@@ -302,28 +302,56 @@ char* cc_rewrite_registered_type_create_destroy(const char* src,
         stmt_s = name_s;
         {
             /* Walk back to the previous statement terminator, skipping over
-             * block comments so a ';' inside a comment doesn't get treated as
-             * a false terminator. Needed when a comment immediately precedes a
-             * `Type var = @create(...)` declaration. */
-            int in_block_comment = 0;
+             * comments and string/char literals so a ';' inside either does
+             * not read as a false terminator (pass_err_syntax's backward
+             * idiom: block comments rewind whole, line comments verify
+             * forward from the line start, string openers resolve by a
+             * forward escape-correct scan). */
             while (stmt_s > 0) {
                 char prev = src[stmt_s - 1];
-                if (!in_block_comment) {
-                    if (stmt_s >= 2 && src[stmt_s - 2] == '*' && src[stmt_s - 1] == '/') {
-                        in_block_comment = 1;
-                        stmt_s -= 2;
-                        continue;
+                if (prev == '/' && stmt_s >= 2 && src[stmt_s - 2] == '*') {
+                    size_t c2 = stmt_s - 2, op = (size_t)-1;
+                    while (c2 > 0) {
+                        c2--;
+                        if (src[c2] == '*' && c2 > 0 && src[c2 - 1] == '/') { op = c2 - 1; break; }
                     }
-                    if (prev == ';' || prev == '{' || prev == '}') break;
-                    stmt_s--;
-                } else {
-                    if (stmt_s >= 2 && src[stmt_s - 2] == '/' && src[stmt_s - 1] == '*') {
-                        in_block_comment = 0;
-                        stmt_s -= 2;
-                        continue;
-                    }
-                    stmt_s--;
+                    if (op == (size_t)-1) { stmt_s = 0; break; }
+                    stmt_s = op;
+                    continue;
                 }
+                if (prev == '"' || prev == '\'') {
+                    /* Forward-verify the literal's opener from the line
+                     * start and jump to it. */
+                    size_t close = stmt_s - 1;
+                    size_t ls2 = close;
+                    size_t open = close;
+                    int in_q = 0;
+                    char cur_q = 0;
+                    while (ls2 > 0 && src[ls2 - 1] != '\n') ls2--;
+                    for (size_t k2 = ls2; k2 <= close; ) {
+                        char c3 = src[k2];
+                        if (!in_q) {
+                            if (c3 == '"' || c3 == '\'') { in_q = 1; cur_q = c3; open = k2; }
+                            k2++;
+                            continue;
+                        }
+                        if (c3 == '\\' && k2 + 1 <= close) { k2 += 2; continue; }
+                        if (c3 == cur_q) {
+                            if (k2 == close) break; /* `open` is the opener */
+                            in_q = 0;
+                            cur_q = 0;
+                        }
+                        k2++;
+                    }
+                    stmt_s = open;
+                    continue;
+                }
+                if (prev != '\n' && cc_scan_pos_in_line_comment(src, stmt_s - 1)) {
+                    while (stmt_s > 0 && src[stmt_s - 1] != '\n') stmt_s--;
+                    continue;
+                }
+                if (prev == ';' || prev == '{' || prev == '}') break;
+                stmt_s--;
             }
         }
         stmt_s = cc_skip_ws_and_comments(src, n, stmt_s);

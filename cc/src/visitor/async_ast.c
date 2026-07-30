@@ -259,12 +259,26 @@ static char* cc__rewrite_idents(const char* s, const char* const* names, const c
         if (cc__is_ident_start(s[i])) {
             size_t j = i + 1;
             while (j < sl && cc__is_ident_char(s[j])) j++;
-            /* Do not replace struct/union member names after '.' or '->' */
+            /* Do not replace struct/union member names after '.' or '->'.
+             * Rewind directly-abutting block comments first so
+             * `x./ *c* /field` still reads as member position (plain
+             * whitespace after `.` is intentionally not skipped — same
+             * acceptance as before). */
+            size_t pb = i;
+            while (pb >= 2 && s[pb - 1] == '/' && s[pb - 2] == '*') {
+                size_t c2 = pb - 2, op = (size_t)-1;
+                while (c2 > 0) {
+                    c2--;
+                    if (s[c2] == '*' && c2 > 0 && s[c2 - 1] == '/') { op = c2 - 1; break; }
+                }
+                if (op == (size_t)-1) break;
+                pb = op;
+            }
             int is_member = 0;
-            if (i > 0 && s[i - 1] == '.') is_member = 1;
-            else if (i > 1 && s[i - 2] == '-' && s[i - 1] == '>') is_member = 1;
-            else if (i > 0 && s[i - 1] == '>') {
-                size_t b = i - 1;
+            if (pb > 0 && s[pb - 1] == '.') is_member = 1;
+            else if (pb > 1 && s[pb - 2] == '-' && s[pb - 1] == '>') is_member = 1;
+            else if (pb > 0 && s[pb - 1] == '>') {
+                size_t b = pb - 1;
                 while (b > 0 && s[b - 1] == ' ') b--;
                 if (b > 0 && s[b - 1] == '-') is_member = 1;
             }
@@ -523,9 +537,19 @@ static char* cc__find_decl_type_in_stmt_list(const Stmt* st, int n, const char* 
             if (q > 0 && cc__is_ident_char(txt[q - 1])) continue;
             if (q + nlen < tlen && cc__is_ident_char(txt[q + nlen])) continue;
             /* Require a decl-init or bare-decl shape to the right of NAME:
-             * optional ws/comments followed by `=` or `;` or end-of-text. */
+             * optional ws/comments followed by `=` or `;` or end-of-text.
+             * (Space/tab and block comments only — bare newlines keep
+             * their old non-match behavior.) */
             size_t r = q + nlen;
-            while (r < tlen && (txt[r] == ' ' || txt[r] == '\t')) r++;
+            for (;;) {
+                while (r < tlen && (txt[r] == ' ' || txt[r] == '\t')) r++;
+                if (r + 1 < tlen && txt[r] == '/' && txt[r + 1] == '*') {
+                    size_t r2 = r + 2;
+                    while (r2 + 1 < tlen && !(txt[r2] == '*' && txt[r2 + 1] == '/')) r2++;
+                    if (r2 + 1 < tlen) { r = r2 + 2; continue; }
+                }
+                break;
+            }
             if (r < tlen && txt[r] != '=' && txt[r] != ';') continue;
             /* The prefix must contain `!>` (or `?>`) to confirm this is a
              * result-typed decl; otherwise we might match a plain scalar
@@ -644,8 +668,24 @@ static char* cc__resolve_er_typeof_concrete_type(const char* in_src, size_t in_l
         size_t a = i + cn;
         while (a < in_len && (in_src[a] == ' ' || in_src[a] == '\t')) a++;
         if (a >= in_len || in_src[a] != '(') continue;
+        /* Backward over space/tab and block comments so
+         * `CCResult_T_E / *doc* / callee(` still reads the result type
+         * (bare newlines keep their old non-match behavior). */
         size_t b = i;
-        while (b > 0 && (in_src[b - 1] == ' ' || in_src[b - 1] == '\t')) b--;
+        for (;;) {
+            while (b > 0 && (in_src[b - 1] == ' ' || in_src[b - 1] == '\t')) b--;
+            if (b >= 2 && in_src[b - 1] == '/' && in_src[b - 2] == '*') {
+                size_t c2 = b - 2, op = (size_t)-1;
+                while (c2 > 0) {
+                    c2--;
+                    if (in_src[c2] == '*' && c2 > 0 && in_src[c2 - 1] == '/') { op = c2 - 1; break; }
+                }
+                if (op == (size_t)-1) break;
+                b = op;
+                continue;
+            }
+            break;
+        }
         size_t e2 = b;
         while (b > 0 && cc__is_ident_char(in_src[b - 1])) b--;
         if (e2 <= b) continue;
@@ -1145,8 +1185,10 @@ static int cc__build_stmt_list_from_block(const CCASTRoot* root,
 
 static int cc__trim_trailing_semicolon(char* s) {
     if (!s) return 0;
-    size_t tl = strlen(s);
-    while (tl > 0 && (s[tl - 1] == ' ' || s[tl - 1] == '\t' || s[tl - 1] == '\n' || s[tl - 1] == '\r')) tl--;
+    /* Comment-aware: `expr; // note` / `expr; / *c* /` still finds and
+     * drops the `;` (the trailing comment is dropped with it — it sat
+     * after the statement's end). */
+    size_t tl = cc_rskip_ws_and_comments(s, strlen(s));
     if (tl > 0 && s[tl - 1] == ';') tl--;
     while (tl > 0 && (s[tl - 1] == ' ' || s[tl - 1] == '\t')) tl--;
     s[tl] = 0;
@@ -1991,8 +2033,11 @@ static char* cc__emit_awaits_in_expr(Emit* e, const char* expr, int* io_aw_next)
                     if (ppar == 0 && pbrk == 0 && pbr == 0 && (c == ',' || c == ';')) break;
                     j++;
                 }
-                size_t expr_e = j;
-                while (expr_e > expr_s && (s[expr_e - 1] == ' ' || s[expr_e - 1] == '\t')) expr_e--;
+                /* Comment-aware trim: a trailing `// note` must not ride
+                 * into the synthesized assignment (it would comment out
+                 * the emitted `;`). */
+                size_t expr_e = cc_rskip_ws_and_comments(s, j);
+                if (expr_e < expr_s) expr_e = expr_s;
                 char* operand = cc__dup_slice(s, expr_s, expr_e);
                 if (!operand) { free(out); return NULL; }
 
@@ -2074,13 +2119,13 @@ static char* cc__normalize_result_generic_bool_calls(const char* expr) {
         size_t lpar = i + pat_len - 1;
         size_t rpar = 0;
         if (!cc__find_matching_paren(expr, n, lpar, &rpar)) { i++; continue; }
-        size_t arg_start = i + pat_len;
-        size_t arg_end = rpar;
-        while (arg_start < arg_end && isspace((unsigned char)expr[arg_start])) arg_start++;
-        while (arg_end > arg_start && isspace((unsigned char)expr[arg_end - 1])) arg_end--;
+        /* Comment-aware arg trims: `chan_recv(/ *c* / &ch)` still sees
+         * the `&` and bounding comments stay out of the emitted arg. */
+        size_t arg_start = cc_skip_ws_and_comments(expr, rpar, i + pat_len);
+        size_t arg_end = cc_rskip_ws_and_comments(expr, rpar);
+        if (arg_end < arg_start) arg_end = arg_start;
         if (arg_start < arg_end && expr[arg_start] == '&') {
-            arg_start++;
-            while (arg_start < arg_end && isspace((unsigned char)expr[arg_start])) arg_start++;
+            arg_start = cc_skip_ws_and_comments(expr, arg_end, arg_start + 1);
         }
         cc_sb_append(&out, &out_len, &out_cap, expr + last_emit, i - last_emit);
         cc_sb_append_cstr(&out, &out_len, &out_cap, repl);
@@ -3655,11 +3700,12 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
                             nm[last_ident_len] = 0;
                             if (strcmp(nm, "void") != 0) {
                                 param_names[param_n] = nm;
-                                /* Extract type: from chunk_start to last_ident, trimmed. */
-                                size_t ty_end = (size_t)(last_ident - params_text);
-                                while (ty_end > chunk_start && (params_text[ty_end - 1] == ' ' || params_text[ty_end - 1] == '\t')) ty_end--;
-                                size_t ty_start = chunk_start;
-                                while (ty_start < ty_end && (params_text[ty_start] == ' ' || params_text[ty_start] == '\t')) ty_start++;
+                                /* Extract type: from chunk_start to last_ident,
+                                 * trimmed (comment-aware: `int / *doc* / x`
+                                 * keeps `int` clean of comment bytes). */
+                                size_t ty_end = cc_rskip_ws_and_comments(params_text, (size_t)(last_ident - params_text));
+                                if (ty_end < chunk_start) ty_end = chunk_start;
+                                size_t ty_start = cc_skip_ws_and_comments(params_text, ty_end, chunk_start);
                                 if (ty_end > ty_start) {
                                     param_tys[param_n] = cc__strndup_trim_ws(&params_text[ty_start], ty_end - ty_start);
                                 }

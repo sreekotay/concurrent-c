@@ -278,9 +278,9 @@ static int cc__ud_extract_decl_name(const char* s, size_t stmt_a, size_t op_pos,
         }
     }
     if (eq == (size_t)-1) return 0;
-    /* Walk back over whitespace. */
-    size_t p = eq;
-    while (p > stmt_a && isspace((unsigned char)s[p - 1])) p--;
+    /* Walk back over whitespace and comments (`T x / *c* / = ...`). */
+    size_t p = cc_rskip_ws_and_comments(s, eq);
+    if (p < stmt_a) p = stmt_a;
     size_t nb = p;
     while (p > stmt_a && (isalnum((unsigned char)s[p - 1]) || s[p - 1] == '_')) p--;
     size_t na = p;
@@ -314,6 +314,18 @@ static int cc__ud_normalize_type_name(const char* s, size_t type_a, size_t type_
     int last_was_space = 1;
     while (i < type_b) {
         char c = s[i];
+        if (c == '/' && i + 1 < type_b && (s[i + 1] == '*' || s[i + 1] == '/')) {
+            /* A comment inside the type span reads as whitespace. */
+            size_t i2 = cc_skip_ws_and_comments(s, type_b, i);
+            if (i2 > i) {
+                if (!last_was_space && o > 0 && o + 1 < out_cap) {
+                    out[o++] = ' ';
+                    last_was_space = 1;
+                }
+                i = i2;
+                continue;
+            }
+        }
         if (isspace((unsigned char)c)) {
             if (!last_was_space && o > 0 && o + 1 < out_cap) {
                 out[o++] = ' ';
@@ -378,6 +390,18 @@ static size_t cc__ud_tighten_type_start(const char* s, size_t type_a, size_t nam
     size_t k = name_a;
     while (k > type_a && isspace((unsigned char)s[k - 1])) k--;
     while (k > type_a) {
+        /* Block comment between type tokens: rewind it whole so
+         * `MyThing* / *doc* / t` keeps its real type start. */
+        if (k >= 2 && s[k - 1] == '/' && s[k - 2] == '*') {
+            size_t c2 = k - 2, op = (size_t)-1;
+            while (c2 > type_a) {
+                c2--;
+                if (s[c2] == '*' && c2 > type_a && s[c2 - 1] == '/') { op = c2 - 1; break; }
+            }
+            if (op == (size_t)-1) break;
+            k = op;
+            continue;
+        }
         char c = s[k - 1];
         if (isalnum((unsigned char)c) || c == '_' || c == '*' ||
             c == ' ' || c == '\t' || c == '\n' || c == '\r') {
@@ -386,7 +410,7 @@ static size_t cc__ud_tighten_type_start(const char* s, size_t type_a, size_t nam
         }
         break;
     }
-    while (k < name_a && isspace((unsigned char)s[k])) k++;
+    k = cc_skip_ws_and_comments(s, name_a, k);
     return k;
 }
 

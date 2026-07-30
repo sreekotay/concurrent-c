@@ -487,6 +487,80 @@ static inline size_t cc_skip_ws_and_comments(const char* src, size_t len, size_t
     return i;
 }
 
+/* Backward analogue of `cc_skip_ws_and_comments`.  `pos` is an EXCLUSIVE
+ * end: the function returns the largest `p <= pos` such that `src[p-1]`
+ * is the previous real-code byte (or 0 if none), skipping whitespace,
+ * `/ * ... * /` block comments and `// ...` line comments while walking
+ * left.  Callers that used `while (p > 0 && isspace(src[p-1])) p--;`
+ * before probing the previous token can substitute this to keep the
+ * probe honest across an intervening comment.
+ *
+ * Block comments are rewound with the established backward idiom (find
+ * the terminating `* /`, search left for the opening `/ *`); adjacent
+ * `* /` cannot appear in real C code outside a comment, so the entry
+ * test is safe.  Line comments are forward-verified from the start of
+ * the physical line (string/char literals on the line respected), which
+ * is the same fidelity as `cc_scan_pos_in_line_comment`. */
+static inline size_t cc_rskip_ws_and_comments(const char* src, size_t pos) {
+    if (!src) return pos;
+    for (;;) {
+        while (pos > 0) {
+            char c = src[pos - 1];
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n' ||
+                c == '\f' || c == '\v') { pos--; continue; }
+            break;
+        }
+        if (pos == 0) return 0;
+        if (src[pos - 1] == '/' && pos >= 2 && src[pos - 2] == '*') {
+            /* Terminating `* /`: rewind to the matching opener. */
+            size_t k = pos - 2;
+            size_t open = (size_t)-1;
+            while (k > 0) {
+                k--;
+                if (src[k] == '*' && k > 0 && src[k - 1] == '/') { open = k - 1; break; }
+            }
+            if (open == (size_t)-1) return pos; /* unterminated: treat as code */
+            pos = open;
+            continue;
+        }
+        /* Tail of a `// ...` line comment?  Forward-verify from the
+         * physical line start; stop at the first `//` that is outside
+         * string/char literals and outside a same-line block comment. */
+        {
+            size_t ls = pos - 1;
+            size_t lc = (size_t)-1;
+            int ins = 0; char q = 0;
+            size_t k;
+            while (ls > 0 && src[ls - 1] != '\n') ls--;
+            k = ls;
+            while (k < pos) {
+                char c = src[k];
+                if (ins) {
+                    if (c == '\\' && k + 1 < pos) { k += 2; continue; }
+                    if (c == q) ins = 0;
+                    k++;
+                    continue;
+                }
+                if (c == '"' || c == '\'') { ins = 1; q = c; k++; continue; }
+                if (c == '/' && k + 1 < pos && src[k + 1] == '/') { lc = k; break; }
+                if (c == '/' && k + 1 < pos && src[k + 1] == '*') {
+                    /* Same-line block comment: hop over it (terminated
+                     * before `pos`) or stop scanning (still open at
+                     * `pos`, which callers walking back from real code
+                     * never hit). */
+                    size_t m = k + 2;
+                    while (m + 1 < pos && !(src[m] == '*' && src[m + 1] == '/')) m++;
+                    if (m + 1 < pos) { k = m + 2; continue; }
+                    break;
+                }
+                k++;
+            }
+            if (lc != (size_t)-1) { pos = lc; continue; }
+        }
+        return pos;
+    }
+}
+
 /* ---- Structural forward search (comment/string/bracket aware) ----
  *
  * Raw-text lowering passes repeatedly ask "given a function/decl/sigil at

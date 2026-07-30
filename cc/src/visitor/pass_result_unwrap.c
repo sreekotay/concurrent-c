@@ -254,8 +254,9 @@ static void cc__ru_emit_uw_err_binder(char** out, size_t* ol, size_t* oc,
                 if (hit >= n) break;
                 after = cc_skip_ws_and_comments(s, n, hit + clen);
                 if (after < n && s[after] == '(') {
-                    p = hit;
-                    while (p > 0 && isspace((unsigned char)s[p - 1])) p--;
+                    /* Comment-aware: `CCResult_T_E / *doc* / foo(` still
+                     * reads the return type. */
+                    p = cc_rskip_ws_and_comments(s, hit);
                     end = p;
                     while (p > 0 && cc_is_ident_char(s[p - 1])) p--;
                     len = end - p;
@@ -317,8 +318,7 @@ static int cc__ru_find_callee_result_type(const char* s, size_t n,
         if (hit >= n) break;
         size_t after = cc_skip_ws_and_comments(s, n, hit + callee_len);
         if (after < n && s[after] == '(') {
-            size_t p = hit;
-            while (p > 0 && isspace((unsigned char)s[p - 1])) p--;
+            size_t p = cc_rskip_ws_and_comments(s, hit);
             size_t end = p;
             while (p > 0 && cc_is_ident_char(s[p - 1])) p--;
             size_t len = end - p;
@@ -328,8 +328,19 @@ static int cc__ru_find_callee_result_type(const char* s, size_t n,
                 return 1;
             }
             {
+                /* Line-head walk, comment-aware: a `;`/`}`/newline inside
+                 * a block comment is not a statement boundary. */
                 size_t line_a = p;
-                while (line_a > 0 && s[line_a - 1] != '\n' && s[line_a - 1] != ';' && s[line_a - 1] != '}') {
+                while (line_a > 0) {
+                    if (line_a >= 2 && s[line_a - 1] == '/' && s[line_a - 2] == '*') {
+                        size_t c2 = line_a - 2, op = (size_t)-1;
+                        while (c2 > 0) {
+                            c2--;
+                            if (s[c2] == '*' && c2 > 0 && s[c2 - 1] == '/') { op = c2 - 1; break; }
+                        }
+                        if (op != (size_t)-1) { line_a = op; continue; }
+                    }
+                    if (s[line_a - 1] == '\n' || s[line_a - 1] == ';' || s[line_a - 1] == '}') break;
                     line_a--;
                 }
                 size_t bang = cc_find_substr_top_level(s, line_a, hit, "!>", 2);
@@ -339,8 +350,8 @@ static int cc__ru_find_callee_result_type(const char* s, size_t n,
                     if (err_l < hit && s[err_l] == '(' &&
                         cc_find_matching_paren(s, n, err_l, &err_r) &&
                         err_r < hit) {
-                        size_t ok_b = bang;
-                        while (ok_b > line_a && isspace((unsigned char)s[ok_b - 1])) ok_b--;
+                        size_t ok_b = cc_rskip_ws_and_comments(s, bang);
+                        if (ok_b < line_a) ok_b = line_a;
                         size_t ok_a = ok_b;
                         while (ok_a > line_a && cc_is_ident_char(s[ok_a - 1])) ok_a--;
                         size_t err_a = err_l + 1, err_b = err_r;
@@ -2557,17 +2568,13 @@ static int cc__strict_enabled(void) {
     return !(e && e[0] == '0' && e[1] == 0);
 }
 
-/* Walk backwards from `from` (exclusive) skipping whitespace.  Returns
- * the index of the non-ws char (or SIZE_MAX sentinel if we fell off the
- * start). */
+/* Walk backwards from `from` (exclusive) skipping whitespace and
+ * comments (`(void) / *x* / foo();` and `return / *x* / foo()` classify
+ * by their real preceding token).  Returns the index of the non-ws
+ * non-comment char (or SIZE_MAX sentinel if we fell off the start). */
 static size_t cc__back_skip_ws(const char* s, size_t from) {
-    size_t i = from;
-    while (i > 0) {
-        char c = s[i - 1];
-        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { i--; continue; }
-        return i - 1;
-    }
-    return (size_t)-1;
+    size_t i = cc_rskip_ws_and_comments(s, from);
+    return i > 0 ? i - 1 : (size_t)-1;
 }
 
 /* Check if the non-ws chars immediately preceding position `pre` form a

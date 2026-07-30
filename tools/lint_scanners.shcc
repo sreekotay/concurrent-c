@@ -37,7 +37,7 @@ static const ScannerBaseline BASELINE[] = {
     {"cc/src/util/text_scan.h", 7},
     {"cc/src/visitor/async_ast.c", 3},
     {"cc/src/visitor/pass_autoblock.c", 0},
-    {"cc/src/visitor/pass_create.c", 4},
+    {"cc/src/visitor/pass_create.c", 0},
     {"cc/src/visitor/pass_defer_syntax.c", 0},
     {"cc/src/visitor/pass_err_syntax.c", 0},
     {"cc/src/visitor/pass_type_syntax.c", 4},

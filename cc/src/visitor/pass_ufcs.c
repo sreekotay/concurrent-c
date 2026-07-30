@@ -58,6 +58,19 @@ static void cc__ufcs_extract_receiver_expr(const char* expr, char* out, size_t o
             }
             continue;
         }
+        /* Comment guards, matching the string skipping above: a `.` or
+         * `->` inside a comment must not end the receiver span. */
+        if (c == '/' && p[1] == '/') {
+            p++;
+            while (p[1] && p[1] != '\n') p++;
+            continue;
+        }
+        if (c == '/' && p[1] == '*') {
+            const char* e2 = p + 2;
+            while (*e2 && !(e2[0] == '*' && e2[1] == '/')) e2++;
+            p = *e2 ? e2 + 1 : e2 - 1;
+            continue;
+        }
         if (c == '(') { par++; continue; }
         if (c == ')' && par > 0) { par--; continue; }
         if (c == '[') { br++; continue; }
@@ -263,6 +276,31 @@ static int cc__find_ufcs_span_in_range(const char* s,
     for (size_t i = range_start; i + method_len + 2 < range_end; i++) {
         int is_arrow = 0;
         size_t sep_pos = 0;
+        /* Skip comments and string/char literals so `x.foo(); // y.foo()`
+         * does not double-count occurrences (same treatment strings get
+         * in the matching-paren scan below). */
+        if (s[i] == '/' && i + 1 < range_end && s[i + 1] == '/') {
+            i++;
+            while (i + 1 < range_end && s[i + 1] != '\n') i++;
+            continue;
+        }
+        if (s[i] == '/' && i + 1 < range_end && s[i + 1] == '*') {
+            size_t m = i + 2;
+            while (m + 1 < range_end && !(s[m] == '*' && s[m + 1] == '/')) m++;
+            i = (m + 1 < range_end) ? m + 1 : range_end;
+            continue;
+        }
+        if (s[i] == '"' || s[i] == '\'') {
+            char q = s[i];
+            size_t m = i + 1;
+            while (m < range_end) {
+                if (s[m] == '\\' && m + 1 < range_end) { m += 2; continue; }
+                if (s[m] == q) break;
+                m++;
+            }
+            i = m;
+            continue;
+        }
         if (s[i] == '.' ) { is_arrow = 0; sep_pos = i; }
         else if (s[i] == '-' && i + 1 < range_end && s[i + 1] == '>') { is_arrow = 1; sep_pos = i; }
         else continue;
@@ -353,7 +391,9 @@ static size_t cc__ufcs_extend_chain_end(const char* s, size_t len, size_t end) {
     if (!s || end >= len) return end;
     size_t p = end;
     for (;;) {
-        while (p < len && isspace((unsigned char)s[p])) p++;
+        /* Comment-aware hops: a comment between chain links (e.g. between
+         * `a.b()` and `.d()`) is skipped instead of splitting the chain. */
+        p = cc_skip_ws_and_comments(s, len, p);
         if (p >= len) break;
         if (s[p] == '.') {
             p++;
@@ -363,10 +403,10 @@ static size_t cc__ufcs_extend_chain_end(const char* s, size_t len, size_t end) {
             break;
         }
 
-        while (p < len && isspace((unsigned char)s[p])) p++;
+        p = cc_skip_ws_and_comments(s, len, p);
         if (p >= len || (!isalpha((unsigned char)s[p]) && s[p] != '_')) break;
         while (p < len && (isalnum((unsigned char)s[p]) || s[p] == '_')) p++;
-        while (p < len && isspace((unsigned char)s[p])) p++;
+        p = cc_skip_ws_and_comments(s, len, p);
         if (p >= len || s[p] != '(') break;
 
         /* Scan to matching ')' of this call. */
@@ -432,11 +472,13 @@ static int cc__verify_member_at(const char* s, size_t n, size_t sep_pos,
     if (s[p] == '.') p++;
     else if (p + 1 < n && s[p] == '-' && s[p + 1] == '>') p += 2;
     else return 0;
-    while (p < n && isspace((unsigned char)s[p])) p++;
+    /* Comments may sit between `.` and the method name (and before the
+     * `(`) — skip them like whitespace. */
+    p = cc_skip_ws_and_comments(s, n, p);
     if (p + ml > n || memcmp(s + p, method, ml) != 0) return 0;
     p += ml;
     if (p < n && cc__is_ident_char_char(s[p])) return 0;
-    while (p < n && isspace((unsigned char)s[p])) p++;
+    p = cc_skip_ws_and_comments(s, n, p);
     return p < n && s[p] == '(';
 }
 

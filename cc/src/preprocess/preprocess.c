@@ -2528,6 +2528,92 @@ static int cc_is_ident_char_local(char c) {
     return (c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'));
 }
 
+/* Backward string/char-literal skip: when a backward scan lands on a
+ * `"`/`'` (the literal's CLOSING quote in source order), resolve the
+ * opener with a forward scan from the line start (proper escape rules)
+ * and jump `*i` to it.  Mirrors `cc__err_skip_string_or_char_backward`
+ * in pass_err_syntax.c (not shareable: these files have no common
+ * header for the low-level scanners). */
+static void cc__pp_skip_string_or_char_backward(const char* s, size_t* i) {
+    size_t close = *i;
+    char qch = s[close];
+    if (qch != '"' && qch != '\'') return;
+    size_t line_start = close;
+    while (line_start > 0 && s[line_start - 1] != '\n') line_start--;
+    size_t k = line_start;
+    size_t open = close;
+    int in_q = 0;
+    char cur_q = 0;
+    while (k <= close) {
+        char c = s[k];
+        if (!in_q) {
+            if (c == '"' || c == '\'') {
+                in_q = 1;
+                cur_q = c;
+                open = k;
+                if (k == close) break;
+                k++;
+                continue;
+            }
+            k++;
+            continue;
+        }
+        if (c == '\\' && k + 1 <= close) {
+            k += 2;
+            continue;
+        }
+        if (c == cur_q) {
+            if (k == close) {
+                *i = open;
+                return;
+            }
+            in_q = 0;
+            cur_q = 0;
+            k++;
+            continue;
+        }
+        k++;
+    }
+    *i = open;
+}
+
+/* Backward bracket match for `)`/`]` at `close_pos`, comment- and
+ * string-aware: block comments rewind whole, bracket bytes inside
+ * `// ...` comments are ignored, and string/char literals are jumped
+ * via the forward-verified opener.  Returns the matching opener's
+ * position, or `(size_t)-1` when unmatched within (limit, close_pos]. */
+static size_t cc__pp_match_bracket_backward(const char* src, size_t close_pos,
+                                            size_t limit, char open_ch, char close_ch) {
+    int depth = 1;
+    size_t q = close_pos;
+    while (q > limit && depth > 0) {
+        q--;
+        char cq = src[q];
+        if (cq == '/' && q > 0 && src[q - 1] == '*') {
+            /* End of a block comment: rewind to its opener. */
+            size_t q2 = q - 1, op2 = (size_t)-1;
+            while (q2 > 0) {
+                q2--;
+                if (src[q2] == '*' && q2 > 0 && src[q2 - 1] == '/') { op2 = q2 - 1; break; }
+            }
+            if (op2 != (size_t)-1) { q = op2; continue; }
+        }
+        if (cq == '"' || cq == '\'') {
+            cc__pp_skip_string_or_char_backward(src, &q);
+            continue;
+        }
+        if (cq == close_ch || cq == open_ch) {
+            if (cc_scan_pos_in_line_comment(src, q)) continue;
+            if (cq == close_ch) depth++;
+            else {
+                depth--;
+                if (depth == 0) return q;
+            }
+        }
+    }
+    return (size_t)-1;
+}
+
 /* Scan backwards from pos to find the start of a member access chain (e.g., obj.field or ptr->field).
    Returns the start position of the full expression.
    Handles chains like a.b.c, a->b->c, (*p)->field, arr[i].field, func().field. */
@@ -2562,25 +2648,13 @@ static size_t cc_scan_back_for_member_access(const char* src, size_t pos, size_t
             last_was_ident = 0;
         } else if (src[p-1] == ')') {
             if (last_was_ident) break;
-            int depth = 1;
-            size_t q = p - 1;
-            while (q > limit && depth > 0) {
-                q--;
-                if (src[q] == ')') depth++;
-                else if (src[q] == '(') depth--;
-            }
-            if (depth == 0) p = q;
+            size_t q = cc__pp_match_bracket_backward(src, p - 1, limit, '(', ')');
+            if (q != (size_t)-1) p = q;
             else break;
             last_was_ident = 0;
         } else if (src[p-1] == ']') {
-            int depth = 1;
-            size_t q = p - 1;
-            while (q > limit && depth > 0) {
-                q--;
-                if (src[q] == ']') depth++;
-                else if (src[q] == '[') depth--;
-            }
-            if (depth == 0) p = q;
+            size_t q = cc__pp_match_bracket_backward(src, p - 1, limit, '[', ']');
+            if (q != (size_t)-1) p = q;
             else break;
         } else {
             break;
@@ -3429,20 +3503,21 @@ static int cc__parse_typedef_alias_stmt(const char* stmt_start,
     if (!alias_name || alias_name_sz == 0 || !alias_type || alias_type_sz == 0) return 0;
     alias_name[0] = '\0';
     alias_type[0] = '\0';
-    while (s < e && (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r')) s++;
-    while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\n' || e[-1] == '\r')) e--;
+    /* Comment-aware trims: `typedef T Alias / *c* / ;` and
+     * `typedef T / *c* / Alias;` must still harvest `Alias` / `T`. */
+    s = stmt_start + cc_skip_ws_and_comments(stmt_start, (size_t)(stmt_end - stmt_start), 0);
+    e = stmt_start + cc_rskip_ws_and_comments(stmt_start, (size_t)(stmt_end - stmt_start));
     if (e <= s) return 0;
     if ((size_t)(e - s) < 7 || memcmp(s, "typedef", 7) != 0) return 0;
     type_start = s + 7;
-    while (type_start < e && (*type_start == ' ' || *type_start == '\t' || *type_start == '\n' || *type_start == '\r')) type_start++;
+    type_start = stmt_start + cc_skip_ws_and_comments(stmt_start, (size_t)(e - stmt_start),
+                                                      (size_t)(type_start - stmt_start));
     if (type_start >= e) return 0;
-    alias_end = e;
-    while (alias_end > type_start && (alias_end[-1] == ' ' || alias_end[-1] == '\t' || alias_end[-1] == '\n' || alias_end[-1] == '\r')) alias_end--;
+    alias_end = stmt_start + cc_rskip_ws_and_comments(stmt_start, (size_t)(e - stmt_start));
     alias_start = alias_end;
     while (alias_start > type_start && cc_is_ident_char(alias_start[-1])) alias_start--;
-    if (alias_start == alias_end || !cc_is_ident_start(*alias_start)) return 0;
-    type_end = alias_start;
-    while (type_end > type_start && (type_end[-1] == ' ' || type_end[-1] == '\t' || type_end[-1] == '\n' || type_end[-1] == '\r')) type_end--;
+    if (alias_start == alias_end || alias_start < type_start || !cc_is_ident_start(*alias_start)) return 0;
+    type_end = stmt_start + cc_rskip_ws_and_comments(stmt_start, (size_t)(alias_start - stmt_start));
     if (type_end <= type_start) return 0;
     {
         size_t alias_len = (size_t)(alias_end - alias_start);
@@ -3474,8 +3549,10 @@ static int cc__parse_decl_name_and_type_fallback(const char* stmt_start,
     if (!decl_name || decl_name_sz == 0 || !decl_type || decl_type_sz == 0) return 0;
     decl_name[0] = '\0';
     decl_type[0] = '\0';
-    while (s < e && isspace((unsigned char)*s)) s++;
-    while (e > s && isspace((unsigned char)e[-1])) e--;
+    /* Comment-aware trims: `int x / *c* / ;` must harvest `x`, not a
+     * trailing comment token. */
+    s = stmt_start + cc_skip_ws_and_comments(stmt_start, (size_t)(stmt_end - stmt_start), 0);
+    e = stmt_start + cc_rskip_ws_and_comments(stmt_start, (size_t)(stmt_end - stmt_start));
     if (e <= s) return 0;
     scan_end = e;
     for (const char* p = s; p < e; ++p) {
@@ -3493,14 +3570,14 @@ static int cc__parse_decl_name_and_type_fallback(const char* stmt_start,
             break;
         }
     }
-    while (scan_end > s && isspace((unsigned char)scan_end[-1])) scan_end--;
+    scan_end = stmt_start + cc_rskip_ws_and_comments(stmt_start, (size_t)(scan_end - stmt_start));
+    if (scan_end <= s) return 0;
     name_end = scan_end;
     while (name_end > s && !cc_is_ident_char(name_end[-1])) name_end--;
     name_start = name_end;
     while (name_start > s && cc_is_ident_char(name_start[-1])) name_start--;
     if (name_start == name_end || !cc_is_ident_start(*name_start)) return 0;
-    type_end = name_start;
-    while (type_end > s && isspace((unsigned char)type_end[-1])) type_end--;
+    type_end = stmt_start + cc_rskip_ws_and_comments(stmt_start, (size_t)(name_start - stmt_start));
     if (type_end <= s) return 0;
     {
         size_t name_len = (size_t)(name_end - name_start);
@@ -3596,15 +3673,29 @@ static void cc__collect_generic_ufcs_types(const char* src,
     while (i < n) {
         if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
         if (src[i] == '{') {
-            size_t close = i;
-            while (close > 0 && isspace((unsigned char)src[close - 1])) close--;
+            size_t close = cc_rskip_ws_and_comments(src, i);
             if (close > 0 && src[close - 1] == ')') {
                 size_t open = close - 1;
                 int depth = 1;
                 while (open > 0 && depth > 0) {
                     open--;
-                    if (src[open] == ')') depth++;
-                    else if (src[open] == '(') depth--;
+                    /* Comment-aware: rewind block comments whole and
+                     * ignore parens inside `// ...` comments so a
+                     * parenthetical in a header comment cannot desync
+                     * the param-list match. */
+                    if (src[open] == '/' && open > 0 && src[open - 1] == '*') {
+                        size_t q2 = open - 1, op2 = (size_t)-1;
+                        while (q2 > 0) {
+                            q2--;
+                            if (src[q2] == '*' && q2 > 0 && src[q2 - 1] == '/') { op2 = q2 - 1; break; }
+                        }
+                        if (op2 != (size_t)-1) { open = op2; continue; }
+                    }
+                    if (src[open] == ')' || src[open] == '(') {
+                        if (cc_scan_pos_in_line_comment(src, open)) continue;
+                        if (src[open] == ')') depth++;
+                        else depth--;
+                    }
                 }
                 if (depth == 0) {
                     size_t param_start = open + 1;
@@ -4240,19 +4331,11 @@ static int cc__ufcs_sink_dest_type(const char* s, size_t recv_start,
     int has_sep = 0;
     if (!s || !out || out_sz == 0) return 0;
     out[0] = 0;
-    /* Walk back over `= lvalue`; block comments can sit between `=` and
-     * the call. */
-    for (;;) {
-        while (p > 0 && isspace((unsigned char)s[p - 1])) p--;
-        if (p >= 2 && s[p - 1] == '/' && s[p - 2] == '*') {
-            size_t q = p - 2;
-            while (q >= 2 && !(s[q - 1] == '*' && s[q - 2] == '/')) q--;
-            if (q < 2) return 0;
-            p = q - 2;
-            continue;
-        }
-        break;
-    }
+    /* Walk back over `= lvalue`; comments can sit between `=` and the
+     * call.  `cc_rskip_ws_and_comments` rewinds block comments via the
+     * opener search (comment-context-safe) and line comments via the
+     * forward line verify. */
+    p = cc_rskip_ws_and_comments(s, p);
     /* Shape 3: a cast directly wrapping the call (may span lines). */
     if (p >= 3 && s[p - 1] == ')') {
         size_t rp = p - 1;
@@ -4273,7 +4356,7 @@ static int cc__ufcs_sink_dest_type(const char* s, size_t recv_start,
     if (p == 0 || s[p - 1] != '=') return 0;
     p--;
     if (p > 0 && strchr("=!<>+-*/%&|^", s[p - 1])) return 0; /* ==, +=, ... */
-    while (p > 0 && isspace((unsigned char)s[p - 1])) p--;
+    p = cc_rskip_ws_and_comments(s, p);
     ne = p;
     /* Ident, or `.`/`->` path (shape 2 lvalues). */
     for (;;) {
@@ -4281,18 +4364,15 @@ static int cc__ufcs_sink_dest_type(const char* s, size_t recv_start,
         while (p > 0 && cc_is_ident_char(s[p - 1])) p--;
         if (p == e2) return 0;
         {
-            size_t r = p;
-            while (r > 0 && isspace((unsigned char)s[r - 1])) r--;
+            size_t r = cc_rskip_ws_and_comments(s, p);
             if (r >= 1 && s[r - 1] == '.') {
                 has_sep = 1;
-                p = r - 1;
-                while (p > 0 && isspace((unsigned char)s[p - 1])) p--;
+                p = cc_rskip_ws_and_comments(s, r - 1);
                 continue;
             }
             if (r >= 2 && s[r - 1] == '>' && s[r - 2] == '-') {
                 has_sep = 1;
-                p = r - 2;
-                while (p > 0 && isspace((unsigned char)s[p - 1])) p--;
+                p = cc_rskip_ws_and_comments(s, r - 2);
                 continue;
             }
         }
@@ -4314,7 +4394,8 @@ static int cc__ufcs_sink_dest_type(const char* s, size_t recv_start,
         if (q >= ty_b) {
             size_t k = ns, dn = 0;
             while (k < ne && dn + 1 < out_sz) {
-                if (isspace((unsigned char)s[k])) { k++; continue; }
+                size_t k2 = cc_skip_ws_and_comments(s, ne, k);
+                if (k2 > k) { k = k2; continue; }
                 out[dn++] = s[k++];
             }
             out[dn] = 0;
@@ -5319,13 +5400,38 @@ static int cc__free_call_name_is_keyword(const char* s, size_t len) {
  * `return println(...)`, `else println(...)`, … — an identifier char
  * before the name is a declaration shape ONLY when the preceding word
  * is not one of these. */
+/* Backward skip over spaces, tabs and `/ * ... * /` block comments only —
+ * for probes whose acceptance must NOT start crossing bare newlines.
+ * `pos` is an exclusive end; returns the new exclusive end.  Same rewind
+ * idiom as the await-lookback (search left for the comment opener;
+ * adjacent `* /` cannot occur in real code outside a comment). */
+static size_t cc__rskip_sp_tab_block_comments(const char* src, size_t pos) {
+    for (;;) {
+        while (pos > 0 && (src[pos - 1] == ' ' || src[pos - 1] == '\t')) pos--;
+        if (pos >= 2 && src[pos - 1] == '/' && src[pos - 2] == '*') {
+            size_t c = pos - 2, open = (size_t)-1;
+            while (c > 0) {
+                c--;
+                if (src[c] == '*' && c > 0 && src[c - 1] == '/') { open = c - 1; break; }
+            }
+            if (open == (size_t)-1) return pos;
+            pos = open;
+            continue;
+        }
+        return pos;
+    }
+}
+
 static int cc__free_call_prev_word_is_stmt_kw(const char* src, size_t b) {
-    size_t e = b, s;
+    size_t e, s;
     static const char* const kws[] = {
         "return", "else", "case", "do", "goto", NULL,
     };
     size_t k;
-    while (e > 0 && (src[e - 1] == ' ' || src[e - 1] == '\t')) e--;
+    /* Skip whitespace and block comments backwards so
+     * `return / *c* / println(x)` still reads `return`; keep the walk
+     * same-line (bare newlines end it, as before). */
+    e = cc__rskip_sp_tab_block_comments(src, b);
     s = e;
     while (s > 0 && cc_is_ident_char(src[s - 1])) s--;
     if (s == e) return 0;
@@ -5394,21 +5500,11 @@ static int cc__name_set_has(const CCNameSet* s, const char* name) {
                    cc__callable_name_cmp) != NULL;
 }
 
-/* Walk back past whitespace/comments to the previous code char before `pos`. */
+/* Walk back past whitespace/comments to the previous code char before `pos`.
+ * `cc_rskip_ws_and_comments` handles block AND line comments (a trailing
+ * `// ...` on the previous line no longer reads as the previous token). */
 static size_t cc__tu_decl_prev_code(const char* src, size_t pos) {
-    size_t b = pos;
-    for (;;) {
-        while (b > 0 && isspace((unsigned char)src[b - 1])) b--;
-        if (b >= 2 && src[b - 1] == '/' && src[b - 2] == '*') {
-            size_t c = b - 2;
-            while (c >= 2 && !(src[c - 1] == '*' && src[c - 2] == '/')) c--;
-            if (c < 2) break;
-            b = c - 2;
-            continue;
-        }
-        break;
-    }
-    return b;
+    return cc_rskip_ws_and_comments(src, pos);
 }
 
 static int cc__tu_ident_paren_is_decl(const char* src, size_t n, size_t name_pos,
@@ -5503,11 +5599,9 @@ static char* cc__rewrite_naked_print_aliases(const char* src, size_t n) {
         while (e < n && (src[e] == ' ' || src[e] == '\t')) e++;
         if (e >= n || src[e] != '(') { i += nl; continue; }
         {
-            /* Skip back over whitespace: `.  println(` is member position. */
-            size_t b = i;
-            while (b > 0 && (src[b - 1] == ' ' || src[b - 1] == '\t' ||
-                             src[b - 1] == '\n' || src[b - 1] == '\r'))
-                b--;
+            /* Skip back over whitespace and comments: `.  println(` (and
+             * `. / *c* / println(`) is member position. */
+            size_t b = cc_rskip_ws_and_comments(src, i);
             if (b > 0 && (src[b - 1] == '.' ||
                           (b > 1 && src[b - 1] == '>' && src[b - 2] == '-') ||
                           src[b - 1] == '#' || src[b - 1] == '&' || src[b - 1] == '*')) {
@@ -5673,25 +5767,21 @@ static char* cc__rewrite_result_chain_links(const char* src, size_t n) {
         while (q < n && cc_is_ident_char(src[q])) q++;
         q = cc_skip_ws_and_comments(src, n, q);
         if (q >= n || src[q] != '(') { i += 2; continue; }
-        /* Producer: one lowered call `F(args)` ending just before `!>`. */
-        eend = i;
-        while (eend > last_emit && (src[eend - 1] == ' ' || src[eend - 1] == '\t' ||
-                                    src[eend - 1] == '\n' || src[eend - 1] == '\r'))
-            eend--;
+        /* Producer: one lowered call `F(args)` ending just before `!>`.
+         * Comments may sit between `)` and `!>`. */
+        eend = cc_rskip_ws_and_comments(src, i);
         if (eend <= last_emit || src[eend - 1] != ')') { i += 2; continue; }
         {
-            int depth = 0;
-            size_t p = eend;
-            while (p > last_emit) {
-                p--;
-                if (src[p] == ')') depth++;
-                else if (src[p] == '(') {
-                    depth--;
-                    if (depth == 0) break;
-                }
-            }
-            if (depth != 0) { i += 2; continue; }
-            fe = p;
+            /* Find the `(` matching the final `)` via the masked backward
+             * scan (comments/strings inside the arg span are inert).
+             * Excluding the final `)` leaves the producer's `(` unmatched,
+             * so the scan stops just after it. */
+            size_t p = cc_rfind_char_top_level(src, last_emit, eend - 1, "");
+            size_t lp = p;
+            while (lp > last_emit && (src[lp - 1] == ' ' || src[lp - 1] == '\t'))
+                lp--;
+            if (lp <= last_emit || src[lp - 1] != '(') { i += 2; continue; }
+            fe = lp - 1;
             while (fe > last_emit && (src[fe - 1] == ' ' || src[fe - 1] == '\t'))
                 fe--;
             fs = fe;
@@ -5997,9 +6087,24 @@ static char* cc__rewrite_optional_types(const char* src, size_t n, const char* i
 
         if (c == '?' && c2 != ':' && c2 != '?' && c2 != '>') {
             if (i > 0) {
-                char prev = src[i - 1];
-                if (cc_is_ident_char(prev) || prev == ')' || prev == ']' || prev == '>') {
-                    size_t ident_end = i;
+                /* Rewind directly-abutting block comments so `T/ *c* /?`
+                 * still reads `T` as the receiver (whitespace is
+                 * intentionally NOT skipped — `T ?` is not a candidate
+                 * today and stays that way). */
+                size_t pe = i;
+                while (pe >= 2 && src[pe - 1] == '/' && src[pe - 2] == '*') {
+                    size_t q = pe - 2, open = (size_t)-1;
+                    while (q > 0) {
+                        q--;
+                        if (src[q] == '*' && q > 0 && src[q - 1] == '/') { open = q - 1; break; }
+                    }
+                    if (open == (size_t)-1) break;
+                    pe = open;
+                }
+                char prev = pe > 0 ? src[pe - 1] : src[0];
+                if (pe > 0 &&
+                    (cc_is_ident_char(prev) || prev == ')' || prev == ']' || prev == '>')) {
+                    size_t ident_end = pe;
                     size_t ident_start = ident_end;
                     while (ident_start > 0 && cc_is_ident_char(src[ident_start - 1])) ident_start--;
                     size_t ident_len = ident_end - ident_start;
@@ -7074,9 +7179,7 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
              * `CALL !> (e) BODY` of the `!>` statement operator — not a
              * type annotation.  Let pass_result_unwrap handle it later. */
             {
-                size_t bk = sigil_pos;
-                while (bk > 0 && (src[bk - 1] == ' ' || src[bk - 1] == '\t' ||
-                                  src[bk - 1] == '\r' || src[bk - 1] == '\n')) bk--;
+                size_t bk = cc_rskip_ws_and_comments(src, sigil_pos);
                 if (bk > 0 && src[bk - 1] == ')') {
                     i = sigil_pos + 2;
                     scan.col += 2;
@@ -8516,13 +8619,13 @@ static int cc__check_block_on_nonblocking(const char* src, size_t n, const char*
             while (j < n && src[j] != '(' && src[j] != '{' && src[j] != ';') j++;
             if (j >= n || src[j] != '(') { i++; continue; }
 
-            /* Back up to find function name */
+            /* Back up to find function name (skipping whitespace and
+             * block comments: `RT name / *c* / (` still reads `name`). */
             size_t paren = j;
-            j--;
-            while (j > i && (src[j] == ' ' || src[j] == '\t')) j--;
-            if (j <= i || !cc_is_ident_char(src[j])) { i++; continue; }
+            j = cc__rskip_sp_tab_block_comments(src, j);
+            if (j == 0 || j - 1 <= i || !cc_is_ident_char(src[j - 1])) { i++; continue; }
 
-            size_t name_end = j + 1;
+            size_t name_end = j;
             while (j > i && cc_is_ident_char(src[j - 1])) j--;
             size_t name_start = j;
             size_t name_len = name_end - name_start;
@@ -8727,13 +8830,12 @@ static const char* cc__ctor_target_vars_find(const CCCtorTargetVar* vars, size_t
  * name cannot be trusted to identify a type. */
 static const char* cc__ctor_assign_target_type(const char* src, size_t macro_start,
                                                const CCCtorTargetVar* vars, size_t count) {
-    size_t p = macro_start;
-    while (p > 0 && (src[p-1] == ' ' || src[p-1] == '\t' || src[p-1] == '\n' || src[p-1] == '\r')) p--;
+    size_t p = cc_rskip_ws_and_comments(src, macro_start);
     if (p == 0 || src[p-1] != '=') return NULL;
     p--;
     /* Reject `==`, `!=`, `<=`, `>=` and compound assignments. */
     if (p > 0 && strchr("=!<>+-*/%&|^", src[p-1])) return NULL;
-    while (p > 0 && (src[p-1] == ' ' || src[p-1] == '\t' || src[p-1] == '\n' || src[p-1] == '\r')) p--;
+    p = cc_rskip_ws_and_comments(src, p);
     size_t nm_end = p;
     while (p > 0 && cc_is_ident_char(src[p-1])) p--;
     if (nm_end == p || !cc_is_ident_start(src[p])) return NULL;
@@ -8890,10 +8992,10 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
         /* Detect function returning T!E or T!>(E) - look for pattern: T!E name( or T!>(E) name( 
            Handle space before ! (e.g., "MyData !> (MyError)" or "MyData*!>(MyError)") */
         if (c == '!' && c2 != '=' && fn_brace_depth < 0 && i > 0) {
-            /* Skip backwards over whitespace to find the type */
-            size_t prev_idx = i - 1;
-            while (prev_idx > 0 && (src[prev_idx] == ' ' || src[prev_idx] == '\t')) prev_idx--;
-            char prev = src[prev_idx];
+            /* Skip backwards over whitespace and block comments to find
+             * the type (`T / *doc* / !> (E) fn(` still reads `T`). */
+            size_t prev_end = cc__rskip_sp_tab_block_comments(src, i);
+            char prev = prev_end > 0 ? src[prev_end - 1] : src[0];
             /* Valid chars before !: identifier chars, closing brackets, pointer star */
             if (cc_is_ident_char(prev) || prev == ')' || prev == ']' || prev == '>' || prev == '*') {
                 /* Check for error type after ! - two forms:
@@ -8953,8 +9055,9 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
                                     ty_start = cc__skip_leading_decl_specs(src, ty_start);
                                     size_t ty_len = i - ty_start;
                                     if (ty_len < sizeof(current_ok_type) - 1) {
-                                        /* Trim whitespace */
-                                        while (ty_len > 0 && (src[ty_start + ty_len - 1] == ' ' || src[ty_start + ty_len - 1] == '\t')) ty_len--;
+                                        /* Trim whitespace and trailing comments */
+                                        size_t ty_e = cc__rskip_sp_tab_block_comments(src, ty_start + ty_len);
+                                        ty_len = (ty_e > ty_start) ? ty_e - ty_start : 0;
                                         memcpy(current_ok_type, src + ty_start, ty_len);
                                         current_ok_type[ty_len] = 0;
                                     }
@@ -10551,8 +10654,7 @@ static void cc__append_family_suffixes(const char* text, size_t n,
         q = e;
         while (q < n && (text[q] == ' ' || text[q] == '\t')) q++;
         if (q >= n || text[q] != '(') { i = e; continue; }
-        b = i;
-        while (b > 0 && isspace((unsigned char)text[b - 1])) b--;
+        b = cc_rskip_ws_and_comments(text, i);
         if (b == 0 || !(cc_is_ident_char(text[b - 1]) || text[b - 1] == '*')) {
             i = e;
             continue;
@@ -10884,7 +10986,9 @@ static int cc_family_header_member_return(const char* header_suffix,
         while (q < formal_s && ol + 2 < out_sz) {
             char tok[64];
             size_t ts, tl;
-            while (q < formal_s && (fsrc[q] == ' ' || fsrc[q] == '\t')) q++;
+            /* Comment-aware: a comment on the macro-body line must not
+             * leak `*`/ident bytes into the harvested return type. */
+            q = cc_skip_ws_and_comments(fsrc, formal_s, q);
             if (q >= formal_s) break;
             if (fsrc[q] == '*') {
                 out[ol++] = '*';
@@ -10970,8 +11074,7 @@ static int cc__decl_fn_return_type_text(const char* text, size_t n,
         q = i + nlen;
         while (q < n && (text[q] == ' ' || text[q] == '\t')) q++;
         if (q >= n || text[q] != '(') { i += nlen; continue; }
-        b = i;
-        while (b > 0 && isspace((unsigned char)text[b - 1])) b--;
+        b = cc_rskip_ws_and_comments(text, i);
         if (b == 0 || !(cc_is_ident_char(text[b - 1]) || text[b - 1] == '*')) {
             i += nlen;
             continue;
@@ -10983,7 +11086,9 @@ static int cc__decl_fn_return_type_text(const char* text, size_t n,
         while (q < b && ol + 2 < out_sz) {
             char tok[64];
             size_t ts, tl;
-            while (q < b && isspace((unsigned char)text[q])) q++;
+            /* Comment-aware: `static / *c* / int foo(` must not leak
+             * comment bytes into the harvested return type. */
+            q = cc_skip_ws_and_comments(text, b, q);
             if (q >= b) break;
             if (text[q] == '*') {
                 out[ol++] = '*';
@@ -11233,8 +11338,7 @@ void cc_note_tu_map_key_pairs(const char* src, size_t n) {
         q = e;
         while (q < n && (src[q] == ' ' || src[q] == '\t')) q++;
         if (q >= n || src[q] != '(') { i = e; continue; }
-        b = i;
-        while (b > 0 && isspace((unsigned char)src[b - 1])) b--;
+        b = cc_rskip_ws_and_comments(src, i);
         if (b == 0 || !(cc_is_ident_char(src[b - 1]) || src[b - 1] == '*')) {
             i = e;
             continue;
@@ -11380,8 +11484,7 @@ static int cc__fn_returns_result_text(const char* text, size_t n,
         q = i + nlen;
         while (q < n && (text[q] == ' ' || text[q] == '\t')) q++;
         if (q >= n || text[q] != '(') { i += nlen; continue; }
-        b = i;
-        while (b > 0 && isspace((unsigned char)text[b - 1])) b--;
+        b = cc_rskip_ws_and_comments(text, i);
         if (b == 0 || !(cc_is_ident_char(text[b - 1]) || text[b - 1] == '*')) {
             i += nlen;
             continue;
@@ -11549,8 +11652,7 @@ int cc_included_cch_fn_first_param(const char* name, char* out, size_t out_sz) {
             q = i + nlen;
             while (q < fn && (fsrc[q] == ' ' || fsrc[q] == '\t')) q++;
             if (q < fn && fsrc[q] == '(') {
-                size_t b = i;
-                while (b > 0 && isspace((unsigned char)fsrc[b - 1])) b--;
+                size_t b = cc_rskip_ws_and_comments(fsrc, i);
                 if (b > 0 && (cc_is_ident_char(fsrc[b - 1]) || fsrc[b - 1] == '*')) {
                     size_t ps = q + 1, pe = ps;
                     int depth = 0;
@@ -13981,15 +14083,14 @@ static int cc__ct_find_struct_body(const char* src, size_t n,
             if (!want_tag && havebrace) {
                 size_t b2;
                 if (cc_find_matching_brace(src, n, b1, &b2) && semi > 0) {
-                    /* typedef name = last identifier before the ';' */
+                    /* typedef name = last identifier before the ';'
+                     * (comment-aware: `} Name / *c* / ;` still reads Name) */
                     size_t s = semi - 1;
                     while (s > b2 && src[s] != ';') s--;
-                    size_t ne = s;
-                    while (ne > b2 && (src[ne - 1] == ' ' || src[ne - 1] == '\t' ||
-                                       src[ne - 1] == '\n' || src[ne - 1] == '\r')) ne--;
+                    size_t ne = cc_rskip_ws_and_comments(src, s);
                     size_t ns = ne;
                     while (ns > b2 && cc_is_ident_char(src[ns - 1])) ns--;
-                    if (ne > ns && (ne - ns) == tlen && memcmp(src + ns, tname, tlen) == 0) {
+                    if (ne > ns && ns > b2 && (ne - ns) == tlen && memcmp(src + ns, tname, tlen) == 0) {
                         *bo = b1; *bc = b2; return 1;
                     }
                 }
@@ -14399,10 +14500,9 @@ static int cc__sm_find_entry_type(const char* src, size_t n, const char* var,
         a = after;
         while (a < n && (src[a] == ' ' || src[a] == '\t' || src[a] == '\n' || src[a] == '\r')) a++;
         if (a >= n || src[a] != '[') { i++; continue; }
-        /* Immediately preceding identifier is the typedef / tag name. */
-        q = i;
-        while (q > 0 && (src[q - 1] == ' ' || src[q - 1] == '\t' ||
-                         src[q - 1] == '\n' || src[q - 1] == '\r')) q--;
+        /* Immediately preceding identifier is the typedef / tag name
+         * (comment-aware: `MyType / *c* / arr[` still reads MyType). */
+        q = cc_rskip_ws_and_comments(src, i);
         te = q;
         while (q > 0 && cc_is_ident_char(src[q - 1])) q--;
         ts = q;
@@ -14411,12 +14511,10 @@ static int cc__sm_find_entry_type(const char* src, size_t n, const char* var,
     }
     if (!found) return 0;
     {
-        size_t q = best;
+        size_t q = cc_rskip_ws_and_comments(src, best);
         size_t te, ts;
         const char* t;
         size_t tl;
-        while (q > 0 && (src[q - 1] == ' ' || src[q - 1] == '\t' ||
-                         src[q - 1] == '\n' || src[q - 1] == '\r')) q--;
         te = q;
         while (q > 0 && cc_is_ident_char(src[q - 1])) q--;
         ts = q;
@@ -14435,13 +14533,11 @@ static int cc__sm_typedef_defines(const char* decl, size_t len, const char* name
     size_t nlen, i, end, start, p;
     if (!decl || !name || !name[0] || len < 8) return 0;
     nlen = strlen(name);
-    i = len;
-    while (i > 0 && (decl[i - 1] == ' ' || decl[i - 1] == '\t' ||
-                     decl[i - 1] == '\n' || decl[i - 1] == '\r')) i--;
+    /* Comment-aware trims: `typedef ... Name / *c* / ;` still reads Name. */
+    i = cc_rskip_ws_and_comments(decl, len);
     if (i == 0 || decl[i - 1] != ';') return 0;
     i--;
-    while (i > 0 && (decl[i - 1] == ' ' || decl[i - 1] == '\t' ||
-                     decl[i - 1] == '\n' || decl[i - 1] == '\r')) i--;
+    i = cc_rskip_ws_and_comments(decl, i);
     end = i;
     while (i > 0 && cc_is_ident_char(decl[i - 1])) i--;
     start = i;
@@ -14762,12 +14858,11 @@ static int cc__ct_find_enum_body(const char* src, size_t n,
                     if (cc_find_matching_brace(src, n, b1, &b2) && semi > 0) {
                         size_t s = semi - 1;
                         while (s > b2 && src[s] != ';') s--;
-                        size_t ne = s;
-                        while (ne > b2 && (src[ne - 1] == ' ' || src[ne - 1] == '\t' ||
-                                           src[ne - 1] == '\n' || src[ne - 1] == '\r')) ne--;
+                        /* Comment-aware: `} Name / *c* / ;` still reads Name */
+                        size_t ne = cc_rskip_ws_and_comments(src, s);
                         size_t ns = ne;
                         while (ns > b2 && cc_is_ident_char(src[ns - 1])) ns--;
-                        if (ne > ns && (ne - ns) == tlen && memcmp(src + ns, tname, tlen) == 0) {
+                        if (ne > ns && ns > b2 && (ne - ns) == tlen && memcmp(src + ns, tname, tlen) == 0) {
                             *bo = b1; *bc = b2; return 1;
                         }
                     }

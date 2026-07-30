@@ -170,10 +170,9 @@ static int cc__slc_name_is_declarator(const char* s, size_t len, size_t name_s,
     k = cc_skip_ws_and_comments(s, len, rparen + 1);
     if (k < len && s[k] == '{') return 1;
 
-    i = name_s;
-    while (i > 0 && (s[i - 1] == ' ' || s[i - 1] == '\t' || s[i - 1] == '\n' ||
-                     s[i - 1] == '\r'))
-        i--;
+    /* Comment-aware rewind: `int / *c* / takes(` is a declarator, not a
+     * call. */
+    i = cc_rskip_ws_and_comments(s, name_s);
     if (i == 0) return 0;
     if (s[i - 1] == '*') return 1;
     if (!cc_is_ident_char(s[i - 1])) return 0; /* `=` `,` `(` `{` `;` `}` → call */
