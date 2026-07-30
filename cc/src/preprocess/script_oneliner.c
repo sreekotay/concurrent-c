@@ -7,6 +7,24 @@
 #include "template_scan.h"
 #include "util/text.h"
 
+/* Text of the injected predeclarations, in one place: three sites emit them
+ * (byte accounting, the file-.shcc emitter, the one-liner emitter) and they
+ * have to agree.
+ *
+ * The implicit `io` binds an arena of its own rather than the script's `a`.
+ * Predecls are emitted above the script body, so an `io` bound to `a` broke
+ * every script that declared `a` itself — the reference sat above the
+ * declaration. A private arena decouples the two orders entirely.
+ *
+ * Sized to match the arena `io` was bound to before, because cc_arena_heap
+ * takes a single fixed block: the size is a cap, and read_all/read_line
+ * allocate the input into it. */
+#define CC_OL_PREDECL_A "CCArena a = @create(megabytes(1)) @destroy;\n"
+#define CC_OL_PREDECL_IO_ARENA \
+    "CCArena __cc_io_arena = @create(megabytes(1)) @destroy;\n"
+#define CC_OL_PREDECL_IO "CCStdio io = @create(&__cc_io_arena) @destroy;\n"
+#define CC_OL_PREDECL_IN "char[:] in = io.read_all() !>;\n"
+
 static void cc__ol_apply_implications(CCScriptOnelinerPredecls* p) {
     if (!p) return;
     if (p->want_line || p->want_nr) {
@@ -143,8 +161,12 @@ static void cc__ol_predecl_on_ident(const char* src, size_t len, size_t i,
     }
 }
 
-void cc_script_oneliner_scan_predecls(const char* src, size_t len,
-                                      CCScriptOnelinerPredecls* out) {
+/* Which implicit names the source mentions, before any implication between
+ * them. Callers that suppress a name must do so against these primaries:
+ * implications turn `line`/`nr` into `io` into `a`, and clearing a name after
+ * that leaves its consequences standing. */
+static void cc__ol_scan_primaries(const char* src, size_t len,
+                                  CCScriptOnelinerPredecls* out) {
     CCOlCodeWalk walk;
     if (out) memset(out, 0, sizeof(*out));
     if (!src || !out) return;
@@ -153,6 +175,11 @@ void cc_script_oneliner_scan_predecls(const char* src, size_t len,
     walk.ctx = out;
     walk.recurse_holes = 1;
     cc__ol_walk_code(src, 0, len, &walk);
+}
+
+void cc_script_oneliner_scan_predecls(const char* src, size_t len,
+                                      CCScriptOnelinerPredecls* out) {
+    cc__ol_scan_primaries(src, len, out);
     cc__ol_apply_implications(out);
 }
 
@@ -248,14 +275,22 @@ char* cc_script_oneliner_predecls_for(const char* src, size_t len,
         src = "";
         len = 0;
     }
-    cc_script_oneliner_scan_predecls(src, len, &p);
-    /* line/nr are -n/-p loop locals only — never ambient in file .shcc. */
+    /* Primaries first: `line`/`nr` are -n/-p loop locals only, never ambient in
+     * a file .shcc, and dropping them has to happen before implications run.
+     * Scanning post-implication left `int line = 1;` pulling in an injected
+     * `CCStdio io = @create(&a) @destroy;` — ahead of the script's own arena. */
+    cc__ol_scan_primaries(src, len, &p);
     p.want_line = 0;
     p.want_nr = 0;
     if (!allow_args) p.want_args = 0;
     cc_script_oneliner_suppress_existing_decls(src, len, &p);
+    cc__ol_apply_implications(&p);
+    /* Implications must not resurrect a name the script declares itself. */
+    cc_script_oneliner_suppress_existing_decls(src, len, &p);
+    p.want_line = 0;
+    p.want_nr = 0;
     if (p.want_a) lines++;
-    if (p.want_io) lines++;
+    if (p.want_io) lines += 2; /* private arena + the handle bound to it */
     if (p.want_in) lines++;
     if (p.want_args) lines++;
     if (lines == 0) {
@@ -269,7 +304,7 @@ char* cc_script_oneliner_predecls_for(const char* src, size_t len,
     out = (char*)malloc(need);
     if (!out) return NULL;
     if (p.want_a) {
-        static const char s[] = "CCArena a = @create(megabytes(1)) @destroy;\n";
+        static const char s[] = CC_OL_PREDECL_A;
         if (ind_len) {
             memcpy(out + o, indent, ind_len);
             o += ind_len;
@@ -278,16 +313,23 @@ char* cc_script_oneliner_predecls_for(const char* src, size_t len,
         o += sizeof(s) - 1;
     }
     if (p.want_io) {
-        static const char s[] = "CCStdio io = @create(&a) @destroy;\n";
+        static const char s_arena[] = CC_OL_PREDECL_IO_ARENA;
+        static const char s_io[] = CC_OL_PREDECL_IO;
         if (ind_len) {
             memcpy(out + o, indent, ind_len);
             o += ind_len;
         }
-        memcpy(out + o, s, sizeof(s) - 1);
-        o += sizeof(s) - 1;
+        memcpy(out + o, s_arena, sizeof(s_arena) - 1);
+        o += sizeof(s_arena) - 1;
+        if (ind_len) {
+            memcpy(out + o, indent, ind_len);
+            o += ind_len;
+        }
+        memcpy(out + o, s_io, sizeof(s_io) - 1);
+        o += sizeof(s_io) - 1;
     }
     if (p.want_in) {
-        static const char s[] = "char[:] in = io.read_all() !>;\n";
+        static const char s[] = CC_OL_PREDECL_IN;
         if (ind_len) {
             memcpy(out + o, indent, ind_len);
             o += ind_len;
@@ -473,11 +515,11 @@ static size_t cc__ol_predecl_bytes(const CCScriptOnelinerPredecls* p) {
     size_t n = 0;
     if (!p) return 0;
     if (p->want_a)
-        n += sizeof("CCArena a = @create(megabytes(1)) @destroy;\n") - 1;
+        n += sizeof(CC_OL_PREDECL_A) - 1;
     if (p->want_io)
-        n += sizeof("CCStdio io = @create(&a) @destroy;\n") - 1;
+        n += sizeof(CC_OL_PREDECL_IO_ARENA) - 1 + sizeof(CC_OL_PREDECL_IO) - 1;
     if (p->want_in)
-        n += sizeof("char[:] in = io.read_all() !>;\n") - 1;
+        n += sizeof(CC_OL_PREDECL_IN) - 1;
     if (p->want_args)
         n += sizeof("char *[:] args = { .ptr = (char *)(argv + 1), "
                     ".len = (size_t)(argc > 1 ? argc - 1 : 0) };\n") -
@@ -491,19 +533,23 @@ static size_t cc__ol_append_predecls(char* out, size_t o, size_t cap,
                                      const CCScriptOnelinerPredecls* p) {
     if (!out || !p) return o;
     if (p->want_a) {
-        static const char s[] = "CCArena a = @create(megabytes(1)) @destroy;\n";
+        static const char s[] = CC_OL_PREDECL_A;
         size_t n = sizeof(s) - 1;
         if (o + n < cap) memcpy(out + o, s, n);
         o += n;
     }
     if (p->want_io) {
-        static const char s[] = "CCStdio io = @create(&a) @destroy;\n";
-        size_t n = sizeof(s) - 1;
-        if (o + n < cap) memcpy(out + o, s, n);
+        static const char s_arena[] = CC_OL_PREDECL_IO_ARENA;
+        static const char s_io[] = CC_OL_PREDECL_IO;
+        size_t n = sizeof(s_arena) - 1;
+        if (o + n < cap) memcpy(out + o, s_arena, n);
+        o += n;
+        n = sizeof(s_io) - 1;
+        if (o + n < cap) memcpy(out + o, s_io, n);
         o += n;
     }
     if (p->want_in) {
-        static const char s[] = "char[:] in = io.read_all() !>;\n";
+        static const char s[] = CC_OL_PREDECL_IN;
         size_t n = sizeof(s) - 1;
         if (o + n < cap) memcpy(out + o, s, n);
         o += n;

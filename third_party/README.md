@@ -4,19 +4,45 @@ All dependencies are Git submodules for easy version tracking and updates.
 
 ## Dependencies
 
-| Directory | Library | License | Purpose | Build |
-|-----------|---------|---------|---------|-------|
-| `tcc/` | TinyCC | LGPL 2.1 | C parser/compiler foundation | (auto) |
-| `liblfds/` | liblfds 7.1.1 | Unlicense | Lock-free channel queue backend | (auto) |
-| `bearssl/` | BearSSL | MIT | TLS support (`<std/tls.cch>`) | `make bearssl` |
-| `curl/` | libcurl | MIT | HTTP client (`<std/http.cch>`) | `make curl` |
-| `xjb/` | xjb | Apache-2.0 | Upstream float/double-to-string algorithm candidate | research/integration |
+| Directory | Library | License | Purpose | Required for | Build |
+|-----------|---------|---------|---------|--------------|-------|
+| `tcc/` | TinyCC | LGPL 2.1 | C parser/compiler foundation | compiler build | (auto) |
+| `xjb/` | xjb | Apache-2.0 | Float/double-to-string formatting | compiler build | (auto) |
+| `liblfds/` | liblfds 7.1.1 | Unlicense | Optional lock-free channel queue backend | — | (auto) |
+| `bearssl/` | BearSSL | MIT | TLS support (`<std/tls.cch>`) | `<std/tls.cch>` | `make bearssl` |
+| `curl/` | libcurl | MIT | HTTP client (`<std/http.cch>`) | `<std/http.cch>` | `make curl` |
+
+Fetch the build inputs with:
+
+```bash
+./scripts/fetch_submodules.sh              # tcc (full) + xjb (sparse)
+./scripts/fetch_submodules.sh --full       # complete trees, for submodule work
+./scripts/fetch_submodules.sh --with-liblfds
+```
 
 **Note**: BearSSL and libcurl are opt-in. Only build/link what you need.
 
 ## xjb
 
-Vendored upstream for evaluating fast float/double formatting, especially as a replacement candidate for the current `snprintf`-based float string path.
+Supplies the runtime's fast float/double formatting, replacing the `snprintf`-based
+float string path. `cc/runtime/float_format_xjb.cpp` wraps it; the build compiles
+`src/ftoa.cpp` into the runtime and `make install` stages it as
+`$PREFIX/lib/ccc/runtime/vendor/xjb_ftoa.cpp`.
+
+Only `src/` is used. `fetch_submodules.sh` checks out that path alone — the full
+tree is ~37M, almost all of it benchmark corpora.
+
+## liblfds
+
+An optional bounded-MPMC-queue backend for channels. `cc/runtime/channel.c`
+probes for it with `__has_include` and defines `CC_HAVE_LIBLFDS` accordingly; the
+native ring queue is the primary lock-free path either way, so builds without it
+are fully supported (and are the default). It also has no TCC port, so a TCC host
+build always sets `CC_NO_LIBLFDS`.
+
+Its only host is `liblfds.org`, which has no mirror. Because a fetch failure
+there is unrelated to whether the compiler can be built, it is opt-in rather
+than a hard prerequisite.
 
 ## TCC
 

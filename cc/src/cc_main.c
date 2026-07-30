@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -41,6 +42,11 @@ static const char* g_run_argv0 = NULL;
 
 // Resolved repo-relative paths so `./cc/bin/ccc build ...` works from the repo root.
 static int g_paths_inited = 0;
+/* Set when paths resolved to a prefix install rather than a checkout. The
+ * prefix is read-only as far as the driver is concerned (it may be
+ * /usr/local, owned by root), so build outputs are rooted at the working
+ * directory instead of at g_repo_root. */
+static int g_layout_installed = 0;
 static char g_repo_root[PATH_MAX];
 static char g_ccc_path[PATH_MAX];
 static char g_ccc_sig_path[PATH_MAX];
@@ -399,29 +405,42 @@ static void cc_refresh_host_obj_root(const char* cc_bin_override) {
 }
 
 static void cc_set_out_dir(const char* out_dir_opt, const char* bin_dir_opt) {
+    /* Base for default and relative output dirs: the repo root in a checkout,
+     * the working directory under a prefix install (see g_layout_installed). */
+    char base[PATH_MAX];
+    if (g_layout_installed) {
+        if (getcwd(base, sizeof(base)) == NULL) {
+            strncpy(base, ".", sizeof(base));
+            base[sizeof(base) - 1] = '\0';
+        }
+    } else {
+        strncpy(base, g_repo_root, sizeof(base));
+        base[sizeof(base) - 1] = '\0';
+    }
+
     const char* env = getenv("CC_OUT_DIR");
     const char* p = out_dir_opt && out_dir_opt[0] ? out_dir_opt : (env && env[0] ? env : NULL);
 
     if (!p) {
-        snprintf(g_out_root, sizeof(g_out_root), "%s/out", g_repo_root);
+        snprintf(g_out_root, sizeof(g_out_root), "%s/out", base);
     } else if (cc__is_abs_path(p)) {
         strncpy(g_out_root, p, sizeof(g_out_root));
         g_out_root[sizeof(g_out_root) - 1] = '\0';
     } else {
-        // Relative paths are interpreted relative to repo root.
-        snprintf(g_out_root, sizeof(g_out_root), "%s/%s", g_repo_root, p);
+        // Relative paths are interpreted relative to the base dir.
+        snprintf(g_out_root, sizeof(g_out_root), "%s/%s", base, p);
     }
 
     const char* benv = getenv("CC_BIN_DIR");
     const char* bp = bin_dir_opt && bin_dir_opt[0] ? bin_dir_opt : (benv && benv[0] ? benv : NULL);
     if (!bp) {
-        snprintf(g_bin_root, sizeof(g_bin_root), "%s/bin", g_repo_root);
+        snprintf(g_bin_root, sizeof(g_bin_root), "%s/bin", base);
     } else if (cc__is_abs_path(bp)) {
         strncpy(g_bin_root, bp, sizeof(g_bin_root));
         g_bin_root[sizeof(g_bin_root) - 1] = '\0';
     } else {
-        // Relative bin dir is interpreted relative to repo root.
-        snprintf(g_bin_root, sizeof(g_bin_root), "%s/%s", g_repo_root, bp);
+        // Relative bin dir is interpreted relative to the base dir.
+        snprintf(g_bin_root, sizeof(g_bin_root), "%s/%s", base, bp);
     }
 
     snprintf(g_cache_root, sizeof(g_cache_root), "%s/.cc-build", g_out_root);
@@ -440,6 +459,32 @@ static int cc__check_layout(const char* include_path, const char* runtime_path) 
     return 0;
 }
 
+/* Resolve a bare argv[0] (no slash) to an absolute path via PATH. After a
+ * prefix install `ccc` is normally invoked by bare name, and the layout probe
+ * below derives <prefix> from <prefix>/bin/ccc — so without this the probe
+ * never fires and a correct install looks broken. `out` must hold PATH_MAX. */
+static int cc__resolve_on_path(const char* name, char* out) {
+    const char* path = getenv("PATH");
+    if (!name || !name[0] || !path || !path[0]) return -1;
+    char* dup = strdup(path);
+    if (!dup) return -1;
+    int rc = -1;
+    char* p = dup;
+    while (p && *p) {
+        char* sep = strchr(p, ':');
+        if (sep) *sep = '\0';
+        char cand[PATH_MAX];
+        if (*p && (size_t)snprintf(cand, sizeof(cand), "%s/%s", p, name) < sizeof(cand) &&
+            access(cand, X_OK) == 0 && realpath(cand, out) != NULL) {
+            rc = 0;
+            break;
+        }
+        p = sep ? sep + 1 : NULL;
+    }
+    free(dup);
+    return rc;
+}
+
 static void cc_init_paths(const char* argv0) {
     if (g_paths_inited) return;
     g_paths_inited = 1;
@@ -448,7 +493,10 @@ static void cc_init_paths(const char* argv0) {
     exe_abs[0] = '\0';
     if (argv0 && argv0[0]) {
         // Best effort: if argv0 is a path (common dev case: ./cc/bin/ccc), realpath it.
-        if (realpath(argv0, exe_abs) == NULL) {
+        if (strchr(argv0, '/') == NULL) {
+            if (cc__resolve_on_path(argv0, exe_abs) != 0)
+                exe_abs[0] = '\0';
+        } else if (realpath(argv0, exe_abs) == NULL) {
             // Fallback: accept argv0 as-is.
             strncpy(exe_abs, argv0, sizeof(exe_abs));
             exe_abs[sizeof(exe_abs) - 1] = '\0';
@@ -486,6 +534,7 @@ static void cc_init_paths(const char* argv0) {
             g_cc_runtime_o[0] = '\0';
             snprintf(g_cc_dir, sizeof(g_cc_dir), "%s/lib/ccc", cc_home);
             layout_found = 1;
+            g_layout_installed = 1;
         }
     }
 
@@ -510,6 +559,7 @@ static void cc_init_paths(const char* argv0) {
             g_cc_runtime_o[0] = '\0';
             snprintf(g_cc_dir, sizeof(g_cc_dir), "%s/lib/ccc", tmp);
             layout_found = 1;
+            g_layout_installed = 1;
         }
     }
 
@@ -601,14 +651,55 @@ static void cc_init_paths(const char* argv0) {
     }
     cc_set_out_dir(NULL, NULL);
 
+    /* Locate TCC's support dir (include/ with stddef.h et al, plus libtcc1.a).
+     * cc_init_parser_state in libtcc only reaches it through cwd-relative
+     * candidates, which hold in a checkout and nowhere else, so publish an
+     * absolute path here. CC_TCC_LIB_PATH is the override every consumer
+     * already probes first (cc__tcc_lib_dir, comptime const-eval/executor,
+     * hook_compile), so one setenv covers all of them. */
+    if (!getenv("CC_TCC_LIB_PATH")) {
+        const char* tcc_cands[2];
+        char installed[PATH_MAX], in_repo[PATH_MAX];
+        size_t ntcc = 0;
+        if (g_cc_dir[0] &&
+            (size_t)snprintf(installed, sizeof(installed), "%s/tcc", g_cc_dir) < sizeof(installed))
+            tcc_cands[ntcc++] = installed;
+        if (g_repo_root[0] &&
+            (size_t)snprintf(in_repo, sizeof(in_repo), "%s/third_party/tcc", g_repo_root) < sizeof(in_repo))
+            tcc_cands[ntcc++] = in_repo;
+        for (size_t i = 0; i < ntcc; i++) {
+            char probe[PATH_MAX];
+            if ((size_t)snprintf(probe, sizeof(probe), "%s/include/stddef.h", tcc_cands[i]) >= sizeof(probe))
+                continue;
+            if (file_exists(probe)) {
+                setenv("CC_TCC_LIB_PATH", tcc_cands[i], 1);
+                break;
+            }
+        }
+    }
+
     // Set CC_INCLUDE_PATH for TCC parser mode. Parser-lowered local/system
     // headers can reference both raw `.cch` headers and lowered `.h` headers.
-    if (g_cc_include[0] && g_cc_lowered_include[0]) {
-        char include_path[sizeof(g_cc_include) + sizeof(g_cc_lowered_include) + 2];
-        snprintf(include_path, sizeof(include_path), "%s:%s", g_cc_lowered_include, g_cc_include);
-        setenv("CC_INCLUDE_PATH", include_path, 1);
-    } else if (g_cc_include[0]) {
-        setenv("CC_INCLUDE_PATH", g_cc_include, 1);
+    // TCC's own builtin headers ride along so the parse pass resolves
+    // <stddef.h> without depending on the working directory.
+    {
+        char include_path[3 * PATH_MAX];
+        size_t n = 0;
+        const char* parts[3];
+        size_t nparts = 0;
+        if (g_cc_lowered_include[0]) parts[nparts++] = g_cc_lowered_include;
+        if (g_cc_include[0] && (nparts == 0 || strcmp(g_cc_include, parts[0]) != 0))
+            parts[nparts++] = g_cc_include;
+        const char* tcc_lib = getenv("CC_TCC_LIB_PATH");
+        char tcc_inc[PATH_MAX];
+        if (tcc_lib && tcc_lib[0] &&
+            (size_t)snprintf(tcc_inc, sizeof(tcc_inc), "%s/include", tcc_lib) < sizeof(tcc_inc))
+            parts[nparts++] = tcc_inc;
+        include_path[0] = '\0';
+        for (size_t i = 0; i < nparts; i++)
+            n += (size_t)snprintf(include_path + n, sizeof(include_path) - n,
+                                  "%s%s", i ? ":" : "", parts[i]);
+        if (include_path[0]) setenv("CC_INCLUDE_PATH", include_path, 1);
     }
 }
 
@@ -2345,7 +2436,9 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         have_runtime = 1;
         if (summary_out) {
             summary_out->runtime_reused = runtime_reused;
-            summary_out->runtime_obj_path = runtime_reused ? g_cc_runtime_o : runtime_obj;
+            /* runtime_obj holds whichever object was chosen — the prebuilt, a
+             * cache hit, or a fresh compile. */
+            summary_out->runtime_obj_path = runtime_obj;
         }
     }
 
@@ -2625,6 +2718,129 @@ static int cc__compile_c_to_obj(const CCBuildOptions* opt,
     return 0;
 }
 
+/* The three commands that produce a runtime object: compile the runtime TU,
+ * compile the C++ float formatter, merge them with `-r`. Under a TCC host the
+ * first writes the final object and the other two stay empty. */
+typedef struct {
+    char core[4096];
+    char xjb[4096];
+    char merge[4096];
+} CCRuntimeCmds;
+
+static uint64_t cc__fnv1a64(const void* data, size_t n, uint64_t h) {
+    const unsigned char* p = (const unsigned char*)data;
+    size_t i;
+    if (!h) h = 14695981039346656037ull;
+    for (i = 0; i < n; i++) {
+        h ^= (uint64_t)p[i];
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
+/* Newest mtime among regular files in `dir`, recursing `depth` levels. */
+static time_t cc__newest_mtime(const char* dir, int depth) {
+    if (!dir || !dir[0]) return 0;
+    DIR* d = opendir(dir);
+    if (!d) return 0;
+    time_t newest = 0;
+    struct dirent* ent;
+    while ((ent = readdir(d)) != NULL) {
+        if (ent->d_name[0] == '.') continue;
+        char path[PATH_MAX];
+        if ((size_t)snprintf(path, sizeof(path), "%s/%s", dir, ent->d_name) >= sizeof(path)) continue;
+        struct stat st;
+        if (stat(path, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) {
+            if (depth > 0) {
+                time_t sub = cc__newest_mtime(path, depth - 1);
+                if (sub > newest) newest = sub;
+            }
+        } else if (st.st_mtime > newest) {
+            newest = st.st_mtime;
+        }
+    }
+    closedir(d);
+    return newest;
+}
+
+/* Newest mtime across everything a runtime object is built from: the runtime
+ * sources (including vendor/), the headers they include, and ccc itself (a new
+ * compiler can lower those headers differently). */
+static time_t cc__runtime_inputs_mtime(void) {
+    time_t newest = 0;
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof(dir), "%s", g_cc_runtime_c);
+    char* slash = strrchr(dir, '/');
+    if (slash) {
+        *slash = '\0';
+        time_t t = cc__newest_mtime(dir, 1);
+        if (t > newest) newest = t;
+    }
+    if (g_cc_lowered_include[0]) {
+        time_t t = cc__newest_mtime(g_cc_lowered_include, 2);
+        if (t > newest) newest = t;
+    }
+    if (g_cc_include[0] &&
+        (!g_cc_lowered_include[0] || strcmp(g_cc_include, g_cc_lowered_include) != 0)) {
+        time_t t = cc__newest_mtime(g_cc_include, 2);
+        if (t > newest) newest = t;
+    }
+    struct stat st;
+    if (g_ccc_sig_path[0] && stat(g_ccc_sig_path, &st) == 0 && st.st_mtime > newest)
+        newest = st.st_mtime;
+    return newest;
+}
+
+/* Whether `path` contains exactly `text`. */
+static int cc__file_text_equals(const char* path, const char* text) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return 0;
+    size_t want = strlen(text);
+    int same = 0;
+    char* buf = malloc(want + 2);
+    if (buf) {
+        size_t got = fread(buf, 1, want + 1, f);
+        same = (got == want && memcmp(buf, text, want) == 0);
+        free(buf);
+    }
+    fclose(f);
+    return same;
+}
+
+static void cc__write_file_text(const char* path, const char* text) {
+    FILE* f = fopen(path, "wb");
+    if (!f) return;
+    fwrite(text, 1, strlen(text), f);
+    fclose(f);
+}
+
+/* Whether the prebuilt runtime object can answer this request.
+ *
+ * out/cc/obj/runtime/concurrent_c.o is whatever `make -C cc` compiled: the
+ * default host cc, the Makefile's own flags, a native target. Reusing it for an
+ * invocation that supplies compilation inputs of its own would silently drop
+ * exactly the flags the caller asked for — the artifact would not be the one
+ * they requested. Any such invocation falls through to the per-variant cache,
+ * which builds one object per flag set and keeps it. */
+static int cc__prebuilt_runtime_applies(const CCBuildOptions* opt,
+                                        const char* target_part,
+                                        const char* sysroot_part) {
+    const char* e;
+    if (opt->cc_flags && *opt->cc_flags) return 0;
+    if (target_part && *target_part) return 0;
+    if (sysroot_part && *sysroot_part) return 0;
+    /* A host CC override may not be the compiler that built the prebuilt, and
+     * nothing records which one did. */
+    if (opt->cc_bin_override && *opt->cc_bin_override) return 0;
+    if ((e = getenv("CC")) != NULL && *e) return 0;
+    if ((e = getenv("CFLAGS")) != NULL && *e) return 0;
+    if ((e = getenv("CPPFLAGS")) != NULL && *e) return 0;
+    /* CXXFLAGS feeds the xjb TU, which the prebuilt has already merged in. */
+    if ((e = getenv("CXXFLAGS")) != NULL && *e) return 0;
+    return 1;
+}
+
 // Check if prebuilt runtime object is stale (runtime sources newer than object).
 static int cc__runtime_obj_is_stale(const char* runtime_obj_path) {
     if (!runtime_obj_path || !file_exists(runtime_obj_path)) return 1;
@@ -2657,6 +2873,76 @@ static int cc__runtime_obj_is_stale(const char* runtime_obj_path) {
     return 0;  // Object is up-to-date
 }
 
+/* Compose the runtime build commands for one set of output paths. Single source
+ * of truth: cc__ensure_runtime_obj calls this twice — once against placeholder
+ * paths to derive the variant hash, once against the real paths to run and to
+ * record — so the hash cannot miss a dimension the commands encode. */
+static void cc__runtime_build_cmds(const CCBuildOptions* opt, const char* cc_bin, int is_tcc,
+                                   const CCHostCcProfile* host_prof,
+                                   const char* target_part, const char* sysroot_part,
+                                   const char* obj, const char* core_obj, const char* xjb_obj,
+                                   const char* xjb_src, CCRuntimeCmds* out) {
+    const char* ccflags_env = getenv("CFLAGS");
+    const char* cxxflags_env = getenv("CXXFLAGS");
+    const char* cppflags_env = getenv("CPPFLAGS");
+    out->core[0] = out->xjb[0] = out->merge[0] = '\0';
+
+    snprintf(out->core, sizeof(out->core), "%s %s %s %s %s -DCC_ENABLE_ASYNC -DCC_ENABLE_XJB_FLOAT_FMT=%d -I%s -I%s -I%s -I%s -c %s -o %s",
+             cc_bin,
+             ccflags_env ? ccflags_env : "",
+             cppflags_env ? cppflags_env : "",
+             target_part ? target_part : "",
+             sysroot_part ? sysroot_part : "",
+             (host_prof->ok ? host_prof->no_xjb_float : is_tcc) ? 0 : 1,
+             g_cc_lowered_include,
+             g_cc_include,
+             g_cc_dir,
+             g_repo_root,
+             g_cc_runtime_c,
+             is_tcc ? obj : core_obj);
+    if (host_prof->ok ? host_prof->no_liblfds : is_tcc) {
+        /* liblfds has no TCC port (needs GCC __atomic_* / OS PAL). Native ring
+         * queue remains the primary lock-free path when CC_NO_LIBLFDS is set. */
+        strncat(out->core, " -DCC_NO_LIBLFDS", sizeof(out->core) - strlen(out->core) - 1);
+    }
+    cc__append_host_cc_flags(out->core, sizeof(out->core), cc_bin);
+    if (opt->cc_flags && *opt->cc_flags) {
+        strncat(out->core, " ", sizeof(out->core) - strlen(out->core) - 1);
+        strncat(out->core, opt->cc_flags, sizeof(out->core) - strlen(out->core) - 1);
+    }
+    if (!is_tcc)
+        strncat(out->core, " -ffunction-sections -fdata-sections", sizeof(out->core) - strlen(out->core) - 1);
+
+    if (is_tcc) return;
+
+    snprintf(out->xjb, sizeof(out->xjb), "%s %s %s %s %s -std=c++17 -fno-exceptions -fno-rtti -DCC_ENABLE_XJB_FLOAT_FMT=1 -I%s -I%s -I%s -I%s -c %s -o %s",
+             pick_cxx_bin(),
+             cxxflags_env ? cxxflags_env : "",
+             cppflags_env ? cppflags_env : "",
+             target_part ? target_part : "",
+             sysroot_part ? sysroot_part : "",
+             g_cc_lowered_include,
+             g_cc_include,
+             g_cc_dir,
+             g_repo_root,
+             xjb_src,
+             xjb_obj);
+    if (opt->cc_flags && *opt->cc_flags) {
+        strncat(out->xjb, " ", sizeof(out->xjb) - strlen(out->xjb) - 1);
+        strncat(out->xjb, opt->cc_flags, sizeof(out->xjb) - strlen(out->xjb) - 1);
+    }
+    strncat(out->xjb, " -ffunction-sections -fdata-sections", sizeof(out->xjb) - strlen(out->xjb) - 1);
+
+    snprintf(out->merge, sizeof(out->merge), "%s %s %s %s -nostdlib -r %s %s -o %s",
+             cc_bin,
+             target_part ? target_part : "",
+             sysroot_part ? sysroot_part : "",
+             cppflags_env ? cppflags_env : "",
+             core_obj,
+             xjb_obj,
+             obj);
+}
+
 static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
                                  const char* target_part,
                                  const char* sysroot_part,
@@ -2678,18 +2964,25 @@ static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
     // It may not be compiled with -ffunction-sections/-fdata-sections, which prevents
     // the linker from dead-stripping unused runtime code.
     // NOTE: For TCC, don't reuse prebuilt - TCC can't link Mach-O/ELF from other compilers.
+    // NOTE: Only for invocations the prebuilt actually answers - see
+    // cc__prebuilt_runtime_applies; a caller's own flags must not be dropped.
     // NOTE: Check if prebuilt is stale (runtime sources changed but make not run).
-    if (!opt->opt_release && !is_tcc && file_exists(g_cc_runtime_o) && !cc__runtime_obj_is_stale(g_cc_runtime_o)) {
+    int prebuilt_applies = cc__prebuilt_runtime_applies(opt, target_part, sysroot_part);
+    if (!opt->opt_release && !is_tcc && prebuilt_applies &&
+        file_exists(g_cc_runtime_o) && !cc__runtime_obj_is_stale(g_cc_runtime_o)) {
         strncpy(out_runtime_path, g_cc_runtime_o, out_runtime_cap);
         out_runtime_path[out_runtime_cap - 1] = '\0';
         if (out_reused) *out_reused = 1;
         return 0;
     }
-    
+
     // ABORT if prebuilt exists but is stale - force explicit rebuild.
     // Skip for TCC: host TCC never reuses the clang/gcc prebuilt (object format
     // mismatch) and always rebuilds out/<dir>/runtime.o from sources.
-    if (!is_tcc && file_exists(g_cc_runtime_o) && cc__runtime_obj_is_stale(g_cc_runtime_o)) {
+    // Skip when the prebuilt does not apply: that build compiles its own runtime
+    // from current sources, so the prebuilt's staleness cannot affect it.
+    if (!is_tcc && prebuilt_applies &&
+        file_exists(g_cc_runtime_o) && cc__runtime_obj_is_stale(g_cc_runtime_o)) {
         fprintf(stderr, "\n");
         fprintf(stderr, "================================================================================\n");
         fprintf(stderr, "STALE RUNTIME DETECTED\n");
@@ -2709,71 +3002,61 @@ static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
     char runtime_xjb_obj[PATH_MAX];
     char runtime_xjb_src[PATH_MAX];
     const char* rt_root = g_host_obj_root[0] ? g_host_obj_root : g_out_root;
-    snprintf(runtime_obj, sizeof(runtime_obj), "%s/runtime.o", rt_root);
-    snprintf(runtime_core_obj, sizeof(runtime_core_obj), "%s/runtime.core.o", rt_root);
-    snprintf(runtime_xjb_obj, sizeof(runtime_xjb_obj), "%s/runtime.xjb.o", rt_root);
     snprintf(runtime_xjb_src, sizeof(runtime_xjb_src), "%s/runtime/float_format_xjb.cpp", g_cc_dir);
-    const char* ccflags_env = getenv("CFLAGS");
-    const char* cxxflags_env = getenv("CXXFLAGS");
-    const char* cppflags_env = getenv("CPPFLAGS");
-    char cmd[4096];
-    snprintf(cmd, sizeof(cmd), "%s %s %s %s %s -DCC_ENABLE_ASYNC -DCC_ENABLE_XJB_FLOAT_FMT=%d -I%s -I%s -I%s -I%s -c %s -o %s",
-             cc_bin,
-             ccflags_env ? ccflags_env : "",
-             cppflags_env ? cppflags_env : "",
-             target_part ? target_part : "",
-             sysroot_part ? sysroot_part : "",
-             (host_prof.ok ? host_prof.no_xjb_float : is_tcc) ? 0 : 1,
-             g_cc_lowered_include,
-             g_cc_include,
-             g_cc_dir,
-             g_repo_root,
-             g_cc_runtime_c,
-             is_tcc ? runtime_obj : runtime_core_obj);
-    if (host_prof.ok ? host_prof.no_liblfds : is_tcc) {
-        /* liblfds has no TCC port (needs GCC __atomic_* / OS PAL). Native ring
-         * queue remains the primary lock-free path when CC_NO_LIBLFDS is set. */
-        strncat(cmd, " -DCC_NO_LIBLFDS", sizeof(cmd) - strlen(cmd) - 1);
-    }
-    cc__append_host_cc_flags(cmd, sizeof(cmd), cc_bin);
-    if (opt->cc_flags && *opt->cc_flags) {
-        strncat(cmd, " ", sizeof(cmd) - strlen(cmd) - 1);
-        strncat(cmd, opt->cc_flags, sizeof(cmd) - strlen(cmd) - 1);
-    }
-    if (!is_tcc) {
-        strncat(cmd, " -ffunction-sections -fdata-sections", sizeof(cmd) - strlen(cmd) - 1);
-    }
-    if (run_cmd(cmd, opt->verbose) != 0) return -1;
-    if (!is_tcc) {
-        const char* cxx_bin = pick_cxx_bin();
-        snprintf(cmd, sizeof(cmd), "%s %s %s %s %s -std=c++17 -fno-exceptions -fno-rtti -DCC_ENABLE_XJB_FLOAT_FMT=1 -I%s -I%s -I%s -I%s -c %s -o %s",
-                 cxx_bin,
-                 cxxflags_env ? cxxflags_env : "",
-                 cppflags_env ? cppflags_env : "",
-                 target_part ? target_part : "",
-                 sysroot_part ? sysroot_part : "",
-                 g_cc_lowered_include,
-                 g_cc_include,
-                 g_cc_dir,
-                 g_repo_root,
-                 runtime_xjb_src,
-                 runtime_xjb_obj);
-        if (opt->cc_flags && *opt->cc_flags) {
-            strncat(cmd, " ", sizeof(cmd) - strlen(cmd) - 1);
-            strncat(cmd, opt->cc_flags, sizeof(cmd) - strlen(cmd) - 1);
+
+    /* Name the objects after a hash of the commands that build them, so each
+     * variant gets its own file. <cache>/host/<fp>/ is keyed on the host CC
+     * alone; sharing one runtime.o across variants made every debug/release
+     * flip rebuild the runtime. Derive the hash from commands written against
+     * placeholder output paths, since the real paths contain the hash. */
+    CCRuntimeCmds probe;
+    char ph_obj[PATH_MAX], ph_core[PATH_MAX], ph_xjb[PATH_MAX];
+    snprintf(ph_obj, sizeof(ph_obj), "%s/runtime.o", rt_root);
+    snprintf(ph_core, sizeof(ph_core), "%s/runtime.core.o", rt_root);
+    snprintf(ph_xjb, sizeof(ph_xjb), "%s/runtime.xjb.o", rt_root);
+    cc__runtime_build_cmds(opt, cc_bin, is_tcc, &host_prof, target_part, sysroot_part,
+                           ph_obj, ph_core, ph_xjb, runtime_xjb_src, &probe);
+    uint64_t vh = cc__fnv1a64(probe.core, strlen(probe.core), 0);
+    vh = cc__fnv1a64(probe.xjb, strlen(probe.xjb), vh);
+    vh = cc__fnv1a64(probe.merge, strlen(probe.merge), vh);
+    char variant[17];
+    snprintf(variant, sizeof(variant), "%016llx", (unsigned long long)vh);
+
+    snprintf(runtime_obj, sizeof(runtime_obj), "%s/runtime-%s.o", rt_root, variant);
+    snprintf(runtime_core_obj, sizeof(runtime_core_obj), "%s/runtime-%s.core.o", rt_root, variant);
+    snprintf(runtime_xjb_obj, sizeof(runtime_xjb_obj), "%s/runtime-%s.xjb.o", rt_root, variant);
+
+    CCRuntimeCmds cmds;
+    cc__runtime_build_cmds(opt, cc_bin, is_tcc, &host_prof, target_part, sysroot_part,
+                           runtime_obj, runtime_core_obj, runtime_xjb_obj, runtime_xjb_src, &cmds);
+
+    /* Reuse the cached object when the very same commands produced it and
+     * nothing it was built from has changed. The recipe is the authority, not
+     * the hash: should the hash ever fail to separate two variants, the
+     * byte-exact comparison still forces a rebuild rather than handing back a
+     * wrong object. Without this cache an installed ccc — which has no prebuilt
+     * runtime object to fall back on — recompiles the whole runtime TU on every
+     * run. */
+    char recipe_path[PATH_MAX];
+    char recipe[sizeof(cmds.core) + sizeof(cmds.xjb) + sizeof(cmds.merge) + 4];
+    snprintf(recipe_path, sizeof(recipe_path), "%s.recipe", runtime_obj);
+    snprintf(recipe, sizeof(recipe), "%s\n%s\n%s\n", cmds.core, cmds.xjb, cmds.merge);
+    if (file_exists(runtime_obj) && cc__file_text_equals(recipe_path, recipe)) {
+        struct stat obj_st;
+        if (stat(runtime_obj, &obj_st) == 0 && obj_st.st_mtime >= cc__runtime_inputs_mtime()) {
+            strncpy(out_runtime_path, runtime_obj, out_runtime_cap);
+            out_runtime_path[out_runtime_cap - 1] = '\0';
+            if (out_reused) *out_reused = 1;
+            return 0;
         }
-        strncat(cmd, " -ffunction-sections -fdata-sections", sizeof(cmd) - strlen(cmd) - 1);
-        if (run_cmd(cmd, opt->verbose) != 0) return -1;
-        snprintf(cmd, sizeof(cmd), "%s %s %s %s -nostdlib -r %s %s -o %s",
-                 cc_bin,
-                 target_part ? target_part : "",
-                 sysroot_part ? sysroot_part : "",
-                 cppflags_env ? cppflags_env : "",
-                 runtime_core_obj,
-                 runtime_xjb_obj,
-                 runtime_obj);
-        if (run_cmd(cmd, opt->verbose) != 0) return -1;
     }
+
+    if (run_cmd(cmds.core, opt->verbose) != 0) return -1;
+    if (!is_tcc) {
+        if (run_cmd(cmds.xjb, opt->verbose) != 0) return -1;
+        if (run_cmd(cmds.merge, opt->verbose) != 0) return -1;
+    }
+    cc__write_file_text(recipe_path, recipe);
     strncpy(out_runtime_path, runtime_obj, out_runtime_cap);
     out_runtime_path[out_runtime_cap - 1] = '\0';
     if (out_reused) *out_reused = 0;

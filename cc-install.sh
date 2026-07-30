@@ -242,7 +242,12 @@ else
     die "target exists and is not a concurrent-c checkout: $ROOT_DIR"
   else
     echo "Cloning concurrent-c into $ROOT_DIR..."
-    git clone "$CC_REPO_URL" "$ROOT_DIR"
+    # Blobless partial clone: full history graph, file contents fetched on
+    # demand. Cuts the clone from ~230M to ~25M without the amputated history
+    # of --depth 1. Servers that do not advertise the filter fall back.
+    if ! git clone --filter=blob:none "$CC_REPO_URL" "$ROOT_DIR" 2>/dev/null; then
+      git clone "$CC_REPO_URL" "$ROOT_DIR"
+    fi
   fi
 fi
 
@@ -251,8 +256,7 @@ cd "$ROOT_DIR"
 check_prefix_writable "$PREFIX"
 
 echo "Initializing required submodules..."
-git submodule sync -- third_party/tcc third_party/liblfds >/dev/null 2>&1 || true
-git submodule update --init third_party/tcc third_party/liblfds
+./scripts/fetch_submodules.sh
 
 if [ -f third_party/tcc/cc_ast_record.h ]; then
   echo "TCC patches already applied."
@@ -276,11 +280,12 @@ echo "Building TinyCC..."
 make -C third_party/tcc -j"$jobs"
 
 echo "Building Concurrent-C..."
-make cc BUILD="$BUILD"
+make cc BUILD="$BUILD" -j"$jobs"
 install_local_ccc_wrapper
 
 echo "Installing Concurrent-C to $PREFIX..."
 make install BUILD="$BUILD" PREFIX="$PREFIX"
+make install-check PREFIX="$PREFIX"
 install_editor_tools
 maybe_add_to_path
 

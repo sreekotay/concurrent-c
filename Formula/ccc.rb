@@ -1,7 +1,7 @@
 # Homebrew formula for Concurrent-C compiler (ccc).
 #
-# Install from this repo (clone with submodules first):
-#   git clone --recurse-submodules https://github.com/sreekotay/concurrent-c.git
+# Install from this repo (the formula fetches submodules itself):
+#   git clone --filter=blob:none https://github.com/sreekotay/concurrent-c.git
 #   cd concurrent-c && brew install --formula Formula/ccc.rb
 #
 # Or add as a tap and install head:
@@ -20,8 +20,8 @@ class Ccc < Formula
   depends_on "make" => :build
 
   def install
-    # TCC and liblfds are required submodules for the compiler and runtime.
-    system "git", "submodule", "update", "--init", "third_party/tcc", "third_party/liblfds"
+    # Fetches the tcc and xjb submodules the build needs (liblfds is optional).
+    system "./scripts/fetch_submodules.sh"
     system "./scripts/apply_tcc_patches.sh"
     cd "third_party/tcc" do
       system "./configure", "--config-cc_ext"
@@ -29,10 +29,11 @@ class Ccc < Formula
     end
 
     # Build the compiler (release).
-    system "make", "cc", "BUILD=release"
+    system "make", "cc", "BUILD=release", "-j#{ENV.make_jobs}"
 
     # Install to Homebrew prefix. Driver resolves paths from executable location.
     system "make", "install", "PREFIX=#{prefix}"
+    system "make", "install-check", "PREFIX=#{prefix}"
   end
 
   test do

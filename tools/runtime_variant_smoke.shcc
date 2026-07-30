@@ -1,0 +1,193 @@
+#!/usr/bin/env -S ./cc/bin/ccc
+/*
+ * Regression: the runtime object a build links must match the flags it was
+ * asked for.
+ *
+ * Two behaviours are guarded, both invisible without --summary:
+ *   1. An unflagged debug build reuses the object `make -C cc` produced.
+ *   2. A build that supplies its own flags does NOT. It compiles a runtime
+ *      with those flags, keeps it per flag set, and a different flag set gets
+ *      a different object. Reusing the prebuilt there silently dropped the
+ *      caller's flags from the artifact.
+ *
+ *   ./tools/runtime_variant_smoke.shcc
+ *   make runtime-variant-smoke
+ *
+ * Clears cached runtime variants first so "compiled" vs "reused" is
+ * deterministic; a developer's cached variants are rebuilt on next use.
+ *
+ * Note: interpolated values are bound to locals first. `${x[i]}` inside
+ * @string mis-selects the _Generic arm for pointer elements.
+ */
+
+#include <stdio.h>
+#include <string.h>
+
+CCArena a = @create(megabytes(2)) @destroy;
+
+@errhandler(CCError e) {
+    int kind = (int)e.kind;
+    const char* why = cc_io_error_str(cc_io_error(e));
+    CCString em = @string(`FAIL runtime-variant-smoke: ${why} (kind=${kind})`, &a);
+    (void)em.eprintln();
+    return 1;
+}
+
+const char* SRC = "tests/with_deadline_at_prefix_smoke.ccs";
+const char* PROBE_A = "-DCC_VARIANT_PROBE_A=1";
+const char* PROBE_B = "-DCC_VARIANT_PROBE_B=1";
+
+const char* labels[4] = { "unflagged", "probe A first", "probe A again", "probe B" };
+const char* cflags[4];
+cflags[0] = "";
+cflags[1] = PROBE_A;
+cflags[2] = PROBE_A;
+cflags[3] = PROBE_B;
+
+char paths[4][512];
+char states[4][32];
+
+{
+    CCCommand clean = cc_command(&a, @slice("/bin/sh"));
+    clean.arg("-c");
+    clean.arg("rm -f out/.cc-build/host/*/runtime-*");
+    CCProcessOutput cleaned = clean.output(&a) !>;
+    (void)cleaned;
+}
+
+for (int i = 0; i < 4; i++) {
+    const char* label = labels[i];
+    const char* flags = cflags[i];
+
+    /* Clear ambient CC/CFLAGS/CPPFLAGS/CXXFLAGS so a developer shell
+     * (e.g. export CC=clang) cannot skip the prebuilt path or share a
+     * host fingerprint with a flagged probe. env -u is POSIX.1-2024 /
+     * BSD/GNU. */
+    char script[1024];
+    if (flags[0])
+        snprintf(script, sizeof(script),
+                 "env -u CC -u CXXFLAGS -u CPPFLAGS CFLAGS=%s "
+                 "./cc/bin/ccc run --summary %s 2>&1",
+                 flags, SRC);
+    else
+        snprintf(script, sizeof(script),
+                 "env -u CC -u CFLAGS -u CXXFLAGS -u CPPFLAGS "
+                 "./cc/bin/ccc run --summary %s 2>&1",
+                 SRC);
+
+    CCCommand cmd = cc_command(&a, @slice("/bin/sh"));
+    cmd.arg("-c");
+    cmd.arg(script);
+    CCProcessOutput out = cmd.output(&a) !>;
+
+    int rc = out.exit_code();
+    CCSlice text = out.stdout_data;
+    if (rc != 0 || !text.ptr) {
+        CCString em = @string(`FAIL runtime-variant-smoke: ${label} exited ${rc}`, &a);
+        em.eprintln() !>;
+        if (text.ptr && text.len) fwrite(text.ptr, 1, text.len, stderr);
+        return 1;
+    }
+
+    /* Summary line shape:  "  runtime: <path> (reused|compiled)" */
+    char buf[8192];
+    size_t n = text.len < sizeof(buf) - 1 ? text.len : sizeof(buf) - 1;
+    memcpy(buf, text.ptr, n);
+    buf[n] = '\0';
+
+    /* Not named `line`: a local of that name fails to compile. */
+    char* sum = strstr(buf, "  runtime: ");
+    if (!sum) {
+        CCString em = @string(`FAIL runtime-variant-smoke: ${label} printed no runtime summary`, &a);
+        em.eprintln() !>;
+        fwrite(buf, 1, n, stderr);
+        return 1;
+    }
+    sum += strlen("  runtime: ");
+    char* open = strstr(sum, " (");
+    char* close = open ? strchr(open, ')') : NULL;
+    if (!open || !close) {
+        CCString em = @string(`FAIL runtime-variant-smoke: ${label} summary unparsable`, &a);
+        em.eprintln() !>;
+        return 1;
+    }
+
+    size_t plen = (size_t)(open - sum);
+    if (plen >= 512) plen = 511;
+    memcpy(paths[i], sum, plen);
+    paths[i][plen] = '\0';
+
+    size_t slen = (size_t)(close - (open + 2));
+    if (slen >= 32) slen = 31;
+    memcpy(states[i], open + 2, slen);
+    states[i][slen] = '\0';
+}
+
+/* 1. Unflagged reuses the make-built prebuilt. */
+{
+    const char* p = paths[0];
+    const char* s = states[0];
+    if (!strstr(p, "obj/runtime/concurrent_c.o") || strcmp(s, "reused") != 0) {
+        CCString em = @string(
+            `FAIL runtime-variant-smoke: unflagged build used ${p} (${s}), want the prebuilt reused`, &a);
+        em.eprintln() !>;
+        return 1;
+    }
+}
+
+/* 2. Flagged builds do not touch the prebuilt. */
+for (int i = 1; i < 4; i++) {
+    const char* p = paths[i];
+    const char* label = labels[i];
+    if (!strstr(p, "runtime-")) {
+        CCString em = @string(
+            `FAIL runtime-variant-smoke: ${label} used ${p}, want a per-variant object`, &a);
+        em.eprintln() !>;
+        return 1;
+    }
+}
+
+/* 3. Same flags: built once, then reused. */
+{
+    const char* p1 = paths[1];
+    const char* p2 = paths[2];
+    const char* s1 = states[1];
+    const char* s2 = states[2];
+    if (strcmp(s1, "compiled") != 0 || strcmp(s2, "reused") != 0 || strcmp(p1, p2) != 0) {
+        CCString em = @string(
+            `FAIL runtime-variant-smoke: same flags gave ${p1} (${s1}) then ${p2} (${s2})`, &a);
+        em.eprintln() !>;
+        return 1;
+    }
+}
+
+/* 4. Different flags: a different object. */
+{
+    const char* p1 = paths[1];
+    const char* p3 = paths[3];
+    if (strcmp(p1, p3) == 0) {
+        CCString em = @string(`FAIL runtime-variant-smoke: different flags shared ${p1}`, &a);
+        em.eprintln() !>;
+        return 1;
+    }
+}
+
+/* 5. The flag is actually in the artifact built for it. */
+{
+    char recipe_path[600];
+    snprintf(recipe_path, sizeof(recipe_path), "%s.recipe", paths[1]);
+    char[:] recipe = cc_file_read_path(char_to_slice(recipe_path), &a) !>;
+    char rbuf[8192];
+    size_t n = recipe.len < sizeof(rbuf) - 1 ? recipe.len : sizeof(rbuf) - 1;
+    memcpy(rbuf, recipe.ptr, n);
+    rbuf[n] = '\0';
+    if (!strstr(rbuf, PROBE_A)) {
+        const char* rp = recipe_path;
+        CCString em = @string(`FAIL runtime-variant-smoke: ${PROBE_A} missing from ${rp}`, &a);
+        em.eprintln() !>;
+        return 1;
+    }
+}
+
+"OK runtime-variant-smoke".println() !>;
+return 0;

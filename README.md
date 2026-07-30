@@ -86,6 +86,43 @@ The compiler pipeline was refactored in 2026 (M0–M5.5): diagnostics core, shar
 
 ---
 
+### Install
+
+Requires `git`, `make`, a C compiler, and a C++ compiler (the runtime's float
+formatter is C++).
+
+```bash
+git clone --filter=blob:none https://github.com/sreekotay/concurrent-c.git
+cd concurrent-c
+PREFIX="$HOME/.local" ./cc-install.sh
+```
+
+One pass: fetch submodules, patch and build TinyCC, build `ccc`, install to
+`$PREFIX`, then compile a program against the installed prefix to prove it
+works. Roughly half a minute on four cores and about 40M of disk.
+
+`cc-install.sh` works in two modes:
+- Run from the repo root, it uses the current checkout.
+- Run anywhere else, it clones into `$PWD/concurrent-c` (or `$CC_REPO_DIR`) first.
+
+```bash
+./cc-install.sh                                   # from an existing checkout
+PREFIX=/opt/ccc sh ./cc-install.sh                # from anywhere, custom prefix
+CC_REPO_DIR="$HOME/code/ccc" sh ./cc-install.sh   # override clone destination
+```
+
+It also writes a repo-local `./ccc` launcher for that checkout, installs the
+Concurrent-C syntax package for VS Code and Cursor, and installs the CodeLLDB
+debugger extension when the `code` / `cursor` CLIs are present. Pass
+`--no-editor-tools` to skip the editor setup, `--add-to-path` /
+`--no-add-to-path` to control the shell-rc edit.
+
+Homebrew:
+```bash
+brew tap sreekotay/concurrent-c https://github.com/sreekotay/concurrent-c.git
+brew install sreekotay/concurrent-c/ccc
+```
+
 ### Build
 
 #### Build the compiler
@@ -93,59 +130,58 @@ The compiler pipeline was refactored in 2026 (M0–M5.5): diagnostics core, shar
 From repo root:
 
 ```bash
-make -C cc BUILD=debug TCC_EXT=1 TCC_INC=../third_party/tcc TCC_LIB=../third_party/tcc/libtcc.a
+./scripts/fetch_submodules.sh
+./scripts/apply_tcc_patches.sh
+jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+(cd third_party/tcc && ./configure --config-cc_ext && make -j"$jobs")
+make cc -j"$jobs"                    # or: make cc BUILD=debug -j"$jobs"
 ```
 
 Notes:
-- `TCC_EXT=1` builds `cc` against the patched `libtcc.a` so CC’s AST hooks are available.
+- The build links against the patched `libtcc.a` so CC's AST hooks are available.
+- `scripts/fetch_submodules.sh` fetches only what the build needs: all of
+  `third_party/tcc`, and `third_party/xjb` sparse (one source file out of a 37M
+  tree). `third_party/liblfds` is an optional channel backend — pass
+  `--with-liblfds` to include it.
 - Today the compiler build uses `make`. The longer-term goal is to move project builds under `cc` itself.
- - Compiler outputs:
-   - `out/cc/bin/ccc` (real binary)
-   - `cc/bin/ccc` (thin wrapper that execs the real binary)
+- Compiler outputs:
+  - `cc/bin/.ccc-bin` (real binary)
+  - `cc/bin/ccc` (wrapper that refreshes lowered headers, then execs the real binary)
 
-#### Install the compiler
+#### Install to a prefix
 
 ```bash
 make install                     # install to /usr/local
 make install PREFIX=/opt/ccc     # install to custom prefix
 make install DESTDIR=/tmp/pkg    # staged install (for packaging)
+make install-check PREFIX=/opt/ccc   # compile a program against the install
 ```
 
 Installed layout:
 ```
 $PREFIX/
 ├── bin/ccc                      # compiler binary
-├── include/ccc/                 # headers
-│   ├── cc_runtime.cch
-│   └── std/prelude.cch
-└── lib/ccc/runtime/             # runtime source
-    └── concurrent_c.c
+├── include/ccc/                 # headers, as .cch and pre-lowered .h
+│   ├── cc_runtime.cch, cc_runtime.h, ...
+│   ├── std/                     # prelude.cch, vec.cch, map.cch, ...
+│   ├── script/                  # stdio.cch (print/println), file.cch, sh.cch, ...
+│   └── vendor/
+└── lib/ccc/
+    ├── runtime/                 # pre-lowered runtime source
+    │   ├── concurrent_c.c
+    │   └── vendor/xjb_ftoa.cpp
+    └── tcc/                     # TinyCC builtin headers + libtcc1.a
 ```
+
+An installed tree is self-contained — it never reads back into a checkout.
+Headers ship pre-lowered because lowering is a build-tree step. `ccc` writes
+build outputs to `./out` and `./bin` relative to the working directory (use
+`--out-dir` / `--bin-dir` to redirect), never into `$PREFIX`.
 
 The compiler auto-detects its include/runtime paths from the binary location. You can also override with `CC_HOME`:
 ```bash
 CC_HOME=/opt/ccc ccc run myfile.ccs
 ```
-
-#### Install with `cc-install.sh`
-
-`cc-install.sh` works in two modes:
-- If you run it from the repo root, it uses the current checkout.
-- If you run it anywhere else, it clones into `$PWD/concurrent-c` first and installs from there.
-
-Examples:
-```bash
-# From an existing checkout
-./cc-install.sh
-
-# From any other directory (using a copied/downloaded script)
-PREFIX=/opt/ccc sh ./cc-install.sh
-
-# Override clone destination
-CC_REPO_DIR="$HOME/Documents/code/ccc" sh ./cc-install.sh
-```
-
-The script initializes the required `third_party/tcc` and `third_party/liblfds` submodules, applies the TCC patch, builds TinyCC, builds `ccc`, runs `make install`, creates a repo-local `./ccc` launcher for that checkout, installs the local Concurrent-C syntax package for VS Code and Cursor, and attempts to install the CodeLLDB debugger extension when the `code` / `cursor` CLIs are available. Pass `--no-editor-tools` to skip the editor setup.
 
 Before pushing a commit that changes submodule pointers, run `make check-submodules`
 or `npm run check:submodules`. This catches unreachable local-only submodule

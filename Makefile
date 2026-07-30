@@ -5,7 +5,8 @@ CURL_DIR := third_party/curl
 CURL_BUILD := $(CURL_DIR)/build
 
 .PHONY: all cc clean distclean fmt lint example smoke test tools
-.PHONY: install uninstall
+.PHONY: install install-check uninstall
+.PHONY: runtime-variant-smoke
 .PHONY: tcc-patch-apply tcc-patch-regen tcc-update-check check-submodules lint-scanners test-strict
 .PHONY: deps bearssl bearssl-clean curl curl-clean deps-update
 .PHONY: examples-check stress-check perf-check full-check
@@ -36,34 +37,82 @@ distclean: clean
 #
 # The installed layout:
 #   $PREFIX/bin/ccc                   - compiler binary
-#   $PREFIX/include/ccc/*.cch         - standard library headers (ccc lowers to .h when compiling)
-#   $PREFIX/include/ccc/std/*.cch     - std module headers
-#   $PREFIX/lib/ccc/runtime/*.c,.h    - runtime source and internal headers
+#   $PREFIX/include/ccc/**/*.cch      - standard library headers
+#   $PREFIX/include/ccc/**/*.h        - the same headers, pre-lowered
+#   $PREFIX/lib/ccc/runtime/*.c,.h    - pre-lowered runtime source and internal headers
+#   $PREFIX/lib/ccc/runtime/vendor/   - vendored third-party runtime sources
+#
+# An installed tree is self-contained: the driver resolves headers and runtime
+# from the prefix (cc_init_paths in cc/src/cc_main.c) and never reaches back
+# into a checkout. Two consequences shape the recipe below:
+#
+#   * ccc must be the real binary. cc/bin/ccc and out/cc/bin/ccc are wrappers
+#     that reach siblings by relative path; those paths do not survive
+#     relocation into a prefix.
+#   * .cch headers and runtime sources must ship pre-lowered. Lowering is a
+#     build-tree step (out/cc/bin/lower_headers, driven by the cc/bin/ccc
+#     wrapper), so an installed driver cannot do it on demand.
+#
+# `make install-check` compiles a program against the installed prefix and is
+# the check that both of those actually hold.
 
 PREFIX ?= /usr/local
 
+XJB_FTOA := third_party/xjb/src/ftoa.cpp
+TCC_DIR := third_party/tcc
+
 install: cc
 	@echo "Installing Concurrent-C to $(DESTDIR)$(PREFIX)..."
+	@test -f $(XJB_FTOA) || { \
+		echo "Error: missing $(XJB_FTOA)"; \
+		echo "The runtime float formatter needs the xjb submodule. Run:"; \
+		echo "    ./scripts/fetch_submodules.sh"; \
+		exit 1; }
 	install -d $(DESTDIR)$(PREFIX)/bin
 	install -d $(DESTDIR)$(PREFIX)/lib/ccc/runtime
 	install -d $(DESTDIR)$(PREFIX)/lib/ccc/runtime/vendor
 	install -d $(DESTDIR)$(PREFIX)/include/ccc/std
+	install -d $(DESTDIR)$(PREFIX)/include/ccc/script
 	install -d $(DESTDIR)$(PREFIX)/include/ccc/vendor
-	install -m 755 out/cc/bin/ccc $(DESTDIR)$(PREFIX)/bin/
+	install -d $(DESTDIR)$(PREFIX)/lib/ccc/tcc/include
+	install -m 755 cc/bin/.ccc-bin $(DESTDIR)$(PREFIX)/bin/ccc
 	install -m 644 cc/include/ccc/*.cch $(DESTDIR)$(PREFIX)/include/ccc/
 	install -m 644 cc/include/ccc/std/*.cch $(DESTDIR)$(PREFIX)/include/ccc/std/
+	install -m 644 cc/include/ccc/script/*.cch $(DESTDIR)$(PREFIX)/include/ccc/script/
+	install -m 644 out/include/ccc/*.h $(DESTDIR)$(PREFIX)/include/ccc/
+	@if [ -n "$$(ls cc/include/ccc/*.h 2>/dev/null)" ]; then \
+		install -m 644 cc/include/ccc/*.h $(DESTDIR)$(PREFIX)/include/ccc/; \
+	fi
+	install -m 644 out/include/ccc/std/*.h $(DESTDIR)$(PREFIX)/include/ccc/std/
+	install -m 644 out/include/ccc/script/*.h $(DESTDIR)$(PREFIX)/include/ccc/script/
 	@if [ -n "$$(ls cc/include/ccc/vendor/*.h 2>/dev/null)" ]; then \
 		install -m 644 cc/include/ccc/vendor/*.h $(DESTDIR)$(PREFIX)/include/ccc/vendor/; \
 	fi
-	install -m 644 cc/runtime/*.c $(DESTDIR)$(PREFIX)/lib/ccc/runtime/
-	@if [ -n "$$(ls cc/runtime/*.cpp 2>/dev/null)" ]; then \
-		install -m 644 cc/runtime/*.cpp $(DESTDIR)$(PREFIX)/lib/ccc/runtime/; \
+	install -m 644 out/runtime/*.c $(DESTDIR)$(PREFIX)/lib/ccc/runtime/
+	@if [ -n "$$(ls out/runtime/*.h 2>/dev/null)" ]; then \
+		install -m 644 out/runtime/*.h $(DESTDIR)$(PREFIX)/lib/ccc/runtime/; \
 	fi
-	@if [ -n "$$(ls cc/runtime/*.h 2>/dev/null)" ]; then \
-		install -m 644 cc/runtime/*.h $(DESTDIR)$(PREFIX)/lib/ccc/runtime/; \
+	install -m 644 cc/runtime/float_format_xjb.cpp $(DESTDIR)$(PREFIX)/lib/ccc/runtime/
+	install -m 644 $(XJB_FTOA) $(DESTDIR)$(PREFIX)/lib/ccc/runtime/vendor/xjb_ftoa.cpp
+	install -m 644 $(TCC_DIR)/include/*.h $(DESTDIR)$(PREFIX)/lib/ccc/tcc/include/
+	@if [ -f $(TCC_DIR)/libtcc1.a ]; then \
+		install -m 644 $(TCC_DIR)/libtcc1.a $(DESTDIR)$(PREFIX)/lib/ccc/tcc/; \
 	fi
-	install -m 644 third_party/xjb/src/ftoa.cpp $(DESTDIR)$(PREFIX)/lib/ccc/runtime/vendor/xjb_ftoa.cpp
 	@echo "Installed. Add $(DESTDIR)$(PREFIX)/bin to PATH if needed."
+
+# Compile and run a program using only $(PREFIX), from a directory with no
+# checkout above it. Catches the failure mode where an install looks complete
+# but the driver falls back to a dev tree (or to nothing) at first use.
+install-check:
+	@ccc_bin="$(DESTDIR)$(PREFIX)/bin/ccc"; \
+	test -x "$$ccc_bin" || { echo "install-check: $$ccc_bin is not executable"; exit 1; }; \
+	work="$$(mktemp -d)"; \
+	trap 'rm -rf "$$work"' EXIT INT TERM; \
+	printf '#include <ccc/std/prelude.cch>\n#include <ccc/script/stdio.cch>\n\nint main(void) {\n    CCArena a = cc_arena_heap(kilobytes(4));\n    CCVec::[int] v = cc_vec_new::[int](&a);\n    v.push(41);\n    print("install-check ok\\n");\n    cc_arena_free(&a);\n    return *v.get(0) == 41 ? 0 : 1;\n}\n' > "$$work/install_check.ccs"; \
+	echo "install-check: compiling against $(DESTDIR)$(PREFIX) in $$work"; \
+	( cd "$$work" && "$$ccc_bin" run install_check.ccs ) || { \
+		echo "install-check: FAILED — the installed prefix cannot compile a program"; exit 1; }; \
+	echo "install-check: ok"
 
 uninstall:
 	@echo "Uninstalling Concurrent-C from $(DESTDIR)$(PREFIX)..."
@@ -105,7 +154,7 @@ tools:
 	@cc -O2 -Wall -Wextra tools/cc_test.c -o tools/cc_test
 
 # Prefer using ccc itself for tests (the runner drives ./cc/bin/ccc).
-test: cc tools out-of-tree-smoke
+test: cc tools out-of-tree-smoke runtime-variant-smoke
 	@./tools/cc_test
 
 # Smoke: verify `ccc` can compile a source file that lives outside the repo
@@ -115,6 +164,13 @@ test: cc tools out-of-tree-smoke
 # because the function isn't registered as pointer-returning.
 out-of-tree-smoke: cc
 	@./tools/out_of_tree_smoke.shcc
+
+# Smoke: the runtime object a build links matches the flags it was asked for.
+# Regression guard for cc__prebuilt_runtime_applies and the per-variant runtime
+# cache. Without it, `CFLAGS=-DFOO ccc run x.ccs` silently reuses the runtime
+# `make -C cc` built without -DFOO, and reports it as reused.
+runtime-variant-smoke: cc
+	@./tools/runtime_variant_smoke.shcc
 
 # Verify all examples compile (tools/make.shcc @examples_check).
 examples-check: cc

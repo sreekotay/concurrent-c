@@ -3,18 +3,40 @@
 ## Prerequisites
 
 - C compiler (gcc or clang)
+- C++ compiler (`c++`) — builds the runtime's float formatter
 - POSIX system (Linux, macOS)
-- make
+- make, git
 
-## Build the Compiler
+## Install
 
 ```bash
-git clone <repo>
+git clone --filter=blob:none https://github.com/sreekotay/concurrent-c.git
 cd concurrent-c
-cd cc && make
+PREFIX="$HOME/.local" ./cc-install.sh
 ```
 
-The compiler is now at `./cc/bin/ccc`.
+That fetches submodules, builds a patched TinyCC and the compiler, installs to
+`$PREFIX`, and verifies the install by compiling a program against it. Add
+`$PREFIX/bin` to `PATH` and `ccc` is ready:
+
+```bash
+ccc run hello.ccs
+```
+
+Build outputs land in `./out` and `./bin` under whatever directory you run
+`ccc` from; `--out-dir` overrides that.
+
+## Or build without installing
+
+```bash
+./scripts/fetch_submodules.sh
+./scripts/apply_tcc_patches.sh
+jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+(cd third_party/tcc && ./configure --config-cc_ext && make -j"$jobs")
+make cc -j"$jobs"
+```
+
+The compiler is now at `./cc/bin/ccc`, usable directly from the checkout.
 
 ## Your First Program
 
