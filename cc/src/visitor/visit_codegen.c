@@ -643,7 +643,7 @@ static int cc__cg_consume_postfix_cc_suffix_chain(const char* src, size_t n,
                     return 0;
                 }
                 if (is_control_stmt || !had_binder) {
-                    while (p < n && src[p] != ';') p++;
+                    p = cc_find_char_top_level(src, p, n, ';');
                     consumed = 1;
                     continue;
                 }
@@ -665,10 +665,13 @@ static int cc__cg_consume_postfix_cc_suffix_chain(const char* src, size_t n,
                 if (!cc_find_matching_paren(src, n, p, &rpar)) return 0;
                 p = cc_skip_ws_and_comments(src, n, rpar + 1);
             }
-            while (p < n && src[p] != ';') {
-                size_t nested_marker_len = 0;
-                if (cc__cg_is_lifetime_marker_at(src, n, p, &nested_marker_len)) break;
-                p++;
+            {
+                size_t semi = cc_find_char_top_level(src, p, n, ';');
+                while (p < semi) {
+                    size_t nested_marker_len = 0;
+                    if (cc__cg_is_lifetime_marker_at(src, n, p, &nested_marker_len)) break;
+                    p++;
+                }
             }
             consumed = 1;
             continue;
@@ -1005,7 +1008,10 @@ static char* cc__rewrite_channel_ufcs_text_late(const char* src, size_t n) {
     if (!src || n == 0) return NULL;
     char* out = NULL;
     size_t ol = 0, oc = 0, last = 0;
-    for (size_t i = 0; i + 6 < n; i++) {
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    for (size_t i = 0; i + 6 < n; ) {
+        if (cc_inert_scan_step(&scan, src, n, &i)) continue;
         const char* fn = NULL;
         const char* method = NULL;
         size_t method_len = 0;
@@ -1022,15 +1028,16 @@ static char* cc__rewrite_channel_ufcs_text_late(const char* src, size_t n) {
             method = "free";
             method_len = 5;
         } else {
+            i++;
             continue;
         }
         size_t recv_a = i;
         while (recv_a > 0 && cc__cg_chan_recv_expr_char(src[recv_a - 1])) recv_a--;
-        if (recv_a == i) continue;
+        if (recv_a == i) { i++; continue; }
         size_t open = i + method_len;
         size_t close = 0;
-        if (open >= n || src[open] != '(' || !cc_find_matching_paren(src, n, open, &close)) continue;
-        if (!cc__cg_late_channel_ufcs_callee(src, recv_a, i, method, &fn)) continue;
+        if (open >= n || src[open] != '(' || !cc_find_matching_paren(src, n, open, &close)) { i++; continue; }
+        if (!cc__cg_late_channel_ufcs_callee(src, recv_a, i, method, &fn)) { i++; continue; }
         cc_sb_append(&out, &ol, &oc, src + last, recv_a - last);
         cc_sb_append_cstr(&out, &ol, &oc, fn);
         cc_sb_append_cstr(&out, &ol, &oc, "(");
@@ -1041,7 +1048,7 @@ static char* cc__rewrite_channel_ufcs_text_late(const char* src, size_t n) {
         }
         cc_sb_append_cstr(&out, &ol, &oc, ")");
         last = close + 1;
-        i = close;
+        i = close + 1;
     }
     if (!out) return NULL;
     if (last < n) cc_sb_append(&out, &ol, &oc, src + last, n - last);
@@ -1266,6 +1273,33 @@ static const char* cc__normalize_bool_spelling_codegen(const char* type_name,
     return changed ? scratch : type_name;
 }
 
+/* Scan forward from `arg_start` (just past a call's `(`) to the end of the
+ * first argument: the `,` or `)` at bracket depth 0.  String/char-literal
+ * AND line/block-comment aware.  Returns `arg_start` when no terminator is
+ * found before `n`.  Shared by the two placeholder arg-scanners below. */
+static size_t cc__cg_placeholder_first_arg_end(const char* src, size_t n, size_t arg_start) {
+    CCInertScan scan;
+    int par = 0, br = 0, brc = 0;
+    size_t arg_end = arg_start;
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0; /* mid-expression: a '#' here is not a directive */
+    for (size_t p = arg_start; p < n;) {
+        char d;
+        if (cc_inert_scan_step(&scan, src, n, &p)) continue;
+        d = src[p];
+        if (d == '(') par++;
+        else if (d == ')' && par == 0 && br == 0 && brc == 0) { arg_end = p; break; }
+        else if (d == ')' && par > 0) par--;
+        else if (d == '[') br++;
+        else if (d == ']' && br > 0) br--;
+        else if (d == '{') brc++;
+        else if (d == '}' && brc > 0) brc--;
+        else if (d == ',' && par == 0 && br == 0 && brc == 0) { arg_end = p; break; }
+        p++;
+    }
+    return arg_end;
+}
+
 static char* cc__rewrite_parser_placeholder_ufcs_lowers(const char* src, size_t n) {
     CCTypeRegistry* reg = cc_type_registry_get_global();
     char* out = NULL;
@@ -1317,25 +1351,7 @@ static char* cc__rewrite_parser_placeholder_ufcs_lowers(const char* src, size_t 
             while (method_end < n && cc_is_ident_char(src[method_end])) method_end++;
             if (method_end < n && src[method_end] == '(') {
                 size_t arg_start = method_end + 1;
-                size_t p = arg_start;
-                int par = 0, br = 0, brc = 0, in_s = 0, in_c = 0;
-                size_t arg_end = arg_start;
-                while (p < n) {
-                    char d = src[p];
-                    if (in_s) { if (d == '\\' && p + 1 < n) { p += 2; continue; } if (d == '"') in_s = 0; p++; continue; }
-                    if (in_c) { if (d == '\\' && p + 1 < n) { p += 2; continue; } if (d == '\'') in_c = 0; p++; continue; }
-                    if (d == '"') { in_s = 1; p++; continue; }
-                    if (d == '\'') { in_c = 1; p++; continue; }
-                    if (d == '(') par++;
-                    else if (d == ')' && par == 0 && br == 0 && brc == 0) { arg_end = p; break; }
-                    else if (d == ')' && par > 0) par--;
-                    else if (d == '[') br++;
-                    else if (d == ']' && br > 0) br--;
-                    else if (d == '{') brc++;
-                    else if (d == '}' && brc > 0) brc--;
-                    else if (d == ',' && par == 0 && br == 0 && brc == 0) { arg_end = p; break; }
-                    p++;
-                }
+                size_t arg_end = cc__cg_placeholder_first_arg_end(src, n, arg_start);
                 if (arg_end > arg_start && reg) {
                     char arg_expr[256];
                     char family_buf[256];
@@ -1400,25 +1416,7 @@ static char* cc__rewrite_parser_placeholder_ufcs_lowers(const char* src, size_t 
             while (method_end < n && cc_is_ident_char(src[method_end])) method_end++;
             if (method_end < n && src[method_end] == '(') {
                 size_t arg_start = method_end + 1;
-                size_t p = arg_start;
-                int par = 0, br = 0, brc = 0, in_s = 0, in_c = 0;
-                size_t arg_end = arg_start;
-                while (p < n) {
-                    char d = src[p];
-                    if (in_s) { if (d == '\\' && p + 1 < n) { p += 2; continue; } if (d == '"') in_s = 0; p++; continue; }
-                    if (in_c) { if (d == '\\' && p + 1 < n) { p += 2; continue; } if (d == '\'') in_c = 0; p++; continue; }
-                    if (d == '"') { in_s = 1; p++; continue; }
-                    if (d == '\'') { in_c = 1; p++; continue; }
-                    if (d == '(') par++;
-                    else if (d == ')' && par == 0 && br == 0 && brc == 0) { arg_end = p; break; }
-                    else if (d == ')' && par > 0) par--;
-                    else if (d == '[') br++;
-                    else if (d == ']' && br > 0) br--;
-                    else if (d == '{') brc++;
-                    else if (d == '}' && brc > 0) brc--;
-                    else if (d == ',' && par == 0 && br == 0 && brc == 0) { arg_end = p; break; }
-                    p++;
-                }
+                size_t arg_end = cc__cg_placeholder_first_arg_end(src, n, arg_start);
                 if (arg_end > arg_start && reg) {
                     char arg_expr[256];
                     char family_buf[256];
@@ -1981,11 +1979,6 @@ static const char* cc__canonicalize_type_alias_codegen(const char* type_name) {
     return type_name;
 }
 
-static size_t cc__skip_ws_codegen(const char* src, size_t n, size_t i) {
-    while (i < n && isspace((unsigned char)src[i])) i++;
-    return i;
-}
-
 static int cc__match_keyword_codegen(const char* src, size_t n, size_t pos, const char* kw) {
     size_t klen = strlen(kw);
     if (pos + klen > n) return 0;
@@ -2340,13 +2333,13 @@ static int cc__collect_legacy_ufcs_registrations(CCUfcsPendingList* pending,
         if (c != '@' || !cc__match_keyword_codegen(src, n, i + 1, "comptime")) { i++; continue; }
         {
             size_t kw_end = i + 1 + strlen("comptime");
-            size_t body_l = cc__skip_ws_codegen(src, n, kw_end);
+            size_t body_l = cc_skip_ws_and_comments(src, n, kw_end);
             size_t body_r;
             if (body_l >= n || src[body_l] != '{') { i++; continue; }
             if (!cc__find_matching_brace_codegen(src, n, body_l, &body_r)) { i++; continue; }
             for (size_t j = body_l + 1; j < body_r; ++j) {
                 if (!cc__match_keyword_codegen(src, body_r, j, "cc_ufcs_register")) continue;
-                size_t lpar = cc__skip_ws_codegen(src, body_r, j + strlen("cc_ufcs_register"));
+                size_t lpar = cc_skip_ws_and_comments(src, body_r, j + strlen("cc_ufcs_register"));
                 size_t rpar, p;
                 char pattern[128];
                 char handler[128];
@@ -2354,19 +2347,19 @@ static int cc__collect_legacy_ufcs_registrations(CCUfcsPendingList* pending,
                 int handler_is_ident = 0;
                 if (lpar >= body_r || src[lpar] != '(') continue;
                 if (!cc__find_matching_paren_codegen(src, body_r, lpar, &rpar)) continue;
-                p = cc__skip_ws_codegen(src, body_r, lpar + 1);
+                p = cc_skip_ws_and_comments(src, body_r, lpar + 1);
                 if (!cc__parse_string_literal_codegen(src, body_r, &p, pattern, sizeof(pattern))) {
                     fprintf(stderr, "%s: error: unsupported @comptime cc_ufcs_register pattern form\n",
                             input_path ? input_path : "<input>");
                     return -1;
                 }
-                p = cc__skip_ws_codegen(src, body_r, p);
+                p = cc_skip_ws_and_comments(src, body_r, p);
                 if (p >= body_r || src[p] != ',') {
                     fprintf(stderr, "%s: error: malformed cc_ufcs_register(...) in @comptime block\n",
                             input_path ? input_path : "<input>");
                     return -1;
                 }
-                p = cc__skip_ws_codegen(src, body_r, p + 1);
+                p = cc_skip_ws_and_comments(src, body_r, p + 1);
                 handler_s = p;
                 if (cc__parse_ident_codegen(src, body_r, &p, handler, sizeof(handler))) {
                     handler_is_ident = 1;
@@ -2654,9 +2647,9 @@ static void cc__register_ufcs_declared_vars_for_type(CCTypeRegistry* reg,
         if (cc_inert_scan_step(&scan, src, n, &i)) continue;
         if (!cc__match_keyword_codegen(src, n, i, type_name)) { i++; continue; }
         {
-            size_t p = cc__skip_ws_codegen(src, n, i + type_len);
+            size_t p = cc_skip_ws_and_comments(src, n, i + type_len);
             while (p < n && src[p] == '*') p++;
-            p = cc__skip_ws_codegen(src, n, p);
+            p = cc_skip_ws_and_comments(src, n, p);
             if (p < n && (isalpha((unsigned char)src[p]) || src[p] == '_')) {
                 char var_name[128];
                 const char* final_type_name = type_name;
@@ -2668,7 +2661,7 @@ static void cc__register_ufcs_declared_vars_for_type(CCTypeRegistry* reg,
                     v++;
                 }
                 var_name[vn < sizeof(var_name) ? vn : sizeof(var_name) - 1] = '\0';
-                v = cc__skip_ws_codegen(src, n, v);
+                v = cc_skip_ws_and_comments(src, n, v);
                 /* Original used `continue;` here when `src[v] == '('`
                  * (function-call shape, not a decl).  In the new while
                  * loop, `continue` would skip the `i += type_len`
@@ -2677,7 +2670,7 @@ static void cc__register_ufcs_declared_vars_for_type(CCTypeRegistry* reg,
                 if (!(v < n && src[v] == '(')) {
                     if ((strcmp(type_name, "CCChanTx") == 0 || strcmp(type_name, "CCChanRx") == 0) &&
                         v < n && src[v] == '=') {
-                        size_t rhs = cc__skip_ws_codegen(src, n, v + 1);
+                        size_t rhs = cc_skip_ws_and_comments(src, n, v + 1);
                         if (rhs < n && (isalpha((unsigned char)src[rhs]) || src[rhs] == '_')) {
                             char rhs_name[128];
                             size_t rn = 0;
@@ -3038,7 +3031,7 @@ static const char* cc__lookup_enclosing_param_type_codegen(const char* src,
             }
             cursor = lpar + 1;
             while (cursor < rpar) {
-                size_t param_s = cc__skip_ws_codegen(src, limit, cursor);
+                size_t param_s = cc_skip_ws_and_comments(src, limit, cursor);
                 size_t param_e = param_s;
                 int par = 0, br = 0, brc = 0;
                 char decl_name[128];
@@ -3124,7 +3117,7 @@ static void cc__record_function_params_before_brace_codegen(CCTypeRegistry* reg,
     }
     cursor = lpar + 1;
     while (cursor < rpar) {
-        size_t param_s = cc__skip_ws_codegen(src, brace_pos, cursor);
+        size_t param_s = cc_skip_ws_and_comments(src, brace_pos, cursor);
         size_t param_e = param_s;
         int par = 0, br = 0, brc = 0;
         char decl_name[128];
@@ -3173,7 +3166,9 @@ static char* cc__rewrite_result_helper_family_to_visible_type(const char* src, s
     size_t i = 0;
     size_t last_emit = 0;
     int changed = 0;
+    CCInertScan scan;
     if (!src || n == 0) return NULL;
+    cc_inert_scan_init(&scan, NULL);
     while (i < n) {
         size_t ident_start;
         size_t ident_end;
@@ -3187,6 +3182,7 @@ static char* cc__rewrite_result_helper_family_to_visible_type(const char* src, s
         char arg_name[128];
         size_t arg_start;
         size_t arg_end;
+        if (cc_inert_scan_step(&scan, src, n, &i)) continue;
         if (!cc_is_ident_start(src[i])) {
             i++;
             continue;
@@ -3653,8 +3649,10 @@ static char* cc__rewrite_string_helper_family_to_visible_type(const char* src, s
         cc__collect_ufcs_field_and_var_types(src, n);
         cc_type_registry_set_global(saved_reg);
     }
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
     while (i < n) {
-        size_t ident_start = i;
+        size_t ident_start;
         size_t ident_end;
         size_t paren_open;
         size_t paren_end = 0;
@@ -3666,10 +3664,12 @@ static char* cc__rewrite_string_helper_family_to_visible_type(const char* src, s
         char actual_type[256];
         char literal_type[64];
         const char* helper = NULL;
+        if (cc_inert_scan_step(&scan, src, n, &i)) continue;
         if (!cc_is_ident_start(src[i])) {
             i++;
             continue;
         }
+        ident_start = i;
         while (i < n && cc_is_ident_char(src[i])) i++;
         ident_end = i;
         family_len = ident_end - ident_start;
@@ -3780,7 +3780,7 @@ static void cc__collect_ufcs_field_and_var_types(const char* src, size_t n) {
                     v++;
                 }
                 var_name[vn < sizeof(var_name) ? vn : sizeof(var_name) - 1] = '\0';
-                v = cc__skip_ws_codegen(src, n, v);
+                v = cc_skip_ws_and_comments(src, n, v);
                 if (v < n && src[v] != '(') {
                     cc_type_registry_add_var(reg, var_name, is_ptr ? "CCChan*" : "CCChan");
                 }
@@ -3809,20 +3809,20 @@ static void cc__collect_ufcs_field_and_var_types(const char* src, size_t n) {
                     }
                 }
             }
-            size_t j = cc__skip_ws_codegen(src, n, i + 7);
+            size_t j = cc_skip_ws_and_comments(src, n, i + 7);
             if (j + 6 < n && memcmp(src + j, "struct", 6) == 0 && !isalnum((unsigned char)src[j + 6]) && src[j + 6] != '_') {
-                size_t body_l = cc__skip_ws_codegen(src, n, j + 6);
+                size_t body_l = cc_skip_ws_and_comments(src, n, j + 6);
                 /* Skip an optional struct tag identifier before the `{` so
                  * tagged typedefs (e.g. `typedef struct Foo { ... } Foo;`)
                  * register their fields alongside the anonymous form. */
                 if (body_l < n && (isalpha((unsigned char)src[body_l]) || src[body_l] == '_')) {
                     size_t tag_end = body_l;
                     while (tag_end < n && (isalnum((unsigned char)src[tag_end]) || src[tag_end] == '_')) tag_end++;
-                    body_l = cc__skip_ws_codegen(src, n, tag_end);
+                    body_l = cc_skip_ws_and_comments(src, n, tag_end);
                 }
                 size_t body_r = 0;
                 if (body_l < n && src[body_l] == '{' && cc__find_matching_brace_codegen(src, n, body_l, &body_r)) {
-                    size_t name_pos = cc__skip_ws_codegen(src, n, body_r + 1);
+                    size_t name_pos = cc_skip_ws_and_comments(src, n, body_r + 1);
                     if (name_pos < n && (isalpha((unsigned char)src[name_pos]) || src[name_pos] == '_')) {
                         char struct_name[128];
                         size_t sn = 0;
@@ -3884,7 +3884,7 @@ static void cc__collect_ufcs_field_and_var_types(const char* src, size_t n) {
             type_end = i;
             if ((type_end - type_start == 6 && memcmp(src + type_start, "struct", 6) == 0) ||
                 (type_end - type_start == 5 && memcmp(src + type_start, "union", 5) == 0)) {
-                size_t tag = cc__skip_ws_codegen(src, n, type_end);
+                size_t tag = cc_skip_ws_and_comments(src, n, type_end);
                 if (tag < n && (isalpha((unsigned char)src[tag]) || src[tag] == '_')) {
                     size_t tag_end = tag;
                     while (tag_end < n && (isalnum((unsigned char)src[tag_end]) || src[tag_end] == '_')) tag_end++;
@@ -3894,7 +3894,7 @@ static void cc__collect_ufcs_field_and_var_types(const char* src, size_t n) {
             }
             if (type_end - type_start == sizeof("__CC_VEC") - 1 &&
                 memcmp(src + type_start, "__CC_VEC", sizeof("__CC_VEC") - 1) == 0) {
-                size_t macro_l = cc__skip_ws_codegen(src, n, type_end);
+                size_t macro_l = cc_skip_ws_and_comments(src, n, type_end);
                 size_t macro_r = 0;
                 if (macro_l < n && src[macro_l] == '(' && cc__find_matching_paren_codegen(src, n, macro_l, &macro_r)) {
                     type_end = macro_r + 1;
@@ -3902,7 +3902,7 @@ static void cc__collect_ufcs_field_and_var_types(const char* src, size_t n) {
             } else if (type_end - type_start == sizeof("__CC_ARRAY_MAP") - 1 &&
                        memcmp(src + type_start, "__CC_ARRAY_MAP",
                               sizeof("__CC_ARRAY_MAP") - 1) == 0) {
-                size_t macro_l = cc__skip_ws_codegen(src, n, type_end);
+                size_t macro_l = cc_skip_ws_and_comments(src, n, type_end);
                 size_t macro_r = 0;
                 if (macro_l < n && src[macro_l] == '(' &&
                     cc__find_matching_paren_codegen(src, n, macro_l, &macro_r)) {
@@ -3910,16 +3910,16 @@ static void cc__collect_ufcs_field_and_var_types(const char* src, size_t n) {
                 }
             } else if (type_end - type_start == sizeof("__CC_MAP") - 1 &&
                        memcmp(src + type_start, "__CC_MAP", sizeof("__CC_MAP") - 1) == 0) {
-                size_t macro_l = cc__skip_ws_codegen(src, n, type_end);
+                size_t macro_l = cc_skip_ws_and_comments(src, n, type_end);
                 size_t macro_r = 0;
                 if (macro_l < n && src[macro_l] == '(' && cc__find_matching_paren_codegen(src, n, macro_l, &macro_r)) {
                     type_end = macro_r + 1;
                 }
             }
-            j = cc__skip_ws_codegen(src, n, type_end);
+            j = cc_skip_ws_and_comments(src, n, type_end);
             while (j < n && src[j] == '*') {
                 j++;
-                j = cc__skip_ws_codegen(src, n, j);
+                j = cc_skip_ws_and_comments(src, n, j);
             }
             if (j < n && (isalpha((unsigned char)src[j]) || src[j] == '_')) {
                 size_t after_name;
@@ -3929,7 +3929,7 @@ static void cc__collect_ufcs_field_and_var_types(const char* src, size_t n) {
                 size_t tn;
                 size_t vn;
                 while (j < n && (isalnum((unsigned char)src[j]) || src[j] == '_')) j++;
-                after_name = cc__skip_ws_codegen(src, n, j);
+                after_name = cc_skip_ws_and_comments(src, n, j);
                 if (after_name < n && src[after_name] != '(') {
                     tn = type_end - type_start;
                     vn = j - var_start;
@@ -3940,7 +3940,7 @@ static void cc__collect_ufcs_field_and_var_types(const char* src, size_t n) {
                     memcpy(var_name, src + var_start, vn);
                     var_name[vn] = '\0';
                     {
-                        size_t k = cc__skip_ws_codegen(src, n, type_end);
+                        size_t k = cc_skip_ws_and_comments(src, n, type_end);
                         while (k < var_start && (src[k] == '*' || src[k] == ' ' || src[k] == '\t')) {
                             if (src[k] == '*') {
                                 strncat(type_name, "*", sizeof(type_name) - strlen(type_name) - 1);

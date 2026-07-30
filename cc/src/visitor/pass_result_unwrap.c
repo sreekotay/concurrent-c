@@ -522,25 +522,54 @@ static int cc__eq_is_boundary(const char* s, size_t n, size_t pos) {
 }
 
 /* Skip a string/char literal scanning BACKWARD. On entry *i points at the
- * closing quote char; on return *i points at the opening quote char (or 0
- * if we ran off the start). Best effort; C escape handling backward is
- * ambiguous but string contents almost never contain `?>` so the worst
- * case is an early stop on a mis-identified quote. */
+ * closing quote char; on return *i points at the opening quote char.
+ * Naive "enter string mode + treat `\\` as escape while walking backward"
+ * mis-parses `'\n'` / `'\t'` / `'\\'`: the escape skip consumes the
+ * opening quote and leaves the scanner stuck in-string.  Resolve the
+ * opener with a forward scan from the line start (proper C escape rules)
+ * and jump to it — same approach as pass_err_syntax's
+ * `cc__err_skip_string_or_char_backward`. */
 static void cc__skip_str_backward(const char* s, size_t* i) {
-    char q = s[*i];
-    if (*i == 0) return;
-    size_t k = *i;
-    while (k > 0) {
-        k--;
-        if (s[k] == q) {
-            /* Check for escape: count trailing backslashes. */
-            size_t bs = 0;
-            size_t m = k;
-            while (m > 0 && s[m - 1] == '\\') { bs++; m--; }
-            if ((bs & 1) == 0) { *i = k; return; }
+    size_t close = *i;
+    char qch = s[close];
+    if (qch != '"' && qch != '\'') return;
+    size_t line_start = close;
+    while (line_start > 0 && s[line_start - 1] != '\n') line_start--;
+    size_t k = line_start;
+    size_t open = close;
+    int in_q = 0;
+    char cur_q = 0;
+    while (k <= close) {
+        char c = s[k];
+        if (!in_q) {
+            if (c == '"' || c == '\'') {
+                in_q = 1;
+                cur_q = c;
+                open = k;
+                if (k == close) break;
+                k++;
+                continue;
+            }
+            k++;
+            continue;
         }
+        if (c == '\\' && k + 1 <= close) {
+            k += 2;
+            continue;
+        }
+        if (c == cur_q) {
+            if (k == close) {
+                *i = open;
+                return;
+            }
+            in_q = 0;
+            cur_q = 0;
+            k++;
+            continue;
+        }
+        k++;
     }
-    *i = 0;
+    *i = open;
 }
 
 /* Skip a block comment scanning BACKWARD.  On entry *i points at the `/`
@@ -564,31 +593,6 @@ static void cc__skip_block_comment_backward(const char* s, size_t* i) {
     *i = 0;
 }
 
-/* Check whether the scanner is currently inside a single-line `//` comment
- * on the line that contains position `pos`.  We walk back from `pos` to
- * the previous newline (or SOF); if we find a `//` (not inside a string)
- * before reaching `pos`, then `pos` sits inside a line comment and should
- * be skipped.  Strings on the same line are respected via a simple forward
- * re-scan from line start. */
-static int cc__pos_in_line_comment(const char* s, size_t pos) {
-    size_t line_start = pos;
-    while (line_start > 0 && s[line_start - 1] != '\n') line_start--;
-    CCInertScan scan;
-    cc_inert_scan_init(&scan, NULL);
-    /* We started right after a '\n' (or at SOF), so the scanner is
-     * literally at a line start.  `at_line_start = 1` makes a leading
-     * `#` look like a pp directive (which would also mean pos is "in
-     * inert text" — fine semantically for the caller, which uses this
-     * to skip CC-token matches sitting inside non-code regions). */
-    scan.at_line_start = 1;
-    size_t k = line_start;
-    while (k < pos) {
-        if (!cc_inert_scan_step(&scan, s, pos, &k)) k++;
-        if (scan.in_line_comment) return 1;
-    }
-    return 0;
-}
-
 /* Find the start of the LHS expression by scanning backward from `from`
  * (exclusive). Returns the position of the first byte of the LHS. */
 static size_t cc__find_lhs_start_backward_raw(const char* s, size_t from) {
@@ -607,7 +611,7 @@ static size_t cc__find_lhs_start_backward_raw(const char* s, size_t from) {
         /* Line comment: if this byte lies inside a `// ...` on its line,
          * jump back to the line start so we don't misparse the comment
          * body. */
-        if (c != '\n' && cc__pos_in_line_comment(s, i)) {
+        if (c != '\n' && cc_scan_pos_in_line_comment(s, i)) {
             while (i > 0 && s[i] != '\n') i--;
             continue;
         }
@@ -1885,7 +1889,7 @@ static size_t cc__find_bang_lhs_start_ex(const char* s, size_t op_at,
             cc__skip_block_comment_backward(s, &i);
             continue;
         }
-        if (c != '\n' && cc__pos_in_line_comment(s, i)) {
+        if (c != '\n' && cc_scan_pos_in_line_comment(s, i)) {
             while (i > 0 && s[i] != '\n') i--;
             continue;
         }

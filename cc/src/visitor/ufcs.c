@@ -2288,6 +2288,21 @@ static int cc__emit_dynamic_sink(char* out, size_t cap, const char* recv,
                     continue;
                 }
                 if (!at_end) {
+                    /* Comments inside the arg text are inert: skip the whole
+                     * region so a `,`/bracket in a comment can't split args. */
+                    if (c == '/' && p[1] == '/') {
+                        p += 2;
+                        while (*p && *p != '\n') p++;
+                        if (!*p) p--; /* re-enter loop at NUL for final flush */
+                        continue;
+                    }
+                    if (c == '/' && p[1] == '*') {
+                        p += 2;
+                        while (*p && !(p[0] == '*' && p[1] == '/')) p++;
+                        if (!*p) { p--; continue; }
+                        p++; /* at closing '/', loop increment steps past */
+                        continue;
+                    }
                     if (c == '"') { in_str = 1; continue; }
                     if (c == '\'') { in_chr = 1; continue; }
                     if (c == '(' || c == '[' || c == '{') { depth++; continue; }
@@ -2994,6 +3009,19 @@ static int cc__parse_ufcs_chain(const char* in,
     bool sep_is_ptr = false;
     for (const char* p = s; *p; p++) {
         char c = *p;
+        if (c == '/' && p[1] == '/') {
+            p += 2;
+            while (*p && *p != '\n') p++;
+            if (!*p) break;
+            continue;
+        }
+        if (c == '/' && p[1] == '*') {
+            p += 2;
+            while (*p && !(*p == '*' && p[1] == '/')) p++;
+            if (!*p) break;
+            p++; /* at closing '/', loop increment steps past */
+            continue;
+        }
         if (c == '"' || c == '\'') {
             char q = c;
             p++;

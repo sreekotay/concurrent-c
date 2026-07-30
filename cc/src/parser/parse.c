@@ -15,6 +15,7 @@
 #include "preprocess/script_entry.h"
 #include "preprocess/type_graph.h"
 #include "util/text.h"
+#include "util/text_scan.h"
 #include "visitor/pass_create.h"
 #include "visitor/pass_channel_syntax.h"
 #include "visitor/pass_unwrap_destroy.h"
@@ -22,31 +23,23 @@
 
 char* cc_blank_comptime_blocks_for_prep(const char* src, size_t n) {
     char* out;
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    CCInertScan sc;
     if (!src) return NULL;
     out = (char*)malloc(n + 1);
     if (!out) return NULL;
     memcpy(out, src, n);
     out[n] = '\0';
-    for (size_t i = 0; i < n; ++i) {
-        char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
-        if (in_str) { if (c == '\\' && c2) { i++; continue; } if (c == '"') in_str = 0; continue; }
-        if (in_chr) { if (c == '\\' && c2) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
-        if (c == '"') { in_str = 1; continue; }
-        if (c == '\'') { in_chr = 1; continue; }
-        if (c != '@' || !cc_match_ident_kw(src, n, i + 1, "comptime")) continue;
+    cc_inert_scan_init(&sc, NULL);
+    for (size_t i = 0; i < n;) {
+        if (cc_inert_scan_step(&sc, src, n, &i)) continue;
+        if (src[i] != '@' || !cc_match_ident_kw(src, n, i + 1, "comptime")) { i++; continue; }
         {
             size_t kw_end = i + 1 + strlen("comptime");
             size_t body_l = cc_skip_ws_len(src, n, kw_end);
             size_t body_r;
-            if (body_l >= n) continue;
+            if (body_l >= n) { i++; continue; }
             if (src[body_l] == '{') {
-                if (!cc_find_matching_brace(src, n, body_l, &body_r)) continue;
+                if (!cc_find_matching_brace(src, n, body_l, &body_r)) { i++; continue; }
                 for (size_t k = i; k <= body_r; ++k) {
                     if (out[k] != '\n') out[k] = ' ';
                 }
@@ -67,37 +60,34 @@ char* cc_blank_comptime_blocks_for_prep(const char* src, size_t n) {
                         }
                     }
                 }
-                i = body_r;
+                i = body_r + 1;
                 continue;
             }
             /* @comptime fn/const decl — blank through body or ';'. */
             {
                 size_t p = body_l, lpar = 0, rpar = 0, end = 0;
-                for (; p < n; p++) {
-                    if (src[p] == '(') { lpar = p; break; }
+                {
+                    size_t lp = cc_find_char_top_level(src, p, n, '(');
+                    if (lp < n) lpar = lp;
                 }
                 if (lpar) {
-                    if (!cc_find_matching_paren(src, n, lpar, &rpar)) continue;
+                    if (!cc_find_matching_paren(src, n, lpar, &rpar)) { i++; continue; }
                     p = cc_skip_ws_len(src, n, rpar + 1);
                     if (p < n && src[p] == '{') {
-                        if (!cc_find_matching_brace(src, n, p, &body_r)) continue;
+                        if (!cc_find_matching_brace(src, n, p, &body_r)) { i++; continue; }
                         end = body_r;
                     } else {
-                        for (; p < n; p++) {
-                            if (src[p] == ';') { end = p; break; }
-                        }
-                        if (!end) continue;
+                        end = cc_find_char_top_level(src, p, n, ';');
+                        if (end >= n) { i++; continue; }
                     }
                 } else {
-                    for (; p < n; p++) {
-                        if (src[p] == ';') { end = p; break; }
-                    }
-                    if (!end) continue;
+                    end = cc_find_char_top_level(src, p, n, ';');
+                    if (end >= n) { i++; continue; }
                 }
                 for (size_t k = i; k <= end; ++k) {
                     if (out[k] != '\n') out[k] = ' ';
                 }
-                i = end;
+                i = end + 1;
             }
         }
     }
@@ -106,57 +96,39 @@ char* cc_blank_comptime_blocks_for_prep(const char* src, size_t n) {
 
 static char* cc__neutralize_comments_preserve_layout_parse(const char* src, size_t n) {
     char* out;
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    CCInertScan sc;
     if (!src) return NULL;
     out = (char*)malloc(n + 1);
     if (!out) return NULL;
     memcpy(out, src, n);
     out[n] = '\0';
-    for (size_t i = 0; i < n; ++i) {
-        char c = out[i];
-        char c2 = (i + 1 < n) ? out[i + 1] : 0;
-        if (in_lc) {
-            if (c == '\n') in_lc = 0;
-            else out[i] = ' ';
-            continue;
+    cc_inert_scan_init(&sc, NULL);
+    for (size_t i = 0; i < n;) {
+        size_t before = i;
+        int was_lc = sc.in_line_comment;
+        int was_bc = sc.in_block_comment;
+        int enter_comment = 0;
+        if (!was_lc && !was_bc && !sc.in_str && !sc.in_chr && !sc.in_pp &&
+            src[i] == '/' && i + 1 < n) {
+            if (src[i + 1] == '/') enter_comment = 1;
+            else if (src[i + 1] == '*') enter_comment = 2;
         }
-        if (in_bc) {
-            if (c == '*' && c2 == '/') {
-                out[i] = ' ';
-                out[i + 1] = ' ';
-                in_bc = 0;
-                ++i;
-                continue;
+        if (cc_inert_scan_step(&sc, src, n, &i)) {
+            if (was_lc || enter_comment == 1) {
+                /* Line-comment bytes (opener included): blank all but the
+                 * terminating newline. */
+                for (size_t k = before; k < i; ++k)
+                    if (out[k] != '\n') out[k] = ' ';
+            } else if (was_bc || enter_comment == 2) {
+                /* Block-comment bytes (opener/closer included): blank all
+                 * but layout characters. */
+                for (size_t k = before; k < i; ++k)
+                    if (out[k] != '\n' && out[k] != '\r' && out[k] != '\t')
+                        out[k] = ' ';
             }
-            if (c != '\n' && c != '\r' && c != '\t') out[i] = ' ';
             continue;
         }
-        if (in_str) {
-            if (c == '\\' && i + 1 < n) { ++i; continue; }
-            if (c == '"') in_str = 0;
-            continue;
-        }
-        if (in_chr) {
-            if (c == '\\' && i + 1 < n) { ++i; continue; }
-            if (c == '\'') in_chr = 0;
-            continue;
-        }
-        if (c == '"') { in_str = 1; continue; }
-        if (c == '\'') { in_chr = 1; continue; }
-        if (c == '/' && c2 == '/') {
-            out[i] = ' ';
-            out[i + 1] = ' ';
-            in_lc = 1;
-            ++i;
-            continue;
-        }
-        if (c == '/' && c2 == '*') {
-            out[i] = ' ';
-            out[i + 1] = ' ';
-            in_bc = 1;
-            ++i;
-            continue;
-        }
+        i++;
     }
     return out;
 }

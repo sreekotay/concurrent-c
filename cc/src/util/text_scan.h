@@ -299,6 +299,39 @@ static inline int cc_inert_scan_step(CCInertScan* s, const char* src,
     return 0;
 }
 
+/* True when the scanner is at real code — not inside a comment, string,
+ * char literal, or preprocessor-directive body.  Harvest-before-skip
+ * probes use this to qualify a token BEFORE letting the scanner consume
+ * the region it heads. */
+static inline int cc_inert_scan_at_code(const CCInertScan* s) {
+    return s && !s->in_line_comment && !s->in_block_comment &&
+           !s->in_str && !s->in_chr && !s->in_pp;
+}
+
+/* Return 1 if position `pos` in `s` lies inside a `//` line comment on
+ * the same line.  Used by backward scanners to skip over commented
+ * characters without mistaking them for statement terminators.
+ *
+ * "Post-step state probe" pattern: rewind to the start of the line
+ * containing `pos`, drive CCInertScan forward over the line, and check
+ * `in_line_comment` after each step.  A leading `#` on the line enters
+ * pp-directive state, which also reads as "inert" here — fine
+ * semantically for callers, which use this to skip CC-token matches
+ * sitting inside non-code regions. */
+static inline int cc_scan_pos_in_line_comment(const char* s, size_t pos) {
+    size_t line_start = pos;
+    while (line_start > 0 && s[line_start - 1] != '\n') line_start--;
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 1;  /* started at line_start (after '\n' or BOF) */
+    size_t k = line_start;
+    while (k < pos) {
+        if (!cc_inert_scan_step(&scan, s, pos, &k)) k++;
+        if (scan.in_line_comment) return 1;
+    }
+    return 0;
+}
+
 /* ---- Directive-head parsing (harvest-before-skip) ----
  *
  * Inert scanning consumes preprocessor directives whole, which is right

@@ -32,6 +32,7 @@
 #include "result_spec.h"
 #include "util/path.h"
 #include "util/text.h"
+#include "util/text_scan.h"
 #include "visitor/pass_common.h"
 
 /* Bit positions mirror the TCC cc-ext hook in third_party/tcc/tccgen.c
@@ -124,40 +125,14 @@ static unsigned int cc__block_mode_attrs_at_offset(const char* src, size_t len, 
     int depth = 0;
     unsigned int pending = 0;
 
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    CCInertScan sc;
+    cc_inert_scan_init(&sc, NULL);
     for (size_t i = 0; i < offset; ) {
-        char c = src[i];
-        char c2 = (i + 1 < offset) ? src[i + 1] : 0;
-
-        if (in_lc) {
-            if (c == '\n') in_lc = 0;
-            i++;
-            continue;
-        }
-        if (in_str) {
-            if (c == '\\' && i + 1 < offset) { i += 2; continue; }
-            if (c == '"') in_str = 0;
-            i++;
-            continue;
-        }
-        if (in_chr) {
-            if (c == '\\' && i + 1 < offset) { i += 2; continue; }
-            if (c == '\'') in_chr = 0;
-            i++;
-            continue;
-        }
-        if (in_bc) {
-            if (c == '*' && c2 == '/') {
-                in_bc = 0;
-                i += 2;
-            } else {
-                i++;
-            }
-            continue;
-        }
-
-        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
-        if (c == '/' && c2 == '*') {
+        /* Harvest-before-skip: block ambient markers live INSIDE comments
+         * (`/ *@CC_BLOCK=...* /`), so probe the comment body at each `/ *`
+         * opener before the scanner consumes the comment. */
+        if (cc_inert_scan_at_code(&sc) &&
+            src[i] == '/' && i + 1 < offset && src[i + 1] == '*') {
             size_t body_start = i + 2;
             size_t j = body_start;
             while (j + 1 < offset && !(src[j] == '*' && src[j + 1] == '/')) j++;
@@ -167,16 +142,9 @@ static unsigned int cc__block_mode_attrs_at_offset(const char* src, size_t len, 
             } else if (body_len == 18 && memcmp(src + body_start, "@CC_BLOCK=blocking", 18) == 0) {
                 pending = CC_FN_ATTR_BLOCKING;
             }
-            if (j + 1 < offset) {
-                i = j + 2;
-            } else {
-                in_bc = 1;
-                i += 2;
-            }
-            continue;
         }
-        if (c == '"') { in_str = 1; i++; continue; }
-        if (c == '\'') { in_chr = 1; i++; continue; }
+        if (cc_inert_scan_step(&sc, src, offset, &i)) continue;
+        char c = src[i];
 
         if (c == '{') {
             unsigned int inherited = (depth > 0) ? stack[depth - 1] : 0;

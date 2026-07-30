@@ -85,28 +85,6 @@ static int cc__ud_skip_comment_or_string(const char* s, size_t n, size_t* i) {
     return 0;
 }
 
-/* Return 1 if position `pos` in `s` lies inside a `//` line comment on
- * the same line.  Used by the backward scanner to skip over commented
- * characters without mistaking them for statement terminators.
- *
- * Twin of `cc__pos_in_line_comment` (pass_result_unwrap, Batch G) and
- * `cc__err_pos_in_line_comment` (pass_err_syntax, Batch I2).  All three
- * use the "post-step state probe" pattern: drive CCInertScan over the
- * line and check `scan.in_line_comment` after each step. */
-static int cc__ud_pos_in_line_comment(const char* s, size_t pos) {
-    size_t line_start = pos;
-    while (line_start > 0 && s[line_start - 1] != '\n') line_start--;
-    CCInertScan scan;
-    cc_inert_scan_init(&scan, NULL);
-    scan.at_line_start = 1;  /* started at line_start (after '\n' or BOF) */
-    size_t k = line_start;
-    while (k < pos) {
-        if (!cc_inert_scan_step(&scan, s, pos, &k)) k++;
-        if (scan.in_line_comment) return 1;
-    }
-    return 0;
-}
-
 /* Is `s[pos]` the start of a token that continues the current statement
  * through a preceding `}` — i.e. the `}` is NOT a statement boundary
  * but a component of the same expression / statement as what follows?
@@ -172,7 +150,7 @@ static int cc__ud_is_stmt_continuation_after_rbrace(const char* s, size_t n, siz
  * the scanner keeps walking past them — see
  * `cc__ud_is_stmt_continuation_after_rbrace`.
  *
- * String/comment aware (via `cc__ud_pos_in_line_comment` and inline
+ * String/comment aware (via `cc_scan_pos_in_line_comment` and inline
  * block-comment skipping below). */
 static size_t cc__ud_stmt_start_backward(const char* s, size_t src_n, size_t pos) {
     size_t i = pos;
@@ -202,7 +180,7 @@ static size_t cc__ud_stmt_start_backward(const char* s, size_t src_n, size_t pos
          * code tokens (e.g. a `{` or `}`) that appear before the comment
          * on the same line.  Forward-walk uses CCInertScan to honour
          * strings/char literals while locating the `//` opener. */
-        if (c != '\n' && cc__ud_pos_in_line_comment(s, k)) {
+        if (c != '\n' && cc_scan_pos_in_line_comment(s, k)) {
             size_t line_start = k;
             while (line_start > 0 && s[line_start - 1] != '\n') line_start--;
             CCInertScan scan;
