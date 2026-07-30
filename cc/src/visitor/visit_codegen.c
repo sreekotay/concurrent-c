@@ -825,18 +825,24 @@ static char* cc__sanitize_statement_unwraps_for_reparse(const char* src, size_t 
 static char* cc__sanitize_lifetime_markers_for_reparse(const char* src, size_t n) {
     char* out = NULL;
     int changed = 0;
+    CCInertScan scan;
     if (!src || n == 0) return NULL;
-    for (size_t i = 0; i + 6 <= n; i++) {
+    cc_inert_scan_init(&scan, NULL);
+    for (size_t i = 0; i + 6 <= n;) {
         size_t marker_len = 0;
+        /* Inert-region aware: "@destroy" inside a string literal or
+         * comment must not blank the block that follows it. */
+        if (cc_inert_scan_step(&scan, src, n, &i)) continue;
         if (memcmp(src + i, "@defer", 6) == 0) {
             marker_len = 6;
         } else if (i + 8 <= n && memcmp(src + i, "@destroy", 8) == 0) {
             marker_len = 8;
         } else {
+            i++;
             continue;
         }
-        if (i > 0 && cc_is_ident_char(src[i - 1])) continue;
-        if (i + marker_len < n && cc_is_ident_char(src[i + marker_len])) continue;
+        if (i > 0 && cc_is_ident_char(src[i - 1])) { i++; continue; }
+        if (i + marker_len < n && cc_is_ident_char(src[i + marker_len])) { i++; continue; }
         if (!out) {
             out = (char*)malloc(n + 1);
             if (!out) return NULL;
@@ -862,7 +868,9 @@ static char* cc__sanitize_lifetime_markers_for_reparse(const char* src, size_t n
             if (out[k] != '\n' && out[k] != '\r') out[k] = ' ';
         }
         changed = 1;
-        i = erase_end > i ? erase_end - 1 : i + marker_len - 1;
+        /* Advance past the marker keyword only; the erased body is
+         * rescanned in src so the inert-scan state stays consistent. */
+        i += marker_len;
     }
     if (!changed) {
         free(out);
@@ -3665,7 +3673,7 @@ static char* cc__rewrite_string_helper_family_to_visible_type(const char* src, s
         while (i < n && cc_is_ident_char(src[i])) i++;
         ident_end = i;
         family_len = ident_end - ident_start;
-        if (family_len == 13 && memcmp(src + ident_start, "cc_string_from", 13) == 0) {
+        if (family_len == 14 && memcmp(src + ident_start, "cc_string_from", 14) == 0) {
             family = "cc_string_from";
         } else if (family_len == 19 && memcmp(src + ident_start, "cc__string_slot_arg", 19) == 0) {
             family = "cc__string_slot_arg";

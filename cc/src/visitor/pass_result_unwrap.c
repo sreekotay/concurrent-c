@@ -21,7 +21,6 @@
 #define cc__append_str cc_sb_append_cstr
 CC_DEFINE_SB_APPEND_FMT
 
-static size_t cc__skip_ws_comments_forward(const char* s, size_t n, size_t i);
 
 /* Extract the callee identifier from a plain `ident(...)` call expression.
  *
@@ -121,7 +120,7 @@ static int cc__ru_extract_ufcs_callee(const char* s, size_t n,
         size_t after, before, ty_a, ty_b, stars, tl;
         if (hit >= recv_a) break;
         after = hit + strlen(recv);
-        after = cc__skip_ws_comments_forward(s, n, after);
+        after = cc_skip_ws_and_comments(s, n, after);
         if (after < n && s[after] == '(') { pos = after; continue; }
         before = hit;
         while (before > 0 && isspace((unsigned char)s[before - 1])) before--;
@@ -253,7 +252,7 @@ static void cc__ru_emit_uw_err_binder(char** out, size_t* ol, size_t* oc,
                 size_t hit = cc_find_ident_top_level(s, pos, n, callee, clen);
                 size_t after, p, end, len;
                 if (hit >= n) break;
-                after = cc__skip_ws_comments_forward(s, n, hit + clen);
+                after = cc_skip_ws_and_comments(s, n, hit + clen);
                 if (after < n && s[after] == '(') {
                     p = hit;
                     while (p > 0 && isspace((unsigned char)s[p - 1])) p--;
@@ -316,7 +315,7 @@ static int cc__ru_find_callee_result_type(const char* s, size_t n,
     while (pos < n) {
         size_t hit = cc_find_ident_top_level(s, pos, n, callee, callee_len);
         if (hit >= n) break;
-        size_t after = cc__skip_ws_comments_forward(s, n, hit + callee_len);
+        size_t after = cc_skip_ws_and_comments(s, n, hit + callee_len);
         if (after < n && s[after] == '(') {
             size_t p = hit;
             while (p > 0 && isspace((unsigned char)s[p - 1])) p--;
@@ -2294,7 +2293,7 @@ static int cc__rewrite_bang_once(const CCVisitorCtx* ctx,
          * must still strip the keyword or resolve sees `return foo(...)`
          * and falls back to ambient CCError. */
         {
-            size_t a = cc__skip_ws_comments_forward(s, op_at, call_start);
+            size_t a = cc_skip_ws_and_comments(s, op_at, call_start);
             if (a + 6 <= op_at && memcmp(s + a, "return", 6) == 0 &&
                 (a + 6 == op_at || !cc_is_ident_char(s[a + 6]))) {
                 is_stmt_pos = 0;
@@ -2585,28 +2584,6 @@ static size_t cc__ident_end(const char* s, size_t n, size_t i) {
     return i;
 }
 
-/* Skip whitespace and line/block comments forward. */
-static size_t cc__skip_ws_comments_forward(const char* s, size_t n, size_t i) {
-    while (i < n) {
-        char c = s[i];
-        char c2 = (i + 1 < n) ? s[i + 1] : 0;
-        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { i++; continue; }
-        if (c == '/' && c2 == '/') {
-            i += 2;
-            while (i < n && s[i] != '\n') i++;
-            continue;
-        }
-        if (c == '/' && c2 == '*') {
-            i += 2;
-            while (i + 1 < n && !(s[i] == '*' && s[i + 1] == '/')) i++;
-            if (i + 1 < n) i += 2;
-            continue;
-        }
-        break;
-    }
-    return i;
-}
-
 static int cc__strict_unhandled_scan(const CCVisitorCtx* ctx,
                                      const char* s, size_t n) {
     if (!cc__strict_enabled()) return 0;
@@ -2650,14 +2627,14 @@ static int cc__strict_unhandled_scan(const CCVisitorCtx* ctx,
         if (!cc_result_fn_registry_contains(s + id_a, id_len)) continue;
 
         /* Must be immediately followed (after ws) by '('. */
-        size_t after_id = cc__skip_ws_comments_forward(s, n, id_b);
+        size_t after_id = cc_skip_ws_and_comments(s, n, id_b);
         if (after_id >= n || s[after_id] != '(') continue;
 
         size_t rpar = 0;
         if (!cc_find_matching_paren(s, n, after_id, &rpar)) continue;
 
         /* Gate (b): char after balanced ')' must be ';'. */
-        size_t post = cc__skip_ws_comments_forward(s, n, rpar + 1);
+        size_t post = cc_skip_ws_and_comments(s, n, rpar + 1);
         if (post >= n || s[post] != ';') continue;
 
         /* Gate (c): non-ws char before NAME must be `;`, `{`, `}`, or

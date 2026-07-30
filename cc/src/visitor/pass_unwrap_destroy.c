@@ -59,6 +59,29 @@ static int cc__ud_skip_comment_or_string(const char* s, size_t n, size_t* i) {
         if (*i < n) (*i)++;
         return 1;
     }
+    if (c == '#') {
+        /* Preprocessor directive (`#` first non-WS on its line): consume
+         * the whole logical line, including `\` continuations, so a
+         * lifetime sigil inside a #define body is never rewritten as
+         * code.  Same rule as pass_err_syntax / pass_defer_syntax. */
+        size_t ls = *i;
+        while (ls > 0 && s[ls - 1] != '\n') {
+            if (s[ls - 1] != ' ' && s[ls - 1] != '\t') return 0;
+            ls--;
+        }
+        while (*i < n) {
+            if (s[*i] == '\n') {
+                size_t b = *i;
+                while (b > 0 && (s[b - 1] == ' ' || s[b - 1] == '\t' ||
+                                 s[b - 1] == '\r'))
+                    b--;
+                if (b > 0 && s[b - 1] == '\\') { (*i)++; continue; }
+                break;
+            }
+            (*i)++;
+        }
+        return 1;
+    }
     return 0;
 }
 

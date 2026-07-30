@@ -1,0 +1,42 @@
+/* Comments, strings, and directives are inert: names, sigils, and
+ * delimiters spelled inside them must never steer a text pass.  Each
+ * case below is a real mis-lowering fixed in the scanning-discipline
+ * round; the mentions are deliberate regression bait.
+ *
+ * Bait: a commented define must not suppress the print aliases —
+ *   #define println(x) user_println(x)
+ */
+#include <ccc/cc_runtime.cch>
+#include <ccc/script/stdio.cch>
+#include <stdio.h>
+
+/* A real user macro binding wins over the print alias. */
+#define eprint(x) (x)
+
+/* A lifetime sigil inside an unused macro body stays untouched. */
+#define UNUSED_LIFETIME(T, v) T v @destroy
+
+int main(void) {
+    @errhandler(CCError e) { fprintf(stderr, "eh: %s\n", e.message); return 1; }
+
+    /* The commented define in the header did not shadow the alias. */
+    println("alias intact") !>;
+
+    /* The real macro binding did. */
+    int ep = eprint(7);
+    printf("ep=%d\n", ep);
+
+    /* Lifetime sigils inside string literals are text, not markers —
+     * the block that follows must survive. */
+    const char* s1 = "@destroy {";
+    const char* s2 = "@defer (x)";
+    {
+        int y = 1;
+        printf("s1=%s s2=%s y=%d\n", s1, s2, y);
+    }
+
+    /* a delimiter inside a comment, on the decl line */ int xs[:] = {1, 2, 3};
+    printf("xs=%zu\n", xs.len());
+
+    return 0;
+}

@@ -32,6 +32,7 @@
 #include "util/path.h"
 #include "util/result_fn_registry.h"
 #include "util/text.h"
+#include "util/text_scan.h"
 #include "visitor/ufcs.h"
 #include "visitor/visitor.h"
 #include "visitor/pass_channel_syntax.h"
@@ -5661,24 +5662,7 @@ static int cc__tu_declares_fn(const char* src, size_t n, const char* name) {
  * provide these names: a function-like macro expands in member
  * position too and would destroy every postfix spelling. */
 static int cc__tu_defines_fnlike_macro(const char* src, size_t n, const char* name) {
-    size_t nlen = strlen(name);
-    size_t i = 0;
-    while (i + 8 + nlen < n) {
-        if (src[i] != '#') { i++; continue; }
-        {
-            size_t q = i + 1;
-            while (q < n && (src[q] == ' ' || src[q] == '\t')) q++;
-            if (q + 6 < n && memcmp(src + q, "define", 6) == 0) {
-                q += 6;
-                while (q < n && (src[q] == ' ' || src[q] == '\t')) q++;
-                if (q + nlen < n && memcmp(src + q, name, nlen) == 0 &&
-                    src[q + nlen] == '(')
-                    return 1;
-            }
-        }
-        while (i < n && src[i] != '\n') i++;
-    }
-    return 0;
+    return cc_text_defines_fnlike_macro(src, n, name);
 }
 
 static char* cc__rewrite_naked_print_aliases(const char* src, size_t n) {
@@ -8341,15 +8325,12 @@ char* cc__rewrite_at_await(const char* src, size_t n) {
                             ret_type = cc__at_await_fns[fi].ret; break;
                         }
                     }
-                    /* Find matching ')' of the call */
-                    size_t m = j; int depth = 0;
-                    while (m < n) {
-                        char mc = src[m];
-                        if (mc=='"') { m++; while(m<n&&src[m]!='"'){if(src[m]=='\\')m++;m++;} }
-                        else if (mc=='(') depth++;
-                        else if (mc==')') { depth--; if(depth==0){m++;break;} }
-                        m++;
-                    }
+                    /* Find matching ')' of the call — comment- and
+                     * char-literal-aware, so a ')' inside either does
+                     * not terminate the span early. */
+                    size_t m = j, rp = 0;
+                    if (cc_find_matching_paren(src, n, m, &rp)) m = rp + 1;
+                    else m = n;
                     call_start = id_s; call_end = m;
                 } else {
                     /* Identifier but not a call – keep from id_s onward */
@@ -8639,7 +8620,7 @@ char* cc__rewrite_link_directives(const char* src, size_t n) {
                 }
             }
             /* If parsing failed, continue from after @ */
-            i = start + 1;
+            i = start;
         }
 
         i++;
@@ -8732,13 +8713,29 @@ static int cc__check_async_chan_await(const char* src, size_t n, const char* inp
             }
 
             if (is_chan_op) {
-                /* Check if preceded by "await" (skipping whitespace/comments backwards) */
+                /* Check if preceded by "await" (skipping whitespace and
+                 * block comments backwards, so `await /(*)note(*)/ op`
+                 * still counts). */
                 int has_await = 0;
                 size_t k = i;
                 while (k > 0) {
                     k--;
                     char ck = src[k];
                     if (ck == ' ' || ck == '\t' || ck == '\n' || ck == '\r') continue;
+                    if (ck == '/' && k > 0 && src[k - 1] == '*') {
+                        size_t bk = k - 1;
+                        int found = 0;
+                        while (bk > 0) {
+                            bk--;
+                            if (src[bk] == '*' && bk > 0 && src[bk - 1] == '/') {
+                                k = bk - 1;
+                                found = 1;
+                                break;
+                            }
+                        }
+                        if (!found) break;
+                        continue;
+                    }
                     /* Check for "await" ending at position k */
                     if (k >= 4 && memcmp(src + k - 4, "await", 5) == 0) {
                         /* Ensure "await" is not part of a larger identifier */
@@ -8885,22 +8882,22 @@ static int cc__check_block_on_nonblocking(const char* src, size_t n, const char*
                     loop_end++;
                 }
 
-                /* Check for channel ops in loop body - look for .send( or .recv( */
+                /* Check for channel ops in loop body - look for .send( or
+                 * .recv( (word-bounded, so `.sendfile(` does not count). */
                 for (size_t m = loop_start; m < loop_end; m++) {
-                    if (m + 5 <= loop_end && memcmp(src + m, ".send", 5) == 0) {
-                        has_loop_with_chan = 1;
-                        break;
-                    }
-                    if (m + 5 <= loop_end && memcmp(src + m, ".recv", 5) == 0) {
+                    if (m + 5 <= loop_end &&
+                        (memcmp(src + m, ".send", 5) == 0 ||
+                         memcmp(src + m, ".recv", 5) == 0) &&
+                        (m + 5 == loop_end || !cc_is_ident_char(src[m + 5]))) {
                         has_loop_with_chan = 1;
                         break;
                     }
                     /* Also check for chan_send/chan_recv macro forms */
-                    if (m + 9 <= loop_end && memcmp(src + m, "chan_send", 9) == 0) {
-                        has_loop_with_chan = 1;
-                        break;
-                    }
-                    if (m + 9 <= loop_end && memcmp(src + m, "chan_recv", 9) == 0) {
+                    if (m + 9 <= loop_end &&
+                        (memcmp(src + m, "chan_send", 9) == 0 ||
+                         memcmp(src + m, "chan_recv", 9) == 0) &&
+                        (m == loop_start || !cc_is_ident_char(src[m - 1])) &&
+                        (m + 9 == loop_end || !cc_is_ident_char(src[m + 9]))) {
                         has_loop_with_chan = 1;
                         break;
                     }
@@ -10606,21 +10603,17 @@ static void cc__index_declares(CCPathTextCache* slot) {
         size_t s, e, q, b;
         /* Function-like macros are real bindings, but the shared scanner
          * consumes directive lines whole — harvest `#define name(` here,
-         * then let the scanner skip the line as usual. */
-        if (slot->text[i] == '#' && (i == 0 || slot->text[i - 1] == '\n')) {
-            size_t d = i + 1;
-            while (d < slot->len && (slot->text[d] == ' ' || slot->text[d] == '\t'))
-                d++;
-            if (d + 6 < slot->len && memcmp(slot->text + d, "define", 6) == 0) {
-                d += 6;
-                while (d < slot->len &&
-                       (slot->text[d] == ' ' || slot->text[d] == '\t'))
-                    d++;
-                s = d;
-                while (d < slot->len && cc_is_ident_char(slot->text[d])) d++;
-                if (d > s && d < slot->len && slot->text[d] == '(')
-                    (void)cc__name_set_push(&set, slot->text + s, d - s);
-            }
+         * then let the scanner skip the line as usual.  The scan-state
+         * guards keep a directive spelled inside a comment or string
+         * from being harvested. */
+        if (slot->text[i] == '#' && scan.at_line_start && !scan.in_pp &&
+            !scan.in_line_comment && !scan.in_block_comment &&
+            !scan.in_str && !scan.in_chr) {
+            size_t noff = 0, nl = 0;
+            int fnlike = 0;
+            if (cc_scan_define_head(slot->text, slot->len, i, &noff, &nl, &fnlike) &&
+                fnlike)
+                (void)cc__name_set_push(&set, slot->text + noff, nl);
         }
         if (cc_scanner_skip_non_code(&scan, slot->text, slot->len, &i)) continue;
         if (!cc_is_ident_start(slot->text[i])) { i++; continue; }
@@ -10638,11 +10631,7 @@ static void cc__index_declares(CCPathTextCache* slot) {
         b = s;
         while (b > 0 && isspace((unsigned char)slot->text[b - 1])) b--;
         if (b > 0 && (cc_is_ident_char(slot->text[b - 1]) ||
-                      slot->text[b - 1] == '*')) {
-            (void)cc__name_set_push(&set, slot->text + s, e - s);
-            continue;
-        }
-        if (b >= 7 && memcmp(slot->text + b - 7, "#define", 7) == 0)
+                      slot->text[b - 1] == '*'))
             (void)cc__name_set_push(&set, slot->text + s, e - s);
     }
     cc__name_set_finalize(&set);

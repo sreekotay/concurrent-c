@@ -371,17 +371,16 @@ int cc__collect_slice_literal_coerce_edits(const CCASTRoot* root,
                 !cc__slc_name_is_declarator(in_src, in_len, call_s, callee_n)) {
                 name_s = call_s;
             } else {
-                size_t j;
-                for (j = call_s; j + callee_n <= call_e; j++) {
-                    if (memcmp(in_src + j, callee, callee_n) != 0) continue;
-                    if (j > 0 && (isalnum((unsigned char)in_src[j - 1]) || in_src[j - 1] == '_'))
-                        continue;
-                    if (j + callee_n < in_len &&
-                        (isalnum((unsigned char)in_src[j + callee_n]) || in_src[j + callee_n] == '_'))
-                        continue;
-                    if (cc__slc_name_is_declarator(in_src, in_len, j, callee_n)) continue;
-                    name_s = j;
-                    break;
+                size_t j = call_s;
+                while (j + callee_n <= call_e) {
+                    size_t hit = cc_find_ident_top_level(in_src, j, call_e,
+                                                         callee, callee_n);
+                    if (hit + callee_n > call_e) break;
+                    if (!cc__slc_name_is_declarator(in_src, in_len, hit, callee_n)) {
+                        name_s = hit;
+                        break;
+                    }
+                    j = hit + callee_n;
                 }
             }
         }
@@ -401,20 +400,22 @@ int cc__collect_slice_literal_coerce_edits(const CCASTRoot* root,
                     (n[k].line_start == n[i].line_start && n[k].col_start <= n[i].col_start))
                     want_occ++;
             }
-            for (j = 0; j + callee_n <= in_len; j++) {
+            /* Comment/string-aware occurrence walk: a callee name spelled
+             * in a comment or literal must not shift the occurrence
+             * numbering (twin of cc__as_find_callee_occ). */
+            j = 0;
+            while (j + callee_n <= in_len) {
                 size_t after;
-                if (memcmp(in_src + j, callee, callee_n) != 0) continue;
-                if (j > 0 && (isalnum((unsigned char)in_src[j - 1]) || in_src[j - 1] == '_'))
-                    continue;
-                if (j + callee_n < in_len &&
-                    (isalnum((unsigned char)in_src[j + callee_n]) || in_src[j + callee_n] == '_'))
-                    continue;
-                after = cc_skip_ws_and_comments(in_src, in_len, j + callee_n);
+                size_t hit = cc_find_ident_top_level(in_src, j, in_len,
+                                                     callee, callee_n);
+                if (hit + callee_n > in_len) break;
+                j = hit + callee_n;
+                after = cc_skip_ws_and_comments(in_src, in_len, hit + callee_n);
                 if (after >= in_len || in_src[after] != '(') continue;
-                if (cc__slc_name_is_declarator(in_src, in_len, j, callee_n)) continue;
+                if (cc__slc_name_is_declarator(in_src, in_len, hit, callee_n)) continue;
                 occ++;
                 if (occ == want_occ) {
-                    name_s = j;
+                    name_s = hit;
                     break;
                 }
             }

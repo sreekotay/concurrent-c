@@ -82,6 +82,8 @@ static size_t cc__skip_leading_decl_specs(const char* s, size_t ty_start) {
     return p;
 }
 
+static size_t cc__scan_back_to_type_start(const char* s, size_t from);
+
 char* cc__rewrite_slice_types_text(const CCVisitorCtx* ctx, const char* src, size_t n) {
     if (!src || n == 0) return NULL;
     char* out = NULL;
@@ -151,14 +153,12 @@ char* cc__rewrite_slice_types_text(const CCVisitorCtx* ctx, const char* src, siz
                     free(out);
                     return NULL;
                 }
-                /* Find start of type token sequence and preserve leading cv qualifiers */
-                size_t ty_start = i;
-                while (ty_start > 0) {
-                    char p = src[ty_start - 1];
-                    if (p == ';' || p == '{' || p == '}' || p == ',' || p == '(' || p == ')' || p == '\n') break;
-                    ty_start--;
-                }
-                while (ty_start < i && (src[ty_start] == ' ' || src[ty_start] == '\t')) ty_start++;
+                /* Find start of type token sequence and preserve leading
+                 * cv qualifiers.  Block-comment aware: a delimiter inside
+                 * a preceding comment must not become the type start (it
+                 * would splice an unterminated comment into the output). */
+                size_t ty_start = cc__scan_back_to_type_start(src, i);
+                if (ty_start > i) ty_start = i;
 
                 if (ty_start >= last_emit) {
                     char quals[64];

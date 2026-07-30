@@ -1108,12 +1108,22 @@ static CCSliceArray cc__build_ufcs_arg_type_slices(CCArena* arena, const char* a
  * "declared" for this heuristic, which is fine because we really just
  * want to know "is the user using this name anywhere?" so we don't stomp
  * on their chosen spelling. */
+static const char* cc__ufcs_skip_noncode(const char* p);
+
 static int cc__ufcs_fn_name_in_source(const char* name) {
     const char* src = g_ufcs_source_text;
     size_t nlen;
     if (!src || !name || !name[0]) return 0;
     nlen = strlen(name);
     for (const char* p = src; *p; ++p) {
+        {
+            const char* s2 = cc__ufcs_skip_noncode(p);
+            if (s2 != p) {
+                p = (*s2) ? s2 - 1 : s2;
+                if (!*p) break;
+                continue;
+            }
+        }
         if (*p != name[0]) continue;
         if (strncmp(p, name, nlen) != 0) continue;
         /* Require a word boundary before the match. */
