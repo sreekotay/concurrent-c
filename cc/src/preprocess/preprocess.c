@@ -8419,9 +8419,9 @@ static int cc__check_async_chan_await(const char* src, size_t n, const char* inp
             }
 
             if (is_chan_op) {
-                /* Check if preceded by "await" (skipping whitespace and
-                 * block comments backwards, so `await /(*)note(*)/ op`
-                 * still counts). */
+                /* Check if preceded by "await", skipping whitespace and
+                 * block comments backwards — a block comment between the
+                 * keyword and the call still counts as awaited. */
                 int has_await = 0;
                 size_t k = i;
                 while (k > 0) {

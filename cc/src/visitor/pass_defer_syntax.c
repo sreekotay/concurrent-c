@@ -834,10 +834,9 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
         size_t span_a = i;
         int was_lit = sc.in_str || sc.in_chr;
         if (cc_inert_scan_step(&sc, in_src, in_len, &i)) {
-            /* Inert content: copy through verbatim.  (The second byte of
-             * a string/char escape pair was consumed by the old per-byte
-             * machine without a newline check; preserve that for
-             * line_no.) */
+            /* Inert content: copy through verbatim.  A `\` + newline
+             * escape pair inside a string/char literal counts as escape
+             * bytes, not a line break, for line_no. */
             for (size_t x = span_a; x < i; x++) {
                 if (in_src[x] == '\n' &&
                     !(was_lit && x == span_a + 1 && in_src[span_a] == '\\'))

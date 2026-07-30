@@ -1,7 +1,6 @@
 /* Comments, strings, and directives are inert: names, sigils, and
- * delimiters spelled inside them must never steer a text pass.  Each
- * case below is a real mis-lowering fixed in the scanning-discipline
- * round; the mentions are deliberate regression bait.
+ * delimiters spelled inside them must never steer a text pass.  Every
+ * mention below is deliberate regression bait.
  *
  * Bait: a commented define must not suppress the print aliases —
  *   #define println(x) user_println(x)

@@ -920,10 +920,9 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
         int was_lit = sc.in_str || sc.in_chr;
         if (cc_inert_scan_step(&sc, in_src, in_len, &i)) {
             /* Inert content: copy through verbatim, stamping the
-             * input->output offset ledger per byte.  (The second byte of
-             * a string/char escape pair was consumed by the old per-byte
-             * machine without a newline check; preserve that for
-             * line_no.) */
+             * input->output offset ledger per byte.  A `\` + newline
+             * escape pair inside a string/char literal counts as escape
+             * bytes, not a line break, for line_no. */
             for (size_t x = span_a; x < i; x++) {
                 ito[x] = ol;
                 if (in_src[x] == '\n' &&
