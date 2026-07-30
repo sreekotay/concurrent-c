@@ -3353,49 +3353,135 @@ static void cc__record_ufcs_field(CCUfcsFieldInfo* fields,
 
 static int cc__stmt_head_has_member_access(const char* stmt_start, const char* stmt_end);
 
-static const char* cc__lookup_scoped_ufcs_var_type(const char* src,
-                                                   size_t limit,
-                                                   const char* var_name,
-                                                   char* out_type,
-                                                   size_t out_type_sz) {
+/* One-pass scoped decl/typedef index for UFCS receiver resolution.
+ * `cc__lookup_scoped_ufcs_var_type` / `cc__lookup_scoped_type_alias` used to
+ * rescan src[0..use_offset) on every call site; redis-sized TUs make that
+ * the dominant cost inside `cc__resolve_generic_ufcs_receiver_type`. */
+typedef struct {
+    size_t pos; /* terminating ';' */
+    int scope_id;
+    char name[128];
+    char type[256];
+} CCUfcsIdxDecl;
+
+typedef struct {
+    size_t pos; /* terminating ';' */
+    char name[128];
+    char type[256];
+} CCUfcsIdxTypedef;
+
+typedef struct {
+    const char* src;
+    size_t n;
+    CCUfcsIdxDecl* decls;
+    size_t n_decls;
+    size_t decls_cap;
+    CCUfcsIdxTypedef* typedefs;
+    size_t n_typedefs;
+    size_t typedefs_cap;
+    size_t* scope_close; /* close pos per scope_id; (size_t)-1 if open at EOF */
+    size_t n_scopes;
+    size_t scopes_cap;
+    int ready;
+} CCUfcsScopeIndex;
+
+static CCUfcsScopeIndex g_ufcs_scope_idx;
+
+static void cc__ufcs_scope_idx_reset(void) {
+    free(g_ufcs_scope_idx.decls);
+    free(g_ufcs_scope_idx.typedefs);
+    free(g_ufcs_scope_idx.scope_close);
+    memset(&g_ufcs_scope_idx, 0, sizeof(g_ufcs_scope_idx));
+}
+
+static int cc__ufcs_scope_idx_ensure_scopes(size_t need) {
+    size_t* nv;
+    size_t cap;
+    size_t i;
+    if (g_ufcs_scope_idx.scopes_cap >= need) return 0;
+    cap = g_ufcs_scope_idx.scopes_cap ? g_ufcs_scope_idx.scopes_cap : 64;
+    while (cap < need) cap *= 2;
+    nv = (size_t*)realloc(g_ufcs_scope_idx.scope_close, cap * sizeof(*nv));
+    if (!nv) return -1;
+    for (i = g_ufcs_scope_idx.scopes_cap; i < cap; i++) nv[i] = (size_t)-1;
+    g_ufcs_scope_idx.scope_close = nv;
+    g_ufcs_scope_idx.scopes_cap = cap;
+    return 0;
+}
+
+static const char* cc__ufcs_idx_typedef_before(size_t limit,
+                                               const char* alias_name,
+                                               char* out_type,
+                                               size_t out_type_sz) {
+    size_t i;
+    if (!alias_name || !alias_name[0] || !out_type || out_type_sz == 0) return NULL;
+    out_type[0] = '\0';
+    for (i = 0; i < g_ufcs_scope_idx.n_typedefs; i++) {
+        const CCUfcsIdxTypedef* td = &g_ufcs_scope_idx.typedefs[i];
+        if (td->pos >= limit) break;
+        if (strcmp(td->name, alias_name) != 0) continue;
+        snprintf(out_type, out_type_sz, "%s", td->type);
+        return out_type;
+    }
+    return NULL;
+}
+
+static void cc__ufcs_scope_idx_build(const char* src, size_t n) {
     CCTypeRegistry* reg = cc_type_registry_get_global();
-    typedef struct {
-        int scope_id;
-        char type_name[256];
-    } LocalDecl;
-    enum { MAX_DECLS = 256, MAX_SCOPES = 256 };
-    LocalDecl decls[MAX_DECLS];
-    int decl_count = 0;
+    enum { MAX_SCOPES = 256 };
     int scope_stack[MAX_SCOPES];
     int scope_depth = 1;
     int next_scope_id = 1;
     int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
     size_t stmt_start = 0;
+    size_t typedef_start = (size_t)-1;
     size_t i = 0;
-    if (!src || !var_name || !var_name[0] || !out_type || out_type_sz == 0) return NULL;
-    out_type[0] = '\0';
+    cc__ufcs_scope_idx_reset();
+    if (!src || n == 0) return;
+    g_ufcs_scope_idx.src = src;
+    g_ufcs_scope_idx.n = n;
     scope_stack[0] = 0;
-    while (i < limit) {
+    if (cc__ufcs_scope_idx_ensure_scopes(1) != 0) return;
+    g_ufcs_scope_idx.n_scopes = 1;
+    g_ufcs_scope_idx.scope_close[0] = (size_t)-1;
+    while (i < n) {
         char c = src[i];
-        char c2 = (i + 1 < limit) ? src[i + 1] : 0;
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
         if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
         if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
-        if (in_str) { if (c == '\\' && i + 1 < limit) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < limit) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
         if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
         if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
         if (c == '"') { in_str = 1; i++; continue; }
         if (c == '\'') { in_chr = 1; i++; continue; }
+        if (typedef_start == (size_t)-1 &&
+            i + 7 <= n &&
+            memcmp(src + i, "typedef", 7) == 0 &&
+            (i == 0 || !cc_is_ident_char(src[i - 1])) &&
+            (i + 7 == n || !cc_is_ident_char(src[i + 7]))) {
+            typedef_start = i;
+        }
         if (c == '{') {
-            if (scope_depth < MAX_SCOPES) scope_stack[scope_depth++] = next_scope_id++;
+            if (scope_depth < MAX_SCOPES) {
+                int sid = next_scope_id++;
+                scope_stack[scope_depth++] = sid;
+                if (cc__ufcs_scope_idx_ensure_scopes((size_t)sid + 1) != 0) return;
+                if ((size_t)sid + 1 > g_ufcs_scope_idx.n_scopes)
+                    g_ufcs_scope_idx.n_scopes = (size_t)sid + 1;
+                g_ufcs_scope_idx.scope_close[sid] = (size_t)-1;
+            }
             stmt_start = i + 1;
             i++;
             continue;
         }
         if (c == '}') {
-            int closing_scope = (scope_depth > 1) ? scope_stack[scope_depth - 1] : 0;
-            while (decl_count > 0 && decls[decl_count - 1].scope_id == closing_scope) decl_count--;
-            if (scope_depth > 1) scope_depth--;
+            if (scope_depth > 1) {
+                int closing_scope = scope_stack[scope_depth - 1];
+                if ((size_t)closing_scope < g_ufcs_scope_idx.scopes_cap)
+                    g_ufcs_scope_idx.scope_close[closing_scope] = i;
+                scope_depth--;
+            }
             stmt_start = i + 1;
             i++;
             continue;
@@ -3403,53 +3489,112 @@ static const char* cc__lookup_scoped_ufcs_var_type(const char* src,
         if (c == ';') {
             char decl_name[128];
             char decl_type[256];
-            /* The raw span still carries any comment between the previous
-             * statement and this one; the decl parsers are comment-blind
-             * and would read comment words as the type. */
             size_t stmt_eff = cc_skip_ws_and_comments(src, i, stmt_start);
-            int stmt_has_member_access = cc__stmt_head_has_member_access(src + stmt_eff, src + i);
+            int stmt_has_member_access =
+                cc__stmt_head_has_member_access(src + stmt_eff, src + i);
+            if (typedef_start != (size_t)-1) {
+                char td_name[128];
+                char td_type[256];
+                if (cc__parse_typedef_alias_stmt(src + typedef_start, src + i,
+                                                 td_name, sizeof(td_name),
+                                                 td_type, sizeof(td_type)) &&
+                    td_name[0]) {
+                    CCUfcsIdxTypedef* slot;
+                    if (g_ufcs_scope_idx.n_typedefs == g_ufcs_scope_idx.typedefs_cap) {
+                        size_t cap = g_ufcs_scope_idx.typedefs_cap
+                                         ? g_ufcs_scope_idx.typedefs_cap * 2
+                                         : 32;
+                        CCUfcsIdxTypedef* nv = (CCUfcsIdxTypedef*)realloc(
+                            g_ufcs_scope_idx.typedefs, cap * sizeof(*nv));
+                        if (!nv) return;
+                        g_ufcs_scope_idx.typedefs = nv;
+                        g_ufcs_scope_idx.typedefs_cap = cap;
+                    }
+                    slot = &g_ufcs_scope_idx.typedefs[g_ufcs_scope_idx.n_typedefs++];
+                    slot->pos = i;
+                    snprintf(slot->name, sizeof(slot->name), "%s", td_name);
+                    cc__canonicalize_ufcs_alias_target(slot->type, sizeof(slot->type),
+                                                       td_type);
+                }
+                typedef_start = (size_t)-1;
+            }
+            /* Same decl harvest as the old per-call scoped walk (including
+             * field-shaped semis inside typedef struct bodies). */
             cc_parse_decl_name_and_type(src + stmt_eff, src + i,
                                          decl_name, sizeof(decl_name),
                                          decl_type, sizeof(decl_type));
-            if ((!decl_name[0] || strcmp(decl_name, var_name) != 0 || !decl_type[0]) &&
-                !stmt_has_member_access) {
-                (void)cc__parse_decl_name_and_type_fallback(src + stmt_eff, src + i,
-                                                            decl_name, sizeof(decl_name),
-                                                            decl_type, sizeof(decl_type));
+            if ((!decl_name[0] || !decl_type[0]) && !stmt_has_member_access) {
+                (void)cc__parse_decl_name_and_type_fallback(
+                    src + stmt_eff, src + i, decl_name, sizeof(decl_name),
+                    decl_type, sizeof(decl_type));
             }
             if (decl_name[0] &&
-                strcmp(decl_name, var_name) == 0 &&
                 !stmt_has_member_access &&
-                !cc_is_non_decl_stmt_type(decl_type) &&
-                decl_count < MAX_DECLS) {
+                !cc_is_non_decl_stmt_type(decl_type)) {
+                CCUfcsIdxDecl* slot;
                 char alias_type[256];
                 const char* alias = NULL;
-                decls[decl_count].scope_id = scope_stack[scope_depth - 1];
-                cc__normalize_ufcs_type_name(decls[decl_count].type_name,
-                                             sizeof(decls[decl_count].type_name),
+                if (g_ufcs_scope_idx.n_decls == g_ufcs_scope_idx.decls_cap) {
+                    size_t cap = g_ufcs_scope_idx.decls_cap
+                                     ? g_ufcs_scope_idx.decls_cap * 2
+                                     : 128;
+                    CCUfcsIdxDecl* nv = (CCUfcsIdxDecl*)realloc(
+                        g_ufcs_scope_idx.decls, cap * sizeof(*nv));
+                    if (!nv) return;
+                    g_ufcs_scope_idx.decls = nv;
+                    g_ufcs_scope_idx.decls_cap = cap;
+                }
+                slot = &g_ufcs_scope_idx.decls[g_ufcs_scope_idx.n_decls];
+                slot->pos = i;
+                slot->scope_id = scope_stack[scope_depth - 1];
+                snprintf(slot->name, sizeof(slot->name), "%s", decl_name);
+                cc__normalize_ufcs_type_name(slot->type, sizeof(slot->type),
                                              decl_type);
-                if (reg && !cc__type_is_known_ufcs_family_base(decls[decl_count].type_name)) {
-                    alias = cc_type_registry_lookup_alias(reg, decls[decl_count].type_name);
-                }
-                if (alias && *alias) {
-                    snprintf(decls[decl_count].type_name, sizeof(decls[decl_count].type_name), "%s", alias);
-                }
-                if (!cc__type_is_known_ufcs_family_base(decls[decl_count].type_name) &&
-                    cc__lookup_scoped_type_alias(src, i, decls[decl_count].type_name,
-                                                 alias_type, sizeof(alias_type))) {
-                    snprintf(decls[decl_count].type_name, sizeof(decls[decl_count].type_name), "%s", alias_type);
-                }
-                decl_count++;
+                if (reg && !cc__type_is_known_ufcs_family_base(slot->type))
+                    alias = cc_type_registry_lookup_alias(reg, slot->type);
+                if (alias && *alias)
+                    snprintf(slot->type, sizeof(slot->type), "%s", alias);
+                if (!cc__type_is_known_ufcs_family_base(slot->type) &&
+                    cc__ufcs_idx_typedef_before(i, slot->type, alias_type,
+                                               sizeof(alias_type)))
+                    snprintf(slot->type, sizeof(slot->type), "%s", alias_type);
+                g_ufcs_scope_idx.n_decls++;
             }
             stmt_start = i + 1;
         }
         i++;
     }
-    if (decl_count == 0) return NULL;
-    strncpy(out_type, decls[decl_count - 1].type_name, out_type_sz - 1);
+    g_ufcs_scope_idx.ready = 1;
+}
+
+static const char* cc__lookup_scoped_ufcs_var_type(const char* src,
+                                                   size_t limit,
+                                                   const char* var_name,
+                                                   char* out_type,
+                                                   size_t out_type_sz) {
+    size_t di;
+    const CCUfcsIdxDecl* best = NULL;
+    if (!src || !var_name || !var_name[0] || !out_type || out_type_sz == 0) return NULL;
+    out_type[0] = '\0';
+    if (!g_ufcs_scope_idx.ready || g_ufcs_scope_idx.src != src) return NULL;
+    for (di = 0; di < g_ufcs_scope_idx.n_decls; di++) {
+        const CCUfcsIdxDecl* d = &g_ufcs_scope_idx.decls[di];
+        size_t close;
+        if (d->pos >= limit) break;
+        if (strcmp(d->name, var_name) != 0) continue;
+        if ((size_t)d->scope_id >= g_ufcs_scope_idx.n_scopes) continue;
+        close = g_ufcs_scope_idx.scope_close[d->scope_id];
+        /* Original walk processes bytes [0, limit). A `}` at `close` is
+         * applied only when close < limit, so the scope is still open when
+         * close >= limit. */
+        if (close < limit) continue;
+        best = d;
+    }
+    if (!best) return NULL;
+    strncpy(out_type, best->type, out_type_sz - 1);
     out_type[out_type_sz - 1] = '\0';
     if (getenv("CC_DEBUG_SCOPED_VAR"))
-        fprintf(stderr, "scoped_var: '%s' -> '%s' (n=%d)\n", var_name, out_type, decl_count);
+        fprintf(stderr, "scoped_var: '%s' -> '%s' (indexed)\n", var_name, out_type);
     return out_type;
 }
 
@@ -3600,6 +3745,8 @@ static const char* cc__lookup_scoped_type_alias(const char* src,
     int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
     if (!src || !alias_name || !alias_name[0] || !out_type || out_type_sz == 0) return NULL;
     out_type[0] = '\0';
+    if (g_ufcs_scope_idx.ready && g_ufcs_scope_idx.src == src)
+        return cc__ufcs_idx_typedef_before(limit, alias_name, out_type, out_type_sz);
     while (i < limit) {
         char c = src[i];
         char c2 = (i + 1 < limit) ? src[i + 1] : 0;
@@ -4490,6 +4637,8 @@ static int cc__try_normalize_ufcs_chain(const char* src, size_t n,
     return 1;
 }
 
+static int g_ufcs_scope_idx_locked = 0;
+
 static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int parser_safe) {
     CCUfcsVarInfo vars[512];
     CCUfcsFieldInfo fields[256];
@@ -4499,8 +4648,16 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
     size_t out_len = 0, out_cap = 0;
     size_t i = 0;
     size_t last_emit = 0;
+    int own_idx = 0;
     CCScannerState scan;
     if (!src || n == 0) return NULL;
+    /* Index decls/typedefs once per outer rewrite. Nested calls on receiver
+     * substrings must not clobber the parent index (lock). */
+    if (!g_ufcs_scope_idx_locked) {
+        cc__ufcs_scope_idx_build(src, n);
+        g_ufcs_scope_idx_locked = 1;
+        own_idx = 1;
+    }
     cc__collect_generic_ufcs_types(src, n, vars, &var_count, sizeof(vars) / sizeof(vars[0]),
                                    fields, &field_count, sizeof(fields) / sizeof(fields[0]));
     cc_scanner_init(&scan);
@@ -5207,8 +5364,18 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
         last_emit = paren_end + 1;
         i = paren_end + 1;
     }
-    if (last_emit == 0) return NULL;
+    if (last_emit == 0) {
+        if (own_idx) {
+            cc__ufcs_scope_idx_reset();
+            g_ufcs_scope_idx_locked = 0;
+        }
+        return NULL;
+    }
     if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    if (own_idx) {
+        cc__ufcs_scope_idx_reset();
+        g_ufcs_scope_idx_locked = 0;
+    }
     return out;
 }
 
@@ -5338,63 +5505,135 @@ static int cc__free_call_prev_word_is_stmt_kw(const char* src, size_t b) {
     return 0;
 }
 
-/* Nonzero when a decl-shaped occurrence of `name(` exists: the
- * occurrence's previous code token ends in an identifier char or `*`
- * (a type or declarator precedes it). Call sites are preceded by
- * operators/punctuation and don't match. */
-static int cc__tu_declares_fn(const char* src, size_t n, const char* name) {
-    size_t nlen = strlen(name);
-    size_t i = 0;
-    CCScannerState scan;
-    if (!nlen) return 0;
-    cc_scanner_init(&scan);
-    while (i + nlen <= n) {
-        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
-        if (src[i] != name[0]) { i++; continue; }
-        if (i > 0 && cc_is_ident_char(src[i - 1])) { i++; continue; }
-        if (i + nlen > n || memcmp(src + i, name, nlen) != 0) { i++; continue; }
-        if (i + nlen < n && cc_is_ident_char(src[i + nlen])) { i += nlen; continue; }
-        {
-            size_t q = i + nlen;
-            while (q < n && (src[q] == ' ' || src[q] == '\t')) q++;
-            if (q < n && src[q] == '(') {
-                size_t b = i;
-                for (;;) {
-                    while (b > 0 && isspace((unsigned char)src[b - 1])) b--;
-                    if (b >= 2 && src[b - 1] == '/' && src[b - 2] == '*') {
-                        size_t c = b - 2;
-                        while (c >= 2 && !(src[c - 1] == '*' && src[c - 2] == '/')) c--;
-                        if (c < 2) break;
-                        b = c - 2;
-                        continue;
-                    }
-                    break;
-                }
-                if (b > 0 && src[b - 1] == '*') return 1;
-                if (b > 0 && cc_is_ident_char(src[b - 1]) &&
-                    !cc__free_call_prev_word_is_stmt_kw(src, b))
-                    return 1;
-            }
-        }
-        i += nlen;
+/* Sorted unique identifier sets for free-call / included-.cch decl probes.
+ * Built once per rewrite (or TU include set) instead of rescanning text per name. */
+typedef struct {
+    char** names;
+    size_t n;
+    size_t cap;
+} CCNameSet;
+
+static int cc__callable_name_cmp(const void* a, const void* b);
+
+static void cc__name_set_free(CCNameSet* s) {
+    size_t i;
+    if (!s) return;
+    for (i = 0; i < s->n; i++) free(s->names[i]);
+    free(s->names);
+    s->names = NULL;
+    s->n = s->cap = 0;
+}
+
+static int cc__name_set_push(CCNameSet* s, const char* name, size_t nlen) {
+    char* copy;
+    char** nv;
+    if (!s || !name || nlen == 0 || nlen >= 192) return -1;
+    if (s->n == s->cap) {
+        size_t cap = s->cap ? s->cap * 2 : 64;
+        nv = (char**)realloc(s->names, cap * sizeof(*nv));
+        if (!nv) return -1;
+        s->names = nv;
+        s->cap = cap;
     }
+    copy = (char*)malloc(nlen + 1);
+    if (!copy) return -1;
+    memcpy(copy, name, nlen);
+    copy[nlen] = 0;
+    s->names[s->n++] = copy;
     return 0;
 }
 
-static int cc__tu_defines_macro(const char* src, size_t n, const char* name) {
-    size_t nlen = strlen(name);
+static void cc__name_set_finalize(CCNameSet* s) {
+    size_t w = 0, r;
+    if (!s || s->n <= 1) return;
+    qsort(s->names, s->n, sizeof(char*), cc__callable_name_cmp);
+    for (r = 0; r < s->n; r++) {
+        if (w > 0 && strcmp(s->names[w - 1], s->names[r]) == 0) {
+            free(s->names[r]);
+            continue;
+        }
+        s->names[w++] = s->names[r];
+    }
+    s->n = w;
+}
+
+static int cc__name_set_has(const CCNameSet* s, const char* name) {
+    char* key = (char*)name;
+    if (!s || !s->names || !name || !name[0]) return 0;
+    return bsearch(&key, s->names, s->n, sizeof(char*),
+                   cc__callable_name_cmp) != NULL;
+}
+
+/* Walk back past whitespace/comments to the previous code char before `pos`. */
+static size_t cc__tu_decl_prev_code(const char* src, size_t pos) {
+    size_t b = pos;
+    for (;;) {
+        while (b > 0 && isspace((unsigned char)src[b - 1])) b--;
+        if (b >= 2 && src[b - 1] == '/' && src[b - 2] == '*') {
+            size_t c = b - 2;
+            while (c >= 2 && !(src[c - 1] == '*' && src[c - 2] == '/')) c--;
+            if (c < 2) break;
+            b = c - 2;
+            continue;
+        }
+        break;
+    }
+    return b;
+}
+
+static int cc__tu_ident_paren_is_decl(const char* src, size_t n, size_t name_pos,
+                                      size_t nlen) {
+    size_t q = name_pos + nlen;
+    size_t b;
+    while (q < n && (src[q] == ' ' || src[q] == '\t')) q++;
+    if (q >= n || src[q] != '(') return 0;
+    b = cc__tu_decl_prev_code(src, name_pos);
+    if (b > 0 && src[b - 1] == '*') return 1;
+    if (b > 0 && cc_is_ident_char(src[b - 1]) &&
+        !cc__free_call_prev_word_is_stmt_kw(src, b))
+        return 1;
+    return 0;
+}
+
+/* One-pass collect of every decl-shaped `ident(` in the TU. */
+static void cc__collect_tu_declared_fns(const char* src, size_t n, CCNameSet* out) {
     size_t i = 0;
-    /* Manual comment/string skipping: the shared scanner treats whole
-     * preprocessor lines as non-code, which would hide the very
-     * `#define` this probe looks for. */
+    CCScannerState scan;
+    if (!src || !out) return;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        size_t ns, ne, nlen, q;
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (!cc_is_ident_start(src[i])) { i++; continue; }
+        if (i > 0 && cc_is_ident_char(src[i - 1])) {
+            while (i < n && cc_is_ident_char(src[i])) i++;
+            continue;
+        }
+        ns = i;
+        while (i < n && cc_is_ident_char(src[i])) i++;
+        ne = i;
+        nlen = ne - ns;
+        q = ne;
+        while (q < n && (src[q] == ' ' || src[q] == '\t')) q++;
+        if (q >= n || src[q] != '(') continue;
+        if (cc__tu_ident_paren_is_decl(src, n, ns, nlen))
+            (void)cc__name_set_push(out, src + ns, nlen);
+    }
+    cc__name_set_finalize(out);
+}
+
+/* One-pass collect of `#define name` bindings (comment/string-aware). */
+static void cc__collect_tu_macros(const char* src, size_t n, CCNameSet* out) {
+    size_t i = 0;
+    if (!src || !out) return;
     while (i + 7 < n) {
-        size_t p;
+        size_t p, ns, ne;
         char c = src[i];
-        if (c == '/' && src[i + 1] == '/') {
+        if (c == '/' && i + 1 < n && src[i + 1] == '/') {
             while (i < n && src[i] != '\n') i++;
             continue;
         }
-        if (c == '/' && src[i + 1] == '*') {
+        if (c == '/' && i + 1 < n && src[i + 1] == '*') {
             i += 2;
             while (i + 1 < n && !(src[i] == '*' && src[i + 1] == '/')) i++;
             i = (i + 1 < n) ? i + 2 : n;
@@ -5417,9 +5656,95 @@ static int cc__tu_defines_macro(const char* src, size_t n, const char* name) {
         if (p + 6 > n || memcmp(src + p, "define", 6) != 0) continue;
         p += 6;
         while (p < n && (src[p] == ' ' || src[p] == '\t')) p++;
-        if (p + nlen <= n && memcmp(src + p, name, nlen) == 0 &&
-            (p + nlen == n || !cc_is_ident_char(src[p + nlen])))
-            return 1;
+        if (p >= n || !cc_is_ident_start(src[p])) continue;
+        ns = p;
+        while (p < n && cc_is_ident_char(src[p])) p++;
+        ne = p;
+        (void)cc__name_set_push(out, src + ns, ne - ns);
+    }
+    cc__name_set_finalize(out);
+}
+
+/* One-pass collect of names with a variable-like decl binding (same shape
+ * as cc__free_call_ident_decl_type existence). */
+static void cc__collect_tu_var_binds(const char* src, size_t n, CCNameSet* out) {
+    size_t i = 0;
+    CCScannerState scan;
+    if (!src || !out) return;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        size_t ns, ne, nlen, a, b, q, we;
+        char head[256];
+        size_t dn = 0;
+        int toks = 0;
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (!cc_is_ident_start(src[i])) { i++; continue; }
+        if (i > 0 && cc_is_ident_char(src[i - 1])) {
+            while (i < n && cc_is_ident_char(src[i])) i++;
+            continue;
+        }
+        ns = i;
+        while (i < n && cc_is_ident_char(src[i])) i++;
+        ne = i;
+        nlen = ne - ns;
+        b = ns;
+        while (b > 0 && (src[b - 1] == ' ' || src[b - 1] == '\t')) b--;
+        if (b == 0 || !(cc_is_ident_char(src[b - 1]) || src[b - 1] == '*'))
+            continue;
+        a = b;
+        while (a > 0 && !strchr(";{}(),", src[a - 1]) && src[a - 1] != '\n') a--;
+        q = a;
+        while (q < b) {
+            while (q < b && isspace((unsigned char)src[q])) q++;
+            if (q >= b) break;
+            if (src[q] == '*') {
+                if (dn + 1 < sizeof(head)) head[dn++] = '*';
+                q++;
+                toks++;
+                continue;
+            }
+            if (!cc_is_ident_char(src[q])) { toks = 0; dn = 0; break; }
+            if (dn > 0 && head[dn - 1] != '*' && dn + 1 < sizeof(head))
+                head[dn++] = ' ';
+            while (q < b && cc_is_ident_char(src[q])) {
+                if (dn + 1 < sizeof(head)) head[dn++] = src[q];
+                q++;
+            }
+            toks++;
+        }
+        if (!toks || !dn) continue;
+        head[dn] = 0;
+        we = 0;
+        while (head[we] && cc_is_ident_char(head[we])) we++;
+        if ((we == 6 && memcmp(head, "return", 6) == 0) ||
+            (we == 4 && (memcmp(head, "else", 4) == 0 ||
+                         memcmp(head, "case", 4) == 0 ||
+                         memcmp(head, "goto", 4) == 0)) ||
+            (we == 2 && memcmp(head, "do", 2) == 0))
+            continue;
+        (void)cc__name_set_push(out, src + ns, nlen);
+    }
+    cc__name_set_finalize(out);
+}
+
+/* Nonzero when a decl-shaped occurrence of `name(` exists: the
+ * occurrence's previous code token ends in an identifier char or `*`
+ * (a type or declarator precedes it). Call sites are preceded by
+ * operators/punctuation and don't match. */
+static int cc__tu_declares_fn(const char* src, size_t n, const char* name) {
+    size_t nlen = strlen(name);
+    size_t i = 0;
+    CCScannerState scan;
+    if (!nlen) return 0;
+    cc_scanner_init(&scan);
+    while (i + nlen <= n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (src[i] != name[0]) { i++; continue; }
+        if (i > 0 && cc_is_ident_char(src[i - 1])) { i++; continue; }
+        if (i + nlen > n || memcmp(src + i, name, nlen) != 0) { i++; continue; }
+        if (i + nlen < n && cc_is_ident_char(src[i + nlen])) { i += nlen; continue; }
+        if (cc__tu_ident_paren_is_decl(src, n, i, nlen)) return 1;
+        i += nlen;
     }
     return 0;
 }
@@ -5652,6 +5977,9 @@ static char* cc__rewrite_container_surface_aliases(const char* src, size_t n) {
 
 static char* cc__rewrite_free_call_families(const char* src, size_t n) {
     char* out = NULL;
+    CCNameSet tu_decl = {0};
+    CCNameSet tu_mac = {0};
+    CCNameSet tu_var = {0};
     /* Test-only baseline: tools/diff_additive.sh proves the additive
      * tiers never change compiling code by diffing lowered output with
      * them disabled. */
@@ -5660,6 +5988,11 @@ static char* cc__rewrite_free_call_families(const char* src, size_t n) {
     CCScannerState scan;
     size_t i = 0;
     if (!src || n == 0) return NULL;
+    /* One scan each for TU bindings — free-call used to rescan the whole
+     * buffer per candidate name (dominant on large TUs like redis). */
+    cc__collect_tu_declared_fns(src, n, &tu_decl);
+    cc__collect_tu_macros(src, n, &tu_mac);
+    cc__collect_tu_var_binds(src, n, &tu_var);
     cc_scanner_init(&scan);
     while (i < n) {
         size_t ns, ne, nlen, p;
@@ -5702,16 +6035,12 @@ static char* cc__rewrite_free_call_families(const char* src, size_t n) {
         if (p >= n || src[p] != '(') continue;
         memcpy(name, src + ns, nlen);
         name[nlen] = 0;
-        if (cc__tu_defines_macro(src, n, name)) continue;
-        if (cc__tu_declares_fn(src, n, name)) continue;
-        {
-            /* Any visible variable binding of this name wins too — a
-             * function pointer `(*println)(...)` makes `println(x)` a
-             * legal C call through the pointer. */
-            char vty[256];
-            if (cc__free_call_ident_decl_type(src, n, name, vty, sizeof(vty)))
-                continue;
-        }
+        if (cc__name_set_has(&tu_mac, name)) continue;
+        if (cc__name_set_has(&tu_decl, name)) continue;
+        /* Any visible variable binding of this name wins too — a
+         * function pointer `(*println)(...)` makes `println(x)` a
+         * legal C call through the pointer. */
+        if (cc__name_set_has(&tu_var, name)) continue;
         if (cc_included_cch_declares_fn(name)) continue;
         {
             size_t close = 0;
@@ -5775,6 +6104,9 @@ static char* cc__rewrite_free_call_families(const char* src, size_t n) {
             }
         }
     }
+    cc__name_set_free(&tu_decl);
+    cc__name_set_free(&tu_mac);
+    cc__name_set_free(&tu_var);
     if (!out) return NULL;
     cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
     return out;
@@ -5785,13 +6117,9 @@ char* cc_rewrite_generic_family_ufcs_parser_safe(const char* src, size_t n) {
     size_t cur_len = n;
     int hit_cap = 0;
     if (!src || n == 0) return NULL;
-    {
-        char* freeform = cc__rewrite_free_call_families(src, n);
-        if (freeform) {
-            cur = freeform;
-            cur_len = strlen(cur);
-        }
-    }
+    /* Free-call family rewrite runs once in phase-1 (before template
+     * lowering so `@string` args are still visible). Re-running it inside
+     * every parser-safe entry was redundant and dominated large-TU cost. */
     for (int iter = 0; iter < 8; ++iter) {
         const char* in = cur ? cur : src;
         char* next = cc__rewrite_generic_family_ufcs_impl(in, cur_len, 1);
@@ -10152,10 +10480,16 @@ typedef struct {
     size_t len;
     char** callables; /* sorted unique `ident(` names in text */
     size_t n_callables;
+    char** declares; /* sorted unique decl-shaped / `#define name(` names */
+    size_t n_declares;
 } CCPathTextCache;
 static CCPathTextCache* g_path_text_cache = NULL;
 static size_t g_path_text_cache_count = 0;
 static size_t g_path_text_cache_cap = 0;
+
+/* Union of declares indexes across registered included .cch sources. */
+static CCNameSet g_incl_declares_union = {0};
+static size_t g_incl_declares_union_for = 0;
 
 static int cc__ensure_lowered_local_header_capacity(size_t needed) {
     if (g_lowered_local_header_cap >= needed) return 0;
@@ -10179,13 +10513,20 @@ static void cc__path_text_cache_reset(void) {
         for (j = 0; j < g_path_text_cache[i].n_callables; j++)
             free(g_path_text_cache[i].callables[j]);
         free(g_path_text_cache[i].callables);
+        for (j = 0; j < g_path_text_cache[i].n_declares; j++)
+            free(g_path_text_cache[i].declares[j]);
+        free(g_path_text_cache[i].declares);
         g_path_text_cache[i].path = NULL;
         g_path_text_cache[i].text = NULL;
         g_path_text_cache[i].len = 0;
         g_path_text_cache[i].callables = NULL;
         g_path_text_cache[i].n_callables = 0;
+        g_path_text_cache[i].declares = NULL;
+        g_path_text_cache[i].n_declares = 0;
     }
     g_path_text_cache_count = 0;
+    cc__name_set_free(&g_incl_declares_union);
+    g_incl_declares_union_for = 0;
 }
 
 void cc_reset_included_cch_sources(void) {
@@ -10325,6 +10666,49 @@ static void cc__index_callables(CCPathTextCache* slot) {
     }
 }
 
+/* Decl-shaped twin of cc__index_callables (scanner-aware; matches
+ * cc_included_cch_declares_fn). */
+static void cc__index_declares(CCPathTextCache* slot) {
+    size_t i = 0;
+    CCScannerState scan;
+    CCNameSet set = {0};
+    if (!slot || !slot->text) return;
+    slot->declares = NULL;
+    slot->n_declares = 0;
+    cc_scanner_init(&scan);
+    while (i < slot->len) {
+        size_t s, e, q, b;
+        if (cc_scanner_skip_non_code(&scan, slot->text, slot->len, &i)) continue;
+        if (!cc_is_ident_start(slot->text[i])) { i++; continue; }
+        if (i > 0 && cc_is_ident_char(slot->text[i - 1])) {
+            while (i < slot->len && cc_is_ident_char(slot->text[i])) i++;
+            continue;
+        }
+        s = i;
+        while (i < slot->len && cc_is_ident_char(slot->text[i])) i++;
+        e = i;
+        q = e;
+        while (q < slot->len && (slot->text[q] == ' ' || slot->text[q] == '\t'))
+            q++;
+        if (q >= slot->len || slot->text[q] != '(') continue;
+        b = s;
+        while (b > 0 && isspace((unsigned char)slot->text[b - 1])) b--;
+        if (b > 0 && (cc_is_ident_char(slot->text[b - 1]) ||
+                      slot->text[b - 1] == '*')) {
+            (void)cc__name_set_push(&set, slot->text + s, e - s);
+            continue;
+        }
+        if (b >= 7 && memcmp(slot->text + b - 7, "#define", 7) == 0)
+            (void)cc__name_set_push(&set, slot->text + s, e - s);
+    }
+    cc__name_set_finalize(&set);
+    slot->declares = set.names;
+    slot->n_declares = set.n;
+    /* Ownership moved into slot; don't free names via set. */
+    set.names = NULL;
+    set.n = set.cap = 0;
+}
+
 static int cc__cache_has_callable(const CCPathTextCache* slot, const char* name) {
     char* key = (char*)name;
     if (!slot || !slot->callables || !name || !name[0]) return 0;
@@ -10412,12 +10796,17 @@ static const char* cc__path_text_cached(const char* path, size_t* out_len) {
     g_path_text_cache[g_path_text_cache_count].len = n;
     g_path_text_cache[g_path_text_cache_count].callables = NULL;
     g_path_text_cache[g_path_text_cache_count].n_callables = 0;
+    g_path_text_cache[g_path_text_cache_count].declares = NULL;
+    g_path_text_cache[g_path_text_cache_count].n_declares = 0;
     if (!g_path_text_cache[g_path_text_cache_count].path) {
         free(buf);
         return NULL;
     }
     cc__index_callables(&g_path_text_cache[g_path_text_cache_count]);
+    cc__index_declares(&g_path_text_cache[g_path_text_cache_count]);
     g_path_text_cache_count++;
+    /* New header text invalidates the union of declares indexes. */
+    g_incl_declares_union_for = 0;
     if (out_len) *out_len = n;
     return buf;
 }
@@ -11494,45 +11883,33 @@ int cc_slice_spec_tu_needs_decl(const char* src, size_t n,
     return 1;
 }
 
+static void cc__ensure_incl_declares_union(void) {
+    size_t h;
+    if (g_incl_declares_union_for == g_included_cch_source_count) return;
+    cc__name_set_free(&g_incl_declares_union);
+    for (h = 0; h < g_included_cch_source_count; h++) {
+        size_t j;
+        CCPathTextCache* slot;
+        (void)cc__included_cch_text(h, NULL);
+        slot = cc__path_text_cache_find(g_included_cch_sources[h]);
+        if (!slot || !slot->declares) continue;
+        for (j = 0; j < slot->n_declares; j++)
+            (void)cc__name_set_push(&g_incl_declares_union, slot->declares[j],
+                                    strlen(slot->declares[j]));
+    }
+    cc__name_set_finalize(&g_incl_declares_union);
+    g_incl_declares_union_for = g_included_cch_source_count;
+}
+
 /* Decl-shaped twin of cc_included_cch_contains_fn: comment/string-aware,
  * and a hit requires the occurrence's previous code char to be an
  * identifier char or `*` (a type or declarator precedes). Doc-comment
  * examples and `.method(` call spellings never match. Also matches
  * `#define name(` (a visible macro is a real binding). */
 static int cc_included_cch_declares_fn(const char* name) {
-    size_t h;
-    size_t nlen;
     if (!name || !name[0]) return 0;
-    nlen = strlen(name);
-    for (h = 0; h < g_included_cch_source_count; h++) {
-        size_t fn = 0;
-        size_t i = 0;
-        CCScannerState scan;
-        const char* fsrc = cc__included_cch_text(h, &fn);
-        if (!fsrc) continue;
-        cc_scanner_init(&scan);
-        while (i + nlen < fn) {
-            size_t q;
-            if (cc_scanner_skip_non_code(&scan, fsrc, fn, &i)) continue;
-            if (fsrc[i] != name[0]) { i++; continue; }
-            if (i > 0 && cc_is_ident_char(fsrc[i - 1])) { i++; continue; }
-            if (memcmp(fsrc + i, name, nlen) != 0) { i++; continue; }
-            if (cc_is_ident_char(fsrc[i + nlen])) { i += nlen; continue; }
-            q = i + nlen;
-            while (q < fn && (fsrc[q] == ' ' || fsrc[q] == '\t')) q++;
-            if (q < fn && fsrc[q] == '(') {
-                size_t b = i;
-                while (b > 0 && isspace((unsigned char)fsrc[b - 1])) b--;
-                if (b > 0 && (cc_is_ident_char(fsrc[b - 1]) || fsrc[b - 1] == '*'))
-                    return 1;
-                /* `#define name(` — macro binding is real. */
-                if (b >= 7 && memcmp(fsrc + b - 7, "#define", 7) == 0)
-                    return 1;
-            }
-            i += nlen;
-        }
-    }
-    return 0;
+    cc__ensure_incl_declares_union();
+    return cc__name_set_has(&g_incl_declares_union, name);
 }
 
 /* First parameter's type span for a decl-shaped `name(` occurrence in

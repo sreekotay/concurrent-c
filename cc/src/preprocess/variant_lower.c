@@ -563,6 +563,87 @@ static size_t cc__va_expr_end(const char* s, size_t n, size_t from) {
 
 enum { CC_VA_FORM_VALUE = 0, CC_VA_FORM_PTR = 1, CC_VA_FORM_KIND = 2 };
 
+/* Per-buffer, per-name occurrence lists for cc__va_resolve_root. Each call
+ * used to re-scan src[0..use_pos) for `id`; redis-sized TUs hammer this.
+ * Occurrence positions are buffer-absolute (independent of use_pos); the
+ * declarator-shape test still uses use_pos, so a full-buffer snapshot of
+ * resolve results would be incorrect. */
+typedef struct {
+    char* id;
+    size_t idl;
+    size_t* hits;
+    size_t n_hits;
+    size_t hits_cap;
+} CCVaIdHits;
+
+static const char* g_va_hits_s = NULL;
+static size_t g_va_hits_n = 0;
+static CCVaIdHits* g_va_hits = NULL;
+static size_t g_va_hits_count = 0;
+static size_t g_va_hits_cap = 0;
+
+static void cc__va_hits_reset(void) {
+    size_t i;
+    for (i = 0; i < g_va_hits_count; i++) {
+        free(g_va_hits[i].id);
+        free(g_va_hits[i].hits);
+        g_va_hits[i].id = NULL;
+        g_va_hits[i].hits = NULL;
+        g_va_hits[i].n_hits = g_va_hits[i].hits_cap = 0;
+    }
+    g_va_hits_count = 0;
+    g_va_hits_s = NULL;
+    g_va_hits_n = 0;
+}
+
+static const CCVaIdHits* cc__va_hits_for(const char* s, size_t n,
+                                         const char* id, size_t idl) {
+    size_t i, from;
+    CCVaIdHits* slot;
+    if (!s || !id || idl == 0) return NULL;
+    if (s != g_va_hits_s || n != g_va_hits_n) {
+        cc__va_hits_reset();
+        g_va_hits_s = s;
+        g_va_hits_n = n;
+    }
+    for (i = 0; i < g_va_hits_count; i++) {
+        if (g_va_hits[i].idl == idl &&
+            memcmp(g_va_hits[i].id, id, idl) == 0)
+            return &g_va_hits[i];
+    }
+    if (g_va_hits_count == g_va_hits_cap) {
+        size_t cap = g_va_hits_cap ? g_va_hits_cap * 2 : 32;
+        CCVaIdHits* nv = (CCVaIdHits*)realloc(g_va_hits, cap * sizeof(*nv));
+        if (!nv) return NULL;
+        g_va_hits = nv;
+        g_va_hits_cap = cap;
+    }
+    slot = &g_va_hits[g_va_hits_count];
+    memset(slot, 0, sizeof(*slot));
+    slot->id = (char*)malloc(idl + 1);
+    if (!slot->id) return NULL;
+    memcpy(slot->id, id, idl);
+    slot->id[idl] = 0;
+    slot->idl = idl;
+    from = 0;
+    while (from < n) {
+        size_t h = cc_find_ident_top_level(s, from, n, id, idl);
+        size_t* hv;
+        if (h >= n) break;
+        from = h + idl;
+        if (slot->n_hits == slot->hits_cap) {
+            size_t cap = slot->hits_cap ? slot->hits_cap * 2 : 8;
+            hv = (size_t*)realloc(slot->hits, cap * sizeof(*hv));
+            if (!hv) break;
+            slot->hits = hv;
+            slot->hits_cap = cap;
+        }
+        slot->hits[slot->n_hits++] = h;
+    }
+    g_va_hits_count++;
+    return slot;
+}
+
 /* Resolve the declared type of identifier `id` by scanning declarations /
  * parameters textually in src[0..use_pos).  Recognizes
  *   Variant id | Variant* id | Variant *id | VariantKind id
@@ -572,12 +653,63 @@ static int cc__va_resolve_root(const char* s, size_t n, size_t use_pos,
     /* Nearest declarator wins.  A later non-variant `T* out` must shadow an
      * earlier schema/variant `V* out` (generated fill helpers use `out`). */
     int found = -1, form = CC_VA_FORM_VALUE;
-    size_t from = 0;
+    const CCVaIdHits* hits;
+    size_t hi;
     if (use_pos > n) use_pos = n;
-    while (from < use_pos) {
-        size_t h = cc_find_ident_top_level(s, from, use_pos, id, idl);
+    hits = cc__va_hits_for(s, n, id, idl);
+    if (!hits) {
+        /* Allocation failure — fall back to the original scan. */
+        size_t from = 0;
+        while (from < use_pos) {
+            size_t h = cc_find_ident_top_level(s, from, use_pos, id, idl);
+            if (h >= use_pos) break;
+            from = h + idl;
+            {
+                size_t f = h + idl;
+                while (f < use_pos && isspace((unsigned char)s[f])) f++;
+                if (f < use_pos && !(s[f] == ',' || s[f] == ';' || s[f] == '=' ||
+                                     s[f] == ')' || s[f] == '[')) continue;
+            }
+            size_t k = cc__va_back_ws(s, h);
+            int stars = 0;
+            while (k > 0 && s[k - 1] == '*') {
+                stars++;
+                k--;
+                k = cc__va_back_ws(s, k);
+            }
+            if (k == 0 || !cc_is_ident_char(s[k - 1])) continue;
+            size_t te = k, ts = k;
+            while (ts > 0 && cc_is_ident_char(s[ts - 1])) ts--;
+            {
+                size_t q = cc__va_back_ws(s, ts);
+                if (q > 0 && (s[q - 1] == '.' ||
+                              (s[q - 1] == '>' && q > 1 && s[q - 2] == '-'))) continue;
+            }
+            {
+                int vi = cc__va_find(s + ts, te - ts);
+                if (vi >= 0) {
+                    found = vi;
+                    form = stars > 0 ? CC_VA_FORM_PTR : CC_VA_FORM_VALUE;
+                    continue;
+                }
+                if (stars == 0) {
+                    vi = cc__va_find_kind(s + ts, te - ts);
+                    if (vi >= 0) {
+                        found = vi;
+                        form = CC_VA_FORM_KIND;
+                        continue;
+                    }
+                }
+                found = -1;
+                form = CC_VA_FORM_VALUE;
+            }
+        }
+        if (found >= 0 && out_form) *out_form = form;
+        return found;
+    }
+    for (hi = 0; hi < hits->n_hits; hi++) {
+        size_t h = hits->hits[hi];
         if (h >= use_pos) break;
-        from = h + idl;
         /* Following char must look like a declarator continuation. */
         {
             size_t f = h + idl;
@@ -3129,6 +3261,7 @@ char* cc_rewrite_variant_uses_text(const char* src, size_t n, const char* input_
     char* owned = NULL;
     const char* cur = src;
     size_t cn = n;
+    cc__va_hits_reset();
     for (size_t st = 0; st < sizeof(steps) / sizeof(steps[0]); st++) {
         int rounds = steps[st].iterate ? 16 : 1;
         for (int r = 0; r < rounds; r++) {
@@ -3137,6 +3270,7 @@ char* cc_rewrite_variant_uses_text(const char* src, size_t n, const char* input_
             if (rc < 0) {
                 cc__va_edits_free(&ed);
                 free(owned);
+                cc__va_hits_reset();
                 return (char*)-1;
             }
             if (!ed.n) {
@@ -3147,13 +3281,17 @@ char* cc_rewrite_variant_uses_text(const char* src, size_t n, const char* input_
             cc__va_edits_free(&ed);
             if (!nb) {
                 free(owned);
+                cc__va_hits_reset();
                 return (char*)-1;
             }
             free(owned);
             owned = nb;
             cur = owned;
             cn = strlen(owned);
+            /* Edits change absolute positions — drop occurrence lists. */
+            cc__va_hits_reset();
         }
     }
+    cc__va_hits_reset();
     return owned;
 }
