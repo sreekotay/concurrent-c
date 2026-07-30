@@ -27,21 +27,21 @@ static const ScannerBaseline BASELINE[] = {
     {"cc/src/comptime/symbols.c", 3},
     {"cc/src/header/lower_header.c", 7},
     {"cc/src/ir/ir.c", 8},
-    {"cc/src/parser/parse.c", 7},
+    {"cc/src/parser/parse.c", 1},
     {"cc/src/preprocess/emit_plan.c", 9},
-    {"cc/src/preprocess/preprocess.c", 85},
+    {"cc/src/preprocess/preprocess.c", 12},
     {"cc/src/preprocess/template_scan.c", 10},
     {"cc/src/preprocess/type_registry.c", 3},
     {"cc/src/util/result_fn_registry.c", 3},
     {"cc/src/util/text.h", 22},
-    {"cc/src/util/text_scan.h", 5},
+    {"cc/src/util/text_scan.h", 7},
     {"cc/src/visitor/async_ast.c", 3},
-    {"cc/src/visitor/pass_autoblock.c", 4},
-    {"cc/src/visitor/pass_create.c", 4},
-    {"cc/src/visitor/pass_defer_syntax.c", 4},
-    {"cc/src/visitor/pass_err_syntax.c", 4},
+    {"cc/src/visitor/pass_autoblock.c", 0},
+    {"cc/src/visitor/pass_create.c", 0},
+    {"cc/src/visitor/pass_defer_syntax.c", 0},
+    {"cc/src/visitor/pass_err_syntax.c", 0},
     {"cc/src/visitor/pass_type_syntax.c", 4},
-    {"cc/src/visitor/visit_codegen.c", 10},
+    {"cc/src/visitor/visit_codegen.c", 11},
 };
 
 static int is_word_char(char c) {
@@ -51,13 +51,13 @@ static int is_word_char(char c) {
 
 /* Match grep -E 'in_bc\b|in_block_comment' on one line. */
 static int line_has_marker(CCSlice line) {
-    if (cc_slice_has(&line, @slice("in_block_comment"))) return 1;
+    if (line.has(@slice("in_block_comment"))) return 1;
     CCSlice needle = @slice("in_bc");
     size_t idx = 0;
     while (idx + needle.len <= line.len) {
         bool found = false;
-        CCSlice rest = cc_slice_sub(line, idx, line.len);
-        size_t pos = cc_slice_index_of(rest, needle, &found);
+        CCSlice rest = line.sub(idx, line.len);
+        size_t pos = rest.index_of(needle, &found);
         if (!found) break;
         size_t at = idx + pos;
         char before = (at > 0) ? line.ptr[at - 1] : 0;
@@ -74,7 +74,7 @@ static int count_markers(CCSlice bytes) {
     while (i < bytes.len) {
         size_t start = i;
         while (i < bytes.len && bytes.ptr[i] != '\n') i++;
-        CCSlice line = cc_slice_sub(bytes, start, i);
+        CCSlice line = bytes.sub(start, i);
         if (line_has_marker(line)) n++;
         if (i < bytes.len) i++;
     }

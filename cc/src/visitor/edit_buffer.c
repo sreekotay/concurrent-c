@@ -126,34 +126,32 @@ static int edit_cmp(const void* a, const void* b) {
 
 size_t cc_find_protos_insertion_point(const char* src, size_t len);
 
-/* Find insertion point for protos (after last #include line) */
+/* Find insertion point for protos (after last #include line).  Driven by
+ * CCInertScan so an `#include` spelled inside a block comment or string
+ * literal never moves the insertion point into that comment/string. */
 static size_t find_protos_insertion_point(const char* src, size_t len) {
     size_t last_include_end = 0;
+    CCInertScan sc;
+    cc_inert_scan_init(&sc, NULL);
     size_t i = 0;
-    
     while (i < len) {
-        /* Skip whitespace */
-        while (i < len && (src[i] == ' ' || src[i] == '\t')) i++;
-        
-        /* Check for #include or # include */
-        if (i < len && src[i] == '#') {
-            i++;
-            while (i < len && (src[i] == ' ' || src[i] == '\t')) i++;
-            
-            if (i + 7 <= len && strncmp(src + i, "include", 7) == 0) {
+        /* Harvest-before-skip: only a `#` that is real code at line start
+         * (clean scan state) can head an #include directive. */
+        if (cc_inert_scan_at_code(&sc) && sc.at_line_start && src[i] == '#') {
+            size_t k = i + 1;
+            while (k < len && (src[k] == ' ' || src[k] == '\t')) k++;
+            if (k + 7 <= len && strncmp(src + k, "include", 7) == 0) {
                 /* Find end of this line */
-                while (i < len && src[i] != '\n') i++;
-                if (i < len) i++; /* Skip newline */
-                last_include_end = i;
-                continue;
+                size_t e = k + 7;
+                while (e < len && src[e] != '\n') e++;
+                if (e < len) e++; /* Skip newline */
+                last_include_end = e;
             }
         }
-        
-        /* Skip to next line */
-        while (i < len && src[i] != '\n') i++;
-        if (i < len) i++;
+        if (cc_inert_scan_step(&sc, src, len, &i)) continue;
+        i++;
     }
-    
+
     return last_include_end;
 }
 

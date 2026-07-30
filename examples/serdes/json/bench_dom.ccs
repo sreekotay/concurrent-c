@@ -32,7 +32,7 @@ int main(int argc, char** argv) {
     best = 1e18;
     for (int t = 0; t < 3; t++) { double t0 = now_s();
         for (int i = 0; i < K; i++) {
-            cc_arena_reset(&ar);
+            ar.reset();
             if (!Json_parse(buf, rd, &ar)) return 1;
         }
         double dt = now_s() - t0; if (dt < best) best = dt; }
@@ -41,7 +41,7 @@ int main(int argc, char** argv) {
     best = 1e18;
     for (int t = 0; t < 3; t++) { double t0 = now_s();
         for (int i = 0; i < K; i++) {
-            cc_arena_reset(&ar);
+            ar.reset();
             CCShapeVal v;
             if (!Json_dom(buf, rd, reg, &ar, &v)) return 1;
         }
@@ -51,7 +51,7 @@ int main(int argc, char** argv) {
 
     /* access: id/text/retweet_count/user.screen_name per tweet */
     {
-        cc_arena_reset(&ar);
+        ar.reset();
         CCShapeVal sv;
         if (!Json_dom(buf, rd, reg, &ar, &sv)) return 1;
         CCShapeVal* st = cc_shape_get(&sv, "statuses");

@@ -307,20 +307,6 @@ static void cc__err_skip_block_comment_backward(const char* s, size_t* i) {
     *i = 0;
 }
 
-static int cc__err_pos_in_line_comment(const char* s, size_t pos) {
-    size_t line_start = pos;
-    while (line_start > 0 && s[line_start - 1] != '\n') line_start--;
-    CCInertScan scan;
-    cc_inert_scan_init(&scan, NULL);
-    scan.at_line_start = 1;  /* started at line_start (after '\n' or BOF) */
-    size_t k = line_start;
-    while (k < pos) {
-        if (!cc_inert_scan_step(&scan, s, pos, &k)) k++;
-        if (scan.in_line_comment) return 1;
-    }
-    return 0;
-}
-
 /* When scanning backward and landing on a `'`/`"`, that quote is the
  * closing delimiter of a literal (in source order).  Naive
  * "enter string mode + treat `\\` as escape while walking backward"
@@ -440,7 +426,7 @@ static size_t cc__err_stmt_start_backward(const char* s, size_t err_at) {
             cc__err_skip_block_comment_backward(s, &i);
             continue;
         }
-        if (c != '\n' && cc__err_pos_in_line_comment(s, i)) {
+        if (c != '\n' && cc_scan_pos_in_line_comment(s, i)) {
             while (i > 0 && s[i] != '\n') i--;
             continue;
         }
@@ -912,18 +898,14 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
     int stk_n = 0;
     int depth = 0;
     int line_no = 1;
-    int in_str = 0;
-    char qch = 0;
-    int in_line_comment = 0;
-    int in_block_comment = 0;
-    /* `in_pp` covers preprocessor-directive bodies that the visitor's
-     * preprocess chain leaves verbatim in the working buffer.  Without
-     * it, a benign `#define UNUSED_ERR_TARGET(lhs, e) lhs =<! e @err`
+    /* Inert regions (comments / strings / char literals / preprocessor
+     * directive bodies) are consumed by the shared CCInertScan.  The pp
+     * coverage matters: without it, a benign
+     * `#define UNUSED_ERR_TARGET(lhs, e) lhs =<! e @err`
      * would have its `@err` keyword scanned as if it were real source
      * code and report "expected ';' after @err" on the #define line.
      * Regression guard: `tests/inert_pp_directive_tokens_smoke.ccs`. */
-    int in_pp = 0;
-    int at_line_start = 1;
+    CCInertScan sc;
 
     char* out = NULL;
     size_t ol = 0, oc = 0;
@@ -931,75 +913,29 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
     static int g_err_id = 0;
     size_t* ito = (size_t*)calloc(in_len + 1, sizeof(size_t));
     if (!ito) goto fail;
+    cc_inert_scan_init(&sc, NULL);
 
-    for (size_t i = 0; i < in_len; i++) {
+    for (size_t i = 0; i < in_len;) {
+        size_t span_a = i;
+        int was_lit = sc.in_str || sc.in_chr;
+        if (cc_inert_scan_step(&sc, in_src, in_len, &i)) {
+            /* Inert content: copy through verbatim, stamping the
+             * input->output offset ledger per byte.  A `\` + newline
+             * escape pair inside a string/char literal counts as escape
+             * bytes, not a line break, for line_no. */
+            for (size_t x = span_a; x < i; x++) {
+                ito[x] = ol;
+                if (in_src[x] == '\n' &&
+                    !(was_lit && x == span_a + 1 && in_src[span_a] == '\\'))
+                    line_no++;
+                cc__append_n(&out, &ol, &oc, &in_src[x], 1);
+            }
+            continue;
+        }
+
         ito[i] = ol;
         char ch = in_src[i];
         if (ch == '\n') line_no++;
-
-        if (in_pp) {
-            cc__append_n(&out, &ol, &oc, &ch, 1);
-            if (ch == '\n') {
-                size_t k = i;
-                while (k > 0 && (in_src[k - 1] == ' ' || in_src[k - 1] == '\t' || in_src[k - 1] == '\r')) k--;
-                if (k == 0 || in_src[k - 1] != '\\') {
-                    in_pp = 0;
-                    at_line_start = 1;
-                }
-            }
-            continue;
-        }
-
-        if (in_line_comment) {
-            cc__append_n(&out, &ol, &oc, &ch, 1);
-            if (ch == '\n') { in_line_comment = 0; at_line_start = 1; }
-            continue;
-        }
-        if (in_block_comment) {
-            cc__append_n(&out, &ol, &oc, &ch, 1);
-            if (ch == '*' && i + 1 < in_len && in_src[i + 1] == '/') {
-                cc__append_n(&out, &ol, &oc, &in_src[i + 1], 1);
-                i++;
-                in_block_comment = 0;
-            }
-            continue;
-        }
-        if (in_str) {
-            cc__append_n(&out, &ol, &oc, &ch, 1);
-            if (ch == '\\' && i + 1 < in_len) {
-                cc__append_n(&out, &ol, &oc, &in_src[i + 1], 1);
-                i++;
-                continue;
-            }
-            if (ch == qch) in_str = 0;
-            continue;
-        }
-        if (at_line_start && ch == '#') {
-            cc__append_n(&out, &ol, &oc, &ch, 1);
-            in_pp = 1;
-            at_line_start = 0;
-            continue;
-        }
-        if (ch == '\n') { at_line_start = 1; }
-        else if (ch != ' ' && ch != '\t' && ch != '\r') at_line_start = 0;
-        if (ch == '/' && i + 1 < in_len && in_src[i + 1] == '/') {
-            cc__append_n(&out, &ol, &oc, &in_src[i], 2);
-            i++;
-            in_line_comment = 1;
-            continue;
-        }
-        if (ch == '/' && i + 1 < in_len && in_src[i + 1] == '*') {
-            cc__append_n(&out, &ol, &oc, &in_src[i], 2);
-            i++;
-            in_block_comment = 1;
-            continue;
-        }
-        if (ch == '"' || ch == '\'') {
-            cc__append_n(&out, &ol, &oc, &ch, 1);
-            in_str = 1;
-            qch = ch;
-            continue;
-        }
 
         if (cc__token_is(in_src, in_len, i, "@errhandler")) {
             int eh_line = line_no;
@@ -1098,7 +1034,7 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
             }
             ito[stmt_end] = ol;
             changed = 1;
-            i = stmt_end - 1;
+            i = stmt_end;
             continue;
         }
 
@@ -1554,13 +1490,14 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
                 if (in_src[x] == '\n') line_no++;
             }
             changed = 1;
-            i = stmt_end - 1;
+            i = stmt_end;
             continue;
         }
 
         if (ch == '{') {
             depth++;
             cc__append_n(&out, &ol, &oc, &ch, 1);
+            i++;
             continue;
         }
         if (ch == '}') {
@@ -1570,10 +1507,12 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
             }
             if (depth > 0) depth--;
             cc__append_n(&out, &ol, &oc, &ch, 1);
+            i++;
             continue;
         }
 
         cc__append_n(&out, &ol, &oc, &ch, 1);
+        i++;
     }
     ito[in_len] = ol;
     free(ito);

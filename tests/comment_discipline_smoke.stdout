@@ -1,0 +1,4 @@
+alias intact
+ep=7
+s1=@destroy { s2=@defer (x) y=1
+xs=3

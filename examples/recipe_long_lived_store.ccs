@@ -11,13 +11,10 @@
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
-CC_MAP_DECL_ARENA(CCSliceHdr, int, StoreMap, cc_map_hash_slice_hdr, cc_map_eq_slice_hdr);
-CC_MAP_DECL_UFCS(StoreMap);
-
 typedef struct Store {
     CCArena map_arena;
     CCArena key_arena;
-    StoreMap* entries;
+    Map::[CCSliceHdr, int] entries;
     size_t key_insert_bytes;
     size_t key_delete_bytes;
 } Store;
@@ -46,7 +43,7 @@ static bool !>(CCError) store_init(Store* store) {
         return cc_err(CC_ERR_OUT_OF_MEMORY, "key arena");
     }
 
-    store->entries = StoreMap_init(&store->map_arena);
+    store->entries = map_new::[CCSliceHdr, int](&store->map_arena);
     if (!store->entries) {
         store->free();
         return cc_err(CC_ERR_OUT_OF_MEMORY, "store map");
@@ -64,15 +61,15 @@ static CCSliceHdr !>(CCError) store_anchor_key(Store* store, char[:] key) {
 }
 
 static void !>(CCError) store_insert_entry(Store* store, CCSliceHdr key, int value) {
-    StoreMap* entries = store ? store->entries : NULL;
+    Map::[CCSliceHdr, int] entries = store ? store->entries : NULL;
     if (!entries) return cc_err(CC_ERR_INVALID_ARG, "insert without entries");
-    int rc = StoreMap_insert(entries, key, value);
+    int rc = entries.insert(key, value);
     if (rc != 0) return cc_err(CC_ERR_OUT_OF_MEMORY, "insert");
     return cc_ok();
 }
 
 static bool !>(CCError) store_put(Store* store, char[:] key, int value) {
-    StoreMap* entries = store ? store->entries : NULL;
+    Map::[CCSliceHdr, int] entries = store ? store->entries : NULL;
     if (!entries) return cc_err(CC_ERR_INVALID_ARG, "put without store");
 
     CCSliceHdr query = key.hdr();
@@ -127,7 +124,7 @@ int main(void) {
 
     if (!store.delete(char_to_slice("user:1"))) return 3;
 
-    StoreMap* entries = store.entries;
+    Map::[CCSliceHdr, int] entries = store.entries;
     printf("entries=%zu logical_key_bytes=%zu inserted=%zu deleted=%zu\n",
            entries->len(),
            store.key_logical_live_bytes(),

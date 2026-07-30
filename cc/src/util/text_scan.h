@@ -299,4 +299,108 @@ static inline int cc_inert_scan_step(CCInertScan* s, const char* src,
     return 0;
 }
 
+/* True when the scanner is at real code — not inside a comment, string,
+ * char literal, or preprocessor-directive body.  Harvest-before-skip
+ * probes use this to qualify a token BEFORE letting the scanner consume
+ * the region it heads. */
+static inline int cc_inert_scan_at_code(const CCInertScan* s) {
+    return s && !s->in_line_comment && !s->in_block_comment &&
+           !s->in_str && !s->in_chr && !s->in_pp;
+}
+
+/* Return 1 if position `pos` in `s` lies inside a `//` line comment on
+ * the same line.  Used by backward scanners to skip over commented
+ * characters without mistaking them for statement terminators.
+ *
+ * "Post-step state probe" pattern: rewind to the start of the line
+ * containing `pos`, drive CCInertScan forward over the line, and check
+ * `in_line_comment` after each step.  A leading `#` on the line enters
+ * pp-directive state, which also reads as "inert" here — fine
+ * semantically for callers, which use this to skip CC-token matches
+ * sitting inside non-code regions. */
+static inline int cc_scan_pos_in_line_comment(const char* s, size_t pos) {
+    size_t line_start = pos;
+    while (line_start > 0 && s[line_start - 1] != '\n') line_start--;
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 1;  /* started at line_start (after '\n' or BOF) */
+    size_t k = line_start;
+    while (k < pos) {
+        if (!cc_inert_scan_step(&scan, s, pos, &k)) k++;
+        if (scan.in_line_comment) return 1;
+    }
+    return 0;
+}
+
+/* ---- Directive-head parsing (harvest-before-skip) ----
+ *
+ * Inert scanning consumes preprocessor directives whole, which is right
+ * for rewrite passes but wrong for probes that must READ a directive's
+ * head — "does this text #define a function-like macro named X?".  The
+ * pattern is to parse the head at the `#` BEFORE letting the scanner
+ * consume the line.  These helpers are that parse, shared, so every
+ * macro-realness probe agrees on what a #define head is. */
+
+/* Parse `# ws* define ws+ NAME` at `hash_pos`, which must be a `#` the
+ * caller's scanner has established as real code at line start.  On
+ * match, `name_off`/`name_len` describe the macro name span and
+ * `is_fnlike` is 1 when `(` immediately follows the name (function-like
+ * macro; C permits no space there).  Returns 1 when the directive is a
+ * #define with a well-formed name, 0 otherwise. */
+static inline int cc_scan_define_head(const char* src, size_t n, size_t hash_pos,
+                                      size_t* name_off, size_t* name_len,
+                                      int* is_fnlike) {
+    size_t q, s;
+    char c;
+    if (!src || hash_pos >= n || src[hash_pos] != '#') return 0;
+    q = hash_pos + 1;
+    while (q < n && (src[q] == ' ' || src[q] == '\t')) q++;
+    if (q + 6 > n || memcmp(src + q, "define", 6) != 0) return 0;
+    q += 6;
+    if (q >= n || (src[q] != ' ' && src[q] != '\t')) return 0;
+    while (q < n && (src[q] == ' ' || src[q] == '\t')) q++;
+    if (q >= n) return 0;
+    c = src[q];
+    if (!(c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'))) return 0;
+    s = q;
+    while (q < n) {
+        c = src[q];
+        if (!(c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+              (c >= '0' && c <= '9')))
+            break;
+        q++;
+    }
+    if (name_off) *name_off = s;
+    if (name_len) *name_len = q - s;
+    if (is_fnlike) *is_fnlike = (q < n && src[q] == '(');
+    return 1;
+}
+
+/* Does the buffer #define a function-like macro named `name`?  Real
+ * directives only: the `#` must be actual code at the start of a line —
+ * a "#define name(" spelled inside a comment or string literal does not
+ * count.  Shared answer for "a TU macro binding wins" checks. */
+static inline int cc_text_defines_fnlike_macro(const char* src, size_t n,
+                                               const char* name) {
+    CCInertScan s;
+    size_t i = 0, nlen;
+    if (!src || !name) return 0;
+    nlen = strlen(name);
+    if (nlen == 0) return 0;
+    cc_inert_scan_init(&s, NULL);
+    while (i < n) {
+        if (src[i] == '#' && s.at_line_start && !s.in_pp &&
+            !s.in_line_comment && !s.in_block_comment && !s.in_str && !s.in_chr) {
+            size_t noff = 0, nl = 0;
+            int fnlike = 0;
+            if (cc_scan_define_head(src, n, i, &noff, &nl, &fnlike) &&
+                fnlike && nl == nlen && memcmp(src + noff, name, nlen) == 0)
+                return 1;
+        }
+        if (cc_inert_scan_step(&s, src, n, &i)) continue;
+        i++;
+    }
+    return 0;
+}
+
 #endif /* CC_UTIL_TEXT_SCAN_H */

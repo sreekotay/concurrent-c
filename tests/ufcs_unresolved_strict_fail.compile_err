@@ -1,1 +1,1 @@
-function 'Widget_nonexistent_method'
+no UFCS method 'nonexistent_method' for receiver type 'Widget'

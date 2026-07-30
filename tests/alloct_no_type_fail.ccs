@@ -1,0 +1,8 @@
+/* allocT with no destination and no explicit type argument is
+ * ill-formed: nothing supplies the element type. */
+#include <ccc/cc_runtime.cch>
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(4));
+    arena.allocT(16);
+    return 0;
+}

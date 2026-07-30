@@ -59,27 +59,28 @@ static int cc__ud_skip_comment_or_string(const char* s, size_t n, size_t* i) {
         if (*i < n) (*i)++;
         return 1;
     }
-    return 0;
-}
-
-/* Return 1 if position `pos` in `s` lies inside a `//` line comment on
- * the same line.  Used by the backward scanner to skip over commented
- * characters without mistaking them for statement terminators.
- *
- * Twin of `cc__pos_in_line_comment` (pass_result_unwrap, Batch G) and
- * `cc__err_pos_in_line_comment` (pass_err_syntax, Batch I2).  All three
- * use the "post-step state probe" pattern: drive CCInertScan over the
- * line and check `scan.in_line_comment` after each step. */
-static int cc__ud_pos_in_line_comment(const char* s, size_t pos) {
-    size_t line_start = pos;
-    while (line_start > 0 && s[line_start - 1] != '\n') line_start--;
-    CCInertScan scan;
-    cc_inert_scan_init(&scan, NULL);
-    scan.at_line_start = 1;  /* started at line_start (after '\n' or BOF) */
-    size_t k = line_start;
-    while (k < pos) {
-        if (!cc_inert_scan_step(&scan, s, pos, &k)) k++;
-        if (scan.in_line_comment) return 1;
+    if (c == '#') {
+        /* Preprocessor directive (`#` first non-WS on its line): consume
+         * the whole logical line, including `\` continuations, so a
+         * lifetime sigil inside a #define body is never rewritten as
+         * code.  Same rule as pass_err_syntax / pass_defer_syntax. */
+        size_t ls = *i;
+        while (ls > 0 && s[ls - 1] != '\n') {
+            if (s[ls - 1] != ' ' && s[ls - 1] != '\t') return 0;
+            ls--;
+        }
+        while (*i < n) {
+            if (s[*i] == '\n') {
+                size_t b = *i;
+                while (b > 0 && (s[b - 1] == ' ' || s[b - 1] == '\t' ||
+                                 s[b - 1] == '\r'))
+                    b--;
+                if (b > 0 && s[b - 1] == '\\') { (*i)++; continue; }
+                break;
+            }
+            (*i)++;
+        }
+        return 1;
     }
     return 0;
 }
@@ -149,7 +150,7 @@ static int cc__ud_is_stmt_continuation_after_rbrace(const char* s, size_t n, siz
  * the scanner keeps walking past them — see
  * `cc__ud_is_stmt_continuation_after_rbrace`.
  *
- * String/comment aware (via `cc__ud_pos_in_line_comment` and inline
+ * String/comment aware (via `cc_scan_pos_in_line_comment` and inline
  * block-comment skipping below). */
 static size_t cc__ud_stmt_start_backward(const char* s, size_t src_n, size_t pos) {
     size_t i = pos;
@@ -179,7 +180,7 @@ static size_t cc__ud_stmt_start_backward(const char* s, size_t src_n, size_t pos
          * code tokens (e.g. a `{` or `}`) that appear before the comment
          * on the same line.  Forward-walk uses CCInertScan to honour
          * strings/char literals while locating the `//` opener. */
-        if (c != '\n' && cc__ud_pos_in_line_comment(s, k)) {
+        if (c != '\n' && cc_scan_pos_in_line_comment(s, k)) {
             size_t line_start = k;
             while (line_start > 0 && s[line_start - 1] != '\n') line_start--;
             CCInertScan scan;
@@ -277,9 +278,9 @@ static int cc__ud_extract_decl_name(const char* s, size_t stmt_a, size_t op_pos,
         }
     }
     if (eq == (size_t)-1) return 0;
-    /* Walk back over whitespace. */
-    size_t p = eq;
-    while (p > stmt_a && isspace((unsigned char)s[p - 1])) p--;
+    /* Walk back over whitespace and comments (`T x / *c* / = ...`). */
+    size_t p = cc_rskip_ws_and_comments(s, eq);
+    if (p < stmt_a) p = stmt_a;
     size_t nb = p;
     while (p > stmt_a && (isalnum((unsigned char)s[p - 1]) || s[p - 1] == '_')) p--;
     size_t na = p;
@@ -313,6 +314,18 @@ static int cc__ud_normalize_type_name(const char* s, size_t type_a, size_t type_
     int last_was_space = 1;
     while (i < type_b) {
         char c = s[i];
+        if (c == '/' && i + 1 < type_b && (s[i + 1] == '*' || s[i + 1] == '/')) {
+            /* A comment inside the type span reads as whitespace. */
+            size_t i2 = cc_skip_ws_and_comments(s, type_b, i);
+            if (i2 > i) {
+                if (!last_was_space && o > 0 && o + 1 < out_cap) {
+                    out[o++] = ' ';
+                    last_was_space = 1;
+                }
+                i = i2;
+                continue;
+            }
+        }
         if (isspace((unsigned char)c)) {
             if (!last_was_space && o > 0 && o + 1 < out_cap) {
                 out[o++] = ' ';
@@ -377,6 +390,18 @@ static size_t cc__ud_tighten_type_start(const char* s, size_t type_a, size_t nam
     size_t k = name_a;
     while (k > type_a && isspace((unsigned char)s[k - 1])) k--;
     while (k > type_a) {
+        /* Block comment between type tokens: rewind it whole so
+         * `MyThing* / *doc* / t` keeps its real type start. */
+        if (k >= 2 && s[k - 1] == '/' && s[k - 2] == '*') {
+            size_t c2 = k - 2, op = (size_t)-1;
+            while (c2 > type_a) {
+                c2--;
+                if (s[c2] == '*' && c2 > type_a && s[c2 - 1] == '/') { op = c2 - 1; break; }
+            }
+            if (op == (size_t)-1) break;
+            k = op;
+            continue;
+        }
         char c = s[k - 1];
         if (isalnum((unsigned char)c) || c == '_' || c == '*' ||
             c == ' ' || c == '\t' || c == '\n' || c == '\r') {
@@ -385,7 +410,7 @@ static size_t cc__ud_tighten_type_start(const char* s, size_t type_a, size_t nam
         }
         break;
     }
-    while (k < name_a && isspace((unsigned char)s[k])) k++;
+    k = cc_skip_ws_and_comments(s, name_a, k);
     return k;
 }
 
@@ -805,8 +830,48 @@ int cc__rewrite_unwrap_destroy_suffix(const char* src,
             }
         }
 
+        /* allocT results: `T* p = cc_arena_alloc_T[_count](T, ARENA, ...)
+         * @destroy;` reclaims through the owning arena —
+         * cc_arena_release(ARENA, p). Where the slab cannot reclaim,
+         * the release is a semantic no-op; the declaration still states
+         * the allocation's scope. */
+        char release_ctx[256];
+        release_ctx[0] = 0;
+        if (have_name && !pre_hook && !post_hook) {
+            size_t eq = cc_find_char_top_level(src, stmt_a, i, '=');
+            if (eq < i) {
+                size_t r = cc_skip_ws_and_comments(src, i, eq + 1);
+                size_t cs = r;
+                while (r < i && cc_is_ident_char(src[r])) r++;
+                size_t cl = r - cs;
+                if ((cl == 16 && !memcmp(src + cs, "cc_arena_alloc_T", 16)) ||
+                    (cl == 22 && !memcmp(src + cs, "cc_arena_alloc_T_count", 22))) {
+                    size_t lp = cc_skip_ws_and_comments(src, i, r);
+                    size_t rp = 0;
+                    if (lp < i && src[lp] == '(' &&
+                        cc_find_matching_paren(src, i, lp, &rp)) {
+                        size_t a1 = cc_find_char_top_level(src, lp + 1, rp, ',');
+                        if (a1 < rp) {
+                            size_t a2s = cc_skip_ws_and_comments(src, rp, a1 + 1);
+                            size_t a2e = cc_find_char_top_level(src, a2s, rp, ',');
+                            if (a2e > rp) a2e = rp;
+                            while (a2e > a2s &&
+                                   isspace((unsigned char)src[a2e - 1]))
+                                a2e--;
+                            if (a2e > a2s &&
+                                a2e - a2s < sizeof(release_ctx)) {
+                                memcpy(release_ctx, src + a2s, a2e - a2s);
+                                release_ctx[a2e - a2s] = 0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         /* Bodyless `@destroy;` needs outer hooks and/or @as-field hooks. */
-        if (!have_body && !pre_hook && !post_hook && !has_as_hooks) {
+        if (!have_body && !pre_hook && !post_hook && !has_as_hooks &&
+            !release_ctx[0]) {
             int line = 1, col = 1;
             cc__ud_offset_to_line_col(src, i, &line, &col);
             const char* f = input_path ? input_path : "<input>";
@@ -892,6 +957,13 @@ int cc__rewrite_unwrap_destroy_suffix(const char* src,
             cc__append_str(&out, &ol, &oc, post_hook);
             cc__append_str(&out, &ol, &oc, "(");
             if (post_pass_addr) cc__append_str(&out, &ol, &oc, "&");
+            cc__append_n(&out, &ol, &oc, src + name_a, name_b - name_a);
+            cc__append_str(&out, &ol, &oc, ");");
+        }
+        if (release_ctx[0] && have_name) {
+            cc__append_str(&out, &ol, &oc, " (void)cc_arena_release(");
+            cc__append_str(&out, &ol, &oc, release_ctx);
+            cc__append_str(&out, &ol, &oc, ", ");
             cc__append_n(&out, &ol, &oc, src + name_a, name_b - name_a);
             cc__append_str(&out, &ol, &oc, ");");
         }

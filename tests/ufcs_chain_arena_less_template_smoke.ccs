@@ -1,0 +1,25 @@
+/* Arena-less `@string(`...`)` yields char[:] (bounded stack form).
+ * Method chains must hoist that receiver as CCSlice, not CCString —
+ * the normalize pass used to hardcode CCString and mis-type this path. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+int main(void) {
+    char[:] t = @string(`hello world`).sub(6, 11);
+    if (t.len != 5) return 1;
+    if (memcmp(t.ptr, "world", 5) != 0) return 2;
+
+    bool found = false;
+    size_t pos = @string(`hello world`).index_of(@slice("world"), &found);
+    if (!found || pos != 6) return 3;
+
+    /* Arena form still chains as CCString. */
+    CCArena a = cc_arena_heap(kilobytes(4));
+    if (!a.valid()) return 4;
+    size_t n = @string(`abcdef`, &a).len();
+    if (n != 6) return 5;
+
+    printf("ok sub=%.*s pos=%zu len=%zu\n", (int)t.len, (const char *)t.ptr, pos, n);
+    return 0;
+}

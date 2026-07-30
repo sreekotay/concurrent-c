@@ -10,7 +10,7 @@ int main(void) {
         CCString s = cc_string_new();
         int v = helper_add(2, 5);
         s.append("mixed_c helper_add(2,5)=", arena);
-        cc_string_push_int(&s, v, arena);
+        s.push_int(v, arena);
         s.append("\n", arena);
         cc_std_out.write(s);
     }

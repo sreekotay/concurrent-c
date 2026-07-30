@@ -185,6 +185,18 @@ Slice UFCS maps `hdr`, `len`, `trim`, `trim_left`, `trim_right`, `sub`,
 `CCSlice_*` or `cc_slice_*` function. Checked index UFCS (`at`, `get_checked`,
 `set`) is documented under arena-backed slice operations below.
 
+### Arena typed allocation
+
+`allocT` is a type-formal member on arenas: `arena.allocT()` allocates
+one `T`, `arena.allocT(n)` allocates `n` — the element type comes from
+the declared pointer destination (`T* p = arena.allocT(n)`) or
+explicitly via `arena.allocT::[T](n)`. Both lower to
+`cc_arena_alloc_T` / `cc_arena_alloc_T_count`. An optional `@destroy`
+on the declaration releases the allocation through its owning arena at
+scope exit (`cc_arena_release`); where the slab cannot reclaim
+individually, the release is a semantic no-op and the declaration
+still states the allocation's scope.
+
 ### Arena-backed slice operations
 
 `<ccc/std/slice.cch>` provides:
@@ -1040,6 +1052,11 @@ int cc_blocking_pool_stats(CCExecStats *out_exec, uint64_t *out_submit_failures)
 completion. `cc_block_any` reports the first successful completion and returns
 `ECANCELED` when every task fails.
 
+`block_on` is also a type-formal member on task values: `T v =
+task.block_on();` takes `T` from the destination, and
+`task.block_on::[T]()` spells it explicitly where no destination is
+visible.
+
 ## Command-line parsing
 
 Declare options with `@grammar(cli)` (see `spec/cc_serdes.md`). The compiler
@@ -1415,6 +1432,19 @@ bool exchanged = cc_atomic_cas(ptr, expected_ptr, desired);
 On a failed compare-and-swap, the C11 and fallback implementations update
 `*expected_ptr` with the observed value. The GCC/Clang `__sync` implementation
 returns false without updating `*expected_ptr`.
+
+Atomic operations are also methods on the atomic value: for a receiver whose
+type is a `cc_atomic_*` typedef, `recv.method(args)` composes
+`cc_atomic_<method>(&recv, args)` when the header declares that operation.
+
+```c
+cc_atomic_int n;
+n.store(40);
+int old = n.fetch_add(2);     // cc_atomic_fetch_add(&n, 2)
+int cur = n.load();
+int want = 42;
+bool ok = n.cas(&want, 100);  // cc_atomic_cas(&n, &want, 100)
+```
 
 `CC_ATOMIC_HAVE_REAL_ATOMICS` is `1` when the header selects C11 atomics or
 GCC/Clang atomic builtins. It is `0` for TinyCC and unknown-compiler fallback

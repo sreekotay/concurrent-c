@@ -228,6 +228,10 @@ char* cc_rewrite_header_type_syntax_shared(const char* src,
 // Rewrite `@slice(...)`, `@string(...)`, and backtick template literals in a
 // source fragment used by later text-based lowering/codegen passes.
 char* cc_rewrite_string_templates_text(const char* src, size_t n, const char* input_path);
+/* `@string(...)` receivers: capture the template and its first member call
+ * into a typed temp so the ident receiver resolves on the normal UFCS
+ * rails in every position. Run before template lowering. */
+char* cc_normalize_template_recv_chains_text(const char* src, size_t n);
 
 /* Arena-less `@string(`...`)` slot registry: the template rewrite records
  * each lowered slot's (file, line, text); the TCC stderr replay uses the

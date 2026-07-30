@@ -32,6 +32,7 @@
 #include "util/path.h"
 #include "util/result_fn_registry.h"
 #include "util/text.h"
+#include "util/text_scan.h"
 #include "visitor/ufcs.h"
 #include "visitor/visitor.h"
 #include "visitor/pass_channel_syntax.h"
@@ -251,6 +252,8 @@ static int cc__apply_phase1_canonical_passes(CCPassChain* chain,
 static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
                                                  const char* input_path);
 char* cc__rewrite_at_await(const char* src, size_t n); /* defined later */
+static char* cc__normalize_template_recv_chains(const char* src, size_t n);
+static int cc__find_matching_bracket(const char* b, size_t bl, size_t lbracket, size_t* out_rbracket);
 
 /* Initialize chain with source buffer (buffer is NOT owned by chain) */
 static inline void cc_pass_chain_init(CCPassChain* c, const char* src, size_t len) {
@@ -314,18 +317,12 @@ static void cc__pp_offset_to_line_col(const char* src, size_t off, int* out_line
 
 static int cc__pp_find_top_level_equal(const char* src, size_t start, size_t end, size_t* out_pos) {
     int par = 0, brk = 0, br = 0;
-    int in_str = 0, in_chr = 0, in_lc = 0, in_bc = 0;
-    for (size_t i = start; i < end; i++) {
+    CCScannerState scan;
+    cc_scanner_init(&scan);
+    size_t i = start;
+    while (i < end) {
+        if (cc_scanner_skip_non_code(&scan, src, end, &i)) continue;
         char c = src[i];
-        char c2 = (i + 1 < end) ? src[i + 1] : 0;
-        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
-        if (in_str) { if (c == '\\' && i + 1 < end) { i++; continue; } if (c == '"') in_str = 0; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < end) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
-        if (c == '"') { in_str = 1; continue; }
-        if (c == '\'') { in_chr = 1; continue; }
         if (c == '(') par++;
         else if (c == ')') { if (par) par--; }
         else if (c == '[') brk++;
@@ -336,6 +333,7 @@ static int cc__pp_find_top_level_equal(const char* src, size_t start, size_t end
             if (out_pos) *out_pos = i;
             return 1;
         }
+        i++;
     }
     return 0;
 }
@@ -631,6 +629,103 @@ static char* cc__rewrite_builtin_owned_decl_annotations(const char* src, size_t 
 /* Legacy compatibility wrapper. Builtin arena/nursery declaration lowering has
    moved to registered type-owned `@create` hooks; keep only the expression-form
    ownership annotation rewrite here (`Type x = expr @destroy/@detach;`). */
+/* `T* p = cc_arena_alloc_T[_count](TY, ARENA, ...) @destroy [{ body }];`
+ * → `T* p = ...; @defer { body (void)cc_arena_release(ARENA, p); };`
+ * Runs after UFCS lowering so ARENA is spelled with the correct
+ * reference form. Where the slab cannot reclaim, the release is a
+ * semantic no-op; the declaration still states the allocation's scope. */
+static char* cc__rewrite_alloct_destroy_annotations(const char* src, size_t n) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0, last_emit = 0, i = 0;
+    size_t cur_stmt = 0;
+    int changed = 0;
+    CCScannerState scan;
+    if (!src || n == 0) return NULL;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        size_t stmt_s, eq, p, name_s, name_e, rhs_s, r, cs, cl, lp, rp;
+        size_t a1, a2s, a2e, semi, body_s = 0, body_e = 0;
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (src[i] == ';' || src[i] == '{' || src[i] == '}') {
+            cur_stmt = i + 1;
+            i++;
+            continue;
+        }
+        if (src[i] != '@' || i + 8 > n || memcmp(src + i, "@destroy", 8) != 0 ||
+            (i + 8 < n && cc__pp_is_ident_char(src[i + 8]))) {
+            i++;
+            continue;
+        }
+        stmt_s = cc_skip_ws_and_comments(src, n, cur_stmt);
+        if (stmt_s >= i || stmt_s < last_emit) { i++; continue; }
+        if (!cc__pp_find_top_level_equal(src, stmt_s, i, &eq)) { i++; continue; }
+        p = eq;
+        while (p > stmt_s && isspace((unsigned char)src[p - 1])) p--;
+        name_e = p;
+        while (p > stmt_s && cc__pp_is_ident_char(src[p - 1])) p--;
+        name_s = p;
+        if (name_s >= name_e ||
+            !(isalpha((unsigned char)src[name_s]) || src[name_s] == '_')) {
+            i++;
+            continue;
+        }
+        rhs_s = cc_skip_ws_and_comments(src, n, eq + 1);
+        cs = rhs_s;
+        r = rhs_s;
+        while (r < i && cc__pp_is_ident_char(src[r])) r++;
+        cl = r - cs;
+        if (!((cl == 16 && !memcmp(src + cs, "cc_arena_alloc_T", 16)) ||
+              (cl == 22 && !memcmp(src + cs, "cc_arena_alloc_T_count", 22)))) {
+            i++;
+            continue;
+        }
+        lp = cc_skip_ws_and_comments(src, i, r);
+        if (lp >= i || src[lp] != '(' || !cc_find_matching_paren(src, i, lp, &rp)) {
+            i++;
+            continue;
+        }
+        a1 = cc_find_char_top_level(src, lp + 1, rp, ',');
+        if (a1 >= rp) { i++; continue; }
+        a2s = cc_skip_ws_and_comments(src, rp, a1 + 1);
+        a2e = cc_find_char_top_level(src, a2s, rp, ',');
+        if (a2e > rp) a2e = rp;
+        while (a2e > a2s && isspace((unsigned char)src[a2e - 1])) a2e--;
+        if (a2e <= a2s) { i++; continue; }
+        /* Optional `{ body }` then the statement `;`. */
+        semi = cc_skip_ws_and_comments(src, n, i + 8);
+        if (semi < n && src[semi] == '{') {
+            body_s = semi;
+            if (!cc_find_matching_brace(src, n, body_s, &body_e)) { i++; continue; }
+            semi = cc_skip_ws_and_comments(src, n, body_e + 1);
+        }
+        if (semi >= n || src[semi] != ';') { i++; continue; }
+        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
+        cc_sb_append_cstr(&out, &out_len, &out_cap, "; @defer { ");
+        if (body_e > body_s) {
+            for (size_t bi = body_s + 1; bi < body_e; bi++) {
+                char bc = src[bi];
+                char oc2 = (bc == '\n' || bc == '\r' || bc == '\t') ? ' ' : bc;
+                cc_sb_append(&out, &out_len, &out_cap, &oc2, 1);
+            }
+            cc_sb_append_cstr(&out, &out_len, &out_cap, " ");
+        }
+        cc_sb_append_cstr(&out, &out_len, &out_cap, "(void)cc_arena_release(");
+        cc_sb_append(&out, &out_len, &out_cap, src + a2s, a2e - a2s);
+        cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+        cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
+        cc_sb_append_cstr(&out, &out_len, &out_cap, "); };");
+        last_emit = semi + 1;
+        i = semi + 1;
+        changed = 1;
+    }
+    if (!changed) {
+        free(out);
+        return NULL;
+    }
+    cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
 char* cc_rewrite_nursery_create_destroy_proto_ex(const char* src, size_t n, const char* input_path, CCSymbolTable* symbols) {
     (void)symbols;
     return cc__rewrite_builtin_owned_decl_annotations(src, n, input_path);
@@ -693,81 +788,16 @@ static char* cc__canonicalize_with_deadline_syntax(const char* src, size_t n) {
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
     size_t i = 0;
-    int in_line_comment = 0;
-    int in_block_comment = 0;
-    int in_str = 0;
-    int in_chr = 0;
+    CCScannerState scan;
+    cc_scanner_init(&scan);
 
     while (i < n) {
+        size_t before = i;
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) {
+            cc_sb_append(&out, &out_len, &out_cap, src + before, i - before);
+            continue;
+        }
         char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-
-        if (in_line_comment) {
-            cc_sb_append(&out, &out_len, &out_cap, &c, 1);
-            if (c == '\n') in_line_comment = 0;
-            i++;
-            continue;
-        }
-        if (in_block_comment) {
-            cc_sb_append(&out, &out_len, &out_cap, &c, 1);
-            if (c == '*' && c2 == '/') {
-                cc_sb_append(&out, &out_len, &out_cap, &c2, 1);
-                i += 2;
-                in_block_comment = 0;
-                continue;
-            }
-            i++;
-            continue;
-        }
-        if (in_str) {
-            cc_sb_append(&out, &out_len, &out_cap, &c, 1);
-            if (c == '\\' && i + 1 < n) {
-                cc_sb_append(&out, &out_len, &out_cap, &c2, 1);
-                i += 2;
-                continue;
-            }
-            if (c == '"') in_str = 0;
-            i++;
-            continue;
-        }
-        if (in_chr) {
-            cc_sb_append(&out, &out_len, &out_cap, &c, 1);
-            if (c == '\\' && i + 1 < n) {
-                cc_sb_append(&out, &out_len, &out_cap, &c2, 1);
-                i += 2;
-                continue;
-            }
-            if (c == '\'') in_chr = 0;
-            i++;
-            continue;
-        }
-
-        if (c == '/' && c2 == '/') {
-            cc_sb_append(&out, &out_len, &out_cap, &c, 1);
-            cc_sb_append(&out, &out_len, &out_cap, &c2, 1);
-            i += 2;
-            in_line_comment = 1;
-            continue;
-        }
-        if (c == '/' && c2 == '*') {
-            cc_sb_append(&out, &out_len, &out_cap, &c, 1);
-            cc_sb_append(&out, &out_len, &out_cap, &c2, 1);
-            i += 2;
-            in_block_comment = 1;
-            continue;
-        }
-        if (c == '"') {
-            cc_sb_append(&out, &out_len, &out_cap, &c, 1);
-            i++;
-            in_str = 1;
-            continue;
-        }
-        if (c == '\'') {
-            cc_sb_append(&out, &out_len, &out_cap, &c, 1);
-            i++;
-            in_chr = 1;
-            continue;
-        }
 
         if (c == '@') {
             size_t j = i + 1;
@@ -804,82 +834,17 @@ static char* cc__lower_with_deadline_syntax(const char* src, size_t n) {
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
     size_t i = 0;
-    int in_line_comment = 0;
-    int in_block_comment = 0;
-    int in_str = 0;
-    int in_chr = 0;
     unsigned long counter = 0;
+    CCScannerState scan;
+    cc_scanner_init(&scan);
 
     while (i < n) {
+        size_t before = i;
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) {
+            cc_sb_append(&out, &out_len, &out_cap, src + before, i - before);
+            continue;
+        }
         char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-
-        if (in_line_comment) {
-            cc_sb_append(&out, &out_len, &out_cap, &c, 1);
-            if (c == '\n') in_line_comment = 0;
-            i++;
-            continue;
-        }
-        if (in_block_comment) {
-            cc_sb_append(&out, &out_len, &out_cap, &c, 1);
-            if (c == '*' && c2 == '/') {
-                cc_sb_append(&out, &out_len, &out_cap, &c2, 1);
-                i += 2;
-                in_block_comment = 0;
-                continue;
-            }
-            i++;
-            continue;
-        }
-        if (in_str) {
-            cc_sb_append(&out, &out_len, &out_cap, &c, 1);
-            if (c == '\\' && i + 1 < n) {
-                cc_sb_append(&out, &out_len, &out_cap, &c2, 1);
-                i += 2;
-                continue;
-            }
-            if (c == '"') in_str = 0;
-            i++;
-            continue;
-        }
-        if (in_chr) {
-            cc_sb_append(&out, &out_len, &out_cap, &c, 1);
-            if (c == '\\' && i + 1 < n) {
-                cc_sb_append(&out, &out_len, &out_cap, &c2, 1);
-                i += 2;
-                continue;
-            }
-            if (c == '\'') in_chr = 0;
-            i++;
-            continue;
-        }
-
-        if (c == '/' && c2 == '/') {
-            cc_sb_append(&out, &out_len, &out_cap, &c, 1);
-            cc_sb_append(&out, &out_len, &out_cap, &c2, 1);
-            i += 2;
-            in_line_comment = 1;
-            continue;
-        }
-        if (c == '/' && c2 == '*') {
-            cc_sb_append(&out, &out_len, &out_cap, &c, 1);
-            cc_sb_append(&out, &out_len, &out_cap, &c2, 1);
-            i += 2;
-            in_block_comment = 1;
-            continue;
-        }
-        if (c == '"') {
-            cc_sb_append(&out, &out_len, &out_cap, &c, 1);
-            i++;
-            in_str = 1;
-            continue;
-        }
-        if (c == '\'') {
-            cc_sb_append(&out, &out_len, &out_cap, &c, 1);
-            i++;
-            in_chr = 1;
-            continue;
-        }
 
         if (cc_is_ident_start(c)) {
             size_t s0 = i;
@@ -1081,62 +1046,11 @@ static size_t cc__scan_to_top_level_delim(const char* src,
                                           char delim2) {
     size_t i = start;
     int paren_depth = 0, brace_depth = 0, bracket_depth = 0;
-    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
+    CCScannerState scan;
+    cc_scanner_init(&scan);
     while (i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
         char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        if (in_line_comment) {
-            if (c == '\n') in_line_comment = 0;
-            i++;
-            continue;
-        }
-        if (in_block_comment) {
-            if (c == '*' && c2 == '/') {
-                in_block_comment = 0;
-                i += 2;
-                continue;
-            }
-            i++;
-            continue;
-        }
-        if (in_str) {
-            if (c == '\\' && i + 1 < n) {
-                i += 2;
-                continue;
-            }
-            if (c == '"') in_str = 0;
-            i++;
-            continue;
-        }
-        if (in_chr) {
-            if (c == '\\' && i + 1 < n) {
-                i += 2;
-                continue;
-            }
-            if (c == '\'') in_chr = 0;
-            i++;
-            continue;
-        }
-        if (c == '/' && c2 == '/') {
-            in_line_comment = 1;
-            i += 2;
-            continue;
-        }
-        if (c == '/' && c2 == '*') {
-            in_block_comment = 1;
-            i += 2;
-            continue;
-        }
-        if (c == '"') {
-            in_str = 1;
-            i++;
-            continue;
-        }
-        if (c == '\'') {
-            in_chr = 1;
-            i++;
-            continue;
-        }
         if (c == '`') {
             size_t tick_end = 0;
             if (cc_tpl_scan_literal(src, n, i, &tick_end) != 0) return n;
@@ -1533,34 +1447,25 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
     size_t i = 0, last_emit = 0;
-    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
-    int line = 1, col = 1;
     int rewrite_count = 0;
+    CCScannerState scan;
     if (!src || n == 0) return NULL;
     if (!cc_contains_token_top_level(src, n, "@slice") &&
         !cc_contains_token_top_level(src, n, "@emit") &&
         !cc_contains_token_top_level(src, n, "@string")) {
         return NULL;
     }
+    cc_scanner_init(&scan);
     while (i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
         char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        if (c == '\n') { line++; col = 1; }
-        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; if (c != '\n') col++; continue; }
-        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; col += 2; continue; } i++; col++; continue; }
-        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; } if (c == '"') in_str = 0; i++; col++; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; } if (c == '\'') in_chr = 0; i++; col++; continue; }
-        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; col += 2; continue; }
-        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; col += 2; continue; }
-        if (c == '"') { in_str = 1; i++; col++; continue; }
-        if (c == '\'') { in_chr = 1; i++; col++; continue; }
         if (c == '@' && i + 6 < n && memcmp(src + i, "@slice(", 7) == 0) {
             size_t arg_s = cc_skip_ws_and_comments(src, n, i + 7);
             size_t arg_e = cc__scan_to_top_level_delim(src, n, arg_s, ')', '\0');
             if (arg_e >= n || src[arg_e] != ')') {
                 char rel[1024];
                 cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                line, col, "syntax", "unterminated @slice(...)");
+                                scan.line, scan.col, "syntax", "unterminated @slice(...)");
                 free(out);
                 return (char*)-1;
             }
@@ -1585,14 +1490,14 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                 if (anchor_e >= n) {
                     char rel[1024];
                     cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                    line, col, "syntax", "unterminated @emit(...)");
+                                    scan.line, scan.col, "syntax", "unterminated @emit(...)");
                     free(out);
                     return (char*)-1;
                 }
                 if (src[anchor_e] == ')') {
                     char rel[1024];
                     cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                    line, col, "syntax", "@emit(anchor, `...`) requires a template literal");
+                                    scan.line, scan.col, "syntax", "@emit(anchor, `...`) requires a template literal");
                     free(out);
                     return (char*)-1;
                 }
@@ -1612,7 +1517,7 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                 } else {
                     char rel[1024];
                     cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                    line, col, "syntax", "unknown @emit anchor");
+                                    scan.line, scan.col, "syntax", "unknown @emit anchor");
                     free(out);
                     return (char*)-1;
                 }
@@ -1621,14 +1526,14 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
             if (tick_s >= n || src[tick_s] != '`') {
                 char rel[1024];
                 cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                line, col, "syntax", "@emit(...) requires a backtick template literal");
+                                scan.line, scan.col, "syntax", "@emit(...) requires a backtick template literal");
                 free(out);
                 return (char*)-1;
             }
             if (cc_tpl_scan_literal(src, n, tick_s, &tick_e) != 0) {
                 char rel[1024];
                 cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                line, col, "syntax", "unterminated template literal in @emit(...)");
+                                scan.line, scan.col, "syntax", "unterminated template literal in @emit(...)");
                 free(out);
                 return (char*)-1;
             }
@@ -1649,7 +1554,7 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                     if (arena_e >= n || src[arena_e] != ')') {
                         char rel[1024];
                         cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                        line, col, "syntax", "unterminated @emit(`...`, arena)");
+                                        scan.line, scan.col, "syntax", "unterminated @emit(`...`, arena)");
                         free(out);
                         return (char*)-1;
                     }
@@ -1660,14 +1565,14 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                 } else {
                     char rel[1024];
                     cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                    line, col, "syntax", "unterminated @emit(...)");
+                                    scan.line, scan.col, "syntax", "unterminated @emit(...)");
                     free(out);
                     return (char*)-1;
                 }
                 if (has_anchor && have_arena) {
                     char rel[1024];
                     cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                    line, col, "syntax",
+                                    scan.line, scan.col, "syntax",
                                     "@emit(anchor, `...`) splices and takes no arena");
                     free(out);
                     return (char*)-1;
@@ -1675,7 +1580,7 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                 if (!has_anchor && !have_arena) {
                     char rel[1024];
                     cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                    line, col, "syntax",
+                                    scan.line, scan.col, "syntax",
                                     "@emit(`...`) requires an arena: @emit(`...`, arena)");
                     free(out);
                     return (char*)-1;
@@ -1712,7 +1617,7 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                                 ? "unterminated ${{...}} verbatim span in @emit template"
                                 : "unterminated interpolation in @emit template";
                         cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                        line, col, "syntax", msg);
+                                        scan.line, scan.col, "syntax", msg);
                         free(out);
                         return (char*)-1;
                     }
@@ -1739,7 +1644,7 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
             if (arg1_e >= n) {
                 char rel[1024];
                 cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                line, col, "syntax", "unterminated @string(...)");
+                                scan.line, scan.col, "syntax", "unterminated @string(...)");
                 free(out);
                 return (char*)-1;
             }
@@ -1750,7 +1655,7 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                  * (spec/draft_variants.md §9.2), handled below. */
                 char rel[1024];
                 cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                line, col, "syntax", "@string(...) requires an arena argument");
+                                scan.line, scan.col, "syntax", "@string(...) requires an arena argument");
                 free(out);
                 return (char*)-1;
             }
@@ -1762,7 +1667,7 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                     if (cc_tpl_scan_literal(src, n, arg1_s, &tick_e) != 0) {
                         char rel[1024];
                         cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                        line, col, "syntax", "unterminated template literal in @string(...)");
+                                        scan.line, scan.col, "syntax", "unterminated template literal in @string(...)");
                         free(out);
                         return (char*)-1;
                     }
@@ -1773,7 +1678,7 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                          * a char[:] borrow instead of an owned CCString. */
                         int tpl_rc = cc__emit_string_stack_tpl(&out, &out_len, &out_cap, src, n,
                                                                arg1_s + 1, tick_e,
-                                                               input_path, line);
+                                                               input_path, scan.line);
                         if (tpl_rc != 0) {
                             char rel[1024];
                             const char* msg = (tpl_rc == -2)
@@ -1782,7 +1687,7 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                                     ? "unterminated ${{...}} verbatim span in @string template"
                                     : "unterminated interpolation in @string template";
                             cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                            line, col, "syntax", msg);
+                                            scan.line, scan.col, "syntax", msg);
                             free(out);
                             return (char*)-1;
                         }
@@ -1794,7 +1699,7 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                     if (arg2_s >= n || src[arg2_s] != ',') {
                         char rel[1024];
                         cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                        line, col, "syntax", "@string(`...`, arena) requires a trailing arena argument");
+                                        scan.line, scan.col, "syntax", "@string(`...`, arena) requires a trailing arena argument");
                         free(out);
                         return (char*)-1;
                     }
@@ -1803,7 +1708,7 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                     if (arg2_e >= n || src[arg2_e] != ')') {
                         char rel[1024];
                         cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                        line, col, "syntax", "unterminated @string(`...`, arena)");
+                                        scan.line, scan.col, "syntax", "unterminated @string(`...`, arena)");
                         free(out);
                         return (char*)-1;
                     }
@@ -1830,7 +1735,7 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                                     ? "unterminated ${{...}} verbatim span in @string template"
                                     : "unterminated interpolation in @string template";
                             cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                            line, col, "syntax", msg);
+                                            scan.line, scan.col, "syntax", msg);
                             free(out);
                             return (char*)-1;
                         }
@@ -1850,7 +1755,7 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                     if (cc_tpl_scan_literal(src, n, arg2_s, &tick_e) != 0) {
                         char rel[1024];
                         cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                        line, col, "syntax", "unterminated template literal in @string(...)");
+                                        scan.line, scan.col, "syntax", "unterminated template literal in @string(...)");
                         free(out);
                         return (char*)-1;
                     }
@@ -1858,7 +1763,7 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                     if (arg3_s >= n || src[arg3_s] != ',') {
                         char rel[1024];
                         cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                        line, col, "syntax", "@string(policy, `...`, arena) requires a trailing arena argument");
+                                        scan.line, scan.col, "syntax", "@string(policy, `...`, arena) requires a trailing arena argument");
                         free(out);
                         return (char*)-1;
                     }
@@ -1867,7 +1772,7 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                     if (arg3_e >= n || src[arg3_e] != ')') {
                         char rel[1024];
                         cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                        line, col, "syntax", "unterminated @string(policy, `...`, arena)");
+                                        scan.line, scan.col, "syntax", "unterminated @string(policy, `...`, arena)");
                         free(out);
                         return (char*)-1;
                     }
@@ -1898,7 +1803,7 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                                 ? "unterminated ${{...}} verbatim span in @string template"
                                 : "unterminated interpolation in @string template";
                             cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                            line, col, "syntax", msg);
+                                            scan.line, scan.col, "syntax", msg);
                             free(out);
                             return (char*)-1;
                         }
@@ -1914,7 +1819,7 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                     if (arg2_e >= n || src[arg2_e] != ')') {
                         char rel[1024];
                         cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                        line, col, "syntax", "unterminated @string(expr, arena)");
+                                        scan.line, scan.col, "syntax", "unterminated @string(expr, arena)");
                         free(out);
                         return (char*)-1;
                     }
@@ -1931,7 +1836,6 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
             }
         }
         i++;
-        col++;
     }
     if (rewrite_count == 0) {
         free(out);
@@ -1943,6 +1847,10 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
 
 char* cc_rewrite_string_templates_text(const char* src, size_t n, const char* input_path) {
     return cc__rewrite_string_templates(src, n, input_path);
+}
+
+char* cc_normalize_template_recv_chains_text(const char* src, size_t n) {
+    return cc__normalize_template_recv_chains(src, n);
 }
 
 /* Lower `CC_GENERIC_FACTORY(Name[, arity]) { ... }` sugar into the canonical
@@ -1982,22 +1890,13 @@ static char* cc__rewrite_generic_factory(const char* src, size_t n, const char* 
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
     size_t i = 0, last_emit = 0;
-    int line = 1, col = 1;
-    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
     int rewrite_count = 0;
+    CCScannerState scan;
+    cc_scanner_init(&scan);
 
     while (i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
         char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        if (c == '\n') { line++; col = 1; }
-        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; if (c != '\n') col++; continue; }
-        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; col += 2; continue; } i++; col++; continue; }
-        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; } if (c == '"') in_str = 0; i++; col++; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; } if (c == '\'') in_chr = 0; i++; col++; continue; }
-        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; col += 2; continue; }
-        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; col += 2; continue; }
-        if (c == '"') { in_str = 1; i++; col++; continue; }
-        if (c == '\'') { in_chr = 1; i++; col++; continue; }
         int is_extend = 0;
         size_t mlen = 0;
         if (c == 'C') {
@@ -2021,7 +1920,7 @@ static char* cc__rewrite_generic_factory(const char* src, size_t n, const char* 
             if (p >= n || src[p] != '(') {
                 char rel[1024];
                 cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                line, col, "syntax",
+                                scan.line, scan.col, "syntax",
                                 "%s requires (Name) { ... }", kwname);
                 free(out);
                 return (char*)-1;
@@ -2030,7 +1929,7 @@ static char* cc__rewrite_generic_factory(const char* src, size_t n, const char* 
             if (p >= n || !cc_is_ident_start(src[p])) {
                 char rel[1024];
                 cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                line, col, "syntax",
+                                scan.line, scan.col, "syntax",
                                 "%s(Name) requires an identifier name", kwname);
                 free(out);
                 return (char*)-1;
@@ -2048,7 +1947,7 @@ static char* cc__rewrite_generic_factory(const char* src, size_t n, const char* 
                 if (p >= n || src[p] < '0' || src[p] > '9') {
                     char rel[1024];
                     cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                    line, col, "syntax",
+                                    scan.line, scan.col, "syntax",
                                     "%s(%s, N) — N must be an integer arity", kwname, name);
                     free(out);
                     return (char*)-1;
@@ -2061,7 +1960,7 @@ static char* cc__rewrite_generic_factory(const char* src, size_t n, const char* 
             if (p >= n || src[p] != ')') {
                 char rel[1024];
                 cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                line, col, "syntax",
+                                scan.line, scan.col, "syntax",
                                 "%s(%s ... — expected ')' after name", kwname, name);
                 free(out);
                 return (char*)-1;
@@ -2074,7 +1973,7 @@ static char* cc__rewrite_generic_factory(const char* src, size_t n, const char* 
                 if (brace >= n || src[brace] != '{') {
                     char rel[1024];
                     cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                    line, col, "syntax",
+                                    scan.line, scan.col, "syntax",
                                     "%s(%s) requires a { ... } body", kwname, name);
                     free(out);
                     return (char*)-1;
@@ -2113,7 +2012,7 @@ static char* cc__rewrite_generic_factory(const char* src, size_t n, const char* 
                                             "return cc_slice_empty(); ", arity);
                 }
                 for (size_t q = i; q <= brace; q++)
-                    if (src[q] == '\n') { line++; col = 1; }
+                    if (src[q] == '\n') { scan.line++; scan.col = 1; }
                 rewrite_count++;
                 last_emit = brace + 1;
                 i = brace + 1;
@@ -2121,7 +2020,6 @@ static char* cc__rewrite_generic_factory(const char* src, size_t n, const char* 
             }
         }
         i++;
-        col++;
     }
     if (rewrite_count == 0) {
         free(out);
@@ -2150,6 +2048,7 @@ int cc__ufcs_method_return_type(const char* recv_type_base, const char* method,
 static int cc__call_return_type(const char* fname, const char* src, size_t n,
                                 char* out, size_t out_sz);
 static int cc__free_call_name_is_keyword(const char* s, size_t n);
+static int cc_included_cch_declares_fn(const char* name);
 static int cc__fn_return_type(const char* src, size_t n, const char* name,
                               char* out, size_t out_sz);
 static void cc__enumerate_family_variants(const char* src, size_t n,
@@ -2388,23 +2287,8 @@ static char* cc__rewrite_chan_handle_types(const char* src, size_t n, const char
                     
                     /* Find matching '}' for the owned block */
                     size_t brace_start = scan;
-                    int brace_depth = 0;
-                    int in_str2 = 0, in_chr2 = 0;
-                    size_t brace_end = scan;
-                    for (size_t bi = scan; bi < n; bi++) {
-                        char bc = src[bi];
-                        if (in_str2) { if (bc == '\\' && bi + 1 < n) { bi++; continue; } if (bc == '"') in_str2 = 0; continue; }
-                        if (in_chr2) { if (bc == '\\' && bi + 1 < n) { bi++; continue; } if (bc == '\'') in_chr2 = 0; continue; }
-                        if (bc == '"') { in_str2 = 1; continue; }
-                        if (bc == '\'') { in_chr2 = 1; continue; }
-                        if (bc == '{') brace_depth++;
-                        else if (bc == '}') {
-                            brace_depth--;
-                            if (brace_depth == 0) { brace_end = bi; break; }
-                        }
-                    }
-                    
-                    if (brace_depth != 0) {
+                    size_t brace_end = 0;
+                    if (!cc_find_matching_brace(src, n, brace_start, &brace_end)) {
                         char rel[1024];
                         cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
                                 scanner.line, scanner.col, "channel", "unterminated owned block");
@@ -2559,6 +2443,13 @@ static char* cc__rewrite_chan_handle_types(const char* src, size_t n, const char
                         while (*p) {
                             if (in_s) { if (*p == '\\' && *(p+1)) p++; else if (*p == '"') in_s = 0; p++; continue; }
                             if (*p == '"') { in_s = 1; p++; continue; }
+                            if (*p == '/' && *(p+1) == '/') { p += 2; while (*p && *p != '\n') p++; continue; }
+                            if (*p == '/' && *(p+1) == '*') {
+                                p += 2;
+                                while (*p && !(*p == '*' && *(p+1) == '/')) p++;
+                                if (*p) p += 2;
+                                continue;
+                            }
                             if (*p == '(' || *p == '[' || *p == '{') depth++;
                             else if (*p == ')' || *p == ']' || *p == '}') depth--;
                             if (depth < 0 || (depth == 0 && *p == ',')) break;
@@ -2735,6 +2626,92 @@ static int cc_is_ident_char_local(char c) {
     return (c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'));
 }
 
+/* Backward string/char-literal skip: when a backward scan lands on a
+ * `"`/`'` (the literal's CLOSING quote in source order), resolve the
+ * opener with a forward scan from the line start (proper escape rules)
+ * and jump `*i` to it.  Mirrors `cc__err_skip_string_or_char_backward`
+ * in pass_err_syntax.c (not shareable: these files have no common
+ * header for the low-level scanners). */
+static void cc__pp_skip_string_or_char_backward(const char* s, size_t* i) {
+    size_t close = *i;
+    char qch = s[close];
+    if (qch != '"' && qch != '\'') return;
+    size_t line_start = close;
+    while (line_start > 0 && s[line_start - 1] != '\n') line_start--;
+    size_t k = line_start;
+    size_t open = close;
+    int in_q = 0;
+    char cur_q = 0;
+    while (k <= close) {
+        char c = s[k];
+        if (!in_q) {
+            if (c == '"' || c == '\'') {
+                in_q = 1;
+                cur_q = c;
+                open = k;
+                if (k == close) break;
+                k++;
+                continue;
+            }
+            k++;
+            continue;
+        }
+        if (c == '\\' && k + 1 <= close) {
+            k += 2;
+            continue;
+        }
+        if (c == cur_q) {
+            if (k == close) {
+                *i = open;
+                return;
+            }
+            in_q = 0;
+            cur_q = 0;
+            k++;
+            continue;
+        }
+        k++;
+    }
+    *i = open;
+}
+
+/* Backward bracket match for `)`/`]` at `close_pos`, comment- and
+ * string-aware: block comments rewind whole, bracket bytes inside
+ * `// ...` comments are ignored, and string/char literals are jumped
+ * via the forward-verified opener.  Returns the matching opener's
+ * position, or `(size_t)-1` when unmatched within (limit, close_pos]. */
+static size_t cc__pp_match_bracket_backward(const char* src, size_t close_pos,
+                                            size_t limit, char open_ch, char close_ch) {
+    int depth = 1;
+    size_t q = close_pos;
+    while (q > limit && depth > 0) {
+        q--;
+        char cq = src[q];
+        if (cq == '/' && q > 0 && src[q - 1] == '*') {
+            /* End of a block comment: rewind to its opener. */
+            size_t q2 = q - 1, op2 = (size_t)-1;
+            while (q2 > 0) {
+                q2--;
+                if (src[q2] == '*' && q2 > 0 && src[q2 - 1] == '/') { op2 = q2 - 1; break; }
+            }
+            if (op2 != (size_t)-1) { q = op2; continue; }
+        }
+        if (cq == '"' || cq == '\'') {
+            cc__pp_skip_string_or_char_backward(src, &q);
+            continue;
+        }
+        if (cq == close_ch || cq == open_ch) {
+            if (cc_scan_pos_in_line_comment(src, q)) continue;
+            if (cq == close_ch) depth++;
+            else {
+                depth--;
+                if (depth == 0) return q;
+            }
+        }
+    }
+    return (size_t)-1;
+}
+
 /* Scan backwards from pos to find the start of a member access chain (e.g., obj.field or ptr->field).
    Returns the start position of the full expression.
    Handles chains like a.b.c, a->b->c, (*p)->field, arr[i].field, func().field. */
@@ -2769,25 +2746,13 @@ static size_t cc_scan_back_for_member_access(const char* src, size_t pos, size_t
             last_was_ident = 0;
         } else if (src[p-1] == ')') {
             if (last_was_ident) break;
-            int depth = 1;
-            size_t q = p - 1;
-            while (q > limit && depth > 0) {
-                q--;
-                if (src[q] == ')') depth++;
-                else if (src[q] == '(') depth--;
-            }
-            if (depth == 0) p = q;
+            size_t q = cc__pp_match_bracket_backward(src, p - 1, limit, '(', ')');
+            if (q != (size_t)-1) p = q;
             else break;
             last_was_ident = 0;
         } else if (src[p-1] == ']') {
-            int depth = 1;
-            size_t q = p - 1;
-            while (q > limit && depth > 0) {
-                q--;
-                if (src[q] == ']') depth++;
-                else if (src[q] == '[') depth--;
-            }
-            if (depth == 0) p = q;
+            size_t q = cc__pp_match_bracket_backward(src, p - 1, limit, '[', ']');
+            if (q != (size_t)-1) p = q;
             else break;
         } else {
             break;
@@ -3002,6 +2967,9 @@ static int cc__is_slice_ufcs_method(const char* method_name) {
             strcmp(method_name, "is_empty") == 0 ||
             strcmp(method_name, "at") == 0 ||
             strcmp(method_name, "sub") == 0 ||
+            strcmp(method_name, "has") == 0 ||
+            strcmp(method_name, "index_of") == 0 ||
+            strcmp(method_name, "last_index_of") == 0 ||
             strcmp(method_name, "starts_with") == 0 ||
             strcmp(method_name, "ends_with") == 0 ||
             strcmp(method_name, "eq") == 0 ||
@@ -3434,7 +3402,7 @@ static void cc__ufcs_scope_idx_build(const char* src, size_t n) {
     int scope_stack[MAX_SCOPES];
     int scope_depth = 1;
     int next_scope_id = 1;
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    CCScannerState scan;
     size_t stmt_start = 0;
     size_t typedef_start = (size_t)-1;
     size_t i = 0;
@@ -3446,17 +3414,13 @@ static void cc__ufcs_scope_idx_build(const char* src, size_t n) {
     if (cc__ufcs_scope_idx_ensure_scopes(1) != 0) return;
     g_ufcs_scope_idx.n_scopes = 1;
     g_ufcs_scope_idx.scope_close[0] = (size_t)-1;
+    cc_scanner_init(&scan);
     while (i < n) {
-        char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
-        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
-        if (c == '"') { in_str = 1; i++; continue; }
-        if (c == '\'') { in_chr = 1; i++; continue; }
+        char c;
+        /* Directive-aware: a brace in a #define body must not corrupt
+         * the scope table for the whole TU. */
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        c = src[i];
         if (typedef_start == (size_t)-1 &&
             i + 7 <= n &&
             memcmp(src + i, "typedef", 7) == 0 &&
@@ -3637,20 +3601,21 @@ static int cc__parse_typedef_alias_stmt(const char* stmt_start,
     if (!alias_name || alias_name_sz == 0 || !alias_type || alias_type_sz == 0) return 0;
     alias_name[0] = '\0';
     alias_type[0] = '\0';
-    while (s < e && (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r')) s++;
-    while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\n' || e[-1] == '\r')) e--;
+    /* Comment-aware trims: `typedef T Alias / *c* / ;` and
+     * `typedef T / *c* / Alias;` must still harvest `Alias` / `T`. */
+    s = stmt_start + cc_skip_ws_and_comments(stmt_start, (size_t)(stmt_end - stmt_start), 0);
+    e = stmt_start + cc_rskip_ws_and_comments(stmt_start, (size_t)(stmt_end - stmt_start));
     if (e <= s) return 0;
     if ((size_t)(e - s) < 7 || memcmp(s, "typedef", 7) != 0) return 0;
     type_start = s + 7;
-    while (type_start < e && (*type_start == ' ' || *type_start == '\t' || *type_start == '\n' || *type_start == '\r')) type_start++;
+    type_start = stmt_start + cc_skip_ws_and_comments(stmt_start, (size_t)(e - stmt_start),
+                                                      (size_t)(type_start - stmt_start));
     if (type_start >= e) return 0;
-    alias_end = e;
-    while (alias_end > type_start && (alias_end[-1] == ' ' || alias_end[-1] == '\t' || alias_end[-1] == '\n' || alias_end[-1] == '\r')) alias_end--;
+    alias_end = stmt_start + cc_rskip_ws_and_comments(stmt_start, (size_t)(e - stmt_start));
     alias_start = alias_end;
     while (alias_start > type_start && cc_is_ident_char(alias_start[-1])) alias_start--;
-    if (alias_start == alias_end || !cc_is_ident_start(*alias_start)) return 0;
-    type_end = alias_start;
-    while (type_end > type_start && (type_end[-1] == ' ' || type_end[-1] == '\t' || type_end[-1] == '\n' || type_end[-1] == '\r')) type_end--;
+    if (alias_start == alias_end || alias_start < type_start || !cc_is_ident_start(*alias_start)) return 0;
+    type_end = stmt_start + cc_rskip_ws_and_comments(stmt_start, (size_t)(alias_start - stmt_start));
     if (type_end <= type_start) return 0;
     {
         size_t alias_len = (size_t)(alias_end - alias_start);
@@ -3682,8 +3647,10 @@ static int cc__parse_decl_name_and_type_fallback(const char* stmt_start,
     if (!decl_name || decl_name_sz == 0 || !decl_type || decl_type_sz == 0) return 0;
     decl_name[0] = '\0';
     decl_type[0] = '\0';
-    while (s < e && isspace((unsigned char)*s)) s++;
-    while (e > s && isspace((unsigned char)e[-1])) e--;
+    /* Comment-aware trims: `int x / *c* / ;` must harvest `x`, not a
+     * trailing comment token. */
+    s = stmt_start + cc_skip_ws_and_comments(stmt_start, (size_t)(stmt_end - stmt_start), 0);
+    e = stmt_start + cc_rskip_ws_and_comments(stmt_start, (size_t)(stmt_end - stmt_start));
     if (e <= s) return 0;
     scan_end = e;
     for (const char* p = s; p < e; ++p) {
@@ -3701,14 +3668,14 @@ static int cc__parse_decl_name_and_type_fallback(const char* stmt_start,
             break;
         }
     }
-    while (scan_end > s && isspace((unsigned char)scan_end[-1])) scan_end--;
+    scan_end = stmt_start + cc_rskip_ws_and_comments(stmt_start, (size_t)(scan_end - stmt_start));
+    if (scan_end <= s) return 0;
     name_end = scan_end;
     while (name_end > s && !cc_is_ident_char(name_end[-1])) name_end--;
     name_start = name_end;
     while (name_start > s && cc_is_ident_char(name_start[-1])) name_start--;
     if (name_start == name_end || !cc_is_ident_start(*name_start)) return 0;
-    type_end = name_start;
-    while (type_end > s && isspace((unsigned char)type_end[-1])) type_end--;
+    type_end = stmt_start + cc_rskip_ws_and_comments(stmt_start, (size_t)(name_start - stmt_start));
     if (type_end <= s) return 0;
     {
         size_t name_len = (size_t)(name_end - name_start);
@@ -3744,22 +3711,16 @@ static const char* cc__lookup_scoped_type_alias(const char* src,
                                                 size_t out_type_sz) {
     size_t i = 0;
     size_t typedef_start = (size_t)-1;
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    CCScannerState scan;
     if (!src || !alias_name || !alias_name[0] || !out_type || out_type_sz == 0) return NULL;
     out_type[0] = '\0';
     if (g_ufcs_scope_idx.ready && g_ufcs_scope_idx.src == src)
         return cc__ufcs_idx_typedef_before(limit, alias_name, out_type, out_type_sz);
+    cc_scanner_init(&scan);
     while (i < limit) {
-        char c = src[i];
-        char c2 = (i + 1 < limit) ? src[i + 1] : 0;
-        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
-        if (in_str) { if (c == '\\' && i + 1 < limit) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < limit) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
-        if (c == '"') { in_str = 1; i++; continue; }
-        if (c == '\'') { in_chr = 1; i++; continue; }
+        char c;
+        if (cc_scanner_skip_non_code(&scan, src, limit, &i)) continue;
+        c = src[i];
         if (typedef_start == (size_t)-1 &&
             i + 7 <= limit &&
             memcmp(src + i, "typedef", 7) == 0 &&
@@ -3810,15 +3771,29 @@ static void cc__collect_generic_ufcs_types(const char* src,
     while (i < n) {
         if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
         if (src[i] == '{') {
-            size_t close = i;
-            while (close > 0 && isspace((unsigned char)src[close - 1])) close--;
+            size_t close = cc_rskip_ws_and_comments(src, i);
             if (close > 0 && src[close - 1] == ')') {
                 size_t open = close - 1;
                 int depth = 1;
                 while (open > 0 && depth > 0) {
                     open--;
-                    if (src[open] == ')') depth++;
-                    else if (src[open] == '(') depth--;
+                    /* Comment-aware: rewind block comments whole and
+                     * ignore parens inside `// ...` comments so a
+                     * parenthetical in a header comment cannot desync
+                     * the param-list match. */
+                    if (src[open] == '/' && open > 0 && src[open - 1] == '*') {
+                        size_t q2 = open - 1, op2 = (size_t)-1;
+                        while (q2 > 0) {
+                            q2--;
+                            if (src[q2] == '*' && q2 > 0 && src[q2 - 1] == '/') { op2 = q2 - 1; break; }
+                        }
+                        if (op2 != (size_t)-1) { open = op2; continue; }
+                    }
+                    if (src[open] == ')' || src[open] == '(') {
+                        if (cc_scan_pos_in_line_comment(src, open)) continue;
+                        if (src[open] == ')') depth++;
+                        else depth--;
+                    }
                 }
                 if (depth == 0) {
                     size_t param_start = open + 1;
@@ -4016,13 +3991,17 @@ static int cc__scan_generic_ufcs_call_site(const char* src,
                                            char* out_method_name,
                                            size_t out_method_name_sz,
                                            char* out_recv_expr,
-                                           size_t out_recv_expr_sz) {
+                                           size_t out_recv_expr_sz,
+                                           size_t* out_targ_a,
+                                           size_t* out_targ_b) {
     size_t sep_pos;
     size_t method_start;
     size_t method_end;
     size_t recv_start;
     size_t paren_pos;
     size_t paren_end = 0;
+    if (out_targ_a) *out_targ_a = 0;
+    if (out_targ_b) *out_targ_b = 0;
     if (!src || pos >= n || !out_method_name || out_method_name_sz == 0 ||
         !out_recv_expr || out_recv_expr_sz == 0) {
         return 0;
@@ -4043,6 +4022,19 @@ static int cc__scan_generic_ufcs_call_site(const char* src,
     memcpy(out_method_name, src + method_start, method_end - method_start);
     out_method_name[method_end - method_start] = '\0';
     paren_pos = cc_skip_ws_and_comments(src, n, method_end);
+    /* `::[...]` specializes the name it follows — member position:
+     * `recv.method::[T](args)`. The bracket span is reported to the
+     * caller; resolution decides whether the member has a type formal. */
+    if (paren_pos + 1 < n && src[paren_pos] == ':' && src[paren_pos + 1] == ':') {
+        size_t br = cc_skip_ws_and_comments(src, n, paren_pos + 2);
+        size_t rb = 0;
+        if (br >= n || src[br] != '[' ||
+            !cc__find_matching_bracket(src, n, br, &rb))
+            return 0;
+        if (out_targ_a) *out_targ_a = br + 1;
+        if (out_targ_b) *out_targ_b = rb;
+        paren_pos = cc_skip_ws_and_comments(src, n, rb + 1);
+    }
     if (paren_pos >= n || src[paren_pos] != '(') return 0;
     if (!cc_find_matching_paren(src, n, paren_pos, &paren_end)) return 0;
     recv_start = cc_scan_back_for_member_access(src, method_start, 0);
@@ -4454,19 +4446,11 @@ static int cc__ufcs_sink_dest_type(const char* s, size_t recv_start,
     int has_sep = 0;
     if (!s || !out || out_sz == 0) return 0;
     out[0] = 0;
-    /* Walk back over `= lvalue`; block comments can sit between `=` and
-     * the call. */
-    for (;;) {
-        while (p > 0 && isspace((unsigned char)s[p - 1])) p--;
-        if (p >= 2 && s[p - 1] == '/' && s[p - 2] == '*') {
-            size_t q = p - 2;
-            while (q >= 2 && !(s[q - 1] == '*' && s[q - 2] == '/')) q--;
-            if (q < 2) return 0;
-            p = q - 2;
-            continue;
-        }
-        break;
-    }
+    /* Walk back over `= lvalue`; comments can sit between `=` and the
+     * call.  `cc_rskip_ws_and_comments` rewinds block comments via the
+     * opener search (comment-context-safe) and line comments via the
+     * forward line verify. */
+    p = cc_rskip_ws_and_comments(s, p);
     /* Shape 3: a cast directly wrapping the call (may span lines). */
     if (p >= 3 && s[p - 1] == ')') {
         size_t rp = p - 1;
@@ -4487,7 +4471,7 @@ static int cc__ufcs_sink_dest_type(const char* s, size_t recv_start,
     if (p == 0 || s[p - 1] != '=') return 0;
     p--;
     if (p > 0 && strchr("=!<>+-*/%&|^", s[p - 1])) return 0; /* ==, +=, ... */
-    while (p > 0 && isspace((unsigned char)s[p - 1])) p--;
+    p = cc_rskip_ws_and_comments(s, p);
     ne = p;
     /* Ident, or `.`/`->` path (shape 2 lvalues). */
     for (;;) {
@@ -4495,18 +4479,15 @@ static int cc__ufcs_sink_dest_type(const char* s, size_t recv_start,
         while (p > 0 && cc_is_ident_char(s[p - 1])) p--;
         if (p == e2) return 0;
         {
-            size_t r = p;
-            while (r > 0 && isspace((unsigned char)s[r - 1])) r--;
+            size_t r = cc_rskip_ws_and_comments(s, p);
             if (r >= 1 && s[r - 1] == '.') {
                 has_sep = 1;
-                p = r - 1;
-                while (p > 0 && isspace((unsigned char)s[p - 1])) p--;
+                p = cc_rskip_ws_and_comments(s, r - 1);
                 continue;
             }
             if (r >= 2 && s[r - 1] == '>' && s[r - 2] == '-') {
                 has_sep = 1;
-                p = r - 2;
-                while (p > 0 && isspace((unsigned char)s[p - 1])) p--;
+                p = cc_rskip_ws_and_comments(s, r - 2);
                 continue;
             }
         }
@@ -4528,7 +4509,8 @@ static int cc__ufcs_sink_dest_type(const char* s, size_t recv_start,
         if (q >= ty_b) {
             size_t k = ns, dn = 0;
             while (k < ne && dn + 1 < out_sz) {
-                if (isspace((unsigned char)s[k])) { k++; continue; }
+                size_t k2 = cc_skip_ws_and_comments(s, ne, k);
+                if (k2 > k) { k = k2; continue; }
                 out[dn++] = s[k++];
             }
             out[dn] = 0;
@@ -4640,6 +4622,9 @@ static int cc__try_normalize_ufcs_chain(const char* src, size_t n,
 }
 
 static int g_ufcs_scope_idx_locked = 0;
+/* Set when a type-formal member site errored (missing/invalid type
+ * source); the parser-safe wrapper turns it into the error sentinel. */
+static _Thread_local int g_ufcs_typeformal_err = 0;
 
 static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int parser_safe) {
     CCUfcsVarInfo vars[512];
@@ -4692,7 +4677,9 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
         int scalar_like = 0;
         int scalar_literal = 0;
         int slice_spec_like = 0;
+        int atomic_like = 0;
         int recv_addressable = 1;
+        size_t targ_a = 0, targ_b = 0;
         char wildcard_callee[256];
         const char* channel_callee = NULL;
         wildcard_callee[0] = '\0';
@@ -4700,7 +4687,8 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
         if (!cc__scan_generic_ufcs_call_site(src, n, i, &sep_pos, &method_start, &method_end,
                                              &recv_start, &paren_pos, &paren_end,
                                              method_name, sizeof(method_name),
-                                             recv_expr, sizeof(recv_expr))) {
+                                             recv_expr, sizeof(recv_expr),
+                                             &targ_a, &targ_b)) {
             i++;
             continue;
         }
@@ -4818,6 +4806,105 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                       strcmp(recv_type_base, "CCSliceUnique*") == 0 ||
                       strcmp(recv_type_base, "CCSliceShared") == 0 ||
                       strcmp(recv_type_base, "CCSliceShared*") == 0);
+        /* Type-formal members: `::[...]` specializes the member name it
+         * follows.  arena.allocT() / arena.allocT(n) lower to
+         * cc_arena_alloc_T / cc_arena_alloc_T_count; task.block_on()
+         * lowers to cc_block_on(T, task).  The type comes from the
+         * explicit `::[T]` or from the declared destination. */
+        {
+            int is_allocT = arena_like && strcmp(method_name, "allocT") == 0;
+            int is_block_on = (strncmp(recv_type_base, "CCTask", 6) == 0 ||
+                               strcmp(recv_type_base, "CCAsyncVoidRet") == 0) &&
+                              strcmp(method_name, "block_on") == 0;
+            if (is_allocT || is_block_on) {
+                char ty[128];
+                ty[0] = 0;
+                if (targ_b > targ_a) {
+                    const char* ta = src + targ_a;
+                    const char* tb = src + targ_b;
+                    cc__trim_span_ws(&ta, &tb);
+                    if (tb > ta && (size_t)(tb - ta) < sizeof(ty)) {
+                        memcpy(ty, ta, (size_t)(tb - ta));
+                        ty[tb - ta] = 0;
+                    }
+                } else {
+                    char dest[256];
+                    size_t cast_a = 0;
+                    if (cc__ufcs_sink_dest_type(src, recv_start, dest,
+                                                sizeof(dest), &cast_a) == 1) {
+                        size_t dl = strlen(dest);
+                        if (is_allocT) {
+                            /* Destination must be a pointer; the element
+                             * type is the destination minus one star. */
+                            if (dl > 1 && dest[dl - 1] == '*') {
+                                dest[--dl] = 0;
+                                while (dl > 0 && dest[dl - 1] == ' ') dest[--dl] = 0;
+                                snprintf(ty, sizeof(ty), "%s", dest);
+                            }
+                        } else {
+                            snprintf(ty, sizeof(ty), "%s", dest);
+                        }
+                    }
+                }
+                if (!ty[0]) {
+                    cc_pp_error_cat("<input>", scan.line, 1, "type",
+                                    is_allocT
+                                        ? "arena.allocT needs its element type: "
+                                          "declare a typed pointer destination "
+                                          "(T* p = arena.allocT(n)) or spell it "
+                                          "explicitly (arena.allocT::[T](n))"
+                                        : "task.block_on needs its result type: "
+                                          "declare a typed destination "
+                                          "(T v = task.block_on()) or spell it "
+                                          "explicitly (task.block_on::[T]())");
+                    g_ufcs_typeformal_err = 1;
+                    i = paren_end + 1;
+                    continue;
+                }
+                cc_sb_append(&out, &out_len, &out_cap, src + last_emit,
+                             recv_start - last_emit);
+                if (is_allocT) {
+                    size_t args_s = cc_skip_ws_and_comments(src, paren_end, paren_pos + 1);
+                    int has_count = args_s < paren_end;
+                    cc_sb_append_cstr(&out, &out_len, &out_cap,
+                                      has_count ? "cc_arena_alloc_T_count("
+                                                : "cc_arena_alloc_T(");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ty);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                    if (!recv_is_ptr)
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "&");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, recv_expr);
+                    if (has_count) {
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                        cc_sb_append(&out, &out_len, &out_cap, src + paren_pos + 1,
+                                     paren_end - (paren_pos + 1));
+                    }
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+                } else {
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_block_on(");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ty);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                    if (recv_is_ptr)
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "*");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, recv_expr);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+                }
+                last_emit = paren_end + 1;
+                i = paren_end + 1;
+                continue;
+            }
+            /* `::[...]` on any other member: no type formal to bind. */
+            if (targ_b > targ_a) {
+                cc_pp_error_cat("<input>", scan.line, 1, "type",
+                                "no type-formal member '%s' for receiver type "
+                                "'%s' — `::[...]` binds only members that "
+                                "declare a type formal (allocT, block_on)",
+                                method_name, recv_type_base);
+                g_ufcs_typeformal_err = 1;
+                i = paren_end + 1;
+                continue;
+            }
+        }
         if (slice_like && !cc__is_slice_ufcs_method(method_name)) {
             i++;
             continue;
@@ -4828,6 +4915,21 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
          * call parse as plain C. Anything else (byte methods via the
          * `base` @as retry, declared extensions, the strict ladder)
          * stays with the AST pass. */
+        /* Atomic receivers: the cc_atomic_* typedefs dispatch to the
+         * type-generic cc_atomic_<op> macros with the receiver's
+         * address — `counter.fetch_add(1)` is cc_atomic_fetch_add(
+         * &counter, 1). Compose-then-verify against the header's
+         * function-like defines; a non-member falls to the ladder. */
+        atomic_like = (strncmp(recv_type_base, "cc_atomic_", 10) == 0);
+        if (atomic_like) {
+            char acand[128];
+            if ((size_t)snprintf(acand, sizeof(acand), "cc_atomic_%s",
+                                 method_name) >= sizeof(acand) ||
+                !cc_included_cch_declares_fn(acand)) {
+                i++;
+                continue;
+            }
+        }
         slice_spec_like = (cc_slice_spec_lookup(recv_type_base, NULL, NULL) == 0);
         if (slice_spec_like && !cc_ufcs_family_has_member(recv_type_base, method_name)) {
             i++;
@@ -4859,6 +4961,7 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
               strncmp(recv_type_base, "Map_", 4) == 0 ||
               parser_vec || parser_map || command_like || file_like || arena_like || string_like || slice_like || nursery_like ||
               chan_tx || chan_rx || map_decl_like || slice_spec_like ||
+              atomic_like ||
               strncmp(recv_type_base, "CCResult_", 9) == 0)) {
             /* CC*-prefixed stdlib types follow the snake_case twin convention
              * (`CCListener.accept` → `cc_listener_accept`) even when the
@@ -5049,7 +5152,7 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                         for (pass = 0; pass < 2; pass++) {
                             size_t s0 = args_start;
                             size_t q = args_start;
-                            int depth = 0, in_s = 0, in_c = 0;
+                            int depth = 0, in_s = 0, in_c = 0, in_lc2 = 0, in_bc2 = 0;
                             if (pass == 1) {
                                 char nbuf[16];
                                 snprintf(nbuf, sizeof(nbuf), ", %d", argc);
@@ -5058,6 +5161,14 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                             for (; q <= args_end; q++) {
                                 int at_end = (q == args_end);
                                 char c = at_end ? '\0' : src[q];
+                                if (!at_end && in_lc2) {
+                                    if (c == '\n') in_lc2 = 0;
+                                    continue;
+                                }
+                                if (!at_end && in_bc2) {
+                                    if (c == '*' && q + 1 < args_end && src[q + 1] == '/') { in_bc2 = 0; q++; }
+                                    continue;
+                                }
                                 if (!at_end && in_s) {
                                     if (c == '\\' && q + 1 < args_end) q++;
                                     else if (c == '"') in_s = 0;
@@ -5069,6 +5180,8 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                                     continue;
                                 }
                                 if (!at_end) {
+                                    if (c == '/' && q + 1 < args_end && src[q + 1] == '/') { in_lc2 = 1; q++; continue; }
+                                    if (c == '/' && q + 1 < args_end && src[q + 1] == '*') { in_bc2 = 1; q++; continue; }
                                     if (c == '"') { in_s = 1; continue; }
                                     if (c == '\'') { in_c = 1; continue; }
                                     if (c == '(' || c == '[' || c == '{') { depth++; continue; }
@@ -5143,6 +5256,18 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
             }
         }
         family_by_value = (strncmp(recv_type_base, "CCResult_", 9) == 0) || scalar_like;
+        /* Mixed-convention runtime families (cc_slice_*): receiver
+         * passing follows the declared first parameter — by value when
+         * the family fn takes the receiver type by value, &recv when it
+         * takes a pointer. Same rule as the bare tier. */
+        if (slice_like && !family_by_value) {
+            char scand[128], fparam[256];
+            if ((size_t)snprintf(scand, sizeof(scand), "cc_slice_%s",
+                                 method_name) < sizeof(scand) &&
+                cc_included_cch_fn_first_param(scand, fparam, sizeof(fparam)) &&
+                !strchr(fparam, '*'))
+                family_by_value = 1;
+        }
         family_pass_direct = parser_map || map_decl_like ||
                              (strncmp(recv_type_base, "ArrayMap_", 9) == 0) ||
                              (strncmp(recv_type_base, "Map_", 4) == 0);
@@ -5302,6 +5427,9 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_nursery_");
                     cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
                 }
+            } else if (atomic_like) {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_atomic_");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
             } else if (map_decl_like) {
                 cc_sb_append_cstr(&out, &out_len, &out_cap, recv_type_base);
                 cc_sb_append_cstr(&out, &out_len, &out_cap, "_");
@@ -5491,13 +5619,38 @@ static int cc__free_call_name_is_keyword(const char* s, size_t len) {
  * `return println(...)`, `else println(...)`, … — an identifier char
  * before the name is a declaration shape ONLY when the preceding word
  * is not one of these. */
+/* Backward skip over spaces, tabs and `/ * ... * /` block comments only —
+ * for probes whose acceptance must NOT start crossing bare newlines.
+ * `pos` is an exclusive end; returns the new exclusive end.  Same rewind
+ * idiom as the await-lookback (search left for the comment opener;
+ * adjacent `* /` cannot occur in real code outside a comment). */
+static size_t cc__rskip_sp_tab_block_comments(const char* src, size_t pos) {
+    for (;;) {
+        while (pos > 0 && (src[pos - 1] == ' ' || src[pos - 1] == '\t')) pos--;
+        if (pos >= 2 && src[pos - 1] == '/' && src[pos - 2] == '*') {
+            size_t c = pos - 2, open = (size_t)-1;
+            while (c > 0) {
+                c--;
+                if (src[c] == '*' && c > 0 && src[c - 1] == '/') { open = c - 1; break; }
+            }
+            if (open == (size_t)-1) return pos;
+            pos = open;
+            continue;
+        }
+        return pos;
+    }
+}
+
 static int cc__free_call_prev_word_is_stmt_kw(const char* src, size_t b) {
-    size_t e = b, s;
+    size_t e, s;
     static const char* const kws[] = {
         "return", "else", "case", "do", "goto", NULL,
     };
     size_t k;
-    while (e > 0 && (src[e - 1] == ' ' || src[e - 1] == '\t')) e--;
+    /* Skip whitespace and block comments backwards so
+     * `return / *c* / println(x)` still reads `return`; keep the walk
+     * same-line (bare newlines end it, as before). */
+    e = cc__rskip_sp_tab_block_comments(src, b);
     s = e;
     while (s > 0 && cc_is_ident_char(src[s - 1])) s--;
     if (s == e) return 0;
@@ -5566,21 +5719,11 @@ static int cc__name_set_has(const CCNameSet* s, const char* name) {
                    cc__callable_name_cmp) != NULL;
 }
 
-/* Walk back past whitespace/comments to the previous code char before `pos`. */
+/* Walk back past whitespace/comments to the previous code char before `pos`.
+ * `cc_rskip_ws_and_comments` handles block AND line comments (a trailing
+ * `// ...` on the previous line no longer reads as the previous token). */
 static size_t cc__tu_decl_prev_code(const char* src, size_t pos) {
-    size_t b = pos;
-    for (;;) {
-        while (b > 0 && isspace((unsigned char)src[b - 1])) b--;
-        if (b >= 2 && src[b - 1] == '/' && src[b - 2] == '*') {
-            size_t c = b - 2;
-            while (c >= 2 && !(src[c - 1] == '*' && src[c - 2] == '/')) c--;
-            if (c < 2) break;
-            b = c - 2;
-            continue;
-        }
-        break;
-    }
-    return b;
+    return cc_rskip_ws_and_comments(src, pos);
 }
 
 static int cc__tu_ident_paren_is_decl(const char* src, size_t n, size_t name_pos,
@@ -5640,24 +5783,7 @@ static int cc__tu_declares_fn(const char* src, size_t n, const char* name) {
  * provide these names: a function-like macro expands in member
  * position too and would destroy every postfix spelling. */
 static int cc__tu_defines_fnlike_macro(const char* src, size_t n, const char* name) {
-    size_t nlen = strlen(name);
-    size_t i = 0;
-    while (i + 8 + nlen < n) {
-        if (src[i] != '#') { i++; continue; }
-        {
-            size_t q = i + 1;
-            while (q < n && (src[q] == ' ' || src[q] == '\t')) q++;
-            if (q + 6 < n && memcmp(src + q, "define", 6) == 0) {
-                q += 6;
-                while (q < n && (src[q] == ' ' || src[q] == '\t')) q++;
-                if (q + nlen < n && memcmp(src + q, name, nlen) == 0 &&
-                    src[q + nlen] == '(')
-                    return 1;
-            }
-        }
-        while (i < n && src[i] != '\n') i++;
-    }
-    return 0;
+    return cc_text_defines_fnlike_macro(src, n, name);
 }
 
 static char* cc__rewrite_naked_print_aliases(const char* src, size_t n) {
@@ -5692,11 +5818,9 @@ static char* cc__rewrite_naked_print_aliases(const char* src, size_t n) {
         while (e < n && (src[e] == ' ' || src[e] == '\t')) e++;
         if (e >= n || src[e] != '(') { i += nl; continue; }
         {
-            /* Skip back over whitespace: `.  println(` is member position. */
-            size_t b = i;
-            while (b > 0 && (src[b - 1] == ' ' || src[b - 1] == '\t' ||
-                             src[b - 1] == '\n' || src[b - 1] == '\r'))
-                b--;
+            /* Skip back over whitespace and comments: `.  println(` (and
+             * `. / *c* / println(`) is member position. */
+            size_t b = cc_rskip_ws_and_comments(src, i);
             if (b > 0 && (src[b - 1] == '.' ||
                           (b > 1 && src[b - 1] == '>' && src[b - 2] == '-') ||
                           src[b - 1] == '#' || src[b - 1] == '&' || src[b - 1] == '*')) {
@@ -5862,25 +5986,21 @@ static char* cc__rewrite_result_chain_links(const char* src, size_t n) {
         while (q < n && cc_is_ident_char(src[q])) q++;
         q = cc_skip_ws_and_comments(src, n, q);
         if (q >= n || src[q] != '(') { i += 2; continue; }
-        /* Producer: one lowered call `F(args)` ending just before `!>`. */
-        eend = i;
-        while (eend > last_emit && (src[eend - 1] == ' ' || src[eend - 1] == '\t' ||
-                                    src[eend - 1] == '\n' || src[eend - 1] == '\r'))
-            eend--;
+        /* Producer: one lowered call `F(args)` ending just before `!>`.
+         * Comments may sit between `)` and `!>`. */
+        eend = cc_rskip_ws_and_comments(src, i);
         if (eend <= last_emit || src[eend - 1] != ')') { i += 2; continue; }
         {
-            int depth = 0;
-            size_t p = eend;
-            while (p > last_emit) {
-                p--;
-                if (src[p] == ')') depth++;
-                else if (src[p] == '(') {
-                    depth--;
-                    if (depth == 0) break;
-                }
-            }
-            if (depth != 0) { i += 2; continue; }
-            fe = p;
+            /* Find the `(` matching the final `)` via the masked backward
+             * scan (comments/strings inside the arg span are inert).
+             * Excluding the final `)` leaves the producer's `(` unmatched,
+             * so the scan stops just after it. */
+            size_t p = cc_rfind_char_top_level(src, last_emit, eend - 1, "");
+            size_t lp = p;
+            while (lp > last_emit && (src[lp - 1] == ' ' || src[lp - 1] == '\t'))
+                lp--;
+            if (lp <= last_emit || src[lp - 1] != '(') { i += 2; continue; }
+            fe = lp - 1;
             while (fe > last_emit && (src[fe - 1] == ' ' || src[fe - 1] == '\t'))
                 fe--;
             fs = fe;
@@ -6053,6 +6173,11 @@ char* cc_rewrite_generic_family_ufcs_parser_safe(const char* src, size_t n) {
             cur_len = strlen(cur);
         }
     }
+    if (g_ufcs_typeformal_err) {
+        g_ufcs_typeformal_err = 0;
+        free(cur);
+        return (char*)-1;
+    }
     return cur;
 }
 
@@ -6186,9 +6311,24 @@ static char* cc__rewrite_optional_types(const char* src, size_t n, const char* i
 
         if (c == '?' && c2 != ':' && c2 != '?' && c2 != '>') {
             if (i > 0) {
-                char prev = src[i - 1];
-                if (cc_is_ident_char(prev) || prev == ')' || prev == ']' || prev == '>') {
-                    size_t ident_end = i;
+                /* Rewind directly-abutting block comments so `T/ *c* /?`
+                 * still reads `T` as the receiver (whitespace is
+                 * intentionally NOT skipped — `T ?` is not a candidate
+                 * today and stays that way). */
+                size_t pe = i;
+                while (pe >= 2 && src[pe - 1] == '/' && src[pe - 2] == '*') {
+                    size_t q = pe - 2, open = (size_t)-1;
+                    while (q > 0) {
+                        q--;
+                        if (src[q] == '*' && q > 0 && src[q - 1] == '/') { open = q - 1; break; }
+                    }
+                    if (open == (size_t)-1) break;
+                    pe = open;
+                }
+                char prev = pe > 0 ? src[pe - 1] : src[0];
+                if (pe > 0 &&
+                    (cc_is_ident_char(prev) || prev == ')' || prev == ']' || prev == '>')) {
+                    size_t ident_end = pe;
                     size_t ident_start = ident_end;
                     while (ident_start > 0 && cc_is_ident_char(src[ident_start - 1])) ident_start--;
                     size_t ident_len = ident_end - ident_start;
@@ -7263,9 +7403,7 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
              * `CALL !> (e) BODY` of the `!>` statement operator — not a
              * type annotation.  Let pass_result_unwrap handle it later. */
             {
-                size_t bk = sigil_pos;
-                while (bk > 0 && (src[bk - 1] == ' ' || src[bk - 1] == '\t' ||
-                                  src[bk - 1] == '\r' || src[bk - 1] == '\n')) bk--;
+                size_t bk = cc_rskip_ws_and_comments(src, sigil_pos);
                 if (bk > 0 && src[bk - 1] == ')') {
                     i = sigil_pos + 2;
                     scan.col += 2;
@@ -7273,27 +7411,16 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
                 }
             }
             if (j < n && src[j] == '(') {
+                size_t lparen = j;
                 j++;  /* skip '(' */
-                
+
                 /* Skip whitespace inside parens */
                 while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '\r')) j++;
-                
+
                 /* Find matching ')' - track nesting for complex types like Error<A, B> */
                 size_t err_start = j;
-                int paren_depth = 1;
-                int in_s = 0, in_c = 0;
-                while (j < n && paren_depth > 0) {
-                    char ch = src[j];
-                    if (in_s) { if (ch == '\\' && j + 1 < n) j++; else if (ch == '"') in_s = 0; j++; continue; }
-                    if (in_c) { if (ch == '\\' && j + 1 < n) j++; else if (ch == '\'') in_c = 0; j++; continue; }
-                    if (ch == '"') { in_s = 1; j++; continue; }
-                    if (ch == '\'') { in_c = 1; j++; continue; }
-                    if (ch == '(') paren_depth++;
-                    else if (ch == ')') paren_depth--;
-                    if (paren_depth > 0) j++;
-                }
-                
-                if (paren_depth != 0) {
+                size_t rparen = 0;
+                if (!cc_find_matching_paren(src, n, lparen, &rparen)) {
                     /* ERROR: unclosed paren in error type */
                     char rel[1024];
                     cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
@@ -7302,8 +7429,9 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
                     free(out);
                     return NULL;
                 }
-                
-                if (paren_depth == 0) {
+                j = rparen;
+
+                {
                     /* Found matching ')' at position j */
                     size_t err_end = j;
                     
@@ -7856,18 +7984,12 @@ char* cc__rewrite_async_void_ret(const char* src, size_t n) {
     size_t out_len = 0, out_cap = 0;
     size_t last_emit = 0;
     int changed = 0;
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    CCScannerState scan;
+    cc_scanner_init(&scan);
 
     for (size_t i = 0; i < n; ) {
-        char c = src[i], c2 = (i + 1 < n) ? src[i + 1] : 0;
-        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } i++; continue; }
-        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
-        if (c == '"') { in_str = 1; i++; continue; }
-        if (c == '\'') { in_chr = 1; i++; continue; }
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        char c = src[i];
 
         /* Match '@async' at a word boundary. */
         if (c == '@' && i + 6 <= n && memcmp(src + i + 1, "async", 5) == 0
@@ -7952,17 +8074,11 @@ static int          cc__at_await_fn_count = 0;
 
 static void cc__collect_async_ret_types(const char* src, size_t n) {
     cc__at_await_fn_count = 0;
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    CCScannerState scan;
+    cc_scanner_init(&scan);
     for (size_t i = 0; i < n; ) {
-        char c = src[i], c2 = (i+1 < n) ? src[i+1] : 0;
-        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
-        if (in_bc) { if (c=='*' && c2=='/') { in_bc = 0; i++; } i++; continue; }
-        if (in_str) { if (c=='\\' && i+1<n) { i+=2; continue; } if (c=='"') in_str=0; i++; continue; }
-        if (in_chr) { if (c=='\\' && i+1<n) { i+=2; continue; } if (c=='\'') in_chr=0; i++; continue; }
-        if (c=='/' && c2=='/') { in_lc=1; i+=2; continue; }
-        if (c=='/' && c2=='*') { in_bc=1; i+=2; continue; }
-        if (c=='"') { in_str=1; i++; continue; }
-        if (c=='\'') { in_chr=1; i++; continue; }
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        char c = src[i];
 
         /* Detect '@async' keyword */
         if (c == '@' && i+6 <= n && memcmp(src+i+1,"async",5) == 0
@@ -8040,18 +8156,12 @@ char* cc__rewrite_at_call_site_mode(const char* src, size_t n) {
     size_t out_len = 0, out_cap = 0;
     size_t last_emit = 0;
     int changed = 0;
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    CCScannerState scan;
+    cc_scanner_init(&scan);
 
     for (size_t i = 0; i < n; ) {
-        char c = src[i], c2 = (i + 1 < n) ? src[i + 1] : 0;
-        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } i++; continue; }
-        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
-        if (c == '"') { in_str = 1; i++; continue; }
-        if (c == '\'') { in_chr = 1; i++; continue; }
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        char c = src[i];
 
         if (c != '@') { i++; continue; }
 
@@ -8121,22 +8231,10 @@ char* cc__rewrite_at_call_site_mode(const char* src, size_t n) {
             continue;
         }
 
-        /* Find matching ')' respecting strings/chars. */
-        size_t m = p;
-        int depth = 0;
-        int in_s = 0, in_q = 0;
-        while (m < n) {
-            char mc = src[m];
-            if (in_s) { if (mc == '\\' && m + 1 < n) { m += 2; continue; } if (mc == '"') in_s = 0; m++; continue; }
-            if (in_q) { if (mc == '\\' && m + 1 < n) { m += 2; continue; } if (mc == '\'') in_q = 0; m++; continue; }
-            if (mc == '"') { in_s = 1; m++; continue; }
-            if (mc == '\'') { in_q = 1; m++; continue; }
-            if (mc == '(') depth++;
-            else if (mc == ')') { depth--; if (depth == 0) { m++; break; } }
-            m++;
-        }
-        if (depth != 0) { i++; continue; }
-        size_t rparen_end = m;
+        /* Find matching ')' respecting strings/chars/comments. */
+        size_t rp = 0;
+        if (!cc_find_matching_paren(src, n, p, &rp)) { i++; continue; }
+        size_t rparen_end = rp + 1;
 
         /* Lookahead: if next non-ws char is `{`, it's a function
          * definition — leave the marker intact for TCC cc-ext. */
@@ -8266,18 +8364,12 @@ char* cc__rewrite_at_await(const char* src, size_t n) {
     size_t out_len = 0, out_cap = 0;
     size_t last_emit = 0;
     int changed = 0;
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    CCScannerState scan;
+    cc_scanner_init(&scan);
 
     for (size_t i = 0; i < n; ) {
-        char c = src[i], c2 = (i+1 < n) ? src[i+1] : 0;
-        if (in_lc) { if (c=='\n') in_lc=0; i++; continue; }
-        if (in_bc) { if (c=='*'&&c2=='/') { in_bc=0; i++; } i++; continue; }
-        if (in_str) { if (c=='\\'&&i+1<n){i+=2;continue;} if(c=='"') in_str=0; i++;continue; }
-        if (in_chr) { if (c=='\\'&&i+1<n){i+=2;continue;} if(c=='\'') in_chr=0; i++;continue; }
-        if (c=='/'&&c2=='/') { in_lc=1; i+=2; continue; }
-        if (c=='/'&&c2=='*') { in_bc=1; i+=2; continue; }
-        if (c=='"') { in_str=1; i++; continue; }
-        if (c=='\'') { in_chr=1; i++; continue; }
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        char c = src[i];
 
         /* Detect '@await' token */
         if (c == '@' && i+6 <= n && memcmp(src+i+1,"await",5) == 0
@@ -8320,15 +8412,12 @@ char* cc__rewrite_at_await(const char* src, size_t n) {
                             ret_type = cc__at_await_fns[fi].ret; break;
                         }
                     }
-                    /* Find matching ')' of the call */
-                    size_t m = j; int depth = 0;
-                    while (m < n) {
-                        char mc = src[m];
-                        if (mc=='"') { m++; while(m<n&&src[m]!='"'){if(src[m]=='\\')m++;m++;} }
-                        else if (mc=='(') depth++;
-                        else if (mc==')') { depth--; if(depth==0){m++;break;} }
-                        m++;
-                    }
+                    /* Find matching ')' of the call — comment- and
+                     * char-literal-aware, so a ')' inside either does
+                     * not terminate the span early. */
+                    size_t m = j, rp = 0;
+                    if (cc_find_matching_paren(src, n, m, &rp)) m = rp + 1;
+                    else m = n;
                     call_start = id_s; call_end = m;
                 } else {
                     /* Identifier but not a call – keep from id_s onward */
@@ -8536,48 +8625,12 @@ char* cc__rewrite_link_directives(const char* src, size_t n) {
     size_t out_len = 0, out_cap = 0;
     size_t i = 0;
     size_t last_emit = 0;
-    int in_line_comment = 0;
-    int in_block_comment = 0;
-    int in_str = 0;
-    int in_chr = 0;
+    CCScannerState scan;
+    cc_scanner_init(&scan);
 
     while (i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
         char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-
-        /* Track comment/string state */
-        if (in_line_comment) {
-            if (c == '\n') in_line_comment = 0;
-            i++;
-            continue;
-        }
-        if (in_block_comment) {
-            if (c == '*' && c2 == '/') {
-                i += 2;
-                in_block_comment = 0;
-                continue;
-            }
-            i++;
-            continue;
-        }
-        if (in_str) {
-            if (c == '\\' && i + 1 < n) { i += 2; continue; }
-            if (c == '"') in_str = 0;
-            i++;
-            continue;
-        }
-        if (in_chr) {
-            if (c == '\\' && i + 1 < n) { i += 2; continue; }
-            if (c == '\'') in_chr = 0;
-            i++;
-            continue;
-        }
-
-        /* Check for comment/string start */
-        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
-        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
-        if (c == '"') { in_str = 1; i++; continue; }
-        if (c == '\'') { in_chr = 1; i++; continue; }
 
         /* Look for @link("...") */
         if (c == '@' && i + 5 < n && strncmp(src + i, "@link(", 6) == 0) {
@@ -8618,7 +8671,7 @@ char* cc__rewrite_link_directives(const char* src, size_t n) {
                 }
             }
             /* If parsing failed, continue from after @ */
-            i = start + 1;
+            i = start;
         }
 
         i++;
@@ -8636,30 +8689,16 @@ static int cc__check_async_chan_await(const char* src, size_t n, const char* inp
     if (!src || n == 0) return 0;
 
     int errors = 0;
-    int line = 1, col = 1;
     int in_async_fn = 0;      /* 1 if inside @async function body */
     int async_brace_depth = 0; /* Brace depth when we entered the async function */
 
-    /* Comment/string tracking */
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
     int brace_depth = 0;
+    CCScannerState scan;
+    cc_scanner_init(&scan);
 
-    for (size_t i = 0; i < n; i++) {
+    for (size_t i = 0; i < n; ) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
         char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-
-        /* Track position */
-        if (c == '\n') { line++; col = 1; } else { col++; }
-
-        /* Skip comments and strings */
-        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; col++; } continue; }
-        if (in_str) { if (c == '\\' && i + 1 < n) { i++; col++; continue; } if (c == '"') in_str = 0; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < n) { i++; col++; continue; } if (c == '\'') in_chr = 0; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i++; col++; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i++; col++; continue; }
-        if (c == '"') { in_str = 1; continue; }
-        if (c == '\'') { in_chr = 1; continue; }
 
         /* Track braces */
         if (c == '{') brace_depth++;
@@ -8689,6 +8728,7 @@ static int cc__check_async_chan_await(const char* src, size_t n, const char* inp
                     async_brace_depth = brace_depth + 1; /* We'll hit the '{' soon */
                 }
             }
+            i++;
             continue;
         }
 
@@ -8711,13 +8751,29 @@ static int cc__check_async_chan_await(const char* src, size_t n, const char* inp
             }
 
             if (is_chan_op) {
-                /* Check if preceded by "await" (skipping whitespace/comments backwards) */
+                /* Check if preceded by "await", skipping whitespace and
+                 * block comments backwards — a block comment between the
+                 * keyword and the call still counts as awaited. */
                 int has_await = 0;
                 size_t k = i;
                 while (k > 0) {
                     k--;
                     char ck = src[k];
                     if (ck == ' ' || ck == '\t' || ck == '\n' || ck == '\r') continue;
+                    if (ck == '/' && k > 0 && src[k - 1] == '*') {
+                        size_t bk = k - 1;
+                        int found = 0;
+                        while (bk > 0) {
+                            bk--;
+                            if (src[bk] == '*' && bk > 0 && src[bk - 1] == '/') {
+                                k = bk - 1;
+                                found = 1;
+                                break;
+                            }
+                        }
+                        if (!found) break;
+                        continue;
+                    }
                     /* Check for "await" ending at position k */
                     if (k >= 4 && memcmp(src + k - 4, "await", 5) == 0) {
                         /* Ensure "await" is not part of a larger identifier */
@@ -8730,13 +8786,14 @@ static int cc__check_async_chan_await(const char* src, size_t n, const char* inp
                 if (!has_await) {
                     char rel[1024];
                     cc_path_rel_to_repo(input_path, rel, sizeof(rel));
-                    cc_pp_error_cat(rel, line, col, "async", "channel operation '%s' must be awaited in @async function", op_name);
+                    cc_pp_error_cat(rel, scan.line, scan.col, "async", "channel operation '%s' must be awaited in @async function", op_name);
                     fprintf(stderr, "  hint: add 'await' before this call\n");
                     errors++;
                 }
                 i += op_len - 1; /* Skip past the op name */
             }
         }
+        i++;
     }
 
     return errors > 0 ? -1 : 0;
@@ -8763,23 +8820,12 @@ static int cc__check_block_on_nonblocking(const char* src, size_t n, const char*
     int warnings = 0;
 
     /* Pass 1: Collect @async functions and determine if they're @nonblocking */
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
-    int line = 1, col = 1;
+    CCScannerState scan;
+    cc_scanner_init(&scan);
 
-    for (size_t i = 0; i < n; i++) {
+    for (size_t i = 0; i < n; ) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
         char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-
-        if (c == '\n') { line++; col = 1; } else { col++; }
-
-        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; col++; } continue; }
-        if (in_str) { if (c == '\\' && i + 1 < n) { i++; col++; continue; } if (c == '"') in_str = 0; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < n) { i++; col++; continue; } if (c == '\'') in_chr = 0; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i++; col++; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i++; col++; continue; }
-        if (c == '"') { in_str = 1; continue; }
-        if (c == '\'') { in_chr = 1; continue; }
 
         /* Look for @async or @async @nonblocking */
         if (c == '@' && i + 5 < n && memcmp(src + i + 1, "async", 5) == 0 && !cc_is_ident_char(src[i + 6])) {
@@ -8795,20 +8841,20 @@ static int cc__check_block_on_nonblocking(const char* src, size_t n, const char*
 
             /* Skip to function name: skip return type and get identifier before '(' */
             while (j < n && src[j] != '(' && src[j] != '{' && src[j] != ';') j++;
-            if (j >= n || src[j] != '(') continue;
+            if (j >= n || src[j] != '(') { i++; continue; }
 
-            /* Back up to find function name */
+            /* Back up to find function name (skipping whitespace and
+             * block comments: `RT name / *c* / (` still reads `name`). */
             size_t paren = j;
-            j--;
-            while (j > i && (src[j] == ' ' || src[j] == '\t')) j--;
-            if (j <= i || !cc_is_ident_char(src[j])) continue;
+            j = cc__rskip_sp_tab_block_comments(src, j);
+            if (j == 0 || j - 1 <= i || !cc_is_ident_char(src[j - 1])) { i++; continue; }
 
-            size_t name_end = j + 1;
+            size_t name_end = j;
             while (j > i && cc_is_ident_char(src[j - 1])) j--;
             size_t name_start = j;
             size_t name_len = name_end - name_start;
 
-            if (name_len == 0 || name_len >= 127) continue;
+            if (name_len == 0 || name_len >= 127) { i++; continue; }
 
             /* Find function body */
             j = paren + 1;
@@ -8819,7 +8865,7 @@ static int cc__check_block_on_nonblocking(const char* src, size_t n, const char*
                 j++;
             }
             while (j < n && src[j] != '{' && src[j] != ';') j++;
-            if (j >= n || src[j] != '{') continue;
+            if (j >= n || src[j] != '{') { i++; continue; }
 
             size_t body_start = j;
             depth = 1;
@@ -8864,22 +8910,22 @@ static int cc__check_block_on_nonblocking(const char* src, size_t n, const char*
                     loop_end++;
                 }
 
-                /* Check for channel ops in loop body - look for .send( or .recv( */
+                /* Check for channel ops in loop body - look for .send( or
+                 * .recv( (word-bounded, so `.sendfile(` does not count). */
                 for (size_t m = loop_start; m < loop_end; m++) {
-                    if (m + 5 <= loop_end && memcmp(src + m, ".send", 5) == 0) {
-                        has_loop_with_chan = 1;
-                        break;
-                    }
-                    if (m + 5 <= loop_end && memcmp(src + m, ".recv", 5) == 0) {
+                    if (m + 5 <= loop_end &&
+                        (memcmp(src + m, ".send", 5) == 0 ||
+                         memcmp(src + m, ".recv", 5) == 0) &&
+                        (m + 5 == loop_end || !cc_is_ident_char(src[m + 5]))) {
                         has_loop_with_chan = 1;
                         break;
                     }
                     /* Also check for chan_send/chan_recv macro forms */
-                    if (m + 9 <= loop_end && memcmp(src + m, "chan_send", 9) == 0) {
-                        has_loop_with_chan = 1;
-                        break;
-                    }
-                    if (m + 9 <= loop_end && memcmp(src + m, "chan_recv", 9) == 0) {
+                    if (m + 9 <= loop_end &&
+                        (memcmp(src + m, "chan_send", 9) == 0 ||
+                         memcmp(src + m, "chan_recv", 9) == 0) &&
+                        (m == loop_start || !cc_is_ident_char(src[m - 1])) &&
+                        (m + 9 == loop_end || !cc_is_ident_char(src[m + 9]))) {
                         has_loop_with_chan = 1;
                         break;
                     }
@@ -8895,50 +8941,39 @@ static int cc__check_block_on_nonblocking(const char* src, size_t n, const char*
                 cc__async_fn_count++;
             }
 
-            i = body_end - 1;
+            i = body_end;
             continue;
         }
+        i++;
     }
 
     /* Pass 2: Check cc_block_on calls */
-    in_lc = in_bc = in_str = in_chr = 0;
-    line = 1; col = 1;
+    cc_scanner_init(&scan);
 
-    for (size_t i = 0; i < n; i++) {
+    for (size_t i = 0; i < n; ) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
         char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-
-        if (c == '\n') { line++; col = 1; } else { col++; }
-
-        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; col++; } continue; }
-        if (in_str) { if (c == '\\' && i + 1 < n) { i++; col++; continue; } if (c == '"') in_str = 0; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < n) { i++; col++; continue; } if (c == '\'') in_chr = 0; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i++; col++; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i++; col++; continue; }
-        if (c == '"') { in_str = 1; continue; }
-        if (c == '\'') { in_chr = 1; continue; }
 
         /* Look for cc_block_on( */
         if (c == 'c' && i + 11 < n && memcmp(src + i, "cc_block_on", 11) == 0 && src[i + 11] == '(') {
-            int call_line = line, call_col = col;
+            int call_line = scan.line, call_col = scan.col;
             size_t j = i + 12;
 
             /* Skip the type argument */
             while (j < n && src[j] != ',') j++;
-            if (j >= n) continue;
+            if (j >= n) { i++; continue; }
             j++; /* Skip comma */
 
             /* Skip whitespace */
             while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n')) j++;
 
             /* Extract the function name being called */
-            if (j >= n || !cc_is_ident_start(src[j])) continue;
+            if (j >= n || !cc_is_ident_start(src[j])) { i++; continue; }
             size_t fn_start = j;
             while (j < n && cc_is_ident_char(src[j])) j++;
             size_t fn_len = j - fn_start;
 
-            if (fn_len == 0 || fn_len >= 127) continue;
+            if (fn_len == 0 || fn_len >= 127) { i++; continue; }
 
             char fn_name[128];
             memcpy(fn_name, src + fn_start, fn_len);
@@ -8962,6 +8997,7 @@ static int cc__check_block_on_nonblocking(const char* src, size_t n, const char*
 
             i = j - 1;
         }
+        i++;
     }
 
     return warnings;
@@ -9018,13 +9054,12 @@ static const char* cc__ctor_target_vars_find(const CCCtorTargetVar* vars, size_t
  * name cannot be trusted to identify a type. */
 static const char* cc__ctor_assign_target_type(const char* src, size_t macro_start,
                                                const CCCtorTargetVar* vars, size_t count) {
-    size_t p = macro_start;
-    while (p > 0 && (src[p-1] == ' ' || src[p-1] == '\t' || src[p-1] == '\n' || src[p-1] == '\r')) p--;
+    size_t p = cc_rskip_ws_and_comments(src, macro_start);
     if (p == 0 || src[p-1] != '=') return NULL;
     p--;
     /* Reject `==`, `!=`, `<=`, `>=` and compound assignments. */
     if (p > 0 && strchr("=!<>+-*/%&|^", src[p-1])) return NULL;
-    while (p > 0 && (src[p-1] == ' ' || src[p-1] == '\t' || src[p-1] == '\n' || src[p-1] == '\r')) p--;
+    p = cc_rskip_ws_and_comments(src, p);
     size_t nm_end = p;
     while (p > 0 && cc_is_ident_char(src[p-1])) p--;
     if (nm_end == p || !cc_is_ident_start(src[p])) return NULL;
@@ -9062,23 +9097,14 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
     CCCtorTargetVar* rvars = NULL;
     size_t rvar_count = 0, rvar_cap = 0;
 
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
-    
+    CCScannerState scan;
+    cc_scanner_init(&scan);
+
     for (size_t i = 0; i < n; ) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
         char c = src[i];
         char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        
-        /* Skip comments and strings */
-        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
-        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
-        
-        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
-        if (c == '"') { in_str = 1; i++; continue; }
-        if (c == '\'') { in_chr = 1; i++; continue; }
-        
+
         /* Track braces */
         if (c == '{') {
             brace_depth++;
@@ -9190,10 +9216,10 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
         /* Detect function returning T!E or T!>(E) - look for pattern: T!E name( or T!>(E) name( 
            Handle space before ! (e.g., "MyData !> (MyError)" or "MyData*!>(MyError)") */
         if (c == '!' && c2 != '=' && fn_brace_depth < 0 && i > 0) {
-            /* Skip backwards over whitespace to find the type */
-            size_t prev_idx = i - 1;
-            while (prev_idx > 0 && (src[prev_idx] == ' ' || src[prev_idx] == '\t')) prev_idx--;
-            char prev = src[prev_idx];
+            /* Skip backwards over whitespace and block comments to find
+             * the type (`T / *doc* / !> (E) fn(` still reads `T`). */
+            size_t prev_end = cc__rskip_sp_tab_block_comments(src, i);
+            char prev = prev_end > 0 ? src[prev_end - 1] : src[0];
             /* Valid chars before !: identifier chars, closing brackets, pointer star */
             if (cc_is_ident_char(prev) || prev == ')' || prev == ']' || prev == '>' || prev == '*') {
                 /* Check for error type after ! - two forms:
@@ -9253,8 +9279,9 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
                                     ty_start = cc__skip_leading_decl_specs(src, ty_start);
                                     size_t ty_len = i - ty_start;
                                     if (ty_len < sizeof(current_ok_type) - 1) {
-                                        /* Trim whitespace */
-                                        while (ty_len > 0 && (src[ty_start + ty_len - 1] == ' ' || src[ty_start + ty_len - 1] == '\t')) ty_len--;
+                                        /* Trim whitespace and trailing comments */
+                                        size_t ty_e = cc__rskip_sp_tab_block_comments(src, ty_start + ty_len);
+                                        ty_len = (ty_e > ty_start) ? ty_e - ty_start : 0;
                                         memcpy(current_ok_type, src + ty_start, ty_len);
                                         current_ok_type[ty_len] = 0;
                                     }
@@ -9304,11 +9331,16 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
                     int brace_depth = 0;
                     int bracket_depth = 0;
                     int comma_count = 0;
-                    int in_s = 0, in_c = 0;
+                    int in_s = 0, in_c = 0, in_lc2 = 0, in_bc2 = 0;
                     while (j < n && depth > 0) {
                         char ch = src[j];
+                        char ch2 = (j + 1 < n) ? src[j + 1] : 0;
+                        if (in_lc2) { if (ch == '\n') in_lc2 = 0; j++; continue; }
+                        if (in_bc2) { if (ch == '*' && ch2 == '/') { in_bc2 = 0; j += 2; } else j++; continue; }
                         if (in_s) { if (ch == '\\' && j+1<n) j++; else if (ch == '"') in_s = 0; j++; continue; }
                         if (in_c) { if (ch == '\\' && j+1<n) j++; else if (ch == '\'') in_c = 0; j++; continue; }
+                        if (ch == '/' && ch2 == '/') { in_lc2 = 1; j += 2; continue; }
+                        if (ch == '/' && ch2 == '*') { in_bc2 = 1; j += 2; continue; }
                         if (ch == '"') { in_s = 1; j++; continue; }
                         if (ch == '\'') { in_c = 1; j++; continue; }
                         if (ch == '{') brace_depth++;
@@ -9438,35 +9470,26 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
 static char* cc__rewrite_cc_concurrent(const char* src, size_t n) {
     if (!src || n == 0) return NULL;
 
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
-    int line = 1;
+    CCScannerState scan;
+    cc_scanner_init(&scan);
 
-    for (size_t i = 0; i < n; i++) {
-        char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-
-        if (c == '\n') line++;
-
-        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
-        if (in_str) { if (c == '\\' && i + 1 < n) { i++; continue; } if (c == '"') in_str = 0; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < n) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
-        if (c == '"') { in_str = 1; continue; }
-        if (c == '\'') { in_chr = 1; continue; }
+    for (size_t i = 0; i < n;) {
+        char c;
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        c = src[i];
 
         if (c == 'c' && i + 12 < n && memcmp(src + i, "cc_concurrent", 13) == 0) {
-            if (i > 0 && cc_is_ident_char(src[i - 1])) continue;
-            if (i + 13 < n && cc_is_ident_char(src[i + 13])) continue;
+            if (i > 0 && cc_is_ident_char(src[i - 1])) { i++; continue; }
+            if (i + 13 < n && cc_is_ident_char(src[i + 13])) { i++; continue; }
 
-            cc_pp_error_cat("<input>", line, 1, "syntax", "'cc_concurrent' syntax is deprecated (use cc_block_all instead)");
+            cc_pp_error_cat("<input>", scan.line, 1, "syntax", "'cc_concurrent' syntax is deprecated (use cc_block_all instead)");
             fprintf(stderr, "  note: use cc_block_all() instead:\n");
             fprintf(stderr, "    CCTaskIntptr tasks[] = { task1(), task2() };\n");
             fprintf(stderr, "    intptr_t results[2];\n");
             fprintf(stderr, "    cc_block_all(2, tasks, results);\n");
             return (char*)-1;
         }
+        i++;
     }
 
     return NULL;
@@ -10583,6 +10606,20 @@ static void cc__index_declares(CCPathTextCache* slot) {
     cc_scanner_init(&scan);
     while (i < slot->len) {
         size_t s, e, q, b;
+        /* Function-like macros are real bindings, but the shared scanner
+         * consumes directive lines whole — harvest `#define name(` here,
+         * then let the scanner skip the line as usual.  The scan-state
+         * guards keep a directive spelled inside a comment or string
+         * from being harvested. */
+        if (slot->text[i] == '#' && scan.at_line_start && !scan.in_pp &&
+            !scan.in_line_comment && !scan.in_block_comment &&
+            !scan.in_str && !scan.in_chr) {
+            size_t noff = 0, nl = 0;
+            int fnlike = 0;
+            if (cc_scan_define_head(slot->text, slot->len, i, &noff, &nl, &fnlike) &&
+                fnlike)
+                (void)cc__name_set_push(&set, slot->text + noff, nl);
+        }
         if (cc_scanner_skip_non_code(&scan, slot->text, slot->len, &i)) continue;
         if (!cc_is_ident_start(slot->text[i])) { i++; continue; }
         if (i > 0 && cc_is_ident_char(slot->text[i - 1])) {
@@ -10599,11 +10636,7 @@ static void cc__index_declares(CCPathTextCache* slot) {
         b = s;
         while (b > 0 && isspace((unsigned char)slot->text[b - 1])) b--;
         if (b > 0 && (cc_is_ident_char(slot->text[b - 1]) ||
-                      slot->text[b - 1] == '*')) {
-            (void)cc__name_set_push(&set, slot->text + s, e - s);
-            continue;
-        }
-        if (b >= 7 && memcmp(slot->text + b - 7, "#define", 7) == 0)
+                      slot->text[b - 1] == '*'))
             (void)cc__name_set_push(&set, slot->text + s, e - s);
     }
     cc__name_set_finalize(&set);
@@ -10845,8 +10878,7 @@ static void cc__append_family_suffixes(const char* text, size_t n,
         q = e;
         while (q < n && (text[q] == ' ' || text[q] == '\t')) q++;
         if (q >= n || text[q] != '(') { i = e; continue; }
-        b = i;
-        while (b > 0 && isspace((unsigned char)text[b - 1])) b--;
+        b = cc_rskip_ws_and_comments(text, i);
         if (b == 0 || !(cc_is_ident_char(text[b - 1]) || text[b - 1] == '*')) {
             i = e;
             continue;
@@ -11178,7 +11210,9 @@ static int cc_family_header_member_return(const char* header_suffix,
         while (q < formal_s && ol + 2 < out_sz) {
             char tok[64];
             size_t ts, tl;
-            while (q < formal_s && (fsrc[q] == ' ' || fsrc[q] == '\t')) q++;
+            /* Comment-aware: a comment on the macro-body line must not
+             * leak `*`/ident bytes into the harvested return type. */
+            q = cc_skip_ws_and_comments(fsrc, formal_s, q);
             if (q >= formal_s) break;
             if (fsrc[q] == '*') {
                 out[ol++] = '*';
@@ -11264,8 +11298,7 @@ static int cc__decl_fn_return_type_text(const char* text, size_t n,
         q = i + nlen;
         while (q < n && (text[q] == ' ' || text[q] == '\t')) q++;
         if (q >= n || text[q] != '(') { i += nlen; continue; }
-        b = i;
-        while (b > 0 && isspace((unsigned char)text[b - 1])) b--;
+        b = cc_rskip_ws_and_comments(text, i);
         if (b == 0 || !(cc_is_ident_char(text[b - 1]) || text[b - 1] == '*')) {
             i += nlen;
             continue;
@@ -11277,7 +11310,9 @@ static int cc__decl_fn_return_type_text(const char* text, size_t n,
         while (q < b && ol + 2 < out_sz) {
             char tok[64];
             size_t ts, tl;
-            while (q < b && isspace((unsigned char)text[q])) q++;
+            /* Comment-aware: `static / *c* / int foo(` must not leak
+             * comment bytes into the harvested return type. */
+            q = cc_skip_ws_and_comments(text, b, q);
             if (q >= b) break;
             if (text[q] == '*') {
                 out[ol++] = '*';
@@ -11527,8 +11562,7 @@ void cc_note_tu_map_key_pairs(const char* src, size_t n) {
         q = e;
         while (q < n && (src[q] == ' ' || src[q] == '\t')) q++;
         if (q >= n || src[q] != '(') { i = e; continue; }
-        b = i;
-        while (b > 0 && isspace((unsigned char)src[b - 1])) b--;
+        b = cc_rskip_ws_and_comments(src, i);
         if (b == 0 || !(cc_is_ident_char(src[b - 1]) || src[b - 1] == '*')) {
             i = e;
             continue;
@@ -11674,8 +11708,7 @@ static int cc__fn_returns_result_text(const char* text, size_t n,
         q = i + nlen;
         while (q < n && (text[q] == ' ' || text[q] == '\t')) q++;
         if (q >= n || text[q] != '(') { i += nlen; continue; }
-        b = i;
-        while (b > 0 && isspace((unsigned char)text[b - 1])) b--;
+        b = cc_rskip_ws_and_comments(text, i);
         if (b == 0 || !(cc_is_ident_char(text[b - 1]) || text[b - 1] == '*')) {
             i += nlen;
             continue;
@@ -11843,8 +11876,7 @@ int cc_included_cch_fn_first_param(const char* name, char* out, size_t out_sz) {
             q = i + nlen;
             while (q < fn && (fsrc[q] == ' ' || fsrc[q] == '\t')) q++;
             if (q < fn && fsrc[q] == '(') {
-                size_t b = i;
-                while (b > 0 && isspace((unsigned char)fsrc[b - 1])) b--;
+                size_t b = cc_rskip_ws_and_comments(fsrc, i);
                 if (b > 0 && (cc_is_ident_char(fsrc[b - 1]) || fsrc[b - 1] == '*')) {
                     size_t ps = q + 1, pe = ps;
                     int depth = 0;
@@ -12030,19 +12062,17 @@ static int cc__cch_text_is_impl_grade(const char* src, size_t n) {
     const size_t fac_len = sizeof(fac_kw) - 1;
     const size_t fac_len_ext = sizeof(fac_kw_ext) - 1;
     size_t i = 0;
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    CCScannerState scan;
     if (!src || n == 0) return 0;
+    cc_scanner_init(&scan);
     while (i < n) {
-        char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
-        if (in_str) { if (c == '\\' && c2) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
-        if (in_chr) { if (c == '\\' && c2) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
-        if (c == '"') { in_str = 1; i++; continue; }
-        if (c == '\'') { in_chr = 1; i++; continue; }
+        char c, c2;
+        /* Directive-aware: an @-sigil inside a #define body does not by
+         * itself make a header impl-grade (the macro expands into the
+         * user TU, which is where it gets lowered). */
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        c = src[i];
+        c2 = (i + 1 < n) ? src[i + 1] : 0;
         if (c == 'C') {
             size_t mlen = 0;
             if (i + fac_len_ext <= n && memcmp(src + i, fac_kw_ext, fac_len_ext) == 0 &&
@@ -12699,18 +12729,11 @@ char* cc_harvest_local_header_factories(void) {
         size_t n = 0;
         if (!path || cc__read_file_text(path, &src, &n) != 0) continue;
         size_t i = 0;
-        int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+        CCScannerState scan;
+        cc_scanner_init(&scan);
         while (i < n) {
+            if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
             char c = src[i];
-            char c2 = (i + 1 < n) ? src[i + 1] : 0;
-            if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
-            if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
-            if (in_str) { if (c == '\\' && c2) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
-            if (in_chr) { if (c == '\\' && c2) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
-            if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
-            if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
-            if (c == '"') { in_str = 1; i++; continue; }
-            if (c == '\'') { in_chr = 1; i++; continue; }
             size_t mlen = 0;
             if (c == 'C') {
                 if (i + kwlen_ext <= n && memcmp(src + i, kw_ext, kwlen_ext) == 0 &&
@@ -12726,29 +12749,12 @@ char* cc_harvest_local_header_factories(void) {
                 size_t start = i;
                 size_t p = cc_skip_ws_and_comments(src, n, i + mlen);
                 if (p >= n || src[p] != '(') { i++; continue; }
-                int pdepth = 0;
-                for (; p < n; ++p) {
-                    if (src[p] == '(') pdepth++;
-                    else if (src[p] == ')') { pdepth--; if (pdepth == 0) { p++; break; } }
-                }
-                p = cc_skip_ws_and_comments(src, n, p);
+                size_t rp = 0;
+                if (!cc_find_matching_paren(src, n, p, &rp)) { i++; continue; }
+                p = cc_skip_ws_and_comments(src, n, rp + 1);
                 if (p >= n || src[p] != '{') { i++; continue; }
                 size_t body_l = p, body_r = 0;
-                int depth = 0, ls = 0, lcb = 0, st = 0, ch = 0;
-                for (p = body_l; p < n; ++p) {
-                    char d = src[p];
-                    char d2 = (p + 1 < n) ? src[p + 1] : 0;
-                    if (lcb) { if (d == '\n') lcb = 0; continue; }
-                    if (ls) { if (d == '*' && d2 == '/') { ls = 0; p++; } continue; }
-                    if (st) { if (d == '\\' && d2) { p++; continue; } if (d == '"') st = 0; continue; }
-                    if (ch) { if (d == '\\' && d2) { p++; continue; } if (d == '\'') ch = 0; continue; }
-                    if (d == '/' && d2 == '/') { lcb = 1; p++; continue; }
-                    if (d == '/' && d2 == '*') { ls = 1; p++; continue; }
-                    if (d == '"') { st = 1; continue; }
-                    if (d == '\'') { ch = 1; continue; }
-                    if (d == '{') { depth++; continue; }
-                    if (d == '}') { depth--; if (depth == 0) { body_r = p; break; } }
-                }
+                if (!cc_find_matching_brace(src, n, body_l, &body_r)) { i++; continue; }
                 if (body_r <= body_l) { i++; continue; }
                 int kwline = 1;
                 for (size_t k = 0; k < start; k++) if (src[k] == '\n') kwline++;
@@ -12790,23 +12796,16 @@ char* cc_harvest_header_comptime_functions(void) {
         const char* path = g_included_cch_sources[h];
         char* src = NULL;
         size_t n = 0, i = 0;
-        int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
         int has_comptime_fn = 0;
+        CCScannerState scan;
         if (!path || cc__read_file_text(path, &src, &n) != 0) continue;
         /* Only harvest helper types from headers that define a real @comptime
          * function — skip comments/strings, and ignore @comptime {/if/for. */
-        i = 0; in_lc = in_bc = in_str = in_chr = 0;
+        i = 0;
+        cc_scanner_init(&scan);
         while (i < n) {
+            if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
             char c = src[i];
-            char c2 = i + 1 < n ? src[i + 1] : 0;
-            if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
-            if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
-            if (in_str) { if (c == '\\' && c2) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
-            if (in_chr) { if (c == '\\' && c2) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
-            if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
-            if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
-            if (c == '"') { in_str = 1; i++; continue; }
-            if (c == '\'') { in_chr = 1; i++; continue; }
             if (c == '@' && cc_match_ident_kw(src, n, i + 1, "comptime")) {
                 size_t p = cc_skip_ws_and_comments(src, n, i + 1 + strlen("comptime"));
                 if (p < n && src[p] != '{' &&
@@ -12823,18 +12822,11 @@ char* cc_harvest_header_comptime_functions(void) {
          * Restrict to this header's own helper surface — skip nested includes'
          * transitive types by only accepting declarations before the first
          * @comptime function. */
-        i = 0; in_lc = in_bc = in_str = in_chr = 0;
+        i = 0;
+        cc_scanner_init(&scan);
         while (i < n) {
+            if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
             char c = src[i];
-            char c2 = i + 1 < n ? src[i + 1] : 0;
-            if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
-            if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
-            if (in_str) { if (c == '\\' && c2) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
-            if (in_chr) { if (c == '\\' && c2) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
-            if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
-            if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
-            if (c == '"') { in_str = 1; i++; continue; }
-            if (c == '\'') { in_chr = 1; i++; continue; }
             if (c == '@' && cc_match_ident_kw(src, n, i + 1, "comptime")) break;
             if ((cc_match_ident_kw(src, n, i, "typedef") ||
                  cc_match_ident_kw(src, n, i, "enum")) &&
@@ -12842,22 +12834,11 @@ char* cc_harvest_header_comptime_functions(void) {
                 size_t start = i;
                 size_t p = i;
                 int depth = 0;
+                CCScannerState pscan;
+                cc_scanner_init(&pscan);
                 while (p < n) {
+                    if (cc_scanner_skip_non_code(&pscan, src, n, &p)) continue;
                     char d = src[p];
-                    char d2 = p + 1 < n ? src[p + 1] : 0;
-                    if (d == '/' && d2 == '/') { while (p < n && src[p] != '\n') p++; continue; }
-                    if (d == '/' && d2 == '*') {
-                        p += 2;
-                        while (p + 1 < n && !(src[p] == '*' && src[p + 1] == '/')) p++;
-                        p += 2;
-                        continue;
-                    }
-                    if (d == '"' || d == '\'') {
-                        char qch = src[p++];
-                        while (p < n && src[p] != qch) { if (src[p] == '\\') p++; p++; }
-                        if (p < n) p++;
-                        continue;
-                    }
                     if (d == '{') { depth++; p++; continue; }
                     if (d == '}') { if (depth) depth--; p++; continue; }
                     if (d == ';' && depth == 0) {
@@ -12875,18 +12856,11 @@ char* cc_harvest_header_comptime_functions(void) {
             i++;
         }
         /* Pass 2: @comptime function definitions into the TU buffer. */
-        i = 0; in_lc = in_bc = in_str = in_chr = 0;
+        i = 0;
+        cc_scanner_init(&scan);
         while (i < n) {
+            if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
             char c = src[i];
-            char c2 = i + 1 < n ? src[i + 1] : 0;
-            if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
-            if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
-            if (in_str) { if (c == '\\' && c2) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
-            if (in_chr) { if (c == '\\' && c2) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
-            if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
-            if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
-            if (c == '"') { in_str = 1; i++; continue; }
-            if (c == '\'') { in_chr = 1; i++; continue; }
             if (c == '@' && cc_match_ident_kw(src, n, i + 1, "comptime")) {
                 size_t start = i;
                 size_t p = cc_skip_ws_and_comments(src, n, i + 1 + strlen("comptime"));
@@ -12897,9 +12871,12 @@ char* cc_harvest_header_comptime_functions(void) {
                     i++;
                     continue;
                 }
-                for (size_t q = p; q < n; q++) {
-                    if (src[q] == ';' || src[q] == '{') break;
-                    if (src[q] == '(') { lparen = q; break; }
+                {
+                    size_t semi_q = cc_find_char_top_level(src, p, n, ';');
+                    size_t brace_q = cc_find_char_top_level(src, p, n, '{');
+                    size_t paren_q = cc_find_char_top_level(src, p, n, '(');
+                    if (paren_q < n && paren_q < semi_q && paren_q < brace_q)
+                        lparen = paren_q;
                 }
                 if (!lparen || !cc_find_matching_paren(src, n, lparen, &rparen)) {
                     i++;
@@ -13035,6 +13012,7 @@ char* cc_rewrite_header_type_syntax_shared(const char* src,
     if (!cc_type_graph_ensure_global_cleared()) return NULL;
 
     cc_pass_chain_init(&chain, src, input_len);
+    if (cc_pass_chain_apply(&chain, cc__normalize_template_recv_chains(chain.src, chain.len)) < 0) goto chain_cleanup;
     if (cc_pass_chain_apply(&chain, cc__rewrite_string_templates(chain.src, chain.len, input_path)) < 0) goto chain_cleanup;
     if (cc_pass_chain_apply(&chain, cc__rewrite_chan_handle_types(chain.src, chain.len, input_path)) < 0) goto chain_cleanup;
     if (cc_pass_chain_apply(&chain, cc__rewrite_slice_types(chain.src, chain.len, input_path)) < 0) goto chain_cleanup;
@@ -13060,6 +13038,7 @@ char* cc_relower_cc_type_syntax_preserving_registry(const char* src,
      * inner text rewrites to mop up CC syntax produced post-preprocess
      * (e.g. via cc_cpp_expand of a #define body). */
     cc_pass_chain_init(&chain, src, input_len);
+    if (cc_pass_chain_apply(&chain, cc__normalize_template_recv_chains(chain.src, chain.len)) < 0) goto chain_cleanup;
     if (cc_pass_chain_apply(&chain, cc__rewrite_string_templates(chain.src, chain.len, input_path)) < 0) goto chain_cleanup;
     if (cc_pass_chain_apply(&chain, cc__rewrite_chan_handle_types(chain.src, chain.len, input_path)) < 0) goto chain_cleanup;
     if (cc_pass_chain_apply(&chain, cc__rewrite_slice_types(chain.src, chain.len, input_path)) < 0) goto chain_cleanup;
@@ -14328,15 +14307,14 @@ static int cc__ct_find_struct_body(const char* src, size_t n,
             if (!want_tag && havebrace) {
                 size_t b2;
                 if (cc_find_matching_brace(src, n, b1, &b2) && semi > 0) {
-                    /* typedef name = last identifier before the ';' */
+                    /* typedef name = last identifier before the ';'
+                     * (comment-aware: `} Name / *c* / ;` still reads Name) */
                     size_t s = semi - 1;
                     while (s > b2 && src[s] != ';') s--;
-                    size_t ne = s;
-                    while (ne > b2 && (src[ne - 1] == ' ' || src[ne - 1] == '\t' ||
-                                       src[ne - 1] == '\n' || src[ne - 1] == '\r')) ne--;
+                    size_t ne = cc_rskip_ws_and_comments(src, s);
                     size_t ns = ne;
                     while (ns > b2 && cc_is_ident_char(src[ns - 1])) ns--;
-                    if (ne > ns && (ne - ns) == tlen && memcmp(src + ns, tname, tlen) == 0) {
+                    if (ne > ns && ns > b2 && (ne - ns) == tlen && memcmp(src + ns, tname, tlen) == 0) {
                         *bo = b1; *bc = b2; return 1;
                     }
                 }
@@ -14746,10 +14724,9 @@ static int cc__sm_find_entry_type(const char* src, size_t n, const char* var,
         a = after;
         while (a < n && (src[a] == ' ' || src[a] == '\t' || src[a] == '\n' || src[a] == '\r')) a++;
         if (a >= n || src[a] != '[') { i++; continue; }
-        /* Immediately preceding identifier is the typedef / tag name. */
-        q = i;
-        while (q > 0 && (src[q - 1] == ' ' || src[q - 1] == '\t' ||
-                         src[q - 1] == '\n' || src[q - 1] == '\r')) q--;
+        /* Immediately preceding identifier is the typedef / tag name
+         * (comment-aware: `MyType / *c* / arr[` still reads MyType). */
+        q = cc_rskip_ws_and_comments(src, i);
         te = q;
         while (q > 0 && cc_is_ident_char(src[q - 1])) q--;
         ts = q;
@@ -14758,12 +14735,10 @@ static int cc__sm_find_entry_type(const char* src, size_t n, const char* var,
     }
     if (!found) return 0;
     {
-        size_t q = best;
+        size_t q = cc_rskip_ws_and_comments(src, best);
         size_t te, ts;
         const char* t;
         size_t tl;
-        while (q > 0 && (src[q - 1] == ' ' || src[q - 1] == '\t' ||
-                         src[q - 1] == '\n' || src[q - 1] == '\r')) q--;
         te = q;
         while (q > 0 && cc_is_ident_char(src[q - 1])) q--;
         ts = q;
@@ -14782,13 +14757,11 @@ static int cc__sm_typedef_defines(const char* decl, size_t len, const char* name
     size_t nlen, i, end, start, p;
     if (!decl || !name || !name[0] || len < 8) return 0;
     nlen = strlen(name);
-    i = len;
-    while (i > 0 && (decl[i - 1] == ' ' || decl[i - 1] == '\t' ||
-                     decl[i - 1] == '\n' || decl[i - 1] == '\r')) i--;
+    /* Comment-aware trims: `typedef ... Name / *c* / ;` still reads Name. */
+    i = cc_rskip_ws_and_comments(decl, len);
     if (i == 0 || decl[i - 1] != ';') return 0;
     i--;
-    while (i > 0 && (decl[i - 1] == ' ' || decl[i - 1] == '\t' ||
-                     decl[i - 1] == '\n' || decl[i - 1] == '\r')) i--;
+    i = cc_rskip_ws_and_comments(decl, i);
     end = i;
     while (i > 0 && cc_is_ident_char(decl[i - 1])) i--;
     start = i;
@@ -15109,12 +15082,11 @@ static int cc__ct_find_enum_body(const char* src, size_t n,
                     if (cc_find_matching_brace(src, n, b1, &b2) && semi > 0) {
                         size_t s = semi - 1;
                         while (s > b2 && src[s] != ';') s--;
-                        size_t ne = s;
-                        while (ne > b2 && (src[ne - 1] == ' ' || src[ne - 1] == '\t' ||
-                                           src[ne - 1] == '\n' || src[ne - 1] == '\r')) ne--;
+                        /* Comment-aware: `} Name / *c* / ;` still reads Name */
+                        size_t ne = cc_rskip_ws_and_comments(src, s);
                         size_t ns = ne;
                         while (ns > b2 && cc_is_ident_char(src[ns - 1])) ns--;
-                        if (ne > ns && (ne - ns) == tlen && memcmp(src + ns, tname, tlen) == 0) {
+                        if (ne > ns && ns > b2 && (ne - ns) == tlen && memcmp(src + ns, tname, tlen) == 0) {
                             *bo = b1; *bc = b2; return 1;
                         }
                     }
@@ -16024,6 +15996,81 @@ static char* cc__rewrite_result_field_sugar_pass(const char* src, size_t len) {
     return cc__rewrite_result_field_sugar_text(NULL, src, len);
 }
 
+/* `@string(...)` receivers: capture the template and its first member
+ * call into a typed temp before template lowering erases the callable
+ * shape — `@string(T).m(A)` becomes
+ * `({ TY __cc_tplrecv_N = @string(T); __cc_tplrecv_N.m(A); })`.
+ * Arena form (`@string(`...`, &a)` / policy) yields CCString; the
+ * arena-less bounded stack form (`@string(`...`)`) yields char[:] —
+ * the temp type must match, or the hoist mis-types the chain. The
+ * ident receiver then resolves on the normal rails in every position,
+ * handler bodies included. */
+static char* cc__normalize_template_recv_chains(const char* src, size_t n) {
+    static _Thread_local int g_tplrecv_id = 0;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0, last_emit = 0, i = 0;
+    CCScannerState scan;
+    if (!src || n == 0) return NULL;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        size_t pe = 0, ape = 0, q, ms, me, open;
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (src[i] != '@' || !cc_match_ident_kw(src, n, i + 1, "string")) {
+            i++;
+            continue;
+        }
+        q = cc_skip_ws_and_comments(src, n, i + 1 + (sizeof("string") - 1));
+        if (q >= n || src[q] != '(' || !cc_find_matching_paren(src, n, q, &pe)) {
+            i++;
+            continue;
+        }
+        open = q;
+        q = cc_skip_ws_and_comments(src, n, pe + 1);
+        if (q >= n || src[q] != '.') { i = pe + 1; continue; }
+        ms = cc_skip_ws_and_comments(src, n, q + 1);
+        me = ms;
+        while (me < n && cc_is_ident_char(src[me])) me++;
+        if (me == ms) { i = pe + 1; continue; }
+        q = cc_skip_ws_and_comments(src, n, me);
+        if (q >= n || src[q] != '(' || !cc_find_matching_paren(src, n, q, &ape)) {
+            i = pe + 1;
+            continue;
+        }
+        {
+            int id = ++g_tplrecv_id;
+            char frag[80];
+            /* Match the template rewrite's classification: a lone
+             * backtick template with no trailing arena yields a char[:]
+             * borrow (CCSlice after slice lowering). Spell CCSlice here
+             * so the statement-expr temp does not depend on slice-sugar
+             * rewrite inside `({ ... })`. */
+            const char* ty = "CCString";
+            size_t arg1_s = cc_skip_ws_and_comments(src, n, open + 1);
+            if (arg1_s < n && src[arg1_s] == '`') {
+                size_t tick_e = 0;
+                if (cc_tpl_scan_literal(src, n, arg1_s, &tick_e) == 0) {
+                    size_t after = cc_skip_ws_and_comments(src, n, tick_e + 1);
+                    if (after < n && src[after] == ')')
+                        ty = "CCSlice";
+                }
+            }
+            snprintf(frag, sizeof(frag), "({ %s __cc_tplrecv_%d = ", ty, id);
+            cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
+            cc_sb_append_cstr(&out, &out_len, &out_cap, frag);
+            cc_sb_append(&out, &out_len, &out_cap, src + i, (pe + 1) - i);
+            snprintf(frag, sizeof(frag), "; __cc_tplrecv_%d", id);
+            cc_sb_append_cstr(&out, &out_len, &out_cap, frag);
+            cc_sb_append(&out, &out_len, &out_cap, src + (pe + 1), (ape + 1) - (pe + 1));
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "; })");
+            last_emit = ape + 1;
+            i = ape + 1;
+        }
+    }
+    if (!out) return NULL;
+    cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
 #define CC__CANON_STEP(name) \
     do { if (getenv("CC_DEBUG_CANON")) fprintf(stderr, "[cc:canon] %s\n", name); } while (0)
 
@@ -16055,6 +16102,7 @@ static int cc__apply_phase1_canonical_passes(CCPassChain* chain,
     CC__CANON_STEP("cc__canonicalize_with_deadline_syntax"); if (cc_pass_chain_apply(chain, cc__canonicalize_with_deadline_syntax(chain->src, chain->len)) < 0) return -1;
     CC__CANON_STEP("cc__rewrite_naked_print_aliases"); if (cc_pass_chain_apply(chain, cc__rewrite_naked_print_aliases(chain->src, chain->len)) < 0) return -1;
     cc_note_tu_map_key_pairs(chain->src, chain->len);
+    CC__CANON_STEP("cc__normalize_template_recv_chains"); if (cc_pass_chain_apply(chain, cc__normalize_template_recv_chains(chain->src, chain->len)) < 0) return -1;
     if (!skip_comptime_surface &&
         cc_pass_chain_apply(chain, cc__rewrite_string_templates(chain->src, chain->len, input_path)) < 0) return -1;
     /* @variant + schema `one of` consumption dialect (spec/draft_variants.md,
@@ -16143,6 +16191,10 @@ static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
     if (cc_pass_chain_apply(chain, cc_rewrite_generic_family_ufcs_parser_safe(chain->src, chain->len)) < 0) {
         return -1;
     }
+    /* After UFCS lowering: `T* p = cc_arena_alloc_T[_count](...) @destroy;`
+     * releases through the owning arena (the lowered call's second
+     * argument spells the correct arena reference). */
+    if (cc_pass_chain_apply(chain, cc__rewrite_alloct_destroy_annotations(chain->src, chain->len)) < 0) return -1;
     /* Result-unwrap operators `?>` (expression) and `!>` (statement) run
      * before the legacy err-syntax rewrite. The `!>` statement form lowers
      * to the existing `@err` shorthands which the legacy pass then

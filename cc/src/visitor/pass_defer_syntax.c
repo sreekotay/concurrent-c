@@ -806,21 +806,16 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
 
     int depth = 0;
     int line_no = 1;
-    int in_str = 0;
-    char qch = 0;
-    int in_line_comment = 0;
-    int in_block_comment = 0;
-    /* `in_pp` covers preprocessor-directive bodies that the visitor's
-     * preprocess chain leaves verbatim in the working buffer.  Without
-     * it, a benign `#define UNUSED_DEFER(stmt) @defer stmt` would be
-     * mis-scanned, the `@defer` keyword inside the macro body would be
-     * treated as a real statement, and the user would see a confusing
-     * "malformed @defer statement" error on the #define line.  See
+    /* Inert regions (comments / strings / char literals / preprocessor
+     * directive bodies) are consumed by the shared CCInertScan.  The pp
+     * coverage matters: without it, a benign
+     * `#define UNUSED_DEFER(stmt) @defer stmt` would be mis-scanned, the
+     * `@defer` keyword inside the macro body would be treated as a real
+     * statement, and the user would see a confusing "malformed @defer
+     * statement" error on the #define line.  See
      * `tests/inert_pp_directive_tokens_smoke.ccs` for the regression
-     * guard.  This mirrors the `in_pp` handling in
-     * `pass_channel_syntax.c` (M7.B reference implementation). */
-    int in_pp = 0;
-    int at_line_start = 1;
+     * guard. */
+    CCInertScan sc;
 
     int changed = 0;
     CCDeferFunctionScope fn_scope;
@@ -833,76 +828,27 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
     int breakable_body_depths[256];
     int breakable_body_count = 0;
 
-    for (size_t i = 0; i < in_len; i++) {
+    cc_inert_scan_init(&sc, NULL);
+
+    for (size_t i = 0; i < in_len;) {
+        size_t span_a = i;
+        int was_lit = sc.in_str || sc.in_chr;
+        if (cc_inert_scan_step(&sc, in_src, in_len, &i)) {
+            /* Inert content: copy through verbatim.  A `\` + newline
+             * escape pair inside a string/char literal counts as escape
+             * bytes, not a line break, for line_no. */
+            for (size_t x = span_a; x < i; x++) {
+                if (in_src[x] == '\n' &&
+                    !(was_lit && x == span_a + 1 && in_src[span_a] == '\\'))
+                    line_no++;
+                cc__append_n(&out, &outl, &outc, &in_src[x], 1);
+            }
+            continue;
+        }
+
         char ch = in_src[i];
 
         if (ch == '\n') line_no++;
-
-        if (in_pp) {
-            cc__append_n(&out, &outl, &outc, &ch, 1);
-            if (ch == '\n') {
-                size_t k = i;
-                while (k > 0 && (in_src[k - 1] == ' ' || in_src[k - 1] == '\t' || in_src[k - 1] == '\r')) k--;
-                if (k == 0 || in_src[k - 1] != '\\') {
-                    in_pp = 0;
-                    at_line_start = 1;
-                }
-            }
-            continue;
-        }
-
-        if (in_line_comment) {
-            cc__append_n(&out, &outl, &outc, &ch, 1);
-            if (ch == '\n') { in_line_comment = 0; at_line_start = 1; }
-            continue;
-        }
-        if (in_block_comment) {
-            cc__append_n(&out, &outl, &outc, &ch, 1);
-            if (ch == '*' && i + 1 < in_len && in_src[i + 1] == '/') {
-                cc__append_n(&out, &outl, &outc, &in_src[i + 1], 1);
-                i++;
-                in_block_comment = 0;
-            }
-            continue;
-        }
-        if (in_str) {
-            cc__append_n(&out, &outl, &outc, &ch, 1);
-            if (ch == '\\' && i + 1 < in_len) {
-                cc__append_n(&out, &outl, &outc, &in_src[i + 1], 1);
-                i++;
-                continue;
-            }
-            if (ch == qch) in_str = 0;
-            continue;
-        }
-
-        if (at_line_start && ch == '#') {
-            cc__append_n(&out, &outl, &outc, &ch, 1);
-            in_pp = 1;
-            at_line_start = 0;
-            continue;
-        }
-        if (ch == '\n') { at_line_start = 1; }
-        else if (ch != ' ' && ch != '\t' && ch != '\r') at_line_start = 0;
-
-        if (ch == '/' && i + 1 < in_len && in_src[i + 1] == '/') {
-            cc__append_n(&out, &outl, &outc, &in_src[i], 2);
-            i++;
-            in_line_comment = 1;
-            continue;
-        }
-        if (ch == '/' && i + 1 < in_len && in_src[i + 1] == '*') {
-            cc__append_n(&out, &outl, &outc, &in_src[i], 2);
-            i++;
-            in_block_comment = 1;
-            continue;
-        }
-        if (ch == '"' || ch == '\'') {
-            cc__append_n(&out, &outl, &outc, &ch, 1);
-            in_str = 1;
-            qch = ch;
-            continue;
-        }
 
         /* `cancel ...;` is reserved for named-defer cancellation and not
          * implemented yet: hard error. Do NOT misclassify a method call
@@ -966,7 +912,7 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
                 for (size_t k = i; k < stmt_end; k++) {
                     if (in_src[k] == '\n') line_no++;
                 }
-                i = stmt_end - 1;
+                i = stmt_end;
                 continue;
             }
 
@@ -1241,7 +1187,7 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
             for (size_t k = i; k < stmt_end; k++) {
                 if (in_src[k] == '\n') line_no++;
             }
-            i = stmt_end - 1;
+            i = stmt_end;
             continue;
         }
 
@@ -1294,7 +1240,7 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
             for (size_t k = i; k < stmt_end; k++) {
                 if (in_src[k] == '\n') line_no++;
             }
-            i = stmt_end - 1;
+            i = stmt_end;
             continue;
         }
 
@@ -1347,7 +1293,7 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
             for (size_t k = i; k < stmt_end; k++) {
                 if (in_src[k] == '\n') line_no++;
             }
-            i = stmt_end - 1;
+            i = stmt_end;
             continue;
         }
 
@@ -1455,7 +1401,7 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
             for (size_t k = i; k < stmt_end; k++) {
                 if (in_src[k] == '\n') line_no++;
             }
-            i = stmt_end - 1;
+            i = stmt_end;
             continue;
         }
 
@@ -1615,6 +1561,7 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
             }
             if (depth > 0) depth--;
             cc__append_n(&out, &outl, &outc, &ch, 1);
+            i++;
             continue;
         }
 
@@ -1705,6 +1652,7 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
                 }
                 changed = 1;
             }
+            i++;
             continue;
         }
 
@@ -1713,6 +1661,7 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
             return_just_emitted[dd] = 0;
         }
         cc__append_n(&out, &outl, &outc, &ch, 1);
+        i++;
     }
 
     for (int d = 0; d < 256; d++) cc__free_defer_list(defers[d], defer_counts[d]);

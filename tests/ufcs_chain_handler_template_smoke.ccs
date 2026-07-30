@@ -1,0 +1,29 @@
+/* `@string(...)` receivers resolve as methods in every position:
+ * top level, statement-position handler bodies, and hoisted chain-link
+ * handlers alike. */
+#include <ccc/cc_runtime.cch>
+#include <ccc/script/stdio.cch>
+#include <stdio.h>
+
+static int cc_int_twice(int v) { return v * 2; }
+static CCResult_int_CCError mk(int v) {
+    if (v < 0) return (CCResult_int_CCError){ .ok = false,
+        .u.error = { .message = "negative" } };
+    return (CCResult_int_CCError){ .ok = true, .u.value = v };
+}
+static CCResult_int_CCError cc_int_step(int v) { return mk(v + 1); }
+
+int main(void) {
+    @errhandler(CCError e) { fprintf(stderr, "eh: %s\n", e.message); return 1; }
+    CCArena a = cc_arena_heap(kilobytes(16));
+
+    @string(`top ${1 + 1}`, &a).println() !>;
+
+    mk(-1) !>(e) { @string(`stmt ${e.message}`, &a).println() !>; };
+
+    int r = mk(-1)
+        !>(e) { @string(`link ${e.message}`, &a).println() !>; return 0; }
+        .step()!>.twice();
+    printf("unreachable %d\n", r);
+    return 9;
+}

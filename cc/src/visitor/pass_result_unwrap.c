@@ -21,7 +21,6 @@
 #define cc__append_str cc_sb_append_cstr
 CC_DEFINE_SB_APPEND_FMT
 
-static size_t cc__skip_ws_comments_forward(const char* s, size_t n, size_t i);
 
 /* Extract the callee identifier from a plain `ident(...)` call expression.
  *
@@ -121,7 +120,7 @@ static int cc__ru_extract_ufcs_callee(const char* s, size_t n,
         size_t after, before, ty_a, ty_b, stars, tl;
         if (hit >= recv_a) break;
         after = hit + strlen(recv);
-        after = cc__skip_ws_comments_forward(s, n, after);
+        after = cc_skip_ws_and_comments(s, n, after);
         if (after < n && s[after] == '(') { pos = after; continue; }
         before = hit;
         while (before > 0 && isspace((unsigned char)s[before - 1])) before--;
@@ -253,10 +252,11 @@ static void cc__ru_emit_uw_err_binder(char** out, size_t* ol, size_t* oc,
                 size_t hit = cc_find_ident_top_level(s, pos, n, callee, clen);
                 size_t after, p, end, len;
                 if (hit >= n) break;
-                after = cc__skip_ws_comments_forward(s, n, hit + clen);
+                after = cc_skip_ws_and_comments(s, n, hit + clen);
                 if (after < n && s[after] == '(') {
-                    p = hit;
-                    while (p > 0 && isspace((unsigned char)s[p - 1])) p--;
+                    /* Comment-aware: `CCResult_T_E / *doc* / foo(` still
+                     * reads the return type. */
+                    p = cc_rskip_ws_and_comments(s, hit);
                     end = p;
                     while (p > 0 && cc_is_ident_char(s[p - 1])) p--;
                     len = end - p;
@@ -316,10 +316,9 @@ static int cc__ru_find_callee_result_type(const char* s, size_t n,
     while (pos < n) {
         size_t hit = cc_find_ident_top_level(s, pos, n, callee, callee_len);
         if (hit >= n) break;
-        size_t after = cc__skip_ws_comments_forward(s, n, hit + callee_len);
+        size_t after = cc_skip_ws_and_comments(s, n, hit + callee_len);
         if (after < n && s[after] == '(') {
-            size_t p = hit;
-            while (p > 0 && isspace((unsigned char)s[p - 1])) p--;
+            size_t p = cc_rskip_ws_and_comments(s, hit);
             size_t end = p;
             while (p > 0 && cc_is_ident_char(s[p - 1])) p--;
             size_t len = end - p;
@@ -329,8 +328,19 @@ static int cc__ru_find_callee_result_type(const char* s, size_t n,
                 return 1;
             }
             {
+                /* Line-head walk, comment-aware: a `;`/`}`/newline inside
+                 * a block comment is not a statement boundary. */
                 size_t line_a = p;
-                while (line_a > 0 && s[line_a - 1] != '\n' && s[line_a - 1] != ';' && s[line_a - 1] != '}') {
+                while (line_a > 0) {
+                    if (line_a >= 2 && s[line_a - 1] == '/' && s[line_a - 2] == '*') {
+                        size_t c2 = line_a - 2, op = (size_t)-1;
+                        while (c2 > 0) {
+                            c2--;
+                            if (s[c2] == '*' && c2 > 0 && s[c2 - 1] == '/') { op = c2 - 1; break; }
+                        }
+                        if (op != (size_t)-1) { line_a = op; continue; }
+                    }
+                    if (s[line_a - 1] == '\n' || s[line_a - 1] == ';' || s[line_a - 1] == '}') break;
                     line_a--;
                 }
                 size_t bang = cc_find_substr_top_level(s, line_a, hit, "!>", 2);
@@ -340,8 +350,8 @@ static int cc__ru_find_callee_result_type(const char* s, size_t n,
                     if (err_l < hit && s[err_l] == '(' &&
                         cc_find_matching_paren(s, n, err_l, &err_r) &&
                         err_r < hit) {
-                        size_t ok_b = bang;
-                        while (ok_b > line_a && isspace((unsigned char)s[ok_b - 1])) ok_b--;
+                        size_t ok_b = cc_rskip_ws_and_comments(s, bang);
+                        if (ok_b < line_a) ok_b = line_a;
                         size_t ok_a = ok_b;
                         while (ok_a > line_a && cc_is_ident_char(s[ok_a - 1])) ok_a--;
                         size_t err_a = err_l + 1, err_b = err_r;
@@ -523,25 +533,54 @@ static int cc__eq_is_boundary(const char* s, size_t n, size_t pos) {
 }
 
 /* Skip a string/char literal scanning BACKWARD. On entry *i points at the
- * closing quote char; on return *i points at the opening quote char (or 0
- * if we ran off the start). Best effort; C escape handling backward is
- * ambiguous but string contents almost never contain `?>` so the worst
- * case is an early stop on a mis-identified quote. */
+ * closing quote char; on return *i points at the opening quote char.
+ * Naive "enter string mode + treat `\\` as escape while walking backward"
+ * mis-parses `'\n'` / `'\t'` / `'\\'`: the escape skip consumes the
+ * opening quote and leaves the scanner stuck in-string.  Resolve the
+ * opener with a forward scan from the line start (proper C escape rules)
+ * and jump to it — same approach as pass_err_syntax's
+ * `cc__err_skip_string_or_char_backward`. */
 static void cc__skip_str_backward(const char* s, size_t* i) {
-    char q = s[*i];
-    if (*i == 0) return;
-    size_t k = *i;
-    while (k > 0) {
-        k--;
-        if (s[k] == q) {
-            /* Check for escape: count trailing backslashes. */
-            size_t bs = 0;
-            size_t m = k;
-            while (m > 0 && s[m - 1] == '\\') { bs++; m--; }
-            if ((bs & 1) == 0) { *i = k; return; }
+    size_t close = *i;
+    char qch = s[close];
+    if (qch != '"' && qch != '\'') return;
+    size_t line_start = close;
+    while (line_start > 0 && s[line_start - 1] != '\n') line_start--;
+    size_t k = line_start;
+    size_t open = close;
+    int in_q = 0;
+    char cur_q = 0;
+    while (k <= close) {
+        char c = s[k];
+        if (!in_q) {
+            if (c == '"' || c == '\'') {
+                in_q = 1;
+                cur_q = c;
+                open = k;
+                if (k == close) break;
+                k++;
+                continue;
+            }
+            k++;
+            continue;
         }
+        if (c == '\\' && k + 1 <= close) {
+            k += 2;
+            continue;
+        }
+        if (c == cur_q) {
+            if (k == close) {
+                *i = open;
+                return;
+            }
+            in_q = 0;
+            cur_q = 0;
+            k++;
+            continue;
+        }
+        k++;
     }
-    *i = 0;
+    *i = open;
 }
 
 /* Skip a block comment scanning BACKWARD.  On entry *i points at the `/`
@@ -565,31 +604,6 @@ static void cc__skip_block_comment_backward(const char* s, size_t* i) {
     *i = 0;
 }
 
-/* Check whether the scanner is currently inside a single-line `//` comment
- * on the line that contains position `pos`.  We walk back from `pos` to
- * the previous newline (or SOF); if we find a `//` (not inside a string)
- * before reaching `pos`, then `pos` sits inside a line comment and should
- * be skipped.  Strings on the same line are respected via a simple forward
- * re-scan from line start. */
-static int cc__pos_in_line_comment(const char* s, size_t pos) {
-    size_t line_start = pos;
-    while (line_start > 0 && s[line_start - 1] != '\n') line_start--;
-    CCInertScan scan;
-    cc_inert_scan_init(&scan, NULL);
-    /* We started right after a '\n' (or at SOF), so the scanner is
-     * literally at a line start.  `at_line_start = 1` makes a leading
-     * `#` look like a pp directive (which would also mean pos is "in
-     * inert text" — fine semantically for the caller, which uses this
-     * to skip CC-token matches sitting inside non-code regions). */
-    scan.at_line_start = 1;
-    size_t k = line_start;
-    while (k < pos) {
-        if (!cc_inert_scan_step(&scan, s, pos, &k)) k++;
-        if (scan.in_line_comment) return 1;
-    }
-    return 0;
-}
-
 /* Find the start of the LHS expression by scanning backward from `from`
  * (exclusive). Returns the position of the first byte of the LHS. */
 static size_t cc__find_lhs_start_backward_raw(const char* s, size_t from) {
@@ -608,7 +622,7 @@ static size_t cc__find_lhs_start_backward_raw(const char* s, size_t from) {
         /* Line comment: if this byte lies inside a `// ...` on its line,
          * jump back to the line start so we don't misparse the comment
          * body. */
-        if (c != '\n' && cc__pos_in_line_comment(s, i)) {
+        if (c != '\n' && cc_scan_pos_in_line_comment(s, i)) {
             while (i > 0 && s[i] != '\n') i--;
             continue;
         }
@@ -1886,7 +1900,7 @@ static size_t cc__find_bang_lhs_start_ex(const char* s, size_t op_at,
             cc__skip_block_comment_backward(s, &i);
             continue;
         }
-        if (c != '\n' && cc__pos_in_line_comment(s, i)) {
+        if (c != '\n' && cc_scan_pos_in_line_comment(s, i)) {
             while (i > 0 && s[i] != '\n') i--;
             continue;
         }
@@ -2129,6 +2143,19 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
         return -1;
     }
 
+    /* An unlowered chain link: `!>` directly followed by `.method(`
+     * means the fallible-chain pass could not type this hop's producer.
+     * Say that — the generic divergence error misleads here. */
+    if (s[scan] == '.') {
+        cc_pass_error_cat(f, line_no, 1, CC_ERR_TYPE,
+                          "'!>' links a chain hop here, but the hop's producer "
+                          "could not be typed as a Result; declare the "
+                          "producer's Result return where the chain can see "
+                          "it, or bind this hop to a typed Result and chain "
+                          "from the binding");
+        return -1;
+    }
+
     /* Parse a single-statement body or block body, then require divergence. */
     size_t body_a = 0, body_b = 0;
     int is_block = 0;
@@ -2139,6 +2166,18 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
             cc_pass_error_cat(f, line_no, 1, CC_ERR_SYNTAX,
                               "unclosed '{' in '!>' body");
             return -1;
+        }
+        {
+            size_t after_body = cc_skip_ws_and_comments(s, n, rbrace + 1);
+            if (after_body < n && s[after_body] == '.') {
+                cc_pass_error_cat(f, line_no, 1, CC_ERR_TYPE,
+                                  "'!>' links a chain hop here, but the hop's "
+                                  "producer could not be typed as a Result; "
+                                  "declare the producer's Result return where "
+                                  "the chain can see it, or bind this hop to "
+                                  "a typed Result and chain from the binding");
+                return -1;
+            }
         }
         body_a = scan + 1;
         body_b = rbrace;
@@ -2294,7 +2333,7 @@ static int cc__rewrite_bang_once(const CCVisitorCtx* ctx,
          * must still strip the keyword or resolve sees `return foo(...)`
          * and falls back to ambient CCError. */
         {
-            size_t a = cc__skip_ws_comments_forward(s, op_at, call_start);
+            size_t a = cc_skip_ws_and_comments(s, op_at, call_start);
             if (a + 6 <= op_at && memcmp(s + a, "return", 6) == 0 &&
                 (a + 6 == op_at || !cc_is_ident_char(s[a + 6]))) {
                 is_stmt_pos = 0;
@@ -2529,17 +2568,13 @@ static int cc__strict_enabled(void) {
     return !(e && e[0] == '0' && e[1] == 0);
 }
 
-/* Walk backwards from `from` (exclusive) skipping whitespace.  Returns
- * the index of the non-ws char (or SIZE_MAX sentinel if we fell off the
- * start). */
+/* Walk backwards from `from` (exclusive) skipping whitespace and
+ * comments (`(void) / *x* / foo();` and `return / *x* / foo()` classify
+ * by their real preceding token).  Returns the index of the non-ws
+ * non-comment char (or SIZE_MAX sentinel if we fell off the start). */
 static size_t cc__back_skip_ws(const char* s, size_t from) {
-    size_t i = from;
-    while (i > 0) {
-        char c = s[i - 1];
-        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { i--; continue; }
-        return i - 1;
-    }
-    return (size_t)-1;
+    size_t i = cc_rskip_ws_and_comments(s, from);
+    return i > 0 ? i - 1 : (size_t)-1;
 }
 
 /* Check if the non-ws chars immediately preceding position `pre` form a
@@ -2582,28 +2617,6 @@ static int cc__is_preceded_by_ident(const char* s, size_t pre, const char* ident
 /* Find end of identifier starting at `i`. */
 static size_t cc__ident_end(const char* s, size_t n, size_t i) {
     while (i < n && cc_is_ident_char(s[i])) i++;
-    return i;
-}
-
-/* Skip whitespace and line/block comments forward. */
-static size_t cc__skip_ws_comments_forward(const char* s, size_t n, size_t i) {
-    while (i < n) {
-        char c = s[i];
-        char c2 = (i + 1 < n) ? s[i + 1] : 0;
-        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { i++; continue; }
-        if (c == '/' && c2 == '/') {
-            i += 2;
-            while (i < n && s[i] != '\n') i++;
-            continue;
-        }
-        if (c == '/' && c2 == '*') {
-            i += 2;
-            while (i + 1 < n && !(s[i] == '*' && s[i + 1] == '/')) i++;
-            if (i + 1 < n) i += 2;
-            continue;
-        }
-        break;
-    }
     return i;
 }
 
@@ -2650,14 +2663,14 @@ static int cc__strict_unhandled_scan(const CCVisitorCtx* ctx,
         if (!cc_result_fn_registry_contains(s + id_a, id_len)) continue;
 
         /* Must be immediately followed (after ws) by '('. */
-        size_t after_id = cc__skip_ws_comments_forward(s, n, id_b);
+        size_t after_id = cc_skip_ws_and_comments(s, n, id_b);
         if (after_id >= n || s[after_id] != '(') continue;
 
         size_t rpar = 0;
         if (!cc_find_matching_paren(s, n, after_id, &rpar)) continue;
 
         /* Gate (b): char after balanced ')' must be ';'. */
-        size_t post = cc__skip_ws_comments_forward(s, n, rpar + 1);
+        size_t post = cc_skip_ws_and_comments(s, n, rpar + 1);
         if (post >= n || s[post] != ';') continue;
 
         /* Gate (c): non-ws char before NAME must be `;`, `{`, `}`, or
@@ -2684,6 +2697,17 @@ static int cc__strict_unhandled_scan(const CCVisitorCtx* ctx,
 
         /* Gate (d): `(void)` escape. */
         if (cc__is_preceded_by_void_cast(s, prev)) continue;
+
+        /* Gate (e): statement-expression tail.  `... NAME(...); })` makes
+         * the call the value of the enclosing `({ ... })`; the consumer
+         * of the statement-expression owns the result. */
+        {
+            size_t tail = cc_skip_ws_and_comments(s, n, post + 1);
+            if (tail < n && s[tail] == '}') {
+                size_t after_rb = cc_skip_ws_and_comments(s, n, tail + 1);
+                if (after_rb < n && s[after_rb] == ')') continue;
+            }
+        }
 
         /* Gate (also accepted): `return NAME(...)` — conservative.  If
          * `return` is directly before NAME (with ws) we won't reach here
