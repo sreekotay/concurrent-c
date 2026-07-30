@@ -4090,6 +4090,11 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
         if (lowered_body && lowered_body[0] == '{') {
             char* lowered2 = cc__lower_nursery_spawn_in_body_text(d->id, lowered_body);
             if (!lowered2) lowered2 = strdup(lowered_body);
+            char* lowered_recv = cc_normalize_template_recv_chains_text(lowered2, strlen(lowered2));
+            if (lowered_recv && lowered_recv != (char*)-1) {
+                free(lowered2);
+                lowered2 = lowered_recv;
+            }
             char* lowered_tpl = cc_rewrite_string_templates_text(lowered2, strlen(lowered2),
                                                                  ctx ? ctx->input_path : NULL);
             const char* src_for_templates = lowered_tpl ? lowered_tpl : lowered2;

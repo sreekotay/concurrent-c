@@ -252,6 +252,7 @@ static int cc__apply_phase1_canonical_passes(CCPassChain* chain,
 static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
                                                  const char* input_path);
 char* cc__rewrite_at_await(const char* src, size_t n); /* defined later */
+static char* cc__normalize_template_recv_chains(const char* src, size_t n);
 
 /* Initialize chain with source buffer (buffer is NOT owned by chain) */
 static inline void cc_pass_chain_init(CCPassChain* c, const char* src, size_t len) {
@@ -1748,6 +1749,10 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
 
 char* cc_rewrite_string_templates_text(const char* src, size_t n, const char* input_path) {
     return cc__rewrite_string_templates(src, n, input_path);
+}
+
+char* cc_normalize_template_recv_chains_text(const char* src, size_t n) {
+    return cc__normalize_template_recv_chains(src, n);
 }
 
 /* Lower `CC_GENERIC_FACTORY(Name[, arity]) { ... }` sugar into the canonical
@@ -12681,6 +12686,7 @@ char* cc_rewrite_header_type_syntax_shared(const char* src,
     if (!cc_type_graph_ensure_global_cleared()) return NULL;
 
     cc_pass_chain_init(&chain, src, input_len);
+    if (cc_pass_chain_apply(&chain, cc__normalize_template_recv_chains(chain.src, chain.len)) < 0) goto chain_cleanup;
     if (cc_pass_chain_apply(&chain, cc__rewrite_string_templates(chain.src, chain.len, input_path)) < 0) goto chain_cleanup;
     if (cc_pass_chain_apply(&chain, cc__rewrite_chan_handle_types(chain.src, chain.len, input_path)) < 0) goto chain_cleanup;
     if (cc_pass_chain_apply(&chain, cc__rewrite_slice_types(chain.src, chain.len, input_path)) < 0) goto chain_cleanup;
@@ -12706,6 +12712,7 @@ char* cc_relower_cc_type_syntax_preserving_registry(const char* src,
      * inner text rewrites to mop up CC syntax produced post-preprocess
      * (e.g. via cc_cpp_expand of a #define body). */
     cc_pass_chain_init(&chain, src, input_len);
+    if (cc_pass_chain_apply(&chain, cc__normalize_template_recv_chains(chain.src, chain.len)) < 0) goto chain_cleanup;
     if (cc_pass_chain_apply(&chain, cc__rewrite_string_templates(chain.src, chain.len, input_path)) < 0) goto chain_cleanup;
     if (cc_pass_chain_apply(&chain, cc__rewrite_chan_handle_types(chain.src, chain.len, input_path)) < 0) goto chain_cleanup;
     if (cc_pass_chain_apply(&chain, cc__rewrite_slice_types(chain.src, chain.len, input_path)) < 0) goto chain_cleanup;
@@ -15670,6 +15677,62 @@ static char* cc__rewrite_result_field_sugar_pass(const char* src, size_t len) {
     return cc__rewrite_result_field_sugar_text(NULL, src, len);
 }
 
+/* `@string(...)` receivers: capture the template and its first member
+ * call into a typed temp before template lowering erases the callable
+ * shape — `@string(T).m(A)` becomes
+ * `({ CCString __cc_tplrecv_N = @string(T); __cc_tplrecv_N.m(A); })`.
+ * The ident receiver then resolves on the normal rails in every
+ * position, handler bodies included. */
+static char* cc__normalize_template_recv_chains(const char* src, size_t n) {
+    static _Thread_local int g_tplrecv_id = 0;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0, last_emit = 0, i = 0;
+    CCScannerState scan;
+    if (!src || n == 0) return NULL;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        size_t pe = 0, ape = 0, q, ms, me;
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (src[i] != '@' || !cc_match_ident_kw(src, n, i + 1, "string")) {
+            i++;
+            continue;
+        }
+        q = cc_skip_ws_and_comments(src, n, i + 1 + (sizeof("string") - 1));
+        if (q >= n || src[q] != '(' || !cc_find_matching_paren(src, n, q, &pe)) {
+            i++;
+            continue;
+        }
+        q = cc_skip_ws_and_comments(src, n, pe + 1);
+        if (q >= n || src[q] != '.') { i = pe + 1; continue; }
+        ms = cc_skip_ws_and_comments(src, n, q + 1);
+        me = ms;
+        while (me < n && cc_is_ident_char(src[me])) me++;
+        if (me == ms) { i = pe + 1; continue; }
+        q = cc_skip_ws_and_comments(src, n, me);
+        if (q >= n || src[q] != '(' || !cc_find_matching_paren(src, n, q, &ape)) {
+            i = pe + 1;
+            continue;
+        }
+        {
+            int id = ++g_tplrecv_id;
+            char frag[64];
+            snprintf(frag, sizeof(frag), "({ CCString __cc_tplrecv_%d = ", id);
+            cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
+            cc_sb_append_cstr(&out, &out_len, &out_cap, frag);
+            cc_sb_append(&out, &out_len, &out_cap, src + i, (pe + 1) - i);
+            snprintf(frag, sizeof(frag), "; __cc_tplrecv_%d", id);
+            cc_sb_append_cstr(&out, &out_len, &out_cap, frag);
+            cc_sb_append(&out, &out_len, &out_cap, src + (pe + 1), (ape + 1) - (pe + 1));
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "; })");
+            last_emit = ape + 1;
+            i = ape + 1;
+        }
+    }
+    if (!out) return NULL;
+    cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
 #define CC__CANON_STEP(name) \
     do { if (getenv("CC_DEBUG_CANON")) fprintf(stderr, "[cc:canon] %s\n", name); } while (0)
 
@@ -15701,6 +15764,7 @@ static int cc__apply_phase1_canonical_passes(CCPassChain* chain,
     CC__CANON_STEP("cc__canonicalize_with_deadline_syntax"); if (cc_pass_chain_apply(chain, cc__canonicalize_with_deadline_syntax(chain->src, chain->len)) < 0) return -1;
     CC__CANON_STEP("cc__rewrite_naked_print_aliases"); if (cc_pass_chain_apply(chain, cc__rewrite_naked_print_aliases(chain->src, chain->len)) < 0) return -1;
     cc_note_tu_map_key_pairs(chain->src, chain->len);
+    CC__CANON_STEP("cc__normalize_template_recv_chains"); if (cc_pass_chain_apply(chain, cc__normalize_template_recv_chains(chain->src, chain->len)) < 0) return -1;
     if (!skip_comptime_surface &&
         cc_pass_chain_apply(chain, cc__rewrite_string_templates(chain->src, chain->len, input_path)) < 0) return -1;
     /* @variant + schema `one of` consumption dialect (spec/draft_variants.md,

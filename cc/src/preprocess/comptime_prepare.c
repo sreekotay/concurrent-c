@@ -95,6 +95,14 @@ int cc_comptime_prepare_source(char** inout_buf, size_t* inout_len,
         }
     }
 
+    templ = cc_normalize_template_recv_chains_text(*inout_buf, *inout_len);
+    if (templ == (char*)-1) return -1;
+    if (templ) {
+        free(*inout_buf);
+        *inout_buf = templ;
+        *inout_len = strlen(templ);
+    }
+
     templ = cc_rewrite_string_templates_text(*inout_buf, *inout_len, input_path);
     if (templ == (char*)-1) return -1;
     if (templ) {

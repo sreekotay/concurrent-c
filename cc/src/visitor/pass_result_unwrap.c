@@ -2132,6 +2132,19 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
         return -1;
     }
 
+    /* An unlowered chain link: `!>` directly followed by `.method(`
+     * means the fallible-chain pass could not type this hop's producer.
+     * Say that — the generic divergence error misleads here. */
+    if (s[scan] == '.') {
+        cc_pass_error_cat(f, line_no, 1, CC_ERR_TYPE,
+                          "'!>' links a chain hop here, but the hop's producer "
+                          "could not be typed as a Result; declare the "
+                          "producer's Result return where the chain can see "
+                          "it, or bind this hop to a typed Result and chain "
+                          "from the binding");
+        return -1;
+    }
+
     /* Parse a single-statement body or block body, then require divergence. */
     size_t body_a = 0, body_b = 0;
     int is_block = 0;
@@ -2142,6 +2155,18 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
             cc_pass_error_cat(f, line_no, 1, CC_ERR_SYNTAX,
                               "unclosed '{' in '!>' body");
             return -1;
+        }
+        {
+            size_t after_body = cc_skip_ws_and_comments(s, n, rbrace + 1);
+            if (after_body < n && s[after_body] == '.') {
+                cc_pass_error_cat(f, line_no, 1, CC_ERR_TYPE,
+                                  "'!>' links a chain hop here, but the hop's "
+                                  "producer could not be typed as a Result; "
+                                  "declare the producer's Result return where "
+                                  "the chain can see it, or bind this hop to "
+                                  "a typed Result and chain from the binding");
+                return -1;
+            }
         }
         body_a = scan + 1;
         body_b = rbrace;
@@ -2665,6 +2690,17 @@ static int cc__strict_unhandled_scan(const CCVisitorCtx* ctx,
 
         /* Gate (d): `(void)` escape. */
         if (cc__is_preceded_by_void_cast(s, prev)) continue;
+
+        /* Gate (e): statement-expression tail.  `... NAME(...); })` makes
+         * the call the value of the enclosing `({ ... })`; the consumer
+         * of the statement-expression owns the result. */
+        {
+            size_t tail = cc_skip_ws_and_comments(s, n, post + 1);
+            if (tail < n && s[tail] == '}') {
+                size_t after_rb = cc_skip_ws_and_comments(s, n, tail + 1);
+                if (after_rb < n && s[after_rb] == ')') continue;
+            }
+        }
 
         /* Gate (also accepted): `return NAME(...)` — conservative.  If
          * `return` is directly before NAME (with ws) we won't reach here
