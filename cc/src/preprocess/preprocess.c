@@ -3772,7 +3772,12 @@ static const char* cc__ufcs_idx_typedef_before(size_t limit,
     return NULL;
 }
 
-static void cc__ufcs_scope_idx_build(const char* src, size_t n) {
+/* Build scoped-decl/typedef index, and optionally harvest UFCS vars/fields in
+ * the same pass (avoids a second full-file walk in the rewrite). */
+static void cc__ufcs_scope_idx_build_ex(const char* src, size_t n,
+                                        CCUfcsVarInfo* vars, size_t* var_count,
+                                        size_t var_cap, CCUfcsFieldInfo* fields,
+                                        size_t* field_count, size_t field_cap) {
     CCTypeRegistry* reg = cc_type_registry_get_global();
     enum { MAX_SCOPES = 256 };
     int scope_stack[MAX_SCOPES];
@@ -3782,6 +3787,7 @@ static void cc__ufcs_scope_idx_build(const char* src, size_t n) {
     size_t stmt_start = 0;
     size_t typedef_start = (size_t)-1;
     size_t i = 0;
+    int harvest = vars && var_count && fields && field_count;
     cc__ufcs_scope_idx_reset();
     if (!src || n == 0) return;
     g_ufcs_scope_idx.src = src;
@@ -3790,6 +3796,10 @@ static void cc__ufcs_scope_idx_build(const char* src, size_t n) {
     if (cc__ufcs_scope_idx_ensure_scopes(1) != 0) return;
     g_ufcs_scope_idx.n_scopes = 1;
     g_ufcs_scope_idx.scope_close[0] = (size_t)-1;
+    if (harvest) {
+        *var_count = 0;
+        *field_count = 0;
+    }
     cc_scanner_init(&scan);
     while (i < n) {
         char c;
@@ -3804,7 +3814,117 @@ static void cc__ufcs_scope_idx_build(const char* src, size_t n) {
             (i + 7 == n || !cc_is_ident_char(src[i + 7]))) {
             typedef_start = i;
         }
+        /* typedef struct { fields } Name — field harvest (same as collect). */
+        if (harvest && i + 6 <= n && memcmp(src + i, "typedef", 7) == 0 &&
+            !cc_is_ident_char(src[i + 7])) {
+            size_t j = cc_skip_ws_and_comments(src, n, i + 7);
+            if (j + 5 <= n && memcmp(src + j, "struct", 6) == 0 &&
+                !cc_is_ident_char(src[j + 6])) {
+                size_t body_l = cc_skip_ws_and_comments(src, n, j + 6);
+                size_t body_r = 0;
+                if (body_l < n && cc_is_ident_start(src[body_l])) {
+                    size_t tag_end = body_l;
+                    while (tag_end < n && cc_is_ident_char(src[tag_end])) tag_end++;
+                    body_l = cc_skip_ws_and_comments(src, n, tag_end);
+                }
+                if (body_l < n && src[body_l] == '{' &&
+                    cc_find_matching_brace(src, n, body_l, &body_r)) {
+                    size_t name_pos = cc_skip_ws_and_comments(src, n, body_r + 1);
+                    if (name_pos < n && cc_is_ident_start(src[name_pos])) {
+                        char struct_name[128];
+                        size_t sn = 0;
+                        size_t p = name_pos;
+                        const char* stmt;
+                        const char* body_end;
+                        while (p < n && cc_is_ident_char(src[p])) {
+                            if (sn + 1 < sizeof(struct_name)) struct_name[sn] = src[p];
+                            sn++;
+                            p++;
+                        }
+                        struct_name[sn < sizeof(struct_name) ? sn : sizeof(struct_name) - 1] = '\0';
+                        stmt = src + body_l + 1;
+                        body_end = src + body_r;
+                        while (stmt < body_end) {
+                            size_t stmt_off = (size_t)(stmt - src);
+                            size_t end_off = (size_t)(body_end - src);
+                            size_t semi_off =
+                                cc_find_char_top_level(src, stmt_off, end_off, ';');
+                            char field_name[128];
+                            char field_type[256];
+                            int field_is_as = 0;
+                            const char* semi;
+                            if (semi_off >= end_off) break;
+                            semi = src + semi_off;
+                            cc_parse_decl_name_and_type_ex(
+                                stmt, semi, field_name, sizeof(field_name),
+                                field_type, sizeof(field_type), &field_is_as);
+                            if (field_name[0] && field_type[0]) {
+                                cc__record_ufcs_field(fields, field_count, field_cap,
+                                                      struct_name, field_name, field_type);
+                                if (reg)
+                                    (void)cc_type_registry_add_field_ex(
+                                        reg, struct_name, field_name, field_type,
+                                        field_is_as);
+                            }
+                            stmt = semi + 1;
+                        }
+                    }
+                }
+            }
+        }
         if (c == '{') {
+            if (harvest) {
+                size_t close = cc_rskip_ws_and_comments(src, i);
+                if (close > 0 && src[close - 1] == ')') {
+                    size_t open = close - 1;
+                    int depth = 1;
+                    while (open > 0 && depth > 0) {
+                        open--;
+                        if (src[open] == '/' && open > 0 && src[open - 1] == '*') {
+                            size_t q2 = open - 1, op2 = (size_t)-1;
+                            while (q2 > 0) {
+                                q2--;
+                                if (src[q2] == '*' && q2 > 0 && src[q2 - 1] == '/') {
+                                    op2 = q2 - 1;
+                                    break;
+                                }
+                            }
+                            if (op2 != (size_t)-1) { open = op2; continue; }
+                        }
+                        if (src[open] == ')' || src[open] == '(') {
+                            if (cc_scan_pos_in_line_comment(src, open)) continue;
+                            if (src[open] == ')') depth++;
+                            else depth--;
+                        }
+                    }
+                    if (depth == 0) {
+                        size_t param_start = open + 1;
+                        size_t p = param_start;
+                        int par = 0, br = 0;
+                        while (p <= close - 1) {
+                            if (p == close - 1 || (src[p] == ',' && par == 0 && br == 0)) {
+                                char decl_name[128];
+                                char decl_type[256];
+                                cc_parse_decl_name_and_type(
+                                    src + param_start, src + p, decl_name,
+                                    sizeof(decl_name), decl_type, sizeof(decl_type));
+                                if (decl_name[0] && strcmp(decl_type, "void") != 0 &&
+                                    !cc_is_non_decl_stmt_type(decl_type)) {
+                                    cc__record_ufcs_var(vars, var_count, var_cap,
+                                                        decl_name, decl_type);
+                                    if (reg && !cc_type_registry_lookup_var(reg, decl_name))
+                                        cc_type_registry_add_var(reg, decl_name, decl_type);
+                                }
+                                param_start = p + 1;
+                            } else if (src[p] == '(') par++;
+                            else if (src[p] == ')' && par > 0) par--;
+                            else if (src[p] == '[') br++;
+                            else if (src[p] == ']' && br > 0) br--;
+                            p++;
+                        }
+                    }
+                }
+            }
             if (scope_depth < MAX_SCOPES) {
                 int sid = next_scope_id++;
                 scope_stack[scope_depth++] = sid;
@@ -3842,6 +3962,7 @@ static void cc__ufcs_scope_idx_build(const char* src, size_t n) {
                                                  td_type, sizeof(td_type)) &&
                     td_name[0]) {
                     CCUfcsIdxTypedef* slot;
+                    char normalized[256];
                     if (g_ufcs_scope_idx.n_typedefs == g_ufcs_scope_idx.typedefs_cap) {
                         size_t cap = g_ufcs_scope_idx.typedefs_cap
                                          ? g_ufcs_scope_idx.typedefs_cap * 2
@@ -3857,6 +3978,12 @@ static void cc__ufcs_scope_idx_build(const char* src, size_t n) {
                     snprintf(slot->name, sizeof(slot->name), "%s", td_name);
                     cc__canonicalize_ufcs_alias_target(slot->type, sizeof(slot->type),
                                                        td_type);
+                    if (harvest && reg) {
+                        cc__canonicalize_ufcs_alias_target(normalized, sizeof(normalized),
+                                                           td_type);
+                        if (normalized[0])
+                            cc_type_registry_add_alias(reg, td_name, normalized);
+                    }
                 }
                 typedef_start = (size_t)-1;
             }
@@ -3901,12 +4028,90 @@ static void cc__ufcs_scope_idx_build(const char* src, size_t n) {
                                                sizeof(alias_type)))
                     snprintf(slot->type, sizeof(slot->type), "%s", alias_type);
                 g_ufcs_scope_idx.n_decls++;
+                if (harvest) {
+                    cc__record_ufcs_var(vars, var_count, var_cap, slot->name, slot->type);
+                    if (reg && !cc_type_registry_lookup_var(reg, slot->name))
+                        cc_type_registry_add_var(reg, slot->name, slot->type);
+                }
             }
             stmt_start = i + 1;
+        }
+        /* Type + var pattern harvest (Vec/Map macros, struct tags, …). */
+        if (harvest && cc_is_ident_start(src[i]) &&
+            !(i > 0 && (cc_is_ident_char(src[i - 1]) || src[i - 1] == '@'))) {
+            size_t type_start = i;
+            size_t type_end;
+            size_t j;
+            while (i < n && cc_is_ident_char(src[i])) i++;
+            type_end = i;
+            if ((type_end - type_start == 6 && memcmp(src + type_start, "struct", 6) == 0) ||
+                (type_end - type_start == 5 && memcmp(src + type_start, "union", 5) == 0)) {
+                size_t tag = cc_skip_ws_and_comments(src, n, type_end);
+                if (tag < n && cc_is_ident_start(src[tag])) {
+                    size_t tag_end = tag;
+                    while (tag_end < n && cc_is_ident_char(src[tag_end])) tag_end++;
+                    type_end = tag_end;
+                    i = tag_end;
+                }
+            }
+            if (type_end - type_start == sizeof("__CC_VEC") - 1 &&
+                memcmp(src + type_start, "__CC_VEC", sizeof("__CC_VEC") - 1) == 0) {
+                size_t macro_l = cc_skip_ws_and_comments(src, n, type_end);
+                size_t macro_r = 0;
+                if (macro_l < n && src[macro_l] == '(' &&
+                    cc_find_matching_paren(src, n, macro_l, &macro_r))
+                    type_end = macro_r + 1;
+            } else if (type_end - type_start == sizeof("__CC_MAP") - 1 &&
+                       memcmp(src + type_start, "__CC_MAP", sizeof("__CC_MAP") - 1) == 0) {
+                size_t macro_l = cc_skip_ws_and_comments(src, n, type_end);
+                size_t macro_r = 0;
+                if (macro_l < n && src[macro_l] == '(' &&
+                    cc_find_matching_paren(src, n, macro_l, &macro_r))
+                    type_end = macro_r + 1;
+            }
+            j = cc_skip_ws_and_comments(src, n, type_end);
+            while (j < n && src[j] == '*') {
+                j++;
+                j = cc_skip_ws_and_comments(src, n, j);
+            }
+            if (j < n && cc_is_ident_start(src[j])) {
+                size_t var_start = j;
+                while (j < n && cc_is_ident_char(src[j])) j++;
+                if (cc_skip_ws_and_comments(src, n, j) < n &&
+                    src[cc_skip_ws_and_comments(src, n, j)] != '(') {
+                    char type_name[256];
+                    char var_name[128];
+                    size_t tn = type_end - type_start;
+                    size_t vn = j - var_start;
+                    size_t k;
+                    if (tn >= sizeof(type_name)) tn = sizeof(type_name) - 1;
+                    if (vn >= sizeof(var_name)) vn = sizeof(var_name) - 1;
+                    memcpy(type_name, src + type_start, tn);
+                    type_name[tn] = '\0';
+                    memcpy(var_name, src + var_start, vn);
+                    var_name[vn] = '\0';
+                    k = cc_skip_ws_and_comments(src, n, type_end);
+                    while (k < var_start &&
+                           (src[k] == '*' || src[k] == ' ' || src[k] == '\t')) {
+                        if (src[k] == '*')
+                            strncat(type_name, "*",
+                                    sizeof(type_name) - strlen(type_name) - 1);
+                        k++;
+                    }
+                    cc__record_ufcs_var(vars, var_count, var_cap, var_name, type_name);
+                    if (reg && !cc_type_registry_lookup_var(reg, var_name))
+                        cc_type_registry_add_var(reg, var_name, type_name);
+                }
+            }
+            continue;
         }
         i++;
     }
     g_ufcs_scope_idx.ready = 1;
+}
+
+static void cc__ufcs_scope_idx_build(const char* src, size_t n) {
+    cc__ufcs_scope_idx_build_ex(src, n, NULL, NULL, 0, NULL, NULL, 0);
 }
 
 static const char* cc__lookup_scoped_ufcs_var_type(const char* src,
@@ -5014,15 +5219,20 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
     int own_idx = 0;
     CCScannerState scan;
     if (!src || n == 0) return NULL;
-    /* Index decls/typedefs once per outer rewrite. Nested calls on receiver
-     * substrings must not clobber the parent index (lock). */
+    /* One pass: scoped-decl index + UFCS var/field harvest. Nested calls on
+     * receiver substrings must not clobber the parent index (lock). */
     if (!g_ufcs_scope_idx_locked) {
-        cc__ufcs_scope_idx_build(src, n);
+        cc__ufcs_scope_idx_build_ex(src, n, vars, &var_count,
+                                    sizeof(vars) / sizeof(vars[0]), fields,
+                                    &field_count, sizeof(fields) / sizeof(fields[0]));
         g_ufcs_scope_idx_locked = 1;
         own_idx = 1;
+    } else {
+        cc__collect_generic_ufcs_types(src, n, vars, &var_count,
+                                       sizeof(vars) / sizeof(vars[0]), fields,
+                                       &field_count,
+                                       sizeof(fields) / sizeof(fields[0]));
     }
-    cc__collect_generic_ufcs_types(src, n, vars, &var_count, sizeof(vars) / sizeof(vars[0]),
-                                   fields, &field_count, sizeof(fields) / sizeof(fields[0]));
     cc_scanner_init(&scan);
     while (i < n) {
         size_t sep_pos;

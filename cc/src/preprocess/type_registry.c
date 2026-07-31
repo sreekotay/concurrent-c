@@ -1867,41 +1867,107 @@ static void cc__normalize_local_decl_type(char* out, size_t out_sz, const char* 
     snprintf(out, out_sz, "CCResult_%s_%s", mangled_ok, mangled_err);
 }
 
-static const char* cc__lookup_scoped_local_var_type(const char* src,
-                                                    size_t limit,
-                                                    const char* var_name,
-                                                    char* out_type,
-                                                    size_t out_type_sz) {
-    typedef struct {
-        int scope_id;
-        char type_name[256];
-    } LocalDecl;
-    enum { MAX_DECLS = 256, MAX_SCOPES = 256 };
-    LocalDecl decls[MAX_DECLS];
-    int decl_count = 0;
+/* One-pass scoped decl index for registry receiver resolution. The old
+ * per-call walk rescanned src[0..use_offset) on every resolve. */
+typedef struct {
+    size_t pos; /* ';' of the decl, or '{' for a param binding */
+    int scope_id;
+    char name[128];
+    char type[256];
+} CCRegIdxDecl;
+
+typedef struct {
+    const char* src;
+    size_t n;
+    CCRegIdxDecl* decls;
+    size_t n_decls;
+    size_t decls_cap;
+    size_t* scope_close;
+    size_t n_scopes;
+    size_t scopes_cap;
+    int ready;
+} CCRegScopeIndex;
+
+static CCRegScopeIndex g_reg_scope_idx;
+
+static void cc__reg_scope_idx_reset(void) {
+    free(g_reg_scope_idx.decls);
+    free(g_reg_scope_idx.scope_close);
+    memset(&g_reg_scope_idx, 0, sizeof(g_reg_scope_idx));
+}
+
+static int cc__reg_scope_idx_ensure_scopes(size_t need) {
+    size_t* nv;
+    size_t cap;
+    size_t i;
+    if (g_reg_scope_idx.scopes_cap >= need) return 0;
+    cap = g_reg_scope_idx.scopes_cap ? g_reg_scope_idx.scopes_cap : 64;
+    while (cap < need) cap *= 2;
+    nv = (size_t*)realloc(g_reg_scope_idx.scope_close, cap * sizeof(*nv));
+    if (!nv) return -1;
+    for (i = g_reg_scope_idx.scopes_cap; i < cap; i++) nv[i] = (size_t)-1;
+    g_reg_scope_idx.scope_close = nv;
+    g_reg_scope_idx.scopes_cap = cap;
+    return 0;
+}
+
+static int cc__reg_scope_idx_push_decl(size_t pos, int scope_id,
+                                       const char* name, const char* type) {
+    CCRegIdxDecl* slot;
+    if (!name || !name[0] || !type || !type[0]) return 0;
+    if (g_reg_scope_idx.n_decls == g_reg_scope_idx.decls_cap) {
+        size_t cap = g_reg_scope_idx.decls_cap ? g_reg_scope_idx.decls_cap * 2 : 128;
+        CCRegIdxDecl* nv =
+            (CCRegIdxDecl*)realloc(g_reg_scope_idx.decls, cap * sizeof(*nv));
+        if (!nv) return -1;
+        g_reg_scope_idx.decls = nv;
+        g_reg_scope_idx.decls_cap = cap;
+    }
+    slot = &g_reg_scope_idx.decls[g_reg_scope_idx.n_decls++];
+    slot->pos = pos;
+    slot->scope_id = scope_id;
+    snprintf(slot->name, sizeof(slot->name), "%s", name);
+    cc__normalize_local_decl_type(slot->type, sizeof(slot->type), type);
+    return 0;
+}
+
+static void cc__reg_scope_idx_build(const char* src, size_t n) {
+    enum { MAX_SCOPES = 256 };
     int scope_stack[MAX_SCOPES];
     int scope_depth = 1;
     int next_scope_id = 1;
     int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
     size_t stmt_start = 0;
     size_t i = 0;
-    if (!src || !var_name || !var_name[0] || !out_type || out_type_sz == 0) return NULL;
-    out_type[0] = '\0';
+    cc__reg_scope_idx_reset();
+    if (!src || n == 0) return;
+    g_reg_scope_idx.src = src;
+    g_reg_scope_idx.n = n;
     scope_stack[0] = 0;
-    while (i < limit) {
+    if (cc__reg_scope_idx_ensure_scopes(1) != 0) return;
+    g_reg_scope_idx.n_scopes = 1;
+    g_reg_scope_idx.scope_close[0] = (size_t)-1;
+    while (i < n) {
         char c = src[i];
-        char c2 = (i + 1 < limit) ? src[i + 1] : 0;
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
         if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
         if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
-        if (in_str) { if (c == '\\' && i + 1 < limit) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < limit) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
         if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
         if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
         if (c == '"') { in_str = 1; i++; continue; }
         if (c == '\'') { in_chr = 1; i++; continue; }
         if (c == '{') {
             int new_scope_id = next_scope_id++;
-            if (scope_depth < MAX_SCOPES) scope_stack[scope_depth++] = new_scope_id;
+            if (scope_depth < MAX_SCOPES) {
+                scope_stack[scope_depth++] = new_scope_id;
+                if (cc__reg_scope_idx_ensure_scopes((size_t)new_scope_id + 1) != 0)
+                    return;
+                if ((size_t)new_scope_id + 1 > g_reg_scope_idx.n_scopes)
+                    g_reg_scope_idx.n_scopes = (size_t)new_scope_id + 1;
+                g_reg_scope_idx.scope_close[new_scope_id] = (size_t)-1;
+            }
             {
                 size_t close = i;
                 while (close > 0 && isspace((unsigned char)src[close - 1])) close--;
@@ -1918,33 +1984,24 @@ static const char* cc__lookup_scoped_local_var_type(const char* src,
                         size_t p = param_start;
                         int par = 0, br = 0;
                         while (p <= close - 1) {
-                            if (p == close - 1 || (src[p] == ',' && par == 0 && br == 0)) {
+                            if (p == close - 1 ||
+                                (src[p] == ',' && par == 0 && br == 0)) {
                                 char decl_name[128];
                                 char decl_type[256];
-                                cc_parse_decl_name_and_type(src + param_start, src + p,
-                                                            decl_name, sizeof(decl_name),
-                                                            decl_type, sizeof(decl_type));
-                                if (decl_name[0] &&
-                                    strcmp(decl_name, var_name) == 0 &&
-                                    strcmp(decl_type, "void") != 0 &&
-                                    !cc_is_non_decl_stmt_type(decl_type) &&
-                                    decl_count < MAX_DECLS) {
-                                    decls[decl_count].scope_id = new_scope_id;
-                                    cc__normalize_local_decl_type(decls[decl_count].type_name,
-                                                                  sizeof(decls[decl_count].type_name),
-                                                                  decl_type);
-                                    decl_count++;
+                                cc_parse_decl_name_and_type(
+                                    src + param_start, src + p, decl_name,
+                                    sizeof(decl_name), decl_type, sizeof(decl_type));
+                                if (decl_name[0] && strcmp(decl_type, "void") != 0 &&
+                                    !cc_is_non_decl_stmt_type(decl_type)) {
+                                    if (cc__reg_scope_idx_push_decl(
+                                            i, new_scope_id, decl_name, decl_type) != 0)
+                                        return;
                                 }
                                 param_start = p + 1;
-                            } else if (src[p] == '(') {
-                                par++;
-                            } else if (src[p] == ')' && par > 0) {
-                                par--;
-                            } else if (src[p] == '[') {
-                                br++;
-                            } else if (src[p] == ']' && br > 0) {
-                                br--;
-                            }
+                            } else if (src[p] == '(') par++;
+                            else if (src[p] == ')' && par > 0) par--;
+                            else if (src[p] == '[') br++;
+                            else if (src[p] == ']' && br > 0) br--;
                             p++;
                         }
                     }
@@ -1955,9 +2012,12 @@ static const char* cc__lookup_scoped_local_var_type(const char* src,
             continue;
         }
         if (c == '}') {
-            int closing_scope = (scope_depth > 1) ? scope_stack[scope_depth - 1] : 0;
-            while (decl_count > 0 && decls[decl_count - 1].scope_id == closing_scope) decl_count--;
-            if (scope_depth > 1) scope_depth--;
+            if (scope_depth > 1) {
+                int closing_scope = scope_stack[scope_depth - 1];
+                if ((size_t)closing_scope < g_reg_scope_idx.scopes_cap)
+                    g_reg_scope_idx.scope_close[closing_scope] = i;
+                scope_depth--;
+            }
             stmt_start = i + 1;
             i++;
             continue;
@@ -1965,25 +2025,55 @@ static const char* cc__lookup_scoped_local_var_type(const char* src,
         if (c == ';') {
             char decl_name[128];
             char decl_type[256];
-            cc_parse_decl_name_and_type(src + stmt_start, src + i,
-                                               decl_name, sizeof(decl_name),
-                                               decl_type, sizeof(decl_type));
-            if (decl_name[0] &&
-                strcmp(decl_name, var_name) == 0 &&
-                !cc_is_non_decl_stmt_type(decl_type) &&
-                decl_count < MAX_DECLS) {
-                decls[decl_count].scope_id = scope_stack[scope_depth - 1];
-                cc__normalize_local_decl_type(decls[decl_count].type_name,
-                                              sizeof(decls[decl_count].type_name),
-                                              decl_type);
-                decl_count++;
+            cc_parse_decl_name_and_type(src + stmt_start, src + i, decl_name,
+                                         sizeof(decl_name), decl_type,
+                                         sizeof(decl_type));
+            if (decl_name[0] && !cc_is_non_decl_stmt_type(decl_type)) {
+                if (cc__reg_scope_idx_push_decl(i, scope_stack[scope_depth - 1],
+                                                decl_name, decl_type) != 0)
+                    return;
             }
             stmt_start = i + 1;
         }
         i++;
     }
-    if (decl_count == 0) return NULL;
-    strncpy(out_type, decls[decl_count - 1].type_name, out_type_sz - 1);
+    g_reg_scope_idx.ready = 1;
+}
+
+static void cc__reg_scope_idx_ensure(const char* src, size_t n) {
+    if (!src || n == 0) return;
+    if (g_reg_scope_idx.ready && g_reg_scope_idx.src == src &&
+        g_reg_scope_idx.n == n)
+        return;
+    cc__reg_scope_idx_build(src, n);
+}
+
+static const char* cc__lookup_scoped_local_var_type(const char* src,
+                                                    size_t limit,
+                                                    const char* var_name,
+                                                    char* out_type,
+                                                    size_t out_type_sz) {
+    size_t di;
+    const CCRegIdxDecl* best = NULL;
+    size_t n;
+    if (!src || !var_name || !var_name[0] || !out_type || out_type_sz == 0) return NULL;
+    out_type[0] = '\0';
+    n = strlen(src);
+    if (limit > n) limit = n;
+    cc__reg_scope_idx_ensure(src, n);
+    if (!g_reg_scope_idx.ready || g_reg_scope_idx.src != src) return NULL;
+    for (di = 0; di < g_reg_scope_idx.n_decls; di++) {
+        const CCRegIdxDecl* d = &g_reg_scope_idx.decls[di];
+        size_t close;
+        if (d->pos >= limit) break;
+        if (strcmp(d->name, var_name) != 0) continue;
+        if ((size_t)d->scope_id >= g_reg_scope_idx.n_scopes) continue;
+        close = g_reg_scope_idx.scope_close[d->scope_id];
+        if (close < limit) continue;
+        best = d;
+    }
+    if (!best) return NULL;
+    strncpy(out_type, best->type, out_type_sz - 1);
     out_type[out_type_sz - 1] = '\0';
     return out_type;
 }

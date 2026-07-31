@@ -2892,18 +2892,53 @@ static void cc__normalize_decl_type_for_receiver_codegen(char* out, size_t out_s
     if (reg) cc_type_registry_canonicalize_type_name(reg, out, out, out_sz);
 }
 
-static const char* cc__lookup_scoped_local_var_type_codegen(const char* src,
-                                                            size_t limit,
-                                                            const char* var_name,
-                                                            char* out_type,
-                                                            size_t out_type_sz) {
-    typedef struct {
-        int scope_id;
-        char type_name[256];
-    } LocalDecl;
-    enum { MAX_DECLS = 256, MAX_SCOPES = 256 };
-    LocalDecl decls[MAX_DECLS];
-    int decl_count = 0;
+/* One-pass scoped-decl index for codegen receiver lookups. Same walk as the
+ * old per-call `cc__lookup_scoped_local_var_type_codegen` (paren/bracket-
+ * aware scopes), but harvested once per buffer. */
+typedef struct {
+    size_t pos;
+    int scope_id;
+    char name[128];
+    char type[256];
+} CCCgIdxDecl;
+
+typedef struct {
+    const char* src;
+    size_t n;
+    CCCgIdxDecl* decls;
+    size_t n_decls;
+    size_t decls_cap;
+    size_t* scope_close;
+    size_t n_scopes;
+    size_t scopes_cap;
+    int ready;
+} CCCgScopeIndex;
+
+static CCCgScopeIndex g_cg_scope_idx;
+
+static void cc__cg_scope_idx_reset(void) {
+    free(g_cg_scope_idx.decls);
+    free(g_cg_scope_idx.scope_close);
+    memset(&g_cg_scope_idx, 0, sizeof(g_cg_scope_idx));
+}
+
+static int cc__cg_scope_idx_ensure_scopes(size_t need) {
+    size_t* nv;
+    size_t cap;
+    size_t i;
+    if (g_cg_scope_idx.scopes_cap >= need) return 0;
+    cap = g_cg_scope_idx.scopes_cap ? g_cg_scope_idx.scopes_cap : 64;
+    while (cap < need) cap *= 2;
+    nv = (size_t*)realloc(g_cg_scope_idx.scope_close, cap * sizeof(*nv));
+    if (!nv) return -1;
+    for (i = g_cg_scope_idx.scopes_cap; i < cap; i++) nv[i] = (size_t)-1;
+    g_cg_scope_idx.scope_close = nv;
+    g_cg_scope_idx.scopes_cap = cap;
+    return 0;
+}
+
+static void cc__cg_scope_idx_build(const char* src, size_t n) {
+    enum { MAX_SCOPES = 256 };
     int scope_stack[MAX_SCOPES];
     int scope_depth = 1;
     int next_scope_id = 1;
@@ -2911,28 +2946,44 @@ static const char* cc__lookup_scoped_local_var_type_codegen(const char* src,
     size_t stmt_start = 0;
     size_t i = 0;
     CCInertScan scan;
-    if (!src || !var_name || !var_name[0] || !out_type || out_type_sz == 0) return NULL;
-    out_type[0] = '\0';
+    cc__cg_scope_idx_reset();
+    if (!src || n == 0) return;
+    g_cg_scope_idx.src = src;
+    g_cg_scope_idx.n = n;
     scope_stack[0] = 0;
+    if (cc__cg_scope_idx_ensure_scopes(1) != 0) return;
+    g_cg_scope_idx.n_scopes = 1;
+    g_cg_scope_idx.scope_close[0] = (size_t)-1;
     cc_inert_scan_init(&scan, NULL);
-    scan.at_line_start = 0;  /* src is a mid-buffer slice */
-    while (i < limit) {
-        if (cc_inert_scan_step(&scan, src, limit, &i)) continue;
-        char c = src[i];
+    scan.at_line_start = 0;
+    while (i < n) {
+        char c;
+        if (cc_inert_scan_step(&scan, src, n, &i)) continue;
+        c = src[i];
         if (c == '(') { paren_depth++; i++; continue; }
         if (c == ')') { if (paren_depth > 0) paren_depth--; i++; continue; }
         if (c == '[') { bracket_depth++; i++; continue; }
         if (c == ']') { if (bracket_depth > 0) bracket_depth--; i++; continue; }
         if (c == '{' && paren_depth == 0 && bracket_depth == 0) {
-            if (scope_depth < MAX_SCOPES) scope_stack[scope_depth++] = next_scope_id++;
+            if (scope_depth < MAX_SCOPES) {
+                int sid = next_scope_id++;
+                scope_stack[scope_depth++] = sid;
+                if (cc__cg_scope_idx_ensure_scopes((size_t)sid + 1) != 0) return;
+                if ((size_t)sid + 1 > g_cg_scope_idx.n_scopes)
+                    g_cg_scope_idx.n_scopes = (size_t)sid + 1;
+                g_cg_scope_idx.scope_close[sid] = (size_t)-1;
+            }
             stmt_start = i + 1;
             i++;
             continue;
         }
         if (c == '}' && paren_depth == 0 && bracket_depth == 0) {
-            int closing_scope = (scope_depth > 1) ? scope_stack[scope_depth - 1] : 0;
-            while (decl_count > 0 && decls[decl_count - 1].scope_id == closing_scope) decl_count--;
-            if (scope_depth > 1) scope_depth--;
+            if (scope_depth > 1) {
+                int closing_scope = scope_stack[scope_depth - 1];
+                if ((size_t)closing_scope < g_cg_scope_idx.scopes_cap)
+                    g_cg_scope_idx.scope_close[closing_scope] = i;
+                scope_depth--;
+            }
             stmt_start = i + 1;
             i++;
             continue;
@@ -2941,40 +2992,86 @@ static const char* cc__lookup_scoped_local_var_type_codegen(const char* src,
             char decl_name[128];
             char decl_type[256];
             cc_parse_decl_name_and_type(src + stmt_start, src + i,
-                                                 decl_name, sizeof(decl_name),
-                                                 decl_type, sizeof(decl_type));
-            if (!decl_name[0] || strcmp(decl_name, var_name) != 0 || !decl_type[0]) {
-                (void)cc__parse_decl_name_and_type_fallback_codegen(src + stmt_start, src + i,
-                                                                    decl_name, sizeof(decl_name),
-                                                                    decl_type, sizeof(decl_type));
+                                         decl_name, sizeof(decl_name),
+                                         decl_type, sizeof(decl_type));
+            if (!decl_name[0] || !decl_type[0]) {
+                (void)cc__parse_decl_name_and_type_fallback_codegen(
+                    src + stmt_start, src + i, decl_name, sizeof(decl_name),
+                    decl_type, sizeof(decl_type));
             }
-            if (decl_name[0] &&
-                strcmp(decl_name, var_name) == 0 &&
-                !cc_is_non_decl_stmt_type(decl_type) &&
-                decl_count < MAX_DECLS) {
-                decls[decl_count].scope_id = scope_stack[scope_depth - 1];
-                cc__normalize_decl_type_for_receiver_codegen(decls[decl_count].type_name,
-                                                             sizeof(decls[decl_count].type_name),
-                                                             decl_type);
-                decl_count++;
+            if (decl_name[0] && !cc_is_non_decl_stmt_type(decl_type)) {
+                CCCgIdxDecl* slot;
+                if (g_cg_scope_idx.n_decls == g_cg_scope_idx.decls_cap) {
+                    size_t cap = g_cg_scope_idx.decls_cap
+                                     ? g_cg_scope_idx.decls_cap * 2
+                                     : 128;
+                    CCCgIdxDecl* nv = (CCCgIdxDecl*)realloc(
+                        g_cg_scope_idx.decls, cap * sizeof(*nv));
+                    if (!nv) return;
+                    g_cg_scope_idx.decls = nv;
+                    g_cg_scope_idx.decls_cap = cap;
+                }
+                slot = &g_cg_scope_idx.decls[g_cg_scope_idx.n_decls];
+                slot->pos = i;
+                slot->scope_id = scope_stack[scope_depth - 1];
+                snprintf(slot->name, sizeof(slot->name), "%s", decl_name);
+                cc__normalize_decl_type_for_receiver_codegen(
+                    slot->type, sizeof(slot->type), decl_type);
+                g_cg_scope_idx.n_decls++;
             }
             stmt_start = i + 1;
         }
         i++;
     }
-    if (decl_count == 0) {
-        return cc__lookup_enclosing_param_type_codegen(src, limit, var_name, out_type, out_type_sz);
-    }
-    strncpy(out_type, decls[decl_count - 1].type_name, out_type_sz - 1);
-    out_type[out_type_sz - 1] = '\0';
-    {
-        const char* canon = cc__canonicalize_type_alias_codegen(out_type);
-        if (canon != out_type) {
-            strncpy(out_type, canon, out_type_sz - 1);
+    g_cg_scope_idx.ready = 1;
+}
+
+static void cc__cg_scope_idx_ensure(const char* src, size_t n) {
+    if (!src || n == 0) return;
+    if (g_cg_scope_idx.ready && g_cg_scope_idx.src == src &&
+        g_cg_scope_idx.n == n)
+        return;
+    cc__cg_scope_idx_build(src, n);
+}
+
+static const char* cc__lookup_scoped_local_var_type_codegen(const char* src,
+                                                            size_t limit,
+                                                            const char* var_name,
+                                                            char* out_type,
+                                                            size_t out_type_sz) {
+    size_t di;
+    const CCCgIdxDecl* best = NULL;
+    size_t n;
+    if (!src || !var_name || !var_name[0] || !out_type || out_type_sz == 0) return NULL;
+    out_type[0] = '\0';
+    n = strlen(src);
+    if (limit > n) limit = n;
+    cc__cg_scope_idx_ensure(src, n);
+    if (g_cg_scope_idx.ready && g_cg_scope_idx.src == src) {
+        for (di = 0; di < g_cg_scope_idx.n_decls; di++) {
+            const CCCgIdxDecl* d = &g_cg_scope_idx.decls[di];
+            size_t close;
+            if (d->pos >= limit) break;
+            if (strcmp(d->name, var_name) != 0) continue;
+            if ((size_t)d->scope_id >= g_cg_scope_idx.n_scopes) continue;
+            close = g_cg_scope_idx.scope_close[d->scope_id];
+            if (close < limit) continue;
+            best = d;
+        }
+        if (best) {
+            strncpy(out_type, best->type, out_type_sz - 1);
             out_type[out_type_sz - 1] = '\0';
+            {
+                const char* canon = cc__canonicalize_type_alias_codegen(out_type);
+                if (canon != out_type) {
+                    strncpy(out_type, canon, out_type_sz - 1);
+                    out_type[out_type_sz - 1] = '\0';
+                }
+            }
+            return out_type;
         }
     }
-    return out_type;
+    return cc__lookup_enclosing_param_type_codegen(src, limit, var_name, out_type, out_type_sz);
 }
 
 static const char* cc__lookup_enclosing_param_type_codegen(const char* src,
@@ -3746,11 +3843,19 @@ static char* cc__rewrite_string_helper_family_to_visible_type(const char* src, s
    cc__ufcs_canonicalize_family_macro in visitor/ufcs.c), so no
    placeholder form is ever emitted and this post-sweep is dead code. */
 
+static const char* g_cg_ufcs_collect_src = NULL;
+static size_t g_cg_ufcs_collect_n = 0;
+
 static void cc__collect_ufcs_field_and_var_types(const char* src, size_t n) {
     CCTypeRegistry* reg = cc_type_registry_get_global();
     size_t i = 0;
     CCInertScan scan;
     if (!reg || !src) return;
+    /* visit_codegen invokes this after several reparses of the same buffer;
+     * registry adds are idempotent, so skip the rewalk. */
+    if (g_cg_ufcs_collect_src == src && g_cg_ufcs_collect_n == n) return;
+    g_cg_ufcs_collect_src = src;
+    g_cg_ufcs_collect_n = n;
     cc_inert_scan_init(&scan, NULL);
     while (i < n) {
         if (cc_inert_scan_step(&scan, src, n, &i)) continue;
