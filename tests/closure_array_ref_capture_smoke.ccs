@@ -1,0 +1,41 @@
+/*
+ * Smoke: reference-capture a local array and index/write through the
+ * shared view. [&arr] must lower as a decayed element pointer alias,
+ * not as `#define arr (*scalar_ptr)`.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+#define N 3
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
+
+    int slots[N] = {0};
+    size_t lens[N] = {0};
+
+    {
+        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+        for (int i = 0; i < N; i++) {
+            int idx = i;
+            n->spawn(() => [idx, &slots, &lens] {
+                slots[idx] = (idx + 1) * 10;
+                lens[idx] = (size_t)(idx + 1);
+            });
+        }
+    }
+
+    int sum = 0;
+    size_t len_sum = 0;
+    for (int i = 0; i < N; i++) {
+        sum += slots[i];
+        len_sum += lens[i];
+        printf("slots[%d]=%d lens[%d]=%zu\n", i, slots[i], i, lens[i]);
+    }
+    if (sum != 60 || len_sum != 6) return 1;
+    printf("closure_array_ref_capture_smoke: PASS\n");
+    return 0;
+}

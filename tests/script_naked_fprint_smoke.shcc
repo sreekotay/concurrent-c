@@ -1,0 +1,18 @@
+#!/usr/bin/env -S ./cc/bin/ccc
+/*
+ * Naked fprint/fprintln: fd first, then data (fprintf-shaped).
+ * Member UFCS stays data.fprintln(fd).
+ */
+
+CCArena a = @create(kilobytes(4)) @destroy;
+
+CCSlice hi = @slice("hello");
+fprintln(STDOUT_FILENO, hi) !>;
+fprintln(STDERR_FILENO, "err-naked") !>;
+fprint(STDOUT_FILENO, "no-nl");
+println("") !>; /* newline after fprint */
+
+/* Postfix form still works and must not be rewritten. */
+hi.fprintln(STDERR_FILENO) !>;
+
+return 0;

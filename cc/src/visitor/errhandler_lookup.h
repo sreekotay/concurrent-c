@@ -48,6 +48,19 @@ int cc_errhandler_split_param_decl(const char* decl,
                                    char* type_out, size_t type_sz,
                                    char* name_out, size_t name_sz);
 
+/*
+ * Parse `@errhandler(E e) { … }` or `@errhandler(E e) STMT;` starting at
+ * `at` (byte of '@'). On success: param decl [decl_a,decl_b), body
+ * [body_a,body_b), and stmt_end past the registration (after optional `;`
+ * following a block, or after the stmt's terminating `;`).
+ * Block bodies are the interior (no braces). Stmt bodies include the `;`.
+ * Returns 1 on success, 0 if malformed.
+ */
+int cc_errhandler_parse_registration(const char* s, size_t n, size_t at,
+                                     size_t* decl_a, size_t* decl_b,
+                                     size_t* body_a, size_t* body_b,
+                                     size_t* stmt_end);
+
 int cc_errhandler_types_equal(const char* a, const char* b);
 
 /* Innermost frame with param_type == err_type; NULL if none. */

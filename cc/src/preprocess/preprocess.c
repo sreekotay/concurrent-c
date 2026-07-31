@@ -1443,6 +1443,369 @@ done:
     return rc;
 }
 
+/* ---- `@string(..., @scratch)` / `@scratch(N)` ---------------------------
+ * Sugar for a per-site stack arena passed as the @string arena operand.
+ * Each site gets its own CC_ARENA_STACK at the enclosing block start; the
+ * arena arg is rewritten to &__cc_str_scratch_K. Not a general expression. */
+#define CC_STR_SCRATCH_DEFAULT_BYTES 1024
+#define CC_STR_SCRATCH_MAX_SITES 256
+
+typedef struct {
+    size_t brace;   /* '{' after which to inject CC_ARENA_STACK */
+    size_t arg_s;   /* start of @scratch... in source */
+    size_t arg_e;   /* exclusive end of arena arg */
+    size_t nbytes;
+    int id;
+    int line;
+    int col;
+} CCStrScratchSite;
+
+/* Parse `@scratch` / `@scratch(N)` starting at `s`. `scan_e` is a hint from
+ * the top-level `)` scan (which stops at the first paren-balanced `)`, so for
+ * `@scratch(N)` it points at N's closing paren). On success, `*out_arg_e` is
+ * the exclusive end of the scratch token (past `@scratch` or past `@scratch(N)`). */
+static int cc__parse_at_scratch_arg(const char* src, size_t n, size_t s, size_t scan_e,
+                                    size_t* out_nbytes, size_t* out_arg_e) {
+    size_t p;
+    size_t val;
+    if (!src || !out_nbytes || !out_arg_e || s >= n) return 0;
+    s = cc_skip_ws_and_comments(src, n, s);
+    if (s + 8 > n || memcmp(src + s, "@scratch", 8) != 0) return 0;
+    p = s + 8;
+    if (p < n && (isalnum((unsigned char)src[p]) || src[p] == '_')) return 0;
+    p = cc_skip_ws_and_comments(src, n, p);
+    if (p >= n || src[p] != '(') {
+        /* Bare `@scratch` — optional trailing ws up to scan_e. */
+        size_t end = p;
+        if (scan_e > s && scan_e <= n) {
+            size_t t = cc_skip_ws_and_comments(src, n, p);
+            if (t > scan_e) return -1;
+            /* allow only whitespace between keyword and the @string ')' */
+            while (p < scan_e) {
+                char c = src[p];
+                if (c != ' ' && c != '\t' && c != '\n' && c != '\r') return -1;
+                p++;
+            }
+            end = scan_e;
+        }
+        *out_nbytes = CC_STR_SCRATCH_DEFAULT_BYTES;
+        *out_arg_e = end;
+        return 1;
+    }
+    /* `@scratch(N)` — parse through the closing paren even when scan_e
+     * landed on that same `)` (top-level delim scan quirk). */
+    p = cc_skip_ws_and_comments(src, n, p + 1);
+    if (p >= n || !isdigit((unsigned char)src[p])) return -1;
+    val = 0;
+    while (p < n && isdigit((unsigned char)src[p])) {
+        size_t digit = (size_t)(src[p] - '0');
+        if (val > 1024u * 1024u * 64u / 10) return -1;
+        val = val * 10 + digit;
+        p++;
+    }
+    p = cc_skip_ws_and_comments(src, n, p);
+    if (p >= n || src[p] != ')') return -1;
+    p++; /* past ')' of @scratch(N) */
+    if (val == 0) return -1;
+    *out_nbytes = val;
+    *out_arg_e = p;
+    return 1;
+}
+
+static int cc__find_enclosing_lbrace(const char* src, size_t n, size_t pos, size_t* out_brace) {
+    size_t stack[256];
+    int sp = 0;
+    CCScannerState scan;
+    size_t i = 0;
+    if (!src || !out_brace || pos > n) return 0;
+    cc_scanner_init(&scan);
+    while (i < pos) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (i >= pos) break;
+        if (src[i] == '{') {
+            if (sp < (int)(sizeof(stack) / sizeof(stack[0]))) stack[sp++] = i;
+            i++;
+        } else if (src[i] == '}') {
+            if (sp > 0) sp--;
+            i++;
+        } else {
+            i++;
+        }
+    }
+    if (sp <= 0) return 0;
+    *out_brace = stack[sp - 1];
+    return 1;
+}
+
+static int cc__line_col_at(const char* src, size_t n, size_t pos, int* line, int* col) {
+    CCScannerState scan;
+    size_t i = 0;
+    if (!src || !line || !col) return 0;
+    cc_scanner_init(&scan);
+    while (i < pos && i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        i++;
+    }
+    *line = scan.line;
+    *col = scan.col;
+    return 1;
+}
+
+/* Collect @string arena args that are @scratch / @scratch(N). Returns
+ * site count, -1 on error. */
+static int cc__collect_string_scratch_sites(const char* src, size_t n, const char* input_path,
+                                           CCStrScratchSite* sites, int max_sites) {
+    CCScannerState scan;
+    size_t i = 0;
+    int count = 0;
+    if (!src || !sites || max_sites <= 0) return 0;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        size_t arg1_s, arg1_e;
+        size_t arena_s = 0, arena_e = 0;
+        size_t nbytes = 0;
+        size_t brace = 0;
+        int prc;
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (!(i + 7 < n && memcmp(src + i, "@string(", 8) == 0)) {
+            i++;
+            continue;
+        }
+        arg1_s = cc_skip_ws_and_comments(src, n, i + 8);
+        arg1_e = cc__scan_to_top_level_delim(src, n, arg1_s, ',', ')');
+        if (arg1_e >= n) {
+            i++;
+            continue;
+        }
+        if (src[arg1_e] == ')' ) {
+            /* Arena-less or malformed — no scratch site. */
+            i = arg1_e + 1;
+            continue;
+        }
+        if (arg1_s < n && src[arg1_s] == '`') {
+            size_t tick_e = 0;
+            size_t arg2_s;
+            if (cc_tpl_scan_literal(src, n, arg1_s, &tick_e) != 0) {
+                i++;
+                continue;
+            }
+            arg2_s = cc_skip_ws_and_comments(src, n, tick_e + 1);
+            if (arg2_s >= n || src[arg2_s] != ',') {
+                i = tick_e + 1;
+                continue;
+            }
+            arena_s = cc_skip_ws_and_comments(src, n, arg2_s + 1);
+            arena_e = cc__scan_to_top_level_delim(src, n, arena_s, ')', '\0');
+            if (arena_e >= n || src[arena_e] != ')') {
+                i = arg2_s + 1;
+                continue;
+            }
+        } else {
+            size_t arg2_s = cc_skip_ws_and_comments(src, n, arg1_e + 1);
+            if (arg2_s < n && src[arg2_s] == '`') {
+                size_t tick_e = 0;
+                size_t arg3_s;
+                if (cc_tpl_scan_literal(src, n, arg2_s, &tick_e) != 0) {
+                    i++;
+                    continue;
+                }
+                arg3_s = cc_skip_ws_and_comments(src, n, tick_e + 1);
+                if (arg3_s >= n || src[arg3_s] != ',') {
+                    i = tick_e + 1;
+                    continue;
+                }
+                arena_s = cc_skip_ws_and_comments(src, n, arg3_s + 1);
+                arena_e = cc__scan_to_top_level_delim(src, n, arena_s, ')', '\0');
+                if (arena_e >= n || src[arena_e] != ')') {
+                    i = arg3_s + 1;
+                    continue;
+                }
+            } else {
+                arena_s = arg2_s;
+                arena_e = cc__scan_to_top_level_delim(src, n, arena_s, ')', '\0');
+                if (arena_e >= n || src[arena_e] != ')') {
+                    i = arg2_s;
+                    continue;
+                }
+            }
+        }
+        {
+            size_t scratch_e = arena_e;
+            prc = cc__parse_at_scratch_arg(src, n, arena_s, arena_e, &nbytes, &scratch_e);
+            if (prc == 0) {
+                i = arena_e + 1;
+                continue;
+            }
+            if (prc < 0) {
+                char rel[1024];
+                int line = 1, col = 1;
+                cc__line_col_at(src, n, arena_s, &line, &col);
+                cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                line, col, "syntax",
+                                "malformed @scratch in @string arena argument "
+                                "(use @scratch or @scratch(N) with N > 0)");
+                return -1;
+            }
+            /* After @scratch(N), only whitespace may remain before @string ')'. */
+            {
+                size_t after = cc_skip_ws_and_comments(src, n, scratch_e);
+                size_t string_close = cc__scan_to_top_level_delim(src, n, after, ')', '\0');
+                /* For bare @scratch, scan_e was already the string ')'. For
+                 * @scratch(N), scratch_e is past N's ')' and after should be
+                 * the string-closing ')'. */
+                if (after < n && src[after] == ')')
+                    string_close = after;
+                else if (string_close >= n || src[string_close] != ')') {
+                    char rel[1024];
+                    int line = 1, col = 1;
+                    cc__line_col_at(src, n, arena_s, &line, &col);
+                    cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                    line, col, "syntax",
+                                    "malformed @scratch in @string arena argument "
+                                    "(use @scratch or @scratch(N) with N > 0)");
+                    return -1;
+                }
+                (void)string_close;
+            }
+            if (!cc__find_enclosing_lbrace(src, n, i, &brace)) {
+                char rel[1024];
+                int line = 1, col = 1;
+                cc__line_col_at(src, n, i, &line, &col);
+                cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                line, col, "syntax",
+                                "@string(..., @scratch) requires an enclosing block");
+                return -1;
+            }
+            if (count >= max_sites) {
+                char rel[1024];
+                int line = 1, col = 1;
+                cc__line_col_at(src, n, i, &line, &col);
+                cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                line, col, "syntax",
+                                "too many @scratch sites in one translation unit");
+                return -1;
+            }
+            sites[count].brace = brace;
+            sites[count].arg_s = arena_s;
+            sites[count].arg_e = scratch_e;
+            sites[count].nbytes = nbytes;
+            sites[count].id = count;
+            cc__line_col_at(src, n, arena_s, &sites[count].line, &sites[count].col);
+            count++;
+            i = scratch_e;
+        }
+    }
+    return count;
+}
+
+static int cc__scratch_site_in_span(const CCStrScratchSite* sites, int n_sites,
+                                    size_t pos) {
+    int k;
+    for (k = 0; k < n_sites; k++) {
+        if (pos >= sites[k].arg_s && pos < sites[k].arg_e) return 1;
+    }
+    return 0;
+}
+
+/* Error if @scratch appears outside an @string arena arg. */
+static int cc__reject_orphan_at_scratch(const char* src, size_t n, const char* input_path,
+                                        const CCStrScratchSite* sites, int n_sites) {
+    CCScannerState scan;
+    size_t i = 0;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (i + 8 <= n && memcmp(src + i, "@scratch", 8) == 0) {
+            size_t after = i + 8;
+            if (after < n && (isalnum((unsigned char)src[after]) || src[after] == '_')) {
+                i++;
+                continue;
+            }
+            if (!cc__scratch_site_in_span(sites, n_sites, i)) {
+                char rel[1024];
+                cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                scan.line, scan.col, "syntax",
+                                "@scratch is only valid as the arena argument of @string(...); "
+                                "use CC_ARENA_STACK for a named scratch arena");
+                return -1;
+            }
+            i = after;
+            continue;
+        }
+        i++;
+    }
+    return 0;
+}
+
+static int cc__scratch_site_cmp_brace(const void* a, const void* b) {
+    const CCStrScratchSite* sa = (const CCStrScratchSite*)a;
+    const CCStrScratchSite* sb = (const CCStrScratchSite*)b;
+    if (sa->brace < sb->brace) return -1;
+    if (sa->brace > sb->brace) return 1;
+    if (sa->id < sb->id) return -1;
+    if (sa->id > sb->id) return 1;
+    return 0;
+}
+
+static int cc__scratch_site_cmp_arg(const void* a, const void* b) {
+    const CCStrScratchSite* sa = (const CCStrScratchSite*)a;
+    const CCStrScratchSite* sb = (const CCStrScratchSite*)b;
+    if (sa->arg_s < sb->arg_s) return -1;
+    if (sa->arg_s > sb->arg_s) return 1;
+    return 0;
+}
+
+/* Expand @scratch arena args; NULL = no sites, (char*)-1 = error. */
+static char* cc__expand_string_scratch(const char* src, size_t n, const char* input_path) {
+    CCStrScratchSite sites[CC_STR_SCRATCH_MAX_SITES];
+    CCStrScratchSite by_brace[CC_STR_SCRATCH_MAX_SITES];
+    CCStrScratchSite by_arg[CC_STR_SCRATCH_MAX_SITES];
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t pos = 0;
+    int n_sites;
+    int bi = 0, ai = 0;
+    if (!src || n == 0) return NULL;
+    if (!cc_contains_token_top_level(src, n, "@scratch")) return NULL;
+    n_sites = cc__collect_string_scratch_sites(src, n, input_path, sites, CC_STR_SCRATCH_MAX_SITES);
+    if (n_sites < 0) return (char*)-1;
+    if (cc__reject_orphan_at_scratch(src, n, input_path, sites, n_sites) != 0)
+        return (char*)-1;
+    if (n_sites == 0) return NULL;
+    memcpy(by_brace, sites, (size_t)n_sites * sizeof(sites[0]));
+    memcpy(by_arg, sites, (size_t)n_sites * sizeof(sites[0]));
+    qsort(by_brace, (size_t)n_sites, sizeof(by_brace[0]), cc__scratch_site_cmp_brace);
+    qsort(by_arg, (size_t)n_sites, sizeof(by_arg[0]), cc__scratch_site_cmp_arg);
+    while (pos < n || bi < n_sites || ai < n_sites) {
+        size_t next_inj = (bi < n_sites) ? by_brace[bi].brace + 1 : (size_t)-1;
+        size_t next_rep = (ai < n_sites) ? by_arg[ai].arg_s : (size_t)-1;
+        size_t next;
+        if (next_inj == (size_t)-1 && next_rep == (size_t)-1) break;
+        if (next_inj == (size_t)-1) next = next_rep;
+        else if (next_rep == (size_t)-1) next = next_inj;
+        else next = (next_inj <= next_rep) ? next_inj : next_rep;
+        if (pos < next) {
+            cc_sb_append(&out, &out_len, &out_cap, src + pos, next - pos);
+            pos = next;
+        }
+        if (next == next_inj) {
+            while (bi < n_sites && by_brace[bi].brace + 1 == next) {
+                cc__sb_append_fmt_local(&out, &out_len, &out_cap,
+                                        " CC_ARENA_STACK(__cc_str_scratch_%d, %zu); ",
+                                        by_brace[bi].id, by_brace[bi].nbytes);
+                bi++;
+            }
+        } else {
+            cc__sb_append_fmt_local(&out, &out_len, &out_cap,
+                                    "&__cc_str_scratch_%d", by_arg[ai].id);
+            pos = by_arg[ai].arg_e;
+            ai++;
+        }
+    }
+    if (pos < n) cc_sb_append(&out, &out_len, &out_cap, src + pos, n - pos);
+    return out;
+}
+
 static char* cc__rewrite_string_templates(const char* src, size_t n, const char* input_path) {
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
@@ -1846,6 +2209,19 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
 }
 
 char* cc_rewrite_string_templates_text(const char* src, size_t n, const char* input_path) {
+    char* scratch = cc__expand_string_scratch(src, n, input_path);
+    char* out;
+    if (scratch == (char*)-1) return (char*)-1;
+    if (scratch) {
+        out = cc__rewrite_string_templates(scratch, strlen(scratch), input_path);
+        if (out == (char*)-1) {
+            free(scratch);
+            return (char*)-1;
+        }
+        if (!out) return scratch; /* injections only (should not happen with @string) */
+        free(scratch);
+        return out;
+    }
     return cc__rewrite_string_templates(src, n, input_path);
 }
 
@@ -5774,25 +6150,30 @@ static int cc__tu_declares_fn(const char* src, size_t n, const char* name) {
  * instance/mangled layer (`Vec::[int]` and `CCVec::[int]` both name
  * `CCVec_int`). Normalized here, before any recognizer, so every
  * downstream pass sees one spelling. Comment/string-aware. */
-/* Naked print names: `println(x)` / `print` / `eprintln` / `eprint` at
- * call position alias the declared `cc_println` family (`_Generic` over
- * the argument, script/stdio.cch). A fixed four-name alias, not a
- * general tier: a TU-declared function or macro of the same name wins
- * (real binding always wins), and member position (`s.println()`) is
- * untouched -- the method rails own it. A C preprocessor macro cannot
- * provide these names: a function-like macro expands in member
- * position too and would destroy every postfix spelling. */
+/* Naked print names at call position alias the declared `cc_print*` family
+ * (script/stdio.cch). Fixed six-name alias, not a general tier:
+ *   print/println/eprint/eprintln(data)     — data only
+ *   fprint/fprintln(fd, data)               — fd first (fprintf-shaped)
+ * A TU-declared function or macro of the same name wins (real binding
+ * always wins). Member position (`s.println()` / `s.fprintln(fd)`) is
+ * untouched — the method rails own it. A C preprocessor macro cannot
+ * provide these names: a function-like macro expands in member position
+ * too and would destroy every postfix spelling. */
 static int cc__tu_defines_fnlike_macro(const char* src, size_t n, const char* name) {
     return cc_text_defines_fnlike_macro(src, n, name);
 }
 
 static char* cc__rewrite_naked_print_aliases(const char* src, size_t n) {
-    static const char* const names[] = {"eprintln", "println", "eprint", "print"};
+    /* Longest-first so fprintln wins over fprint, etc. */
+    static const char* const names[] = {
+        "fprintln", "eprintln", "println", "fprint", "eprint", "print"
+    };
+    enum { CC__NAKED_PRINT_N = 6 };
     char* out = NULL;
     size_t out_len = 0, out_cap = 0, last_emit = 0;
     CCScannerState scan;
     size_t i = 0;
-    int usable[4];
+    int usable[CC__NAKED_PRINT_N];
     int checked = 0;
     if (!src || n == 0) return NULL;
     cc_scanner_init(&scan);
@@ -5800,19 +6181,19 @@ static char* cc__rewrite_naked_print_aliases(const char* src, size_t n) {
         int k;
         size_t nl, e;
         if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
-        if (src[i] != 'p' && src[i] != 'e') { i++; continue; }
+        if (src[i] != 'p' && src[i] != 'e' && src[i] != 'f') { i++; continue; }
         if (i > 0 && (cc_is_ident_char(src[i - 1]) || src[i - 1] == '.' ||
                       (i > 1 && src[i - 1] == '>' && src[i - 2] == '-'))) {
             i++;
             continue;
         }
-        for (k = 0; k < 4; k++) {
+        for (k = 0; k < CC__NAKED_PRINT_N; k++) {
             nl = strlen(names[k]);
             if (i + nl < n && memcmp(src + i, names[k], nl) == 0 &&
                 !cc_is_ident_char(src[i + nl]))
                 break;
         }
-        if (k == 4) { i++; continue; }
+        if (k == CC__NAKED_PRINT_N) { i++; continue; }
         nl = strlen(names[k]);
         e = i + nl;
         while (e < n && (src[e] == ' ' || src[e] == '\t')) e++;
@@ -5834,7 +6215,7 @@ static char* cc__rewrite_naked_print_aliases(const char* src, size_t n) {
             }
         }
         if (!checked) {
-            for (int j = 0; j < 4; j++)
+            for (int j = 0; j < CC__NAKED_PRINT_N; j++)
                 usable[j] = !cc__tu_declares_fn(src, n, names[j]) &&
                             !cc__tu_defines_fnlike_macro(src, n, names[j]);
             checked = 1;

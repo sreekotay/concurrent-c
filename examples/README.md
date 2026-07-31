@@ -17,16 +17,19 @@ New to Concurrent-C? Work through these in order:
 |---|------|---------|-------------------|
 | 1  | `hello.ccs` | First nursery | `cc_nursery_create`, `n->spawn()`, basic structured concurrency |
 | 2  | `recipe_result_error_handling.ccs` | Results & `@errhandler` | `T!>(E)`, `!>`, `!>;`, `?>`, hoisted error policy |
-| 3  | `recipe_fanout_capture.ccs` | Multiple tasks | Spawning N tasks, fresh per-iteration captures |
-| 4  | `recipe_explicit_capture.ccs` | Capture semantics | Value vs reference capture, mutation rules |
-| 5  | `recipe_channel_pipeline.ccs` | Communication | Channels, owned close, producer/consumer |
-| 6  | `recipe_async_await.ccs` | Async/Await | `@async` functions, `@await`, `cc_block_on` |
-| 7  | `recipe_timeout.ccs` | Cancellation | deadlines, cooperative exit |
-| 8  | `recipe_worker_pool.ccs` | Real pattern | Putting it together: workers + channels |
-| 9  | `recipe_exclusive_named.ccs` | Named exclusivity | `CCExclusive`, resolve-once mutex, short guard CS |
-| 10 | `recipe_arena_scope.ccs` | Memory | `CCArena`, scoped allocation with `@destroy` |
-| 11 | `recipe_long_lived_store.ccs` | Provenance | Anchoring request-lifetime views in a long-lived arena |
-| 12 | `recipe_defer_cleanup.ccs` | Cleanup | `@defer` for resource management |
+| 3  | `recipe_unwrap_destroy_forms.ccs` | Unwrap shape | Same two ops × modifiers × `@destroy` — the whole product |
+| 4  | `recipe_ufcs_forms.ccs` | UFCS shape | One dispatch rule × spellings (families, bare-name, fallible chains) |
+| 5  | `recipe_fanout_capture.ccs` | Multiple tasks | Spawning N tasks, fresh per-iteration captures |
+| 6  | `recipe_explicit_capture.ccs` | Capture semantics | Value vs reference capture, mutation rules |
+| 7  | `recipe_channel_pipeline.ccs` | Communication | Channels, owned close, producer/consumer |
+| 8  | `recipe_async_await.ccs` | Async/Await | `@async` call stacks vs `spawn`, `@await`, composition |
+| 9  | `recipe_timeout.ccs` | Cancellation | deadlines, cooperative exit |
+| 10 | `recipe_worker_pool.ccs` | Real pattern | Putting it together: workers + channels |
+| 11 | `recipe_ordered_parallel.ccs` | Ordered fan-out | `send_task` + ordered recv, FIFO without reorder buffer |
+| 12 | `recipe_exclusive_named.ccs` | Named exclusivity | `CCExclusive`, resolve-once mutex, short guard CS |
+| 13 | `recipe_arena_scope.ccs` | Memory | `CCArena`, scoped allocation with `@destroy` |
+| 14 | `recipe_long_lived_store.ccs` | Provenance | Anchoring request-lifetime views in a long-lived arena |
+| 15 | `recipe_defer_cleanup.ccs` | Cleanup | `@defer` for resource management |
 
 After these, explore the remaining recipes and build system examples.
 
@@ -50,8 +53,9 @@ Minimal concurrent hello world — shows explicit nursery creation and task spaw
 | `recipe_defer_cleanup.ccs` | Cleanup | `@defer` on scope exit |
 | `recipe_timeout.ccs` | Deadline | Cooperative cancellation |
 | `recipe_result_error_handling.ccs` | Results | `T!>(E)`, `@errhandler`, `!>;`, `?>` |
+| `recipe_unwrap_destroy_forms.ccs` | Unwrap matrix | Every `!>` / `?>` / `@destroy` product (composability) |
+| `recipe_ufcs_forms.ccs` | UFCS matrix | One rule × spellings, including bare-name and fallible chains |
 | `recipe_ordered_parallel.ccs` | Ordered fan-out | `send_task` + ordered recv, FIFO await |
-| `recipe_unwrap_destroy_forms.ccs` | Unwrap matrix | Every `!>` / `?>` / `@destroy` combination (regression sentinel) |
 
 ### Comparison: where Rust wins (data races)
 

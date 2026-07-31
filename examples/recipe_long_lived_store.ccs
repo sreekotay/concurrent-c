@@ -9,7 +9,8 @@
  * store arena until the whole store is freed.
  */
 #include <ccc/std/prelude.cch>
-#include <stdio.h>
+#include <stdlib.h>
+#include <ccc/script/stdio.cch>
 
 typedef struct Store {
     CCArena map_arena;
@@ -97,10 +98,7 @@ static bool store_delete(Store* store, char[:] key) {
 }
 
 int main(void) {
-    @errhandler(CCError e) {
-        fprintf(stderr, "fatal: %s\n", e.message);
-        return 1;
-    }
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
 
     Store store;
     store.init() !>;
@@ -125,10 +123,8 @@ int main(void) {
     if (!store.delete(char_to_slice("user:1"))) return 3;
 
     Map::[CCSliceHdr, int] entries = store.entries;
-    printf("entries=%zu logical_key_bytes=%zu inserted=%zu deleted=%zu\n",
-           entries->len(),
-           store.key_logical_live_bytes(),
-           store.key_insert_bytes,
-           store.key_delete_bytes);
+    size_t n = entries->len();
+    size_t live = store.key_logical_live_bytes();
+    println(@string(`entries=${n} logical_key_bytes=${live} inserted=${store.key_insert_bytes} deleted=${store.key_delete_bytes}`, @scratch)) !>;
     return 0;
 }

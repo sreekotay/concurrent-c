@@ -1,0 +1,20 @@
+/*
+ * @errhandler(E e) STMT; binds a named policy; !>; forwards to it.
+ * Shared cc_error_exit from main and a task.
+ */
+#include <ccc/cc_runtime.cch>
+#include <ccc/script/stdio.cch>
+
+int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
+
+    {
+        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+        n->spawn(() => {
+            @errhandler(CCError e) cc_error_exit(e);
+            println("named-ok") !>;
+        });
+    }
+    println("main-ok") !>;
+    return 0;
+}

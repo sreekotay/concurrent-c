@@ -1271,6 +1271,26 @@ static int cc__pu_find_outer_errhandler(const char* s, size_t n, size_t pos,
                                        out_as_diag, out_ambient);
 }
 
+/* Bare `!>;` whose matching `@errhandler(E)` body contains the call would
+ * re-enter that handler. Diagnose — report via a helper (cc_error_log /
+ * cc_error_exit) or `!> { abort(); }`, not `!>;` inside the same-E body. */
+static int cc__pu_bare_bang_reenters_handler(const char* s, size_t call_a,
+                                             const char* outer_body,
+                                             size_t outer_body_len) {
+    size_t body_off;
+    if (!s || !outer_body || outer_body_len == 0) return 0;
+    if (outer_body < s) return 0;
+    body_off = (size_t)(outer_body - s);
+    return call_a >= body_off && call_a < body_off + outer_body_len;
+}
+
+static void cc__pu_diag_same_e_reenter(const char* f, int line) {
+    cc_pass_error_cat(f, line, 1, CC_ERR_SYNTAX,
+                      "bare '!>;' inside matching '@errhandler' would re-enter "
+                      "the same handler; use a helper (cc_error_exit) or "
+                      "'!> { abort(); }' for reporting");
+}
+
 static void cc__pu_errhandler_miss_diag(const char* f, int line,
                                         const char* err_type, int have_handlers,
                                         int as_diag, const char* bare_msg) {
@@ -1344,8 +1364,8 @@ static void cc__ru_emit_handler_err_binder(char** out, size_t* ol, size_t* oc,
  *   - `break;` / `continue;` / `goto IDENT;`
  *   - `@err(IDENT);` (nested forward)
  *   - A call to one of a small noreturn allowlist:
- *     exit, _Exit, _exit, abort, longjmp, siglongjmp, pthread_exit,
- *     __builtin_unreachable, __builtin_trap
+ *     exit, _Exit, _exit, abort, cc_error_exit, longjmp, siglongjmp,
+ *     pthread_exit, __builtin_unreachable, __builtin_trap
  *   - A bare compound block `{ ... }` whose last statement satisfies
  *     the rule recursively.
  *
@@ -1356,6 +1376,7 @@ static void cc__ru_emit_handler_err_binder(char** out, size_t* ol, size_t* oc,
 
 static const char* const CC_PU_NORETURN_FNS[] = {
     "exit", "_Exit", "_exit", "abort",
+    "cc_error_exit",
     "longjmp", "siglongjmp", "pthread_exit",
     "__builtin_unreachable", "__builtin_trap",
 };
@@ -1555,6 +1576,68 @@ static size_t cc__pu_find_next_stmt_byte(const char* s, size_t from, size_t limi
     return limit;
 }
 
+/* No-binder `!> { ... }` / `!> STMT` must not contain `@err(IDENT);` —
+ * that forward needs `!>(e) { ... @err(e); }`. Diagnose before leaking
+ * `@err` through to the host C parser. Returns -1 if a forward was found. */
+static int cc__pu_reject_err_forward_without_binder(
+    const CCVisitorCtx* ctx, const char* s, size_t n,
+    size_t body_a, size_t body_b, int fallback_line) {
+    CCInertScan scan;
+    size_t i;
+    char rel[1024];
+    const char* f;
+    if (!s || body_a >= body_b || body_b > n) return 0;
+    f = cc_path_rel_to_repo(
+        ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
+    cc_inert_scan_init(&scan, ctx ? ctx->input_path : NULL);
+    scan.at_line_start = 0;
+    i = body_a;
+    while (i < body_b) {
+        if (cc_inert_scan_step(&scan, s, n, &i)) continue;
+        if (s[i] == '@' && i + 4 <= body_b && memcmp(s + i, "@err", 4) == 0 &&
+            !(i + 11 <= body_b && memcmp(s + i, "@errhandler", 11) == 0) &&
+            (i + 4 >= body_b || !cc_is_ident_char(s[i + 4]))) {
+            size_t j = i + 4;
+            size_t rpar = 0;
+            size_t ia, ib, semi;
+            int err_line = fallback_line;
+            while (j < body_b && isspace((unsigned char)s[j])) j++;
+            if (j >= body_b || s[j] != '(') {
+                i++;
+                continue;
+            }
+            if (!cc_find_matching_paren(s, n, j, &rpar) || rpar >= body_b) {
+                i++;
+                continue;
+            }
+            ia = j + 1;
+            ib = rpar;
+            while (ia < ib && isspace((unsigned char)s[ia])) ia++;
+            while (ib > ia && isspace((unsigned char)s[ib - 1])) ib--;
+            semi = rpar + 1;
+            while (semi < body_b && isspace((unsigned char)s[semi])) semi++;
+            if (!cc__range_is_ident(s, ia, ib) || semi >= body_b ||
+                s[semi] != ';') {
+                i++;
+                continue;
+            }
+            cc__line_from_pos(s, i, &err_line);
+            cc_pass_error_cat(f, err_line, 1, CC_ERR_SYNTAX,
+                              "'@err(%.*s)' requires an error binder; use "
+                              "'!>(%.*s) { ...; @err(%.*s); }'",
+                              (int)(ib - ia), s + ia,
+                              (int)(ib - ia), s + ia,
+                              (int)(ib - ia), s + ia);
+            cc_pass_note(f, err_line, 1,
+                         "statements before '@err' must also consume Results "
+                         "(e.g. println(...) !>;)");
+            return -1;
+        }
+        i++;
+    }
+    return 0;
+}
+
 /* Process the body text of a `!> (BINDER) BODY` form.  Rewrite every
  * `@err(IDENT);` forward inside the body:
  *   - If IDENT == BINDER: inline outer_body with outer_param → BINDER
@@ -1646,8 +1729,12 @@ static int cc__pu_process_bang_body(const CCVisitorCtx* ctx,
                                           idname, idname, binder);
                     } else {
                         cc_pass_error_cat(relf, err_line, 1, CC_ERR_SYNTAX,
-                                          "@err(%s) forward references unknown binder '%s'",
-                                          idname, idname);
+                                          "'@err(%s)' requires an error binder; use "
+                                          "'!>(%s) { ...; @err(%s); }'",
+                                          idname, idname, idname);
+                        cc_pass_note(relf, err_line, 1,
+                                     "statements before '@err' must also consume Results "
+                                     "(e.g. println(...) !>;)");
                     }
                     free(out);
                     return -1;
@@ -2060,12 +2147,17 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
     }
 
     /* Form P: bare `!>;` at expression position.  Synthesize a binder,
-     * inline the outer handler body. */
+     * inline the outer handler body. Same-E re-entry is ill-formed. */
     if (s[scan] == ';' && !has_binder) {
         if (!outer_found) {
             cc__pu_errhandler_miss_diag(
                 f, line_no, outer_err_type, outer_have_handlers, outer_as_diag,
                 "'!>;' at expression position requires an enclosing '@errhandler' in scope");
+            return -1;
+        }
+        if (cc__pu_bare_bang_reenters_handler(s, call_a, outer_body,
+                                              outer_body_len)) {
+            cc__pu_diag_same_e_reenter(f, line_no);
             return -1;
         }
         if (!cc__pu_body_diverges(outer_body, outer_body_len)) {
@@ -2471,9 +2563,40 @@ static int cc__rewrite_bang_once(const CCVisitorCtx* ctx,
     size_t insert_semi_at = 0; /* 0 sentinel: no insertion */
 
     if (s[scan] == ';') {
-        /* Form A: `CALL !>;` — plain dispatch to the default handler.  The
-         * existing `;` following `!>` stays put; we only replace the two
-         * sigil bytes with `@err`. */
+        /* Form A: `CALL !>;` — plain dispatch to the default handler.
+         * Same-E re-entry inside that handler is ill-formed. */
+        size_t call_a = call_start, call_b = op_at;
+        char outer_decl[256];
+        size_t outer_decl_len = 0;
+        const char* outer_body = NULL;
+        size_t outer_body_len = 0;
+        size_t outer_decl_pos = 0;
+        char outer_err_type[128];
+        char outer_as_path[CC_ERRHANDLER_AS_PATH_MAX];
+        int outer_have_handlers = 0;
+        int outer_as_diag = CC_ERRHANDLER_AS_NONE;
+        int outer_ambient = 0;
+        cc__trim_range(s, &call_a, &call_b);
+        outer_err_type[0] = 0;
+        outer_as_path[0] = 0;
+        if (call_b > call_a &&
+            cc__pu_find_outer_errhandler(
+                s, n, call_a, call_a, call_b,
+                outer_decl, sizeof(outer_decl), &outer_decl_len,
+                &outer_body, &outer_body_len, &outer_decl_pos,
+                outer_err_type, sizeof(outer_err_type),
+                outer_as_path, sizeof(outer_as_path),
+                &outer_have_handlers, &outer_as_diag, &outer_ambient) &&
+            cc__pu_bare_bang_reenters_handler(s, call_a, outer_body,
+                                              outer_body_len)) {
+            char rel[1024];
+            const char* f = cc_path_rel_to_repo(
+                ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
+            (void)outer_decl_pos;
+            (void)outer_ambient;
+            cc__pu_diag_same_e_reenter(f, line_no);
+            return -1;
+        }
     } else if (s[scan] == '{') {
         size_t rbrace = 0;
         if (!cc_find_matching_brace(s, n, scan, &rbrace)) {
@@ -2484,6 +2607,9 @@ static int cc__rewrite_bang_once(const CCVisitorCtx* ctx,
                               "unclosed '{' in '!>' body");
             return -1;
         }
+        if (cc__pu_reject_err_forward_without_binder(
+                ctx, s, n, scan + 1, rbrace, line_no) < 0)
+            return -1;
         /* Form C: `CALL !> { BLOCK }` or `CALL !> { BLOCK };`.  The legacy
          * `@err { ... };` shorthand requires a trailing `;`, so synthesize
          * one when the input omitted it. */
@@ -2504,7 +2630,9 @@ static int cc__rewrite_bang_once(const CCVisitorCtx* ctx,
                               "expected ';' terminating '!>' body");
             return -1;
         }
-        (void)semi;
+        if (cc__pu_reject_err_forward_without_binder(
+                ctx, s, n, scan, semi, line_no) < 0)
+            return -1;
     }
 
     char* out = NULL;
@@ -2855,9 +2983,10 @@ static int cc__rewrite_nobinder_bangs_via_ir(const CCVisitorCtx* ctx,
             continue;
         }
 
-        /* No-binder UNWRAP_BANG: substitute `!>` -> `@err`, preserve
-         * surrounding bytes, synthesize `;` if the span didn't end
-         * with one (Form C without trailing semicolon). */
+        /* No-binder UNWRAP_BANG: substitute `!>` -> `@err`. Form A same-E
+         * re-entry is diagnosed (ill-formed). `@err(IDENT);` inside a
+         * no-binder body needs `!>(e)` — diagnose here (IR path skips
+         * legacy Form B/C checks). */
         size_t sig_off = cc__ir_node_sigil_offset(c);
         if (sig_off == (size_t)-1 || sig_off + 2 > c->raw_len) {
             /* Defensive: the recogniser should never produce this,
@@ -2865,6 +2994,64 @@ static int cc__rewrite_nobinder_bangs_via_ir(const CCVisitorCtx* ctx,
              * legacy loop still rewrites it correctly. */
             cc__append_n(&buf, &bl, &bc, c->raw_text, c->raw_len);
             continue;
+        }
+        {
+            int bang_line = 1;
+            size_t file_body_a = c->span.byte_start + sig_off + 2;
+            size_t file_body_b = c->span.byte_start + c->raw_len;
+            if (file_body_b > in_len) file_body_b = in_len;
+            cc__line_from_pos(in, c->span.byte_start + sig_off, &bang_line);
+            if (cc__pu_reject_err_forward_without_binder(
+                    ctx, in, in_len, file_body_a, file_body_b, bang_line) < 0) {
+                free(buf);
+                rc = -1;
+                goto out;
+            }
+        }
+        {
+            size_t after_sig = cc_skip_ws_len(c->raw_text, c->raw_len, sig_off + 2);
+            int form_a = (after_sig < c->raw_len && c->raw_text[after_sig] == ';');
+            if (form_a) {
+                size_t file_call_a = c->span.byte_start;
+                size_t file_call_b = c->span.byte_start + sig_off;
+                char outer_decl[256];
+                size_t outer_decl_len = 0;
+                const char* outer_body = NULL;
+                size_t outer_body_len = 0;
+                size_t outer_decl_pos = 0;
+                char outer_err_type[128];
+                char outer_as_path[CC_ERRHANDLER_AS_PATH_MAX];
+                int outer_have_handlers = 0;
+                int outer_as_diag = CC_ERRHANDLER_AS_NONE;
+                int outer_ambient = 0;
+                int call_line = 1;
+                outer_err_type[0] = 0;
+                outer_as_path[0] = 0;
+                cc__trim_range(in, &file_call_a, &file_call_b);
+                if (file_call_b > file_call_a &&
+                    cc__pu_find_outer_errhandler(
+                        in, in_len, file_call_a, file_call_a, file_call_b,
+                        outer_decl, sizeof(outer_decl), &outer_decl_len,
+                        &outer_body, &outer_body_len, &outer_decl_pos,
+                        outer_err_type, sizeof(outer_err_type),
+                        outer_as_path, sizeof(outer_as_path),
+                        &outer_have_handlers, &outer_as_diag,
+                        &outer_ambient) &&
+                    cc__pu_bare_bang_reenters_handler(in, file_call_a,
+                                                      outer_body,
+                                                      outer_body_len)) {
+                    char rel[1024];
+                    const char* f = cc_path_rel_to_repo(
+                        ctx && ctx->input_path ? ctx->input_path : "<input>",
+                        rel, sizeof(rel));
+                    (void)outer_decl_pos;
+                    (void)outer_ambient;
+                    cc__line_from_pos(in, file_call_a, &call_line);
+                    cc__pu_diag_same_e_reenter(f, call_line);
+                    free(buf);
+                    return -1;
+                }
+            }
         }
         /* Prefix: LHS + any whitespace before the sigil. */
         cc__append_n(&buf, &bl, &bc, c->raw_text, sig_off);

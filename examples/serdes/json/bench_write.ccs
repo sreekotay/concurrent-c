@@ -11,6 +11,8 @@
 // identical byte output (see docs). Corpora that don't parse as a Feed
 // are skipped.
 #include <ccc/std/prelude.cch>
+#include <stdlib.h>
+#include <ccc/script/stdio.cch>
 #include <time.h>
 #include "json_codec.cch"
 
@@ -66,9 +68,12 @@ static size_t hand_write(const Feed* f, char* dst) {
 }
 
 int main(int argc, char** argv) {
+    CCArena pa = cc_arena_create(kilobytes(4));
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
     const char* path = argc > 1 ? argv[1] : "examples/serdes/json/twitter.json";
     FILE* f = fopen(path, "rb");
-    if (!f) { printf("no corpus at %s\n", path); return 1; }
+    if (!f) { eprintln(@string(`no corpus at ${path}`, &pa)) !>; return 1; }
     fseek(f, 0, SEEK_END); long fn = ftell(f); fseek(f, 0, SEEK_SET);
     char* buf = (char*)malloc((size_t)fn + 1);
     size_t rd = fread(buf, 1, (size_t)fn, f);
@@ -77,23 +82,26 @@ int main(int argc, char** argv) {
     CCArena arena = cc_arena_create(64 << 20);
     Feed feed;
     if (!Feed_parse(buf, rd, &arena, &feed)) {
-        printf("write: corpus is not a Feed — skipped\n");
+        println("write: corpus is not a Feed — skipped") !>;
         return 0;
     }
 
     char* out = (char*)malloc(rd * 2 + 4096);
     size_t w = Feed_write(&feed, out, rd * 2 + 4096);
-    if (!w) { printf("write FAIL\n"); return 1; }
+    if (!w) { eprintln("write FAIL") !>; return 1; }
     /* sanity: reparse round-trip */
     {
         Feed rt;
         if (!Feed_parse(out, w, &arena, &rt) || rt.statuses_n != feed.statuses_n) {
-            printf("roundtrip FAIL\n"); return 1;
+            eprintln("roundtrip FAIL") !>; return 1;
         }
     }
     char* hout = (char*)malloc(rd * 2 + 4096);
     size_t hw = hand_write(&feed, hout);
-    if (hw != w || memcmp(hout, out, w) != 0) { printf("MISMATCH gen=%zu hand=%zu\n", w, hw); return 1; }
+    if (hw != w || memcmp(hout, out, w) != 0) {
+        eprintln(@string(`MISMATCH gen=${w} hand=${hw}`, &pa)) !>;
+        return 1;
+    }
 
     const int K = argc > 2 ? atoi(argv[2]) : 2000;
     double best;
@@ -102,25 +110,23 @@ int main(int argc, char** argv) {
         double t0 = now_s();
         for (int i = 0; i < K; i++) {
             size_t x = Feed_write(&feed, out, rd * 2 + 4096);
-            if (x != w) { printf("bench FAIL\n"); return 1; }
+            if (x != w) { eprintln("bench FAIL") !>; return 1; }
         }
         double dt = now_s() - t0;
         if (dt < best) best = dt;
     }
-    printf("json write gen  %6.0f MB/s  (%zu bytes/iter, statuses=%zu)\n",
-           (double)w * K / best / 1e6, w, feed.statuses_n);
+    println(@string(`json write gen  ${(double)w * K / best / 1e6} MB/s  (${w} bytes/iter, statuses=${feed.statuses_n})`, &pa)) !>;
     best = 1e30;
     for (int r = 0; r < 5; r++) {
         double t0 = now_s();
         for (int i = 0; i < K; i++) {
             size_t x = hand_write(&feed, hout);
-            if (x != w) { printf("bench FAIL\n"); return 1; }
+            if (x != w) { eprintln("bench FAIL") !>; return 1; }
         }
         double dt = now_s() - t0;
         if (dt < best) best = dt;
     }
-    printf("json write hand %6.0f MB/s  (unchecked single-pass)\n",
-           (double)w * K / best / 1e6);
+    println(@string(`json write hand ${(double)w * K / best / 1e6} MB/s  (unchecked single-pass)`, &pa)) !>;
     free(buf); free(out); free(hout);
     arena.destroy();
     return 0;

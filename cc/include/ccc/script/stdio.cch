@@ -6,9 +6,14 @@
  *   msg.println() !>;                 // CCSlice / CCString / cstr receivers
  *   "literal".println() !>;
  *   @string(`n=${n}`, &a).println() !>;
+ *   msg.fprintln(STDERR_FILENO) !>;   // UFCS: data first, then fd
  *
- * `cc_println` / `cc_eprintln` are lowered-C sugar (driver inject / oneliners).
- * Prefer UFCS on the data; do not use the free macros in new script code.
+ * Naked aliases (call position; sink-oriented for f*):
+ *   println(msg) !>;
+ *   fprintln(STDERR_FILENO, msg) !>;  // fd first, then data
+ *
+ * `cc_print*` macros are lowered-C sugar (driver inject / oneliners / naked
+ * alias targets). Prefer UFCS on the data in new script code.
  */
 #ifndef CC_SCRIPT_STDIO_H
 #define CC_SCRIPT_STDIO_H
@@ -488,6 +493,70 @@ static inline CCResult_size_t_CCError cc__eprintln_scstr(const signed char *s) {
     CCString *: cc__eprintln_string_ptr, \
     const CCString *: cc__eprintln_string_ptr \
 )(x)
+
+/* Naked fprint/fprintln: fd first (fprintf-shaped), then data. UFCS stays
+ * data.fprintln(fd). Helpers flip to the existing (data, fd) callees. */
+static inline CCResult_size_t_CCError cc__fprint_slice_val(int fd, CCSlice s) {
+    return cc_slice_fprint(&s, fd);
+}
+static inline CCResult_size_t_CCError cc__fprintln_slice_val(int fd, CCSlice s) {
+    return cc_slice_fprintln(&s, fd);
+}
+static inline CCResult_size_t_CCError cc__fprint_cstr(int fd, const char *s) {
+    return cc_const_char_fprint(s, fd);
+}
+static inline CCResult_size_t_CCError cc__fprintln_cstr(int fd, const char *s) {
+    return cc_const_char_fprintln(s, fd);
+}
+static inline CCResult_size_t_CCError cc__fprint_ucstr(int fd, const unsigned char *s) {
+    return cc__fprint_cstr(fd, (const char *)s);
+}
+static inline CCResult_size_t_CCError cc__fprintln_ucstr(int fd, const unsigned char *s) {
+    return cc__fprintln_cstr(fd, (const char *)s);
+}
+static inline CCResult_size_t_CCError cc__fprint_scstr(int fd, const signed char *s) {
+    return cc__fprint_cstr(fd, (const char *)s);
+}
+static inline CCResult_size_t_CCError cc__fprintln_scstr(int fd, const signed char *s) {
+    return cc__fprintln_cstr(fd, (const char *)s);
+}
+static inline CCResult_size_t_CCError cc__fprint_string_val(int fd, CCString s) {
+    return cc_string_fprint(&s, fd);
+}
+static inline CCResult_size_t_CCError cc__fprintln_string_val(int fd, CCString s) {
+    return cc_string_fprintln(&s, fd);
+}
+static inline CCResult_size_t_CCError cc__fprint_string_ptr(int fd, const CCString *s) {
+    return cc_string_fprint((CCString *)s, fd);
+}
+static inline CCResult_size_t_CCError cc__fprintln_string_ptr(int fd, const CCString *s) {
+    return cc_string_fprintln((CCString *)s, fd);
+}
+
+#define cc_fprint(fd, x) _Generic((x), \
+    CCSlice: cc__fprint_slice_val, \
+    char *: cc__fprint_cstr, \
+    const char *: cc__fprint_cstr, \
+    unsigned char *: cc__fprint_ucstr, \
+    const unsigned char *: cc__fprint_ucstr, \
+    signed char *: cc__fprint_scstr, \
+    const signed char *: cc__fprint_scstr, \
+    CCString: cc__fprint_string_val, \
+    CCString *: cc__fprint_string_ptr, \
+    const CCString *: cc__fprint_string_ptr \
+)(fd, x)
+#define cc_fprintln(fd, x) _Generic((x), \
+    CCSlice: cc__fprintln_slice_val, \
+    char *: cc__fprintln_cstr, \
+    const char *: cc__fprintln_cstr, \
+    unsigned char *: cc__fprintln_ucstr, \
+    const unsigned char *: cc__fprintln_ucstr, \
+    signed char *: cc__fprintln_scstr, \
+    const signed char *: cc__fprintln_scstr, \
+    CCString: cc__fprintln_string_val, \
+    CCString *: cc__fprintln_string_ptr, \
+    const CCString *: cc__fprintln_string_ptr \
+)(fd, x)
 
 #ifdef CC_COMPTIME_SCAN
 @comptime {

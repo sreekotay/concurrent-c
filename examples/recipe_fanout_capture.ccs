@@ -10,7 +10,8 @@
  */
 
 #include <ccc/cc_runtime.cch>
-#include <stdio.h>
+#include <stdlib.h>
+#include <ccc/script/stdio.cch>
 
 #define NUM_TASKS 5
 
@@ -21,12 +22,9 @@ static int compute(int x) {
 }
 
 int main(void) {
-    @errhandler(CCError e) {
-        fprintf(stderr, "fatal: %s\n", e.message);
-        return 1;
-    }
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
 
-    printf("=== Fan-out: spawning %d tasks ===\n", NUM_TASKS);
+    println(@string(`=== Fan-out: spawning ${NUM_TASKS} tasks ===`, @scratch)) !>;
 
     {
         CCNursery* n = cc_nursery_create(NULL) !> @destroy;
@@ -35,20 +33,21 @@ int main(void) {
             int task_id = i;                    /* per-task value */
 
             n->spawn(() => [task_id] {
+                @errhandler(CCError e) cc_error_exit(e);
                 int r = compute(task_id);
-                printf("  task %d: compute(%d) = %d\n", task_id, task_id, r);
+                println(@string(`  task ${task_id}: compute(${task_id}) = ${r}`, @scratch)) !>;
                 results[task_id] = r;           /* disjoint write, no race */
             });
         }
     }
 
-    printf("\n=== Results ===\n");
+    println("\n=== Results ===") !>;
     int sum = 0;
     for (int i = 0; i < NUM_TASKS; i++) {
-        printf("  results[%d] = %d\n", i, results[i]);
+        println(@string(`  results[${i}] = ${results[i]}`, @scratch)) !>;
         sum += results[i];
     }
-    printf("sum = %d (expected 30)\n", sum);
+    println(@string(`sum = ${sum} (expected 30)`, @scratch)) !>;
 
     return (sum == 30) ? 0 : 1;
 }

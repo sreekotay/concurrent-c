@@ -26,22 +26,21 @@
  */
 
 #include <ccc/cc_runtime.cch>
-#include <stdio.h>
+#include <stdlib.h>
+#include <ccc/script/stdio.cch>
 
 enum { N_TASKS = 8, N_ITERS = 100000 };
 
 int main(void) {
-    @errhandler(CCError e) {
-        fprintf(stderr, "fatal: %s\n", e.message);
-        return 1;
-    }
+    CCArena arena = cc_arena_heap(kilobytes(4)) @destroy;
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
 
     int counter = 0;
     int* p = &counter; /* shared mutable memory behind a copyable address */
 
-    printf("=== CC: pointer alias race (compiles; wrong answer) ===\n");
-    printf("tasks=%d iters/task=%d expected=%d\n",
-           N_TASKS, N_ITERS, N_TASKS * N_ITERS);
+    println("=== CC: pointer alias race (compiles; wrong answer) ===") !>;
+    int expected = N_TASKS * N_ITERS;
+    println(@string(`tasks=${N_TASKS} iters/task=${N_ITERS} expected=${expected}`, &arena)) !>;
 
     {
         CCNursery* n = cc_nursery_create(NULL) !> @destroy;
@@ -56,10 +55,10 @@ int main(void) {
         }
     }
 
-    int expected = N_TASKS * N_ITERS;
-    printf("counter=%d expected=%d %s\n",
-           counter, expected,
-           counter == expected ? "(lucky serialize — re-run)" : "(data race: lost updates)");
+    const char* verdict = counter == expected
+        ? "(lucky serialize — re-run)"
+        : "(data race: lost updates)";
+    println(@string(`counter=${counter} expected=${expected} ${verdict}`, &arena)) !>;
 
     /*
      * Idiomatic CC: don't share the cell — pass work on a channel, or

@@ -1,0 +1,11 @@
+/*
+ * @err(e) inside a no-binder !> { } body is ill-formed — needs !>(e).
+ */
+#include <ccc/cc_runtime.cch>
+#include <ccc/script/stdio.cch>
+
+int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
+    println("x") !> { @err(e); };
+    return 0;
+}

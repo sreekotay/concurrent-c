@@ -11,28 +11,32 @@
  * a bare declared function whose first parameter takes the receiver
  * needs no naming convention at all — declare the natural name and
  * prefix is plain C while postfix is the method. Handles you import
- * carry whole families (io.println). And when a hop can fail, `!>` is
- * the link: each hop spells its unwrap, then the next dispatches on
- * the unwrapped value.
+ * carry whole families (io.println). And when a hop can fail, `!>` /
+ * `?>` is the link: unwrap (or substitute), then the next method
+ * dispatches on the value.
  *
- * There is no registration step anywhere in this file.
+ * There is no registration step anywhere in this file. Same pedagogy as
+ * recipe_unwrap_destroy_forms.ccs: frame the grammar, then show products.
  *
  *    1. Family members       v.push(x)
  *    2. Instance extension   v.median()          declare CCVec_double_median
  *    3. Scalar family        d.halve()           declare cc_double_halve
- *    4. Print names, handles println("hi")      four aliased names; io.println
+ *    4. Print names, handles println(x)         prefer naked at line start
  *    5. Bare-name tier       u.mean(6.0)         any fn whose 1st param fits
  *    6. System headers       d.fabs()            math.h, nothing local
  *    7. Chains               d.halve().twice()
  *    8. Typed slices         ps.at(1).y
- *    9. Fallible chains      get(21)!>.twice()    every hop spells its unwrap
- *   10. The miss             fails loud: the ladder names the receiver's
- *                            type and lists its installed methods
+ *    9. Fallible chains      get(21)!>.twice()    unwrap / ?> then dispatch
+ *
+ * Unknown methods fail with the receiver type and its installed set
+ * (tests/ufcs_vec_member_miss_fail) — not shown here because they do not compile.
  */
 #include <ccc/cc_runtime.cch>
+#include <stdlib.h>
+#include <stdio.h>
 #include <ccc/script/stdio.cch>
 #include <math.h>
-#include <stdio.h>
+#include <unistd.h>
 
 typedef struct Pt { double x, y; } Pt;
 
@@ -50,7 +54,7 @@ static double cc_double_twice(double v) { return v * 2.0; }
 typedef struct Stats { double sum; int n; } Stats;
 static double mean(Stats s, double bump) { return s.sum / s.n + bump; }
 
-/* 9. A fallible hop returns a Result; `!>` is the chain link. */
+/* 9. A fallible hop returns a Result; unwrap links into the next method. */
 static int cc_int_twice(int v) { return v * 2; }
 static CCResult_int_CCError get(int v) {
     if (v < 0) return (CCResult_int_CCError){ .ok = false,
@@ -58,11 +62,20 @@ static CCResult_int_CCError get(int v) {
     return (CCResult_int_CCError){ .ok = true, .u.value = v };
 }
 
-int main(void) {
-    @errhandler(CCError e) { fprintf(stderr, "eh: %s\n", e.message); return 1; }
+/* !> / !>; must diverge or forward — here the helper's policy returns -1. */
+static int get_or_die(int v) {
+    @errhandler(CCError e) {
+        /* fprintf: avoid Result print inside the same-E handler. */
+        fprintf(stderr, "get_or_die: %s\n", cc_error_str(e));
+        return -1;
+    }
+    return get(v) !>;
+}
 
-    CCArena arena = cc_arena_heap(kilobytes(64));
-    if (!arena.base) return 1;
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
 
     /* 1. Family members: the declaration form's ##_ tokens ARE the
      *    method set. */
@@ -70,46 +83,57 @@ int main(void) {
     v.push(1.0);
     v.push(3.0);
     v.push(8.0);
-    printf("len=%zu\n", v.len());
+    println(@string(`len=${v.len()}`, @scratch)) !>;
 
     /* 2. Declared above — no header edit, no compiler edit. */
-    printf("median=%g\n", v.median());
+    println(@string(`median=${v.median()}`, @scratch)) !>;
 
     /* 3. Scalar receiver, by value. */
     double d = 10.0;
-    printf("halve=%g\n", d.halve());
+    println(@string(`halve=${d.halve()}`, @scratch)) !>;
 
-    /* 4. The naked print names alias the declared cc_println family;
-     *    a handle you import carries the family as methods. */
+    /* 4. Prefer naked print at line start (println/eprint/fprintln…).
+     *    f* is fd-first. Member UFCS on data is legal; recipes still put
+     *    the print name first. Handles keep the family as methods. */
     println("printed naked") !>;
+    fprintln(STDERR_FILENO, "printed naked to stderr") !>;
     CCStdio io = cc_stdio_create(&arena);
     io.println("printed via a handle") !>;
+    fprintln(STDOUT_FILENO, "also via naked fprintln") !>;
 
     /* 5. mean() is just a function — prefix is plain C, postfix is
      *    the method; one declaration, both spellings. */
     Stats u = { 12.0, 3 };
-    printf("mean=%g\n", u.mean(6.0));
+    println(@string(`mean=${u.mean(6.0)}`, @scratch)) !>;
 
     /* 6. System headers participate: fabs comes from math.h. */
     double neg = -2.5;
-    printf("fabs=%g\n", neg.fabs());
+    println(@string(`fabs=${neg.fabs()}`, @scratch)) !>;
 
     /* 7. Chains: each link is the same one rule on the previous result. */
-    printf("chain=%g\n", d.halve().twice().halve());
+    println(@string(`chain=${d.halve().twice().halve()}`, @scratch)) !>;
 
     /* 8. Typed slices auto-instantiate for any element type. */
     Pt ps[:] = {{1, 2}, {3, 4}, {5, 6}};
-    printf("slice=%zu y=%g\n", ps.sub(1, 3).len(), ps.at(1).y);
+    println(@string(`slice=${ps.sub(1, 3).len()} y=${ps.at(1).y}`, @scratch)) !>;
 
-    /* 9. Fallible chains: a bare `!>` sends the error to @errhandler;
-     *    a handler recovers this hop alone. Dynamic objects chain the
-     *    same way — py.import("sys")!>.get("version")!>. */
+    /* 9. Fallible chains.
+     *    !>  — error becomes CODE (body must diverge: return / abort / !>;).
+     *    ?>  — error becomes a VALUE (RHS is an expression, not a block). */
     int ok = get(21)!>.twice();
-    printf("ok=%d\n", ok);
+    println(@string(`ok=${ok}`, @scratch)) !>;
 
-    int rec = get(-1)
-        !>(e) { printf("recovered: %s\n", e.message); return 0; }
-        .twice();
-    printf("unreachable %d\n", rec);
-    return 9;
+    /* ?> then an ordinary hop — substitute, then dispatch. */
+    int recovered = get(-1) ?> 0;
+    int rec = recovered.twice();
+    println(@string(`rec=${rec}`, @scratch)) !>;
+
+    /* ?>(e) when the fallback expression needs the error value. */
+    int mapped = get(-1) ?>(e) (e.message[0] == 'n' ? 0 : -1);
+    println(@string(`mapped=${mapped.twice()}`, @scratch)) !>;
+
+    /* !> — error becomes CODE. Diverges out of get_or_die (not into a chain). */
+    println(@string(`die=${get_or_die(-1)}`, @scratch)) !>;
+
+    return 0;
 }

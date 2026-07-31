@@ -44,6 +44,11 @@ static int cc__skip_generated_name_for_capture_scan(const char* s, size_t n) {
 static char* cc__dup_decl_type_text(const char* ty_s,
                                     const char* ty_e,
                                     unsigned char* out_flags);
+static int cc__capture_type_is_array(const char* ty);
+static int cc__capture_array_elem_type(const char* ty, char* out, size_t out_cap);
+static char* cc__dup_type_with_array_dims(const char* base_ty,
+                                         const char* after_name,
+                                         const char* seg_end);
 
 static int cc__capture_type_text_usable(const char* ty, const char* name) {
     const char* s = ty;
@@ -630,10 +635,16 @@ static void cc__maybe_record_decl_stmt(char*** scope_names,
         scope_counts[depth] = cur_n_ + 1; \
     } while (0)
 
-    RECORD_NAME_IN_SCOPE(name_s, name_n, ty);
+    /* Keep C array dimensions on the type (`int status[N]` → `int[N]`).
+     * Without them, [&status] lowers as a scalar ref and `status[i]` breaks. */
+    {
+        char* ty_full = cc__dup_type_with_array_dims(ty, name_s + name_n, first_seg_end);
+        RECORD_NAME_IN_SCOPE(name_s, name_n, ty_full ? ty_full : ty);
+        free(ty_full);
+    }
 
     /* For comma-separated multi-declarations, record each additional name
-     * with the same base type. */
+     * with the same base type (plus that declarator's own array dims). */
     for (int ci = 0; ci < comma_n; ci++) {
         const char* seg_s = comma_pos[ci] + 1;
         const char* seg_e = (ci + 1 < comma_n) ? comma_pos[ci + 1] : semi;
@@ -653,7 +664,9 @@ static void cc__maybe_record_decl_stmt(char*** scope_names,
             ex_name_n = n;
         }
         if (ex_name && ex_name_n > 0) {
-            RECORD_NAME_IN_SCOPE(ex_name, ex_name_n, ty);
+            char* ty_ex = cc__dup_type_with_array_dims(ty, ex_name + ex_name_n, seg_e);
+            RECORD_NAME_IN_SCOPE(ex_name, ex_name_n, ty_ex ? ty_ex : ty);
+            free(ty_ex);
         }
     }
     #undef RECORD_NAME_IN_SCOPE
@@ -2354,6 +2367,72 @@ static char* cc__rewrite_with_edits(const char* src, size_t len, Edit* edits, in
 
 static char* cc__make_call_expr(const CCClosureDesc* d); /* forward */
 
+/* True when `ty` is a C array (`T[N]` / `T[N][M]`), not channel/slice sugar. */
+static int cc__capture_type_is_array(const char* ty) {
+    if (!ty) return 0;
+    const char* lb = strchr(ty, '[');
+    if (!lb) return 0;
+    const char* rb = strchr(lb, ']');
+    if (!rb) return 0;
+    for (const char* p = lb; p < rb; p++) {
+        if (*p == '~' || *p == ':' || *p == '!' || *p == '>' || *p == '<') return 0;
+    }
+    return 1;
+}
+
+/* Element type text for `T[N]...` — bytes before the first `[`. */
+static int cc__capture_array_elem_type(const char* ty, char* out, size_t out_cap) {
+    if (!ty || !out || out_cap == 0) return 0;
+    const char* lb = strchr(ty, '[');
+    if (!lb || lb == ty) return 0;
+    size_t n = (size_t)(lb - ty);
+    while (n > 0 && (ty[n - 1] == ' ' || ty[n - 1] == '\t')) n--;
+    if (n == 0 || n + 1 > out_cap) return 0;
+    memcpy(out, ty, n);
+    out[n] = 0;
+    return 1;
+}
+
+/* Scan `[...][...]` dims after a declarator name; stop before `=`, `,`, `;`. */
+static const char* cc__scan_array_dims_end(const char* p, const char* end) {
+    if (!p || !end || p >= end) return p;
+    while (p < end && (*p == ' ' || *p == '\t')) p++;
+    if (p >= end || *p != '[') return p;
+    while (p < end && *p == '[') {
+        int depth = 0;
+        do {
+            if (*p == '[') depth++;
+            else if (*p == ']') depth--;
+            p++;
+        } while (p < end && depth > 0);
+        while (p < end && (*p == ' ' || *p == '\t')) p++;
+    }
+    return p;
+}
+
+/* `base_ty` + trailing C array dims after the declarator name, if any. */
+static char* cc__dup_type_with_array_dims(const char* base_ty,
+                                         const char* after_name,
+                                         const char* seg_end) {
+    if (!base_ty) return NULL;
+    if (!after_name || !seg_end || after_name >= seg_end) return strdup(base_ty);
+    const char* dims_s = after_name;
+    while (dims_s < seg_end && (*dims_s == ' ' || *dims_s == '\t')) dims_s++;
+    if (dims_s >= seg_end || *dims_s != '[') return strdup(base_ty);
+    const char* dims_e = cc__scan_array_dims_end(dims_s, seg_end);
+    for (const char* q = dims_s; q < dims_e; q++) {
+        if (*q == '~' || *q == ':' || *q == '!') return strdup(base_ty);
+    }
+    size_t bl = strlen(base_ty);
+    size_t dl = (size_t)(dims_e - dims_s);
+    char* out = (char*)malloc(bl + dl + 1);
+    if (!out) return NULL;
+    memcpy(out, base_ty, bl);
+    memcpy(out + bl, dims_s, dl);
+    out[bl + dl] = 0;
+    return out;
+}
+
 /* Reference captures and pointer-like value captures use an opaque make-factory
  * ABI so the generated env allocator can stay simple and preserve qualifiers. */
 static int cc__capture_needs_opaque(int is_ref, const char* ty) {
@@ -3577,6 +3656,30 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                         
                         if (cc__cap_is_ref(d, caps[ci])) fl |= 4; /* bit 2: reference capture */
                         d->cap_flags[ci] = fl;
+                        /* Arrays are not assignable; value-capture cannot copy them. */
+                        if (ty && !(fl & 4) && cc__capture_type_is_array(ty) && !init) {
+                            int col1 = d->start_col >= 0 ? (d->start_col + 1) : 1;
+                            fprintf(stderr,
+                                    "%s:%d:%d: error: CC: cannot value-capture array '%s' "
+                                    "(use [&%s] for a shared view)\n",
+                                    ctx->input_path ? ctx->input_path : "<input>",
+                                    d->start_line,
+                                    col1,
+                                    caps[ci] ? caps[ci] : "?",
+                                    caps[ci] ? caps[ci] : "?");
+                            for (int q = 0; q < idx_n; q++) cc__free_closure_desc(&descs[q]);
+                            free(descs);
+                            for (int dd = 0; dd < 256; dd++) {
+                                for (int k2 = 0; k2 < scope_counts[dd]; k2++) free(scope_names[dd][k2]);
+                                free(scope_names[dd]);
+                                for (int k2 = 0; k2 < scope_counts[dd]; k2++) free(scope_types[dd][k2]);
+                                free(scope_types[dd]);
+                                free(scope_flags[dd]);
+                            }
+                            free(idxs);
+                            free(in_src_decl_scan);
+                            return -1;
+                        }
                         if (!ty) {
                             int col1 = d->start_col >= 0 ? (d->start_col + 1) : 1;
                             if (init) {
@@ -3919,7 +4022,14 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                 const char* ty = d->cap_types[ci] ? d->cap_types[ci] : "int";
                 const char* nm = d->cap_names[ci] ? d->cap_names[ci] : "__cap";
                 if (cc__capture_needs_opaque(is_ref, ty)) {
-                    if (is_ref) {
+                    char elem[256];
+                    if (is_ref && cc__capture_type_is_array(ty) &&
+                        cc__capture_array_elem_type(ty, elem, sizeof(elem))) {
+                        /* `T[N]*` is not valid C; store decayed element*. */
+                        cc__append_fmt(&defs, &defs_len, &defs_cap,
+                                       "  %s* %s = (%s*)__cc_opaque_%s;\n",
+                                       elem, nm, elem, nm);
+                    } else if (is_ref) {
                         cc__append_fmt(&defs, &defs_len, &defs_cap,
                                        "  __typeof__((%s*)0) %s = (__typeof__((%s*)0))__cc_opaque_%s;\n",
                                        ty, nm, ty, nm);
@@ -3968,7 +4078,13 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                 const char* ty = d->cap_types[ci] ? d->cap_types[ci] : "int";
                 const char* nm = d->cap_names[ci] ? d->cap_names[ci] : "__cap";
                 if (cc__capture_needs_opaque(is_ref, ty)) {
-                    if (is_ref) {
+                    char elem[256];
+                    if (is_ref && cc__capture_type_is_array(ty) &&
+                        cc__capture_array_elem_type(ty, elem, sizeof(elem))) {
+                        cc__append_fmt(&defs, &defs_len, &defs_cap,
+                                       "  %s* %s = (%s*)__cc_opaque_%s;\n",
+                                       elem, nm, elem, nm);
+                    } else if (is_ref) {
                         cc__append_fmt(&defs, &defs_len, &defs_cap,
                                        "  __typeof__((%s*)0) %s = (__typeof__((%s*)0))__cc_opaque_%s;\n",
                                        ty, nm, ty, nm);
@@ -4032,17 +4148,29 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                 const char* ty = d->cap_types[ci] ? d->cap_types[ci] : "int";
                 const char* nm = d->cap_names[ci] ? d->cap_names[ci] : "__cap";
                 if (is_ref) {
-                    /* Reference capture: dereference the stored pointer.
-                       Use a local reference-like alias. */
-                    if (cc__capture_needs_opaque(is_ref, ty)) {
+                    /* Reference capture: local alias for the shared object.
+                     * Arrays must NOT use `#define name (*ptr)` — that makes
+                     * `name` a scalar. Decay to element* and alias without *. */
+                    char elem[256];
+                    if (cc__capture_type_is_array(ty) &&
+                        cc__capture_array_elem_type(ty, elem, sizeof(elem))) {
+                        cc__append_fmt(&defs, &defs_len, &defs_cap,
+                                       "  %s* __cc_ref_%s = (%s*)__env->%s;\n",
+                                       elem, nm, elem, nm);
+                        cc__append_fmt(&defs, &defs_len, &defs_cap,
+                                       "#define %s (__cc_ref_%s)\n", nm, nm);
+                    } else if (cc__capture_needs_opaque(is_ref, ty)) {
                         cc__append_fmt(&defs, &defs_len, &defs_cap,
                                        "  __typeof__((%s*)0) __cc_ref_%s = (__typeof__((%s*)0))__env->%s;\n",
                                        ty, nm, ty, nm);
+                        cc__append_fmt(&defs, &defs_len, &defs_cap,
+                                       "#define %s (*__cc_ref_%s)\n", nm, nm);
                     } else {
                         cc__append_fmt(&defs, &defs_len, &defs_cap,
                                        "  %s* __cc_ref_%s = __env->%s;\n", ty, nm, nm);
+                        cc__append_fmt(&defs, &defs_len, &defs_cap,
+                                       "#define %s (*__cc_ref_%s)\n", nm, nm);
                     }
-                    cc__append_fmt(&defs, &defs_len, &defs_cap, "#define %s (*__cc_ref_%s)\n", nm, nm);
                 } else {
                     if (cc__capture_needs_opaque(is_ref, ty)) {
                         cc__append_fmt(&defs, &defs_len, &defs_cap,

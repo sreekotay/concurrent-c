@@ -784,3 +784,4 @@ CCShardMask cc_shard_mask_auto(size_t max) {
     return cc_shard_mask_ceil((size_t)ncpu, max);
 }
 
+

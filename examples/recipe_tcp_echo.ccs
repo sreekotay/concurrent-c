@@ -26,34 +26,39 @@
  * Manual run:
  *   ./ccc run examples/recipe_tcp_echo.ccs
  *   (in another shell:)  echo "hello" | nc 127.0.0.1 9000
+ *
+ * Temp prints use @string(`...`, @scratch). Real arenas remain where IO
+ * allocates (peer addr, read buffer, CLI parse).
  */
 #include <ccc/cc_runtime.cch>
+#include <stdlib.h>
 #include <ccc/std/prelude.cch>
 #include <ccc/std/net.cch>
 #include <ccc/std/cli.cch>
+#include <ccc/script/stdio.cch>
 #include <string.h>
 
 #define PORT "127.0.0.1:9000"
 
 /* Echo every received chunk until the peer closes. */
 static void handle_client(CCSocket sock) {
+    @errhandler(CCError e) cc_error_exit(e);
     CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
-    if (!a.base) { sock.close(); return; }
 
     CCNetError peer_err = CC_NET_OK;
     CCSlice peer = sock.peer_addr(&a, &peer_err);
     if (peer_err == CC_NET_OK) {
-        printf("client connected: %.*s\n", (int)peer.len, (char*)peer.ptr);
+        println(@string(`client connected: ${peer}`, @scratch)) !>;
     }
 
     for (;;) {
         a.reset();
         CCSlice data;
         if (!cc_io_avail(sock.read(&a, 1024, &data))) {
-            printf("client disconnected\n");
+            println("client disconnected") !>;
             break;
         }
-        printf("echo %zu bytes\n", data.len);
+        println(@string(`echo ${data.len} bytes`, @scratch)) !>;
         size_t written = sock.write(data.ptr, data.len) !>(e) {
             (void)e;
             break;
@@ -65,14 +70,15 @@ static void handle_client(CCSocket sock) {
 
 /* In-process client: connect, send, read echo, close. */
 static void run_test_client(void) {
+    @errhandler(CCError e) cc_error_exit(e);
     CCSocket sock = cc_tcp_connect(PORT, sizeof(PORT) - 1) !>(e) {
-        fprintf(stderr, "dial error: %d\n", (int)e);
+        eprintln(@string(`dial error: ${e}`, @scratch)) !>;
         return;
     };
 
     const char msg[] = "hello from test\n";
     size_t nw = sock.write(msg, sizeof(msg) - 1) !>(e) {
-        fprintf(stderr, "write error: %s\n", cc_io_error_str(e));
+        eprintln(@string(`write error: ${cc_io_error_str(e)}`, @scratch)) !>;
         sock.close();
         return;
     };
@@ -81,12 +87,13 @@ static void run_test_client(void) {
     char buf[64] = {0};
     size_t got = 0;
     bool ok = sock.read_into(buf, sizeof(buf) - 1, &got) !>(e) {
-        fprintf(stderr, "read error: %s\n", cc_io_error_str(e));
+        eprintln(@string(`read error: ${cc_io_error_str(e)}`, @scratch)) !>;
         sock.close();
         return;
     };
     if (!ok) got = 0;
-    printf("test client got %zu bytes: %.*s", got, (int)got, buf);
+    CCSlice got_slice = { .ptr = buf, .len = got, .alen = got };
+    println(@string(`test client got ${got} bytes: ${got_slice}`, @scratch)) !>;
     sock.close();
 }
 
@@ -97,22 +104,22 @@ static void run_test_client(void) {
 static bool parse_test_flag(int argc, char** argv) {
     CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
     TcpEchoOpts opts = {0};
-    if (!a.base) return false;
     /* Pure parse — no usage ritual; unknown flags are just "not test mode". */
     if (!cc_parse_args(TcpEchoOpts, argc, argv, &a, &opts)) return false;
     return opts.test;
 }
 
 int main(int argc, char** argv) {
-    @errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); return 1; }
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
 
     bool test_mode = parse_test_flag(argc, argv);
 
     CCListener ln = cc_tcp_listen(PORT, sizeof(PORT) - 1) !>(e) {
-        printf("listen error: %d\n", (int)e);
+        println(@string(`listen error: ${e}`, @scratch)) !>;
         return 1;
     };
-    printf("listening on %s (%s mode)\n", PORT, test_mode ? "test" : "demo");
+    const char* mode = test_mode ? "test" : "demo";
+    println(@string(`listening on ${PORT} (${mode} mode)`, @scratch)) !>;
 
     {
         CCNursery* n = cc_nursery_create(NULL) !> @destroy;
@@ -128,7 +135,7 @@ int main(int argc, char** argv) {
             CCSocket sock = ln.accept() !>(e) {
                 /* Real-server shutdown path: listener closed, fd gone,
                  * peer unreachable, etc. */
-                printf("accept stopped: %d\n", (int)e);
+                println(@string(`accept stopped: ${e}`, @scratch)) !>;
                 break;
             };
             n->spawn(() => [sock] { handle_client(sock); });
@@ -138,6 +145,6 @@ int main(int argc, char** argv) {
      * client, if any) have drained. */
 
     ln.close();
-    printf("server done\n");
+    println("server done") !>;
     return 0;
 }

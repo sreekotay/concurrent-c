@@ -10,15 +10,22 @@
  * Everything else is a modifier on those two:
  *
  *   (e)  binds the error:  expr ?>(e) fallback(e.kind)
- *                          expr !>(e) { log(e); return 1; }
+ *                          expr !>(e) { cc_error_log(e); return 1; }
  *   ;    the code is the handler declared at the top of the scope:
  *        expr !>;          (requires an enclosing @errhandler)
  *
- * hello.ccs shows the inline code form. This recipe shows the hoisted
- * @errhandler pattern: declare one fatal policy at the top of a scope,
- * then use bare !>; at every call site.
+ * Hoist a policy with @errhandler — either a named helper statement
+ * (`cc_error_exit(e);`) or a block (`{ cc_error_log(e); return 1; }`)
+ * — then use bare !>; at every call site. Compose with
+ * `!>(e) { local; @err(e); }` when you want work before the default.
+ *
+ * Temp prints: `@string(`...`, @scratch)` injects a per-site stack arena
+ * (no hand-rolled CCArena). Next: recipe_unwrap_destroy_forms.ccs;
+ * recipe_ufcs_forms.ccs covers method dispatch including fallible chains.
  */
 #include <ccc/std/prelude.cch>
+#include <stdlib.h>
+#include <ccc/script/stdio.cch>
 
 /* A fallible operation: returns T!>(CCError). */
 int !>(CCError) read_config_value(const char* key) {
@@ -37,23 +44,28 @@ int !>(CCError) get_total_wait_time(void) {
 }
 
 int main(void) {
-    /* One fatal policy governs every !>; in this scope. */
-    @errhandler(CCError e) {
-        fprintf(stderr, "fatal [%ld]: %s\n", (long)e.kind, e.message);
-        return 1;
-    }
+    /* Soft main: log and return so @destroy still runs. */
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
 
     /* (1) !>; — forwards to @errhandler if the composition fails. */
     int total = get_total_wait_time() !>;
-    printf("total wait time: %d seconds\n", total);
+    println(@string(`total wait time: ${total} seconds`, @scratch)) !>;
 
     /* (2) ?> — substitutes a default; never propagates. */
     int missing = read_config_value("unknown_key") ?> -1;
-    printf("missing key fell back to: %d\n", missing);
+    println(@string(`missing key fell back to: ${missing}`, @scratch)) !>;
 
     /* (3) ?>(e) — default computed from the error value. */
     int bad = read_config_value("") ?>(e) (e.kind == CC_ERR_INVALID_ARG ? 0 : -1);
-    printf("invalid key mapped to: %d\n", bad);
+    println(@string(`invalid key mapped to: ${bad}`, @scratch)) !>;
+
+    /* (4) Compose then default — local work, then `@err(e)` → @errhandler.
+     *    (Success path: known key. Flip to "" to exercise the forward.) */
+    int shown = read_config_value("timeout") !>(e) {
+        println(@string(`compose local: ${e.message}`, @scratch)) !>;
+        @err(e);
+    };
+    println(@string(`compose ok: timeout=${shown}`, @scratch)) !>;
 
     return 0;
 }

@@ -266,25 +266,13 @@ static size_t cc__stmt_start_after_leading_errhandlers(const char* s, size_t n, 
         if (j >= err_at) break;
         /* Real statement starts at j; do not return stale i (still end of prior @errhandler). */
         if (!cc__token_is(s, n, j, "@errhandler")) return j;
-        size_t k = j + 11;
-        while (k < n && isspace((unsigned char)s[k])) k++;
-        if (k >= n || s[k] != '(') break;
-        int dp = 1;
-        k++;
-        while (k < n && dp > 0) {
-            if (s[k] == '(') dp++;
-            else if (s[k] == ')') dp--;
-            k++;
+        {
+            size_t da = 0, db = 0, ba = 0, bb = 0, stmt_end = 0;
+            if (!cc_errhandler_parse_registration(s, n, j, &da, &db, &ba, &bb,
+                                                  &stmt_end))
+                break;
+            i = stmt_end;
         }
-        if (dp != 0) break;
-        while (k < n && isspace((unsigned char)s[k])) k++;
-        if (k >= n || s[k] != '{') break;
-        size_t bclose = 0;
-        if (!cc__find_matching_brace_text(s, n, k, &bclose)) break;
-        size_t stmt_end = bclose + 1;
-        while (stmt_end < n && isspace((unsigned char)s[stmt_end])) stmt_end++;
-        if (stmt_end < n && s[stmt_end] == ';') stmt_end++;
-        i = stmt_end;
     }
     return i > err_at ? stmt_start : i;
 }
@@ -939,52 +927,23 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
 
         if (cc__token_is(in_src, in_len, i, "@errhandler")) {
             int eh_line = line_no;
-            size_t j = i + 11;
-            while (j < in_len && isspace((unsigned char)in_src[j])) j++;
-            if (j >= in_len || in_src[j] != '(') {
+            size_t decl_a = 0, decl_b = 0, body_a = 0, body_b = 0, stmt_end = 0;
+            if (!cc_errhandler_parse_registration(in_src, in_len, i, &decl_a, &decl_b,
+                                                  &body_a, &body_b, &stmt_end)) {
                 char rel[1024];
                 const char* f =
                     cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
-                cc_pass_error_cat(f, eh_line, 1, CC_ERR_SYNTAX, "expected '(' after @errhandler");
+                /* Distinguish common mistakes for clearer diagnostics. */
+                size_t j = i + 11;
+                while (j < in_len && isspace((unsigned char)in_src[j])) j++;
+                if (j >= in_len || in_src[j] != '(') {
+                    cc_pass_error_cat(f, eh_line, 1, CC_ERR_SYNTAX, "expected '(' after @errhandler");
+                } else {
+                    cc_pass_error_cat(f, eh_line, 1, CC_ERR_SYNTAX,
+                                      "malformed @errhandler: expected '{ ... }' or a statement ending in ';'");
+                }
                 goto fail;
             }
-            size_t p0 = j;
-            int dp = 1;
-            j++;
-            while (j < in_len && dp > 0) {
-                if (in_src[j] == '(') dp++;
-                else if (in_src[j] == ')')
-                    dp--;
-                j++;
-            }
-            if (dp != 0) {
-                char rel[1024];
-                const char* f =
-                    cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
-                cc_pass_error_cat(f, eh_line, 1, CC_ERR_SYNTAX, "unclosed '(' in @errhandler");
-                goto fail;
-            }
-            size_t p1 = j - 1;
-            while (j < in_len && isspace((unsigned char)in_src[j])) j++;
-            if (j >= in_len || in_src[j] != '{') {
-                char rel[1024];
-                const char* f =
-                    cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
-                cc_pass_error_cat(f, eh_line, 1, CC_ERR_SYNTAX, "expected '{' after @errhandler(...)");
-                goto fail;
-            }
-            size_t bopen = j;
-            size_t bclose = 0;
-            if (!cc__find_matching_brace_text(in_src, in_len, bopen, &bclose)) {
-                char rel[1024];
-                const char* f =
-                    cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
-                cc_pass_error_cat(f, eh_line, 1, CC_ERR_SYNTAX, "unclosed '{' in @errhandler body");
-                goto fail;
-            }
-            size_t stmt_end = bclose + 1;
-            while (stmt_end < in_len && isspace((unsigned char)in_src[stmt_end])) stmt_end++;
-            if (stmt_end < in_len && in_src[stmt_end] == ';') stmt_end++;
 
             if (stk_n >= CC_ERR_STK_MAX) {
                 char rel[1024];
@@ -998,8 +957,6 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
             memset(fr, 0, sizeof(*fr));
             fr->reg_depth = depth;
             {
-                size_t decl_a = p0 + 1, decl_b = p1;
-                cc__trim_slice(in_src, decl_a, decl_b, &decl_a, &decl_b);
                 size_t dl = decl_b - decl_a;
                 if (dl >= sizeof(fr->param_decl)) dl = sizeof(fr->param_decl) - 1;
                 memcpy(fr->param_decl, in_src + decl_a, dl);
@@ -1016,12 +973,10 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
                     goto fail;
                 }
             }
-            size_t inner_a = bopen + 1, inner_b = bclose;
-            cc__trim_slice(in_src, inner_a, inner_b, &inner_a, &inner_b);
-            fr->body_len = inner_b - inner_a;
+            fr->body_len = body_b - body_a;
             fr->body = (char*)malloc(fr->body_len + 1);
             if (!fr->body) goto fail;
-            memcpy(fr->body, in_src + inner_a, fr->body_len);
+            memcpy(fr->body, in_src + body_a, fr->body_len);
             fr->body[fr->body_len] = 0;
             stk_n++;
 

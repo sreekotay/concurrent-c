@@ -1,0 +1,8 @@
+/* Compile-fail: @scratch is not a general expression. */
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    CCArena* a = @scratch;
+    (void)a;
+    return 0;
+}

@@ -1,0 +1,11 @@
+/* Compile-fail: @scratch string must not leave the enclosing block. */
+#include <ccc/std/prelude.cch>
+
+CCString leak(double r) {
+    return @string(`r=${r}`, @scratch);
+}
+
+int main(void) {
+    (void)leak(1.0);
+    return 0;
+}

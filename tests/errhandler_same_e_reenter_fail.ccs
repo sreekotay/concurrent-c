@@ -1,0 +1,16 @@
+/*
+ * Bare !>; inside @errhandler(E) for the same E is ill-formed.
+ * Report via cc_error_exit / !> { abort(); }, not !>; in the handler body.
+ */
+#include <ccc/cc_runtime.cch>
+#include <ccc/script/stdio.cch>
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(1)) @destroy;
+    @errhandler(CCError e) {
+        eprintln(@string(`fatal: ${e.message}`, &arena)) !>;
+        return 1;
+    }
+    println("ok") !>;
+    return 0;
+}

@@ -89,11 +89,14 @@ full error space — each answers a different question at the call site:
 ```c
 int !>(CCError) read_timeout(void);
 
-@errhandler(CCError e) { fprintf(stderr, "%s\n", e.message); return 1; }
+@errhandler(CCError e) cc_error_exit(e);         // or { cc_error_log(e); return 1; }
 
 int t1 = read_timeout() ?> 30;                   // default on error
 int t2 = read_timeout() !>(e) return 2;          // inline (must diverge)
 int t3 = read_timeout() !>;                      // forward to @errhandler
+/* Non-hoisted equivalent of !>; with that binding:
+ *   int t3 = read_timeout() !>(e) cc_error_exit(e);
+ */
 ```
 
 Normative rules in §3.1.
@@ -216,7 +219,7 @@ bugs.
 | `@defer(err)`  | Cleanup only on error return                                            | `@defer(err) free(ptr);`               |
 | `@defer(ok)`   | Cleanup only on success return                                          | `@defer(ok) commit();`                 |
 | `@cancel`      | Cancel a named `@defer` before it runs                                  | `@cancel cleanup;`                     |
-| `@errhandler`  | Block-scoped handler for `!>;` / `@err`, selected by Result error type  | `@errhandler(CCError e) { log(e); }`   |
+| `@errhandler`  | Block-scoped handler for `!>;` / `@err`, selected by Result error type  | `@errhandler(CCError e) cc_error_exit(e);` |
 | `@err`         | Forward current error to the matching `@errhandler` for that `E`        | `@err(e);`                             |
 | `@with_deadline` | Apply deadline to a block                                             | `@with_deadline(seconds(5)) { … }`     |
 | `@destroy`     | Attach cleanup to a result-unwrap                                       | `FILE* f = open() !> @destroy;`         |
@@ -244,7 +247,7 @@ bugs.
 | `CALL() !> @destroy { D };`     | Resource lifetime declaration with error-checked cleanup | `CCNursery* n = cc_nursery_create(NULL) !> @destroy;`    |
 | `@defer stmt;`                  | Schedule statement to run on scope exit                  | `@defer file.close();`                                   |
 | `@comptime if (cond) { }`       | Compile-time conditional                                 | `@comptime if (FEATURE_X) { }`                           |
-| `@errhandler(E e) { }`          | Block-scoped handler for Result error type `E` (§3.1)    | `@errhandler(CCIoError e) { log(e); return cc_err(e); }` |
+| `@errhandler(E e) stmt` / `{ }` | Block-scoped handler for Result error type `E` (§3.1)    | `@errhandler(CCError e) cc_error_exit(e);` |
 
 **Call-site annotation forms** (see §8.2 for precedence):
 
@@ -293,6 +296,7 @@ Result-typed calls (`T!>(E)`) must be explicitly consumed. Two operators with cl
 | `@await expr`                                            | Suspend until task completes, unwrap result                           | `int result = @await fetch();`            |
 | `@slice("...")`                                          | Build-time canonical sentinel slice                                   | `char[:0] mode = @slice("recv");`         |
 | `@string(expr, arena)` / `@string(policy, \`..., arena)` | Direct or templated string construction (`${e}` and `$~tag{e}` slots) | `CCString msg = @string(user_id, arena);` |
+| `@string(\`...\`, @scratch)` / `@scratch(N)`             | Temp stack arena for `@string` only — per site, block lifetime (§9.1.4) | `println(@string(\`r=${ratio}\`, @scratch))` |
 | `@string(\`...\`)` (no arena)                            | Bounded-template stack form: block-scoped buffer, yields `char[:]` borrow (§9.1.2) | `char[:] s = @string(\`v=${v}\`);`        |
 
 
@@ -971,14 +975,14 @@ CCRes(MyData, MyError) my_function(int arg);
   - At **statement position** the body may fall through. Forms: `CALL !>;`, `CALL !> STMT;`, `CALL !> { BODY };`, `CALL !>(e) STMT;`, `CALL !>(e) { BODY };`.
   - At **expression position** the body must *visibly diverge*. Forms: `CALL !>(e) DIVERGENT_STMT;`, `CALL !>(e) { …; DIVERGENT_STMT };`, `CALL !> DIVERGENT_STMT;`, `CALL !> { …; DIVERGENT_STMT };`, and the bare `CALL !>;` which synthesizes a binder and inlines the matching `@errhandler` body for Result `E` (which must itself diverge). A non-divergent body at expression position is diagnosed with `expression-position '!>' body must diverge (return/break/continue/goto/@err/exit/abort/etc.)`. A bare `CALL !>;` at expression position with no matching `@errhandler` for `E` is ill-formed.
 3. Error values are accessible only via an explicit `(ident)` binder on `?>` or `!>`. Neither operator creates an implicit `e` / `err` binding. The bare expression-position `!>;` form synthesizes a fresh internal binder that threads the error value through the inlined handler body.
-4. `CALL !>;` at statement position runs the nearest in-scope `@errhandler` whose parameter type exactly matches the call's Result error type `E` (else, when `E` has a unique `@as` path to a handler parameter type `F`, that handler — see `@as` fields draft §5), or the success path if the call succeeded. No match is ill-formed.
+4. `CALL !>;` at statement position runs the nearest in-scope `@errhandler` whose parameter type exactly matches the call's Result error type `E` (else, when `E` has a unique `@as` path to a handler parameter type `F`, that handler — see `@as` fields draft §5), or the success path if the call succeeded. No match is ill-formed. If that matching handler's body textually contains the call (same-`E` re-entry), the program is ill-formed — report via a helper such as `cc_error_log` / `cc_error_exit`, or an inline `!> { abort(); }`, not bare `!>;` inside the same-`E` handler.
 5. `@err(IDENT);` inside a `!>` body forwards the bound error to the matching `@errhandler` for that unwrap's `E`. It is a **structured control-flow transfer** (not a returning call): any statement textually following it in the same block is unreachable and is a compile error.
-6. `@errhandler(E e) { ... }` registers a block-local handler for Result error type `E`. When reached via `CALL !>;` at statement position, the handler body runs and control returns to the statement after the call — the handler may end in any statement. When reached via an `@err(e);` forward, via a bare expression-position `!>;`, or via an expression-position `!>` whose body inlines the handler, control never returns, so the handler body **must visibly diverge**. Concretely: if any `@err(e);` targets a handler, or any expression-position `!>;` inlines a handler, that handler's body must end in one of:
+6. `@errhandler(E e) STMT;` or `@errhandler(E e) { ... }` registers a block-local handler for Result error type `E`. The statement form is a thin forward (typically `cc_error_exit(e);`); the block form holds multiple statements. `CALL !>;` is the hoist of `CALL !>(e) STMT` when `STMT` is that handler body. When reached via `CALL !>;` at statement position, the handler body runs and control returns to the statement after the call — the handler may end in any statement. When reached via an `@err(e);` forward, via a bare expression-position `!>;`, or via an expression-position `!>` whose body inlines the handler, control never returns, so the handler body **must visibly diverge**. Concretely: if any `@err(e);` targets a handler, or any expression-position `!>;` inlines a handler, that handler's body must end in one of:
   - `return EXPR;` / `return;`
     - `break;` / `continue;`
     - `goto LABEL;`
     - `@err(e);` (forwarding to an outer handler)
-    - A call to one of the hardcoded noreturn functions: `exit`, `_Exit`, `_exit`, `abort`, `longjmp`, `siglongjmp`, `pthread_exit`, `__builtin_unreachable`, `__builtin_trap`
+    - A call to one of the hardcoded noreturn functions: `exit`, `_Exit`, `_exit`, `abort`, `cc_error_exit`, `longjmp`, `siglongjmp`, `pthread_exit`, `__builtin_unreachable`, `__builtin_trap`
     - A `{ ... }` compound statement whose recursive last statement satisfies this rule.
      A forward-reached or `!>;`-inlined handler whose last statement does not satisfy this rule is a compile error at the `@errhandler` declaration site. The rule applies in `void` functions equally.
 7. A result-typed call that is not consumed by `?>`, `!>`, `@err`, assignment to a result-typed destination, `return`, or a `(void)` cast is ill-formed. `(void)call();` is the one explicit-discard escape hatch.
@@ -1011,18 +1015,19 @@ divergent_stmt ::= 'return' expr? ';'
 err_forward   ::= '@err' '(' ident ')' ';'                 // only inside bang_stmt or bang_expr body
 
 err_handler   ::= '@errhandler' '(' type ident ')' '{' stmt* '}'
+               |  '@errhandler' '(' type ident ')' stmt
 ```
 
 **Semantics (normative, by form).**
 
 - `EXPR ?> DEFAULT_EXPR` — Evaluate `EXPR` (a `T!>(E)` result) exactly once. If success, the expression's value is the unwrapped `T`. Otherwise the expression's value is `DEFAULT_EXPR`. `EXPR ?>(e) DEFAULT_EXPR` binds the error to `e`, scoped to `DEFAULT_EXPR`. `DEFAULT_EXPR` is always a pure C expression producing `T`.
-- `CALL !>;` *(statement)* — Evaluate `CALL` exactly once. On success, the success payload is discarded. On error, the nearest in-scope `@errhandler` whose parameter type exactly matches the call's Result error type `E` runs (else unique `@as` path to a handler face `F`, binder projected to that member); control then falls through to the following statement. If no such handler is in scope, the program is ill-formed.
+- `CALL !>;` *(statement)* — Evaluate `CALL` exactly once. On success, the success payload is discarded. On error, the nearest in-scope `@errhandler` whose parameter type exactly matches the call's Result error type `E` runs (else unique `@as` path to a handler face `F`, binder projected to that member); control then falls through to the following statement. If no such handler is in scope, the program is ill-formed. If the call occurs inside that matching handler's body (same-`E` re-entry), the program is ill-formed.
 - `CALL !> BODY` *(statement)* — Same, with `BODY` in place of the default handler. `BODY` may fall through. `@err(e);` inside `BODY` is ill-formed without a binder.
 - `CALL !>(e) BODY` *(statement)* — Same, with the error bound to `e` for the scope of `BODY`. `@err(e);` inside `BODY` forwards to the matching `@errhandler` for `E` (see invariant 5).
-- `CALL !>;` *(expression)* — Evaluate `CALL` exactly once. On success, the surrounding expression's value is the unwrapped `T`. On error, a synthesized binder captures the error and the matching `@errhandler` body for `E` is inlined in place of `BODY`; the handler must diverge, so control never returns past the `!>;`. If no matching handler is in scope, the program is ill-formed.
+- `CALL !>;` *(expression)* — Evaluate `CALL` exactly once. On success, the surrounding expression's value is the unwrapped `T`. On error, a synthesized binder captures the error and the matching `@errhandler` body for `E` is inlined in place of `BODY`; the handler must diverge, so control never returns past the `!>;`. If no matching handler is in scope, the program is ill-formed. If the call occurs inside that matching handler's body (same-`E` re-entry), the program is ill-formed.
 - `CALL !> DIVERGENT_STMT;` and `CALL !> { …; DIVERGENT_STMT }` *(expression)* — Evaluate `CALL` exactly once. On success, the surrounding expression's value is the unwrapped `T`. On error, `DIVERGENT_STMT` (or the block) runs; because it cannot fall through, the surrounding expression has no observable value on that path. `!>(e) …` binds the error to `e` across the body.
 - `@err(X);` — Inside a `!> (X) BODY` or `!> (X) { BODY }` (statement or expression position). Transfers control to the nearest in-scope `@errhandler` whose parameter type exactly matches the unwrap's Result error type `E` (else unique `@as` path to a handler face, with the binder projected), with the error value forwarded. Does not return.
-- `@errhandler(E e) { BODY }` — Registers a block-local handler for Result error type `E`. `CALL !>;` at statement position, `@err(e);` forwards, and `CALL !>;` at expression position dispatch to the nearest in-scope handler whose parameter type exactly matches the unwrap's `E`. If none matches exactly, the nearest in-scope handler whose parameter type is reachable from `E` by a unique `@as` embed path is selected and the binder is that path's member by value (same preference order as UFCS). When the unwrap's error type cannot be resolved as a Result `E` (pointer-returning calls and other untyped LHS forms), dispatch matches `@errhandler(CCError …)` — the same ambient error type those binders use. Subject to the divergence rule of invariant 6.
+- `@errhandler(E e) STMT;` / `@errhandler(E e) { BODY }` — Registers a block-local handler for Result error type `E`. `CALL !>;` at statement position, `@err(e);` forwards, and `CALL !>;` at expression position dispatch to the nearest in-scope handler whose parameter type exactly matches the unwrap's `E`. If none matches exactly, the nearest in-scope handler whose parameter type is reachable from `E` by a unique `@as` embed path is selected and the binder is that path's member by value (same preference order as UFCS). When the unwrap's error type cannot be resolved as a Result `E` (pointer-returning calls and other untyped LHS forms), dispatch matches `@errhandler(CCError …)` — the same ambient error type those binders use. Subject to the divergence rule of invariant 6. Stdlib helpers: `cc_error_log(e)` (report, returns) and `cc_error_exit(e)` (report then `exit(1)`).
 
 **Single-evaluation (normative).** Every operator listed above evaluates its LHS call expression exactly once. Lowerings MUST preserve this.
 
@@ -1071,11 +1076,8 @@ int!>(CCError) parse_and_log(char[:] s) {
 
 // Bare expression-position !>; delegates to the matching @errhandler for E.
 int main(void) {
-    @errhandler(CCError e) {
-        log(e);
-        return 1;
-    }
-    int v = parse_int(s) !>;        // error -> handler -> return 1
+    @errhandler(CCError e) cc_error_exit(e);  // ≡ !>(e) cc_error_exit(e) at each site
+    int v = parse_int(s) !>;
     return v;
 }
 
@@ -3046,7 +3048,7 @@ UFCS on the explicit nursery handle.
 `cc_nursery_create(CCNursery* parent)` returns `CCNursery*!>(CCError)`. Pass `NULL` for a top-level nursery; pass a parent nursery for nested structured concurrency.
 
 ```c
-@errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); abort(); }
+@errhandler(CCError e) cc_error_exit(e);
 
 CCNursery* outer = cc_nursery_create(NULL) !> @destroy;
 CCNursery* inner = cc_nursery_create(outer) !> @destroy;
@@ -4755,7 +4757,7 @@ This section defines the core standard library using **UFCS-first design**: meth
 
 **Rule (scalar value receivers, normative):** A receiver of scalar arithmetic type (`double`, `float`, `int`, `short`, `long`, `long long`, `size_t`) dispatches to the family `cc_<mangled type>_<method>`, where multi-word type names join with `_` (`long long` → `cc_long_long_<method>`). The receiver is passed by value, never by address; cv-qualifiers on the receiver do not vary the callee. The composed callee is used only when that function is verifiably declared in the translation unit or an included header — these are ordinary declarations, never synthesized — otherwise the call site is left unchanged and is ill-formed C. A numeric literal is a receiver only when parenthesized: `(1.5).halve()` dispatches on `double`, `(42).twice()` on `int`, with the literal's type read lexically from its suffix under C rules; one leading unary minus may appear inside the parentheses. `1.5.halve()` without parentheses is not a UFCS call. Unsigned suffixes and `char` receivers do not participate. A declared `<type>_<method>` snake spelling for the same receiver keeps its ordinary dispatch precedence.
 
-**Rule (naked calls and print aliases, normative):** A call `name(args)` is C: it dispatches to the declared function or macro named `name`, or is ill-formed. Exactly four names alias when `<ccc/script/stdio.cch>` is visible and the translation unit binds none of them itself: `print`, `println`, `eprint`, `eprintln` at call position dispatch to the declared `cc_print` / `cc_println` / `cc_eprint` / `cc_eprintln` (`_Generic` over the argument). A translation-unit binding of one of these names — function, function-like macro, or declaration shape — takes the call unchanged, and member position (`s.println()`) never aliases. Prefix spellings for other functions come by declaration: a declared `f(T, …)` is callable as `f(x, …)` by C and as `x.f(…)` by the bare-name tier — one declaration, both spellings. Method families reach prefix position through an imported handle whose type carries them (`CCStdio io = cc_stdio_create(&a); io.println(x)`).
+**Rule (naked calls and print aliases, normative):** A call `name(args)` is C: it dispatches to the declared function or macro named `name`, or is ill-formed. Exactly six names alias when `<ccc/script/stdio.cch>` is visible and the translation unit binds none of them itself: `print`, `println`, `eprint`, `eprintln` at call position dispatch to `cc_print` / `cc_println` / `cc_eprint` / `cc_eprintln` (`_Generic` over the data argument); `fprint` / `fprintln` dispatch to `cc_fprint` / `cc_fprintln` with **fd first, then data** (`fprintln(STDERR_FILENO, path)` — fprintf-shaped). Member UFCS stays data-first (`path.fprintln(STDERR_FILENO)`). A translation-unit binding of one of these names — function, function-like macro, or declaration shape — takes the call unchanged, and member position (`s.println()`) never aliases. Prefix spellings for other functions come by declaration: a declared `f(T, …)` is callable as `f(x, …)` by C and as `x.f(…)` by the bare-name tier — one declaration, both spellings. Method families reach prefix position through an imported handle whose type carries them (`CCStdio io = cc_stdio_create(&a); io.println(x)`).
 
 **Rule (universal bare-name tier, normative):** When every family composition for `recv.f(args)` fails to name a declared function, `f` itself is the final candidate: the call dispatches to a declared function `f` whose first parameter takes the receiver — `u.mean(6.0)` lowers to `mean(u, 6.0)`; `pp->get_x()` lowers to `get_x(pp)`. Compatibility is uniform where lossless and exact where lossy. A value receiver of type `T` matches a first parameter of type `T` exactly (no arithmetic conversions — dispatch never converts the receiver's value), or of type `T*` / `const T*` via `&recv` (addressable receivers only). A pointer receiver of type `T*` matches pointer parameters under C's pointer rules — exact `T*`, qualifier-adding `const T*`, and `void*` / `const void*` — one-way: a `const T*` receiver matches only const-qualified parameters. A dereference is never synthesized: pointer receivers match pointer parameters only. A first parameter of `void*` never matches a value receiver (the address synthesis and the type erasure are not combined implicitly). Zero-parameter functions never capture a receiver. Members, composed family spellings, and a receiver type's registered dynamic sink all outrank the bare name — a sink-registered type's unresolved methods belong to its sink, and a later-declared ambient function cannot capture them. Declarations participate from the translation unit, included headers, and the parse's symbol table — which sees system headers, so `d.fabs()` with `math.h` included dispatches to `fabs(d)`. Unprototyped (old-style) declarations never participate. A composed callee that is not verifiably declared is never emitted while a bare-name match exists.
 
@@ -4935,6 +4937,8 @@ String   cc_string_from_slice(Arena* a, char[:] initial);
 char[:0] @slice("...");                           // build-time canonical slice
 String   @string(expr, Arena* a);                 // literal/single-value builder
 String   @string(policy, `...`, Arena* a);        // templated builder
+String   @string(`...`, @scratch);                // temp stack arena (§9.1.4)
+String   @string(`...`, @scratch(N));             // sized temp stack arena (§9.1.4)
 char[:]  @string(`...`);                          // arena-less bounded template (§9.1.2)
 String* cc_string_push(String* s, char[:] data);
 String* cc_string_push_char(String* s, char c);
@@ -4966,6 +4970,7 @@ String  <primitive>.to_str(Arena* a);           // e.g. 42.to_str(&arena)
 - `@string(expr, a)` builds a `String` from a literal, `char`*, `char[:]`, `String`, or a value that supports `to_str(a)`.
 - `@string(policy, \`..., a)`lowers to`String` builder operations over literal chunks plus interpolation slots.
 - `@string(\`...\`)` with no arena is the bounded-template stack form: it yields a `char[:]` borrow of a block-scoped buffer and requires every interpolation to have a statically bounded width (§9.1.2).
+- `@string(..., @scratch)` / `@scratch(N)` injects a per-site stack arena for the `@string` arena operand only (§9.1.4).
 - Template slots are string-oriented. Accepted slot forms are `char*`, `char[:]`, and `String`; non-string values may bridge through `expr.to_str(a)` if the receiver type provides that UFCS conversion.
 - Interpolation syntax: only `${expr}` and `$~tag{expr}` start a slot (where `tag` is a C identifier). `${expr}` is **untagged**—the policy gets an empty tag slice and the value slice. `$~tag{expr}` is **tagged**—the policy gets the tag slice `"tag"` and the value slice, so policies can distinguish holes (metadata, escaping tiers, i18n keys, and so on). Any other `$` in the template is literal text, so ordinary uses like prices or macros do not need escaping.
 - To emit a literal `${` or `$~tag{` sequence, prefix `$` with backslash: `\${` and `\$~…` are not slots; the backslash is removed and the string helpers emit the remainder (same rules as other template backslash escapes, e.g. an even run of `\` before `$` restores slot parsing, as in `\\${x}`).
@@ -5043,9 +5048,37 @@ The arena form is unchanged: the same template with an arena yields an owned `St
 - `cc_string_failed(&s)` reports the poisoned state.
 - `cc_string_clear(&s)` is the explicit recovery: it resets the value to a valid empty string.
 
+#### 9.1.4 `@scratch` — temporary arena operand for `@string`
+
+`@scratch` and `@scratch(N)` are legal **only** as the arena argument of `@string` (including `@string(policy, \`...\`, @scratch)` and `@string(expr, @scratch)`). They are not expressions, not general `CCArena*` values, and not a revival of retired `@arena { }` blocks.
+
+**Lowering.** Each `@string(..., @scratch)` / `@scratch(N)` site injects its own stack arena at the start of the enclosing block:
+
+```c
+{
+    CC_ARENA_STACK(__cc_str_scratch_0, 1024);   // default N
+    CCString s = @string(`r=${ratio}`, &__cc_str_scratch_0);
+
+    CC_ARENA_STACK(__cc_str_scratch_1, 256);    // explicit N
+    println(@string(`x=${x}`, &__cc_str_scratch_1));
+}
+```
+
+- Default size is 1024 bytes; `@scratch(N)` sets **that site only** (`N` is a positive integer constant). Sites do not share storage and do not max-merge sizes.
+- Overflow follows `CC_ARENA_STACK` (stack-first, then ordinary growth / `String` poison rules).
+- Freestanding `@scratch` (or use outside `@string`) is a compile error. Prefer `CC_ARENA_STACK` / `cc_arena_heap` for named or long-lived arenas.
+
+**Escape (normative).** Products of `@string(..., @scratch)` have block lifetime. It is a compile-time error to:
+
+- `return` that `String` (or a slice/view derived from it),
+- assign it into a variable declared in an **outer** block,
+- capture it into a closure or task that may outlive the enclosing block.
+
+Same-block use (`CCString s = @string(..., @scratch); println(s);`) is fine. Call-local borrows (`println(@string(..., @scratch))`) are fine.
+
 `@string(...)` templated construction follows the same contract: if the destination arena cannot hold the output, the result is a failed `String` — never partial bytes.
 
-#### 9.1.4 Formatting (Global)
+#### 9.1.5 Formatting (Global)
 
 ```c
 // Build formatted strings (use with Arena)
@@ -5331,26 +5364,32 @@ io.write_all(out.as_slice()) !>;
 
 `CCStdio` binds an arena for growing reads (`read_all` / `read_line`) and
 offers `write_all` / `println` / `eprintln` that take a `CCSlice` or
-`CCString`. Console output in scripts is **flipped onto the data** (no `io`
-argument). A string, slice, C string, or string literal is a UFCS receiver:
+`CCString`. Console output prefers the **naked aliases at statement start**
+(no `io` argument). Member UFCS on the data remains available:
 
 ```c
-path.println() !>;                 /* CCSlice / char[:0] */
-line.eprintln() !>;                /* CCString */
-"literal".println() !>;            /* string literal / cstr */
-@string(`n=${n}`, &a).println() !>;
-path.fprintln(STDERR_FILENO) !>;
+println("literal") !>;             /* preferred: naked alias → cc_println */
+println(path) !>;                  /* CCSlice / char[:0] */
+eprintln(line) !>;                 /* CCString */
+println(@string(`n=${n}`, &a)) !>;
+fprintln(STDERR_FILENO, path) !>;  /* naked: fd first, then data */
+
+path.println() !>;                 /* also OK: UFCS on data */
+path.fprintln(STDERR_FILENO) !>;   /* UFCS: data, then fd */
 ```
 
 Returns are `CCResult_size_t_CCError` (same as `CCStdio.println`). Short names
-`println` / `eprintln` are not free macros — a function-like
-`#define println(x)` would steal UFCS `x.println()`. The macros
-`cc_println` / `cc_eprintln` exist only as lowered-C sugar (driver inject,
-`-E` desugar); script source uses UFCS. The injected default
-`@errhandler(CCError)` prints with `(void)cc_eprintln(cc_error_str(e))`.
-Inside a custom `@errhandler` body, discard with a bound receiver
-(`CCString msg = …; (void)msg.eprintln();`) — do not use `!>` there.
-Template formatting uses language `@string`.
+`print` / `println` / `eprint` / `eprintln` / `fprint` / `fprintln` are not
+user macros — a function-like `#define println(x)` would steal UFCS
+`x.println()`. The `cc_print*` macros exist as lowered-C sugar (driver inject,
+naked-alias targets, `-E` desugar); script and recipe source prefer naked
+`println` / `eprintln` / `fprintln` at the start of the statement.
+The injected default `@errhandler(CCError)` prints with
+`(void)cc_eprintln(cc_error_str(e))`. Custom handlers should report via
+`cc_error_log` / `cc_error_exit` (or `!> { abort(); }` on the print Result) —
+bare `eprintln(msg) !>;` inside a matching `@errhandler(E)` is ill-formed
+(same-`E` re-entry, §3.1 invariant 4). Template formatting uses language
+`@string`. Recipe and script source must not discard print Results with `(void)`.
 
 #### 9.5.5 Path, file, process, and temp helpers
 

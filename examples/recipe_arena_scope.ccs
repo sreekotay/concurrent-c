@@ -7,13 +7,14 @@
  * scratch work without tearing down the whole arena.
  */
 #include <ccc/std/prelude.cch>
+#include <stdlib.h>
+#include <ccc/script/stdio.cch>
 
 int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(4)) @destroy;
-    if (!arena.base) return 1;
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
     for (int i = 1; i <= 3; i++) {
-        CCString s = @string(`Processing request ${i} bytes: ${arena.remaining()}\n`, &arena);
-        cc_std_out.write(s);
+        println(@string(`Processing request ${i} bytes: ${arena.remaining()}`, @scratch)) !>;
 
         /* scratch allocation, reclaimed at cp.restore(); the element
          * type comes from the destination */

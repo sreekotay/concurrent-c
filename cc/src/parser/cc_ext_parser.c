@@ -617,6 +617,45 @@ static int cc_try_cc_at_stmt(void) {
         strcmp(cc_at, "match") != 0 &&
         strcmp(cc_at, "with_deadline") != 0 &&
         strcmp(cc_at, "comptime") != 0) {
+        if (strcmp(cc_at, "err") == 0) {
+            /* Leftover `@err(...)` that visitor passes failed to lower —
+             * usually a missing `!>(e)` binder. Consume the statement so
+             * we do not also emit "require CC external parser". */
+            tcc_error("'@err(e)' requires an error binder; use "
+                      "'!>(e) { ...; @err(e); }' (or bare '!>;' for the "
+                      "scope's @errhandler)");
+            next(); /* consume 'err' */
+            if (tok == '(') {
+                int depth = 1;
+                next();
+                while (tok && tok != TOK_EOF && depth > 0) {
+                    if (tok == '(') depth++;
+                    else if (tok == ')') depth--;
+                    next();
+                }
+            }
+            if (tok == '{') cc_skip_retired_block();
+            else cc_skip_retired_stmt_tail();
+            return 1;
+        }
+        if (strcmp(cc_at, "scratch") == 0) {
+            tcc_error("@scratch is only valid as the arena argument of "
+                      "@string(...); use CC_ARENA_STACK for a named scratch "
+                      "arena");
+            next(); /* consume 'scratch' */
+            if (tok == '(') {
+                int depth = 1;
+                next();
+                while (tok && tok != TOK_EOF && depth > 0) {
+                    if (tok == '(') depth++;
+                    else if (tok == ')') depth--;
+                    next();
+                }
+            }
+            if (tok == '{') cc_skip_retired_block();
+            else cc_skip_retired_stmt_tail();
+            return 1;
+        }
         tcc_error("unknown '@%s' block", cc_at);
         return 0;
     }

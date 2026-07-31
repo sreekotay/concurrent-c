@@ -92,6 +92,24 @@ static inline const char* cc_error_str(CCError e) {
     return cc_error_kind_str(e.kind);
 }
 
+#include <stdio.h>
+#include <stdlib.h>
+
+/* Report a CCError to stderr. Building block for soft handlers:
+ *   @errhandler(CCError e) { cc_error_log(e); return 1; }
+ * Does not diverge — pair with return/cancel at the binding site. */
+static inline void cc_error_log(CCError e) {
+    if (fprintf(stderr, "fatal: %s\n", cc_error_str(e)) < 0) abort();
+}
+
+/* Log then exit(1). The standard named `@errhandler` terminate policy:
+ *   @errhandler(CCError e) cc_error_exit(e);
+ * Recognized as diverging for expression-position `!>;`. */
+static inline void cc_error_exit(CCError e) {
+    cc_error_log(e);
+    exit(1);
+}
+
 /*
  * Result type layout:
  *   r.ok       - true if success
@@ -107,9 +125,6 @@ static inline const char* cc_error_str(CCError e) {
  *   r.is_err()    - returns true if error
  *   r.unwrap_or(default) - returns value or default if error
  */
-#include <stdio.h>
-#include <stdlib.h>
-
 #define CC_DECL_RESULT_SPEC(name, OkType, ErrType)                                  \
     typedef struct name {                                                           \
         bool ok;                                                                    \

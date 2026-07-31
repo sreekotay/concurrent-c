@@ -18,9 +18,12 @@
  * Duration helpers: seconds(n), millis(n) (see cc_sched.cch).
  */
 #include <ccc/cc_runtime.cch>
-#include <stdio.h>
+#include <stdlib.h>
+#include <ccc/script/stdio.cch>
 
 int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
     /* --- form 1: ambient deadline, polled via cc_current_deadline() --- */
     int work_done = 0;
     @with_deadline(millis(50)) {
@@ -29,7 +32,7 @@ int main(void) {
             cc_sleep_ms(10);
         }
     }
-    printf("form 1: %d iterations before deadline\n", work_done);
+    println(@string(`form 1: ${work_done} iterations before deadline`, @scratch)) !>;
 
     /* --- form 2: `as dl` binds a handle for inspection --- */
     int checkpoints = 0;
@@ -39,7 +42,7 @@ int main(void) {
             cc_sleep_ms(10);
         }
     }
-    printf("form 2: %d checkpoints against handle\n", checkpoints);
+    println(@string(`form 2: ${checkpoints} checkpoints against handle`, @scratch)) !>;
 
     /* Both forms exit cleanly when the deadline expires; the scope's
      * pushed deadline is popped automatically on block exit. */

@@ -13,8 +13,9 @@
 @link("curl")
 
 #include <ccc/cc_runtime.cch>
+#include <stdlib.h>
 #include <ccc/std/http.cch>
-#include <stdio.h>
+#include <ccc/script/stdio.cch>
 #include <string.h>
 
 /* URLs to fetch in parallel */
@@ -26,68 +27,61 @@ const char* g_urls[] = {
 #define NUM_URLS 3
 
 static void fetch_one(int idx, int* status_p, size_t* body_len_p) {
-    /* Each task gets its own arena backed by stack memory. */
+    /* Each task gets a stack arena for the HTTP response body. */
     char buf[32 * 1024];
     {
         CCArena scratch = cc_arena_create_buffer(buf, sizeof(buf), CC_ARENA_GROWABLE) @destroy;
-        if (!scratch.base) abort();
         CCArena* arena = &scratch;
         /* Soft-fail per URL so offline CI can SKIP instead of fatal. */
-        CCHttpResponse resp = cc_http_get(arena, g_urls[idx], strlen(g_urls[idx])) !>(e) {
+        const char* url = g_urls[idx];
+        CCHttpResponse resp = cc_http_get(arena, url, strlen(url)) !>(e) {
             status_p[idx] = -1;
-            printf("[%d] %s -> ERROR %d\n", idx, g_urls[idx], (int)e.code);
+            int code = (int)e.code;
+            println(@string(`[${idx}] ${url} -> ERROR ${code}`, @scratch)) !> { return; };
             return;
         };
         status_p[idx] = resp.status;
         body_len_p[idx] = resp.body.len;
-        printf("[%d] %s -> %d (%zu bytes)\n",
-               idx, g_urls[idx], resp.status, resp.body.len);
+        println(@string(`[${idx}] ${url} -> ${resp.status} (${resp.body.len} bytes)`, @scratch)) !> { return; };
     }
 }
 
 int main(void) {
-    @errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); return 1; }
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
 
-    printf("Fetching %d URLs in parallel...\n\n", NUM_URLS);
+    println(@string(`Fetching ${NUM_URLS} URLs in parallel...`, @scratch)) !>;
+    println("") !>;
 
-    /* Results storage stays valid until the nursery scope waits on all tasks. */
+    /* Results storage stays valid until the nursery scope waits on all tasks.
+     * [&status, &body_len] shares the arrays; tasks write disjoint slots. */
     int status[NUM_URLS] = {0};
     size_t body_len[NUM_URLS] = {0};
-    /* The natural form would be [&status, &body_len] on the closure below,
-     * but today's &-capture lowering treats the captured name as a scalar
-     * lvalue (`#define status (*__cc_ref_status)`), so `status` in the body
-     * expands to a single int instead of decaying to int*. Value-capture
-     * would need array-by-assignment in the closure env (not legal C), so
-     * neither direct form works. As a BUG-workaround, alias each array to
-     * a pointer and value-capture the pointers — tasks write disjoint
-     * slots, so no synchronisation is needed. */
-    int* status_p = status;
-    size_t* body_len_p = body_len;
 
     {
         CCNursery* n = cc_nursery_create(NULL) !> @destroy;
 
         for (int i = 0; i < NUM_URLS; i++) {
-            int idx = i;  /* capture copy */
-            n->spawn(() => {
-                fetch_one(idx, status_p, body_len_p);
+            int idx = i;  /* per-task value */
+            n->spawn(() => [idx, &status, &body_len] {
+                fetch_one(idx, status, body_len);
             });
         }
     }
 
     /* All requests complete - summarize */
-    printf("\n=== Summary ===\n");
+    println("\n=== Summary ===") !>;
     int success = 0;
     int network_errors = 0;
     for (int i = 0; i < NUM_URLS; i++) {
         if (status[i] == 200) success++;
         else if (status[i] == -1) network_errors++;
-        printf("%s: %d (%zu bytes)\n", g_urls[i], status[i], body_len[i]);
+        const char* url = g_urls[i];
+        println(@string(`${url}: ${status[i]} (${body_len[i]} bytes)`, @scratch)) !>;
     }
-    printf("Success: %d/%d\n", success, NUM_URLS);
+    println(@string(`Success: ${success}/${NUM_URLS}`, @scratch)) !>;
 
     if (network_errors == NUM_URLS) {
-        printf("\nSKIP: No network access or all requests failed.\n");
+        println("\nSKIP: No network access or all requests failed.") !>;
         return 0;  /* Return 0 to avoid failing the test runner */
     }
 

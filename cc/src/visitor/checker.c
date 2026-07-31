@@ -28,6 +28,7 @@ typedef struct {
     int is_slice;
     int is_array;
     int is_stack_slice_view;
+    int is_scratch_string;     /* CCString / view from @string(..., @scratch) */
     int is_static_slice;       /* cc_slice_from_static / immortal — channel-stable */
     int is_arena;              /* CCArena (value) local */
     int is_nursery;            /* CCNursery* handle */
@@ -258,6 +259,57 @@ static int cc__subtree_has_call_named(const StubNodeView* nodes,
     return 0;
 }
 
+/* True if any IDENT in the subtree is `__cc_str_scratch_*` (injected @scratch). */
+static int cc__subtree_has_scratch_arena_ident(const StubNodeView* nodes,
+                                               const ChildList* kids,
+                                               int idx) {
+    if (!nodes || !kids) return 0;
+    const StubNodeView* n = &nodes[idx];
+    if (n->kind == CC_STUB_IDENT && n->aux_s1 &&
+        strncmp(n->aux_s1, "__cc_str_scratch_", 17) == 0)
+        return 1;
+    const ChildList* cl = &kids[idx];
+    for (int i = 0; i < cl->len; i++) {
+        if (cc__subtree_has_scratch_arena_ident(nodes, kids, cl->child[i])) return 1;
+    }
+    return 0;
+}
+
+static int cc__scopes_lookup_depth(CCScope* scopes, int n, const char* name, CCSliceVar** out) {
+    for (int i = n - 1; i >= 0; i--) {
+        CCSliceVar* v = cc__scope_find(&scopes[i], name);
+        if (v) {
+            if (out) *out = v;
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int cc__subtree_mentions_scratch_value(const StubNodeView* nodes,
+                                              const ChildList* kids,
+                                              int idx,
+                                              CCScope* scopes,
+                                              int scope_n) {
+    if (!nodes || !kids) return 0;
+    if (cc__subtree_has_scratch_arena_ident(nodes, kids, idx)) return 1;
+    int stack[512];
+    int sp = 0;
+    stack[sp++] = idx;
+    while (sp > 0) {
+        int cur = stack[--sp];
+        const StubNodeView* n = &nodes[cur];
+        if (n->kind == CC_STUB_IDENT && n->aux_s1) {
+            CCSliceVar* v = cc__scopes_lookup(scopes, scope_n, n->aux_s1);
+            if (v && v->is_scratch_string) return 1;
+        }
+        const ChildList* cl = &kids[cur];
+        for (int i = 0; i < cl->len && sp < (int)(sizeof(stack) / sizeof(stack[0])); i++)
+            stack[sp++] = cl->child[i];
+    }
+    return 0;
+}
+
 static int cc__subtree_find_first_ident_matching_scope(const StubNodeView* nodes,
                                                        const ChildList* kids,
                                                        int idx,
@@ -363,6 +415,7 @@ static int cc__closure_captures_stack_slice_view(int closure_idx,
                 if (!is_local) {
                     CCSliceVar* v = cc__scopes_lookup(scopes, scope_n, nm);
                     if (v && v->is_slice && v->is_stack_slice_view) return 1;
+                    if (v && v->is_scratch_string) return 1;
                 }
             }
         }
@@ -1550,6 +1603,19 @@ static int cc__walk_assign(int idx,
             lhs_v->is_arena_ptr = 1;
             lhs_v->arena_name = rhs_v->arena_name;
         }
+        /* Escape: only @scratch *strings* (not `CCArena* p = &__cc_str_scratch_K`). */
+        if (lhs_v && rhs_v && !saw_member && rhs_v->is_scratch_string) {
+            CCSliceVar* lv = NULL;
+            int lhs_depth = cc__scopes_lookup_depth(scopes, *io_scope_n, lhs, &lv);
+            if (lv && lhs_depth >= 0 && lhs_depth < *io_scope_n - 1) {
+                cc__emit_err_cat(ctx, n, CC_ERR_SLICE, "@scratch string escapes scope");
+                fprintf(stderr, "  note: cannot assign @string(..., @scratch) into an outer-scope variable\n");
+                fprintf(stderr, "  hint: pass an explicit CCArena (or CC_ARENA_STACK) for longer-lived strings\n");
+                ctx->errors++;
+                return -1;
+            }
+            lhs_v->is_scratch_string = 1;
+        }
     }
 
     const ChildList* cl = &kids[idx];
@@ -1583,6 +1649,13 @@ static int cc__walk_return(int idx,
             }
             /* cc_move(...) is handled by the move marker call + commit at expression boundary. */
         }
+    }
+    if (cc__subtree_mentions_scratch_value(nodes, kids, idx, scopes, *io_scope_n)) {
+        cc__emit_err_cat(ctx, n, CC_ERR_SLICE, "@scratch string escapes scope");
+        fprintf(stderr, "  note: @string(..., @scratch) products must not leave the enclosing block\n");
+        fprintf(stderr, "  hint: pass an explicit CCArena (or CC_ARENA_STACK) for longer-lived strings\n");
+        ctx->errors++;
+        return -1;
     }
 
     const ChildList* cl = &kids[idx];
@@ -1803,7 +1876,16 @@ static int cc__walk(int idx,
                     /* Moving a move-only slice produces a move-only slice value. */
                     v->move_only = 1;
                 }
+                if (rhs && rhs->is_scratch_string) v->is_scratch_string = 1;
             }
+            /* Mark only string-like destinations built from @scratch — not
+             * `CCArena* p = &__cc_str_scratch_K` temps in @string lowering. */
+            if (cc__subtree_has_scratch_arena_ident(nodes, kids, idx) &&
+                n->aux_s2 &&
+                (strstr(n->aux_s2, "CCString") != NULL ||
+                 strstr(n->aux_s2, "String") != NULL ||
+                 cc__type_spelling_is_slice_like(n->aux_s2)))
+                v->is_scratch_string = 1;
         }
     }
 
@@ -1836,9 +1918,10 @@ static int cc__walk(int idx,
             escapes = g_cc_closure_escapes[idx] != 0;
         if (escapes &&
             cc__closure_captures_stack_slice_view(idx, nodes, kids, scopes, *io_scope_n)) {
-            cc__emit_err_cat(ctx, n, CC_ERR_CLOSURE, "cannot capture stack slice in escaping closure");
-            fprintf(stderr, "  note: the closure outlives the slice's stack frame\n");
-            fprintf(stderr, "  hint: pass slice as parameter, or allocate with heap/arena\n");
+            cc__emit_err_cat(ctx, n, CC_ERR_CLOSURE,
+                             "cannot capture stack slice or @scratch string in escaping closure");
+            fprintf(stderr, "  note: the closure outlives the stack / @scratch frame\n");
+            fprintf(stderr, "  hint: pass as parameter, or allocate with an explicit heap/arena\n");
             ctx->errors++;
             return -1;
         }

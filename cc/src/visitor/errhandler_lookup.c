@@ -22,6 +22,76 @@ static void cc__eh_trim(const char* s, size_t* a, size_t* b) {
     while (*b > *a && isspace((unsigned char)s[*b - 1])) (*b)--;
 }
 
+static int cc__eh_scan_stmt_end_semicolon(const char* s, size_t len, size_t i,
+                                          size_t* out_end) {
+    int par = 0, brk = 0, br = 0;
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0;
+    while (i < len) {
+        if (cc_inert_scan_step(&scan, s, len, &i)) continue;
+        char ch = s[i];
+        if (ch == '(') par++;
+        else if (ch == ')') { if (par) par--; }
+        else if (ch == '[') brk++;
+        else if (ch == ']') { if (brk) brk--; }
+        else if (ch == '{') br++;
+        else if (ch == '}') { if (br) br--; }
+        else if (ch == ';' && par == 0 && brk == 0 && br == 0) {
+            if (out_end) *out_end = i + 1;
+            return 1;
+        }
+        i++;
+    }
+    return 0;
+}
+
+int cc_errhandler_parse_registration(const char* s, size_t n, size_t at,
+                                     size_t* decl_a, size_t* decl_b,
+                                     size_t* body_a, size_t* body_b,
+                                     size_t* stmt_end) {
+    size_t j;
+    size_t rpar = 0;
+    size_t da, db, ba, bb, end;
+    if (!s || at >= n || s[at] != '@') return 0;
+    if (at + 11 > n || memcmp(s + at, "@errhandler", 11) != 0) return 0;
+    if (at + 11 < n && cc_is_ident_char(s[at + 11])) return 0;
+    j = at + 11;
+    while (j < n && isspace((unsigned char)s[j])) j++;
+    if (j >= n || s[j] != '(') return 0;
+    if (!cc_find_matching_paren(s, n, j, &rpar)) return 0;
+    da = j + 1;
+    db = rpar;
+    cc__eh_trim(s, &da, &db);
+    j = rpar + 1;
+    while (j < n && isspace((unsigned char)s[j])) j++;
+    if (j >= n) return 0;
+    if (s[j] == '{') {
+        size_t rbrace = 0;
+        if (!cc_find_matching_brace(s, n, j, &rbrace)) return 0;
+        ba = j + 1;
+        bb = rbrace;
+        cc__eh_trim(s, &ba, &bb);
+        end = rbrace + 1;
+        while (end < n && isspace((unsigned char)s[end])) end++;
+        if (end < n && s[end] == ';') end++;
+    } else {
+        /* Single-statement body: `@errhandler(E e) STMT;` */
+        ba = j;
+        if (!cc__eh_scan_stmt_end_semicolon(s, n, j, &end)) return 0;
+        bb = end;
+        cc__eh_trim(s, &ba, &bb);
+        /* Keep terminating `;` in the body so inlining is a full stmt. */
+        if (bb < end && end > 0 && s[end - 1] == ';') bb = end;
+    }
+    if (decl_a) *decl_a = da;
+    if (decl_b) *decl_b = db;
+    if (body_a) *body_a = ba;
+    if (body_b) *body_b = bb;
+    if (stmt_end) *stmt_end = end;
+    return 1;
+}
+
 int cc_errhandler_split_param_decl(const char* decl,
                                    char* type_out, size_t type_sz,
                                    char* name_out, size_t name_sz) {
@@ -230,37 +300,17 @@ int cc_errhandler_stack_build_at(const char* s, size_t n, size_t pos,
             (i + 11 >= n || !cc_is_ident_char(s[i + 11])) &&
             (i == 0 || !cc_is_ident_char(s[i - 1]))) {
             size_t at = i;
-            size_t j = i + 11;
-            size_t rpar = 0;
-            size_t rbrace = 0;
-            size_t decl_a, decl_b;
-            while (j < n && isspace((unsigned char)s[j])) j++;
-            if (j >= n || s[j] != '(') {
-                i++;
-                continue;
-            }
-            if (!cc_find_matching_paren(s, n, j, &rpar)) {
-                i++;
-                continue;
-            }
-            decl_a = j + 1;
-            decl_b = rpar;
-            cc__eh_trim(s, &decl_a, &decl_b);
-            j = rpar + 1;
-            while (j < n && isspace((unsigned char)s[j])) j++;
-            if (j >= n || s[j] != '{') {
-                i++;
-                continue;
-            }
-            if (!cc_find_matching_brace(s, n, j, &rbrace)) {
+            size_t decl_a = 0, decl_b = 0, body_a = 0, body_b = 0, stmt_end = 0;
+            if (!cc_errhandler_parse_registration(s, n, at, &decl_a, &decl_b,
+                                                  &body_a, &body_b, &stmt_end)) {
                 i++;
                 continue;
             }
             if (cc__eh_push(out, depth, s + decl_a, decl_b - decl_a,
-                            s + j + 1, rbrace - (j + 1), at) != 0) {
+                            s + body_a, body_b - body_a, at) != 0) {
                 return -1;
             }
-            i = rbrace + 1;
+            i = stmt_end;
             continue;
         }
         if (ch == '{') {

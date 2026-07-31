@@ -1,0 +1,25 @@
+/*
+ * Compose then default: local work in !>(e) { ... }, then @err(e)
+ * forwards to the matching @errhandler.
+ */
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+#include <stdlib.h>
+
+static int !>(CCError) fail_once(void) {
+    return cc_err(CC_ERR_INVALID_ARG, "compose");
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        (void)e;
+        puts("default");
+        exit(0);
+    }
+
+    fail_once() !>(e) {
+        puts("local");
+        @err(e);
+    };
+    return 1;
+}

@@ -1,0 +1,4 @@
+slots[0]=10 lens[0]=1
+slots[1]=20 lens[1]=2
+slots[2]=30 lens[2]=3
+closure_array_ref_capture_smoke: PASS

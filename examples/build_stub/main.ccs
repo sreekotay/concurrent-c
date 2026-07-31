@@ -13,11 +13,12 @@
  *
  * These can be overridden with CLI -D flags.
  */
-#include <stdio.h>
+#include <ccc/script/stdio.cch>
+#include <stdlib.h>
 
 int main(void) {
-    printf("build_stub example\n");
-    printf("See build.cc for CC_CONST declarations\n");
+    @errhandler(CCError e) cc_error_exit(e);
+    println("build_stub example") !>;
+    println("See build.cc for CC_CONST declarations") !>;
     return 0;
 }
-

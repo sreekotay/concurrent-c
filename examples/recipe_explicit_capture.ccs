@@ -15,35 +15,49 @@
  * CCMutex::[T]) or the closure is marked @unsafe.
  */
 #include <ccc/cc_runtime.cch>
-#include <stdio.h>
+#include <stdlib.h>
+#include <ccc/script/stdio.cch>
 
 int main(void) {
-    @errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); return 1; }
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
 
     /* --- value capture (default) --- */
     int snapshot = 42;
-    printf("=== value capture ===\n");
-    printf("before: snapshot = %d\n", snapshot);
+    println("=== value capture ===") !>;
+    println(@string(`before: snapshot = ${snapshot}`, @scratch)) !>;
     {
         CCNursery* n = cc_nursery_create(NULL) !> @destroy;
-        n->spawn(() => printf("  task A sees snapshot = %d\n", snapshot));
-        n->spawn(() => printf("  task B sees snapshot = %d\n", snapshot));
+        n->spawn(() => {
+            @errhandler(CCError e) cc_error_exit(e);
+            int seen = snapshot;
+            println(@string(`  task A sees snapshot = ${seen}`, @scratch)) !>;
+        });
+        n->spawn(() => {
+            @errhandler(CCError e) cc_error_exit(e);
+            int seen = snapshot;
+            println(@string(`  task B sees snapshot = ${seen}`, @scratch)) !>;
+        });
         /* snapshot++ inside the body would be a compile error:
          * value-captured variables are immutable. */
     }
-    printf("after:  snapshot = %d (unchanged)\n\n", snapshot);
+    println(@string(`after:  snapshot = ${snapshot} (unchanged)`, @scratch)) !>;
+    println("") !>;
 
     /* --- reference capture (read-only) --- */
     int counter = 100;
-    printf("=== reference capture (read-only) ===\n");
-    printf("before: counter = %d\n", counter);
+    println("=== reference capture (read-only) ===") !>;
+    println(@string(`before: counter = ${counter}`, @scratch)) !>;
     {
         CCNursery* n = cc_nursery_create(NULL) !> @destroy;
-        n->spawn(() => [&counter] { printf("  task C reads counter = %d\n", counter); });
+        n->spawn(() => [&counter] {
+            @errhandler(CCError e) cc_error_exit(e);
+            println(@string(`  task C reads counter = ${counter}`, @scratch)) !>;
+        });
         /* counter++ in the body would be a compile error:
          * mutation of a shared reference requires a safe wrapper. */
     }
-    printf("after:  counter = %d\n\n", counter);
+    println(@string(`after:  counter = ${counter}`, @scratch)) !>;
+    println("") !>;
 
     /* --- when you need mutation ---
      *   CCAtomic::[int] counter        — lock-free atomic ops

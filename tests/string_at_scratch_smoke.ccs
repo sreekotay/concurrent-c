@@ -1,0 +1,26 @@
+/* @string(..., @scratch) / @scratch(N): per-site stack arena sugar. */
+#include <ccc/std/prelude.cch>
+#include <ccc/script/stdio.cch>
+#include <assert.h>
+#include <stdio.h>
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    double ratio = 1.5;
+    CCString s = @string(`r=${ratio}`, @scratch);
+    assert(s.as_slice().eq_cstr("r=1.5"));
+    println(s) !>;
+
+    int x = 42;
+    println(@string(`x=${x}`, @scratch(256))) !>;
+
+    const char* who = "ada";
+    CCString a = @string(`w=${who}`, @scratch);
+    CCString b = @string(`n=${x}`, @scratch(128));
+    assert(a.as_slice().eq_cstr("w=ada"));
+    assert(b.as_slice().eq_cstr("n=42"));
+
+    printf("string_at_scratch_smoke: PASS\n");
+    return 0;
+}

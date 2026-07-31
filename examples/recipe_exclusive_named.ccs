@@ -17,8 +17,9 @@
  * Keep critical sections short; park/await under the lock stalls others.
  */
 #include <ccc/std/prelude.cch>
+#include <stdlib.h>
 #include <ccc/cc_exclusive.cch>
-#include <stdio.h>
+#include <ccc/script/stdio.cch>
 
 #define NUM_WORKERS 4
 #define ITERS       1000
@@ -50,19 +51,16 @@ static void bump_private(int worker_id, int iters) {
 }
 
 int main(void) {
-    @errhandler(CCError e) {
-        fprintf(stderr, "fatal: %s\n", e.message);
-        return 1;
-    }
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
 
     CCArena excl_arena = @create(kilobytes(64)) @destroy;
     g_excl = cc_exclusive_create(&excl_arena);
     if (!g_excl) {
-        fprintf(stderr, "cc_exclusive_create failed\n");
+        eprintln("cc_exclusive_create failed") !>;
         return 1;
     }
 
-    printf("=== Named exclusive: %d workers × %d iters ===\n", NUM_WORKERS, ITERS);
+    println(@string(`=== Named exclusive: ${NUM_WORKERS} workers × ${ITERS} iters ===`, @scratch)) !>;
 
     /* Shared name: all workers serialize on counter name=1. */
     {
@@ -91,15 +89,13 @@ int main(void) {
     }
 
     int64_t expect = (int64_t)NUM_WORKERS * (int64_t)ITERS;
-    printf("shared  = %lld (expect %lld)\n",
-           (long long)g_shared.value, (long long)expect);
-    printf("private = %lld (expect %lld)\n",
-           (long long)private_sum, (long long)expect);
+    println(@string(`shared  = ${g_shared.value} (expect ${expect})`, @scratch)) !>;
+    println(@string(`private = ${private_sum} (expect ${expect})`, @scratch)) !>;
 
     g_excl->destroy();
     g_excl = NULL;
 
     if (g_shared.value != expect || private_sum != expect) return 1;
-    printf("OK\n");
+    println("OK") !>;
     return 0;
 }
