@@ -1,0 +1,14 @@
+#include <ccc/std/prelude.cch>
+#include "comptime_static_map_in_header.cch"
+#include <stdio.h>
+
+int main(void) {
+    if (hdr_cmd_arity(char_to_slice("get")) != 1) return 1;
+    if (hdr_cmd_arity(char_to_slice("SET")) != 2) return 2;
+    if (hdr_cmd_arity(char_to_slice("NOPE")) != -1) return 3;
+    if (!hdr_commands_get(char_to_slice("Get")) ||
+        hdr_commands_get(char_to_slice("Get"))->kind != HDR_CMD_GET)
+        return 4;
+    puts("comptime_static_map_in_header_smoke: PASS");
+    return 0;
+}

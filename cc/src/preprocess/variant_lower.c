@@ -596,23 +596,17 @@ static void cc__va_hits_reset(void) {
     g_va_hits_n = 0;
 }
 
-static const CCVaIdHits* cc__va_hits_for(const char* s, size_t n,
-                                         const char* id, size_t idl) {
-    size_t i, from;
+/* Grow / locate a per-name hit bucket. Returns NULL on OOM. */
+static CCVaIdHits* cc__va_hits_bucket(const char* id, size_t idl) {
+    size_t i;
     CCVaIdHits* slot;
-    if (!s || !id || idl == 0) return NULL;
-    if (s != g_va_hits_s || n != g_va_hits_n) {
-        cc__va_hits_reset();
-        g_va_hits_s = s;
-        g_va_hits_n = n;
-    }
     for (i = 0; i < g_va_hits_count; i++) {
         if (g_va_hits[i].idl == idl &&
             memcmp(g_va_hits[i].id, id, idl) == 0)
             return &g_va_hits[i];
     }
     if (g_va_hits_count == g_va_hits_cap) {
-        size_t cap = g_va_hits_cap ? g_va_hits_cap * 2 : 32;
+        size_t cap = g_va_hits_cap ? g_va_hits_cap * 2 : 64;
         CCVaIdHits* nv = (CCVaIdHits*)realloc(g_va_hits, cap * sizeof(*nv));
         if (!nv) return NULL;
         g_va_hits = nv;
@@ -625,22 +619,110 @@ static const CCVaIdHits* cc__va_hits_for(const char* s, size_t n,
     memcpy(slot->id, id, idl);
     slot->id[idl] = 0;
     slot->idl = idl;
-    from = 0;
-    while (from < n) {
-        size_t h = cc_find_ident_top_level(s, from, n, id, idl);
-        size_t* hv;
-        if (h >= n) break;
-        from = h + idl;
-        if (slot->n_hits == slot->hits_cap) {
-            size_t cap = slot->hits_cap ? slot->hits_cap * 2 : 8;
-            hv = (size_t*)realloc(slot->hits, cap * sizeof(*hv));
-            if (!hv) break;
-            slot->hits = hv;
-            slot->hits_cap = cap;
-        }
-        slot->hits[slot->n_hits++] = h;
-    }
     g_va_hits_count++;
+    return slot;
+}
+
+static int cc__va_hits_push(CCVaIdHits* slot, size_t off) {
+    size_t* hv;
+    if (!slot) return -1;
+    if (slot->n_hits == slot->hits_cap) {
+        size_t cap = slot->hits_cap ? slot->hits_cap * 2 : 8;
+        hv = (size_t*)realloc(slot->hits, cap * sizeof(*hv));
+        if (!hv) return -1;
+        slot->hits = hv;
+        slot->hits_cap = cap;
+    }
+    slot->hits[slot->n_hits++] = off;
+    return 0;
+}
+
+/* One pass over the buffer — same inert rules as cc_find_ident_top_level —
+ * indexing every word-bounded ident.  Turns O(unique_ids · n) resolve work
+ * into O(n) per buffer version (redis-sized TUs). */
+static int cc__va_hits_index_all(const char* s, size_t n) {
+    int in_lc = 0, in_bc = 0, ins = 0;
+    char q = 0;
+    size_t p = 0;
+    while (p < n) {
+        char c = s[p];
+        char c2 = (p + 1 < n) ? s[p + 1] : 0;
+        if (in_lc) {
+            if (c == '\n') in_lc = 0;
+            p++;
+            continue;
+        }
+        if (in_bc) {
+            if (c == '*' && c2 == '/') {
+                in_bc = 0;
+                p += 2;
+            } else {
+                p++;
+            }
+            continue;
+        }
+        if (ins) {
+            if (c == '\\' && p + 1 < n) {
+                p += 2;
+                continue;
+            }
+            if (c == q) ins = 0;
+            p++;
+            continue;
+        }
+        if (c == '/' && c2 == '/') {
+            in_lc = 1;
+            p += 2;
+            continue;
+        }
+        if (c == '/' && c2 == '*') {
+            in_bc = 1;
+            p += 2;
+            continue;
+        }
+        if (c == '"' || c == '\'') {
+            ins = 1;
+            q = c;
+            p++;
+            continue;
+        }
+        if (cc_is_ident_start(c)) {
+            size_t start = p++;
+            CCVaIdHits* slot;
+            while (p < n && cc_is_ident_char(s[p])) p++;
+            slot = cc__va_hits_bucket(s + start, p - start);
+            if (!slot || cc__va_hits_push(slot, start) != 0) return -1;
+            continue;
+        }
+        p++;
+    }
+    return 0;
+}
+
+static const CCVaIdHits* cc__va_hits_for(const char* s, size_t n,
+                                         const char* id, size_t idl) {
+    size_t i;
+    CCVaIdHits* slot;
+    if (!s || !id || idl == 0) return NULL;
+    if (s != g_va_hits_s || n != g_va_hits_n) {
+        cc__va_hits_reset();
+        g_va_hits_s = s;
+        g_va_hits_n = n;
+        /* Full-buffer index; on OOM leave empty so resolve falls back. */
+        if (cc__va_hits_index_all(s, n) != 0) {
+            cc__va_hits_reset();
+            g_va_hits_s = s;
+            g_va_hits_n = n;
+            return NULL;
+        }
+    }
+    for (i = 0; i < g_va_hits_count; i++) {
+        if (g_va_hits[i].idl == idl &&
+            memcmp(g_va_hits[i].id, id, idl) == 0)
+            return &g_va_hits[i];
+    }
+    /* Present-but-never-seen id: empty bucket (same as a full miss scan). */
+    slot = cc__va_hits_bucket(id, idl);
     return slot;
 }
 

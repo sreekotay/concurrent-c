@@ -325,17 +325,49 @@ static int cc__is_storage_keyword_range(const char* s, size_t n) {
  * cc__extract_function_return_type: a naive backward walk from the function
  * name happily lands on a `;` inside a long block-comment header,
  * which then makes the return-type extractor splice a huge chunk of source
- * into the function prologue.  Scan is O(end) per call. */
+ * into the function prologue.
+ *
+ * Hot path: defer rewrite builds a prefix table once (g_defer_last_term[end])
+ * so each function brace is O(1) instead of O(end). */
+static const size_t* g_defer_last_term = NULL;
+static size_t g_defer_last_term_len = 0;
+
+static size_t* cc__build_last_stmt_terminator_prefix(const char* s, size_t len) {
+    size_t* pref;
+    size_t last = 0;
+    size_t i = 0;
+    CCInertScan scan;
+    if (!s) return NULL;
+    pref = (size_t*)malloc((len + 1) * sizeof(size_t));
+    if (!pref) return NULL;
+    cc_inert_scan_init(&scan, NULL);
+    while (i < len) {
+        pref[i] = last;
+        if (cc_inert_scan_step(&scan, s, len, &i)) continue;
+        {
+            char c = s[i];
+            if (c == ';' || c == '{' || c == '}') last = i + 1;
+        }
+        i++;
+    }
+    pref[len] = last;
+    return pref;
+}
+
 static size_t cc__last_stmt_terminator_before(const char* s, size_t end) {
     size_t last = 0;
     CCInertScan scan;
-    if (!s || end == 0) return 0;
-    cc_inert_scan_init(&scan, NULL);
     size_t i = 0;
+    if (!s || end == 0) return 0;
+    if (g_defer_last_term && end <= g_defer_last_term_len)
+        return g_defer_last_term[end];
+    cc_inert_scan_init(&scan, NULL);
     while (i < end) {
         if (cc_inert_scan_step(&scan, s, end, &i)) continue;
-        char c = s[i];
-        if (c == ';' || c == '{' || c == '}') last = i + 1;
+        {
+            char c = s[i];
+            if (c == ';' || c == '{' || c == '}') last = i + 1;
+        }
         i++;
     }
     return last;
@@ -785,6 +817,7 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
                             char** out_src,
                             size_t* out_len,
                             int line_marks) {
+    size_t* last_term_pref = NULL;
     if (!ctx || !in_src || !out_src || !out_len) return 0;
     *out_src = NULL;
     *out_len = 0;
@@ -806,6 +839,9 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
 
     int depth = 0;
     int line_no = 1;
+    last_term_pref = cc__build_last_stmt_terminator_prefix(in_src, in_len);
+    g_defer_last_term = last_term_pref;
+    g_defer_last_term_len = last_term_pref ? in_len : 0;
     /* Inert regions (comments / strings / char literals / preprocessor
      * directive bodies) are consumed by the shared CCInertScan.  The pp
      * coverage matters: without it, a benign
@@ -862,6 +898,9 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
                               "'cancel' is not implemented in defer lowering (use structured scopes instead)");
             for (int d = 0; d < 256; d++) cc__free_defer_list(defers[d], defer_counts[d]);
             free(out);
+            g_defer_last_term = NULL;
+            g_defer_last_term_len = 0;
+            free(last_term_pref);
             return -1;
         }
 
@@ -895,6 +934,9 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
                                   "malformed 'return' while lowering @defer (expected ';')");
                 for (int d = 0; d < 256; d++) cc__free_defer_list(defers[d], defer_counts[d]);
                 free(out);
+                g_defer_last_term = NULL;
+                g_defer_last_term_len = 0;
+                free(last_term_pref);
                 return -1;
             }
             int has_defers = 0;
@@ -1204,6 +1246,9 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
                                   "malformed 'continue' while lowering @defer (expected ';')");
                 for (int d = 0; d < 256; d++) cc__free_defer_list(defers[d], defer_counts[d]);
                 free(out);
+                g_defer_last_term = NULL;
+                g_defer_last_term_len = 0;
+                free(last_term_pref);
                 return -1;
             }
 
@@ -1257,6 +1302,9 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
                                   "malformed 'break' while lowering @defer (expected ';')");
                 for (int d = 0; d < 256; d++) cc__free_defer_list(defers[d], defer_counts[d]);
                 free(out);
+                g_defer_last_term = NULL;
+                g_defer_last_term_len = 0;
+                free(last_term_pref);
                 return -1;
             }
 
@@ -1358,6 +1406,9 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
                                   "malformed '@defer' statement (expected ';' after deferred action)");
                 for (int d = 0; d < 256; d++) cc__free_defer_list(defers[d], defer_counts[d]);
                 free(out);
+                g_defer_last_term = NULL;
+                g_defer_last_term_len = 0;
+                free(last_term_pref);
                 return -1;
             }
 
@@ -1366,6 +1417,9 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
             if (!stmt) {
                 for (int d = 0; d < 256; d++) cc__free_defer_list(defers[d], defer_counts[d]);
                 free(out);
+                g_defer_last_term = NULL;
+                g_defer_last_term_len = 0;
+                free(last_term_pref);
                 return -1;
             }
             memcpy(stmt, in_src + stmt_start, stmt_len);
@@ -1374,6 +1428,9 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
             if (!stmt) {
                 for (int d = 0; d < 256; d++) cc__free_defer_list(defers[d], defer_counts[d]);
                 free(out);
+                g_defer_last_term = NULL;
+                g_defer_last_term_len = 0;
+                free(last_term_pref);
                 return -1;
             }
 
@@ -1387,6 +1444,9 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
                     free(stmt);
                     for (int d = 0; d < 256; d++) cc__free_defer_list(defers[d], defer_counts[d]);
                     free(out);
+                    g_defer_last_term = NULL;
+                    g_defer_last_term_len = 0;
+                    free(last_term_pref);
                     return -1;
                 }
                 defers[defer_depth] = nb;
@@ -1665,6 +1725,10 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
     }
 
     for (int d = 0; d < 256; d++) cc__free_defer_list(defers[d], defer_counts[d]);
+    g_defer_last_term = NULL;
+    g_defer_last_term_len = 0;
+    free(last_term_pref);
+    last_term_pref = NULL;
 
     if (!changed) {
         free(out);

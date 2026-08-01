@@ -1,1 +1,1 @@
-cannot capture stack slice in escaping closure
+cannot capture stack slice or @scratch string in escaping closure

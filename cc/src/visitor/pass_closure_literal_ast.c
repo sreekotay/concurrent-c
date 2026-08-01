@@ -710,53 +710,78 @@ static void cc__maybe_record_decl(char*** scope_names,
     }
 }
 
-static size_t cc__last_top_level_semi_offset(const char* line) {
-    if (!line) return 0;
-    size_t n = strlen(line);
-    size_t last = 0;  /* 0 = no semi found */
-    int paren_depth = 0, brace_depth = 0, bracket_depth = 0;
-    CCInertScan scan;
-    cc_inert_scan_init(&scan, NULL);
-    size_t i = 0;
-    while (i < n) {
-        if (cc_inert_scan_step(&scan, line, n, &i)) continue;
-        char c = line[i];
-        if (c == '(') paren_depth++;
-        else if (c == ')') { if (paren_depth > 0) paren_depth--; }
-        else if (c == '{') brace_depth++;
-        else if (c == '}') { if (brace_depth > 0) brace_depth--; }
-        else if (c == '[') bracket_depth++;
-        else if (c == ']') { if (bracket_depth > 0) bracket_depth--; }
-        else if (c == ';' && paren_depth == 0 && brace_depth == 0 && bracket_depth == 0) {
-            last = i + 1;
+/* Rolling scan over a decl_carry buffer. Callers append lines then feed only
+ * the new suffix — avoids O(lines × carry) full rescans on large TUs. */
+typedef struct {
+    size_t scanned;     /* bytes of carry already scanned */
+    size_t last_semi;   /* 0, or exclusive end offset of last top-level ';' */
+    int paren_depth;
+    int brace_depth;
+    int bracket_depth;
+    int has_tl_brace;
+    CCInertScan inert;
+} CCCarrySemiState;
+
+static void cc__carry_semi_state_init(CCCarrySemiState* st) {
+    if (!st) return;
+    memset(st, 0, sizeof(*st));
+    cc_inert_scan_init(&st->inert, NULL);
+}
+
+static void cc__carry_semi_feed(CCCarrySemiState* st, const char* carry, size_t carry_len) {
+    size_t i;
+    if (!st || !carry) return;
+    if (carry_len < st->scanned) {
+        /* Buffer was truncated/replaced — rescan from scratch. */
+        cc__carry_semi_state_init(st);
+    }
+    i = st->scanned;
+    while (i < carry_len) {
+        if (cc_inert_scan_step(&st->inert, carry, carry_len, &i)) continue;
+        char c = carry[i];
+        if (c == '(') st->paren_depth++;
+        else if (c == ')') { if (st->paren_depth > 0) st->paren_depth--; }
+        else if (c == '{') {
+            st->brace_depth++;
+            if (st->paren_depth == 0 && st->bracket_depth == 0) st->has_tl_brace = 1;
+        } else if (c == '}') {
+            if (st->paren_depth == 0 && st->bracket_depth == 0) st->has_tl_brace = 1;
+            if (st->brace_depth > 0) st->brace_depth--;
+        } else if (c == '[') st->bracket_depth++;
+        else if (c == ']') { if (st->bracket_depth > 0) st->bracket_depth--; }
+        else if (c == ';' && st->paren_depth == 0 && st->brace_depth == 0 &&
+                 st->bracket_depth == 0) {
+            st->last_semi = i + 1;
         }
         i++;
     }
-    return last;
+    st->scanned = carry_len;
+}
+
+/* After consume/clear, re-establish depths for the remaining carry prefix. */
+static void cc__carry_semi_reset_feed(CCCarrySemiState* st, const char* carry, size_t carry_len) {
+    cc__carry_semi_state_init(st);
+    cc__carry_semi_feed(st, carry, carry_len);
+}
+
+static size_t cc__last_top_level_semi_offset(const char* line) {
+    CCCarrySemiState st;
+    if (!line) return 0;
+    cc__carry_semi_state_init(&st);
+    cc__carry_semi_feed(&st, line, strlen(line));
+    return st.last_semi;
 }
 
 static int cc__has_top_level_brace(const char* line) {
+    CCCarrySemiState st;
     if (!line) return 0;
-    size_t n = strlen(line);
-    int paren_depth = 0, bracket_depth = 0;
-    CCInertScan scan;
-    cc_inert_scan_init(&scan, NULL);
     /* Note: callers pass comment-stripped text (built from
      * `cc__src_strip_comments_and_strings`), so original's lack of
      * comment tracking was harmless.  Migrated form adds comment
      * awareness for free — defensive against any future caller. */
-    size_t i = 0;
-    while (i < n) {
-        if (cc_inert_scan_step(&scan, line, n, &i)) continue;
-        char c = line[i];
-        if (c == '(') paren_depth++;
-        else if (c == ')') { if (paren_depth > 0) paren_depth--; }
-        else if (c == '[') bracket_depth++;
-        else if (c == ']') { if (bracket_depth > 0) bracket_depth--; }
-        else if ((c == '{' || c == '}') && paren_depth == 0 && bracket_depth == 0) return 1;
-        i++;
-    }
-    return 0;
+    cc__carry_semi_state_init(&st);
+    cc__carry_semi_feed(&st, line, strlen(line));
+    return st.has_tl_brace;
 }
 
 static const char* cc__lookup_decl_type(char** scope_names,
@@ -975,172 +1000,376 @@ static char* cc__lookup_internal_generated_decl_type(const char* src,
     return result;
 }
 
+/* One-pass name→type maps for closure capture text fallbacks.
+ * Hot path used to rebuild these maps once per probed identifier. */
+typedef struct {
+    char** names;
+    char** types;
+    unsigned char* flags;
+    int count;
+} CCDeclTextIndex;
+
+/* Incremental builders: closures are visited in source order, so extend the
+ * maps once across the TU instead of rescanning [0, start_off) per closure. */
+typedef struct {
+    CCDeclTextIndex idx;
+    char* decl_carry;
+    size_t carry_len;
+    size_t built_to;
+    CCCarrySemiState carry_semi;
+    char** scope_names[2];
+    char** scope_types[2];
+    unsigned char* scope_flags[2];
+    int scope_counts[2];
+    int synced_count; /* scope_counts[1] entries already appended to idx */
+} CCNestedDeclBuilder;
+
+typedef struct {
+    CCDeclTextIndex idx;
+    char* decl_carry;
+    size_t carry_len;
+    size_t built_to;
+    int depth;
+    CCCarrySemiState carry_semi;
+    char** scope_names[1];
+    char** scope_types[1];
+    unsigned char* scope_flags[1];
+    int scope_counts[1];
+    int synced_count;
+} CCToplevelDeclBuilder;
+
+static void cc__decl_text_index_clear(CCDeclTextIndex* idx) {
+    int i;
+    if (!idx) return;
+    for (i = 0; i < idx->count; i++) {
+        free(idx->names ? idx->names[i] : NULL);
+        free(idx->types ? idx->types[i] : NULL);
+    }
+    free(idx->names);
+    free(idx->types);
+    free(idx->flags);
+    idx->names = NULL;
+    idx->types = NULL;
+    idx->flags = NULL;
+    idx->count = 0;
+}
+
+static int cc__decl_text_index_append_range(CCDeclTextIndex* idx,
+                                            char** names,
+                                            char** types,
+                                            unsigned char* flags,
+                                            int from,
+                                            int to) {
+    int n;
+    char** nn;
+    char** tn;
+    unsigned char* fn;
+    int i;
+    if (!idx || from >= to) return 0;
+    n = idx->count + (to - from);
+    nn = (char**)realloc(idx->names, (size_t)n * sizeof(char*));
+    tn = (char**)realloc(idx->types, (size_t)n * sizeof(char*));
+    fn = (unsigned char*)realloc(idx->flags, (size_t)n * sizeof(unsigned char));
+    if (!nn || !tn || !fn) {
+        if (nn && nn != idx->names) idx->names = nn;
+        if (tn && tn != idx->types) idx->types = tn;
+        if (fn && fn != idx->flags) idx->flags = fn;
+        return -1;
+    }
+    idx->names = nn;
+    idx->types = tn;
+    idx->flags = fn;
+    for (i = from; i < to; i++) {
+        idx->names[idx->count] = names && names[i] ? strdup(names[i]) : NULL;
+        idx->types[idx->count] = types && types[i] ? strdup(types[i]) : NULL;
+        idx->flags[idx->count] = flags ? flags[i] : 0;
+        idx->count++;
+    }
+    return 0;
+}
+
+static void cc__nested_decl_builder_clear(CCNestedDeclBuilder* b) {
+    int d, i;
+    if (!b) return;
+    cc__decl_text_index_clear(&b->idx);
+    free(b->decl_carry);
+    for (d = 0; d < 2; d++) {
+        for (i = 0; i < b->scope_counts[d]; i++) {
+            free(b->scope_names[d] ? b->scope_names[d][i] : NULL);
+            free(b->scope_types[d] ? b->scope_types[d][i] : NULL);
+        }
+        free(b->scope_names[d]);
+        free(b->scope_types[d]);
+        free(b->scope_flags[d]);
+    }
+    memset(b, 0, sizeof(*b));
+    cc__carry_semi_state_init(&b->carry_semi);
+}
+
+static void cc__toplevel_decl_builder_clear(CCToplevelDeclBuilder* b) {
+    int i;
+    if (!b) return;
+    cc__decl_text_index_clear(&b->idx);
+    free(b->decl_carry);
+    for (i = 0; i < b->scope_counts[0]; i++) {
+        free(b->scope_names[0] ? b->scope_names[0][i] : NULL);
+        free(b->scope_types[0] ? b->scope_types[0][i] : NULL);
+    }
+    free(b->scope_names[0]);
+    free(b->scope_types[0]);
+    free(b->scope_flags[0]);
+    memset(b, 0, sizeof(*b));
+    cc__carry_semi_state_init(&b->carry_semi);
+}
+
+static const char* cc__decl_text_index_lookup(const CCDeclTextIndex* idx,
+                                              const char* name,
+                                              unsigned char* out_flags) {
+    int i;
+    if (out_flags) *out_flags = 0;
+    if (!idx || !name) return NULL;
+    for (i = 0; i < idx->count; i++) {
+        if (!idx->names || !idx->names[i]) continue;
+        if (strcmp(idx->names[i], name) != 0) continue;
+        if (out_flags && idx->flags) *out_flags = idx->flags[i];
+        return idx->types ? idx->types[i] : NULL;
+    }
+    return NULL;
+}
+
+/* Extend nested (depth-1) decl map up to `before_off`. Closures call this with
+ * increasing offsets so each byte of `clean` is scanned once per TU. */
+static int cc__nested_decl_builder_extend(CCNestedDeclBuilder* b,
+                                          const char* clean,
+                                          size_t before_off) {
+    size_t off;
+    if (!b || !clean) return -1;
+    if (before_off <= b->built_to) return 0;
+    if (b->built_to == 0 && b->carry_semi.scanned == 0)
+        cc__carry_semi_state_init(&b->carry_semi);
+    off = b->built_to;
+    while (off < before_off) {
+        size_t line_end = off;
+        size_t line_len;
+        char* next_carry;
+        int count_before;
+        while (line_end < before_off && clean[line_end] != '\n') line_end++;
+        line_len = line_end - off;
+        {
+            const char* line_s = clean + off;
+            const char* line_e = clean + line_end;
+            while (line_s < line_e && (*line_s == ' ' || *line_s == '\t' || *line_s == '\r')) line_s++;
+            if (line_s < line_e && *line_s == '#') {
+                if (b->decl_carry) {
+                    b->decl_carry[0] = '\0';
+                    b->carry_len = 0;
+                    cc__carry_semi_state_init(&b->carry_semi);
+                }
+                off = line_end < before_off && clean[line_end] == '\n' ? line_end + 1 : line_end;
+                continue;
+            }
+        }
+        next_carry = (char*)realloc(b->decl_carry, b->carry_len + line_len + 2);
+        if (!next_carry) break;
+        b->decl_carry = next_carry;
+        memcpy(b->decl_carry + b->carry_len, clean + off, line_len);
+        b->carry_len += line_len;
+        b->decl_carry[b->carry_len++] = '\n';
+        b->decl_carry[b->carry_len] = '\0';
+        cc__carry_semi_feed(&b->carry_semi, b->decl_carry, b->carry_len);
+        if (b->carry_semi.last_semi > 0) {
+            size_t consumed = b->carry_semi.last_semi;
+            size_t remain = b->carry_len - consumed;
+            char saved = b->decl_carry[consumed];
+            count_before = b->scope_counts[1];
+            b->decl_carry[consumed] = '\0';
+            cc__maybe_record_decl(b->scope_names, b->scope_types, b->scope_flags, b->scope_counts,
+                                  1, b->decl_carry);
+            b->decl_carry[consumed] = saved;
+            if (b->scope_counts[1] > count_before) {
+                if (cc__decl_text_index_append_range(&b->idx, b->scope_names[1], b->scope_types[1],
+                                                     b->scope_flags[1], count_before,
+                                                     b->scope_counts[1]) != 0)
+                    return -1;
+                b->synced_count = b->scope_counts[1];
+            }
+            memmove(b->decl_carry, b->decl_carry + consumed, remain + 1);
+            b->carry_len = remain;
+            cc__carry_semi_reset_feed(&b->carry_semi, b->decl_carry, b->carry_len);
+        } else if (b->carry_semi.has_tl_brace) {
+            b->decl_carry[0] = '\0';
+            b->carry_len = 0;
+            cc__carry_semi_state_init(&b->carry_semi);
+        }
+        off = line_end < before_off && clean[line_end] == '\n' ? line_end + 1 : line_end;
+    }
+    b->built_to = before_off;
+    return 0;
+}
+
+static int cc__toplevel_decl_builder_extend(CCToplevelDeclBuilder* b,
+                                            const char* clean,
+                                            size_t before_off) {
+    size_t off;
+    if (!b || !clean) return -1;
+    if (before_off <= b->built_to) return 0;
+    if (b->built_to == 0 && b->carry_semi.scanned == 0)
+        cc__carry_semi_state_init(&b->carry_semi);
+    off = b->built_to;
+    while (off < before_off) {
+        size_t line_end = off;
+        size_t line_len;
+        size_t i;
+        while (line_end < before_off && clean[line_end] != '\n') line_end++;
+        line_len = line_end - off;
+        {
+            const char* line_s = clean + off;
+            const char* line_e = clean + line_end;
+            while (line_s < line_e && (*line_s == ' ' || *line_s == '\t' || *line_s == '\r')) line_s++;
+            if (line_s < line_e && *line_s == '#') {
+                if (b->decl_carry) {
+                    b->decl_carry[0] = '\0';
+                    b->carry_len = 0;
+                    cc__carry_semi_state_init(&b->carry_semi);
+                }
+                off = line_end < before_off && clean[line_end] == '\n' ? line_end + 1 : line_end;
+                continue;
+            }
+        }
+        if (b->depth == 0) {
+            char* next_carry = (char*)realloc(b->decl_carry, b->carry_len + line_len + 2);
+            int count_before;
+            if (!next_carry) break;
+            b->decl_carry = next_carry;
+            memcpy(b->decl_carry + b->carry_len, clean + off, line_len);
+            b->carry_len += line_len;
+            b->decl_carry[b->carry_len++] = '\n';
+            b->decl_carry[b->carry_len] = '\0';
+            cc__carry_semi_feed(&b->carry_semi, b->decl_carry, b->carry_len);
+            if (b->carry_semi.last_semi > 0) {
+                size_t consumed = b->carry_semi.last_semi;
+                size_t remain = b->carry_len - consumed;
+                char saved = b->decl_carry[consumed];
+                count_before = b->scope_counts[0];
+                b->decl_carry[consumed] = '\0';
+                cc__maybe_record_decl(b->scope_names, b->scope_types, b->scope_flags, b->scope_counts,
+                                      0, b->decl_carry);
+                b->decl_carry[consumed] = saved;
+                if (b->scope_counts[0] > count_before) {
+                    if (cc__decl_text_index_append_range(&b->idx, b->scope_names[0], b->scope_types[0],
+                                                         b->scope_flags[0], count_before,
+                                                         b->scope_counts[0]) != 0)
+                        return -1;
+                    b->synced_count = b->scope_counts[0];
+                }
+                memmove(b->decl_carry, b->decl_carry + consumed, remain + 1);
+                b->carry_len = remain;
+                cc__carry_semi_reset_feed(&b->carry_semi, b->decl_carry, b->carry_len);
+            } else if (b->carry_semi.has_tl_brace) {
+                b->decl_carry[0] = '\0';
+                b->carry_len = 0;
+                cc__carry_semi_state_init(&b->carry_semi);
+            }
+        }
+        for (i = off; i < line_end; i++) {
+            if (clean[i] == '{') b->depth++;
+            else if (clean[i] == '}' && b->depth > 0) b->depth--;
+        }
+        off = line_end < before_off && clean[line_end] == '\n' ? line_end + 1 : line_end;
+    }
+    b->built_to = before_off;
+    return 0;
+}
+
+/* Flat "depth-1" decl map — same semantics as the old per-name fallback. */
+static int cc__decl_text_index_build_nested_clean(CCDeclTextIndex* idx,
+                                                  const char* clean,
+                                                  size_t before_off) {
+    CCNestedDeclBuilder b;
+    if (!idx || !clean) return -1;
+    memset(&b, 0, sizeof(b));
+    if (cc__nested_decl_builder_extend(&b, clean, before_off) != 0) {
+        cc__nested_decl_builder_clear(&b);
+        return -1;
+    }
+    cc__decl_text_index_clear(idx);
+    *idx = b.idx;
+    memset(&b.idx, 0, sizeof(b.idx));
+    cc__nested_decl_builder_clear(&b);
+    return 0;
+}
+
+/* Top-level-only decl map (skips function bodies via brace depth). */
+static int cc__decl_text_index_build_toplevel_clean(CCDeclTextIndex* idx,
+                                                    const char* clean,
+                                                    size_t before_off) {
+    CCToplevelDeclBuilder b;
+    if (!idx || !clean) return -1;
+    memset(&b, 0, sizeof(b));
+    if (cc__toplevel_decl_builder_extend(&b, clean, before_off) != 0) {
+        cc__toplevel_decl_builder_clear(&b);
+        return -1;
+    }
+    cc__decl_text_index_clear(idx);
+    *idx = b.idx;
+    memset(&b.idx, 0, sizeof(b.idx));
+    cc__toplevel_decl_builder_clear(&b);
+    return 0;
+}
+
 static char* cc__lookup_decl_type_by_text_fallback(const char* src,
                                                    size_t before_off,
                                                    const char* name,
                                                    unsigned char* out_flags) {
+    CCDeclTextIndex idx;
+    char* clean;
+    const char* ty;
+    char* found;
+    size_t src_len;
+    memset(&idx, 0, sizeof(idx));
     if (out_flags) *out_flags = 0;
     if (!src || !name || !name[0]) return NULL;
-    size_t src_len = strlen(src);
+    src_len = strlen(src);
     if (before_off > src_len) before_off = src_len;
-    char* clean = cc__src_strip_comments_and_strings(src, before_off);
+    clean = cc__src_strip_comments_and_strings(src, before_off);
     if (!clean) return NULL;
-    char** scope_names[2] = {0};
-    char** scope_types[2] = {0};
-    unsigned char* scope_flags[2] = {0};
-    int scope_counts[2] = {0};
-    char* decl_carry = NULL;
-    char* found_type = NULL;
-    unsigned char found_flags = 0;
-    size_t off = 0;
-    while (off < before_off) {
-        size_t line_end = off;
-        while (line_end < before_off && clean[line_end] != '\n') line_end++;
-        size_t line_len = line_end - off;
-        {
-            const char* line_s = clean + off;
-            const char* line_e = clean + line_end;
-            while (line_s < line_e && (*line_s == ' ' || *line_s == '\t' || *line_s == '\r')) line_s++;
-            if (line_s < line_e && *line_s == '#') {
-                if (decl_carry) decl_carry[0] = '\0';
-                off = line_end < before_off && clean[line_end] == '\n' ? line_end + 1 : line_end;
-                continue;
-            }
-        }
-        size_t carry_len = decl_carry ? strlen(decl_carry) : 0;
-        char* next_carry = (char*)realloc(decl_carry, carry_len + line_len + 2);
-        if (!next_carry) {
-            free(found_type);
-            found_type = NULL;
-            break;
-        }
-        decl_carry = next_carry;
-        memcpy(decl_carry + carry_len, clean + off, line_len);
-        decl_carry[carry_len + line_len] = '\n';
-        decl_carry[carry_len + line_len + 1] = '\0';
-        cc__maybe_record_decl(scope_names, scope_types, scope_flags, scope_counts, 1, decl_carry);
-        {
-            const char* ty = scope_counts[1] > 0
-                           ? cc__lookup_decl_type(scope_names[1], scope_types[1], scope_counts[1], name)
-                           : NULL;
-            if (ty) {
-                char* next_found = strdup(ty);
-                if (next_found) {
-                    free(found_type);
-                    found_type = next_found;
-                    found_flags = cc__lookup_decl_flags(scope_names[1], scope_flags[1], scope_counts[1], name);
-                }
-            }
-        }
-        {
-            size_t consumed = cc__last_top_level_semi_offset(decl_carry);
-            if (consumed > 0) {
-                size_t remain = strlen(decl_carry + consumed);
-                memmove(decl_carry, decl_carry + consumed, remain + 1);
-            } else if (cc__has_top_level_brace(decl_carry)) {
-                decl_carry[0] = '\0';
-            }
-        }
-        off = line_end < before_off && clean[line_end] == '\n' ? line_end + 1 : line_end;
+    if (cc__decl_text_index_build_nested_clean(&idx, clean, before_off) != 0) {
+        free(clean);
+        return NULL;
     }
-    for (int i = 0; i < scope_counts[1]; i++) free(scope_names[1][i]);
-    free(scope_names[1]);
-    for (int i = 0; i < scope_counts[1]; i++) free(scope_types[1][i]);
-    free(scope_types[1]);
-    free(scope_flags[1]);
-    free(decl_carry);
     free(clean);
-    if (found_type && out_flags) *out_flags = found_flags;
-    return found_type;
+    ty = cc__decl_text_index_lookup(&idx, name, out_flags);
+    found = ty ? strdup(ty) : NULL;
+    cc__decl_text_index_clear(&idx);
+    return found;
 }
 
-static char* cc__lookup_top_level_decl_type_by_text(const char* src,
-                                                    size_t before_off,
-                                                    const char* name,
-                                                    unsigned char* out_flags) {
-    char** scope_names[1] = {0};
-    char** scope_types[1] = {0};
-    unsigned char* scope_flags[1] = {0};
-    int scope_counts[1] = {0};
-    char* decl_carry = NULL;
-    char* found_type = NULL;
-    unsigned char found_flags = 0;
-    int depth = 0;
-    size_t off = 0;
-
+static char* __attribute__((unused))
+cc__lookup_top_level_decl_type_by_text(const char* src,
+                                       size_t before_off,
+                                       const char* name,
+                                       unsigned char* out_flags) {
+    CCDeclTextIndex idx;
+    char* clean;
+    const char* ty;
+    char* found;
+    size_t src_len;
+    memset(&idx, 0, sizeof(idx));
     if (out_flags) *out_flags = 0;
     if (!src || !name || !name[0]) return NULL;
-    if (before_off > strlen(src)) before_off = strlen(src);
-    char* clean = cc__src_strip_comments_and_strings(src, before_off);
+    src_len = strlen(src);
+    if (before_off > src_len) before_off = src_len;
+    clean = cc__src_strip_comments_and_strings(src, before_off);
     if (!clean) return NULL;
-
-    while (off < before_off) {
-        size_t line_end = off;
-        while (line_end < before_off && clean[line_end] != '\n') line_end++;
-        size_t line_len = line_end - off;
-        {
-            const char* line_s = clean + off;
-            const char* line_e = clean + line_end;
-            while (line_s < line_e && (*line_s == ' ' || *line_s == '\t' || *line_s == '\r')) line_s++;
-            if (line_s < line_e && *line_s == '#') {
-                if (decl_carry) decl_carry[0] = '\0';
-                off = line_end < before_off && clean[line_end] == '\n' ? line_end + 1 : line_end;
-                continue;
-            }
-        }
-        if (depth == 0) {
-            size_t carry_len = decl_carry ? strlen(decl_carry) : 0;
-            char* next_carry = (char*)realloc(decl_carry, carry_len + line_len + 2);
-            if (!next_carry) {
-                free(found_type);
-                found_type = NULL;
-                break;
-            }
-            decl_carry = next_carry;
-            memcpy(decl_carry + carry_len, clean + off, line_len);
-            decl_carry[carry_len + line_len] = '\n';
-            decl_carry[carry_len + line_len + 1] = '\0';
-            cc__maybe_record_decl(scope_names, scope_types, scope_flags, scope_counts, 0, decl_carry);
-            {
-                const char* ty = scope_counts[0] > 0
-                               ? cc__lookup_decl_type(scope_names[0], scope_types[0], scope_counts[0], name)
-                               : NULL;
-                if (ty) {
-                    char* next_found = strdup(ty);
-                    if (next_found) {
-                        free(found_type);
-                        found_type = next_found;
-                        found_flags = cc__lookup_decl_flags(scope_names[0], scope_flags[0], scope_counts[0], name);
-                    }
-                }
-            }
-            {
-                size_t consumed = cc__last_top_level_semi_offset(decl_carry);
-                if (consumed > 0) {
-                    size_t remain = strlen(decl_carry + consumed);
-                    memmove(decl_carry, decl_carry + consumed, remain + 1);
-                } else if (cc__has_top_level_brace(decl_carry)) {
-                    decl_carry[0] = '\0';
-                }
-            }
-        }
-
-        for (size_t i = off; i < line_end; i++) {
-            if (clean[i] == '{') depth++;
-            else if (clean[i] == '}' && depth > 0) depth--;
-        }
-        off = line_end < before_off && clean[line_end] == '\n' ? line_end + 1 : line_end;
+    if (cc__decl_text_index_build_toplevel_clean(&idx, clean, before_off) != 0) {
+        free(clean);
+        return NULL;
     }
-
-    for (int i = 0; i < scope_counts[0]; i++) free(scope_names[0][i]);
-    free(scope_names[0]);
-    for (int i = 0; i < scope_counts[0]; i++) free(scope_types[0][i]);
-    free(scope_types[0]);
-    free(scope_flags[0]);
-    free(decl_carry);
     free(clean);
-    if (found_type && out_flags) *out_flags = found_flags;
-    return found_type;
+    ty = cc__decl_text_index_lookup(&idx, name, out_flags);
+    found = ty ? strdup(ty) : NULL;
+    cc__decl_text_index_clear(&idx);
+    return found;
 }
 
 /* Fallback: look up a captured name in the nearest function signature. */
@@ -1155,6 +1384,7 @@ static void cc__collect_caps_from_block(char*** scope_names,
                                         const char* ignore_name1,
                                         char* const* local_decl_names,
                                         int local_decl_count,
+                                        const CCDeclTextIndex* nested_idx,
                                         char*** out_caps,
                                         int* out_cap_count) {
     if (!scope_names || !scope_counts || !block || !out_caps || !out_cap_count) return;
@@ -1273,19 +1503,35 @@ static void cc__collect_caps_from_block(char*** scope_names,
             if (n < sizeof(probe)) {
                 memcpy(probe, s, n);
                 probe[n] = '\0';
-                probe_ty = cc__lookup_decl_type_by_text_fallback(src, before_off, probe, &probe_flags);
-                if (probe_ty && !cc__capture_type_text_usable(probe_ty, probe)) {
-                    free(probe_ty);
-                    probe_ty = NULL;
+                if (nested_idx) {
+                    const char* ty = cc__decl_text_index_lookup(nested_idx, probe, &probe_flags);
+                    if (ty && cc__capture_type_text_usable(ty, probe)) found = 1;
+                } else {
+                    probe_ty = cc__lookup_decl_type_by_text_fallback(src, before_off, probe, &probe_flags);
+                    if (probe_ty && !cc__capture_type_text_usable(probe_ty, probe)) {
+                        free(probe_ty);
+                        probe_ty = NULL;
+                    }
+                    if (probe_ty) {
+                        found = 1;
+                        free(probe_ty);
+                        probe_ty = NULL;
+                    }
                 }
-                if (!probe_ty) probe_ty = cc__lookup_internal_generated_decl_type(src, before_off, probe, &probe_flags);
-                if (probe_ty && !cc__capture_type_text_usable(probe_ty, probe)) {
-                    free(probe_ty);
-                    probe_ty = NULL;
-                }
-                if (probe_ty) {
-                    found = 1;
-                    free(probe_ty);
+                /* Generated temps only — avoid O(idents×src) backward scans for
+                 * ordinary callees / type names that missed the decl index. */
+                if (!found &&
+                    ((n >= 5 && strncmp(probe, "__cc_", 5) == 0) ||
+                     (n >= 3 && strncmp(probe, "cc_", 3) == 0))) {
+                    probe_ty = cc__lookup_internal_generated_decl_type(src, before_off, probe, &probe_flags);
+                    if (probe_ty && !cc__capture_type_text_usable(probe_ty, probe)) {
+                        free(probe_ty);
+                        probe_ty = NULL;
+                    }
+                    if (probe_ty) {
+                        found = 1;
+                        free(probe_ty);
+                    }
                 }
             }
         }
@@ -1421,49 +1667,53 @@ static const char* cc__lookup_param_type_for_closure(const CCFuncSig* sigs,
     return NULL;
 }
 
-static const char* cc__lookup_param_type_by_src(const CCFuncSig* sigs,
-                                                int sig_n,
-                                                const char* src,
-                                                size_t closure_off,
-                                                const char* param_name) {
-    if (!sigs || sig_n <= 0 || !src || !param_name) return NULL;
+/* Most recent call to any `sigs[*]` before `closure_off` (comment/string-safe). */
+static const CCFuncSig* cc__best_call_sig_before(const CCFuncSig* sigs,
+                                                 int sig_n,
+                                                 const char* src,
+                                                 size_t closure_off) {
     const CCFuncSig* best_sig = NULL;
     size_t best_off = 0;
-    /* Only search the region before `closure_off` — the goal is to
-     * find the most recent call to one of `sigs[*]` whose bounded
-     * argument position would supply the closure's param types. */
-    size_t scan_end = closure_off;
-    for (int i = 0; i < sig_n; i++) {
-        if (!sigs[i].name) continue;
-        size_t name_len = strlen(sigs[i].name);
-        if (name_len == 0) continue;
+    size_t scan_end;
+    int i;
+    if (!sigs || sig_n <= 0 || !src) return NULL;
+    scan_end = closure_off;
+    for (i = 0; i < sig_n; i++) {
+        size_t name_len;
         size_t last_off = (size_t)-1;
         size_t scan_pos = 0;
+        if (!sigs[i].name) continue;
+        name_len = strlen(sigs[i].name);
+        if (name_len == 0) continue;
         while (scan_pos < scan_end) {
-            /* Comment/string-aware, word-bounded identifier find —
-             * pre-metaclass this used `strstr` which would match
-             * `sigs[i].name` inside block comments and string
-             * literals (e.g. `/ * calls foo(x) * /`) and pull the
-             * "last call" offset into dead text.  See util/text.h. */
             size_t hit = cc_find_ident_top_level(src, scan_pos, scan_end,
                                                  sigs[i].name, name_len);
+            size_t after;
+            const char* q;
             if (hit >= scan_end) break;
-            size_t after = hit + name_len;
-            const char* q = src + after;
+            after = hit + name_len;
+            q = src + after;
             while (after < scan_end && (*q == ' ' || *q == '\t')) { q++; after++; }
-            if (after < scan_end && *q == '(') {
-                last_off = hit;
-            }
+            if (after < scan_end && *q == '(') last_off = hit;
             scan_pos = hit + name_len;
         }
-        if (last_off != (size_t)-1) {
-            if (last_off >= best_off) {
-                best_off = last_off;
-                best_sig = &sigs[i];
-            }
+        if (last_off != (size_t)-1 && last_off >= best_off) {
+            best_off = last_off;
+            best_sig = &sigs[i];
         }
     }
-    return cc__lookup_param_type_in_sig(best_sig, param_name);
+    return best_sig;
+}
+
+static const char* __attribute__((unused))
+cc__lookup_param_type_by_src(const CCFuncSig* sigs,
+                             int sig_n,
+                             const char* src,
+                             size_t closure_off,
+                             const char* param_name) {
+    if (!param_name) return NULL;
+    return cc__lookup_param_type_in_sig(
+        cc__best_call_sig_before(sigs, sig_n, src, closure_off), param_name);
 }
 
 static void cc__free_func_sigs(CCFuncSig* sigs, int n) {
@@ -3104,11 +3354,33 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
 
     const NodeView* n = (const NodeView*)root->nodes;
 
-    /* Build a best-effort function signature table from stub-AST FUNC/PARAM nodes.
-       Used to allow `&x` only when passed to a known `const T*` parameter (2B),
-       AND to register function parameters as capturable variables (closure support). */
+    /* Collect closure nodes first.  FuncSig build walks the whole AST and
+     * is unused when there are no in-TU closures (also fixes a prior leak
+     * on the idx_n==0 early return). */
+    int idxs_cap = 512;
+    int* idxs = (int*)malloc((size_t)idxs_cap * sizeof(int));
+    int idx_n = 0;
     CCFuncSig* sigs = NULL;
     int sig_n = 0;
+    if (!idxs) return 0;
+    for (int i = 0; i < root->node_count; i++) {
+        if (n[i].kind != CC_AST_NODE_CLOSURE) continue;
+        if (!cc_pass_node_in_tu(root, ctx, n[i].file)) continue;
+        if (n[i].line_start <= 0) continue;
+        if (n[i].line_end <= 0) continue;
+        if (idx_n == idxs_cap) {
+            idxs_cap *= 2;
+            int* ni = (int*)realloc(idxs, (size_t)idxs_cap * sizeof(int));
+            if (!ni) break;
+            idxs = ni;
+        }
+        idxs[idx_n++] = i;
+    }
+    if (idx_n == 0) { free(idxs); return 0; }
+
+    /* Best-effort function signature table from stub-AST FUNC/PARAM nodes.
+       Used to allow `&x` only when passed to a known `const T*` parameter (2B),
+       AND to register function parameters as capturable variables. */
     {
         typedef struct { char** tys; char** names; int n; int cap; } Tmp;
         Tmp* tmp = (Tmp*)calloc((size_t)root->node_count, sizeof(Tmp));
@@ -3137,7 +3409,6 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                 if (n[i].kind != 17) continue; /* CC_AST_NODE_FUNC */
                 if (!n[i].aux_s1) continue;
                 if (!cc_pass_node_in_tu(root, ctx, n[i].file)) continue;
-                /* Insert/replace by name. */
                 int idx = -1;
                 for (int k = 0; k < sig_n; k++) {
                     if (sigs && sigs[k].name && strcmp(sigs[k].name, n[i].aux_s1) == 0) { idx = k; break; }
@@ -3172,7 +3443,6 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                 tmp[i].n = 0;
                 tmp[i].cap = 0;
             }
-            /* cleanup tmp leftovers */
             for (int i = 0; i < root->node_count; i++) {
                 for (int k = 0; k < tmp[i].n; k++) {
                     free(tmp[i].tys ? tmp[i].tys[k] : NULL);
@@ -3184,26 +3454,6 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
             free(tmp);
         }
     }
-
-    /* Collect closure nodes in this TU. */
-    int idxs_cap = 512;
-    int* idxs = (int*)malloc((size_t)idxs_cap * sizeof(int));
-    int idx_n = 0;
-    if (!idxs) return 0;
-    for (int i = 0; i < root->node_count; i++) {
-        if (n[i].kind != CC_AST_NODE_CLOSURE) continue;
-        if (!cc_pass_node_in_tu(root, ctx, n[i].file)) continue;
-        if (n[i].line_start <= 0) continue;
-        if (n[i].line_end <= 0) continue;
-        if (idx_n == idxs_cap) {
-            idxs_cap *= 2;
-            int* ni = (int*)realloc(idxs, (size_t)idxs_cap * sizeof(int));
-            if (!ni) break;
-            idxs = ni;
-        }
-        idxs[idx_n++] = i;
-    }
-    if (idx_n == 0) { free(idxs); return 0; }
 
     /* TCC may defer and replay function-call arguments in reverse order, so
      * recorder order is not source order for closure literals nested in call
@@ -3414,9 +3664,18 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
         return -1;
     }
 
+    /* Shared text-decl indexes: extended in source order across closures. */
+    CCNestedDeclBuilder nested_decl_b;
+    CCToplevelDeclBuilder toplevel_decl_b;
+    memset(&nested_decl_b, 0, sizeof(nested_decl_b));
+    memset(&toplevel_decl_b, 0, sizeof(toplevel_decl_b));
+
     const char* cur = in_src;
     char* decl_carry = NULL;
+    size_t carry_len = 0;
+    CCCarrySemiState carry_semi;
     size_t off = 0;
+    cc__carry_semi_state_init(&carry_semi);
     while (off < in_len && *cur) {
         const char* line_start = cur;
         const char* nl = memchr(cur, '\n', in_len - off);
@@ -3426,9 +3685,10 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
         /* Record decls using a rolling statement buffer so multi-line decls like
            `CCAbIntptr x =\n  (CCAbIntptr)(...) ;` are visible to capture inference. */
         {
-            size_t carry_len = decl_carry ? strlen(decl_carry) : 0;
             char* next_carry = (char*)realloc(decl_carry, carry_len + line_len + 2);
             if (!next_carry) {
+                cc__nested_decl_builder_clear(&nested_decl_b);
+                cc__toplevel_decl_builder_clear(&toplevel_decl_b);
                 for (int q = 0; q < idx_n; q++) cc__free_closure_desc(&descs[q]);
                 free(descs);
                 for (int dd = 0; dd < 256; dd++) {
@@ -3445,17 +3705,26 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
             }
             decl_carry = next_carry;
             memcpy(decl_carry + carry_len, in_src_decl_scan + off, line_len);
-            decl_carry[carry_len + line_len] = '\n';
-            decl_carry[carry_len + line_len + 1] = '\0';
-            cc__maybe_record_decl(scope_names, scope_types, scope_flags, scope_counts, depth, decl_carry);
-            {
-                size_t consumed = cc__last_top_level_semi_offset(decl_carry);
-                if (consumed > 0) {
-                    size_t remain = strlen(decl_carry + consumed);
-                    memmove(decl_carry, decl_carry + consumed, remain + 1);
-                } else if (cc__has_top_level_brace(decl_carry)) {
-                    decl_carry[0] = '\0';
-                }
+            carry_len += line_len;
+            decl_carry[carry_len++] = '\n';
+            decl_carry[carry_len] = '\0';
+            cc__carry_semi_feed(&carry_semi, decl_carry, carry_len);
+            if (carry_semi.last_semi > 0) {
+                size_t consumed = carry_semi.last_semi;
+                size_t remain = carry_len - consumed;
+                char saved = decl_carry[consumed];
+                /* Record only completed statements — skip rescanning incomplete carry. */
+                decl_carry[consumed] = '\0';
+                cc__maybe_record_decl(scope_names, scope_types, scope_flags, scope_counts,
+                                      depth, decl_carry);
+                decl_carry[consumed] = saved;
+                memmove(decl_carry, decl_carry + consumed, remain + 1);
+                carry_len = remain;
+                cc__carry_semi_reset_feed(&carry_semi, decl_carry, carry_len);
+            } else if (carry_semi.has_tl_brace) {
+                decl_carry[0] = '\0';
+                carry_len = 0;
+                cc__carry_semi_state_init(&carry_semi);
             }
         }
 
@@ -3470,6 +3739,8 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                 cc_pass_error_cat(ctx->input_path ? ctx->input_path : "<input>",
                         d->start_line, (d->start_col >= 0 ? (d->start_col + 1) : 1),
                         CC_ERR_CLOSURE, "out of memory while building captures");
+                cc__nested_decl_builder_clear(&nested_decl_b);
+                cc__toplevel_decl_builder_clear(&toplevel_decl_b);
                 for (int q = 0; q < idx_n; q++) cc__free_closure_desc(&descs[q]);
                 free(descs);
                 for (int dd = 0; dd < 256; dd++) {
@@ -3483,6 +3754,33 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                 free(in_src_decl_scan);
                 return -1;
             }
+            /* Extend shared text-decl indexes up to this closure (O(file) total). */
+            {
+                CCDeclTextIndex* nested_idx = &nested_decl_b.idx;
+                CCDeclTextIndex* toplevel_idx = &toplevel_decl_b.idx;
+                const CCFuncSig* best_call_sig = NULL;
+                size_t idx_before = d->start_off;
+                if (idx_before > in_len) idx_before = in_len;
+                if (cc__nested_decl_builder_extend(&nested_decl_b, in_src_decl_scan, idx_before) != 0 ||
+                    cc__toplevel_decl_builder_extend(&toplevel_decl_b, in_src_decl_scan, idx_before) != 0) {
+                    cc__nested_decl_builder_clear(&nested_decl_b);
+                    cc__toplevel_decl_builder_clear(&toplevel_decl_b);
+                    for (int q = 0; q < idx_n; q++) cc__free_closure_desc(&descs[q]);
+                    free(descs);
+                    for (int dd = 0; dd < 256; dd++) {
+                        for (int k2 = 0; k2 < scope_counts[dd]; k2++) free(scope_names[dd][k2]);
+                        free(scope_names[dd]);
+                        for (int k2 = 0; k2 < scope_counts[dd]; k2++) free(scope_types[dd][k2]);
+                        free(scope_types[dd]);
+                        free(scope_flags[dd]);
+                    }
+                    free(idxs);
+                    free(in_src_decl_scan);
+                    free(decl_carry);
+                    return -1;
+                }
+                best_call_sig = cc__best_call_sig_before(sigs, sig_n, in_src, d->start_off);
+
             if (d->body_text) {
                 char** local_decl_names = NULL;
                 int local_decl_count = 0;
@@ -3493,6 +3791,7 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                                             d->param1_name,
                                             local_decl_names,
                                             local_decl_count,
+                                            nested_idx,
                                             &caps, &cap_n);
                 cc__free_string_list(local_decl_names, local_decl_count);
             }
@@ -3501,16 +3800,15 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                 for (int ci = 0; ci < cap_n; ci++) {
                     const char* cap = caps[ci];
                     unsigned char fl_global = 0;
-                    char* global_ty = NULL;
+                    const char* global_ty = NULL;
                     int keep_cap = 1;
 
                     if (!cap) continue;
                     if (!cc__cap_is_explicit(d, cap)) {
-                        global_ty = cc__lookup_top_level_decl_type_by_text(in_src, d->start_off, cap, &fl_global);
+                        global_ty = cc__decl_text_index_lookup(toplevel_idx, cap, &fl_global);
                         if (global_ty && cc__capture_type_text_usable(global_ty, cap)) {
                             keep_cap = 0;
                         }
-                        free(global_ty);
                     }
 
                     if (keep_cap) {
@@ -3549,6 +3847,8 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                                         col1,
                                         caps[ci] ? caps[ci] : "?",
                                         init);
+                                cc__nested_decl_builder_clear(&nested_decl_b);
+                                cc__toplevel_decl_builder_clear(&toplevel_decl_b);
                                 for (int q = 0; q < idx_n; q++) cc__free_closure_desc(&descs[q]);
                                 free(descs);
                                 for (int dd = 0; dd < 256; dd++) {
@@ -3560,6 +3860,7 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                                 }
                                 free(idxs);
                                 free(in_src_decl_scan);
+                                free(decl_carry);
                                 return -1;
                             }
                             lookup_name = init_base;
@@ -3573,7 +3874,7 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                             fl = 0;
                         }
                         if (!ty) {
-                            ty = cc__lookup_param_type_by_src(sigs, sig_n, in_src, d->start_off, lookup_name);
+                            ty = cc__lookup_param_type_in_sig(best_call_sig, lookup_name);
                         }
                         if (ty && !cc__capture_type_text_usable(ty, lookup_name)) {
                             ty = NULL;
@@ -3588,24 +3889,20 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                         }
                         if (!ty) {
                             unsigned char fl_global = 0;
-                            char* ty_global = cc__lookup_top_level_decl_type_by_text(in_src, d->start_off, lookup_name, &fl_global);
+                            const char* ty_global = cc__decl_text_index_lookup(toplevel_idx, lookup_name, &fl_global);
                             if (ty_global && cc__capture_type_text_usable(ty_global, lookup_name)) {
-                                d->cap_types[ci] = ty_global;
+                                d->cap_types[ci] = strdup(ty_global);
                                 ty = d->cap_types[ci];
                                 fl = fl_global;
-                            } else {
-                                free(ty_global);
                             }
                         }
                         if (!ty) {
                             unsigned char fl_fb = 0;
-                            char* ty_fb = cc__lookup_decl_type_by_text_fallback(in_src, d->start_off, lookup_name, &fl_fb);
+                            const char* ty_fb = cc__decl_text_index_lookup(nested_idx, lookup_name, &fl_fb);
                             if (ty_fb && cc__capture_type_text_usable(ty_fb, lookup_name)) {
-                                d->cap_types[ci] = ty_fb;
+                                d->cap_types[ci] = strdup(ty_fb);
                                 ty = d->cap_types[ci];
                                 fl = fl_fb;
-                            } else {
-                                free(ty_fb);
                             }
                         }
                         if (!ty) {
@@ -3666,6 +3963,8 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                                     col1,
                                     caps[ci] ? caps[ci] : "?",
                                     caps[ci] ? caps[ci] : "?");
+                            cc__nested_decl_builder_clear(&nested_decl_b);
+                            cc__toplevel_decl_builder_clear(&toplevel_decl_b);
                             for (int q = 0; q < idx_n; q++) cc__free_closure_desc(&descs[q]);
                             free(descs);
                             for (int dd = 0; dd < 256; dd++) {
@@ -3677,6 +3976,7 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                             }
                             free(idxs);
                             free(in_src_decl_scan);
+                            free(decl_carry);
                             return -1;
                         }
                         if (!ty) {
@@ -3698,6 +3998,8 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                                         caps[ci] ? caps[ci] : "?");
                             }
                             /* cleanup */
+                            cc__nested_decl_builder_clear(&nested_decl_b);
+                            cc__toplevel_decl_builder_clear(&toplevel_decl_b);
                             for (int q = 0; q < idx_n; q++) cc__free_closure_desc(&descs[q]);
                             free(descs);
                             for (int dd = 0; dd < 256; dd++) {
@@ -3709,11 +4011,13 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                             }
                             free(idxs);
                             free(in_src_decl_scan);
+                            free(decl_carry);
                             return -1;
                         }
                     }
                 }
             }
+            } /* shared text-decl indexes (extended across closures) */
             /* Register resolved captures in the scope table so that nested
                closures can find them through the normal scope walk instead of
                falling through to error-prone text-based fallbacks. */
@@ -3820,6 +4124,8 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                                     ty ? ty : "T", ty ? ty : "T", nm ? nm : "var");
                         }
                         /* cleanup and fail */
+                        cc__nested_decl_builder_clear(&nested_decl_b);
+                        cc__toplevel_decl_builder_clear(&toplevel_decl_b);
                         for (int q = 0; q < idx_n; q++) cc__free_closure_desc(&descs[q]);
                         free(descs);
                         for (int dd = 0; dd < 256; dd++) {
@@ -3831,6 +4137,7 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                         }
                         free(idxs);
                         free(in_src_decl_scan);
+                        free(decl_carry);
                         cc__free_func_sigs(sigs, sig_n);
                         return -1;
                     }
@@ -3896,6 +4203,8 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
         off = (size_t)(cur - in_src);
         line_num++;  /* Advance line counter for function param registration */
     }
+    cc__nested_decl_builder_clear(&nested_decl_b);
+    cc__toplevel_decl_builder_clear(&toplevel_decl_b);
     free(in_src_decl_scan);
 
     /* Emit protos/defs and build rewrite edits for all closure literals. */

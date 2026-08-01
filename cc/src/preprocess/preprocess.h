@@ -208,18 +208,22 @@ int cc_writeback_local_lowered_headers_from_codegen(char** src, size_t* n);
 // `#line`/`# N "file"` markers so diagnostics in header content blame the .cch.
 const char* cc_lowered_header_source_for(const char* lowered_path);
 
-// Harvest CC_GENERIC_FACTORY / _EXTEND blocks from every local .cch included by
-// the current TU (transitive set from the lowered-header registry), each wrapped
-// in a `#line` directive back to its .cch. Returns malloc'd text to append to
-// the TU buffer before comptime preparation, or NULL if none. Caller frees.
-// Must be called after cc_rewrite_local_cch_includes_to_lowered_headers has
-// populated the registry for this TU.
-char* cc_harvest_local_header_factories(void);
+/* ---- Header comptime harvest --------------------------------------------
+ * lower_header blanks `@comptime` / CC_GENERIC_FACTORY from `.cch` → `.h` so
+ * the lowered header stays host-C. The including TU re-appends the raw forms
+ * (with `#line` back to the `.cch`) before comptime prepare/exec so factories,
+ * `@comptime` functions, and emit-producing `@comptime { }` blocks (e.g.
+ * `static_map`) still run. Call after local `.cch` includes are rewritten /
+ * registered. Each returns malloc'd text to append, or NULL. Caller frees.
+ *
+ *   factories  — local headers only (g_lowered_local_headers)
+ *   functions  — local + system included .cch (g_included_cch_sources)
+ *   blocks     — local headers only; skips `@comptime if/for` and functions
+ * ------------------------------------------------------------------------ */
 
-// Harvest reusable @comptime function definitions from every local or system
-// .cch included by the current TU. Definitions retain #line provenance and are
-// appended before comptime preparation/execution.
+char* cc_harvest_local_header_factories(void);
 char* cc_harvest_header_comptime_functions(void);
+char* cc_harvest_local_header_comptime_blocks(void);
 
 // Shared header-safe type-syntax lowering used by both preprocessing and
 // `.cch -> .h` lowering. Rewrites syntax that must not leak into plain C

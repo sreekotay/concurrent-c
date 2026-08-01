@@ -123,6 +123,24 @@ int cc_build_parse_input(const char* file_buf,
             got += sep + hlen;
         }
     }
+    /* Local-header `@comptime { }` blocks (e.g. static_map): see
+     * cc_harvest_local_header_comptime_blocks — blanked from .h, re-run here. */
+    {
+        char* harvested = cc_harvest_local_header_comptime_blocks();
+        if (harvested) {
+            size_t hlen = strlen(harvested);
+            size_t sep = (got > 0 && buf[got - 1] == '\n') ? 0 : 1;
+            char* nb = (char*)malloc(got + sep + hlen + 1);
+            if (!nb) { free(harvested); goto fail_buf; }
+            memcpy(nb, buf, got);
+            if (sep) nb[got] = '\n';
+            memcpy(nb + got + sep, harvested, hlen + 1);
+            free(harvested);
+            free(buf);
+            buf = nb;
+            got += sep + hlen;
+        }
+    }
     /* Seam: expand `@comptime for`/`if`, then lower `@emit`/`@string` templates
      * before comptime execution (see cc_comptime_prepare_source). */
     if (cc_comptime_prepare_source(&buf, &got, input_path) != 0) goto fail_buf;
@@ -240,7 +258,9 @@ int cc_build_parse_input(const char* file_buf,
      * would require widening every preprocess return type up to
      * `cc_build_parse_input`; that is a worthwhile follow-up but
      * out of scope for this commit. */
-    if (!for_reparse) {
+    if (!for_reparse &&
+        (cc_contains_token_top_level(buf, got, "type_of") ||
+         cc_contains_token_top_level(buf, got, "cc_type_of"))) {
         size_t before = (size_t)cc_diag_error_count();
         cc__check_type_of_calls(buf, got, input_path,
                                 cc_type_registry_get_global());
@@ -325,13 +345,21 @@ int cc_build_parse_input(const char* file_buf,
              * Stash the pre-relower buffer (still has `[~ ... >]` brackets)
              * for downstream visitor passes that need to introspect chan
              * handle bracket specs of macro-generated decls (M7.C3). */
-            /* Stash a copy of the post-CPP-expand buffer BEFORE the relower
-             * step so the visitor's channel-pair scanner can fall back to a
-             * view that still has `[~ ... >]` chan brackets for macro-
-             * generated decls (M7.C3). `cc_cpp_expand` now tightly re-packs
-             * its output, so this malloc is guaranteed not to overlap
-             * pp's allocation. */
-            {
+            /* Stash + re-lower only when CPP may have produced residual CC
+             * type surface (macro-expanded `[~` / `[:` / `::[` / `@string` /
+             * `@slice`).  Redis pays a full expanded-TU clone + walk
+             * otherwise for a no-op. */
+            int need_relower =
+                (memmem(pp, exp_len, "[~", 2) != NULL) ||
+                (memmem(pp, exp_len, "[:", 2) != NULL) ||
+                (memmem(pp, exp_len, "::[", 3) != NULL) ||
+                cc_contains_token_top_level(pp, exp_len, "@string") ||
+                cc_contains_token_top_level(pp, exp_len, "@slice");
+            if (need_relower) {
+                /* Stash a copy of the post-CPP-expand buffer BEFORE the
+                 * relower so the visitor's channel-pair scanner can fall
+                 * back to a view that still has `[~ ... >]` brackets for
+                 * macro-generated decls (M7.C3). */
                 char* pre_relower_copy = (char*)malloc(exp_len + 1);
                 if (pre_relower_copy) {
                     memcpy(pre_relower_copy, pp, exp_len);
@@ -339,14 +367,22 @@ int cc_build_parse_input(const char* file_buf,
                     out->buffer_pre_relower = pre_relower_copy;
                     out->buffer_pre_relower_len = exp_len;
                 }
-            }
-            char* relowered = cc_relower_cc_type_syntax_preserving_registry(pp, exp_len, input_path);
-            if (relowered) {
-                free(pp);
-                pp = relowered;
-                if (getenv("CC_DEBUG_PRE_EXPAND")) {
-                    fprintf(stderr, "[cc:pre-expand] re-lowered post-expand CC type syntax\n");
+                char* relowered =
+                    cc_relower_cc_type_syntax_preserving_registry(pp, exp_len,
+                                                                 input_path);
+                if (relowered) {
+                    free(pp);
+                    pp = relowered;
+                    if (getenv("CC_DEBUG_PRE_EXPAND")) {
+                        fprintf(stderr,
+                                "[cc:pre-expand] re-lowered post-expand CC "
+                                "type syntax\n");
+                    }
                 }
+            } else if (getenv("CC_DEBUG_PRE_EXPAND")) {
+                fprintf(stderr,
+                        "[cc:pre-expand] skip re-lower (no residual CC type "
+                        "surface)\n");
             }
         } else if (getenv("CC_DEBUG_PRE_EXPAND")) {
             fprintf(stderr, "[cc:pre-expand] %s: cc_cpp_expand failed, falling back\n",

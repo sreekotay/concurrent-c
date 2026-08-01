@@ -7,6 +7,7 @@
 
 #include "preprocess/type_registry.h"
 #include "util/text.h"
+#include "visitor/pass_callee_occ.h"
 #include "visitor/pass_common.h"
 
 typedef CCNodeView NodeView;
@@ -327,6 +328,7 @@ int cc__collect_slice_literal_coerce_edits(const CCASTRoot* root,
     const NodeView* n;
     const char* in_src;
     size_t in_len;
+    CCCalleeOccIndex* occ_idx = NULL;
     int edits = 0;
     int i;
     int dbg = getenv("CC_DEBUG_SLICE_LIT_COERCE") != NULL;
@@ -338,6 +340,7 @@ int cc__collect_slice_literal_coerce_edits(const CCASTRoot* root,
     in_src = eb->src;
     in_len = eb->src_len;
     n = (const NodeView*)root->nodes;
+    occ_idx = cc_callee_occ_index_build(in_src, in_len, cc__slc_name_is_declarator);
     if (dbg) {
         fprintf(stderr, "slice_lit_coerce: nodes=%d tu=%s\n",
                 root->node_count, ctx->input_path ? ctx->input_path : "?");
@@ -369,26 +372,14 @@ int cc__collect_slice_literal_coerce_edits(const CCASTRoot* root,
             if (call_s + callee_n <= in_len && memcmp(in_src + call_s, callee, callee_n) == 0 &&
                 !cc__slc_name_is_declarator(in_src, in_len, call_s, callee_n)) {
                 name_s = call_s;
-            } else {
-                size_t j = call_s;
-                while (j + callee_n <= call_e) {
-                    size_t hit = cc_find_ident_top_level(in_src, j, call_e,
-                                                         callee, callee_n);
-                    if (hit + callee_n > call_e) break;
-                    if (!cc__slc_name_is_declarator(in_src, in_len, hit, callee_n)) {
-                        name_s = hit;
-                        break;
-                    }
-                    j = hit + callee_n;
-                }
+            } else if (occ_idx) {
+                name_s = cc_callee_occ_index_first_in_range(occ_idx, callee, call_s, call_e);
             }
         }
-        /* #line makes physical line_start unreliable; scan the whole buffer
-         * for this callee occurrence when exact offs miss. Skip declarators
-         * so same-TU definitions are not mistaken for their call sites. */
-        if (name_s == (size_t)-1) {
-            size_t j;
-            int occ = 0;
+        /* #line makes physical line_start unreliable; use the prebuilt
+         * occurrence index when exact offs miss. Skip declarators so
+         * same-TU definitions are not mistaken for their call sites. */
+        if (name_s == (size_t)-1 && occ_idx) {
             int want_occ = 1;
             for (int k = 0; k < i; k++) {
                 if (n[k].kind != CC_AST_NODE_CALL) continue;
@@ -399,25 +390,7 @@ int cc__collect_slice_literal_coerce_edits(const CCASTRoot* root,
                     (n[k].line_start == n[i].line_start && n[k].col_start <= n[i].col_start))
                     want_occ++;
             }
-            /* Comment/string-aware occurrence walk: a callee name spelled
-             * in a comment or literal must not shift the occurrence
-             * numbering (twin of cc__as_find_callee_occ). */
-            j = 0;
-            while (j + callee_n <= in_len) {
-                size_t after;
-                size_t hit = cc_find_ident_top_level(in_src, j, in_len,
-                                                     callee, callee_n);
-                if (hit + callee_n > in_len) break;
-                j = hit + callee_n;
-                after = cc_skip_ws_and_comments(in_src, in_len, hit + callee_n);
-                if (after >= in_len || in_src[after] != '(') continue;
-                if (cc__slc_name_is_declarator(in_src, in_len, hit, callee_n)) continue;
-                occ++;
-                if (occ == want_occ) {
-                    name_s = hit;
-                    break;
-                }
-            }
+            name_s = cc_callee_occ_index_nth(occ_idx, callee, want_occ);
         }
         if (name_s == (size_t)-1) {
             if (dbg) {
@@ -472,13 +445,17 @@ int cc__collect_slice_literal_coerce_edits(const CCASTRoot* root,
             arg_n = trim_e - trim_a;
             need = (int)(sizeof("const_char_to_slice()") + arg_n);
             repl = (char*)malloc((size_t)need);
-            if (!repl) return -1;
+            if (!repl) {
+                cc_callee_occ_index_free(occ_idx);
+                return -1;
+            }
             memcpy(repl, "const_char_to_slice(", 20);
             memcpy(repl + 20, in_src + trim_a, arg_n);
             repl[20 + arg_n] = ')';
             repl[20 + arg_n + 1] = '\0';
             if (cc_edit_buffer_add(eb, trim_a, trim_e, repl, 0, "slice_literal_coerce") < 0) {
                 free(repl);
+                cc_callee_occ_index_free(occ_idx);
                 return -1;
             }
             free(repl);
@@ -491,5 +468,6 @@ int cc__collect_slice_literal_coerce_edits(const CCASTRoot* root,
     if (dbg) {
         fprintf(stderr, "slice_lit_coerce: call_nodes=%d edits=%d\n", call_nodes, edits);
     }
+    cc_callee_occ_index_free(occ_idx);
     return edits;
 }

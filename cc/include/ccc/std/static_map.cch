@@ -46,7 +46,13 @@ enum {
  * be POD integers or enums; a field of any other kind (pointer, float, nested
  * aggregate) is a keyed comptime error, as is a value layout the model cannot
  * reproduce, a duplicate key, a key needing C-string escaping, or a failure to
- * construct a perfect hash. */
+ * construct a perfect hash.
+ *
+ * In a `.cch` header: lower_header blanks the `@comptime { }` block so the
+ * `.h` stays host-C. Forward-declare `<name>_get` for in-header callers; the
+ * including TU harvests and re-runs the block
+ * (`cc_harvest_local_header_comptime_blocks`) so the definition is spliced
+ * into the merged `.c`. Proof: `tests/comptime_static_map_in_header_smoke`. */
 @comptime void static_map(const char* name,
                           const char* value_type,
                           const void* entries,

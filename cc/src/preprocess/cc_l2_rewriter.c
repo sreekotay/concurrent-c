@@ -207,6 +207,13 @@ static int cc__l2_try_rewrite_ctor_priority(const char* src, size_t n, size_t* p
 char* cc_l2_rewrite_all(const char* src, size_t src_len, size_t* out_len) {
     if (out_len) *out_len = src_len;
     if (!src) return NULL;
+    /* Fast reject: after CPP, `offsetof` is often already
+     * `__builtin_offsetof` and ctor attributes are absent — avoid a
+     * full expanded-TU clone that is freed unused. */
+    if (!memmem(src, src_len, "offsetof", 8) &&
+        !memmem(src, src_len, "constructor", 11) &&
+        !memmem(src, src_len, "destructor", 10))
+        return NULL;
 
     char* out = NULL;
     size_t ol = 0, oc = 0;

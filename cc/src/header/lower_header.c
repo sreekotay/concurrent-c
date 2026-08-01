@@ -414,7 +414,9 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
     char* buf_result_fields = NULL;
     
     /* Pass 0: Strip raw @comptime blocks and function definitions so lowered
-       headers are valid C. Functions are harvested into including CC TUs. */
+       headers are valid C. Functions and `@comptime { }` blocks are harvested
+       into including CC TUs (see cc_harvest_header_comptime_functions /
+       cc_harvest_local_header_comptime_blocks). */
     buf0 = cc__strip_comptime_blocks_header(cur, cur_len);
     if (buf0) {
         cur = buf0;

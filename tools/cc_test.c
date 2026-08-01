@@ -8,6 +8,9 @@
 #include <errno.h>
 #include <signal.h>
 #include <time.h>
+#if defined(_SC_NPROCESSORS_ONLN)
+/* sysconf for default --jobs */
+#endif
 
 static int file_exists(const char* path) {
     if (!path) return 0;
@@ -185,10 +188,13 @@ static long long now_ms_monotonic(void) {
     return (long long)ts.tv_sec * 1000LL + (long long)(ts.tv_nsec / 1000000LL);
 }
 
-// Runs command via `sh -c <full>` with optional timeout. Returns:
+// Runs command via one `sh -c` with optional timeout. Returns:
 // - exit code of the command (0..255)
 // - 124 on timeout (like GNU timeout)
 // Optional in_path redirects stdin (`< in_path`) when non-NULL.
+//
+// Historically this nested `sh -c 'sh -c …'`, which doubled process overhead
+// on every harness test.  Build the redirect script once and exec a single sh.
 static int run_cmd_redirect_timeout(const char* cmd,
                                     const char* in_path,
                                     const char* out_path,
@@ -198,18 +204,18 @@ static int run_cmd_redirect_timeout(const char* cmd,
     if (!cmd) return -1;
     char full[4096];
     if (in_path && in_path[0] && out_path && err_path) {
-        snprintf(full, sizeof(full), "sh -c '%s < %s > %s 2> %s'",
+        snprintf(full, sizeof(full), "%s < %s > %s 2> %s",
                  cmd, in_path, out_path, err_path);
     } else if (in_path && in_path[0] && out_path) {
-        snprintf(full, sizeof(full), "sh -c '%s < %s > %s'", cmd, in_path, out_path);
+        snprintf(full, sizeof(full), "%s < %s > %s", cmd, in_path, out_path);
     } else if (in_path && in_path[0] && err_path) {
-        snprintf(full, sizeof(full), "sh -c '%s < %s 2> %s'", cmd, in_path, err_path);
+        snprintf(full, sizeof(full), "%s < %s 2> %s", cmd, in_path, err_path);
     } else if (out_path && err_path) {
-        snprintf(full, sizeof(full), "sh -c '%s > %s 2> %s'", cmd, out_path, err_path);
+        snprintf(full, sizeof(full), "%s > %s 2> %s", cmd, out_path, err_path);
     } else if (out_path) {
-        snprintf(full, sizeof(full), "sh -c '%s > %s'", cmd, out_path);
+        snprintf(full, sizeof(full), "%s > %s", cmd, out_path);
     } else if (err_path) {
-        snprintf(full, sizeof(full), "sh -c '%s 2> %s'", cmd, err_path);
+        snprintf(full, sizeof(full), "%s 2> %s", cmd, err_path);
     } else {
         snprintf(full, sizeof(full), "%s", cmd);
     }
@@ -241,9 +247,30 @@ static int run_cmd_redirect_timeout(const char* cmd,
                 return 124;
             }
         }
-        // Sleep a bit to avoid busy waiting.
-        usleep(10 * 1000);
+        // 10ms polling contended under high --jobs; 50ms is plenty for suite.
+        usleep(50 * 1000);
     }
+}
+
+static int default_job_count(void) {
+    long n = 0;
+#if defined(_SC_NPROCESSORS_ONLN)
+    n = sysconf(_SC_NPROCESSORS_ONLN);
+#endif
+    if (n < 1) n = 6;
+    if (n > 16) n = 16;
+    return (int)n;
+}
+
+/* Stress / lost-wake / race matrix tests: useful overnight, expensive in the
+ * local edit loop.  Selected by --quick / CC_TEST_QUICK=1. */
+static int test_is_heavy(const char* stem, const char* path) {
+    if (!stem) return 0;
+    if (str_contains(stem, "stress")) return 1;
+    if (str_contains(stem, "lostwake")) return 1;
+    if (str_contains(stem, "_race")) return 1;
+    if (path && str_contains(path, "/stress")) return 1;
+    return 0;
 }
 
 /* Track failed test names for summary */
@@ -859,14 +886,16 @@ static int run_one_test(const char* stem,
 
 static void usage(const char* prog) {
     fprintf(stderr, "Usage:\n");
-    fprintf(stderr, "  %s [--list] [--filter SUBSTR] [--verbose] [--jobs N] [--build-timeout SECONDS] [--run-timeout SECONDS] [--use-cache|--no-cache] [--clean]\n", prog);
+    fprintf(stderr, "  %s [--list] [--filter SUBSTR] [--quick] [--verbose] [--jobs N] [--build-timeout SECONDS] [--run-timeout SECONDS] [--use-cache|--no-cache] [--clean]\n", prog);
+    fprintf(stderr, "  --quick  skip stress/lostwake/race tests (also CC_TEST_QUICK=1)\n");
 }
 
 int main(int argc, char** argv) {
     const char* filter = NULL;
     int verbose = 0;
     int list_only = 0;
-    int jobs = 6;
+    int jobs = default_job_count();
+    int quick = 0;
     int use_cache = 1; /* default on; cold runs reuse shared concurrent_c.o / .c outs */
     int clean = 0;
     int build_timeout_sec = 300;
@@ -874,6 +903,7 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--verbose") == 0) { verbose = 1; continue; }
         if (strcmp(argv[i], "--list") == 0) { list_only = 1; continue; }
+        if (strcmp(argv[i], "--quick") == 0) { quick = 1; continue; }
         if (strcmp(argv[i], "--use-cache") == 0) { use_cache = 1; continue; }
         if (strcmp(argv[i], "--no-cache") == 0) { use_cache = 0; continue; }
         if (strcmp(argv[i], "--clean") == 0) { clean = 1; continue; }
@@ -898,6 +928,7 @@ int main(int argc, char** argv) {
             if (i + 1 >= argc) { fprintf(stderr, "--jobs requires a value\n"); return 2; }
             jobs = atoi(argv[++i]);
             if (jobs < 1) jobs = 1;
+            if (jobs > 64) jobs = 64;
             continue;
         }
         usage(argv[0]);
@@ -917,6 +948,18 @@ int main(int argc, char** argv) {
     {
         const char* env = getenv("CC_TEST_NO_CACHE");
         if (env && strcmp(env, "1") == 0) use_cache = 0;
+    }
+    {
+        const char* env = getenv("CC_TEST_QUICK");
+        if (env && strcmp(env, "1") == 0) quick = 1;
+    }
+    {
+        const char* env = getenv("CC_TEST_JOBS");
+        if (env && *env) {
+            int t = atoi(env);
+            if (t >= 1) jobs = t;
+            if (jobs > 64) jobs = 64;
+        }
     }
     {
         const char* env = getenv("CC_TEST_CLEAN");
@@ -1031,6 +1074,10 @@ int main(int argc, char** argv) {
         }
 
         if (filter && !str_contains(stem, filter) && !str_contains(path, filter)) continue;
+        if (quick && test_is_heavy(stem, path)) {
+            if (verbose) fprintf(stderr, "[SKIP] %s (quick: stress/race)\n", stem);
+            continue;
+        }
 
         if (list_only) {
             printf("%s\n", path);

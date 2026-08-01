@@ -1686,6 +1686,17 @@ static int cc__emit_registered_callable(char* out,
             }
         }
     }
+    /* Mixed-convention runtime families (esp. cc_slice_*): receiver
+     * passing follows the declared first parameter — by value when the
+     * family fn takes the receiver type by value. Same rule as the
+     * preprocess text UFCS path (`family_by_value` / slice_like). */
+    if (!receiver_by_value && !recv_is_ptr && recv_is_addressable) {
+        char fparam[256];
+        if ((cc_included_cch_fn_first_param(lowered_name, fparam, sizeof(fparam)) ||
+             cc__ufcs_fn_first_param_in_source(lowered_name, fparam, sizeof(fparam))) &&
+            fparam[0] && !strchr(fparam, '*'))
+            receiver_by_value = 1;
+    }
     if (has_args) {
         if (receiver_by_value) {
             return snprintf(out, cap, "%s(%s, ", lowered_name, recv);

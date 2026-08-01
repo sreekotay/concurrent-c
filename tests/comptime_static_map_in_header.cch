@@ -1,0 +1,39 @@
+#ifndef COMPTIME_STATIC_MAP_IN_HEADER_CCH
+#define COMPTIME_STATIC_MAP_IN_HEADER_CCH
+
+#include <ccc/std/static_map.cch>
+
+typedef enum {
+    HDR_CMD_GET = 1,
+    HDR_CMD_SET = 2,
+} HdrCmdKind;
+
+typedef struct {
+    HdrCmdKind kind;
+    int arity;
+} HdrCmdSpec;
+
+typedef struct {
+    const char* key;
+    HdrCmdSpec value;
+} HdrCmdEntry;
+
+/* Emit-producing block: lower_header blanks this; the including TU harvests
+ * and runs it so hdr_commands_get is defined in the merged .c. */
+@comptime {
+    HdrCmdEntry hdr_cmd_entries[] = {
+        { "GET", { HDR_CMD_GET, 1 } },
+        { "SET", { HDR_CMD_SET, 2 } },
+    };
+    static_map("hdr_commands", hdr_cmd_entries, CC_STATIC_MAP_ASCII_CI);
+}
+
+/* Callers in the header need a forward decl — the body is TU-spliced. */
+static const HdrCmdSpec* hdr_commands_get(CCSlice key);
+
+static int hdr_cmd_arity(CCSlice name) {
+    const HdrCmdSpec* s = hdr_commands_get(name);
+    return s ? s->arity : -1;
+}
+
+#endif

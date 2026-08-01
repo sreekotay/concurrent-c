@@ -50,6 +50,11 @@ real tools (e.g. `script_minify_smoke.shcc` → `examples/.../minify.shcc`).
 
 - `./tools/cc_test --list`: list selected tests
 - `./tools/cc_test --filter SUBSTR`: only run tests whose name/path contains `SUBSTR`
+- `./tools/cc_test --quick`: skip stress / lostwake / `*_race*` tests (also `CC_TEST_QUICK=1`)
 - `./tools/cc_test --verbose`: print commands
-- `./tools/cc_test --jobs N`: parallel runs
+- `./tools/cc_test --jobs N`: parallel runs (default: online CPU count, cap 16; `CC_TEST_JOBS`)
 - `./tools/cc_test --no-cache` / `--use-cache`: control `ccc build` cache
+
+`./scripts/test.sh --quick` (or `CC_TEST_QUICK=1`) also skips the heavy serial
+preambles (redis functional, async line map, tcc patch apply, …). Use
+`CC_TEST_FULL=1` / `--full` for the complete gate.

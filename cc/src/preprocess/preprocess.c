@@ -641,6 +641,11 @@ static char* cc__rewrite_alloct_destroy_annotations(const char* src, size_t n) {
     int changed = 0;
     CCScannerState scan;
     if (!src || n == 0) return NULL;
+    /* Needs both the annotation and an arena alloc spelling. */
+    if (!cc_contains_token_top_level(src, n, "@destroy") ||
+        (!cc_contains_token_top_level(src, n, "cc_arena_alloc") &&
+         !memmem(src, n, "cc_arena_alloc_T", 15)))
+        return NULL;
     cc_scanner_init(&scan);
     while (i < n) {
         size_t stmt_s, eq, p, name_s, name_e, rhs_s, r, cs, cl, lp, rp;
@@ -744,6 +749,7 @@ char* cc_rewrite_nursery_create_destroy_proto(const char* src, size_t n, const c
    sentinel) after printing the diagnostic when it is present. */
 static char* cc__reject_match_syntax(const char* src, size_t n, const char* input_path) {
     if (!src || n == 0) return NULL;
+    if (!cc_contains_token_top_level(src, n, "@match")) return NULL;
 
     size_t i = 0;
     CCScannerState scanner;
@@ -785,6 +791,9 @@ static char* cc__reject_match_syntax(const char* src, size_t n, const char* inpu
    the scope remains part of canonical CC and is lowered later. */
 static char* cc__canonicalize_with_deadline_syntax(const char* src, size_t n) {
     if (!src || n == 0) return NULL;
+    /* Presence gate: avoid a full-buffer clone when the construct is absent
+     * (redis and most smoke TUs never spell it). */
+    if (!cc_contains_token_top_level(src, n, "@with_deadline")) return NULL;
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
     size_t i = 0;
@@ -831,6 +840,7 @@ static char* cc__canonicalize_with_deadline_syntax(const char* src, size_t n) {
    scaffolding. */
 static char* cc__lower_with_deadline_syntax(const char* src, size_t n) {
     if (!src || n == 0) return NULL;
+    if (!cc_contains_token_top_level(src, n, "with_deadline")) return NULL;
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
     size_t i = 0;
@@ -997,6 +1007,10 @@ static char* cc__lower_with_deadline_syntax(const char* src, size_t n) {
         i++;
     }
 
+    if (counter == 0) {
+        free(out);
+        return NULL;
+    }
     return out;
 }
 
@@ -3091,6 +3105,31 @@ static size_t cc__pp_match_bracket_backward(const char* src, size_t close_pos,
 /* Scan backwards from pos to find the start of a member access chain (e.g., obj.field or ptr->field).
    Returns the start position of the full expression.
    Handles chains like a.b.c, a->b->c, (*p)->field, arr[i].field, func().field. */
+/* True when src[open+1..close) is a parenthesized C type used as a cast
+ * prefix: `(T)`, `(T*)`, `(struct S*)`, etc. */
+static int cc__ufcs_paren_is_cast_type_only(const char* src, size_t open, size_t close) {
+    size_t i;
+    size_t ident_runs = 0;
+    if (!src || close <= open + 1) return 0;
+    i = open + 1;
+    while (i < close && (src[i] == ' ' || src[i] == '\t')) i++;
+    while (i < close) {
+        if (cc_is_ident_start(src[i])) {
+            while (i < close && cc_is_ident_char(src[i])) i++;
+            ident_runs++;
+            while (i < close && (src[i] == ' ' || src[i] == '\t')) i++;
+            continue;
+        }
+        if (src[i] == '*') {
+            i++;
+            while (i < close && (src[i] == ' ' || src[i] == '\t' || src[i] == '*')) i++;
+            continue;
+        }
+        return 0;
+    }
+    return ident_runs >= 1;
+}
+
 static size_t cc_scan_back_for_member_access(const char* src, size_t pos, size_t limit) {
     if (pos == 0 || pos <= limit) return pos;
     
@@ -3121,10 +3160,21 @@ static size_t cc_scan_back_for_member_access(const char* src, size_t pos, size_t
             p -= 2;
             last_was_ident = 0;
         } else if (src[p-1] == ')') {
+            size_t q;
+            size_t before;
             if (last_was_ident) break;
-            size_t q = cc__pp_match_bracket_backward(src, p - 1, limit, '(', ')');
-            if (q != (size_t)-1) p = q;
-            else break;
+            q = cc__pp_match_bracket_backward(src, p - 1, limit, '(', ')');
+            if (q == (size_t)-1) break;
+            /* Prefix cast `(T)primary` must not join the UFCS receiver:
+             *   (int64_t)((T*)(e))->field.len()
+             * Call receivers `f(x)->m()` still scan through (`f` before `(`). */
+            before = q;
+            while (before > limit && (src[before - 1] == ' ' || src[before - 1] == '\t'))
+                before--;
+            if (!(before > limit && cc_is_ident_char(src[before - 1])) &&
+                cc__ufcs_paren_is_cast_type_only(src, q, p - 1))
+                break;
+            p = q;
             last_was_ident = 0;
         } else if (src[p-1] == ']') {
             size_t q = cc__pp_match_bracket_backward(src, p - 1, limit, '[', ']');
@@ -3284,26 +3334,75 @@ static int cc__match_kw_at(const char* src, size_t n, size_t pos, const char* kw
     return 1;
 }
 
-static int cc__source_declares_map_ufcs(const char* src, size_t n, const char* type_name) {
-    char base[128];
-    size_t tlen;
+/* Once-per-buffer index of types declared via CC_MAP_DECL_UFCS /
+ * CC_ARRAY_MAP_DECL_UFCS (and their __cc_* marker spellings).  Text UFCS
+ * used to re-scan the whole TU for every `.method(` site; redis pays that
+ * with zero user map decls. */
+typedef struct {
+    const char* src;
+    size_t n;
+    char** names;
+    size_t* lens;
+    size_t count;
+    size_t cap;
+    int built;
+} CCMapUfcsDeclIndex;
+
+static _Thread_local CCMapUfcsDeclIndex g_map_ufcs_decl_idx;
+
+static void cc__map_ufcs_decl_idx_reset(void) {
+    size_t i;
+    for (i = 0; i < g_map_ufcs_decl_idx.count; i++) free(g_map_ufcs_decl_idx.names[i]);
+    free(g_map_ufcs_decl_idx.names);
+    free(g_map_ufcs_decl_idx.lens);
+    memset(&g_map_ufcs_decl_idx, 0, sizeof(g_map_ufcs_decl_idx));
+}
+
+static int cc__map_ufcs_decl_idx_push(const char* name, size_t nlen) {
+    char* copy;
+    size_t i;
+    if (!name || nlen == 0) return 0;
+    for (i = 0; i < g_map_ufcs_decl_idx.count; i++) {
+        if (g_map_ufcs_decl_idx.lens[i] == nlen &&
+            memcmp(g_map_ufcs_decl_idx.names[i], name, nlen) == 0)
+            return 0;
+    }
+    if (g_map_ufcs_decl_idx.count == g_map_ufcs_decl_idx.cap) {
+        size_t cap = g_map_ufcs_decl_idx.cap ? g_map_ufcs_decl_idx.cap * 2 : 8;
+        char** nn = (char**)realloc(g_map_ufcs_decl_idx.names, cap * sizeof(*nn));
+        size_t* nl = (size_t*)realloc(g_map_ufcs_decl_idx.lens, cap * sizeof(*nl));
+        if (!nn || !nl) {
+            free(nn);
+            free(nl);
+            return -1;
+        }
+        g_map_ufcs_decl_idx.names = nn;
+        g_map_ufcs_decl_idx.lens = nl;
+        g_map_ufcs_decl_idx.cap = cap;
+    }
+    copy = (char*)malloc(nlen + 1);
+    if (!copy) return -1;
+    memcpy(copy, name, nlen);
+    copy[nlen] = '\0';
+    g_map_ufcs_decl_idx.names[g_map_ufcs_decl_idx.count] = copy;
+    g_map_ufcs_decl_idx.lens[g_map_ufcs_decl_idx.count] = nlen;
+    g_map_ufcs_decl_idx.count++;
+    return 0;
+}
+
+static void cc__map_ufcs_decl_idx_build(const char* src, size_t n) {
     static const char* const kws[] = { "CC_MAP_DECL_UFCS", "CC_ARRAY_MAP_DECL_UFCS" };
     static const char* const markers[] = { "__cc_map_decl_ufcs__", "__cc_array_map_decl_ufcs__" };
-    if (!src || !type_name || !type_name[0]) return 0;
-    while (*type_name == ' ' || *type_name == '\t') type_name++;
-    if (strncmp(type_name, "struct ", 7) == 0) type_name += 7;
-    else if (strncmp(type_name, "union ", 6) == 0) type_name += 6;
-    tlen = strlen(type_name);
-    while (tlen > 0 && (type_name[tlen - 1] == '*' || type_name[tlen - 1] == ' ' || type_name[tlen - 1] == '\t')) tlen--;
-    if (tlen == 0 || tlen >= sizeof(base)) return 0;
-    memcpy(base, type_name, tlen);
-    base[tlen] = '\0';
-    for (size_t ki = 0; ki < sizeof(kws) / sizeof(kws[0]); ++ki) {
+    size_t ki, mi, i;
+    cc__map_ufcs_decl_idx_reset();
+    g_map_ufcs_decl_idx.src = src;
+    g_map_ufcs_decl_idx.n = n;
+    g_map_ufcs_decl_idx.built = 1;
+    if (!src || n == 0) return;
+    for (ki = 0; ki < sizeof(kws) / sizeof(kws[0]); ++ki) {
         size_t kwlen = strlen(kws[ki]);
-        for (size_t i = 0; i + kwlen < n; ++i) {
-            size_t p;
-            size_t ident_start;
-            size_t ident_end;
+        for (i = 0; i + kwlen < n; ++i) {
+            size_t p, ident_start, ident_end;
             if (!cc__match_kw_at(src, n, i, kws[ki])) continue;
             p = cc_skip_ws_and_comments(src, n, i + kwlen);
             if (p >= n || src[p] != '(') continue;
@@ -3315,19 +3414,48 @@ static int cc__source_declares_map_ufcs(const char* src, size_t n, const char* t
             ident_end = p;
             p = cc_skip_ws_and_comments(src, n, p);
             if (p >= n || src[p] != ')') continue;
-            if (ident_end - ident_start == tlen && memcmp(src + ident_start, base, tlen) == 0) return 1;
+            if (ident_end > ident_start)
+                (void)cc__map_ufcs_decl_idx_push(src + ident_start, ident_end - ident_start);
+            i = ident_end ? ident_end - 1 : i;
         }
     }
-    for (size_t mi = 0; mi < sizeof(markers) / sizeof(markers[0]); ++mi) {
-        char marker[192];
-        int mlen = snprintf(marker, sizeof(marker), "%s%s", markers[mi], base);
-        if (mlen <= 0 || (size_t)mlen >= sizeof(marker)) continue;
-        for (size_t i = 0; i + (size_t)mlen <= n; ++i) {
-            if (memcmp(src + i, marker, (size_t)mlen) != 0) continue;
+    for (mi = 0; mi < sizeof(markers) / sizeof(markers[0]); ++mi) {
+        size_t mpre = strlen(markers[mi]);
+        for (i = 0; i + mpre < n; ++i) {
+            size_t j;
+            if (memcmp(src + i, markers[mi], mpre) != 0) continue;
             if (i > 0 && cc_is_ident_char(src[i - 1])) continue;
-            if (i + (size_t)mlen < n && cc_is_ident_char(src[i + (size_t)mlen])) continue;
-            return 1;
+            j = i + mpre;
+            if (j >= n || !cc_is_ident_start(src[j])) continue;
+            while (j < n && cc_is_ident_char(src[j])) j++;
+            if (j + 1 < n && cc_is_ident_char(src[j])) continue;
+            (void)cc__map_ufcs_decl_idx_push(src + i + mpre, j - (i + mpre));
+            i = j ? j - 1 : i;
         }
+    }
+}
+
+static int cc__source_declares_map_ufcs(const char* src, size_t n, const char* type_name) {
+    char base[128];
+    size_t tlen;
+    size_t i;
+    if (!src || !type_name || !type_name[0]) return 0;
+    while (*type_name == ' ' || *type_name == '\t') type_name++;
+    if (strncmp(type_name, "struct ", 7) == 0) type_name += 7;
+    else if (strncmp(type_name, "union ", 6) == 0) type_name += 6;
+    tlen = strlen(type_name);
+    while (tlen > 0 && (type_name[tlen - 1] == '*' || type_name[tlen - 1] == ' ' || type_name[tlen - 1] == '\t')) tlen--;
+    if (tlen == 0 || tlen >= sizeof(base)) return 0;
+    memcpy(base, type_name, tlen);
+    base[tlen] = '\0';
+    if (!g_map_ufcs_decl_idx.built || g_map_ufcs_decl_idx.src != src ||
+        g_map_ufcs_decl_idx.n != n)
+        cc__map_ufcs_decl_idx_build(src, n);
+    if (g_map_ufcs_decl_idx.count == 0) return 0;
+    for (i = 0; i < g_map_ufcs_decl_idx.count; i++) {
+        if (g_map_ufcs_decl_idx.lens[i] == tlen &&
+            memcmp(g_map_ufcs_decl_idx.names[i], base, tlen) == 0)
+            return 1;
     }
     return 0;
 }
@@ -4653,6 +4781,62 @@ static int cc__scan_generic_ufcs_call_site(const char* src,
     return 1;
 }
 
+/* Parse a C cast primary `(T*)(e)` / `(T*)e` / `(T)e`. On success, writes the
+ * cast type (including trailing `*`) and points *rest at the first byte after
+ * the cast operand. */
+static int cc__ufcs_parse_c_cast_primary(const char* s,
+                                         char* type_out,
+                                         size_t type_out_sz,
+                                         const char** rest_out) {
+    const char* p;
+    const char* type_s;
+    const char* type_e;
+    size_t stars = 0;
+    size_t tlen;
+    if (!s || !type_out || type_out_sz == 0 || !rest_out) return 0;
+    p = s;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != '(') return 0;
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+    if (!cc_is_ident_start(*p)) return 0;
+    type_s = p;
+    while (cc_is_ident_char(*p)) p++;
+    type_e = p;
+    while (*p == ' ' || *p == '\t') p++;
+    while (*p == '*') {
+        stars++;
+        p++;
+        while (*p == ' ' || *p == '\t') p++;
+    }
+    if (*p != ')') return 0;
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+    /* Operand: parenthesized expr, or a bare primary starting with ident/'('. */
+    if (*p == '(') {
+        int depth = 0;
+        const char* q = p;
+        do {
+            if (*q == '(') depth++;
+            else if (*q == ')') depth--;
+            q++;
+        } while (*q && depth > 0);
+        if (depth != 0) return 0;
+        p = q;
+    } else if (cc_is_ident_start(*p)) {
+        while (cc_is_ident_char(*p)) p++;
+    } else {
+        return 0;
+    }
+    tlen = (size_t)(type_e - type_s);
+    if (tlen + stars + 1 > type_out_sz) return 0;
+    memcpy(type_out, type_s, tlen);
+    while (stars--) type_out[tlen++] = '*';
+    type_out[tlen] = '\0';
+    *rest_out = p;
+    return 1;
+}
+
 static int cc__resolve_generic_ufcs_receiver_type(const char* recv,
                                                   const char* source_text,
                                                   size_t use_offset,
@@ -4670,6 +4854,7 @@ static int cc__resolve_generic_ufcs_receiver_type(const char* recv,
     const char* p;
     const char* type_name;
     int recv_is_ptr = 0;
+    int from_cast = 0;
     CCTypeRegistry* reg = cc_type_registry_get_global();
     if (!recv || !out_type || out_type_sz == 0) return 0;
     out_type[0] = '\0';
@@ -4685,6 +4870,47 @@ static int cc__resolve_generic_ufcs_receiver_type(const char* recv,
         recv_is_ptr = 1;
         p++;
         while (*p == ' ' || *p == '\t') p++;
+    }
+    /* `((T*)(e))->field` / `(T*)(e)->field`: peel cast primary so family text
+     * UFCS can lower residual sites the AST final sweep would otherwise keep. */
+    while (*p == '(') {
+        const char* open = p;
+        const char* close;
+        const char* after;
+        int depth = 0;
+        const char* q = p;
+        do {
+            if (*q == '(') depth++;
+            else if (*q == ')') depth--;
+            q++;
+        } while (*q && depth > 0);
+        if (depth != 0) break;
+        close = q - 1;
+        after = close + 1;
+        while (*after == ' ' || *after == '\t') after++;
+        if (*after == '.' || (*after == '-' && after[1] == '>') || *after == '\0') {
+            char cast_type[256];
+            const char* cast_rest = NULL;
+            char inner[256];
+            size_t ilen = (size_t)(close - (open + 1));
+            if (ilen == 0 || ilen >= sizeof(inner)) break;
+            memcpy(inner, open + 1, ilen);
+            inner[ilen] = '\0';
+            if (cc__ufcs_parse_c_cast_primary(inner, cast_type, sizeof(cast_type), &cast_rest)) {
+                while (*cast_rest == ' ' || *cast_rest == '\t') cast_rest++;
+                if (*cast_rest == '\0') {
+                    snprintf(out_type, out_type_sz, "%s", cast_type);
+                    p = after;
+                    from_cast = 1;
+                    break;
+                }
+            }
+        }
+        break;
+    }
+    if (from_cast) {
+        type_name = out_type;
+        goto cc__ufcs_recv_field_walk;
     }
     if (!cc_is_ident_start(*p)) return 0;
     {
@@ -4770,6 +4996,8 @@ static int cc__resolve_generic_ufcs_receiver_type(const char* recv,
             }
         }
     }
+cc__ufcs_recv_field_walk:
+    (void)type_name;
     while (*p) {
         char field_name[128];
         char base_type[256];
@@ -5834,18 +6062,20 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
         }
         if (arena_like) {
             /* CCArena has a registered @comptime hook (cc_arena_lower_c).
-               Skip rewriting here so the hook is authoritative: rewriting
-               would bypass it and silently produce default `cc_arena_<method>`
-               callees that may not exist (e.g. comptime_type_arena_hooks_smoke
-               block 2: `arena.avail()` must lower via the hook to
-               `arena_avail`, not `cc_arena_avail`).
-
-               CCNursery also has a hook, but closure literal lowering can run
-               after the AST UFCS pass and leave `n->spawn(__cc_closure_make_N())`
-               behind. The parser-safe fallback below mirrors that nursery hook's
-               fixed mappings so these calls do not survive to emitted C. */
-            i++;
-            continue;
+               Leave hook-owned methods for the AST/hook path so rewriting
+               cannot invent default `cc_arena_<method>` callees that may not
+               exist (e.g. comptime_type_arena_hooks_smoke: `arena.avail()`
+               must lower via the hook to `arena_avail`, not `cc_arena_avail`).
+               Fixed lifecycle methods match the default twins and are safe to
+               text-lower — needed so `@defer arena.destroy()` cleanup sites
+               do not force a final-UFCS reparse when phase-3 reused the
+               initial AST (defer bodies often lack a UFCS stub node). */
+            if (!(strcmp(method_name, "destroy") == 0 ||
+                  strcmp(method_name, "free") == 0 ||
+                  strcmp(method_name, "reset") == 0)) {
+                i++;
+                continue;
+            }
         }
         if (chan_tx || chan_rx) {
             if (chan_tx && strcmp(method_name, "send") == 0) {
@@ -9346,6 +9576,7 @@ static char* cc__rewrite_result_star_unwrap(const char* src, size_t n) {
 // Output: a comment containing __CC_LINK__ curl
 char* cc__rewrite_link_directives(const char* src, size_t n) {
     if (!src || n == 0) return NULL;
+    if (!cc_contains_token_top_level(src, n, "@link")) return NULL;
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
     size_t i = 0;
@@ -10194,6 +10425,7 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
    cc_concurrent syntax is deprecated; use cc_block_all instead. */
 static char* cc__rewrite_cc_concurrent(const char* src, size_t n) {
     if (!src || n == 0) return NULL;
+    if (!cc_contains_token_top_level(src, n, "cc_concurrent")) return NULL;
 
     CCScannerState scan;
     cc_scanner_init(&scan);
@@ -13656,6 +13888,62 @@ char* cc_harvest_header_comptime_functions(void) {
     return out;
 }
 
+/* Top-level `@comptime { ... }` in local .cch headers — same harvest model as
+ * CC_GENERIC_FACTORY.  lower_header blanks these so the .h stays host-C; the
+ * including TU re-runs them so CC_EMIT_AT_COMPTIME_SITE (e.g. static_map's
+ * `<name>_get`) lands in the merged .c.  Skips `@comptime if/for` and
+ * `@comptime` function definitions (handled elsewhere). */
+char* cc_harvest_local_header_comptime_blocks(void) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    int any = 0;
+    for (size_t h = 0; h < g_lowered_local_header_count; h++) {
+        const char* path = g_lowered_local_headers[h].source_path;
+        char* src = NULL;
+        size_t n = 0;
+        size_t i = 0;
+        CCScannerState scan;
+        if (!path || cc__read_file_text(path, &src, &n) != 0) continue;
+        cc_scanner_init(&scan);
+        while (i < n) {
+            if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+            if (src[i] != '@' || !cc_match_ident_kw(src, n, i + 1, "comptime")) {
+                i++;
+                continue;
+            }
+            size_t start = i;
+            size_t p = cc_skip_ws_and_comments(src, n, i + 1 + strlen("comptime"));
+            size_t body_r = 0;
+            /* Only plain blocks — not if/for/functions. */
+            if (p >= n || src[p] != '{') {
+                i++;
+                continue;
+            }
+            if (!cc_find_matching_brace(src, n, p, &body_r)) {
+                i++;
+                continue;
+            }
+            {
+                int line = 1;
+                char ld[PATH_MAX + 64];
+                for (size_t k = 0; k < start; k++) if (src[k] == '\n') line++;
+                snprintf(ld, sizeof(ld), "#line %d \"%s\"\n", line, path);
+                if (out_len > 0 && out[out_len - 1] != '\n')
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, ld);
+                cc_sb_append(&out, &out_len, &out_cap,
+                             src + start, body_r + 1 - start);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+            }
+            any = 1;
+            i = body_r + 1;
+        }
+        free(src);
+    }
+    if (!any) { free(out); return NULL; }
+    return out;
+}
+
 const char* cc_lowered_header_source_for(const char* lowered_path) {
     if (!lowered_path || !lowered_path[0]) return NULL;
     for (size_t i = 0; i < g_lowered_local_header_count; ++i) {
@@ -13772,6 +14060,13 @@ char* cc_relower_cc_type_syntax_preserving_registry(const char* src,
     CCPassChain chain;
     char* out = NULL;
     if (!src || input_len == 0) return NULL;
+    /* Presence gate: same probe as build_parse_input's post-CPP path. */
+    if (!memmem(src, input_len, "[~", 2) &&
+        !memmem(src, input_len, "[:", 2) &&
+        !memmem(src, input_len, "::[", 3) &&
+        !cc_contains_token_top_level(src, input_len, "@string") &&
+        !cc_contains_token_top_level(src, input_len, "@slice"))
+        return NULL;
 
     /* DELIBERATELY do NOT touch the type registry. Caller has already gone
      * through phase-1+phase-3 and may have populated registries (Result,
@@ -15380,9 +15675,20 @@ int cc_ct_reflect_struct_fields(const char* src, size_t len, const char* type_na
     if (out_n) *out_n = 0;
     if (!src || !type_name || !type_name[0] || !out || !out_n) return 0;
     size_t bo, bc;
-    if (!cc__ct_find_struct_body(src, len, type_name, strlen(type_name), &bo, &bc))
-        return 0;
-    return cc__ct_parse_fields_from_body(src, bo, bc, out, out_n);
+    size_t nlen = strlen(type_name);
+    if (cc__ct_find_struct_body(src, len, type_name, nlen, &bo, &bc))
+        return cc__ct_parse_fields_from_body(src, bo, bc, out, out_n);
+    /* Types often live in included .cch while emit-producing `@comptime { }`
+     * blocks are harvested into the TU (static_map-in-header). Mirror
+     * cc__sm_find_typedef's included-source search. */
+    for (size_t h = 0; h < g_included_cch_source_count; h++) {
+        size_t fn = 0;
+        const char* fsrc = cc__included_cch_text(h, &fn);
+        if (!fsrc) continue;
+        if (cc__ct_find_struct_body(fsrc, fn, type_name, nlen, &bo, &bc))
+            return cc__ct_parse_fields_from_body(fsrc, bo, bc, out, out_n);
+    }
+    return 0;
 }
 
 void cc_ct_free_fields(CCCtField* fields, size_t n) {

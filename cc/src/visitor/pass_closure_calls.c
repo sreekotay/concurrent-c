@@ -397,6 +397,16 @@ typedef struct {
     int arity; /* 1 or 2 */
 } CCClosureCallNode;
 
+static int cc__closure_call_node_cmp(const void* a, const void* b) {
+    const CCClosureCallNode* x = (const CCClosureCallNode*)a;
+    const CCClosureCallNode* y = (const CCClosureCallNode*)b;
+    if (x->line_start != y->line_start)
+        return (x->line_start < y->line_start) ? -1 : 1;
+    if (x->col_start != y->col_start)
+        return (x->col_start < y->col_start) ? -1 : 1;
+    return 0;
+}
+
 typedef struct {
     size_t name_start;
     size_t lparen;
@@ -543,6 +553,10 @@ int cc__collect_closure_calls_edits(const CCASTRoot* root,
                                     CCEditBuffer* eb) {
     if (!root || !ctx || !eb || !eb->src) return 0;
     if (!root->nodes || root->node_count <= 0) return 0;
+    /* Only CCClosureN typed callees rewrite.  Redis has `=>` literals but
+     * no CCClosure decls/calls — skip the CALL collect + O(n²) sort. */
+    if (!cc_contains_token_top_level(eb->src, eb->src_len, "CCClosure"))
+        return 0;
 
     const char* in_src = eb->src;
     size_t in_len = eb->src_len;
@@ -578,14 +592,7 @@ int cc__collect_closure_calls_edits(const CCASTRoot* root,
     if (call_n == 0) { free(calls); return 0; }
 
     /* Sort by (line_start, col_start). */
-    for (int i = 0; i < call_n; i++) {
-        for (int j = i + 1; j < call_n; j++) {
-            int swap = 0;
-            if (calls[j].line_start < calls[i].line_start) swap = 1;
-            else if (calls[j].line_start == calls[i].line_start && calls[j].col_start < calls[i].col_start) swap = 1;
-            if (swap) { CCClosureCallNode t = calls[i]; calls[i] = calls[j]; calls[j] = t; }
-        }
-    }
+    qsort(calls, (size_t)call_n, sizeof(*calls), cc__closure_call_node_cmp);
 
     /* Assign occurrence per (line_start, callee) so we can find spans after prior rewrites. */
     for (int i = 0; i < call_n; i++) {

@@ -3019,6 +3019,60 @@ static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n) {
     return 1;
 }
 
+/* Locate `@async <ret> <name>(...){...}` in current source by name.
+ * Authoritative for spans after defer/closure text edits: stub-AST
+ * line_start can lag the buffer while names/attrs remain valid. */
+static int cc__async_locate_fn_in_text(const char* src, size_t len, const char* fn_name,
+                                       size_t* out_async, size_t* out_lbrace, size_t* out_rbrace) {
+    size_t q;
+    size_t nlen;
+    if (!src || !fn_name || !fn_name[0] || !out_async || !out_lbrace || !out_rbrace) return 0;
+    nlen = strlen(fn_name);
+    *out_async = len;
+    *out_lbrace = 0;
+    *out_rbrace = 0;
+    for (q = 0; q < len; ) {
+        size_t m = cc_find_substr_top_level(src, q, len, "@async", 6);
+        size_t name_pos;
+        size_t after_name;
+        size_t lparen;
+        size_t rparen = 0;
+        size_t lbrace;
+        size_t rbrace = 0;
+        if (m >= len) break;
+        if (m + 6 < len && cc__is_ident_char(src[m + 6])) { q = m + 6; continue; }
+        name_pos = cc_find_ident_top_level(src, m + 6, len, fn_name, nlen);
+        if (name_pos >= len) { q = m + 6; continue; }
+        /* Require the name to be the declarator: next non-ws token is `(`. */
+        after_name = name_pos + nlen;
+        while (after_name < len && (src[after_name] == ' ' || src[after_name] == '\t' ||
+                                    src[after_name] == '\n' || src[after_name] == '\r'))
+            after_name++;
+        if (after_name >= len || src[after_name] != '(') { q = m + 6; continue; }
+        lparen = after_name;
+        if (!cc_find_matching_paren(src, len, lparen, &rparen)) { q = m + 6; continue; }
+        lbrace = cc_find_char_top_level(src, rparen + 1, len, '{');
+        if (lbrace >= len || !cc__find_matching_brace(src, len, lbrace, &rbrace)) {
+            q = m + 6;
+            continue;
+        }
+        /* Reject if another `@async` sits between this marker and the name
+         * (would mean we latched onto a later call/mention of the name). */
+        {
+            size_t mid = cc_find_substr_top_level(src, m + 6, name_pos, "@async", 6);
+            if (mid < name_pos && (mid + 6 >= len || !cc__is_ident_char(src[mid + 6]))) {
+                q = m + 6;
+                continue;
+            }
+        }
+        *out_async = m;
+        *out_lbrace = lbrace;
+        *out_rbrace = rbrace;
+        return 1;
+    }
+    return 0;
+}
+
 int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
                                        const CCVisitorCtx* ctx,
                                        const char* in_src,
@@ -3035,16 +3089,20 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
 
     const NodeView* n = (const NodeView*)root->nodes;
 
-    /* Diagnose await outside @async and unsupported await contexts early. */
-    for (int i = 0; i < root->node_count; i++) {
-        if (n[i].kind != CC_AST_NODE_AWAIT) continue;
-        if (!cc_pass_node_in_tu(root, ctx, n[i].file)) continue;
-        if (!cc__is_async_owner(root, ctx, n, n[i].parent)) {
-            const char* f = n[i].file ? n[i].file : (ctx->input_path ? ctx->input_path : "<input>");
-            cc_pass_error_cat(f, n[i].line_start, n[i].col_start > 0 ? n[i].col_start : 1,
-                    CC_ERR_ASYNC, "'await' is only valid inside @async functions");
-            fprintf(stderr, "  hint: mark the containing function with @async, e.g.: @async void my_fn(void) { ... }\n");
-            return -1;
+    /* Diagnose await outside @async.  Skip when the current buffer has no
+     * `await` token — checker already enforced this, and a reused stub-AST
+     * after defer/closure can carry stale await node coordinates. */
+    if (cc_contains_token_top_level(in_src, in_len, "await")) {
+        for (int i = 0; i < root->node_count; i++) {
+            if (n[i].kind != CC_AST_NODE_AWAIT) continue;
+            if (!cc_pass_node_in_tu(root, ctx, n[i].file)) continue;
+            if (!cc__is_async_owner(root, ctx, n, n[i].parent)) {
+                const char* f = n[i].file ? n[i].file : (ctx->input_path ? ctx->input_path : "<input>");
+                cc_pass_error_cat(f, n[i].line_start, n[i].col_start > 0 ? n[i].col_start : 1,
+                        CC_ERR_ASYNC, "'await' is only valid inside @async functions");
+                fprintf(stderr, "  hint: mark the containing function with @async, e.g.: @async void my_fn(void) { ... }\n");
+                return -1;
+            }
         }
     }
 
@@ -3093,84 +3151,58 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
         }
 
         int body_block = -1;
-
-        /* Compute span by brace matching in the *current* source.
-           Stub-AST block node spans can be short for function bodies (decls are tracked under a child DECL node),
-           so we avoid using `body_block`'s end span for replacement. */
         int ls = n[i].line_start > 0 ? n[i].line_start : 1;
-        size_t s0 = cc_offset_for_logical_line(in_src, in_len, n[i].file, ls);
-        size_t scan = s0;
-        /* Find the '@async' marker for this decl (best-effort),
-         * otherwise start at the recorded line.
-         *
-         * TCC's stub AST records `line_start` at the line where the
-         * declarator COMPLETES (the body-`{` line), not where the
-         * declaration begins.  For a single-line signature the two
-         * coincide, but when the parameter list spans multiple source
-         * lines the marker (and the whole signature head) sits on
-         * EARLIER lines.  A forward-only search from `s0` then misses
-         * it — or latches onto the NEXT function's marker — and the
-         * fn-name lookup below drifts to a later use of the name
-         * (typically a call site), so the replacement region starts
-         * mid-signature and the continuation lines of the parameter
-         * list are dropped from the rewritten output.
-         *
-         * Anchor on the body `{` instead: the first top-level `{` at or
-         * after the recorded line start (comment/string-aware, so a
-         * `{` in a comment on the decl line can't bait it) is the body
-         * opener whether or not the signature is split.  The `@async`
-         * marker for THIS decl is then the NEAREST marker BEFORE that
-         * brace: markers only occur at declaration level, so any
-         * earlier hit belongs to a previous function and any later hit
-         * sits past our body opener. */
-        {
-            size_t anchor = cc_find_char_top_level(in_src, s0, in_len, '{');
-            size_t win_end = anchor < in_len ? anchor
-                                             : (s0 + 512 < in_len ? s0 + 512 : in_len);
-            size_t lo = (s0 > 8192) ? s0 - 8192 : 0;
-            size_t best = in_len;
-            for (size_t q = lo; q < win_end; ) {
-                size_t m = cc_find_substr_top_level(in_src, q, win_end, "@async", 6);
-                if (m >= win_end) break;
-                if (m + 6 >= in_len || !cc__is_ident_char(in_src[m + 6])) best = m;
-                q = m + 6;
-            }
-            if (best < in_len) scan = best;
-        }
+        size_t scan = 0;
         size_t lbrace = 0, rbrace = 0;
-        /* Find first '{' after the function name — comment/string-aware.
-         *
-         * Follow-up bug [F6] metaclass fix: `strstr` + naive char walk
-         * used to accept matches inside block comments and string
-         * literals, so a doc comment mentioning `handle_client(...)`
-         * before the real decl would pull the scanner into the comment
-         * and mis-identify the function's body brace.  Use the shared
-         * structural-search helpers in util/text.h instead — they skip
-         * comments + literals and, for `(`/`{`, return depth-0 matches.
-         *
-         * Note: the `{` we want is the FIRST `{` at top level after the
-         * function name (the function body opener).  There shouldn't be
-         * an earlier `{` in valid source — C params can't contain a
-         * brace — but a user-visible `{` embedded in a block comment on
-         * the decl line certainly can; that's what this guards. */
-        const char* nm = n[i].aux_s1;
-        size_t name_pos = in_len;
-        if (nm && nm[0]) {
-            name_pos = cc_find_ident_top_level(in_src, scan, in_len, nm, strlen(nm));
+        size_t e = 0;
+        size_t s = 0;
+
+        /* Prefer a full-buffer text locate by function name.  This stays
+         * correct when the stub-AST is reused after defer/closure edits
+         * that shift physical lines (and stale line_start). */
+        if (!cc__async_locate_fn_in_text(in_src, in_len, fn_name, &scan, &lbrace, &rbrace)) {
+            /* Legacy fallback: line_start window + nearest `@async`. */
+            size_t s0 = cc_offset_for_logical_line(in_src, in_len, n[i].file, ls);
+            scan = s0;
+            {
+                size_t anchor = cc_find_char_top_level(in_src, s0, in_len, '{');
+                size_t win_end = anchor < in_len ? anchor
+                                                 : (s0 + 512 < in_len ? s0 + 512 : in_len);
+                size_t lo = (s0 > 8192) ? s0 - 8192 : 0;
+                size_t best = in_len;
+                for (size_t q = lo; q < win_end; ) {
+                    size_t m = cc_find_substr_top_level(in_src, q, win_end, "@async", 6);
+                    if (m >= win_end) break;
+                    if (m + 6 >= in_len || !cc__is_ident_char(in_src[m + 6])) best = m;
+                    q = m + 6;
+                }
+                if (best < in_len) scan = best;
+            }
+            {
+                const char* nm = n[i].aux_s1;
+                size_t name_pos = in_len;
+                if (nm && nm[0]) {
+                    name_pos = cc_find_ident_top_level(in_src, scan, in_len, nm, strlen(nm));
+                }
+                size_t p = (name_pos < in_len) ? name_pos : scan;
+                size_t br = cc_find_char_top_level(in_src, p, in_len, '{');
+                if (br < in_len) lbrace = br;
+            }
+            if (lbrace && cc__find_matching_brace(in_src, in_len, lbrace, &rbrace)) {
+                /* ok */
+            } else {
+                rbrace = 0;
+            }
         }
-        size_t p = (name_pos < in_len) ? name_pos : scan;
-        size_t br = cc_find_char_top_level(in_src, p, in_len, '{');
-        if (br < in_len) lbrace = br;
-        size_t e = scan;
-        if (lbrace && cc__find_matching_brace(in_src, in_len, lbrace, &rbrace)) {
+        e = scan;
+        if (lbrace && rbrace) {
             e = rbrace + 1;
             while (e < in_len && in_src[e] != '\n') e++;
             if (e < in_len) e++;
         } else {
-            /* Fallback: use decl line only. */
             e = cc_offset_for_logical_line(in_src, in_len, n[i].file, ls + 1);
         }
-        size_t s = scan;
+        s = scan;
 
         /* Find the best body block: scan all BLOCK nodes in the function's subtree and pick the one
            whose span encloses the function braces with the tightest span. */
@@ -3322,28 +3354,43 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
                *source text* for the declarator starts with an actual scalar keyword when aux_s2 says "int". */
             int is_scalar = (strcmp(n[i].aux_s2, "int") == 0 || strcmp(n[i].aux_s2, "intptr_t") == 0);
             /* Note: We no longer skip non-scalar/non-pointer types - struct types must be hoisted too. */
-            /* Ensure this declaration is actually inside the brace-bounded function body.
-               This prevents accidentally hoisting decls from other functions when stub-AST parentage is noisy. */
-            if (fn->lbrace && fn->rbrace) {
+            /* Ensure this declaration is actually inside the brace-bounded
+             * function body.  Prefer a current-text name hit over stub-AST
+             * line_start — the latter drifts when this AST is reused after
+             * defer/closure edits above the function. */
+            size_t decl_off = (size_t)-1;
+            if (fn->lbrace && fn->rbrace && n[i].aux_s1) {
+                decl_off = cc_find_ident_top_level(cur, fn->lbrace + 1, fn->rbrace,
+                                                   n[i].aux_s1, strlen(n[i].aux_s1));
+                if (decl_off >= fn->rbrace) continue;
+            } else if (fn->lbrace && fn->rbrace) {
                 int dls = n[i].line_start > 0 ? n[i].line_start : 1;
-                size_t decl_off = cc_offset_for_logical_line(cur, cur_len, n[i].file, dls);
+                decl_off = cc_offset_for_logical_line(cur, cur_len, n[i].file, dls);
                 if (n[i].col_start > 0)
                     decl_off = cc_offset_for_logical_line_col(cur, cur_len, n[i].file,
                                                              n[i].line_start, n[i].col_start);
                 if (!(decl_off > fn->lbrace && decl_off < fn->rbrace)) continue;
             }
             if (is_scalar) {
-                int dls = n[i].line_start > 0 ? n[i].line_start : 1;
-                size_t lo = cc_offset_for_logical_line(cur, cur_len, n[i].file, dls);
-                size_t hi = lo;
-                if (n[i].col_start > 0) {
-                    hi = cc_offset_for_logical_line_col(cur, cur_len, n[i].file,
-                                                       n[i].line_start, n[i].col_start);
-                    if (hi > cur_len) hi = cur_len;
-                    if (hi < lo) hi = lo;
+                size_t lo = 0, hi = 0;
+                if (decl_off != (size_t)-1 && decl_off < cur_len) {
+                    lo = decl_off;
+                    while (lo > fn->lbrace && cur[lo - 1] != '\n') lo--;
+                    hi = decl_off;
+                    while (hi < cur_len && cur[hi] != '\n') hi++;
                 } else {
-                    hi = cc_offset_for_logical_line(cur, cur_len, n[i].file, dls + 1);
-                    if (hi > cur_len) hi = cur_len;
+                    int dls = n[i].line_start > 0 ? n[i].line_start : 1;
+                    lo = cc_offset_for_logical_line(cur, cur_len, n[i].file, dls);
+                    hi = lo;
+                    if (n[i].col_start > 0) {
+                        hi = cc_offset_for_logical_line_col(cur, cur_len, n[i].file,
+                                                           n[i].line_start, n[i].col_start);
+                        if (hi > cur_len) hi = cur_len;
+                        if (hi < lo) hi = lo;
+                    } else {
+                        hi = cc_offset_for_logical_line(cur, cur_len, n[i].file, dls + 1);
+                        if (hi > cur_len) hi = cur_len;
+                    }
                 }
                 const char* seg = (lo < cur_len) ? (cur + lo) : "";
                 size_t seg_n = (hi > lo) ? (hi - lo) : 0;
@@ -3366,10 +3413,18 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
              * state by async lowering; that value must survive across the split. */
             if (strncmp(n[i].aux_s1, "__cc_pu_", 8) == 0) {
                 int keep_channel_result_tmp = 0;
-                if (strncmp(n[i].aux_s1, "__cc_pu_s_", 11) == 0 && n[i].line_start > 0) {
-                    size_t lo = cc_offset_for_logical_line(cur, cur_len, n[i].file, n[i].line_start);
-                    size_t hi = cc_offset_for_logical_line(cur, cur_len, n[i].file, n[i].line_start + 1);
-                    if (hi > cur_len) hi = cur_len;
+                if (strncmp(n[i].aux_s1, "__cc_pu_s_", 11) == 0) {
+                    size_t lo = 0, hi = 0;
+                    if (decl_off != (size_t)-1 && decl_off < cur_len) {
+                        lo = decl_off;
+                        while (lo > fn->lbrace && cur[lo - 1] != '\n') lo--;
+                        hi = decl_off;
+                        while (hi < cur_len && cur[hi] != '\n') hi++;
+                    } else if (n[i].line_start > 0) {
+                        lo = cc_offset_for_logical_line(cur, cur_len, n[i].file, n[i].line_start);
+                        hi = cc_offset_for_logical_line(cur, cur_len, n[i].file, n[i].line_start + 1);
+                        if (hi > cur_len) hi = cur_len;
+                    }
                     if (lo < hi) {
                         const char* line = cur + lo;
                         size_t line_len = hi - lo;
@@ -3407,10 +3462,18 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
             {
                 /* Prefer the type text from the actual (rewritten) source so we don't emit
                    non-C spellings like `struct <anonymous>*` in the final output. */
-                if (n[i].line_start > 0 && n[i].aux_s1) {
-                    size_t lo = cc_offset_for_logical_line(cur, cur_len, n[i].file, n[i].line_start);
-                    size_t hi = cc_offset_for_logical_line(cur, cur_len, n[i].file, n[i].line_start + 1);
-                    if (hi > cur_len) hi = cur_len;
+                if (n[i].aux_s1 && (decl_off != (size_t)-1 || n[i].line_start > 0)) {
+                    size_t lo, hi;
+                    if (decl_off != (size_t)-1 && decl_off < cur_len) {
+                        lo = decl_off;
+                        while (lo > fn->lbrace && cur[lo - 1] != '\n') lo--;
+                        hi = decl_off;
+                        while (hi < cur_len && cur[hi] != '\n') hi++;
+                    } else {
+                        lo = cc_offset_for_logical_line(cur, cur_len, n[i].file, n[i].line_start);
+                        hi = cc_offset_for_logical_line(cur, cur_len, n[i].file, n[i].line_start + 1);
+                        if (hi > cur_len) hi = cur_len;
+                    }
                     if (lo < hi) {
                         const char* ls = cur + lo;
                         size_t ln = hi - lo;

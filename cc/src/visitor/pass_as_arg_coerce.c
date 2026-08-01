@@ -8,6 +8,7 @@
 #include "preprocess/type_registry.h"
 #include "util/path.h"
 #include "util/text.h"
+#include "visitor/pass_callee_occ.h"
 #include "visitor/pass_common.h"
 
 typedef CCNodeView NodeView;
@@ -306,68 +307,10 @@ static int cc__as_arg_already_member(const char* s, size_t a, size_t b,
     return i + fl == e && memcmp(s + i, field, fl) == 0;
 }
 
-/* Next code-byte index after skipping one comment/string starting at i, or i. */
-static size_t cc__as_skip_inert(const char* s, size_t n, size_t i) {
-    if (!s || i >= n) return i;
-    if (s[i] == '/' && i + 1 < n && s[i + 1] == '/') {
-        i += 2;
-        while (i < n && s[i] != '\n') i++;
-        return i;
-    }
-    if (s[i] == '/' && i + 1 < n && s[i + 1] == '*') {
-        i += 2;
-        while (i + 1 < n && !(s[i] == '*' && s[i + 1] == '/')) i++;
-        if (i + 1 < n) i += 2;
-        return i;
-    }
-    if (s[i] == '"' || s[i] == '\'') {
-        char q = s[i++];
-        while (i < n) {
-            if (s[i] == '\\' && i + 1 < n) { i += 2; continue; }
-            if (s[i] == q) { i++; break; }
-            i++;
-        }
-        return i;
-    }
-    return i;
-}
-
-/* Find word-bounded callee( occurrences outside comments/strings. */
-static size_t cc__as_find_callee_occ(const char* in_src, size_t in_len,
-                                     size_t start, size_t end,
-                                     const char* callee, size_t callee_n,
-                                     int want_occ) {
-    size_t j = start;
-    int occ = 0;
-    if (!in_src || !callee || callee_n == 0 || want_occ <= 0) return (size_t)-1;
-    if (end > in_len) end = in_len;
-    while (j + callee_n <= end) {
-        size_t after;
-        size_t next = cc__as_skip_inert(in_src, end, j);
-        if (next != j) { j = next; continue; }
-        if (memcmp(in_src + j, callee, callee_n) != 0) { j++; continue; }
-        if (j > 0 && (isalnum((unsigned char)in_src[j - 1]) || in_src[j - 1] == '_')) {
-            j++;
-            continue;
-        }
-        if (j + callee_n < in_len &&
-            (isalnum((unsigned char)in_src[j + callee_n]) || in_src[j + callee_n] == '_')) {
-            j++;
-            continue;
-        }
-        after = cc_skip_ws_and_comments(in_src, in_len, j + callee_n);
-        if (after >= in_len || in_src[after] != '(') { j++; continue; }
-        if (cc__as_name_is_declarator(in_src, in_len, j, callee_n)) { j++; continue; }
-        occ++;
-        if (occ == want_occ) return j;
-        j += callee_n;
-    }
-    return (size_t)-1;
-}
-
 static size_t cc__as_find_callee_span(const CCASTRoot* root, const NodeView* n,
                                       int call_idx, const char* in_src, size_t in_len,
-                                      const CCVisitorCtx* ctx, const char* callee) {
+                                      const CCVisitorCtx* ctx, const char* callee,
+                                      const CCCalleeOccIndex* occ_idx) {
     size_t callee_n = strlen(callee);
     size_t call_s = cc_pass_node_exact_off(root, n[call_idx].off_start, in_len);
     size_t call_e = cc_pass_node_exact_end_off(root, n[call_idx].off_end, in_len);
@@ -378,8 +321,10 @@ static size_t cc__as_find_callee_span(const CCASTRoot* root, const NodeView* n,
             !cc__as_name_is_declarator(in_src, in_len, call_s, callee_n)) {
             return call_s;
         }
-        name_s = cc__as_find_callee_occ(in_src, in_len, call_s, call_e, callee, callee_n, 1);
-        if (name_s != (size_t)-1) return name_s;
+        if (occ_idx) {
+            name_s = cc_callee_occ_index_first_in_range(occ_idx, callee, call_s, call_e);
+            if (name_s != (size_t)-1) return name_s;
+        }
     }
     {
         int want_occ = 1;
@@ -394,7 +339,8 @@ static size_t cc__as_find_callee_span(const CCASTRoot* root, const NodeView* n,
                  n[k].col_start <= n[call_idx].col_start))
                 want_occ++;
         }
-        name_s = cc__as_find_callee_occ(in_src, in_len, 0, in_len, callee, callee_n, want_occ);
+        if (occ_idx)
+            name_s = cc_callee_occ_index_nth(occ_idx, callee, want_occ);
     }
     return name_s;
 }
@@ -406,6 +352,7 @@ int cc__collect_as_arg_coerce_edits(const CCASTRoot* root,
     const char* in_src;
     size_t in_len;
     CCTypeRegistry* reg;
+    CCCalleeOccIndex* occ_idx = NULL;
     int edits = 0;
     int i;
     int dbg = getenv("CC_DEBUG_AS_ARG_COERCE") != NULL;
@@ -418,6 +365,7 @@ int cc__collect_as_arg_coerce_edits(const CCASTRoot* root,
     in_src = eb->src;
     in_len = eb->src_len;
     n = (const NodeView*)root->nodes;
+    occ_idx = cc_callee_occ_index_build(in_src, in_len, cc__as_name_is_declarator);
 
     for (i = 0; i < root->node_count; i++) {
         const char* callee;
@@ -437,7 +385,7 @@ int cc__collect_as_arg_coerce_edits(const CCASTRoot* root,
         if (!callee) continue;
         if (!cc_pass_node_in_tu(root, ctx, n[i].file)) continue;
         callee_n = strlen(callee);
-        name_s = cc__as_find_callee_span(root, n, i, in_src, in_len, ctx, callee);
+        name_s = cc__as_find_callee_span(root, n, i, in_src, in_len, ctx, callee, occ_idx);
         if (name_s == (size_t)-1) continue;
         after = cc_skip_ws_and_comments(in_src, in_len, name_s + callee_n);
         if (after >= in_len || in_src[after] != '(') continue;
@@ -547,12 +495,14 @@ int cc__collect_as_arg_coerce_edits(const CCASTRoot* root,
                     cc_pass_error_cat(file, line, col, CC_ERR_TYPE,
                                       "cyclic @as embed graph while coercing '%s' to '%s *'",
                                       outer_ty, bases[ai]);
+                    cc_callee_occ_index_free(occ_idx);
                     return -1;
                 }
                 if (match == -2) {
                     cc_pass_error_cat(file, line, col, CC_ERR_TYPE,
                                       "ambiguous @as arg coerce: multiple '%s' embeds on '%s'",
                                       bases[ai], outer_ty);
+                    cc_callee_occ_index_free(occ_idx);
                     return -1;
                 }
                 if (match != 0 || !path[0]) continue;
@@ -582,6 +532,7 @@ int cc__collect_as_arg_coerce_edits(const CCASTRoot* root,
                                           "cannot coerce by-value '%s' to '%s *'; pass &%s "
                                           "(lowers via @as to &%s.%s)",
                                           outer_ty, bases[ai], ident, ident, field_name);
+                        cc_callee_occ_index_free(occ_idx);
                         return -1;
                     }
 
@@ -599,10 +550,13 @@ int cc__collect_as_arg_coerce_edits(const CCASTRoot* root,
                 fprintf(stderr, "as_arg_coerce: %s arg%d '%.*s' -> '%s'\n",
                         callee, ai, (int)(trim_e - trim_a), in_src + trim_a, repl);
             }
-            if (cc_edit_buffer_add(eb, trim_a, trim_e, repl, 0, "as_arg_coerce") < 0)
+            if (cc_edit_buffer_add(eb, trim_a, trim_e, repl, 0, "as_arg_coerce") < 0) {
+                cc_callee_occ_index_free(occ_idx);
                 return -1;
+            }
             edits++;
         }
     }
+    cc_callee_occ_index_free(occ_idx);
     return edits;
 }

@@ -881,6 +881,189 @@ static inline int cc_contains_token_top_level(const char* src, size_t len, const
     return cc_find_substr_top_level(src, 0, len, needle, nl) < len;
 }
 
+/* ---- One-pass surface-feature bitmap ----
+ *
+ * Phase-3 / preprocess presence gates used to call
+ * `cc_contains_token_top_level` once per needle on the same buffer.  Each call
+ * re-walks the TU (or at least memmem's it).  Suite wall time is dominated by
+ * many small TUs, so the fixed per-check tax adds up.  Scan once; test bits.
+ *
+ * Bits are set for matches outside comments/strings (same policy as
+ * `cc_contains_token_top_level`).  False positives are safe for gates that
+ * only skip work; keep the denser rewrite path for correctness. */
+enum {
+    CC_SURF_AWAIT              = 1ull << 0,
+    CC_SURF_AT_ASYNC           = 1ull << 1,
+    CC_SURF_AT_BLOCKING        = 1ull << 2,
+    CC_SURF_AT_NOBLOCK         = 1ull << 3,
+    CC_SURF_AT_NONBLOCKING     = 1ull << 4,
+    CC_SURF_FAT_ARROW          = 1ull << 5,  /* => */
+    CC_SURF_BANG_GT            = 1ull << 6,  /* !> */
+    CC_SURF_Q_GT               = 1ull << 7,  /* ?> */
+    CC_SURF_AT_DEFER           = 1ull << 8,
+    CC_SURF_CANCEL             = 1ull << 9,
+    CC_SURF_SEND_TASK          = 1ull << 10,
+    CC_SURF_CC_CHANNEL_SEND_TASK = 1ull << 11,
+    CC_SURF_CCCLOSURE          = 1ull << 12,
+    CC_SURF_AT_DESTROY         = 1ull << 13,
+    CC_SURF_AT_ERRHANDLER      = 1ull << 14,
+    CC_SURF_AT_ERR             = 1ull << 15,
+    CC_SURF_EQ_LT_BANG         = 1ull << 16, /* =<! */
+    CC_SURF_LT_Q               = 1ull << 17, /* <? */
+    CC_SURF_CCSLICE_FAMILY     = 1ull << 18, /* CCSlice / Shared / Unique */
+    CC_SURF_CC_PATH_IO         = 1ull << 19, /* cc_path_ / cc_file_ / cc_dir_ / cc_glob / cc_command / cc_sh_run */
+    CC_SURF_AT_MATCH           = 1ull << 20,
+    CC_SURF_WITH_DEADLINE      = 1ull << 21,
+    CC_SURF_AT_LINK            = 1ull << 22,
+    CC_SURF_CC_CONCURRENT      = 1ull << 23,
+    CC_SURF_AT_STRING          = 1ull << 24,
+    CC_SURF_AT_SLICE           = 1ull << 25,
+    CC_SURF_AT_EMIT            = 1ull << 26,
+    CC_SURF_AT_SCRATCH         = 1ull << 27,
+    CC_SURF_TYPE_OF            = 1ull << 28,
+    CC_SURF_AT_AWAIT           = 1ull << 29,
+    CC_SURF_AT_WITH_DEADLINE   = 1ull << 30
+};
+
+static inline int cc__surf_match_at(const char* src, size_t len, size_t p,
+                                    const char* lit, size_t lit_len, int word) {
+    if (p + lit_len > len) return 0;
+    if (memcmp(src + p, lit, lit_len) != 0) return 0;
+    if (word) {
+        if (p > 0 && cc_is_ident_char(src[p - 1])) return 0;
+        if (p + lit_len < len && cc_is_ident_char(src[p + lit_len])) return 0;
+    }
+    return 1;
+}
+
+/* Like word-match but only left-bounded: `CCClosure1` / `CCSliceShared` still
+ * count as the `CCClosure` / `CCSlice` family (matches contains_token_top_level
+ * substring policy for these prefixes). */
+static inline int cc__surf_match_prefix(const char* src, size_t len, size_t p,
+                                        const char* lit, size_t lit_len) {
+    if (p + lit_len > len) return 0;
+    if (memcmp(src + p, lit, lit_len) != 0) return 0;
+    if (p > 0 && cc_is_ident_char(src[p - 1])) return 0;
+    return 1;
+}
+
+static inline unsigned long long cc_scan_surface_features(const char* src, size_t len) {
+    unsigned long long bits = 0;
+    int in_lc = 0, in_bc = 0, ins = 0;
+    char q = 0;
+    if (!src || len == 0) return 0;
+    for (size_t p = 0; p < len; p++) {
+        char c = src[p];
+        char c2 = (p + 1 < len) ? src[p + 1] : 0;
+        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; p++; } continue; }
+        if (ins) {
+            if (c == '\\' && p + 1 < len) { p++; continue; }
+            if (c == q) ins = 0;
+            continue;
+        }
+        if (c == '/' && c2 == '/') { in_lc = 1; p++; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; p++; continue; }
+        if (c == '"' || c == '\'') { ins = 1; q = c; continue; }
+
+        if (c == '=' && c2 == '>') {
+            bits |= CC_SURF_FAT_ARROW;
+            p++;
+            continue;
+        }
+        if (c == '!' && c2 == '>') {
+            bits |= CC_SURF_BANG_GT;
+            p++;
+            continue;
+        }
+        if (c == '?' && c2 == '>') {
+            bits |= CC_SURF_Q_GT;
+            p++;
+            continue;
+        }
+        if (c == '<' && c2 == '?') {
+            bits |= CC_SURF_LT_Q;
+            p++;
+            continue;
+        }
+        if (c == '=' && c2 == '<' && p + 2 < len && src[p + 2] == '!') {
+            bits |= CC_SURF_EQ_LT_BANG;
+            p += 2;
+            continue;
+        }
+        if (c == '@') {
+            if (cc__surf_match_at(src, len, p, "@async", 6, 1)) bits |= CC_SURF_AT_ASYNC;
+            else if (cc__surf_match_at(src, len, p, "@blocking", 9, 1)) bits |= CC_SURF_AT_BLOCKING;
+            else if (cc__surf_match_at(src, len, p, "@noblock", 8, 1)) bits |= CC_SURF_AT_NOBLOCK;
+            else if (cc__surf_match_at(src, len, p, "@nonblocking", 12, 1)) bits |= CC_SURF_AT_NONBLOCKING;
+            else if (cc__surf_match_at(src, len, p, "@defer", 6, 1)) bits |= CC_SURF_AT_DEFER;
+            else if (cc__surf_match_at(src, len, p, "@destroy", 8, 1)) bits |= CC_SURF_AT_DESTROY;
+            else if (cc__surf_match_at(src, len, p, "@errhandler", 11, 1)) bits |= CC_SURF_AT_ERRHANDLER;
+            else if (cc__surf_match_at(src, len, p, "@err", 4, 1)) bits |= CC_SURF_AT_ERR;
+            else if (cc__surf_match_at(src, len, p, "@match", 6, 1)) bits |= CC_SURF_AT_MATCH;
+            else if (cc__surf_match_at(src, len, p, "@link", 5, 1)) bits |= CC_SURF_AT_LINK;
+            else if (cc__surf_match_at(src, len, p, "@string", 7, 1)) bits |= CC_SURF_AT_STRING;
+            else if (cc__surf_match_at(src, len, p, "@slice", 6, 1)) bits |= CC_SURF_AT_SLICE;
+            else if (cc__surf_match_at(src, len, p, "@emit", 5, 1)) bits |= CC_SURF_AT_EMIT;
+            else if (cc__surf_match_at(src, len, p, "@scratch", 8, 1)) bits |= CC_SURF_AT_SCRATCH;
+            else if (cc__surf_match_at(src, len, p, "@await", 6, 1)) bits |= CC_SURF_AT_AWAIT;
+            else if (cc__surf_match_at(src, len, p, "@with_deadline", 14, 1))
+                bits |= CC_SURF_AT_WITH_DEADLINE;
+            continue;
+        }
+        if (c == 'a' && cc__surf_match_at(src, len, p, "await", 5, 1)) {
+            bits |= CC_SURF_AWAIT;
+            continue;
+        }
+        if (c == 'c') {
+            if (cc__surf_match_at(src, len, p, "cancel", 6, 1)) bits |= CC_SURF_CANCEL;
+            else if (cc__surf_match_prefix(src, len, p, "cc_channel_send_task", 20))
+                bits |= CC_SURF_CC_CHANNEL_SEND_TASK; /* also *_hybrid */
+            else if (cc__surf_match_at(src, len, p, "cc_concurrent", 13, 1))
+                bits |= CC_SURF_CC_CONCURRENT;
+            else if (cc__surf_match_at(src, len, p, "cc_path_exists", 14, 1) ||
+                     cc__surf_match_at(src, len, p, "cc_path_is_dir", 14, 1) ||
+                     cc__surf_match_at(src, len, p, "cc_path_is_file", 15, 1) ||
+                     cc__surf_match_at(src, len, p, "cc_path_join", 12, 1) ||
+                     cc__surf_match_at(src, len, p, "cc_script_path_join", 19, 1) ||
+                     cc__surf_match_at(src, len, p, "cc_file_open", 12, 1) ||
+                     cc__surf_match_at(src, len, p, "cc_file_read_path", 17, 1) ||
+                     cc__surf_match_at(src, len, p, "cc_file_write_path", 18, 1) ||
+                     cc__surf_match_at(src, len, p, "cc_dir_open", 11, 1) ||
+                     cc__surf_match_at(src, len, p, "cc_glob", 7, 1) ||
+                     cc__surf_match_at(src, len, p, "cc_command", 10, 1) ||
+                     cc__surf_match_at(src, len, p, "cc_sh_run", 9, 1) ||
+                     cc__surf_match_at(src, len, p, "cc_type_of", 10, 1)) {
+                if (cc__surf_match_at(src, len, p, "cc_type_of", 10, 1))
+                    bits |= CC_SURF_TYPE_OF;
+                else
+                    bits |= CC_SURF_CC_PATH_IO;
+            }
+            continue;
+        }
+        if (c == 's' && cc__surf_match_prefix(src, len, p, "send_task", 9)) {
+            bits |= CC_SURF_SEND_TASK; /* also send_task_hybrid */
+            continue;
+        }
+        if (c == 'w' && cc__surf_match_at(src, len, p, "with_deadline", 13, 1)) {
+            bits |= CC_SURF_WITH_DEADLINE;
+            continue;
+        }
+        if (c == 't' && cc__surf_match_at(src, len, p, "type_of", 7, 1)) {
+            bits |= CC_SURF_TYPE_OF;
+            continue;
+        }
+        if (c == 'C') {
+            if (cc__surf_match_prefix(src, len, p, "CCClosure", 9))
+                bits |= CC_SURF_CCCLOSURE;
+            else if (cc__surf_match_prefix(src, len, p, "CCSlice", 7))
+                bits |= CC_SURF_CCSLICE_FAMILY; /* CCSlice / Shared / Unique */
+            continue;
+        }
+    }
+    return bits;
+}
+
 /* ---- Error-lowering helpers ----
  *
  * The `!> / ?> / @err` pointer-lowering paths all need to embed a snippet
