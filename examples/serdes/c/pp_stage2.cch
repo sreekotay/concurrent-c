@@ -1,0 +1,390 @@
+/* Stage 2: include splice, object-like macros, #ifndef guards, angle
+ * passthrough. Closed directive names use pp_dir static_map.
+ * Requires pp_tape.cch + <ccc/std/static_map.cch>. */
+#pragma once
+
+/* ---- closed directive vocabulary (comptime perfect hash) ---------------- */
+
+typedef enum {
+    PP_DIR_NONE = 0,
+    PP_DIR_IF,
+    PP_DIR_IFDEF,
+    PP_DIR_IFNDEF,
+    PP_DIR_ELSE,
+    PP_DIR_ENDIF,
+    PP_DIR_DEFINE,
+    PP_DIR_INCLUDE
+} PpDirKind;
+
+typedef struct {
+    PpDirKind kind;
+} PpDirSpec;
+
+typedef struct {
+    const char* key;
+    PpDirSpec value;
+} PpDirEntry;
+
+@comptime {
+    PpDirEntry pp_dir_entries[] = {
+        { "if", { PP_DIR_IF } },
+        { "ifdef", { PP_DIR_IFDEF } },
+        { "ifndef", { PP_DIR_IFNDEF } },
+        { "else", { PP_DIR_ELSE } },
+        { "endif", { PP_DIR_ENDIF } },
+        { "define", { PP_DIR_DEFINE } },
+        { "include", { PP_DIR_INCLUDE } },
+    };
+    static_map("pp_dir", pp_dir_entries, CC_STATIC_MAP_CASE_SENSITIVE);
+}
+
+/* Forward decl for in-header callers; body is TU-spliced from the map above. */
+static const PpDirSpec* pp_dir_get(CCSlice key);
+
+static PpDirKind pp_dir_of(CCSlice spell) {
+    const PpDirSpec* s = pp_dir_get(spell);
+    return s ? s->kind : PP_DIR_NONE;
+}
+
+/* ---- stage-2: splice + object-like macros + guards ---------------------- */
+
+enum { MACRO_CAP = 64, FRAME_CAP = 32, EXPAND_CAP = 1 << 14 };
+
+typedef struct {
+    char name[128];
+    Token* body;   /* owned copies of spells (borrow into defining file bytes) */
+    int nbody;
+} Macro;
+
+typedef struct {
+    FileTape* tape;
+    int i;         /* next index in tape->toks */
+} Frame;
+
+enum { PASS_INC_CAP = 64, SYS_INC_CAP = 16 };
+
+typedef struct {
+    TapeCache* cache;
+    CCArena* arena;
+    const char* search_dir; /* directory prefix for "..." includes */
+    /* Angle-include search roots (e.g. cc/include). Used to warm stage-1
+     * cache; <...> are not spliced into the AST stream (passthrough emit). */
+    const char* sys_inc[SYS_INC_CAP];
+    int nsys_inc;
+    Frame frames[FRAME_CAP];
+    int nf;
+    Macro macros[MACRO_CAP];
+    int nmacros;
+    /* emit buffer: post-expand tokens for the AST */
+    Token* out;
+    int nout;
+    int out_cap;
+    int skip_depth; /* nested #if/#ifdef skip; spike: only #ifndef */
+    int err;
+    /* Top-level #include <...> lines preserved for C/H emit (not spliced). */
+    char pass_inc[PASS_INC_CAP][256];
+    int npass_inc;
+} Pp;
+
+static void pp_add_sys_inc(Pp* pp, const char* path) {
+    if (!pp || !path || pp->nsys_inc >= SYS_INC_CAP) return;
+    pp->sys_inc[pp->nsys_inc++] = path;
+}
+
+static int pp_add_passthrough_include(Pp* pp, const char* line) {
+    if (!pp || !line || pp->npass_inc >= PASS_INC_CAP) return 0;
+    snprintf(pp->pass_inc[pp->npass_inc], sizeof(pp->pass_inc[0]), "%s", line);
+    pp->npass_inc++;
+    return 1;
+}
+
+static int spell_eq(CCSlice s, const char* lit) {
+    size_t n = strlen(lit);
+    return s.len == n && memcmp(s.ptr, lit, n) == 0;
+}
+
+static int at_bol(FileTape* ft, Token t) {
+    /* Synthetic macro-expansion frames have no source bytes — never treat as
+     * directive lines (minted tokens only). */
+    if (!ft->bytes || ft->len == 0) return 0;
+    if (t.offset == 0) return 1;
+    return ft->bytes[t.offset - 1] == '\n';
+}
+
+static Macro* macro_find(Pp* pp, CCSlice name) {
+    for (int i = 0; i < pp->nmacros; i++) {
+        if (spell_eq(name, pp->macros[i].name)) return &pp->macros[i];
+    }
+    return NULL;
+}
+
+static int macro_define(Pp* pp, CCSlice name, Token* body, int nbody) {
+    if (name.len >= sizeof(pp->macros[0].name)) return 0;
+    Macro* m = macro_find(pp, name);
+    if (!m) {
+        if (pp->nmacros >= MACRO_CAP) return 0;
+        m = &pp->macros[pp->nmacros++];
+        memset(m, 0, sizeof(*m));
+        memcpy(m->name, name.ptr, name.len);
+        m->name[name.len] = 0;
+    } else {
+        free(m->body);
+        m->body = NULL;
+        m->nbody = 0;
+    }
+    if (nbody > 0) {
+        m->body = (Token*)malloc(sizeof(Token) * (size_t)nbody);
+        if (!m->body) return 0;
+        memcpy(m->body, body, sizeof(Token) * (size_t)nbody);
+        m->nbody = nbody;
+    }
+    return 1;
+}
+
+static int pp_emit(Pp* pp, Token t) {
+    if (pp->nout >= pp->out_cap) return 0;
+    pp->out[pp->nout++] = t;
+    return 1;
+}
+
+static int join_path(const char* dir, CCSlice rel, char* dst, size_t dst_cap) {
+    /* strip quotes from string token spell */
+    if (rel.len < 2) return 0;
+    const char* p = rel.ptr + 1;
+    size_t n = rel.len - 2;
+    size_t dlen = dir ? strlen(dir) : 0;
+    if (dlen + 1 + n + 1 > dst_cap) return 0;
+    if (dlen) {
+        memcpy(dst, dir, dlen);
+        if (dir[dlen - 1] != '/') dst[dlen++] = '/';
+    }
+    memcpy(dst + dlen, p, n);
+    dst[dlen + n] = 0;
+    return 1;
+}
+
+static int pp_push_tape(Pp* pp, FileTape* ft) {
+    if (pp->nf >= FRAME_CAP) return 0;
+    pp->frames[pp->nf++] = (Frame){ .tape = ft, .i = 0 };
+    return 1;
+}
+
+/* Peek/pop raw from top frame (no expand). */
+static int pp_raw_peek(Pp* pp, Token* out) {
+    while (pp->nf > 0) {
+        Frame* fr = &pp->frames[pp->nf - 1];
+        if (fr->i < fr->tape->ntoks) {
+            *out = fr->tape->toks[fr->i];
+            return 1;
+        }
+        pp->nf--;
+    }
+    return 0;
+}
+
+static int pp_raw_next(Pp* pp, Token* out) {
+    if (!pp_raw_peek(pp, out)) return 0;
+    pp->frames[pp->nf - 1].i++;
+    return 1;
+}
+
+/* Consume rest of logical line (stop before next bol token). */
+static int pp_skip_line(Pp* pp) {
+    Token t;
+    while (pp_raw_peek(pp, &t)) {
+        Frame* fr = &pp->frames[pp->nf - 1];
+        if (at_bol(fr->tape, t)) break;
+        pp_raw_next(pp, &t);
+    }
+    return 1;
+}
+
+static int handle_directive(Pp* pp);
+
+/* Macro expansion frames: Token array with no source bytes (not cached). */
+static FileTape* synth_tape_from_tokens(Token* body, int nbody, int file_id) {
+    FileTape* ft = (FileTape*)calloc(1, sizeof(FileTape));
+    if (!ft) return NULL;
+    ft->toks = (Token*)malloc(sizeof(Token) * (size_t)(nbody > 0 ? nbody : 1));
+    if (!ft->toks) { free(ft); return NULL; }
+    if (nbody > 0) memcpy(ft->toks, body, sizeof(Token) * (size_t)nbody);
+    ft->ntoks = nbody;
+    ft->file_id = file_id;
+    ft->bytes = NULL;
+    ft->len = 0;
+    ft->path = NULL;
+    return ft;
+}
+
+static void free_synth_if(FileTape* ft) {
+    if (!ft) return;
+    if (!ft->path && !ft->bytes) {
+        free(ft->toks);
+        free(ft);
+    }
+}
+
+static int handle_include(Pp* pp) {
+    Token hdr;
+    if (!pp_raw_next(pp, &hdr)) return 0;
+    /* object-like expand of HEADER */
+    if (hdr.kind == TK_IDENT) {
+        Macro* m = macro_find(pp, hdr.spell);
+        if (m && m->nbody == 1) hdr = m->body[0];
+    }
+    /* #include <path> — tokenize as < ident (/ ident)* . ident > */
+    if (tok_eq(hdr, TK_PUNCT, "<")) {
+        char angle[240];
+        size_t al = 0;
+        Token t;
+        while (pp_raw_next(pp, &t)) {
+            if (tok_eq(t, TK_PUNCT, ">")) break;
+            if (al + t.spell.len >= sizeof(angle)) return 0;
+            memcpy(angle + al, t.spell.ptr, t.spell.len);
+            al += t.spell.len;
+        }
+        angle[al] = 0;
+        char line[256];
+        snprintf(line, sizeof(line), "#include <%s>", angle);
+        if (!pp_add_passthrough_include(pp, line)) return 0;
+        /* Warm stage-1 cache if resolvable; do not splice into AST. */
+        for (int i = 0; i < pp->nsys_inc; i++) {
+            char full[512];
+            snprintf(full, sizeof(full), "%s/%s", pp->sys_inc[i], angle);
+            FileTape* warm = tape_cache_load(pp->cache, full, pp->arena);
+            if (warm) break;
+        }
+        pp_skip_line(pp);
+        return 1;
+    }
+    if (hdr.kind != TK_STR) { pp_skip_line(pp); return 0; }
+    /* #include "..." — splice (mid-struct / local fixtures). */
+    char path[512];
+    if (!join_path(pp->search_dir, hdr.spell, path, sizeof(path))) return 0;
+    FileTape* ft = tape_cache_load(pp->cache, path, pp->arena);
+    if (!ft) return 0;
+    pp_skip_line(pp);
+    return pp_push_tape(pp, ft);
+}
+
+static int handle_define(Pp* pp) {
+    Token id;
+    if (!pp_raw_next(pp, &id) || id.kind != TK_IDENT) return 0;
+    /* function-like: ident immediately followed by '(' with no space —
+     * pp-tokens lose space, so '(' after name means function-like.
+     * Spike: reject / ignore body as object-like empty if '('. */
+    Token body_buf[256];
+    int nb = 0;
+    Token peek;
+    if (pp_raw_peek(pp, &peek) && tok_eq(peek, TK_PUNCT, "(")) {
+        pp_skip_line(pp);
+        return macro_define(pp, id.spell, NULL, 0);
+    }
+    while (pp_raw_peek(pp, &peek)) {
+        Frame* fr = &pp->frames[pp->nf - 1];
+        if (at_bol(fr->tape, peek)) break;
+        pp_raw_next(pp, &peek);
+        if (nb < 256) body_buf[nb++] = peek;
+    }
+    return macro_define(pp, id.spell, body_buf, nb);
+}
+
+static int handle_directive(Pp* pp) {
+    Token hash, name;
+    if (!pp_raw_next(pp, &hash)) return 0;
+    if (!pp_raw_peek(pp, &name)) return 1;
+    if (name.kind != TK_IDENT) { pp_skip_line(pp); return 1; }
+    pp_raw_next(pp, &name);
+
+    PpDirKind dir = pp_dir_of(name.spell);
+
+    switch (dir) {
+    case PP_DIR_ENDIF:
+        if (pp->skip_depth > 0) pp->skip_depth--;
+        pp_skip_line(pp);
+        return 1;
+    case PP_DIR_ELSE:
+        /* spike: toggle skip for one level */
+        if (pp->skip_depth == 1) pp->skip_depth = 0;
+        else if (pp->skip_depth == 0) pp->skip_depth = 1;
+        pp_skip_line(pp);
+        return 1;
+    case PP_DIR_IFNDEF: {
+        Token id;
+        if (!pp_raw_next(pp, &id) || id.kind != TK_IDENT) return 0;
+        if (pp->skip_depth > 0) pp->skip_depth++;
+        else if (macro_find(pp, id.spell)) pp->skip_depth = 1;
+        pp_skip_line(pp);
+        return 1;
+    }
+    case PP_DIR_IFDEF: {
+        Token id;
+        if (!pp_raw_next(pp, &id) || id.kind != TK_IDENT) return 0;
+        if (pp->skip_depth > 0) pp->skip_depth++;
+        else if (!macro_find(pp, id.spell)) pp->skip_depth = 1;
+        pp_skip_line(pp);
+        return 1;
+    }
+    default:
+        break;
+    }
+
+    if (pp->skip_depth > 0) {
+        /* Nested #if depth while skipping; other unknown dirs just skip line. */
+        if (dir == PP_DIR_IF) pp->skip_depth++;
+        pp_skip_line(pp);
+        return 1;
+    }
+
+    switch (dir) {
+    case PP_DIR_DEFINE:
+        return handle_define(pp);
+    case PP_DIR_INCLUDE:
+        return handle_include(pp);
+    default:
+        pp_skip_line(pp);
+        return 1;
+    }
+}
+
+/* Full preprocess into out[] */
+static int pp_run(Pp* pp, FileTape* root) {
+    pp->nf = 0;
+    pp->nout = 0;
+    pp->skip_depth = 0;
+    pp->err = 0;
+    pp->npass_inc = 0;
+    if (!pp_push_tape(pp, root)) return 0;
+
+    while (pp->nf > 0) {
+        Frame* fr = &pp->frames[pp->nf - 1];
+        if (fr->i >= fr->tape->ntoks) {
+            FileTape* done = fr->tape;
+            pp->nf--;
+            free_synth_if(done);
+            continue;
+        }
+        Token t = fr->tape->toks[fr->i];
+        if (at_bol(fr->tape, t) && tok_eq(t, TK_PUNCT, "#")) {
+            if (!handle_directive(pp)) return 0;
+            continue;
+        }
+        if (pp->skip_depth > 0) {
+            fr->i++;
+            continue;
+        }
+        fr->i++;
+        if (t.kind == TK_IDENT) {
+            Macro* m = macro_find(pp, t.spell);
+            if (m) {
+                if (m->nbody == 0) continue;
+                FileTape* syn = synth_tape_from_tokens(m->body, m->nbody, t.file_id);
+                if (!syn || !pp_push_tape(pp, syn)) return 0;
+                continue;
+            }
+        }
+        if (!pp_emit(pp, t)) return 0;
+    }
+    return !pp->err;
+}
+

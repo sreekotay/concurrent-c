@@ -1,0 +1,5 @@
+/* Shadow-lower input: Concurrent-C header → .h product. */
+#pragma once
+typedef int Err;
+int!>Err answer(void);
+int[:] buf;

@@ -1,0 +1,59 @@
+; Phase-3-ish pp-tokenizer factory (stage 1) for C and Concurrent-C.
+; Host must line-splice (`\` + newline) before matching.
+; Whitespace and comments are skipped; kept leaves are pp-tokens.
+; Identifiers are never recolored as typedef-names (stage 2 oracle).
+; CC digraphs (`=>`, `!>`, `?>`, `@`) are maximal-munch puncts so a C lexer
+; cannot silently split them before stage 2 / AST.
+; Backtick templates (`...${x}...`) are one keep token (body may hold `$` `{` `}`).
+;
+; Entry: top
+;
+; Comments MUST be first in the skip alt. `/` is also a punct; if `tok`
+; wins the PEG trial, `/*…*/` / `//…` bodies are re-lexed as code (backticks,
+; `?>`, digraphs, …) and stage1 dies. Comment branches before `tok` keep
+; comment interiors opaque.
+
+top:     any [comment | ws | tok]
+comment: line_comment | block_comment
+ws:      some charset [#' ' #'\t' #'\r' #'\n']
+
+line_comment:  ["//" any complement charset [#'\n']]
+block_comment: ["/*" any block_char "*/"]
+block_char:    [complement charset [#'*']
+               | [#'*' complement charset [#'/']]]
+
+digit:    charset [#'0' - #'9']
+nondigit: charset [#'a' - #'z' #'A' - #'Z' #'_']
+idcont:   charset [#'a' - #'z' #'A' - #'Z' #'_' #'0' - #'9']
+
+; Greedy pp-number (so 1e+1 stays one token). Exponent+sign before nondigit
+; so `e` is not swallowed without its following sign.
+pp_number: keep [[digit | [#'.' digit]]
+                 any [[charset [#'e' #'E' #'p' #'P'] charset [#'+' #'-']]
+                     | digit | nondigit | #'.']]
+
+ident: keep [nondigit any idcont]
+
+strchar: complement charset [#'"' #'\\' #'\n']
+chrchar: complement charset [#'\'' #'\\' #'\n']
+esc:     [#'\\' skip]
+string:  keep [#'"' any [some strchar | esc] #'"']
+charlit: keep [#'\'' any [some chrchar | esc] #'\'']
+; Recipe/surface templates: naive span to next tick (no nested ticks in beachhead).
+bt_string: keep [#'`' any complement charset [#'`'] #'`']
+
+; Maximal munch punctuators; `#` is an ordinary punct (directives are stage 2).
+; CC: `=>` (closure), `!>` / `?>` (result) before `=`/`!`/`?` singles; `@` for attrs.
+; Split because the rules engine caps alternatives at 32 per alt node.
+punct_multi: [
+      "..." | "<<=" | ">>=" | "->" | "=>" | "!>" | "?>" | "++" | "--" | "<<" | ">>"
+    | "<=" | ">=" | "==" | "!=" | "&&" | "||" | "*=" | "/=" | "%=" | "+="
+    | "-=" | "&=" | "^=" | "|=" | "##"
+]
+punct_one: charset [
+    #'#' #'@' #'[' #']' #'(' #')' #'{' #'}' #'.' #'&' #'*' #'+' #'-' #'~' #'!'
+    #'/' #'%' #'<' #'>' #'^' #'|' #'?' #':' #';' #'=' #','
+]
+punct: keep [punct_multi | punct_one]
+
+tok: ident | pp_number | string | bt_string | charlit | punct

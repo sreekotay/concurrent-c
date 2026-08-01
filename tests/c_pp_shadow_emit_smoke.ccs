@@ -1,0 +1,265 @@
+/* Shadow path: same 2-stage front → .c (from .ccs) or .h (from .cch).
+ * Host cc / TCC consume the product (intentional extra parse). */
+#include <ccc/std/prelude.cch>
+
+@grammar(rules) PpTok {~~~~
+    include "../examples/serdes/c/pp_tok.rules"
+~~~~}
+
+#include "../examples/serdes/c/c_pp_spike.cch"
+
+static const char* FIX = "examples/serdes/c/shadow";
+
+static void pp_free_macros(Pp* pp) {
+    for (int i = 0; i < pp->nmacros; i++) free(pp->macros[i].body);
+    pp->nmacros = 0;
+}
+
+static char* read_all(const char* path, size_t* out_n) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char* b = (char*)malloc((size_t)n + 1);
+    if (!b) { fclose(f); return NULL; }
+    size_t rd = fread(b, 1, (size_t)n, f);
+    fclose(f);
+    b[rd] = 0;
+    if (out_n) *out_n = rd;
+    return b;
+}
+
+static int norm_eq(const char* a, size_t alen, const char* b, size_t blen) {
+    while (alen && (a[alen - 1] == '\n' || a[alen - 1] == '\r')) alen--;
+    while (blen && (b[blen - 1] == '\n' || b[blen - 1] == '\r')) blen--;
+    return alen == blen && memcmp(a, b, alen) == 0;
+}
+
+static int lower_file(TapeCache* cache, CCArena* arena, const char* name,
+                      ShadowEmitKind kind, CEmit* out) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s", FIX, name);
+    FileTape* ft = tape_cache_load(cache, path, arena);
+    if (!ft) {
+        fprintf(stderr, "error: cannot stage1-load %s\n", path);
+        return 0;
+    }
+    Token tokbuf[4096];
+    Pp pp = {0};
+    pp.cache = cache;
+    pp.arena = arena;
+    pp.search_dir = FIX;
+    pp_add_sys_inc(&pp, "cc/include");
+    pp_add_sys_inc(&pp, "out/include");
+    pp.out = tokbuf;
+    pp.out_cap = 4096;
+    if (!pp_run(&pp, ft)) {
+        fprintf(stderr, "%s:1:1: error: stage2 preprocess failed\n", path);
+        pp_free_macros(&pp);
+        return 0;
+    }
+    Parser p = {0};
+    p.toks = tokbuf;
+    p.n = pp.nout;
+    p.cache = cache;
+    AstNode** items = NULL;
+    int n = 0;
+    if (!parse_tu(&p, &items, &n)) {
+        if (!p.err_msg[0])
+            fprintf(stderr, "%s:1:1: error: parse failed\n", path);
+        pp_free_macros(&pp);
+        return 0;
+    }
+    int ok = shadow_emit(items, n, cache, out, kind, pp.pass_inc, pp.npass_inc);
+    pp_free_macros(&pp);
+    return ok;
+}
+
+static int expect_golden(const char* src_name, ShadowEmitKind kind,
+                         const char* golden_name) {
+    CCArena arena = cc_arena_create(1 << 20);
+    TapeCache cache = {0};
+    CEmit emit = {0};
+    if (!lower_file(&cache, &arena, src_name, kind, &emit)) {
+        tape_cache_free(&cache);
+        cc_arena_free(&arena);
+        return 0;
+    }
+    char gpath[512];
+    snprintf(gpath, sizeof(gpath), "%s/%s", FIX, golden_name);
+    size_t glen = 0;
+    char* golden = read_all(gpath, &glen);
+    if (!golden) {
+        printf("FAIL: missing golden %s\n", gpath);
+        free(emit.buf);
+        tape_cache_free(&cache);
+        cc_arena_free(&arena);
+        return 0;
+    }
+    if (!norm_eq(emit.buf, emit.len, golden, glen)) {
+        printf("FAIL: %s emit != %s\n---- emit ----\n%.*s\n---- golden ----\n%s\n",
+               src_name, golden_name, (int)emit.len, emit.buf, golden);
+        free(golden);
+        free(emit.buf);
+        tape_cache_free(&cache);
+        cc_arena_free(&arena);
+        return 0;
+    }
+    free(golden);
+    free(emit.buf);
+    tape_cache_free(&cache);
+    cc_arena_free(&arena);
+    return 1;
+}
+
+static int test_ccs_to_c_hostcc(void) {
+    CCArena arena = cc_arena_create(1 << 20);
+    TapeCache cache = {0};
+    CEmit emit = {0};
+    if (!lower_file(&cache, &arena, "mini.ccs", SHADOW_EMIT_C, &emit)) return 0;
+    const char* tmp = "out/c_pp_shadow_mini.c";
+    const char* obj = "out/c_pp_shadow_mini.o";
+    FILE* f = fopen(tmp, "wb");
+    if (!f) { printf("FAIL: write %s\n", tmp); return 0; }
+    fwrite(emit.buf, 1, emit.len, f);
+    fclose(f);
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "cc -c -o %s %s 2>&1", obj, tmp);
+    int rc = system(cmd);
+    free(emit.buf);
+    tape_cache_free(&cache);
+    cc_arena_free(&arena);
+    if (rc != 0) {
+        printf("FAIL: host cc -c rejected .c product (rc=%d)\n", rc);
+        return 0;
+    }
+    return 1;
+}
+
+static int test_cch_to_h_hostcc(void) {
+    /* Compile a tiny .c that includes the generated .h */
+    CCArena arena = cc_arena_create(1 << 20);
+    TapeCache cache = {0};
+    CEmit emit = {0};
+    if (!lower_file(&cache, &arena, "mini.cch", SHADOW_EMIT_H, &emit)) return 0;
+    const char* hpath = "out/c_pp_shadow_mini.h";
+    const char* cpath = "out/c_pp_shadow_mini_use.c";
+    const char* obj = "out/c_pp_shadow_mini_use.o";
+    {
+        FILE* f = fopen(hpath, "wb");
+        if (!f) return 0;
+        fwrite(emit.buf, 1, emit.len, f);
+        fclose(f);
+    }
+    {
+        FILE* f = fopen(cpath, "wb");
+        if (!f) return 0;
+        fputs("#include \"c_pp_shadow_mini.h\"\n", f);
+        fputs("int main(void) { (void)buf; return 0; }\n", f);
+        fclose(f);
+    }
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "cc -c -Iout -o %s %s 2>&1", obj, cpath);
+    int rc = system(cmd);
+    free(emit.buf);
+    tape_cache_free(&cache);
+    cc_arena_free(&arena);
+    if (rc != 0) {
+        printf("FAIL: host cc rejected .h product (rc=%d)\n", rc);
+        return 0;
+    }
+    return 1;
+}
+
+static int test_diag_line(void) {
+    CCArena arena = cc_arena_create(1 << 20);
+    TapeCache cache = {0};
+    const char* path = "examples/serdes/c/shadow/bad_token.ccs";
+    {
+        FILE* f = fopen(path, "wb");
+        if (!f) return 0;
+        fputs("typedef int Err;\n", f);
+        fputs("float x;\n", f);
+        fclose(f);
+    }
+    FileTape* ft = tape_cache_load(&cache, path, &arena);
+    if (!ft) { printf("FAIL: load bad_token\n"); return 0; }
+    Token tokbuf[256];
+    Pp pp = {0};
+    pp.cache = &cache; pp.arena = &arena; pp.search_dir = FIX;
+    pp.out = tokbuf; pp.out_cap = 256;
+    if (!pp_run(&pp, ft)) { printf("FAIL: pp bad\n"); return 0; }
+    Parser p = {0};
+    p.toks = tokbuf; p.n = pp.nout; p.cache = &cache;
+    AstNode** items; int n;
+    int ok = !parse_tu(&p, &items, &n);
+    pp_free_macros(&pp);
+    tape_cache_free(&cache);
+    cc_arena_free(&arena);
+    remove(path);
+    if (!ok) {
+        printf("FAIL: expected parse failure on float\n");
+        return 0;
+    }
+    return 1;
+}
+
+static int test_include_tape_reuse(void) {
+    CCArena arena = cc_arena_create(1 << 20);
+    TapeCache cache = {0};
+    CEmit emit = {0};
+    if (!lower_file(&cache, &arena, "with_include.cch", SHADOW_EMIT_H, &emit)) {
+        tape_cache_free(&cache);
+        cc_arena_free(&arena);
+        return 0;
+    }
+    int types_tapes = 0;
+    for (int i = 0; i < cache.n; i++) {
+        if (strstr(cache.items[i]->path, "types.inc")) types_tapes++;
+    }
+    free(emit.buf);
+    tape_cache_free(&cache);
+    cc_arena_free(&arena);
+    if (types_tapes != 1) {
+        printf("FAIL: types.inc stage1 tapes=%d want 1\n", types_tapes);
+        return 0;
+    }
+    return 1;
+}
+
+static int shadow_keep_nop(void* env, int id, CCSlice v) {
+    (void)env; (void)id; (void)v;
+    return 0;
+}
+
+int main(void) {
+    CCArena gate = cc_arena_create(4096);
+    (void)PpTok_match(";", 1);
+    (void)PpTok_collect(";", 1, &gate, shadow_keep_nop, NULL);
+    cc_arena_free(&gate);
+
+    if (!expect_golden("mini.ccs", SHADOW_EMIT_C, "mini.c.golden")) return 1;
+    if (!expect_golden("hello.ccs", SHADOW_EMIT_C, "hello.c.golden")) return 1;
+    if (!expect_golden("recipe_result.ccs", SHADOW_EMIT_C, "recipe_result.c.golden")) return 1;
+    if (!expect_golden("recipe_defer.ccs", SHADOW_EMIT_C, "recipe_defer.c.golden")) return 1;
+    if (!expect_golden("mini.cch", SHADOW_EMIT_H, "mini.h.golden")) return 1;
+    if (!expect_golden("with_include.cch", SHADOW_EMIT_H, "with_include.h.golden")) return 1;
+    if (!expect_golden("result_frag.cch", SHADOW_EMIT_H, "result_frag.h.golden")) return 1;
+    if (!test_include_tape_reuse()) return 1;
+    if (!test_ccs_to_c_hostcc()) return 1;
+    if (!test_cch_to_h_hostcc()) return 1;
+    if (!test_diag_line()) return 1;
+    {
+        char cmd[512];
+        snprintf(cmd, sizeof(cmd),
+                 "bash examples/serdes/c/shadow/diff_lower_header.sh");
+        int rc = system(cmd);
+        if (rc != 0) {
+            printf("FAIL: diff_lower_header.sh rc=%d\n", rc);
+            return 1;
+        }
+    }
+    printf("c_pp shadow emit (.ccs→.c / .cch→.h, 2-stage) OK\n");
+    return 0;
+}

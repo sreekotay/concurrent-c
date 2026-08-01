@@ -1,0 +1,156 @@
+/* Explicit shadow lowerer (experiment Phase 3) — beside ccc, never replaces it.
+ *
+ * Usage:
+ *   ./out/cc/bin/ccc run examples/serdes/c/shadow_lower.ccs -- <in.ccs|.cch> [-o out]
+ *
+ * Default product: .cch → .h, .ccs → .c (by extension). Writes stdout if -o omitted.
+ */
+#include <ccc/std/prelude.cch>
+
+@grammar(rules) PpTok {~~~~
+    include "pp_tok.rules"
+~~~~}
+
+#include "c_pp_spike.cch"
+
+static int shadow_keep_nop(void* env, int id, CCSlice v) {
+    (void)env; (void)id; (void)v;
+    return 0;
+}
+
+static void usage(const char* argv0) {
+    fprintf(stderr,
+            "usage: %s <input.ccs|.cch> [-o output]\n"
+            "  experiment shadow lowerer — emits C/H; does not replace ccc/lower_header\n",
+            argv0);
+}
+
+static const char* dirname_of(const char* path, char* buf, size_t buflen) {
+    snprintf(buf, buflen, "%s", path);
+    char* slash = strrchr(buf, '/');
+    if (!slash) {
+        snprintf(buf, buflen, ".");
+        return buf;
+    }
+    *slash = 0;
+    if (!buf[0]) snprintf(buf, buflen, "/");
+    return buf;
+}
+
+static int ends_with(const char* s, const char* suf) {
+    size_t n = strlen(s), m = strlen(suf);
+    return n >= m && strcmp(s + n - m, suf) == 0;
+}
+
+static void pp_free_macros(Pp* pp) {
+    for (int i = 0; i < pp->nmacros; i++) free(pp->macros[i].body);
+    pp->nmacros = 0;
+}
+
+int main(int argc, char** argv) {
+    /* Demand-gate grammar projections. */
+    CCArena gate = cc_arena_create(4096);
+    (void)PpTok_match(";", 1);
+    (void)PpTok_collect(";", 1, &gate, shadow_keep_nop, NULL);
+    cc_arena_free(&gate);
+
+    const char* in_path = NULL;
+    const char* out_path = NULL;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-o") == 0) {
+            if (i + 1 >= argc) { usage(argv[0]); return 2; }
+            out_path = argv[++i];
+        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            usage(argv[0]);
+            return 0;
+        } else if (argv[i][0] == '-') {
+            fprintf(stderr, "error: unknown flag %s\n", argv[i]);
+            usage(argv[0]);
+            return 2;
+        } else if (!in_path) {
+            in_path = argv[i];
+        } else {
+            fprintf(stderr, "error: unexpected arg %s\n", argv[i]);
+            usage(argv[0]);
+            return 2;
+        }
+    }
+    if (!in_path) { usage(argv[0]); return 2; }
+
+    ShadowEmitKind kind = ends_with(in_path, ".cch") ? SHADOW_EMIT_H : SHADOW_EMIT_C;
+    char search_dir[512];
+    dirname_of(in_path, search_dir, sizeof(search_dir));
+
+    CCArena arena = cc_arena_create(1 << 20);
+    TapeCache cache = {0};
+    FileTape* ft = tape_cache_load(&cache, in_path, &arena);
+    if (!ft) {
+        fprintf(stderr, "%s:1:1: error: stage1 load failed\n", in_path);
+        return 1;
+    }
+
+    Token tokbuf[1 << 16];
+    Pp pp = {0};
+    pp.cache = &cache;
+    pp.arena = &arena;
+    pp.search_dir = search_dir;
+    pp_add_sys_inc(&pp, "cc/include");
+    pp_add_sys_inc(&pp, "out/include");
+    pp.out = tokbuf;
+    pp.out_cap = 1 << 16;
+    if (!pp_run(&pp, ft)) {
+        fprintf(stderr, "%s:1:1: error: stage2 preprocess failed\n", in_path);
+        pp_free_macros(&pp);
+        tape_cache_free(&cache);
+        cc_arena_free(&arena);
+        return 1;
+    }
+
+    Parser p = {0};
+    p.toks = tokbuf;
+    p.n = pp.nout;
+    p.cache = &cache;
+    AstNode** items = NULL;
+    int n = 0;
+    if (!parse_tu(&p, &items, &n)) {
+        if (!p.err_msg[0])
+            fprintf(stderr, "%s:1:1: error: parse failed\n", in_path);
+        pp_free_macros(&pp);
+        tape_cache_free(&cache);
+        cc_arena_free(&arena);
+        return 1;
+    }
+
+    CEmit emit = {0};
+    if (!shadow_emit(items, n, &cache, &emit, kind, pp.pass_inc, pp.npass_inc)) {
+        fprintf(stderr, "%s:1:1: error: emit failed\n", in_path);
+        pp_free_macros(&pp);
+        free(emit.buf);
+        tape_cache_free(&cache);
+        cc_arena_free(&arena);
+        return 1;
+    }
+
+    if (out_path) {
+        FILE* f = fopen(out_path, "wb");
+        if (!f) {
+            fprintf(stderr, "error: cannot write %s\n", out_path);
+            free(emit.buf);
+            pp_free_macros(&pp);
+            tape_cache_free(&cache);
+            cc_arena_free(&arena);
+            return 1;
+        }
+        fwrite(emit.buf, 1, emit.len, f);
+        fclose(f);
+    } else {
+        fwrite(emit.buf, 1, emit.len, stdout);
+        if (emit.len == 0 || emit.buf[emit.len - 1] != '\n') fputc('\n', stdout);
+    }
+
+    free(emit.buf);
+    pp_free_macros(&pp);
+    tape_cache_free(&cache);
+    cc_arena_free(&arena);
+    return 0;
+}

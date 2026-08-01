@@ -1,0 +1,281 @@
+/* Spike: stage-1 pp-token cache + stage-2 include stitch / object-like macros
+ * / typedef-oracle AST for C and Concurrent-C. See examples/serdes/c/README.md. */
+#include <ccc/std/prelude.cch>
+
+@grammar(rules) PpTok {~~~~
+    include "../examples/serdes/c/pp_tok.rules"
+~~~~}
+
+#include "../examples/serdes/c/c_pp_spike.cch"
+
+static const char* FIX = "examples/serdes/c/fixtures";
+
+static void pp_free_macros(Pp* pp) {
+    for (int i = 0; i < pp->nmacros; i++) free(pp->macros[i].body);
+    pp->nmacros = 0;
+}
+
+static int run_file(TapeCache* cache, CCArena* arena, const char* name,
+                    AstNode*** items, int* nitems, Parser* parser_out) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s", FIX, name);
+    FileTape* ft = tape_cache_load(cache, path, arena);
+    if (!ft) {
+        printf("FAIL: stage1 load %s\n", path);
+        return 0;
+    }
+
+    Token out_buf[4096];
+    Pp pp = {0};
+    pp.cache = cache;
+    pp.arena = arena;
+    pp.search_dir = FIX;
+    pp.out = out_buf;
+    pp.out_cap = 4096;
+
+    if (!pp_run(&pp, ft)) {
+        printf("FAIL: stage2 pp_run %s\n", name);
+        pp_free_macros(&pp);
+        return 0;
+    }
+
+    Parser p = {0};
+    p.toks = out_buf;
+    p.n = pp.nout;
+    p.cache = cache;
+    if (!parse_tu(&p, items, nitems)) {
+        printf("FAIL: parse %s (%s) nout=%d i=%d\n", name, p.err_msg, pp.nout, p.i);
+        pp_free_macros(&pp);
+        return 0;
+    }
+    if (parser_out) *parser_out = p;
+    pp_free_macros(&pp);
+    return 1;
+}
+
+static int expect_kind(AstNode* n, AstKind k, const char* a, const char* b) {
+    if (!n || n->kind != k) {
+        printf("FAIL: kind want %s got %s\n", ast_kind_name(k),
+               n ? ast_kind_name(n->kind) : "null");
+        return 0;
+    }
+    if (a && strcmp(n->a, a) != 0) {
+        printf("FAIL: a want %s got %s\n", a, n->a);
+        return 0;
+    }
+    if (b && strcmp(n->b, b) != 0) {
+        printf("FAIL: b want %s got %s\n", b, n->b);
+        return 0;
+    }
+    return 1;
+}
+
+static int test_pp_number(CCArena* arena) {
+    const char* src = "1e+1+2.";
+    TokBuild b;
+    Token toks[16];
+    FileTape fake = {0};
+    fake.bytes = (char*)src;
+    fake.len = strlen(src);
+    fake.file_id = 99;
+    b.toks = toks;
+    b.n = 0;
+    b.cap = 16;
+    b.building = &fake;
+    if (!PpTok_collect(src, strlen(src), arena, tok_build_push, &b)) {
+        printf("FAIL: pp_number collect\n");
+        return 0;
+    }
+    /* 1e+1 , + , 2.  — three tokens if pp-number greedy */
+    if (b.n != 3 || toks[0].kind != TK_NUM || toks[0].spell.len != 4) {
+        printf("FAIL: pp_number split n=%d len0=%d\n", b.n,
+               b.n ? (int)toks[0].spell.len : -1);
+        return 0;
+    }
+    if (!tok_eq(toks[1], TK_PUNCT, "+") || toks[2].kind != TK_NUM) {
+        printf("FAIL: pp_number trailing\n");
+        return 0;
+    }
+    return 1;
+}
+
+static int test_cache_identity(TapeCache* cache, CCArena* arena) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/fields.inc", FIX);
+    FileTape* a = tape_cache_load(cache, path, arena);
+    FileTape* b = tape_cache_load(cache, path, arena);
+    if (!a || a != b) {
+        printf("FAIL: stage1 cache identity\n");
+        return 0;
+    }
+    return 1;
+}
+
+/* CC digraphs must be one punct each (C lexer would split => / !>). */
+static int test_cc_digraphs(CCArena* arena) {
+    const char* src = "()=>{} int!>E @defer";
+    TokBuild b;
+    Token toks[32];
+    FileTape fake = {0};
+    fake.bytes = (char*)src;
+    fake.len = strlen(src);
+    fake.file_id = 98;
+    b.toks = toks;
+    b.n = 0;
+    b.cap = 32;
+    b.building = &fake;
+    if (!PpTok_collect(src, strlen(src), arena, tok_build_push, &b)) {
+        printf("FAIL: cc digraph collect\n");
+        return 0;
+    }
+    int saw_arrow = 0, saw_result = 0, saw_at = 0;
+    for (int i = 0; i < b.n; i++) {
+        if (tok_eq(toks[i], TK_PUNCT, "=>")) saw_arrow = 1;
+        if (tok_eq(toks[i], TK_PUNCT, "!>")) saw_result = 1;
+        if (tok_eq(toks[i], TK_PUNCT, "@")) saw_at = 1;
+    }
+    if (!saw_arrow || !saw_result || !saw_at) {
+        printf("FAIL: cc digraphs arrow=%d result=%d at=%d n=%d\n",
+               saw_arrow, saw_result, saw_at, b.n);
+        return 0;
+    }
+    /* Ensure => was not split into = and > */
+    for (int i = 0; i + 1 < b.n; i++) {
+        if (tok_eq(toks[i], TK_PUNCT, "=") && tok_eq(toks[i + 1], TK_PUNCT, ">")) {
+            printf("FAIL: => split into = >\n");
+            return 0;
+        }
+        if (tok_eq(toks[i], TK_PUNCT, "!") && tok_eq(toks[i + 1], TK_PUNCT, ">")) {
+            printf("FAIL: !> split into ! >\n");
+            return 0;
+        }
+    }
+    return 1;
+}
+
+int main(void) {
+    CCArena arena = cc_arena_create(1 << 20);
+    TapeCache cache = {0};
+    int pass = 1;
+
+    pass &= test_pp_number(&arena);
+    pass &= test_cc_digraphs(&arena);
+    pass &= test_cache_identity(&cache, &arena);
+
+    /* typedef fork */
+    {
+        AstNode** items = NULL;
+        int n = 0;
+        if (!run_file(&cache, &arena, "typedef_fork.c", &items, &n, NULL)) return 1;
+        if (n != 5) { printf("FAIL: typedef_fork n=%d\n", n); return 1; }
+        pass &= expect_kind(items[0], AST_TYPEDEF_INT, "T", NULL);
+        pass &= expect_kind(items[1], AST_PTR_DECL, "T", "x");
+        pass &= expect_kind(items[2], AST_VAR_INT, "a", NULL);
+        pass &= expect_kind(items[3], AST_VAR_INT, "b", NULL);
+        pass &= expect_kind(items[4], AST_MUL_EXPR, "a", "b");
+    }
+
+    /* cross-include fields into struct */
+    {
+        AstNode** items = NULL;
+        int n = 0;
+        if (!run_file(&cache, &arena, "cross_include.c", &items, &n, NULL)) return 1;
+        if (n != 6) { printf("FAIL: cross_include n=%d\n", n); return 1; }
+        pass &= expect_kind(items[0], AST_STRUCT, "Foo", NULL);
+        if (!items[0] || items[0]->nkids != 2) {
+            printf("FAIL: Foo fields %d\n", items[0] ? items[0]->nkids : -1);
+            return 1;
+        }
+        pass &= expect_kind(items[0]->kids[0], AST_FIELD_INT, "x", NULL);
+        pass &= expect_kind(items[0]->kids[1], AST_FIELD_INT, "y", NULL);
+        pass &= expect_kind(items[1], AST_TYPEDEF_INT, "T", NULL);
+        pass &= expect_kind(items[2], AST_PTR_DECL, "T", "x");
+        pass &= expect_kind(items[5], AST_MUL_EXPR, "a", "b");
+    }
+
+    /* include guard: stage-1 tape reused; typedef once */
+    {
+        AstNode** items = NULL;
+        int n = 0;
+        int before = cache.n;
+        if (!run_file(&cache, &arena, "guard_twice.c", &items, &n, NULL)) return 1;
+        if (n != 2) { printf("FAIL: guard_twice n=%d\n", n); return 1; }
+        pass &= expect_kind(items[0], AST_TYPEDEF_INT, "Guarded", NULL);
+        pass &= expect_kind(items[1], AST_PTR_DECL, "Guarded", "p");
+        /* guarded.h + fields.inc + others may already be cached; ensure guarded
+         * loaded at most once as a tape entry */
+        int guarded_tapes = 0;
+        for (int i = 0; i < cache.n; i++) {
+            if (strstr(cache.items[i]->path, "guarded.h")) guarded_tapes++;
+        }
+        if (guarded_tapes != 1) {
+            printf("FAIL: guarded.h tapes=%d (cache grew %d->%d)\n",
+                   guarded_tapes, before, cache.n);
+            return 1;
+        }
+    }
+
+    /* object-like macro before typedef */
+    {
+        AstNode** items = NULL;
+        int n = 0;
+        if (!run_file(&cache, &arena, "macro_obj.c", &items, &n, NULL)) return 1;
+        if (n != 2) { printf("FAIL: macro_obj n=%d\n", n); return 1; }
+        pass &= expect_kind(items[0], AST_TYPEDEF_INT, "U", NULL);
+        pass &= expect_kind(items[1], AST_PTR_DECL, "U", "q");
+    }
+
+    /* line splice in stage 1 */
+    {
+        AstNode** items = NULL;
+        int n = 0;
+        if (!run_file(&cache, &arena, "line_splice.c", &items, &n, NULL)) return 1;
+        if (n != 2) { printf("FAIL: line_splice n=%d\n", n); return 1; }
+        pass &= expect_kind(items[0], AST_TYPEDEF_INT, "T", NULL);
+        pass &= expect_kind(items[1], AST_PTR_DECL, "T", "x");
+    }
+
+    /* Concurrent-C surface forms */
+    {
+        AstNode** items = NULL;
+        int n = 0;
+        if (!run_file(&cache, &arena, "cc_surface.ccs", &items, &n, NULL)) return 1;
+        if (n != 5) { printf("FAIL: cc_surface n=%d\n", n); return 1; }
+        pass &= expect_kind(items[0], AST_SLICE_VAR, "xs", NULL);
+        pass &= expect_kind(items[1], AST_CHAN_VAR, "ch", "4");
+        pass &= expect_kind(items[2], AST_RESULT_FN, "go", "int");
+        pass &= expect_kind(items[3], AST_CLOSURE_LIT, NULL, NULL);
+        pass &= expect_kind(items[4], AST_AT_STMT, "defer", NULL);
+    }
+
+    /* CC types spliced mid-struct + @async */
+    {
+        AstNode** items = NULL;
+        int n = 0;
+        if (!run_file(&cache, &arena, "cc_cross_include.ccs", &items, &n, NULL)) return 1;
+        if (n != 2) { printf("FAIL: cc_cross_include n=%d\n", n); return 1; }
+        pass &= expect_kind(items[0], AST_STRUCT, "Bundle", NULL);
+        if (!items[0] || items[0]->nkids != 2) {
+            printf("FAIL: Bundle fields %d\n", items[0] ? items[0]->nkids : -1);
+            return 1;
+        }
+        pass &= expect_kind(items[0]->kids[0], AST_SLICE_VAR, "buf", NULL);
+        pass &= expect_kind(items[0]->kids[1], AST_CHAN_VAR, "tx", "8");
+        pass &= expect_kind(items[1], AST_AT_STMT, "async", NULL);
+    }
+
+    /* object-like macro expands to CC channel type (post-expand oracle) */
+    {
+        AstNode** items = NULL;
+        int n = 0;
+        if (!run_file(&cache, &arena, "cc_macro_chan.ccs", &items, &n, NULL)) return 1;
+        if (n != 1) { printf("FAIL: cc_macro_chan n=%d\n", n); return 1; }
+        pass &= expect_kind(items[0], AST_CHAN_VAR, "c", "4");
+    }
+
+    tape_cache_free(&cache);
+    cc_arena_free(&arena);
+    if (!pass) return 1;
+    printf("c_pp stage1-cache stage2-stitch C+CC spike OK\n");
+    return 0;
+}

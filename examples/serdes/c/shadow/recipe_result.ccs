@@ -1,0 +1,71 @@
+/*
+ * Recipe: Result Types and Error Unwrapping
+ *
+ * Functions that can fail return T!>(E). There are exactly TWO error
+ * operators, split by what the error becomes:
+ *
+ *   ?>   the error becomes a VALUE — expr ?> default
+ *   !>   the error becomes CODE   — expr !> { ... }   (body must diverge)
+ *
+ * Everything else is a modifier on those two:
+ *
+ *   (e)  binds the error:  expr ?>(e) fallback(e.kind)
+ *                          expr !>(e) { cc_error_log(e); return 1; }
+ *   ;    the code is the handler declared at the top of the scope:
+ *        expr !>;          (requires an enclosing @errhandler)
+ *
+ * Hoist a policy with @errhandler — either a named helper statement
+ * (`cc_error_exit(e);`) or a block (`{ cc_error_log(e); return 1; }`)
+ * — then use bare !>; at every call site. Compose with
+ * `!>(e) { local; @err(e); }` when you want work before the default.
+ *
+ * Temp prints: `@string(`...`, @scratch)` injects a per-site stack arena
+ * (no hand-rolled CCArena). Next: recipe_unwrap_destroy_forms.ccs;
+ * recipe_ufcs_forms.ccs covers method dispatch including fallible chains.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdlib.h>
+#include <ccc/script/stdio.cch>
+
+/* A fallible operation: returns T!>(CCError). */
+int !>(CCError) read_config_value(const char* key) {
+    if (!key || key[0] == '\0')          return cc_err(CC_ERR_INVALID_ARG, "empty key");
+    if (strcmp(key, "timeout") == 0)     return cc_ok(30);
+    if (strcmp(key, "max_retries") == 0) return cc_ok(3);
+    return cc_err(CC_ERR_NOT_FOUND, "key not found");
+}
+
+/* Composes fallible calls. !>(e) return cc_err(e); propagates the
+ * error unchanged to the caller — the function-level equivalent of !>;. */
+int !>(CCError) get_total_wait_time(void) {
+    int timeout = read_config_value("timeout")     !>(e) return cc_err(e);
+    int retries = read_config_value("max_retries") !>(e) return cc_err(e);
+    return cc_ok(timeout * retries);
+}
+
+int main(void) {
+    /* Soft main: log and return so @destroy still runs. */
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    /* (1) !>; — forwards to @errhandler if the composition fails. */
+    int total = get_total_wait_time() !>;
+    println(@string(`total wait time: ${total} seconds`, @scratch)) !>;
+
+    /* (2) ?> — substitutes a default; never propagates. */
+    int missing = read_config_value("unknown_key") ?> -1;
+    println(@string(`missing key fell back to: ${missing}`, @scratch)) !>;
+
+    /* (3) ?>(e) — default computed from the error value. */
+    int bad = read_config_value("") ?>(e) (e.kind == CC_ERR_INVALID_ARG ? 0 : -1);
+    println(@string(`invalid key mapped to: ${bad}`, @scratch)) !>;
+
+    /* (4) Compose then default — local work, then `@err(e)` → @errhandler.
+     *    (Success path: known key. Flip to "" to exercise the forward.) */
+    int shown = read_config_value("timeout") !>(e) {
+        println(@string(`compose local: ${e.message}`, @scratch)) !>;
+        @err(e);
+    };
+    println(@string(`compose ok: timeout=${shown}`, @scratch)) !>;
+
+    return 0;
+}

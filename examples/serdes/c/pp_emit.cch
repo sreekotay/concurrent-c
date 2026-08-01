@@ -1,0 +1,875 @@
+/* Shadow emit: AST → .c / .h text (host cc / TCC consume).
+ * Requires pp_ast.cch (Parser / AstNode / parse_tu). */
+#pragma once
+
+/* ---- shadow emit: AST → C source (product for TCC / host cc) ------------ */
+
+typedef struct {
+    char* buf;
+    size_t len;
+    size_t cap;
+    int err;
+} CEmit;
+
+static int cemit_reserve(CEmit* e, size_t need) {
+    if (e->len + need + 1 <= e->cap) return 1;
+    size_t ncap = e->cap ? e->cap * 2 : 4096;
+    while (ncap < e->len + need + 1) ncap *= 2;
+    char* nbuf = (char*)realloc(e->buf, ncap);
+    if (!nbuf) { e->err = 1; return 0; }
+    e->buf = nbuf;
+    e->cap = ncap;
+    return 1;
+}
+
+static int cemit_str(CEmit* e, const char* s) {
+    size_t n = strlen(s);
+    if (!cemit_reserve(e, n)) return 0;
+    memcpy(e->buf + e->len, s, n);
+    e->len += n;
+    e->buf[e->len] = 0;
+    return 1;
+}
+
+static int cemit_fmt(CEmit* e, const char* fmt, ...) {
+    char tmp[512];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
+    va_end(ap);
+    if (n < 0 || n >= (int)sizeof(tmp)) { e->err = 1; return 0; }
+    return cemit_str(e, tmp);
+}
+
+typedef enum { SHADOW_EMIT_C = 0, SHADOW_EMIT_H = 1 } ShadowEmitKind;
+
+/* Mirror of cc_result_spec_mangle_type (result_spec.c) — keep in sync for goldens. */
+static void shadow_mangle_type(const char* src, char* out, size_t out_sz) {
+    size_t len = src ? strlen(src) : 0;
+    size_t i, j = 0;
+    if (!src || len == 0 || !out || out_sz == 0) {
+        if (out && out_sz) out[0] = 0;
+        return;
+    }
+    while (len && (*src == ' ' || *src == '\t')) { src++; len--; }
+    while (len && (src[len - 1] == ' ' || src[len - 1] == '\t')) len--;
+    for (i = 0; i < len && j < out_sz - 1; i++) {
+        char c = src[i];
+        if (c == ' ' || c == '\t') {
+            if (j > 0 && out[j - 1] != '_') out[j++] = '_';
+        } else if (c == '*') {
+            if (j + 3 < out_sz - 1) { out[j++] = 'p'; out[j++] = 't'; out[j++] = 'r'; }
+        } else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                   (c >= '0' && c <= '9') || c == '_') {
+            out[j++] = c;
+        } else {
+            if (j > 0 && out[j - 1] != '_') out[j++] = '_';
+        }
+    }
+    while (j > 0 && out[j - 1] == '_') j--;
+    out[j] = 0;
+    if (strcmp(out, "_Bool") == 0) snprintf(out, out_sz, "bool");
+}
+
+static void shadow_result_name(const char* ok, const char* err, char* out, size_t out_sz) {
+    char mok[128], merr[128];
+    shadow_mangle_type(ok, mok, sizeof(mok));
+    shadow_mangle_type(err, merr, sizeof(merr));
+    snprintf(out, out_sz, "CCResult_%s_%s", mok, merr);
+}
+
+/* Rewrite #include <… .cch> → #include <… .h> for host/TCC consumption. */
+static void shadow_rewrite_pass_inc(char* dst, size_t cap, const char* src) {
+    size_t n = src ? strlen(src) : 0;
+    /* "...foo.cch>" → "...foo.h>" */
+    if (n >= 5 && src[n - 5] == '.' && src[n - 4] == 'c' && src[n - 3] == 'c' &&
+        src[n - 2] == 'h' && src[n - 1] == '>') {
+        snprintf(dst, cap, "%.*s.h>", (int)(n - 5), src);
+        return;
+    }
+    snprintf(dst, cap, "%s", src ? src : "");
+}
+
+typedef struct {
+    AstNode* eh;          /* @errhandler node (call or block) */
+    const char* rname;    /* enclosing CCResult_* name, or NULL */
+    int* scratch_i;       /* next @scratch arena id */
+    int defer_cleanup;    /* result fn uses @defer → goto cleanup */
+    AstNode** defers;     /* borrowed defer nodes (reverse emit) */
+    int ndefers;
+} ShadowCtx;
+
+/* r.is_err() → cc_is_err(r) */
+static void shadow_rewrite_cond(char* dst, size_t cap, const char* cond) {
+    size_t n = cond ? strlen(cond) : 0;
+    /* ".is_err()" is 9 chars; recv may be a single ident (`r.is_err()`). */
+    if (n >= 9 && memcmp(cond + n - 9, ".is_err()", 9) == 0) {
+        snprintf(dst, cap, "cc_is_err(%.*s)", (int)(n - 9), cond);
+        return;
+    }
+    snprintf(dst, cap, "%s", cond ? cond : "");
+}
+
+/* x.error() → cc_error(x) (first occurrence) */
+static void shadow_rewrite_slot(char* dst, size_t cap, const char* expr) {
+    const char* p = expr ? strstr(expr, ".error()") : NULL;
+    if (!p) {
+        snprintf(dst, cap, "%s", expr ? expr : "");
+        return;
+    }
+    size_t pre = (size_t)(p - expr);
+    snprintf(dst, cap, "cc_error(%.*s)%s", (int)pre, expr, p + 8);
+}
+
+static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
+                                const char* indent, int use_cleanup);
+
+static int shadow_emit_handler(CEmit* out, ShadowCtx* ctx, const char* bind,
+                               const char* indent) {
+    if (ctx && ctx->eh && ctx->eh->nbody > 0) {
+        /* Block form: paste body (bind name already matches). */
+        char nested[64];
+        snprintf(nested, sizeof(nested), "%s", indent);
+        for (int k = 0; k < ctx->eh->nbody; k++) {
+            if (!shadow_emit_stmt_ctx(ctx->eh->body[k], out, ctx, nested, 0))
+                return 0;
+        }
+        return 1;
+    }
+    const char* h = (ctx && ctx->eh && ctx->eh->c[0]) ? ctx->eh->c : "cc_error_exit";
+    return cemit_fmt(out, "%s%s(%s);\n", indent, h, bind);
+}
+
+/* ({ CCArena*…; CCString…; pieces; str }) for @string(`tpl`, @scratch). */
+static int shadow_emit_tpl_expr(CEmit* out, const char* tpl, int scratch_id) {
+    if (!cemit_fmt(out,
+            "({ CCArena* __cc_tpl_arena = (&__cc_str_scratch_%d); "
+            "CCString __cc_tpl = cc_string_new(); ",
+            scratch_id))
+        return 0;
+    const char* p = tpl ? tpl : "";
+    while (*p) {
+        const char* slot = strstr(p, "${");
+        if (!slot) {
+            size_t n = strlen(p);
+            if (n && !cemit_fmt(out,
+                    "cc_string_push_buffer(&__cc_tpl, \"%s\", %u, __cc_tpl_arena); ",
+                    p, (unsigned)n))
+                return 0;
+            break;
+        }
+        if (slot > p) {
+            size_t n = (size_t)(slot - p);
+            char lit[256];
+            if (n >= sizeof(lit)) n = sizeof(lit) - 1;
+            memcpy(lit, p, n);
+            lit[n] = 0;
+            if (!cemit_fmt(out,
+                    "cc_string_push_buffer(&__cc_tpl, \"%s\", %u, __cc_tpl_arena); ",
+                    lit, (unsigned)n))
+                return 0;
+        }
+        const char* end = strchr(slot + 2, '}');
+        if (!end) {
+            fprintf(stderr, "error: unterminated ${...} in @string template\n");
+            out->err = 1;
+            return 0;
+        }
+        char expr[128];
+        char rexpr[160];
+        size_t el = (size_t)(end - (slot + 2));
+        if (el >= sizeof(expr)) el = sizeof(expr) - 1;
+        memcpy(expr, slot + 2, el);
+        expr[el] = 0;
+        shadow_rewrite_slot(rexpr, sizeof(rexpr), expr);
+        if (!cemit_fmt(out, "cc_string_push(&__cc_tpl, (%s), __cc_tpl_arena); ", rexpr))
+            return 0;
+        p = end + 1;
+    }
+    return cemit_str(out, "__cc_tpl; })");
+}
+
+static int shadow_emit_println_arg(CEmit* out, ShadowCtx* ctx, const char* arg_expr,
+                                   const char* indent) {
+    const char* hbind = "e";
+    if (!cemit_fmt(out,
+            "%s{ __typeof__(cc_println(%s)) __cc_er_r = (cc_println(%s)); "
+            "if (__cc_uw_is_err(__cc_er_r)) { CCError %s = __cc_uw_err_at(__cc_er_r, "
+            "\"cc_println\", \"<shadow>\", \"0\");\n",
+            indent, arg_expr, arg_expr, hbind))
+        return 0;
+    char nested[64];
+    snprintf(nested, sizeof(nested), "%s  ", indent);
+    if (!shadow_emit_handler(out, ctx, hbind, nested)) return 0;
+    return cemit_fmt(out, "%s} else { (void)__cc_er_r; } }\n", indent);
+}
+
+static int shadow_emit_println(AstNode* st, CEmit* out, ShadowCtx* ctx,
+                               const char* indent) {
+    return shadow_emit_println_arg(out, ctx, st->a, indent);
+}
+
+static int shadow_emit_println_tpl(AstNode* st, CEmit* out, ShadowCtx* ctx,
+                                   const char* indent) {
+    int id = ctx && ctx->scratch_i ? (*ctx->scratch_i)++ : 0;
+    if (!cemit_fmt(out, "%s{ __typeof__(cc_println(", indent)) return 0;
+    if (!shadow_emit_tpl_expr(out, st->a, id)) return 0;
+    if (!cemit_str(out, ")) __cc_er_r = (cc_println(")) return 0;
+    if (!shadow_emit_tpl_expr(out, st->a, id)) return 0;
+    if (!cemit_str(out,
+            ")); if (__cc_uw_is_err(__cc_er_r)) { CCError e = __cc_uw_err_at(__cc_er_r, "
+            "\"cc_println\", \"<shadow>\", \"0\");\n"))
+        return 0;
+    char nested[64];
+    snprintf(nested, sizeof(nested), "%s  ", indent);
+    if (!shadow_emit_handler(out, ctx, "e", nested)) return 0;
+    return cemit_fmt(out, "%s} else { (void)__cc_er_r; } }\n", indent);
+}
+
+/* Emit destroy-body stmts (nested under cleanup). */
+static int shadow_emit_destroy_body(AstNode* nur, CEmit* out, ShadowCtx* ctx) {
+    for (int k = 0; k < nur->nbody; k++) {
+        AstNode* st = nur->body[k];
+        if (st->kind == AST_PRINTLN_BANG) {
+            if (!shadow_emit_println(st, out, ctx, "        ")) return 0;
+        } else {
+            fprintf(stderr, "error: @destroy body stmt %s not lowerable yet\n",
+                    ast_kind_name(st->kind));
+            out->err = 1;
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int shadow_emit_bang_bind(AstNode* st, CEmit* out, ShadowCtx* ctx,
+                                 const char* indent) {
+    if (!cemit_fmt(out,
+            "%s{ __typeof__(cc_println(%s)) __cc_pu_s = (cc_println(%s));\n"
+            "%s  if (__cc_uw_is_err(__cc_pu_s)) {\n"
+            "%s    CCError %s = __cc_uw_err_at(__cc_pu_s, \"cc_println\", "
+            "\"<shadow>\", \"0\");\n",
+            indent, st->a, st->a, indent, indent, st->b))
+        return 0;
+    char nested[32];
+    snprintf(nested, sizeof(nested), "%s      ", indent);
+    for (int k = 0; k < st->nbody; k++) {
+        AstNode* b = st->body[k];
+        if (b->kind == AST_PRINTLN_BANG) {
+            if (!shadow_emit_println(b, out, ctx, nested)) return 0;
+        } else if (b->kind == AST_ERR_FWD) {
+            if (!shadow_emit_handler(out, ctx, b->a, nested)) return 0;
+        } else {
+            fprintf(stderr, "error: !>(...) body stmt %s not lowerable yet\n",
+                    ast_kind_name(b->kind));
+            out->err = 1;
+            return 0;
+        }
+    }
+    return cemit_fmt(out, "%s  }\n%s}\n", indent, indent);
+}
+
+/* Stmts inside a spawned closure body (indent under entry). */
+static int shadow_emit_closure_body(AstNode* cl, CEmit* out) {
+    ShadowCtx ctx = {0};
+    for (int k = 0; k < cl->nbody; k++) {
+        if (cl->body[k]->kind == AST_ERRHANDLER) ctx.eh = cl->body[k];
+    }
+    for (int k = 0; k < cl->nbody; k++) {
+        AstNode* st = cl->body[k];
+        if (st->kind == AST_ERRHANDLER) {
+            if (st->c[0]) {
+                if (!cemit_fmt(out, "    /* @errhandler(%s %s) %s(%s); */\n",
+                               st->a, st->b, st->c, st->b))
+                    return 0;
+            } else {
+                if (!cemit_fmt(out, "    /* @errhandler(%s %s) {…} */\n",
+                               st->a, st->b))
+                    return 0;
+            }
+        } else if (!shadow_emit_stmt_ctx(st, out, &ctx, "    ", 0)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int shadow_emit_closure_def(AstNode* cl, CEmit* out) {
+    const char* id = cl->d[0] ? cl->d : "1";
+    if (!cemit_fmt(out,
+            "\n/* CC closure %s */\n"
+            "static CCClosure0 cc_closure__N%s_make(void) {\n"
+            "    return cc_closure0_make(cc_closure__N%s_entry, NULL, NULL);\n"
+            "}\n"
+            "static void* cc_closure__N%s_entry(void* __p) {\n"
+            "    (void)__p;\n",
+            id, id, id, id))
+        return 0;
+    if (!shadow_emit_closure_body(cl, out)) return 0;
+    return cemit_str(out, "    return NULL;\n}\n");
+}
+
+static int shadow_args_has_comma(const char* args) {
+    int depth = 0;
+    for (const char* p = args ? args : ""; *p; p++) {
+        if (*p == '(' || *p == '[' || *p == '{') depth++;
+        else if (*p == ')' || *p == ']' || *p == '}') depth--;
+        else if (*p == ',' && depth == 0) return 1;
+    }
+    return 0;
+}
+
+static int shadow_emit_return_cc(AstNode* st, CEmit* out, ShadowCtx* ctx,
+                                 const char* indent) {
+    const char* rname = ctx && ctx->rname ? ctx->rname : "CCResult_int_CCError";
+    char assign[384];
+    if (strcmp(st->a, "ok") == 0) {
+        if (st->b[0])
+            snprintf(assign, sizeof(assign), "cc_ok_%s(%s)", rname, st->b);
+        else
+            snprintf(assign, sizeof(assign), "cc_ok_%s()", rname);
+        if (ctx && ctx->defer_cleanup) {
+            return cemit_fmt(out,
+                "%s__cc_retval = (%s); __cc_ret_set = 1; __cc_ret_err = 0; "
+                "goto __cc_cleanup;\n",
+                indent, assign);
+        }
+        return cemit_fmt(out, "%sreturn %s;\n", indent, assign);
+    }
+    if (shadow_args_has_comma(st->b))
+        snprintf(assign, sizeof(assign), "cc_err_%s(CC_ERROR(%s))", rname, st->b);
+    else
+        snprintf(assign, sizeof(assign), "cc_err_%s(%s)", rname, st->b);
+    if (ctx && ctx->defer_cleanup) {
+        return cemit_fmt(out,
+            "%s__cc_retval = (%s); __cc_ret_set = 1; __cc_ret_err = 1; "
+            "goto __cc_cleanup;\n",
+            indent, assign);
+    }
+    return cemit_fmt(out, "%sreturn %s;\n", indent, assign);
+}
+
+static int shadow_emit_defer_epilogue(CEmit* out, ShadowCtx* ctx) {
+    if (!ctx || !ctx->ndefers) return 1;
+    if (!cemit_str(out, "__cc_cleanup:\n")) return 0;
+    /* Reverse declaration order */
+    for (int i = ctx->ndefers - 1; i >= 0; i--) {
+        AstNode* d = ctx->defers[i];
+        const char* mode = d->c;
+        if (mode[0] == 0) {
+            /* always */
+            for (int k = 0; k < d->nbody; k++) {
+                if (!shadow_emit_stmt_ctx(d->body[k], out, ctx, "    ", 0)) return 0;
+            }
+        } else if (strcmp(mode, "ok") == 0) {
+            if (!cemit_str(out, "    if (!__cc_ret_err) {\n")) return 0;
+            for (int k = 0; k < d->nbody; k++) {
+                if (!shadow_emit_stmt_ctx(d->body[k], out, ctx, "        ", 0)) return 0;
+            }
+            if (!cemit_str(out, "    }\n")) return 0;
+        } else if (strcmp(mode, "err") == 0) {
+            if (!cemit_str(out, "    if (__cc_ret_err) {\n")) return 0;
+            for (int k = 0; k < d->nbody; k++) {
+                if (!shadow_emit_stmt_ctx(d->body[k], out, ctx, "        ", 0)) return 0;
+            }
+            if (!cemit_str(out, "    }\n")) return 0;
+        }
+    }
+    return cemit_str(out,
+        "    if (__cc_ret_set) return __cc_retval;\n"
+        "    return __cc_retval;\n");
+}
+
+static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
+                                  const char* indent) {
+    const char* call = st->b;
+    const char* mode = st->c;
+    /* Diag site label is fixed — call text may contain quotes. */
+    if (strcmp(mode, "bang") == 0) {
+        if (!cemit_fmt(out,
+                "%sint %s = ({ __typeof__(%s) __cc_pu_e = (%s);\n"
+                "%s  if (__cc_uw_is_err(__cc_pu_e)) {\n"
+                "%s    CCError e = __cc_uw_err_at(__cc_pu_e, \"<unwrap>\", "
+                "\"<shadow>\", \"0\");\n",
+                indent, st->a, call, call, indent, indent))
+            return 0;
+        char nested[64];
+        snprintf(nested, sizeof(nested), "%s      ", indent);
+        if (!shadow_emit_handler(out, ctx, "e", nested)) return 0;
+        return cemit_fmt(out, "%s  } __cc_uw_value(__cc_pu_e); });\n", indent);
+    }
+    if (strcmp(mode, "bang_stmt") == 0) {
+        if (!cemit_fmt(out,
+                "%sint %s = ({ __typeof__(%s) __cc_pu_e = (%s);\n"
+                "%s  if (__cc_uw_is_err(__cc_pu_e)) {\n"
+                "%s    CCError %s = __cc_uw_err_at(__cc_pu_e, \"<unwrap>\", "
+                "\"<shadow>\", \"0\");\n",
+                indent, st->a, call, call, indent, indent, st->d))
+            return 0;
+        char nested[64];
+        snprintf(nested, sizeof(nested), "%s      ", indent);
+        if (st->nbody > 0) {
+            if (!shadow_emit_stmt_ctx(st->body[0], out, ctx, nested, 0)) return 0;
+        }
+        return cemit_fmt(out, "%s  } __cc_uw_value(__cc_pu_e); });\n", indent);
+    }
+    if (strcmp(mode, "bang_block") == 0) {
+        if (!cemit_fmt(out,
+                "%sint %s = ({ __typeof__(%s) __cc_pu_e = (%s);\n"
+                "%s  if (__cc_uw_is_err(__cc_pu_e)) {\n"
+                "%s    CCError %s = __cc_uw_err_at(__cc_pu_e, \"<unwrap>\", "
+                "\"<shadow>\", \"0\");\n",
+                indent, st->a, call, call, indent, indent, st->d))
+            return 0;
+        char nested[64];
+        snprintf(nested, sizeof(nested), "%s      ", indent);
+        for (int k = 0; k < st->nbody; k++) {
+            if (!shadow_emit_stmt_ctx(st->body[k], out, ctx, nested, 0)) return 0;
+        }
+        return cemit_fmt(out, "%s  } __cc_uw_value(__cc_pu_e); });\n", indent);
+    }
+    if (strcmp(mode, "qmark") == 0) {
+        return cemit_fmt(out,
+            "%sint %s = ({ __typeof__(%s) __cc_pu_r = (%s); "
+            "!__cc_uw_is_err(__cc_pu_r) ? __cc_uw_value(__cc_pu_r) : (%s); });\n",
+            indent, st->a, call, call, st->e);
+    }
+    if (strcmp(mode, "qmark_bind") == 0) {
+        return cemit_fmt(out,
+            "%sint %s = ({ __typeof__(%s) __cc_pu_r = (%s); "
+            "!__cc_uw_is_err(__cc_pu_r) ? __cc_uw_value(__cc_pu_r) : "
+            "({ CCError %s = __cc_uw_err_at(__cc_pu_r, \"<unwrap>\", \"<shadow>\", \"0\"); "
+            "(%s); }); });\n",
+            indent, st->a, call, call, st->d, st->e);
+    }
+    fprintf(stderr, "error: unknown unwrap mode %s\n", mode);
+    out->err = 1;
+    return 0;
+}
+
+static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
+                                const char* indent, int use_cleanup) {
+    switch (st->kind) {
+    case AST_RETURN_INT:
+        if (use_cleanup) {
+            return cemit_fmt(out,
+                "%s__cc_retval = (%s); __cc_ret_set = 1; goto __cc_cleanup;\n",
+                indent, st->a);
+        }
+        return cemit_fmt(out, "%sreturn %s;\n", indent, st->a);
+    case AST_RETURN_CC:
+        return shadow_emit_return_cc(st, out, ctx, indent);
+    case AST_ERRHANDLER:
+        if (st->c[0])
+            return cemit_fmt(out, "%s/* @errhandler(%s %s) %s(%s); */\n",
+                             indent, st->a, st->b, st->c, st->b);
+        return cemit_fmt(out, "%s/* @errhandler(%s %s) {…} */\n",
+                         indent, st->a, st->b);
+    case AST_PRINTLN_BANG:
+        return shadow_emit_println(st, out, ctx, indent);
+    case AST_PRINTLN_TPL:
+        return shadow_emit_println_tpl(st, out, ctx, indent);
+    case AST_PRINTLN_BANG_BIND:
+        return shadow_emit_bang_bind(st, out, ctx, indent);
+    case AST_ERR_FWD:
+        return shadow_emit_handler(out, ctx, st->a, indent);
+    case AST_IF: {
+        char cond[288];
+        shadow_rewrite_cond(cond, sizeof(cond), st->a);
+        if (!cemit_fmt(out, "%sif (%s) ", indent, cond)) return 0;
+        if (st->nbody < 1) return 0;
+        if (st->body[0]->kind == AST_BLOCK) {
+            if (!cemit_str(out, "{\n")) return 0;
+            char nested[64];
+            snprintf(nested, sizeof(nested), "%s    ", indent);
+            for (int k = 0; k < st->body[0]->nbody; k++) {
+                if (!shadow_emit_stmt_ctx(st->body[0]->body[k], out, ctx, nested,
+                                          use_cleanup))
+                    return 0;
+            }
+            return cemit_fmt(out, "%s}\n", indent);
+        }
+        if (!cemit_str(out, "\n")) return 0;
+        return shadow_emit_stmt_ctx(st->body[0], out, ctx, indent, use_cleanup);
+    }
+    case AST_BLOCK: {
+        if (!cemit_fmt(out, "%s{\n", indent)) return 0;
+        char nested[64];
+        snprintf(nested, sizeof(nested), "%s    ", indent);
+        for (int k = 0; k < st->nbody; k++) {
+            if (!shadow_emit_stmt_ctx(st->body[k], out, ctx, nested, use_cleanup))
+                return 0;
+        }
+        return cemit_fmt(out, "%s}\n", indent);
+    }
+    case AST_VAR_UNWRAP:
+        return shadow_emit_var_unwrap(st, out, ctx, indent);
+    case AST_PTR_INIT:
+        return cemit_fmt(out, "%s%s* %s = %s;\n", indent, st->a, st->b, st->c);
+    case AST_STMT_UNWRAP: {
+        if (!cemit_fmt(out,
+                "%s{ __typeof__(%s) __cc_pu_e = (%s);\n"
+                "%s  if (__cc_uw_is_err(__cc_pu_e)) {\n"
+                "%s    CCError e = __cc_uw_err_at(__cc_pu_e, \"<unwrap>\", "
+                "\"<shadow>\", \"0\");\n",
+                indent, st->a, st->a, indent, indent))
+            return 0;
+        char nested[64];
+        snprintf(nested, sizeof(nested), "%s      ", indent);
+        if (!shadow_emit_handler(out, ctx, "e", nested)) return 0;
+        return cemit_fmt(out, "%s  } else { (void)__cc_pu_e; } }\n", indent);
+    }
+    case AST_RESULT_LOCAL: {
+        char rname[256];
+        shadow_result_name(st->c, st->b, rname, sizeof(rname));
+        return cemit_fmt(out, "%s%s %s = %s;\n", indent, rname, st->a, st->d);
+    }
+    case AST_DEFER:
+        /* Bodies run at __cc_cleanup — declaration site is a marker only. */
+        if (st->c[0])
+            return cemit_fmt(out, "%s/* @defer(%s) … */\n", indent, st->c);
+        return cemit_fmt(out, "%s/* @defer … */\n", indent);
+    case AST_NURSERY_DESTROY: {
+        if (!cemit_fmt(out,
+                "%s%s* %s = ({ __typeof__(%s(NULL)) __cc_pu_e = (%s(NULL)); "
+                "if (__cc_uw_is_err(__cc_pu_e)) { CCError e = __cc_uw_err_at(__cc_pu_e, "
+                "\"%s(NULL)\", \"<shadow>\", \"0\");\n",
+                indent, st->a, st->b, st->c, st->c, st->c))
+            return 0;
+        char nested[64];
+        snprintf(nested, sizeof(nested), "%s  ", indent);
+        if (!shadow_emit_handler(out, ctx, "e", nested)) return 0;
+        return cemit_fmt(out, "%s} __cc_uw_value(__cc_pu_e); });\n", indent);
+    }
+    case AST_SPAWN_CLOSURE:
+        return cemit_fmt(out,
+            "%scc_nursery_spawn_closure0(%s, cc_closure__N%s_make());\n",
+            indent, st->a, st->d[0] ? st->d : "1");
+    case AST_CALL_NUM:
+        return cemit_fmt(out, "%s%s(%s);\n", indent, st->a, st->b);
+    case AST_CALL_ARGS:
+        return cemit_fmt(out, "%s%s(%s);\n", indent, st->a, st->b);
+    case AST_AT_STMT:
+        return cemit_fmt(out, "%s/* @%s */\n", indent, st->a);
+    default:
+        fprintf(stderr, "error: stmt %s not lowerable\n", ast_kind_name(st->kind));
+        out->err = 1;
+        return 0;
+    }
+}
+
+static int shadow_count_tpl(AstNode* st) {
+    if (!st) return 0;
+    int n = (st->kind == AST_PRINTLN_TPL) ? 1 : 0;
+    for (int k = 0; k < st->nbody; k++) n += shadow_count_tpl(st->body[k]);
+    if (st->kids) {
+        for (int k = 0; k < st->nkids; k++) n += shadow_count_tpl(st->kids[k]);
+    }
+    return n;
+}
+
+/* Shared lower: same AST → C text; H adds #pragma once and rejects fn bodies.
+ * pass_inc: top-level #include <...> lines from stage 2 (not spliced). */
+static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
+                       ShadowEmitKind kind, char pass_inc[][256], int npass_inc) {
+    (void)cache;
+    memset(out, 0, sizeof(*out));
+    if (kind == SHADOW_EMIT_H) {
+        if (!cemit_str(out,
+                "/* generated by examples/serdes/c shadow lowerer — .cch → .h */\n"
+                "#pragma once\n"
+                "#include <stddef.h>\n\n"))
+            return 0;
+    } else {
+        if (!cemit_str(out,
+                "/* generated by examples/serdes/c shadow lowerer — not the production compiler */\n"
+                "#include <stddef.h>\n\n"))
+            return 0;
+    }
+
+    for (int i = 0; i < npass_inc; i++) {
+        char line[256];
+        shadow_rewrite_pass_inc(line, sizeof(line), pass_inc[i]);
+        if (!cemit_fmt(out, "%s\n", line)) return 0;
+    }
+    if (npass_inc && !cemit_str(out, "\n")) return 0;
+
+    /* User typedefs first (so CCResult_* can name Err / MyOk). */
+    for (int i = 0; i < n; i++) {
+        if (items[i]->kind == AST_TYPEDEF_INT) {
+            if (!cemit_fmt(out, "typedef int %s;\n", items[i]->a)) return 0;
+        }
+    }
+
+    /* Unique result pairs (ok\0err in flat table). */
+    char seen_ok[32][128];
+    char seen_err[32][128];
+    int nseen = 0;
+    int need_slice = 0, need_chan = 0;
+    for (int i = 0; i < n; i++) {
+        if (items[i]->kind == AST_RESULT_FN) {
+            int dup = 0;
+            for (int j = 0; j < nseen; j++) {
+                if (strcmp(seen_ok[j], items[i]->c) == 0 &&
+                    strcmp(seen_err[j], items[i]->b) == 0) { dup = 1; break; }
+            }
+            if (!dup && nseen < 32) {
+                snprintf(seen_ok[nseen], sizeof(seen_ok[0]), "%s", items[i]->c);
+                snprintf(seen_err[nseen], sizeof(seen_err[0]), "%s", items[i]->b);
+                nseen++;
+            }
+        }
+        if (items[i]->kind == AST_SLICE_VAR) need_slice = 1;
+        if (items[i]->kind == AST_CHAN_VAR) need_chan = 1;
+        if (items[i]->kind == AST_STRUCT) {
+            for (int k = 0; k < items[i]->nkids; k++) {
+                if (items[i]->kids[k]->kind == AST_SLICE_VAR) need_slice = 1;
+                if (items[i]->kids[k]->kind == AST_CHAN_VAR) need_chan = 1;
+            }
+        }
+    }
+    /* Stand-in CCResult_* only when no angle includes (mini beachhead).
+     * Recipe TUs pull real CCResult_* from prelude/runtime headers. */
+    if (npass_inc == 0) {
+        if (nseen && !cemit_str(out, "\n")) return 0;
+        for (int i = 0; i < nseen; i++) {
+            char rname[256];
+            shadow_result_name(seen_ok[i], seen_err[i], rname, sizeof(rname));
+            if (!cemit_fmt(out,
+                    "#ifndef %s_DEFINED\n"
+                    "#define %s_DEFINED 1\n"
+                    "typedef struct { %s ok; int is_err; %s err; } %s;\n"
+                    "#endif\n",
+                    rname, rname, seen_ok[i], seen_err[i], rname))
+                return 0;
+        }
+        if (nseen && !cemit_str(out, "\n")) return 0;
+    } else if (nseen && !cemit_str(out, "\n")) {
+        return 0;
+    }
+    if (need_slice) {
+        if (!cemit_str(out, "typedef struct { int *ptr; size_t len; } CCShadowSlice_int;\n\n"))
+            return 0;
+    }
+    if (need_chan) {
+        if (!cemit_str(out, "typedef struct { int unused; } CCShadowChan_int;\n\n"))
+            return 0;
+    }
+
+    for (int i = 0; i < n; i++) {
+        AstNode* it = items[i];
+        switch (it->kind) {
+        case AST_TYPEDEF_INT:
+            /* already emitted in prelude */
+            break;
+        case AST_VAR_INT:
+            if (!cemit_fmt(out, "int %s;\n", it->a)) return 0;
+            break;
+        case AST_PTR_DECL:
+            if (!cemit_fmt(out, "%s *%s;\n", it->a, it->b)) return 0;
+            break;
+        case AST_RESULT_FN: {
+            char rname[256];
+            shadow_result_name(it->c, it->b, rname, sizeof(rname));
+            if (it->nkids == 0) {
+                if (it->d[0]) {
+                    if (!cemit_fmt(out, "%s %s(%s);\n", rname, it->a, it->d)) return 0;
+                } else {
+                    if (!cemit_fmt(out, "%s %s(void);\n", rname, it->a)) return 0;
+                }
+                break;
+            }
+            if (kind == SHADOW_EMIT_H) {
+                fprintf(stderr, "error: result fn body not allowed in .cch → .h (%s)\n",
+                        it->a);
+                out->err = 1;
+                return 0;
+            }
+            if (it->d[0]) {
+                if (!cemit_fmt(out, "%s %s(%s) {\n", rname, it->a, it->d)) return 0;
+            } else {
+                if (!cemit_fmt(out, "%s %s(void) {\n", rname, it->a)) return 0;
+            }
+            ShadowCtx ctx = { .rname = rname };
+            int scratch = 0;
+            ctx.scratch_i = &scratch;
+            AstNode* defers[16];
+            int ndefers = 0;
+            for (int k = 0; k < it->nkids; k++) {
+                if (it->kids[k]->kind == AST_ERRHANDLER) ctx.eh = it->kids[k];
+                if (it->kids[k]->kind == AST_DEFER) {
+                    if (ndefers >= 16) {
+                        fprintf(stderr, "error: too many @defer for shadow beachhead\n");
+                        out->err = 1;
+                        return 0;
+                    }
+                    defers[ndefers++] = it->kids[k];
+                }
+            }
+            ctx.defers = defers;
+            ctx.ndefers = ndefers;
+            ctx.defer_cleanup = ndefers > 0;
+            if (ctx.defer_cleanup) {
+                if (!cemit_fmt(out,
+                        "    %s __cc_retval = {0};\n"
+                        "    int __cc_ret_set = 0;\n"
+                        "    int __cc_ret_err = 0;\n",
+                        rname))
+                    return 0;
+            }
+            int ntpl = 0;
+            for (int k = 0; k < it->nkids; k++) ntpl += shadow_count_tpl(it->kids[k]);
+            for (int s = 0; s < ntpl; s++) {
+                if (!cemit_fmt(out, "    CC_ARENA_STACK(__cc_str_scratch_%d, 1024);\n", s))
+                    return 0;
+            }
+            for (int k = 0; k < it->nkids; k++) {
+                if (!shadow_emit_stmt_ctx(it->kids[k], out, &ctx, "    ", 0)) return 0;
+            }
+            if (ctx.defer_cleanup) {
+                if (!shadow_emit_defer_epilogue(out, &ctx)) return 0;
+            }
+            if (!cemit_str(out, "}\n\n")) return 0;
+            break;
+        }
+        case AST_SLICE_VAR:
+            if (!cemit_fmt(out, "CCShadowSlice_int %s;\n", it->a)) return 0;
+            break;
+        case AST_CHAN_VAR:
+            if (!cemit_fmt(out, "CCShadowChan_int %s;\n", it->a)) return 0;
+            break;
+        case AST_FN: {
+            if (kind == SHADOW_EMIT_H) {
+                fprintf(stderr, "error: function body not allowed in .cch → .h shadow emit (%s)\n",
+                        it->a);
+                out->err = 1;
+                return 0;
+            }
+            ShadowCtx ctx = {0};
+            int scratch = 0;
+            ctx.scratch_i = &scratch;
+            AstNode* nursery = NULL;
+            AstNode* spawns[8];
+            int nspawns = 0;
+            for (int k = 0; k < it->nkids; k++) {
+                if (it->kids[k]->kind == AST_ERRHANDLER) ctx.eh = it->kids[k];
+                if (it->kids[k]->kind == AST_NURSERY_DESTROY && !nursery)
+                    nursery = it->kids[k];
+                if (it->kids[k]->kind == AST_SPAWN_CLOSURE) {
+                    if (nspawns >= 8) {
+                        fprintf(stderr, "error: too many spawns for shadow beachhead\n");
+                        out->err = 1;
+                        return 0;
+                    }
+                    snprintf(it->kids[k]->d, sizeof(it->kids[k]->d), "%d", nspawns + 1);
+                    spawns[nspawns++] = it->kids[k];
+                }
+            }
+            if (nspawns) {
+                if (!cemit_str(out, "\n/* --- CC closure declarations --- */\n"))
+                    return 0;
+                for (int s = 0; s < nspawns; s++) {
+                    if (!cemit_fmt(out,
+                            "static void* cc_closure__N%s_entry(void*);\n"
+                            "static CCClosure0 cc_closure__N%s_make(void);\n",
+                            spawns[s]->d, spawns[s]->d))
+                        return 0;
+                }
+                if (!cemit_str(out, "/* --- end closure declarations --- */\n\n"))
+                    return 0;
+            }
+            if (!cemit_fmt(out, "int %s(void) {\n", it->a)) return 0;
+            int ntpl = 0;
+            for (int k = 0; k < it->nkids; k++) ntpl += shadow_count_tpl(it->kids[k]);
+            for (int s = 0; s < ntpl; s++) {
+                if (!cemit_fmt(out, "    CC_ARENA_STACK(__cc_str_scratch_%d, 1024);\n", s))
+                    return 0;
+            }
+            if (nursery) {
+                if (!cemit_str(out, "    int __cc_retval = 0;\n"
+                                    "    int __cc_ret_set = 0;\n"))
+                    return 0;
+            }
+            for (int k = 0; k < it->nkids; k++) {
+                if (!shadow_emit_stmt_ctx(it->kids[k], out, &ctx, "    ", nursery != NULL))
+                    return 0;
+            }
+            if (nursery) {
+                if (!cemit_str(out, "__cc_cleanup:\n")) return 0;
+                if (!cemit_fmt(out, "    { cc_nursery_wait(%s); {\n", nursery->b))
+                    return 0;
+                if (!shadow_emit_destroy_body(nursery, out, &ctx)) return 0;
+                if (!cemit_fmt(out, "    } cc_nursery_free(%s); }\n"
+                                    "    if (__cc_ret_set) return __cc_retval;\n"
+                                    "    return 0;\n",
+                               nursery->b))
+                    return 0;
+            }
+            if (!cemit_str(out, "}\n")) return 0;
+            if (nspawns) {
+                if (!cemit_str(out, "\n/* --- CC generated closures --- */\n"))
+                    return 0;
+                for (int s = 0; s < nspawns; s++) {
+                    if (!shadow_emit_closure_def(spawns[s], out)) return 0;
+                }
+            }
+            break;
+        }
+        case AST_STRUCT: {
+            if (!cemit_fmt(out, "struct %s {\n", it->a)) return 0;
+            for (int k = 0; k < it->nkids; k++) {
+                AstNode* f = it->kids[k];
+                if (f->kind == AST_FIELD_INT) {
+                    if (!cemit_fmt(out, "  int %s;\n", f->a)) return 0;
+                } else if (f->kind == AST_SLICE_VAR) {
+                    if (!cemit_fmt(out, "  CCShadowSlice_int %s;\n", f->a)) return 0;
+                } else if (f->kind == AST_CHAN_VAR) {
+                    if (!cemit_fmt(out, "  CCShadowChan_int %s;\n", f->a)) return 0;
+                } else {
+                    diag_at(cache, (Token){0}, "struct field not lowerable to C");
+                    out->err = 1;
+                    return 0;
+                }
+            }
+            if (!cemit_str(out, "};\n")) return 0;
+            break;
+        }
+        case AST_MUL_EXPR:
+        case AST_CLOSURE_LIT:
+        case AST_AT_STMT:
+        case AST_FIELD_INT:
+        case AST_RETURN_INT:
+        case AST_RETURN_CC:
+        case AST_ERRHANDLER:
+        case AST_PRINTLN_BANG:
+        case AST_PRINTLN_BANG_BIND:
+        case AST_PRINTLN_TPL:
+        case AST_ERR_FWD:
+        case AST_NURSERY_DESTROY:
+        case AST_SPAWN_CLOSURE:
+        case AST_CALL_NUM:
+        case AST_CALL_ARGS:
+        case AST_IF:
+        case AST_BLOCK:
+        case AST_VAR_UNWRAP:
+        case AST_PTR_INIT:
+        case AST_STMT_UNWRAP:
+        case AST_RESULT_LOCAL:
+        case AST_DEFER:
+            fprintf(stderr, "error: AST node %s is not part of the C-emit shadow subset\n",
+                    ast_kind_name(it->kind));
+            out->err = 1;
+            return 0;
+        }
+        if (out->err) return 0;
+    }
+    return !out->err;
+}
+
+static int shadow_emit_c(AstNode** items, int n, TapeCache* cache, CEmit* out) {
+    return shadow_emit(items, n, cache, out, SHADOW_EMIT_C, NULL, 0);
+}
+
+static int shadow_emit_h(AstNode** items, int n, TapeCache* cache, CEmit* out) {
+    return shadow_emit(items, n, cache, out, SHADOW_EMIT_H, NULL, 0);
+}

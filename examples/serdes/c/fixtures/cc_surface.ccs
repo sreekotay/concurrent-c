@@ -1,0 +1,5 @@
+int[:] xs;
+int[~4 >] ch;
+int!>int go();
+() => {};
+@defer {};

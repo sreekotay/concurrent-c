@@ -1,0 +1,5 @@
+/* Header that stitches a stage-1-cached include into the .h product. */
+#pragma once
+typedef int Err;
+#include "types.inc"
+int[:] buf;

@@ -1,0 +1,6 @@
+/* Trimmed fragment using production T!>(E) spelling for lower_header diff. */
+#pragma once
+typedef int MyErr;
+typedef int MyOk;
+MyOk!>(MyErr) do_it(void);
+MyOk!>(MyErr) take(MyOk x);

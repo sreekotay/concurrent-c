@@ -1,0 +1,4 @@
+struct Bundle {
+#include "cc_types.inc"
+};
+@async {};

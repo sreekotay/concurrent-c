@@ -1,0 +1,5 @@
+/* Shadow-lower input: Concurrent-C surface → plain C product for TCC/host. */
+typedef int Err;
+int!>Err answer(void);
+int[:] buf;
+int main(void) { return 0; }

@@ -1,0 +1,59 @@
+/*
+ * Recipe: Guaranteed Cleanup with @defer
+ *
+ * @defer schedules a statement to run when the enclosing scope exits,
+ * in reverse declaration order — no matter how the scope exits.
+ *
+ * Three forms:
+ *
+ *   @defer stmt;       — always runs
+ *   @defer(ok)  stmt;  — only on success exit
+ *   @defer(err) stmt;  — only on error exit (return cc_err(...))
+ *
+ * For resource lifetimes tied to a declaration, see @destroy in
+ * hello.ccs (e.g. CCNursery* n = ... !> @destroy { ... };).
+ */
+#include <ccc/cc_runtime.cch>
+#include <stdlib.h>
+#include <ccc/script/stdio.cch>
+#include <stdio.h>
+
+/* Writes two lines to `path`. If `inject_error` is nonzero, returns an
+ * error after the first line — exercising the @defer(err) rollback. */
+void !>(CCError) write_report(const char* path, int inject_error) {
+    @errhandler(CCError e) cc_error_exit(e);
+    FILE* f = fopen(path, "w");
+    if (!f) return cc_err(CC_ERR_IO, "fopen failed");
+
+    @defer fclose(f);                                   /* always runs */
+    @defer(ok) {
+        println(@string(`  committed ${path}`, @scratch)) !>;
+    }
+    @defer(err) {
+        println(@string(`  rolled back ${path}`, @scratch)) !>;
+    }
+
+    if (fputs("line 1\n", f) < 0) return cc_err(CC_ERR_IO, "write 1 failed");
+    if (inject_error) return cc_err(CC_ERR_INVALID_ARG, "injected failure");
+    if (fputs("line 2\n", f) < 0) return cc_err(CC_ERR_IO, "write 2 failed");
+
+    return cc_ok();
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    /* Happy path: fclose runs, then @defer(ok) prints "committed". */
+    println("write_report (ok):") !>;
+    write_report("/tmp/report_ok.txt", 0) !>;
+
+    /* Injected failure: fclose still runs, @defer(err) prints "rolled back",
+     * @defer(ok) is skipped, error is caught here (not forwarded). */
+    println("write_report (err):") !>;
+    void !>(CCError) r = write_report("/tmp/report_err.txt", 1);
+    if (r.is_err()) {
+        println(@string(`  caught: ${r.error().message}`, @scratch)) !>;
+    }
+
+    return 0;
+}
