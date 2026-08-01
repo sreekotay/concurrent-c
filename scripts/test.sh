@@ -3,12 +3,15 @@ set -euo pipefail
 
 # Local test entrypoint without requiring "make test" (though building cc still uses make today).
 #
+# Default is the fast local loop (cheap preambles + no stress/race). Opt into
+# the complete gate with --full / CC_TEST_FULL=1.
+#
 # Env / flags:
 #   CC_TEST_JOBS=N     parallel harness jobs (default: ncpu, capped at 16)
-#   CC_TEST_QUICK=1    skip heavy serial preambles + stress/lostwake/race tests
-#   --quick            same as CC_TEST_QUICK=1
-#   CC_TEST_FULL=1     force full preambles + all harness tests
+#   CC_TEST_FULL=1     full preambles + stress/lostwake/race tests
 #   --full             same as CC_TEST_FULL=1
+#   CC_TEST_QUICK=0    same as --full (escape hatch if something sets QUICK=1)
+#   --quick            explicit default (no-op unless paired with conflicting FULL)
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
@@ -24,18 +27,19 @@ if [ -f "./tools/cc_test.c" ] && [ "./tools/cc_test.c" -nt "./tools/cc_test" ]; 
   cc -O2 -Wall -Wextra tools/cc_test.c -o tools/cc_test
 fi
 
-quick=0
+# Default: quick. Full is opt-in.
+quick=1
 full=0
 case "${CC_TEST_FULL:-0}" in
   1|yes|true|TRUE|Yes) full=1 ;;
 esac
-case "${CC_TEST_QUICK:-0}" in
-  1|yes|true|TRUE|Yes) quick=1 ;;
+case "${CC_TEST_QUICK:-}" in
+  0|no|false|FALSE|No) full=1 ;;
 esac
 for a in "$@"; do
   case "$a" in
-    --quick) quick=1 ;;
-    --full)  full=1; quick=0 ;;
+    --quick) quick=1; full=0 ;;
+    --full)  full=1 ;;
   esac
 done
 if [ "$full" = 1 ]; then
@@ -62,7 +66,6 @@ if [ "$has_jobs" = 0 ]; then
   extra="$extra --jobs $jobs"
 fi
 if [ "$quick" = 1 ]; then
-  # Ensure cc_test sees --quick even when only the env var was set.
   has_quick=0
   for a in "$@"; do
     if [ "$a" = "--quick" ]; then has_quick=1; break; fi
@@ -70,10 +73,17 @@ if [ "$quick" = 1 ]; then
   if [ "$has_quick" = 0 ]; then
     extra="$extra --quick"
   fi
-  echo "[test] quick mode: skipping heavy preambles + stress/race tests (jobs=$jobs)"
-  echo "[test] tip: CC_TEST_FULL=1 or --full for the complete gate"
+  echo "[test] default (quick): skipping heavy preambles + stress/race tests (jobs=$jobs)"
+  echo "[test] tip: CC_TEST_FULL=1 or --full for redis line-map / functional / tcc-patch / stress"
 else
-  echo "[test] full mode (jobs=$jobs); tip: CC_TEST_QUICK=1 for a faster local loop"
+  has_full=0
+  for a in "$@"; do
+    if [ "$a" = "--full" ]; then has_full=1; break; fi
+  done
+  if [ "$has_full" = 0 ]; then
+    extra="$extra --full"
+  fi
+  echo "[test] full mode (jobs=$jobs)"
 fi
 
 # D3.0: exercise the in-process constexpr seam (cc_tcc_eval_const_expr) — a

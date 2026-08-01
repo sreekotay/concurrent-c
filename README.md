@@ -348,7 +348,8 @@ make test TCC_EXT=1 TCC_INC=third_party/tcc TCC_LIB=../third_party/tcc/libtcc.a
 Or without `make` (builds only the runner; the compiler still needs to be built):
 
 ```bash
-./scripts/test.sh
+./scripts/test.sh              # default: fast loop (skips redis preambles + stress)
+./scripts/test.sh --full       # complete gate
 ./scripts/test.sh --filter ufcs
 ./scripts/test.sh --list
 ```
