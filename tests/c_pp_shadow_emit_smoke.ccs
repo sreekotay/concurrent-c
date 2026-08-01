@@ -245,6 +245,7 @@ int main(void) {
     if (!expect_golden("recipe_defer.ccs", SHADOW_EMIT_C, "recipe_defer.c.golden")) return 1;
     if (!expect_golden("recipe_unwrap.ccs", SHADOW_EMIT_C, "recipe_unwrap.c.golden")) return 1;
     if (!expect_golden("recipe_arena.ccs", SHADOW_EMIT_C, "recipe_arena.c.golden")) return 1;
+    if (!expect_golden("recipe_capture.ccs", SHADOW_EMIT_C, "recipe_capture.c.golden")) return 1;
     if (!expect_golden("mini.cch", SHADOW_EMIT_H, "mini.h.golden")) return 1;
     if (!expect_golden("with_include.cch", SHADOW_EMIT_H, "with_include.h.golden")) return 1;
     if (!expect_golden("result_frag.cch", SHADOW_EMIT_H, "result_frag.h.golden")) return 1;
