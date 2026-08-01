@@ -48,7 +48,7 @@ static int process_item(int id) {
             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
             if (__cc_uw_is_err(__r)) {
                 #line 34 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
-                CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+                CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "34");
                 cc_error_exit(e);
             }
         }
@@ -86,7 +86,7 @@ int main(void) {
         __typeof__(cc_channel_pair(&results_tx, &results_rx)) __r = cc_channel_pair(&results_tx, &results_rx);
         if (__cc_uw_is_err(__r)) {
             #line 43 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
-            CCError e = __cc_uw_err_at(__r, "unwrap", __FILE__, __LINE__);
+            CCError e = __cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "43");
             #line 39 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
             cc_error_log(e);
             __cc_retval = 1;
@@ -101,7 +101,7 @@ int main(void) {
         __typeof__(cc_println("=== Ordered Parallel Processing ===")) __r = cc_println("=== Ordered Parallel Processing ===");
         if (__cc_uw_is_err(__r)) {
             #line 45 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
-            CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+            CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "45");
             #line 39 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
             cc_error_log(e);
             __cc_retval = 1;
@@ -119,7 +119,7 @@ int main(void) {
             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
             if (__cc_uw_is_err(__r)) {
                 #line 46 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
-                CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+                CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "46");
                 #line 39 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
                 cc_error_log(e);
                 __cc_retval = 1;
@@ -133,7 +133,7 @@ int main(void) {
         __typeof__(cc_println("")) __r = cc_println("");
         if (__cc_uw_is_err(__r)) {
             #line 47 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
-            CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+            CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "47");
             #line 39 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
             cc_error_log(e);
             __cc_retval = 1;
@@ -152,7 +152,7 @@ int main(void) {
             __typeof__(cc_nursery_create(NULL)) __r = cc_nursery_create(NULL);
             if (__cc_uw_is_err(__r)) {
                 #line 51 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
-                CCError e = __cc_uw_err_at(__r, "unwrap", __FILE__, __LINE__);
+                CCError e = __cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "51");
                 #line 39 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
                 cc_error_log(e);
                 __cc_retval = 1;
@@ -175,7 +175,7 @@ int main(void) {
                 __typeof__(cc_nursery_create(consumer)) __r = cc_nursery_create(consumer);
                 if (__cc_uw_is_err(__r)) {
                     #line 79 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
-                    CCError e = __cc_uw_err_at(__r, "unwrap", __FILE__, __LINE__);
+                    CCError e = __cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "79");
                     #line 39 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
                     cc_error_log(e);
                     __cc_retval = 1;
@@ -205,7 +205,7 @@ int main(void) {
         __typeof__(cc_println("\nDone! Results printed in order despite out-of-order completion.")) __r = cc_println("\nDone! Results printed in order despite out-of-order completion.");
         if (__cc_uw_is_err(__r)) {
             #line 95 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
-            CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+            CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "95");
             #line 39 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
             cc_error_log(e);
             __cc_retval = 1;
@@ -250,7 +250,7 @@ static void* cc_closure__N1_entry(void* __p) {
                 __typeof__(cc_println("\n[consumer] receiving results in order:")) __r = cc_println("\n[consumer] receiving results in order:");
                 if (__cc_uw_is_err(__r)) {
                     #line 55 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
-                    CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+                    CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "55");
                     cc_error_exit(e);
                 }
             }
@@ -275,7 +275,7 @@ static void* cc_closure__N1_entry(void* __p) {
                         __typeof__(cc_println(__msg)) __r = cc_println(__msg);
                         if (__cc_uw_is_err(__r)) {
                             #line 60 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
-                            CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+                            CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "60");
                             cc_error_exit(e);
                         }
                     }
@@ -293,7 +293,7 @@ static void* cc_closure__N1_entry(void* __p) {
                             __typeof__(cc_eprintln(__msg)) __r = cc_eprintln(__msg);
                             if (__cc_uw_is_err(__r)) {
                                 #line 62 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
-                                CCError e = __cc_uw_err_at(__r, "cc_eprintln", __FILE__, __LINE__);
+                                CCError e = __cc_uw_err_at(__r, "cc_eprintln", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "62");
                                 cc_error_exit(e);
                             }
                         }
@@ -323,7 +323,7 @@ static void* cc_closure__N1_entry(void* __p) {
                         __typeof__(cc_eprintln(__msg)) __r = cc_eprintln(__msg);
                         if (__cc_uw_is_err(__r)) {
                             #line 71 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
-                            CCError e = __cc_uw_err_at(__r, "cc_eprintln", __FILE__, __LINE__);
+                            CCError e = __cc_uw_err_at(__r, "cc_eprintln", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "71");
                             cc_error_exit(e);
                         }
                     }
@@ -366,7 +366,7 @@ static void* cc_closure__N2_entry(void* __p) {
                             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
                             if (__cc_uw_is_err(__r)) {
                                 #line 89 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
-                                CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+                                CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "89");
                                 cc_error_exit(e);
                             }
                         }

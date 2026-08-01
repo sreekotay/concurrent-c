@@ -2,6 +2,7 @@
 #pragma once
 #include <stddef.h>
 /* Trimmed fragment using production T!>(E) spelling for lower_header diff. */
+
 #line 3 "examples/serdes/c/shadow/result_frag.cch"
 typedef int MyErr;
 #line 4 "examples/serdes/c/shadow/result_frag.cch"

@@ -127,7 +127,7 @@ int main(void) {
         __typeof__(q.at(1)) __r = q.at(1);
         if (__cc_uw_is_err(__r)) {
             #line 73 "examples/serdes/c/shadow/recipe_generics.ccs"
-            CCError e = __cc_uw_err_at(__r, "unwrap", __FILE__, __LINE__);
+            CCError e = __cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_generics.ccs", "73");
             #line 62 "examples/serdes/c/shadow/recipe_generics.ccs"
             fprintf(stderr, "eh: %s\n", e.message);
             return 1;

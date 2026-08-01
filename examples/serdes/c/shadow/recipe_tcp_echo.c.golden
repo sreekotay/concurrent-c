@@ -63,7 +63,7 @@ static void handle_client(CCSocket sock) {
                 __typeof__(cc_println(__msg)) __r = cc_println(__msg);
                 if (__cc_uw_is_err(__r)) {
                     #line 51 "examples/serdes/c/shadow/recipe_tcp_echo.ccs"
-                    CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+                    CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_tcp_echo.ccs", "51");
                     cc_error_exit(e);
                 }
             }
@@ -83,7 +83,7 @@ static void handle_client(CCSocket sock) {
                 __typeof__(cc_println("client disconnected")) __r = cc_println("client disconnected");
                 if (__cc_uw_is_err(__r)) {
                     #line 58 "examples/serdes/c/shadow/recipe_tcp_echo.ccs"
-                    CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+                    CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_tcp_echo.ccs", "58");
                     cc_error_exit(e);
                 }
             }
@@ -100,7 +100,7 @@ static void handle_client(CCSocket sock) {
                 __typeof__(cc_println(__msg)) __r = cc_println(__msg);
                 if (__cc_uw_is_err(__r)) {
                     #line 61 "examples/serdes/c/shadow/recipe_tcp_echo.ccs"
-                    CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+                    CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_tcp_echo.ccs", "61");
                     cc_error_exit(e);
                 }
             }
@@ -110,7 +110,7 @@ static void handle_client(CCSocket sock) {
             __typeof__(size_t written =cc_socket_write( sock, data.ptr, data.len)) __r = size_t written =cc_socket_write( sock, data.ptr, data.len);
             if (__cc_uw_is_err(__r)) {
                 #line 62 "examples/serdes/c/shadow/recipe_tcp_echo.ccs"
-                CCError e = __cc_uw_err_at(__r, "write", __FILE__, __LINE__);
+                CCError e = __cc_uw_err_at(__r, "write", "examples/serdes/c/shadow/recipe_tcp_echo.ccs", "62");
             #line 63 "examples/serdes/c/shadow/recipe_tcp_echo.ccs"
             (void)e;
             #line 64 "examples/serdes/c/shadow/recipe_tcp_echo.ccs"
@@ -141,7 +141,7 @@ static void run_test_client(void) {
         __typeof__(size_t nw =cc_socket_write( sock, msg, sizeof(msg) - 1)) __r = size_t nw =cc_socket_write( sock, msg, sizeof(msg) - 1);
         if (__cc_uw_is_err(__r)) {
             #line 80 "examples/serdes/c/shadow/recipe_tcp_echo.ccs"
-            CCError e = __cc_uw_err_at(__r, "write", __FILE__, __LINE__);
+            CCError e = __cc_uw_err_at(__r, "write", "examples/serdes/c/shadow/recipe_tcp_echo.ccs", "80");
         #line 81 "examples/serdes/c/shadow/recipe_tcp_echo.ccs"
         {
             CCString __msg = cc_string_new();
@@ -151,7 +151,7 @@ static void run_test_client(void) {
                 __typeof__(cc_eprintln(__msg)) __r = cc_eprintln(__msg);
                 if (__cc_uw_is_err(__r)) {
                     #line 81 "examples/serdes/c/shadow/recipe_tcp_echo.ccs"
-                    CCError e = __cc_uw_err_at(__r, "cc_eprintln", __FILE__, __LINE__);
+                    CCError e = __cc_uw_err_at(__r, "cc_eprintln", "examples/serdes/c/shadow/recipe_tcp_echo.ccs", "81");
                     cc_error_exit(e);
                 }
             }
@@ -174,7 +174,7 @@ static void run_test_client(void) {
         __typeof__(bool ok =cc_socket_read_into( sock, buf, sizeof(buf) - 1, &got)) __r = bool ok =cc_socket_read_into( sock, buf, sizeof(buf) - 1, &got);
         if (__cc_uw_is_err(__r)) {
             #line 89 "examples/serdes/c/shadow/recipe_tcp_echo.ccs"
-            CCError e = __cc_uw_err_at(__r, "read_into", __FILE__, __LINE__);
+            CCError e = __cc_uw_err_at(__r, "read_into", "examples/serdes/c/shadow/recipe_tcp_echo.ccs", "89");
         #line 90 "examples/serdes/c/shadow/recipe_tcp_echo.ccs"
         {
             CCString __msg = cc_string_new();
@@ -184,7 +184,7 @@ static void run_test_client(void) {
                 __typeof__(cc_eprintln(__msg)) __r = cc_eprintln(__msg);
                 if (__cc_uw_is_err(__r)) {
                     #line 90 "examples/serdes/c/shadow/recipe_tcp_echo.ccs"
-                    CCError e = __cc_uw_err_at(__r, "cc_eprintln", __FILE__, __LINE__);
+                    CCError e = __cc_uw_err_at(__r, "cc_eprintln", "examples/serdes/c/shadow/recipe_tcp_echo.ccs", "90");
                     cc_error_exit(e);
                 }
             }
@@ -210,7 +210,7 @@ static void run_test_client(void) {
             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
             if (__cc_uw_is_err(__r)) {
                 #line 96 "examples/serdes/c/shadow/recipe_tcp_echo.ccs"
-                CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+                CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_tcp_echo.ccs", "96");
                 cc_error_exit(e);
             }
         }
@@ -270,7 +270,7 @@ int main(int argc, char** argv) {
             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
             if (__cc_uw_is_err(__r)) {
                 #line 122 "examples/serdes/c/shadow/recipe_tcp_echo.ccs"
-                CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+                CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_tcp_echo.ccs", "122");
                 #line 113 "examples/serdes/c/shadow/recipe_tcp_echo.ccs"
                 cc_error_log(e);
                 return 1;
@@ -286,7 +286,7 @@ int main(int argc, char** argv) {
             __typeof__(cc_nursery_create(NULL)) __r = cc_nursery_create(NULL);
             if (__cc_uw_is_err(__r)) {
                 #line 125 "examples/serdes/c/shadow/recipe_tcp_echo.ccs"
-                CCError e = __cc_uw_err_at(__r, "unwrap", __FILE__, __LINE__);
+                CCError e = __cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_tcp_echo.ccs", "125");
                 #line 113 "examples/serdes/c/shadow/recipe_tcp_echo.ccs"
                 cc_error_log(e);
                 return 1;
@@ -310,7 +310,7 @@ int main(int argc, char** argv) {
                 __typeof__(CCSocket sock =cc_listener_accept( ln)) __r = CCSocket sock =cc_listener_accept( ln);
                 if (__cc_uw_is_err(__r)) {
                     #line 135 "examples/serdes/c/shadow/recipe_tcp_echo.ccs"
-                    CCError e = __cc_uw_err_at(__r, "accept", __FILE__, __LINE__);
+                    CCError e = __cc_uw_err_at(__r, "accept", "examples/serdes/c/shadow/recipe_tcp_echo.ccs", "135");
                 /* Real-server shutdown path: listener closed, fd gone,
                  * peer unreachable, etc. */
                 #line 138 "examples/serdes/c/shadow/recipe_tcp_echo.ccs"
@@ -322,7 +322,7 @@ int main(int argc, char** argv) {
                         __typeof__(cc_println(__msg)) __r = cc_println(__msg);
                         if (__cc_uw_is_err(__r)) {
                             #line 138 "examples/serdes/c/shadow/recipe_tcp_echo.ccs"
-                            CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+                            CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_tcp_echo.ccs", "138");
                             #line 113 "examples/serdes/c/shadow/recipe_tcp_echo.ccs"
                             cc_error_log(e);
                             return 1;
@@ -351,7 +351,7 @@ int main(int argc, char** argv) {
         __typeof__(cc_println("server done")) __r = cc_println("server done");
         if (__cc_uw_is_err(__r)) {
             #line 148 "examples/serdes/c/shadow/recipe_tcp_echo.ccs"
-            CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+            CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_tcp_echo.ccs", "148");
             #line 113 "examples/serdes/c/shadow/recipe_tcp_echo.ccs"
             cc_error_log(e);
             return 1;

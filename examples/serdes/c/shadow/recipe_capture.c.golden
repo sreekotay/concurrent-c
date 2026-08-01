@@ -49,7 +49,7 @@ int main(void) {
         __typeof__(cc_println("=== value capture ===")) __r = cc_println("=== value capture ===");
         if (__cc_uw_is_err(__r)) {
             #line 26 "examples/serdes/c/shadow/recipe_capture.ccs"
-            CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+            CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_capture.ccs", "26");
             #line 22 "examples/serdes/c/shadow/recipe_capture.ccs"
             cc_error_log(e);
             return 1;
@@ -64,7 +64,7 @@ int main(void) {
             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
             if (__cc_uw_is_err(__r)) {
                 #line 27 "examples/serdes/c/shadow/recipe_capture.ccs"
-                CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+                CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_capture.ccs", "27");
                 #line 22 "examples/serdes/c/shadow/recipe_capture.ccs"
                 cc_error_log(e);
                 return 1;
@@ -79,7 +79,7 @@ int main(void) {
             __typeof__(cc_nursery_create(NULL)) __r = cc_nursery_create(NULL);
             if (__cc_uw_is_err(__r)) {
                 #line 29 "examples/serdes/c/shadow/recipe_capture.ccs"
-                CCError e = __cc_uw_err_at(__r, "unwrap", __FILE__, __LINE__);
+                CCError e = __cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_capture.ccs", "29");
                 #line 22 "examples/serdes/c/shadow/recipe_capture.ccs"
                 cc_error_log(e);
                 return 1;
@@ -105,7 +105,7 @@ int main(void) {
             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
             if (__cc_uw_is_err(__r)) {
                 #line 43 "examples/serdes/c/shadow/recipe_capture.ccs"
-                CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+                CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_capture.ccs", "43");
                 #line 22 "examples/serdes/c/shadow/recipe_capture.ccs"
                 cc_error_log(e);
                 return 1;
@@ -117,7 +117,7 @@ int main(void) {
         __typeof__(cc_println("")) __r = cc_println("");
         if (__cc_uw_is_err(__r)) {
             #line 44 "examples/serdes/c/shadow/recipe_capture.ccs"
-            CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+            CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_capture.ccs", "44");
             #line 22 "examples/serdes/c/shadow/recipe_capture.ccs"
             cc_error_log(e);
             return 1;
@@ -132,7 +132,7 @@ int main(void) {
         __typeof__(cc_println("=== reference capture (read-only) ===")) __r = cc_println("=== reference capture (read-only) ===");
         if (__cc_uw_is_err(__r)) {
             #line 48 "examples/serdes/c/shadow/recipe_capture.ccs"
-            CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+            CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_capture.ccs", "48");
             #line 22 "examples/serdes/c/shadow/recipe_capture.ccs"
             cc_error_log(e);
             return 1;
@@ -147,7 +147,7 @@ int main(void) {
             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
             if (__cc_uw_is_err(__r)) {
                 #line 49 "examples/serdes/c/shadow/recipe_capture.ccs"
-                CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+                CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_capture.ccs", "49");
                 #line 22 "examples/serdes/c/shadow/recipe_capture.ccs"
                 cc_error_log(e);
                 return 1;
@@ -162,7 +162,7 @@ int main(void) {
             __typeof__(cc_nursery_create(NULL)) __r = cc_nursery_create(NULL);
             if (__cc_uw_is_err(__r)) {
                 #line 51 "examples/serdes/c/shadow/recipe_capture.ccs"
-                CCError e = __cc_uw_err_at(__r, "unwrap", __FILE__, __LINE__);
+                CCError e = __cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_capture.ccs", "51");
                 #line 22 "examples/serdes/c/shadow/recipe_capture.ccs"
                 cc_error_log(e);
                 return 1;
@@ -185,7 +185,7 @@ int main(void) {
             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
             if (__cc_uw_is_err(__r)) {
                 #line 59 "examples/serdes/c/shadow/recipe_capture.ccs"
-                CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+                CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_capture.ccs", "59");
                 #line 22 "examples/serdes/c/shadow/recipe_capture.ccs"
                 cc_error_log(e);
                 return 1;
@@ -197,7 +197,7 @@ int main(void) {
         __typeof__(cc_println("")) __r = cc_println("");
         if (__cc_uw_is_err(__r)) {
             #line 60 "examples/serdes/c/shadow/recipe_capture.ccs"
-            CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+            CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_capture.ccs", "60");
             #line 22 "examples/serdes/c/shadow/recipe_capture.ccs"
             cc_error_log(e);
             return 1;
@@ -243,7 +243,7 @@ static void* cc_closure__N1_entry(void* __p) {
                     __typeof__(cc_println(__msg)) __r = cc_println(__msg);
                     if (__cc_uw_is_err(__r)) {
                         #line 33 "examples/serdes/c/shadow/recipe_capture.ccs"
-                        CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+                        CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_capture.ccs", "33");
                         cc_error_exit(e);
                     }
                 }
@@ -276,7 +276,7 @@ static void* cc_closure__N2_entry(void* __p) {
                     __typeof__(cc_println(__msg)) __r = cc_println(__msg);
                     if (__cc_uw_is_err(__r)) {
                         #line 38 "examples/serdes/c/shadow/recipe_capture.ccs"
-                        CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+                        CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_capture.ccs", "38");
                         cc_error_exit(e);
                     }
                 }
@@ -308,7 +308,7 @@ static void* cc_closure__N3_entry(void* __p) {
                     __typeof__(cc_println(__msg)) __r = cc_println(__msg);
                     if (__cc_uw_is_err(__r)) {
                         #line 54 "examples/serdes/c/shadow/recipe_capture.ccs"
-                        CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+                        CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_capture.ccs", "54");
                         cc_error_exit(e);
                     }
                 }

@@ -75,7 +75,7 @@ int main(void) {
         __typeof__(cc_channel_pair(&tx, &rx)) __r = cc_channel_pair(&tx, &rx);
         if (__cc_uw_is_err(__r)) {
             #line 51 "examples/serdes/c/shadow/recipe_async.ccs"
-            CCError e = __cc_uw_err_at(__r, "unwrap", __FILE__, __LINE__);
+            CCError e = __cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_async.ccs", "51");
             #line 46 "examples/serdes/c/shadow/recipe_async.ccs"
             cc_error_log(e);
             __cc_retval = 1;
@@ -99,7 +99,7 @@ int main(void) {
             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
             if (__cc_uw_is_err(__r)) {
                 #line 56 "examples/serdes/c/shadow/recipe_async.ccs"
-                CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+                CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_async.ccs", "56");
                 #line 46 "examples/serdes/c/shadow/recipe_async.ccs"
                 cc_error_log(e);
                 __cc_retval = 1;
