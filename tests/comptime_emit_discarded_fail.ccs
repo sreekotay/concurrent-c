@@ -1,0 +1,10 @@
+/* `@emit(`...`, arena)` yields a fragment; the anchor form splices.
+ * Discarding the yielded fragment emits nothing, so it is diagnosed
+ * rather than silently dropped. */
+#include <ccc/std/prelude.cch>
+
+@comptime {
+    @emit(`static int never_emitted(void) { return 7; }`, arena);
+}
+
+int main(void) { return 0; }

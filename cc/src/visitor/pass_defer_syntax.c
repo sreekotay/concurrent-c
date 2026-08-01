@@ -26,6 +26,7 @@ typedef struct {
 typedef struct {
     int active;
     int cleanup_label_id;
+    int hw_declared; /* `__cc_defer_hw_N` emitted at entry */
     int has_top_level_defers;
     int has_top_level_conditional;
     int used_goto;
@@ -1454,6 +1455,18 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
             }
             defers[defer_depth][defer_counts[defer_depth]++] = (CCDeferStmt){ .line_no = defer_line, .stmt = stmt, .cond = cond };
 
+            /* Function-scope cleanups all run from one `__cc_cleanup_N:`
+             * label, which every early exit jumps to — including exits that
+             * happen BEFORE a later declaration ran.  Stamp a high-water
+             * mark here so the label can skip cleanups whose declaration was
+             * never reached (releasing an uninitialized value otherwise).
+             * Function-scope declarations execute in source order, so
+             * reaching the k-th implies the first k-1 also ran. */
+            if (defer_depth == 1 && fn_scope.hw_declared && fn_scope.cleanup_label_id > 0) {
+                cc_sb_append_fmt(&out, &outl, &outc, " __cc_defer_hw_%d = %d;",
+                                 fn_scope.cleanup_label_id, defer_counts[1]);
+            }
+
             cc__append_newline_padding(&out, &outl, &outc, in_src + i, stmt_end - i);
             changed = 1;
 
@@ -1498,6 +1511,9 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
                 for (int k = defer_counts[1] - 1; k >= 0; k--) {
                     if (defers[1][k].cond == DEFER_ALWAYS) {
                         cc__append_missing_indent_to(&out, &outl, &outc, fn_body_indent);
+                        if (fn_scope.hw_declared)
+                            cc_sb_append_fmt(&out, &outl, &outc, "if (__cc_defer_hw_%d > %d) ",
+                                             fn_scope.cleanup_label_id, k);
                         cc__append_str(&out, &outl, &outc, defers[1][k].stmt);
                         if (defers[1][k].stmt[0] != 0) {
                             size_t sl = strlen(defers[1][k].stmt);
@@ -1672,6 +1688,7 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
              * the `{` line instead: line-neutral beats a wrong anchor. */
             if (fn_scope.active && depth == 1 && fn_scope.has_top_level_defers && !fn_scope.has_top_level_conditional) {
                 int brace_line = 0;
+                fn_scope.hw_declared = 1;
                 const char* mark_path = ctx->input_path ? ctx->input_path : "<cc_input>";
                 int mark_path_len = (int)strlen(mark_path);
                 if (line_marks) {
@@ -1692,22 +1709,24 @@ static int cc__rewrite_defer_syntax_impl(const CCVisitorCtx* ctx,
                 if (!fn_scope.is_void) {
                     if (line_marks) {
                         cc_sb_append_fmt(&out, &outl, &outc,
-                                       "\n    %s __cc_retval_%d;\n    int __cc_ret_set_%d = 0;\n/*CC_LN %d %.*s*/\n",
+                                       "\n    %s __cc_retval_%d;\n    int __cc_ret_set_%d = 0;\n    int __cc_defer_hw_%d = 0;\n/*CC_LN %d %.*s*/\n",
                                        fn_scope.return_type, fn_scope.cleanup_label_id, fn_scope.cleanup_label_id,
+                                       fn_scope.cleanup_label_id,
                                        brace_line, mark_path_len, mark_path);
                     } else {
                         cc_sb_append_fmt(&out, &outl, &outc,
-                                       " %s __cc_retval_%d; int __cc_ret_set_%d = 0;",
-                                       fn_scope.return_type, fn_scope.cleanup_label_id, fn_scope.cleanup_label_id);
+                                       " %s __cc_retval_%d; int __cc_ret_set_%d = 0; int __cc_defer_hw_%d = 0;",
+                                       fn_scope.return_type, fn_scope.cleanup_label_id, fn_scope.cleanup_label_id,
+                                       fn_scope.cleanup_label_id);
                     }
                 } else {
                     if (line_marks) {
                         cc_sb_append_fmt(&out, &outl, &outc,
-                                       "\n    int __cc_ret_set_%d = 0;\n/*CC_LN %d %.*s*/\n",
-                                       fn_scope.cleanup_label_id,
+                                       "\n    int __cc_ret_set_%d = 0;\n    int __cc_defer_hw_%d = 0;\n/*CC_LN %d %.*s*/\n",
+                                       fn_scope.cleanup_label_id, fn_scope.cleanup_label_id,
                                        brace_line, mark_path_len, mark_path);
                     } else {
-                        cc_sb_append_fmt(&out, &outl, &outc, " int __cc_ret_set_%d = 0;", fn_scope.cleanup_label_id);
+                        cc_sb_append_fmt(&out, &outl, &outc, " int __cc_ret_set_%d = 0; int __cc_defer_hw_%d = 0;", fn_scope.cleanup_label_id, fn_scope.cleanup_label_id);
                     }
                 }
                 changed = 1;

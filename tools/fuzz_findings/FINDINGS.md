@@ -23,14 +23,20 @@ One emit-block hole found while probing factory error paths, pinned by
   SUCCEEDED with a malformed fragment. `arg(i)` is now bounds-checked and
   reports through `cc_emit_error`; the factory site fails the build.
 
-## Open — compiler crash (py lowering)
+## Fixed — `@destroy` ran on a declaration that never executed
 
-`py_import_after_early_return_crash.shcc` segfaults the compiler, including
-under `--emit-c-only`, so it is a lowering crash rather than a runtime one.
-The crashing statement (`CCPyObj json = py.import("json") !> @destroy;`) is
-unreachable at runtime — an earlier handler returns first — yet removing it
-makes the file compile. Found by hand during the py interop stress round;
-the mutation fuzzer has not reproduced it (seed 7, 1200 iterations, clean).
+Function-scope cleanups all run from one `__cc_cleanup_N:` label that every
+early exit jumps to, and the label ran every registered cleanup — including
+ones whose declaration sat after the exit and had never executed, destroying
+an uninitialized value. Being an uninitialized read it was layout-dependent:
+`py_unreached_destroy_after_early_return_crash.shcc` faulted releasing a
+`CCPyObj`, while the same shape with a `CCArena` survived.
+
+Fixed with a per-function high-water mark: each function-scope cleanup stamps
+`__cc_defer_hw_N` at its declaration, and the label runs cleanup k only when
+the mark passed it. Function-scope declarations execute in source order, so
+reaching the k-th implies the first k-1 also ran. Pinned by
+`tests/destroy_unreached_decl_smoke.ccs`.
 
 ## Open — comment-insertion soak (seed 7, 800 iterations)
 
@@ -52,21 +58,17 @@ Recurring shapes, by insertion context:
 Not yet triaged individually — the three already-fixed classes were all
 whitespace-only scans, and these shapes suggest the same.
 
-## Open — a discarded `@emit` fragment is silent
+## Fixed — a discarded `@emit` fragment was silent
 
-Inside a plain `@comptime { }` block, `@emit(ANCHOR, `...`)` emits, while
-`@emit(`...`, arena)` *returns* a fragment — the factory form. Writing the
-factory form as a bare statement in a block therefore builds the fragment and
-throws it away, with no diagnostic: the code it was meant to emit simply never
-appears, and the failure surfaces later as an implicit-function-declaration on
-the missing symbol.
+Inside a `@comptime` block, `@emit(ANCHOR, `...`)` splices while
+`@emit(`...`, arena)` yields a fragment — the factory form. Writing the
+factory form as a bare statement built the fragment and dropped it with no
+diagnostic; the code it was meant to emit simply never appeared, surfacing
+later as an implicit-function-declaration on the missing symbol.
 
-Repro: a block containing ``@emit(`static int good_fn(void) { return 7; }`,
-arena);`` and a `main` that calls `good_fn()`.
-
-Both spellings are legitimate in their own context, so the fix is a diagnostic
-on the discarded value, pointing at the anchor form for blocks and at
-`return @emit(...)` for factories.
+The yielded form at statement position is now an error naming both fixes (the
+anchor form for blocks, `return @emit(...)` for factories). Pinned by
+`tests/comptime_emit_discarded_fail.ccs`.
 
 ## Known limitation
 

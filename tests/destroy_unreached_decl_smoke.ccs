@@ -1,0 +1,22 @@
+/* Cleanups run only for declarations that executed. An early exit
+ * jumps to the shared cleanup label, which must skip the @destroy of
+ * a declaration it never reached — destroying an uninitialized value
+ * otherwise. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int !>(CCError) boom(void) { return cc_err(CC_ERR_INVALID_ARG, "x"); }
+
+int main(void) {
+    @errhandler(CCError e) { printf("handled\n"); return 0; }
+
+    CCArena a1 = cc_arena_heap(kilobytes(4)) @destroy;
+    printf("a1 live=%d\n", a1.base != NULL);
+
+    int v = boom() !>;              /* diverges */
+
+    printf("unreachable %d\n", v);
+    CCNursery* nur = cc_nursery_create(NULL) @destroy;  /* never reached */
+    (void)nur;
+    return 0;
+}
