@@ -1,0 +1,492 @@
+#!/usr/bin/env -S ./cc/bin/ccc
+/*
+ * Behavior-preservation fuzzer: inserting a block comment `/⁎x⁎/` at any
+ * code position must not change a program's behavior.  Stress-tests the
+ * comment-discipline consolidation (comments inert across text passes).
+ *
+ *   ./tools/fuzz_comment_insert.shcc [--seed N] [--n N] [--scratch DIR]
+ *   ./tools/dev.shcc @fuzz_comment [--seed N] [--n N]
+ *
+ * Corpus: tests/*.ccs with a .stdout twin that build+run green and
+ * deterministically at baseline (probed once, cached under the scratch
+ * dir).  Insertion points are code positions only — never inside
+ * strings/chars/comments/preprocessor directives (CCInertScan is the
+ * oracle), never inside backtick template literals or {~~~~ grammar
+ * blocks (tracked here; the scanner does not know those), and never
+ * splitting an identifier, number, `@sigil`, or multi-char operator.
+ *
+ * A divergence (compile failure, differing output, timeout, crash) is a
+ * FINDING: the mutant and a one-line summary are saved under
+ * tools/fuzz_findings/.  Exit 0 = no findings, 1 = findings, 2 = usage.
+ */
+
+#include "../cc/src/util/text_scan.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/stat.h>
+
+#define FZ_MAX_CORPUS 1024
+
+/* ---- tiny deterministic PRNG (LCG, MMIX constants) ---- */
+static unsigned long long fz_rng;
+static unsigned long long fz_next(void) {
+    fz_rng = fz_rng * 6364136223846793005ULL + 1442695040888963407ULL;
+    return fz_rng >> 17;
+}
+
+static int fz_file_exists(const char* p) { return access(p, F_OK) == 0; }
+
+static int fz_ends_with(const char* s, const char* suf) {
+    size_t n = strlen(s), m = strlen(suf);
+    return m <= n && memcmp(s + n - m, suf, m) == 0;
+}
+
+static void fz_mkdir_p(const char* path) {
+    char tmp[1024];
+    size_t n = strlen(path);
+    if (n == 0 || n >= sizeof(tmp)) return;
+    memcpy(tmp, path, n + 1);
+    for (size_t i = 1; i < n; i++) {
+        if (tmp[i] == '/') {
+            tmp[i] = '\0';
+            (void)mkdir(tmp, 0777);
+            tmp[i] = '/';
+        }
+    }
+    (void)mkdir(tmp, 0777);
+}
+
+/* ---- insertion-point rules ---- */
+
+static int fz_identch(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_' || c == '$' || c == '.';
+}
+
+/* Multi-char operators a comment must not split.  Includes the CC sigils
+ * (`!>`, `?>`, `::[`, `[:`, `[~`) alongside the C compound operators. */
+static const char* FZ_OPS[] = {
+    "<<=", ">>=", "...", "::[",
+    "!>", "?>", "=>", "->", "::", "<<", ">>", "<=", ">=", "==", "!=",
+    "&&", "||", "++", "--", "+=", "-=", "*=", "/=", "%=", "&=", "|=",
+    "^=", "##", "[~", "~]", "[:", ":]", ":[",
+    NULL,
+};
+
+static int fz_boundary_ok(const char* s, size_t n, size_t i) {
+    char prev = (i > 0) ? s[i - 1] : '\0';
+    char cur = s[i];
+    if (fz_identch(prev) && fz_identch(cur)) return 0; /* splits ident/number */
+    if (prev == '@') return 0;                         /* splits @sigil */
+    if (prev == '\\') return 0;                        /* line continuation */
+    if (cur == '#') return 0;                          /* keep # first on line */
+    for (int oi = 0; FZ_OPS[oi]; oi++) {
+        const char* op = FZ_OPS[oi];
+        size_t L = strlen(op);
+        for (size_t k = 1; k < L; k++) {
+            if (i >= k && i - k + L <= n && memcmp(s + i - k, op, L) == 0) return 0;
+        }
+    }
+    return 1;
+}
+
+/* Enumerate valid insertion offsets.  CCInertScan skips comments, string
+ * and char literals, and preprocessor directives; on top of that we skip
+ * backtick template literals and {~~~~ ... ~~~~} grammar blocks, which
+ * the scanner does not know about. */
+static void fz_positions(const char* src, size_t n, size_t** out, size_t* out_n) {
+    size_t cap = 256, cnt = 0;
+    size_t* v = (size_t*)malloc(cap * sizeof(size_t));
+    CCInertScan sc;
+    cc_inert_scan_init(&sc, NULL);
+    size_t i = 0;
+    while (i < n && v) {
+        if (cc_inert_scan_at_code(&sc)) {
+            if (src[i] == '`') { /* template literal: skip whole span */
+                i++;
+                while (i < n && src[i] != '`') i++;
+                if (i < n) i++;
+                continue;
+            }
+            if (i + 5 <= n && memcmp(src + i, "{~~~~", 5) == 0) { /* grammar */
+                i += 5;
+                while (i + 5 <= n && memcmp(src + i, "~~~~}", 5) != 0) i++;
+                if (i + 5 <= n) i += 5;
+                continue;
+            }
+            if (fz_boundary_ok(src, n, i)) {
+                if (cnt == cap) {
+                    cap *= 2;
+                    size_t* nv = (size_t*)realloc(v, cap * sizeof(size_t));
+                    if (!nv) { free(v); v = NULL; break; }
+                    v = nv;
+                }
+                v[cnt++] = i;
+            }
+        }
+        if (!cc_inert_scan_step(&sc, src, n, &i)) i++;
+    }
+    *out = v;
+    *out_n = v ? cnt : 0;
+}
+
+static size_t fz_line_of(const char* src, size_t pos) {
+    size_t line = 1;
+    for (size_t i = 0; i < pos; i++)
+        if (src[i] == '\n') line++;
+    return line;
+}
+
+static void fz_stem_of(const char* path, char* out, size_t cap) {
+    const char* base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    const char* dot = strrchr(base, '.');
+    size_t n = dot ? (size_t)(dot - base) : strlen(base);
+    if (n >= cap) n = cap - 1;
+    memcpy(out, base, n);
+    out[n] = '\0';
+}
+
+/* ---- one ccc invocation under `timeout` ---- */
+
+typedef struct {
+    int timed_out;
+    int signaled;
+    int exit_code;
+    CCSlice out_data;
+    CCSlice err_data;
+} FzRun;
+
+static FzRun !>(CCError) fz_run_build_run(const char* scratch, const char* src_path,
+                                          int timeout_sec, CCArena* a) {
+    @errhandler(CCError e) { return cc_err(e); }
+    char outd[1024], bind[1024], tmo[32];
+    snprintf(outd, sizeof(outd), "%s/out", scratch);
+    snprintf(bind, sizeof(bind), "%s/bin", scratch);
+    snprintf(tmo, sizeof(tmo), "%d", timeout_sec);
+    CCCommand cmd = cc_command(a, @slice("timeout"));
+    cmd.arg(tmo);
+    cmd.arg("./cc/bin/ccc");
+    cmd.arg("build");
+    cmd.arg("run");
+    cmd.arg("--out-dir");
+    cmd.arg(outd);
+    cmd.arg("--bin-dir");
+    cmd.arg(bind);
+    cmd.arg(src_path);
+    CCProcessOutput po = cmd.output(a) !>;
+    FzRun r = {0};
+    r.signaled = po.status.signaled ? 1 : 0;
+    r.exit_code = po.status.exit_code;
+    r.timed_out = (!r.signaled && r.exit_code == 124) ? 1 : 0;
+    r.out_data = po.stdout_data;
+    r.err_data = po.stderr_data;
+    return cc_ok(r);
+}
+
+/* ---- corpus entry ---- */
+
+typedef struct {
+    char path[512];
+    char stem[256];
+    const char* text;   /* corpus arena */
+    size_t text_len;
+    const char* base_out; /* recorded baseline stdout, corpus arena */
+    size_t base_out_len;
+    size_t* positions;  /* lazy, malloc */
+    size_t n_positions;
+    int positions_ready;
+} FzEntry;
+
+static FzEntry g_corpus[FZ_MAX_CORPUS];
+static int g_ncorpus = 0;
+
+/* findings bookkeeping (dedupe by file+offset) */
+typedef struct { int entry; size_t off; } FzSeen;
+static FzSeen g_seen[4096];
+static int g_nseen = 0;
+
+static int fz_seen_before(int entry, size_t off) {
+    for (int i = 0; i < g_nseen; i++)
+        if (g_seen[i].entry == entry && g_seen[i].off == off) return 1;
+    if (g_nseen < (int)(sizeof(g_seen) / sizeof(g_seen[0]))) {
+        g_seen[g_nseen].entry = entry;
+        g_seen[g_nseen].off = off;
+        g_nseen++;
+    }
+    return 0;
+}
+
+static int fz_append_line(const char* path, const char* line) {
+    FILE* f = fopen(path, "a");
+    if (!f) return -1;
+    fputs(line, f);
+    fputc('\n', f);
+    fclose(f);
+    return 0;
+}
+
+static int fz_write_bytes(const char* path, const char* buf, size_t len) {
+    FILE* f = fopen(path, "wb");
+    if (!f) return -1;
+    if (len) (void)fwrite(buf, 1, len, f);
+    fclose(f);
+    return 0;
+}
+
+/* --- script body --- */
+
+CCArena a = @create(megabytes(64)) @destroy;
+
+@errhandler(CCError e) {
+    CCString em = @string(`fuzz_comment: error: ${cc_error_str(e)}`, &a);
+    (void)em.eprintln();
+    return 2;
+}
+
+unsigned long long seed = 1;
+long want_n = 100;
+char scratch[900];
+snprintf(scratch, sizeof(scratch), "tmp/fuzz_comment");
+{
+    int pos_seen = 0;
+    for (int i = 1; i < argc; i++) {
+        const char* s = argv[i];
+        if (!s || s[0] == '@') continue; /* task-runner name forwarding */
+        if (strcmp(s, "--seed") == 0 && i + 1 < argc) { seed = (unsigned long long)atoll(argv[++i]); continue; }
+        if (strcmp(s, "--n") == 0 && i + 1 < argc) { want_n = atol(argv[++i]); continue; }
+        if (strcmp(s, "--scratch") == 0 && i + 1 < argc) {
+            snprintf(scratch, sizeof(scratch), "%s", argv[++i]);
+            continue;
+        }
+        if (s[0] >= '0' && s[0] <= '9') { /* positional: seed then n */
+            if (pos_seen == 0) seed = (unsigned long long)atoll(s);
+            else if (pos_seen == 1) want_n = atol(s);
+            pos_seen++;
+            continue;
+        }
+        fprintf(stderr, "fuzz_comment: usage: [--seed N] [--n N] [--scratch DIR]\n");
+        return 2;
+    }
+}
+if (want_n < 0) want_n = 0;
+fz_rng = seed * 2654435761ULL + 0x9e3779b97f4a7c15ULL;
+
+CCSlice root = cc_script_repo_root(
+    argv[0] ? char_to_slice(argv[0]) : cc_slice_empty(), &a) !>;
+cc_dir_chdir(root) !>;
+
+char pbuf[1200];
+fz_mkdir_p(scratch);
+snprintf(pbuf, sizeof(pbuf), "%s/out", scratch); fz_mkdir_p(pbuf);
+snprintf(pbuf, sizeof(pbuf), "%s/bin", scratch); fz_mkdir_p(pbuf);
+snprintf(pbuf, sizeof(pbuf), "%s/mut", scratch); fz_mkdir_p(pbuf);
+snprintf(pbuf, sizeof(pbuf), "%s/baseline", scratch); fz_mkdir_p(pbuf);
+fz_mkdir_p("tools/fuzz_findings");
+
+char cache_path[1024];
+snprintf(cache_path, sizeof(cache_path), "%s/corpus_cache_v2.txt", scratch);
+
+/* ---- corpus: load cache or probe ---- */
+
+if (fz_file_exists(cache_path)) {
+    CCSlice cbytes = cc_file_read_path(char_to_slice(cache_path), &a) !>;
+    size_t i = 0;
+    while (i < cbytes.len && g_ncorpus < FZ_MAX_CORPUS) {
+        size_t st = i;
+        while (i < cbytes.len && cbytes.ptr[i] != '\n') i++;
+        size_t len = i - st;
+        if (i < cbytes.len) i++;
+        if (len == 0 || len >= sizeof(g_corpus[0].path)) continue;
+        FzEntry* e = &g_corpus[g_ncorpus];
+        memcpy(e->path, cbytes.ptr + st, len);
+        e->path[len] = '\0';
+        fz_stem_of(e->path, e->stem, sizeof(e->stem));
+        snprintf(pbuf, sizeof(pbuf), "%s/baseline/%s.out", scratch, e->stem);
+        if (!fz_file_exists(e->path) || !fz_file_exists(pbuf)) continue;
+        CCSlice text = cc_file_read_path(char_to_slice(e->path), &a) !>;
+        CCSlice bout = cc_file_read_path(char_to_slice(pbuf), &a) !>;
+        e->text = (const char*)text.ptr;
+        e->text_len = text.len;
+        e->base_out = (const char*)bout.ptr;
+        e->base_out_len = bout.len;
+        g_ncorpus++;
+    }
+    {
+        CCString m = @string(`fuzz_comment: corpus cache hit (${g_ncorpus} files)`, &a);
+        m.println() !>;
+    }
+} else {
+    "fuzz_comment: probing corpus (one-time; cached under scratch dir)".println() !>;
+    CCSliceArray files = cc_glob(@slice("tests/*.ccs"), &a) !>;
+    static const char* SIDECARS[] = {
+        ".args", ".exit", ".stdin", ".env", ".ldflags",
+        ".requires_async", ".compile_err", ".stderr", ".build_stderr", NULL,
+    };
+    int probed = 0, skipped = 0;
+    for (size_t fi = 0; fi < files.len() && g_ncorpus < FZ_MAX_CORPUS; fi++) {
+        CCSlice ps = files.get(fi);
+        if (!ps.ptr || ps.len == 0 || ps.len >= sizeof(g_corpus[0].path)) continue;
+        char path[512], stem[256];
+        memcpy(path, ps.ptr, ps.len);
+        path[ps.len] = '\0';
+        fz_stem_of(path, stem, sizeof(stem));
+        if (fz_ends_with(stem, "_fail")) { skipped++; continue; }
+        snprintf(pbuf, sizeof(pbuf), "tests/%s.stdout", stem);
+        if (!fz_file_exists(pbuf)) { skipped++; continue; }
+        int has_sidecar = 0;
+        for (int si = 0; SIDECARS[si]; si++) {
+            snprintf(pbuf, sizeof(pbuf), "tests/%s%s", stem, SIDECARS[si]);
+            if (fz_file_exists(pbuf)) { has_sidecar = 1; break; }
+        }
+        if (has_sidecar) { skipped++; continue; }
+
+        /* Build+run twice: green AND deterministic (kicks out anything
+         * needing network/python/wall-clock — those fail, hang, or drift). */
+        probed++;
+        CCArena pa = cc_arena_create(megabytes(8));
+        FzRun r1 = fz_run_build_run(scratch, path, 20, &pa) !>;
+        if (r1.timed_out || r1.signaled || r1.exit_code != 0) {
+            cc_arena_destroy(&pa);
+            skipped++;
+            continue;
+        }
+        FzRun r2 = fz_run_build_run(scratch, path, 20, &pa) !>;
+        int deterministic = !r2.timed_out && !r2.signaled && r2.exit_code == 0 &&
+                            r1.out_data.len == r2.out_data.len &&
+                            (r1.out_data.len == 0 ||
+                             memcmp(r1.out_data.ptr, r2.out_data.ptr, r1.out_data.len) == 0);
+        if (!deterministic) {
+            cc_arena_destroy(&pa);
+            skipped++;
+            continue;
+        }
+        /* Relocatable: mutants build from the scratch dir, so the pristine
+         * text must too — tests with path-relative includes or grammar
+         * files would otherwise report phantom findings. */
+        {
+            CCSlice ptext = cc_file_read_path(char_to_slice(path), &pa) !>;
+            snprintf(pbuf, sizeof(pbuf), "%s/mut/probe_%s.ccs", scratch, stem);
+            if (fz_write_bytes(pbuf, (const char*)ptext.ptr, ptext.len) != 0) {
+                cc_arena_destroy(&pa);
+                skipped++;
+                continue;
+            }
+            FzRun r3 = fz_run_build_run(scratch, pbuf, 20, &pa) !>;
+            (void)unlink(pbuf);
+            if (r3.timed_out || r3.signaled || r3.exit_code != 0) {
+                cc_arena_destroy(&pa);
+                skipped++;
+                continue;
+            }
+        }
+        FzEntry* e = &g_corpus[g_ncorpus];
+        snprintf(e->path, sizeof(e->path), "%s", path);
+        snprintf(e->stem, sizeof(e->stem), "%s", stem);
+        snprintf(pbuf, sizeof(pbuf), "%s/baseline/%s.out", scratch, stem);
+        if (fz_write_bytes(pbuf, (const char*)r1.out_data.ptr, r1.out_data.len) != 0) {
+            cc_arena_destroy(&pa);
+            continue;
+        }
+        CCSlice text = cc_file_read_path(char_to_slice(e->path), &a) !>;
+        CCSlice bout = cc_file_read_path(char_to_slice(pbuf), &a) !>;
+        e->text = (const char*)text.ptr;
+        e->text_len = text.len;
+        e->base_out = (const char*)bout.ptr;
+        e->base_out_len = bout.len;
+        g_ncorpus++;
+        cc_arena_destroy(&pa);
+    }
+    {
+        FILE* cf = fopen(cache_path, "w");
+        if (cf) {
+            for (int i = 0; i < g_ncorpus; i++) fprintf(cf, "%s\n", g_corpus[i].path);
+            fclose(cf);
+        }
+    }
+    {
+        CCString m = @string(
+            `fuzz_comment: probe done: ${g_ncorpus} in corpus, ${skipped} skipped, ${probed} probed`, &a);
+        m.println() !>;
+    }
+}
+
+if (g_ncorpus == 0) {
+    "fuzz_comment: empty corpus — nothing to fuzz".eprintln() !>;
+    return 2;
+}
+
+/* ---- fuzz loop ---- */
+
+long iters = 0, no_pos = 0;
+long f_compile = 0, f_diff = 0, f_timeout = 0, f_crash = 0;
+
+for (long it = 0; it < want_n; it++) {
+    int ei = (int)(fz_next() % (unsigned long long)g_ncorpus);
+    FzEntry* e = &g_corpus[ei];
+    if (!e->positions_ready) {
+        fz_positions(e->text, e->text_len, &e->positions, &e->n_positions);
+        e->positions_ready = 1;
+    }
+    iters++;
+    if (e->n_positions == 0) { no_pos++; continue; }
+    size_t off = e->positions[fz_next() % (unsigned long long)e->n_positions];
+
+    /* mutant = text[0..off) + "/⁎x⁎/" + text[off..) */
+    char* mut = (char*)malloc(e->text_len + 5 + 1);
+    if (!mut) continue;
+    memcpy(mut, e->text, off);
+    memcpy(mut + off, "/*x*/", 5);
+    memcpy(mut + off + 5, e->text + off, e->text_len - off);
+    mut[e->text_len + 5] = '\0';
+
+    char mut_path[1200];
+    snprintf(mut_path, sizeof(mut_path), "%s/mut/m%ld_%s.ccs", scratch, it, e->stem);
+    if (fz_write_bytes(mut_path, mut, e->text_len + 5) != 0) { free(mut); continue; }
+
+    CCArena ia = cc_arena_create(megabytes(8));
+    FzRun r = fz_run_build_run(scratch, mut_path, 30, &ia) !>;
+    const char* cls = NULL;
+    if (r.timed_out) cls = "timeout";
+    else if (r.signaled) cls = "crash";
+    else if (r.exit_code != 0) cls = "compile_or_run_fail";
+    else if (r.out_data.len != e->base_out_len ||
+             (e->base_out_len &&
+              memcmp(r.out_data.ptr, e->base_out, e->base_out_len) != 0)) cls = "output_diff";
+
+    if (cls) {
+        if (strcmp(cls, "timeout") == 0) f_timeout++;
+        else if (strcmp(cls, "crash") == 0) f_crash++;
+        else if (strcmp(cls, "compile_or_run_fail") == 0) f_compile++;
+        else f_diff++;
+        if (!fz_seen_before(ei, off)) {
+            char save_path[1024], logline[2200];
+            snprintf(save_path, sizeof(save_path),
+                     "tools/fuzz_findings/comment_%s_off%zu.ccs", e->stem, off);
+            (void)fz_write_bytes(save_path, mut, e->text_len + 5);
+            snprintf(logline, sizeof(logline),
+                     "%s file=%s offset=%zu line=%zu exit=%d seed=%llu iter=%ld saved=%s",
+                     cls, e->path, off, fz_line_of(e->text, off), r.exit_code,
+                     seed, it, save_path);
+            (void)fz_append_line("tools/fuzz_findings/comment_findings.log", logline);
+            printf("fuzz_comment: FINDING %s: %s offset %zu\n", cls, e->path, off);
+            fflush(stdout);
+        }
+    } else {
+        (void)unlink(mut_path); /* keep the mut dir small on the happy path */
+    }
+    free(mut);
+    cc_arena_destroy(&ia);
+}
+
+long findings = f_compile + f_diff + f_timeout + f_crash;
+{
+    CCString m = @string(
+        `fuzz_comment: seed=${(long)seed} iterations=${iters} no_position=${no_pos} findings=${findings} (compile_or_run_fail=${f_compile}, output_diff=${f_diff}, timeout=${f_timeout}, crash=${f_crash})`,
+        &a);
+    m.println() !>;
+}
+return findings > 0 ? 1 : 0;

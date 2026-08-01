@@ -1,0 +1,1 @@
+comptime_emit_error_line_fail.ccs:6: error: comptime constraint violated

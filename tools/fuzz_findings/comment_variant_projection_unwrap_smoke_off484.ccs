@@ -1,0 +1,42 @@
+/* Projection with `!>` handler (spec/draft_variants.md §5a): the handler
+ * runs iff the arm is NOT active — the Result unwrap rule generalized to N
+ * arms (the "err set" is every other arm).  Value and pointer receivers;
+ * the handler diverges out of the enclosing function. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdint.h>
+
+@variant RedisValue {
+    txt: const char*;
+    num: int64_t;
+};
+
+static int g_handled = 0;
+
+static int64_t read_num(RedisValue*/*x*/ cell) {
+    int64_t v = cell->num !> { g_handled++; return -1; };  /* ptr receiver */
+    return v;
+}
+
+static int64_t read_num_val(RedisValue cell) {
+    int64_t v = cell.num !> { g_handled++; return -1; };   /* value receiver */
+    return v;
+}
+
+int main(void) {
+    RedisValue v = { .num = 42 };
+    RedisValue s = { .txt = "abc" };
+
+    if (read_num(&v) != 42) return 1;
+    if (g_handled != 0) return 2;          /* active arm: handler skipped */
+
+    if (read_num(&s) != -1) return 3;
+    if (g_handled != 1) return 4;          /* inactive arm: handler ran once */
+
+    if (read_num_val(v) != 42) return 5;
+    if (read_num_val(s) != -1) return 6;
+    if (g_handled != 2) return 7;
+
+    printf("ok\n");
+    return 0;
+}

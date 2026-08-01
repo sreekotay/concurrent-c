@@ -1666,11 +1666,23 @@ static int cc__emit_registered_callable(char* out,
                         cc__ufcs_fn_name_in_source(type_method_candidate));
             }
             if (strcmp(lowered_name, type_method_candidate) != 0 &&
-                !cc__ufcs_fn_name_in_source(lowered_name) &&
-                cc__ufcs_fn_name_in_source(type_method_candidate)) {
+                !cc__ufcs_fn_name_in_source(lowered_name)) {
                 /* Snake form isn't declared, PascalCase form is — defer to
-                   the fallback dispatcher so `Type_method` emits. */
-                return -1;
+                   the fallback dispatcher so `Type_method` emits.
+                   Generic-factory instances derive their members from the
+                   emitted fragment, which the source probe cannot see; the
+                   instance oracle stands in for the text check there. */
+                char base_ty[256];
+                if (tlen < sizeof(base_ty)) {
+                    memcpy(base_ty, t, tlen);
+                    base_ty[tlen] = '\0';
+                } else {
+                    base_ty[0] = '\0';
+                }
+                if (cc__ufcs_fn_name_in_source(type_method_candidate) ||
+                    (base_ty[0] && cc_ufcs_generic_instance_known(base_ty) &&
+                     cc_ufcs_family_has_member(base_ty, method)))
+                    return -1;
             }
         }
     }
@@ -1821,10 +1833,14 @@ static void cc__resolve_dispatch_ctx(CCUFCSDispatchCtx* ctx, const char* recv) {
         if (reg_type_name && reg_type_name[0]) {
             if (reg_recv_is_ptr &&
                 ctx->recv_type_name && ctx->recv_type_name[0] &&
-                (strncmp(reg_type_name, "struct ", 7) == 0 ||
-                 strncmp(reg_type_name, "union ", 6) == 0) &&
                 !cc__type_name_has_ptr(ctx->recv_type_name) &&
                 cc__same_nominal_type(reg_type_name, ctx->recv_type_name)) {
+                /* The recorder typed this use site as a value of the same
+                 * nominal type: trust it. The registry's pointer flag can
+                 * come from a different declaration of the same name —
+                 * e.g. another function's `Foo* p` parameter — and a
+                 * pointer receiver at THIS site would have been recorded
+                 * with its star. */
                 ctx->recv_is_ptr = 0;
             } else {
                 ctx->recv_is_ptr = reg_recv_is_ptr;
@@ -2466,7 +2482,8 @@ int cc_ufcs_describe_unresolved(const char* recv_type, const char* method,
                            strncmp(base, "CCResult_", 9) == 0 ||
                            strncmp(base, "CCVec_", 6) == 0 ||
                            strncmp(base, "ArrayMap_", 9) == 0 ||
-                           strncmp(base, "Map_", 4) == 0);
+                           strncmp(base, "Map_", 4) == 0 ||
+                           cc_ufcs_generic_instance_known(base));
         int composed = is_instance
                            ? ((size_t)snprintf(cand, sizeof(cand), "%s_%s", base,
                                                method) < sizeof(cand))

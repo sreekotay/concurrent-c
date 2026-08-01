@@ -1,0 +1,42 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+
+/* Free-name type-argument calls for user factories:
+ * `<snake(Family)>_<member>::[targs](args)` lowers to
+ * `<Family>_<mangled targs>_<member>(args)` — the same grid as
+ * vec_new::[T] / map_new::[K, V].  The call also requests the
+ * instantiation, so the monomorph is emitted even when the type is
+ * never spelled elsewhere. */
+
+CC_GENERIC_FACTORY(Box, 1) {
+    return @emit(`
+        typedef struct { ${arg(0)} value; } ${mangled};
+        static inline ${mangled} ${mangled}_make(${arg(0)} v) {
+            ${mangled} b; b.value = v; return b;
+        }
+        static inline ${arg(0)} ${mangled}_get(${mangled}* self) { return self->value; }`, arena);
+}
+
+CC_GENERIC_FACTORY(LruCache, 2) {
+    return @emit(`
+        typedef struct { ${arg(0)} key; ${arg(1)} val; } ${mangled};
+        static inline ${mangled} ${mangled}_make(${arg(0)} k, ${arg(1)} v) {
+            ${mangled} c; c.key = k; c.val = v; return c;
+        }`, arena);
+}
+
+int main(void) {
+    /* 1-arg family; the destination decl spells the type. */
+    Box::[int] b = box_make::[int](41);
+
+    /* 2-arg family with a case boundary: LruCache -> lru_cache.  The
+     * expression is the only mention of the monomorph in this TU. */
+    if (lru_cache_make::[int, double](7, 2.5).val != 2.5) return 1;
+
+    if (b.get() != 41) return 2;
+
+    printf("user_generic_ctor_smoke ok b=%d lru=%g\n",
+           b.get(), lru_cache_make::[int, double](7, 2.5).val);
+    return 0;
+}

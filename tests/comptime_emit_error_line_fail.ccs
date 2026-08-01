@@ -1,0 +1,10 @@
+/* A comptime block that reports its own constraint violation is
+ * attributed to the block, not to the top of the file. The expected
+ * error pins the line number. */
+#include <ccc/std/prelude.cch>
+
+@comptime {
+    cc_emit_error("comptime constraint violated");
+}
+
+int main(void) { return 0; }

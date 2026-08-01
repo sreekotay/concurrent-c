@@ -1,0 +1,54 @@
+// Pin test: UFCS `occ` (recorder aux2>>8) is the 1-based occurrence of THIS
+// METHOD NAME on the line — not the count of member constructs on the line.
+//
+// Shapes pinned here:
+//   1. Two DIFFERENT methods on one line (the redis dead-band shape):
+//      `return c->write_ok(5) && c->flush();` — flush is the 2nd member
+//      construct but the 1st `flush` on the line, so it must record occ=1.
+//   2. The SAME method twice on one line: `c->flush(); c->flush();` —
+//      occurrences 1 and 2 must each resolve to their own span.
+//   3. Two different methods interpolated in ONE @string template line.
+//      Template lowering duplicates the interpolated expressions in the
+//      parse buffer (off_start=-1), which forces the occurrence-probe
+//      path in pass_ufcs — the only path where a wrong occ is fatal:
+//      with construct-counting occ the 2nd method records occ=2, the
+//      probe hunts for a 2nd `.flush_str(` on the source line, finds
+//      none, and the call is left unlowered (compile error).
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+struct Conn { int wrote; int flushed; };
+
+static inline int Conn_write_ok/*x*/(struct Conn* c, int v) { c->wrote += v; return 1; }
+static inline int Conn_flush(struct Conn* c) { c->flushed++; return c->flushed; }
+static inline int Conn_wsum(struct Conn* c) { return c->wrote; }
+static inline int Conn_flush_str(struct Conn* c) { c->flushed++; return c->flushed; }
+
+static inline int use_both(struct Conn* c) {
+    return c->write_ok(5) && c->flush();  /* different methods, same line */
+}
+
+int main(void) {
+    struct Conn conn = {0, 0};
+    struct Conn* c = &conn;
+
+    int r = use_both(c);
+    printf("r=%d wrote=%d flushed=%d\n", r, conn.wrote, conn.flushed);
+
+    c->flush(); c->flush();  /* same method twice on one line */
+    printf("flushed=%d\n", conn.flushed);
+
+    int q = conn.write_ok(2) && conn.flush();  /* dot-receiver variant */
+    printf("q=%d wrote=%d flushed=%d\n", q, conn.wrote, conn.flushed);
+
+    {
+        CCArena arena_storage = @create(kilobytes(4)) @destroy;
+        if (!arena_storage.base) abort();
+        CCArena* arena = &arena_storage;
+        /* two different methods interpolated on ONE template line */
+        CCString ts = @string(`w=${conn.wsum()} f=${conn.flush_str()}`, arena);
+        CCSlice tv = cc_string_as_slice(&ts);
+        printf("%.*s\n", (int)tv.len, (const char*)tv.ptr);
+    }
+    return 0;
+}

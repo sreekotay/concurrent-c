@@ -3873,6 +3873,22 @@ static void cc__ufcs_scope_idx_build_ex(const char* src, size_t n,
             }
         }
         if (c == '{') {
+            /* An initializer brace — `Foo p = {41};`, `x = (Foo){...};` —
+             * is an expression, not a scope: a `{` after the statement's
+             * top-level `=` must not reset the statement head, or the
+             * declaration never gets indexed and the receiver falls to
+             * the flat table (where an unrelated function's parameter of
+             * the same name can win). Skip the balanced group whole. */
+            {
+                size_t eqp = 0;
+                if (cc__pp_find_top_level_equal(src, stmt_start, i, &eqp)) {
+                    size_t be = 0;
+                    if (cc_find_matching_brace(src, n, i, &be)) {
+                        i = be + 1;
+                        continue;
+                    }
+                }
+            }
             if (harvest) {
                 size_t close = cc_rskip_ws_and_comments(src, i);
                 if (close > 0 && src[close - 1] == ')') {
@@ -7205,10 +7221,12 @@ static int cc__try_rewrite_user_generic(const char* src, size_t n, const char* i
     size_t id_e, br_open, br_close, params_len;
     const char* params;
     char gname[128];
+    char member[128];
     char orig_args[8][128];
     char mang_args[8][128];
     int nargs = 0;
 
+    member[0] = 0;
     if (!(i == 0 || !cc_is_ident_char(src[i - 1]))) return 0;
     if (i >= n || !cc_is_ident_start(src[i])) return 0;
     id_e = i;
@@ -7217,7 +7235,23 @@ static int cc__try_rewrite_user_generic(const char* src, size_t n, const char* i
     if (id_e - i == 0 || id_e - i >= sizeof(gname)) return 0;
     memcpy(gname, src + i, id_e - i);
     gname[id_e - i] = 0;
-    if (!cc_emit_plan_has_generic_factory(gname)) return 0;
+    if (!cc_emit_plan_has_generic_factory(gname)) {
+        /* Free-name member call: `<snake(Family)>_<member>::[targs](args)`
+         * lowers to `<Family>_<mangled targs>_<member>(args)` — the same
+         * grid as `vec_new::[T]`.  Member position (`recv.m::[T]`) belongs
+         * to the type-formal member tier, not this one. */
+        char family[128];
+        size_t member_off = 0;
+        size_t b = cc_rskip_ws_and_comments(src, i);
+        if (b > 0 && (src[b - 1] == '.' ||
+                      (b > 1 && src[b - 1] == '>' && src[b - 2] == '-')))
+            return 0;
+        if (!cc_emit_plan_generic_factory_for_snake_call(gname, family, sizeof(family),
+                                                         &member_off))
+            return 0;
+        snprintf(member, sizeof(member), "%s", gname + member_off);
+        snprintf(gname, sizeof(gname), "%s", family);
+    }
 
     br_open = id_e + 2; /* '[' */
     if (!cc__find_matching_bracket(src, n, br_open, &br_close)) return 0;
@@ -7298,11 +7332,22 @@ static int cc__try_rewrite_user_generic(const char* src, size_t n, const char* i
             if (ps == CC_GEN_PRODUCE_INVOKE_FAILED) {
                 cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
                                 use_line, use_col, "type",
-                                "compiled generic factory '%s' failed for '%s' "
-                                "(returned empty slice, @emit buffer overflow, or runtime error)",
-                                gname, mangled);
+                                "compiled generic factory '%s' failed for '%s' with %d type "
+                                "argument%s (empty fragment: arity-guard rejection, @emit "
+                                "buffer overflow, or runtime error)",
+                                gname, mangled, nargs, nargs == 1 ? "" : "s");
                 return -1;
             }
+        }
+        /* A factory that raised cc_emit_error reported its own constraint
+         * violation; fail here (attributed to the use site) even when the
+         * fragment it still returned happens to parse as C. */
+        if (cc_emit_plan_take_exec_error()) {
+            cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                            use_line, use_col, "type",
+                            "compiled generic factory '%s' reported an error for '%s'",
+                            gname, mangled);
+            return -1;
         }
         /* Validate the generated definition at the emit site so a malformed
          * factory fails here, attributed to the use site, rather than surfacing
@@ -7406,10 +7451,38 @@ static int cc__try_rewrite_user_generic(const char* src, size_t n, const char* i
             }
         }
         cc_emit_plan_generic_def_emit_once(mangled, def);
+        cc_emit_plan_note_generic_instance(gname, mangled, def);
+    }
+
+    /* Free-name member call: the member must exist in the instance's
+     * emitted definition — miss articulately, listing what does. */
+    if (member[0] && !cc_emit_plan_generic_instance_has_member(mangled, member)) {
+        char rel[1024];
+        int use_line = 1;
+        for (size_t k = 0; k < i && k < n; k++)
+            if (src[k] == '\n') use_line++;
+        cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                        use_line, 1, "type",
+                        "generic family '%s' has no member '%s' (no '%s_%s' in its "
+                        "emitted definition)",
+                        gname, member, mangled, member);
+        {
+            const char* csv = cc_emit_plan_generic_instance_members_csv(mangled);
+            if (csv && csv[0])
+                fprintf(stderr, "  note: members of %s: %s\n", mangled, csv);
+            else
+                fprintf(stderr, "  note: %s emits no '%s_<member>' functions\n",
+                        mangled, mangled);
+        }
+        return -1;
     }
 
     cc_sb_append(out, out_len, out_cap, src + *io_last_emit, i - *io_last_emit);
     cc_sb_append(out, out_len, out_cap, mangled, strlen(mangled));
+    if (member[0]) {
+        cc_sb_append(out, out_len, out_cap, "_", 1);
+        cc_sb_append(out, out_len, out_cap, member, strlen(member));
+    }
     *io_last_emit = br_close + 1;
     *io_i = br_close + 1;
     return 1;
@@ -7777,7 +7850,68 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
             i = delim_end + 1;
             continue;
         }
-        
+
+        /* Articulate `::[` misses: a free name followed by `::[` that no
+         * recognizer consumed is an error here — never a host-parser
+         * surprise.  Member position (`recv.m::[T]`) belongs to the
+         * type-formal member tier and is skipped. */
+        if (cc_is_ident_start(src[i]) && (i == 0 || !cc_is_ident_char(src[i - 1]))) {
+            size_t id_end = i;
+            while (id_end < n && cc_is_ident_char(src[id_end])) id_end++;
+            if (id_end + 3 <= n && src[id_end] == ':' && src[id_end + 1] == ':' &&
+                src[id_end + 2] == '[') {
+                size_t b = cc_rskip_ws_and_comments(src, i);
+                int member_pos = (b > 0 && (src[b - 1] == '.' ||
+                                            (b > 1 && src[b - 1] == '>' &&
+                                             src[b - 2] == '-')));
+                if (!member_pos) {
+                    char nm[128];
+                    char rel[1024];
+                    size_t nl = id_end - i;
+                    int use_line = 1;
+                    if (nl >= sizeof(nm)) nl = sizeof(nm) - 1;
+                    memcpy(nm, src + i, nl);
+                    nm[nl] = 0;
+                    for (size_t k = 0; k < i && k < n; k++)
+                        if (src[k] == '\n') use_line++;
+                    if (cc_emit_plan_has_generic_factory(nm)) {
+                        cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>",
+                                                            rel, sizeof(rel)),
+                                        use_line, 1, "type",
+                                        "malformed type-argument list after '%s::[' "
+                                        "(expected '%s::[Type, ...]')",
+                                        nm, nm);
+                    } else {
+                        char fams[512];
+                        cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>",
+                                                            rel, sizeof(rel)),
+                                        use_line, 1, "type",
+                                        "unknown generic name '%s' before '::[...]' — "
+                                        "'::[' specializes the name it follows, but '%s' is "
+                                        "neither a built-in generic form (Vec, Map, ArrayMap, "
+                                        "vec_new, map_new, ...) nor '<family>_<member>' of a "
+                                        "registered generic factory family",
+                                        nm, nm);
+                        if (cc_emit_plan_generic_factory_names_csv(fams, sizeof(fams)) > 0)
+                            fprintf(stderr,
+                                    "  note: registered generic factory families: %s\n",
+                                    fams);
+                        else
+                            fprintf(stderr,
+                                    "  note: no generic factory families are registered in "
+                                    "this translation unit (define one with "
+                                    "CC_GENERIC_FACTORY(Name, arity) { ... })\n");
+                    }
+                    free(out);
+                    return (char*)-1;
+                }
+                i = id_end;
+                continue;
+            }
+            i = id_end;
+            continue;
+        }
+
         i++; scanner.col++;
     }
 
@@ -9862,7 +9996,7 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
                                 else if (src[j] == '\'') { j++; while (j < n && src[j] != '\'') { if (src[j] == '\\' && j+1<n) j++; j++; } }
                                 j++;
                             }
-                            while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n')) j++;
+                            j = cc_skip_ws_and_comments(src, n, j);
                             if (j < n && src[j] == '{') {
                                 /* Found function definition! Extract ok and err types */
                                 size_t ty_start = cc__scan_back_to_delim(src, i);
@@ -11721,6 +11855,7 @@ int cc_ufcs_family_has_member(const char* base, const char* method) {
     if (strncmp(base, "CCChanTx", 8) == 0 || strncmp(base, "CCChanRx", 8) == 0 ||
         strcmp(base, "CCChan") == 0)
         return cc__ufcs_chan_handle_has_member(base, method);
+    if (cc_emit_plan_generic_instance_has_member(base, method)) return 1;
     hdr = cc_ufcs_family_header_for(base);
     if (!hdr) return 0;
     return cc_family_header_has_member(hdr, method);
@@ -11732,9 +11867,18 @@ const char* cc_ufcs_family_members_for(const char* base) {
     if (strncmp(base, "CCChanTx", 8) == 0 || strncmp(base, "CCChanRx", 8) == 0 ||
         strcmp(base, "CCChan") == 0)
         return cc__ufcs_chan_handle_members(base);
+    {
+        const char* csv = cc_emit_plan_generic_instance_members_csv(base);
+        if (csv && csv[0]) return csv;
+    }
     hdr = cc_ufcs_family_header_for(base);
     if (!hdr) return "";
     return cc_family_header_members(hdr);
+}
+
+
+int cc_ufcs_generic_instance_known(const char* base) {
+    return cc_emit_plan_generic_instance_known(base);
 }
 
 int cc_ufcs_family_accepts(const char* base, const char* method) {
@@ -11952,6 +12096,12 @@ static int cc__fn_return_type(const char* src, size_t n, const char* name,
         const char* fsrc = cc__included_cch_text(h, &fn);
         if (!fsrc) continue;
         if (cc__decl_fn_return_type_text(fsrc, fn, name, out, out_sz)) return 1;
+    }
+    /* Generic-factory instance members live only in the emitted fragment. */
+    {
+        const char* d = cc_emit_plan_generic_instance_def_for_symbol(name);
+        if (d && cc__decl_fn_return_type_text(d, strlen(d), name, out, out_sz))
+            return 1;
     }
     return 0;
 }

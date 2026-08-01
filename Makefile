@@ -6,7 +6,7 @@ CURL_BUILD := $(CURL_DIR)/build
 
 .PHONY: all cc clean distclean fmt lint example smoke test tools
 .PHONY: install install-check uninstall
-.PHONY: runtime-variant-smoke
+.PHONY: runtime-variant-smoke fuzz-check
 .PHONY: tcc-patch-apply tcc-patch-regen tcc-update-check check-submodules lint-scanners test-strict
 .PHONY: deps bearssl bearssl-clean curl curl-clean deps-update
 .PHONY: examples-check stress-check perf-check full-check
@@ -171,6 +171,11 @@ out-of-tree-smoke: cc
 # `make -C cc` built without -DFOO, and reports it as reused.
 runtime-variant-smoke: cc
 	@./tools/runtime_variant_smoke.shcc
+
+# Fuzzers: comment-insertion behavior preservation + mutation crash oracle.
+fuzz-check: cc
+	@./tools/fuzz_comment_insert.shcc 1 100
+	@./tools/fuzz_mutate.shcc 1 100
 
 # Verify all examples compile (tools/make.shcc @examples_check).
 examples-check: cc

@@ -1,0 +1,10 @@
+/* `::[` specializes the name it follows; a free name that matches no
+ * built-in generic form and no registered factory family's
+ * `<snake(Family)>_<member>` grid is an articulate error, never a host
+ * parser surprise. */
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    int x = unknown_fn::[int](1);
+    return x;
+}

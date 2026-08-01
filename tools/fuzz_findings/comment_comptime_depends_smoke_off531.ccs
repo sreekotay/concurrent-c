@@ -1,0 +1,35 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+
+/* #pragma cc_depends declares a comptime build dependency: the named file's
+ * content is folded into the emit cache key, so editing the data file forces a
+ * re-emit (COMPTIME_CAPABILITY_MODEL.md §2).  The path is resolved relative to
+ * this source file's directory.  The directive carries no codegen meaning and
+ * is stripped before lowering, so it never reaches the emitted C. */
+#pragma cc_depends("comptime_depends_data.txt")
+
+@comptime /*x*/{
+    /* Read the same fixture (path is relative to the build CWD = repo root). */
+    FILE* f = fopen("tests/comptime_depends_data.txt", "rb");
+    int idx = 0;
+    if (f) {
+        char line[64];
+        while (fgets(line, sizeof(line), f)) {
+            size_t L = strlen(line);
+            while (L && (line[L - 1] == (char)10 || line[L - 1] == (char)13)) line[--L] = 0;
+            if (!L) continue;
+            @emit(CC_EMIT_AFTER_PRELUDE, `static const char* dep_word_${idx}(void) { return "${line}"; }`);
+            idx++;
+        }
+        fclose(f);
+    }
+    @emit(CC_EMIT_AFTER_PRELUDE, `enum { DEP_WORD_COUNT = ${idx} };`);
+}
+
+int main(void) {
+    if (DEP_WORD_COUNT != 3) return 1;
+    printf("comptime_depends_smoke ok count=%d %s %s %s\n",
+           DEP_WORD_COUNT, dep_word_0(), dep_word_1(), dep_word_2());
+    return 0;
+}

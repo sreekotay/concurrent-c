@@ -1,0 +1,27 @@
+/* A comment is inert at every token boundary the fuzzer can reach:
+ * between an unwrap sigil and its binder, between a function
+ * signature and its body, between a closure arrow and its capture
+ * list. Each case below is a fuzzer finding, pinned. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int !>(CCError) mk(int v) /*x*/{
+    if (v < 0) return cc_err(CC_ERR_INVALID_ARG, "negative");
+    return cc_ok(v);
+}
+
+int main(void) {
+    @errhandler(CCError e) { fprintf(stderr, "eh: %s\n", e.message); return 1; }
+
+    int a = mk(41) ?>/*x*/ (e) 0;
+    printf("a=%d\n", a + 1);
+
+    int b = mk(-1) ?> /*x*/ (e) 7;
+    printf("b=%d\n", b);
+
+    CCNursery* nur = cc_nursery_create(NULL) @destroy;
+    int base = 5;
+    nur.spawn(() =>/*x*/ [base] { printf("seen=%d\n", base); });
+    nur.wait();
+    return 0;
+}

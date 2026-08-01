@@ -355,12 +355,225 @@ int cc_emit_plan_generic_def_emit_once(const char* mangled, const char* def_text
     return 1;
 }
 
+/* --- factory-instance member sets (UFCS trust) ---
+ *
+ * A factory instance's methods exist only inside its emitted definition
+ * fragment, which splices after the passes that answer "is this name
+ * real".  Harvest the decl-shaped `<mangled>_<member>(` names from each
+ * produced definition so the UFCS family oracle can trust composed
+ * member spellings for factory instances, mirroring how macro families
+ * derive their member sets from `##_` tokens. */
+#define CC_GEN_INSTANCE_MAX 128
+typedef struct CCGenericInstance {
+    char* family;    /* owns: "Pair" */
+    char* mangled;   /* owns: "Pair_int_double" */
+    char* members;   /* owns: "make, head" (csv, derivation order) */
+    char* def_text;  /* owns: the emitted definition (return-type reads) */
+} CCGenericInstance;
+static CCGenericInstance cc__gen_instances[CC_GEN_INSTANCE_MAX];
+static size_t cc__gen_instance_count = 0;
+
+static CCGenericInstance* cc__gen_instance_find(const char* mangled) {
+    if (!mangled || !mangled[0]) return NULL;
+    for (size_t i = 0; i < cc__gen_instance_count; i++)
+        if (strcmp(cc__gen_instances[i].mangled, mangled) == 0)
+            return &cc__gen_instances[i];
+    return NULL;
+}
+
+static int cc__gen_members_csv_has(const char* csv, const char* member) {
+    size_t ml = strlen(member);
+    const char* p = csv;
+    while (p && *p) {
+        while (*p == ' ' || *p == ',') p++;
+        if (strncmp(p, member, ml) == 0 && (p[ml] == 0 || p[ml] == ',')) return 1;
+        p = strchr(p, ',');
+    }
+    return 0;
+}
+
+/* Append decl-shaped `<mangled>_<member>(` names in `def` to a csv. */
+static char* cc__gen_instance_scan_members(const char* mangled, const char* def) {
+    size_t n = strlen(def);
+    size_t ml = strlen(mangled);
+    size_t i = 0;
+    char* csv = NULL;
+    size_t csv_len = 0, csv_cap = 0;
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    while (i + ml + 1 < n) {
+        size_t e, q, b;
+        char member[128];
+        size_t mlen2;
+        if (cc_inert_scan_step(&scan, def, n, &i)) continue;
+        if (def[i] != mangled[0]) { i++; continue; }
+        if (i > 0 && cc_is_ident_char(def[i - 1])) { i++; continue; }
+        if (memcmp(def + i, mangled, ml) != 0 || def[i + ml] != '_') { i++; continue; }
+        e = i + ml + 1;
+        while (e < n && cc_is_ident_char(def[e])) e++;
+        mlen2 = e - (i + ml + 1);
+        if (mlen2 == 0 || mlen2 >= sizeof(member)) { i = e; continue; }
+        q = e;
+        while (q < n && (def[q] == ' ' || def[q] == '\t')) q++;
+        if (q >= n || def[q] != '(') { i = e; continue; }
+        /* Decl-shaped: a return-type token (ident or `*`) precedes. */
+        b = cc_rskip_ws_and_comments(def, i);
+        if (b == 0 || !(cc_is_ident_char(def[b - 1]) || def[b - 1] == '*')) {
+            i = e;
+            continue;
+        }
+        memcpy(member, def + i + ml + 1, mlen2);
+        member[mlen2] = 0;
+        if (!csv || !cc__gen_members_csv_has(csv, member)) {
+            if (csv_len) cc_sb_append_cstr(&csv, &csv_len, &csv_cap, ", ");
+            cc_sb_append_cstr(&csv, &csv_len, &csv_cap, member);
+        }
+        i = e;
+    }
+    return csv;
+}
+
+void cc_emit_plan_note_generic_instance(const char* family, const char* mangled,
+                                        const char* def_text) {
+    CCGenericInstance* gi;
+    if (!family || !mangled || !mangled[0] || !def_text) return;
+    if (cc__gen_instance_find(mangled)) return;
+    if (cc__gen_instance_count >= CC_GEN_INSTANCE_MAX) return;
+    gi = &cc__gen_instances[cc__gen_instance_count];
+    gi->family = strdup(family);
+    gi->mangled = strdup(mangled);
+    gi->def_text = strdup(def_text);
+    gi->members = cc__gen_instance_scan_members(mangled, def_text);
+    if (!gi->family || !gi->mangled || !gi->def_text) {
+        free(gi->family);
+        free(gi->mangled);
+        free(gi->def_text);
+        free(gi->members);
+        memset(gi, 0, sizeof(*gi));
+        return;
+    }
+    cc__gen_instance_count++;
+}
+
+int cc_emit_plan_generic_instance_known(const char* mangled) {
+    return cc__gen_instance_find(mangled) != NULL;
+}
+
+int cc_emit_plan_generic_instance_has_member(const char* mangled, const char* member) {
+    CCGenericInstance* gi = cc__gen_instance_find(mangled);
+    if (!gi || !gi->members || !member || !member[0]) return 0;
+    return cc__gen_members_csv_has(gi->members, member);
+}
+
+const char* cc_emit_plan_generic_instance_members_csv(const char* mangled) {
+    CCGenericInstance* gi = cc__gen_instance_find(mangled);
+    return (gi && gi->members) ? gi->members : NULL;
+}
+
+const char* cc_emit_plan_generic_instance_family(const char* mangled) {
+    CCGenericInstance* gi = cc__gen_instance_find(mangled);
+    return gi ? gi->family : NULL;
+}
+
+const char* cc_emit_plan_generic_instance_def_for_symbol(const char* fn_name) {
+    size_t fl;
+    if (!fn_name || !fn_name[0]) return NULL;
+    fl = strlen(fn_name);
+    for (size_t i = 0; i < cc__gen_instance_count; i++) {
+        size_t il = strlen(cc__gen_instances[i].mangled);
+        if (fl > il + 1 && fn_name[il] == '_' &&
+            strncmp(fn_name, cc__gen_instances[i].mangled, il) == 0)
+            return cc__gen_instances[i].def_text;
+    }
+    return NULL;
+}
+
+static void cc__gen_instances_clear(void) {
+    for (size_t i = 0; i < cc__gen_instance_count; i++) {
+        free(cc__gen_instances[i].family);
+        free(cc__gen_instances[i].mangled);
+        free(cc__gen_instances[i].members);
+        free(cc__gen_instances[i].def_text);
+        memset(&cc__gen_instances[i], 0, sizeof(cc__gen_instances[i]));
+    }
+    cc__gen_instance_count = 0;
+}
+
+/* --- snake-name family lookup (free-name constructor grid) ---
+ *
+ * `<snake(Family)>_<member>::[targs](args)` lowers to
+ * `<Family>_<mangled targs>_<member>(args)` for any registered factory
+ * family — the same grid as `vec_new::[T]` / `map_new::[K, V]`.
+ * snake(Family): '_' before an uppercase that follows a lowercase, then
+ * tolower (Pair -> pair, LruCache -> lru_cache). */
+static void cc__gen_snake_name(const char* name, char* out, size_t cap) {
+    size_t o = 0;
+    if (!out || cap == 0) return;
+    for (size_t i = 0; name && name[i]; i++) {
+        char c = name[i];
+        if (c >= 'A' && c <= 'Z') {
+            if (i > 0 && name[i - 1] >= 'a' && name[i - 1] <= 'z' && o + 1 < cap)
+                out[o++] = '_';
+            c = (char)(c - 'A' + 'a');
+        }
+        if (o + 1 >= cap) break;
+        out[o++] = c;
+    }
+    out[o] = 0;
+}
+
+int cc_emit_plan_generic_factory_for_snake_call(const char* ident,
+                                                char* family_out, size_t family_cap,
+                                                size_t* member_off_out) {
+    size_t best_snake_len = 0;
+    const char* best_family = NULL;
+    if (!ident || !ident[0]) return 0;
+    for (size_t i = 0; i < cc__generic_count; i++) {
+        char snake[160];
+        size_t sl;
+        if (cc__generics[i].kind != CC_GENERIC_COMPILED) continue;
+        cc__gen_snake_name(cc__generics[i].name, snake, sizeof(snake));
+        sl = strlen(snake);
+        if (sl == 0 || strncmp(ident, snake, sl) != 0) continue;
+        if (ident[sl] != '_' || !ident[sl + 1]) continue;
+        if (sl > best_snake_len) {
+            best_snake_len = sl;
+            best_family = cc__generics[i].name;
+        }
+    }
+    if (!best_family) return 0;
+    if (family_out && family_cap)
+        snprintf(family_out, family_cap, "%s", best_family);
+    if (member_off_out) *member_off_out = best_snake_len + 1;
+    return 1;
+}
+
+int cc_emit_plan_generic_factory_names_csv(char* out, size_t cap) {
+    int count = 0;
+    size_t o = 0;
+    if (!out || cap == 0) return 0;
+    out[0] = 0;
+    for (size_t i = 0; i < cc__generic_count; i++) {
+        size_t nl;
+        if (cc__generics[i].kind != CC_GENERIC_COMPILED) continue;
+        nl = strlen(cc__generics[i].name);
+        if (o + nl + 3 >= cap) break;
+        if (count) { out[o++] = ','; out[o++] = ' '; }
+        memcpy(out + o, cc__generics[i].name, nl);
+        o += nl;
+        out[o] = 0;
+        count++;
+    }
+    return count;
+}
+
 /* Per-TU reset of the generic emit/invalid dedup tracking. */
 static void cc__generic_dedup_clear(void) {
     for (size_t i = 0; i < cc__generic_emitted_count; i++) free(cc__generic_emitted[i]);
     cc__generic_emitted_count = 0;
     for (size_t i = 0; i < cc__generic_invalid_count; i++) free(cc__generic_invalid[i]);
     cc__generic_invalid_count = 0;
+    cc__gen_instances_clear();
 }
 
 void cc_emit_plan_clear_generic_factory_registrations(void) {
@@ -1280,6 +1493,16 @@ static void cc__exec_visit_block(const char* src, size_t len,
         cc__exec_failed = 1;
     }
     cc__exec_range_mark(body_l, body_r);
+}
+
+/* Did a comptime body raise cc_emit_error since the last clear?  The
+   generic-factory path consults this: a factory that reports a
+   constraint violation (an out-of-range arg(i), say) must fail the
+   build even when its fragment still parses as C. */
+int cc_emit_plan_take_exec_error(void) {
+    int had = cc__exec_failed;
+    cc__exec_failed = 0;
+    return had;
 }
 
 int cc_emit_plan_exec_comptime_blocks(const char* src, size_t len, const char* input_path) {

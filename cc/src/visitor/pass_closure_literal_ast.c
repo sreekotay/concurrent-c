@@ -2669,8 +2669,7 @@ static int cc__parse_closure_from_src(const char* src,
     }
 
     /* Parse body start (skip ws). */
-    size_t b0 = arrow + 2;
-    while (b0 < n && (s[b0] == ' ' || s[b0] == '\t' || s[b0] == '\r' || s[b0] == '\n')) b0++;
+    size_t b0 = cc_skip_ws_and_comments(s, n, arrow + 2);
     if (b0 >= n) return 0;
 
     /* NEW SYNTAX (v3): Optional capture list `[x, &y]` comes AFTER the arrow */

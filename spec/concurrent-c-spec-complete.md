@@ -4761,7 +4761,7 @@ This section defines the core standard library using **UFCS-first design**: meth
 
 **Rule (universal bare-name tier, normative):** When every family composition for `recv.f(args)` fails to name a declared function, `f` itself is the final candidate: the call dispatches to a declared function `f` whose first parameter takes the receiver — `u.mean(6.0)` lowers to `mean(u, 6.0)`; `pp->get_x()` lowers to `get_x(pp)`. Compatibility is uniform where lossless and exact where lossy. A value receiver of type `T` matches a first parameter of type `T` exactly (no arithmetic conversions — dispatch never converts the receiver's value), or of type `T*` / `const T*` via `&recv` (addressable receivers only). A pointer receiver of type `T*` matches pointer parameters under C's pointer rules — exact `T*`, qualifier-adding `const T*`, and `void*` / `const void*` — one-way: a `const T*` receiver matches only const-qualified parameters. A dereference is never synthesized: pointer receivers match pointer parameters only. A first parameter of `void*` never matches a value receiver (the address synthesis and the type erasure are not combined implicitly). Zero-parameter functions never capture a receiver. Members, composed family spellings, and a receiver type's registered dynamic sink all outrank the bare name — a sink-registered type's unresolved methods belong to its sink, and a later-declared ambient function cannot capture them. Declarations participate from the translation unit, included headers, and the parse's symbol table — which sees system headers, so `d.fabs()` with `math.h` included dispatches to `fabs(d)`. Unprototyped (old-style) declarations never participate. A composed callee that is not verifiably declared is never emitted while a bare-name match exists.
 
-**Rule (family member sets, normative):** A generic family instance's method set derives from the family's declaration form: the `##_<member>` tokens of the family macro's body are the members (`Name##_push` declares `push`; `NAME##_sub` declares `sub`). Dispatch trusts composed spellings exactly for this derived set — members are macro-generated and invisible to textual declaration checks — and an unresolved method on an instance enumerates it. Instances are extensible by declaration: a visible function spelling the composed name (`CCVec_double_median(CCVec_double*, …)`, `CCSlice_double_sum(CCSlice_double*, …)`) makes `v.median(…)` / `s.sum(…)` dispatch to it, with no change to the family header or the compiler.
+**Rule (family member sets, normative):** A generic family instance's method set derives from the family's declaration form: the `##_<member>` tokens of the family macro's body are the members (`Name##_push` declares `push`; `NAME##_sub` declares `sub`). Factory-emitted families derive their member set from the emitted fragment's `<mangled>_<member>` definitions. Dispatch trusts composed spellings exactly for this derived set — members are macro-generated and invisible to textual declaration checks — and an unresolved method on an instance enumerates it. Instances are extensible by declaration: a visible function spelling the composed name (`CCVec_double_median(CCVec_double*, …)`, `CCSlice_double_sum(CCSlice_double*, …)`) makes `v.median(…)` / `s.sum(…)` dispatch to it, with no change to the family header or the compiler.
 
 **Rule (method chains, normative):** A UFCS call whose receiver is itself a call expression is well-formed when the receiver's return type is known — derived from the family declaration form for instance members, read from the visible declaration otherwise. The chain lowers as if the receiver were first bound to a temporary of that type; each subsequent link then resolves against that variable under the ordinary rules (members, extensions, `@as` retry, the strict ladder), so `xs.sub(1, 3).len()`, `ps.at(2).y`, and scalar chains like `d.halve().twice()` mean exactly what their bound-temporary spellings mean. A trailing field access binds to the last link's result. A failing link diagnoses against its own receiver type, enumerating that instance's installed methods.
 
@@ -5818,6 +5818,18 @@ compiler:
 The base factory must exist and return a non-empty C fragment. Each concrete
 name is emitted once per translation unit. Extensions may return an empty
 fragment.
+
+**Rule (free-name member calls, normative).** For every registered family,
+`<snake(Family)>_<member>::[args](call-args)` lowers to
+`<Family>_<mangled args>_<member>(call-args)` — the same grid as
+`vec_new::[T]` / `map_new::[K, V]`. snake(Family) is the family name
+lowercased with `_` inserted before an uppercase letter that follows a
+lowercase one (`Pair` → `pair`, `LruCache` → `lru_cache`). The call requests
+the instantiation, so the monomorph is emitted even when the type is spelled
+nowhere else; the named member must exist in the instance's member set. A free
+name followed by `::[` that matches neither a built-in generic form nor a
+registered family's grid is ill-formed, diagnosed with the spelling and the
+registered families.
 
 ### 12.2 Library-owned policy
 

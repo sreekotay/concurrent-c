@@ -1,0 +1,15 @@
+/* `arg(i)` past the type-argument count is a factory constraint
+ * violation: the build fails naming the factory, the index and the
+ * arity — never a silently empty interpolation. */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+
+CC_GENERIC_FACTORY(Oob, 1) {
+    return @emit(`typedef ${arg(3)} ${mangled};`, arena);
+}
+
+int main(void) {
+    Oob::[int] b;
+    (void)b;
+    return 0;
+}

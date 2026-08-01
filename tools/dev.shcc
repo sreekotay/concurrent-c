@@ -37,5 +37,19 @@ static int check_submodules(int argc, char **argv) {
     return cc_script_task_exe(argc, argv, "scripts/check_submodule_reachability.sh");
 }
 
-"dev: use @fmt, @lint, @lint_scanners, or @check_submodules (or @ to list)".println() !>;
+/**
+ * @task Comment-insertion fuzzer: an inserted comment must not change behavior.
+ */
+static int fuzz_comment(int argc, char **argv) {
+    return cc_script_task_shcc(argc, argv, "tools/fuzz_comment_insert.shcc");
+}
+
+/**
+ * @task Mutation fuzzer: no input may crash the compiler or hit internal errors.
+ */
+static int fuzz_mutate(int argc, char **argv) {
+    return cc_script_task_shcc(argc, argv, "tools/fuzz_mutate.shcc");
+}
+
+"dev: use @fmt, @lint, @lint_scanners, @check_submodules, @fuzz_comment, or @fuzz_mutate (or @ to list)".println() !>;
 return 2;

@@ -1,0 +1,10 @@
+/* Inside a block, `@emit(ANCHOR, `...`)` emits; the arena form
+ * returns a fragment and belongs in a factory. Omitting both is
+ * diagnosed rather than silently accepted. */
+#include <ccc/std/prelude.cch>
+
+@comptime {
+    @emit(`static int orphan(void) { return 1; }`);
+}
+
+int main(void) { return 0; }

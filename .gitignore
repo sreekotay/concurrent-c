@@ -26,3 +26,12 @@ tools/toolbox.shcc
 
 # Claude Code agent worktrees / session-local state
 .claude/
+
+# Stray build droppings from in-tree compiles
+.cc-build/
+*.c.diag
+*.c.diag.*.tmp
+
+# Accidental root lowered-C probes (c2.ccs → c2.c)
+/c[0-9].c
+/c[0-9][0-9].c

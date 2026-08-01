@@ -861,7 +861,7 @@ static int cc__rewrite_result_unwrap_once(const CCVisitorCtx* ctx,
 
     /* --- Optional binder: `?>(e) ...` or `?> (e) ...` ------------------ */
     size_t scan = op_at + 2;
-    scan = cc_skip_ws_len(s, n, scan);
+    scan = cc_skip_ws_and_comments(s, n, scan);
 
     int has_binder = 0;
     char binder[128];
@@ -2076,7 +2076,7 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
         return -1;
     }
 
-    size_t scan = cc_skip_ws_len(s, n, op_at + 2);
+    size_t scan = cc_skip_ws_and_comments(s, n, op_at + 2);
     int has_binder = 0;
     char binder[128];
     binder[0] = 0;

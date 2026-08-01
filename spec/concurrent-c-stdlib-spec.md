@@ -52,7 +52,10 @@ ArrayMap::[K, V] array_map_new_count::[K, V](CCArena *arena, size_t count);
 
 `Vec::[T]` denotes the generated C family `CCVec_<T-mangling>`; the
 CC-prefixed spellings (`CCVec::[T]`, `cc_vec_new::[T]`) name the same
-instances and remain accepted as the instance layer.
+instances and remain accepted as the instance layer. The spelling grid is
+general: for any registered factory family,
+`<snake(Family)>_<member>::[args](...)` calls
+`<Family>_<mangled args>_<member>(...)` (language spec §12.1).
 `vec_new::[T](arena)` calls:
 
 ```c

@@ -177,6 +177,9 @@ typedef enum CCGenProduceStatus {
     CC_GEN_PRODUCE_INVOKE_FAILED   = 2, /* compiled factory returned empty / overflowed  */
 } CCGenProduceStatus;
 
+/* Take-and-clear: did a comptime body raise cc_emit_error? */
+int cc_emit_plan_take_exec_error(void);
+
 CCGenProduceStatus cc_emit_plan_produce_generic_def(
     const char* gname, const char* mangled, const char orig_args[8][128], int nargs,
     const char* reflect_src, size_t reflect_len, const char* input_path,
@@ -184,6 +187,36 @@ CCGenProduceStatus cc_emit_plan_produce_generic_def(
 /* Emit `def_text` as an AFTER_PRELUDE fragment unless `mangled` was already
  * emitted this TU.  Returns 1 if newly added, 0 if a duplicate/full/failed. */
 int cc_emit_plan_generic_def_emit_once(const char* mangled, const char* def_text);
+
+/* --- factory-instance member sets (UFCS trust) ---
+ *
+ * A factory instance's methods exist only inside its emitted definition
+ * fragment, which splices after the passes that answer "is this name real".
+ * `note` harvests the decl-shaped `<mangled>_<member>(` names from a produced
+ * definition; the accessors are the oracle the UFCS ladder consults so
+ * composed member spellings stay trusted for factory instances (mirroring how
+ * macro families derive member sets from `##_` tokens).  Cleared per TU with
+ * the emit dedup table. */
+void cc_emit_plan_note_generic_instance(const char* family, const char* mangled,
+                                        const char* def_text);
+int cc_emit_plan_generic_instance_known(const char* mangled);
+int cc_emit_plan_generic_instance_has_member(const char* mangled, const char* member);
+const char* cc_emit_plan_generic_instance_members_csv(const char* mangled);
+const char* cc_emit_plan_generic_instance_family(const char* mangled);
+/* Definition text of the instance whose `<mangled>_` prefixes `fn_name`
+ * (return-type reads for composed members); NULL when none. */
+const char* cc_emit_plan_generic_instance_def_for_symbol(const char* fn_name);
+
+/* Free-name constructor grid: map `<snake(Family)>_<member>` to its registered
+ * factory family (longest snake prefix wins).  On hit, `family_out` gets the
+ * family name and `*member_off_out` the offset of the member suffix in
+ * `ident`.  snake(Family) lowercases with '_' inserted before an uppercase
+ * that follows a lowercase (Pair -> pair, LruCache -> lru_cache). */
+int cc_emit_plan_generic_factory_for_snake_call(const char* ident,
+                                                char* family_out, size_t family_cap,
+                                                size_t* member_off_out);
+/* Registered factory family names as "A, B, C" (diagnostics); returns count. */
+int cc_emit_plan_generic_factory_names_csv(char* out, size_t cap);
 void cc_emit_plan_clear_generic_factory_registrations(void);
 /* Returns 1 the first time `mangled` is reported as producing invalid C this
  * TU, 0 thereafter — used to suppress duplicate emit-site diagnostics across

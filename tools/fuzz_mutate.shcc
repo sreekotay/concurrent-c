@@ -1,0 +1,599 @@
+#!/usr/bin/env -S ./cc/bin/ccc
+/*
+ * Crash-oracle fuzzer: no input may crash the compiler or reach its
+ * internal-error paths; invalid input must die with an ordinary
+ * diagnostic.
+ *
+ *   ./tools/fuzz_mutate.shcc [--seed N] [--n N] [--scratch DIR]
+ *   ./tools/dev.shcc @fuzz_mutate [--seed N] [--n N]
+ *
+ * Corpus: all tests/*.ccs (fail tests included), with a bias toward
+ * tests/comptime_*.ccs (factory/@emit templates are the newest surface).
+ * Mutations (seeded LCG): delete a random span, duplicate a random span,
+ * replace a random byte, insert a nasty token, or mutate INSIDE a
+ * backtick template literal span.
+ *
+ * Oracle: `ccc build --compile` under a timeout.  PASS is exit 0 with
+ * host-cc-acceptable emitted C, or any clean nonzero exit with an
+ * ordinary diagnostic.  FINDINGS: killed by signal, timeout/hang,
+ * internal-error markers in the output, or exit 0 where the emitted C
+ * fails host cc (accepted-but-miscompiled).  Findings are saved to
+ * tools/fuzz_findings/, deduped by normalized first-error-line
+ * signature.  Exit 0 = no findings, 1 = findings, 2 = usage.
+ */
+
+#include "../cc/src/util/text_scan.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/stat.h>
+
+#define FM_MAX_CORPUS 2048
+#define FM_MAX_SIGS 512
+#define FM_SIG_LEN 240
+
+static unsigned long long fm_rng;
+static unsigned long long fm_next(void) {
+    fm_rng = fm_rng * 6364136223846793005ULL + 1442695040888963407ULL;
+    return fm_rng >> 17;
+}
+
+static void fm_mkdir_p(const char* path) {
+    char tmp[1024];
+    size_t n = strlen(path);
+    if (n == 0 || n >= sizeof(tmp)) return;
+    memcpy(tmp, path, n + 1);
+    for (size_t i = 1; i < n; i++) {
+        if (tmp[i] == '/') {
+            tmp[i] = '\0';
+            (void)mkdir(tmp, 0777);
+            tmp[i] = '/';
+        }
+    }
+    (void)mkdir(tmp, 0777);
+}
+
+static void fm_stem_of(const char* path, char* out, size_t cap) {
+    const char* base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    const char* dot = strrchr(base, '.');
+    size_t n = dot ? (size_t)(dot - base) : strlen(base);
+    if (n >= cap) n = cap - 1;
+    memcpy(out, base, n);
+    out[n] = '\0';
+}
+
+static int fm_write_bytes(const char* path, const char* buf, size_t len) {
+    FILE* f = fopen(path, "wb");
+    if (!f) return -1;
+    if (len) (void)fwrite(buf, 1, len, f);
+    fclose(f);
+    return 0;
+}
+
+static int fm_append_line(const char* path, const char* line) {
+    FILE* f = fopen(path, "a");
+    if (!f) return -1;
+    fputs(line, f);
+    fputc('\n', f);
+    fclose(f);
+    return 0;
+}
+
+static const char* FM_NASTY[] = {
+    "!>", "?>", "::[", "@destroy", "@defer", "@string(", "`",
+    "/*", "*/", "\"", "${", "##", "\\\n",
+    NULL,
+};
+
+/* Internal-error markers: any of these in compiler output is a finding,
+ * regardless of exit code. */
+static const char* FM_MARKERS[] = {
+    "internal error", "compiler bug", "failed to re-parse",
+    "Assertion", "Sanitizer", NULL,
+};
+
+typedef struct {
+    char path[512];
+    char stem[256];
+    const char* text; /* corpus arena */
+    size_t text_len;
+    /* backtick template spans (interior byte ranges), lazy */
+    size_t* tpl_start;
+    size_t* tpl_end;
+    size_t n_tpl;
+    int tpl_ready;
+} FmEntry;
+
+static FmEntry g_corpus[FM_MAX_CORPUS];
+static int g_ncorpus = 0;
+static int g_comptime_idx[FM_MAX_CORPUS];
+static int g_ncomptime = 0;
+
+/* Backtick spans at code positions; {~~~~ grammar blocks skipped so their
+ * interiors don't read as template text. */
+static void fm_tpl_spans(FmEntry* e) {
+    const char* src = e->text;
+    size_t n = e->text_len;
+    size_t cap = 16, cnt = 0;
+    size_t* st = (size_t*)malloc(cap * sizeof(size_t));
+    size_t* en = (size_t*)malloc(cap * sizeof(size_t));
+    CCInertScan sc;
+    cc_inert_scan_init(&sc, NULL);
+    size_t i = 0;
+    while (i < n && st && en) {
+        if (cc_inert_scan_at_code(&sc)) {
+            if (src[i] == '`') {
+                size_t s0 = i + 1;
+                i++;
+                while (i < n && src[i] != '`') i++;
+                if (i > s0) {
+                    if (cnt == cap) {
+                        cap *= 2;
+                        size_t* ns = (size_t*)realloc(st, cap * sizeof(size_t));
+                        size_t* ne = (size_t*)realloc(en, cap * sizeof(size_t));
+                        if (!ns || !ne) { free(ns ? ns : st); free(ne ? ne : en); st = NULL; en = NULL; break; }
+                        st = ns; en = ne;
+                    }
+                    st[cnt] = s0;
+                    en[cnt] = i; /* exclusive */
+                    cnt++;
+                }
+                if (i < n) i++;
+                continue;
+            }
+            if (i + 5 <= n && memcmp(src + i, "{~~~~", 5) == 0) {
+                i += 5;
+                while (i + 5 <= n && memcmp(src + i, "~~~~}", 5) != 0) i++;
+                if (i + 5 <= n) i += 5;
+                continue;
+            }
+        }
+        if (!cc_inert_scan_step(&sc, src, n, &i)) i++;
+    }
+    e->tpl_start = st;
+    e->tpl_end = en;
+    e->n_tpl = (st && en) ? cnt : 0;
+    e->tpl_ready = 1;
+}
+
+/* ---- mutation engine: returns malloc'd mutant ---- */
+
+typedef struct {
+    char kind[32];
+    size_t at;
+} FmMutInfo;
+
+static char* fm_mutate(const FmEntry* e, size_t* out_len, FmMutInfo* info) {
+    const char* src = e->text;
+    size_t n = e->text_len;
+    if (n == 0) return NULL;
+    int kind = (int)(fm_next() % 5ULL);
+    if (kind == 4 && e->n_tpl == 0) kind = (int)(fm_next() % 4ULL);
+
+    if (kind == 0) { /* delete span */
+        size_t at = fm_next() % n;
+        size_t len = 1 + (size_t)(fm_next() % 64ULL);
+        if (at + len > n) len = n - at;
+        char* m = (char*)malloc(n - len + 1);
+        if (!m) return NULL;
+        memcpy(m, src, at);
+        memcpy(m + at, src + at + len, n - at - len);
+        m[n - len] = '\0';
+        *out_len = n - len;
+        snprintf(info->kind, sizeof(info->kind), "delete%zu", len);
+        info->at = at;
+        return m;
+    }
+    if (kind == 1) { /* duplicate span */
+        size_t at = fm_next() % n;
+        size_t len = 1 + (size_t)(fm_next() % 64ULL);
+        if (at + len > n) len = n - at;
+        char* m = (char*)malloc(n + len + 1);
+        if (!m) return NULL;
+        memcpy(m, src, at + len);
+        memcpy(m + at + len, src + at, len);
+        memcpy(m + at + 2 * len, src + at + len, n - at - len);
+        m[n + len] = '\0';
+        *out_len = n + len;
+        snprintf(info->kind, sizeof(info->kind), "dup%zu", len);
+        info->at = at;
+        return m;
+    }
+    if (kind == 2) { /* replace one byte */
+        size_t at = fm_next() % n;
+        char b = (char)(fm_next() % 256ULL);
+        char* m = (char*)malloc(n + 1);
+        if (!m) return NULL;
+        memcpy(m, src, n);
+        m[at] = b;
+        m[n] = '\0';
+        *out_len = n;
+        snprintf(info->kind, sizeof(info->kind), "byte%02x", (unsigned char)b);
+        info->at = at;
+        return m;
+    }
+    if (kind == 3) { /* insert nasty token */
+        int nt = 0;
+        while (FM_NASTY[nt]) nt++;
+        const char* tok = FM_NASTY[fm_next() % (unsigned long long)nt];
+        size_t tl = strlen(tok);
+        size_t at = fm_next() % (n + 1);
+        char* m = (char*)malloc(n + tl + 1);
+        if (!m) return NULL;
+        memcpy(m, src, at);
+        memcpy(m + at, tok, tl);
+        memcpy(m + at + tl, src + at, n - at);
+        m[n + tl] = '\0';
+        *out_len = n + tl;
+        snprintf(info->kind, sizeof(info->kind), "nasty");
+        info->at = at;
+        return m;
+    }
+    /* kind == 4: mutate inside a backtick template span */
+    {
+        size_t ti = fm_next() % (unsigned long long)e->n_tpl;
+        size_t s0 = e->tpl_start[ti], e0 = e->tpl_end[ti];
+        size_t span = e0 - s0;
+        size_t at = s0 + (fm_next() % (unsigned long long)span);
+        int sub = (int)(fm_next() % 3ULL);
+        if (sub == 0) { /* replace byte in template */
+            char b = (char)(fm_next() % 256ULL);
+            char* m = (char*)malloc(n + 1);
+            if (!m) return NULL;
+            memcpy(m, src, n);
+            m[at] = b;
+            m[n] = '\0';
+            *out_len = n;
+            snprintf(info->kind, sizeof(info->kind), "tpl_byte%02x", (unsigned char)b);
+            info->at = at;
+            return m;
+        }
+        if (sub == 1) { /* insert nasty token in template */
+            int nt = 0;
+            while (FM_NASTY[nt]) nt++;
+            const char* tok = FM_NASTY[fm_next() % (unsigned long long)nt];
+            size_t tl = strlen(tok);
+            char* m = (char*)malloc(n + tl + 1);
+            if (!m) return NULL;
+            memcpy(m, src, at);
+            memcpy(m + at, tok, tl);
+            memcpy(m + at + tl, src + at, n - at);
+            m[n + tl] = '\0';
+            *out_len = n + tl;
+            snprintf(info->kind, sizeof(info->kind), "tpl_nasty");
+            info->at = at;
+            return m;
+        }
+        /* delete 1-8 bytes inside the template */
+        {
+            size_t len = 1 + (size_t)(fm_next() % 8ULL);
+            if (at + len > e0) len = e0 - at;
+            if (len == 0) len = 1;
+            if (at + len > n) len = n - at;
+            char* m = (char*)malloc(n - len + 1);
+            if (!m) return NULL;
+            memcpy(m, src, at);
+            memcpy(m + at, src + at + len, n - at - len);
+            m[n - len] = '\0';
+            *out_len = n - len;
+            snprintf(info->kind, sizeof(info->kind), "tpl_del%zu", len);
+            info->at = at;
+            return m;
+        }
+    }
+}
+
+/* ---- signature dedupe ---- */
+
+static char g_sigs[FM_MAX_SIGS][FM_SIG_LEN];
+static int g_nsigs = 0;
+
+/* Normalize a diagnostic line: digits -> '#', clip length. */
+static void fm_normalize(const char* line, size_t len, char* out, size_t cap) {
+    size_t o = 0;
+    for (size_t i = 0; i < len && o + 1 < cap; i++) {
+        char c = line[i];
+        if (c >= '0' && c <= '9') {
+            if (o > 0 && out[o - 1] == '#') continue;
+            out[o++] = '#';
+        } else if (c == '\r') {
+            continue;
+        } else {
+            out[o++] = c;
+        }
+    }
+    out[o] = '\0';
+}
+
+/* First line of `data` containing `needle` (or first non-empty line when
+ * needle is NULL); normalized into out. */
+static int fm_first_line_with(CCSlice data, const char* needle, char* out, size_t cap) {
+    size_t i = 0;
+    while (i < data.len) {
+        size_t st = i;
+        while (i < data.len && data.ptr[i] != '\n') i++;
+        size_t len = i - st;
+        if (i < data.len) i++;
+        if (len == 0) continue;
+        if (!needle) {
+            fm_normalize((const char*)data.ptr + st, len, out, cap);
+            return 1;
+        }
+        /* bounded substring search */
+        size_t nl = strlen(needle);
+        for (size_t k = 0; k + nl <= len; k++) {
+            if (memcmp(data.ptr + st + k, needle, nl) == 0) {
+                fm_normalize((const char*)data.ptr + st, len, out, cap);
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/* Returns 1 when sig is new (and records it). */
+static int fm_sig_new(const char* sig) {
+    for (int i = 0; i < g_nsigs; i++)
+        if (strcmp(g_sigs[i], sig) == 0) return 0;
+    if (g_nsigs < FM_MAX_SIGS) {
+        snprintf(g_sigs[g_nsigs], FM_SIG_LEN, "%s", sig);
+        g_nsigs++;
+    }
+    return 1;
+}
+
+static int fm_contains(CCSlice data, const char* needle) {
+    size_t nl = strlen(needle);
+    if (nl == 0 || data.len < nl) return 0;
+    for (size_t i = 0; i + nl <= data.len; i++)
+        if (memcmp(data.ptr + i, needle, nl) == 0) return 1;
+    return 0;
+}
+
+/* ---- runners ---- */
+
+typedef struct {
+    int timed_out;
+    int signaled;
+    int exit_code;
+    CCSlice out_data;
+    CCSlice err_data;
+} FmRun;
+
+static FmRun !>(CCError) fm_run_compile(const char* scratch, const char* src_path,
+                                        const char* out_stem, CCArena* a) {
+    @errhandler(CCError e) { return cc_err(e); }
+    char outd[1024];
+    snprintf(outd, sizeof(outd), "%s/out", scratch);
+    CCCommand cmd = cc_command(a, @slice("timeout"));
+    cmd.arg("15");
+    cmd.arg("./cc/bin/ccc");
+    cmd.arg("build");
+    cmd.arg("--compile");
+    cmd.arg("--keep-c");
+    cmd.arg("--out-dir");
+    cmd.arg(outd);
+    cmd.arg("--out-stem");
+    cmd.arg(out_stem);
+    cmd.arg(src_path);
+    CCProcessOutput po = cmd.output(a) !>;
+    FmRun r = {0};
+    r.signaled = po.status.signaled ? 1 : 0;
+    r.exit_code = po.status.exit_code;
+    r.timed_out = (!r.signaled && r.exit_code == 124) ? 1 : 0;
+    r.out_data = po.stdout_data;
+    r.err_data = po.stderr_data;
+    return cc_ok(r);
+}
+
+/* Host-cc syntax check of the emitted C.  Nonzero exit = rejected. */
+static int !>(CCError) fm_host_cc_rejects(const char* c_path, CCArena* a,
+                                          CCSlice* err_out) {
+    @errhandler(CCError e) { return cc_err(e); }
+    CCCommand cmd = cc_command(a, @slice("timeout"));
+    cmd.arg("20");
+    cmd.arg("cc");
+    cmd.arg("-fsyntax-only");
+    cmd.arg("-I");
+    cmd.arg("out/include");
+    cmd.arg("-I");
+    cmd.arg("cc/include");
+    cmd.arg(c_path);
+    CCProcessOutput po = cmd.output(a) !>;
+    *err_out = po.stderr_data;
+    int failed = (!po.status.signaled && po.status.exit_code != 0) ? 1 : 0;
+    return cc_ok(failed);
+}
+
+/* --- script body --- */
+
+CCArena a = @create(megabytes(96)) @destroy;
+
+@errhandler(CCError e) {
+    CCString em = @string(`fuzz_mutate: error: ${cc_error_str(e)}`, &a);
+    (void)em.eprintln();
+    return 2;
+}
+
+unsigned long long seed = 1;
+long want_n = 100;
+char scratch[900];
+snprintf(scratch, sizeof(scratch), "tmp/fuzz_mutate");
+{
+    int pos_seen = 0;
+    for (int i = 1; i < argc; i++) {
+        const char* s = argv[i];
+        if (!s || s[0] == '@') continue; /* task-runner name forwarding */
+        if (strcmp(s, "--seed") == 0 && i + 1 < argc) { seed = (unsigned long long)atoll(argv[++i]); continue; }
+        if (strcmp(s, "--n") == 0 && i + 1 < argc) { want_n = atol(argv[++i]); continue; }
+        if (strcmp(s, "--scratch") == 0 && i + 1 < argc) {
+            snprintf(scratch, sizeof(scratch), "%s", argv[++i]);
+            continue;
+        }
+        if (s[0] >= '0' && s[0] <= '9') { /* positional: seed then n */
+            if (pos_seen == 0) seed = (unsigned long long)atoll(s);
+            else if (pos_seen == 1) want_n = atol(s);
+            pos_seen++;
+            continue;
+        }
+        fprintf(stderr, "fuzz_mutate: usage: [--seed N] [--n N] [--scratch DIR]\n");
+        return 2;
+    }
+}
+if (want_n < 0) want_n = 0;
+fm_rng = seed * 2654435761ULL + 0x9e3779b97f4a7c15ULL;
+
+CCSlice root = cc_script_repo_root(
+    argv[0] ? char_to_slice(argv[0]) : cc_slice_empty(), &a) !>;
+cc_dir_chdir(root) !>;
+
+char pbuf[1200];
+fm_mkdir_p(scratch);
+snprintf(pbuf, sizeof(pbuf), "%s/out", scratch); fm_mkdir_p(pbuf);
+snprintf(pbuf, sizeof(pbuf), "%s/mut", scratch); fm_mkdir_p(pbuf);
+fm_mkdir_p("tools/fuzz_findings");
+
+/* ---- corpus: all tests/*.ccs ---- */
+{
+    CCSliceArray files = cc_glob(@slice("tests/*.ccs"), &a) !>;
+    for (size_t fi = 0; fi < files.len() && g_ncorpus < FM_MAX_CORPUS; fi++) {
+        CCSlice ps = files.get(fi);
+        if (!ps.ptr || ps.len == 0 || ps.len >= sizeof(g_corpus[0].path)) continue;
+        FmEntry* e = &g_corpus[g_ncorpus];
+        memcpy(e->path, ps.ptr, ps.len);
+        e->path[ps.len] = '\0';
+        fm_stem_of(e->path, e->stem, sizeof(e->stem));
+        CCSlice text = cc_file_read_path(char_to_slice(e->path), &a) !>;
+        if (text.len == 0) continue;
+        e->text = (const char*)text.ptr;
+        e->text_len = text.len;
+        if (strncmp(e->stem, "comptime_", 9) == 0)
+            g_comptime_idx[g_ncomptime++] = g_ncorpus;
+        g_ncorpus++;
+    }
+}
+if (g_ncorpus == 0) {
+    "fuzz_mutate: empty corpus".eprintln() !>;
+    return 2;
+}
+{
+    CCString m = @string(
+        `fuzz_mutate: corpus ${g_ncorpus} files (${g_ncomptime} comptime-biased)`, &a);
+    m.println() !>;
+}
+
+/* ---- fuzz loop ---- */
+
+long iters = 0;
+long f_signal = 0, f_timeout = 0, f_internal = 0, f_badc = 0;
+long passes = 0, dup_findings = 0;
+
+for (long it = 0; it < want_n; it++) {
+    /* 1 in 3 iterations draws from the comptime sublist (newest surface). */
+    int ei;
+    if (g_ncomptime > 0 && (fm_next() % 3ULL) == 0)
+        ei = g_comptime_idx[fm_next() % (unsigned long long)g_ncomptime];
+    else
+        ei = (int)(fm_next() % (unsigned long long)g_ncorpus);
+    FmEntry* e = &g_corpus[ei];
+    if (!e->tpl_ready) fm_tpl_spans(e);
+
+    size_t mlen = 0;
+    FmMutInfo info = {{0}, 0};
+    char* mut = fm_mutate(e, &mlen, &info);
+    if (!mut) continue;
+    iters++;
+
+    char mut_path[1200], out_stem[64];
+    snprintf(mut_path, sizeof(mut_path), "%s/mut/m%ld_%s.ccs", scratch, it, e->stem);
+    snprintf(out_stem, sizeof(out_stem), "m%ld", it);
+    if (fm_write_bytes(mut_path, mut, mlen) != 0) { free(mut); continue; }
+
+    CCArena ia = cc_arena_create(megabytes(16));
+    FmRun r = fm_run_compile(scratch, mut_path, out_stem, &ia) !>;
+
+    const char* cls = NULL;
+    char sig[FM_SIG_LEN];
+    sig[0] = '\0';
+
+    if (r.timed_out) {
+        cls = "timeout";
+        snprintf(sig, sizeof(sig), "timeout:%.200s", e->stem);
+    } else if (r.signaled) {
+        cls = "signal";
+        snprintf(sig, sizeof(sig), "signal:%d", r.exit_code);
+    } else {
+        const char* marker = NULL;
+        for (int mi = 0; FM_MARKERS[mi]; mi++) {
+            if (fm_contains(r.err_data, FM_MARKERS[mi]) ||
+                fm_contains(r.out_data, FM_MARKERS[mi])) {
+                marker = FM_MARKERS[mi];
+                break;
+            }
+        }
+        if (marker) {
+            cls = "internal";
+            char line[FM_SIG_LEN];
+            line[0] = '\0';
+            if (!fm_first_line_with(r.err_data, marker, line, sizeof(line)))
+                (void)fm_first_line_with(r.out_data, marker, line, sizeof(line));
+            snprintf(sig, sizeof(sig), "internal:%s", line);
+        } else if (r.exit_code == 0) {
+            char c_path[1200];
+            snprintf(c_path, sizeof(c_path), "%s/out/%s.c", scratch, out_stem);
+            CCSlice cc_err_data = cc_slice_empty();
+            int rejected = fm_host_cc_rejects(c_path, &ia, &cc_err_data) !>;
+            if (rejected) {
+                cls = "accept_bad_c";
+                char line[FM_SIG_LEN];
+                line[0] = '\0';
+                if (!fm_first_line_with(cc_err_data, "error", line, sizeof(line)))
+                    (void)fm_first_line_with(cc_err_data, NULL, line, sizeof(line));
+                snprintf(sig, sizeof(sig), "badc:%s", line);
+            } else {
+                passes++;
+            }
+        } else {
+            passes++; /* ordinary diagnostic death */
+        }
+    }
+
+    if (cls) {
+        if (strcmp(cls, "signal") == 0) f_signal++;
+        else if (strcmp(cls, "timeout") == 0) f_timeout++;
+        else if (strcmp(cls, "internal") == 0) f_internal++;
+        else f_badc++;
+        if (fm_sig_new(sig)) {
+            char save_path[1024], logline[2200];
+            snprintf(save_path, sizeof(save_path),
+                     "tools/fuzz_findings/mutate_%s_%s_i%ld.ccs", cls, e->stem, it);
+            (void)fm_write_bytes(save_path, mut, mlen);
+            snprintf(logline, sizeof(logline),
+                     "%s file=%s kind=%s at=%zu exit=%d seed=%llu iter=%ld saved=%s sig=%s",
+                     cls, e->path, info.kind, info.at, r.exit_code, seed, it,
+                     save_path, sig);
+            (void)fm_append_line("tools/fuzz_findings/mutate_findings.log", logline);
+            printf("fuzz_mutate: FINDING %s: %s kind=%s at=%zu\n", cls, e->path,
+                   info.kind, info.at);
+            fflush(stdout);
+        } else {
+            dup_findings++;
+        }
+    } else {
+        (void)unlink(mut_path);
+    }
+    free(mut);
+    cc_arena_destroy(&ia);
+}
+
+long findings = f_signal + f_timeout + f_internal + f_badc;
+{
+    CCString m = @string(
+        `fuzz_mutate: seed=${(long)seed} iterations=${iters} pass=${passes} findings=${findings} (signal=${f_signal}, timeout=${f_timeout}, internal=${f_internal}, accept_bad_c=${f_badc}) unique_sigs=${(long)g_nsigs} dup=${dup_findings}`,
+        &a);
+    m.println() !>;
+}
+return findings > 0 ? 1 : 0;

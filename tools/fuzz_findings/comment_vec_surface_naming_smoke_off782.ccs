@@ -1,0 +1,32 @@
+/* Container naming grid: `Vec::[T]` / `vec_new::[T]` are the canonical
+ * surface spellings, matching Map/ArrayMap; the CC-prefixed twins
+ * remain accepted as the instance layer. Both name the same instance
+ * (CCVec_int), so the spellings interoperate freely. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct Pt { double x, y; } Pt;
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(64));
+    if (!arena.base) return 1;
+
+    Vec::[int] v = vec_new::[int](&arena);
+    if (v.push(10) != 0) return 2;
+    if (v.push(20) != 0) return 3;
+
+    /* Instance-layer spelling names the SAME type. */
+    CCVec::[int] alias = v;
+    if (alias.len() != 2 || *alias.get(1) != 20) return 4;
+
+    /* Struct element through the canonical spelling. */
+    Vec::[Pt/*x*/] pv = vec_new::[Pt](&arena);
+    {
+        Pt p = {1.5, 2.5};
+        if (pv.push(p) != 0) return 5;
+    }
+    if (pv.len() != 1 || pv.get(0)->y != 2.5) return 6;
+
+    printf("%zu %d %g\n", v.len(), *v.get(0), pv.get(0)->x);
+    return 0;
+}

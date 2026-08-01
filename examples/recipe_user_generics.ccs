@@ -1,0 +1,78 @@
+/*
+ * Recipe: user-defined generics
+ *
+ * The sections below are NOT five things to learn. A generic is ONE rule:
+ *
+ *     Name::[args] names a monomorph, and the factory's emitted
+ *     `${mangled}_<member>` definitions ARE its methods.
+ *
+ * Everything else is spelling. `Type::[args]` names the instance;
+ * `<snake(Family)>_<member>::[args](...)` is the same grid vec_new uses;
+ * `recv.member(...)` dispatches on the instance like any family; and a
+ * declared `<Mangled>_<member>` function extends one instance the same
+ * way declaring installs any method.
+ *
+ *    1. Define a family     CC_GENERIC_FACTORY + one @emit template
+ *    2. Instantiate         Pair::[int, double] p
+ *    3. Construct free-name pair_make::[int, double](3, 4.5)
+ *    4. Emitted methods     p.head(), p.tail()
+ *    5. Extend one instance declare Pair_int_double_span
+ *    6. Fallible members    q.at(1) !>
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+
+/* 1. A family in eight lines: the template is the whole definition.
+ *    `arg(i)` is the i-th type argument; `${mangled}` the instance name. */
+CC_GENERIC_FACTORY(Pair, 2) {
+    return @emit(`
+        typedef struct { ${arg(0)} first; ${arg(1)} second; } ${mangled};
+        static inline ${mangled} ${mangled}_make(${arg(0)} a, ${arg(1)} b) {
+            ${mangled} r; r.first = a; r.second = b; return r;
+        }
+        static inline ${arg(0)} ${mangled}_head(${mangled}* self) { return self->first; }
+        static inline ${arg(1)} ${mangled}_tail(${mangled}* self) { return self->second; }`, arena);
+}
+
+/* 5. Extension by declaration: the composed spelling IS the install. */
+static double Pair_int_double_span(Pair::[int, double]* pr) {
+    return pr->second - (double)pr->first;
+}
+
+/* 6. A fallible extension: Results and `!>` compose with user
+ *    generics like any other method. */
+static int !>(CCError) Pair_int_int_at(Pair::[int, int]* pr, int i) {
+    if (i == 0) return cc_ok(pr->first);
+    if (i == 1) return cc_ok(pr->second);
+    return cc_err(CC_ERR_INVALID_ARG, "pair index out of range");
+}
+
+int main(void) {
+    @errhandler(CCError e) { fprintf(stderr, "eh: %s\n", e.message); return 1; }
+
+    /* 2 + 3. The type names the instance; the free-name form constructs
+     * it — and requests the monomorph by itself, so either mention
+     * alone is enough. */
+    Pair::[int, double] p = pair_make::[int, double](3, 4.5);
+
+    /* 4. The emitted `${mangled}_<member>` definitions are the method
+     * set — same dispatch as Vec/Map members. */
+    printf("head=%d tail=%g\n", p.head(), p.tail());
+
+    /* 5. Declared above — no factory edit. */
+    printf("span=%g\n", p.span());
+
+    /* A second monomorph is just another spelling of the same family;
+     * the instance-layer mangled name is always callable directly. */
+    Pair::[int, int] q = Pair_int_int_make(10, 20);
+    printf("q=%d,%d\n", q.head(), q.tail());
+
+    /* 6. Declared above — a Result member unwraps like any other. */
+    int second = q.at(1) !>;
+    printf("at=%d\n", second);
+
+    /* The miss fails loud: `p.middle()` names the receiver's type and
+     * lists its installed methods (make, head, tail, span). */
+    return 0;
+}

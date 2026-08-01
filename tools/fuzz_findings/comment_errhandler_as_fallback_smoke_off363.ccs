@@ -1,0 +1,21 @@
+/*
+ * CCIoError Result with only @errhandler(CCError): matches via @as face.
+ * Exact CCIoError handler still preferred when stacked (see type_match smoke).
+ */
+#include <ccc/std/io.h>
+#include <stdio.h>
+
+static int g_hit;
+
+static int !> (CCIoError) always_err_io(void) {
+    return cc_err(cc_io_error(CC_IO_OTHER));
+}
+
+int main(void) {
+    @errhandler(CCError e)/*x*/ {
+        g_hit = 1 + (int)e.kind; /* binder is CCError via @as projection */
+    }
+    always_err_io() !>;
+    printf("g_hit=%d\n", g_hit);
+    return (g_hit == 1 + (int)CC_ERR_IO) ? 0 : 1;
+}

@@ -1,0 +1,31 @@
+/* Expression-position `!>;` with a CCSlice (struct) Result payload.
+ *
+ * Guards the regression where parser-mode rewrote
+ * `CCResult_CCSlice_CCError_unwrap(...)` to an undeclared
+ * `__cc_parser_result_unwrap_*` stub.  TCC treated that as returning
+ * `int`, so `CCSlice in = ... !>;` failed with "'{' expected (got ';')".
+ * Scalar payloads (`int v = ... !>;`) survived by accident.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static CCResult_CCSlice_CCError get_slice(CCArena* a) {
+    char* p = (char*)cc_arena_alloc(a, 4, 1);
+    if (!p) return cc_err_CCResult_CCSlice_CCError(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "oom"));
+    p[0] = 'o';
+    p[1] = 'k';
+    return cc_ok_CCResult_CCSlice_CCError(cc_slice_from_buffer(p, 2));
+}
+
+int main(void) {
+    @errhandler(CCError/*x*/ e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
+    CCArena a = cc_arena_heap(kilobytes(1)) @destroy;
+    CCSlice in = get_slice(&a) !>;
+    if (in.len != 2 || !in.ptr) return 2;
+    if (in.ptr[0] != 'o' || in.ptr[1] != 'k') return 3;
+    printf("result_unwrap_slice_expr_bang_smoke: PASS len=%zu\n", in.len);
+    return 0;
+}

@@ -115,9 +115,25 @@ HDR
     "  return 0;\n" \
     "}\n" \
     "#ifdef CC_COMPTIME_EXEC\n" \
-    "/* Factory-body sugar: arg(i) == type_args.items[(i)].  Defined only in\n" \
-    "   compiled-factory TUs (CC_COMPTIME_EXEC), never in @comptime block TUs. */\n" \
-    "#define arg(i) (type_args.items[(i)])\n" \
+    "/* Factory-body sugar: arg(i) == type_args.items[(i)], bounds-checked.  An\n" \
+    "   out-of-range index reports the factory, the index and the arity, then\n" \
+    "   yields the empty fragment so the caller's factory-failed diagnostic\n" \
+    "   names the instance.  Never exit(): a factory body can run in-process\n" \
+    "   under the libtcc executor.  Defined only in compiled-factory TUs\n" \
+    "   (CC_COMPTIME_EXEC), never in @comptime block TUs. */\n" \
+    "static CCSlice cc__tpl_arg(CCSliceArray ta, long i, CCSlice gname) {\n" \
+    "  if (i < 0 || (unsigned long)i >= (unsigned long)ta.len) {\n" \
+    "    char m[256];\n" \
+    "    snprintf(m, sizeof(m), \"factory '%.*s': arg(%ld) is out of range \"\n" \
+    "             \"(%lu type argument%s)\", (int)gname.len,\n" \
+    "             (const char*)gname.ptr, i, (unsigned long)ta.len,\n" \
+    "             ta.len == 1 ? \"\" : \"s\");\n" \
+    "    cc_emit_error(m);\n" \
+    "    return cc_slice_empty();\n" \
+    "  }\n" \
+    "  return ta.items[i];\n" \
+    "}\n" \
+    "#define arg(i) cc__tpl_arg(type_args, (long)(i), generic_name)\n" \
     "#endif\n"
 
 #endif /* CC_COMPTIME_EMIT_TPL_PRELUDE_INC_H */

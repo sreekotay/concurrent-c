@@ -1,0 +1,13 @@
+/* A receiver keeps its own declared type when another function's
+ * parameter spells the same name: `Foo* p` in Foo_get must not turn
+ * main's value-typed `p` into a pointer receiver (the `&` stays). */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+typedef struct Foo { int x; } Foo;
+static int Foo_get(Foo* p) { return p->x; }
+static int Foo_twice(Foo* p) { return p->x * 2; }
+int main(void) {
+    Foo p = {41};
+    printf("%d %d\n", p.get(), p.twice());
+    return 0;
+}

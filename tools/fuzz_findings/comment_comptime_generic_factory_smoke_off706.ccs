@@ -1,0 +1,28 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_slice.cch>
+#include <stdio.h>
+
+/* CC_GENERIC_FACTORY: single canonical factory style, @emit ${...} grammar. */
+
+CC_GENERIC_FACTORY(Pair) {
+    (void)generic_name;
+    if (type_args.len < 2 || !mangled.ptr) return cc_slice_empty();
+    return @emit(`
+        typedef struct { ${type_args.items[0]} first; ${type_args.items[1]} second; } ${mangled};
+        static inline ${mangled} ${mangled}_make(${type_args.items[0]} a, ${type_args.items[1]} b) {
+            ${mangled} r; r.first = a; r.second = b; return r;
+        }`, arena);
+}
+
+int main(void) {
+    Pair::[int, double] p = Pair_int_double_make(3, 2.5);
+    Pair::[int/*x*/, int]    q = Pair_int_int_make(10, 20);
+
+    if (p.first != 3) return 1;
+    if (q.second != 20) return 2;
+
+    printf("comptime_generic_factory_smoke ok p=%d,%g q=%d,%d\n",
+           p.first, p.second, q.first, q.second);
+    return 0;
+}

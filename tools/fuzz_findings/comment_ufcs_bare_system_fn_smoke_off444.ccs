@@ -1,0 +1,19 @@
+/* Bare-name tier over the tcc-fed signature table: functions declared
+ * only in SYSTEM headers participate — the parse reports every declared
+ * function's signature, so `d.fabs()` (math.h) and `s.strlen()`
+ * (string.h) resolve with no textual TU/cch declaration in sight. */
+#include <ccc/std/prelude.cch>
+#include <math.h>
+#include <string.h>
+#include <stdio.h>
+
+int main(void) {
+    double d = -4.0;
+    double a = d.fabs();
+
+    const /*x*/char* s = "hello";
+    size_t n = s.strlen();
+
+    printf("%g %zu\n", a, n);
+    return 0;
+}

@@ -1,0 +1,14 @@
+/* A fragment that is not valid C fails at the use site, quoting the
+ * generated line — the factory author sees the C they produced. */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+
+CC_GENERIC_FACTORY(BadC, 1) {
+    return @emit(`typedef struct { ${arg(0)} v } ${mangled};`, arena);
+}
+
+int main(void) {
+    BadC::[int] b;
+    (void)b;
+    return 0;
+}

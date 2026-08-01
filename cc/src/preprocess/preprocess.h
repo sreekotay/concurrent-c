@@ -165,6 +165,9 @@ const char* cc_ufcs_family_members_for(const char* base);
 int cc_ufcs_family_accepts(const char* base, const char* method);
 int cc_ufcs_family_accepts_in_tu(const char* base, const char* method,
                                  const char* src, size_t n);
+/* True when `base` is a generic-factory instance emitted this TU (member
+ * set derived from the fragment; see cc_emit_plan_note_generic_instance). */
+int cc_ufcs_generic_instance_known(const char* base);
 /* Reset per-TU dest-trap dedup (also cleared with included-cch sources). */
 void cc_ufcs_reset_dest_trap_dedup(void);
 /* Map key hash/eq selection: declared convention
