@@ -214,7 +214,8 @@ struct AstNode {
     AstKind kind;
     char a[256];
     char b[256];
-    char c[256];
+    /* Params / long spans — nursery lower_c protos exceed 256 with source indent. */
+    char c[512];
     char d[256];
     char e[256];
     AstNode** kids;
@@ -2080,7 +2081,7 @@ static AstNode* parse_static_fn(Parser* p) {
         }
         p_next(p);
     }
-    char params[256];
+    char params[512];
     if (p0 >= p->i) params[0] = 0;
     else if (!span_text(p, p0, p->i, params, sizeof(params))) {
         parser_fail(p, name, "static fn params too long");
@@ -2964,19 +2965,26 @@ static AstNode* parse_typedef_fn_ptr(Parser* p) {
     return n;
 }
 
-/* [const] Ret[*] name(params); — file-scope prototype (no body). */
+/* [const] [struct] Ret[*] name(params); — file-scope prototype (no body). */
 static AstNode* parse_fn_proto(Parser* p) {
     int ri = p->i;
     int has_const = 0;
+    int has_struct = 0;
     if (ri < p->n && shadow_kw(p->toks[ri]) == SHADOW_KW_CONST) {
         has_const = 1;
         ri++;
     }
+    if (ri < p->n && shadow_kw(p->toks[ri]) == SHADOW_KW_STRUCT) {
+        has_struct = 1;
+        ri++;
+    }
     if (ri >= p->n) return NULL;
     Token rty = p->toks[ri];
-    if (rty.kind != TK_IDENT && shadow_kw(rty) != SHADOW_KW_INT &&
-        shadow_kw(rty) != SHADOW_KW_VOID && shadow_kw(rty) != SHADOW_KW_CHAR &&
-        shadow_kw(rty) != SHADOW_KW_SIZE_T && shadow_kw(rty) != SHADOW_KW_BOOL)
+    if (has_struct) {
+        if (rty.kind != TK_IDENT) return NULL;
+    } else if (rty.kind != TK_IDENT && shadow_kw(rty) != SHADOW_KW_INT &&
+               shadow_kw(rty) != SHADOW_KW_VOID && shadow_kw(rty) != SHADOW_KW_CHAR &&
+               shadow_kw(rty) != SHADOW_KW_SIZE_T && shadow_kw(rty) != SHADOW_KW_BOOL)
         return NULL;
     if (ri + 2 >= p->n) return NULL;
     int ni = ri + 1;
@@ -3004,7 +3012,8 @@ static AstNode* parse_fn_proto(Parser* p) {
         return NULL;
 
     if (has_const) p_next(p); /* const */
-    p_next(p); /* ret */
+    if (has_struct) p_next(p); /* struct */
+    p_next(p); /* ret / tag */
     if (is_ptr) p_next(p); /* * */
     Token name = p_next(p);
     p_next(p); /* ( */
@@ -3019,7 +3028,7 @@ static AstNode* parse_fn_proto(Parser* p) {
         }
         p_next(p);
     }
-    char params[256];
+    char params[512];
     if (p0 >= p->i) params[0] = 0;
     else if (!span_text(p, p0, p->i, params, sizeof(params))) {
         parser_fail(p, name, "fn proto params too long");
@@ -3031,13 +3040,25 @@ static AstNode* parse_fn_proto(Parser* p) {
     }
     AstNode* n = ast_new(p, AST_FN_PROTO);
     if (!n) return NULL;
-    if (has_const)
-        snprintf(n->a, sizeof(n->a), "const %.*s", (int)rty.spell.len, rty.spell.ptr);
-    else
-        slice_to(n->a, sizeof(n->a), rty.spell);
-    if (is_ptr) {
-        size_t al = strlen(n->a);
-        if (al + 1 < sizeof(n->a)) { n->a[al] = '*'; n->a[al + 1] = 0; }
+    {
+        char ty[256];
+        if (has_const && has_struct)
+            snprintf(ty, sizeof(ty), "const struct %.*s",
+                     (int)rty.spell.len, rty.spell.ptr);
+        else if (has_struct)
+            snprintf(ty, sizeof(ty), "struct %.*s",
+                     (int)rty.spell.len, rty.spell.ptr);
+        else if (has_const)
+            snprintf(ty, sizeof(ty), "const %.*s",
+                     (int)rty.spell.len, rty.spell.ptr);
+        else
+            snprintf(ty, sizeof(ty), "%.*s",
+                     (int)rty.spell.len, rty.spell.ptr);
+        if (is_ptr) {
+            size_t al = strlen(ty);
+            if (al + 1 < sizeof(ty)) { ty[al] = '*'; ty[al + 1] = 0; }
+        }
+        snprintf(n->a, sizeof(n->a), "%s", ty);
     }
     slice_to(n->b, sizeof(n->b), name.spell);
     snprintf(n->c, sizeof(n->c), "%s", params);
@@ -3221,7 +3242,12 @@ static AstNode* parse_external_inner(Parser* p) {
         if (n || p->err) return n;
     }
     if (shadow_kw(t) == SHADOW_KW_TYPEDEF) return parse_typedef_int(p);
-    if (shadow_kw(t) == SHADOW_KW_STRUCT) return parse_struct(p);
+    if (shadow_kw(t) == SHADOW_KW_STRUCT) {
+        /* `struct Tag *? name(...);` before `struct Tag { … }`. */
+        n = parse_fn_proto(p);
+        if (n || p->err) return n;
+        return parse_struct(p);
+    }
     if (peek_result_shape(p)) {
         n = parse_result_fn(p);
         if (n || p->err) return n;

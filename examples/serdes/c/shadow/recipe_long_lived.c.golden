@@ -41,7 +41,7 @@ static size_t store_key_logical_live_bytes(Store* store) {
 #line 27 "examples/serdes/c/shadow/recipe_long_lived.ccs"
 static void store_free(Store* store) {
     #line 28 "examples/serdes/c/shadow/recipe_long_lived.ccs"
-    if (!store)     return ;
+    if (!store) return;
     #line 29 "examples/serdes/c/shadow/recipe_long_lived.ccs"
     store->map_arena.destroy();
     #line 30 "examples/serdes/c/shadow/recipe_long_lived.ccs"
@@ -54,14 +54,14 @@ static void store_free(Store* store) {
 #line 34 "examples/serdes/c/shadow/recipe_long_lived.ccs"
 static CCResult_bool_CCError store_init(Store* store) {
     #line 35 "examples/serdes/c/shadow/recipe_long_lived.ccs"
-    if (!store)     return cc_err_CCResult_bool_CCError(CC_ERROR(CC_ERR_INVALID_ARG, "store_init without store"));
+    if (!store) return cc_err_CCResult_bool_CCError(CC_ERROR(CC_ERR_INVALID_ARG, "store_init without store"));
     #line 36 "examples/serdes/c/shadow/recipe_long_lived.ccs"
     *store = (Store){0};
 
     #line 38 "examples/serdes/c/shadow/recipe_long_lived.ccs"
     store->map_arena = cc_arena_heap(kilobytes(4));
     #line 39 "examples/serdes/c/shadow/recipe_long_lived.ccs"
-    if (!store->map_arena.valid())     return cc_err_CCResult_bool_CCError(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "map arena"));
+    if (!store->map_arena.valid()) return cc_err_CCResult_bool_CCError(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "map arena"));
 
     #line 41 "examples/serdes/c/shadow/recipe_long_lived.ccs"
     store->key_arena = cc_arena_heap(kilobytes(4));
@@ -91,7 +91,7 @@ static CCResult_bool_CCError store_init(Store* store) {
 #line 56 "examples/serdes/c/shadow/recipe_long_lived.ccs"
 static CCResult_CCSliceHdr_CCError store_anchor_key(Store* store, char[:] key) {
     #line 57 "examples/serdes/c/shadow/recipe_long_lived.ccs"
-    if (!store)     return cc_err_CCResult_CCSliceHdr_CCError(CC_ERROR(CC_ERR_INVALID_ARG, "anchor without store"));
+    if (!store) return cc_err_CCResult_CCSliceHdr_CCError(CC_ERROR(CC_ERR_INVALID_ARG, "anchor without store"));
     #line 58 "examples/serdes/c/shadow/recipe_long_lived.ccs"
     CCSliceHdr view = cc_slice_hdr(&key);
     #line 59 "examples/serdes/c/shadow/recipe_long_lived.ccs"
@@ -108,11 +108,11 @@ static CCResult_void_CCError store_insert_entry(Store* store, CCSliceHdr key, in
     #line 65 "examples/serdes/c/shadow/recipe_long_lived.ccs"
     Map_CCSliceHdr_int* entries = store ? store->entries : NULL;
     #line 66 "examples/serdes/c/shadow/recipe_long_lived.ccs"
-    if (!entries)     return cc_err_CCResult_void_CCError(CC_ERROR(CC_ERR_INVALID_ARG, "insert without entries"));
+    if (!entries) return cc_err_CCResult_void_CCError(CC_ERROR(CC_ERR_INVALID_ARG, "insert without entries"));
     #line 67 "examples/serdes/c/shadow/recipe_long_lived.ccs"
     int rc = Map_insert(entries, key, value);
     #line 68 "examples/serdes/c/shadow/recipe_long_lived.ccs"
-    if (rc != 0)     return cc_err_CCResult_void_CCError(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "insert"));
+    if (rc != 0) return cc_err_CCResult_void_CCError(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "insert"));
     #line 69 "examples/serdes/c/shadow/recipe_long_lived.ccs"
     return cc_ok_CCResult_void_CCError();
 }
@@ -123,7 +123,7 @@ static CCResult_bool_CCError store_put(Store* store, char[:] key, int value) {
     #line 73 "examples/serdes/c/shadow/recipe_long_lived.ccs"
     Map_CCSliceHdr_int* entries = store ? store->entries : NULL;
     #line 74 "examples/serdes/c/shadow/recipe_long_lived.ccs"
-    if (!entries)     return cc_err_CCResult_bool_CCError(CC_ERROR(CC_ERR_INVALID_ARG, "put without store"));
+    if (!entries) return cc_err_CCResult_bool_CCError(CC_ERROR(CC_ERR_INVALID_ARG, "put without store"));
 
     #line 76 "examples/serdes/c/shadow/recipe_long_lived.ccs"
     CCSliceHdr query = cc_slice_hdr(&key);
@@ -156,7 +156,7 @@ static CCResult_bool_CCError store_put(Store* store, char[:] key, int value) {
 #line 88 "examples/serdes/c/shadow/recipe_long_lived.ccs"
 static int* store_get(Store* store, char[:] key) {
     #line 89 "examples/serdes/c/shadow/recipe_long_lived.ccs"
-    if (!store || !store->entries)     return NULL;
+    if (!store || !store->entries) return NULL;
     #line 90 "examples/serdes/c/shadow/recipe_long_lived.ccs"
     return store->entries->get_ptr(key.hdr());
 }
@@ -165,9 +165,9 @@ static int* store_get(Store* store, char[:] key) {
 #line 93 "examples/serdes/c/shadow/recipe_long_lived.ccs"
 static bool store_delete(Store* store, char[:] key) {
     #line 94 "examples/serdes/c/shadow/recipe_long_lived.ccs"
-    if (!store || !store->entries)     return false;
+    if (!store || !store->entries) return false;
     #line 95 "examples/serdes/c/shadow/recipe_long_lived.ccs"
-    if (!store->entries->remove(key.hdr()))     return false;
+    if (!store->entries->remove(key.hdr())) return false;
     #line 96 "examples/serdes/c/shadow/recipe_long_lived.ccs"
     store->key_delete_bytes += key.len;
     #line 97 "examples/serdes/c/shadow/recipe_long_lived.ccs"
@@ -198,7 +198,7 @@ int main(void) {
     #line 109 "examples/serdes/c/shadow/recipe_long_lived.ccs"
     CCArena request_arena = cc_arena_heap(kilobytes(1));
     #line 111 "examples/serdes/c/shadow/recipe_long_lived.ccs"
-    if (!cc_arena_valid(&request_arena))     return 1;
+    if (!cc_arena_valid(&request_arena)) return 1;
 
     #line 113 "examples/serdes/c/shadow/recipe_long_lived.ccs"
     for (int request_id = 0; request_id < 3; request_id++) {
@@ -223,10 +223,10 @@ int main(void) {
     #line 120 "examples/serdes/c/shadow/recipe_long_lived.ccs"
     int* user1 = store_get(store, char_to_slice("user:1"));
     #line 121 "examples/serdes/c/shadow/recipe_long_lived.ccs"
-    if (!user1 || *user1 != 10)     return 2;
+    if (!user1 || *user1 != 10) return 2;
 
     #line 123 "examples/serdes/c/shadow/recipe_long_lived.ccs"
-    if (!store_delete(store, char_to_slice("user:1")))     return 3;
+    if (!store_delete(store, char_to_slice("user:1"))) return 3;
 
     #line 125 "examples/serdes/c/shadow/recipe_long_lived.ccs"
     Map_CCSliceHdr_int* entries = store.entries;

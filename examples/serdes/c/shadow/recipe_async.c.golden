@@ -22,14 +22,14 @@
 #line 20 "examples/serdes/c/shadow/recipe_async.ccs"
 int echo_through_channel(CCChanTx tx, CCChanRx rx, int value) {
     #line 21 "examples/serdes/c/shadow/recipe_async.ccs"
-    if (cc_channel_send(tx, value) != 0)         #line 22 "examples/serdes/c/shadow/recipe_async.ccs"
-        return -1;
+    if (cc_channel_send(tx, value) != 0) #line 22 "examples/serdes/c/shadow/recipe_async.ccs"
+return -1;
 
     #line 24 "examples/serdes/c/shadow/recipe_async.ccs"
     int received = 0;
     #line 25 "examples/serdes/c/shadow/recipe_async.ccs"
-    if (cc_channel_recv(rx, &received) != 0)         #line 26 "examples/serdes/c/shadow/recipe_async.ccs"
-        return -2;
+    if (cc_channel_recv(rx, &received) != 0) #line 26 "examples/serdes/c/shadow/recipe_async.ccs"
+return -2;
 
     #line 28 "examples/serdes/c/shadow/recipe_async.ccs"
     return received;
@@ -51,8 +51,8 @@ int pipeline(CCChanTx tx, CCChanRx rx, int value) {
     #line 39 "examples/serdes/c/shadow/recipe_async.ccs"
     int echoed = echo_through_channel(tx, rx, value);
     #line 40 "examples/serdes/c/shadow/recipe_async.ccs"
-    if (echoed < 0)         #line 41 "examples/serdes/c/shadow/recipe_async.ccs"
-        return echoed;
+    if (echoed < 0) #line 41 "examples/serdes/c/shadow/recipe_async.ccs"
+return echoed;
     #line 42 "examples/serdes/c/shadow/recipe_async.ccs"
     return bump(echoed);
 }

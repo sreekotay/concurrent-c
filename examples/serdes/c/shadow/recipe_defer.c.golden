@@ -34,26 +34,26 @@ CCResult_void_CCError write_report(const char* path, int inject_error) {
     #line 25 "examples/serdes/c/shadow/recipe_defer.ccs"
     FILE* f = fopen(path, "w");
     #line 26 "examples/serdes/c/shadow/recipe_defer.ccs"
-    if (!f)     __cc_retval = cc_err_CCResult_void_CCError(CC_ERROR(CC_ERR_IO, "fopen failed"));
-    __cc_ret_set = 1;
-    __cc_ret_err = 1;
-    goto __cc_cleanup;
+    if (!f) __cc_retval = cc_err_CCResult_void_CCError(CC_ERROR(CC_ERR_IO, "fopen failed"));
+__cc_ret_set = 1;
+__cc_ret_err = 1;
+goto __cc_cleanup;
 
     #line 36 "examples/serdes/c/shadow/recipe_defer.ccs"
-    if (fputs("line 1\n", f) < 0)     __cc_retval = cc_err_CCResult_void_CCError(CC_ERROR(CC_ERR_IO, "write 1 failed"));
-    __cc_ret_set = 1;
-    __cc_ret_err = 1;
-    goto __cc_cleanup;
+    if (fputs("line 1\n", f) < 0) __cc_retval = cc_err_CCResult_void_CCError(CC_ERROR(CC_ERR_IO, "write 1 failed"));
+__cc_ret_set = 1;
+__cc_ret_err = 1;
+goto __cc_cleanup;
     #line 37 "examples/serdes/c/shadow/recipe_defer.ccs"
-    if (inject_error)     __cc_retval = cc_err_CCResult_void_CCError(CC_ERROR(CC_ERR_INVALID_ARG, "injected failure"));
-    __cc_ret_set = 1;
-    __cc_ret_err = 1;
-    goto __cc_cleanup;
+    if (inject_error) __cc_retval = cc_err_CCResult_void_CCError(CC_ERROR(CC_ERR_INVALID_ARG, "injected failure"));
+__cc_ret_set = 1;
+__cc_ret_err = 1;
+goto __cc_cleanup;
     #line 38 "examples/serdes/c/shadow/recipe_defer.ccs"
-    if (fputs("line 2\n", f) < 0)     __cc_retval = cc_err_CCResult_void_CCError(CC_ERROR(CC_ERR_IO, "write 2 failed"));
-    __cc_ret_set = 1;
-    __cc_ret_err = 1;
-    goto __cc_cleanup;
+    if (fputs("line 2\n", f) < 0) __cc_retval = cc_err_CCResult_void_CCError(CC_ERROR(CC_ERR_IO, "write 2 failed"));
+__cc_ret_set = 1;
+__cc_ret_err = 1;
+goto __cc_cleanup;
 
     #line 40 "examples/serdes/c/shadow/recipe_defer.ccs"
     __cc_retval = cc_ok_CCResult_void_CCError();
