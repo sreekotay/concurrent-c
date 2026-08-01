@@ -256,9 +256,9 @@ int main(void) {
     g_excl = NULL;
 
     #line 98 "examples/serdes/c/shadow/recipe_exclusive.ccs"
-    if (g_shared.value != expect || private_sum != expect)     __cc_retval = 1;
-    __cc_ret_set = 1;
-    goto __cc_cleanup;
+    if (g_shared.value != expect || private_sum != expect) __cc_retval = 1;
+__cc_ret_set = 1;
+goto __cc_cleanup;
     #line 99 "examples/serdes/c/shadow/recipe_exclusive.ccs"
     {
         __typeof__(cc_println("OK")) __r = cc_println("OK");

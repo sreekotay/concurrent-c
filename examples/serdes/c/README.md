@@ -118,6 +118,7 @@ Experiment smokes stay out of the default driver path:
 bash examples/serdes/c/shadow/diff_lower_header.sh
 bash examples/serdes/c/shadow/diff_stdlib_exec.sh
 bash examples/serdes/c/shadow/diff_stdlib_async_runtime.sh
+bash examples/serdes/c/shadow/diff_stdlib_nursery.sh
 ```
 
 Compiler harvest (production, independent of this tree):
@@ -155,14 +156,17 @@ on the normalized C surface and host `cc -c` consumes the product:
 
 - `cc/include/ccc/cc_exec.cch` → `diff_stdlib_exec.sh`
 - `cc/include/ccc/cc_async_runtime.cch` → `diff_stdlib_async_runtime.sh`
-  (`const T*` returns; unlocks the same family on nursery/io)
+  (`const T*` returns)
+- `cc/include/ccc/cc_nursery.cch` → `diff_stdlib_nursery.sh`
+  (`const struct T*` protos; long static-inline param spans; comptime
+  `#ifdef` normalized away — production blanks the body, shadow omits it)
 
 Production lower of these headers is near-passthrough; shadow keeps the
 same API with `#pragma once` + `#line` instead of the `#ifndef` guard dance.
 
-Larger stdlib headers (`cc_result`, `cc_arena`, …) still hit the coverage /
-cpp walls — grow the whitelist only when the next header is a clean
-beachhead, not a general C parser.
+Larger stdlib headers (`cc_result`, `cc_arena`, `cc_io_error`, …) still hit
+the coverage / cpp walls — grow the whitelist only when the next header is
+a clean beachhead, not a general C parser.
 
 ## Working rules
 

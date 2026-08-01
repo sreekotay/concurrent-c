@@ -94,7 +94,7 @@ static int cc_int_twice(int v) {
 #line 59 "examples/serdes/c/shadow/recipe_ufcs.ccs"
 static CCResult_int_CCError get(int v) {
     #line 60 "examples/serdes/c/shadow/recipe_ufcs.ccs"
-    if (v < 0)     return (CCResult_int_CCError){ .ok = false,
+    if (v < 0) return (CCResult_int_CCError){ .ok = false,
         .u.error = { .message = "negative" } };
     #line 62 "examples/serdes/c/shadow/recipe_ufcs.ccs"
     return (CCResult_int_CCError){ .ok = true, .u.value = v };

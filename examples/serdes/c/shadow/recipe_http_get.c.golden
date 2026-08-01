@@ -71,7 +71,7 @@ static void fetch_one(int idx, int* status_p, size_t* body_len_p) {
                 if (__cc_uw_is_err(__r)) {
                     #line 45 "examples/serdes/c/shadow/recipe_http_get.ccs"
                     CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
-        return ;
+        return;
                 }
             }
         }
@@ -177,9 +177,9 @@ int main(void) {
     #line 75 "examples/serdes/c/shadow/recipe_http_get.ccs"
     for (int i = 0; i < NUM_URLS; i++) {
         #line 76 "examples/serdes/c/shadow/recipe_http_get.ccs"
-        if (status[i] == 200)         success++;
-        else if (status[i] == -1)         #line 77 "examples/serdes/c/shadow/recipe_http_get.ccs"
-        network_errors++;
+        if (status[i] == 200) success++;
+        else if (status[i] == -1) #line 77 "examples/serdes/c/shadow/recipe_http_get.ccs"
+network_errors++;
         #line 78 "examples/serdes/c/shadow/recipe_http_get.ccs"
         const char* url = g_urls[i];
         #line 79 "examples/serdes/c/shadow/recipe_http_get.ccs"

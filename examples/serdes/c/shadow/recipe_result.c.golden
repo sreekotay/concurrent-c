@@ -35,11 +35,11 @@
 #line 31 "examples/serdes/c/shadow/recipe_result.ccs"
 CCResult_int_CCError read_config_value(const char* key) {
     #line 32 "examples/serdes/c/shadow/recipe_result.ccs"
-    if (!key || key[0] == '\0')     return cc_err_CCResult_int_CCError(CC_ERROR(CC_ERR_INVALID_ARG, "empty key"));
+    if (!key || key[0] == '\0') return cc_err_CCResult_int_CCError(CC_ERROR(CC_ERR_INVALID_ARG, "empty key"));
     #line 33 "examples/serdes/c/shadow/recipe_result.ccs"
-    if (strcmp(key, "timeout") == 0)     return cc_ok_CCResult_int_CCError(30);
+    if (strcmp(key, "timeout") == 0) return cc_ok_CCResult_int_CCError(30);
     #line 34 "examples/serdes/c/shadow/recipe_result.ccs"
-    if (strcmp(key, "max_retries") == 0)     return cc_ok_CCResult_int_CCError(3);
+    if (strcmp(key, "max_retries") == 0) return cc_ok_CCResult_int_CCError(3);
     #line 35 "examples/serdes/c/shadow/recipe_result.ccs"
     return cc_err_CCResult_int_CCError(CC_ERROR(CC_ERR_NOT_FOUND, "key not found"));
 }

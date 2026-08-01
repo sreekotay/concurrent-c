@@ -159,7 +159,7 @@ static void run_test_client(void) {
         #line 82 "examples/serdes/c/shadow/recipe_tcp_echo.ccs"
         cc_channel_close(sock);
         #line 83 "examples/serdes/c/shadow/recipe_tcp_echo.ccs"
-        return ;
+        return;
         }
     }
     #line 85 "examples/serdes/c/shadow/recipe_tcp_echo.ccs"
@@ -192,11 +192,11 @@ static void run_test_client(void) {
         #line 91 "examples/serdes/c/shadow/recipe_tcp_echo.ccs"
         cc_channel_close(sock);
         #line 92 "examples/serdes/c/shadow/recipe_tcp_echo.ccs"
-        return ;
+        return;
         }
     }
     #line 94 "examples/serdes/c/shadow/recipe_tcp_echo.ccs"
-    if (!ok)     got = 0;
+    if (!ok) got = 0;
     #line 95 "examples/serdes/c/shadow/recipe_tcp_echo.ccs"
     CCSlice got_slice = { .ptr = buf, .len = got, .alen = got };
     #line 96 "examples/serdes/c/shadow/recipe_tcp_echo.ccs"
@@ -231,7 +231,7 @@ static bool parse_test_flag(int argc, char** argv) {
     TcpEchoOpts opts = {0};
     /* Pure parse — no usage ritual; unknown flags are just "not test mode". */
     #line 108 "examples/serdes/c/shadow/recipe_tcp_echo.ccs"
-    if (!cc_parse_args(TcpEchoOpts, argc, argv, &a, &opts))     return false;
+    if (!cc_parse_args(TcpEchoOpts, argc, argv, &a, &opts)) return false;
     #line 109 "examples/serdes/c/shadow/recipe_tcp_echo.ccs"
     return opts.test;
 }

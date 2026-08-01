@@ -50,7 +50,7 @@ int main(void) {
         #line 22 "examples/serdes/c/shadow/recipe_arena.ccs"
         char* scratch = cc_arena_alloc_T_count(char, &arena, 1024);
         #line 23 "examples/serdes/c/shadow/recipe_arena.ccs"
-        if (scratch)         scratch[0] = '\0';
+        if (scratch) scratch[0] = '\0';
         #line 24 "examples/serdes/c/shadow/recipe_arena.ccs"
         cc_arena_checkpoint_restore(&cp);
     }

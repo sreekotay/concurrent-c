@@ -96,9 +96,9 @@ static double Pair_int_double_span(Pair_int_double* pr) {
 #line 55 "examples/serdes/c/shadow/recipe_generics.ccs"
 static CCResult_int_CCError Pair_int_int_at(Pair_int_int* pr, int i) {
     #line 56 "examples/serdes/c/shadow/recipe_generics.ccs"
-    if (i == 0)     return cc_ok_CCResult_int_CCError(pr->first);
+    if (i == 0) return cc_ok_CCResult_int_CCError(pr->first);
     #line 57 "examples/serdes/c/shadow/recipe_generics.ccs"
-    if (i == 1)     return cc_ok_CCResult_int_CCError(pr->second);
+    if (i == 1) return cc_ok_CCResult_int_CCError(pr->second);
     #line 58 "examples/serdes/c/shadow/recipe_generics.ccs"
     return cc_err_CCResult_int_CCError(CC_ERROR(CC_ERR_INVALID_ARG, "pair index out of range"));
 }

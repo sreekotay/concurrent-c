@@ -284,8 +284,10 @@ static int shadow_emit_preamble(AstNode* st, CEmit* out, TapeCache* cache) {
     return shadow_emit_preamble_ex(st, out, cache, 0);
 }
 
-/* Prefer source line indent when present. */
+/* Prefer source line indent when present.
+ * Explicit empty fallback means same-line continuation (e.g. `if (c) stmt`). */
 static const char* shadow_stmt_indent(AstNode* st, const char* fallback) {
+    if (fallback && !fallback[0]) return fallback;
     if (st && st->indent[0]) return st->indent;
     return fallback ? fallback : "";
 }
@@ -1321,6 +1323,15 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
     case AST_RETURN_EXPR: {
         char expr[288];
         shadow_rewrite_ufcs(expr, sizeof(expr), st->a, NULL);
+        if (!expr[0]) {
+            if (use_cleanup) {
+                return cemit_fmt(out,
+                    "%s__cc_ret_set = 1;\n"
+                    "%sgoto __cc_cleanup;\n",
+                    indent, indent);
+            }
+            return cemit_fmt(out, "%sreturn;\n", indent);
+        }
         if (use_cleanup) {
             return cemit_fmt(out,
                 "%s__cc_retval = %s;\n"
@@ -1979,7 +1990,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             break;
         }
         case AST_TYPEDEF_FN_PTR: {
-            char params[288];
+            char params[512];
             shadow_rewrite_attr_expr(params, sizeof(params),
                                      it->c[0] ? it->c : "void");
             if (!cemit_fmt(out, "typedef %s (*%s)(%s);\n", it->a, it->b, params))
@@ -1987,7 +1998,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             break;
         }
         case AST_FN_PROTO: {
-            char params[288];
+            char params[512];
             shadow_rewrite_attr_expr(params, sizeof(params),
                                      it->c[0] ? it->c : "void");
             if (!cemit_fmt(out, "%s %s(%s);\n", it->a, it->b, params)) return 0;
@@ -2086,7 +2097,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 out->err = 1;
                 return 0;
             }
-            char params[288];
+            char params[512];
             shadow_rewrite_attr_expr(params, sizeof(params),
                                      it->c[0] ? it->c : "void");
             const char* inl =
