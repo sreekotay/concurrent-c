@@ -130,7 +130,8 @@ bash examples/serdes/c/shadow/diff_stdlib_exec.sh
 bash examples/serdes/c/shadow/diff_stdlib_async_runtime.sh
 bash examples/serdes/c/shadow/diff_stdlib_nursery.sh
 bash examples/serdes/c/shadow/diff_stdlib_chan_handle.sh
-bash examples/serdes/c/shadow/run_hello_shadow.sh
+bash examples/serdes/c/shadow/diff_stdlib_io_error.sh
+bash examples/serdes/c/shadow/run_recipes_shadow.sh
 ```
 
 Compiler harvest (production, independent of this tree):
@@ -175,19 +176,23 @@ on the normalized C surface and host `cc -c` consumes the product:
 - `cc/include/ccc/cc_chan_handle.cch` → `diff_stdlib_chan_handle.sh`
   (forward `struct Tag;`, `struct Tag*` fields, one-line anon typedefs;
   nested `__CC_CHAN_*_DEFINED` guards normalized away)
+- `cc/include/ccc/cc_io_error.cch` → `diff_stdlib_io_error.sh`
+  (`#define` passthrough, `_Generic` macro, `CC_DECL_RESULT_SPEC` raw line,
+  `#if defined` inside `switch` via body span; host-cc unwrap helpers on `.c`)
 
-**Behavioral (`.ccs` product):** `run_hello_shadow.sh` — shadow-lower
-`examples/hello.ccs`, host-`cc` + link `concurrent_c.o`, assert task output.
+**Behavioral (`.ccs` product):** `run_recipes_shadow.sh` — shadow-lower
+`hello` + result / arena / capture / timeout recipes, host-`cc` + link
+`concurrent_c.o`, assert output. (`run_hello_shadow.sh` remains a minimal
+subset.)
 
 Production lower of these headers is near-passthrough; shadow keeps the
 same API with `#pragma once` + `#line` instead of the `#ifndef` guard dance.
 
-Larger stdlib headers (`cc_result`, `cc_arena`, full `cc_io_error`, …) still
-hit coverage / cpp walls. Trimmed frags cover enum + `@as` + `switch` +
-`const T*` returns; grow the whitelist only when the next header is a clean
-beachhead, not a general C parser. Keep pushing this parallel path; do not
-force a merge into the TCC-heavy driver until the transform boundary is
-boring.
+Larger stdlib headers (`cc_result`, `cc_arena`, …) still hit coverage / cpp
+walls. Trimmed frags cover enum + `@as` + `switch` + `const T*` returns;
+grow the whitelist only when the next header is a clean beachhead, not a
+general C parser. Keep pushing this parallel path; do not force a merge
+into the TCC-heavy driver until the transform boundary is boring.
 
 ## Working rules
 

@@ -122,7 +122,8 @@ int main(int argc, char** argv) {
     }
 
     CEmit emit = {0};
-    if (!shadow_emit(items, n, &cache, &emit, kind, pp.pass_inc, pp.npass_inc)) {
+    if (!shadow_emit(items, n, &cache, &emit, kind, pp.pass_inc, pp.npass_inc,
+                     pp.pass_def, pp.npass_def)) {
         fprintf(stderr, "%s:1:1: error: emit failed\n", in_path);
         pp_free_macros(&pp);
         free(emit.buf);

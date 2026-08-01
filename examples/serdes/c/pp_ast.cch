@@ -214,7 +214,10 @@ typedef enum {
     /* typedef enum [Tag]? { enumerators } Alias; — a=tag b=alias d=body */
     AST_TYPEDEF_ENUM,
     /* switch (expr) { body } — a=expr d=body text */
-    AST_SWITCH
+    AST_SWITCH,
+    /* File-scope macro invocation kept as text — a=full `NAME(...);` span.
+     * Beachhead: CC_DECL_RESULT_SPEC(...); */
+    AST_RAW_LINE
 } AstKind;
 
 typedef struct AstNode AstNode;
@@ -3527,6 +3530,24 @@ static AstNode* parse_external_inner(Parser* p) {
         n = parse_fn_proto(p);
         if (n || p->err) return n;
     }
+    /* CC_DECL_RESULT_SPEC(...); — keep as text for host expand via includes. */
+    if (t.kind == TK_IDENT && spell_eq(t.spell, "CC_DECL_RESULT_SPEC") &&
+        p->i + 1 < p->n && tok_eq(p->toks[p->i + 1], TK_PUNCT, "(")) {
+        int a0 = p->i;
+        p_next(p); /* name */
+        if (!skip_parens(p)) {
+            parser_fail(p, p_peek(p), "unterminated CC_DECL_RESULT_SPEC(...)");
+            return NULL;
+        }
+        p_accept(p, TK_PUNCT, ";");
+        n = ast_new(p, AST_RAW_LINE);
+        if (!n) return NULL;
+        if (!span_text(p, a0, p->i, n->a, sizeof(n->a))) {
+            parser_fail(p, t, "CC_DECL_RESULT_SPEC span too long");
+            return NULL;
+        }
+        return n;
+    }
     parser_fail(p, t, "unexpected token (shadow subset cannot lower this yet)");
     return NULL;
 }
@@ -3636,6 +3657,7 @@ static const char* ast_kind_name(AstKind k) {
     case AST_DO_WHILE: return "do_while";
     case AST_GLOBAL_ARR: return "global_arr";
     case AST_TYPEDEF_ENUM: return "typedef_enum";
+    case AST_RAW_LINE: return "raw_line";
     case AST_SWITCH: return "switch";
 }
     return "?";

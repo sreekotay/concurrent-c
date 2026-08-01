@@ -1843,9 +1843,11 @@ static int shadow_collect_spawns(AstNode* st, AstNode** spawns, int* nspawns,
 }
 
 /* Shared lower: same AST → C text; H adds #pragma once and rejects fn bodies.
- * pass_inc: top-level #include <...> lines from stage 2 (not spliced). */
+ * pass_inc: top-level #include <...> lines from stage 2 (not spliced).
+ * pass_def: top-level #define lines preserved for .h API surface. */
 static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
-                       ShadowEmitKind kind, char pass_inc[][256], int npass_inc) {
+                       ShadowEmitKind kind, char pass_inc[][256], int npass_inc,
+                       char pass_def[][512], int npass_def) {
     memset(out, 0, sizeof(*out));
     if (kind == SHADOW_EMIT_H) {
         if (!cemit_str(out,
@@ -1876,6 +1878,76 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
         if (!cemit_fmt(out, "%s\n", line)) return 0;
     }
     if (npass_inc && !cemit_str(out, "\n")) return 0;
+
+    for (int i = 0; i < npass_def; i++) {
+        if (!cemit_fmt(out, "%s\n", pass_def[i])) return 0;
+    }
+    if (npass_def && !cemit_str(out, "\n")) return 0;
+
+    /* Host-cc path has no visit_codegen rewrite of unwrap macros. Cast through
+     * (T*)(void*)&x so unused _Generic arms stay type-valid (same as ccc). */
+    if (kind == SHADOW_EMIT_C) {
+        if (!cemit_str(out,
+                "#undef __cc_uw_is_err\n"
+                "#undef __cc_uw_value\n"
+                "#undef __cc_uw_err_at\n"
+                "#define __cc_uw_is_err(__x__) _Generic((__x__), "
+                "CCResult_int_CCError: "
+                "(!((CCResult_int_CCError*)(void*)&(__x__))->ok), "
+                "CCResult_bool_CCError: "
+                "(!((CCResult_bool_CCError*)(void*)&(__x__))->ok), "
+                "CCResult_char_CCError: "
+                "(!((CCResult_char_CCError*)(void*)&(__x__))->ok), "
+                "CCResult_size_t_CCError: "
+                "(!((CCResult_size_t_CCError*)(void*)&(__x__))->ok), "
+                "CCResult_voidptr_CCError: "
+                "(!((CCResult_voidptr_CCError*)(void*)&(__x__))->ok), "
+                "CCResult_charptr_CCError: "
+                "(!((CCResult_charptr_CCError*)(void*)&(__x__))->ok), "
+                "CCResult_void_CCError: "
+                "(!((CCResult_void_CCError*)(void*)&(__x__))->ok), "
+                "default: (*(void* const*)(void*)&(__x__) == (void*)0))\n"
+                "#define __cc_uw_value(__x__) _Generic((__x__), "
+                "CCResult_int_CCError: "
+                "((CCResult_int_CCError*)(void*)&(__x__))->u.value, "
+                "CCResult_bool_CCError: "
+                "((CCResult_bool_CCError*)(void*)&(__x__))->u.value, "
+                "CCResult_char_CCError: "
+                "((CCResult_char_CCError*)(void*)&(__x__))->u.value, "
+                "CCResult_size_t_CCError: "
+                "((CCResult_size_t_CCError*)(void*)&(__x__))->u.value, "
+                "CCResult_voidptr_CCError: "
+                "((CCResult_voidptr_CCError*)(void*)&(__x__))->u.value, "
+                "CCResult_charptr_CCError: "
+                "((CCResult_charptr_CCError*)(void*)&(__x__))->u.value, "
+                "default: (__x__))\n"
+                "#define __cc_uw_err_at(__x__, __e__, __f__, __l__) _Generic((__x__), "
+                "CCResult_int_CCError: "
+                "(cc_rt_diag_record_unwrap_site(__f__, __l__), "
+                "((CCResult_int_CCError*)(void*)&(__x__))->u.error), "
+                "CCResult_bool_CCError: "
+                "(cc_rt_diag_record_unwrap_site(__f__, __l__), "
+                "((CCResult_bool_CCError*)(void*)&(__x__))->u.error), "
+                "CCResult_char_CCError: "
+                "(cc_rt_diag_record_unwrap_site(__f__, __l__), "
+                "((CCResult_char_CCError*)(void*)&(__x__))->u.error), "
+                "CCResult_size_t_CCError: "
+                "(cc_rt_diag_record_unwrap_site(__f__, __l__), "
+                "((CCResult_size_t_CCError*)(void*)&(__x__))->u.error), "
+                "CCResult_voidptr_CCError: "
+                "(cc_rt_diag_record_unwrap_site(__f__, __l__), "
+                "((CCResult_voidptr_CCError*)(void*)&(__x__))->u.error), "
+                "CCResult_charptr_CCError: "
+                "(cc_rt_diag_record_unwrap_site(__f__, __l__), "
+                "((CCResult_charptr_CCError*)(void*)&(__x__))->u.error), "
+                "CCResult_void_CCError: "
+                "(cc_rt_diag_record_unwrap_site(__f__, __l__), "
+                "((CCResult_void_CCError*)(void*)&(__x__))->u.error), "
+                "default: (cc_rt_diag_record_unwrap_site(__f__, __l__), "
+                "__cc_err_null_at(__e__, __f__, __l__)))\n"
+                "\n"))
+            return 0;
+    }
 
     ShadowCtx line_ctx = { .cache = cache };
 
@@ -2340,6 +2412,9 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             if (!cemit_fmt(out, "%s %s[] = %s;\n", it->a, it->b, it->c))
                 return 0;
             break;
+        case AST_RAW_LINE:
+            if (!cemit_fmt(out, "%s\n", it->a)) return 0;
+            break;
         case AST_AT_STMT:
             if (!cemit_fmt(out, "/* @%s */\n", it->a)) return 0;
             break;
@@ -2393,9 +2468,9 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
 }
 
 static int shadow_emit_c(AstNode** items, int n, TapeCache* cache, CEmit* out) {
-    return shadow_emit(items, n, cache, out, SHADOW_EMIT_C, NULL, 0);
+    return shadow_emit(items, n, cache, out, SHADOW_EMIT_C, NULL, 0, NULL, 0);
 }
 
 static int shadow_emit_h(AstNode** items, int n, TapeCache* cache, CEmit* out) {
-    return shadow_emit(items, n, cache, out, SHADOW_EMIT_H, NULL, 0);
+    return shadow_emit(items, n, cache, out, SHADOW_EMIT_H, NULL, 0, NULL, 0);
 }

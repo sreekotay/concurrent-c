@@ -71,7 +71,8 @@ static int lower_file(TapeCache* cache, CCArena* arena, const char* name,
         pp_free_macros(&pp);
         return 0;
     }
-    int ok = shadow_emit(items, n, cache, out, kind, pp.pass_inc, pp.npass_inc);
+    int ok = shadow_emit(items, n, cache, out, kind, pp.pass_inc, pp.npass_inc,
+                         pp.pass_def, pp.npass_def);
     pp_free_macros(&pp);
     return ok;
 }
@@ -347,10 +348,20 @@ int main(void) {
     {
         char cmd[512];
         snprintf(cmd, sizeof(cmd),
-                 "bash examples/serdes/c/shadow/run_hello_shadow.sh");
+                 "bash examples/serdes/c/shadow/diff_stdlib_io_error.sh");
         int rc = system(cmd);
         if (rc != 0) {
-            printf("FAIL: run_hello_shadow.sh rc=%d\n", rc);
+            printf("FAIL: diff_stdlib_io_error.sh rc=%d\n", rc);
+            return 1;
+        }
+    }
+    {
+        char cmd[512];
+        snprintf(cmd, sizeof(cmd),
+                 "bash examples/serdes/c/shadow/run_recipes_shadow.sh");
+        int rc = system(cmd);
+        if (rc != 0) {
+            printf("FAIL: run_recipes_shadow.sh rc=%d\n", rc);
             return 1;
         }
     }

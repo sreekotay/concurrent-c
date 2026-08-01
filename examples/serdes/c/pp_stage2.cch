@@ -84,6 +84,9 @@ typedef struct {
     /* Top-level #include <...> lines preserved for C/H emit (not spliced). */
     char pass_inc[PASS_INC_CAP][256];
     int npass_inc;
+    /* Top-level #define lines preserved for .h API surface. */
+    char pass_def[PASS_INC_CAP][512];
+    int npass_def;
 } Pp;
 
 static void pp_add_sys_inc(Pp* pp, const char* path) {
@@ -95,6 +98,33 @@ static int pp_add_passthrough_include(Pp* pp, const char* line) {
     if (!pp || !line || pp->npass_inc >= PASS_INC_CAP) return 0;
     snprintf(pp->pass_inc[pp->npass_inc], sizeof(pp->pass_inc[0]), "%s", line);
     pp->npass_inc++;
+    return 1;
+}
+
+static int pp_add_passthrough_define(Pp* pp, const char* line) {
+    if (!pp || !line || !line[0] || pp->npass_def >= PASS_INC_CAP) return 0;
+    snprintf(pp->pass_def[pp->npass_def], sizeof(pp->pass_def[0]), "%s", line);
+    pp->npass_def++;
+    return 1;
+}
+
+/* Logical line containing `tok` (stage-1 already spliced '\\' joins). */
+static int pp_capture_dir_line(Pp* pp, Token tok, char* dst, size_t cap) {
+    Frame* fr;
+    FileTape* ft;
+    size_t i, j, n;
+    if (!pp || !dst || !cap || pp->nf <= 0) return 0;
+    fr = &pp->frames[pp->nf - 1];
+    ft = fr->tape;
+    if (!ft || !ft->bytes) return 0;
+    i = tok.offset;
+    while (i > 0 && ft->bytes[i - 1] != '\n') i--;
+    j = i;
+    while (j < ft->len && ft->bytes[j] != '\n' && ft->bytes[j] != '\r') j++;
+    n = j - i;
+    if (n >= cap) n = cap - 1;
+    memcpy(dst, ft->bytes + i, n);
+    dst[n] = 0;
     return 1;
 }
 
@@ -188,12 +218,37 @@ static int pp_raw_next(Pp* pp, Token* out) {
     return 1;
 }
 
-/* Consume rest of logical line (stop before next bol token). */
+/* Byte offset of the first char of the physical line containing `off`. */
+static size_t pp_line_start(FileTape* ft, size_t off) {
+    if (!ft || !ft->bytes || off > ft->len) return 0;
+    while (off > 0 && ft->bytes[off - 1] != '\n') off--;
+    return off;
+}
+
+/* Skip remaining tokens on the current directive line only.
+ * Anchor to the last-consumed token's line — not the next peek. After
+ * `#include "x"` the next peek is already the following line; using that
+ * as line0 would skip the next declaration. */
 static int pp_skip_line(Pp* pp) {
     Token t;
+    Frame* fr;
+    size_t line0;
+    if (pp->nf <= 0) return 0;
+    fr = &pp->frames[pp->nf - 1];
+    if (!fr->tape || !fr->tape->bytes || fr->tape->len == 0) {
+        /* Synth / empty tape: no line structure; nothing more to skip. */
+        return 1;
+    }
+    if (fr->i > 0)
+        line0 = pp_line_start(fr->tape, fr->tape->toks[fr->i - 1].offset);
+    else if (pp_raw_peek(pp, &t))
+        line0 = pp_line_start(fr->tape, t.offset);
+    else
+        return 1;
     while (pp_raw_peek(pp, &t)) {
-        Frame* fr = &pp->frames[pp->nf - 1];
-        if (at_bol(fr->tape, t)) break;
+        fr = &pp->frames[pp->nf - 1];
+        if (!fr->tape || !fr->tape->bytes) break;
+        if (pp_line_start(fr->tape, t.offset) != line0) break;
         pp_raw_next(pp, &t);
     }
     return 1;
@@ -268,24 +323,39 @@ static int handle_include(Pp* pp) {
 }
 
 static int handle_define(Pp* pp) {
+    Frame* fr;
+    Token hash;
     Token id;
-    if (!pp_raw_next(pp, &id) || id.kind != TK_IDENT) return 0;
-    /* function-like: ident immediately followed by '(' with no space —
-     * pp-tokens lose space, so '(' after name means function-like.
-     * Spike: reject / ignore body as object-like empty if '('. */
+    char line[512];
     Token body_buf[256];
     int nb = 0;
     Token peek;
+    int captured = 0;
+
+    if (pp->nf <= 0) return 0;
+    fr = &pp->frames[pp->nf - 1];
+    /* handle_directive already consumed `#` + `define`; recover `#` for capture. */
+    if (fr->i < 2) return 0;
+    hash = fr->tape->toks[fr->i - 2];
+    if (pp->skip_depth == 0)
+        captured = pp_capture_dir_line(pp, hash, line, sizeof(line));
+
+    if (!pp_raw_next(pp, &id) || id.kind != TK_IDENT) return 0;
+    /* function-like: passthrough only (host keeps the API macro). */
     if (pp_raw_peek(pp, &peek) && tok_eq(peek, TK_PUNCT, "(")) {
+        if (captured) (void)pp_add_passthrough_define(pp, line);
         pp_skip_line(pp);
-        return macro_define(pp, id.spell, NULL, 0);
+        return 1;
     }
     while (pp_raw_peek(pp, &peek)) {
-        Frame* fr = &pp->frames[pp->nf - 1];
+        fr = &pp->frames[pp->nf - 1];
         if (at_bol(fr->tape, peek)) break;
         pp_raw_next(pp, &peek);
         if (nb < 256) body_buf[nb++] = peek;
     }
+    /* Empty object-like `#define FOO` is an include/stub guard — expand only.
+     * Non-empty object-like (`#define A B`) is API surface — pass through too. */
+    if (captured && nb > 0) (void)pp_add_passthrough_define(pp, line);
     return macro_define(pp, id.spell, body_buf, nb);
 }
 
@@ -354,6 +424,7 @@ static int pp_run(Pp* pp, FileTape* root) {
     pp->skip_depth = 0;
     pp->err = 0;
     pp->npass_inc = 0;
+    pp->npass_def = 0;
     if (!pp_push_tape(pp, root)) return 0;
 
     while (pp->nf > 0) {

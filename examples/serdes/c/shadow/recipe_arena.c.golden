@@ -13,6 +13,13 @@
 #include <stdlib.h>
 #include <ccc/script/stdio.h>
 
+#undef __cc_uw_is_err
+#undef __cc_uw_value
+#undef __cc_uw_err_at
+#define __cc_uw_is_err(__x__) _Generic((__x__), CCResult_int_CCError: (!((CCResult_int_CCError*)(void*)&(__x__))->ok), CCResult_bool_CCError: (!((CCResult_bool_CCError*)(void*)&(__x__))->ok), CCResult_char_CCError: (!((CCResult_char_CCError*)(void*)&(__x__))->ok), CCResult_size_t_CCError: (!((CCResult_size_t_CCError*)(void*)&(__x__))->ok), CCResult_voidptr_CCError: (!((CCResult_voidptr_CCError*)(void*)&(__x__))->ok), CCResult_charptr_CCError: (!((CCResult_charptr_CCError*)(void*)&(__x__))->ok), CCResult_void_CCError: (!((CCResult_void_CCError*)(void*)&(__x__))->ok), default: (*(void* const*)(void*)&(__x__) == (void*)0))
+#define __cc_uw_value(__x__) _Generic((__x__), CCResult_int_CCError: ((CCResult_int_CCError*)(void*)&(__x__))->u.value, CCResult_bool_CCError: ((CCResult_bool_CCError*)(void*)&(__x__))->u.value, CCResult_char_CCError: ((CCResult_char_CCError*)(void*)&(__x__))->u.value, CCResult_size_t_CCError: ((CCResult_size_t_CCError*)(void*)&(__x__))->u.value, CCResult_voidptr_CCError: ((CCResult_voidptr_CCError*)(void*)&(__x__))->u.value, CCResult_charptr_CCError: ((CCResult_charptr_CCError*)(void*)&(__x__))->u.value, default: (__x__))
+#define __cc_uw_err_at(__x__, __e__, __f__, __l__) _Generic((__x__), CCResult_int_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_int_CCError*)(void*)&(__x__))->u.error), CCResult_bool_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_bool_CCError*)(void*)&(__x__))->u.error), CCResult_char_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_char_CCError*)(void*)&(__x__))->u.error), CCResult_size_t_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_size_t_CCError*)(void*)&(__x__))->u.error), CCResult_voidptr_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_voidptr_CCError*)(void*)&(__x__))->u.error), CCResult_charptr_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_charptr_CCError*)(void*)&(__x__))->u.error), CCResult_void_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_void_CCError*)(void*)&(__x__))->u.error), default: (cc_rt_diag_record_unwrap_site(__f__, __l__), __cc_err_null_at(__e__, __f__, __l__)))
+
 #line 13 "examples/serdes/c/shadow/recipe_arena.ccs"
 int main(void) {
     CC_ARENA_STACK(__cc_str_scratch_0, 1024);
