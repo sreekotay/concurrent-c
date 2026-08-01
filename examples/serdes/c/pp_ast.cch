@@ -23,7 +23,8 @@ typedef enum {
     SHADOW_KW_DEFER,
         SHADOW_KW_STATIC,
     SHADOW_KW_CHAR,
-    SHADOW_KW_FOR
+    SHADOW_KW_FOR,
+    SHADOW_KW_WHILE
 } ShadowKwKind;
 
 typedef struct {
@@ -53,6 +54,7 @@ typedef struct {
         { "static", { SHADOW_KW_STATIC } },
         { "char", { SHADOW_KW_CHAR } },
         { "for", { SHADOW_KW_FOR } },
+        { "while", { SHADOW_KW_WHILE } },
     };
     static_map("shadow_kw", shadow_kw_entries, CC_STATIC_MAP_CASE_SENSITIVE);
 }
@@ -145,7 +147,11 @@ typedef enum {
     /* recv.method(args); — a=recv b=method c=args */
     AST_UFCS_STMT,
     /* lhs = rhs; — a=lhs b=rhs */
-    AST_ASSIGN
+    AST_ASSIGN,
+    /* Type name; — a=type b=name (no init) */
+    AST_VAR_DECL,
+    /* while (cond) { stmts } — a=cond, body=stmts */
+    AST_WHILE
 } AstKind;
 
 typedef struct AstNode AstNode;
@@ -1513,20 +1519,97 @@ static AstNode* parse_assign_stmt(Parser* p) {
     return n;
 }
 
-/* (void) ident ; */
+/* (void) expr ; */
 static AstNode* parse_void_cast(Parser* p) {
     if (!tok_eq(p_peek(p), TK_PUNCT, "(")) return NULL;
-    if (p->i + 4 >= p->n) return NULL;
+    if (p->i + 3 >= p->n) return NULL;
     if (shadow_kw(p->toks[p->i + 1]) != SHADOW_KW_VOID) return NULL;
     if (!tok_eq(p->toks[p->i + 2], TK_PUNCT, ")")) return NULL;
-    if (p->toks[p->i + 3].kind != TK_IDENT) return NULL;
-    if (!tok_eq(p->toks[p->i + 4], TK_PUNCT, ";")) return NULL;
-    p_next(p); p_next(p); p_next(p);
-    Token id = p_next(p);
-    p_next(p); /* ; */
+    p_next(p); p_next(p); p_next(p); /* ( void ) */
+    int e0 = p->i;
+    int depth = 0;
+    while (p->i < p->n) {
+        Token t = p_peek(p);
+        if (tok_eq(t, TK_PUNCT, "(") || tok_eq(t, TK_PUNCT, "[") || tok_eq(t, TK_PUNCT, "{"))
+            depth++;
+        else if (tok_eq(t, TK_PUNCT, ")") || tok_eq(t, TK_PUNCT, "]") || tok_eq(t, TK_PUNCT, "}"))
+            depth--;
+        else if (depth == 0 && tok_eq(t, TK_PUNCT, ";"))
+            break;
+        p_next(p);
+    }
+    if (e0 >= p->i) return NULL;
     AstNode* n = ast_new(p, AST_VOID_CAST);
     if (!n) return NULL;
-    slice_to(n->a, sizeof(n->a), id.spell);
+    if (!span_text(p, e0, p->i, n->a, sizeof(n->a))) {
+        parser_fail(p, p_peek(p), "(void) expr too long");
+        return NULL;
+    }
+    if (!p_accept(p, TK_PUNCT, ";")) {
+        parser_fail(p, p_peek(p), "expected ';' after (void) expr");
+        return NULL;
+    }
+    return n;
+}
+
+/* Type name ;  (no initializer) */
+static AstNode* parse_var_decl(Parser* p) {
+    Token ty = p_peek(p);
+    if (ty.kind != TK_IDENT && shadow_kw(ty) != SHADOW_KW_INT &&
+        shadow_kw(ty) != SHADOW_KW_CHAR)
+        return NULL;
+    if (p->i + 2 >= p->n) return NULL;
+    if (p->toks[p->i + 1].kind != TK_IDENT) return NULL;
+    if (!tok_eq(p->toks[p->i + 2], TK_PUNCT, ";")) return NULL;
+    p_next(p);
+    Token name = p_next(p);
+    p_next(p); /* ; */
+    AstNode* n = ast_new(p, AST_VAR_DECL);
+    if (!n) return NULL;
+    slice_to(n->a, sizeof(n->a), ty.spell);
+    slice_to(n->b, sizeof(n->b), name.spell);
+    return n;
+}
+
+/* while ( cond ) { stmts } */
+static AstNode* parse_while(Parser* p) {
+    if (shadow_kw(p_peek(p)) != SHADOW_KW_WHILE) return NULL;
+    p_next(p);
+    if (!tok_eq(p_peek(p), TK_PUNCT, "(")) {
+        parser_fail(p, p_peek(p), "expected '(' after while");
+        return NULL;
+    }
+    int c0 = p->i + 1;
+    if (!skip_parens(p)) {
+        parser_fail(p, p_peek(p), "unterminated while (...)");
+        return NULL;
+    }
+    int c1 = p->i - 1;
+    AstNode* n = ast_new(p, AST_WHILE);
+    if (!n) return NULL;
+    if (c0 >= c1) n->a[0] = 0;
+    else if (!span_text(p, c0, c1, n->a, sizeof(n->a))) {
+        parser_fail(p, p_peek(p), "while condition too long");
+        return NULL;
+    }
+    if (!tok_eq(p_peek(p), TK_PUNCT, "{")) {
+        parser_fail(p, p_peek(p), "expected '{' after while (...)");
+        return NULL;
+    }
+    p_next(p);
+    while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF && !p->err) {
+        AstNode* s = parse_stmt(p);
+        if (!s) return NULL;
+        if (n->nbody >= 8) {
+            parser_fail(p, p_peek(p), "while body too large for shadow beachhead");
+            return NULL;
+        }
+        n->body[n->nbody++] = s;
+    }
+    if (!p_accept(p, TK_PUNCT, "}")) {
+        parser_fail(p, p_peek(p), "expected '}' to close while");
+        return NULL;
+    }
     return n;
 }
 
@@ -1856,6 +1939,7 @@ static AstNode* parse_stmt(Parser* p) {
     }
     if (shadow_kw(t) == SHADOW_KW_IF) return parse_if_stmt(p);
     if (shadow_kw(t) == SHADOW_KW_FOR) return parse_for(p);
+    if (shadow_kw(t) == SHADOW_KW_WHILE) return parse_while(p);
     if (shadow_kw(t) == SHADOW_KW_RETURN) return parse_return_int(p);
     if (shadow_kw(t) == SHADOW_KW_PRINTLN) return parse_println_bang(p);
     if (shadow_kw(t) == SHADOW_KW_STATIC) {
@@ -1883,6 +1967,8 @@ static AstNode* parse_stmt(Parser* p) {
     n = parse_ptr_init(p);
     if (n || p->err) return n;
     n = parse_typed_init(p);
+    if (n || p->err) return n;
+    n = parse_var_decl(p);
     if (n || p->err) return n;
     n = parse_spawn_closure(p);
     if (n || p->err) return n;
@@ -2146,6 +2232,8 @@ static const char* ast_kind_name(AstKind k) {
     case AST_TYPED_INIT: return "typed_init";
     case AST_UFCS_STMT: return "ufcs_stmt";
     case AST_ASSIGN: return "assign";
+    case AST_VAR_DECL: return "var_decl";
+    case AST_WHILE: return "while";
     }
     return "?";
 }

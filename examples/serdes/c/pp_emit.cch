@@ -124,54 +124,146 @@ static void shadow_rewrite_slot(char* dst, size_t cap, const char* expr) {
     snprintf(dst, cap, "cc_error(%.*s)%s", (int)pre, expr, p + 8);
 }
 
-/* Beachhead UFCS: arena.remaining/checkpoint/allocT, cp.restore. */
+/* Extract recv ident immediately before `.` / `->` at `op`. */
+static int shadow_ufcs_recv(const char* src, const char* op, char* recv, size_t rcap) {
+    const char* r = op;
+    while (r > src && (r[-1] == ' ' || r[-1] == '\t')) r--;
+    const char* end = r;
+    while (r > src) {
+        char c = r[-1];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '_')
+            r--;
+        else
+            break;
+    }
+    if (r == end) return 0;
+    size_t n = (size_t)(end - r);
+    if (n >= rcap) return 0;
+    memcpy(recv, r, n);
+    recv[n] = 0;
+    return 1;
+}
+
+/* Balanced args starting just after `(`. */
+static int shadow_ufcs_args(const char* open_paren, char* args, size_t acap,
+                            const char** after_close) {
+    if (!open_paren || *open_paren != '(') return 0;
+    int depth = 0;
+    const char* p = open_paren;
+    for (; *p; p++) {
+        if (*p == '(') depth++;
+        else if (*p == ')') {
+            depth--;
+            if (depth == 0) {
+                size_t n = (size_t)(p - (open_paren + 1));
+                if (n >= acap) n = acap - 1;
+                memcpy(args, open_paren + 1, n);
+                args[n] = 0;
+                if (after_close) *after_close = p + 1;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/* One beachhead UFCS rewrite; returns 1 if rewrote into dst. */
+static int shadow_rewrite_ufcs_once(char* dst, size_t cap, const char* src,
+                                    const char* elem_ty) {
+    const char* dot = strchr(src, '.');
+    const char* arrow = strstr(src, "->");
+    const char* op = NULL;
+    int is_arrow = 0;
+    if (dot && arrow) {
+        if (dot < arrow) { op = dot; is_arrow = 0; }
+        else { op = arrow; is_arrow = 1; }
+    } else if (dot) {
+        op = dot;
+        is_arrow = 0;
+    } else if (arrow) {
+        op = arrow;
+        is_arrow = 1;
+    } else {
+        return 0;
+    }
+    char recv[64];
+    if (!shadow_ufcs_recv(src, op, recv, sizeof(recv))) return 0;
+    const char* meth = is_arrow ? op + 2 : op + 1;
+    while (*meth == ' ' || *meth == '\t') meth++;
+    char args[128];
+    const char* after = NULL;
+    char repl[192];
+    repl[0] = 0;
+    if (!is_arrow && strncmp(meth, "remaining()", 11) == 0) {
+        snprintf(repl, sizeof(repl), "cc_arena_remaining(&%s)", recv);
+        after = meth + 11;
+    } else if (!is_arrow && strncmp(meth, "checkpoint()", 12) == 0) {
+        snprintf(repl, sizeof(repl), "cc_arena_checkpoint(&%s)", recv);
+        after = meth + 12;
+    } else if (!is_arrow && strncmp(meth, "restore()", 9) == 0) {
+        snprintf(repl, sizeof(repl), "cc_arena_checkpoint_restore(&%s)", recv);
+        after = meth + 9;
+    } else if (!is_arrow && strncmp(meth, "load()", 6) == 0) {
+        snprintf(repl, sizeof(repl), "cc_atomic_load(&%s)", recv);
+        after = meth + 6;
+    } else if (!is_arrow && strncmp(meth, "allocT(", 7) == 0) {
+        if (!shadow_ufcs_args(meth + 6, args, sizeof(args), &after)) return 0;
+        if (!elem_ty || !elem_ty[0]) return 0;
+        if (args[0])
+            snprintf(repl, sizeof(repl), "cc_arena_alloc_T_count(%s, &%s, %s)",
+                     elem_ty, recv, args);
+        else
+            snprintf(repl, sizeof(repl), "cc_arena_alloc_T(%s, &%s)", elem_ty, recv);
+    } else if (!is_arrow && strncmp(meth, "recv(", 5) == 0) {
+        if (!shadow_ufcs_args(meth + 4, args, sizeof(args), &after)) return 0;
+        snprintf(repl, sizeof(repl), "cc_channel_recv(%s, %s)", recv, args);
+    } else if (!is_arrow && strncmp(meth, "send(", 5) == 0) {
+        if (!shadow_ufcs_args(meth + 4, args, sizeof(args), &after)) return 0;
+        snprintf(repl, sizeof(repl), "cc_channel_send(%s, %s)", recv, args);
+    } else if (!is_arrow && strncmp(meth, "fetch_add(", 10) == 0) {
+        if (!shadow_ufcs_args(meth + 9, args, sizeof(args), &after)) return 0;
+        snprintf(repl, sizeof(repl), "cc_atomic_fetch_add(&%s, %s)", recv, args);
+    } else if (is_arrow && strncmp(meth, "close_on(", 9) == 0) {
+        if (!shadow_ufcs_args(meth + 8, args, sizeof(args), &after)) return 0;
+        snprintf(repl, sizeof(repl), "cc_nursery_add_closing_tx(%s, %s)", recv, args);
+    } else {
+        return 0;
+    }
+    /* splice: prefix + repl + after */
+    size_t pre = (size_t)(op - src) - strlen(recv);
+    /* op points at . or -; recv starts before op — find recv start */
+    const char* rstart = op;
+    while (rstart > src && (rstart[-1] == ' ' || rstart[-1] == '\t')) rstart--;
+    while (rstart > src) {
+        char c = rstart[-1];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '_')
+            rstart--;
+        else
+            break;
+    }
+    pre = (size_t)(rstart - src);
+    if (pre + strlen(repl) + strlen(after ? after : "") + 1 >= cap) return 0;
+    snprintf(dst, cap, "%.*s%s%s", (int)pre, src, repl, after ? after : "");
+    return 1;
+}
+
+/* Beachhead UFCS (may rewrite nested calls). */
 static void shadow_rewrite_ufcs(char* dst, size_t cap, const char* src,
                                 const char* elem_ty) {
     if (!src) { if (cap) dst[0] = 0; return; }
-    const char* dot = strchr(src, '.');
-    if (!dot || dot == src) {
-        snprintf(dst, cap, "%s", src);
-        return;
-    }
-    char recv[64];
-    size_t rl = (size_t)(dot - src);
-    if (rl >= sizeof(recv)) { snprintf(dst, cap, "%s", src); return; }
-    memcpy(recv, src, rl);
-    recv[rl] = 0;
-    /* trim trailing space on recv */
-    while (rl > 0 && (recv[rl - 1] == ' ' || recv[rl - 1] == '\t')) recv[--rl] = 0;
-    const char* meth = dot + 1;
-    while (*meth == ' ' || *meth == '\t') meth++;
-    if (strncmp(meth, "remaining()", 11) == 0 && meth[11] == 0) {
-        snprintf(dst, cap, "cc_arena_remaining(&%s)", recv);
-        return;
-    }
-    if (strncmp(meth, "checkpoint()", 12) == 0 && meth[12] == 0) {
-        snprintf(dst, cap, "cc_arena_checkpoint(&%s)", recv);
-        return;
-    }
-    if (strncmp(meth, "restore()", 9) == 0 && meth[9] == 0) {
-        snprintf(dst, cap, "cc_arena_checkpoint_restore(&%s)", recv);
-        return;
-    }
-    if (strncmp(meth, "allocT(", 7) == 0) {
-        const char* args = meth + 7;
-        const char* end = strrchr(args, ')');
-        if (end && elem_ty && elem_ty[0]) {
-            char abuf[64];
-            size_t al = (size_t)(end - args);
-            if (al >= sizeof(abuf)) al = sizeof(abuf) - 1;
-            memcpy(abuf, args, al);
-            abuf[al] = 0;
-            if (al > 0)
-                snprintf(dst, cap, "cc_arena_alloc_T_count(%s, &%s, %s)",
-                         elem_ty, recv, abuf);
-            else
-                snprintf(dst, cap, "cc_arena_alloc_T(%s, &%s)", elem_ty, recv);
+    char cur[512];
+    char nxt[512];
+    snprintf(cur, sizeof(cur), "%s", src);
+    for (int i = 0; i < 8; i++) {
+        if (!shadow_rewrite_ufcs_once(nxt, sizeof(nxt), cur, elem_ty)) {
+            snprintf(dst, cap, "%s", cur);
             return;
         }
+        snprintf(cur, sizeof(cur), "%s", nxt);
     }
-    snprintf(dst, cap, "%s", src);
+    snprintf(dst, cap, "%s", cur);
 }
 
 static int shadow_slot_is_simple_ident(const char* expr) {
@@ -357,6 +449,13 @@ static int shadow_emit_bang_bind(AstNode* st, CEmit* out, ShadowCtx* ctx,
 }
 
 /* Stmts inside a spawned closure body (indent under entry). */
+/* Beachhead capture type: int | CCChanRx | CCChanTx | cc_atomic_int (ref). */
+static const char* shadow_cap_val_type(const char* name) {
+    if (strcmp(name, "rx") == 0) return "CCChanRx";
+    if (strcmp(name, "tx") == 0) return "CCChanTx";
+    return "int";
+}
+
 /* Capture list helpers: "x,&y" → proto / call / env / entry unpack. */
 static int shadow_caps_proto(const char* caps, char* dst, size_t cap) {
     if (!caps || !caps[0]) {
@@ -377,7 +476,7 @@ static int shadow_caps_proto(const char* caps, char* dst, size_t cap) {
         if (item[0] == '&')
             snprintf(piece, sizeof(piece), "void* __cc_opaque_%s", item + 1);
         else
-            snprintf(piece, sizeof(piece), "int %s", item);
+            snprintf(piece, sizeof(piece), "%s %s", shadow_cap_val_type(item), item);
         size_t cur = strlen(dst);
         size_t need = strlen(piece) + (first ? 0 : 2);
         if (cur + need + 1 >= cap) return 0;
@@ -476,7 +575,8 @@ static int shadow_emit_closure_def(AstNode* cl, CEmit* out) {
             if (item[0] == '&') {
                 if (!cemit_fmt(out, "    void* %s;\n", item + 1)) return 0;
             } else {
-                if (!cemit_fmt(out, "    int %s;\n", item)) return 0;
+                if (!cemit_fmt(out, "    %s %s;\n", shadow_cap_val_type(item), item))
+                    return 0;
             }
             if (!c) break;
             p = c + 1;
@@ -527,13 +627,17 @@ static int shadow_emit_closure_def(AstNode* cl, CEmit* out) {
             memcpy(item, p, n);
             item[n] = 0;
             if (item[0] == '&') {
+                /* Beachhead: `sum` → atomic; other refs → int (capture recipe). */
+                const char* rty =
+                    (strcmp(item + 1, "sum") == 0) ? "cc_atomic_int" : "int";
                 if (!cemit_fmt(out,
-                        "    int* __cc_ref_%s = (int*)__env->%s;\n"
+                        "    %s* __cc_ref_%s = (%s*)__env->%s;\n"
                         "#define %s (*__cc_ref_%s)\n",
-                        item + 1, item + 1, item + 1, item + 1))
+                        rty, item + 1, rty, item + 1, item + 1, item + 1))
                     return 0;
             } else {
-                if (!cemit_fmt(out, "    int %s = __env->%s;\n", item, item))
+                if (!cemit_fmt(out, "    %s %s = __env->%s;\n",
+                               shadow_cap_val_type(item), item, item))
                     return 0;
             }
             if (!c) break;
@@ -798,8 +902,25 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
         if (st->c[0])
             return cemit_fmt(out, "%s/* @defer(%s) … */\n", indent, st->c);
         return cemit_fmt(out, "%s/* @defer … */\n", indent);
-    case AST_VOID_CAST:
-        return cemit_fmt(out, "%s(void)%s;\n", indent, st->a);
+    case AST_VOID_CAST: {
+        char expr[288];
+        shadow_rewrite_ufcs(expr, sizeof(expr), st->a, NULL);
+        return cemit_fmt(out, "%s(void)%s;\n", indent, expr);
+    }
+    case AST_VAR_DECL:
+        return cemit_fmt(out, "%s%s %s;\n", indent, st->a, st->b);
+    case AST_WHILE: {
+        char cond[288];
+        shadow_rewrite_ufcs(cond, sizeof(cond), st->a, NULL);
+        if (!cemit_fmt(out, "%swhile (%s) {\n", indent, cond)) return 0;
+        char nested[64];
+        snprintf(nested, sizeof(nested), "%s    ", indent);
+        for (int k = 0; k < st->nbody; k++) {
+            if (!shadow_emit_stmt_ctx(st->body[k], out, ctx, nested, use_cleanup))
+                return 0;
+        }
+        return cemit_fmt(out, "%s}\n", indent);
+    }
     case AST_STATIC_ARR:
         return cemit_fmt(out, "%sstatic char %s[] = %s;\n", indent, st->a, st->b);
     case AST_CHAN_VAR:
@@ -1361,6 +1482,8 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
         case AST_TYPED_INIT:
         case AST_UFCS_STMT:
         case AST_ASSIGN:
+        case AST_VAR_DECL:
+        case AST_WHILE:
             fprintf(stderr, "error: AST node %s is not part of the C-emit shadow subset\n",
                     ast_kind_name(it->kind));
             out->err = 1;

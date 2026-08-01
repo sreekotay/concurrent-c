@@ -39,7 +39,7 @@ Same front for both products; H adds `#pragma once` and rejects function bodies.
 | `c_pp_spike.cch` | Umbrella for tools/smokes |
 | `shadow_lower.{ccs,sh}` | Explicit CLI (does **not** replace `ccc`) |
 | `fixtures/` | Architecture falsifiers (mid-struct include, guards, …) |
-| `shadow/` | Goldens: mini, includes, `result_frag`, `hello`, recipes (result/defer/unwrap/arena/capture) |
+| `shadow/` | Goldens: mini, includes, `result_frag`, `hello`, recipe beachheads |
 
 ## Beachhead
 
@@ -54,6 +54,8 @@ Same front for both products; H adds `#pragma once` and rejects function bodies.
 (value `@destroy`, `for`, arena UFCS: remaining/checkpoint/allocT/restore).
 `shadow/recipe_capture.ccs` ↔ `examples/recipe_explicit_capture.ccs`
 (bare blocks, block-scoped nursery `@destroy`, value/ref spawn captures).
+`shadow/recipe_pipeline.ccs` ↔ `examples/recipe_channel_pipeline.ccs`
+(`while`, chan send/recv, `close_on`, atomics, nested nurseries).
 
 ```bash
 ./examples/serdes/c/shadow_lower.sh examples/hello.ccs -o /tmp/hello_shadow.c
@@ -62,6 +64,7 @@ Same front for both products; H adds `#pragma once` and rejects function bodies.
 ./examples/serdes/c/shadow_lower.sh examples/recipe_unwrap_destroy_forms.ccs -o /tmp/unwrap_shadow.c
 ./examples/serdes/c/shadow_lower.sh examples/recipe_arena_scope.ccs -o /tmp/arena_shadow.c
 ./examples/serdes/c/shadow_lower.sh examples/recipe_explicit_capture.ccs -o /tmp/capture_shadow.c
+./examples/serdes/c/shadow_lower.sh examples/recipe_channel_pipeline.ccs -o /tmp/pipeline_shadow.c
 ```
 
 Emit uses simplified file:line (`"<shadow>"`, `"0"`) and GNU statement
