@@ -71,7 +71,7 @@ __cc_cleanup:
                 __typeof__(cc_println(__msg)) __r = cc_println(__msg);
                 if (__cc_uw_is_err(__r)) {
                     #line 33 "examples/serdes/c/shadow/recipe_defer.ccs"
-                    CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+                    CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_defer.ccs", "33");
                     cc_error_exit(e);
                 }
             }
@@ -87,7 +87,7 @@ __cc_cleanup:
                 __typeof__(cc_println(__msg)) __r = cc_println(__msg);
                 if (__cc_uw_is_err(__r)) {
                     #line 30 "examples/serdes/c/shadow/recipe_defer.ccs"
-                    CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+                    CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_defer.ccs", "30");
                     cc_error_exit(e);
                 }
             }
@@ -110,7 +110,7 @@ int main(void) {
         __typeof__(cc_println("write_report (ok):")) __r = cc_println("write_report (ok):");
         if (__cc_uw_is_err(__r)) {
             #line 47 "examples/serdes/c/shadow/recipe_defer.ccs"
-            CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+            CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_defer.ccs", "47");
             #line 44 "examples/serdes/c/shadow/recipe_defer.ccs"
             cc_error_log(e);
             return 1;
@@ -121,7 +121,7 @@ int main(void) {
         __typeof__(write_report("/tmp/report_ok.txt", 0)) __r = write_report("/tmp/report_ok.txt", 0);
         if (__cc_uw_is_err(__r)) {
             #line 48 "examples/serdes/c/shadow/recipe_defer.ccs"
-            CCError e = __cc_uw_err_at(__r, "unwrap", __FILE__, __LINE__);
+            CCError e = __cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_defer.ccs", "48");
             #line 44 "examples/serdes/c/shadow/recipe_defer.ccs"
             cc_error_log(e);
             return 1;
@@ -135,7 +135,7 @@ int main(void) {
         __typeof__(cc_println("write_report (err):")) __r = cc_println("write_report (err):");
         if (__cc_uw_is_err(__r)) {
             #line 52 "examples/serdes/c/shadow/recipe_defer.ccs"
-            CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+            CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_defer.ccs", "52");
             #line 44 "examples/serdes/c/shadow/recipe_defer.ccs"
             cc_error_log(e);
             return 1;
@@ -154,7 +154,7 @@ int main(void) {
                 __typeof__(cc_println(__msg)) __r = cc_println(__msg);
                 if (__cc_uw_is_err(__r)) {
                     #line 55 "examples/serdes/c/shadow/recipe_defer.ccs"
-                    CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+                    CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_defer.ccs", "55");
                     #line 44 "examples/serdes/c/shadow/recipe_defer.ccs"
                     cc_error_log(e);
                     return 1;

@@ -1,8 +1,13 @@
 # SERDES 2-stage emit experiment
 
-**Status: experiment — may be abandoned.** Not a commitment to replace
-production `ccc`, and not a project to write a full C parser
-([ARCHITECTURE NG-1](../../cc/docs/ARCHITECTURE.md): we *emit* C; TCC/host
+**Status: long-lived parallel path.** Not a drop-in replacement for today's
+`ccc` (heavily TCC-shaped passes). Target shape: **SERDES/CC owns the
+transform**; **minimally modified TCC is comptime-only**; host `cc` consumes
+emitted `.c` / `.h`. Wiring into the production driver stays deferred — the
+old model is too entangled with TCC to merge cheaply.
+
+Not a project to write a full C parser
+([ARCHITECTURE NG-1](../../cc/docs/ARCHITECTURE.md): we *emit* C; host/TCC
 *consume* it).
 
 ## Goal
@@ -12,16 +17,16 @@ A Concurrent-C program that:
 1. **Stage 1:** pp-lex `.ccs` / `.cch` → cached `FileTape` (path-keyed, env-free)
 2. **Stage 2:** splice `#include`, object-like macros, simple guards
 3. **Lower + emit:** CC surface → **`.c`** or **`.h`** text
-4. **Consume:** host `cc` / TCC parse that text (extra parse is intentional)
+4. **Consume:** host `cc` links runtime objects; TCC reserved for comptime
 
 ```text
 .ccs / .cch bytes
     → stage 1  PpTok collect → FileTape (cached by path)
     → stage 2  splice / macros / guards / <…> passthrough
     → whitelist AST (pp_ast) + typedef oracle
-         ├─ shadow_emit_c → .c
-         └─ shadow_emit_h → .h
-              → host cc / TCC
+         ├─ shadow_emit_c → .c  → host cc + concurrent_c.o  → run
+         └─ shadow_emit_h → .h  → host cc -c
+    comptime (later): minimal TCC, not the lowerer
 ```
 
 Same front for both products; H adds `#pragma once` and rejects function bodies.
@@ -79,6 +84,11 @@ Same front for both products; H adds `#pragma once` and rejects function bodies.
 `shadow/recipe_generics.ccs` — **shadow twin** of `examples/recipe_user_generics.ccs`
 (`CC_GENERIC_FACTORY`/`@emit` is compile-time; twin shows post-instantiation
 `Pair_int_double`/`Pair_int_int` surface).
+`shadow/error_face_frag.cch` — trimmed `CCError` face from `cc_result`
+(`CCErrorKind`, brace init, `static inline const char*`, long `switch` bodies).
+`shadow/io_error_frag.cch` — trimmed `CCIoError` on that face (`#include`
+splice, `/*@as*/`, `const char*` helpers, errno `switch`; no `_Generic` /
+`CC_DECL_RESULT_SPEC`).
 
 ```bash
 ./examples/serdes/c/shadow_lower.sh examples/hello.ccs -o /tmp/hello_shadow.c
@@ -119,6 +129,8 @@ bash examples/serdes/c/shadow/diff_lower_header.sh
 bash examples/serdes/c/shadow/diff_stdlib_exec.sh
 bash examples/serdes/c/shadow/diff_stdlib_async_runtime.sh
 bash examples/serdes/c/shadow/diff_stdlib_nursery.sh
+bash examples/serdes/c/shadow/diff_stdlib_chan_handle.sh
+bash examples/serdes/c/shadow/run_hello_shadow.sh
 ```
 
 Compiler harvest (production, independent of this tree):
@@ -160,13 +172,22 @@ on the normalized C surface and host `cc -c` consumes the product:
 - `cc/include/ccc/cc_nursery.cch` → `diff_stdlib_nursery.sh`
   (`const struct T*` protos; long static-inline param spans; comptime
   `#ifdef` normalized away — production blanks the body, shadow omits it)
+- `cc/include/ccc/cc_chan_handle.cch` → `diff_stdlib_chan_handle.sh`
+  (forward `struct Tag;`, `struct Tag*` fields, one-line anon typedefs;
+  nested `__CC_CHAN_*_DEFINED` guards normalized away)
+
+**Behavioral (`.ccs` product):** `run_hello_shadow.sh` — shadow-lower
+`examples/hello.ccs`, host-`cc` + link `concurrent_c.o`, assert task output.
 
 Production lower of these headers is near-passthrough; shadow keeps the
 same API with `#pragma once` + `#line` instead of the `#ifndef` guard dance.
 
-Larger stdlib headers (`cc_result`, `cc_arena`, `cc_io_error`, …) still hit
-the coverage / cpp walls — grow the whitelist only when the next header is
-a clean beachhead, not a general C parser.
+Larger stdlib headers (`cc_result`, `cc_arena`, full `cc_io_error`, …) still
+hit coverage / cpp walls. Trimmed frags cover enum + `@as` + `switch` +
+`const T*` returns; grow the whitelist only when the next header is a clean
+beachhead, not a general C parser. Keep pushing this parallel path; do not
+force a merge into the TCC-heavy driver until the transform boundary is
+boring.
 
 ## Working rules
 
@@ -180,6 +201,8 @@ a clean beachhead, not a general C parser.
 
 ```bash
 ./examples/serdes/c/shadow_lower.sh examples/serdes/c/shadow/result_frag.cch -o /tmp/x.h
+./examples/serdes/c/shadow_lower.sh examples/serdes/c/shadow/io_error_frag.cch -o /tmp/io_error.h
+./examples/serdes/c/shadow_lower.sh examples/serdes/c/shadow/error_face_frag.cch -o /tmp/error_face.h
 ./out/cc/bin/ccc run --no-cache examples/serdes/c/shadow_lower.ccs -- path.cch -o out.h
 ```
 

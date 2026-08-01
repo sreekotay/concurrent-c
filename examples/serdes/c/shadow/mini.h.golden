@@ -2,6 +2,7 @@
 #pragma once
 #include <stddef.h>
 /* Shadow-lower input: Concurrent-C header → .h product. */
+
 #line 3 "examples/serdes/c/shadow/mini.cch"
 typedef int Err;
 

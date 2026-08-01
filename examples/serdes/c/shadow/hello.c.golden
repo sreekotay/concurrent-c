@@ -27,7 +27,7 @@ int main(void) {
         __typeof__(cc_nursery_create(NULL)) __r = cc_nursery_create(NULL);
         if (__cc_uw_is_err(__r)) {
             #line 9 "examples/serdes/c/shadow/hello.ccs"
-            CCError e = __cc_uw_err_at(__r, "unwrap", __FILE__, __LINE__);
+            CCError e = __cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/hello.ccs", "9");
             cc_error_exit(e);
         }
         n = __cc_uw_value(__r);
@@ -52,7 +52,7 @@ __cc_cleanup:
             __typeof__(cc_println("All tasks completed.")) __r = cc_println("All tasks completed.");
             if (__cc_uw_is_err(__r)) {
                 #line 10 "examples/serdes/c/shadow/hello.ccs"
-                CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+                CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/hello.ccs", "10");
                 cc_error_exit(e);
             }
         }
@@ -77,7 +77,7 @@ static void* cc_closure__N1_entry(void* __p) {
             __typeof__(cc_println("Hello from task A! (last)")) __r = cc_println("Hello from task A! (last)");
             if (__cc_uw_is_err(__r)) {
                 #line 16 "examples/serdes/c/shadow/hello.ccs"
-                CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+                CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/hello.ccs", "16");
                 cc_error_exit(e);
             }
         }
@@ -95,7 +95,7 @@ static void* cc_closure__N2_entry(void* __p) {
             __typeof__(cc_println("Hello from task B!")) __r = cc_println("Hello from task B!");
             if (__cc_uw_is_err(__r)) {
                 #line 20 "examples/serdes/c/shadow/hello.ccs"
-                CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+                CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/hello.ccs", "20");
                 cc_error_exit(e);
             }
         }
@@ -113,12 +113,12 @@ static void* cc_closure__N3_entry(void* __p) {
             __typeof__(cc_println("Hello from task C!")) __r = cc_println("Hello from task C!");
             if (__cc_uw_is_err(__r)) {
                 #line 24 "examples/serdes/c/shadow/hello.ccs"
-                CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+                CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/hello.ccs", "24");
                 {
                     __typeof__(cc_println("Task C failed!")) __r = cc_println("Task C failed!");
                     if (__cc_uw_is_err(__r)) {
                         #line 24 "examples/serdes/c/shadow/hello.ccs"
-                        CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+                        CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/hello.ccs", "24");
                         cc_error_exit(e);
                     }
                 }

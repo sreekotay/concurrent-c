@@ -39,7 +39,9 @@ typedef enum {
     SHADOW_KW_CONTINUE,
     SHADOW_KW_ELSE,
     SHADOW_KW_DO,
-    SHADOW_KW_EPRINTLN
+    SHADOW_KW_EPRINTLN,
+    SHADOW_KW_ENUM,
+    SHADOW_KW_SWITCH
 } ShadowKwKind;
 
 typedef struct {
@@ -85,6 +87,8 @@ typedef struct {
         { "else", { SHADOW_KW_ELSE } },
         { "do", { SHADOW_KW_DO } },
         { "eprintln", { SHADOW_KW_EPRINTLN } },
+        { "enum", { SHADOW_KW_ENUM } },
+        { "switch", { SHADOW_KW_SWITCH } },
     };
     static_map("shadow_kw", shadow_kw_entries, CC_STATIC_MAP_CASE_SENSITIVE);
 }
@@ -206,7 +210,11 @@ typedef enum {
     /* do { stmts } while (cond); — a=cond, body=stmts */
     AST_DO_WHILE,
     /* const Type* name[] = { init_list }; — a=type b=name c=init text */
-    AST_GLOBAL_ARR
+    AST_GLOBAL_ARR,
+    /* typedef enum [Tag]? { enumerators } Alias; — a=tag b=alias d=body */
+    AST_TYPEDEF_ENUM,
+    /* switch (expr) { body } — a=expr d=body text */
+    AST_SWITCH
 } AstKind;
 
 typedef struct AstNode AstNode;
@@ -216,7 +224,8 @@ struct AstNode {
     char b[256];
     /* Params / long spans — nursery lower_c protos exceed 256 with source indent. */
     char c[512];
-    char d[256];
+    /* Long raw spans: static-fn / switch / enum bodies (was 256; errno maps overflow). */
+    char d[2048];
     char e[256];
     AstNode** kids;
     int nkids;
@@ -398,6 +407,7 @@ static void shadow_attach_lead(Parser* p, AstNode* n, int start_i) {
 static int parse_struct_fields(Parser* p, AstNode* st);
 static AstNode* parse_external(Parser* p);
 static AstNode* parse_stmt(Parser* p);
+static AstNode* parse_switch_stmt(Parser* p);
 static AstNode* parse_at_stmt(Parser* p);
 static AstNode* parse_with_deadline(Parser* p);
 static AstNode* parse_inc(Parser* p);
@@ -2040,14 +2050,19 @@ static AstNode* parse_static_arr(Parser* p) {
     return n;
 }
 
-/* static Ret[*] name ( params ) { body } — body as stmts or raw text (d). */
+/* static [inline] [const] Ret[*] name ( params ) { body } — stmts or raw (d). */
 static AstNode* parse_static_fn(Parser* p) {
     if (shadow_kw(p_peek(p)) != SHADOW_KW_STATIC) return NULL;
     if (p->i + 4 >= p->n) return NULL;
     int ri = p->i + 1;
     int has_inline = 0;
+    int has_const = 0;
     if (ri < p->n && shadow_kw(p->toks[ri]) == SHADOW_KW_INLINE) {
         has_inline = 1;
+        ri++;
+    }
+    if (ri < p->n && shadow_kw(p->toks[ri]) == SHADOW_KW_CONST) {
+        has_const = 1;
         ri++;
     }
     if (ri >= p->n) return NULL;
@@ -2066,6 +2081,7 @@ static AstNode* parse_static_fn(Parser* p) {
 
     p_next(p); /* static */
     if (has_inline) p_next(p); /* inline */
+    if (has_const) p_next(p); /* const */
     p_next(p); /* ret */
     if (is_ptr) p_next(p); /* * */
     Token name = p_next(p);
@@ -2093,10 +2109,15 @@ static AstNode* parse_static_fn(Parser* p) {
     }
     AstNode* n = ast_new(p, AST_STATIC_FN);
     if (!n) return NULL;
-    slice_to(n->a, sizeof(n->a), rty.spell);
-    if (is_ptr) {
-        size_t al = strlen(n->a);
-        if (al + 1 < sizeof(n->a)) { n->a[al] = '*'; n->a[al + 1] = 0; }
+    if (has_const)
+        snprintf(n->a, sizeof(n->a), "const %.*s%s", (int)rty.spell.len, rty.spell.ptr,
+                 is_ptr ? "*" : "");
+    else {
+        slice_to(n->a, sizeof(n->a), rty.spell);
+        if (is_ptr) {
+            size_t al = strlen(n->a);
+            if (al + 1 < sizeof(n->a)) { n->a[al] = '*'; n->a[al + 1] = 0; }
+        }
     }
     slice_to(n->b, sizeof(n->b), name.spell);
     snprintf(n->c, sizeof(n->c), "%s", params);
@@ -2416,6 +2437,7 @@ static AstNode* parse_stmt_inner(Parser* p) {
         if (n || p->err) return n;
     }
     if (shadow_kw(t) == SHADOW_KW_IF) return parse_if_stmt(p);
+    if (shadow_kw(t) == SHADOW_KW_SWITCH) return parse_switch_stmt(p);
     if (shadow_kw(t) == SHADOW_KW_FOR) return parse_for(p);
     if (shadow_kw(t) == SHADOW_KW_WHILE) return parse_while(p);
     if (shadow_kw(t) == SHADOW_KW_DO) return parse_do_while(p);
@@ -2721,6 +2743,8 @@ static AstNode* parse_async_fn(Parser* p) {
 static AstNode* parse_static_var(Parser* p) {
     if (shadow_kw(p_peek(p)) != SHADOW_KW_STATIC) return NULL;
     if (p->i + 2 >= p->n) return NULL;
+    /* `static inline …` is always a function (parse_static_fn). */
+    if (shadow_kw(p->toks[p->i + 1]) == SHADOW_KW_INLINE) return NULL;
     Token ty = p->toks[p->i + 1];
     if (ty.kind != TK_IDENT && shadow_kw(ty) != SHADOW_KW_INT &&
         shadow_kw(ty) != SHADOW_KW_BOOL)
@@ -2777,8 +2801,11 @@ static AstNode* parse_at_stmt(Parser* p) {
     if (!tok_eq(p_peek(p), TK_PUNCT, "@")) return NULL;
     if (p->i + 1 < p->n && shadow_kw(p->toks[p->i + 1]) == SHADOW_KW_WITH_DEADLINE)
         return parse_with_deadline(p);
-    if (p->i + 1 < p->n && shadow_kw(p->toks[p->i + 1]) == SHADOW_KW_ASYNC)
-        return parse_async_fn(p);
+    /* Real `@async Ret name(...){…}` first; spike `@async {}` falls through. */
+    if (p->i + 1 < p->n && shadow_kw(p->toks[p->i + 1]) == SHADOW_KW_ASYNC) {
+        AstNode* af = parse_async_fn(p);
+        if (af || p->err) return af;
+    }
     p_next(p);
     Token name = p_next(p);
     if (name.kind != TK_IDENT) { p->err = 1; return NULL; }
@@ -2820,54 +2847,244 @@ static AstNode* parse_int_decl(Parser* p, AstKind kind) {
     return n;
 }
 
-/* Type name [, name]* ; — beachhead struct field (Type may be Name::[…]) */
+/* True when source gap between name and `;` carries `@as` or comment-form as
+ * (comments are stage-1-skipped, so peek the tape bytes). */
+static int field_gap_has_as(Parser* p, Token name, Token semi) {
+    FileTape* ft;
+    size_t a, b, i;
+    if (!p || !p->cache) return 0;
+    ft = tape_by_id(p->cache, name.file_id);
+    if (!ft || !ft->bytes) return 0;
+    a = name.offset + name.spell.len;
+    b = semi.offset;
+    if (b > ft->len) b = ft->len;
+    if (a >= b) return 0;
+    for (i = a; i < b; i++) {
+        if (i + 7 <= b && memcmp(ft->bytes + i, "/*@as*/", 7) == 0) return 1;
+        if (ft->bytes[i] == '@' && i + 3 <= b && memcmp(ft->bytes + i, "@as", 3) == 0) {
+            char nx = (i + 3 < b) ? ft->bytes[i + 3] : 0;
+            if (!((nx >= 'a' && nx <= 'z') || (nx >= 'A' && nx <= 'Z') ||
+                  nx == '_' || (nx >= '0' && nx <= '9')))
+                return 1;
+        }
+    }
+    return 0;
+}
+
+/* [const] [struct] Type[*] name [, name]* [@as] ; — beachhead struct field.
+ * Comment-form `@as` is recovered from the tape gap (stage-1 skips comments). */
 static AstNode* parse_field_simple(Parser* p) {
-    Token ty = p_peek(p);
-    if (ty.kind != TK_IDENT && shadow_kw(ty) != SHADOW_KW_INT &&
-        shadow_kw(ty) != SHADOW_KW_CHAR && shadow_kw(ty) != SHADOW_KW_VOID &&
-        shadow_kw(ty) != SHADOW_KW_BOOL && shadow_kw(ty) != SHADOW_KW_SIZE_T)
+    int has_const = 0;
+    int has_struct = 0;
+    int is_ptr = 0;
+    int has_as = 0;
+    int ti;
+    Token ty;
+    int ty_end;
+    int name_i;
+    int j;
+    char tytxt[128];
+    char names[128];
+    Token last_name;
+    Token semi;
+    AstNode* n;
+
+    ti = p->i;
+    if (ti < p->n && shadow_kw(p->toks[ti]) == SHADOW_KW_CONST) {
+        has_const = 1;
+        ti++;
+    }
+    if (ti < p->n && shadow_kw(p->toks[ti]) == SHADOW_KW_STRUCT) {
+        has_struct = 1;
+        ti++;
+    }
+    if (ti >= p->n) return NULL;
+    ty = p->toks[ti];
+    if (has_struct) {
+        if (ty.kind != TK_IDENT) return NULL;
+    } else if (ty.kind != TK_IDENT && shadow_kw(ty) != SHADOW_KW_INT &&
+               shadow_kw(ty) != SHADOW_KW_CHAR && shadow_kw(ty) != SHADOW_KW_VOID &&
+               shadow_kw(ty) != SHADOW_KW_BOOL && shadow_kw(ty) != SHADOW_KW_SIZE_T)
         return NULL;
-    int ty_end = peek_generic_type_end(p, p->i);
-    int name_i = (ty_end > 0) ? ty_end : p->i + 1;
+    ty_end = has_struct ? 0 : peek_generic_type_end(p, ti);
+    name_i = (ty_end > 0) ? ty_end : ti + 1;
+    if (name_i < p->n && tok_eq(p->toks[name_i], TK_PUNCT, "*")) {
+        is_ptr = 1;
+        name_i++;
+    }
     if (name_i >= p->n || p->toks[name_i].kind != TK_IDENT) return NULL;
-    /* Must end with `;` (optional comma names). */
-    int j = name_i;
+    /* Must end with `;` (optional comma names; optional @as before `;`). */
+    j = name_i;
     while (j < p->n) {
         if (p->toks[j].kind != TK_IDENT) return NULL;
         j++;
-        if (tok_eq(p->toks[j], TK_PUNCT, ";")) break;
-        if (!tok_eq(p->toks[j], TK_PUNCT, ",")) return NULL;
+        if (j < p->n && tok_eq(p->toks[j], TK_PUNCT, "@") &&
+            j + 1 < p->n && shadow_kw(p->toks[j + 1]) == SHADOW_KW_AS) {
+            has_as = 1;
+            j += 2;
+        }
+        if (j < p->n && tok_eq(p->toks[j], TK_PUNCT, ";")) break;
+        if (j >= p->n || !tok_eq(p->toks[j], TK_PUNCT, ",")) return NULL;
         j++;
     }
     if (j >= p->n || !tok_eq(p->toks[j], TK_PUNCT, ";")) return NULL;
+    semi = p->toks[j];
 
-    char tytxt[128];
+    if (has_const) p_next(p);
+    if (has_struct) p_next(p); /* struct */
     if (ty_end > 0) {
         if (!span_text(p, p->i, ty_end, tytxt, sizeof(tytxt))) return NULL;
         while (p->i < ty_end) p_next(p);
     } else {
-        p_next(p); /* type */
-        slice_to(tytxt, sizeof(tytxt), ty.spell);
+        p_next(p); /* type / tag */
+        if (has_struct)
+            snprintf(tytxt, sizeof(tytxt), "struct %.*s",
+                     (int)ty.spell.len, ty.spell.ptr);
+        else
+            slice_to(tytxt, sizeof(tytxt), ty.spell);
     }
-    char names[128];
+    if (is_ptr) p_next(p); /* * */
+    if (has_const) {
+        char tmp[128];
+        snprintf(tmp, sizeof(tmp), "const %s%s", tytxt, is_ptr ? "*" : "");
+        snprintf(tytxt, sizeof(tytxt), "%s", tmp);
+    } else if (is_ptr) {
+        size_t al = strlen(tytxt);
+        if (al + 1 < sizeof(tytxt)) { tytxt[al] = '*'; tytxt[al + 1] = 0; }
+    }
     names[0] = 0;
+    last_name = (Token){0};
     for (;;) {
         Token nm = p_next(p);
         char piece[64];
+        last_name = nm;
         slice_to(piece, sizeof(piece), nm.spell);
         size_t cur = strlen(names);
         if (cur && cur + 1 < sizeof(names)) { names[cur++] = ','; names[cur] = 0; }
         snprintf(names + strlen(names), sizeof(names) - strlen(names), "%s", piece);
+        if (tok_eq(p_peek(p), TK_PUNCT, "@") &&
+            p->i + 1 < p->n && shadow_kw(p->toks[p->i + 1]) == SHADOW_KW_AS) {
+            has_as = 1;
+            p_next(p); p_next(p);
+        }
         if (p_accept(p, TK_PUNCT, ";")) break;
         if (!p_accept(p, TK_PUNCT, ",")) {
             parser_fail(p, p_peek(p), "expected ',' or ';' in field");
             return NULL;
         }
     }
-    AstNode* n = ast_new(p, AST_FIELD_SIMPLE);
+    if (!has_as && last_name.kind == TK_IDENT)
+        has_as = field_gap_has_as(p, last_name, semi);
+    n = ast_new(p, AST_FIELD_SIMPLE);
     if (!n) return NULL;
     snprintf(n->a, sizeof(n->a), "%s", tytxt);
     snprintf(n->b, sizeof(n->b), "%s", names);
+    if (has_as) snprintf(n->e, sizeof(n->e), "as");
+    return n;
+}
+
+/* typedef enum [Tag]? { enumerators } Alias ; */
+static AstNode* parse_typedef_enum(Parser* p) {
+    if (shadow_kw(p_peek(p)) != SHADOW_KW_TYPEDEF) return NULL;
+    if (p->i + 1 >= p->n || shadow_kw(p->toks[p->i + 1]) != SHADOW_KW_ENUM)
+        return NULL;
+    p_next(p); /* typedef */
+    p_next(p); /* enum */
+    AstNode* n = ast_new(p, AST_TYPEDEF_ENUM);
+    if (!n) return NULL;
+    n->a[0] = 0;
+    if (p_peek(p).kind == TK_IDENT) {
+        Token tag = p_next(p);
+        slice_to(n->a, sizeof(n->a), tag.spell);
+    }
+    if (!p_accept(p, TK_PUNCT, "{")) {
+        parser_fail(p, p_peek(p), "expected '{' after typedef enum");
+        return NULL;
+    }
+    int b0 = p->i;
+    int depth = 1;
+    while (p->i < p->n && depth > 0) {
+        Token t = p_peek(p);
+        if (tok_eq(t, TK_PUNCT, "{")) depth++;
+        else if (tok_eq(t, TK_PUNCT, "}")) {
+            depth--;
+            if (depth == 0) break;
+        }
+        p_next(p);
+    }
+    if (!span_text(p, b0, p->i, n->d, sizeof(n->d))) {
+        parser_fail(p, p_peek(p), "enum body too long");
+        return NULL;
+    }
+    if (!p_accept(p, TK_PUNCT, "}")) {
+        parser_fail(p, p_peek(p), "expected '}' after enum body");
+        return NULL;
+    }
+    Token alias = p_next(p);
+    if (alias.kind != TK_IDENT) {
+        parser_fail(p, alias, "expected typedef enum alias");
+        return NULL;
+    }
+    slice_to(n->b, sizeof(n->b), alias.spell);
+    if (!p_accept(p, TK_PUNCT, ";")) {
+        parser_fail(p, p_peek(p), "expected ';' after typedef enum");
+        return NULL;
+    }
+    if (!scope_add_typedef(p, alias.spell)) { p->err = 1; return NULL; }
+    return n;
+}
+
+/* switch (expr) { body } — body kept as text (case/default passthrough). */
+static AstNode* parse_switch_stmt(Parser* p) {
+    if (shadow_kw(p_peek(p)) != SHADOW_KW_SWITCH) return NULL;
+    p_next(p); /* switch */
+    if (!p_accept(p, TK_PUNCT, "(")) {
+        parser_fail(p, p_peek(p), "expected '(' after switch");
+        return NULL;
+    }
+    int e0 = p->i;
+    int depth = 1;
+    while (p->i < p->n && depth > 0) {
+        Token t = p_peek(p);
+        if (tok_eq(t, TK_PUNCT, "(")) depth++;
+        else if (tok_eq(t, TK_PUNCT, ")")) {
+            depth--;
+            if (depth == 0) break;
+        }
+        p_next(p);
+    }
+    char expr[256];
+    if (e0 >= p->i) expr[0] = 0;
+    else if (!span_text(p, e0, p->i, expr, sizeof(expr))) {
+        parser_fail(p, p_peek(p), "switch expr too long");
+        return NULL;
+    }
+    if (!p_accept(p, TK_PUNCT, ")") || !p_accept(p, TK_PUNCT, "{")) {
+        parser_fail(p, p_peek(p), "expected ') {' after switch");
+        return NULL;
+    }
+    int b0 = p->i;
+    depth = 1;
+    while (p->i < p->n && depth > 0) {
+        Token t = p_peek(p);
+        if (tok_eq(t, TK_PUNCT, "{")) depth++;
+        else if (tok_eq(t, TK_PUNCT, "}")) {
+            depth--;
+            if (depth == 0) break;
+        }
+        p_next(p);
+    }
+    AstNode* n = ast_new(p, AST_SWITCH);
+    if (!n) return NULL;
+    snprintf(n->a, sizeof(n->a), "%s", expr);
+    if (!span_text(p, b0, p->i, n->d, sizeof(n->d))) {
+        parser_fail(p, p_peek(p), "switch body too long");
+        return NULL;
+    }
+    if (!p_accept(p, TK_PUNCT, "}")) {
+        parser_fail(p, p_peek(p), "expected '}' to close switch");
+        return NULL;
+    }
     return n;
 }
 
@@ -3069,6 +3286,8 @@ static AstNode* parse_typedef_int(Parser* p) {
     if (shadow_kw(p_peek(p)) != SHADOW_KW_TYPEDEF) return NULL;
     if (p->i + 1 < p->n && shadow_kw(p->toks[p->i + 1]) == SHADOW_KW_STRUCT)
         return parse_typedef_struct(p);
+    if (p->i + 1 < p->n && shadow_kw(p->toks[p->i + 1]) == SHADOW_KW_ENUM)
+        return parse_typedef_enum(p);
     {
         AstNode* fp = parse_typedef_fn_ptr(p);
         if (fp || p->err) return fp;
@@ -3111,11 +3330,46 @@ static AstNode* parse_star_stmt(Parser* p) {
     return n;
 }
 
+/* Copy a same-line C block comment after `after` into dst (empty if none). */
+static void shadow_same_line_c_comment(Parser* p, Token after, char* dst, size_t cap) {
+    FileTape* ft;
+    size_t i, j, n;
+    if (!dst || !cap) return;
+    dst[0] = 0;
+    if (!p || !p->cache) return;
+    ft = tape_by_id(p->cache, after.file_id);
+    if (!ft || !ft->bytes) return;
+    i = after.offset + after.spell.len;
+    while (i < ft->len && (ft->bytes[i] == ' ' || ft->bytes[i] == '\t')) i++;
+    if (i + 1 >= ft->len || ft->bytes[i] != '/' || ft->bytes[i + 1] != '*') return;
+    j = i + 2;
+    while (j + 1 < ft->len && !(ft->bytes[j] == '*' && ft->bytes[j + 1] == '/')) {
+        if (ft->bytes[j] == '\n') return;
+        j++;
+    }
+    if (j + 1 >= ft->len) return;
+    j += 2;
+    n = j - i;
+    if (n >= cap) n = cap - 1;
+    memcpy(dst, ft->bytes + i, n);
+    dst[n] = 0;
+}
+
 static AstNode* parse_struct(Parser* p) {
     if (shadow_kw(p_peek(p)) != SHADOW_KW_STRUCT) return NULL;
     p_next(p);
     Token name = p_next(p);
     if (name.kind != TK_IDENT) { p->err = 1; return NULL; }
+    /* Forward: struct Tag; (+ optional same-line block comment). */
+    if (tok_eq(p_peek(p), TK_PUNCT, ";")) {
+        Token semi = p_next(p);
+        AstNode* st = ast_new(p, AST_STRUCT);
+        if (!st) return NULL;
+        slice_to(st->a, sizeof(st->a), name.spell);
+        snprintf(st->e, sizeof(st->e), "fwd");
+        shadow_same_line_c_comment(p, semi, st->d, sizeof(st->d));
+        return st;
+    }
     if (!p_accept(p, TK_PUNCT, "{")) { p->err = 1; return NULL; }
     AstNode* st = ast_new(p, AST_STRUCT);
     if (!st) return NULL;
@@ -3277,10 +3531,37 @@ static AstNode* parse_external_inner(Parser* p) {
     return NULL;
 }
 
+/* If lead begins with optional ws + `cmt`, advance past that prefix. */
+static void shadow_lead_skip_prefix(Parser* p, AstNode* n, const char* cmt) {
+    FileTape* ft;
+    size_t i, cl;
+    if (!n || !n->lead_len || !cmt || !cmt[0] || !p || !p->cache) return;
+    ft = tape_by_id(p->cache, n->file_id);
+    if (!ft || !ft->bytes) return;
+    cl = strlen(cmt);
+    i = n->lead_off;
+    while (i < n->lead_off + n->lead_len &&
+           (ft->bytes[i] == ' ' || ft->bytes[i] == '\t'))
+        i++;
+    if (i + cl > n->lead_off + n->lead_len) return;
+    if (memcmp(ft->bytes + i, cmt, cl) != 0) return;
+    i += cl;
+    n->lead_len = (n->lead_off + n->lead_len) - i;
+    n->lead_off = i;
+}
+
 static AstNode* parse_external(Parser* p) {
     int start = p->i;
     AstNode* n = parse_external_inner(p);
-    if (n) shadow_attach_lead(p, n, start);
+    if (n) {
+        shadow_attach_lead(p, n, start);
+        /* Forward struct already owns its same-line trailing comment. */
+        if (p->ntu > 0) {
+            AstNode* prev = p->tu_items[p->ntu - 1];
+            if (prev->kind == AST_STRUCT && strcmp(prev->e, "fwd") == 0 && prev->d[0])
+                shadow_lead_skip_prefix(p, n, prev->d);
+        }
+    }
     return n;
 }
 
@@ -3354,6 +3635,8 @@ static const char* ast_kind_name(AstKind k) {
     case AST_CONTINUE: return "continue";
     case AST_DO_WHILE: return "do_while";
     case AST_GLOBAL_ARR: return "global_arr";
-    }
+    case AST_TYPEDEF_ENUM: return "typedef_enum";
+    case AST_SWITCH: return "switch";
+}
     return "?";
 }

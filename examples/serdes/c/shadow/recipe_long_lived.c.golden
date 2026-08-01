@@ -144,7 +144,7 @@ static CCResult_bool_CCError store_put(Store* store, char[:] key, int value) {
         __typeof__(store_insert_entry(store, stable_key, value)) __r = store_insert_entry(store, stable_key, value);
         if (__cc_uw_is_err(__r)) {
             #line 84 "examples/serdes/c/shadow/recipe_long_lived.ccs"
-            CCError e = __cc_uw_err_at(__r, "insert_entry", __FILE__, __LINE__);
+            CCError e = __cc_uw_err_at(__r, "insert_entry", "examples/serdes/c/shadow/recipe_long_lived.ccs", "84");
     return cc_err_CCResult_bool_CCError(e);
         }
     }
@@ -186,7 +186,7 @@ int main(void) {
         __typeof__(cc_println(store_init(store))) __r = cc_println(store_init(store));
         if (__cc_uw_is_err(__r)) {
             #line 104 "examples/serdes/c/shadow/recipe_long_lived.ccs"
-            CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+            CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_long_lived.ccs", "104");
             #line 101 "examples/serdes/c/shadow/recipe_long_lived.ccs"
             cc_error_log(e);
             return 1;
@@ -212,7 +212,7 @@ int main(void) {
             __typeof__(cc_println(store_put(store,cc_string_as_slice(& key), request_id * 10))) __r = cc_println(store_put(store,cc_string_as_slice(& key), request_id * 10));
             if (__cc_uw_is_err(__r)) {
                 #line 117 "examples/serdes/c/shadow/recipe_long_lived.ccs"
-                CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+                CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_long_lived.ccs", "117");
                 #line 101 "examples/serdes/c/shadow/recipe_long_lived.ccs"
                 cc_error_log(e);
                 return 1;
@@ -249,7 +249,7 @@ int main(void) {
             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
             if (__cc_uw_is_err(__r)) {
                 #line 128 "examples/serdes/c/shadow/recipe_long_lived.ccs"
-                CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+                CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_long_lived.ccs", "128");
                 #line 101 "examples/serdes/c/shadow/recipe_long_lived.ccs"
                 cc_error_log(e);
                 return 1;

@@ -26,10 +26,7 @@
 
 
 #line 27 "examples/serdes/c/shadow/recipe_exclusive.ccs"
-typedef struct {
-    #line 28 "examples/serdes/c/shadow/recipe_exclusive.ccs"
-    int64_t value;
-} Counter;
+typedef struct { int64_t value; } Counter;
 
 
 #line 31 "examples/serdes/c/shadow/recipe_exclusive.ccs"
@@ -101,7 +98,7 @@ int main(void) {
             __typeof__(cc_eprintln("cc_exclusive_create failed")) __r = cc_eprintln("cc_exclusive_create failed");
             if (__cc_uw_is_err(__r)) {
                 #line 59 "examples/serdes/c/shadow/recipe_exclusive.ccs"
-                CCError e = __cc_uw_err_at(__r, "cc_eprintln", __FILE__, __LINE__);
+                CCError e = __cc_uw_err_at(__r, "cc_eprintln", "examples/serdes/c/shadow/recipe_exclusive.ccs", "59");
                 #line 54 "examples/serdes/c/shadow/recipe_exclusive.ccs"
                 cc_error_log(e);
                 __cc_retval = 1;
@@ -127,7 +124,7 @@ int main(void) {
             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
             if (__cc_uw_is_err(__r)) {
                 #line 63 "examples/serdes/c/shadow/recipe_exclusive.ccs"
-                CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+                CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_exclusive.ccs", "63");
                 #line 54 "examples/serdes/c/shadow/recipe_exclusive.ccs"
                 cc_error_log(e);
                 __cc_retval = 1;
@@ -146,7 +143,7 @@ int main(void) {
             __typeof__(cc_nursery_create(NULL)) __r = cc_nursery_create(NULL);
             if (__cc_uw_is_err(__r)) {
                 #line 67 "examples/serdes/c/shadow/recipe_exclusive.ccs"
-                CCError e = __cc_uw_err_at(__r, "unwrap", __FILE__, __LINE__);
+                CCError e = __cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_exclusive.ccs", "67");
                 #line 54 "examples/serdes/c/shadow/recipe_exclusive.ccs"
                 cc_error_log(e);
                 __cc_retval = 1;
@@ -175,7 +172,7 @@ int main(void) {
             __typeof__(cc_nursery_create(NULL)) __r = cc_nursery_create(NULL);
             if (__cc_uw_is_err(__r)) {
                 #line 77 "examples/serdes/c/shadow/recipe_exclusive.ccs"
-                CCError e = __cc_uw_err_at(__r, "unwrap", __FILE__, __LINE__);
+                CCError e = __cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_exclusive.ccs", "77");
                 #line 54 "examples/serdes/c/shadow/recipe_exclusive.ccs"
                 cc_error_log(e);
                 __cc_retval = 1;
@@ -219,7 +216,7 @@ int main(void) {
             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
             if (__cc_uw_is_err(__r)) {
                 #line 92 "examples/serdes/c/shadow/recipe_exclusive.ccs"
-                CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+                CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_exclusive.ccs", "92");
                 #line 54 "examples/serdes/c/shadow/recipe_exclusive.ccs"
                 cc_error_log(e);
                 __cc_retval = 1;
@@ -240,7 +237,7 @@ int main(void) {
             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
             if (__cc_uw_is_err(__r)) {
                 #line 93 "examples/serdes/c/shadow/recipe_exclusive.ccs"
-                CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+                CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_exclusive.ccs", "93");
                 #line 54 "examples/serdes/c/shadow/recipe_exclusive.ccs"
                 cc_error_log(e);
                 __cc_retval = 1;
@@ -264,7 +261,7 @@ goto __cc_cleanup;
         __typeof__(cc_println("OK")) __r = cc_println("OK");
         if (__cc_uw_is_err(__r)) {
             #line 99 "examples/serdes/c/shadow/recipe_exclusive.ccs"
-            CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+            CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_exclusive.ccs", "99");
             #line 54 "examples/serdes/c/shadow/recipe_exclusive.ccs"
             cc_error_log(e);
             __cc_retval = 1;

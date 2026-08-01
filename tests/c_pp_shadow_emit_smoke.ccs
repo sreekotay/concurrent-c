@@ -287,6 +287,8 @@ int main(void) {
     if (!expect_golden("mini.cch", SHADOW_EMIT_H, "mini.h.golden")) return 1;
     if (!expect_golden("with_include.cch", SHADOW_EMIT_H, "with_include.h.golden")) return 1;
     if (!expect_golden("result_frag.cch", SHADOW_EMIT_H, "result_frag.h.golden")) return 1;
+    if (!expect_golden("io_error_frag.cch", SHADOW_EMIT_H, "io_error_frag.h.golden")) return 1;
+    if (!expect_golden("error_face_frag.cch", SHADOW_EMIT_H, "error_face_frag.h.golden")) return 1;
     if (!test_include_tape_reuse()) return 1;
     if (!test_line_provenance()) return 1;
     if (!test_ccs_to_c_hostcc()) return 1;
@@ -329,6 +331,26 @@ int main(void) {
         int rc = system(cmd);
         if (rc != 0) {
             printf("FAIL: diff_stdlib_nursery.sh rc=%d\n", rc);
+            return 1;
+        }
+    }
+    {
+        char cmd[512];
+        snprintf(cmd, sizeof(cmd),
+                 "bash examples/serdes/c/shadow/diff_stdlib_chan_handle.sh");
+        int rc = system(cmd);
+        if (rc != 0) {
+            printf("FAIL: diff_stdlib_chan_handle.sh rc=%d\n", rc);
+            return 1;
+        }
+    }
+    {
+        char cmd[512];
+        snprintf(cmd, sizeof(cmd),
+                 "bash examples/serdes/c/shadow/run_hello_shadow.sh");
+        int rc = system(cmd);
+        if (rc != 0) {
+            printf("FAIL: run_hello_shadow.sh rc=%d\n", rc);
             return 1;
         }
     }

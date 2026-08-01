@@ -2,6 +2,7 @@
 #pragma once
 #include <stddef.h>
 /* Header that stitches a stage-1-cached include into the .h product. */
+
 #line 3 "examples/serdes/c/shadow/with_include.cch"
 typedef int Err;
 
