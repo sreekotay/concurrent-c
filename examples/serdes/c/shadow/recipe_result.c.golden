@@ -7,12 +7,9 @@
 
 
 CCResult_int_CCError read_config_value(const char* key) {
-    if (!key || key[0] == '\0') 
-    return cc_err_CCResult_int_CCError(CC_ERROR(CC_ERR_INVALID_ARG, "empty key"));
-    if (strcmp(key, "timeout") == 0) 
-    return cc_ok_CCResult_int_CCError(30);
-    if (strcmp(key, "max_retries") == 0) 
-    return cc_ok_CCResult_int_CCError(3);
+    if (!key || key[0] == '\0') return cc_err_CCResult_int_CCError(CC_ERROR(CC_ERR_INVALID_ARG, "empty key"));
+    if (strcmp(key, "timeout") == 0) return cc_ok_CCResult_int_CCError(30);
+    if (strcmp(key, "max_retries") == 0) return cc_ok_CCResult_int_CCError(3);
     return cc_err_CCResult_int_CCError(CC_ERROR(CC_ERR_NOT_FOUND, "key not found"));
 }
 
@@ -43,17 +40,17 @@ int main(void) {
           cc_error_log(e);
           return 1;
       } __cc_uw_value(__cc_pu_e); });
-    { __typeof__(cc_println(({ CCArena* __cc_tpl_arena = (&__cc_str_scratch_0); CCString __cc_tpl = cc_string_new(); cc_string_push_buffer(&__cc_tpl, "total wait time: ", 17, __cc_tpl_arena); cc_string_push(&__cc_tpl, (total), __cc_tpl_arena); cc_string_push_buffer(&__cc_tpl, " seconds", 8, __cc_tpl_arena); __cc_tpl; }))) __cc_er_r = (cc_println(({ CCArena* __cc_tpl_arena = (&__cc_str_scratch_0); CCString __cc_tpl = cc_string_new(); cc_string_push_buffer(&__cc_tpl, "total wait time: ", 17, __cc_tpl_arena); cc_string_push(&__cc_tpl, (total), __cc_tpl_arena); cc_string_push_buffer(&__cc_tpl, " seconds", 8, __cc_tpl_arena); __cc_tpl; }))); if (__cc_uw_is_err(__cc_er_r)) { CCError e = __cc_uw_err_at(__cc_er_r, "cc_println", "<shadow>", "0");
+    { __typeof__(cc_println(({ CCArena* __cc_tpl_arena = (&__cc_str_scratch_0); CCString __cc_tpl = cc_string_new(); cc_string_push_buffer(&__cc_tpl, "total wait time: ", 17, __cc_tpl_arena); cc_string_push_int(&__cc_tpl, (int)(total), __cc_tpl_arena); cc_string_push_buffer(&__cc_tpl, " seconds", 8, __cc_tpl_arena); __cc_tpl; }))) __cc_er_r = (cc_println(({ CCArena* __cc_tpl_arena = (&__cc_str_scratch_0); CCString __cc_tpl = cc_string_new(); cc_string_push_buffer(&__cc_tpl, "total wait time: ", 17, __cc_tpl_arena); cc_string_push_int(&__cc_tpl, (int)(total), __cc_tpl_arena); cc_string_push_buffer(&__cc_tpl, " seconds", 8, __cc_tpl_arena); __cc_tpl; }))); if (__cc_uw_is_err(__cc_er_r)) { CCError e = __cc_uw_err_at(__cc_er_r, "cc_println", "<shadow>", "0");
       cc_error_log(e);
       return 1;
     } else { (void)__cc_er_r; } }
     int missing = ({ __typeof__(read_config_value("unknown_key")) __cc_pu_r = (read_config_value("unknown_key")); !__cc_uw_is_err(__cc_pu_r) ? __cc_uw_value(__cc_pu_r) : (-1); });
-    { __typeof__(cc_println(({ CCArena* __cc_tpl_arena = (&__cc_str_scratch_1); CCString __cc_tpl = cc_string_new(); cc_string_push_buffer(&__cc_tpl, "missing key fell back to: ", 26, __cc_tpl_arena); cc_string_push(&__cc_tpl, (missing), __cc_tpl_arena); __cc_tpl; }))) __cc_er_r = (cc_println(({ CCArena* __cc_tpl_arena = (&__cc_str_scratch_1); CCString __cc_tpl = cc_string_new(); cc_string_push_buffer(&__cc_tpl, "missing key fell back to: ", 26, __cc_tpl_arena); cc_string_push(&__cc_tpl, (missing), __cc_tpl_arena); __cc_tpl; }))); if (__cc_uw_is_err(__cc_er_r)) { CCError e = __cc_uw_err_at(__cc_er_r, "cc_println", "<shadow>", "0");
+    { __typeof__(cc_println(({ CCArena* __cc_tpl_arena = (&__cc_str_scratch_1); CCString __cc_tpl = cc_string_new(); cc_string_push_buffer(&__cc_tpl, "missing key fell back to: ", 26, __cc_tpl_arena); cc_string_push_int(&__cc_tpl, (int)(missing), __cc_tpl_arena); __cc_tpl; }))) __cc_er_r = (cc_println(({ CCArena* __cc_tpl_arena = (&__cc_str_scratch_1); CCString __cc_tpl = cc_string_new(); cc_string_push_buffer(&__cc_tpl, "missing key fell back to: ", 26, __cc_tpl_arena); cc_string_push_int(&__cc_tpl, (int)(missing), __cc_tpl_arena); __cc_tpl; }))); if (__cc_uw_is_err(__cc_er_r)) { CCError e = __cc_uw_err_at(__cc_er_r, "cc_println", "<shadow>", "0");
       cc_error_log(e);
       return 1;
     } else { (void)__cc_er_r; } }
     int bad = ({ __typeof__(read_config_value("")) __cc_pu_r = (read_config_value("")); !__cc_uw_is_err(__cc_pu_r) ? __cc_uw_value(__cc_pu_r) : ({ CCError e = __cc_uw_err_at(__cc_pu_r, "<unwrap>", "<shadow>", "0"); ((e.kind == CC_ERR_INVALID_ARG ? 0 : -1)); }); });
-    { __typeof__(cc_println(({ CCArena* __cc_tpl_arena = (&__cc_str_scratch_2); CCString __cc_tpl = cc_string_new(); cc_string_push_buffer(&__cc_tpl, "invalid key mapped to: ", 23, __cc_tpl_arena); cc_string_push(&__cc_tpl, (bad), __cc_tpl_arena); __cc_tpl; }))) __cc_er_r = (cc_println(({ CCArena* __cc_tpl_arena = (&__cc_str_scratch_2); CCString __cc_tpl = cc_string_new(); cc_string_push_buffer(&__cc_tpl, "invalid key mapped to: ", 23, __cc_tpl_arena); cc_string_push(&__cc_tpl, (bad), __cc_tpl_arena); __cc_tpl; }))); if (__cc_uw_is_err(__cc_er_r)) { CCError e = __cc_uw_err_at(__cc_er_r, "cc_println", "<shadow>", "0");
+    { __typeof__(cc_println(({ CCArena* __cc_tpl_arena = (&__cc_str_scratch_2); CCString __cc_tpl = cc_string_new(); cc_string_push_buffer(&__cc_tpl, "invalid key mapped to: ", 23, __cc_tpl_arena); cc_string_push_int(&__cc_tpl, (int)(bad), __cc_tpl_arena); __cc_tpl; }))) __cc_er_r = (cc_println(({ CCArena* __cc_tpl_arena = (&__cc_str_scratch_2); CCString __cc_tpl = cc_string_new(); cc_string_push_buffer(&__cc_tpl, "invalid key mapped to: ", 23, __cc_tpl_arena); cc_string_push_int(&__cc_tpl, (int)(bad), __cc_tpl_arena); __cc_tpl; }))); if (__cc_uw_is_err(__cc_er_r)) { CCError e = __cc_uw_err_at(__cc_er_r, "cc_println", "<shadow>", "0");
       cc_error_log(e);
       return 1;
     } else { (void)__cc_er_r; } }
@@ -67,7 +64,7 @@ int main(void) {
           cc_error_log(e);
           return 1;
       } __cc_uw_value(__cc_pu_e); });
-    { __typeof__(cc_println(({ CCArena* __cc_tpl_arena = (&__cc_str_scratch_4); CCString __cc_tpl = cc_string_new(); cc_string_push_buffer(&__cc_tpl, "compose ok: timeout=", 20, __cc_tpl_arena); cc_string_push(&__cc_tpl, (shown), __cc_tpl_arena); __cc_tpl; }))) __cc_er_r = (cc_println(({ CCArena* __cc_tpl_arena = (&__cc_str_scratch_4); CCString __cc_tpl = cc_string_new(); cc_string_push_buffer(&__cc_tpl, "compose ok: timeout=", 20, __cc_tpl_arena); cc_string_push(&__cc_tpl, (shown), __cc_tpl_arena); __cc_tpl; }))); if (__cc_uw_is_err(__cc_er_r)) { CCError e = __cc_uw_err_at(__cc_er_r, "cc_println", "<shadow>", "0");
+    { __typeof__(cc_println(({ CCArena* __cc_tpl_arena = (&__cc_str_scratch_4); CCString __cc_tpl = cc_string_new(); cc_string_push_buffer(&__cc_tpl, "compose ok: timeout=", 20, __cc_tpl_arena); cc_string_push_int(&__cc_tpl, (int)(shown), __cc_tpl_arena); __cc_tpl; }))) __cc_er_r = (cc_println(({ CCArena* __cc_tpl_arena = (&__cc_str_scratch_4); CCString __cc_tpl = cc_string_new(); cc_string_push_buffer(&__cc_tpl, "compose ok: timeout=", 20, __cc_tpl_arena); cc_string_push_int(&__cc_tpl, (int)(shown), __cc_tpl_arena); __cc_tpl; }))); if (__cc_uw_is_err(__cc_er_r)) { CCError e = __cc_uw_err_at(__cc_er_r, "cc_println", "<shadow>", "0");
       cc_error_log(e);
       return 1;
     } else { (void)__cc_er_r; } }

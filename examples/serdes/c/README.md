@@ -39,7 +39,7 @@ Same front for both products; H adds `#pragma once` and rejects function bodies.
 | `c_pp_spike.cch` | Umbrella for tools/smokes |
 | `shadow_lower.{ccs,sh}` | Explicit CLI (does **not** replace `ccc`) |
 | `fixtures/` | Architecture falsifiers (mid-struct include, guards, …) |
-| `shadow/` | Goldens: mini, includes, `result_frag`, `hello`, `recipe_result`, `recipe_defer` |
+| `shadow/` | Goldens: mini, includes, `result_frag`, `hello`, recipes (result/defer/unwrap/arena) |
 
 ## Beachhead
 
@@ -48,11 +48,17 @@ Same front for both products; H adds `#pragma once` and rejects function bodies.
 (`T!>(E)`, `!>` / `?>`, `@string` / `@scratch`, block `@errhandler`).
 `shadow/recipe_defer.ccs` ↔ `examples/recipe_defer_cleanup.ccs`
 (`void!>(E)`, `@defer` / `(ok)` / `(err)`, stmt unwrap, `cc_is_err`).
+`shadow/recipe_unwrap.ccs` ↔ `examples/recipe_unwrap_destroy_forms.ccs`
+(`Type*` unwrap, `@destroy` / bare, chan `>`/`<`, static helpers).
+`shadow/recipe_arena.ccs` ↔ `examples/recipe_arena_scope.ccs`
+(value `@destroy`, `for`, arena UFCS: remaining/checkpoint/allocT/restore).
 
 ```bash
 ./examples/serdes/c/shadow_lower.sh examples/hello.ccs -o /tmp/hello_shadow.c
 ./examples/serdes/c/shadow_lower.sh examples/recipe_result_error_handling.ccs -o /tmp/recipe_shadow.c
 ./examples/serdes/c/shadow_lower.sh examples/recipe_defer_cleanup.ccs -o /tmp/defer_shadow.c
+./examples/serdes/c/shadow_lower.sh examples/recipe_unwrap_destroy_forms.ccs -o /tmp/unwrap_shadow.c
+./examples/serdes/c/shadow_lower.sh examples/recipe_arena_scope.ccs -o /tmp/arena_shadow.c
 ```
 
 Emit uses simplified file:line (`"<shadow>"`, `"0"`) and GNU statement

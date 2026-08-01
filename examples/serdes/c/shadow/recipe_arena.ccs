@@ -1,0 +1,27 @@
+/*
+ * Recipe: Scoped Memory (Arena)
+ *
+ * Arenas are bump-allocated memory with O(1) reset. @destroy frees the
+ * arena at scope exit — in a loop body, that's once per iteration, so
+ * each "request" gets a clean arena. Checkpoints let you peel back
+ * scratch work without tearing down the whole arena.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdlib.h>
+#include <ccc/script/stdio.cch>
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(4)) @destroy;
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    for (int i = 1; i <= 3; i++) {
+        println(@string(`Processing request ${i} bytes: ${arena.remaining()}`, @scratch)) !>;
+
+        /* scratch allocation, reclaimed at cp.restore(); the element
+         * type comes from the destination */
+        CCArenaCheckpoint cp = arena.checkpoint();
+        char* scratch = arena.allocT(1024);
+        if (scratch) scratch[0] = '\0';
+        cp.restore();
+    }
+    return 0;
+}
