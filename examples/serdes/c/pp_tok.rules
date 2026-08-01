@@ -46,7 +46,7 @@ bt_string: keep [#'`' any complement charset [#'`'] #'`']
 ; CC: `=>` (closure), `!>` / `?>` (result) before `=`/`!`/`?` singles; `@` for attrs.
 ; Split because the rules engine caps alternatives at 32 per alt node.
 punct_multi: [
-      "..." | "<<=" | ">>=" | "->" | "=>" | "!>" | "?>" | "++" | "--" | "<<" | ">>"
+      "..." | "<<=" | ">>=" | "->" | "=>" | "!>" | "?>" | "::" | "++" | "--" | "<<" | ">>"
     | "<=" | ">=" | "==" | "!=" | "&&" | "||" | "*=" | "/=" | "%=" | "+="
     | "-=" | "&=" | "^=" | "|=" | "##"
 ]

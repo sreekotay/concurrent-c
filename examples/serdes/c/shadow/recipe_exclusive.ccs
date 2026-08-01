@@ -1,0 +1,101 @@
+/*
+ * Recipe: Named Exclusive Sections
+ *
+ * Prefer channels + single-writer ownership when you can. When several
+ * fibers must briefly mutate the same named resource, use a CCExclusive
+ * domain:
+ *
+ *   CCArena arena = @create(kilobytes(64)) @destroy;
+ *   CCExclusive* excl = cc_exclusive_create(&arena);       // or create_sized
+ *   CCExclusiveMutex m = excl->mutex(name);   // resolve once
+ *   CCExclusiveGuard g = m.acquire();
+ *   ... short critical section (do not @await) ...
+ *   g.release();                              // idempotent (local held bit)
+ *   excl->destroy();
+ *
+ * Same name in one domain ⇒ same lock. Different domains never collide.
+ * Keep critical sections short; park/await under the lock stalls others.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdlib.h>
+#include <ccc/cc_exclusive.cch>
+#include <ccc/script/stdio.cch>
+
+#define NUM_WORKERS 4
+#define ITERS       1000
+
+typedef struct {
+    int64_t value;
+} Counter;
+
+static CCExclusive* g_excl;
+static Counter g_shared;                 /* guarded by name=1 */
+static Counter g_private[NUM_WORKERS];   /* each guarded by name=100+id */
+
+static void bump_shared(int iters) {
+    CCExclusiveMutex m = g_excl->mutex(1); /* resolve once per worker */
+    for (int i = 0; i < iters; i++) {
+        CCExclusiveGuard g = m.acquire();
+        g_shared.value++;
+        g.release();
+    }
+}
+
+static void bump_private(int worker_id, int iters) {
+    CCExclusiveMutex m = g_excl->mutex((uint64_t)(100 + worker_id));
+    for (int i = 0; i < iters; i++) {
+        CCExclusiveGuard g = m.acquire();
+        g_private[worker_id].value++;
+        g.release();
+    }
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    CCArena excl_arena = @create(kilobytes(64)) @destroy;
+    g_excl = cc_exclusive_create(&excl_arena);
+    if (!g_excl) {
+        eprintln("cc_exclusive_create failed") !>;
+        return 1;
+    }
+
+    println(@string(`=== Named exclusive: ${NUM_WORKERS} workers × ${ITERS} iters ===`, @scratch)) !>;
+
+    /* Shared name: all workers serialize on counter name=1. */
+    {
+        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+        for (int w = 0; w < NUM_WORKERS; w++) {
+            n->spawn(() => {
+                bump_shared(ITERS);
+            });
+        }
+    }
+
+    /* Private names: no cross-worker contention. */
+    {
+        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+        for (int w = 0; w < NUM_WORKERS; w++) {
+            int id = w;
+            n->spawn(() => [id] {
+                bump_private(id, ITERS);
+            });
+        }
+    }
+
+    int64_t private_sum = 0;
+    for (int w = 0; w < NUM_WORKERS; w++) {
+        private_sum += g_private[w].value;
+    }
+
+    int64_t expect = (int64_t)NUM_WORKERS * (int64_t)ITERS;
+    println(@string(`shared  = ${g_shared.value} (expect ${expect})`, @scratch)) !>;
+    println(@string(`private = ${private_sum} (expect ${expect})`, @scratch)) !>;
+
+    g_excl->destroy();
+    g_excl = NULL;
+
+    if (g_shared.value != expect || private_sum != expect) return 1;
+    println("OK") !>;
+    return 0;
+}

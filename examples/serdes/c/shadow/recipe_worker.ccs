@@ -1,0 +1,76 @@
+/*
+ * Recipe: Worker Pool
+ *
+ *   jobs_ch: feeder → N workers (bounded queue)
+ *   done_ch: workers → main (completion ledger, no shared counter)
+ *
+ * Nested nurseries drive the close protocol:
+ *   feeder nursery @destroy → closes jobs_tx when the feeder finishes,
+ *                             causing workers to drain jobs_rx and exit.
+ *   worker nursery @destroy → joins all workers before main drains done_rx.
+ *
+ * Temp prints use @string(`...`, @scratch) — no hand-rolled arena.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdlib.h>
+#include <ccc/script/stdio.cch>
+
+#define NUM_WORKERS 3
+#define NUM_JOBS    9
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    int[~4 >]        jobs_tx;
+    int[~4 <]        jobs_rx;
+    int[~NUM_JOBS >] done_tx;   /* capacity >= NUM_JOBS to avoid deadlock */
+    int[~NUM_JOBS <] done_rx;
+
+    CCChan* jobs_ch = cc_channel_pair(&jobs_tx, &jobs_rx) !> @destroy;
+    CCChan* done_ch = cc_channel_pair(&done_tx, &done_rx) !> @destroy;
+
+    {
+        CCNursery* workers = cc_nursery_create(NULL) !> @destroy;
+
+        /* Workers: pull jobs, report each completion on done_tx. */
+        for (int w = 0; w < NUM_WORKERS; w++) {
+            workers->spawn(() => [jobs_rx, done_tx] {
+                @errhandler(CCError e) cc_error_exit(e);
+                int job;
+                while (cc_io_avail(jobs_rx.recv(&job))) {
+                    println(@string(`worker: processed job ${job}`, @scratch)) !>;
+                    (void)done_tx.send(job);
+                }
+            });
+        }
+
+        /* Feeder in an inner nursery: its @destroy closes jobs_tx once feeder returns. */
+        {
+            CCNursery* feeder = cc_nursery_create(workers) !> @destroy;
+            (void)feeder->close_on(jobs_tx);
+
+            feeder->spawn(() => [jobs_tx] {
+                @errhandler(CCError e) cc_error_exit(e);
+                for (int j = 1; j <= NUM_JOBS; j++) {
+                    (void)jobs_tx.send(j);
+                }
+                int n = NUM_JOBS;
+                println(@string(`feeder: sent ${n} jobs`, @scratch)) !>;
+            });
+        }
+        /* feeder @destroy: jobs_tx closed → workers drain and exit. */
+    }
+    /* workers @destroy: all workers joined. */
+
+    /* Close done_tx so the drain loop terminates. */
+    done_tx.close();
+
+    int jobs_done = 0;
+    int v;
+    while (cc_io_avail(done_rx.recv(&v))) {
+        jobs_done++;
+    }
+
+    println(@string(`done, jobs_done = ${jobs_done}`, @scratch)) !>;
+    return (jobs_done == NUM_JOBS) ? 0 : 1;
+}

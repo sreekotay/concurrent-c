@@ -247,6 +247,12 @@ int main(void) {
     if (!expect_golden("recipe_arena.ccs", SHADOW_EMIT_C, "recipe_arena.c.golden")) return 1;
     if (!expect_golden("recipe_capture.ccs", SHADOW_EMIT_C, "recipe_capture.c.golden")) return 1;
     if (!expect_golden("recipe_pipeline.ccs", SHADOW_EMIT_C, "recipe_pipeline.c.golden")) return 1;
+    if (!expect_golden("recipe_timeout.ccs", SHADOW_EMIT_C, "recipe_timeout.c.golden")) return 1;
+    if (!expect_golden("recipe_worker.ccs", SHADOW_EMIT_C, "recipe_worker.c.golden")) return 1;
+    if (!expect_golden("recipe_ufcs.ccs", SHADOW_EMIT_C, "recipe_ufcs.c.golden")) return 1;
+    if (!expect_golden("recipe_async.ccs", SHADOW_EMIT_C, "recipe_async.c.golden")) return 1;
+    if (!expect_golden("recipe_exclusive.ccs", SHADOW_EMIT_C, "recipe_exclusive.c.golden")) return 1;
+    if (!expect_golden("recipe_long_lived.ccs", SHADOW_EMIT_C, "recipe_long_lived.c.golden")) return 1;
     if (!expect_golden("mini.cch", SHADOW_EMIT_H, "mini.h.golden")) return 1;
     if (!expect_golden("with_include.cch", SHADOW_EMIT_H, "with_include.h.golden")) return 1;
     if (!expect_golden("result_frag.cch", SHADOW_EMIT_H, "result_frag.h.golden")) return 1;

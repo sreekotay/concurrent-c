@@ -56,6 +56,18 @@ Same front for both products; H adds `#pragma once` and rejects function bodies.
 (bare blocks, block-scoped nursery `@destroy`, value/ref spawn captures).
 `shadow/recipe_pipeline.ccs` ↔ `examples/recipe_channel_pipeline.ccs`
 (`while`, chan send/recv, `close_on`, atomics, nested nurseries).
+`shadow/recipe_timeout.ccs` ↔ `examples/recipe_timeout.ccs`
+(`@with_deadline` / `as`, `while`, `name++`).
+`shadow/recipe_worker.ccs` ↔ `examples/recipe_worker_pool.ccs`
+(nested nurseries, chan close, capture types).
+`shadow/recipe_ufcs.ccs` ↔ `examples/recipe_ufcs_forms.ccs`
+(UFCS rewrite, `!>.meth()`, chains, typed slices beachhead).
+`shadow/recipe_async.ccs` ↔ `examples/recipe_async_await.ccs`
+(`@async` as sync fn beachhead; `@await` stripped to blocking channel ops).
+`shadow/recipe_exclusive.ccs` ↔ `examples/recipe_exclusive_named.ccs`
+(anonymous typedef, statics, `@create`, exclusive UFCS).
+`shadow/recipe_long_lived.ccs` ↔ `examples/recipe_long_lived_store.ccs`
+(`Map::[K,V]`, result helpers, store UFCS / `!>(e){…}`).
 
 ```bash
 ./examples/serdes/c/shadow_lower.sh examples/hello.ccs -o /tmp/hello_shadow.c
@@ -65,10 +77,19 @@ Same front for both products; H adds `#pragma once` and rejects function bodies.
 ./examples/serdes/c/shadow_lower.sh examples/recipe_arena_scope.ccs -o /tmp/arena_shadow.c
 ./examples/serdes/c/shadow_lower.sh examples/recipe_explicit_capture.ccs -o /tmp/capture_shadow.c
 ./examples/serdes/c/shadow_lower.sh examples/recipe_channel_pipeline.ccs -o /tmp/pipeline_shadow.c
+./examples/serdes/c/shadow_lower.sh examples/recipe_timeout.ccs -o /tmp/timeout_shadow.c
+./examples/serdes/c/shadow_lower.sh examples/recipe_worker_pool.ccs -o /tmp/worker_shadow.c
+./examples/serdes/c/shadow_lower.sh examples/recipe_ufcs_forms.ccs -o /tmp/ufcs_shadow.c
+./examples/serdes/c/shadow_lower.sh examples/recipe_async_await.ccs -o /tmp/async_shadow.c
+./examples/serdes/c/shadow_lower.sh examples/recipe_exclusive_named.ccs -o /tmp/exclusive_shadow.c
+./examples/serdes/c/shadow_lower.sh examples/recipe_long_lived_store.ccs -o /tmp/long_lived_shadow.c
 ```
 
-Emit uses simplified file:line (`"<shadow>"`, `"0"`) and GNU statement
-expressions; host `cc -c` is asserted on `mini` only.
+**Emit quality:** product C should read like hand-lowered code — short lines,
+named temps, blocks instead of mega-line statement expressions. Source
+comments and blank lines are replayed from the tape; inserted lowering
+nests from each statement’s source indent (spaces/tabs). Diag sites use
+`__FILE__` / `__LINE__`. Host `cc -c` is asserted on `mini` only.
 
 ## Smokes
 

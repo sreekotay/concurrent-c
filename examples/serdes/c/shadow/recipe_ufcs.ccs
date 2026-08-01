@@ -1,0 +1,139 @@
+/*
+ * Recipe: every form of UFCS
+ *
+ * The sections below are NOT ten things to learn. UFCS is ONE rule:
+ *
+ *     recv.method(args) calls the function the receiver's TYPE names,
+ *     and DECLARING that function IS installing the method.
+ *
+ * Everything else is spelling. Generic instances name members
+ * <Instance>_<method>; runtime families name them cc_<type>_<method>;
+ * a bare declared function whose first parameter takes the receiver
+ * needs no naming convention at all — declare the natural name and
+ * prefix is plain C while postfix is the method. Handles you import
+ * carry whole families (io.println). And when a hop can fail, `!>` /
+ * `?>` is the link: unwrap (or substitute), then the next method
+ * dispatches on the value.
+ *
+ * There is no registration step anywhere in this file. Same pedagogy as
+ * recipe_unwrap_destroy_forms.ccs: frame the grammar, then show products.
+ *
+ *    1. Family members       v.push(x)
+ *    2. Instance extension   v.median()          declare CCVec_double_median
+ *    3. Scalar family        d.halve()           declare cc_double_halve
+ *    4. Print names, handles println(x)         prefer naked at line start
+ *    5. Bare-name tier       u.mean(6.0)         any fn whose 1st param fits
+ *    6. System headers       d.fabs()            math.h, nothing local
+ *    7. Chains               d.halve().twice()
+ *    8. Typed slices         ps.at(1).y
+ *    9. Fallible chains      get(21)!>.twice()    unwrap / ?> then dispatch
+ *
+ * Unknown methods fail with the receiver type and its installed set
+ * (tests/ufcs_vec_member_miss_fail) — not shown here because they do not compile.
+ */
+#include <ccc/cc_runtime.cch>
+#include <stdlib.h>
+#include <stdio.h>
+#include <ccc/script/stdio.cch>
+#include <math.h>
+#include <unistd.h>
+
+typedef struct Pt { double x, y; } Pt;
+
+/* 2. Extension by declaration: the composed spelling IS the install. */
+static double CCVec_double_median(CCVec_double* v) {
+    return v->len ? v->data[v->len / 2] : 0.0;
+}
+
+/* 3. Scalar families: cc_<type>_<method>, receiver by value. */
+static double cc_double_halve(double v) { return v / 2.0; }
+static double cc_double_twice(double v) { return v * 2.0; }
+
+/* 5. Bare-name tier: any function whose first parameter takes the
+ *    receiver (by value exactly, or by pointer via &recv). */
+typedef struct Stats { double sum; int n; } Stats;
+static double mean(Stats s, double bump) { return s.sum / s.n + bump; }
+
+/* 9. A fallible hop returns a Result; unwrap links into the next method. */
+static int cc_int_twice(int v) { return v * 2; }
+static CCResult_int_CCError get(int v) {
+    if (v < 0) return (CCResult_int_CCError){ .ok = false,
+        .u.error = { .message = "negative" } };
+    return (CCResult_int_CCError){ .ok = true, .u.value = v };
+}
+
+/* !> / !>; must diverge or forward — here the helper's policy returns -1. */
+static int get_or_die(int v) {
+    @errhandler(CCError e) {
+        /* fprintf: avoid Result print inside the same-E handler. */
+        fprintf(stderr, "get_or_die: %s\n", cc_error_str(e));
+        return -1;
+    }
+    return get(v) !>;
+}
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    /* 1. Family members: the declaration form's ##_ tokens ARE the
+     *    method set. */
+    Vec::[double] v = vec_new::[double](&arena);
+    v.push(1.0);
+    v.push(3.0);
+    v.push(8.0);
+    println(@string(`len=${v.len()}`, @scratch)) !>;
+
+    /* 2. Declared above — no header edit, no compiler edit. */
+    println(@string(`median=${v.median()}`, @scratch)) !>;
+
+    /* 3. Scalar receiver, by value. */
+    double d = 10.0;
+    println(@string(`halve=${d.halve()}`, @scratch)) !>;
+
+    /* 4. Prefer naked print at line start (println/eprint/fprintln…).
+     *    f* is fd-first. Member UFCS on data is legal; recipes still put
+     *    the print name first. Handles keep the family as methods. */
+    println("printed naked") !>;
+    fprintln(STDERR_FILENO, "printed naked to stderr") !>;
+    CCStdio io = cc_stdio_create(&arena);
+    io.println("printed via a handle") !>;
+    fprintln(STDOUT_FILENO, "also via naked fprintln") !>;
+
+    /* 5. mean() is just a function — prefix is plain C, postfix is
+     *    the method; one declaration, both spellings. */
+    Stats u = { 12.0, 3 };
+    println(@string(`mean=${u.mean(6.0)}`, @scratch)) !>;
+
+    /* 6. System headers participate: fabs comes from math.h. */
+    double neg = -2.5;
+    println(@string(`fabs=${neg.fabs()}`, @scratch)) !>;
+
+    /* 7. Chains: each link is the same one rule on the previous result. */
+    println(@string(`chain=${d.halve().twice().halve()}`, @scratch)) !>;
+
+    /* 8. Typed slices auto-instantiate for any element type. */
+    Pt ps[:] = {{1, 2}, {3, 4}, {5, 6}};
+    println(@string(`slice=${ps.sub(1, 3).len()} y=${ps.at(1).y}`, @scratch)) !>;
+
+    /* 9. Fallible chains.
+     *    !>  — error becomes CODE (body must diverge: return / abort / !>;).
+     *    ?>  — error becomes a VALUE (RHS is an expression, not a block). */
+    int ok = get(21)!>.twice();
+    println(@string(`ok=${ok}`, @scratch)) !>;
+
+    /* ?> then an ordinary hop — substitute, then dispatch. */
+    int recovered = get(-1) ?> 0;
+    int rec = recovered.twice();
+    println(@string(`rec=${rec}`, @scratch)) !>;
+
+    /* ?>(e) when the fallback expression needs the error value. */
+    int mapped = get(-1) ?>(e) (e.message[0] == 'n' ? 0 : -1);
+    println(@string(`mapped=${mapped.twice()}`, @scratch)) !>;
+
+    /* !> — error becomes CODE. Diverges out of get_or_die (not into a chain). */
+    println(@string(`die=${get_or_die(-1)}`, @scratch)) !>;
+
+    return 0;
+}
