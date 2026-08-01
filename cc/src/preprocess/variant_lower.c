@@ -463,12 +463,10 @@ static int cc__va_is_c_keyword(const char* s, size_t len) {
     return 0;
 }
 
-/* Backward skip over plain whitespace (no comment awareness — callers use
- * it across short gaps like `= {`, `) {`). */
+/* Backward skip over whitespace and comments — the short gaps callers
+ * cross (`= {`, `) {`, `Type name`) all admit a comment. */
 static size_t cc__va_back_ws(const char* s, size_t i) {
-    while (i > 0 && (s[i - 1] == ' ' || s[i - 1] == '\t' ||
-                     s[i - 1] == '\n' || s[i - 1] == '\r')) i--;
-    return i;
+    return cc_rskip_ws_and_comments(s, i);
 }
 
 /* Backward over a balanced (), [] group whose CLOSER is at s[i-1].

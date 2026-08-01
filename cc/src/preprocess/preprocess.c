@@ -1962,6 +1962,30 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                     free(out);
                     return (char*)-1;
                 }
+                /* `@emit(`...`, arena)` BUILDS a fragment and yields it; the
+                 * anchor form is what splices.  Written as a bare statement
+                 * the fragment is constructed and dropped, and the code it
+                 * was meant to emit silently never appears. */
+                if (have_arena) {
+                    size_t tail = cc_skip_ws_and_comments(src, n, close_p + 1);
+                    if (tail < n && src[tail] == ';') {
+                        size_t b = cc_rskip_ws_and_comments(src, i);
+                        if (b == 0 || src[b - 1] == ';' || src[b - 1] == '{' ||
+                            src[b - 1] == '}') {
+                            char rel[1024];
+                            cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                            scan.line, scan.col, "syntax",
+                                            "@emit(`...`, arena) builds a fragment and yields it; "
+                                            "discarding it emits nothing");
+                            fprintf(stderr, "  note: to splice from a @comptime block, use "
+                                            "@emit(CC_EMIT_AFTER_PRELUDE, `...`)\n");
+                            fprintf(stderr, "  note: in a generic factory, return it: "
+                                            "return @emit(`...`, arena);\n");
+                            free(out);
+                            return (char*)-1;
+                        }
+                    }
+                }
                 cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
                 snprintf(builder_name, sizeof(builder_name), "__cc_et_s_%d", rewrite_count);
                 snprintf(arena_name, sizeof(arena_name), "__cc_et_a_%d", rewrite_count);
@@ -8341,7 +8365,7 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
             size_t j = i + 2;  /* skip '!>' */
             
             /* Skip whitespace */
-            while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '\r')) j++;
+            j = cc_skip_ws_and_comments(src, n, j);
             
             /* If '!>' is not followed by '(' it is not a result-type
              * annotation; it is the statement operator `func() !>;` /
@@ -8369,8 +8393,8 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
                 size_t lparen = j;
                 j++;  /* skip '(' */
 
-                /* Skip whitespace inside parens */
-                while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '\r')) j++;
+                /* Skip whitespace and comments inside parens */
+                j = cc_skip_ws_and_comments(src, n, j);
 
                 /* Find matching ')' - track nesting for complex types like Error<A, B> */
                 size_t err_start = j;
@@ -8419,8 +8443,10 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
                      * for a missing type. */
                     size_t ty_end = sigil_pos;
                     for (;;) {
-                        while (ty_end > 0 && (src[ty_end - 1] == ' ' || src[ty_end - 1] == '\t' ||
-                                              src[ty_end - 1] == '\n' || src[ty_end - 1] == '\r')) ty_end--;
+                        /* Comment-aware: `int /(*)c(*)!>(E)` must yield the ok
+                         * type `int`, not a span whose comment bytes mangle
+                         * into the Result name. */
+                        ty_end = cc_rskip_ws_and_comments(src, ty_end);
                         if (ty_end == 0) break;
                         /* If the line ending at ty_end is a '# ...' directive, drop it and retry. */
                         size_t line_start = ty_end;

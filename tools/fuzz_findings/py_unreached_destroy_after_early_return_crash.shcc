@@ -1,0 +1,6 @@
+#include <ccc/script/py.cch>
+CCPy py = cc_py(&a) !> @destroy;
+CCPyObj b = py.import("builtins") !> @destroy;
+int64_t big = b.int("bad") !>(e) { return 0; };
+CCSlice uni = b.str("hi")!>.as_slice()!>;
+CCPyObj j = py.import("json") !> @destroy;

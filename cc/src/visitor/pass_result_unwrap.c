@@ -898,7 +898,7 @@ static int cc__rewrite_result_unwrap_once(const CCVisitorCtx* ctx,
              * digit, `(`, `{`, or a string/char literal.  Empty parens `()`
              * are never a valid C expression so they are always binder-intended.
              */
-            size_t post = cc_skip_ws_len(s, n, rpar + 1);
+            size_t post = cc_skip_ws_and_comments(s, n, rpar + 1);
             int binder_intended = 0;
             if (bb <= ba) {
                 binder_intended = 1;
@@ -924,7 +924,7 @@ static int cc__rewrite_result_unwrap_once(const CCVisitorCtx* ctx,
     }
 
     /* --- RHS shape check: `?>` is value-only ---------------------------- */
-    size_t rhs_scan = cc_skip_ws_len(s, n, scan);
+    size_t rhs_scan = cc_skip_ws_and_comments(s, n, scan);
     if (rhs_scan < n) {
         int misuse = 0;
         if (cc__match_ident_kw(s, n, rhs_scan, "return") ||
@@ -2101,7 +2101,7 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
         memcpy(binder, s + ba, blen);
         binder[blen] = 0;
         has_binder = 1;
-        scan = cc_skip_ws_len(s, n, rpar + 1);
+        scan = cc_skip_ws_and_comments(s, n, rpar + 1);
     }
 
     if (scan >= n) {
@@ -2402,7 +2402,7 @@ static int cc__rewrite_bang_once(const CCVisitorCtx* ctx,
         cc__line_from_pos(s, op_at, &line_no);
 
         after = op_at + 2;
-        scan = cc_skip_ws_len(s, n, after);
+        scan = cc_skip_ws_and_comments(s, n, after);
         if (scan >= n) {
             char rel[1024];
             const char* f = cc_path_rel_to_repo(
@@ -2505,7 +2505,7 @@ static int cc__rewrite_bang_once(const CCVisitorCtx* ctx,
             return -1;
         }
 
-        size_t after_bind = cc_skip_ws_len(s, n, rpar + 1);
+        size_t after_bind = cc_skip_ws_and_comments(s, n, rpar + 1);
         if (after_bind >= n || s[after_bind] == ';') {
             char rel[1024];
             const char* f = cc_path_rel_to_repo(
@@ -2528,7 +2528,7 @@ static int cc__rewrite_bang_once(const CCVisitorCtx* ctx,
             size_t body_a = after_bind + 1, body_b = rbrace;
             /* Eat a following `;` so we do not leave a stray empty stmt. */
             size_t splice_to = rbrace + 1;
-            size_t tail = cc_skip_ws_len(s, n, splice_to);
+            size_t tail = cc_skip_ws_and_comments(s, n, splice_to);
             if (tail < n && s[tail] == ';') splice_to = tail + 1;
             return cc__rewrite_bang_binder(ctx, s, n, call_a, call_b, binder,
                                            s + body_a, body_b - body_a,
@@ -2613,7 +2613,7 @@ static int cc__rewrite_bang_once(const CCVisitorCtx* ctx,
         /* Form C: `CALL !> { BLOCK }` or `CALL !> { BLOCK };`.  The legacy
          * `@err { ... };` shorthand requires a trailing `;`, so synthesize
          * one when the input omitted it. */
-        size_t post = cc_skip_ws_len(s, n, rbrace + 1);
+        size_t post = cc_skip_ws_and_comments(s, n, rbrace + 1);
         if (post >= n || s[post] != ';') {
             insert_semi_at = rbrace + 1;
         }
@@ -3009,7 +3009,7 @@ static int cc__rewrite_nobinder_bangs_via_ir(const CCVisitorCtx* ctx,
             }
         }
         {
-            size_t after_sig = cc_skip_ws_len(c->raw_text, c->raw_len, sig_off + 2);
+            size_t after_sig = cc_skip_ws_and_comments(c->raw_text, c->raw_len, sig_off + 2);
             int form_a = (after_sig < c->raw_len && c->raw_text[after_sig] == ';');
             if (form_a) {
                 size_t file_call_a = c->span.byte_start;

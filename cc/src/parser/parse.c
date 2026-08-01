@@ -35,7 +35,7 @@ char* cc_blank_comptime_blocks_for_prep(const char* src, size_t n) {
         if (src[i] != '@' || !cc_match_ident_kw(src, n, i + 1, "comptime")) { i++; continue; }
         {
             size_t kw_end = i + 1 + strlen("comptime");
-            size_t body_l = cc_skip_ws_len(src, n, kw_end);
+            size_t body_l = cc_skip_ws_and_comments(src, n, kw_end);
             size_t body_r;
             if (body_l >= n) { i++; continue; }
             if (src[body_l] == '{') {
@@ -72,7 +72,7 @@ char* cc_blank_comptime_blocks_for_prep(const char* src, size_t n) {
                 }
                 if (lpar) {
                     if (!cc_find_matching_paren(src, n, lpar, &rpar)) { i++; continue; }
-                    p = cc_skip_ws_len(src, n, rpar + 1);
+                    p = cc_skip_ws_and_comments(src, n, rpar + 1);
                     if (p < n && src[p] == '{') {
                         if (!cc_find_matching_brace(src, n, p, &body_r)) { i++; continue; }
                         end = body_r;

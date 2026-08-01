@@ -30,8 +30,9 @@ cc/src/preprocess/emit_plan.c 9
 cc/src/preprocess/preprocess.c 12
 cc/src/preprocess/template_scan.c 10
 cc/src/preprocess/type_registry.c 3
+cc/src/preprocess/variant_lower.c 4
 cc/src/util/result_fn_registry.c 3
-cc/src/util/text.h 22
+cc/src/util/text.h 25
 cc/src/util/text_scan.h 7
 cc/src/visitor/async_ast.c 3
 cc/src/visitor/pass_autoblock.c 0
