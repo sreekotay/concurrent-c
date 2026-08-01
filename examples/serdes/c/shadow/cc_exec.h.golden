@@ -18,13 +18,13 @@ typedef void (*cc_exec_fn)(void *arg);
 
 #line 15 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_exec.cch"
 typedef struct {
-#line 16 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_exec.cch"
+    #line 16 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_exec.cch"
     size_t workers;
-#line 17 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_exec.cch"
+    #line 17 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_exec.cch"
     size_t queue_cap;
-#line 18 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_exec.cch"
+    #line 18 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_exec.cch"
     size_t queue_len;
-#line 19 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_exec.cch"
+    #line 19 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_exec.cch"
     int shutting_down;
 } CCExecStats;
 
@@ -35,7 +35,7 @@ typedef struct {
 CCExec* cc_exec_create(size_t workers, size_t queue_cap);
 #line 25 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_exec.cch"
 static inline CCExec* cc_exec_init(size_t workers, size_t queue_cap) {
-#line 26 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_exec.cch"
+    #line 26 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_exec.cch"
     return cc_exec_create(workers, queue_cap);
 }
 

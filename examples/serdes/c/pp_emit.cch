@@ -143,8 +143,10 @@ static void shadow_escape_path(char* dst, size_t cap, const char* path) {
     dst[o] = 0;
 }
 
-/* `#line N "path"` when site differs from the last marker. */
-static int shadow_emit_line(CEmit* out, ShadowCtx* ctx, AstNode* st) {
+/* `#line N "path"` when site differs from the last marker.
+ * Indent with surrounding code (`#` is still the first non-whitespace). */
+static int shadow_emit_line(CEmit* out, ShadowCtx* ctx, AstNode* st,
+                            const char* indent) {
     if (!out || !ctx) return 1;
     const char* path = NULL;
     int line = 0;
@@ -152,7 +154,8 @@ static int shadow_emit_line(CEmit* out, ShadowCtx* ctx, AstNode* st) {
     if (ctx->line_file_id == st->file_id && ctx->line_no == line) return 1;
     char esc[512];
     shadow_escape_path(esc, sizeof(esc), path);
-    if (!cemit_fmt(out, "#line %d \"%s\"\n", line, esc)) return 0;
+    if (!cemit_fmt(out, "%s#line %d \"%s\"\n", indent ? indent : "", line, esc))
+        return 0;
     ctx->line_file_id = st->file_id;
     ctx->line_no = line;
     ctx->site = st;
@@ -160,13 +163,13 @@ static int shadow_emit_line(CEmit* out, ShadowCtx* ctx, AstNode* st) {
 }
 
 /* Force a `#line` resync for the current site (multi-line synthetic blocks). */
-static int shadow_resync_line(CEmit* out, ShadowCtx* ctx) {
+static int shadow_resync_line(CEmit* out, ShadowCtx* ctx, const char* indent) {
     if (!ctx || !ctx->site) return 1;
     int saved_file = ctx->line_file_id;
     int saved_line = ctx->line_no;
     ctx->line_file_id = 0;
     ctx->line_no = 0;
-    int ok = shadow_emit_line(out, ctx, ctx->site);
+    int ok = shadow_emit_line(out, ctx, ctx->site, indent);
     if (!ok) {
         ctx->line_file_id = saved_file;
         ctx->line_no = saved_line;
@@ -754,7 +757,7 @@ static int shadow_emit_try_call(CEmit* out, ShadowCtx* ctx, const char* indent,
             indent, i1, call, call, i1))
         return 0;
     /* Resync so __FILE__/__LINE__ on the next line are the source site. */
-    if (!shadow_resync_line(out, ctx)) return 0;
+    if (!shadow_resync_line(out, ctx, i2)) return 0;
     if (!cemit_fmt(out,
             "%sCCError %s = __cc_uw_err_at(__r, \"%s\", __FILE__, __LINE__);\n",
             i2, bind, site))
@@ -779,7 +782,7 @@ static int shadow_emit_try_assign(CEmit* out, ShadowCtx* ctx, const char* indent
             "%sif (__cc_uw_is_err(__r)) {\n",
             indent, ty_lhs, name, indent, i1, call, call, i1))
         return 0;
-    if (!shadow_resync_line(out, ctx)) return 0;
+    if (!shadow_resync_line(out, ctx, i2)) return 0;
     if (!cemit_fmt(out,
             "%sCCError %s = __cc_uw_err_at(__r, \"%s\", __FILE__, __LINE__);\n",
             i2, bind, site))
@@ -849,7 +852,7 @@ static int shadow_emit_bang_bind(AstNode* st, CEmit* out, ShadowCtx* ctx,
             "%sif (__cc_uw_is_err(__r)) {\n",
             indent, i1, call, call, i1))
         return 0;
-    if (!shadow_resync_line(out, ctx)) return 0;
+    if (!shadow_resync_line(out, ctx, i2)) return 0;
     if (!cemit_fmt(out,
             "%sCCError %s = __cc_uw_err_at(__r, \"cc_println\", "
             "__FILE__, __LINE__);\n",
@@ -1191,7 +1194,7 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
                 "%sif (__cc_uw_is_err(__r)) {\n",
                 indent, st->a, indent, i1, call, call, i1))
             return 0;
-        if (!shadow_resync_line(out, ctx)) return 0;
+        if (!shadow_resync_line(out, ctx, i2)) return 0;
         if (!cemit_fmt(out,
                 "%sCCError %s = __cc_uw_err_at(__r, \"unwrap\", "
                 "__FILE__, __LINE__);\n",
@@ -1237,7 +1240,7 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
                 "%s} else {\n",
                 indent, st->a, indent, i1, call, call, i1, i2, st->a, i1))
             return 0;
-        if (!shadow_resync_line(out, ctx)) return 0;
+        if (!shadow_resync_line(out, ctx, i2)) return 0;
         return cemit_fmt(out,
             "%sCCError %s = __cc_uw_err_at(__r, \"unwrap\", "
             "__FILE__, __LINE__);\n"
@@ -1258,8 +1261,8 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
     if (st->kind == AST_ERRHANDLER || st->kind == AST_DEFER)
         return 1;
     if (!shadow_emit_preamble(st, out, ctx ? ctx->cache : NULL)) return 0;
-    if (ctx && !shadow_emit_line(out, ctx, st)) return 0;
     indent = shadow_stmt_indent(st, indent);
+    if (ctx && !shadow_emit_line(out, ctx, st, indent)) return 0;
     switch (st->kind) {
     case AST_RETURN_INT:
         if (use_cleanup) {
@@ -1454,7 +1457,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                     "%sif (__cc_uw_is_err(__r)) {\n",
                     indent, i1, call, call, i1))
                 return 0;
-            if (!shadow_resync_line(out, ctx)) return 0;
+            if (!shadow_resync_line(out, ctx, i2)) return 0;
             if (!cemit_fmt(out,
                     "%sCCError %s = __cc_uw_err_at(__r, \"%s\", "
                     "__FILE__, __LINE__);\n",
@@ -1503,7 +1506,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                 indent, ty, st->b, indent, i1, call, call, i1))
             return 0;
         if (strncmp(mode, "bang_eh", 7) == 0) {
-            if (!shadow_resync_line(out, ctx)) return 0;
+            if (!shadow_resync_line(out, ctx, i2)) return 0;
             if (!cemit_fmt(out,
                     "%sCCError e = __cc_uw_err_at(__r, \"unwrap\", "
                     "__FILE__, __LINE__);\n",
@@ -1511,7 +1514,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                 return 0;
             if (!shadow_emit_handler(out, ctx, "e", i2)) return 0;
         } else if (strncmp(mode, "bang_block", 10) == 0) {
-            if (!shadow_resync_line(out, ctx)) return 0;
+            if (!shadow_resync_line(out, ctx, i2)) return 0;
             if (!cemit_fmt(out,
                     "%sCCError %s = __cc_uw_err_at(__r, \"unwrap\", "
                     "__FILE__, __LINE__);\n",
@@ -1721,7 +1724,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
         if (items[i]->kind == AST_TYPEDEF_INT) {
             if (!shadow_emit_preamble(items[i], out, cache)) return 0;
             items[i]->lead_len = 0;
-            if (!shadow_emit_line(out, &line_ctx, items[i])) return 0;
+            if (!shadow_emit_line(out, &line_ctx, items[i], "")) return 0;
             if (!cemit_fmt(out, "typedef int %s;\n", items[i]->a)) return 0;
         }
     }
@@ -1785,7 +1788,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
         AstNode* it = items[i];
         if (!shadow_emit_preamble(it, out, cache)) return 0;
         it->lead_len = 0;
-        if (!shadow_emit_line(out, &line_ctx, it)) return 0;
+        if (!shadow_emit_line(out, &line_ctx, it, "")) return 0;
         switch (it->kind) {
         case AST_TYPEDEF_INT:
             /* already emitted in prelude */
@@ -1804,9 +1807,9 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             }
             for (int k = 0; k < it->nkids; k++) {
                 AstNode* f = it->kids[k];
-                if (!shadow_emit_line(out, &line_ctx, f)) return 0;
                 const char* find =
                     shadow_stmt_indent(f, "    ");
+                if (!shadow_emit_line(out, &line_ctx, f, find)) return 0;
                 if (f->kind == AST_FIELD_INT) {
                     if (!cemit_fmt(out, "%sint %s;\n", find, f->a)) return 0;
                 } else if (f->kind == AST_FIELD_SIMPLE) {

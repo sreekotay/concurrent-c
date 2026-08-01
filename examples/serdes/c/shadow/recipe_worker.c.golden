@@ -35,24 +35,24 @@ int main(void) {
     int __cc_retval = 0;
     int __cc_ret_set = 0;
 
-#line 24 "examples/serdes/c/shadow/recipe_worker.ccs"
+    #line 24 "examples/serdes/c/shadow/recipe_worker.ccs"
     CCChanTx jobs_tx;
-#line 25 "examples/serdes/c/shadow/recipe_worker.ccs"
+    #line 25 "examples/serdes/c/shadow/recipe_worker.ccs"
     CCChanRx jobs_rx;
-#line 26 "examples/serdes/c/shadow/recipe_worker.ccs"
+    #line 26 "examples/serdes/c/shadow/recipe_worker.ccs"
     CCChanTx done_tx;
    /* capacity >= NUM_JOBS to avoid deadlock */
-#line 27 "examples/serdes/c/shadow/recipe_worker.ccs"
+    #line 27 "examples/serdes/c/shadow/recipe_worker.ccs"
     CCChanRx done_rx;
 
-#line 29 "examples/serdes/c/shadow/recipe_worker.ccs"
+    #line 29 "examples/serdes/c/shadow/recipe_worker.ccs"
     CCChan* jobs_ch;
     {
         __typeof__(cc_channel_pair(&jobs_tx, &jobs_rx)) __r = cc_channel_pair(&jobs_tx, &jobs_rx);
         if (__cc_uw_is_err(__r)) {
-#line 29 "examples/serdes/c/shadow/recipe_worker.ccs"
+            #line 29 "examples/serdes/c/shadow/recipe_worker.ccs"
             CCError e = __cc_uw_err_at(__r, "unwrap", __FILE__, __LINE__);
-#line 22 "examples/serdes/c/shadow/recipe_worker.ccs"
+            #line 22 "examples/serdes/c/shadow/recipe_worker.ccs"
             cc_error_log(e);
             __cc_retval = 1;
             __cc_ret_set = 1;
@@ -60,14 +60,14 @@ int main(void) {
         }
         jobs_ch = __cc_uw_value(__r);
     }
-#line 30 "examples/serdes/c/shadow/recipe_worker.ccs"
+    #line 30 "examples/serdes/c/shadow/recipe_worker.ccs"
     CCChan* done_ch;
     {
         __typeof__(cc_channel_pair(&done_tx, &done_rx)) __r = cc_channel_pair(&done_tx, &done_rx);
         if (__cc_uw_is_err(__r)) {
-#line 30 "examples/serdes/c/shadow/recipe_worker.ccs"
+            #line 30 "examples/serdes/c/shadow/recipe_worker.ccs"
             CCError e = __cc_uw_err_at(__r, "unwrap", __FILE__, __LINE__);
-#line 22 "examples/serdes/c/shadow/recipe_worker.ccs"
+            #line 22 "examples/serdes/c/shadow/recipe_worker.ccs"
             cc_error_log(e);
             __cc_retval = 1;
             __cc_ret_set = 1;
@@ -76,16 +76,16 @@ int main(void) {
         done_ch = __cc_uw_value(__r);
     }
 
-#line 32 "examples/serdes/c/shadow/recipe_worker.ccs"
+    #line 32 "examples/serdes/c/shadow/recipe_worker.ccs"
     {
-#line 33 "examples/serdes/c/shadow/recipe_worker.ccs"
+        #line 33 "examples/serdes/c/shadow/recipe_worker.ccs"
         CCNursery* workers;
         {
             __typeof__(cc_nursery_create(NULL)) __r = cc_nursery_create(NULL);
             if (__cc_uw_is_err(__r)) {
-#line 33 "examples/serdes/c/shadow/recipe_worker.ccs"
+                #line 33 "examples/serdes/c/shadow/recipe_worker.ccs"
                 CCError e = __cc_uw_err_at(__r, "unwrap", __FILE__, __LINE__);
-#line 22 "examples/serdes/c/shadow/recipe_worker.ccs"
+                #line 22 "examples/serdes/c/shadow/recipe_worker.ccs"
                 cc_error_log(e);
                 __cc_retval = 1;
                 __cc_ret_set = 1;
@@ -95,23 +95,23 @@ int main(void) {
         }
 
         /* Workers: pull jobs, report each completion on done_tx. */
-#line 36 "examples/serdes/c/shadow/recipe_worker.ccs"
+        #line 36 "examples/serdes/c/shadow/recipe_worker.ccs"
         for (int w = 0; w < NUM_WORKERS; w++) {
-#line 37 "examples/serdes/c/shadow/recipe_worker.ccs"
+            #line 37 "examples/serdes/c/shadow/recipe_worker.ccs"
             cc_nursery_spawn_closure0(workers, cc_closure__N1_make(jobs_rx, done_tx));
         }
 
         /* Feeder in an inner nursery: its @destroy closes jobs_tx once feeder returns. */
-#line 48 "examples/serdes/c/shadow/recipe_worker.ccs"
+        #line 48 "examples/serdes/c/shadow/recipe_worker.ccs"
         {
-#line 49 "examples/serdes/c/shadow/recipe_worker.ccs"
+            #line 49 "examples/serdes/c/shadow/recipe_worker.ccs"
             CCNursery* feeder;
             {
                 __typeof__(cc_nursery_create(workers)) __r = cc_nursery_create(workers);
                 if (__cc_uw_is_err(__r)) {
-#line 49 "examples/serdes/c/shadow/recipe_worker.ccs"
+                    #line 49 "examples/serdes/c/shadow/recipe_worker.ccs"
                     CCError e = __cc_uw_err_at(__r, "unwrap", __FILE__, __LINE__);
-#line 22 "examples/serdes/c/shadow/recipe_worker.ccs"
+                    #line 22 "examples/serdes/c/shadow/recipe_worker.ccs"
                     cc_error_log(e);
                     __cc_retval = 1;
                     __cc_ret_set = 1;
@@ -119,10 +119,10 @@ int main(void) {
                 }
                 feeder = __cc_uw_value(__r);
             }
-#line 50 "examples/serdes/c/shadow/recipe_worker.ccs"
+            #line 50 "examples/serdes/c/shadow/recipe_worker.ccs"
             (void)cc_nursery_add_closing_tx(feeder, jobs_tx);
 
-#line 52 "examples/serdes/c/shadow/recipe_worker.ccs"
+            #line 52 "examples/serdes/c/shadow/recipe_worker.ccs"
             cc_nursery_spawn_closure0(feeder, cc_closure__N2_make(jobs_tx));
             {
                 cc_nursery_wait(feeder);
@@ -137,20 +137,20 @@ int main(void) {
     /* workers @destroy: all workers joined. */
 
     /* Close done_tx so the drain loop terminates. */
-#line 66 "examples/serdes/c/shadow/recipe_worker.ccs"
+    #line 66 "examples/serdes/c/shadow/recipe_worker.ccs"
     cc_channel_close(done_tx);
 
-#line 68 "examples/serdes/c/shadow/recipe_worker.ccs"
+    #line 68 "examples/serdes/c/shadow/recipe_worker.ccs"
     int jobs_done = 0;
-#line 69 "examples/serdes/c/shadow/recipe_worker.ccs"
+    #line 69 "examples/serdes/c/shadow/recipe_worker.ccs"
     int v;
-#line 70 "examples/serdes/c/shadow/recipe_worker.ccs"
+    #line 70 "examples/serdes/c/shadow/recipe_worker.ccs"
     while (cc_io_avail(cc_channel_recv(done_rx, &v))) {
-#line 71 "examples/serdes/c/shadow/recipe_worker.ccs"
+        #line 71 "examples/serdes/c/shadow/recipe_worker.ccs"
         jobs_done++;
     }
 
-#line 74 "examples/serdes/c/shadow/recipe_worker.ccs"
+    #line 74 "examples/serdes/c/shadow/recipe_worker.ccs"
     {
         CCString __msg = cc_string_new();
         cc_string_push_buffer(&__msg, "done, jobs_done = ", 18, &__cc_str_scratch_0);
@@ -158,9 +158,9 @@ int main(void) {
         {
             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
             if (__cc_uw_is_err(__r)) {
-#line 74 "examples/serdes/c/shadow/recipe_worker.ccs"
+                #line 74 "examples/serdes/c/shadow/recipe_worker.ccs"
                 CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
-#line 22 "examples/serdes/c/shadow/recipe_worker.ccs"
+                #line 22 "examples/serdes/c/shadow/recipe_worker.ccs"
                 cc_error_log(e);
                 __cc_retval = 1;
                 __cc_ret_set = 1;
@@ -168,7 +168,7 @@ int main(void) {
             }
         }
     }
-#line 75 "examples/serdes/c/shadow/recipe_worker.ccs"
+    #line 75 "examples/serdes/c/shadow/recipe_worker.ccs"
     __cc_retval = (jobs_done == NUM_JOBS) ? 0 : 1;
     __cc_ret_set = 1;
     goto __cc_cleanup;
@@ -198,11 +198,11 @@ static void* cc_closure__N1_entry(void* __p) {
     CCChanRx jobs_rx = __env->jobs_rx;
     CCChanTx done_tx = __env->done_tx;
                 CC_ARENA_STACK(__cc_str_scratch_0, 1024);
-#line 39 "examples/serdes/c/shadow/recipe_worker.ccs"
+                #line 39 "examples/serdes/c/shadow/recipe_worker.ccs"
                 int job;
-#line 40 "examples/serdes/c/shadow/recipe_worker.ccs"
+                #line 40 "examples/serdes/c/shadow/recipe_worker.ccs"
                 while (cc_io_avail(cc_channel_recv(jobs_rx, &job))) {
-#line 41 "examples/serdes/c/shadow/recipe_worker.ccs"
+                    #line 41 "examples/serdes/c/shadow/recipe_worker.ccs"
                     {
                         CCString __msg = cc_string_new();
                         cc_string_push_buffer(&__msg, "worker: processed job ", 22, &__cc_str_scratch_0);
@@ -210,13 +210,13 @@ static void* cc_closure__N1_entry(void* __p) {
                         {
                             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
                             if (__cc_uw_is_err(__r)) {
-#line 41 "examples/serdes/c/shadow/recipe_worker.ccs"
+                                #line 41 "examples/serdes/c/shadow/recipe_worker.ccs"
                                 CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
                                 cc_error_exit(e);
                             }
                         }
                     }
-#line 42 "examples/serdes/c/shadow/recipe_worker.ccs"
+                    #line 42 "examples/serdes/c/shadow/recipe_worker.ccs"
                     (void)cc_channel_send(done_tx, job);
                 }
     return NULL;
@@ -236,14 +236,14 @@ static void* cc_closure__N2_entry(void* __p) {
     cc_closure__N2_env* __env = (cc_closure__N2_env*)__p;
     CCChanTx jobs_tx = __env->jobs_tx;
                 CC_ARENA_STACK(__cc_str_scratch_0, 1024);
-#line 54 "examples/serdes/c/shadow/recipe_worker.ccs"
+                #line 54 "examples/serdes/c/shadow/recipe_worker.ccs"
                 for (int j = 1; j <= NUM_JOBS; j++) {
-#line 55 "examples/serdes/c/shadow/recipe_worker.ccs"
+                    #line 55 "examples/serdes/c/shadow/recipe_worker.ccs"
                     (void)cc_channel_send(jobs_tx, j);
                 }
-#line 57 "examples/serdes/c/shadow/recipe_worker.ccs"
+                #line 57 "examples/serdes/c/shadow/recipe_worker.ccs"
                 int n = 9;
-#line 58 "examples/serdes/c/shadow/recipe_worker.ccs"
+                #line 58 "examples/serdes/c/shadow/recipe_worker.ccs"
                 {
                     CCString __msg = cc_string_new();
                     cc_string_push_buffer(&__msg, "feeder: sent ", 13, &__cc_str_scratch_0);
@@ -252,7 +252,7 @@ static void* cc_closure__N2_entry(void* __p) {
                     {
                         __typeof__(cc_println(__msg)) __r = cc_println(__msg);
                         if (__cc_uw_is_err(__r)) {
-#line 58 "examples/serdes/c/shadow/recipe_worker.ccs"
+                            #line 58 "examples/serdes/c/shadow/recipe_worker.ccs"
                             CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
                             cc_error_exit(e);
                         }

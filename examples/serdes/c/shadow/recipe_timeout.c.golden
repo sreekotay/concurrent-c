@@ -30,22 +30,22 @@ int main(void) {
     CC_ARENA_STACK(__cc_str_scratch_1, 1024);
 
     /* --- form 1: ambient deadline, polled via cc_current_deadline() --- */
-#line 28 "examples/serdes/c/shadow/recipe_timeout.ccs"
+    #line 28 "examples/serdes/c/shadow/recipe_timeout.ccs"
     int work_done = 0;
-#line 29 "examples/serdes/c/shadow/recipe_timeout.ccs"
+    #line 29 "examples/serdes/c/shadow/recipe_timeout.ccs"
     {
         CCDeadline __cc_dl0 = cc_deadline_after_ms((uint64_t)(millis(50)));
         CCDeadline* __cc_prev0 = cc_deadline_push(&__cc_dl0);
-#line 30 "examples/serdes/c/shadow/recipe_timeout.ccs"
+        #line 30 "examples/serdes/c/shadow/recipe_timeout.ccs"
         while (!cc_deadline_expired(cc_current_deadline())) {
-#line 31 "examples/serdes/c/shadow/recipe_timeout.ccs"
+            #line 31 "examples/serdes/c/shadow/recipe_timeout.ccs"
             work_done++;
-#line 32 "examples/serdes/c/shadow/recipe_timeout.ccs"
+            #line 32 "examples/serdes/c/shadow/recipe_timeout.ccs"
             cc_sleep_ms(10);
         }
         cc_deadline_pop(__cc_prev0);
     }
-#line 35 "examples/serdes/c/shadow/recipe_timeout.ccs"
+    #line 35 "examples/serdes/c/shadow/recipe_timeout.ccs"
     {
         CCString __msg = cc_string_new();
         cc_string_push_buffer(&__msg, "form 1: ", 8, &__cc_str_scratch_0);
@@ -54,9 +54,9 @@ int main(void) {
         {
             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
             if (__cc_uw_is_err(__r)) {
-#line 35 "examples/serdes/c/shadow/recipe_timeout.ccs"
+                #line 35 "examples/serdes/c/shadow/recipe_timeout.ccs"
                 CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
-#line 25 "examples/serdes/c/shadow/recipe_timeout.ccs"
+                #line 25 "examples/serdes/c/shadow/recipe_timeout.ccs"
                 cc_error_log(e);
                 return 1;
             }
@@ -64,23 +64,23 @@ int main(void) {
     }
 
     /* --- form 2: `as dl` binds a handle for inspection --- */
-#line 38 "examples/serdes/c/shadow/recipe_timeout.ccs"
+    #line 38 "examples/serdes/c/shadow/recipe_timeout.ccs"
     int checkpoints = 0;
-#line 39 "examples/serdes/c/shadow/recipe_timeout.ccs"
+    #line 39 "examples/serdes/c/shadow/recipe_timeout.ccs"
     {
         CCDeadline __cc_dl1 = cc_deadline_after_ms((uint64_t)(millis(50)));
         CCDeadline* dl = &__cc_dl1;
         CCDeadline* __cc_prev1 = cc_deadline_push(dl);
-#line 40 "examples/serdes/c/shadow/recipe_timeout.ccs"
+        #line 40 "examples/serdes/c/shadow/recipe_timeout.ccs"
         while (!cc_deadline_expired(dl)) {
-#line 41 "examples/serdes/c/shadow/recipe_timeout.ccs"
+            #line 41 "examples/serdes/c/shadow/recipe_timeout.ccs"
             checkpoints++;
-#line 42 "examples/serdes/c/shadow/recipe_timeout.ccs"
+            #line 42 "examples/serdes/c/shadow/recipe_timeout.ccs"
             cc_sleep_ms(10);
         }
         cc_deadline_pop(__cc_prev1);
     }
-#line 45 "examples/serdes/c/shadow/recipe_timeout.ccs"
+    #line 45 "examples/serdes/c/shadow/recipe_timeout.ccs"
     {
         CCString __msg = cc_string_new();
         cc_string_push_buffer(&__msg, "form 2: ", 8, &__cc_str_scratch_1);
@@ -89,9 +89,9 @@ int main(void) {
         {
             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
             if (__cc_uw_is_err(__r)) {
-#line 45 "examples/serdes/c/shadow/recipe_timeout.ccs"
+                #line 45 "examples/serdes/c/shadow/recipe_timeout.ccs"
                 CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
-#line 25 "examples/serdes/c/shadow/recipe_timeout.ccs"
+                #line 25 "examples/serdes/c/shadow/recipe_timeout.ccs"
                 cc_error_log(e);
                 return 1;
             }
@@ -101,9 +101,9 @@ int main(void) {
     /* Both forms exit cleanly when the deadline expires; the scope's
      * pushed deadline is popped automatically on block exit. */
 
-#line 50 "examples/serdes/c/shadow/recipe_timeout.ccs"
+    #line 50 "examples/serdes/c/shadow/recipe_timeout.ccs"
     int ok = (work_done  >= 1 && work_done  <= 10)
           && (checkpoints >= 1 && checkpoints <= 10);
-#line 52 "examples/serdes/c/shadow/recipe_timeout.ccs"
+    #line 52 "examples/serdes/c/shadow/recipe_timeout.ccs"
     return ok ? 0 : 1;
 }

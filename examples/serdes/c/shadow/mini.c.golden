@@ -17,6 +17,6 @@ CCResult_int_Err answer(void);
 CCShadowSlice_int buf;
 #line 5 "examples/serdes/c/shadow/mini.ccs"
 int main(void) {
-#line 5 "examples/serdes/c/shadow/mini.ccs"
+    #line 5 "examples/serdes/c/shadow/mini.ccs"
     return 0;
 }

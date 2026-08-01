@@ -31,38 +31,38 @@ CCResult_void_CCError write_report(const char* path, int inject_error) {
     int __cc_ret_err = 0;
     CC_ARENA_STACK(__cc_str_scratch_0, 1024);
     CC_ARENA_STACK(__cc_str_scratch_1, 1024);
-#line 25 "examples/serdes/c/shadow/recipe_defer.ccs"
+    #line 25 "examples/serdes/c/shadow/recipe_defer.ccs"
     FILE* f = fopen(path, "w");
-#line 26 "examples/serdes/c/shadow/recipe_defer.ccs"
+    #line 26 "examples/serdes/c/shadow/recipe_defer.ccs"
     if (!f)     __cc_retval = cc_err_CCResult_void_CCError(CC_ERROR(CC_ERR_IO, "fopen failed"));
     __cc_ret_set = 1;
     __cc_ret_err = 1;
     goto __cc_cleanup;
 
-#line 36 "examples/serdes/c/shadow/recipe_defer.ccs"
+    #line 36 "examples/serdes/c/shadow/recipe_defer.ccs"
     if (fputs("line 1\n", f) < 0)     __cc_retval = cc_err_CCResult_void_CCError(CC_ERROR(CC_ERR_IO, "write 1 failed"));
     __cc_ret_set = 1;
     __cc_ret_err = 1;
     goto __cc_cleanup;
-#line 37 "examples/serdes/c/shadow/recipe_defer.ccs"
+    #line 37 "examples/serdes/c/shadow/recipe_defer.ccs"
     if (inject_error)     __cc_retval = cc_err_CCResult_void_CCError(CC_ERROR(CC_ERR_INVALID_ARG, "injected failure"));
     __cc_ret_set = 1;
     __cc_ret_err = 1;
     goto __cc_cleanup;
-#line 38 "examples/serdes/c/shadow/recipe_defer.ccs"
+    #line 38 "examples/serdes/c/shadow/recipe_defer.ccs"
     if (fputs("line 2\n", f) < 0)     __cc_retval = cc_err_CCResult_void_CCError(CC_ERROR(CC_ERR_IO, "write 2 failed"));
     __cc_ret_set = 1;
     __cc_ret_err = 1;
     goto __cc_cleanup;
 
-#line 40 "examples/serdes/c/shadow/recipe_defer.ccs"
+    #line 40 "examples/serdes/c/shadow/recipe_defer.ccs"
     __cc_retval = cc_ok_CCResult_void_CCError();
     __cc_ret_set = 1;
     __cc_ret_err = 0;
     goto __cc_cleanup;
 __cc_cleanup:
     if (__cc_ret_err) {
-#line 33 "examples/serdes/c/shadow/recipe_defer.ccs"
+        #line 33 "examples/serdes/c/shadow/recipe_defer.ccs"
         {
             CCString __msg = cc_string_new();
             cc_string_push_buffer(&__msg, "  rolled back ", 14, &__cc_str_scratch_0);
@@ -70,7 +70,7 @@ __cc_cleanup:
             {
                 __typeof__(cc_println(__msg)) __r = cc_println(__msg);
                 if (__cc_uw_is_err(__r)) {
-#line 33 "examples/serdes/c/shadow/recipe_defer.ccs"
+                    #line 33 "examples/serdes/c/shadow/recipe_defer.ccs"
                     CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
                     cc_error_exit(e);
                 }
@@ -78,7 +78,7 @@ __cc_cleanup:
         }
     }
     if (!__cc_ret_err) {
-#line 30 "examples/serdes/c/shadow/recipe_defer.ccs"
+        #line 30 "examples/serdes/c/shadow/recipe_defer.ccs"
         {
             CCString __msg = cc_string_new();
             cc_string_push_buffer(&__msg, "  committed ", 12, &__cc_str_scratch_1);
@@ -86,14 +86,14 @@ __cc_cleanup:
             {
                 __typeof__(cc_println(__msg)) __r = cc_println(__msg);
                 if (__cc_uw_is_err(__r)) {
-#line 30 "examples/serdes/c/shadow/recipe_defer.ccs"
+                    #line 30 "examples/serdes/c/shadow/recipe_defer.ccs"
                     CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
                     cc_error_exit(e);
                 }
             }
         }
     }
-#line 28 "examples/serdes/c/shadow/recipe_defer.ccs"
+    #line 28 "examples/serdes/c/shadow/recipe_defer.ccs"
     fclose(f);
     if (__cc_ret_set) return __cc_retval;
     return __cc_retval;
@@ -105,24 +105,24 @@ int main(void) {
     CC_ARENA_STACK(__cc_str_scratch_0, 1024);
 
     /* Happy path: fclose runs, then @defer(ok) prints "committed". */
-#line 47 "examples/serdes/c/shadow/recipe_defer.ccs"
+    #line 47 "examples/serdes/c/shadow/recipe_defer.ccs"
     {
         __typeof__(cc_println("write_report (ok):")) __r = cc_println("write_report (ok):");
         if (__cc_uw_is_err(__r)) {
-#line 47 "examples/serdes/c/shadow/recipe_defer.ccs"
+            #line 47 "examples/serdes/c/shadow/recipe_defer.ccs"
             CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
-#line 44 "examples/serdes/c/shadow/recipe_defer.ccs"
+            #line 44 "examples/serdes/c/shadow/recipe_defer.ccs"
             cc_error_log(e);
             return 1;
         }
     }
-#line 48 "examples/serdes/c/shadow/recipe_defer.ccs"
+    #line 48 "examples/serdes/c/shadow/recipe_defer.ccs"
     {
         __typeof__(write_report("/tmp/report_ok.txt", 0)) __r = write_report("/tmp/report_ok.txt", 0);
         if (__cc_uw_is_err(__r)) {
-#line 48 "examples/serdes/c/shadow/recipe_defer.ccs"
+            #line 48 "examples/serdes/c/shadow/recipe_defer.ccs"
             CCError e = __cc_uw_err_at(__r, "unwrap", __FILE__, __LINE__);
-#line 44 "examples/serdes/c/shadow/recipe_defer.ccs"
+            #line 44 "examples/serdes/c/shadow/recipe_defer.ccs"
             cc_error_log(e);
             return 1;
         }
@@ -130,22 +130,22 @@ int main(void) {
 
     /* Injected failure: fclose still runs, @defer(err) prints "rolled back",
      * @defer(ok) is skipped, error is caught here (not forwarded). */
-#line 52 "examples/serdes/c/shadow/recipe_defer.ccs"
+    #line 52 "examples/serdes/c/shadow/recipe_defer.ccs"
     {
         __typeof__(cc_println("write_report (err):")) __r = cc_println("write_report (err):");
         if (__cc_uw_is_err(__r)) {
-#line 52 "examples/serdes/c/shadow/recipe_defer.ccs"
+            #line 52 "examples/serdes/c/shadow/recipe_defer.ccs"
             CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
-#line 44 "examples/serdes/c/shadow/recipe_defer.ccs"
+            #line 44 "examples/serdes/c/shadow/recipe_defer.ccs"
             cc_error_log(e);
             return 1;
         }
     }
-#line 53 "examples/serdes/c/shadow/recipe_defer.ccs"
+    #line 53 "examples/serdes/c/shadow/recipe_defer.ccs"
     CCResult_void_CCError r = write_report("/tmp/report_err.txt", 1);
-#line 54 "examples/serdes/c/shadow/recipe_defer.ccs"
+    #line 54 "examples/serdes/c/shadow/recipe_defer.ccs"
     if (cc_is_err(r)) {
-#line 55 "examples/serdes/c/shadow/recipe_defer.ccs"
+        #line 55 "examples/serdes/c/shadow/recipe_defer.ccs"
         {
             CCString __msg = cc_string_new();
             cc_string_push_buffer(&__msg, "  caught: ", 10, &__cc_str_scratch_0);
@@ -153,9 +153,9 @@ int main(void) {
             {
                 __typeof__(cc_println(__msg)) __r = cc_println(__msg);
                 if (__cc_uw_is_err(__r)) {
-#line 55 "examples/serdes/c/shadow/recipe_defer.ccs"
+                    #line 55 "examples/serdes/c/shadow/recipe_defer.ccs"
                     CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
-#line 44 "examples/serdes/c/shadow/recipe_defer.ccs"
+                    #line 44 "examples/serdes/c/shadow/recipe_defer.ccs"
                     cc_error_log(e);
                     return 1;
                 }
@@ -163,6 +163,6 @@ int main(void) {
         }
     }
 
-#line 58 "examples/serdes/c/shadow/recipe_defer.ccs"
+    #line 58 "examples/serdes/c/shadow/recipe_defer.ccs"
     return 0;
 }
