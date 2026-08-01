@@ -20,44 +20,64 @@
 #include <stdlib.h>
 #include <ccc/script/stdio.h>
 
+#line 20 "examples/serdes/c/shadow/recipe_async.ccs"
 int echo_through_channel(CCChanTx tx, CCChanRx rx, int value) {
-    if (cc_channel_send(tx, value) != 0)         return -1;
+#line 21 "examples/serdes/c/shadow/recipe_async.ccs"
+    if (cc_channel_send(tx, value) != 0) #line 22 "examples/serdes/c/shadow/recipe_async.ccs"
+        return -1;
 
+#line 24 "examples/serdes/c/shadow/recipe_async.ccs"
     int received = 0;
-    if (cc_channel_recv(rx, &received) != 0)         return -2;
+#line 25 "examples/serdes/c/shadow/recipe_async.ccs"
+    if (cc_channel_recv(rx, &received) != 0) #line 26 "examples/serdes/c/shadow/recipe_async.ccs"
+        return -2;
 
+#line 28 "examples/serdes/c/shadow/recipe_async.ccs"
     return received;
 }
 
 
 /* Ordinary async step — no channel, still awaitable. */
+#line 32 "examples/serdes/c/shadow/recipe_async.ccs"
 int bump(int value) {
+#line 33 "examples/serdes/c/shadow/recipe_async.ccs"
     return value + 1;
 }
 
 
 /* Composition: await echo, then await bump. Sibling tasks would need a
  * nursery + join; here the call stack itself suspends. */
+#line 38 "examples/serdes/c/shadow/recipe_async.ccs"
 int pipeline(CCChanTx tx, CCChanRx rx, int value) {
+#line 39 "examples/serdes/c/shadow/recipe_async.ccs"
     int echoed = echo_through_channel(tx, rx, value);
-    if (echoed < 0)         return echoed;
+#line 40 "examples/serdes/c/shadow/recipe_async.ccs"
+    if (echoed < 0) #line 41 "examples/serdes/c/shadow/recipe_async.ccs"
+        return echoed;
+#line 42 "examples/serdes/c/shadow/recipe_async.ccs"
     return bump(echoed);
 }
 
 
+#line 45 "examples/serdes/c/shadow/recipe_async.ccs"
 int main(void) {
     CC_ARENA_STACK(__cc_str_scratch_0, 1024);
     int __cc_retval = 0;
     int __cc_ret_set = 0;
 
+#line 48 "examples/serdes/c/shadow/recipe_async.ccs"
     CCChanTx tx;
+#line 49 "examples/serdes/c/shadow/recipe_async.ccs"
     CCChanRx rx;
     /* CCChan* is a builtin-owned type: @destroy auto-calls cc_channel_free(ch). */
+#line 51 "examples/serdes/c/shadow/recipe_async.ccs"
     CCChan* ch;
     {
         __typeof__(cc_channel_pair(&tx, &rx)) __r = cc_channel_pair(&tx, &rx);
         if (__cc_uw_is_err(__r)) {
+#line 51 "examples/serdes/c/shadow/recipe_async.ccs"
             CCError e = __cc_uw_err_at(__r, "unwrap", __FILE__, __LINE__);
+#line 46 "examples/serdes/c/shadow/recipe_async.ccs"
             cc_error_log(e);
             __cc_retval = 1;
             __cc_ret_set = 1;
@@ -67,8 +87,10 @@ int main(void) {
     }
 
     /* Sync main drives the whole async stack with one @await. */
+#line 54 "examples/serdes/c/shadow/recipe_async.ccs"
     int result = pipeline(tx, rx, 41);
 
+#line 56 "examples/serdes/c/shadow/recipe_async.ccs"
     {
         CCString __msg = cc_string_new();
         cc_string_push_buffer(&__msg, "pipeline result: ", 17, &__cc_str_scratch_0);
@@ -77,7 +99,9 @@ int main(void) {
         {
             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
             if (__cc_uw_is_err(__r)) {
+#line 56 "examples/serdes/c/shadow/recipe_async.ccs"
                 CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+#line 46 "examples/serdes/c/shadow/recipe_async.ccs"
                 cc_error_log(e);
                 __cc_retval = 1;
                 __cc_ret_set = 1;
@@ -85,6 +109,7 @@ int main(void) {
             }
         }
     }
+#line 57 "examples/serdes/c/shadow/recipe_async.ccs"
     __cc_retval = (result == 42) ? 0 : 1;
     __cc_ret_set = 1;
     goto __cc_cleanup;

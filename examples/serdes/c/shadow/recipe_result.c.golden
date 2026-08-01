@@ -32,39 +32,51 @@
 #include <ccc/script/stdio.h>
 
 
+#line 31 "examples/serdes/c/shadow/recipe_result.ccs"
 CCResult_int_CCError read_config_value(const char* key) {
+#line 32 "examples/serdes/c/shadow/recipe_result.ccs"
     if (!key || key[0] == '\0')     return cc_err_CCResult_int_CCError(CC_ERROR(CC_ERR_INVALID_ARG, "empty key"));
+#line 33 "examples/serdes/c/shadow/recipe_result.ccs"
     if (strcmp(key, "timeout") == 0)     return cc_ok_CCResult_int_CCError(30);
+#line 34 "examples/serdes/c/shadow/recipe_result.ccs"
     if (strcmp(key, "max_retries") == 0)     return cc_ok_CCResult_int_CCError(3);
+#line 35 "examples/serdes/c/shadow/recipe_result.ccs"
     return cc_err_CCResult_int_CCError(CC_ERROR(CC_ERR_NOT_FOUND, "key not found"));
 }
 
 
 /* Composes fallible calls. !>(e) return cc_err(e); propagates the
  * error unchanged to the caller — the function-level equivalent of !>;. */
+#line 40 "examples/serdes/c/shadow/recipe_result.ccs"
 CCResult_int_CCError get_total_wait_time(void) {
+#line 41 "examples/serdes/c/shadow/recipe_result.ccs"
     int timeout;
     {
         __typeof__(read_config_value("timeout")) __r = read_config_value("timeout");
         if (__cc_uw_is_err(__r)) {
+#line 41 "examples/serdes/c/shadow/recipe_result.ccs"
             CCError e = __cc_uw_err_at(__r, "unwrap", __FILE__, __LINE__);
     return cc_err_CCResult_int_CCError(e);
         }
         timeout = __cc_uw_value(__r);
     }
+#line 42 "examples/serdes/c/shadow/recipe_result.ccs"
     int retries;
     {
         __typeof__(read_config_value("max_retries")) __r = read_config_value("max_retries");
         if (__cc_uw_is_err(__r)) {
+#line 42 "examples/serdes/c/shadow/recipe_result.ccs"
             CCError e = __cc_uw_err_at(__r, "unwrap", __FILE__, __LINE__);
     return cc_err_CCResult_int_CCError(e);
         }
         retries = __cc_uw_value(__r);
     }
+#line 43 "examples/serdes/c/shadow/recipe_result.ccs"
     return cc_ok_CCResult_int_CCError(timeout * retries);
 }
 
 
+#line 46 "examples/serdes/c/shadow/recipe_result.ccs"
 int main(void) {
     CC_ARENA_STACK(__cc_str_scratch_0, 1024);
     CC_ARENA_STACK(__cc_str_scratch_1, 1024);
@@ -73,16 +85,20 @@ int main(void) {
     CC_ARENA_STACK(__cc_str_scratch_4, 1024);
 
     /* (1) !>; — forwards to @errhandler if the composition fails. */
+#line 51 "examples/serdes/c/shadow/recipe_result.ccs"
     int total;
     {
         __typeof__(get_total_wait_time()) __r = get_total_wait_time();
         if (__cc_uw_is_err(__r)) {
+#line 51 "examples/serdes/c/shadow/recipe_result.ccs"
             CCError e = __cc_uw_err_at(__r, "unwrap", __FILE__, __LINE__);
+#line 48 "examples/serdes/c/shadow/recipe_result.ccs"
             cc_error_log(e);
             return 1;
         }
         total = __cc_uw_value(__r);
     }
+#line 52 "examples/serdes/c/shadow/recipe_result.ccs"
     {
         CCString __msg = cc_string_new();
         cc_string_push_buffer(&__msg, "total wait time: ", 17, &__cc_str_scratch_0);
@@ -91,7 +107,9 @@ int main(void) {
         {
             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
             if (__cc_uw_is_err(__r)) {
+#line 52 "examples/serdes/c/shadow/recipe_result.ccs"
                 CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+#line 48 "examples/serdes/c/shadow/recipe_result.ccs"
                 cc_error_log(e);
                 return 1;
             }
@@ -99,11 +117,13 @@ int main(void) {
     }
 
     /* (2) ?> — substitutes a default; never propagates. */
+#line 55 "examples/serdes/c/shadow/recipe_result.ccs"
     int missing;
     {
         __typeof__(read_config_value("unknown_key")) __r = read_config_value("unknown_key");
         missing = !__cc_uw_is_err(__r) ? __cc_uw_value(__r) : (-1);
     }
+#line 56 "examples/serdes/c/shadow/recipe_result.ccs"
     {
         CCString __msg = cc_string_new();
         cc_string_push_buffer(&__msg, "missing key fell back to: ", 26, &__cc_str_scratch_1);
@@ -111,7 +131,9 @@ int main(void) {
         {
             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
             if (__cc_uw_is_err(__r)) {
+#line 56 "examples/serdes/c/shadow/recipe_result.ccs"
                 CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+#line 48 "examples/serdes/c/shadow/recipe_result.ccs"
                 cc_error_log(e);
                 return 1;
             }
@@ -119,16 +141,19 @@ int main(void) {
     }
 
     /* (3) ?>(e) — default computed from the error value. */
+#line 59 "examples/serdes/c/shadow/recipe_result.ccs"
     int bad;
     {
         __typeof__(read_config_value("")) __r = read_config_value("");
         if (!__cc_uw_is_err(__r)) {
             bad = __cc_uw_value(__r);
         } else {
+#line 59 "examples/serdes/c/shadow/recipe_result.ccs"
             CCError e = __cc_uw_err_at(__r, "unwrap", __FILE__, __LINE__);
             bad = ((e.kind == CC_ERR_INVALID_ARG ? 0 : -1));
         }
     }
+#line 60 "examples/serdes/c/shadow/recipe_result.ccs"
     {
         CCString __msg = cc_string_new();
         cc_string_push_buffer(&__msg, "invalid key mapped to: ", 23, &__cc_str_scratch_2);
@@ -136,7 +161,9 @@ int main(void) {
         {
             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
             if (__cc_uw_is_err(__r)) {
+#line 60 "examples/serdes/c/shadow/recipe_result.ccs"
                 CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+#line 48 "examples/serdes/c/shadow/recipe_result.ccs"
                 cc_error_log(e);
                 return 1;
             }
@@ -145,11 +172,14 @@ int main(void) {
 
     /* (4) Compose then default — local work, then `@err(e)` → @errhandler.
      *    (Success path: known key. Flip to "" to exercise the forward.) */
+#line 64 "examples/serdes/c/shadow/recipe_result.ccs"
     int shown;
     {
         __typeof__(read_config_value("timeout")) __r = read_config_value("timeout");
         if (__cc_uw_is_err(__r)) {
+#line 64 "examples/serdes/c/shadow/recipe_result.ccs"
             CCError e = __cc_uw_err_at(__r, "unwrap", __FILE__, __LINE__);
+#line 65 "examples/serdes/c/shadow/recipe_result.ccs"
         {
             CCString __msg = cc_string_new();
             cc_string_push_buffer(&__msg, "compose local: ", 15, &__cc_str_scratch_3);
@@ -157,17 +187,22 @@ int main(void) {
             {
                 __typeof__(cc_println(__msg)) __r = cc_println(__msg);
                 if (__cc_uw_is_err(__r)) {
+#line 65 "examples/serdes/c/shadow/recipe_result.ccs"
                     CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+#line 48 "examples/serdes/c/shadow/recipe_result.ccs"
                     cc_error_log(e);
                     return 1;
                 }
             }
         }
+#line 66 "examples/serdes/c/shadow/recipe_result.ccs"
+#line 48 "examples/serdes/c/shadow/recipe_result.ccs"
         cc_error_log(e);
         return 1;
         }
         shown = __cc_uw_value(__r);
     }
+#line 68 "examples/serdes/c/shadow/recipe_result.ccs"
     {
         CCString __msg = cc_string_new();
         cc_string_push_buffer(&__msg, "compose ok: timeout=", 20, &__cc_str_scratch_4);
@@ -175,12 +210,15 @@ int main(void) {
         {
             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
             if (__cc_uw_is_err(__r)) {
+#line 68 "examples/serdes/c/shadow/recipe_result.ccs"
                 CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+#line 48 "examples/serdes/c/shadow/recipe_result.ccs"
                 cc_error_log(e);
                 return 1;
             }
         }
     }
 
+#line 70 "examples/serdes/c/shadow/recipe_result.ccs"
     return 0;
 }

@@ -6,6 +6,7 @@
 #include <ccc/script/stdio.h>
 #include <unistd.h>
 
+#line 6 "examples/serdes/c/shadow/hello.ccs"
 
 /* --- CC closure declarations --- */
 static void* cc_closure__N1_entry(void*);
@@ -20,29 +21,37 @@ int main(void) {
     int __cc_retval = 0;
     int __cc_ret_set = 0;
 
+#line 9 "examples/serdes/c/shadow/hello.ccs"
     CCNursery* n;
     {
         __typeof__(cc_nursery_create(NULL)) __r = cc_nursery_create(NULL);
         if (__cc_uw_is_err(__r)) {
+#line 9 "examples/serdes/c/shadow/hello.ccs"
             CCError e = __cc_uw_err_at(__r, "unwrap", __FILE__, __LINE__);
             cc_error_exit(e);
         }
         n = __cc_uw_value(__r);
     }
 
+#line 13 "examples/serdes/c/shadow/hello.ccs"
     cc_nursery_spawn_closure0(n, cc_closure__N1_make());
+#line 18 "examples/serdes/c/shadow/hello.ccs"
     cc_nursery_spawn_closure0(n, cc_closure__N2_make());
+#line 22 "examples/serdes/c/shadow/hello.ccs"
     cc_nursery_spawn_closure0(n, cc_closure__N3_make());
 
+#line 30 "examples/serdes/c/shadow/hello.ccs"
     __cc_retval = 0;
     __cc_ret_set = 1;
     goto __cc_cleanup;
 __cc_cleanup:
     {
         cc_nursery_wait(n);
+#line 10 "examples/serdes/c/shadow/hello.ccs"
         {
             __typeof__(cc_println("All tasks completed.")) __r = cc_println("All tasks completed.");
             if (__cc_uw_is_err(__r)) {
+#line 10 "examples/serdes/c/shadow/hello.ccs"
                 CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
                 cc_error_exit(e);
             }
@@ -61,10 +70,13 @@ static CCClosure0 cc_closure__N1_make(void) {
 }
 static void* cc_closure__N1_entry(void* __p) {
     (void)__p;
+#line 15 "examples/serdes/c/shadow/hello.ccs"
         usleep(100000);
+#line 16 "examples/serdes/c/shadow/hello.ccs"
         {
             __typeof__(cc_println("Hello from task A! (last)")) __r = cc_println("Hello from task A! (last)");
             if (__cc_uw_is_err(__r)) {
+#line 16 "examples/serdes/c/shadow/hello.ccs"
                 CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
                 cc_error_exit(e);
             }
@@ -78,9 +90,11 @@ static CCClosure0 cc_closure__N2_make(void) {
 }
 static void* cc_closure__N2_entry(void* __p) {
     (void)__p;
+#line 20 "examples/serdes/c/shadow/hello.ccs"
         {
             __typeof__(cc_println("Hello from task B!")) __r = cc_println("Hello from task B!");
             if (__cc_uw_is_err(__r)) {
+#line 20 "examples/serdes/c/shadow/hello.ccs"
                 CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
                 cc_error_exit(e);
             }
@@ -94,13 +108,16 @@ static CCClosure0 cc_closure__N3_make(void) {
 }
 static void* cc_closure__N3_entry(void* __p) {
     (void)__p;
+#line 24 "examples/serdes/c/shadow/hello.ccs"
         {
             __typeof__(cc_println("Hello from task C!")) __r = cc_println("Hello from task C!");
             if (__cc_uw_is_err(__r)) {
+#line 24 "examples/serdes/c/shadow/hello.ccs"
                 CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
                 {
                     __typeof__(cc_println("Task C failed!")) __r = cc_println("Task C failed!");
                     if (__cc_uw_is_err(__r)) {
+#line 24 "examples/serdes/c/shadow/hello.ccs"
                         CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
                         cc_error_exit(e);
                     }

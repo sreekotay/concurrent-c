@@ -37,6 +37,9 @@ def norm(text: str, *, shadow: bool) -> str:
             continue
         if s.startswith("#endif") and ("CC_EXEC" in s or s == "#endif"):
             continue
+        # Provenance markers — compare C surface, not #line ledger.
+        if s.startswith("#line "):
+            continue
         # Shadow injects <stddef.h>; production pulls it via compat.
         if shadow and s == "#include <stddef.h>":
             continue

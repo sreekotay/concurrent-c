@@ -2,6 +2,7 @@
 #pragma once
 #include <stddef.h>
 /* Header that stitches a stage-1-cached include into the .h product. */
+#line 3 "examples/serdes/c/shadow/with_include.cch"
 typedef int Err;
 
 #ifndef CCResult_int_Err_DEFINED
@@ -11,5 +12,7 @@ typedef struct { int ok; int is_err; Err err; } CCResult_int_Err;
 
 typedef struct { int *ptr; size_t len; } CCShadowSlice_int;
 
+#line 1 "examples/serdes/c/shadow/types.inc"
 CCResult_int_Err helper(void);
+#line 5 "examples/serdes/c/shadow/with_include.cch"
 CCShadowSlice_int buf;

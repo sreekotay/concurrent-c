@@ -88,8 +88,10 @@ Same front for both products; H adds `#pragma once` and rejects function bodies.
 **Emit quality:** product C should read like hand-lowered code — short lines,
 named temps, blocks instead of mega-line statement expressions. Source
 comments and blank lines are replayed from the tape; inserted lowering
-nests from each statement’s source indent (spaces/tabs). Diag sites use
-`__FILE__` / `__LINE__`. Host `cc -c` is asserted on `mini` only.
+nests from each statement’s source indent (spaces/tabs). `#line N "path"`
+markers at source boundaries (plus resync before `__FILE__`/`__LINE__`
+err sites) map host diagnostics back to the original `.ccs`/`.cch`. Host
+`cc -c` is asserted on `mini` only.
 
 ## Smokes
 

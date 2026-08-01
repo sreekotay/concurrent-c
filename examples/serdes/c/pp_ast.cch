@@ -205,10 +205,12 @@ struct AstNode {
     int ndbody;
     /* Source trivia: gap before this node (comments / blank lines) + line indent.
      * lead spans tape bytes [lead_off, lead_off+lead_len); indent is the
-     * whitespace after the last newline in that gap (hand-lower nest base). */
+     * whitespace after the last newline in that gap (hand-lower nest base).
+     * tok_off is the first token of the node (for #line provenance). */
     int file_id;
     size_t lead_off;
     size_t lead_len;
+    size_t tok_off;
     char indent[64];
 };
 
@@ -344,6 +346,7 @@ static void shadow_attach_lead(Parser* p, AstNode* n, int start_i) {
     if (!n || !p || start_i < 0 || start_i >= p->n) return;
     Token t = p->toks[start_i];
     n->file_id = t.file_id;
+    n->tok_off = t.offset;
     if (start_i > 0) {
         Token prev = p->toks[start_i - 1];
         if (prev.file_id == t.file_id) {

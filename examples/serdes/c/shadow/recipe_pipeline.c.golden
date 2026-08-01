@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <ccc/script/stdio.h>
 
+#line 20 "examples/serdes/c/shadow/recipe_pipeline.ccs"
 
 /* --- CC closure declarations --- */
 static void* cc_closure__N1_entry(void*);
@@ -36,13 +37,18 @@ int main(void) {
     int __cc_ret_set = 0;
  //if you omit this errhandler, the naked error unwrapping (e.g. line 31) will compile error
 
+#line 23 "examples/serdes/c/shadow/recipe_pipeline.ccs"
     CCChanTx tx;
+#line 24 "examples/serdes/c/shadow/recipe_pipeline.ccs"
     CCChanRx rx;
+#line 25 "examples/serdes/c/shadow/recipe_pipeline.ccs"
     CCChan* ch;
     {
         __typeof__(cc_channel_pair(&tx, &rx)) __r = cc_channel_pair(&tx, &rx);
         if (__cc_uw_is_err(__r)) {
+#line 25 "examples/serdes/c/shadow/recipe_pipeline.ccs"
             CCError e = __cc_uw_err_at(__r, "unwrap", __FILE__, __LINE__);
+#line 21 "examples/serdes/c/shadow/recipe_pipeline.ccs"
             cc_error_log(e);
             __cc_retval = 1;
             __cc_ret_set = 1;
@@ -51,14 +57,19 @@ int main(void) {
         ch = __cc_uw_value(__r);
     }
 
+#line 27 "examples/serdes/c/shadow/recipe_pipeline.ccs"
     cc_atomic_int sum = 0;
 
+#line 29 "examples/serdes/c/shadow/recipe_pipeline.ccs"
     {
+#line 30 "examples/serdes/c/shadow/recipe_pipeline.ccs"
         CCNursery* outer;
         {
             __typeof__(cc_nursery_create(NULL)) __r = cc_nursery_create(NULL);
             if (__cc_uw_is_err(__r)) {
+#line 30 "examples/serdes/c/shadow/recipe_pipeline.ccs"
                 CCError e = __cc_uw_err_at(__r, "unwrap", __FILE__, __LINE__);
+#line 21 "examples/serdes/c/shadow/recipe_pipeline.ccs"
                 cc_error_log(e);
                 __cc_retval = 1;
                 __cc_ret_set = 1;
@@ -67,15 +78,20 @@ int main(void) {
             outer = __cc_uw_value(__r);
         }
 
+#line 32 "examples/serdes/c/shadow/recipe_pipeline.ccs"
         cc_nursery_spawn_closure0(outer, cc_closure__N1_make(&sum, rx));
 
+#line 41 "examples/serdes/c/shadow/recipe_pipeline.ccs"
         {
  // inner nursery - parented by outer nursery
+#line 42 "examples/serdes/c/shadow/recipe_pipeline.ccs"
             CCNursery* inner;
             {
                 __typeof__(cc_nursery_create(outer)) __r = cc_nursery_create(outer);
                 if (__cc_uw_is_err(__r)) {
+#line 42 "examples/serdes/c/shadow/recipe_pipeline.ccs"
                     CCError e = __cc_uw_err_at(__r, "unwrap", __FILE__, __LINE__);
+#line 21 "examples/serdes/c/shadow/recipe_pipeline.ccs"
                     cc_error_log(e);
                     __cc_retval = 1;
                     __cc_ret_set = 1;
@@ -83,8 +99,10 @@ int main(void) {
                 }
                 inner = __cc_uw_value(__r);
             }
+#line 43 "examples/serdes/c/shadow/recipe_pipeline.ccs"
             (void)cc_nursery_add_closing_tx(inner, tx);
 
+#line 45 "examples/serdes/c/shadow/recipe_pipeline.ccs"
             cc_nursery_spawn_closure0(inner, cc_closure__N2_make(tx));
             {
                 cc_nursery_wait(inner);
@@ -98,7 +116,9 @@ int main(void) {
     }
     /* outer @destroy: wait consumer (saw close, drained, exited) */
 
+#line 57 "examples/serdes/c/shadow/recipe_pipeline.ccs"
     int total = cc_atomic_load(&sum);
+#line 58 "examples/serdes/c/shadow/recipe_pipeline.ccs"
     {
         CCString __msg = cc_string_new();
         cc_string_push_buffer(&__msg, "sum = ", 6, &__cc_str_scratch_0);
@@ -107,7 +127,9 @@ int main(void) {
         {
             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
             if (__cc_uw_is_err(__r)) {
+#line 58 "examples/serdes/c/shadow/recipe_pipeline.ccs"
                 CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
+#line 21 "examples/serdes/c/shadow/recipe_pipeline.ccs"
                 cc_error_log(e);
                 __cc_retval = 1;
                 __cc_ret_set = 1;
@@ -115,6 +137,7 @@ int main(void) {
             }
         }
     }
+#line 59 "examples/serdes/c/shadow/recipe_pipeline.ccs"
     __cc_retval = (total == 6) ? 0 : 1;
     __cc_ret_set = 1;
     goto __cc_cleanup;
@@ -144,8 +167,11 @@ static void* cc_closure__N1_entry(void* __p) {
 #define sum (*__cc_ref_sum)
     CCChanRx rx = __env->rx;
             CC_ARENA_STACK(__cc_str_scratch_0, 1024);
+#line 34 "examples/serdes/c/shadow/recipe_pipeline.ccs"
             int v;
+#line 35 "examples/serdes/c/shadow/recipe_pipeline.ccs"
             while (cc_io_avail(cc_channel_recv(rx, &v))) {
+#line 36 "examples/serdes/c/shadow/recipe_pipeline.ccs"
                 {
                     CCString __msg = cc_string_new();
                     cc_string_push_buffer(&__msg, "recv: ", 6, &__cc_str_scratch_0);
@@ -153,11 +179,13 @@ static void* cc_closure__N1_entry(void* __p) {
                     {
                         __typeof__(cc_println(__msg)) __r = cc_println(__msg);
                         if (__cc_uw_is_err(__r)) {
+#line 36 "examples/serdes/c/shadow/recipe_pipeline.ccs"
                             CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
                             cc_error_exit(e);
                         }
                     }
                 }
+#line 37 "examples/serdes/c/shadow/recipe_pipeline.ccs"
                 cc_atomic_fetch_add(&sum, v);
             }
 #undef sum
@@ -178,8 +206,11 @@ static void* cc_closure__N2_entry(void* __p) {
     cc_closure__N2_env* __env = (cc_closure__N2_env*)__p;
     CCChanTx tx = __env->tx;
                 CC_ARENA_STACK(__cc_str_scratch_0, 1024);
+#line 47 "examples/serdes/c/shadow/recipe_pipeline.ccs"
                 for (int i = 1; i <= 3; i++) {
+#line 48 "examples/serdes/c/shadow/recipe_pipeline.ccs"
                     (void)cc_channel_send(tx, i);
+#line 49 "examples/serdes/c/shadow/recipe_pipeline.ccs"
                     {
                         CCString __msg = cc_string_new();
                         cc_string_push_buffer(&__msg, "send: ", 6, &__cc_str_scratch_0);
@@ -187,6 +218,7 @@ static void* cc_closure__N2_entry(void* __p) {
                         {
                             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
                             if (__cc_uw_is_err(__r)) {
+#line 49 "examples/serdes/c/shadow/recipe_pipeline.ccs"
                                 CCError e = __cc_uw_err_at(__r, "cc_println", __FILE__, __LINE__);
                                 cc_error_exit(e);
                             }
