@@ -1,0 +1,77 @@
+/*
+ * Shadow twin of examples/recipe_user_generics.ccs
+ *
+ * The real recipe uses CC_GENERIC_FACTORY + @emit (compile-time code
+ * generation) which the shadow lowerer cannot evaluate.  This file
+ * shows the post-instantiation surface the recipe cares about:
+ *   - Pair_int_double  (make, head, tail)
+ *   - Pair_int_int     (make, head, tail, at)
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+/* --- post-instantiation surface for Pair::[int, double] --- */
+typedef struct { int first; double second; } Pair_int_double;
+
+static Pair_int_double Pair_int_double_make(int a, double b) {
+    Pair_int_double r;
+    r.first = a;
+    r.second = b;
+    return r;
+}
+
+static int Pair_int_double_head(Pair_int_double* self) {
+    return self->first;
+}
+
+static double Pair_int_double_tail(Pair_int_double* self) {
+    return self->second;
+}
+
+/* --- post-instantiation surface for Pair::[int, int] --- */
+typedef struct { int first; int second; } Pair_int_int;
+
+static Pair_int_int Pair_int_int_make(int a, int b) {
+    Pair_int_int r;
+    r.first = a;
+    r.second = b;
+    return r;
+}
+
+static int Pair_int_int_head(Pair_int_int* self) {
+    return self->first;
+}
+
+static int Pair_int_int_tail(Pair_int_int* self) {
+    return self->second;
+}
+
+/* 5. Extension by declaration */
+static double Pair_int_double_span(Pair_int_double* pr) {
+    return pr->second - (double)pr->first;
+}
+
+/* 6. A fallible extension */
+static int !>(CCError) Pair_int_int_at(Pair_int_int* pr, int i) {
+    if (i == 0) return cc_ok(pr->first);
+    if (i == 1) return cc_ok(pr->second);
+    return cc_err(CC_ERR_INVALID_ARG, "pair index out of range");
+}
+
+int main(void) {
+    @errhandler(CCError e) { fprintf(stderr, "eh: %s\n", e.message); return 1; }
+
+    Pair_int_double p = Pair_int_double_make(3, 4.5);
+
+    printf("head=%d tail=%g\n", p.head(), p.tail());
+
+    printf("span=%g\n", p.span());
+
+    Pair_int_int q = Pair_int_int_make(10, 20);
+    printf("q=%d,%d\n", q.head(), q.tail());
+
+    int second = q.at(1) !>;
+    printf("at=%d\n", second);
+
+    return 0;
+}

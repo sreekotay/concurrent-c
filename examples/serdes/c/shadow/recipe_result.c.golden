@@ -26,12 +26,12 @@
  * recipe_ufcs_forms.ccs covers method dispatch including fallible chains.
  */
 
-/* A fallible operation: returns T!>(CCError). */
 #include <ccc/std/prelude.h>
 #include <stdlib.h>
 #include <ccc/script/stdio.h>
 
 
+/* A fallible operation: returns T!>(CCError). */
 #line 31 "examples/serdes/c/shadow/recipe_result.ccs"
 CCResult_int_CCError read_config_value(const char* key) {
     #line 32 "examples/serdes/c/shadow/recipe_result.ccs"

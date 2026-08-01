@@ -27,11 +27,11 @@
  *   11. Same as 10 but split across lines
  */
 
-/* Return a pointer or NULL based on the argument. */
 #include <ccc/cc_runtime.h>
 #include <stdlib.h>
 #include <ccc/script/stdio.h>
 
+/* Return a pointer or NULL based on the argument. */
 #line 32 "examples/serdes/c/shadow/recipe_unwrap.ccs"
 static char* maybe_null(int want_null) {
     static char buf[] = "hello";

@@ -19,11 +19,11 @@
  * Keep critical sections short; park/await under the lock stalls others.
  */
 
-
 #include <ccc/std/prelude.h>
 #include <stdlib.h>
 #include <ccc/cc_exclusive.h>
 #include <ccc/script/stdio.h>
+
 
 #line 27 "examples/serdes/c/shadow/recipe_exclusive.ccs"
 typedef struct {
@@ -98,10 +98,10 @@ int main(void) {
     if (!g_excl) {
         #line 59 "examples/serdes/c/shadow/recipe_exclusive.ccs"
         {
-            __typeof__(eprintln("cc_exclusive_create failed")) __r = eprintln("cc_exclusive_create failed");
+            __typeof__(cc_eprintln("cc_exclusive_create failed")) __r = cc_eprintln("cc_exclusive_create failed");
             if (__cc_uw_is_err(__r)) {
                 #line 59 "examples/serdes/c/shadow/recipe_exclusive.ccs"
-                CCError e = __cc_uw_err_at(__r, "unwrap", __FILE__, __LINE__);
+                CCError e = __cc_uw_err_at(__r, "cc_eprintln", __FILE__, __LINE__);
                 #line 54 "examples/serdes/c/shadow/recipe_exclusive.ccs"
                 cc_error_log(e);
                 __cc_retval = 1;

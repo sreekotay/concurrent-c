@@ -279,6 +279,11 @@ int main(void) {
     if (!expect_golden("recipe_async.ccs", SHADOW_EMIT_C, "recipe_async.c.golden")) return 1;
     if (!expect_golden("recipe_exclusive.ccs", SHADOW_EMIT_C, "recipe_exclusive.c.golden")) return 1;
     if (!expect_golden("recipe_long_lived.ccs", SHADOW_EMIT_C, "recipe_long_lived.c.golden")) return 1;
+    if (!expect_golden("recipe_fanout_capture.ccs", SHADOW_EMIT_C, "recipe_fanout_capture.c.golden")) return 1;
+    if (!expect_golden("recipe_http_get.ccs", SHADOW_EMIT_C, "recipe_http_get.c.golden")) return 1;
+    if (!expect_golden("recipe_tcp_echo.ccs", SHADOW_EMIT_C, "recipe_tcp_echo.c.golden")) return 1;
+    if (!expect_golden("recipe_ordered_parallel.ccs", SHADOW_EMIT_C, "recipe_ordered_parallel.c.golden")) return 1;
+    if (!expect_golden("recipe_generics.ccs", SHADOW_EMIT_C, "recipe_generics.c.golden")) return 1;
     if (!expect_golden("mini.cch", SHADOW_EMIT_H, "mini.h.golden")) return 1;
     if (!expect_golden("with_include.cch", SHADOW_EMIT_H, "with_include.h.golden")) return 1;
     if (!expect_golden("result_frag.cch", SHADOW_EMIT_H, "result_frag.h.golden")) return 1;
@@ -304,6 +309,16 @@ int main(void) {
         int rc = system(cmd);
         if (rc != 0) {
             printf("FAIL: diff_stdlib_exec.sh rc=%d\n", rc);
+            return 1;
+        }
+    }
+    {
+        char cmd[512];
+        snprintf(cmd, sizeof(cmd),
+                 "bash examples/serdes/c/shadow/diff_stdlib_async_runtime.sh");
+        int rc = system(cmd);
+        if (rc != 0) {
+            printf("FAIL: diff_stdlib_async_runtime.sh rc=%d\n", rc);
             return 1;
         }
     }

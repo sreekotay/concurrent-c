@@ -1,0 +1,97 @@
+/*
+ * Recipe: Ordered Parallel Processing
+ *
+ * Work completes out of order; output must come out in submit order.
+ * There is no sort step and no reorder buffer — the ordered channel
+ * awaits each queued handle in FIFO submission order.
+ *
+ *   producer: for each item → results_tx.send_task(() => work)
+ *   consumer: recv on an ordered channel → each recv awaits the next
+ *             submitted task → results print 1..N even if work finished
+ *             2,1,4,3,...
+ *
+ * Idiom: send_task + `ordered` recv. Nested nurseries + close_on match
+ * recipe_channel_pipeline / recipe_worker_pool; only the channel kind
+ * and send_task differ. Larger example: real_projects/pigz/pigz_idiomatic.ccs.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdlib.h>
+#include <ccc/cc_atomic.cch>
+#include <ccc/script/stdio.cch>
+#include <unistd.h>
+
+#define NUM_ITEMS 8
+#define CHAN_CAP  4
+
+/* Simulate variable-time work: odd ids take longer.
+ * Temp prints use @scratch (per-site stack arena). */
+static int process_item(int id) {
+    @errhandler(CCError e) cc_error_exit(e);
+    int delay_us = (id % 2 == 1) ? 50000 : 10000;
+    usleep(delay_us);
+    int result = id * id;
+    int delay_ms = delay_us / 1000;
+    println(@string(`  [worker] completed item ${id} (delay=${delay_ms}ms)`, @scratch)) !>;
+    return result;
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    int[~CHAN_CAP >] results_tx;
+    int[~CHAN_CAP ordered <] results_rx;
+    CCChan* results_ch = cc_channel_pair(&results_tx, &results_rx) !> @destroy;
+
+    println("=== Ordered Parallel Processing ===") !>;
+    println(@string(`Processing ${NUM_ITEMS} items with variable delays...`, @scratch)) !>;
+    println("") !>;
+
+    cc_atomic_int failed = 0;
+    {
+        CCNursery* consumer = cc_nursery_create(NULL) !> @destroy;
+
+        consumer->spawn(() => [results_rx, &failed] {
+            @errhandler(CCError e) cc_error_exit(e);
+            println("\n[consumer] receiving results in order:") !>;
+            int result = 0;
+            int expect = 1;
+            while (cc_io_avail(results_rx.recv(&result))) {
+                int want = expect * expect;
+                println(@string(`[consumer] item ${expect}: ${expect}^2 = ${result}`, @scratch)) !>;
+                if (result != want) {
+                    eprintln(@string(`ORDER/VALUE: expected ${want} got ${result}`, @scratch)) !>;
+                    failed.store(1);
+                    break;
+                }
+                expect++;
+            }
+            if (expect != NUM_ITEMS + 1) {
+                int got = expect - 1;
+                int n = NUM_ITEMS;
+                eprintln(@string(`missing results: got ${got} of ${n}`, @scratch)) !>;
+                failed.store(1);
+            }
+        });
+
+        /* Producer in an inner nursery: @destroy closes results_tx once the
+         * producer returns, so the consumer sees EOF after draining. */
+        {
+            CCNursery* producer = cc_nursery_create(consumer) !> @destroy;
+            (void)producer->close_on(results_tx);
+
+            producer->spawn(() => [results_tx] {
+                @errhandler(CCError e) cc_error_exit(e);
+                for (int i = 1; i <= NUM_ITEMS; i++) {
+                    int id = i;
+                    results_tx.send_task(() => [id] {
+                        return process_item(id);
+                    });
+                    println(@string(`[producer] submitted task for item ${i}`, @scratch)) !>;
+                }
+            });
+        }
+    }
+
+    println("\nDone! Results printed in order despite out-of-order completion.") !>;
+    return failed.load() ? 1 : 0;
+}

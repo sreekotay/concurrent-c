@@ -16,14 +16,14 @@
  * hello.ccs (e.g. CCNursery* n = ... !> @destroy { ... };).
  */
 
-/* Writes two lines to `path`. If `inject_error` is nonzero, returns an
- * error after the first line — exercising the @defer(err) rollback. */
 #include <ccc/cc_runtime.h>
 #include <stdlib.h>
 #include <ccc/script/stdio.h>
 #include <stdio.h>
 
 
+/* Writes two lines to `path`. If `inject_error` is nonzero, returns an
+ * error after the first line — exercising the @defer(err) rollback. */
 #line 23 "examples/serdes/c/shadow/recipe_defer.ccs"
 CCResult_void_CCError write_report(const char* path, int inject_error) {
     CCResult_void_CCError __cc_retval = {0};

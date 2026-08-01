@@ -68,6 +68,17 @@ Same front for both products; H adds `#pragma once` and rejects function bodies.
 (anonymous typedef, statics, `@create`, exclusive UFCS).
 `shadow/recipe_long_lived.ccs` ↔ `examples/recipe_long_lived_store.ccs`
 (`Map::[K,V]`, result helpers, store UFCS / `!>(e){…}`).
+`shadow/recipe_fanout_capture.ccs` ↔ `examples/recipe_fanout_capture.ccs`
+(fan-out spawn, per-task capture semantics).
+`shadow/recipe_http_get.ccs` ↔ `examples/recipe_http_get.ccs`
+(`@link`, global array init, `char buf[N]`, template `@string`/`@scratch`).
+`shadow/recipe_tcp_echo.ccs` ↔ `examples/recipe_tcp_echo.ccs`
+(`@grammar` skip, `do-while`, `break`/`continue`, expression-body spawn).
+`shadow/recipe_ordered_parallel.ccs` ↔ `examples/recipe_ordered_parallel.ccs`
+(`ordered` channels, `send_task` UFCS, `eprintln`).
+`shadow/recipe_generics.ccs` — **shadow twin** of `examples/recipe_user_generics.ccs`
+(`CC_GENERIC_FACTORY`/`@emit` is compile-time; twin shows post-instantiation
+`Pair_int_double`/`Pair_int_int` surface).
 
 ```bash
 ./examples/serdes/c/shadow_lower.sh examples/hello.ccs -o /tmp/hello_shadow.c
@@ -83,6 +94,10 @@ Same front for both products; H adds `#pragma once` and rejects function bodies.
 ./examples/serdes/c/shadow_lower.sh examples/recipe_async_await.ccs -o /tmp/async_shadow.c
 ./examples/serdes/c/shadow_lower.sh examples/recipe_exclusive_named.ccs -o /tmp/exclusive_shadow.c
 ./examples/serdes/c/shadow_lower.sh examples/recipe_long_lived_store.ccs -o /tmp/long_lived_shadow.c
+./examples/serdes/c/shadow_lower.sh examples/recipe_fanout_capture.ccs -o /tmp/fanout_shadow.c
+./examples/serdes/c/shadow_lower.sh examples/recipe_http_get.ccs -o /tmp/http_shadow.c
+./examples/serdes/c/shadow_lower.sh examples/recipe_tcp_echo.ccs -o /tmp/tcp_shadow.c
+./examples/serdes/c/shadow_lower.sh examples/recipe_ordered_parallel.ccs -o /tmp/ordered_shadow.c
 ```
 
 **Emit quality:** product C should read like hand-lowered code — short lines,
@@ -102,6 +117,7 @@ Experiment smokes stay out of the default driver path:
 ./out/cc/bin/ccc run --no-cache tests/c_pp_shadow_emit_smoke.ccs
 bash examples/serdes/c/shadow/diff_lower_header.sh
 bash examples/serdes/c/shadow/diff_stdlib_exec.sh
+bash examples/serdes/c/shadow/diff_stdlib_async_runtime.sh
 ```
 
 Compiler harvest (production, independent of this tree):
@@ -134,12 +150,15 @@ Met for the trimmed `result_frag` beachhead (`CCResult_` names match
 
 **Soft signal (met):** real `examples/hello.ccs` lowers via `shadow_lower`.
 
-**Hard go (met for `cc_exec`):** shadow-lower of real
-`cc/include/ccc/cc_exec.cch` matches production `out/include/ccc/cc_exec.h`
-on the normalized C surface (`diff_stdlib_exec.sh`) and host `cc -c`
-consumes the shadow product. Production lower of this header is near-
-passthrough; shadow preserves the same API with `#pragma once` instead of
-the `#ifndef` guard dance.
+**Hard go (met):** shadow-lower of real stdlib headers matches production
+on the normalized C surface and host `cc -c` consumes the product:
+
+- `cc/include/ccc/cc_exec.cch` → `diff_stdlib_exec.sh`
+- `cc/include/ccc/cc_async_runtime.cch` → `diff_stdlib_async_runtime.sh`
+  (`const T*` returns; unlocks the same family on nursery/io)
+
+Production lower of these headers is near-passthrough; shadow keeps the
+same API with `#pragma once` + `#line` instead of the `#ifndef` guard dance.
 
 Larger stdlib headers (`cc_result`, `cc_arena`, …) still hit the coverage /
 cpp walls — grow the whitelist only when the next header is a clean

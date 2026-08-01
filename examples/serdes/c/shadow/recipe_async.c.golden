@@ -14,12 +14,11 @@
  *   stack, two suspend regions, no spawn.
  */
 
-
-/* Suspends twice on the channel, then returns the echoed value. */
 #include <ccc/cc_runtime.h>
 #include <stdlib.h>
 #include <ccc/script/stdio.h>
 
+/* Suspends twice on the channel, then returns the echoed value. */
 #line 20 "examples/serdes/c/shadow/recipe_async.ccs"
 int echo_through_channel(CCChanTx tx, CCChanRx rx, int value) {
     #line 21 "examples/serdes/c/shadow/recipe_async.ccs"

@@ -14,10 +14,10 @@
  * Temp prints use @string(`...`, @scratch) — no hand-rolled arena.
  */
 
-
 #include <ccc/std/prelude.h>
 #include <stdlib.h>
 #include <ccc/script/stdio.h>
+
 
 #line 21 "examples/serdes/c/shadow/recipe_worker.ccs"
 
