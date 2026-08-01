@@ -1697,6 +1697,12 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             /* already emitted in prelude */
             break;
         case AST_TYPEDEF_STRUCT: {
+            /* Opaque: typedef struct Tag Alias; */
+            if (it->nkids == 0 && it->a[0]) {
+                if (!cemit_fmt(out, "typedef struct %s %s;\n", it->a, it->b))
+                    return 0;
+                break;
+            }
             if (it->a[0]) {
                 if (!cemit_fmt(out, "typedef struct %s {\n", it->a)) return 0;
             } else {
@@ -1704,17 +1710,21 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             }
             for (int k = 0; k < it->nkids; k++) {
                 AstNode* f = it->kids[k];
+                const char* find =
+                    shadow_stmt_indent(f, "    ");
                 if (f->kind == AST_FIELD_INT) {
-                    if (!cemit_fmt(out, "  int %s;\n", f->a)) return 0;
+                    if (!cemit_fmt(out, "%sint %s;\n", find, f->a)) return 0;
                 } else if (f->kind == AST_FIELD_SIMPLE) {
                     /* b may be "x,y" — emit `type x, y;` */
                     char fty[160];
                     shadow_rewrite_attr_expr(fty, sizeof(fty), f->a);
-                    if (!cemit_fmt(out, "  %s %s;\n", fty, f->b)) return 0;
+                    if (!cemit_fmt(out, "%s%s %s;\n", find, fty, f->b)) return 0;
                 } else if (f->kind == AST_SLICE_VAR) {
-                    if (!cemit_fmt(out, "  CCShadowSlice_int %s;\n", f->a)) return 0;
+                    if (!cemit_fmt(out, "%sCCShadowSlice_int %s;\n", find, f->a))
+                        return 0;
                 } else if (f->kind == AST_CHAN_VAR) {
-                    if (!cemit_fmt(out, "  CCShadowChan_int %s;\n", f->a)) return 0;
+                    if (!cemit_fmt(out, "%sCCShadowChan_int %s;\n", find, f->a))
+                        return 0;
                 } else {
                     diag_at(cache, (Token){0}, "struct field not lowerable to C");
                     out->err = 1;
@@ -1722,6 +1732,21 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 }
             }
             if (!cemit_fmt(out, "} %s;\n\n", it->b)) return 0;
+            break;
+        }
+        case AST_TYPEDEF_FN_PTR: {
+            char params[288];
+            shadow_rewrite_attr_expr(params, sizeof(params),
+                                     it->c[0] ? it->c : "void");
+            if (!cemit_fmt(out, "typedef %s (*%s)(%s);\n", it->a, it->b, params))
+                return 0;
+            break;
+        }
+        case AST_FN_PROTO: {
+            char params[288];
+            shadow_rewrite_attr_expr(params, sizeof(params),
+                                     it->c[0] ? it->c : "void");
+            if (!cemit_fmt(out, "%s %s(%s);\n", it->a, it->b, params)) return 0;
             break;
         }
         case AST_VAR_INT:
@@ -1811,19 +1836,49 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             break;
         case AST_STATIC_FN:
         case AST_ASYNC_FN: {
-            if (kind == SHADOW_EMIT_H) {
-                fprintf(stderr, "error: static/async fn body not allowed in .cch → .h\n");
+            /* Headers may keep static inline helpers; async bodies stay .ccs-only. */
+            if (kind == SHADOW_EMIT_H && it->kind == AST_ASYNC_FN) {
+                fprintf(stderr, "error: async fn body not allowed in .cch → .h\n");
                 out->err = 1;
                 return 0;
             }
             char params[288];
             shadow_rewrite_attr_expr(params, sizeof(params),
                                      it->c[0] ? it->c : "void");
+            const char* inl =
+                (it->kind == AST_STATIC_FN && it->e[0] &&
+                 strcmp(it->e, "inline") == 0)
+                    ? "inline "
+                    : "";
+            /* One-liner wrapper before emitting `{` + newline. */
+            if (it->kind == AST_STATIC_FN && it->nkids == 1 &&
+                it->kids[0]->kind == AST_CALL_ARGS) {
+                AstNode* c = it->kids[0];
+                if (!cemit_fmt(out, "static %s%s %s(%s) { %s(%s); }\n\n", inl,
+                               it->a, it->b, params, c->a, c->b))
+                    return 0;
+                break;
+            }
+            if (it->kind == AST_STATIC_FN && it->d[0] && it->nkids == 0 &&
+                strchr(it->d, '\n') == NULL) {
+                char body[512];
+                shadow_rewrite_ufcs(body, sizeof(body), it->d, NULL);
+                while (body[0] == ' ' || body[0] == '\t')
+                    memmove(body, body + 1, strlen(body));
+                size_t bl = strlen(body);
+                while (bl && (body[bl - 1] == ' ' || body[bl - 1] == '\t'))
+                    body[--bl] = 0;
+                if (!cemit_fmt(out, "static %s%s %s(%s) { %s }\n\n", inl, it->a,
+                               it->b, params, body))
+                    return 0;
+                break;
+            }
             /* Async beachhead: emit as ordinary fn; @await stripped in exprs. */
             if (it->kind == AST_ASYNC_FN) {
                 if (!cemit_fmt(out, "%s %s(%s) {\n", it->a, it->b, params)) return 0;
             } else {
-                if (!cemit_fmt(out, "static %s %s(%s) {\n", it->a, it->b, params))
+                if (!cemit_fmt(out, "static %s%s %s(%s) {\n", inl, it->a, it->b,
+                               params))
                     return 0;
             }
             if (it->d[0] && it->nkids == 0) {
@@ -1960,14 +2015,17 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             if (!cemit_fmt(out, "struct %s {\n", it->a)) return 0;
             for (int k = 0; k < it->nkids; k++) {
                 AstNode* f = it->kids[k];
+                const char* find = shadow_stmt_indent(f, "    ");
                 if (f->kind == AST_FIELD_INT) {
-                    if (!cemit_fmt(out, "  int %s;\n", f->a)) return 0;
+                    if (!cemit_fmt(out, "%sint %s;\n", find, f->a)) return 0;
                 } else if (f->kind == AST_FIELD_SIMPLE) {
-                    if (!cemit_fmt(out, "  %s %s;\n", f->a, f->b)) return 0;
+                    if (!cemit_fmt(out, "%s%s %s;\n", find, f->a, f->b)) return 0;
                 } else if (f->kind == AST_SLICE_VAR) {
-                    if (!cemit_fmt(out, "  CCShadowSlice_int %s;\n", f->a)) return 0;
+                    if (!cemit_fmt(out, "%sCCShadowSlice_int %s;\n", find, f->a))
+                        return 0;
                 } else if (f->kind == AST_CHAN_VAR) {
-                    if (!cemit_fmt(out, "  CCShadowChan_int %s;\n", f->a)) return 0;
+                    if (!cemit_fmt(out, "%sCCShadowChan_int %s;\n", find, f->a))
+                        return 0;
                 } else {
                     diag_at(cache, (Token){0}, "struct field not lowerable to C");
                     out->err = 1;

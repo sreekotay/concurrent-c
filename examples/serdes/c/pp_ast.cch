@@ -31,7 +31,8 @@ typedef enum {
     SHADOW_KW_AWAIT,
     SHADOW_KW_CREATE,
     SHADOW_KW_BOOL,
-    SHADOW_KW_SIZE_T
+    SHADOW_KW_SIZE_T,
+    SHADOW_KW_INLINE
 } ShadowKwKind;
 
 typedef struct {
@@ -69,6 +70,7 @@ typedef struct {
         { "create", { SHADOW_KW_CREATE } },
         { "bool", { SHADOW_KW_BOOL } },
         { "size_t", { SHADOW_KW_SIZE_T } },
+        { "inline", { SHADOW_KW_INLINE } },
     };
     static_map("shadow_kw", shadow_kw_entries, CC_STATIC_MAP_CASE_SENSITIVE);
 }
@@ -170,14 +172,19 @@ typedef enum {
     AST_WITH_DEADLINE,
     /* name++; — a=name */
     AST_INC,
-    /* typedef struct Tag { fields } Alias; — a=tag|"" b=alias; kids=fields */
+    /* typedef struct Tag { fields } Alias; — a=tag|"" b=alias; kids=fields
+     * Opaque form (no `{…}`): nkids==0, a=tag, b=alias → `typedef struct Tag Alias;` */
     AST_TYPEDEF_STRUCT,
     /* field: Type name[, name2]*; — a=type b=names csv */
     AST_FIELD_SIMPLE,
     /* @async Ret name(params) { stmts } — a=ret b=name c=params; kids=body */
     AST_ASYNC_FN,
     /* static Type[*] name[[N]]; — a=type b=name c="*"|"[N]"|"" */
-    AST_STATIC_VAR
+    AST_STATIC_VAR,
+    /* typedef Ret (*Name)(params); — a=ret b=name c=params */
+    AST_TYPEDEF_FN_PTR,
+    /* Ret[*] name(params); — a=ret(+optional *) b=name c=params */
+    AST_FN_PROTO
 } AstKind;
 
 typedef struct AstNode AstNode;
@@ -1847,11 +1854,18 @@ static AstNode* parse_static_arr(Parser* p) {
 static AstNode* parse_static_fn(Parser* p) {
     if (shadow_kw(p_peek(p)) != SHADOW_KW_STATIC) return NULL;
     if (p->i + 4 >= p->n) return NULL;
-    Token rty = p->toks[p->i + 1];
+    int ri = p->i + 1;
+    int has_inline = 0;
+    if (ri < p->n && shadow_kw(p->toks[ri]) == SHADOW_KW_INLINE) {
+        has_inline = 1;
+        ri++;
+    }
+    if (ri >= p->n) return NULL;
+    Token rty = p->toks[ri];
     if (rty.kind != TK_IDENT && shadow_kw(rty) != SHADOW_KW_INT &&
         shadow_kw(rty) != SHADOW_KW_CHAR && shadow_kw(rty) != SHADOW_KW_VOID)
         return NULL;
-    int ni = p->i + 2;
+    int ni = ri + 1;
     int is_ptr = 0;
     if (ni < p->n && tok_eq(p->toks[ni], TK_PUNCT, "*")) {
         is_ptr = 1;
@@ -1861,6 +1875,7 @@ static AstNode* parse_static_fn(Parser* p) {
     if (ni + 1 >= p->n || !tok_eq(p->toks[ni + 1], TK_PUNCT, "(")) return NULL;
 
     p_next(p); /* static */
+    if (has_inline) p_next(p); /* inline */
     p_next(p); /* ret */
     if (is_ptr) p_next(p); /* * */
     Token name = p_next(p);
@@ -1895,6 +1910,7 @@ static AstNode* parse_static_fn(Parser* p) {
     }
     slice_to(n->b, sizeof(n->b), name.spell);
     snprintf(n->c, sizeof(n->c), "%s", params);
+    if (has_inline) snprintf(n->e, sizeof(n->e), "inline");
 
     /* Prefer stmt parse; on failure, take raw body text (helpers with C exprs). */
     int body0 = p->i;
@@ -2614,7 +2630,8 @@ static AstNode* parse_field_simple(Parser* p) {
     return n;
 }
 
-/* typedef struct [Tag] { fields } Alias ; */
+/* typedef struct [Tag] { fields } Alias ;
+ * Opaque: typedef struct Tag Alias ; */
 static AstNode* parse_typedef_struct(Parser* p) {
     if (shadow_kw(p_peek(p)) != SHADOW_KW_TYPEDEF) return NULL;
     if (p->i + 1 >= p->n || shadow_kw(p->toks[p->i + 1]) != SHADOW_KW_STRUCT)
@@ -2628,16 +2645,18 @@ static AstNode* parse_typedef_struct(Parser* p) {
         Token tag = p_next(p);
         slice_to(st->a, sizeof(st->a), tag.spell);
     }
-    if (!p_accept(p, TK_PUNCT, "{")) {
+    if (p_accept(p, TK_PUNCT, "{")) {
+        st->kids = &p->kids_storage[p->nkstore];
+        if (!parse_struct_fields(p, st)) return NULL;
+        if (!p_accept(p, TK_PUNCT, "}")) {
+            parser_fail(p, p_peek(p), "expected '}' after typedef struct fields");
+            return NULL;
+        }
+    } else if (!st->a[0]) {
         parser_fail(p, p_peek(p), "expected '{' after typedef struct");
         return NULL;
     }
-    st->kids = &p->kids_storage[p->nkstore];
-    if (!parse_struct_fields(p, st)) return NULL;
-    if (!p_accept(p, TK_PUNCT, "}")) {
-        parser_fail(p, p_peek(p), "expected '}' after typedef struct fields");
-        return NULL;
-    }
+    /* Opaque or closing alias after `}`. */
     Token alias = p_next(p);
     if (alias.kind != TK_IDENT) {
         parser_fail(p, alias, "expected typedef struct alias");
@@ -2652,10 +2671,136 @@ static AstNode* parse_typedef_struct(Parser* p) {
     return st;
 }
 
+/* typedef Ret (*Name)(params); */
+static AstNode* parse_typedef_fn_ptr(Parser* p) {
+    if (shadow_kw(p_peek(p)) != SHADOW_KW_TYPEDEF) return NULL;
+    if (p->i + 5 >= p->n) return NULL;
+    Token rty = p->toks[p->i + 1];
+    if (rty.kind != TK_IDENT && shadow_kw(rty) != SHADOW_KW_VOID &&
+        shadow_kw(rty) != SHADOW_KW_INT && shadow_kw(rty) != SHADOW_KW_CHAR)
+        return NULL;
+    if (!tok_eq(p->toks[p->i + 2], TK_PUNCT, "(") ||
+        !tok_eq(p->toks[p->i + 3], TK_PUNCT, "*") ||
+        p->toks[p->i + 4].kind != TK_IDENT ||
+        !tok_eq(p->toks[p->i + 5], TK_PUNCT, ")"))
+        return NULL;
+    p_next(p); /* typedef */
+    p_next(p); /* ret */
+    p_next(p); /* ( */
+    p_next(p); /* * */
+    Token name = p_next(p);
+    p_next(p); /* ) */
+    if (!p_accept(p, TK_PUNCT, "(")) {
+        parser_fail(p, p_peek(p), "expected '(' after typedef fn-ptr name");
+        return NULL;
+    }
+    int p0 = p->i;
+    int depth = 1;
+    while (p->i < p->n && depth > 0) {
+        Token t = p_peek(p);
+        if (tok_eq(t, TK_PUNCT, "(")) depth++;
+        else if (tok_eq(t, TK_PUNCT, ")")) {
+            depth--;
+            if (depth == 0) break;
+        }
+        p_next(p);
+    }
+    char params[256];
+    if (p0 >= p->i) params[0] = 0;
+    else if (!span_text(p, p0, p->i, params, sizeof(params))) {
+        parser_fail(p, name, "typedef fn-ptr params too long");
+        return NULL;
+    }
+    if (!p_accept(p, TK_PUNCT, ")") || !p_accept(p, TK_PUNCT, ";")) {
+        parser_fail(p, p_peek(p), "expected ');' after typedef fn-ptr");
+        return NULL;
+    }
+    if (!scope_add_typedef(p, name.spell)) { p->err = 1; return NULL; }
+    AstNode* n = ast_new(p, AST_TYPEDEF_FN_PTR);
+    if (!n) return NULL;
+    slice_to(n->a, sizeof(n->a), rty.spell);
+    slice_to(n->b, sizeof(n->b), name.spell);
+    snprintf(n->c, sizeof(n->c), "%s", params);
+    return n;
+}
+
+/* Ret[*] name(params); — file-scope prototype (no body). */
+static AstNode* parse_fn_proto(Parser* p) {
+    Token rty = p_peek(p);
+    if (rty.kind != TK_IDENT && shadow_kw(rty) != SHADOW_KW_INT &&
+        shadow_kw(rty) != SHADOW_KW_VOID && shadow_kw(rty) != SHADOW_KW_CHAR &&
+        shadow_kw(rty) != SHADOW_KW_SIZE_T && shadow_kw(rty) != SHADOW_KW_BOOL)
+        return NULL;
+    if (p->i + 3 >= p->n) return NULL;
+    int ni = p->i + 1;
+    int is_ptr = 0;
+    if (ni < p->n && tok_eq(p->toks[ni], TK_PUNCT, "*")) {
+        is_ptr = 1;
+        ni++;
+    }
+    if (ni >= p->n || p->toks[ni].kind != TK_IDENT) return NULL;
+    if (ni + 1 >= p->n || !tok_eq(p->toks[ni + 1], TK_PUNCT, "(")) return NULL;
+    /* Must end with `);` not `){`. */
+    int j = ni + 2;
+    int depth = 1;
+    while (j < p->n && depth > 0) {
+        Token t = p->toks[j];
+        if (tok_eq(t, TK_PUNCT, "(")) depth++;
+        else if (tok_eq(t, TK_PUNCT, ")")) {
+            depth--;
+            if (depth == 0) break;
+        }
+        j++;
+    }
+    if (j + 1 >= p->n || !tok_eq(p->toks[j], TK_PUNCT, ")") ||
+        !tok_eq(p->toks[j + 1], TK_PUNCT, ";"))
+        return NULL;
+
+    p_next(p); /* ret */
+    if (is_ptr) p_next(p); /* * */
+    Token name = p_next(p);
+    p_next(p); /* ( */
+    int p0 = p->i;
+    depth = 1;
+    while (p->i < p->n && depth > 0) {
+        Token t = p_peek(p);
+        if (tok_eq(t, TK_PUNCT, "(")) depth++;
+        else if (tok_eq(t, TK_PUNCT, ")")) {
+            depth--;
+            if (depth == 0) break;
+        }
+        p_next(p);
+    }
+    char params[256];
+    if (p0 >= p->i) params[0] = 0;
+    else if (!span_text(p, p0, p->i, params, sizeof(params))) {
+        parser_fail(p, name, "fn proto params too long");
+        return NULL;
+    }
+    if (!p_accept(p, TK_PUNCT, ")") || !p_accept(p, TK_PUNCT, ";")) {
+        parser_fail(p, p_peek(p), "expected ');' after fn proto");
+        return NULL;
+    }
+    AstNode* n = ast_new(p, AST_FN_PROTO);
+    if (!n) return NULL;
+    slice_to(n->a, sizeof(n->a), rty.spell);
+    if (is_ptr) {
+        size_t al = strlen(n->a);
+        if (al + 1 < sizeof(n->a)) { n->a[al] = '*'; n->a[al + 1] = 0; }
+    }
+    slice_to(n->b, sizeof(n->b), name.spell);
+    snprintf(n->c, sizeof(n->c), "%s", params);
+    return n;
+}
+
 static AstNode* parse_typedef_int(Parser* p) {
     if (shadow_kw(p_peek(p)) != SHADOW_KW_TYPEDEF) return NULL;
     if (p->i + 1 < p->n && shadow_kw(p->toks[p->i + 1]) == SHADOW_KW_STRUCT)
         return parse_typedef_struct(p);
+    {
+        AstNode* fp = parse_typedef_fn_ptr(p);
+        if (fp || p->err) return fp;
+    }
     if (p->i + 1 >= p->n || shadow_kw(p->toks[p->i + 1]) != SHADOW_KW_INT)
         return NULL;
     p_next(p);
@@ -2712,6 +2857,7 @@ static AstNode* parse_struct(Parser* p) {
 
 static int parse_struct_fields(Parser* p, AstNode* st) {
     while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF) {
+        int start = p->i;
         AstNode* f = parse_slice_var(p);
         if (!f) f = parse_chan_var(p);
         if (!f) f = parse_int_decl(p, AST_FIELD_INT);
@@ -2720,6 +2866,7 @@ static int parse_struct_fields(Parser* p, AstNode* st) {
             parser_fail(p, p_peek(p), "bad struct field");
             return 0;
         }
+        shadow_attach_lead(p, f, start);
         if (p->nkstore >= AST_CAP * 4) { p->err = 1; return 0; }
         p->kids_storage[p->nkstore++] = f;
         st->nkids++;
@@ -2771,8 +2918,12 @@ static AstNode* parse_external_inner(Parser* p) {
         if (n || p->err) return n;
         n = parse_fn(p);
         if (n || p->err) return n;
+        n = parse_fn_proto(p);
+        if (n || p->err) return n;
         return parse_int_decl(p, AST_VAR_INT);
     }
+    n = parse_fn_proto(p);
+    if (n || p->err) return n;
     n = parse_star_stmt(p);
     if (n || p->err) return n;
     parser_fail(p, t, "unexpected token (shadow subset cannot lower this yet)");
@@ -2850,6 +3001,8 @@ static const char* ast_kind_name(AstKind k) {
     case AST_FIELD_SIMPLE: return "field_simple";
     case AST_ASYNC_FN: return "async_fn";
     case AST_STATIC_VAR: return "static_var";
+    case AST_TYPEDEF_FN_PTR: return "typedef_fn_ptr";
+    case AST_FN_PROTO: return "fn_proto";
     }
     return "?";
 }

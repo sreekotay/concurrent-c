@@ -42,7 +42,7 @@
 #include <unistd.h>
 
 typedef struct Pt {
-  double x,y;
+    double x,y;
 } Pt;
 
 
@@ -65,8 +65,8 @@ static double cc_double_twice(double v) {
 /* 5. Bare-name tier: any function whose first parameter takes the
  *    receiver (by value exactly, or by pointer via &recv). */
 typedef struct Stats {
-  double sum;
-  int n;
+    double sum;
+    int n;
 } Stats;
 
 static double mean(Stats s, double bump) {

@@ -270,6 +270,16 @@ int main(void) {
             return 1;
         }
     }
+    {
+        char cmd[512];
+        snprintf(cmd, sizeof(cmd),
+                 "bash examples/serdes/c/shadow/diff_stdlib_exec.sh");
+        int rc = system(cmd);
+        if (rc != 0) {
+            printf("FAIL: diff_stdlib_exec.sh rc=%d\n", rc);
+            return 1;
+        }
+    }
     printf("c_pp shadow emit (.ccs→.c / .cch→.h, 2-stage) OK\n");
     return 0;
 }

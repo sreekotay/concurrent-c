@@ -17,11 +17,11 @@
 
 
 typedef struct Store {
-  CCArena map_arena;
-  CCArena key_arena;
-  Map_CCSliceHdr_int* entries;
-  size_t key_insert_bytes;
-  size_t key_delete_bytes;
+    CCArena map_arena;
+    CCArena key_arena;
+    Map_CCSliceHdr_int* entries;
+    size_t key_insert_bytes;
+    size_t key_delete_bytes;
 } Store;
 
 

@@ -39,7 +39,7 @@ Same front for both products; H adds `#pragma once` and rejects function bodies.
 | `c_pp_spike.cch` | Umbrella for tools/smokes |
 | `shadow_lower.{ccs,sh}` | Explicit CLI (does **not** replace `ccc`) |
 | `fixtures/` | Architecture falsifiers (mid-struct include, guards, …) |
-| `shadow/` | Goldens: mini, includes, `result_frag`, `hello`, recipe beachheads |
+| `shadow/` | Goldens: mini, includes, `result_frag`, `hello`, recipe beachheads, `cc_exec.h` |
 
 ## Beachhead
 
@@ -99,6 +99,7 @@ Experiment smokes stay out of the default driver path:
 ./out/cc/bin/ccc run --no-cache tests/c_pp_stage_spike_smoke.ccs
 ./out/cc/bin/ccc run --no-cache tests/c_pp_shadow_emit_smoke.ccs
 bash examples/serdes/c/shadow/diff_lower_header.sh
+bash examples/serdes/c/shadow/diff_stdlib_exec.sh
 ```
 
 Compiler harvest (production, independent of this tree):
@@ -129,10 +130,18 @@ On kill: leave this tree + smokes as a study; do not merge into the driver.
 Met for the trimmed `result_frag` beachhead (`CCResult_` names match
 `lower_header`; include tape reuse; host `cc` clean on mini).
 
-**Soft signal (not go):** real `examples/hello.ccs` lowers via `shadow_lower`.
+**Soft signal (met):** real `examples/hello.ccs` lowers via `shadow_lower`.
 
-**Hard go still:** stdlib-adjacent `.cch` shadow-diff that beats pass soup, with
-emit still host-consumable.
+**Hard go (met for `cc_exec`):** shadow-lower of real
+`cc/include/ccc/cc_exec.cch` matches production `out/include/ccc/cc_exec.h`
+on the normalized C surface (`diff_stdlib_exec.sh`) and host `cc -c`
+consumes the shadow product. Production lower of this header is near-
+passthrough; shadow preserves the same API with `#pragma once` instead of
+the `#ifndef` guard dance.
+
+Larger stdlib headers (`cc_result`, `cc_arena`, …) still hit the coverage /
+cpp walls — grow the whitelist only when the next header is a clean
+beachhead, not a general C parser.
 
 ## Working rules
 
