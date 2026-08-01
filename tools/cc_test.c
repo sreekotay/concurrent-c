@@ -263,7 +263,7 @@ static int default_job_count(void) {
 }
 
 /* Stress / lost-wake / race matrix tests: useful overnight, expensive in the
- * local edit loop.  Selected by --quick / CC_TEST_QUICK=1. */
+ * local edit loop.  Skipped by default (--quick); include with --full. */
 static int test_is_heavy(const char* stem, const char* path) {
     if (!stem) return 0;
     if (str_contains(stem, "stress")) return 1;
@@ -886,8 +886,9 @@ static int run_one_test(const char* stem,
 
 static void usage(const char* prog) {
     fprintf(stderr, "Usage:\n");
-    fprintf(stderr, "  %s [--list] [--filter SUBSTR] [--quick] [--verbose] [--jobs N] [--build-timeout SECONDS] [--run-timeout SECONDS] [--use-cache|--no-cache] [--clean]\n", prog);
-    fprintf(stderr, "  --quick  skip stress/lostwake/race tests (also CC_TEST_QUICK=1)\n");
+    fprintf(stderr, "  %s [--list] [--filter SUBSTR] [--quick|--full] [--verbose] [--jobs N] [--build-timeout SECONDS] [--run-timeout SECONDS] [--use-cache|--no-cache] [--clean]\n", prog);
+    fprintf(stderr, "  --quick  skip stress/lostwake/race tests (default)\n");
+    fprintf(stderr, "  --full   include stress/lostwake/race tests (also CC_TEST_FULL=1)\n");
 }
 
 int main(int argc, char** argv) {
@@ -895,7 +896,7 @@ int main(int argc, char** argv) {
     int verbose = 0;
     int list_only = 0;
     int jobs = default_job_count();
-    int quick = 0;
+    int quick = 1; /* default: skip heavy stress/race; --full for the complete set */
     int use_cache = 1; /* default on; cold runs reuse shared concurrent_c.o / .c outs */
     int clean = 0;
     int build_timeout_sec = 300;
@@ -904,6 +905,7 @@ int main(int argc, char** argv) {
         if (strcmp(argv[i], "--verbose") == 0) { verbose = 1; continue; }
         if (strcmp(argv[i], "--list") == 0) { list_only = 1; continue; }
         if (strcmp(argv[i], "--quick") == 0) { quick = 1; continue; }
+        if (strcmp(argv[i], "--full") == 0) { quick = 0; continue; }
         if (strcmp(argv[i], "--use-cache") == 0) { use_cache = 1; continue; }
         if (strcmp(argv[i], "--no-cache") == 0) { use_cache = 0; continue; }
         if (strcmp(argv[i], "--clean") == 0) { clean = 1; continue; }
@@ -950,8 +952,13 @@ int main(int argc, char** argv) {
         if (env && strcmp(env, "1") == 0) use_cache = 0;
     }
     {
+        const char* env = getenv("CC_TEST_FULL");
+        if (env && strcmp(env, "1") == 0) quick = 0;
+    }
+    {
         const char* env = getenv("CC_TEST_QUICK");
         if (env && strcmp(env, "1") == 0) quick = 1;
+        if (env && strcmp(env, "0") == 0) quick = 0;
     }
     {
         const char* env = getenv("CC_TEST_JOBS");

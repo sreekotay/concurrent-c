@@ -32,7 +32,8 @@ echo ""
 
 # --- Unit Tests ---
 echo "=== UNIT TESTS ==="
-./scripts/test.sh 2>&1 | tail -5
+# test.sh defaults to the fast loop; comprehensive runs want the full gate.
+./scripts/test.sh --full 2>&1 | tail -5
 echo ""
 
 # --- Examples ---
