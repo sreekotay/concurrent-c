@@ -1,17 +1,24 @@
-/* Explicit shadow lowerer (experiment Phase 3) — beside ccc, never replaces it.
+/* Explicit shadow lowerer (experiment) — beside ccc, never replaces it.
  *
  * Usage:
- *   ./out/cc/bin/ccc run examples/serdes/c/shadow_lower.ccs -- <in.ccs|.cch> [-o out]
+ *   shadow_lower <in.ccs|.cch> [-o out.c|.h] [--exe out.bin]
  *
- * Default product: .cch → .h, .ccs → .c (by extension). Writes stdout if -o omitted.
+ * Default product: .cch → .h, .ccs → .c (by extension). Writes stdout if -o
+ * omitted. `--exe` compiles the emit buffer in-process via libtcc (no .c on
+ * disk) and links the host-built CC runtime shared lib.
  */
 #include <ccc/std/prelude.cch>
+#include <unistd.h>
 
 @grammar(rules) PpTok {~~~~
     include "pp_tok.rules"
 ~~~~}
 
 #include "c_pp_spike.cch"
+
+#ifdef SHADOW_HAVE_LIBTCC
+#include "shadow_tcc_compile.h"
+#endif
 
 static int shadow_keep_nop(void* env, int id, CCSlice v) {
     (void)env; (void)id; (void)v;
@@ -20,8 +27,10 @@ static int shadow_keep_nop(void* env, int id, CCSlice v) {
 
 static void usage(const char* argv0) {
     fprintf(stderr,
-            "usage: %s <input.ccs|.cch> [-o output]\n"
-            "  experiment shadow lowerer — emits C/H; does not replace ccc/lower_header\n",
+            "usage: %s <input.ccs|.cch> [-o output] [--exe binary]\n"
+            "  -o     write lowered C/H text\n"
+            "  --exe  compile emit buffer via libtcc → binary (no .c on disk)\n"
+            "  experiment shadow lowerer — does not replace ccc/lower_header\n",
             argv0);
 }
 
@@ -47,6 +56,46 @@ static void pp_free_macros(Pp* pp) {
     pp->nmacros = 0;
 }
 
+/* Directory containing libcc_runtime.{dylib,so}. Override: SHADOW_RUNTIME_LIBDIR.
+ * Product binaries load the leaf soname; set DYLD_LIBRARY_PATH / LD_LIBRARY_PATH
+ * to this dir when running (bench/scripts do that). */
+static int shadow_runtime_libdir(char* dst, size_t cap) {
+    const char* env = getenv("SHADOW_RUNTIME_LIBDIR");
+    const char* cands[4];
+    char probe[1100];
+    int i, n = 0;
+    if (env && env[0]) {
+#if defined(__APPLE__)
+        snprintf(probe, sizeof(probe), "%s/libcc_runtime.dylib", env);
+#else
+        snprintf(probe, sizeof(probe), "%s/libcc_runtime.so", env);
+#endif
+        if (access(probe, R_OK) != 0) {
+            fprintf(stderr, "error: SHADOW_RUNTIME_LIBDIR missing libcc_runtime: %s\n",
+                    env);
+            return 0;
+        }
+        snprintf(dst, cap, "%s", env);
+        return 1;
+    }
+    cands[n++] = "out/cc/lib";
+    cands[n++] = "cc/lib";
+    for (i = 0; i < n; i++) {
+#if defined(__APPLE__)
+        snprintf(probe, sizeof(probe), "%s/libcc_runtime.dylib", cands[i]);
+#else
+        snprintf(probe, sizeof(probe), "%s/libcc_runtime.so", cands[i]);
+#endif
+        if (access(probe, R_OK) != 0) continue;
+        snprintf(dst, cap, "%s", cands[i]);
+        return 1;
+    }
+    fprintf(stderr,
+            "error: missing CC runtime shared lib "
+            "(build: make -C cc ../out/cc/lib/libcc_runtime.*)\n");
+    return 0;
+}
+
 int main(int argc, char** argv) {
     /* Demand-gate grammar projections. */
     CCArena gate = cc_arena_create(4096);
@@ -56,10 +105,14 @@ int main(int argc, char** argv) {
 
     const char* in_path = NULL;
     const char* out_path = NULL;
+    const char* exe_path = NULL;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-o") == 0) {
             if (i + 1 >= argc) { usage(argv[0]); return 2; }
             out_path = argv[++i];
+        } else if (strcmp(argv[i], "--exe") == 0) {
+            if (i + 1 >= argc) { usage(argv[0]); return 2; }
+            exe_path = argv[++i];
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             usage(argv[0]);
             return 0;
@@ -76,6 +129,9 @@ int main(int argc, char** argv) {
         }
     }
     if (!in_path) { usage(argv[0]); return 2; }
+    if (!out_path && !exe_path) {
+        /* stdout text product */
+    }
 
     ShadowEmitKind kind = ends_with(in_path, ".cch") ? SHADOW_EMIT_H : SHADOW_EMIT_C;
     char search_dir[512];
@@ -132,6 +188,39 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    if (exe_path) {
+#ifdef SHADOW_HAVE_LIBTCC
+        char rt_dir[1024];
+        const char* incs[2];
+        if (!shadow_runtime_libdir(rt_dir, sizeof(rt_dir))) {
+            free(emit.buf);
+            pp_free_macros(&pp);
+            tape_cache_free(&cache);
+            cc_arena_free(&arena);
+            return 1;
+        }
+        incs[0] = "out/include";
+        incs[1] = "cc/include";
+        if (shadow_tcc_compile_exe(emit.buf, exe_path, NULL, incs, 2, rt_dir) != 0) {
+            fprintf(stderr, "%s:1:1: error: libtcc compile failed\n", in_path);
+            free(emit.buf);
+            pp_free_macros(&pp);
+            tape_cache_free(&cache);
+            cc_arena_free(&arena);
+            return 1;
+        }
+#else
+        fprintf(stderr,
+                "error: --exe requires a libtcc-linked shadow_lower "
+                "(make -C cc install native shadow_lower)\n");
+        free(emit.buf);
+        pp_free_macros(&pp);
+        tape_cache_free(&cache);
+        cc_arena_free(&arena);
+        return 1;
+#endif
+    }
+
     if (out_path) {
         FILE* f = fopen(out_path, "wb");
         if (!f) {
@@ -144,7 +233,7 @@ int main(int argc, char** argv) {
         }
         fwrite(emit.buf, 1, emit.len, f);
         fclose(f);
-    } else {
+    } else if (!exe_path) {
         fwrite(emit.buf, 1, emit.len, stdout);
         if (emit.len == 0 || emit.buf[emit.len - 1] != '\n') fputc('\n', stdout);
     }

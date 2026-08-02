@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# First-class shadow lowerer CLI (parallel path — does not replace ccc).
-# Installed to cc/bin/shadow_lower and out/cc/bin/shadow_lower by the Makefile.
+# Fallback shadow lowerer via `ccc run` (parallel path — does not replace ccc).
+# Primary install is a native libtcc-linked binary from `make -C cc`.
+# This script remains for bootstrap / when the native binary is absent.
 set -euo pipefail
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 # cc/bin/shadow_lower → repo root is ../..

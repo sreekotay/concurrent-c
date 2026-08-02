@@ -127,6 +127,18 @@ WRAPPER := $(OUT_BINDIR)/ccc
 SHADOW_LOWER_TEMPLATE := scripts/shadow_lower.sh
 SHADOW_LOWER_SCRIPT := bin/shadow_lower
 SHADOW_LOWER_WRAPPER := $(OUT_BINDIR)/shadow_lower
+# Native shadow_lower (libtcc-linked) + host-built runtime dylib for --exe.
+SHADOW_LOWER_CCS := ../examples/serdes/c/shadow_lower.ccs
+SHADOW_TCC_C := ../examples/serdes/c/shadow_tcc_compile.c
+SHADOW_TCC_OBJ := $(OBJDIR)/shadow_tcc_compile.o
+OUT_LIBDIR := $(dir $(OUT_BINDIR))lib
+ifeq ($(shell uname -s),Darwin)
+  RUNTIME_DYLIB := $(OUT_LIBDIR)/libcc_runtime.dylib
+  RUNTIME_DYLIB_LINK := -dynamiclib
+else
+  RUNTIME_DYLIB := $(OUT_LIBDIR)/libcc_runtime.so
+  RUNTIME_DYLIB_LINK := -shared
+endif
 
 LOWER_HEADERS_SRCS := src/tools/lower_headers.c \
 	src/header/lower_header.c \
@@ -177,7 +189,7 @@ OUT_INCLUDE := ../out/include
 OUT_RUNTIME := ../out/runtime
 LOWER_HEADERS_STAMP := $(OUT_INCLUDE)/.headers_lowered.stamp
 
-all: $(CCC_SCRIPT) $(WRAPPER) $(SHADOW_LOWER_WRAPPER) $(LOWER_HEADERS_STAMP)
+all: $(CCC_SCRIPT) $(WRAPPER) $(SHADOW_LOWER_WRAPPER) $(RUNTIME_DYLIB) $(LOWER_HEADERS_STAMP)
 
 # Patched-TCC guard: a fresh clone (or a changed patch set) gets the CC
 # hooks applied into the submodule working tree BEFORE any CC object that
@@ -293,15 +305,35 @@ $(WRAPPER): $(CCC_SCRIPT)
 	@printf '%s\n' 'exec "$$SELF_DIR/../../../cc/bin/ccc" "$$@"' >> $@
 	@chmod +x $@
 
-# First-class shadow lowerer beside ccc (parallel path; does not replace lower_header).
-$(SHADOW_LOWER_SCRIPT): $(SHADOW_LOWER_TEMPLATE)
+# Runtime shared lib for shadow --exe (libtcc cannot link host clang .o on Darwin).
+# Leaf soname only — run with DYLD_LIBRARY_PATH / LD_LIBRARY_PATH = this dir.
+$(RUNTIME_DYLIB): $(OBJDIR)/runtime/concurrent_c.o
+	@mkdir -p $(dir $@)
+ifeq ($(shell uname -s),Darwin)
+	$(CC) $(RUNTIME_DYLIB_LINK) -install_name libcc_runtime.dylib -o $@ $< -lpthread -lm
+else
+	$(CC) $(RUNTIME_DYLIB_LINK) -o $@ $< -lpthread -lm
+endif
+
+$(SHADOW_TCC_OBJ): $(SHADOW_TCC_C) $(TCC_LIB_DEP)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -I../examples/serdes/c -c $(SHADOW_TCC_C) -o $@
+
+# Native shadow_lower beside ccc: emit + optional in-process libtcc --exe.
+# Falls back to scripts/shadow_lower.sh only if the native build is skipped.
+$(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_CCS) $(SHADOW_TCC_OBJ) $(WRAPPER) $(TCC_LIB_DEP) $(RUNTIME_DYLIB)
+	@mkdir -p $(dir $@)
+	$(WRAPPER) $(SHADOW_LOWER_CCS) -o $@ \
+		--cc-flags "-I../examples/serdes/c -I$(TCC_INC) -DSHADOW_HAVE_LIBTCC=1" \
+		--ld-flags "$(abspath $(SHADOW_TCC_OBJ)) -L$(TCC_LIB) -ltcc"
+	@mkdir -p $(dir $(SHADOW_LOWER_SCRIPT))
+	@cp $@ $(SHADOW_LOWER_SCRIPT)
+	@chmod +x $(SHADOW_LOWER_SCRIPT)
+
+# Dev fallback wrapper (ccc run) — not installed as the primary CLI.
+$(SHADOW_LOWER_SCRIPT).sh: $(SHADOW_LOWER_TEMPLATE)
 	@mkdir -p $(dir $@)
 	@cp $(SHADOW_LOWER_TEMPLATE) $@
-	@chmod +x $@
-
-$(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_SCRIPT) $(WRAPPER)
-	@mkdir -p $(dir $@)
-	@cp $(SHADOW_LOWER_SCRIPT) $@
 	@chmod +x $@
 
 $(LOWER_HEADERS_BINARY): $(LOWER_HEADERS_OBJS) $(TCC_LIB_DEP)
