@@ -48,9 +48,7 @@ int main(void) {
     cc_nursery_spawn_closure0(n, cc_closure__N3_make());
 
     #line 30 "examples/serdes/c/shadow/hello.ccs"
-    __cc_retval = 0;
-    __cc_ret_set = 1;
-    goto __cc_cleanup;
+    { __cc_retval = 0; __cc_ret_set = 1; goto __cc_cleanup; }
 __cc_cleanup:
     {
         cc_nursery_wait(n);

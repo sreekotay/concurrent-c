@@ -296,7 +296,7 @@ Result-typed calls (`T!>(E)`) must be explicitly consumed. Two operators with cl
 | `@await expr`                                            | Suspend until task completes, unwrap result                           | `int result = @await fetch();`            |
 | `@slice("...")`                                          | Build-time canonical sentinel slice                                   | `char[:0] mode = @slice("recv");`         |
 | `@string(expr, arena)` / `@string(policy, \`..., arena)` | Direct or templated string construction (`${e}` and `$~tag{e}` slots) | `CCString msg = @string(user_id, arena);` |
-| `@string(\`...\`, @scratch)` / `@scratch(N)`             | Temp stack arena for `@string` only — per site, block lifetime (§9.1.4) | `println(@string(\`r=${ratio}\`, @scratch))` |
+| `@string(\`...\`, @scratch)` / `@scratch(N)`             | Temp stack arena for `@string` only — shared per function/closure (§9.1.4) | `println(@string(\`r=${ratio}\`, @scratch))` |
 | `@string(\`...\`)` (no arena)                            | Bounded-template stack form: block-scoped buffer, yields `char[:]` borrow (§9.1.2) | `char[:] s = @string(\`v=${v}\`);`        |
 
 
@@ -4970,7 +4970,7 @@ String  <primitive>.to_str(Arena* a);           // e.g. 42.to_str(&arena)
 - `@string(expr, a)` builds a `String` from a literal, `char`*, `char[:]`, `String`, or a value that supports `to_str(a)`.
 - `@string(policy, \`..., a)`lowers to`String` builder operations over literal chunks plus interpolation slots.
 - `@string(\`...\`)` with no arena is the bounded-template stack form: it yields a `char[:]` borrow of a block-scoped buffer and requires every interpolation to have a statically bounded width (§9.1.2).
-- `@string(..., @scratch)` / `@scratch(N)` injects a per-site stack arena for the `@string` arena operand only (§9.1.4).
+- `@string(..., @scratch)` / `@scratch(N)` injects a shared function/closure stack arena for the `@string` arena operand only (§9.1.4).
 - Template slots are string-oriented. Accepted slot forms are `char*`, `char[:]`, and `String`; non-string values may bridge through `expr.to_str(a)` if the receiver type provides that UFCS conversion.
 - Interpolation syntax: only `${expr}` and `$~tag{expr}` start a slot (where `tag` is a C identifier). `${expr}` is **untagged**—the policy gets an empty tag slice and the value slice. `$~tag{expr}` is **tagged**—the policy gets the tag slice `"tag"` and the value slice, so policies can distinguish holes (metadata, escaping tiers, i18n keys, and so on). Any other `$` in the template is literal text, so ordinary uses like prices or macros do not need escaping.
 - To emit a literal `${` or `$~tag{` sequence, prefix `$` with backslash: `\${` and `\$~…` are not slots; the backslash is removed and the string helpers emit the remainder (same rules as other template backslash escapes, e.g. an even run of `\` before `$` restores slot parsing, as in `\\${x}`).
@@ -5052,29 +5052,28 @@ The arena form is unchanged: the same template with an arena yields an owned `St
 
 `@scratch` and `@scratch(N)` are legal **only** as the arena argument of `@string` (including `@string(policy, \`...\`, @scratch)` and `@string(expr, @scratch)`). They are not expressions, not general `CCArena*` values, and not a revival of retired `@arena { }` blocks.
 
-**Lowering.** Each `@string(..., @scratch)` / `@scratch(N)` site injects its own stack arena at the start of the enclosing block:
+**Lowering.** All `@string(..., @scratch)` / `@scratch(N)` sites in the same function or closure body share one stack arena injected at the start of that body. Sites bump-allocate; they do not reset between uses:
 
 ```c
-{
-    CC_ARENA_STACK(__cc_str_scratch_0, 1024);   // default N
-    CCString s = @string(`r=${ratio}`, &__cc_str_scratch_0);
-
-    CC_ARENA_STACK(__cc_str_scratch_1, 256);    // explicit N
-    println(@string(`x=${x}`, &__cc_str_scratch_1));
+int main(void) {
+    CC_ARENA_STACK(__cc_str_scratch, 1024);   // max of default and any @scratch(N)
+    CCString s = @string(`r=${ratio}`, &__cc_str_scratch);
+    println(@string(`x=${x}`, &__cc_str_scratch));
 }
 ```
 
-- Default size is 1024 bytes; `@scratch(N)` sets **that site only** (`N` is a positive integer constant). Sites do not share storage and do not max-merge sizes.
+- Default size is 1024 bytes; `@scratch(N)` contributes `N` (`N` is a positive integer constant). The shared arena size is the **max** of the default and every `@scratch(N)` in that function/closure.
+- Nested closures get their own shared scratch (C shadowing of `__cc_str_scratch`).
 - Overflow follows `CC_ARENA_STACK` (stack-first, then ordinary growth / `String` poison rules).
 - Freestanding `@scratch` (or use outside `@string`) is a compile error. Prefer `CC_ARENA_STACK` / `cc_arena_heap` for named or long-lived arenas.
 
-**Escape (normative).** Products of `@string(..., @scratch)` have block lifetime. It is a compile-time error to:
+**Escape (normative).** Products of `@string(..., @scratch)` have function/closure lifetime. It is a compile-time error to:
 
 - `return` that `String` (or a slice/view derived from it),
 - assign it into a variable declared in an **outer** block,
-- capture it into a closure or task that may outlive the enclosing block.
+- capture it into a closure or task that may outlive the enclosing function or closure.
 
-Same-block use (`CCString s = @string(..., @scratch); println(s);`) is fine. Call-local borrows (`println(@string(..., @scratch))`) are fine.
+Same-scope use (`CCString s = @string(..., @scratch); println(s);`) is fine. Call-local borrows (`println(@string(..., @scratch))`) are fine.
 
 `@string(...)` templated construction follows the same contract: if the destination arena cannot hold the output, the result is a failed `String` — never partial bytes.
 

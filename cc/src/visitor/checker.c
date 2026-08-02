@@ -259,14 +259,16 @@ static int cc__subtree_has_call_named(const StubNodeView* nodes,
     return 0;
 }
 
-/* True if any IDENT in the subtree is `__cc_str_scratch_*` (injected @scratch). */
+/* True if any IDENT in the subtree is `__cc_str_scratch` / `__cc_str_scratch_*`
+ * (injected @scratch). */
 static int cc__subtree_has_scratch_arena_ident(const StubNodeView* nodes,
                                                const ChildList* kids,
                                                int idx) {
     if (!nodes || !kids) return 0;
     const StubNodeView* n = &nodes[idx];
     if (n->kind == CC_STUB_IDENT && n->aux_s1 &&
-        strncmp(n->aux_s1, "__cc_str_scratch_", 17) == 0)
+        strncmp(n->aux_s1, "__cc_str_scratch", 16) == 0 &&
+        (n->aux_s1[16] == '\0' || n->aux_s1[16] == '_'))
         return 1;
     const ChildList* cl = &kids[idx];
     for (int i = 0; i < cl->len; i++) {
@@ -1603,7 +1605,7 @@ static int cc__walk_assign(int idx,
             lhs_v->is_arena_ptr = 1;
             lhs_v->arena_name = rhs_v->arena_name;
         }
-        /* Escape: only @scratch *strings* (not `CCArena* p = &__cc_str_scratch_K`). */
+        /* Escape: only @scratch *strings* (not `CCArena* p = &__cc_str_scratch`). */
         if (lhs_v && rhs_v && !saw_member && rhs_v->is_scratch_string) {
             CCSliceVar* lv = NULL;
             int lhs_depth = cc__scopes_lookup_depth(scopes, *io_scope_n, lhs, &lv);
@@ -1652,7 +1654,7 @@ static int cc__walk_return(int idx,
     }
     if (cc__subtree_mentions_scratch_value(nodes, kids, idx, scopes, *io_scope_n)) {
         cc__emit_err_cat(ctx, n, CC_ERR_SLICE, "@scratch string escapes scope");
-        fprintf(stderr, "  note: @string(..., @scratch) products must not leave the enclosing block\n");
+        fprintf(stderr, "  note: @string(..., @scratch) products must not leave the enclosing function or closure\n");
         fprintf(stderr, "  hint: pass an explicit CCArena (or CC_ARENA_STACK) for longer-lived strings\n");
         ctx->errors++;
         return -1;
@@ -1879,7 +1881,7 @@ static int cc__walk(int idx,
                 if (rhs && rhs->is_scratch_string) v->is_scratch_string = 1;
             }
             /* Mark only string-like destinations built from @scratch — not
-             * `CCArena* p = &__cc_str_scratch_K` temps in @string lowering. */
+             * `CCArena* p = &__cc_str_scratch` temps in @string lowering. */
             if (cc__subtree_has_scratch_arena_ident(nodes, kids, idx) &&
                 n->aux_s2 &&
                 (strstr(n->aux_s2, "CCString") != NULL ||

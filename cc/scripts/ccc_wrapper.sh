@@ -28,6 +28,21 @@ REAL_BIN="$SELF_DIR/.ccc-bin"
 CC_DIR="$(cd "$SELF_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$CC_DIR/.." && pwd)"
 
+# Optional parallel-path seam (does not change the default ccc pipeline):
+#   ccc --shadow-lower <in.ccs> [-o out.c]   → examples/serdes shadow lowerer
+#   ccc --shadow-run <in.ccs>              → shadow_lower → host cc + runtime
+if [ "${1:-}" = "--shadow-lower" ]; then
+    shift
+    if [ -x "$REPO_ROOT/cc/bin/shadow_lower" ]; then
+        exec "$REPO_ROOT/cc/bin/shadow_lower" "$@"
+    fi
+    exec bash "$REPO_ROOT/cc/scripts/shadow_lower.sh" "$@"
+fi
+if [ "${1:-}" = "--shadow-run" ]; then
+    shift
+    exec bash "$REPO_ROOT/examples/serdes/c/shadow/run_via_seam.sh" "$@"
+fi
+
 CCH_DIR="$CC_DIR/include"
 RUNTIME_SRC="$CC_DIR/runtime"
 OUT_INCLUDE="$REPO_ROOT/out/include"

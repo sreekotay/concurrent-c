@@ -89,6 +89,24 @@ static int expect_golden(const char* src_name, ShadowEmitKind kind,
     }
     char gpath[512];
     snprintf(gpath, sizeof(gpath), "%s/%s", FIX, golden_name);
+    if (getenv("UPDATE_GOLDEN") && getenv("UPDATE_GOLDEN")[0] == '1') {
+        FILE* gf = fopen(gpath, "wb");
+        if (!gf) {
+            printf("FAIL: cannot write golden %s\n", gpath);
+            free(emit.buf);
+            tape_cache_free(&cache);
+            cc_arena_free(&arena);
+            return 0;
+        }
+        fwrite(emit.buf, 1, emit.len, gf);
+        if (emit.len == 0 || emit.buf[emit.len - 1] != '\n') fputc('\n', gf);
+        fclose(gf);
+        printf("UPDATE: %s\n", gpath);
+        free(emit.buf);
+        tape_cache_free(&cache);
+        cc_arena_free(&arena);
+        return 1;
+    }
     size_t glen = 0;
     char* golden = read_all(gpath, &glen);
     if (!golden) {
@@ -249,7 +267,7 @@ static int test_line_provenance(void) {
         printf("FAIL: hello emit missing #line … hello.ccs provenance\n");
         ok = 0;
     }
-    /* Nursery unwrap site in shadow/hello.ccs (line 9). */
+    /* Nursery unwrap site in shadow/hello.ccs (line 9) — tok_off loci. */
     if (ok && !strstr(emit.buf, "#line 9 \"")) {
         printf("FAIL: hello emit missing #line 9 for nursery site\n");
         ok = 0;
@@ -266,25 +284,16 @@ int main(void) {
     (void)PpTok_collect(";", 1, &gate, shadow_keep_nop, NULL);
     cc_arena_free(&gate);
 
+    /* Compact golden matrix: mini + hard shapes. Full recipe behavior is
+     * run_recipes_shadow.sh (not text goldens). */
     if (!expect_golden("mini.ccs", SHADOW_EMIT_C, "mini.c.golden")) return 1;
     if (!expect_golden("hello.ccs", SHADOW_EMIT_C, "hello.c.golden")) return 1;
     if (!expect_golden("recipe_result.ccs", SHADOW_EMIT_C, "recipe_result.c.golden")) return 1;
-    if (!expect_golden("recipe_defer.ccs", SHADOW_EMIT_C, "recipe_defer.c.golden")) return 1;
-    if (!expect_golden("recipe_unwrap.ccs", SHADOW_EMIT_C, "recipe_unwrap.c.golden")) return 1;
-    if (!expect_golden("recipe_arena.ccs", SHADOW_EMIT_C, "recipe_arena.c.golden")) return 1;
-    if (!expect_golden("recipe_capture.ccs", SHADOW_EMIT_C, "recipe_capture.c.golden")) return 1;
-    if (!expect_golden("recipe_pipeline.ccs", SHADOW_EMIT_C, "recipe_pipeline.c.golden")) return 1;
-    if (!expect_golden("recipe_timeout.ccs", SHADOW_EMIT_C, "recipe_timeout.c.golden")) return 1;
-    if (!expect_golden("recipe_worker.ccs", SHADOW_EMIT_C, "recipe_worker.c.golden")) return 1;
-    if (!expect_golden("recipe_ufcs.ccs", SHADOW_EMIT_C, "recipe_ufcs.c.golden")) return 1;
-    if (!expect_golden("recipe_async.ccs", SHADOW_EMIT_C, "recipe_async.c.golden")) return 1;
-    if (!expect_golden("recipe_exclusive.ccs", SHADOW_EMIT_C, "recipe_exclusive.c.golden")) return 1;
-    if (!expect_golden("recipe_long_lived.ccs", SHADOW_EMIT_C, "recipe_long_lived.c.golden")) return 1;
-    if (!expect_golden("recipe_fanout_capture.ccs", SHADOW_EMIT_C, "recipe_fanout_capture.c.golden")) return 1;
-    if (!expect_golden("recipe_http_get.ccs", SHADOW_EMIT_C, "recipe_http_get.c.golden")) return 1;
-    if (!expect_golden("recipe_tcp_echo.ccs", SHADOW_EMIT_C, "recipe_tcp_echo.c.golden")) return 1;
-    if (!expect_golden("recipe_ordered_parallel.ccs", SHADOW_EMIT_C, "recipe_ordered_parallel.c.golden")) return 1;
-    if (!expect_golden("recipe_generics.ccs", SHADOW_EMIT_C, "recipe_generics.c.golden")) return 1;
+    if (!expect_golden("recipe_ordered_parallel.ccs", SHADOW_EMIT_C,
+                       "recipe_ordered_parallel.c.golden"))
+        return 1;
+    if (!expect_golden("recipe_generics.ccs", SHADOW_EMIT_C, "recipe_generics.c.golden"))
+        return 1;
     if (!expect_golden("mini.cch", SHADOW_EMIT_H, "mini.h.golden")) return 1;
     if (!expect_golden("with_include.cch", SHADOW_EMIT_H, "with_include.h.golden")) return 1;
     if (!expect_golden("result_frag.cch", SHADOW_EMIT_H, "result_frag.h.golden")) return 1;
@@ -296,72 +305,15 @@ int main(void) {
     if (!test_cch_to_h_hostcc()) return 1;
     if (!test_diag_line()) return 1;
     {
+        /* Beachhead name-match only — stdlib diffs + recipes live in
+         * scripts/test_serdes_shadow.sh (keeps this smoke under cc_test's
+         * default run timeout). */
         char cmd[512];
         snprintf(cmd, sizeof(cmd),
                  "bash examples/serdes/c/shadow/diff_lower_header.sh");
         int rc = system(cmd);
         if (rc != 0) {
             printf("FAIL: diff_lower_header.sh rc=%d\n", rc);
-            return 1;
-        }
-    }
-    {
-        char cmd[512];
-        snprintf(cmd, sizeof(cmd),
-                 "bash examples/serdes/c/shadow/diff_stdlib_exec.sh");
-        int rc = system(cmd);
-        if (rc != 0) {
-            printf("FAIL: diff_stdlib_exec.sh rc=%d\n", rc);
-            return 1;
-        }
-    }
-    {
-        char cmd[512];
-        snprintf(cmd, sizeof(cmd),
-                 "bash examples/serdes/c/shadow/diff_stdlib_async_runtime.sh");
-        int rc = system(cmd);
-        if (rc != 0) {
-            printf("FAIL: diff_stdlib_async_runtime.sh rc=%d\n", rc);
-            return 1;
-        }
-    }
-    {
-        char cmd[512];
-        snprintf(cmd, sizeof(cmd),
-                 "bash examples/serdes/c/shadow/diff_stdlib_nursery.sh");
-        int rc = system(cmd);
-        if (rc != 0) {
-            printf("FAIL: diff_stdlib_nursery.sh rc=%d\n", rc);
-            return 1;
-        }
-    }
-    {
-        char cmd[512];
-        snprintf(cmd, sizeof(cmd),
-                 "bash examples/serdes/c/shadow/diff_stdlib_chan_handle.sh");
-        int rc = system(cmd);
-        if (rc != 0) {
-            printf("FAIL: diff_stdlib_chan_handle.sh rc=%d\n", rc);
-            return 1;
-        }
-    }
-    {
-        char cmd[512];
-        snprintf(cmd, sizeof(cmd),
-                 "bash examples/serdes/c/shadow/diff_stdlib_io_error.sh");
-        int rc = system(cmd);
-        if (rc != 0) {
-            printf("FAIL: diff_stdlib_io_error.sh rc=%d\n", rc);
-            return 1;
-        }
-    }
-    {
-        char cmd[512];
-        snprintf(cmd, sizeof(cmd),
-                 "bash examples/serdes/c/shadow/run_recipes_shadow.sh");
-        int rc = system(cmd);
-        if (rc != 0) {
-            printf("FAIL: run_recipes_shadow.sh rc=%d\n", rc);
             return 1;
         }
     }

@@ -1458,14 +1458,15 @@ done:
 }
 
 /* ---- `@string(..., @scratch)` / `@scratch(N)` ---------------------------
- * Sugar for a per-site stack arena passed as the @string arena operand.
- * Each site gets its own CC_ARENA_STACK at the enclosing block start; the
- * arena arg is rewritten to &__cc_str_scratch_K. Not a general expression. */
+ * Sugar for a function/closure-scoped stack arena passed as the @string arena
+ * operand. All sites in the same function or closure body share one
+ * CC_ARENA_STACK(__cc_str_scratch, max N) at that body's '{'; every arena
+ * arg rewrites to &__cc_str_scratch. Not a general expression. */
 #define CC_STR_SCRATCH_DEFAULT_BYTES 1024
 #define CC_STR_SCRATCH_MAX_SITES 256
 
 typedef struct {
-    size_t brace;   /* '{' after which to inject CC_ARENA_STACK */
+    size_t brace;   /* function/closure '{' after which to inject CC_ARENA_STACK */
     size_t arg_s;   /* start of @scratch... in source */
     size_t arg_e;   /* exclusive end of arena arg */
     size_t nbytes;
@@ -1526,9 +1527,99 @@ static int cc__parse_at_scratch_arg(const char* src, size_t n, size_t s, size_t 
     return 1;
 }
 
+static int cc__scratch_ident_eq_range(const char* s, size_t n, const char* kw) {
+    size_t klen;
+    if (!s || !kw) return 0;
+    klen = strlen(kw);
+    return n == klen && memcmp(s, kw, klen) == 0;
+}
+
+/* Control / attribute bodies that open with `name(...) {` but are not
+ * function or closure scopes for @scratch sharing. */
+static int cc__scratch_is_non_fn_kw_range(const char* s, size_t n) {
+    return cc__scratch_ident_eq_range(s, n, "if") ||
+           cc__scratch_ident_eq_range(s, n, "for") ||
+           cc__scratch_ident_eq_range(s, n, "while") ||
+           cc__scratch_ident_eq_range(s, n, "switch") ||
+           cc__scratch_ident_eq_range(s, n, "catch") ||
+           cc__scratch_ident_eq_range(s, n, "errhandler") ||
+           cc__scratch_ident_eq_range(s, n, "with_deadline") ||
+           cc__scratch_ident_eq_range(s, n, "destroy");
+}
+
+/* True when `src[brace]` opens a function or closure body (`name(...) {`,
+ * `=> {`, or `=> [...] {`). */
+static int cc__lbrace_is_fn_or_closure_body(const char* src, size_t n, size_t brace) {
+    size_t j;
+    if (!src || brace >= n || src[brace] != '{') return 0;
+    j = brace;
+    while (j > 0) {
+        char c = src[j - 1];
+        if (c != ' ' && c != '\t' && c != '\n' && c != '\r') break;
+        j--;
+    }
+    if (j == 0) return 0;
+    /* `=> {` */
+    if (src[j - 1] == '>' && j >= 2 && src[j - 2] == '=') return 1;
+    /* `=> [captures] {` */
+    if (src[j - 1] == ']') {
+        size_t k = j - 1;
+        int depth = 1;
+        while (k > 0 && depth > 0) {
+            k--;
+            if (src[k] == ']') depth++;
+            else if (src[k] == '[') depth--;
+        }
+        if (depth != 0) return 0;
+        while (k > 0) {
+            char c = src[k - 1];
+            if (c != ' ' && c != '\t' && c != '\n' && c != '\r') break;
+            k--;
+        }
+        if (k >= 2 && src[k - 1] == '>' && src[k - 2] == '=') return 1;
+        return 0;
+    }
+    /* `name(...) {` — reject control/attr keywords and `@name(...) {`. */
+    if (src[j - 1] != ')') return 0;
+    {
+        size_t close_paren = j - 1;
+        size_t open_paren = close_paren;
+        size_t name_end, name_start;
+        int par = 1;
+        while (open_paren > 0) {
+            open_paren--;
+            if (src[open_paren] == ')') par++;
+            else if (src[open_paren] == '(') {
+                par--;
+                if (par == 0) break;
+            }
+        }
+        if (par != 0) return 0;
+        name_end = open_paren;
+        while (name_end > 0) {
+            char c = src[name_end - 1];
+            if (c != ' ' && c != '\t' && c != '\n' && c != '\r') break;
+            name_end--;
+        }
+        name_start = name_end;
+        while (name_start > 0) {
+            unsigned char c = (unsigned char)src[name_start - 1];
+            if (!(isalnum(c) || c == '_')) break;
+            name_start--;
+        }
+        if (name_start == name_end) return 0;
+        if (cc__scratch_is_non_fn_kw_range(src + name_start, name_end - name_start))
+            return 0;
+        if (name_start > 0 && src[name_start - 1] == '@') return 0;
+        return 1;
+    }
+}
+
+/* Innermost function/closure `{` enclosing `pos`, else innermost block `{`. */
 static int cc__find_enclosing_lbrace(const char* src, size_t n, size_t pos, size_t* out_brace) {
     size_t stack[256];
     int sp = 0;
+    int k;
     CCScannerState scan;
     size_t i = 0;
     if (!src || !out_brace || pos > n) return 0;
@@ -1547,6 +1638,12 @@ static int cc__find_enclosing_lbrace(const char* src, size_t n, size_t pos, size
         }
     }
     if (sp <= 0) return 0;
+    for (k = sp - 1; k >= 0; k--) {
+        if (cc__lbrace_is_fn_or_closure_body(src, n, stack[k])) {
+            *out_brace = stack[k];
+            return 1;
+        }
+    }
     *out_brace = stack[sp - 1];
     return 1;
 }
@@ -1687,7 +1784,7 @@ static int cc__collect_string_scratch_sites(const char* src, size_t n, const cha
                 cc__line_col_at(src, n, i, &line, &col);
                 cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
                                 line, col, "syntax",
-                                "@string(..., @scratch) requires an enclosing block");
+                                "@string(..., @scratch) requires an enclosing function or block");
                 return -1;
             }
             if (count >= max_sites) {
@@ -1769,7 +1866,8 @@ static int cc__scratch_site_cmp_arg(const void* a, const void* b) {
     return 0;
 }
 
-/* Expand @scratch arena args; NULL = no sites, (char*)-1 = error. */
+/* Expand @scratch arena args; NULL = no sites, (char*)-1 = error.
+ * One shared CC_ARENA_STACK(__cc_str_scratch, max N) per function/closure. */
 static char* cc__expand_string_scratch(const char* src, size_t n, const char* input_path) {
     CCStrScratchSite sites[CC_STR_SCRATCH_MAX_SITES];
     CCStrScratchSite by_brace[CC_STR_SCRATCH_MAX_SITES];
@@ -1803,15 +1901,17 @@ static char* cc__expand_string_scratch(const char* src, size_t n, const char* in
             pos = next;
         }
         if (next == next_inj) {
-            while (bi < n_sites && by_brace[bi].brace + 1 == next) {
-                cc__sb_append_fmt_local(&out, &out_len, &out_cap,
-                                        " CC_ARENA_STACK(__cc_str_scratch_%d, %zu); ",
-                                        by_brace[bi].id, by_brace[bi].nbytes);
+            size_t nbytes = by_brace[bi].nbytes;
+            size_t brace = by_brace[bi].brace;
+            while (bi < n_sites && by_brace[bi].brace == brace) {
+                if (by_brace[bi].nbytes > nbytes) nbytes = by_brace[bi].nbytes;
                 bi++;
             }
-        } else {
             cc__sb_append_fmt_local(&out, &out_len, &out_cap,
-                                    "&__cc_str_scratch_%d", by_arg[ai].id);
+                                    " CC_ARENA_STACK(__cc_str_scratch, %zu); ",
+                                    nbytes);
+        } else {
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "&__cc_str_scratch");
             pos = by_arg[ai].arg_e;
             ai++;
         }

@@ -64,9 +64,35 @@ def norm(text: str, *, shadow: bool) -> str:
             if not blank:
                 flat.append("")
             blank = True
-        else:
-            flat.append(s)
-            blank = False
+            continue
+        # Glue `if (cond)\n[{]\n stmt;` (shadow may split for #line safety).
+        t = s.strip()
+        if flat and flat[-1].lstrip().startswith("if (") and not flat[-1].rstrip().endswith(";"):
+            if t == "{":
+                flat[-1] = flat[-1].rstrip() + " {"
+                blank = False
+                continue
+            if not t.startswith("if ") and t != "}":
+                flat[-1] = flat[-1].rstrip() + " " + t
+                blank = False
+                continue
+        flat.append(s)
+        blank = False
+    # Collapse `if (…) { return …; }` onto one line when body is a single return.
+    joined = []
+    i = 0
+    while i < len(flat):
+        s = flat[i]
+        if (s.lstrip().startswith("if (") and s.rstrip().endswith("{")
+                and i + 2 < len(flat)
+                and flat[i + 1].lstrip().startswith("return ")
+                and flat[i + 2].strip() == "}"):
+            joined.append(s.rstrip() + " " + flat[i + 1].strip() + " }")
+            i += 3
+            continue
+        joined.append(s)
+        i += 1
+    flat = joined
     while flat and not flat[0].strip():
         flat.pop(0)
     while flat and not flat[-1].strip():

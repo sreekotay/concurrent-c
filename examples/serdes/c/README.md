@@ -21,13 +21,16 @@ A Concurrent-C program that:
 
 ```text
 .ccs / .cch bytes
-    → stage 1  PpTok collect → FileTape (cached by path)
-    → stage 2  splice / macros / guards / <…> passthrough
-    → whitelist AST (pp_ast) + typedef oracle
+    → stage 1  tape (toks + comment spans)
+    → stage 2  stitch (include / object-like #define / guards)  ← upfront, closed
+    → whitelist AST (emit + diags + safety — not a compiler IR)
          ├─ shadow_emit_c → .c  → host cc + concurrent_c.o  → run
          └─ shadow_emit_h → .h  → host cc -c
-    comptime (later): minimal TCC, not the lowerer
+    comptime: minimal TCC on product / factory path, not the lowerer
 ```
+
+The AST is for **clean emission**, **errors** (`path:line:col` on user source),
+and **safety analysis** — not compilation. Host `cc` compiles the emitted C.
 
 Same front for both products; H adds `#pragma once` and rejects function bodies.
 
@@ -44,46 +47,21 @@ Same front for both products; H adds `#pragma once` and rejects function bodies.
 | `c_pp_spike.cch` | Umbrella for tools/smokes |
 | `shadow_lower.{ccs,sh}` | Explicit CLI (does **not** replace `ccc`) |
 | `fixtures/` | Architecture falsifiers (mid-struct include, guards, …) |
-| `shadow/` | Goldens: mini, includes, `result_frag`, `hello`, recipe beachheads, `cc_exec.h` |
+| `shadow/` | Goldens: mini, includes, frags, `hello`, trimmed recipe smoke twins, `cc_exec.h` |
 
 ## Beachhead
 
+Behavioral recipes gate on real `examples/recipe_*.ccs` via
+`scripts/test_serdes_shadow.sh` — not shadow twins.
+
+Smoke goldens keep a trimmed twin set only:
 `shadow/hello.ccs` ↔ `examples/hello.ccs`.
 `shadow/recipe_result.ccs` ↔ `examples/recipe_result_error_handling.ccs`
 (`T!>(E)`, `!>` / `?>`, `@string` / `@scratch`, block `@errhandler`).
-`shadow/recipe_defer.ccs` ↔ `examples/recipe_defer_cleanup.ccs`
-(`void!>(E)`, `@defer` / `(ok)` / `(err)`, stmt unwrap, `cc_is_err`).
-`shadow/recipe_unwrap.ccs` ↔ `examples/recipe_unwrap_destroy_forms.ccs`
-(`Type*` unwrap, `@destroy` / bare, chan `>`/`<`, static helpers).
-`shadow/recipe_arena.ccs` ↔ `examples/recipe_arena_scope.ccs`
-(value `@destroy`, `for`, arena UFCS: remaining/checkpoint/allocT/restore).
-`shadow/recipe_capture.ccs` ↔ `examples/recipe_explicit_capture.ccs`
-(bare blocks, block-scoped nursery `@destroy`, value/ref spawn captures).
-`shadow/recipe_pipeline.ccs` ↔ `examples/recipe_channel_pipeline.ccs`
-(`while`, chan send/recv, `close_on`, atomics, nested nurseries).
-`shadow/recipe_timeout.ccs` ↔ `examples/recipe_timeout.ccs`
-(`@with_deadline` / `as`, `while`, `name++`).
-`shadow/recipe_worker.ccs` ↔ `examples/recipe_worker_pool.ccs`
-(nested nurseries, chan close, capture types).
-`shadow/recipe_ufcs.ccs` ↔ `examples/recipe_ufcs_forms.ccs`
-(UFCS rewrite, `!>.meth()`, chains, typed slices beachhead).
-`shadow/recipe_async.ccs` ↔ `examples/recipe_async_await.ccs`
-(`@async` as sync fn beachhead; `@await` stripped to blocking channel ops).
-`shadow/recipe_exclusive.ccs` ↔ `examples/recipe_exclusive_named.ccs`
-(anonymous typedef, statics, `@create`, exclusive UFCS).
-`shadow/recipe_long_lived.ccs` ↔ `examples/recipe_long_lived_store.ccs`
-(`Map::[K,V]`, result helpers, store UFCS / `!>(e){…}`).
-`shadow/recipe_fanout_capture.ccs` ↔ `examples/recipe_fanout_capture.ccs`
-(fan-out spawn, per-task capture semantics).
-`shadow/recipe_http_get.ccs` ↔ `examples/recipe_http_get.ccs`
-(`@link`, global array init, `char buf[N]`, template `@string`/`@scratch`).
-`shadow/recipe_tcp_echo.ccs` ↔ `examples/recipe_tcp_echo.ccs`
-(`@grammar` skip, `do-while`, `break`/`continue`, expression-body spawn).
 `shadow/recipe_ordered_parallel.ccs` ↔ `examples/recipe_ordered_parallel.ccs`
 (`ordered` channels, `send_task` UFCS, `eprintln`).
-`shadow/recipe_generics.ccs` — **shadow twin** of `examples/recipe_user_generics.ccs`
-(`CC_GENERIC_FACTORY`/`@emit` is compile-time; twin shows post-instantiation
-`Pair_int_double`/`Pair_int_int` surface).
+`shadow/recipe_generics.ccs` ↔ `examples/recipe_user_generics.ccs`
+(`CC_GENERIC_FACTORY` + `@emit(`…`)` instantiation).
 `shadow/error_face_frag.cch` — trimmed `CCError` face from `cc_result`
 (`CCErrorKind`, brace init, `static inline const char*`, long `switch` bodies).
 `shadow/io_error_frag.cch` — trimmed `CCIoError` on that face (`#include`
@@ -123,15 +101,12 @@ err sites) map host diagnostics back to the original `.ccs`/`.cch`. Host
 Experiment smokes stay out of the default driver path:
 
 ```bash
+bash scripts/test_serdes.sh          # full parallel-path gate (preferred)
+# or piecemeal:
 ./out/cc/bin/ccc run --no-cache tests/c_pp_stage_spike_smoke.ccs
 ./out/cc/bin/ccc run --no-cache tests/c_pp_shadow_emit_smoke.ccs
+bash scripts/test_serdes_shadow.sh   # stdlib diffs + recipes + seam only
 bash examples/serdes/c/shadow/diff_lower_header.sh
-bash examples/serdes/c/shadow/diff_stdlib_exec.sh
-bash examples/serdes/c/shadow/diff_stdlib_async_runtime.sh
-bash examples/serdes/c/shadow/diff_stdlib_nursery.sh
-bash examples/serdes/c/shadow/diff_stdlib_chan_handle.sh
-bash examples/serdes/c/shadow/diff_stdlib_io_error.sh
-bash examples/serdes/c/shadow/run_recipes_shadow.sh
 ```
 
 Compiler harvest (production, independent of this tree):
@@ -179,20 +154,40 @@ on the normalized C surface and host `cc -c` consumes the product:
 - `cc/include/ccc/cc_io_error.cch` → `diff_stdlib_io_error.sh`
   (`#define` passthrough, `_Generic` macro, `CC_DECL_RESULT_SPEC` raw line,
   `#if defined` inside `switch` via body span; host-cc unwrap helpers on `.c`)
+- `cc_result` CCError face → `diff_stdlib_result_face.sh`
+  (`error_face_frag.cch` through `cc_error_exit`; full `cc_result.cch`
+  still hits Result-macro / cpp wall)
 
 **Behavioral (`.ccs` product):** `run_recipes_shadow.sh` — shadow-lower
-`hello` + result / arena / capture / timeout recipes, host-`cc` + link
-`concurrent_c.o`, assert output. (`run_hello_shadow.sh` remains a minimal
-subset.)
+≥10 beachhead recipes (hello, result, arena, capture, timeout, defer,
+unwrap, pipeline, worker, fanout, exclusive, async, ufcs), host-`cc` +
+link `concurrent_c.o`, assert output. (`run_hello_shadow.sh` remains a
+minimal subset.)
+
+**Hosting seam:** tracked driver is `cc/scripts/shadow_lower.sh` (installed
+to `cc/bin/shadow_lower` / `out/cc/bin/shadow_lower` by the Makefile).
+`ccc --shadow-lower` / `ccc --shadow-run` are optional opt-in entry
+points. Default `ccc` pipeline is unchanged. `run_via_seam.sh` exercises
+shadow_lower → host `cc` + `concurrent_c.o`.
 
 Production lower of these headers is near-passthrough; shadow keeps the
 same API with `#pragma once` + `#line` instead of the `#ifndef` guard dance.
 
-Larger stdlib headers (`cc_result`, `cc_arena`, …) still hit coverage / cpp
-walls. Trimmed frags cover enum + `@as` + `switch` + `const T*` returns;
+Larger stdlib headers (`cc_arena`, full `cc_result`, …) still hit coverage /
+cpp walls. Trimmed frags cover enum + `@as` + `switch` + `const T*` returns;
 grow the whitelist only when the next header is a clean beachhead, not a
 general C parser. Keep pushing this parallel path; do not force a merge
 into the TCC-heavy driver until the transform boundary is boring.
+
+## How to test
+
+| command | what |
+|---------|------|
+| `./scripts/test.sh` | Production `ccc` only — does **not** run the shadow lowerer |
+| `./scripts/test_serdes.sh` | SERDES parallel path: stage/emit smokes + stdlib hard-go + recipes |
+
+`c_pp_*` smokes under `tests/` are skipped by default `cc_test` unless
+`CC_TEST_SERDES=1` or `--filter c_pp_`.
 
 ## Working rules
 
@@ -202,13 +197,47 @@ into the TCC-heavy driver until the transform boundary is boring.
 - Nested stmt lists stay on `AstNode.body[]` (do not append into
   `kids_storage` while a parent list is still open)
 
+## Direction (real shape — zero text mangling)
+
+Target:
+
+```text
+bytes → stage1 tape (toks + comment spans)
+     → stage2 stitch (include / #define / guards)   ← upfront, closed
+     → whitelist AST (types + Call + sticky trivia + type map)
+     → emit C once (#line / err_at → original .ccs/.cch)
+     → host cc / comptime consume product C
+```
+
+- **Stitch early.** Macros/defines/includes before AST; never re-expand in emit.
+- **Trivia sticky.** Lead comments/`#line` from `tok_off`/`file_id` attached at
+  parse; emit only prints — no comment recovery after string rewrite.
+- **Zero post-parse mangling on the CC surface.** Structured types +
+  `AST_UFCS_*` (table emit via `shadow_ufcs_lower_parts`); Map/Vec/`char[:]`,
+  `@await`/`@create` spelled at parse; channel_pair / return `!>` / cond
+  shapes handled at emit sites. No `shadow_lower_expr_beachhead` pipeline.
+  Leftover text UFCS (e.g. nested args, `@string` slots) still uses
+  `shadow_ufcs_apply` until those sites grow kids — not a second IR soup.
+- **Opaque C ≠ mangling.** Already-C blobs (switch cases, enum lists,
+  `AST_RAW_LINE`, unparsed static-fn bodies) pass through as text. That is
+  product policy, not CC sugar rewrite. `SHADOW_RAW_BODY_REWRITE` defaults
+  **off** (opaque copy); set to `1` only for an explicit legacy fallback.
+  `scripts/test_serdes.sh` asserts the default stays `0` and the beachhead
+  symbol is gone.
+- AST grows only for emit, diags, and safety — not a general C compiler IR.
+  File splits of `pp_ast` / `pp_emit` are optional readability follow-ups
+  once rewrite debt stays dead — not a substitute for deleting mangling.
+- Recipe twins deleted except smoke goldens; recipes behavioral via
+  `scripts/test_serdes_shadow.sh`. Do not weaken stdlib hard-go or comptime.
+
 ## Explicit tool
 
 ```bash
-./examples/serdes/c/shadow_lower.sh examples/serdes/c/shadow/result_frag.cch -o /tmp/x.h
-./examples/serdes/c/shadow_lower.sh examples/serdes/c/shadow/io_error_frag.cch -o /tmp/io_error.h
-./examples/serdes/c/shadow_lower.sh examples/serdes/c/shadow/error_face_frag.cch -o /tmp/error_face.h
-./out/cc/bin/ccc run --no-cache examples/serdes/c/shadow_lower.ccs -- path.cch -o out.h
+./out/cc/bin/shadow_lower examples/serdes/c/shadow/result_frag.cch -o /tmp/x.h
+./out/cc/bin/shadow_lower examples/serdes/c/shadow/io_error_frag.cch -o /tmp/io_error.h
+./out/cc/bin/shadow_lower examples/serdes/c/shadow/error_face_frag.cch -o /tmp/error_face.h
+./out/cc/bin/ccc --shadow-lower path.cch -o out.h
+bash examples/serdes/c/shadow/run_via_seam.sh examples/hello.ccs
 ```
 
 **P-pass “walk tape instead of rescan”:** frozen — no production scanner is

@@ -262,6 +262,13 @@ static int default_job_count(void) {
     return (int)n;
 }
 
+/* Parallel SERDES shadow lowerer (examples/serdes/c). Default harness skips
+ * these — run scripts/test_serdes.sh (or CC_TEST_SERDES=1 / --filter c_pp_). */
+static int test_is_serdes(const char* stem) {
+    if (!stem) return 0;
+    return strncmp(stem, "c_pp_", 5) == 0;
+}
+
 /* Stress / lost-wake / race matrix tests: useful overnight, expensive in the
  * local edit loop.  Skipped by default (--quick); include with --full. */
 static int test_is_heavy(const char* stem, const char* path) {
@@ -474,6 +481,8 @@ static int get_run_timeout_for_test(const char* stem, int default_timeout_sec) {
     if (strcmp(stem, "redis_phase2_lowering_shape_smoke") == 0) return 30;
     /* Many nested ccc -e/-E subprocesses; ~9s alone, flaky at default 10s. */
     if (strcmp(stem, "script_oneliner_smoke") == 0) return 30;
+    /* Compact goldens + hostcc + one header beachhead; keep near default. */
+    if (strcmp(stem, "c_pp_shadow_emit_smoke") == 0) return 20;
     return default_timeout_sec;
 }
 
@@ -889,6 +898,7 @@ static void usage(const char* prog) {
     fprintf(stderr, "  %s [--list] [--filter SUBSTR] [--quick|--full] [--verbose] [--jobs N] [--build-timeout SECONDS] [--run-timeout SECONDS] [--use-cache|--no-cache] [--clean]\n", prog);
     fprintf(stderr, "  --quick  skip stress/lostwake/race tests (default)\n");
     fprintf(stderr, "  --full   include stress/lostwake/race tests (also CC_TEST_FULL=1)\n");
+    fprintf(stderr, "  c_pp_*   SERDES smokes skipped unless CC_TEST_SERDES=1 or --filter c_pp_\n");
 }
 
 int main(int argc, char** argv) {
@@ -1081,6 +1091,15 @@ int main(int argc, char** argv) {
         }
 
         if (filter && !str_contains(stem, filter) && !str_contains(path, filter)) continue;
+        /* Default suite = production ccc. SERDES c_pp_* only with opt-in or filter. */
+        {
+            const char* serdes = getenv("CC_TEST_SERDES");
+            int want_serdes = (serdes && strcmp(serdes, "1") == 0) || filter != NULL;
+            if (test_is_serdes(stem) && !want_serdes) {
+                if (verbose) fprintf(stderr, "[SKIP] %s (serdes: scripts/test_serdes.sh)\n", stem);
+                continue;
+            }
+        }
         if (quick && test_is_heavy(stem, path)) {
             if (verbose) fprintf(stderr, "[SKIP] %s (quick: stress/race)\n", stem);
             continue;

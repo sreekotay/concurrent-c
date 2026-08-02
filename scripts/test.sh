@@ -114,6 +114,7 @@ if [ -x "./cc/bin/ccc" ]; then
     echo "[test] autoblock noblock warning selftest FAILED"
     exit 1
   fi
+  # SERDES parallel lowerer is NOT part of this gate — use scripts/test_serdes.sh.
 
   if [ "$quick" = 0 ]; then
     # @async state-machine #line accuracy on the real redis port: async poll

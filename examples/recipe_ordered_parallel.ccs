@@ -24,7 +24,7 @@
 #define CHAN_CAP  4
 
 /* Simulate variable-time work: odd ids take longer.
- * Temp prints use @scratch (per-site stack arena). */
+ * Temp prints use @scratch (shared fn/closure stack arena). */
 static int process_item(int id) {
     @errhandler(CCError e) cc_error_exit(e);
     int delay_us = (id % 2 == 1) ? 50000 : 10000;

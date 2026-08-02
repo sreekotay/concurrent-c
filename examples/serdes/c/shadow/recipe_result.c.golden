@@ -42,11 +42,14 @@
 #line 31 "examples/serdes/c/shadow/recipe_result.ccs"
 CCResult_int_CCError read_config_value(const char* key) {
     #line 32 "examples/serdes/c/shadow/recipe_result.ccs"
-    if (!key || key[0] == '\0') return cc_err_CCResult_int_CCError(CC_ERROR(CC_ERR_INVALID_ARG, "empty key"));
+    if (!key || key[0] == '\0')
+    return cc_err_CCResult_int_CCError(CC_ERROR(CC_ERR_INVALID_ARG, "empty key"));
     #line 33 "examples/serdes/c/shadow/recipe_result.ccs"
-    if (strcmp(key, "timeout") == 0) return cc_ok_CCResult_int_CCError(30);
+    if (strcmp(key, "timeout") == 0)
+    return cc_ok_CCResult_int_CCError(30);
     #line 34 "examples/serdes/c/shadow/recipe_result.ccs"
-    if (strcmp(key, "max_retries") == 0) return cc_ok_CCResult_int_CCError(3);
+    if (strcmp(key, "max_retries") == 0)
+    return cc_ok_CCResult_int_CCError(3);
     #line 35 "examples/serdes/c/shadow/recipe_result.ccs"
     return cc_err_CCResult_int_CCError(CC_ERROR(CC_ERR_NOT_FOUND, "key not found"));
 }
@@ -60,23 +63,23 @@ CCResult_int_CCError get_total_wait_time(void) {
     int timeout;
     {
         __typeof__(read_config_value("timeout")) __r = read_config_value("timeout");
-        if (__cc_uw_is_err(__r)) {
+        if (!__r.ok) {
+            __typeof__(__r.u.error) e = __r.u.error;
             #line 41 "examples/serdes/c/shadow/recipe_result.ccs"
-            CCError e = __cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_result.ccs", "41");
     return cc_err_CCResult_int_CCError(e);
         }
-        timeout = __cc_uw_value(__r);
+        timeout = __r.u.value;
     }
     #line 42 "examples/serdes/c/shadow/recipe_result.ccs"
     int retries;
     {
         __typeof__(read_config_value("max_retries")) __r = read_config_value("max_retries");
-        if (__cc_uw_is_err(__r)) {
+        if (!__r.ok) {
+            __typeof__(__r.u.error) e = __r.u.error;
             #line 42 "examples/serdes/c/shadow/recipe_result.ccs"
-            CCError e = __cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_result.ccs", "42");
     return cc_err_CCResult_int_CCError(e);
         }
-        retries = __cc_uw_value(__r);
+        retries = __r.u.value;
     }
     #line 43 "examples/serdes/c/shadow/recipe_result.ccs"
     return cc_ok_CCResult_int_CCError(timeout * retries);
@@ -85,11 +88,7 @@ CCResult_int_CCError get_total_wait_time(void) {
 
 #line 46 "examples/serdes/c/shadow/recipe_result.ccs"
 int main(void) {
-    CC_ARENA_STACK(__cc_str_scratch_0, 1024);
-    CC_ARENA_STACK(__cc_str_scratch_1, 1024);
-    CC_ARENA_STACK(__cc_str_scratch_2, 1024);
-    CC_ARENA_STACK(__cc_str_scratch_3, 1024);
-    CC_ARENA_STACK(__cc_str_scratch_4, 1024);
+    CC_ARENA_STACK(__cc_str_scratch, 1024);
 
     /* (1) !>; — forwards to @errhandler if the composition fails. */
     #line 51 "examples/serdes/c/shadow/recipe_result.ccs"
@@ -108,9 +107,9 @@ int main(void) {
     #line 52 "examples/serdes/c/shadow/recipe_result.ccs"
     {
         CCString __msg = cc_string_new();
-        cc_string_push_buffer(&__msg, "total wait time: ", 17, &__cc_str_scratch_0);
-        cc_string_push_int(&__msg, (int)(total), &__cc_str_scratch_0);
-        cc_string_push_buffer(&__msg, " seconds", 8, &__cc_str_scratch_0);
+        cc_string_push_buffer(&__msg, "total wait time: ", 17, &__cc_str_scratch);
+        cc__string_slot_push(&__msg, (total), &__cc_str_scratch);
+        cc_string_push_buffer(&__msg, " seconds", 8, &__cc_str_scratch);
         {
             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
             if (__cc_uw_is_err(__r)) {
@@ -133,8 +132,8 @@ int main(void) {
     #line 56 "examples/serdes/c/shadow/recipe_result.ccs"
     {
         CCString __msg = cc_string_new();
-        cc_string_push_buffer(&__msg, "missing key fell back to: ", 26, &__cc_str_scratch_1);
-        cc_string_push_int(&__msg, (int)(missing), &__cc_str_scratch_1);
+        cc_string_push_buffer(&__msg, "missing key fell back to: ", 26, &__cc_str_scratch);
+        cc__string_slot_push(&__msg, (missing), &__cc_str_scratch);
         {
             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
             if (__cc_uw_is_err(__r)) {
@@ -163,8 +162,8 @@ int main(void) {
     #line 60 "examples/serdes/c/shadow/recipe_result.ccs"
     {
         CCString __msg = cc_string_new();
-        cc_string_push_buffer(&__msg, "invalid key mapped to: ", 23, &__cc_str_scratch_2);
-        cc_string_push_int(&__msg, (int)(bad), &__cc_str_scratch_2);
+        cc_string_push_buffer(&__msg, "invalid key mapped to: ", 23, &__cc_str_scratch);
+        cc__string_slot_push(&__msg, (bad), &__cc_str_scratch);
         {
             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
             if (__cc_uw_is_err(__r)) {
@@ -183,14 +182,14 @@ int main(void) {
     int shown;
     {
         __typeof__(read_config_value("timeout")) __r = read_config_value("timeout");
-        if (__cc_uw_is_err(__r)) {
+        if (!__r.ok) {
+            __typeof__(__r.u.error) e = __r.u.error;
             #line 64 "examples/serdes/c/shadow/recipe_result.ccs"
-            CCError e = __cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_result.ccs", "64");
         #line 65 "examples/serdes/c/shadow/recipe_result.ccs"
         {
             CCString __msg = cc_string_new();
-            cc_string_push_buffer(&__msg, "compose local: ", 15, &__cc_str_scratch_3);
-            cc_string_push(&__msg, (e.message), &__cc_str_scratch_3);
+            cc_string_push_buffer(&__msg, "compose local: ", 15, &__cc_str_scratch);
+            cc__string_slot_push(&__msg, (e.message), &__cc_str_scratch);
             {
                 __typeof__(cc_println(__msg)) __r = cc_println(__msg);
                 if (__cc_uw_is_err(__r)) {
@@ -207,13 +206,13 @@ int main(void) {
         cc_error_log(e);
         return 1;
         }
-        shown = __cc_uw_value(__r);
+        shown = __r.u.value;
     }
     #line 68 "examples/serdes/c/shadow/recipe_result.ccs"
     {
         CCString __msg = cc_string_new();
-        cc_string_push_buffer(&__msg, "compose ok: timeout=", 20, &__cc_str_scratch_4);
-        cc_string_push_int(&__msg, (int)(shown), &__cc_str_scratch_4);
+        cc_string_push_buffer(&__msg, "compose ok: timeout=", 20, &__cc_str_scratch);
+        cc__string_slot_push(&__msg, (shown), &__cc_str_scratch);
         {
             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
             if (__cc_uw_is_err(__r)) {

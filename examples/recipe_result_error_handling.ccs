@@ -19,7 +19,7 @@
  * — then use bare !>; at every call site. Compose with
  * `!>(e) { local; @err(e); }` when you want work before the default.
  *
- * Temp prints: `@string(`...`, @scratch)` injects a per-site stack arena
+ * Temp prints: `@string(`...`, @scratch)` injects a shared fn/closure stack arena
  * (no hand-rolled CCArena). Next: recipe_unwrap_destroy_forms.ccs;
  * recipe_ufcs_forms.ccs covers method dispatch including fallible chains.
  */

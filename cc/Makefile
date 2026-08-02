@@ -124,6 +124,9 @@ REAL_BINARY := bin/.ccc-bin
 CCC_SCRIPT  := bin/ccc
 CCC_WRAPPER_TEMPLATE := scripts/ccc_wrapper.sh
 WRAPPER := $(OUT_BINDIR)/ccc
+SHADOW_LOWER_TEMPLATE := scripts/shadow_lower.sh
+SHADOW_LOWER_SCRIPT := bin/shadow_lower
+SHADOW_LOWER_WRAPPER := $(OUT_BINDIR)/shadow_lower
 
 LOWER_HEADERS_SRCS := src/tools/lower_headers.c \
 	src/header/lower_header.c \
@@ -174,7 +177,7 @@ OUT_INCLUDE := ../out/include
 OUT_RUNTIME := ../out/runtime
 LOWER_HEADERS_STAMP := $(OUT_INCLUDE)/.headers_lowered.stamp
 
-all: $(CCC_SCRIPT) $(WRAPPER) $(LOWER_HEADERS_STAMP)
+all: $(CCC_SCRIPT) $(WRAPPER) $(SHADOW_LOWER_WRAPPER) $(LOWER_HEADERS_STAMP)
 
 # Patched-TCC guard: a fresh clone (or a changed patch set) gets the CC
 # hooks applied into the submodule working tree BEFORE any CC object that
@@ -288,6 +291,17 @@ $(WRAPPER): $(CCC_SCRIPT)
 	@printf '%s\n' 'set -e' >> $@
 	@printf '%s\n' 'SELF_DIR="$$(cd "$$(dirname "$$0")" && pwd)"' >> $@
 	@printf '%s\n' 'exec "$$SELF_DIR/../../../cc/bin/ccc" "$$@"' >> $@
+	@chmod +x $@
+
+# First-class shadow lowerer beside ccc (parallel path; does not replace lower_header).
+$(SHADOW_LOWER_SCRIPT): $(SHADOW_LOWER_TEMPLATE)
+	@mkdir -p $(dir $@)
+	@cp $(SHADOW_LOWER_TEMPLATE) $@
+	@chmod +x $@
+
+$(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_SCRIPT) $(WRAPPER)
+	@mkdir -p $(dir $@)
+	@cp $(SHADOW_LOWER_SCRIPT) $@
 	@chmod +x $@
 
 $(LOWER_HEADERS_BINARY): $(LOWER_HEADERS_OBJS) $(TCC_LIB_DEP)

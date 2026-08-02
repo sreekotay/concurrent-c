@@ -1,4 +1,4 @@
-/* Beachhead: CCError face from cc_result (no Result macros / no cc_error_log). */
+/* Beachhead: CCError face from cc_result (through cc_error_exit; no Result macros). */
 #pragma once
 
 typedef enum {
@@ -31,6 +31,7 @@ static inline CCError __cc_error_make(CCErrorKind kind, const char* msg) {
     CCError e = { kind, msg };
     return e;
 }
+#define CC_ERROR(kind, msg) __cc_error_make((kind), (msg))
 
 static inline const char* cc_error_kind_str(CCErrorKind kind) {
     switch (kind) {
@@ -58,4 +59,16 @@ static inline const char* cc_error_kind_str(CCErrorKind kind) {
 static inline const char* cc_error_str(CCError e) {
     if (e.message && e.message[0]) return e.message;
     return cc_error_kind_str(e.kind);
+}
+
+#include <stdio.h>
+#include <stdlib.h>
+
+static inline void cc_error_log(CCError e) {
+    if (fprintf(stderr, "fatal: %s\n", cc_error_str(e)) < 0) abort();
+}
+
+static inline void cc_error_exit(CCError e) {
+    cc_error_log(e);
+    exit(1);
 }
