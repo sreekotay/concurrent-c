@@ -41,11 +41,18 @@ Same front for both products; H adds `#pragma once` and rejects function bodies.
 | `pp_tok.rules` | Stage‑1 grammar (C pp-tokens + CC `=>` `!>` `@`) |
 | `pp_tape.cch` | Stage‑1 tape cache + `file:line` diags |
 | `pp_stage2.cch` | Stage‑2 cpp subset + `pp_dir` static_map |
-| `pp_ast.cch` | Whitelist AST + parser |
-| `pp_emit.cch` | AST → C/H text |
+| `pp_ast.cch` | AST umbrella → core + parse |
+| `pp_ast_core.cch` | Keywords, AstNode, Parser, spell helpers |
+| `pp_ast_parse_stmt.cch` | Statement / expr parsers |
+| `pp_ast_parse_ext.cch` | External / TU parsers + `parse_tu` |
+| `pp_emit.cch` | Emit umbrella → core + ufcs + stmt |
+| `pp_emit_core.cch` | CEmit, bind/chan tables, `#line` / lead |
+| `pp_emit_ufcs.cch` | `lower_parts` + leftover peel (not a pipeline) |
+| `pp_emit_stmt.cch` | Stmt switch + TU product |
 | `pp_lower.cch` | Thin include of ast + emit |
 | `c_pp_spike.cch` | Umbrella for tools/smokes |
-| `shadow_lower.{ccs,sh}` | Explicit CLI (does **not** replace `ccc`) |
+| `shadow_lower.ccs` | Explicit CLI (does **not** replace `ccc`) |
+| `shadow_tcc_compile.{c,h}` | Emit buffer → libtcc `--exe` (no .c on disk) |
 | `fixtures/` | Architecture falsifiers (mid-struct include, guards, …) |
 | `shadow/` | Goldens: mini, includes, frags, `hello`, trimmed recipe smoke twins, `cc_exec.h` |
 
@@ -222,11 +229,11 @@ bytes → stage1 tape (toks + comment spans)
   `AST_RAW_LINE`, unparsed static-fn bodies) pass through as text. That is
   product policy, not CC sugar rewrite. `SHADOW_RAW_BODY_REWRITE` defaults
   **off** (opaque copy); set to `1` only for an explicit legacy fallback.
-  `scripts/test_serdes.sh` asserts the default stays `0` and the beachhead
-  symbol is gone.
+  `scripts/test_serdes.sh` asserts the default stays `0` and deleted mangling
+  helpers stay gone.
 - AST grows only for emit, diags, and safety — not a general C compiler IR.
-  File splits of `pp_ast` / `pp_emit` are optional readability follow-ups
-  once rewrite debt stays dead — not a substitute for deleting mangling.
+  `pp_ast*` / `pp_emit*` are split by concern for readability; umbrellas keep
+  include order for tools.
 - Recipe twins deleted except smoke goldens; recipes behavioral via
   `scripts/test_serdes_shadow.sh`. Do not weaken stdlib hard-go or comptime.
 

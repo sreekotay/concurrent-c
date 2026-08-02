@@ -1,0 +1,606 @@
+/* Shadow emit core: CEmit, bind/chan/generic tables, #line / lead trivia.
+ * Included by pp_emit.cch before ufcs + stmt. Requires pp_ast.cch. */
+#pragma once
+
+/* ---- shadow emit: AST → C source (product for TCC / host cc) ------------ */
+
+typedef struct {
+    char* buf;
+    size_t len;
+    size_t cap;
+    int err;
+} CEmit;
+
+static int cemit_reserve(CEmit* e, size_t need) {
+    if (e->len + need + 1 <= e->cap) return 1;
+    size_t ncap = e->cap ? e->cap * 2 : 4096;
+    while (ncap < e->len + need + 1) ncap *= 2;
+    char* nbuf = (char*)realloc(e->buf, ncap);
+    if (!nbuf) { e->err = 1; return 0; }
+    e->buf = nbuf;
+    e->cap = ncap;
+    return 1;
+}
+
+static int cemit_str(CEmit* e, const char* s) {
+    size_t n = strlen(s);
+    if (!cemit_reserve(e, n)) return 0;
+    memcpy(e->buf + e->len, s, n);
+    e->len += n;
+    e->buf[e->len] = 0;
+    return 1;
+}
+
+static int cemit_fmt(CEmit* e, const char* fmt, ...) {
+    char tmp[512];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
+    va_end(ap);
+    if (n < 0 || n >= (int)sizeof(tmp)) { e->err = 1; return 0; }
+    return cemit_str(e, tmp);
+}
+
+typedef enum { SHADOW_EMIT_C = 0, SHADOW_EMIT_H = 1 } ShadowEmitKind;
+
+/* Mirror of cc_result_spec_mangle_type (result_spec.c) — keep in sync for goldens. */
+static void shadow_mangle_type(const char* src, char* out, size_t out_sz) {
+    size_t len = src ? strlen(src) : 0;
+    size_t i, j = 0;
+    if (!src || len == 0 || !out || out_sz == 0) {
+        if (out && out_sz) out[0] = 0;
+        return;
+    }
+    while (len && (*src == ' ' || *src == '\t')) { src++; len--; }
+    while (len && (src[len - 1] == ' ' || src[len - 1] == '\t')) len--;
+    for (i = 0; i < len && j < out_sz - 1; i++) {
+        char c = src[i];
+        if (c == ' ' || c == '\t') {
+            if (j > 0 && out[j - 1] != '_') out[j++] = '_';
+        } else if (c == '*') {
+            if (j + 3 < out_sz - 1) { out[j++] = 'p'; out[j++] = 't'; out[j++] = 'r'; }
+        } else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                   (c >= '0' && c <= '9') || c == '_') {
+            out[j++] = c;
+        } else {
+            if (j > 0 && out[j - 1] != '_') out[j++] = '_';
+        }
+    }
+    while (j > 0 && out[j - 1] == '_') j--;
+    out[j] = 0;
+    if (strcmp(out, "_Bool") == 0) snprintf(out, out_sz, "bool");
+}
+
+static void shadow_result_name(const char* ok, const char* err, char* out, size_t out_sz) {
+    char mok[128], merr[128];
+    shadow_mangle_type(ok, mok, sizeof(mok));
+    shadow_mangle_type(err, merr, sizeof(merr));
+    snprintf(out, out_sz, "CCResult_%s_%s", mok, merr);
+}
+
+/* Rewrite #include <… .cch> → #include <… .h> for host/TCC consumption. */
+static void shadow_rewrite_pass_inc(char* dst, size_t cap, const char* src) {
+    size_t n = src ? strlen(src) : 0;
+    /* "...foo.cch>" → "...foo.h>" */
+    if (n >= 5 && src[n - 5] == '.' && src[n - 4] == 'c' && src[n - 3] == 'c' &&
+        src[n - 2] == 'h' && src[n - 1] == '>') {
+        snprintf(dst, cap, "%.*s.h>", (int)(n - 5), src);
+        return;
+    }
+    snprintf(dst, cap, "%s", src ? src : "");
+}
+
+/* Channel decls for emit-site cc_channel_pair → create_named. */
+typedef struct {
+    char name[64];
+    char cap[64];
+    int ordered;
+} ShadowChanDecl;
+
+enum { SHADOW_CHAN_CAP = 64 };
+
+typedef struct {
+    AstNode* eh;          /* @errhandler node (call or block) */
+    const char* rname;    /* enclosing CCResult_* name, or NULL */
+    const char* body_indent; /* fn/closure body indent from source */
+    int* deadline_i;      /* @with_deadline id counter */
+    int defer_cleanup;    /* result fn uses @defer → goto cleanup */
+    int goto_cleanup;     /* fn has @destroy/@defer → returns goto cleanup */
+    AstNode** defers;     /* borrowed defer nodes (reverse emit) */
+    int ndefers;
+    AstNode** destroys;   /* borrowed PTR_UNWRAP/NURSERY with @destroy */
+    int ndestroys;
+    TapeCache* cache;     /* for replaying source trivia */
+    /* Last `#line` emitted (dedupe consecutive identical markers). */
+    int line_file_id;
+    int line_no;
+    AstNode* site;        /* current source site for err_at / #line resync */
+    ShadowChanDecl* chans; /* TU-scoped channel handle table */
+    int* nchans;
+    int send_task_ret; /* closure packs int into cc_task_result_ptr */
+} ShadowCtx;
+
+/* Emit-wide channel table (filled while walking stmts / items). */
+static ShadowChanDecl g_shadow_chans[SHADOW_CHAN_CAP];
+static int g_shadow_nchans;
+/* Vec::[T] → emit CC_VEC_DECL_ARENA(T, CCVec_T) once per TU. */
+static char g_shadow_vecs[16][64];
+static int g_shadow_nvecs;
+/* Map::[K,V] — compact "K_V" → Map_K_V + hash/eq table. */
+static char g_shadow_maps[8][64];
+static int g_shadow_nmaps;
+
+/* User generic factories (CC_GENERIC_FACTORY). */
+typedef struct {
+    char family[64];
+    char tpl[2048];
+    int arity;
+} ShadowGenericFactory;
+typedef struct {
+    char family[64];
+    char mangled[96]; /* Family_arg0_arg1 */
+    char compact[96]; /* arg0_arg1 */
+} ShadowGenericInst;
+
+static ShadowGenericFactory g_shadow_gfac[4];
+static int g_shadow_ngfac;
+static ShadowGenericInst g_shadow_ginst[16];
+static int g_shadow_nginst;
+
+/* Name → type bindings (AST+type phase). Drives capture unpack / UFCS. */
+enum {
+    SHADOW_BIND_ARRAY = 1,
+    SHADOW_BIND_ATOMIC = 2
+};
+typedef struct {
+    char name[64];
+    char ty[128];
+    int flags;
+} ShadowBind;
+static ShadowBind g_shadow_binds[96];
+static int g_shadow_nbinds;
+
+static void shadow_chan_reset(void) {
+    g_shadow_nchans = 0;
+    g_shadow_nvecs = 0;
+    g_shadow_nmaps = 0;
+    g_shadow_ngfac = 0;
+    g_shadow_nginst = 0;
+    g_shadow_nbinds = 0;
+}
+
+static void shadow_bind_name(const char* name, const char* ty, int flags) {
+    int i;
+    if (!name || !name[0] || !ty || g_shadow_nbinds >= 96) return;
+    for (i = 0; i < g_shadow_nbinds; i++) {
+        if (strcmp(g_shadow_binds[i].name, name) == 0) {
+            snprintf(g_shadow_binds[i].ty, sizeof(g_shadow_binds[i].ty), "%s", ty);
+            g_shadow_binds[i].flags = flags;
+            return;
+        }
+    }
+    snprintf(g_shadow_binds[g_shadow_nbinds].name,
+             sizeof(g_shadow_binds[0].name), "%s", name);
+    snprintf(g_shadow_binds[g_shadow_nbinds].ty, sizeof(g_shadow_binds[0].ty),
+             "%s", ty);
+    g_shadow_binds[g_shadow_nbinds].flags = flags;
+    g_shadow_nbinds++;
+}
+
+static const ShadowBind* shadow_bind_lookup(const char* name) {
+    int i;
+    if (!name) return NULL;
+    for (i = 0; i < g_shadow_nbinds; i++) {
+        if (strcmp(g_shadow_binds[i].name, name) == 0)
+            return &g_shadow_binds[i];
+    }
+    return NULL;
+}
+
+/* Simple identifier at the start of a UFCS receiver (strip * &). */
+static const ShadowBind* shadow_bind_for_recv(const char* recv) {
+    char name[64];
+    const char* p = recv;
+    size_t ni = 0;
+    if (!p) return NULL;
+    while (*p == '*' || *p == '&' || *p == ' ' || *p == '\t' || *p == '(') p++;
+    while ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+           (*p >= '0' && *p <= '9') || *p == '_') {
+        if (ni + 1 >= sizeof(name)) break;
+        name[ni++] = *p++;
+    }
+    if (!ni) return NULL;
+    name[ni] = 0;
+    return shadow_bind_lookup(name);
+}
+
+static int shadow_bind_ty_has(const ShadowBind* b, const char* needle) {
+    return b && b->ty[0] && needle && strstr(b->ty, needle) != NULL;
+}
+
+/* Strip trailing * / spaces from a bound type into dst. */
+static void shadow_bind_base_ty(const ShadowBind* b, char* dst, size_t cap) {
+    size_t n;
+    if (!dst || !cap) return;
+    dst[0] = 0;
+    if (!b || !b->ty[0]) return;
+    snprintf(dst, cap, "%s", b->ty);
+    n = strlen(dst);
+    while (n > 0 && (dst[n - 1] == ' ' || dst[n - 1] == '*' || dst[n - 1] == '\t'))
+        dst[--n] = 0;
+}
+
+static void shadow_family_snake(const char* family, char* out, size_t cap) {
+    size_t i;
+    if (!family || !cap) return;
+    for (i = 0; family[i] && i + 1 < cap; i++) {
+        char c = family[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        out[i] = c;
+    }
+    out[i] = 0;
+}
+
+static void shadow_gfac_add(const char* family, int arity, const char* tpl) {
+    int i;
+    if (!family || !tpl || g_shadow_ngfac >= 4) return;
+    for (i = 0; i < g_shadow_ngfac; i++) {
+        if (strcmp(g_shadow_gfac[i].family, family) == 0) {
+            snprintf(g_shadow_gfac[i].tpl, sizeof(g_shadow_gfac[i].tpl), "%s",
+                     tpl);
+            g_shadow_gfac[i].arity = arity;
+            return;
+        }
+    }
+    snprintf(g_shadow_gfac[g_shadow_ngfac].family,
+             sizeof(g_shadow_gfac[0].family), "%s", family);
+    snprintf(g_shadow_gfac[g_shadow_ngfac].tpl, sizeof(g_shadow_gfac[0].tpl),
+             "%s", tpl);
+    g_shadow_gfac[g_shadow_ngfac].arity = arity;
+    g_shadow_ngfac++;
+}
+
+static void shadow_ginst_need(const char* family, const char* compact) {
+    int i;
+    char mangled[96];
+    if (!family || !compact || !compact[0] || g_shadow_nginst >= 16) return;
+    snprintf(mangled, sizeof(mangled), "%s_%s", family, compact);
+    for (i = 0; i < g_shadow_nginst; i++) {
+        if (strcmp(g_shadow_ginst[i].mangled, mangled) == 0) return;
+    }
+    snprintf(g_shadow_ginst[g_shadow_nginst].family,
+             sizeof(g_shadow_ginst[0].family), "%s", family);
+    snprintf(g_shadow_ginst[g_shadow_nginst].mangled,
+             sizeof(g_shadow_ginst[0].mangled), "%s", mangled);
+    snprintf(g_shadow_ginst[g_shadow_nginst].compact,
+             sizeof(g_shadow_ginst[0].compact), "%s", compact);
+    g_shadow_nginst++;
+}
+
+static int shadow_inst_generic_tpl(const char* tpl, const char* mangled,
+                                   char args[][64], int nargs, char* out,
+                                   size_t cap) {
+    size_t o = 0;
+    const char* p = tpl ? tpl : "";
+    while (*p && o + 1 < cap) {
+        if (strncmp(p, "${mangled}", 10) == 0) {
+            size_t n = strlen(mangled);
+            if (o + n >= cap) return 0;
+            memcpy(out + o, mangled, n);
+            o += n;
+            p += 10;
+            continue;
+        }
+        if (strncmp(p, "${arg(", 6) == 0) {
+            int idx = 0;
+            const char* q = p + 6;
+            while (*q >= '0' && *q <= '9') idx = idx * 10 + (*q++ - '0');
+            if (*q == ')' && q[1] == '}') {
+                if (idx < 0 || idx >= nargs) return 0;
+                size_t n = strlen(args[idx]);
+                if (o + n >= cap) return 0;
+                memcpy(out + o, args[idx], n);
+                o += n;
+                p = q + 2;
+                continue;
+            }
+        }
+        out[o++] = *p++;
+    }
+    out[o] = 0;
+    return 1;
+}
+
+static void shadow_vec_need(const char* mangled_t) {
+    int i;
+    if (!mangled_t || !mangled_t[0] || g_shadow_nvecs >= 16) return;
+    for (i = 0; i < g_shadow_nvecs; i++) {
+        if (strcmp(g_shadow_vecs[i], mangled_t) == 0) return;
+    }
+    snprintf(g_shadow_vecs[g_shadow_nvecs], sizeof(g_shadow_vecs[0]), "%s",
+             mangled_t);
+    g_shadow_nvecs++;
+}
+
+static void shadow_map_need(const char* compact_kv) {
+    int i;
+    if (!compact_kv || !compact_kv[0] || g_shadow_nmaps >= 8) return;
+    for (i = 0; i < g_shadow_nmaps; i++) {
+        if (strcmp(g_shadow_maps[i], compact_kv) == 0) return;
+    }
+    snprintf(g_shadow_maps[g_shadow_nmaps], sizeof(g_shadow_maps[0]), "%s",
+             compact_kv);
+    g_shadow_nmaps++;
+}
+
+/* Hash/eq for known Map::[K,V] pairs. */
+static int shadow_map_hash_eq(const char* compact, const char** hash,
+                              const char** eq, char* kbuf, size_t kcap,
+                              char* vbuf, size_t vcap) {
+    const char* us;
+    size_t kn;
+    if (!compact || !hash || !eq) return 0;
+    us = strchr(compact, '_');
+    if (!us) return 0;
+    kn = (size_t)(us - compact);
+    if (kn + 1 >= kcap || strlen(us + 1) + 1 >= vcap) return 0;
+    memcpy(kbuf, compact, kn);
+    kbuf[kn] = 0;
+    snprintf(vbuf, vcap, "%s", us + 1);
+    if (strcmp(compact, "CCSliceHdr_int") == 0) {
+        *hash = "cc_map_hash_slice_hdr";
+        *eq = "cc_map_eq_slice_hdr";
+        return 1;
+    }
+    return 0;
+}
+
+static void shadow_chan_register(const char* name, const char* cap, int ordered) {
+    int i;
+    if (!name || !name[0] || g_shadow_nchans >= SHADOW_CHAN_CAP) return;
+    for (i = 0; i < g_shadow_nchans; i++) {
+        if (strcmp(g_shadow_chans[i].name, name) == 0) {
+            snprintf(g_shadow_chans[i].cap, sizeof(g_shadow_chans[i].cap), "%s",
+                     cap ? cap : "1");
+            if (ordered) g_shadow_chans[i].ordered = 1;
+            return;
+        }
+    }
+    snprintf(g_shadow_chans[g_shadow_nchans].name,
+             sizeof(g_shadow_chans[0].name), "%s", name);
+    snprintf(g_shadow_chans[g_shadow_nchans].cap,
+             sizeof(g_shadow_chans[0].cap), "%s", cap ? cap : "1");
+    g_shadow_chans[g_shadow_nchans].ordered = ordered ? 1 : 0;
+    g_shadow_nchans++;
+}
+
+static const ShadowChanDecl* shadow_chan_find(const char* name) {
+    int i;
+    if (!name) return NULL;
+    for (i = 0; i < g_shadow_nchans; i++) {
+        if (strcmp(g_shadow_chans[i].name, name) == 0) return &g_shadow_chans[i];
+    }
+    return NULL;
+}
+
+/* Resolve AstNode → (path, line). Returns 0 if unknown. */
+static int shadow_site_loc(TapeCache* cache, AstNode* st, const char** path_out,
+                           int* line_out) {
+    if (!cache || !st || !st->file_id || !path_out || !line_out) return 0;
+    FileTape* ft = tape_by_id(cache, st->file_id);
+    if (!ft || !ft->path || !ft->bytes) return 0;
+    int line = 1, col = 1;
+    offset_to_linecol(ft->bytes, ft->len, st->tok_off, &line, &col);
+    *path_out = ft->path;
+    *line_out = line;
+    return 1;
+}
+
+/* Escape path for a `#line` / string literal (\\ and \"). */
+static void shadow_escape_path(char* dst, size_t cap, const char* path) {
+    if (!dst || !cap) return;
+    size_t o = 0;
+    for (const char* p = path ? path : ""; *p && o + 2 < cap; p++) {
+        if (*p == '\\' || *p == '"') {
+            if (o + 3 >= cap) break;
+            dst[o++] = '\\';
+        }
+        dst[o++] = *p;
+    }
+    dst[o] = 0;
+}
+
+/* Bake file/line as string literals (production shape). `__LINE__` is an int
+ * and breaks `__cc_uw_err_at`'s `const char* line_str` once `#line` is active. */
+static int shadow_emit_err_at_bind(CEmit* out, ShadowCtx* ctx, const char* indent,
+                                   const char* bind, const char* site) {
+    const char* path = "unknown";
+    int line = 0;
+    char esc[512];
+    if (ctx && ctx->site)
+        (void)shadow_site_loc(ctx->cache, ctx->site, &path, &line);
+    if (!path || !path[0]) path = "unknown";
+    shadow_escape_path(esc, sizeof(esc), path);
+    return cemit_fmt(out,
+        "%sCCError %s = __cc_uw_err_at(__r, \"%s\", \"%s\", \"%d\");\n",
+        indent, bind, site ? site : "unwrap", esc, line);
+}
+
+/* `#line N "path"` when site differs from the last marker.
+ * Indent with surrounding code (`#` is still the first non-whitespace). */
+static int shadow_emit_line(CEmit* out, ShadowCtx* ctx, AstNode* st,
+                            const char* indent) {
+    if (!out || !ctx) return 1;
+    const char* path = NULL;
+    int line = 0;
+    if (!shadow_site_loc(ctx->cache, st, &path, &line) || line <= 0) return 1;
+    if (ctx->line_file_id == st->file_id && ctx->line_no == line) return 1;
+    char esc[512];
+    shadow_escape_path(esc, sizeof(esc), path);
+    if (!cemit_fmt(out, "%s#line %d \"%s\"\n", indent ? indent : "", line, esc))
+        return 0;
+    ctx->line_file_id = st->file_id;
+    ctx->line_no = line;
+    ctx->site = st;
+    return 1;
+}
+
+/* Force a `#line` resync for the current site (multi-line synthetic blocks). */
+static int shadow_resync_line(CEmit* out, ShadowCtx* ctx, const char* indent) {
+    if (!ctx || !ctx->site) return 1;
+    int saved_file = ctx->line_file_id;
+    int saved_line = ctx->line_no;
+    ctx->line_file_id = 0;
+    ctx->line_no = 0;
+    int ok = shadow_emit_line(out, ctx, ctx->site, indent);
+    if (!ok) {
+        ctx->line_file_id = saved_file;
+        ctx->line_no = saved_line;
+    }
+    return ok;
+}
+
+/* Prefer indent of first real stmt; else 4 spaces. */
+static void shadow_pick_body_indent(AstNode** kids, int nkids, char* dst,
+                                    size_t cap) {
+    for (int k = 0; k < nkids; k++) {
+        AstNode* st = kids[k];
+        if (!st) continue;
+        if (st->kind == AST_ERRHANDLER || st->kind == AST_DEFER) continue;
+        if (st->indent[0]) {
+            snprintf(dst, cap, "%s", st->indent);
+            return;
+        }
+    }
+    snprintf(dst, cap, "    ");
+}
+
+/* Indent unit matching source style (tab or 2/4 spaces). */
+static void shadow_indent_unit(const char* base, char* unit, size_t ucap) {
+    if (!unit || !ucap) return;
+    if (base) {
+        for (const char* p = base; *p; p++) {
+            if (*p == '\t') {
+                snprintf(unit, ucap, "\t");
+                return;
+            }
+        }
+        size_t n = strlen(base);
+        if (n > 0 && n % 2 == 0 && n % 4 != 0) {
+            snprintf(unit, ucap, "  ");
+            return;
+        }
+    }
+    snprintf(unit, ucap, "    ");
+}
+
+/* base + levels of nest, preferring the statement's source indent. */
+static void shadow_indent_nest(char* dst, size_t cap, const char* base, int levels) {
+    if (!dst || !cap) return;
+    snprintf(dst, cap, "%s", base ? base : "");
+    char unit[8];
+    shadow_indent_unit(base, unit, sizeof(unit));
+    for (int i = 0; i < levels; i++) {
+        size_t cur = strlen(dst);
+        size_t ul = strlen(unit);
+        if (cur + ul + 1 >= cap) break;
+        memcpy(dst + cur, unit, ul + 1);
+    }
+}
+
+/* Sticky post-include lead for first decl (file-header split). Never mutates
+ * AstNode.lead_* — trivia attached at parse stays the source of truth. */
+static size_t g_sticky_lead_off;
+static size_t g_sticky_lead_len;
+static int g_sticky_lead_fid;
+static int g_sticky_lead_set;
+/* 1 = file-header pass already printed items[0] lead (banner and/or sticky). */
+static int g_file_header_lead_done;
+
+/* Emit comments/blank lines from a tape span (does not mutate AST).
+ * Skip `#…` preprocessor lines — those are re-emitted via pass_inc.
+ * file_header=1: only the banner before the first `#…`; remainder goes to
+ * g_sticky_lead_* for the first decl preamble. */
+static int shadow_emit_lead_span(CEmit* out, TapeCache* cache, int file_id,
+                                size_t lead_off, size_t lead_len,
+                                int file_header) {
+    if (!lead_len || !cache) return 1;
+    FileTape* ft = tape_by_id(cache, file_id);
+    if (!ft || !ft->bytes) return 1;
+    size_t off = lead_off;
+    size_t len = lead_len;
+    if (off + len > ft->len) return 1;
+    while (len > 0) {
+        char c = ft->bytes[off + len - 1];
+        if (c == ' ' || c == '\t') len--;
+        else break;
+    }
+    if (len > 0 && ft->bytes[off] == '\n') {
+        off++;
+        len--;
+    }
+    if (!len) return 1;
+    size_t i = 0;
+    int seen_hash = 0;
+    while (i < len) {
+        size_t ls = i;
+        while (i < len && ft->bytes[off + i] != '\n') i++;
+        size_t le = i;
+        int has_nl = (i < len);
+        if (has_nl) i++;
+        size_t j = ls;
+        while (j < le && (ft->bytes[off + j] == ' ' || ft->bytes[off + j] == '\t'))
+            j++;
+        if (j < le && ft->bytes[off + j] == '#') {
+            seen_hash = 1;
+            continue;
+        }
+        if (file_header && seen_hash) {
+            g_sticky_lead_off = off + ls;
+            g_sticky_lead_len = len - ls;
+            g_sticky_lead_fid = file_id;
+            g_sticky_lead_set = 1;
+            g_file_header_lead_done = 1;
+            return 1;
+        }
+        size_t n = (has_nl ? i : le) - ls;
+        if (!cemit_reserve(out, n)) return 0;
+        memcpy(out->buf + out->len, ft->bytes + off + ls, n);
+        out->len += n;
+        out->buf[out->len] = 0;
+    }
+    if (file_header) g_file_header_lead_done = 1;
+    return 1;
+}
+
+static int shadow_emit_preamble_ex(AstNode* st, CEmit* out, TapeCache* cache,
+                                   int file_header) {
+    if (!st) return 1;
+    return shadow_emit_lead_span(out, cache, st->file_id, st->lead_off,
+                                 st->lead_len, file_header);
+}
+
+static int shadow_emit_preamble(AstNode* st, CEmit* out, TapeCache* cache) {
+    /* Prefer sticky remainder from file-header split (first decl). */
+    if (g_sticky_lead_set) {
+        int ok = shadow_emit_lead_span(out, cache, g_sticky_lead_fid,
+                                       g_sticky_lead_off, g_sticky_lead_len, 0);
+        g_sticky_lead_set = 0;
+        g_file_header_lead_done = 0;
+        return ok;
+    }
+    if (g_file_header_lead_done) {
+        /* Banner-only lead already printed; node trivia left intact. */
+        g_file_header_lead_done = 0;
+        return 1;
+    }
+    return shadow_emit_preamble_ex(st, out, cache, 0);
+}
+
+/* Prefer source line indent when present.
+ * Explicit empty fallback means same-line continuation (e.g. `if (c) stmt`). */
+static const char* shadow_stmt_indent(AstNode* st, const char* fallback) {
+    if (fallback && !fallback[0]) return fallback;
+    if (st && st->indent[0]) return st->indent;
+    return fallback ? fallback : "";
+}

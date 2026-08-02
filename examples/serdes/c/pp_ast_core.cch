@@ -1,0 +1,660 @@
+/* Whitelist AST types, keywords, Parser, and token/spell helpers.
+ * Included by pp_ast.cch before pp_ast_parse.cch. */
+#pragma once
+
+/* ---- closed parse keywords (comptime perfect hash) ---------------------- */
+
+typedef enum {
+    SHADOW_KW_NONE = 0,
+    SHADOW_KW_INT,
+    SHADOW_KW_VOID,
+    SHADOW_KW_RETURN,
+    SHADOW_KW_TYPEDEF,
+    SHADOW_KW_STRUCT,
+    SHADOW_KW_PRINTLN,
+    SHADOW_KW_ERRHANDLER,
+    SHADOW_KW_DESTROY,
+    SHADOW_KW_SPAWN,
+    SHADOW_KW_ERR,
+    SHADOW_KW_IF,
+    SHADOW_KW_STRING,
+    SHADOW_KW_DEFER,
+        SHADOW_KW_STATIC,
+    SHADOW_KW_CHAR,
+    SHADOW_KW_FOR,
+    SHADOW_KW_WHILE,
+    SHADOW_KW_WITH_DEADLINE,
+    SHADOW_KW_AS,
+    SHADOW_KW_ASYNC,
+    SHADOW_KW_AWAIT,
+    SHADOW_KW_CREATE,
+    SHADOW_KW_BOOL,
+    SHADOW_KW_SIZE_T,
+    SHADOW_KW_INLINE,
+    SHADOW_KW_CONST,
+    SHADOW_KW_ORDERED,
+    SHADOW_KW_BREAK,
+    SHADOW_KW_CONTINUE,
+    SHADOW_KW_ELSE,
+    SHADOW_KW_DO,
+    SHADOW_KW_EPRINTLN,
+    SHADOW_KW_ENUM,
+    SHADOW_KW_SWITCH
+} ShadowKwKind;
+
+typedef struct {
+    ShadowKwKind kind;
+} ShadowKwSpec;
+
+typedef struct {
+    const char* key;
+    ShadowKwSpec value;
+} ShadowKwEntry;
+
+@comptime {
+    ShadowKwEntry shadow_kw_entries[] = {
+        { "int", { SHADOW_KW_INT } },
+        { "void", { SHADOW_KW_VOID } },
+        { "return", { SHADOW_KW_RETURN } },
+        { "typedef", { SHADOW_KW_TYPEDEF } },
+        { "struct", { SHADOW_KW_STRUCT } },
+        { "println", { SHADOW_KW_PRINTLN } },
+        { "errhandler", { SHADOW_KW_ERRHANDLER } },
+        { "destroy", { SHADOW_KW_DESTROY } },
+        { "spawn", { SHADOW_KW_SPAWN } },
+        { "err", { SHADOW_KW_ERR } },
+        { "if", { SHADOW_KW_IF } },
+        { "string", { SHADOW_KW_STRING } },
+        { "defer", { SHADOW_KW_DEFER } },
+        { "static", { SHADOW_KW_STATIC } },
+        { "char", { SHADOW_KW_CHAR } },
+        { "for", { SHADOW_KW_FOR } },
+        { "while", { SHADOW_KW_WHILE } },
+        { "with_deadline", { SHADOW_KW_WITH_DEADLINE } },
+        { "as", { SHADOW_KW_AS } },
+        { "async", { SHADOW_KW_ASYNC } },
+        { "await", { SHADOW_KW_AWAIT } },
+        { "create", { SHADOW_KW_CREATE } },
+        { "bool", { SHADOW_KW_BOOL } },
+        { "size_t", { SHADOW_KW_SIZE_T } },
+        { "inline", { SHADOW_KW_INLINE } },
+        { "const", { SHADOW_KW_CONST } },
+        { "ordered", { SHADOW_KW_ORDERED } },
+        { "break", { SHADOW_KW_BREAK } },
+        { "continue", { SHADOW_KW_CONTINUE } },
+        { "else", { SHADOW_KW_ELSE } },
+        { "do", { SHADOW_KW_DO } },
+        { "eprintln", { SHADOW_KW_EPRINTLN } },
+        { "enum", { SHADOW_KW_ENUM } },
+        { "switch", { SHADOW_KW_SWITCH } },
+    };
+    static_map("shadow_kw", shadow_kw_entries, CC_STATIC_MAP_CASE_SENSITIVE);
+}
+
+/* Forward decl for in-header callers; body is TU-spliced from the map above. */
+static const ShadowKwSpec* shadow_kw_get(CCSlice key);
+
+static ShadowKwKind shadow_kw(Token t) {
+    if (t.kind != TK_IDENT) return SHADOW_KW_NONE;
+    const ShadowKwSpec* s = shadow_kw_get(t.spell);
+    return s ? s->kind : SHADOW_KW_NONE;
+}
+
+/* ---- typedef scopes + tiny AST ------------------------------------------ */
+
+enum { SCOPE_CAP = 32, NAME_CAP = 64, AST_CAP = 256 };
+
+typedef struct {
+    char names[NAME_CAP][128];
+    int n;
+} Scope;
+
+typedef enum {
+    AST_TYPEDEF_INT,   /* typedef int Name; */
+    AST_VAR_INT,       /* int Name; */
+    AST_PTR_DECL,      /* TypeName * Name; */
+    AST_MUL_EXPR,      /* Ident * Ident;  (expression statement) */
+    AST_STRUCT,        /* struct Name { ...fields... } */
+    AST_FIELD_INT,     /* int Name; inside struct */
+    /* Concurrent-C surface (post-expand; stage 1 kept digraphs intact) */
+    AST_SLICE_VAR,     /* int[:] Name; */
+    /* CHAN_VAR: a=name b=capacity c=">"|"<" (direction) */
+    AST_CHAN_VAR,
+    /* RESULT_FN: a=fname, b=err, c=ok, d=param text or "" for void; kids=body */
+    AST_RESULT_FN,
+    AST_CLOSURE_LIT,   /* () => { }   (expression-level; counted as external) */
+    AST_AT_STMT,       /* @ident ... ;  (a = attr name, e.g. defer/async) */
+    AST_FN,            /* int Name(void) { stmts } — a=name, kids=stmts */
+    AST_RETURN_INT,    /* return N; — a=literal */
+    /* return cc_ok|cc_err(...); — a="ok"|"err", b=args text (inside parens) */
+    AST_RETURN_CC,
+    /* return <expr> [!>]; — a=expr text; e="bang" when trailing !> unwrap */
+    AST_RETURN_EXPR,
+    AST_ERRHANDLER,    /* @errhandler(Type bind) …; a=type b=bind c=handler or ""+body */
+    AST_PRINTLN_BANG,  /* println("...") !>; — a=string spell including quotes */
+    /* println("...") !>(bind) { stmts }; — a=string b=bind, body=handler stmts */
+    AST_PRINTLN_BANG_BIND,
+    /* println(@string(`tpl`, @scratch)) !>; — a=tpl body without ticks */
+    AST_PRINTLN_TPL,
+    AST_ERR_FWD,       /* @err(bind); — a=bind name; emits handler(bind) */
+    /* Type * name = callee(NULL) !> @destroy { stmts }; — a=type b=name c=callee */
+    AST_NURSERY_DESTROY,
+    /* recv->spawn(() => [caps] { stmts }); — a=recv b=spawn d=id e=caps
+     * caps: comma list "x" (value) or "&x" (ref); empty → inferred */
+    AST_SPAWN_CLOSURE,
+    /* Ident ( NUM ) ; — e.g. usleep(100000); a=callee b=literal */
+    AST_CALL_NUM,
+    /* Ident ( args ) ; — a=callee b=args text */
+    AST_CALL_ARGS,
+    /* if (cond) stmt — a=cond text, body[0]=stmt */
+    AST_IF,
+    /* { stmts } — body=stmts */
+    AST_BLOCK,
+    /* int name = call(...) !>|?> …; a=name b=call c=mode d=bind e=default */
+    AST_VAR_UNWRAP,
+    /* Type * name = call(...); — a=type b=name c=call */
+    AST_PTR_INIT,
+    /* call(...) !>; — a=call text */
+    AST_STMT_UNWRAP,
+    /* Ok!>(Err) name = call(...); — a=name b=err c=ok d=call */
+    AST_RESULT_LOCAL,
+    /* @defer[(ok|err)] stmt — c=""|"ok"|"err", body=stmts */
+    AST_DEFER,
+    /* Type* name = call !>|?> … [@destroy]; a=type b=name c=call d=mode e=bind/default
+     * mode: bang_nobind|bang_block|bang_eh|qmark[+_D|_Dbare]
+     * body=handler; dbody=destroy body (if _D) — not kids_storage (fn mid-append) */
+    AST_PTR_UNWRAP,
+    /* (void)ident; — a=ident */
+    AST_VOID_CAST,
+    /* static Ret name(params) { … } — a=ret b=name c=params; kids=stmts OR d=raw body */
+    AST_STATIC_FN,
+    /* static char name[] = "lit"; — a=name b=string lit incl quotes */
+    AST_STATIC_ARR,
+    /* Type name = expr @destroy; — a=type b=name c=init (bare destroy) */
+    AST_VAL_DESTROY,
+    /* for (hdr) { stmts } — a=hdr text, body=stmts */
+    AST_FOR,
+    /* Type[*] name = expr; — a=type b=name c=expr d="*"|"", UFCS rewritten on emit */
+    AST_TYPED_INIT,
+    /* Type name[:] = {…}; — a=elem ty b=name c=brace init */
+    AST_SLICE_INIT,
+    /* recv.method(args); — a=recv b=method c=args e="->"|"", d=bang|bang_block */
+    AST_UFCS_STMT,
+    /* recv.method(args) as expression — same fields as STMT, no trailing ;/bang */
+    AST_UFCS_EXPR,
+    /* lhs = rhs; — a=lhs b=rhs; optional kids[0]=AST_UFCS_EXPR when RHS is UFCS */
+    AST_ASSIGN,
+    /* Type name; — a=type b=name (no init) */
+    AST_VAR_DECL,
+    /* while (cond) { stmts } — a=cond, body=stmts */
+    AST_WHILE,
+    /* @with_deadline(expr) [as name] { stmts } — a=expr b=bind|"" */
+    AST_WITH_DEADLINE,
+    /* name++; — a=name */
+    AST_INC,
+    /* typedef struct Tag { fields } Alias; — a=tag|"" b=alias; kids=fields
+     * Opaque form (no `{…}`): nkids==0, a=tag, b=alias → `typedef struct Tag Alias;` */
+    AST_TYPEDEF_STRUCT,
+    /* field: Type name[, name2]*; — a=type b=names csv */
+    AST_FIELD_SIMPLE,
+    /* @async Ret name(params) { stmts } — a=ret b=name c=params; kids=body */
+    AST_ASYNC_FN,
+    /* static Type[*] name[[N]]; — a=type b=name c="*"|"[N]"|"" */
+    AST_STATIC_VAR,
+    /* typedef Ret (*Name)(params); — a=ret b=name c=params */
+    AST_TYPEDEF_FN_PTR,
+    /* Ret[*] name(params); — a=ret(+optional *) b=name c=params */
+    AST_FN_PROTO,
+    /* break; */
+    AST_BREAK,
+    /* continue; */
+    AST_CONTINUE,
+    /* do { stmts } while (cond); — a=cond, body=stmts */
+    AST_DO_WHILE,
+    /* const Type* name[] = { init_list }; — a=type b=name c=init text */
+    AST_GLOBAL_ARR,
+    /* typedef enum [Tag]? { enumerators } Alias; — a=tag b=alias d=body */
+    AST_TYPEDEF_ENUM,
+    /* switch (expr) { body } — a=expr d=body text */
+    AST_SWITCH,
+    /* File-scope macro invocation kept as text — a=full `NAME(...);` span.
+     * Beachhead: CC_DECL_RESULT_SPEC(...); */
+    AST_RAW_LINE,
+    /* CC_GENERIC_FACTORY(Name, N) { return @emit(`tpl`, arena); }
+     * a=family b=arity d=template (ticks stripped). */
+    AST_GENERIC_FACTORY
+} AstKind;
+
+typedef struct AstNode AstNode;
+struct AstNode {
+    AstKind kind;
+    char a[256];
+    char b[256];
+    /* Params / long spans — nursery lower_c protos exceed 256 with source indent. */
+    char c[512];
+    /* Long raw spans: static-fn / switch / enum bodies (was 256; errno maps overflow). */
+    char d[2048];
+    char e[256];
+    AstNode** kids;
+    int nkids;
+    /* Nested stmt lists that must not interleave with a parent's kids_storage
+     * (e.g. @destroy body while still appending to a function's stmt list). */
+    AstNode* body[8];
+    int nbody;
+    AstNode* dbody[8];
+    int ndbody;
+    /* Source trivia: gap before this node (comments / blank lines) + line indent.
+     * lead spans tape bytes [lead_off, lead_off+lead_len); indent is the
+     * whitespace after the last newline in that gap (hand-lower nest base).
+     * tok_off is the first token of the node (for #line provenance). */
+    int file_id;
+    size_t lead_off;
+    size_t lead_len;
+    size_t tok_off;
+    char indent[64];
+};
+
+typedef struct {
+    Token* toks;
+    int n;
+    int i;
+    TapeCache* cache; /* for file:line diagnostics */
+    Scope scopes[SCOPE_CAP];
+    int ns;
+    AstNode nodes[AST_CAP];
+    int nn;
+    AstNode* kids_storage[AST_CAP * 4];
+    int nkstore;
+    AstNode* tu_items[AST_CAP];
+    int ntu;
+    int err;
+    char err_msg[128];
+} Parser;
+
+static void parser_fail(Parser* p, Token at, const char* msg) {
+    p->err = 1;
+    snprintf(p->err_msg, sizeof(p->err_msg), "%s", msg);
+    diag_at(p->cache, at, msg);
+}
+
+static void scope_push(Parser* p) {
+    if (p->ns >= SCOPE_CAP) { p->err = 1; return; }
+    p->scopes[p->ns++] = (Scope){0};
+}
+
+static void scope_pop(Parser* p) {
+    if (p->ns > 0) p->ns--;
+}
+
+static int scope_is_typedef(Parser* p, CCSlice name) {
+    for (int s = p->ns - 1; s >= 0; s--) {
+        Scope* sc = &p->scopes[s];
+        for (int i = 0; i < sc->n; i++) {
+            if (spell_eq(name, sc->names[i])) return 1;
+        }
+    }
+    return 0;
+}
+
+static int scope_add_typedef(Parser* p, CCSlice name) {
+    if (p->ns == 0) scope_push(p);
+    Scope* sc = &p->scopes[p->ns - 1];
+    if (sc->n >= NAME_CAP || name.len >= 128) return 0;
+    memcpy(sc->names[sc->n], name.ptr, name.len);
+    sc->names[sc->n][name.len] = 0;
+    sc->n++;
+    return 1;
+}
+
+static void slice_to(char* dst, size_t cap, CCSlice s) {
+    size_t n = s.len < cap - 1 ? s.len : cap - 1;
+    memcpy(dst, s.ptr, n);
+    dst[n] = 0;
+}
+
+/* Exact source span covering toks[i0 .. i1_excl). */
+static int span_text(Parser* p, int i0, int i1_excl, char* dst, size_t cap) {
+    if (!dst || cap == 0) return 0;
+    dst[0] = 0;
+    if (i0 < 0 || i1_excl > p->n || i0 >= i1_excl) return 1;
+    Token a = p->toks[i0];
+    Token b = p->toks[i1_excl - 1];
+    size_t start = a.offset;
+    size_t end = b.offset + b.spell.len;
+    FileTape* ft = tape_by_id(p->cache, a.file_id);
+    if (ft && ft->bytes && end <= ft->len && end >= start) {
+        size_t n = end - start;
+        if (n >= cap) n = cap - 1;
+        memcpy(dst, ft->bytes + start, n);
+        dst[n] = 0;
+        return 1;
+    }
+    size_t o = 0;
+    for (int i = i0; i < i1_excl && o + 1 < (int)cap; i++) {
+        if (i > i0 && o + 1 < cap) dst[o++] = ' ';
+        size_t ln = p->toks[i].spell.len;
+        if (o + ln >= cap) ln = cap - 1 - o;
+        memcpy(dst + o, p->toks[i].spell.ptr, ln);
+        o += ln;
+    }
+    dst[o] = 0;
+    return 1;
+}
+
+static Token p_peek(Parser* p) {
+    if (p->i >= p->n) return (Token){ .kind = TK_EOF };
+    return p->toks[p->i];
+}
+
+static Token p_next(Parser* p) {
+    if (p->i >= p->n) return (Token){ .kind = TK_EOF };
+    return p->toks[p->i++];
+}
+
+static int p_accept(Parser* p, TokKind k, const char* lit) {
+    Token t = p_peek(p);
+    if (!tok_eq(t, k, lit)) return 0;
+    p_next(p);
+    return 1;
+}
+
+/* Skip a `(...)` starting at p->i on `(`. Returns 1 and leaves i past `)`. */
+static int skip_parens(Parser* p) {
+    if (!tok_eq(p_peek(p), TK_PUNCT, "(")) return 0;
+    int depth = 0;
+    while (p->i < p->n) {
+        Token t = p_next(p);
+        if (tok_eq(t, TK_PUNCT, "(")) depth++;
+        else if (tok_eq(t, TK_PUNCT, ")")) {
+            depth--;
+            if (depth == 0) return 1;
+        }
+    }
+    return 0;
+}
+
+static AstNode* ast_new(Parser* p, AstKind k) {
+    if (p->nn >= AST_CAP) { p->err = 1; return NULL; }
+    AstNode* n = &p->nodes[p->nn++];
+    memset(n, 0, sizeof(*n));
+    n->kind = k;
+    return n;
+}
+
+/* Attach leading trivia + line indent from tape using token index `start_i`.
+ * Sticky: lead_off/lead_len/tok_off/file_id are set once here for emit + diags.
+ * Emit must print them — never re-derive comments after string rewrite. */
+static void shadow_attach_lead(Parser* p, AstNode* n, int start_i) {
+    if (!n || !p || start_i < 0 || start_i >= p->n) return;
+    Token t = p->toks[start_i];
+    n->file_id = t.file_id;
+    n->tok_off = t.offset;
+    if (start_i > 0) {
+        Token prev = p->toks[start_i - 1];
+        if (prev.file_id == t.file_id) {
+            size_t end = prev.offset + prev.spell.len;
+            n->lead_off = end;
+            n->lead_len = (t.offset >= end) ? (t.offset - end) : 0;
+        }
+    } else {
+        n->lead_off = 0;
+        n->lead_len = t.offset;
+    }
+    n->indent[0] = 0;
+    FileTape* ft = tape_by_id(p->cache, n->file_id);
+    if (!ft || !ft->bytes) return;
+    size_t i = t.offset;
+    while (i > 0 && ft->bytes[i - 1] != '\n') i--;
+    size_t j = 0;
+    while (i < t.offset && j + 1 < sizeof(n->indent)) {
+        char c = ft->bytes[i++];
+        if (c == ' ' || c == '\t') n->indent[j++] = c;
+        else break;
+    }
+    n->indent[j] = 0;
+}
+
+static int parse_struct_fields(Parser* p, AstNode* st);
+static AstNode* parse_external(Parser* p);
+static AstNode* parse_stmt(Parser* p);
+static AstNode* parse_switch_stmt(Parser* p);
+static AstNode* parse_at_stmt(Parser* p);
+static AstNode* parse_with_deadline(Parser* p);
+static AstNode* parse_inc(Parser* p);
+static AstNode* parse_async_fn(Parser* p);
+static AstNode* parse_static_var(Parser* p);
+static AstNode* parse_result_fn(Parser* p);
+
+/* Peek type prefix "int" then optional CC shape before a name. */
+static int peek_int_base(Parser* p) { return shadow_kw(p_peek(p)) == SHADOW_KW_INT; }
+
+static int peek_result_shape(Parser* p) {
+    if (p->i + 1 >= p->n || !tok_eq(p->toks[p->i + 1], TK_PUNCT, "!>"))
+        return 0;
+    Token t = p->toks[p->i];
+    return t.kind == TK_IDENT || shadow_kw(t) == SHADOW_KW_VOID ||
+           shadow_kw(t) == SHADOW_KW_BOOL || shadow_kw(t) == SHADOW_KW_INT ||
+           shadow_kw(t) == SHADOW_KW_CHAR;
+}
+
+/* Ident :: [ … ] — advances nothing; returns end index after `]` or -1. */
+static int peek_generic_type_end(Parser* p, int start) {
+    if (start + 3 >= p->n) return -1;
+    if (p->toks[start].kind != TK_IDENT) return -1;
+    if (!tok_eq(p->toks[start + 1], TK_PUNCT, "::")) return -1;
+    if (!tok_eq(p->toks[start + 2], TK_PUNCT, "[")) return -1;
+    int j = start + 2;
+    int depth = 0;
+    while (j < p->n) {
+        Token t = p->toks[j];
+        if (tok_eq(t, TK_PUNCT, "[")) depth++;
+        else if (tok_eq(t, TK_PUNCT, "]")) {
+            depth--;
+            if (depth == 0) return j + 1;
+        }
+        j++;
+    }
+    return -1;
+}
+
+/* Compact type args inside `[`…`]` (token range exclusive of brackets). */
+static void ast_compact_type_args(Parser* p, int a0, int a1, char* compact,
+                                  size_t cap) {
+    size_t ci = 0;
+    int i;
+    compact[0] = 0;
+    for (i = a0; i < a1 && ci + 1 < cap; i++) {
+        Token t = p->toks[i];
+        if (tok_eq(t, TK_PUNCT, ",")) {
+            compact[ci++] = '_';
+            continue;
+        }
+        if (t.kind == TK_IDENT || shadow_kw(t) == SHADOW_KW_INT ||
+            shadow_kw(t) == SHADOW_KW_BOOL || shadow_kw(t) == SHADOW_KW_CHAR ||
+            shadow_kw(t) == SHADOW_KW_SIZE_T || shadow_kw(t) == SHADOW_KW_VOID) {
+            size_t n = t.spell.len;
+            if (ci + n >= cap) n = cap - 1 - ci;
+            memcpy(compact + ci, t.spell.ptr, n);
+            ci += n;
+            compact[ci] = 0;
+        }
+    }
+}
+
+/* Structured Map/Vec/Family/char[:] → C emit spelling (from tokens, not blob rewrite). */
+static int ast_spell_type_tokens(Parser* p, int start, int end, char* dst,
+                                 size_t cap) {
+    char family[64];
+    char compact[96];
+    if (!p || !dst || !cap || start < 0 || end > p->n || start >= end)
+        return 0;
+    /* char [ : ] */
+    if (end - start >= 4 && shadow_kw(p->toks[start]) == SHADOW_KW_CHAR &&
+        tok_eq(p->toks[start + 1], TK_PUNCT, "[") &&
+        tok_eq(p->toks[start + 2], TK_PUNCT, ":") &&
+        tok_eq(p->toks[start + 3], TK_PUNCT, "]")) {
+        snprintf(dst, cap, "CCSlice");
+        return 1;
+    }
+    if (peek_generic_type_end(p, start) != end) return 0;
+    slice_to(family, sizeof(family), p->toks[start].spell);
+    ast_compact_type_args(p, start + 3, end - 1, compact, sizeof(compact));
+    if (!compact[0]) return 0;
+    if (strcmp(family, "Map") == 0)
+        snprintf(dst, cap, "Map_%s*", compact);
+    else if (strcmp(family, "Vec") == 0)
+        snprintf(dst, cap, "CCVec_%s", compact);
+    else if (strcmp(family, "map_new") == 0)
+        snprintf(dst, cap, "Map_%s_new", compact);
+    else if (strcmp(family, "vec_new") == 0)
+        snprintf(dst, cap, "CCVec_%s_new", compact);
+    else {
+        size_t fl = strlen(family);
+        /* snake_make::[A,B] → Family_A_B_make (pair_make → Pair_…). */
+        if (fl > 5 && strcmp(family + fl - 5, "_make") == 0) {
+            char base[64];
+            size_t bl = fl - 5;
+            if (bl >= sizeof(base)) bl = sizeof(base) - 1;
+            memcpy(base, family, bl);
+            base[bl] = 0;
+            if (base[0] >= 'a' && base[0] <= 'z')
+                base[0] = (char)(base[0] - 'a' + 'A');
+            snprintf(dst, cap, "%s_%s_make", base, compact);
+        } else {
+            snprintf(dst, cap, "%s_%s", family, compact); /* Pair / Family */
+        }
+    }
+    return 1;
+}
+
+/* Token spell matches bytes at its file offset (not a macro-body mint). */
+static int ast_tok_verbatim(Parser* p, Token t) {
+    FileTape* ft;
+    if (!p || !t.spell.ptr || !t.spell.len) return 0;
+    ft = tape_by_id(p->cache, t.file_id);
+    if (!ft || !ft->bytes || t.offset + t.spell.len > ft->len) return 0;
+    return memcmp(ft->bytes + t.offset, t.spell.ptr, t.spell.len) == 0;
+}
+
+/* Copy [lo, hi) when it is only whitespace (source gaps, incl. newlines). */
+static int ast_copy_ws_gap(Parser* p, Token t, size_t lo, size_t hi, char* dst,
+                           size_t* o, size_t cap) {
+    FileTape* ft;
+    size_t i;
+    size_t n;
+    if (hi <= lo) return 1;
+    if (hi - lo > 512) return 0;
+    ft = tape_by_id(p->cache, t.file_id);
+    if (!ft || !ft->bytes || hi > ft->len) return 0;
+    for (i = lo; i < hi; i++) {
+        char c = ft->bytes[i];
+        if (c != ' ' && c != '\t' && c != '\n' && c != '\r') return 0;
+    }
+    n = hi - lo;
+    if (*o + n + 1 >= cap) return 0;
+    memcpy(dst + *o, ft->bytes + lo, n);
+    *o += n;
+    dst[*o] = 0;
+    return 1;
+}
+
+static int ast_append_spell(char* dst, size_t* o, size_t cap, CCSlice spell,
+                            int need_sp) {
+    if (need_sp && *o && *o + 1 < cap) dst[(*o)++] = ' ';
+    if (*o + spell.len + 1 >= cap) return 0;
+    memcpy(dst + *o, spell.ptr, spell.len);
+    *o += spell.len;
+    dst[*o] = 0;
+    return 1;
+}
+
+static int ast_need_lex_space(char prev, char next) {
+    int na = (next >= 'A' && next <= 'Z') || (next >= 'a' && next <= 'z') ||
+             (next >= '0' && next <= '9') || next == '_';
+    int pa = (prev >= 'A' && prev <= 'Z') || (prev >= 'a' && prev <= 'z') ||
+             (prev >= '0' && prev <= '9') || prev == '_';
+    if (pa && na) return 1;
+    /* `,const` / `;int` — keep C surfaces readable when gaps are non-ws. */
+    if ((prev == ',' || prev == ';') && na) return 1;
+    return 0;
+}
+
+/* Rebuild token range: keep local source gaps; spell generics/char[:] /
+ * macro-expanded tokens from their spells (body offsets are not use-site). */
+static int ast_spell_token_range(Parser* p, int start, int end, char* dst,
+                                 size_t cap) {
+    size_t o = 0;
+    int i = start;
+    size_t prev_end;
+    int have_prev = 0;
+    if (!dst || !cap) return 0;
+    dst[0] = 0;
+    if (!p || start < 0 || end > p->n || start >= end) return 0;
+    while (i < end) {
+        int gend = -1;
+        char piece[160];
+        Token t = p->toks[i];
+        size_t tok_off = t.offset;
+        int spelled = 0;
+        piece[0] = 0;
+        /* Spell @await away and @create → cc_arena_heap at parse (no emit rewrite). */
+        if (tok_eq(t, TK_PUNCT, "@") && i + 1 < end) {
+            ShadowKwKind ak = shadow_kw(p->toks[i + 1]);
+            if (ak == SHADOW_KW_AWAIT) {
+                i += 2;
+                continue;
+            }
+            if (ak == SHADOW_KW_CREATE) {
+                snprintf(piece, sizeof(piece), "cc_arena_heap");
+                gend = i + 2;
+                spelled = 1;
+            }
+        }
+        if (!spelled && shadow_kw(t) == SHADOW_KW_CHAR && i + 3 < end &&
+            tok_eq(p->toks[i + 1], TK_PUNCT, "[") &&
+            tok_eq(p->toks[i + 2], TK_PUNCT, ":") &&
+            tok_eq(p->toks[i + 3], TK_PUNCT, "]")) {
+            snprintf(piece, sizeof(piece), "CCSlice");
+            gend = i + 4;
+            spelled = 1;
+        } else if (!spelled && (gend = peek_generic_type_end(p, i)) > i &&
+                   gend <= end &&
+                   ast_spell_type_tokens(p, i, gend, piece, sizeof(piece))) {
+            spelled = 1;
+        }
+        if (spelled) {
+            CCSlice ps = { .ptr = piece, .len = strlen(piece) };
+            if (have_prev && tok_off >= prev_end)
+                (void)ast_copy_ws_gap(p, t, prev_end, tok_off, dst, &o, cap);
+            if (!ast_append_spell(dst, &o, cap, ps,
+                                  o && ps.len &&
+                                      ast_need_lex_space(dst[o - 1], piece[0])))
+                return 0;
+            if (ast_tok_verbatim(p, p->toks[gend - 1])) {
+                prev_end = p->toks[gend - 1].offset +
+                           p->toks[gend - 1].spell.len;
+                have_prev = 1;
+            }
+            i = gend;
+        } else {
+            int verbatim = ast_tok_verbatim(p, t);
+            size_t tok_end = tok_off + t.spell.len;
+            if (have_prev && verbatim && tok_off >= prev_end)
+                (void)ast_copy_ws_gap(p, t, prev_end, tok_off, dst, &o, cap);
+            if (!ast_append_spell(dst, &o, cap, t.spell,
+                                  o && t.spell.len &&
+                                      ast_need_lex_space(dst[o - 1],
+                                                         t.spell.ptr[0])))
+                return 0;
+            /* Only advance the use-site cursor for verbatim tokens; macro
+             * body tokens keep define-site offsets and must not rewind it. */
+            if (verbatim) {
+                prev_end = tok_end;
+                have_prev = 1;
+            }
+            i++;
+        }
+    }
+    return 1;
+}
+

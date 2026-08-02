@@ -1,0 +1,880 @@
+/* UFCS lower: structured parts, leftover text peel, expr/cond helpers.
+ * Peel is leftover-text only — not a beachhead pipeline.
+ * Requires pp_emit_core.cch. */
+#pragma once
+
+/* Extract receiver immediately before `.` / `->` at `op`.
+ * Accepts ident, a->b.c chains, parenthesized expr, or call ending in `)`. */
+static int shadow_ufcs_recv(const char* src, const char* op, char* recv, size_t rcap) {
+    const char* r = op;
+    while (r > src && (r[-1] == ' ' || r[-1] == '\t')) r--;
+    const char* end = r;
+    for (;;) {
+        if (r > src && r[-1] == ')') {
+            int depth = 0;
+            while (r > src) {
+                r--;
+                if (*r == ')') depth++;
+                else if (*r == '(') {
+                    depth--;
+                    if (depth == 0) break;
+                }
+            }
+            if (depth != 0) return 0;
+            while (r > src && (r[-1] == ' ' || r[-1] == '\t')) r--;
+            while (r > src) {
+                char c = r[-1];
+                if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                    (c >= '0' && c <= '9') || c == '_')
+                    r--;
+                else
+                    break;
+            }
+        } else {
+            while (r > src) {
+                char c = r[-1];
+                if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                    (c >= '0' && c <= '9') || c == '_')
+                    r--;
+                else
+                    break;
+            }
+        }
+        /* continue through `.` / `->` field access */
+        while (r > src && (r[-1] == ' ' || r[-1] == '\t')) r--;
+        if (r > src && r[-1] == '.') {
+            r--;
+            while (r > src && (r[-1] == ' ' || r[-1] == '\t')) r--;
+            continue;
+        }
+        if (r > src + 1 && r[-1] == '>' && r[-2] == '-') {
+            r -= 2;
+            while (r > src && (r[-1] == ' ' || r[-1] == '\t')) r--;
+            continue;
+        }
+        break;
+    }
+    if (r == end) return 0;
+    size_t n = (size_t)(end - r);
+    if (n >= rcap) return 0;
+    memcpy(recv, r, n);
+    recv[n] = 0;
+    return 1;
+}
+
+/* Balanced args starting just after `(`. */
+static int shadow_ufcs_args(const char* open_paren, char* args, size_t acap,
+                            const char** after_close) {
+    if (!open_paren || *open_paren != '(') return 0;
+    int depth = 0;
+    const char* p = open_paren;
+    for (; *p; p++) {
+        if (*p == '(') depth++;
+        else if (*p == ')') {
+            depth--;
+            if (depth == 0) {
+                size_t n = (size_t)(p - (open_paren + 1));
+                if (n >= acap) n = acap - 1;
+                memcpy(args, open_paren + 1, n);
+                args[n] = 0;
+                if (after_close) *after_close = p + 1;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/* Lower one UFCS call from structured pieces → C spelling in dst.
+ * meth_name is bare (no parens); args is inside-parens text (may be empty). */
+static int shadow_ufcs_need_amp(const char* recv) {
+    return !(recv && (recv[0] == '*' || recv[0] == '&' || strchr(recv, '*') ||
+                      strstr(recv, "->")));
+}
+
+static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
+                                   const char* args, int is_arrow,
+                                   const char* elem_ty, char* dst, size_t cap) {
+    char a[160];
+    const ShadowBind* rb;
+    char vty[128];
+    int recv_is_double;
+    if (!recv || !meth_name || !dst || !cap) return 0;
+    a[0] = 0;
+    if (args) snprintf(a, sizeof(a), "%s", args);
+    while (a[0] == ' ' || a[0] == '\t') memmove(a, a + 1, strlen(a));
+    recv_is_double =
+        strstr(recv, "double") || strstr(recv, "halve") ||
+        strstr(recv, "fabs") || (strchr(recv, '.') && !strchr(recv, '('));
+    rb = shadow_bind_for_recv(recv);
+    shadow_bind_base_ty(rb, vty, sizeof(vty));
+
+    if (!is_arrow && strcmp(meth_name, "remaining") == 0) {
+        snprintf(dst, cap, "cc_arena_remaining(&%s)", recv);
+    } else if (!is_arrow && strcmp(meth_name, "checkpoint") == 0) {
+        snprintf(dst, cap, "cc_arena_checkpoint(&%s)", recv);
+    } else if (!is_arrow && strcmp(meth_name, "restore") == 0) {
+        snprintf(dst, cap, "cc_arena_checkpoint_restore(&%s)", recv);
+    } else if (!is_arrow && strcmp(meth_name, "load") == 0) {
+        snprintf(dst, cap, "cc_atomic_load(&%s)", recv);
+    } else if (!is_arrow && strcmp(meth_name, "close") == 0) {
+        int need_amp = shadow_ufcs_need_amp(recv);
+        if (shadow_bind_ty_has(rb, "CCListener"))
+            snprintf(dst, cap, need_amp ? "cc_listener_close(&%s)" : "cc_listener_close(%s)", recv);
+        else if (shadow_bind_ty_has(rb, "CCSocket"))
+            snprintf(dst, cap, need_amp ? "cc_socket_close(&%s)" : "cc_socket_close(%s)", recv);
+        else if (shadow_bind_ty_has(rb, "CCChan") || shadow_bind_ty_has(rb, "Chan"))
+            snprintf(dst, cap, "cc_channel_close(%s)", recv);
+        else if (strcmp(recv, "ln") == 0 || strstr(recv, "listener"))
+            snprintf(dst, cap, need_amp ? "cc_listener_close(&%s)" : "cc_listener_close(%s)", recv);
+        else if (strstr(recv, "sock") || strstr(recv, "conn"))
+            snprintf(dst, cap, need_amp ? "cc_socket_close(&%s)" : "cc_socket_close(%s)", recv);
+        else
+            snprintf(dst, cap, "cc_channel_close(%s)", recv);
+    } else if (!is_arrow && strcmp(meth_name, "twice") == 0) {
+        snprintf(dst, cap, recv_is_double ? "cc_double_twice(%s)" : "cc_int_twice(%s)", recv);
+    } else if (!is_arrow && strcmp(meth_name, "halve") == 0) {
+        snprintf(dst, cap, "cc_double_halve(%s)", recv);
+    } else if (!is_arrow && strcmp(meth_name, "fabs") == 0) {
+        snprintf(dst, cap, "fabs(%s)", recv);
+    } else if (!is_arrow && strcmp(meth_name, "len") == 0) {
+        if (vty[0] && strncmp(vty, "CCVec_", 6) == 0)
+            snprintf(dst, cap, "%s_len(&%s)", vty, recv);
+        else if (shadow_bind_ty_has(rb, "Slice") || shadow_bind_ty_has(rb, "slice") ||
+                 strstr(recv, "sub(") || strstr(recv, "ps") || strstr(recv, "Pt"))
+            snprintf(dst, cap, "(%s).len", recv);
+        else
+            snprintf(dst, cap, "CCVec_double_len(&%s)", recv);
+    } else if (is_arrow && strcmp(meth_name, "len") == 0) {
+        if (vty[0] && strncmp(vty, "Map_", 4) == 0)
+            snprintf(dst, cap, "%s_len(%s)", vty, recv);
+        else
+            snprintf(dst, cap, "Map_CCSliceHdr_int_len(%s)", recv);
+    } else if (!is_arrow && strcmp(meth_name, "median") == 0) {
+        if (vty[0] && strncmp(vty, "CCVec_", 6) == 0)
+            snprintf(dst, cap, "%s_median(&%s)", vty, recv);
+        else
+            snprintf(dst, cap, "CCVec_double_median(&%s)", recv);
+    } else if (!is_arrow && strcmp(meth_name, "push") == 0) {
+        if (vty[0] && strncmp(vty, "CCVec_", 6) == 0)
+            snprintf(dst, cap, "%s_push(&%s, %s)", vty, recv, a);
+        else
+            snprintf(dst, cap, "CCVec_double_push(&%s, %s)", recv, a);
+    } else if (!is_arrow && strcmp(meth_name, "mean") == 0) {
+        snprintf(dst, cap, "mean(%s, %s)", recv, a);
+    } else if (!is_arrow && strcmp(meth_name, "println") == 0) {
+        snprintf(dst, cap, "cc_println(%s)", a);
+    } else if (!is_arrow && strcmp(meth_name, "sub") == 0) {
+        if (strstr(recv, "ps") || strstr(recv, "__cc_sl_")) {
+            char a0[64] = {0}, a1[64] = {0};
+            const char* comma = strchr(a, ',');
+            if (comma) {
+                size_t n0 = (size_t)(comma - a);
+                if (n0 >= sizeof(a0)) n0 = sizeof(a0) - 1;
+                memcpy(a0, a, n0);
+                a0[n0] = 0;
+                while (a0[0] == ' ') memmove(a0, a0 + 1, strlen(a0));
+                snprintf(a1, sizeof(a1), "%s", comma + 1);
+                while (a1[0] == ' ') memmove(a1, a1 + 1, strlen(a1));
+                snprintf(dst, cap,
+                         "((__typeof__(%s)){ (%s).ptr + (%s), "
+                         "(size_t)((%s) - (%s)) })",
+                         recv, recv, a0, a1, a0);
+            } else {
+                snprintf(dst, cap, "cc_slice_sub(%s, %s)", recv, a);
+            }
+        } else {
+            snprintf(dst, cap, "cc_slice_sub(%s, %s)", recv, a);
+        }
+    } else if (!is_arrow && strcmp(meth_name, "at") == 0) {
+        if (vty[0] && strncmp(vty, "Pair_", 5) == 0)
+            snprintf(dst, cap, "%s_at(&%s, %s)", vty, recv, a);
+        else if (g_shadow_nginst > 0 && shadow_bind_ty_has(rb, "Pair"))
+            snprintf(dst, cap, "Pair_int_int_at(&%s, %s)", recv, a);
+        else
+            snprintf(dst, cap, "(%s).ptr[%s]", recv, a);
+    } else if (!is_arrow && strcmp(meth_name, "allocT") == 0) {
+        if (!elem_ty || !elem_ty[0]) return 0;
+        if (a[0])
+            snprintf(dst, cap, "cc_arena_alloc_T_count(%s, &%s, %s)", elem_ty, recv, a);
+        else
+            snprintf(dst, cap, "cc_arena_alloc_T(%s, &%s)", elem_ty, recv);
+    } else if (!is_arrow && strcmp(meth_name, "recv") == 0) {
+        snprintf(dst, cap, "cc_channel_recv(%s, %s)", recv, a);
+    } else if (!is_arrow && strcmp(meth_name, "send") == 0) {
+        snprintf(dst, cap, "cc_channel_send(%s, %s)", recv, a);
+    } else if (!is_arrow && strcmp(meth_name, "fetch_add") == 0) {
+        snprintf(dst, cap, "cc_atomic_fetch_add(&%s, %s)", recv, a);
+    } else if (is_arrow && strcmp(meth_name, "close_on") == 0) {
+        snprintf(dst, cap, "cc_nursery_add_closing_tx(%s, %s)", recv, a);
+    } else if (is_arrow && strcmp(meth_name, "mutex") == 0) {
+        snprintf(dst, cap, "cc_exclusive_mutex(%s, %s)", recv, a);
+    } else if (is_arrow && strcmp(meth_name, "destroy") == 0) {
+        snprintf(dst, cap, "cc_exclusive_destroy(%s)", recv);
+    } else if (!is_arrow && strcmp(meth_name, "acquire") == 0) {
+        snprintf(dst, cap, "cc_exclusive_mutex_acquire(&%s)", recv);
+    } else if (!is_arrow && strcmp(meth_name, "release") == 0) {
+        snprintf(dst, cap, "cc_exclusive_guard_release(&%s)", recv);
+    } else if (!is_arrow && strcmp(meth_name, "destroy") == 0) {
+        snprintf(dst, cap, "cc_arena_destroy(&%s)", recv);
+    } else if (!is_arrow && strcmp(meth_name, "reset") == 0) {
+        snprintf(dst, cap, "cc_arena_reset(&%s)", recv);
+    } else if (!is_arrow && strcmp(meth_name, "store") == 0) {
+        snprintf(dst, cap, "cc_atomic_store(&%s, %s)", recv, a);
+    } else if (!is_arrow && strcmp(meth_name, "peer_addr") == 0) {
+        if (!shadow_ufcs_need_amp(recv))
+            snprintf(dst, cap, "cc_socket_peer_addr(%s, %s)", recv, a);
+        else
+            snprintf(dst, cap, "cc_socket_peer_addr(&%s, %s)", recv, a);
+    } else if (!is_arrow && strcmp(meth_name, "read") == 0) {
+        if (!shadow_ufcs_need_amp(recv))
+            snprintf(dst, cap, "cc_socket_read(%s, %s)", recv, a);
+        else
+            snprintf(dst, cap, "cc_socket_read(&%s, %s)", recv, a);
+    } else if (!is_arrow && strcmp(meth_name, "write") == 0) {
+        if (!shadow_ufcs_need_amp(recv))
+            snprintf(dst, cap, "cc_socket_write(%s, %s)", recv, a);
+        else
+            snprintf(dst, cap, "cc_socket_write(&%s, %s)", recv, a);
+    } else if (!is_arrow && strcmp(meth_name, "read_into") == 0) {
+        if (!shadow_ufcs_need_amp(recv))
+            snprintf(dst, cap, "cc_socket_read_into(%s, %s)", recv, a);
+        else
+            snprintf(dst, cap, "cc_socket_read_into(&%s, %s)", recv, a);
+    } else if (!is_arrow && strcmp(meth_name, "accept") == 0) {
+        if (!shadow_ufcs_need_amp(recv))
+            snprintf(dst, cap, "cc_listener_accept(%s)", recv);
+        else
+            snprintf(dst, cap, "cc_listener_accept(&%s)", recv);
+    } else if (!is_arrow && strcmp(meth_name, "send_task") == 0) {
+        if (strstr(a, "=>")) return 0;
+        snprintf(dst, cap, "cc_channel_send_task(%s, %s)", recv, a);
+    } else if (!is_arrow && strcmp(meth_name, "valid") == 0) {
+        snprintf(dst, cap, "cc_arena_valid(&%s)", recv);
+    } else if (strcmp(meth_name, "init") == 0) {
+        if (is_arrow || recv[0] == '&' || strstr(recv, "->"))
+            snprintf(dst, cap, "store_init(%s)", recv);
+        else
+            snprintf(dst, cap, "store_init(&%s)", recv);
+    } else if (strcmp(meth_name, "put") == 0) {
+        if (is_arrow || recv[0] == '&' || strstr(recv, "->"))
+            snprintf(dst, cap, "store_put(%s, %s)", recv, a);
+        else
+            snprintf(dst, cap, "store_put(&%s, %s)", recv, a);
+    } else if (strcmp(meth_name, "get") == 0) {
+        if (is_arrow || recv[0] == '&' || strstr(recv, "->"))
+            snprintf(dst, cap, "store_get(%s, %s)", recv, a);
+        else
+            snprintf(dst, cap, "store_get(&%s, %s)", recv, a);
+    } else if (strcmp(meth_name, "delete") == 0) {
+        if (is_arrow || recv[0] == '&' || strstr(recv, "->"))
+            snprintf(dst, cap, "store_delete(%s, %s)", recv, a);
+        else
+            snprintf(dst, cap, "store_delete(&%s, %s)", recv, a);
+    } else if (strcmp(meth_name, "insert_entry") == 0) {
+        if (is_arrow || recv[0] == '&' || strstr(recv, "->"))
+            snprintf(dst, cap, "store_insert_entry(%s, %s)", recv, a);
+        else
+            snprintf(dst, cap, "store_insert_entry(&%s, %s)", recv, a);
+    } else if (strcmp(meth_name, "key_logical_live_bytes") == 0) {
+        if (is_arrow || recv[0] == '&' || strstr(recv, "->"))
+            snprintf(dst, cap, "store_key_logical_live_bytes(%s)", recv);
+        else
+            snprintf(dst, cap, "store_key_logical_live_bytes(&%s)", recv);
+    } else if (!is_arrow && strcmp(meth_name, "as_slice") == 0) {
+        snprintf(dst, cap, "cc_string_as_slice(&%s)", recv);
+    } else if (is_arrow && strcmp(meth_name, "get_ptr") == 0) {
+        if (vty[0] && strncmp(vty, "Map_", 4) == 0)
+            snprintf(dst, cap, "%s_get_ptr(%s, %s)", vty, recv, a);
+        else
+            snprintf(dst, cap, "Map_CCSliceHdr_int_get_ptr(%s, %s)", recv, a);
+    } else if (!is_arrow && strcmp(meth_name, "insert") == 0) {
+        if (vty[0] && strncmp(vty, "Map_", 4) == 0)
+            snprintf(dst, cap, "%s_insert(%s, %s)", vty, recv, a);
+        else
+            snprintf(dst, cap, "Map_CCSliceHdr_int_insert(%s, %s)", recv, a);
+    } else if (is_arrow && strcmp(meth_name, "remove") == 0) {
+        if (vty[0] && strncmp(vty, "Map_", 4) == 0)
+            snprintf(dst, cap, "%s_remove(%s, %s)", vty, recv, a);
+        else
+            snprintf(dst, cap, "Map_CCSliceHdr_int_remove(%s, %s)", recv, a);
+    } else if (strcmp(meth_name, "free") == 0) {
+        if (is_arrow || recv[0] == '*' || strchr(recv, '*') || recv[0] == '&' ||
+            strstr(recv, "->"))
+            snprintf(dst, cap, "store_free(%s)", recv);
+        else
+            snprintf(dst, cap, "store_free(&%s)", recv);
+    } else if (!is_arrow && strcmp(meth_name, "head") == 0) {
+        if (g_shadow_nginst <= 0) return 0;
+        {
+            char gen[384];
+            size_t go = 0;
+            int i;
+            go += (size_t)snprintf(gen + go, sizeof(gen) - go, "_Generic((%s)", recv);
+            for (i = 0; i < g_shadow_nginst && go + 80 < sizeof(gen); i++)
+                go += (size_t)snprintf(gen + go, sizeof(gen) - go, ", %s: %s_head",
+                                       g_shadow_ginst[i].mangled, g_shadow_ginst[i].mangled);
+            snprintf(dst, cap, "%s)(&%s)", gen, recv);
+        }
+    } else if (!is_arrow && strcmp(meth_name, "tail") == 0) {
+        if (g_shadow_nginst <= 0) return 0;
+        {
+            char gen[384];
+            size_t go = 0;
+            int i;
+            go += (size_t)snprintf(gen + go, sizeof(gen) - go, "_Generic((%s)", recv);
+            for (i = 0; i < g_shadow_nginst && go + 80 < sizeof(gen); i++)
+                go += (size_t)snprintf(gen + go, sizeof(gen) - go, ", %s: %s_tail",
+                                       g_shadow_ginst[i].mangled, g_shadow_ginst[i].mangled);
+            snprintf(dst, cap, "%s)(&%s)", gen, recv);
+        }
+    } else if (!is_arrow && strcmp(meth_name, "span") == 0) {
+        if (vty[0] && strncmp(vty, "Pair_", 5) == 0)
+            snprintf(dst, cap, "%s_span(&%s)", vty, recv);
+        else
+            snprintf(dst, cap, "Pair_int_double_span(&%s)", recv);
+    } else if (!is_arrow && strcmp(meth_name, "hdr") == 0) {
+        snprintf(dst, cap, "cc_slice_hdr(&%s)", recv);
+    } else if (!is_arrow && strcmp(meth_name, "is_err") == 0) {
+        snprintf(dst, cap, "cc_is_err(%s)", recv);
+    } else if (!is_arrow && strcmp(meth_name, "error") == 0) {
+        snprintf(dst, cap, "cc_error(%s)", recv);
+    } else {
+        return 0;
+    }
+    return 1;
+}
+
+/* One left-to-right UFCS step → lower_parts + splice.
+ * Leftmost so chains like d.halve().twice() peel correctly. Gated leftover
+ * text (slots/chains) uses this; structured AST_UFCS_* use lower_parts only. */
+static int shadow_ufcs_peel_left(char* dst, size_t cap, const char* src,
+                                const char* elem_ty) {
+    const char* op = NULL;
+    int is_arrow = 0;
+    {
+        const char* p = src;
+        while (*p && !op) {
+            if (p[0] == '-' && p[1] == '>' &&
+                ((p[2] >= 'A' && p[2] <= 'Z') || (p[2] >= 'a' && p[2] <= 'z') ||
+                 p[2] == '_')) {
+                const char* m = p + 2;
+                while (*m == ' ' || *m == '\t') m++;
+                const char* q = m;
+                while ((*q >= 'A' && *q <= 'Z') || (*q >= 'a' && *q <= 'z') ||
+                       (*q >= '0' && *q <= '9') || *q == '_')
+                    q++;
+                while (*q == ' ' || *q == '\t') q++;
+                if (*q == '(') {
+                    op = p;
+                    is_arrow = 1;
+                    break;
+                }
+                p += 2;
+                continue;
+            }
+            if (p[0] == '.' &&
+                ((p[1] >= 'A' && p[1] <= 'Z') || (p[1] >= 'a' && p[1] <= 'z') ||
+                 p[1] == '_')) {
+                const char* m = p + 1;
+                while (*m == ' ' || *m == '\t') m++;
+                const char* q = m;
+                while ((*q >= 'A' && *q <= 'Z') || (*q >= 'a' && *q <= 'z') ||
+                       (*q >= '0' && *q <= '9') || *q == '_')
+                    q++;
+                while (*q == ' ' || *q == '\t') q++;
+                if (*q == '(') {
+                    op = p;
+                    is_arrow = 0;
+                    break;
+                }
+            }
+            p++;
+        }
+    }
+    if (!op) return 0;
+    char recv[192];
+    char meth_name[64];
+    char args[160];
+    char repl[288];
+    const char* after = NULL;
+    const char* meth;
+    size_t mi = 0;
+    if (!shadow_ufcs_recv(src, op, recv, sizeof(recv))) return 0;
+    meth = is_arrow ? op + 2 : op + 1;
+    while (*meth == ' ' || *meth == '\t') meth++;
+    while (meth[mi] && meth[mi] != '(' && mi + 1 < sizeof(meth_name)) {
+        meth_name[mi] = meth[mi];
+        mi++;
+    }
+    meth_name[mi] = 0;
+    if (meth[mi] != '(') return 0;
+    if (!shadow_ufcs_args(meth + mi, args, sizeof(args), &after)) return 0;
+    if (!shadow_ufcs_lower_parts(recv, meth_name, args, is_arrow, elem_ty, repl,
+                                 sizeof(repl)))
+        return 0;
+    {
+        const char* rstart = op;
+        size_t rn, pre;
+        while (rstart > src && (rstart[-1] == ' ' || rstart[-1] == '\t')) rstart--;
+        rn = strlen(recv);
+        if ((size_t)(rstart - src) < rn) return 0;
+        rstart -= rn;
+        if (memcmp(rstart, recv, rn) != 0) return 0;
+        pre = (size_t)(rstart - src);
+        if (pre + strlen(repl) + strlen(after ? after : "") + 1 >= cap) return 0;
+        snprintf(dst, cap, "%.*s%s%s", (int)pre, src, repl, after ? after : "");
+    }
+    return 1;
+}
+
+#if SHADOW_RAW_BODY_REWRITE
+static void shadow_rewrite_attr_expr(char* dst, size_t cap, const char* src);
+/* `expr !>` string scan — raw-body only; gated returns use AST bang flag. */
+static int shadow_lower_return_bang(char* dst, size_t cap, const char* src) {
+    const char* bang = src ? strstr(src, "!>") : NULL;
+    const char* after;
+    const char* p;
+    char expr[192];
+    char call[256];
+    size_t n;
+    if (!bang) return 0;
+    after = bang + 2;
+    while (*after == ' ' || *after == '\t') after++;
+    if (*after == '(') return 0; /* !>(e) { … } bind form */
+    if (*after == ';') after++;
+    p = bang;
+    while (p > src && (p[-1] == ' ' || p[-1] == '\t')) p--;
+    while (p > src && (isalnum((unsigned char)p[-1]) || p[-1] == '_' || p[-1] == ')' ||
+                       p[-1] == '(' || p[-1] == '.' || p[-1] == '>' || p[-1] == '-' ||
+                       p[-1] == '*' || p[-1] == '&' || p[-1] == ' ')) {
+        p--;
+    }
+    while (*p == ' ' || *p == '\t') p++;
+    n = (size_t)(bang - p);
+    while (n > 0 && (p[n - 1] == ' ' || p[n - 1] == '\t')) n--;
+    if (n == 0 || n >= sizeof(expr)) return 0;
+    memcpy(expr, p, n);
+    expr[n] = 0;
+    /* Don't call shadow_rewrite_ufcs (would recurse via this helper). */
+    shadow_rewrite_attr_expr(call, sizeof(call), expr);
+    {
+        char nxt[288];
+        int i;
+        for (i = 0; i < 4; i++) {
+            if (!shadow_ufcs_peel_left(nxt, sizeof(nxt), call, NULL)) break;
+            snprintf(call, sizeof(call), "%s", nxt);
+        }
+    }
+    snprintf(dst, cap,
+             "%.*s"
+             "({ __typeof__(%s) __r = %s; "
+             "if (__cc_uw_is_err(__r)) { "
+             "CCError e = __cc_uw_err_at(__r, \"unwrap\", __FILE__, \"0\"); "
+             "(void)e; return -1; } "
+             "__cc_uw_value(__r); })%s",
+             (int)(p - src), src, call, call, after);
+    return 1;
+}
+
+/* Strip `@await ` and rewrite `@create(…)` → `cc_arena_heap(…)`. */
+static void shadow_rewrite_attr_expr(char* dst, size_t cap, const char* src) {
+    if (!src) { if (cap) dst[0] = 0; return; }
+    char buf[512];
+    size_t o = 0;
+    const char* p = src;
+    while (*p && o + 1 < sizeof(buf)) {
+        if (strncmp(p, "@await", 6) == 0 &&
+            (p[6] == ' ' || p[6] == '\t' || p[6] == '(')) {
+            p += 6;
+            while (*p == ' ' || *p == '\t') p++;
+            continue;
+        }
+        if (strncmp(p, "@create", 7) == 0 && p[7] == '(') {
+            const char* ins = "cc_arena_heap";
+            while (*ins && o + 1 < sizeof(buf)) buf[o++] = *ins++;
+            p += 7;
+            continue;
+        }
+        buf[o++] = *p++;
+    }
+    buf[o] = 0;
+    /* Generics/char[:] are spelled at parse from tokens. Only @await/@create
+     * remain here for raw-body fallbacks until those are AST attrs. */
+    snprintf(dst, cap, "%s", buf);
+}
+
+#endif /* SHADOW_RAW_BODY_REWRITE */
+
+/* cc_channel_pair(&tx, &rx) → cc_channel_pair_create_named(...).
+ * Looks up capacity/ordered from registered AST_CHAN_VAR decls. */
+static int shadow_format_channel_pair(char* dst, size_t cap, const char* src) {
+    const char* call = src ? strstr(src, "cc_channel_pair(") : NULL;
+    const char* p;
+    char tx[64], rx[64];
+    char args[128];
+    char repl[512];
+    char outb[768];
+    const ShadowChanDecl* dtx;
+    const ShadowChanDecl* drx;
+    const char* cap_expr = "1";
+    int ordered = 0;
+    const char* elem_sz = "sizeof(int)";
+    size_t pre;
+    const char* after;
+    if (!call) return 0;
+    p = call + strlen("cc_channel_pair");
+    if (!shadow_ufcs_args(p, args, sizeof(args), &after)) return 0;
+    /* Expect &tx, &rx (optional whitespace). */
+    {
+        const char* a = args;
+        while (*a == ' ' || *a == '\t') a++;
+        if (*a != '&') return 0;
+        a++;
+        size_t i = 0;
+        while (*a && *a != ',' && *a != ' ' && *a != '\t' && i + 1 < sizeof(tx))
+            tx[i++] = *a++;
+        tx[i] = 0;
+        while (*a == ' ' || *a == '\t') a++;
+        if (*a != ',') return 0;
+        a++;
+        while (*a == ' ' || *a == '\t') a++;
+        if (*a != '&') return 0;
+        a++;
+        i = 0;
+        while (*a && *a != ' ' && *a != '\t' && i + 1 < sizeof(rx))
+            rx[i++] = *a++;
+        rx[i] = 0;
+        while (*a == ' ' || *a == '\t') a++;
+        if (*a) return 0;
+        if (!tx[0] || !rx[0]) return 0;
+    }
+    dtx = shadow_chan_find(tx);
+    drx = shadow_chan_find(rx);
+    if (dtx && dtx->cap[0]) cap_expr = dtx->cap;
+    else if (drx && drx->cap[0]) cap_expr = drx->cap;
+    if ((dtx && dtx->ordered) || (drx && drx->ordered)) {
+        ordered = 1;
+        elem_sz = "sizeof(CCTask)";
+    }
+    snprintf(repl, sizeof(repl),
+             "cc_channel_pair_create_named(%s, CC_CHAN_MODE_BLOCK, 0, %s, 0, "
+             "CC_CHAN_TOPO_DEFAULT, %d, &%s, &%s, \"%s,%s\", __FILE__, __LINE__)",
+             cap_expr, elem_sz, ordered, tx, rx, tx, rx);
+    pre = (size_t)(call - src);
+    snprintf(outb, sizeof(outb), "%.*s%s%s", (int)pre, src, repl, after);
+    snprintf(dst, cap, "%s", outb);
+    return 1;
+}
+
+/* cc_channel_send/recv(...) != 0 → __cc_uw_is_err(...) (Result API). */
+static int shadow_lower_chan_result_cmp(char* dst, size_t cap,
+                                              const char* src) {
+    const char* ops[] = { "cc_channel_send(", "cc_channel_recv(", NULL };
+    int oi;
+    for (oi = 0; ops[oi]; oi++) {
+        const char* call = strstr(src, ops[oi]);
+        const char* after;
+        char args[256];
+        char outb[768];
+        size_t pre;
+        const char* p;
+        if (!call) continue;
+        p = call + strlen(ops[oi]) - 1; /* at '(' */
+        if (!shadow_ufcs_args(p, args, sizeof(args), &after)) continue;
+        while (*after == ' ' || *after == '\t') after++;
+        if (strncmp(after, "!= 0", 4) == 0 || strncmp(after, "!=0", 3) == 0) {
+            const char* rest = after + (after[2] == ' ' ? 4 : 3);
+            pre = (size_t)(call - src);
+            /* Bind call to a local — __cc_uw_* needs an lvalue for &x cast. */
+            snprintf(outb, sizeof(outb),
+                     "%.*s({ __typeof__(%.*s) __cc_chkr = %.*s; "
+                     "__cc_uw_is_err(__cc_chkr); })%s",
+                     (int)pre, src, (int)(after - call), call,
+                     (int)(after - call), call, rest);
+            snprintf(dst, cap, "%s", outb);
+            return 1;
+        }
+        if (strncmp(after, "== 0", 4) == 0 || strncmp(after, "==0", 3) == 0) {
+            const char* rest = after + (after[2] == ' ' ? 4 : 3);
+            pre = (size_t)(call - src);
+            snprintf(outb, sizeof(outb),
+                     "%.*s({ __typeof__(%.*s) __cc_chkr = %.*s; "
+                     "!__cc_uw_is_err(__cc_chkr); })%s",
+                     (int)pre, src, (int)(after - call), call,
+                     (int)(after - call), call, rest);
+            snprintf(dst, cap, "%s", outb);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void shadow_rewrite_ufcs(char* dst, size_t cap, const char* src,
+                                const char* elem_ty);
+
+/* Structured UFCS → C via lower_parts (no text reconstruct on the call). */
+static int shadow_emit_ufcs_to_buf(AstNode* st, char* dst, size_t cap,
+                                  const char* elem_ty) {
+    char recv[192];
+    char args[288];
+    int is_arrow;
+    int i;
+    if (!st || !dst || !cap) return 0;
+    if (st->kind != AST_UFCS_STMT && st->kind != AST_UFCS_EXPR) return 0;
+    is_arrow = (st->e[0] == '-');
+    snprintf(recv, sizeof(recv), "%s", st->a);
+    args[0] = 0;
+    if (st->c[0]) snprintf(args, sizeof(args), "%s", st->c);
+    /* Nested UFCS kids (recv/args) — structural first. */
+    for (i = 0; i < st->ndbody; i++) {
+        AstNode* u = st->dbody[i];
+        char nested[320];
+        char surface[288];
+        const char* uop;
+        if (!u || (u->kind != AST_UFCS_EXPR && u->kind != AST_UFCS_STMT))
+            continue;
+        if (!shadow_emit_ufcs_to_buf(u, nested, sizeof(nested), elem_ty))
+            continue;
+        uop = (u->e[0] == '-') ? "->" : ".";
+        if (u->c[0])
+            snprintf(surface, sizeof(surface), "%s%s%s(%s)", u->a, uop, u->b,
+                     u->c);
+        else
+            snprintf(surface, sizeof(surface), "%s%s%s()", u->a, uop, u->b);
+        if (strcmp(recv, surface) == 0)
+            snprintf(recv, sizeof(recv), "%s", nested);
+        if (args[0] && strcmp(args, surface) == 0)
+            snprintf(args, sizeof(args), "%s", nested);
+        else if (args[0] && surface[0]) {
+            /* Piece-level nested UFCS inside a larger arg list. */
+            const char* hit = strstr(args, surface);
+            if (hit) {
+                char rebuilt[288];
+                size_t pre = (size_t)(hit - args);
+                snprintf(rebuilt, sizeof(rebuilt), "%.*s%s%s", (int)pre, args,
+                         nested, hit + strlen(surface));
+                snprintf(args, sizeof(args), "%s", rebuilt);
+            }
+        }
+    }
+    if (!shadow_ufcs_lower_parts(recv, st->b, args, is_arrow, elem_ty, dst, cap)) {
+        if (args[0])
+            snprintf(dst, cap, "%s%s%s(%s)", recv, is_arrow ? "->" : ".", st->b, args);
+        else
+            snprintf(dst, cap, "%s%s%s()", recv, is_arrow ? "->" : ".", st->b);
+    }
+    return 1;
+}
+
+/* If src is exactly one UFCS call (no prefix/suffix), lower via parts. */
+static int shadow_emit_exact_ufcs_text(char* dst, size_t cap, const char* src,
+                                      const char* elem_ty) {
+    const char* op = NULL;
+    int is_arrow = 0;
+    const char* p;
+    char recv[192];
+    char meth_name[64];
+    char args[160];
+    const char* after = NULL;
+    const char* meth;
+    size_t mi = 0;
+    if (!src || !src[0]) return 0;
+    for (p = src; *p && !op; p++) {
+        if (p[0] == '-' && p[1] == '>' &&
+            ((p[2] >= 'A' && p[2] <= 'Z') || (p[2] >= 'a' && p[2] <= 'z') ||
+             p[2] == '_')) {
+            const char* m = p + 2;
+            const char* q;
+            while (*m == ' ' || *m == '\t') m++;
+            q = m;
+            while ((*q >= 'A' && *q <= 'Z') || (*q >= 'a' && *q <= 'z') ||
+                   (*q >= '0' && *q <= '9') || *q == '_')
+                q++;
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q == '(') {
+                op = p;
+                is_arrow = 1;
+                break;
+            }
+            p += 2;
+            continue;
+        }
+        if (p[0] == '.' &&
+            ((p[1] >= 'A' && p[1] <= 'Z') || (p[1] >= 'a' && p[1] <= 'z') ||
+             p[1] == '_')) {
+            const char* m = p + 1;
+            const char* q;
+            while (*m == ' ' || *m == '\t') m++;
+            q = m;
+            while ((*q >= 'A' && *q <= 'Z') || (*q >= 'a' && *q <= 'z') ||
+                   (*q >= '0' && *q <= '9') || *q == '_')
+                q++;
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q == '(') {
+                op = p;
+                is_arrow = 0;
+                break;
+            }
+        }
+    }
+    if (!op) return 0;
+    if (!shadow_ufcs_recv(src, op, recv, sizeof(recv))) return 0;
+    /* Recv must be the start of src (exact call, no leading junk). */
+    {
+        const char* rstart = op;
+        size_t rn;
+        while (rstart > src && (rstart[-1] == ' ' || rstart[-1] == '\t'))
+            rstart--;
+        rn = strlen(recv);
+        if ((size_t)(rstart - src) < rn) return 0;
+        rstart -= rn;
+        if (rstart != src || memcmp(rstart, recv, rn) != 0) return 0;
+    }
+    meth = is_arrow ? op + 2 : op + 1;
+    while (*meth == ' ' || *meth == '\t') meth++;
+    while (meth[mi] && meth[mi] != '(' && mi + 1 < sizeof(meth_name)) {
+        meth_name[mi] = meth[mi];
+        mi++;
+    }
+    meth_name[mi] = 0;
+    if (meth[mi] != '(') return 0;
+    if (!shadow_ufcs_args(meth + mi, args, sizeof(args), &after)) return 0;
+    while (after && (*after == ' ' || *after == '\t')) after++;
+    if (after && *after) return 0; /* trailing junk → not exact */
+    /* Reject chains: recv/args must not still contain UFCS calls. */
+    {
+        const char* q;
+        for (q = recv; *q; q++) {
+            if (q[0] == '.' && ((q[1] >= 'A' && q[1] <= 'Z') ||
+                                (q[1] >= 'a' && q[1] <= 'z') || q[1] == '_')) {
+                const char* r = q + 1;
+                while ((*r >= 'A' && *r <= 'Z') || (*r >= 'a' && *r <= 'z') ||
+                       (*r >= '0' && *r <= '9') || *r == '_')
+                    r++;
+                while (*r == ' ' || *r == '\t') r++;
+                if (*r == '(') return 0;
+            }
+            if (q[0] == '-' && q[1] == '>') return 0;
+        }
+        for (q = args; *q; q++) {
+            if (q[0] == '.' && ((q[1] >= 'A' && q[1] <= 'Z') ||
+                                (q[1] >= 'a' && q[1] <= 'z') || q[1] == '_')) {
+                const char* r = q + 1;
+                while ((*r >= 'A' && *r <= 'Z') || (*r >= 'a' && *r <= 'z') ||
+                       (*r >= '0' && *r <= '9') || *r == '_')
+                    r++;
+                while (*r == ' ' || *r == '\t') r++;
+                if (*r == '(') return 0;
+            }
+        }
+    }
+    return shadow_ufcs_lower_parts(recv, meth_name, args, is_arrow, elem_ty, dst,
+                                  cap);
+}
+
+/* Leftover expr text UFCS (slots / chains). Prefer exact parts; else peel. */
+static void shadow_emit_text_ufcs(char* dst, size_t cap, const char* src,
+                                 const char* elem_ty) {
+    char cur[512];
+    char nxt[512];
+    int i;
+    if (!src) { if (cap) dst[0] = 0; return; }
+    if (shadow_emit_exact_ufcs_text(dst, cap, src, elem_ty)) return;
+    snprintf(cur, sizeof(cur), "%s", src);
+    for (i = 0; i < 8; i++) {
+        if (!shadow_ufcs_peel_left(nxt, sizeof(nxt), cur, elem_ty)) break;
+        snprintf(cur, sizeof(cur), "%s", nxt);
+    }
+    snprintf(dst, cap, "%s", cur);
+}
+
+/* Prefer structured UFCS on dbody; else leftover text UFCS (exact / peel). */
+static void shadow_emit_expr_text(AstNode* st, const char* text, char* dst,
+                                  size_t cap, const char* elem_ty) {
+    int i;
+    if (st) {
+        for (i = 0; i < st->ndbody; i++) {
+            AstNode* u = st->dbody[i];
+            if (u && (u->kind == AST_UFCS_EXPR || u->kind == AST_UFCS_STMT)) {
+                if (shadow_emit_ufcs_to_buf(u, dst, cap, elem_ty)) return;
+            }
+        }
+    }
+    shadow_emit_text_ufcs(dst, cap, text, elem_ty);
+}
+
+/* Emit-site channel_pair → create_named (chan table). */
+static int shadow_emit_channel_pair_expr(char* dst, size_t cap, const char* src) {
+    char cur[768];
+    char nxt[768];
+    int n = 0;
+    if (!src) { if (cap) dst[0] = 0; return 0; }
+    snprintf(cur, sizeof(cur), "%s", src);
+    while (shadow_format_channel_pair(nxt, sizeof(nxt), cur)) {
+        snprintf(cur, sizeof(cur), "%s", nxt);
+        n = 1;
+    }
+    if (n) snprintf(dst, cap, "%s", cur);
+    return n;
+}
+
+/* Structured return !> unwrap (expr already lowered). */
+static void shadow_emit_return_bang_unwrap(char* dst, size_t cap,
+                                          const char* expr) {
+    snprintf(dst, cap,
+             "({ __typeof__(%s) __r = %s; "
+             "if (__cc_uw_is_err(__r)) { "
+             "CCError e = __cc_uw_err_at(__r, \"unwrap\", __FILE__, \"0\"); "
+             "(void)e; return -1; } "
+             "__cc_uw_value(__r); })",
+             expr, expr);
+}
+
+/* Leftover: bare `r.is_err()` text → `cc_is_err(r)` when not structured UFCS. */
+static void shadow_rewrite_cond(char* dst, size_t cap, const char* cond) {
+    size_t n = cond ? strlen(cond) : 0;
+    if (n >= 9 && memcmp(cond + n - 9, ".is_err()", 9) == 0) {
+        snprintf(dst, cap, "cc_is_err(%.*s)", (int)(n - 9), cond);
+        return;
+    }
+    snprintf(dst, cap, "%s", cond ? cond : "");
+}
+
+/* Cond: UFCS via emit_expr_text; leftover is_err / chan send-recv checks. */
+static void shadow_emit_cond_text(AstNode* st, const char* text, char* dst,
+                                 size_t cap) {
+    char cur[512];
+    char nxt[512];
+    shadow_emit_expr_text(st, text, cur, sizeof(cur), NULL);
+    shadow_rewrite_cond(nxt, sizeof(nxt), cur);
+    snprintf(cur, sizeof(cur), "%s", nxt);
+    while (shadow_lower_chan_result_cmp(nxt, sizeof(nxt), cur))
+        snprintf(cur, sizeof(cur), "%s", nxt);
+    snprintf(dst, cap, "%s", cur);
+}
+
+/* Opaque C passthrough for unparsed static bodies (RAW_BODY_REWRITE default 0). */
+static int g_shadow_raw_body_rewrite_hits = 0;
+static void shadow_rewrite_ufcs(char* dst, size_t cap, const char* src,
+                                const char* elem_ty) {
+    if (!src) { if (cap) dst[0] = 0; return; }
+#if !SHADOW_RAW_BODY_REWRITE
+    (void)elem_ty;
+    snprintf(dst, cap, "%s", src);
+#else
+    g_shadow_raw_body_rewrite_hits++;
+    char cur[512];
+    char nxt[512];
+    shadow_rewrite_attr_expr(cur, sizeof(cur), src);
+    for (int i = 0; i < 8; i++) {
+        if (!shadow_ufcs_peel_left(nxt, sizeof(nxt), cur, elem_ty))
+            break;
+        snprintf(cur, sizeof(cur), "%s", nxt);
+    }
+    snprintf(dst, cap, "%s", cur);
+    while (shadow_lower_return_bang(nxt, sizeof(nxt), dst))
+        snprintf(dst, cap, "%s", nxt);
+#endif
+}
+
