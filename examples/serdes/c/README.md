@@ -216,8 +216,8 @@ bytes → stage1 tape (toks + comment spans)
   `AST_UFCS_*` (table emit via `shadow_ufcs_lower_parts`); Map/Vec/`char[:]`,
   `@await`/`@create` spelled at parse; channel_pair / return `!>` / cond
   shapes handled at emit sites. No `shadow_lower_expr_beachhead` pipeline.
-  Leftover text UFCS (e.g. nested args, `@string` slots) still uses
-  `shadow_ufcs_apply` until those sites grow kids — not a second IR soup.
+  Leftover text (mainly `@string` chains) peels left-to-right through
+  `shadow_ufcs_peel_left` → `lower_parts` — not a second IR soup.
 - **Opaque C ≠ mangling.** Already-C blobs (switch cases, enum lists,
   `AST_RAW_LINE`, unparsed static-fn bodies) pass through as text. That is
   product policy, not CC sugar rewrite. `SHADOW_RAW_BODY_REWRITE` defaults

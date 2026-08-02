@@ -594,17 +594,6 @@ static void shadow_rewrite_cond(char* dst, size_t cap, const char* cond) {
     snprintf(dst, cap, "%s", cond ? cond : "");
 }
 
-/* x.error() → cc_error(x) (first occurrence) */
-static void shadow_rewrite_slot(char* dst, size_t cap, const char* expr) {
-    const char* p = expr ? strstr(expr, ".error()") : NULL;
-    if (!p) {
-        snprintf(dst, cap, "%s", expr ? expr : "");
-        return;
-    }
-    size_t pre = (size_t)(p - expr);
-    snprintf(dst, cap, "cc_error(%.*s)%s", (int)pre, expr, p + 8);
-}
-
 /* Extract receiver immediately before `.` / `->` at `op`.
  * Accepts ident, a->b.c chains, parenthesized expr, or call ending in `)`. */
 static int shadow_ufcs_recv(const char* src, const char* op, char* recv, size_t rcap) {
@@ -952,14 +941,16 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
     return 1;
 }
 
-/* Text UFCS rewrite for beachhead/raw-body; structured nodes use lower_parts. */
-static int shadow_ufcs_apply(char* dst, size_t cap, const char* src,
-                             const char* elem_ty) {
+/* One left-to-right UFCS step → lower_parts + splice.
+ * Leftmost so chains like d.halve().twice() peel correctly. Gated leftover
+ * text (slots/chains) uses this; structured AST_UFCS_* use lower_parts only. */
+static int shadow_ufcs_peel_left(char* dst, size_t cap, const char* src,
+                                const char* elem_ty) {
     const char* op = NULL;
     int is_arrow = 0;
     {
         const char* p = src;
-        while (*p) {
+        while (*p && !op) {
             if (p[0] == '-' && p[1] == '>' &&
                 ((p[2] >= 'A' && p[2] <= 'Z') || (p[2] >= 'a' && p[2] <= 'z') ||
                  p[2] == '_')) {
@@ -973,6 +964,7 @@ static int shadow_ufcs_apply(char* dst, size_t cap, const char* src,
                 if (*q == '(') {
                     op = p;
                     is_arrow = 1;
+                    break;
                 }
                 p += 2;
                 continue;
@@ -990,6 +982,7 @@ static int shadow_ufcs_apply(char* dst, size_t cap, const char* src,
                 if (*q == '(') {
                     op = p;
                     is_arrow = 0;
+                    break;
                 }
             }
             p++;
@@ -1070,7 +1063,7 @@ static int shadow_lower_return_bang(char* dst, size_t cap, const char* src) {
         char nxt[288];
         int i;
         for (i = 0; i < 4; i++) {
-            if (!shadow_ufcs_apply(nxt, sizeof(nxt), call, NULL)) break;
+            if (!shadow_ufcs_peel_left(nxt, sizeof(nxt), call, NULL)) break;
             snprintf(call, sizeof(call), "%s", nxt);
         }
     }
@@ -1288,7 +1281,7 @@ static int shadow_emit_exact_ufcs_text(char* dst, size_t cap, const char* src,
     const char* meth;
     size_t mi = 0;
     if (!src || !src[0]) return 0;
-    for (p = src; *p; p++) {
+    for (p = src; *p && !op; p++) {
         if (p[0] == '-' && p[1] == '>' &&
             ((p[2] >= 'A' && p[2] <= 'Z') || (p[2] >= 'a' && p[2] <= 'z') ||
              p[2] == '_')) {
@@ -1303,6 +1296,7 @@ static int shadow_emit_exact_ufcs_text(char* dst, size_t cap, const char* src,
             if (*q == '(') {
                 op = p;
                 is_arrow = 1;
+                break;
             }
             p += 2;
             continue;
@@ -1321,6 +1315,7 @@ static int shadow_emit_exact_ufcs_text(char* dst, size_t cap, const char* src,
             if (*q == '(') {
                 op = p;
                 is_arrow = 0;
+                break;
             }
         }
     }
@@ -1389,7 +1384,7 @@ static void shadow_emit_text_ufcs(char* dst, size_t cap, const char* src,
     if (shadow_emit_exact_ufcs_text(dst, cap, src, elem_ty)) return;
     snprintf(cur, sizeof(cur), "%s", src);
     for (i = 0; i < 8; i++) {
-        if (!shadow_ufcs_apply(nxt, sizeof(nxt), cur, elem_ty)) break;
+        if (!shadow_ufcs_peel_left(nxt, sizeof(nxt), cur, elem_ty)) break;
         snprintf(cur, sizeof(cur), "%s", nxt);
     }
     snprintf(dst, cap, "%s", cur);
@@ -1464,7 +1459,7 @@ static void shadow_rewrite_ufcs(char* dst, size_t cap, const char* src,
     char nxt[512];
     shadow_rewrite_attr_expr(cur, sizeof(cur), src);
     for (int i = 0; i < 8; i++) {
-        if (!shadow_ufcs_apply(nxt, sizeof(nxt), cur, elem_ty))
+        if (!shadow_ufcs_peel_left(nxt, sizeof(nxt), cur, elem_ty))
             break;
         snprintf(cur, sizeof(cur), "%s", nxt);
     }
@@ -1591,14 +1586,13 @@ static int shadow_emit_tpl_build(CEmit* out, const char* tpl, const char* arena_
             return 0;
         }
         char expr[128];
-        char rexpr[160];
         char uexpr[192];
         size_t el = (size_t)(end - (slot + 2));
         if (el >= sizeof(expr)) el = sizeof(expr) - 1;
         memcpy(expr, slot + 2, el);
         expr[el] = 0;
-        shadow_rewrite_slot(rexpr, sizeof(rexpr), expr);
-        shadow_emit_text_ufcs(uexpr, sizeof(uexpr), rexpr, NULL);
+        /* .error() / UFCS chains → lower_parts via left-to-right peel. */
+        shadow_emit_text_ufcs(uexpr, sizeof(uexpr), expr, NULL);
         /* Stdlib slot push: function-selector _Generic (safe unused arms). */
         if (!cemit_fmt(out,
                 "%scc__string_slot_push(&%s, (%s), %s);\n",

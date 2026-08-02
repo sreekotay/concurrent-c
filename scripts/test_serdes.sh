@@ -12,8 +12,8 @@ echo "[test_serdes] parallel path (shadow lowerer) — not production ccc"
 
 # Mangling debt locks: beachhead gone; raw-body rewrite off by default.
 EMIT="$ROOT/examples/serdes/c/pp_emit.cch"
-if rg -q 'shadow_lower_expr_beachhead' "$EMIT"; then
-  echo "[test_serdes] FAIL: shadow_lower_expr_beachhead still present"
+if rg -q 'shadow_lower_expr_beachhead|shadow_rewrite_slot|shadow_ufcs_apply' "$EMIT"; then
+  echo "[test_serdes] FAIL: deleted mangling helper still present"
   exit 1
 fi
 if ! rg -q '#define SHADOW_RAW_BODY_REWRITE 0' "$EMIT"; then
