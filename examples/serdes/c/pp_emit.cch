@@ -1254,19 +1254,15 @@ static int shadow_emit_ufcs_to_buf(AstNode* st, char* dst, size_t cap,
             snprintf(recv, sizeof(recv), "%s", nested);
         if (args[0] && strcmp(args, surface) == 0)
             snprintf(args, sizeof(args), "%s", nested);
-    }
-    /* Nested UFCS inside larger arg lists (not whole-span kids). */
-    {
-        char nxt[320];
-        int j;
-        for (j = 0; j < 4; j++) {
-            if (!shadow_ufcs_apply(nxt, sizeof(nxt), recv, elem_ty)) break;
-            snprintf(recv, sizeof(recv), "%s", nxt);
-        }
-        if (args[0]) {
-            for (j = 0; j < 6; j++) {
-                if (!shadow_ufcs_apply(nxt, sizeof(nxt), args, elem_ty)) break;
-                snprintf(args, sizeof(args), "%s", nxt);
+        else if (args[0] && surface[0]) {
+            /* Piece-level nested UFCS inside a larger arg list. */
+            const char* hit = strstr(args, surface);
+            if (hit) {
+                char rebuilt[288];
+                size_t pre = (size_t)(hit - args);
+                snprintf(rebuilt, sizeof(rebuilt), "%.*s%s%s", (int)pre, args,
+                         nested, hit + strlen(surface));
+                snprintf(args, sizeof(args), "%s", rebuilt);
             }
         }
     }
@@ -1279,13 +1275,118 @@ static int shadow_emit_ufcs_to_buf(AstNode* st, char* dst, size_t cap,
     return 1;
 }
 
-/* Leftover expr text UFCS (slots / args without kids). Not the beachhead soup. */
+/* If src is exactly one UFCS call (no prefix/suffix), lower via parts. */
+static int shadow_emit_exact_ufcs_text(char* dst, size_t cap, const char* src,
+                                      const char* elem_ty) {
+    const char* op = NULL;
+    int is_arrow = 0;
+    const char* p;
+    char recv[192];
+    char meth_name[64];
+    char args[160];
+    const char* after = NULL;
+    const char* meth;
+    size_t mi = 0;
+    if (!src || !src[0]) return 0;
+    for (p = src; *p; p++) {
+        if (p[0] == '-' && p[1] == '>' &&
+            ((p[2] >= 'A' && p[2] <= 'Z') || (p[2] >= 'a' && p[2] <= 'z') ||
+             p[2] == '_')) {
+            const char* m = p + 2;
+            const char* q;
+            while (*m == ' ' || *m == '\t') m++;
+            q = m;
+            while ((*q >= 'A' && *q <= 'Z') || (*q >= 'a' && *q <= 'z') ||
+                   (*q >= '0' && *q <= '9') || *q == '_')
+                q++;
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q == '(') {
+                op = p;
+                is_arrow = 1;
+            }
+            p += 2;
+            continue;
+        }
+        if (p[0] == '.' &&
+            ((p[1] >= 'A' && p[1] <= 'Z') || (p[1] >= 'a' && p[1] <= 'z') ||
+             p[1] == '_')) {
+            const char* m = p + 1;
+            const char* q;
+            while (*m == ' ' || *m == '\t') m++;
+            q = m;
+            while ((*q >= 'A' && *q <= 'Z') || (*q >= 'a' && *q <= 'z') ||
+                   (*q >= '0' && *q <= '9') || *q == '_')
+                q++;
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q == '(') {
+                op = p;
+                is_arrow = 0;
+            }
+        }
+    }
+    if (!op) return 0;
+    if (!shadow_ufcs_recv(src, op, recv, sizeof(recv))) return 0;
+    /* Recv must be the start of src (exact call, no leading junk). */
+    {
+        const char* rstart = op;
+        size_t rn;
+        while (rstart > src && (rstart[-1] == ' ' || rstart[-1] == '\t'))
+            rstart--;
+        rn = strlen(recv);
+        if ((size_t)(rstart - src) < rn) return 0;
+        rstart -= rn;
+        if (rstart != src || memcmp(rstart, recv, rn) != 0) return 0;
+    }
+    meth = is_arrow ? op + 2 : op + 1;
+    while (*meth == ' ' || *meth == '\t') meth++;
+    while (meth[mi] && meth[mi] != '(' && mi + 1 < sizeof(meth_name)) {
+        meth_name[mi] = meth[mi];
+        mi++;
+    }
+    meth_name[mi] = 0;
+    if (meth[mi] != '(') return 0;
+    if (!shadow_ufcs_args(meth + mi, args, sizeof(args), &after)) return 0;
+    while (after && (*after == ' ' || *after == '\t')) after++;
+    if (after && *after) return 0; /* trailing junk → not exact */
+    /* Reject chains: recv/args must not still contain UFCS calls. */
+    {
+        const char* q;
+        for (q = recv; *q; q++) {
+            if (q[0] == '.' && ((q[1] >= 'A' && q[1] <= 'Z') ||
+                                (q[1] >= 'a' && q[1] <= 'z') || q[1] == '_')) {
+                const char* r = q + 1;
+                while ((*r >= 'A' && *r <= 'Z') || (*r >= 'a' && *r <= 'z') ||
+                       (*r >= '0' && *r <= '9') || *r == '_')
+                    r++;
+                while (*r == ' ' || *r == '\t') r++;
+                if (*r == '(') return 0;
+            }
+            if (q[0] == '-' && q[1] == '>') return 0;
+        }
+        for (q = args; *q; q++) {
+            if (q[0] == '.' && ((q[1] >= 'A' && q[1] <= 'Z') ||
+                                (q[1] >= 'a' && q[1] <= 'z') || q[1] == '_')) {
+                const char* r = q + 1;
+                while ((*r >= 'A' && *r <= 'Z') || (*r >= 'a' && *r <= 'z') ||
+                       (*r >= '0' && *r <= '9') || *r == '_')
+                    r++;
+                while (*r == ' ' || *r == '\t') r++;
+                if (*r == '(') return 0;
+            }
+        }
+    }
+    return shadow_ufcs_lower_parts(recv, meth_name, args, is_arrow, elem_ty, dst,
+                                  cap);
+}
+
+/* Leftover expr text UFCS (slots / chains). Prefer exact parts; else apply. */
 static void shadow_emit_text_ufcs(char* dst, size_t cap, const char* src,
                                  const char* elem_ty) {
     char cur[512];
     char nxt[512];
     int i;
     if (!src) { if (cap) dst[0] = 0; return; }
+    if (shadow_emit_exact_ufcs_text(dst, cap, src, elem_ty)) return;
     snprintf(cur, sizeof(cur), "%s", src);
     for (i = 0; i < 8; i++) {
         if (!shadow_ufcs_apply(nxt, sizeof(nxt), cur, elem_ty)) break;

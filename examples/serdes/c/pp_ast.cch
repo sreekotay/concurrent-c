@@ -2096,10 +2096,39 @@ static AstNode* ast_make_ufcs(Parser* p, AstKind kind, int r0, int call_op,
         if (!ast_spell_token_range(p, a0, a1, n->c, sizeof(n->c)) &&
             !span_text(p, a0, a1, n->c, sizeof(n->c)))
             return NULL;
-        /* Nested UFCS covering the whole args span (whitelist). */
+        /* Nested UFCS: whole args, or each top-level comma piece. */
         {
             AstNode* nested = parse_ufcs_expr_range(p, a0, a1);
-            if (nested) (void)ast_attach_ufcs_kid(p, n, nested);
+            if (nested) {
+                (void)ast_attach_ufcs_kid(p, n, nested);
+            } else {
+                int s = a0;
+                int depth = 0;
+                int k;
+                for (k = a0; k <= a1; k++) {
+                    int at_end = (k == a1);
+                    int at_comma = 0;
+                    if (!at_end) {
+                        Token t = p->toks[k];
+                        if (tok_eq(t, TK_PUNCT, "(") || tok_eq(t, TK_PUNCT, "[") ||
+                            tok_eq(t, TK_PUNCT, "{"))
+                            depth++;
+                        else if (tok_eq(t, TK_PUNCT, ")") ||
+                                 tok_eq(t, TK_PUNCT, "]") ||
+                                 tok_eq(t, TK_PUNCT, "}"))
+                            depth--;
+                        else if (depth == 0 && tok_eq(t, TK_PUNCT, ","))
+                            at_comma = 1;
+                    }
+                    if (at_comma || at_end) {
+                        if (k > s) {
+                            AstNode* piece = parse_ufcs_expr_range(p, s, k);
+                            if (piece) (void)ast_attach_ufcs_kid(p, n, piece);
+                        }
+                        s = k + 1;
+                    }
+                }
+            }
         }
     }
     /* Nested UFCS as receiver when recv is itself a call chain. */
