@@ -129,6 +129,7 @@ SHADOW_LOWER_SCRIPT := bin/shadow_lower
 SHADOW_LOWER_WRAPPER := $(OUT_BINDIR)/shadow_lower
 # Native shadow_lower (libtcc-linked) + host-built runtime dylib for --exe.
 SHADOW_LOWER_CCS := ../examples/serdes/c/shadow_lower.ccs
+SHADOW_BUILD_CCH := ../examples/serdes/c/shadow_build.cch
 SHADOW_TCC_C := ../examples/serdes/c/shadow_tcc_compile.c
 SHADOW_TCC_OBJ := $(OBJDIR)/shadow_tcc_compile.o
 OUT_LIBDIR := $(dir $(OUT_BINDIR))lib
@@ -321,7 +322,7 @@ $(SHADOW_TCC_OBJ): $(SHADOW_TCC_C) $(TCC_LIB_DEP)
 
 # Native shadow_lower beside ccc: emit + optional in-process libtcc --exe.
 # Falls back to scripts/shadow_lower.sh only if the native build is skipped.
-$(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_CCS) $(SHADOW_TCC_OBJ) $(WRAPPER) $(TCC_LIB_DEP) $(RUNTIME_DYLIB)
+$(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_CCS) $(SHADOW_BUILD_CCH) $(SHADOW_TCC_OBJ) $(WRAPPER) $(TCC_LIB_DEP) $(RUNTIME_DYLIB)
 	@mkdir -p $(dir $@)
 	$(WRAPPER) $(SHADOW_LOWER_CCS) -o $@ \
 		--cc-flags "-I../examples/serdes/c -I$(TCC_INC) -DSHADOW_HAVE_LIBTCC=1" \

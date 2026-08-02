@@ -746,6 +746,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --bin-dir DIR       Output dir for linked executables (default: <repo>/bin)\n");
     fprintf(stderr, "  --out-stem NAME     Override the basename/stem used for generated files\n");
     fprintf(stderr, "  --no-cache          Disable incremental cache (also: CC_NO_CACHE=1)\n");
+    fprintf(stderr, "  --frontend=serdes|legacy  Opt-in SERDES front (also: CC_FRONTEND=serdes)\n");
     fprintf(stderr, "  --timeout SECONDS   Kill run/test step after timeout\n");
     fprintf(stderr, "  --verbose           Print invoked commands\n");
     fprintf(stderr, "One-liners:\n");
@@ -2204,10 +2205,118 @@ static int cc__load_const_bindings(const CCBuildOptions* opt, CCConstBinding* bi
 static void cc__print_comptime_targets(const char* build_path);
 static void cc__print_comptime_state(const CCBuildOptions* opt, const char* build_path, const CCConstBinding* bindings, size_t count);
 
+/* Opt-in SERDES front: --frontend=serdes or CC_FRONTEND=serdes.
+ * -1 = unset (env), 0 = legacy, 1 = serdes. */
+static int g_frontend_serdes = -1;
+
+static int cc__want_serdes_front(void) {
+    if (g_frontend_serdes == 1) return 1;
+    if (g_frontend_serdes == 0) return 0;
+    {
+        const char* e = getenv("CC_FRONTEND");
+        return e && strcmp(e, "serdes") == 0;
+    }
+}
+
+static int cc__ends_with_ci(const char* s, const char* suf) {
+    size_t n, m;
+    if (!s || !suf) return 0;
+    n = strlen(s);
+    m = strlen(suf);
+    if (n < m) return 0;
+    return strcmp(s + n - m, suf) == 0;
+}
+
+/* Resolve native shadow_lower beside ccc (not the ccc-run wrapper). */
+static int cc__find_shadow_lower(char* dst, size_t cap) {
+    const char* env = getenv("CC_SHADOW_LOWER");
+    if (env && env[0] && access(env, X_OK) == 0) {
+        snprintf(dst, cap, "%s", env);
+        return 0;
+    }
+    if (g_repo_root[0]) {
+        snprintf(dst, cap, "%s/out/cc/bin/shadow_lower", g_repo_root);
+        if (access(dst, X_OK) == 0) return 0;
+        snprintf(dst, cap, "%s/cc/bin/shadow_lower", g_repo_root);
+        if (access(dst, X_OK) == 0) return 0;
+    }
+    snprintf(dst, cap, "out/cc/bin/shadow_lower");
+    if (access(dst, X_OK) == 0) return 0;
+    return -1;
+}
+
+/* Delegate .ccs build/emit to native shadow_lower (owns cache + host-cc/link). */
+static int cc__run_shadow_lower(const char* in_path, const char* out_path,
+                                int no_cache, int verbose) {
+    char shadow[PATH_MAX];
+    char* argv[8];
+    int argc = 0;
+    pid_t pid;
+    int status;
+    if (!in_path || !out_path) return -1;
+    if (cc__find_shadow_lower(shadow, sizeof(shadow)) != 0) {
+        fprintf(stderr,
+                "cc: --frontend=serdes requires native shadow_lower "
+                "(make -C cc ../out/cc/bin/shadow_lower)\n");
+        return -1;
+    }
+    argv[argc++] = shadow;
+    if (no_cache) argv[argc++] = (char*)"--no-cache";
+    argv[argc++] = (char*)in_path;
+    argv[argc++] = (char*)"-o";
+    argv[argc++] = (char*)out_path;
+    argv[argc] = NULL;
+    if (verbose) {
+        fprintf(stderr, "cc: serdes:");
+        for (int i = 0; argv[i]; ++i) fprintf(stderr, " %s", argv[i]);
+        fprintf(stderr, "\n");
+    }
+    pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "cc: fork failed for shadow_lower\n");
+        return -1;
+    }
+    if (pid == 0) {
+        execv(shadow, argv);
+        _exit(127);
+    }
+    if (waitpid(pid, &status, 0) < 0) return -1;
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        fprintf(stderr, "cc: shadow_lower failed (rc=%d)\n",
+                WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+        return -1;
+    }
+    return 0;
+}
+
 // Core compile helper shared by default and build modes.
 static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary_out) {
     if (!opt || !opt->in_path || !opt->c_out_path) {
         fprintf(stderr, "cc: missing input or c_out_path\n");
+        return -1;
+    }
+    /* SERDES succession path: delegate .ccs link/emit to shadow_lower. */
+    if (cc__want_serdes_front() && cc__ends_with_ci(opt->in_path, ".ccs")) {
+        if (opt->mode == CC_MODE_LINK && opt->bin_out_path) {
+            if (summary_out) {
+                memset(summary_out, 0, sizeof(*summary_out));
+                summary_out->bin_out_path = opt->bin_out_path;
+            }
+            return cc__run_shadow_lower(opt->in_path, opt->bin_out_path,
+                                        opt->no_cache, opt->verbose);
+        }
+        if (opt->mode == CC_MODE_EMIT_C) {
+            if (summary_out) {
+                memset(summary_out, 0, sizeof(*summary_out));
+                summary_out->c_out_path = opt->c_out_path;
+                summary_out->did_emit_c = 1;
+            }
+            return cc__run_shadow_lower(opt->in_path, opt->c_out_path,
+                                        opt->no_cache, opt->verbose);
+        }
+        fprintf(stderr,
+                "cc: --frontend=serdes supports --link and --emit-c-only "
+                "(got --compile); use legacy front or emit-c-only\n");
         return -1;
     }
     if (summary_out) {
@@ -3247,6 +3356,30 @@ static int run_build_mode(int argc, char** argv) {
         if (strcmp(argv[i], "--debug") == 0 || strcmp(argv[i], "-g") == 0) { opt_debug = 1; continue; }
         if (strcmp(argv[i], "--summary") == 0) { summary = 1; continue; }
         if (strcmp(argv[i], "--no-cache") == 0) { no_cache = 1; continue; }
+        if (strcmp(argv[i], "--frontend") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "cc: --frontend requires serdes|legacy\n");
+                goto parse_fail;
+            }
+            ++i;
+            if (strcmp(argv[i], "serdes") == 0) g_frontend_serdes = 1;
+            else if (strcmp(argv[i], "legacy") == 0) g_frontend_serdes = 0;
+            else {
+                fprintf(stderr, "cc: --frontend must be serdes or legacy\n");
+                goto parse_fail;
+            }
+            continue;
+        }
+        if (strncmp(argv[i], "--frontend=", 11) == 0) {
+            const char* v = argv[i] + 11;
+            if (strcmp(v, "serdes") == 0) g_frontend_serdes = 1;
+            else if (strcmp(v, "legacy") == 0) g_frontend_serdes = 0;
+            else {
+                fprintf(stderr, "cc: --frontend must be serdes or legacy\n");
+                goto parse_fail;
+            }
+            continue;
+        }
         if (strcmp(argv[i], "--out-dir") == 0) {
             if (i + 1 >= argc) { fprintf(stderr, "cc: --out-dir requires a path\n"); goto parse_fail; }
             out_dir = argv[++i];
@@ -5186,6 +5319,31 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--keep-c") == 0) { keep_c = 1; continue; }
         if (strcmp(argv[i], "--verbose") == 0) { verbose = 1; continue; }
         if (strcmp(argv[i], "--no-cache") == 0) { no_cache = 1; continue; }
+        if (strcmp(argv[i], "--frontend") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "cc: --frontend requires serdes|legacy\n");
+                usage(argv[0]);
+                return 1;
+            }
+            ++i;
+            if (strcmp(argv[i], "serdes") == 0) g_frontend_serdes = 1;
+            else if (strcmp(argv[i], "legacy") == 0) g_frontend_serdes = 0;
+            else {
+                fprintf(stderr, "cc: --frontend must be serdes or legacy\n");
+                return 1;
+            }
+            continue;
+        }
+        if (strncmp(argv[i], "--frontend=", 11) == 0) {
+            const char* v = argv[i] + 11;
+            if (strcmp(v, "serdes") == 0) g_frontend_serdes = 1;
+            else if (strcmp(v, "legacy") == 0) g_frontend_serdes = 0;
+            else {
+                fprintf(stderr, "cc: --frontend must be serdes or legacy\n");
+                return 1;
+            }
+            continue;
+        }
         if (strcmp(argv[i], "--out-dir") == 0) {
             if (i + 1 >= argc) { fprintf(stderr, "cc: --out-dir requires a path\n"); usage(argv[0]); return 1; }
             out_dir = argv[++i];

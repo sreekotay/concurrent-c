@@ -1,10 +1,17 @@
 # SERDES 2-stage emit experiment
 
-**Status: long-lived parallel path.** Not a drop-in replacement for today's
-`ccc` (heavily TCC-shaped passes). Target shape: **SERDES/CC owns the
-transform**; **minimally modified TCC is comptime-only**; host `cc` consumes
-emitted `.c` / `.h`. Wiring into the production driver stays deferred — the
-old model is too entangled with TCC to merge cheaply.
+**Status: succession path (opt-in).** The whitelist AST front is the
+maintainable successor to hand-rolled `ccc` lowering. Default `ccc` stays
+legacy until the gate is boring; opt in with:
+
+```bash
+ccc --frontend=serdes examples/hello.ccs -o /tmp/hello
+# or: CC_FRONTEND=serdes ccc examples/hello.ccs -o /tmp/hello
+```
+
+`shadow_lower` is the product tool: emit text, host-cc build with emit/obj
+cache under `out/.cc-build/serdes/`, or `--exe` (libtcc from the emit buffer).
+Succession metric is **warm host-cc rebuild parity**, not libtcc-vs-clang.
 
 Not a project to write a full C parser
 ([ARCHITECTURE NG-1](../../cc/docs/ARCHITECTURE.md): we *emit* C; host/TCC
@@ -51,7 +58,8 @@ Same front for both products; H adds `#pragma once` and rejects function bodies.
 | `pp_emit_stmt.cch` | Stmt switch + TU product |
 | `pp_lower.cch` | Thin include of ast + emit |
 | `c_pp_spike.cch` | Umbrella for tools/smokes |
-| `shadow_lower.ccs` | Explicit CLI (does **not** replace `ccc`) |
+| `shadow_lower.ccs` | Product CLI (emit / host-cc+cache / `--exe`) |
+| `shadow_build.cch` | Emit/obj cache + host-cc link (ccc-compatible flags) |
 | `shadow_tcc_compile.{c,h}` | Emit buffer → libtcc `--exe` (no .c on disk) |
 | `fixtures/` | Architecture falsifiers (mid-struct include, guards, …) |
 | `shadow/` | Goldens: mini, includes, frags, `hello`, trimmed recipe smoke twins, `cc_exec.h` |
@@ -199,10 +207,11 @@ into the TCC-heavy driver until the transform boundary is boring.
 ## Working rules
 
 - Goldens on every emit/parse change; host `cc -c` on mini products
-- No default `ccc` pipeline changes from this tree
+- Default `ccc` stays legacy; opt-in via `--frontend=serdes` / `CC_FRONTEND=serdes`
 - Grow **emit/lower** whitelist, not a general C parser
 - Nested stmt lists stay on `AstNode.body[]` (do not append into
   `kids_storage` while a parent list is still open)
+- Fair bench: warm vs warm host-cc (`shadow/bench_vs_ccc.sh`)
 
 ## Direction (real shape — zero text mangling)
 
@@ -213,7 +222,8 @@ bytes → stage1 tape (toks + comment spans)
      → stage2 stitch (include / #define / guards)   ← upfront, closed
      → whitelist AST (types + Call + sticky trivia + type map)
      → emit C once (#line / err_at → original .ccs/.cch)
-     → host cc / comptime consume product C
+     → cache (out/.cc-build/serdes/<fp>/) → host cc + link
+       (or --exe: libtcc from emit buffer)
 ```
 
 - **Stitch early.** Macros/defines/includes before AST; never re-expand in emit.
