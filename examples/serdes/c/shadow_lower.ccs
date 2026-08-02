@@ -200,6 +200,13 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    if (!shadow_safety_check(items, n, &cache)) {
+        pp_free_macros(&pp);
+        tape_cache_free(&cache);
+        cc_arena_free(&arena);
+        return 1;
+    }
+
     CEmit emit = {0};
     if (!shadow_emit(items, n, &cache, &emit, kind, pp.pass_inc, pp.npass_inc,
                      pp.pass_def, pp.npass_def)) {

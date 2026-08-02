@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 set -euo pipefail
 
 # Local test entrypoint without requiring "make test" (though building cc still uses make today).
@@ -12,6 +12,9 @@ set -euo pipefail
 #   --full             same as CC_TEST_FULL=1
 #   CC_TEST_QUICK=0    same as --full (escape hatch if something sets QUICK=1)
 #   --quick            explicit default (no-op unless paired with conflicting FULL)
+#   --serdes           build tests via ccc --frontend=serdes (CC_TEST_FRONTEND=serdes)
+#   --compare-front    run the harness twice (legacy then serdes) and print wall times
+#   CC_TEST_FRONTEND=serdes|legacy   same as --serdes when set to serdes
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
@@ -30,18 +33,34 @@ fi
 # Default: quick. Full is opt-in.
 quick=1
 full=0
+serdes=0
+compare_front=0
 case "${CC_TEST_FULL:-0}" in
   1|yes|true|TRUE|Yes) full=1 ;;
 esac
 case "${CC_TEST_QUICK:-}" in
   0|no|false|FALSE|No) full=1 ;;
 esac
+case "${CC_TEST_FRONTEND:-}" in
+  serdes) serdes=1 ;;
+esac
+# Strip front flags before handing argv to cc_test; keep --quick/--full.
+args=()
 for a in "$@"; do
   case "$a" in
-    --quick) quick=1; full=0 ;;
-    --full)  full=1 ;;
+    --quick) quick=1; full=0; args+=("$a") ;;
+    --full)  full=1; args+=("$a") ;;
+    --serdes) serdes=1 ;;
+    --compare-front) compare_front=1 ;;
+    *) args+=("$a") ;;
   esac
 done
+# Empty "${args[@]}" trips `set -u` on some bash builds — expand safely.
+if [ "${#args[@]}" -gt 0 ]; then
+  set -- "${args[@]}"
+else
+  set --
+fi
 if [ "$full" = 1 ]; then
   quick=0
 fi
@@ -86,6 +105,13 @@ else
   echo "[test] full mode (jobs=$jobs)"
 fi
 
+if [ "$serdes" = 1 ] || [ "$compare_front" = 1 ]; then
+  if [ ! -x "./out/cc/bin/shadow_lower" ] && [ ! -x "./cc/bin/shadow_lower" ]; then
+    echo "[test] FAIL: --serdes/--compare-front needs native shadow_lower (make -C cc)"
+    exit 1
+  fi
+fi
+
 # D3.0: exercise the in-process constexpr seam (cc_tcc_eval_const_expr) — a
 # compiler-internal that the .ccs/.c harness can't reach directly.
 if [ -x "./cc/bin/ccc" ]; then
@@ -114,7 +140,7 @@ if [ -x "./cc/bin/ccc" ]; then
     echo "[test] autoblock noblock warning selftest FAILED"
     exit 1
   fi
-  # SERDES parallel lowerer is NOT part of this gate — use scripts/test_serdes.sh.
+  # Full SERDES goldens/recipes: scripts/test_serdes.sh (not this gate).
 
   if [ "$quick" = 0 ]; then
     # @async state-machine #line accuracy on the real redis port: async poll
@@ -163,6 +189,63 @@ if [ -x "./cc/bin/ccc" ]; then
   else
     echo "[test] quick: skipped async_line_map / diag_cache / variant_shape / tcc_patch / redis_functional"
   fi
+fi
+
+now_s() {
+  python3 -c 'import time; print(f"{time.perf_counter():.3f}")'
+}
+
+run_harness() {
+  front="$1"
+  shift
+  export CC_TEST_FRONTEND="$front"
+  # Keep CC_FRONTEND in sync so nested tools see the same choice.
+  if [ "$front" = "serdes" ]; then
+    export CC_FRONTEND=serdes
+  else
+    unset CC_FRONTEND 2>/dev/null || true
+    export CC_TEST_FRONTEND=legacy
+  fi
+  # shellcheck disable=SC2086
+  ./tools/cc_test $extra "$@"
+}
+
+if [ "$compare_front" = 1 ]; then
+  echo "[test] compare-front: legacy then serdes (same harness args)"
+  echo "[test] note: serdes coverage is incomplete — expect more failures; metric is wall time"
+  t0="$(now_s)"
+  set +e
+  # shellcheck disable=SC2086
+  run_harness legacy "$@"
+  rc_leg=$?
+  set -e
+  t1="$(now_s)"
+  set +e
+  # shellcheck disable=SC2086
+  run_harness serdes "$@"
+  rc_ser=$?
+  set -e
+  t2="$(now_s)"
+  leg_s="$(python3 -c "print(f'{float('$t1')-float('$t0'):.1f}')")"
+  ser_s="$(python3 -c "print(f'{float('$t2')-float('$t1'):.1f}')")"
+  ratio="$(python3 -c "a=float('$ser_s'); b=float('$leg_s'); print(f'{a/b:.2f}x' if b>0 else 'n/a')")"
+  echo ""
+  echo "[test] compare-front summary"
+  echo "  legacy: ${leg_s}s  rc=$rc_leg"
+  echo "  serdes: ${ser_s}s  rc=$rc_ser  (${ratio} of legacy wall time)"
+  if [ "$rc_ser" -ne 0 ]; then
+    echo "[test] tip: serdes front failed some tests (expected until coverage grows)"
+  fi
+  # Gate on legacy; serdes incompleteness is informational for this mode.
+  exit "$rc_leg"
+fi
+
+if [ "$serdes" = 1 ]; then
+  echo "[test] frontend=serdes (ccc --frontend=serdes via CC_TEST_FRONTEND)"
+  export CC_TEST_FRONTEND=serdes
+  export CC_FRONTEND=serdes
+else
+  unset CC_TEST_FRONTEND 2>/dev/null || true
 fi
 
 # shellcheck disable=SC2086

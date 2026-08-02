@@ -1,8 +1,10 @@
 # SERDES 2-stage emit experiment
 
-**Status: succession path (opt-in).** The whitelist AST front is the
-maintainable successor to hand-rolled `ccc` lowering. Default `ccc` stays
-legacy until the gate is boring; opt in with:
+**Status: succession path (opt-in).** Beachhead metric on
+`./scripts/test.sh --serdes --quick`: ~331 OK / ~812 total (~41%). Phase 1
+cleanup (unify unwrap emit, cap hygiene, stub retirement, parse/emit splits,
+leftover `?>` quarantine) is done; succession stays opt-in until the gate is
+boring. Default `ccc` stays legacy. Opt in with:
 
 ```bash
 ccc --frontend=serdes examples/hello.ccs -o /tmp/hello
@@ -50,12 +52,18 @@ Same front for both products; H adds `#pragma once` and rejects function bodies.
 | `pp_stage2.cch` | Stage‑2 cpp subset + `pp_dir` static_map |
 | `pp_ast.cch` | AST umbrella → core + parse |
 | `pp_ast_core.cch` | Keywords, AstNode, Parser, spell helpers |
-| `pp_ast_parse_stmt.cch` | Statement / expr parsers |
+| `pp_ast_parse_stmt.cch` | Control-flow parsers + `parse_stmt` dispatch |
+| `pp_ast_parse_unwrap.cch` | Unwrap / bang / result-local / ptr unwrap |
+| `pp_ast_parse_spawn.cch` | Spawn / send_task / closure / capture infer |
 | `pp_ast_parse_ext.cch` | External / TU parsers + `parse_tu` |
 | `pp_emit.cch` | Emit umbrella → core + ufcs + stmt |
-| `pp_emit_core.cch` | CEmit, bind/chan tables, `#line` / lead |
+| `pp_emit_core.cch` | CEmit, bind/chan tables, `#line` / lead; leftover `?>` API |
 | `pp_emit_ufcs.cch` | `lower_parts` + leftover peel (not a pipeline) |
-| `pp_emit_stmt.cch` | Stmt switch + TU product |
+| `pp_emit_unwrap.cch` | Result / bang / qmark / try_assign emit |
+| `pp_emit_spawn.cch` | Closure make, spawn collect, defer epilogue |
+| `pp_emit_async.cch` | `@async` poll-task beachhead |
+| `pp_emit_tu.cch` | TU product (typedefs, Result specs, file switch) |
+| `pp_emit_stmt.cch` | Stmt switch + destroy helpers |
 | `pp_lower.cch` | Thin include of ast + emit |
 | `c_pp_spike.cch` | Umbrella for tools/smokes |
 | `shadow_lower.ccs` | Product CLI (emit / host-cc+cache / `--exe`) |
@@ -246,6 +254,21 @@ bytes → stage1 tape (toks + comment spans)
   include order for tools.
 - Recipe twins deleted except smoke goldens; recipes behavioral via
   `scripts/test_serdes_shadow.sh`. Do not weaken stdlib hard-go or comptime.
+
+## Next gaps (after cleanup)
+
+Prioritized by fail mass × language value on serdes-quick:
+
+1. **Safety / diag oracles** — retired `@`, sync `@await`, bare `!>;`, slice move /
+   unique provenance, arena borrow, unwrap diverge / unhandled-result, `@err`
+   forward/deadcode, closure ref/alias mutation, `@as` pointer/dup/ambiguous,
+   ordered-tx, async bare `chan_send`/`chan_recv`, channel send pointer-field /
+   non-stable slice (`pp_ast_safety.cch`); still missing variant/comptime /
+   grammar/type_of (~18 silent-accept)
+2. **`@comptime` / `@emit`** — blocks still comment-stripped (factory sugar works)
+3. **`@variant` AST + emit** — no whitelist surface yet
+4. **Real `@async` / `@await` SM** — replace poll-wrapper beachhead
+5. UFCS leftovers / `@as` forwarding; slice provenance; `@string` templates
 
 ## Explicit tool
 

@@ -9,7 +9,11 @@
  *
  *   pp_emit_core.cch — CEmit, tables, #line / lead
  *   pp_emit_ufcs.cch — UFCS lower_parts + leftover peel
- *   pp_emit_stmt.cch — stmt switch + TU product
+ *   pp_emit_stmt.cch — stmt switch + destroy helpers
+ *     pp_emit_unwrap.cch — Result / bang / qmark / try_assign
+ *     pp_emit_spawn.cch — closure make, spawn collect, defer epilogue
+ *     pp_emit_async.cch — @async poll-task beachhead
+ *     pp_emit_tu.cch — TU product (typedefs, Result specs, file switch)
  */
 #pragma once
 

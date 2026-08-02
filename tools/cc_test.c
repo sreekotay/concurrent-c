@@ -711,20 +711,27 @@ static int run_one_test(const char* stem,
         trim_trailing_ws_inplace(ldflags_clean);
     }
 
-    /* 1) Build via ccc build (this is the build system under test) */
+    /* 1) Build via ccc build (this is the build system under test).
+     * Opt-in SERDES front: CC_TEST_FRONTEND=serdes or CC_FRONTEND=serdes. */
     char build_cmd[3072];
     const char* cache_flag = use_cache ? "" : "--no-cache ";
+    const char* front_flag = "";
+    {
+        const char* fe = getenv("CC_TEST_FRONTEND");
+        if (!fe || !fe[0]) fe = getenv("CC_FRONTEND");
+        if (fe && strcmp(fe, "serdes") == 0) front_flag = "--frontend=serdes ";
+    }
     if (ldflags_clean[0]) {
         snprintf(build_cmd, sizeof(build_cmd),
-                 "./cc/bin/ccc build %s--out-dir %s --bin-dir %s --link %s -o %s --ld-flags \"%s\"",
-                 cache_flag,
+                 "./cc/bin/ccc build %s%s--out-dir %s --bin-dir %s --link %s -o %s --ld-flags \"%s\"",
+                 cache_flag, front_flag,
                  (out_dir && out_dir[0]) ? out_dir : "out",
                  (bin_dir && bin_dir[0]) ? bin_dir : "bin",
                  input_path, bin_out, ldflags_clean);
     } else {
         snprintf(build_cmd, sizeof(build_cmd),
-                 "./cc/bin/ccc build %s--out-dir %s --bin-dir %s --link %s -o %s",
-                 cache_flag,
+                 "./cc/bin/ccc build %s%s--out-dir %s --bin-dir %s --link %s -o %s",
+                 cache_flag, front_flag,
                  (out_dir && out_dir[0]) ? out_dir : "out",
                  (bin_dir && bin_dir[0]) ? bin_dir : "bin",
                  input_path, bin_out);
@@ -899,6 +906,7 @@ static void usage(const char* prog) {
     fprintf(stderr, "  --quick  skip stress/lostwake/race tests (default)\n");
     fprintf(stderr, "  --full   include stress/lostwake/race tests (also CC_TEST_FULL=1)\n");
     fprintf(stderr, "  c_pp_*   SERDES smokes skipped unless CC_TEST_SERDES=1 or --filter c_pp_\n");
+    fprintf(stderr, "  Front:   CC_TEST_FRONTEND=serdes|legacy (or CC_FRONTEND) → ccc --frontend=\n");
 }
 
 int main(int argc, char** argv) {

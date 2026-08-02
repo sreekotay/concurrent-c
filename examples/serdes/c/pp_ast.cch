@@ -10,3 +10,4 @@
 #pragma once
 #include "pp_ast_core.cch"
 #include "pp_ast_parse.cch"
+#include "pp_ast_safety.cch"

@@ -73,9 +73,246 @@ static void shadow_mangle_type(const char* src, char* out, size_t out_sz) {
 
 static void shadow_result_name(const char* ok, const char* err, char* out, size_t out_sz) {
     char mok[128], merr[128];
-    shadow_mangle_type(ok, mok, sizeof(mok));
+    const char* oks = ok;
+    char ptmp[128];
+    if (ok && strchr(ok, '*')) {
+        snprintf(ptmp, sizeof(ptmp), "void*");
+        oks = ptmp;
+    }
+    shadow_mangle_type(oks, mok, sizeof(mok));
     shadow_mangle_type(err, merr, sizeof(merr));
     snprintf(out, out_sz, "CCResult_%s_%s", mok, merr);
+}
+
+/* In result-fn bodies, rewrite cc_ok/cc_err to typed cc_ok_RNAME/cc_err_RNAME. */
+static void shadow_rewrite_result_ctors(char* expr, size_t cap, const char* rname) {
+    char tmp[512];
+    const char* p;
+    char* o;
+    size_t rem;
+    if (!expr || !cap || !rname || !rname[0]) return;
+    p = expr;
+    o = tmp;
+    rem = sizeof(tmp) - 1;
+    tmp[0] = 0;
+    while (*p && rem > 0) {
+        if (strncmp(p, "cc_ok(", 6) == 0) {
+            int n = snprintf(o, rem, "cc_ok_%s(", rname);
+            if (n < 0 || (size_t)n >= rem) break;
+            o += n;
+            rem -= (size_t)n;
+            p += 6;
+            continue;
+        }
+        if (strncmp(p, "cc_err(", 7) == 0) {
+            const char* args = p + 7; /* first char inside parens */
+            const char* q = args;
+            int dep = 1;
+            int has_comma = 0;
+            while (*q && dep > 0) {
+                if (*q == '(') dep++;
+                else if (*q == ')') dep--;
+                if (dep == 1 && *q == ',') has_comma = 1;
+                q++;
+            }
+            if (has_comma) {
+                int n = snprintf(o, rem, "cc_err_%s(CC_ERROR(", rname);
+                if (n < 0 || (size_t)n >= rem) break;
+                o += n;
+                rem -= (size_t)n;
+                p = args;
+                while (p < q - 1 && rem > 0) {
+                    *o++ = *p++;
+                    rem--;
+                }
+                if (rem < 3) break;
+                *o++ = ')';
+                *o++ = ')';
+                rem -= 2;
+            } else {
+                int n = snprintf(o, rem, "cc_err_%s(", rname);
+                if (n < 0 || (size_t)n >= rem) break;
+                o += n;
+                rem -= (size_t)n;
+                p += 7;
+                continue;
+            }
+            p = q;
+            continue;
+        }
+        *o++ = *p++;
+        rem--;
+    }
+    *o = 0;
+    snprintf(expr, cap, "%s", tmp);
+}
+
+/* Result temp `__r`: emit `!(__r).ok` / `(__r).u.value` / `(__r).u.error`.
+ * Host `_Generic` `__cc_uw_*` is only for AST_PTR_UNWRAP (pointer/null default). */
+
+/* True if s[i] starts an identifier char. */
+static int shadow_is_id0(char c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
+}
+static int shadow_is_id(char c) {
+    return shadow_is_id0(c) || (c >= '0' && c <= '9');
+}
+
+/* Walk back from end (exclusive) over a primary call/ident for ?> / !> lhs. */
+static int shadow_expr_lhs_start(const char* s, int end) {
+    int i = end - 1;
+    while (i >= 0 && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n')) i--;
+    if (i < 0) return -1;
+    if (s[i] == ')') {
+        int d = 0;
+        while (i >= 0) {
+            if (s[i] == ')') d++;
+            else if (s[i] == '(') {
+                d--;
+                if (d == 0) { i--; break; }
+            }
+            i--;
+        }
+        while (i >= 0 && (s[i] == ' ' || s[i] == '\t')) i--;
+        if (i < 0 || !shadow_is_id(s[i])) return -1;
+        while (i >= 0 && shadow_is_id(s[i])) i--;
+        return i + 1;
+    }
+    if (!shadow_is_id(s[i])) return -1;
+    while (i >= 0 && shadow_is_id(s[i])) i--;
+    return i + 1;
+}
+
+/* Rewrite one `lhs ?> [>(bind)] rhs` occurrence. Returns 1 if rewritten. */
+static int shadow_rewrite_one_qmark(char* expr, size_t cap) {
+    char out[768];
+    const char* p;
+    int op;
+    int ls, le, rs, re;
+    char bind[64];
+    int bi;
+    if (!expr || !cap) return 0;
+    p = strstr(expr, "?>");
+    if (!p) return 0;
+    op = (int)(p - expr);
+    le = op;
+    ls = shadow_expr_lhs_start(expr, le);
+    if (ls < 0) return 0;
+    bi = 0;
+    bind[0] = 0;
+    rs = op + 2;
+    /* ?>(ident) binder — no space between ?> and ( */
+    if (expr[rs] == '(' && shadow_is_id0(expr[rs + 1])) {
+        int k = rs + 1;
+        while (expr[k] && shadow_is_id(expr[k])) k++;
+        if (expr[k] == ')' && k > rs + 1) {
+            int n = k - (rs + 1);
+            if (n >= (int)sizeof(bind)) n = (int)sizeof(bind) - 1;
+            memcpy(bind, expr + rs + 1, (size_t)n);
+            bind[n] = 0;
+            bi = 1;
+            rs = k + 1;
+        }
+    }
+    while (expr[rs] == ' ' || expr[rs] == '\t') rs++;
+    {
+        int depth = 0;
+        re = rs;
+        while (expr[re]) {
+            char c = expr[re];
+            if (c == '(' || c == '[' || c == '{') depth++;
+            else if (c == ')' || c == ']' || c == '}') {
+                if (depth == 0) break;
+                depth--;
+            } else if (depth == 0 && (c == ',' || c == ';')) break;
+            else if (depth == 0 && (c == '+' || c == '-' || c == '*' || c == '/' ||
+                                    c == '%' || c == '|' || c == '&' || c == '^' ||
+                                    c == '<' || c == '>' || c == '?' || c == ':') &&
+                     !(c == '>' && expr[re + 1] == '=') &&
+                     !(c == '<' && expr[re + 1] == '=') &&
+                     !(c == '+' && expr[re + 1] == '+') &&
+                     !(c == '-' && expr[re + 1] == '-')) {
+                /* Stop at binary ops so `a ?> 0 > 10` binds ?> tightly.
+                 * Keep unary/paren defaults: `?> (-1)` already consumed '('. */
+                if (re > rs) break;
+            }
+            re++;
+        }
+    }
+    if (re <= rs) return 0;
+    if (bi) {
+        if (snprintf(out, sizeof(out),
+                     "%.*s({ __typeof__(%.*s) __r = (%.*s); "
+                     "!__cc_uw_is_err(__r) ? __cc_uw_value(__r) : "
+                     "({ CCError %s = __cc_uw_err_at(__r, \"unwrap\", __FILE__, \"0\"); "
+                     "(void)%s; (%.*s); }); })%s",
+                     ls, expr, le - ls, expr + ls, le - ls, expr + ls,
+                     bind, bind, re - rs, expr + rs, expr + re) >= (int)sizeof(out))
+            return 0;
+    } else {
+        if (snprintf(out, sizeof(out),
+                     "%.*s({ __typeof__(%.*s) __r = (%.*s); "
+                     "!__cc_uw_is_err(__r) ? __cc_uw_value(__r) : (%.*s); })%s",
+                     ls, expr, le - ls, expr + ls, le - ls, expr + ls,
+                     re - rs, expr + rs, expr + re) >= (int)sizeof(out))
+            return 0;
+    }
+    if (strlen(out) >= cap) return 0;
+    snprintf(expr, cap, "%s", out);
+    return 1;
+}
+
+/* Sole leftover `?>` text rewrite entry (emit-time). Prefer parse-time
+ * AST_* unwrap forms; do not call `shadow_rewrite_one_qmark` from ad-hoc sites. */
+static void shadow_emit_leftover_qmark_rewrite(char* expr, size_t cap) {
+    int guard = 0;
+    if (!expr || !cap) return;
+    while (guard++ < 8 && shadow_rewrite_one_qmark(expr, cap)) { }
+}
+
+/* Rewrite @slice(lit) → cc_slice_from_cstr(lit) for host-cc (preprocess seam). */
+static void shadow_rewrite_at_slice(char* expr, size_t cap) {
+    char tmp[768];
+    const char* p;
+    char* o;
+    size_t rem;
+    if (!expr || !cap) return;
+    p = expr;
+    o = tmp;
+    rem = sizeof(tmp) - 1;
+    tmp[0] = 0;
+    while (*p && rem > 0) {
+        if (p[0] == '@' && strncmp(p, "@slice(", 7) == 0) {
+            const char* args = p + 7;
+            const char* q = args;
+            int dep = 1;
+            while (*q && dep > 0) {
+                if (*q == '(') dep++;
+                else if (*q == ')') dep--;
+                q++;
+            }
+            if (dep == 0) {
+                int n = snprintf(o, rem, "cc_slice_from_cstr(");
+                if (n < 0 || (size_t)n >= rem) break;
+                o += n;
+                rem -= (size_t)n;
+                p = args;
+                while (p < q - 1 && rem > 0) {
+                    *o++ = *p++;
+                    rem--;
+                }
+                if (rem < 2) break;
+                *o++ = ')';
+                rem--;
+                p = q;
+                continue;
+            }
+        }
+        *o++ = *p++;
+        rem--;
+    }
+    *o = 0;
+    snprintf(expr, cap, "%s", tmp);
 }
 
 /* Rewrite #include <… .cch> → #include <… .h> for host/TCC consumption. */
@@ -129,6 +366,9 @@ static int g_shadow_nvecs;
 /* Map::[K,V] — compact "K_V" → Map_K_V + hash/eq table. */
 static char g_shadow_maps[8][64];
 static int g_shadow_nmaps;
+/* Non-prelude slice elems needing CC_DECL_SLICE(T) (e.g. Pt). */
+static char g_shadow_slices[8][64];
+static int g_shadow_nslices;
 
 /* User generic factories (CC_GENERIC_FACTORY). */
 typedef struct {
@@ -160,13 +400,81 @@ typedef struct {
 static ShadowBind g_shadow_binds[96];
 static int g_shadow_nbinds;
 
+/* Declared callables for UFCS family/bare-name resolution. */
+typedef struct {
+    char name[96];
+    char first_ty[128];
+} ShadowUfcsFn;
+static ShadowUfcsFn g_shadow_ufns[128];
+static int g_shadow_nufns;
+
 static void shadow_chan_reset(void) {
     g_shadow_nchans = 0;
     g_shadow_nvecs = 0;
     g_shadow_nmaps = 0;
+    g_shadow_nslices = 0;
     g_shadow_ngfac = 0;
     g_shadow_nginst = 0;
     g_shadow_nbinds = 0;
+    g_shadow_nufns = 0;
+}
+
+static int shadow_slice_elem_is_prelude(const char* t) {
+    return t && (!strcmp(t, "int") || !strcmp(t, "double") ||
+                 !strcmp(t, "float") || !strcmp(t, "char") ||
+                 !strcmp(t, "bool") || !strcmp(t, "size_t") ||
+                 !strcmp(t, "long") || !strcmp(t, "long_long") ||
+                 !strcmp(t, "short") || !strcmp(t, "int16_t") ||
+                 !strcmp(t, "int32_t") || !strcmp(t, "int64_t"));
+}
+
+static void shadow_slice_need(const char* elem) {
+    int i;
+    if (!elem || !elem[0] || g_shadow_nslices >= 8) return;
+    if (shadow_slice_elem_is_prelude(elem)) return;
+    for (i = 0; i < g_shadow_nslices; i++) {
+        if (strcmp(g_shadow_slices[i], elem) == 0) return;
+    }
+    snprintf(g_shadow_slices[g_shadow_nslices], sizeof(g_shadow_slices[0]), "%s",
+             elem);
+    g_shadow_nslices++;
+}
+
+static void shadow_ufn_register(const char* name, const char* first_ty) {
+    int i;
+    if (!name || !name[0] || g_shadow_nufns >= 128) return;
+    for (i = 0; i < g_shadow_nufns; i++) {
+        if (strcmp(g_shadow_ufns[i].name, name) == 0) {
+            if (first_ty)
+                snprintf(g_shadow_ufns[i].first_ty,
+                         sizeof(g_shadow_ufns[i].first_ty), "%s", first_ty);
+            return;
+        }
+    }
+    snprintf(g_shadow_ufns[g_shadow_nufns].name,
+             sizeof(g_shadow_ufns[0].name), "%s", name);
+    snprintf(g_shadow_ufns[g_shadow_nufns].first_ty,
+             sizeof(g_shadow_ufns[0].first_ty), "%s", first_ty ? first_ty : "");
+    g_shadow_nufns++;
+}
+
+static int shadow_ufn_exists(const char* name) {
+    int i;
+    if (!name || !name[0]) return 0;
+    for (i = 0; i < g_shadow_nufns; i++) {
+        if (strcmp(g_shadow_ufns[i].name, name) == 0) return 1;
+    }
+    return 0;
+}
+
+static const char* shadow_ufn_first_ty(const char* name) {
+    int i;
+    if (!name || !name[0]) return NULL;
+    for (i = 0; i < g_shadow_nufns; i++) {
+        if (strcmp(g_shadow_ufns[i].name, name) == 0)
+            return g_shadow_ufns[i].first_ty;
+    }
+    return NULL;
 }
 
 static void shadow_bind_name(const char* name, const char* ty, int flags) {
@@ -197,6 +505,16 @@ static const ShadowBind* shadow_bind_lookup(const char* name) {
     return NULL;
 }
 
+/* Rewrite cc_ok/cc_err using a bound variable's declared CCResult_* type. */
+static void shadow_rewrite_result_ctors_for_var(char* expr, size_t cap,
+                                                const char* var) {
+    const ShadowBind* b;
+    if (!expr || !cap || !var || !var[0]) return;
+    b = shadow_bind_lookup(var);
+    if (b && b->ty[0] && strncmp(b->ty, "CCResult_", 9) == 0)
+        shadow_rewrite_result_ctors(expr, cap, b->ty);
+}
+
 /* Simple identifier at the start of a UFCS receiver (strip * &). */
 static const ShadowBind* shadow_bind_for_recv(const char* recv) {
     char name[64];
@@ -218,13 +536,29 @@ static int shadow_bind_ty_has(const ShadowBind* b, const char* needle) {
     return b && b->ty[0] && needle && strstr(b->ty, needle) != NULL;
 }
 
-/* Strip trailing * / spaces from a bound type into dst. */
+/* Strip leading cv / trailing * / spaces from a bound type into dst. */
 static void shadow_bind_base_ty(const ShadowBind* b, char* dst, size_t cap) {
     size_t n;
+    const char* s;
     if (!dst || !cap) return;
     dst[0] = 0;
     if (!b || !b->ty[0]) return;
-    snprintf(dst, cap, "%s", b->ty);
+    s = b->ty;
+    while (*s == ' ' || *s == '\t') s++;
+    for (;;) {
+        if (strncmp(s, "const ", 6) == 0) {
+            s += 6;
+            while (*s == ' ' || *s == '\t') s++;
+            continue;
+        }
+        if (strncmp(s, "volatile ", 9) == 0) {
+            s += 9;
+            while (*s == ' ' || *s == '\t') s++;
+            continue;
+        }
+        break;
+    }
+    snprintf(dst, cap, "%s", s);
     n = strlen(dst);
     while (n > 0 && (dst[n - 1] == ' ' || dst[n - 1] == '*' || dst[n - 1] == '\t'))
         dst[--n] = 0;
@@ -339,7 +673,14 @@ static int shadow_map_hash_eq(const char* compact, const char** hash,
                               char* vbuf, size_t vcap) {
     const char* us;
     size_t kn;
-    if (!compact || !hash || !eq) return 0;
+    if (!compact || !hash || !eq || !kbuf || !vbuf) return 0;
+    if (strcmp(compact, "CCSliceHdr_int") == 0) {
+        snprintf(kbuf, kcap, "CCSliceHdr");
+        snprintf(vbuf, vcap, "int");
+        *hash = "cc_map_hash_slice_hdr";
+        *eq = "cc_map_eq_slice_hdr";
+        return 1;
+    }
     us = strchr(compact, '_');
     if (!us) return 0;
     kn = (size_t)(us - compact);
@@ -347,9 +688,34 @@ static int shadow_map_hash_eq(const char* compact, const char** hash,
     memcpy(kbuf, compact, kn);
     kbuf[kn] = 0;
     snprintf(vbuf, vcap, "%s", us + 1);
-    if (strcmp(compact, "CCSliceHdr_int") == 0) {
+    if (strcmp(kbuf, "int") == 0) {
+        *hash = "cc_map_hash_i32";
+        *eq = "cc_map_eq_i32";
+        return 1;
+    }
+    if (strcmp(kbuf, "CCSliceHdr") == 0) {
         *hash = "cc_map_hash_slice_hdr";
         *eq = "cc_map_eq_slice_hdr";
+        return 1;
+    }
+    if (strcmp(kbuf, "CCSlicePacked") == 0) {
+        *hash = "cc_map_hash_slice_packed";
+        *eq = "cc_map_eq_slice_packed";
+        return 1;
+    }
+    if (strcmp(kbuf, "CCSlice") == 0 || strcmp(kbuf, "charslice") == 0) {
+        *hash = "cc_map_hash_slice";
+        *eq = "cc_map_eq_slice";
+        return 1;
+    }
+    if (strstr(kbuf, "slice") != NULL || strstr(kbuf, "Slice") != NULL) {
+        *hash = "cc_map_hash_slice";
+        *eq = "cc_map_eq_slice";
+        return 1;
+    }
+    if (strstr(kbuf, "64") != NULL) {
+        *hash = "cc_map_hash_u64";
+        *eq = "cc_map_eq_u64";
         return 1;
     }
     return 0;
@@ -411,9 +777,28 @@ static void shadow_escape_path(char* dst, size_t cap, const char* path) {
 }
 
 /* Bake file/line as string literals (production shape). `__LINE__` is an int
- * and breaks `__cc_uw_err_at`'s `const char* line_str` once `#line` is active. */
+ * and breaks once `#line` is active if used as an int diag arg. */
 static int shadow_emit_err_at_bind(CEmit* out, ShadowCtx* ctx, const char* indent,
                                    const char* bind, const char* site) {
+    const char* path = "unknown";
+    int line = 0;
+    char esc[512];
+    (void)site;
+    if (ctx && ctx->site)
+        (void)shadow_site_loc(ctx->cache, ctx->site, &path, &line);
+    if (!path || !path[0]) path = "unknown";
+    shadow_escape_path(esc, sizeof(esc), path);
+    /* Result field access — no host _Generic arm required. */
+    return cemit_fmt(out,
+        "%scc_rt_diag_record_unwrap_site(\"%s\", \"%d\");\n"
+        "%sCCError %s = (__r).u.error;\n",
+        indent, esc, line, indent, bind);
+}
+
+/* Pointer/null unwrap: host `_Generic` `__cc_uw_err_at` (Result + null default). */
+static int shadow_emit_ptr_err_at_bind(CEmit* out, ShadowCtx* ctx,
+                                       const char* indent, const char* bind,
+                                       const char* site) {
     const char* path = "unknown";
     int line = 0;
     char esc[512];

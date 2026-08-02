@@ -1,0 +1,1530 @@
+/* Post-parse safety/diag beachhead for the SERDES front.
+ * Slice move, unique provenance, arena borrow free/reset/spawn-pin,
+ * unwrap diverge / bare unhandled, closure capture mutation.
+ * Requires pp_ast_core.cch (AstNode / TapeCache). */
+#pragma once
+
+enum {
+    SHADOW_SAFE_VAR_CAP = 96,
+    SHADOW_SAFE_PIN_CAP = 24,
+    SHADOW_SAFE_EH_CAP = 16,
+    SHADOW_SAFE_RFN_CAP = 64
+};
+
+typedef struct {
+    char name[64];
+    char ty[64];    /* declared type spelling (aggregate send bans) */
+    int is_slice;
+    int is_arena;
+    int is_arena_ptr;
+    int is_ptr;     /* any pointer local */
+    int moved;
+    int unique;     /* move-only (unique bit / [:!]) */
+    int arena_view; /* non-owning slice into arena epoch */
+    int nonstable_slice; /* aggregate init copied an arena-view slice */
+    int is_chan;    /* 1 = tx (>), 2 = rx (<) */
+    char arena[64]; /* owning arena ident (view / ptr) */
+    char alias_of[64]; /* if ptr init from &local */
+} ShadowSafeVar;
+
+enum {
+    SHADOW_SAFE_STRUCT_CAP = 64,
+    SHADOW_SAFE_FIELD_CAP = 24,
+    SHADOW_SAFE_AS_SEEN_CAP = 32
+};
+
+typedef struct {
+    char name[64]; /* typedef alias */
+    char fty[SHADOW_SAFE_FIELD_CAP][64];
+    char fname[SHADOW_SAFE_FIELD_CAP][64];
+    int is_as[SHADOW_SAFE_FIELD_CAP];
+    int nf;
+} ShadowSafeStruct;
+
+typedef struct {
+    ShadowSafeVar vars[SHADOW_SAFE_VAR_CAP];
+    int nvars;
+    char pinned[SHADOW_SAFE_PIN_CAP][64];
+    int npin;
+    AstNode* eh_stack[SHADOW_SAFE_EH_CAP];
+    int neh;
+    char result_fns[SHADOW_SAFE_RFN_CAP][64];
+    int nrfn;
+    int strict_unhandled; /* CC_STRICT_RESULT_UNWRAP (default on) */
+    int in_async;         /* walking an @async fn body */
+    TapeCache* cache;
+    int err;
+    ShadowSafeStruct* structs; /* file-scope table owned by check */
+    int nstructs;
+} ShadowSafeCtx;
+
+static void shadow_safe_err_at_col(ShadowSafeCtx* ctx, AstNode* st, int force_col,
+                                   const char* msg) {
+    FileTape* ft;
+    int line = 1, col = 1;
+    if (!ctx || !msg) return;
+    ctx->err = 1;
+    if (!st || !ctx->cache || !st->file_id) {
+        fprintf(stderr, "error: %s\n", msg);
+        return;
+    }
+    ft = tape_by_id(ctx->cache, st->file_id);
+    if (!ft || !ft->bytes) {
+        fprintf(stderr, "error: %s\n", msg);
+        return;
+    }
+    offset_to_linecol(ft->bytes, ft->len, st->tok_off, &line, &col);
+    if (force_col > 0) col = force_col;
+    fprintf(stderr, "%s:%d:%d: error: %s\n", ft->path, line, col, msg);
+}
+
+static void shadow_safe_err_at(ShadowSafeCtx* ctx, AstNode* st, const char* msg) {
+    shadow_safe_err_at_col(ctx, st, 0, msg);
+}
+
+static void shadow_safe_check_async_chan_text(ShadowSafeCtx* ctx, AstNode* st,
+                                             const char* text);
+static void shadow_safe_on_chan_send_text(ShadowSafeCtx* ctx, AstNode* st,
+                                         const char* text);
+static ShadowSafeStruct* shadow_safe_find_struct(ShadowSafeCtx* ctx,
+                                                const char* name);
+static void shadow_safe_strip_ty(const char* in, char* out, size_t cap);
+
+static int shadow_safe_ident_eq(const char* a, const char* b) {
+    return a && b && a[0] && strcmp(a, b) == 0;
+}
+
+static ShadowSafeVar* shadow_safe_find(ShadowSafeCtx* ctx, const char* name) {
+    int i;
+    if (!ctx || !name || !name[0]) return NULL;
+    for (i = ctx->nvars - 1; i >= 0; i--) {
+        if (strcmp(ctx->vars[i].name, name) == 0) return &ctx->vars[i];
+    }
+    return NULL;
+}
+
+static ShadowSafeVar* shadow_safe_add(ShadowSafeCtx* ctx, const char* name) {
+    ShadowSafeVar* v;
+    if (!ctx || !name || !name[0] || ctx->nvars >= SHADOW_SAFE_VAR_CAP)
+        return NULL;
+    v = &ctx->vars[ctx->nvars++];
+    memset(v, 0, sizeof(*v));
+    snprintf(v->name, sizeof(v->name), "%s", name);
+    return v;
+}
+
+static int shadow_safe_is_word(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
+
+/* True if `text` contains ident as a whole word. */
+static int shadow_safe_text_uses(const char* text, const char* ident) {
+    const char* p;
+    size_t n;
+    if (!text || !ident || !ident[0]) return 0;
+    n = strlen(ident);
+    p = text;
+    while ((p = strstr(p, ident)) != NULL) {
+        char before = (p > text) ? p[-1] : 0;
+        char after = p[n];
+        if (!shadow_safe_is_word(before) && !shadow_safe_is_word(after))
+            return 1;
+        p += n;
+    }
+    return 0;
+}
+
+/* Skip uses inside cc_move(ident) — the move site itself is not UAF. */
+static int shadow_safe_text_uses_outside_move(const char* text,
+                                             const char* ident) {
+    const char* p;
+    size_t n;
+    if (!text || !ident || !ident[0]) return 0;
+    n = strlen(ident);
+    p = text;
+    while ((p = strstr(p, ident)) != NULL) {
+        char before = (p > text) ? p[-1] : 0;
+        char after = p[n];
+        if (!shadow_safe_is_word(before) && !shadow_safe_is_word(after)) {
+            const char* q = p;
+            while (q > text && (q[-1] == ' ' || q[-1] == '\t')) q--;
+            if (q > text && q[-1] == '(') {
+                const char* m = q - 1;
+                const char* key = "cc_move";
+                size_t kn = 7;
+                while (m > text && (m[-1] == ' ' || m[-1] == '\t')) m--;
+                if ((size_t)(m - text) >= kn &&
+                    memcmp(m - kn, key, kn) == 0 &&
+                    (m - kn == text || !shadow_safe_is_word(m[-kn - 1]))) {
+                    p += n;
+                    continue;
+                }
+            }
+            return 1;
+        }
+        p += n;
+    }
+    return 0;
+}
+
+static int shadow_safe_plain_ident(const char* text, char* out, size_t cap) {
+    size_t i = 0, n;
+    if (!text || !out || cap < 2) return 0;
+    while (text[i] == ' ' || text[i] == '\t') i++;
+    if (!shadow_safe_is_word(text[i]) || (text[i] >= '0' && text[i] <= '9'))
+        return 0;
+    n = 0;
+    while (shadow_safe_is_word(text[i])) {
+        if (n + 1 >= cap) return 0;
+        out[n++] = text[i++];
+    }
+    while (text[i] == ' ' || text[i] == '\t') i++;
+    if (text[i] != 0) return 0;
+    out[n] = 0;
+    return n > 0;
+}
+
+static int shadow_safe_amp_ident(const char* text, char* out, size_t cap) {
+    size_t i = 0;
+    if (!text) return 0;
+    while (text[i] == ' ' || text[i] == '\t') i++;
+    if (text[i] == '&') {
+        i++;
+        while (text[i] == ' ' || text[i] == '\t') i++;
+    }
+    return shadow_safe_plain_ident(text + i, out, cap);
+}
+
+/* First top-level comma-separated arg as ident or &ident. */
+static int shadow_safe_first_arg_ident(const char* args, char* out, size_t cap) {
+    char buf[160];
+    size_t n = 0;
+    int depth = 0;
+    size_t i = 0;
+    if (!args) return 0;
+    while (args[i] == ' ' || args[i] == '\t') i++;
+    while (args[i] && n + 1 < sizeof(buf)) {
+        char c = args[i];
+        if (c == '(' || c == '[' || c == '{') depth++;
+        else if (c == ')' || c == ']' || c == '}') {
+            if (depth) depth--;
+        } else if (c == ',' && depth == 0)
+            break;
+        buf[n++] = c;
+        i++;
+    }
+    buf[n] = 0;
+    return shadow_safe_amp_ident(buf, out, cap);
+}
+
+static int shadow_safe_parse_cc_move(const char* expr, char* src, size_t cap) {
+    const char* p;
+    char args[160];
+    size_t n;
+    int depth;
+    if (!expr) return 0;
+    p = strstr(expr, "cc_move(");
+    if (!p) return 0;
+    if (p > expr && shadow_safe_is_word(p[-1])) return 0;
+    p += 8;
+    depth = 1;
+    n = 0;
+    while (*p && n + 1 < sizeof(args)) {
+        if (*p == '(') depth++;
+        else if (*p == ')') {
+            depth--;
+            if (depth == 0) break;
+        }
+        args[n++] = *p++;
+    }
+    if (depth != 0) return 0;
+    args[n] = 0;
+    return shadow_safe_amp_ident(args, src, cap);
+}
+
+static int shadow_safe_expr_unique_lit(const char* expr) {
+    /* Beachhead: cc_slice_make_id(..., true, ...) marks unique. */
+    return expr && strstr(expr, "cc_slice_make_id(") != NULL &&
+           strstr(expr, ", true,") != NULL;
+}
+
+static int shadow_safe_arena_from_alloc_call(const char* expr, char* arena,
+                                            size_t cap) {
+    const char* p;
+    const char* keys[] = {
+        "cc_arena_alloc_slice_bytes(", "cc_arena_alloc_T_count(",
+        "cc_arena_alloc_T(", "cc_arena_alloc(", NULL};
+    int k;
+    if (!expr) return 0;
+    for (k = 0; keys[k]; k++) {
+        p = strstr(expr, keys[k]);
+        if (!p) continue;
+        p += strlen(keys[k]);
+        /* slice_bytes: (&arena, n) — arena first.
+         * alloc_T_count: (T, &arena, n) — arena second. */
+        if (strcmp(keys[k], "cc_arena_alloc_T_count(") == 0 ||
+            strcmp(keys[k], "cc_arena_alloc_T(") == 0) {
+            const char* comma = strchr(p, ',');
+            if (!comma) continue;
+            p = comma + 1;
+        }
+        if (shadow_safe_first_arg_ident(p, arena, cap)) return 1;
+    }
+    return 0;
+}
+
+static int shadow_safe_from_parts_base(const char* expr, char* base,
+                                      size_t cap) {
+    const char* p;
+    if (!expr) return 0;
+    p = strstr(expr, "cc_slice_from_parts(");
+    if (!p) return 0;
+    p += strlen("cc_slice_from_parts(");
+    return shadow_safe_first_arg_ident(p, base, cap);
+}
+
+static int shadow_safe_type_is_slice(const char* ty) {
+    if (!ty) return 0;
+    if (strcmp(ty, "CCSlice") == 0) return 1;
+    if (strncmp(ty, "CCSlice_", 8) == 0) return 1;
+    if (strstr(ty, "Slice") != NULL) return 1;
+    return 0;
+}
+
+static int shadow_safe_type_is_arena(const char* ty) {
+    return ty && (strcmp(ty, "CCArena") == 0 || strcmp(ty, "CCArena*") == 0);
+}
+
+static void shadow_safe_pin_arena(ShadowSafeCtx* ctx, const char* arena) {
+    int i;
+    if (!ctx || !arena || !arena[0] || ctx->npin >= SHADOW_SAFE_PIN_CAP) return;
+    for (i = 0; i < ctx->npin; i++) {
+        if (strcmp(ctx->pinned[i], arena) == 0) return;
+    }
+    snprintf(ctx->pinned[ctx->npin++], sizeof(ctx->pinned[0]), "%s", arena);
+}
+
+static int shadow_safe_arena_pinned(ShadowSafeCtx* ctx, const char* arena) {
+    int i;
+    if (!ctx || !arena) return 0;
+    for (i = 0; i < ctx->npin; i++) {
+        if (strcmp(ctx->pinned[i], arena) == 0) return 1;
+    }
+    return 0;
+}
+
+static int shadow_safe_live_borrow_on(ShadowSafeCtx* ctx, const char* arena) {
+    int i;
+    if (!ctx || !arena) return 0;
+    /* Epoch-end vs in-scope slice views only — arena pointers may outlive
+     * reset (sibling-block / after-scope smokes); spawn pins cover captures. */
+    for (i = 0; i < ctx->nvars; i++) {
+        ShadowSafeVar* v = &ctx->vars[i];
+        if (v->moved || !v->arena_view) continue;
+        if (shadow_safe_ident_eq(v->arena, arena)) return 1;
+    }
+    return 0;
+}
+
+static void shadow_safe_check_moved_use(ShadowSafeCtx* ctx, AstNode* st,
+                                       const char* text) {
+    int i;
+    char msg[160];
+    if (!ctx || !text) return;
+    for (i = 0; i < ctx->nvars; i++) {
+        ShadowSafeVar* v = &ctx->vars[i];
+        if (!v->is_slice || !v->moved) continue;
+        if (!shadow_safe_text_uses_outside_move(text, v->name)) continue;
+        snprintf(msg, sizeof(msg), "use of moved slice '%s'", v->name);
+        shadow_safe_err_at(ctx, st, msg);
+        fprintf(stderr,
+                "  note: after cc_move(x), the source variable is no longer "
+                "valid\n");
+        return;
+    }
+}
+
+static void shadow_safe_scan_texts(ShadowSafeCtx* ctx, AstNode* st) {
+    if (!ctx || !st || ctx->err) return;
+    shadow_safe_check_moved_use(ctx, st, st->a);
+    if (ctx->err) return;
+    shadow_safe_check_moved_use(ctx, st, st->b);
+    if (ctx->err) return;
+    shadow_safe_check_moved_use(ctx, st, st->c);
+    if (ctx->err) return;
+    shadow_safe_check_moved_use(ctx, st, st->d);
+    if (ctx->err) return;
+    shadow_safe_check_moved_use(ctx, st, st->e);
+    if (ctx->err) return;
+    if (ctx->in_async) {
+        shadow_safe_check_async_chan_text(ctx, st, st->a);
+        if (ctx->err) return;
+        shadow_safe_check_async_chan_text(ctx, st, st->b);
+        if (ctx->err) return;
+        shadow_safe_check_async_chan_text(ctx, st, st->c);
+    }
+    if (ctx->err) return;
+    shadow_safe_on_chan_send_text(ctx, st, st->a);
+    if (ctx->err) return;
+    shadow_safe_on_chan_send_text(ctx, st, st->c);
+}
+
+static void shadow_safe_on_typed_init(ShadowSafeCtx* ctx, AstNode* st) {
+    ShadowSafeVar* v;
+    ShadowSafeVar* srcv;
+    char src[64], arena[64], base[64], msg[192];
+    const char* ty;
+    const char* name;
+    const char* expr;
+    int stars;
+    if (!ctx || !st || ctx->err) return;
+    ty = st->a;
+    name = st->b;
+    expr = st->c;
+    /* AST_PTR_INIT stores Type without '*'; TYPED_INIT/VAL_DESTROY use d="*". */
+    stars = (st->d[0] == '*') || (st->kind == AST_PTR_INIT) ||
+            (ty && strchr(ty, '*') != NULL);
+    shadow_safe_check_moved_use(ctx, st, expr);
+    if (ctx->err) return;
+
+    v = shadow_safe_add(ctx, name);
+    if (!v) return;
+    if (ty) snprintf(v->ty, sizeof(v->ty), "%s", ty);
+    /* Aggregate with CCSlice and no sibling CCArena: if init mentions an
+     * arena-view slice local, mark non-stable for channel-send ban. */
+    if (!stars && ty && expr) {
+        char leaf[64];
+        ShadowSafeStruct* s;
+        int fi, has_slice = 0, has_arena = 0, vi;
+        shadow_safe_strip_ty(ty, leaf, sizeof(leaf));
+        s = shadow_safe_find_struct(ctx, leaf);
+        if (s) {
+            for (fi = 0; fi < s->nf; fi++) {
+                if (strcmp(s->fty[fi], "CCSlice") == 0) has_slice = 1;
+                if (strcmp(s->fty[fi], "CCArena") == 0) has_arena = 1;
+            }
+            if (has_slice && !has_arena) {
+                for (vi = 0; vi < ctx->nvars; vi++) {
+                    if (ctx->vars[vi].arena_view &&
+                        shadow_safe_text_uses(expr, ctx->vars[vi].name)) {
+                        v->nonstable_slice = 1;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if (shadow_safe_type_is_arena(ty) && !stars) {
+        v->is_arena = 1;
+        return;
+    }
+    if (shadow_safe_type_is_slice(ty) && !stars) {
+        v->is_slice = 1;
+        if (shadow_safe_parse_cc_move(expr, src, sizeof(src))) {
+            srcv = shadow_safe_find(ctx, src);
+            if (srcv && srcv->is_slice) {
+                if (srcv->moved) {
+                    snprintf(msg, sizeof(msg), "use of moved slice '%s'", src);
+                    shadow_safe_err_at(ctx, st, msg);
+                    return;
+                }
+                srcv->moved = 1;
+                v->unique = srcv->unique;
+                v->arena_view = srcv->arena_view;
+                snprintf(v->arena, sizeof(v->arena), "%s", srcv->arena);
+            }
+            return;
+        }
+        if (shadow_safe_plain_ident(expr, src, sizeof(src))) {
+            srcv = shadow_safe_find(ctx, src);
+            if (srcv && srcv->is_slice) {
+                if (srcv->moved) {
+                    snprintf(msg, sizeof(msg), "use of moved slice '%s'", src);
+                    shadow_safe_err_at(ctx, st, msg);
+                    return;
+                }
+                if (srcv->unique) {
+                    shadow_safe_err_at(ctx, st, "cannot copy unique slice");
+                    fprintf(stderr,
+                            "  hint: unique slices have move-only semantics; "
+                            "use cc_move(x) to transfer ownership\n");
+                    return;
+                }
+                v->unique = srcv->unique;
+                v->arena_view = srcv->arena_view;
+                snprintf(v->arena, sizeof(v->arena), "%s", srcv->arena);
+                return;
+            }
+        }
+        if (shadow_safe_expr_unique_lit(expr)) v->unique = 1;
+        if (shadow_safe_arena_from_alloc_call(expr, arena, sizeof(arena))) {
+            v->arena_view = 1;
+            snprintf(v->arena, sizeof(v->arena), "%s", arena);
+        } else if (shadow_safe_from_parts_base(expr, base, sizeof(base))) {
+            srcv = shadow_safe_find(ctx, base);
+            if (srcv && (srcv->is_arena_ptr || srcv->arena_view) &&
+                srcv->arena[0]) {
+                v->arena_view = 1;
+                snprintf(v->arena, sizeof(v->arena), "%s", srcv->arena);
+            }
+        }
+        return;
+    }
+    if (stars) {
+        v->is_ptr = 1;
+        if (shadow_safe_arena_from_alloc_call(expr, arena, sizeof(arena))) {
+            v->is_arena_ptr = 1;
+            snprintf(v->arena, sizeof(v->arena), "%s", arena);
+            return;
+        }
+        if (expr[0] == '&' &&
+            shadow_safe_amp_ident(expr, src, sizeof(src))) {
+            snprintf(v->alias_of, sizeof(v->alias_of), "%s", src);
+            return;
+        }
+        if (shadow_safe_plain_ident(expr, src, sizeof(src))) {
+            srcv = shadow_safe_find(ctx, src);
+            if (srcv && srcv->is_arena_ptr) {
+                v->is_arena_ptr = 1;
+                snprintf(v->arena, sizeof(v->arena), "%s", srcv->arena);
+            }
+            if (srcv && srcv->alias_of[0])
+                snprintf(v->alias_of, sizeof(v->alias_of), "%s",
+                         srcv->alias_of);
+        }
+    }
+}
+
+static void shadow_safe_on_assign(ShadowSafeCtx* ctx, AstNode* st) {
+    ShadowSafeVar* lhs;
+    ShadowSafeVar* rhs;
+    char lname[64], rname[64], src[64], msg[160];
+    if (!ctx || !st || ctx->err) return;
+    shadow_safe_check_moved_use(ctx, st, st->a);
+    if (ctx->err) return;
+    shadow_safe_check_moved_use(ctx, st, st->b);
+    if (ctx->err) return;
+    if (!shadow_safe_plain_ident(st->a, lname, sizeof(lname))) return;
+    lhs = shadow_safe_find(ctx, lname);
+    if (!lhs || !lhs->is_slice) return;
+    if (shadow_safe_parse_cc_move(st->b, src, sizeof(src))) {
+        rhs = shadow_safe_find(ctx, src);
+        if (rhs && rhs->is_slice) {
+            if (rhs->moved) {
+                snprintf(msg, sizeof(msg), "use of moved slice '%s'", src);
+                shadow_safe_err_at(ctx, st, msg);
+                return;
+            }
+            rhs->moved = 1;
+            lhs->unique = rhs->unique;
+            lhs->moved = 0;
+        }
+        return;
+    }
+    if (shadow_safe_plain_ident(st->b, rname, sizeof(rname))) {
+        rhs = shadow_safe_find(ctx, rname);
+        if (rhs && rhs->is_slice) {
+            if (rhs->moved) {
+                snprintf(msg, sizeof(msg), "use of moved slice '%s'", rname);
+                shadow_safe_err_at(ctx, st, msg);
+                return;
+            }
+            if (rhs->unique || lhs->unique) {
+                shadow_safe_err_at(ctx, st, "cannot copy unique slice");
+                fprintf(stderr,
+                        "  hint: unique slices have move-only semantics; use "
+                        "cc_move(x) to transfer ownership\n");
+            }
+        }
+    }
+}
+
+static void shadow_safe_on_return(ShadowSafeCtx* ctx, AstNode* st) {
+    ShadowSafeVar* v;
+    char name[64];
+    if (!ctx || !st || ctx->err) return;
+    shadow_safe_check_moved_use(ctx, st, st->a);
+    if (ctx->err) return;
+    if (shadow_safe_parse_cc_move(st->a, name, sizeof(name))) return;
+    if (!shadow_safe_plain_ident(st->a, name, sizeof(name))) return;
+    v = shadow_safe_find(ctx, name);
+    if (v && v->is_slice && v->unique) {
+        shadow_safe_err_at(ctx, st, "cannot return unique slice");
+        fprintf(stderr,
+                "  hint: unique slices (T[:!]) require explicit ownership "
+                "transfer; use: return cc_move(x)\n");
+    }
+}
+
+static void shadow_safe_on_deleter(ShadowSafeCtx* ctx, AstNode* st,
+                                  const char* callee, const char* args) {
+    char name[64], msg[192];
+    ShadowSafeVar* v;
+    if (!ctx || !callee || ctx->err) return;
+    if (strcmp(callee, "free") != 0 && strcmp(callee, "cfree") != 0 &&
+        strcmp(callee, "cc_slice_destroy") != 0 &&
+        strcmp(callee, "CCSlice_destroy") != 0)
+        return;
+    if (!shadow_safe_first_arg_ident(args, name, sizeof(name))) return;
+    v = shadow_safe_find(ctx, name);
+    if (!v) return;
+    if ((v->is_slice && v->arena_view) || v->is_arena_ptr) {
+        snprintf(msg, sizeof(msg),
+                 "cannot free/destroy non-owning borrow '%s'", name);
+        shadow_safe_err_at(ctx, st, msg);
+    }
+}
+
+static void shadow_safe_on_arena_epoch(ShadowSafeCtx* ctx, AstNode* st,
+                                      const char* callee, const char* args) {
+    char arena[64], msg[256];
+    const char* op;
+    if (!ctx || !callee || ctx->err) return;
+    if (strcmp(callee, "cc_arena_reset") == 0)
+        op = "cc_arena_reset";
+    else if (strcmp(callee, "cc_arena_free") == 0)
+        op = "cc_arena_free";
+    else if (strcmp(callee, "cc_arena_destroy") == 0)
+        op = "cc_arena_destroy";
+    else
+        return;
+    if (!shadow_safe_first_arg_ident(args, arena, sizeof(arena))) return;
+    if (shadow_safe_arena_pinned(ctx, arena)) {
+        snprintf(msg, sizeof(msg),
+                 "cannot %s arena '%s' while a nursery task holds a borrow "
+                 "from it",
+                 op, arena);
+        shadow_safe_err_at(ctx, st, msg);
+        fprintf(stderr,
+                "  note: capturing an arena borrow into a spawn pins that "
+                "arena epoch until the nursery scope ends\n");
+        return;
+    }
+    if (strcmp(op, "cc_arena_reset") == 0 &&
+        shadow_safe_live_borrow_on(ctx, arena)) {
+        snprintf(msg, sizeof(msg),
+                 "cannot cc_arena_reset arena '%s' while a derived slice "
+                 "borrow is still in scope",
+                 arena);
+        shadow_safe_err_at(ctx, st, msg);
+        fprintf(stderr,
+                "  note: arena provenance epoch would invalidate live borrows "
+                "(CVE-2017-13245 class)\n");
+    }
+}
+
+static ShadowSafeStruct* shadow_safe_find_struct(ShadowSafeCtx* ctx,
+                                                const char* name) {
+    int i;
+    if (!ctx || !name || !name[0] || !ctx->structs) return NULL;
+    for (i = 0; i < ctx->nstructs; i++)
+        if (strcmp(ctx->structs[i].name, name) == 0) return &ctx->structs[i];
+    return NULL;
+}
+
+static void shadow_safe_strip_ty(const char* in, char* out, size_t cap) {
+    const char* p = in;
+    size_t n = 0;
+    if (!out || !cap) return;
+    out[0] = 0;
+    if (!p) return;
+    while (*p == ' ' || *p == '\t') p++;
+    if (strncmp(p, "const ", 6) == 0) p += 6;
+    while (*p == ' ' || *p == '\t') p++;
+    if (strncmp(p, "struct ", 7) == 0) p += 7;
+    while (*p && *p != '*' && *p != ' ' && *p != '\t' && n + 1 < cap)
+        out[n++] = *p++;
+    out[n] = 0;
+}
+
+static int shadow_safe_register_struct(ShadowSafeCtx* ctx, AstNode* st) {
+    ShadowSafeStruct* s;
+    int i;
+    if (!ctx || !st || st->kind != AST_TYPEDEF_STRUCT || !st->b[0]) return 0;
+    if (ctx->nstructs >= SHADOW_SAFE_STRUCT_CAP) return 0;
+    if (shadow_safe_find_struct(ctx, st->b)) return 0;
+    s = &ctx->structs[ctx->nstructs++];
+    memset(s, 0, sizeof(*s));
+    snprintf(s->name, sizeof(s->name), "%s", st->b);
+    for (i = 0; i < st->nkids && s->nf < SHADOW_SAFE_FIELD_CAP; i++) {
+        AstNode* f = st->kids[i];
+        char* comma;
+        if (!f || f->kind != AST_FIELD_SIMPLE || !f->a[0] || !f->b[0]) continue;
+        /* First declarator name only (beachhead). */
+        snprintf(s->fname[s->nf], sizeof(s->fname[0]), "%s", f->b);
+        comma = strchr(s->fname[s->nf], ',');
+        if (comma) *comma = 0;
+        snprintf(s->fty[s->nf], sizeof(s->fty[0]), "%s", f->a);
+        s->is_as[s->nf] = (strcmp(f->e, "as") == 0);
+        s->nf++;
+    }
+    return 1;
+}
+
+typedef struct {
+    char type[64];
+    char path[128];
+} ShadowSafeAsSeen;
+
+static void shadow_safe_as_walk(ShadowSafeCtx* ctx, AstNode* at,
+                                const char* root, const char* cur,
+                                const char* path_prefix, ShadowSafeAsSeen* seen,
+                                int* nseen) {
+    ShadowSafeStruct* s;
+    int i;
+    char msg[256];
+    if (!ctx || ctx->err || !cur || !cur[0] || !seen || !nseen) return;
+    s = shadow_safe_find_struct(ctx, cur);
+    if (!s) return;
+    for (i = 0; i < s->nf; i++) {
+        char leaf[64];
+        char path[128];
+        int k;
+        if (!s->is_as[i]) continue;
+        if (strchr(s->fty[i], '*') != NULL) {
+            snprintf(msg, sizeof(msg),
+                     "type: @as field '%s' on '%s' must be a value embed, "
+                     "not a pointer",
+                     s->fname[i], s->name);
+            shadow_safe_err_at(ctx, at, msg);
+            return;
+        }
+        shadow_safe_strip_ty(s->fty[i], leaf, sizeof(leaf));
+        if (!leaf[0]) continue;
+        if (path_prefix && path_prefix[0])
+            snprintf(path, sizeof(path), "%s.%s", path_prefix, s->fname[i]);
+        else
+            snprintf(path, sizeof(path), "%s", s->fname[i]);
+        for (k = 0; k < *nseen; k++) {
+            if (strcmp(seen[k].type, leaf) == 0) {
+                if (strcmp(seen[k].path, path) != 0) {
+                    snprintf(msg, sizeof(msg),
+                             "type: ambiguous @as embed of '%s' on '%s'", leaf,
+                             root);
+                    shadow_safe_err_at(ctx, at, msg);
+                    return;
+                }
+                break;
+            }
+        }
+        if (k == *nseen) {
+            if (*nseen >= SHADOW_SAFE_AS_SEEN_CAP) return;
+            snprintf(seen[*nseen].type, sizeof(seen[0].type), "%s", leaf);
+            snprintf(seen[*nseen].path, sizeof(seen[0].path), "%s", path);
+            (*nseen)++;
+        }
+        shadow_safe_as_walk(ctx, at, root, leaf, path, seen, nseen);
+        if (ctx->err) return;
+    }
+}
+
+static void shadow_safe_check_as_embeds(ShadowSafeCtx* ctx, AstNode** items,
+                                        int n) {
+    int i;
+    if (!ctx || !items) return;
+    for (i = 0; i < n && !ctx->err; i++) {
+        AstNode* it = items[i];
+        ShadowSafeAsSeen seen[SHADOW_SAFE_AS_SEEN_CAP];
+        int nseen = 0;
+        if (!it || it->kind != AST_TYPEDEF_STRUCT || !it->b[0]) continue;
+        shadow_safe_as_walk(ctx, it, it->b, it->b, "", seen, &nseen);
+    }
+}
+
+/* Whole-word match; rejects `cc_chan_send` matching `chan_send`. */
+static int shadow_safe_text_has_word(const char* text, const char* word) {
+    const char* p;
+    size_t n;
+    if (!text || !word || !word[0]) return 0;
+    n = strlen(word);
+    p = text;
+    while ((p = strstr(p, word)) != NULL) {
+        char before = (p > text) ? p[-1] : 0;
+        char after = p[n];
+        if (!shadow_safe_is_word(before) && !shadow_safe_is_word(after))
+            return 1;
+        p += n;
+    }
+    return 0;
+}
+
+static void shadow_safe_check_async_chan_text(ShadowSafeCtx* ctx, AstNode* st,
+                                             const char* text) {
+    const char* op = NULL;
+    char msg[160];
+    if (!ctx || !ctx->in_async || !text || ctx->err) return;
+    if (shadow_safe_text_has_word(text, "chan_send"))
+        op = "chan_send";
+    else if (shadow_safe_text_has_word(text, "chan_recv"))
+        op = "chan_recv";
+    else
+        return;
+    snprintf(msg, sizeof(msg),
+             "async: channel operation '%s' must be awaited in @async function",
+             op);
+    shadow_safe_err_at(ctx, st, msg);
+}
+
+/* Second top-level call arg → bare ident (beachhead). */
+static int shadow_safe_call_arg1_ident(const char* args, char* out, size_t cap) {
+    const char* p;
+    const char* start;
+    int depth = 0;
+    size_t n = 0;
+    if (!args || !out || !cap) return 0;
+    out[0] = 0;
+    p = args;
+    while (*p) {
+        if (*p == '(' || *p == '[' || *p == '{') depth++;
+        else if (*p == ')' || *p == ']' || *p == '}') {
+            if (depth > 0) depth--;
+        } else if (*p == ',' && depth == 0) {
+            p++;
+            break;
+        }
+        p++;
+    }
+    while (*p == ' ' || *p == '\t') p++;
+    if (!*p || *p == '&') return 0; /* pointer send / non-ident */
+    start = p;
+    while (*p && (shadow_safe_is_word(*p))) p++;
+    if (p == start) return 0;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != 0 && *p != ')') return 0; /* not a bare ident */
+    n = (size_t)(p - start);
+    while (n > 0 && (start[n - 1] == ' ' || start[n - 1] == '\t')) n--;
+    if (n == 0 || n + 1 > cap) return 0;
+    memcpy(out, start, n);
+    out[n] = 0;
+    return 1;
+}
+
+static void shadow_safe_check_chan_send_payload(ShadowSafeCtx* ctx, AstNode* st,
+                                               const char* callee,
+                                               const char* args) {
+    char payload[64];
+    char leaf[64];
+    ShadowSafeVar* v;
+    ShadowSafeStruct* s;
+    int i;
+    int has_slice = 0;
+    int has_arena = 0;
+    if (!ctx || !st || ctx->err || !callee || !args) return;
+    if (strcmp(callee, "cc_channel_send") != 0 &&
+        strcmp(callee, "chan_send") != 0)
+        return;
+    if (!shadow_safe_call_arg1_ident(args, payload, sizeof(payload))) return;
+    v = shadow_safe_find(ctx, payload);
+    if (!v || !v->ty[0] || v->is_ptr) return;
+    shadow_safe_strip_ty(v->ty, leaf, sizeof(leaf));
+    s = shadow_safe_find_struct(ctx, leaf);
+    if (!s) return;
+    for (i = 0; i < s->nf; i++) {
+        const char* fty = s->fty[i];
+        if (strchr(fty, '*') != NULL) {
+            shadow_safe_err_at(
+                ctx, st,
+                "cannot send value containing a raw pointer field on a channel");
+            return;
+        }
+        if (strcmp(fty, "CCSlice") == 0) has_slice = 1;
+        if (strcmp(fty, "CCArena") == 0) has_arena = 1;
+    }
+    if (has_slice && !has_arena && v->nonstable_slice) {
+        char msg[256];
+        snprintf(msg, sizeof(msg),
+                 "slice: cannot send '__cc_tmp' (type '%s'): non-stable slice "
+                 "field without a CCArena",
+                 leaf[0] ? leaf : "struct");
+        shadow_safe_err_at(ctx, st, msg);
+        fprintf(stderr,
+                "  note: non-unique slices (arena / stack / untracked "
+                "from_buffer) may dangle after send (channel-stable-borrow)\n"
+                "  hint: include a CCArena in the same message, use unique "
+                "T[:!] / cc_slice_from_static, or use send_into / "
+                "try_send_into\n");
+        return;
+    }
+}
+
+static void shadow_safe_check_channel_pair_text(ShadowSafeCtx* ctx, AstNode* st,
+                                               const char* text) {
+    const char* call;
+    const char* a;
+    char tx[64], rx[64];
+    size_t i;
+    ShadowSafeVar* vtx;
+    ShadowSafeVar* vrx;
+    FileTape* ft;
+    size_t off;
+    int line = 1, col = 1;
+    if (!ctx || !st || !text || ctx->err) return;
+    call = strstr(text, "cc_channel_pair(");
+    if (!call) return;
+    /* Do not match create_named / other helpers. */
+    if (call > text && shadow_safe_is_word(call[-1])) return;
+    a = call + strlen("cc_channel_pair(");
+    while (*a == ' ' || *a == '\t') a++;
+    if (*a != '&') return;
+    a++;
+    i = 0;
+    while (*a && *a != ',' && *a != ' ' && *a != '\t' && i + 1 < sizeof(tx))
+        tx[i++] = *a++;
+    tx[i] = 0;
+    while (*a == ' ' || *a == '\t') a++;
+    if (*a != ',') return;
+    a++;
+    while (*a == ' ' || *a == '\t') a++;
+    if (*a != '&') return;
+    a++;
+    i = 0;
+    while (*a && *a != ')' && *a != ' ' && *a != '\t' && i + 1 < sizeof(rx))
+        rx[i++] = *a++;
+    rx[i] = 0;
+    if (!tx[0] || !rx[0]) return;
+    vtx = shadow_safe_find(ctx, tx);
+    vrx = shadow_safe_find(ctx, rx);
+    if (vtx && vtx->is_chan == 1 && vrx && vrx->is_chan == 2) return;
+    /* Origin at `cc_channel_pair` spelling in the source tape. */
+    ctx->err = 1;
+    if (!ctx->cache || !st->file_id) {
+        fprintf(stderr, "error: channel: cc_channel_pair\n");
+        return;
+    }
+    ft = tape_by_id(ctx->cache, st->file_id);
+    if (!ft || !ft->bytes) {
+        fprintf(stderr, "error: channel: cc_channel_pair\n");
+        return;
+    }
+    off = st->tok_off;
+    if (off < ft->len) {
+        const char* hit = strstr(ft->bytes + off, "cc_channel_pair");
+        if (!hit && off > 0) {
+            size_t back = off > 80 ? off - 80 : 0;
+            hit = strstr(ft->bytes + back, "cc_channel_pair");
+        }
+        if (hit && (size_t)(hit - ft->bytes) < ft->len)
+            off = (size_t)(hit - ft->bytes);
+    }
+    offset_to_linecol(ft->bytes, ft->len, off, &line, &col);
+    fprintf(stderr, "%s:%d:%d: error: channel: cc_channel_pair\n", ft->path,
+            line, col);
+}
+
+static void shadow_safe_on_chan_send_text(ShadowSafeCtx* ctx, AstNode* st,
+                                         const char* text) {
+    const char* p;
+    char callee[32];
+    if (!ctx || !st || !text || ctx->err) return;
+    shadow_safe_check_channel_pair_text(ctx, st, text);
+    if (ctx->err) return;
+    p = text;
+    while (*p) {
+        const char* open;
+        size_t clen = 0;
+        int depth;
+        char args[192];
+        size_t ai = 0;
+        while (*p && !shadow_safe_is_word(*p)) p++;
+        if (!*p) break;
+        if (strncmp(p, "cc_channel_send", 15) == 0 &&
+            !shadow_safe_is_word(p[15])) {
+            snprintf(callee, sizeof(callee), "cc_channel_send");
+            clen = 15;
+        } else if (strncmp(p, "chan_send", 9) == 0 &&
+                   !shadow_safe_is_word(p[9]) &&
+                   (p == text || !shadow_safe_is_word(p[-1]))) {
+            snprintf(callee, sizeof(callee), "chan_send");
+            clen = 9;
+        } else {
+            while (shadow_safe_is_word(*p)) p++;
+            continue;
+        }
+        open = p + clen;
+        while (*open == ' ' || *open == '\t') open++;
+        if (*open != '(') {
+            p += clen;
+            continue;
+        }
+        depth = 0;
+        ai = 0;
+        open++;
+        while (*open && ai + 1 < sizeof(args)) {
+            if (*open == '(') depth++;
+            else if (*open == ')') {
+                if (depth == 0) break;
+                depth--;
+            }
+            args[ai++] = *open++;
+        }
+        args[ai] = 0;
+        shadow_safe_check_chan_send_payload(ctx, st, callee, args);
+        if (ctx->err) return;
+        p = open;
+    }
+}
+
+static void shadow_safe_on_call(ShadowSafeCtx* ctx, AstNode* st) {
+    if (!ctx || !st || ctx->err) return;
+    shadow_safe_scan_texts(ctx, st);
+    if (ctx->err) return;
+    shadow_safe_check_async_chan_text(ctx, st, st->a);
+    if (ctx->err) return;
+    shadow_safe_check_chan_send_payload(ctx, st, st->a, st->b);
+    if (ctx->err) return;
+    shadow_safe_on_deleter(ctx, st, st->a, st->b);
+    if (ctx->err) return;
+    shadow_safe_on_arena_epoch(ctx, st, st->a, st->b);
+}
+
+static void shadow_safe_on_ufcs(ShadowSafeCtx* ctx, AstNode* st) {
+    char msg[192];
+    ShadowSafeVar* v;
+    if (!ctx || !st || ctx->err) return;
+    shadow_safe_scan_texts(ctx, st);
+    if (ctx->err) return;
+    if (strcmp(st->b, "destroy") != 0 && strcmp(st->b, "free") != 0 &&
+        strcmp(st->b, "reset") != 0)
+        return;
+    v = shadow_safe_find(ctx, st->a);
+    if (!v) return;
+    if ((strcmp(st->b, "destroy") == 0 || strcmp(st->b, "free") == 0) &&
+        ((v->is_slice && v->arena_view) || v->is_arena_ptr)) {
+        snprintf(msg, sizeof(msg),
+                 "cannot free/destroy non-owning borrow '%s'", st->a);
+        shadow_safe_err_at(ctx, st, msg);
+        return;
+    }
+    if (v->is_arena &&
+        (strcmp(st->b, "reset") == 0 || strcmp(st->b, "free") == 0 ||
+         strcmp(st->b, "destroy") == 0)) {
+        char args[80];
+        snprintf(args, sizeof(args), "&%s", st->a);
+        if (strcmp(st->b, "reset") == 0)
+            shadow_safe_on_arena_epoch(ctx, st, "cc_arena_reset", args);
+        else if (strcmp(st->b, "free") == 0)
+            shadow_safe_on_arena_epoch(ctx, st, "cc_arena_free", args);
+        else
+            shadow_safe_on_arena_epoch(ctx, st, "cc_arena_destroy", args);
+    }
+}
+
+static int shadow_safe_stmt_diverges(AstNode* st) {
+    if (!st) return 0;
+    if (st->kind == AST_RETURN_EXPR || st->kind == AST_RETURN_INT ||
+        st->kind == AST_RETURN_CC || st->kind == AST_BREAK ||
+        st->kind == AST_CONTINUE || st->kind == AST_ERR_FWD)
+        return 1;
+    if (st->kind == AST_CALL_ARGS || st->kind == AST_CALL_NUM) {
+        if (strcmp(st->a, "exit") == 0 || strcmp(st->a, "abort") == 0 ||
+            strcmp(st->a, "_exit") == 0 || strcmp(st->a, "longjmp") == 0 ||
+            strcmp(st->a, "cc_error_exit") == 0)
+            return 1;
+    }
+    if (st->kind == AST_BLOCK && st->nbody > 0)
+        return shadow_safe_stmt_diverges(st->body[st->nbody - 1]);
+    return 0;
+}
+
+static int shadow_safe_body_diverges(AstNode** body, int n) {
+    if (!body || n <= 0) return 0;
+    return shadow_safe_stmt_diverges(body[n - 1]);
+}
+
+static AstNode* shadow_safe_eh(ShadowSafeCtx* ctx) {
+    if (!ctx || ctx->neh <= 0) return NULL;
+    return ctx->eh_stack[ctx->neh - 1];
+}
+
+static void shadow_safe_push_eh(ShadowSafeCtx* ctx, AstNode* eh) {
+    if (!ctx || !eh || ctx->neh >= SHADOW_SAFE_EH_CAP) return;
+    ctx->eh_stack[ctx->neh++] = eh;
+}
+
+static int shadow_safe_is_result_fn(ShadowSafeCtx* ctx, const char* name) {
+    int i;
+    if (!ctx || !name) return 0;
+    for (i = 0; i < ctx->nrfn; i++)
+        if (strcmp(ctx->result_fns[i], name) == 0) return 1;
+    return 0;
+}
+
+static void shadow_safe_add_result_fn(ShadowSafeCtx* ctx, const char* name) {
+    if (!ctx || !name || !name[0] || ctx->nrfn >= SHADOW_SAFE_RFN_CAP) return;
+    if (shadow_safe_is_result_fn(ctx, name)) return;
+    snprintf(ctx->result_fns[ctx->nrfn++], sizeof(ctx->result_fns[0]), "%s",
+             name);
+}
+
+static void shadow_safe_check_err_fwds(ShadowSafeCtx* ctx, AstNode* site,
+                                      AstNode** body, int nbody,
+                                      const char* binder) {
+    int i, j;
+    AstNode* eh;
+    if (!ctx || !body || ctx->err) return;
+    for (i = 0; i < nbody && !ctx->err; i++) {
+        AstNode* st = body[i];
+        if (!st || st->kind != AST_ERR_FWD) continue;
+        if (!binder || !binder[0]) {
+            char msg[160];
+            snprintf(msg, sizeof(msg),
+                     "'@err(%s)' requires an error binder",
+                     st->a[0] ? st->a : "e");
+            shadow_safe_err_at(ctx, st, msg);
+            return;
+        }
+        if (st->a[0] && strcmp(st->a, binder) != 0) {
+            char msg[160];
+            snprintf(msg, sizeof(msg),
+                     "'@err(%s)' requires an error binder", st->a);
+            shadow_safe_err_at(ctx, st, msg);
+            return;
+        }
+        eh = shadow_safe_eh(ctx);
+        if (!eh) {
+            shadow_safe_err_at(ctx, st,
+                               "@err with no local handler requires @errhandler");
+            return;
+        }
+        if (!shadow_safe_body_diverges(eh->body, eh->nbody) &&
+            !(eh->c[0] && (strstr(eh->c, "exit") || strstr(eh->c, "abort")))) {
+            shadow_safe_err_at(ctx, eh,
+                               "@errhandler body must visibly diverge");
+            return;
+        }
+        for (j = i + 1; j < nbody; j++) {
+            if (!body[j]) continue;
+            shadow_safe_err_at(ctx, body[j],
+                               "unreachable code after '@err(e);'");
+            return;
+        }
+    }
+}
+
+static void shadow_safe_check_bang_body(ShadowSafeCtx* ctx, AstNode* st,
+                                       const char* mode, const char* binder,
+                                       int expr_pos) {
+    if (!ctx || !st || ctx->err) return;
+    if (mode && (strcmp(mode, "bang_block") == 0 ||
+                 strcmp(mode, "bang_stmt") == 0)) {
+        if (expr_pos && !shadow_safe_body_diverges(st->body, st->nbody)) {
+            shadow_safe_err_at(
+                ctx, st, "expression-position '!>' body must diverge");
+            return;
+        }
+        shadow_safe_check_err_fwds(ctx, st, st->body, st->nbody, binder);
+    }
+}
+
+static void shadow_safe_require_eh(ShadowSafeCtx* ctx, AstNode* st,
+                                  const char* stmt_msg) {
+    if (!ctx || !st || ctx->err) return;
+    if (shadow_safe_eh(ctx)) return;
+    if (stmt_msg) {
+        shadow_safe_err_at(ctx, st, stmt_msg);
+        return;
+    }
+    /* Match diag_oracle_ccfront: col 1 + `syntax:` prefix. */
+    shadow_safe_err_at_col(
+        ctx, st, 1,
+        "syntax: '!>;' at expression position requires an enclosing "
+        "'@errhandler' in scope");
+}
+
+static void shadow_safe_on_unwrap(ShadowSafeCtx* ctx, AstNode* st) {
+    const char* mode;
+    const char* binder;
+    int expr_pos = 0;
+    if (!ctx || !st || ctx->err) return;
+    if (st->kind == AST_VAR_UNWRAP) {
+        mode = st->c;
+        binder = st->d;
+        expr_pos = 1;
+        if (strcmp(mode, "bang") == 0 || strcmp(mode, "bang_chain") == 0)
+            shadow_safe_require_eh(ctx, st, NULL);
+        else if ((strcmp(mode, "bang_stmt") == 0 ||
+                  strcmp(mode, "bang_block") == 0) &&
+                 st->nbody == 1 && st->body[0] &&
+                 st->body[0]->kind == AST_AT_STMT &&
+                 (strcmp(st->body[0]->a, "destroy") == 0 ||
+                  strcmp(st->body[0]->a, "detach") == 0)) {
+            /* `T x = call() !> @destroy` parsed as bang_stmt — delegate to eh. */
+            shadow_safe_require_eh(ctx, st, NULL);
+        } else
+            shadow_safe_check_bang_body(ctx, st, mode, binder, 1);
+        return;
+    }
+    if (st->kind == AST_STMT_UNWRAP) {
+        mode = st->c;
+        binder = st->d;
+        if (!mode[0]) {
+            /* `call() !>;` statement position */
+            shadow_safe_require_eh(
+                ctx, st, "@err with no local handler requires @errhandler");
+            return;
+        }
+        /* Statement-position bang_block/bang_stmt: diverge not required by
+         * Form D/E legacy (only expr-pos). Still check @err forwards. */
+        shadow_safe_check_bang_body(ctx, st, mode, binder, 0);
+        return;
+    }
+    if (st->kind == AST_PTR_UNWRAP) {
+        mode = st->d;
+        binder = st->e;
+        /* bang_nobind + body is `!> { … }` (inline handler), not bare !>; */
+        if (strncmp(mode, "bang_eh", 7) == 0)
+            shadow_safe_require_eh(ctx, st, NULL);
+        else if (strncmp(mode, "bang_nobind", 11) == 0) {
+            if (st->nbody > 0)
+                shadow_safe_check_bang_body(ctx, st, "bang_block", binder, 1);
+            else
+                shadow_safe_require_eh(ctx, st, NULL);
+        } else if (strncmp(mode, "bang_block", 10) == 0)
+            shadow_safe_check_bang_body(ctx, st, "bang_block", binder, 1);
+        return;
+    }
+    if (st->kind == AST_PRINTLN_BANG || st->kind == AST_PRINTLN_TPL) {
+        if (st->nbody > 0)
+            shadow_safe_check_err_fwds(ctx, st, st->body, st->nbody, NULL);
+        else
+            shadow_safe_require_eh(ctx, st, NULL);
+        return;
+    }
+    if (st->kind == AST_PRINTLN_BANG_BIND) {
+        shadow_safe_check_err_fwds(ctx, st, st->body, st->nbody, st->b);
+        return;
+    }
+}
+
+static void shadow_safe_on_unhandled_call(ShadowSafeCtx* ctx, AstNode* st) {
+    if (!ctx || !st || ctx->err || !ctx->strict_unhandled) return;
+    if (st->kind != AST_CALL_ARGS && st->kind != AST_CALL_NUM) return;
+    if (!shadow_safe_is_result_fn(ctx, st->a)) return;
+    {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "unhandled-result\ncall to '%s'", st->a);
+        /* Two-line oracle: emit as one stderr blob with newline. */
+        shadow_safe_err_at(ctx, st, "unhandled-result");
+        fprintf(stderr, "call to '%s'\n", st->a);
+        (void)msg;
+    }
+}
+
+static int shadow_safe_body_mutates_ident(AstNode** body, int n,
+                                         const char* name) {
+    int i;
+    if (!body || !name) return 0;
+    for (i = 0; i < n; i++) {
+        AstNode* st = body[i];
+        char lname[64];
+        if (!st) continue;
+        if (st->kind == AST_INC && strcmp(st->a, name) == 0) return 1;
+        if (st->kind == AST_ASSIGN) {
+            if (shadow_safe_plain_ident(st->a, lname, sizeof(lname)) &&
+                strcmp(lname, name) == 0)
+                return 1;
+            if (st->a[0] == '*' &&
+                shadow_safe_plain_ident(st->a + 1, lname, sizeof(lname)) &&
+                strcmp(lname, name) == 0)
+                return 1;
+        }
+        if (st->nbody &&
+            shadow_safe_body_mutates_ident(st->body, st->nbody, name))
+            return 1;
+        if (st->nkids &&
+            shadow_safe_body_mutates_ident(st->kids, st->nkids, name))
+            return 1;
+    }
+    return 0;
+}
+
+static int shadow_safe_body_passes_amp(AstNode** body, int n,
+                                      const char* name, char* callee_out,
+                                      size_t ccap) {
+    int i;
+    char amp[80];
+    if (!body || !name) return 0;
+    snprintf(amp, sizeof(amp), "&%s", name);
+    for (i = 0; i < n; i++) {
+        AstNode* st = body[i];
+        if (!st) continue;
+        if ((st->kind == AST_CALL_ARGS || st->kind == AST_CALL_NUM) &&
+            shadow_safe_text_uses(st->b, amp)) {
+            if (callee_out && ccap)
+                snprintf(callee_out, ccap, "%s", st->a);
+            return 1;
+        }
+        if (st->nbody &&
+            shadow_safe_body_passes_amp(st->body, st->nbody, name, callee_out,
+                                       ccap))
+            return 1;
+        if (st->nkids &&
+            shadow_safe_body_passes_amp(st->kids, st->nkids, name, callee_out,
+                                       ccap))
+            return 1;
+    }
+    return 0;
+}
+
+enum { SHADOW_SAFE_CFN_CAP = 64 };
+/* File-scope: filled in shadow_safety_check before walks. */
+static char g_shadow_safe_const_fns[SHADOW_SAFE_CFN_CAP][64];
+static int g_shadow_safe_nconst_fns;
+
+static int shadow_safe_is_const_ptr_fn(const char* name) {
+    int i;
+    if (!name) return 0;
+    for (i = 0; i < g_shadow_safe_nconst_fns; i++)
+        if (strcmp(g_shadow_safe_const_fns[i], name) == 0) return 1;
+    return 0;
+}
+
+static void shadow_safe_add_const_ptr_fn(const char* name) {
+    if (!name || !name[0] || g_shadow_safe_nconst_fns >= SHADOW_SAFE_CFN_CAP)
+        return;
+    if (shadow_safe_is_const_ptr_fn(name)) return;
+    snprintf(g_shadow_safe_const_fns[g_shadow_safe_nconst_fns++],
+             sizeof(g_shadow_safe_const_fns[0]), "%s", name);
+}
+
+static int shadow_safe_amp_call_ok(const char* callee) {
+    if (!callee || !callee[0]) return 0;
+    if (shadow_safe_is_const_ptr_fn(callee)) return 1;
+    /* Intentional shared mutators (atomics) — not a race diagnostic target. */
+    if (strstr(callee, "atomic") != NULL) return 1;
+    return 0;
+}
+
+static void shadow_safe_on_spawn(ShadowSafeCtx* ctx, AstNode* st) {
+    /* caps in e: "view,base,&x" */
+    const char* p;
+    char item[64];
+    size_t n;
+    ShadowSafeVar* v;
+    char callee[64];
+    char msg[192];
+    int is_unsafe;
+    if (!ctx || !st || ctx->err) return;
+    is_unsafe = (strcmp(st->b, "spawn_unsafe") == 0);
+    p = st->e;
+    while (p && *p) {
+        int is_ref = 0;
+        while (*p == ' ' || *p == '\t' || *p == ',') p++;
+        if (!*p) break;
+        n = 0;
+        if (*p == '&') {
+            is_ref = 1;
+            p++;
+        }
+        while (*p && *p != ',' && n + 1 < sizeof(item)) item[n++] = *p++;
+        item[n] = 0;
+        if (!item[0]) continue;
+        v = shadow_safe_find(ctx, item);
+        if (v && v->arena[0] && (v->arena_view || v->is_arena_ptr))
+            shadow_safe_pin_arena(ctx, v->arena);
+        if (is_unsafe) continue; /* @unsafe: skip mutation / amp races */
+        if (is_ref) {
+            if (shadow_safe_body_mutates_ident(st->body, st->nbody, item)) {
+                snprintf(msg, sizeof(msg),
+                         "mutation of shared reference '%s' in closure", item);
+                shadow_safe_err_at(ctx, st, msg);
+                return;
+            }
+            callee[0] = 0;
+            if (shadow_safe_body_passes_amp(st->body, st->nbody, item, callee,
+                                            sizeof(callee)) &&
+                !shadow_safe_amp_call_ok(callee)) {
+                snprintf(msg, sizeof(msg),
+                         "passing '&%s' to '%s' may mutate shared state", item,
+                         callee[0] ? callee : "callee");
+                shadow_safe_err_at(ctx, st, msg);
+                return;
+            }
+        } else if (v && (v->is_ptr || v->is_arena_ptr) && v->alias_of[0]) {
+            if (shadow_safe_body_mutates_ident(st->body, st->nbody, item)) {
+                snprintf(msg, sizeof(msg),
+                         "mutation through value-captured pointer '%s' that "
+                         "aliases an outer local",
+                         item);
+                shadow_safe_err_at(ctx, st, msg);
+                return;
+            }
+        }
+    }
+}
+
+static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st);
+
+static void shadow_safe_walk_list(ShadowSafeCtx* ctx, AstNode** xs, int n) {
+    int i;
+    for (i = 0; i < n && ctx && !ctx->err; i++)
+        shadow_safe_walk_stmt(ctx, xs[i]);
+}
+
+static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st) {
+    int saved_nvars;
+    int saved_neh;
+    if (!ctx || !st || ctx->err) return;
+    switch (st->kind) {
+    case AST_CHAN_VAR: {
+        ShadowSafeVar* cv = shadow_safe_add(ctx, st->a);
+        if (cv) {
+            if (strcmp(st->c, ">") == 0) cv->is_chan = 1;
+            else if (strcmp(st->c, "<") == 0) cv->is_chan = 2;
+        }
+        break;
+    }
+    case AST_TYPED_INIT:
+    case AST_PTR_INIT:
+        shadow_safe_on_typed_init(ctx, st);
+        if (!ctx->err) shadow_safe_check_channel_pair_text(ctx, st, st->c);
+        break;
+    case AST_VAL_DESTROY:
+        shadow_safe_on_typed_init(ctx, st);
+        /* `T x = call() !> @destroy` — bang uses enclosing @errhandler. */
+        if (!ctx->err && st->c[0] && strstr(st->c, "!>") != NULL)
+            shadow_safe_require_eh(ctx, st, NULL);
+        break;
+    case AST_ASSIGN:
+        shadow_safe_on_assign(ctx, st);
+        break;
+    case AST_RETURN_EXPR:
+        shadow_safe_on_return(ctx, st);
+        break;
+    case AST_CALL_ARGS:
+    case AST_CALL_NUM:
+        shadow_safe_on_call(ctx, st);
+        if (!ctx->err) shadow_safe_on_unhandled_call(ctx, st);
+        break;
+    case AST_UFCS_STMT:
+    case AST_UFCS_EXPR:
+        shadow_safe_on_ufcs(ctx, st);
+        break;
+    case AST_SPAWN_CLOSURE:
+        shadow_safe_on_spawn(ctx, st);
+        shadow_safe_walk_list(ctx, st->body, st->nbody);
+        break;
+    case AST_ERRHANDLER:
+        shadow_safe_push_eh(ctx, st);
+        shadow_safe_walk_list(ctx, st->body, st->nbody);
+        break;
+    case AST_BLOCK:
+    case AST_NURSERY_DESTROY:
+        saved_nvars = ctx->nvars;
+        saved_neh = ctx->neh;
+        shadow_safe_walk_list(ctx, st->body, st->nbody);
+        shadow_safe_walk_list(ctx, st->kids, st->nkids);
+        ctx->nvars = saved_nvars;
+        ctx->neh = saved_neh;
+        break;
+    case AST_IF:
+    case AST_FOR:
+    case AST_WHILE:
+    case AST_DEFER:
+    case AST_WITH_DEADLINE:
+        shadow_safe_scan_texts(ctx, st);
+        if (ctx->err) return;
+        shadow_safe_walk_list(ctx, st->body, st->nbody);
+        shadow_safe_walk_list(ctx, st->kids, st->nkids);
+        break;
+    case AST_VOID_CAST:
+        shadow_safe_scan_texts(ctx, st);
+        break;
+    case AST_STMT_UNWRAP:
+    case AST_VAR_UNWRAP:
+    case AST_PTR_UNWRAP:
+    case AST_PRINTLN_BANG:
+    case AST_PRINTLN_TPL:
+    case AST_PRINTLN_BANG_BIND:
+        shadow_safe_scan_texts(ctx, st);
+        if (!ctx->err) shadow_safe_on_unwrap(ctx, st);
+        if (!ctx->err) shadow_safe_walk_list(ctx, st->body, st->nbody);
+        break;
+    case AST_RESULT_LOCAL:
+        shadow_safe_scan_texts(ctx, st);
+        shadow_safe_walk_list(ctx, st->body, st->nbody);
+        break;
+    default:
+        shadow_safe_scan_texts(ctx, st);
+        shadow_safe_walk_list(ctx, st->body, st->nbody);
+        shadow_safe_walk_list(ctx, st->kids, st->nkids);
+        break;
+    }
+}
+
+static void shadow_safe_walk_fn(ShadowSafeCtx* ctx, AstNode* fn) {
+    int saved_nvars;
+    int saved_npin;
+    int saved_neh;
+    int saved_async;
+    if (!ctx || !fn || ctx->err) return;
+    saved_nvars = ctx->nvars;
+    saved_npin = ctx->npin;
+    saved_neh = ctx->neh;
+    saved_async = ctx->in_async;
+    if (fn->kind == AST_ASYNC_FN) ctx->in_async = 1;
+    shadow_safe_walk_list(ctx, fn->kids, fn->nkids);
+    shadow_safe_walk_list(ctx, fn->body, fn->nbody);
+    ctx->nvars = saved_nvars;
+    ctx->npin = saved_npin;
+    ctx->neh = saved_neh;
+    ctx->in_async = saved_async;
+}
+
+/* Returns 1 on success, 0 if a safety diagnostic was emitted. */
+static int shadow_safety_check(AstNode** items, int n, TapeCache* cache) {
+    ShadowSafeCtx ctx;
+    ShadowSafeStruct structs[SHADOW_SAFE_STRUCT_CAP];
+    int i;
+    const char* strict;
+    memset(&ctx, 0, sizeof(ctx));
+    memset(structs, 0, sizeof(structs));
+    ctx.cache = cache;
+    ctx.structs = structs;
+    ctx.nstructs = 0;
+    strict = getenv("CC_STRICT_RESULT_UNWRAP");
+    /* Default on; only "0"/"false"/"off" disable. */
+    ctx.strict_unhandled = 1;
+    if (strict && (strcmp(strict, "0") == 0 || strcmp(strict, "false") == 0 ||
+                   strcmp(strict, "off") == 0))
+        ctx.strict_unhandled = 0;
+    g_shadow_safe_nconst_fns = 0;
+    for (i = 0; i < n; i++) {
+        AstNode* it = items[i];
+        const char* fname;
+        const char* params;
+        if (!it) continue;
+        if (it->kind == AST_TYPEDEF_STRUCT)
+            shadow_safe_register_struct(&ctx, it);
+        if (it->kind == AST_RESULT_FN && it->a[0])
+            shadow_safe_add_result_fn(&ctx, it->a);
+        fname = NULL;
+        params = NULL;
+        if (it->kind == AST_FN) {
+            fname = it->a;
+            params = it->c;
+        } else if (it->kind == AST_STATIC_FN || it->kind == AST_FN_PROTO) {
+            fname = it->b;
+            params = it->c;
+        } else if (it->kind == AST_RESULT_FN) {
+            fname = it->a;
+            params = it->d;
+        }
+        if (fname && params && strstr(params, "const") != NULL &&
+            strchr(params, '*') != NULL)
+            shadow_safe_add_const_ptr_fn(fname);
+    }
+    shadow_safe_check_as_embeds(&ctx, items, n);
+    for (i = 0; i < n && !ctx.err; i++) {
+        AstNode* it = items[i];
+        if (!it) continue;
+        if (it->kind == AST_FN || it->kind == AST_STATIC_FN ||
+            it->kind == AST_ASYNC_FN || it->kind == AST_RESULT_FN)
+            shadow_safe_walk_fn(&ctx, it);
+        else
+            shadow_safe_walk_stmt(&ctx, it);
+    }
+    return ctx.err ? 0 : 1;
+}

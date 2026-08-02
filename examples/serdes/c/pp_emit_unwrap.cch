@@ -1,0 +1,236 @@
+/* Emit: Result / bang / qmark / try_assign unwrap.
+ * Included from pp_emit_stmt.cch. */
+#pragma once
+
+static int shadow_emit_try_call(CEmit* out, ShadowCtx* ctx, const char* indent,
+                                const char* call, const char* site,
+                                const char* bind, int discard_ok) {
+    char i1[80], i2[80];
+    shadow_indent_nest(i1, sizeof(i1), indent, 1);
+    shadow_indent_nest(i2, sizeof(i2), indent, 2);
+    (void)discard_ok;
+    /* Polymorphic Result|pointer — host `_Generic` `__cc_uw_*`. */
+    if (!cemit_fmt(out,
+            "%s{\n"
+            "%s__typeof__(%s) __r = %s;\n"
+            "%sif (__cc_uw_is_err(__r)) {\n",
+            indent, i1, call, call, i1))
+        return 0;
+    /* Resync so __FILE__/__LINE__ on the next line are the source site. */
+    if (!shadow_resync_line(out, ctx, i2)) return 0;
+    if (!shadow_emit_ptr_err_at_bind(out, ctx, i2, bind, site))
+        return 0;
+    if (!shadow_emit_handler(out, ctx, bind, i2)) return 0;
+    return cemit_fmt(out, "%s}\n%s}\n", i1, indent);
+}
+
+/* Fallible call → typed local (hand-lowered unwrap). */
+static int shadow_emit_try_assign(CEmit* out, ShadowCtx* ctx, const char* indent,
+                                  const char* ty_lhs, const char* name,
+                                  const char* call, const char* site,
+                                  const char* bind,
+                                  const char* value_expr /* after ok */) {
+    char i1[80], i2[80];
+    shadow_indent_nest(i1, sizeof(i1), indent, 1);
+    shadow_indent_nest(i2, sizeof(i2), indent, 2);
+    /* Prefer .ok / field value — _Generic unwrap macros omit many Result arms.
+     * value_expr is `__r.u.value` or a post-unwrap UFCS chain (bang_chain). */
+    if (!value_expr || !value_expr[0]) value_expr = "__r.u.value";
+    if (!cemit_fmt(out,
+            "%s%s %s;\n"
+            "%s{\n"
+            "%s__typeof__(%s) __r = %s;\n"
+            "%sif (!__r.ok) {\n",
+            indent, ty_lhs, name, indent, i1, call, call, i1))
+        return 0;
+    if (!shadow_resync_line(out, ctx, i2)) return 0;
+    if (!shadow_emit_err_at_bind(out, ctx, i2, bind, site))
+        return 0;
+    if (!shadow_emit_handler(out, ctx, bind, i2)) return 0;
+    return cemit_fmt(out,
+            "%s}\n"
+            "%s%s = %s;\n"
+            "%s}\n",
+            i1, i1, name, value_expr, indent);
+}
+
+static int shadow_emit_println_arg(CEmit* out, ShadowCtx* ctx, const char* arg_expr,
+                                   const char* indent, int is_eprint) {
+    char call[320];
+    const char* fn = is_eprint ? "cc_eprintln" : "cc_println";
+    snprintf(call, sizeof(call), "%s(%s)", fn, arg_expr);
+    return shadow_emit_try_call(out, ctx, indent, call, fn, "e", 1);
+}
+
+static int shadow_emit_println(AstNode* st, CEmit* out, ShadowCtx* ctx,
+                               const char* indent) {
+    return shadow_emit_println_arg(out, ctx, st->a, indent, st->d[0] == 'e');
+}
+
+static int shadow_emit_println_tpl(AstNode* st, CEmit* out, ShadowCtx* ctx,
+                                   const char* indent) {
+    int is_eprint = st->d[0] == 'e';
+    const char* fn = is_eprint ? "cc_eprintln" : "cc_println";
+    char nested[80];
+    (void)ctx;
+    shadow_indent_nest(nested, sizeof(nested), indent, 1);
+    {
+        if (!cemit_fmt(out, "%s{\n", indent)) return 0;
+        if (!shadow_emit_tpl_build(out, st->a, "&__cc_str_scratch", nested, "__msg"))
+            return 0;
+    }
+    char call[320];
+    snprintf(call, sizeof(call), "%s(__msg)", fn);
+    if (!shadow_emit_try_call(out, ctx, nested, call, fn, "e", 1))
+        return 0;
+    return cemit_fmt(out, "%s}\n", indent);
+}
+
+static int shadow_emit_bang_bind(AstNode* st, CEmit* out, ShadowCtx* ctx,
+                                 const char* indent) {
+    char call[320];
+    char i1[80], i2[80];
+    shadow_indent_nest(i1, sizeof(i1), indent, 1);
+    shadow_indent_nest(i2, sizeof(i2), indent, 2);
+    snprintf(call, sizeof(call), "cc_println(%s)", st->a);
+    if (!cemit_fmt(out,
+            "%s{\n"
+            "%s__typeof__(%s) __r = %s;\n"
+            "%sif (__cc_uw_is_err(__r)) {\n",
+            indent, i1, call, call, i1))
+        return 0;
+    if (!shadow_resync_line(out, ctx, i2)) return 0;
+    if (!shadow_emit_ptr_err_at_bind(out, ctx, i2, st->b, "cc_println"))
+        return 0;
+    for (int k = 0; k < st->nbody; k++) {
+        AstNode* b = st->body[k];
+        if (b->kind == AST_PRINTLN_BANG) {
+            if (!shadow_emit_println(b, out, ctx, i2)) return 0;
+        } else if (b->kind == AST_ERR_FWD) {
+            if (!shadow_emit_handler(out, ctx, b->a, i2)) return 0;
+        } else {
+            fprintf(stderr, "error: !>(...) body stmt %s not lowerable yet\n",
+                    ast_kind_name(b->kind));
+            out->err = 1;
+            return 0;
+        }
+    }
+    return cemit_fmt(out, "%s}\n%s}\n", i1, indent);
+}
+
+static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
+                                  const char* indent) {
+    const char* call = st->b;
+    const char* mode = st->c;
+    /* e holds lhs type for bang/bang_stmt/bang_block; chain/qmark reuse e. */
+    const char* ty = "int";
+    if ((strcmp(mode, "bang") == 0 || strcmp(mode, "bang_stmt") == 0 ||
+         strcmp(mode, "bang_block") == 0) &&
+        st->e[0])
+        ty = st->e;
+    char callbuf[288];
+    if (shadow_emit_channel_pair_expr(callbuf, sizeof(callbuf), call))
+        call = callbuf;
+    else {
+        shadow_emit_expr_text(st, call, callbuf, sizeof(callbuf), NULL);
+        call = callbuf;
+    }
+    if (strcmp(mode, "bang") == 0 || strcmp(mode, "bang_chain") == 0) {
+        const char* val = "(__r).u.value";
+        char chained[192];
+        /* Form P: bare `!>;` at expression position needs @errhandler. */
+        if (!ctx || !ctx->eh) {
+            const char* path = NULL;
+            int line = 0;
+            if (shadow_site_loc(ctx ? ctx->cache : NULL, st, &path, &line) &&
+                path) {
+                fprintf(stderr,
+                        "%s:%d:1: error: syntax: '!>;' at expression position "
+                        "requires an enclosing '@errhandler' in scope\n",
+                        path, line);
+            } else {
+                fprintf(stderr,
+                        "error: syntax: '!>;' at expression position requires "
+                        "an enclosing '@errhandler' in scope\n");
+            }
+            out->err = 1;
+            return 0;
+        }
+        if (strcmp(mode, "bang_chain") == 0 && st->e[0]) {
+            char tmp[192];
+            snprintf(tmp, sizeof(tmp), "((__r).u.value)%s", st->e);
+            shadow_emit_text_ufcs(chained, sizeof(chained), tmp, NULL);
+            val = chained;
+        }
+        return shadow_emit_try_assign(out, ctx, indent, ty, st->a, call,
+                                      "unwrap", "e", val);
+    }
+    if (strcmp(mode, "bang_stmt") == 0 || strcmp(mode, "bang_block") == 0) {
+        const char* bind = st->d[0] ? st->d : "e";
+        char i1[80], i2[80];
+        shadow_indent_nest(i1, sizeof(i1), indent, 1);
+        shadow_indent_nest(i2, sizeof(i2), indent, 2);
+        /* Direct Result field access — works for http/net Results not listed
+         * in the host-cc _Generic unwrap macros. */
+        if (!cemit_fmt(out,
+                "%s%s %s;\n"
+                "%s{\n"
+                "%s__typeof__(%s) __r = %s;\n"
+                "%sif (!__r.ok) {\n"
+                "%s__typeof__(__r.u.error) %s = __r.u.error;\n",
+                indent, ty, st->a, indent, i1, call, call, i1, i2, bind))
+            return 0;
+        if (!shadow_resync_line(out, ctx, i2)) return 0;
+        if (strcmp(mode, "bang_stmt") == 0) {
+            if (st->nbody > 0 &&
+                !shadow_emit_stmt_ctx(st->body[0], out, ctx, i2, 0))
+                return 0;
+        } else {
+            for (int k = 0; k < st->nbody; k++) {
+                if (!shadow_emit_stmt_ctx(st->body[k], out, ctx, i2, 0))
+                    return 0;
+            }
+        }
+        return cemit_fmt(out,
+                "%s}\n"
+                "%s%s = __r.u.value;\n"
+                "%s}\n",
+                i1, i1, st->a, indent);
+    }
+    if (strcmp(mode, "qmark") == 0) {
+        char i1[80];
+        shadow_indent_nest(i1, sizeof(i1), indent, 1);
+        return cemit_fmt(out,
+            "%sint %s;\n"
+            "%s{\n"
+            "%s__typeof__(%s) __r = %s;\n"
+            "%s%s = !__cc_uw_is_err(__r) ? __cc_uw_value(__r) : (%s);\n"
+            "%s}\n",
+            indent, st->a, indent, i1, call, call, i1, st->a, st->e, indent);
+    }
+    if (strcmp(mode, "qmark_bind") == 0) {
+        char i1[80], i2[80];
+        shadow_indent_nest(i1, sizeof(i1), indent, 1);
+        shadow_indent_nest(i2, sizeof(i2), indent, 2);
+        if (!cemit_fmt(out,
+                "%sint %s;\n"
+                "%s{\n"
+                "%s__typeof__(%s) __r = %s;\n"
+                "%sif (!__cc_uw_is_err(__r)) {\n"
+                "%s%s = __cc_uw_value(__r);\n"
+                "%s} else {\n",
+                indent, st->a, indent, i1, call, call, i1, i2, st->a, i1))
+            return 0;
+        if (!shadow_resync_line(out, ctx, i2)) return 0;
+        if (!shadow_emit_ptr_err_at_bind(out, ctx, i2, st->d, "unwrap")) return 0;
+        return cemit_fmt(out,
+            "%s%s = (%s);\n"
+            "%s}\n"
+            "%s}\n",
+            i2, st->a, st->e, i1, indent);
+    }
+    fprintf(stderr, "error: unknown unwrap mode %s\n", mode);
+    out->err = 1;
+    return 0;
+}
+

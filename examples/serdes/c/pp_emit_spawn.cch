@@ -1,0 +1,455 @@
+/* Emit: closure make, spawn collect, nursery create, defer epilogue.
+ * Included from pp_emit_stmt.cch. */
+#pragma once
+
+static void shadow_resolve_at_create(char* expr, size_t cap, const char* ty,
+                                     int is_ptr, int with_closure) {
+    const char* callee = NULL;
+    char rest[256];
+    const size_t prefix_len = sizeof("__cc_at_create(") - 1; /* 15 */
+    if (!expr || !ty) return;
+    if (strncmp(expr, "__cc_at_create(", prefix_len) != 0) return;
+    if (strcmp(ty, "CCNursery") == 0)
+        callee = with_closure ? "cc_nursery_spawn_child_closure0"
+                              : "cc_nursery_create";
+    else if (strcmp(ty, "CCArena") == 0)
+        callee = "cc_arena_heap";
+    else if (strcmp(ty, "CCChan") == 0)
+        callee = "cc_channel_pair"; /* unlikely @create shape */
+    else
+        callee = is_ptr ? "cc_nursery_create" : "cc_arena_heap";
+    snprintf(rest, sizeof(rest), "%s", expr + prefix_len);
+    snprintf(expr, cap, "%s(%s", callee, rest);
+}
+
+/* Expr-level () => / (T x) => closure on dbody (create / typed-init). */
+static int shadow_is_expr_closure(AstNode* kid) {
+    if (!kid || kid->kind != AST_SPAWN_CLOSURE || kid->c[0]) return 0;
+    if (strcmp(kid->b, "create") == 0 || strcmp(kid->b, "callarg") == 0 ||
+        strcmp(kid->b, "callarg1") == 0 || strcmp(kid->b, "callarg2") == 0)
+        return 1;
+    return 0;
+}
+
+static AstNode* shadow_expr_closure_kid(AstNode* st) {
+    int k;
+    if (!st) return NULL;
+    for (k = 0; k < st->ndbody; k++) {
+        if (shadow_is_expr_closure(st->dbody[k])) return st->dbody[k];
+    }
+    return NULL;
+}
+
+static int shadow_closure_arity(AstNode* cl) {
+    if (!cl) return 0;
+    if (strcmp(cl->b, "callarg1") == 0) return 1;
+    if (strcmp(cl->b, "callarg2") == 0) return 2;
+    return 0;
+}
+
+static const char* shadow_closure_cc_ty(AstNode* cl) {
+    int a = shadow_closure_arity(cl);
+    if (a == 1) return "CCClosure1";
+    if (a == 2) return "CCClosure2";
+    return "CCClosure0";
+}
+
+/* Format cc_closure__Nid_make(caps…) into dst. */
+static void shadow_fmt_closure_make(char* dst, size_t cap, AstNode* cl) {
+    const char* id;
+    if (!dst || !cap || !cl) return;
+    id = cl->d[0] ? cl->d : "1";
+    if (cl->e[0])
+        snprintf(dst, cap, "cc_closure__N%s_make(%s)", id, cl->e);
+    else
+        snprintf(dst, cap, "cc_closure__N%s_make()", id);
+}
+
+/* Insert cc_closure__Nid_make(…) before the final ')' of a call expr. */
+static void shadow_splice_closure_arg(char* expr, size_t cap, AstNode* cl) {
+    size_t L;
+    size_t M;
+    int empty;
+    char make[288];
+    char with_cl[320];
+    if (!expr || !cap || !cl) return;
+    L = strlen(expr);
+    while (L && (expr[L - 1] == ' ' || expr[L - 1] == '\t')) L--;
+    if (!L || expr[L - 1] != ')') return;
+    expr[L - 1] = 0;
+    M = strlen(expr);
+    while (M && (expr[M - 1] == ' ' || expr[M - 1] == '\t')) M--;
+    empty = (M > 0 && expr[M - 1] == '(');
+    shadow_fmt_closure_make(make, sizeof(make), cl);
+    if (empty)
+        snprintf(with_cl, sizeof(with_cl), "%s%s)", expr, make);
+    else
+        snprintf(with_cl, sizeof(with_cl), "%s, %s)", expr, make);
+    snprintf(expr, cap, "%s", with_cl);
+}
+
+/* dbody holds real stmts (PTR_UNWRAP destroy) or attachments (UFCS / create cl). */
+
+static void shadow_cap_val_type(const char* name, char* dst, size_t cap) {
+    const ShadowBind* b = shadow_bind_lookup(name);
+    size_t n = name ? strlen(name) : 0;
+    if (b && b->ty[0]) {
+        snprintf(dst, cap, "%s", b->ty);
+        return;
+    }
+    if (strcmp(name, "rx") == 0 || (n >= 3 && strcmp(name + n - 3, "_rx") == 0)) {
+        snprintf(dst, cap, "CCChanRx");
+        return;
+    }
+    if (strcmp(name, "tx") == 0 || (n >= 3 && strcmp(name + n - 3, "_tx") == 0)) {
+        snprintf(dst, cap, "CCChanTx");
+        return;
+    }
+    snprintf(dst, cap, "int");
+}
+
+/* Ref capture: array → T* identity; atomic → cc_atomic_int*; else T* + deref macro. */
+static int shadow_cap_ref_is_array(const char* name) {
+    const ShadowBind* b = shadow_bind_lookup(name);
+    return b && (b->flags & SHADOW_BIND_ARRAY);
+}
+
+static void shadow_cap_ref_base_type(const char* name, char* dst, size_t cap) {
+    const ShadowBind* b = shadow_bind_lookup(name);
+    if (b && (b->flags & SHADOW_BIND_ATOMIC)) {
+        snprintf(dst, cap, "cc_atomic_int");
+        return;
+    }
+    if (b && b->ty[0]) {
+        shadow_bind_base_ty(b, dst, cap);
+        return;
+    }
+    snprintf(dst, cap, "int");
+}
+
+/* Capture list helpers: "x,&y" → proto / call / env / entry unpack. */
+static int shadow_caps_proto(const char* caps, char* dst, size_t cap) {
+    if (!caps || !caps[0]) {
+        snprintf(dst, cap, "void");
+        return 1;
+    }
+    dst[0] = 0;
+    const char* p = caps;
+    int first = 1;
+    while (*p) {
+        const char* c = strchr(p, ',');
+        size_t n = c ? (size_t)(c - p) : strlen(p);
+        char item[64];
+        if (n >= sizeof(item)) n = sizeof(item) - 1;
+        memcpy(item, p, n);
+        item[n] = 0;
+        char piece[96];
+        char vty[80];
+        if (item[0] == '&')
+            snprintf(piece, sizeof(piece), "void* __cc_opaque_%s", item + 1);
+        else {
+            shadow_cap_val_type(item, vty, sizeof(vty));
+            snprintf(piece, sizeof(piece), "%s %s", vty, item);
+        }
+        size_t cur = strlen(dst);
+        size_t need = strlen(piece) + (first ? 0 : 2);
+        if (cur + need + 1 >= cap) return 0;
+        if (!first) strcat(dst, ", ");
+        strcat(dst, piece);
+        first = 0;
+        if (!c) break;
+        p = c + 1;
+    }
+    return 1;
+}
+
+static int shadow_caps_call_args(const char* caps, char* dst, size_t cap) {
+    if (!caps || !caps[0]) {
+        dst[0] = 0;
+        return 1;
+    }
+    /* Call site: value name as-is; ref stays "&name". */
+    snprintf(dst, cap, "%s", caps);
+    /* Insert spaces after commas for readability */
+    char tmp[256];
+    size_t o = 0;
+    for (const char* p = caps; *p && o + 2 < sizeof(tmp); p++) {
+        tmp[o++] = *p;
+        if (*p == ',' && p[1]) tmp[o++] = ' ';
+    }
+    tmp[o] = 0;
+    snprintf(dst, cap, "%s", tmp);
+    return 1;
+}
+
+static int shadow_emit_closure_body(AstNode* cl, CEmit* out, TapeCache* cache) {
+    char body_ind[64];
+    shadow_pick_body_indent(cl->body, cl->nbody, body_ind, sizeof(body_ind));
+    ShadowCtx ctx = { .cache = cache, .body_indent = body_ind };
+    ctx.send_task_ret = (cl->b[0] && strcmp(cl->b, "send_task") == 0);
+    for (int k = 0; k < cl->nbody; k++) {
+        if (cl->body[k]->kind == AST_ERRHANDLER) ctx.eh = cl->body[k];
+    }
+    int need_scratch = 0;
+    for (int k = 0; k < cl->nbody; k++)
+        need_scratch |= shadow_stmt_uses_scratch(cl->body[k]);
+    if (need_scratch) {
+        if (!cemit_fmt(out, "%sCC_ARENA_STACK(__cc_str_scratch, 1024);\n",
+                       body_ind))
+            return 0;
+    }
+    for (int k = 0; k < cl->nbody; k++) {
+        AstNode* st = cl->body[k];
+        if (st->kind == AST_ERRHANDLER)
+            continue; /* inlined at unwrap sites */
+        if (!shadow_emit_stmt_ctx(st, out, &ctx, body_ind, 0))
+            return 0;
+    }
+    return 1;
+}
+
+/* Emit `Type name = (Type)__argN;` for callarg1/2 formals in cl->a.
+ * (Spawn/create keep recv/empty in a — not formals.) */
+static int shadow_emit_closure_formals(AstNode* cl, CEmit* out) {
+    const char* p;
+    int ai = 0;
+    if (!cl || !cl->a[0] || shadow_closure_arity(cl) == 0) return 1;
+    p = cl->a;
+    while (*p) {
+        char ty[32];
+        char name[32];
+        size_t ti = 0, ni = 0;
+        while (*p == ' ') p++;
+        while (*p && *p != ' ' && *p != ',' && ti + 1 < sizeof(ty)) ty[ti++] = *p++;
+        ty[ti] = 0;
+        while (*p == ' ') p++;
+        while (*p && *p != ',' && *p != ' ' && ni + 1 < sizeof(name))
+            name[ni++] = *p++;
+        name[ni] = 0;
+        if (!ty[0] || !name[0]) return 0;
+        if (!cemit_fmt(out, "    %s %s = (%s)__arg%d;\n", ty, name, ty, ai))
+            return 0;
+        ai++;
+        while (*p && *p != ',') p++;
+        if (*p == ',') p++;
+    }
+    return 1;
+}
+
+static int shadow_emit_closure_def(AstNode* cl, CEmit* out, TapeCache* cache) {
+    const char* id = cl->d[0] ? cl->d : "1";
+    const char* caps = cl->e;
+    const char* ccty = shadow_closure_cc_ty(cl);
+    int arity = shadow_closure_arity(cl);
+    const char* make_fn =
+        arity == 1 ? "cc_closure1_make" :
+        arity == 2 ? "cc_closure2_make" : "cc_closure0_make";
+    char proto[256];
+    char entry_sig[96];
+    if (!shadow_caps_proto(caps, proto, sizeof(proto))) return 0;
+    if (arity == 1)
+        snprintf(entry_sig, sizeof(entry_sig), "void* __p, intptr_t __arg0");
+    else if (arity == 2)
+        snprintf(entry_sig, sizeof(entry_sig),
+                 "void* __p, intptr_t __arg0, intptr_t __arg1");
+    else
+        snprintf(entry_sig, sizeof(entry_sig), "void* __p");
+
+    if (!cemit_fmt(out, "\n/* CC closure %s */\n", id)) return 0;
+
+    if (!caps || !caps[0]) {
+        if (arity == 0) {
+            if (!cemit_fmt(out,
+                    "static CCClosure0 cc_closure__N%s_make(void) {\n"
+                    "    return cc_closure0_make(cc_closure__N%s_entry, NULL, NULL);\n"
+                    "}\n"
+                    "static void* cc_closure__N%s_entry(void* __p) {\n"
+                    "    (void)__p;\n",
+                    id, id, id))
+                return 0;
+        } else {
+            if (!cemit_fmt(out,
+                    "static %s cc_closure__N%s_make(void) {\n"
+                    "    return %s(cc_closure__N%s_entry, NULL, NULL);\n"
+                    "}\n"
+                    "static void* cc_closure__N%s_entry(%s) {\n"
+                    "    (void)__p;\n",
+                    ccty, id, make_fn, id, id, entry_sig))
+                return 0;
+            if (!shadow_emit_closure_formals(cl, out)) return 0;
+        }
+        if (!shadow_emit_closure_body(cl, out, cache)) return 0;
+        return cemit_str(out, "    return NULL;\n}\n");
+    }
+
+    /* env struct */
+    if (!cemit_fmt(out, "typedef struct cc_closure__N%s_env {\n", id)) return 0;
+    {
+        const char* p = caps;
+        while (*p) {
+            const char* c = strchr(p, ',');
+            size_t n = c ? (size_t)(c - p) : strlen(p);
+            char item[64];
+            if (n >= sizeof(item)) n = sizeof(item) - 1;
+            memcpy(item, p, n);
+            item[n] = 0;
+            if (item[0] == '&') {
+                if (!cemit_fmt(out, "    void* %s;\n", item + 1)) return 0;
+            } else {
+                char vty[80];
+                shadow_cap_val_type(item, vty, sizeof(vty));
+                if (!cemit_fmt(out, "    %s %s;\n", vty, item)) return 0;
+            }
+            if (!c) break;
+            p = c + 1;
+        }
+    }
+    if (!cemit_fmt(out,
+            "} cc_closure__N%s_env;\n"
+            "static void cc_closure__N%s_env_drop(void* p) { if (p) free(p); }\n"
+            "static %s cc_closure__N%s_make(%s) {\n"
+            "    cc_closure__N%s_env* __env = (cc_closure__N%s_env*)malloc(sizeof(*__env));\n",
+            id, id, ccty, id, proto, id, id))
+        return 0;
+    {
+        const char* p = caps;
+        while (*p) {
+            const char* c = strchr(p, ',');
+            size_t n = c ? (size_t)(c - p) : strlen(p);
+            char item[64];
+            if (n >= sizeof(item)) n = sizeof(item) - 1;
+            memcpy(item, p, n);
+            item[n] = 0;
+            if (item[0] == '&') {
+                if (!cemit_fmt(out, "    __env->%s = __cc_opaque_%s;\n",
+                               item + 1, item + 1))
+                    return 0;
+            } else {
+                if (!cemit_fmt(out, "    __env->%s = %s;\n", item, item)) return 0;
+            }
+            if (!c) break;
+            p = c + 1;
+        }
+    }
+    if (!cemit_fmt(out,
+            "    return %s(cc_closure__N%s_entry, __env, "
+            "cc_closure__N%s_env_drop);\n"
+            "}\n"
+            "static void* cc_closure__N%s_entry(%s) {\n"
+            "    cc_closure__N%s_env* __env = (cc_closure__N%s_env*)__p;\n",
+            make_fn, id, id, id, entry_sig, id, id))
+        return 0;
+    {
+        const char* p = caps;
+        while (*p) {
+            const char* c = strchr(p, ',');
+            size_t n = c ? (size_t)(c - p) : strlen(p);
+            char item[64];
+            if (n >= sizeof(item)) n = sizeof(item) - 1;
+            memcpy(item, p, n);
+            item[n] = 0;
+            if (item[0] == '&') {
+                char rty[80];
+                shadow_cap_ref_base_type(item + 1, rty, sizeof(rty));
+                if (shadow_cap_ref_is_array(item + 1)) {
+                    /* Array/buffer ref: keep pointer identity (no deref macro). */
+                    if (!cemit_fmt(out, "    %s* %s = (%s*)__env->%s;\n",
+                                   rty, item + 1, rty, item + 1))
+                        return 0;
+                } else {
+                    if (!cemit_fmt(out,
+                            "    %s* __cc_ref_%s = (%s*)__env->%s;\n"
+                            "#define %s (*__cc_ref_%s)\n",
+                            rty, item + 1, rty, item + 1, item + 1, item + 1))
+                        return 0;
+                }
+            } else {
+                char vty[80];
+                shadow_cap_val_type(item, vty, sizeof(vty));
+                if (!cemit_fmt(out, "    %s %s = __env->%s;\n", vty, item, item))
+                    return 0;
+            }
+            if (!c) break;
+            p = c + 1;
+        }
+    }
+    if (!shadow_emit_closure_formals(cl, out)) return 0;
+    if (!shadow_emit_closure_body(cl, out, cache)) return 0;
+    {
+        const char* p = caps;
+        while (*p) {
+            const char* c = strchr(p, ',');
+            size_t n = c ? (size_t)(c - p) : strlen(p);
+            char item[64];
+            if (n >= sizeof(item)) n = sizeof(item) - 1;
+            memcpy(item, p, n);
+            item[n] = 0;
+            if (item[0] == '&' && !shadow_cap_ref_is_array(item + 1)) {
+                if (!cemit_fmt(out, "#undef %s\n", item + 1)) return 0;
+            }
+            if (!c) break;
+            p = c + 1;
+        }
+    }
+    return cemit_str(out, "    return NULL;\n}\n");
+}
+
+
+static int shadow_emit_defer_epilogue(CEmit* out, ShadowCtx* ctx) {
+    if (!ctx || !ctx->ndefers) return 1;
+    const char* ind = ctx->body_indent ? ctx->body_indent : "    ";
+    char i1[80];
+    shadow_indent_nest(i1, sizeof(i1), ind, 1);
+    if (!cemit_str(out, "__cc_cleanup:\n")) return 0;
+    /* Reverse declaration order */
+    for (int i = ctx->ndefers - 1; i >= 0; i--) {
+        AstNode* d = ctx->defers[i];
+        const char* mode = d->c;
+        if (mode[0] == 0) {
+            /* always */
+            for (int k = 0; k < d->nbody; k++) {
+                if (!shadow_emit_stmt_ctx(d->body[k], out, ctx, ind, 0)) return 0;
+            }
+        } else if (strcmp(mode, "ok") == 0) {
+            if (!cemit_fmt(out, "%sif (!__cc_ret_err) {\n", ind)) return 0;
+            for (int k = 0; k < d->nbody; k++) {
+                if (!shadow_emit_stmt_ctx(d->body[k], out, ctx, i1, 0)) return 0;
+            }
+            if (!cemit_fmt(out, "%s}\n", ind)) return 0;
+        } else if (strcmp(mode, "err") == 0) {
+            if (!cemit_fmt(out, "%sif (__cc_ret_err) {\n", ind)) return 0;
+            for (int k = 0; k < d->nbody; k++) {
+                if (!shadow_emit_stmt_ctx(d->body[k], out, ctx, i1, 0)) return 0;
+            }
+            if (!cemit_fmt(out, "%s}\n", ind)) return 0;
+        }
+    }
+    return cemit_fmt(out,
+        "%sif (__cc_ret_set) return __cc_retval;\n"
+        "%sreturn __cc_retval;\n",
+        ind, ind);
+}
+
+
+static int shadow_collect_spawns(AstNode* st, AstNode** spawns, int* nspawns,
+                                int cap) {
+    if (!st) return 1;
+    if (st->kind == AST_SPAWN_CLOSURE && !st->c[0]) {
+        if (*nspawns >= cap) return 0;
+        snprintf(st->d, sizeof(st->d), "%d", g_shadow_closure_id++);
+        spawns[(*nspawns)++] = st;
+    }
+    for (int k = 0; k < st->nbody; k++) {
+        if (!shadow_collect_spawns(st->body[k], spawns, nspawns, cap)) return 0;
+    }
+    for (int k = 0; k < st->ndbody; k++) {
+        if (!shadow_collect_spawns(st->dbody[k], spawns, nspawns, cap)) return 0;
+    }
+    if (st->kids) {
+        for (int k = 0; k < st->nkids; k++) {
+            if (!shadow_collect_spawns(st->kids[k], spawns, nspawns, cap)) return 0;
+        }
+    }
+    return 1;
+}
+

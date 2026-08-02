@@ -10,7 +10,13 @@ typedef int MyOk;
 
 #ifndef CCResult_MyOk_MyErr_DEFINED
 #define CCResult_MyOk_MyErr_DEFINED 1
-typedef struct { MyOk ok; int is_err; MyErr err; } CCResult_MyOk_MyErr;
+#ifdef CC_DECL_RESULT_SPEC
+CC_DECL_RESULT_SPEC(CCResult_MyOk_MyErr, MyOk, MyErr)
+#else
+typedef struct { int ok; union { MyOk value; MyErr error; } u; } CCResult_MyOk_MyErr;
+static inline CCResult_MyOk_MyErr cc_ok_CCResult_MyOk_MyErr(MyOk v) { CCResult_MyOk_MyErr r; r.ok = 1; r.u.value = v; return r; }
+static inline CCResult_MyOk_MyErr cc_err_CCResult_MyOk_MyErr(MyErr e) { CCResult_MyOk_MyErr r; r.ok = 0; r.u.error = e; return r; }
+#endif
 #endif
 
 #line 3 "examples/serdes/c/shadow/result_frag.cch"

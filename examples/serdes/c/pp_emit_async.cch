@@ -1,0 +1,133 @@
+/* Emit: @async poll-task beachhead.
+ * Included from pp_emit_stmt.cch. */
+#pragma once
+
+static int shadow_emit_async_body_args(CEmit* out, ShadowParam* ps, int np) {
+    for (int k = 0; k < np; k++) {
+        if (k && !cemit_str(out, ", ")) return 0;
+        if (!cemit_fmt(out, "__f->__p_%s", ps[k].name)) return 0;
+    }
+    return 1;
+}
+
+static int shadow_emit_async_fn(AstNode* it, CEmit* out, TapeCache* cache) {
+    char params[512];
+    char base[160];
+    char body_ind[64];
+    ShadowParam ps[16];
+    int np;
+    int id;
+    int is_void;
+    int k;
+    if (!it || !out) return 0;
+    snprintf(params, sizeof(params), "%s", it->c[0] ? it->c : "void");
+    np = shadow_parse_params(params, ps, 16);
+    id = g_shadow_async_id++;
+    snprintf(base, sizeof(base), "__cc_async_%s_%d", it->b, id);
+    is_void = (strcmp(it->a, "void") == 0);
+
+    if (!cemit_fmt(out, "typedef struct %s_frame {\n", base)) return 0;
+    if (!cemit_str(out, "  int __st;\n  intptr_t __r;\n")) return 0;
+    for (k = 0; k < np; k++) {
+        if (!cemit_fmt(out, "  %s __p_%s;\n", ps[k].ty, ps[k].name)) return 0;
+    }
+    if (!cemit_fmt(out, "  CCTaskIntptr __t[1];\n} %s_frame;\n\n", base))
+        return 0;
+
+    /* Sync body helper keeps original return type + param names. */
+    if (!cemit_fmt(out, "static %s %s_body(%s) {\n", it->a, base, params))
+        return 0;
+    if (it->d[0] && it->nkids == 0) {
+        char body[2048];
+        shadow_rewrite_ufcs(body, sizeof(body), it->d, NULL);
+        if (!cemit_fmt(out, "%s\n}\n\n", body)) return 0;
+    } else {
+        shadow_pick_body_indent(it->kids, it->nkids, body_ind, sizeof(body_ind));
+        ShadowCtx sctx = { .cache = cache, .body_indent = body_ind };
+        for (k = 0; k < it->nkids; k++) {
+            if (it->kids[k]->kind == AST_ERRHANDLER) sctx.eh = it->kids[k];
+        }
+        if (!shadow_emit_scratch_if_needed(it->kids, it->nkids, NULL, 0, out,
+                                           body_ind))
+            return 0;
+        for (k = 0; k < it->nkids; k++) {
+            if (!shadow_emit_stmt_ctx(it->kids[k], out, &sctx, body_ind, 0))
+                return 0;
+        }
+        if (!cemit_str(out, "}\n\n")) return 0;
+    }
+
+    if (!cemit_fmt(out,
+            "static CCFutureStatus %s_poll(void* __p, intptr_t* __o, int* __e) {\n"
+            "  (void)__e;\n"
+            "  %s_frame* __f = (%s_frame*)__p;\n"
+            "  if (!__f) return CC_FUTURE_ERR;\n",
+            base, base, base))
+        return 0;
+    if (!cemit_str(out,
+            "  for (;;) {\n"
+            "  switch (__f->__st) {\n"
+            "    case 0:\n"
+            "      __f->__st = 1;\n"
+            "      /* fallthrough */\n"
+            "    case 1: {\n"))
+        return 0;
+    if (is_void) {
+        if (!cemit_fmt(out, "      %s_body(", base)) return 0;
+        if (!shadow_emit_async_body_args(out, ps, np)) return 0;
+        if (!cemit_str(out, ");\n      __f->__r = 0;\n")) return 0;
+    } else {
+        if (!cemit_fmt(out, "      __f->__r = (intptr_t)%s_body(", base))
+            return 0;
+        if (!shadow_emit_async_body_args(out, ps, np)) return 0;
+        if (!cemit_str(out, ");\n")) return 0;
+    }
+    if (!cemit_str(out,
+            "      __f->__st = 999;\n"
+            "      continue;\n"
+            "    }\n"
+            "    case 999: {\n"
+            "      if (__o) *__o = __f->__r;\n"
+            "      return CC_FUTURE_READY;\n"
+            "    }\n"
+            "    default:\n"
+            "      return CC_FUTURE_ERR;\n"
+            "  }\n"
+            "  }\n"
+            "}\n\n"))
+        return 0;
+    if (!cemit_fmt(out, "static void %s_drop(void* __p) {\n", base)) return 0;
+    if (!cemit_fmt(out, "  %s_frame* __f = (%s_frame*)__p;\n", base, base))
+        return 0;
+    if (!cemit_str(out,
+            "  if (!__f) return;\n"
+            "  for (int __i = 0; __i < 1; __i++) {\n"
+            "    cc_task_intptr_free(&__f->__t[__i]);\n"
+            "  }\n"
+            "  free(__f);\n"
+            "}\n\n"))
+        return 0;
+    if (!cemit_fmt(out, "CCTaskIntptr %s(%s) {\n", it->b, params)) return 0;
+    if (!cemit_fmt(out,
+            "  %s_frame* __f = (%s_frame*)calloc(1, sizeof(%s_frame));\n",
+            base, base, base))
+        return 0;
+    if (!cemit_str(out,
+            "  if (!__f) {\n"
+            "    CCTaskIntptr __t;\n"
+            "    memset(&__t, 0, sizeof(__t));\n"
+            "    return __t;\n"
+            "  }\n"
+            "  __f->__st = 0;\n"))
+        return 0;
+    for (k = 0; k < np; k++) {
+        if (!cemit_fmt(out, "  __f->__p_%s = %s;\n", ps[k].name, ps[k].name))
+            return 0;
+    }
+    if (!cemit_fmt(out,
+            "  return cc_task_intptr_make_poll_ex(%s_poll, NULL, __f, %s_drop);\n"
+            "}\n\n",
+            base, base))
+        return 0;
+    return 1;
+}

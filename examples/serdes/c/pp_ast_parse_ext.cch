@@ -2,17 +2,31 @@
  * Requires pp_ast_core.cch + pp_ast_parse_stmt.cch. */
 #pragma once
 
+/* Ret[*] name ( params ) { body } — ret in e (default int). */
 static AstNode* parse_fn(Parser* p) {
-    if (!peek_int_base(p)) return NULL;
+    Token rty = p_peek(p);
+    ShadowKwKind rkw = shadow_kw(rty);
+    int is_ptr = 0;
+    int name_i;
+    int j;
+    int depth;
+    if (rty.kind != TK_IDENT && rkw != SHADOW_KW_INT && rkw != SHADOW_KW_VOID &&
+        rkw != SHADOW_KW_CHAR && rkw != SHADOW_KW_BOOL && rkw != SHADOW_KW_SIZE_T)
+        return NULL;
     if (p->i + 1 < p->n && (tok_eq(p->toks[p->i + 1], TK_PUNCT, "[") ||
                             tok_eq(p->toks[p->i + 1], TK_PUNCT, "!>")))
         return NULL;
-    if (p->i + 5 >= p->n) return NULL;
-    if (p->toks[p->i + 1].kind != TK_IDENT) return NULL;
-    if (!tok_eq(p->toks[p->i + 2], TK_PUNCT, "(")) return NULL;
+    name_i = p->i + 1;
+    if (name_i < p->n && tok_eq(p->toks[name_i], TK_PUNCT, "*")) {
+        is_ptr = 1;
+        name_i++;
+    }
+    if (name_i + 3 >= p->n) return NULL;
+    if (p->toks[name_i].kind != TK_IDENT) return NULL;
+    if (!tok_eq(p->toks[name_i + 1], TK_PUNCT, "(")) return NULL;
     /* Find matching `)` then `{` */
-    int j = p->i + 3;
-    int depth = 1;
+    j = name_i + 2;
+    depth = 1;
     while (j < p->n && depth > 0) {
         if (tok_eq(p->toks[j], TK_PUNCT, "(")) depth++;
         else if (tok_eq(p->toks[j], TK_PUNCT, ")")) { depth--; if (depth == 0) break; }
@@ -21,7 +35,8 @@ static AstNode* parse_fn(Parser* p) {
     if (j >= p->n || !tok_eq(p->toks[j], TK_PUNCT, ")")) return NULL;
     if (j + 1 >= p->n || !tok_eq(p->toks[j + 1], TK_PUNCT, "{")) return NULL;
 
-    p_next(p); /* int */
+    p_next(p); /* ret */
+    if (is_ptr) p_next(p); /* * */
     Token name = p_next(p);
     p_next(p); /* ( */
     int p0 = p->i;
@@ -37,6 +52,14 @@ static AstNode* parse_fn(Parser* p) {
     if (!n) return NULL;
     slice_to(n->a, sizeof(n->a), name.spell);
     snprintf(n->b, sizeof(n->b), "%s", params);
+    {
+        char rbuf[64];
+        slice_to(rbuf, sizeof(rbuf), rty.spell);
+        if (is_ptr)
+            snprintf(n->e, sizeof(n->e), "%s*", rbuf);
+        else
+            snprintf(n->e, sizeof(n->e), "%s", rbuf);
+    }
     n->kids = &p->kids_storage[p->nkstore];
     while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF && !p->err) {
         AstNode* s = parse_stmt(p);
@@ -106,8 +129,8 @@ static AstNode* parse_with_deadline(Parser* p) {
     while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF && !p->err) {
         AstNode* s = parse_stmt(p);
         if (!s) return NULL;
-        if (n->nbody >= 8) {
-            parser_fail(p, p_peek(p), "@with_deadline body too large");
+        if (n->nbody >= 32) {
+            parser_fail_body_cap(p, p_peek(p), "@with_deadline body");
             return NULL;
         }
         n->body[n->nbody++] = s;
@@ -154,7 +177,7 @@ static AstNode* parse_inc(Parser* p) {
     return n;
 }
 
-/* @async Ret name ( params ) { body } — sync beachhead (awaits stripped on emit). */
+/* @async Ret name ( params ) { body } — poll-task beachhead (no real @await SM). */
 static AstNode* parse_async_fn(Parser* p) {
     if (!tok_eq(p_peek(p), TK_PUNCT, "@")) return NULL;
     if (p->i + 1 >= p->n || shadow_kw(p->toks[p->i + 1]) != SHADOW_KW_ASYNC)
@@ -198,10 +221,14 @@ static AstNode* parse_async_fn(Parser* p) {
     slice_to(n->a, sizeof(n->a), rty.spell);
     slice_to(n->b, sizeof(n->b), name.spell);
     snprintf(n->c, sizeof(n->c), "%s", params);
+    /* Register before body so nested `@await name(...)` can wrap. */
+    shadow_async_fn_register(n->b, n->a);
     int body0 = p->i;
     int saved_i = p->i, saved_err = p->err, saved_nn = p->nn, saved_nk = p->nkstore;
+    int saved_async = p->in_async;
     n->kids = &p->kids_storage[p->nkstore];
     int ok_stmts = 1;
+    p->in_async = 1;
     while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF && !p->err) {
         AstNode* s = parse_stmt(p);
         if (!s) { ok_stmts = 0; break; }
@@ -209,12 +236,16 @@ static AstNode* parse_async_fn(Parser* p) {
         p->kids_storage[p->nkstore++] = s;
         n->nkids++;
     }
-    if (ok_stmts && p_accept(p, TK_PUNCT, "}")) return n;
+    if (ok_stmts && p_accept(p, TK_PUNCT, "}")) {
+        p->in_async = saved_async;
+        return n;
+    }
 
     p->i = saved_i;
     p->err = saved_err;
     p->nn = saved_nn;
     p->nkstore = saved_nk;
+    p->in_async = saved_async;
     n->nkids = 0;
     n->kids = NULL;
     depth = 1;
@@ -238,17 +269,43 @@ static AstNode* parse_async_fn(Parser* p) {
     return n;
 }
 
-/* static Type[*] name[[N]]; */
+/* static [volatile] [const] Type[*] name[[N]] [= expr]; */
 static AstNode* parse_static_var(Parser* p) {
     if (shadow_kw(p_peek(p)) != SHADOW_KW_STATIC) return NULL;
     if (p->i + 2 >= p->n) return NULL;
     /* `static inline …` is always a function (parse_static_fn). */
     if (shadow_kw(p->toks[p->i + 1]) == SHADOW_KW_INLINE) return NULL;
-    Token ty = p->toks[p->i + 1];
+    int has_const = 0;
+    int has_volatile = 0;
+    int ti = p->i + 1;
+    if (ti < p->n && p->toks[ti].kind == TK_IDENT &&
+        spell_eq(p->toks[ti].spell, "volatile")) {
+        has_volatile = 1;
+        ti++;
+        if (ti >= p->n) return NULL;
+    }
+    if (shadow_kw(p->toks[ti]) == SHADOW_KW_CONST) {
+        has_const = 1;
+        ti++;
+        if (ti >= p->n) return NULL;
+    }
+    /* Also accept `static const volatile` order. */
+    if (!has_volatile && ti < p->n && p->toks[ti].kind == TK_IDENT &&
+        spell_eq(p->toks[ti].spell, "volatile")) {
+        has_volatile = 1;
+        ti++;
+        if (ti >= p->n) return NULL;
+    }
+    Token ty = p->toks[ti];
     if (ty.kind != TK_IDENT && shadow_kw(ty) != SHADOW_KW_INT &&
-        shadow_kw(ty) != SHADOW_KW_BOOL)
+        shadow_kw(ty) != SHADOW_KW_BOOL && shadow_kw(ty) != SHADOW_KW_CHAR &&
+        shadow_kw(ty) != SHADOW_KW_SIZE_T)
         return NULL;
-    int ni = p->i + 2;
+    int ni = ti + 1;
+    /* `static long long …` is a function/type form — not a single-token var. */
+    if (ty.kind == TK_IDENT && spell_eq(ty.spell, "long") && ni < p->n &&
+        p->toks[ni].kind == TK_IDENT && spell_eq(p->toks[ni].spell, "long"))
+        return NULL;
     int is_ptr = 0;
     if (ni < p->n && tok_eq(p->toks[ni], TK_PUNCT, "*")) {
         is_ptr = 1;
@@ -259,12 +316,26 @@ static AstNode* parse_static_var(Parser* p) {
     if (ni + 1 < p->n && tok_eq(p->toks[ni + 1], TK_PUNCT, "(")) return NULL;
 
     p_next(p); /* static */
+    if (has_volatile && spell_eq(p_peek(p).spell, "volatile")) p_next(p);
+    if (has_const) p_next(p);
+    if (has_volatile && spell_eq(p_peek(p).spell, "volatile")) p_next(p);
     p_next(p); /* type */
     if (is_ptr) p_next(p);
     Token name = p_next(p);
     AstNode* n = ast_new(p, AST_STATIC_VAR);
     if (!n) return NULL;
-    slice_to(n->a, sizeof(n->a), ty.spell);
+    {
+        char tbuf[128];
+        slice_to(tbuf, sizeof(tbuf), ty.spell);
+        if (has_volatile && has_const)
+            snprintf(n->a, sizeof(n->a), "volatile const %s", tbuf);
+        else if (has_volatile)
+            snprintf(n->a, sizeof(n->a), "volatile %s", tbuf);
+        else if (has_const)
+            snprintf(n->a, sizeof(n->a), "const %s", tbuf);
+        else
+            snprintf(n->a, sizeof(n->a), "%s", tbuf);
+    }
     slice_to(n->b, sizeof(n->b), name.spell);
     if (is_ptr) snprintf(n->c, sizeof(n->c), "*");
     if (tok_eq(p_peek(p), TK_PUNCT, "[")) {
@@ -288,8 +359,147 @@ static AstNode* parse_static_var(Parser* p) {
         p_next(p); /* ] */
         snprintf(n->c, sizeof(n->c), "%s", dims);
     }
+    if (tok_eq(p_peek(p), TK_PUNCT, "=")) {
+        p_next(p); /* = */
+        int e0 = p->i;
+        int depth = 0;
+        while (p->i < p->n) {
+            Token t = p_peek(p);
+            if (tok_eq(t, TK_PUNCT, "(") || tok_eq(t, TK_PUNCT, "[") ||
+                tok_eq(t, TK_PUNCT, "{"))
+                depth++;
+            else if (tok_eq(t, TK_PUNCT, ")") || tok_eq(t, TK_PUNCT, "]") ||
+                     tok_eq(t, TK_PUNCT, "}"))
+                depth--;
+            else if (depth == 0 && tok_eq(t, TK_PUNCT, ";"))
+                break;
+            p_next(p);
+        }
+        if (!ast_spell_token_range(p, e0, p->i, n->d, sizeof(n->d)) &&
+            !span_text(p, e0, p->i, n->d, sizeof(n->d))) {
+            parser_fail(p, name, "static init too long");
+            return NULL;
+        }
+    }
     if (!p_accept(p, TK_PUNCT, ";")) {
         parser_fail(p, p_peek(p), "expected ';' after static var");
+        return NULL;
+    }
+    return n;
+}
+
+/* Type[*] name [[N]] [= expr]; — file-scope global (non-static). */
+static AstNode* parse_global_var(Parser* p) {
+    int ti = p->i;
+    Token ty = p->toks[ti];
+    ShadowKwKind tkw = shadow_kw(ty);
+    if (ty.kind != TK_IDENT && tkw != SHADOW_KW_INT && tkw != SHADOW_KW_BOOL &&
+        tkw != SHADOW_KW_CHAR && tkw != SHADOW_KW_SIZE_T)
+        return NULL;
+    /* Not a type keyword (`const`/`struct`/…) — those are other parsers. */
+    if (tkw != SHADOW_KW_NONE && tkw != SHADOW_KW_INT && tkw != SHADOW_KW_BOOL &&
+        tkw != SHADOW_KW_CHAR && tkw != SHADOW_KW_SIZE_T)
+        return NULL;
+    /* Bare IDENT types: local typedefs, or Concurrent-C / runtime names from
+     * passthrough `<…>` includes (not spliced into the AST scope). */
+    if (tkw == SHADOW_KW_NONE && !scope_is_typedef(p, ty.spell)) {
+        char tname[128];
+        slice_to(tname, sizeof(tname), ty.spell);
+        if (!(tname[0] == 'C' && tname[1] == 'C') &&
+            !(tname[0] == 'c' && tname[1] == 'c' && tname[2] == '_'))
+            return NULL;
+    }
+    int ni = ti + 1;
+    int is_ptr = 0;
+    if (ni < p->n && tok_eq(p->toks[ni], TK_PUNCT, "*")) {
+        is_ptr = 1;
+        ni++;
+    }
+    if (ni >= p->n || p->toks[ni].kind != TK_IDENT) return NULL;
+    if (ni + 1 < p->n && tok_eq(p->toks[ni + 1], TK_PUNCT, "(")) return NULL;
+    /* `Ident * Ident;` is parse_star_stmt (typedef ptr vs mul expr). */
+    if (is_ptr && ni + 1 < p->n && tok_eq(p->toks[ni + 1], TK_PUNCT, ";"))
+        return NULL;
+    if (ni + 1 < p->n && tok_eq(p->toks[ni + 1], TK_PUNCT, "[")) {
+        if (p->toks[ni + 1].kind != TK_PUNCT || !tok_eq(p->toks[ni + 1], TK_PUNCT, "["))
+            return NULL;
+    }
+    /* Must end with `;` (optional `=` init). */
+    {
+        int j = ni + 1;
+        int depth = 0;
+        int has_semi = 0;
+        while (j < p->n) {
+            Token t = p->toks[j];
+            if (tok_eq(t, TK_PUNCT, "(") || tok_eq(t, TK_PUNCT, "[") ||
+                tok_eq(t, TK_PUNCT, "{"))
+                depth++;
+            else if (tok_eq(t, TK_PUNCT, ")") || tok_eq(t, TK_PUNCT, "]") ||
+                     tok_eq(t, TK_PUNCT, "}"))
+                depth--;
+            else if (depth == 0 && tok_eq(t, TK_PUNCT, ";")) {
+                has_semi = 1;
+                break;
+            }
+            j++;
+        }
+        if (!has_semi) return NULL;
+    }
+
+    p_next(p); /* type */
+    if (is_ptr) p_next(p);
+    Token name = p_next(p);
+    AstNode* n = ast_new(p, AST_STATIC_VAR);
+    if (!n) return NULL;
+    slice_to(n->a, sizeof(n->a), ty.spell);
+    slice_to(n->b, sizeof(n->b), name.spell);
+    snprintf(n->e, sizeof(n->e), "global");
+    if (is_ptr) snprintf(n->c, sizeof(n->c), "*");
+    if (tok_eq(p_peek(p), TK_PUNCT, "[")) {
+        int a0 = p->i;
+        int depth = 0;
+        p_next(p);
+        while (p->i < p->n && depth >= 0) {
+            Token t = p_peek(p);
+            if (tok_eq(t, TK_PUNCT, "[")) depth++;
+            else if (tok_eq(t, TK_PUNCT, "]")) {
+                depth--;
+                if (depth == 0) break;
+            }
+            p_next(p);
+        }
+        char dims[64];
+        if (!span_text(p, a0, p->i + 1, dims, sizeof(dims))) {
+            parser_fail(p, name, "global array dims too long");
+            return NULL;
+        }
+        p_next(p); /* ] */
+        snprintf(n->c, sizeof(n->c), "%s", dims);
+    }
+    if (tok_eq(p_peek(p), TK_PUNCT, "=")) {
+        p_next(p);
+        int e0 = p->i;
+        int depth = 0;
+        while (p->i < p->n) {
+            Token t = p_peek(p);
+            if (tok_eq(t, TK_PUNCT, "(") || tok_eq(t, TK_PUNCT, "[") ||
+                tok_eq(t, TK_PUNCT, "{"))
+                depth++;
+            else if (tok_eq(t, TK_PUNCT, ")") || tok_eq(t, TK_PUNCT, "]") ||
+                     tok_eq(t, TK_PUNCT, "}"))
+                depth--;
+            else if (depth == 0 && tok_eq(t, TK_PUNCT, ";"))
+                break;
+            p_next(p);
+        }
+        if (!ast_spell_token_range(p, e0, p->i, n->d, sizeof(n->d)) &&
+            !span_text(p, e0, p->i, n->d, sizeof(n->d))) {
+            parser_fail(p, name, "global init too long");
+            return NULL;
+        }
+    }
+    if (!p_accept(p, TK_PUNCT, ";")) {
+        parser_fail(p, p_peek(p), "expected ';' after global var");
         return NULL;
     }
     return n;
@@ -308,6 +518,40 @@ static AstNode* parse_at_stmt(Parser* p) {
     p_next(p);
     Token name = p_next(p);
     if (name.kind != TK_IDENT) { p->err = 1; return NULL; }
+    /* Retired @ forms — reject with legacy migration text (safety/diag seam). */
+    if (spell_eq(name.spell, "arena")) {
+        parser_fail(p, name,
+                    "async: `@arena(...) { ... }` is retired; use "
+                    "`CCArena a = @create(size) @destroy`");
+        return NULL;
+    }
+    if (spell_eq(name.spell, "arena_init")) {
+        parser_fail(p, name,
+                    "async: `@arena_init(...) { ... }` is retired; use "
+                    "`CCArena a = @create(buf, size) @destroy` or "
+                    "`cc_arena_buffer(...)` directly");
+        return NULL;
+    }
+    if (spell_eq(name.spell, "closing")) {
+        parser_fail(p, name,
+                    "async: `@closing(...)` is retired; use explicit ownership "
+                    "with `@create(...) @destroy { chan.close(); }`");
+        return NULL;
+    }
+    if (spell_eq(name.spell, "nursery")) {
+        parser_fail(p, name,
+                    "async: `@nursery { ... }` is retired; use "
+                    "`CCNursery* n = @create(parent) @destroy` and "
+                    "`n->spawn(...)`");
+        return NULL;
+    }
+    if (spell_eq(name.spell, "match")) {
+        parser_fail(p, name,
+                    "syntax: '@match' was removed; multiplex channels with "
+                    "cc_chan_match_select(...) (see spec) or restructure with "
+                    "one fiber per source");
+        return NULL;
+    }
     if (tok_eq(p_peek(p), TK_PUNCT, "(")) {
         if (!skip_parens(p)) { p->err = 1; return NULL; }
     }
@@ -338,9 +582,11 @@ static AstNode* parse_int_decl(Parser* p, AstKind kind) {
     /* CC shapes take precedence over plain int Name */
     if (p->i + 1 < p->n && tok_eq(p->toks[p->i + 1], TK_PUNCT, "[")) return NULL;
     if (p->i + 1 < p->n && tok_eq(p->toks[p->i + 1], TK_PUNCT, "!>")) return NULL;
+    /* `int x, y;` belongs to parse_field_simple — don't steal / set err. */
+    if (p->i + 2 >= p->n || p->toks[p->i + 1].kind != TK_IDENT) return NULL;
+    if (!tok_eq(p->toks[p->i + 2], TK_PUNCT, ";")) return NULL;
     p_next(p);
     Token name = p_next(p);
-    if (name.kind != TK_IDENT) { p->err = 1; return NULL; }
     if (!p_accept(p, TK_PUNCT, ";")) { p->err = 1; return NULL; }
     AstNode* n = ast_new(p, kind);
     if (!n) return NULL;
@@ -486,6 +732,12 @@ static AstNode* parse_field_simple(Parser* p) {
     }
     if (!has_as && last_name.kind == TK_IDENT)
         has_as = field_gap_has_as(p, last_name, semi);
+    /* `@as` is a value-embed layout marker — pointers are ill-formed. */
+    if (has_as && (is_ptr || strchr(tytxt, '*') != NULL)) {
+        parser_fail(p, last_name.kind == TK_IDENT ? last_name : ty,
+                    "@as field must be a value embed, not a pointer");
+        return NULL;
+    }
     n = ast_new(p, AST_FIELD_SIMPLE);
     if (!n) return NULL;
     snprintf(n->a, sizeof(n->a), "%s", tytxt);
@@ -693,6 +945,64 @@ static AstNode* parse_typedef_fn_ptr(Parser* p) {
     return n;
 }
 
+/* typedef Elem[~N [ordered] >|<] Alias; */
+static AstNode* parse_typedef_chan(Parser* p) {
+    if (shadow_kw(p_peek(p)) != SHADOW_KW_TYPEDEF) return NULL;
+    if (p->i + 6 >= p->n) return NULL;
+    Token ety = p->toks[p->i + 1];
+    ShadowKwKind ekw = shadow_kw(ety);
+    if (ety.kind != TK_IDENT && ekw != SHADOW_KW_INT && ekw != SHADOW_KW_CHAR &&
+        ekw != SHADOW_KW_BOOL && ekw != SHADOW_KW_SIZE_T && ekw != SHADOW_KW_VOID)
+        return NULL;
+    if (!tok_eq(p->toks[p->i + 2], TK_PUNCT, "[") ||
+        !tok_eq(p->toks[p->i + 3], TK_PUNCT, "~"))
+        return NULL;
+    int di = p->i + 4;
+    char cap_txt[32];
+    if (di < p->n && p->toks[di].kind == TK_NUM) {
+        slice_to(cap_txt, sizeof(cap_txt), p->toks[di].spell);
+        di++;
+    } else {
+        snprintf(cap_txt, sizeof(cap_txt), "0");
+    }
+    int ordered = 0;
+    if (di < p->n && shadow_kw(p->toks[di]) == SHADOW_KW_ORDERED) {
+        ordered = 1;
+        di++;
+    }
+    if (di >= p->n) return NULL;
+    Token dir = p->toks[di];
+    if (!tok_eq(dir, TK_PUNCT, ">") && !tok_eq(dir, TK_PUNCT, "<")) return NULL;
+    if (di + 1 >= p->n || !tok_eq(p->toks[di + 1], TK_PUNCT, "]")) return NULL;
+    if (di + 2 >= p->n || p->toks[di + 2].kind != TK_IDENT) return NULL;
+    if (di + 3 >= p->n || !tok_eq(p->toks[di + 3], TK_PUNCT, ";")) return NULL;
+    if (ordered && tok_eq(dir, TK_PUNCT, ">")) {
+        parser_fail(p, dir,
+                    "'ordered' modifier only allowed on receive (<) channel");
+        return NULL;
+    }
+
+    p_next(p); /* typedef */
+    p_next(p); /* elem */
+    p_next(p); /* [ */
+    p_next(p); /* ~ */
+    if (p->toks[p->i].kind == TK_NUM) p_next(p);
+    if (ordered) p_next(p);
+    p_next(p); /* > or < */
+    p_next(p); /* ] */
+    Token alias = p_next(p);
+    p_next(p); /* ; */
+    if (!scope_add_typedef(p, alias.spell)) { p->err = 1; return NULL; }
+    AstNode* n = ast_new(p, AST_TYPEDEF_CHAN);
+    if (!n) return NULL;
+    slice_to(n->a, sizeof(n->a), alias.spell);
+    snprintf(n->b, sizeof(n->b), "%s", cap_txt);
+    slice_to(n->c, sizeof(n->c), dir.spell);
+    slice_to(n->d, sizeof(n->d), ety.spell);
+    if (ordered) snprintf(n->e, sizeof(n->e), "ordered");
+    return n;
+}
+
 /* [const] [struct] Ret[*] name(params); — file-scope prototype (no body). */
 static AstNode* parse_fn_proto(Parser* p) {
     int ri = p->i;
@@ -793,12 +1103,98 @@ static AstNode* parse_fn_proto(Parser* p) {
     return n;
 }
 
+/* typedef Ok !> (Err) Alias; */
+static AstNode* parse_typedef_result(Parser* p) {
+    if (shadow_kw(p_peek(p)) != SHADOW_KW_TYPEDEF) return NULL;
+    {
+        Parser peek = *p;
+        peek.i++;
+        if (!peek_result_shape(&peek)) return NULL;
+    }
+    if (p->i + 5 >= p->n) return NULL;
+    p_next(p); /* typedef */
+    Token ok = p_next(p);
+    char okty[64];
+    slice_to(okty, sizeof(okty), ok.spell);
+    if (tok_eq(p_peek(p), TK_PUNCT, "*")) {
+        p_next(p);
+        size_t al = strlen(okty);
+        if (al + 1 < sizeof(okty)) {
+            okty[al] = '*';
+            okty[al + 1] = 0;
+        }
+    }
+    p_next(p); /* !> */
+    Token err;
+    if (tok_eq(p_peek(p), TK_PUNCT, "(")) {
+        p_next(p);
+        err = p_next(p);
+        if (err.kind != TK_IDENT) { p->err = 1; return NULL; }
+        if (!p_accept(p, TK_PUNCT, ")")) { p->err = 1; return NULL; }
+    } else {
+        err = p_next(p);
+        if (err.kind != TK_IDENT) { p->err = 1; return NULL; }
+    }
+    Token alias = p_next(p);
+    if (alias.kind != TK_IDENT) { p->err = 1; return NULL; }
+    if (!p_accept(p, TK_PUNCT, ";")) { p->err = 1; return NULL; }
+    if (!scope_add_typedef(p, alias.spell)) { p->err = 1; return NULL; }
+    AstNode* n = ast_new(p, AST_TYPEDEF_INT);
+    if (!n) return NULL;
+    slice_to(n->a, sizeof(n->a), alias.spell);
+    snprintf(n->c, sizeof(n->c), "%s", okty);
+    slice_to(n->d, sizeof(n->d), err.spell);
+    return n;
+}
+
+/* typedef [const] char[:] Alias; */
+static AstNode* parse_typedef_slice(Parser* p) {
+    if (shadow_kw(p_peek(p)) != SHADOW_KW_TYPEDEF) return NULL;
+    int i = p->i + 1;
+    int has_const = 0;
+    if (i < p->n && shadow_kw(p->toks[i]) == SHADOW_KW_CONST) {
+        has_const = 1;
+        i++;
+    }
+    if (i + 4 >= p->n) return NULL;
+    if (shadow_kw(p->toks[i]) != SHADOW_KW_CHAR) return NULL;
+    if (!tok_eq(p->toks[i + 1], TK_PUNCT, "[") ||
+        !tok_eq(p->toks[i + 2], TK_PUNCT, ":") ||
+        !tok_eq(p->toks[i + 3], TK_PUNCT, "]"))
+        return NULL;
+    if (p->toks[i + 4].kind != TK_IDENT) return NULL;
+    if (i + 5 >= p->n || !tok_eq(p->toks[i + 5], TK_PUNCT, ";")) return NULL;
+    p_next(p); /* typedef */
+    if (has_const) p_next(p);
+    p_next(p); p_next(p); p_next(p); p_next(p); /* char [:] */
+    Token alias = p_next(p);
+    if (!p_accept(p, TK_PUNCT, ";")) { p->err = 1; return NULL; }
+    if (!scope_add_typedef(p, alias.spell)) { p->err = 1; return NULL; }
+    AstNode* n = ast_new(p, AST_TYPEDEF_INT);
+    if (!n) return NULL;
+    slice_to(n->a, sizeof(n->a), alias.spell);
+    snprintf(n->b, sizeof(n->b), "%sCCSlice", has_const ? "const " : "");
+    return n;
+}
+
 static AstNode* parse_typedef_int(Parser* p) {
     if (shadow_kw(p_peek(p)) != SHADOW_KW_TYPEDEF) return NULL;
     if (p->i + 1 < p->n && shadow_kw(p->toks[p->i + 1]) == SHADOW_KW_STRUCT)
         return parse_typedef_struct(p);
     if (p->i + 1 < p->n && shadow_kw(p->toks[p->i + 1]) == SHADOW_KW_ENUM)
         return parse_typedef_enum(p);
+    {
+        AstNode* rt = parse_typedef_result(p);
+        if (rt || p->err) return rt;
+    }
+    {
+        AstNode* sl = parse_typedef_slice(p);
+        if (sl || p->err) return sl;
+    }
+    {
+        AstNode* ch = parse_typedef_chan(p);
+        if (ch || p->err) return ch;
+    }
     {
         AstNode* fp = parse_typedef_fn_ptr(p);
         if (fp || p->err) return fp;
@@ -1028,6 +1424,16 @@ static AstNode* parse_external_inner(Parser* p) {
         if (n || p->err) return n;
         return parse_int_decl(p, AST_VAR_INT);
     }
+    if (shadow_kw(t) == SHADOW_KW_VOID || shadow_kw(t) == SHADOW_KW_CHAR ||
+        shadow_kw(t) == SHADOW_KW_BOOL || shadow_kw(t) == SHADOW_KW_SIZE_T ||
+        t.kind == TK_IDENT) {
+        n = parse_global_var(p);
+        if (n || p->err) return n;
+        n = parse_chan_var(p);
+        if (n || p->err) return n;
+        n = parse_fn(p);
+        if (n || p->err) return n;
+    }
     n = parse_fn_proto(p);
     if (n || p->err) return n;
     n = parse_star_stmt(p);
@@ -1182,6 +1588,7 @@ static AstNode* parse_external(Parser* p) {
 static int parse_tu(Parser* p, AstNode*** out_items, int* out_n) {
     scope_push(p);
     p->ntu = 0;
+    shadow_async_fn_reset();
     while (p_peek(p).kind != TK_EOF && !p->err) {
         AstNode* e = parse_external(p);
         if (!e) break;
@@ -1252,6 +1659,7 @@ static const char* ast_kind_name(AstKind k) {
     case AST_DO_WHILE: return "do_while";
     case AST_GLOBAL_ARR: return "global_arr";
     case AST_TYPEDEF_ENUM: return "typedef_enum";
+    case AST_TYPEDEF_CHAN: return "typedef_chan";
     case AST_RAW_LINE: return "raw_line";
     case AST_GENERIC_FACTORY: return "generic_factory";
     case AST_SWITCH: return "switch";
