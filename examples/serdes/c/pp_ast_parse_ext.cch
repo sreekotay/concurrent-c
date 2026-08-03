@@ -415,6 +415,7 @@ static AstNode* parse_static_var(Parser* p) {
             snprintf(n->a, sizeof(n->a), "%s", tbuf);
     }
     slice_to(n->b, sizeof(n->b), name.spell);
+    spawn_note_global(n->b);
     if (is_ptr) {
         size_t la = strlen(n->a);
         if (la + 2 <= sizeof(n->a)) {
@@ -541,6 +542,7 @@ static AstNode* parse_global_var(Parser* p) {
     if (!n) return NULL;
     slice_to(n->a, sizeof(n->a), ty.spell);
     slice_to(n->b, sizeof(n->b), name.spell);
+    spawn_note_global(n->b);
     snprintf(n->e, sizeof(n->e), "global");
     if (is_ptr) snprintf(n->c, sizeof(n->c), "*");
     if (tok_eq(p_peek(p), TK_PUNCT, "[")) {
@@ -992,6 +994,8 @@ static AstNode* parse_field_simple(Parser* p) {
     int has_struct = 0;
     int is_ptr = 0;
     int has_as = 0;
+    int is_char_slice = 0;
+    int char_slice_unique = 0;
     int ti;
     Token ty;
     int ty_end;
@@ -1025,15 +1029,16 @@ static AstNode* parse_field_simple(Parser* p) {
         int iend = peek_c_int_type_end(p, ti);
         if (iend > ti) ty_end = iend;
     }
-    {
-        int is_char_slice =
-            (!has_struct && ty_end < 0 && shadow_kw(ty) == SHADOW_KW_CHAR &&
-             ti + 4 <= p->n && tok_eq(p->toks[ti + 1], TK_PUNCT, "[") &&
-             tok_eq(p->toks[ti + 2], TK_PUNCT, ":") &&
-             tok_eq(p->toks[ti + 3], TK_PUNCT, "]"));
-        name_i = (ty_end > 0) ? ty_end : (is_char_slice ? ti + 4 : ti + 1);
-        if (is_char_slice) ty_end = ti + 4; /* reuse as exclusive end */
+    /* `char[:]` / `char[:0]` / `char[:!]` / `char[::]` → CCSlice. */
+    if (!has_struct && ty_end < 0 && shadow_kw(ty) == SHADOW_KW_CHAR &&
+        ti + 1 < p->n && tok_eq(p->toks[ti + 1], TK_PUNCT, "[")) {
+        int mend = peek_slice_brack_end(p, ti + 1, p->n, &char_slice_unique);
+        if (mend > ti + 1) {
+            is_char_slice = 1;
+            ty_end = mend;
+        }
     }
+    name_i = (ty_end > 0) ? ty_end : ti + 1;
     if (name_i < p->n && tok_eq(p->toks[name_i], TK_PUNCT, "*")) {
         is_ptr = 1;
         name_i++;
@@ -1072,7 +1077,11 @@ static AstNode* parse_field_simple(Parser* p) {
 
     if (has_const) p_next(p);
     if (has_struct) p_next(p); /* struct */
-    if (ty_end > 0 && !has_struct) {
+    if (is_char_slice) {
+        snprintf(tytxt, sizeof(tytxt), "%s",
+                 char_slice_unique ? "CCSliceUnique" : "CCSlice");
+        while (p->i < ty_end) p_next(p);
+    } else if (ty_end > 0 && !has_struct) {
         if (!ast_spell_type_tokens(p, ti, ty_end, tytxt, sizeof(tytxt)) &&
             !ast_spell_token_range(p, ti, ty_end, tytxt, sizeof(tytxt)))
             return NULL;

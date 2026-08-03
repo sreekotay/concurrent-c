@@ -17,6 +17,7 @@ static int shadow_emit_typedef_struct(AstNode* it, CEmit* out, TapeCache* cache,
         const char* asuf =
             (f->e[0] && strcmp(f->e, "as") == 0) ? " /*@as*/" : "";
         snprintf(fty, sizeof(fty), "%s", f->a);
+        shadow_rewrite_char_slice_types(fty, sizeof(fty));
         if (it->b[0] && f->b[0])
             shadow_field_register_ex(it->b, f->b, fty[0] ? fty : NULL);
         if (!cemit_fmt(out, "typedef struct { %s %s%s; } %s;\n\n",
@@ -42,11 +43,15 @@ static int shadow_emit_typedef_struct(AstNode* it, CEmit* out, TapeCache* cache,
             const char* asuf =
                 (f->e[0] && strcmp(f->e, "as") == 0) ? " /*@as*/" : "";
             if (f->e[0] && strcmp(f->e, "raw") == 0) {
+                char raw[512];
+                snprintf(raw, sizeof(raw), "%s", f->a);
+                shadow_rewrite_char_slice_types(raw, sizeof(raw));
                 if (it->b[0] && f->a[0]) shadow_field_register_raw(it->b, f->a);
                 if (it->a[0] && f->a[0]) shadow_field_register_raw(it->a, f->a);
-                if (!cemit_fmt(out, "%s%s;\n", find, f->a)) return 0;
+                if (!cemit_fmt(out, "%s%s;\n", find, raw)) return 0;
             } else {
                 snprintf(fty, sizeof(fty), "%s", f->a);
+                shadow_rewrite_char_slice_types(fty, sizeof(fty));
                 if (it->b[0] && f->b[0])
                     shadow_field_register_ex(it->b, f->b, fty[0] ? fty : NULL);
                 if (it->a[0] && f->b[0])
@@ -895,7 +900,8 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                     }
                 }
                 if (!needed) continue;
-                /* Hoist field-type typedefs first (FaceA/FaceB before DualFaceErr). */
+                /* Hoist field-type typedefs first (FaceA/FaceB / RedisReplyKind
+                 * before DualFaceErr / RedisReply). */
                 {
                     int k, j2;
                     for (k = 0; k < items[i]->nkids; k++) {
@@ -906,6 +912,35 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                         if (!fty || !fty[0] || strchr(fty, '*')) continue;
                         for (j2 = 0; j2 < n; j2++) {
                             const char* a2;
+                            if (items[j2]->kind == AST_TYPEDEF_ENUM) {
+                                if (strcmp(items[j2]->e, "hoist") == 0)
+                                    continue;
+                                a2 = items[j2]->b;
+                                if (!a2[0] || strcmp(a2, fty) != 0) continue;
+                                if (!shadow_emit_preamble(items[j2], out, cache))
+                                    return 0;
+                                items[j2]->lead_len = 0;
+                                if (!shadow_emit_line(out, &line_ctx, items[j2],
+                                                       ""))
+                                    return 0;
+                                if (items[j2]->a[0]) {
+                                    if (!cemit_fmt(out, "typedef enum %s {\n",
+                                                   items[j2]->a))
+                                        return 0;
+                                } else if (!cemit_str(out, "typedef enum {\n")) {
+                                    return 0;
+                                }
+                                if (items[j2]->d[0] &&
+                                    !cemit_str(out, items[j2]->d))
+                                    return 0;
+                                if (items[j2]->d[0] && !cemit_str(out, "\n"))
+                                    return 0;
+                                if (!cemit_fmt(out, "} %s;\n\n", items[j2]->b))
+                                    return 0;
+                                snprintf(items[j2]->e, sizeof(items[j2]->e),
+                                         "hoist");
+                                continue;
+                            }
                             if (items[j2]->kind != AST_TYPEDEF_STRUCT)
                                 continue;
                             if (strcmp(items[j2]->e, "hoist") == 0) continue;
@@ -1341,6 +1376,8 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 return 0;
             break;
         case AST_TYPEDEF_ENUM: {
+            if (strcmp(it->e, "hoist") == 0)
+                break; /* already emitted before Result specs */
             /* Enumerators can exceed cemit_fmt's 512 temp — emit in pieces. */
             if (it->a[0]) {
                 if (!cemit_fmt(out, "typedef enum %s {\n", it->a)) return 0;

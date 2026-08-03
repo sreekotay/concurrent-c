@@ -988,8 +988,20 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
         else
             snprintf(dst, cap, "CCVec_double_len(&%s)", recv);
     } else if (is_arrow && strcmp(meth_name, "len") == 0) {
-        if (shadow_ufcs_is_map_ty(vty))
-            snprintf(dst, cap, "%s_len(%s)", vty, recv);
+        /* CharVec* → CCVec_char; avoid Map_* false fallback. */
+        char rty[128];
+        const char* resolved;
+        snprintf(rty, sizeof(rty), "%s", vty);
+        resolved = rty[0] ? shadow_td_alias_resolve(rty) : NULL;
+        if (resolved && resolved[0]) snprintf(rty, sizeof(rty), "%s", resolved);
+        if (rty[0] && strncmp(rty, "CCVec_", 6) == 0)
+            snprintf(dst, cap, "%s_len(%s)", rty, recv);
+        else if (rty[0] && (strncmp(rty, "Map_", 4) == 0 ||
+                            strncmp(rty, "ArrayMap_", 9) == 0 ||
+                            shadow_ufcs_is_map_ty(rty)))
+            snprintf(dst, cap, "%s_len(%s)", rty, recv);
+        else if (rty[0] && strncmp(rty, "CCSlice_", 8) == 0)
+            return shadow_ufcs_emit_slice_meth(rty, "len", recv, NULL, dst, cap);
         else
             snprintf(dst, cap, "Map_CCSliceHdr_int_len(%s)", recv);
     } else if (!is_arrow && strcmp(meth_name, "median") == 0) {
@@ -1153,6 +1165,22 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
     } else if (is_arrow && strcmp(meth_name, "spawn") == 0) {
         /* Raw `cc_nursery_spawn` takes (fn, arg); UFCS surface is closure. */
         snprintf(dst, cap, "cc_nursery_spawn_closure0(%s, %s)", recv, a);
+    } else if (is_arrow && strcmp(meth_name, "spawn_async") == 0) {
+        /* R1: named spawn so fibers answer via cc_rt_diag_current_async_info. */
+        char callee_name[96];
+        size_t ci = 0, cj = 0;
+        while (a[ci] && (a[ci] == ' ' || a[ci] == '\t')) ci++;
+        while (a[ci] && cj + 1 < sizeof(callee_name) &&
+               ((a[ci] >= 'A' && a[ci] <= 'Z') || (a[ci] >= 'a' && a[ci] <= 'z') ||
+                (a[ci] >= '0' && a[ci] <= '9') || a[ci] == '_' || a[ci] == ':')) {
+            callee_name[cj++] = a[ci++];
+        }
+        callee_name[cj] = 0;
+        if (cj == 0 || a[ci] != '(')
+            snprintf(callee_name, sizeof(callee_name), "%s", "<async>");
+        snprintf(dst, cap,
+                 "cc_nursery_spawn_async_named(%s, %s, \"%s\", __FILE__, __LINE__)",
+                 recv, a, callee_name);
     } else if (is_arrow && strcmp(meth_name, "spawnhybrid") == 0) {
         snprintf(dst, cap, "cc_nursery_spawnhybrid_closure0(%s, %s)", recv, a);
     } else if (is_arrow && strcmp(meth_name, "close_on") == 0) {
@@ -1462,6 +1490,9 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
             snprintf(dst, cap, "cc_slice_packed_as_slice(&%s)", recv);
         else if (vty[0] && strncmp(vty, "CCVec_", 6) == 0)
             snprintf(dst, cap, "%s_as_slice(&%s)", vty, recv);
+        else if (strcmp(vty, "CCPyObj") == 0 ||
+                 shadow_bind_ty_has(rb, "CCPyObj"))
+            snprintf(dst, cap, "cc_py_obj_as_slice(&%s)", recv);
         else if (shadow_bind_ty_has(rb, "CCString") || strstr(recv, "string") ||
                  strstr(recv, "str") || strstr(recv, "CCString"))
             snprintf(dst, cap, "cc_string_as_slice(&%s)", recv);

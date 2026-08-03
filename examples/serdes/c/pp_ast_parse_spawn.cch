@@ -663,6 +663,27 @@ static int spawn_is_closure_local(const char* name) {
 
 static void spawn_reset_closure_locals(void) { g_spawn_n_cl_locals = 0; }
 
+/* File-scope names: bare uses inside closures must not become captures. */
+static char g_spawn_globals[64][64];
+static int g_spawn_nglobals;
+
+static void spawn_note_global(const char* name) {
+    int i;
+    if (!name || !name[0] || g_spawn_nglobals >= 64) return;
+    for (i = 0; i < g_spawn_nglobals; i++)
+        if (strcmp(g_spawn_globals[i], name) == 0) return;
+    snprintf(g_spawn_globals[g_spawn_nglobals++],
+             sizeof(g_spawn_globals[0]), "%s", name);
+}
+
+static int spawn_is_file_global(const char* name) {
+    int i;
+    if (!name || !name[0]) return 0;
+    for (i = 0; i < g_spawn_nglobals; i++)
+        if (strcmp(g_spawn_globals[i], name) == 0) return 1;
+    return 0;
+}
+
 /* Skip C/CC noise tokens that look like idents in casts / keywords. */
 static int spawn_is_noise_ident(const char* id) {
     static const char* kw[] = {
@@ -742,10 +763,12 @@ static void spawn_infer_caps_from_text(AstNode* n, const char* text) {
                 while (b > start && (*b == ' ' || *b == '\t')) b--;
                 if (*b == '&') after_amp = 1;
             }
-            /* Call-form: skip callees unless a CCClosure local (`inc(x)`). */
+            /* Call-form: skip callees unless a CCClosure local (`inc(x)`).
+             * File-scope names (incl. global arrays) need no capture. */
             if (!after_dot && !after_amp &&
                 !(is_call && !spawn_is_closure_local(id)) &&
                 spawn_is_ident(id) && !spawn_is_noise_ident(id) &&
+                !spawn_is_file_global(id) &&
                 !spawn_body_declares(n, id) && !spawn_name_is_formal(n, id))
                     spawn_caps_add(n->e, sizeof(n->e), id);
             }

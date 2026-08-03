@@ -152,26 +152,8 @@ static char* shadow_ct_blank_comptime(const char* src, size_t n) {
     return out;
 }
 
-/* Mask `@grammar(cli)` so the seam leaves it for the AST stub emitter.
- * Same length as `@grammar(cli)` so offsets stay stable. */
-enum { SHADOW_CT_CLI_MARK_LEN = 13 };
-static const char SHADOW_CT_CLI_KEEP[SHADOW_CT_CLI_MARK_LEN + 1] = "@g_keep_cli__";
-
-static void shadow_ct_mask_grammar_cli(char* buf, size_t n) {
-    size_t i;
-    for (i = 0; i + SHADOW_CT_CLI_MARK_LEN <= n; i++) {
-        if (memcmp(buf + i, "@grammar(cli)", SHADOW_CT_CLI_MARK_LEN) == 0)
-            memcpy(buf + i, SHADOW_CT_CLI_KEEP, SHADOW_CT_CLI_MARK_LEN);
-    }
-}
-
-static void shadow_ct_unmask_grammar_cli(char* buf, size_t n) {
-    size_t i;
-    for (i = 0; i + SHADOW_CT_CLI_MARK_LEN <= n; i++) {
-        if (memcmp(buf + i, SHADOW_CT_CLI_KEEP, SHADOW_CT_CLI_MARK_LEN) == 0)
-            memcpy(buf + i, "@grammar(cli)", SHADOW_CT_CLI_MARK_LEN);
-    }
-}
+/* `@grammar(cli)` is a builtin seam engine (same as rules/schema) — do not
+ * mask it; `cc_rewrite_grammar_decls_text` splices the typed opts + helpers. */
 
 /* Whitelist stage1 buffer: original spelling (keeps CC_GENERIC_FACTORY and
  * relative .cch includes) with @comptime if/value resolved and @comptime
@@ -206,8 +188,7 @@ static char* shadow_ct_stage1_src(const char* input_path, size_t* out_n) {
         n = strlen(buf);
     }
 
-    /* Splice @grammar(rules|schema) → matchers; keep @grammar(cli) for AST. */
-    shadow_ct_mask_grammar_cli(buf, n);
+    /* Splice @grammar(rules|schema|cli) → generated C. */
     r = cc_rewrite_grammar_decls_text(buf, n, input_path);
     if (r == (char*)-1) {
         free(buf);
@@ -218,7 +199,6 @@ static char* shadow_ct_stage1_src(const char* input_path, size_t* out_n) {
         buf = r;
         n = strlen(buf);
     }
-    shadow_ct_unmask_grammar_cli(buf, n);
 
     {
         char* blanked = shadow_ct_blank_comptime(buf, n);

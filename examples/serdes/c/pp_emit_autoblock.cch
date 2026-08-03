@@ -176,6 +176,45 @@ static int shadow_ab_split_args(const char* args, char out[][128], int cap) {
     return n;
 }
 
+/* Aggregates that cannot travel through (intptr_t) casts. */
+static int shadow_ab_ty_by_value_agg(const char* ty) {
+    if (!ty || !ty[0] || strchr(ty, '*')) return 0;
+    if (strcmp(ty, "CCSlice") == 0 || strncmp(ty, "CCSlice_", 8) == 0 ||
+        strcmp(ty, "CCSliceUnique") == 0 || strcmp(ty, "CCSliceShared") == 0 ||
+        strcmp(ty, "CCSlicePacked") == 0)
+        return 1;
+    if (strcmp(ty, "CCError") == 0 || strcmp(ty, "CCIoError") == 0)
+        return 1;
+    if (strstr(ty, "struct ") || strstr(ty, "struct{")) return 1;
+    return 0;
+}
+
+/* True when every arg can travel through intptr_t / pointer casts. */
+static int shadow_ab_args_intptr_ok(const char* callee, const char* args) {
+    char argv[8][128];
+    int argc;
+    int i;
+    argc = shadow_ab_split_args(args, argv, 8);
+    for (i = 0; i < argc; i++) {
+        const ShadowFnParam* fp;
+        const ShadowBind* lb;
+        const char* p = argv[i];
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p || *p == '&') continue;
+        if (*p >= '0' && *p <= '9') continue;
+        if (*p == '-' && p[1] >= '0' && p[1] <= '9') continue;
+        if (*p == '"' || *p == '\'') continue;
+        fp = callee ? shadow_fnparam_lookup(callee, i) : NULL;
+        if (fp) {
+            if (fp->stars > 0) continue;
+            if (fp->base[0] && shadow_ab_ty_by_value_agg(fp->base)) return 0;
+        }
+        lb = shadow_bind_lookup(p);
+        if (lb && lb->ty[0] && shadow_ab_ty_by_value_agg(lb->ty)) return 0;
+    }
+    return 1;
+}
+
 static unsigned shadow_call_site_attrs(AstNode* st) {
     if (!st || !st->e[0]) return 0;
     if (strcmp(st->e, "noblock") == 0) return SHADOW_FN_NOBLOCK;
@@ -198,6 +237,13 @@ static int shadow_call_should_autoblock(AstNode* st, ShadowCtx* ctx,
                                         const char* fn) {
     return shadow_call_edge_for(st, ctx, fn) == SHADOW_CALL_BLOCKING &&
            shadow_callee_is_known_cc(fn);
+}
+
+static int shadow_call_should_autoblock_args(AstNode* st, ShadowCtx* ctx,
+                                             const char* fn,
+                                             const char* args) {
+    if (!shadow_call_should_autoblock(st, ctx, fn)) return 0;
+    return shadow_ab_args_intptr_ok(fn, args);
 }
 
 static int shadow_emit_ab_scalar_helper(CEmit* out, int id, const char* callee,
@@ -529,7 +575,11 @@ static int shadow_emit_ab_site(CEmit* out, const char* indent, int id,
     char argv[8][128];
     int argc = shadow_ab_split_args(args, argv, 8);
     int i;
-    if (!cemit_fmt(out, "%s(void)cc_run_blocking_closure0(", indent))
+    /* Match production shape: `t = (cc_run_blocking_task_intptr(...));`
+     * then block so body-helper async still runs the work synchronously. */
+    if (!cemit_fmt(out,
+                   "%s{ CCTask __cc_ab_t = (cc_run_blocking_task_intptr(",
+                   indent))
         return 0;
     if (argc > 0) {
         if (!cemit_fmt(out, "__cc_ab_make_%d(", id)) return 0;
@@ -537,9 +587,13 @@ static int shadow_emit_ab_site(CEmit* out, const char* indent, int id,
             if (!cemit_fmt(out, "%s(intptr_t)(%s)", i ? ", " : "", argv[i]))
                 return 0;
         }
-        return cemit_fmt(out, "));\n");
+        return cemit_fmt(out,
+                         "))); (void)cc_block_on_intptr(__cc_ab_t); }\n");
     }
-    return cemit_fmt(out, "__cc_ab_make_%d());\n", id);
+    return cemit_fmt(out,
+                     "__cc_ab_make_%d()))); (void)cc_block_on_intptr(__cc_ab_t); "
+                     "}\n",
+                     id);
 }
 
 static int shadow_emit_ab_batch_site(CEmit* out, const char* indent,
@@ -591,7 +645,7 @@ static int shadow_ab_fill_item(AstNode* st, ShadowCtx* ctx, ShadowAbItem* it) {
     it->st = st;
     snprintf(it->callee, sizeof(it->callee), "%s", st->a);
     shadow_emit_expr_text(st, st->b, it->args, sizeof(it->args), NULL);
-    return shadow_call_should_autoblock(st, ctx, st->a);
+    return shadow_call_should_autoblock_args(st, ctx, st->a, it->args);
 }
 
 static int shadow_ab_try_tail(AstNode* st, ShadowCtx* ctx, ShadowAbBatch* b) {
@@ -600,7 +654,7 @@ static int shadow_ab_try_tail(AstNode* st, ShadowCtx* ctx, ShadowAbBatch* b) {
     if (st->kind == AST_RETURN_CC && st->b[0]) {
         if (!shadow_parse_call_expr(st->b, fn, sizeof(fn), args, sizeof(args)))
             return 0;
-        if (!shadow_call_should_autoblock(st, ctx, fn)) return 0;
+        if (!shadow_call_should_autoblock_args(st, ctx, fn, args)) return 0;
         b->tail_kind = 1;
         snprintf(b->tail_callee, sizeof(b->tail_callee), "%s", fn);
         snprintf(b->tail_args, sizeof(b->tail_args), "%s", args);
@@ -611,7 +665,7 @@ static int shadow_ab_try_tail(AstNode* st, ShadowCtx* ctx, ShadowAbBatch* b) {
         (!st->e[0] || strcmp(st->e, "bang") != 0)) {
         if (!shadow_parse_call_expr(st->a, fn, sizeof(fn), args, sizeof(args)))
             return 0;
-        if (!shadow_call_should_autoblock(st, ctx, fn)) return 0;
+        if (!shadow_call_should_autoblock_args(st, ctx, fn, args)) return 0;
         b->tail_kind = 1;
         snprintf(b->tail_callee, sizeof(b->tail_callee), "%s", fn);
         snprintf(b->tail_args, sizeof(b->tail_args), "%s", args);
@@ -622,7 +676,7 @@ static int shadow_ab_try_tail(AstNode* st, ShadowCtx* ctx, ShadowAbBatch* b) {
         (!st->c[0] || strcmp(st->c, "=") == 0)) {
         if (!shadow_parse_call_expr(st->b, fn, sizeof(fn), args, sizeof(args)))
             return 0;
-        if (!shadow_call_should_autoblock(st, ctx, fn)) return 0;
+        if (!shadow_call_should_autoblock_args(st, ctx, fn, args)) return 0;
         b->tail_kind = 2;
         snprintf(b->tail_lhs, sizeof(b->tail_lhs), "%s", st->a);
         snprintf(b->tail_callee, sizeof(b->tail_callee), "%s", fn);
@@ -697,7 +751,7 @@ static void shadow_prescan_autoblock_body(AstNode** body, int nbody,
             char tag[16];
             if (shadow_parse_call_expr(st->c, fn, sizeof(fn), args,
                                        sizeof(args)) &&
-                shadow_call_should_autoblock(st, ctx, fn)) {
+                shadow_call_should_autoblock_args(st, ctx, fn, args)) {
                 int id = g_shadow_ab_id++;
                 if (shadow_ty_is_structy(st->a)) {
                     if (shadow_emit_ab_struct_helper(out, id, fn, args, st->a)) {
@@ -716,7 +770,7 @@ static void shadow_prescan_autoblock_body(AstNode** body, int nbody,
             const ShadowBind* lb;
             if (shadow_parse_call_expr(st->b, fn, sizeof(fn), args,
                                        sizeof(args)) &&
-                shadow_call_should_autoblock(st, ctx, fn)) {
+                shadow_call_should_autoblock_args(st, ctx, fn, args)) {
                 int id = g_shadow_ab_id++;
                 lb = shadow_bind_lookup(st->a);
                 if (lb && shadow_ty_is_structy(lb->ty)) {

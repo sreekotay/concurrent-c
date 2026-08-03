@@ -541,6 +541,45 @@ static int shadow_product_host_c_ok(const char* buf, size_t len, const char** hi
 }
 
 /* Rewrite @slice(lit) → cc_slice_from_cstr(lit) for host-cc (preprocess seam). */
+/* Surface `char[:…]` / `char[0:]` → CCSlice (grammar seam / raw fields). */
+static void shadow_rewrite_char_slice_types(char* text, size_t cap) {
+    char tmp[2048];
+    const char* pats[] = {"char[:0!]", "char[:0]", "char[0:]", "char[::]",
+                          "char[:!]", "char[:]", NULL};
+    const char* repls[] = {"CCSliceUnique", "CCSlice", "CCSlice", "CCSlice",
+                           "CCSliceUnique", "CCSlice", NULL};
+    int pi;
+    if (!text || !cap || !text[0]) return;
+    snprintf(tmp, sizeof(tmp), "%s", text);
+    for (pi = 0; pats[pi]; pi++) {
+        char cur[2048];
+        char* p;
+        size_t plen = strlen(pats[pi]);
+        snprintf(cur, sizeof(cur), "%s", tmp);
+        tmp[0] = 0;
+        p = cur;
+        while (*p) {
+            char* hit = strstr(p, pats[pi]);
+            size_t keep;
+            size_t used;
+            if (!hit) {
+                used = strlen(tmp);
+                snprintf(tmp + used, sizeof(tmp) - used, "%s", p);
+                break;
+            }
+            keep = (size_t)(hit - p);
+            used = strlen(tmp);
+            if (used + keep + strlen(repls[pi]) + 1 >= sizeof(tmp)) break;
+            memcpy(tmp + used, p, keep);
+            tmp[used + keep] = 0;
+            used = strlen(tmp);
+            snprintf(tmp + used, sizeof(tmp) - used, "%s", repls[pi]);
+            p = hit + plen;
+        }
+    }
+    snprintf(text, cap, "%s", tmp);
+}
+
 static void shadow_rewrite_at_slice(char* expr, size_t cap) {
     char tmp[768];
     const char* p;
@@ -644,6 +683,10 @@ typedef struct {
     unsigned owner_fn_attrs; /* enclosing @async fn attrs for autoblock */
     unsigned block_attrs;    /* lexical @nonblocking/@blocking ambient */
     int defer_emit;          /* emitting @defer body — no autoblock */
+    /* `@err(e)` expanding an @errhandler inside a bang binder: legacy
+     * statement-expr-in-poll made `return N` escape the poll fn and leave
+     * the task result at 0.  Body-helper async emit maps those returns to 0. */
+    int err_via_bang;
     struct { char name[64]; char ty[64]; } vdrops[32];
     int nvdrops;
     int vdrop_marks[16];
@@ -2503,8 +2546,25 @@ static void shadow_collect_task_sends(AstNode* n) {
     if (!n) return;
     if (n->kind == AST_SPAWN_CLOSURE && n->a[0] &&
         (strcmp(n->b, "send_task") == 0 ||
-         strcmp(n->b, "send_task_hybrid") == 0))
-        shadow_note_task_send(n->a);
+         strcmp(n->b, "send_task_hybrid") == 0)) {
+        /* UFCS `tx.send_task` stores tx in a; free-fn callarg keeps formals. */
+        if (!strchr(n->a, ' ') && !strchr(n->a, '*') && !strchr(n->a, ','))
+            shadow_note_task_send(n->a);
+    }
+    if (n->kind == AST_CALL_ARGS &&
+        (strcmp(n->a, "cc_channel_send_task") == 0 ||
+         strcmp(n->a, "cc_channel_send_task_hybrid") == 0) &&
+        n->b[0]) {
+        char tx[64];
+        const char* p = n->b;
+        size_t i = 0;
+        while (*p == ' ' || *p == '\t') p++;
+        while (*p && *p != ',' && *p != ' ' && *p != '\t' &&
+               i + 1 < sizeof(tx))
+            tx[i++] = *p++;
+        tx[i] = 0;
+        if (tx[0]) shadow_note_task_send(tx);
+    }
     for (k = 0; k < n->nbody; k++) shadow_collect_task_sends(n->body[k]);
     for (k = 0; k < n->ndbody; k++) shadow_collect_task_sends(n->dbody[k]);
     if (n->kids) {

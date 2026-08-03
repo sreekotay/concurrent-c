@@ -2125,7 +2125,9 @@ static int shadow_safe_call_arg1_span(const char* args, char* out, size_t cap) {
         p++;
     }
     while (*p == ' ' || *p == '\t') p++;
-    if (!*p || *p == '&') return 0; /* pointer send / empty */
+    /* Allow `&ident` stack aliases — proven below via payload_expr_ok /
+     * amp-ident path (channel copies the pointer bits by value). */
+    if (!*p) return 0;
     start = p;
     depth = 0;
     while (*p) {
@@ -2496,12 +2498,14 @@ static void shadow_safe_on_ufcs(ShadowSafeCtx* ctx, AstNode* st) {
     if (!ctx || !st || ctx->err) return;
     shadow_safe_scan_texts(ctx, st);
     if (ctx->err) return;
-    /* UFCS channel send: recv.send(payload) — same oracle as cc_channel_send. */
+    /* UFCS channel send: recv.send(payload) — same oracle as cc_channel_send.
+     * `!>` / `!>(e){…}` on the UFCS node (st->d starts with bang*) awaits. */
     if (strcmp(st->b, "send") == 0) {
         snprintf(args, sizeof(args), "%s, %s", st->a, st->c);
         shadow_safe_check_chan_send_payload(ctx, st, "cc_channel_send", args);
         if (ctx->err) return;
-        if (ctx->in_async) {
+        if (ctx->in_async &&
+            !(st->d[0] && strncmp(st->d, "bang", 4) == 0)) {
             shadow_safe_err_at(
                 ctx, st,
                 "async: channel operation 'chan_send' must be awaited in "
@@ -2509,7 +2513,8 @@ static void shadow_safe_on_ufcs(ShadowSafeCtx* ctx, AstNode* st) {
         }
         return;
     }
-    if (strcmp(st->b, "recv") == 0 && ctx->in_async) {
+    if (strcmp(st->b, "recv") == 0 && ctx->in_async &&
+        !(st->d[0] && strncmp(st->d, "bang", 4) == 0)) {
         shadow_safe_err_at(
             ctx, st,
             "async: channel operation 'chan_recv' must be awaited in "

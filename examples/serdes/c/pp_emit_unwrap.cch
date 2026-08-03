@@ -504,15 +504,24 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
                 indent, ty, st->a, indent, i1, call, call, i1, i2, bind))
             return 0;
         if (!shadow_resync_line(out, ctx, i2)) return 0;
-        if (strcmp(mode, "bang_stmt") == 0) {
-            if (st->nbody > 0 &&
-                !shadow_emit_stmt_ctx(st->body[0], out, ctx, i2, 0))
-                return 0;
-        } else {
-            for (int k = 0; k < st->nbody; k++) {
-                if (!shadow_emit_stmt_ctx(st->body[k], out, ctx, i2, 0))
+        {
+            int saved_via = ctx ? ctx->err_via_bang : 0;
+            if (ctx) ctx->err_via_bang = 1;
+            if (strcmp(mode, "bang_stmt") == 0) {
+                if (st->nbody > 0 &&
+                    !shadow_emit_stmt_ctx(st->body[0], out, ctx, i2, 0)) {
+                    if (ctx) ctx->err_via_bang = saved_via;
                     return 0;
+                }
+            } else {
+                for (int k = 0; k < st->nbody; k++) {
+                    if (!shadow_emit_stmt_ctx(st->body[k], out, ctx, i2, 0)) {
+                        if (ctx) ctx->err_via_bang = saved_via;
+                        return 0;
+                    }
+                }
             }
+            if (ctx) ctx->err_via_bang = saved_via;
         }
         return cemit_fmt(out,
                 "%s}\n"

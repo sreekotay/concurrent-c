@@ -1165,7 +1165,7 @@ static size_t shadow_strip_method_suffix(char* compact, size_t n) {
         "_insert_entry", "_key_logical_live_bytes", "_as_slice", "_get_ptr",
         "_nfields", "_make", "_init", "_push", "_pop", "_get", "_set", "_len",
         "_new", "_free", "_insert", "_delete", "_remove", "_del", "_clear",
-        "_destroy", "_put", "_head", "_tail", NULL};
+        "_destroy", "_put", "_head", "_tail", "_marker", "_is_int", NULL};
     int changed = 1;
     while (changed && n > 0) {
         int i;
@@ -1304,7 +1304,33 @@ static void shadow_register_mangled_ty(const char* ty) {
 static void shadow_register_from_text(const char* s) {
     int fi;
     const char* h;
+    char buf[2048];
+    char* w;
+    /* Strip "…" / '…' so mangled names inside strcmp("Pair_…") are not
+     * mistaken for live instantiations (corrupts factory emit). */
     if (!s || !s[0]) return;
+    w = buf;
+    h = s;
+    while (*h && (size_t)(w - buf) + 1 < sizeof(buf)) {
+        if (*h == '"' || *h == '\'') {
+            char q = *h++;
+            while (*h) {
+                if (*h == '\\' && h[1]) {
+                    h += 2;
+                    continue;
+                }
+                if (*h == q) {
+                    h++;
+                    break;
+                }
+                h++;
+            }
+            continue;
+        }
+        *w++ = *h++;
+    }
+    *w = 0;
+    s = buf;
     shadow_register_mangled_ty(s);
     h = s;
     while ((h = strstr(h, "ArrayMap_")) != NULL) {
@@ -1536,6 +1562,16 @@ static void shadow_collect_binds_node(AstNode* st) {
             shadow_register_from_text(st->e);
             shadow_bind_name(st->a, st->e, 0);
         }
+    } else if (st->kind == AST_IF || st->kind == AST_WHILE ||
+               st->kind == AST_DO_WHILE || st->kind == AST_FOR) {
+        /* Free-name `lru_cache_make::[T](…)` may appear only in conditions. */
+        shadow_register_from_text(st->a);
+    } else if (st->kind == AST_CALL_ARGS || st->kind == AST_EXPR_STMT) {
+        shadow_register_from_text(st->a);
+        shadow_register_from_text(st->b);
+    } else if (st->kind == AST_RETURN_EXPR || st->kind == AST_RETURN_CC) {
+        shadow_register_from_text(st->a);
+        shadow_register_from_text(st->b);
     }
     for (k = 0; k < st->nbody; k++) shadow_collect_binds_node(st->body[k]);
     for (k = 0; k < st->ndbody; k++) shadow_collect_binds_node(st->dbody[k]);
@@ -1644,6 +1680,11 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
     if (ctx && !shadow_emit_line(out, ctx, st, indent)) return 0;
     switch (st->kind) {
     case AST_RETURN_INT:
+        /* `@err`→errhandler return inside bang + @async body helper: match
+         * legacy poll-escape (task result stays 0). */
+        if (ctx && ctx->err_via_bang &&
+            (ctx->owner_fn_attrs & SHADOW_FN_ASYNC))
+            return cemit_fmt(out, "%sreturn 0;\n", indent);
         if (use_cleanup) {
             /* Braced so unbraced `if (c) return N;` stays a single stmt. */
             return cemit_fmt(out,
@@ -1690,16 +1731,26 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                     indent, i1, expr, expr, i1, i2, bind))
                 return 0;
             if (!shadow_resync_line(out, ctx, i2)) return 0;
-            if (strcmp(st->e, "bang_stmt") == 0) {
-                if (st->nbody > 0 &&
-                    !shadow_emit_stmt_ctx(st->body[0], out, ctx, i2, 0))
-                    return 0;
-            } else {
-                int k;
-                for (k = 0; k < st->nbody; k++) {
-                    if (!shadow_emit_stmt_ctx(st->body[k], out, ctx, i2, 0))
+            {
+                int saved_via = ctx ? ctx->err_via_bang : 0;
+                if (ctx) ctx->err_via_bang = 1;
+                if (strcmp(st->e, "bang_stmt") == 0) {
+                    if (st->nbody > 0 &&
+                        !shadow_emit_stmt_ctx(st->body[0], out, ctx, i2, 0)) {
+                        if (ctx) ctx->err_via_bang = saved_via;
                         return 0;
+                    }
+                } else {
+                    int k;
+                    for (k = 0; k < st->nbody; k++) {
+                        if (!shadow_emit_stmt_ctx(st->body[k], out, ctx, i2,
+                                                  0)) {
+                            if (ctx) ctx->err_via_bang = saved_via;
+                            return 0;
+                        }
+                    }
                 }
+                if (ctx) ctx->err_via_bang = saved_via;
             }
             if (use_cleanup) {
                 return cemit_fmt(out,
@@ -2099,23 +2150,35 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                         "%sif (__cc_uw_is_err(__r)) {\n",
                         indent, i1, call, call, i1))
                     return 0;
-                if (!shadow_resync_line(out, ctx, i2)) return 0;
-                if (!shadow_emit_ptr_err_at_bind(out, ctx, i2, bind, "unwrap"))
-                    return 0;
+            if (!shadow_resync_line(out, ctx, i2)) return 0;
+            if (!shadow_emit_ptr_err_at_bind(out, ctx, i2, bind, "unwrap"))
+                return 0;
+            {
+                int saved_via = ctx ? ctx->err_via_bang : 0;
+                if (ctx) ctx->err_via_bang = 1;
                 if (use_eh && st->nbody == 0) {
-                    if (!shadow_emit_handler(out, ctx, bind, i2)) return 0;
+                    if (!shadow_emit_handler(out, ctx, bind, i2)) {
+                        if (ctx) ctx->err_via_bang = saved_via;
+                        return 0;
+                    }
                 } else if (strcmp(st->c, "bang_stmt") == 0) {
                     if (st->nbody > 0 &&
                         !shadow_emit_stmt_ctx(st->body[0], out, ctx, i2,
-                                              use_cleanup))
+                                              use_cleanup)) {
+                        if (ctx) ctx->err_via_bang = saved_via;
                         return 0;
+                    }
                 } else {
                     for (int k = 0; k < st->nbody; k++) {
                         if (!shadow_emit_stmt_ctx(st->body[k], out, ctx, i2,
-                                                  use_cleanup))
+                                                  use_cleanup)) {
+                            if (ctx) ctx->err_via_bang = saved_via;
                             return 0;
+                        }
                     }
                 }
+                if (ctx) ctx->err_via_bang = saved_via;
+            }
                 if (st->e[0])
                     return cemit_fmt(out,
                                      "%s}\n%s%s = __cc_uw_value(__r);\n%s}\n",
@@ -2131,17 +2194,26 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                     indent, i1, call, call, i1, i2, bind))
                 return 0;
             if (!shadow_resync_line(out, ctx, i2)) return 0;
-            if (strcmp(st->c, "bang_stmt") == 0) {
-                if (st->nbody > 0 &&
-                    !shadow_emit_stmt_ctx(st->body[0], out, ctx, i2,
-                                          use_cleanup))
-                    return 0;
-            } else {
-                for (int k = 0; k < st->nbody; k++) {
-                    if (!shadow_emit_stmt_ctx(st->body[k], out, ctx, i2,
-                                              use_cleanup))
+            {
+                int saved_via = ctx ? ctx->err_via_bang : 0;
+                if (ctx) ctx->err_via_bang = 1;
+                if (strcmp(st->c, "bang_stmt") == 0) {
+                    if (st->nbody > 0 &&
+                        !shadow_emit_stmt_ctx(st->body[0], out, ctx, i2,
+                                              use_cleanup)) {
+                        if (ctx) ctx->err_via_bang = saved_via;
                         return 0;
+                    }
+                } else {
+                    for (int k = 0; k < st->nbody; k++) {
+                        if (!shadow_emit_stmt_ctx(st->body[k], out, ctx, i2,
+                                                  use_cleanup)) {
+                            if (ctx) ctx->err_via_bang = saved_via;
+                            return 0;
+                        }
+                    }
                 }
+                if (ctx) ctx->err_via_bang = saved_via;
             }
             if (st->e[0])
                 return cemit_fmt(out, "%s}\n%s%s = __r.u.value;\n%s}\n", i1, i1,
@@ -2424,7 +2496,10 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
         return cemit_fmt(out, "%s%s %s = %s;\n", indent, st->a, st->b, init);
     }
     case AST_FOR: {
-        if (!cemit_fmt(out, "%sfor (%s) {\n", indent, st->a)) return 0;
+        char header[768];
+        snprintf(header, sizeof(header), "%s", st->a);
+        shadow_rewrite_variant_expr(header, sizeof(header), NULL);
+        if (!cemit_fmt(out, "%sfor (%s) {\n", indent, header)) return 0;
         char nested[80];
         shadow_indent_nest(nested, sizeof(nested), indent, 1);
         if (ctx) {
@@ -2695,9 +2770,17 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             if (!shadow_resync_line(out, ctx, i2)) return 0;
             if (!shadow_emit_ptr_err_at_bind(out, ctx, i2, bind, st->b))
                 return 0;
-            for (int k = 0; k < st->nbody; k++) {
-                if (!shadow_emit_stmt_ctx(st->body[k], out, ctx, i2, use_cleanup))
-                    return 0;
+            {
+                int saved_via = ctx ? ctx->err_via_bang : 0;
+                if (ctx) ctx->err_via_bang = 1;
+                for (int k = 0; k < st->nbody; k++) {
+                    if (!shadow_emit_stmt_ctx(st->body[k], out, ctx, i2,
+                                              use_cleanup)) {
+                        if (ctx) ctx->err_via_bang = saved_via;
+                        return 0;
+                    }
+                }
+                if (ctx) ctx->err_via_bang = saved_via;
             }
             return cemit_fmt(out, "%s}\n%s}\n", i1, indent);
         }
@@ -2880,15 +2963,20 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             }
             if (ctx) ctx->eh = saved_eh;
         } else if (strncmp(mode, "bang_block", 10) == 0) {
+            int saved_via = ctx ? ctx->err_via_bang : 0;
             if (!shadow_resync_line(out, ctx, i2)) return 0;
             /* Site is the callee expr so __cc_err_null_at embeds it. */
             if (!shadow_emit_ptr_err_at_bind(out, ctx, i2,
                                              st->e[0] ? st->e : "e", call))
                 return 0;
+            if (ctx) ctx->err_via_bang = 1;
             for (int k = 0; k < st->nbody; k++) {
-                if (!shadow_emit_stmt_ctx(st->body[k], out, ctx, i2, use_c))
+                if (!shadow_emit_stmt_ctx(st->body[k], out, ctx, i2, use_c)) {
+                    if (ctx) ctx->err_via_bang = saved_via;
                     return 0;
+                }
             }
+            if (ctx) ctx->err_via_bang = saved_via;
         } else {
             for (int k = 0; k < st->nbody; k++) {
                 if (!shadow_emit_stmt_ctx(st->body[k], out, ctx, i2, use_c))

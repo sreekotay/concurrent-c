@@ -987,16 +987,30 @@ static int ast_spell_type_tokens(Parser* p, int start, int end, char* dst,
         snprintf(dst, cap, "CCVec_%s", compact);
     else {
         size_t fl = strlen(family);
-        /* snake_make::[A,B] → Family_A_B_make (pair_make → Pair_…). */
+        /* snake_make::[A,B] → Family_A_B_make (lru_cache_make → LruCache_…). */
         if (fl > 5 && strcmp(family + fl - 5, "_make") == 0) {
             char base[64];
+            char pascal[64];
             size_t bl = fl - 5;
+            size_t bi, po = 0;
+            int up = 1;
             if (bl >= sizeof(base)) bl = sizeof(base) - 1;
             memcpy(base, family, bl);
             base[bl] = 0;
-            if (base[0] >= 'a' && base[0] <= 'z')
-                base[0] = (char)(base[0] - 'a' + 'A');
-            snprintf(dst, cap, "%s_%s_make", base, compact);
+            for (bi = 0; base[bi] && po + 1 < sizeof(pascal); bi++) {
+                char c = base[bi];
+                if (c == '_') {
+                    up = 1;
+                    continue;
+                }
+                if (up && c >= 'a' && c <= 'z')
+                    c = (char)(c - 'a' + 'A');
+                pascal[po++] = c;
+                up = 0;
+            }
+            pascal[po] = 0;
+            if (!pascal[0]) snprintf(pascal, sizeof(pascal), "%s", base);
+            snprintf(dst, cap, "%s_%s_make", pascal, compact);
         } else if (family[0] >= 'A' && family[0] <= 'Z') {
             /* PascalCase type-style: Pair::[T] / Box::[T] / user factories. */
             snprintf(dst, cap, "%s_%s", family, compact);
