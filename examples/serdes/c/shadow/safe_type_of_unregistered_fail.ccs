@@ -1,0 +1,8 @@
+/* Safety fail: type_of(T) with no registered cc_type_info. */
+#include <ccc/cc_type.cch>
+
+int main(void) {
+    const cc_type_info* ti = type_of(DefinitelyNotARegisteredType);
+    (void)ti;
+    return 0;
+}

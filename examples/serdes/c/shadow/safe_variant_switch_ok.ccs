@@ -1,0 +1,34 @@
+/* Safety pass: case labels dominate @variant arm projections. */
+#include <ccc/std/prelude.cch>
+#include <stdint.h>
+
+@variant RedisValue {
+    txt: const char*;
+    num: int64_t;
+};
+
+static int64_t bump(RedisValue* cell, int64_t delta) {
+    switch (cell) {
+        case .num:
+            cell->num += delta;
+            return cell->num;
+        case .txt:
+            return -1;
+    }
+    return -2;
+}
+
+int main(void) {
+    RedisValue v = { .num = 40 };
+    int64_t got = 0;
+    if (bump(&v, 2) != 42) return 1;
+    switch (v.kind) {
+        case RedisValue_num:
+            got = v.num + 1;
+            break;
+        case RedisValue_txt:
+            return 2;
+    }
+    (void)got;
+    return 0;
+}

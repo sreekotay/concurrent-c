@@ -1,0 +1,15 @@
+/* Safety fail: unprotected @variant arm projection. */
+#include <ccc/std/prelude.cch>
+#include <stdint.h>
+
+@variant V {
+    str: const char*;
+    num: int64_t;
+};
+
+int main(void) {
+    V v = { .num = 1 };
+    int64_t x = v.num;
+    (void)x;
+    return 0;
+}

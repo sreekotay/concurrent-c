@@ -181,19 +181,41 @@ static int shadow_ufcs_ty_eq(const char* a, const char* b) {
     return na[0] && strcmp(na, nb) == 0;
 }
 
+/* Strip trailing param name from "Pair* p1" / "Pair p1" → type for match. */
+static void shadow_ufcs_param_ty_only(const char* in, char* out, size_t cap) {
+    const char* e;
+    size_t n;
+    if (!out || !cap) return;
+    out[0] = 0;
+    if (!in || !in[0]) return;
+    e = in + strlen(in);
+    while (e > in &&
+           ((e[-1] >= 'A' && e[-1] <= 'Z') || (e[-1] >= 'a' && e[-1] <= 'z') ||
+            (e[-1] >= '0' && e[-1] <= '9') || e[-1] == '_'))
+        e--;
+    while (e > in && (e[-1] == ' ' || e[-1] == '\t')) e--;
+    n = (size_t)(e - in);
+    if (n >= cap) n = cap - 1;
+    memcpy(out, in, n);
+    out[n] = 0;
+}
+
 /* Universal bare-name tier: meth(recv[, args]) when first param matches. */
 static int shadow_ufcs_emit_bare(const char* recv, const char* meth_name,
                                  const char* args, int recv_is_ptr,
                                  const char* recv_base, int recv_is_const,
                                  char* dst, size_t cap) {
-    const char* param;
+    const char* param_full;
+    char param[160];
     char cand[160];
     int matched = 0;
     int by_ptr = 0;
     if (!recv || !meth_name || !recv_base || !recv_base[0] || !dst || !cap)
         return 0;
-    param = shadow_ufn_first_ty(meth_name);
-    if (!param || !param[0]) return 0;
+    param_full = shadow_ufn_first_ty(meth_name);
+    if (!param_full || !param_full[0]) return 0;
+    shadow_ufcs_param_ty_only(param_full, param, sizeof(param));
+    if (!param[0]) return 0;
     if (!recv_is_ptr) {
         const char* pv = param;
         if (strncmp(pv, "const ", 6) == 0) pv += 6;
@@ -303,14 +325,65 @@ static int shadow_ufcs_emit_slice_meth(const char* sty, const char* meth,
     return 1;
 }
 
+/* Peel a leading C cast `(T*)` / `(T)` so bind/UFCS see the real receiver. */
+static const char* shadow_ufcs_skip_cast(const char* recv, char* buf,
+                                         size_t buf_cap) {
+    const char* p;
+    const char* rp;
+    int depth;
+    if (!recv || !buf || !buf_cap) return recv;
+    p = recv;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != '(') return recv;
+    depth = 0;
+    rp = NULL;
+    for (; *p; p++) {
+        if (*p == '(') depth++;
+        else if (*p == ')') {
+            depth--;
+            if (depth == 0) {
+                rp = p;
+                break;
+            }
+        }
+    }
+    if (!rp) return recv;
+    /* Cast if inside looks like a type (has ident + optional *), not a call. */
+    {
+        const char* in = recv;
+        int has_star = 0, has_ident = 0, has_call = 0;
+        while (*in == ' ' || *in == '\t' || *in == '(') in++;
+        for (; in < rp; in++) {
+            if ((*in >= 'A' && *in <= 'Z') || (*in >= 'a' && *in <= 'z') ||
+                *in == '_')
+                has_ident = 1;
+            if (*in == '*') has_star = 1;
+            if (*in == '(') {
+                has_call = 1;
+                break;
+            }
+        }
+        if (!has_ident || has_call) return recv;
+        (void)has_star;
+    }
+    p = rp + 1;
+    while (*p == ' ' || *p == '\t') p++;
+    if (!*p) return recv;
+    snprintf(buf, buf_cap, "%s", p);
+    return buf;
+}
+
 static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
                                    const char* args, int is_arrow,
                                    const char* elem_ty, char* dst, size_t cap) {
     char a[160];
+    char recv_buf[192];
     const ShadowBind* rb;
     char vty[128];
     int recv_is_double;
     if (!recv || !meth_name || !dst || !cap) return 0;
+    recv = shadow_ufcs_skip_cast(recv, recv_buf, sizeof(recv_buf));
+    while (*recv == ' ' || *recv == '\t') recv++;
     a[0] = 0;
     if (args) snprintf(a, sizeof(a), "%s", args);
     while (a[0] == ' ' || a[0] == '\t') memmove(a, a + 1, strlen(a));
@@ -319,9 +392,95 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
         strstr(recv, "fabs") || (strchr(recv, '.') && !strchr(recv, '('));
     rb = shadow_bind_for_recv(recv);
     shadow_bind_base_ty(rb, vty, sizeof(vty));
+    /* Field path: db.entries.meth → type of entries, not Db.
+     * path_is_ptr: final field is a pointer (ArrayMap_* *entries). */
+    int path_is_ptr = 0;
+    int walked_fields = 0;
+    if (vty[0] && recv) {
+        const char* p = recv;
+        char outer[128];
+        char fty[128];
+        while (*p == '*' || *p == '&' || *p == ' ' || *p == '\t' || *p == '(')
+            p++;
+        while (*p && *p != '.' && *p != '-' && *p != '(' && *p != ' ' &&
+               *p != '\t')
+            p++;
+        snprintf(outer, sizeof(outer), "%s", vty);
+        while (*p == '.' || (*p == '-' && p[1] == '>')) {
+            char fname[64];
+            size_t ni = 0;
+            int fptr = 0;
+            if (*p == '-') p += 2;
+            else p++;
+            while (*p == ' ' || *p == '\t') p++;
+            while (((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+                    (*p >= '0' && *p <= '9') || *p == '_') &&
+                   ni + 1 < sizeof(fname))
+                fname[ni++] = *p++;
+            fname[ni] = 0;
+            if (!fname[0] || !shadow_field_ty_of(outer, fname, fty, sizeof(fty)))
+                break;
+            walked_fields = 1;
+            if (strchr(fty, '*')) fptr = 1;
+            /* Strip trailing * from field type for family spelling. */
+            {
+                size_t L = strlen(fty);
+                while (L && (fty[L - 1] == '*' || fty[L - 1] == ' '))
+                    fty[--L] = 0;
+            }
+            path_is_ptr = fptr;
+            snprintf(outer, sizeof(outer), "%s", fty);
+            snprintf(vty, sizeof(vty), "%s", fty);
+        }
+        /* Map/ArrayMap field sugar is a handle pointer even when spelled
+         * without `*` on the member declarator. */
+        if (walked_fields && !path_is_ptr && vty[0] &&
+            (strncmp(vty, "ArrayMap_", 9) == 0 || strncmp(vty, "Map_", 4) == 0))
+            path_is_ptr = 1;
+    }
+    /* Helper: pointer vs &recv for container methods. */
+#define SHADOW_UFCS_PTR_RECV()                                                   \
+    (is_arrow || path_is_ptr ||                                                   \
+     (!walked_fields && rb && strchr(rb->ty, '*') != NULL) ||                     \
+     recv[0] == '&' || strstr(recv, "->") != NULL)
     /* Chain continuation through typed-slice calls. */
     if (!vty[0])
         (void)shadow_ufcs_recv_slice_ty(recv, vty, sizeof(vty));
+
+    /* @as field UFCS: Outer.open/write/close → cc_file_*( &Outer.field, … ).
+     * Only plain Outer idents — `w.file.write` already names the embed. */
+    if (!is_arrow && vty[0] && g_shadow_nas > 0 &&
+        shadow_ufcs_recv_is_ident(recv) &&
+        (strcmp(meth_name, "open") == 0 || strcmp(meth_name, "close") == 0 ||
+         strcmp(meth_name, "write") == 0 || strcmp(meth_name, "read") == 0)) {
+        int ai;
+        for (ai = 0; ai < g_shadow_nas; ai++) {
+            const ShadowAsEmbed* as = &g_shadow_as[ai];
+            char arecv[192];
+            int ptr = 0;
+            if (strcmp(as->outer, vty) != 0) continue;
+            if (strcmp(as->target, "CCFile") != 0) continue;
+            if (rb && strchr(rb->ty, '*')) ptr = 1;
+            if (ptr)
+                snprintf(arecv, sizeof(arecv), "&%s->%s", recv, as->field);
+            else
+                snprintf(arecv, sizeof(arecv), "&%s.%s", recv, as->field);
+            if (strcmp(meth_name, "open") == 0)
+                snprintf(dst, cap, "cc_file_open(%s, %s)", arecv, a);
+            else if (strcmp(meth_name, "close") == 0)
+                snprintf(dst, cap, "cc_file_close(%s)", arecv);
+            else if (strcmp(meth_name, "write") == 0)
+                snprintf(dst, cap, "cc_file_write(%s, %s)", arecv, a);
+            else
+                snprintf(dst, cap, "cc_file_read(%s, %s)", arecv, a);
+            return 1;
+        }
+    }
+    /* Member path `w.file.write` — bind_for_recv stops at `w`; force CCFile. */
+    if (!is_arrow && (strstr(recv, ".file") || strstr(recv, "->file")) &&
+        (strcmp(meth_name, "open") == 0 || strcmp(meth_name, "close") == 0 ||
+         strcmp(meth_name, "write") == 0 || strcmp(meth_name, "read") == 0))
+        snprintf(vty, sizeof(vty), "CCFile");
 
     if (!is_arrow && strcmp(meth_name, "remaining") == 0) {
         snprintf(dst, cap, "cc_arena_remaining(&%s)", recv);
@@ -331,32 +490,114 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
         snprintf(dst, cap, "cc_arena_checkpoint_restore(&%s)", recv);
     } else if (!is_arrow && strcmp(meth_name, "load") == 0) {
         snprintf(dst, cap, "cc_atomic_load(&%s)", recv);
+    } else if (!is_arrow && strcmp(meth_name, "open") == 0) {
+        int need_amp = shadow_ufcs_need_amp(recv);
+        if (shadow_bind_ty_has(rb, "CCFile") ||
+            (vty[0] && strcmp(vty, "CCFile") == 0))
+            snprintf(dst, cap,
+                     need_amp ? "cc_file_open(&%s, %s)" : "cc_file_open(%s, %s)",
+                     recv, a);
+        else
+            return 0;
     } else if (!is_arrow && strcmp(meth_name, "close") == 0) {
         int need_amp = shadow_ufcs_need_amp(recv);
-        if (shadow_bind_ty_has(rb, "CCListener"))
+        if (shadow_bind_ty_has(rb, "CCFile") ||
+            (vty[0] && strcmp(vty, "CCFile") == 0))
+            snprintf(dst, cap, need_amp ? "cc_file_close(&%s)" : "cc_file_close(%s)", recv);
+        else if (shadow_bind_ty_has(rb, "CCListener"))
             snprintf(dst, cap, need_amp ? "cc_listener_close(&%s)" : "cc_listener_close(%s)", recv);
         else if (shadow_bind_ty_has(rb, "CCSocket"))
             snprintf(dst, cap, need_amp ? "cc_socket_close(&%s)" : "cc_socket_close(%s)", recv);
-        else if (shadow_bind_ty_has(rb, "CCChan") || shadow_bind_ty_has(rb, "Chan"))
+        else if (shadow_bind_ty_has(rb, "CCChanTx") &&
+                 shadow_ufn_exists("tracked_tx_close"))
+            snprintf(dst, cap, "tracked_tx_close(%s)", recv);
+        else if (shadow_bind_ty_has(rb, "CCChan") ||
+                 shadow_bind_ty_has(rb, "CCChanTx") ||
+                 shadow_bind_ty_has(rb, "CCChanRx") ||
+                 shadow_bind_ty_has(rb, "Chan") ||
+                 strncmp(vty, "CCChan", 6) == 0)
             snprintf(dst, cap, "cc_channel_close(%s)", recv);
-        else if (strcmp(recv, "ln") == 0 || strstr(recv, "listener"))
+        else if (shadow_bind_ty_has(rb, "CCListener") ||
+                 (vty[0] && strcmp(vty, "CCListener") == 0))
             snprintf(dst, cap, need_amp ? "cc_listener_close(&%s)" : "cc_listener_close(%s)", recv);
-        else if (strstr(recv, "sock") || strstr(recv, "conn"))
+        else if (shadow_bind_ty_has(rb, "CCSocket") ||
+                 (vty[0] && strcmp(vty, "CCSocket") == 0))
             snprintf(dst, cap, need_amp ? "cc_socket_close(&%s)" : "cc_socket_close(%s)", recv);
         else
-            snprintf(dst, cap, "cc_channel_close(%s)", recv);
+            return 0; /* no ambient close — resolve from receiver type only */
     } else if (!is_arrow && strcmp(meth_name, "twice") == 0) {
-        snprintf(dst, cap, recv_is_double ? "cc_double_twice(%s)" : "cc_int_twice(%s)", recv);
+        /* Typed recv (Foo.twice) beats scalar cc_int_twice. */
+        if (vty[0] && vty[0] >= 'A' && vty[0] <= 'Z' &&
+            strcmp(vty, "CCSlice") != 0) {
+            char tryc[160];
+            snprintf(tryc, sizeof(tryc), "%s_twice", vty);
+            if (shadow_ufn_exists(tryc))
+                snprintf(dst, cap, "%s(&%s)", tryc, recv);
+            else if (!shadow_ufcs_emit_bare(recv, meth_name, a, 0, vty, 0, dst,
+                                           cap))
+                snprintf(dst, cap,
+                         recv_is_double ? "cc_double_twice(%s)"
+                                        : "cc_int_twice(%s)",
+                         recv);
+        } else {
+            snprintf(dst, cap,
+                     recv_is_double ? "cc_double_twice(%s)" : "cc_int_twice(%s)",
+                     recv);
+        }
     } else if (!is_arrow && strcmp(meth_name, "halve") == 0) {
         snprintf(dst, cap, "cc_double_halve(%s)", recv);
     } else if (!is_arrow && strcmp(meth_name, "fabs") == 0) {
         snprintf(dst, cap, "fabs(%s)", recv);
+    } else if (!is_arrow && strcmp(meth_name, "strlen") == 0) {
+        snprintf(dst, cap, "strlen(%s)", recv);
+    } else if (!is_arrow && strcmp(meth_name, "alloc") == 0 &&
+               (strcmp(vty, "CCArenaPool") == 0 ||
+                (rb && strcmp(rb->ty, "CCArenaPool") == 0) ||
+                strstr(recv, "pool") != NULL ||
+                strstr(recv, "_stack") != NULL)) {
+        if (!shadow_ufcs_need_amp(recv))
+            snprintf(dst, cap, "cc_arena_pool_alloc(%s)", recv);
+        else
+            snprintf(dst, cap, "cc_arena_pool_alloc(&%s)", recv);
+    } else if (!is_arrow && strcmp(meth_name, "detach_arena") == 0 &&
+               (strcmp(vty, "CCArenaPool") == 0 ||
+                (rb && strcmp(rb->ty, "CCArenaPool") == 0))) {
+        if (!shadow_ufcs_need_amp(recv))
+            snprintf(dst, cap, "cc_arena_pool_detach_arena(%s)", recv);
+        else
+            snprintf(dst, cap, "cc_arena_pool_detach_arena(&%s)", recv);
     } else if (!is_arrow && strcmp(meth_name, "len") == 0) {
         if (vty[0] && strncmp(vty, "CCSlice_", 8) == 0)
             return shadow_ufcs_emit_slice_meth(vty, "len", recv, NULL, dst, cap);
-        if (vty[0] && strncmp(vty, "CCVec_", 6) == 0)
-            snprintf(dst, cap, "%s_len(&%s)", vty, recv);
+        if (vty[0] && (strncmp(vty, "CCVec_", 6) == 0 ||
+                       strncmp(vty, "Map_", 4) == 0 ||
+                       strncmp(vty, "ArrayMap_", 9) == 0)) {
+            if (SHADOW_UFCS_PTR_RECV())
+                snprintf(dst, cap, "%s_len(%s)", vty, recv);
+            else
+                snprintf(dst, cap, "%s_len(&%s)", vty, recv);
+        } else if (vty[0] && strcmp(vty, "CCString") == 0)
+            snprintf(dst, cap, "cc_string_len(&%s)", recv);
+        else if (strstr(recv, "__cc_tpl; })")) {
+            /* Arena @string stmt-expr: fold .len() into the yield. */
+            char tmp[4096];
+            const char* mark = strstr(recv, "__cc_tpl; })");
+            size_t pre = (size_t)(mark - recv);
+            if (pre + 32 < sizeof(tmp)) {
+                snprintf(tmp, sizeof(tmp), "%.*scc_string_len(&__cc_tpl); })",
+                         (int)pre, recv);
+                snprintf(dst, cap, "%s", tmp);
+            } else
+                snprintf(dst, cap,
+                         "({ CCString __cc_ls = %s; cc_string_len(&__cc_ls); })",
+                         recv);
+        } else if (strstr(recv, "cc_string_") || strstr(recv, "CCString"))
+            snprintf(dst, cap,
+                     "({ CCString __cc_ls = %s; cc_string_len(&__cc_ls); })",
+                     recv);
         else if (vty[0] && strcmp(vty, "CCSlice") == 0)
+            snprintf(dst, cap, "(%s).len", recv);
+        else if (strstr(recv, "cc__string_stack") || strstr(recv, "cc_slice_"))
             snprintf(dst, cap, "(%s).len", recv);
         else if (shadow_bind_ty_has(rb, "Slice") || shadow_bind_ty_has(rb, "slice") ||
                  strstr(recv, "sub(") || strstr(recv, "ps") || strstr(recv, "Pt"))
@@ -406,6 +647,17 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
         } else {
             snprintf(dst, cap, "cc_slice_sub(%s, %s)", recv, a);
         }
+    } else if (!is_arrow && strcmp(meth_name, "index_of") == 0) {
+        snprintf(dst, cap, "cc_slice_index_of(%s, %s)", recv, a);
+    } else if (!is_arrow &&
+               (strcmp(meth_name, "to_i64") == 0 ||
+                strcmp(meth_name, "to_u64") == 0 ||
+                strcmp(meth_name, "to_f64") == 0)) {
+        /* char[:] / CCSlice → cc_slice_to_*; takes const CCSlice*. */
+        if (shadow_ufcs_recv_is_ident(recv))
+            snprintf(dst, cap, "cc_slice_%s(&%s)", meth_name, recv);
+        else
+            snprintf(dst, cap, "cc_slice_%s(&(%s))", meth_name, recv);
     } else if (!is_arrow && strcmp(meth_name, "at") == 0) {
         if (vty[0] && strncmp(vty, "CCSlice_", 8) == 0)
             return shadow_ufcs_emit_slice_meth(vty, "at", recv, a, dst, cap);
@@ -413,8 +665,10 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
             snprintf(dst, cap, "%s_at(&%s, %s)", vty, recv, a);
         else if (g_shadow_nginst > 0 && shadow_bind_ty_has(rb, "Pair"))
             snprintf(dst, cap, "Pair_int_int_at(&%s, %s)", recv, a);
+        else if (!shadow_ufcs_need_amp(recv))
+            snprintf(dst, cap, "cc_slice_at(%s, %s)", recv, a);
         else
-            snprintf(dst, cap, "(%s).ptr[%s]", recv, a);
+            snprintf(dst, cap, "cc_slice_at(&%s, %s)", recv, a);
     } else if (!is_arrow && strcmp(meth_name, "bytes") == 0) {
         if (vty[0] && strncmp(vty, "CCSlice_", 8) == 0)
             return shadow_ufcs_emit_slice_meth(vty, "bytes", recv, NULL, dst,
@@ -476,27 +730,120 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
         snprintf(dst, cap, "cc_exclusive_mutex_acquire(&%s)", recv);
     } else if (!is_arrow && strcmp(meth_name, "release") == 0) {
         snprintf(dst, cap, "cc_exclusive_guard_release(&%s)", recv);
-    } else if (!is_arrow && strcmp(meth_name, "destroy") == 0) {
+    } else if (!is_arrow && strcmp(meth_name, "destroy") == 0 &&
+               (strcmp(vty, "CCArenaPool") == 0 ||
+                (rb && strcmp(rb->ty, "CCArenaPool") == 0))) {
+        snprintf(dst, cap, "cc_arena_pool_destroy(&%s)", recv);
+    } else if (!is_arrow && strcmp(meth_name, "destroy") == 0 &&
+               (strcmp(vty, "CCArena") == 0 ||
+                (rb && strcmp(rb->ty, "CCArena") == 0) ||
+                /* Field paths: store->map_arena — bind is Store*, not CCArena. */
+                strstr(recv, "arena") || strstr(recv, "detached"))) {
         snprintf(dst, cap, "cc_arena_destroy(&%s)", recv);
-    } else if (!is_arrow && strcmp(meth_name, "reset") == 0) {
+    } else if (!is_arrow && strcmp(meth_name, "destroy") == 0 && vty[0] &&
+               (strncmp(vty, "ArrayMap_", 9) == 0 ||
+                strncmp(vty, "Map_", 4) == 0 ||
+                strncmp(vty, "CCVec_", 6) == 0)) {
+        if (SHADOW_UFCS_PTR_RECV())
+            snprintf(dst, cap, "%s_destroy(%s)", vty, recv);
+        else
+            snprintf(dst, cap, "%s_destroy(&%s)", vty, recv);
+    } else if (!is_arrow && strcmp(meth_name, "destroy") == 0 && vty[0] &&
+               vty[0] >= 'A' && vty[0] <= 'Z') {
+        /* draft_as §3: registered deltas + recursive @as flatten (no synth). */
+        char body[768];
+        size_t bo = 0;
+        int have;
+        char dhook[96];
+        bo += (size_t)snprintf(body + bo, sizeof(body) - bo, "({ ");
+        have = shadow_as_destroy_append(body, &bo, sizeof(body), vty, recv);
+        if (!have) {
+            snprintf(dhook, sizeof(dhook), "%s_destroy", vty);
+            if (shadow_ufn_exists(dhook) && bo + 48 < sizeof(body)) {
+                bo += (size_t)snprintf(body + bo, sizeof(body) - bo,
+                                       "%s(&%s); ", dhook, recv);
+                have = 1;
+            }
+        }
+        if (bo + 3 < sizeof(body))
+            snprintf(body + bo, sizeof(body) - bo, "})");
+        else
+            return 0;
+        if (have)
+            snprintf(dst, cap, "%s", body);
+        else
+            return 0;
+    } else if (!is_arrow && strcmp(meth_name, "reset") == 0 &&
+               (strcmp(vty, "CCArena") == 0 ||
+                shadow_bind_ty_has(rb, "CCArena"))) {
+        /* Only CCArena.reset — user types (MyWidget.reset) use snake UFCS. */
         snprintf(dst, cap, "cc_arena_reset(&%s)", recv);
     } else if (!is_arrow && strcmp(meth_name, "store") == 0) {
         snprintf(dst, cap, "cc_atomic_store(&%s, %s)", recv, a);
+    } else if (!is_arrow && strcmp(meth_name, "cas") == 0) {
+        snprintf(dst, cap, "cc_atomic_cas(&%s, %s)", recv, a);
     } else if (!is_arrow && strcmp(meth_name, "peer_addr") == 0) {
         if (!shadow_ufcs_need_amp(recv))
             snprintf(dst, cap, "cc_socket_peer_addr(%s, %s)", recv, a);
         else
             snprintf(dst, cap, "cc_socket_peer_addr(&%s, %s)", recv, a);
     } else if (!is_arrow && strcmp(meth_name, "read") == 0) {
-        if (!shadow_ufcs_need_amp(recv))
-            snprintf(dst, cap, "cc_socket_read(%s, %s)", recv, a);
-        else
-            snprintf(dst, cap, "cc_socket_read(&%s, %s)", recv, a);
+        if (shadow_bind_ty_has(rb, "CCFile") ||
+            (vty[0] && strcmp(vty, "CCFile") == 0)) {
+            if (!shadow_ufcs_need_amp(recv))
+                snprintf(dst, cap, "cc_file_read(%s, %s)", recv, a);
+            else
+                snprintf(dst, cap, "cc_file_read(&%s, %s)", recv, a);
+        } else if (shadow_bind_ty_has(rb, "CCSocket") ||
+                   (vty[0] && strcmp(vty, "CCSocket") == 0)) {
+            if (!shadow_ufcs_need_amp(recv))
+                snprintf(dst, cap, "cc_socket_read(%s, %s)", recv, a);
+            else
+                snprintf(dst, cap, "cc_socket_read(&%s, %s)", recv, a);
+        } else
+            return 0;
     } else if (!is_arrow && strcmp(meth_name, "write") == 0) {
-        if (!shadow_ufcs_need_amp(recv))
-            snprintf(dst, cap, "cc_socket_write(%s, %s)", recv, a);
+        if (strcmp(recv, "cc_std_out") == 0 || strcmp(recv, "std_out") == 0)
+            snprintf(dst, cap, "cc_std_out_write_auto(%s)", a);
+        else if (strcmp(recv, "cc_std_err") == 0 || strcmp(recv, "std_err") == 0)
+            snprintf(dst, cap, "cc_std_err_write_auto(%s)", a);
+        else if (shadow_bind_ty_has(rb, "CCFile") ||
+                 (vty[0] && strcmp(vty, "CCFile") == 0)) {
+            if (!shadow_ufcs_need_amp(recv))
+                snprintf(dst, cap, "cc_file_write(%s, %s)", recv, a);
+            else
+                snprintf(dst, cap, "cc_file_write(&%s, %s)", recv, a);
+        } else if (shadow_bind_ty_has(rb, "CCSocket") ||
+                   (vty[0] && strcmp(vty, "CCSocket") == 0)) {
+            if (!shadow_ufcs_need_amp(recv))
+                snprintf(dst, cap, "cc_socket_write(%s, %s)", recv, a);
+            else
+                snprintf(dst, cap, "cc_socket_write(&%s, %s)", recv, a);
+        } else
+            return 0; /* no ambient write by method name */
+    } else if (strcmp(meth_name, "to_slice") == 0) {
+        /* `p->to_slice()` / `p.to_slice()` on C string pointers. */
+        const char* ty = rb ? rb->ty : vty;
+        int is_unsigned = ty && strstr(ty, "unsigned char") != NULL;
+        int is_signed = ty && strstr(ty, "signed char") != NULL && !is_unsigned;
+        int is_const = ty && strstr(ty, "const") != NULL;
+        if (is_unsigned && is_const)
+            snprintf(dst, cap, "const_unsigned_char_to_slice(%s)", recv);
+        else if (is_unsigned)
+            snprintf(dst, cap, "unsigned_char_to_slice(%s)", recv);
+        else if (is_signed && is_const)
+            snprintf(dst, cap, "const_signed_char_to_slice(%s)", recv);
+        else if (is_signed)
+            snprintf(dst, cap, "signed_char_to_slice(%s)", recv);
+        else if (is_const || (ty && strstr(ty, "char")))
+            snprintf(dst, cap,
+                     is_const ? "const_char_to_slice(%s)" : "char_to_slice(%s)",
+                     recv);
         else
-            snprintf(dst, cap, "cc_socket_write(&%s, %s)", recv, a);
+            /* Untyped beachhead: arrow/dot to_slice on pointer-ish idents. */
+            snprintf(dst, cap,
+                     is_arrow ? "const_char_to_slice(%s)" : "char_to_slice(%s)",
+                     recv);
     } else if (!is_arrow && strcmp(meth_name, "read_into") == 0) {
         if (!shadow_ufcs_need_amp(recv))
             snprintf(dst, cap, "cc_socket_read_into(%s, %s)", recv, a);
@@ -532,6 +879,124 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
             } else {
                 snprintf(dst, cap, "%s_%s(&%s)", vty, meth_name, recv);
             }
+        } else if (vty[0]) {
+            /* Typed user struct: Foo_get / struct Foo_get — not store_*. */
+            char tag[128];
+            char tryc[160];
+            const char* bt = vty;
+            if (strncmp(bt, "struct ", 7) == 0) bt += 7;
+            snprintf(tag, sizeof(tag), "%s", bt);
+            if (tag[0] >= 'A' && tag[0] <= 'Z' && strncmp(tag, "CC", 2) != 0 &&
+                strncmp(tag, "Map_", 4) != 0 &&
+                strncmp(tag, "ArrayMap_", 9) != 0) {
+                char snake[160];
+                size_t si = 0, ti = 0;
+                const char* callee = NULL;
+                snprintf(tryc, sizeof(tryc), "%s_%s", tag, meth_name);
+                if (shadow_ufn_exists(tryc))
+                    callee = tryc;
+                else if (shadow_ufn_exists(meth_name))
+                    callee = meth_name;
+                else {
+                    /* Store.get → store_get (snake family, TU-declared). */
+                    for (; tag[ti] && si + 2 < sizeof(snake); ti++) {
+                        char c = tag[ti];
+                        if (c >= 'A' && c <= 'Z') {
+                            if (si > 0) snake[si++] = '_';
+                            snake[si++] = (char)(c - 'A' + 'a');
+                        } else
+                            snake[si++] = c;
+                    }
+                    snake[si] = 0;
+                    if (snake[0]) {
+                        snprintf(tryc, sizeof(tryc), "%s_%s", snake, meth_name);
+                        if (shadow_ufn_exists(tryc)) callee = tryc;
+                    }
+                }
+                if (callee) {
+                    if (a[0]) {
+                        if (ptr_recv)
+                            snprintf(dst, cap, "%s(%s, %s)", callee, recv, a);
+                        else
+                            snprintf(dst, cap, "%s(&%s, %s)", callee, recv, a);
+                    } else if (ptr_recv) {
+                        snprintf(dst, cap, "%s(%s)", callee, recv);
+                    } else {
+                        snprintf(dst, cap, "%s(&%s)", callee, recv);
+                    }
+                } else if (shadow_ufcs_emit_bare(recv, meth_name, a, ptr_recv,
+                                                tag, 0, dst, cap)) {
+                    /* bare */
+                } else if (strcmp(meth_name, "init") == 0) {
+                    snprintf(dst, cap,
+                             ptr_recv ? "store_init(%s)" : "store_init(&%s)",
+                             recv);
+                } else if (strcmp(meth_name, "put") == 0) {
+                    snprintf(dst, cap,
+                             ptr_recv ? "store_put(%s, %s)"
+                                      : "store_put(&%s, %s)",
+                             recv, a);
+                } else if (strcmp(meth_name, "get") == 0) {
+                    if (a[0])
+                        snprintf(dst, cap,
+                                 ptr_recv ? "store_get(%s, %s)"
+                                          : "store_get(&%s, %s)",
+                                 recv, a);
+                    else
+                        snprintf(dst, cap,
+                                 ptr_recv ? "store_get(%s)" : "store_get(&%s)",
+                                 recv);
+                } else if (strcmp(meth_name, "delete") == 0) {
+                    snprintf(dst, cap,
+                             ptr_recv ? "store_delete(%s, %s)"
+                                      : "store_delete(&%s, %s)",
+                             recv, a);
+                } else if (strcmp(meth_name, "insert_entry") == 0) {
+                    snprintf(dst, cap,
+                             ptr_recv ? "store_insert_entry(%s, %s)"
+                                      : "store_insert_entry(&%s, %s)",
+                             recv, a);
+                } else if (strcmp(meth_name, "key_logical_live_bytes") == 0) {
+                    snprintf(dst, cap,
+                             ptr_recv ? "store_key_logical_live_bytes(%s)"
+                                      : "store_key_logical_live_bytes(&%s)",
+                             recv);
+                } else {
+                    return 0;
+                }
+            } else if (strcmp(meth_name, "init") == 0) {
+                snprintf(dst, cap,
+                         ptr_recv ? "store_init(%s)" : "store_init(&%s)", recv);
+            } else if (strcmp(meth_name, "put") == 0) {
+                snprintf(dst, cap,
+                         ptr_recv ? "store_put(%s, %s)" : "store_put(&%s, %s)",
+                         recv, a);
+            } else if (strcmp(meth_name, "get") == 0) {
+                if (a[0])
+                    snprintf(dst, cap,
+                             ptr_recv ? "store_get(%s, %s)"
+                                      : "store_get(&%s, %s)",
+                             recv, a);
+                else
+                    snprintf(dst, cap,
+                             ptr_recv ? "store_get(%s)" : "store_get(&%s)",
+                             recv);
+            } else if (strcmp(meth_name, "delete") == 0) {
+                snprintf(dst, cap,
+                         ptr_recv ? "store_delete(%s, %s)"
+                                  : "store_delete(&%s, %s)",
+                         recv, a);
+            } else if (strcmp(meth_name, "insert_entry") == 0) {
+                snprintf(dst, cap,
+                         ptr_recv ? "store_insert_entry(%s, %s)"
+                                  : "store_insert_entry(&%s, %s)",
+                         recv, a);
+            } else {
+                snprintf(dst, cap,
+                         ptr_recv ? "store_key_logical_live_bytes(%s)"
+                                  : "store_key_logical_live_bytes(&%s)",
+                         recv);
+            }
         } else if (strcmp(meth_name, "init") == 0) {
             snprintf(dst, cap, ptr_recv ? "store_init(%s)" : "store_init(&%s)",
                      recv);
@@ -540,9 +1005,13 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
                      ptr_recv ? "store_put(%s, %s)" : "store_put(&%s, %s)", recv,
                      a);
         } else if (strcmp(meth_name, "get") == 0) {
-            snprintf(dst, cap,
-                     ptr_recv ? "store_get(%s, %s)" : "store_get(&%s, %s)", recv,
-                     a);
+            if (a[0])
+                snprintf(dst, cap,
+                         ptr_recv ? "store_get(%s, %s)" : "store_get(&%s, %s)",
+                         recv, a);
+            else
+                snprintf(dst, cap,
+                         ptr_recv ? "store_get(%s)" : "store_get(&%s)", recv);
         } else if (strcmp(meth_name, "delete") == 0) {
             snprintf(dst, cap,
                      ptr_recv ? "store_delete(%s, %s)" : "store_delete(&%s, %s)",
@@ -562,15 +1031,27 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
         if (vty[0] && strncmp(vty, "CCVec_", 6) == 0)
             snprintf(dst, cap, "%s_as_slice(&%s)", vty, recv);
         else if (shadow_bind_ty_has(rb, "CCString") || strstr(recv, "string") ||
-                 strstr(recv, "str"))
+                 strstr(recv, "str") || strstr(recv, "CCString"))
             snprintf(dst, cap, "cc_string_as_slice(&%s)", recv);
         else if (vty[0] && strncmp(vty, "CCSlice", 7) == 0)
             snprintf(dst, cap, "(%s)", recv);
         else
             snprintf(dst, cap, "cc_string_as_slice(&%s)", recv);
+    } else if (!is_arrow && strcmp(meth_name, "eq_cstr") == 0) {
+        /* slice.eq_cstr("…") or as_slice().eq_cstr — always cc_slice_eq_cstr. */
+        if (strstr(recv, "cc_string_as_slice") || strstr(recv, "as_slice"))
+            snprintf(dst, cap,
+                     "({ CCSlice __cc_eq = %s; cc_slice_eq_cstr(&__cc_eq, %s); })",
+                     recv, a);
+        else
+            snprintf(dst, cap, "cc_slice_eq_cstr(&%s, %s)", recv, a);
+    } else if (!is_arrow && strcmp(meth_name, "to_str") == 0) {
+        /* int/age.to_str(arena) → cc_string_from((recv), (arena)) beachhead. */
+        snprintf(dst, cap, "cc_string_from((%s), (%s))", recv, a);
     } else if (strcmp(meth_name, "get_ptr") == 0) {
-        int ptr_recv = is_arrow || (rb && strchr(rb->ty, '*') != NULL);
-        if (vty[0] && strncmp(vty, "Map_", 4) == 0) {
+        int ptr_recv = SHADOW_UFCS_PTR_RECV();
+        if (vty[0] && (strncmp(vty, "Map_", 4) == 0 ||
+                       strncmp(vty, "ArrayMap_", 9) == 0)) {
             if (ptr_recv)
                 snprintf(dst, cap, "%s_get_ptr(%s, %s)", vty, recv, a);
             else
@@ -581,37 +1062,70 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
             snprintf(dst, cap, "Map_CCSliceHdr_int_get_ptr(&%s, %s)", recv, a);
         }
     } else if (!is_arrow && strcmp(meth_name, "insert") == 0) {
-        int ptr_recv = rb && strchr(rb->ty, '*') != NULL;
-        if (vty[0] && strncmp(vty, "Map_", 4) == 0) {
+        int ptr_recv = SHADOW_UFCS_PTR_RECV();
+        if (vty[0] && (strncmp(vty, "Map_", 4) == 0 ||
+                       strncmp(vty, "ArrayMap_", 9) == 0)) {
             if (ptr_recv)
                 snprintf(dst, cap, "%s_insert(%s, %s)", vty, recv, a);
             else
                 snprintf(dst, cap, "%s_insert(&%s, %s)", vty, recv, a);
         } else
             snprintf(dst, cap, "Map_CCSliceHdr_int_insert(%s, %s)", recv, a);
-    } else if (strcmp(meth_name, "remove") == 0) {
-        int ptr_recv = is_arrow || (rb && strchr(rb->ty, '*') != NULL);
-        if (vty[0] && strncmp(vty, "Map_", 4) == 0) {
+    } else if (strcmp(meth_name, "del") == 0 ||
+               strcmp(meth_name, "remove") == 0) {
+        int ptr_recv = SHADOW_UFCS_PTR_RECV();
+        const char* meth =
+            (strcmp(meth_name, "del") == 0) ? "del" : "remove";
+        if (vty[0] && (strncmp(vty, "Map_", 4) == 0 ||
+                       strncmp(vty, "ArrayMap_", 9) == 0)) {
             if (ptr_recv)
-                snprintf(dst, cap, "%s_remove(%s, %s)", vty, recv, a);
+                snprintf(dst, cap, "%s_%s(%s, %s)", vty, meth, recv, a);
             else
-                snprintf(dst, cap, "%s_remove(&%s, %s)", vty, recv, a);
+                snprintf(dst, cap, "%s_%s(&%s, %s)", vty, meth, recv, a);
         } else if (ptr_recv) {
-            snprintf(dst, cap, "Map_CCSliceHdr_int_remove(%s, %s)", recv, a);
+            snprintf(dst, cap, "Map_CCSliceHdr_int_%s(%s, %s)", meth, recv, a);
         } else {
-            snprintf(dst, cap, "Map_CCSliceHdr_int_remove(&%s, %s)", recv, a);
+            snprintf(dst, cap, "Map_CCSliceHdr_int_%s(&%s, %s)", meth, recv, a);
         }
+    } else if (!is_arrow && strcmp(meth_name, "clear") == 0) {
+        int ptr_recv = SHADOW_UFCS_PTR_RECV();
+        if (vty[0] && (strncmp(vty, "Map_", 4) == 0 ||
+                       strncmp(vty, "ArrayMap_", 9) == 0 ||
+                       strncmp(vty, "CCVec_", 6) == 0)) {
+            if (ptr_recv)
+                snprintf(dst, cap, "%s_clear(%s)", vty, recv);
+            else
+                snprintf(dst, cap, "%s_clear(&%s)", vty, recv);
+        } else
+            return 0;
     } else if (strcmp(meth_name, "free") == 0) {
-        /* Nursery*→free; Arena.free()→destroy; else store_free. */
+        /* Nursery*→free; ArenaPool.free(ptr); Arena.free()→destroy;
+         * chan → cc_channel_free; else store_free.
+         * Note: strstr(ty,"CCArena") also matches CCArenaPool — check pool
+         * first and use exact base ty for plain arenas. */
         if (is_arrow && shadow_bind_ty_has(rb, "CCNursery")) {
             snprintf(dst, cap, "cc_nursery_free(%s)", recv);
+        } else if (!is_arrow && a[0] &&
+                   (strcmp(vty, "CCArenaPool") == 0 ||
+                    (rb && strcmp(rb->ty, "CCArenaPool") == 0) ||
+                    strstr(recv, "pool") != NULL ||
+                    strstr(recv, "_stack") != NULL)) {
+            if (!shadow_ufcs_need_amp(recv))
+                snprintf(dst, cap, "cc_arena_pool_free(%s, %s)", recv, a);
+            else
+                snprintf(dst, cap, "cc_arena_pool_free(&%s, %s)", recv, a);
         } else if (!is_arrow &&
-                   (shadow_bind_ty_has(rb, "CCArena") || strstr(recv, "arena") ||
+                   (strcmp(vty, "CCArena") == 0 || strstr(recv, "arena") ||
                     strstr(recv, "detached"))) {
             if (recv[0] == '&' || recv[0] == '*')
                 snprintf(dst, cap, "cc_arena_destroy(%s)", recv);
             else
                 snprintf(dst, cap, "cc_arena_destroy(&%s)", recv);
+        } else if (shadow_bind_ty_has(rb, "CCChanTx") ||
+                   shadow_bind_ty_has(rb, "CCChanRx") ||
+                   shadow_bind_ty_has(rb, "CCChan") ||
+                   strncmp(vty, "CCChan", 6) == 0) {
+            snprintf(dst, cap, "cc_channel_free(%s)", recv);
         } else if (is_arrow || recv[0] == '*' || strchr(recv, '*') ||
                    recv[0] == '&' || strstr(recv, "->")) {
             snprintf(dst, cap, "store_free(%s)", recv);
@@ -619,27 +1133,58 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
             snprintf(dst, cap, "store_free(&%s)", recv);
         }
     } else if (!is_arrow && strcmp(meth_name, "head") == 0) {
-        if (g_shadow_nginst <= 0) return 0;
-        {
+        /* Prefer typed mangled callee when the receiver type is known
+         * (declared twin or factory instance) — avoids huge _Generic and
+         * leftover-buffer truncation in multi-UFCS printf lines. */
+        if (vty[0] && (shadow_family_accepts(vty, "head") ||
+                       shadow_ginst_has_mangled(vty))) {
+            int ptr_recv = (rb && strchr(rb->ty, '*') != NULL);
+            if (ptr_recv)
+                snprintf(dst, cap, "%s_head(%s)", vty, recv);
+            else
+                snprintf(dst, cap, "%s_head(&%s)", vty, recv);
+        } else if (g_shadow_nginst <= 0) {
+            return 0;
+        } else {
             char gen[384];
             size_t go = 0;
             int i;
+            int n;
             go += (size_t)snprintf(gen + go, sizeof(gen) - go, "_Generic((%s)", recv);
-            for (i = 0; i < g_shadow_nginst && go + 80 < sizeof(gen); i++)
-                go += (size_t)snprintf(gen + go, sizeof(gen) - go, ", %s: %s_head",
-                                       g_shadow_ginst[i].mangled, g_shadow_ginst[i].mangled);
+            for (i = 0; i < g_shadow_nginst; i++) {
+                if (go + 80 >= sizeof(gen)) return 0; /* fail-loud: truncated */
+                n = snprintf(gen + go, sizeof(gen) - go, ", %s: %s_head",
+                             g_shadow_ginst[i].mangled, g_shadow_ginst[i].mangled);
+                if (n < 0 || (size_t)n >= sizeof(gen) - go) return 0;
+                go += (size_t)n;
+            }
+            if (go + strlen(recv) + 8 >= cap) return 0;
             snprintf(dst, cap, "%s)(&%s)", gen, recv);
         }
     } else if (!is_arrow && strcmp(meth_name, "tail") == 0) {
-        if (g_shadow_nginst <= 0) return 0;
-        {
+        if (vty[0] && (shadow_family_accepts(vty, "tail") ||
+                       shadow_ginst_has_mangled(vty))) {
+            int ptr_recv = (rb && strchr(rb->ty, '*') != NULL);
+            if (ptr_recv)
+                snprintf(dst, cap, "%s_tail(%s)", vty, recv);
+            else
+                snprintf(dst, cap, "%s_tail(&%s)", vty, recv);
+        } else if (g_shadow_nginst <= 0) {
+            return 0;
+        } else {
             char gen[384];
             size_t go = 0;
             int i;
+            int n;
             go += (size_t)snprintf(gen + go, sizeof(gen) - go, "_Generic((%s)", recv);
-            for (i = 0; i < g_shadow_nginst && go + 80 < sizeof(gen); i++)
-                go += (size_t)snprintf(gen + go, sizeof(gen) - go, ", %s: %s_tail",
-                                       g_shadow_ginst[i].mangled, g_shadow_ginst[i].mangled);
+            for (i = 0; i < g_shadow_nginst; i++) {
+                if (go + 80 >= sizeof(gen)) return 0;
+                n = snprintf(gen + go, sizeof(gen) - go, ", %s: %s_tail",
+                             g_shadow_ginst[i].mangled, g_shadow_ginst[i].mangled);
+                if (n < 0 || (size_t)n >= sizeof(gen) - go) return 0;
+                go += (size_t)n;
+            }
+            if (go + strlen(recv) + 8 >= cap) return 0;
             snprintf(dst, cap, "%s)(&%s)", gen, recv);
         }
     } else if (!is_arrow && strcmp(meth_name, "span") == 0) {
@@ -666,13 +1211,18 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
         char mty[96];
         int ptr_recv = is_arrow || (rb && strchr(rb->ty, '*') != NULL);
         tag[0] = mty[0] = 0;
-        /* Typed-slice instance members: CCSlice_T_<meth>(&recv, …). */
-        if (vty[0] && strncmp(vty, "CCSlice_", 8) == 0)
-            return shadow_ufcs_emit_slice_meth(vty, meth_name, recv, a, dst, cap);
+        /* Typed family instances: trust composed Name_meth when the method is
+         * in the header-derived ##_ set or a TU-declared extension. */
+        if (vty[0] && strncmp(vty, "CCSlice_", 8) == 0) {
+            if (!shadow_family_accepts(vty, meth_name)) return 0;
+            return shadow_ufcs_emit_slice_meth(vty, meth_name, recv, a, dst,
+                                              cap);
+        }
         if (vty[0] && (strncmp(vty, "CCVec_", 6) == 0 ||
                        strncmp(vty, "Map_", 4) == 0 ||
                        strncmp(vty, "ArrayMap_", 9) == 0 ||
                        strncmp(vty, "Pair_", 5) == 0)) {
+            if (!shadow_family_accepts(vty, meth_name)) return 0;
             if (a[0]) {
                 if (ptr_recv)
                     snprintf(dst, cap, "%s_%s(%s, %s)", vty, meth_name, recv, a);
@@ -789,16 +1339,112 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
         }
         if (vty[0] && strncmp(vty, "struct ", 7) == 0) {
             snprintf(tag, sizeof(tag), "%s", vty + 7);
-        } else if (vty[0] && vty[0] >= 'A' && vty[0] <= 'Z' &&
-                   strncmp(vty, "CC", 2) != 0) {
-            /* Typedef / tag-like name (Point, Builder, Stats). */
+        } else if (vty[0] && vty[0] >= 'A' && vty[0] <= 'Z') {
+            /* Typedef / tag / CC* (CCArena.avail → arena_avail via snake). */
             snprintf(tag, sizeof(tag), "%s", vty);
         }
         if (tag[0]) {
             char composed[160];
+            char snake[160];
+            char tryc[160];
             int ris_const = rb && strncmp(rb->ty, "const ", 6) == 0;
-            snprintf(composed, sizeof(composed), "%s_%s", tag, meth_name);
-            if (shadow_ufn_exists(composed)) {
+            size_t si = 0, ti = 0;
+            int found = 0;
+            /* CCArena → Arena for snake (drop CC prefix). */
+            if (strncmp(tag, "CC", 2) == 0 && tag[2] >= 'A' && tag[2] <= 'Z')
+                ti = 2;
+            /* DefinedToy → defined_toy (matches cc_type_register ufcs prefixes). */
+            for (; tag[ti] && si + 2 < sizeof(snake); ti++) {
+                char c = tag[ti];
+                if (c >= 'A' && c <= 'Z') {
+                    if (si > 0) snake[si++] = '_';
+                    snake[si++] = (char)(c - 'A' + 'a');
+                } else
+                    snake[si++] = c;
+            }
+            snake[si] = 0;
+            composed[0] = 0;
+            /* Prefer registered callees visible as static fns in the TU:
+             *   Type_meth, snake_type_meth, snake_meth_{int,cstr},
+             *   snake_meth, snake_legacy_meth, bare meth (arena_avail). */
+            snprintf(tryc, sizeof(tryc), "%s_%s", tag, meth_name);
+            if (shadow_ufn_exists(tryc)) {
+                snprintf(composed, sizeof(composed), "%s", tryc);
+                found = 1;
+            }
+            if (!found && snake[0]) {
+                snprintf(tryc, sizeof(tryc), "%s_type_%s", snake, meth_name);
+                if (shadow_ufn_exists(tryc)) {
+                    snprintf(composed, sizeof(composed), "%s", tryc);
+                    found = 1;
+                }
+            }
+            if (!found && snake[0] && a[0]) {
+                const char* ap = a;
+                while (*ap == ' ' || *ap == '\t') ap++;
+                if (*ap == '"')
+                    snprintf(tryc, sizeof(tryc), "%s_%s_cstr", snake,
+                             meth_name);
+                else if ((*ap >= '0' && *ap <= '9') || *ap == '-' || *ap == '+')
+                    snprintf(tryc, sizeof(tryc), "%s_%s_int", snake,
+                             meth_name);
+                else
+                    tryc[0] = 0;
+                if (tryc[0] && shadow_ufn_exists(tryc)) {
+                    snprintf(composed, sizeof(composed), "%s", tryc);
+                    found = 1;
+                }
+            }
+            if (!found && snake[0]) {
+                snprintf(tryc, sizeof(tryc), "%s_%s", snake, meth_name);
+                if (shadow_ufn_exists(tryc)) {
+                    snprintf(composed, sizeof(composed), "%s", tryc);
+                    found = 1;
+                }
+            }
+            if (!found && snake[0]) {
+                snprintf(tryc, sizeof(tryc), "%s_legacy_%s", snake, meth_name);
+                if (shadow_ufn_exists(tryc)) {
+                    snprintf(composed, sizeof(composed), "%s", tryc);
+                    found = 1;
+                }
+            }
+            /* CCArena.avail → cc_arena_remaining (stdlib / header hook). */
+            if (!found && strcmp(meth_name, "avail") == 0 &&
+                (strcmp(tag, "CCArena") == 0 || strcmp(snake, "arena") == 0)) {
+                snprintf(composed, sizeof(composed), "cc_arena_remaining");
+                found = 1;
+            }
+            /* Stdlib CC* methods in headers: plain CCSlice → cc_slice_meth;
+             * Unique/Shared slice markers share cc_slice_*; Tx/Rx → Type_meth.
+             * Invent the composed callee for host/stdlib link (Nursery.spawn_async,
+             * Arena.slice, …). Typed CCSlice_T / CCVec_T miss paths above do not
+             * invent Type_nosuch. */
+            if (!found && strncmp(tag, "CC", 2) == 0) {
+                if ((strstr(tag, "Unique") || strstr(tag, "Shared")) &&
+                    strstr(tag, "Slice")) {
+                    snprintf(composed, sizeof(composed), "cc_slice_%s",
+                             meth_name);
+                } else if (strstr(tag, "Unique") || strstr(tag, "Shared") ||
+                           strstr(tag, "Tx") || strstr(tag, "Rx")) {
+                    snprintf(composed, sizeof(composed), "%s_%s", tag,
+                             meth_name);
+                } else if (snake[0]) {
+                    snprintf(composed, sizeof(composed), "cc_%s_%s", snake,
+                             meth_name);
+                } else {
+                    snprintf(composed, sizeof(composed), "%s_%s", tag,
+                             meth_name);
+                }
+                found = 1;
+            }
+            /* Bare local name: first-param match decides & vs by-value. */
+            if (!found && shadow_ufn_exists(meth_name)) {
+                if (shadow_ufcs_emit_bare(recv, meth_name, a, ptr_recv, tag,
+                                          ris_const, dst, cap))
+                    return 1;
+            }
+            if (found) {
                 if (a[0]) {
                     if (ptr_recv)
                         snprintf(dst, cap, "%s(%s, %s)", composed, recv, a);
@@ -814,10 +1460,9 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
             if (shadow_ufcs_emit_bare(recv, meth_name, a, ptr_recv, tag,
                                       ris_const, dst, cap))
                 return 1;
-            return 0;
-        }
-        /* Typed receiver with no family/tag spelling — bare-name only. */
-        if (vty[0]) {
+            /* Fall through to typed-miss diagnostic below. */
+        } else if (vty[0]) {
+            /* Typed receiver with no family/tag spelling — bare-name only. */
             int ris_const = rb && strncmp(rb->ty, "const ", 6) == 0;
             if (shadow_ufcs_emit_bare(recv, meth_name, a, ptr_recv, vty,
                                       ris_const, dst, cap))
@@ -825,7 +1470,78 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
         }
         return 0;
     }
+#undef SHADOW_UFCS_PTR_RECV
     return 1;
+}
+
+/* Diagnose a typed UFCS miss once; used by structured emit + leftover scan. */
+static void shadow_ufcs_diagnose_miss(const char* recv, const char* meth) {
+    const ShadowBind* rb;
+    char vty[128];
+    if (!meth || !meth[0] || g_shadow_ufcs_miss) return;
+    rb = shadow_bind_for_recv(recv);
+    shadow_bind_base_ty(rb, vty, sizeof(vty));
+    if (!vty[0])
+        (void)shadow_ufcs_recv_slice_ty(recv, vty, sizeof(vty));
+    if (!vty[0] && recv && recv[0] >= 'A' && recv[0] <= 'Z') {
+        /* CCSlice_double_sub(...) → type prefix before '('. */
+        const char* par = strchr(recv, '(');
+        size_t n = par ? (size_t)(par - recv) : strlen(recv);
+        if (n && n < sizeof(vty)) {
+            memcpy(vty, recv, n);
+            vty[n] = 0;
+        } else
+            snprintf(vty, sizeof(vty), "%s", recv);
+    }
+    if (!vty[0]) return;
+    fprintf(stderr,
+            "error: type: no UFCS method '%s' for receiver type '%s'\n", meth,
+            vty);
+    if (shadow_ufn_exists(meth)) {
+        const char* pty = shadow_ufn_first_ty(meth);
+        fprintf(stderr,
+                "candidate %s (bare): declared, but first parameter '%s' does "
+                "not take\n",
+                meth, pty && pty[0] ? pty : "?");
+    } else if (strncmp(vty, "CCSlice_", 8) == 0 ||
+               strncmp(vty, "CCVec_", 6) == 0 ||
+               strncmp(vty, "Map_", 4) == 0 ||
+               strncmp(vty, "ArrayMap_", 9) == 0 ||
+               strncmp(vty, "Pair_", 5) == 0 ||
+               (vty[0] >= 'A' && vty[0] <= 'Z')) {
+        char cand[160];
+        char snake[160];
+        size_t si = 0, ti = 0;
+        snprintf(cand, sizeof(cand), "%s_%s", vty, meth);
+        fprintf(stderr, "candidate %s (family spelling): not declared\n", cand);
+        if (strncmp(vty, "CC", 2) == 0 && vty[2] >= 'A' && vty[2] <= 'Z')
+            ti = 2;
+        for (; vty[ti] && si + 2 < sizeof(snake); ti++) {
+            char c = vty[ti];
+            if (c >= 'A' && c <= 'Z') {
+                if (si > 0) snake[si++] = '_';
+                snake[si++] = (char)(c - 'A' + 'a');
+            } else if (c == '_')
+                snake[si++] = c;
+            else
+                snake[si++] = c;
+        }
+        snake[si] = 0;
+        if (snake[0]) {
+            snprintf(cand, sizeof(cand), "%s_%s", snake, meth);
+            if (strcmp(cand, meth) != 0)
+                fprintf(stderr,
+                        "candidate %s (family spelling): not declared\n", cand);
+        }
+    }
+    {
+        const char* mem = shadow_family_members_csv(vty);
+        if (mem && mem[0])
+            fprintf(stderr, "installed methods of %s: %s\n", vty, mem);
+        else
+            fprintf(stderr, "installed methods of %s:\n", vty);
+    }
+    g_shadow_ufcs_miss = 1;
 }
 
 /* One left-to-right UFCS step → lower_parts + splice.
@@ -887,7 +1603,7 @@ static int shadow_ufcs_peel_left(char* dst, size_t cap, const char* src,
     char recv[192];
     char meth_name[64];
     char args[160];
-    char repl[288];
+    char repl[512];
     const char* after = NULL;
     const char* meth;
     const char* par;
@@ -926,7 +1642,7 @@ static int shadow_ufcs_peel_left(char* dst, size_t cap, const char* src,
 }
 
 /* cc_channel_pair(&tx, &rx) → cc_channel_pair_create_named(...).
- * Looks up capacity/ordered from registered AST_CHAN_VAR decls. */
+ * Looks up capacity/elem/topo/ordered from registered AST_CHAN_VAR decls. */
 static int shadow_format_channel_pair(char* dst, size_t cap, const char* src) {
     const char* call = src ? strstr(src, "cc_channel_pair(") : NULL;
     const char* p;
@@ -934,11 +1650,16 @@ static int shadow_format_channel_pair(char* dst, size_t cap, const char* src) {
     char args[128];
     char repl[512];
     char outb[768];
+    char elem_sz_buf[96];
     const ShadowChanDecl* dtx;
     const ShadowChanDecl* drx;
     const char* cap_expr = "1";
-    int ordered = 0;
+    const char* elem_ty = NULL;
+    const char* topo = NULL;
+    const char* topo_enum = "CC_CHAN_TOPO_DEFAULT";
     const char* elem_sz = "sizeof(int)";
+    int ordered = 0;
+    int allow_take = 0;
     size_t pre;
     const char* after;
     if (!call) return 0;
@@ -972,14 +1693,38 @@ static int shadow_format_channel_pair(char* dst, size_t cap, const char* src) {
     drx = shadow_chan_find(rx);
     if (dtx && dtx->cap[0]) cap_expr = dtx->cap;
     else if (drx && drx->cap[0]) cap_expr = drx->cap;
-    if ((dtx && dtx->ordered) || (drx && drx->ordered)) {
-        ordered = 1;
+    if (dtx && dtx->elem[0]) elem_ty = dtx->elem;
+    else if (drx && drx->elem[0]) elem_ty = drx->elem;
+    if (dtx && dtx->topo[0]) topo = dtx->topo;
+    else if (drx && drx->topo[0]) topo = drx->topo;
+    if ((dtx && dtx->ordered) || (drx && drx->ordered)) ordered = 1;
+    if (elem_ty && elem_ty[0]) {
+        if (strstr(elem_ty, "[:") || strstr(elem_ty, "CCSlice")) {
+            elem_sz = "sizeof(CCSlice)";
+            allow_take = 1;
+        } else if (strchr(elem_ty, '*')) {
+            elem_sz = "sizeof(void*)";
+            allow_take = 1;
+        } else {
+            snprintf(elem_sz_buf, sizeof(elem_sz_buf), "sizeof(%s)", elem_ty);
+            elem_sz = elem_sz_buf;
+        }
+    }
+    if (ordered) {
+        /* Beachhead: ordered → task payload (matches prior shadow behavior). */
         elem_sz = "sizeof(CCTask)";
+        allow_take = 0;
+    }
+    if (topo) {
+        if (strcmp(topo, "1:1") == 0) topo_enum = "CC_CHAN_TOPO_1_1";
+        else if (strcmp(topo, "1:N") == 0) topo_enum = "CC_CHAN_TOPO_1_N";
+        else if (strcmp(topo, "N:1") == 0) topo_enum = "CC_CHAN_TOPO_N_1";
+        else if (strcmp(topo, "N:N") == 0) topo_enum = "CC_CHAN_TOPO_N_N";
     }
     snprintf(repl, sizeof(repl),
-             "cc_channel_pair_create_named(%s, CC_CHAN_MODE_BLOCK, 0, %s, 0, "
-             "CC_CHAN_TOPO_DEFAULT, %d, &%s, &%s, \"%s,%s\", __FILE__, __LINE__)",
-             cap_expr, elem_sz, ordered, tx, rx, tx, rx);
+             "cc_channel_pair_create_named(%s, CC_CHAN_MODE_BLOCK, %d, %s, 0, "
+             "%s, %d, &%s, &%s, \"%s,%s\", __FILE__, __LINE__)",
+             cap_expr, allow_take, elem_sz, topo_enum, ordered, tx, rx, tx, rx);
     pre = (size_t)(call - src);
     snprintf(outb, sizeof(outb), "%.*s%s%s", (int)pre, src, repl, after);
     snprintf(dst, cap, "%s", outb);
@@ -1096,18 +1841,8 @@ static int shadow_emit_ufcs_to_buf(AstNode* st, char* dst, size_t cap,
             }
         }
     }
-    if (!shadow_ufcs_lower_parts(recv, st->b, args, is_arrow, formal, dst, cap)) {
-        if (targs && targs[0] && args[0])
-            snprintf(dst, cap, "%s%s%s::[%s](%s)", recv, is_arrow ? "->" : ".",
-                     st->b, targs, args);
-        else if (targs && targs[0])
-            snprintf(dst, cap, "%s%s%s::[%s]()", recv, is_arrow ? "->" : ".",
-                     st->b, targs);
-        else if (args[0])
-            snprintf(dst, cap, "%s%s%s(%s)", recv, is_arrow ? "->" : ".", st->b, args);
-        else
-            snprintf(dst, cap, "%s%s%s()", recv, is_arrow ? "->" : ".", st->b);
-    }
+    if (!shadow_ufcs_lower_parts(recv, st->b, args, is_arrow, formal, dst, cap))
+        return 0; /* let leftover text peel retry (e.g. cast-prefixed recv) */
     return 1;
 }
 
@@ -1229,9 +1964,410 @@ static int shadow_emit_exact_ufcs_text(char* dst, size_t cap, const char* src,
                                   cap);
 }
 
+/* Known callees: wrap string-literal args that expect CCSlice by value. */
+static int shadow_slc_known_arg(const char* callee, int arg_index) {
+    if (!callee || arg_index < 0) return 0;
+    if (strcmp(callee, "cc_path_exists") == 0) return arg_index == 0;
+    if (strcmp(callee, "cc_path_is_dir") == 0) return arg_index == 0;
+    if (strcmp(callee, "cc_path_is_file") == 0) return arg_index == 0;
+    if (strcmp(callee, "cc_file_open") == 0) return arg_index == 1;
+    if (strcmp(callee, "cc_file_open_async") == 0) return arg_index == 2;
+    if (strcmp(callee, "cc_dir_open") == 0) return arg_index == 1;
+    if (strcmp(callee, "cc_glob") == 0) return arg_index == 0;
+    if (strcmp(callee, "cc_command") == 0) return arg_index == 1;
+    if (strcmp(callee, "cc_command_new") == 0) return arg_index == 1;
+    if (strcmp(callee, "cc_path_join") == 0)
+        return arg_index == 1 || arg_index == 2;
+    if (strcmp(callee, "cc_file_read_path") == 0) return arg_index == 0;
+    if (strcmp(callee, "cc_file_write_path") == 0) return arg_index == 0;
+    if (strcmp(callee, "cc_sh_run") == 0) return arg_index == 0;
+    return 0;
+}
+
+static int shadow_slc_is_string_lit(const char* s, size_t n) {
+    size_t i = 0;
+    if (!s || !n) return 0;
+    while (i < n && (s[i] == ' ' || s[i] == '\t')) i++;
+    if (i < n && (s[i] == 'L' || s[i] == 'u' || s[i] == 'U')) i++;
+    if (i >= n || s[i] != '"') return 0;
+    i++;
+    while (i < n) {
+        if (s[i] == '\\' && i + 1 < n) {
+            i += 2;
+            continue;
+        }
+        if (s[i] == '"') {
+            i++;
+            while (i < n && (s[i] == ' ' || s[i] == '\t')) i++;
+            return i == n;
+        }
+        i++;
+    }
+    return 0;
+}
+
+static int shadow_slc_already_wrapped(const char* s, size_t n) {
+    static const char* wraps[] = {
+        "const_char_to_slice", "char_to_slice", "cc_slice_from_cstr",
+    };
+    size_t i = 0, k;
+    while (i < n && (s[i] == ' ' || s[i] == '\t')) i++;
+    for (k = 0; k < sizeof(wraps) / sizeof(wraps[0]); k++) {
+        size_t wn = strlen(wraps[k]);
+        if (i + wn <= n && memcmp(s + i, wraps[k], wn) == 0) {
+            size_t j = i + wn;
+            while (j < n && (s[j] == ' ' || s[j] == '\t')) j++;
+            if (j < n && s[j] == '(') return 1;
+        }
+    }
+    return 0;
+}
+
+/* Wrap string lits at known CCSlice params: cc_path_exists(".") etc. */
+static void shadow_rewrite_slice_lit_call_args(char* expr, size_t cap) {
+    char out[8192];
+    size_t o = 0;
+    const char* p;
+    if (!expr || !cap) return;
+    p = expr;
+    while (*p && o + 1 < sizeof(out)) {
+        if (((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+             *p == '_') &&
+            (p == expr ||
+             !((p[-1] >= 'A' && p[-1] <= 'Z') || (p[-1] >= 'a' && p[-1] <= 'z') ||
+               (p[-1] >= '0' && p[-1] <= '9') || p[-1] == '_'))) {
+            const char* name = p;
+            size_t nl = 0;
+            const char* q;
+            char callee[64];
+            while ((p[nl] >= 'A' && p[nl] <= 'Z') ||
+                   (p[nl] >= 'a' && p[nl] <= 'z') ||
+                   (p[nl] >= '0' && p[nl] <= '9') || p[nl] == '_')
+                nl++;
+            q = name + nl;
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q == '(' && nl < sizeof(callee)) {
+                const char* args = q + 1;
+                const char* rp = NULL;
+                int depth = 1;
+                const char* r;
+                for (r = args; *r; r++) {
+                    if (*r == '(') depth++;
+                    else if (*r == ')') {
+                        depth--;
+                        if (depth == 0) {
+                            rp = r;
+                            break;
+                        }
+                    }
+                }
+                if (rp) {
+                    int argi = 0;
+                    const char* cur = args;
+                    const char* c;
+                    int d = 0;
+                    memcpy(callee, name, nl);
+                    callee[nl] = 0;
+                    o += (size_t)snprintf(out + o, sizeof(out) - o, "%.*s(",
+                                          (int)nl, name);
+                    for (c = args; c <= rp && o + 40 < sizeof(out); c++) {
+                        if (c < rp && (*c == '(' || *c == '[' || *c == '{'))
+                            d++;
+                        else if (c < rp &&
+                                 (*c == ')' || *c == ']' || *c == '}')) {
+                            if (d > 0) d--;
+                        } else if ((c == rp || (*c == ',' && d == 0))) {
+                            size_t al = (size_t)(c - cur);
+                            while (al && (cur[al - 1] == ' ' ||
+                                          cur[al - 1] == '\t'))
+                                al--;
+                            {
+                                size_t lead = 0;
+                                while (lead < al &&
+                                       (cur[lead] == ' ' || cur[lead] == '\t'))
+                                    lead++;
+                                if (shadow_slc_known_arg(callee, argi) &&
+                                    !shadow_slc_already_wrapped(cur + lead,
+                                                                al - lead) &&
+                                    shadow_slc_is_string_lit(cur + lead,
+                                                             al - lead)) {
+                                    o += (size_t)snprintf(
+                                        out + o, sizeof(out) - o,
+                                        "const_char_to_slice(%.*s)",
+                                        (int)(al - lead), cur + lead);
+                                } else {
+                                    o += (size_t)snprintf(
+                                        out + o, sizeof(out) - o, "%.*s",
+                                        (int)al, cur);
+                                }
+                            }
+                            if (c < rp) {
+                                out[o++] = ',';
+                                cur = c + 1;
+                                argi++;
+                            }
+                            continue;
+                        }
+                    }
+                    out[o++] = ')';
+                    p = rp + 1;
+                    continue;
+                }
+            }
+        }
+        out[o++] = *p++;
+    }
+    out[o] = 0;
+    snprintf(expr, cap, "%s", out);
+}
+
+/* @as arg coerce: takes_file(&w) → takes_file(&w.file) when Outer has @as. */
+static void shadow_rewrite_as_call_args(char* expr, size_t cap) {
+    char out[4096];
+    size_t o = 0;
+    const char* p;
+    if (!expr || !cap || g_shadow_nas <= 0) return;
+    p = expr;
+    while (*p && o + 1 < sizeof(out)) {
+        if (((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+             *p == '_') &&
+            (p == expr ||
+             !((p[-1] >= 'A' && p[-1] <= 'Z') || (p[-1] >= 'a' && p[-1] <= 'z') ||
+               (p[-1] >= '0' && p[-1] <= '9') || p[-1] == '_'))) {
+            const char* name = p;
+            size_t nl = 0;
+            const char* q;
+            char callee[64];
+            while ((p[nl] >= 'A' && p[nl] <= 'Z') ||
+                   (p[nl] >= 'a' && p[nl] <= 'z') ||
+                   (p[nl] >= '0' && p[nl] <= '9') || p[nl] == '_')
+                nl++;
+            q = name + nl;
+            while (*q == ' ' || *q == '\t') q++;
+            memcpy(callee, name, nl);
+            callee[nl] = 0;
+            if (*q == '(' && nl < sizeof(callee) &&
+                shadow_fnparam_lookup(callee, 0)) {
+                const char* args = q + 1;
+                const char* rp = NULL;
+                int depth = 1;
+                const char* r;
+                for (r = args; *r; r++) {
+                    if (*r == '(') depth++;
+                    else if (*r == ')') {
+                        depth--;
+                        if (depth == 0) {
+                            rp = r;
+                            break;
+                        }
+                    }
+                }
+                if (rp) {
+                    int argi = 0;
+                    const char* cur = args;
+                    const char* c;
+                    int d = 0;
+                    o += (size_t)snprintf(out + o, sizeof(out) - o, "%s(",
+                                          callee);
+                    for (c = args; c <= rp && o + 64 < sizeof(out); c++) {
+                        if (c < rp && (*c == '(' || *c == '[' || *c == '{'))
+                            d++;
+                        else if (c < rp &&
+                                 (*c == ')' || *c == ']' || *c == '}')) {
+                            if (d > 0) d--;
+                        } else if ((c == rp || (*c == ',' && d == 0))) {
+                            size_t al = (size_t)(c - cur);
+                            const ShadowFnParam* fp =
+                                shadow_fnparam_lookup(callee, argi);
+                            int rewritten = 0;
+                            while (al && (cur[al - 1] == ' ' ||
+                                          cur[al - 1] == '\t'))
+                                al--;
+                            if (fp && fp->stars == 1 && fp->base[0]) {
+                                size_t lead = 0;
+                                int has_amp = 0;
+                                char ident[64];
+                                size_t ii = 0;
+                                const ShadowBind* b;
+                                char obase[64];
+                                int ostars = 0;
+                                const ShadowAsEmbed* as;
+                                while (lead < al &&
+                                       (cur[lead] == ' ' || cur[lead] == '\t'))
+                                    lead++;
+                                /* Explicit cast `(T*)&x` / `(T*)x` — keep as
+                                 * written; warn when Outer has an @as path. */
+                                if (lead < al && cur[lead] == '(') {
+                                    const char* cast_end = NULL;
+                                    int cd = 0;
+                                    size_t k;
+                                    char cast_base[64];
+                                    size_t cbn = 0;
+                                    for (k = lead; k < al; k++) {
+                                        if (cur[k] == '(') cd++;
+                                        else if (cur[k] == ')') {
+                                            cd--;
+                                            if (cd == 0) {
+                                                cast_end = cur + k;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if (cast_end) {
+                                        const char* cs = cur + lead + 1;
+                                        while (cs < cast_end &&
+                                               (*cs == ' ' || *cs == '\t'))
+                                            cs++;
+                                        if (strncmp(cs, "const ", 6) == 0)
+                                            cs += 6;
+                                        while (cs < cast_end &&
+                                               ((*cs >= 'A' && *cs <= 'Z') ||
+                                                (*cs >= 'a' && *cs <= 'z') ||
+                                                (*cs >= '0' && *cs <= '9') ||
+                                                *cs == '_') &&
+                                               cbn + 1 < sizeof(cast_base))
+                                            cast_base[cbn++] = *cs++;
+                                        cast_base[cbn] = 0;
+                                        while (cs < cast_end &&
+                                               (*cs == ' ' || *cs == '\t' ||
+                                                *cs == '*'))
+                                            cs++;
+                                        if (cs == cast_end && cast_base[0] &&
+                                            strcmp(cast_base, fp->base) == 0) {
+                                            size_t after = (size_t)(cast_end -
+                                                                   cur) +
+                                                           1;
+                                            int ca = 0;
+                                            char cid[64];
+                                            size_t ci = 0;
+                                            while (after < al &&
+                                                   (cur[after] == ' ' ||
+                                                    cur[after] == '\t'))
+                                                after++;
+                                            if (after < al &&
+                                                cur[after] == '&') {
+                                                ca = 1;
+                                                after++;
+                                                while (after < al &&
+                                                       (cur[after] == ' ' ||
+                                                        cur[after] == '\t'))
+                                                    after++;
+                                            }
+                                            while (after + ci < al &&
+                                                   ((cur[after + ci] >= 'A' &&
+                                                     cur[after + ci] <= 'Z') ||
+                                                    (cur[after + ci] >= 'a' &&
+                                                     cur[after + ci] <= 'z') ||
+                                                    (cur[after + ci] >= '0' &&
+                                                     cur[after + ci] <= '9') ||
+                                                    cur[after + ci] == '_') &&
+                                                   ci + 1 < sizeof(cid)) {
+                                                cid[ci] = cur[after + ci];
+                                                ci++;
+                                            }
+                                            cid[ci] = 0;
+                                            if (ci && after + ci == al) {
+                                                b = shadow_bind_lookup(cid);
+                                                if (b) {
+                                                    shadow_ty_base_stars(
+                                                        b->ty, obase,
+                                                        sizeof(obase),
+                                                        &ostars);
+                                                    as = shadow_as_lookup(
+                                                        obase, fp->base);
+                                                    if (as) {
+                                                        fprintf(stderr,
+                                                                "warning: "
+                                                                "explicit cast "
+                                                                "to '%s *' "
+                                                                "from '%s' "
+                                                                "skips @as "
+                                                                "path\n",
+                                                                fp->base,
+                                                                obase);
+                                                        (void)ca;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else if (lead < al && cur[lead] == '&') {
+                                    has_amp = 1;
+                                    lead++;
+                                    while (lead < al &&
+                                           (cur[lead] == ' ' ||
+                                            cur[lead] == '\t'))
+                                        lead++;
+                                }
+                                if (!rewritten && lead < al &&
+                                    cur[lead] != '(') {
+                                    while (lead + ii < al &&
+                                           ((cur[lead + ii] >= 'A' &&
+                                             cur[lead + ii] <= 'Z') ||
+                                            (cur[lead + ii] >= 'a' &&
+                                             cur[lead + ii] <= 'z') ||
+                                            (cur[lead + ii] >= '0' &&
+                                             cur[lead + ii] <= '9') ||
+                                            cur[lead + ii] == '_') &&
+                                           ii + 1 < sizeof(ident)) {
+                                        ident[ii] = cur[lead + ii];
+                                        ii++;
+                                    }
+                                    ident[ii] = 0;
+                                    /* Bare ident only — skip member forms. */
+                                    if (ii && lead + ii == al) {
+                                        b = shadow_bind_lookup(ident);
+                                        if (b) {
+                                            shadow_ty_base_stars(
+                                                b->ty, obase, sizeof(obase),
+                                                &ostars);
+                                            as = shadow_as_lookup(obase,
+                                                                  fp->base);
+                                            if (as) {
+                                                if (has_amp || ostars == 0)
+                                                    o += (size_t)snprintf(
+                                                        out + o,
+                                                        sizeof(out) - o,
+                                                        "&%s.%s", ident,
+                                                        as->field);
+                                                else
+                                                    o += (size_t)snprintf(
+                                                        out + o,
+                                                        sizeof(out) - o,
+                                                        "&%s->%s", ident,
+                                                        as->field);
+                                                rewritten = 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if (!rewritten)
+                                o += (size_t)snprintf(out + o, sizeof(out) - o,
+                                                      "%.*s", (int)al, cur);
+                            if (c < rp) {
+                                out[o++] = ',';
+                                cur = c + 1;
+                                argi++;
+                            }
+                            continue;
+                        }
+                    }
+                    out[o++] = ')';
+                    p = rp + 1;
+                    continue;
+                }
+            }
+        }
+        out[o++] = *p++;
+    }
+    out[o] = 0;
+    snprintf(expr, cap, "%s", out);
+}
+
 /* CCSlice_T value → erased CCSlice via bytes() when passed to a call. */
 static void shadow_rewrite_slice_as_call_args(char* expr, size_t cap) {
-    char out[768];
+    char out[8192];
     size_t o = 0;
     const char* p;
     if (!expr || !cap) return;
@@ -1295,12 +2431,15 @@ static void shadow_rewrite_slice_as_call_args(char* expr, size_t cap) {
 /* Leftover expr text UFCS (slots / chains). Prefer exact parts; else peel. */
 static void shadow_emit_text_ufcs(char* dst, size_t cap, const char* src,
                                  const char* elem_ty) {
-    char cur[512];
-    char nxt[512];
+    /* Opaque switch bodies with expanded @string can exceed 512. */
+    char cur[8192];
+    char nxt[8192];
     int i;
     if (!src) { if (cap) dst[0] = 0; return; }
     if (shadow_emit_exact_ufcs_text(dst, cap, src, elem_ty)) {
         shadow_rewrite_slice_as_call_args(dst, cap);
+        shadow_rewrite_slice_lit_call_args(dst, cap);
+        shadow_rewrite_as_call_args(dst, cap);
         return;
     }
     snprintf(cur, sizeof(cur), "%s", src);
@@ -1309,6 +2448,91 @@ static void shadow_emit_text_ufcs(char* dst, size_t cap, const char* src,
         snprintf(cur, sizeof(cur), "%s", nxt);
     }
     shadow_rewrite_slice_as_call_args(cur, sizeof(cur));
+    shadow_rewrite_slice_lit_call_args(cur, sizeof(cur));
+    shadow_rewrite_as_call_args(cur, sizeof(cur));
+    /* Leftover `recv.meth(` / `recv->meth(` after peel → typed miss.
+     * Instance/handle types always; other bound types when neither
+     * Type_meth nor bare meth is a successful lower (leftover remains). */
+    {
+        const char* p = cur;
+        while (*p && !g_shadow_ufcs_miss) {
+            int is_arrow = 0;
+            const char* mstart = NULL;
+            if (p[0] == '-' && p[1] == '>' &&
+                ((p[2] >= 'A' && p[2] <= 'Z') || (p[2] >= 'a' && p[2] <= 'z') ||
+                 p[2] == '_')) {
+                is_arrow = 1;
+                mstart = p + 2;
+            } else if (p[0] == '.' &&
+                       ((p[1] >= 'A' && p[1] <= 'Z') ||
+                        (p[1] >= 'a' && p[1] <= 'z') || p[1] == '_')) {
+                mstart = p + 1;
+            }
+            if (mstart) {
+                char recv[160], meth[64], vty[128], composed[160];
+                const char* m = mstart;
+                size_t mi = 0;
+                const char* par;
+                const ShadowBind* rb;
+                int instance = 0;
+                if (shadow_ufcs_recv(cur, p, recv, sizeof(recv))) {
+                    /* Method name is an identifier only — never scan into
+                     * `s.len != 0` / field compares looking for a later `(`. */
+                    while (((m[mi] >= 'A' && m[mi] <= 'Z') ||
+                            (m[mi] >= 'a' && m[mi] <= 'z') ||
+                            (m[mi] >= '0' && m[mi] <= '9') || m[mi] == '_') &&
+                           mi + 1 < sizeof(meth)) {
+                        meth[mi] = m[mi];
+                        mi++;
+                    }
+                    meth[mi] = 0;
+                    par = m + mi;
+                    while (*par == ' ' || *par == '\t') par++;
+                    /* Optional ::[T] before '('. */
+                    if (par[0] == ':' && par[1] == ':') {
+                        par = shadow_ufcs_text_paren_after_meth(m + mi, NULL, 0);
+                        if (!par) {
+                            p++;
+                            continue;
+                        }
+                    }
+                    rb = shadow_bind_for_recv(recv);
+                    shadow_bind_base_ty(rb, vty, sizeof(vty));
+                    if (!vty[0])
+                        (void)shadow_ufcs_recv_slice_ty(recv, vty, sizeof(vty));
+                    instance =
+                        vty[0] &&
+                        (strncmp(vty, "CCSlice_", 8) == 0 ||
+                         strcmp(vty, "CCSlice") == 0 ||
+                         strncmp(vty, "CCVec_", 6) == 0 ||
+                         strncmp(vty, "Map_", 4) == 0 ||
+                         strncmp(vty, "ArrayMap_", 9) == 0 ||
+                         strncmp(vty, "CCChan", 6) == 0 ||
+                         strncmp(vty, "CCResult_", 9) == 0 ||
+                         strncmp(vty, "Pair_", 5) == 0 ||
+                         strcmp(vty, "double") == 0 ||
+                         strcmp(vty, "int") == 0 ||
+                         strcmp(vty, "float") == 0 ||
+                         strcmp(vty, "size_t") == 0);
+                    /* Instance/handle leftovers always diagnose. Bare-name
+                     * mismatch when meth is a known fn. Capital typedefs
+                     * diagnose only when meth is not a struct field (fnptr
+                     * members like t.cb() stay as C field calls). */
+                    if (par && *par == '(' && meth[0] && vty[0]) {
+                        int capital = vty[0] >= 'A' && vty[0] <= 'Z' &&
+                                      strncmp(vty, "CC", 2) != 0;
+                        snprintf(composed, sizeof(composed), "%s_%s", vty, meth);
+                        if (instance || shadow_ufn_exists(meth) ||
+                            (capital && !shadow_type_has_field(vty, meth) &&
+                             !shadow_ufn_exists(composed)))
+                            shadow_ufcs_diagnose_miss(recv, meth);
+                    }
+                }
+                (void)is_arrow;
+            }
+            p++;
+        }
+    }
     snprintf(dst, cap, "%s", cur);
 }
 
@@ -1404,11 +2628,18 @@ static void shadow_rewrite_closure_calls(char* expr, size_t cap) {
     snprintf(expr, cap, "%s", out);
 }
 
+/* Defined in pp_emit_stmt.cch (after this include). */
+static void shadow_rewrite_print_and_string(char* expr, size_t cap);
+
 /* Prefer structured UFCS on dbody; else leftover text UFCS (exact / peel). */
 static void shadow_emit_expr_text(AstNode* st, const char* text, char* dst,
                                   size_t cap, const char* elem_ty) {
     int i;
-    if (st) {
+    char cur[8192];
+    /* Boolean / ternary mixes are multi-call — peel text, don't trust one kid. */
+    int multi = text && (strstr(text, "&&") || strstr(text, "||") ||
+                         strchr(text, '?'));
+    if (st && !multi) {
         for (i = 0; i < st->ndbody; i++) {
             AstNode* u = st->dbody[i];
             if (u && (u->kind == AST_UFCS_EXPR || u->kind == AST_UFCS_STMT)) {
@@ -1421,10 +2652,15 @@ static void shadow_emit_expr_text(AstNode* st, const char* text, char* dst,
             }
         }
     }
-    shadow_emit_text_ufcs(dst, cap, text, elem_ty);
+    /* Lower @string before UFCS peel so chains like `@string(`…`).sub()` /
+     * `.index_of()` / `.len()` see a CCSlice / CCString receiver. */
+    snprintf(cur, sizeof(cur), "%s", text ? text : "");
+    shadow_rewrite_print_and_string(cur, sizeof(cur));
+    shadow_emit_text_ufcs(dst, cap, cur, elem_ty);
     shadow_rewrite_closure_calls(dst, cap);
     shadow_emit_leftover_qmark_rewrite(dst, cap);
     shadow_rewrite_at_slice(dst, cap);
+    shadow_rewrite_variant_expr(dst, cap, elem_ty);
     if (elem_ty && strncmp(elem_ty, "CCResult_", 9) == 0)
         shadow_rewrite_result_ctors(dst, cap, elem_ty);
 }
@@ -1480,15 +2716,23 @@ static void shadow_emit_cond_text(AstNode* st, const char* text, char* dst,
     snprintf(cur, sizeof(cur), "%s", nxt);
     while (shadow_lower_chan_result_cmp(nxt, sizeof(nxt), cur))
         snprintf(cur, sizeof(cur), "%s", nxt);
+    shadow_rewrite_variant_expr(cur, sizeof(cur), NULL);
     snprintf(dst, cap, "%s", cur);
 }
 
-/* Opaque C passthrough for unparsed static/enum/switch bodies.
- * SHADOW_RAW_BODY_REWRITE stays 0 — no post-parse UFCS/bang peel here. */
+/* Opaque C passthrough for unparsed static/enum/fn one-liner bodies. */
 static void shadow_rewrite_ufcs(char* dst, size_t cap, const char* src,
                                 const char* elem_ty) {
-    (void)elem_ty;
-    if (!src) { if (cap) dst[0] = 0; return; }
-    snprintf(dst, cap, "%s", src);
+    char cur[2048];
+    if (!src) {
+        if (cap) dst[0] = 0;
+        return;
+    }
+    /* Peel UFCS in-place via a temp — dst/src may alias.
+     * @string first so chains see a real receiver. */
+    snprintf(cur, sizeof(cur), "%s", src);
+    shadow_rewrite_print_and_string(cur, sizeof(cur));
+    shadow_emit_text_ufcs(dst, cap, cur, elem_ty);
+    shadow_rewrite_variant_expr(dst, cap, elem_ty);
 }
 

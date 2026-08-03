@@ -81,32 +81,58 @@ static AstNode* parse_slice_init(Parser* p) {
 }
 
 /* int[~N >] Name ;  or  int[~N ordered <] Name ; */
-/* Elem[~[N] [ordered] >|<] name; — capacity optional (default 0). */
+/* Elem[~[N] [ordered] [sched] >|<] name; — capacity optional (default 0). */
 static AstNode* parse_chan_var(Parser* p) {
     Token ety = p_peek(p);
     ShadowKwKind ekw = shadow_kw(ety);
+    int bi;
+    int di;
+    int ordered = 0;
+    int is_ptr = 0;
+    char cap_txt[32];
+    char topo_txt[32];
+    char elem_txt[64];
+    Token dir;
+    Token dtok;
+    Token name;
+    AstNode* n;
+    topo_txt[0] = 0;
     if (ety.kind != TK_IDENT && ekw != SHADOW_KW_INT && ekw != SHADOW_KW_CHAR &&
         ekw != SHADOW_KW_BOOL && ekw != SHADOW_KW_SIZE_T && ekw != SHADOW_KW_VOID)
         return NULL;
     if (p->i + 5 >= p->n) return NULL;
-    if (!tok_eq(p->toks[p->i + 1], TK_PUNCT, "[") ||
-        !tok_eq(p->toks[p->i + 2], TK_PUNCT, "~"))
+    /* Elem may be pointer: `T*[~N …]` */
+    bi = p->i + 1;
+    if (bi < p->n && tok_eq(p->toks[bi], TK_PUNCT, "*")) {
+        is_ptr = 1;
+        bi++;
+    }
+    if (bi + 1 >= p->n || !tok_eq(p->toks[bi], TK_PUNCT, "[") ||
+        !tok_eq(p->toks[bi + 1], TK_PUNCT, "~"))
         return NULL;
-    int di = p->i + 3;
-    char cap_txt[32];
+    di = bi + 2;
     if (di < p->n && p->toks[di].kind == TK_NUM) {
         slice_to(cap_txt, sizeof(cap_txt), p->toks[di].spell);
         di++;
     } else {
         snprintf(cap_txt, sizeof(cap_txt), "0");
     }
-    int ordered = 0;
     if (di < p->n && shadow_kw(p->toks[di]) == SHADOW_KW_ORDERED) {
         ordered = 1;
         di++;
     }
+    /* Optional schedule `N:1` / `ident:num` between cap and direction. */
+    if (di + 2 < p->n && tok_eq(p->toks[di + 1], TK_PUNCT, ":") &&
+        p->toks[di + 2].kind == TK_NUM &&
+        (p->toks[di].kind == TK_NUM || p->toks[di].kind == TK_IDENT)) {
+        char left[16], right[16];
+        slice_to(left, sizeof(left), p->toks[di].spell);
+        slice_to(right, sizeof(right), p->toks[di + 2].spell);
+        snprintf(topo_txt, sizeof(topo_txt), "%s:%s", left, right);
+        di += 3;
+    }
     if (di >= p->n) return NULL;
-    Token dir = p->toks[di];
+    dir = p->toks[di];
     if (!tok_eq(dir, TK_PUNCT, ">") && !tok_eq(dir, TK_PUNCT, "<")) return NULL;
     if (di + 1 >= p->n || !tok_eq(p->toks[di + 1], TK_PUNCT, "]")) return NULL;
     if (ordered && tok_eq(dir, TK_PUNCT, ">")) {
@@ -115,23 +141,44 @@ static AstNode* parse_chan_var(Parser* p) {
         return NULL;
     }
     p_next(p); /* elem ty */
+    if (tok_eq(p_peek(p), TK_PUNCT, "*")) p_next(p); /* * */
     p_next(p); /* [ */
     p_next(p); /* ~ */
     if (p->toks[p->i].kind == TK_NUM) p_next(p); /* cap */
     if (ordered) p_next(p); /* ordered */
-    Token dtok = p_next(p); /* > or < */
+    if (p->i + 2 < p->n && tok_eq(p->toks[p->i + 1], TK_PUNCT, ":") &&
+        p->toks[p->i + 2].kind == TK_NUM &&
+        (p->toks[p->i].kind == TK_NUM || p->toks[p->i].kind == TK_IDENT)) {
+        p_next(p);
+        p_next(p);
+        p_next(p); /* schedule */
+    }
+    dtok = p_next(p); /* > or < */
     p_next(p); /* ] */
-    Token name = p_next(p);
+    name = p_next(p);
     if (name.kind != TK_IDENT) { p->err = 1; return NULL; }
     if (!p_accept(p, TK_PUNCT, ";")) { p->err = 1; return NULL; }
-    AstNode* n = ast_new(p, AST_CHAN_VAR);
+    n = ast_new(p, AST_CHAN_VAR);
     if (!n) return NULL;
     slice_to(n->a, sizeof(n->a), name.spell);
     snprintf(n->b, sizeof(n->b), "%s", cap_txt);
-    /* c: ">" / "<" ; e: "ordered" when present (emit still uses handle types). */
     slice_to(n->c, sizeof(n->c), dtok.spell);
-    if (ordered) snprintf(n->e, sizeof(n->e), "ordered");
-    (void)ety;
+    slice_to(elem_txt, sizeof(elem_txt), ety.spell);
+    if (is_ptr) {
+        size_t el = strlen(elem_txt);
+        if (el + 1 < sizeof(elem_txt)) {
+            elem_txt[el] = '*';
+            elem_txt[el + 1] = 0;
+        }
+    }
+    snprintf(n->d, sizeof(n->d), "%s", elem_txt);
+    /* e: ordered / topo packing for register. */
+    if (ordered && topo_txt[0])
+        snprintf(n->e, sizeof(n->e), "o:%s", topo_txt);
+    else if (ordered)
+        snprintf(n->e, sizeof(n->e), "o");
+    else if (topo_txt[0])
+        snprintf(n->e, sizeof(n->e), "t:%s", topo_txt);
     return n;
 }
 
@@ -216,8 +263,7 @@ static AstNode* parse_result_fn(Parser* p) {
     while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF && !p->err) {
         AstNode* s = parse_stmt(p);
         if (!s) return NULL;
-        if (p->nkstore >= AST_CAP * 4) { p->err = 1; return NULL; }
-        p->kids_storage[p->nkstore++] = s;
+        if (!ast_kids_push(p, s)) return NULL;
         n->nkids++;
     }
     if (!p_accept(p, TK_PUNCT, "}")) {
@@ -344,6 +390,13 @@ static int parse_at_string_scratch(Parser* p, char* dst, size_t cap) {
         parser_fail(p, scratch, "expected @scratch");
         return 0;
     }
+    /* Optional `@scratch(N)` size hint — stack arena sizing is emit-side. */
+    if (tok_eq(p_peek(p), TK_PUNCT, "(")) {
+        if (!skip_parens(p)) {
+            parser_fail(p, p_peek(p), "unterminated @scratch(...)");
+            return 0;
+        }
+    }
     if (!p_accept(p, TK_PUNCT, ")")) {
         parser_fail(p, p_peek(p), "expected ')' after @string(..., @scratch)");
         return 0;
@@ -394,39 +447,90 @@ static AstNode* parse_return_int(Parser* p) {
         slice_to(n->a, sizeof(n->a), num.spell);
         return n;
     }
-    /* General return expr (ternary, NULL, ident, …) [!>]; */
+    /* General return expr (ternary, NULL, UFCS, …) [!> …]; */
     int e0 = p->i;
     int depth = 0;
+    int bang_at = -1;
     while (p->i < p->n) {
         Token x = p_peek(p);
-        if (tok_eq(x, TK_PUNCT, "(") || tok_eq(x, TK_PUNCT, "[") || tok_eq(x, TK_PUNCT, "{"))
+        if (tok_eq(x, TK_PUNCT, "(") || tok_eq(x, TK_PUNCT, "[") ||
+            tok_eq(x, TK_PUNCT, "{"))
             depth++;
-        else if (tok_eq(x, TK_PUNCT, ")") || tok_eq(x, TK_PUNCT, "]") || tok_eq(x, TK_PUNCT, "}"))
+        else if (tok_eq(x, TK_PUNCT, ")") || tok_eq(x, TK_PUNCT, "]") ||
+                 tok_eq(x, TK_PUNCT, "}"))
             depth--;
-        else if (depth == 0 && tok_eq(x, TK_PUNCT, ";")) break;
+        else if (depth == 0 && tok_eq(x, TK_PUNCT, "!>")) {
+            bang_at = p->i;
+            break;
+        } else if (depth == 0 && tok_eq(x, TK_PUNCT, ";"))
+            break;
         p_next(p);
     }
     AstNode* n = ast_new(p, AST_RETURN_EXPR);
     if (!n) return NULL;
     {
-        int e1 = p->i;
-        int bang = 0;
-        /* Trailing `expr !>` before `;` (not `!>(bind)` — bind forms are
-         * other stmt parsers). */
-        if (e1 > e0 && tok_eq(p->toks[e1 - 1], TK_PUNCT, "!>")) {
-            bang = 1;
-            e1--;
-        }
+        int e1 = (bang_at >= 0) ? bang_at : p->i;
         AstNode* ue = parse_ufcs_expr_range(p, e0, e1);
-        if (!ast_spell_token_range(p, e0, e1, n->a, sizeof(n->a)) &&
-            !span_text(p, e0, e1, n->a, sizeof(n->a))) {
+        if (e0 >= e1)
+            n->a[0] = 0;
+        else if (!ast_spell_token_range(p, e0, e1, n->a, sizeof(n->a)) &&
+                 !span_text(p, e0, e1, n->a, sizeof(n->a))) {
             parser_fail(p, p_peek(p), "return expr too long");
             return NULL;
         }
         if (ue) (void)ast_attach_ufcs_kid(p, n, ue);
-        if (bang) snprintf(n->e, sizeof(n->e), "bang");
     }
-    if (!p_accept(p, TK_PUNCT, ";")) { p->err = 1; return NULL; }
+    if (bang_at < 0) {
+        if (!p_accept(p, TK_PUNCT, ";")) { p->err = 1; return NULL; }
+        return n;
+    }
+    p_next(p); /* !> */
+    /* `return expr !>;` — errhandler */
+    if (p_accept(p, TK_PUNCT, ";")) {
+        snprintf(n->e, sizeof(n->e), "bang");
+        return n;
+    }
+    if (tok_eq(p_peek(p), TK_PUNCT, "(")) {
+        p_next(p);
+        Token bind = p_next(p);
+        if (bind.kind != TK_IDENT) {
+            parser_fail(p, bind, "expected bind name in return !>(...)");
+            return NULL;
+        }
+        if (!p_accept(p, TK_PUNCT, ")")) {
+            parser_fail(p, p_peek(p), "expected ')' after return !>(bind");
+            return NULL;
+        }
+        slice_to(n->d, sizeof(n->d), bind.spell);
+    }
+    if (tok_eq(p_peek(p), TK_PUNCT, "{")) {
+        p_next(p);
+        snprintf(n->e, sizeof(n->e), "bang_block");
+        while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF &&
+               !p->err) {
+            AstNode* st = parse_stmt(p);
+            if (!st) return NULL;
+            if (n->nbody >= 32) {
+                parser_fail_body_cap(p, p_peek(p), "return !> { ... } body");
+                return NULL;
+            }
+            n->body[n->nbody++] = st;
+        }
+        if (!p_accept(p, TK_PUNCT, "}")) {
+            parser_fail(p, p_peek(p), "expected '}' after return !> { ... }");
+            return NULL;
+        }
+        (void)p_accept(p, TK_PUNCT, ";");
+        return n;
+    }
+    /* `return expr !>(e) stmt;` or `return expr !> stmt;` */
+    snprintf(n->e, sizeof(n->e), "bang_stmt");
+    {
+        AstNode* st = parse_stmt(p);
+        if (!st) return NULL;
+        n->body[0] = st;
+        n->nbody = 1;
+    }
     return n;
 }
 
@@ -883,10 +987,12 @@ static AstNode* parse_for(Parser* p) {
     return n;
 }
 
-/* [const] Type[*] name [dims] = expr|{init} ;  (no unwrap / @destroy) */
+/* [const] Type[*] name [dims] = expr|{init} ;  (no unwrap / @destroy)
+ * Beachhead also accepts anonymous `struct { … }` types (reflect smokes). */
 static AstNode* parse_typed_init(Parser* p) {
     int has_const = 0;
     int has_struct = 0;
+    int is_anon_struct = 0;
     int start_i = p->i;
     if (shadow_kw(p_peek(p)) == SHADOW_KW_CONST) {
         has_const = 1;
@@ -899,19 +1005,61 @@ static AstNode* parse_typed_init(Parser* p) {
         if (ti >= p->n) return NULL;
     }
     Token ty = p->toks[ti];
-    if (ty.kind != TK_IDENT && shadow_kw(ty) != SHADOW_KW_BOOL &&
-        shadow_kw(ty) != SHADOW_KW_SIZE_T && shadow_kw(ty) != SHADOW_KW_INT &&
-        shadow_kw(ty) != SHADOW_KW_CHAR)
+    if (has_struct && tok_eq(ty, TK_PUNCT, "{")) {
+        is_anon_struct = 1;
+    } else if (ty.kind != TK_IDENT && shadow_kw(ty) != SHADOW_KW_BOOL &&
+               shadow_kw(ty) != SHADOW_KW_SIZE_T &&
+               shadow_kw(ty) != SHADOW_KW_INT &&
+               shadow_kw(ty) != SHADOW_KW_CHAR)
         return NULL;
     if (ti + 3 >= p->n) return NULL;
     int ty0 = has_struct ? (start_i + has_const) : ti;
     int ty_end = has_struct ? -1 : peek_generic_type_end(p, ti);
-    int is_char_slice =
-        (!has_struct && ty_end < 0 && shadow_kw(ty) == SHADOW_KW_CHAR &&
-         ti + 4 <= p->n && tok_eq(p->toks[ti + 1], TK_PUNCT, "[") &&
-         tok_eq(p->toks[ti + 2], TK_PUNCT, ":") &&
-         tok_eq(p->toks[ti + 3], TK_PUNCT, "]"));
-    int ni = (ty_end > 0) ? ty_end : (is_char_slice ? ti + 4 : ti + 1);
+    if (!has_struct && ty_end < 0) {
+        int iend = peek_c_int_type_end(p, ti);
+        if (iend > ti) ty_end = iend;
+    }
+    if (is_anon_struct) {
+        int depth = 0;
+        int j = ti;
+        for (; j < p->n; j++) {
+            if (tok_eq(p->toks[j], TK_PUNCT, "{")) depth++;
+            else if (tok_eq(p->toks[j], TK_PUNCT, "}")) {
+                depth--;
+                if (depth == 0) {
+                    j++;
+                    break;
+                }
+            }
+        }
+        if (depth != 0 || j >= p->n) return NULL;
+        ty_end = j;
+    }
+    /* `char[:]` / `char[:0]` / `char[:N]` / `char[0:]` / `char[:!]` / `char[:0!]`
+     * → CCSlice (unique forms record CCSlice! for safety). */
+    int char_slice_end = -1;
+    int char_slice_unique = 0;
+    if (!has_struct && ty_end < 0 && shadow_kw(ty) == SHADOW_KW_CHAR &&
+        ti + 3 < p->n && tok_eq(p->toks[ti + 1], TK_PUNCT, "[")) {
+        int k = ti + 2;
+        if (tok_eq(p->toks[k], TK_PUNCT, ":")) {
+            k++;
+            if (k < p->n && p->toks[k].kind == TK_NUM) k++;
+            if (k < p->n && tok_eq(p->toks[k], TK_PUNCT, "!")) {
+                char_slice_unique = 1;
+                k++;
+            }
+            if (k < p->n && tok_eq(p->toks[k], TK_PUNCT, "]"))
+                char_slice_end = k + 1;
+        } else if (p->toks[k].kind == TK_NUM && k + 1 < p->n &&
+                   tok_eq(p->toks[k + 1], TK_PUNCT, ":")) {
+            k += 2;
+            if (k < p->n && tok_eq(p->toks[k], TK_PUNCT, "]"))
+                char_slice_end = k + 1;
+        }
+    }
+    int is_char_slice = (char_slice_end > 0);
+    int ni = (ty_end > 0) ? ty_end : (is_char_slice ? char_slice_end : ti + 1);
     int nstars = 0;
     while (ni < p->n && tok_eq(p->toks[ni], TK_PUNCT, "*")) {
         nstars++;
@@ -957,8 +1105,15 @@ static AstNode* parse_typed_init(Parser* p) {
     if (j >= p->n || !tok_eq(p->toks[j], TK_PUNCT, ";")) return NULL;
 
     if (has_const) p_next(p);
-    char tytxt[128];
-    if (has_struct) {
+    char tytxt[256];
+    if (is_anon_struct) {
+        if (!ast_spell_token_range(p, ty0, ty_end, tytxt, sizeof(tytxt)) &&
+            !span_text(p, ty0, ty_end, tytxt, sizeof(tytxt))) {
+            parser_fail(p, ty, "anonymous struct type too long");
+            return NULL;
+        }
+        while (p->i < ty_end) p_next(p);
+    } else if (has_struct) {
         p_next(p); /* struct */
         p_next(p); /* Tag */
         snprintf(tytxt, sizeof(tytxt), "struct %.*s", (int)ty.spell.len,
@@ -970,7 +1125,7 @@ static AstNode* parse_typed_init(Parser* p) {
         while (p->i < ty_end) p_next(p);
     } else if (is_char_slice) {
         snprintf(tytxt, sizeof(tytxt), "CCSlice");
-        while (p->i < ty0 + 4) p_next(p);
+        while (p->i < char_slice_end) p_next(p);
     } else {
         p_next(p);
         slice_to(tytxt, sizeof(tytxt), ty.spell);
@@ -987,7 +1142,8 @@ static AstNode* parse_typed_init(Parser* p) {
     }
     p_next(p); /* = */
     int c0 = p->i;
-    char expr[256];
+    /* Match AstNode.c — compound inits (reflect field tables) need headroom. */
+    char expr[512];
     AstNode* call_cl = NULL;
     int had_cl = parse_call_arg_closure(p, c0, j, expr, sizeof(expr), "callarg",
                                         &call_cl);
@@ -996,7 +1152,10 @@ static AstNode* parse_typed_init(Parser* p) {
     if (!had_cl) {
         while (p->i < j) p_next(p);
         ue = parse_ufcs_expr_range(p, c0, j);
-        if (!ast_spell_token_range(p, c0, j, expr, sizeof(expr))) {
+        /* Empty RHS (`int x = ;`) kept so host/#line report the syntax error. */
+        if (c0 >= j)
+            expr[0] = 0;
+        else if (!ast_spell_token_range(p, c0, j, expr, sizeof(expr))) {
             parser_fail(p, name, "typed init expr too long");
             return NULL;
         }
@@ -1017,6 +1176,8 @@ static AstNode* parse_typed_init(Parser* p) {
         n->d[di] = 0;
     }
     if (dims_txt[0]) snprintf(n->e, sizeof(n->e), "%s", dims_txt);
+    else if (char_slice_unique)
+        snprintf(n->e, sizeof(n->e), "!"); /* safety: T[:!] unique fact */
     if (ue) (void)ast_attach_ufcs_kid(p, n, ue);
     if (call_cl) {
         if (n->ndbody >= 32) {
@@ -1177,6 +1338,29 @@ static AstNode* parse_ufcs_expr_range(Parser* p, int i0, int i1) {
         }
     }
     if (call_op < 0 || call_op <= i0) return NULL;
+    /* `a.foo() && b.bar()` is two calls, not recv=`a.foo() && b`. */
+    {
+        int d2 = 0, k;
+        for (k = i0; k < call_op; k++) {
+            Token t = p->toks[k];
+            if (tok_eq(t, TK_PUNCT, "(") || tok_eq(t, TK_PUNCT, "[") ||
+                tok_eq(t, TK_PUNCT, "{"))
+                d2++;
+            else if (tok_eq(t, TK_PUNCT, ")") || tok_eq(t, TK_PUNCT, "]") ||
+                     tok_eq(t, TK_PUNCT, "}"))
+                d2--;
+            else if (d2 == 0 &&
+                     (tok_eq(t, TK_PUNCT, "&&") || tok_eq(t, TK_PUNCT, "||") ||
+                      tok_eq(t, TK_PUNCT, "?") || tok_eq(t, TK_PUNCT, ",")))
+                return NULL;
+            else if (d2 == 0 && tok_eq(t, TK_PUNCT, "&") && k + 1 < call_op &&
+                     tok_eq(p->toks[k + 1], TK_PUNCT, "&"))
+                return NULL;
+            else if (d2 == 0 && tok_eq(t, TK_PUNCT, "|") && k + 1 < call_op &&
+                     tok_eq(p->toks[k + 1], TK_PUNCT, "|"))
+                return NULL;
+        }
+    }
     par = ufcs_paren_after_meth(p, call_op + 1, i1, &targ0, &targ1);
     if (par < 0 || !tok_eq(p->toks[par], TK_PUNCT, "(")) return NULL;
     a0 = par + 1;
@@ -1349,7 +1533,11 @@ static AstNode* parse_assign_stmt(Parser* p) {
             return NULL; /* stmt/var unwrap owns this form */
         } else if (depth == 0 && eq < 0 &&
                  (tok_eq(t, TK_PUNCT, "=") || tok_eq(t, TK_PUNCT, "+=") ||
-                  tok_eq(t, TK_PUNCT, "-=") || tok_eq(t, TK_PUNCT, "*="))) {
+                  tok_eq(t, TK_PUNCT, "-=") || tok_eq(t, TK_PUNCT, "*=") ||
+                  tok_eq(t, TK_PUNCT, "/=") || tok_eq(t, TK_PUNCT, "%=") ||
+                  tok_eq(t, TK_PUNCT, "&=") || tok_eq(t, TK_PUNCT, "|=") ||
+                  tok_eq(t, TK_PUNCT, "^=") || tok_eq(t, TK_PUNCT, "<<=") ||
+                  tok_eq(t, TK_PUNCT, ">>="))) {
             eq = j;
         } else if (depth == 0 && tok_eq(t, TK_PUNCT, ";")) {
             break;
@@ -1385,13 +1573,20 @@ static AstNode* parse_assign_stmt(Parser* p) {
 
 /* (void) expr ; */
 static AstNode* parse_void_cast(Parser* p) {
+    int e0;
+    int e1;
+    int depth = 0;
+    AstNode* n;
+    AstNode* cl = NULL;
+    AstNode* ue;
+    char expr[256];
+    int had_cl;
     if (!tok_eq(p_peek(p), TK_PUNCT, "(")) return NULL;
     if (p->i + 3 >= p->n) return NULL;
     if (shadow_kw(p->toks[p->i + 1]) != SHADOW_KW_VOID) return NULL;
     if (!tok_eq(p->toks[p->i + 2], TK_PUNCT, ")")) return NULL;
     p_next(p); p_next(p); p_next(p); /* ( void ) */
-    int e0 = p->i;
-    int depth = 0;
+    e0 = p->i;
     while (p->i < p->n) {
         Token t = p_peek(p);
         if (tok_eq(t, TK_PUNCT, "(") || tok_eq(t, TK_PUNCT, "[") || tok_eq(t, TK_PUNCT, "{"))
@@ -1403,12 +1598,28 @@ static AstNode* parse_void_cast(Parser* p) {
         p_next(p);
     }
     if (e0 >= p->i) return NULL;
-    AstNode* n = ast_new(p, AST_VOID_CAST);
+    e1 = p->i;
+    n = ast_new(p, AST_VOID_CAST);
     if (!n) return NULL;
-    {
-        AstNode* ue = parse_ufcs_expr_range(p, e0, p->i);
-        if (!ast_spell_token_range(p, e0, p->i, n->a, sizeof(n->a)) &&
-            !span_text(p, e0, p->i, n->a, sizeof(n->a))) {
+    /* Prefer structured call-arg closure so bodies are not spelled into a[256]. */
+    had_cl = parse_call_arg_closure(p, e0, e1, expr, sizeof(expr), "callarg",
+                                    &cl);
+    if (p->err) return NULL;
+    if (had_cl) {
+        snprintf(n->a, sizeof(n->a), "%s", expr);
+        if (cl) {
+            if (n->ndbody >= 32) {
+                parser_fail(p, p_peek(p), "too many (void) closure attachments");
+                return NULL;
+            }
+            if (!cl->e[0]) spawn_infer_value_caps(cl);
+            n->dbody[n->ndbody++] = cl;
+        }
+    } else {
+        p->i = e1;
+        ue = parse_ufcs_expr_range(p, e0, e1);
+        if (!ast_spell_token_range(p, e0, e1, n->a, sizeof(n->a)) &&
+            !span_text(p, e0, e1, n->a, sizeof(n->a))) {
             parser_fail(p, p_peek(p), "(void) expr too long");
             return NULL;
         }
@@ -1425,6 +1636,7 @@ static AstNode* parse_void_cast(Parser* p) {
 static AstNode* parse_var_decl(Parser* p) {
     int has_struct = 0;
     int ti = p->i;
+    int ty0 = p->i;
     Token ty;
     if (shadow_kw(p_peek(p)) == SHADOW_KW_STRUCT) {
         has_struct = 1;
@@ -1432,6 +1644,7 @@ static AstNode* parse_var_decl(Parser* p) {
         ti = p->i + 1;
         ty = p->toks[ti];
         if (ty.kind != TK_IDENT) return NULL;
+        ty0 = p->i;
     } else {
         ty = p_peek(p);
         if (ty.kind != TK_IDENT && shadow_kw(ty) != SHADOW_KW_INT &&
@@ -1439,27 +1652,56 @@ static AstNode* parse_var_decl(Parser* p) {
             shadow_kw(ty) != SHADOW_KW_SIZE_T)
             return NULL;
         if (p->i + 2 >= p->n) return NULL;
+        ty0 = ti;
     }
-    int name_i = ti + 1;
+    int ty_end = has_struct ? -1 : peek_generic_type_end(p, ti);
+    if (!has_struct && ty_end < 0) {
+        int iend = peek_c_int_type_end(p, ti);
+        if (iend > ti) ty_end = iend;
+    }
+    int name_i = (ty_end > 0) ? ty_end : (has_struct ? ti + 1 : ti + 1);
+    int nstars = 0;
+    while (name_i < p->n && tok_eq(p->toks[name_i], TK_PUNCT, "*")) {
+        nstars++;
+        name_i++;
+    }
     if (name_i >= p->n || p->toks[name_i].kind != TK_IDENT) return NULL;
     int si = name_i + 1;
-    if (tok_eq(p->toks[si], TK_PUNCT, ";")) {
-        if (has_struct) p_next(p); /* struct */
-        p_next(p); /* type / Tag */
-        Token name = p_next(p);
+    if (si < p->n && tok_eq(p->toks[si], TK_PUNCT, ";")) {
+        char tytxt[160];
+        Token name;
+        if (has_struct) {
+            p_next(p); /* struct */
+            p_next(p); /* Tag */
+            snprintf(tytxt, sizeof(tytxt), "struct %.*s", (int)ty.spell.len,
+                     ty.spell.ptr);
+        } else if (ty_end > 0) {
+            if (!ast_spell_type_tokens(p, ty0, ty_end, tytxt, sizeof(tytxt)) &&
+                !ast_spell_token_range(p, ty0, ty_end, tytxt, sizeof(tytxt)))
+                return NULL;
+            while (p->i < ty_end) p_next(p);
+        } else {
+            p_next(p); /* type */
+            slice_to(tytxt, sizeof(tytxt), ty.spell);
+        }
+        while (nstars-- > 0) {
+            size_t L = strlen(tytxt);
+            if (L + 1 < sizeof(tytxt)) {
+                tytxt[L] = '*';
+                tytxt[L + 1] = 0;
+            }
+            p_next(p); /* * */
+        }
+        name = p_next(p);
         p_next(p); /* ; */
         AstNode* n = ast_new(p, AST_VAR_DECL);
         if (!n) return NULL;
-        if (has_struct)
-            snprintf(n->a, sizeof(n->a), "struct %.*s", (int)ty.spell.len,
-                     ty.spell.ptr);
-        else
-            slice_to(n->a, sizeof(n->a), ty.spell);
+        snprintf(n->a, sizeof(n->a), "%s", tytxt);
         slice_to(n->b, sizeof(n->b), name.spell);
         return n;
     }
-    /* Type name [ expr ] ; */
-    if (!has_struct && tok_eq(p->toks[si], TK_PUNCT, "[")) {
+    /* Type name [ expr ] ;  (non-generic only) */
+    if (!has_struct && ty_end < 0 && tok_eq(p->toks[si], TK_PUNCT, "[")) {
         int j = si + 1;
         int depth = 1;
         while (j < p->n && depth > 0) {
@@ -1625,7 +1867,36 @@ static AstNode* parse_static_fn(Parser* p) {
         parser_fail(p, name, "static fn params too long");
         return NULL;
     }
-    if (!p_accept(p, TK_PUNCT, ")") || !p_accept(p, TK_PUNCT, "{")) {
+    if (!p_accept(p, TK_PUNCT, ")")) {
+        parser_fail(p, p_peek(p), "expected ')' after static fn params");
+        return NULL;
+    }
+    /* Forward decl: `static T name(params);` — no body. */
+    if (tok_eq(p_peek(p), TK_PUNCT, ";")) {
+        AstNode* n = ast_new(p, AST_RAW_LINE);
+        char line[640];
+        size_t o = 0;
+        p_next(p); /* ; */
+        if (!n) return NULL;
+        o += (size_t)snprintf(line + o, sizeof(line) - o, "static ");
+        if (has_inline)
+            o += (size_t)snprintf(line + o, sizeof(line) - o, "inline ");
+        if (has_const)
+            o += (size_t)snprintf(line + o, sizeof(line) - o, "const ");
+        if (is_long_long)
+            o += (size_t)snprintf(line + o, sizeof(line) - o, "long long");
+        else
+            o += (size_t)snprintf(line + o, sizeof(line) - o, "%.*s",
+                                  (int)rty.spell.len, rty.spell.ptr);
+        if (is_ptr)
+            o += (size_t)snprintf(line + o, sizeof(line) - o, "*");
+        o += (size_t)snprintf(line + o, sizeof(line) - o, " %.*s(%s);",
+                              (int)name.spell.len, name.spell.ptr, params);
+        (void)o;
+        snprintf(n->a, sizeof(n->a), "%s", line);
+        return n;
+    }
+    if (!p_accept(p, TK_PUNCT, "{")) {
         parser_fail(p, p_peek(p), "expected ') {' after static fn params");
         return NULL;
     }
@@ -1659,8 +1930,7 @@ static AstNode* parse_static_fn(Parser* p) {
         AstNode* s = parse_static_arr(p);
         if (!s && !p->err) s = parse_stmt(p);
         if (!s) { ok_stmts = 0; break; }
-        if (p->nkstore >= AST_CAP * 4) { p->err = 1; ok_stmts = 0; break; }
-        p->kids_storage[p->nkstore++] = s;
+        if (!ast_kids_push(p, s)) { ok_stmts = 0; break; }
         n->nkids++;
     }
     if (ok_stmts && p_accept(p, TK_PUNCT, "}")) return n;
@@ -1754,14 +2024,38 @@ static AstNode* parse_call_args(Parser* p) {
     AstNode* n = ast_new(p, AST_CALL_ARGS);
     if (!n) return NULL;
     slice_to(n->a, sizeof(n->a), callee.spell);
-    if (a0 >= a1) n->b[0] = 0;
-    else if (!ast_spell_token_range(p, a0, a1, n->b, sizeof(n->b)) &&
-             !span_text(p, a0, a1, n->b, sizeof(n->b))) {
-        parser_fail(p, callee, "call args too long");
-        return NULL;
-    } else if (a0 < a1) {
-        AstNode* ue = parse_ufcs_expr_range(p, a0, a1);
-        if (ue) (void)ast_attach_ufcs_kid(p, n, ue);
+    if (a0 >= a1) {
+        n->b[0] = 0;
+    } else {
+        AstNode* cl = NULL;
+        char args[256];
+        int had_cl = parse_call_arg_closure(p, a0, a1, args, sizeof(args),
+                                            "callarg", &cl);
+        if (p->err) return NULL;
+        if (had_cl) {
+            size_t L = strlen(args);
+            /* Helper closes a call expr with ')'; CALL_ARGS stores inner args. */
+            if (L && args[L - 1] == ')') args[--L] = 0;
+            while (L && (args[L - 1] == ' ' || args[L - 1] == '\t' ||
+                         args[L - 1] == ','))
+                args[--L] = 0;
+            snprintf(n->b, sizeof(n->b), "%s", args);
+            if (cl) {
+                if (n->ndbody >= 32) {
+                    parser_fail(p, callee, "too many call-arg closure attachments");
+                    return NULL;
+                }
+                if (!cl->e[0]) spawn_infer_value_caps(cl);
+                n->dbody[n->ndbody++] = cl;
+            }
+        } else if (!ast_spell_token_range(p, a0, a1, n->b, sizeof(n->b)) &&
+                   !span_text(p, a0, a1, n->b, sizeof(n->b))) {
+            parser_fail(p, callee, "call args too long");
+            return NULL;
+        } else {
+            AstNode* ue = parse_ufcs_expr_range(p, a0, a1);
+            if (ue) (void)ast_attach_ufcs_kid(p, n, ue);
+        }
     }
     if (is_bang) snprintf(n->d, sizeof(n->d), "bang");
     return n;
@@ -1770,10 +2064,17 @@ static AstNode* parse_call_args(Parser* p) {
 #include "pp_ast_parse_unwrap.cch"
 #include "pp_ast_parse_spawn.cch"
 
+/* Defined in pp_ast_parse_ext.cch (included after this file). */
+static AstNode* parse_typedef_int(Parser* p);
+
 static AstNode* parse_stmt_inner(Parser* p) {
     Token t = p_peek(p);
     if (t.kind == TK_EOF) return NULL;
     AstNode* n;
+    if (shadow_kw(t) == SHADOW_KW_TYPEDEF) {
+        n = parse_typedef_int(p);
+        if (n || p->err) return n;
+    }
     if (tok_eq(t, TK_PUNCT, "@")) {
         n = parse_errhandler(p);
         if (n || p->err) return n;

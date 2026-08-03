@@ -97,6 +97,7 @@ case EACCES: kind = CC_ERR_PERMISSION; break;
 #endif
         case 0:      kind = CC_ERR_IO; break;
         default:     kind = CC_ERR_IO; break;
+    
     }
     #line 77 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_io_error.cch"
     return cc_io_error_os(kind, err);

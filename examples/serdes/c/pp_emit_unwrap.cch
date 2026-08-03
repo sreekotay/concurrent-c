@@ -9,7 +9,8 @@ static int shadow_emit_try_call(CEmit* out, ShadowCtx* ctx, const char* indent,
     shadow_indent_nest(i1, sizeof(i1), indent, 1);
     shadow_indent_nest(i2, sizeof(i2), indent, 2);
     (void)discard_ok;
-    /* Polymorphic Result|pointer — host `_Generic` `__cc_uw_*`. */
+    /* Polymorphic Result|pointer — host `_Generic` `__cc_uw_*` (TU-seen
+     * Result arms + prelude CCError seeds; @as faces via err_at_bind). */
     if (!cemit_fmt(out,
             "%s{\n"
             "%s__typeof__(%s) __r = %s;\n"

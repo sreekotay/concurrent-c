@@ -35,9 +35,9 @@
 #undef __cc_uw_is_err
 #undef __cc_uw_value
 #undef __cc_uw_err_at
-#define __cc_uw_is_err(__x__) _Generic((__x__), CCResult_int_CCError: (!((CCResult_int_CCError*)(void*)&(__x__))->ok), CCResult_bool_CCError: (!((CCResult_bool_CCError*)(void*)&(__x__))->ok), CCResult_char_CCError: (!((CCResult_char_CCError*)(void*)&(__x__))->ok), CCResult_size_t_CCError: (!((CCResult_size_t_CCError*)(void*)&(__x__))->ok), CCResult_voidptr_CCError: (!((CCResult_voidptr_CCError*)(void*)&(__x__))->ok), CCResult_charptr_CCError: (!((CCResult_charptr_CCError*)(void*)&(__x__))->ok), CCResult_void_CCError: (!((CCResult_void_CCError*)(void*)&(__x__))->ok), default: (*(void* const*)(void*)&(__x__) == (void*)0))
-#define __cc_uw_value(__x__) _Generic((__x__), CCResult_int_CCError: ((CCResult_int_CCError*)(void*)&(__x__))->u.value, CCResult_bool_CCError: ((CCResult_bool_CCError*)(void*)&(__x__))->u.value, CCResult_char_CCError: ((CCResult_char_CCError*)(void*)&(__x__))->u.value, CCResult_size_t_CCError: ((CCResult_size_t_CCError*)(void*)&(__x__))->u.value, CCResult_voidptr_CCError: ((CCResult_voidptr_CCError*)(void*)&(__x__))->u.value, CCResult_charptr_CCError: ((CCResult_charptr_CCError*)(void*)&(__x__))->u.value, default: (__x__))
-#define __cc_uw_err_at(__x__, __e__, __f__, __l__) _Generic((__x__), CCResult_int_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_int_CCError*)(void*)&(__x__))->u.error), CCResult_bool_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_bool_CCError*)(void*)&(__x__))->u.error), CCResult_char_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_char_CCError*)(void*)&(__x__))->u.error), CCResult_size_t_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_size_t_CCError*)(void*)&(__x__))->u.error), CCResult_voidptr_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_voidptr_CCError*)(void*)&(__x__))->u.error), CCResult_charptr_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_charptr_CCError*)(void*)&(__x__))->u.error), CCResult_void_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_void_CCError*)(void*)&(__x__))->u.error), default: (cc_rt_diag_record_unwrap_site(__f__, __l__), __cc_err_null_at(__e__, __f__, __l__)))
+#define __cc_uw_is_err(__x__) _Generic((__x__), CCResult_int_CCError: (!((CCResult_int_CCError*)(void*)&(__x__))->ok), CCResult_bool_CCError: (!((CCResult_bool_CCError*)(void*)&(__x__))->ok), CCResult_bool_CCIoError: (!((CCResult_bool_CCIoError*)(void*)&(__x__))->ok), CCResult_char_CCError: (!((CCResult_char_CCError*)(void*)&(__x__))->ok), CCResult_size_t_CCError: (!((CCResult_size_t_CCError*)(void*)&(__x__))->ok), CCResult_voidptr_CCError: (!((CCResult_voidptr_CCError*)(void*)&(__x__))->ok), CCResult_charptr_CCError: (!((CCResult_charptr_CCError*)(void*)&(__x__))->ok), CCResult_void_CCError: (!((CCResult_void_CCError*)(void*)&(__x__))->ok), default: (*(void* const*)(void*)&(__x__) == (void*)0))
+#define __cc_uw_value(__x__) _Generic((__x__), CCResult_int_CCError: ((CCResult_int_CCError*)(void*)&(__x__))->u.value, CCResult_bool_CCError: ((CCResult_bool_CCError*)(void*)&(__x__))->u.value, CCResult_bool_CCIoError: ((CCResult_bool_CCIoError*)(void*)&(__x__))->u.value, CCResult_char_CCError: ((CCResult_char_CCError*)(void*)&(__x__))->u.value, CCResult_size_t_CCError: ((CCResult_size_t_CCError*)(void*)&(__x__))->u.value, CCResult_voidptr_CCError: ((CCResult_voidptr_CCError*)(void*)&(__x__))->u.value, CCResult_charptr_CCError: ((CCResult_charptr_CCError*)(void*)&(__x__))->u.value, default: (__x__))
+#define __cc_uw_err_at(__x__, __e__, __f__, __l__) _Generic((__x__), CCResult_int_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_int_CCError*)(void*)&(__x__))->u.error), CCResult_bool_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_bool_CCError*)(void*)&(__x__))->u.error), CCResult_bool_CCIoError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_bool_CCIoError*)(void*)&(__x__))->u.error), CCResult_char_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_char_CCError*)(void*)&(__x__))->u.error), CCResult_size_t_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_size_t_CCError*)(void*)&(__x__))->u.error), CCResult_voidptr_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_voidptr_CCError*)(void*)&(__x__))->u.error), CCResult_charptr_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_charptr_CCError*)(void*)&(__x__))->u.error), CCResult_void_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_void_CCError*)(void*)&(__x__))->u.error), default: (cc_rt_diag_record_unwrap_site(__f__, __l__), __cc_err_null_at(__e__, __f__, __l__)))
 
 
 #ifndef CCResult_int_CCError_DEFINED
@@ -111,7 +111,7 @@ int main(void) {
         if (!__r.ok) {
             #line 51 "examples/serdes/c/shadow/recipe_result.ccs"
             cc_rt_diag_record_unwrap_site("examples/serdes/c/shadow/recipe_result.ccs", "51");
-            CCError e = (__r).u.error;
+            CCError e = _Generic((__r).u.error, CCError: (__r).u.error, CCIoError: (*(CCError*)(void*)&(__r).u.error), default: (__r).u.error);
             #line 48 "examples/serdes/c/shadow/recipe_result.ccs"
             cc_error_log(e);
             return 1;
@@ -128,7 +128,7 @@ int main(void) {
             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
             if (__cc_uw_is_err(__r)) {
                 #line 52 "examples/serdes/c/shadow/recipe_result.ccs"
-                CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_result.ccs", "52");
+                __typeof__(__cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_result.ccs", "52")) e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_result.ccs", "52");
                 #line 48 "examples/serdes/c/shadow/recipe_result.ccs"
                 cc_error_log(e);
                 return 1;
@@ -152,7 +152,7 @@ int main(void) {
             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
             if (__cc_uw_is_err(__r)) {
                 #line 56 "examples/serdes/c/shadow/recipe_result.ccs"
-                CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_result.ccs", "56");
+                __typeof__(__cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_result.ccs", "56")) e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_result.ccs", "56");
                 #line 48 "examples/serdes/c/shadow/recipe_result.ccs"
                 cc_error_log(e);
                 return 1;
@@ -169,7 +169,7 @@ int main(void) {
             bad = __cc_uw_value(__r);
         } else {
             #line 59 "examples/serdes/c/shadow/recipe_result.ccs"
-            CCError e = __cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_result.ccs", "59");
+            __typeof__(__cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_result.ccs", "59")) e = __cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_result.ccs", "59");
             bad = ((e.kind == CC_ERR_INVALID_ARG ? 0 : -1));
         }
     }
@@ -182,7 +182,7 @@ int main(void) {
             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
             if (__cc_uw_is_err(__r)) {
                 #line 60 "examples/serdes/c/shadow/recipe_result.ccs"
-                CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_result.ccs", "60");
+                __typeof__(__cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_result.ccs", "60")) e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_result.ccs", "60");
                 #line 48 "examples/serdes/c/shadow/recipe_result.ccs"
                 cc_error_log(e);
                 return 1;
@@ -208,7 +208,7 @@ int main(void) {
                 __typeof__(cc_println(__msg)) __r = cc_println(__msg);
                 if (__cc_uw_is_err(__r)) {
                     #line 65 "examples/serdes/c/shadow/recipe_result.ccs"
-                    CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_result.ccs", "65");
+                    __typeof__(__cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_result.ccs", "65")) e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_result.ccs", "65");
                     #line 48 "examples/serdes/c/shadow/recipe_result.ccs"
                     cc_error_log(e);
                     return 1;
@@ -231,7 +231,7 @@ int main(void) {
             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
             if (__cc_uw_is_err(__r)) {
                 #line 68 "examples/serdes/c/shadow/recipe_result.ccs"
-                CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_result.ccs", "68");
+                __typeof__(__cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_result.ccs", "68")) e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_result.ccs", "68");
                 #line 48 "examples/serdes/c/shadow/recipe_result.ccs"
                 cc_error_log(e);
                 return 1;

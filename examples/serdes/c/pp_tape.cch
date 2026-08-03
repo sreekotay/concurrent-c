@@ -121,18 +121,27 @@ static size_t line_splice_copy(const char* in, size_t n, char* out) {
 static int tok_build_push(void* env, int id, CCSlice v) {
     TokBuild* b = (TokBuild*)env;
     TokKind k = pptok_keep_kind(id);
+    size_t off = 0;
     if (!k) return 0;
-    if (b->n >= b->cap) return -1;
+    if (v.ptr >= b->building->bytes &&
+        v.ptr < b->building->bytes + b->building->len) {
+        off = (size_t)(v.ptr - b->building->bytes);
+    }
+    if (b->n >= b->cap) {
+        int line = 1, col = 1;
+        offset_to_linecol(b->building->bytes, b->building->len, off, &line,
+                          &col);
+        fprintf(stderr,
+                "%s:%d:%d: error: stage1 token buffer full (%d tokens)\n",
+                b->building->path ? b->building->path : "<input>", line, col,
+                b->cap);
+        return -1;
+    }
     Token* t = &b->toks[b->n++];
     t->kind = k;
     t->spell = v;
     t->file_id = b->building->file_id;
-    if (v.ptr >= b->building->bytes &&
-        v.ptr < b->building->bytes + b->building->len) {
-        t->offset = (size_t)(v.ptr - b->building->bytes);
-    } else {
-        t->offset = 0;
-    }
+    t->offset = off;
     return 0;
 }
 
@@ -172,37 +181,73 @@ static FileTape* tape_cache_find(TapeCache* c, const char* path) {
     return NULL;
 }
 
-static FileTape* tape_cache_load(TapeCache* c, const char* path, CCArena* arena) {
+/* Load stage1 from owned `bytes` (takes ownership). `path` is the diagnostic
+ * identity (usually the original input); may differ from the byte source when
+ * comptime prepare+blank rewrites the buffer before whitelist parse.
+ * Line-splices like `read_file` — PpTok expects spliced bytes. */
+static FileTape* tape_cache_load_bytes(TapeCache* c, const char* path,
+                                       char* bytes, size_t len, CCArena* arena) {
     FileTape* hit = tape_cache_find(c, path);
-    if (hit) return hit;
-    if (c->n >= TAPE_CACHE_CAP) return NULL;
+    if (hit) {
+        free(bytes);
+        return hit;
+    }
+    if (c->n >= TAPE_CACHE_CAP) {
+        free(bytes);
+        return NULL;
+    }
+    if (!bytes) return NULL;
 
-    char* bytes = NULL;
-    size_t len = 0;
-    if (!read_file(path, &bytes, &len)) return NULL;
+    {
+        char* spliced = (char*)malloc(len + 1);
+        if (!spliced) {
+            free(bytes);
+            return NULL;
+        }
+        size_t m = line_splice_copy(bytes, len, spliced);
+        free(bytes);
+        spliced[m] = 0;
+        bytes = spliced;
+        len = m;
+    }
 
     FileTape* ft = (FileTape*)calloc(1, sizeof(FileTape));
-    if (!ft) { free(bytes); return NULL; }
+    if (!ft) {
+        free(bytes);
+        return NULL;
+    }
     ft->path = xstrdup(path);
     ft->bytes = bytes;
     ft->len = len;
     ft->file_id = ++c->next_file_id;
     ft->toks = (Token*)malloc(sizeof(Token) * TOK_BUILD_CAP);
     if (!ft->path || !ft->toks) {
-        free(ft->path); free(ft->bytes); free(ft->toks); free(ft);
+        free(ft->path);
+        free(ft->bytes);
+        free(ft->toks);
+        free(ft);
         return NULL;
     }
 
-    TokBuild b = { .toks = ft->toks, .n = 0, .cap = TOK_BUILD_CAP, .building = ft };
+    TokBuild b = {.toks = ft->toks, .n = 0, .cap = TOK_BUILD_CAP, .building = ft};
     if (!PpTok_collect(ft->bytes, ft->len, arena, tok_build_push, &b)) {
-        free(ft->path); free(ft->bytes); free(ft->toks); free(ft);
+        free(ft->path);
+        free(ft->bytes);
+        free(ft->toks);
+        free(ft);
         return NULL;
     }
     ft->ntoks = b.n;
-    /* shrink optional — keep as-is for spike */
     c->items[c->n++] = ft;
     (void)arena;
     return ft;
+}
+
+static FileTape* tape_cache_load(TapeCache* c, const char* path, CCArena* arena) {
+    char* bytes = NULL;
+    size_t len = 0;
+    if (!read_file(path, &bytes, &len)) return NULL;
+    return tape_cache_load_bytes(c, path, bytes, len, arena);
 }
 
 static void tape_cache_free(TapeCache* c) {

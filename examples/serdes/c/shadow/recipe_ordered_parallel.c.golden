@@ -31,9 +31,9 @@
 #undef __cc_uw_is_err
 #undef __cc_uw_value
 #undef __cc_uw_err_at
-#define __cc_uw_is_err(__x__) _Generic((__x__), CCResult_int_CCError: (!((CCResult_int_CCError*)(void*)&(__x__))->ok), CCResult_bool_CCError: (!((CCResult_bool_CCError*)(void*)&(__x__))->ok), CCResult_char_CCError: (!((CCResult_char_CCError*)(void*)&(__x__))->ok), CCResult_size_t_CCError: (!((CCResult_size_t_CCError*)(void*)&(__x__))->ok), CCResult_voidptr_CCError: (!((CCResult_voidptr_CCError*)(void*)&(__x__))->ok), CCResult_charptr_CCError: (!((CCResult_charptr_CCError*)(void*)&(__x__))->ok), CCResult_void_CCError: (!((CCResult_void_CCError*)(void*)&(__x__))->ok), default: (*(void* const*)(void*)&(__x__) == (void*)0))
-#define __cc_uw_value(__x__) _Generic((__x__), CCResult_int_CCError: ((CCResult_int_CCError*)(void*)&(__x__))->u.value, CCResult_bool_CCError: ((CCResult_bool_CCError*)(void*)&(__x__))->u.value, CCResult_char_CCError: ((CCResult_char_CCError*)(void*)&(__x__))->u.value, CCResult_size_t_CCError: ((CCResult_size_t_CCError*)(void*)&(__x__))->u.value, CCResult_voidptr_CCError: ((CCResult_voidptr_CCError*)(void*)&(__x__))->u.value, CCResult_charptr_CCError: ((CCResult_charptr_CCError*)(void*)&(__x__))->u.value, default: (__x__))
-#define __cc_uw_err_at(__x__, __e__, __f__, __l__) _Generic((__x__), CCResult_int_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_int_CCError*)(void*)&(__x__))->u.error), CCResult_bool_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_bool_CCError*)(void*)&(__x__))->u.error), CCResult_char_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_char_CCError*)(void*)&(__x__))->u.error), CCResult_size_t_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_size_t_CCError*)(void*)&(__x__))->u.error), CCResult_voidptr_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_voidptr_CCError*)(void*)&(__x__))->u.error), CCResult_charptr_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_charptr_CCError*)(void*)&(__x__))->u.error), CCResult_void_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_void_CCError*)(void*)&(__x__))->u.error), default: (cc_rt_diag_record_unwrap_site(__f__, __l__), __cc_err_null_at(__e__, __f__, __l__)))
+#define __cc_uw_is_err(__x__) _Generic((__x__), CCResult_int_CCError: (!((CCResult_int_CCError*)(void*)&(__x__))->ok), CCResult_bool_CCError: (!((CCResult_bool_CCError*)(void*)&(__x__))->ok), CCResult_bool_CCIoError: (!((CCResult_bool_CCIoError*)(void*)&(__x__))->ok), CCResult_char_CCError: (!((CCResult_char_CCError*)(void*)&(__x__))->ok), CCResult_size_t_CCError: (!((CCResult_size_t_CCError*)(void*)&(__x__))->ok), CCResult_voidptr_CCError: (!((CCResult_voidptr_CCError*)(void*)&(__x__))->ok), CCResult_charptr_CCError: (!((CCResult_charptr_CCError*)(void*)&(__x__))->ok), CCResult_void_CCError: (!((CCResult_void_CCError*)(void*)&(__x__))->ok), default: (*(void* const*)(void*)&(__x__) == (void*)0))
+#define __cc_uw_value(__x__) _Generic((__x__), CCResult_int_CCError: ((CCResult_int_CCError*)(void*)&(__x__))->u.value, CCResult_bool_CCError: ((CCResult_bool_CCError*)(void*)&(__x__))->u.value, CCResult_bool_CCIoError: ((CCResult_bool_CCIoError*)(void*)&(__x__))->u.value, CCResult_char_CCError: ((CCResult_char_CCError*)(void*)&(__x__))->u.value, CCResult_size_t_CCError: ((CCResult_size_t_CCError*)(void*)&(__x__))->u.value, CCResult_voidptr_CCError: ((CCResult_voidptr_CCError*)(void*)&(__x__))->u.value, CCResult_charptr_CCError: ((CCResult_charptr_CCError*)(void*)&(__x__))->u.value, default: (__x__))
+#define __cc_uw_err_at(__x__, __e__, __f__, __l__) _Generic((__x__), CCResult_int_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_int_CCError*)(void*)&(__x__))->u.error), CCResult_bool_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_bool_CCError*)(void*)&(__x__))->u.error), CCResult_bool_CCIoError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_bool_CCIoError*)(void*)&(__x__))->u.error), CCResult_char_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_char_CCError*)(void*)&(__x__))->u.error), CCResult_size_t_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_size_t_CCError*)(void*)&(__x__))->u.error), CCResult_voidptr_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_voidptr_CCError*)(void*)&(__x__))->u.error), CCResult_charptr_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_charptr_CCError*)(void*)&(__x__))->u.error), CCResult_void_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_void_CCError*)(void*)&(__x__))->u.error), default: (cc_rt_diag_record_unwrap_site(__f__, __l__), __cc_err_null_at(__e__, __f__, __l__)))
 
 
 /* Simulate variable-time work: odd ids take longer.
@@ -61,7 +61,7 @@ static int process_item(int id) {
             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
             if (__cc_uw_is_err(__r)) {
                 #line 34 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
-                CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "34");
+                __typeof__(__cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "34")) e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "34");
                 cc_error_exit(e);
             }
         }
@@ -98,7 +98,7 @@ int main(void) {
         __typeof__(cc_channel_pair_create_named(4, CC_CHAN_MODE_BLOCK, 0, sizeof(CCTask), 0, CC_CHAN_TOPO_DEFAULT, 1, &results_tx, &results_rx, "results_tx,results_rx", __FILE__, __LINE__)) __r = cc_channel_pair_create_named(4, CC_CHAN_MODE_BLOCK, 0, sizeof(CCTask), 0, CC_CHAN_TOPO_DEFAULT, 1, &results_tx, &results_rx, "results_tx,results_rx", __FILE__, __LINE__);
         if (__cc_uw_is_err(__r)) {
             #line 43 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
-            CCError e = __cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "43");
+            __typeof__(__cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "43")) e = __cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "43");
             #line 39 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
             cc_error_log(e);
             { __cc_retval = 1; __cc_ret_set = 1; goto __cc_cleanup; }
@@ -112,7 +112,7 @@ int main(void) {
         __typeof__(cc_println("=== Ordered Parallel Processing ===")) __r = cc_println("=== Ordered Parallel Processing ===");
         if (__cc_uw_is_err(__r)) {
             #line 45 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
-            CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "45");
+            __typeof__(__cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "45")) e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "45");
             #line 39 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
             cc_error_log(e);
             { __cc_retval = 1; __cc_ret_set = 1; goto __cc_cleanup; }
@@ -128,7 +128,7 @@ int main(void) {
             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
             if (__cc_uw_is_err(__r)) {
                 #line 46 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
-                CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "46");
+                __typeof__(__cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "46")) e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "46");
                 #line 39 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
                 cc_error_log(e);
                 { __cc_retval = 1; __cc_ret_set = 1; goto __cc_cleanup; }
@@ -140,7 +140,7 @@ int main(void) {
         __typeof__(cc_println("")) __r = cc_println("");
         if (__cc_uw_is_err(__r)) {
             #line 47 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
-            CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "47");
+            __typeof__(__cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "47")) e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "47");
             #line 39 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
             cc_error_log(e);
             { __cc_retval = 1; __cc_ret_set = 1; goto __cc_cleanup; }
@@ -157,7 +157,7 @@ int main(void) {
             __typeof__(cc_nursery_create(NULL)) __r = cc_nursery_create(NULL);
             if (__cc_uw_is_err(__r)) {
                 #line 51 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
-                CCError e = __cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "51");
+                __typeof__(__cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "51")) e = __cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "51");
                 #line 39 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
                 cc_error_log(e);
                 { __cc_retval = 1; __cc_ret_set = 1; goto __cc_cleanup; }
@@ -178,7 +178,7 @@ int main(void) {
                 __typeof__(cc_nursery_create(consumer)) __r = cc_nursery_create(consumer);
                 if (__cc_uw_is_err(__r)) {
                     #line 79 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
-                    CCError e = __cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "79");
+                    __typeof__(__cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "79")) e = __cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "79");
                     #line 39 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
                     cc_error_log(e);
                     { __cc_retval = 1; __cc_ret_set = 1; goto __cc_cleanup; }
@@ -206,7 +206,7 @@ int main(void) {
         __typeof__(cc_println("\nDone! Results printed in order despite out-of-order completion.")) __r = cc_println("\nDone! Results printed in order despite out-of-order completion.");
         if (__cc_uw_is_err(__r)) {
             #line 95 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
-            CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "95");
+            __typeof__(__cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "95")) e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "95");
             #line 39 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
             cc_error_log(e);
             { __cc_retval = 1; __cc_ret_set = 1; goto __cc_cleanup; }
@@ -247,7 +247,7 @@ static void* cc_closure__N1_entry(void* __p) {
                 __typeof__(cc_println("\n[consumer] receiving results in order:")) __r = cc_println("\n[consumer] receiving results in order:");
                 if (__cc_uw_is_err(__r)) {
                     #line 55 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
-                    CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "55");
+                    __typeof__(__cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "55")) e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "55");
                     cc_error_exit(e);
                 }
             }
@@ -272,7 +272,7 @@ static void* cc_closure__N1_entry(void* __p) {
                         __typeof__(cc_println(__msg)) __r = cc_println(__msg);
                         if (__cc_uw_is_err(__r)) {
                             #line 60 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
-                            CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "60");
+                            __typeof__(__cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "60")) e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "60");
                             cc_error_exit(e);
                         }
                     }
@@ -291,7 +291,7 @@ static void* cc_closure__N1_entry(void* __p) {
                             __typeof__(cc_eprintln(__msg)) __r = cc_eprintln(__msg);
                             if (__cc_uw_is_err(__r)) {
                                 #line 62 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
-                                CCError e = __cc_uw_err_at(__r, "cc_eprintln", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "62");
+                                __typeof__(__cc_uw_err_at(__r, "cc_eprintln", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "62")) e = __cc_uw_err_at(__r, "cc_eprintln", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "62");
                                 cc_error_exit(e);
                             }
                         }
@@ -322,7 +322,7 @@ static void* cc_closure__N1_entry(void* __p) {
                         __typeof__(cc_eprintln(__msg)) __r = cc_eprintln(__msg);
                         if (__cc_uw_is_err(__r)) {
                             #line 71 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
-                            CCError e = __cc_uw_err_at(__r, "cc_eprintln", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "71");
+                            __typeof__(__cc_uw_err_at(__r, "cc_eprintln", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "71")) e = __cc_uw_err_at(__r, "cc_eprintln", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "71");
                             cc_error_exit(e);
                         }
                     }
@@ -368,7 +368,7 @@ static void* cc_closure__N2_entry(void* __p) {
                             __typeof__(cc_println(__msg)) __r = cc_println(__msg);
                             if (__cc_uw_is_err(__r)) {
                                 #line 89 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
-                                CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "89");
+                                __typeof__(__cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "89")) e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "89");
                                 cc_error_exit(e);
                             }
                         }

@@ -1,0 +1,25 @@
+/* Safety pass: if-guard dominates @variant arm projection. */
+#include <ccc/std/prelude.cch>
+#include <stdint.h>
+
+@variant RedisValue {
+    txt: const char*;
+    num: int64_t;
+};
+
+int main(void) {
+    RedisValue v = { .num = 41 };
+    if (v.kind == RedisValue_num) {
+        v.num += 1;
+    }
+    RedisValue* p = &v;
+    int64_t got = 0;
+    if (p->kind == RedisValue_num) {
+        got = p->num;
+    }
+    if (v.kind == .num) {
+        if (v.num != 42) return 1;
+    }
+    (void)got;
+    return 0;
+}

@@ -1,0 +1,14 @@
+/* Safety fail: anonymous @as is ill-formed. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct {
+    CCFile @as;
+    int x;
+} AnonOuter;
+
+int main(void) {
+    AnonOuter o = {0};
+    (void)o;
+    return 0;
+}

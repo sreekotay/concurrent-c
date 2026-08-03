@@ -132,6 +132,8 @@ SHADOW_LOWER_CCS := ../examples/serdes/c/shadow_lower.ccs
 SHADOW_BUILD_CCH := ../examples/serdes/c/shadow_build.cch
 SHADOW_TCC_C := ../examples/serdes/c/shadow_tcc_compile.c
 SHADOW_TCC_OBJ := $(OBJDIR)/shadow_tcc_compile.o
+SHADOW_COMPTIME_C := ../examples/serdes/c/shadow_comptime.c
+SHADOW_COMPTIME_OBJ := $(OBJDIR)/shadow_comptime.o
 OUT_LIBDIR := $(dir $(OUT_BINDIR))lib
 ifeq ($(shell uname -s),Darwin)
   RUNTIME_DYLIB := $(OUT_LIBDIR)/libcc_runtime.dylib
@@ -177,6 +179,9 @@ LOWER_HEADERS_SRCS := src/tools/lower_headers.c \
 	src/util/path.c \
 	src/util/result_fn_registry.c
 LOWER_HEADERS_OBJS := $(LOWER_HEADERS_SRCS:%.c=$(OBJDIR)/%.o)
+# Same engine surface as lower_headers (minus its main), for prepare/exec/splice.
+SHADOW_COMPTIME_ENGINE_OBJS := $(filter-out $(OBJDIR)/src/tools/lower_headers.o,$(LOWER_HEADERS_OBJS))
+SHADOW_COMPTIME_LIB := $(OBJDIR)/libshadow_comptime.a
 LOWER_HEADERS_BINARY := $(OUT_BINDIR)/lower_headers
 # Stage-1 bootstrap variant: grammar engines stubbed (see BOOTSTRAP SHAPE)
 # Stage-1: stub grammar_rules (no engines) and drop grammar_cli.o (defined there).
@@ -320,13 +325,28 @@ $(SHADOW_TCC_OBJ): $(SHADOW_TCC_C) $(TCC_LIB_DEP)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -I../examples/serdes/c -c $(SHADOW_TCC_C) -o $@
 
+$(SHADOW_COMPTIME_OBJ): $(SHADOW_COMPTIME_C) $(TCC_LIB_DEP)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -I../examples/serdes/c -Isrc -c $(SHADOW_COMPTIME_C) -o $@
+
+$(SHADOW_COMPTIME_LIB): $(SHADOW_COMPTIME_OBJ) $(SHADOW_COMPTIME_ENGINE_OBJS)
+	@mkdir -p $(dir $@)
+	@rm -f $@
+	ar rcs $@ $^
+
 # Native shadow_lower beside ccc: emit + optional in-process libtcc --exe.
 # Falls back to scripts/shadow_lower.sh only if the native build is skipped.
-$(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_CCS) $(SHADOW_BUILD_CCH) $(SHADOW_TCC_OBJ) $(WRAPPER) $(TCC_LIB_DEP) $(RUNTIME_DYLIB)
+# Included pp_*.cch / shadow_*.cch are not listed individually; mtime the
+# umbrella so edits under examples/serdes/c rebuild the native lowerer.
+SHADOW_LOWER_DEPS := $(SHADOW_LOWER_CCS) $(SHADOW_BUILD_CCH) \
+	$(wildcard ../examples/serdes/c/pp_*.cch) \
+	$(wildcard ../examples/serdes/c/shadow_*.cch) \
+	$(wildcard ../examples/serdes/c/shadow_*.h)
+$(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_COMPTIME_LIB) $(WRAPPER) $(TCC_LIB_DEP) $(RUNTIME_DYLIB)
 	@mkdir -p $(dir $@)
-	$(WRAPPER) $(SHADOW_LOWER_CCS) -o $@ \
+	$(WRAPPER) $(SHADOW_LOWER_CCS) -o $@ --no-cache \
 		--cc-flags "-I../examples/serdes/c -I$(TCC_INC) -DSHADOW_HAVE_LIBTCC=1" \
-		--ld-flags "$(abspath $(SHADOW_TCC_OBJ)) -L$(TCC_LIB) -ltcc"
+		--ld-flags "$(abspath $(SHADOW_TCC_OBJ)) $(abspath $(SHADOW_COMPTIME_LIB)) -L$(TCC_LIB) -ltcc"
 	@mkdir -p $(dir $(SHADOW_LOWER_SCRIPT))
 	@cp $@ $(SHADOW_LOWER_SCRIPT)
 	@chmod +x $(SHADOW_LOWER_SCRIPT)

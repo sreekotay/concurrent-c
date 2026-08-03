@@ -1,0 +1,8 @@
+/* Binary warm-cache fixture: edits to cache_warm_dep.inc must force re-emit. */
+#include <stdio.h>
+#include "cache_warm_dep.inc"
+
+int main(void) {
+    printf("marker=%d\n", cache_warm_marker());
+    return 0;
+}

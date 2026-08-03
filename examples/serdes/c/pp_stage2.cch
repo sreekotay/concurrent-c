@@ -81,6 +81,7 @@ typedef struct {
     int out_cap;
     int skip_depth; /* nested #if/#ifdef skip; spike: only #ifndef */
     int err;
+    char err_msg[192]; /* set on capacity / hard failures (also printed) */
     /* Top-level #include <...> lines preserved for C/H emit (not spliced). */
     char pass_inc[PASS_INC_CAP][256];
     int npass_inc;
@@ -172,7 +173,13 @@ static int macro_define(Pp* pp, CCSlice name, Token* body, int nbody) {
 }
 
 static int pp_emit(Pp* pp, Token t) {
-    if (pp->nout >= pp->out_cap) return 0;
+    if (pp->nout >= pp->out_cap) {
+        snprintf(pp->err_msg, sizeof(pp->err_msg),
+                 "stage2 token buffer full (%d tokens)", pp->out_cap);
+        diag_at(pp->cache, t, pp->err_msg);
+        pp->err = 1;
+        return 0;
+    }
     pp->out[pp->nout++] = t;
     return 1;
 }
@@ -182,6 +189,14 @@ static int join_path(const char* dir, CCSlice rel, char* dst, size_t dst_cap) {
     if (rel.len < 2) return 0;
     const char* p = rel.ptr + 1;
     size_t n = rel.len - 2;
+    /* Absolute / already-rooted paths (prepare may emit these for lowered
+     * local headers) — use as-is. */
+    if (n > 0 && (p[0] == '/' || (n > 1 && p[1] == ':'))) {
+        if (n + 1 > dst_cap) return 0;
+        memcpy(dst, p, n);
+        dst[n] = 0;
+        return 1;
+    }
     size_t dlen = dir ? strlen(dir) : 0;
     if (dlen + 1 + n + 1 > dst_cap) return 0;
     if (dlen) {
@@ -423,6 +438,7 @@ static int pp_run(Pp* pp, FileTape* root) {
     pp->nout = 0;
     pp->skip_depth = 0;
     pp->err = 0;
+    pp->err_msg[0] = 0;
     pp->npass_inc = 0;
     pp->npass_def = 0;
     if (!pp_push_tape(pp, root)) return 0;

@@ -7,6 +7,9 @@
 ~~~~}
 
 #include "../examples/serdes/c/c_pp_spike.cch"
+#include "../examples/serdes/c/shadow_comptime.h"
+#include <fcntl.h>
+#include <unistd.h>
 
 static const char* FIX = "examples/serdes/c/shadow";
 
@@ -36,43 +39,64 @@ static int norm_eq(const char* a, size_t alen, const char* b, size_t blen) {
     return alen == blen && memcmp(a, b, alen) == 0;
 }
 
+/* Same succession path as native shadow_lower: comptime prepare/exec →
+ * stage1 bytes → stage2 → parse → safety → emit → comptime splice. */
 static int lower_file(TapeCache* cache, CCArena* arena, const char* name,
                       ShadowEmitKind kind, CEmit* out) {
     char path[512];
+    char* stage1_src = NULL;
+    size_t stage1_len = 0;
+    FileTape* ft;
+    Token tokbuf[1 << 16];
+    Pp pp = {0};
+    Parser p = {0};
+    AstNode** items = NULL;
+    int n = 0;
+    int ok;
     snprintf(path, sizeof(path), "%s/%s", FIX, name);
-    FileTape* ft = tape_cache_load(cache, path, arena);
+    if (shadow_comptime_exec_file(path, &stage1_src, &stage1_len) != 0) {
+        free(stage1_src);
+        fprintf(stderr, "%s:1:1: error: comptime prepare/exec failed\n", path);
+        return 0;
+    }
+    ft = tape_cache_load_bytes(cache, path, stage1_src, stage1_len, arena);
+    stage1_src = NULL;
     if (!ft) {
         fprintf(stderr, "error: cannot stage1-load %s\n", path);
         return 0;
     }
-    Token tokbuf[4096];
-    Pp pp = {0};
     pp.cache = cache;
     pp.arena = arena;
     pp.search_dir = FIX;
     pp_add_sys_inc(&pp, "cc/include");
     pp_add_sys_inc(&pp, "out/include");
     pp.out = tokbuf;
-    pp.out_cap = 4096;
+    pp.out_cap = 1 << 16;
     if (!pp_run(&pp, ft)) {
-        fprintf(stderr, "%s:1:1: error: stage2 preprocess failed\n", path);
+        if (!pp.err_msg[0])
+            fprintf(stderr, "%s:1:1: error: stage2 preprocess failed\n", path);
         pp_free_macros(&pp);
         return 0;
     }
-    Parser p = {0};
     p.toks = tokbuf;
     p.n = pp.nout;
     p.cache = cache;
-    AstNode** items = NULL;
-    int n = 0;
     if (!parse_tu(&p, &items, &n)) {
         if (!p.err_msg[0])
             fprintf(stderr, "%s:1:1: error: parse failed\n", path);
         pp_free_macros(&pp);
         return 0;
     }
-    int ok = shadow_emit(items, n, cache, out, kind, pp.pass_inc, pp.npass_inc,
-                         pp.pass_def, pp.npass_def);
+    if (!shadow_safety_check(items, n, cache)) {
+        pp_free_macros(&pp);
+        return 0;
+    }
+    ok = shadow_emit(items, n, cache, out, kind, pp.pass_inc, pp.npass_inc,
+                     pp.pass_def, pp.npass_def, path);
+    if (ok && shadow_comptime_splice_emit(&out->buf, &out->len, path) != 0) {
+        fprintf(stderr, "%s:1:1: error: comptime splice failed\n", path);
+        ok = 0;
+    }
     pp_free_macros(&pp);
     return ok;
 }
@@ -224,6 +248,274 @@ static int test_diag_line(void) {
     return 1;
 }
 
+/* Capacity overflows must name the limit (no silent truncate / generic fail). */
+/* Conservative safety: lower must fail and name the oracle. */
+static int expect_safety_fail(const char* name, const char* needle) {
+    char errpath[256];
+    char* errbuf = NULL;
+    size_t errlen = 0;
+    int saved_fd, err_fd;
+    CCArena arena = cc_arena_create(1 << 20);
+    TapeCache cache = {0};
+    CEmit emit = {0};
+    int failed;
+    snprintf(errpath, sizeof(errpath), "out/cc_safe_%s.err", name);
+    err_fd = open(errpath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (err_fd < 0) {
+        printf("FAIL: cannot open %s\n", errpath);
+        cc_arena_free(&arena);
+        return 0;
+    }
+    fflush(stderr);
+    saved_fd = dup(2);
+    if (saved_fd < 0 || dup2(err_fd, 2) < 0) {
+        close(err_fd);
+        if (saved_fd >= 0) close(saved_fd);
+        printf("FAIL: stderr redirect\n");
+        cc_arena_free(&arena);
+        return 0;
+    }
+    close(err_fd);
+    failed = !lower_file(&cache, &arena, name, SHADOW_EMIT_C, &emit);
+    fflush(stderr);
+    dup2(saved_fd, 2);
+    close(saved_fd);
+    free(emit.buf);
+    tape_cache_free(&cache);
+    cc_arena_free(&arena);
+    errbuf = read_all(errpath, &errlen);
+    remove(errpath);
+    if (!failed) {
+        printf("FAIL: expected safety fail on %s\n", name);
+        free(errbuf);
+        return 0;
+    }
+    if (!errbuf || !strstr(errbuf, needle)) {
+        printf("FAIL: %s missing '%s' in:\n%s\n", name, needle,
+               errbuf ? errbuf : "(empty)");
+        free(errbuf);
+        return 0;
+    }
+    free(errbuf);
+    return 1;
+}
+
+static int expect_safety_pass(const char* name) {
+    CCArena arena = cc_arena_create(1 << 20);
+    TapeCache cache = {0};
+    CEmit emit = {0};
+    int ok = lower_file(&cache, &arena, name, SHADOW_EMIT_C, &emit);
+    free(emit.buf);
+    tape_cache_free(&cache);
+    cc_arena_free(&arena);
+    if (!ok) {
+        printf("FAIL: expected safety pass on %s\n", name);
+        return 0;
+    }
+    return 1;
+}
+
+static int test_safety_oracles(void) {
+    if (!expect_safety_fail("safe_use_after_move_fail.ccs",
+                            "use of moved slice 's'"))
+        return 0;
+    if (!expect_safety_fail("safe_move_in_call_fail.ccs",
+                            "use of moved slice 's'"))
+        return 0;
+    if (!expect_safety_fail("safe_chan_send_borrow_fail.ccs",
+                            "non-stable slice borrow"))
+        return 0;
+    if (!expect_safety_fail("safe_arena_reset_borrow_fail.ccs",
+                            "cc_arena_reset"))
+        return 0;
+    if (!expect_safety_fail("safe_unwrap_no_diverge_fail.ccs",
+                            "must diverge"))
+        return 0;
+    if (!expect_safety_fail("safe_variant_unprotected_proj_fail.ccs",
+                            "unprotected projection"))
+        return 0;
+    if (!expect_safety_fail("safe_variant_raw_u_fail.ccs",
+                            "raw '.u' reach-in"))
+        return 0;
+    if (!expect_safety_fail("safe_chan_send_pointer_field_fail.ccs",
+                            "raw pointer field"))
+        return 0;
+    if (!expect_safety_fail("safe_as_anon_fail.ccs", "anonymous @as"))
+        return 0;
+    if (!expect_safety_fail("safe_type_of_unregistered_fail.ccs",
+                            "has no registered cc_type_info"))
+        return 0;
+    if (!expect_safety_fail("safe_arena_ptr_alias_free_fail.ccs",
+                            "non-owning borrow"))
+        return 0;
+    if (!expect_safety_fail("safe_unproven_ptr_free_fail.ccs",
+                            "cannot prove free target provenance"))
+        return 0;
+    /* Syntactic domination / !> / ?> allow protected projections. */
+    if (!expect_safety_pass("safe_variant_if_guard_ok.ccs")) return 0;
+    if (!expect_safety_pass("safe_variant_switch_ok.ccs")) return 0;
+    if (!expect_safety_pass("safe_variant_bang_ok.ccs")) return 0;
+    if (!expect_safety_pass("safe_variant_qmark_ok.ccs")) return 0;
+    return 1;
+}
+
+static int test_cap_stage2(void) {
+    CCArena arena = cc_arena_create(1 << 20);
+    TapeCache cache = {0};
+    const char* path = "examples/serdes/c/shadow/cap_stage2.ccs";
+    FileTape* ft;
+    Token tokbuf[8];
+    Pp pp = {0};
+    {
+        FILE* f = fopen(path, "wb");
+        if (!f) return 0;
+        fputs("int main(void) { return 0; }\n", f);
+        fclose(f);
+    }
+    ft = tape_cache_load(&cache, path, &arena);
+    if (!ft) {
+        printf("FAIL: load cap_stage2\n");
+        return 0;
+    }
+    pp.cache = &cache;
+    pp.arena = &arena;
+    pp.search_dir = FIX;
+    pp.out = tokbuf;
+    pp.out_cap = 8;
+    if (pp_run(&pp, ft)) {
+        printf("FAIL: expected stage2 cap overflow\n");
+        pp_free_macros(&pp);
+        tape_cache_free(&cache);
+        cc_arena_free(&arena);
+        remove(path);
+        return 0;
+    }
+    if (!strstr(pp.err_msg, "stage2 token buffer full (8")) {
+        printf("FAIL: stage2 cap msg missing limit: %s\n", pp.err_msg);
+        pp_free_macros(&pp);
+        tape_cache_free(&cache);
+        cc_arena_free(&arena);
+        remove(path);
+        return 0;
+    }
+    pp_free_macros(&pp);
+    tape_cache_free(&cache);
+    cc_arena_free(&arena);
+    remove(path);
+    return 1;
+}
+
+static int test_cap_body(void) {
+    CCArena arena = cc_arena_create(1 << 20);
+    TapeCache cache = {0};
+    const char* path = "examples/serdes/c/shadow/cap_body.ccs";
+    FileTape* ft;
+    Token tokbuf[4096];
+    Pp pp = {0};
+    Parser p = {0};
+    AstNode** items = NULL;
+    int n = 0;
+    int i;
+    {
+        FILE* f = fopen(path, "wb");
+        if (!f) return 0;
+        fputs("int main(void) {\n{\n", f);
+        for (i = 0; i < 33; i++) fprintf(f, "int a%d;\n", i);
+        fputs("}\nreturn 0;\n}\n", f);
+        fclose(f);
+    }
+    ft = tape_cache_load(&cache, path, &arena);
+    if (!ft) {
+        printf("FAIL: load cap_body\n");
+        return 0;
+    }
+    pp.cache = &cache;
+    pp.arena = &arena;
+    pp.search_dir = FIX;
+    pp.out = tokbuf;
+    pp.out_cap = 4096;
+    if (!pp_run(&pp, ft)) {
+        printf("FAIL: pp cap_body\n");
+        pp_free_macros(&pp);
+        tape_cache_free(&cache);
+        cc_arena_free(&arena);
+        remove(path);
+        return 0;
+    }
+    p.toks = tokbuf;
+    p.n = pp.nout;
+    p.cache = &cache;
+    if (parse_tu(&p, &items, &n) || !strstr(p.err_msg, "cap 32")) {
+        printf("FAIL: expected body cap 32 diag, got: %s\n", p.err_msg);
+        pp_free_macros(&pp);
+        tape_cache_free(&cache);
+        cc_arena_free(&arena);
+        remove(path);
+        return 0;
+    }
+    pp_free_macros(&pp);
+    tape_cache_free(&cache);
+    cc_arena_free(&arena);
+    remove(path);
+    return 1;
+}
+
+static int test_cap_field(void) {
+    CCArena arena = cc_arena_create(1 << 20);
+    TapeCache cache = {0};
+    const char* path = "examples/serdes/c/shadow/cap_field.ccs";
+    FileTape* ft;
+    Token tokbuf[4096];
+    Pp pp = {0};
+    Parser p = {0};
+    AstNode** items = NULL;
+    int n = 0;
+    char long_id[320];
+    {
+        FILE* f = fopen(path, "wb");
+        if (!f) return 0;
+        memset(long_id, 'A', 300);
+        long_id[300] = 0;
+        fprintf(f, "int main(void) { return %s; }\n", long_id);
+        fclose(f);
+    }
+    ft = tape_cache_load(&cache, path, &arena);
+    if (!ft) {
+        printf("FAIL: load cap_field\n");
+        return 0;
+    }
+    pp.cache = &cache;
+    pp.arena = &arena;
+    pp.search_dir = FIX;
+    pp.out = tokbuf;
+    pp.out_cap = 4096;
+    if (!pp_run(&pp, ft)) {
+        printf("FAIL: pp cap_field\n");
+        pp_free_macros(&pp);
+        tape_cache_free(&cache);
+        cc_arena_free(&arena);
+        remove(path);
+        return 0;
+    }
+    p.toks = tokbuf;
+    p.n = pp.nout;
+    p.cache = &cache;
+    if (parse_tu(&p, &items, &n) ||
+        !strstr(p.err_msg, "exceeds 255-byte AST text field")) {
+        printf("FAIL: expected 255-byte field diag, got: %s\n", p.err_msg);
+        pp_free_macros(&pp);
+        tape_cache_free(&cache);
+        cc_arena_free(&arena);
+        remove(path);
+        return 0;
+    }
+    pp_free_macros(&pp);
+    tape_cache_free(&cache);
+    cc_arena_free(&arena);
+    remove(path);
+    return 1;
+}
+
 static int test_include_tape_reuse(void) {
     CCArena arena = cc_arena_create(1 << 20);
     TapeCache cache = {0};
@@ -304,6 +596,10 @@ int main(void) {
     if (!test_ccs_to_c_hostcc()) return 1;
     if (!test_cch_to_h_hostcc()) return 1;
     if (!test_diag_line()) return 1;
+    if (!test_cap_stage2()) return 1;
+    if (!test_cap_body()) return 1;
+    if (!test_cap_field()) return 1;
+    if (!test_safety_oracles()) return 1;
     {
         /* Beachhead name-match only — stdlib diffs + recipes live in
          * scripts/test_serdes_shadow.sh (keeps this smoke under cc_test's

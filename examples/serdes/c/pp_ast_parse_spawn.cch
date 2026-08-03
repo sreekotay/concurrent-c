@@ -64,17 +64,35 @@ static AstNode* parse_nursery_destroy(Parser* p) {
     return n;
 }
 
+/* True for `=> {` / `=> [caps] {` (and `= >` digraph forms). */
 static int shadow_is_arrow_brace(Parser* p, int i, int end, int* out_brace) {
+    int k;
     if (!p || i < 0 || i >= end) return 0;
-    if (tok_eq(p->toks[i], TK_PUNCT, "=>") && i + 1 < end &&
-        tok_eq(p->toks[i + 1], TK_PUNCT, "{")) {
-        if (out_brace) *out_brace = i + 1;
-        return 1;
+    k = i;
+    if (tok_eq(p->toks[k], TK_PUNCT, "=>")) {
+        k++;
+    } else if (tok_eq(p->toks[k], TK_PUNCT, "=") && k + 1 < end &&
+               tok_eq(p->toks[k + 1], TK_PUNCT, ">")) {
+        k += 2;
+    } else {
+        return 0;
     }
-    if (tok_eq(p->toks[i], TK_PUNCT, "=") && i + 2 < end &&
-        tok_eq(p->toks[i + 1], TK_PUNCT, ">") &&
-        tok_eq(p->toks[i + 2], TK_PUNCT, "{")) {
-        if (out_brace) *out_brace = i + 2;
+    if (k < end && tok_eq(p->toks[k], TK_PUNCT, "[")) {
+        int depth = 0;
+        for (; k < end; k++) {
+            if (tok_eq(p->toks[k], TK_PUNCT, "["))
+                depth++;
+            else if (tok_eq(p->toks[k], TK_PUNCT, "]")) {
+                depth--;
+                if (depth == 0) {
+                    k++;
+                    break;
+                }
+            }
+        }
+    }
+    if (k < end && tok_eq(p->toks[k], TK_PUNCT, "{")) {
+        if (out_brace) *out_brace = k;
         return 1;
     }
     return 0;
@@ -170,6 +188,8 @@ static int parse_closure_formals_text(Parser* p, int lp, int rp, char* dst,
     return arity;
 }
 
+static void spawn_caps_add(char* caps, size_t cap, const char* item);
+
 /* Lift `(…) => { stmts }` as call/create arg or bare typed-init RHS in toks[c0..end).
  * Call-arg form writes closed call prefix into dst and consumes trailing `)`.
  * Bare RHS (closure is the whole span) leaves dst empty.
@@ -244,10 +264,6 @@ static int parse_call_arg_closure(Parser* p, int c0, int end, char* dst,
             p_next(p); /* > */
         }
     }
-    if (!p_accept(p, TK_PUNCT, "{")) {
-        parser_fail(p, p_peek(p), "expected '{' after () =>");
-        return 0;
-    }
     {
         AstNode* n = ast_new(p, AST_SPAWN_CLOSURE);
         if (!n) return 0;
@@ -263,6 +279,39 @@ static int parse_call_arg_closure(Parser* p, int c0, int end, char* dst,
             n->a[0] = 0;
         n->c[0] = 0;
         n->e[0] = 0;
+        /* Optional explicit captures: `=> [rx, &tx] { … }` */
+        if (tok_eq(p_peek(p), TK_PUNCT, "[")) {
+            p_next(p);
+            while (!tok_eq(p_peek(p), TK_PUNCT, "]") &&
+                   p_peek(p).kind != TK_EOF && !p->err) {
+                int is_ref = 0;
+                Token id;
+                char name[64];
+                char item[80];
+                if (tok_eq(p_peek(p), TK_PUNCT, "&")) {
+                    is_ref = 1;
+                    p_next(p);
+                }
+                id = p_next(p);
+                if (id.kind != TK_IDENT) {
+                    parser_fail(p, id, "expected capture name");
+                    return 0;
+                }
+                slice_to(name, sizeof(name), id.spell);
+                if (is_ref) snprintf(item, sizeof(item), "&%s", name);
+                else snprintf(item, sizeof(item), "%s", name);
+                spawn_caps_add(n->e, sizeof(n->e), item);
+                if (tok_eq(p_peek(p), TK_PUNCT, ",")) p_next(p);
+            }
+            if (!p_accept(p, TK_PUNCT, "]")) {
+                parser_fail(p, p_peek(p), "expected ']' after capture list");
+                return 0;
+            }
+        }
+        if (!p_accept(p, TK_PUNCT, "{")) {
+            parser_fail(p, p_peek(p), "expected '{' after () =>");
+            return 0;
+        }
         while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF &&
                !p->err) {
             AstNode* s = parse_stmt(p);
@@ -491,6 +540,7 @@ static void spawn_infer_value_caps(AstNode* n) {
 }
 
 /* recv -> spawn ( [@unsafe] ( ) => [caps] { stmts } ) ; */
+/* Also `recv.spawn(() => …)` (UFCS spelling). */
 /* recv->spawn(() => …) starting at p->i — no trailing `;` (stmt vs expr). */
 static AstNode* parse_spawn_closure_core(Parser* p) {
     Token recv = p_peek(p);
@@ -498,7 +548,9 @@ static AstNode* parse_spawn_closure_core(Parser* p) {
     int i;
     if (recv.kind != TK_IDENT) return NULL;
     if (p->i + 7 >= p->n) return NULL;
-    if (!tok_eq(p->toks[p->i + 1], TK_PUNCT, "->")) return NULL;
+    if (!tok_eq(p->toks[p->i + 1], TK_PUNCT, "->") &&
+        !tok_eq(p->toks[p->i + 1], TK_PUNCT, "."))
+        return NULL;
     if (shadow_kw(p->toks[p->i + 2]) != SHADOW_KW_SPAWN) return NULL;
     if (!tok_eq(p->toks[p->i + 3], TK_PUNCT, "(")) return NULL;
     /* Optional `@unsafe` before `() =>`. */
@@ -518,7 +570,7 @@ static AstNode* parse_spawn_closure_core(Parser* p) {
     arrow_i = i + 2;
 
     p_next(p); /* recv */
-    p_next(p); /* -> */
+    p_next(p); /* -> or . */
     p_next(p); /* spawn */
     p_next(p); /* ( */
     while (p->i < arrow_i - 2) p_next(p); /* optional @unsafe */

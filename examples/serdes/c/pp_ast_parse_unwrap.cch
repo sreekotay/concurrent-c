@@ -21,7 +21,8 @@ static AstNode* parse_println_bang(Parser* p) {
         is_tpl = 1;
     } else {
         Token s = p_next(p);
-        if (s.kind != TK_STR) {
+        /* String literal, or CCString/ident expr (cc_println accepts both). */
+        if (s.kind != TK_STR && s.kind != TK_IDENT) {
             parser_fail(p, s, "expected string or @string(...) in println(...)");
             return NULL;
         }
@@ -323,6 +324,12 @@ static AstNode* parse_var_unwrap(Parser* p) {
         j++;
     }
     if (op_at < 0) return NULL;
+    /* `Type name = expr !> @destroy` — owned by parse_val_destroy. */
+    if (tok_eq(p->toks[op_at], TK_PUNCT, "!>") && op_at + 2 < p->n &&
+        tok_eq(p->toks[op_at + 1], TK_PUNCT, "@")) {
+        ShadowKwKind ak = shadow_kw(p->toks[op_at + 2]);
+        if (ak == SHADOW_KW_DESTROY || ak == SHADOW_KW_DETACH) return NULL;
+    }
 
     char tytxt[128];
     p_next(p); /* type */
@@ -377,6 +384,30 @@ static AstNode* parse_var_unwrap(Parser* p) {
             return n;
         }
         if (!p_accept(p, TK_PUNCT, "(")) {
+            /* !> { stmts }; — bare handler block (no bind). */
+            if (tok_eq(p_peek(p), TK_PUNCT, "{")) {
+                p_next(p);
+                snprintf(n->c, sizeof(n->c), "bang_block");
+                while (!tok_eq(p_peek(p), TK_PUNCT, "}") &&
+                       p_peek(p).kind != TK_EOF && !p->err) {
+                    AstNode* st = parse_stmt(p);
+                    if (!st) return NULL;
+                    if (n->nbody >= 32) {
+                        parser_fail_body_cap(p, p_peek(p), "!> { ... } body");
+                        return NULL;
+                    }
+                    n->body[n->nbody++] = st;
+                }
+                if (!p_accept(p, TK_PUNCT, "}")) {
+                    parser_fail(p, p_peek(p), "expected '}' after !> { ... }");
+                    return NULL;
+                }
+                if (!p_accept(p, TK_PUNCT, ";")) {
+                    parser_fail(p, p_peek(p), "expected ';' after !> { ... }");
+                    return NULL;
+                }
+                return n;
+            }
             /* !> stmt ; — break/continue/return without binder */
             snprintf(n->c, sizeof(n->c), "bang_stmt");
             AstNode* st = parse_stmt(p);

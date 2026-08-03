@@ -1,0 +1,14 @@
+/* Safety fail: cannot send non-unique arena slice borrow on a channel. */
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(4));
+    char[:] view = cc_arena_alloc_slice_bytes(&a, 32);
+    CCSlice[~4 >] tx;
+    CCSlice[~4 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    (void)ch;
+    (void)cc_channel_send(tx, view);
+    cc_arena_free(&a);
+    return 0;
+}

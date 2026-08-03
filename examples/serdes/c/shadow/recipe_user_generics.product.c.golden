@@ -3,15 +3,48 @@
 #include <stdint.h>
 #include <stdlib.h>
 /*
- * In-process UFCS surface twin of examples/recipe_user_generics.ccs.
+ * Recipe: user-defined generics
  *
- * Product comptime (CC_GENERIC_FACTORY + @emit) is gated by native
- * shadow_lower against recipe_user_generics.product.c.golden — this twin
- * only exercises typed Pair_* method dispatch without the factory.
+ * The sections below are NOT five things to learn. A generic is ONE rule:
+ *
+ *     Name::[args] names a monomorph, and the factory's emitted
+ *     `${mangled}_<member>` definitions ARE its methods.
+ *
+ * Everything else is spelling. `Type::[args]` names the instance;
+ * `<snake(Family)>_<member>::[args](...)` is the same grid vec_new uses;
+ * `recv.member(...)` dispatches on the instance like any family; and a
+ * declared `<Mangled>_<member>` function extends one instance the same
+ * way declaring installs any method.
+ *
+ *    1. Define a family     CC_GENERIC_FACTORY + one @emit template
+ *    2. Instantiate         Pair::[int, double] p
+ *    3. Construct free-name pair_make::[int, double](3, 4.5)
+ *    4. Emitted methods     p.head(), p.tail()
+ *    5. Extend one instance declare Pair_int_double_span
+ *    6. Fallible members    q.at(1) !>
  */
 
 #include <ccc/std/prelude.h>
+#include <ccc/cc_instantiate.h>
 #include <stdio.h>
+
+/* generic Pair_int_double */
+
+        typedef struct { int first; double second; } Pair_int_double;
+        static inline Pair_int_double Pair_int_double_make(int a, double b) {
+            Pair_int_double r; r.first = a; r.second = b; return r;
+        }
+        static inline int Pair_int_double_head(Pair_int_double* self) { return self->first; }
+        static inline double Pair_int_double_tail(Pair_int_double* self) { return self->second; }
+
+/* generic Pair_int_int */
+
+        typedef struct { int first; int second; } Pair_int_int;
+        static inline Pair_int_int Pair_int_int_make(int a, int b) {
+            Pair_int_int r; r.first = a; r.second = b; return r;
+        }
+        static inline int Pair_int_int_head(Pair_int_int* self) { return self->first; }
+        static inline int Pair_int_int_tail(Pair_int_int* self) { return self->second; }
 
 #undef __cc_uw_is_err
 #undef __cc_uw_value
@@ -32,132 +65,79 @@ static inline CCResult_int_CCError cc_err_CCResult_int_CCError(CCError e) { CCRe
 #endif
 #endif
 
-/* --- post-instantiation surface for Pair::[int, double] --- */
-#line 12 "examples/serdes/c/shadow/recipe_generics.ccs"
-typedef struct {
-    int first;
-    double second;
-} Pair_int_double;
+/* 1. A family in eight lines: the template is the whole definition.
+ *    `arg(i)` is the i-th type argument; `${mangled}` the instance name. */
+#line 28 "examples/recipe_user_generics.ccs"
+/* CC_GENERIC_FACTORY(Pair) — instantiated above */
 
-
-#line 14 "examples/serdes/c/shadow/recipe_generics.ccs"
-static Pair_int_double Pair_int_double_make(int a, double b) {
-    #line 15 "examples/serdes/c/shadow/recipe_generics.ccs"
-    Pair_int_double r;
-    #line 16 "examples/serdes/c/shadow/recipe_generics.ccs"
-    r.first = a;
-    #line 17 "examples/serdes/c/shadow/recipe_generics.ccs"
-    r.second = b;
-    #line 18 "examples/serdes/c/shadow/recipe_generics.ccs"
-    return r;
-}
-
-
-#line 21 "examples/serdes/c/shadow/recipe_generics.ccs"
-static int Pair_int_double_head(Pair_int_double* self) {
-    #line 22 "examples/serdes/c/shadow/recipe_generics.ccs"
-    return self->first;
-}
-
-
-#line 25 "examples/serdes/c/shadow/recipe_generics.ccs"
-static double Pair_int_double_tail(Pair_int_double* self) {
-    #line 26 "examples/serdes/c/shadow/recipe_generics.ccs"
-    return self->second;
-}
-
-
-/* --- post-instantiation surface for Pair::[int, int] --- */
-#line 30 "examples/serdes/c/shadow/recipe_generics.ccs"
-typedef struct {
-    int first;
-    int second;
-} Pair_int_int;
-
-
-#line 32 "examples/serdes/c/shadow/recipe_generics.ccs"
-static Pair_int_int Pair_int_int_make(int a, int b) {
-    #line 33 "examples/serdes/c/shadow/recipe_generics.ccs"
-    Pair_int_int r;
-    #line 34 "examples/serdes/c/shadow/recipe_generics.ccs"
-    r.first = a;
-    #line 35 "examples/serdes/c/shadow/recipe_generics.ccs"
-    r.second = b;
-    #line 36 "examples/serdes/c/shadow/recipe_generics.ccs"
-    return r;
-}
-
-
-#line 39 "examples/serdes/c/shadow/recipe_generics.ccs"
-static int Pair_int_int_head(Pair_int_int* self) {
-    #line 40 "examples/serdes/c/shadow/recipe_generics.ccs"
-    return self->first;
-}
-
-
-#line 43 "examples/serdes/c/shadow/recipe_generics.ccs"
-static int Pair_int_int_tail(Pair_int_int* self) {
-    #line 44 "examples/serdes/c/shadow/recipe_generics.ccs"
-    return self->second;
-}
-
-
-/* 5. Extension by declaration */
-#line 48 "examples/serdes/c/shadow/recipe_generics.ccs"
+/* 5. Extension by declaration: the composed spelling IS the install. */
+#line 39 "examples/recipe_user_generics.ccs"
 static double Pair_int_double_span(Pair_int_double* pr) {
-    #line 49 "examples/serdes/c/shadow/recipe_generics.ccs"
+    #line 40 "examples/recipe_user_generics.ccs"
     return pr->second - (double)pr->first;
 }
 
 
-/* 6. A fallible extension */
-#line 53 "examples/serdes/c/shadow/recipe_generics.ccs"
+/* 6. A fallible extension: Results and `!>` compose with user
+ *    generics like any other method. */
+#line 45 "examples/recipe_user_generics.ccs"
 static CCResult_int_CCError Pair_int_int_at(Pair_int_int* pr, int i) {
-    #line 54 "examples/serdes/c/shadow/recipe_generics.ccs"
+    #line 46 "examples/recipe_user_generics.ccs"
     if (i == 0)
     return cc_ok_CCResult_int_CCError(pr->first);
-    #line 55 "examples/serdes/c/shadow/recipe_generics.ccs"
+    #line 47 "examples/recipe_user_generics.ccs"
     if (i == 1)
     return cc_ok_CCResult_int_CCError(pr->second);
-    #line 56 "examples/serdes/c/shadow/recipe_generics.ccs"
+    #line 48 "examples/recipe_user_generics.ccs"
     return cc_err_CCResult_int_CCError(CC_ERROR(CC_ERR_INVALID_ARG, "pair index out of range"));
 }
 
 
-#line 59 "examples/serdes/c/shadow/recipe_generics.ccs"
+#line 51 "examples/recipe_user_generics.ccs"
 int main(void) {
 
-    #line 62 "examples/serdes/c/shadow/recipe_generics.ccs"
+    /* 2 + 3. The type names the instance; the free-name form constructs
+     * it — and requests the monomorph by itself, so either mention
+     * alone is enough. */
+    #line 57 "examples/recipe_user_generics.ccs"
     Pair_int_double p = Pair_int_double_make(3, 4.5);
 
-    #line 64 "examples/serdes/c/shadow/recipe_generics.ccs"
+    /* 4. The emitted `${mangled}_<member>` definitions are the method
+     * set — same dispatch as Vec/Map members. */
+    #line 61 "examples/recipe_user_generics.ccs"
     printf("head=%d tail=%g\n",Pair_int_double_head(&p),Pair_int_double_tail(&p));
 
-    #line 66 "examples/serdes/c/shadow/recipe_generics.ccs"
+    /* 5. Declared above — no factory edit. */
+    #line 64 "examples/recipe_user_generics.ccs"
     printf("span=%g\n",Pair_int_double_span(&p));
 
-    #line 68 "examples/serdes/c/shadow/recipe_generics.ccs"
+    /* A second monomorph is just another spelling of the same family;
+     * the instance-layer mangled name is always callable directly. */
+    #line 68 "examples/recipe_user_generics.ccs"
     Pair_int_int q = Pair_int_int_make(10, 20);
-    #line 69 "examples/serdes/c/shadow/recipe_generics.ccs"
+    #line 69 "examples/recipe_user_generics.ccs"
     printf("q=%d,%d\n",Pair_int_int_head(&q),Pair_int_int_tail(&q));
 
-    #line 71 "examples/serdes/c/shadow/recipe_generics.ccs"
+    /* 6. Declared above — a Result member unwraps like any other. */
+    #line 72 "examples/recipe_user_generics.ccs"
     int second;
     {
         __typeof__(Pair_int_int_at(&q, 1)) __r = Pair_int_int_at(&q, 1);
         if (!__r.ok) {
-            #line 71 "examples/serdes/c/shadow/recipe_generics.ccs"
-            cc_rt_diag_record_unwrap_site("examples/serdes/c/shadow/recipe_generics.ccs", "71");
+            #line 72 "examples/recipe_user_generics.ccs"
+            cc_rt_diag_record_unwrap_site("examples/recipe_user_generics.ccs", "72");
             CCError e = _Generic((__r).u.error, CCError: (__r).u.error, CCIoError: (*(CCError*)(void*)&(__r).u.error), default: (__r).u.error);
-            #line 60 "examples/serdes/c/shadow/recipe_generics.ccs"
+            #line 52 "examples/recipe_user_generics.ccs"
             fprintf(stderr, "eh: %s\n", e.message);
             return 1;
         }
         second = (__r).u.value;
     }
-    #line 72 "examples/serdes/c/shadow/recipe_generics.ccs"
+    #line 73 "examples/recipe_user_generics.ccs"
     printf("at=%d\n", second);
 
-    #line 74 "examples/serdes/c/shadow/recipe_generics.ccs"
+    /* The miss fails loud: `p.middle()` names the receiver's type and
+     * lists its installed methods (make, head, tail, span). */
+    #line 77 "examples/recipe_user_generics.ccs"
     return 0;
 }

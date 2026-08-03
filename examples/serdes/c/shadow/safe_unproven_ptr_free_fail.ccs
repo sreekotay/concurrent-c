@@ -1,0 +1,12 @@
+/* Safety fail: free() on cast/unproven pointer provenance. */
+#include <ccc/std/prelude.cch>
+#include <stdlib.h>
+
+int main(void) {
+    CCArena buf = cc_arena_heap(kilobytes(4));
+    char* bytes = cc_arena_alloc_T_count(char, &buf, 32);
+    char* p = (char*)bytes;
+    free(p);
+    cc_arena_free(&buf);
+    return 0;
+}

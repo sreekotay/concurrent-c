@@ -145,7 +145,9 @@ static int shadow_runtime_o(char* dst, size_t cap) {
     return 0;
 }
 
-/* Emit key: input content + tool sig + include roots. */
+/* Emit key: input content + tool sig + include roots + comptime/tcc libs.
+ * Transitive tapes / harvested .cch / `#pragma cc_depends` are not folded
+ * here — they live in emit.deps (+ emit.deps.key) written on cold emit. */
 static uint64_t shadow_emit_cache_key(const char* in_path, const char* self_path) {
     uint64_t h = 1469598103934665603ULL;
     ShadowFileSig in_sig = {0}, self_sig = {0};
@@ -162,7 +164,88 @@ static uint64_t shadow_emit_cache_key(const char* in_path, const char* self_path
     }
     h = shadow_fnv1a64_str(h, "out/include");
     h = shadow_fnv1a64_str(h, "cc/include");
+    /* Comptime prepare/exec/splice identity (product path uses these libs). */
+    h = shadow_fnv1a64_str(h, "\x03" "toolchain:");
+    h = shadow_fold_file_content(h, "out/cc/obj/libshadow_comptime.a");
+    h = shadow_fold_file_content(h, "third_party/tcc/libtcc.a");
     return h;
+}
+
+/* Fingerprint of declared transitive deps (path + content). */
+static uint64_t shadow_fold_dep_paths(uint64_t h, const char* const* paths,
+                                      int n) {
+    int i;
+    for (i = 0; i < n; i++) {
+        ShadowFileSig sig = {0};
+        if (!paths[i] || !paths[i][0]) continue;
+        h = shadow_fnv1a64_str(h, "\x02" "dep:");
+        h = shadow_fnv1a64_str(h, paths[i]);
+        if (shadow_stat_sig(paths[i], &sig) == 0) {
+            h = shadow_fnv1a64_i64(h, sig.mtime_sec);
+            h = shadow_fnv1a64_i64(h, sig.size);
+        }
+        h = shadow_fold_file_content(h, paths[i]);
+    }
+    return h;
+}
+
+/* Persist dep path list + content fingerprint beside emit.c. */
+static int shadow_emit_deps_save(const char* dir, const char* const* paths,
+                                 int n) {
+    char list_path[640], key_path[640];
+    FILE* f;
+    uint64_t h = 1469598103934665603ULL;
+    int i;
+    if (!dir || !dir[0]) return -1;
+    snprintf(list_path, sizeof(list_path), "%s/emit.deps", dir);
+    snprintf(key_path, sizeof(key_path), "%s/emit.deps.key", dir);
+    f = fopen(list_path, "wb");
+    if (!f) return -1;
+    for (i = 0; i < n; i++) {
+        if (!paths[i] || !paths[i][0]) continue;
+        fprintf(f, "%s\n", paths[i]);
+    }
+    fclose(f);
+    h = shadow_fold_dep_paths(h, paths, n);
+    return shadow_write_u64_file(key_path, h);
+}
+
+/* Re-hash paths listed in emit.deps; 1 = still valid, 0 = miss / absent. */
+static int shadow_emit_deps_match(const char* dir) {
+    char list_path[640], key_path[640];
+    char line[1024];
+    const char* paths[256];
+    char* owned[256];
+    int n = 0, i;
+    uint64_t prev = 0, h = 1469598103934665603ULL;
+    FILE* f;
+    if (!dir || !dir[0]) return 0;
+    snprintf(list_path, sizeof(list_path), "%s/emit.deps", dir);
+    snprintf(key_path, sizeof(key_path), "%s/emit.deps.key", dir);
+    /* Legacy cache entries without a sidecar: force cold re-emit once. */
+    if (!shadow_file_exists(list_path) || !shadow_file_exists(key_path))
+        return 0;
+    if (shadow_read_u64_file(key_path, &prev) != 0) return 0;
+    f = fopen(list_path, "rb");
+    if (!f) return 0;
+    while (n < 256 && fgets(line, sizeof(line), f)) {
+        size_t L = strlen(line);
+        while (L && (line[L - 1] == '\n' || line[L - 1] == '\r')) line[--L] = 0;
+        if (!L) continue;
+        owned[n] = (char*)malloc(L + 1);
+        if (!owned[n]) {
+            fclose(f);
+            for (i = 0; i < n; i++) free(owned[i]);
+            return 0;
+        }
+        memcpy(owned[n], line, L + 1);
+        paths[n] = owned[n];
+        n++;
+    }
+    fclose(f);
+    h = shadow_fold_dep_paths(h, paths, n);
+    for (i = 0; i < n; i++) free(owned[i]);
+    return h == prev;
 }
 
 /* Obj key: emit key + host cc id + flag fingerprint. */
@@ -226,7 +309,9 @@ static int shadow_host_link(const char* o_path, const char* bin_path,
     return 0;
 }
 
-/* True if emit.c is cached for this input (skip parse/emit). */
+/* True if emit.c is cached for this input (skip parse/emit).
+ * Also requires emit.deps fingerprint still match (transitive headers /
+ * harvested .cch / cc_depends). */
 static int shadow_emit_cache_hit(const char* in_path, const char* self_path,
                                  int no_cache, char* c_path_out, size_t c_cap,
                                  uint64_t* ekey_out) {
@@ -239,15 +324,19 @@ static int shadow_emit_cache_hit(const char* in_path, const char* self_path,
     snprintf(ekey_path, sizeof(ekey_path), "%s/emit.key", dir);
     if (!shadow_file_exists(c_path_out)) return 0;
     if (shadow_read_u64_file(ekey_path, &prev) != 0 || prev != ekey) return 0;
+    if (!shadow_emit_deps_match(dir)) return 0;
     if (ekey_out) *ekey_out = ekey;
     return 1;
 }
 
 /* Host build from emit buffer or existing cached emit.c.
- * If emit_buf is NULL, require a warm emit cache hit. */
+ * If emit_buf is NULL, require a warm emit cache hit.
+ * dep_paths: transitive inputs observed on the cold path (may be NULL/0
+ * when reusing a prior sidecar). */
 static int shadow_build_host(const char* in_path, const char* bin_path,
                              const char* emit_buf, size_t emit_len,
-                             const char* self_path, int no_cache) {
+                             const char* self_path, int no_cache,
+                             const char* const* dep_paths, int ndeps) {
     uint64_t ekey, okey, prev;
     char dir[512], c_path[600], o_path[600], ekey_path[600], okey_path[600];
     char runtime_o[512];
@@ -266,7 +355,8 @@ static int shadow_build_host(const char* in_path, const char* bin_path,
     snprintf(okey_path, sizeof(okey_path), "%s/obj.key", dir);
 
     if (cache_ok && shadow_file_exists(c_path) &&
-        shadow_read_u64_file(ekey_path, &prev) == 0 && prev == ekey) {
+        shadow_read_u64_file(ekey_path, &prev) == 0 && prev == ekey &&
+        shadow_emit_deps_match(dir)) {
         reuse_emit = 1;
     } else {
         if (!emit_buf) {
@@ -282,6 +372,10 @@ static int shadow_build_host(const char* in_path, const char* bin_path,
             return -1;
         }
         (void)shadow_write_u64_file(ekey_path, ekey);
+        if (dep_paths && ndeps > 0)
+            (void)shadow_emit_deps_save(dir, dep_paths, ndeps);
+        else
+            (void)shadow_emit_deps_save(dir, NULL, 0);
     }
 
     if (!(cache_ok && reuse_emit && shadow_file_exists(o_path) &&
@@ -299,8 +393,13 @@ static int shadow_build_host(const char* in_path, const char* bin_path,
 
 /* True when -o path looks like a text product (.c / .h), not a binary. */
 static int shadow_out_is_text(const char* path) {
-    return path && (shadow_build_ends_with(path, ".c") ||
-                    shadow_build_ends_with(path, ".h") ||
-                    shadow_build_ends_with(path, ".cch") ||
-                    shadow_build_ends_with(path, ".ccs"));
+    if (!path) return 0;
+    if (shadow_build_ends_with(path, ".c") ||
+        shadow_build_ends_with(path, ".h") ||
+        shadow_build_ends_with(path, ".cch") ||
+        shadow_build_ends_with(path, ".ccs"))
+        return 1;
+    /* Goldens: `foo.c.golden` / `foo.h.golden` (not `*.golden` alone). */
+    if (strstr(path, ".c.golden") || strstr(path, ".h.golden")) return 1;
+    return 0;
 }

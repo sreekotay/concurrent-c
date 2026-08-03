@@ -11549,6 +11549,13 @@ void cc_reset_included_cch_sources(void) {
     cc__family_members_reset();
 }
 
+size_t cc_included_cch_source_count(void) { return g_included_cch_source_count; }
+
+const char* cc_included_cch_source_path(size_t i) {
+    if (i >= g_included_cch_source_count || !g_included_cch_sources) return NULL;
+    return g_included_cch_sources[i];
+}
+
 static int cc__register_included_cch_source(const char* source_path) {
     char abs_src[PATH_MAX];
     char** nv;

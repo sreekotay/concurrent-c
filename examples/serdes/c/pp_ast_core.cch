@@ -120,7 +120,8 @@ typedef enum {
     AST_FIELD_INT,     /* int Name; inside struct */
     /* Concurrent-C surface (post-expand; stage 1 kept digraphs intact) */
     AST_SLICE_VAR,     /* int[:] Name; */
-    /* CHAN_VAR: a=name b=capacity c=">"|"<" (direction) */
+    /* CHAN_VAR: a=name b=capacity c=">"|"<" d=elem(ty[*])
+     * e: "" | "o" | "t:TOPO" | "o:TOPO" (ordered / schedule) */
     AST_CHAN_VAR,
     /* RESULT_FN: a=fname, b=err, c=ok, d=param text or "" for void; kids=body */
     AST_RESULT_FN,
@@ -281,22 +282,37 @@ typedef struct {
     int in_async; /* 1 while parsing @async fn body (await strip vs reject). */
 } Parser;
 
+static Token p_peek(Parser* p);
+
 static void parser_fail(Parser* p, Token at, const char* msg) {
+    /* Sticky: keep the first (most specific) diagnostic. */
+    if (p->err) return;
     p->err = 1;
     snprintf(p->err_msg, sizeof(p->err_msg), "%s", msg);
     diag_at(p->cache, at, msg);
 }
 
+/* Named capacity overflow — always includes the numeric limit. */
+static void parser_fail_cap(Parser* p, Token at, const char* what, int limit) {
+    char msg[192];
+    snprintf(msg, sizeof(msg), "%s capacity exceeded (%d)",
+             what ? what : "parser", limit);
+    parser_fail(p, at, msg);
+}
+
 /* Cap for body[] / dbody[] (both sized 32). `what` names the list, e.g. "block". */
 static void parser_fail_body_cap(Parser* p, Token at, const char* what) {
     char msg[160];
-    snprintf(msg, sizeof(msg), "%s too large for shadow beachhead",
-             what ? what : "body");
+    snprintf(msg, sizeof(msg), "%s too large for shadow beachhead (cap %d)",
+             what ? what : "body", 32);
     parser_fail(p, at, msg);
 }
 
 static void scope_push(Parser* p) {
-    if (p->ns >= SCOPE_CAP) { p->err = 1; return; }
+    if (p->ns >= SCOPE_CAP) {
+        parser_fail_cap(p, p_peek(p), "typedef scope depth", SCOPE_CAP);
+        return;
+    }
     p->scopes[p->ns++] = (Scope){0};
 }
 
@@ -317,7 +333,16 @@ static int scope_is_typedef(Parser* p, CCSlice name) {
 static int scope_add_typedef(Parser* p, CCSlice name) {
     if (p->ns == 0) scope_push(p);
     Scope* sc = &p->scopes[p->ns - 1];
-    if (sc->n >= NAME_CAP || name.len >= 128) return 0;
+    if (name.len >= 128) {
+        Token at = p_peek(p);
+        if (p->i < p->n) at = p->toks[p->i];
+        parser_fail_cap(p, at, "typedef name", 127);
+        return 0;
+    }
+    if (sc->n >= NAME_CAP) {
+        parser_fail_cap(p, p_peek(p), "typedef names per scope", NAME_CAP);
+        return 0;
+    }
     memcpy(sc->names[sc->n], name.ptr, name.len);
     sc->names[sc->n][name.len] = 0;
     sc->n++;
@@ -330,32 +355,61 @@ static void slice_to(char* dst, size_t cap, CCSlice s) {
     dst[n] = 0;
 }
 
-/* Exact source span covering toks[i0 .. i1_excl). */
+/* Exact source span covering toks[i0 .. i1_excl).
+ * Fails loud (no silent truncate) when the span does not fit `cap`. */
 static int span_text(Parser* p, int i0, int i1_excl, char* dst, size_t cap) {
+    size_t need = 0;
+    int i;
     if (!dst || cap == 0) return 0;
     dst[0] = 0;
-    if (i0 < 0 || i1_excl > p->n || i0 >= i1_excl) return 1;
-    Token a = p->toks[i0];
-    Token b = p->toks[i1_excl - 1];
-    size_t start = a.offset;
-    size_t end = b.offset + b.spell.len;
-    FileTape* ft = tape_by_id(p->cache, a.file_id);
-    if (ft && ft->bytes && end <= ft->len && end >= start) {
-        size_t n = end - start;
-        if (n >= cap) n = cap - 1;
-        memcpy(dst, ft->bytes + start, n);
-        dst[n] = 0;
-        return 1;
+    if (!p || i0 < 0 || i1_excl > p->n || i0 >= i1_excl) return 1;
+    {
+        Token a = p->toks[i0];
+        Token b = p->toks[i1_excl - 1];
+        size_t start = a.offset;
+        size_t end = b.offset + b.spell.len;
+        FileTape* ft = tape_by_id(p->cache, a.file_id);
+        if (ft && ft->bytes && end <= ft->len && end >= start) {
+            size_t n = end - start;
+            if (n + 1 > cap) {
+                if (!p->err) {
+                    char msg[192];
+                    snprintf(msg, sizeof(msg),
+                             "source span exceeds %zu-byte AST text field "
+                             "(need %zu)",
+                             cap - 1, n);
+                    parser_fail(p, a, msg);
+                }
+                return 0;
+            }
+            memcpy(dst, ft->bytes + start, n);
+            dst[n] = 0;
+            return 1;
+        }
     }
-    size_t o = 0;
-    for (int i = i0; i < i1_excl && o + 1 < (int)cap; i++) {
-        if (i > i0 && o + 1 < cap) dst[o++] = ' ';
-        size_t ln = p->toks[i].spell.len;
-        if (o + ln >= cap) ln = cap - 1 - o;
-        memcpy(dst + o, p->toks[i].spell.ptr, ln);
-        o += ln;
+    for (i = i0; i < i1_excl; i++) {
+        if (i > i0) need++;
+        need += p->toks[i].spell.len;
     }
-    dst[o] = 0;
+    if (need + 1 > cap) {
+        if (!p->err) {
+            char msg[192];
+            snprintf(msg, sizeof(msg),
+                     "source span exceeds %zu-byte AST text field (need %zu)",
+                     cap - 1, need);
+            parser_fail(p, p->toks[i0], msg);
+        }
+        return 0;
+    }
+    {
+        size_t o = 0;
+        for (i = i0; i < i1_excl; i++) {
+            if (i > i0) dst[o++] = ' ';
+            memcpy(dst + o, p->toks[i].spell.ptr, p->toks[i].spell.len);
+            o += p->toks[i].spell.len;
+        }
+        dst[o] = 0;
+    }
     return 1;
 }
 
@@ -392,11 +446,25 @@ static int skip_parens(Parser* p) {
 }
 
 static AstNode* ast_new(Parser* p, AstKind k) {
-    if (p->nn >= AST_CAP) { p->err = 1; return NULL; }
+    if (p->nn >= AST_CAP) {
+        parser_fail_cap(p, p_peek(p), "AST node table", AST_CAP);
+        return NULL;
+    }
     AstNode* n = &p->nodes[p->nn++];
     memset(n, 0, sizeof(*n));
     n->kind = k;
     return n;
+}
+
+/* Push onto kids_storage; diagnose when the table is full. */
+static int ast_kids_push(Parser* p, AstNode* child) {
+    if (!p || !child) return 0;
+    if (p->nkstore >= AST_CAP * 4) {
+        parser_fail_cap(p, p_peek(p), "AST kids storage", AST_CAP * 4);
+        return 0;
+    }
+    p->kids_storage[p->nkstore++] = child;
+    return 1;
 }
 
 /* Attach leading trivia + line indent from tape using token index `start_i`.
@@ -479,6 +547,41 @@ static int peek_generic_type_end(Parser* p, int start) {
     return -1;
 }
 
+/* unsigned? (long long | long | short | int | char | …) — exclusive end, or -1. */
+static int peek_c_int_type_end(Parser* p, int start) {
+    int i = start;
+    int saw = 0;
+    if (!p || start < 0 || start >= p->n) return -1;
+    if (p->toks[i].kind == TK_IDENT && spell_eq(p->toks[i].spell, "unsigned")) {
+        i++;
+        saw = 1;
+    }
+    if (i >= p->n) return saw ? i : -1;
+    if (p->toks[i].kind == TK_IDENT && spell_eq(p->toks[i].spell, "long")) {
+        i++;
+        if (i < p->n && p->toks[i].kind == TK_IDENT &&
+            spell_eq(p->toks[i].spell, "long"))
+            i++;
+        else if (i < p->n && shadow_kw(p->toks[i]) == SHADOW_KW_INT)
+            i++;
+        return i;
+    }
+    if (p->toks[i].kind == TK_IDENT && spell_eq(p->toks[i].spell, "short")) {
+        i++;
+        if (i < p->n && shadow_kw(p->toks[i]) == SHADOW_KW_INT) i++;
+        return i;
+    }
+    if (saw) {
+        ShadowKwKind k = shadow_kw(p->toks[i]);
+        if (k == SHADOW_KW_INT || k == SHADOW_KW_CHAR || k == SHADOW_KW_BOOL ||
+            k == SHADOW_KW_VOID || k == SHADOW_KW_SIZE_T ||
+            p->toks[i].kind == TK_IDENT)
+            return i + 1;
+        return i; /* bare `unsigned` */
+    }
+    return -1;
+}
+
 /* Compact type args inside `[`…`]` (token range exclusive of brackets).
  * `char[:]` → CCSlice; trailing `*` → `ptr` (int* → intptr). */
 static void ast_compact_type_args(Parser* p, int a0, int a1, char* compact,
@@ -554,11 +657,17 @@ static int ast_spell_type_tokens(Parser* p, int start, int end, char* dst,
     if (!compact[0]) return 0;
     if (strcmp(family, "Map") == 0)
         snprintf(dst, cap, "Map_%s*", compact);
+    else if (strcmp(family, "ArrayMap") == 0)
+        snprintf(dst, cap, "ArrayMap_%s*", compact);
     else if (strcmp(family, "Vec") == 0)
         snprintf(dst, cap, "CCVec_%s", compact);
     else if (strcmp(family, "map_new") == 0 ||
              strcmp(family, "cc_map_new") == 0)
         snprintf(dst, cap, "Map_%s_new", compact);
+    else if (strcmp(family, "array_map_new") == 0)
+        snprintf(dst, cap, "array_map_new_%s", compact);
+    else if (strcmp(family, "array_map_new_count") == 0)
+        snprintf(dst, cap, "array_map_new_count_%s", compact);
     else if (strcmp(family, "vec_new") == 0 ||
              strcmp(family, "cc_vec_new") == 0)
         snprintf(dst, cap, "CCVec_%s_new", compact);
@@ -616,12 +725,27 @@ static int ast_copy_ws_gap(Parser* p, Token t, size_t lo, size_t hi, char* dst,
 
 static int ast_append_spell(char* dst, size_t* o, size_t cap, CCSlice spell,
                             int need_sp) {
-    if (need_sp && *o && *o + 1 < cap) dst[(*o)++] = ' ';
-    if (*o + spell.len + 1 >= cap) return 0;
+    size_t need = spell.len + (need_sp && *o ? 1 : 0);
+    if (*o + need + 1 > cap) return 0;
+    if (need_sp && *o) dst[(*o)++] = ' ';
     memcpy(dst + *o, spell.ptr, spell.len);
     *o += spell.len;
     dst[*o] = 0;
     return 1;
+}
+
+/* Like ast_append_spell, but diagnoses a named field-cap overflow once. */
+static int ast_append_spell_diag(Parser* p, Token at, char* dst, size_t* o,
+                                 size_t cap, CCSlice spell, int need_sp) {
+    if (ast_append_spell(dst, o, cap, spell, need_sp)) return 1;
+    if (p && !p->err) {
+        char msg[192];
+        snprintf(msg, sizeof(msg),
+                 "token spelling exceeds %zu-byte AST text field",
+                 cap > 0 ? cap - 1 : 0);
+        parser_fail(p, at, msg);
+    }
+    return 0;
 }
 
 static int ast_need_lex_space(char prev, char next) {
@@ -737,10 +861,11 @@ static int ast_spell_token_range(Parser* p, int start, int end, char* dst,
                         if (have_prev && tok_off >= prev_end)
                             (void)ast_copy_ws_gap(p, t, prev_end, tok_off, dst,
                                                   &o, cap);
-                        if (!ast_append_spell(dst, &o, cap, ps,
-                                              o && ps.len &&
-                                                  ast_need_lex_space(
-                                                      dst[o - 1], wrap[0])))
+                        if (!ast_append_spell_diag(p, t, dst, &o, cap, ps,
+                                                   o && ps.len &&
+                                                       ast_need_lex_space(
+                                                           dst[o - 1],
+                                                           wrap[0])))
                             return 0;
                         if (ast_tok_verbatim(p, p->toks[call_close])) {
                             prev_end = p->toks[call_close].offset +
@@ -798,9 +923,10 @@ static int ast_spell_token_range(Parser* p, int start, int end, char* dst,
             CCSlice ps = { .ptr = piece, .len = strlen(piece) };
             if (have_prev && tok_off >= prev_end)
                 (void)ast_copy_ws_gap(p, t, prev_end, tok_off, dst, &o, cap);
-            if (!ast_append_spell(dst, &o, cap, ps,
-                                  o && ps.len &&
-                                      ast_need_lex_space(dst[o - 1], piece[0])))
+            if (!ast_append_spell_diag(p, t, dst, &o, cap, ps,
+                                       o && ps.len &&
+                                           ast_need_lex_space(dst[o - 1],
+                                                              piece[0])))
                 return 0;
             if (ast_tok_verbatim(p, p->toks[gend - 1])) {
                 prev_end = p->toks[gend - 1].offset +
@@ -813,10 +939,10 @@ static int ast_spell_token_range(Parser* p, int start, int end, char* dst,
             size_t tok_end = tok_off + t.spell.len;
             if (have_prev && verbatim && tok_off >= prev_end)
                 (void)ast_copy_ws_gap(p, t, prev_end, tok_off, dst, &o, cap);
-            if (!ast_append_spell(dst, &o, cap, t.spell,
-                                  o && t.spell.len &&
-                                      ast_need_lex_space(dst[o - 1],
-                                                         t.spell.ptr[0])))
+            if (!ast_append_spell_diag(p, t, dst, &o, cap, t.spell,
+                                       o && t.spell.len &&
+                                           ast_need_lex_space(
+                                               dst[o - 1], t.spell.ptr[0])))
                 return 0;
             /* Only advance the use-site cursor for verbatim tokens; macro
              * body tokens keep define-site offsets and must not rewind it. */

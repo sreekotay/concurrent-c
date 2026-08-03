@@ -73,6 +73,7 @@ case CC_ERR_NONE:           return "ok";
         case CC_ERR_NULL:           return "null";
         case CC_ERR_INTERNAL:       return "internal error";
         default:                    return "error";
+    
     }
 }
 
@@ -168,6 +169,7 @@ case EACCES: kind = CC_ERR_PERMISSION; break;
         case EPIPE:  kind = CC_ERR_CLOSED; break;
         case 0:      kind = CC_ERR_IO; break;
         default:     kind = CC_ERR_IO; break;
+    
     }
     #line 47 "examples/serdes/c/shadow/io_error_frag.cch"
     return cc_io_error_os(kind, err);

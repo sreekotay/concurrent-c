@@ -1,10 +1,15 @@
 # SERDES 2-stage emit experiment
 
 **Status: succession path (opt-in).** Beachhead metric on
-`./scripts/test.sh --serdes --quick`: ~331 OK / ~812 total (~41%). Phase 1
-cleanup (unify unwrap emit, cap hygiene, stub retirement, parse/emit splits,
-leftover `?>` quarantine) is done; succession stays opt-in until the gate is
-boring. Default `ccc` stays legacy. Opt in with:
+`./scripts/test.sh --serdes --quick` is the succession metric (~478–505 OK /
+~812 historically; score moves with coverage). Focused `scripts/test_serdes.sh`
+is architectural smoke only. Recent beachheads: stmt `typedef`, compound
+assigns, scheduled/pointer chans (`CCChanTx`/`Rx` fields + pair topo/elem),
+call-arg `=> [caps]`, `.spawn`, host-C quarantine, typed unwrap
+(`CCResult_bool_CCIoError` / `__typeof__` err bind), UFCS user-type snake
+before arena `.reset` steal, stage1 `@grammar(rules|schema)` splice (+ tape
+passthrough for generated statics; `@grammar(cli)` stays on the AST stub).
+Default `ccc` stays legacy. Opt in with:
 
 ```bash
 ccc --frontend=serdes examples/hello.ccs -o /tmp/hello
@@ -259,16 +264,18 @@ bytes → stage1 tape (toks + comment spans)
 
 Prioritized by fail mass × language value on serdes-quick:
 
-1. **Safety / diag oracles** — retired `@`, sync `@await`, bare `!>;`, slice move /
-   unique provenance, arena borrow, unwrap diverge / unhandled-result, `@err`
-   forward/deadcode, closure ref/alias mutation, `@as` pointer/dup/ambiguous,
-   ordered-tx, async bare `chan_send`/`chan_recv`, channel send pointer-field /
-   non-stable slice (`pp_ast_safety.cch`); still missing variant/comptime /
-   grammar/type_of (~18 silent-accept)
-2. **`@comptime` / `@emit`** — blocks still comment-stripped (factory sugar works)
-3. **`@variant` AST + emit** — no whitelist surface yet
+1. **Safety / diag oracles** — move/channel/unwrap/`T[:!]`/`@variant`/anon
+   `@as`/`type_of`/unproven-pointer free refuse when unprovable; remaining:
+   dominating-check allowlists for safe variant projections + richer points-to
+2. **`@comptime` / `@emit`** — product path runs legacy prepare/exec/splice via
+   `shadow_comptime.c` + `libshadow_comptime.a` (not a `pp_emit*` VM). Stage1
+   gets original spelling with `@comptime if`/value resolved and `@comptime`
+   blocks blanked (keeps `CC_GENERIC_FACTORY` for whitelist instantiate).
+   Remaining holes: compiled-factory dylib path, type-register/UFCS comptime,
+   header-local static_map, reflect factories (~24 comptime fails)
+3. **`@variant` AST + emit** — no whitelist surface yet (~4 ebf + ~20 bf)
 4. **Real `@async` / `@await` SM** — replace poll-wrapper beachhead
-5. UFCS leftovers / `@as` forwarding; slice provenance; `@string` templates
+5. UFCS leftovers; `@as` forwarding; `@string` templates
 
 ## Explicit tool
 

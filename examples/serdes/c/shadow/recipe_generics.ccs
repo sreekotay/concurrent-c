@@ -1,11 +1,9 @@
 /*
- * Shadow twin of examples/recipe_user_generics.ccs
+ * In-process UFCS surface twin of examples/recipe_user_generics.ccs.
  *
- * The real recipe uses CC_GENERIC_FACTORY + @emit (compile-time code
- * generation) which the shadow lowerer cannot evaluate.  This file
- * shows the post-instantiation surface the recipe cares about:
- *   - Pair_int_double  (make, head, tail)
- *   - Pair_int_int     (make, head, tail, at)
+ * Product comptime (CC_GENERIC_FACTORY + @emit) is gated by native
+ * shadow_lower against recipe_user_generics.product.c.golden — this twin
+ * only exercises typed Pair_* method dispatch without the factory.
  */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>

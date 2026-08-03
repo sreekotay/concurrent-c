@@ -11,9 +11,9 @@
 #undef __cc_uw_is_err
 #undef __cc_uw_value
 #undef __cc_uw_err_at
-#define __cc_uw_is_err(__x__) _Generic((__x__), CCResult_int_CCError: (!((CCResult_int_CCError*)(void*)&(__x__))->ok), CCResult_bool_CCError: (!((CCResult_bool_CCError*)(void*)&(__x__))->ok), CCResult_char_CCError: (!((CCResult_char_CCError*)(void*)&(__x__))->ok), CCResult_size_t_CCError: (!((CCResult_size_t_CCError*)(void*)&(__x__))->ok), CCResult_voidptr_CCError: (!((CCResult_voidptr_CCError*)(void*)&(__x__))->ok), CCResult_charptr_CCError: (!((CCResult_charptr_CCError*)(void*)&(__x__))->ok), CCResult_void_CCError: (!((CCResult_void_CCError*)(void*)&(__x__))->ok), default: (*(void* const*)(void*)&(__x__) == (void*)0))
-#define __cc_uw_value(__x__) _Generic((__x__), CCResult_int_CCError: ((CCResult_int_CCError*)(void*)&(__x__))->u.value, CCResult_bool_CCError: ((CCResult_bool_CCError*)(void*)&(__x__))->u.value, CCResult_char_CCError: ((CCResult_char_CCError*)(void*)&(__x__))->u.value, CCResult_size_t_CCError: ((CCResult_size_t_CCError*)(void*)&(__x__))->u.value, CCResult_voidptr_CCError: ((CCResult_voidptr_CCError*)(void*)&(__x__))->u.value, CCResult_charptr_CCError: ((CCResult_charptr_CCError*)(void*)&(__x__))->u.value, default: (__x__))
-#define __cc_uw_err_at(__x__, __e__, __f__, __l__) _Generic((__x__), CCResult_int_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_int_CCError*)(void*)&(__x__))->u.error), CCResult_bool_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_bool_CCError*)(void*)&(__x__))->u.error), CCResult_char_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_char_CCError*)(void*)&(__x__))->u.error), CCResult_size_t_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_size_t_CCError*)(void*)&(__x__))->u.error), CCResult_voidptr_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_voidptr_CCError*)(void*)&(__x__))->u.error), CCResult_charptr_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_charptr_CCError*)(void*)&(__x__))->u.error), CCResult_void_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_void_CCError*)(void*)&(__x__))->u.error), default: (cc_rt_diag_record_unwrap_site(__f__, __l__), __cc_err_null_at(__e__, __f__, __l__)))
+#define __cc_uw_is_err(__x__) _Generic((__x__), CCResult_int_CCError: (!((CCResult_int_CCError*)(void*)&(__x__))->ok), CCResult_bool_CCError: (!((CCResult_bool_CCError*)(void*)&(__x__))->ok), CCResult_bool_CCIoError: (!((CCResult_bool_CCIoError*)(void*)&(__x__))->ok), CCResult_char_CCError: (!((CCResult_char_CCError*)(void*)&(__x__))->ok), CCResult_size_t_CCError: (!((CCResult_size_t_CCError*)(void*)&(__x__))->ok), CCResult_voidptr_CCError: (!((CCResult_voidptr_CCError*)(void*)&(__x__))->ok), CCResult_charptr_CCError: (!((CCResult_charptr_CCError*)(void*)&(__x__))->ok), CCResult_void_CCError: (!((CCResult_void_CCError*)(void*)&(__x__))->ok), default: (*(void* const*)(void*)&(__x__) == (void*)0))
+#define __cc_uw_value(__x__) _Generic((__x__), CCResult_int_CCError: ((CCResult_int_CCError*)(void*)&(__x__))->u.value, CCResult_bool_CCError: ((CCResult_bool_CCError*)(void*)&(__x__))->u.value, CCResult_bool_CCIoError: ((CCResult_bool_CCIoError*)(void*)&(__x__))->u.value, CCResult_char_CCError: ((CCResult_char_CCError*)(void*)&(__x__))->u.value, CCResult_size_t_CCError: ((CCResult_size_t_CCError*)(void*)&(__x__))->u.value, CCResult_voidptr_CCError: ((CCResult_voidptr_CCError*)(void*)&(__x__))->u.value, CCResult_charptr_CCError: ((CCResult_charptr_CCError*)(void*)&(__x__))->u.value, default: (__x__))
+#define __cc_uw_err_at(__x__, __e__, __f__, __l__) _Generic((__x__), CCResult_int_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_int_CCError*)(void*)&(__x__))->u.error), CCResult_bool_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_bool_CCError*)(void*)&(__x__))->u.error), CCResult_bool_CCIoError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_bool_CCIoError*)(void*)&(__x__))->u.error), CCResult_char_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_char_CCError*)(void*)&(__x__))->u.error), CCResult_size_t_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_size_t_CCError*)(void*)&(__x__))->u.error), CCResult_voidptr_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_voidptr_CCError*)(void*)&(__x__))->u.error), CCResult_charptr_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_charptr_CCError*)(void*)&(__x__))->u.error), CCResult_void_CCError: (cc_rt_diag_record_unwrap_site(__f__, __l__), ((CCResult_void_CCError*)(void*)&(__x__))->u.error), default: (cc_rt_diag_record_unwrap_site(__f__, __l__), __cc_err_null_at(__e__, __f__, __l__)))
 
 #line 6 "examples/serdes/c/shadow/hello.ccs"
 
@@ -37,7 +37,7 @@ int main(void) {
         __typeof__(cc_nursery_create(NULL)) __r = cc_nursery_create(NULL);
         if (__cc_uw_is_err(__r)) {
             #line 9 "examples/serdes/c/shadow/hello.ccs"
-            CCError e = __cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/hello.ccs", "9");
+            __typeof__(__cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/hello.ccs", "9")) e = __cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/hello.ccs", "9");
             cc_error_exit(e);
         }
         n = __cc_uw_value(__r);
@@ -62,7 +62,7 @@ __cc_cleanup:
             __typeof__(cc_println("All tasks completed.")) __r = cc_println("All tasks completed.");
             if (__cc_uw_is_err(__r)) {
                 #line 10 "examples/serdes/c/shadow/hello.ccs"
-                CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/hello.ccs", "10");
+                __typeof__(__cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/hello.ccs", "10")) e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/hello.ccs", "10");
                 cc_error_exit(e);
             }
         }
@@ -88,7 +88,7 @@ static void* cc_closure__N1_entry(void* __p) {
             __typeof__(cc_println("Hello from task A! (last)")) __r = cc_println("Hello from task A! (last)");
             if (__cc_uw_is_err(__r)) {
                 #line 16 "examples/serdes/c/shadow/hello.ccs"
-                CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/hello.ccs", "16");
+                __typeof__(__cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/hello.ccs", "16")) e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/hello.ccs", "16");
                 cc_error_exit(e);
             }
         }
@@ -106,7 +106,7 @@ static void* cc_closure__N2_entry(void* __p) {
             __typeof__(cc_println("Hello from task B!")) __r = cc_println("Hello from task B!");
             if (__cc_uw_is_err(__r)) {
                 #line 20 "examples/serdes/c/shadow/hello.ccs"
-                CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/hello.ccs", "20");
+                __typeof__(__cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/hello.ccs", "20")) e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/hello.ccs", "20");
                 cc_error_exit(e);
             }
         }
@@ -124,12 +124,12 @@ static void* cc_closure__N3_entry(void* __p) {
             __typeof__(cc_println("Hello from task C!")) __r = cc_println("Hello from task C!");
             if (__cc_uw_is_err(__r)) {
                 #line 24 "examples/serdes/c/shadow/hello.ccs"
-                CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/hello.ccs", "24");
+                __typeof__(__cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/hello.ccs", "24")) e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/hello.ccs", "24");
                 {
                     __typeof__(cc_println("Task C failed!")) __r = cc_println("Task C failed!");
                     if (__cc_uw_is_err(__r)) {
                         #line 24 "examples/serdes/c/shadow/hello.ccs"
-                        CCError e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/hello.ccs", "24");
+                        __typeof__(__cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/hello.ccs", "24")) e = __cc_uw_err_at(__r, "cc_println", "examples/serdes/c/shadow/hello.ccs", "24");
                         cc_error_exit(e);
                     }
                 }

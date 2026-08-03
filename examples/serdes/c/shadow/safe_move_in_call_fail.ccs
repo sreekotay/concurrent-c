@@ -1,0 +1,11 @@
+/* Safety fail: cc_move in call args still marks the source moved. */
+#include <ccc/cc_runtime.cch>
+
+static void take(CCSlice s) { (void)s; }
+
+int main(void) {
+    int buf[2] = {1, 2};
+    CCSlice s = cc_slice_from_buffer(buf, 2);
+    take(cc_move(s));
+    return (s.len == 0) ? 0 : 1;
+}

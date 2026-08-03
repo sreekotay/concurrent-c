@@ -2,23 +2,103 @@
  * Included from pp_emit_stmt.cch. */
 #pragma once
 
+/* Top-level arity of `args…)` (comma count + 1 when non-empty). */
+static int shadow_create_arg_count(const char* args_with_close) {
+    const char* p = args_with_close;
+    int depth = 0, n = 0, any = 0;
+    if (!p) return 0;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p == ')') return 0;
+    for (; *p; p++) {
+        if (*p == '(' || *p == '[' || *p == '{') depth++;
+        else if (*p == ')' || *p == ']' || *p == '}') {
+            if (depth == 0 && *p == ')') break;
+            if (depth > 0) depth--;
+        } else if (*p == ',' && depth == 0) {
+            n++;
+            any = 1;
+        } else if (*p != ' ' && *p != '\t' && *p != '\n')
+            any = 1;
+    }
+    return any ? n + 1 : 0;
+}
+
+static int shadow_create_arg0_is_str(const char* args_with_close) {
+    const char* p = args_with_close;
+    while (p && (*p == ' ' || *p == '\t')) p++;
+    return p && *p == '"';
+}
+
+static int shadow_create_arg0_is_int(const char* args_with_close) {
+    const char* p = args_with_close;
+    while (p && (*p == ' ' || *p == '\t')) p++;
+    if (!p) return 0;
+    if (*p == '-' || *p == '+') p++;
+    return *p >= '0' && *p <= '9';
+}
+
+/* Type → snake_case prefix (CreateToy → create_toy; CCArena → arena). */
+static void shadow_type_snake(const char* ty, char* snake, size_t cap) {
+    size_t si = 0, ti = 0;
+    if (!ty || !snake || !cap) return;
+    snake[0] = 0;
+    if (strncmp(ty, "CC", 2) == 0 && ty[2] >= 'A' && ty[2] <= 'Z')
+        ti = 2; /* CCArena → Arena → arena */
+    for (; ty[ti] && si + 2 < cap; ti++) {
+        char c = ty[ti];
+        if (c >= 'A' && c <= 'Z') {
+            if (si > 0) snake[si++] = '_';
+            snake[si++] = (char)(c - 'A' + 'a');
+        } else
+            snake[si++] = c;
+    }
+    snake[si] = 0;
+}
+
 static void shadow_resolve_at_create(char* expr, size_t cap, const char* ty,
                                      int is_ptr, int with_closure) {
-    const char* callee = NULL;
     char rest[256];
+    char snake[96];
+    char callee[128];
+    int arity;
     const size_t prefix_len = sizeof("__cc_at_create(") - 1; /* 15 */
+    callee[0] = 0;
     if (!expr || !ty) return;
     if (strncmp(expr, "__cc_at_create(", prefix_len) != 0) return;
-    if (strcmp(ty, "CCNursery") == 0)
-        callee = with_closure ? "cc_nursery_spawn_child_closure0"
-                              : "cc_nursery_create";
-    else if (strcmp(ty, "CCArena") == 0)
-        callee = "cc_arena_heap";
-    else if (strcmp(ty, "CCChan") == 0)
-        callee = "cc_channel_pair"; /* unlikely @create shape */
-    else
-        callee = is_ptr ? "cc_nursery_create" : "cc_arena_heap";
     snprintf(rest, sizeof(rest), "%s", expr + prefix_len);
+    arity = shadow_create_arg_count(rest);
+    shadow_type_snake(ty, snake, sizeof(snake));
+    if (strcmp(ty, "CCNursery") == 0)
+        snprintf(callee, sizeof(callee), "%s",
+                 with_closure ? "cc_nursery_spawn_child_closure0"
+                              : "cc_nursery_create");
+    else if (strcmp(ty, "CCArena") == 0)
+        snprintf(callee, sizeof(callee), "%s",
+                 (arity >= 2) ? "cc_arena_fixed_buffer" : "cc_arena_create");
+    else if (strcmp(ty, "CCChan") == 0)
+        snprintf(callee, sizeof(callee), "cc_channel_pair");
+    else if (snake[0] && !is_ptr) {
+        const char* reg = shadow_create_hook_for(ty);
+        /* Registered create beats naming folklore (Holder → holder_make). */
+        if (reg && reg[0] && arity == 0)
+            snprintf(callee, sizeof(callee), "%s", reg);
+        /* CreateToy @create(4) → create_toy_from_int; @create("x") → _from_cstr. */
+        if (!callee[0] && arity == 1 && shadow_create_arg0_is_str(rest))
+            snprintf(callee, sizeof(callee), "%s_from_cstr", snake);
+        else if (!callee[0] && arity == 1 && shadow_create_arg0_is_int(rest))
+            snprintf(callee, sizeof(callee), "%s_from_int", snake);
+        if (!callee[0] || (!reg && !shadow_ufn_exists(callee))) {
+            char tryc[128];
+            snprintf(tryc, sizeof(tryc), "%s_create", snake);
+            if (shadow_ufn_exists(tryc))
+                snprintf(callee, sizeof(callee), "%s", tryc);
+            else if (!reg)
+                callee[0] = 0;
+        }
+    }
+    if (!callee[0])
+        snprintf(callee, sizeof(callee), "%s",
+                 is_ptr ? "cc_nursery_create" : "cc_arena_create");
     snprintf(expr, cap, "%s(%s", callee, rest);
 }
 

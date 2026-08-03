@@ -1,0 +1,13 @@
+/* Safety fail: raw `.u` reach-in on @variant (SHAPE-T10). */
+#include <ccc/std/prelude.cch>
+#include <stdint.h>
+
+@variant RedisValue {
+    txt: const char*;
+    num: int64_t;
+};
+
+int main(void) {
+    RedisValue v = { .txt = "x" };
+    return (int)v.u.num;
+}

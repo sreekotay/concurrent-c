@@ -137,6 +137,11 @@ char* cc_rewrite_system_cch_includes_to_lowered_headers(const char* src,
                                                         size_t input_len);
 void cc_reset_included_cch_sources(void);
 
+/* Enumerate .cch paths registered for this TU (harvest / include rewrite).
+ * Paths are absolute; valid until the next cc_reset_included_cch_sources. */
+size_t cc_included_cch_source_count(void);
+const char* cc_included_cch_source_path(size_t i);
+
 /* Ingest `typedef struct …` fields (including `Type name @as`) from every
  * .cch registered for this TU into `reg`.  Headers stay as `#include` in the
  * host buffer, so destroy/UFCS must pull @as metadata from this side channel. */
