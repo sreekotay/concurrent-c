@@ -44,6 +44,11 @@ int main(void) {
     int ec = 0;
     int failed = 0;
 
+    /* Nested `ccc -e` must not inherit suite CC_FRONTEND=serdes — each
+     * oneliner would re-enter shadow_lower and time out under --jobs. */
+    unsetenv("CC_FRONTEND");
+    unsetenv("CC_TEST_FRONTEND");
+
     if (!mkdtemp(tmpdir)) {
         perror("mkdtemp");
         return 1;
