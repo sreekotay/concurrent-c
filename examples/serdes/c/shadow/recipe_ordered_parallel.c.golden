@@ -101,7 +101,7 @@ int main(void) {
         __typeof__(cc_channel_pair_create_named(4, CC_CHAN_MODE_BLOCK, 0, sizeof(CCTask), 0, CC_CHAN_TOPO_DEFAULT, 1, &results_tx, &results_rx, "results_tx,results_rx", __FILE__, __LINE__)) __r = cc_channel_pair_create_named(4, CC_CHAN_MODE_BLOCK, 0, sizeof(CCTask), 0, CC_CHAN_TOPO_DEFAULT, 1, &results_tx, &results_rx, "results_tx,results_rx", __FILE__, __LINE__);
         if (__cc_uw_is_err(__r)) {
             #line 43 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
-            __typeof__(__cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "43")) e = __cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "43");
+            __typeof__(__cc_uw_err_at(__r, "cc_channel_pair_create_named(4, CC_CHAN_MODE_BLOCK, 0, sizeof(CCTask), 0, CC_CHAN_TOPO_DEFAULT, 1, &results_tx, &results_rx, \"results_tx,results_rx\", __FILE__, __LINE__)", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "43")) e = __cc_uw_err_at(__r, "cc_channel_pair_create_named(4, CC_CHAN_MODE_BLOCK, 0, sizeof(CCTask), 0, CC_CHAN_TOPO_DEFAULT, 1, &results_tx, &results_rx, \"results_tx,results_rx\", __FILE__, __LINE__)", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "43");
             #line 39 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
             cc_error_log(e);
             { __cc_retval = 1; __cc_ret_set = 1; goto __cc_cleanup; }
@@ -160,7 +160,7 @@ int main(void) {
             __typeof__(cc_nursery_create(NULL)) __r = cc_nursery_create(NULL);
             if (__cc_uw_is_err(__r)) {
                 #line 51 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
-                __typeof__(__cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "51")) e = __cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "51");
+                __typeof__(__cc_uw_err_at(__r, "cc_nursery_create(NULL)", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "51")) e = __cc_uw_err_at(__r, "cc_nursery_create(NULL)", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "51");
                 #line 39 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
                 cc_error_log(e);
                 { __cc_retval = 1; __cc_ret_set = 1; goto __cc_cleanup; }
@@ -181,7 +181,7 @@ int main(void) {
                 __typeof__(cc_nursery_create(consumer)) __r = cc_nursery_create(consumer);
                 if (__cc_uw_is_err(__r)) {
                     #line 79 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
-                    __typeof__(__cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "79")) e = __cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "79");
+                    __typeof__(__cc_uw_err_at(__r, "cc_nursery_create(consumer)", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "79")) e = __cc_uw_err_at(__r, "cc_nursery_create(consumer)", "examples/serdes/c/shadow/recipe_ordered_parallel.ccs", "79");
                     #line 39 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
                     cc_error_log(e);
                     { __cc_retval = 1; __cc_ret_set = 1; goto __cc_cleanup; }
@@ -282,7 +282,7 @@ static void* cc_closure__N1_entry(void* __p) {
                 }
                 #line 61 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
                 if (result != want)
-{
+                {
                     #line 62 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
                     {
                         CCString __msg = cc_string_new();
@@ -302,14 +302,16 @@ static void* cc_closure__N1_entry(void* __p) {
                     #line 63 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
                     cc_atomic_store(&failed, 1);
                     #line 64 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
-                    break;
+                    {
+                        break;
+                    }
                 }
                 #line 66 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
                 expect++;
             }
             #line 68 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
             if (expect !=8+ 1)
-{
+            {
                 #line 69 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"
                 int got = expect - 1;
                 #line 70 "examples/serdes/c/shadow/recipe_ordered_parallel.ccs"

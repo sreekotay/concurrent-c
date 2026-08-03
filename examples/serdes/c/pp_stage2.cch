@@ -1,5 +1,5 @@
-/* Stage 2: include splice, object-like macros, #ifndef guards, angle
- * passthrough. Closed directive names use pp_dir static_map.
+/* Stage 2: include splice, object-like macros, #if/#ifdef/#ifndef guards,
+ * angle passthrough. Closed directive names use pp_dir static_map.
  * Requires pp_tape.cch + <ccc/std/static_map.cch>. */
 #pragma once
 
@@ -79,7 +79,10 @@ typedef struct {
     Token* out;
     int nout;
     int out_cap;
-    int skip_depth; /* nested #if/#ifdef skip; spike: only #ifndef */
+    int skip_depth; /* nested #if/#ifdef/#ifndef skip depth */
+    /* Blank skipped token bytes only for `#if`/`#else` arms (not `#ifdef`
+     * include-guard skips — those share TapeCache bytes across includes). */
+    int skip_blank;
     int err;
     char err_msg[192]; /* set on capacity / hard failures (also printed) */
     /* Top-level #include <...> lines preserved for C/H emit (not spliced). */
@@ -102,8 +105,31 @@ static int pp_add_passthrough_include(Pp* pp, const char* line) {
     return 1;
 }
 
+static int pp_define_has_cc_token(const char* line) {
+    const char* p;
+    if (!line) return 0;
+    /* Concurrent-C surface tokens must not reach the host .c product. */
+    if (strstr(line, "!>") || strstr(line, "?>") || strstr(line, "=>"))
+        return 1;
+    p = line;
+    while ((p = strchr(p, '@')) != NULL) {
+        if (strncmp(p, "@variant", 8) == 0 || strncmp(p, "@create", 7) == 0 ||
+            strncmp(p, "@destroy", 8) == 0 || strncmp(p, "@defer", 6) == 0 ||
+            strncmp(p, "@async", 6) == 0 || strncmp(p, "@await", 6) == 0 ||
+            strncmp(p, "@errhandler", 11) == 0 || strncmp(p, "@err", 4) == 0 ||
+            strncmp(p, "@comptime", 9) == 0 || strncmp(p, "@string", 7) == 0 ||
+            strncmp(p, "@scratch", 8) == 0 || strncmp(p, "@emit", 5) == 0 ||
+            strncmp(p, "@with_deadline", 14) == 0)
+            return 1;
+        p++;
+    }
+    return 0;
+}
+
 static int pp_add_passthrough_define(Pp* pp, const char* line) {
     if (!pp || !line || !line[0] || pp->npass_def >= PASS_INC_CAP) return 0;
+    /* Keep macro table registration; skip host emit for CC-token bodies. */
+    if (pp_define_has_cc_token(line)) return 1;
     snprintf(pp->pass_def[pp->npass_def], sizeof(pp->pass_def[0]), "%s", line);
     pp->npass_def++;
     return 1;
@@ -269,6 +295,20 @@ static int pp_skip_line(Pp* pp) {
     return 1;
 }
 
+/* Space-blank a token's source bytes (keep newlines) so emit lead trivia
+ * cannot resurrect `#if`-skipped arms from the original tape. */
+static void pp_blank_token_src(FileTape* ft, Token t) {
+    size_t off, end, k;
+    if (!ft || !ft->bytes || !t.spell.len) return;
+    off = t.offset;
+    if (off >= ft->len) return;
+    end = off + t.spell.len;
+    if (end > ft->len) end = ft->len;
+    for (k = off; k < end; k++) {
+        if (ft->bytes[k] != '\n') ft->bytes[k] = ' ';
+    }
+}
+
 static int handle_directive(Pp* pp);
 
 /* Macro expansion frames: Token array with no source bytes (not cached). */
@@ -358,6 +398,22 @@ static int handle_define(Pp* pp) {
     if (!pp_raw_next(pp, &id) || id.kind != TK_IDENT) return 0;
     /* function-like: passthrough only (host keeps the API macro). */
     if (pp_raw_peek(pp, &peek) && tok_eq(peek, TK_PUNCT, "(")) {
+        /* Closure literals cannot survive CPP token replay — refuse. */
+        if (captured && strstr(line, "=>")) {
+            const char* path = "<input>";
+            if (pp->nf > 0 && pp->frames[pp->nf - 1].tape &&
+                pp->frames[pp->nf - 1].tape->path)
+                path = pp->frames[pp->nf - 1].tape->path;
+            fprintf(stderr,
+                    "cc: error: %s: 1 closure literal(s) come from macro "
+                    "expansion; closure literals inside #define bodies are "
+                    "not supported\n",
+                    path);
+            fprintf(stderr,
+                    "  hint: define the closure at the use site, or make the "
+                    "macro take the closure as a parameter\n");
+            return 0;
+        }
         if (captured) (void)pp_add_passthrough_define(pp, line);
         pp_skip_line(pp);
         return 1;
@@ -386,19 +442,28 @@ static int handle_directive(Pp* pp) {
     switch (dir) {
     case PP_DIR_ENDIF:
         if (pp->skip_depth > 0) pp->skip_depth--;
+        if (pp->skip_depth == 0) pp->skip_blank = 0;
         pp_skip_line(pp);
         return 1;
     case PP_DIR_ELSE:
         /* spike: toggle skip for one level */
-        if (pp->skip_depth == 1) pp->skip_depth = 0;
-        else if (pp->skip_depth == 0) pp->skip_depth = 1;
+        if (pp->skip_depth == 1) {
+            pp->skip_depth = 0;
+            pp->skip_blank = 0;
+        } else if (pp->skip_depth == 0) {
+            pp->skip_depth = 1;
+            pp->skip_blank = 1; /* dropping an `#if` true arm */
+        }
         pp_skip_line(pp);
         return 1;
     case PP_DIR_IFNDEF: {
         Token id;
         if (!pp_raw_next(pp, &id) || id.kind != TK_IDENT) return 0;
         if (pp->skip_depth > 0) pp->skip_depth++;
-        else if (macro_find(pp, id.spell)) pp->skip_depth = 1;
+        else if (macro_find(pp, id.spell)) {
+            pp->skip_depth = 1;
+            pp->skip_blank = 0; /* include guards: keep shared tape bytes */
+        }
         pp_skip_line(pp);
         return 1;
     }
@@ -406,7 +471,51 @@ static int handle_directive(Pp* pp) {
         Token id;
         if (!pp_raw_next(pp, &id) || id.kind != TK_IDENT) return 0;
         if (pp->skip_depth > 0) pp->skip_depth++;
-        else if (!macro_find(pp, id.spell)) pp->skip_depth = 1;
+        else if (!macro_find(pp, id.spell)) {
+            pp->skip_depth = 1;
+            pp->skip_blank = 0;
+        }
+        pp_skip_line(pp);
+        return 1;
+    }
+    case PP_DIR_IF: {
+        /* Simple spike: #if 0 / #if 1 / #if IDENT (object-like → 0|1).
+         * Unknown forms (`#if defined(...)`, complex exprs) keep the true arm
+         * (directive lines still dropped). Known-false → skip until #else/#endif. */
+        int known = 0;
+        int truth = 0;
+        if (pp->skip_depth > 0) {
+            pp->skip_depth++;
+            pp_skip_line(pp);
+            return 1;
+        }
+        Token cond;
+        if (pp_raw_next(pp, &cond)) {
+            if (cond.kind == TK_NUM) {
+                if (spell_eq(cond.spell, "1")) {
+                    known = 1;
+                    truth = 1;
+                } else if (spell_eq(cond.spell, "0")) {
+                    known = 1;
+                    truth = 0;
+                }
+            } else if (cond.kind == TK_IDENT) {
+                Macro* m = macro_find(pp, cond.spell);
+                if (m && m->nbody == 1 && m->body[0].kind == TK_NUM) {
+                    if (spell_eq(m->body[0].spell, "1")) {
+                        known = 1;
+                        truth = 1;
+                    } else if (spell_eq(m->body[0].spell, "0")) {
+                        known = 1;
+                        truth = 0;
+                    }
+                }
+            }
+        }
+        if (known && !truth) {
+            pp->skip_depth = 1;
+            pp->skip_blank = 1;
+        }
         pp_skip_line(pp);
         return 1;
     }
@@ -415,8 +524,7 @@ static int handle_directive(Pp* pp) {
     }
 
     if (pp->skip_depth > 0) {
-        /* Nested #if depth while skipping; other unknown dirs just skip line. */
-        if (dir == PP_DIR_IF) pp->skip_depth++;
+        /* Unknown dirs while skipping: drop the line. */
         pp_skip_line(pp);
         return 1;
     }
@@ -437,6 +545,7 @@ static int pp_run(Pp* pp, FileTape* root) {
     pp->nf = 0;
     pp->nout = 0;
     pp->skip_depth = 0;
+    pp->skip_blank = 0;
     pp->err = 0;
     pp->err_msg[0] = 0;
     pp->npass_inc = 0;
@@ -457,6 +566,9 @@ static int pp_run(Pp* pp, FileTape* root) {
             continue;
         }
         if (pp->skip_depth > 0) {
+            /* Drop from the token stream; for `#if`/`#else` also blank source
+             * so lead replay (skips only `#…` lines) cannot re-inject the arm. */
+            if (pp->skip_blank) pp_blank_token_src(fr->tape, t);
             fr->i++;
             continue;
         }

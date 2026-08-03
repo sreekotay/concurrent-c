@@ -129,6 +129,30 @@ static int cc__va_find(const char* s, size_t len); /* fwd: used by schema commit
 
 void cc_variant_schema_pending_clear(void) { g_schema_pending_n = 0; }
 
+int cc_variant_schema_pending_count(void) { return g_schema_pending_n; }
+
+const char* cc_variant_schema_pending_name(int i) {
+    if (i < 0 || i >= g_schema_pending_n) return "";
+    return g_schema_pending[i].name;
+}
+
+int cc_variant_schema_pending_narms(int i) {
+    if (i < 0 || i >= g_schema_pending_n) return 0;
+    return g_schema_pending[i].narms;
+}
+
+const char* cc_variant_schema_pending_arm(int i, int a) {
+    if (i < 0 || i >= g_schema_pending_n || a < 0 || a >= g_schema_pending[i].narms)
+        return "";
+    return g_schema_pending[i].arms[a].name;
+}
+
+int cc_variant_schema_pending_arm_is_void(int i, int a) {
+    if (i < 0 || i >= g_schema_pending_n || a < 0 || a >= g_schema_pending[i].narms)
+        return 0;
+    return g_schema_pending[i].arms[a].is_void;
+}
+
 int cc_variant_schema_pending_add(const char* name, int narms,
                                   const char* const* arm_names,
                                   const int* is_void) {

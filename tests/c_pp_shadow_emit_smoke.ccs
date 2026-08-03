@@ -332,10 +332,10 @@ static int test_safety_oracles(void) {
                             "must diverge"))
         return 0;
     if (!expect_safety_fail("safe_variant_unprotected_proj_fail.ccs",
-                            "unprotected projection"))
+                            "projection of arm"))
         return 0;
     if (!expect_safety_fail("safe_variant_raw_u_fail.ccs",
-                            "raw '.u' reach-in"))
+                            "cannot reach into variant"))
         return 0;
     if (!expect_safety_fail("safe_chan_send_pointer_field_fail.ccs",
                             "raw pointer field"))
@@ -420,7 +420,7 @@ static int test_cap_body(void) {
         FILE* f = fopen(path, "wb");
         if (!f) return 0;
         fputs("int main(void) {\n{\n", f);
-        for (i = 0; i < 33; i++) fprintf(f, "int a%d;\n", i);
+        for (i = 0; i < 65; i++) fprintf(f, "int a%d;\n", i);
         fputs("}\nreturn 0;\n}\n", f);
         fclose(f);
     }
@@ -445,8 +445,8 @@ static int test_cap_body(void) {
     p.toks = tokbuf;
     p.n = pp.nout;
     p.cache = &cache;
-    if (parse_tu(&p, &items, &n) || !strstr(p.err_msg, "cap 32")) {
-        printf("FAIL: expected body cap 32 diag, got: %s\n", p.err_msg);
+    if (parse_tu(&p, &items, &n) || !strstr(p.err_msg, "cap 64")) {
+        printf("FAIL: expected body cap 64 diag, got: %s\n", p.err_msg);
         pp_free_macros(&pp);
         tape_cache_free(&cache);
         cc_arena_free(&arena);

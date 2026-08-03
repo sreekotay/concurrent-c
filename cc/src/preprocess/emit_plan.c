@@ -1093,6 +1093,11 @@ size_t cc_emit_plan_comptime_fragment_count(void) {
     return cc__comptime_frag_count;
 }
 
+const char* cc_emit_plan_comptime_fragment_text(size_t frag_index) {
+    if (frag_index >= cc__comptime_frag_count) return NULL;
+    return cc__comptime_frags[frag_index].text;
+}
+
 /* --- comptime executor host API (Stage 0) --- */
 
 static size_t cc__host_site_pos = 0;

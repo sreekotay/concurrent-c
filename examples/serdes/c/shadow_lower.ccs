@@ -334,6 +334,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    /* Tables are heap/TLS via parser_ensure_storage — stack Parser is small. */
     Parser p = {0};
     p.toks = tokbuf;
     p.n = pp.nout;

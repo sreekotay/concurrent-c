@@ -184,19 +184,19 @@ static inline CCSlice cc_nursery_lower_c(CCSlice recv_type,
     (void)arg_types;
     #line 143 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_nursery.cch"
     if (cc_ufcs_slice_eq_cstr(method, "spawn"))
-{
+    {
         #line 144 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_nursery.cch"
         return cc_ufcs_emit_value_cstr(arena, "cc_nursery_spawn_closure0");
     }
     #line 146 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_nursery.cch"
     if (cc_ufcs_slice_eq_cstr(method, "spawnhybrid"))
-{
+    {
         #line 147 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_nursery.cch"
         return cc_ufcs_emit_value_cstr(arena, "cc_nursery_spawnhybrid_closure0");
     }
     #line 149 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_nursery.cch"
     if (cc_ufcs_slice_eq_cstr(method, "close_on"))
-{
+    {
         #line 150 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_nursery.cch"
         return cc_ufcs_emit_value_cstr(arena, "cc_nursery_add_closing_tx");
     }

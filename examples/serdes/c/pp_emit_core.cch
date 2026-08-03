@@ -163,7 +163,7 @@ static void shadow_result_name(const char* ok, const char* err, char* out, size_
 
 /* In result-fn bodies, rewrite cc_ok/cc_err to typed cc_ok_RNAME/cc_err_RNAME. */
 static void shadow_rewrite_result_ctors(char* expr, size_t cap, const char* rname) {
-    char tmp[512];
+    char tmp[4096];
     const char* p;
     char* o;
     size_t rem;
@@ -260,6 +260,81 @@ static int shadow_expr_lhs_start(const char* s, int end) {
     return i + 1;
 }
 
+/* Walk back from accessor pos over a projection receiver primary:
+ * ident, parenthesized expr, call, or `*p` — stop at ops outside groups. */
+static int shadow_proj_recv_start(const char* s, int end) {
+    int i = end - 1;
+    while (i >= 0 && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n')) i--;
+    if (i < 0) return -1;
+    if (s[i] == ')' || s[i] == ']') {
+        char close = s[i];
+        char open = (close == ')') ? '(' : '[';
+        int d = 0;
+        while (i >= 0) {
+            if (s[i] == close) d++;
+            else if (s[i] == open) {
+                d--;
+                if (d == 0) {
+                    i--;
+                    break;
+                }
+            }
+            i--;
+        }
+        if (d != 0) return -1;
+        while (i >= 0 && (s[i] == ' ' || s[i] == '\t')) i--;
+        /* call/callee: ident(...) — include the name; else '(' of `(recv)`. */
+        if (i >= 0 && shadow_is_id(s[i])) {
+            while (i >= 0 && shadow_is_id(s[i])) i--;
+        }
+        return i + 1;
+    }
+    if (!shadow_is_id(s[i])) return -1;
+    while (i >= 0 && shadow_is_id(s[i])) i--;
+    /* optional unary `*` prefixes (`*p`, `**p`) */
+    {
+        int j = i;
+        while (j >= 0 && (s[j] == ' ' || s[j] == '\t')) j--;
+        while (j >= 0 && s[j] == '*') {
+            i = j - 1;
+            j = i;
+            while (j >= 0 && (s[j] == ' ' || s[j] == '\t')) j--;
+        }
+    }
+    return i + 1;
+}
+
+/* Walk back from `?>` over `recv.arm` / `recv->arm`. Returns primary start
+ * or -1; fills arm / is_arrow / acc_pos (index of '.' or '-' of '->'). */
+static int shadow_variant_proj_lhs_start(const char* s, int end, char* arm,
+                                        size_t arm_cap, int* is_arrow,
+                                        int* acc_pos) {
+    int i, arm_s, arm_e, acc;
+    if (!s || end <= 0 || !arm || !arm_cap || !is_arrow || !acc_pos) return -1;
+    i = end - 1;
+    while (i >= 0 && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n')) i--;
+    if (i < 0 || !shadow_is_id(s[i])) return -1;
+    arm_e = i + 1;
+    while (i >= 0 && shadow_is_id(s[i])) i--;
+    arm_s = i + 1;
+    if (arm_e <= arm_s || (size_t)(arm_e - arm_s) >= arm_cap) return -1;
+    memcpy(arm, s + arm_s, (size_t)(arm_e - arm_s));
+    arm[arm_e - arm_s] = 0;
+    while (i >= 0 && (s[i] == ' ' || s[i] == '\t')) i--;
+    if (i < 0) return -1;
+    if (s[i] == '.') {
+        *is_arrow = 0;
+        acc = i;
+    } else if (i > 0 && s[i] == '>' && s[i - 1] == '-') {
+        *is_arrow = 1;
+        acc = i - 1;
+    } else {
+        return -1;
+    }
+    *acc_pos = acc;
+    return shadow_proj_recv_start(s, acc);
+}
+
 /* Rewrite one `lhs ?> [>(bind)] rhs` occurrence. Returns 1 if rewritten. */
 static int shadow_rewrite_one_qmark(char* expr, size_t cap) {
     char out[768];
@@ -339,11 +414,17 @@ static int shadow_rewrite_one_qmark(char* expr, size_t cap) {
     return 1;
 }
 
+static int shadow_rewrite_variant_qmark(char* expr, size_t cap);
+
+static int shadow_recv_name_before(const char* expr, const char* dot,
+                                   char* name, size_t cap);
+
 /* Sole leftover `?>` text rewrite entry (emit-time). Prefer parse-time
  * AST_* unwrap forms; do not call `shadow_rewrite_one_qmark` from ad-hoc sites. */
 static void shadow_emit_leftover_qmark_rewrite(char* expr, size_t cap) {
     int guard = 0;
     if (!expr || !cap) return;
+    if (shadow_rewrite_variant_qmark(expr, cap)) return;
     while (guard++ < 8 && shadow_rewrite_one_qmark(expr, cap)) { }
 }
 
@@ -523,12 +604,26 @@ typedef struct {
     char elem[64]; /* "int", "int*", … */
     char topo[16]; /* "1:1" or empty */
     int ordered;
+    int is_sync;
+    int bp_mode; /* 0 block, 1 drop_new, 2 drop_old */
 } ShadowChanDecl;
 
 enum { SHADOW_CHAN_CAP = 64 };
-
+enum {
+    SHADOW_DEFER_SCOPE_MAX = 32,
+    SHADOW_DEFER_SCOPE_DEFERS = 16
+};
 typedef struct {
-    AstNode* eh;          /* @errhandler node (call or block) */
+    AstNode* defers[SHADOW_DEFER_SCOPE_DEFERS];
+    int ndefers;
+    int is_loop;
+} ShadowDeferScope;
+
+enum { SHADOW_EH_STACK_CAP = 8 };
+typedef struct {
+    AstNode* eh;          /* nearest @errhandler (default) */
+    AstNode* ehs[SHADOW_EH_STACK_CAP]; /* stacked handlers, outer→inner */
+    int nehs;
     const char* rname;    /* enclosing CCResult_* name, or NULL */
     const char* body_indent; /* fn/closure body indent from source */
     int* deadline_i;      /* @with_deadline id counter */
@@ -546,6 +641,15 @@ typedef struct {
     ShadowChanDecl* chans; /* TU-scoped channel handle table */
     int* nchans;
     int send_task_ret; /* closure packs int into cc_task_result_ptr */
+    unsigned owner_fn_attrs; /* enclosing @async fn attrs for autoblock */
+    unsigned block_attrs;    /* lexical @nonblocking/@blocking ambient */
+    int defer_emit;          /* emitting @defer body — no autoblock */
+    struct { char name[64]; char ty[64]; } vdrops[32];
+    int nvdrops;
+    int vdrop_marks[16];
+    int nvdrop_marks;
+    ShadowDeferScope defer_stack[SHADOW_DEFER_SCOPE_MAX];
+    int defer_depth;
 } ShadowCtx;
 
 static const char* shadow_eh_bind(ShadowCtx* ctx) {
@@ -553,9 +657,89 @@ static const char* shadow_eh_bind(ShadowCtx* ctx) {
     return "e";
 }
 
+/* Result-fn name → CCResult_* (for stacked @errhandler type match). */
+enum { SHADOW_RFN_CAP = 64 };
+static struct {
+    char name[64];
+    char rname[128];
+    char err[64];
+} g_shadow_rfns[SHADOW_RFN_CAP];
+static int g_shadow_nrfns;
+
+static void shadow_rfn_register(const char* name, const char* rname,
+                                const char* err) {
+    int i;
+    if (!name || !name[0] || g_shadow_nrfns >= SHADOW_RFN_CAP) return;
+    for (i = 0; i < g_shadow_nrfns; i++) {
+        if (strcmp(g_shadow_rfns[i].name, name) == 0) {
+            if (rname && rname[0])
+                snprintf(g_shadow_rfns[i].rname, sizeof(g_shadow_rfns[i].rname),
+                         "%s", rname);
+            if (err && err[0])
+                snprintf(g_shadow_rfns[i].err, sizeof(g_shadow_rfns[i].err),
+                         "%s", err);
+            return;
+        }
+    }
+    snprintf(g_shadow_rfns[g_shadow_nrfns].name,
+             sizeof(g_shadow_rfns[0].name), "%s", name);
+    snprintf(g_shadow_rfns[g_shadow_nrfns].rname,
+             sizeof(g_shadow_rfns[0].rname), "%s", rname ? rname : "");
+    snprintf(g_shadow_rfns[g_shadow_nrfns].err, sizeof(g_shadow_rfns[0].err),
+             "%s", err ? err : "");
+    g_shadow_nrfns++;
+}
+
+static const char* shadow_rfn_err(const char* name) {
+    int i;
+    if (!name || !name[0]) return NULL;
+    for (i = 0; i < g_shadow_nrfns; i++) {
+        if (strcmp(g_shadow_rfns[i].name, name) == 0 &&
+            g_shadow_rfns[i].err[0])
+            return g_shadow_rfns[i].err;
+    }
+    return NULL;
+}
+
+/* Pick stacked @errhandler by Result error type E (inner-most match). */
+static AstNode* shadow_eh_for_call(ShadowCtx* ctx, const char* call) {
+    char fname[64];
+    size_t ni = 0;
+    const char* p;
+    const char* err;
+    int i;
+    if (!ctx || ctx->nehs <= 0) return ctx ? ctx->eh : NULL;
+    if (!call || !call[0]) return ctx->eh;
+    p = call;
+    while (*p == ' ' || *p == '\t') p++;
+    while (((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+            (*p >= '0' && *p <= '9') || *p == '_') &&
+           ni + 1 < sizeof(fname))
+        fname[ni++] = *p++;
+    fname[ni] = 0;
+    if (!fname[0] || *p != '(') return ctx->eh;
+    err = shadow_rfn_err(fname);
+    if (!err || !err[0]) return ctx->eh;
+    for (i = ctx->nehs - 1; i >= 0; i--) {
+        if (ctx->ehs[i] && ctx->ehs[i]->a[0] &&
+            strcmp(ctx->ehs[i]->a, err) == 0)
+            return ctx->ehs[i];
+    }
+    return ctx->eh;
+}
+
+static void shadow_eh_push_node(ShadowCtx* ctx, AstNode* eh) {
+    if (!ctx || !eh) return;
+    if (ctx->nehs < SHADOW_EH_STACK_CAP) ctx->ehs[ctx->nehs++] = eh;
+    ctx->eh = eh;
+}
+
 /* Emit-wide channel table (filled while walking stmts / items). */
 static ShadowChanDecl g_shadow_chans[SHADOW_CHAN_CAP];
 static int g_shadow_nchans;
+/* Tx names that this TU feeds via send_task (ordered-task channel select). */
+static char g_shadow_task_send[SHADOW_CHAN_CAP][64];
+static int g_shadow_ntask_send;
 /* Vec::[T] → emit CC_VEC_DECL_ARENA(T, CCVec_T) once per TU. */
 static char g_shadow_vecs[16][64];
 static int g_shadow_nvecs;
@@ -572,42 +756,870 @@ static int g_shadow_ntd;
 /* Non-prelude slice elems needing CC_DECL_SLICE(T) (e.g. Pt). */
 static char g_shadow_slices[8][64];
 static int g_shadow_nslices;
-/* `@variant Name` — arm names for init/field rewrite. */
+/* `@variant Name` — arm names, packed layout, drop hooks. */
 typedef struct {
     char name[64];
     char arms[8][64];
+    char tys[8][96];
     int is_void[8];
     int narm;
+    int is_packed;
+    int donor_arm;
+    unsigned packed_size;
+    unsigned packed_align;
+    unsigned niche_off;
+    unsigned niche_width;
+    unsigned long long niche_sentinel;
+    int has_drop;
 } ShadowVariant;
-static ShadowVariant g_shadow_variants[8];
+static ShadowVariant g_shadow_variants[32];
 static int g_shadow_nvariants;
+static int g_shadow_va_tmp_id;
+
+static ShadowVariant* shadow_variant_for_recv(const char* recv);
+
+static const char* shadow_destroy_hook_for(const char* ty);
+
+static int shadow_is_c_keyword(const char* s) {
+    static const char* kw[] = {
+        "auto", "break", "case", "char", "const", "continue", "default", "do",
+        "double", "else", "enum", "extern", "float", "for", "goto", "if",
+        "inline", "int", "long", "register", "return", "short", "signed",
+        "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned",
+        "void", "volatile", "while", NULL
+    };
+    int i;
+    if (!s || !s[0]) return 0;
+    for (i = 0; kw[i]; i++) if (strcmp(s, kw[i]) == 0) return 1;
+    return 0;
+}
+
+static int shadow_type_is_pointer(const char* ty) {
+    return ty && strchr(ty, '*') != NULL;
+}
+
+/* Lower leftover `Family::[args]` spellings in opaque expr text. */
+static void shadow_rewrite_generic_types_text(char* text, size_t cap) {
+    char out[4096];
+    size_t o = 0;
+    const char* p;
+    int changed = 0;
+    if (!text || !cap || !text[0]) return;
+    p = text;
+    while (*p && o + 1 < sizeof(out)) {
+        /* Never rewrite inside "…" / '…' (printf "CCVec::[T]" must survive). */
+        if (*p == '"' || *p == '\'') {
+            char qch = *p;
+            out[o++] = *p++;
+            while (*p && o + 1 < sizeof(out)) {
+                out[o++] = *p;
+                if (*p == '\\' && p[1]) {
+                    p++;
+                    if (o + 1 < sizeof(out)) out[o++] = *p;
+                    p++;
+                    continue;
+                }
+                p++;
+                if (p[-1] == qch) break;
+            }
+            continue;
+        }
+        if (((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+             *p == '_') &&
+            (p == text ||
+             !((p[-1] >= 'A' && p[-1] <= 'Z') || (p[-1] >= 'a' && p[-1] <= 'z') ||
+               (p[-1] >= '0' && p[-1] <= '9') || p[-1] == '_'))) {
+            const char* name = p;
+            size_t nl = 0;
+            const char* q;
+            while ((p[nl] >= 'A' && p[nl] <= 'Z') ||
+                   (p[nl] >= 'a' && p[nl] <= 'z') ||
+                   (p[nl] >= '0' && p[nl] <= '9') || p[nl] == '_')
+                nl++;
+            q = name + nl;
+            while (*q == ' ' || *q == '\t') q++;
+            if (q[0] == ':' && q[1] == ':' && q[2] == '[') {
+                const char* br = q + 2;
+                const char* r = br + 1;
+                int depth = 1;
+                char compact[96];
+                size_t ci = 0;
+                while (*r && depth > 0) {
+                    if (*r == '[') depth++;
+                    else if (*r == ']') {
+                        depth--;
+                        if (depth == 0) break;
+                    }
+                    r++;
+                }
+                if (depth == 0 && *r == ']') {
+                    const char* a = br + 1;
+                    while (a < r && ci + 1 < sizeof(compact)) {
+                        if (*a == ',' ||
+                            (a[0] == ':' && a[1] == ':' && a[2] == '[')) {
+                            if (*a == ',') {
+                                if (ci && compact[ci - 1] != '_')
+                                    compact[ci++] = '_';
+                                a++;
+                                while (*a == ' ' || *a == '\t') a++;
+                                continue;
+                            }
+                            /* Nested Family::[…] → Family_compact */
+                            {
+                                const char* fn = a;
+                                size_t fnl = 0;
+                                const char* b2;
+                                const char* r2;
+                                int d2 = 1;
+                                while ((fn[fnl] >= 'A' && fn[fnl] <= 'Z') ||
+                                       (fn[fnl] >= 'a' && fn[fnl] <= 'z') ||
+                                       (fn[fnl] >= '0' && fn[fnl] <= '9') ||
+                                       fn[fnl] == '_')
+                                    fnl++;
+                                b2 = fn + fnl;
+                                while (*b2 == ' ' || *b2 == '\t') b2++;
+                                if (!(b2[0] == ':' && b2[1] == ':' &&
+                                      b2[2] == '['))
+                                    break;
+                                b2 += 2;
+                                r2 = b2 + 1;
+                                while (*r2 && d2 > 0) {
+                                    if (*r2 == '[') d2++;
+                                    else if (*r2 == ']') {
+                                        d2--;
+                                        if (d2 == 0) break;
+                                    }
+                                    r2++;
+                                }
+                                if (d2 != 0 || *r2 != ']') break;
+                                if (ci + fnl + 1 >= sizeof(compact)) break;
+                                memcpy(compact + ci, fn, fnl);
+                                ci += fnl;
+                                compact[ci++] = '_';
+                                {
+                                    const char* ia = b2 + 1;
+                                    while (ia < r2 && ci + 1 < sizeof(compact)) {
+                                        if (*ia == ' ' || *ia == '\t') {
+                                            ia++;
+                                            continue;
+                                        }
+                                        if (*ia == ',') {
+                                            if (ci && compact[ci - 1] != '_')
+                                                compact[ci++] = '_';
+                                            ia++;
+                                            continue;
+                                        }
+                                        compact[ci++] = *ia++;
+                                    }
+                                }
+                                a = r2 + 1;
+                                continue;
+                            }
+                        }
+                        if (*a == ' ' || *a == '\t') {
+                            a++;
+                            continue;
+                        }
+                        compact[ci++] = *a++;
+                    }
+                    compact[ci] = 0;
+                    if (compact[0] &&
+                        (strncmp(name, "CCVec", 5) == 0 ||
+                         strncmp(name, "Map", 3) == 0 ||
+                         strncmp(name, "ArrayMap", 8) == 0 ||
+                         strncmp(name, "Vec", 3) == 0 ||
+                         (name[0] >= 'A' && name[0] <= 'Z'))) {
+                        char spelled[160];
+                        if (strncmp(name, "Map", 3) == 0 && nl == 3)
+                            snprintf(spelled, sizeof(spelled), "Map_%s*",
+                                     compact);
+                        else if (strncmp(name, "ArrayMap", 8) == 0 && nl == 8)
+                            snprintf(spelled, sizeof(spelled), "ArrayMap_%s*",
+                                     compact);
+                        else if ((strncmp(name, "CCVec", 5) == 0 && nl == 5) ||
+                                 (strncmp(name, "Vec", 3) == 0 && nl == 3))
+                            snprintf(spelled, sizeof(spelled), "CCVec_%s",
+                                     compact);
+                        else
+                            snprintf(spelled, sizeof(spelled), "%.*s_%s",
+                                     (int)nl, name, compact);
+                        o += (size_t)snprintf(out + o, sizeof(out) - o, "%s",
+                                              spelled);
+                        p = r + 1;
+                        changed = 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        out[o++] = *p++;
+    }
+    out[o] = 0;
+    if (changed) snprintf(text, cap, "%s", out);
+}
+
+/* Fold `type_of(T).size|align|name|kind|nfields` like oracle D1.0/D1.1. */
+static void shadow_lower_type_of_constexpr(char* text, size_t cap) {
+    char out[4096];
+    size_t o = 0;
+    const char* p;
+    int changed = 0;
+    if (!text || !cap || !text[0]) return;
+    p = text;
+    while (*p && o + 1 < sizeof(out)) {
+        if (strncmp(p, "type_of", 7) == 0 &&
+            (p == text ||
+             !((p[-1] >= 'A' && p[-1] <= 'Z') || (p[-1] >= 'a' && p[-1] <= 'z') ||
+               (p[-1] >= '0' && p[-1] <= '9') || p[-1] == '_')) &&
+            !(p[7] >= 'A' && p[7] <= 'Z') && !(p[7] >= 'a' && p[7] <= 'z') &&
+            p[7] != '_' && !(p >= text + 3 && memcmp(p - 3, "cc_", 3) == 0)) {
+            const char* q = p + 7;
+            const char* id0;
+            size_t idn = 0;
+            const char* mem;
+            size_t memn = 0;
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q != '(') goto copy_ch;
+            q++;
+            while (*q == ' ' || *q == '\t') q++;
+            id0 = q;
+            while ((*q >= 'A' && *q <= 'Z') || (*q >= 'a' && *q <= 'z') ||
+                   (*q >= '0' && *q <= '9') || *q == '_')
+                q++;
+            idn = (size_t)(q - id0);
+            if (!idn) goto copy_ch;
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q != ')') goto copy_ch;
+            q++;
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q != '.') goto copy_ch;
+            q++;
+            while (*q == ' ' || *q == '\t') q++;
+            mem = q;
+            while ((*q >= 'A' && *q <= 'Z') || (*q >= 'a' && *q <= 'z') ||
+                   (*q >= '0' && *q <= '9') || *q == '_')
+                q++;
+            memn = (size_t)(q - mem);
+            if (memn == 4 && memcmp(mem, "size", 4) == 0) {
+                o += (size_t)snprintf(out + o, sizeof(out) - o,
+                                      "((size_t)sizeof(%.*s))", (int)idn, id0);
+            } else if (memn == 5 && memcmp(mem, "align", 5) == 0) {
+                o += (size_t)snprintf(out + o, sizeof(out) - o,
+                                      "((size_t)_Alignof(%.*s))", (int)idn, id0);
+            } else if (memn == 4 && memcmp(mem, "name", 4) == 0) {
+                o += (size_t)snprintf(out + o, sizeof(out) - o, "\"%.*s\"",
+                                      (int)idn, id0);
+            } else if (memn == 4 && memcmp(mem, "kind", 4) == 0) {
+                int prim =
+                    (idn == 3 && memcmp(id0, "int", 3) == 0) ||
+                    (idn == 4 && memcmp(id0, "char", 4) == 0) ||
+                    (idn == 5 && memcmp(id0, "short", 5) == 0) ||
+                    (idn == 4 && memcmp(id0, "long", 4) == 0) ||
+                    (idn == 5 && memcmp(id0, "float", 5) == 0) ||
+                    (idn == 6 && memcmp(id0, "double", 6) == 0) ||
+                    (idn == 6 && memcmp(id0, "size_t", 6) == 0) ||
+                    (idn == 4 && memcmp(id0, "bool", 4) == 0);
+                int cont = (idn >= 6 && memcmp(id0, "CCVec_", 6) == 0) ||
+                           (idn >= 4 && memcmp(id0, "Map_", 4) == 0) ||
+                           (idn >= 9 && memcmp(id0, "ArrayMap_", 9) == 0);
+                if (prim)
+                    o += (size_t)snprintf(out + o, sizeof(out) - o,
+                                          "(CC_TK_PRIMITIVE)");
+                else if (cont)
+                    o += (size_t)snprintf(out + o, sizeof(out) - o,
+                                          "(CC_TK_GENERIC_INST)");
+                else
+                    o += (size_t)snprintf(out + o, sizeof(out) - o,
+                                          "(cc_type_of(\"%.*s\")->kind)",
+                                          (int)idn, id0);
+            } else if (memn == 7 && memcmp(mem, "nfields", 7) == 0) {
+                int prim =
+                    (idn == 3 && memcmp(id0, "int", 3) == 0) ||
+                    (idn == 4 && memcmp(id0, "char", 4) == 0) ||
+                    (idn == 5 && memcmp(id0, "short", 5) == 0) ||
+                    (idn == 4 && memcmp(id0, "long", 4) == 0) ||
+                    (idn == 5 && memcmp(id0, "float", 5) == 0) ||
+                    (idn == 6 && memcmp(id0, "double", 6) == 0) ||
+                    (idn == 6 && memcmp(id0, "size_t", 6) == 0) ||
+                    (idn == 4 && memcmp(id0, "bool", 4) == 0);
+                if (prim)
+                    o += (size_t)snprintf(out + o, sizeof(out) - o,
+                                          "((size_t)0)");
+                else
+                    o += (size_t)snprintf(
+                        out + o, sizeof(out) - o,
+                        "((size_t)cc_type_of(\"%.*s\")->nfields)", (int)idn,
+                        id0);
+            } else {
+                goto copy_ch;
+            }
+            p = q;
+            changed = 1;
+            continue;
+        }
+    copy_ch:
+        out[o++] = *p++;
+    }
+    out[o] = 0;
+    if (changed) snprintf(text, cap, "%s", out);
+}
+
+/* Forward-declared niche table (defined below with other hook tables). */
+typedef struct {
+    char ty[64];
+    unsigned size;
+    unsigned align;
+    unsigned off;
+    unsigned width;
+    unsigned long long sentinel;
+} ShadowNicheInfo;
+static ShadowNicheInfo g_shadow_niches[32];
+static int g_shadow_nniches;
+
+static unsigned shadow_variant_type_size(const char* ty) {
+    int i;
+    if (strcmp(ty, "CCString") == 0) return 16;
+    if (strcmp(ty, "int64_t") == 0) return 8;
+    if (strcmp(ty, "int") == 0) return 4;
+    if (strcmp(ty, "Payload") == 0) return 8;
+    if (strcmp(ty, "Handle") == 0) return 16;
+    if (shadow_type_is_pointer(ty)) return 8;
+    for (i = 0; i < g_shadow_nniches; i++) {
+        if (strcmp(g_shadow_niches[i].ty, ty) == 0 && g_shadow_niches[i].size)
+            return g_shadow_niches[i].size;
+    }
+    return 0;
+}
+
+static int shadow_variant_type_niche(const char* ty, unsigned* off, unsigned* width,
+                                    unsigned long long* sentinel) {
+    int i;
+    if (!ty || !off || !width || !sentinel) return 0;
+    if (strcmp(ty, "CCString") == 0) {
+        *off = 12; *width = 4; *sentinel = 0xFFFFFFFFULL; return 1;
+    }
+    if (shadow_type_is_pointer(ty)) {
+        *off = 0; *width = 8; *sentinel = 0; return 1;
+    }
+    for (i = 0; i < g_shadow_nniches; i++) {
+        if (strcmp(g_shadow_niches[i].ty, ty) == 0) {
+            *off = g_shadow_niches[i].off;
+            *width = g_shadow_niches[i].width;
+            *sentinel = g_shadow_niches[i].sentinel;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void shadow_variant_compute_packed(ShadowVariant* v) {
+    int a, d, o;
+    unsigned max_size = 8, max_align = 8;
+    if (!v || !v->is_packed) return;
+    v->donor_arm = -1;
+    for (a = 0; a < v->narm; a++) {
+        unsigned sz = shadow_variant_type_size(v->tys[a]);
+        if (sz > max_size) max_size = sz;
+    }
+    if (v->narm == 2) {
+        for (d = 0; d < 2; d++) {
+            unsigned off, width;
+            unsigned long long sentinel;
+            o = 1 - d;
+            if (v->is_void[o] && shadow_variant_type_niche(v->tys[d], &off, &width, &sentinel)) {
+                v->donor_arm = d; v->niche_off = off; v->niche_width = width;
+                v->niche_sentinel = sentinel; break;
+            } else if (shadow_variant_type_niche(v->tys[d], &off, &width, &sentinel)) {
+                if (shadow_variant_type_size(v->tys[o]) <= off) {
+                    v->donor_arm = d; v->niche_off = off; v->niche_width = width;
+                    v->niche_sentinel = sentinel; break;
+                }
+            }
+        }
+    }
+    v->packed_size = max_size;
+    v->packed_align = max_align;
+}
+
+static void shadow_variant_update_drop(ShadowVariant* v) {
+    int a;
+    if (!v) return;
+    v->has_drop = 0;
+    for (a = 0; a < v->narm; a++) {
+        if (!v->is_void[a] && shadow_destroy_hook_for(v->tys[a])) {
+            v->has_drop = 1; return;
+        }
+    }
+}
+
+static void shadow_variant_register_full(const char* name, char arms[][64],
+                                         char tys[][96], const int* is_void,
+                                         int narm, int is_packed) {
+    int i, a;
+    ShadowVariant* v;
+    if (!name || !name[0] || narm <= 0 ||
+        g_shadow_nvariants >= (int)(sizeof(g_shadow_variants) /
+                                    sizeof(g_shadow_variants[0])))
+        return;
+    for (i = 0; i < g_shadow_nvariants; i++) {
+        if (strcmp(g_shadow_variants[i].name, name) == 0) {
+            v = &g_shadow_variants[i]; goto upd;
+        }
+    }
+    v = &g_shadow_variants[g_shadow_nvariants++];
+    memset(v, 0, sizeof(*v));
+    snprintf(v->name, sizeof(v->name), "%s", name);
+upd:
+    v->narm = narm > 8 ? 8 : narm;
+    v->is_packed = is_packed ? 1 : 0;
+    for (a = 0; a < v->narm; a++) {
+        snprintf(v->arms[a], sizeof(v->arms[0]), "%s", arms[a]);
+        if (tys && tys[a][0]) snprintf(v->tys[a], sizeof(v->tys[0]), "%s", tys[a]);
+        v->is_void[a] = is_void && is_void[a] ? 1 : 0;
+    }
+    if (v->is_packed) shadow_variant_compute_packed(v);
+    shadow_variant_update_drop(v);
+}
 
 static void shadow_variant_register(const char* name, char arms[][64],
                                     const int* is_void, int narm) {
-    int i, a;
-    if (!name || !name[0] || narm <= 0 || g_shadow_nvariants >= 8) return;
-    for (i = 0; i < g_shadow_nvariants; i++) {
-        if (strcmp(g_shadow_variants[i].name, name) == 0) return;
-    }
-    snprintf(g_shadow_variants[g_shadow_nvariants].name,
-             sizeof(g_shadow_variants[0].name), "%s", name);
-    g_shadow_variants[g_shadow_nvariants].narm = narm > 8 ? 8 : narm;
-    for (a = 0; a < g_shadow_variants[g_shadow_nvariants].narm; a++) {
-        snprintf(g_shadow_variants[g_shadow_nvariants].arms[a],
-                 sizeof(g_shadow_variants[0].arms[0]), "%s", arms[a]);
-        g_shadow_variants[g_shadow_nvariants].is_void[a] =
-            is_void && is_void[a] ? 1 : 0;
-    }
-    g_shadow_nvariants++;
+    char tys[8][96];
+    memset(tys, 0, sizeof(tys));
+    shadow_variant_register_full(name, arms, tys, is_void, narm, 0);
 }
 
 static ShadowVariant* shadow_variant_find(const char* name) {
+    char base[64];
+    const char* p = name;
+    size_t n = 0;
     int i;
     if (!name) return NULL;
+    /* Binds are often `Name*` / `const Name*`; variants are registered bare. */
+    while (*p == ' ' || *p == '\t') p++;
+    if (strncmp(p, "const ", 6) == 0) p += 6;
+    while (*p == ' ' || *p == '\t') p++;
+    if (strncmp(p, "struct ", 7) == 0) p += 7;
+    while (*p && *p != '*' && *p != ' ' && *p != '\t' && n + 1 < sizeof(base))
+        base[n++] = *p++;
+    base[n] = 0;
+    if (!base[0]) return NULL;
     for (i = 0; i < g_shadow_nvariants; i++)
-        if (strcmp(g_shadow_variants[i].name, name) == 0)
+        if (strcmp(g_shadow_variants[i].name, base) == 0)
             return &g_shadow_variants[i];
     return NULL;
+}
+
+static ShadowVariant* shadow_variant_find_by_arm(const char* arm) {
+    int i, a, hits = 0;
+    ShadowVariant* found = NULL;
+    if (!arm || !arm[0]) return NULL;
+    for (i = 0; i < g_shadow_nvariants; i++) {
+        for (a = 0; a < g_shadow_variants[i].narm; a++) {
+            if (strcmp(g_shadow_variants[i].arms[a], arm) == 0) {
+                found = &g_shadow_variants[i];
+                hits++;
+            }
+        }
+    }
+    return hits == 1 ? found : NULL;
+}
+
+static int shadow_variant_arm_match(ShadowVariant* hint, const char* expr,
+                                    const char* site, const char* arm,
+                                    size_t alen, ShadowVariant** out_v,
+                                    int* out_a);
+
+static void shadow_variant_track_drop(ShadowCtx* ctx, const char* name,
+                                      const char* vty) {
+    ShadowVariant* v;
+    if (!ctx || !name || !name[0] || !vty || !vty[0]) return;
+    v = shadow_variant_find(vty);
+    if (!v) return;
+    shadow_variant_update_drop(v);
+    if (!v->has_drop) return;
+    if (ctx->nvdrops >= 32) return;
+    snprintf(ctx->vdrops[ctx->nvdrops].name, sizeof(ctx->vdrops[0].name),
+             "%s", name);
+    snprintf(ctx->vdrops[ctx->nvdrops].ty, sizeof(ctx->vdrops[0].ty),
+             "%s", vty);
+    ctx->nvdrops++;
+}
+
+static int shadow_emit_variant_block_drops(CEmit* out, ShadowCtx* ctx,
+                                           const char* indent, int from,
+                                           int to) {
+    int i;
+    if (!out || !ctx || from >= to) return 1;
+    for (i = to - 1; i >= from; i--) {
+        ShadowVariant* v = shadow_variant_find(ctx->vdrops[i].ty);
+        if (!v) continue;
+        shadow_variant_update_drop(v);
+        if (!v->has_drop) continue;
+        if (!cemit_fmt(out, "%s%s__cc_drop(&(%s));\n", indent, v->name,
+                       ctx->vdrops[i].name))
+            return 0;
+    }
+    return 1;
+}
+
+static void shadow_vdrop_mark_push(ShadowCtx* ctx) {
+    if (!ctx || ctx->nvdrop_marks >= 16) return;
+    ctx->vdrop_marks[ctx->nvdrop_marks++] = ctx->nvdrops;
+}
+
+/* Emit scope-exit drops for the current mark and pop it. */
+static int shadow_vdrop_mark_pop_emit(CEmit* out, ShadowCtx* ctx,
+                                     const char* indent) {
+    int from;
+    if (!out || !ctx || ctx->nvdrop_marks <= 0) return 1;
+    from = ctx->vdrop_marks[--ctx->nvdrop_marks];
+    if (!shadow_emit_variant_block_drops(out, ctx, indent, from, ctx->nvdrops))
+        return 0;
+    ctx->nvdrops = from;
+    return 1;
+}
+
+/* `v.arm ?> fb` → if/else statement-expression (spec §5a).
+ * Only the projection primary immediately left of `?>` is the LHS — not the
+ * whole prefix — so `a || (c.num ?> 0)` keeps `a || (` intact. */
+static int shadow_rewrite_variant_qmark(char* expr, size_t cap) {
+    const char* q;
+    char base[128], arm[64], fb[1536], piece[2048], out[3072];
+    char rname[64];
+    ShadowVariant* v;
+    int is_arrow = 0, a, id, ls, le, rs, re, acc_pos;
+    const char* acc;
+    size_t bl;
+    if (!expr || !cap) return 0;
+    q = strstr(expr, "?>");
+    if (!q) return 0;
+    le = (int)(q - expr);
+    ls = shadow_variant_proj_lhs_start(expr, le, arm, sizeof(arm), &is_arrow,
+                                      &acc_pos);
+    if (ls < 0 || acc_pos <= ls) return 0;
+    bl = (size_t)(acc_pos - ls);
+    if (bl == 0 || bl >= sizeof(base)) return 0;
+    memcpy(base, expr + ls, bl);
+    base[bl] = 0;
+    while (bl > 0 && (base[bl - 1] == ' ' || base[bl - 1] == '\t'))
+        base[--bl] = 0;
+    if (!bl) return 0;
+    v = shadow_variant_for_recv(base);
+    if (!v &&
+        shadow_recv_name_before(expr, expr + acc_pos, rname, sizeof(rname)))
+        v = shadow_variant_for_recv(rname);
+    if (!v) v = shadow_variant_find_by_arm(arm);
+    if (!v) return 0;
+    for (a = 0; a < v->narm; a++)
+        if (strcmp(v->arms[a], arm) == 0) break;
+    if (a >= v->narm || v->is_void[a]) return 0;
+    /* Fallback: tight operand, stop at ops / closers outside groups. */
+    rs = le + 2;
+    while (expr[rs] == ' ' || expr[rs] == '\t') rs++;
+    {
+        int depth = 0;
+        re = rs;
+        while (expr[re]) {
+            char c = expr[re];
+            if (c == '(' || c == '[' || c == '{') depth++;
+            else if (c == ')' || c == ']' || c == '}') {
+                if (depth == 0) break;
+                depth--;
+            } else if (depth == 0 && (c == ',' || c == ';')) break;
+            else if (depth == 0 &&
+                     ((c == '&' && expr[re + 1] == '&') ||
+                      (c == '|' && expr[re + 1] == '|') ||
+                      (c == '=' && expr[re + 1] == '=') ||
+                      (c == '!' && expr[re + 1] == '=') ||
+                      (c == '<' && (expr[re + 1] == '=' || expr[re + 1] != '<')) ||
+                      (c == '>' && (expr[re + 1] == '=' || expr[re + 1] != '>')) ||
+                      c == '?' || c == ':' || c == '+' || c == '-' || c == '*' ||
+                      c == '/' || c == '%' || c == '^')) {
+                if (re > rs) break;
+            }
+            re++;
+        }
+    }
+    if (re <= rs || (size_t)(re - rs) >= sizeof(fb)) return 0;
+    memcpy(fb, expr + rs, (size_t)(re - rs));
+    fb[re - rs] = 0;
+    acc = is_arrow ? "->" : ".";
+    id = ++g_shadow_va_tmp_id;
+    /* Packed: emit getters directly — never insert `.u.` for later materialize. */
+    if (v->is_packed) {
+        if (is_arrow) {
+            if (snprintf(piece, sizeof(piece),
+                         "({ __typeof__(%s__cc_get_%s(%s)) __cc_pj%d; "
+                         "if (%s__cc_kind(%s) == %s_%s) { __cc_pj%d = "
+                         "%s__cc_get_%s(%s); } else { __cc_pj%d = (%s); } "
+                         "__cc_pj%d; })",
+                         v->name, arm, base, id, v->name, base, v->name, arm,
+                         id, v->name, arm, base, id, fb, id) >= (int)sizeof(piece))
+                return 0;
+        } else {
+            if (snprintf(piece, sizeof(piece),
+                         "({ __typeof__(%s__cc_get_%s(&(%s))) __cc_pj%d; "
+                         "if (%s__cc_kind(&(%s)) == %s_%s) { __cc_pj%d = "
+                         "%s__cc_get_%s(&(%s)); } else { __cc_pj%d = (%s); } "
+                         "__cc_pj%d; })",
+                         v->name, arm, base, id, v->name, base, v->name, arm,
+                         id, v->name, arm, base, id, fb, id) >= (int)sizeof(piece))
+                return 0;
+        }
+    } else {
+        if (snprintf(piece, sizeof(piece),
+                     "({ __typeof__((%s)%su.%s) __cc_pj%d; "
+                     "if ((%s)%skind == %s_%s) { __cc_pj%d = (%s)%su.%s; } "
+                     "else { __cc_pj%d = (%s); } __cc_pj%d; })",
+                     base, acc, arm, id, base, acc, v->name, arm, id, base,
+                     acc, arm, id, fb, id) >= (int)sizeof(piece))
+            return 0;
+    }
+    if (snprintf(out, sizeof(out), "%.*s%s%s", ls, expr, piece,
+                 expr + re) >= (int)sizeof(out))
+        return 0;
+    if (strlen(out) >= cap) return 0;
+    snprintf(expr, cap, "%s", out);
+    return 1;
+}
+
+/* Resolve surface `recv.arm` / `recv->arm` to a registered variant projection.
+ * Fills base/arm/is_arrow. Returns the variant, or NULL. */
+static ShadowVariant* shadow_variant_parse_proj(const char* expr, char* base,
+                                               size_t bcap, char* arm,
+                                               size_t acap, int* is_arrow) {
+    int ls, acc_pos, arrow = 0;
+    size_t bl;
+    char rname[64];
+    ShadowVariant* v;
+    int a;
+    if (!expr || !base || !bcap || !arm || !acap || !is_arrow) return NULL;
+    ls = shadow_variant_proj_lhs_start(expr, (int)strlen(expr), arm, acap,
+                                      &arrow, &acc_pos);
+    if (ls < 0 || acc_pos <= ls) return NULL;
+    /* Peel already-lowered `.u.arm` / `->u.arm` back to the real receiver. */
+    if (!arrow && acc_pos >= 2 && expr[acc_pos - 1] == 'u') {
+        int uacc = -1;
+        if (expr[acc_pos - 2] == '.') {
+            uacc = acc_pos - 2;
+            arrow = 0;
+        } else if (acc_pos >= 3 && expr[acc_pos - 2] == '>' &&
+                   expr[acc_pos - 3] == '-') {
+            uacc = acc_pos - 3;
+            arrow = 1;
+        }
+        if (uacc >= 0) {
+            ls = shadow_proj_recv_start(expr, uacc);
+            if (ls < 0) return NULL;
+            acc_pos = uacc;
+        }
+    }
+    bl = (size_t)(acc_pos - ls);
+    if (bl == 0 || bl >= bcap) return NULL;
+    memcpy(base, expr + ls, bl);
+    base[bl] = 0;
+    while (bl > 0 && (base[bl - 1] == ' ' || base[bl - 1] == '\t'))
+        base[--bl] = 0;
+    if (!bl) return NULL;
+    v = shadow_variant_for_recv(base);
+    if (!v &&
+        shadow_recv_name_before(expr, expr + acc_pos, rname, sizeof(rname)))
+        v = shadow_variant_for_recv(rname);
+    if (!v) v = shadow_variant_find_by_arm(arm);
+    if (!v) return NULL;
+    for (a = 0; a < v->narm; a++)
+        if (strcmp(v->arms[a], arm) == 0) break;
+    if (a >= v->narm || v->is_void[a]) return NULL;
+    *is_arrow = arrow;
+    return v;
+}
+
+/* Walk left over a receiver. Include `(expr)` / `[i]` groups, but stop before
+ * a cast `(T)recv` so `(int64_t)c.arm` yields `c` (not `(int64_t)c`). */
+static const char* shadow_variant_recv_lbound(const char* expr, const char* from) {
+    const char* rs = from;
+    if (!expr || !from || from < expr) return from;
+    while (rs > expr) {
+        char c = rs[-1];
+        if (shadow_is_id((unsigned char)c) || c == '_') {
+            rs--;
+            continue;
+        }
+        /* `)` / `]` only when not a cast: `(T)id` has an id right after `)`. */
+        if ((c == ')' || c == ']') && !shadow_is_id((unsigned char)*rs)) {
+            rs--;
+            continue;
+        }
+        break;
+    }
+    return rs;
+}
+
+static void shadow_variant_packed_materialize(char* expr, size_t cap,
+                                              ShadowVariant* v) {
+    char out[768];
+    const char* p;
+    char* o;
+    size_t rem;
+    int a;
+    if (!expr || !cap || !v || !v->is_packed) return;
+    p = expr;
+    o = out;
+    rem = sizeof(out) - 1;
+    out[0] = 0;
+    while (*p && rem > 0) {
+        if (*p == '.' && p > expr &&
+            (shadow_is_id(p[-1]) || p[-1] == ')' || p[-1] == ']')) {
+            const char* mem = p + 1;
+            const char* e = mem;
+            const char* rs = shadow_variant_recv_lbound(expr, p);
+            size_t rlen = (size_t)(p - rs);
+            while (*e && ((*e >= 'a' && *e <= 'z') || (*e >= 'A' && *e <= 'Z') ||
+                          (*e >= '0' && *e <= '9') || *e == '_'))
+                e++;
+            if ((size_t)(e - mem) == 4 && memcmp(mem, "kind", 4) == 0) {
+                if (rlen > 0 && (size_t)(o - out) >= rlen &&
+                    memcmp(o - rlen, rs, rlen) == 0) {
+                    o -= rlen;
+                    rem += rlen;
+                }
+                {
+                    int n = snprintf(o, rem, "%s__cc_kind(&(%.*s))", v->name,
+                                     (int)rlen, rs);
+                    if (n < 0 || (size_t)n >= rem) { rem = 0; break; }
+                    o += n; rem -= (size_t)n; p = e; continue;
+                }
+            }
+            /* `.u.arm` — receiver is before `.u`, not the `u` token itself. */
+            if (p >= expr + 2 && p[-1] == 'u' && p[-2] == '.') {
+                const char* arm = mem;
+                const char* u_dot = p - 2;
+                const char* brs = shadow_variant_recv_lbound(expr, u_dot);
+                size_t brlen = (size_t)(u_dot - brs);
+                int matched = 0;
+                for (a = 0; a < v->narm; a++) {
+                    size_t al = strlen(v->arms[a]);
+                    if ((size_t)(e - arm) == al &&
+                        memcmp(arm, v->arms[a], al) == 0) {
+                        /* Drop already-copied `recv.u` before emitting overlay. */
+                        if (brlen > 0 && (size_t)(o - out) >= brlen + 2 &&
+                            o[-1] == 'u' && o[-2] == '.' &&
+                            memcmp(o - (brlen + 2), brs, brlen) == 0) {
+                            o -= brlen + 2;
+                            rem += brlen + 2;
+                        } else if ((size_t)(o - out) >= 2 && o[-1] == 'u' &&
+                                   o[-2] == '.') {
+                            o -= 2;
+                            rem += 2;
+                        }
+                        {
+                            int n = snprintf(o, rem,
+                                             "((%s__cc_ov_%s*)&(%.*s))->%s",
+                                             v->name, v->arms[a], (int)brlen,
+                                             brs, v->arms[a]);
+                            if (n < 0 || (size_t)n >= rem) { rem = 0; break; }
+                            o += n; rem -= (size_t)n; p = e; matched = 1;
+                        }
+                        break;
+                    }
+                }
+                if (matched) continue;
+                /* Not a variant arm — fall through and copy `.` literally. */
+            }
+            for (a = 0; a < v->narm; a++) {
+                size_t al = strlen(v->arms[a]);
+                if ((size_t)(e - mem) == al && memcmp(mem, v->arms[a], al) == 0) {
+                    if (rlen > 0 && (size_t)(o - out) >= rlen &&
+                        memcmp(o - rlen, rs, rlen) == 0) {
+                        o -= rlen;
+                        rem += rlen;
+                    }
+                    {
+                        int n = snprintf(o, rem,
+                                         "((%s__cc_ov_%s*)&(%.*s))->%s",
+                                         v->name, v->arms[a], (int)rlen, rs,
+                                         v->arms[a]);
+                        if (n < 0 || (size_t)n >= rem) { rem = 0; break; }
+                        o += n; rem -= (size_t)n; p = e; continue;
+                    }
+                }
+            }
+        }
+        if (p[0] == '-' && p[1] == '>' && p > expr &&
+            (shadow_is_id(p[-1]) || p[-1] == ')' || p[-1] == ']')) {
+            const char* mem = p + 2;
+            const char* e = mem;
+            const char* rs = shadow_variant_recv_lbound(expr, p);
+            size_t rlen = (size_t)(p - rs);
+            while (*e && ((*e >= 'a' && *e <= 'z') || (*e >= 'A' && *e <= 'Z') ||
+                          (*e >= '0' && *e <= '9') || *e == '_'))
+                e++;
+            if ((size_t)(e - mem) == 4 && memcmp(mem, "kind", 4) == 0) {
+                if (rlen > 0 && (size_t)(o - out) >= rlen &&
+                    memcmp(o - rlen, rs, rlen) == 0) {
+                    o -= rlen;
+                    rem += rlen;
+                }
+                {
+                    int n = snprintf(o, rem, "%s__cc_kind(%.*s)", v->name,
+                                     (int)rlen, rs);
+                    if (n < 0 || (size_t)n >= rem) { rem = 0; break; }
+                    o += n; rem -= (size_t)n; p = e; continue;
+                }
+            }
+            if (p[2] == 'u' && p[3] == '.') {
+                const char* arm = p + 4;
+                int matched = 0;
+                e = arm;
+                while (*e && ((*e >= 'a' && *e <= 'z') || (*e >= 'A' && *e <= 'Z') ||
+                              (*e >= '0' && *e <= '9') || *e == '_'))
+                    e++;
+                for (a = 0; a < v->narm; a++) {
+                    size_t al = strlen(v->arms[a]);
+                    if ((size_t)(e - arm) == al &&
+                        memcmp(arm, v->arms[a], al) == 0) {
+                        if (rlen > 0 && (size_t)(o - out) >= rlen &&
+                            memcmp(o - rlen, rs, rlen) == 0) {
+                            o -= rlen;
+                            rem += rlen;
+                        }
+                        {
+                            int n = snprintf(o, rem,
+                                             "((%s__cc_ov_%s*)%.*s)->%s",
+                                             v->name, v->arms[a], (int)rlen, rs,
+                                             v->arms[a]);
+                            if (n < 0 || (size_t)n >= rem) { rem = 0; break; }
+                            o += n; rem -= (size_t)n; p = e; matched = 1;
+                        }
+                        break;
+                    }
+                }
+                if (matched) continue;
+            }
+            for (a = 0; a < v->narm; a++) {
+                size_t al = strlen(v->arms[a]);
+                if ((size_t)(e - mem) == al && memcmp(mem, v->arms[a], al) == 0) {
+                    if (rlen > 0 && (size_t)(o - out) >= rlen &&
+                        memcmp(o - rlen, rs, rlen) == 0) {
+                        o -= rlen;
+                        rem += rlen;
+                    }
+                    {
+                        int n = snprintf(o, rem,
+                                         "((%s__cc_ov_%s*)%.*s)->%s",
+                                         v->name, v->arms[a], (int)rlen, rs,
+                                         v->arms[a]);
+                        if (n < 0 || (size_t)n >= rem) { rem = 0; break; }
+                        o += n; rem -= (size_t)n; p = e; continue;
+                    }
+                }
+            }
+        }
+        *o++ = *p++;
+        rem--;
+    }
+    *o = 0;
+    if (strlen(out) < cap) snprintf(expr, cap, "%s", out);
 }
 
 /* Rewrite variant designators / arm projections in leftover expr text.
@@ -622,9 +1634,17 @@ static void shadow_rewrite_variant_expr(char* expr, size_t cap, const char* vty)
     int a;
     if (!expr || !cap || !g_shadow_nvariants) return;
     v = vty ? shadow_variant_find(vty) : NULL;
-    /* Prefer typed dest; else first registered (smoke beachhead). */
+    if (!v && expr[0]) {
+        const char* dot = strchr(expr, '.');
+        const char* arr = strstr(expr, "->");
+        const char* acc = dot;
+        char recv[64];
+        if (arr && (!dot || arr < dot)) acc = arr;
+        if (acc && acc > expr &&
+            shadow_recv_name_before(expr, acc, recv, sizeof(recv)))
+            v = shadow_variant_for_recv(recv);
+    }
     if (!v && g_shadow_nvariants == 1) v = &g_shadow_variants[0];
-    if (!v) return;
     p = expr;
     o = out;
     rem = sizeof(out) - 1;
@@ -637,19 +1657,19 @@ static void shadow_rewrite_variant_expr(char* expr, size_t cap, const char* vty)
             if (*q == '.') {
                 const char* arm = q + 1;
                 const char* e = arm;
+                ShadowVariant* mv;
+                int ma;
                 while (*e && ((*e >= 'a' && *e <= 'z') || (*e >= 'A' && *e <= 'Z') ||
                               (*e >= '0' && *e <= '9') || *e == '_'))
                     e++;
-                for (a = 0; a < v->narm; a++) {
-                    size_t al = strlen(v->arms[a]);
-                    if ((size_t)(e - arm) == al && memcmp(arm, v->arms[a], al) == 0) {
-                        int n = snprintf(o, rem, "== %s_%s", v->name, v->arms[a]);
-                        if (n < 0 || (size_t)n >= rem) { rem = 0; break; }
-                        o += n;
-                        rem -= (size_t)n;
-                        p = e;
-                        goto cont;
-                    }
+                if (shadow_variant_arm_match(v, expr, q, arm, (size_t)(e - arm),
+                                             &mv, &ma)) {
+                    int n = snprintf(o, rem, "== %s_%s", mv->name, mv->arms[ma]);
+                    if (n < 0 || (size_t)n >= rem) { rem = 0; break; }
+                    o += n;
+                    rem -= (size_t)n;
+                    p = e;
+                    goto cont;
                 }
             }
         }
@@ -661,6 +1681,8 @@ static void shadow_rewrite_variant_expr(char* expr, size_t cap, const char* vty)
             const char* arm = p + 1;
             const char* e = arm;
             const char* op;
+            ShadowVariant* mv;
+            int ma;
             while (*e && ((*e >= 'a' && *e <= 'z') || (*e >= 'A' && *e <= 'Z') ||
                           (*e >= '0' && *e <= '9') || *e == '_'))
                 e++;
@@ -668,17 +1690,14 @@ static void shadow_rewrite_variant_expr(char* expr, size_t cap, const char* vty)
             while (*op == ' ' || *op == '\t') op++;
             if ((op[0] == '=' && op[1] == '=') ||
                 (op[0] == '!' && op[1] == '=')) {
-                for (a = 0; a < v->narm; a++) {
-                    size_t al = strlen(v->arms[a]);
-                    if ((size_t)(e - arm) == al &&
-                        memcmp(arm, v->arms[a], al) == 0) {
-                        int n = snprintf(o, rem, "%s_%s", v->name, v->arms[a]);
-                        if (n < 0 || (size_t)n >= rem) { rem = 0; break; }
-                        o += n;
-                        rem -= (size_t)n;
-                        p = e;
-                        goto cont;
-                    }
+                if (shadow_variant_arm_match(v, expr, p, arm, (size_t)(e - arm),
+                                             &mv, &ma)) {
+                    int n = snprintf(o, rem, "%s_%s", mv->name, mv->arms[ma]);
+                    if (n < 0 || (size_t)n >= rem) { rem = 0; break; }
+                    o += n;
+                    rem -= (size_t)n;
+                    p = e;
+                    goto cont;
                 }
             }
         }
@@ -699,14 +1718,16 @@ static void shadow_rewrite_variant_expr(char* expr, size_t cap, const char* vty)
             while (pre > expr && (pre[-1] == ' ' || pre[-1] == '\t')) pre--;
             if (*eq == '=' && pre > expr &&
                 (pre[-1] == '{' || pre[-1] == ',')) {
-                for (a = 0; a < v->narm; a++) {
-                    size_t al = strlen(v->arms[a]);
-                    if ((size_t)(e - arm) == al && memcmp(arm, v->arms[a], al) == 0) {
-                        int n;
-                        const char* rest = eq + 1;
-                        if (v->is_void[a]) {
-                            n = snprintf(o, rem, ".kind = %s_%s", v->name,
-                                         v->arms[a]);
+                ShadowVariant* mv;
+                int ma;
+                if (shadow_variant_arm_match(v, expr, p, arm, (size_t)(e - arm),
+                                             &mv, &ma)) {
+                    int n;
+                    const char* rest = eq + 1;
+                    if (mv->is_packed) {
+                        if (mv->is_void[ma]) {
+                            n = snprintf(o, rem, "%s__cc_set_%s()",
+                                         mv->name, mv->arms[ma]);
                             while (*rest == ' ' || *rest == '\t') rest++;
                             if (*rest == '{') {
                                 int dep = 0;
@@ -717,15 +1738,36 @@ static void shadow_rewrite_variant_expr(char* expr, size_t cap, const char* vty)
                                 } while (*rest && dep > 0);
                             }
                         } else {
-                            n = snprintf(o, rem, ".kind = %s_%s, .u.%s =",
-                                         v->name, v->arms[a], v->arms[a]);
+                            n = snprintf(o, rem, "%s__cc_set_%s(",
+                                         mv->name, mv->arms[ma]);
                         }
                         if (n < 0 || (size_t)n >= rem) { rem = 0; break; }
                         o += n;
                         rem -= (size_t)n;
-                        p = v->is_void[a] ? rest : (eq + 1);
+                        p = mv->is_void[ma] ? rest : (eq + 1);
                         goto cont;
                     }
+                    if (mv->is_void[ma]) {
+                        n = snprintf(o, rem, ".kind = %s_%s", mv->name,
+                                     mv->arms[ma]);
+                        while (*rest == ' ' || *rest == '\t') rest++;
+                        if (*rest == '{') {
+                            int dep = 0;
+                            do {
+                                if (*rest == '{') dep++;
+                                else if (*rest == '}') dep--;
+                                rest++;
+                            } while (*rest && dep > 0);
+                        }
+                    } else {
+                        n = snprintf(o, rem, ".kind = %s_%s, .u.%s =",
+                                     mv->name, mv->arms[ma], mv->arms[ma]);
+                    }
+                    if (n < 0 || (size_t)n >= rem) { rem = 0; break; }
+                    o += n;
+                    rem -= (size_t)n;
+                    p = mv->is_void[ma] ? rest : (eq + 1);
+                    goto cont;
                 }
             }
         }
@@ -737,19 +1779,19 @@ static void shadow_rewrite_variant_expr(char* expr, size_t cap, const char* vty)
             if (*q == '.') {
                 const char* arm = q + 1;
                 const char* e = arm;
+                ShadowVariant* mv;
+                int ma;
                 while (*e && ((*e >= 'a' && *e <= 'z') || (*e >= 'A' && *e <= 'Z') ||
                               (*e >= '0' && *e <= '9') || *e == '_'))
                     e++;
-                for (a = 0; a < v->narm; a++) {
-                    size_t al = strlen(v->arms[a]);
-                    if ((size_t)(e - arm) == al && memcmp(arm, v->arms[a], al) == 0) {
-                        int n = snprintf(o, rem, "case %s_%s", v->name, v->arms[a]);
-                        if (n < 0 || (size_t)n >= rem) { rem = 0; break; }
-                        o += n;
-                        rem -= (size_t)n;
-                        p = e;
-                        goto cont;
-                    }
+                if (shadow_variant_arm_match(v, expr, q, arm, (size_t)(e - arm),
+                                             &mv, &ma)) {
+                    int n = snprintf(o, rem, "case %s_%s", mv->name, mv->arms[ma]);
+                    if (n < 0 || (size_t)n >= rem) { rem = 0; break; }
+                    o += n;
+                    rem -= (size_t)n;
+                    p = e;
+                    goto cont;
                 }
             }
         }
@@ -759,21 +1801,21 @@ static void shadow_rewrite_variant_expr(char* expr, size_t cap, const char* vty)
              p[2] == '_')) {
             const char* arm = p + 2;
             const char* e = arm;
+            ShadowVariant* mv;
+            int ma;
             while (*e && ((*e >= 'a' && *e <= 'z') || (*e >= 'A' && *e <= 'Z') ||
                           (*e >= '0' && *e <= '9') || *e == '_'))
                 e++;
             if (!(e - arm == 4 && memcmp(arm, "kind", 4) == 0) &&
                 !(e - arm == 1 && arm[0] == 'u')) {
-                for (a = 0; a < v->narm; a++) {
-                    size_t al = strlen(v->arms[a]);
-                    if ((size_t)(e - arm) == al && memcmp(arm, v->arms[a], al) == 0) {
-                        int n = snprintf(o, rem, "->u.%s", v->arms[a]);
-                        if (n < 0 || (size_t)n >= rem) { rem = 0; break; }
-                        o += n;
-                        rem -= (size_t)n;
-                        p = e;
-                        goto cont;
-                    }
+                if (shadow_variant_arm_match(v, expr, p, arm, (size_t)(e - arm),
+                                             &mv, &ma)) {
+                    int n = snprintf(o, rem, "->u.%s", mv->arms[ma]);
+                    if (n < 0 || (size_t)n >= rem) { rem = 0; break; }
+                    o += n;
+                    rem -= (size_t)n;
+                    p = e;
+                    goto cont;
                 }
             }
         }
@@ -798,17 +1840,16 @@ static void shadow_rewrite_variant_expr(char* expr, size_t cap, const char* vty)
                 (b == expr ||
                  (b > expr &&
                   (b[-1] == '=' || b[-1] == '(' || b[-1] == ',')))) {
-                for (a = 0; a < v->narm; a++) {
-                    size_t al = strlen(v->arms[a]);
-                    if ((size_t)(e - arm) == al &&
-                        memcmp(arm, v->arms[a], al) == 0) {
-                        int n = snprintf(o, rem, "%s_%s", v->name, v->arms[a]);
-                        if (n < 0 || (size_t)n >= rem) { rem = 0; break; }
-                        o += n;
-                        rem -= (size_t)n;
-                        p = e;
-                        goto cont;
-                    }
+                ShadowVariant* mv;
+                int ma;
+                if (shadow_variant_arm_match(v, expr, p, arm, (size_t)(e - arm),
+                                             &mv, &ma)) {
+                    int n = snprintf(o, rem, "%s_%s", mv->name, mv->arms[ma]);
+                    if (n < 0 || (size_t)n >= rem) { rem = 0; break; }
+                    o += n;
+                    rem -= (size_t)n;
+                    p = e;
+                    goto cont;
                 }
             }
         }
@@ -822,21 +1863,21 @@ static void shadow_rewrite_variant_expr(char* expr, size_t cap, const char* vty)
               (p[-2] == '.' || p[-2] == '>'))) {
             const char* arm = p + 1;
             const char* e = arm;
+            ShadowVariant* mv;
+            int ma;
             while (*e && ((*e >= 'a' && *e <= 'z') || (*e >= 'A' && *e <= 'Z') ||
                           (*e >= '0' && *e <= '9') || *e == '_'))
                 e++;
             if (!(e - arm == 4 && memcmp(arm, "kind", 4) == 0) &&
                 !(e - arm == 1 && arm[0] == 'u')) {
-                for (a = 0; a < v->narm; a++) {
-                    size_t al = strlen(v->arms[a]);
-                    if ((size_t)(e - arm) == al && memcmp(arm, v->arms[a], al) == 0) {
-                        int n = snprintf(o, rem, ".u.%s", v->arms[a]);
-                        if (n < 0 || (size_t)n >= rem) { rem = 0; break; }
-                        o += n;
-                        rem -= (size_t)n;
-                        p = e;
-                        goto cont;
-                    }
+                if (shadow_variant_arm_match(v, expr, p, arm, (size_t)(e - arm),
+                                             &mv, &ma)) {
+                    int n = snprintf(o, rem, ".u.%s", mv->arms[ma]);
+                    if (n < 0 || (size_t)n >= rem) { rem = 0; break; }
+                    o += n;
+                    rem -= (size_t)n;
+                    p = e;
+                    goto cont;
                 }
             }
         }
@@ -865,29 +1906,32 @@ static void shadow_rewrite_variant_expr(char* expr, size_t cap, const char* vty)
                     continue;
                 }
                 if (*r == '{') {
-                    const char* tag = strstr(r, ".kind = ");
-                    /* Only the opening brace of this init (stop at nesting). */
-                    if (tag && tag < r + 64) {
-                        tag += 8;
-                        while (*tag == ' ') tag++;
-                        for (a = 0; a < g_shadow_nvariants; a++) {
-                            size_t nl = strlen(g_shadow_variants[a].name);
-                            if (strncmp(tag, g_shadow_variants[a].name, nl) == 0 &&
-                                tag[nl] == '_') {
-                                int n;
-                                if (at_eq)
-                                    n = snprintf(tmp + o2, sizeof(tmp) - o2,
-                                                 "= (%s){",
-                                                 g_shadow_variants[a].name);
-                                else
-                                    n = snprintf(tmp + o2, sizeof(tmp) - o2,
-                                                 "(%s){",
-                                                 g_shadow_variants[a].name);
-                                if (n < 0) break;
-                                o2 += (size_t)n;
-                                q = r + 1; /* skip original `{` */
-                                goto vcont;
-                            }
+                    const char* body = r + 1;
+                    const char* tag;
+                    while (*body == ' ' || *body == '\t') body++;
+                    if (strncmp(body, ".kind = ", 8) != 0) {
+                        tmp[o2++] = *q++;
+                        continue;
+                    }
+                    tag = body + 8;
+                    while (*tag == ' ') tag++;
+                    for (a = 0; a < g_shadow_nvariants; a++) {
+                        size_t nl = strlen(g_shadow_variants[a].name);
+                        if (strncmp(tag, g_shadow_variants[a].name, nl) == 0 &&
+                            tag[nl] == '_') {
+                            int n;
+                            if (at_eq)
+                                n = snprintf(tmp + o2, sizeof(tmp) - o2,
+                                             "= (%s){",
+                                             g_shadow_variants[a].name);
+                            else
+                                n = snprintf(tmp + o2, sizeof(tmp) - o2,
+                                             "(%s){",
+                                             g_shadow_variants[a].name);
+                            if (n < 0) break;
+                            o2 += (size_t)n;
+                            q = r + 1; /* skip original `{` */
+                            goto vcont;
                         }
                     }
                 }
@@ -899,6 +1943,41 @@ static void shadow_rewrite_variant_expr(char* expr, size_t cap, const char* vty)
         tmp[o2] = 0;
         if (o2 && o2 < cap) snprintf(expr, cap, "%s", tmp);
     }
+    if (v && v->is_packed) {
+        shadow_variant_packed_materialize(expr, cap, v);
+        /* Trim / close `{ Name__cc_set_arm(x) }` packed designated-init. */
+        {
+            char* s = expr;
+            size_t n = strlen(s);
+            char inner[512];
+            const char* src = s;
+            size_t il = n;
+            if (n >= 2 && s[0] == '{' && s[n - 1] == '}') {
+                src = s + 1;
+                il = n - 2;
+            }
+            if (il < sizeof(inner)) {
+                int depth = 0;
+                char* q;
+                memcpy(inner, src, il);
+                inner[il] = 0;
+                while (il > 0 && (inner[il - 1] == ' ' || inner[il - 1] == '\t' ||
+                                  inner[il - 1] == '}'))
+                    inner[--il] = 0;
+                if (strstr(inner, "__cc_set_")) {
+                    for (q = inner; *q; q++) {
+                        if (*q == '(') depth++;
+                        else if (*q == ')') depth--;
+                    }
+                    if (depth > 0 && il + 1 < sizeof(inner)) {
+                        inner[il++] = ')';
+                        inner[il] = 0;
+                    }
+                    snprintf(expr, cap, "%s", inner);
+                }
+            }
+        }
+    }
 }
 
 /* User generic factories (CC_GENERIC_FACTORY / _EXTEND). */
@@ -906,6 +1985,7 @@ typedef struct {
     char family[64];
     char tpl[4096];
     int arity;
+    int has_base; /* 0 if only CC_GENERIC_FACTORY_EXTEND seen */
     /* `#line` origin at factory definition (for invalid-C notes). */
     char origin_file[128];
     int origin_line;
@@ -926,13 +2006,18 @@ enum {
     SHADOW_BIND_ARRAY = 1,
     SHADOW_BIND_ATOMIC = 2
 };
-typedef struct {
+typedef struct ShadowBind {
     char name[64];
     char ty[128];
     int flags;
 } ShadowBind;
 static ShadowBind g_shadow_binds[96];
 static int g_shadow_nbinds;
+/* When set, shadow_bind_name is a no-op (TU prepass still walks fn bodies for
+ * type/generic registration without polluting the name→type map). */
+static int g_shadow_binds_frozen;
+static ShadowBind g_shadow_cap_binds[96];
+static int g_shadow_ncap_binds;
 
 /* Outer → @as field path (beachhead: one embed per outer/target). */
 typedef struct {
@@ -985,6 +2070,10 @@ static int g_shadow_nfnparams;
 
 /* Set when a typed UFCS miss was diagnosed — fail the emit product. */
 static int g_shadow_ufcs_miss;
+
+/* Set when arena-less @string had an unbounded slot — fail the emit product.
+ * Named *_diag (not *_err): Concurrent-C rewrites `_err` assignments. */
+static int g_shadow_string_stack_diag;
 
 /* Declared callables for UFCS family/bare-name resolution. */
 typedef struct {
@@ -1052,6 +2141,41 @@ static int shadow_type_has_field(const char* ty, const char* field) {
         if (strcmp(g_shadow_fields[i].ty, ty) == 0 &&
             strcmp(g_shadow_fields[i].field, field) == 0)
             return 1;
+    }
+    return 0;
+}
+
+enum { SHADOW_FNPTR_TY_CAP = 32 };
+static char g_shadow_fnptr_tys[SHADOW_FNPTR_TY_CAP][96];
+static int g_shadow_nfnptr_tys;
+
+static void shadow_fnptr_ty_register(const char* name) {
+    int i;
+    if (!name || !name[0] || g_shadow_nfnptr_tys >= SHADOW_FNPTR_TY_CAP)
+        return;
+    for (i = 0; i < g_shadow_nfnptr_tys; i++)
+        if (strcmp(g_shadow_fnptr_tys[i], name) == 0) return;
+    snprintf(g_shadow_fnptr_tys[g_shadow_nfnptr_tys++],
+             sizeof(g_shadow_fnptr_tys[0]), "%s", name);
+}
+
+static int shadow_is_fnptr_ty(const char* name) {
+    int i;
+    if (!name || !name[0]) return 0;
+    if (strstr(name, "(*") || strstr(name, "(^")) return 1;
+    for (i = 0; i < g_shadow_nfnptr_tys; i++)
+        if (strcmp(g_shadow_fnptr_tys[i], name) == 0) return 1;
+    return 0;
+}
+
+static int shadow_type_has_callable_field(const char* ty, const char* field) {
+    int i;
+    if (!ty || !ty[0] || !field || !field[0]) return 0;
+    for (i = 0; i < g_shadow_nfields; i++) {
+        if (strcmp(g_shadow_fields[i].ty, ty) == 0 &&
+            strcmp(g_shadow_fields[i].field, field) == 0) {
+            return shadow_is_fnptr_ty(g_shadow_fields[i].field_ty);
+        }
     }
     return 0;
 }
@@ -1293,26 +2417,128 @@ static int shadow_family_accepts(const char* base, const char* method) {
     return 0;
 }
 
+/* Erased CCSlice helpers (`CCSlice_is_empty` / `cc_slice_is_empty`) live in
+ * cc_slice.cch outside the ##_ SPEC set — cache their names for UFCS. */
+static int shadow_cc_slice_erased_has(const char* method) {
+    static char csv[1100];
+    static int loaded = 0;
+    char pat[110];
+    char hay[1200];
+    if (!method || !method[0]) return 0;
+    if (!loaded) {
+        char* fsrc = NULL;
+        size_t fn = 0;
+        size_t i;
+        csv[0] = 0;
+        loaded = 1;
+        if (shadow_family_header_read("cc_slice.cch", &fsrc, &fn) && fsrc) {
+            for (i = 0; i + 10 < fn; i++) {
+                const char* pref = NULL;
+                size_t plen = 0;
+                size_t ms, me, ol;
+                if (strncmp(fsrc + i, "CCSlice_", 8) == 0) {
+                    pref = fsrc + i + 8;
+                    plen = 8;
+                } else if (strncmp(fsrc + i, "cc_slice_", 9) == 0) {
+                    pref = fsrc + i + 9;
+                    plen = 9;
+                } else
+                    continue;
+                ms = 0;
+                while (pref[ms] && shadow_is_ident_char(pref[ms])) ms++;
+                if (!ms || pref[ms] != '(') continue;
+                /* Skip typed instance spellings: CCSlice_double_len( */
+                {
+                    size_t u;
+                    int has_us = 0;
+                    for (u = 0; u < ms; u++)
+                        if (pref[u] == '_') has_us = 1;
+                    if (has_us && plen == 8) continue;
+                }
+                me = ms;
+                ol = strlen(csv);
+                snprintf(pat, sizeof(pat), ", %.*s,", (int)me, pref);
+                snprintf(hay, sizeof(hay), ", %s,", csv);
+                if (!strstr(hay, pat) && ol + me + 3 < sizeof(csv)) {
+                    if (ol) {
+                        csv[ol++] = ',';
+                        csv[ol++] = ' ';
+                    }
+                    memcpy(csv + ol, pref, me);
+                    csv[ol + me] = 0;
+                }
+                i += plen + me;
+            }
+            free(fsrc);
+        }
+    }
+    if (!csv[0]) return 0;
+    snprintf(pat, sizeof(pat), ", %s,", method);
+    snprintf(hay, sizeof(hay), ", %s,", csv);
+    return strstr(hay, pat) != NULL;
+}
+
+static void shadow_note_task_send(const char* name) {
+    int i;
+    if (!name || !name[0] || g_shadow_ntask_send >= SHADOW_CHAN_CAP) return;
+    for (i = 0; i < g_shadow_ntask_send; i++) {
+        if (strcmp(g_shadow_task_send[i], name) == 0) return;
+    }
+    snprintf(g_shadow_task_send[g_shadow_ntask_send],
+             sizeof(g_shadow_task_send[0]), "%s", name);
+    g_shadow_ntask_send++;
+}
+
+static int shadow_chan_has_task_send(const char* name) {
+    int i;
+    if (!name || !name[0]) return 0;
+    for (i = 0; i < g_shadow_ntask_send; i++) {
+        if (strcmp(g_shadow_task_send[i], name) == 0) return 1;
+    }
+    return 0;
+}
+
+static void shadow_collect_task_sends(AstNode* n) {
+    int k;
+    if (!n) return;
+    if (n->kind == AST_SPAWN_CLOSURE && n->a[0] &&
+        (strcmp(n->b, "send_task") == 0 ||
+         strcmp(n->b, "send_task_hybrid") == 0))
+        shadow_note_task_send(n->a);
+    for (k = 0; k < n->nbody; k++) shadow_collect_task_sends(n->body[k]);
+    for (k = 0; k < n->ndbody; k++) shadow_collect_task_sends(n->dbody[k]);
+    if (n->kids) {
+        for (k = 0; k < n->nkids; k++) shadow_collect_task_sends(n->kids[k]);
+    }
+}
+
 static void shadow_chan_reset(void) {
     g_shadow_nchans = 0;
+    g_shadow_ntask_send = 0;
     g_shadow_nvecs = 0;
     g_shadow_nmaps = 0;
     g_shadow_namaps = 0;
     g_shadow_ntd = 0;
     g_shadow_nslices = 0;
+    g_shadow_nfnptr_tys = 0;
     g_shadow_nvariants = 0;
     g_shadow_ngfac = 0;
     g_shadow_nginst = 0;
     g_shadow_nbinds = 0;
+    g_shadow_nrfns = 0;
+    g_shadow_binds_frozen = 0;
+    g_shadow_ncap_binds = 0;
     g_shadow_nufns = 0;
     g_shadow_nas = 0;
     g_shadow_ndhooks = 0;
     g_shadow_nchooks = 0;
+    g_shadow_nniches = 0;
     g_shadow_ndsinks = 0;
     g_shadow_sink_dest[0] = 0;
     g_shadow_nfnparams = 0;
     g_shadow_nfields = 0;
     g_shadow_ufcs_miss = 0;
+    g_shadow_string_stack_diag = 0;
 }
 
 static void shadow_destroy_hook_register(const char* ty, const char* pre,
@@ -1386,6 +2612,32 @@ static const char* shadow_create_hook_for(const char* ty) {
             return g_shadow_chooks[i].hook;
     }
     return NULL;
+}
+
+static void shadow_niche_register(const char* ty, unsigned size, unsigned align,
+                                  unsigned off, unsigned width,
+                                  unsigned long long sentinel) {
+    int i;
+    if (!ty || !ty[0] || !width) return;
+    if (g_shadow_nniches >= 32) return;
+    for (i = 0; i < g_shadow_nniches; i++) {
+        if (strcmp(g_shadow_niches[i].ty, ty) == 0) {
+            g_shadow_niches[i].size = size;
+            g_shadow_niches[i].align = align;
+            g_shadow_niches[i].off = off;
+            g_shadow_niches[i].width = width;
+            g_shadow_niches[i].sentinel = sentinel;
+            return;
+        }
+    }
+    snprintf(g_shadow_niches[g_shadow_nniches].ty,
+             sizeof(g_shadow_niches[0].ty), "%s", ty);
+    g_shadow_niches[g_shadow_nniches].size = size;
+    g_shadow_niches[g_shadow_nniches].align = align;
+    g_shadow_niches[g_shadow_nniches].off = off;
+    g_shadow_niches[g_shadow_nniches].width = width;
+    g_shadow_niches[g_shadow_nniches].sentinel = sentinel;
+    g_shadow_nniches++;
 }
 
 static void shadow_dyn_sink_register(const char* ty, const char* callee,
@@ -1638,6 +2890,25 @@ static void shadow_as_scan_header_text(const char* text) {
                         }
                     }
                 }
+                /* .niche = cc_type_niche(size, align, off, width, sentinel) */
+                {
+                    const char* nic = strstr(reg, "cc_type_niche(");
+                    if (ty[0] && nic && nic < reg + 800) {
+                        unsigned ns = 0, na = 0, no = 0, nw = 0;
+                        unsigned long long nsen = 0;
+                        const char* np = nic + 14;
+                        ns = (unsigned)strtoul(np, (char**)&np, 0);
+                        while (*np == ',' || *np == ' ' || *np == '\t') np++;
+                        na = (unsigned)strtoul(np, (char**)&np, 0);
+                        while (*np == ',' || *np == ' ' || *np == '\t') np++;
+                        no = (unsigned)strtoul(np, (char**)&np, 0);
+                        while (*np == ',' || *np == ' ' || *np == '\t') np++;
+                        nw = (unsigned)strtoul(np, (char**)&np, 0);
+                        while (*np == ',' || *np == ' ' || *np == '\t') np++;
+                        nsen = strtoull(np, NULL, 0);
+                        if (nw) shadow_niche_register(ty, ns, na, no, nw, nsen);
+                    }
+                }
             }
         }
         if (!nl) break;
@@ -1811,16 +3082,96 @@ static int shadow_slice_elem_is_prelude(const char* t) {
                  !strcmp(t, "int32_t") || !strcmp(t, "int64_t"));
 }
 
+/* Hand-written CC_DECL_SLICE[_SPEC] already in the TU — suppress auto-splice. */
+static char g_shadow_slice_have[8][64];
+static int g_shadow_nslice_have;
+
+static void shadow_slice_have(const char* elem) {
+    int i;
+    if (!elem || !elem[0] || g_shadow_nslice_have >= 8) return;
+    for (i = 0; i < g_shadow_nslice_have; i++) {
+        if (strcmp(g_shadow_slice_have[i], elem) == 0) return;
+    }
+    snprintf(g_shadow_slice_have[g_shadow_nslice_have],
+             sizeof(g_shadow_slice_have[0]), "%s", elem);
+    g_shadow_nslice_have++;
+}
+
+static int shadow_slice_already(const char* elem) {
+    int i;
+    if (!elem || !elem[0]) return 0;
+    if (shadow_slice_elem_is_prelude(elem)) return 1;
+    for (i = 0; i < g_shadow_nslice_have; i++) {
+        if (strcmp(g_shadow_slice_have[i], elem) == 0) return 1;
+    }
+    return 0;
+}
+
+static void shadow_slice_mangle_elem(const char* elem, char* dst, size_t cap) {
+    size_t i, o = 0;
+    if (!dst || !cap) return;
+    dst[0] = 0;
+    if (!elem) return;
+    for (i = 0; elem[i] && o + 1 < cap; i++) {
+        if (elem[i] == ' ' || elem[i] == '\t') {
+            if (o && dst[o - 1] != '_') dst[o++] = '_';
+        } else
+            dst[o++] = elem[i];
+    }
+    dst[o] = 0;
+}
+
 static void shadow_slice_need(const char* elem) {
     int i;
+    char mangled[64];
     if (!elem || !elem[0] || g_shadow_nslices >= 8) return;
-    if (shadow_slice_elem_is_prelude(elem)) return;
+    shadow_slice_mangle_elem(elem, mangled, sizeof(mangled));
+    if (!mangled[0] || shadow_slice_already(mangled)) return;
+    /* Multi-word elements need CC_DECL_SLICE_SPEC — hand-written or skip. */
+    if (strchr(elem, ' ') || strchr(elem, '\t')) return;
     for (i = 0; i < g_shadow_nslices; i++) {
-        if (strcmp(g_shadow_slices[i], elem) == 0) return;
+        if (strcmp(g_shadow_slices[i], mangled) == 0) return;
     }
     snprintf(g_shadow_slices[g_shadow_nslices], sizeof(g_shadow_slices[0]), "%s",
-             elem);
+             mangled);
     g_shadow_nslices++;
+}
+
+/* Note CC_DECL_SLICE(T) / CC_DECL_SLICE_SPEC(CCSlice_T, T) from RAW_LINE. */
+static void shadow_slice_note_raw(const char* line) {
+    const char* p;
+    char elem[64];
+    size_t ni = 0;
+    if (!line) return;
+    while (*line == ' ' || *line == '\t') line++;
+    if (strncmp(line, "CC_DECL_SLICE_SPEC", 17) == 0) {
+        p = strchr(line, ',');
+        if (!p) return;
+        p++;
+        while (*p == ' ' || *p == '\t') p++;
+        while (*p && *p != ')' && ni + 1 < sizeof(elem)) {
+            if (*p == ' ' || *p == '\t') {
+                if (ni && elem[ni - 1] != '_') elem[ni++] = '_';
+                p++;
+                continue;
+            }
+            elem[ni++] = *p++;
+        }
+        elem[ni] = 0;
+        while (ni && elem[ni - 1] == '_') elem[--ni] = 0;
+        if (elem[0]) shadow_slice_have(elem);
+        return;
+    }
+    if (strncmp(line, "CC_DECL_SLICE", 13) != 0) return;
+    if (line[13] == '_') return; /* CC_DECL_SLICE_SPEC already handled */
+    p = strchr(line, '(');
+    if (!p) return;
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+    while (*p && *p != ')' && *p != ',' && ni + 1 < sizeof(elem))
+        elem[ni++] = *p++;
+    elem[ni] = 0;
+    if (elem[0]) shadow_slice_have(elem);
 }
 
 static void shadow_ufn_register(const char* name, const char* first_ty) {
@@ -1865,8 +3216,8 @@ extern const char* cc_grammar_pending_ufcs_type(int i);
 
 static void shadow_grammar_ufcs_install(void) {
     static const char* methods[] = {
-        "parse", "read", "try_read", "write", "measure", "to_str", "reader",
-        "get", "next", "at_end", "_fill", "__wmeasure", "__wput"
+        "match", "parse", "read", "try_read", "write", "measure", "to_str",
+        "reader", "get", "next", "at_end", "_fill", "__wmeasure", "__wput"
     };
     int nt = cc_grammar_pending_ufcs_type_count();
     int ti;
@@ -1886,6 +3237,34 @@ static void shadow_grammar_ufcs_install(void) {
             snprintf(callee, sizeof(callee), "%s_%s", type, methods[mi]);
             shadow_ufn_register(callee, fty);
         }
+    }
+}
+
+extern int cc_variant_schema_pending_count(void);
+extern const char* cc_variant_schema_pending_name(int i);
+extern int cc_variant_schema_pending_narms(int i);
+extern const char* cc_variant_schema_pending_arm(int i, int a);
+extern int cc_variant_schema_pending_arm_is_void(int i, int a);
+
+static void shadow_grammar_variant_install(void) {
+    int ni = cc_variant_schema_pending_count();
+    int i, a;
+    for (i = 0; i < ni; i++) {
+        const char* name = cc_variant_schema_pending_name(i);
+        int narm = cc_variant_schema_pending_narms(i);
+        char arms[8][64];
+        char tys[8][96];
+        int is_void[8];
+        if (!name || !name[0] || narm <= 0) continue;
+        if (shadow_variant_find(name)) continue;
+        memset(tys, 0, sizeof(tys));
+        memset(is_void, 0, sizeof(is_void));
+        for (a = 0; a < narm && a < 8; a++) {
+            snprintf(arms[a], sizeof(arms[0]), "%s",
+                     cc_variant_schema_pending_arm(i, a));
+            is_void[a] = cc_variant_schema_pending_arm_is_void(i, a);
+        }
+        shadow_variant_register_full(name, arms, tys, is_void, narm, 0);
     }
 }
 
@@ -1984,6 +3363,7 @@ static const char* shadow_td_alias_resolve(const char* ty) {
 static void shadow_bind_name(const char* name, const char* ty, int flags) {
     int i;
     const char* resolved;
+    if (g_shadow_binds_frozen) return;
     if (!name || !name[0] || !ty || g_shadow_nbinds >= 96) return;
     resolved = shadow_td_alias_resolve(ty);
     for (i = 0; i < g_shadow_nbinds; i++) {
@@ -2023,6 +3403,45 @@ static void shadow_ty_base_stars(const char* ty, char* base, size_t bcap,
         p++;
     }
     if (stars) *stars = st;
+}
+
+/* Param-shaped binds for closure captures. Last-wins locals in
+ * g_shadow_binds must not clobber `Pool* pool` when main has `Pool pool`. */
+static void shadow_cap_bind_name(const char* name, const char* ty, int flags) {
+    int i;
+    const char* resolved;
+    char nb[64], ob[64];
+    int ns = 0, os = 0;
+    if (!name || !name[0] || !ty || g_shadow_ncap_binds >= 96) return;
+    resolved = shadow_td_alias_resolve(ty);
+    shadow_ty_base_stars(resolved, nb, sizeof(nb), &ns);
+    for (i = 0; i < g_shadow_ncap_binds; i++) {
+        if (strcmp(g_shadow_cap_binds[i].name, name) == 0) {
+            shadow_ty_base_stars(g_shadow_cap_binds[i].ty, ob, sizeof(ob), &os);
+            /* Prefer more stars so `Pool* pool` beats later `Pool pool`. */
+            if (ns < os) return;
+            snprintf(g_shadow_cap_binds[i].ty, sizeof(g_shadow_cap_binds[i].ty),
+                     "%s", resolved);
+            g_shadow_cap_binds[i].flags = flags;
+            return;
+        }
+    }
+    snprintf(g_shadow_cap_binds[g_shadow_ncap_binds].name,
+             sizeof(g_shadow_cap_binds[0].name), "%s", name);
+    snprintf(g_shadow_cap_binds[g_shadow_ncap_binds].ty,
+             sizeof(g_shadow_cap_binds[0].ty), "%s", resolved);
+    g_shadow_cap_binds[g_shadow_ncap_binds].flags = flags;
+    g_shadow_ncap_binds++;
+}
+
+static const ShadowBind* shadow_cap_bind_lookup(const char* name) {
+    int i;
+    if (!name) return NULL;
+    for (i = 0; i < g_shadow_ncap_binds; i++) {
+        if (strcmp(g_shadow_cap_binds[i].name, name) == 0)
+            return &g_shadow_cap_binds[i];
+    }
+    return NULL;
 }
 
 static void shadow_as_register(const char* outer, const char* field,
@@ -2120,6 +3539,779 @@ static const ShadowBind* shadow_bind_lookup(const char* name) {
     return NULL;
 }
 
+static ShadowVariant* shadow_variant_for_recv(const char* recv) {
+    const ShadowBind* b;
+    char base[96];
+    size_t tl;
+    if (!recv || !recv[0]) return NULL;
+    b = shadow_bind_lookup(recv);
+    if (!b || !b->ty[0]) return NULL;
+    /* `RedisValueKind k` resolves bare designators via the variant base. */
+    tl = strlen(b->ty);
+    if (tl > 4 && strcmp(b->ty + tl - 4, "Kind") == 0) {
+        size_t nl = tl - 4;
+        if (nl >= sizeof(base)) nl = sizeof(base) - 1;
+        memcpy(base, b->ty, nl);
+        base[nl] = 0;
+        return shadow_variant_find(base);
+    }
+    return shadow_variant_find(b->ty);
+}
+
+static int shadow_recv_name_before(const char* expr, const char* dot,
+                                   char* name, size_t cap) {
+    const char* q = dot - 1;
+    size_t ni = 0;
+    char tmp[64];
+    int dep;
+    if (!expr || !dot || dot <= expr || !name || !cap) return 0;
+    while (q >= expr && (*q == ' ' || *q == '\t')) q--;
+    if (q < expr) return 0;
+    if (*q == ']' || *q == ')') {
+        dep = 0;
+        while (q >= expr) {
+            if (*q == ']' || *q == ')') dep++;
+            else if ((*q == '[' || *q == '(') && dep > 0) dep--;
+            else if (dep == 0 && shadow_is_id0(*q)) {
+                /* Leave q on the last identifier char (walk may stop mid-id). */
+                while (q + 1 < dot && shadow_is_id(q[1])) q++;
+                break;
+            }
+            q--;
+        }
+    }
+    while (q >= expr && shadow_is_id(*q) && ni + 1 < sizeof(tmp))
+        tmp[ni++] = *q--;
+    if (!ni) return 0;
+    {
+        size_t i;
+        for (i = 0; i < ni && i + 1 < cap; i++)
+            name[i] = tmp[ni - 1 - i];
+        name[i < cap - 1 ? i : cap - 1] = 0;
+    }
+    return 1;
+}
+
+static ShadowVariant* shadow_variant_pick(const char* expr, const char* site,
+                                          ShadowVariant* hint, const char* arm,
+                                          size_t alen) {
+    char ab[64], recv[64];
+    ShadowVariant* vv;
+    int a;
+    if (hint) {
+        for (a = 0; a < hint->narm; a++)
+            if (strlen(hint->arms[a]) == alen &&
+                memcmp(hint->arms[a], arm, alen) == 0)
+                return hint;
+    }
+    if (site && shadow_recv_name_before(expr, site, recv, sizeof(recv))) {
+        vv = shadow_variant_for_recv(recv);
+        if (vv) {
+            for (a = 0; a < vv->narm; a++)
+                if (strlen(vv->arms[a]) == alen &&
+                    memcmp(vv->arms[a], arm, alen) == 0)
+                    return vv;
+        }
+    }
+    if (alen + 1 <= sizeof(ab)) {
+        memcpy(ab, arm, alen);
+        ab[alen] = 0;
+        vv = shadow_variant_find_by_arm(ab);
+        if (vv) return vv;
+    }
+    return hint;
+}
+
+static int shadow_variant_arm_match(ShadowVariant* hint, const char* expr,
+                                    const char* site, const char* arm,
+                                    size_t alen, ShadowVariant** out_v,
+                                    int* out_a) {
+    ShadowVariant* vv = shadow_variant_pick(expr, site, hint, arm, alen);
+    int a;
+    if (!vv || !out_v || !out_a) return 0;
+    for (a = 0; a < vv->narm; a++) {
+        if (strlen(vv->arms[a]) == alen &&
+            memcmp(vv->arms[a], arm, alen) == 0) {
+            *out_v = vv;
+            *out_a = a;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* --- Variant frontend diagnostics (oracle-aligned with classic lower) --- */
+
+static void shadow_variant_arm_list(const ShadowVariant* v, char* out,
+                                   size_t out_sz) {
+    size_t o = 0;
+    int a;
+    if (!out || !out_sz) return;
+    out[0] = 0;
+    if (!v) return;
+    for (a = 0; a < v->narm; a++) {
+        int m = snprintf(out + o, out_sz - o, "%s%s", a ? ", " : "",
+                         v->arms[a]);
+        if (m < 0 || (size_t)m >= out_sz - o) break;
+        o += (size_t)m;
+    }
+}
+
+/* Cheap did-you-mean: nearest arm by Levenshtein distance <= 2. */
+static const char* shadow_variant_suggest_arm(const ShadowVariant* v,
+                                              const char* s, size_t len) {
+    const char* best = NULL;
+    int best_d = 3;
+    int a;
+    char cand[64];
+    if (!v || !s || len == 0 || len > 48) return NULL;
+    memcpy(cand, s, len);
+    cand[len] = 0;
+    for (a = 0; a < v->narm; a++) {
+        const char* t = v->arms[a];
+        size_t tl = strlen(t);
+        int d[64][64];
+        size_t i, j;
+        if (tl > 48) continue;
+        for (i = 0; i <= len; i++) d[i][0] = (int)i;
+        for (j = 0; j <= tl; j++) d[0][j] = (int)j;
+        for (i = 1; i <= len; i++) {
+            for (j = 1; j <= tl; j++) {
+                int c = (cand[i - 1] == t[j - 1]) ? 0 : 1;
+                int m = d[i - 1][j] + 1;
+                if (d[i][j - 1] + 1 < m) m = d[i][j - 1] + 1;
+                if (d[i - 1][j - 1] + c < m) m = d[i - 1][j - 1] + c;
+                d[i][j] = m;
+            }
+        }
+        if (d[len][tl] < best_d) {
+            best_d = d[len][tl];
+            best = t;
+        }
+    }
+    return best;
+}
+
+/* Emit `path:line:col: error: …` (or `path:line: error:` when no_col).
+ * Needle search starts at st->tok_off (never earlier) so comment-text hits
+ * like the word "switch" in a file header cannot steal the column. */
+static void shadow_variant_err_loc(ShadowCtx* ctx, AstNode* st, CEmit* out,
+                                  const char* needle, int no_col,
+                                  const char* msg) {
+    const char* path = "<input>";
+    int line = 1, col = 1;
+    if (out) out->err = 1;
+    if (ctx && ctx->cache && st && st->file_id) {
+        FileTape* ft = tape_by_id(ctx->cache, st->file_id);
+        if (ft && ft->bytes) {
+            size_t off = st->tok_off;
+            if (needle && needle[0] && strlen(needle) >= 2) {
+                size_t nlen = strlen(needle);
+                size_t i;
+                size_t end = ft->len;
+                if (st->tok_off + 1024 < end) end = st->tok_off + 1024;
+                for (i = st->tok_off; i + nlen <= end; i++) {
+                    if (memcmp(ft->bytes + i, needle, nlen) == 0) {
+                        /* Prefer identifier needles at a word boundary. */
+                        if (nlen >= 2 && shadow_is_id(needle[0]) && i > 0 &&
+                            shadow_is_id(ft->bytes[i - 1]))
+                            continue;
+                        off = i;
+                        break;
+                    }
+                }
+            }
+            offset_to_linecol(ft->bytes, ft->len, off, &line, &col);
+            tape_logical_at(ft->bytes, ft->len, off, ft->path, NULL, 0, &line);
+            if (ft->path && ft->path[0]) path = ft->path;
+        }
+    }
+    if (no_col)
+        fprintf(stderr, "%s:%d: error: %s\n", path, line, msg);
+    else
+        fprintf(stderr, "%s:%d:%d: error: %s\n", path, line, col, msg);
+}
+
+static void shadow_variant_note_loc(ShadowCtx* ctx, AstNode* st,
+                                   const char* needle, const char* msg) {
+    const char* path = "<input>";
+    int line = 1, col = 1;
+    if (ctx && ctx->cache && st && st->file_id) {
+        FileTape* ft = tape_by_id(ctx->cache, st->file_id);
+        if (ft && ft->bytes) {
+            size_t off = st->tok_off;
+            if (needle && needle[0] && strlen(needle) >= 2) {
+                size_t nlen = strlen(needle);
+                size_t i;
+                size_t end = ft->len;
+                if (st->tok_off + 1024 < end) end = st->tok_off + 1024;
+                for (i = st->tok_off; i + nlen <= end; i++) {
+                    if (memcmp(ft->bytes + i, needle, nlen) == 0) {
+                        off = i;
+                        break;
+                    }
+                }
+            }
+            offset_to_linecol(ft->bytes, ft->len, off, &line, &col);
+            tape_logical_at(ft->bytes, ft->len, off, ft->path, NULL, 0, &line);
+            if (ft->path && ft->path[0]) path = ft->path;
+        }
+    }
+    fprintf(stderr, "%s:%d:%d: note: %s\n", path, line, col, msg);
+}
+
+static int shadow_variant_arm_index(const ShadowVariant* v, const char* arm,
+                                   size_t alen) {
+    int a;
+    if (!v || !arm) return -1;
+    for (a = 0; a < v->narm; a++)
+        if (strlen(v->arms[a]) == alen && memcmp(v->arms[a], arm, alen) == 0)
+            return a;
+    return -1;
+}
+
+static int shadow_variant_is_bare_dot(const char* expr, const char* p) {
+    const char* b;
+    if (!expr || !p || *p != '.') return 0;
+    b = p;
+    while (b > expr && (b[-1] == ' ' || b[-1] == '\t')) b--;
+    if (b > expr &&
+        (shadow_is_id(b[-1]) || b[-1] == ')' || b[-1] == ']'))
+        return 0;
+    return 1;
+}
+
+/* Partner of `==` / `!=` resolves to a variant (via `.kind` / bind / NameKind). */
+static ShadowVariant* shadow_variant_resolve_cmp_partner(const char* expr,
+                                                        const char* op) {
+    const char* a;
+    const char* b;
+    char recv[64];
+    size_t n;
+    ShadowVariant* v;
+    if (!expr || !op || op < expr) return NULL;
+    a = expr;
+    b = op;
+    while (a < b && (*a == ' ' || *a == '(' || *a == '\t')) a++;
+    while (b > a && (b[-1] == ' ' || b[-1] == ')' || b[-1] == '\t')) b--;
+    if (b <= a) return NULL;
+    /* ends with `.kind` / `->kind` */
+    if ((size_t)(b - a) >= 5 && memcmp(b - 4, "kind", 4) == 0) {
+        const char* k = b - 4;
+        while (k > a && (k[-1] == ' ' || k[-1] == '\t')) k--;
+        if (k > a && k[-1] == '.') {
+            if (shadow_recv_name_before(expr, k - 1, recv, sizeof(recv)))
+                return shadow_variant_for_recv(recv);
+        } else if (k > a + 1 && k[-1] == '>' && k[-2] == '-') {
+            if (shadow_recv_name_before(expr, k - 2, recv, sizeof(recv)))
+                return shadow_variant_for_recv(recv);
+        }
+        return NULL;
+    }
+    /* single identifier */
+    n = 0;
+    while (a + n < b && shadow_is_id(a[n])) n++;
+    if (n && a + n == b && n < sizeof(recv)) {
+        memcpy(recv, a, n);
+        recv[n] = 0;
+        v = shadow_variant_for_recv(recv);
+        if (v) return v;
+        /* NameKind */
+        if (n > 4 && strcmp(recv + n - 4, "Kind") == 0) {
+            char base[64];
+            size_t bl = n - 4;
+            if (bl >= sizeof(base)) bl = sizeof(base) - 1;
+            memcpy(base, recv, bl);
+            base[bl] = 0;
+            return shadow_variant_find(base);
+        }
+    }
+    return NULL;
+}
+
+/* Returns 1 if a diagnostic was emitted (caller must abort). */
+static int shadow_variant_diag_bare_desig(ShadowCtx* ctx, AstNode* st,
+                                         CEmit* out, const char* expr) {
+    const char* p;
+    if (!expr || !g_shadow_nvariants) return 0;
+    p = expr;
+    while (*p) {
+        if (*p == '.' && shadow_variant_is_bare_dot(expr, p) &&
+            ((p[1] >= 'a' && p[1] <= 'z') || (p[1] >= 'A' && p[1] <= 'Z') ||
+             p[1] == '_')) {
+            const char* arm = p + 1;
+            const char* e = arm;
+            const char* before;
+            const char* after;
+            char needle[72];
+            char msg[320];
+            size_t alen;
+            ShadowVariant* v = NULL;
+            int ai;
+            while (*e && shadow_is_id(*e)) e++;
+            alen = (size_t)(e - arm);
+            if (!alen || alen >= 64) {
+                p = e;
+                continue;
+            }
+            before = p;
+            while (before > expr &&
+                   (before[-1] == ' ' || before[-1] == '\t'))
+                before--;
+            after = e;
+            while (*after == ' ' || *after == '\t') after++;
+            /* `.arm ==` / `.arm !=` or `== .arm` / `!= .arm` */
+            if (before > expr + 1 &&
+                ((before[-1] == '=' && before[-2] == '=') ||
+                 (before[-1] == '=' && before[-2] == '!'))) {
+                const char* op = before - 2;
+                v = shadow_variant_resolve_cmp_partner(expr, op);
+            } else if ((after[0] == '=' && after[1] == '=') ||
+                       (after[0] == '!' && after[1] == '=')) {
+                const char* rhs = after + 2;
+                while (*rhs == ' ' || *rhs == '\t') rhs++;
+                /* Partner on the right — rare; try bind/kind form. */
+                {
+                    char tmp[288];
+                    size_t n = strlen(rhs);
+                    if (n >= sizeof(tmp)) n = sizeof(tmp) - 1;
+                    memcpy(tmp, rhs, n);
+                    tmp[n] = 0;
+                    v = shadow_variant_resolve_cmp_partner(tmp, tmp + n);
+                    if (!v) {
+                        /* scan `Name_arm` / `.kind` on the right of == */
+                        const char* q;
+                        for (q = rhs; *q; q++) {
+                            if ((q[0] == '=' && q[1] == '=') ||
+                                (q[0] == '!' && q[1] == '='))
+                                break;
+                        }
+                        (void)q;
+                        {
+                            char recv[64];
+                            const char* id = rhs;
+                            size_t nl = 0;
+                            while (*id == '(' || *id == ' ') id++;
+                            while (shadow_is_id(id[nl])) nl++;
+                            if (nl && nl < sizeof(recv)) {
+                                memcpy(recv, id, nl);
+                                recv[nl] = 0;
+                                v = shadow_variant_for_recv(recv);
+                                if (!v && nl > 4 &&
+                                    strcmp(recv + nl - 4, "Kind") == 0) {
+                                    recv[nl - 4] = 0;
+                                    v = shadow_variant_find(recv);
+                                }
+                            }
+                            if (!v) {
+                                const char* kd = strstr(rhs, ".kind");
+                                if (!kd) kd = strstr(rhs, "->kind");
+                                if (kd &&
+                                    shadow_recv_name_before(rhs, kd, recv,
+                                                            sizeof(recv)))
+                                    v = shadow_variant_for_recv(recv);
+                            }
+                        }
+                    }
+                }
+            } else {
+                p = e;
+                continue;
+            }
+            snprintf(needle, sizeof(needle), ".%.*s", (int)alen, arm);
+            if (!v) {
+                snprintf(msg, sizeof(msg),
+                         "bare designator '.%.*s' cannot be resolved from "
+                         "context (no variant type governs this "
+                         "comparison/assignment)",
+                         (int)alen, arm);
+                shadow_variant_err_loc(ctx, st, out, needle, 0, msg);
+                shadow_variant_note_loc(
+                    ctx, st, needle,
+                    "compare against a variant tag");
+                return 1;
+            }
+            ai = shadow_variant_arm_index(v, arm, alen);
+            if (ai < 0) {
+                char arms[256];
+                const char* sugg;
+                shadow_variant_arm_list(v, arms, sizeof(arms));
+                sugg = shadow_variant_suggest_arm(v, arm, alen);
+                if (sugg)
+                    snprintf(msg, sizeof(msg),
+                             "variant '%s' has no arm '.%.*s' (arms: %s) — "
+                             "did you mean '.%s'?",
+                             v->name, (int)alen, arm, arms, sugg);
+                else
+                    snprintf(msg, sizeof(msg),
+                             "variant '%s' has no arm '.%.*s' (arms: %s)",
+                             v->name, (int)alen, arm, arms);
+                shadow_variant_err_loc(ctx, st, out, needle, 0, msg);
+                return 1;
+            }
+            p = e;
+            continue;
+        }
+        p++;
+    }
+    return 0;
+}
+
+/* `.kind` / `->kind` write on a variant lvalue. */
+static int shadow_variant_diag_kind_write(ShadowCtx* ctx, AstNode* st,
+                                         CEmit* out, const char* lhs) {
+    const char* k;
+    const char* acc;
+    char recv[64];
+    char root[64];
+    char msg[384];
+    ShadowVariant* v;
+    size_t rlen;
+    int arrow = 0;
+    if (!lhs) return 0;
+    k = strstr(lhs, "->kind");
+    if (k && (k[6] == 0 || !shadow_is_id(k[6]))) {
+        acc = k;
+        arrow = 1;
+    } else {
+        k = strstr(lhs, ".kind");
+        if (!k || (k[5] && shadow_is_id(k[5]))) return 0;
+        /* skip `.kind` that is part of something else; require end or space */
+        if (k[5] != 0 && k[5] != ' ' && k[5] != '\t') return 0;
+        acc = k;
+    }
+    if (!shadow_recv_name_before(lhs, acc, recv, sizeof(recv))) return 0;
+    v = shadow_variant_for_recv(recv);
+    if (!v) return 0;
+    /* root spelling for the oracle message */
+    {
+        const char* rs = shadow_variant_recv_lbound(lhs, acc);
+        rlen = (size_t)(acc - rs);
+        while (rlen > 0 && (rs[rlen - 1] == ' ' || rs[rlen - 1] == '\t'))
+            rlen--;
+        if (rlen >= sizeof(root)) rlen = sizeof(root) - 1;
+        memcpy(root, rs, rlen);
+        root[rlen] = 0;
+    }
+    (void)arrow;
+    snprintf(msg, sizeof(msg),
+             "variant tag '.kind' is read-only — the tag changes only through "
+             "construction or whole-variant assignment ('%s = (%s){ .arm = "
+             "... };')",
+             root[0] ? root : recv, v->name);
+    shadow_variant_err_loc(ctx, st, out, ".kind", 0, msg);
+    return 1;
+}
+
+/* Designated ctor / braced-assign diagnostics on `{ .arm = … }`. */
+static int shadow_variant_diag_ctor(ShadowCtx* ctx, AstNode* st, CEmit* out,
+                                   const char* vty, const char* expr,
+                                   const char* lhs_for_braced) {
+    ShadowVariant* v;
+    const char* p;
+    const char* brace;
+    int arm_i = -1;
+    char first_arm[64];
+    first_arm[0] = 0;
+    if (!expr) return 0;
+    v = vty ? shadow_variant_find(vty) : NULL;
+    brace = expr;
+    while (*brace == ' ' || *brace == '\t') brace++;
+    /* Strip outer `(Name){` compound form for scanning. Plain-struct
+     * compound literals are host C — only bare `{ .arm = … }` braced
+     * assigns are restricted to @variant. */
+    int is_compound_lit = 0;
+    if (*brace == '(') {
+        const char* q = brace + 1;
+        while (*q && *q != ')') q++;
+        if (*q == ')') {
+            q++;
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q == '{') {
+                brace = q;
+                is_compound_lit = 1;
+            }
+        }
+    }
+    if (*brace != '{') {
+        /* braced assign: rhs may be `{ … }` without type prefix */
+        return 0;
+    }
+    p = brace + 1;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == ',') p++;
+        if (*p == '}' || !*p) break;
+        if (*p == '.') {
+            const char* arm = p + 1;
+            const char* e = arm;
+            const char* eq;
+            size_t alen;
+            char needle[72];
+            char msg[384];
+            int ai;
+            while (*e && shadow_is_id(*e)) e++;
+            alen = (size_t)(e - arm);
+            eq = e;
+            while (*eq == ' ' || *eq == '\t') eq++;
+            if (*eq != '=' || eq[1] == '=') {
+                p = e;
+                continue;
+            }
+            if (alen == 4 && memcmp(arm, "kind", 4) == 0) {
+                p = eq + 1;
+                continue;
+            }
+            if (alen == 1 && arm[0] == 'u') {
+                p = eq + 1;
+                continue;
+            }
+            snprintf(needle, sizeof(needle), ".%.*s", (int)alen, arm);
+            if (!v) {
+                /* Unique-arm / multi-owner / unresolved braced assign. */
+                int owners = 0;
+                int oi;
+                ShadowVariant* uv = NULL;
+                for (oi = 0; oi < g_shadow_nvariants; oi++) {
+                    if (shadow_variant_arm_index(&g_shadow_variants[oi], arm,
+                                                alen) >= 0) {
+                        owners++;
+                        uv = &g_shadow_variants[oi];
+                    }
+                }
+                if (lhs_for_braced && lhs_for_braced[0] && owners == 0 &&
+                    !is_compound_lit) {
+                    char lhs_needle[96];
+                    snprintf(msg, sizeof(msg),
+                             "braced assignment 'lhs = { ... };' is only "
+                             "defined for @variant types — '%s' does not "
+                             "resolve to a variant and '.%.*s' is not an arm "
+                             "of any declared variant (for a plain struct use "
+                             "a compound literal: 'lhs = (T){ ... };')",
+                             lhs_for_braced, (int)alen, arm);
+                    /* `p = {` — avoid matching a lone `p` in comments. */
+                    snprintf(lhs_needle, sizeof(lhs_needle), "%s = {",
+                             lhs_for_braced);
+                    shadow_variant_err_loc(ctx, st, out, lhs_needle, 0, msg);
+                    return 1;
+                }
+                if (owners == 0) {
+                    /* Plain-struct designated init / compound literal. */
+                    p = eq + 1;
+                    continue;
+                }
+                if (owners == 1) v = uv;
+                else {
+                    p = eq + 1;
+                    continue;
+                }
+            }
+            ai = shadow_variant_arm_index(v, arm, alen);
+            if (ai < 0) {
+                char arms[256];
+                const char* sugg;
+                shadow_variant_arm_list(v, arms, sizeof(arms));
+                sugg = shadow_variant_suggest_arm(v, arm, alen);
+                if (sugg)
+                    snprintf(msg, sizeof(msg),
+                             "variant '%s' has no arm '.%.*s' (arms: %s) — "
+                             "did you mean '.%s'?",
+                             v->name, (int)alen, arm, arms, sugg);
+                else
+                    snprintf(msg, sizeof(msg),
+                             "variant '%s' has no arm '.%.*s' (arms: %s)",
+                             v->name, (int)alen, arm, arms);
+                shadow_variant_err_loc(ctx, st, out, needle, 0, msg);
+                return 1;
+            }
+            if (arm_i >= 0) {
+                snprintf(msg, sizeof(msg),
+                         "variant '%s' initializer names two arms '.%s' and "
+                         "'.%.*s' — a variant holds exactly one active arm",
+                         v->name, first_arm, (int)alen, arm);
+                shadow_variant_err_loc(ctx, st, out, needle, 0, msg);
+                return 1;
+            }
+            arm_i = ai;
+            snprintf(first_arm, sizeof(first_arm), "%.*s", (int)alen, arm);
+            /* Payload type mismatch: `(Other){…}` vs arm type. */
+            {
+                const char* val = eq + 1;
+                while (*val == ' ' || *val == '\t') val++;
+                if (*val == '(' && v->tys[ai][0]) {
+                    const char* tn = val + 1;
+                    const char* te = tn;
+                    char got[96];
+                    size_t gl;
+                    while (*te && *te != ')' && *te != ' ' && *te != '\t')
+                        te++;
+                    gl = (size_t)(te - tn);
+                    if (gl && gl < sizeof(got) && *te == ')') {
+                        memcpy(got, tn, gl);
+                        got[gl] = 0;
+                        if (strcmp(got, v->tys[ai]) != 0 &&
+                            strcmp(got, "void") != 0) {
+                            /* Skip if arm type is a pointer spelling of got. */
+                            size_t want = strlen(v->tys[ai]);
+                            int ptr_ok =
+                                (want == gl + 1 &&
+                                 memcmp(v->tys[ai], got, gl) == 0 &&
+                                 v->tys[ai][gl] == '*');
+                            if (!ptr_ok) {
+                                snprintf(msg, sizeof(msg),
+                                         "cannot convert 'struct %s' to",
+                                         got);
+                                shadow_variant_err_loc(ctx, st, out, NULL, 1,
+                                                      msg);
+                                return 1;
+                            }
+                        }
+                    }
+                }
+            }
+            p = eq + 1;
+            continue;
+        }
+        /* skip nested groups */
+        if (*p == '{' || *p == '(' || *p == '[') {
+            char open = *p;
+            char close = (open == '{') ? '}' : (open == '(') ? ')' : ']';
+            int dep = 0;
+            do {
+                if (*p == open) dep++;
+                else if (*p == close) dep--;
+                p++;
+            } while (*p && dep > 0);
+            continue;
+        }
+        p++;
+    }
+    return 0;
+}
+
+/* Switch subject + designator cases: unknown arm / non-variant / exhaustiveness. */
+static int shadow_variant_diag_switch(ShadowCtx* ctx, AstNode* st, CEmit* out,
+                                     const char* subj, const char* body,
+                                     ShadowVariant* v) {
+    const char* p;
+    unsigned covered = 0;
+    int have_default = 0;
+    int have_desig = 0;
+    char msg[384];
+    if (!body) return 0;
+    p = body;
+    while (*p) {
+        if (strncmp(p, "default", 7) == 0 && !shadow_is_id(p[7] ? p[7] : 0) &&
+            (p == body || !shadow_is_id(p[-1]))) {
+            const char* q = p + 7;
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q == ':') have_default = 1;
+            p = q;
+            continue;
+        }
+        if (strncmp(p, "case", 4) == 0 && !shadow_is_id(p[4] ? p[4] : 0) &&
+            (p == body || !shadow_is_id(p[-1]))) {
+            const char* q = p + 4;
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q == '.') {
+                const char* arm = q + 1;
+                const char* e = arm;
+                char needle[72];
+                size_t alen;
+                int ai;
+                have_desig = 1;
+                while (*e && shadow_is_id(*e)) e++;
+                alen = (size_t)(e - arm);
+                snprintf(needle, sizeof(needle), ".%.*s", (int)alen, arm);
+                if (!v) {
+                    char subj_show[64];
+                    size_t sl;
+                    const char* s = subj ? subj : "?";
+                    while (*s == '(' || *s == ' ') s++;
+                    sl = 0;
+                    while (s[sl] && shadow_is_id(s[sl]) &&
+                           sl + 1 < sizeof(subj_show))
+                        sl++;
+                    memcpy(subj_show, s, sl);
+                    subj_show[sl] = 0;
+                    snprintf(msg, sizeof(msg),
+                             "designator case label '.%.*s' requires a switch "
+                             "on a @variant subject — '%s' does not resolve "
+                             "to a variant",
+                             (int)alen, arm,
+                             subj_show[0] ? subj_show : "?");
+                    shadow_variant_err_loc(ctx, st, out, needle, 0, msg);
+                    return 1;
+                }
+                ai = shadow_variant_arm_index(v, arm, alen);
+                if (ai < 0) {
+                    char arms[256];
+                    const char* sugg;
+                    shadow_variant_arm_list(v, arms, sizeof(arms));
+                    sugg = shadow_variant_suggest_arm(v, arm, alen);
+                    if (sugg)
+                        snprintf(msg, sizeof(msg),
+                                 "variant '%s' has no arm '.%.*s' (arms: %s) — "
+                                 "did you mean '.%s'?",
+                                 v->name, (int)alen, arm, arms, sugg);
+                    else
+                        snprintf(msg, sizeof(msg),
+                                 "variant '%s' has no arm '.%.*s' (arms: %s)",
+                                 v->name, (int)alen, arm, arms);
+                    shadow_variant_err_loc(ctx, st, out, needle, 0, msg);
+                    return 1;
+                }
+                covered |= 1u << ai;
+                p = e;
+                continue;
+            }
+            /* tag constant Name_arm */
+            if (v && shadow_is_id(*q)) {
+                const char* e = q;
+                size_t pfx = strlen(v->name);
+                while (*e && shadow_is_id(*e)) e++;
+                if ((size_t)(e - q) > pfx + 1 &&
+                    memcmp(q, v->name, pfx) == 0 && q[pfx] == '_') {
+                    int ai = shadow_variant_arm_index(
+                        v, q + pfx + 1, (size_t)(e - (q + pfx + 1)));
+                    if (ai >= 0) covered |= 1u << ai;
+                }
+                p = e;
+                continue;
+            }
+        }
+        p++;
+    }
+    if (v && have_desig && !have_default) {
+        char missing[256];
+        size_t mo = 0;
+        int nmiss = 0;
+        int a;
+        missing[0] = 0;
+        for (a = 0; a < v->narm; a++) {
+            int m;
+            if (covered & (1u << a)) continue;
+            m = snprintf(missing + mo, sizeof(missing) - mo, "%s'.%s'",
+                         nmiss ? ", " : "", v->arms[a]);
+            if (m > 0 && (size_t)m < sizeof(missing) - mo) mo += (size_t)m;
+            nmiss++;
+        }
+        if (nmiss > 0) {
+            char sw_needle[96];
+            snprintf(msg, sizeof(msg),
+                     "switch on variant '%s' is not exhaustive: missing arm%s "
+                     "%s (add the missing case%s or a 'default:' to opt out)",
+                     v->name, nmiss > 1 ? "s" : "", missing,
+                     nmiss > 1 ? "s" : "");
+            /* Prefer `switch (` at the stmt — not the word in a comment. */
+            snprintf(sw_needle, sizeof(sw_needle), "switch (");
+            shadow_variant_err_loc(ctx, st, out, sw_needle, 0, msg);
+            return 1;
+        }
+    }
+    (void)have_desig;
+    return 0;
+}
+
 /* Rewrite cc_ok/cc_err using a bound variable's declared CCResult_* type. */
 static void shadow_rewrite_result_ctors_for_var(char* expr, size_t cap,
                                                 const char* var) {
@@ -2155,20 +4347,21 @@ static int shadow_bind_ty_has(const ShadowBind* b, const char* needle) {
 static void shadow_bind_base_ty(const ShadowBind* b, char* dst, size_t cap) {
     size_t n;
     const char* s;
+    const char* resolved;
     if (!dst || !cap) return;
     dst[0] = 0;
     if (!b || !b->ty[0]) return;
     s = b->ty;
-    while (*s == ' ' || *s == '\t') s++;
+    while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
     for (;;) {
         if (strncmp(s, "const ", 6) == 0) {
             s += 6;
-            while (*s == ' ' || *s == '\t') s++;
+            while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
             continue;
         }
         if (strncmp(s, "volatile ", 9) == 0) {
             s += 9;
-            while (*s == ' ' || *s == '\t') s++;
+            while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
             continue;
         }
         break;
@@ -2178,6 +4371,34 @@ static void shadow_bind_base_ty(const ShadowBind* b, char* dst, size_t cap) {
     else if (strncmp(s, "union ", 6) == 0) s += 6;
     while (*s == ' ' || *s == '\t') s++;
     snprintf(dst, cap, "%s", s);
+    /* Drop trailing `*` / spaces so `Map_T*` and `Map_T` share family UFCS. */
+    {
+        size_t dn = strlen(dst);
+        while (dn && (dst[dn - 1] == '*' || dst[dn - 1] == ' ' ||
+                      dst[dn - 1] == '\t'))
+            dst[--dn] = 0;
+    }
+    /* CharVec / CharVec* → CCVec_char so family UFCS (as_slice) resolves. */
+    {
+        char alias[128];
+        size_t al = 0;
+        while (dst[al] && dst[al] != '*' && dst[al] != ' ' &&
+               al + 1 < sizeof(alias))
+            al++;
+        memcpy(alias, dst, al);
+        alias[al] = 0;
+        resolved = shadow_td_alias_resolve(alias);
+        if (resolved && resolved[0] && strcmp(resolved, alias) != 0) {
+            char base[128];
+            size_t bl = 0;
+            while (resolved[bl] && resolved[bl] != '*' && resolved[bl] != ' ' &&
+                   bl + 1 < sizeof(base))
+                bl++;
+            memcpy(base, resolved, bl);
+            base[bl] = 0;
+            if (base[0]) snprintf(dst, cap, "%s", base);
+        }
+    }
     n = strlen(dst);
     while (n > 0 && (dst[n - 1] == ' ' || dst[n - 1] == '*' || dst[n - 1] == '\t'))
         dst[--n] = 0;
@@ -2283,6 +4504,7 @@ static void shadow_gfac_add(const char* family, int arity, const char* tpl,
             } else {
                 snprintf(g_shadow_gfac[i].tpl, sizeof(g_shadow_gfac[i].tpl),
                          "%s", tpl);
+                g_shadow_gfac[i].has_base = 1;
             }
             if (arity > 0) g_shadow_gfac[i].arity = arity;
             if (origin_file && origin_file[0] &&
@@ -2301,6 +4523,7 @@ static void shadow_gfac_add(const char* family, int arity, const char* tpl,
     snprintf(g_shadow_gfac[g_shadow_ngfac].tpl, sizeof(g_shadow_gfac[0].tpl),
              "%s", tpl);
     g_shadow_gfac[g_shadow_ngfac].arity = arity;
+    g_shadow_gfac[g_shadow_ngfac].has_base = append ? 0 : 1;
     g_shadow_gfac[g_shadow_ngfac].origin_file[0] = 0;
     g_shadow_gfac[g_shadow_ngfac].origin_line = 0;
     if (origin_file && origin_file[0]) {
@@ -2328,11 +4551,13 @@ static void shadow_ginst_need(const char* family, const char* compact) {
     g_shadow_nginst++;
 }
 
+/* Returns 1 on success, 0 on soft failure, -1 on arg OOB (sets *oob_arg). */
 static int shadow_inst_generic_tpl(const char* tpl, const char* mangled,
                                    char args[][64], int nargs, char* out,
-                                   size_t cap) {
+                                   size_t cap, int* oob_arg) {
     size_t o = 0;
     const char* p = tpl ? tpl : "";
+    if (oob_arg) *oob_arg = -1;
     while (*p && o + 1 < cap) {
         if (strncmp(p, "${mangled}", 10) == 0) {
             size_t n = strlen(mangled);
@@ -2347,7 +4572,12 @@ static int shadow_inst_generic_tpl(const char* tpl, const char* mangled,
             const char* q = p + 6;
             while (*q >= '0' && *q <= '9') idx = idx * 10 + (*q++ - '0');
             if (*q == ')' && q[1] == '}') {
-                if (idx < 0 || idx >= nargs) return 0;
+                /* Text templates are 0-based; compiled factories are 1-based.
+                 * Accept both: idx==nargs with nargs>0 is also OOB for 1-based. */
+                if (idx < 0 || idx >= nargs) {
+                    if (oob_arg) *oob_arg = idx;
+                    return -1;
+                }
                 size_t n = strlen(args[idx]);
                 if (o + n >= cap) return 0;
                 memcpy(out + o, args[idx], n);
@@ -2362,7 +4592,10 @@ static int shadow_inst_generic_tpl(const char* tpl, const char* mangled,
             const char* q = p + 18;
             while (*q >= '0' && *q <= '9') idx = idx * 10 + (*q++ - '0');
             if (*q == ']' && q[1] == '}') {
-                if (idx < 0 || idx >= nargs) return 0;
+                if (idx < 0 || idx >= nargs) {
+                    if (oob_arg) *oob_arg = idx;
+                    return -1;
+                }
                 size_t n = strlen(args[idx]);
                 if (o + n >= cap) return 0;
                 memcpy(out + o, args[idx], n);
@@ -2462,7 +4695,8 @@ static int shadow_map_hash_eq(const char* compact, const char** hash,
         *eq = "cc_map_eq_u64";
         return 1;
     }
-    /* User-installed key: cc_map_key_hash_<K> / cc_map_key_eq_<K>. */
+    /* User-installed key: cc_map_key_hash_<K> / cc_map_key_eq_<K>.
+     * Unknown keys are refused in shadow_safety_check (articulate oracle). */
     {
         static char hash_name[160];
         static char eq_name[160];
@@ -2475,37 +4709,75 @@ static int shadow_map_hash_eq(const char* compact, const char** hash,
     }
 }
 
-/* e from AST_CHAN_VAR / AST_TYPEDEF_CHAN: "" | "o" | "t:TOPO" | "o:TOPO". */
+/* e from AST_CHAN_VAR / AST_TYPEDEF_CHAN:
+ *   "" | "o" | "t:TOPO" | "o:TOPO" | "owned"  plus optional ";s" ";dn" ";do". */
 static void shadow_chan_flags_from_e(const char* e, int* ordered, char* topo,
-                                     size_t topo_cap) {
+                                     size_t topo_cap, int* is_sync,
+                                     int* bp_mode) {
+    const char* semi;
+    char base[64];
+    size_t bl;
     if (ordered) *ordered = 0;
     if (topo && topo_cap) topo[0] = 0;
+    if (is_sync) *is_sync = 0;
+    if (bp_mode) *bp_mode = 0;
     if (!e || !e[0]) return;
-    if (e[0] == 'o') {
+    semi = strchr(e, ';');
+    bl = semi ? (size_t)(semi - e) : strlen(e);
+    if (bl >= sizeof(base)) bl = sizeof(base) - 1;
+    memcpy(base, e, bl);
+    base[bl] = 0;
+    if (strcmp(base, "owned") == 0) {
+        /* owned channels are not pair-registered. */
+    } else if (base[0] == 'o') {
         if (ordered) *ordered = 1;
-        if (e[1] == ':' && topo && topo_cap > 1)
-            snprintf(topo, topo_cap, "%s", e + 2);
-    } else if (e[0] == 't' && e[1] == ':' && topo && topo_cap > 1) {
-        snprintf(topo, topo_cap, "%s", e + 2);
-    } else if (strcmp(e, "ordered") == 0) {
-        /* Legacy spell from older parse. */
+        if (base[1] == ':' && topo && topo_cap > 1)
+            snprintf(topo, topo_cap, "%s", base + 2);
+    } else if (base[0] == 't' && base[1] == ':' && topo && topo_cap > 1) {
+        snprintf(topo, topo_cap, "%s", base + 2);
+    } else if (strcmp(base, "ordered") == 0) {
         if (ordered) *ordered = 1;
+    }
+    if (semi) {
+        const char* p = semi;
+        while (*p) {
+            if (*p == ';') p++;
+            if (p[0] == 's' && (p[1] == 0 || p[1] == ';')) {
+                if (is_sync) *is_sync = 1;
+                p += 1;
+            } else if (p[0] == 'd' && p[1] == 'n' &&
+                       (p[2] == 0 || p[2] == ';')) {
+                if (bp_mode) *bp_mode = 1;
+                p += 2;
+            } else if (p[0] == 'd' && p[1] == 'o' &&
+                       (p[2] == 0 || p[2] == ';')) {
+                if (bp_mode) *bp_mode = 2;
+                p += 2;
+            } else {
+                while (*p && *p != ';') p++;
+            }
+        }
     }
 }
 
 static void shadow_chan_register_ex(const char* name, const char* cap, int ordered,
-                                    const char* elem, const char* topo) {
+                                    const char* elem, const char* topo,
+                                    int is_sync, int bp_mode) {
     int i;
     if (!name || !name[0] || g_shadow_nchans >= SHADOW_CHAN_CAP) return;
     for (i = 0; i < g_shadow_nchans; i++) {
         if (strcmp(g_shadow_chans[i].name, name) == 0) {
+            /* Last wins — same name reused in later blocks (fifo smoke). */
             snprintf(g_shadow_chans[i].cap, sizeof(g_shadow_chans[i].cap), "%s",
                      cap ? cap : "1");
-            if (ordered) g_shadow_chans[i].ordered = 1;
-            if (elem && elem[0] && !g_shadow_chans[i].elem[0])
+            g_shadow_chans[i].ordered = ordered ? 1 : 0;
+            g_shadow_chans[i].is_sync = is_sync ? 1 : 0;
+            g_shadow_chans[i].bp_mode = bp_mode;
+            if (elem && elem[0])
                 snprintf(g_shadow_chans[i].elem, sizeof(g_shadow_chans[i].elem),
                          "%s", elem);
-            if (topo && topo[0] && !g_shadow_chans[i].topo[0])
+            g_shadow_chans[i].topo[0] = 0;
+            if (topo && topo[0])
                 snprintf(g_shadow_chans[i].topo, sizeof(g_shadow_chans[i].topo),
                          "%s", topo);
             return;
@@ -2524,21 +4796,27 @@ static void shadow_chan_register_ex(const char* name, const char* cap, int order
         snprintf(g_shadow_chans[g_shadow_nchans].topo,
                  sizeof(g_shadow_chans[0].topo), "%s", topo);
     g_shadow_chans[g_shadow_nchans].ordered = ordered ? 1 : 0;
+    g_shadow_chans[g_shadow_nchans].is_sync = is_sync ? 1 : 0;
+    g_shadow_chans[g_shadow_nchans].bp_mode = bp_mode;
     g_shadow_nchans++;
 }
 
 static void shadow_chan_register(const char* name, const char* cap, int ordered) {
-    shadow_chan_register_ex(name, cap, ordered, NULL, NULL);
+    shadow_chan_register_ex(name, cap, ordered, NULL, NULL, 0, 0);
 }
 
 static void shadow_chan_register_node(AstNode* n) {
     int ordered = 0;
+    int is_sync = 0;
+    int bp_mode = 0;
     char topo[16];
     const char* p;
     char name[64];
     size_t ni;
     if (!n || !n->a[0]) return;
-    shadow_chan_flags_from_e(n->e, &ordered, topo, sizeof(topo));
+    if (strcmp(n->c, "owned") == 0) return; /* create_owned, not pair table */
+    shadow_chan_flags_from_e(n->e, &ordered, topo, sizeof(topo), &is_sync,
+                             &bp_mode);
     /* `a` may be comma-separated multi-declarator names. */
     p = n->a;
     while (*p) {
@@ -2551,7 +4829,7 @@ static void shadow_chan_register_node(AstNode* n) {
         name[ni] = 0;
         if (name[0])
             shadow_chan_register_ex(name, n->b, ordered, n->d[0] ? n->d : NULL,
-                                    topo[0] ? topo : NULL);
+                                    topo[0] ? topo : NULL, is_sync, bp_mode);
     }
 }
 
@@ -2564,14 +4842,18 @@ static const ShadowChanDecl* shadow_chan_find(const char* name) {
     return NULL;
 }
 
-/* Resolve AstNode → (path, line). Returns 0 if unknown. */
+/* Resolve AstNode → (path, line). Returns 0 if unknown.
+ * Prefer `#line`-aware logical coords so grammar splices keep user lines. */
 static int shadow_site_loc(TapeCache* cache, AstNode* st, const char** path_out,
                            int* line_out) {
     if (!cache || !st || !st->file_id || !path_out || !line_out) return 0;
     FileTape* ft = tape_by_id(cache, st->file_id);
     if (!ft || !ft->path || !ft->bytes) return 0;
-    int line = 1, col = 1;
-    offset_to_linecol(ft->bytes, ft->len, st->tok_off, &line, &col);
+    int line = 1;
+    char lfile[256];
+    lfile[0] = 0;
+    shadow_tape_logical_at(ft->bytes, ft->len, st->tok_off, ft->path, lfile,
+                           sizeof(lfile), &line);
     *path_out = ft->path;
     *line_out = line;
     return 1;
@@ -2609,13 +4891,15 @@ static int shadow_as_path_to(const char* outer, const char* face, char* path,
 
 /* Bake file/line as string literals (production shape). `__LINE__` is an int
  * and breaks once `#line` is active if used as an int diag arg. */
-static int shadow_emit_err_at_bind(CEmit* out, ShadowCtx* ctx, const char* indent,
-                                   const char* bind, const char* site) {
+static int shadow_emit_err_at_bind_tmp(CEmit* out, ShadowCtx* ctx,
+                                       const char* indent, const char* bind,
+                                       const char* site, const char* rtmp) {
     const char* path = "unknown";
     int line = 0;
     char esc[512];
     const char* eh_ty =
         (ctx && ctx->eh && ctx->eh->a[0]) ? ctx->eh->a : "CCError";
+    const char* r = (rtmp && rtmp[0]) ? rtmp : "__r";
     char arms[768];
     size_t ao = 0;
     int ai;
@@ -2628,27 +4912,32 @@ static int shadow_emit_err_at_bind(CEmit* out, ShadowCtx* ctx, const char* inden
     /* draft_as §5: exact E, else unique @as face (offset-0 cast — all
      * _Generic arms are type-checked). Arms come from the @as registry. */
     arms[0] = 0;
-    ao += (size_t)snprintf(arms + ao, sizeof(arms) - ao, "%s: (__r).u.error",
-                           eh_ty);
+    ao += (size_t)snprintf(arms + ao, sizeof(arms) - ao, "%s: (%s).u.error",
+                           eh_ty, r);
     for (ai = 0; ai < g_shadow_nas && ao + 80 < sizeof(arms); ai++) {
         if (strcmp(g_shadow_as[ai].target, eh_ty) != 0) continue;
         if (strchr(g_shadow_as[ai].field, '.')) continue;
         ao += (size_t)snprintf(
             arms + ao, sizeof(arms) - ao,
-            ", %s: (*(%s*)(void*)&(__r).u.error)", g_shadow_as[ai].outer,
-            eh_ty);
+            ", %s: (*(%s*)(void*)&(%s).u.error)", g_shadow_as[ai].outer,
+            eh_ty, r);
         nas++;
     }
     if (nas > 0) {
         return cemit_fmt(out,
             "%scc_rt_diag_record_unwrap_site(\"%s\", \"%d\");\n"
-            "%s%s %s = _Generic((__r).u.error, %s, default: (__r).u.error);\n",
-            indent, esc, line, indent, eh_ty, bind, arms);
+            "%s%s %s = _Generic((%s).u.error, %s, default: (%s).u.error);\n",
+            indent, esc, line, indent, eh_ty, bind, r, arms, r);
     }
     return cemit_fmt(out,
         "%scc_rt_diag_record_unwrap_site(\"%s\", \"%d\");\n"
-        "%s%s %s = (__r).u.error;\n",
-        indent, esc, line, indent, eh_ty, bind);
+        "%s%s %s = (%s).u.error;\n",
+        indent, esc, line, indent, eh_ty, bind, r);
+}
+
+static int shadow_emit_err_at_bind(CEmit* out, ShadowCtx* ctx, const char* indent,
+                                   const char* bind, const char* site) {
+    return shadow_emit_err_at_bind_tmp(out, ctx, indent, bind, site, "__r");
 }
 
 /* Pointer/null unwrap: host `_Generic` `__cc_uw_err_at` (Result + null).
@@ -2659,12 +4948,15 @@ static int shadow_emit_ptr_err_at_bind(CEmit* out, ShadowCtx* ctx,
     const char* path = "unknown";
     int line = 0;
     char esc[512];
+    char site_esc[512];
     const char* eh_ty =
         (ctx && ctx->eh && ctx->eh->a[0]) ? ctx->eh->a : "CCError";
     if (ctx && ctx->site)
         (void)shadow_site_loc(ctx->cache, ctx->site, &path, &line);
     if (!path || !path[0]) path = "unknown";
     shadow_escape_path(esc, sizeof(esc), path);
+    shadow_escape_path(site_esc, sizeof(site_esc),
+                       site && site[0] ? site : "unwrap");
     /* Non-CCError handlers are Result-shaped — field bind + @as face. */
     if (strcmp(eh_ty, "CCError") != 0)
         return shadow_emit_err_at_bind(out, ctx, indent, bind, site);
@@ -2672,8 +4964,7 @@ static int shadow_emit_ptr_err_at_bind(CEmit* out, ShadowCtx* ctx,
     return cemit_fmt(out,
         "%s__typeof__(__cc_uw_err_at(__r, \"%s\", \"%s\", \"%d\")) %s = "
         "__cc_uw_err_at(__r, \"%s\", \"%s\", \"%d\");\n",
-        indent, site ? site : "unwrap", esc, line, bind,
-        site ? site : "unwrap", esc, line);
+        indent, site_esc, esc, line, bind, site_esc, esc, line);
 }
 
 /* `#line N "path"` when site differs from the last marker.

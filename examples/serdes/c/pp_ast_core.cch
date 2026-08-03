@@ -104,7 +104,9 @@ static ShadowKwKind shadow_kw(Token t) {
 
 /* ---- typedef scopes + tiny AST ------------------------------------------ */
 
-enum { SCOPE_CAP = 32, NAME_CAP = 64, AST_CAP = 512 };
+/* Large tables are heap-backed (parser_ensure_storage) so stack Parser stays
+ * small in spike smokes. Grammar TUs need headroom beyond the old 512. */
+enum { SCOPE_CAP = 32, NAME_CAP = 64, AST_CAP = 2048 };
 
 typedef struct {
     char names[NAME_CAP][128];
@@ -142,6 +144,9 @@ typedef enum {
     /* println(@string(`tpl`, @scratch)) !>; — a=tpl body without ticks */
     AST_PRINTLN_TPL,
     AST_ERR_FWD,       /* @err(bind); — a=bind name; emits handler(bind) */
+    /* lhs =<! expr [: default] @err …;  OR  expr @err …;
+     * a=lhs|"" b=fallible expr c="colon"|"" d=local bind spec e=default */
+    AST_ERR_SYNTAX,
     /* Type * name = callee(NULL) !> @destroy { stmts }; — a=type b=name c=callee */
     AST_NURSERY_DESTROY,
     /* recv->spawn(() => [caps] { stmts }); — a=recv b=spawn d=id e=caps
@@ -217,6 +222,10 @@ typedef enum {
     AST_BREAK,
     /* continue; */
     AST_CONTINUE,
+    /* goto label; — a=label */
+    AST_GOTO,
+    /* label: — a=label (statement position) */
+    AST_LABEL,
     /* do { stmts } while (cond); — a=cond, body=stmts */
     AST_DO_WHILE,
     /* const Type* name[] = { init_list }; — a=type b=name c=init text */
@@ -252,9 +261,9 @@ struct AstNode {
      *   dbody — destroy bodies + UFCS/create/closure attachments on a stmt */
     AstNode** kids;
     int nkids;
-    AstNode* body[32];
+    AstNode* body[64];
     int nbody;
-    AstNode* dbody[32];
+    AstNode* dbody[64];
     int ndbody;
     /* Source trivia: gap before this node (comments / blank lines) + line indent.
      * lead spans tape bytes [lead_off, lead_off+lead_len); indent is the
@@ -274,18 +283,59 @@ typedef struct {
     TapeCache* cache; /* for file:line diagnostics */
     Scope scopes[SCOPE_CAP];
     int ns;
-    AstNode nodes[AST_CAP];
+    AstNode* nodes; /* heap — AST_CAP entries */
     int nn;
-    AstNode* kids_storage[AST_CAP * 4];
+    AstNode** kids_storage; /* heap — AST_CAP * 4 */
     int nkstore;
-    AstNode* tu_items[AST_CAP];
+    AstNode** tu_items; /* heap — AST_CAP */
     int ntu;
     int err;
     char err_msg[192];
     int in_async; /* 1 while parsing @async fn body (await strip vs reject). */
+    unsigned pending_fn_attrs; /* @noblock/@blocking before fn decl */
+    /* 1 = parse_stmt returns NULL on miss without parser_fail (static-fn soft). */
+    int soft_stmt;
+    int own_storage; /* 1 if nodes/kids/tu were calloc'd by ensure_storage */
 } Parser;
 
 static Token p_peek(Parser* p);
+
+/* Process-local tables so stack `Parser p = {0}` stays small. One active
+ * parse_tu at a time (shadow_lower / spike smokes). TCC has no _Thread_local. */
+static AstNode* g_parser_nodes;
+static AstNode** g_parser_kids;
+static AstNode** g_parser_tu;
+static int g_parser_storage_cap;
+
+static int parser_ensure_storage(Parser* p) {
+    if (!p) return 0;
+    if (p->nodes && p->kids_storage && p->tu_items) return 1;
+    if (!g_parser_nodes || g_parser_storage_cap < AST_CAP) {
+        free(g_parser_nodes);
+        free(g_parser_kids);
+        free(g_parser_tu);
+        g_parser_nodes = (AstNode*)calloc((size_t)AST_CAP, sizeof(AstNode));
+        g_parser_kids =
+            (AstNode**)calloc((size_t)AST_CAP * 4, sizeof(AstNode*));
+        g_parser_tu = (AstNode**)calloc((size_t)AST_CAP, sizeof(AstNode*));
+        g_parser_storage_cap =
+            (g_parser_nodes && g_parser_kids && g_parser_tu) ? AST_CAP : 0;
+        if (!g_parser_storage_cap) {
+            free(g_parser_nodes);
+            free(g_parser_kids);
+            free(g_parser_tu);
+            g_parser_nodes = NULL;
+            g_parser_kids = NULL;
+            g_parser_tu = NULL;
+            return 0;
+        }
+    }
+    p->nodes = g_parser_nodes;
+    p->kids_storage = g_parser_kids;
+    p->tu_items = g_parser_tu;
+    p->own_storage = 0; /* TLS — do not free with Parser */
+    return 1;
+}
 
 static void parser_fail(Parser* p, Token at, const char* msg) {
     /* Sticky: keep the first (most specific) diagnostic. */
@@ -303,11 +353,12 @@ static void parser_fail_cap(Parser* p, Token at, const char* what, int limit) {
     parser_fail(p, at, msg);
 }
 
-/* Cap for body[] / dbody[] (both sized 32). `what` names the list, e.g. "block". */
+/* Cap for body[] / dbody[] (both sized 64). `what` names the list, e.g. "block". */
+enum { SHADOW_BODY_CAP = 64 };
 static void parser_fail_body_cap(Parser* p, Token at, const char* what) {
     char msg[160];
     snprintf(msg, sizeof(msg), "%s too large for shadow beachhead (cap %d)",
-             what ? what : "body", 32);
+             what ? what : "body", SHADOW_BODY_CAP);
     parser_fail(p, at, msg);
 }
 
@@ -350,6 +401,125 @@ static int scope_add_typedef(Parser* p, CCSlice name) {
     sc->names[sc->n][name.len] = 0;
     sc->n++;
     return 1;
+}
+
+/* From libshadow_comptime (emit_plan). Weak stubs so spike TUs that do not
+ * link the comptime engine still resolve; strong defs win when linked. */
+__attribute__((weak)) size_t cc_emit_plan_comptime_fragment_count(void) {
+    return 0;
+}
+__attribute__((weak)) const char* cc_emit_plan_comptime_fragment_text(
+    size_t frag_index) {
+    (void)frag_index;
+    return NULL;
+}
+
+/* Seed a CamelCase / mangled typedef name into the current scope (idempotent). */
+static void shadow_seed_typedef_name(Parser* p, const char* name, size_t n) {
+    char buf[128];
+    CCSlice s;
+    if (!p || !name || n == 0 || n >= sizeof(buf)) return;
+    if (!(name[0] >= 'A' && name[0] <= 'Z')) return;
+    memcpy(buf, name, n);
+    buf[n] = 0;
+    s.ptr = buf;
+    s.len = n;
+    if (!scope_is_typedef(p, s)) (void)scope_add_typedef(p, s);
+}
+
+/* Scan comptime-emitted C for `typedef … Alias;` and seed Alias into scope.
+ * Late splice still supplies the real definitions into the emit buffer. */
+static void shadow_scan_fragment_typedefs(Parser* p, const char* text) {
+    const char* s = text;
+    size_t n;
+    size_t i;
+    if (!p || !text) return;
+    n = strlen(text);
+    for (i = 0; i + 7 < n;) {
+        int bound_l = (i == 0) ||
+                      !((s[i - 1] >= 'A' && s[i - 1] <= 'Z') ||
+                        (s[i - 1] >= 'a' && s[i - 1] <= 'z') ||
+                        (s[i - 1] >= '0' && s[i - 1] <= '9') || s[i - 1] == '_');
+        int bound_r = (i + 7 >= n) ||
+                      !((s[i + 7] >= 'A' && s[i + 7] <= 'Z') ||
+                        (s[i + 7] >= 'a' && s[i + 7] <= 'z') ||
+                        (s[i + 7] >= '0' && s[i + 7] <= '9') || s[i + 7] == '_');
+        if (bound_l && bound_r && memcmp(s + i, "typedef", 7) == 0) {
+            size_t j = i + 7;
+            size_t last_s = 0, last_e = 0;
+            int depth = 0;
+            while (j < n) {
+                char c = s[j];
+                if (c == '{') {
+                    depth++;
+                    j++;
+                    continue;
+                }
+                if (c == '}') {
+                    if (depth) depth--;
+                    j++;
+                    continue;
+                }
+                if (c == '"' || c == '\'' || c == '`') {
+                    char q = c;
+                    j++;
+                    while (j < n && s[j] != q) {
+                        if (s[j] == '\\' && j + 1 < n) j++;
+                        j++;
+                    }
+                    if (j < n) j++;
+                    continue;
+                }
+                if (depth == 0 && c == ';') {
+                    if (last_e > last_s)
+                        shadow_seed_typedef_name(p, s + last_s, last_e - last_s);
+                    j++;
+                    break;
+                }
+                if (depth == 0 &&
+                    ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                     c == '_')) {
+                    size_t a = j++;
+                    while (j < n &&
+                           ((s[j] >= 'A' && s[j] <= 'Z') ||
+                            (s[j] >= 'a' && s[j] <= 'z') ||
+                            (s[j] >= '0' && s[j] <= '9') || s[j] == '_'))
+                        j++;
+                    last_s = a;
+                    last_e = j;
+                    continue;
+                }
+                j++;
+            }
+            i = j;
+            continue;
+        }
+        i++;
+    }
+}
+
+static void shadow_seed_comptime_emitted_types(Parser* p) {
+    size_t i, n;
+    n = cc_emit_plan_comptime_fragment_count();
+    for (i = 0; i < n; i++)
+        shadow_scan_fragment_typedefs(p, cc_emit_plan_comptime_fragment_text(i));
+}
+
+/* Seed a spelled type when it is a plain identifier (Pair_int_double). */
+static void shadow_seed_spelled_type_name(Parser* p, const char* tytxt) {
+    size_t nl;
+    size_t k;
+    int ok;
+    if (!tytxt || !tytxt[0]) return;
+    nl = strlen(tytxt);
+    ok = 1;
+    for (k = 0; ok && k < nl; k++) {
+        char c = tytxt[k];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+              (c >= '0' && c <= '9') || c == '_'))
+            ok = 0;
+    }
+    if (ok) shadow_seed_typedef_name(p, tytxt, nl);
 }
 
 static void slice_to(char* dst, size_t cap, CCSlice s) {
@@ -553,6 +723,12 @@ static int peek_result_shape(Parser* p) {
            shadow_kw(t) == SHADOW_KW_CHAR || shadow_kw(t) == SHADOW_KW_SIZE_T;
 }
 
+/* Beachhead Result name: CCResult_<ok>_<err> (int/CCError etc.; no full mangle). */
+static void ast_result_name(const char* ok, const char* err, char* out, size_t cap) {
+    if (!out || !cap) return;
+    snprintf(out, cap, "CCResult_%s_%s", ok ? ok : "void", err ? err : "CCError");
+}
+
 /* Ident :: [ … ] — advances nothing; returns end index after `]` or -1. */
 static int peek_generic_type_end(Parser* p, int start) {
     if (start + 3 >= p->n) return -1;
@@ -608,6 +784,117 @@ static int peek_c_int_type_end(Parser* p, int start) {
     return -1;
 }
 
+/* Exclusive end after `]` for a slice marker at `lb` (`[`), or -1.
+ * Allows `:`, lexer `::` (nested char[::]/[:::]), digits, and at most one
+ * `!` (unique). */
+static int peek_slice_brack_end(Parser* p, int lb, int lim, int* out_unique) {
+    int j;
+    int saw_colon = 0;
+    int bang = 0;
+    if (!p || lb < 0 || lb >= lim || !tok_eq(p->toks[lb], TK_PUNCT, "["))
+        return -1;
+    if (out_unique) *out_unique = 0;
+    for (j = lb + 1; j < lim; j++) {
+        Token t = p->toks[j];
+        if (tok_eq(t, TK_PUNCT, "]")) {
+            if (!saw_colon) return -1;
+            if (out_unique) *out_unique = bang > 0;
+            return j + 1;
+        }
+        /* `:` or fused `::` from the punct lexer (nested slice sugar). */
+        if (tok_eq(t, TK_PUNCT, ":") || tok_eq(t, TK_PUNCT, "::")) {
+            saw_colon = 1;
+            continue;
+        }
+        if (tok_eq(t, TK_PUNCT, "!")) {
+            bang++;
+            if (bang > 1) return -1;
+            continue;
+        }
+        if (t.kind == TK_NUM) continue;
+        return -1;
+    }
+    return -1;
+}
+
+/* Exclusive end of a C type token span at `start`, or -1. */
+static int peek_slice_elem_type_end(Parser* p, int start, int lim) {
+    int iend;
+    ShadowKwKind k;
+    if (!p || start < 0 || start >= lim) return -1;
+    iend = peek_c_int_type_end(p, start);
+    if (iend > start && iend <= lim) return iend;
+    k = shadow_kw(p->toks[start]);
+    if (k == SHADOW_KW_CHAR || k == SHADOW_KW_INT || k == SHADOW_KW_BOOL ||
+        k == SHADOW_KW_SIZE_T || k == SHADOW_KW_VOID)
+        return start + 1;
+    if (p->toks[start].kind == TK_IDENT) return start + 1;
+    return -1;
+}
+
+/* Mangle element type tokens [ty0, ty1) → CCSlice name suffix (spaces → `_`). */
+static void ast_mangle_slice_elem(Parser* p, int ty0, int ty1, char* dst,
+                                  size_t cap) {
+    size_t o = 0;
+    int i;
+    if (!dst || !cap) return;
+    dst[0] = 0;
+    for (i = ty0; i < ty1 && o + 1 < cap; i++) {
+        Token t = p->toks[i];
+        size_t n = t.spell.len;
+        if (o && o + 1 < cap) dst[o++] = '_';
+        if (o + n >= cap) n = cap - 1 - o;
+        memcpy(dst + o, t.spell.ptr, n);
+        o += n;
+        dst[o] = 0;
+    }
+}
+
+/* Spell a slice type covering tokens [start, *out_end): type-position
+ * `T[:…]` / `char[:0]` / `char[::]` or declarator `T name[:…]`.
+ * On declarator form, `*out_end` is after `]` and `piece` is `CCSlice[_T] name`. */
+static int ast_try_spell_slice_at(Parser* p, int start, int lim, char* piece,
+                                  size_t cap, int* out_end) {
+    int ty1;
+    int j;
+    int unique = 0;
+    int mend;
+    int name_i = -1;
+    char elem[64];
+    char sty[96];
+    if (!p || !piece || !cap || !out_end || start < 0 || start >= lim)
+        return 0;
+    ty1 = peek_slice_elem_type_end(p, start, lim);
+    if (ty1 < 0) return 0;
+    j = ty1;
+    if (j < lim && p->toks[j].kind == TK_IDENT) {
+        /* Declarator `T name[:…]` — only when `[` follows the name. */
+        if (j + 1 < lim && tok_eq(p->toks[j + 1], TK_PUNCT, "[")) {
+            name_i = j;
+            j++;
+        }
+    }
+    if (j >= lim || !tok_eq(p->toks[j], TK_PUNCT, "[")) return 0;
+    mend = peek_slice_brack_end(p, j, lim, &unique);
+    if (mend < 0) return 0;
+    if (shadow_kw(p->toks[start]) == SHADOW_KW_CHAR && ty1 == start + 1)
+        snprintf(sty, sizeof(sty), "%s", unique ? "CCSliceUnique" : "CCSlice");
+    else {
+        ast_mangle_slice_elem(p, start, ty1, elem, sizeof(elem));
+        if (!elem[0]) return 0;
+        snprintf(sty, sizeof(sty), "CCSlice_%s", elem);
+    }
+    if (name_i >= 0) {
+        char nm[64];
+        slice_to(nm, sizeof(nm), p->toks[name_i].spell);
+        snprintf(piece, cap, "%s %s", sty, nm);
+    } else {
+        snprintf(piece, cap, "%s", sty);
+    }
+    *out_end = mend;
+    return 1;
+}
+
 /* Compact type args inside `[`…`]` (token range exclusive of brackets).
  * `char[:]` → CCSlice; trailing `*` → `ptr` (int* → intptr). */
 static void ast_compact_type_args(Parser* p, int a0, int a1, char* compact,
@@ -617,24 +904,23 @@ static void ast_compact_type_args(Parser* p, int a0, int a1, char* compact,
     compact[0] = 0;
     for (i = a0; i < a1 && ci + 1 < cap; ) {
         Token t = p->toks[i];
+        int gend = -1;
+        char piece[96];
         if (tok_eq(t, TK_PUNCT, ",")) {
             compact[ci++] = '_';
             compact[ci] = 0;
             i++;
             continue;
         }
-        /* char [ : ] */
-        if (i + 3 < a1 && shadow_kw(t) == SHADOW_KW_CHAR &&
-            tok_eq(p->toks[i + 1], TK_PUNCT, "[") &&
-            tok_eq(p->toks[i + 2], TK_PUNCT, ":") &&
-            tok_eq(p->toks[i + 3], TK_PUNCT, "]")) {
-            const char* s = "CCSlice";
-            size_t n = 7;
+        /* char[:…] / T[:…] inside type-args */
+        if (ast_try_spell_slice_at(p, i, a1, piece, sizeof(piece), &gend) &&
+            gend > i && strchr(piece, ' ') == NULL) {
+            size_t n = strlen(piece);
             if (ci + n >= cap) n = cap - 1 - ci;
-            memcpy(compact + ci, s, n);
+            memcpy(compact + ci, piece, n);
             ci += n;
             compact[ci] = 0;
-            i += 4;
+            i = gend;
             continue;
         }
         if (t.kind == TK_IDENT || shadow_kw(t) == SHADOW_KW_INT ||
@@ -642,6 +928,9 @@ static void ast_compact_type_args(Parser* p, int a0, int a1, char* compact,
             shadow_kw(t) == SHADOW_KW_SIZE_T || shadow_kw(t) == SHADOW_KW_VOID) {
             size_t n = t.spell.len;
             int stars = 0;
+            /* Nested `CCVec::[int]` leaves multiple idents — join with `_`. */
+            if (ci && compact[ci - 1] != '_' && ci + 1 < cap)
+                compact[ci++] = '_';
             if (ci + n >= cap) n = cap - 1 - ci;
             memcpy(compact + ci, t.spell.ptr, n);
             ci += n;
@@ -667,16 +956,13 @@ static int ast_spell_type_tokens(Parser* p, int start, int end, char* dst,
                                  size_t cap) {
     char family[64];
     char compact[96];
+    int slice_end = -1;
     if (!p || !dst || !cap || start < 0 || end > p->n || start >= end)
         return 0;
-    /* char [ : ] */
-    if (end - start >= 4 && shadow_kw(p->toks[start]) == SHADOW_KW_CHAR &&
-        tok_eq(p->toks[start + 1], TK_PUNCT, "[") &&
-        tok_eq(p->toks[start + 2], TK_PUNCT, ":") &&
-        tok_eq(p->toks[start + 3], TK_PUNCT, "]")) {
-        snprintf(dst, cap, "CCSlice");
+    /* char[:…] / T[:…] (type-position only for this helper). */
+    if (ast_try_spell_slice_at(p, start, end, dst, cap, &slice_end) &&
+        slice_end == end && strchr(dst, ' ') == NULL)
         return 1;
-    }
     if (peek_generic_type_end(p, start) != end) return 0;
     slice_to(family, sizeof(family), p->toks[start].spell);
     ast_compact_type_args(p, start + 3, end - 1, compact, sizeof(compact));
@@ -711,8 +997,17 @@ static int ast_spell_type_tokens(Parser* p, int start, int end, char* dst,
             if (base[0] >= 'a' && base[0] <= 'z')
                 base[0] = (char)(base[0] - 'a' + 'A');
             snprintf(dst, cap, "%s_%s_make", base, compact);
+        } else if (family[0] >= 'A' && family[0] <= 'Z') {
+            /* PascalCase type-style: Pair::[T] / Box::[T] / user factories. */
+            snprintf(dst, cap, "%s_%s", family, compact);
         } else {
-            snprintf(dst, cap, "%s_%s", family, compact); /* Pair / Family */
+            /* Free snake name that is not a known ctor form — refuse host
+             * invent (unknown_fn::[int] → unknown_fn_int). */
+            char msg[192];
+            snprintf(msg, sizeof(msg),
+                     "unknown generic name '%s' before '::[...]'", family);
+            parser_fail(p, p->toks[start], msg);
+            return 0;
         }
     }
     return 1;
@@ -990,12 +1285,9 @@ static int ast_spell_token_range(Parser* p, int start, int end, char* dst,
                 spelled = 1;
             }
         }
-        if (!spelled && shadow_kw(t) == SHADOW_KW_CHAR && i + 3 < end &&
-            tok_eq(p->toks[i + 1], TK_PUNCT, "[") &&
-            tok_eq(p->toks[i + 2], TK_PUNCT, ":") &&
-            tok_eq(p->toks[i + 3], TK_PUNCT, "]")) {
-            snprintf(piece, sizeof(piece), "CCSlice");
-            gend = i + 4;
+        if (!spelled &&
+            ast_try_spell_slice_at(p, i, end, piece, sizeof(piece), &gend) &&
+            gend > i) {
             spelled = 1;
         } else if (!spelled && (gend = peek_generic_type_end(p, i)) > i &&
                    gend <= end) {
@@ -1053,3 +1345,4 @@ static int ast_spell_token_range(Parser* p, int start, int end, char* dst,
     return 1;
 }
 
+#include "pp_ast_autoblock.cch"

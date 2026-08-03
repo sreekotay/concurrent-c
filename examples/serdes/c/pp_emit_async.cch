@@ -77,27 +77,79 @@ static int shadow_emit_async_fn(AstNode* it, CEmit* out, TapeCache* cache) {
             if (!cemit_str(out, "/* --- end closure declarations --- */\n\n"))
                 return 0;
         }
+        int bind_mark = shadow_push_fn_binds(it);
+        /* Autoblock helpers at file scope (before body fn). */
+        if (it->nkids > 0) {
+            ShadowCtx prescan = { .cache = cache,
+                                  .owner_fn_attrs = shadow_fn_attr_lookup(it->b) };
+            if (!shadow_emit_autoblock_prescan(it->kids, it->nkids, &prescan, out))
+                return 0;
+        }
         /* Sync body helper keeps original return type + param names. */
         if (!cemit_fmt(out, "static %s %s_body(%s) {\n", it->a, base, params))
             return 0;
-        if (it->d[0] && it->nkids == 0) {
-            char body[2048];
-            shadow_rewrite_ufcs(body, sizeof(body), it->d, NULL);
-            if (!cemit_fmt(out, "%s\n}\n\n", body)) return 0;
-        } else {
-            shadow_pick_body_indent(it->kids, it->nkids, body_ind, sizeof(body_ind));
-            ShadowCtx sctx = { .cache = cache, .body_indent = body_ind };
-            for (k = 0; k < it->nkids; k++) {
-                if (it->kids[k]->kind == AST_ERRHANDLER) sctx.eh = it->kids[k];
+        {
+            int bind_ok = 1;
+            if (it->d[0] && it->nkids == 0) {
+                char body[2048];
+                shadow_rewrite_ufcs(body, sizeof(body), it->d, NULL);
+                if (!cemit_fmt(out, "%s\n}\n\n", body)) bind_ok = 0;
+            } else {
+                shadow_pick_body_indent(it->kids, it->nkids, body_ind,
+                                        sizeof(body_ind));
+                ShadowCtx sctx = { .cache = cache, .body_indent = body_ind };
+                AstNode* defers[16];
+                int ndefers = 0;
+                for (k = 0; bind_ok && k < it->nkids; k++) {
+                    if (it->kids[k]->kind == AST_ERRHANDLER)
+                        sctx.eh = it->kids[k];
+                    if (it->kids[k]->kind == AST_DEFER) {
+                        if (ndefers >= 16) {
+                            fprintf(stderr,
+                                    "error: too many @defer in @async body\n");
+                            out->err = 1;
+                            bind_ok = 0;
+                            break;
+                        }
+                        defers[ndefers++] = it->kids[k];
+                    }
+                }
+                if (bind_ok) {
+                    sctx.defers = defers;
+                    sctx.ndefers = ndefers;
+                    sctx.defer_cleanup = ndefers > 0;
+                    sctx.owner_fn_attrs = shadow_fn_attr_lookup(it->b);
+                    if (sctx.defer_cleanup) {
+                        if (is_void) {
+                            if (!cemit_fmt(out,
+                                    "%sint __cc_ret_set = 0;\n"
+                                    "%sint __cc_ret_err = 0;\n",
+                                    body_ind, body_ind))
+                                bind_ok = 0;
+                        } else if (!cemit_fmt(out,
+                                "%sint __cc_retval = 0;\n"
+                                "%sint __cc_ret_set = 0;\n"
+                                "%sint __cc_ret_err = 0;\n",
+                                body_ind, body_ind, body_ind))
+                            bind_ok = 0;
+                    }
+                    if (bind_ok &&
+                        !shadow_emit_scratch_if_needed(it->kids, it->nkids, NULL,
+                                                       0, out, body_ind))
+                        bind_ok = 0;
+                    for (k = 0; bind_ok && k < it->nkids; k++) {
+                        if (!shadow_emit_stmt_ctx(it->kids[k], out, &sctx,
+                                                  body_ind, sctx.defer_cleanup))
+                            bind_ok = 0;
+                    }
+                    if (bind_ok && sctx.defer_cleanup) {
+                        if (!shadow_emit_defer_epilogue(out, &sctx)) bind_ok = 0;
+                    }
+                    if (bind_ok && !cemit_str(out, "}\n\n")) bind_ok = 0;
+                }
             }
-            if (!shadow_emit_scratch_if_needed(it->kids, it->nkids, NULL, 0, out,
-                                               body_ind))
-                return 0;
-            for (k = 0; k < it->nkids; k++) {
-                if (!shadow_emit_stmt_ctx(it->kids[k], out, &sctx, body_ind, 0))
-                    return 0;
-            }
-            if (!cemit_str(out, "}\n\n")) return 0;
+            shadow_pop_fn_binds(bind_mark);
+            if (!bind_ok) return 0;
         }
         /* Defer closure defs until after the task ctor (below). Stash count. */
         if (nspawns) {

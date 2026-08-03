@@ -33,6 +33,8 @@ const char* cc_included_cch_source_path(size_t i);
  * CCGenProduceStatus is declared in pp_emit_core.cch when building shadow_lower. */
 int cc_emit_plan_generic_factory_names_csv(char* out, size_t cap);
 int cc_emit_plan_has_generic_factory(const char* name);
+size_t cc_emit_plan_comptime_fragment_count(void);
+const char* cc_emit_plan_comptime_fragment_text(size_t frag_index);
 
 #ifdef __cplusplus
 }

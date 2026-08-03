@@ -75,6 +75,66 @@ static void offset_to_linecol(const char* bytes, size_t len, size_t off,
     *out_col = col;
 }
 
+/* Logical file:line at byte offset, honoring `#line` in stage-1 tape bytes. */
+static void tape_logical_at(const char* bytes, size_t len, size_t off,
+                            const char* fallback_path, char* file, size_t fcap,
+                            int* line_out) {
+    int phys = 1;
+    int logic = 1;
+    char sticky[128];
+    const char* cur_file = fallback_path ? fallback_path : "";
+    size_t i = 0;
+    size_t lim = off < len ? off : len;
+    sticky[0] = 0;
+    if (!file || !fcap || !line_out) return;
+    file[0] = 0;
+    *line_out = 1;
+    if (!bytes) {
+        snprintf(file, fcap, "%s", cur_file);
+        return;
+    }
+    while (i < lim) {
+        if (i + 5 < lim && bytes[i] == '#' &&
+            (i == 0 || bytes[i - 1] == '\n') &&
+            strncmp(bytes + i, "#line", 5) == 0 &&
+            (bytes[i + 5] == ' ' || bytes[i + 5] == '\t')) {
+            size_t j = i + 5;
+            int n = 0;
+            while (j < lim && (bytes[j] == ' ' || bytes[j] == '\t')) j++;
+            while (j < lim && bytes[j] >= '0' && bytes[j] <= '9') {
+                n = n * 10 + (bytes[j] - '0');
+                j++;
+            }
+            while (j < lim && (bytes[j] == ' ' || bytes[j] == '\t')) j++;
+            if (j < lim && bytes[j] == '"') {
+                size_t k = ++j;
+                while (k < lim && bytes[k] != '"' && bytes[k] != '\n') k++;
+                if (k < lim && bytes[k] == '"' && k > j) {
+                    size_t nlen = k - j;
+                    if (nlen >= sizeof(sticky)) nlen = sizeof(sticky) - 1;
+                    memcpy(sticky, bytes + j, nlen);
+                    sticky[nlen] = 0;
+                    cur_file = sticky;
+                }
+            }
+            logic = n;
+            while (i < lim && bytes[i] != '\n') i++;
+            if (i < lim && bytes[i] == '\n') {
+                i++;
+                phys++;
+            }
+            continue;
+        }
+        if (bytes[i] == '\n') {
+            phys++;
+            logic++;
+        }
+        i++;
+    }
+    snprintf(file, fcap, "%s", cur_file);
+    *line_out = logic > 0 ? logic : phys;
+}
+
 static FileTape* tape_by_id(TapeCache* c, int file_id) {
     if (!c) return NULL;
     for (int i = 0; i < c->n; i++) {
@@ -91,6 +151,7 @@ static void diag_at(TapeCache* cache, Token t, const char* msg) {
     }
     int line = 1, col = 1;
     offset_to_linecol(ft->bytes, ft->len, t.offset, &line, &col);
+    tape_logical_at(ft->bytes, ft->len, t.offset, ft->path, NULL, 0, &line);
     fprintf(stderr, "%s:%d:%d: error: %s\n", ft->path, line, col, msg);
 }
 

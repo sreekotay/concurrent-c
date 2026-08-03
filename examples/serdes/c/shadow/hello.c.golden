@@ -37,7 +37,7 @@ int main(void) {
         __typeof__(cc_nursery_create(NULL)) __r = cc_nursery_create(NULL);
         if (__cc_uw_is_err(__r)) {
             #line 9 "examples/serdes/c/shadow/hello.ccs"
-            __typeof__(__cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/hello.ccs", "9")) e = __cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/hello.ccs", "9");
+            __typeof__(__cc_uw_err_at(__r, "cc_nursery_create(NULL)", "examples/serdes/c/shadow/hello.ccs", "9")) e = __cc_uw_err_at(__r, "cc_nursery_create(NULL)", "examples/serdes/c/shadow/hello.ccs", "9");
             cc_error_exit(e);
         }
         n = __cc_uw_value(__r);

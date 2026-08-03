@@ -65,6 +65,16 @@ static int shadow_emit_typedef_struct(AstNode* it, CEmit* out, TapeCache* cache,
             if (it->a[0] && f->a[0])
                 shadow_field_register_ex(it->a, f->a, cty);
             if (!cemit_fmt(out, "%s%s %s;\n", find, cty, f->a)) return 0;
+        } else if (f->kind == AST_RESULT_LOCAL) {
+            char rname[256];
+            shadow_result_name(f->c, f->b, rname, sizeof(rname));
+            if (it->b[0] && f->a[0])
+                shadow_field_register_ex(it->b, f->a, rname);
+            if (it->a[0] && f->a[0])
+                shadow_field_register_ex(it->a, f->a, rname);
+            if (!cemit_fmt(out, "%s%s %s%s;\n", find, rname, f->a,
+                           f->e[0] ? f->e : ""))
+                return 0;
         } else {
             diag_at(cache, (Token){0}, "struct field not lowerable to C");
             out->err = 1;
@@ -102,6 +112,8 @@ static int shadow_node_needs_uw(AstNode* n) {
             return 1;
         break;
     case AST_NURSERY_DESTROY:
+        return 1;
+    case AST_ERR_SYNTAX:
         return 1;
     default:
         break;
@@ -159,10 +171,17 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
     memset(out, 0, sizeof(*out));
     shadow_chan_reset();
     shadow_grammar_ufcs_install();
+    shadow_grammar_variant_install();
     g_sticky_lead_set = 0;
     g_file_header_lead_done = 0;
     g_shadow_async_id = 60000;
     g_shadow_closure_id = 1;
+    /* Pre-scan send_task receivers so ordered channel_pair can select task
+     * machinery before the send_task site is emitted. */
+    {
+        int si;
+        for (si = 0; si < n; si++) shadow_collect_task_sends(items[si]);
+    }
     /* @as embeds + destroy hooks from included headers (not spliced into AST). */
     if (npass_inc > 0 && pass_inc)
         shadow_as_scan_pass_inc(pass_inc, npass_inc);
@@ -239,21 +258,31 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
         if (!cemit_str(out, "\n")) return 0;
     }
 
-    for (int i = 0; i < npass_inc; i++) {
-        char line[256];
-        int sse_hdr;
-        shadow_rewrite_pass_inc(line, sizeof(line), pass_inc[i]);
-        /* Stage2 harvests `#include <emmintrin.h>` even when it sat under
-         * `#if defined(__SSE2__)` in grammar emit — re-wrap for arm64 hosts. */
-        sse_hdr = (strstr(line, "emmintrin.h") != NULL ||
-                   strstr(line, "xmmintrin.h") != NULL ||
-                   strstr(line, "mmintrin.h") != NULL);
-        if (sse_hdr) {
-            if (!cemit_fmt(out, "#if defined(__SSE2__)\n%s\n#endif\n", line))
+    {
+        int need_task_h = 0;
+        for (int i = 0; i < npass_inc; i++) {
+            char line[256];
+            int sse_hdr;
+            shadow_rewrite_pass_inc(line, sizeof(line), pass_inc[i]);
+            /* Only .ccs→.c: nursery/.cch surface must stay oracle-aligned. */
+            if (kind == SHADOW_EMIT_C && strstr(line, "cc_sched"))
+                need_task_h = 1;
+            /* Stage2 harvests `#include <emmintrin.h>` even when it sat under
+             * `#if defined(__SSE2__)` in grammar emit — re-wrap for arm64 hosts. */
+            sse_hdr = (strstr(line, "emmintrin.h") != NULL ||
+                       strstr(line, "xmmintrin.h") != NULL ||
+                       strstr(line, "mmintrin.h") != NULL);
+            if (sse_hdr) {
+                if (!cemit_fmt(out, "#if defined(__SSE2__)\n%s\n#endif\n", line))
+                    return 0;
+            } else if (!cemit_fmt(out, "%s\n", line)) {
                 return 0;
-        } else if (!cemit_fmt(out, "%s\n", line)) {
-            return 0;
+            }
         }
+        /* cc_sched documents cc_block_on_intptr; the decl lives in std/task. */
+        if (need_task_h &&
+            !cemit_str(out, "#include <ccc/std/task.h>\n"))
+            return 0;
     }
     if (npass_inc && !cemit_str(out, "\n")) return 0;
 
@@ -341,8 +370,43 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                     char verr[256];
                     const char* path_base = path;
                     const char* slash;
-                    if (!shadow_inst_generic_tpl(tpl, inst->mangled, args,
-                                                 nargs, body, sizeof(body))) {
+                    int oob_arg = -1;
+                    int irc;
+                    if (fi < g_shadow_ngfac && !g_shadow_gfac[fi].has_base) {
+                        const char* tests = path ? strstr(path, "tests/") : NULL;
+                        const char* pb = tests ? tests : path;
+                        slash = pb ? strrchr(pb, '/') : NULL;
+                        if (!tests && slash && slash[1]) pb = slash + 1;
+                        fprintf(stderr,
+                                "%s:%d:%d: error: type: compiled generic "
+                                "factory '%s' failed to compile: generic '%s' "
+                                "is extended but never defined (needs "
+                                "CC_GENERIC_FACTORY(%s) or "
+                                "cc_generic_register)\n",
+                                pb && pb[0] ? pb : "<input>", use_line,
+                                use_col, inst->family, inst->family,
+                                inst->family);
+                        out->err = 1;
+                        return 0;
+                    }
+                    irc = shadow_inst_generic_tpl(tpl, inst->mangled, args,
+                                                  nargs, body, sizeof(body),
+                                                  &oob_arg);
+                    if (irc < 0) {
+                        const char* tests = path ? strstr(path, "tests/") : NULL;
+                        const char* pb = tests ? tests : path;
+                        slash = pb ? strrchr(pb, '/') : NULL;
+                        if (!tests && slash && slash[1]) pb = slash + 1;
+                        fprintf(stderr,
+                                "%s:%d: error: factory '%s': arg(%d) is out of "
+                                "range (%d type argument%s)\n",
+                                pb && pb[0] ? pb : "<input>", use_line,
+                                inst->family, oob_arg, nargs,
+                                nargs == 1 ? "" : "s");
+                        out->err = 1;
+                        return 0;
+                    }
+                    if (irc == 0) {
                         fprintf(stderr,
                                 "error: generic instantiate failed for %s\n",
                                 inst->mangled);
@@ -773,13 +837,23 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
         }
     }
     /* Hoist typedefs when Result specs need prior names. Also hoist only those
-     * typedefs that are Vec element types (e.g. Pt) before CC_VEC_DECL — not
-     * structs that embed Map_ types (those need macros first). */
-    hoist_typedefs = (nseen > 0);
+     * typedefs that are Vec element types (e.g. Pt / CharVec) before
+     * CC_VEC_DECL — not NestedCharVec-style aliases of CCVec_<Alias> (those
+     * need the element DECL first), nor structs that embed Map_. */
+    hoist_typedefs = (nseen > 0 || g_shadow_nvecs > 0 || g_shadow_nmaps > 0 ||
+                      g_shadow_namaps > 0);
 
     if (hoist_typedefs) {
         for (int i = 0; i < n; i++) {
             if (items[i]->kind == AST_TYPEDEF_INT) {
+                int needed = (nseen > 0);
+                int vi;
+                if (items[i]->e[0] && strcmp(items[i]->e, "vech") == 0)
+                    continue;
+                /* Hoist when this alias is a Vec/Map element type name. */
+                for (vi = 0; vi < g_shadow_nvecs && !needed; vi++)
+                    if (strcmp(g_shadow_vecs[vi], items[i]->a) == 0) needed = 1;
+                if (!needed) continue;
                 if (!shadow_emit_preamble(items[i], out, cache)) return 0;
                 items[i]->lead_len = 0;
                 if (!shadow_emit_line(out, &line_ctx, items[i], "")) return 0;
@@ -796,6 +870,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 } else if (!cemit_fmt(out, "typedef int %s;\n", items[i]->a)) {
                     return 0;
                 }
+                snprintf(items[i]->e, sizeof(items[i]->e), "vech");
             }
             if (items[i]->kind == AST_TYPEDEF_STRUCT) {
                 /* Only hoist structs named as Result Ok/Err arms — not
@@ -820,6 +895,37 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                     }
                 }
                 if (!needed) continue;
+                /* Hoist field-type typedefs first (FaceA/FaceB before DualFaceErr). */
+                {
+                    int k, j2;
+                    for (k = 0; k < items[i]->nkids; k++) {
+                        AstNode* f = items[i]->kids[k];
+                        const char* fty;
+                        if (!f || f->kind != AST_FIELD_SIMPLE) continue;
+                        fty = f->a;
+                        if (!fty || !fty[0] || strchr(fty, '*')) continue;
+                        for (j2 = 0; j2 < n; j2++) {
+                            const char* a2;
+                            if (items[j2]->kind != AST_TYPEDEF_STRUCT)
+                                continue;
+                            if (strcmp(items[j2]->e, "hoist") == 0) continue;
+                            a2 = items[j2]->b[0] ? items[j2]->b
+                                                 : items[j2]->a;
+                            if (strcmp(a2, fty) != 0) continue;
+                            if (!shadow_emit_preamble(items[j2], out, cache))
+                                return 0;
+                            items[j2]->lead_len = 0;
+                            if (!shadow_emit_line(out, &line_ctx, items[j2],
+                                                   ""))
+                                return 0;
+                            if (!shadow_emit_typedef_struct(items[j2], out,
+                                                            cache, &line_ctx))
+                                return 0;
+                            snprintf(items[j2]->e, sizeof(items[j2]->e),
+                                     "hoist");
+                        }
+                    }
+                }
                 if (!shadow_emit_preamble(items[i], out, cache)) return 0;
                 items[i]->lead_len = 0;
                 if (!shadow_emit_line(out, &line_ctx, items[i], "")) return 0;
@@ -828,6 +934,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 snprintf(items[i]->e, sizeof(items[i]->e), "hoist");
             } else if (items[i]->kind == AST_TYPEDEF_FN_PTR) {
                 char params[512];
+                shadow_fnptr_ty_register(items[i]->b);
                 if (!shadow_emit_preamble(items[i], out, cache)) return 0;
                 items[i]->lead_len = 0;
                 if (!shadow_emit_line(out, &line_ctx, items[i], "")) return 0;
@@ -930,14 +1037,26 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             if (!cemit_str(out, "\n")) return 0;
         }
         if (g_shadow_nvecs > 0) {
-            if (!cemit_str(out, "#include <ccc/std/vec.h>\n")) return 0;
+            if (!cemit_str(out, "#include <ccc/std/vec.h>\n"
+                                "#include <ccc/cc_type.h>\n"))
+                return 0;
             for (int vi = 0; vi < g_shadow_nvecs; vi++) {
                 const char* t = g_shadow_vecs[vi];
                 int typed_slice =
                     !strcmp(t, "int") || !strcmp(t, "double") ||
-                    !strcmp(t, "float") || !strcmp(t, "char") ||
-                    !strcmp(t, "bool") || !strcmp(t, "size_t") ||
+                    !strcmp(t, "float") || !strcmp(t, "bool") ||
                     !strcmp(t, "long") || !strcmp(t, "long_long");
+                /* vec.h already provides CCVec_char / CCVec_size_t DECL — still
+                 * emit the `_new` helper the beachhead lowers `cc_vec_new` to. */
+                if (!strcmp(t, "char") || !strcmp(t, "size_t")) {
+                    if (!cemit_fmt(out,
+                            "static inline CCVec_%s CCVec_%s_new(CCArena* __a) {\n"
+                            "    return CCVec_%s_init(__a, 0);\n"
+                            "}\n",
+                            t, t, t))
+                        return 0;
+                    continue;
+                }
                 if (typed_slice) {
                     if (!cemit_fmt(out,
                             "CC_VEC_DECL_ARENA_TSLICE(%s, CCVec_%s, CCSlice_%s)\n"
@@ -954,13 +1073,31 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                                t, t, t, t, t)) {
                     return 0;
                 }
+                /* Mirror oracle visit_codegen container cc_type_info. */
+                if (!cemit_fmt(out,
+                        "\n/* cc_type_info for CCVec_%s (serdes) */\n"
+                        "static const cc_type_info __cc_ti_CCVec_%s = {\n"
+                        "    .name = \"CCVec_%s\", .mangled = \"CCVec_%s\",\n"
+                        "    .id = 0, .size = (uint32_t)sizeof(CCVec_%s),\n"
+                        "    .align = (uint32_t)_Alignof(CCVec_%s),\n"
+                        "    .kind = (uint16_t)CC_TK_GENERIC_INST, .nfields = 0,\n"
+                        "    .flags = (uint16_t)CC_TF_ERASABLE, ._reserved = 0,\n"
+                        "    .fields = NULL, .copy_fn = NULL, .drop_fn = NULL,\n"
+                        "};\n"
+                        "__attribute__((constructor)) static void "
+                        "cc__ti_reg_CCVec_%s(void) {\n"
+                        "    cc_type_info_register(&__cc_ti_CCVec_%s);\n"
+                        "}\n",
+                        t, t, t, t, t, t, t, t))
+                    return 0;
             }
             if (!cemit_str(out, "\n")) return 0;
         }
         if (g_shadow_nmaps > 0) {
             if (!cemit_str(out,
                     "#include <ccc/std/map.h>\n"
-                    "#include <ccc/std/map_impl.h>\n"))
+                    "#include <ccc/std/map_impl.h>\n"
+                    "#include <ccc/cc_type.h>\n"))
                 return 0;
             for (int mi = 0; mi < g_shadow_nmaps; mi++) {
                 const char* kv = g_shadow_maps[mi];
@@ -1000,8 +1137,22 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                         "CC_MAP_DECL_ARENA(%s, %s, Map_%s, %s, %s)\n"
                         "static inline Map_%s* Map_%s_new(CCArena* __a) {\n"
                         "    return Map_%s_init(__a);\n"
+                        "}\n"
+                        "\n/* cc_type_info for Map_%s (serdes) */\n"
+                        "static const cc_type_info __cc_ti_Map_%s = {\n"
+                        "    .name = \"Map_%s\", .mangled = \"Map_%s\",\n"
+                        "    .id = 0, .size = (uint32_t)sizeof(Map_%s),\n"
+                        "    .align = (uint32_t)_Alignof(Map_%s),\n"
+                        "    .kind = (uint16_t)CC_TK_GENERIC_INST, .nfields = 0,\n"
+                        "    .flags = (uint16_t)CC_TF_ERASABLE, ._reserved = 0,\n"
+                        "    .fields = NULL, .copy_fn = NULL, .drop_fn = NULL,\n"
+                        "};\n"
+                        "__attribute__((constructor)) static void "
+                        "cc__ti_reg_Map_%s(void) {\n"
+                        "    cc_type_info_register(&__cc_ti_Map_%s);\n"
                         "}\n",
-                        k, vty, kv, hash, eq, kv, kv, kv))
+                        k, vty, kv, hash, eq, kv, kv, kv, kv, kv, kv, kv, kv, kv,
+                        kv, kv))
                     return 0;
             }
             if (!cemit_str(out, "\n")) return 0;
@@ -1170,7 +1321,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
         if (!shadow_emit_line(out, &line_ctx, it, "")) return 0;
         switch (it->kind) {
         case AST_TYPEDEF_INT:
-            if (hoist_typedefs) break; /* already emitted before Result specs */
+            if (strcmp(it->e, "vech") == 0) break; /* hoisted before Vec/Map */
             if (it->c[0] && it->d[0]) {
                 char rname[256];
                 shadow_result_name(it->c, it->d, rname, sizeof(rname));
@@ -1202,6 +1353,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             break;
         }
         case AST_TYPEDEF_FN_PTR:
+            shadow_fnptr_ty_register(it->b);
             if (hoist_typedefs) break; /* already emitted before Result specs */
             {
                 char params[512];
@@ -1222,9 +1374,13 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             break;
         case AST_FN_PROTO: {
             char params[512];
+            const char* pref =
+                (strcmp(it->e, "extern") == 0) ? "extern " : "";
             snprintf(params, sizeof(params), "%s",
                      it->c[0] ? it->c : "void");
-            if (!cemit_fmt(out, "%s %s(%s);\n", it->a, it->b, params)) return 0;
+            shadow_normalize_chan_params(params, sizeof(params));
+            if (!cemit_fmt(out, "%s%s %s(%s);\n", pref, it->a, it->b, params))
+                return 0;
             break;
         }
         case AST_VAR_INT:
@@ -1236,6 +1392,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
         case AST_RESULT_FN: {
             char rname[256];
             shadow_result_name(it->c, it->b, rname, sizeof(rname));
+            shadow_rfn_register(it->a, rname, it->b);
             const char* pref =
                 (strcmp(it->e, "static inline") == 0) ? "static inline "
                 : (strcmp(it->e, "static") == 0)      ? "static "
@@ -1243,6 +1400,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             char dparams[288];
             snprintf(dparams, sizeof(dparams), "%s",
                      it->d[0] ? it->d : "void");
+            shadow_normalize_chan_params(dparams, sizeof(dparams));
             if (it->nkids == 0) {
                 if (!cemit_fmt(out, "%s%s %s(%s);\n", pref, rname, it->a, dparams))
                     return 0;
@@ -1257,44 +1415,58 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             if (!cemit_fmt(out, "%s%s %s(%s) {\n", pref, rname, it->a, dparams))
                 return 0;
             char body_ind[64];
+            int bind_mark = shadow_push_fn_binds(it);
+            int bind_ok = 1;
             shadow_pick_body_indent(it->kids, it->nkids, body_ind, sizeof(body_ind));
             ShadowCtx ctx = { .rname = rname, .cache = cache,
                               .body_indent = body_ind };
             AstNode* defers[16];
             int ndefers = 0;
             for (int k = 0; k < it->nkids; k++) {
-                if (it->kids[k]->kind == AST_ERRHANDLER) ctx.eh = it->kids[k];
+                if (it->kids[k]->kind == AST_ERRHANDLER)
+                    shadow_eh_push_node(&ctx, it->kids[k]);
                 if (it->kids[k]->kind == AST_DEFER) {
                     if (ndefers >= 16) {
                         fprintf(stderr, "error: too many @defer for shadow beachhead\n");
                         out->err = 1;
-                        return 0;
+                        bind_ok = 0;
+                        break;
                     }
                     defers[ndefers++] = it->kids[k];
                 }
             }
-            ctx.defers = defers;
-            ctx.ndefers = ndefers;
-            ctx.defer_cleanup = ndefers > 0;
-            if (ctx.defer_cleanup) {
-                if (!cemit_fmt(out,
-                        "%s%s __cc_retval = {0};\n"
-                        "%sint __cc_ret_set = 0;\n"
-                        "%sint __cc_ret_err = 0;\n",
-                        body_ind, rname, body_ind, body_ind))
-                    return 0;
+            if (bind_ok) {
+                ctx.defers = defers;
+                ctx.ndefers = ndefers;
+                ctx.defer_cleanup = ndefers > 0;
+                shadow_vdrop_mark_push(&ctx);
+                if (ctx.defer_cleanup) {
+                    if (!cemit_fmt(out,
+                            "%s%s __cc_retval = {0};\n"
+                            "%sint __cc_ret_set = 0;\n"
+                            "%sint __cc_ret_err = 0;\n",
+                            body_ind, rname, body_ind, body_ind))
+                        bind_ok = 0;
+                }
+                if (bind_ok &&
+                    !shadow_emit_scratch_if_needed(it->kids, it->nkids, NULL, 0,
+                                                   out, body_ind))
+                    bind_ok = 0;
+                for (int k = 0; bind_ok && k < it->nkids; k++) {
+                    if (!shadow_emit_stmt_ctx(it->kids[k], out, &ctx, body_ind,
+                                              0))
+                        bind_ok = 0;
+                }
+                if (bind_ok &&
+                    !shadow_vdrop_mark_pop_emit(out, &ctx, body_ind))
+                    bind_ok = 0;
+                if (bind_ok && ctx.defer_cleanup) {
+                    if (!shadow_emit_defer_epilogue(out, &ctx)) bind_ok = 0;
+                }
+                if (bind_ok && !cemit_str(out, "}\n\n")) bind_ok = 0;
             }
-            if (!shadow_emit_scratch_if_needed(it->kids, it->nkids, NULL, 0, out,
-                                               body_ind))
-                return 0;
-            for (int k = 0; k < it->nkids; k++) {
-                if (!shadow_emit_stmt_ctx(it->kids[k], out, &ctx, body_ind, 0))
-                    return 0;
-            }
-            if (ctx.defer_cleanup) {
-                if (!shadow_emit_defer_epilogue(out, &ctx)) return 0;
-            }
-            if (!cemit_str(out, "}\n\n")) return 0;
+            shadow_pop_fn_binds(bind_mark);
+            if (!bind_ok) return 0;
             break;
         }
         case AST_SLICE_VAR:
@@ -1317,6 +1489,23 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
         }
         case AST_STATIC_FN: {
             char params[512];
+            /* Skip duplicate grammar entry-point functions (Name_match).
+             * Grammar rules expansion can produce multiple parse passes of
+             * the same entry function. */
+            {
+                static char emitted_fns[16][64];
+                static int n_emitted_fns;
+                int dup = 0, ef;
+                if (strstr(it->b, "_match") || strstr(it->b, "_rule_count")) {
+                    for (ef = 0; ef < n_emitted_fns; ef++) {
+                        if (strcmp(emitted_fns[ef], it->b) == 0) { dup = 1; break; }
+                    }
+                    if (dup) break;
+                    if (n_emitted_fns < 16)
+                        snprintf(emitted_fns[n_emitted_fns++],
+                                 sizeof(emitted_fns[0]), "%s", it->b);
+                }
+            }
             snprintf(params, sizeof(params), "%s",
                      it->c[0] ? it->c : "void");
             const char* inl =
@@ -1361,92 +1550,132 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 break;
             }
             char body_ind[64];
+            int bind_mark = shadow_push_fn_binds(it);
+            int bind_ok = 1;
             shadow_pick_body_indent(it->kids, it->nkids, body_ind, sizeof(body_ind));
             ShadowCtx sctx = { .cache = cache, .body_indent = body_ind };
             AstNode* sdestroys[32];
             AstNode* sspawns[16];
-            int nsdestroys = 0, nsspawns = 0;
-            for (int k = 0; k < it->nkids; k++) {
-                if (it->kids[k]->kind == AST_ERRHANDLER) sctx.eh = it->kids[k];
+            AstNode* sdefers[16];
+            int nsdestroys = 0, nsspawns = 0, nsdefers = 0;
+            for (int k = 0; bind_ok && k < it->nkids; k++) {
+                if (it->kids[k]->kind == AST_ERRHANDLER)
+                    shadow_eh_push_node(&sctx, it->kids[k]);
+                if (it->kids[k]->kind == AST_DEFER) {
+                    if (nsdefers >= 16) {
+                        fprintf(stderr, "error: too many @defer for shadow beachhead\n");
+                        out->err = 1;
+                        bind_ok = 0;
+                        break;
+                    }
+                    sdefers[nsdefers++] = it->kids[k];
+                }
                 if (shadow_stmt_is_destroy(it->kids[k])) {
                     if (nsdestroys >= 32) {
                         fprintf(stderr, "error: too many @destroy for shadow beachhead\n");
                         out->err = 1;
-                        return 0;
+                        bind_ok = 0;
+                        break;
                     }
                     sdestroys[nsdestroys++] = it->kids[k];
                 }
                 if (!shadow_collect_spawns(it->kids[k], sspawns, &nsspawns, 16)) {
                     fprintf(stderr, "error: too many spawns for shadow beachhead\n");
                     out->err = 1;
-                    return 0;
+                    bind_ok = 0;
+                    break;
                 }
             }
-            sctx.destroys = sdestroys;
-            sctx.ndestroys = nsdestroys;
-            if (nsspawns) {
-                if (!cemit_str(out, "\n/* --- CC closure declarations --- */\n"))
-                    return 0;
-                for (int s = 0; s < nsspawns; s++) {
-                    char proto[256];
-                    int ar = shadow_closure_arity(sspawns[s]);
-                    const char* ccty = shadow_closure_cc_ty(sspawns[s]);
-                    if (!shadow_caps_proto(sspawns[s]->e, proto, sizeof(proto)))
-                        return 0;
-                    if (ar == 1) {
-                        if (!cemit_fmt(out,
-                                "static void* cc_closure__N%s_entry(void*, intptr_t);\n"
-                                "static %s cc_closure__N%s_make(%s);\n",
-                                sspawns[s]->d, ccty, sspawns[s]->d, proto))
-                            return 0;
-                    } else if (ar == 2) {
-                        if (!cemit_fmt(out,
-                                "static void* cc_closure__N%s_entry(void*, intptr_t, intptr_t);\n"
-                                "static %s cc_closure__N%s_make(%s);\n",
-                                sspawns[s]->d, ccty, sspawns[s]->d, proto))
-                            return 0;
-                    } else if (!cemit_fmt(out,
-                            "static void* cc_closure__N%s_entry(void*);\n"
-                            "static CCClosure0 cc_closure__N%s_make(%s);\n",
-                            sspawns[s]->d, sspawns[s]->d, proto)) {
-                        return 0;
+            if (bind_ok) {
+                sctx.destroys = sdestroys;
+                sctx.ndestroys = nsdestroys;
+                sctx.defers = sdefers;
+                sctx.ndefers = nsdefers;
+                sctx.defer_cleanup = nsdefers > 0;
+                if (nsspawns) {
+                    if (!cemit_str(out, "\n/* --- CC closure declarations --- */\n"))
+                        bind_ok = 0;
+                    for (int s = 0; bind_ok && s < nsspawns; s++) {
+                        char proto[256];
+                        int ar = shadow_closure_arity(sspawns[s]);
+                        const char* ccty = shadow_closure_cc_ty(sspawns[s]);
+                        if (!shadow_caps_proto(sspawns[s]->e, proto, sizeof(proto)))
+                            bind_ok = 0;
+                        else if (ar == 1) {
+                            if (!cemit_fmt(out,
+                                    "static void* cc_closure__N%s_entry(void*, intptr_t);\n"
+                                    "static %s cc_closure__N%s_make(%s);\n",
+                                    sspawns[s]->d, ccty, sspawns[s]->d, proto))
+                                bind_ok = 0;
+                        } else if (ar == 2) {
+                            if (!cemit_fmt(out,
+                                    "static void* cc_closure__N%s_entry(void*, intptr_t, intptr_t);\n"
+                                    "static %s cc_closure__N%s_make(%s);\n",
+                                    sspawns[s]->d, ccty, sspawns[s]->d, proto))
+                                bind_ok = 0;
+                        } else if (!cemit_fmt(out,
+                                "static void* cc_closure__N%s_entry(void*);\n"
+                                "static CCClosure0 cc_closure__N%s_make(%s);\n",
+                                sspawns[s]->d, sspawns[s]->d, proto)) {
+                            bind_ok = 0;
+                        }
+                    }
+                    if (bind_ok &&
+                        !cemit_str(out, "/* --- end closure declarations --- */\n\n"))
+                        bind_ok = 0;
+                }
+            }
+            if (bind_ok &&
+                !cemit_fmt(out, "static %s%s %s(%s) {\n", inl, it->a, it->b,
+                           params))
+                bind_ok = 0;
+            /* Soft returns + watermark: int only (retval is int). */
+            int use_c = (nsdestroys > 0 || nsdefers > 0) &&
+                        strcmp(it->a, "int") == 0;
+            if (bind_ok) {
+                sctx.goto_cleanup = use_c;
+                shadow_vdrop_mark_push(&sctx);
+                if (!shadow_emit_scratch_if_needed(it->kids, it->nkids, sdestroys,
+                                                  nsdestroys, out, body_ind))
+                    bind_ok = 0;
+                if (bind_ok && use_c &&
+                    !shadow_emit_destroy_soft_vars(out, body_ind))
+                    bind_ok = 0;
+                for (int k = 0; bind_ok && k < it->nkids; k++) {
+                    if (!shadow_emit_stmt_ctx(it->kids[k], out, &sctx, body_ind,
+                                              use_c))
+                        bind_ok = 0;
+                    if (bind_ok && use_c &&
+                        !shadow_emit_hw_bump(out, &sctx, it->kids[k], body_ind))
+                        bind_ok = 0;
+                }
+                if (bind_ok &&
+                    !shadow_vdrop_mark_pop_emit(out, &sctx, body_ind))
+                    bind_ok = 0;
+                /* int+defer: goto cleanup + retval. void+defer: run at end. */
+                if (bind_ok && nsdefers > 0 && use_c) {
+                    if (!shadow_emit_defer_epilogue(out, &sctx)) bind_ok = 0;
+                } else if (bind_ok && nsdefers > 0 && !use_c) {
+                    if (!shadow_emit_defer_list(sdefers, nsdefers, out, &sctx,
+                                                 body_ind, 0))
+                        bind_ok = 0;
+                } else if (bind_ok && use_c && nsdestroys > 0 &&
+                           !shadow_emit_destroy_cleanup(out, &sctx, sdestroys,
+                                                        nsdestroys, body_ind)) {
+                    bind_ok = 0;
+                }
+                if (bind_ok && !cemit_str(out, "}\n\n")) bind_ok = 0;
+                if (bind_ok && nsspawns) {
+                    if (!cemit_str(out, "\n/* --- CC generated closures --- */\n"))
+                        bind_ok = 0;
+                    for (int s = 0; bind_ok && s < nsspawns; s++) {
+                        if (!shadow_emit_closure_def(sspawns[s], out, cache))
+                            bind_ok = 0;
                     }
                 }
-                if (!cemit_str(out, "/* --- end closure declarations --- */\n\n"))
-                    return 0;
             }
-            if (!cemit_fmt(out, "static %s%s %s(%s) {\n", inl, it->a, it->b,
-                           params))
-                return 0;
-            /* Soft returns + watermark: int only (retval is int). */
-            int use_c = nsdestroys > 0 && strcmp(it->a, "int") == 0;
-            sctx.goto_cleanup = use_c;
-            if (!shadow_emit_scratch_if_needed(it->kids, it->nkids, sdestroys,
-                                              nsdestroys, out, body_ind))
-                return 0;
-            if (use_c && !shadow_emit_destroy_soft_vars(out, body_ind))
-                return 0;
-            for (int k = 0; k < it->nkids; k++) {
-                if (!shadow_emit_stmt_ctx(it->kids[k], out, &sctx, body_ind,
-                                          use_c))
-                    return 0;
-                if (use_c &&
-                    !shadow_emit_hw_bump(out, &sctx, it->kids[k], body_ind))
-                    return 0;
-            }
-            if (use_c &&
-                !shadow_emit_destroy_cleanup(out, &sctx, sdestroys, nsdestroys,
-                                             body_ind))
-                return 0;
-            if (!cemit_str(out, "}\n\n")) return 0;
-            if (nsspawns) {
-                if (!cemit_str(out, "\n/* --- CC generated closures --- */\n"))
-                    return 0;
-                for (int s = 0; s < nsspawns; s++) {
-                    if (!shadow_emit_closure_def(sspawns[s], out, cache))
-                        return 0;
-                }
-            }
+            shadow_pop_fn_binds(bind_mark);
+            if (!bind_ok) return 0;
             break;
         }
         case AST_STATIC_VAR: {
@@ -1482,111 +1711,156 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 out->err = 1;
                 return 0;
             }
+            int bind_mark = shadow_push_fn_binds(it);
+            int bind_ok = 1;
             ShadowCtx ctx = { .cache = cache };
             int deadline = 0;
             ctx.deadline_i = &deadline;
             AstNode* spawns[16];
             AstNode* destroys[32];
-            int nspawns = 0, ndestroys = 0;
-            for (int k = 0; k < it->nkids; k++) {
-                if (it->kids[k]->kind == AST_ERRHANDLER) ctx.eh = it->kids[k];
+            AstNode* defers[16];
+            int nspawns = 0, ndestroys = 0, ndefers = 0;
+            for (int k = 0; bind_ok && k < it->nkids; k++) {
+                if (it->kids[k]->kind == AST_ERRHANDLER)
+                    shadow_eh_push_node(&ctx, it->kids[k]);
+                if (it->kids[k]->kind == AST_DEFER) {
+                    if (ndefers >= 16) {
+                        fprintf(stderr, "error: too many @defer for shadow beachhead\n");
+                        out->err = 1;
+                        bind_ok = 0;
+                        break;
+                    }
+                    defers[ndefers++] = it->kids[k];
+                }
                 /* Fn-level @destroy only (block-scoped destroys emit at block end). */
                 if (shadow_stmt_is_destroy(it->kids[k])) {
                     if (ndestroys >= 32) {
                         fprintf(stderr, "error: too many @destroy for shadow beachhead\n");
                         out->err = 1;
-                        return 0;
+                        bind_ok = 0;
+                        break;
                     }
                     destroys[ndestroys++] = it->kids[k];
                 }
                 if (!shadow_collect_spawns(it->kids[k], spawns, &nspawns, 16)) {
                     fprintf(stderr, "error: too many spawns for shadow beachhead\n");
                     out->err = 1;
-                    return 0;
+                    bind_ok = 0;
+                    break;
                 }
             }
-            ctx.destroys = destroys;
-            ctx.ndestroys = ndestroys;
-            /* Soft-return cleanup is int-retval only. */
-            {
-                const char* rty = it->e[0] ? it->e : "int";
-                ctx.goto_cleanup = ndestroys > 0 && strcmp(rty, "int") == 0;
-            }
-            if (nspawns) {
-                if (!cemit_str(out, "\n/* --- CC closure declarations --- */\n"))
-                    return 0;
-                for (int s = 0; s < nspawns; s++) {
-                    char proto[256];
-                    int ar = shadow_closure_arity(spawns[s]);
-                    const char* ccty = shadow_closure_cc_ty(spawns[s]);
-                    if (!shadow_caps_proto(spawns[s]->e, proto, sizeof(proto)))
-                        return 0;
-                    if (ar == 1) {
-                        if (!cemit_fmt(out,
-                                "static void* cc_closure__N%s_entry(void*, intptr_t);\n"
-                                "static %s cc_closure__N%s_make(%s);\n",
-                                spawns[s]->d, ccty, spawns[s]->d, proto))
-                            return 0;
-                    } else if (ar == 2) {
-                        if (!cemit_fmt(out,
-                                "static void* cc_closure__N%s_entry(void*, intptr_t, intptr_t);\n"
-                                "static %s cc_closure__N%s_make(%s);\n",
-                                spawns[s]->d, ccty, spawns[s]->d, proto))
-                            return 0;
-                    } else if (!cemit_fmt(out,
-                            "static void* cc_closure__N%s_entry(void*);\n"
-                            "static CCClosure0 cc_closure__N%s_make(%s);\n",
-                            spawns[s]->d, spawns[s]->d, proto)) {
-                        return 0;
+            if (bind_ok) {
+                ctx.destroys = destroys;
+                ctx.ndestroys = ndestroys;
+                ctx.defers = defers;
+                ctx.ndefers = ndefers;
+                ctx.defer_cleanup = ndefers > 0;
+                /* Soft-return cleanup is int-retval only. */
+                {
+                    const char* rty = it->e[0] ? it->e : "int";
+                    ctx.goto_cleanup =
+                        (ndestroys > 0 || ndefers > 0) && strcmp(rty, "int") == 0;
+                }
+                if (nspawns) {
+                    if (!cemit_str(out, "\n/* --- CC closure declarations --- */\n"))
+                        bind_ok = 0;
+                    for (int s = 0; bind_ok && s < nspawns; s++) {
+                        char proto[256];
+                        int ar = shadow_closure_arity(spawns[s]);
+                        const char* ccty = shadow_closure_cc_ty(spawns[s]);
+                        if (!shadow_caps_proto(spawns[s]->e, proto, sizeof(proto)))
+                            bind_ok = 0;
+                        else if (ar == 1) {
+                            if (!cemit_fmt(out,
+                                    "static void* cc_closure__N%s_entry(void*, intptr_t);\n"
+                                    "static %s cc_closure__N%s_make(%s);\n",
+                                    spawns[s]->d, ccty, spawns[s]->d, proto))
+                                bind_ok = 0;
+                        } else if (ar == 2) {
+                            if (!cemit_fmt(out,
+                                    "static void* cc_closure__N%s_entry(void*, intptr_t, intptr_t);\n"
+                                    "static %s cc_closure__N%s_make(%s);\n",
+                                    spawns[s]->d, ccty, spawns[s]->d, proto))
+                                bind_ok = 0;
+                        } else if (!cemit_fmt(out,
+                                "static void* cc_closure__N%s_entry(void*);\n"
+                                "static CCClosure0 cc_closure__N%s_make(%s);\n",
+                                spawns[s]->d, spawns[s]->d, proto)) {
+                            bind_ok = 0;
+                        }
                     }
+                    if (bind_ok &&
+                        !cemit_str(out, "/* --- end closure declarations --- */\n\n"))
+                        bind_ok = 0;
                 }
-                if (!cemit_str(out, "/* --- end closure declarations --- */\n\n"))
-                    return 0;
             }
-            {
+            if (bind_ok) {
                 const char* rty = it->e[0] ? it->e : "int";
+                char params[512];
                 /* Host linkers require `int main`; coerce void main. */
                 if (strcmp(it->a, "main") == 0 && strcmp(rty, "void") == 0)
                     rty = "int";
-                if (it->b[0])
-                    cemit_fmt(out, "%s %s(%s) {\n", rty, it->a, it->b);
+                params[0] = 0;
+                if (it->b[0]) {
+                    snprintf(params, sizeof(params), "%s", it->b);
+                    shadow_normalize_chan_params(params, sizeof(params));
+                }
+                if (params[0])
+                    cemit_fmt(out, "%s %s(%s) {\n", rty, it->a, params);
                 else
                     cemit_fmt(out, "%s %s(void) {\n", rty, it->a);
+                if (out->err) bind_ok = 0;
             }
-            if (out->err) return 0;
-            char body_ind[64];
-            shadow_pick_body_indent(it->kids, it->nkids, body_ind, sizeof(body_ind));
-            ctx.body_indent = body_ind;
-            if (!shadow_emit_scratch_if_needed(it->kids, it->nkids, destroys,
-                                              ndestroys, out, body_ind))
-                return 0;
-            if (ctx.goto_cleanup &&
-                !shadow_emit_destroy_soft_vars(out, body_ind))
-                return 0;
-            for (int k = 0; k < it->nkids; k++) {
-                if (!shadow_emit_stmt_ctx(it->kids[k], out, &ctx, body_ind,
-                                          ctx.goto_cleanup))
-                    return 0;
-                if (!shadow_emit_hw_bump(out, &ctx, it->kids[k], body_ind))
-                    return 0;
-            }
-            if (ctx.goto_cleanup &&
-                !shadow_emit_destroy_cleanup(out, &ctx, destroys, ndestroys,
-                                             body_ind))
-                return 0;
-            /* void main coerced to int — ensure a return. */
-            if (strcmp(it->a, "main") == 0 && it->e[0] &&
-                strcmp(it->e, "void") == 0) {
-                if (!cemit_fmt(out, "%sreturn 0;\n", body_ind)) return 0;
-            }
-            if (!cemit_str(out, "}\n")) return 0;
-            if (nspawns) {
-                if (!cemit_str(out, "\n/* --- CC generated closures --- */\n"))
-                    return 0;
-                for (int s = 0; s < nspawns; s++) {
-                    if (!shadow_emit_closure_def(spawns[s], out, cache)) return 0;
+            if (bind_ok) {
+                char body_ind[64];
+                shadow_pick_body_indent(it->kids, it->nkids, body_ind, sizeof(body_ind));
+                ctx.body_indent = body_ind;
+                shadow_vdrop_mark_push(&ctx);
+                if (!shadow_emit_scratch_if_needed(it->kids, it->nkids, destroys,
+                                                  ndestroys, out, body_ind))
+                    bind_ok = 0;
+                if (bind_ok && ctx.goto_cleanup &&
+                    !shadow_emit_destroy_soft_vars(out, body_ind))
+                    bind_ok = 0;
+                for (int k = 0; bind_ok && k < it->nkids; k++) {
+                    if (!shadow_emit_stmt_ctx(it->kids[k], out, &ctx, body_ind,
+                                              ctx.goto_cleanup))
+                        bind_ok = 0;
+                    if (bind_ok &&
+                        !shadow_emit_hw_bump(out, &ctx, it->kids[k], body_ind))
+                        bind_ok = 0;
+                }
+                if (bind_ok &&
+                    !shadow_vdrop_mark_pop_emit(out, &ctx, body_ind))
+                    bind_ok = 0;
+                if (bind_ok && ndefers > 0 && ctx.goto_cleanup) {
+                    if (!shadow_emit_defer_epilogue(out, &ctx)) bind_ok = 0;
+                } else if (bind_ok && ndefers > 0 && !ctx.goto_cleanup) {
+                    if (!shadow_emit_defer_list(defers, ndefers, out, &ctx,
+                                                 body_ind, 0))
+                        bind_ok = 0;
+                } else if (bind_ok && ctx.goto_cleanup &&
+                           !shadow_emit_destroy_cleanup(out, &ctx, destroys,
+                                                        ndestroys, body_ind)) {
+                    bind_ok = 0;
+                }
+                /* void main coerced to int — ensure a return. */
+                if (bind_ok && strcmp(it->a, "main") == 0 && it->e[0] &&
+                    strcmp(it->e, "void") == 0) {
+                    if (!cemit_fmt(out, "%sreturn 0;\n", body_ind)) bind_ok = 0;
+                }
+                if (bind_ok && !cemit_str(out, "}\n")) bind_ok = 0;
+                if (bind_ok && nspawns) {
+                    if (!cemit_str(out, "\n/* --- CC generated closures --- */\n"))
+                        bind_ok = 0;
+                    for (int s = 0; bind_ok && s < nspawns; s++) {
+                        if (!shadow_emit_closure_def(spawns[s], out, cache))
+                            bind_ok = 0;
+                    }
                 }
             }
+            shadow_pop_fn_binds(bind_mark);
+            if (!bind_ok) return 0;
             break;
         }
         case AST_STRUCT: {
@@ -1647,25 +1921,59 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 o1 = (size_t)strtoull(it->b, &endp, 10);
                 if (o1 > ft->len) o1 = ft->len;
                 if (o0 > o1) o0 = o1;
-                if (o1 > o0 &&
-                    !cemit_buf(out, ft->bytes + o0, o1 - o0))
-                    return 0;
+                if (o1 > o0) {
+                    char span[512];
+                    size_t sn = o1 - o0;
+                    if (sn < sizeof(span)) {
+                        memcpy(span, ft->bytes + o0, sn);
+                        span[sn] = 0;
+                        if (strncmp(span, "static void", 11) == 0 &&
+                            strstr(span, "[]")) {
+                            const char* rest = span + 11;
+                            while (*rest == ' ' || *rest == '\t') rest++;
+                            if (*rest == '*') rest++;
+                            while (*rest == ' ' || *rest == '\t') rest++;
+                            if (!cemit_fmt(out, "static void* %s\n", rest))
+                                return 0;
+                            break;
+                        }
+                    }
+                    if (!cemit_buf(out, ft->bytes + o0, o1 - o0))
+                        return 0;
+                }
                 if (!cemit_str(out, "\n")) return 0;
                 break;
             }
             /* Install map UFCS before bodies use map->insert / … */
             shadow_map_ufcs_install_from_raw(it->a);
-            if (!cemit_fmt(out, "%s\n", it->a)) return 0;
+            shadow_slice_note_raw(it->a);
+            if (it->a[0] && strncmp(it->a, "static void", 11) == 0 &&
+                strstr(it->a, "[]")) {
+                const char* rest = it->a + 11;
+                while (*rest == ' ' || *rest == '\t') rest++;
+                if (*rest == '*') rest++;
+                while (*rest == ' ' || *rest == '\t') rest++;
+                if (!cemit_fmt(out, "static void* %s\n", rest)) return 0;
+                break;
+            }
+            {
+                char line[768];
+                snprintf(line, sizeof(line), "%s", it->a);
+                shadow_lower_type_of_constexpr(line, sizeof(line));
+                if (!cemit_fmt(out, "%s\n", line)) return 0;
+            }
             break;
         case AST_GENERIC_FACTORY:
             if (!cemit_fmt(out, "/* CC_GENERIC_FACTORY(%s) — instantiated above */\n",
                            it->a))
                 return 0;
             break;
-        case AST_AT_STMT:
+        case AST_AT_STMT: {
             /* grammar / variant / … — shared stmt emitter. */
-            if (!shadow_emit_stmt_ctx(it, out, NULL, "", 0)) return 0;
+            ShadowCtx at_ctx = { .cache = cache };
+            if (!shadow_emit_stmt_ctx(it, out, &at_ctx, "", 0)) return 0;
             break;
+        }
         case AST_MUL_EXPR:
         case AST_EXPR_STMT:
         case AST_CLOSURE_LIT:
@@ -1678,6 +1986,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
         case AST_PRINTLN_BANG_BIND:
         case AST_PRINTLN_TPL:
         case AST_ERR_FWD:
+        case AST_ERR_SYNTAX:
         case AST_NURSERY_DESTROY:
         case AST_SPAWN_CLOSURE:
         case AST_CALL_NUM:
@@ -1706,6 +2015,8 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
         case AST_FIELD_SIMPLE:
         case AST_BREAK:
         case AST_CONTINUE:
+        case AST_GOTO:
+        case AST_LABEL:
         case AST_DO_WHILE:
         case AST_SWITCH:
             fprintf(stderr, "error: AST node %s is not part of the C-emit shadow subset\n",
@@ -1716,6 +2027,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
         if (out->err) return 0;
     }
     if (g_shadow_ufcs_miss) return 0;
+    if (g_shadow_string_stack_diag) return 0;
     if (!out->err && out->buf && out->len) {
         const char* hit = NULL;
         if (!shadow_product_host_c_ok(out->buf, out->len, &hit)) {

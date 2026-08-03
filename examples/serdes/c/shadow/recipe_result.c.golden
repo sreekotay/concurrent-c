@@ -165,11 +165,11 @@ int main(void) {
     int bad;
     {
         __typeof__(read_config_value("")) __r = read_config_value("");
-        if (!__cc_uw_is_err(__r)) {
-            bad = __cc_uw_value(__r);
+        if (__r.ok) {
+            bad = __r.u.value;
         } else {
+            __typeof__(__r.u.error) e = __r.u.error;
             #line 59 "examples/serdes/c/shadow/recipe_result.ccs"
-            __typeof__(__cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_result.ccs", "59")) e = __cc_uw_err_at(__r, "unwrap", "examples/serdes/c/shadow/recipe_result.ccs", "59");
             bad = ((e.kind == CC_ERR_INVALID_ARG ? 0 : -1));
         }
     }

@@ -38,4 +38,11 @@ int cc_variant_schema_pending_add(const char* name, int narms,
                                   const char* const* arm_names,
                                   const int* is_void);
 
+/* Read-only view of queued schema `one of` types (before commit/clear). */
+int cc_variant_schema_pending_count(void);
+const char* cc_variant_schema_pending_name(int i);
+int cc_variant_schema_pending_narms(int i);
+const char* cc_variant_schema_pending_arm(int i, int a);
+int cc_variant_schema_pending_arm_is_void(int i, int a);
+
 #endif /* CC_VARIANT_LOWER_H */

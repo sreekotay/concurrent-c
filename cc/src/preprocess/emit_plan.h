@@ -226,6 +226,8 @@ int cc_emit_plan_generic_invalid_report_once(const char* mangled);
 /* --- comptime fragment buffer (track B2) --- */
 void cc_emit_plan_clear_comptime_fragments(void);
 size_t cc_emit_plan_comptime_fragment_count(void);
+/* Borrowed fragment text (NULL if out of range or empty). */
+const char* cc_emit_plan_comptime_fragment_text(size_t frag_index);
 void cc_emit_plan_collect_comptime_emits(const char* src, size_t len);
 void cc_emit_plan_build_comptime_schedule(const char* src, size_t len,
                                           const char* input_path,
