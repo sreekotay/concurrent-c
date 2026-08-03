@@ -104,7 +104,7 @@ static ShadowKwKind shadow_kw(Token t) {
 
 /* ---- typedef scopes + tiny AST ------------------------------------------ */
 
-enum { SCOPE_CAP = 32, NAME_CAP = 64, AST_CAP = 256 };
+enum { SCOPE_CAP = 32, NAME_CAP = 64, AST_CAP = 512 };
 
 typedef struct {
     char names[NAME_CAP][128];
@@ -116,6 +116,8 @@ typedef enum {
     AST_VAR_INT,       /* int Name; */
     AST_PTR_DECL,      /* TypeName * Name; */
     AST_MUL_EXPR,      /* Ident * Ident;  (expression statement) */
+    /* Bare expression statement: a=expr text (closure/fn bodies). */
+    AST_EXPR_STMT,
     AST_STRUCT,        /* struct Name { ...fields... } */
     AST_FIELD_INT,     /* int Name; inside struct */
     /* Concurrent-C surface (post-expand; stage 1 kept digraphs intact) */
@@ -236,13 +238,14 @@ typedef enum {
 typedef struct AstNode AstNode;
 struct AstNode {
     AstKind kind;
-    char a[256];
-    char b[256];
+    /* Long exprs / grammar schema rows (was 256; union schema needs ~387). */
+    char a[512];
+    char b[512];
     /* Params / long spans — nursery lower_c protos exceed 256 with source indent. */
     char c[512];
     /* Long raw spans: static-fn / switch / enum bodies (was 256; errno maps overflow). */
     char d[2048];
-    char e[256];
+    char e[512];
     /* Attachment roles (never mix):
      *   kids  — open parent lists (fn/struct members still being filled)
      *   body  — nested stmt lists (block / if / loop / bang bodies)
@@ -353,6 +356,29 @@ static void slice_to(char* dst, size_t cap, CCSlice s) {
     size_t n = s.len < cap - 1 ? s.len : cap - 1;
     memcpy(dst, s.ptr, n);
     dst[n] = 0;
+}
+
+/* Byte length of toks[i0 .. i1_excl) without copying (0 when empty/invalid). */
+static size_t span_text_len(Parser* p, int i0, int i1_excl) {
+    int i;
+    if (!p || i0 < 0 || i1_excl > p->n || i0 >= i1_excl) return 0;
+    {
+        Token a = p->toks[i0];
+        Token b = p->toks[i1_excl - 1];
+        size_t start = a.offset;
+        size_t end = b.offset + b.spell.len;
+        FileTape* ft = tape_by_id(p->cache, a.file_id);
+        if (ft && ft->bytes && end <= ft->len && end >= start)
+            return end - start;
+    }
+    {
+        size_t need = 0;
+        for (i = i0; i < i1_excl; i++) {
+            if (i > i0) need++;
+            need += p->toks[i].spell.len;
+        }
+        return need;
+    }
 }
 
 /* Exact source span covering toks[i0 .. i1_excl).
@@ -876,12 +902,83 @@ static int ast_spell_token_range(Parser* p, int start, int end, char* dst,
                     i = call_close + 1;
                     continue;
                 }
-                /* Inside @async: strip (@await tx.send → tx.send). Sync
-                 * context: only @await known_async_fn(...) is valid. */
+                /* Inside @async: wrap the following call/UFCS so emit can
+                 * lower channel/task awaits to cc_block_on(intptr_t, …).
+                 * Sync context: only @await known_async_fn(...) is valid. */
                 if (!p->in_async) {
                     parser_fail(p, t,
                                 "'await' is only valid inside @async functions");
                     return 0;
+                }
+                {
+                    int j = i + 2;
+                    int call_close = -1;
+                    char wrap[384];
+                    int did = 0;
+                    wrap[0] = 0;
+                    /* @await recv.send/recv(...) → block_on(channel_*_task). */
+                    if (j + 3 < end && p->toks[j].kind == TK_IDENT &&
+                        tok_eq(p->toks[j + 1], TK_PUNCT, ".") &&
+                        p->toks[j + 2].kind == TK_IDENT &&
+                        tok_eq(p->toks[j + 3], TK_PUNCT, "(")) {
+                        char recv[64], meth[32], args[160];
+                        call_close = ast_matching_paren(p, j + 3, end);
+                        slice_to(recv, sizeof(recv), p->toks[j].spell);
+                        slice_to(meth, sizeof(meth), p->toks[j + 2].spell);
+                        if (call_close > j + 3)
+                            (void)ast_spell_token_range(p, j + 4, call_close,
+                                                        args, sizeof(args));
+                        else
+                            args[0] = 0;
+                        if (strcmp(meth, "send") == 0)
+                            snprintf(wrap, sizeof(wrap),
+                                     "cc_block_on(intptr_t, "
+                                     "cc_channel_send_task(%s, %s))",
+                                     recv, args);
+                        else if (strcmp(meth, "recv") == 0)
+                            snprintf(wrap, sizeof(wrap),
+                                     "cc_block_on(intptr_t, "
+                                     "cc_channel_recv_task(%s, %s))",
+                                     recv, args);
+                        else if (call_close > j) {
+                            char inner[256];
+                            if (ast_spell_token_range(p, j, call_close + 1,
+                                                      inner, sizeof(inner)))
+                                snprintf(wrap, sizeof(wrap),
+                                         "cc_block_on(intptr_t, %s)", inner);
+                        }
+                        did = wrap[0] != 0;
+                    } else if (j + 1 < end && p->toks[j].kind == TK_IDENT &&
+                               tok_eq(p->toks[j + 1], TK_PUNCT, "(")) {
+                        /* @await cc_chan_*_task(...) */
+                        char inner[256];
+                        call_close = ast_matching_paren(p, j + 1, end);
+                        if (call_close > j &&
+                            ast_spell_token_range(p, j, call_close + 1, inner,
+                                                  sizeof(inner))) {
+                            snprintf(wrap, sizeof(wrap),
+                                     "cc_block_on(intptr_t, %s)", inner);
+                            did = 1;
+                        }
+                    }
+                    if (did && call_close > j) {
+                        CCSlice ps = { .ptr = wrap, .len = strlen(wrap) };
+                        if (have_prev && tok_off >= prev_end)
+                            (void)ast_copy_ws_gap(p, t, prev_end, tok_off, dst,
+                                                  &o, cap);
+                        if (!ast_append_spell_diag(
+                                p, t, dst, &o, cap, ps,
+                                o && ps.len &&
+                                    ast_need_lex_space(dst[o - 1], wrap[0])))
+                            return 0;
+                        if (ast_tok_verbatim(p, p->toks[call_close])) {
+                            prev_end = p->toks[call_close].offset +
+                                       p->toks[call_close].spell.len;
+                            have_prev = 1;
+                        }
+                        i = call_close + 1;
+                        continue;
+                    }
                 }
                 i += 2;
                 continue;

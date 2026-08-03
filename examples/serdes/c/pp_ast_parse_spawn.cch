@@ -64,7 +64,8 @@ static AstNode* parse_nursery_destroy(Parser* p) {
     return n;
 }
 
-/* True for `=> {` / `=> [caps] {` (and `= >` digraph forms). */
+/* True for `=> {` / `=> [caps] {` / `=> [caps] expr` / `=> expr`
+ * (and `= >` digraph forms). *out_brace = `{` index, or -1 for expr body. */
 static int shadow_is_arrow_brace(Parser* p, int i, int end, int* out_brace) {
     int k;
     if (!p || i < 0 || i >= end) return 0;
@@ -93,6 +94,13 @@ static int shadow_is_arrow_brace(Parser* p, int i, int end, int* out_brace) {
     }
     if (k < end && tok_eq(p->toks[k], TK_PUNCT, "{")) {
         if (out_brace) *out_brace = k;
+        return 1;
+    }
+    /* Expression body: anything but `,` / `)` starter (call-arg / send_task). */
+    if (k < end && !tok_eq(p->toks[k], TK_PUNCT, ",") &&
+        !tok_eq(p->toks[k], TK_PUNCT, ")") &&
+        !tok_eq(p->toks[k], TK_PUNCT, ";")) {
+        if (out_brace) *out_brace = -1;
         return 1;
     }
     return 0;
@@ -223,12 +231,7 @@ static int parse_call_arg_closure(Parser* p, int c0, int end, char* dst,
         L = strlen(dst);
         while (L && (dst[L - 1] == ' ' || dst[L - 1] == '\t' || dst[L - 1] == ','))
             dst[--L] = 0;
-        if (L && dst[L - 1] != ')') {
-            if (L + 1 < cap) {
-                dst[L++] = ')';
-                dst[L] = 0;
-            }
-        }
+        /* Leave the call open at '(' — closure splice fills the first arg. */
     }
     if (rp == -2) {
         /* Bare `x => {` */
@@ -277,7 +280,11 @@ static int parse_call_arg_closure(Parser* p, int c0, int end, char* dst,
             snprintf(n->a, sizeof(n->a), "%s", formals);
         else
             n->a[0] = 0;
-        n->c[0] = 0;
+        /* Call prefix for send_into formal inference (e.g. tx.try_send_into). */
+        if (!bare && dst[0])
+            snprintf(n->c, sizeof(n->c), "%s", dst);
+        else
+            n->c[0] = 0;
         n->e[0] = 0;
         /* Optional explicit captures: `=> [rx, &tx] { … }` */
         if (tok_eq(p_peek(p), TK_PUNCT, "[")) {
@@ -308,29 +315,118 @@ static int parse_call_arg_closure(Parser* p, int c0, int end, char* dst,
                 return 0;
             }
         }
-        if (!p_accept(p, TK_PUNCT, "{")) {
-            parser_fail(p, p_peek(p), "expected '{' after () =>");
-            return 0;
-        }
-        while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF &&
-               !p->err) {
-            AstNode* s = parse_stmt(p);
-            if (!s) return 0;
-            if (n->nbody >= 32) {
-                parser_fail_body_cap(p, p_peek(p), "() => body");
+        if (tok_eq(p_peek(p), TK_PUNCT, "{")) {
+            p_next(p); /* { */
+            while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF &&
+                   !p->err) {
+                AstNode* s = parse_stmt(p);
+                if (!s) return 0;
+                if (n->nbody >= 32) {
+                    parser_fail_body_cap(p, p_peek(p), "() => body");
+                    return 0;
+                }
+                n->body[n->nbody++] = s;
+            }
+            if (!p_accept(p, TK_PUNCT, "}")) {
+                parser_fail(p, p_peek(p), "expected '}' after () => { ... }");
                 return 0;
             }
-            n->body[n->nbody++] = s;
+        } else {
+            /* Expression body: `() => [caps] expr` up to call's `)`. */
+            int e0 = p->i;
+            int depth = bare ? 0 : 1;
+            while (p->i < end) {
+                Token t = p_peek(p);
+                if (tok_eq(t, TK_PUNCT, "(") || tok_eq(t, TK_PUNCT, "[") ||
+                    tok_eq(t, TK_PUNCT, "{"))
+                    depth++;
+                else if (tok_eq(t, TK_PUNCT, ")") || tok_eq(t, TK_PUNCT, "]") ||
+                         tok_eq(t, TK_PUNCT, "}")) {
+                    if (!bare && tok_eq(t, TK_PUNCT, ")") && depth == 1) break;
+                    if (depth > 0) depth--;
+                }
+                p_next(p);
+            }
+            {
+                char expr[256];
+                if (!span_text(p, e0, p->i, expr, sizeof(expr))) {
+                    parser_fail(p, p_peek(p), "() => expression body too long");
+                    return 0;
+                }
+                /* Prefer CALL_ARGS when `name(args)`; else EXPR_STMT. */
+                const char* lp = strchr(expr, '(');
+                const char* rp = expr[0] ? strrchr(expr, ')') : NULL;
+                if (lp && rp && rp > lp && n->nbody < 8) {
+                    AstNode* s = ast_new(p, AST_CALL_ARGS);
+                    size_t nl, al;
+                    if (!s) return 0;
+                    nl = (size_t)(lp - expr);
+                    while (nl > 0 &&
+                           (expr[nl - 1] == ' ' || expr[nl - 1] == '\t'))
+                        nl--;
+                    if (nl >= sizeof(s->a)) nl = sizeof(s->a) - 1;
+                    memcpy(s->a, expr, nl);
+                    s->a[nl] = 0;
+                    al = (size_t)(rp - lp - 1);
+                    if (al >= sizeof(s->b)) al = sizeof(s->b) - 1;
+                    memcpy(s->b, lp + 1, al);
+                    s->b[al] = 0;
+                    n->body[n->nbody++] = s;
+                } else if (n->nbody < 8) {
+                    AstNode* s = ast_new(p, AST_EXPR_STMT);
+                    if (!s) return 0;
+                    snprintf(s->a, sizeof(s->a), "%s", expr);
+                    n->body[n->nbody++] = s;
+                } else {
+                    parser_fail_body_cap(p, p_peek(p), "() => expression body");
+                    return 0;
+                }
+            }
         }
-        if (!p_accept(p, TK_PUNCT, "}")) {
-            parser_fail(p, p_peek(p), "expected '}' after () => { ... }");
-            return 0;
-        }
-        if (!bare) {
-            if (!p_accept(p, TK_PUNCT, ")")) {
-                parser_fail(p, p_peek(p), "expected '})' after () => { ... }");
+        if (p->i != end) {
+            /* `(a, b) => { … }, NULL` — closure is first of several call args. */
+            char trail[256];
+            int t0;
+            if (tok_eq(p_peek(p), TK_PUNCT, ","))
+                p_next(p);
+            t0 = p->i;
+            if (!span_text(p, t0, end, trail, sizeof(trail))) {
+                parser_fail(p, p_peek(p),
+                            "call-arg closure trailing args too long");
                 return 0;
             }
+            {
+                size_t tl = strlen(trail);
+                while (tl && (trail[tl - 1] == ' ' || trail[tl - 1] == '\t' ||
+                              trail[tl - 1] == '\n' || trail[tl - 1] == '\r'))
+                    trail[--tl] = 0;
+                while (tl && trail[tl - 1] == ')')
+                    trail[--tl] = 0;
+            }
+            if (!bare) {
+                size_t L = strlen(dst);
+                const char* t;
+                while (L && (dst[L - 1] == ' ' || dst[L - 1] == '\t'))
+                    L--;
+                t = trail;
+                while (*t == ' ' || *t == '\t' || *t == '\n' || *t == '\r')
+                    t++;
+                if (*t && strcmp(t, ")") != 0) {
+                    if (L + strlen(trail) + 4 >= cap) {
+                        parser_fail(p, p->toks[c0],
+                                    "call-arg closure prefix too long");
+                        return 0;
+                    }
+                    /* Empty first-arg slot: `(closure, rest…)`. */
+                    snprintf(dst + L, cap - L, ", %s)", trail);
+                }
+            } else if (trail[0]) {
+                const char* t = trail;
+                while (*t == ' ' || *t == '\t') t++;
+                if (*t && strcmp(t, ")") != 0)
+                    snprintf(dst, cap, ", %s", trail);
+            }
+            p->i = end;
         }
         if (p->i != end) {
             parser_fail(p, p_peek(p), "trailing tokens after () => closure arg");
@@ -344,28 +440,40 @@ static int parse_call_arg_closure(Parser* p, int c0, int end, char* dst,
 /* Type[*] name = expr @destroy [ { body } ];  or  … @detach;
  * d="*"|"", e="_Dbare"|"_D"|"_detach"; UFCS on dbody; body stmts on body[]. */
 
+static int spawn_is_ident_char(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
+
 static int spawn_is_ident(const char* s) {
     if (!s || !*s) return 0;
-    if (!((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') || *s == '_'))
+    if (!((s[0] >= 'a' && s[0] <= 'z') || (s[0] >= 'A' && s[0] <= 'Z') ||
+          s[0] == '_'))
         return 0;
     for (const char* p = s + 1; *p; p++) {
-        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
-              (*p >= '0' && *p <= '9') || *p == '_'))
-            return 0;
+        if (!spawn_is_ident_char(*p)) return 0;
     }
     return 1;
 }
 
-/* Append "name" or "&name" to capture list if not already present. */
+/* Append "name" or "&name" to capture list if not already present.
+ * Also refuse value form when `&name` is already listed (and vice versa). */
 static void spawn_caps_add(char* caps, size_t cap, const char* item) {
+    char alt[80];
     if (!item || !item[0]) return;
+    if (item[0] == '&')
+        snprintf(alt, sizeof(alt), "%s", item + 1);
+    else
+        snprintf(alt, sizeof(alt), "&%s", item);
     /* Exact token match among comma-separated items (avoid "a" matching "ab"). */
     const char* p = caps;
     size_t il = strlen(item);
+    size_t al = strlen(alt);
     while (*p) {
         const char* c = strchr(p, ',');
         size_t n = c ? (size_t)(c - p) : strlen(p);
         if (n == il && memcmp(p, item, il) == 0) return;
+        if (n == al && memcmp(p, alt, al) == 0) return;
         if (!c) break;
         p = c + 1;
     }
@@ -378,16 +486,55 @@ static void spawn_caps_add(char* caps, size_t cap, const char* item) {
     }
 }
 
+static int spawn_stmt_declares(AstNode* s, const char* name) {
+    int k;
+    if (!s || !name || !name[0]) return 0;
+    if ((s->kind == AST_TYPED_INIT || s->kind == AST_PTR_INIT ||
+         s->kind == AST_VAR_DECL) &&
+        strcmp(s->b, name) == 0)
+        return 1;
+    /* VAR_UNWRAP / PTR_UNWRAP: binder name is a (not b). */
+    if ((s->kind == AST_VAR_UNWRAP || s->kind == AST_PTR_UNWRAP) &&
+        strcmp(s->a, name) == 0)
+        return 1;
+    /* RESULT_LOCAL: name lives in a (ok/err types in c/b). */
+    if (s->kind == AST_RESULT_LOCAL && strcmp(s->a, name) == 0)
+        return 1;
+    /* `for (int i = 0; …)` — loop var is body-local. */
+    if (s->kind == AST_FOR && s->a[0]) {
+        const char* h = s->a;
+        char id[64];
+        size_t ni = 0;
+        while (*h == ' ' || *h == '\t') h++;
+        if ((strncmp(h, "int", 3) == 0 && !spawn_is_ident_char(h[3])) ||
+            (strncmp(h, "size_t", 6) == 0 && !spawn_is_ident_char(h[6])) ||
+            (strncmp(h, "long", 4) == 0 && !spawn_is_ident_char(h[4])) ||
+            (strncmp(h, "bool", 4) == 0 && !spawn_is_ident_char(h[4]))) {
+            while (*h && spawn_is_ident_char(*h)) h++;
+            while (*h == ' ' || *h == '\t') h++;
+            while (*h && spawn_is_ident_char(*h) && ni + 1 < sizeof(id))
+                id[ni++] = *h++;
+            id[ni] = 0;
+            if (id[0] && strcmp(id, name) == 0) return 1;
+        }
+    }
+    if (s->kind == AST_IF || s->kind == AST_WHILE || s->kind == AST_FOR ||
+        s->kind == AST_BLOCK || s->kind == AST_DO_WHILE) {
+        for (k = 0; k < s->nbody; k++)
+            if (spawn_stmt_declares(s->body[k], name)) return 1;
+        for (k = 0; k < s->ndbody; k++)
+            if (spawn_stmt_declares(s->dbody[k], name)) return 1;
+        if (s->kids) {
+            for (k = 0; k < s->nkids; k++)
+                if (spawn_stmt_declares(s->kids[k], name)) return 1;
+        }
+    }
+    return 0;
+}
+
 static int spawn_body_declares(AstNode* n, const char* name) {
     for (int k = 0; k < n->nbody; k++) {
-        AstNode* s = n->body[k];
-        if ((s->kind == AST_TYPED_INIT || s->kind == AST_VAR_UNWRAP ||
-             s->kind == AST_PTR_INIT || s->kind == AST_PTR_UNWRAP) &&
-            strcmp(s->b, name) == 0)
-            return 1;
-        if (s->kind == AST_TYPED_INIT && strcmp(s->a, "int") == 0 &&
-            strcmp(s->b, name) == 0)
-            return 1;
+        if (spawn_stmt_declares(n->body[k], name)) return 1;
     }
     return 0;
 }
@@ -415,22 +562,90 @@ static int spawn_name_is_formal(AstNode* n, const char* name) {
     return 0;
 }
 
+/* Skip C/CC noise tokens that look like idents in casts / keywords. */
+static int spawn_is_noise_ident(const char* id) {
+    static const char* kw[] = {
+        "int", "void", "char", "long", "short", "signed", "unsigned", "const",
+        "static", "struct", "enum", "typedef", "return", "if", "else", "while",
+        "for", "do", "switch", "case", "default", "break", "continue", "sizeof",
+        "NULL", "true", "false", "bool", "size_t", "intptr_t", "uintptr_t",
+        "ptrdiff_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t", "int8_t",
+        "int16_t", "int32_t", "int64_t", "float", "double", "auto", "register",
+        "volatile", "restrict", "inline", "typeof", "__typeof__", "abort",
+        "malloc", "free", "printf", "fprintf", "snprintf", "memcpy", "memset",
+        "strlen", "strcmp", "CCSlice", "CCNursery", "CCChan", "CCChanTx",
+        "CCChanRx", "CCTask", "CCError", "CCIoError", "chan_send", "chan_recv",
+        "chan_try_send", "chan_try_recv", "chan_close", "chan_free",
+        "cc_channel_send", "cc_channel_recv", "cc_channel_pair", "cc_chan_free",
+        "cc_nursery_wait", "cc_nursery_free", "cleanup_fn", "usleep", "sleep",
+        "nanosleep", "pthread_create", "pthread_join", "stderr", "stdout",
+        "stdin", "fprintf", "FILE", "NULL", "cc_io_avail", "cc_atomic_fetch_add",
+        "cc_atomic_load", "abort", NULL};
+    int i;
+    if (!id || !id[0]) return 1;
+    /* Type-ish tokens (Item, CCResult_…) are not value captures. */
+    if (id[0] >= 'A' && id[0] <= 'Z') return 1;
+    /* Generated temps / macros (`__cc_nursery47`) stay unbound. */
+    if (strncmp(id, "__cc_", 5) == 0 || strncmp(id, "__CC_", 5) == 0)
+        return 1;
+    for (i = 0; kw[i]; i++)
+        if (strcmp(id, kw[i]) == 0) return 1;
+    return 0;
+}
+
 /* Scan C-ish text for free idents → value captures (skip formals / locals). */
 static void spawn_infer_caps_from_text(AstNode* n, const char* text) {
     const char* p = text ? text : "";
+    const char* start = p;
     while (*p) {
+        /* Skip string / char literals so "spawned task\n" is not captures. */
+        if (*p == '"' || *p == '\'') {
+            char q = *p++;
+            while (*p && *p != q) {
+                if (*p == '\\' && p[1]) p++;
+                p++;
+            }
+            if (*p == q) p++;
+            continue;
+        }
         if (((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || *p == '_')) {
             char id[64];
             size_t nlen = 0;
-            while ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
-                   (*p >= '0' && *p <= '9') || *p == '_') {
+            const char* id0 = p;
+            int after_dot = 0;
+            /* Skip struct/union field names: `s.ptr` / `s->len`. */
+            if (id0 > start) {
+                const char* b = id0 - 1;
+                while (b > start && (*b == ' ' || *b == '\t')) b--;
+                if (*b == '.')
+                    after_dot = 1;
+                else if (*b == '>' && b > start && b[-1] == '-')
+                    after_dot = 1;
+            }
+            while (spawn_is_ident_char(*p)) {
                 if (nlen + 1 < sizeof(id)) id[nlen++] = *p;
                 p++;
             }
             id[nlen] = 0;
-            if (spawn_is_ident(id) && !spawn_body_declares(n, id) &&
-                !spawn_name_is_formal(n, id))
-                spawn_caps_add(n->e, sizeof(n->e), id);
+            {
+                const char* after = p;
+                int is_call = 0;
+                while (*after == ' ' || *after == '\t') after++;
+                /* `usleep(…)` / `printf(…)` are callees, not captures. */
+                if (*after == '(') is_call = 1;
+                /* `&g_worker_count` / `&local` — address-of is not a value
+             * capture (globals must stay unbound; refs use explicit `&name`). */
+            int after_amp = 0;
+            if (id0 > start) {
+                const char* b = id0 - 1;
+                while (b > start && (*b == ' ' || *b == '\t')) b--;
+                if (*b == '&') after_amp = 1;
+            }
+            if (!after_dot && !after_amp && !is_call && spawn_is_ident(id) &&
+                    !spawn_is_noise_ident(id) && !spawn_body_declares(n, id) &&
+                    !spawn_name_is_formal(n, id))
+                    spawn_caps_add(n->e, sizeof(n->e), id);
+            }
             continue;
         }
         p++;
@@ -477,28 +692,36 @@ static void spawn_infer_value_caps_stmt(AstNode* n, AstNode* s) {
         !spawn_body_declares(n, s->c) && !spawn_name_is_formal(n, s->c)) {
         spawn_caps_add(n->e, sizeof(n->e), s->c);
     }
-    /* Typed callarg bodies: free idents in assigns (e.g. `*gp = x`).
-     * Skip spawn/create — globals like `g_runs += 1` must stay unbound. */
+    /* Callarg: capture free idents from assign RHS (`*gp = x` → x), not bare
+     * assign LHS (globals like `g = 1` must stay unbound). */
     if (s->kind == AST_ASSIGN && strncmp(n->b, "callarg", 7) == 0) {
-        spawn_infer_caps_from_text(n, s->a);
         spawn_infer_caps_from_text(n, s->b);
+        if (s->a[0] == '*')
+            spawn_infer_caps_from_text(n, s->a);
     }
-    /* Spawn/create: capture chan handles from calls / void-casts / UFCS / conds. */
-    if (strcmp(n->b, "spawn") == 0 || strcmp(n->b, "create") == 0 ||
-        strcmp(n->b, "send_task") == 0) {
+    /* Spawn/create/callarg: free idents in conds / inits / UFCS / calls.
+     * Skip assign LHS/RHS full scan — globals like `g = 9` must stay unbound. */
+    if (strcmp(n->b, "spawn") == 0 || strcmp(n->b, "spawnhybrid") == 0 ||
+        strcmp(n->b, "spawnhybrid_unsafe") == 0 ||
+        strcmp(n->b, "create") == 0 ||
+        strcmp(n->b, "send_task") == 0 ||
+        strncmp(n->b, "callarg", 7) == 0) {
         if (s->kind == AST_CALL_ARGS)
-            spawn_infer_chan_caps_from_text(n, s->b);
+            spawn_infer_caps_from_text(n, s->b);
         if (s->kind == AST_VOID_CAST)
-            spawn_infer_chan_caps_from_text(n, s->a);
+            spawn_infer_caps_from_text(n, s->a);
         if (s->kind == AST_UFCS_STMT || s->kind == AST_UFCS_EXPR) {
-            spawn_infer_chan_caps_from_text(n, s->a);
-            spawn_infer_chan_caps_from_text(n, s->c);
+            spawn_infer_caps_from_text(n, s->a);
+            spawn_infer_caps_from_text(n, s->c);
         }
-        if (s->kind == AST_CALL_NUM)
-            spawn_infer_chan_caps_from_text(n, s->a);
+        /* CALL_NUM.a is the callee (usleep) — never a capture. */
+        if (s->kind == AST_EXPR_STMT)
+            spawn_infer_caps_from_text(n, s->a);
         if (s->kind == AST_IF || s->kind == AST_WHILE)
-            spawn_infer_chan_caps_from_text(n, s->a);
-        if (s->kind == AST_ASSIGN) {
+            spawn_infer_caps_from_text(n, s->a);
+        if (s->kind == AST_TYPED_INIT || s->kind == AST_PTR_INIT)
+            spawn_infer_caps_from_text(n, s->c);
+        if (s->kind == AST_ASSIGN && strncmp(n->b, "callarg", 7) != 0) {
             spawn_infer_chan_caps_from_text(n, s->a);
             spawn_infer_chan_caps_from_text(n, s->b);
         }
@@ -551,11 +774,20 @@ static AstNode* parse_spawn_closure_core(Parser* p) {
     if (!tok_eq(p->toks[p->i + 1], TK_PUNCT, "->") &&
         !tok_eq(p->toks[p->i + 1], TK_PUNCT, "."))
         return NULL;
-    if (shadow_kw(p->toks[p->i + 2]) != SHADOW_KW_SPAWN) return NULL;
+    {
+        Token meth = p->toks[p->i + 2];
+        int is_spawn = (shadow_kw(meth) == SHADOW_KW_SPAWN);
+        int is_hybrid = (meth.kind == TK_IDENT &&
+                         spell_eq(meth.spell, "spawnhybrid"));
+        if (!is_spawn && !is_hybrid) return NULL;
+    }
     if (!tok_eq(p->toks[p->i + 3], TK_PUNCT, "(")) return NULL;
     /* Optional `@unsafe` before `() =>`. */
     i = p->i + 4;
     int is_unsafe = 0;
+    int is_hybrid =
+        (p->toks[p->i + 2].kind == TK_IDENT &&
+         spell_eq(p->toks[p->i + 2].spell, "spawnhybrid"));
     if (i + 1 < p->n && tok_eq(p->toks[i], TK_PUNCT, "@") &&
         p->toks[i + 1].kind == TK_IDENT &&
         spell_eq(p->toks[i + 1].spell, "unsafe")) {
@@ -571,7 +803,7 @@ static AstNode* parse_spawn_closure_core(Parser* p) {
 
     p_next(p); /* recv */
     p_next(p); /* -> or . */
-    p_next(p); /* spawn */
+    p_next(p); /* spawn | spawnhybrid */
     p_next(p); /* ( */
     while (p->i < arrow_i - 2) p_next(p); /* optional @unsafe */
     p_next(p); /* ( */
@@ -581,7 +813,12 @@ static AstNode* parse_spawn_closure_core(Parser* p) {
     AstNode* n = ast_new(p, AST_SPAWN_CLOSURE);
     if (!n) return NULL;
     slice_to(n->a, sizeof(n->a), recv.spell);
-    snprintf(n->b, sizeof(n->b), "%s", is_unsafe ? "spawn_unsafe" : "spawn");
+    if (is_hybrid)
+        snprintf(n->b, sizeof(n->b), "%s",
+                 is_unsafe ? "spawnhybrid_unsafe" : "spawnhybrid");
+    else
+        snprintf(n->b, sizeof(n->b), "%s",
+                 is_unsafe ? "spawn_unsafe" : "spawn");
     n->e[0] = 0;
 
     if (tok_eq(p_peek(p), TK_PUNCT, "[")) {
@@ -680,7 +917,8 @@ static AstNode* parse_spawn_closure_core(Parser* p) {
             }
         }
     }
-    if (!n->e[0]) spawn_infer_value_caps(n);
+    /* Merge inferred free idents even when an explicit `[caps]` list exists. */
+    spawn_infer_value_caps(n);
     return n;
 }
 
@@ -726,14 +964,17 @@ static int try_parse_spawn_cond(Parser* p, int c0, int c1, AstNode** out_sp,
     return 1;
 }
 
-/* recv.send_task(() => [caps] { stmts }); — ordered-task beachhead. */
+/* recv.send_task[|_hybrid](() => [caps] { stmts }|expr); — ordered-task beachhead. */
 static AstNode* parse_send_task_closure(Parser* p) {
     Token recv = p_peek(p);
+    int is_hybrid = 0;
     if (recv.kind != TK_IDENT) return NULL;
     if (p->i + 7 >= p->n) return NULL;
     if (!tok_eq(p->toks[p->i + 1], TK_PUNCT, ".")) return NULL;
-    if (p->toks[p->i + 2].kind != TK_IDENT ||
-        !spell_eq(p->toks[p->i + 2].spell, "send_task"))
+    if (p->toks[p->i + 2].kind != TK_IDENT) return NULL;
+    if (spell_eq(p->toks[p->i + 2].spell, "send_task_hybrid"))
+        is_hybrid = 1;
+    else if (!spell_eq(p->toks[p->i + 2].spell, "send_task"))
         return NULL;
     if (!tok_eq(p->toks[p->i + 3], TK_PUNCT, "(")) return NULL;
     if (!tok_eq(p->toks[p->i + 4], TK_PUNCT, "(")) return NULL;
@@ -742,7 +983,7 @@ static AstNode* parse_send_task_closure(Parser* p) {
 
     p_next(p); /* recv */
     p_next(p); /* . */
-    p_next(p); /* send_task */
+    p_next(p); /* send_task[_hybrid] */
     p_next(p); /* ( */
     p_next(p); /* ( */
     p_next(p); /* ) */
@@ -751,7 +992,8 @@ static AstNode* parse_send_task_closure(Parser* p) {
     AstNode* n = ast_new(p, AST_SPAWN_CLOSURE);
     if (!n) return NULL;
     slice_to(n->a, sizeof(n->a), recv.spell);
-    snprintf(n->b, sizeof(n->b), "send_task");
+    snprintf(n->b, sizeof(n->b), "%s",
+             is_hybrid ? "send_task_hybrid" : "send_task");
     n->e[0] = 0;
 
     if (tok_eq(p_peek(p), TK_PUNCT, "[")) {
@@ -782,34 +1024,75 @@ static AstNode* parse_send_task_closure(Parser* p) {
         }
     }
 
-    if (!tok_eq(p_peek(p), TK_PUNCT, "{")) {
-        parser_fail(p, p_peek(p), "expected '{' after send_task(() => …)");
-        return NULL;
-    }
-    p_next(p); /* { */
-    while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF &&
-           !p->err) {
-        AstNode* s = parse_stmt(p);
-        if (!s) return NULL;
-        if (n->nbody >= 32) {
-            parser_fail_body_cap(p, p_peek(p), "send_task closure body");
+    if (tok_eq(p_peek(p), TK_PUNCT, "{")) {
+        p_next(p); /* { */
+        while (!tok_eq(p_peek(p), TK_PUNCT, "}") && p_peek(p).kind != TK_EOF &&
+               !p->err) {
+            AstNode* s = parse_stmt(p);
+            if (!s) return NULL;
+            if (n->nbody >= 32) {
+                parser_fail_body_cap(p, p_peek(p), "send_task closure body");
+                return NULL;
+            }
+            n->body[n->nbody++] = s;
+        }
+        if (!p_accept(p, TK_PUNCT, "}")) {
+            parser_fail(p, p_peek(p), "expected '}' to close send_task closure");
             return NULL;
         }
-        n->body[n->nbody++] = s;
-    }
-    if (!p_accept(p, TK_PUNCT, "}")) {
-        parser_fail(p, p_peek(p), "expected '}' to close send_task closure");
-        return NULL;
+    } else {
+        /* `tx.send_task(() => [v] compute(v));` expression body. */
+        int e0 = p->i;
+        int depth = 1;
+        while (p->i < p->n && depth > 0) {
+            Token t = p_peek(p);
+            if (tok_eq(t, TK_PUNCT, "(")) depth++;
+            else if (tok_eq(t, TK_PUNCT, ")")) {
+                depth--;
+                if (depth == 0) break;
+            }
+            p_next(p);
+        }
+        {
+            char expr[256];
+            if (!span_text(p, e0, p->i, expr, sizeof(expr))) {
+                parser_fail(p, p_peek(p), "send_task expression body too long");
+                return NULL;
+            }
+            const char* lp = strchr(expr, '(');
+            const char* rp = expr[0] ? strrchr(expr, ')') : NULL;
+            if (lp && rp && rp > lp && n->nbody < 8) {
+                AstNode* s = ast_new(p, AST_CALL_ARGS);
+                size_t nl, al;
+                if (!s) return NULL;
+                nl = (size_t)(lp - expr);
+                while (nl > 0 && (expr[nl - 1] == ' ' || expr[nl - 1] == '\t'))
+                    nl--;
+                if (nl >= sizeof(s->a)) nl = sizeof(s->a) - 1;
+                memcpy(s->a, expr, nl);
+                s->a[nl] = 0;
+                al = (size_t)(rp - lp - 1);
+                if (al >= sizeof(s->b)) al = sizeof(s->b) - 1;
+                memcpy(s->b, lp + 1, al);
+                s->b[al] = 0;
+                n->body[n->nbody++] = s;
+            } else if (n->nbody < 8) {
+                AstNode* s = ast_new(p, AST_EXPR_STMT);
+                if (!s) return NULL;
+                snprintf(s->a, sizeof(s->a), "%s", expr);
+                n->body[n->nbody++] = s;
+            }
+        }
     }
     if (!p_accept(p, TK_PUNCT, ")")) {
-        parser_fail(p, p_peek(p), "expected ')' after send_task(() => { … })");
+        parser_fail(p, p_peek(p), "expected ')' after send_task(() => …)");
         return NULL;
     }
     if (!p_accept(p, TK_PUNCT, ";")) {
         parser_fail(p, p_peek(p), "expected ';' after send_task(...)");
         return NULL;
     }
-    if (!n->e[0]) spawn_infer_value_caps(n);
+    spawn_infer_value_caps(n);
     return n;
 }
 

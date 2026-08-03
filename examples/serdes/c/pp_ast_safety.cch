@@ -12,7 +12,8 @@ enum {
     SHADOW_SAFE_VARIANT_CAP = 32,
     SHADOW_SAFE_VARM_CAP = 16,
     SHADOW_SAFE_TYPE_CAP = 128,
-    SHADOW_SAFE_DOM_CAP = 16
+    SHADOW_SAFE_DOM_CAP = 16,
+    SHADOW_SAFE_CHAN_TD_CAP = 32
 };
 
 typedef struct {
@@ -73,6 +74,7 @@ typedef struct {
     int nrfn;
     int strict_unhandled; /* CC_STRICT_RESULT_UNWRAP (default on) */
     int in_async;         /* walking an @async fn body */
+    int in_send_task;     /* send_task[_hybrid] closure packs Result payload */
     TapeCache* cache;
     int err;
     ShadowSafeStruct* structs; /* file-scope table owned by check */
@@ -81,9 +83,33 @@ typedef struct {
     int nvariants;
     char type_names[SHADOW_SAFE_TYPE_CAP][64]; /* typedef / variant / primitives */
     int ntypes;
+    /* Typedef channel aliases: `typedef int[~N >] Tx;` → Tx is role 1. */
+    char chan_td_name[SHADOW_SAFE_CHAN_TD_CAP][64];
+    int chan_td_role[SHADOW_SAFE_CHAN_TD_CAP]; /* 1=tx 2=rx */
+    int nchan_td;
     ShadowSafeDom dom[SHADOW_SAFE_DOM_CAP];
     int ndom;
 } ShadowSafeCtx;
+
+static int shadow_safe_chan_td_role(ShadowSafeCtx* ctx, const char* ty) {
+    int i;
+    if (!ctx || !ty || !ty[0]) return 0;
+    for (i = 0; i < ctx->nchan_td; i++) {
+        if (strcmp(ctx->chan_td_name[i], ty) == 0) return ctx->chan_td_role[i];
+    }
+    return 0;
+}
+
+static void shadow_safe_add_chan_td(ShadowSafeCtx* ctx, const char* alias,
+                                    int role) {
+    if (!ctx || !alias || !alias[0] || (role != 1 && role != 2)) return;
+    if (shadow_safe_chan_td_role(ctx, alias)) return;
+    if (ctx->nchan_td >= SHADOW_SAFE_CHAN_TD_CAP) return;
+    snprintf(ctx->chan_td_name[ctx->nchan_td],
+             sizeof(ctx->chan_td_name[0]), "%s", alias);
+    ctx->chan_td_role[ctx->nchan_td] = role;
+    ctx->nchan_td++;
+}
 
 static void shadow_safe_err_at_col(ShadowSafeCtx* ctx, AstNode* st, int force_col,
                                    const char* msg) {
@@ -1538,10 +1564,11 @@ static void shadow_safe_check_async_chan_text(ShadowSafeCtx* ctx, AstNode* st,
     shadow_safe_err_at(ctx, st, msg);
 }
 
-/* Second top-level call arg → bare ident (beachhead). */
-static int shadow_safe_call_arg1_ident(const char* args, char* out, size_t cap) {
+/* Second top-level call arg → text span (trimmed). Returns 1 on success. */
+static int shadow_safe_call_arg1_span(const char* args, char* out, size_t cap) {
     const char* p;
     const char* start;
+    const char* end;
     int depth = 0;
     size_t n = 0;
     if (!args || !out || !cap) return 0;
@@ -1558,17 +1585,102 @@ static int shadow_safe_call_arg1_ident(const char* args, char* out, size_t cap) 
         p++;
     }
     while (*p == ' ' || *p == '\t') p++;
-    if (!*p || *p == '&') return 0; /* pointer send / non-ident */
+    if (!*p || *p == '&') return 0; /* pointer send / empty */
     start = p;
-    while (*p && (shadow_safe_is_word(*p))) p++;
-    if (p == start) return 0;
-    while (*p == ' ' || *p == '\t') p++;
-    if (*p != 0 && *p != ')') return 0; /* not a bare ident */
-    n = (size_t)(p - start);
-    while (n > 0 && (start[n - 1] == ' ' || start[n - 1] == '\t')) n--;
+    depth = 0;
+    while (*p) {
+        if (*p == '(' || *p == '[' || *p == '{') depth++;
+        else if (*p == ')' || *p == ']' || *p == '}') {
+            if (depth == 0 && *p == ')') break;
+            if (depth > 0) depth--;
+        } else if (*p == ',' && depth == 0)
+            break;
+        p++;
+    }
+    end = p;
+    while (end > start && (end[-1] == ' ' || end[-1] == '\t')) end--;
+    n = (size_t)(end - start);
     if (n == 0 || n + 1 > cap) return 0;
     memcpy(out, start, n);
     out[n] = 0;
+    return 1;
+}
+
+/* Second top-level call arg → bare ident (beachhead). */
+static int shadow_safe_call_arg1_ident(const char* args, char* out, size_t cap) {
+    const char* p;
+    size_t n;
+    if (!shadow_safe_call_arg1_span(args, out, cap)) return 0;
+    p = out;
+    if (!shadow_safe_is_word(*p)) return 0;
+    while (*p && shadow_safe_is_word(*p)) p++;
+    if (*p) return 0; /* not a bare ident */
+    n = strlen(out);
+    return n > 0;
+}
+
+/* Scalar arithmetic / field payload: literals + tracked POD idents only. */
+static int shadow_safe_payload_expr_ok(ShadowSafeCtx* ctx, const char* expr) {
+    const char* p = expr ? expr : "";
+    char id[64];
+    size_t n;
+    ShadowSafeVar* v;
+    if (!ctx || !expr || !expr[0]) return 0;
+    while (*p) {
+        if (*p == ' ' || *p == '\t' || *p == '+' || *p == '-' || *p == '*' ||
+            *p == '/' || *p == '%' || *p == '(' || *p == ')' || *p == '>' ||
+            *p == '<' || *p == '|' || *p == '&' || *p == '^' || *p == '~' ||
+            *p == '!') {
+            p++;
+            continue;
+        }
+        if (*p >= '0' && *p <= '9') {
+            p++;
+            while ((*p >= '0' && *p <= '9') || *p == '.' || *p == 'u' ||
+                   *p == 'U' || *p == 'l' || *p == 'L' || *p == 'e' ||
+                   *p == 'E' || *p == '+' || *p == '-')
+                p++;
+            continue;
+        }
+        if (*p == '"' || *p == '\'') {
+            char q = *p++;
+            while (*p && *p != q) {
+                if (*p == '\\' && p[1]) p++;
+                p++;
+            }
+            if (*p == q) p++;
+            continue;
+        }
+        if (shadow_safe_is_word(*p)) {
+            n = 0;
+            while (*p && shadow_safe_is_word(*p)) {
+                if (n + 1 < sizeof(id)) id[n++] = *p;
+                p++;
+            }
+            id[n] = 0;
+            /* `ident->field` / `ident.field` — prove leaf via base var. */
+            if (*p == '-' && p[1] == '>') {
+                p += 2;
+                while (*p && shadow_safe_is_word(*p)) p++;
+                v = shadow_safe_find(ctx, id);
+                if (!v) return 0;
+                /* Scalar field through pointer/value receiver is channel-stable. */
+                continue;
+            }
+            if (*p == '.') {
+                p++;
+                while (*p && shadow_safe_is_word(*p)) p++;
+                v = shadow_safe_find(ctx, id);
+                if (!v) return 0;
+                continue;
+            }
+            v = shadow_safe_find(ctx, id);
+            if (!v) return 0;
+            if (v->is_ptr || v->is_slice) return 0;
+            continue;
+        }
+        return 0;
+    }
     return 1;
 }
 
@@ -1596,12 +1708,32 @@ static void shadow_safe_check_chan_send_payload(ShadowSafeCtx* ctx, AstNode* st,
     if (strcmp(callee, "cc_channel_send") != 0 &&
         strcmp(callee, "chan_send") != 0)
         return;
-    /* Conservative: non-bare payload cannot be proven channel-stable. */
+    /* Bare ident, or scalar arithmetic / field expr over tracked POD. */
     if (!shadow_safe_call_arg1_ident(args, payload, sizeof(payload))) {
+        char span[128];
+        if (shadow_safe_call_arg1_span(args, span, sizeof(span)) &&
+            shadow_safe_payload_expr_ok(ctx, span))
+            return;
         shadow_safe_err_at(
             ctx, st,
             "cannot prove channel-send payload (need bare identifier)");
         return;
+    }
+    /* Scalar / string literals are channel-stable POD (no provenance). */
+    {
+        const char* lit = payload;
+        int is_num = 0;
+        if (lit[0] == '-' || lit[0] == '+') lit++;
+        if (lit[0] >= '0' && lit[0] <= '9') {
+            const char* q = lit;
+            while (*q >= '0' && *q <= '9') q++;
+            if (*q == '.' || *q == 'e' || *q == 'E' || *q == 'u' || *q == 'U' ||
+                *q == 'l' || *q == 'L' || *q == 0)
+                is_num = 1;
+        }
+        if (is_num || ((payload[0] == '"' || payload[0] == '\'') &&
+                       payload[strlen(payload) - 1] == payload[0]))
+            return;
     }
     v = shadow_safe_find(ctx, payload);
     if (!v) {
@@ -1643,6 +1775,10 @@ static void shadow_safe_check_chan_send_payload(ShadowSafeCtx* ctx, AstNode* st,
             strcmp(leaf, "double") == 0 || strcmp(leaf, "int64_t") == 0 ||
             strcmp(leaf, "uint64_t") == 0 || strcmp(leaf, "int32_t") == 0 ||
             strcmp(leaf, "uint32_t") == 0 ||
+            /* Task handles are channel-stable POD (spawn-into / ordered). */
+            strcmp(leaf, "CCTask") == 0 ||
+            /* Typed Results are POD envelopes (ok + union). */
+            strncmp(leaf, "CCResult_", 9) == 0 ||
             shadow_safe_type_is_slice(leaf) ||
             shadow_safe_type_is_arena(leaf) ||
             shadow_safe_find_variant(ctx, leaf))
@@ -1861,6 +1997,15 @@ static void shadow_safe_on_ufcs(ShadowSafeCtx* ctx, AstNode* st) {
 
 static int shadow_safe_stmt_diverges(AstNode* st) {
     if (!st) return 0;
+    if (st->kind == AST_EXPR_STMT && st->a[0]) {
+        const char* p = st->a;
+        while (*p == ' ' || *p == '\t') p++;
+        if (strncmp(p, "goto", 4) == 0) {
+            const char* q = p + 4;
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q) return 1;
+        }
+    }
     if (st->kind == AST_RETURN_EXPR || st->kind == AST_RETURN_INT ||
         st->kind == AST_RETURN_CC || st->kind == AST_BREAK ||
         st->kind == AST_CONTINUE || st->kind == AST_ERR_FWD)
@@ -1868,7 +2013,7 @@ static int shadow_safe_stmt_diverges(AstNode* st) {
     if (st->kind == AST_CALL_ARGS || st->kind == AST_CALL_NUM) {
         if (strcmp(st->a, "exit") == 0 || strcmp(st->a, "abort") == 0 ||
             strcmp(st->a, "_exit") == 0 || strcmp(st->a, "longjmp") == 0 ||
-            strcmp(st->a, "cc_error_exit") == 0)
+            strcmp(st->a, "cc_error_exit") == 0 || strcmp(st->a, "goto") == 0)
             return 1;
     }
     if (st->kind == AST_BLOCK && st->nbody > 0)
@@ -1987,7 +2132,8 @@ static void shadow_safe_check_bang_body(ShadowSafeCtx* ctx, AstNode* st,
                                        int expr_pos) {
     if (!ctx || !st || ctx->err) return;
     if (mode && (strcmp(mode, "bang_block") == 0 ||
-                 strcmp(mode, "bang_stmt") == 0)) {
+                 strcmp(mode, "bang_stmt") == 0 ||
+                 strncmp(mode, "bang_block:", 11) == 0)) {
         if (expr_pos && !shadow_safe_body_diverges(st->body, st->nbody)) {
             shadow_safe_err_at(
                 ctx, st, "expression-position '!>' body must diverge");
@@ -2089,6 +2235,8 @@ static void shadow_safe_on_unwrap(ShadowSafeCtx* ctx, AstNode* st) {
 
 static void shadow_safe_on_unhandled_call(ShadowSafeCtx* ctx, AstNode* st) {
     if (!ctx || !st || ctx->err || !ctx->strict_unhandled) return;
+    /* send_task body packs the Result into the task payload. */
+    if (ctx->in_send_task) return;
     if (st->kind != AST_CALL_ARGS && st->kind != AST_CALL_NUM) return;
     if (!shadow_safe_is_result_fn(ctx, st->a)) return;
     {
@@ -2196,7 +2344,8 @@ static void shadow_safe_on_spawn(ShadowSafeCtx* ctx, AstNode* st) {
     char msg[192];
     int is_unsafe;
     if (!ctx || !st || ctx->err) return;
-    is_unsafe = (strcmp(st->b, "spawn_unsafe") == 0);
+    is_unsafe = (strcmp(st->b, "spawn_unsafe") == 0 ||
+                 strcmp(st->b, "spawnhybrid_unsafe") == 0);
     p = st->e;
     while (p && *p) {
         int is_ref = 0;
@@ -2257,11 +2406,46 @@ static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st) {
     int saved_neh;
     if (!ctx || !st || ctx->err) return;
     switch (st->kind) {
+    case AST_TYPEDEF_CHAN: {
+        int role = 0;
+        if (st->c[0] == '>') role = 1;
+        else if (st->c[0] == '<') role = 2;
+        if (st->a[0] && role) shadow_safe_add_chan_td(ctx, st->a, role);
+        break;
+    }
     case AST_CHAN_VAR: {
-        ShadowSafeVar* cv = shadow_safe_add(ctx, st->a);
-        if (cv) {
-            if (strcmp(st->c, ">") == 0) cv->is_chan = 1;
-            else if (strcmp(st->c, "<") == 0) cv->is_chan = 2;
+        const char* p = st->a;
+        char name[64];
+        size_t ni;
+        int role = 0;
+        if (strcmp(st->c, ">") == 0) role = 1;
+        else if (strcmp(st->c, "<") == 0) role = 2;
+        while (*p) {
+            ShadowSafeVar* cv;
+            while (*p == ' ' || *p == '\t' || *p == ',') p++;
+            if (!*p) break;
+            ni = 0;
+            while (*p && *p != ',' && *p != ' ' && *p != '\t' &&
+                   ni + 1 < sizeof(name))
+                name[ni++] = *p++;
+            name[ni] = 0;
+            cv = name[0] ? shadow_safe_add(ctx, name) : NULL;
+            if (cv) cv->is_chan = role;
+        }
+        break;
+    }
+    case AST_VAR_DECL: {
+        /* `WorkerTx tx;` — typedef channel alias → mark endpoint role.
+         * Also bind ordinary locals (`int v;`) so send(v+1) can prove POD. */
+        int role = shadow_safe_chan_td_role(ctx, st->a);
+        ShadowSafeVar* cv;
+        if (st->b[0]) {
+            cv = shadow_safe_add(ctx, st->b);
+            if (cv) {
+                snprintf(cv->ty, sizeof(cv->ty), "%s", st->a);
+                if (role) cv->is_chan = role;
+                if (strchr(st->a, '*')) cv->is_ptr = 1;
+            }
         }
         break;
     }
@@ -2300,10 +2484,16 @@ static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st) {
     case AST_UFCS_EXPR:
         shadow_safe_on_ufcs(ctx, st);
         break;
-    case AST_SPAWN_CLOSURE:
+    case AST_SPAWN_CLOSURE: {
+        int prev_st = ctx->in_send_task;
+        if (st->b[0] && (strcmp(st->b, "send_task") == 0 ||
+                         strcmp(st->b, "send_task_hybrid") == 0))
+            ctx->in_send_task = 1;
         shadow_safe_on_spawn(ctx, st);
         shadow_safe_walk_list(ctx, st->body, st->nbody);
+        ctx->in_send_task = prev_st;
         break;
+    }
     case AST_ERRHANDLER:
         shadow_safe_push_eh(ctx, st);
         shadow_safe_walk_list(ctx, st->body, st->nbody);
@@ -2356,7 +2546,37 @@ static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st) {
         shadow_safe_check_type_of_text(ctx, st, st->d);
         break;
     }
-    case AST_FOR:
+    case AST_FOR: {
+        /* Bind `for (int i = 0; …)` / `for (size_t n; …)` so chan_send(i)
+         * sees a tracked scalar (not "untracked value"). */
+        const char* h = st->a;
+        char ty[32], name[64];
+        size_t ti = 0, ni = 0;
+        ShadowSafeVar* fv;
+        while (h && (*h == ' ' || *h == '\t')) h++;
+        if (h && ((strncmp(h, "int", 3) == 0 && !shadow_safe_is_word(h[3])) ||
+                  (strncmp(h, "size_t", 6) == 0 && !shadow_safe_is_word(h[6])) ||
+                  (strncmp(h, "long", 4) == 0 && !shadow_safe_is_word(h[4])) ||
+                  (strncmp(h, "bool", 4) == 0 && !shadow_safe_is_word(h[4])))) {
+            while (*h && shadow_safe_is_word(*h) && ti + 1 < sizeof(ty))
+                ty[ti++] = *h++;
+            ty[ti] = 0;
+            while (*h == ' ' || *h == '\t') h++;
+            if (*h && ((*h >= 'A' && *h <= 'Z') || (*h >= 'a' && *h <= 'z') ||
+                       *h == '_')) {
+                while (*h && shadow_safe_is_word(*h) && ni + 1 < sizeof(name))
+                    name[ni++] = *h++;
+                name[ni] = 0;
+                fv = name[0] ? shadow_safe_add(ctx, name) : NULL;
+                if (fv) snprintf(fv->ty, sizeof(fv->ty), "%s", ty);
+            }
+        }
+        shadow_safe_scan_texts(ctx, st);
+        if (ctx->err) return;
+        shadow_safe_walk_list(ctx, st->body, st->nbody);
+        shadow_safe_walk_list(ctx, st->kids, st->nkids);
+        break;
+    }
     case AST_WHILE:
     case AST_DEFER:
     case AST_WITH_DEADLINE:
@@ -2572,7 +2792,13 @@ static int shadow_safety_check(AstNode** items, int n, TapeCache* cache) {
         } else if (it->kind == AST_TYPEDEF_INT || it->kind == AST_TYPEDEF_ENUM ||
                    it->kind == AST_TYPEDEF_FN_PTR ||
                    it->kind == AST_TYPEDEF_CHAN) {
-            if (it->kind == AST_TYPEDEF_INT && it->a[0])
+            if (it->kind == AST_TYPEDEF_CHAN && it->a[0]) {
+                int role = 0;
+                if (it->c[0] == '>') role = 1;
+                else if (it->c[0] == '<') role = 2;
+                shadow_safe_add_type_name(&ctx, it->a);
+                if (role) shadow_safe_add_chan_td(&ctx, it->a, role);
+            } else if (it->kind == AST_TYPEDEF_INT && it->a[0])
                 shadow_safe_add_type_name(&ctx, it->a);
             else if (it->b[0])
                 shadow_safe_add_type_name(&ctx, it->b);

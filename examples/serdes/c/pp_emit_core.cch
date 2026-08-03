@@ -154,13 +154,9 @@ static void shadow_mangle_type(const char* src, char* out, size_t out_sz) {
 
 static void shadow_result_name(const char* ok, const char* err, char* out, size_t out_sz) {
     char mok[128], merr[128];
-    const char* oks = ok;
-    char ptmp[128];
-    if (ok && strchr(ok, '*')) {
-        snprintf(ptmp, sizeof(ptmp), "void*");
-        oks = ptmp;
-    }
-    shadow_mangle_type(oks, mok, sizeof(mok));
+    /* Mangle pointer ok-types as Tptr (e.g. CCDirIter* → CCDirIterptr), matching
+     * CC_DECL_RESULT_SPEC naming in std headers — not a blanket void*. */
+    shadow_mangle_type(ok, mok, sizeof(mok));
     shadow_mangle_type(err, merr, sizeof(merr));
     snprintf(out, out_sz, "CCResult_%s_%s", mok, merr);
 }
@@ -552,6 +548,11 @@ typedef struct {
     int send_task_ret; /* closure packs int into cc_task_result_ptr */
 } ShadowCtx;
 
+static const char* shadow_eh_bind(ShadowCtx* ctx) {
+    if (ctx && ctx->eh && ctx->eh->b[0]) return ctx->eh->b;
+    return "e";
+}
+
 /* Emit-wide channel table (filled while walking stmts / items). */
 static ShadowChanDecl g_shadow_chans[SHADOW_CHAN_CAP];
 static int g_shadow_nchans;
@@ -564,6 +565,10 @@ static int g_shadow_nmaps;
 /* ArrayMap::[K,V] — compact "K_V" → ArrayMap_K_V + CC_ARRAY_MAP_DECL. */
 static char g_shadow_amaps[8][64];
 static int g_shadow_namaps;
+/* typedef Alias → ArrayMap_/Map_/CCVec_ base — resolve for UFCS binds. */
+static char g_shadow_td_alias[16][64];
+static char g_shadow_td_base[16][96];
+static int g_shadow_ntd;
 /* Non-prelude slice elems needing CC_DECL_SLICE(T) (e.g. Pt). */
 static char g_shadow_slices[8][64];
 static int g_shadow_nslices;
@@ -955,6 +960,19 @@ typedef struct {
 static ShadowCreateHook g_shadow_chooks[32];
 static int g_shadow_nchooks;
 
+/* Dynamic UFCS sink (.ufcs_dynamic / .ufcs_dynamic2): unresolved methods
+ * lower to callee(&recv, "method", N, WRAP(a), …). */
+typedef struct {
+    char ty[64];
+    char callee[96];
+    char wrap[64];
+    int dest_aware; /* .ufcs_dynamic2 */
+} ShadowDynSink;
+static ShadowDynSink g_shadow_dsinks[16];
+static int g_shadow_ndsinks;
+/* Active destination type for .ufcs_dynamic2 (whole-RHS / cast only). */
+static char g_shadow_sink_dest[96];
+
 /* Local fn param bases for @as arg coerce (fn, arg_index → T / stars). */
 typedef struct {
     char fn[64];
@@ -989,15 +1007,26 @@ static int g_shadow_nfields;
 static void shadow_field_register_ex(const char* ty, const char* field,
                                      const char* field_ty) {
     int i;
+    const char* fty = field_ty;
     if (!ty || !ty[0] || !field || !field[0]) return;
     if (g_shadow_nfields >= (int)(sizeof(g_shadow_fields) / sizeof(g_shadow_fields[0])))
         return;
+    /* Resolve typedef aliases (DbMap → ArrayMap_CCSliceHdr_Entr*). */
+    if (fty && fty[0]) {
+        int ai;
+        for (ai = 0; ai < g_shadow_ntd; ai++) {
+            if (strcmp(g_shadow_td_alias[ai], fty) == 0) {
+                fty = g_shadow_td_base[ai];
+                break;
+            }
+        }
+    }
     for (i = 0; i < g_shadow_nfields; i++) {
         if (strcmp(g_shadow_fields[i].ty, ty) == 0 &&
             strcmp(g_shadow_fields[i].field, field) == 0) {
-            if (field_ty && field_ty[0] && !g_shadow_fields[i].field_ty[0])
+            if (fty && fty[0] && !g_shadow_fields[i].field_ty[0])
                 snprintf(g_shadow_fields[i].field_ty,
-                         sizeof(g_shadow_fields[i].field_ty), "%s", field_ty);
+                         sizeof(g_shadow_fields[i].field_ty), "%s", fty);
             return;
         }
     }
@@ -1006,9 +1035,9 @@ static void shadow_field_register_ex(const char* ty, const char* field,
     snprintf(g_shadow_fields[g_shadow_nfields].field,
              sizeof(g_shadow_fields[0].field), "%s", field);
     g_shadow_fields[g_shadow_nfields].field_ty[0] = 0;
-    if (field_ty && field_ty[0])
+    if (fty && fty[0])
         snprintf(g_shadow_fields[g_shadow_nfields].field_ty,
-                 sizeof(g_shadow_fields[0].field_ty), "%s", field_ty);
+                 sizeof(g_shadow_fields[0].field_ty), "%s", fty);
     g_shadow_nfields++;
 }
 
@@ -1269,6 +1298,7 @@ static void shadow_chan_reset(void) {
     g_shadow_nvecs = 0;
     g_shadow_nmaps = 0;
     g_shadow_namaps = 0;
+    g_shadow_ntd = 0;
     g_shadow_nslices = 0;
     g_shadow_nvariants = 0;
     g_shadow_ngfac = 0;
@@ -1278,6 +1308,8 @@ static void shadow_chan_reset(void) {
     g_shadow_nas = 0;
     g_shadow_ndhooks = 0;
     g_shadow_nchooks = 0;
+    g_shadow_ndsinks = 0;
+    g_shadow_sink_dest[0] = 0;
     g_shadow_nfnparams = 0;
     g_shadow_nfields = 0;
     g_shadow_ufcs_miss = 0;
@@ -1352,6 +1384,41 @@ static const char* shadow_create_hook_for(const char* ty) {
     for (i = 0; i < g_shadow_nchooks; i++) {
         if (strcmp(g_shadow_chooks[i].ty, ty) == 0)
             return g_shadow_chooks[i].hook;
+    }
+    return NULL;
+}
+
+static void shadow_dyn_sink_register(const char* ty, const char* callee,
+                                     const char* wrap, int dest_aware) {
+    int i;
+    if (!ty || !ty[0] || !callee || !callee[0] || !wrap || !wrap[0]) return;
+    if (g_shadow_ndsinks >= 16) return;
+    for (i = 0; i < g_shadow_ndsinks; i++) {
+        if (strcmp(g_shadow_dsinks[i].ty, ty) == 0) {
+            snprintf(g_shadow_dsinks[i].callee, sizeof(g_shadow_dsinks[0].callee),
+                     "%s", callee);
+            snprintf(g_shadow_dsinks[i].wrap, sizeof(g_shadow_dsinks[0].wrap),
+                     "%s", wrap);
+            g_shadow_dsinks[i].dest_aware = dest_aware;
+            return;
+        }
+    }
+    snprintf(g_shadow_dsinks[g_shadow_ndsinks].ty, sizeof(g_shadow_dsinks[0].ty),
+             "%s", ty);
+    snprintf(g_shadow_dsinks[g_shadow_ndsinks].callee,
+             sizeof(g_shadow_dsinks[0].callee), "%s", callee);
+    snprintf(g_shadow_dsinks[g_shadow_ndsinks].wrap,
+             sizeof(g_shadow_dsinks[0].wrap), "%s", wrap);
+    g_shadow_dsinks[g_shadow_ndsinks].dest_aware = dest_aware;
+    g_shadow_ndsinks++;
+}
+
+static const ShadowDynSink* shadow_dyn_sink_for(const char* ty) {
+    int i;
+    if (!ty || !ty[0]) return NULL;
+    for (i = 0; i < g_shadow_ndsinks; i++) {
+        if (strcmp(g_shadow_dsinks[i].ty, ty) == 0)
+            return &g_shadow_dsinks[i];
     }
     return NULL;
 }
@@ -1533,6 +1600,43 @@ static void shadow_as_scan_header_text(const char* text) {
                     memcpy(hook, he, hn);
                     hook[hn] = 0;
                     if (hook[0]) shadow_create_hook_register(ty, hook);
+                }
+                /* .ufcs_dynamic / .ufcs_dynamic2 = cc_type_dynamic_call("c","W") */
+                {
+                    const char* dyn = strstr(reg, ".ufcs_dynamic");
+                    const char* call = strstr(reg, "cc_type_dynamic_call(\"");
+                    int dest_aware = 0;
+                    if (dyn && dyn < reg + 800 &&
+                        dyn[13] == '2') /* ".ufcs_dynamic2" */
+                        dest_aware = 1;
+                    if (ty[0] && dyn && call && dyn < reg + 800 &&
+                        call < reg + 900 && call > dyn) {
+                        const char* he = call + 22; /* after open quote */
+                        char callee[96], wrap[64];
+                        size_t hn = 0;
+                        const char* q2;
+                        while (he[hn] && he[hn] != '"' &&
+                               hn + 1 < sizeof(callee))
+                            hn++;
+                        memcpy(callee, he, hn);
+                        callee[hn] = 0;
+                        q2 = he + hn;
+                        while (*q2 && *q2 != '"') q2++;
+                        if (*q2 == '"') q2++;
+                        while (*q2 == ' ' || *q2 == '\t' || *q2 == ',') q2++;
+                        if (*q2 == '"') {
+                            size_t wn = 0;
+                            q2++;
+                            while (q2[wn] && q2[wn] != '"' &&
+                                   wn + 1 < sizeof(wrap))
+                                wn++;
+                            memcpy(wrap, q2, wn);
+                            wrap[wn] = 0;
+                            if (callee[0] && wrap[0])
+                                shadow_dyn_sink_register(ty, callee, wrap,
+                                                         dest_aware);
+                        }
+                    }
                 }
             }
         }
@@ -1737,6 +1841,100 @@ static void shadow_ufn_register(const char* name, const char* first_ty) {
     g_shadow_nufns++;
 }
 
+/* Mirror production cc__record_map_decl_ufcs for CC_MAP_DECL_* beachhead. */
+static void shadow_map_ufcs_install(const char* map_name) {
+    static const char* methods[] = {
+        "insert", "put", "get", "get_ptr", "remove", "del", "clear", "destroy",
+        "len", "cap", "live_bytes", "at_ptr", "key_ptr"
+    };
+    char callee[160];
+    char fty[96];
+    size_t i;
+    if (!map_name || !map_name[0]) return;
+    snprintf(fty, sizeof(fty), "%s*", map_name);
+    for (i = 0; i < sizeof(methods) / sizeof(methods[0]); i++) {
+        snprintf(callee, sizeof(callee), "%s_%s", map_name, methods[i]);
+        shadow_ufn_register(callee, fty);
+    }
+}
+
+/* @grammar(schema) types queued during stage1 splice — register Type_method
+ * UFCS targets even when matchers live in AST_RAW_LINE tape passthrough. */
+extern int cc_grammar_pending_ufcs_type_count(void);
+extern const char* cc_grammar_pending_ufcs_type(int i);
+
+static void shadow_grammar_ufcs_install(void) {
+    static const char* methods[] = {
+        "parse", "read", "try_read", "write", "measure", "to_str", "reader",
+        "get", "next", "at_end", "_fill", "__wmeasure", "__wput"
+    };
+    int nt = cc_grammar_pending_ufcs_type_count();
+    int ti;
+    size_t mi;
+    for (ti = 0; ti < nt; ti++) {
+        const char* type = cc_grammar_pending_ufcs_type(ti);
+        char callee[160];
+        char fty[96];
+        if (!type || !type[0]) continue;
+        snprintf(fty, sizeof(fty), "const %s*", type);
+        for (mi = 0; mi < sizeof(methods) / sizeof(methods[0]); mi++) {
+            snprintf(callee, sizeof(callee), "%s_%s", type, methods[mi]);
+            shadow_ufn_register(callee, fty);
+        }
+        snprintf(fty, sizeof(fty), "%s*", type);
+        for (mi = 0; mi < sizeof(methods) / sizeof(methods[0]); mi++) {
+            snprintf(callee, sizeof(callee), "%s_%s", type, methods[mi]);
+            shadow_ufn_register(callee, fty);
+        }
+    }
+}
+
+/* Parse Name out of CC_MAP_DECL_UFCS(Name) or CC_MAP_DECL_ARENA(K,V,Name,…). */
+static void shadow_map_ufcs_install_from_raw(const char* line) {
+    const char* p;
+    char name[64];
+    size_t ni = 0;
+    int arg = 0;
+    int depth = 0;
+    if (!line) return;
+    while (*line == ' ' || *line == '\t') line++;
+    if (strncmp(line, "CC_MAP_DECL_UFCS", 15) == 0) {
+        p = strchr(line, '(');
+        if (!p) return;
+        p++;
+        while (*p == ' ' || *p == '\t') p++;
+        while (*p && *p != ')' && *p != ',' && ni + 1 < sizeof(name))
+            name[ni++] = *p++;
+        name[ni] = 0;
+        if (name[0]) shadow_map_ufcs_install(name);
+        return;
+    }
+    if (strncmp(line, "CC_MAP_DECL_ARENA", 16) != 0) return;
+    p = strchr(line, '(');
+    if (!p) return;
+    p++;
+    /* 3rd arg is Name. */
+    for (; *p; p++) {
+        if (*p == '(') depth++;
+        else if (*p == ')') {
+            if (depth == 0) break;
+            depth--;
+        } else if (*p == ',' && depth == 0) {
+            arg++;
+            if (arg == 2) {
+                p++;
+                while (*p == ' ' || *p == '\t') p++;
+                while (*p && *p != ')' && *p != ',' && *p != ' ' &&
+                       *p != '\t' && ni + 1 < sizeof(name))
+                    name[ni++] = *p++;
+                name[ni] = 0;
+                if (name[0]) shadow_map_ufcs_install(name);
+                return;
+            }
+        }
+    }
+}
+
 static int shadow_ufn_exists(const char* name) {
     int i;
     if (!name || !name[0]) return 0;
@@ -1756,12 +1954,42 @@ static const char* shadow_ufn_first_ty(const char* name) {
     return NULL;
 }
 
+static void shadow_td_alias_register(const char* alias, const char* base) {
+    int i;
+    if (!alias || !alias[0] || !base || !base[0] || g_shadow_ntd >= 16) return;
+    for (i = 0; i < g_shadow_ntd; i++) {
+        if (strcmp(g_shadow_td_alias[i], alias) == 0) {
+            snprintf(g_shadow_td_base[i], sizeof(g_shadow_td_base[0]), "%s",
+                     base);
+            return;
+        }
+    }
+    snprintf(g_shadow_td_alias[g_shadow_ntd], sizeof(g_shadow_td_alias[0]), "%s",
+             alias);
+    snprintf(g_shadow_td_base[g_shadow_ntd], sizeof(g_shadow_td_base[0]), "%s",
+             base);
+    g_shadow_ntd++;
+}
+
+static const char* shadow_td_alias_resolve(const char* ty) {
+    int i;
+    if (!ty || !ty[0]) return ty;
+    for (i = 0; i < g_shadow_ntd; i++) {
+        if (strcmp(g_shadow_td_alias[i], ty) == 0)
+            return g_shadow_td_base[i];
+    }
+    return ty;
+}
+
 static void shadow_bind_name(const char* name, const char* ty, int flags) {
     int i;
+    const char* resolved;
     if (!name || !name[0] || !ty || g_shadow_nbinds >= 96) return;
+    resolved = shadow_td_alias_resolve(ty);
     for (i = 0; i < g_shadow_nbinds; i++) {
         if (strcmp(g_shadow_binds[i].name, name) == 0) {
-            snprintf(g_shadow_binds[i].ty, sizeof(g_shadow_binds[i].ty), "%s", ty);
+            snprintf(g_shadow_binds[i].ty, sizeof(g_shadow_binds[i].ty), "%s",
+                     resolved);
             g_shadow_binds[i].flags = flags;
             return;
         }
@@ -1769,7 +1997,7 @@ static void shadow_bind_name(const char* name, const char* ty, int flags) {
     snprintf(g_shadow_binds[g_shadow_nbinds].name,
              sizeof(g_shadow_binds[0].name), "%s", name);
     snprintf(g_shadow_binds[g_shadow_nbinds].ty, sizeof(g_shadow_binds[0].ty),
-             "%s", ty);
+             "%s", resolved);
     g_shadow_binds[g_shadow_nbinds].flags = flags;
     g_shadow_nbinds++;
 }
@@ -2182,12 +2410,13 @@ static void shadow_amap_need(const char* compact_kv) {
     g_shadow_namaps++;
 }
 
-/* Hash/eq for known Map::[K,V] pairs. */
+/* Hash/eq for known Map::[K,V] pairs. *user_key=1 ⇒ emit static fwd protos. */
 static int shadow_map_hash_eq(const char* compact, const char** hash,
                               const char** eq, char* kbuf, size_t kcap,
-                              char* vbuf, size_t vcap) {
+                              char* vbuf, size_t vcap, int* user_key) {
     const char* us;
     size_t kn;
+    if (user_key) *user_key = 0;
     if (!compact || !hash || !eq || !kbuf || !vbuf) return 0;
     if (strcmp(compact, "CCSliceHdr_int") == 0) {
         snprintf(kbuf, kcap, "CCSliceHdr");
@@ -2233,7 +2462,17 @@ static int shadow_map_hash_eq(const char* compact, const char** hash,
         *eq = "cc_map_eq_u64";
         return 1;
     }
-    return 0;
+    /* User-installed key: cc_map_key_hash_<K> / cc_map_key_eq_<K>. */
+    {
+        static char hash_name[160];
+        static char eq_name[160];
+        snprintf(hash_name, sizeof(hash_name), "cc_map_key_hash_%s", kbuf);
+        snprintf(eq_name, sizeof(eq_name), "cc_map_key_eq_%s", kbuf);
+        *hash = hash_name;
+        *eq = eq_name;
+        if (user_key) *user_key = 1;
+        return 1;
+    }
 }
 
 /* e from AST_CHAN_VAR / AST_TYPEDEF_CHAN: "" | "o" | "t:TOPO" | "o:TOPO". */
@@ -2295,10 +2534,25 @@ static void shadow_chan_register(const char* name, const char* cap, int ordered)
 static void shadow_chan_register_node(AstNode* n) {
     int ordered = 0;
     char topo[16];
-    if (!n) return;
+    const char* p;
+    char name[64];
+    size_t ni;
+    if (!n || !n->a[0]) return;
     shadow_chan_flags_from_e(n->e, &ordered, topo, sizeof(topo));
-    shadow_chan_register_ex(n->a, n->b, ordered, n->d[0] ? n->d : NULL,
-                            topo[0] ? topo : NULL);
+    /* `a` may be comma-separated multi-declarator names. */
+    p = n->a;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == ',') p++;
+        if (!*p) break;
+        ni = 0;
+        while (*p && *p != ',' && *p != ' ' && *p != '\t' &&
+               ni + 1 < sizeof(name))
+            name[ni++] = *p++;
+        name[ni] = 0;
+        if (name[0])
+            shadow_chan_register_ex(name, n->b, ordered, n->d[0] ? n->d : NULL,
+                                    topo[0] ? topo : NULL);
+    }
 }
 
 static const ShadowChanDecl* shadow_chan_find(const char* name) {

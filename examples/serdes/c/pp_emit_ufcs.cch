@@ -201,6 +201,230 @@ static void shadow_ufcs_param_ty_only(const char* in, char* out, size_t cap) {
 }
 
 /* Universal bare-name tier: meth(recv[, args]) when first param matches. */
+/* Dynamic sink: callee(&recv, "meth", N, WRAP(a1), …). */
+static int shadow_ufcs_emit_dyn_sink(const char* recv, const char* meth_name,
+                                    const char* args, int ptr_recv,
+                                    const char* callee, const char* wrap,
+                                    char* dst, size_t cap) {
+    char argbuf[512];
+    size_t ao = 0;
+    int argc = 0;
+    if (!recv || !meth_name || !callee || !wrap || !dst || !cap) return 0;
+    argbuf[0] = 0;
+    if (args && args[0]) {
+        const char* p = args;
+        const char* seg = p;
+        int depth = 0;
+        int in_str = 0, in_chr = 0;
+        for (;; p++) {
+            char c = *p;
+            int at_end = (c == '\0');
+            if (!at_end && in_str) {
+                if (c == '\\' && p[1]) p++;
+                else if (c == '"') in_str = 0;
+                continue;
+            }
+            if (!at_end && in_chr) {
+                if (c == '\\' && p[1]) p++;
+                else if (c == '\'') in_chr = 0;
+                continue;
+            }
+            if (!at_end) {
+                if (c == '"') {
+                    in_str = 1;
+                    continue;
+                }
+                if (c == '\'') {
+                    in_chr = 1;
+                    continue;
+                }
+                if (c == '(' || c == '[' || c == '{') {
+                    depth++;
+                    continue;
+                }
+                if (c == ')' || c == ']' || c == '}') {
+                    depth--;
+                    continue;
+                }
+                if (!(c == ',' && depth == 0)) continue;
+            }
+            {
+                size_t seg_len = (size_t)(p - seg);
+                while (seg_len > 0 && (seg[0] == ' ' || seg[0] == '\t')) {
+                    seg++;
+                    seg_len--;
+                }
+                while (seg_len > 0 &&
+                       (seg[seg_len - 1] == ' ' || seg[seg_len - 1] == '\t'))
+                    seg_len--;
+                if (seg_len > 0) {
+                    int n = snprintf(argbuf + ao, sizeof(argbuf) - ao,
+                                     ", %s(%.*s)", wrap, (int)seg_len, seg);
+                    if (n < 0 || (size_t)n >= sizeof(argbuf) - ao) return 0;
+                    ao += (size_t)n;
+                    argc++;
+                }
+            }
+            if (at_end) break;
+            seg = p + 1;
+        }
+    }
+    if (ptr_recv)
+        snprintf(dst, cap, "%s((%s), \"%s\", %d%s)", callee, recv, meth_name,
+                 argc, argbuf);
+    else
+        snprintf(dst, cap, "%s(&(%s), \"%s\", %d%s)", callee, recv, meth_name,
+                 argc, argbuf);
+    return 1;
+}
+
+/* Mangle dest type for `<sink>_<mangled>` (cv-stripped). */
+static void shadow_sink_mangle_dest(const char* dest, char* out, size_t cap) {
+    char buf[96];
+    size_t i, o = 0;
+    if (!dest || !out || !cap) return;
+    out[0] = 0;
+    while (*dest == ' ' || *dest == '\t') dest++;
+    if (strncmp(dest, "const ", 6) == 0) dest += 6;
+    while (*dest == ' ' || *dest == '\t') dest++;
+    snprintf(buf, sizeof(buf), "%s", dest);
+    /* Drop trailing stars / spaces. */
+    {
+        size_t L = strlen(buf);
+        while (L && (buf[L - 1] == '*' || buf[L - 1] == ' ' || buf[L - 1] == '\t'))
+            buf[--L] = 0;
+    }
+    for (i = 0; buf[i] && o + 1 < cap; i++) {
+        char c = buf[i];
+        if (c == ' ' || c == '\t') c = '_';
+        out[o++] = c;
+    }
+    out[o] = 0;
+    /* Collapse __ from "long  long". */
+    {
+        char* p;
+        while ((p = strstr(out, "__")) != NULL) memmove(p, p + 1, strlen(p));
+    }
+}
+
+/* Try registered .ufcs_dynamic sink for receiver base type. */
+static int shadow_ufcs_try_dyn_sink(const char* recv, const char* meth_name,
+                                   const char* args, int ptr_recv,
+                                   const char* ty, char* dst, size_t cap) {
+    const ShadowDynSink* ds;
+    char base[96];
+    const char* callee;
+    size_t n;
+    if (!ty || !ty[0]) return 0;
+    while (*ty == ' ' || *ty == '\t') ty++;
+    if (strncmp(ty, "struct ", 7) == 0) ty += 7;
+    n = 0;
+    while (ty[n] && ty[n] != ' ' && ty[n] != '*' && n + 1 < sizeof(base)) {
+        base[n] = ty[n];
+        n++;
+    }
+    base[n] = 0;
+    ds = shadow_dyn_sink_for(base);
+    if (!ds) return 0;
+    callee = ds->callee;
+    if (ds->dest_aware && g_shadow_sink_dest[0]) {
+        char mangled[96];
+        char tryc[160];
+        shadow_sink_mangle_dest(g_shadow_sink_dest, mangled, sizeof(mangled));
+        if (mangled[0]) {
+            snprintf(tryc, sizeof(tryc), "%s_%s", ds->callee, mangled);
+            if (shadow_ufn_exists(tryc)) callee = tryc;
+        }
+    }
+    return shadow_ufcs_emit_dyn_sink(recv, meth_name, args, ptr_recv, callee,
+                                    ds->wrap, dst, cap);
+}
+
+/* Build `recv.meth(args)` / `recv->meth(args)` surface for whole-RHS checks. */
+static void shadow_ufcs_surface(AstNode* u, char* dst, size_t cap) {
+    const char* uop;
+    const char* uta;
+    if (!u || !dst || !cap) return;
+    dst[0] = 0;
+    uop = shadow_ufcs_e_arrow(u->e) ? "->" : ".";
+    uta = shadow_ufcs_e_targs(u->e);
+    if (uta && uta[0] && u->c[0])
+        snprintf(dst, cap, "%s%s%s::[%s](%s)", u->a, uop, u->b, uta, u->c);
+    else if (uta && uta[0])
+        snprintf(dst, cap, "%s%s%s::[%s]()", u->a, uop, u->b, uta);
+    else if (u->c[0])
+        snprintf(dst, cap, "%s%s%s(%s)", u->a, uop, u->b, u->c);
+    else
+        snprintf(dst, cap, "%s%s%s()", u->a, uop, u->b);
+}
+
+static int shadow_text_eq_trim(const char* a, const char* b) {
+    if (!a || !b) return 0;
+    while (*a == ' ' || *a == '\t' || *a == '\n') a++;
+    while (*b == ' ' || *b == '\t' || *b == '\n') b++;
+    {
+        size_t na = strlen(a), nb = strlen(b);
+        while (na && (a[na - 1] == ' ' || a[na - 1] == '\t' || a[na - 1] == '\n'))
+            na--;
+        while (nb && (b[nb - 1] == ' ' || b[nb - 1] == '\t' || b[nb - 1] == '\n'))
+            nb--;
+        if (na != nb) return 0;
+        return na == 0 || memcmp(a, b, na) == 0;
+    }
+}
+
+/* `(T)call` / `((T)call)` → dest T; *out_inner points at call start. */
+static const char* shadow_sink_cast_dest(const char* text, char* dest,
+                                         size_t dcap) {
+    const char* p;
+    const char* ty0;
+    const char* ty1;
+    const char* call;
+    size_t nparen = 0;
+    if (!text || !dest || !dcap) return NULL;
+    dest[0] = 0;
+    p = text;
+    while (*p == ' ' || *p == '\t' || *p == '\n') p++;
+    while (*p == '(') {
+        nparen++;
+        p++;
+        while (*p == ' ' || *p == '\t' || *p == '\n') p++;
+    }
+    if (nparen == 0) return NULL;
+    /* Type tokens then `)`. */
+    ty0 = p;
+    if (!(((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') || *p == '_') ||
+          strncmp(p, "long", 4) == 0))
+        return NULL;
+    while (*p && *p != ')') p++;
+    if (*p != ')') return NULL;
+    ty1 = p;
+    {
+        size_t n = (size_t)(ty1 - ty0);
+        while (n && (ty0[n - 1] == ' ' || ty0[n - 1] == '\t')) n--;
+        if (!n || n + 1 >= dcap) return NULL;
+        memcpy(dest, ty0, n);
+        dest[n] = 0;
+    }
+    p++;
+    while (*p == ' ' || *p == '\t' || *p == '\n') p++;
+    call = p;
+    /* Trailing close-parens for `((T)call)`. */
+    {
+        const char* e = call + strlen(call);
+        size_t need = nparen - 1;
+        while (e > call && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\n'))
+            e--;
+        while (need && e > call && e[-1] == ')') {
+            e--;
+            need--;
+        }
+        if (need) return NULL;
+        (void)e;
+    }
+    return call;
+}
+
 static int shadow_ufcs_emit_bare(const char* recv, const char* meth_name,
                                  const char* args, int recv_is_ptr,
                                  const char* recv_base, int recv_is_const,
@@ -325,16 +549,25 @@ static int shadow_ufcs_emit_slice_meth(const char* sty, const char* meth,
     return 1;
 }
 
-/* Peel a leading C cast `(T*)` / `(T)` so bind/UFCS see the real receiver. */
+/* Peel a leading C cast `(T*)` / `(T)` so bind/UFCS see the real receiver.
+ * Must not peel grouping / unary deref: `(*link)->key`, `(&x)->…`. */
 static const char* shadow_ufcs_skip_cast(const char* recv, char* buf,
                                          size_t buf_cap) {
     const char* p;
     const char* rp;
+    const char* in;
     int depth;
+    int has_star = 0, has_ident = 0, has_call = 0;
     if (!recv || !buf || !buf_cap) return recv;
     p = recv;
     while (*p == ' ' || *p == '\t') p++;
     if (*p != '(') return recv;
+    in = p + 1;
+    while (*in == ' ' || *in == '\t') in++;
+    /* Unary `*` / `&` / `!` / `~` / `+/-` → parenthesized expr, not a cast. */
+    if (*in == '*' || *in == '&' || *in == '!' || *in == '~' || *in == '+' ||
+        *in == '-')
+        return recv;
     depth = 0;
     rp = NULL;
     for (; *p; p++) {
@@ -349,28 +582,33 @@ static const char* shadow_ufcs_skip_cast(const char* recv, char* buf,
     }
     if (!rp) return recv;
     /* Cast if inside looks like a type (has ident + optional *), not a call. */
-    {
-        const char* in = recv;
-        int has_star = 0, has_ident = 0, has_call = 0;
-        while (*in == ' ' || *in == '\t' || *in == '(') in++;
-        for (; in < rp; in++) {
-            if ((*in >= 'A' && *in <= 'Z') || (*in >= 'a' && *in <= 'z') ||
-                *in == '_')
-                has_ident = 1;
-            if (*in == '*') has_star = 1;
-            if (*in == '(') {
-                has_call = 1;
-                break;
-            }
+    for (; in < rp; in++) {
+        if ((*in >= 'A' && *in <= 'Z') || (*in >= 'a' && *in <= 'z') ||
+            *in == '_')
+            has_ident = 1;
+        if (*in == '*') has_star = 1;
+        if (*in == '(') {
+            has_call = 1;
+            break;
         }
-        if (!has_ident || has_call) return recv;
-        (void)has_star;
     }
+    if (!has_ident || has_call) return recv;
+    (void)has_star;
     p = rp + 1;
     while (*p == ' ' || *p == '\t') p++;
     if (!*p) return recv;
     snprintf(buf, buf_cap, "%s", p);
     return buf;
+}
+
+/* Map_/ArrayMap_ or CC_MAP_DECL_* type with installed Name_insert. */
+static int shadow_ufcs_is_map_ty(const char* vty) {
+    char tryc[160];
+    if (!vty || !vty[0]) return 0;
+    if (strncmp(vty, "Map_", 4) == 0 || strncmp(vty, "ArrayMap_", 9) == 0)
+        return 1;
+    snprintf(tryc, sizeof(tryc), "%s_insert", vty);
+    return shadow_ufn_exists(tryc);
 }
 
 static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
@@ -569,6 +807,7 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
     } else if (!is_arrow && strcmp(meth_name, "len") == 0) {
         if (vty[0] && strncmp(vty, "CCSlice_", 8) == 0)
             return shadow_ufcs_emit_slice_meth(vty, "len", recv, NULL, dst, cap);
+        /* Maps before packed — ty may be ArrayMap_CCSlicePacked_int. */
         if (vty[0] && (strncmp(vty, "CCVec_", 6) == 0 ||
                        strncmp(vty, "Map_", 4) == 0 ||
                        strncmp(vty, "ArrayMap_", 9) == 0)) {
@@ -576,6 +815,8 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
                 snprintf(dst, cap, "%s_len(%s)", vty, recv);
             else
                 snprintf(dst, cap, "%s_len(&%s)", vty, recv);
+        } else if (strcmp(vty, "CCSlicePacked") == 0) {
+            snprintf(dst, cap, "cc_slice_packed_len(&%s)", recv);
         } else if (vty[0] && strcmp(vty, "CCString") == 0)
             snprintf(dst, cap, "cc_string_len(&%s)", recv);
         else if (strstr(recv, "__cc_tpl; })")) {
@@ -597,7 +838,10 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
                      recv);
         else if (vty[0] && strcmp(vty, "CCSlice") == 0)
             snprintf(dst, cap, "(%s).len", recv);
-        else if (strstr(recv, "cc__string_stack") || strstr(recv, "cc_slice_"))
+        else if (vty[0] && strcmp(vty, "CCSliceArray") == 0)
+            snprintf(dst, cap, "(%s).len", recv);
+        else if (strstr(recv, "cc__string_stack") || strstr(recv, "cc_slice_") ||
+                 strstr(recv, "cc_unwrap") || strstr(recv, "__cc_uw_value"))
             snprintf(dst, cap, "(%s).len", recv);
         else if (shadow_bind_ty_has(rb, "Slice") || shadow_bind_ty_has(rb, "slice") ||
                  strstr(recv, "sub(") || strstr(recv, "ps") || strstr(recv, "Pt"))
@@ -605,7 +849,7 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
         else
             snprintf(dst, cap, "CCVec_double_len(&%s)", recv);
     } else if (is_arrow && strcmp(meth_name, "len") == 0) {
-        if (vty[0] && strncmp(vty, "Map_", 4) == 0)
+        if (shadow_ufcs_is_map_ty(vty))
             snprintf(dst, cap, "%s_len(%s)", vty, recv);
         else
             snprintf(dst, cap, "Map_CCSliceHdr_int_len(%s)", recv);
@@ -713,9 +957,40 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
         else
             snprintf(dst, cap, "cc_arena_detach(&%s)", recv);
     } else if (!is_arrow && strcmp(meth_name, "recv") == 0) {
-        snprintf(dst, cap, "cc_channel_recv(%s, %s)", recv, a);
+        /* Raw CCChan* only — not CCChanRx/Tx (substring-safe). */
+        int raw_chan = 0;
+        if (rb && rb->ty[0]) {
+            char bty[96];
+            shadow_bind_base_ty(rb, bty, sizeof(bty));
+            raw_chan = (strcmp(bty, "CCChan") == 0);
+        }
+        if (!raw_chan && vty[0] &&
+            (strcmp(vty, "CCChan") == 0 || strcmp(vty, "CCChan*") == 0))
+            raw_chan = 1;
+        if (raw_chan) {
+            snprintf(dst, cap,
+                     "cc_chan_result_with((%s), cc_channel_raw_recv((%s), "
+                     "(void*)(%s), sizeof(*(%s))), 1)",
+                     recv, recv, a, a);
+        } else {
+            snprintf(dst, cap, "cc_channel_recv(%s, %s)", recv, a);
+        }
     } else if (!is_arrow && strcmp(meth_name, "send") == 0) {
         snprintf(dst, cap, "cc_channel_send(%s, %s)", recv, a);
+    } else if (!is_arrow &&
+               (strcmp(meth_name, "try_send_into") == 0 ||
+                strcmp(meth_name, "send_into") == 0)) {
+        const char* cfn = (strcmp(meth_name, "try_send_into") == 0)
+                              ? "cc_channel_try_send_into"
+                              : "cc_channel_send_into";
+        if (shadow_bind_ty_has(rb, "CCChanTx") ||
+            shadow_bind_ty_has(rb, "CCChan") ||
+            (vty[0] && strncmp(vty, "CCChan", 6) == 0) ||
+            (vty[0] && shadow_chan_find(vty))) {
+            snprintf(dst, cap, "%s(%s, %s)", cfn, recv, a);
+            return 1;
+        }
+        return 0;
     } else if (!is_arrow && strcmp(meth_name, "fetch_add") == 0) {
         snprintf(dst, cap, "cc_atomic_fetch_add(&%s, %s)", recv, a);
     } else if (is_arrow && strcmp(meth_name, "wait") == 0) {
@@ -725,11 +1000,18 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
     } else if (is_arrow && strcmp(meth_name, "mutex") == 0) {
         snprintf(dst, cap, "cc_exclusive_mutex(%s, %s)", recv, a);
     } else if (is_arrow && strcmp(meth_name, "destroy") == 0) {
-        snprintf(dst, cap, "cc_exclusive_destroy(%s)", recv);
+        if (shadow_ufcs_is_map_ty(vty))
+            snprintf(dst, cap, "%s_destroy(%s)", vty, recv);
+        else
+            snprintf(dst, cap, "cc_exclusive_destroy(%s)", recv);
     } else if (!is_arrow && strcmp(meth_name, "acquire") == 0) {
         snprintf(dst, cap, "cc_exclusive_mutex_acquire(&%s)", recv);
     } else if (!is_arrow && strcmp(meth_name, "release") == 0) {
         snprintf(dst, cap, "cc_exclusive_guard_release(&%s)", recv);
+    } else if (!is_arrow && strcmp(meth_name, "destroy") == 0 &&
+               (strcmp(vty, "CCExclusiveGuard") == 0 ||
+                (rb && strcmp(rb->ty, "CCExclusiveGuard") == 0))) {
+        snprintf(dst, cap, "cc_exclusive_guard_destroy(&%s)", recv);
     } else if (!is_arrow && strcmp(meth_name, "destroy") == 0 &&
                (strcmp(vty, "CCArenaPool") == 0 ||
                 (rb && strcmp(rb->ty, "CCArenaPool") == 0))) {
@@ -857,6 +1139,9 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
     } else if (!is_arrow && strcmp(meth_name, "send_task") == 0) {
         if (strstr(a, "=>")) return 0;
         snprintf(dst, cap, "cc_channel_send_task(%s, %s)", recv, a);
+    } else if (!is_arrow && strcmp(meth_name, "send_task_hybrid") == 0) {
+        if (strstr(a, "=>")) return 0;
+        snprintf(dst, cap, "cc_channel_send_task_hybrid(%s, %s)", recv, a);
     } else if (!is_arrow && strcmp(meth_name, "valid") == 0) {
         snprintf(dst, cap, "cc_arena_valid(&%s)", recv);
     } else if (strcmp(meth_name, "init") == 0 || strcmp(meth_name, "put") == 0 ||
@@ -1028,7 +1313,9 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
                      recv);
         }
     } else if (!is_arrow && strcmp(meth_name, "as_slice") == 0) {
-        if (vty[0] && strncmp(vty, "CCVec_", 6) == 0)
+        if (strcmp(vty, "CCSlicePacked") == 0)
+            snprintf(dst, cap, "cc_slice_packed_as_slice(&%s)", recv);
+        else if (vty[0] && strncmp(vty, "CCVec_", 6) == 0)
             snprintf(dst, cap, "%s_as_slice(&%s)", vty, recv);
         else if (shadow_bind_ty_has(rb, "CCString") || strstr(recv, "string") ||
                  strstr(recv, "str") || strstr(recv, "CCString"))
@@ -1037,6 +1324,9 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
             snprintf(dst, cap, "(%s)", recv);
         else
             snprintf(dst, cap, "cc_string_as_slice(&%s)", recv);
+    } else if (!is_arrow && strcmp(meth_name, "is_inline") == 0 &&
+               strcmp(vty, "CCSlicePacked") == 0) {
+        snprintf(dst, cap, "cc_slice_packed_is_inline(&%s)", recv);
     } else if (!is_arrow && strcmp(meth_name, "eq_cstr") == 0) {
         /* slice.eq_cstr("…") or as_slice().eq_cstr — always cc_slice_eq_cstr. */
         if (strstr(recv, "cc_string_as_slice") || strstr(recv, "as_slice"))
@@ -1050,8 +1340,7 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
         snprintf(dst, cap, "cc_string_from((%s), (%s))", recv, a);
     } else if (strcmp(meth_name, "get_ptr") == 0) {
         int ptr_recv = SHADOW_UFCS_PTR_RECV();
-        if (vty[0] && (strncmp(vty, "Map_", 4) == 0 ||
-                       strncmp(vty, "ArrayMap_", 9) == 0)) {
+        if (shadow_ufcs_is_map_ty(vty)) {
             if (ptr_recv)
                 snprintf(dst, cap, "%s_get_ptr(%s, %s)", vty, recv, a);
             else
@@ -1063,8 +1352,7 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
         }
     } else if (!is_arrow && strcmp(meth_name, "insert") == 0) {
         int ptr_recv = SHADOW_UFCS_PTR_RECV();
-        if (vty[0] && (strncmp(vty, "Map_", 4) == 0 ||
-                       strncmp(vty, "ArrayMap_", 9) == 0)) {
+        if (shadow_ufcs_is_map_ty(vty)) {
             if (ptr_recv)
                 snprintf(dst, cap, "%s_insert(%s, %s)", vty, recv, a);
             else
@@ -1076,8 +1364,7 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
         int ptr_recv = SHADOW_UFCS_PTR_RECV();
         const char* meth =
             (strcmp(meth_name, "del") == 0) ? "del" : "remove";
-        if (vty[0] && (strncmp(vty, "Map_", 4) == 0 ||
-                       strncmp(vty, "ArrayMap_", 9) == 0)) {
+        if (shadow_ufcs_is_map_ty(vty)) {
             if (ptr_recv)
                 snprintf(dst, cap, "%s_%s(%s, %s)", vty, meth, recv, a);
             else
@@ -1126,6 +1413,10 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
                    shadow_bind_ty_has(rb, "CCChan") ||
                    strncmp(vty, "CCChan", 6) == 0) {
             snprintf(dst, cap, "cc_channel_free(%s)", recv);
+        } else if (!is_arrow &&
+                   (strcmp(vty, "CCExclusiveMutex") == 0 ||
+                    (rb && strcmp(rb->ty, "CCExclusiveMutex") == 0))) {
+            snprintf(dst, cap, "cc_exclusive_mutex_free(&%s)", recv);
         } else if (is_arrow || recv[0] == '*' || strchr(recv, '*') ||
                    recv[0] == '&' || strstr(recv, "->")) {
             snprintf(dst, cap, "store_free(%s)", recv);
@@ -1187,7 +1478,9 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
             if (go + strlen(recv) + 8 >= cap) return 0;
             snprintf(dst, cap, "%s)(&%s)", gen, recv);
         }
-    } else if (!is_arrow && strcmp(meth_name, "span") == 0) {
+    } else if (!is_arrow && strcmp(meth_name, "span") == 0 &&
+               (!vty[0] || strncmp(vty, "Pair_", 5) == 0)) {
+        /* Pair beachhead only — typed ArrayMap_/TU extensions fall through. */
         if (vty[0] && strncmp(vty, "Pair_", 5) == 0)
             snprintf(dst, cap, "%s_span(&%s)", vty, recv);
         else
@@ -1438,6 +1731,11 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
                 }
                 found = 1;
             }
+            /* Dynamic sink outranks bare ambient names (poke etc.). */
+            if (!found &&
+                shadow_ufcs_try_dyn_sink(recv, meth_name, a, ptr_recv, tag, dst,
+                                        cap))
+                return 1;
             /* Bare local name: first-param match decides & vs by-value. */
             if (!found && shadow_ufn_exists(meth_name)) {
                 if (shadow_ufcs_emit_bare(recv, meth_name, a, ptr_recv, tag,
@@ -1457,6 +1755,9 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
                 }
                 return 1;
             }
+            if (shadow_ufcs_try_dyn_sink(recv, meth_name, a, ptr_recv, tag, dst,
+                                        cap))
+                return 1;
             if (shadow_ufcs_emit_bare(recv, meth_name, a, ptr_recv, tag,
                                       ris_const, dst, cap))
                 return 1;
@@ -1464,6 +1765,9 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
         } else if (vty[0]) {
             /* Typed receiver with no family/tag spelling — bare-name only. */
             int ris_const = rb && strncmp(rb->ty, "const ", 6) == 0;
+            if (shadow_ufcs_try_dyn_sink(recv, meth_name, a, ptr_recv, vty, dst,
+                                        cap))
+                return 1;
             if (shadow_ufcs_emit_bare(recv, meth_name, a, ptr_recv, vty,
                                       ris_const, dst, cap))
                 return 1;
@@ -1623,20 +1927,75 @@ static int shadow_ufcs_peel_left(char* dst, size_t cap, const char* src,
     if (targs[0]) formal = targs;
     if (!shadow_ufcs_args(par, args, sizeof(args), &after)) return 0;
     if (targs[0] && !shadow_meth_has_type_formal(meth_name)) return 0;
-    if (!shadow_ufcs_lower_parts(recv, meth_name, args, is_arrow, formal, repl,
-                                 sizeof(repl)))
-        return 0;
     {
         const char* rstart = op;
         size_t rn, pre;
-        while (rstart > src && (rstart[-1] == ' ' || rstart[-1] == '\t')) rstart--;
+        const char* cast_lp = NULL;
+        char cast_ty[96];
+        int saved_dest = g_shadow_sink_dest[0];
+        cast_ty[0] = 0;
+        while (rstart > src && (rstart[-1] == ' ' || rstart[-1] == '\t' ||
+                                rstart[-1] == '\n'))
+            rstart--;
         rn = strlen(recv);
         if ((size_t)(rstart - src) < rn) return 0;
         rstart -= rn;
         if (memcmp(rstart, recv, rn) != 0) return 0;
-        pre = (size_t)(rstart - src);
-        if (pre + strlen(repl) + strlen(after ? after : "") + 1 >= cap) return 0;
-        snprintf(dst, cap, "%.*s%s%s", (int)pre, src, repl, after ? after : "");
+        /* `(T)recv.meth` — cast is a spelled sink destination (absorbed). */
+        {
+            const char* q = rstart;
+            while (q > src && (q[-1] == ' ' || q[-1] == '\t' || q[-1] == '\n'))
+                q--;
+            if (q > src && q[-1] == ')') {
+                const char* rp = q - 1;
+                const char* lp = rp;
+                int found = 0;
+                while (lp > src) {
+                    char c = lp[-1];
+                    if (c == '(') {
+                        lp--; /* points at '(' */
+                        found = 1;
+                        break;
+                    }
+                    if (c == ')' || c == ';' || c == '{' || c == '}') break;
+                    lp--;
+                }
+                if (found) {
+                    size_t tn = (size_t)(rp - (lp + 1));
+                    const char* ty = lp + 1;
+                    while (tn && (*ty == ' ' || *ty == '\t' || *ty == '\n')) {
+                        ty++;
+                        tn--;
+                    }
+                    while (tn && (ty[tn - 1] == ' ' || ty[tn - 1] == '\t' ||
+                                  ty[tn - 1] == '\n'))
+                        tn--;
+                    if (tn && tn + 1 < sizeof(cast_ty) &&
+                        (((ty[0] >= 'A' && ty[0] <= 'Z') ||
+                          (ty[0] >= 'a' && ty[0] <= 'z') || ty[0] == '_') ||
+                         strncmp(ty, "long", 4) == 0 ||
+                         strncmp(ty, "const", 5) == 0)) {
+                        memcpy(cast_ty, ty, tn);
+                        cast_ty[tn] = 0;
+                        cast_lp = lp;
+                        snprintf(g_shadow_sink_dest, sizeof(g_shadow_sink_dest),
+                                 "%s", cast_ty);
+                    }
+                }
+            }
+        }
+        if (!shadow_ufcs_lower_parts(recv, meth_name, args, is_arrow, formal,
+                                     repl, sizeof(repl))) {
+            if (!saved_dest) g_shadow_sink_dest[0] = 0;
+            return 0;
+        }
+        if (cast_lp && !saved_dest) g_shadow_sink_dest[0] = 0;
+        /* Replace cast+call; keep any outer parens (`((T)call)` → `(lowered)`). */
+        pre = (size_t)((cast_lp ? cast_lp : rstart) - src);
+        if (pre + strlen(repl) + strlen(after ? after : "") + 1 >= cap)
+            return 0;
+        snprintf(dst, cap, "%.*s%s%s", (int)pre, src, repl,
+                 after ? after : "");
     }
     return 1;
 }
@@ -1697,7 +2056,20 @@ static int shadow_format_channel_pair(char* dst, size_t cap, const char* src) {
     else if (drx && drx->elem[0]) elem_ty = drx->elem;
     if (dtx && dtx->topo[0]) topo = dtx->topo;
     else if (drx && drx->topo[0]) topo = drx->topo;
-    if ((dtx && dtx->ordered) || (drx && drx->ordered)) ordered = 1;
+    /* Decl `ordered` vs create_named ordered-TASK bit (production):
+     * pointer / slice payloads stay data channels (RedisReq*); non-pointer
+     * ordered beachhead uses CCTask + ordered=1 (send_task recipes). */
+    {
+        int decl_ordered =
+            (dtx && dtx->ordered) || (drx && drx->ordered);
+        int ptr_or_slice = 0;
+        if (elem_ty && elem_ty[0]) {
+            if (strstr(elem_ty, "[:") || strstr(elem_ty, "CCSlice") ||
+                strchr(elem_ty, '*'))
+                ptr_or_slice = 1;
+        }
+        ordered = (decl_ordered && !ptr_or_slice) ? 1 : 0;
+    }
     if (elem_ty && elem_ty[0]) {
         if (strstr(elem_ty, "[:") || strstr(elem_ty, "CCSlice")) {
             elem_sz = "sizeof(CCSlice)";
@@ -1711,7 +2083,6 @@ static int shadow_format_channel_pair(char* dst, size_t cap, const char* src) {
         }
     }
     if (ordered) {
-        /* Beachhead: ordered → task payload (matches prior shadow behavior). */
         elem_sz = "sizeof(CCTask)";
         allow_take = 0;
     }
@@ -2410,13 +2781,26 @@ static void shadow_rewrite_slice_as_call_args(char* expr, size_t cap) {
                         if (b && strncmp(b->ty, "CCSlice_", 8) == 0 &&
                             strcmp(callee, "CCSlice_double_len") != 0 &&
                             strncmp(callee, "CCSlice_", 8) != 0) {
-                            char sty[96];
-                            shadow_bind_base_ty(b, sty, sizeof(sty));
-                            o += (size_t)snprintf(
-                                out + o, sizeof(out) - o, "%s(%s_bytes(&%s))",
-                                callee, sty, arg);
-                            p = r + 1;
-                            continue;
+                            int skip = 0;
+                            int di;
+                            /* Dyn-sink WRAP macros (_Generic on CCSlice_T)
+                             * must see the typed instance, not erased bytes. */
+                            for (di = 0; di < g_shadow_ndsinks; di++) {
+                                if (strcmp(g_shadow_dsinks[di].wrap, callee) ==
+                                    0) {
+                                    skip = 1;
+                                    break;
+                                }
+                            }
+                            if (!skip) {
+                                char sty[96];
+                                shadow_bind_base_ty(b, sty, sizeof(sty));
+                                o += (size_t)snprintf(
+                                    out + o, sizeof(out) - o,
+                                    "%s(%s_bytes(&%s))", callee, sty, arg);
+                                p = r + 1;
+                                continue;
+                            }
                         }
                     }
                 }
@@ -2521,10 +2905,16 @@ static void shadow_emit_text_ufcs(char* dst, size_t cap, const char* src,
                     if (par && *par == '(' && meth[0] && vty[0]) {
                         int capital = vty[0] >= 'A' && vty[0] <= 'Z' &&
                                       strncmp(vty, "CC", 2) != 0;
+                        int chain = strchr(recv, '.') != NULL ||
+                                    strstr(recv, "->") != NULL;
                         snprintf(composed, sizeof(composed), "%s_%s", vty, meth);
-                        if (instance || shadow_ufn_exists(meth) ||
-                            (capital && !shadow_type_has_field(vty, meth) &&
-                             !shadow_ufn_exists(composed)))
+                        /* Field/member chains (`hp->tx.try_send_into`) use the
+                         * peeled C call or valid member access — outer bind ty
+                         * is not the UFCS receiver. */
+                        if (!chain &&
+                            (instance || shadow_ufn_exists(meth) ||
+                             (capital && !shadow_type_has_field(vty, meth) &&
+                              !shadow_ufn_exists(composed))))
                             shadow_ufcs_diagnose_miss(recv, meth);
                     }
                 }
@@ -2643,12 +3033,30 @@ static void shadow_emit_expr_text(AstNode* st, const char* text, char* dst,
         for (i = 0; i < st->ndbody; i++) {
             AstNode* u = st->dbody[i];
             if (u && (u->kind == AST_UFCS_EXPR || u->kind == AST_UFCS_STMT)) {
+                char surface[288];
+                char cast_dest[96];
+                const char* cast_call;
+                g_shadow_sink_dest[0] = 0;
+                shadow_ufcs_surface(u, surface, sizeof(surface));
+                /* Whole-RHS decl/assign destination. */
+                if (elem_ty && elem_ty[0] && text &&
+                    shadow_text_eq_trim(text, surface))
+                    snprintf(g_shadow_sink_dest, sizeof(g_shadow_sink_dest),
+                             "%s", elem_ty);
+                /* Cast destination wrapping the call (absorbed). */
+                cast_call = shadow_sink_cast_dest(text, cast_dest,
+                                                  sizeof(cast_dest));
+                if (cast_call && shadow_text_eq_trim(cast_call, surface))
+                    snprintf(g_shadow_sink_dest, sizeof(g_shadow_sink_dest),
+                             "%s", cast_dest);
                 if (shadow_emit_ufcs_to_buf(u, dst, cap, elem_ty)) {
+                    g_shadow_sink_dest[0] = 0;
                     shadow_rewrite_closure_calls(dst, cap);
                     if (elem_ty && strncmp(elem_ty, "CCResult_", 9) == 0)
                         shadow_rewrite_result_ctors(dst, cap, elem_ty);
                     return;
                 }
+                g_shadow_sink_dest[0] = 0;
             }
         }
     }
@@ -2656,6 +3064,48 @@ static void shadow_emit_expr_text(AstNode* st, const char* text, char* dst,
      * `.index_of()` / `.len()` see a CCSlice / CCString receiver. */
     snprintf(cur, sizeof(cur), "%s", text ? text : "");
     shadow_rewrite_print_and_string(cur, sizeof(cur));
+    /* Exact UFCS / cast-wrapped UFCS: dest-aware sink. */
+    {
+        char cast_dest[96];
+        const char* cast_call = shadow_sink_cast_dest(cur, cast_dest,
+                                                     sizeof(cast_dest));
+        char exact_buf[512];
+        g_shadow_sink_dest[0] = 0;
+        if (cast_call) {
+            snprintf(g_shadow_sink_dest, sizeof(g_shadow_sink_dest), "%s",
+                     cast_dest);
+            if (shadow_emit_exact_ufcs_text(exact_buf, sizeof(exact_buf),
+                                           cast_call, elem_ty)) {
+                g_shadow_sink_dest[0] = 0;
+                snprintf(dst, cap, "%s", exact_buf);
+                shadow_rewrite_closure_calls(dst, cap);
+                shadow_emit_leftover_qmark_rewrite(dst, cap);
+                shadow_rewrite_at_slice(dst, cap);
+                shadow_rewrite_variant_expr(dst, cap, elem_ty);
+                if (elem_ty && strncmp(elem_ty, "CCResult_", 9) == 0)
+                    shadow_rewrite_result_ctors(dst, cap, elem_ty);
+                return;
+            }
+            g_shadow_sink_dest[0] = 0;
+        } else if (elem_ty && elem_ty[0]) {
+            /* Whole-text exact call with typed destination. */
+            snprintf(g_shadow_sink_dest, sizeof(g_shadow_sink_dest), "%s",
+                     elem_ty);
+            if (shadow_emit_exact_ufcs_text(exact_buf, sizeof(exact_buf), cur,
+                                           elem_ty)) {
+                g_shadow_sink_dest[0] = 0;
+                snprintf(dst, cap, "%s", exact_buf);
+                shadow_rewrite_closure_calls(dst, cap);
+                shadow_emit_leftover_qmark_rewrite(dst, cap);
+                shadow_rewrite_at_slice(dst, cap);
+                shadow_rewrite_variant_expr(dst, cap, elem_ty);
+                if (elem_ty && strncmp(elem_ty, "CCResult_", 9) == 0)
+                    shadow_rewrite_result_ctors(dst, cap, elem_ty);
+                return;
+            }
+            g_shadow_sink_dest[0] = 0;
+        }
+    }
     shadow_emit_text_ufcs(dst, cap, cur, elem_ty);
     shadow_rewrite_closure_calls(dst, cap);
     shadow_emit_leftover_qmark_rewrite(dst, cap);

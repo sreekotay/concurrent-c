@@ -158,6 +158,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                        const char* src_path) {
     memset(out, 0, sizeof(*out));
     shadow_chan_reset();
+    shadow_grammar_ufcs_install();
     g_sticky_lead_set = 0;
     g_file_header_lead_done = 0;
     g_shadow_async_id = 60000;
@@ -527,11 +528,71 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             }
         }
         if (items[i]->kind == AST_SLICE_VAR) need_slice = 1;
-        if (items[i]->kind == AST_CHAN_VAR) need_chan = 1;
-        if (items[i]->kind == AST_STRUCT) {
+        if (items[i]->kind == AST_CHAN_VAR) {
+            need_chan = 1;
+            /* Result-typed channel elems: ensure CCResult_* specs exist. */
+            if (strncmp(items[i]->d, "CCResult_", 9) == 0) {
+                const char* rest = items[i]->d + 9;
+                const char* us = strrchr(rest, '_');
+                char ok[64], err[64];
+                int dup = 0, j;
+                if (us && us > rest) {
+                    size_t ol = (size_t)(us - rest);
+                    if (ol >= sizeof(ok)) ol = sizeof(ok) - 1;
+                    memcpy(ok, rest, ol);
+                    ok[ol] = 0;
+                    snprintf(err, sizeof(err), "%s", us + 1);
+                    for (j = 0; j < nseen; j++) {
+                        if (strcmp(seen_ok[j], ok) == 0 &&
+                            strcmp(seen_err[j], err) == 0) {
+                            dup = 1;
+                            break;
+                        }
+                    }
+                    if (!dup && nseen < 32) {
+                        snprintf(seen_ok[nseen], sizeof(seen_ok[0]), "%s", ok);
+                        snprintf(seen_err[nseen], sizeof(seen_err[0]), "%s",
+                                 err);
+                        nseen++;
+                    }
+                }
+            }
+        }
+        if (items[i]->kind == AST_STRUCT || items[i]->kind == AST_FN ||
+            items[i]->kind == AST_STATIC_FN || items[i]->kind == AST_RESULT_FN) {
             for (int k = 0; k < items[i]->nkids; k++) {
-                if (items[i]->kids[k]->kind == AST_SLICE_VAR) need_slice = 1;
-                if (items[i]->kids[k]->kind == AST_CHAN_VAR) need_chan = 1;
+                AstNode* kid = items[i]->kids[k];
+                if (kid->kind == AST_SLICE_VAR) need_slice = 1;
+                if (kid->kind == AST_CHAN_VAR) {
+                    need_chan = 1;
+                    if (strncmp(kid->d, "CCResult_", 9) == 0) {
+                        const char* rest = kid->d + 9;
+                        const char* us = strrchr(rest, '_');
+                        char ok[64], err[64];
+                        int dup = 0, j;
+                        if (us && us > rest) {
+                            size_t ol = (size_t)(us - rest);
+                            if (ol >= sizeof(ok)) ol = sizeof(ok) - 1;
+                            memcpy(ok, rest, ol);
+                            ok[ol] = 0;
+                            snprintf(err, sizeof(err), "%s", us + 1);
+                            for (j = 0; j < nseen; j++) {
+                                if (strcmp(seen_ok[j], ok) == 0 &&
+                                    strcmp(seen_err[j], err) == 0) {
+                                    dup = 1;
+                                    break;
+                                }
+                            }
+                            if (!dup && nseen < 32) {
+                                snprintf(seen_ok[nseen], sizeof(seen_ok[0]),
+                                         "%s", ok);
+                                snprintf(seen_err[nseen], sizeof(seen_err[0]),
+                                         "%s", err);
+                                nseen++;
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -556,6 +617,40 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             int si;
             char rname[128];
             char apath[64];
+            /* Clang requires complete types in _Generic associations. Only
+             * arm types fully declared by <ccc/cc_result.h> (+ TU-seen
+             * specs emitted below). IoError Results need their header. */
+            {
+                int need_io = 0;
+                for (si = 0; si < nseen; si++) {
+                    if (strcmp(seen_err[si], "CCIoError") == 0) {
+                        need_io = 1;
+                        break;
+                    }
+                }
+                /* Channel send/recv returns CCResult_bool_CCIoError even when
+                 * the TU never declares a Result local of that shape. */
+                if (need_chan) {
+                    int has_bool_io = 0;
+                    for (si = 0; si < nseen; si++) {
+                        if (strcmp(seen_ok[si], "bool") == 0 &&
+                            strcmp(seen_err[si], "CCIoError") == 0) {
+                            has_bool_io = 1;
+                            break;
+                        }
+                    }
+                    if (!has_bool_io && nseen < 32) {
+                        snprintf(seen_ok[nseen], sizeof(seen_ok[0]), "bool");
+                        snprintf(seen_err[nseen], sizeof(seen_err[0]),
+                                 "CCIoError");
+                        nseen++;
+                    }
+                    need_io = 1;
+                }
+                if (need_io &&
+                    !cemit_str(out, "#include <ccc/cc_io_error.h>\n"))
+                    return 0;
+            }
             if (!cemit_str(out,
                     "#undef __cc_uw_is_err\n"
                     "#undef __cc_uw_value\n"
@@ -565,8 +660,6 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                     "(!((CCResult_int_CCError*)(void*)&(__x__))->ok), "
                     "CCResult_bool_CCError: "
                     "(!((CCResult_bool_CCError*)(void*)&(__x__))->ok), "
-                    "CCResult_bool_CCIoError: "
-                    "(!((CCResult_bool_CCIoError*)(void*)&(__x__))->ok), "
                     "CCResult_char_CCError: "
                     "(!((CCResult_char_CCError*)(void*)&(__x__))->ok), "
                     "CCResult_size_t_CCError: "
@@ -574,9 +667,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                     "CCResult_voidptr_CCError: "
                     "(!((CCResult_voidptr_CCError*)(void*)&(__x__))->ok), "
                     "CCResult_charptr_CCError: "
-                    "(!((CCResult_charptr_CCError*)(void*)&(__x__))->ok), "
-                    "CCResult_void_CCError: "
-                    "(!((CCResult_void_CCError*)(void*)&(__x__))->ok)"))
+                    "(!((CCResult_charptr_CCError*)(void*)&(__x__))->ok)"))
                 return 0;
             for (si = 0; si < nseen; si++) {
                 shadow_result_name(seen_ok[si], seen_err[si], rname,
@@ -586,8 +677,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                     strcmp(rname, "CCResult_char_CCError") == 0 ||
                     strcmp(rname, "CCResult_size_t_CCError") == 0 ||
                     strcmp(rname, "CCResult_voidptr_CCError") == 0 ||
-                    strcmp(rname, "CCResult_charptr_CCError") == 0 ||
-                    strcmp(rname, "CCResult_void_CCError") == 0)
+                    strcmp(rname, "CCResult_charptr_CCError") == 0)
                     continue;
                 if (!cemit_fmt(out,
                         ", %s: (!((%s*)(void*)&(__x__))->ok)", rname, rname))
@@ -600,8 +690,6 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                     "((CCResult_int_CCError*)(void*)&(__x__))->u.value, "
                     "CCResult_bool_CCError: "
                     "((CCResult_bool_CCError*)(void*)&(__x__))->u.value, "
-                    "CCResult_bool_CCIoError: "
-                    "((CCResult_bool_CCIoError*)(void*)&(__x__))->u.value, "
                     "CCResult_char_CCError: "
                     "((CCResult_char_CCError*)(void*)&(__x__))->u.value, "
                     "CCResult_size_t_CCError: "
@@ -620,7 +708,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                     strcmp(rname, "CCResult_size_t_CCError") == 0 ||
                     strcmp(rname, "CCResult_voidptr_CCError") == 0 ||
                     strcmp(rname, "CCResult_charptr_CCError") == 0 ||
-                    strcmp(rname, "CCResult_void_CCError") == 0)
+                    strcmp(seen_ok[si], "void") == 0)
                     continue;
                 if (!cemit_fmt(out, ", %s: ((%s*)(void*)&(__x__))->u.value",
                                rname, rname))
@@ -636,9 +724,6 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                     "CCResult_bool_CCError: "
                     "(cc_rt_diag_record_unwrap_site(__f__, __l__), "
                     "((CCResult_bool_CCError*)(void*)&(__x__))->u.error), "
-                    "CCResult_bool_CCIoError: "
-                    "(cc_rt_diag_record_unwrap_site(__f__, __l__), "
-                    "((CCResult_bool_CCIoError*)(void*)&(__x__))->u.error), "
                     "CCResult_char_CCError: "
                     "(cc_rt_diag_record_unwrap_site(__f__, __l__), "
                     "((CCResult_char_CCError*)(void*)&(__x__))->u.error), "
@@ -650,10 +735,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                     "((CCResult_voidptr_CCError*)(void*)&(__x__))->u.error), "
                     "CCResult_charptr_CCError: "
                     "(cc_rt_diag_record_unwrap_site(__f__, __l__), "
-                    "((CCResult_charptr_CCError*)(void*)&(__x__))->u.error), "
-                    "CCResult_void_CCError: "
-                    "(cc_rt_diag_record_unwrap_site(__f__, __l__), "
-                    "((CCResult_void_CCError*)(void*)&(__x__))->u.error)"))
+                    "((CCResult_charptr_CCError*)(void*)&(__x__))->u.error)"))
                 return 0;
             for (si = 0; si < nseen; si++) {
                 shadow_result_name(seen_ok[si], seen_err[si], rname,
@@ -663,8 +745,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                     strcmp(rname, "CCResult_char_CCError") == 0 ||
                     strcmp(rname, "CCResult_size_t_CCError") == 0 ||
                     strcmp(rname, "CCResult_voidptr_CCError") == 0 ||
-                    strcmp(rname, "CCResult_charptr_CCError") == 0 ||
-                    strcmp(rname, "CCResult_void_CCError") == 0)
+                    strcmp(rname, "CCResult_charptr_CCError") == 0)
                     continue;
                 /* Macro returns CCError: exact E, or @as face at offset 0. */
                 apath[0] = 0;
@@ -728,6 +809,14 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                         strcmp(seen_err[j], alias) == 0) {
                         needed = 1;
                         break;
+                    }
+                    {
+                        char okptr[128];
+                        snprintf(okptr, sizeof(okptr), "%s*", alias);
+                        if (strcmp(seen_ok[j], okptr) == 0) {
+                            needed = 1;
+                            break;
+                        }
                     }
                 }
                 if (!needed) continue;
@@ -879,8 +968,9 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 const char* eq = NULL;
                 char k[64], v[64], vty[80];
                 size_t vl, o;
+                int user_key = 0;
                 if (!shadow_map_hash_eq(kv, &hash, &eq, k, sizeof(k), v,
-                                        sizeof(v)))
+                                        sizeof(v), &user_key))
                     continue;
                 /* Mangled value `intptr` → C type `int*` for the DECL. */
                 {
@@ -899,6 +989,13 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                         vty[o++] = '*';
                     vty[o] = 0;
                 }
+                /* Fwd protos so DECL thunks see hash/eq before TU defs. */
+                if (user_key &&
+                    !cemit_fmt(out,
+                               "static size_t %s(%s);\n"
+                               "static int %s(%s, %s);\n",
+                               hash, k, eq, k, k))
+                    return 0;
                 if (!cemit_fmt(out,
                         "CC_MAP_DECL_ARENA(%s, %s, Map_%s, %s, %s)\n"
                         "static inline Map_%s* Map_%s_new(CCArena* __a) {\n"
@@ -917,8 +1014,9 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 const char* eq = NULL;
                 char k[64], v[64], vty[80];
                 size_t vl, o;
+                int user_key = 0;
                 if (!shadow_map_hash_eq(kv, &hash, &eq, k, sizeof(k), v,
-                                        sizeof(v)))
+                                        sizeof(v), &user_key))
                     continue;
                 {
                     char base[64];
@@ -936,6 +1034,12 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                         vty[o++] = '*';
                     vty[o] = 0;
                 }
+                if (user_key &&
+                    !cemit_fmt(out,
+                               "static size_t %s(%s);\n"
+                               "static int %s(%s, %s);\n",
+                               hash, k, eq, k, k))
+                    return 0;
                 if (!cemit_fmt(out,
                         "CC_ARRAY_MAP_DECL(%s, %s, ArrayMap_%s, %s, %s)\n"
                         "static inline ArrayMap_%s* array_map_new_%s(CCArena* __a) {\n"
@@ -1004,6 +1108,10 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
     for (int i = 0; i < nseen; i++) {
         char rname[256];
         shadow_result_name(seen_ok[i], seen_err[i], rname, sizeof(rname));
+        /* Stdlib already defines these (cc_io_error.h) without *_DEFINED. */
+        if (strcmp(seen_ok[i], "bool") == 0 &&
+            strcmp(seen_err[i], "CCIoError") == 0)
+            continue;
         /* Real layout + typed ctors when cc_result.h provided CC_DECL_RESULT_SPEC.
          * Split across cemit_fmt calls (512-byte temp). */
         if (!cemit_fmt(out,
@@ -1128,7 +1236,10 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
         case AST_RESULT_FN: {
             char rname[256];
             shadow_result_name(it->c, it->b, rname, sizeof(rname));
-            const char* pref = (strcmp(it->e, "static") == 0) ? "static " : "";
+            const char* pref =
+                (strcmp(it->e, "static inline") == 0) ? "static inline "
+                : (strcmp(it->e, "static") == 0)      ? "static "
+                                                       : "";
             char dparams[288];
             snprintf(dparams, sizeof(dparams), "%s",
                      it->d[0] ? it->d : "void");
@@ -1542,6 +1653,8 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 if (!cemit_str(out, "\n")) return 0;
                 break;
             }
+            /* Install map UFCS before bodies use map->insert / … */
+            shadow_map_ufcs_install_from_raw(it->a);
             if (!cemit_fmt(out, "%s\n", it->a)) return 0;
             break;
         case AST_GENERIC_FACTORY:
@@ -1554,6 +1667,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             if (!shadow_emit_stmt_ctx(it, out, NULL, "", 0)) return 0;
             break;
         case AST_MUL_EXPR:
+        case AST_EXPR_STMT:
         case AST_CLOSURE_LIT:
         case AST_FIELD_INT:
         case AST_RETURN_INT:

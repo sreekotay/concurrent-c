@@ -470,12 +470,13 @@ static int test_cap_field(void) {
     Parser p = {0};
     AstNode** items = NULL;
     int n = 0;
-    char long_id[320];
+    char long_id[640];
     {
         FILE* f = fopen(path, "wb");
         if (!f) return 0;
-        memset(long_id, 'A', 300);
-        long_id[300] = 0;
+        /* AstNode text fields are 512 bytes; exceed that for the span diag. */
+        memset(long_id, 'A', 600);
+        long_id[600] = 0;
         fprintf(f, "int main(void) { return %s; }\n", long_id);
         fclose(f);
     }
@@ -501,8 +502,8 @@ static int test_cap_field(void) {
     p.n = pp.nout;
     p.cache = &cache;
     if (parse_tu(&p, &items, &n) ||
-        !strstr(p.err_msg, "exceeds 255-byte AST text field")) {
-        printf("FAIL: expected 255-byte field diag, got: %s\n", p.err_msg);
+        !strstr(p.err_msg, "exceeds 511-byte AST text field")) {
+        printf("FAIL: expected 511-byte field diag, got: %s\n", p.err_msg);
         pp_free_macros(&pp);
         tape_cache_free(&cache);
         cc_arena_free(&arena);
