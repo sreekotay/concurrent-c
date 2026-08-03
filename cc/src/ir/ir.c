@@ -458,7 +458,7 @@ static int cc_ir_scan_tail(const char* s, size_t n,
                            size_t after_sigil, CCIrKind kind,
                            CCIrTail* out) {
     memset(out, 0, sizeof(*out));
-    size_t p = cc_skip_ws_len(s, n, after_sigil);
+    size_t p = cc_skip_ws_and_comments(s, n, after_sigil);
     if (p >= n) return 0;
 
     /* Optional `(IDENT)` binder. */
@@ -472,7 +472,7 @@ static int cc_ir_scan_tail(const char* s, size_t n,
         out->binder_a   = ba;
         out->binder_b   = bb;
         out->has_binder = 1;
-        p = cc_skip_ws_len(s, n, rpar + 1);
+        p = cc_skip_ws_and_comments(s, n, rpar + 1);
         if (p >= n) return 0;
     }
 
@@ -491,7 +491,7 @@ static int cc_ir_scan_tail(const char* s, size_t n,
             out->body_a   = p + 1;
             out->body_b   = rbrace;
             out->is_block = 1;
-            size_t q = cc_skip_ws_len(s, n, rbrace + 1);
+            size_t q = cc_skip_ws_and_comments(s, n, rbrace + 1);
             out->span_end = (q < n && s[q] == ';') ? q + 1 : rbrace + 1;
             out->recognized = 1;
             return 1;
@@ -667,7 +667,7 @@ static int cc_ir_carve_sigils(CCIrArena* arena, CCIrNode* file,
          * emission starts at `sigil_end` and silently drops the
          * intervening source text (found via real_projects/redis). */
         if (is_stmt && lb > la && cc_ir_lhs_is_parenless(src, la, lb)) {
-            size_t post = cc_skip_ws_len(src, n, sigil_end);
+            size_t post = cc_skip_ws_and_comments(src, n, sigil_end);
             if (post < n && src[post] == '(') {
                 if (cc_ir_append_opaque(arena, file, src, cursor, sigil_end) != 0)
                     return -1;

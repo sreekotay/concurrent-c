@@ -1,0 +1,15 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_type.cch>
+
+/* Negative: an unnamed entry in a reflected declaration list is a hard error.
+ * `p.name` has nothing to yield, and dropping the entry would leave `p.index`
+ * naming a different position than the source does — reflection reports every
+ * entry or none. */
+
+int main(void) {
+    int n = 0;
+    @comptime for (p in (int a, double)) {
+        n += p.index;
+    }
+    return n;
+}

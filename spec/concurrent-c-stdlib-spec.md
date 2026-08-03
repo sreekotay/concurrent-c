@@ -27,7 +27,8 @@ The standard library provides these headers under `<ccc/std/...>`:
 - `http.cch`
 - `hash.cch`
 
-Portable atomics are provided separately by `<ccc/cc_atomic.cch>`.
+Portable atomics are provided separately by `<ccc/cc_atomic.cch>`, and
+Python interop by `<ccc/script/py.cch>`.
 
 `<ccc/std/prelude.cch>` includes the core runtime headers and the stdlib slice,
 string, I/O, vector, map-forward, array-map, directory, process, command,
@@ -1452,3 +1453,460 @@ bool ok = n.cas(&want, 100);  // cc_atomic_cas(&n, &want, 100)
 `CC_ATOMIC_HAVE_REAL_ATOMICS` is `1` when the header selects C11 atomics or
 GCC/Clang atomic builtins. It is `0` for TinyCC and unknown-compiler fallback
 implementations. Operations in a `0` configuration are not thread-safe.
+
+## Python interop
+
+### Model
+
+An embedded Python interpreter anchors Python objects the way an arena
+anchors allocations: every object has a home interpreter, its lifetime ends
+no later than its home's, and nothing crosses homes implicitly. Crossing is
+an explicit, costed operation (§7).
+
+| Type | Role |
+| ---- | ---- |
+| `CCPy` | one interpreter handle; `arena` is its scratch |
+| `CCPyObj` | an object reference, anchored to its home `CCPy` |
+| `CCPyError` | Python exception with a `CCError base @as` face (§4) |
+
+```c
+#include <ccc/script/py.cch>
+
+CCPy py = cc_py_new(&a) !> @destroy;
+CCPyObj np = py.import("numpy") !> @destroy;
+CCPyObj arr = np.call("arange", 10) !> @destroy;
+double s = arr.call("sum").as_f64() !>;
+```
+
+### Loading
+
+`cc_py_new` resolves `libpython3` with `dlopen` at first use; no CC binary
+carries a Python dependency by existing. A missing or unloadable library is
+a `CCPyError` at the `cc_py_new` call — the same posture as a missing binary
+in `cc_command`. Bindings target the limited C API (`Py_LIMITED_API` / abi3):
+one binding serves every 3.x, and nothing couples to interpreter internals.
+Interpreter creation (§6) is the single exception, and it is resolved by name
+so its absence is an error at that call rather than a load failure.
+`py.cch` is never in the prelude; scripts include it.
+
+`cc_py_available()` is the boolean form of the load question, for programs
+that degrade rather than fail when Python is absent:
+
+```c
+if (!cc_py_available()) { puts("SKIP (no libpython)"); return 0; }
+CCPy py = cc_py_new(&arena) !>;
+```
+
+The probe is the loader — same search order, same `CC_LIBPYTHON` override —
+so it cannot disagree with the constructor. After a true probe, `!>` on
+`cc_py_new` means what it says: a real initialization failure.
+
+Spawning subprocesses while a `CCPy` is live is safe; `fork` without `exec`
+is not supported.
+
+### Running source text
+
+`py.exec(src)` runs statements; `py.eval(expr)` yields the value of an
+expression as `CCPyObj !>(CCPyError)`. Both evaluate in the interpreter's
+`__main__` namespace, so a definition from one call is visible to the next
+and to `py.import("__main__")`. They route through `builtins.exec` / `eval`
+rather than `PyRun_*`, which is outside the limited ABI.
+
+### Objects and calls
+
+`CCPyObj` is opaque. `.get(name)` reads an attribute; `.call(name, args…)`
+calls a method; both return `CCPyObj !>(CCPyError)`. Arguments marshal by
+type: `int` / `int64_t` → Python `int`, `double` → `float`, `bool` →
+`bool`, `CCSlice` / `char[:0]` → `str`, a typed slice (`double[:]` is
+`CCSlice_double`, …) → `list` of its scalar element type, `CCPyObj` →
+itself (same home required, §7). No other type marshals; there is no
+deep conversion. Typed-slice dispatch is `_Generic` over the scalar
+instance structs, so any expression of an instance type marshals as a
+list; a slice erased to plain `CCSlice` (via `bytes()` or `.base`)
+marshals as `str`. Non-scalar instances have no marshal arm and fail
+at compile time.
+
+Marshalling a typed slice builds one Python object per element, so the cost is
+per element and the layout is rebuilt on the far side even when both sides
+already agree on it.
+
+`py_buf(x)` hands the slice over as a `memoryview` onto the CC buffer instead,
+copying nothing:
+
+```c
+double s = m.sum_buffer(py_buf(xs)) !>;     /* CC side   */
+np.frombuffer(mv, dtype=np.float64).sum()   #  Python side
+```
+
+The view borrows, and the borrow ends with the call: when the call
+returns, the view is refcount-checked and released. A callee that kept
+the view fails the call with a `CCPyError` naming the argument, and the
+view is dead besides — a later touch raises `ValueError`, never a read
+through freed CC memory. Compute through it or copy (`bytes(mv)`,
+`numpy.frombuffer(mv).copy()`) inside the call.
+
+The check's limit: a derived object kept past the call — a nested
+memoryview, a numpy `frombuffer` array — shares the interpreter's
+managed buffer without referencing the view, so it escapes both the
+refcount check and the release; the buffer protocol snapshots the
+pointer and has no revocation. Such a keep outlives its right to read
+exactly as before, so the rule stands even where it cannot be enforced:
+copy on the Python side to keep the data. The view is read-only, so a
+callee cannot write back through it. A memoryview carries no element
+type, so the callee names the dtype; that is the trade for not copying.
+
+`py_buf` applies to a typed slice, which is what has a contiguous run to
+borrow. Any other argument passes through unchanged and marshals normally.
+
+`obj.as_list::[T](&arena)` converts a Python sequence to a typed run of
+`T` — numbers to CC scalars, strings to arena-backed slices — and
+`obj.as_map::[K, V](&arena, m)` fills a Map and yields the pair count. The
+type argument names the element type(s); an element that will not convert
+is a `CCPyError` naming the index.
+
+A contiguous buffer exporter (a numpy array, `array.array`, `bytes`) whose
+element format and size match `T` is read with one `memcpy` into the arena
+instead of one boxed object per element; anything else — a plain `list`, or
+an exporter of a different dtype — takes the per-element walk, so the result
+is identical either way. Raw bytes only move when both sides agree on what
+they mean: a `float32` array asked for as `double` converts per element
+rather than being reinterpreted.
+
+`f.map::[T](&arena, cols…)` calls a callable once per row across column
+slices, in one crossing: each argument is a typed slice of equal length,
+row `i` passes element `i` of every column, and the results land as a
+`T[:]` run in the arena — `CCSlice !>(CCPyError)`. Columns are
+independently typed, so a row may be a heterogeneous argument tuple
+(`f.map::[double](&a, xs, ks, zs)` with `double`, `int64_t`, `double`
+columns). The type argument names the result element type, the same
+reading as `as_list`. Columns of unequal length are a `CCPyError` naming
+the column, before any call runs; a row whose call raises or whose result
+does not convert is a `CCPyError` naming the row. The free spelling is
+`cc_py_obj_map(T, &f, &arena, cols…)`, to eight columns.
+
+One crossing for N calls removes the per-call FFI overhead but not the
+Python calls themselves, so it lands between the per-call form and a loop
+run natively in Python; the rows section of `perf/py_baseline.ccs` prices
+all three.
+
+`py_kw(name, value)` makes a call argument bind by keyword instead of by
+position. It marshals `value` by the same type rule and tags it with
+`name`; keyword arguments may appear in any order and in any number, and
+the remaining arguments keep their positional order. A name the callee
+does not accept is an ordinary Python `TypeError`.
+
+```c
+CCSlice s = m.greet("world", py_kw("greeting", "hello")) !>.as_slice() !>;
+```
+
+A `char*` argument marshals through the C string API, so it truncates at an
+embedded NUL; pass a slice to carry arbitrary bytes.
+
+`CCPyError` carries `type_name` (the exception class) and `traceback` (the
+formatted Python traceback, present when the failure crossed Python
+frames), both anchored in the handle's scratch arena.
+
+`CCPyObj`'s dynamic sink is destination-aware (`.ufcs_dynamic2`):
+wherever a typed destination is visible — a declaration
+`T name = obj.method(args…)`, an assignment to a resolvable lvalue, or
+a cast `(T)obj.method(args…)` directly wrapping the call — the
+destination joins UFCS resolution, and the call lowers through the
+library's destination-typed variant (`cc_py_obj_callm_double`,
+`_float`, `_int`, `_int64_t`, `_long_long`) when one is declared. The
+variant runs the same call, extracts the destination type, and releases
+the intermediate object — it never reaches user space:
+
+```c
+double v = math.sqrt(2.0) !>;
+int    i = (int)math.sqrt(2.0) !>;
+```
+
+The variant returns `T !>(CCPyError)`, so the site consumes it like any
+Result; a composed cast is absorbed — it spells the destination and
+performs no conversion, and it never consumes the Result (the sigil
+does). Declaration and assignment destinations apply only when the call
+is the whole right-hand side — an operand of a larger expression has no
+single expected type in C; a cast is its own destination anywhere.
+Destinations without a declared variant lower through the plain sink
+and keep the `CCPyObj` Result. A scalar destination with no declared
+variant is ill-formed — the plain Result can never initialize it — and
+the diagnostic names the destination and enumerates the installed
+variants.
+
+Extraction semantics are the library's: `double`/`float` accept any
+Python number (`float` narrows); integer destinations extract Python
+ints exactly and truncate Python floats toward zero (C cast and Python
+`int()` agree); a result outside the destination's range is a
+`CCPyError`, not a truncation.
+
+Explicit extraction remains for held objects:
+`.as_i64() !>`, `.as_f64() !>`, `.as_slice() !>` (`str`/`bytes` copied into
+the home handle's scratch arena from `cc_py_new(&arena)`). Override the
+destination with `.as_slice_into(&dst) !>`. The result slice is minted with
+that arena's provenance epoch. Anything else stays a `CCPyObj`.
+
+`cc_py_new(&arena)` stores `arena` on the handle. Error text and default
+`.as_slice()` allocate from it. Every `CCPyObj` carries `home` pointing at
+that handle so obj methods can reach the scratch arena.
+
+Reference lifetime rides the destroy machinery: `CCPyObj`'s registered
+destroy hook releases the reference under its home's lock, so `@destroy`
+and `.destroy()` work and chain as for any type. Releasing after the home
+interpreter is destroyed is a no-op (hook idempotence).
+
+Ownership is compile-checked at the declaration: a local
+`CCPyObj name = init;` must bind `@destroy`, be returned, or be released
+by hand (`cc_py_obj_release(&name)`) — a handle that would silently drop
+its reference on scope exit is an error, since the leak has no diagnostic
+on either side of the boundary. Pointer declarations are borrows and
+exempt; chain intermediates are compiler temporaries the fused sinks
+already release.
+
+### Errors
+
+```c
+typedef struct {
+    CCError base @as;   /* kind + message: str(exception), arena-copied */
+    CCSlice type_name;  /* exception class: `ValueError`, `KeyError`, … */
+    CCSlice traceback;  /* formatted traceback; empty if none crossed */
+} CCPyError;
+```
+
+A Python exception surfaces as `CCPyError`: `base.message` is the
+exception's `str()` captured at raise time and copied into the handle's
+scratch arena. The message remains valid until that arena is reset or
+freed. Bootstrap failures before a handle exists (missing libpython, null
+arena) use a process-static buffer. The script register's default
+`@errhandler(CCError)` prints the face. An exact `@errhandler(CCPyError)`
+claims the same face when a typed handler is preferred.
+
+### Blocking
+
+Interpreter calls are blocking-shaped: ill-formed in `@noblock` context,
+serialized per interpreter. A single `CCPy` behaves as one implicit
+exclusive; fibers contending it park like any blocking call.
+
+### Interpreters
+
+`cc_py_new` is the only constructor, and it yields an interpreter. The first
+call in a process takes the one `Py_Initialize` creates. Every later call
+creates an isolated interpreter with its own GIL, so two handles run Python
+in parallel:
+
+```c
+CCPy a = cc_py_new(&arena) !> @destroy;
+CCPy b = cc_py_new(&arena) !> @destroy;   /* isolated: its own GIL */
+```
+
+There is no pool type. A set of interpreters is an ordinary array of `CCPy`,
+distributed like anything else; sharing one is passing the handle, the same
+discipline an arena has.
+
+Isolation is not best-effort. Where the runtime cannot create a second
+interpreter — no per-interpreter GIL before CPython 3.12, or an extension
+that refuses one — `cc_py_new` fails with that reason rather than returning
+a handle to the first. A silently shared interpreter would serialize on one
+GIL and share module state with no signal, which surfaces as unexplained
+throughput collapse instead of an error at startup.
+
+- `py.isolated` is 1 for an interpreter holding its own GIL, 0 for the
+  process interpreter.
+- Each isolated interpreter holds its own module state: an import per
+  interpreter that uses it.
+- Extensions must opt in to per-interpreter GIL support; those that predate
+  multi-phase init refuse, and their import error surfaces verbatim.
+  Pure-Python modules work unconditionally.
+- On a free-threaded build (PEP 703) parallelism needs no isolation at all:
+  one interpreter serves many threads, and `cc_py_new` means only what it
+  says.
+
+Entering an interpreter is a GIL handoff, not a pointer swap: every call
+attaches its handle's thread state, releasing the lock of whichever
+interpreter was current. A fiber cannot migrate mid-call, so a call always
+completes in the interpreter it entered.
+
+Using a handle from more than one OS thread is not yet supported. Two things
+are required and only the first is built:
+
+- A `PyThreadState` belongs to one OS thread — CPython keeps the current one
+  in thread-local storage and derives per-thread bookkeeping from it — so each
+  thread makes its own state per interpreter on first touch. Serializing
+  CC-side entry does not substitute for this: there is no race to prevent, the
+  state simply describes the wrong thread, and reusing it faults inside the
+  interpreter even under perfect mutual exclusion.
+- A thread must release the interpreter's GIL before blocking on anything
+  else. Entry currently acquires and holds until the next entry on that
+  thread, so a thread that parks while holding one deadlocks every other
+  thread wanting that interpreter. Entry and exit must be symmetric —
+  acquire on the way in, release on the way out — before a handle can cross
+  threads.
+
+### Host modules
+
+When CC hosts the interpreter it injects modules under a `cc.` namespace, the
+way any embedder installs host bindings. Python imports them normally:
+
+```python
+import cc.host
+r = cc.host.add(20, 22)
+```
+
+The name is host-scoped on purpose. `import cc.host` declares a dependency on
+running under CC, and an injected module can never shadow a package on
+`sys.path` — a naked name could, since the host's modules resolve first.
+
+Registration is per interpreter, not per process: `sys.modules` is
+per-interpreter, and each interpreter — including an isolated one — builds its
+own module instance, so per-module state is per interpreter. Sharing one
+instance is what a per-interpreter GIL forbids. This also rules out
+`PyImport_AppendInittab`, whose importer declines any dotted name.
+
+An exported function runs with the GIL held, on a thread CPython chose: it
+must not block, and a `T !>(CCError)` return raises at the boundary. A call
+that does not match the declared parameters is an ordinary Python `TypeError`.
+
+Exports use the vectorcall entry shape: arguments arrive as a pointer into
+CPython's value stack with a count, so a call allocates no argument tuple, the
+arity check is a comparison, and reading an argument is an array index.
+
+Calls in the other direction are shaped the same way. A method name is
+interned once per interpreter and kept on the handle, so a call is a dict
+probe rather than the construction of a temporary string; arguments without
+keywords go to `PyObject_Vectorcall` as an array. Keyword arguments still
+build a tuple and a dict, since that is what carries them.
+
+There is no default location on disk. Compiling a host module into a real
+importable artifact is future work; the module definition is the same either
+way, so only the registration differs.
+
+### Exposing a CC type as a Python module
+
+`py_expose::[T]` installs a CC type as an importable module under `cc.`:
+
+```c
+py.expose::[Counter]("counter", &seed) !>;        // installs cc.counter
+py_expose::[Counter](&py, "counter", &seed) !>;   // the same call
+```
+
+The module is the type. Its methods are the module's functions and the
+receiver is the module's per-interpreter state — the same reading of "first
+parameter" UFCS dispatch runs on, so nothing new declares what a member is.
+The Python name is the method's UFCS member name, so the export list and the
+callable list are one list while the long searchable symbol stays at file
+scope.
+
+Return shapes map by declaration: a valued method returns its marshalled
+value, a `void` method returns `None`, and a `T !>(E)` method raises at the
+boundary rather than handing a Result to a caller that cannot act on one. An
+argument of the wrong type or count is an ordinary Python `TypeError`.
+
+The registrar returns the interpreter, so a registration composes into a
+chain, including into another `expose`. A member-generic hop resolves after
+the hop before it is hoisted into a typed temporary; the factory reflects on
+a snapshot of the translation unit taken before lowering, so an instantiation
+requested late in the pipeline generates the same code as one requested
+early.
+
+Registration fails host-side — no interpreter, no module — so it reports a
+plain `CCError` rather than a Python exception nobody raised. A type with no
+methods, an unnamed parameter, or a method whose Result box cannot be named
+is rejected at the use site.
+
+### The other door: Python imports CC
+
+`py_module::[T]` is the same exposure pointed the other way: where
+`py_expose` installs a module into an interpreter the CC program owns,
+`py_module` creates the module and returns it — which is exactly what a
+CPython extension entry point must do:
+
+```c
+/* counter.ccs — `ccc build counter.ccs` produces counter.abi3.so */
+#include <ccc/script/py.cch>
+
+typedef struct Counter { long long n; } Counter;
+static long long Counter_bump(Counter *self, long long by) { return self->n += by; }
+
+void *PyInit_counter(void) {
+    return py_module::[Counter]("counter", NULL);
+}
+```
+
+```python
+import counter          # Python owns main; CC is the module
+counter.bump(4)
+```
+
+There is no flag and no keyword: a TU that exports `PyInit_<name>` and
+defines no `main` IS a Python extension module — CPython's own
+entry-point convention is the declaration — and the build obeys: PIC
+objects, a shared link, `<name>.abi3.so` as the default output — the abi3 tag is in every
+CPython finder's suffix list, so `import <name>` finds it by bare name,
+and the filename advertises the stable-ABI promise. A TU with a
+`main` stays an executable even if it mentions `PyInit_`.
+
+The seed is the initial module state (NULL for zeroed). Failure follows
+Python's convention at this boundary — NULL with the exception set —
+not a CC Result, because the caller is the import machinery. The
+trampolines, marshalling, and error conversion (a fallible method's
+error raises `RuntimeError`) are the same machinery `py_expose` emits.
+
+The loader resolves symbols from the importing process itself (the
+self-probe runs before any `dlopen` of a libpython, so two runtimes can
+never meet in one process), and the module never initializes an
+interpreter — it is a guest. The abi3 discipline the binding already
+keeps means one built module serves every supported Python 3.x: one
+`.so` (or wheel) per platform, not per Python version.
+
+### Moves
+
+Status: draft — not implemented.
+
+Anchored lifetime implies explicit transfer, arena-style:
+
+```c
+CCPyObj there = obj.clone_into(&other) !>;
+```
+
+`clone_into` serializes in the home interpreter and rebuilds in the
+target (pickle round-trip); objects exposing the buffer protocol take a
+byte-copy fast path. The source reference is untouched; drop it separately
+when the move is a handoff. Scalars need no transfer: extract to a CC
+value, pass the value.
+
+An object that does not serialize fails with `CCPyError` at the call —
+crossing is loud, never partial.
+
+### Teardown
+
+`CCPy` destroy ends an interpreter this handle created, after releasing
+pending references; the process interpreter is left alive, since
+re-initializing CPython is unreliable and process exit reclaims it. Declare
+the interpreter before the objects it anchors:
+reverse-declaration destroy order then releases every reference before
+finalization. References that outlive their home release as no-ops (§3).
+
+### Benchmarks
+
+`perf/py_baseline.ccs` prices the boundary in both directions against native
+Python controls on the same rung: a call into CC against a Python function
+call of the same shape, a call out of CC against the same function called
+from Python, and bulk transfer — list marshal, `py_buf` borrow, buffer-probe
+extraction — against numpy and `sum()` over data each side already owns.
+Every mode's answer is cross-checked, so a marshalling bug reports as a
+mismatch rather than as a timing. Snapshots collect under `perf/baselines/`.
+
+`perf/py_matplotlib_workload.ccs` exercises the surface against a real
+library end to end: data computed in CC, rendered off-screen to disk in
+Python.
+
+### Out of scope
+
+- Deep container conversion (dict/list ↔ CC collections)
+- Python callbacks into arbitrary CC closures (an exposed type's methods are
+  the supported direction)
+- Compiling an exposed module to a standalone importable artifact
+- Free-threaded (no-GIL) CPython builds
+- `fork` without `exec` while an interpreter is live
+- Non-limited C API (interpreter internals)
+- Async integration (interpreter calls stay blocking-shaped)
+- Implicit cross-home use or implicit moves

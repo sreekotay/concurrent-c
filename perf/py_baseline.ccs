@@ -1,0 +1,518 @@
+/*
+ * The CC <-> Python boundary, priced against native Python — one benchmark,
+ * both directions, scalar calls and bulk data.
+ *
+ *   ./cc/bin/ccc run perf/py_baseline.ccs -- [iters] [n] [samples]
+ *
+ * iters     scalar calls per timed sample   (default 300000)
+ * n         bulk array length in doubles    (default 1000000)
+ * samples   timed samples per mode          (default 7; median reported)
+ *
+ * Every mode has a native control on the same rung, so each number answers
+ * "compared to what": a call into CC is read against a Python function call
+ * of the same shape, not against an inline add that performs no call at all;
+ * bulk transfer is read against numpy reducing an array it already owns.
+ *
+ * Scalar ladder (ns/call) — the work is one add (or one mul-add), chosen too
+ * small to hide the call:
+ *
+ *   c_native      CC calling CC                        the C floor
+ *   py_inline     `r += i + 7` in Python               no call at all
+ *   py_call       `r += f(i, 7)`, f a Python function  the native call cost
+ *   py_to_cc      `r += f(i, 7)`, f = cc.m.add         crossing into CC
+ *   py_to_cc_attr `r += m.add(i, 7)`                   + attr lookup per call
+ *   cc_to_py_0/1/3  CC calling a Python function       the other direction
+ *   py_to_py      the same function called from Python cc_to_py's control
+ *
+ * Rows (ns/row, iters/10 rows) — N calls priced as one crossing versus N
+ * crossings.  The argument row is deliberately mixed-type (f64, i64, f64):
+ * a heterogeneous tuple per call, so the comparison answers whether
+ * batching pays even when there is no single element type to blit:
+ *
+ *   row_per_call  m.mul_add_py(x, k, z), one row per crossing
+ *   row_map       f.map::[double](&a, xs, ks, zs), one crossing
+ *   row_py        the same rows looped natively in Python, the control
+ *
+ * Bulk (ms, n doubles) — where the data lives decides the form:
+ *
+ *   cc_sum        C loop over CC memory                the C floor
+ *   numpy_sum     A.sum(), numpy-owned array           the numpy floor
+ *   py_sum        sum(list), Python-owned list         the native list form
+ *   send_list     CC slice -> Python as a list         per-element, outbound
+ *   send_buf      CC slice -> numpy via py_buf         zero-copy, outbound
+ *   recv_list     Python list -> CC slice              per-element, inbound
+ *   recv_buf      numpy array -> CC slice              one memcpy, inbound
+ *
+ * Output: aligned tables for reading, `RESULT <section> <mode> <unit> <val>`
+ * lines for machines, and derived ratios.  Snapshots collect under
+ * perf/baselines/ — run, redirect, commit:
+ *
+ *   ./cc/bin/ccc run perf/py_baseline.ccs > perf/baselines/py_baseline_$(date +%Y%m%d).txt
+ *
+ * Every mode's answer is cross-checked against the C computation; a
+ * marshalling bug reports as MISMATCH, never as a timing.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/script/py.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+typedef struct Math { long long calls; } Math;
+
+static long long Math_add(Math *self, long long a, long long b) {
+    self->calls += 1;
+    return a + b;
+}
+static long long Math_mul_add(Math *self, long long x, long long k, long long z) {
+    self->calls += 1;
+    return x * k + z;
+}
+
+static double now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+}
+
+static int cmp_double(const void *p, const void *q) {
+    double a = *(const double *)p, b = *(const double *)q;
+    return (a > b) - (a < b);
+}
+
+static double median(double *v, int n) {
+    qsort(v, (size_t)n, sizeof(*v), cmp_double);
+    return (n & 1) ? v[n / 2] : 0.5 * (v[n / 2 - 1] + v[n / 2]);
+}
+
+static double g_ms[64];
+static int g_samples = 7;
+
+static double report_ns(const char *mode, long long per) {
+    double m = median(g_ms, g_samples);
+    double ns = m * 1e6 / (double)per;
+    printf("  %-14s %9.2f ms  %9.1f ns/call\n", mode, m, ns);
+    printf("RESULT scalar %s ns_per_call %.1f\n", mode, ns);
+    return ns;
+}
+
+static double report_ms(const char *mode) {
+    double m = median(g_ms, g_samples);
+    printf("  %-14s %9.2f ms\n", mode, m);
+    printf("RESULT bulk %s ms %.2f\n", mode, m);
+    return m;
+}
+
+static double report_row(const char *mode, long long rows) {
+    double m = median(g_ms, g_samples);
+    double ns = m * 1e6 / (double)rows;
+    printf("  %-14s %9.2f ms  %9.1f ns/row\n", mode, m, ns);
+    printf("RESULT vector %s ns_per_row %.1f\n", mode, ns);
+    return ns;
+}
+
+int main(int argc, char **argv) {
+    @errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); return 1; }
+    CCArena a = cc_arena_heap(megabytes(64)) @destroy;
+
+    long long iters = (argc > 1) ? atoll(argv[1]) : 300000;
+    long long n = (argc > 2) ? atoll(argv[2]) : 1000000;
+    g_samples = (argc > 3) ? atoi(argv[3]) : 7;
+    if (iters < 1) iters = 1;
+    if (n < 1) n = 1;
+    if (g_samples < 1) g_samples = 1;
+    if (g_samples > 64) g_samples = 64;
+
+    if (!cc_py_available()) { puts("SKIP (no libpython)"); return 0; }
+    CCPy py = cc_py_new(&a) !>;
+
+    Math seed = { .calls = 0 };
+    py.expose::[Math]("m", &seed) !>;
+
+    py.exec(@string(`
+        import sys
+        def env():
+            v = sys.version.split()[0]
+            try:
+                import numpy
+                return v + " numpy " + numpy.__version__
+            except Exception:
+                return v + " numpy absent"
+        `, &a).as_slice()) !>;
+    CCPyObj main_mod = py.import("__main__") !> @destroy;
+    CCSlice ev = main_mod.env()!>.as_slice()!>;
+    printf("py_baseline iters=%lld n=%lld samples=%d python=%.*s\n",
+           iters, n, g_samples, (int)ev.len, (const char *)ev.ptr);
+
+    long long sink = 0, want_mul_add = 0, want_add = 0;
+
+    /* ---- scalar ladder ---- */
+    printf("\nscalar (one add / one mul-add per call):\n");
+
+    for (int s = 0; s < g_samples; s++) {
+        Math local = { .calls = 0 };
+        long long t = 0;
+        double t0 = now_ms();
+        for (long long i = 0; i < iters; i++) t += Math_mul_add(&local, 3, i, 7);
+        g_ms[s] = now_ms() - t0;
+        want_mul_add = t;
+        sink += t;
+    }
+    double ns_c = report_ns("c_native", iters);
+
+    py.exec(@string(`
+        import cc.m as m
+        def py_inline(k):
+            r = 0
+            for i in range(k):
+                r += i + 7
+            return r
+        def _add(x, y):
+            return x + y
+        def py_call(k):
+            f = _add
+            r = 0
+            for i in range(k):
+                r += f(i, 7)
+            return r
+        def py_to_cc(k):
+            f = m.add
+            r = 0
+            for i in range(k):
+                r += f(i, 7)
+            return r
+        def py_to_cc_attr(k):
+            r = 0
+            for i in range(k):
+                r += m.add(i, 7)
+            return r
+        def mul_add_py(x, k, z):
+            return x * k + z
+        def noargs_py():
+            return 1
+        def one_py(x):
+            return x
+        def py_to_py(k):
+            # cc_to_py's control: the same function, called from Python.
+            f = mul_add_py
+            r = 0
+            for i in range(k):
+                r += f(3, i, 7)
+            return r
+        _rows = None
+        def rows_prep(k):
+            # Built once, outside the timed region, so row_py times the loop and
+            # the calls — not list construction.
+            global _rows
+            _rows = ([(i % 1000) * 0.5 for i in range(k)],
+                     [i % 7 + 1 for i in range(k)],
+                     [0.25] * k)
+            return 0
+        def rows_py_loop():
+            xs, ks, zs = _rows
+            f = mul_add_py
+            r = 0.0
+            for x, k, z in zip(xs, ks, zs):
+                r += f(x, k, z)
+            return r
+        `, &a).as_slice()) !>;
+
+    /* CPython specializes bytecode adaptively; warm each loop before timing
+     * so the mode that runs first does not pay for everyone. */
+    {
+        int64_t d;
+        d = main_mod.py_inline(20000) !>;     (void)d;
+        d = main_mod.py_call(20000) !>;       (void)d;
+        d = main_mod.py_to_cc(20000) !>;      (void)d;
+        d = main_mod.py_to_cc_attr(20000) !>; (void)d;
+        d = main_mod.py_to_py(20000) !>;      (void)d;
+    }
+
+    for (int s = 0; s < g_samples; s++) {
+        double t0 = now_ms();
+        int64_t r = main_mod.py_inline(iters) !>;
+        g_ms[s] = now_ms() - t0;
+        want_add = (long long)r;
+        sink += r;
+    }
+    double ns_inline = report_ns("py_inline", iters);
+
+    long long got_pycall = 0, got_tocc = 0, got_attr = 0;
+    for (int s = 0; s < g_samples; s++) {
+        double t0 = now_ms();
+        int64_t r = main_mod.py_call(iters) !>;
+        g_ms[s] = now_ms() - t0;
+        got_pycall = (long long)r;
+    }
+    double ns_pycall = report_ns("py_call", iters);
+
+    for (int s = 0; s < g_samples; s++) {
+        double t0 = now_ms();
+        int64_t r = main_mod.py_to_cc(iters) !>;
+        g_ms[s] = now_ms() - t0;
+        got_tocc = (long long)r;
+    }
+    double ns_tocc = report_ns("py_to_cc", iters);
+
+    for (int s = 0; s < g_samples; s++) {
+        double t0 = now_ms();
+        int64_t r = main_mod.py_to_cc_attr(iters) !>;
+        g_ms[s] = now_ms() - t0;
+        got_attr = (long long)r;
+    }
+    double ns_attr = report_ns("py_to_cc_attr", iters);
+
+    if (got_pycall != want_add || got_tocc != want_add || got_attr != want_add) {
+        fprintf(stderr, "MISMATCH add: want=%lld pycall=%lld tocc=%lld attr=%lld\n",
+                want_add, got_pycall, got_tocc, got_attr);
+        return 1;
+    }
+
+    /* The outbound direction, at three arities so the fixed crossing cost
+     * separates from the per-argument cost, plus its native control.  A
+     * tenth of `iters`, not a twentieth: these are the slowest scalar modes
+     * and the shortest samples, and short samples are what made this leg
+     * wobble between runs. */
+    long long on = iters / 10 > 0 ? iters / 10 : 1;
+    long long got_ccpy = 0, got_pypy = 0;
+    for (int s = 0; s < g_samples; s++) {
+        double t0 = now_ms();
+        for (long long i = 0; i < on; i++) { int64_t v = main_mod.noargs_py() !>; sink += v; }
+        g_ms[s] = now_ms() - t0;
+    }
+    report_ns("cc_to_py_0", on);
+    for (int s = 0; s < g_samples; s++) {
+        double t0 = now_ms();
+        for (long long i = 0; i < on; i++) { int64_t v = main_mod.one_py(i) !>; sink += v; }
+        g_ms[s] = now_ms() - t0;
+    }
+    report_ns("cc_to_py_1", on);
+    for (int s = 0; s < g_samples; s++) {
+        long long t = 0;
+        double t0 = now_ms();
+        for (long long i = 0; i < on; i++) { int64_t v = main_mod.mul_add_py(3, i, 7) !>; t += v; }
+        g_ms[s] = now_ms() - t0;
+        got_ccpy = t;
+        sink += t;
+    }
+    double ns_ccpy3 = report_ns("cc_to_py_3", on);
+    for (int s = 0; s < g_samples; s++) {
+        double t0 = now_ms();
+        int64_t r = main_mod.py_to_py(on) !>;
+        g_ms[s] = now_ms() - t0;
+        got_pypy = (long long)r;
+        sink += r;
+    }
+    double ns_pypy = report_ns("py_to_py", on);
+    if (got_ccpy != got_pypy) {
+        fprintf(stderr, "MISMATCH mul_add: cc_to_py=%lld py_to_py=%lld\n",
+                got_ccpy, got_pypy);
+        return 1;
+    }
+
+    /* ---- rows: N calls, one crossing vs N crossings ---- */
+    printf("\nrows (%lld rows of (f64, i64, f64)):\n", on);
+
+    double *rx = cc_arena_alloc_T_count(double, &a, (size_t)on);
+    int64_t *rk = cc_arena_alloc_T_count(int64_t, &a, (size_t)on);
+    double *rz = cc_arena_alloc_T_count(double, &a, (size_t)on);
+    if (!rx || !rk || !rz) { puts("SKIP (allocation)"); return 0; }
+    for (long long i = 0; i < on; i++) {
+        rx[i] = (double)(i % 1000) * 0.5;
+        rk[i] = i % 7 + 1;
+        rz[i] = 0.25;
+    }
+    double[:] rxs = CCSlice_double_from_buffer(rx, (size_t)on);
+    int64_t[:] rks = CCSlice_int64_t_from_buffer(rk, (size_t)on);
+    double[:] rzs = CCSlice_double_from_buffer(rz, (size_t)on);
+
+    CCPyObj fax = main_mod.get("mul_add_py") !> @destroy;
+    { int64_t d = main_mod.rows_prep(on) !>; (void)d; }
+    {
+        CCSlice w = fax.map::[double](&a, rxs, rks, rzs) !>; (void)w;
+        double  d = main_mod.rows_py_loop() !>;              (void)d;
+    }
+
+    double got_rowcall = 0, got_rowmap = 0, got_rowpy = 0;
+    for (int s = 0; s < g_samples; s++) {
+        double acc = 0;
+        double t0 = now_ms();
+        for (long long i = 0; i < on; i++) {
+            double v = main_mod.mul_add_py(rx[i], rk[i], rz[i]) !>;
+            acc += v;
+        }
+        g_ms[s] = now_ms() - t0;
+        got_rowcall = acc;
+    }
+    double ns_rowcall = report_row("row_per_call", on);
+
+    for (int s = 0; s < g_samples; s++) {
+        double t0 = now_ms();
+        CCSlice rout = fax.map::[double](&a, rxs, rks, rzs) !>;
+        double acc = 0;
+        const double *rv = (const double *)rout.ptr;
+        for (long long i = 0; i < on; i++) acc += rv[i];
+        g_ms[s] = now_ms() - t0;
+        got_rowmap = acc;
+    }
+    double ns_rowmap = report_row("row_map", on);
+
+    for (int s = 0; s < g_samples; s++) {
+        double t0 = now_ms();
+        double r = main_mod.rows_py_loop() !>;
+        g_ms[s] = now_ms() - t0;
+        got_rowpy = r;
+    }
+    double ns_rowpy = report_row("row_py", on);
+
+    /* Same values, same order, both accumulate in doubles — exact match. */
+    if (got_rowcall != got_rowmap || got_rowcall != got_rowpy) {
+        fprintf(stderr, "MISMATCH rows: per_call=%.17g map=%.17g py=%.17g\n",
+                got_rowcall, got_rowmap, got_rowpy);
+        return 1;
+    }
+    printf("  batching: map vs per-call %.2fx, map vs native rows %.2fx\n",
+           ns_rowcall / ns_rowmap, ns_rowpy / ns_rowmap);
+    printf("RESULT ratio map_vs_per_call x %.2f\n", ns_rowcall / ns_rowmap);
+    printf("RESULT ratio map_vs_row_py x %.2f\n", ns_rowpy / ns_rowmap);
+
+    /* ---- bulk ---- */
+    printf("\nbulk (%lld doubles):\n", n);
+
+    double *xs = cc_arena_alloc_T_count(double, &a, (size_t)n);
+    if (!xs) { puts("SKIP (allocation)"); return 0; }
+    for (long long i = 0; i < n; i++) xs[i] = (double)(i % 1000) * 0.5;
+
+    double cc_sum = 0;
+    for (int s = 0; s < g_samples; s++) {
+        double t0 = now_ms();
+        double acc = 0;
+        for (long long i = 0; i < n; i++) acc += xs[i];
+        g_ms[s] = now_ms() - t0;
+        cc_sum = acc;
+    }
+    double ms_cc = report_ms("cc_sum");
+
+    int have_numpy = 1;
+    {
+        CCResult_void_CCPyError probe = cc_py_exec(&py, @slice("import numpy\n"));
+        if (probe.is_err()) have_numpy = 0;
+    }
+
+    py.exec(@string(`
+        def build(k):
+            global A, L
+            try:
+                import numpy as np
+                A = np.arange(k, dtype=np.float64) % 1000 * 0.5
+            except Exception:
+                A = None
+            L = [float(i % 1000) * 0.5 for i in range(k)]
+            return float(len(L))
+        def numpy_sum():
+            return float(A.sum())
+        def py_sum():
+            return float(sum(L))
+        def send_list(seq):
+            import numpy as np
+            return float(np.asarray(seq, dtype=np.float64).sum())
+        def send_buf(mv):
+            import numpy as np
+            return float(np.frombuffer(mv, dtype=np.float64).sum())
+        def get_array():
+            return A
+        def get_list():
+            return L
+        `, &a).as_slice()) !>;
+
+    double built = main_mod.build(n) !>;
+    if ((long long)built != n) { fprintf(stderr, "bulk build mismatch\n"); return 1; }
+
+    double got;
+    if (have_numpy) {
+        for (int s = 0; s < g_samples; s++) {
+            double t0 = now_ms();
+            got = main_mod.numpy_sum() !>;
+            g_ms[s] = now_ms() - t0;
+        }
+        report_ms("numpy_sum");
+        if (got != cc_sum) { fprintf(stderr, "MISMATCH numpy_sum\n"); return 1; }
+    }
+
+    for (int s = 0; s < g_samples; s++) {
+        double t0 = now_ms();
+        got = main_mod.py_sum() !>;
+        g_ms[s] = now_ms() - t0;
+    }
+    report_ms("py_sum");
+    if (got != cc_sum) { fprintf(stderr, "MISMATCH py_sum\n"); return 1; }
+
+    double[:] view = CCSlice_double_from_buffer(xs, (size_t)n);
+    double ms_send_list = 0, ms_send_buf = 0, ms_recv_list = 0, ms_recv_buf = 0;
+    if (have_numpy) {
+        for (int s = 0; s < g_samples; s++) {
+            double t0 = now_ms();
+            got = main_mod.send_list(view) !>;
+            g_ms[s] = now_ms() - t0;
+        }
+        ms_send_list = report_ms("send_list");
+        if (got != cc_sum) { fprintf(stderr, "MISMATCH send_list\n"); return 1; }
+
+        for (int s = 0; s < g_samples; s++) {
+            double t0 = now_ms();
+            got = main_mod.send_buf(py_buf(view)) !>;
+            g_ms[s] = now_ms() - t0;
+        }
+        ms_send_buf = report_ms("send_buf");
+        if (got != cc_sum) { fprintf(stderr, "MISMATCH send_buf\n"); return 1; }
+
+        CCPyObj arr = main_mod.get_array() !> @destroy;
+        for (int s = 0; s < g_samples; s++) {
+            CCArena ex = cc_arena_heap((size_t)(n + 16) * 8 + 4096);
+            double t0 = now_ms();
+            CCSlice r = arr.as_list::[double](&ex) !>;
+            g_ms[s] = now_ms() - t0;
+            double acc = 0;
+            const double *rv = (const double *)r.ptr;
+            for (size_t k = 0; k < r.len; k++) acc += rv[k];
+            if (acc != cc_sum) { fprintf(stderr, "MISMATCH recv_buf\n"); return 1; }
+            cc_arena_free(&ex);
+        }
+        ms_recv_buf = report_ms("recv_buf");
+    }
+
+    {
+        CCPyObj lst = main_mod.get_list() !> @destroy;
+        for (int s = 0; s < g_samples; s++) {
+            CCArena ex = cc_arena_heap((size_t)(n + 16) * 8 + 4096);
+            double t0 = now_ms();
+            CCSlice r = lst.as_list::[double](&ex) !>;
+            g_ms[s] = now_ms() - t0;
+            if (r.len != (size_t)n) { fprintf(stderr, "MISMATCH recv_list len\n"); return 1; }
+            cc_arena_free(&ex);
+        }
+        ms_recv_list = report_ms("recv_list");
+    }
+
+    /* ---- derived ratios: overhead each way, against the native rung ---- */
+    printf("\nratios (native control = 1.0):\n");
+    printf("  py_to_cc  / py_call    %5.2fx   crossing into CC vs a Python call\n",
+           ns_tocc / ns_pycall);
+    printf("  py_to_cc_attr/py_to_cc %5.2fx   the per-call attribute lookup\n",
+           ns_attr / ns_tocc);
+    printf("  cc_to_py_3 / py_to_py  %5.2fx   crossing out of CC vs a Python call\n",
+           ns_ccpy3 / ns_pypy);
+    printf("  py_inline / c_native   %5.1fx   the two floors\n", ns_inline / ns_c);
+    if (have_numpy && ms_send_buf > 0)
+        printf("  send_list / send_buf   %5.0fx   what py_buf removes (outbound)\n",
+               ms_send_list / ms_send_buf);
+    if (have_numpy && ms_recv_buf > 0)
+        printf("  recv_list / recv_buf   %5.0fx   what the buffer probe removes (inbound)\n",
+               ms_recv_list / ms_recv_buf);
+    printf("RESULT ratio py_to_cc_vs_py_call x %.2f\n", ns_tocc / ns_pycall);
+    printf("RESULT ratio cc_to_py_vs_py_to_py x %.2f\n", ns_ccpy3 / ns_pypy);
+
+    (void)want_mul_add;
+    printf("\nagree=%.1f sink=%lld\n", cc_sum, sink);
+    return 0;
+}

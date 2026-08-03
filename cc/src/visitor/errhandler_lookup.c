@@ -17,9 +17,18 @@ void cc_errhandler_stack_init(CCErrHandlerStack* stk) {
     memset(stk, 0, sizeof(*stk));
 }
 
+/* Trim both edges to code.  A comment is inert, so a commented parameter
+ * declaration must yield the same type text as a bare one — and because the
+ * parameter name is split off first, a comment sitting between the type and
+ * the name lands on this span's trailing edge and is trimmed here too. */
 static void cc__eh_trim(const char* s, size_t* a, size_t* b) {
-    while (*a < *b && isspace((unsigned char)s[*a])) (*a)++;
-    while (*b > *a && isspace((unsigned char)s[*b - 1])) (*b)--;
+    size_t lo = cc_skip_ws_and_comments(s, *b, *a);
+    size_t hi;
+    if (lo > *b) lo = *b;
+    hi = cc_rskip_ws_and_comments(s, *b);
+    if (hi < lo) hi = lo;
+    *a = lo;
+    *b = hi;
 }
 
 static int cc__eh_scan_stmt_end_semicolon(const char* s, size_t len, size_t i,
@@ -56,15 +65,14 @@ int cc_errhandler_parse_registration(const char* s, size_t n, size_t at,
     if (!s || at >= n || s[at] != '@') return 0;
     if (at + 11 > n || memcmp(s + at, "@errhandler", 11) != 0) return 0;
     if (at + 11 < n && cc_is_ident_char(s[at + 11])) return 0;
-    j = at + 11;
-    while (j < n && isspace((unsigned char)s[j])) j++;
+    j = cc_skip_ws_and_comments(s, n, at + 11);
     if (j >= n || s[j] != '(') return 0;
     if (!cc_find_matching_paren(s, n, j, &rpar)) return 0;
     da = j + 1;
     db = rpar;
     cc__eh_trim(s, &da, &db);
-    j = rpar + 1;
-    while (j < n && isspace((unsigned char)s[j])) j++;
+    /* The next code character decides brace body vs single statement. */
+    j = cc_skip_ws_and_comments(s, n, rpar + 1);
     if (j >= n) return 0;
     if (s[j] == '{') {
         size_t rbrace = 0;
@@ -73,8 +81,11 @@ int cc_errhandler_parse_registration(const char* s, size_t n, size_t at,
         bb = rbrace;
         cc__eh_trim(s, &ba, &bb);
         end = rbrace + 1;
-        while (end < n && isspace((unsigned char)s[end])) end++;
-        if (end < n && s[end] == ';') end++;
+        {   /* Only extend over the gap when a `;` is actually there, so a
+             * trailing comment never widens the erased statement span. */
+            size_t semi = cc_skip_ws_and_comments(s, n, end);
+            if (semi < n && s[semi] == ';') end = semi + 1;
+        }
     } else {
         /* Single-statement body: `@errhandler(E e) STMT;` */
         ba = j;
@@ -101,8 +112,7 @@ int cc_errhandler_split_param_decl(const char* decl,
     if (type_out && type_sz) type_out[0] = 0;
     if (name_out && name_sz) name_out[0] = 0;
     if (!decl) return 0;
-    L = strlen(decl);
-    while (L > 0 && isspace((unsigned char)decl[L - 1])) L--;
+    L = cc_rskip_ws_and_comments(decl, strlen(decl));
     start = L;
     while (start > 0 && cc_is_ident_char(decl[start - 1])) start--;
     if (L <= start) return 0;

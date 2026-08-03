@@ -1,0 +1,12 @@
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+
+@async intptr_t work(intptr_t x) { return x * 2; }
+
+int main(void) {
+    CCTaskIntptr t = work(21);
+    /*x*/intptr_t v = t.block_on();
+    CCTaskIntptr t2 = work(100);
+    printf("%ld %ld\n", (long)v, (long)t2.block_on::[intptr_t]());
+    return 0;
+}

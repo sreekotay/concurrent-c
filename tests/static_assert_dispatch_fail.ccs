@@ -1,0 +1,24 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+/* Negative: an unsupported type is rejected where it is used, and the
+ * diagnostic is the library's sentence rather than the compiler's. */
+
+static int kind_of_int(int v)       { (void)v; return 1; }
+static int kind_of_double(double v) { (void)v; return 2; }
+struct kind_of_unsupported_type;
+extern int kind_of_other(struct kind_of_unsupported_type *v);
+
+#define KIND_SUPPORTED(x) _Generic((x), int: 1, double: 1, default: 0)
+#define KIND(x) \
+    (cc_static_assert(KIND_SUPPORTED(x), kind_wants_an_int_or_a_double), \
+     _Generic((x), int: kind_of_int, double: kind_of_double, \
+                   default: kind_of_other)(x))
+
+typedef struct Widget { int w; } Widget;
+
+int main(void) {
+    Widget w = { .w = 1 };
+    printf("kind=%d\n", KIND(w));
+    return 0;
+}

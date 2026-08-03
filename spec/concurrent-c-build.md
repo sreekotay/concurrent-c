@@ -112,6 +112,24 @@ Cache keys include the relevant source and build-file signatures, compiler input
 
 Failed emission is not cached. A diagnostic-producing emit fails the build, and a later invocation reruns it even when prior cache metadata exists. `--no-cache` and `CC_NO_CACHE=1` force each selected phase to execute.
 
+## Cache eviction
+
+Three content-addressed caches sit outside the build cache: `incexp/` and
+`comptime-hooks/` under `$HOME/.cache/concurrent-c/`, and `comptime/` under
+`<out-dir>/ccc-cache/`. Their keys fold input mtimes and toolchain
+fingerprints, so an edited source mints a new entry and the previous one is
+unreachable.
+
+Each directory is capped. A store trims its directory to a byte budget,
+deleting entries in oldest-mtime-first order until the total is under budget.
+Budgets default to 1024 MB for `incexp/` and 256 MB for the two dylib caches.
+`CC_CACHE_MAX_MB` overrides the budget for every such directory; `0` removes
+the cap. `CC_CACHE_EVICT_INTERVAL` sets the minimum seconds between sweeps of
+one directory, default 60. A directory that cannot be trimmed reports on
+stderr.
+
+Evicting an entry costs a cache miss and never changes build output.
+
 ## Build-file discovery
 
 Unless disabled or overridden, the driver looks for `build.cc` beside the first input and in the current directory. If both locations contain different build files, discovery is ambiguous and the build fails. `--build-file PATH` bypasses discovery.

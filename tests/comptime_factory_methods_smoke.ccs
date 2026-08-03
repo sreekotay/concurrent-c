@@ -1,0 +1,76 @@
+/* Method reflection has a value-level face, so a compiled generic factory can
+ * enumerate what `@comptime for (m in type_of(T).methods)` enumerates. That is
+ * what lets code generation over a type's methods be packaged as a `::[T]`
+ * generic rather than pasted into every consumer.
+ *
+ * Two rules show up here and both are the fragment's responsibility, not the
+ * machinery's:
+ *
+ *  - A factory's fragment is spliced ahead of the file's own definitions, so a
+ *    generated body that calls a method must FORWARD-DECLARE it. Assuming
+ *    placement is what produced an implicit declaration and then a conflicting
+ *    definition.
+ *  - A forward declaration cannot use `__typeof__` — there is no expression yet
+ *    — so a fallible method's box has to be spelled. `cc_result_box_name` gives
+ *    the canonicalizer's own answer instead of re-deriving it here, which is
+ *    how two spellings drift apart.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+
+typedef struct Acc { int total; } Acc;
+
+static int  acc_get(Acc *self)          { return self->total; }
+static int  acc_plus(Acc *self, int n)  { return self->total + n; }
+static int !>(CCError) acc_div(Acc *self, int n) {
+    if (n == 0) return cc_err(CC_ERR_INVALID_ARG, "acc_div: zero");
+    return cc_ok(self->total / n);
+}
+
+/* One wrapper per method, reporting failure through its return code. */
+CC_GENERIC_FACTORY(Wrap, 1) {
+    CCString s = cc_string_new();
+    const char *T = arg(0).ptr;
+    int n = cc_reflect_method_count(T);
+    if (n < 0) return cc_slice_empty();
+    for (int i = 0; i < n; i++) {
+        char nm[128], pr[256], ar[256], rt[128], er[128], box[256];
+        cc_reflect_method_name(T, i, nm, sizeof(nm));
+        cc_reflect_method_params(T, i, pr, sizeof(pr));
+        cc_reflect_method_args(T, i, ar, sizeof(ar));
+        cc_reflect_method_ret(T, i, rt, sizeof(rt));
+        cc_reflect_method_err(T, i, er, sizeof(er));
+        if (er[0]) {
+            /* Fallible: declare it by its box, then consume the Result with
+             * the accessors — a fragment is host C and has no sigil. */
+            if (cc_result_box_name(rt, er, box, sizeof(box)) < 0)
+                return cc_slice_empty();
+            cc_string_push_slice(&s, @emit(`
+                static ${box} ${nm}${pr};
+                static int w_${nm}${pr} {
+                    ${box} r = ${nm}${ar};
+                    if (!cc_is_ok(r)) return -1;
+                    return (int)cc_value(r);
+                }`, arena), arena);
+        } else {
+            cc_string_push_slice(&s, @emit(`
+                static ${rt} ${nm}${pr};
+                static int w_${nm}${pr} { return (int)${nm}${ar}; }`, arena), arena);
+        }
+    }
+    /* The use site rewrites to the mangled name, so it needs to name something. */
+    cc_string_push_slice(&s, @emit(`
+        typedef int ${mangled};`, arena), arena);
+    return cc_string_as_slice(&s);
+}
+
+int main(void) {
+    Wrap::[Acc] tag = 0;
+    (void)tag;
+
+    Acc a = { .total = 40 };
+    printf("get=%d plus=%d div=%d div0=%d\n",
+           w_acc_get(&a), w_acc_plus(&a, 2), w_acc_div(&a, 4), w_acc_div(&a, 0));
+    return 0;
+}

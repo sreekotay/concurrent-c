@@ -1,0 +1,15 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+/* A content line indented LESS than the closing backtick's margin is a
+ * compile error at that line — never a silently shifted margin (Java's
+ * min-over-lines rule would quietly dedent the whole block instead). */
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(16)) @destroy;
+    CCString t = @string(`
+        properly margined
+    four spaces only
+        `, &a);
+    (void)t;
+    return 0;
+}

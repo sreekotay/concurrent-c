@@ -1,0 +1,5 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+static int runs=0;
+static int g(int n){ CCArena a = cc_arena_heap(kilobytes(4)) @destroy; @defer { runs++; } if (!a.valid()) return -1; while (n==0) return 10; return 2; }
+int main(void){ int x=g(0); printf("g0=%d runs=%d\n",x,runs); return 0; }

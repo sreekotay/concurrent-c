@@ -1,0 +1,18 @@
+#ifndef LOCAL_HEADER_FACTORY_SMOKE_CCH
+#define LOCAL_HEADER_FACTORY_SMOKE_CCH
+
+/* A generic factory shipped by a LOCAL header. Unlike a Result declaration —
+ * which is scanned out of the include text in memory — a factory is harvested
+ * from the LOWERED header, so this is the shape that needs lowering to have
+ * actually happened. Copied out of the repo by tools/out_of_tree_smoke.shcc,
+ * where the lowered path cannot be derived from a repo root. */
+CC_GENERIC_FACTORY(Boxed, 1) {
+    CCString s = cc_string_new();
+    cc_string_push_slice(&s, @emit(`
+typedef struct { ${arg(0)} v; } ${mangled};
+static ${arg(0)} ${mangled}_get(const ${mangled} *b) { return b->v; }
+`, arena), arena);
+    return cc_string_as_slice(&s);
+}
+
+#endif

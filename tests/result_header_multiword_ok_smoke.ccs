@@ -1,0 +1,26 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include "result_header_multiword_ok_smoke.cch"
+
+/* A Result box declared by a header has to precede the function whose return
+ * type names it. Declaring the collected boxes at the end of the lowered
+ * header only ever worked because the prelude predeclares the single-word
+ * instances — so `int !>(E)` compiled and `long long !>(E)` did not, and the
+ * late declaration was dead code nobody had reason to look at.
+ *
+ * This pins both directions: multi-word ok types, an ok type declared inside
+ * the same header (the box must follow the struct), and a box whose first use
+ * is inside a function body rather than at file scope. */
+int main(void) {
+    @errhandler(CCError e) { printf("H:%s\n", e.message); return 1; }
+
+    long long          a = h_ll(1)   !>;
+    unsigned int       b = h_ui(1)   !>;
+    unsigned long long c = h_ull(1)  !>;
+    unsigned long      d = h_ul()    !>;
+    HPt                p = h_pt(1)   !>;
+
+    printf("a=%lld b=%u c=%llu d=%lu p=%lld,%lld sum=%lld\n",
+           a, b, c, d, p.x, p.y, h_sum(1));
+    return 0;
+}

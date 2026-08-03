@@ -1,0 +1,75 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/script/py.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* When CC hosts the interpreter it injects modules under a `cc.` namespace,
+ * the way any embedder installs host bindings. `import cc.host` is an
+ * ordinary import statement — the name is host-scoped on purpose, so it
+ * declares a dependency on running under CC and cannot shadow anything on
+ * `sys.path`. Registration is per interpreter, since `sys.modules` is. */
+
+/* Runs `src` expecting it to raise, printing the exception class. 0 when it
+ * raised, -1 when it did not. A handler belongs to its function, so probing
+ * for a failure takes one — a bare `!>(e){...}` in main would have to leave
+ * main to report. */
+static int expect_py_error(CCPy *py, CCSlice src) {
+    CCPyObj o = py->eval(src) !>(e) {
+        printf("caught %.*s\n", (int)e.type_name.len, (const char*)e.type_name.ptr);
+        return 0;
+    };
+    cc_py_obj_release(&o);
+    return -1;
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
+
+    CCArena a = cc_arena_heap(kilobytes(64)) @destroy;
+    if (!a.valid()) return 1;
+
+    if (!cc_py_available()) { puts("py_host_module_smoke: SKIP (no libpython)"); return 0; }
+    CCPy py = cc_py_new(&a) !>;
+
+    /* Python calls CC, through the normal import machinery. */
+    py.exec(@slice("import cc.host\n"
+                   "r = cc.host.add(20, 22)\n"
+                   "s = sum(cc.host.add(i, i) for i in range(5))\n")) !>;
+    CCPyObj m = py.import("__main__") !> @destroy;
+    int64_t r = m.get("r")!>.as_i64()!>;
+    int64_t s = m.get("s")!>.as_i64()!>;
+    if (r != 42) return 2;
+    if (s != 20) return 3;
+
+    /* The parent is a real package, and nothing naked was added. */
+    CCPyObj chk = py.eval(@slice(
+        "__import__('importlib.util').util.find_spec('host') is None "
+        "and hasattr(__import__('cc'), '__path__')")) !> @destroy;
+    CCSlice ok = chk.as_slice() !>;
+    if (ok.len != 4 || memcmp(ok.ptr, "True", 4) != 0) return 4;
+
+    /* A void export returns None; state it mutates is the module's own, so a
+     * later call sees the change. */
+    py.exec(@slice("cc.host.bump(7)\n"
+                   "n0 = cc.host.bump(0)\n"
+                   "rv = cc.host.reset()\n"
+                   "n1 = cc.host.bump(0)\n")) !>;
+    CCPyObj n0 = m.get("n0") !> @destroy;
+    CCPyObj n1 = m.get("n1") !> @destroy;
+    CCPyObj rv = m.get("rv") !> @destroy;
+    CCSlice rvs = rv.as_slice() !>;
+    if (n0.as_i64() !> != 7) return 5;
+    if (n1.as_i64() !> != 0) return 6;
+    if (rvs.len != 4 || memcmp(rvs.ptr, "None", 4) != 0) return 7;
+
+    /* Marshaling is by declared type, so a str where an integer is declared is
+     * a TypeError naming the parameter rather than a silent coercion; a wrong
+     * arity is the same kind of ordinary Python failure, not a crash. */
+    if (expect_py_error(&py, @slice("cc.host.add('x', 1)")) != 0) return 8;
+    if (expect_py_error(&py, @slice("cc.host.add(1)")) != 0) return 9;
+    printf("add=%lld sum=%lld\n", (long long)r, (long long)s);
+    return 0;
+}

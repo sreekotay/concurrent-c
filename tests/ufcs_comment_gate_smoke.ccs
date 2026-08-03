@@ -1,0 +1,21 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+/* A comment between a method name and its paren must not hide the call.
+ *
+ * The UFCS reparse is behind a textual gate that asks "does this TU still
+ * have member-call surface". The gate skipped spaces and tabs only, so a
+ * comment in that gap failed it, the reparse never ran, and the call reached
+ * the C compiler verbatim — reported as a missing struct member, nowhere
+ * near the cause. A gate must accept everything its pass would: a false
+ * positive costs one reparse, a false negative loses the pass silently.
+ *
+ * This file's ONLY candidate site carries the comment, so if the gate
+ * declines it the whole TU goes unlowered and the test fails to build. */
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(8));
+    CCArena d = a.detach/*gap*/();
+    void *probe = cc_arena_alloc(&d, 16, 8);
+    printf("ok %d\n", probe != NULL);
+    return 0;
+}

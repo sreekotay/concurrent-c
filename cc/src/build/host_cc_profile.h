@@ -12,6 +12,17 @@
 
 #define CC_HOST_PROFILE_SCHEMA 1
 
+/* The C version CC requires of a host toolchain — the probe rejects a host
+ * that cannot compile C11 `max_align_t` — and therefore the version every
+ * in-process parse session must run at.
+ *
+ * libtcc defaults to `cversion = 199901`, so a session that sets nothing
+ * parses headers as C99 while the real compile sees C11: glibc's `assert.h`
+ * substitutes its pre-C11 compat macro for `_Static_assert` and silently
+ * discards the message, and `cc_atomic.h` takes its non-atomic CAS fallback.
+ * One constant so the requirement and the sessions cannot drift apart. */
+#define CC_HOST_C_STD_OPTION "-std=c11"
+
 typedef struct CCHostCcProfile {
     char cc_path[1024];
     char flags[512];     /* leading-space flags: " -std=c11 -B..." */

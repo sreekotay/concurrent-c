@@ -1,0 +1,11 @@
+#include <ccc/script/py.cch>
+CCPy p1 = cc_py_new(&a) !> @destroy;
+CCPy p2 = cc_py_new(&a) !>(e) { println(@string(`no second`, &a)) !>; return 0; };
+p1.exec(@slice("mark='one'\n")) !>;
+p2.exec(@slice("import cc.host\nmark='two'\n")) !>;
+CCPyObj q1 = p1.eval(@slice("repr(sorted(k for k in globals() if not k.startswith('__')))")) !> @destroy;
+CCSlice a1 = q1.as_slice() !>;
+CCPyObj q2 = p2.eval(@slice("repr(sorted(k for k in globals() if not k.startswith('__')))")) !> @destroy;
+CCSlice a2 = q2.as_slice() !>;
+println(@string(`p1=${a1}  p2=${a2}`, &a)) !>;
+return 0;

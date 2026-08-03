@@ -1,0 +1,59 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/script/py.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* Every `cc_py_new` yields an interpreter.  The first takes the one
+ * `Py_Initialize` makes; a later one is isolated — its own GIL, its own
+ * module state — or the call fails saying so, never aliasing the first.
+ *
+ * Where the runtime predates the per-interpreter GIL (CPython < 3.12) the
+ * second constructor errors and the test reports the same line; where it
+ * works, isolation is checked for real. */
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
+
+    CCArena a = cc_arena_heap(kilobytes(64)) @destroy;
+    if (!a.valid()) return 1;
+
+    if (!cc_py_available()) { puts("py_isolated_interp_smoke: SKIP (no libpython)"); return 0; }
+    CCPy first = cc_py_new(&a) !>;
+    if (first.isolated != 0) return 2; /* the process interpreter is shared */
+    first.exec(@slice("marker = 'first'\n")) !>;
+
+    /* Not an availability question: libpython is loaded, and this asks
+     * whether the runtime can make an ISOLATED interpreter — a per-call
+     * failure the probe cannot see, so the Result stays long-form. */
+    CCResult_CCPy_CCPyError r2 = cc_py_new(&a);
+    if (r2.is_err()) {
+        puts("ok");
+        return 0;
+    }
+    CCPy second = CCResult_CCPy_CCPyError_value(r2);
+    if (second.isolated != 1) return 3;   /* created, so it must be isolated */
+    if (second.tstate == first.tstate) return 4;
+
+    second.exec(@slice("marker = 'second'\n")) !>;
+
+    /* Each handle's calls run in its own interpreter no matter which one
+     * happened to be current — the entry attach is a GIL handoff. */
+    CCPyObj m1 = first.import("__main__") !> @destroy;
+    CCPyObj m2 = second.import("__main__") !> @destroy;
+    CCSlice s1 = m1.get("marker")!>.as_slice()!>;
+    CCSlice s2 = m2.get("marker")!>.as_slice()!>;
+    if (s1.len != 5 || memcmp(s1.ptr, "first", 5) != 0) return 5;
+    if (s2.len != 6 || memcmp(s2.ptr, "second", 6) != 0) return 6;
+
+    /* Interleaving back the other way must not disturb either. */
+    CCSlice again = m1.get("marker")!>.as_slice()!>;
+    if (again.len != 5 || memcmp(again.ptr, "first", 5) != 0) return 7;
+
+    /* Ending the isolated interpreter reclaims it; the process one stays. */
+    cc_py_close(&second);
+    cc_py_close(&first);
+    puts("ok");
+    return 0;
+}

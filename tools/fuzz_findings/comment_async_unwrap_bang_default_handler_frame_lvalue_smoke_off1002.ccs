@@ -1,0 +1,43 @@
+/* Smoke: a bare statement-position `!>;` inside `@async` may route
+ * through the default `@errhandler` after async frame lowering has
+ * rewritten the handler binder into `__f->e`.  The err-syntax lowering
+ * must assign to that frame field, not emit an invalid declaration like
+ * `CCError __f->e = ...`.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+bool !>(CCError) may_fail(bool want_err) {
+    if (want_err) return cc_err(CC_ERR_INVALID_ARG, "boom");
+    return cc_ok(true);
+}
+
+typedef struct Sink {
+    int closed;
+} Sink;
+
+static void close_sink(Sink* sink, CCError err) {
+    if (sink) sink->closed = err.kind;
+}
+
+@async int work(bool want_err) {
+    /* Force `e` to be a frame local so the later default-handler binder
+     * rewrite sees the same framed lvalue shape Redis hit. */
+    CCError e = CC_ERROR(CC_ERR_INVALID_ARG, "seed");
+    Sink sink = (Sink){0};
+    Sink* conn = &sink;
+    @errhandler(CCError e) {
+        close_sink(conn, e);
+        return 0;
+    }
+
+    may_fail/*x*/(want_err) !>;
+    return sink.closed + (e.kind == CC_ERR_INVALID_ARG ? 7 : 8);
+}
+
+int main(void) {
+    CCTaskIntptr ok = work(false);
+    intptr_t ok_rc = cc_block_on_intptr(ok);
+    printf("ok=%ld\n", (long)ok_rc);
+    return ok_rc == 7 ? 0 : 1;
+}

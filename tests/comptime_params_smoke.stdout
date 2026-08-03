@@ -1,0 +1,7 @@
+lit 0 int a
+lit 1 const char* s
+add: [0 Box* self] [1 int x] [2 double y]
+nil: [0 Box* self]
+add forwards 2
+nil forwards 0
+v=10

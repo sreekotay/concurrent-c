@@ -1,7 +1,7 @@
 #!/usr/bin/env -S ./cc/bin/ccc
 #include <ccc/script/py.cch>
 
-CCPy py = cc_py(&a) !> @destroy;
+CCPy py = cc_py_new(&a) !> @destroy;
 
 /* Unresolved methods on CCPyObj dispatch dynamically: the method
  * identifier becomes the Python attribute; arguments marshal by static

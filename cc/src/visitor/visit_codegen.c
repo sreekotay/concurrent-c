@@ -55,6 +55,7 @@ static double cc__now_ms(void) {
 #include "preprocess/comptime_prepare.h"
 #include "result_spec.h"
 #include "util/path.h"
+#include "util/result_fn_registry.h"
 #include "util/text.h"
 #include "util/text_scan.h"
 #include "../diag/diag.h"
@@ -1786,11 +1787,18 @@ static int cc__has_final_ufcs_candidate(const char* s, size_t n) {
         } else {
             continue;
         }
+        /* Comments are filler in both gaps.  This is a GATE: a false
+         * positive costs one reparse, but a false negative means the reparse
+         * never runs and the call site survives to the C compiler verbatim —
+         * so it must accept everything the recorder would.  A comment between
+         * the name and its paren failed it, and the whole UFCS pass silently
+         * did not happen for that TU. */
+        j = cc_skip_ws_and_comments(s, n, j);
         if (j >= n || !cc_is_ident_start(s[j])) continue;
         m0 = j;
         while (j < n && cc_is_ident_char(s[j])) j++;
         m1 = j;
-        while (j < n && (s[j] == ' ' || s[j] == '\t')) j++;
+        j = cc_skip_ws_and_comments(s, n, j);
         if (j < n && s[j] == '(' &&
             !cc__is_non_ufcs_member_leftover(s + m0, m1 - m0))
             return 1;
@@ -5351,7 +5359,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
        the host compiler when the receiver type is one of the registered
        parser-safe UFCS families. */
     if (src_ufcs && ctx) {
-        char* rew = cc_rewrite_generic_family_ufcs_parser_safe(src_ufcs, src_ufcs_len);
+        char* rew = cc_rewrite_generic_family_ufcs_parser_safe(src_ufcs, src_ufcs_len, ctx->input_path);
         if (rew == (char*)-1) rew = NULL; /* site error already reported */
         if (rew) {
             if (src_ufcs != src_all) free(src_ufcs);
@@ -5606,7 +5614,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
          * parser-safe family pass.  Re-run here so cast->field.len() inside
          * lifted bodies is text-lowered before the final-UFCS reparse gate. */
         if (src_ufcs && ctx) {
-            char* rew = cc_rewrite_generic_family_ufcs_parser_safe(src_ufcs, src_ufcs_len);
+            char* rew = cc_rewrite_generic_family_ufcs_parser_safe(src_ufcs, src_ufcs_len, ctx->input_path);
             if (rew == (char*)-1) rew = NULL;
             if (rew) {
                 if (src_ufcs != src_all) free(src_ufcs);
@@ -5709,7 +5717,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             }
         }
         if (src_ufcs && ctx) {
-            char* rew = cc_rewrite_generic_family_ufcs_parser_safe(src_ufcs, src_ufcs_len);
+            char* rew = cc_rewrite_generic_family_ufcs_parser_safe(src_ufcs, src_ufcs_len, ctx->input_path);
             if (rew == (char*)-1) rew = NULL; /* site error already reported */
             if (rew) {
                 if (src_ufcs != src_all) free(src_ufcs);
@@ -5769,6 +5777,13 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                                      "__cc_uw_value", 13) < src_ufcs_len) ||
             (cc_find_ident_top_level(src_ufcs, 0, src_ufcs_len,
                                      "__cc_uw_err_at", 14) < src_ufcs_len);
+        /* Specs at or past this index were seeded from header declarations
+         * (valued registry seeding below): they join the `_Generic` roster
+         * through their own X-list but must NOT get a `CC_DECL_RESULT_SPEC`
+         * of their own — the header already defines them, and the registry
+         * only carries the MANGLED ok spelling, which is not a source
+         * type. */
+        size_t hdr_valued_seed_start = (size_t)-1;
         if (uses_uw_primitives) {
             int pi;
             if (getenv("CC_DEBUG_UW_SEED")) fprintf(stderr, "uw_seed: specs_before=%zu\n", cc__cg_result_specs.count);
@@ -5813,6 +5828,76 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                                                pre->err_type, strlen(pre->err_type),
                                                pre->mangled_ok, pre->mangled_err);
                 if (getenv("CC_DEBUG_UW_SEED")) fprintf(stderr, "uw_seed: added %s\n", pre->concrete_name);
+            }
+            /* Results declared in an INCLUDED header, not just the stdlib
+             * predeclared set.  Without these the `_Generic` falls to its
+             * default arm, which reads the first pointer-word of the struct —
+             * meaningless for a `bool ok` layout — so `!>` on such a value
+             * silently continues past a failure.  The registry only holds
+             * types from headers this TU includes, so naming one in an arm is
+             * safe by construction. */
+            {
+                size_t hi, hn = cc_result_fn_registry_count();
+                for (hi = 0; hi < hn; hi++) {
+                    const char* cn = cc_result_fn_registry_result_type_at(hi);
+                    const char* us;
+                    char ok_ty[128];
+                    size_t ok_len;
+                    if (!cn || strncmp(cn, "CCResult_", 9) != 0) continue;
+                    if (cc_result_spec_table_find_by_name(&cc__cg_result_specs, cn)) continue;
+                    if (cc_result_spec_is_stdlib_predeclared_name(cn)) continue;
+                    us = strrchr(cn + 9, '_');
+                    if (!us || !us[1]) continue;
+                    ok_len = (size_t)(us - (cn + 9));
+                    if (ok_len == 0 || ok_len >= sizeof(ok_ty)) continue;
+                    memcpy(ok_ty, cn + 9, ok_len);
+                    ok_ty[ok_len] = 0;
+                    /* Only `void`, the class proven broken and proven fixed.
+                     * Any other ok spelling here is the MANGLED form, and a
+                     * mangled name is not a source type — `charptr` is
+                     * `char*` — so seeding one would put a bogus ok_type in
+                     * the table that `cc_result_spec_emit_decl` would emit
+                     * verbatim. Valued header specs need the unmangling the
+                     * registry does not carry. */
+                    if (strcmp(ok_ty, "void") != 0) continue;
+                    (void)cc_result_spec_table_add(&cc__cg_result_specs,
+                                                   ok_ty, ok_len,
+                                                   us + 1, strlen(us + 1),
+                                                   ok_ty, us + 1);
+                    if (getenv("CC_DEBUG_UW_SEED"))
+                        fprintf(stderr, "uw_seed: added header spec %s\n", cn);
+                }
+                /* VALUED header specs join the roster too, past the
+                 * watermark: they get `_Generic` arms (the casts in an arm
+                 * never spell the ok type, so the mangled-only registry
+                 * spelling is enough) but no declaration — the header
+                 * defines the struct.  Without these arms, `!>` on a
+                 * callee the registry cannot type (a macro name) whose
+                 * Result type is header-declared falls to `default:` and
+                 * hands the whole struct to the destination. */
+                hdr_valued_seed_start = cc__cg_result_specs.count;
+                for (hi = 0; hi < hn; hi++) {
+                    const char* cn = cc_result_fn_registry_result_type_at(hi);
+                    const char* us;
+                    char ok_ty[128];
+                    size_t ok_len;
+                    if (!cn || strncmp(cn, "CCResult_", 9) != 0) continue;
+                    if (cc_result_spec_table_find_by_name(&cc__cg_result_specs, cn)) continue;
+                    if (cc_result_spec_is_stdlib_predeclared_name(cn)) continue;
+                    us = strrchr(cn + 9, '_');
+                    if (!us || !us[1]) continue;
+                    ok_len = (size_t)(us - (cn + 9));
+                    if (ok_len == 0 || ok_len >= sizeof(ok_ty)) continue;
+                    memcpy(ok_ty, cn + 9, ok_len);
+                    ok_ty[ok_len] = 0;
+                    if (strcmp(ok_ty, "void") == 0) continue; /* seeded above */
+                    (void)cc_result_spec_table_add(&cc__cg_result_specs,
+                                                   ok_ty, ok_len,
+                                                   us + 1, strlen(us + 1),
+                                                   ok_ty, us + 1);
+                    if (getenv("CC_DEBUG_UW_SEED"))
+                        fprintf(stderr, "uw_seed: added valued header spec %s\n", cn);
+                }
             }
             if (getenv("CC_DEBUG_UW_SEED")) fprintf(stderr, "uw_seed: specs_after=%zu\n", cc__cg_result_specs.count);
         } else if (getenv("CC_DEBUG_UW_SEED")) {
@@ -5922,6 +6007,10 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                     char line[512];
                     if (ri < sizeof(delayed_result_specs) && delayed_result_specs[ri]) continue;
                     if (!spec) continue;
+                    /* Valued header seeds: arm only, never a decl — the
+                     * header defines the struct and the seed's ok spelling
+                     * is mangled. */
+                    if (ri >= hdr_valued_seed_start) continue;
                     /* Stdlib-predeclared types already have `CC_DECL_RESULT_SPEC`
                      * expanded by a header (unguarded), so re-emitting would
                      * duplicate `_unwrap`/`_unwrap_err`/etc. static-inline
@@ -5959,6 +6048,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                     const CCResultSpec* spec = cc_result_spec_table_get(&cc__cg_result_specs, ri);
                     char line[320];
                     if (ri < sizeof(delayed_result_specs) && delayed_result_specs[ri]) continue;
+                    if (ri >= hdr_valued_seed_start) continue; /* own X-list below */
                     if (!spec || strcmp(spec->ok_type, "void") == 0) continue;
                     snprintf(line, sizeof(line), " \\\n    X(%s, __VA_ARGS__)", spec->concrete_name);
                     cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap, line);
@@ -5974,6 +6064,22 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                     snprintf(line, sizeof(line), " \\\n    X(%s, __VA_ARGS__)", spec->concrete_name);
                     cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap, line);
                 }
+                /* Header-declared valued Result types (registry seeds past
+                 * the watermark): same is_err/value arms, but the err arm
+                 * degrades to the CCError base view — header error types
+                 * lead with `CCError base @as`, and a raw-typed binder
+                 * would fail the handler's `e.message`. */
+                cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
+                    "\n#undef __CC_UW_RESULT_TYPES_HDR\n"
+                    "#define __CC_UW_RESULT_TYPES_HDR(X, ...)");
+                for (size_t ri = hdr_valued_seed_start; ri < cc__cg_result_specs.count; ri++) {
+                    const CCResultSpec* spec = cc_result_spec_table_get(&cc__cg_result_specs, ri);
+                    char line[320];
+                    if (ri < sizeof(delayed_result_specs) && delayed_result_specs[ri]) continue;
+                    if (!spec || strcmp(spec->ok_type, "void") == 0) continue;
+                    snprintf(line, sizeof(line), " \\\n    X(%s, __VA_ARGS__)", spec->concrete_name);
+                    cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap, line);
+                }
                 cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
                     "\n"
                     "#undef __cc_uw_arm_is_err\n"
@@ -5984,20 +6090,25 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                     "#define __cc_uw_arm_value_voidok(T, x) T: ((void)0),\n"
                     "#undef __cc_uw_arm_err_at\n"
                     "#define __cc_uw_arm_err_at(T, x, f, l) T: (cc_rt_diag_record_unwrap_site(f, l), ((T*)(void*)&(x))->u.error),\n"
+                    "#undef __cc_uw_arm_err_at_hdr\n"
+                    "#define __cc_uw_arm_err_at_hdr(T, x, f, l) T: (cc_rt_diag_record_unwrap_site(f, l), *(CCError*)(void*)&(((T*)(void*)&(x))->u.error)),\n"
                     "#undef __cc_uw_is_err\n"
                     "#define __cc_uw_is_err(__x__) _Generic((__x__), \\\n"
                     "    __CC_UW_RESULT_TYPES(__cc_uw_arm_is_err, __x__) \\\n"
                     "    __CC_UW_RESULT_TYPES_VOIDOK(__cc_uw_arm_is_err, __x__) \\\n"
+                    "    __CC_UW_RESULT_TYPES_HDR(__cc_uw_arm_is_err, __x__) \\\n"
                     "    default: (*(void* const*)(void*)&(__x__) == (void*)0))\n"
                     "#undef __cc_uw_value\n"
                     "#define __cc_uw_value(__x__) _Generic((__x__), \\\n"
                     "    __CC_UW_RESULT_TYPES(__cc_uw_arm_value, __x__) \\\n"
                     "    __CC_UW_RESULT_TYPES_VOIDOK(__cc_uw_arm_value_voidok, __x__) \\\n"
+                    "    __CC_UW_RESULT_TYPES_HDR(__cc_uw_arm_value, __x__) \\\n"
                     "    default: (__x__))\n"
                     "#undef __cc_uw_err_at\n"
                     "#define __cc_uw_err_at(__x__, __e__, __f__, __l__) _Generic((__x__), \\\n"
                     "    __CC_UW_RESULT_TYPES(__cc_uw_arm_err_at, __x__, __f__, __l__) \\\n"
                     "    __CC_UW_RESULT_TYPES_VOIDOK(__cc_uw_arm_err_at, __x__, __f__, __l__) \\\n"
+                    "    __CC_UW_RESULT_TYPES_HDR(__cc_uw_arm_err_at_hdr, __x__, __f__, __l__) \\\n"
                     "    default: (cc_rt_diag_record_unwrap_site(__f__, __l__), __cc_err_null_at(__e__, __f__, __l__)))\n");
 
                 cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,

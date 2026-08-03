@@ -332,6 +332,47 @@ ccc build --build-file path/build.cc
 
 ---
 
+## Python Interop (one boundary, two doors)
+
+```c
+#include <ccc/script/py.cch>
+```
+
+**CC embeds Python** (CC owns main):
+
+```c
+if (!cc_py_available()) { puts("SKIP (no libpython)"); return 0; }
+CCPy py = cc_py_new(&arena) !> @destroy;
+py.exec(@string(`
+    def f(x):
+        return x * 2
+    `, &arena).as_slice()) !>;   // closer's indent = margin, stripped per line
+CCPyObj m = py.import("__main__") !> @destroy;
+int64_t v = m.f(21) !>;                       // dynamic member call
+double s = m.total(py_buf(xs)) !>;            // zero-copy view, call-scoped borrow
+CCSlice out = f.map::[double](&a, xs, ks) !>; // N calls, one crossing
+```
+
+**Python imports CC** (Python owns main):
+
+```c
+void *PyInit_counter(void) {                  // CPython's own convention
+    return py_module::[Counter]("counter", NULL);
+}
+```
+
+```bash
+ccc build counter.ccs      # PyInit_ + no main → counter.abi3.so, one command
+PYTHONPATH=bin python3 -c "import counter; counter.bump(4)"
+```
+
+One binding for both (dlopen'd stable ABI — no link-time Python
+dependency; one built module serves every 3.x). Costs are measured in
+`perf/py_baseline.ccs`; full semantics in the stdlib spec's Python
+section.
+
+---
+
 ## Environment Variables
 
 | Variable | Purpose |
@@ -340,6 +381,8 @@ ccc build --build-file path/build.cc
 | `CC_OUT_DIR` | Generated C + objects (default: out/) |
 | `CC_BIN_DIR` | Linked executables (default: bin/) |
 | `CC_NO_CACHE` | Disable incremental cache |
+| `CC_CACHE_MAX_MB` | Per-directory cap on the content-addressed caches (0 = uncapped) |
+| `CC_CACHE_EVICT_INTERVAL` | Min seconds between cache sweeps (default 60) |
 
 ---
 

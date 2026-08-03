@@ -18,6 +18,12 @@ typedef struct {
 } CCResultSpecTable;
 
 void cc_result_spec_mangle_type(const char* src, size_t len, char* out, size_t out_sz);
+
+/* Set aside leading type qualifiers for an identity comparison.  The spelling
+ * is never rewritten — stripping is asked for, not applied. */
+void cc_result_spec_skip_qualifiers(const char** io_src, size_t* io_len);
+int  cc_result_spec_same_type_unqualified(const char* a, size_t a_len,
+                                          const char* b, size_t b_len);
 void cc_result_spec_format_name(const char* mangled_ok,
                                 const char* mangled_err,
                                 char* out,

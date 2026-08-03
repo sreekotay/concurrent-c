@@ -14,6 +14,7 @@
 #include "comptime/executor.h"
 #include "comptime/hook_compile.h"
 #include "preprocess/emit_limits.h"
+#include "result_spec.h"
 #include "preprocess/preprocess.h"
 #include "preprocess/type_registry.h"
 #include "preprocess/template_scan.h"
@@ -49,7 +50,7 @@ static void cc__exec_ranges_clear(void);
 
 static int cc__emit_parse_ident(const char* src, size_t len, size_t* pos,
                                 char* out, size_t cap) {
-    size_t p = cc_skip_ws_len(src, len, *pos);
+    size_t p = cc_skip_ws_and_comments(src, len, *pos);
     size_t start;
     size_t n;
     if (p >= len || !cc_is_ident_start(src[p])) return 0;
@@ -64,7 +65,7 @@ static int cc__emit_parse_ident(const char* src, size_t len, size_t* pos,
 }
 
 static int cc__emit_parse_anchor(const char* src, size_t len, size_t* pos, CCEmitAnchor* out) {
-    size_t p = cc_skip_ws_len(src, len, *pos);
+    size_t p = cc_skip_ws_and_comments(src, len, *pos);
     if (p >= len) return 0;
     if (src[p] >= '0' && src[p] <= '9') {
         int v = 0;
@@ -101,13 +102,13 @@ static int cc__emit_try_collect_cc_emit_cstr(const char* src, size_t len, size_t
     CCEmitAnchor anchor;
     char frag[4096];
     if (cc__comptime_frag_count >= CC_EMIT_PLAN_MAX_COMPTIME_FRAGMENTS) return 0;
-    p = cc_skip_ws_len(src, len, p);
+    p = cc_skip_ws_and_comments(src, len, p);
     if (p >= len || src[p] != '(') return 0;
     p++;
     if (!cc__emit_parse_anchor(src, len, &p, &anchor)) return 0;
-    p = cc_skip_ws_len(src, len, p);
+    p = cc_skip_ws_and_comments(src, len, p);
     if (p >= len || src[p] != ',') return 0;
-    p = cc_skip_ws_len(src, len, p + 1);
+    p = cc_skip_ws_and_comments(src, len, p + 1);
     if (!cc__emit_parse_c_string(src, len, &p, frag, sizeof(frag))) return 0;
     if (strlen(frag) + 1 >= sizeof(frag)) {
         fprintf(stderr, "error: cc_emit_cstr fragment exceeds %d bytes\n", CC_EMIT_FRAGMENT_MAX);
@@ -144,13 +145,13 @@ static int cc__emit_try_collect_cc_emit_format(const char* src, size_t len, size
     char fmt[4096];
     char frag[4096];
     if (cc__comptime_frag_count >= CC_EMIT_PLAN_MAX_COMPTIME_FRAGMENTS) return 0;
-    p = cc_skip_ws_len(src, len, p);
+    p = cc_skip_ws_and_comments(src, len, p);
     if (p >= len || src[p] != '(') return 0;
     p++;
     if (!cc__emit_parse_anchor(src, len, &p, &anchor)) return 0;
-    p = cc_skip_ws_len(src, len, p);
+    p = cc_skip_ws_and_comments(src, len, p);
     if (p >= len || src[p] != ',') return 0;
-    p = cc_skip_ws_len(src, len, p + 1);
+    p = cc_skip_ws_and_comments(src, len, p + 1);
     if (!cc__emit_parse_c_string(src, len, &p, fmt, sizeof(fmt))) return 0;
 
     size_t o = 0;
@@ -173,9 +174,9 @@ static int cc__emit_try_collect_cc_emit_format(const char* src, size_t len, size
         }
         if (c != 's' && c != 'd' && c != 'i') return 0;  /* unsupported conv */
         /* pull the next argument: `, <arg>` */
-        p = cc_skip_ws_len(src, len, p);
+        p = cc_skip_ws_and_comments(src, len, p);
         if (p >= len || src[p] != ',') return 0;
-        p = cc_skip_ws_len(src, len, p + 1);
+        p = cc_skip_ws_and_comments(src, len, p + 1);
         if (c == 's') {
             char arg[1024];
             if (!cc__emit_parse_c_string(src, len, &p, arg, sizeof(arg))) return 0;
@@ -255,6 +256,10 @@ typedef struct CCGenericReg {
     const void*   ext_fns[CC_GENERIC_MAX_EXT];
     void*         ext_owners[CC_GENERIC_MAX_EXT];
     size_t        ext_count;
+    /* Where the factory was declared, so a constraint it reports names its
+     * own line instead of line 1.  The factory body runs compiled and
+     * detached, so nothing else in the invoke path knows the source. */
+    size_t        site_pos;
 } CCGenericReg;
 
 #define CC_EMIT_PLAN_MAX_GENERICS 128
@@ -481,8 +486,14 @@ const char* cc_emit_plan_generic_instance_def_for_symbol(const char* fn_name) {
     fl = strlen(fn_name);
     for (size_t i = 0; i < cc__gen_instance_count; i++) {
         size_t il = strlen(cc__gen_instances[i].mangled);
+        /* An instance member, `<mangled>_<member>`. */
         if (fl > il + 1 && fn_name[il] == '_' &&
             strncmp(fn_name, cc__gen_instances[i].mangled, il) == 0)
+            return cc__gen_instances[i].def_text;
+        /* The instance itself.  A factory that names an action rather than a
+         * type emits one function called exactly `<mangled>` — its return type
+         * lives in the same fragment and is just as unreadable from the TU. */
+        if (fl == il && strcmp(fn_name, cc__gen_instances[i].mangled) == 0)
             return cc__gen_instances[i].def_text;
     }
     return NULL;
@@ -506,7 +517,7 @@ static void cc__gen_instances_clear(void) {
  * family — the same grid as `vec_new::[T]` / `map_new::[K, V]`.
  * snake(Family): '_' before an uppercase that follows a lowercase, then
  * tolower (Pair -> pair, LruCache -> lru_cache). */
-static void cc__gen_snake_name(const char* name, char* out, size_t cap) {
+void cc_emit_plan_snake_name(const char* name, char* out, size_t cap) {
     size_t o = 0;
     if (!out || cap == 0) return;
     for (size_t i = 0; name && name[i]; i++) {
@@ -532,7 +543,7 @@ int cc_emit_plan_generic_factory_for_snake_call(const char* ident,
         char snake[160];
         size_t sl;
         if (cc__generics[i].kind != CC_GENERIC_COMPILED) continue;
-        cc__gen_snake_name(cc__generics[i].name, snake, sizeof(snake));
+        cc_emit_plan_snake_name(cc__generics[i].name, snake, sizeof(snake));
         sl = strlen(snake);
         if (sl == 0 || strncmp(ident, snake, sl) != 0) continue;
         if (ident[sl] != '_' || !ident[sl + 1]) continue;
@@ -582,7 +593,8 @@ void cc_emit_plan_clear_generic_factory_registrations(void) {
 
 /* --- user generic factories (D6.1: compiled handlers) --- */
 
-void cc_emit_plan_register_generic_factory(const char* name, const char* handler_name) {
+void cc_emit_plan_register_generic_factory(const char* name, const char* handler_name,
+                                          size_t site_pos) {
     CCGenericReg* r;
     if (!name || !handler_name) return;
     r = cc__generic_find(name, CC_GENERIC_COMPILED);
@@ -600,13 +612,15 @@ void cc_emit_plan_register_generic_factory(const char* name, const char* handler
     r = cc__generic_new(name, CC_GENERIC_COMPILED);
     if (!r) return;
     r->handler_name = strdup(handler_name);
+    if (r) r->site_pos = site_pos;
     if (!r->handler_name) { cc__generic_free_entry(r); cc__generic_count--; }
 }
 
 /* Append an extension factory for `name`, creating the registry entry if the
  * base hasn't registered yet (the base requirement is checked at the use site,
  * so include/registration order across files does not matter). */
-void cc_emit_plan_register_generic_factory_extend(const char* name, const char* handler_name) {
+void cc_emit_plan_register_generic_factory_extend(const char* name, const char* handler_name,
+                                                 size_t site_pos) {
     CCGenericReg* r;
     char* h;
     if (!name || !handler_name) return;
@@ -622,6 +636,7 @@ void cc_emit_plan_register_generic_factory_extend(const char* name, const char* 
     }
     h = strdup(handler_name);
     if (!h) return;
+    if (r) r->site_pos = site_pos;
     r->ext_handlers[r->ext_count++] = h;
 }
 
@@ -721,16 +736,25 @@ int cc_emit_plan_invoke_generic_factory(const char* name, const char* mangled,
     args.items = arg_slices;
     args.len = (size_t)nargs;
     def_out[0] = '\0';
+    /* A factory that raises cc_emit_error should name ITS line, not line 1:
+       the body runs compiled and detached, so the host position has to be
+       supplied here from what registration recorded. */
+    cc_emit_plan_host_ctx_begin(r->site_pos);
     /* Base first (defines the type / `${mangled}`), then extensions in
        registration order — so extensions can reference the base's symbols. */
     if (!cc__invoke_one_factory(r->fn_ptr, name, mangled, args,
-                                def_out, def_cap, &total, 1, name))
+                                def_out, def_cap, &total, 1, name)) {
+        cc_emit_plan_host_ctx_end();
         return 0;
+    }
     for (size_t e = 0; e < r->ext_count; e++) {
         if (!cc__invoke_one_factory(r->ext_fns[e], name, mangled, args,
-                                    def_out, def_cap, &total, 0, r->ext_handlers[e]))
+                                    def_out, def_cap, &total, 0, r->ext_handlers[e])) {
+            cc_emit_plan_host_ctx_end();
             return 0;
+        }
     }
+    cc_emit_plan_host_ctx_end();
     return 1;
 }
 
@@ -839,15 +863,15 @@ static int cc__emit_try_collect_cc_generic_register(const char* src, size_t len,
     size_t p = call_pos + strlen("cc_generic_register");
     char name[128];
     char handler[128];
-    p = cc_skip_ws_len(src, len, p);
+    p = cc_skip_ws_and_comments(src, len, p);
     if (p >= len || src[p] != '(') return 0;
     p++;
     if (!cc__emit_parse_c_string(src, len, &p, name, sizeof(name))) return 0;
-    p = cc_skip_ws_len(src, len, p);
+    p = cc_skip_ws_and_comments(src, len, p);
     if (p >= len || src[p] != ',') return 0;
-    p = cc_skip_ws_len(src, len, p + 1);
+    p = cc_skip_ws_and_comments(src, len, p + 1);
     if (!cc__emit_parse_ident(src, len, &p, handler, sizeof(handler))) return 0;
-    cc_emit_plan_register_generic_factory(name, handler);
+    cc_emit_plan_register_generic_factory(name, handler, call_pos);
     return 1;
 }
 
@@ -857,15 +881,15 @@ static int cc__emit_try_collect_cc_generic_register_extend(const char* src, size
     size_t p = call_pos + strlen("cc_generic_register_extend");
     char name[128];
     char handler[128];
-    p = cc_skip_ws_len(src, len, p);
+    p = cc_skip_ws_and_comments(src, len, p);
     if (p >= len || src[p] != '(') return 0;
     p++;
     if (!cc__emit_parse_c_string(src, len, &p, name, sizeof(name))) return 0;
-    p = cc_skip_ws_len(src, len, p);
+    p = cc_skip_ws_and_comments(src, len, p);
     if (p >= len || src[p] != ',') return 0;
-    p = cc_skip_ws_len(src, len, p + 1);
+    p = cc_skip_ws_and_comments(src, len, p + 1);
     if (!cc__emit_parse_ident(src, len, &p, handler, sizeof(handler))) return 0;
-    cc_emit_plan_register_generic_factory_extend(name, handler);
+    cc_emit_plan_register_generic_factory_extend(name, handler, call_pos);
     return 1;
 }
 
@@ -926,14 +950,14 @@ static int cc__ci_collect_instantiate(const CCComptimeIntrinsicDesc* d,
     if (cc__comptime_inst_count >= CC_EMIT_PLAN_MAX_COMPTIME_FRAGMENTS) return 0;
     memset(&inst, 0, sizeof(inst));
     inst.kind = d->kind;
-    p = cc_skip_ws_len(src, len, p);
+    p = cc_skip_ws_and_comments(src, len, p);
     if (p >= len || src[p] != '(') return 0;
-    p = cc_skip_ws_len(src, len, p + 1);
+    p = cc_skip_ws_and_comments(src, len, p + 1);
     if (!cc__emit_parse_c_string(src, len, &p, inst.a, sizeof(inst.a))) return 0;
     if (d->n_args == 2) {
-        p = cc_skip_ws_len(src, len, p);
+        p = cc_skip_ws_and_comments(src, len, p);
         if (p >= len || src[p] != ',') return 0;
-        p = cc_skip_ws_len(src, len, p + 1);
+        p = cc_skip_ws_and_comments(src, len, p + 1);
         if (!cc__emit_parse_c_string(src, len, &p, inst.b, sizeof(inst.b))) return 0;
     }
     cc__comptime_insts[cc__comptime_inst_count++] = inst;
@@ -1224,6 +1248,44 @@ void cc_emit_plan_set_reflect_source(const char* src, size_t len) {
     cc__reflect_src_len = len;
 }
 
+/* The declarations a generated fragment may depend on: the file's own type
+ * definitions, plus a stand-in for every Result box collected so far.
+ *
+ * The boxes are stand-ins rather than the real `CC_DECL_RESULT_SPEC` expansion
+ * because the consumer is a syntax check compiled without the prelude that
+ * defines that macro.  The shape is the documented lowering — tag plus a union
+ * of value and error — so member access through `cc_is_ok` / `cc_value` parses
+ * exactly as it will in the merged TU.
+ *
+ * Caller frees; NULL when there is nothing to say. */
+char* cc_emit_plan_reflect_type_prelude(void) {
+    char* types = NULL;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    const CCResultSpecTable* tbl = cc_result_spec_table_get_global();
+    if (cc__reflect_src && cc__reflect_src_len > 0)
+        types = cc_ct_extract_type_decls_prelude(cc__reflect_src, cc__reflect_src_len);
+    if (types && types[0]) cc_sb_append_cstr(&out, &out_len, &out_cap, types);
+    free(types);
+    if (tbl) {
+        for (size_t i = 0; i < tbl->count; i++) {
+            const CCResultSpec* sp = cc_result_spec_table_get(tbl, i);
+            char line[1024];
+            if (!sp || !sp->concrete_name[0]) continue;
+            if (strcmp(sp->ok_type, "void") == 0)
+                snprintf(line, sizeof(line),
+                         "typedef struct { int ok; union { %s error; } u; } %s;\n",
+                         sp->err_type, sp->concrete_name);
+            else
+                snprintf(line, sizeof(line),
+                         "typedef struct { int ok; union { %s value; %s error; } u; } %s;\n",
+                         sp->ok_type, sp->err_type, sp->concrete_name);
+            cc_sb_append_cstr(&out, &out_len, &out_cap, line);
+        }
+    }
+    return out;
+}
+
 /* Copy `s` into out (NUL-terminated, truncated to out_sz). Returns bytes written. */
 static int cc__rfl_emit(const char* s, char* out, int out_sz) {
     int wlen = (int)strlen(s);
@@ -1265,6 +1327,175 @@ int cc_reflect_field_name(const char* type_name, int idx, char* buf, int buf_sz)
 
 int cc_reflect_field_type(const char* type_name, int idx, char* buf, int buf_sz) {
     return cc__reflect_field_member(type_name, idx, 1, buf, buf_sz);
+}
+
+/* --- method reflection host verbs ---
+ * The value-level face of `type_of(T).methods`, so a compiled factory can
+ * enumerate what the `@comptime for` surface enumerates.  Same bytes-only waist
+ * as the field verbs: names and spellings copy out, nothing crosses by
+ * pointer. */
+int cc_reflect_method_count(const char* type_name) {
+    CCCtField* ms = NULL;
+    size_t nm = 0;
+    if (!cc_ct_reflect_type_methods(cc__reflect_src, cc__reflect_src_len,
+                                    type_name, &ms, &nm))
+        return -1;
+    cc_ct_free_fields(ms, nm);
+    return (int)nm;
+}
+
+/* Which spelling to copy out of one method entry. */
+enum { CC__RM_NAME = 0, CC__RM_MEMBER, CC__RM_PARAMS, CC__RM_ARGS, CC__RM_RET, CC__RM_ERR };
+
+/* Drop the types from a parameter list, leaving `(a, b)` — the call form,
+ * whose every name the generated body already declared. */
+static int cc__rm_args_of(const char* params, char* buf, int buf_sz) {
+    CCCtField* ps = NULL;
+    size_t pn = 0, len;
+    char* acc;
+    int rc;
+    if (!params || !*params) return cc__rfl_emit("()", buf, buf_sz);
+    if (!cc_ct_reflect_param_list(params, &ps, &pn)) return -1;
+    len = 3;
+    for (size_t k = 0; k < pn; k++) len += strlen(ps[k].name) + 2;
+    acc = (char*)malloc(len);
+    if (!acc) { cc_ct_free_fields(ps, pn); return -1; }
+    acc[0] = '('; acc[1] = '\0';
+    for (size_t k = 0; k < pn; k++) {
+        if (k) strcat(acc, ", ");
+        strcat(acc, ps[k].name);
+    }
+    strcat(acc, ")");
+    cc_ct_free_fields(ps, pn);
+    rc = cc__rfl_emit(acc, buf, buf_sz);
+    free(acc);
+    return rc;
+}
+
+static int cc__reflect_method_member(const char* type_name, int idx, int want,
+                                     char* buf, int buf_sz) {
+    CCCtField* ms = NULL;
+    size_t nm = 0;
+    int rc = -1;
+    if (buf && buf_sz > 0) buf[0] = '\0';
+    if (!cc_ct_reflect_type_methods(cc__reflect_src, cc__reflect_src_len,
+                                    type_name, &ms, &nm))
+        return -1;
+    if (idx >= 0 && (size_t)idx < nm) {
+        const CCCtField* m = &ms[idx];
+        const char* bang = m->type ? strstr(m->type, "!>") : NULL;
+        switch (want) {
+        case CC__RM_NAME:   rc = cc__rfl_emit(m->name, buf, buf_sz); break;
+        case CC__RM_MEMBER: rc = cc__rfl_emit(m->member ? m->member : m->name, buf, buf_sz); break;
+        case CC__RM_PARAMS: rc = cc__rfl_emit(m->params ? m->params : "(void)", buf, buf_sz); break;
+        case CC__RM_ARGS:   rc = cc__rm_args_of(m->params, buf, buf_sz); break;
+        case CC__RM_RET: {
+            /* The ok half: everything before `!>`, trailing blanks trimmed. */
+            size_t n = bang ? (size_t)(bang - m->type) : strlen(m->type ? m->type : "");
+            char* ok;
+            while (n > 0 && (m->type[n - 1] == ' ' || m->type[n - 1] == '\t')) n--;
+            ok = (char*)malloc(n + 1);
+            if (ok) {
+                memcpy(ok, m->type, n); ok[n] = '\0';
+                rc = cc__rfl_emit(ok, buf, buf_sz);
+                free(ok);
+            }
+            break;
+        }
+        case CC__RM_ERR: {
+            /* Empty for an infallible method, which is how `fallible` reads. */
+            const char* lp = bang ? strchr(bang, '(') : NULL;
+            const char* rp = lp ? strrchr(lp, ')') : NULL;
+            if (lp && rp && rp > lp + 1) {
+                const char* a = lp + 1;
+                size_t n;
+                char* er;
+                while (a < rp && (*a == ' ' || *a == '\t')) a++;
+                n = (size_t)(rp - a);
+                while (n > 0 && (a[n - 1] == ' ' || a[n - 1] == '\t')) n--;
+                er = (char*)malloc(n + 1);
+                if (er) {
+                    memcpy(er, a, n); er[n] = '\0';
+                    rc = cc__rfl_emit(er, buf, buf_sz);
+                    free(er);
+                }
+            } else {
+                rc = cc__rfl_emit("", buf, buf_sz);
+            }
+            break;
+        }
+        default: break;
+        }
+    }
+    cc_ct_free_fields(ms, nm);
+    return rc;
+}
+
+/* The concrete name of the Result box for `ok !>(err)`.
+ *
+ * A generated forward declaration cannot use `__typeof__` — there is no
+ * expression yet — so it has to spell the box.  Spelling it by hand would
+ * re-derive canonicalization at a second site, which is how two spellings
+ * drift apart; this returns the canonicalizer's own answer. */
+int cc_result_box_name(const char* ok_type, const char* err_type,
+                       char* buf, int buf_sz) {
+    char mok[256], merr[256], name[512];
+    if (buf && buf_sz > 0) buf[0] = '\0';
+    if (!ok_type || !err_type || !*ok_type || !*err_type) return -1;
+    cc_result_spec_mangle_type(ok_type, strlen(ok_type), mok, sizeof(mok));
+    cc_result_spec_mangle_type(err_type, strlen(err_type), merr, sizeof(merr));
+    if (!mok[0] || !merr[0]) return -1;
+    cc_result_spec_format_name(mok, merr, name, sizeof(name));
+    return cc__rfl_emit(name, buf, buf_sz);
+}
+
+int cc_reflect_method_name(const char* type_name, int idx, char* buf, int buf_sz) {
+    return cc__reflect_method_member(type_name, idx, CC__RM_NAME, buf, buf_sz);
+}
+/* Parameter reflection over a parenthesized list, so a factory can walk a
+ * method's parameters without CCCtField crossing the waist. */
+int cc_reflect_param_count(const char* params) {
+    CCCtField* ps = NULL;
+    size_t pn = 0;
+    if (!params || !cc_ct_reflect_param_list(params, &ps, &pn)) return -1;
+    cc_ct_free_fields(ps, pn);
+    return (int)pn;
+}
+
+static int cc__reflect_param_member(const char* params, int idx, int want_type,
+                                    char* buf, int buf_sz) {
+    CCCtField* ps = NULL;
+    size_t pn = 0;
+    int rc = -1;
+    if (buf && buf_sz > 0) buf[0] = '\0';
+    if (!params || !cc_ct_reflect_param_list(params, &ps, &pn)) return -1;
+    if (idx >= 0 && (size_t)idx < pn)
+        rc = cc__rfl_emit(want_type ? ps[idx].type : ps[idx].name, buf, buf_sz);
+    cc_ct_free_fields(ps, pn);
+    return rc;
+}
+
+int cc_reflect_param_name(const char* params, int idx, char* buf, int buf_sz) {
+    return cc__reflect_param_member(params, idx, 0, buf, buf_sz);
+}
+int cc_reflect_param_type(const char* params, int idx, char* buf, int buf_sz) {
+    return cc__reflect_param_member(params, idx, 1, buf, buf_sz);
+}
+
+int cc_reflect_method_member(const char* type_name, int idx, char* buf, int buf_sz) {
+    return cc__reflect_method_member(type_name, idx, CC__RM_MEMBER, buf, buf_sz);
+}
+int cc_reflect_method_params(const char* type_name, int idx, char* buf, int buf_sz) {
+    return cc__reflect_method_member(type_name, idx, CC__RM_PARAMS, buf, buf_sz);
+}
+int cc_reflect_method_args(const char* type_name, int idx, char* buf, int buf_sz) {
+    return cc__reflect_method_member(type_name, idx, CC__RM_ARGS, buf, buf_sz);
+}
+int cc_reflect_method_ret(const char* type_name, int idx, char* buf, int buf_sz) {
+    return cc__reflect_method_member(type_name, idx, CC__RM_RET, buf, buf_sz);
+}
+int cc_reflect_method_err(const char* type_name, int idx, char* buf, int buf_sz) {
+    return cc__reflect_method_member(type_name, idx, CC__RM_ERR, buf, buf_sz);
 }
 
 /* --- enum reflection host verbs (edge-push #1) ---
@@ -2042,6 +2273,19 @@ static int cc__emit_plan_block_references_container(const char* src, size_t bloc
 
 size_t cc_emit_plan_compute_prelude_insert_pos(const char* src, size_t len) {
     size_t insert_pos = 0;
+    /* Directives are skipped one line at a time, which walks straight INTO a
+     * `#ifndef X` / `#define X 1` guard and stops at the first ordinary line
+     * inside it.  Inside CC's own generated `#ifndef CCResult_..._DEFINED`
+     * blocks that is fatal: the guard is normally already defined by a header,
+     * so the fragment is emitted, looks spliced, and is compiled away —
+     * surfacing as an implicit declaration at the use site with nothing
+     * pointing back here.
+     *
+     * Only those blocks are skipped.  A hand-written conditional is a
+     * legitimate anchor: a header that declares Result boxes under guards
+     * needs the fragment to land among them. */
+    size_t cond_depth = 0;
+    size_t gen_guard_depth = 0;
     if (!src || len == 0) return 0;
     while (insert_pos < len) {
         size_t line_start = insert_pos;
@@ -2061,6 +2305,39 @@ size_t cc_emit_plan_compute_prelude_insert_pos(const char* src, size_t len) {
             continue;
         }
         if (p < line_end && src[p] == '#') {
+            size_t d = p + 1;
+            while (d < line_end && (src[d] == ' ' || src[d] == '\t')) d++;
+            if ((d + 2 <= line_end && memcmp(src + d, "if", 2) == 0)) {
+                cond_depth++;                 /* #if / #ifdef / #ifndef */
+                if (!gen_guard_depth &&
+                    d + 7 <= line_end && memcmp(src + d, "ifndef", 6) == 0) {
+                    size_t g = d + 6;
+                    while (g < line_end && (src[g] == ' ' || src[g] == '\t')) g++;
+                    if (g + 9 <= line_end && memcmp(src + g, "CCResult_", 9) == 0)
+                        gen_guard_depth = cond_depth;
+                }
+            } else if (d + 5 <= line_end && memcmp(src + d, "endif", 5) == 0 &&
+                       cond_depth > 0) {
+                if (gen_guard_depth == cond_depth) gen_guard_depth = 0;
+                cond_depth--;
+            }
+            /* A directive continued with `\` owns the lines that follow it.
+             * Stopping inside a multi-line `#define` body splices the fragment
+             * into a macro definition, where it is not code at all. */
+            for (;;) {
+                size_t e = line_end;
+                while (e > line_start && (src[e - 1] == '\r' || src[e - 1] == ' ' ||
+                                          src[e - 1] == '\t')) e--;
+                if (e == line_start || src[e - 1] != '\\' || line_end >= len) break;
+                line_start = line_end + 1;
+                line_end = line_start;
+                while (line_end < len && src[line_end] != '\n') line_end++;
+            }
+            insert_pos = (line_end < len) ? line_end + 1 : line_end;
+            continue;
+        }
+        if (gen_guard_depth > 0) {
+            /* Inside a generated Result guard: keep going, never anchor. */
             insert_pos = (line_end < len) ? line_end + 1 : line_end;
             continue;
         }

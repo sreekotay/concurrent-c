@@ -1,0 +1,36 @@
+/* A `CC`-prefixed receiver gets the same dispatch ladder as any other.
+ *
+ * It did not: the text pass claimed every CC-prefixed member call whether or
+ * not the composed snake callee existed, so the call never reached the AST
+ * pass that owns the PascalCase family spelling and the universal bare-name
+ * tier. Naming your own type by the stdlib convention silently cost you two
+ * tiers, and the diagnostic named a function you never wrote.
+ *
+ * The claim is now conditioned on the same compose-then-verify predicate the
+ * sink path already used — the callee is declared here or in an included
+ * header — so an unverified claim cannot swallow the ladder. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct Widget  { long long w; } Widget;
+typedef struct CCThing { long long w; } CCThing;
+
+/* snake twin */
+static long long widget_area(Widget *self)      { return self->w * 2; }
+static long long cc_thing_area(CCThing *self)   { return self->w * 2; }
+/* exact family spelling */
+static long long Widget_scale(Widget *self, long long k)   { return self->w * k; }
+static long long CCThing_scale(CCThing *self, long long k) { return self->w * k; }
+/* bare name — reached through the universal tier */
+static long long peek_w(Widget *self)  { return self->w; }
+static long long peek_t(CCThing *self) { return self->w; }
+
+int main(void) {
+    Widget  w = { .w = 6 };
+    CCThing t = { .w = 6 };
+
+    printf("snake  %lld %lld\n", w.area(),     t.area());
+    printf("family %lld %lld\n", w.scale(7),   t.scale(7));
+    printf("bare   %lld %lld\n", w.peek_w(),   t.peek_t());
+    return 0;
+}

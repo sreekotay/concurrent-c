@@ -1,0 +1,23 @@
+/* A CPython extension module, in one command:
+ *
+ *     ccc build examples/recipe_py_module.ccs
+ *     PYTHONPATH=bin python3 -c "import counter; print(counter.bump(4))"
+ *
+ * No flag says "module": the TU exports `PyInit_counter` and defines no
+ * `main`, so the build links a shared object named counter.abi3.so.  Python
+ * imports CC the same way CC imports Python — one boundary, two doors. */
+#include <ccc/script/py.cch>
+
+typedef struct Counter { long long n; } Counter;
+
+static long long Counter_bump(Counter *self, long long by) {
+    self->n += by;
+    return self->n;
+}
+static long long Counter_total(Counter *self) {
+    return self->n;
+}
+
+void *PyInit_counter(void) {
+    return py_module::[Counter]("counter", NULL);
+}

@@ -1,0 +1,18 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+typedef struct Box { int v; } Box;
+static int plain(Box* self) { return self->v; }
+static int !>(CCError) risky(Box* self) {
+    if (self->v < 0) return cc_err(CC_ERR_INVALID_ARG, "neg");
+    return cc_ok(self->v * 2);
+}
+int main(void) {
+    @errhandler(CCError e) { printf("H:%s\n", e.message); return 1; }
+    Box b = { .v = 21 };
+    @comptime for (m in type_of(Box).methods) {
+        printf("%s fallible=%d err=[%s]\n", m.name, m.fallible, "E");
+        { m.ret v0 = 0; (void)v0; }
+    }
+    return 0;
+}

@@ -1,0 +1,5 @@
+#include <ccc/std/prelude.cch>
+int n = 7;
+println(@string(`sigil '!>' and n=${n}`, &a)) !>;
+println(@string(`bare !> here`, &a)) !>;
+return 0;

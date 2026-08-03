@@ -1,0 +1,158 @@
+// WRITE projection of `one of` (tagged-union) schemas: cc_write/cc_format
+// switch on `kind` and each arm emits its variant's product terms exactly as
+// the product writer would — leading literals become bytes, ints print,
+// length/count fields are DERIVED from the data (stored values are ignored),
+// and self-typed `items` recurse (the RESP array variant). An out-of-range
+// kind refuses to emit anything: 0 bytes, the writer's error convention.
+// User construction uses the protected arm surface (not raw `.u`).
+#include <ccc/std/prelude.cch>
+
+@grammar(schema) Reply {~~~~
+    rules [
+        digit:  charset [#'0' - #'9']
+        number: keep [opt #'-' some digit]
+        lchar:  complement charset [#'\r' #'\n']
+        line:   keep [any lchar]
+    ]
+    one of [
+        simple  [ #'+' s: line "\r\n" ]
+        error   [ #'-' msg: line "\r\n" ]
+        integer [ #':' v: int number "\r\n" ]
+        bulk    [ #'$' len: int number "\r\n" data: bytes len "\r\n" ]
+        array   [ #'*' n: int number "\r\n" items: items Reply n ]
+    ]
+~~~~}
+
+/* the DEFAULT-arm union: plain has no leading literal, must still write */
+@grammar(schema) Cmd {~~~~
+    rules [
+        digit:  charset [#'0' - #'9']
+        number: keep [opt #'-' some digit]
+        lchar:  complement charset [#'\r' #'\n']
+        line:   keep [any lchar]
+    ]
+    one of [
+        framed [ #'*' argc: int number "\r\n" ]
+        plain  [ text: line "\r\n" ]
+    ]
+~~~~}
+
+static int bytes_are(const char* got, size_t n, const char* want) {
+    return n == strlen(want) && memcmp(got, want, n) == 0;
+}
+
+int main(void) {
+    CCArena arena = cc_arena_create(1 << 20);
+    char buf[256];
+    size_t w;
+
+    /* each variant, constructed via arm designators */
+    {
+        Reply r = { .simple = { .s = cc_slice_from_buffer((void*)"OK", 2) } };
+        w = Reply_write(&r, buf, sizeof buf);
+        if (!bytes_are(buf, w, "+OK\r\n")) { printf("FAIL: write simple\n"); return 1; }
+
+        r = (Reply){ .error = { .msg = cc_slice_from_buffer((void*)"ERR bad key", 11) } };
+        w = cc_write(Reply, &r, buf, sizeof buf);
+        if (!bytes_are(buf, w, "-ERR bad key\r\n")) { printf("FAIL: write error\n"); return 1; }
+
+        r = (Reply){ .integer = { .v = 42 } };
+        w = Reply_write(&r, buf, sizeof buf);
+        if (!bytes_are(buf, w, ":42\r\n")) { printf("FAIL: write integer\n"); return 1; }
+        r = (Reply){ .integer = { .v = -7 } };
+        w = Reply_write(&r, buf, sizeof buf);
+        if (!bytes_are(buf, w, ":-7\r\n")) { printf("FAIL: write negative\n"); return 1; }
+
+        /* bulk: $<len> is DERIVED from data.len — stored len is a lie */
+        r = (Reply){ .bulk = {
+            .len = 999,
+            .data = cc_slice_from_buffer((void*)"hello", 5)
+        } };
+        w = Reply_write(&r, buf, sizeof buf);
+        if (!bytes_are(buf, w, "$5\r\nhello\r\n")) { printf("FAIL: write bulk\n"); return 1; }
+    }
+
+    /* nested arrays */
+    {
+        Reply inner[1] = {
+            (Reply){ .simple = { .s = cc_slice_from_buffer((void*)"A", 1) } },
+        };
+
+        Reply items[3] = {
+            (Reply){ .bulk = { .len = 7, .data = cc_slice_from_buffer((void*)"ab", 2) } },
+            (Reply){ .integer = { .v = 7 } },
+            (Reply/*x*/){ .array = { .n = 42, .items = inner, .items_n = 1 } },
+        };
+
+        Reply r = (Reply){ .array = { .n = 999, .items = items, .items_n = 3 } };
+        w = Reply_write(&r, buf, sizeof buf);
+        if (!bytes_are(buf, w, "*3\r\n$2\r\nab\r\n:7\r\n*1\r\n+A\r\n")) {
+            printf("FAIL: nested array write\n"); return 1; }
+    }
+
+    /* round-trip: parse a wire reply, write it back, byte-exact */
+    {
+        const char* src = "*3\r\n:1\r\n$2\r\nab\r\n*2\r\n+A\r\n-B\r\n";
+        Reply r;
+        if (!Reply_parse(src, strlen(src), &arena, &r)) { printf("FAIL: rt parse\n"); return 1; }
+        w = Reply_write(&r, buf, sizeof buf);
+        if (w != strlen(src) || memcmp(buf, src, w) != 0) {
+            printf("FAIL: round-trip (%zu bytes)\n", w); return 1; }
+
+        /* corrupt every stored length/count under protected projection */
+        if (r.kind == .array) {
+            r.array.n = 999;
+            Reply* items = r.array.items;
+            if (items[1].kind == .bulk) items[1].bulk.len = 77;
+            if (items[2].kind == .array) items[2].array.n = -5;
+        }
+        w = Reply_write(&r, buf, sizeof buf);
+        if (w != strlen(src) || memcmp(buf, src, w) != 0) {
+            printf("FAIL: derived counts not derived\n"); return 1; }
+
+        if (Reply_write(&r, buf, 5) != 0) { printf("FAIL: overflow accepted\n"); return 1; }
+        if (Reply_write(&r, buf, strlen(src) - 1) != 0) {
+            printf("FAIL: off-by-one cap accepted\n"); return 1; }
+        if (Reply_write(&r, buf, strlen(src)) != strlen(src)) {
+            printf("FAIL: exact cap rejected\n"); return 1; }
+
+        size_t need = cc_measure(Reply, &r);
+        if (need != w) { printf("FAIL: cc_measure %zu != write %zu\n", need, w); return 1; }
+        if (r.measure() != need) { printf("FAIL: ufcs measure\n"); return 1; }
+        CCString fs = cc_format(Reply, &r, &arena);
+        CCSlice fv = cc_string_as_slice(&fs);
+        if (fv.len != strlen(src) || memcmp(fv.ptr, src, fv.len) != 0) {
+            printf("FAIL: cc_format bytes\n"); return 1; }
+        CCString us = r.to_str(&arena);
+        CCSlice uv = cc_string_as_slice(&us);
+        if (uv.len != fv.len || memcmp(uv.ptr, fv.ptr, uv.len) != 0) {
+            printf("FAIL: ufcs to_str\n"); return 1; }
+    }
+
+    /* invalid kind: compound-literal interop escape (`.kind` designator) */
+    {
+        Reply r = { .kind = (ReplyKind)99 };
+        if (Reply_write(&r, buf, sizeof buf) != 0) {
+            printf("FAIL: bad kind accepted\n"); return 1; }
+        if (cc_measure(Reply, &r) != 0) {
+            printf("FAIL: bad kind measured\n"); return 1; }
+        CCString bs = cc_format(Reply, &r, &arena);
+        if (cc_string_as_slice(&bs).len != 0) {
+            printf("FAIL: bad kind formatted\n"); return 1; }
+    }
+
+    /* the DEFAULT arm (no leading literal) writes its terms like any other */
+    {
+        Cmd c = { .framed = { .argc = 3 } };
+        w = Cmd_write(&c, buf, sizeof buf);
+        if (!bytes_are(buf, w, "*3\r\n")) { printf("FAIL: framed write\n"); return 1; }
+
+        c = (Cmd){ .plain = { .text = cc_slice_from_buffer((void*)"PING", 4) } };
+        w = Cmd_write(&c, buf, sizeof buf);
+        if (!bytes_are(buf, w, "PING\r\n")) { printf("FAIL: plain write\n"); return 1; }
+    }
+
+    cc_arena_free(&arena);
+    printf("grammar union write OK\n");
+    return 0;
+}

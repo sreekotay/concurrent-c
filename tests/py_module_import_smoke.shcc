@@ -1,0 +1,33 @@
+/* The other door: Python imports CC.  A TU exporting `PyInit_counter`
+ * and no `main` builds — in one command, no flag — as counter.so, and
+ * `import counter` runs CC code with module state.  Skips where no
+ * python3 executable is on PATH (the .so needs a host to import it). */
+CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+
+{
+    CCCommand which = cc_command(&a, @slice("sh"));
+    which.arg("-c");
+    which.arg("command -v python3 >/dev/null 2>&1");
+    int rc = which.status() !>;
+    if (rc != 0) { "SKIP (no python3)".println() !>; return 0; }
+}
+
+{
+    CCCommand build = cc_command(&a, @slice("./cc/bin/ccc"));
+    build.arg("build");
+    build.arg("examples/recipe_py_module.ccs");
+    build.inherit_stdio();
+    int rc = build.status() !>;
+    if (rc != 0) { "build failed".println() !>; return 1; }
+}
+
+{
+    CCCommand run = cc_command(&a, @slice("sh"));
+    run.arg("-c");
+    CCString py = @string(`PYTHONPATH=bin python3 -c "import counter; print('bump', counter.bump(4)); print('bump', counter.bump(3)); print('total', counter.total())"`, &a);
+    run.arg(py.cstr(&a));
+    run.inherit_stdio();
+    int rc = run.status() !>;
+    if (rc != 0) { "import failed".println() !>; return 1; }
+}
+return 0;

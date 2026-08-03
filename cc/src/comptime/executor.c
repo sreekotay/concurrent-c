@@ -1,3 +1,4 @@
+#include "../build/host_cc_profile.h"
 #include "executor.h"
 
 #include <setjmp.h>
@@ -704,6 +705,8 @@ static TCCState* cc__exec_new_state(char* err_buf, size_t err_sz) {
         return NULL;
     }
     tcc_set_error_func(s, NULL, cc__exec_err_silent);
+    /* Parse at the version the real compile will use; see the constant. */
+    tcc_set_options(s, CC_HOST_C_STD_OPTION);
     {
         char dirbuf[1024];
         const char* libdir = cc__exec_lib_dir(dirbuf, sizeof(dirbuf));
@@ -739,6 +742,17 @@ static TCCState* cc__exec_new_state(char* err_buf, size_t err_sz) {
     tcc_add_symbol(s, "cc_reflect_field_count", (void*)cc_reflect_field_count);
     tcc_add_symbol(s, "cc_reflect_field_name", (void*)cc_reflect_field_name);
     tcc_add_symbol(s, "cc_reflect_field_type", (void*)cc_reflect_field_type);
+    tcc_add_symbol(s, "cc_result_box_name", (void*)cc_result_box_name);
+    tcc_add_symbol(s, "cc_reflect_method_count", (void*)cc_reflect_method_count);
+    tcc_add_symbol(s, "cc_reflect_method_name", (void*)cc_reflect_method_name);
+    tcc_add_symbol(s, "cc_reflect_param_count", (void*)cc_reflect_param_count);
+    tcc_add_symbol(s, "cc_reflect_param_name", (void*)cc_reflect_param_name);
+    tcc_add_symbol(s, "cc_reflect_param_type", (void*)cc_reflect_param_type);
+    tcc_add_symbol(s, "cc_reflect_method_member", (void*)cc_reflect_method_member);
+    tcc_add_symbol(s, "cc_reflect_method_params", (void*)cc_reflect_method_params);
+    tcc_add_symbol(s, "cc_reflect_method_args", (void*)cc_reflect_method_args);
+    tcc_add_symbol(s, "cc_reflect_method_ret", (void*)cc_reflect_method_ret);
+    tcc_add_symbol(s, "cc_reflect_method_err", (void*)cc_reflect_method_err);
     tcc_add_symbol(s, "cc_reflect_enum_count", (void*)cc_reflect_enum_count);
     tcc_add_symbol(s, "cc_reflect_enum_name", (void*)cc_reflect_enum_name);
     tcc_add_symbol(s, "cc_reflect_enum_value", (void*)cc_reflect_enum_value);
@@ -1034,7 +1048,10 @@ static void cc__frag_err_capture(void* opaque, const char* msg) {
 
 /* True when the message names a syntax defect intrinsic to the fragment, rather
  * than a missing dependency (unknown type, undeclared name) that only the
- * merged TU can resolve.  High-precision allowlist: never blocks on context. */
+ * merged TU can resolve.  High-precision allowlist: never blocks on context —
+ * which requires the validation TU to CARRY that context, since an unknown type
+ * name reports as "expected" too (`T *self` with `T` undeclared parses as an
+ * identifier followed by `*`).  See cc__frag_context_prelude. */
 static int cc__frag_msg_is_syntax(const char* msg) {
     if (!msg || !msg[0]) return 0;
     return strstr(msg, "expected") != NULL ||
@@ -1046,6 +1063,46 @@ static int cc__frag_msg_is_syntax(const char* msg) {
            strstr(msg, "incompatible types") != NULL;
 }
 
+/* Declare every `CCResult_*` name the fragment mentions.
+ *
+ * The boxes a fragment references are minted by the Result machinery, not
+ * written in the source, so the file's type prelude does not carry them — and
+ * a fragment that forward-declares a fallible method must name one.  The names
+ * are in the text, so they are read from the text; ok and error spellings are
+ * not recoverable from a mangled name, but this is a SYNTAX check, and the
+ * documented shape is all that member access needs to parse. */
+static void cc__frag_append_box_decls(char** out, size_t* len, size_t* cap,
+                                      const char* frag) {
+    static const char PFX[] = "CCResult_";
+    const size_t PFXN = sizeof(PFX) - 1;
+    size_t i = 0, n = frag ? strlen(frag) : 0;
+    char seen[64][256];
+    size_t nseen = 0;
+    while (i + PFXN <= n) {
+        size_t e, k;
+        int dup = 0;
+        char nm[256];
+        if (memcmp(frag + i, PFX, PFXN) != 0 ||
+            (i > 0 && (cc_is_ident_char(frag[i - 1])))) { i++; continue; }
+        e = i;
+        while (e < n && cc_is_ident_char(frag[e])) e++;
+        if (e - i >= sizeof(nm)) { i = e; continue; }
+        memcpy(nm, frag + i, e - i);
+        nm[e - i] = '\0';
+        for (k = 0; k < nseen; k++) if (strcmp(seen[k], nm) == 0) { dup = 1; break; }
+        if (!dup && nseen < sizeof(seen) / sizeof(seen[0])) {
+            char line[512];
+            snprintf(line, sizeof(line),
+                     "typedef struct { int ok; union { long long value; "
+                     "long long error; } u; } %s;\n", nm);
+            cc_sb_append_cstr(out, len, cap, line);
+            snprintf(seen[nseen], sizeof(seen[0]), "%s", nm);
+            nseen++;
+        }
+        i = e;
+    }
+}
+
 int cc_comptime_validate_c_fragment(const char* fragment,
                                     int* out_frag_line,
                                     char* err_buf, size_t err_sz) {
@@ -1054,14 +1111,36 @@ int cc_comptime_validate_c_fragment(const char* fragment,
     if (!fragment || !fragment[0]) return 0;
     if (getenv("CC_NO_FRAGMENT_VALIDATE")) return 0;
 
+    /* The file's own types go in ahead of the fragment.  A generated
+     * definition that names a user type is the normal case — a factory exists
+     * to write code about a type — and without them `T *self` parses as an
+     * unknown identifier followed by `*`, whose message ("',' expected") looks
+     * exactly like a syntax defect to the filter below.  Validating against
+     * real declarations is also what lets the check mean anything. */
+    char* types = cc_emit_plan_reflect_type_prelude();
+    {   /* Boxes named by the fragment, appended to the file's own types. */
+        size_t tl = types ? strlen(types) : 0, tc = tl + 1;
+        cc__frag_append_box_decls(&types, &tl, &tc, fragment);
+    }
+    size_t tylen = types ? strlen(types) : 0;
     size_t pre = sizeof(CC__FRAG_PRELUDE) - 1;
     size_t fl = strlen(fragment);
-    char* tu = (char*)malloc(pre + fl + 2);
-    if (!tu) return 0;   /* OOM: don't block compilation on a missing check */
-    memcpy(tu, CC__FRAG_PRELUDE, pre);
-    memcpy(tu + pre, fragment, fl);
-    tu[pre + fl] = '\n';
-    tu[pre + fl + 1] = '\0';
+    char* tu = (char*)malloc(pre + tylen + fl + 2);
+    if (!tu) { free(types); return 0; }  /* OOM: don't block on a missing check */
+    {
+        /* `#line 1 "<generic-fragment>"` closes the prelude, so the type block
+         * goes BEFORE it and fragment line numbers stay 1-based. */
+        static const char MARK[] = "#line 1 \"<generic-fragment>\"\n";
+        size_t marklen = sizeof(MARK) - 1;
+        size_t head = pre - marklen;
+        memcpy(tu, CC__FRAG_PRELUDE, head);
+        if (tylen) memcpy(tu + head, types, tylen);
+        memcpy(tu + head + tylen, MARK, marklen);
+        memcpy(tu + head + tylen + marklen, fragment, fl);
+        tu[head + tylen + marklen + fl] = '\n';
+        tu[head + tylen + marklen + fl + 1] = '\0';
+    }
+    free(types);
 
     TCCState* s = tcc_new();
     if (!s) { free(tu); return 0; }
@@ -1082,6 +1161,13 @@ int cc_comptime_validate_c_fragment(const char* fragment,
     free(tu);
 
     if (compiled >= 0) return 0;                 /* clean parse */
+    /* Only the fragment is on trial.  The context prepended above is
+     * best-effort — a type definition it carries may itself name something the
+     * validation TU has never seen — and an error inside it says nothing about
+     * the generated code.  Errors there report against `<string>`; the
+     * fragment's own report against `<generic-fragment>`, which the `#line`
+     * directive establishes. */
+    if (!strstr(sink.buf, "<generic-fragment>")) return 0;
     if (!cc__frag_msg_is_syntax(sink.buf)) return 0;  /* missing context: skip */
 
     if (err_buf && err_sz) snprintf(err_buf, err_sz, "%s", sink.buf);

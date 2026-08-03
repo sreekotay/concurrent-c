@@ -1,0 +1,22 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+typedef struct Base { int v; } Base;
+static int base_get(Base* self) { return self->v; }
+static int base_dbl(Base* self) { return self->v * 2; }
+typedef struct Wrap { Base base @as; int tag; } Wrap;
+
+int main(void) {
+    Wrap w; w.base.v = 21; w.tag = 1;
+    int n = 0;
+    @comptime for (f in type_of(Wrap).fields) {
+        @comptime if (f.is_as) {
+            @comptime for (m in type_of(f.type).methods) {
+                printf("%s.%s=%d\n", f.name, m.name, m(&w.f));
+                n++;
+            }
+        }
+    }
+    printf("composed=%d\n", n);
+    return 0;
+}

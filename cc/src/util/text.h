@@ -263,13 +263,8 @@ static inline const char* cc_skip_ws(const char* s) {
     return s;
 }
 
-static inline size_t cc_skip_ws_len(const char* s, size_t len, size_t start) {
-    while (start < len && (s[start] == ' ' || s[start] == '\t' || 
-                           s[start] == '\r' || s[start] == '\n')) {
-        start++;
-    }
-    return start;
-}
+/* No comment-blind forward skip: every inter-token gap in CC syntax can
+ * hold a comment, so use `cc_skip_ws_and_comments` below. */
 
 /* ---- String builder (dynamic buffer) ---- */
 
@@ -373,6 +368,14 @@ static inline int cc_find_matching_paren(const char* b, size_t bl, size_t lpar, 
         if (ch == '/' && ch2 == '/') { in_lc = 1; p++; continue; }
         if (ch == '/' && ch2 == '*') { in_bc = 1; p++; continue; }
         if (ch == '"' || ch == '\'') { ins = 1; q = ch; continue; }
+        /* A backtick template is one lexical region: its text is not C, so
+         * braces, quotes and apostrophes inside it must not count.  Backtick
+         * is not a C token, so skipping here is unambiguous. */
+        if (ch == '`') {
+            p++;
+            while (p < bl && b[p] != '`') { if (b[p] == '\\' && p + 1 < bl) p++; p++; }
+            continue;
+        }
         if (ch == '(') par++;
         else if (ch == ')') { par--; if (par == 0) { if (out_rpar) *out_rpar = p; return 1; } }
         else if (ch == '[') brk++;
@@ -398,6 +401,14 @@ static inline int cc_find_matching_brace(const char* b, size_t bl, size_t lbrace
         if (ch == '/' && ch2 == '/') { in_lc = 1; p++; continue; }
         if (ch == '/' && ch2 == '*') { in_bc = 1; p++; continue; }
         if (ch == '"' || ch == '\'') { ins = 1; q = ch; continue; }
+        /* A backtick template is one lexical region: its text is not C, so
+         * braces, quotes and apostrophes inside it must not count.  Backtick
+         * is not a C token, so skipping here is unambiguous. */
+        if (ch == '`') {
+            p++;
+            while (p < bl && b[p] != '`') { if (b[p] == '\\' && p + 1 < bl) p++; p++; }
+            continue;
+        }
         if (ch == '(') par++;
         else if (ch == ')') { if (par) par--; }
         else if (ch == '[') brk++;
@@ -423,6 +434,14 @@ static inline int cc_find_matching_bracket(const char* b, size_t bl, size_t lbra
         if (ch == '/' && ch2 == '/') { in_lc = 1; p++; continue; }
         if (ch == '/' && ch2 == '*') { in_bc = 1; p++; continue; }
         if (ch == '"' || ch == '\'') { ins = 1; q = ch; continue; }
+        /* A backtick template is one lexical region: its text is not C, so
+         * braces, quotes and apostrophes inside it must not count.  Backtick
+         * is not a C token, so skipping here is unambiguous. */
+        if (ch == '`') {
+            p++;
+            while (p < bl && b[p] != '`') { if (b[p] == '\\' && p + 1 < bl) p++; p++; }
+            continue;
+        }
         if (ch == '(') par++;
         else if (ch == ')') { if (par) par--; }
         else if (ch == '{') br++;
@@ -1472,23 +1491,31 @@ static inline void cc_parse_decl_name_and_type_ex(const char* stmt,
                 return;
             }
         }
-        while (after < semi && (after[0] == ' ' || after[0] == '\t' ||
-               after[0] == '\n' || after[0] == '\r')) after++;
-        /* Named `@as` embed: source form `Type name @as;` is rewritten to
-         * `Type name /@as/` (block comment) before TCC parse. Accept either. */
+        /* Named `@as` embed: source form `Type name @as;` is rewritten to a
+         * block-comment marker before TCC parse, so both spellings arrive
+         * here.  Ordinary comments around the attribute are inert, but the
+         * shared skip cannot tell the marker from a real comment — so scan
+         * the run it consumed for the marker rather than testing only the
+         * byte it landed on. */
+        {
+            size_t base = (size_t)(after - p);
+            size_t lim  = (size_t)(semi - p);
+            size_t k    = cc_skip_ws_and_comments(p, lim, base);
+            for (size_t q = base; q + 7 <= k; q++) {
+                if (p[q] == '/' && p[q + 1] == '*' && p[q + 2] == '@' &&
+                    p[q + 3] == 'a' && p[q + 4] == 's' && p[q + 5] == '*' &&
+                    p[q + 6] == '/') {
+                    if (out_is_as) *out_is_as = 1;
+                    break;
+                }
+            }
+            after = p + k;
+        }
         if (after + 3 <= semi && after[0] == '@' && after[1] == 'a' && after[2] == 's' &&
             (after + 3 == semi || !cc_is_ident_char(after[3]))) {
             if (out_is_as) *out_is_as = 1;
-            after += 3;
-            while (after < semi && (after[0] == ' ' || after[0] == '\t' ||
-                   after[0] == '\n' || after[0] == '\r')) after++;
-        } else if (after + 7 <= semi && after[0] == '/' && after[1] == '*' &&
-                   after[2] == '@' && after[3] == 'a' && after[4] == 's' &&
-                   after[5] == '*' && after[6] == '/') {
-            if (out_is_as) *out_is_as = 1;
-            after += 7;
-            while (after < semi && (after[0] == ' ' || after[0] == '\t' ||
-                   after[0] == '\n' || after[0] == '\r')) after++;
+            after = p + cc_skip_ws_and_comments(p, (size_t)(semi - p),
+                                                (size_t)(after + 3 - p));
         }
         if (after < semi && *after != '=' && *after != ';' && *after != '[') {
             return;
@@ -1504,15 +1531,25 @@ static inline void cc_parse_decl_name_and_type_ex(const char* stmt,
     {
         const char* ty_s = p;
         const char* ty_e = multi_decl_type_end ? multi_decl_type_end : name_s;
-        while (ty_s < ty_e && (*ty_s == ' ' || *ty_s == '\t' || *ty_s == '\n' || *ty_s == '\r')) ty_s++;
-        while (ty_e > ty_s && (ty_e[-1] == ' ' || ty_e[-1] == '\t' || ty_e[-1] == '\n' || ty_e[-1] == '\r')) ty_e--;
-        if (ty_e <= ty_s) return;
-        {
-            size_t type_len = (size_t)(ty_e - ty_s);
-            if (type_len >= out_type_sz) type_len = out_type_sz - 1;
-            memcpy(out_type, ty_s, type_len);
-            out_type[type_len] = '\0';
+        /* A declaration's type is its specifier TOKENS; a comment anywhere in
+         * that span is a separator, not text.  Copy code only, collapsing each
+         * inert run to one space, so the recorded type matches what the same
+         * declaration without comments would record. */
+        size_t span = (size_t)(ty_e > ty_s ? ty_e - ty_s : 0);
+        size_t si = 0;
+        size_t w = 0;
+        while (si < span && w + 1 < out_type_sz) {
+            size_t k = cc_skip_ws_and_comments(ty_s, span, si);
+            if (k > si) {
+                if (w > 0) out_type[w++] = ' ';
+                si = k;
+                continue;
+            }
+            out_type[w++] = ty_s[si++];
         }
+        while (w > 0 && out_type[w - 1] == ' ') w--;
+        if (w == 0) return;
+        out_type[w] = '\0';
         if (name_n >= out_name_sz) name_n = out_name_sz - 1;
         memcpy(out_name, name_s, name_n);
         out_name[name_n] = '\0';

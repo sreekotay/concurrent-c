@@ -1,0 +1,88 @@
+/*
+ * A rendering pipeline through the interop surface: CC owns the data, Python
+ * owns the plot.
+ *
+ *   ./cc/bin/ccc run perf/py_matplotlib_workload.ccs -- [n] [out.png]
+ *
+ * n     samples to plot (default 20000)
+ * out   output path (default out/py_plot.png)
+ *
+ * This is the shape the interop is actually for, and the opposite of
+ * `py_baseline`: one crossing carrying a lot, rather than many carrying
+ * little. The render dwarfs the marshalling, so the boundary stops mattering
+ * — which is the case where reaching for Python pays.
+ *
+ * Agg is selected before pyplot is imported: a headless process has no
+ * display, and the default backend would fail at import rather than at draw.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/script/py.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <math.h>
+
+static double now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+}
+
+int main(int argc, char **argv) {
+    @errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); return 1; }
+    CCArena a = cc_arena_heap(megabytes(64)) @destroy;
+
+    long long n = (argc > 1) ? atoll(argv[1]) : 20000;
+    const char *out_path = (argc > 2) ? argv[2] : "out/py_plot.png";
+    if (n < 2) n = 2;
+
+    if (!cc_py_available()) { puts("SKIP (no libpython)"); return 0; }
+    CCPy py = cc_py_new(&a) !>;
+
+    CCResult_void_CCPyError probe = cc_py_exec(&py, @string(`
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot
+        `, &a).as_slice());
+    if (probe.is_err()) { puts("SKIP (no matplotlib)"); return 0; }
+
+    /* A damped sine, computed in CC. */
+    double *xs = cc_arena_alloc_T_count(double, &a, (size_t)n);
+    double *ys = cc_arena_alloc_T_count(double, &a, (size_t)n);
+    if (!xs || !ys) { puts("SKIP (allocation)"); return 0; }
+    for (long long i = 0; i < n; i++) {
+        double t = (double)i / (double)(n - 1) * 20.0;
+        xs[i] = t;
+        ys[i] = exp(-t / 8.0) * sin(t * 3.0);
+    }
+
+    py.exec(@string(`
+        import matplotlib.pyplot as plt
+
+        def render(xs, ys, path):
+            fig, ax = plt.subplots(figsize=(8, 3), dpi=110)
+            ax.plot(xs, ys, linewidth=0.8)
+            ax.set_title("damped sine (computed in CC, rendered in Python)")
+            ax.set_xlabel("t")
+            ax.set_ylabel("amplitude")
+            ax.grid(True, alpha=0.3)
+            fig.tight_layout()
+            fig.savefig(path)
+            plt.close(fig)
+            import os
+            return float(os.path.getsize(path))
+        `, &a).as_slice()) !>;
+
+    CCPyObj m = py.import("__main__") !> @destroy;
+
+    double[:] xv = CCSlice_double_from_buffer(xs, (size_t)n);
+    double[:] yv = CCSlice_double_from_buffer(ys, (size_t)n);
+
+    double t0 = now_ms();
+    double bytes = m.render(xv, yv, out_path) !>;
+    double ms = now_ms() - t0;
+
+    if (bytes <= 0) { fprintf(stderr, "render produced no output\n"); return 1; }
+    printf("n=%lld  render=%.1f ms  %s (%.0f bytes)\n", n, ms, out_path, bytes);
+    return 0;
+}

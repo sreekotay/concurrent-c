@@ -1,0 +1,78 @@
+/* A swallowed error looks exactly like success, so no ordinary test can see
+ * one. This walks the grid the sigil has to cover — ok type void or valued,
+ * error type reaching the handler directly or through `@as`, at statement and
+ * expression position — and asserts each failing call REACHES the handler.
+ *
+ * Every arm returns a distinct code, so a silent continue is a wrong answer
+ * rather than a missing line. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct WrapError {
+    CCError base @as;   /* reaches @errhandler(CCError) through the face */
+    int tag;
+} WrapError;
+
+static int !>(CCError) valued_direct(int fail) {
+    if (fail) return cc_err(CC_ERR_INVALID_ARG, "valued_direct");
+    return cc_ok(1);
+}
+static void !>(CCError) void_direct(int fail) {
+    if (fail) return cc_err(CC_ERR_INVALID_ARG, "void_direct");
+    return cc_ok();
+}
+static int !>(WrapError) valued_as(int fail) {
+    WrapError e = {0};
+    if (fail) { e.base = CC_ERROR(CC_ERR_INVALID_ARG, "valued_as"); e.tag = 1; return cc_err(e); }
+    return cc_ok(2);
+}
+static void !>(WrapError) void_as(int fail) {
+    WrapError e = {0};
+    if (fail) { e.base = CC_ERROR(CC_ERR_INVALID_ARG, "void_as"); e.tag = 2; return cc_err(e); }
+    return cc_ok();
+}
+
+static int reached = 0;
+
+/* Each probe runs one failing call under a handler that records arrival.
+ * Returning normally from the probe means the sigil let execution past. */
+static int probe_void_direct(void) {
+    @errhandler(CCError e) { (void)e; reached++; return 0; }
+    void_direct(1) !>;
+    return 1;
+}
+static int probe_valued_direct(void) {
+    @errhandler(CCError e) { (void)e; reached++; return 0; }
+    int v = valued_direct(1) !>;
+    (void)v;
+    return 1;
+}
+static int probe_void_as(void) {
+    @errhandler(CCError e) { (void)e; reached++; return 0; }
+    void_as(1) !>;
+    return 1;
+}
+static int probe_valued_as(void) {
+    @errhandler(CCError e) { (void)e; reached++; return 0; }
+    int v = valued_as(1) !>;
+    (void)v;
+    return 1;
+}
+
+int main(void) {
+    int leaked = 0;
+    leaked += probe_void_direct();
+    leaked += probe_valued_direct();
+    leaked += probe_void_as();
+    leaked += probe_valued_as();
+    printf("reached=%d leaked=%d\n", reached, leaked);
+
+    /* And the success paths still deliver values. */
+    @errhandler(CCError e) { fprintf(stderr, "unexpected: %s\n", e.message); return 1; }
+    void_direct(0) !>;
+    void_as(0) !>;
+    int a = valued_direct(0) !>;
+    int b = valued_as(0) !>;
+    printf("ok a=%d b=%d\n", a, b);
+    return 0;
+}

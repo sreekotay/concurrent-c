@@ -9,6 +9,7 @@
 
 #include "util/text.h"
 #include "util/text_scan.h"
+#include "preprocess/template_scan.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -129,6 +130,55 @@ char* cc_lower_state_emit_decls(const CCLowerState* state) {
 /*
  * Rewrite T!>(E) syntax to CCResult_T_E and collect type pairs.
  */
+/* First occurrence of `name` as a whole identifier in code — comments and
+ * string literals do not count, so a box named only in prose is not mistaken
+ * for a use. */
+static const char* cc__find_ident_top_level(const char* s, size_t n, const char* name) {
+    size_t nl = name ? strlen(name) : 0;
+    size_t i = 0;
+    CCInertScan scan;
+    if (!s || !name || nl == 0) return NULL;
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0;
+    while (i < n) {
+        if (cc_inert_scan_step(&scan, s, n, &i)) continue;
+        if (i + nl <= n && memcmp(s + i, name, nl) == 0 &&
+            (i == 0 || !cc_is_ident_char(s[i - 1])) &&
+            (i + nl == n || !cc_is_ident_char(s[i + nl])))
+            return s + i;
+        i++;
+    }
+    return NULL;
+}
+
+/* Where a declaration may be spliced so that it precedes `use_pos`: the start
+ * of the last line that began at brace depth 0.  A use inside a function body
+ * or a struct body therefore anchors to the top-level construct containing it,
+ * never to a point where a declaration would be ill-formed. */
+static size_t cc__decl_insert_point(const char* s, size_t use_pos) {
+    size_t i = 0, depth = 0, line_start = 0, anchor = 0;
+    CCInertScan scan;
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0;
+    while (i < use_pos) {
+        size_t before = i;
+        if (cc_inert_scan_step(&scan, s, use_pos, &i)) {
+            /* A skipped run may span newlines; resync the line start. */
+            for (size_t k = before; k < i && k < use_pos; k++)
+                if (s[k] == '\n') { line_start = k + 1; if (depth == 0) anchor = line_start; }
+            continue;
+        }
+        if (s[i] == '\n') {
+            line_start = i + 1;
+            if (depth == 0) anchor = line_start;
+        } else if (s[i] == '{') depth++;
+        else if (s[i] == '}') { if (depth) depth--; }
+        i++;
+    }
+    (void)line_start;
+    return anchor;
+}
+
 static char* cc__lower_result_types(const char* src, size_t n, CCLowerState* state) {
     if (!src || n == 0) return NULL;
     
@@ -290,7 +340,7 @@ static char* cc__strip_generic_factory_blocks_header(const char* src, size_t n) 
 static char* cc__strip_comptime_blocks_header(const char* src, size_t n) {
     char* out = NULL;
     size_t i = 0;
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0, in_tpl = 0;
     if (!src || n == 0) return NULL;
     out = (char*)malloc(n + 1);
     if (!out) return NULL;
@@ -303,14 +353,19 @@ static char* cc__strip_comptime_blocks_header(const char* src, size_t n) {
         if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
         if (in_str) { if (c == '\\' && c2) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
         if (in_chr) { if (c == '\\' && c2) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        /* A backtick template is one lexical region: its prose is not code, so
+         * an apostrophe in it must not open a char literal that never closes
+         * and swallows the rest of the header. */
+        if (in_tpl) { if (c == '\\' && c2) { i += 2; continue; } if (c == '`') in_tpl = 0; i++; continue; }
         if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
         if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
         if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '`') { in_tpl = 1; i++; continue; }
         if (c == '\'') { in_chr = 1; i++; continue; }
         if (c == '@' && i + strlen("@comptime") < n && strncmp(src + i, "@comptime", strlen("@comptime")) == 0) {
             size_t p = i + strlen("@comptime");
             size_t body_l = 0, body_r = 0;
-            int depth = 0, ls = 0, lc = 0, st = 0, ch = 0;
+            int depth = 0, ls = 0, lc = 0, st = 0, ch = 0, tp = 0;
             while (p < n && isspace((unsigned char)src[p])) p++;
             if (p >= n) { i++; continue; }
             if (src[p] != '{') {
@@ -340,9 +395,13 @@ static char* cc__strip_comptime_blocks_header(const char* src, size_t n) {
                 if (ls) { if (d == '*' && d2 == '/') { ls = 0; p++; } continue; }
                 if (st) { if (d == '\\' && d2) { p++; continue; } if (d == '"') st = 0; continue; }
                 if (ch) { if (d == '\\' && d2) { p++; continue; } if (d == '\'') ch = 0; continue; }
+                /* Templates hold the factory's emitted C, braces and all — the
+                 * body's brace depth must not count them. */
+                if (tp) { if (d == '\\' && d2) { p++; continue; } if (d == '`') tp = 0; continue; }
                 if (d == '/' && d2 == '/') { lc = 1; p++; continue; }
                 if (d == '/' && d2 == '*') { ls = 1; p++; continue; }
                 if (d == '"') { st = 1; continue; }
+                if (d == '`') { tp = 1; continue; }
                 if (d == '\'') { ch = 1; continue; }
                 if (d == '{') { depth++; continue; }
                 if (d == '}') {
@@ -351,7 +410,20 @@ static char* cc__strip_comptime_blocks_header(const char* src, size_t n) {
                     if (depth == 0) { body_r = p; break; }
                 }
             }
-            if (body_r <= body_l) { free(out); return NULL; }
+            if (body_r <= body_l) {
+                /* Returning NULL leaves EVERY `@comptime` block in the lowered
+                 * `.h`, so one unbalanced block far away surfaces as
+                 * `declaration expected` in generated C with nothing naming
+                 * this position.  Say where it is. */
+                size_t line = 1;
+                for (size_t k = 0; k < i; k++) if (src[k] == '\n') line++;
+                fprintf(stderr,
+                        "cc: error: unterminated '@comptime' block at line %zu "
+                        "of this header; no @comptime block in it can be "
+                        "stripped\n", line);
+                free(out);
+                return NULL;
+            }
             for (size_t k = i; k <= body_r; ++k) {
                 if (out[k] != '\n') out[k] = ' ';
             }
@@ -404,6 +476,7 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
     /* Current processing buffer */
     const char* cur = input;
     size_t cur_len = input_len;
+    char* buf_ded = NULL;
     char* buf0 = NULL;
     char* buf_fac = NULL;
     char* buf_inc = NULL;
@@ -413,6 +486,16 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
     char* buf2 = NULL;
     char* buf_result_fields = NULL;
     
+    /* Pass -1: closer-anchored template dedent, so a header's @emit
+       templates carry the same bytes here as in the comptime and main
+       pipelines (all three dedent before reading a template body). */
+    {
+        size_t dlen = 0;
+        buf_ded = cc_tpl_dedent_text(cur, cur_len, input_path, &dlen);
+        if (buf_ded == (char*)-1) return NULL; /* diagnosed */
+        if (buf_ded) { cur = buf_ded; cur_len = dlen; }
+    }
+
     /* Pass 0: Strip raw @comptime blocks and function definitions so lowered
        headers are valid C. Functions and `@comptime { }` blocks are harvested
        into including CC TUs (see cc_harvest_header_comptime_functions /
@@ -484,35 +567,55 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
     /* Build final output */
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
-    /* Emit auto-generated type declarations at the end of the file 
-       (before any closing #endif for the include guard) */
-    char* decls = cc_lower_state_emit_decls(&state);
-    
-    if (decls) {
-        /* Find the location of the final #endif (include guard) */
-        const char* last_endif = NULL;
-        const char* p = cur;
-        while ((p = strstr(p, "#endif")) != NULL) {
-            last_endif = p;
-            p++;
+    /* Each collected Result box is declared just before its own first use.
+     *
+     * Declaring them all at the end (before the closing include guard) is only
+     * enough when the box already exists — which is why a header returning
+     * `int !>(E)` worked and `long long !>(E)` did not: the prelude predeclares
+     * the single-word instances, so the late declaration was dead code and
+     * nobody noticed it was late.  A newly minted box has to precede the
+     * function whose return type names it.
+     *
+     * Per-use placement rather than one block at the top, because an ok type
+     * may be declared inside this header: the first use necessarily follows
+     * that declaration, so anchoring to the use is correct in both directions. */
+    if (state.result_specs.count > 0) {
+        typedef struct { size_t pos; char decl[512]; } CCDeclAt;
+        CCDeclAt* items = (CCDeclAt*)calloc(state.result_specs.count, sizeof(CCDeclAt));
+        size_t nitems = 0;
+        if (items) {
+            for (size_t i = 0; i < state.result_specs.count; i++) {
+                const CCResultSpec* sp = cc_result_spec_table_get(&state.result_specs, i);
+                const char* hit;
+                if (!sp) continue;
+                hit = cc__find_ident_top_level(cur, cur_len, sp->concrete_name);
+                if (!hit) continue;
+                items[nitems].pos = cc__decl_insert_point(cur, (size_t)(hit - cur));
+                cc_result_spec_emit_decl(sp, items[nitems].decl, sizeof(items[nitems].decl));
+                nitems++;
+            }
+            /* Ascending by insertion point so one forward pass can splice. */
+            for (size_t a = 1; a < nitems; a++) {
+                CCDeclAt tmp = items[a];
+                size_t b = a;
+                while (b > 0 && items[b - 1].pos > tmp.pos) { items[b] = items[b - 1]; b--; }
+                items[b] = tmp;
+            }
         }
-
-        if (last_endif) {
-            /* Insert declarations before the final #endif */
-            size_t insert_pos = (size_t)(last_endif - cur);
-            cc_sb_append(&out, &out_len, &out_cap, cur, insert_pos);
-            cc_sb_append_cstr(&out, &out_len, &out_cap, "\n/* --- CC auto-generated type declarations --- */\n");
-            cc_sb_append_cstr(&out, &out_len, &out_cap, decls);
-            cc_sb_append_cstr(&out, &out_len, &out_cap, "/* --- end auto-generated --- */\n\n");
-            cc_sb_append(&out, &out_len, &out_cap, last_endif, cur_len - insert_pos);
-        } else {
-            /* No include guard found - append at end */
-            cc_sb_append(&out, &out_len, &out_cap, cur, cur_len);
-            cc_sb_append_cstr(&out, &out_len, &out_cap, "\n/* --- CC auto-generated type declarations --- */\n");
-            cc_sb_append_cstr(&out, &out_len, &out_cap, decls);
-            cc_sb_append_cstr(&out, &out_len, &out_cap, "/* --- end auto-generated --- */\n");
+        if (nitems > 0) {
+            size_t last = 0;
+            for (size_t a = 0; a < nitems; a++) {
+                cc_sb_append(&out, &out_len, &out_cap, cur + last, items[a].pos - last);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "/* --- CC auto-generated type declaration --- */\n");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, items[a].decl);
+                last = items[a].pos;
+            }
+            cc_sb_append(&out, &out_len, &out_cap, cur + last, cur_len - last);
+        } else if (cur != input) {
+            out = strdup(cur);
+            out_len = cur_len;
         }
-        free(decls);
+        free(items);
     } else if (cur != input) {
         /* No declarations to add, but we did rewrites */
         out = strdup(cur);
@@ -520,6 +623,7 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
     }
     
     /* Cleanup */
+    free(buf_ded);
     free(buf0);
     free(buf_fac);
     free(buf_inc);

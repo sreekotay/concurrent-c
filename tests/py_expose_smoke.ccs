@@ -1,0 +1,62 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/script/py.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* A CC type exposed as a Python module: `py_expose::[T]`.
+ *
+ * The module IS the type. Its methods are the module's functions and the
+ * receiver is the module's per-interpreter state — the same reading of "first
+ * parameter" the language already dispatches on, so nothing new declares what
+ * a member is, and nothing is listed twice.
+ *
+ * The Python name is the method's UFCS member name, what a caller writes after
+ * the dot in CC. `Counter_add` stays long and searchable at file scope and is
+ * `add` in Python; the export list and the callable list are one list.
+ *
+ * All three shapes are here — valued, void, fallible — because getting one
+ * wrong does not produce a wrong answer, it fails to compile: a void call
+ * cannot initialize anything, and a Result cannot initialize its ok type
+ * unconsumed. That is why the generator selects on `m.ret_void` and
+ * `m.fallible` rather than on a naming convention.
+ *
+ * Embedded Python is a backtick template: real newlines and real indentation,
+ * which matters most for the one language here where indentation is syntax. */
+
+typedef struct Counter { CCArena *arena; long long n; } Counter;
+
+static long long Counter_add(Counter *self, long long a, long long b) { (void)self; return a + b; }
+static long long Counter_bump(Counter *self, long long by) { self->n += by; return self->n; }
+static void      Counter_reset(Counter *self) { self->n = 0; }
+static long long !>(CCError) Counter_divide(Counter *self, long long a, long long b) {
+    (void)self;
+    if (b == 0) return cc_err(CC_ERR_INVALID_ARG, "division by zero");
+    return cc_ok(a / b);
+}
+
+int main(void) {
+    @errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); return 1; }
+    CCArena a = cc_arena_heap(kilobytes(64)) @destroy;
+    if (!cc_py_available()) { puts("SKIP (no libpython)"); return 0; }
+    CCPy py = cc_py_new(&a) !>;
+
+    Counter seed = { .arena = &a, .n = 0 };
+    py_expose::[Counter](&py, "counter", &seed) !>;
+
+    py.exec(@string(`
+import cc.counter as c
+out = [c.add(20, 22), c.bump(5), c.bump(2), c.divide(84, 2)]
+c.reset()
+out.append(c.bump(1))
+for call, args in (("divide", (1, 0)), ("add", ("x", 1)), ("add", (1,))):
+    try:
+        getattr(c, call)(*args)
+    except Exception as e:
+        out.append(type(e).__name__)
+`, &a).as_slice()) !>;
+
+    CCPyObj m = py.import("__main__") !> @destroy;
+    CCSlice rs = m.get("out")!>.as_slice()!>;
+    printf("%.*s\n", (int)rs.len, (const char*)rs.ptr);
+    return 0;
+}

@@ -1,0 +1,98 @@
+/*
+ * Recipe: Python interop
+ *
+ * A Python object is a value with a home interpreter, and every call
+ * that can fail returns a Result. So the whole surface is ONE rule:
+ *
+ *     obj.anything(args) is the Python attribute, and `!>` is how a
+ *     Python failure becomes a CC error.
+ *
+ * Everything else is spelling. Source text goes in with py.exec /
+ * py.eval; values come out with as_i64 / as_f64 / as_slice, or
+ * as_list::[T] for a whole sequence; failures carry the exception
+ * class and the Python traceback.
+ *
+ *    1. Open           cc_py_new(&arena) !> @destroy
+ *    2. Source text    py.exec(...) / py.eval(...)
+ *    3. Modules        py.import("statistics")
+ *    4. Calls          st.mean(xs)        — the method IS the attribute
+ *    5. Chains         py.import(..)!>.get(..)!>.as_slice()!>
+ *    6. Sequences      lst.as_list::[double](&arena)
+ *    7. Failure        e.type_name, e.traceback
+ *    8. Keywords       f(x, py_kw("width", 4))
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/script/py.cch>
+#include <stdio.h>
+
+int main(void) {
+    /* `cc_error_site()` names the `!>` that routed the error here — the CC
+     * position a Python exception's message does not carry. */
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s (at %s)\n", e.message, cc_error_site());
+        return 1;
+    }
+
+    CCArena arena = cc_arena_heap(megabytes(1)) @destroy;
+
+    /* 1. The handle owns the interpreter; its arena backs error text and
+     *    extracted values.  `cc_py_available()` is the boolean form of the
+     *    question — probe it to degrade gracefully, and `!>` on the
+     *    constructor then means a real failure. */
+    if (!cc_py_available()) { puts("SKIP (no libpython)"); return 0; }
+    CCPy py = cc_py_new(&arena) !> @destroy;
+
+    /* 2. Source text goes straight in. exec and eval share `__main__`,
+     *    so what one defines the next can use. */
+    py.exec(@string(`
+        def scale(xs, k):
+            return [x * k for x in xs]
+        def pad(n, width=2, fill=' '):
+            return str(n).rjust(width, fill)
+        `, &arena).as_slice()) !>;
+
+    CCPyObj scaled = py.eval(@slice("scale([1.5, 2.5, 3.0], 2)")) !> @destroy;
+
+    /* 6. A Python sequence becomes a typed run of T. */
+    CCSlice ys = scaled.as_list::[double](&arena) !>;
+    double* yv = (double*)ys.ptr;
+    printf("scaled=%zu first=%g last=%g\n", ys.len, yv[0], yv[ys.len - 1]);
+
+    /* 3 + 4. An imported module is an object; its attributes are
+     *    methods. Arguments marshal by static type — a typed slice
+     *    goes over as a list. */
+    CCPyObj st = py.import("statistics") !> @destroy;
+    double xs[:] = {1.0, 2.0, 3.0, 4.0, 42.0};
+    double mean = st.mean(xs) !>;
+    printf("mean=%g\n", mean);
+
+    /* 5. `!>` links hops: each unwraps, the next dispatches on the
+     *    unwrapped value. */
+    CCSlice ver = py.import("sys")!>.get("version")!>.as_slice()!>;
+    printf("python=%.6s\n", (const char*)ver.ptr);
+
+    /* 8. A keyword argument is an ordinary argument that carries the name
+     *    it binds to; order among keywords does not matter. */
+    CCPyObj main = py.import("__main__") !> @destroy;
+    CCSlice pad = main.pad(7, py_kw("width", 4), py_kw("fill", "0"))
+                      !>.as_slice()!>;
+    printf("pad=%.*s\n", (int)pad.len, (const char*)pad.ptr);
+
+    /* 7. A failure carries the exception class and, when it crossed
+     *    Python frames, the formatted traceback. The handler recovers
+     *    this hop alone. */
+    py.exec(@string(`
+        def boom():
+            return 1 / 0
+        `, &arena).as_slice()) !>;
+
+    CCPyObj bad = py.eval(@slice("boom()")) !>(e) {
+        printf("caught %.*s\n", (int)e.type_name.len, (const char*)e.type_name.ptr);
+        printf("traceback lines=%d\n", e.traceback.len > 0);
+        return 0;
+    } @destroy;
+    (void)bad;
+
+    printf("unreachable\n");
+    return 9;
+}

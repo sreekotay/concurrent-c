@@ -1,0 +1,54 @@
+/* `@comptime if` and `@comptime for` are text unrollers: their braces delimit
+ * the text to splice, they are not C blocks. Nothing wraps the spliced text,
+ * because the same construct emits declarations at file scope, where a block
+ * would be a syntax error.
+ *
+ * So a name declared in a body is declared in whatever scope the construct
+ * sits in — once per surviving arm, once per iteration. Write an explicit
+ * block when you want per-iteration scope. This pins both halves: the arm
+ * selection (including a negated predicate) and the scoping rule that makes
+ * reusing one name across iterations legal. */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+typedef struct Box { int v; } Box;
+
+static int plain(Box* self) { return self->v; }
+static int !>(CCError) risky(Box* self) {
+    if (self->v < 0) return cc_err(CC_ERR_INVALID_ARG, "neg");
+    return cc_ok(self->v * 2);
+}
+
+int main(void) {
+    @errhandler(CCError e) { printf("H:%s\n", e.message); return 1; }
+    Box b = { .v = 21 };
+
+    /* Two-arm shape selection. The arms differ in more than text — the
+     * fallible one consumes a Result — so picking the wrong one would not
+     * compile, and emitting both would declare `r` twice in one scope. The
+     * explicit inner block is what gives each iteration its own scope. */
+    @comptime for (m in type_of(Box).methods) {
+        {
+            @comptime if (m.fallible)  { m.ret r = b.m() !>; printf("%s F=%d\n", m.name, r); }
+            @comptime if (!m.fallible) { m.ret r = b.m();    printf("%s P=%d\n", m.name, r); }
+        }
+    }
+
+    /* The negated predicate on its own: `!0` selects, `!1` prunes. Observed
+     * through output rather than declarations, so this stays honest even if
+     * the scoping rule above ever changes. */
+    @comptime if (!0) { printf("neg-true\n"); }
+    @comptime if (!1) { printf("neg-false\n"); }
+
+    /* Without an inner block the loop body splices straight into main's
+     * scope, so a body may declare a name only if it declares it once across
+     * every iteration. A single accumulator declared outside the loop and
+     * updated inside is the shape that survives. */
+    int total = 0;
+    @comptime for (f in type_of(Box).fields) {
+        total += b.f;
+    }
+    printf("total=%d\n", total);
+    return 0;
+}

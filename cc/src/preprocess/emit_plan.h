@@ -148,10 +148,12 @@ void cc_emit_plan_apply_comptime_instantiations(CCTypeGraph* graph);
  * name, invokes the factory to produce the C definition, emits it once via the
  * comptime-fragment channel, and rewrites the use site to the mangled name.
  * Modeled on UFCS (library owns the C lowering; compiler owns the splice). */
-void cc_emit_plan_register_generic_factory(const char* name, const char* handler_name);
+void cc_emit_plan_register_generic_factory(const char* name, const char* handler_name,
+                                          size_t site_pos);
 /* Append an extension factory (CC_GENERIC_FACTORY_EXTEND); the base may register
  * before or after — the base requirement is enforced at the use site. */
-void cc_emit_plan_register_generic_factory_extend(const char* name, const char* handler_name);
+void cc_emit_plan_register_generic_factory_extend(const char* name, const char* handler_name,
+                                                 size_t site_pos);
 const void* cc_emit_plan_lookup_generic_factory(const char* name);
 const char* cc_emit_plan_lookup_generic_factory_handler(const char* name);
 /* True when `name` has any COMPILED registration (base or extension); the
@@ -212,6 +214,13 @@ const char* cc_emit_plan_generic_instance_def_for_symbol(const char* fn_name);
  * family name and `*member_off_out` the offset of the member suffix in
  * `ident`.  snake(Family) lowercases with '_' inserted before an uppercase
  * that follows a lowercase (Pair -> pair, LruCache -> lru_cache). */
+/* The grid's snake spelling: '_' before an uppercase that follows a lowercase,
+ * then tolower (Pair -> pair, LruCache -> lru_cache).  Exported because the
+ * member spelling `recv.member::[T]` derives its candidate factory name the
+ * same way — a second implementation would let the two spellings disagree
+ * about which factory a name refers to. */
+void cc_emit_plan_snake_name(const char* name, char* out, size_t cap);
+
 int cc_emit_plan_generic_factory_for_snake_call(const char* ident,
                                                 char* family_out, size_t family_cap,
                                                 size_t* member_off_out);
@@ -278,6 +287,22 @@ void cc_emit_plan_set_reflect_source(const char* src, size_t len);
 int cc_reflect_field_count(const char* type_name);
 int cc_reflect_field_name(const char* type_name, int idx, char* buf, int buf_sz);
 int cc_reflect_field_type(const char* type_name, int idx, char* buf, int buf_sz);
+
+/* Method reflection: the value-level face of `type_of(T).methods`, so a
+ * compiled factory enumerates what the `@comptime for` surface does.
+ * `_err` is empty for an infallible method; `_ret` is the ok half alone. */
+char* cc_emit_plan_reflect_type_prelude(void);
+int cc_reflect_method_count(const char* type_name);
+int cc_result_box_name(const char* ok_type, const char* err_type, char* buf, int buf_sz);
+int cc_reflect_method_name(const char* type_name, int idx, char* buf, int buf_sz);
+int cc_reflect_param_count(const char* params);
+int cc_reflect_param_name(const char* params, int idx, char* buf, int buf_sz);
+int cc_reflect_param_type(const char* params, int idx, char* buf, int buf_sz);
+int cc_reflect_method_member(const char* type_name, int idx, char* buf, int buf_sz);
+int cc_reflect_method_params(const char* type_name, int idx, char* buf, int buf_sz);
+int cc_reflect_method_args(const char* type_name, int idx, char* buf, int buf_sz);
+int cc_reflect_method_ret(const char* type_name, int idx, char* buf, int buf_sz);
+int cc_reflect_method_err(const char* type_name, int idx, char* buf, int buf_sz);
 
 /* Enum reflection (edge-push #1): enumerator count, name (bytes), and value
  * (scalar out-param).  Same bytes-only contract and source-scan backing as the

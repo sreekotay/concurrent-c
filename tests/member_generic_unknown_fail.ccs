@@ -1,0 +1,12 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/script/py.cch>
+
+/* `::[...]` on a member that is neither a type-formal member nor a registered
+ * factory names both spellings that could have resolved it. */
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(8));
+    CCResult_CCPy_CCPyError pr = cc_py_new(&a);
+    CCPy py = CCResult_CCPy_CCPyError_value(pr);
+    py.expse::[int]("x");
+    return 0;
+}

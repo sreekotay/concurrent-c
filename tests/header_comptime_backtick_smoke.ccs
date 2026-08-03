@@ -1,0 +1,9 @@
+#include <ccc/std/prelude.cch>
+#include "header_comptime_backtick_smoke.cch"
+#include <stdio.h>
+
+int main(void) {
+    AposThing t = { .v = 42 };
+    printf("%d\n", t.v);
+    return 0;
+}

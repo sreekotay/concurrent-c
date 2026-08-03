@@ -669,13 +669,11 @@ static int cc__find_chan_decl_before_in_buf(const char* src,
         size_t lbr = 0, rbr = 0;
         int have_inline = cc__scan_back_for_chan_bracket(src, len, pos, &lbr, &rbr);
         if (have_inline) {
-            size_t ts = lbr;
-            while (ts > 0) {
-                char c = src[ts - 1];
-                if (c == ';' || c == '{' || c == '}' || c == ',' || c == '(' || c == ')' || c == '\n') break;
-                ts--;
-            }
-            while (ts < lbr && (src[ts] == ' ' || src[ts] == '\t')) ts++;
+            /* `src[ts..lbr)` is copied verbatim as the element type, so ts
+             * must be the first CODE byte after the statement boundary. */
+            size_t ts = cc_rfind_char_top_level(src, 0, lbr, ";{},()\n");
+            ts = cc_skip_ws_and_comments(src, lbr, ts);
+            if (ts > lbr) ts = lbr;
 
             *out_lbrack = lbr;
             *out_rbrack = rbr;
@@ -802,7 +800,8 @@ static int cc__parse_chan_bracket_spec(const CCVisitorCtx* ctx,
     while (t < rbr && src[t] != '~') t++;
     if (t < rbr && src[t] == '~') t++;
     while (t < rbr) {
-        while (t < rbr && (src[t] == ' ' || src[t] == '\t')) t++;
+        /* The spec is a token list; a comment separates tokens. */
+        t = cc_skip_ws_and_comments(src, rbr, t);
         if (t >= rbr) break;
         char c = src[t];
         if (c == '>' || c == '<' || c == ',') { t++; continue; }

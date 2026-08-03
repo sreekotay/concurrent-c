@@ -162,6 +162,42 @@ static inline int cc_ufcs_compose_default_callee(char* out,
     return 1;
 }
 
+/* The member name `fn_name` answers to on a receiver of `type_name` — what a
+ * caller writes after the dot.  Returns a pointer into `fn_name`.
+ *
+ * This is the inverse of the composition above, and it is computed BY that
+ * composition rather than beside it: a candidate prefix is stripped and the
+ * result recomposed, so a spelling is only accepted when it reproduces
+ * `fn_name` exactly.  Reimplementing the strip would be a second copy of the
+ * dispatch rule, and two copies drift.
+ *
+ * Order follows dispatch: the exact family spelling (`Counter_add`) first,
+ * then the snake twin (`counter_add`), then the bare-name tier — where the
+ * function IS the member name and nothing is stripped. */
+static inline const char* cc_ufcs_member_name_of(const char* type_name,
+                                                 const char* fn_name) {
+    char probe[320];
+    if (!type_name || !fn_name || !*fn_name) return fn_name;
+    {   /* Exact family spelling: `<Type>_<member>`. */
+        size_t tl = strlen(type_name);
+        if (tl > 0 && strncmp(fn_name, type_name, tl) == 0 && fn_name[tl] == '_' &&
+            fn_name[tl + 1] != '\0')
+            return fn_name + tl + 1;
+    }
+    /* Snake twin: compose with a one-character probe and measure the prefix
+     * the composer produced, so the transform stays in one place. */
+    if (cc_ufcs_compose_default_callee(probe, sizeof(probe), type_name, "x")) {
+        size_t pl = strlen(probe);
+        if (pl >= 2) {
+            pl -= 2;                     /* drop the trailing "_x" */
+            if (pl > 0 && strncmp(fn_name, probe, pl) == 0 && fn_name[pl] == '_' &&
+                fn_name[pl + 1] != '\0')
+                return fn_name + pl + 1;
+        }
+    }
+    return fn_name;
+}
+
 /* Scalar value-receiver UFCS family: `cc_<mangled type>_<method>` with the
  * receiver passed by value (`d.halve()` -> `cc_double_halve(d)`,
  * `(1.5).halve()` -> `cc_double_halve(1.5)`). Returns the mangled family

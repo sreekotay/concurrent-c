@@ -1,0 +1,18 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+static int runs = 0;
+static int g(int n) {
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    @defer { runs++; }
+    if (!a.valid()) return -1;
+    while (n == 0) return 10;
+    for (; n == 1; ) return 20;
+    if (n == 2) return 30;
+    if (n == 3) return 40; else return 50;
+    return 2;
+}
+int main(void) {
+    int r0=g(0), r1=g(1), r2=g(2), r3=g(3), r4=g(4);
+    printf("%d %d %d %d %d runs=%d\n", r0,r1,r2,r3,r4,runs);
+    return 0;
+}

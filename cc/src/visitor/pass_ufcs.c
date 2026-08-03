@@ -305,13 +305,15 @@ static int cc__find_ufcs_span_in_range(const char* s,
         else if (s[i] == '-' && i + 1 < range_end && s[i + 1] == '>') { is_arrow = 1; sep_pos = i; }
         else continue;
 
-        size_t mpos = sep_pos + (is_arrow ? 2 : 1);
-        while (mpos < range_end && isspace((unsigned char)s[mpos])) mpos++;
+        /* Comments are filler in both gaps — a comment between a method name
+         * and its opening paren does not end the call.  Whitespace-only skips
+         * here left such a call unmatched, so the span was never found and it
+         * stayed unlowered. */
+        size_t mpos = cc_skip_ws_and_comments(s, range_end, sep_pos + (is_arrow ? 2 : 1));
         if (mpos + method_len >= range_end) continue;
         if (memcmp(s + mpos, method, method_len) != 0) continue;
 
-        size_t after = mpos + method_len;
-        while (after < range_end && isspace((unsigned char)s[after])) after++;
+        size_t after = cc_skip_ws_and_comments(s, range_end, mpos + method_len);
         if (after >= range_end || s[after] != '(') continue;
 
         /* Match Nth occurrence. */
@@ -498,6 +500,47 @@ static int cc__verify_member_at(const char* s, size_t n, size_t sep_pos,
  *      resolver used as its range fallback, bounded to this candidate.
  *
  * Returns 1 with *out set only when the construct is verifiably present. */
+/* End of the call that starts at `sep` (a `.` or `->`), by scanning the raw
+ * text: method name, its `(`, then the matching `)`, with comments and string
+ * literals inert.
+ *
+ * The AST's end column cannot be used for this.  tcc reports columns against
+ * text whose comments are already gone, so a comment sitting INSIDE the call
+ * shifts the closing paren's column left while the `.` before it keeps its
+ * own — the member verifies, the primary path is taken, and the span ends
+ * short of the real `)`.  A comment before or after the call shifts the `.`
+ * too, the verification fails, and the text scanner picks it up, which is why
+ * only the inside case ever misbehaved. */
+static int cc__ufcs_call_end_from_text(const char* s, size_t n, size_t sep,
+                                       size_t limit, size_t* out_end) {
+    size_t p = sep + ((sep + 1 < n && s[sep] == '-' && s[sep + 1] == '>') ? 2 : 1);
+    int depth = 0;
+    p = cc_skip_ws_and_comments(s, n, p);
+    if (p >= limit || !(isalpha((unsigned char)s[p]) || s[p] == '_')) return 0;
+    while (p < limit && (isalnum((unsigned char)s[p]) || s[p] == '_')) p++;
+    p = cc_skip_ws_and_comments(s, n, p);
+    if (p >= limit || s[p] != '(') return 0;
+    while (p < limit) {
+        size_t q = cc_skip_ws_and_comments(s, n, p);
+        if (q != p) { p = q; continue; }
+        {
+            char c = s[p++];
+            if (c == '(') depth++;
+            else if (c == ')') {
+                if (--depth == 0) { *out_end = p; return 1; }
+            } else if (c == '"' || c == '\'') {
+                char qt = c;
+                while (p < limit) {
+                    char d = s[p++];
+                    if (d == '\\' && p < limit) { p++; continue; }
+                    if (d == qt) break;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
 static int cc__span_at_candidate(const char* s, size_t n, size_t ls_off,
                                  int ls, int le, int col_start, int col_end,
                                  const char* method, int occurrence_1based,
@@ -539,8 +582,12 @@ static int cc__span_at_candidate(const char* s, size_t n, size_t ls_off,
                 }
             }
             if (sep != (size_t)-1) {
+                size_t text_end = 0;
                 out->start = cc__scan_receiver_start_left(s, ls_off, sep);
-                out->end = end_pos;
+                if (cc__ufcs_call_end_from_text(s, n, sep, region_end, &text_end))
+                    out->end = text_end;
+                else
+                    out->end = end_pos;
                 if (out->start < out->end) return 1;
             }
         }

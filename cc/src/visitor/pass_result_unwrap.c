@@ -1497,6 +1497,42 @@ static void cc__pu_next_stmt(const char* body, size_t blen,
 }
 
 /* Top-level: does the handler body diverge at its last statement? */
+/* Does the token at `scan` end the bare `!>` form?
+ *
+ * `!>` has no closing delimiter — its handler body runs to the terminating
+ * `;` — so what follows decides which form was written.  The bare form (defer
+ * to the enclosing `@errhandler`) applies wherever the next token CANNOT BEGIN
+ * A STATEMENT, since a handler body is one: a closer or separator ends the
+ * expression, and so does any operator that only ever appears infix.
+ *
+ * Prefixes that can begin a statement stay a handler body, because there is no
+ * honest way to choose: in `f() !> *p = 0;` the `*p = 0;` reads equally well as
+ * a body or as a multiplication, and guessing would silently drop one of them.
+ * Parenthesising the unwrap — `(f() !>) * p` — says which was meant, and `)`
+ * is a terminator, so the escape hatch is always available. */
+static int cc__pu_bare_terminator(const char* s, size_t n, size_t scan) {
+    char c, d;
+    if (scan >= n) return 0;
+    c = s[scan];
+    d = (scan + 1 < n) ? s[scan + 1] : 0;
+    /* Closers and separators: the expression is over. */
+    if (c == ';' || c == ')' || c == ',' || c == ']' || c == '}' || c == ':')
+        return 1;
+    /* Two-character infix operators whose first byte is otherwise ambiguous. */
+    if (d == '=' && (c == '!' || c == '=' || c == '<' || c == '>' ||
+                     c == '+' || c == '-' || c == '*' || c == '/' ||
+                     c == '%' || c == '&' || c == '|' || c == '^'))
+        return 1;
+    if ((c == '&' && d == '&') || (c == '|' && d == '|') ||
+        (c == '<' && d == '<') || (c == '>' && d == '>'))
+        return 1;
+    /* Single-character operators that are only ever infix. */
+    if (c == '<' || c == '>' || c == '=' || c == '?' ||
+        c == '%' || c == '/' || c == '^' || c == '|')
+        return 1;
+    return 0;
+}
+
 static int cc__pu_body_diverges(const char* body, size_t blen) {
     size_t i = 0;
     size_t last_a = 0, last_b = 0;
@@ -2088,9 +2124,9 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
                               "unclosed '(' in '!>' binder");
             return -1;
         }
-        size_t ba = scan + 1, bb = rpar;
-        while (ba < bb && isspace((unsigned char)s[ba])) ba++;
-        while (bb > ba && isspace((unsigned char)s[bb - 1])) bb--;
+        size_t ba = cc_skip_ws_and_comments(s, rpar, scan + 1);
+        size_t bb = cc_rskip_ws_and_comments(s, rpar);
+        if (bb < ba) bb = ba;
         if (!cc__range_is_ident(s, ba, bb)) {
             cc_pass_error_cat(f, line_no, 1, CC_ERR_SYNTAX,
                               "expected identifier in '!> (...)'");
@@ -2146,9 +2182,12 @@ static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
                                   outer_param, sizeof(outer_param));
     }
 
-    /* Form P: bare `!>;` at expression position.  Synthesize a binder,
-     * inline the outer handler body. Same-E re-entry is ill-formed. */
-    if (s[scan] == ';' && !has_binder) {
+    /* Form P: bare `!>` at expression position.  Synthesize a binder, inline
+     * the outer handler body.  Same-E re-entry is ill-formed.  The lowering is
+     * a self-contained `({ ... })` that leaves the terminator in place, so it
+     * composes wherever the terminator says the expression ended — a `;` after
+     * a declaration, but equally a `)`, a `,` or an infix operator. */
+    if (cc__pu_bare_terminator(s, n, scan) && !has_binder) {
         if (!outer_found) {
             cc__pu_errhandler_miss_diag(
                 f, line_no, outer_err_type, outer_have_handlers, outer_as_diag,
@@ -2476,9 +2515,9 @@ static int cc__rewrite_bang_once(const CCVisitorCtx* ctx,
                               "unclosed '(' in '!>' binder");
             return -1;
         }
-        size_t ba = scan + 1, bb = rpar;
-        while (ba < bb && isspace((unsigned char)s[ba])) ba++;
-        while (bb > ba && isspace((unsigned char)s[bb - 1])) bb--;
+        size_t ba = cc_skip_ws_and_comments(s, rpar, scan + 1);
+        size_t bb = cc_rskip_ws_and_comments(s, rpar);
+        if (bb < ba) bb = ba;
         if (!cc__range_is_ident(s, ba, bb)) {
             char rel[1024];
             const char* f = cc_path_rel_to_repo(
@@ -2888,6 +2927,33 @@ static int cc__strict_unhandled_scan(const CCVisitorCtx* ctx,
  * `*out_buf` and must free it.
  * ---------------------------------------------------------------- */
 
+/* Find the offset of the `!>` / `?>` sigil within `raw_text` relative
+ * to the node's span start.
+ *
+ * This was a plain `strstr`, on the guarantee that the IR carver had already
+ * ensured a node's only sigil was real code.  That guarantee does not survive
+ * template lowering: a `@string` template whose PROSE contains `!>` becomes a
+ * C string literal inside the node's span, `strstr` finds the sigil in there,
+ * and the rewrite splices `@err` into the middle of the user's text.  In the
+ * script register nothing lowers the template earlier, which is why only that
+ * register showed it.  Returns SIZE_MAX on not-found. */
+static size_t cc__ir_node_sigil_offset(const CCIrNode* n) {
+    CCInertScan scan;
+    size_t i = 0, len;
+    char lead;
+    if (!n || !n->raw_text) return (size_t)-1;
+    lead = (n->kind == CC_IR_UNWRAP_BANG) ? '!' : '?';
+    len = n->raw_len ? n->raw_len : strlen(n->raw_text);
+    cc_inert_scan_init(&scan, NULL);
+    while (i < len) {
+        if (cc_inert_scan_step(&scan, n->raw_text, len, &i)) continue;
+        if (n->raw_text[i] == lead && i + 1 < len && n->raw_text[i + 1] == '>')
+            return i;
+        i++;
+    }
+    return (size_t)-1;
+}
+
 /* True iff `n` is a statement-position `!>` with no binder whose tail
  * was successfully parsed by the recogniser (Form A / B / C).  Expression-
  * position `!>` has a wholly different lowering (stmt-expr `({ ... })`
@@ -2901,25 +2967,12 @@ static int cc__ir_is_nobinder_stmt_bang(const CCIrNode* n) {
     /* Recogniser extended the span past the 2-byte sigil iff the tail
      * parse succeeded; on failure span_end stops right after `!>`.
      * raw_len <= sig_off + 2 is the "failed" shape. */
-    const char* hit = strstr(n->raw_text, "!>");
-    if (!hit) return 0;
-    size_t sig_off = (size_t)(hit - n->raw_text);
+    size_t sig_off = cc__ir_node_sigil_offset(n);
+    if (sig_off == (size_t)-1) return 0;
     if (sig_off + 2 >= n->raw_len) return 0;
     return 1;
 }
 
-/* Find the offset of the `!>` / `?>` sigil within `raw_text` relative
- * to the node's span start.  Fast path: since the IR carver guaranteed
- * exactly one sigil per UNWRAP_* node and that the sigil is not inside
- * a comment or string literal, a plain strstr over the NUL-terminated
- * raw_text suffices.  Returns SIZE_MAX on (defensively) not-found. */
-static size_t cc__ir_node_sigil_offset(const CCIrNode* n) {
-    if (!n || !n->raw_text) return (size_t)-1;
-    const char* needle = (n->kind == CC_IR_UNWRAP_BANG) ? "!>" : "?>";
-    const char* hit = strstr(n->raw_text, needle);
-    if (!hit) return (size_t)-1;
-    return (size_t)(hit - n->raw_text);
-}
 
 static int cc__rewrite_nobinder_bangs_via_ir(const CCVisitorCtx* ctx,
                                              const char* in,

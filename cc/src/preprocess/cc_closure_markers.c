@@ -1,5 +1,6 @@
 #include "cc_closure_markers.h"
 
+#include "../util/text.h"
 #include "../util/text_scan.h"
 
 #include <ctype.h>
@@ -36,21 +37,15 @@ static size_t cc__cm_find_closure_start_from_arrow(const char* src,
                                                     size_t span_lo,
                                                     size_t arrow_off) {
     if (!src || arrow_off <= span_lo) return arrow_off;
-    size_t j = arrow_off;
-    while (j > span_lo && (src[j - 1] == ' ' || src[j - 1] == '\t' ||
-                           src[j - 1] == '\r' || src[j - 1] == '\n')) j--;
+    size_t j = cc_rskip_ws_and_comments(src, arrow_off);
+    if (j < span_lo) j = span_lo;
     if (j <= span_lo) return arrow_off;
     char prev = src[j - 1];
     if (prev == ')') {
-        int par = 0;
-        for (size_t k = j; k-- > span_lo; ) {
-            char ch = src[k];
-            if (ch == ')') par++;
-            else if (ch == '(') {
-                par--;
-                if (par == 0) return k;
-            }
-        }
+        /* Masked backward scan: a paren inside a comment or string in the
+         * parameter list must not count toward the match. */
+        size_t lp = cc_rfind_char_top_level(src, span_lo, j - 1, "");
+        if (lp > span_lo && src[lp - 1] == '(') return lp - 1;
         return arrow_off;
     }
     if (cc__cm_is_ident_char(prev)) {

@@ -1,0 +1,14 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/script/py.cch>
+#include <stdio.h>
+int main(void) {
+    @errhandler(CCError e) { printf("HANDLER: %s\n", e.message); return 1; }
+    CCArena a = cc_arena_heap(kilobytes(64)) @destroy;
+    CCResult_CCPy_CCPyError pr = cc_py_new(&a);
+    if (pr.is_err()) { puts("SKIP"); return 0; }
+    CCPy py = CCResult_CCPy_CCPyError_value(pr);
+    printf("start\n");
+    py.exec(@slice("import nonexistent_module_xyz\n")) !>;   /* must fail */
+    printf("PAST FAILING py.exec !>\n");
+    return 0;
+}

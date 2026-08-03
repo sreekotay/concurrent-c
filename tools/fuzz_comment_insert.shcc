@@ -69,10 +69,16 @@ static int fz_identch(char c) {
 /* Multi-char operators a comment must not split.  Includes the CC sigils
  * (`!>`, `?>`, `::[`, `[:`, `[~`) alongside the C compound operators. */
 static const char* FZ_OPS[] = {
-    "<<=", ">>=", "...", "::[",
+    "<<=", ">>=", "...", "::[", "=<!",
+    /* `=<!` is one token (err-syntax assignment).  Splitting it produced
+     * `comment_err_syntax_smoke_off509`, which was filed as a compiler bug and
+     * is not one: `b = <! always_ok()` fails identically with a plain space.
+     * A comment inside a token need not be inert — a comment between two plus
+     * signs does not have to still read as `++` — so what needs to be complete
+     * is this operator list. */
     "!>", "?>", "=>", "->", "::", "<<", ">>", "<=", ">=", "==", "!=",
     "&&", "||", "++", "--", "+=", "-=", "*=", "/=", "%=", "&=", "|=",
-    "^=", "##", "[~", "~]", "[:", ":]", ":[",
+    "^=", "##", "[~", "~]", "[:", ":]", ":[", "<?", "<!",
     NULL,
 };
 

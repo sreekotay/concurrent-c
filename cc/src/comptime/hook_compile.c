@@ -20,6 +20,7 @@
 #include "header/lower_header.h"
 #include "preprocess/preprocess.h"
 #include "preprocess/type_registry.h"
+#include "util/cache_evict.h"
 #include "util/path.h"
 #include "visitor/visitor_fileutil.h"
 #include "../comptime/emit_tpl_prelude.inc.h"
@@ -589,7 +590,7 @@ static int cc__build_compile_argv(CCArgvBuilder* argv,
             }
         } else if (cc__hc_is_tcc(cc_bin)) {
             /* Legacy fallback if profile probe fails. */
-            if (cc__argv_push(argv, "-std=c11") != 0) return -1;
+            if (cc__argv_push(argv, CC_HOST_C_STD_OPTION) != 0) return -1;
             if (cc__hc_tcc_lib_dir(cc_bin, repo_root, tcc_dir, sizeof(tcc_dir))) {
                 snprintf(tmp, sizeof(tmp), "-B%s", tcc_dir);
                 if (cc__argv_push(argv, tmp) != 0) return -1;
@@ -798,8 +799,11 @@ static int cc__build_compile_and_load(const char* input_path,
     char input_dir[1024];
     char repo_root[1024];
     char tmp_base[] = "/tmp/cc_comptime_type_hook_XXXXXX";
-    char cache_dir[1024];
-    char cache_dylib_path[1280];
+    /* Read on the `done:` path, which any early `goto` can reach before the
+     * cache dir is resolved — an uninitialized buffer there is a garbage
+     * directory name, not an empty one. */
+    char cache_dir[1024] = {0};
+    char cache_dylib_path[1280] = {0};
     CCComptimeDlModule* module = NULL;
     CCArgvBuilder argv = {0};
     CCTypeRegistryScope reg_scope;
@@ -1062,6 +1066,10 @@ done:
     free(pp_src);
     free(tu_src);
     cc_type_registry_scope_pop(&reg_scope);
+    /* Keyed by a toolchain fingerprint + TU hash, so every edit orphans an
+     * entry and nothing else reclaims it. */
+    if (cache_enabled && cache_dir[0])
+        (void)cc_cache_evict(cache_dir, 256ULL * 1024ULL * 1024ULL);
     return rc;
 }
 

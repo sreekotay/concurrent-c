@@ -1,0 +1,36 @@
+/*
+ * Smoke: @await + channel auto-destroy
+ *
+ *   - @async fn suspends on channel send/recv.
+ *   - @await runs it from synchronous main (lowered to cc_block_on).
+ *   - `CCChan* ch = cc_channel_pair(&tx, &rx) !>(e) { ... } @destroy;`
+ *     relies on the builtin-owned destroy action registered for CCChan*
+ *     (cc_channel_free) to free the channel at scope exit.
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+
+@async int echo_through_channel(CCChanTx tx, CCChanRx rx, int value) {
+    if (@await tx.send(value) != 0)
+        return -1;
+
+    int received = 0;
+    if (@await rx.recv(&received) != 0)
+        return -2;
+
+    return received;
+}
+
+int main(void) {
+ /*x*/   int[~1 >] tx;
+    int[~1 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx)
+        !>(e) { fprintf(stderr, "fatal: %s\n", e.message); return 1; }
+        @destroy;
+
+    int result = @await echo_through_channel(tx, rx, 42);
+
+    printf("echo result: %d (expected 42)\n", result);
+    return (result == 42) ? 0 : 1;
+}

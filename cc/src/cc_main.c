@@ -213,7 +213,7 @@ static void cc__append_host_cc_flags(char* cmd, size_t cmd_cap, const char* cc_b
         char dir[PATH_MAX];
         const char* libdir;
         if (!cc__is_tcc(cc_bin)) return;
-        strncat(cmd, " -std=c11", cmd_cap - strlen(cmd) - 1);
+        strncat(cmd, " " CC_HOST_C_STD_OPTION, cmd_cap - strlen(cmd) - 1);
         libdir = cc__tcc_lib_dir(cc_bin, dir, sizeof(dir));
         if (libdir) {
             char flag[PATH_MAX + 4];
@@ -950,6 +950,82 @@ static int derive_default_bin(const char* in_path, char* out_buf, size_t out_buf
     char stem[128];
     cc__stem_from_path(in_path, stem, sizeof(stem));
     return derive_path_from_stem(stem, g_bin_root, "", out_buf, out_buf_size);
+}
+
+/* A TU that exports `PyInit_<name>` and defines no `main` is a CPython
+ * extension module — the source declares the artifact, so the build obeys:
+ * PIC objects, a `-shared` link, `<name>.so` as the default output.  There
+ * is no flag; CPython's own entry-point convention is the declaration.
+ * Comment/string-opaque scan of the raw file; `main` beats `PyInit_` so an
+ * embed-style program that mentions both stays an executable.  Returns 1
+ * and fills `name_out` when the TU is a module. */
+static int cc__detect_py_module(const char* in_path, char* name_out, size_t cap) {
+    FILE* f;
+    char* buf;
+    long n;
+    int found = 0, has_main = 0;
+    if (!in_path || !name_out || cap == 0) return 0;
+    name_out[0] = '\0';
+    f = fopen(in_path, "rb");
+    if (!f) return 0;
+    fseek(f, 0, SEEK_END);
+    n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (n <= 0 || n > 16 * 1024 * 1024) { fclose(f); return 0; }
+    buf = (char*)malloc((size_t)n + 1);
+    if (!buf) { fclose(f); return 0; }
+    if (fread(buf, 1, (size_t)n, f) != (size_t)n) { free(buf); fclose(f); return 0; }
+    buf[n] = '\0';
+    fclose(f);
+    {
+        size_t i = 0, len = (size_t)n;
+        while (i < len) {
+            char c = buf[i];
+            char c2 = (i + 1 < len) ? buf[i + 1] : 0;
+            if (c == '/' && c2 == '/') { while (i < len && buf[i] != '\n') i++; continue; }
+            if (c == '/' && c2 == '*') {
+                i += 2;
+                while (i + 1 < len && !(buf[i] == '*' && buf[i + 1] == '/')) i++;
+                i = (i + 1 < len) ? i + 2 : len;
+                continue;
+            }
+            if (c == '"' || c == '\'' || c == '`') {
+                char q = c;
+                i++;
+                while (i < len) {
+                    if (q != '`' && buf[i] == '\\' && i + 1 < len) { i += 2; continue; }
+                    if (buf[i] == q) { i++; break; }
+                    i++;
+                }
+                continue;
+            }
+            if (c == 'm' && i + 4 < len && memcmp(buf + i, "main", 4) == 0 &&
+                (i == 0 || !(isalnum((unsigned char)buf[i - 1]) || buf[i - 1] == '_')) &&
+                !(isalnum((unsigned char)buf[i + 4]) || buf[i + 4] == '_')) {
+                size_t k = i + 4;
+                while (k < len && (buf[k] == ' ' || buf[k] == '\t')) k++;
+                if (k < len && buf[k] == '(') has_main = 1;
+                i += 4;
+                continue;
+            }
+            if (!found && c == 'P' && i + 7 < len && memcmp(buf + i, "PyInit_", 7) == 0 &&
+                (i == 0 || !(isalnum((unsigned char)buf[i - 1]) || buf[i - 1] == '_'))) {
+                size_t k = i + 7, s = k, m = 0;
+                while (k < len && (isalnum((unsigned char)buf[k]) || buf[k] == '_')) k++;
+                if (k > s) {
+                    while (s + m < k && m + 1 < cap) { name_out[m] = buf[s + m]; m++; }
+                    name_out[m] = '\0';
+                    found = 1;
+                }
+                i = k;
+                continue;
+            }
+            i++;
+        }
+    }
+    free(buf);
+    if (has_main || !found) { name_out[0] = '\0'; return 0; }
+    return 1;
 }
 
 static const char* pick_cc_bin(const char* override) {
@@ -4522,6 +4598,19 @@ static int run_build_mode(int argc, char** argv) {
         }
     }
 
+    /* Python extension module: `PyInit_<name>` exported, no `main`. */
+    static char pymod_name[128];
+    static char pymod_ccflags[1024];
+    static char pymod_ldflags[1024];
+    if (cc__detect_py_module(in_path_abs, pymod_name, sizeof(pymod_name))) {
+        snprintf(pymod_ccflags, sizeof(pymod_ccflags), "%s%s-fPIC",
+                 cc_flags ? cc_flags : "", (cc_flags && cc_flags[0]) ? " " : "");
+        cc_flags = pymod_ccflags;
+        snprintf(pymod_ldflags, sizeof(pymod_ldflags), "%s%s-shared",
+                 ld_flags ? ld_flags : "", (ld_flags && ld_flags[0]) ? " " : "");
+        ld_flags = pymod_ldflags;
+    }
+
     int raw_c = cc__is_raw_c(in_path_abs);
     if (mode == CC_MODE_EMIT_C) {
         if (user_out) {
@@ -4557,6 +4646,17 @@ static int run_build_mode(int argc, char** argv) {
         if (user_out) {
             strncpy(bin_path, user_out, sizeof(bin_path));
             bin_path[sizeof(bin_path)-1] = '\0';
+        } else if (pymod_name[0]) {
+            /* The module names its artifact.  The .abi3 tag is in every
+             * CPython finder's suffix list, so `import <name>` works the
+             * same as a plain .so — and the filename then advertises the
+             * stable-ABI promise the binding actually keeps: one built
+             * module for every supported 3.x. */
+            if (derive_path_from_stem(pymod_name, g_bin_root, ".abi3.so",
+                                      bin_path, sizeof(bin_path)) != 0) {
+                fprintf(stderr, "cc: failed to derive module output\n");
+                goto parse_fail;
+            }
         } else if (derive_default_bin(in_path_abs, bin_path, sizeof(bin_path)) != 0) {
             fprintf(stderr, "cc: failed to derive default binary output\n");
             goto parse_fail;

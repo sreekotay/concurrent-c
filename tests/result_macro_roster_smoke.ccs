@@ -1,0 +1,43 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/script/py.cch>
+#include <stdio.h>
+
+/* `!>` on a Result-returning MACRO.  The registry cannot type a macro
+ * name, so the unwrap goes through the roster `_Generic` — which must
+ * carry an arm for a Result type declared only in an included header.
+ * Without that arm the `default:` hands the whole struct to the CCSlice
+ * destination and TCC reports it as "'{' expected (got ';')" at logical
+ * EOF, pointing at nothing.
+ *
+ * The error path is the second half: the roster's err arm binds the
+ * handler with the CCError base view (header error types lead with
+ * `CCError base @as`), so the handler's `e.message` type-checks and the
+ * raising call lands here with a real message. */
+#define aliased_map cc__py_obj_map_raw
+
+int main(void) {
+    @errhandler(CCError e) { printf("caught=%d\n", e.message && e.message[0]); return 0; }
+    CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+    if (!cc_py_available()) { puts("SKIP (no libpython)"); return 0; }
+    CCPy py = cc_py_new(&a) !>;
+    py.exec(@string(`
+        def f(x):
+            return x + 0.5
+        def boom(x):
+            raise ValueError('row zero')
+        `, &a).as_slice()) !>;
+    CCPyObj m = py.import("__main__") !> @destroy;
+    CCPyObj f = m.get("f") !> @destroy;
+    CCPyObj boom = m.get("boom") !> @destroy;
+    double xs[:] = {1.0, 2.0};
+    CCPyArg col = cc__py_arg_ts_CCSlice_double(xs);
+
+    CCSlice out = aliased_map(&f, &a, CC__PY_EL_F64, 1, &col) !>;
+    printf("n=%zu v0=%.1f v1=%.1f\n", out.len,
+           ((const double *)out.ptr)[0], ((const double *)out.ptr)[1]);
+
+    CCSlice bad = aliased_map(&boom, &a, CC__PY_EL_F64, 1, &col) !>;
+    (void)bad;
+    puts("unreached");
+    return 1;
+}

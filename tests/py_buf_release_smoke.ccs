@@ -1,0 +1,75 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/script/py.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* The py_buf borrow is call-scoped: when the call returns, every view is
+ * refcount-checked and released.  A callee that computes through the
+ * view or copies it passes; one that keeps THE VIEW ITSELF fails the
+ * call naming the argument, and the view is dead besides (ValueError on
+ * a later touch, never a read through freed CC memory).
+ *
+ * The documented limit, pinned here so it cannot drift silently: a
+ * DERIVED object (a nested memoryview, a numpy frombuffer array) shares
+ * CPython's managed buffer without referencing the view, so it escapes
+ * both the refcount check and release — the buffer protocol snapshots
+ * the pointer and has no revocation.  That case stays on the rule in
+ * the spec: the borrow ends with the call; copy to keep the data. */
+int main(void) {
+    @errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); return 1; }
+    CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+    if (!cc_py_available()) { puts("SKIP (no libpython)"); return 0; }
+    CCPy py = cc_py_new(&a) !>;
+
+    py.exec(@string(`
+        import struct
+        def total(mv):
+            return sum(struct.unpack('<%dd' % (len(mv) // 8), mv))
+        def copy_then_return(mv):
+            return float(len(bytes(mv)))
+        g_view = None
+        def keep_view(mv):
+            global g_view
+            g_view = mv
+            return 0
+        g_nest = None
+        def keep_nested(mv):
+            global g_nest
+            g_nest = memoryview(mv)
+            return 0
+        def poke():
+            try:
+                return float(g_view[0])
+            except ValueError:
+                return -1.0
+        `, &a).as_slice()) !>;
+    CCPyObj m = py.import("__main__") !> @destroy;
+
+    double xs[:] = {1.5, 2.0, 3.0};
+
+    /* Compute-and-return and copy-to-keep both pass: no false positive. */
+    double s = m.total(py_buf(xs)) !>;
+    double c = m.copy_then_return(py_buf(xs)) !>;
+    printf("sum=%.1f copied=%.0f\n", s, c);
+
+    /* Keeping the view fails the call, naming the argument... */
+    {
+        CCResult_int64_t_CCPyError r = cc_py_obj_callm_int64_t(&m, "keep_view",
+            1, cc__py_arg_buffer(CC_PY_ARG(xs)));
+        const char *msg = r.is_err()
+            ? CCResult_int64_t_CCPyError_error(r).base.message : "";
+        printf("view_caught=%d names_arg=%d\n", r.is_err() ? 1 : 0,
+               strstr(msg, "argument 1 retained") != NULL);
+    }
+    /* ...and the kept view is already dead, released at the boundary. */
+    double dead = m.poke() !>;
+    printf("dead_view=%.1f\n", dead);
+
+    /* The limit, pinned: a derived keep escapes the check (see header). */
+    {
+        CCResult_int64_t_CCPyError r = cc_py_obj_callm_int64_t(&m, "keep_nested",
+            1, cc__py_arg_buffer(CC_PY_ARG(xs)));
+        printf("nested_escapes=%d\n", r.is_err() ? 0 : 1);
+    }
+    return 0;
+}

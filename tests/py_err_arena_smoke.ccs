@@ -6,15 +6,12 @@
 /* Error messages are copied into the handle scratch arena, so a prior
  * failure's message survives a later failure. Skips without libpython. */
 int main(void) {
+    @errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); return 1; }
     CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
     if (!a.valid()) return 1;
 
-    CCResult_CCPy_CCPyError pr = cc_py(&a);
-    if (pr.is_err()) {
-        puts("py_err_arena_smoke: SKIP (no libpython)");
-        return 0;
-    }
-    CCPy py = CCResult_CCPy_CCPyError_value(pr);
+    if (!cc_py_available()) { puts("py_err_arena_smoke: SKIP (no libpython)"); return 0; }
+    CCPy py = cc_py_new(&a) !>;
 
     CCResult_CCPyObj_CCPyError r1 = py.import("cc_py_missing_module_aaa");
     if (!r1.is_err()) return 2;

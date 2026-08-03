@@ -1,0 +1,8 @@
+arg=7
+args=7 3
+lt ok
+sum=8
+decl=7 3
+arr=7 8
+stmt ok c=7
+body ran

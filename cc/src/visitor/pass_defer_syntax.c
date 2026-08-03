@@ -653,35 +653,40 @@ static int cc__token_is(const char* s, size_t len, size_t i, const char* tok) {
     return 1;
 }
 
+/* Does the identifier ending at `end` (exclusive) spell exactly `kw`? */
+static int cc__kw_ends_at(const char* s, size_t end, const char* kw, size_t kn) {
+    size_t w = end;
+    while (w > 0 && cc__is_ident_char(s[w - 1])) w--;
+    return (end - w) == kn && memcmp(s + w, kw, kn) == 0;
+}
+
 static int cc__is_if_controlled_return(const char* s, size_t len, size_t ret_i) {
     (void)len;
     if (!s || ret_i == 0) return 0;
-    /* Heuristic: detect `if (...) return ...;` without braces by looking backward for a ')'
-       immediately before the `return` token (ignoring whitespace), and checking for `if`
-       before the matching '('. */
-    size_t j = ret_i;
-    while (j > 0 && (s[j - 1] == ' ' || s[j - 1] == '\t' || s[j - 1] == '\r' || s[j - 1] == '\n')) j--;
-    if (j == 0 || s[j - 1] != ')') return 0;
+    /* `if (...) STMT` without braces: the controlling `)` is the previous
+     * CODE byte, and the `(` is found with the masked backward scan —
+     * excluding the `)` leaves the condition's `(` unmatched, so the scan
+     * stops just after it.  Both matter: a comment before the statement,
+     * and a `(` or `)` inside a comment or string in the condition, each
+     * made this predicate answer no and the brace wrap disappear, turning
+     * a conditional `goto cleanup` into an unconditional one. */
+    size_t j = cc_rskip_ws_and_comments(s, ret_i);
+    if (j == 0) return 0;
+    /* `else STMT` has no condition to walk back through. */
+    if (cc__kw_ends_at(s, j, "else", 4)) return 1;
+    if (s[j - 1] != ')') return 0;
 
-    int par = 0;
-    size_t k = j - 1;
-    while (k > 0) {
-        char ch = s[k - 1];
-        if (ch == ')') par++;
-        else if (ch == '(') {
-            if (par == 0) break;
-            par--;
-        }
-        k--;
-    }
-    if (k == 0) return 0;
+    size_t k = cc_rfind_char_top_level(s, 0, j - 1, "");
+    if (k == 0 || s[k - 1] != '(') return 0;
 
-    size_t t = k - 1;
-    while (t > 0 && (s[t - 1] == ' ' || s[t - 1] == '\t' || s[t - 1] == '\r' || s[t - 1] == '\n')) t--;
-    if (t < 2) return 0;
-    if (s[t - 2] != 'i' || s[t - 1] != 'f') return 0;
-    if (t > 2 && cc__is_ident_char(s[t - 3])) return 0; /* word boundary */
-    return 1;
+    size_t t = cc_rskip_ws_and_comments(s, k - 1);
+    /* Any head that controls a single statement: wrapping one that does not
+     * need it is harmless (a block is a statement), while missing one puts
+     * the injection inside a loop body — `while (c) retval = x;` never
+     * exits. */
+    return cc__kw_ends_at(s, t, "if", 2) ||
+           cc__kw_ends_at(s, t, "while", 5) ||
+           cc__kw_ends_at(s, t, "for", 3);
 }
 
 /* True when `stmt_i` is the statement of `if (...)<stmt>` (no braces), so a
@@ -689,29 +694,30 @@ static int cc__is_if_controlled_return(const char* s, size_t len, size_t ret_i) 
 static int cc__is_if_controlled_stmt(const char* s, size_t len, size_t stmt_i) {
     (void)len;
     if (!s || stmt_i == 0) return 0;
-    size_t j = stmt_i;
-    while (j > 0 && (s[j - 1] == ' ' || s[j - 1] == '\t' || s[j - 1] == '\r' || s[j - 1] == '\n')) j--;
-    if (j == 0 || s[j - 1] != ')') return 0;
+    /* `if (...) STMT` without braces: the controlling `)` is the previous
+     * CODE byte, and the `(` is found with the masked backward scan —
+     * excluding the `)` leaves the condition's `(` unmatched, so the scan
+     * stops just after it.  Both matter: a comment before the statement,
+     * and a `(` or `)` inside a comment or string in the condition, each
+     * made this predicate answer no and the brace wrap disappear, turning
+     * a conditional `goto cleanup` into an unconditional one. */
+    size_t j = cc_rskip_ws_and_comments(s, stmt_i);
+    if (j == 0) return 0;
+    /* `else STMT` has no condition to walk back through. */
+    if (cc__kw_ends_at(s, j, "else", 4)) return 1;
+    if (s[j - 1] != ')') return 0;
 
-    int par = 0;
-    size_t k = j - 1;
-    while (k > 0) {
-        char ch = s[k - 1];
-        if (ch == ')') par++;
-        else if (ch == '(') {
-            if (par == 0) break;
-            par--;
-        }
-        k--;
-    }
-    if (k == 0) return 0;
+    size_t k = cc_rfind_char_top_level(s, 0, j - 1, "");
+    if (k == 0 || s[k - 1] != '(') return 0;
 
-    size_t t = k - 1;
-    while (t > 0 && (s[t - 1] == ' ' || s[t - 1] == '\t' || s[t - 1] == '\r' || s[t - 1] == '\n')) t--;
-    if (t < 2) return 0;
-    if (s[t - 2] != 'i' || s[t - 1] != 'f') return 0;
-    if (t > 2 && cc__is_ident_char(s[t - 3])) return 0;
-    return 1;
+    size_t t = cc_rskip_ws_and_comments(s, k - 1);
+    /* Any head that controls a single statement: wrapping one that does not
+     * need it is harmless (a block is a statement), while missing one puts
+     * the injection inside a loop body — `while (c) retval = x;` never
+     * exits. */
+    return cc__kw_ends_at(s, t, "if", 2) ||
+           cc__kw_ends_at(s, t, "while", 5) ||
+           cc__kw_ends_at(s, t, "for", 3);
 }
 
 static int cc__scan_stmt_end_semicolon(const char* s, size_t len, size_t i, size_t* out_end_off) {

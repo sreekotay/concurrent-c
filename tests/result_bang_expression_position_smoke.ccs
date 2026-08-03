@@ -1,0 +1,55 @@
+/* `!>` has no closing delimiter — its handler body runs to the terminating
+ * `;` — so what follows it is what decides which form was written. The bare
+ * form (defer to the enclosing `@errhandler`) applies wherever the next token
+ * cannot begin a statement, because a handler body is one.
+ *
+ * That makes the unwrap compose: it lowers to a self-contained expression, so
+ * it belongs wherever its terminator says the expression ended. Before this,
+ * every one of these needed a named temporary first.
+ *
+ * Prefixes that CAN begin a statement keep the handler-body reading, since
+ * `f() !> *p = 0;` reads equally well either way and guessing would silently
+ * drop one of them. Parenthesising says which was meant, and `)` is a
+ * terminator — so the escape hatch is always in reach. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int !>(CCError) val(int ok) {
+    if (!ok) return cc_err(CC_ERR_INVALID_ARG, "val");
+    return cc_ok(7);
+}
+
+int main(void) {
+    @errhandler(CCError e) { printf("H:%s\n", e.message); return 1; }
+
+    /* Closers and separators end the expression. */
+    printf("arg=%d\n", val(1) !>);
+    printf("args=%d %d\n", val(1) !>, 3);
+
+    /* Infix operators are terminators too — none of them can start a
+     * statement, so there is nothing to be ambiguous about. */
+    if (val(1) !> != 7) return 2;
+    if (val(1) !> < 9) printf("lt ok\n");
+    printf("sum=%d\n", (val(1) !>) + 1);
+
+    /* A declarator list separates with `,` like an argument list does. */
+    int a = val(1) !>, b = 3;
+    printf("decl=%d %d\n", a, b);
+
+    /* Subscript and assignment destinations. */
+    int arr[2];
+    arr[0] = val(1) !>;
+    arr[1] = arr[0] + 1;
+    printf("arr=%d %d\n", arr[0], arr[1]);
+
+    /* The statement and declaration forms still mean what they meant. */
+    val(1) !>;
+    int c = val(1) !>;
+    printf("stmt ok c=%d\n", c);
+
+    /* An explicit handler body still wins wherever one is written, and it
+     * still has to diverge. */
+    int d = val(0) !> { printf("body ran\n"); return 0; };
+    printf("unreachable d=%d\n", d);
+    return 3;
+}

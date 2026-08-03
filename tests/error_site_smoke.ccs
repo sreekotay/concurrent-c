@@ -1,0 +1,33 @@
+// `cc_error_site()` — the one-liner face of the R3 chain: the most
+// recent `!>` site as "file:line", current inside any @errhandler, for
+// errors whose message carries no position of its own (an errno, a
+// Python exception).  The chain keeps the full trail; the site names
+// the unwrap that routed the error HERE.
+
+#include <stdio.h>
+#include <string.h>
+
+int !>(CCError) leaf(void) {
+    return cc_err(CC_ERR_IO, "boom");
+}
+
+int !>(CCError) middle(void) {
+    @errhandler(CCError e) { return cc_err(e); }
+    int v = leaf()!>;
+    return cc_ok(v);
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        const char *site = cc_error_site();
+        printf("caught=%s site_here=%d depth=%d\n", e.message,
+               strstr(site, "error_site_smoke.ccs:29") != NULL,
+               cc_rt_diag_unwrap_chain_len());
+        return 0;
+    }
+    printf("site_empty=%d\n", cc_error_site()[0] == '\0');
+    int v = middle()!>;
+    (void)v;
+    puts("unreached");
+    return 1;
+}

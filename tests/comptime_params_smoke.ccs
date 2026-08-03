@@ -1,0 +1,57 @@
+/* `m.params` completes method reflection: a method's shape is its return type
+ * (`m.ret`/`m.err`/`m.fallible`) and its argument list. A trampoline generator
+ * needs both — it has to spell each parameter to declare and forward it.
+ *
+ * The list is text, like every other reflected fact: `m.params` substitutes to
+ * the parenthesized declaration list the source wrote, and a `@comptime for`
+ * head walks a parenthesized list. So the nested form composes out of two
+ * primitives rather than a second enumeration mode, and the same list written
+ * by hand means exactly the same thing. */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+typedef struct Box { int v; } Box;
+
+static int add(Box* self, int x, double y) { return self->v + x + (int)y; }
+static int nil(Box* self) { return self->v; }
+
+int main(void) {
+    /* A parenthesized list is a sequence wherever it appears — the hand-written
+     * form is the same construct `m.params` expands into. */
+    @comptime for (q in (int a, const char* s)) {
+        printf("lit %d %s %s\n", q.index, q.typestr, q.name);
+    }
+
+    /* Both spellings of "no parameters" unroll zero times. */
+    @comptime for (q in ())     { printf("unreachable %s\n", q.name); }
+    @comptime for (q in (void)) { printf("unreachable %s\n", q.name); }
+
+    /* Every declared parameter, in order, receiver included at index 0 —
+     * reflection reports what is declared, and index 0 is exactly the fact
+     * that makes a method a method. */
+    @comptime for (m in type_of(Box).methods) {
+        printf("%s:", m.name);
+        @comptime for (p in m.params) {
+            printf(" [%d %s %s]", p.index, p.typestr, p.name);
+        }
+        printf("\n");
+    }
+
+    /* The trampoline shape: skip the receiver, declare each remaining
+     * parameter by its own type, and forward. `p.type` is a usable type
+     * spelling, so the declaration is the reflected one, not a guess, and the
+     * bare `p` is the parameter's own name — `p.type p` declares `int x`. */
+    Box b = { .v = 10 };
+    @comptime for (m in type_of(Box).methods) {
+        {
+            int sum = 0;
+            @comptime for (p in m.params) {
+                @comptime if (p.index) { { p.type p = 1; sum += (int)p; } }
+            }
+            printf("%s forwards %d\n", m.name, sum);
+        }
+    }
+    printf("v=%d\n", b.v);
+    return 0;
+}

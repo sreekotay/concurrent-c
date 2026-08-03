@@ -1,0 +1,78 @@
+/* The generator shape reflection exists for: one wrapper per method, written
+ * once and specialized by the facts the declaration carries.
+ *
+ * Three shapes have to come out of one template — infallible-valued,
+ * infallible-void, and fallible-valued — and each differs in what the wrapper
+ * may name. Getting it wrong does not produce a wrong answer, it fails to
+ * compile: a void call cannot initialize anything, and a Result cannot
+ * initialize the ok type without being consumed. That is the point of
+ * selecting on `m.ret_void` and `m.fallible` rather than on a naming
+ * convention.
+ *
+ * `m.args` forwards the call: it names the same parameters `m.params` declares,
+ * so the wrapper passes its own arguments straight through.
+ *
+ * Note which spellings go inside `${...}` and which do not. A slot appends the
+ * VALUE of an expression, so only `m.name` — a string literal — belongs there,
+ * and that is exactly the case where the text has to be pasted into a longer
+ * identifier. `m`, `m.params`, `m.args` and `m.ret` are substituted as tokens
+ * before the template is lowered, so they are written bare. */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+typedef struct Acc { int total; int calls; } Acc;
+
+static int  acc_add(Acc *self, int x, int y) { self->calls++; return self->total + x + y; }
+static void acc_clear(Acc *self)             { self->calls++; self->total = 0; }
+static int !>(CCError) acc_div(Acc *self, int n) {
+    self->calls++;
+    if (n == 0) return cc_err(CC_ERR_INVALID_ARG, "acc_div: zero");
+    return cc_ok(self->total / n);
+}
+
+/* One wrapper per method, reporting failure through its own return code.
+ *
+ * An emitted fragment is spliced as host C, after the passes that lower CC
+ * syntax, so the template may not use `!>` or `@errhandler`. It does not need
+ * them: `cc_is_ok` / `cc_value` are plain macros over the Result, so a
+ * generated wrapper consumes one in ordinary C. `__typeof__` spells the box
+ * without evaluating the call, which is what keeps the mangled instance name
+ * out of the template.
+ *
+ * The anchor is the comptime site, not the prelude: a wrapper calls the method
+ * it wraps, so it has to land after that declaration. Spliced ahead of it the
+ * call would be an implicit declaration and the real definition would then
+ * conflict with it. */
+@comptime for (m in type_of(Acc).methods) {
+    @emit(CC_EMIT_AT_COMPTIME_SITE, `
+        static int wrap_${m.name} m.params {
+            @comptime if (m.fallible) {
+                __typeof__(m m.args) r__ = m m.args;
+                if (!cc_is_ok(r__)) return -1;
+                return (int)cc_value(r__);
+            }
+            @comptime if (!m.fallible) {
+                @comptime if (m.ret_void)  { m m.args; return 0; }
+                @comptime if (!m.ret_void) { m.ret v__ = m m.args; return (int)v__; }
+            }
+        }
+    `);
+}
+
+int main(void) {
+    Acc a = { .total = 40, .calls = 0 };
+
+    /* Infallible valued: the wrapper's parameter list is the method's, so the
+     * receiver is passed the same way. */
+    printf("add=%d\n", wrap_acc_add(&a, 1, 1));
+
+    /* Fallible: the wrapper consumed the Result and turned the error into its
+     * own return code, so nothing propagates past it. */
+    printf("div=%d div0=%d\n", wrap_acc_div(&a, 4), wrap_acc_div(&a, 0));
+
+    /* Void: the wrapper reports success itself, having nothing to return. */
+    printf("clear=%d\n", wrap_acc_clear(&a));
+    printf("total=%d calls=%d\n", a.total, a.calls);
+    return 0;
+}

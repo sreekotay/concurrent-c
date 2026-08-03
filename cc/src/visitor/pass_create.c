@@ -282,15 +282,15 @@ char* cc_rewrite_registered_type_create_destroy(const char* src,
             i++;
             continue;
         }
-        p = i;
-        while (p > 0 && isspace((unsigned char)src[p - 1])) p--;
+        /* Every forward hop in this loop is comment-aware; the backward
+         * walk to `=` and to the declarator name must match. */
+        p = cc_rskip_ws_and_comments(src, i);
         if (p == 0 || src[p - 1] != '=') {
             i++;
             continue;
         }
         eq = p - 1;
-        p = eq;
-        while (p > 0 && isspace((unsigned char)src[p - 1])) p--;
+        p = cc_rskip_ws_and_comments(src, eq);
         name_end = p;
         while (p > 0 && cc_is_ident_char(src[p - 1])) p--;
         if (p >= name_end || !cc_is_ident_start(src[p])) {
@@ -355,10 +355,10 @@ char* cc_rewrite_registered_type_create_destroy(const char* src,
             }
         }
         stmt_s = cc_skip_ws_and_comments(src, n, stmt_s);
-        declared_type_len = name_s - stmt_s;
-        while (declared_type_len > 0 &&
-               (src[stmt_s + declared_type_len - 1] == ' ' || src[stmt_s + declared_type_len - 1] == '\t')) {
-            declared_type_len--;
+        {   /* The declared type is looked up verbatim in the registry, so
+             * its trailing edge must land on code. */
+            size_t dt_end = cc_rskip_ws_and_comments(src, name_s);
+            declared_type_len = (dt_end > stmt_s) ? (dt_end - stmt_s) : 0;
         }
         if (declared_type_len == 0) {
             i++;

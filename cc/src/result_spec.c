@@ -79,6 +79,45 @@ static void cc__normalize_type_name(char* name) {
     }
 }
 
+/* Advance past a leading type qualifier run.  `const` and `volatile` are
+ * about the pointee, not the box, so identity comparisons want them gone —
+ * but the SPELLING keeps them, because emitted code must declare the type it
+ * was given.  Stripping is something a caller asks for, never something that
+ * happens to a spelling.
+ *
+ * `memcmp` with a literal length lowers to a 4-byte plus a 2-byte compare, so
+ * this is two loads in the hit case and one failed compare in the common miss
+ * — no call, and no unaligned-load question, since arena text carries no
+ * alignment guarantee. */
+void cc_result_spec_skip_qualifiers(const char** io_src, size_t* io_len) {
+    const char* s;
+    size_t n;
+    if (!io_src || !io_len || !*io_src) return;
+    s = *io_src;
+    n = *io_len;
+    for (;;) {
+        size_t k = 0;
+        while (k < n && (s[k] == ' ' || s[k] == '\t' || s[k] == '\n' || s[k] == '\r')) k++;
+        if (n - k >= 6 && memcmp(s + k, "const ", 6) == 0) { s += k + 6; n -= k + 6; continue; }
+        if (n - k >= 9 && memcmp(s + k, "volatile ", 9) == 0) { s += k + 9; n -= k + 9; continue; }
+        break;
+    }
+    *io_src = s;
+    *io_len = n;
+}
+
+/* Do two spellings name the same type once qualifiers are set aside?  Compares
+ * the canonical forms, so `char *` and `const char*` match. */
+int cc_result_spec_same_type_unqualified(const char* a, size_t a_len,
+                                         const char* b, size_t b_len) {
+    char ma[256], mb[256];
+    cc_result_spec_skip_qualifiers(&a, &a_len);
+    cc_result_spec_skip_qualifiers(&b, &b_len);
+    cc_result_spec_mangle_type(a, a_len, ma, sizeof(ma));
+    cc_result_spec_mangle_type(b, b_len, mb, sizeof(mb));
+    return ma[0] && strcmp(ma, mb) == 0;
+}
+
 void cc_result_spec_mangle_type(const char* src, size_t len, char* out, size_t out_sz) {
     size_t i;
     size_t j = 0;
@@ -100,6 +139,13 @@ void cc_result_spec_mangle_type(const char* src, size_t len, char* out, size_t o
     for (i = 0; i < len && j < out_sz - 1; i++) {
         char c = src[i];
         if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            /* Whitespace before a `*` is not a token separator — `char *` and
+             * `char*` are one type and must canonicalize to one name, or the
+             * two spellings mint two different Result structs. */
+            size_t k = i + 1;
+            while (k < len && (src[k] == ' ' || src[k] == '\t' ||
+                               src[k] == '\n' || src[k] == '\r')) k++;
+            if (k < len && src[k] == '*') continue;
             if (j > 0 && out[j - 1] != '_') out[j++] = '_';
         } else if (c == '*') {
             if (j + 3 < out_sz - 1) {
@@ -280,6 +326,19 @@ const CCResultSpec* cc_result_spec_table_add(CCResultSpecTable* table,
 
 int cc_result_spec_emit_decl(const CCResultSpec* spec, char* out, size_t out_sz) {
     if (!spec || !out || out_sz == 0) return -1;
+    /* A void ok type has nothing to store, so it needs the void generator —
+     * the valued macro would declare a `void value;` union member. */
+    if (strcmp(spec->ok_type, "void") == 0) {
+        return snprintf(out, out_sz,
+                        "#ifndef %s_DEFINED\n"
+                        "#define %s_DEFINED 1\n"
+                        "CC_DECL_RESULT_SPEC_VOID(%s, %s)\n"
+                        "#endif\n",
+                        spec->concrete_name,
+                        spec->concrete_name,
+                        spec->concrete_name,
+                        spec->err_type);
+    }
     return snprintf(out, out_sz,
                     "#ifndef %s_DEFINED\n"
                     "#define %s_DEFINED 1\n"

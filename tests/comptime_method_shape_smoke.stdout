@@ -1,0 +1,2 @@
+plain fallible=0 err=[E]
+risky fallible=1 err=[E]

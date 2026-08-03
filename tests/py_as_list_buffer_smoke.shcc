@@ -1,0 +1,40 @@
+/* `as_list::[T]` reads a contiguous buffer exporter with one memcpy.
+ *
+ * The result must be indistinguishable from the per-element walk — same
+ * values, same element count — so this compares the exporter path against a
+ * plain list of the same values. The wrong-dtype case matters most: a
+ * float32 array asked for as double must NOT be reinterpreted raw; it falls
+ * back to per-element conversion, because bytes only move when both sides
+ * agree on what they mean. */
+#include <ccc/script/py.cch>
+
+CCPy py = cc_py_new(&a) !> @destroy;
+
+py.exec(@slice(
+    "import array\n"
+    "buf_d = array.array('d', [1.5, 2.5, 3.5, 4.5])\n"
+    "lst_d = [1.5, 2.5, 3.5, 4.5]\n"
+    "buf_q = array.array('q', [10, 20, 30])\n"
+    "buf_f = array.array('f', [1.5, 2.5])\n")) !>;
+
+CCPyObj m = py.import("__main__") !> @destroy;
+
+CCPyObj bd = m.get("buf_d") !> @destroy;
+CCPyObj ld = m.get("lst_d") !> @destroy;
+CCPyObj bq = m.get("buf_q") !> @destroy;
+CCPyObj bf = m.get("buf_f") !> @destroy;
+
+CCSlice xs = bd.as_list::[double](&a) !>;
+CCSlice ys = ld.as_list::[double](&a) !>;
+CCSlice qs = bq.as_list::[int64_t](&a) !>;
+/* float32 exporter, double destination: per-element fallback, not raw. */
+CCSlice fs = bf.as_list::[double](&a) !>;
+
+double *xv = (double *)xs.ptr, *yv = (double *)ys.ptr, *fv = (double *)fs.ptr;
+int64_t *qv = (int64_t *)qs.ptr;
+int ok = xs.len == 4 && ys.len == 4 && qs.len == 3 && fs.len == 2;
+for (size_t i = 0; i < 4 && ok; i++) ok = xv[i] == yv[i];
+ok = ok && qv[0] == 10 && qv[2] == 30;
+ok = ok && fv[0] == 1.5 && fv[1] == 2.5;
+println(@string(`buffer_as_list ok=${ok}`, &a)) !>;
+return ok ? 0 : 1;

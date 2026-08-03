@@ -1,6 +1,10 @@
 #include "template_scan.h"
 
 #include "../util/text.h"
+#include "../util/text_scan.h"
+#include "../util/path.h"
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int cc__tpl_is_tag_start(const char* src, size_t n, size_t pos) {
@@ -263,3 +267,124 @@ int cc_template_body_needs_emit_exec(const char* src, size_t n,
     return 0;
 }
 
+
+/* --- closer-anchored dedent (see header) --- */
+
+/* Logical position of `off`: honors `# <line> "<file>"` markers, so a
+ * diagnostic in an include-expanded buffer names the user's file and
+ * line rather than an offset into the expansion. */
+static size_t cc__tpl_line_of(const char* src, size_t n, size_t off,
+                              char* file_out, size_t file_cap) {
+    size_t line = 1, k = 0;
+    if (file_out && file_cap) file_out[0] = '\0';
+    while (k < off) {
+        size_t ls = k, le = k;
+        while (le < n && src[le] != '\n') le++;
+        {
+            size_t q = ls;
+            while (q < le && (src[q] == ' ' || src[q] == '\t')) q++;
+            if (q < le && src[q] == '#') {
+                size_t d = q + 1;
+                while (d < le && (src[d] == ' ' || src[d] == '\t')) d++;
+                if (d < le && src[d] >= '0' && src[d] <= '9') {
+                    size_t v = 0;
+                    while (d < le && src[d] >= '0' && src[d] <= '9')
+                        v = v * 10 + (size_t)(src[d++] - '0');
+                    while (d < le && (src[d] == ' ' || src[d] == '\t')) d++;
+                    if (d < le && src[d] == '"' && file_out) {
+                        size_t f = d + 1, m = 0;
+                        while (f < le && src[f] != '"' && m + 1 < file_cap)
+                            file_out[m++] = src[f++];
+                        file_out[m] = '\0';
+                    }
+                    /* The marker names the NEXT line's number. */
+                    line = v;
+                    k = le + 1;
+                    continue;
+                }
+            }
+        }
+        if (le >= off) break;
+        line++;
+        k = le + 1;
+    }
+    return line;
+}
+
+char* cc_tpl_dedent_text(const char* src, size_t n, const char* input_path,
+                         size_t* out_len) {
+    char* out = NULL;
+    size_t olen = 0, ocap = 0;
+    size_t i = 0, last_emit = 0;
+    int changed = 0;
+    CCInertScan sc;
+    if (!src || n == 0 || !memchr(src, '`', n)) return NULL;
+    cc_inert_scan_init(&sc, NULL);
+    while (i < n) {
+        if (cc_inert_scan_step(&sc, src, n, &i)) continue;
+        if (src[i] != '`') { i++; continue; }
+        {
+            size_t tick_s = i, tick_e = 0;
+            size_t ls, mlen, open_nl, p;
+            int alone = 1;
+            if (cc_tpl_scan_literal(src, n, tick_s, &tick_e) != 0) {
+                /* Unterminated: leave it for the pass that will diagnose. */
+                i++;
+                continue;
+            }
+            ls = tick_e;
+            while (ls > 0 && src[ls - 1] != '\n') ls--;
+            for (size_t k = ls; k < tick_e; k++)
+                if (src[k] != ' ' && src[k] != '\t') { alone = 0; break; }
+            mlen = tick_e - ls;
+            /* No dedent when the closer shares its line with content, when
+             * the margin is empty (every pre-rule template), or when the
+             * whole template sits on one line. */
+            if (!alone || mlen == 0 || ls <= tick_s) { i = tick_e + 1; continue; }
+            open_nl = tick_s + 1;
+            while (open_nl < tick_e && src[open_nl] != '\n') open_nl++;
+            if (open_nl >= tick_e) { i = tick_e + 1; continue; }
+            /* Emit through the opening line (its remainder is not margined:
+             * it starts mid-line, after the tick). */
+            cc_sb_append(&out, &olen, &ocap, src + last_emit, open_nl + 1 - last_emit);
+            p = open_nl + 1;
+            while (p < tick_e) {
+                size_t le = p, q = p;
+                if (p == ls) { p = tick_e; break; } /* the closer's margin: drop it */
+                while (le < tick_e && src[le] != '\n') le++;
+                while (q < le && (src[q] == ' ' || src[q] == '\t')) q++;
+                if (q == le) {
+                    /* Blank line: nothing to dedent, bytes pass through. */
+                    cc_sb_append(&out, &olen, &ocap, src + p, le + 1 - p);
+                } else if (le - p >= mlen && memcmp(src + p, src + ls, mlen) == 0) {
+                    cc_sb_append(&out, &olen, &ocap, src + p + mlen, le + 1 - (p + mlen));
+                } else {
+                    char rel[1024];
+                    char mfile[512];
+                    size_t mline = cc__tpl_line_of(src, n, p, mfile, sizeof(mfile));
+                    fprintf(stderr,
+                            "%s:%zu:1: error: template: line indented less than "
+                            "the closing backtick's margin (the closer's "
+                            "indentation is the margin stripped from every "
+                            "line; indent the line to at least match it)\n",
+                            mfile[0] ? mfile
+                                     : (input_path
+                                            ? cc_path_rel_to_repo(input_path, rel, sizeof(rel))
+                                            : "<input>"),
+                            mline);
+                    free(out);
+                    return (char*)-1;
+                }
+                p = le + 1;
+            }
+            cc_sb_append(&out, &olen, &ocap, "`", 1);
+            changed = 1;
+            last_emit = tick_e + 1;
+            i = tick_e + 1;
+        }
+    }
+    if (!changed) { free(out); return NULL; }
+    cc_sb_append(&out, &olen, &ocap, src + last_emit, n - last_emit);
+    if (out_len) *out_len = olen;
+    return out;
+}

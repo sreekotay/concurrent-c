@@ -1,0 +1,55 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/script/py.cch>
+#include <stdio.h>
+
+/* Calling out to Python must not leak or over-release.
+ *
+ * The outbound path hands arguments to `PyObject_Vectorcall` as a C array and
+ * keeps ownership of them, where the tuple form it replaced had
+ * `PyTuple_SetItem` STEAL each reference. Getting that backwards leaks on one
+ * side and double-frees on the other, and neither shows up in a result — so
+ * this watches the reference counts instead of the answers.
+ *
+ * Keywords still go through the tuple-and-dict path, so both are exercised. */
+int main(void) {
+    @errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); return 1; }
+    CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+    if (!cc_py_available()) { puts("SKIP (no libpython)"); return 0; }
+    CCPy py = cc_py_new(&a) !>;
+
+    py.exec(@slice(
+        "import sys\n"
+        "ARG = [1, 2, 3]\n"
+        "def f(x, y=0):\n"
+        "    return x + y\n"
+        "def g(seq):\n"
+        "    return len(seq)\n"
+        "def rc_f():\n"
+        "    return sys.getrefcount(f)\n"
+        "def rc_arg():\n"
+        "    return sys.getrefcount(ARG)\n")) !>;
+
+    CCPyObj m = py.import("__main__") !> @destroy;
+    CCPyObj arg = m.get("ARG") !> @destroy;
+
+    int64_t f0 = m.rc_f() !>;
+    int64_t a0 = m.rc_arg() !>;
+
+    for (int i = 0; i < 2000; i++) {
+        int64_t v = m.f(i) !>;                        /* vectorcall path */
+        int64_t w = m.f(i, py_kw("y", 1)) !>;         /* tuple + kwargs path */
+        if (w != v + 1) { fprintf(stderr, "wrong at %d\n", i); return 1; }
+        int64_t k = m.g(arg) !>;                      /* object argument */
+        if (k != 3) { fprintf(stderr, "wrong len at %d\n", i); return 1; }
+    }
+
+    int64_t f1 = m.rc_f() !>;
+    int64_t a1 = m.rc_arg() !>;
+
+    printf("callee_stable=%d arg_stable=%d\n", f0 == f1, a0 == a1);
+    if (f0 != f1) fprintf(stderr, "callee refcount %lld -> %lld\n",
+                          (long long)f0, (long long)f1);
+    if (a0 != a1) fprintf(stderr, "arg refcount %lld -> %lld\n",
+                          (long long)a0, (long long)a1);
+    return 0;
+}

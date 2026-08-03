@@ -1,0 +1,45 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+/* `cc_static_assert` lets a type-dispatching macro reject an unsupported type
+ * at the call site, in the library's own words, rather than leaving the user
+ * with the compiler's.
+ *
+ * A `_Generic` selection is an integer constant expression, so support is
+ * decidable in a constant context. Without the assertion the choices are all
+ * bad: no `default:` arm gives "does not match any association" — the type but
+ * not the operation — and a `default:` arm that calls something incompatible
+ * is merely a warning, so the build reaches an undefined reference at link,
+ * far from the call and silent about why.
+ *
+ * The form is C89 on purpose: bitfields and struct types inside `sizeof` both
+ * predate C99, and a negative width is a constraint violation, so every
+ * conforming compiler must diagnose it. No statement expression, no `_Generic`
+ * in the assertion itself, no dependency on the advertised C version. */
+
+static int   kind_of_int(int v)       { (void)v; return 1; }
+static int   kind_of_double(double v) { (void)v; return 2; }
+struct kind_of_unsupported_type;
+extern int   kind_of_other(struct kind_of_unsupported_type *v);
+
+#define KIND_SUPPORTED(x) _Generic((x), int: 1, double: 1, default: 0)
+#define KIND(x) \
+    (cc_static_assert(KIND_SUPPORTED(x), kind_wants_an_int_or_a_double), \
+     _Generic((x), int: kind_of_int, double: kind_of_double, \
+                   default: kind_of_other)(x))
+
+int main(void) {
+    int    i = 3;
+    double d = 1.5;
+
+    /* Supported types dispatch normally; the assertion folds away. */
+    printf("kind=%d %d\n", KIND(i), KIND(d));
+
+    /* The assertion is an expression, so it composes where a value is wanted. */
+    if (KIND(i) + KIND(d) != 3) return 1;
+
+    /* A true condition costs nothing and yields void. */
+    cc_static_assert(sizeof(int) >= 2, int_is_at_least_two_bytes);
+    puts("ok");
+    return 0;
+}

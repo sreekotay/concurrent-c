@@ -1,0 +1,45 @@
+/* The value-level face of `m.params`, so a compiled factory can walk a
+ * method's parameters without CCCtField crossing the waist — the same
+ * bytes-only rule the field and method verbs follow.
+ *
+ * A generator needs both halves: the type to declare a local with, and the
+ * name to forward by. Index 0 is the receiver, which is how a trampoline
+ * knows where its arguments start. */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+
+typedef struct Acc { int total; } Acc;
+
+static int  Acc_get(Acc *self)                      { return self->total; }
+static int  Acc_span(Acc *self, int lo, double hi)  { return self->total + lo + (int)hi; }
+static void Acc_clear(Acc *self)                    { self->total = 0; }
+
+@comptime {
+    int n = cc_reflect_method_count("Acc");
+    for (int i = 0; i < n; i++) {
+        char mb[128], pr[256];
+        int pn;
+        cc_reflect_method_member("Acc", i, mb, sizeof(mb));
+        cc_reflect_method_params("Acc", i, pr, sizeof(pr));
+        pn = cc_reflect_param_count(pr);
+        cc_emit_format(CC_EMIT_AFTER_PRELUDE, "/* %s takes %d */\n", mb, pn - 1);
+        for (int k = 0; k < pn; k++) {
+            char ty[192], nmb[128];
+            cc_reflect_param_type(pr, k, ty, sizeof(ty));
+            cc_reflect_param_name(pr, k, nmb, sizeof(nmb));
+            cc_emit_format(CC_EMIT_AFTER_PRELUDE,
+                           "enum { ACC_%s_%d = sizeof(%s) };\n", mb, k, ty);
+            cc_emit_format(CC_EMIT_AFTER_PRELUDE,
+                           "/*   [%d] %s %s */\n", k, ty, nmb);
+        }
+    }
+}
+
+int main(void) {
+    /* The emitted constants prove each parameter's type round-tripped as a
+     * usable type spelling, not just as text. */
+    printf("get=%d span=%d,%d,%d clear=%d\n",
+           ACC_get_0, ACC_span_0, ACC_span_1, ACC_span_2, ACC_clear_0);
+    return 0;
+}

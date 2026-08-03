@@ -1,0 +1,23 @@
+#ifndef HEADER_COMPTIME_BACKTICK_SMOKE_CCH
+#define HEADER_COMPTIME_BACKTICK_SMOKE_CCH
+
+typedef struct AposThing { int v; } AposThing;
+static void apos_thing_close(AposThing *t) { t->v = 0; }
+
+/* A header `@comptime` whose template prose carries an ODD number of
+ * apostrophes. The stripper removes these blocks from the lowered `.h`;
+ * scanning template prose as code opens a char literal that never closes, and
+ * the block's own `}` is then never found — which used to disable stripping
+ * for the WHOLE header, leaving every block behind as raw CC syntax. */
+@comptime {
+    CCString note = @string(`the header's note`, arena);
+    (void)note;
+}
+
+@comptime {
+    (void)cc_type_register("AposThing", (CCTypeHooks){
+        .destroy = cc_type_destroy_call("apos_thing_close"),
+    });
+}
+
+#endif

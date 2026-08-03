@@ -17,6 +17,7 @@
 #include "util/text.h"
 #include "util/text_scan.h"
 #include "visitor/pass_create.h"
+#include "parser/check_py_own.h"
 #include "visitor/pass_channel_syntax.h"
 #include "visitor/pass_unwrap_destroy.h"
 #include "util/path.h"
@@ -138,7 +139,19 @@ static char* cc__neutralize_comments_preserve_layout_parse(const char* src, size
  * header helpers (e.g. `CCResult_CCSlice_CCError_unwrap`) became undeclared
  * calls that TCC typed as `int`, and `CCSlice x = result !>;` failed with
  * "'{' expected (got ';')".  Real `CC_DECL_RESULT_SPEC` static inlines are
- * already in scope at every valid call site (same as reparse-diet). */
+ * already in scope at every valid call site (same as reparse-diet).
+ *
+ * That error spelling is TCC's report for ANY struct declaration whose
+ * initializer has the wrong type: it decides the initializer must be a
+ * brace list and complains about the missing `{`, at the declaration's
+ * line — or at logical EOF when the statement came from a text pass.  The
+ * other known route here is `!>` on a Result-returning MACRO: the callee
+ * name has no registry entry, the unwrap falls back to the roster
+ * `_Generic`, and if the Result type is not among the arms the `default:`
+ * arm hands back the whole struct.  Headers avoid this by declaring the
+ * macro's shape as a real prototype above the `#define` (see
+ * `cc_py_obj_map` in ccc/script/py.cch), which the registry scanner picks
+ * up. */
 static char* cc__rewrite_result_helper_calls_for_parser_parse(const char* src, size_t n) {
     (void)src;
     (void)n;
@@ -216,6 +229,13 @@ int cc_parse_to_ast(const char* input_path, CCSymbolTable* symbols, CCASTRoot** 
             file_buf = script;
             got = script_len;
         }
+    }
+
+    /* Ownership check on the raw user file: headers are not in view, so
+     * py.cch's own CCPyObj plumbing never trips it. */
+    if (cc_check_py_own(file_buf, got, input_path) != 0) {
+        free(file_buf);
+        return -1;
     }
 
     /* Phase 1 -> 2: include-expand once for comptime discovery, collect type
@@ -300,6 +320,14 @@ int cc_parse_to_ast(const char* input_path, CCSymbolTable* symbols, CCASTRoot** 
     char rel_path[1024];
     cc_path_rel_to_repo(input_path, rel_path, sizeof(rel_path));
     char* parse_input = cc__neutralize_comments_preserve_layout_parse(pp_buf, strlen(pp_buf));
+    if (getenv("CC_DEBUG_MAIN_PARSE_DUMP")) {
+        FILE* df = fopen(getenv("CC_DEBUG_MAIN_PARSE_DUMP"), "w");
+        if (df) {
+            const char* b = parse_input ? parse_input : pp_buf;
+            fwrite(b, 1, strlen(b), df);
+            fclose(df);
+        }
+    }
     CCASTRoot* root = cc_tcc_bridge_parse_string_to_ast(parse_input ? parse_input : pp_buf, rel_path, input_path, symbols);
     free(parse_input);
     /* M7.C3 / M1-lite: when pre-expand is on, hand the post-pre-expand

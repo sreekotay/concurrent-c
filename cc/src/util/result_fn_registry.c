@@ -268,6 +268,16 @@ static size_t cc__scan_back_type_start(const char* s, size_t end) {
     return i;
 }
 
+/* Enumerate the concrete `CCResult_T_E` names seen in scanned declarations.
+ * These come from headers this TU actually includes, so naming one in a
+ * `_Generic` arm is safe by construction. */
+const char* cc_result_fn_registry_result_type_at(size_t i) {
+    if (i >= g_result_fn_meta.len) return NULL;
+    return g_result_fn_meta.result_types[i];
+}
+
+size_t cc_result_fn_registry_count(void) { return g_result_fn_meta.len; }
+
 void cc_result_fn_registry_scan_source(const char* src, size_t n) {
     size_t i = 0;
     int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;

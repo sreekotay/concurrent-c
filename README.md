@@ -71,6 +71,15 @@ The `Name::[args]` instantiation and `v.method(...)` UFCS syntax is lowered by t
 The angle-bracket spellings (`Vec<T>`, `vec_new<T>`) are retired; `Name::[args]` is the
 single instantiation surface for both built-in containers and user generic factories.
 
+A registered factory can also be called in member position. `recv.member::[T](args)`
+resolves to the factory `<snake(RecvType)>_<member>` and passes the receiver as its
+first argument, so these are two spellings of one call and lower to one monomorph:
+
+```c
+py.expose::[Counter]("counter", &seed) !>;        // member spelling
+py_expose::[Counter](&py, "counter", &seed) !>;   // free-name spelling
+```
+
 See the [stdlib spec](spec/concurrent-c-stdlib-spec.md) for full API documentation.
 
 ---
@@ -372,6 +381,10 @@ Override:
 `ccc build` maintains a lightweight incremental cache under `out/.cc-build/` to skip re-emitting C, recompiling objects, and relinking when inputs/flags haven’t changed.
 
 - Disable: `--no-cache` or `CC_NO_CACHE=1`
+
+The content-addressed caches (`~/.cache/concurrent-c/`, `out/ccc-cache/`) are
+capped and trim themselves oldest-first; `CC_CACHE_MAX_MB` sets the
+per-directory budget and `make -C cc clean-cache` empties them.
 
 ---
 

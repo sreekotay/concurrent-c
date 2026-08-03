@@ -143,6 +143,14 @@ else
   RUNTIME_DYLIB_LINK := -shared
 endif
 
+# The runtime object is linked into RUNTIME_DYLIB as well as the binary, and
+# ELF rejects a thread-local relocation in a shared object built from non-PIC
+# code (`R_X86_64_TPOFF32 ... recompile with -fPIC`).  Mach-O does not, which
+# is why this only shows up on Linux.
+ifneq ($(shell uname -s),Darwin)
+  RUNTIME_PIC := -fPIC
+endif
+
 LOWER_HEADERS_SRCS := src/tools/lower_headers.c \
 	src/header/lower_header.c \
 	src/ir/ir.c \
@@ -175,6 +183,7 @@ LOWER_HEADERS_SRCS := src/tools/lower_headers.c \
 	src/visitor/pass_result_unwrap.c \
 	src/visitor/pass_unwrap_destroy.c \
 	src/visitor/visitor_fileutil.c \
+	src/util/cache_evict.c \
 	src/util/io.c \
 	src/util/path.c \
 	src/util/result_fn_registry.c
@@ -224,7 +233,7 @@ $(TCC_LIB)/libtcc.a: $(TCC_PATCH_STAMP)
 endif
 
 # Lower .cch headers to .h files (must run before examples that use generated C)
-.PHONY: lower-headers
+.PHONY: clean-cache lower-headers
 lower-headers: $(LOWER_HEADERS_STAMP)
 
 # The stamp uses the STAGE-1 tool (grammar stubbed): stdlib headers contain
@@ -367,14 +376,18 @@ ifeq ($(CC_IS_TCC),1)
 	# No C++ XJB under host TCC — same fallback path as user programs with CC=tcc.
 	$(CC) $(CFLAGS) -DCC_ENABLE_XJB_FLOAT_FMT=0 -MMD -MP -MF $(@:.o=.d) -c $(OUT_RUNTIME)/concurrent_c.c -o $@
 else
-	$(CC) $(CFLAGS) -DCC_ENABLE_XJB_FLOAT_FMT=1 -MMD -MP -MF $(RUNTIME_CORE_OBJ:.o=.d) -c $(OUT_RUNTIME)/concurrent_c.c -o $(RUNTIME_CORE_OBJ)
-	$(CXX) $(CXXFLAGS) -DCC_ENABLE_XJB_FLOAT_FMT=1 -MMD -MP -MF $(RUNTIME_XJB_OBJ:.o=.d) -c runtime/float_format_xjb.cpp -o $(RUNTIME_XJB_OBJ)
+	$(CC) $(CFLAGS) $(RUNTIME_PIC) -DCC_ENABLE_XJB_FLOAT_FMT=1 -MMD -MP -MF $(RUNTIME_CORE_OBJ:.o=.d) -c $(OUT_RUNTIME)/concurrent_c.c -o $(RUNTIME_CORE_OBJ)
+	$(CXX) $(CXXFLAGS) $(RUNTIME_PIC) -DCC_ENABLE_XJB_FLOAT_FMT=1 -MMD -MP -MF $(RUNTIME_XJB_OBJ:.o=.d) -c runtime/float_format_xjb.cpp -o $(RUNTIME_XJB_OBJ)
 	$(CC) -nostdlib -r -o $@ $(RUNTIME_CORE_OBJ) $(RUNTIME_XJB_OBJ)
 endif
 
 $(OBJDIR)/%.o: %.c | $(TCC_PATCH_STAMP)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -MMD -MP -MF $(@:.o=.d) -c $< -o $@
+
+clean-cache:
+	rm -rf $(HOME)/.cache/concurrent-c/incexp $(HOME)/.cache/concurrent-c/comptime-hooks
+	rm -rf $(CURDIR)/../out/ccc-cache
 
 clean:
 	rm -f $(WRAPPER) $(REAL_BINARY) $(LOWER_HEADERS_BINARY)

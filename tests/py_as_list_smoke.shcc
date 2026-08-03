@@ -1,0 +1,17 @@
+/* `obj.as_list::[T](&arena)` converts a Python sequence to a typed
+ * run of T: numbers to CC scalars, strings to arena-backed slices. */
+#include <ccc/script/py.cch>
+
+CCPy py = cc_py_new(&a) !> @destroy;
+CCPyObj b = py.import("builtins") !> @destroy;
+
+CCPyObj r5 = b.range(5) !> @destroy;
+CCPyObj lst = b.list(r5) !> @destroy;
+CCSlice xs = lst.as_list::[int64_t](&a) !>;
+int64_t* v = (int64_t*)xs.ptr;
+println(@string(`n=${xs.len} first=${v[0]} last=${v[4]}`, &a)) !>;
+
+CCPyObj srt = b.sorted("cba") !> @destroy;
+CCSlice ss = srt.as_list::[CCSlice](&a) !>;
+CCSlice* sv = (CCSlice*)ss.ptr;
+println(@string(`strs=${ss.len} first=${sv[0]}`, &a)) !>;

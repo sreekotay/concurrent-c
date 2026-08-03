@@ -1,0 +1,51 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+/* A Result's concrete type comes from canonicalizing its ok-type spelling, so
+ * the canonicalizer has to be total and injective. Both directions fail
+ * silently — a collision makes one box serve two types, a false distinction
+ * mints two boxes for one type — so this pins both.
+ *
+ * Tested through the real consumer: declaring the spellings and assigning
+ * across them. Unit-testing the mangler would not have caught the whitespace
+ * case, because the mangled names looked plausible in isolation. */
+
+/* --- one type, several spellings: must land on ONE box --- */
+static char*  !>(CCError) sp_tight(void)  { return cc_ok((char*)0); }
+static char * !>(CCError) sp_loose(void)  { return cc_ok((char*)0); }
+static char  *!>(CCError) sp_wide(void)   { return cc_ok((char*)0); }
+
+/* Const is NOT part of a Result's ok type: `const` is a declaration
+ * specifier here, and a box holding `char*` is the same box as one holding
+ * `const char*` — C applies const at the binding site. So this shares the
+ * box above rather than minting a new one. */
+static const char* !>(CCError) sp_const(void) { return cc_ok((char*)0); }
+
+/* --- distinct types: must NOT collide --- */
+static int          !>(CCError) d_int(void)   { return cc_ok(1); }
+static unsigned int !>(CCError) d_uint(void)  { return cc_ok(2u); }
+static int*         !>(CCError) d_p1(void)    { return cc_ok((int*)0); }
+static int**        !>(CCError) d_p2(void)    { return cc_ok((int**)0); }
+
+int main(void) {
+    @errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); return 1; }
+
+    /* All four spellings name the same concrete Result: assigning across
+     * them only compiles if canonicalization agreed. */
+    CCResult_charptr_CCError r = sp_tight();
+    r = sp_loose();
+    r = sp_wide();
+    r = sp_const();
+    char* p = r !> ;
+    if (p != (char*)0) return 2;
+
+    /* Distinct ok types keep distinct boxes and distinct values. */
+    int          a = d_int()  !>;
+    unsigned int b = d_uint() !>;
+    int*         c = d_p1()   !>;
+    int**        d = d_p2()   !>;
+    if (a != 1 || b != 2u || c != (int*)0 || d != (int**)0) return 3;
+
+    printf("canonical ok a=%d b=%u\n", a, b);
+    return 0;
+}

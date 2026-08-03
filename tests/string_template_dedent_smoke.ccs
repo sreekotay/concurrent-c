@@ -1,0 +1,43 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* Closer-anchored dedent: the closing backtick's indentation is the
+ * margin, stripped exactly from every content line — so a template sits
+ * at the code's indentation and its content still means column 0.  A
+ * closer sharing its line with content means no dedent (one-liners
+ * unchanged), and an empty margin is a no-op (every template written
+ * before this rule). */
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(64)) @destroy;
+
+    /* Indented template: margin = the 8 spaces before the closer. */
+    CCString t = @string(`
+        line one
+            nested keeps its extra four
+        line two
+        `, &a);
+    printf("[%.*s]\n", (int)t.as_slice().len, (const char *)t.as_slice().ptr);
+
+    /* Column-0 twin: byte-identical result. */
+    CCString z = @string(`
+line one
+    nested keeps its extra four
+line two
+`, &a);
+    printf("same=%d\n",
+           t.as_slice().len == z.as_slice().len &&
+           memcmp(t.as_slice().ptr, z.as_slice().ptr, z.as_slice().len) == 0);
+
+    /* Inline one-liner: closer shares the line, no dedent. */
+    CCString one = @string(`  two leading spaces stay`, &a);
+    printf("[%.*s]\n", (int)one.as_slice().len, (const char *)one.as_slice().ptr);
+
+    /* Interpolation is untouched by the margin strip. */
+    int n = 7;
+    CCString ip = @string(`
+        n=${n}
+        `, &a);
+    printf("[%.*s]\n", (int)ip.as_slice().len, (const char *)ip.as_slice().ptr);
+    return 0;
+}

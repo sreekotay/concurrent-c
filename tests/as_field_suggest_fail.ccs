@@ -1,0 +1,15 @@
+#include <stdio.h>
+
+/* A field that lives one member deep gets named in the error: `w.label`
+ * on a wrapper whose `base` member has it says spell `.base.label`,
+ * instead of a bare not-found that sends the user hunting through
+ * typedefs.  This is the diagnostic face of `@as` embedding — the
+ * forwarding itself is method-only. */
+typedef struct Base { int code; const char *label; } Base;
+typedef struct Wrap { Base base; int extra; } Wrap;
+
+int main(void) {
+    Wrap w = { .base = { 1, "x" }, .extra = 2 };
+    printf("%s\n", w.label);
+    return 0;
+}

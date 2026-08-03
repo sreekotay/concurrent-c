@@ -1,0 +1,29 @@
+/* A keyword argument is an ordinary call argument that carries the name
+ * it binds to, so defaults, one keyword, and several out of order all
+ * ride the same sink. */
+#include <ccc/script/py.cch>
+
+CCPy py = cc_py_new(&a) !> @destroy;
+
+py.exec(@slice("def greet(name, greeting='hi', punct='!'):\n"
+               "    return greeting + ', ' + name + punct\n"
+               "def area(w, h=2, scale=1):\n"
+               "    return w * h * scale\n")) !>;
+CCPyObj m = py.import("__main__") !> @destroy;
+
+CCSlice d = m.greet("world")!>.as_slice()!>;
+CCSlice one = m.greet("world", py_kw("greeting", "hello"))!>.as_slice()!>;
+CCSlice many = m.greet("world", py_kw("punct", "?"),
+                       py_kw("greeting", "yo"))!>.as_slice()!>;
+println(@string(`${d} | ${one} | ${many}`, &a)) !>;
+
+/* Keywords reach the destination-typed variants too. */
+int64_t n = m.area(3, py_kw("scale", 5)) !>;
+println(@string(`area=${n}`, &a)) !>;
+
+/* An unknown keyword is an ordinary Python failure. */
+CCPyObj bad = m.greet("world", py_kw("nope", 1)) !>(e) {
+    println(@string(`caught=${e.type_name}`, &a)) !>;
+    return 0;
+} @destroy;
+(void)bad;

@@ -1,0 +1,20 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+typedef struct Metrics { int count; } Metrics;
+
+static int bump(Metrics* self, int by) { self->count += by; return self->count; }
+static int peek(Metrics* self) { return self->count; }
+
+int main(void) {
+    Metrics m = { .count = 0 };
+    int n = 0;
+    @comptime for (mm in type_of(Metrics).methods) {
+        printf("method[%d]=%s\n", mm.index, mm.name);
+        n++;
+    }
+    (void)m.bump(5);
+    printf("methods=%d peek=%d\n", n, m.peek());
+    return 0;
+}

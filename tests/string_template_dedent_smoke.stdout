@@ -1,0 +1,10 @@
+[
+line one
+    nested keeps its extra four
+line two
+]
+same=1
+[  two leading spaces stay]
+[
+n=7
+]

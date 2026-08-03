@@ -57,6 +57,24 @@ Minimal concurrent hello world — shows explicit nursery creation and task spaw
 | `recipe_ufcs_forms.ccs` | UFCS matrix | One rule × spellings, including bare-name and fallible chains |
 | `recipe_ordered_parallel.ccs` | Ordered fan-out | `send_task` + ordered recv, FIFO await |
 
+### Python interop (one boundary, two doors)
+
+| File | Direction | Key Concept |
+|------|-----------|-------------|
+| `recipe_py_interop.ccs` | CC embeds Python | `cc_py_available()`, `py.exec`/`.eval`, member calls, `as_list`, error surface with `cc_error_site()` |
+| `recipe_py_module.ccs` | Python imports CC | `py_module::[T]` + exported `PyInit_<name>` → `ccc build` links `<name>.abi3.so`, `import <name>` just works |
+
+```bash
+./cc/bin/ccc run examples/recipe_py_interop.ccs        # CC owns main, Python is the guest
+./cc/bin/ccc build examples/recipe_py_module.ccs       # Python owns main, CC is the module
+PYTHONPATH=bin python3 -c "import counter; print(counter.bump(4))"
+```
+
+Both directions share one binding (dlopen'd stable ABI, no link-time
+Python dependency), one marshalling ruleset, and one benchmark
+(`perf/py_baseline.ccs`). `examples/py/pydemo.shcc` is the same embed
+door in script form.
+
 ### Comparison: where Rust wins (data races)
 
 | Directory | Point |

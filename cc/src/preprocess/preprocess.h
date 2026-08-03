@@ -21,10 +21,34 @@ typedef struct CCTypeRegistry CCTypeRegistry;
  * (inline anonymous/nested aggregate def, anonymous member, unnamed bitfield,
  * pointer-to-array): callers must treat 0 as "no reflection" — every field or
  * none, never a partial or guessed result. */
-typedef struct CCCtField { char* name; char* type; } CCCtField;
+/* `params` is the method's parenthesized parameter list, verbatim, and `member`
+ * the name it answers to after the dot; both NULL for a field.  Reflection
+ * carries text, so the list is the source's own spelling. */
+typedef struct CCCtField {
+    char* name; char* type; int is_as; char* params; char* member;
+} CCCtField;
 int cc_ct_reflect_struct_fields(const char* src, size_t len, const char* type_name,
                                 CCCtField** out, size_t* out_n);
+
+/* Methods of `type_name`: the functions in `src` whose first parameter is `T`
+ * or `T*`, in declaration order.  `name` is the function's, `type` its declared
+ * return-type spelling (`!>(E)` included), `params` its parameter list verbatim.
+ * Returns 0 when the type has no method, the same all-or-nothing posture the
+ * field reader has. */
+int cc_ct_reflect_type_methods(const char* src, size_t len, const char* type_name,
+                               CCCtField** out, size_t* out_n);
+
+/* One entry per declared parameter of a parenthesized list (`"(T self, int x)"`),
+ * in order.  Returns 0 when an entry is unnamed or spelled in a form the
+ * declarator parser cannot model — every parameter or none, since a dropped one
+ * would silently renumber the rest. */
+int cc_ct_reflect_param_list(const char* params, CCCtField** out, size_t* out_n);
 void cc_ct_free_fields(CCCtField* fields, size_t n);
+
+/* The file's in-scope type definitions as a compilable prelude, for contexts
+ * that must resolve a user type outside the merged TU — the `@comptime if`
+ * layout evaluator and the generated-fragment validator.  Caller frees. */
+char* cc_ct_extract_type_decls_prelude(const char* src, size_t n);
 
 /* Enum reflection (edge-push #1).  Parses the enumerators of the enum `type_name`
  * (a typedef name, or an `enum Tag` spelling) from `src`, with C auto-increment
@@ -293,7 +317,8 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
 // narrow parser-survival aid so the stub-AST parser sees lowered receiver
 // forms for fragile nested contexts (Vec methods inside printf args,
 // CCCommand/CCFile calls recorded inconsistently by TCC, etc.).
-char* cc_rewrite_generic_family_ufcs_parser_safe(const char* src, size_t n);
+char* cc_rewrite_generic_family_ufcs_parser_safe(const char* src, size_t n,
+                                                const char* input_path);
 
 // [Removed] cc_rewrite_channel_ufcs_concrete: channel UFCS is now handled by
 // the AST UFCS pass via the CCChanTx/CCChanRx registered hooks.  The AST

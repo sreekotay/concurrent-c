@@ -1139,8 +1139,7 @@ static int cc__ufcs_fn_name_in_source(const char* name) {
            confirm it's used as a callable rather than e.g. a string
            literal fragment. */
         {
-            const char* q = p + nlen;
-            while (*q == ' ' || *q == '\t') q++;
+            const char* q = cc_skip_ws_and_comments_ptr(p + nlen);
             if (*q == '(') return 1;
         }
     }
@@ -2995,6 +2994,13 @@ struct CCUFCSSegment {
     bool recv_is_ptr;
 };
 
+/* An argument list holds no arguments when it holds no CODE bytes: a call
+ * whose parentheses contain only a comment has arity zero, so no receiver
+ * comma is emitted. */
+static bool cc__ufcs_args_have_code(const char* args) {
+    return args && *cc_skip_ws_and_comments_ptr(args) != '\0';
+}
+
 static void cc__free_ufcs_segments(struct CCUFCSSegment* segs, int seg_count) {
     if (!segs) return;
     for (int i = 0; i < seg_count; i++) {
@@ -3128,13 +3134,11 @@ static int cc__parse_ufcs_chain(const char* in,
         if (par || br || brc) continue;
         if (c == '.' || (c == '-' && p[1] == '>')) {
             bool cand_is_ptr = (c == '-');
-            const char* m = p + (cand_is_ptr ? 2 : 1);
-            while (*m && isspace((unsigned char)*m)) m++;
+            const char* m = cc_skip_ws_and_comments_ptr(p + (cand_is_ptr ? 2 : 1));
             if (cc_is_ident_char(*m)) {
                 const char* me = m;
                 while (cc_is_ident_char(*me)) me++;
-                const char* after = me;
-                while (*after && isspace((unsigned char)*after)) after++;
+                const char* after = cc_skip_ws_and_comments_ptr(me);
                 if (*after == '(') {
                     sep = p;
                     sep_is_ptr = cand_is_ptr;
@@ -3168,7 +3172,7 @@ static int cc__parse_ufcs_chain(const char* in,
 
     const char* p = sep + (sep_is_ptr ? 2 : 1);
     for (;;) {
-        while (*p && isspace((unsigned char)*p)) p++;
+        p = cc_skip_ws_and_comments_ptr(p);
         if (!cc_is_ident_char(*p)) {
             cc__free_ufcs_segments(segs, *seg_count);
             *seg_count = 0;
@@ -3183,7 +3187,7 @@ static int cc__parse_ufcs_chain(const char* in,
             return 0;
         }
 
-        while (*p && isspace((unsigned char)*p)) p++;
+        p = cc_skip_ws_and_comments_ptr(p);
         if (*p != '(') {
             cc__free_ufcs_segments(segs, *seg_count);
             *seg_count = 0;
@@ -3264,8 +3268,7 @@ static int cc__rewrite_ufcs_chain(const char* in, char* out, size_t out_cap) {
      * rename the receiver to `__cc_ufcs_recv` and lose literal detection. */
     if (seg_count == 1 && cc__is_cstr_literal_recv(recv)) {
         char* rewritten_args = cc__rewrite_nested_ufcs_args(segs[0].args ? segs[0].args : "");
-        size_t args_len = rewritten_args ? strlen(rewritten_args) : 0;
-        bool has_args = args_len > 0;
+        bool has_args = cc__ufcs_args_have_code(rewritten_args);
         const char* saved_type = g_ufcs_recv_type;
         int n;
         g_ufcs_recv_type = "const char*";
@@ -3285,8 +3288,7 @@ static int cc__rewrite_ufcs_chain(const char* in, char* out, size_t out_cap) {
 
     if (!needs_temps) {
         char* rewritten_args = cc__rewrite_nested_ufcs_args(segs[0].args ? segs[0].args : "");
-        size_t args_len = rewritten_args ? strlen(rewritten_args) : 0;
-        bool has_args = args_len > 0;
+        bool has_args = cc__ufcs_args_have_code(rewritten_args);
         int n = emit_full_call(out, out_cap, recv_expr, segs[0].method, segs[0].recv_is_ptr,
                                rewritten_args ? rewritten_args : "", has_args);
         free(rewritten_args);
@@ -3312,8 +3314,7 @@ static int cc__rewrite_ufcs_chain(const char* in, char* out, size_t out_cap) {
 
     for (int i = 0; i < seg_count; i++) {
         char* rewritten_args = cc__rewrite_nested_ufcs_args(segs[i].args ? segs[i].args : "");
-        size_t args_len = rewritten_args ? strlen(rewritten_args) : 0;
-        bool has_args = args_len > 0;
+        bool has_args = cc__ufcs_args_have_code(rewritten_args);
 
         char call[1024];
         const char* recv_for_call = recv_expr;
@@ -3535,8 +3536,7 @@ static int cc__ufcs_rewrite_line_simple(const char* in, char* out, size_t out_ca
                 continue;
             }
 
-            const char* m_start = sep + (cand_is_ptr ? 2 : 1);
-            while (*m_start && isspace((unsigned char)*m_start)) m_start++;
+            const char* m_start = cc_skip_ws_and_comments_ptr(sep + (cand_is_ptr ? 2 : 1));
             if (!cc_is_ident_char(*m_start)) {
                 scan = sep + (cand_is_ptr ? 2 : 1);
                 sep = NULL;
@@ -3544,8 +3544,7 @@ static int cc__ufcs_rewrite_line_simple(const char* in, char* out, size_t out_ca
             }
             const char* m_end = m_start;
             while (cc_is_ident_char(*m_end)) m_end++;
-            const char* paren = m_end;
-            while (*paren && isspace((unsigned char)*paren)) paren++;
+            const char* paren = cc_skip_ws_and_comments_ptr(m_end);
             if (*paren == '(') {
                 recv_is_ptr = cand_is_ptr;
                 break;
@@ -3587,8 +3586,7 @@ static int cc__ufcs_rewrite_line_simple(const char* in, char* out, size_t out_ca
         size_t recv_len = (size_t)(r_end - r_start + 1);
 
         // Identify method
-        const char* m_start = sep + (recv_is_ptr ? 2 : 1);
-        while (*m_start && isspace((unsigned char)*m_start)) m_start++;
+        const char* m_start = cc_skip_ws_and_comments_ptr(sep + (recv_is_ptr ? 2 : 1));
         if (!cc_is_ident_char(*m_start)) {
             size_t chunk = (size_t)((sep + (recv_is_ptr ? 2 : 1)) - p);
             if (chunk >= cap) chunk = cap - 1;
@@ -3600,9 +3598,8 @@ static int cc__ufcs_rewrite_line_simple(const char* in, char* out, size_t out_ca
         while (cc_is_ident_char(*m_end)) m_end++;
         size_t method_len = (size_t)(m_end - m_start);
 
-        // Next non-space after method must be '('
-        const char* paren = m_end;
-        while (*paren && isspace((unsigned char)*paren)) paren++;
+        // Next code char after the method name must be '('
+        const char* paren = cc_skip_ws_and_comments_ptr(m_end);
         if (*paren != '(') {
             size_t chunk = (size_t)((sep + (recv_is_ptr ? 2 : 1)) - p);
             if (chunk >= cap) chunk = cap - 1;
@@ -3669,8 +3666,9 @@ static int cc__ufcs_rewrite_line_simple(const char* in, char* out, size_t out_ca
             inner = NULL;
         }
 
+        bool has_args = cc__ufcs_args_have_code(rewritten_args);
+        if (!has_args) rewritten_args[0] = '\0'; /* inert-only args are no args */
         size_t args_out_len = strlen(rewritten_args);
-        bool has_args = args_out_len > 0;
 
         // Emit desugared call
         int n = emit_desugared_call(o, cap, recv, method, recv_is_ptr, rewritten_args, has_args);

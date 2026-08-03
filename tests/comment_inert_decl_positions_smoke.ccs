@@ -1,0 +1,56 @@
+/* A comment is inert at every position in a declaration: inside a result
+ * signature, between a declarator and its parameter list, before a body's
+ * brace, inside declaration specifiers, and inside a type-argument list.
+ * Each case below is a fuzzer finding, pinned. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* Every gap in `T !>(E) name(params) {` takes a comment. */
+static int !>/*x*/(CCError) s1(int d) { return cc_ok(d); }
+static int !> (/*x*/CCError) s2(int d) { return cc_ok(d); }
+static int !> (CCError/*x*/) s3(int d) { return cc_ok(d); }
+static int !> (CCError)/*x*/s4(int d) { return cc_ok(d); }
+static int !> (CCError) s5/*x*/(int d) { return cc_ok(d); }
+static int !> (CCError) s6(int d)/*x*/{ return cc_ok(d); }
+
+/* A comment before the body brace must not hide the function from the
+ * closure-declaration insertion point. */
+static void emit_closure(CCNursery* nur, int base) /*x*/{
+    nur.spawn(() => [base] { printf("closure=%d\n", base); });
+}
+
+int main(void) {
+    /* The handler's own brace, and its parameter declaration. */
+    @errhandler(/*x*/CCError e)/*x*/ { fprintf(stderr, "eh: %s\n", e.message); return 1; }
+
+    CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+
+    int sum = 0;
+    sum += s1(1) !>;
+    sum += s2(2) !>;
+    sum += s3(4) !>;
+    sum += s4(8) !>;
+    sum += s5(16) !>;
+    sum += s6(32) !>;
+    printf("sum=%d\n", sum);
+
+    /* Declaration specifiers: the receiver type must still be recorded, or
+     * the bare UFCS tier cannot resolve `strlen`. */
+    const /*x*/char* p1 = "aa";
+    const char /*x*/* p2 = "bbb";
+    const char* /*x*/p3 = "cccc";
+    unsigned /*x*/int n = 7;
+    int /*x*/m = 8;
+    printf("lens=%zu%zu%zu n=%u m=%d\n", p1.strlen(), p2.strlen(), p3.strlen(), n, m);
+
+    /* Type arguments: a comment must not reach the mangled instance name. */
+    Vec::[int/*x*/] v = vec_new::[int](&a);
+    v.push(3);
+    printf("v=%d\n", *v.get(0));
+
+    CCNursery* nur = cc_nursery_create(NULL) @destroy;
+    emit_closure(nur, 5);
+    nur.wait();
+    return 0;
+}

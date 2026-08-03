@@ -1,0 +1,42 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/script/py.cch>
+#include <stdio.h>
+
+/* `py_buf(xs)` hands a typed slice over as a memoryview onto CC's own memory.
+ * Nothing is copied: the ordinary marshal builds one Python object per element
+ * and the callee rebuilds a contiguous array from them, even when both sides
+ * already agree on the layout.
+ *
+ * The view borrows. It is valid while the CC buffer is, and a callee that
+ * keeps it — or an array built on it, which shares the memory — outlives its
+ * right to read. */
+int main(void) {
+    @errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); return 1; }
+    CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+    if (!cc_py_available()) { puts("SKIP (no libpython)"); return 0; }
+    CCPy py = cc_py_new(&a) !>;
+
+    py.exec(@slice(
+        "import struct\n"
+        "def sum_d(mv):\n"
+        "    n = len(mv) // 8\n"
+        "    return float(sum(struct.unpack('<%dd' % n, mv.tobytes())))\n"
+        "def nbytes(mv):\n"
+        "    return len(mv)\n"
+        "def readonly(mv):\n"
+        "    return 1 if mv.readonly else 0\n")) !>;
+
+    CCPyObj m = py.import("__main__") !> @destroy;
+
+    double xs[:] = {1.0, 2.0, 3.0, 4.5};
+    double s = m.sum_d(py_buf(xs)) !>;
+    int64_t nb = m.nbytes(py_buf(xs)) !>;
+    int64_t ro = m.readonly(py_buf(xs)) !>;
+
+    /* Same slice the ordinary way still marshals as a list of scalars. */
+    int64_t as_list_len = m.nbytes(xs) !>;
+
+    printf("sum=%.1f bytes=%lld readonly=%lld list_len=%lld\n",
+           s, (long long)nb, (long long)ro, (long long)as_list_len);
+    return 0;
+}

@@ -1,0 +1,14 @@
+/* A Python failure carries its exception class and, when the failure
+ * crossed Python frames, the formatted traceback — both anchored in
+ * the handle's scratch arena. */
+#include <ccc/script/py.cch>
+
+CCPy py = cc_py_new(&a) !> @destroy;
+CCPyObj b = py.import("builtins") !> @destroy;
+
+int64_t n = b.int("notanum") !>(e) {
+    println(@string(`type=${e.type_name}`, &a)) !>;
+    println(@string(`has_msg=${(int)(e.base.message != NULL)}`, &a)) !>;
+    return 0;
+};
+(void)n;

@@ -89,4 +89,10 @@ int  cc_rt_diag_unwrap_site(int i, const char** out_file, const char** out_line_
  * No-op for an empty chain.  `fp` may be NULL (defaults to stderr). */
 void cc_rt_diag_print_unwrap_chain(FILE* fp);
 
+/* The most recent `!>` / `?>` site as "file:line" — the unwrap that routed
+ * the error the handler is holding, which is always current even when the
+ * chain carries older propagations.  "" when nothing has been recorded.
+ * The pointer is a process-static buffer, valid until the next call. */
+const char* cc_error_site(void);
+
 #endif

@@ -1,0 +1,25 @@
+#ifndef RESULT_HEADER_MULTIWORD_OK_SMOKE_CCH
+#define RESULT_HEADER_MULTIWORD_OK_SMOKE_CCH
+
+/* Multi-word ok types: each mints a box the prelude does not carry. */
+static long long          !>(CCError) h_ll(int ok)  { if (!ok) return cc_err(CC_ERR_INVALID_ARG, "ll");  return cc_ok((long long)10); }
+static unsigned int       !>(CCError) h_ui(int ok)  { if (!ok) return cc_err(CC_ERR_INVALID_ARG, "ui");  return cc_ok(20u); }
+static unsigned long long !>(CCError) h_ull(int ok) { if (!ok) return cc_err(CC_ERR_INVALID_ARG, "ull"); return cc_ok(30ull); }
+static unsigned long      !>(CCError) h_ul(void)    { return cc_ok(40ul); }
+
+/* An ok type declared in this same header: its box must land after the type. */
+typedef struct HPt { long long x; long long y; } HPt;
+static HPt !>(CCError) h_pt(int ok) {
+    HPt p = { .x = 3, .y = 4 };
+    if (!ok) return cc_err(CC_ERR_INVALID_ARG, "pt");
+    return cc_ok(p);
+}
+
+/* First use of this box is inside a function body, so the declaration has to
+ * anchor to the enclosing top-level construct rather than to the use itself. */
+static long long h_sum(int ok) {
+    HPt zero = { .x = 0, .y = 0 };
+    HPt p = h_pt(ok) ?> zero;
+    return p.x + p.y;
+}
+#endif

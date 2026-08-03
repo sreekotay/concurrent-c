@@ -519,9 +519,13 @@ static void cc__va_append_flat(char** out, size_t* ol, size_t* oc,
     }
 }
 
+/* Every consumer inspects this span's ends with raw byte tests (is it an
+ * ident start, does it end in `kind`, is the first byte `.`), so both edges
+ * must land on code or the classification silently changes. */
 static void cc__va_trim(const char* s, size_t* a, size_t* b) {
-    while (*a < *b && isspace((unsigned char)s[*a])) (*a)++;
-    while (*b > *a && isspace((unsigned char)s[*b - 1])) (*b)--;
+    *a = cc_skip_ws_and_comments(s, *b, *a);
+    *b = cc_rskip_ws_and_comments(s, *b);
+    if (*b < *a) *b = *a;
 }
 
 /* Forward find of the next top-level ';' from `from` (depth-aware, inert-safe).

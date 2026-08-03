@@ -29,6 +29,7 @@
 #include "preprocess/type_graph.h"
 #include "preprocess/variant_lower.h"
 #include "result_spec.h"
+#include "util/cache_evict.h"
 #include "util/path.h"
 #include "util/result_fn_registry.h"
 #include "util/text.h"
@@ -173,6 +174,7 @@ static int cc_scanner_skip_non_code(CCScannerState* s, const char* src, size_t n
         return 1;
     }
 
+
     /* Inside a preprocessor directive (#define, #include, #if, ...).
      * Skip until the end of the logical line (handles backslash-newline
      * continuations). Body bytes are reported as "non-code" so text
@@ -253,6 +255,17 @@ static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
                                                  const char* input_path);
 char* cc__rewrite_at_await(const char* src, size_t n); /* defined later */
 static char* cc__normalize_template_recv_chains(const char* src, size_t n);
+
+/* Python element-kind token for a CC scalar/slice type spelling. */
+static const char* cc__py_elem_kind_token(const char* ty) {
+    if (!ty) return "CC__PY_EL_SLICE";
+    if (strcmp(ty, "double") == 0 || strcmp(ty, "float") == 0)
+        return "CC__PY_EL_F64";
+    if (strcmp(ty, "int64_t") == 0 || strcmp(ty, "long long") == 0)
+        return "CC__PY_EL_I64";
+    if (strcmp(ty, "int") == 0) return "CC__PY_EL_INT";
+    return "CC__PY_EL_SLICE";
+}
 static int cc__find_matching_bracket(const char* b, size_t bl, size_t lbracket, size_t* out_rbracket);
 
 /* Initialize chain with source buffer (buffer is NOT owned by chain) */
@@ -912,8 +925,7 @@ static char* cc__lower_with_deadline_syntax(const char* src, size_t n) {
                 continue;
             }
             size_t expr_r = k; /* points at ')' */
-            size_t after_paren = expr_r + 1;
-            while (after_paren < n && (src[after_paren] == ' ' || src[after_paren] == '\t' || src[after_paren] == '\r' || src[after_paren] == '\n')) after_paren++;
+            size_t after_paren = cc_skip_ws_and_comments(src, n, expr_r + 1);
 
             /* Optional "as <ident>" clause: binds CCDeadline* <ident> inside
                the block so user code can inspect the active deadline. */
@@ -1662,8 +1674,32 @@ static int cc__line_col_at(const char* src, size_t n, size_t pos, int* line, int
     return 1;
 }
 
+/* `@name` followed by `delim`, with whitespace and comments allowed between,
+ * and `@name` matched as a whole token.
+ *
+ * Replaces `memcmp(src + i, "@name(", ...)`, which required the delimiter to
+ * be the very next byte, so a comment sitting between a sigil and its `(` made
+ * the call invisible and it was left unlowered — reaching the C compiler as an
+ * `@` that means nothing there.  A comment in that gap is inert filler, like a
+ * space.
+ *
+ * Returns 1 and sets `*out_after` to the offset just past the delimiter. */
+static int cc__sigil_delim_after(const char* src, size_t n, size_t i,
+                                 const char* name, char delim,
+                                 size_t* out_after) {
+    size_t ln = strlen(name);
+    size_t p;
+    if (i + ln > n || memcmp(src + i, name, ln) != 0) return 0;
+    if (i + ln < n && cc_is_ident_char(src[i + ln])) return 0;
+    p = cc_skip_ws_and_comments(src, n, i + ln);
+    if (p >= n || src[p] != delim) return 0;
+    if (out_after) *out_after = p + 1;
+    return 1;
+}
+
 /* Collect @string arena args that are @scratch / @scratch(N). Returns
  * site count, -1 on error. */
+
 static int cc__collect_string_scratch_sites(const char* src, size_t n, const char* input_path,
                                            CCStrScratchSite* sites, int max_sites) {
     CCScannerState scan;
@@ -1677,12 +1713,13 @@ static int cc__collect_string_scratch_sites(const char* src, size_t n, const cha
         size_t nbytes = 0;
         size_t brace = 0;
         int prc;
+        size_t sig_after = 0;
         if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
-        if (!(i + 7 < n && memcmp(src + i, "@string(", 8) == 0)) {
+        if (!cc__sigil_delim_after(src, n, i, "@string", '(', &sig_after)) {
             i++;
             continue;
         }
-        arg1_s = cc_skip_ws_and_comments(src, n, i + 8);
+        arg1_s = cc_skip_ws_and_comments(src, n, sig_after);
         arg1_e = cc__scan_to_top_level_delim(src, n, arg1_s, ',', ')');
         if (arg1_e >= n) {
             i++;
@@ -1934,10 +1971,11 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
     }
     cc_scanner_init(&scan);
     while (i < n) {
+        size_t sig_after = 0;
         if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
         char c = src[i];
-        if (c == '@' && i + 6 < n && memcmp(src + i, "@slice(", 7) == 0) {
-            size_t arg_s = cc_skip_ws_and_comments(src, n, i + 7);
+        if (c == '@' && cc__sigil_delim_after(src, n, i, "@slice", '(', &sig_after)) {
+            size_t arg_s = cc_skip_ws_and_comments(src, n, sig_after);
             size_t arg_e = cc__scan_to_top_level_delim(src, n, arg_s, ')', '\0');
             if (arg_e >= n || src[arg_e] != ')') {
                 char rel[1024];
@@ -1955,8 +1993,8 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
             i = arg_e + 1;
             continue;
         }
-        if (c == '@' && i + 5 < n && memcmp(src + i, "@emit(", 6) == 0) {
-            size_t arg1_s = cc_skip_ws_and_comments(src, n, i + 6);
+        if (c == '@' && cc__sigil_delim_after(src, n, i, "@emit", '(', &sig_after)) {
+            size_t arg1_s = cc_skip_ws_and_comments(src, n, sig_after);
             int has_anchor = 0;
             int anchor_val = 0;
             size_t tick_s = arg1_s;
@@ -2139,8 +2177,8 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                 continue;
             }
         }
-        if (c == '@' && i + 7 < n && memcmp(src + i, "@string(", 8) == 0) {
-            size_t arg1_s = cc_skip_ws_and_comments(src, n, i + 8);
+        if (c == '@' && cc__sigil_delim_after(src, n, i, "@string", '(', &sig_after)) {
+            size_t arg1_s = cc_skip_ws_and_comments(src, n, sig_after);
             size_t arg1_e = cc__scan_to_top_level_delim(src, n, arg1_s, ',', ')');
             if (arg1_e >= n) {
                 char rel[1024];
@@ -3254,11 +3292,38 @@ static int cc__ufcs_paren_is_cast_type_only(const char* src, size_t open, size_t
     return ident_runs >= 1;
 }
 
+/* Skip backwards over horizontal whitespace AND comments, stopping at a real
+ * newline.
+ *
+ * The receiver back-walk below is line-bounded by design: a newline before `.`
+ * ends the receiver, so swapping in `cc_rskip_ws_and_comments` would newly
+ * lower multi-line chains — a behaviour change well past comment inertness.
+ * A block comment that itself spans a newline stops the walk for that reason,
+ * so only a comment sitting within the line is filler. */
+static size_t cc__rskip_hspace_and_comments(const char* src, size_t p, size_t limit) {
+    for (;;) {
+        size_t q = p;
+        while (q > limit && (src[q - 1] == ' ' || src[q - 1] == '\t')) q--;
+        if (q >= limit + 2 && src[q - 1] == '/' && src[q - 2] == '*') {
+            size_t r = q - 2;
+            int saw_nl = 0;
+            while (r > limit + 1 && !(src[r - 2] == '/' && src[r - 1] == '*')) {
+                if (src[r - 1] == '\n') saw_nl = 1;
+                r--;
+            }
+            if (r <= limit + 1 || saw_nl) return p;
+            p = r - 2;
+            continue;
+        }
+        return q;
+    }
+}
+
 static size_t cc_scan_back_for_member_access(const char* src, size_t pos, size_t limit) {
     if (pos == 0 || pos <= limit) return pos;
     
     size_t p = pos;
-    while (p > limit && (src[p-1] == ' ' || src[p-1] == '\t')) p--;
+    p = cc__rskip_hspace_and_comments(src, p, limit);
     
     int has_access = 0;
     if (p > limit && src[p-1] == '.') {
@@ -3271,7 +3336,7 @@ static size_t cc_scan_back_for_member_access(const char* src, size_t pos, size_t
     
     if (!has_access) return pos;
     
-    while (p > limit && (src[p-1] == ' ' || src[p-1] == '\t')) p--;
+    p = cc__rskip_hspace_and_comments(src, p, limit);
     int last_was_ident = 0;
     while (p > limit) {
         if (cc_is_ident_char(src[p-1])) {
@@ -3292,9 +3357,7 @@ static size_t cc_scan_back_for_member_access(const char* src, size_t pos, size_t
             /* Prefix cast `(T)primary` must not join the UFCS receiver:
              *   (int64_t)((T*)(e))->field.len()
              * Call receivers `f(x)->m()` still scan through (`f` before `(`). */
-            before = q;
-            while (before > limit && (src[before - 1] == ' ' || src[before - 1] == '\t'))
-                before--;
+            before = cc__rskip_hspace_and_comments(src, q, limit);
             if (!(before > limit && cc_is_ident_char(src[before - 1])) &&
                 cc__ufcs_paren_is_cast_type_only(src, q, p - 1))
                 break;
@@ -4890,7 +4953,13 @@ static int cc__scan_generic_ufcs_call_site(const char* src,
     if (recv_start >= sep_pos || sep_pos - recv_start >= out_recv_expr_sz) return 0;
     {
         const char* recv_s = src + recv_start;
-        const char* recv_e = src + sep_pos;
+        const char* recv_e;
+        /* A comment between the receiver and its `.` is not part of the
+         * receiver expression.  Leaving it in ended the captured text with a
+         * comment close rather than a paren, so the call-receiver chain hoist
+         * declined and the hop was emitted unlowered. */
+        size_t recv_end = cc__rskip_hspace_and_comments(src, sep_pos, recv_start);
+        recv_e = src + (recv_end > recv_start ? recv_end : sep_pos);
         cc__trim_span_ws(&recv_s, &recv_e);
         if (recv_e <= recv_s || (size_t)(recv_e - recv_s) >= out_recv_expr_sz) return 0;
         memcpy(out_recv_expr, recv_s, (size_t)(recv_e - recv_s));
@@ -5326,7 +5395,9 @@ static int cc__ufcs_dest_span_type(const char* s, size_t ty_a, size_t ty_b,
         size_t first_s = 0, first_e = 0;
         int toks = 0;
         while (q < ty_b) {
-            while (q < ty_b && isspace((unsigned char)s[q])) q++;
+            /* A comment inside the type span is inert filler; without this
+             * its `/` reaches the ident test and the destination is lost. */
+            q = cc_skip_ws_and_comments(s, ty_b, q);
             if (q >= ty_b) break;
             if (s[q] == '*') { q++; toks++; continue; }
             if (!cc_is_ident_char(s[q])) return 0;
@@ -5348,9 +5419,10 @@ static int cc__ufcs_dest_span_type(const char* s, size_t ty_a, size_t ty_b,
     {
         size_t q = ty_a, dn = 0;
         while (q < ty_b && dn + 1 < out_sz) {
-            if (isspace((unsigned char)s[q])) {
+            size_t q2 = cc_skip_ws_and_comments(s, ty_b, q);
+            if (q2 != q) {
                 if (dn > 0 && out[dn - 1] != ' ') out[dn++] = ' ';
-                q++;
+                q = q2;
                 continue;
             }
             out[dn++] = s[q++];
@@ -5575,7 +5647,47 @@ static int g_ufcs_scope_idx_locked = 0;
  * source); the parser-safe wrapper turns it into the error sentinel. */
 static _Thread_local int g_ufcs_typeformal_err = 0;
 
-static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int parser_safe) {
+/* Defined below, after the generic-instantiation machinery they belong to;
+ * the UFCS tier above calls them for member-position factory sites. */
+/* `ident` followed by `::[`, with whitespace and comments allowed in both
+ * gaps.  Requiring the three bytes to sit flush against the identifier made a
+ * comment between the type name and its `::[` hide the whole site, so the
+ * instantiation never happened and the raw spelling reached the C compiler.
+ * Returns 1 and sets `*out_lb` to the `[`. */
+static int cc__ident_generic_bracket(const char* src, size_t n, size_t id_e,
+                                     size_t* out_lb) {
+    size_t p = cc_skip_ws_and_comments(src, n, id_e);
+    if (p + 1 >= n || src[p] != ':' || src[p + 1] != ':') return 0;
+    p = cc_skip_ws_and_comments(src, n, p + 2);
+    if (p >= n || src[p] != '[') return 0;
+    if (out_lb) *out_lb = p;
+    return 1;
+}
+
+/* A built-in container spelling `Name::[`, with whitespace and comments
+ * allowed in the gaps.  Same defect as the user-generic site: the name and
+ * `::[` were one literal, so a comment between them hid the spelling. */
+static int cc__builtin_generic_at(const char* src, size_t n, size_t i,
+                                  const char* name, size_t* out_lb) {
+    size_t ln = strlen(name);
+    if (i + ln > n || memcmp(src + i, name, ln) != 0) return 0;
+    if (i + ln < n && cc_is_ident_char(src[i + ln])) return 0;
+    return cc__ident_generic_bracket(src, n, i + ln, out_lb);
+}
+
+
+static int cc__split_type_args(const char* params, size_t params_len,
+                               char orig_args[][128], char mang_args[][128],
+                               int max_args);
+static int cc__emit_generic_instance(const char* gname,
+                                     char orig_args[][128], char mang_args[][128],
+                                     int nargs, const char* src, size_t n,
+                                     size_t use_pos, size_t br_close,
+                                     const char* input_path,
+                                     char* mangled, size_t mangled_cap);
+
+static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int parser_safe,
+                                                 const char* input_path) {
     CCUfcsVarInfo vars[512];
     CCUfcsFieldInfo fields[256];
     CCTypeRegistry* reg = cc_type_registry_get_global();
@@ -5766,6 +5878,64 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
          * lowers to cc_block_on(T, task).  The type comes from the
          * explicit `::[T]` or from the declared destination. */
         {
+            /* Python sequence/mapping extraction: the type argument names
+             * the element type(s), and the worker macros take them as a
+             * leading argument — the same shape as cc_arena_alloc_T. */
+            int py_recv = (strcmp(recv_type_base, "CCPyObj") == 0 ||
+                           strcmp(recv_type_base, "CCPyObj*") == 0);
+            int is_as_list = py_recv && strcmp(method_name, "as_list") == 0;
+            int is_as_map = py_recv && strcmp(method_name, "as_map") == 0;
+            int is_pymap = py_recv && strcmp(method_name, "map") == 0;
+            if (is_as_list || is_as_map || is_pymap) {
+                char targs[192];
+                targs[0] = 0;
+                if (targ_b > targ_a) {
+                    const char* ta = src + targ_a;
+                    const char* tb = src + targ_b;
+                    cc__trim_span_ws(&ta, &tb);
+                    if (tb > ta && (size_t)(tb - ta) < sizeof(targs)) {
+                        memcpy(targs, ta, (size_t)(tb - ta));
+                        targs[tb - ta] = 0;
+                    }
+                }
+                if (!targs[0]) {
+                    cc_pp_error_cat("<input>", scan.line, 1, "type",
+                                    is_as_list
+                                        ? "as_list needs its element type: "
+                                          "obj.as_list::[T](&arena)"
+                                    : is_pymap
+                                        ? "map needs its result element type: "
+                                          "f.map::[T](&arena, cols...)"
+                                        : "as_map needs its key and value types: "
+                                          "obj.as_map::[K, V](&arena, m)");
+                    g_ufcs_typeformal_err = 1;
+                    i = paren_end + 1;
+                    continue;
+                }
+                cc_sb_append(&out, &out_len, &out_cap, src + last_emit,
+                             recv_start - last_emit);
+                cc_sb_append_cstr(&out, &out_len, &out_cap,
+                                  is_as_list ? "cc_py_obj_as_list("
+                                  : is_pymap ? "cc_py_obj_map("
+                                             : "cc_py_obj_as_map(");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, targs);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                if (!recv_is_ptr)
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "&");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, recv_expr);
+                {
+                    size_t as = cc_skip_ws_and_comments(src, paren_end, paren_pos + 1);
+                    if (as < paren_end) {
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                        cc_sb_append(&out, &out_len, &out_cap, src + as,
+                                     paren_end - as);
+                    }
+                }
+                cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+                last_emit = paren_end + 1;
+                i = paren_end + 1;
+                continue;
+            }
             int is_allocT = arena_like && strcmp(method_name, "allocT") == 0;
             int is_block_on = (strncmp(recv_type_base, "CCTask", 6) == 0 ||
                                strcmp(recv_type_base, "CCAsyncVoidRet") == 0) &&
@@ -5847,13 +6017,30 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                 i = paren_end + 1;
                 continue;
             }
-            /* `::[...]` on any other member: no type formal to bind. */
+            /* `::[...]` on any other member: no type formal to bind.  A
+             * member-position factory site was already rewritten to its
+             * free-name spelling before instantiation, so anything still
+             * wearing `::[` here resolved to neither. */
             if (targ_b > targ_a) {
+                char base[192], snake[192], cand[352], names[512];
+                size_t bl;
+                snprintf(base, sizeof(base), "%s", recv_type_base);
+                bl = strlen(base);
+                while (bl > 0 && (base[bl - 1] == '*' || base[bl - 1] == ' '))
+                    base[--bl] = 0;
+                if (bl > 2 && base[0] == 'C' && base[1] == 'C' &&
+                    base[2] >= 'A' && base[2] <= 'Z')
+                    memmove(base, base + 2, bl - 1);
+                cc_emit_plan_snake_name(base, snake, sizeof(snake));
+                snprintf(cand, sizeof(cand), "%s_%s", snake, method_name);
                 cc_pp_error_cat("<input>", scan.line, 1, "type",
                                 "no type-formal member '%s' for receiver type "
-                                "'%s' — `::[...]` binds only members that "
-                                "declare a type formal (allocT, block_on)",
-                                method_name, recv_type_base);
+                                "'%s' — `::[...]` binds a member that declares a "
+                                "type formal (allocT, block_on, as_list, as_map, map) "
+                                "or a registered generic factory named '%s'",
+                                method_name, recv_type_base, cand);
+                if (cc_emit_plan_generic_factory_names_csv(names, sizeof(names)) > 0)
+                    fprintf(stderr, "  note: registered generic factories: %s\n", names);
                 g_ufcs_typeformal_err = 1;
                 i = paren_end + 1;
                 continue;
@@ -6081,14 +6268,10 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                     }
                     size_t args_start = paren_pos + 1;
                     size_t args_end = paren_end;
-                    while (args_start < args_end &&
-                           (src[args_start] == ' ' || src[args_start] == '\t' ||
-                            src[args_start] == '\n' || src[args_start] == '\r'))
-                        args_start++;
-                    while (args_end > args_start &&
-                           (src[args_end - 1] == ' ' || src[args_end - 1] == '\t' ||
-                            src[args_end - 1] == '\n' || src[args_end - 1] == '\r'))
-                        args_end--;
+                    /* Inert-only argument list is an EMPTY list. */
+                    args_start = cc_skip_ws_and_comments(src, args_end, args_start);
+                    args_end = cc_rskip_ws_and_comments(src, args_end);
+                    if (args_end < args_start) args_end = args_start;
                     cc_sb_append(&out, &out_len, &out_cap, src + last_emit,
                                  sink_emit_from - last_emit);
                     cc_sb_append_cstr(&out, &out_len, &out_cap, sink_callee);
@@ -6161,8 +6344,8 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                     i = paren_end + 1;
                     continue;
                 }
-                if (!scalar_literal && composed &&
-                    (is_cc_std || cc__ufcs_fn_name_in_text(src, n, wildcard_callee))) {
+                if (!scalar_literal && real &&
+                    !cc_ufcs_scalar_recv_family(recv_type_base)) {
                     wildcard_like = 1;
                 } else if (!recv_is_ptr &&
                            cc__compose_scalar_ufcs_callee(wildcard_callee,
@@ -6247,19 +6430,16 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
             static int g_wildcard_recv_tmp_id = 0;
             int tmp_id = ++g_wildcard_recv_tmp_id;
             char tmp_name[64];
-            char* lowered_recv = cc__rewrite_generic_family_ufcs_impl(recv_expr, strlen(recv_expr), parser_safe);
+            char* lowered_recv = cc__rewrite_generic_family_ufcs_impl(recv_expr, strlen(recv_expr), parser_safe,
+                                                                 input_path);
             const char* emit_recv = lowered_recv ? lowered_recv : recv_expr;
             size_t args_start = paren_pos + 1;
             size_t args_end = paren_end;
             snprintf(tmp_name, sizeof(tmp_name), "__cc_ufcs_recv_%d", tmp_id);
-            while (args_start < args_end &&
-                   (src[args_start] == ' ' || src[args_start] == '\t' || src[args_start] == '\n' || src[args_start] == '\r')) {
-                args_start++;
-            }
-            while (args_end > args_start &&
-                   (src[args_end - 1] == ' ' || src[args_end - 1] == '\t' || src[args_end - 1] == '\n' || src[args_end - 1] == '\r')) {
-                args_end--;
-            }
+            /* Inert-only argument list is an EMPTY list. */
+            args_start = cc_skip_ws_and_comments(src, args_end, args_start);
+            args_end = cc_rskip_ws_and_comments(src, args_end);
+            if (args_end < args_start) args_end = args_start;
             cc_sb_append(&out, &out_len, &out_cap, src + last_emit, recv_start - last_emit);
             cc_sb_append_cstr(&out, &out_len, &out_cap, "({ ");
             cc_sb_append_cstr(&out, &out_len, &out_cap, recv_type);
@@ -6409,14 +6589,10 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
         {
             size_t args_start = paren_pos + 1;
             size_t args_end = paren_end;
-            while (args_start < args_end &&
-                   (src[args_start] == ' ' || src[args_start] == '\t' || src[args_start] == '\n' || src[args_start] == '\r')) {
-                args_start++;
-            }
-            while (args_end > args_start &&
-                   (src[args_end - 1] == ' ' || src[args_end - 1] == '\t' || src[args_end - 1] == '\n' || src[args_end - 1] == '\r')) {
-                args_end--;
-            }
+            /* An argument list of inert bytes only is an EMPTY list. */
+            args_start = cc_skip_ws_and_comments(src, args_end, args_start);
+            args_end = cc_rskip_ws_and_comments(src, args_end);
+            if (args_end < args_start) args_end = args_start;
             if (args_end > args_start) {
                 cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
                 cc_sb_append(&out, &out_len, &out_cap, src + args_start, args_end - args_start);
@@ -6879,6 +7055,17 @@ static int cc__result_ok_type_for(const char* concrete, char* out, size_t sz) {
             if (ml + 1 < sz) {
                 memcpy(out, mid, ml);
                 out[ml] = 0;
+                /* A pointer ok type mangles its star away (`CCDirIter*` ->
+                 * `CCDirIterptr`, the same convention as `voidptr` and
+                 * `charptr`).  Put it back: the recovered segment is used as a
+                 * C type, and `CCDirIterptr` is not one — without this the
+                 * fallback yields a token that cannot compile, which reads as
+                 * a puzzling error in generated code rather than as the
+                 * unmangling that did not happen. */
+                if (ml > 3 && strcmp(out + ml - 3, "ptr") == 0 && ml + 1 < sz) {
+                    out[ml - 3] = '*';
+                    out[ml - 2] = 0;
+                }
                 return 1;
             }
         }
@@ -6946,6 +7133,18 @@ static char* cc__rewrite_result_chain_links(const char* src, size_t n) {
         if (q >= n || !cc_is_ident_start(src[q])) { i += 2; continue; }
         while (q < n && cc_is_ident_char(src[q])) q++;
         q = cc_skip_ws_and_comments(src, n, q);
+        /* A member-generic hop, `.ident::[T](args)`, is a link too: the hop
+         * hoisted before it gives this one a typed receiver, at which point
+         * the member normalization resolves the `::[...]` and instantiates.
+         * Not recognizing it left the `!>` for the statement-unwrap form,
+         * which consumed the producer and shredded the rest of the line. */
+        if (q + 2 < n && src[q] == ':' && src[q + 1] == ':') {
+            size_t br = cc_skip_ws_and_comments(src, n, q + 2);
+            size_t rb = 0;
+            if (br >= n || src[br] != '[' ||
+                !cc__find_matching_bracket(src, n, br, &rb)) { i += 2; continue; }
+            q = cc_skip_ws_and_comments(src, n, rb + 1);
+        }
         if (q >= n || src[q] != '(') { i += 2; continue; }
         /* Producer: one lowered call `F(args)` ending just before `!>`.
          * Comments may sit between `)` and `!>`. */
@@ -7057,6 +7256,20 @@ static char* cc__rewrite_result_chain_links(const char* src, size_t n) {
             m = cc_skip_ws_and_comments(src, n, m + 1);
             while (m < n && cc_is_ident_char(src[m])) m++;
             m = cc_skip_ws_and_comments(src, n, m);
+            /* Same hop grammar as the recognition scan above — a re-walk that
+             * accepts less than the recognizer turns "link found" into a
+             * silent no-op, and the `!>` then falls to the statement-unwrap
+             * form, which shreds the line. */
+            if (m + 2 < n && src[m] == ':' && src[m + 1] == ':') {
+                size_t br2 = cc_skip_ws_and_comments(src, n, m + 2);
+                size_t rb2 = 0;
+                if (br2 >= n || src[br2] != '[' ||
+                    !cc__find_matching_bracket(src, n, br2, &rb2)) {
+                    i = sep_end;
+                    continue;
+                }
+                m = cc_skip_ws_and_comments(src, n, rb2 + 1);
+            }
             if (m >= n || src[m] != '(' ||
                 !cc_find_matching_paren(src, n, m, &npe)) {
                 i = sep_end;
@@ -7086,7 +7299,8 @@ static char* cc__rewrite_result_chain_links(const char* src, size_t n) {
 }
 
 
-char* cc_rewrite_generic_family_ufcs_parser_safe(const char* src, size_t n) {
+char* cc_rewrite_generic_family_ufcs_parser_safe(const char* src, size_t n,
+                                                const char* input_path) {
     char* cur = NULL;
     size_t cur_len = n;
     int hit_cap = 0;
@@ -7097,7 +7311,7 @@ char* cc_rewrite_generic_family_ufcs_parser_safe(const char* src, size_t n) {
     for (int iter = 0; iter < 8; ++iter) {
         const char* in = cur ? cur : src;
         int changed = 0;
-        char* next = cc__rewrite_generic_family_ufcs_impl(in, cur_len, 1);
+        char* next = cc__rewrite_generic_family_ufcs_impl(in, cur_len, 1, input_path);
         if (next) {
             if (cur) free(cur);
             cur = next;
@@ -7113,6 +7327,33 @@ char* cc_rewrite_generic_family_ufcs_parser_safe(const char* src, size_t n) {
             cur = next;
             cur_len = strlen(cur);
             changed = 1;
+        }
+        /* A chain hop can BE a member-generic call: the hop before it binds a
+         * temp whose declared type only exists in this rewritten text, so the
+         * member spelling cannot resolve until now.  Normalize it to the
+         * free-name spelling and instantiate — safe at this depth because the
+         * factory reflects on the pristine snapshot, not on this buffer. */
+        in = cur ? cur : src;
+        if (memmem(in, cur_len, "::[", 3)) {
+            next = cc_rewrite_generic_containers(in, cur_len, input_path);
+            if (next == (char*)-1) {
+                free(cur);
+                return (char*)-1;
+            }
+            if (next) {
+                if (cur) free(cur);
+                cur = next;
+                cur_len = strlen(cur);
+                changed = 1;
+            }
+        }
+        if (getenv("CC_DEBUG_FIXPOINT_DUMP")) {
+            char dp[256];
+            FILE* df;
+            snprintf(dp, sizeof(dp), "%s/fixpoint_%d.c",
+                     getenv("CC_DEBUG_FIXPOINT_DUMP"), iter);
+            df = fopen(dp, "w");
+            if (df) { fwrite(cur ? cur : src, 1, cur_len, df); fclose(df); }
         }
         if (!changed) {
             hit_cap = 0;
@@ -7167,8 +7408,19 @@ char* cc_rewrite_generic_family_ufcs_parser_safe(const char* src, size_t n) {
  *   never part of a type name).  This function now matches both.
  *   Adding a new `@attribute` to the language requires no change here.
  */
-static size_t cc__skip_leading_decl_specs(const char* s, size_t ty_start) {
+/* Type qualifiers a Result's ok type may carry.  Storage class legitimately
+ * varies between declarations of the same box; these do not — a box holding
+ * `char*` and one holding `const char*` are the same box, so two spellings
+ * that disagree here silently share whichever arrived first. */
+#define CC_TYQ_CONST     1u
+#define CC_TYQ_VOLATILE  2u
+#define CC_TYQ_RESTRICT  4u
+#define CC_TYQ_ATOMIC    8u
+
+static size_t cc__skip_leading_decl_specs_ex(const char* s, size_t ty_start,
+                                             unsigned* out_quals) {
     size_t p = ty_start;
+    if (out_quals) *out_quals = 0;
     if (!s) return p;
     /* Known C storage-class / type-qualifier keywords.  Attributes
      * (`@IDENT`) are handled generically below so new ones don't need
@@ -7179,7 +7431,7 @@ static size_t cc__skip_leading_decl_specs(const char* s, size_t ty_start) {
         "_Thread_local", "thread_local",
         NULL
     };
-    while (s[p] == ' ' || s[p] == '\t') p++;
+    p = (size_t)(cc_skip_ws_and_comments_ptr(s + p) - s);
     for (;;) {
         int matched = 0;
         /* `@IDENT` — any attribute token.  We consume the `@` plus the
@@ -7199,6 +7451,12 @@ static size_t cc__skip_leading_decl_specs(const char* s, size_t ty_start) {
             for (int k = 0; kw[k]; k++) {
                 size_t kn = strlen(kw[k]);
                 if (strncmp(s + p, kw[k], kn) == 0 && !cc_is_ident_char_local(s[p + kn])) {
+                    if (out_quals) {
+                        if (strcmp(kw[k], "const") == 0)         *out_quals |= CC_TYQ_CONST;
+                        else if (strcmp(kw[k], "volatile") == 0) *out_quals |= CC_TYQ_VOLATILE;
+                        else if (strcmp(kw[k], "restrict") == 0) *out_quals |= CC_TYQ_RESTRICT;
+                        else if (strcmp(kw[k], "_Atomic") == 0)  *out_quals |= CC_TYQ_ATOMIC;
+                    }
                     p += kn;
                     matched = 1;
                     break;
@@ -7206,27 +7464,64 @@ static size_t cc__skip_leading_decl_specs(const char* s, size_t ty_start) {
             }
         }
         if (!matched) break;
-        /* Also skip line/block comments between decl-specs so prose
-         * like `static COMMENT int !>(E) ...` (where COMMENT is a
-         * `slash-star ... star-slash` block) doesn't drop us onto the
-         * generic fallback. */
-        for (;;) {
-            while (s[p] == ' ' || s[p] == '\t' || s[p] == '\r' || s[p] == '\n') p++;
-            if (s[p] == '/' && s[p + 1] == '/') {
-                p += 2;
-                while (s[p] && s[p] != '\n') p++;
-                continue;
-            }
-            if (s[p] == '/' && s[p + 1] == '*') {
-                p += 2;
-                while (s[p] && !(s[p] == '*' && s[p + 1] == '/')) p++;
-                if (s[p]) p += 2;
-                continue;
-            }
-            break;
-        }
+        /* Comments between decl-specs are inert filler, like the spaces. */
+        p = (size_t)(cc_skip_ws_and_comments_ptr(s + p) - s);
     }
     return p;
+}
+
+static size_t cc__skip_leading_decl_specs(const char* s, size_t ty_start) {
+    return cc__skip_leading_decl_specs_ex(s, ty_start, NULL);
+}
+
+/* Which qualifiers the first declaration of a concrete box name carried.
+ * A later declaration reaching the same name with a different set is sharing
+ * a box it does not spell the same way — the language's rule (C applies
+ * `const` at the binding site, so one box serves both), but silently, and
+ * whichever came first wins for everyone. */
+typedef struct { char name[288]; unsigned quals; int line; } CCResultQualSeen;
+static CCResultQualSeen* g_result_quals = NULL;
+static size_t g_result_qual_count = 0, g_result_qual_cap = 0;
+
+static void cc__result_quals_reset(void) {
+    free(g_result_quals);
+    g_result_quals = NULL;
+    g_result_qual_count = g_result_qual_cap = 0;
+}
+
+static void cc__qual_names(unsigned q, char* out, size_t sz) {
+    out[0] = 0;
+    if (!q) { snprintf(out, sz, "unqualified"); return; }
+    if (q & CC_TYQ_CONST)    strncat(out, "const ",    sz - strlen(out) - 1);
+    if (q & CC_TYQ_VOLATILE) strncat(out, "volatile ", sz - strlen(out) - 1);
+    if (q & CC_TYQ_RESTRICT) strncat(out, "restrict ", sz - strlen(out) - 1);
+    if (q & CC_TYQ_ATOMIC)   strncat(out, "_Atomic ",  sz - strlen(out) - 1);
+    { size_t l = strlen(out); if (l && out[l - 1] == ' ') out[l - 1] = 0; }
+}
+
+/* Returns 1 when this sighting conflicts with an earlier one. */
+static int cc__result_quals_note(const char* concrete, unsigned quals, int line,
+                                 unsigned* out_first, int* out_first_line) {
+    for (size_t i = 0; i < g_result_qual_count; i++) {
+        if (strcmp(g_result_quals[i].name, concrete) != 0) continue;
+        if (g_result_quals[i].quals == quals) return 0;
+        if (out_first) *out_first = g_result_quals[i].quals;
+        if (out_first_line) *out_first_line = g_result_quals[i].line;
+        return 1;
+    }
+    if (g_result_qual_count == g_result_qual_cap) {
+        size_t nc = g_result_qual_cap ? g_result_qual_cap * 2 : 32;
+        CCResultQualSeen* g = (CCResultQualSeen*)realloc(g_result_quals, nc * sizeof(*g));
+        if (!g) return 0;
+        g_result_quals = g;
+        g_result_qual_cap = nc;
+    }
+    snprintf(g_result_quals[g_result_qual_count].name,
+             sizeof(g_result_quals[g_result_qual_count].name), "%s", concrete);
+    g_result_quals[g_result_qual_count].quals = quals;
+    g_result_quals[g_result_qual_count].line = line;
+    g_result_qual_count++;
+    return 0;
 }
 
 /* Mangle a type name for use in CCResult_T_E.
@@ -7489,6 +7784,31 @@ static void cc__mangle_container_type_param(const char* src, size_t len, char* o
     out[j] = 0;
 }
 
+/* Copy the type-argument span `src[s..e)` into `out` as code-only text:
+ * comments are dropped and each whitespace-or-comment run collapses to one
+ * space, so `unsigned` and `long` stay two tokens.  A type argument feeds
+ * both the mangled instance name and the text handed to a generic factory,
+ * so a comment that survives the capture lands inside a C identifier. */
+static void cc__copy_type_arg_text(const char* src, size_t s, size_t e,
+                                   char* out, size_t out_sz) {
+    size_t j = 0;
+    if (!out || out_sz == 0) return;
+    out[0] = 0;
+    if (!src || s >= e) return;
+    s = cc_skip_ws_and_comments(src, e, s);
+    while (s < e && j + 1 < out_sz) {
+        size_t k = cc_skip_ws_and_comments(src, e, s);
+        if (k > s) {
+            s = k;
+            if (s < e && j > 0) out[j++] = ' ';
+            continue;
+        }
+        out[j++] = src[s++];
+    }
+    while (j > 0 && out[j - 1] == ' ') j--;
+    out[j] = 0;
+}
+
 /* Find matching '>' for '<' at position langle. Returns 1 on success. */
 static int cc__find_matching_angle(const char* b, size_t bl, size_t langle, size_t* out_rangle) {
     if (!b || langle >= bl || b[langle] != '<') return 0;
@@ -7563,90 +7883,96 @@ static int cc__find_matching_bracket(const char* b, size_t bl, size_t lbracket, 
    they are detected only to emit a migration error.  `::[ ... ]` is the single
    instantiation surface for both built-in containers and user generic
    factories (`Name::[args]`).  Also tracks variable declarations for UFCS. */
-/* D6.0: handle a user generic-factory use site `Name::[arg, ...]`.  Returns 1 if
- * `*io_i` is at such a site for a library-registered template (output appended,
- * indices advanced past the `]`), 0 otherwise (caller falls through to the
- * built-in CCVec/Map handling).  The library owns the C lowering (its template);
- * the compiler owns the mangle (`Name_arg1_arg2`), the dedup, and the splice. */
-static int cc__try_rewrite_user_generic(const char* src, size_t n, const char* input_path,
-                                        char** out, size_t* out_len, size_t* out_cap,
-                                        size_t* io_i, size_t* io_last_emit) {
-    size_t i = *io_i;
-    size_t id_e, br_open, br_close, params_len;
-    const char* params;
-    char gname[128];
-    char member[128];
-    char orig_args[8][128];
-    char mang_args[8][128];
-    int nargs = 0;
+/* The TU as it read when generic instantiation FIRST ran for it.
+ *
+ * A factory reflects on the source it is handed, and the two spellings of an
+ * instantiation must hand it the same source — but a chain cannot resolve a
+ * member-generic hop until the previous hop's temp has a type, which is many
+ * passes later, when `!>(CCError)` is already lowered and a fallible method no
+ * longer looks fallible.  Snapshotting the buffer at the first containers
+ * entry decouples WHEN an instantiation happens from WHAT its factory sees:
+ * a late site reflects on the same bytes an early one did. */
+static char* g_reflect_snapshot = NULL;
+static size_t g_reflect_snapshot_len = 0;
+static char g_reflect_snapshot_path[1024];
 
-    member[0] = 0;
-    if (!(i == 0 || !cc_is_ident_char(src[i - 1]))) return 0;
-    if (i >= n || !cc_is_ident_start(src[i])) return 0;
-    id_e = i;
-    while (id_e < n && cc_is_ident_char(src[id_e])) id_e++;
-    if (!(id_e + 3 <= n && src[id_e] == ':' && src[id_e + 1] == ':' && src[id_e + 2] == '[')) return 0;
-    if (id_e - i == 0 || id_e - i >= sizeof(gname)) return 0;
-    memcpy(gname, src + i, id_e - i);
-    gname[id_e - i] = 0;
-    if (!cc_emit_plan_has_generic_factory(gname)) {
-        /* Free-name member call: `<snake(Family)>_<member>::[targs](args)`
-         * lowers to `<Family>_<mangled targs>_<member>(args)` — the same
-         * grid as `vec_new::[T]`.  Member position (`recv.m::[T]`) belongs
-         * to the type-formal member tier, not this one. */
-        char family[128];
-        size_t member_off = 0;
-        size_t b = cc_rskip_ws_and_comments(src, i);
-        if (b > 0 && (src[b - 1] == '.' ||
-                      (b > 1 && src[b - 1] == '>' && src[b - 2] == '-')))
-            return 0;
-        if (!cc_emit_plan_generic_factory_for_snake_call(gname, family, sizeof(family),
-                                                         &member_off))
-            return 0;
-        snprintf(member, sizeof(member), "%s", gname + member_off);
-        snprintf(gname, sizeof(gname), "%s", family);
-    }
+static void cc__reflect_snapshot_capture(const char* src, size_t n,
+                                         const char* input_path) {
+    const char* key = input_path ? input_path : "<input>";
+    if (g_reflect_snapshot && strcmp(g_reflect_snapshot_path, key) == 0) return;
+    free(g_reflect_snapshot);
+    g_reflect_snapshot = (char*)malloc(n + 1);
+    if (!g_reflect_snapshot) { g_reflect_snapshot_len = 0; return; }
+    memcpy(g_reflect_snapshot, src, n);
+    g_reflect_snapshot[n] = '\0';
+    g_reflect_snapshot_len = n;
+    snprintf(g_reflect_snapshot_path, sizeof(g_reflect_snapshot_path), "%s", key);
+}
 
-    br_open = id_e + 2; /* '[' */
-    if (!cc__find_matching_bracket(src, n, br_open, &br_close)) return 0;
-    params = src + br_open + 1;
-    params_len = br_close - br_open - 1;
 
-    /* split top-level args (respecting <>, [], () nesting) */
-    {
-        size_t a_s = 0;
-        int depth = 0;
-        for (size_t k = 0; k <= params_len; k++) {
-            char pc = (k < params_len) ? params[k] : ',';
-            if (k < params_len && (pc == '<' || pc == '[' || pc == '(')) { depth++; continue; }
-            if (k < params_len && (pc == '>' || pc == ']' || pc == ')')) { depth--; continue; }
-            if (pc == ',' && depth == 0) {
-                size_t s = a_s, e = k;
-                while (s < e && (params[s] == ' ' || params[s] == '\t')) s++;
-                while (e > s && (params[e - 1] == ' ' || params[e - 1] == '\t')) e--;
-                if (e > s) {
-                    size_t cl = e - s;
-                    if (nargs >= 8) return 0;
-                    if (cl >= sizeof(orig_args[0])) cl = sizeof(orig_args[0]) - 1;
-                    memcpy(orig_args[nargs], params + s, cl);
-                    orig_args[nargs][cl] = 0;
-                    cc__canonicalize_container_param_type(orig_args[nargs], sizeof(orig_args[nargs]));
-                    cc__mangle_container_type_param(orig_args[nargs], strlen(orig_args[nargs]),
-                                                    mang_args[nargs], sizeof(mang_args[nargs]));
-                    nargs++;
-                }
-                a_s = k + 1;
-            }
+/* Split a `::[ ... ]` type-argument list into original and mangled spellings.
+ *
+ * Shared by the free-name and member spellings for the same reason the
+ * instantiation is: they must agree on what `::[K, V]` means down to the
+ * canonicalization, or the same text would name two different monomorphs.
+ * Nesting is tracked so `Map::[int, Vec::[int]]` splits at the top level only.
+ * Comments are inert on both counts: they must not read as separators, and
+ * they must not survive into a captured argument.
+ * Returns the count, or -1 if there are more than `max_args`. */
+static int cc__split_type_args(const char* params, size_t params_len,
+                               char orig_args[][128], char mang_args[][128],
+                               int max_args) {
+    size_t a_s = 0;
+    int depth = 0, nargs = 0;
+    for (size_t k = 0; k <= params_len; ) {
+        char pc;
+        if (k < params_len) {
+            size_t sk = cc_skip_ws_and_comments(params, params_len, k);
+            if (sk > k) { k = sk; continue; }
         }
+        pc = (k < params_len) ? params[k] : ',';
+        if (k < params_len && (pc == '<' || pc == '[' || pc == '(')) { depth++; k++; continue; }
+        if (k < params_len && (pc == '>' || pc == ']' || pc == ')')) { depth--; k++; continue; }
+        if (pc == ',' && depth == 0) {
+            if (nargs >= max_args) return -1;
+            cc__copy_type_arg_text(params, a_s, k,
+                                   orig_args[nargs], sizeof(orig_args[nargs]));
+            if (orig_args[nargs][0]) {
+                cc__canonicalize_container_param_type(orig_args[nargs], sizeof(orig_args[nargs]));
+                cc__mangle_container_type_param(orig_args[nargs], strlen(orig_args[nargs]),
+                                                mang_args[nargs], sizeof(mang_args[nargs]));
+                nargs++;
+            }
+            a_s = k + 1;
+        }
+        k++;
     }
-    if (nargs == 0) return 0;
+    return nargs;
+}
 
+/* Produce the monomorph for `gname::[args]` and emit its definition once.
+ *
+ * Shared by the two spellings that request an instantiation: the free-name
+ * site (`Name::[T](...)`) and the member site (`recv.member::[T](...)`).  They
+ * differ only in how the surrounding call text is rewritten — the receiver
+ * moves into argument position for one and not the other — never in how the
+ * instance is produced, so producing it lives here and neither spelling can
+ * drift from the other's diagnostics.
+ *
+ * `use_pos` is the offset of the use site (for line/column attribution) and
+ * `br_close` the offset of its closing `]` (for the --emit-c-inspect dump).
+ * Writes the mangled instance name.  Returns 0, or -1 having reported. */
+static int cc__emit_generic_instance(const char* gname,
+                                     char orig_args[][128], char mang_args[][128],
+                                     int nargs, const char* src, size_t n,
+                                     size_t use_pos, size_t br_close,
+                                     const char* input_path,
+                                     char* mangled, size_t mangled_cap) {
     /* mangled name: Name_marg1_marg2... */
-    char mangled[256];
     {
-        int mo = snprintf(mangled, sizeof(mangled), "%s", gname);
-        for (int a = 0; a < nargs && mo > 0 && (size_t)mo < sizeof(mangled); a++)
-            mo += snprintf(mangled + mo, sizeof(mangled) - (size_t)mo, "_%s", mang_args[a]);
+        int mo = snprintf(mangled, mangled_cap, "%s", gname);
+        for (int a = 0; a < nargs && mo > 0 && (size_t)mo < mangled_cap; a++)
+            mo += snprintf(mangled + mo, mangled_cap - (size_t)mo, "_%s", mang_args[a]);
     }
 
     /* invoke compiled factory once per mangled name. */
@@ -7654,14 +7980,20 @@ static int cc__try_rewrite_user_generic(const char* src, size_t n, const char* i
         char def[CC_GENERIC_DEF_MAX];
         char rel[1024];
         int use_line = 1, use_col = 1;
-        for (size_t k = 0; k < i && k < n; k++) {
+        for (size_t k = 0; k < use_pos && k < n; k++) {
             if (src[k] == '\n') { use_line++; use_col = 1; } else { use_col++; }
         }
         {
             char ferr[512];
+            /* Reflect on the snapshot when one exists: a factory must see
+             * the same program regardless of which pass requested the
+             * instantiation.  Line/col attribution and the inspect dump keep
+             * using the live buffer, where the use site actually is. */
+            const char* rsrc = g_reflect_snapshot ? g_reflect_snapshot : src;
+            size_t rlen = g_reflect_snapshot ? g_reflect_snapshot_len : n;
             CCGenProduceStatus ps = cc_emit_plan_produce_generic_def(
                 gname, mangled, orig_args, nargs,
-                src, n, input_path, def, sizeof(def), ferr, sizeof(ferr));
+                rsrc, rlen, input_path, def, sizeof(def), ferr, sizeof(ferr));
             if (ps == CC_GEN_PRODUCE_ENSURE_FAILED) {
                 cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
                                 use_line, use_col, "type",
@@ -7776,7 +8108,7 @@ static int cc__try_rewrite_user_generic(const char* src, size_t n, const char* i
                             if (dl == 0 || def[dl - 1] != '\n') fputc('\n', gf);
                             /* Source with this use site (src[i..br_close]) lowered
                              * to the mangled type name. */
-                            fwrite(src, 1, i, gf);
+                            fwrite(src, 1, use_pos, gf);
                             fwrite(mangled, 1, strlen(mangled), gf);
                             if (br_close + 1 < n)
                                 fwrite(src + br_close + 1, 1, n - (br_close + 1), gf);
@@ -7806,7 +8138,76 @@ static int cc__try_rewrite_user_generic(const char* src, size_t n, const char* i
         }
         cc_emit_plan_generic_def_emit_once(mangled, def);
         cc_emit_plan_note_generic_instance(gname, mangled, def);
+        /* A generated definition is spliced after the prelude, so the passes
+         * that need its signatures cannot read it where it lands.  Register
+         * the result-returning ones now: without this, `!>` on a factory's
+         * own function has no ok type to unwrap to and silently leaves the
+         * Result in place, which fails as a type error nowhere near the
+         * cause. */
+        cc_result_fn_registry_scan_source(def, strlen(def));
     }
+    return 0;
+}
+
+/* D6.0: handle a user generic-factory use site `Name::[arg, ...]`.  Returns 1 if
+ * `*io_i` is at such a site for a library-registered template (output appended,
+ * indices advanced past the `]`), 0 otherwise (caller falls through to the
+ * built-in CCVec/Map handling).  The library owns the C lowering (its template);
+ * the compiler owns the mangle (`Name_arg1_arg2`), the dedup, and the splice. */
+static int cc__try_rewrite_user_generic(const char* src, size_t n, const char* input_path,
+                                        char** out, size_t* out_len, size_t* out_cap,
+                                        size_t* io_i, size_t* io_last_emit) {
+    size_t i = *io_i;
+    size_t id_e, br_open, br_close, params_len;
+    const char* params;
+    char gname[128];
+    char member[128];
+    size_t gen_lb = 0;
+    char orig_args[8][128];
+    char mang_args[8][128];
+    int nargs = 0;
+
+    member[0] = 0;
+    if (!(i == 0 || !cc_is_ident_char(src[i - 1]))) return 0;
+    if (i >= n || !cc_is_ident_start(src[i])) return 0;
+    id_e = i;
+    while (id_e < n && cc_is_ident_char(src[id_e])) id_e++;
+    if (!cc__ident_generic_bracket(src, n, id_e, &gen_lb)) return 0;
+    if (id_e - i == 0 || id_e - i >= sizeof(gname)) return 0;
+    memcpy(gname, src + i, id_e - i);
+    gname[id_e - i] = 0;
+    if (!cc_emit_plan_has_generic_factory(gname)) {
+        /* Free-name member call: `<snake(Family)>_<member>::[targs](args)`
+         * lowers to `<Family>_<mangled targs>_<member>(args)` — the same
+         * grid as `vec_new::[T]`.  Member position (`recv.m::[T]`) belongs
+         * to the type-formal member tier, not this one. */
+        char family[128];
+        size_t member_off = 0;
+        size_t b = cc_rskip_ws_and_comments(src, i);
+        if (b > 0 && (src[b - 1] == '.' ||
+                      (b > 1 && src[b - 1] == '>' && src[b - 2] == '-')))
+            return 0;
+        if (!cc_emit_plan_generic_factory_for_snake_call(gname, family, sizeof(family),
+                                                         &member_off))
+            return 0;
+        snprintf(member, sizeof(member), "%s", gname + member_off);
+        snprintf(gname, sizeof(gname), "%s", family);
+    }
+
+    br_open = gen_lb; /* '[' */
+    if (!cc__find_matching_bracket(src, n, br_open, &br_close)) return 0;
+    params = src + br_open + 1;
+    params_len = br_close - br_open - 1;
+
+    nargs = cc__split_type_args(params, params_len, orig_args, mang_args, 8);
+    if (nargs <= 0) return 0;
+
+    /* mangled name: Name_marg1_marg2... */
+    char mangled[256];
+    if (cc__emit_generic_instance(gname, orig_args, mang_args, nargs, src, n,
+                                  i, br_close, input_path,
+                                  mangled, sizeof(mangled)) != 0)
+        return -1;
 
     /* Free-name member call: the member must exist in the instance's
      * emitted definition — miss articulately, listing what does. */
@@ -7857,9 +8258,129 @@ static int cc__source_has_generic_container_syntax(const char* src, size_t n) {
     return 0;
 }
 
+/* Normalize a member-position generic call to its free-name spelling.
+ *
+ *     py.expose::[Counter]("counter", &seed)
+ *  -> py_expose::[Counter](&py, "counter", &seed)
+ *
+ * `recv.member::[T](args)` where recv has type `Foo` (or `CCFoo`) names the
+ * factory `<snake(Foo)>_<member>` — the same grid the free-name spelling uses.
+ * The receiver becomes the instance's ordinary first parameter, which is the
+ * same reading of "first parameter is the receiver" that UFCS dispatch already
+ * runs on, and the reading `py_expose::[T]` itself applies to decide what a
+ * method is.
+ *
+ * This runs BEFORE instantiation rather than in the UFCS tier that knows
+ * receiver types, for one reason: a factory reflects on the source it is
+ * handed.  By UFCS time `!>(CCError)` has been lowered and a fallible method
+ * no longer looks fallible, so instantiating there would hand the factory a
+ * different program than the free-name spelling does, and the two spellings
+ * would silently generate different code.  Rewriting to text first means there
+ * is one instantiation path, not two that are meant to agree.
+ *
+ * Returns a new buffer, or NULL when nothing matched. */
+static char* cc__rewrite_member_generic_to_free_name(const char* src, size_t n) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0, last_emit = 0, i = 0;
+    CCUfcsVarInfo* vars = NULL;
+    CCUfcsFieldInfo* fields = NULL;
+    size_t var_count = 0, field_count = 0;
+    int built = 0, any = 0;
+    CCScannerState scan;
+
+    if (!src || n == 0 || !memmem(src, n, "::[", 3)) return NULL;
+    cc_scanner_init(&scan);
+
+    while (i < n) {
+        size_t sep_pos, m_s, m_e, recv_start, paren_pos, paren_end, targ_a, targ_b;
+        char method_name[128], recv_expr[256];
+        char rtype[192], base[192], snake[192], cand[352];
+        int recv_is_ptr = 0;
+        size_t bl;
+
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (src[i] != '.' && !(src[i] == '-' && i + 1 < n && src[i + 1] == '>')) { i++; continue; }
+        if (!cc__scan_generic_ufcs_call_site(src, n, i, &sep_pos, &m_s, &m_e,
+                                             &recv_start, &paren_pos, &paren_end,
+                                             method_name, sizeof(method_name),
+                                             recv_expr, sizeof(recv_expr),
+                                             &targ_a, &targ_b)) {
+            i++;
+            continue;
+        }
+        /* Only `::[...]` sites; a plain member call is not this tier's. */
+        if (targ_b <= targ_a) { i = paren_end + 1; continue; }
+
+        if (!built) {
+            vars = (CCUfcsVarInfo*)calloc(512, sizeof(*vars));
+            fields = (CCUfcsFieldInfo*)calloc(512, sizeof(*fields));
+            if (!vars || !fields) { free(vars); free(fields); free(out); return NULL; }
+            cc__collect_generic_ufcs_types(src, n, vars, &var_count, 512,
+                                           fields, &field_count, 512);
+            built = 1;
+        }
+        if (!cc__resolve_generic_ufcs_receiver_type(recv_expr, src, recv_start,
+                                                    vars, var_count, fields,
+                                                    field_count, rtype,
+                                                    sizeof(rtype), &recv_is_ptr)) {
+            i = paren_end + 1;
+            continue;
+        }
+        snprintf(base, sizeof(base), "%s", rtype);
+        bl = strlen(base);
+        while (bl > 0 && (base[bl - 1] == '*' || base[bl - 1] == ' ')) base[--bl] = 0;
+        /* Families are spelled without the `CC` prefix (Vec, Map), so a
+         * `CC`-prefixed receiver names the family its instance layer serves. */
+        if (bl > 2 && base[0] == 'C' && base[1] == 'C' &&
+            base[2] >= 'A' && base[2] <= 'Z')
+            memmove(base, base + 2, bl - 1);
+        cc_emit_plan_snake_name(base, snake, sizeof(snake));
+        snprintf(cand, sizeof(cand), "%s_%s", snake, method_name);
+        if (!snake[0] || !cc_emit_plan_has_generic_factory(cand)) {
+            /* Leave it for the type-formal tier, which owns both the built-in
+             * type-formal members and the diagnostic when it is neither. */
+            i = paren_end + 1;
+            continue;
+        }
+
+        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, recv_start - last_emit);
+        cc_sb_append_cstr(&out, &out_len, &out_cap, cand);
+        cc_sb_append_cstr(&out, &out_len, &out_cap, "::[");
+        cc_sb_append(&out, &out_len, &out_cap, src + targ_a, targ_b - targ_a);
+        cc_sb_append_cstr(&out, &out_len, &out_cap, "](");
+        if (!recv_is_ptr) cc_sb_append_cstr(&out, &out_len, &out_cap, "&");
+        cc_sb_append(&out, &out_len, &out_cap, src + recv_start, sep_pos - recv_start);
+        {
+            size_t as = cc_skip_ws_and_comments(src, paren_end, paren_pos + 1);
+            if (as < paren_end) {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                cc_sb_append(&out, &out_len, &out_cap, src + as, paren_end - as);
+            }
+        }
+        cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+        last_emit = paren_end + 1;
+        i = paren_end + 1;
+        any = 1;
+    }
+
+    free(vars);
+    free(fields);
+    if (!any) { free(out); return NULL; }
+    cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
 char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input_path) {
+    char* owned = NULL;
     if (!src || n == 0) return NULL;
+    /* Before the syntax gate: the first call per TU defines "pristine" even
+     * when the only generic surface appears later in the fixpoint. */
+    cc__reflect_snapshot_capture(src, n, input_path);
     if (!cc__source_has_generic_container_syntax(src, n)) return NULL;
+
+    /* Member spelling first, so instantiation below sees one form. */
+    owned = cc__rewrite_member_generic_to_free_name(src, n);
+    if (owned) { src = owned; n = strlen(owned); }
 
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
@@ -7883,6 +8404,7 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                                                   &i, &last_emit);
             if (gr < 0) {
                 free(out);
+                free(owned);
                 return (char*)-1;
             }
             if (gr) continue;
@@ -7891,35 +8413,36 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
         /* Look for canonical CCVec::[ / cc_vec_new::[ and Map forms. */
         int is_vec_type = 0, is_map_type = 0, is_vec_new = 0, is_map_new = 0;
         int use_bracket = 0;
+        size_t blb = 0;
         const char* retired_vec_syntax = NULL;
         size_t kw_start = i;
         size_t kw_len = 0;
         
         if (i == 0 || !cc_is_ident_char(src[i - 1])) {
-            if (i + 8 <= n && memcmp(src + i, "CCVec::[", 8) == 0) {
+            if (cc__builtin_generic_at(src, n, i, "CCVec", &blb)) {
                 is_vec_type = 1; kw_len = 5; use_bracket = 1;
             } else if (i + 6 <= n && memcmp(src + i, "CCVec<", 6) == 0) {
                 retired_vec_syntax = "CCVec<T>";
             } else if (i + 4 <= n && memcmp(src + i, "Vec<", 4) == 0) {
                 retired_vec_syntax = "Vec<T>";
-            } else if (i + 11 <= n && memcmp(src + i, "ArrayMap::[", 11) == 0) {
+            } else if (cc__builtin_generic_at(src, n, i, "ArrayMap", &blb)) {
                 is_map_type = 2; kw_len = 8; use_bracket = 1; /* 2 ⇒ ArrayMap */
-            } else if (i + 6 <= n && memcmp(src + i, "Map::[", 6) == 0) {
+            } else if (cc__builtin_generic_at(src, n, i, "Map", &blb)) {
                 is_map_type = 1; kw_len = 3; use_bracket = 1;
             } else if (i + 4 <= n && memcmp(src + i, "Map<", 4) == 0) {
                 retired_vec_syntax = "Map<K, V>";
-            } else if (i + 13 <= n && memcmp(src + i, "cc_vec_new::[", 13) == 0) {
+            } else if (cc__builtin_generic_at(src, n, i, "cc_vec_new", &blb)) {
                 is_vec_new = 1; kw_len = 10; use_bracket = 1;
             } else if (i + 11 <= n && memcmp(src + i, "cc_vec_new<", 11) == 0) {
                 retired_vec_syntax = "cc_vec_new<T>";
             } else if (i + 8 <= n && memcmp(src + i, "vec_new<", 8) == 0) {
                 retired_vec_syntax = "vec_new<T>";
-            } else if (i + 22 <= n && memcmp(src + i, "array_map_new_count::[", 22) == 0) {
+            } else if (cc__builtin_generic_at(src, n, i, "array_map_new_count", &blb)) {
                 /* Must precede array_map_new::[ — that spelling is a prefix. */
                 is_map_new = 3; kw_len = 19; use_bracket = 1;
-            } else if (i + 16 <= n && memcmp(src + i, "array_map_new::[", 16) == 0) {
+            } else if (cc__builtin_generic_at(src, n, i, "array_map_new", &blb)) {
                 is_map_new = 2; kw_len = 13; use_bracket = 1;
-            } else if (i + 10 <= n && memcmp(src + i, "map_new::[", 10) == 0) {
+            } else if (cc__builtin_generic_at(src, n, i, "map_new", &blb)) {
                 is_map_new = 1; kw_len = 7; use_bracket = 1;
             } else if (i + 8 <= n && memcmp(src + i, "map_new<", 8) == 0) {
                 retired_vec_syntax = "map_new<K, V>";
@@ -7934,11 +8457,12 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                     "(e.g. 'Vec::[int]', 'Map::[K, V]', 'vec_new::[T](...)', 'map_new::[K, V](...)')",
                     retired_vec_syntax);
             free(out);
+            free(owned);
             return NULL;
         }
         
         if (is_vec_type || is_map_type || is_vec_new || is_map_new) {
-            size_t delim_start = use_bracket ? kw_start + kw_len + 2 : kw_start + kw_len;
+            size_t delim_start = use_bracket ? blb : kw_start + kw_len;
             size_t delim_end = 0;
             int found = 0;
             
@@ -7956,6 +8480,7 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                         what, use_bracket ? ']' : '>');
                 fprintf(stderr, "  hint: generic syntax is '%s::[Type]' e.g., 'CCVec::[int]'\n", what);
                 free(out);
+                free(owned);
                 return NULL;
             }
             
@@ -7972,16 +8497,10 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
             char orig_val_type[128] = {0};
             
             if (is_vec_type || is_vec_new) {
-                /* Single type parameter - save both original and mangled */
-                /* Original (trimmed): copy params as-is for macro */
-                size_t ti = 0;
-                while (ti < params_len && (params[ti] == ' ' || params[ti] == '\t')) ti++;
-                size_t te = params_len;
-                while (te > ti && (params[te-1] == ' ' || params[te-1] == '\t')) te--;
-                size_t orig_len = te - ti;
-                if (orig_len >= sizeof(orig_elem_type)) orig_len = sizeof(orig_elem_type) - 1;
-                memcpy(orig_elem_type, params + ti, orig_len);
-                orig_elem_type[orig_len] = 0;
+                /* Single type parameter: capture code-only text, since it
+                 * feeds both the macro operand and the mangled name. */
+                cc__copy_type_arg_text(params, 0, params_len,
+                                       orig_elem_type, sizeof(orig_elem_type));
                 cc__canonicalize_container_param_type(orig_elem_type, sizeof(orig_elem_type));
                 cc__normalize_slice_in_type(orig_elem_type, sizeof(orig_elem_type));
                 
@@ -7996,14 +8515,15 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                 /* Two type parameters: K, V */
                 const char* comma = NULL;
                 int depth = 0;
-                for (size_t k = 0; k < params_len; k++) {
-                    char pc = params[k];
+                for (size_t k = 0; k < params_len; ) {
+                    char pc;
+                    size_t sk = cc_skip_ws_and_comments(params, params_len, k);
+                    if (sk > k) { k = sk; continue; }
+                    pc = params[k];
                     if (pc == '<' || pc == '[') depth++;
                     else if (pc == '>' || pc == ']') depth--;
-                    else if (pc == ',' && depth == 0) {
-                        comma = params + k;
-                        break;
-                    }
+                    else if (pc == ',' && depth == 0) { comma = params + k; break; }
+                    k++;
                 }
                 
                 if (!comma) {
@@ -8015,32 +8535,15 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                 size_t v_start = (size_t)(comma - params) + 1;
                 size_t v_len = params_len - v_start;
                 
-                /* Save original key type (trimmed) */
-                {
-                    size_t ti = 0;
-                    while (ti < k_len && (params[ti] == ' ' || params[ti] == '\t')) ti++;
-                    size_t te = k_len;
-                    while (te > ti && (params[te-1] == ' ' || params[te-1] == '\t')) te--;
-                    size_t orig_len = te - ti;
-                    if (orig_len >= sizeof(orig_key_type)) orig_len = sizeof(orig_key_type) - 1;
-                    memcpy(orig_key_type, params + ti, orig_len);
-                    orig_key_type[orig_len] = 0;
-                    cc__canonicalize_container_param_type(orig_key_type, sizeof(orig_key_type));
-                }
-                
-                /* Save original val type (trimmed) */
-                {
-                    const char* vparams = params + v_start;
-                    size_t ti = 0;
-                    while (ti < v_len && (vparams[ti] == ' ' || vparams[ti] == '\t')) ti++;
-                    size_t te = v_len;
-                    while (te > ti && (vparams[te-1] == ' ' || vparams[te-1] == '\t')) te--;
-                    size_t orig_len = te - ti;
-                    if (orig_len >= sizeof(orig_val_type)) orig_len = sizeof(orig_val_type) - 1;
-                    memcpy(orig_val_type, vparams + ti, orig_len);
-                    orig_val_type[orig_len] = 0;
-                    cc__canonicalize_container_param_type(orig_val_type, sizeof(orig_val_type));
-                }
+                /* Save original key/val types as code-only text. */
+                (void)v_len;
+                cc__copy_type_arg_text(params, 0, k_len,
+                                       orig_key_type, sizeof(orig_key_type));
+                cc__canonicalize_container_param_type(orig_key_type, sizeof(orig_key_type));
+
+                cc__copy_type_arg_text(params, v_start, params_len,
+                                       orig_val_type, sizeof(orig_val_type));
+                cc__canonicalize_container_param_type(orig_val_type, sizeof(orig_val_type));
                 
                 cc__normalize_slice_in_type(orig_key_type, sizeof(orig_key_type));
                 cc__normalize_slice_in_type(orig_val_type, sizeof(orig_val_type));
@@ -8205,6 +8708,95 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
             continue;
         }
 
+        /* Python extraction members carry their element types as leading
+         * macro arguments: `obj.as_list::[T](&a)` becomes
+         * `cc_py_obj_as_list(T, &obj, &a)`.  Lowered here rather than in
+         * the family engine because CCPyObj methods resolve on the AST
+         * dynamic sink, which never sees a `::[` member. */
+        if (src[i] == '.' && i > 0) {
+            static const char* const pynames[] = { "as_list", "as_map" };
+            int pk;
+            for (pk = 0; pk < 2; pk++) {
+                size_t mlen = strlen(pynames[pk]);
+                size_t ms = cc_skip_ws_and_comments(src, n, i + 1);
+                size_t br, rb = 0, lp, rp = 0, rs;
+                if (ms + mlen > n || memcmp(src + ms, pynames[pk], mlen) != 0)
+                    continue;
+                br = cc_skip_ws_and_comments(src, n, ms + mlen);
+                if (br + 2 >= n || src[br] != ':' || src[br + 1] != ':' ||
+                    src[br + 2] != '[')
+                    continue;
+                if (!cc__find_matching_bracket(src, n, br + 2, &rb)) continue;
+                lp = cc_skip_ws_and_comments(src, n, rb + 1);
+                if (lp >= n || src[lp] != '(' ||
+                    !cc_find_matching_paren(src, n, lp, &rp))
+                    continue;
+                /* Receiver: a plain identifier immediately left of the `.`. */
+                rs = cc_rskip_ws_and_comments(src, i);
+                {
+                    size_t re = rs;
+                    while (rs > 0 && cc_is_ident_char(src[rs - 1])) rs--;
+                    if (rs == re || !cc_is_ident_start(src[rs])) break;
+                    if (rs > 0 && (src[rs - 1] == '.' || src[rs - 1] == '>'))
+                        break;
+                    cc_sb_append(&out, &out_len, &out_cap, src + last_emit,
+                                 rs - last_emit);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap,
+                                      pk == 0 ? "cc__py_obj_as_list_raw(&"
+                                              : "cc__py_obj_as_map_raw(&");
+                    cc_sb_append(&out, &out_len, &out_cap, src + rs, re - rs);
+                    {
+                        size_t as = cc_skip_ws_and_comments(src, rp, lp + 1);
+                        if (as < rp) {
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                            cc_sb_append(&out, &out_len, &out_cap, src + as,
+                                         rp - as);
+                        }
+                    }
+                    /* Element kinds resolve here, so the emitted call carries
+                     * no type token — a type argument inside a macro call
+                     * would parse as a declarator in parser mode. */
+                    {
+                        char ta[192];
+                        const char* s0 = src + br + 3;
+                        const char* s1 = src + rb;
+                        size_t tn;
+                        cc__trim_span_ws(&s0, &s1);
+                        tn = (size_t)(s1 - s0);
+                        if (tn >= sizeof(ta)) tn = sizeof(ta) - 1;
+                        memcpy(ta, s0, tn);
+                        ta[tn] = 0;
+                        {
+                            char* comma = strchr(ta, ',');
+                            const char* k1 = ta;
+                            const char* k2 = NULL;
+                            if (comma) {
+                                *comma = 0;
+                                k2 = comma + 1;
+                                while (*k2 == ' ' || *k2 == '\t') k2++;
+                            }
+                            {
+                                size_t kl = strlen(k1);
+                                while (kl > 0 && (k1[kl - 1] == ' ' || k1[kl - 1] == '\t'))
+                                    ((char*)k1)[--kl] = 0;
+                            }
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                            cc_sb_append_cstr(&out, &out_len, &out_cap,
+                                              cc__py_elem_kind_token(k1));
+                            if (k2) {
+                                cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                                cc_sb_append_cstr(&out, &out_len, &out_cap,
+                                                  cc__py_elem_kind_token(k2));
+                            }
+                        }
+                    }
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+                    last_emit = rp + 1;
+                    i = rp + 1;
+                    goto py_extract_done;
+                }
+            }
+        }
         /* Articulate `::[` misses: a free name followed by `::[` that no
          * recognizer consumed is an error here — never a host-parser
          * surprise.  Member position (`recv.m::[T]`) belongs to the
@@ -8212,8 +8804,7 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
         if (cc_is_ident_start(src[i]) && (i == 0 || !cc_is_ident_char(src[i - 1]))) {
             size_t id_end = i;
             while (id_end < n && cc_is_ident_char(src[id_end])) id_end++;
-            if (id_end + 3 <= n && src[id_end] == ':' && src[id_end + 1] == ':' &&
-                src[id_end + 2] == '[') {
+            if (cc__ident_generic_bracket(src, n, id_end, NULL)) {
                 size_t b = cc_rskip_ws_and_comments(src, i);
                 int member_pos = (b > 0 && (src[b - 1] == '.' ||
                                             (b > 1 && src[b - 1] == '>' &&
@@ -8267,10 +8858,15 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
         }
 
         i++; scanner.col++;
+        py_extract_done: ;
     }
 
-    if (!out) return NULL;
+    /* `owned` is the member-normalized source the scan above ran on.  When
+     * the scan changed nothing further, that normalization IS the result —
+     * returning NULL here would report "no change" and silently drop it. */
+    if (!out) return owned;
     if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    free(owned);
     return out;
 }
 
@@ -8514,11 +9110,10 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
                     /* Found matching ')' at position j */
                     size_t err_end = j;
                     
-                    /* Trim trailing whitespace from error type */
-                    while (err_end > err_start && (src[err_end - 1] == ' ' || src[err_end - 1] == '\t' ||
-                                                    src[err_end - 1] == '\n' || src[err_end - 1] == '\r')) {
-                        err_end--;
-                    }
+                    /* Trim the trailing edge to code: a comment before the `)`
+                     * would otherwise mangle into the Result type name. */
+                    err_end = cc_rskip_ws_and_comments(src, err_end);
+                    if (err_end < err_start) err_end = err_start;
                     
                     /* VALIDATE: error type cannot be empty */
                     if (err_end <= err_start) {
@@ -8558,7 +9153,8 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
                     }
 
                     size_t ty_start = cc__scan_back_to_delim(src, ty_end);
-                    ty_start = cc__skip_leading_decl_specs(src, ty_start);
+                    unsigned ok_quals = 0;
+                    ty_start = cc__skip_leading_decl_specs_ex(src, ty_start, &ok_quals);
                     
                     /* VALIDATE: ok type cannot be empty */
                     if (ty_start >= ty_end) {
@@ -8580,6 +9176,35 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
                         cc__mangle_type_name(src + err_start, err_len, mangled_err, sizeof(mangled_err));
                         
                         if (mangled_ok[0] && mangled_err[0]) {
+                            /* The qualifier is gone by the time a spec reaches
+                             * `cc_result_spec_table_add` — both declarations
+                             * arrive spelled the same and look identical — so
+                             * the conflict can only be seen here, where the
+                             * span was captured. */
+                            char concrete[288];
+                            unsigned first_q = 0;
+                            int first_line = 0;
+                            snprintf(concrete, sizeof(concrete), "CCResult_%s_%s",
+                                     mangled_ok, mangled_err);
+                            /* A warning, not an error: sharing one box is the
+                             * intended rule (C applies the qualifier at the
+                             * binding site), and `result_type_canonical_smoke`
+                             * pins it.  What was wrong is that it happened in
+                             * silence, so whichever declaration came first
+                             * decided const-ness for every other. */
+                            if (cc__result_quals_note(concrete, ok_quals, scan.line,
+                                                      &first_q, &first_line)) {
+                                char a[64], b[64], rel[1024];
+                                cc__qual_names(first_q, a, sizeof(a));
+                                cc__qual_names(ok_quals, b, sizeof(b));
+                                fprintf(stderr,
+                                        "%s:%d:%d: warning: type: '%s' is declared with a %s "
+                                        "ok type here and a %s one at line %d; qualifiers are "
+                                        "not part of a box's identity, so both share one box "
+                                        "and the first spelling wins\n",
+                                        cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                        scan.line, scan.col, concrete, b, a, first_line);
+                            }
                             /* Collect this type pair for later declaration emission */
                             cc__add_result_type(src + ty_start, ty_len, src + err_start, err_len,
                                                 mangled_ok, mangled_err);
@@ -10313,19 +10938,19 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
                 /* Check for !> arrow form */
                 if (j < n && src[j] == '>') {
                     j++; /* skip '>' */
-                    while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+                    j = cc_skip_ws_and_comments(src, n, j);
                     if (j < n && src[j] == '(') {
                         j++; /* skip '(' */
-                        while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+                        j = cc_skip_ws_and_comments(src, n, j);
                         err_start = j;
                         while (j < n && cc_is_ident_char(src[j])) j++;
                         err_end = j;
-                        while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+                        j = cc_skip_ws_and_comments(src, n, j);
                         if (j < n && src[j] == ')') j++; /* skip ')' */
                     }
                 } else {
                     /* Simple !E form */
-                    while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+                    j = cc_skip_ws_and_comments(src, n, j);
                     if (j < n && cc_is_ident_start(src[j])) {
                         err_start = j;
                         while (j < n && cc_is_ident_char(src[j])) j++;
@@ -10335,13 +10960,19 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
                 
                 if (err_start < err_end) {
                     
-                    /* Skip whitespace, then check for identifier followed by '(' */
-                    while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '*')) j++;
+                    /* Skip inert bytes and pointer stars, then check for an
+                     * identifier followed by '('. */
+                    for (;;) {
+                        size_t k = cc_skip_ws_and_comments(src, n, j);
+                        if (k < n && src[k] == '*') { j = k + 1; continue; }
+                        j = k;
+                        break;
+                    }
                     if (j < n && cc_is_ident_start(src[j])) {
                         size_t name_start = j;
                         while (j < n && cc_is_ident_char(src[j])) j++;
                         (void)name_start; /* function name, not needed */
-                        while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+                        j = cc_skip_ws_and_comments(src, n, j);
                         if (j < n && src[j] == '(') {
                             /* Skip params to find '{' */
                             int pdepth = 1;
@@ -10396,16 +11027,21 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
            function, or when the ctor targets a variable with a known
            concrete CCResult type. */
         if ((current_ok_type[0] || rvar_count > 0) && c == 'c' && i + 5 < n) {
-            int is_ok = (memcmp(src + i, "cc_ok(", 6) == 0);
-            int is_err = (memcmp(src + i, "cc_err(", 7) == 0);
-            
+            int is_ok = (n - i >= 6 && memcmp(src + i, "cc_ok", 5) == 0 &&
+                         !cc_is_ident_char(src[i + 5]));
+            int is_err = (n - i >= 7 && memcmp(src + i, "cc_err", 6) == 0 &&
+                          !cc_is_ident_char(src[i + 6]));
+
             if (is_ok || is_err) {
                 /* Check word boundary */
                 int word_start = (i == 0) || !cc_is_ident_char(src[i - 1]);
-                if (word_start) {
+                /* The ctor name and its `(` are separate tokens; an inert run
+                 * may sit between them. */
+                size_t paren_pos =
+                    cc_skip_ws_and_comments(src, n, i + (is_ok ? 5 : 6));
+                if (word_start && paren_pos < n && src[paren_pos] == '(') {
                     size_t macro_start = i;
-                    size_t paren_pos = i + (is_ok ? 5 : 6);
-                    
+
                     /* Count args to determine if short form */
                     size_t args_start = paren_pos + 1;
                     size_t j = args_start;
@@ -10822,6 +11458,20 @@ static char* cc_preprocess_pipeline_ex(const char* input, size_t input_len, cons
         buf[input_len] = 0;
         got = input_len;
 
+        /* Closer-anchored template dedent, before any pass reads a
+         * template body.  Idempotent: a dedented closer sits at column 0,
+         * so the fixpoint's repeat passes are no-ops. */
+        {
+            size_t dlen = 0;
+            char* ded = cc_tpl_dedent_text(buf, got, input_path, &dlen);
+            if (ded == (char*)-1) { free(buf); return NULL; }
+            if (ded) {
+                free(buf);
+                buf = ded;
+                got = dlen;
+            }
+        }
+
         if (!skip_checks) {
             if (cc_emit_plan_comptime_fragment_count() == 0) {
                 cc_emit_plan_collect_comptime_emits(buf, got);
@@ -11094,13 +11744,12 @@ static char* cc_preprocess_pipeline_ex(const char* input, size_t input_len, cons
                     fprintf(out, "#ifndef CCResult_%s_%s_DEFINED\n", ok_m, err_m);
                     fprintf(out, "#define CCResult_%s_%s_DEFINED 1\n", ok_m, err_m);
                     if (ok_is_void) {
-                        /* Void result: union carries only the error field. */
-                        fprintf(out,
-                            "typedef struct CCResult_%s_%s {\n"
-                            "    bool ok;\n"
-                            "    union { char _dummy; %s error; } u;\n"
-                            "} CCResult_%s_%s;\n",
-                            ok_m, err_m, err_ty, ok_m, err_m);
+                        /* Void ok type: same generator, different shape.  The
+                         * struct alone is not a Result — without cc_ok_/cc_err_
+                         * the constructors stay undeclared, and without
+                         * _is_err/_error the sigil cannot propagate. */
+                        fprintf(out, "CC_DECL_RESULT_SPEC_VOID(CCResult_%s_%s, %s)\n",
+                                ok_m, err_m, err_ty);
                     } else {
                         fprintf(out, "CC_DECL_RESULT_SPEC(CCResult_%s_%s, %s, %s)\n",
                                 ok_m, err_m, ok_ty, err_ty);
@@ -11183,6 +11832,26 @@ static char* cc_preprocess_pipeline_ex(const char* input, size_t input_len, cons
                         p->concrete_name, p->concrete_name,
                         p->concrete_name, p->concrete_name);
                 }
+                /* Result types the include scan found declared in headers
+                 * (`cc_result_fn_registry_scan_source`) join the roster
+                 * too.  Without them, `!>` on a callee the registry cannot
+                 * type — a macro name, a function pointer — falls to the
+                 * `default:` arm, which hands back the WHOLE Result struct;
+                 * a mismatched destination then dies in TCC as
+                 * "'{' expected (got ';')" with nothing pointing here.
+                 * Forward tags suffice: parser-mode TCC never evaluates an
+                 * unselected arm's body, and the real compile emits its own
+                 * roster from complete types (visit_codegen). */
+                for (size_t ri = 0; ri < cc_result_fn_registry_count(); ri++) {
+                    const char* t = cc_result_fn_registry_result_type_at(ri);
+                    if (!t || strncmp(t, "CCResult_", 9) != 0) continue;
+                    fprintf(out,
+                        "#ifndef %s_FWD_DECLARED\n"
+                        "#define %s_FWD_DECLARED 1\n"
+                        "typedef struct %s %s;\n"
+                        "#endif\n",
+                        t, t, t, t);
+                }
 
                 /* Helper: has this (ok_m, err_m) pair already been emitted as
                  * a `_Generic` arm?  Used to avoid duplicate arms when a
@@ -11252,6 +11921,15 @@ static char* cc_preprocess_pipeline_ex(const char* input, size_t input_len, cons
                         fputs(arm, out);
                     }
                 }
+                for (size_t ri = 0; ri < cc_result_fn_registry_count(); ri++) {
+                    const char* t = cc_result_fn_registry_result_type_at(ri);
+                    char arm[256];
+                    if (!t || strncmp(t, "CCResult_", 9) != 0) continue;
+                    if (CC_UW_ARM_EMIT_CHECK(&seen, t)) continue;
+                    cc_emit_plan_format_result_arm(arm, sizeof(arm), t,
+                                                   CC_RESULT_ARM_IS_ERR, 0, 0);
+                    fputs(arm, out);
+                }
                 fprintf(out,
                     "    default: (*(void* const*)(void*)&(__x__) == (void*)0))\n");
 
@@ -11295,6 +11973,18 @@ static char* cc_preprocess_pipeline_ex(const char* input, size_t input_len, cons
                         fputs(arm, out);
                     }
                 }
+                for (size_t ri = 0; ri < cc_result_fn_registry_count(); ri++) {
+                    const char* t = cc_result_fn_registry_result_type_at(ri);
+                    char arm[256];
+                    if (!t || strncmp(t, "CCResult_", 9) != 0) continue;
+                    /* Void-ok results have no `.u.value`; same skip as the
+                     * spec-table loop above. */
+                    if (strncmp(t, "CCResult_void_", 14) == 0) continue;
+                    if (CC_UW_ARM_EMIT_CHECK(&seen, t)) continue;
+                    cc_emit_plan_format_result_arm(arm, sizeof(arm), t,
+                                                   CC_RESULT_ARM_VALUE, 0, 0);
+                    fputs(arm, out);
+                }
                 fprintf(out, "    default: (__x__))\n");
 
                 seen.count = 0;
@@ -11329,6 +12019,23 @@ static char* cc_preprocess_pipeline_ex(const char* input, size_t input_len, cons
                                                        CC_RESULT_ARM_ERR, 0, 0);
                         fputs(arm, out);
                     }
+                }
+                for (size_t ri = 0; ri < cc_result_fn_registry_count(); ri++) {
+                    const char* t = cc_result_fn_registry_result_type_at(ri);
+                    char arm[256];
+                    if (!t || strncmp(t, "CCResult_", 9) != 0) continue;
+                    if (CC_UW_ARM_EMIT_CHECK(&seen, t)) continue;
+                    /* Degrade to the CCError base view rather than the raw
+                     * error struct: header error types wrap `CCError base
+                     * @as` (CCIoError, CCPyError, ...), and a raw-typed
+                     * binder makes the handler's `e.message` fail the
+                     * parser-mode type-check.  Same reasoning as the
+                     * `__CCResultGeneric` arm, whose error is CCError-
+                     * layout "so the binder picks up usable fields". */
+                    snprintf(arm, sizeof(arm),
+                        "    %s: (*(CCError*)(void*)&(((%s*)(void*)&(__x__))->u.error)), \\\n",
+                        t, t);
+                    fputs(arm, out);
                 }
                 fprintf(out,
                     "    default: __cc_err_null_at(__e__, __f__, __l__))\n");
@@ -11390,13 +12097,8 @@ static char* cc_preprocess_pipeline_ex(const char* input, size_t input_len, cons
                             fprintf(out, "#ifndef CCResult_%s_%s_DEFINED\n", spec->mangled_ok, spec->mangled_err);
                             fprintf(out, "#define CCResult_%s_%s_DEFINED 1\n", spec->mangled_ok, spec->mangled_err);
                             if (ok_is_void) {
-                                fprintf(out,
-                                    "typedef struct CCResult_%s_%s {\n"
-                                    "    bool ok;\n"
-                                    "    union { char _dummy; %s error; } u;\n"
-                                    "} CCResult_%s_%s;\n",
-                                    spec->mangled_ok, spec->mangled_err, spec->err_type,
-                                    spec->mangled_ok, spec->mangled_err);
+                                fprintf(out, "CC_DECL_RESULT_SPEC_VOID(CCResult_%s_%s, %s)\n",
+                                        spec->mangled_ok, spec->mangled_err, spec->err_type);
                             } else {
                                 fprintf(out, "CC_DECL_RESULT_SPEC(CCResult_%s_%s, %s, %s)\n",
                                         spec->mangled_ok, spec->mangled_err,
@@ -13091,6 +13793,23 @@ static int cc__write_file_text(const char* path, const char* buf, size_t len) {
     return 0;
 }
 
+/* Where a header outside any repo lowers to.  Keyed by a hash of its absolute
+ * path so the location is stable across runs (the incremental cache keys on
+ * it) and two same-named headers in different directories cannot collide. */
+static int cc__lowered_header_tmp_path(const char* abs_src, const char* base,
+                                       char* out_path, size_t out_path_sz) {
+    const char* tmp = getenv("TMPDIR");
+    unsigned long long h = 1469598103934665603ULL;
+    size_t i;
+    for (i = 0; abs_src[i]; i++) {
+        h ^= (unsigned char)abs_src[i];
+        h *= 1099511628211ULL;
+    }
+    if (!tmp || !tmp[0]) tmp = "/tmp";
+    return snprintf(out_path, out_path_sz, "%s/cc-lowered-%ld/%016llx/%s",
+                    tmp, (long)getuid(), h, base) >= (int)out_path_sz ? -1 : 0;
+}
+
 static int cc__build_stable_lowered_header_path(const char* abs_src,
                                                 char* out_path,
                                                 size_t out_path_sz) {
@@ -13099,10 +13818,27 @@ static int cc__build_stable_lowered_header_path(const char* abs_src,
     const char* rel = NULL;
     size_t rel_len;
     if (!abs_src || !out_path || out_path_sz == 0) return -1;
+    rel_len = strlen(abs_src);
+    if (rel_len < 4 || strcmp(abs_src + rel_len - 4, ".cch") != 0) return -1;
     repo_root[0] = '\0';
-    if (!cc_path_find_repo_root(abs_src, repo_root, sizeof(repo_root))) return -1;
-    repo_len = strlen(repo_root);
-    if (strncmp(abs_src, repo_root, repo_len) != 0) return -1;
+    /* No repo root: lower to a temp directory rather than declining.  Declining
+     * left the include pointing at the `.cch`, so CPP inlined raw CC syntax and
+     * `!>` reached the parser unlowered, reporting something unrelated in a
+     * file that looked fine — a silent no-op that has cost an afternoon twice. */
+    repo_len = 0;
+    if (cc_path_find_repo_root(abs_src, repo_root, sizeof(repo_root)))
+        repo_len = strlen(repo_root);
+    /* A root that does not contain this header is not this header's root: the
+     * lookup falls back to the working directory's repo, and mapping the file
+     * into an unrelated `out/include` is not possible. */
+    if (repo_len == 0 || strncmp(abs_src, repo_root, repo_len) != 0) {
+        const char* base = strrchr(abs_src, '/');
+        base = base ? base + 1 : abs_src;
+        if (cc__lowered_header_tmp_path(abs_src, base, out_path, out_path_sz) != 0)
+            return -1;
+        strcpy(out_path + strlen(out_path) - 4, ".h");
+        return 0;
+    }
     rel = abs_src + repo_len;
     if (*rel == '/') rel++;
     if (!*rel) return -1;
@@ -13110,7 +13846,6 @@ static int cc__build_stable_lowered_header_path(const char* abs_src,
     if (snprintf(out_path, out_path_sz, "%s/out/include/%s", repo_root, rel) >= (int)out_path_sz) {
         return -1;
     }
-    if (rel_len < 4 || strcmp(rel + rel_len - 4, ".cch") != 0) return -1;
     strcpy(out_path + strlen(out_path) - 4, ".h");
     return 0;
 }
@@ -13427,17 +14162,34 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
             return g_lowered_local_headers[i].lowered_path;
         }
     }
-    if (cc__build_stable_lowered_header_path(abs_src, lowered_path, sizeof(lowered_path)) != 0) return NULL;
-    if (cc__dirname_local(lowered_path, lowered_dir, sizeof(lowered_dir)) != 0) return NULL;
-    if (cc__mkpath_local(lowered_dir) != 0) return NULL;
-    if (cc__read_file_text(abs_src, &input, &input_len) != 0) return NULL;
+    /* Every give-up below leaves the include pointing at the `.cch`, so CPP
+     * inlines raw CC syntax and the failure surfaces as a parse error in
+     * unrelated code.  Name the header and the step instead. */
+#define CC__LOWER_GIVE_UP(step)                                                \
+    do {                                                                       \
+        fprintf(stderr,                                                        \
+                "cc: warning: cannot lower local header %s (%s: %s); it will " \
+                "be included as raw CC source\n",                              \
+                abs_src, (step), strerror(errno));                             \
+        return NULL;                                                           \
+    } while (0)
+    if (cc__build_stable_lowered_header_path(abs_src, lowered_path, sizeof(lowered_path)) != 0)
+        CC__LOWER_GIVE_UP("no lowered path");
+    if (cc__dirname_local(lowered_path, lowered_dir, sizeof(lowered_dir)) != 0)
+        CC__LOWER_GIVE_UP("dirname");
+    if (cc__mkpath_local(lowered_dir) != 0)
+        CC__LOWER_GIVE_UP("mkdir -p");
+    if (cc__read_file_text(abs_src, &input, &input_len) != 0)
+        CC__LOWER_GIVE_UP("read");
     rewritten = cc__rewrite_local_cch_includes_impl(input, input_len, abs_src);
     lowered = cc_lower_header_string(rewritten ? rewritten : input,
                                      rewritten ? strlen(rewritten) : input_len,
                                      abs_src);
     if (!lowered) lowered = strdup(rewritten ? rewritten : input);
     if (!lowered) return NULL;
-    if (cc__write_file_text(lowered_path, lowered, strlen(lowered)) != 0) return NULL;
+    if (cc__write_file_text(lowered_path, lowered, strlen(lowered)) != 0)
+        CC__LOWER_GIVE_UP("write");
+#undef CC__LOWER_GIVE_UP
     if (cc__ensure_lowered_local_header_capacity(g_lowered_local_header_count + 1) != 0) return NULL;
     lowered_idx = g_lowered_local_header_count++;
     memset(&g_lowered_local_headers[lowered_idx], 0, sizeof(g_lowered_local_headers[lowered_idx]));
@@ -13821,6 +14573,10 @@ int cc_writeback_local_lowered_headers_from_codegen(char** src, size_t* n) {
  * the normal factory-rewrite + @emit lowering + comptime collection process it
  * uniformly with .ccs-defined factories.  Returns malloc'd text, or NULL when
  * no included header defines a factory. */
+/* Collect the CC_GENERIC_FACTORY / _EXTEND blocks in one header's text. */
+static int cc__harvest_factories_from(const char* src, size_t n, const char* path,
+                                      char** out_p, size_t* out_len_p, size_t* out_cap_p);
+
 char* cc_harvest_local_header_factories(void) {
     static const char kw[] = "CC_GENERIC_FACTORY";
     static const char kw_ext[] = "CC_GENERIC_FACTORY_EXTEND";
@@ -13883,8 +14639,88 @@ char* cc_harvest_local_header_factories(void) {
         }
         free(src);
     }
+    /* Installed `.cch` headers too: `lower_headers` blanks their factory blocks
+     * out of the lowered `.h`, so an unharvested library factory simply never
+     * registers and the use site reports the generic name as unknown.
+     *
+     * A local header can appear in BOTH lists, and harvesting it twice defines
+     * its monomorphs twice, so skip anything the loop above already covered. */
+    for (size_t h = 0; h < g_included_cch_source_count; h++) {
+        size_t hn = 0;
+        const char* hsrc;
+        const char* hpath = g_included_cch_sources[h];
+        int seen = 0;
+        for (size_t l = 0; l < g_lowered_local_header_count && !seen; l++) {
+            const char* lp = g_lowered_local_headers[l].source_path;
+            if (lp && hpath && strcmp(lp, hpath) == 0) seen = 1;
+        }
+        if (seen) continue;
+        hsrc = cc__included_cch_text(h, &hn);
+        if (!hsrc || hn == 0) continue;
+        any |= cc__harvest_factories_from(hsrc, hn, hpath ? hpath : "<header>",
+                                          &out, &out_len, &out_cap);
+    }
     if (!any) { free(out); return NULL; }
     return out;
+}
+
+static int cc__harvest_factories_from(const char* src, size_t n, const char* path,
+                                      char** out_p, size_t* out_len_p,
+                                      size_t* out_cap_p) {
+    static const char kw[] = "CC_GENERIC_FACTORY";
+    static const char kw_ext[] = "CC_GENERIC_FACTORY_EXTEND";
+    const size_t kwlen = sizeof(kw) - 1;
+    const size_t kwlen_ext = sizeof(kw_ext) - 1;
+    char* out = *out_p;
+    size_t out_len = *out_len_p, out_cap = *out_cap_p;
+    int any = 0;
+    size_t i = 0;
+    CCScannerState scan;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        size_t mlen = 0;
+        if (src[i] == 'C') {
+            if (i + kwlen_ext <= n && memcmp(src + i, kw_ext, kwlen_ext) == 0 &&
+                (i == 0 || !cc_is_ident_char(src[i - 1])) &&
+                (i + kwlen_ext >= n || !cc_is_ident_char(src[i + kwlen_ext])))
+                mlen = kwlen_ext;
+            else if (i + kwlen <= n && memcmp(src + i, kw, kwlen) == 0 &&
+                     (i == 0 || !cc_is_ident_char(src[i - 1])) &&
+                     (i + kwlen >= n || !cc_is_ident_char(src[i + kwlen])))
+                mlen = kwlen;
+        }
+        if (mlen) {
+            size_t start = i;
+            size_t p = cc_skip_ws_and_comments(src, n, i + mlen);
+            size_t rp = 0, body_l, body_r = 0;
+            if (p >= n || src[p] != '(') { i++; continue; }
+            if (!cc_find_matching_paren(src, n, p, &rp)) { i++; continue; }
+            p = cc_skip_ws_and_comments(src, n, rp + 1);
+            if (p >= n || src[p] != '{') { i++; continue; }
+            body_l = p;
+            if (!cc_find_matching_brace(src, n, body_l, &body_r) || body_r <= body_l) {
+                i++; continue;
+            }
+            {
+                int kwline = 1;
+                char ld[PATH_MAX + 64];
+                for (size_t k = 0; k < start; k++) if (src[k] == '\n') kwline++;
+                snprintf(ld, sizeof(ld), "#line %d \"%s\"\n", kwline, path);
+                if (out_len > 0 && out[out_len - 1] != '\n')
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, ld);
+            }
+            cc_sb_append(&out, &out_len, &out_cap, src + start, body_r + 1 - start);
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+            any = 1;
+            i = body_r + 1;
+            continue;
+        }
+        i++;
+    }
+    *out_p = out; *out_len_p = out_len; *out_cap_p = out_cap;
+    return any;
 }
 
 /* Reusable @comptime functions in .cch files follow the same model as header
@@ -14442,6 +15278,10 @@ static void cc__incexp_disk_store(const char* cache_dir, uint64_t key,
         unlink(tmp_deps);
     }
     for (size_t k = 1; k < path_n; ++k) free(paths[k]);
+
+    /* Nothing else ever deletes an entry: the key folds in the input's mtime,
+     * so an edited file mints a new one and orphans the old. */
+    (void)cc_cache_evict(cache_dir, 1024ULL * 1024ULL * 1024ULL);
 }
 
 char* cc_preprocess_include_expanded(const char* input_path) {
@@ -14721,18 +15561,18 @@ char* cc__lower_type_of_constexpr(const char* src, size_t n) {
             i++;
             continue;
         }
-        size_t p = cc_skip_ws_len(src, n, i + KWN);
+        size_t p = cc_skip_ws_and_comments(src, n, i + KWN);
         if (p >= n || src[p] != '(') { i++; continue; }
-        p = cc_skip_ws_len(src, n, p + 1);
+        p = cc_skip_ws_and_comments(src, n, p + 1);
         size_t id0 = p;
         while (p < n && cc_is_ident_char(src[p])) p++;
         size_t idn = p - id0;
         if (idn == 0) { i++; continue; }
-        size_t q = cc_skip_ws_len(src, n, p);
+        size_t q = cc_skip_ws_and_comments(src, n, p);
         if (q >= n || src[q] != ')') { i++; continue; }   /* bare IDENT only */
-        q = cc_skip_ws_len(src, n, q + 1);
+        q = cc_skip_ws_and_comments(src, n, q + 1);
         if (q >= n || src[q] != '.') { i++; continue; }    /* value/`->` forms untouched */
-        size_t m = cc_skip_ws_len(src, n, q + 1);
+        size_t m = cc_skip_ws_and_comments(src, n, q + 1);
         size_t mem0 = m;
         while (m < n && cc_is_ident_char(src[m])) m++;
         size_t memn = m - mem0;
@@ -14825,7 +15665,7 @@ typedef struct { const char* s; size_t n; size_t i; int ok; } CCCEval;
 
 static long cc__ce_expr(CCCEval* e);
 
-static void cc__ce_ws(CCCEval* e) { e->i = cc_skip_ws_len(e->s, e->n, e->i); }
+static void cc__ce_ws(CCCEval* e) { e->i = cc_skip_ws_and_comments(e->s, e->n, e->i); }
 
 static int cc__ce_kw_value(const char* s, size_t n, long* out) {
     /* Mirror of `cc_type_kind` in include/ccc/cc_type.cch — keep in sync. */
@@ -15157,22 +15997,22 @@ static int cc__ct_if_extent(const char* src, size_t n, size_t p, size_t* end) {
     static const char ATC[] = "@comptime";
     const size_t ATCN = sizeof(ATC) - 1;
     if (p + ATCN > n || memcmp(src + p, ATC, ATCN) != 0) return 0;
-    size_t q = cc_skip_ws_len(src, n, p + ATCN);
+    size_t q = cc_skip_ws_and_comments(src, n, p + ATCN);
     if (!(q + 2 <= n && src[q] == 'i' && src[q + 1] == 'f' &&
           (q + 2 >= n || !cc_is_ident_char(src[q + 2])))) return 0;
-    size_t lp = cc_skip_ws_len(src, n, q + 2);
+    size_t lp = cc_skip_ws_and_comments(src, n, q + 2);
     if (lp >= n || src[lp] != '(') return 0;
     size_t pclose;
     if (!cc_find_matching_paren(src, n, lp, &pclose)) return 0;
-    size_t tb = cc_skip_ws_len(src, n, pclose + 1);
+    size_t tb = cc_skip_ws_and_comments(src, n, pclose + 1);
     if (tb >= n || src[tb] != '{') return 0;
     size_t tbc;
     if (!cc_find_matching_brace(src, n, tb, &tbc)) return 0;
     size_t cur = tbc + 1;
-    size_t after = cc_skip_ws_len(src, n, tbc + 1);
+    size_t after = cc_skip_ws_and_comments(src, n, tbc + 1);
     if (after + 4 <= n && memcmp(src + after, "else", 4) == 0 &&
         (after + 4 >= n || !cc_is_ident_char(src[after + 4]))) {
-        size_t ep = cc_skip_ws_len(src, n, after + 4);
+        size_t ep = cc_skip_ws_and_comments(src, n, after + 4);
         if (ep < n && src[ep] == '{') {
             size_t ebc;
             if (!cc_find_matching_brace(src, n, ep, &ebc)) return 0;
@@ -15224,7 +16064,7 @@ static int cc__span_has_cc_syntax(const char* src, size_t a, size_t b) {
  * and is skipped), and CC-tainted spans are dropped individually.  Defs are
  * emitted in source order so in-file dependencies resolve.  Returns a malloc'd
  * string the caller frees (empty if none), or NULL on OOM. */
-static char* cc__extract_type_decls_prelude(const char* src, size_t n) {
+char* cc_ct_extract_type_decls_prelude(const char* src, size_t n) {
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
     CCScannerState scan;
@@ -15253,13 +16093,13 @@ static char* cc__extract_type_decls_prelude(const char* src, size_t n) {
             end = cc__span_to_top_semicolon(src, n, i + kwlen);
         } else {
             /* require `[TAG] { ... } ;` (a bare aggregate definition) */
-            size_t p = cc_skip_ws_len(src, n, i + kwlen);
+            size_t p = cc_skip_ws_and_comments(src, n, i + kwlen);
             while (p < n && cc_is_ident_char(src[p])) p++;   /* optional tag */
-            p = cc_skip_ws_len(src, n, p);
+            p = cc_skip_ws_and_comments(src, n, p);
             if (p >= n || src[p] != '{') { i += kwlen; continue; } /* fwd decl */
             size_t bclose;
             if (!cc_find_matching_brace(src, n, p, &bclose)) { i += kwlen; continue; }
-            size_t q = cc_skip_ws_len(src, n, bclose + 1);
+            size_t q = cc_skip_ws_and_comments(src, n, bclose + 1);
             if (q >= n || src[q] != ';') { i = bclose + 1; continue; } /* declarator */
             end = q + 1;
         }
@@ -15367,16 +16207,16 @@ static char* cc__normalize_cc_type_of_to_type_of(const char* src, size_t n) {
             i++;
             continue;
         }
-        size_t p = cc_skip_ws_len(src, n, i + KWN);
+        size_t p = cc_skip_ws_and_comments(src, n, i + KWN);
         if (p >= n || src[p] != '(') { i++; continue; }
         size_t close;
         if (!cc_find_matching_paren(src, n, p, &close)) { i++; continue; }
-        size_t q = cc_skip_ws_len(src, n, p + 1);
+        size_t q = cc_skip_ws_and_comments(src, n, p + 1);
         if (q >= close || src[q] != '"') { i++; continue; }
         size_t qs = q + 1, qe = qs;
         while (qe < close && src[qe] != '"') qe++;
         if (qe >= close) { i++; continue; }
-        size_t tail = cc_skip_ws_len(src, n, qe + 1);
+        size_t tail = cc_skip_ws_and_comments(src, n, qe + 1);
         if (tail != close) { i++; continue; }
         cc_sb_append(&out, &out_len, &out_cap, src + last, i - last);
         cc_sb_append_cstr(&out, &out_len, &out_cap, "type_of(");
@@ -15429,7 +16269,9 @@ static char* cc__build_reflection_view(const char* src, size_t n,
 
 static void cc__ct_free_fields(CCCtField* f, size_t n) {
     if (!f) return;
-    for (size_t i = 0; i < n; i++) { free(f[i].name); free(f[i].type); }
+    for (size_t i = 0; i < n; i++) {
+        free(f[i].name); free(f[i].type); free(f[i].params); free(f[i].member);
+    }
     free(f);
 }
 
@@ -15491,11 +16333,11 @@ static int cc__ct_find_struct_body(const char* src, size_t n,
             i = semi; continue;
         }
         /* struct/union [TAG] { ... } */
-        size_t p = cc_skip_ws_len(src, n, i + kwlen);
+        size_t p = cc_skip_ws_and_comments(src, n, i + kwlen);
         size_t tags = p;
         while (p < n && cc_is_ident_char(src[p])) p++;
         size_t tage = p;
-        size_t bp = cc_skip_ws_len(src, n, p);
+        size_t bp = cc_skip_ws_and_comments(src, n, p);
         if (bp < n && src[bp] == '{') {
             size_t b2;
             if (cc_find_matching_brace(src, n, bp, &b2)) {
@@ -15527,6 +16369,9 @@ static int cc__ct_push_field(CCCtField** fs, size_t* fn, size_t* fc,
         *fs = nb; *fc = nc;
     }
     (*fs)[*fn].name = nm; (*fs)[*fn].type = ty; (*fn)++;
+    (*fs)[*fn - 1].is_as = 0;
+    (*fs)[*fn - 1].params = NULL;
+    (*fs)[*fn - 1].member = NULL;
     return 1;
 }
 
@@ -15766,6 +16611,55 @@ static int cc__ct_parse_member(const char* m, CCCtField** fs, size_t* fn, size_t
     return 1;
 }
 
+/* Parse a parenthesized parameter list `src[lp..rp]` (lp='(', rp=')') into a
+ * field list, one entry per declared parameter, in declaration order.
+ *
+ * Unlike a struct member, every parameter carries its own base type, so each
+ * comma-separated piece is parsed as a fresh declarator rather than sharing the
+ * first one's base.  `(void)` and `()` yield the empty list.  A parameter using
+ * a form the declarator parser cannot spell exactly — or an unnamed one, which
+ * has no identifier to reflect — is a bail, so the caller errors rather than
+ * handing back a guessed or partial list.  Returns 1 ok, 0 bail. */
+static int cc__ct_parse_param_list(const char* src, size_t lp, size_t rp,
+                                   CCCtField** out, size_t* out_n) {
+    CCCtField* fs = NULL; size_t fn = 0, fc = 0;
+    size_t i = lp + 1;
+    *out = NULL; *out_n = 0;
+    /* An empty or `(void)` list has no parameters. */
+    {
+        size_t a = cc_skip_ws_and_comments(src, rp, i);
+        size_t b = cc_rskip_ws_and_comments(src, rp);
+        if (b <= a) { *out = NULL; *out_n = 0; return 1; }
+        if (b - a == 4 && memcmp(src + a, "void", 4) == 0) { *out = NULL; *out_n = 0; return 1; }
+    }
+    while (i < rp) {
+        CCScannerState s; cc_scanner_init(&s);
+        size_t j = i, depth = 0, comma = rp;
+        while (j < rp) {
+            if (cc_scanner_skip_non_code(&s, src, rp, &j)) continue;
+            char c = src[j];
+            if (c == '(' || c == '[') depth++;
+            else if (c == ')' || c == ']') { if (depth) depth--; }
+            else if (c == ',' && depth == 0) { comma = j; break; }
+            j++;
+        }
+        {
+            size_t ps = cc_skip_ws_and_comments(src, comma, i);
+            size_t pe = cc_rskip_ws_and_comments(src, comma);
+            if (pe > ps) {
+                char* d = cc__ct_member_normalize(src, ps, pe);
+                int ok;
+                if (!d) { cc__ct_free_fields(fs, fn); return 0; }
+                ok = cc__ct_parse_declarator(d, strlen(d), NULL, NULL, 0, &fs, &fn, &fc);
+                free(d);
+                if (!ok) { cc__ct_free_fields(fs, fn); return 0; }
+            } else { cc__ct_free_fields(fs, fn); return 0; }  /* `a, , b` */
+        }
+        i = comma + 1;
+    }
+    *out = fs; *out_n = fn; return 1;
+}
+
 /* Parse the member declarations in struct body (bo='{', bc='}') into a field
  * list.  Returns 1 on success (caller frees *out via cc__ct_free_fields), 0 if
  * any member uses a form the parser cannot model exactly (so the caller errors
@@ -15791,11 +16685,40 @@ static int cc__ct_parse_fields_from_body(const char* src, size_t bo, size_t bc,
         size_t me = semi;
         while (me > ms && (src[me - 1] == ' ' || src[me - 1] == '\t' || src[me - 1] == '\n' || src[me - 1] == '\r')) me--;
         if (me > ms) {
-            char* m = cc__ct_member_normalize(src, ms, me);
+            /* `@as` composition: source spells `Base base @as;`, and the
+             * parse-input rewrite turns it into a block-comment marker, so
+             * both spellings reach here.  Record it — a walk over composition
+             * has to tell a composed member from an ordinary field. */
+            int member_is_as = 0;
+            size_t before = fn;
+            char* m;
+            int ok;
+            for (size_t q = ms; q + 3 <= me; q++) {
+                if (src[q] == '@' && memcmp(src + q, "@as", 3) == 0 &&
+                    (q + 3 == me || !cc_is_ident_char(src[q + 3]))) { member_is_as = 1; break; }
+                if (src[q] == '/' && q + 7 <= me && memcmp(src + q, "/*@as*/", 7) == 0) {
+                    member_is_as = 1; break;
+                }
+            }
+            m = cc__ct_member_normalize(src, ms, me);
             if (!m) { cc__ct_free_fields(fs, fn); return 0; }
-            int ok = cc__ct_parse_member(m, &fs, &fn, &fc);
+            if (member_is_as) {
+                /* The marker is an attribute on the member, not part of its
+                 * declarator — leave it in and the declarator parser reads it
+                 * as an unsupported form. */
+                char* w = m;
+                for (char* r = m; *r; ) {
+                    if (r[0] == '@' && r[1] == 'a' && r[2] == 's' &&
+                        !cc_is_ident_char(r[3])) { r += 3; continue; }
+                    if (r[0] == '/' && strncmp(r, "/*@as*/", 7) == 0) { r += 7; continue; }
+                    *w++ = *r++;
+                }
+                *w = 0;
+            }
+            ok = cc__ct_parse_member(m, &fs, &fn, &fc);
             free(m);
             if (!ok) { cc__ct_free_fields(fs, fn); return 0; }
+            if (member_is_as) for (size_t q = before; q < fn; q++) fs[q].is_as = 1;
         }
         i = semi + 1;
     }
@@ -15822,6 +16745,16 @@ int cc_ct_reflect_struct_fields(const char* src, size_t len, const char* type_na
             return cc__ct_parse_fields_from_body(fsrc, bo, bc, out, out_n);
     }
     return 0;
+}
+
+int cc_ct_reflect_param_list(const char* params, CCCtField** out, size_t* out_n) {
+    size_t n;
+    if (out) *out = NULL;
+    if (out_n) *out_n = 0;
+    if (!params || !out || !out_n) return 0;
+    n = strlen(params);
+    if (n < 2 || params[0] != '(' || params[n - 1] != ')') return 0;
+    return cc__ct_parse_param_list(params, 0, n - 1, out, out_n);
 }
 
 void cc_ct_free_fields(CCCtField* fields, size_t n) {
@@ -15953,16 +16886,16 @@ static int cc__sm_typedef_defines(const char* decl, size_t len, const char* name
                        decl[p] == '\n' || decl[p] == '\r')) p++;
     if (p + 7 > len || memcmp(decl + p, "typedef", 7) != 0 ||
         (p + 7 < len && cc_is_ident_char(decl[p + 7]))) return 0;
-    p = cc_skip_ws_len(decl, len, p + 7);
+    p = cc_skip_ws_and_comments(decl, len, p + 7);
     if (p + 4 <= len && memcmp(decl + p, "enum", 4) == 0 &&
         (p + 4 == len || !cc_is_ident_char(decl[p + 4])))
-        p = cc_skip_ws_len(decl, len, p + 4);
+        p = cc_skip_ws_and_comments(decl, len, p + 4);
     else if (p + 6 <= len && memcmp(decl + p, "struct", 6) == 0 &&
              (p + 6 == len || !cc_is_ident_char(decl[p + 6])))
-        p = cc_skip_ws_len(decl, len, p + 6);
+        p = cc_skip_ws_and_comments(decl, len, p + 6);
     else if (p + 5 <= len && memcmp(decl + p, "union", 5) == 0 &&
              (p + 5 == len || !cc_is_ident_char(decl[p + 5])))
-        p = cc_skip_ws_len(decl, len, p + 5);
+        p = cc_skip_ws_and_comments(decl, len, p + 5);
     else return 0;
     if (p + nlen <= len && memcmp(decl + p, name, nlen) == 0 &&
         (p + nlen == len || !cc_is_ident_char(decl[p + nlen])))
@@ -16254,7 +17187,7 @@ static int cc__ct_find_enum_body(const char* src, size_t n,
             }
             if (!want_tag && havebrace) {
                 /* Only a `typedef enum {…} Name;` qualifies (not typedef struct). */
-                size_t kw = cc_skip_ws_len(src, n, i + kwlen);
+                size_t kw = cc_skip_ws_and_comments(src, n, i + kwlen);
                 int is_enum = (kw + 4 <= n && memcmp(src + kw, "enum", 4) == 0 &&
                                (kw + 4 == n || !cc_is_ident_char(src[kw + 4])));
                 if (is_enum) {
@@ -16275,11 +17208,11 @@ static int cc__ct_find_enum_body(const char* src, size_t n,
             i = semi; continue;
         }
         /* enum [TAG] { ... } */
-        size_t p = cc_skip_ws_len(src, n, i + kwlen);
+        size_t p = cc_skip_ws_and_comments(src, n, i + kwlen);
         size_t tags = p;
         while (p < n && cc_is_ident_char(src[p])) p++;
         size_t tage = p;
-        size_t bp = cc_skip_ws_len(src, n, p);
+        size_t bp = cc_skip_ws_and_comments(src, n, p);
         if (bp < n && src[bp] == '{') {
             size_t b2;
             if (cc_find_matching_brace(src, n, bp, &b2)) {
@@ -16613,10 +17546,162 @@ static int cc__ct_load_fields_via_reflect(const char* tname, size_t tlen,
 
 /* Append one unrolled copy of BODY (body[bs..be)) with the loop variable
  * `lv` (length lvlen) substituted for field `f` at index `idx`. */
+/* Collect the methods of `T`: functions whose FIRST parameter is `T` or `T*`.
+ * That is the tier where declaring the function installs the method, and it is
+ * the only one that is unambiguous and local — the bare-name tier is universal
+ * and the dynamic sink is unknowable, so neither is reflectable.
+ *
+ * Reuses CCCtField: `name` is the method identifier, `type` its return-type
+ * spelling, so the field substituter serves both loops unchanged.
+ *
+ * Method reflection is as-of-this-TU by construction: a method family is open,
+ * so anyone can install one by declaring a function. */
+static int cc__ct_load_methods(const char* src, size_t n,
+                               const char* tname, size_t tlen,
+                               CCCtField** out_fs, size_t* out_n) {
+    CCCtField* fs = NULL;
+    size_t fn = 0, fc = 0;
+    CCScannerState sc;
+    size_t i = 0;
+    int depth = 0;
+    if (!src || !tname || tlen == 0) return 0;
+    cc_scanner_init(&sc);
+    while (i < n) {
+        size_t rp, ns, ne, ps, pe, ds;
+        if (cc_scanner_skip_non_code(&sc, src, n, &i)) continue;
+        if (src[i] == '{') { depth++; i++; continue; }
+        if (src[i] == '}') { if (depth > 0) depth--; i++; continue; }
+        if (depth != 0 || !cc_is_ident_start(src[i]) ||
+            (i > 0 && cc_is_ident_char(src[i - 1]))) { i++; continue; }
+        ns = i;
+        while (i < n && cc_is_ident_char(src[i])) i++;
+        ne = i;
+        {
+            size_t q = cc_skip_ws_and_comments(src, n, i);
+            if (q >= n || src[q] != '(' || !cc_find_matching_paren(src, n, q, &rp)) continue;
+            /* First parameter's declared type. */
+            ps = cc_skip_ws_and_comments(src, n, q + 1);
+            pe = ps;
+            {
+                int d2 = 0;
+                while (pe < rp) {
+                    char c = src[pe];
+                    if (c == '(' || c == '[') d2++;
+                    else if (c == ')' || c == ']') d2--;
+                    else if (c == ',' && d2 == 0) break;
+                    pe++;
+                }
+            }
+            /* `T self` / `T* self`: match the type head, then require a `*` or
+             * whitespace before the parameter name. */
+            {
+                const char* pp = src + ps;
+                size_t pl = (pe > ps) ? pe - ps : 0;
+                cc_result_spec_skip_qualifiers(&pp, &pl);
+                if (pl <= tlen || memcmp(pp, tname, tlen) != 0) { i = rp + 1; continue; }
+                if (cc_is_ident_char(pp[tlen])) { i = rp + 1; continue; }
+            }
+            /* Return type: back to the previous top-level delimiter. */
+            ds = cc__scan_back_to_delim(src, ns);
+            ds = cc__skip_leading_decl_specs(src, ds);
+            {
+                char ty[256];
+                size_t de = cc_rskip_ws_and_comments(src, ns);
+                size_t nl = ne - ns, tl = (de > ds) ? de - ds : 0;
+                if (tl >= sizeof(ty)) tl = sizeof(ty) - 1;
+                memcpy(ty, src + ds, tl); ty[tl] = 0;
+                if (nl > 0 && !cc__ct_push_field(&fs, &fn, &fc, src + ns, nl, ty)) {
+                    cc__ct_free_fields(fs, fn);
+                    return 0;
+                }
+                /* The parameter list verbatim, parens included, so `m.params`
+                 * substitutes to a sequence the `@comptime for` head parses
+                 * and to a usable signature fragment anywhere else. */
+                if (nl > 0) {
+                    size_t plen = rp + 1 - q;
+                    char* pl = (char*)malloc(plen + 1);
+                    if (!pl) { cc__ct_free_fields(fs, fn); return 0; }
+                    memcpy(pl, src + q, plen); pl[plen] = 0;
+                    fs[fn - 1].params = pl;
+                }
+                /* The name a caller writes after the dot.  Computed here, where
+                 * the receiver type is in hand, by the same composition UFCS
+                 * dispatches through — an exported name and a callable name
+                 * must not be two answers to one question. */
+                if (nl > 0) {
+                    char tn[256];
+                    size_t cl = tlen < sizeof(tn) - 1 ? tlen : sizeof(tn) - 1;
+                    const char* mem;
+                    memcpy(tn, tname, cl); tn[cl] = 0;
+                    mem = cc_ufcs_member_name_of(tn, fs[fn - 1].name);
+                    {
+                        size_t ml = strlen(mem);
+                        char* mb = (char*)malloc(ml + 1);
+                        if (!mb) { cc__ct_free_fields(fs, fn); return 0; }
+                        memcpy(mb, mem, ml + 1);
+                        fs[fn - 1].member = mb;
+                    }
+                    if (!fs[fn - 1].member) { cc__ct_free_fields(fs, fn); return 0; }
+                }
+            }
+            i = rp + 1;
+        }
+    }
+    *out_fs = fs;
+    *out_n = fn;
+    return fn > 0;
+}
+
+int cc_ct_reflect_type_methods(const char* src, size_t len, const char* type_name,
+                               CCCtField** out, size_t* out_n) {
+    if (out) *out = NULL;
+    if (out_n) *out_n = 0;
+    if (!src || !type_name || !type_name[0] || !out || !out_n) return 0;
+    {
+        size_t nlen = strlen(type_name);
+        if (cc__ct_load_methods(src, len, type_name, nlen, out, out_n)) return 1;
+        /* A type's methods may be declared in an included `.cch` while the
+         * factory asking about them lives in the TU.  Same search the field
+         * reader does, for the same reason. */
+        for (size_t h = 0; h < g_included_cch_source_count; h++) {
+            size_t fn = 0;
+            const char* fsrc = cc__included_cch_text(h, &fn);
+            if (!fsrc) continue;
+            if (cc__ct_load_methods(fsrc, fn, type_name, nlen, out, out_n)) return 1;
+        }
+    }
+    return 0;
+}
+
+/* Split a captured return-type spelling into its ok and error halves.
+ * `int !>(CCError)` -> ok "int", err "CCError"; a plain type has no err.
+ * Fallibility changes the SHAPE of emitted code — unwrap or not — so it is a
+ * reflected fact, unlike anything `_Generic` can decide in the emitted code. */
+static void cc__ct_split_ret(const char* ty, const char** ok_s, size_t* ok_n,
+                             const char** er_s, size_t* er_n) {
+    const char* b = ty ? strstr(ty, "!>") : NULL;
+    *ok_s = ty ? ty : ""; *ok_n = ty ? strlen(ty) : 0;
+    *er_s = ""; *er_n = 0;
+    if (!b) return;
+    *ok_n = (size_t)(b - ty);
+    while (*ok_n > 0 && ((*ok_s)[*ok_n - 1] == ' ' || (*ok_s)[*ok_n - 1] == '\t')) (*ok_n)--;
+    {
+        const char* lp = strchr(b, '(');
+        const char* rp = lp ? strrchr(lp, ')') : NULL;
+        if (lp && rp && rp > lp + 1) {
+            const char* a = lp + 1;
+            while (a < rp && (*a == ' ' || *a == '\t')) a++;
+            *er_s = a; *er_n = (size_t)(rp - a);
+            while (*er_n > 0 && ((*er_s)[*er_n - 1] == ' ' || (*er_s)[*er_n - 1] == '\t')) (*er_n)--;
+        }
+    }
+}
+
 static void cc__ct_append_field_body(char** out, size_t* ol, size_t* oc,
                                      const char* body, size_t bs, size_t be,
                                      const char* lv, size_t lvlen,
-                                     const CCCtField* f, size_t idx) {
+                                     const CCCtField* f, size_t idx,
+                                     int is_method) {
     CCScannerState s; cc_scanner_init(&s);
     size_t i = bs, emit = bs;
     while (i < be) {
@@ -16636,6 +17721,65 @@ static void cc__ct_append_field_body(char** out, size_t* ol, size_t* oc,
                     cc_sb_append_cstr(out, ol, oc, "\"");
                     i = m; emit = i; continue;
                 }
+                if (is_method && ((mlen == 3 && memcmp(body + ms, "ret", 3) == 0) ||
+                                  (mlen == 3 && memcmp(body + ms, "err", 3) == 0) ||
+                                  (mlen == 8 && memcmp(body + ms, "ret_void", 8) == 0) ||
+                                  (mlen == 8 && memcmp(body + ms, "fallible", 8) == 0))) {
+                    const char *oks, *ers; size_t okn, ern;
+                    cc__ct_split_ret(f->type, &oks, &okn, &ers, &ern);
+                    if (mlen == 3 && body[ms] == 'r') cc_sb_append(out, ol, oc, oks, okn);
+                    else if (mlen == 3) cc_sb_append(out, ol, oc, ers, ern);
+                    else if (body[ms] == 'r')
+                        /* Whether a call yields a value is a shape fact like
+                         * fallibility: a generated caller either binds the
+                         * result or must not name it. `void` is the whole
+                         * spelling, never a prefix — `void*` is a value. */
+                        cc_sb_append_cstr(out, ol, oc,
+                                          (okn == 4 && memcmp(oks, "void", 4) == 0) ? "1" : "0");
+                    else cc_sb_append_cstr(out, ol, oc, ern > 0 ? "1" : "0");
+                    i = m; emit = i; continue;
+                }
+                if (is_method && mlen == 6 && memcmp(body + ms, "member", 6) == 0) {
+                    /* The exported/callable short name, as a string literal —
+                     * the same shape `.name` has, since both are text a
+                     * generator pastes into a table or an identifier. */
+                    const char* mm = f->member ? f->member : f->name;
+                    cc_sb_append_cstr(out, ol, oc, "\"");
+                    cc_sb_append(out, ol, oc, mm, strlen(mm));
+                    cc_sb_append_cstr(out, ol, oc, "\"");
+                    i = m; emit = i; continue;
+                }
+                if (is_method && mlen == 4 && memcmp(body + ms, "args", 4) == 0) {
+                    /* The same list with the types dropped: every name is a
+                     * local the generated body already declared, so forwarding
+                     * a call is `${m.name}${m.args}` with no comma splicing. */
+                    const char* pl = f->params ? f->params : "()";
+                    CCCtField* ps = NULL; size_t pn = 0;
+                    if (!cc__ct_parse_param_list(pl, 0, strlen(pl) - 1, &ps, &pn)) {
+                        /* No name to forward.  Emit something that cannot
+                         * compile and says so, rather than a call that quietly
+                         * drops or misorders an argument. */
+                        cc_sb_append_cstr(out, ol, oc,
+                            "(cc__reflect_method_has_an_unnamed_parameter)");
+                    } else {
+                        cc_sb_append_cstr(out, ol, oc, "(");
+                        for (size_t k = 0; k < pn; k++) {
+                            if (k) cc_sb_append_cstr(out, ol, oc, ", ");
+                            cc_sb_append(out, ol, oc, ps[k].name, strlen(ps[k].name));
+                        }
+                        cc_sb_append_cstr(out, ol, oc, ")");
+                        cc__ct_free_fields(ps, pn);
+                    }
+                    i = m; emit = i; continue;
+                }
+                if (is_method && mlen == 6 && memcmp(body + ms, "params", 6) == 0) {
+                    /* The declared list, parens and all.  In a `@comptime for`
+                     * head it is the sequence to walk; anywhere else it is the
+                     * signature fragment the source wrote. */
+                    const char* pl = f->params ? f->params : "(void)";
+                    cc_sb_append(out, ol, oc, pl, strlen(pl));
+                    i = m; emit = i; continue;
+                }
                 if (mlen == 4 && memcmp(body + ms, "type", 4) == 0) {
                     cc_sb_append(out, ol, oc, f->type, strlen(f->type));
                     i = m; emit = i; continue;
@@ -16646,6 +17790,10 @@ static void cc__ct_append_field_body(char** out, size_t* ol, size_t* oc,
                     cc_sb_append_cstr(out, ol, oc, "\"");
                     cc_sb_append(out, ol, oc, f->type, strlen(f->type));
                     cc_sb_append_cstr(out, ol, oc, "\"");
+                    i = m; emit = i; continue;
+                }
+                if (mlen == 5 && memcmp(body + ms, "is_as", 5) == 0) {
+                    cc_sb_append_cstr(out, ol, oc, f->is_as ? "1" : "0");
                     i = m; emit = i; continue;
                 }
                 if (mlen == 5 && memcmp(body + ms, "index", 5) == 0) {
@@ -16674,57 +17822,81 @@ static int cc__try_expand_comptime_for(const char* src, size_t n, const char* in
                                        size_t* io_i, size_t* io_last_emit) {
     size_t i = *io_i;
     const size_t ATCN = sizeof("@comptime") - 1;
-    size_t p = cc_skip_ws_len(src, n, i + ATCN);
+    size_t p = cc_skip_ws_and_comments(src, n, i + ATCN);
     if (!(p + 3 <= n && memcmp(src + p, "for", 3) == 0 &&
           (p + 3 >= n || !cc_is_ident_char(src[p + 3])))) return 0;
 
-    size_t lp = cc_skip_ws_len(src, n, p + 3);
+    size_t lp = cc_skip_ws_and_comments(src, n, p + 3);
     if (lp >= n || src[lp] != '(') return 0;       /* not our shape; leave alone */
     size_t hp_close;
     if (!cc_find_matching_paren(src, n, lp, &hp_close)) return 0;
 
     /* header: NAME in type_of(T).fields (canonical spelling only; Fix A
      * normalizes cc_type_of("T") -> type_of(T) before we run). */
-    size_t h = cc_skip_ws_len(src, n, lp + 1);
+    size_t h = cc_skip_ws_and_comments(src, n, lp + 1);
     size_t lv_s = h;
     while (h < hp_close && cc_is_ident_char(src[h])) h++;
     size_t lvlen = h - lv_s;
-    h = cc_skip_ws_len(src, n, h);
+    h = cc_skip_ws_and_comments(src, n, h);
     int ok = lvlen > 0 &&
              h + 2 <= hp_close && src[h] == 'i' && src[h + 1] == 'n' &&
              (h + 2 >= hp_close || !cc_is_ident_char(src[h + 2]));
     size_t ts = 0, te = 0;
+    int want_methods = 0;
+    int want_params = 0;
+    size_t plist_lp = 0, plist_rp = 0;
     if (ok) {
-        h = cc_skip_ws_len(src, n, h + 2);
+        h = cc_skip_ws_and_comments(src, n, h + 2);
+        /* A parenthesized declaration list is a sequence in its own right, and
+         * it is what `m.params` substitutes to — reflection carries text, so
+         * the loop walks the list the source wrote rather than a handle to it.
+         * Written by hand it means exactly the same thing. */
+        if (h < hp_close && src[h] == '(') {
+            size_t pc;
+            if (cc_find_matching_paren(src, n, h, &pc) && pc <= hp_close &&
+                cc_skip_ws_and_comments(src, n, pc + 1) >= hp_close) {
+                want_params = 1; plist_lp = h; plist_rp = pc;
+            } else ok = 0;
+        } else {
         const size_t TOFN = sizeof("type_of") - 1;
         if (h + TOFN <= hp_close && memcmp(src + h, "type_of", TOFN) == 0 &&
             (h + TOFN >= hp_close || !cc_is_ident_char(src[h + TOFN]))) {
             h += TOFN;
         } else ok = 0;
         if (ok) {
-            h = cc_skip_ws_len(src, n, h);
+            h = cc_skip_ws_and_comments(src, n, h);
             size_t tpc;
             if (h < hp_close && src[h] == '(' &&
                 cc_find_matching_paren(src, n, h, &tpc) && tpc <= hp_close) {
-                ts = cc_skip_ws_len(src, n, h + 1); te = tpc;
-                while (te > ts && (src[te - 1] == ' ' || src[te - 1] == '\t')) te--;
-                size_t af = cc_skip_ws_len(src, n, tpc + 1);
+                /* `src[ts..te)` is copied verbatim as the struct name to look
+                 * up, so the trailing edge must land on code too. */
+                ts = cc_skip_ws_and_comments(src, n, h + 1);
+                te = cc_rskip_ws_and_comments(src, tpc);
+                if (te < ts) te = ts;
+                size_t af = cc_skip_ws_and_comments(src, n, tpc + 1);
                 if (af < hp_close && src[af] == '.') {
-                    af = cc_skip_ws_len(src, n, af + 1);
-                    ok = (af + 6 <= hp_close && memcmp(src + af, "fields", 6) == 0);
+                    af = cc_skip_ws_and_comments(src, n, af + 1);
+                    if (af + 6 <= hp_close && memcmp(src + af, "fields", 6) == 0) {
+                        ok = 1;
+                    } else if (af + 7 <= hp_close && memcmp(src + af, "methods", 7) == 0) {
+                        ok = 1; want_methods = 1;
+                    } else ok = 0;
                 } else ok = 0;
             } else ok = 0;
+        }
         }
     }
     if (!ok) {
         fprintf(stderr,
                 "%s: error: malformed `@comptime for` — expected "
-                "`@comptime for (NAME in type_of(T).fields) { ... }`.\n",
+                "`@comptime for (NAME in type_of(T).fields|.methods) { ... }` "
+                "or a parenthesized declaration list "
+                "(`@comptime for (P in m.params) { ... }`).\n",
                 input_path ? input_path : "<input>");
         return -1;
     }
 
-    size_t bb = cc_skip_ws_len(src, n, hp_close + 1);
+    size_t bb = cc_skip_ws_and_comments(src, n, hp_close + 1);
     if (bb >= n || src[bb] != '{') return 0;
     size_t bb_close;
     if (!cc_find_matching_brace(src, n, bb, &bb_close)) return 0;
@@ -16735,7 +17907,26 @@ static int cc__try_expand_comptime_for(const char* src, size_t n, const char* in
     size_t rn = reflect_src ? reflect_n : n;
     {
         int unified = cc_comptime_unified_exec_enabled();
-        if (unified && cc__ct_load_fields_via_reflect(src + ts, te - ts, &fields, &nf)) {
+        if (want_params) {
+            if (!cc__ct_parse_param_list(src, plist_lp, plist_rp, &fields, &nf)) {
+                fprintf(stderr,
+                        "%s: error: `@comptime for` over a declaration list needs "
+                        "every entry named and spelled in a form reflection models "
+                        "(`%.*s`).\n",
+                        input_path ? input_path : "<input>",
+                        (int)(plist_rp + 1 - plist_lp), src + plist_lp);
+                return -1;
+            }
+        } else if (want_methods) {
+            if (!cc__ct_load_methods(rsrc, rn, src + ts, te - ts, &fields, &nf)) {
+                fprintf(stderr,
+                        "%s: error: `@comptime for ... .methods` found no method of "
+                        "`%.*s` — a method is a function whose first parameter is "
+                        "`T` or `T*`, declared where this loop can see it.\n",
+                        input_path ? input_path : "<input>", (int)(te - ts), src + ts);
+                return -1;
+            }
+        } else if (unified && cc__ct_load_fields_via_reflect(src + ts, te - ts, &fields, &nf)) {
             /* fields loaded via host reflection callbacks */
         } else if (!cc__ct_find_struct_body(rsrc, rn, src + ts, te - ts, &body_o, &body_c) ||
                    !cc__ct_parse_fields_from_body(rsrc, body_o, body_c, &fields, &nf)) {
@@ -16756,7 +17947,7 @@ static int cc__try_expand_comptime_for(const char* src, size_t n, const char* in
         for (size_t fi = 0; fi < nf; fi++) {
             if (wrap_exec) cc_sb_append_cstr(out, out_len, out_cap, "@comptime { ");
             cc__ct_append_field_body(out, out_len, out_cap, src, bb + 1, bb_close,
-                                     src + lv_s, lvlen, &fields[fi], fi);
+                                     src + lv_s, lvlen, &fields[fi], fi, want_methods);
             if (wrap_exec) cc_sb_append_cstr(out, out_len, out_cap, " } ");
         }
     }
@@ -16816,17 +18007,17 @@ static char* cc__resolve_comptime_if_once(const char* src, size_t n, const char*
             if (fr == -1) { free(type_prelude); free(reflect_view); free(out); return (char*)-1; }
             if (fr == 1) { changed = 1; continue; }
         }
-        size_t p = cc_skip_ws_len(src, n, i + ATCN);
+        size_t p = cc_skip_ws_and_comments(src, n, i + ATCN);
         /* Distinguish `@comptime if` from a plain `@comptime { }` block. */
         if (!(p + 2 <= n && src[p] == 'i' && src[p + 1] == 'f' &&
               (p + 2 >= n || !cc_is_ident_char(src[p + 2])))) { i++; continue; }
-        size_t lp = cc_skip_ws_len(src, n, p + 2);
+        size_t lp = cc_skip_ws_and_comments(src, n, p + 2);
         if (lp >= n || src[lp] != '(') { i++; continue; }
         size_t pred_close;
         if (!cc_find_matching_paren(src, n, lp, &pred_close)) { i++; continue; }
         long val = 0;
         if (!type_prelude_built) {
-            type_prelude = cc__extract_type_decls_prelude(src, n);
+            type_prelude = cc_ct_extract_type_decls_prelude(src, n);
             type_prelude_built = 1;
         }
         if (!cc__comptime_eval_pred_unified(src, n,
@@ -16847,7 +18038,7 @@ static char* cc__resolve_comptime_if_once(const char* src, size_t n, const char*
             free(out);
             return (char*)-1;
         }
-        size_t tb = cc_skip_ws_len(src, n, pred_close + 1);
+        size_t tb = cc_skip_ws_and_comments(src, n, pred_close + 1);
         if (tb >= n || src[tb] != '{') { i++; continue; }
         size_t tb_close;
         if (!cc_find_matching_brace(src, n, tb, &tb_close)) { i++; continue; }
@@ -16857,10 +18048,10 @@ static char* cc__resolve_comptime_if_once(const char* src, size_t n, const char*
         size_t eb = 0, eb_close = 0;   /* ELSE_BLOCK body braces                */
         size_t chain_start = 0;        /* ELSE_CHAIN: nested `@comptime if` start */
         size_t construct_end;          /* exclusive end of the whole construct  */
-        size_t after = cc_skip_ws_len(src, n, tb_close + 1);
+        size_t after = cc_skip_ws_and_comments(src, n, tb_close + 1);
         if (after + 4 <= n && memcmp(src + after, "else", 4) == 0 &&
             (after + 4 >= n || !cc_is_ident_char(src[after + 4]))) {
-            size_t ep = cc_skip_ws_len(src, n, after + 4);
+            size_t ep = cc_skip_ws_and_comments(src, n, after + 4);
             if (ep < n && src[ep] == '{' && cc_find_matching_brace(src, n, ep, &eb_close)) {
                 else_kind = ELSE_BLOCK; eb = ep; construct_end = eb_close + 1;
             } else if (cc__ct_if_extent(src, n, ep, &construct_end)) {
@@ -17368,7 +18559,7 @@ static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
             }
         }
     }
-    if (cc_pass_chain_apply(chain, cc_rewrite_generic_family_ufcs_parser_safe(chain->src, chain->len)) < 0) {
+    if (cc_pass_chain_apply(chain, cc_rewrite_generic_family_ufcs_parser_safe(chain->src, chain->len, input_path)) < 0) {
         return -1;
     }
     /* After UFCS lowering: `T* p = cc_arena_alloc_T[_count](...) @destroy;`
@@ -17447,7 +18638,7 @@ static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
     cc__seed_ufcs_receiver_types(chain->src, chain->len);
     /* Post-unwrap UFCS: handler bodies and other spans that still carry
      * member-call surface after `!>` expansion. */
-    if (cc_pass_chain_apply(chain, cc_rewrite_generic_family_ufcs_parser_safe(chain->src, chain->len)) < 0) {
+    if (cc_pass_chain_apply(chain, cc_rewrite_generic_family_ufcs_parser_safe(chain->src, chain->len, input_path)) < 0) {
         return -1;
     }
     if (cc_pass_chain_apply(chain, cc__rewrite_result_star_unwrap(chain->src, chain->len)) < 0) return -1;
@@ -17464,5 +18655,17 @@ char* cc_preprocess_comptime_source(const char* input_path) {
        lowering over the expanded prelude was the dominant emit-c cost and is
        not required for collecting cc_type_register / UFCS hooks.
        Surface sugar for the main TU still goes through build_parse_input. */
-    return cc_preprocess_include_expanded(input_path);
+    {
+        char* raw = cc_preprocess_include_expanded(input_path);
+        size_t dlen = 0;
+        char* ded;
+        if (!raw) return NULL;
+        /* Same dedent the main pipeline applies, so the comptime view of a
+         * template (factory @emit bodies, reflection snapshots) matches the
+         * lowered one byte for byte. */
+        ded = cc_tpl_dedent_text(raw, strlen(raw), input_path, &dlen);
+        if (ded == (char*)-1) { free(raw); return NULL; }
+        if (ded) { free(raw); return ded; }
+        return raw;
+    }
 }

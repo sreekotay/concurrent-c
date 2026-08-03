@@ -762,11 +762,7 @@ int cc__rewrite_unwrap_destroy_suffix(const char* src,
          * meaningful for builtin-owned types (auto-free).  The `;` ending
          * the host statement is still required. */
         size_t after_kw = i + 8;
-        size_t cur = after_kw;
-        while (cur < n &&
-               (src[cur] == ' ' || src[cur] == '\t' ||
-                src[cur] == '\n' || src[cur] == '\r'))
-            cur++;
+        size_t cur = cc_skip_ws_and_comments(src, n, after_kw);
         int have_body = 0;
         size_t body_s = 0, body_e = 0;
         if (cur < n && src[cur] == '{') {
@@ -776,11 +772,7 @@ int cc__rewrite_unwrap_destroy_suffix(const char* src,
                 continue;
             }
             have_body = 1;
-            cur = body_e + 1;
-            while (cur < n &&
-                   (src[cur] == ' ' || src[cur] == '\t' ||
-                    src[cur] == '\n' || src[cur] == '\r'))
-                cur++;
+            cur = cc_skip_ws_and_comments(src, n, body_e + 1);
         }
         size_t semi = cur;
         if (semi >= n || src[semi] != ';') {

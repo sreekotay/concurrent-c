@@ -1,0 +1,179 @@
+// REAL USE #2 for @grammar(schema): RESP (Redis Serialization Protocol)
+// requests — the length-prefixed wire format the spec's schema section was
+// sketched around. A request is `*N\r\n` then N bulk strings `$len\r\ndata\r\n`
+// where data is OPAQUE BYTES (may contain \r\n, NUL, anything): no delimiter
+// grammar can recognize it — the parse is count-driven.
+//
+// New schema forms exercised here:
+//   len:  int Resp.number     parse-visible length field
+//   data: bytes len           read exactly `len` bytes, zero-copy borrow
+//   args: items RespArg argc  count-driven repetition, exact-size allocation
+//   Name_read(s, n, &pos, ..) incremental entry: one value per call, for
+//                             pipelines (Name_parse still requires p == n)
+#include <ccc/std/prelude.cch>
+
+// LIGHTWEIGHT: these schemas are fully self-contained — the rules they need
+// live INLINE in the same block (`rules [...]`), referenced bare. No separate
+// grammar declaration, no `use`, one block per wire type. Composition (`use`)
+// remains available when grammars are shared; either way the emitted code is
+// the same flat specialized C — nothing parses through an intermediate.
+@grammar(schema) RespArg {~~~~
+    rules [
+        digit:  charset [#'0' - #'9']
+        number: keep [opt #'-' some digit]
+    ]
+    #'$' len: int number "\r\n"
+    data: bytes len
+    "\r\n"
+~~~~}
+
+@grammar(schema) RespCmd {~~~~
+    rules [
+        digit:  charset [#'0' - #'9']
+        number: keep [opt #'-' some digit]
+    ]
+    #'*' argc: int number "\r\n"
+    args: items RespArg argc
+~~~~}
+
+static int arg_is(const RespArg* a, const char* want) {
+    size_t l = strlen(want);
+    return a->data.len == l && memcmp(a->data.ptr, want, l) == 0;
+}
+
+int main(void) {
+    CCArena arena = cc_arena_create(8 << 20);
+
+    /* the classic: SET mykey hello */
+    {
+        const char* src = "*3\r\n$3\r\nSET\r\n$5\r\nmykey\r\n$5\r\nhello\r\n";
+        RespCmd c;
+        if (!RespCmd_parse(src, strlen(src), &arena, &c)) { printf("FAIL: set parse\n"); return 1; }
+        if (c.argc != 3 || c.args_n != 3) { printf("FAIL: argc\n"); return 1; }
+        if (!arg_is(&c.args[0], "SET") || !arg_is(&c.args[1], "mykey") || !arg_is(&c.args[2], "hello")) {
+            printf("FAIL: args\n"); return 1;
+        }
+        /* zero-copy: payloads borrow straight from the source buffer */
+        if (cc_slice_is_unique(c.args[2].data)) { printf("FAIL: bulk should borrow\n"); return 1; }
+        if ((const char*)c.args[2].data.ptr < src || (const char*)c.args[2].data.ptr >= src + strlen(src)) {
+            printf("FAIL: bulk not in src\n"); return 1;
+        }
+    }
+    /* binary-safe payload: embedded CRLF and NUL — undeliverable by any
+     * delimiter grammar, trivial for the count-driven read */
+    {
+        char src[64]; size_t n = 0;
+        memcpy(src + n, "*1\r\n$8\r\n", 8); n += 8;
+        memcpy(src + n, "a\r\nb\0c\r\n", 8); n += 8;   /* 8 payload bytes */
+        memcpy(src + n, "\r\n", 2); n += 2;
+        RespCmd c;
+        if (!RespCmd_parse(src, n, &arena, &c)) { printf("FAIL: binary parse\n"); return 1; }
+        if (c.args[0].len != 8 || c.args[0].data.len != 8 ||
+            memcmp(c.args[0].data.ptr, "a\r\nb\0c\r\n", 8) != 0) {
+            printf("FAIL: binary payload\n"); return 1;
+        }
+    }
+    /* edges: empty bulk, empty array */
+    {
+        RespCmd c;
+        const char* e1 = "*1\r\n$0\r\n\r\n";
+        if (!RespCmd_parse(e1, strlen(e1), &arena, &c) || c.args[0].data.len != 0) {
+            printf("FAIL: empty bulk\n"); return 1;
+        }
+        const char* e2 = "*0\r\n";
+        if (!RespCmd_parse(e2, strlen(e2), &arena, &c) || c.argc != 0 || c.args_n != 0) {
+            printf("FAIL: empty array\n"); return 1;
+        }
+    }
+    /* negatives: truncation, length overrun, negative count, bad framing */
+    {
+        RespCmd c;
+        if (RespCmd_parse("*2\r\n$3\r\nGET\r\n", 13, &arena, &c)) { printf("FAIL: truncated accepted\n"); return 1; }
+        if (RespCmd_parse("*1\r\n$5\r\nab\r\n", 12, &arena, &c)) { printf("FAIL: overrun accepted\n"); return 1; }
+        if (RespCmd_parse("*-1\r\n", 5, &arena, &c)) { printf("FAIL: negative count accepted\n"); return 1; }
+        if (RespCmd_parse("*1\n$1\na\n", 8, &arena, &c)) { printf("FAIL: bad CRLF accepted\n"); return 1; }
+        if (RespCmd_parse("*1\r\n$1\r\nab\r\n", 12, &arena, &c)) { printf("FAIL: long data accepted\n"); return 1; }
+    }
+    /* pipeline: incremental _read, one command per call */
+    {
+        const char* pipe =
+            "*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n"
+            "*2\r\n$3\r\nGET\r\n$1\r\nk\r\n"
+            "*1\r\n$4\r\nPING\r\n";
+        size_t n = strlen(pipe), pos = 0;
+        long cmds = 0, args = 0;
+        while (pos < n) {
+            RespCmd c;
+            if (!RespCmd_read(pipe, n, &pos, &arena, &c)) { printf("FAIL: pipeline read\n"); return 1; }
+            cmds++; args += (long)c.args_n;
+        }
+        if (pos != n || cmds != 3 || args != 6) {
+            printf("FAIL: pipeline cmds=%ld args=%ld pos=%zu/%zu\n", cmds, args, pos, n);
+            return 1;
+        }
+    }
+    /* FORMAT: the schema inverted. cc_write emits the byte template with
+     * length/count fields DERIVED from the data (len from data.len, argc
+     * from args_n) — output is correct by construction. */
+    {
+        const char* src = "*3\r\n$3\r\nSET\r\n$5\r\nmykey\r\n$5\r\nhello\r\n";
+        RespCmd c;
+        char buf[128];
+        if (!RespCmd_parse(src, strlen(src), &arena, &c)) { printf("FAIL: rt parse\n"); return 1; }
+        /* round-trip: parse -> write reproduces the wire bytes exactly */
+        size_t w = cc_write(RespCmd, &c, buf, sizeof buf);
+        if (w != strlen(src) || memcmp(buf, src, w) != 0) {
+            printf("FAIL: round-trip (%zu bytes)\n", w);
+            return 1;
+        }
+        /* derived fields: corrupt the stored counts — write must IGNORE them
+         * and derive from the actual data, staying correct by construction */
+        c.argc = 999;
+        c.args[0].len = 77;
+        w = RespCmd_write(&c, buf, sizeof buf);
+        if (w != strlen(src) || memcmp(buf, src, w) != 0) {
+            printf("FAIL: derived fields not derived\n");
+            return 1;
+        }
+        /* manual construction: a Redis client encoding a command from parts */
+        {
+            RespArg parts[2];
+            parts[0].data = cc_slice_from_buffer((void*)"GET", 3);
+            parts[1].data = cc_slice_from_buffer((void*)"k1", 2);
+            RespCmd g = { .argc = 0, .args = parts, .args_n = 2 };
+            w = cc_write(RespCmd, &g, buf, sizeof buf);
+            const char* want = "*2\r\n$3\r\nGET\r\n$2\r\nk1\r\n";
+            if (w != strlen(want) || memcmp(buf, want, w) != 0) {
+                printf("FAIL: manual encode\n");
+                return 1;
+            }
+        }
+        /* overflow: a too-small buffer reports 0, never writes past cap */
+        if (RespCmd_write(&c, buf, 8) != 0) { printf("FAIL: overflow accepted\n"); return 1; }
+
+        /* CCString face: cc_format / UFCS to_str / @string template slots */
+        {
+            CCString fs = cc_format(RespCmd, &c, &arena);
+            CCSlice fv = cc_string_as_slice(&fs);
+            if (fv.len != strlen(src) || memcmp(fv.ptr, src, fv.len) != 0) {
+                printf("FAIL: cc_format bytes\n"); return 1;
+            }
+            CCString us = c.to_str(/*x*/&arena);
+            CCSlice uv = cc_string_as_slice(&us);
+            if (uv.len != fv.len || memcmp(uv.ptr, fv.ptr, uv.len) != 0) {
+                printf("FAIL: ufcs to_str\n"); return 1;
+            }
+            /* schema values drop into the language's string templates */
+            CCString ts = @string(`pipe> ${c.to_str(&arena)}`, &arena);
+            CCSlice tv = cc_string_as_slice(&ts);
+            if (tv.len != 6 + fv.len || memcmp(tv.ptr, "pipe> ", 6) != 0 ||
+                memcmp((const char*)tv.ptr + 6, src, fv.len) != 0) {
+                printf("FAIL: template interpolation\n"); return 1;
+            }
+        }
+    }
+
+    cc_arena_free(&arena);
+    printf("grammar schema RESP OK\n");
+    return 0;
+}

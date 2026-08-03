@@ -1,0 +1,52 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/script/py.cch>
+#include <stdio.h>
+
+/* `py.expose::[T]` — the member spelling, and chaining.
+ *
+ * The registrar's first parameter is the interpreter, which is the same
+ * reading of "first parameter is the receiver" that `py_expose::[T]` applies
+ * to the methods it exposes. So the call wears the member spelling, and
+ * `py_expose::[Counter](&py, ...)` remains the free-name spelling of the same
+ * factory — one name, one monomorph, two ways to write the call.
+ *
+ * The registrar returns the interpreter, so a module registration is a link in
+ * a chain — including into ANOTHER `expose`. Resolving a member-generic hop
+ * needs the receiver's type, which only exists once the previous hop is
+ * hoisted; the factory still sees the untransformed program because
+ * instantiation reflects on a snapshot of the TU taken before lowering, so a
+ * late instantiation generates the same code an early one does. */
+
+typedef struct Counter { long long n; } Counter;
+typedef struct Greeter { long long calls; } Greeter;
+
+static long long Counter_bump(Counter *self, long long by) { self->n += by; return self->n; }
+static long long Greeter_hello(Greeter *self) { self->calls += 1; return self->calls; }
+
+int main(void) {
+    @errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); return 1; }
+    CCArena a = cc_arena_heap(kilobytes(64)) @destroy;
+    if (!cc_py_available()) { puts("SKIP (no libpython)"); return 0; }
+    CCPy py = cc_py_new(&a) !>;
+
+    Counter cseed = { .n = 0 };
+    Greeter gseed = { .calls = 0 };
+
+    /* Member spelling, and the receiver comes back out. */
+    CCPy *p = py.expose::[Counter]("counter", &cseed) !>;
+    printf("same=%d\n", p == &py);
+
+    /* A registration links into another registration, then into an
+     * ordinary member call — one chain, three hops, two monomorphs. */
+    py.expose::[Greeter]("greeter", &gseed)!>.expose::[Counter]("counter2", &cseed)!>.exec(@string(`
+        import cc.counter as c
+        import cc.counter2 as c2
+        import cc.greeter as g
+        out = [c.bump(4), c2.bump(6), g.hello(), g.hello()]
+        `, &a).as_slice())!>;
+
+    CCPyObj m = py.import("__main__") !> @destroy;
+    CCSlice rs = m.get("out")!>.as_slice()!>;
+    printf("%.*s\n", (int)rs.len, (const char*)rs.ptr);
+    return 0;
+}

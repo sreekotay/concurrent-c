@@ -7,6 +7,8 @@
 
 #include "dylib_cache.h"
 
+#include "../util/cache_evict.h"
+
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -237,6 +239,11 @@ CCComptimeDlModule* cc_comptime_dylib_cache_load(
             return NULL;
         }
     }
+
+    /* Content-addressed and never rewritten, so edits accumulate entries that
+     * nothing else reclaims.  `out/` is dropped by `make clean`, but a tree
+     * that is not cleaned still grows without bound. */
+    (void)cc_cache_evict(cache_dir, 256ULL * 1024ULL * 1024ULL);
 
     void* handle = dlopen(dylib_path, RTLD_NOW | RTLD_LOCAL);
     if (!handle) {

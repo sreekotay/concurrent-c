@@ -1,0 +1,18 @@
+/* Source text goes straight to the interpreter: exec runs statements,
+ * eval yields a value, and both share `__main__` — so what one call
+ * defines the next can use. */
+#include <ccc/script/py.cch>
+
+CCPy py = cc_py_new(&a) !> @destroy;
+
+py.exec(@slice("def triple(x):\n    return x * 3\n")) !>;
+CCPyObj v = py.eval(@slice("triple(14)")) !> @destroy;
+int64_t n = v.as_i64() !>;
+println(@string(`triple=${n}`, &a)) !>;
+
+/* A bad expression is an ordinary Python failure. */
+CCPyObj bad = py.eval(@slice("1/0")) !>(e) {
+    println(@string(`caught=${e.type_name}`, &a)) !>;
+    return 0;
+} @destroy;
+(void)bad;

@@ -15,12 +15,8 @@ int main(void) {
     CCArena other = cc_arena_heap(kilobytes(4)) @destroy;
     if (!a.valid() || !other.valid()) return 1;
 
-    CCResult_CCPy_CCPyError pr = cc_py(&a);
-    if (pr.is_err()) {
-        puts("py_as_slice_materialize_smoke: SKIP (no libpython)");
-        return 0;
-    }
-    CCPy py = CCResult_CCPy_CCPyError_value(pr);
+    if (!cc_py_available()) { puts("py_as_slice_materialize_smoke: SKIP (no libpython)"); return 0; }
+    CCPy py = cc_py_new(&a) !>;
     if (py.arena != &a) return 2;
 
     CCPyObj sys = py.import("sys") !> @destroy;

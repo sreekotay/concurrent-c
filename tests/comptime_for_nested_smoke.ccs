@@ -1,0 +1,20 @@
+/* Nested `@comptime for` unrolls inner-in-outer, and the inner loop's type
+ * argument may be the outer loop variable's `.type`. That is what lets
+ * composition be written as a walk over two thin primitives instead of a
+ * third enumeration mode in the compiler. */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+typedef struct Inner { int x; int y; } Inner;
+typedef struct Outer { Inner a; Inner b; } Outer;
+int main(void) {
+    int n = 0;
+    @comptime for (f in type_of(Outer).fields) {
+        @comptime for (g in type_of(Inner).fields) {
+            printf("%s.%s\n", f.name, g.name);
+            n++;
+        }
+    }
+    printf("n=%d\n", n);
+    return 0;
+}

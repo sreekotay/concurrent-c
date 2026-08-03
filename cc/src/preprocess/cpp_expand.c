@@ -5,6 +5,7 @@
  * This is now the only initial-parse path: pre-expansion is unconditional
  * (the CC_PRE_EXPAND opt-out was collapsed 2026-05-29). */
 
+#include "../build/host_cc_profile.h"
 #include "cpp_expand.h"
 
 #include <stdio.h>
@@ -169,6 +170,7 @@ char* cc_cpp_expand_ex(const char* src, size_t src_len,
     if (!s) return NULL;
 
     tcc_set_error_func(s, NULL, cc__cpp_err_silent);
+    tcc_set_options(s, CC_HOST_C_STD_OPTION);
 
     /* Mirror the parser-mode define so any #ifdef CC_PARSER_MODE branches
      * collapse the same way the existing path would have seen them. */

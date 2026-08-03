@@ -641,8 +641,7 @@ static char* cc__expand_delegations(const char* body,
 
         if (ch == '@' && i + 11 <= blen && memcmp(body + i, "@errhandler", 11) == 0 &&
             (i + 11 >= blen || !cc_is_ident_char(body[i + 11]))) {
-            size_t j = i + 11;
-            while (j < blen && isspace((unsigned char)body[j])) j++;
+            size_t j = cc_skip_ws_and_comments(body, blen, i + 11);
             if (j < blen && body[j] == '(') {
                 size_t close = j;
                 int d = 1;
@@ -658,7 +657,9 @@ static char* cc__expand_delegations(const char* body,
                     free(acc);
                     return NULL;
                 }
-                while (close < blen && isspace((unsigned char)body[close])) close++;
+                /* `)` and `;` are separate tokens: the delegate/registration
+                 * split reads the next CODE byte. */
+                close = cc_skip_ws_and_comments(body, blen, close);
                 if (close < blen && body[close] == ';') {
                     close++;
                     if (!inner_param || !inner_param[0]) {

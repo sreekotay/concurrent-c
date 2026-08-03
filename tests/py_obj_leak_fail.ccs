@@ -1,0 +1,17 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/script/py.cch>
+#include <stdio.h>
+
+/* A CCPyObj local with no ownership: not @destroy'd, not returned, not
+ * released by hand.  The handle would drop a Python reference on scope
+ * exit with no diagnostic on either side — so it is a compile error at
+ * the declaration instead. */
+int main(void) {
+    @errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); return 1; }
+    CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+    if (!cc_py_available()) { puts("SKIP (no libpython)"); return 0; }
+    CCPy py = cc_py_new(&a) !>;
+    CCPyObj m = py.import("__main__") !>;
+    (void)m;
+    return 0;
+}

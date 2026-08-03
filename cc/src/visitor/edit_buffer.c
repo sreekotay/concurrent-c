@@ -2,6 +2,7 @@
 
 #include "edit_buffer.h"
 #include "../diag/source_map.h"
+#include "../util/text.h"
 #include "../util/text_scan.h"
 #include <stdlib.h>
 #include <string.h>
@@ -207,22 +208,19 @@ size_t cc_find_first_func_def_offset(const char* src, size_t len) {
         if (c == ';' && brace_depth == 0) { pending_decl_start = 1; i++; continue; }
         if (c == '{') {
             if (brace_depth == 0) {
-                size_t j = i;
-                while (j > 0 && (src[j - 1] == ' ' || src[j - 1] == '\t' || src[j - 1] == '\n')) j--;
+                /* The `)` closing the parameter list is what makes this a
+                 * function definition, and it is the previous *code* byte —
+                 * comments in the gap are inert and must rewind too. */
+                size_t j = cc_rskip_ws_and_comments(src, i);
                 if (j > 0 && src[j - 1] == ')') {
-                    /* match the `(` that opens this paren group */
-                    size_t rp = j - 1;
-                    int par = 1;
-                    size_t lp = rp;
-                    while (lp > 0) {
+                    /* Match the `(` opening this paren group with the masked
+                     * backward scan: a `(` or `)` inside a comment or string
+                     * in the parameter list must not count. */
+                    size_t lp = cc_rfind_char_top_level(src, 0, j - 1, "");
+                    if (lp > 0 && src[lp - 1] == '(') {
                         lp--;
-                        if (src[lp] == ')') par++;
-                        else if (src[lp] == '(') { par--; if (par == 0) break; }
-                    }
-                    if (par == 0) {
                         /* identifier immediately before `(` */
-                        size_t k = lp;
-                        while (k > 0 && (src[k - 1] == ' ' || src[k - 1] == '\t')) k--;
+                        size_t k = cc_rskip_ws_and_comments(src, lp);
                         size_t id_end = k;
                         while (k > 0 && (((src[k - 1] >= 'A' && src[k - 1] <= 'Z')) ||
                                          ((src[k - 1] >= 'a' && src[k - 1] <= 'z')) ||

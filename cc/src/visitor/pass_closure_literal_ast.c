@@ -2798,8 +2798,7 @@ static int cc__parse_closure_from_src(const char* src,
 
     /* Parse optional `@unsafe` prefix (expression-context marker). */
     {
-        size_t u0 = 0;
-        while (u0 < arrow && (s[u0] == ' ' || s[u0] == '\t')) u0++;
+        size_t u0 = cc_skip_ws_and_comments(s, arrow, 0);
         if (u0 + 7 <= arrow && s[u0] == '@' && memcmp(s + u0 + 1, "unsafe", 6) == 0) {
             size_t u1 = u0 + 7;
             if (u1 == arrow || !cc__is_ident_char2(s[u1])) {
@@ -2816,17 +2815,16 @@ static int cc__parse_closure_from_src(const char* src,
     char t0[128] = {0}, t1[128] = {0};
 
     /* trim left */
-    size_t l0 = 0, l1 = arrow;
-    while (l0 < l1 && (s[l0] == ' ' || s[l0] == '\t')) l0++;
-    while (l1 > l0 && (s[l1 - 1] == ' ' || s[l1 - 1] == '\t')) l1--;
+    size_t l0 = cc_skip_ws_and_comments(s, arrow, 0);
+    size_t l1 = cc_rskip_ws_and_comments(s, arrow);
+    if (l1 < l0) l1 = l0;
 
     /* Skip `@unsafe` when parsing params. */
     if (l0 + 7 <= l1 && s[l0] == '@' && memcmp(s + l0 + 1, "unsafe", 6) == 0) {
         size_t u1 = l0 + 7;
         if (u1 == l1 || !cc__is_ident_char2(s[u1])) {
             out->is_unsafe = 1;
-            l0 = u1;
-            while (l0 < l1 && (s[l0] == ' ' || s[l0] == '\t')) l0++;
+            l0 = cc_skip_ws_and_comments(s, l1, u1);
         }
     }
 
@@ -2951,7 +2949,8 @@ static int cc__parse_closure_from_src(const char* src,
             int nn = 0;
             size_t p = cap_l;
             while (p < cap_r) {
-                while (p < cap_r && (s[p] == ' ' || s[p] == '\t' || s[p] == '\n' || s[p] == '\r')) p++;
+                /* Comments separate capture entries; they are not entries. */
+                p = cc_skip_ws_and_comments(s, cap_r, p);
                 if (p >= cap_r) break;
                 if (s[p] == ',') { p++; continue; }
                 if (s[p] == '=') {

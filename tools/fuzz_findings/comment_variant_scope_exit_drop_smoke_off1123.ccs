@@ -1,0 +1,66 @@
+/* Scope-exit drop (spec/draft_variants.md §6): on scope exit the destructor
+ * of the ACTIVE arm runs, when that arm's type has a registered destructor
+ * (rides the @defer machinery).  An arm without a destructor drops nothing;
+ * early returns still drop. */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef struct Payload { char* p; } Payload;
+
+static int g_drops = 0;
+
+static Payload payload_from(const char* s) {
+    Payload x;
+    x.p = strdup(s);
+    return x;
+}
+
+static void payload_destroy(Payload* x) {
+    if (!x) return;
+    if (x->p) {
+        g_drops++;
+        free(x->p);
+        x->p = NULL;
+    }
+}
+
+@comptime {
+    (void)cc_type_register("Payload", (CCTypeHooks){
+        .destroy = cc_type_destroy_call("payload_destroy"),
+    });
+}
+
+@variant Cell {
+    txt: Payload;
+    num: int64_t;
+};
+
+static int early(int take) {
+    Cell c = { .txt = payload_from("early") };
+    if (take && c.kind == Cell_txt) return 1;   /* early return: still drops */
+    return 0;
+}
+
+int main(void) {
+    {
+        Cell a = {/*x*/ .txt = payload_from("abc") };
+        if (a.kind != Cell_txt) return 1;
+    }
+    if (g_drops != 1) { printf("drops after scope = %d\n", g_drops); return 2; }
+
+    {
+        Cell b = { .num = 5 };                  /* active arm has no dtor */
+        if (b.kind != Cell_num) return 3;
+    }
+    if (g_drops != 1) return 4;
+
+    if (early(1) != 1) return 5;
+    if (g_drops != 2) { printf("drops after early = %d\n", g_drops); return 6; }
+
+    printf("ok\n");
+    return 0;
+}

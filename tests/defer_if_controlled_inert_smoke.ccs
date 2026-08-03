@@ -1,0 +1,32 @@
+/* A braceless `if (...) return x;` under an active `@defer` must be wrapped
+ * in braces, or the injected `goto cleanup` becomes unconditional and the
+ * function returns an uninitialized value. Finding what controls the
+ * statement means reading the previous CODE token — so a comment before the
+ * statement, and a paren inside a comment or string in the condition, are
+ * both inert here. These built and printed the wrong answer. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+static int cleanup_runs = 0;
+
+static int guarded(int guard, const char* s) {
+    @defer { cleanup_runs++; }
+
+    if (guard == 0) /*x*/return 10;
+    if (guard /*)*/ == 1) return 20;
+    if (strcmp(s, "(") == 0) return 30;
+    if/*x*/ (guard == 2) return 40;
+    return 2;
+}
+
+int main(void) {
+    /* Sequenced, so `cleanup_runs` is read after every call. */
+    int a = guarded(0, "");
+    int b = guarded(1, "");
+    int c = guarded(9, "(");
+    int d = guarded(2, "");
+    int e = guarded(9, "");
+    printf("a=%d b=%d c=%d d=%d e=%d runs=%d\n", a, b, c, d, e, cleanup_runs);
+    return 0;
+}

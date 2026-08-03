@@ -296,7 +296,8 @@ static int cc__hp_probe(const char* cc_bin,
         need_std = 1;
     }
 
-    if (need_std) strncat(flags, " -std=c11", sizeof(flags) - strlen(flags) - 1);
+    if (need_std)
+        strncat(flags, " " CC_HOST_C_STD_OPTION, sizeof(flags) - strlen(flags) - 1);
     if (need_B || out->is_tcc) {
         libdir = cc__hp_tcc_lib_dir(cc_bin, repo_root, tcc_dir, sizeof(tcc_dir));
         if (libdir) {

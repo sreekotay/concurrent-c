@@ -1,0 +1,10 @@
+#include <ccc/std/prelude.cch>
+#include "local_header_factory_smoke.cch"
+#include <stdio.h>
+
+int main(void) {
+    Boxed::[int] a = { .v = 7 };
+    Boxed::[double] d = { .v = 2.5 };
+    printf("%d %.1f\n", a.get(), d.get());
+    return 0;
+}

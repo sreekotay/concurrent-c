@@ -491,6 +491,8 @@ Concurrent-C distinguishes **copyable** and **move-only** values:
 
 This is a value-level property, not a type-level distinction. The compiler tracks provenance to enforce it.
 
+**Rule (foreign memory is untracked).** A slice over memory the program does not own — a buffer belonging to an embedded runtime, a `mmap`, a callback's argument — is minted with `cc_slice_from_buffer`, which records no provenance epoch. Claiming an arena's epoch for bytes that arena did not allocate makes the compiler's lifetime reasoning wrong in the one direction it cannot detect: the epoch would say the bytes outlive a reset that has nothing to do with them, or survive a scope that does not govern them. Untracked is the honest answer, and it means the borrow is valid only for as long as the foreign owner says. Copy into an arena to outlive that window.
+
 **Move semantics:**
 
 ```c
@@ -844,6 +846,18 @@ Lowering is explicit and ABI-preserving:
 These accessors are the idiomatic source-level API. Direct `.u.value` / `.u.error`
 access is a C-interop detail, not the preferred surface style.
 
+**Rule (reach for the accessors where the operators cannot go).** `!>` and `?>` are the surface style in ordinary CC code, but they are compiler constructs: they are lowered by passes that do not run over `@emit` fragments, and they are unavailable to anything the compiler does not process. The accessors are ordinary macros over the struct, so they work in plain C, in a macro body, and in generated code. A generator consuming a Result writes the accessors, not the sigil.
+
+**Rule (name a Result without naming its box).** `__typeof__` yields the concrete type without evaluating its operand, so a Result is bound without spelling the mangled instance name:
+
+```c
+__typeof__(f(x)) r = f(x);
+if (cc_is_err(r)) return handle(cc_error(r));
+use(cc_value(r));
+```
+
+This is the form to use wherever the concrete name is unavailable or would be a guess — macro bodies, `@emit` templates, and reflection-driven generation, where the ok type is only known as a spelling. Writing `CCResult_long_long_CCError` by hand re-derives the canonicalizer's answer, and re-deriving it is how the two spellings drift.
+
 **Lowering examples (normative):**
 
 ```c
@@ -1028,6 +1042,15 @@ err_handler   ::= '@errhandler' '(' type ident ')' '{' stmt* '}'
 - `CALL !> DIVERGENT_STMT;` and `CALL !> { …; DIVERGENT_STMT }` *(expression)* — Evaluate `CALL` exactly once. On success, the surrounding expression's value is the unwrapped `T`. On error, `DIVERGENT_STMT` (or the block) runs; because it cannot fall through, the surrounding expression has no observable value on that path. `!>(e) …` binds the error to `e` across the body.
 - `@err(X);` — Inside a `!> (X) BODY` or `!> (X) { BODY }` (statement or expression position). Transfers control to the nearest in-scope `@errhandler` whose parameter type exactly matches the unwrap's Result error type `E` (else unique `@as` path to a handler face, with the binder projected), with the error value forwarded. Does not return.
 - `@errhandler(E e) STMT;` / `@errhandler(E e) { BODY }` — Registers a block-local handler for Result error type `E`. `CALL !>;` at statement position, `@err(e);` forwards, and `CALL !>;` at expression position dispatch to the nearest in-scope handler whose parameter type exactly matches the unwrap's `E`. If none matches exactly, the nearest in-scope handler whose parameter type is reachable from `E` by a unique `@as` embed path is selected and the binder is that path's member by value (same preference order as UFCS). When the unwrap's error type cannot be resolved as a Result `E` (pointer-returning calls and other untyped LHS forms), dispatch matches `@errhandler(CCError …)` — the same ambient error type those binders use. Subject to the divergence rule of invariant 6. Stdlib helpers: `cc_error_log(e)` (report, returns) and `cc_error_exit(e)` (report then `exit(1)`).
+
+**Form selection (normative).** `!>` has no closing delimiter — a handler body runs to its terminating `;` — so the token after `!>` decides which form was written. The **bare** form (`CALL !>`, dispatching to the in-scope `@errhandler`) applies wherever that token cannot begin a statement:
+
+- a closer or separator — `;`, `)`, `,`, `]`, `}`, `:`;
+- an operator that is only ever infix — `<`, `>`, `=`, `?`, `%`, `/`, `^`, `|`, the compound assignments, and `==` `!=` `<=` `>=` `&&` `||` `<<` `>>`.
+
+Anything else begins a handler body. Prefixes that can open a statement — `*`, `&`, `+`, `-`, `!`, `~`, `(`, an identifier — therefore always read as a body, because `f() !> *p = 0;` is equally a multiplication and a body and the choice cannot be inferred. Parenthesise the unwrap to say which was meant: `(f() !>) * p`. Since `)` is a terminator, that escape is always available.
+
+Consequently the bare form composes: it lowers to a self-contained expression, so it may appear anywhere a value may, including as a call argument, an operand, an array subscript, or one declarator of several.
 
 **Single-evaluation (normative).** Every operator listed above evaluates its LHS call expression exactly once. Lowerings MUST preserve this.
 
@@ -4927,6 +4950,34 @@ This same contract applies to standard-library families such as channels, files,
 
 `String.as_slice()` is the canonical sentinel string view: it returns `char[:0]`, not plain `char[:]`.
 
+**Template literal dedent (normative).** Every backtick template —
+`@string`, `@emit`, wherever a template literal appears — dedents against
+its closing backtick. When the closer is alone on its line (only spaces
+and tabs before it), that whitespace is the **margin**: exactly that
+prefix is stripped from every content line, and the margin before the
+closer is stripped with it. A closer that shares its line with content
+means no dedent, so one-line templates pass through byte-for-byte, and an
+empty margin strips nothing. The rule applies per physical line of the
+template, interpolation and verbatim spans included. The line after the
+opening backtick starts the margined region; the opening line's remainder
+is not margined (it begins mid-line).
+
+A non-blank content line indented less than the margin is a compile error
+naming the line — never a silently reduced margin. Blank lines are exempt
+and pass through unchanged.
+
+```c
+    py.exec(@string(`
+        def scale(xs, k):
+            return [x * k for x in xs]
+        `, &arena).as_slice()) !>;
+    // the callee receives "def scale(xs, k):\n    return [x * k for x in xs]\n"
+```
+
+The template sits at the code's indentation; its content still means
+column 0, and relative indentation inside the block (the body's four
+spaces) is preserved.
+
 #### 9.1.1 Core API
 
 ```c
@@ -5830,6 +5881,22 @@ name followed by `::[` that matches neither a built-in generic form nor a
 registered family's grid is ill-formed, diagnosed with the spelling and the
 registered families.
 
+**Rule (member-position generic calls, normative).** `recv.member::[args](call-args)`
+where `recv` has type `Foo` — or `CCFoo`, since families are spelled without the
+`CC` prefix — resolves to the registered factory `<snake(Foo)>_<member>`. The
+receiver becomes the instance's first argument, so the call is equivalent to the
+free-name spelling `<snake(Foo)>_<member>::[args](recv, call-args)` and lowers to
+the same monomorph. A receiver that is not already a pointer is passed by
+address. Both spellings request the same instantiation; neither is primary.
+
+Resolution requires the receiver's type, so the receiver must be an expression
+whose type is known at the use site. The type arguments are explicit: a member
+call carries no destination to infer them from.
+
+`::[...]` on a member that names neither a type formal nor a registered factory
+is ill-formed, diagnosed with the receiver type, the factory name that would
+have resolved it, and the registered factories.
+
 ### 12.2 Library-owned policy
 
 The family owns emitted definitions, C symbol names, internal erasure, linkage,
@@ -6049,6 +6116,14 @@ void serialize::[T](T value, char[~]* out) {
 
 **Rule:** Only the selected branch is type-checked and lowered; the other branch is discarded. This enables type-specific code that would otherwise fail to compile.
 
+**Rule (splice, not block):** The branch braces delimit the text to splice; they do not introduce a scope. The selected branch's text lands directly in whatever scope the construct sits in — the same construct emits declarations at file scope, where a block would be a syntax error. A branch that declares a name declares it in the enclosing scope. Write an explicit block when a scope is wanted:
+
+```c
+@comptime if (is_fallible(T)) { { T v = call() !>; use(v); } }
+```
+
+The same rule governs `@comptime for` bodies (§14.11): each iteration splices unbraced, so a body that declares a name needs an explicit block to declare it once per iteration rather than once per program point.
+
 ---
 
 ### 14.4a Value-position `@comptime(expr)` (Normative)
@@ -6160,6 +6235,24 @@ The following are available in constant expressions:
 
 **Rule:** If the condition is false, compilation fails with the provided message.
 
+**Rule:** `@comptime_assert` is a statement, and its condition is folded by the compiler — structural type facts (`type_of(T).kind`, `.nfields`) and host-C constant expressions over in-scope types. It cannot see a construct whose meaning depends on a local declaration at the call site, `_Generic` above all.
+
+`cc_static_assert(COND, why)` covers that case: an assertion in **expression position**, whose condition the host compiler folds.
+
+```c
+#define KIND_SUPPORTED(x) _Generic((x), int: 1, double: 1, default: 0)
+#define KIND(x) \
+    (cc_static_assert(KIND_SUPPORTED(x), kind_wants_an_int_or_a_double), \
+     _Generic((x), int: kind_of_int, double: kind_of_double, \
+                   default: kind_of_other)(x))
+```
+
+**Rule:** `why` is an **identifier**, not a string, and it is the diagnostic. A failing assertion reports it at the call site — `error: negative width in bit-field 'kind_wants_an_int_or_a_double'` — so the identifier should read as the sentence a caller needs.
+
+**Rule:** A type-dispatching macro that can be given an unsupported type SHOULD guard itself this way, and SHOULD keep a `default:` arm in the dispatch it guards. The assertion says what is wrong; the arm's argument mismatch names the offending type. Neither alone is enough: without the assertion, a missing arm reports only "does not match any association", and a `default:` arm calling an incompatible function is a warning that defers the real failure to link time.
+
+**Guidance:** `cc_static_assert` is deliberately C89 — bitfields and struct types inside `sizeof` both predate C99, and a negative width is a constraint violation every conforming compiler must diagnose. It needs no statement expression and no advertised C version, so it holds on hosts where `_Static_assert` would be replaced by a message-losing compatibility macro.
+
 ---
 
 ### 14.8 Restrictions
@@ -6196,6 +6289,12 @@ typedef enum CCEmitAnchor {
 ```
 
 **Rule:** `cc_emit_*` text is splice-once per anchor/site; consecutive emits at the same anchor/site concatenate into one block.
+
+**Rule (anchor after what the fragment references).** A fragment is spliced verbatim at its anchor and is subject to ordinary C declaration order. Emitted code that calls or names something declared in the source must be anchored where that declaration already stands — `CC_EMIT_AT_COMPTIME_SITE` for a `@comptime` block that follows the declarations it reflects over. `CC_EMIT_AFTER_PRELUDE` precedes the file's own declarations, so a wrapper spliced there calls an undeclared function; the real definition then conflicts with the implicit one, and the error names the *source* line rather than the emitted call.
+
+**Rule (a fragment is host C).** Splicing happens after the passes that lower CC syntax, so a fragment may not contain `!>`, `?>`, `@errhandler`, or any other construct those passes handle — the parser reports `'@' statements require CC external parser`. Emitted code consumes a Result through the accessors (§Results), which are ordinary macros.
+
+**Rule (a template's text is emitted once per instance).** Everything between the backticks reaches every generated copy, comments included. Explanatory prose belongs beside the generator, not inside its template, where it is duplicated code rather than documentation.
 
 **Rule:** `cc_instantiate_*` forces monomorphization of a built-in family even when the type is never spelled in source.
 
@@ -6342,6 +6441,37 @@ int cc_reflect_field_type(const char* type_name, int idx, char* buf, int buf_sz)
 
 **Rule:** `@comptime for` loop variables (`f.name`, `f.type`, `f.typestr`, `f.index`) and `${...}` slots inside `@emit` share the same field metadata.
 
+**Rule:** `f.is_as` is 1 for a member declared `Base base @as;` and 0 otherwise. Composition is a fact about the declaration, not about the type, so it is reflected per field — which is what lets a walk descend through composition:
+
+```c
+@comptime for (f in type_of(Wrap).fields) {
+    @comptime if (f.is_as) {
+        @comptime for (m in type_of(f.type).methods) { /* ... m(&w.f) ... */ }
+    }
+}
+```
+
+**Rule (splice, not block):** The body braces delimit the text to unroll; they do not introduce a scope, and neither does an iteration. Each iteration's text splices directly into the scope holding the construct — which is what lets a loop at file scope emit declarations. A body that declares a name declares it once per iteration in one scope, so reusing a name across iterations needs an explicit block:
+
+```c
+@comptime for (m in type_of(T).methods) {
+    { m.ret r = t.m(); use(r); }
+}
+```
+
+**Rule (token substitution vs. template slot).** A loop variable substitutes as **tokens**, before any template is lowered, so `m`, `m.params`, `m.args`, `m.type` and `m.ret` are written bare inside a backtick template and their text lands in the fragment. A `${...}` slot is different: it appends the **value of an expression** at emit time, so only the string-valued members belong there — `${m.name}` and `${f.typestr}` — and that is exactly the case where the text must be pasted into a longer identifier:
+
+```c
+@emit(CC_EMIT_AT_COMPTIME_SITE, `
+    static int wrap_${m.name} m.params {     /* slot builds the name; params are tokens */
+        m.ret v = m m.args;                  /* call the method, forwarding by name */
+        return (int)v;
+    }
+`);
+```
+
+Putting a token-valued member in a slot (`${m.params}`) is ill-formed — a parameter list is not an expression — and putting a string-valued one bare yields a string literal where an identifier was meant.
+
 **Rule:** Field name and type accessors write at most `buf_sz - 1` bytes plus a NUL and return the byte count, or `-1` when `idx` is out of range. A returned type spelling may be passed back into `cc_reflect_field_count` to descend into nested struct fields.
 
 **Rule:** The field parser models these member-declarator forms exactly, one `CCReflectField` per declared name:
@@ -6357,6 +6487,40 @@ int cc_reflect_field_type(const char* type_name, int idx, char* buf, int buf_sz)
 For the array and function-pointer forms the `type` spelling carries the extent / signature, so it is exact for `sizeof` and `t.f` access but is **not** usable as a declaration prefix (`${f.type} x;`).
 
 **Rule:** Field reflection is otherwise all-or-nothing. `type_of(T).fields`, `@comptime for`, and `cc_reflect_field_*` share one field parser, which never produces a partial or guessed field set. If `T` is not found, or any member uses a form the parser cannot spell exactly as a usable `type` — an inline anonymous or nested aggregate definition (`struct { ... } m;`), an anonymous member, an unnamed (padding) bitfield, or a pointer-to-array — reflection yields no fields: `cc_reflect_field_count` returns `-1` and `@comptime for` is a compile-time error. (A member that names an already-defined aggregate, e.g. `struct Foo m;`, is an ordinary scalar field and reflects normally.)
+
+#### Method reflection
+
+`type_of(T).methods` enumerates `T`'s methods — the functions whose first parameter is `T` or `T*`, which is what declaring a method means (§9). They are enumerated in declaration order, from the same sources the loop can see:
+
+```c
+@comptime for (m in type_of(T).methods) {
+    // m          -> the method's identifier (t.m() calls it)
+    // m.name     -> the method name as a string literal
+    // m.index    -> 0-based index
+    // m.type     -> the declared return-type spelling, `!>(E)` included
+    // m.ret      -> the ok type alone: `int` for `int !>(CCError)`
+    // m.err      -> the error type alone: `CCError`, empty when infallible
+    // m.fallible -> 1 when the return type carries `!>(E)`, else 0
+    // m.params   -> the declared parameter list, parentheses included
+}
+```
+
+**Rule:** `m.ret` and `m.fallible` are reflected rather than derived in the emitted code, because fallibility changes the *shape* of what is emitted — a caller unwraps or does not — and shape selection has to happen before the code exists.
+
+**Rule:** `m.params` is the parameter list the source wrote, verbatim and parenthesized, so it is both a sequence and a usable signature fragment. A parenthesized declaration list is a `@comptime for` sequence in its own right, which is what makes the nested walk two primitives rather than a second enumeration mode:
+
+```c
+@comptime for (m in type_of(T).methods) {
+    @comptime for (p in m.params) {
+        // p -> the parameter's identifier; p.name / p.type / p.typestr / p.index
+    }
+}
+@comptime for (p in (int a, const char* s)) { /* the same construct, by hand */ }
+```
+
+**Rule:** Every declared parameter is reported, in order, with the receiver at index 0 — being the first parameter is what makes the function a method, so it is a fact reflection states rather than hides. `()` and `(void)` are the empty list and unroll zero times.
+
+**Rule:** A declaration list reflects under the same all-or-nothing discipline as struct fields, through the same declarator parser. An entry that is unnamed, or spelled in a form the parser cannot model exactly, is a compile-time error naming the list — never a dropped entry, which would leave `p.index` naming a different position than the source does.
 
 **Implementation note:** By default the compiler routes `@comptime if` predicate evaluation and `@comptime for` field loading through the libtcc comptime executor (`CC_COMPTIME_UNIFIED_EXEC=1`). Set `CC_COMPTIME_UNIFIED_EXEC=0` to use the legacy structural text resolver only. Both `@string` and `@emit` share one backtick `${...}` scanner (`preprocess/template_scan.c`). `@emit` slot values are appended via type-driven `_Generic` dispatch in `cc_emit_tpl.cch`, not name heuristics.
 

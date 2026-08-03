@@ -134,6 +134,15 @@ int cc_rt_diag_unwrap_site(int i, const char** out_file, const char** out_line_s
     return 0;
 }
 
+const char* cc_error_site(void) {
+    static char buf[280];
+    if (g_uw_chain_len == 0) return "";
+    snprintf(buf, sizeof(buf), "%s:%s",
+             g_uw_chain[g_uw_chain_len - 1].file,
+             g_uw_chain[g_uw_chain_len - 1].line_str);
+    return buf;
+}
+
 void cc_rt_diag_print_unwrap_chain(FILE* fp) {
     if (!fp) fp = stderr;
     if (g_uw_chain_len == 0) return;

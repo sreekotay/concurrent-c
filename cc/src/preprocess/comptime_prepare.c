@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "preprocess/preprocess.h"
+#include "preprocess/template_scan.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -22,6 +23,20 @@ int cc_comptime_prepare_source(char** inout_buf, size_t* inout_len,
     char* templ;
     char* factory;
     if (!inout_buf || !*inout_buf || !inout_len) return -1;
+
+    /* Closer-anchored template dedent, before any pass reads a template
+     * body (grammar fences carry no backticks, so running first is safe;
+     * idempotent — a dedented closer sits at column 0). */
+    {
+        size_t dlen = 0;
+        char* ded = cc_tpl_dedent_text(*inout_buf, *inout_len, input_path, &dlen);
+        if (ded == (char*)-1) return -1;
+        if (ded) {
+            free(*inout_buf);
+            *inout_buf = ded;
+            *inout_len = dlen;
+        }
+    }
 
     /* @grammar(engine) Name {SENT...SENT}: capture the fenced body VERBATIM and
      * rewrite to a synthesized @comptime engine call.  Must run before every

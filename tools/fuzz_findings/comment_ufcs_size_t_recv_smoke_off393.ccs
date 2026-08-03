@@ -1,0 +1,16 @@
+/* size_t joins the scalar value-receiver families: a declared
+ * cc_size_t_<method> dispatches by value, and chains through the
+ * normalization rail like any scalar. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static size_t cc_size_t_dbl(size_t v) { return v * 2u; }
+static size_t cc_size_t_inc(size_t v) { return v + 1u; }
+
+int main(void) {
+    size_t n = 7;
+    size_t m = n.dbl(/*x*/);
+    size_t k = n.dbl().inc().dbl();
+    printf("%zu %zu\n", m, k);
+    return 0;
+}

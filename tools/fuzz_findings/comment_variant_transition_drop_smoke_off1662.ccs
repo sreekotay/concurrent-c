@@ -1,0 +1,80 @@
+/* Transitions + drop (spec/draft_variants.md §6): whole-variant assignment
+ * first drops the OLD active arm when its type has a registered destructor,
+ * then installs the new arm and tag.  The destructor is observed EXACTLY
+ * once per owned payload; a num->num transition drops nothing; cc_move on
+ * a projected arm zeroes the source so the subsequent transition drop is a
+ * no-op (existing move rules). */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef struct Payload { char* p; } Payload;
+
+static int g_drops = 0;
+
+static Payload payload_from(const char* s) {
+    Payload x;
+    x.p = strdup(s);
+    return x;
+}
+
+static void payload_destroy(Payload* x) {
+    if (!x) return;
+    if (x->p) {
+        g_drops++;
+        free(x->p);
+        x->p = NULL;
+    }
+}
+
+@comptime {
+    (void)cc_type_register("Payload", (CCTypeHooks){
+        .destroy = cc_type_destroy_call("payload_destroy"),
+    });
+}
+
+@variant Cell {
+    txt: Payload;
+    num: int64_t;
+};
+
+int main(void) {
+    /* txt -> num transition drops the payload exactly once */
+    Cell c = { .txt = payload_from("abc") };
+    c = { .num = 7 };
+    if (c.kind != Cell_num) return 1;
+    if (c.kind == .num) {
+        if (c.num != 7) return 1;
+    } else {
+        return 1;
+    }
+    if (g_drops != 1) { printf("drops after transition = %d\n", g_drops); return 2; }
+
+    /* num -> num transition: nothing to drop */
+    c = { .num = 8 };
+    if (g_drops != 1) return 3;
+
+    /* compound-literal RHS transitions drop too */
+    c = { .txt = payload_from("xyz") };
+    if (g_drops != 1) return 4;
+    c/*x*/ = (Cell){ .num = 9 };
+    if (g_drops != 2) { printf("drops after cl transition = %d\n", g_drops); return 5; }
+
+    /* cc_move zeroes the source arm; the following transition drop is a
+     * no-op on the moved-out payload */
+    c = { .txt = payload_from("moved") };
+    Payload taken = { 0 };
+    if (c.kind == .txt) {
+        taken = cc_move(c.txt);
+    }
+    c = { .num = 10 };
+    if (g_drops != 2) { printf("drops after moved transition = %d\n", g_drops); return 6; }
+    payload_destroy(&taken);
+    if (g_drops != 3) return 7;
+
+    printf("ok\n");
+    return 0;
+}

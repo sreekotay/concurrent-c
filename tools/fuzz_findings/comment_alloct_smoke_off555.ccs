@@ -1,0 +1,34 @@
+/* Type-formal members: `::[...]` specializes the member name it
+ * follows. arena.allocT() / arena.allocT(n) allocate one T / n Ts —
+ * the element type comes from the declared destination, or explicitly
+ * via allocT::[T]. An optional @destroy releases through the owning
+ * arena at scope exit. */
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+    if (!arena.base) return 1;
+
+    double* xs = arena.allocT(16);
+    if (!xs) return 2;
+    xs[0] = 1.5; xs[15] = 2.5;
+
+    /*x*/int* one = arena.allocT();
+    if (!one) return 3;
+    *one = 41;
+
+    long* ys = arena.allocT::[long](4);
+    if (!ys) return 4;
+    ys[3] = 7;
+
+    {
+        short* scoped = arena.allocT(8) @destroy;
+        if (!scoped) return 5;
+        scoped[7] = 3;
+        printf("scoped %d\n", scoped[7]);
+    }
+
+    printf("%g %g %d %ld\n", xs[0], xs[15], *one + 1, ys[3]);
+    return 0;
+}

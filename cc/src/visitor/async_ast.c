@@ -644,8 +644,8 @@ static char* cc__resolve_er_typeof_concrete_type(const char* in_src, size_t in_l
             if (cc__is_ident_start(inner[i])) {
                 size_t s = i;
                 while (i < inner_len && cc__is_ident_char(inner[i])) i++;
-                size_t j = i;
-                while (j < inner_len && (inner[j] == ' ' || inner[j] == '\t')) j++;
+                /* The callee name and its `(` are separate tokens. */
+                size_t j = cc_skip_ws_and_comments(inner, inner_len, i);
                 if (j < inner_len && inner[j] == '(') {
                     cn = i - s;
                     if (cn >= sizeof(callee)) cn = sizeof(callee) - 1;

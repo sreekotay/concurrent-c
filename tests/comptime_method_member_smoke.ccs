@@ -1,0 +1,32 @@
+/* An exported name and a callable name must not be two answers to one
+ * question. `m.member` is the name a caller writes after the dot — computed by
+ * the same composition UFCS dispatches through, so a generator that exports a
+ * method exports the name CC already calls it by.
+ *
+ * The composition differs by type spelling: a `CC`-prefixed type dispatches
+ * through the snake twin (`cc_counter_add`), a plain one through the exact
+ * family spelling (`Widget_scale`). Both are stripped here by recomposing
+ * rather than by pattern-matching, which is what keeps the two in step. */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+typedef struct CCCounter { long long n; } CCCounter;
+typedef struct Widget    { long long w; } Widget;
+
+static long long cc_counter_add(CCCounter *self, long long a) { return self->n + a; }
+static long long cc_counter_bump(CCCounter *self, long long b) { self->n += b; return self->n; }
+static long long Widget_scale(Widget *self, long long k) { return self->w * k; }
+
+int main(void) {
+    CCCounter c = { .n = 3 };
+    Widget    w = { .w = 6 };
+
+    /* The short name is what the dot reaches... */
+    printf("call add=%lld bump=%lld scale=%lld\n", c.add(7), c.bump(5), w.scale(7));
+
+    /* ...and it is exactly what reflection reports as the member. */
+    @comptime for (m in type_of(CCCounter).methods) { printf("%s => %s\n", m.name, m.member); }
+    @comptime for (m in type_of(Widget).methods)    { printf("%s => %s\n", m.name, m.member); }
+    return 0;
+}

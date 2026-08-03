@@ -217,45 +217,51 @@ CC_DECL_RESULT_SPEC(CCResult_voidptr_CCError, void*, CCError)
 CC_DECL_RESULT_SPEC(CCResult_charptr_CCError, char*, CCError)
 #endif
 
+/* Void ok type: success carries no value, so there is nothing to store and
+ * no `unwrap_or`.  Generated, never hand-written — a hand-copied spec is how
+ * a Result silently stops behaving like one. */
+#define CC_DECL_RESULT_SPEC_VOID(name, ErrType)                                     \
+    typedef struct name {                                                           \
+        bool ok;                                                                    \
+        union { char _dummy; ErrType error; } u;                                    \
+    } name;                                                                         \
+    static inline name cc_ok_##name(void) {                                         \
+        name r;                                                                     \
+        r.ok = true;                                                                \
+        r.u._dummy = 0;                                                             \
+        return r;                                                                   \
+    }                                                                               \
+    static inline name cc_err_##name(ErrType e) {                                   \
+        name r;                                                                     \
+        r.ok = false;                                                               \
+        r.u.error = e;                                                              \
+        return r;                                                                   \
+    }                                                                               \
+    /* UFCS method: r.value() -> name##_value(r); yields nothing, aborts on err. */ \
+    static inline void name##_value(name r) {                                       \
+        if (!r.ok) {                                                                \
+            fprintf(stderr, "CC: value failed on %s at %s:%d\n",                    \
+                    #name, __FILE__, __LINE__);                                     \
+            abort();                                                                \
+        }                                                                           \
+    }                                                                               \
+    static inline void name##_unwrap(name r) { name##_value(r); }                   \
+    static inline bool name##_is_ok(name r) { return r.ok; }                        \
+    static inline bool name##_is_err(name r) { return !r.ok; }                      \
+    static inline ErrType name##_error(name r) {                                    \
+        if (r.ok) {                                                                 \
+            fprintf(stderr, "CC: error failed on %s at %s:%d\n",                    \
+                    #name, __FILE__, __LINE__);                                     \
+            abort();                                                                \
+        }                                                                           \
+        return r.u.error;                                                           \
+    }                                                                               \
+    static inline ErrType name##_unwrap_err(name r) { return name##_error(r); }
+
 /* Void result (for functions that return only success/error) */
 #ifndef CCResult_void_CCError_DEFINED
 #define CCResult_void_CCError_DEFINED 1
-typedef struct CCResult_void_CCError {
-    bool ok;
-    union { char _dummy; CCError error; } u;
-} CCResult_void_CCError;
-static inline CCResult_void_CCError cc_ok_CCResult_void_CCError(void) {
-    CCResult_void_CCError r;
-    r.ok = true;
-    return r;
-}
-static inline CCResult_void_CCError cc_err_CCResult_void_CCError(CCError e) {
-    CCResult_void_CCError r;
-    r.ok = false;
-    r.u.error = e;
-    return r;
-}
-/* UFCS methods for void result */
-static inline void CCResult_void_CCError_unwrap(CCResult_void_CCError r) {
-    if (!r.ok) {
-        fprintf(stderr, "CC: unwrap failed on CCResult_void_CCError at %s:%d\n",
-                __FILE__, __LINE__);
-        abort();
-    }
-}
-static inline bool CCResult_void_CCError_is_ok(CCResult_void_CCError r) { return r.ok; }
-static inline bool CCResult_void_CCError_is_err(CCResult_void_CCError r) { return !r.ok; }
-static inline CCError CCResult_void_CCError_unwrap_err(CCResult_void_CCError r) {
-    if (r.ok) {
-        fprintf(stderr, "CC: unwrap_err failed on CCResult_void_CCError at %s:%d\n",
-                __FILE__, __LINE__);
-        abort();
-    }
-    return r.u.error;
-}
-static inline CCError CCResult_void_CCError_error(CCResult_void_CCError r) {
-    return CCResult_void_CCError_unwrap_err(r);
-}
+CC_DECL_RESULT_SPEC_VOID(CCResult_void_CCError, CCError)
 #endif /* CCResult_void_CCError_DEFINED */
 
 /*
@@ -412,6 +418,18 @@ void cc_rt_diag_record_unwrap_site(const char* file, const char* line_str);
 void cc_rt_diag_clear_unwrap_chain(void);
 int  cc_rt_diag_unwrap_chain_len(void);
 int  cc_rt_diag_unwrap_site(int i, const char** out_file, const char** out_line_str);
+/* The most recent `!>` / `?>` site as "file:line" — the unwrap that routed
+ * the error a handler is holding.  Every unwrap error path records its
+ * site before extracting the error, so this is current inside any
+ * `@errhandler`, including for errors whose message carries no position
+ * of its own (a Python exception, an errno).  "" before any unwrap:
+ *
+ *     @errhandler(CCError e) {
+ *         fprintf(stderr, "fatal: %s (at %s)\n", e.message, cc_error_site());
+ *         return 1;
+ *     }
+ */
+const char* cc_error_site(void);
 
 /* ============================================================================
  * Unified unwrap primitives: `__cc_uw_is_err(x)`, `__cc_uw_value(x)`,

@@ -1,0 +1,50 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/script/py.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* Each interpreter builds its own instance of a host module, so per-module
+ * state is per interpreter — which is what a per-interpreter GIL requires.
+ * Skips cleanly where the runtime cannot make a second interpreter. */
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
+
+    CCArena a = cc_arena_heap(kilobytes(64)) @destroy;
+    if (!a.valid()) return 1;
+
+    if (!cc_py_available()) { puts("py_host_module_isolated_smoke: SKIP (no libpython)"); return 0; }
+    CCPy p1 = cc_py_new(&a) !>;
+
+    /* Not availability — whether THIS runtime can make a second, isolated
+     * interpreter. The probe cannot answer that; the Result stays. */
+    CCResult_CCPy_CCPyError r2 = cc_py_new(&a);
+    if (r2.is_err()) {
+        puts("ok");   /* no isolated interpreter on this runtime */
+        return 0;
+    }
+    CCPy p2 = CCResult_CCPy_CCPyError_value(r2);
+
+    /* Both import the module by an ordinary import statement. */
+    p1.exec(@slice("import cc.host\nv = [cc.host.bump(1), cc.host.bump(1)]\n")) !>;
+    p2.exec(@slice("import cc.host\nv = [cc.host.bump(10), cc.host.bump(10)]\n")) !>;
+
+    CCPyObj m1 = p1.import("__main__") !> @destroy;
+    CCPyObj m2 = p2.import("__main__") !> @destroy;
+    CCSlice s1 = m1.get("v")!>.as_slice()!>;
+    CCSlice s2 = m2.get("v")!>.as_slice()!>;
+    if (s1.len != 6 || memcmp(s1.ptr, "[1, 2]", 6) != 0) return 2;
+    if (s2.len != 8 || memcmp(s2.ptr, "[10, 20]", 8) != 0) return 3;
+
+    /* The first interpreter's counter is untouched by the second. */
+    CCPyObj nx = p1.eval(@slice("cc.host.bump(1)")) !> @destroy;
+    int64_t n = nx.as_i64() !>;
+    if (n != 3) return 4;
+
+    cc_py_close(&p2);
+    cc_py_close(&p1);
+    puts("ok");
+    return 0;
+}
