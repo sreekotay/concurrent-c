@@ -1,0 +1,3 @@
+twice 42
+half 2.5
+raised: half takes a non-negative value

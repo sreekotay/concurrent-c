@@ -11756,48 +11756,6 @@ static char* cc_preprocess_pipeline_ex(const char* input, size_t input_len, cons
                     }
                     fprintf(out, "#endif\n");
                 }
-                /* Legacy parser-helper prototypes below remained useful for
-                 * downstream passes that look for the `__cc_parser_result_*`
-                 * symbols as markers of "this TU uses result types".  With
-                 * the typed structs now in place these prototypes are
-                 * linker-only (never called at runtime) and the stdlib-level
-                 * inline helpers emitted by `CC_DECL_RESULT_SPEC` carry all
-                 * real semantics. */
-                for (size_t i = 0; i < cc__result_specs.count; i++) {
-                    const CCResultSpec* spec = cc_result_spec_table_get(&cc__result_specs, i);
-                    const char* ok = spec ? spec->mangled_ok : NULL;
-                    const char* err = spec ? spec->mangled_err : NULL;
-                    if (i < CC_EMIT_PLAN_MAX_DELAYED && result_delay.delayed[i]) continue;
-                    if (!ok || !err) continue;
-                    int ok_is_void = (strcmp(spec->ok_type, "void") == 0);
-                    fprintf(out, "bool __cc_parser_result_is_ok_CCResult_%s_%s(CCResult_%s_%s r);\n",
-                            ok, err, ok, err);
-                    fprintf(out, "bool __cc_parser_result_is_err_CCResult_%s_%s(CCResult_%s_%s r);\n",
-                            ok, err, ok, err);
-                    if (!ok_is_void) {
-                        fprintf(out, "%s __cc_parser_result_unwrap_CCResult_%s_%s(CCResult_%s_%s r);\n",
-                                spec->ok_type, ok, err, ok, err);
-                    }
-                    fprintf(out, "%s __cc_parser_result_error_CCResult_%s_%s(CCResult_%s_%s r);\n",
-                            spec->err_type, ok, err, ok, err);
-                    if (!ok_is_void) {
-                        fprintf(out, "%s __cc_parser_result_unwrap_or_CCResult_%s_%s(CCResult_%s_%s r, %s def);\n",
-                                spec->ok_type, ok, err, ok, err, spec->ok_type);
-                    }
-                }
-                /* Parser-mode enumerated `_Generic` arms for the unified
-                 * unwrap primitives.  Without these, `__cc_uw_value(r)`
-                 * falls through to the `default: (__x__)` arm defined in
-                 * cc_result.cch and returns the whole Result struct, so
-                 * a `?>(e) handle(e)` ternary whose handler returns `T`
-                 * fails TCC's conditional type-check with
-                 *   "have 'struct CCResult_T_E' and 'struct T'".
-                 * visit_codegen.c emits the same enumeration for the
-                 * real compile path; we mirror it here so the initial
-                 * parser-mode parse type-checks too.  Every CCResult_T_E
-                 * struct shares layout `{ bool ok; union { T value; E
-                 * error; } u; }`, so the casts pick out the right field
-                 * regardless of T / E. */
                 /* Forward-declare the stdlib-predeclared Result struct tags
                  * so `_Generic` can reference them by type name even when
                  * the TU doesn't `#include` the owning header.  `_Generic`
@@ -11807,7 +11765,16 @@ static char* cc_preprocess_pipeline_ex(const char* input, size_t input_len, cons
                  * type) the incomplete struct is never accessed.  In TUs
                  * that *do* include e.g. `ccc/std/io.cch`, the header's
                  * `CC_DECL_RESULT_SPEC` expansion supplies the full
-                 * definition and the typedef here is benignly repeated. */
+                 * definition and the typedef here is benignly repeated.
+                 *
+                 * These tags MUST precede the parser-helper prototypes
+                 * below: the decl loop above skips stdlib-predeclared
+                 * specs (their definition belongs to the owning header),
+                 * so when a user spec hits a predeclared name in a TU
+                 * that never includes that header, this tag is the only
+                 * declaration of the type name the prototypes mention.
+                 * An incomplete parameter type in a declaration is fine;
+                 * an undeclared one is a parse error at the parameter. */
                 fprintf(out, "/* Forward-declare stdlib-predeclared Result tags. */\n");
                 /* Also forward-declare `__CCResultGeneric` so TUs that never
                  * include `ccc/cc_result.cch` (e.g. C-style smoke tests that
@@ -11852,7 +11819,48 @@ static char* cc_preprocess_pipeline_ex(const char* input, size_t input_len, cons
                         "#endif\n",
                         t, t, t, t);
                 }
-
+                /* Legacy parser-helper prototypes below remained useful for
+                 * downstream passes that look for the `__cc_parser_result_*`
+                 * symbols as markers of "this TU uses result types".  With
+                 * the typed structs now in place these prototypes are
+                 * linker-only (never called at runtime) and the stdlib-level
+                 * inline helpers emitted by `CC_DECL_RESULT_SPEC` carry all
+                 * real semantics. */
+                for (size_t i = 0; i < cc__result_specs.count; i++) {
+                    const CCResultSpec* spec = cc_result_spec_table_get(&cc__result_specs, i);
+                    const char* ok = spec ? spec->mangled_ok : NULL;
+                    const char* err = spec ? spec->mangled_err : NULL;
+                    if (i < CC_EMIT_PLAN_MAX_DELAYED && result_delay.delayed[i]) continue;
+                    if (!ok || !err) continue;
+                    int ok_is_void = (strcmp(spec->ok_type, "void") == 0);
+                    fprintf(out, "bool __cc_parser_result_is_ok_CCResult_%s_%s(CCResult_%s_%s r);\n",
+                            ok, err, ok, err);
+                    fprintf(out, "bool __cc_parser_result_is_err_CCResult_%s_%s(CCResult_%s_%s r);\n",
+                            ok, err, ok, err);
+                    if (!ok_is_void) {
+                        fprintf(out, "%s __cc_parser_result_unwrap_CCResult_%s_%s(CCResult_%s_%s r);\n",
+                                spec->ok_type, ok, err, ok, err);
+                    }
+                    fprintf(out, "%s __cc_parser_result_error_CCResult_%s_%s(CCResult_%s_%s r);\n",
+                            spec->err_type, ok, err, ok, err);
+                    if (!ok_is_void) {
+                        fprintf(out, "%s __cc_parser_result_unwrap_or_CCResult_%s_%s(CCResult_%s_%s r, %s def);\n",
+                                spec->ok_type, ok, err, ok, err, spec->ok_type);
+                    }
+                }
+                /* Parser-mode enumerated `_Generic` arms for the unified
+                 * unwrap primitives.  Without these, `__cc_uw_value(r)`
+                 * falls through to the `default: (__x__)` arm defined in
+                 * cc_result.cch and returns the whole Result struct, so
+                 * a `?>(e) handle(e)` ternary whose handler returns `T`
+                 * fails TCC's conditional type-check with
+                 *   "have 'struct CCResult_T_E' and 'struct T'".
+                 * visit_codegen.c emits the same enumeration for the
+                 * real compile path; we mirror it here so the initial
+                 * parser-mode parse type-checks too.  Every CCResult_T_E
+                 * struct shares layout `{ bool ok; union { T value; E
+                 * error; } u; }`, so the casts pick out the right field
+                 * regardless of T / E. */
                 /* Helper: has this (ok_m, err_m) pair already been emitted as
                  * a `_Generic` arm?  Used to avoid duplicate arms when a
                  * user-defined spec happens to match a stdlib-predeclared

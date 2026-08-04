@@ -1,0 +1,23 @@
+/* Companion module source for py_module_double_result_smoke.shcc — kept
+ * out of the .shcc (and under a non-test extension) because the harness
+ * runs every tests/*.ccs|*.shcc, and source scanners read string-literal
+ * content, so embedding this in a backtick template drags py.cch into the
+ * test's own compile. */
+#include <ccc/script/py.cch>
+
+typedef struct Halver { int pad; } Halver;
+
+static long long !>(CCError) Halver_twice(Halver *self, long long v) {
+    (void)self;
+    return cc_ok(v * 2);
+}
+
+static double !>(CCError) Halver_half(Halver *self, double v) {
+    (void)self;
+    if (v < 0) return cc_err(CC_ERR_INVALID_ARG, "half takes a non-negative value");
+    return cc_ok(v / 2.0);
+}
+
+void *PyInit_halver(void) {
+    return py_module::[Halver]("halver", NULL);
+}

@@ -1,0 +1,57 @@
+/* A module method returning `double !>(CCError)` must build.
+ *
+ * `CCResult_double_CCError` is stdlib-predeclared (string.cch/slice.cch own
+ * its definition), so the emit plan skips its struct decl — but the
+ * parser-helper prototypes still name the type.  Unless a forward tag
+ * precedes them, a TU that includes neither owning header hands TCC an
+ * undeclared parameter type and dies with "',' expected (got 'r')" at the
+ * prototype.  The module (py_module_double_result_mod.src) pairs a
+ * long-long method (user-emitted spec) with a double method (predeclared
+ * spec) — the exact collision — then both marshal through Python. */
+CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+
+{
+    CCCommand which = cc_command(&a, @slice("sh"));
+    which.arg("-c");
+    which.arg("command -v python3 >/dev/null 2>&1");
+    int rc = which.status() !>;
+    if (rc != 0) { "SKIP (no python3)".println() !>; return 0; }
+}
+
+{
+    CCCommand stage = cc_command(&a, @slice("sh"));
+    stage.arg("-c");
+    stage.arg("mkdir -p out/pymod_dblres && "
+              "cp tests/py_module_double_result_mod.src out/pymod_dblres/halver.ccs");
+    stage.inherit_stdio();
+    int rc = stage.status() !>;
+    if (rc != 0) { "stage failed".println() !>; return 1; }
+}
+
+{
+    CCCommand build = cc_command(&a, @slice("./cc/bin/ccc"));
+    build.arg("build");
+    build.arg("out/pymod_dblres/halver.ccs");
+    build.inherit_stdio();
+    int rc = build.status() !>;
+    if (rc != 0) { "build failed".println() !>; return 1; }
+}
+
+{
+    CCCommand run = cc_command(&a, @slice("sh"));
+    run.arg("-c");
+    CCString py = @string(`PYTHONPATH=bin python3 -c "
+import halver
+print('twice', halver.twice(21))
+print('half', halver.half(5.0))
+try:
+    halver.half(-1.0)
+except ValueError as e:
+    print('raised:', e)
+"`, &a);
+    run.arg(py.cstr(&a));
+    run.inherit_stdio();
+    int rc = run.status() !>;
+    if (rc != 0) { "import failed".println() !>; return 1; }
+}
+return 0;
