@@ -2265,13 +2265,21 @@ static int shadow_safe_call_arg1_ident(const char* args, char* out, size_t cap) 
     return n > 0;
 }
 
-/* Scalar arithmetic / field payload: literals + tracked POD idents only. */
+/* Scalar arithmetic / field payload: literals + tracked POD idents only.
+ * Leading `&ident` is a stack alias (channel copies pointer bits by value). */
 static int shadow_safe_payload_expr_ok(ShadowSafeCtx* ctx, const char* expr) {
     const char* p = expr ? expr : "";
     char id[64];
     size_t n;
     ShadowSafeVar* v;
+    int addr_of = 0;
     if (!ctx || !expr || !expr[0]) return 0;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p == '&') {
+        addr_of = 1;
+        p++;
+        while (*p == ' ' || *p == '\t') p++;
+    }
     while (*p) {
         if (*p == ' ' || *p == '\t' || *p == '+' || *p == '-' || *p == '*' ||
             *p == '/' || *p == '%' || *p == '(' || *p == ')' || *p == '>' ||
@@ -2322,7 +2330,8 @@ static int shadow_safe_payload_expr_ok(ShadowSafeCtx* ctx, const char* expr) {
             }
             v = shadow_safe_find(ctx, id);
             if (!v) return 0;
-            if (v->is_ptr || v->is_slice) return 0;
+            /* `&ptr` / `&local` — POD address bits; bare ptr/slice still refuse. */
+            if (!addr_of && (v->is_ptr || v->is_slice)) return 0;
             continue;
         }
         return 0;
@@ -3753,7 +3762,9 @@ static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st) {
     }
 }
 
-/* Seed @variant / @variant* parameters so projections on them are checked. */
+/* Seed function parameters so channel-send / projections can see them.
+ * @variant params get variant flags; others are tracked POD/pointer formals
+ * (needed for `&param` pool-recycle sends like pigz `return_input_arena`). */
 static void shadow_safe_seed_fn_params(ShadowSafeCtx* ctx, AstNode* fn) {
     const char* params = NULL;
     const char* p;
@@ -3818,15 +3829,16 @@ static void shadow_safe_seed_fn_params(ShadowSafeCtx* ctx, AstNode* fn) {
             memcpy(leaf, t, tl);
             leaf[tl] = 0;
         }
-        vt = shadow_safe_find_variant(ctx, leaf);
-        if (!vt) continue;
         v = shadow_safe_add(ctx, ident);
         if (!v) return;
         snprintf(v->ty, sizeof(v->ty), "%s", leaf);
+        vt = shadow_safe_find_variant(ctx, leaf);
         if (stars) {
             v->is_ptr = 1;
-            v->is_variant_ptr = 1;
-        } else {
+            if (vt) v->is_variant_ptr = 1;
+            /* Arena* formals are live handles — not arena-borrow sends. */
+            if (shadow_safe_type_is_arena(leaf)) v->is_arena_ptr = 0;
+        } else if (vt) {
             v->is_variant = 1;
         }
     }

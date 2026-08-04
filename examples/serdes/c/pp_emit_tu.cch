@@ -1846,11 +1846,17 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                     if (!cemit_str(out, "\n/* --- CC closure declarations --- */\n"))
                         bind_ok = 0;
                     for (int s = 0; bind_ok && s < nspawns; s++) {
-                        char proto[256];
+                        char proto[1024];
                         int ar = shadow_closure_arity(spawns[s]);
                         const char* ccty = shadow_closure_cc_ty(spawns[s]);
-                        if (!shadow_caps_proto(spawns[s]->e, proto, sizeof(proto)))
+                        if (!shadow_caps_proto(spawns[s]->e, proto, sizeof(proto))) {
+                            fprintf(stderr,
+                                    "error: closure caps proto failed in '%s' "
+                                    "(spawn %d caps='%s')\n",
+                                    it->a, s,
+                                    spawns[s]->e[0] ? spawns[s]->e : "");
                             bind_ok = 0;
+                        }
                         else if (ar == 1) {
                             if (!cemit_fmt(out,
                                     "static void* cc_closure__N%s_entry(void*, intptr_t);\n"

@@ -1235,7 +1235,10 @@ static AstNode* parse_send_task_closure(Parser* p) {
         parser_fail(p, p_peek(p), "expected ';' after send_task(...)");
         return NULL;
     }
-    spawn_infer_value_caps(n);
+    /* Explicit `[caps]` already names the capture set — do not re-scan the
+     * body (pigz send_task bodies sit inside huge fns; infer otherwise
+     * slurps locals/hex noise into e and blows shadow_caps_proto). */
+    if (!n->e[0]) spawn_infer_value_caps(n);
     return n;
 }
 

@@ -474,13 +474,33 @@ static int shadow_caps_proto(const char* caps, char* dst, size_t cap) {
         const char* c = strchr(p, ',');
         size_t n = c ? (size_t)(c - p) : strlen(p);
         char item[64];
-        if (n >= sizeof(item)) n = sizeof(item) - 1;
-        memcpy(item, p, n);
-        item[n] = 0;
+        size_t cur;
+        size_t need;
         char piece[96];
         char vty[80];
         char cname[64];
         const char* init = NULL;
+        if (n >= sizeof(item)) n = sizeof(item) - 1;
+        memcpy(item, p, n);
+        item[n] = 0;
+        /* Skip hex/noise tokens that infer sometimes picks up (`x1f`, `ffff`). */
+        if (item[0] == 'x' || item[0] == 'X') {
+            const char* q = item + 1;
+            int hex = (*q != 0);
+            while (*q) {
+                char ch = *q++;
+                if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') ||
+                      (ch >= 'A' && ch <= 'F'))) {
+                    hex = 0;
+                    break;
+                }
+            }
+            if (hex) {
+                if (!c) break;
+                p = c + 1;
+                continue;
+            }
+        }
         shadow_cap_item_parts(item, cname, sizeof(cname), &init);
         if (item[0] == '&')
             snprintf(piece, sizeof(piece), "void* __cc_opaque_%s", cname);
@@ -488,8 +508,8 @@ static int shadow_caps_proto(const char* caps, char* dst, size_t cap) {
             shadow_cap_val_type(item, vty, sizeof(vty));
             shadow_cap_decl(vty, cname, piece, sizeof(piece));
         }
-        size_t cur = strlen(dst);
-        size_t need = strlen(piece) + (first ? 0 : 2);
+        cur = strlen(dst);
+        need = strlen(piece) + (first ? 0 : 2);
         if (cur + need + 1 >= cap) return 0;
         if (!first) strcat(dst, ", ");
         strcat(dst, piece);

@@ -299,10 +299,12 @@ static AstNode* parse_async_fn(Parser* p) {
 
 /* static [volatile] [const] Type[*] name[[N]] [= expr]; */
 static AstNode* parse_static_var(Parser* p) {
+    int start;
     if (shadow_kw(p_peek(p)) != SHADOW_KW_STATIC) return NULL;
     if (p->i + 2 >= p->n) return NULL;
     /* `static inline …` is always a function (parse_static_fn). */
     if (shadow_kw(p->toks[p->i + 1]) == SHADOW_KW_INLINE) return NULL;
+    start = p->i;
     int has_const = 0;
     int has_volatile = 0;
     int ti = p->i + 1;
@@ -460,9 +462,26 @@ static AstNode* parse_static_var(Parser* p) {
                 break;
             p_next(p);
         }
+        /* Grammar CLI field tables can exceed AstNode.d — soft-miss so the
+         * static-decl tape fallback in parse_external_inner owns the span.
+         * Probe size first: ast_spell/span_text diagnose into p->err. */
+        {
+            size_t need = 0;
+            int ti;
+            for (ti = e0; ti < p->i; ti++) {
+                if (ti > e0) need++;
+                need += p->toks[ti].spell.len;
+            }
+            if (need + 1 > sizeof(n->d)) {
+                p->i = start;
+                return NULL;
+            }
+        }
         if (!ast_spell_token_range(p, e0, p->i, n->d, sizeof(n->d)) &&
             !span_text(p, e0, p->i, n->d, sizeof(n->d))) {
-            parser_fail(p, name, "static init too long");
+            p->i = start;
+            p->err = 0;
+            p->err_msg[0] = 0;
             return NULL;
         }
     }
@@ -2052,29 +2071,108 @@ static void shadow_same_line_c_comment(Parser* p, Token after, char* dst, size_t
 }
 
 static AstNode* parse_struct(Parser* p) {
+    int start;
+    Token t0;
     if (shadow_kw(p_peek(p)) != SHADOW_KW_STRUCT) return NULL;
-    p_next(p);
-    Token name = p_next(p);
-    if (name.kind != TK_IDENT) { p->err = 1; return NULL; }
-    /* Forward: struct Tag; (+ optional same-line block comment). */
-    if (tok_eq(p_peek(p), TK_PUNCT, ";")) {
-        Token semi = p_next(p);
-        AstNode* st = ast_new(p, AST_STRUCT);
-        if (!st) return NULL;
-        slice_to(st->a, sizeof(st->a), name.spell);
-        snprintf(st->e, sizeof(st->e), "fwd");
-        shadow_same_line_c_comment(p, semi, st->d, sizeof(st->d));
-        return st;
+    start = p->i;
+    t0 = p_peek(p);
+    p_next(p); /* struct */
+    /* Anonymous file-scope: `struct { … } name [= init];` — tape passthrough
+     * (pigz_cc `struct { … } g = {0};`). Do not set err on `{` (silent
+     * degradation); either lower as tape or fail with a message. */
+    if (tok_eq(p_peek(p), TK_PUNCT, "{")) {
+        int depth = 0;
+        size_t off0, off1;
+        AstNode* n;
+        Token last;
+        while (p->i < p->n) {
+            Token cur = p_peek(p);
+            if (tok_eq(cur, TK_PUNCT, "{")) depth++;
+            else if (tok_eq(cur, TK_PUNCT, "}")) {
+                depth--;
+                p_next(p);
+                if (depth == 0) break;
+                continue;
+            }
+            p_next(p);
+        }
+        if (depth != 0) {
+            parser_fail(p, t0, "unterminated anonymous struct");
+            return NULL;
+        }
+        if (p_peek(p).kind != TK_IDENT) {
+            parser_fail(p, p_peek(p),
+                        "expected variable name after anonymous struct");
+            return NULL;
+        }
+        p_next(p); /* name */
+        if (tok_eq(p_peek(p), TK_PUNCT, "=")) {
+            int idepth = 0;
+            p_next(p); /* = */
+            while (p->i < p->n) {
+                Token cur = p_peek(p);
+                if (tok_eq(cur, TK_PUNCT, "(") || tok_eq(cur, TK_PUNCT, "{") ||
+                    tok_eq(cur, TK_PUNCT, "["))
+                    idepth++;
+                else if (tok_eq(cur, TK_PUNCT, ")") || tok_eq(cur, TK_PUNCT, "}") ||
+                         tok_eq(cur, TK_PUNCT, "]")) {
+                    if (idepth > 0) idepth--;
+                } else if (idepth == 0 && tok_eq(cur, TK_PUNCT, ";"))
+                    break;
+                p_next(p);
+            }
+        }
+        if (!p_accept(p, TK_PUNCT, ";")) {
+            parser_fail(p, p_peek(p),
+                        "expected ';' after anonymous struct variable");
+            return NULL;
+        }
+        last = p->toks[p->i - 1];
+        off0 = t0.offset;
+        off1 = last.offset + last.spell.len;
+        n = ast_new(p, AST_RAW_LINE);
+        if (!n) return NULL;
+        snprintf(n->e, sizeof(n->e), "tape");
+        snprintf(n->a, sizeof(n->a), "%zu", off0);
+        snprintf(n->b, sizeof(n->b), "%zu", off1);
+        n->file_id = t0.file_id;
+        (void)start;
+        return n;
     }
-    if (!p_accept(p, TK_PUNCT, "{")) { p->err = 1; return NULL; }
-    AstNode* st = ast_new(p, AST_STRUCT);
-    if (!st) return NULL;
-    slice_to(st->a, sizeof(st->a), name.spell);
-    st->kids = &p->kids_storage[p->nkstore];
-    if (!parse_struct_fields(p, st)) return NULL;
-    if (!p_accept(p, TK_PUNCT, "}")) { p->err = 1; return NULL; }
-    p_accept(p, TK_PUNCT, ";"); /* optional trailing semi */
-    return st;
+    {
+        Token name = p_next(p);
+        if (name.kind != TK_IDENT) {
+            parser_fail(p, name, "expected struct tag or '{'");
+            return NULL;
+        }
+        /* Forward: struct Tag; (+ optional same-line block comment). */
+        if (tok_eq(p_peek(p), TK_PUNCT, ";")) {
+            Token semi = p_next(p);
+            AstNode* st = ast_new(p, AST_STRUCT);
+            if (!st) return NULL;
+            slice_to(st->a, sizeof(st->a), name.spell);
+            snprintf(st->e, sizeof(st->e), "fwd");
+            shadow_same_line_c_comment(p, semi, st->d, sizeof(st->d));
+            return st;
+        }
+        if (!p_accept(p, TK_PUNCT, "{")) {
+            parser_fail(p, p_peek(p), "expected '{' after struct tag");
+            return NULL;
+        }
+        {
+            AstNode* st = ast_new(p, AST_STRUCT);
+            if (!st) return NULL;
+            slice_to(st->a, sizeof(st->a), name.spell);
+            st->kids = &p->kids_storage[p->nkstore];
+            if (!parse_struct_fields(p, st)) return NULL;
+            if (!p_accept(p, TK_PUNCT, "}")) {
+                parser_fail(p, p_peek(p), "expected '}' after struct fields");
+                return NULL;
+            }
+            p_accept(p, TK_PUNCT, ";"); /* optional trailing semi */
+            return st;
+        }
+    }
 }
 
 static int parse_struct_fields(Parser* p, AstNode* st) {

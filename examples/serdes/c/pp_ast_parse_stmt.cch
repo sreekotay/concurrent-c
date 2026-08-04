@@ -3001,6 +3001,7 @@ static int shadow_is_grammar_static_helper(CCSlice name) {
     if (!(buf[0] >= 'A' && buf[0] <= 'Z')) return 0;
     if (n >= 6 && strcmp(buf + n - 6, "_match") == 0) return 1;
     if (n >= 6 && strcmp(buf + n - 6, "_parse") == 0) return 1;
+    if (n >= 8 && strcmp(buf + n - 8, "_prepare") == 0) return 1;
     if (n >= 11 && strcmp(buf + n - 11, "_parse_args") == 0) return 1;
     if (n >= 9 && strcmp(buf + n - 9, "_try_read") == 0) return 1;
     if (n >= 7 && strcmp(buf + n - 7, "_reader") == 0) return 1;
@@ -3403,6 +3404,22 @@ static AstNode* parse_stmt_inner(Parser* p) {
     Token t = p_peek(p);
     if (t.kind == TK_EOF) return NULL;
     AstNode* n;
+    /* cpp-transparent `#if`/`#elif`/`#else`/`#endif` (stage-2 root tape).
+     * File-scope parse_external_inner handles these; stmt bodies must too
+     * or `#endif` is stolen as an expr/assign spanning to the next `;`. */
+    if (t.kind == TK_IDENT && t.spell.len > 0 && t.spell.ptr[0] == '#') {
+        n = ast_new(p, AST_RAW_LINE);
+        if (!n) return NULL;
+        if (t.spell.len >= sizeof(n->a)) {
+            parser_fail(p, t, "preprocessor directive line too long");
+            return NULL;
+        }
+        memcpy(n->a, t.spell.ptr, t.spell.len);
+        n->a[t.spell.len] = 0;
+        snprintf(n->e, sizeof(n->e), "ppdir");
+        p_next(p);
+        return n;
+    }
     if (shadow_kw(t) == SHADOW_KW_TYPEDEF) {
         n = parse_typedef_int(p);
         if (n || p->err) return n;

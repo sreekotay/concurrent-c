@@ -1857,20 +1857,23 @@ static void shadow_rewrite_variant_expr(char* expr, size_t cap, const char* vty)
                 }
             }
         }
-        /* `case .arm` → `case Name_arm` */
+        /* `case .arm` → `case Name_arm` (allow `case . arm` from spell-join). */
         if (strncmp(p, "case", 4) == 0 && !shadow_is_id(p[4] ? p[4] : 0) &&
             (p == expr || !shadow_is_id(p[-1]))) {
             const char* q = p + 4;
             while (*q == ' ' || *q == '\t') q++;
             if (*q == '.') {
                 const char* arm = q + 1;
-                const char* e = arm;
+                const char* e;
                 ShadowVariant* mv;
                 int ma;
+                while (*arm == ' ' || *arm == '\t') arm++;
+                e = arm;
                 while (*e && ((*e >= 'a' && *e <= 'z') || (*e >= 'A' && *e <= 'Z') ||
                               (*e >= '0' && *e <= '9') || *e == '_'))
                     e++;
-                if (shadow_variant_arm_match(v, expr, q, arm, (size_t)(e - arm),
+                if (e > arm &&
+                    shadow_variant_arm_match(v, expr, q, arm, (size_t)(e - arm),
                                              &mv, &ma)) {
                     int n = snprintf(o, rem, "case %s_%s", mv->name, mv->arms[ma]);
                     if (n < 0 || (size_t)n >= rem) { rem = 0; break; }
@@ -2161,12 +2164,14 @@ static int g_shadow_ufcs_miss;
  * Named *_diag (not *_err): Concurrent-C rewrites `_err` assignments. */
 static int g_shadow_string_stack_diag;
 
-/* Declared callables for UFCS family/bare-name resolution. */
+/* Declared callables for UFCS family/bare-name resolution.
+ * redis_idiomatic + prelude/maps exceeds 128; silent drop hid clock.now(). */
+enum { SHADOW_UFN_CAP = 512 };
 typedef struct {
     char name[96];
     char first_ty[128];
 } ShadowUfcsFn;
-static ShadowUfcsFn g_shadow_ufns[128];
+static ShadowUfcsFn g_shadow_ufns[SHADOW_UFN_CAP];
 static int g_shadow_nufns;
 
 /* Struct/typedef fields — names for callable-field wins; field_ty for
@@ -3286,7 +3291,20 @@ static void shadow_slice_note_raw(const char* line) {
 
 static void shadow_ufn_register(const char* name, const char* first_ty) {
     int i;
-    if (!name || !name[0] || g_shadow_nufns >= 128) return;
+    if (!name || !name[0]) return;
+    if (g_shadow_nufns >= SHADOW_UFN_CAP) {
+        /* No silent drop — redis-sized TUs must not lose later UFCS callees. */
+        static int reported;
+        if (!reported) {
+            fprintf(stderr,
+                    "error: UFCS callable table full (%d); later methods "
+                    "(e.g. db_cmd_clock_now) will not resolve\n",
+                    SHADOW_UFN_CAP);
+            reported = 1;
+            g_shadow_ufcs_miss = 1;
+        }
+        return;
+    }
     for (i = 0; i < g_shadow_nufns; i++) {
         if (strcmp(g_shadow_ufns[i].name, name) == 0) {
             if (first_ty)
@@ -4330,7 +4348,15 @@ static int shadow_variant_diag_switch(ShadowCtx* ctx, AstNode* st, CEmit* out,
                 int ai;
                 have_desig = 1;
                 while (*e && shadow_is_id(*e)) e++;
+                /* Space-joined token spans can yield `case . str`. */
+                while (*arm == ' ' || *arm == '\t') arm++;
+                e = arm;
+                while (*e && shadow_is_id(*e)) e++;
                 alen = (size_t)(e - arm);
+                if (!alen) {
+                    p = (*q == '.') ? q + 1 : e;
+                    continue;
+                }
                 snprintf(needle, sizeof(needle), ".%.*s", (int)alen, arm);
                 if (!v) {
                     char subj_show[64];
