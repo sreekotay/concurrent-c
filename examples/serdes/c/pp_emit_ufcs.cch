@@ -323,6 +323,10 @@ static int shadow_ufcs_try_dyn_sink(const char* recv, const char* meth_name,
     const ShadowDynSink* ds;
     char base[96];
     const char* callee;
+    /* Function-scoped: callee may point here across the emit_dyn_sink call.
+     * A block-local tryc dangles into emit_dyn_sink's argbuf (same stack
+     * slot) and the sink name becomes `, WRAP(...)` — compiling-but-wrong. */
+    char tryc[160];
     size_t n;
     if (!ty || !ty[0]) return 0;
     while (*ty == ' ' || *ty == '\t') ty++;
@@ -336,9 +340,9 @@ static int shadow_ufcs_try_dyn_sink(const char* recv, const char* meth_name,
     ds = shadow_dyn_sink_for(base);
     if (!ds) return 0;
     callee = ds->callee;
+    tryc[0] = 0;
     if (ds->dest_aware && g_shadow_sink_dest[0]) {
         char mangled[96];
-        char tryc[160];
         shadow_sink_mangle_dest(g_shadow_sink_dest, mangled, sizeof(mangled));
         if (mangled[0]) {
             int scalar_dest =
@@ -2844,34 +2848,11 @@ static int shadow_emit_ufcs_to_buf(AstNode* st, char* dst, size_t cap,
         }
     }
     if (!shadow_ufcs_lower_parts(recv, st->b, args, is_arrow, formal, dst, cap)) {
-        /* Typed/instance receivers: diagnose and refuse peel retry.
-         * Peel is only for unbound / cast-prefixed / @string leftovers. */
-        {
-            const ShadowBind* rb_miss = shadow_bind_for_recv(st->a);
-            char vty_miss[128];
-            int instance = 0;
-            shadow_bind_base_ty(rb_miss, vty_miss, sizeof(vty_miss));
-            if (!vty_miss[0])
-                (void)shadow_ufcs_recv_slice_ty(st->a, vty_miss,
-                                                sizeof(vty_miss));
-            instance =
-                vty_miss[0] &&
-                (strncmp(vty_miss, "CCSlice_", 8) == 0 ||
-                 strcmp(vty_miss, "CCSlice") == 0 ||
-                 strncmp(vty_miss, "CCVec_", 6) == 0 ||
-                 strncmp(vty_miss, "Map_", 4) == 0 ||
-                 strncmp(vty_miss, "ArrayMap_", 9) == 0 ||
-                 strncmp(vty_miss, "CCChan", 6) == 0 ||
-                 strncmp(vty_miss, "CCResult_", 9) == 0 ||
-                 strncmp(vty_miss, "Pair_", 5) == 0 ||
-                 shadow_ufcs_is_scalar_ty(vty_miss) ||
-                 (vty_miss[0] >= 'A' && vty_miss[0] <= 'Z'));
-            if (instance) {
-                shadow_ufcs_diagnose_miss_at(st->a, st->b, NULL, 0);
-                return 0;
-            }
-        }
-        return 0; /* unbound / cast-prefixed: caller may peel leftover text */
+        /* Typed miss: return 0 so callers diagnose with site/@as (stmt path)
+         * or leftover peel can keep fnptr field calls as surface C.
+         * Do not diagnose here — that skipped `@as retry` lines and
+         * `file:line:` oracles, and blocked FpT.cb() as a false miss. */
+        return 0;
     }
     /* Args may still carry @string / @slice — lower before host C. */
     shadow_rewrite_print_and_string(dst, cap);

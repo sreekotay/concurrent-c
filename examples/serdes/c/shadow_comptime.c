@@ -73,11 +73,15 @@ static void shadow_ct_append_harvest(char** buf, size_t* n, char* harvested) {
 }
 
 /* Space-blank @comptime {…} / @comptime fn/const decls (layout-preserving).
- * No enum{__ccs…} marker — whitelist AST rejects that form.
+ * File-scope `@comptime {…}` also leaves `enum{__ccs<body_l>=0};` on one
+ * all-space line inside the blanked span (never crossing newlines — eating a
+ * newline shifts every later diagnostic line by -1). Nested / in-function
+ * blocks stay space-blank only (whitelist rejects enum as a statement).
  * Leaves CC_GENERIC_FACTORY sugar intact for shadow instantiate. */
 static char* shadow_ct_blank_comptime(const char* src, size_t n) {
     char* out;
     CCInertScan sc;
+    int brace_depth = 0;
     if (!src) return NULL;
     out = (char*)malloc(n + 1);
     if (!out) return NULL;
@@ -86,6 +90,16 @@ static char* shadow_ct_blank_comptime(const char* src, size_t n) {
     cc_inert_scan_init(&sc, NULL);
     for (size_t i = 0; i < n;) {
         if (cc_inert_scan_step(&sc, src, n, &i)) continue;
+        if (src[i] == '{') {
+            brace_depth++;
+            i++;
+            continue;
+        }
+        if (src[i] == '}' && brace_depth > 0) {
+            brace_depth--;
+            i++;
+            continue;
+        }
         if (src[i] != '@' || !cc_match_ident_kw(src, n, i + 1, "comptime")) {
             i++;
             continue;
@@ -94,17 +108,41 @@ static char* shadow_ct_blank_comptime(const char* src, size_t n) {
             size_t kw_end = i + 1 + strlen("comptime");
             size_t body_l = cc_skip_ws_and_comments(src, n, kw_end);
             size_t body_r;
+            int file_scope = (brace_depth == 0);
             if (body_l >= n) {
                 i++;
                 continue;
             }
             if (src[body_l] == '{') {
+                char marker[64];
+                int mlen;
                 if (!cc_find_matching_brace(src, n, body_l, &body_r)) {
                     i++;
                     continue;
                 }
                 for (size_t k = i; k <= body_r; ++k) {
                     if (out[k] != '\n') out[k] = ' ';
+                }
+                if (file_scope) {
+                    mlen = snprintf(marker, sizeof(marker),
+                                    "enum{__ccs%zu=0};", body_l);
+                    /* Place on a single blanked line that has room — never
+                     * overwrite '\n' (line-map must stay stable). */
+                    if (mlen > 0 && (size_t)mlen < sizeof(marker)) {
+                        size_t p = i;
+                        while (p <= body_r) {
+                            size_t line_end = p;
+                            size_t room;
+                            while (line_end <= body_r && out[line_end] != '\n')
+                                line_end++;
+                            room = line_end - p;
+                            if (room >= (size_t)mlen) {
+                                memcpy(out + p, marker, (size_t)mlen);
+                                break;
+                            }
+                            p = (line_end <= body_r) ? line_end + 1 : body_r + 1;
+                        }
+                    }
                 }
                 i = body_r + 1;
                 continue;

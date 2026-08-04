@@ -1839,6 +1839,36 @@ static size_t cc__emit_resolve_anchor_pos(CCEmitAnchor anchor, size_t site_pos,
         int in_block = 0;
         snprintf(marker, sizeof(marker), "enum{__ccs%zu=0};", site_pos);
         const char* hit = src ? strstr(src, marker) : NULL;
+        /* Serdes stage1 markers use un-harvested body_l; exec fragments record
+         * harvested site_pos. Fall back to the nearest `__ccs<digits>` anchor. */
+        if (!hit && src) {
+            size_t logic_pos =
+                (site_line > 0)
+                    ? cc__emit_find_logical_line(src, len, input_path, site_line,
+                                                 0)
+                    : 0;
+            const char* p = src;
+            const char* best = NULL;
+            while ((p = strstr(p, "enum{__ccs")) != NULL) {
+                const char* q = p + 10;
+                if (*q < '0' || *q > '9') {
+                    p++;
+                    continue;
+                }
+                while (*q >= '0' && *q <= '9') q++;
+                if (strncmp(q, "=0};", 4) != 0) {
+                    p++;
+                    continue;
+                }
+                if ((size_t)(p - src) >= logic_pos) {
+                    best = p;
+                    break;
+                }
+                if (!best) best = p;
+                p = q;
+            }
+            hit = best;
+        }
         if (hit) {
             pos = (size_t)(hit - src);
             while (pos > 0 && src[pos - 1] != '\n') pos--;
