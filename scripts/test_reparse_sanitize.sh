@@ -13,13 +13,16 @@ set -eu
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 CCC=./cc/bin/ccc
+# Reparse dumps are a legacy-pipeline seam; pin front so default=serdes
+# does not skip the dump path.
+export CC_FRONTEND=legacy
 
 fail() { echo "[test_reparse_sanitize] FAIL: $1" >&2; exit 1; }
 
 dump_dir="$(mktemp -d)"
 trap 'rm -rf "$dump_dir"' EXIT
 
-CC_DEBUG_REPARSE_DUMP_DIR="$dump_dir" "$CCC" --no-cache --emit-c-only \
+CC_DEBUG_REPARSE_DUMP_DIR="$dump_dir" "$CCC" --frontend=legacy --no-cache --emit-c-only \
     tests/l2_rewriter_ctor_priority_smoke.ccs >/dev/null 2>&1 \
   || fail "l2_rewriter_ctor_priority_smoke failed to compile"
 
@@ -44,7 +47,7 @@ grep -q 'constructor    ' "$prepared" \
 dump_dir2="$(mktemp -d)"
 trap 'rm -rf "$dump_dir" "$dump_dir2"' EXIT
 
-CC_DEBUG_REPARSE_DUMP_DIR="$dump_dir2" "$CCC" --no-cache --emit-c-only \
+CC_DEBUG_REPARSE_DUMP_DIR="$dump_dir2" "$CCC" --frontend=legacy --no-cache --emit-c-only \
     tests/ufcs_below_multiline_unwrap_smoke.ccs >/dev/null 2>&1 \
   || fail "ufcs_below_multiline_unwrap_smoke failed to compile"
 

@@ -3265,6 +3265,7 @@ static AstNode* parse_static_fn(Parser* p) {
 
         /* Soft stmt parse; on any miss, whole-fn tape (no half body / no redef). */
         int saved_err = p->err;
+        int body0 = p->i;
         n->kids = &p->kids_storage[p->nkstore];
         int ok_stmts = 1;
         p->soft_stmt = 1;
@@ -3277,6 +3278,33 @@ static AstNode* parse_static_fn(Parser* p) {
         }
         p->soft_stmt = saved_soft;
         if (ok_stmts && p_accept(p, TK_PUNCT, "}")) return n;
+
+        /* Soft miss with Concurrent-C still in the body must not become raw
+         * tape — that leaves !>/@/=> unlowered. Plain-C bodies may rewind. */
+        if (!ok_stmts) {
+            int j = body0;
+            int d = 1;
+            Token at = name;
+            while (j < p->n && d > 0) {
+                Token t = p->toks[j];
+                if (tok_eq(t, TK_PUNCT, "{")) d++;
+                else if (tok_eq(t, TK_PUNCT, "}")) d--;
+                else if (tok_eq(t, TK_PUNCT, "!>") || tok_eq(t, TK_PUNCT, "?>") ||
+                         tok_eq(t, TK_PUNCT, "=>") || tok_eq(t, TK_PUNCT, "@") ||
+                         tok_eq(t, TK_PUNCT, "::")) {
+                    at = t;
+                    p->nn = saved_nn;
+                    p->nkstore = saved_nk;
+                    p->err = saved_err;
+                    parser_fail(p, at,
+                                "static fn soft-parse miss with Concurrent-C "
+                                "tokens still in body (refusing whole-fn raw "
+                                "tape)");
+                    return NULL;
+                }
+                j++;
+            }
+        }
 
         /* Stmt subset miss — rewind; caller keeps one AST_RAW_LINE tape span.
          * Grammar primitive: `fallible` / PpStmt soft_unit (pp_stmt.rules). */

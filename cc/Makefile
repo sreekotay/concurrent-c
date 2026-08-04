@@ -353,7 +353,8 @@ SHADOW_LOWER_DEPS := $(SHADOW_LOWER_CCS) $(SHADOW_BUILD_CCH) \
 	$(wildcard ../examples/serdes/c/shadow_*.h)
 $(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_COMPTIME_LIB) $(WRAPPER) $(TCC_LIB_DEP) $(RUNTIME_DYLIB)
 	@mkdir -p $(dir $@)
-	$(WRAPPER) $(SHADOW_LOWER_CCS) -o $@ --no-cache \
+	# Self-build must use legacy: serdes is the default and needs this binary.
+	CC_FRONTEND=legacy $(WRAPPER) --frontend=legacy $(SHADOW_LOWER_CCS) -o $@ --no-cache \
 		--cc-flags "-I../examples/serdes/c -I$(TCC_INC) -DSHADOW_HAVE_LIBTCC=1" \
 		--ld-flags "$(abspath $(SHADOW_TCC_OBJ)) $(abspath $(SHADOW_COMPTIME_LIB)) -L$(TCC_LIB) -ltcc"
 	@mkdir -p $(dir $(SHADOW_LOWER_SCRIPT))

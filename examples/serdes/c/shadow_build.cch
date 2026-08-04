@@ -253,7 +253,23 @@ static int shadow_emit_deps_match(const char* dir) {
     return h == prev;
 }
 
-/* Obj key: emit key + host cc id + flag fingerprint. */
+/* Host-build options forwarded from ccc (see cc__run_shadow_lower). */
+typedef struct {
+    int no_cache;
+    int verbose;
+    int opt_release;
+    int opt_debug;
+    int dry_run;
+    int no_runtime; /* omit concurrent_c.o from link */
+    const char* cc_flags; /* may be NULL */
+    const char* ld_flags; /* may be NULL */
+} ShadowHostOpts;
+
+static ShadowHostOpts g_shadow_host_opts;
+
+/* Obj key: emit key + host cc id + flag fingerprint.
+ * Must fold every host-compile input (cc_flags, release/debug, no_runtime)
+ * so warm tu.o is never reused across incompatible builds. */
 static uint64_t shadow_obj_cache_key(uint64_t emit_key, const char* host_cc) {
     uint64_t h = emit_key;
     ShadowFileSig cc_sig = {0};
@@ -264,27 +280,18 @@ static uint64_t shadow_obj_cache_key(uint64_t emit_key, const char* host_cc) {
     }
     h = shadow_fnv1a64_str(h, getenv("CFLAGS"));
     h = shadow_fnv1a64_str(h, getenv("CPPFLAGS"));
-    /* Match ccc user-TU flag shape (flavor comes via forwarded cc_flags). */
     h = shadow_fnv1a64_str(h, "-std=c11-D_DEFAULT_SOURCE-ffunction-sections-fdata-sections");
+    h = shadow_fnv1a64_str(h, g_shadow_host_opts.cc_flags);
+    h = shadow_fnv1a64_str(h, g_shadow_host_opts.ld_flags);
+    h = shadow_fnv1a64_i64(h, g_shadow_host_opts.opt_release ? 1 : 0);
+    h = shadow_fnv1a64_i64(h, g_shadow_host_opts.opt_debug ? 1 : 0);
+    h = shadow_fnv1a64_i64(h, g_shadow_host_opts.no_runtime ? 1 : 0);
     return h;
 }
 
 static void shadow_cache_dir(uint64_t emit_key, char* dst, size_t cap) {
     snprintf(dst, cap, "out/.cc-build/serdes/%016llx", (unsigned long long)emit_key);
 }
-
-/* Host-build options forwarded from ccc (see cc__run_shadow_lower). */
-typedef struct {
-    int no_cache;
-    int verbose;
-    int opt_release;
-    int opt_debug;
-    int dry_run;
-    const char* cc_flags; /* may be NULL */
-    const char* ld_flags; /* may be NULL */
-} ShadowHostOpts;
-
-static ShadowHostOpts g_shadow_host_opts;
 
 /* Run host cc -c with ccc-compatible flags. -D_DEFAULT_SOURCE keeps POSIX
  * decls visible under -std=c11 on glibc (usleep/mkstemp/fdopen) while
@@ -469,9 +476,15 @@ static int shadow_host_link(const char* o_path, const char* bin_path,
      * may carry @link in comments that never make it into emit). */
     shadow_extract_links_from_file(c_path, extracted, sizeof(extracted));
     shadow_extract_links_from_file(in_path, extracted, sizeof(extracted));
-    n = snprintf(cmd, sizeof(cmd),
-                 "%s \"%s\" \"%s\" -o \"%s\" -lpthread -lm %s",
-                 cc, o_path, runtime_o, bin_path, extracted);
+    if (g_shadow_host_opts.no_runtime) {
+        n = snprintf(cmd, sizeof(cmd),
+                     "%s \"%s\" -o \"%s\" -lpthread -lm %s",
+                     cc, o_path, bin_path, extracted);
+    } else {
+        n = snprintf(cmd, sizeof(cmd),
+                     "%s \"%s\" \"%s\" -o \"%s\" -lpthread -lm %s",
+                     cc, o_path, runtime_o, bin_path, extracted);
+    }
     if (n < 0 || (size_t)n >= sizeof(cmd)) return -1;
     if (g_shadow_host_opts.dry_run) {
         fprintf(stderr, "shadow_lower: dry-run link:\n  %s\n", cmd);
@@ -521,7 +534,10 @@ static int shadow_build_host(const char* in_path, const char* bin_path,
     int cache_ok = !shadow_cache_disabled(no_cache);
 
     if (!in_path || !bin_path) return -1;
-    if (!shadow_runtime_o(runtime_o, sizeof(runtime_o))) return -1;
+    runtime_o[0] = 0;
+    if (!g_shadow_host_opts.no_runtime &&
+        !shadow_runtime_o(runtime_o, sizeof(runtime_o)))
+        return -1;
 
     ekey = shadow_emit_cache_key(in_path, self_path);
     okey = shadow_obj_cache_key(ekey, shadow_host_cc());

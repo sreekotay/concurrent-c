@@ -1019,6 +1019,9 @@ static bool db_setup(RedisDb* db, size_t shard_count, const char* shard_src) {
         /* Parse errors turn into RESP errors on the wire, then close. */
         @errhandler(CCError e) {
             (void)conn->write_reply_now(err_reply(e));
+            /* Close here as well as via @defer — serdes errhandler return must
+             * not leave the TCP session half-open for a follow-up PING. */
+            cc_socket_close(&client);
             return 0;
         }
 

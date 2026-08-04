@@ -634,6 +634,108 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                       g_shadow_namaps > 0);
 
     if (hoist_typedefs) {
+        /* Hoist typedefs referenced by @variant arm types so they are
+         * visible when the variant helpers are emitted below. */
+        for (int vi = 0; vi < n; vi++) {
+            const char* vp;
+            if (items[vi]->kind != AST_AT_STMT) continue;
+            if (strcmp(items[vi]->a, "variant") != 0) continue;
+            vp = items[vi]->c;
+            while (*vp) {
+                char arm_ty[96];
+                size_t atl;
+                int j2;
+                while (*vp && *vp != ':') vp++;
+                if (!*vp) break;
+                vp++;
+                while (*vp == ' ' || *vp == '\t') vp++;
+                atl = 0;
+                while (vp[atl] && vp[atl] != ';' && vp[atl] != '}')
+                    atl++;
+                while (atl > 0 && (vp[atl-1]==' ' || vp[atl-1]=='\t'))
+                    atl--;
+                if (atl == 0 || atl >= sizeof(arm_ty)) { vp += atl; continue; }
+                memcpy(arm_ty, vp, atl);
+                arm_ty[atl] = 0;
+                vp += atl;
+                while (*vp == ';' || *vp == ' ') vp++;
+                for (j2 = 0; j2 < n; j2++) {
+                    const char* a2;
+                    if (items[j2]->kind == AST_TYPEDEF_STRUCT) {
+                        if (strcmp(items[j2]->e, "hoist") == 0) continue;
+                        a2 = items[j2]->b[0] ? items[j2]->b : items[j2]->a;
+                        if (!a2[0] || strcmp(a2, arm_ty) != 0) continue;
+                        if (!shadow_emit_preamble(items[j2], out, cache))
+                            return 0;
+                        items[j2]->lead_len = 0;
+                        if (!shadow_emit_line(out, &line_ctx, items[j2], ""))
+                            return 0;
+                        if (!shadow_emit_typedef_struct(items[j2], out, cache,
+                                                       &line_ctx))
+                            return 0;
+                        snprintf(items[j2]->e, sizeof(items[j2]->e), "hoist");
+                    } else if (items[j2]->kind == AST_TYPEDEF_INT) {
+                        if (strcmp(items[j2]->e, "vech") == 0) continue;
+                        if (!items[j2]->a[0] || strcmp(items[j2]->a, arm_ty) != 0)
+                            continue;
+                        if (!shadow_emit_preamble(items[j2], out, cache))
+                            return 0;
+                        items[j2]->lead_len = 0;
+                        if (!cemit_fmt(out, "typedef %s %s;\n",
+                                       items[j2]->b, items[j2]->a))
+                            return 0;
+                        snprintf(items[j2]->e, sizeof(items[j2]->e), "vech");
+                    }
+                }
+            }
+        }
+        /* Forward-declare destroy hooks that @variant drop helpers need.
+         * The variant helpers are hoisted before the user static definitions,
+         * so the host compiler must see the names. */
+        {
+            char fwd_done[16][64];
+            int nfwd = 0;
+            for (int i = 0; i < n; i++) {
+                const char* vp;
+                if (items[i]->kind != AST_AT_STMT) continue;
+                if (strcmp(items[i]->a, "variant") != 0) continue;
+                vp = items[i]->c;
+                while (*vp) {
+                    char arm_ty[96];
+                    const char* hook;
+                    size_t atl;
+                    int dup, fi;
+                    while (*vp && *vp != ':') vp++;
+                    if (!*vp) break;
+                    vp++;
+                    while (*vp == ' ' || *vp == '\t') vp++;
+                    atl = 0;
+                    while (vp[atl] && vp[atl] != ';' && vp[atl] != '}')
+                        atl++;
+                    while (atl > 0 && (vp[atl-1]==' ' || vp[atl-1]=='\t'))
+                        atl--;
+                    if (atl == 0 || atl >= sizeof(arm_ty)) { vp += atl; continue; }
+                    memcpy(arm_ty, vp, atl);
+                    arm_ty[atl] = 0;
+                    vp += atl;
+                    while (*vp == ';' || *vp == ' ') vp++;
+                    hook = shadow_destroy_hook_for(arm_ty);
+                    if (!hook || !hook[0]) continue;
+                    dup = 0;
+                    for (fi = 0; fi < nfwd; fi++)
+                        if (strcmp(fwd_done[fi], hook) == 0) { dup = 1; break; }
+                    if (dup) continue;
+                    if (nfwd < 16) {
+                        snprintf(fwd_done[nfwd], sizeof(fwd_done[0]),
+                                 "%s", hook);
+                        nfwd++;
+                    }
+                    if (!cemit_fmt(out, "static void %s(%s*);\n",
+                                   hook, arm_ty))
+                        return 0;
+                }
+            }
+        }
         /* Emit @variant decls before any hoisted struct that embeds them
          * (RedisEntry.val : RedisValue). Mark with e="hoist" so the main
          * loop does not re-emit. */
@@ -1157,6 +1259,25 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                             t, t, t))
                         return 0;
                     continue;
+                }
+                /* Emit skipped CCVec_ typedef aliases before the DECL that
+                 * references them (CharVec = CCVec_char before
+                 * CC_VEC_DECL_ARENA(CharVec, …)). */
+                {
+                    int ai;
+                    for (ai = 0; ai < n; ai++) {
+                        if (items[ai]->kind != AST_TYPEDEF_INT) continue;
+                        if (strcmp(items[ai]->e, "vech") == 0) continue;
+                        if (!items[ai]->a[0] || strcmp(items[ai]->a, t) != 0)
+                            continue;
+                        if (!items[ai]->b[0] ||
+                            strncmp(items[ai]->b, "CCVec_", 6) != 0)
+                            continue;
+                        if (!cemit_fmt(out, "typedef %s %s;\n",
+                                       items[ai]->b, items[ai]->a))
+                            return 0;
+                        snprintf(items[ai]->e, sizeof(items[ai]->e), "vech");
+                    }
                 }
                 if (typed_slice) {
                     if (!cemit_fmt(out,
@@ -1800,18 +1921,26 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 if (bind_ok && nsdefers > 0 && use_c) {
                     if (!shadow_emit_defer_epilogue(out, &sctx)) bind_ok = 0;
                 } else if (bind_ok && nsdefers > 0 && !use_c) {
-                    if (nsdestroys > 0) {
-                        int d;
-                        for (d = nsdestroys - 1; bind_ok && d >= 0; d--) {
-                            if (!shadow_emit_one_destroy(sdestroys[d], out,
-                                                         &sctx, body_ind))
-                                bind_ok = 0;
+                    {
+                        int di = nsdestroys - 1, fi = nsdefers - 1;
+                        while (bind_ok && (di >= 0 || fi >= 0)) {
+                            int dd = 0;
+                            if (di >= 0 && fi >= 0)
+                                dd = sdestroys[di]->tok_off >= sdefers[fi]->tok_off;
+                            else dd = (di >= 0);
+                            if (dd) {
+                                if (!shadow_emit_one_destroy(sdestroys[di], out,
+                                        &sctx, body_ind))
+                                    bind_ok = 0;
+                                di--;
+                            } else {
+                                if (!shadow_emit_one_defer(sdefers[fi], out,
+                                        &sctx, body_ind, 0))
+                                    bind_ok = 0;
+                                fi--;
+                            }
                         }
                     }
-                    if (bind_ok &&
-                        !shadow_emit_defer_list(sdefers, nsdefers, out, &sctx,
-                                                 body_ind, 0))
-                        bind_ok = 0;
                 } else if (bind_ok && use_c && nsdestroys > 0 &&
                            !shadow_emit_destroy_cleanup(out, &sctx, sdestroys,
                                                         nsdestroys, body_ind)) {
@@ -1995,18 +2124,26 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 if (bind_ok && ndefers > 0 && ctx.goto_cleanup) {
                     if (!shadow_emit_defer_epilogue(out, &ctx)) bind_ok = 0;
                 } else if (bind_ok && ndefers > 0 && !ctx.goto_cleanup) {
-                    if (ndestroys > 0) {
-                        int d;
-                        for (d = ndestroys - 1; bind_ok && d >= 0; d--) {
-                            if (!shadow_emit_one_destroy(destroys[d], out, &ctx,
-                                                         body_ind))
-                                bind_ok = 0;
+                    {
+                        int di = ndestroys - 1, fi = ndefers - 1;
+                        while (bind_ok && (di >= 0 || fi >= 0)) {
+                            int dd = 0;
+                            if (di >= 0 && fi >= 0)
+                                dd = destroys[di]->tok_off >= defers[fi]->tok_off;
+                            else dd = (di >= 0);
+                            if (dd) {
+                                if (!shadow_emit_one_destroy(destroys[di], out,
+                                        &ctx, body_ind))
+                                    bind_ok = 0;
+                                di--;
+                            } else {
+                                if (!shadow_emit_one_defer(defers[fi], out, &ctx,
+                                        body_ind, 0))
+                                    bind_ok = 0;
+                                fi--;
+                            }
                         }
                     }
-                    if (bind_ok &&
-                        !shadow_emit_defer_list(defers, ndefers, out, &ctx,
-                                                 body_ind, 0))
-                        bind_ok = 0;
                 } else if (bind_ok && ctx.goto_cleanup &&
                            !shadow_emit_destroy_cleanup(out, &ctx, destroys,
                                                         ndestroys, body_ind)) {

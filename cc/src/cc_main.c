@@ -747,7 +747,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --bin-dir DIR       Output dir for linked executables (default: <repo>/bin)\n");
     fprintf(stderr, "  --out-stem NAME     Override the basename/stem used for generated files\n");
     fprintf(stderr, "  --no-cache          Disable incremental cache (also: CC_NO_CACHE=1)\n");
-    fprintf(stderr, "  --frontend=serdes|legacy  Opt-in SERDES front (also: CC_FRONTEND=serdes)\n");
+    fprintf(stderr, "  --frontend=serdes|legacy  Front end (default serdes; also: CC_FRONTEND)\n");
     fprintf(stderr, "  --timeout SECONDS   Kill run/test step after timeout\n");
     fprintf(stderr, "  --verbose           Print invoked commands\n");
     fprintf(stderr, "One-liners:\n");
@@ -2282,8 +2282,8 @@ static int cc__load_const_bindings(const CCBuildOptions* opt, CCConstBinding* bi
 static void cc__print_comptime_targets(const char* build_path);
 static void cc__print_comptime_state(const CCBuildOptions* opt, const char* build_path, const CCConstBinding* bindings, size_t count);
 
-/* Opt-in SERDES front: --frontend=serdes or CC_FRONTEND=serdes.
- * -1 = unset (env), 0 = legacy, 1 = serdes. */
+/* SERDES is the default front. Opt out: --frontend=legacy or CC_FRONTEND=legacy.
+ * -1 = unset (env/default), 0 = legacy, 1 = serdes. */
 static int g_frontend_serdes = -1;
 
 static int cc__want_serdes_front(void) {
@@ -2291,8 +2291,10 @@ static int cc__want_serdes_front(void) {
     if (g_frontend_serdes == 0) return 0;
     {
         const char* e = getenv("CC_FRONTEND");
-        return e && strcmp(e, "serdes") == 0;
+        if (e && strcmp(e, "legacy") == 0) return 0;
+        if (e && strcmp(e, "serdes") == 0) return 1;
     }
+    return 1; /* default: serdes */
 }
 
 static int cc__ends_with_ci(const char* s, const char* suf) {
@@ -2323,75 +2325,81 @@ static int cc__find_shadow_lower(char* dst, size_t cap) {
 }
 
 /* Delegate .ccs build/emit to native shadow_lower (owns cache + host-cc/link).
- * Options contract: every CCBuildOptions field is either forwarded, N/A for
- * the serdes product path, or a hard error when set — never silently dropped. */
+ * Options contract: every CCBuildOptions field is either forwarded, handled by
+ * a documented legacy fallback, or a hard error — never silently dropped. */
 static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path) {
     char shadow[PATH_MAX];
-    char cc_flags_arg[2048];
+    char cc_flags_buf[2048];
+    char cc_flags_arg[2200];
     char ld_flags_arg[2048];
-    char* argv[24];
+    char* argv[28];
     int argc = 0;
     pid_t pid;
     int status;
+    size_t cflen = 0;
     if (!opt || !opt->in_path || !out_path) return -1;
-    /* Hard-error on options shadow_lower does not implement yet. */
+    /* build.cc / dump paths still need the legacy front. */
     if (opt->dump_consts || opt->dump_comptime) {
         fprintf(stderr,
-                "cc: --frontend=serdes does not support --dump-consts / "
-                "--dump-comptime (options contract)\n");
-        return -1;
-    }
-    if (opt->target_flag && opt->target_flag[0]) {
-        fprintf(stderr,
-                "cc: --frontend=serdes does not support --target yet "
-                "(options contract)\n");
-        return -1;
-    }
-    if (opt->sysroot_flag && opt->sysroot_flag[0]) {
-        fprintf(stderr,
-                "cc: --frontend=serdes does not support --sysroot yet "
-                "(options contract)\n");
+                "cc: --dump-consts/--dump-comptime require --frontend=legacy "
+                "(serdes does not load build.cc)\n");
         return -1;
     }
     if (opt->build_override && opt->build_override[0]) {
         fprintf(stderr,
-                "cc: --frontend=serdes does not support --build yet "
-                "(options contract)\n");
+                "cc: --build-file requires --frontend=legacy "
+                "(serdes does not load build.cc)\n");
         return -1;
     }
     if (opt->no_build) {
         fprintf(stderr,
-                "cc: --frontend=serdes does not support --no-build "
-                "(options contract)\n");
-        return -1;
-    }
-    if (opt->no_runtime) {
-        fprintf(stderr,
-                "cc: --frontend=serdes does not support --no-runtime "
-                "(options contract)\n");
-        return -1;
-    }
-    if (opt->cli_count > 0) {
-        fprintf(stderr,
-                "cc: --frontend=serdes does not support comptime CLI bindings "
-                "yet (options contract)\n");
+                "cc: --no-build requires --frontend=legacy "
+                "(serdes does not load build.cc)\n");
         return -1;
     }
     if (cc__find_shadow_lower(shadow, sizeof(shadow)) != 0) {
         fprintf(stderr,
-                "cc: --frontend=serdes requires native shadow_lower "
+                "cc: serdes front requires native shadow_lower "
                 "(make -C cc ../out/cc/bin/shadow_lower)\n");
         return -1;
     }
+    /* Fold --target / --sysroot / existing cc_flags (incl. CLI -D) for host cc. */
+    cc_flags_buf[0] = 0;
+    if (opt->cc_flags && opt->cc_flags[0]) {
+        cflen = strlen(opt->cc_flags);
+        if (cflen >= sizeof(cc_flags_buf)) cflen = sizeof(cc_flags_buf) - 1;
+        memcpy(cc_flags_buf, opt->cc_flags, cflen);
+        cc_flags_buf[cflen] = 0;
+    }
+    if (opt->target_flag && opt->target_flag[0]) {
+        int n = snprintf(cc_flags_buf + cflen, sizeof(cc_flags_buf) - cflen,
+                         "%s--target %s", cflen ? " " : "", opt->target_flag);
+        if (n < 0 || (size_t)n >= sizeof(cc_flags_buf) - cflen) {
+            fprintf(stderr, "cc: --target/--cc-flags too long for serdes forward\n");
+            return -1;
+        }
+        cflen += (size_t)n;
+    }
+    if (opt->sysroot_flag && opt->sysroot_flag[0]) {
+        int n = snprintf(cc_flags_buf + cflen, sizeof(cc_flags_buf) - cflen,
+                         "%s--sysroot %s", cflen ? " " : "", opt->sysroot_flag);
+        if (n < 0 || (size_t)n >= sizeof(cc_flags_buf) - cflen) {
+            fprintf(stderr, "cc: --sysroot/--cc-flags too long for serdes forward\n");
+            return -1;
+        }
+        cflen += (size_t)n;
+    }
+    (void)cflen;
     argv[argc++] = shadow;
     if (opt->no_cache) argv[argc++] = (char*)"--no-cache";
     if (opt->verbose) argv[argc++] = (char*)"--verbose";
     if (opt->opt_release) argv[argc++] = (char*)"--release";
     if (opt->opt_debug) argv[argc++] = (char*)"--debug";
     if (opt->dry_run) argv[argc++] = (char*)"--dry-run";
-    if (opt->cc_flags && opt->cc_flags[0]) {
+    if (opt->no_runtime) argv[argc++] = (char*)"--no-runtime";
+    if (cc_flags_buf[0]) {
         snprintf(cc_flags_arg, sizeof(cc_flags_arg), "--cc-flags=%s",
-                 opt->cc_flags);
+                 cc_flags_buf);
         argv[argc++] = cc_flags_arg;
     }
     if (opt->ld_flags && opt->ld_flags[0]) {

@@ -557,9 +557,20 @@ static void spawn_caps_add(char* caps, size_t cap, const char* item) {
     if (caps[0]) {
         size_t n = strlen(caps);
         size_t il = strlen(item);
-        if (n + 1 + il >= cap) return;
+        if (n + 1 + il >= cap) {
+            fprintf(stderr,
+                    "error: spawn capture list full (cap=%zu); cannot add '%s'\n",
+                    cap, item);
+            return;
+        }
         snprintf(caps + n, cap - n, ",%s", item);
     } else {
+        if (strlen(item) >= cap) {
+            fprintf(stderr,
+                    "error: spawn capture name too long for buffer (cap=%zu): '%s'\n",
+                    cap, item);
+            return;
+        }
         snprintf(caps, cap, "%s", item);
     }
 }
@@ -794,10 +805,14 @@ static void spawn_infer_caps_from_text(AstNode* n, const char* text) {
 static int spawn_looks_like_chan(const char* id) {
     size_t n;
     if (!id || !id[0]) return 0;
+    /* Channel *handles* only — never callees (cc_chan_send) or globals
+     * that merely end in `_done` (g_done is an atomic, not a chan). */
     if (strcmp(id, "tx") == 0 || strcmp(id, "rx") == 0) return 1;
+    if (strcmp(id, "block_done") == 0) return 1;
     n = strlen(id);
     if (n >= 3 && (strcmp(id + n - 3, "_tx") == 0 || strcmp(id + n - 3, "_rx") == 0))
         return 1;
+    if (n >= 5 && strcmp(id + n - 5, "_chan") == 0) return 1;
     return 0;
 }
 
@@ -899,12 +914,31 @@ static void spawn_infer_value_caps_stmt(AstNode* n, AstNode* s) {
     }
 }
 
+/* Walk body text for channel-shaped free names only (tx/rx/*_tx/*_rx). */
+static void spawn_infer_chan_caps_stmt(AstNode* n, AstNode* s) {
+    int k;
+    if (!n || !s) return;
+    spawn_infer_chan_caps_from_text(n, s->a);
+    spawn_infer_chan_caps_from_text(n, s->b);
+    spawn_infer_chan_caps_from_text(n, s->c);
+    for (k = 0; k < s->nbody; k++) spawn_infer_chan_caps_stmt(n, s->body[k]);
+    for (k = 0; k < s->ndbody; k++) spawn_infer_chan_caps_stmt(n, s->dbody[k]);
+    if (s->kids) {
+        for (k = 0; k < s->nkids; k++) spawn_infer_chan_caps_stmt(n, s->kids[k]);
+    }
+}
+
 /* Infer value captures from `int x = outer;`, assigns, and `${outer}` in body.
- * Explicit `[caps]` are a floor, not a ceiling — merge free outer idents the
- * same way legacy does (`=> [n] { chan_send(tx,…) }` still captures `tx`).
- * Guards: body_declares / formals / spawn_note_global'd file names / noise. */
+ * Explicit `[caps]` are a floor: still pull in channel endpoints used in the
+ * body (`=> [n] { chan_send(tx,…) }` → capture `tx`), but do not re-merge
+ * general value idents (that slurps body locals / pigz `g`). */
 static void spawn_infer_value_caps(AstNode* n) {
     if (!n) return;
+    if (n->e[0]) {
+        for (int k = 0; k < n->nbody; k++)
+            spawn_infer_chan_caps_stmt(n, n->body[k]);
+        return;
+    }
     for (int k = 0; k < n->nbody; k++)
         spawn_infer_value_caps_stmt(n, n->body[k]);
 }

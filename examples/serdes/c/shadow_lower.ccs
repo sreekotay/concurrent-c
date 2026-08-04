@@ -36,7 +36,7 @@ static void usage(const char* argv0) {
     fprintf(stderr,
             "usage: %s <input.ccs|.cch> [-o output] [--exe binary]\n"
             "          [--no-cache] [--verbose] [--release] [--debug] [--dry-run]\n"
-            "          [--cc-flags=FLAGS] [--ld-flags=FLAGS]\n"
+            "          [--no-runtime] [--cc-flags=FLAGS] [--ld-flags=FLAGS]\n"
             "  -o out.c/.h  lowered text\n"
             "  -o binary    host-cc build with emit/obj cache\n"
             "  --exe        libtcc from emit buffer (no .c on disk)\n"
@@ -285,6 +285,8 @@ int main(int argc, char** argv) {
             g_shadow_host_opts.opt_debug = 1;
         } else if (strcmp(argv[i], "--dry-run") == 0) {
             g_shadow_host_opts.dry_run = 1;
+        } else if (strcmp(argv[i], "--no-runtime") == 0) {
+            g_shadow_host_opts.no_runtime = 1;
         } else if (strncmp(argv[i], "--cc-flags=", 11) == 0) {
             g_shadow_host_opts.cc_flags = argv[i] + 11;
         } else if (strncmp(argv[i], "--ld-flags=", 11) == 0) {

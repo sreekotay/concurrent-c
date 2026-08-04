@@ -717,7 +717,7 @@ static int run_one_test(const char* stem,
     }
 
     /* 1) Build via ccc build (this is the build system under test).
-     * Opt-in SERDES front: CC_TEST_FRONTEND=serdes or CC_FRONTEND=serdes.
+     * Front: CC_TEST_FRONTEND / CC_FRONTEND = serdes|legacy (ccc default: serdes).
      * Pinning build diagnostics requires a cold parse — warm emit cache
      * skips shadow_lower and would silently drop .build_stderr matches. */
     char build_cmd[3072];
@@ -728,6 +728,7 @@ static int run_one_test(const char* stem,
         const char* fe = getenv("CC_TEST_FRONTEND");
         if (!fe || !fe[0]) fe = getenv("CC_FRONTEND");
         if (fe && strcmp(fe, "serdes") == 0) front_flag = "--frontend=serdes ";
+        else if (fe && strcmp(fe, "legacy") == 0) front_flag = "--frontend=legacy ";
     }
     if (ldflags_clean[0]) {
         snprintf(build_cmd, sizeof(build_cmd),

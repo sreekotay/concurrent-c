@@ -17,6 +17,8 @@ set -eu
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 CCC=./cc/bin/ccc
+# @noblock lying-decl warnings are emitted by the legacy visitor pipeline.
+export CC_FRONTEND=legacy
 
 fail() { echo "[test_autoblock_noblock_warn] FAIL: $1" >&2; exit 1; }
 
@@ -31,7 +33,7 @@ decl_line=$(grep -n '@noblock static void record_tid' "$fixture" | head -1 | cut
 def_line=$(grep -n '^static void record_tid' "$fixture" | head -1 | cut -d: -f1)
 [ -n "$decl_line" ] && [ -n "$def_line" ] || fail "fixture drifted: cannot locate decl/def lines in $fixture"
 
-"$CCC" --no-cache --emit-c-only "$fixture" >/dev/null 2>"$tmp_dir/dp.err" \
+"$CCC" --frontend=legacy --no-cache --emit-c-only "$fixture" >/dev/null 2>"$tmp_dir/dp.err" \
   || fail "decl-promises fixture failed to compile: $(cat "$tmp_dir/dp.err")"
 
 grep -Eq "$WARN_RE" "$tmp_dir/dp.err" \
@@ -46,7 +48,7 @@ grep -Eq "definition at [^ ]*${fixture##*/}:${def_line} does not carry it" "$tmp
 
 # --- 2/3. honest configurations must be warning-free ---
 for f in tests/autoblock_noblock_def_wins_smoke.ccs tests/autoblock_noblock_decl_and_def_smoke.ccs; do
-  "$CCC" --no-cache --emit-c-only "$f" >/dev/null 2>"$tmp_dir/ok.err" \
+  "$CCC" --frontend=legacy --no-cache --emit-c-only "$f" >/dev/null 2>"$tmp_dir/ok.err" \
     || fail "$f failed to compile: $(cat "$tmp_dir/ok.err")"
   if grep -Eq 'promises @noblock' "$tmp_dir/ok.err"; then
     fail "spurious lying-decl warning for $f: $(grep -E 'promises @noblock' "$tmp_dir/ok.err")"

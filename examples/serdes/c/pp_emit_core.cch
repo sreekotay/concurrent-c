@@ -2361,8 +2361,18 @@ static void shadow_field_register_ex(const char* ty, const char* field,
     int i;
     const char* fty = field_ty;
     if (!ty || !ty[0] || !field || !field[0]) return;
-    if (g_shadow_nfields >= (int)(sizeof(g_shadow_fields) / sizeof(g_shadow_fields[0])))
+    if (g_shadow_nfields >= (int)(sizeof(g_shadow_fields) / sizeof(g_shadow_fields[0]))) {
+        static int reported;
+        if (!reported) {
+            fprintf(stderr,
+                    "error: struct field table full (%d); later fields will "
+                    "not resolve for UFCS/safety\n",
+                    (int)(sizeof(g_shadow_fields) / sizeof(g_shadow_fields[0])));
+            reported = 1;
+            g_shadow_ufcs_miss = 1;
+        }
         return;
+    }
     /* Resolve typedef aliases (DbMap → ArrayMap_CCSliceHdr_Entr*). */
     if (fty && fty[0]) {
         int ai;

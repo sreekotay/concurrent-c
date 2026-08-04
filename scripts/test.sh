@@ -12,9 +12,10 @@ set -euo pipefail
 #   --full             same as CC_TEST_FULL=1
 #   CC_TEST_QUICK=0    same as --full (escape hatch if something sets QUICK=1)
 #   --quick            explicit default (no-op unless paired with conflicting FULL)
-#   --serdes           build tests via ccc --frontend=serdes (CC_TEST_FRONTEND=serdes)
+#   --serdes           pin harness to serdes (ccc default; explicit)
+#   --legacy           pin harness to legacy front (CC_TEST_FRONTEND=legacy)
 #   --compare-front    run the harness twice (legacy then serdes) and print wall times
-#   CC_TEST_FRONTEND=serdes|legacy   same as --serdes when set to serdes
+#   CC_TEST_FRONTEND=serdes|legacy   same as --serdes / --legacy
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
@@ -30,10 +31,10 @@ if [ -f "./tools/cc_test.c" ] && [ "./tools/cc_test.c" -nt "./tools/cc_test" ]; 
   cc -O2 -Wall -Wextra tools/cc_test.c -o tools/cc_test
 fi
 
-# Default: quick. Full is opt-in.
+# Default: quick. Full is opt-in. Front default: serdes (ccc default).
 quick=1
 full=0
-serdes=0
+front=serdes
 compare_front=0
 case "${CC_TEST_FULL:-0}" in
   1|yes|true|TRUE|Yes) full=1 ;;
@@ -42,7 +43,8 @@ case "${CC_TEST_QUICK:-}" in
   0|no|false|FALSE|No) full=1 ;;
 esac
 case "${CC_TEST_FRONTEND:-}" in
-  serdes) serdes=1 ;;
+  serdes) front=serdes ;;
+  legacy) front=legacy ;;
 esac
 # Strip front flags before handing argv to cc_test; keep --quick/--full.
 args=()
@@ -50,7 +52,8 @@ for a in "$@"; do
   case "$a" in
     --quick) quick=1; full=0; args+=("$a") ;;
     --full)  full=1; args+=("$a") ;;
-    --serdes) serdes=1 ;;
+    --serdes) front=serdes ;;
+    --legacy) front=legacy ;;
     --compare-front) compare_front=1 ;;
     *) args+=("$a") ;;
   esac
@@ -105,9 +108,9 @@ else
   echo "[test] full mode (jobs=$jobs)"
 fi
 
-if [ "$serdes" = 1 ] || [ "$compare_front" = 1 ]; then
+if [ "$front" = "serdes" ] || [ "$compare_front" = 1 ]; then
   if [ ! -x "./out/cc/bin/shadow_lower" ] && [ ! -x "./cc/bin/shadow_lower" ]; then
-    echo "[test] FAIL: --serdes/--compare-front needs native shadow_lower (make -C cc)"
+    echo "[test] FAIL: serdes front needs native shadow_lower (make -C cc)"
     exit 1
   fi
 fi
@@ -186,8 +189,14 @@ if [ -x "./cc/bin/ccc" ]; then
       echo "[test] redis functional smoke FAILED"
       exit 1
     fi
+    if [ "$front" = "serdes" ]; then
+      if ! sh scripts/test_serdes_real_projects.sh; then
+        echo "[test] serdes real-projects smoke FAILED"
+        exit 1
+      fi
+    fi
   else
-    echo "[test] quick: skipped async_line_map / diag_cache / variant_shape / tcc_patch / redis_functional"
+    echo "[test] quick: skipped async_line_map / diag_cache / variant_shape / tcc_patch / redis_functional / serdes_real"
   fi
 fi
 
@@ -196,23 +205,16 @@ now_s() {
 }
 
 run_harness() {
-  front="$1"
+  local_front="$1"
   shift
-  export CC_TEST_FRONTEND="$front"
-  # Keep CC_FRONTEND in sync so nested tools see the same choice.
-  if [ "$front" = "serdes" ]; then
-    export CC_FRONTEND=serdes
-  else
-    unset CC_FRONTEND 2>/dev/null || true
-    export CC_TEST_FRONTEND=legacy
-  fi
+  export CC_TEST_FRONTEND="$local_front"
+  export CC_FRONTEND="$local_front"
   # shellcheck disable=SC2086
   ./tools/cc_test $extra "$@"
 }
 
 if [ "$compare_front" = 1 ]; then
   echo "[test] compare-front: legacy then serdes (same harness args)"
-  echo "[test] note: serdes coverage is incomplete — expect more failures; metric is wall time"
   t0="$(now_s)"
   set +e
   # shellcheck disable=SC2086
@@ -233,20 +235,15 @@ if [ "$compare_front" = 1 ]; then
   echo "[test] compare-front summary"
   echo "  legacy: ${leg_s}s  rc=$rc_leg"
   echo "  serdes: ${ser_s}s  rc=$rc_ser  (${ratio} of legacy wall time)"
-  if [ "$rc_ser" -ne 0 ]; then
-    echo "[test] tip: serdes front failed some tests (expected until coverage grows)"
+  if [ "$rc_leg" -ne 0 ] || [ "$rc_ser" -ne 0 ]; then
+    exit 1
   fi
-  # Gate on legacy; serdes incompleteness is informational for this mode.
-  exit "$rc_leg"
+  exit 0
 fi
 
-if [ "$serdes" = 1 ]; then
-  echo "[test] frontend=serdes (ccc --frontend=serdes via CC_TEST_FRONTEND)"
-  export CC_TEST_FRONTEND=serdes
-  export CC_FRONTEND=serdes
-else
-  unset CC_TEST_FRONTEND 2>/dev/null || true
-fi
+echo "[test] frontend=$front (CC_TEST_FRONTEND / ccc --frontend)"
+export CC_TEST_FRONTEND="$front"
+export CC_FRONTEND="$front"
 
 # shellcheck disable=SC2086
 exec ./tools/cc_test $extra "$@"

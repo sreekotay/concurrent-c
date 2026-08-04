@@ -1,23 +1,24 @@
 # SERDES 2-stage emit experiment
 
-**Status: succession path (opt-in).** Beachhead metric on
-`./scripts/test.sh --serdes --quick` is the succession metric (currently
-green on the full `--serdes` suite). Focused `scripts/test_serdes.sh`
-is architectural smoke only. The tape → whitelist-AST → tape-fallback spine
-stays; active hardening (not changing that spine):
+**Status: succession path (default front).** Beachhead metric on
+`./scripts/test.sh --quick` (serdes default) / `./scripts/test.sh --serdes`.
+Focused `scripts/test_serdes.sh` is architectural smoke;
+`scripts/test_serdes_real_projects.sh` covers redis / pigz / levenshtein.
+The tape → whitelist-AST → tape-fallback spine stays; active hardening
+(not changing that spine):
 
 1. **UFCS peel kill** — typed/instance receivers diagnose on structured miss;
    no `Map_CCSliceHdr_int_*` invent; leftover peel only for unbound/opaque.
 2. **Stage-2 exhaustive directives** — implement / passthrough-by-design /
    hard error; `#if` never guesses the true arm; indented `#` recognized.
-3. **ccc↔shadow_lower options contract** — forward release/debug/flags/dry-run;
-   unset-but-unimplemented ccc options hard-error (no silent drop).
+3. **ccc↔shadow_lower options contract** — forward release/debug/flags/target/
+   sysroot/no-runtime/dry-run; build.cc dump paths need `--frontend=legacy`.
 
-Default `ccc` stays legacy. Opt in with:
+Default `ccc` is serdes. Opt out with:
 
 ```bash
-ccc --frontend=serdes examples/hello.ccs -o /tmp/hello
-# or: CC_FRONTEND=serdes ccc examples/hello.ccs -o /tmp/hello
+ccc --frontend=legacy examples/hello.ccs -o /tmp/hello
+# or: CC_FRONTEND=legacy ccc examples/hello.ccs -o /tmp/hello
 ```
 
 `shadow_lower` is the product tool: emit text, host-cc build with emit/obj

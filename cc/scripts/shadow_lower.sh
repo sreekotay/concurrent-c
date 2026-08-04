@@ -19,4 +19,6 @@ CCC="${CCC:-$ROOT/out/cc/bin/ccc}"
 if [[ ! -x "$CCC" ]]; then
   CCC="$ROOT/cc/bin/ccc"
 fi
-exec "$CCC" run --no-cache "$ROOT/examples/serdes/c/shadow_lower.ccs" -- "$@"
+# Bootstrap must stay on legacy — serdes is the default and needs native shadow_lower.
+exec env CC_FRONTEND=legacy "$CCC" --frontend=legacy run --no-cache \
+  "$ROOT/examples/serdes/c/shadow_lower.ccs" -- "$@"

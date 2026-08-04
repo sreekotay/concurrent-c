@@ -1053,37 +1053,26 @@ static int shadow_emit_defer_epilogue(CEmit* out, ShadowCtx* ctx) {
     char i1[80];
     shadow_indent_nest(i1, sizeof(i1), ind, 1);
     if (!cemit_str(out, "__cc_cleanup:\n")) return 0;
-    /* @destroy (nursery wait/free) before @defer (file/channel close) —
-     * legacy order. Without this, defer-only cleanup closes inputs before
-     * producers run (pigz → 0-byte gzip). */
-    if (ctx->destroys && ctx->ndestroys > 0) {
-        int d;
-        for (d = ctx->ndestroys - 1; d >= 0; d--) {
-            if (!shadow_emit_one_destroy(ctx->destroys[d], out, ctx, ind))
-                return 0;
-        }
-    }
-    /* Reverse declaration order */
-    for (int i = ctx->ndefers - 1; i >= 0; i--) {
-        AstNode* d = ctx->defers[i];
-        const char* mode = d->c;
-        if (mode[0] == 0) {
-            /* always */
-            for (int k = 0; k < d->nbody; k++) {
-                if (!shadow_emit_stmt_ctx(d->body[k], out, ctx, ind, 0)) return 0;
+    /* Interleave @destroy and @defer in reverse declaration order (tok_off)
+     * so later-declared resources are released before earlier ones. */
+    {
+        int di = (ctx->destroys && ctx->ndestroys > 0) ? ctx->ndestroys - 1 : -1;
+        int fi = ctx->ndefers - 1;
+        while (di >= 0 || fi >= 0) {
+            int do_dest = 0;
+            if (di >= 0 && fi >= 0)
+                do_dest = ctx->destroys[di]->tok_off >= ctx->defers[fi]->tok_off;
+            else
+                do_dest = (di >= 0);
+            if (do_dest) {
+                if (!shadow_emit_one_destroy(ctx->destroys[di], out, ctx, ind))
+                    return 0;
+                di--;
+            } else {
+                if (!shadow_emit_one_defer(ctx->defers[fi], out, ctx, ind, 0))
+                    return 0;
+                fi--;
             }
-        } else if (strcmp(mode, "ok") == 0) {
-            if (!cemit_fmt(out, "%sif (!__cc_ret_err) {\n", ind)) return 0;
-            for (int k = 0; k < d->nbody; k++) {
-                if (!shadow_emit_stmt_ctx(d->body[k], out, ctx, i1, 0)) return 0;
-            }
-            if (!cemit_fmt(out, "%s}\n", ind)) return 0;
-        } else if (strcmp(mode, "err") == 0) {
-            if (!cemit_fmt(out, "%sif (__cc_ret_err) {\n", ind)) return 0;
-            for (int k = 0; k < d->nbody; k++) {
-                if (!shadow_emit_stmt_ctx(d->body[k], out, ctx, i1, 0)) return 0;
-            }
-            if (!cemit_fmt(out, "%s}\n", ind)) return 0;
         }
     }
     return cemit_fmt(out,

@@ -1397,9 +1397,19 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
         /* CCExclusive* → cc_exclusive_acquire(excl, name). */
         snprintf(dst, cap, "cc_exclusive_acquire(%s, %s)", recv, a);
     } else if (!is_arrow && strcmp(meth_name, "release") == 0) {
-        snprintf(dst, cap, "cc_exclusive_guard_release(&%s)", recv);
+        /* CCString.release(arena) vs CCExclusiveGuard.release(). */
+        if (strcmp(vty, "CCString") == 0 ||
+            (rb && strcmp(rb->ty, "CCString") == 0))
+            snprintf(dst, cap, "cc_string_release(&%s, %s)", recv, a);
+        else
+            snprintf(dst, cap, "cc_exclusive_guard_release(&%s)", recv);
     } else if (is_arrow && strcmp(meth_name, "release") == 0) {
-        snprintf(dst, cap, "cc_exclusive_guard_release(%s)", recv);
+        if (strcmp(vty, "CCString") == 0 || strcmp(vty, "CCString*") == 0 ||
+            (rb && (strcmp(rb->ty, "CCString") == 0 ||
+                    strcmp(rb->ty, "CCString*") == 0)))
+            snprintf(dst, cap, "cc_string_release(%s, %s)", recv, a);
+        else
+            snprintf(dst, cap, "cc_exclusive_guard_release(%s)", recv);
     } else if (!is_arrow && strcmp(meth_name, "destroy") == 0 &&
                (strcmp(vty, "CCExclusiveGuard") == 0 ||
                 (rb && strcmp(rb->ty, "CCExclusiveGuard") == 0))) {
@@ -4026,7 +4036,10 @@ static void shadow_emit_expr_text(AstNode* st, const char* text, char* dst,
                     shadow_rewrite_result_ctors(dst, cap, elem_ty);
                 return;
             }
-            /* Keep sink dest for text peel (same bang-suffix case). */
+            /* Keep sink dest only for bang suffix — subexpression calls
+             * (e.g. `w.foo(1.0) + 100.0`) must not inherit the decl type. */
+            if (!strstr(cur, "!>"))
+                g_shadow_sink_dest[0] = 0;
         }
     }
     shadow_emit_text_ufcs(dst, cap, cur, elem_ty);
