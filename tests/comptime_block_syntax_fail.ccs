@@ -1,0 +1,13 @@
+#include <ccc/std/prelude.cch>
+
+/* A syntax error inside @comptime must blame this file and the bad line —
+ * not "<string>:N" and not a bare "comptime TU compile failed".  The
+ * executor injects `#line` before the block body so libtcc's diagnostic
+ * names the user source. */
+@comptime {
+    for (int i = 0; i < 3 i++) {
+        (void)i;
+    }
+}
+
+int main(void) { return 0; }

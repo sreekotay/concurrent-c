@@ -32,9 +32,10 @@ the readable spec and carries small inputs; above an 8-codepoint threshold,
 Allison–Dix bit-parallel LCS (indel = n + m − 2·LCS), both blocked to
 arbitrary lengths over 64-bit words; and where rapidfuzz reaches for C++
 templates on the block count, one `@comptime` block in the same file emits
-`lev__lcs_fx2`..`fx8` — the kernel unrolled to a fixed count, every state
-word in a register. The generated specialization is ordinary C, spliced
-where the block sits, readable in the lowered output (`--emit-c-only`).
+`lev__dist_fx2`..`fx8` and `lev__lcs_fx2`..`fx8` — each kernel unrolled to
+a fixed block count, every state word in a register. The generated
+specialization is ordinary C, spliced where the block sits, readable in the
+lowered output (`--emit-c-only`).
 
 ## Referees
 
@@ -52,20 +53,23 @@ imports the module in the main suite without needing pip.
 
 ## Cost, honestly (release build, one machine)
 
+Snapshot from `ccc build -O` + `bench.py` on Darwin arm64 (raw output under
+`benchmarks/`). Ratios below 1 mean cclev is faster.
+
 | workload | cclev | upstream | cclev/upstream |
 |---|---|---|---|
-| distance, words 3–12 | 282 ns | 383 ns | 0.74× — cclev faster |
-| distance, 200 chars | 5.6 µs | 5.6 µs | 1.00× — dead heat |
-| ratio, words 3–12 | 264 ns | 371 ns | 0.71× — cclev faster |
-| ratio, 200 chars | 2.3 µs | 1.7 µs | 1.2–1.4× — upstream faster |
-| jaro_winkler, words 3–12 | 295 ns | 430 ns | 0.69× — cclev faster |
+| distance, words 3–12 | 129 ns | 261 ns | 0.49× — cclev faster |
+| distance, 200 chars | 2.6 µs | 3.2 µs | 0.81× — cclev faster |
+| ratio, words 3–12 | 105 ns | 279 ns | 0.37× — cclev faster |
+| ratio, 200 chars | 864 ns | 914 ns | 0.95× — near parity |
+| jaro_winkler, words 3–12 | 101 ns | 288 ns | 0.35× — cclev faster |
+| hamming, equal-len words | 48 ns | 112 ns | 0.43× — cclev faster |
 
-Ratios below 1 mean cclev is faster. Short strings: cclev wins — the abi3
-crossing is cheaper than upstream's binding layer. Long `distance` sits at
-parity with rapidfuzz; long `ratio` trails inside a wide noise band
-(repeat runs range 0.8–1.4×), the residue being one structural cost:
-Python str reaches us as UTF-8 bytes to decode, while upstream reads
-CPython's internal codepoint array and never decodes at all. With the
-scalar DP alone the long rows read 13× and 35×. (Refresh the table from a
-bench run on your machine — the crossing-dominated short rows especially
-move with the CPU.)
+Short strings: cclev wins — the abi3 crossing is cheaper than upstream's
+binding layer. Long rows sit at or ahead of rapidfuzz after the bit-parallel
+kernels and `@comptime` fixed-block specializations; the remaining residue
+is structural: Python str reaches us as UTF-8 bytes to decode, while
+upstream reads CPython's internal codepoint array and never decodes at all.
+With the scalar DP alone the long rows read 13× and 35×. (Refresh the table
+from a bench run on your machine — the crossing-dominated short rows
+especially move with the CPU.)

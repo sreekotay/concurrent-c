@@ -15,6 +15,7 @@
 typedef struct CCComptimeExecOpts {
     const char* input_path;
     size_t      site_pos;       /* source offset of the @comptime block (anchors) */
+    int         site_line;      /* 1-based line of the first body byte; 0 = unknown */
     const char* type_prelude;   /* optional expanded type defs for host cc_type_of */
 } CCComptimeExecOpts;
 

@@ -395,10 +395,28 @@ static void cc__host_instantiate_chan(const char* elem) {
 }
 
 #ifdef CC_TCC_EXT_AVAILABLE
-static void cc__exec_err_silent(void* opaque, const char* msg) {
-    (void)opaque;
-    if (getenv("CC_DEBUG_COMPTIME_EXEC"))
+/* Capture libtcc diagnostics for the comptime executor TU.  Warnings fire
+ * before errors on a typical failure, so keep the first `error:` message
+ * when one arrives; otherwise retain the first message as a fallback.
+ * CC_DEBUG_COMPTIME_EXEC still mirrors every callback to stderr. */
+typedef struct {
+    char buf[512];
+    int  got_error;
+} CCExecErrSink;
+
+static void cc__exec_err_capture(void* opaque, const char* msg) {
+    CCExecErrSink* sink = (CCExecErrSink*)opaque;
+    if (getenv("CC_DEBUG_COMPTIME_EXEC") && msg)
         fprintf(stderr, "[cc:comptime-exec] tcc: %s\n", msg);
+    if (!sink || !msg || !msg[0]) return;
+    {
+        int is_err = strstr(msg, "error:") != NULL;
+        if (sink->got_error && !is_err) return;
+        if (sink->got_error && is_err) return; /* first error wins */
+        if (is_err) sink->got_error = 1;
+        else if (sink->buf[0]) return;         /* keep first warning */
+        snprintf(sink->buf, sizeof(sink->buf), "%s", msg);
+    }
 }
 
 static const char* cc__exec_lib_dir(char* buf, size_t cap) {
@@ -439,7 +457,8 @@ static int cc__exec_fndefs_need_exec_define(const char* fndefs) {
     return fndefs && strstr(fndefs, "__cc_gfac_") != NULL;
 }
 
-static char* cc__exec_build_tu(const char* body, size_t body_len) {
+static char* cc__exec_build_tu(const char* body, size_t body_len,
+                               const char* file, int line) {
     static const char entry[] = "\nvoid __cc_ct_entry(void) {\n";
     static const char tail[] = "\n}\n";
     static const char exec_def[] = "#define CC_COMPTIME_EXEC 1\n";
@@ -449,13 +468,22 @@ static char* cc__exec_build_tu(const char* body, size_t body_len) {
     size_t pre = sizeof(CC__EXEC_PRELUDE) - 1;
     size_t ent = sizeof(entry) - 1;
     size_t tl = sizeof(tail) - 1;
-    char* s = (char*)malloc(ed + pre + fndef_len + ent + body_len + tl + 1);
+    /* `#line N "file"` before the body so libtcc names the user source, not
+     * `<string>:N`.  Line is the 1-based line of the first body byte. */
+    char line_dir[1100];
+    size_t ld = 0;
+    if (file && file[0] && line > 0) {
+        int n = snprintf(line_dir, sizeof(line_dir), "#line %d \"%s\"\n", line, file);
+        if (n > 0 && (size_t)n < sizeof(line_dir)) ld = (size_t)n;
+    }
+    char* s = (char*)malloc(ed + pre + fndef_len + ent + ld + body_len + tl + 1);
     if (!s) return NULL;
     size_t o = 0;
     if (ed) { memcpy(s + o, exec_def, ed); o += ed; }
     memcpy(s + o, CC__EXEC_PRELUDE, pre); o += pre;
     if (fndef_len) { memcpy(s + o, fndefs, fndef_len); o += fndef_len; }
     memcpy(s + o, entry, ent); o += ent;
+    if (ld) { memcpy(s + o, line_dir, ld); o += ld; }
     memcpy(s + o, body, body_len); o += body_len;
     memcpy(s + o, tail, tl); o += tl;
     s[o] = '\0';
@@ -609,7 +637,7 @@ static char* cc__exec_build_litproj_tu(const char* expr) {
     return s;
 }
 
-static TCCState* cc__exec_new_state(char* err_buf, size_t err_sz);
+static TCCState* cc__exec_new_state(CCExecErrSink* sink, char* err_buf, size_t err_sz);
 
 /* Compile + relocate + run the litproj TU, then read back the projected text
  * (__cc_ce_text/__cc_ce_len) and the projectability flag (__cc_ce_ok).
@@ -619,21 +647,29 @@ static int cc__exec_run_litproj_tu(const char* tu,
                                    char** out_lit, size_t* out_len,
                                    char* err_buf, size_t err_sz,
                                    CCArena* arena) {
+    CCExecErrSink sink;
     if (out_lit) *out_lit = NULL;
     if (out_len) *out_len = 0;
     if (!arena) {
         if (err_buf && err_sz) snprintf(err_buf, err_sz, "comptime value eval requires an arena");
         return -1;
     }
-    TCCState* s = cc__exec_new_state(err_buf, err_sz);
+    memset(&sink, 0, sizeof(sink));
+    TCCState* s = cc__exec_new_state(&sink, err_buf, err_sz);
     if (!s) return -1;
     if (tcc_compile_string(s, tu) < 0) {
-        if (err_buf && err_sz) snprintf(err_buf, err_sz, "comptime value TU compile failed");
+        if (err_buf && err_sz) {
+            if (sink.buf[0]) snprintf(err_buf, err_sz, "%s", sink.buf);
+            else snprintf(err_buf, err_sz, "comptime value TU compile failed");
+        }
         tcc_delete(s);
         return -1;
     }
     if (tcc_relocate(s) < 0) {
-        if (err_buf && err_sz) snprintf(err_buf, err_sz, "comptime value TU relocate failed");
+        if (err_buf && err_sz) {
+            if (sink.buf[0]) snprintf(err_buf, err_sz, "%s", sink.buf);
+            else snprintf(err_buf, err_sz, "comptime value TU relocate failed");
+        }
         tcc_delete(s);
         return -1;
     }
@@ -710,13 +746,13 @@ static int cc__exec_run_tu(const char* tu, char* err_buf, size_t err_sz) {
  * executor: libtcc lib path, the compiler's CC_INCLUDE_PATH, and the full host
  * verb symbol table.  Shared by @comptime block execution and the in-process
  * compiled-factory path so both run in an identical environment. */
-static TCCState* cc__exec_new_state(char* err_buf, size_t err_sz) {
+static TCCState* cc__exec_new_state(CCExecErrSink* sink, char* err_buf, size_t err_sz) {
     TCCState* s = tcc_new();
     if (!s) {
         if (err_buf && err_sz) snprintf(err_buf, err_sz, "tcc_new failed");
         return NULL;
     }
-    tcc_set_error_func(s, NULL, cc__exec_err_silent);
+    tcc_set_error_func(s, sink, cc__exec_err_capture);
     /* Parse at the version the real compile will use; see the constant. */
     tcc_set_options(s, CC_HOST_C_STD_OPTION);
     {
@@ -781,16 +817,24 @@ static TCCState* cc__exec_new_state(char* err_buf, size_t err_sz) {
 }
 
 static int cc__exec_run_tu_ex(const char* tu, char* err_buf, size_t err_sz, int64_t* out_int) {
-    TCCState* s = cc__exec_new_state(err_buf, err_sz);
+    CCExecErrSink sink;
+    memset(&sink, 0, sizeof(sink));
+    TCCState* s = cc__exec_new_state(&sink, err_buf, err_sz);
     if (!s) return -1;
 
     if (tcc_compile_string(s, tu) < 0) {
-        if (err_buf && err_sz) snprintf(err_buf, err_sz, "comptime TU compile failed");
+        if (err_buf && err_sz) {
+            if (sink.buf[0]) snprintf(err_buf, err_sz, "%s", sink.buf);
+            else snprintf(err_buf, err_sz, "comptime TU compile failed");
+        }
         tcc_delete(s);
         return -1;
     }
     if (tcc_relocate(s) < 0) {
-        if (err_buf && err_sz) snprintf(err_buf, err_sz, "comptime TU relocate failed");
+        if (err_buf && err_sz) {
+            if (sink.buf[0]) snprintf(err_buf, err_sz, "%s", sink.buf);
+            else snprintf(err_buf, err_sz, "comptime TU relocate failed");
+        }
         tcc_delete(s);
         return -1;
     }
@@ -827,21 +871,29 @@ static int cc__exec_run_tu_ex(const char* tu, char* err_buf, size_t err_sz, int6
  * compile is in-process (ms) and shares the executor's exact environment. */
 int cc_comptime_exec_compile_tu(const char* tu_src, void** out_state,
                                 char* err_buf, size_t err_sz) {
+    CCExecErrSink sink;
     if (err_buf && err_sz) err_buf[0] = '\0';
     if (!tu_src || !out_state) {
         if (err_buf && err_sz) snprintf(err_buf, err_sz, "invalid compile_tu args");
         return -1;
     }
     *out_state = NULL;
-    TCCState* s = cc__exec_new_state(err_buf, err_sz);
+    memset(&sink, 0, sizeof(sink));
+    TCCState* s = cc__exec_new_state(&sink, err_buf, err_sz);
     if (!s) return -1;
     if (tcc_compile_string(s, tu_src) < 0) {
-        if (err_buf && err_sz) snprintf(err_buf, err_sz, "factory TU compile failed");
+        if (err_buf && err_sz) {
+            if (sink.buf[0]) snprintf(err_buf, err_sz, "%s", sink.buf);
+            else snprintf(err_buf, err_sz, "factory TU compile failed");
+        }
         tcc_delete(s);
         return -1;
     }
     if (tcc_relocate(s) < 0) {
-        if (err_buf && err_sz) snprintf(err_buf, err_sz, "factory TU relocate failed");
+        if (err_buf && err_sz) {
+            if (sink.buf[0]) snprintf(err_buf, err_sz, "%s", sink.buf);
+            else snprintf(err_buf, err_sz, "factory TU relocate failed");
+        }
         tcc_delete(s);
         return -1;
     }
@@ -986,7 +1038,9 @@ int cc_comptime_exec_block_body(const char* body, size_t body_len,
     cc_emit_plan_host_ctx_begin(opts ? opts->site_pos : 0);
     cc__exec_start = clock();
 
-    char* tu = cc__exec_build_tu(body, body_len);
+    char* tu = cc__exec_build_tu(body, body_len,
+                                 opts ? opts->input_path : NULL,
+                                 opts ? opts->site_line : 0);
     if (!tu) {
         cc_emit_plan_host_ctx_end();
         if (err_buf && err_sz) snprintf(err_buf, err_sz, "OOM building comptime TU");

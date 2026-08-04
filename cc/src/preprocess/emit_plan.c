@@ -1721,11 +1721,24 @@ static void cc__exec_visit_block(const char* src, size_t len,
     CCComptimeExecOpts opts = {0};
     opts.input_path = input_path;
     opts.site_pos = body_l;
+    /* First body byte — `#line` in the executor TU maps libtcc diagnostics
+     * to this file:line instead of `<string>:N`. */
+    opts.site_line = (body_l + 1 <= body_r) ? cc__diag_line_for_pos(body_l + 1) : 0;
     char err[512];
     if (cc_comptime_exec_block_body(src + body_l + 1, body_r - body_l - 1,
                                     &opts, err, sizeof(err)) != 0) {
-        fprintf(stderr, "%s: error: @comptime block execution failed: %s\n",
-                input_path ? input_path : "<input>", err[0] ? err : "unknown");
+        /* libtcc messages (with `#line`) already look like
+         * `file:line: error: ...` — pass them through.  Generic failures
+         * still get a path:line wrapper at the @comptime site. */
+        if (err[0] && strstr(err, "error:")) {
+            fprintf(stderr, "%s\n", err);
+        } else {
+            int line = opts.site_line > 0 ? opts.site_line
+                                          : cc__diag_line_for_pos(body_l);
+            fprintf(stderr, "%s:%d: error: @comptime block execution failed: %s\n",
+                    input_path ? input_path : "<input>", line,
+                    err[0] ? err : "unknown");
+        }
         cc__exec_failed = 1;
     }
     cc__exec_range_mark(body_l, body_r);

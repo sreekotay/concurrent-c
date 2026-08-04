@@ -1,0 +1,4 @@
+# Syntax errors in @comptime blocks must carry file:line from the user
+# source (via `#line` in the executor TU), not an opaque
+# "comptime TU compile failed" or a bare "<string>:N".
+comptime_block_syntax_fail.ccs:8: error: ';' expected (got 'i')
