@@ -313,8 +313,531 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
     /* AST+type: one normalize/bind walk before emit (not per-expr string soup). */
     shadow_collect_binds(items, n);
 
-    /* Family factory bodies can emit early; Map/Vec macros wait until after
-     * typedef hoist so element/key types like `Pt` are in scope. */
+    /* Collect Result Ok/Err pairs first — drives specs and __cc_uw_* arms. */
+    ShadowCtx line_ctx = { .cache = cache };
+    char seen_ok[32][128];
+    char seen_err[32][128];
+    int nseen = 0;
+    int need_slice = 0, need_chan = 0, need_spawn_into = 0;
+    int hoist_typedefs = 0;
+    int has_result_hdr = 0;
+    int need_uw = 0;
+
+    for (int i = 0; i < n; i++) {
+        if (items[i]->kind == AST_RESULT_FN || items[i]->kind == AST_RESULT_LOCAL) {
+            int dup = 0;
+            for (int j = 0; j < nseen; j++) {
+                if (strcmp(seen_ok[j], items[i]->c) == 0 &&
+                    strcmp(seen_err[j], items[i]->b) == 0) { dup = 1; break; }
+            }
+            if (!dup && nseen < 32) {
+                snprintf(seen_ok[nseen], sizeof(seen_ok[0]), "%s", items[i]->c);
+                snprintf(seen_err[nseen], sizeof(seen_err[0]), "%s", items[i]->b);
+                nseen++;
+            }
+        }
+        if (items[i]->kind == AST_TYPEDEF_INT && items[i]->c[0] && items[i]->d[0]) {
+            int dup = 0;
+            for (int j = 0; j < nseen; j++) {
+                if (strcmp(seen_ok[j], items[i]->c) == 0 &&
+                    strcmp(seen_err[j], items[i]->d) == 0) { dup = 1; break; }
+            }
+            if (!dup && nseen < 32) {
+                snprintf(seen_ok[nseen], sizeof(seen_ok[0]), "%s", items[i]->c);
+                snprintf(seen_err[nseen], sizeof(seen_err[0]), "%s", items[i]->d);
+                nseen++;
+            }
+        }
+        if (items[i]->kind == AST_SLICE_VAR) need_slice = 1;
+        if (items[i]->kind == AST_CHAN_VAR) {
+            need_chan = 1;
+            /* Result-typed channel elems: ensure CCResult_* specs exist. */
+            if (strncmp(items[i]->d, "CCResult_", 9) == 0) {
+                const char* rest = items[i]->d + 9;
+                const char* us = strrchr(rest, '_');
+                char ok[64], err[64];
+                int dup = 0, j;
+                if (us && us > rest) {
+                    size_t ol = (size_t)(us - rest);
+                    if (ol >= sizeof(ok)) ol = sizeof(ok) - 1;
+                    memcpy(ok, rest, ol);
+                    ok[ol] = 0;
+                    snprintf(err, sizeof(err), "%s", us + 1);
+                    for (j = 0; j < nseen; j++) {
+                        if (strcmp(seen_ok[j], ok) == 0 &&
+                            strcmp(seen_err[j], err) == 0) {
+                            dup = 1;
+                            break;
+                        }
+                    }
+                    if (!dup && nseen < 32) {
+                        snprintf(seen_ok[nseen], sizeof(seen_ok[0]), "%s", ok);
+                        snprintf(seen_err[nseen], sizeof(seen_err[0]), "%s",
+                                 err);
+                        nseen++;
+                    }
+                }
+            }
+        }
+        if (items[i]->kind == AST_STRUCT || items[i]->kind == AST_FN ||
+            items[i]->kind == AST_STATIC_FN || items[i]->kind == AST_RESULT_FN) {
+            for (int k = 0; k < items[i]->nkids; k++) {
+                AstNode* kid = items[i]->kids[k];
+                if (kid->kind == AST_SLICE_VAR) need_slice = 1;
+                if (kid->kind == AST_CHAN_VAR) {
+                    need_chan = 1;
+                    if (strncmp(kid->d, "CCResult_", 9) == 0) {
+                        const char* rest = kid->d + 9;
+                        const char* us = strrchr(rest, '_');
+                        char ok[64], err[64];
+                        int dup = 0, j;
+                        if (us && us > rest) {
+                            size_t ol = (size_t)(us - rest);
+                            if (ol >= sizeof(ok)) ol = sizeof(ok) - 1;
+                            memcpy(ok, rest, ol);
+                            ok[ol] = 0;
+                            snprintf(err, sizeof(err), "%s", us + 1);
+                            for (j = 0; j < nseen; j++) {
+                                if (strcmp(seen_ok[j], ok) == 0 &&
+                                    strcmp(seen_err[j], err) == 0) {
+                                    dup = 1;
+                                    break;
+                                }
+                            }
+                            if (!dup && nseen < 32) {
+                                snprintf(seen_ok[nseen], sizeof(seen_ok[0]),
+                                         "%s", ok);
+                                snprintf(seen_err[nseen], sizeof(seen_err[0]),
+                                         "%s", err);
+                                nseen++;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /* Host-cc: builtins + TU-seen Result types (not a handwritten E allowlist). */
+    if (kind == SHADOW_EMIT_C) {
+        for (int i = 0; i < npass_inc; i++) {
+            if (strstr(pass_inc[i], "cc_result") ||
+                strstr(pass_inc[i], "cc_runtime") ||
+                strstr(pass_inc[i], "prelude")) {
+                has_result_hdr = 1;
+                break;
+            }
+        }
+        for (int i = 0; i < n && !need_uw; i++)
+            need_uw = shadow_node_needs_uw(items[i]);
+        if (need_uw && !has_result_hdr) {
+            if (!cemit_str(out, "#include <ccc/cc_result.h>\n\n")) return 0;
+            has_result_hdr = 1;
+        }
+        if (need_uw) {
+            int si;
+            char rname[128];
+            char apath[64];
+            /* Clang requires complete types in _Generic associations. Only
+             * arm types fully declared by <ccc/cc_result.h> (+ TU-seen
+             * specs emitted below). IoError Results need their header. */
+            {
+                int need_io = 0;
+                for (si = 0; si < nseen; si++) {
+                    if (strcmp(seen_err[si], "CCIoError") == 0) {
+                        need_io = 1;
+                        break;
+                    }
+                }
+                /* Channel send/recv returns CCResult_bool_CCIoError even when
+                 * the TU never declares a Result local of that shape. */
+                if (need_chan) {
+                    int has_bool_io = 0;
+                    for (si = 0; si < nseen; si++) {
+                        if (strcmp(seen_ok[si], "bool") == 0 &&
+                            strcmp(seen_err[si], "CCIoError") == 0) {
+                            has_bool_io = 1;
+                            break;
+                        }
+                    }
+                    if (!has_bool_io && nseen < 32) {
+                        snprintf(seen_ok[nseen], sizeof(seen_ok[0]), "bool");
+                        snprintf(seen_err[nseen], sizeof(seen_err[0]),
+                                 "CCIoError");
+                        nseen++;
+                    }
+                    need_io = 1;
+                }
+                /* py_expose_* returns CCResult_CCPyptr_CCError — arm __cc_uw_*. */
+                {
+                    int gi, has_pyptr = 0;
+                    for (gi = 0; gi < g_shadow_nginst; gi++) {
+                        if (strcmp(g_shadow_ginst[gi].family, "py_expose") == 0)
+                            break;
+                    }
+                    if (gi < g_shadow_nginst) {
+                        for (si = 0; si < nseen; si++) {
+                            if (strcmp(seen_ok[si], "CCPyptr") == 0 &&
+                                strcmp(seen_err[si], "CCError") == 0) {
+                                has_pyptr = 1;
+                                break;
+                            }
+                        }
+                        if (!has_pyptr && nseen < 32) {
+                            snprintf(seen_ok[nseen], sizeof(seen_ok[0]),
+                                     "CCPyptr");
+                            snprintf(seen_err[nseen], sizeof(seen_err[0]),
+                                     "CCError");
+                            nseen++;
+                        }
+                    }
+                }
+                if (need_io &&
+                    !cemit_str(out, "#include <ccc/cc_io_error.h>\n"))
+                    return 0;
+            }
+            if (!cemit_str(out,
+                    "#undef __cc_uw_is_err\n"
+                    "#undef __cc_uw_value\n"
+                    "#undef __cc_uw_err_at\n"
+                    "#define __cc_uw_is_err(__x__) _Generic((__x__), "
+                    "CCResult_int_CCError: "
+                    "(!((CCResult_int_CCError*)(void*)&(__x__))->ok), "
+                    "CCResult_bool_CCError: "
+                    "(!((CCResult_bool_CCError*)(void*)&(__x__))->ok), "
+                    "CCResult_char_CCError: "
+                    "(!((CCResult_char_CCError*)(void*)&(__x__))->ok), "
+                    "CCResult_size_t_CCError: "
+                    "(!((CCResult_size_t_CCError*)(void*)&(__x__))->ok), "
+                    "CCResult_voidptr_CCError: "
+                    "(!((CCResult_voidptr_CCError*)(void*)&(__x__))->ok), "
+                    "CCResult_charptr_CCError: "
+                    "(!((CCResult_charptr_CCError*)(void*)&(__x__))->ok)"))
+                return 0;
+            for (si = 0; si < nseen; si++) {
+                shadow_result_name(seen_ok[si], seen_err[si], rname,
+                                   sizeof(rname));
+                if (strcmp(rname, "CCResult_int_CCError") == 0 ||
+                    strcmp(rname, "CCResult_bool_CCError") == 0 ||
+                    strcmp(rname, "CCResult_char_CCError") == 0 ||
+                    strcmp(rname, "CCResult_size_t_CCError") == 0 ||
+                    strcmp(rname, "CCResult_voidptr_CCError") == 0 ||
+                    strcmp(rname, "CCResult_charptr_CCError") == 0)
+                    continue;
+                if (!cemit_fmt(out,
+                        ", %s: (!((%s*)(void*)&(__x__))->ok)", rname, rname))
+                    return 0;
+            }
+            if (!cemit_str(out,
+                    ", default: (*(void* const*)(void*)&(__x__) == (void*)0))\n"
+                    "#define __cc_uw_value(__x__) _Generic((__x__), "
+                    "CCResult_int_CCError: "
+                    "((CCResult_int_CCError*)(void*)&(__x__))->u.value, "
+                    "CCResult_bool_CCError: "
+                    "((CCResult_bool_CCError*)(void*)&(__x__))->u.value, "
+                    "CCResult_char_CCError: "
+                    "((CCResult_char_CCError*)(void*)&(__x__))->u.value, "
+                    "CCResult_size_t_CCError: "
+                    "((CCResult_size_t_CCError*)(void*)&(__x__))->u.value, "
+                    "CCResult_voidptr_CCError: "
+                    "((CCResult_voidptr_CCError*)(void*)&(__x__))->u.value, "
+                    "CCResult_charptr_CCError: "
+                    "((CCResult_charptr_CCError*)(void*)&(__x__))->u.value"))
+                return 0;
+            for (si = 0; si < nseen; si++) {
+                shadow_result_name(seen_ok[si], seen_err[si], rname,
+                                   sizeof(rname));
+                if (strcmp(rname, "CCResult_int_CCError") == 0 ||
+                    strcmp(rname, "CCResult_bool_CCError") == 0 ||
+                    strcmp(rname, "CCResult_char_CCError") == 0 ||
+                    strcmp(rname, "CCResult_size_t_CCError") == 0 ||
+                    strcmp(rname, "CCResult_voidptr_CCError") == 0 ||
+                    strcmp(rname, "CCResult_charptr_CCError") == 0 ||
+                    strcmp(seen_ok[si], "void") == 0)
+                    continue;
+                if (!cemit_fmt(out, ", %s: ((%s*)(void*)&(__x__))->u.value",
+                               rname, rname))
+                    return 0;
+            }
+            if (!cemit_str(out,
+                    ", default: (__x__))\n"
+                    "#define __cc_uw_err_at(__x__, __e__, __f__, __l__) "
+                    "_Generic((__x__), "
+                    "CCResult_int_CCError: "
+                    "(cc_rt_diag_record_unwrap_site(__f__, __l__), "
+                    "((CCResult_int_CCError*)(void*)&(__x__))->u.error), "
+                    "CCResult_bool_CCError: "
+                    "(cc_rt_diag_record_unwrap_site(__f__, __l__), "
+                    "((CCResult_bool_CCError*)(void*)&(__x__))->u.error), "
+                    "CCResult_char_CCError: "
+                    "(cc_rt_diag_record_unwrap_site(__f__, __l__), "
+                    "((CCResult_char_CCError*)(void*)&(__x__))->u.error), "
+                    "CCResult_size_t_CCError: "
+                    "(cc_rt_diag_record_unwrap_site(__f__, __l__), "
+                    "((CCResult_size_t_CCError*)(void*)&(__x__))->u.error), "
+                    "CCResult_voidptr_CCError: "
+                    "(cc_rt_diag_record_unwrap_site(__f__, __l__), "
+                    "((CCResult_voidptr_CCError*)(void*)&(__x__))->u.error), "
+                    "CCResult_charptr_CCError: "
+                    "(cc_rt_diag_record_unwrap_site(__f__, __l__), "
+                    "((CCResult_charptr_CCError*)(void*)&(__x__))->u.error)"))
+                return 0;
+            for (si = 0; si < nseen; si++) {
+                shadow_result_name(seen_ok[si], seen_err[si], rname,
+                                   sizeof(rname));
+                if (strcmp(rname, "CCResult_int_CCError") == 0 ||
+                    strcmp(rname, "CCResult_bool_CCError") == 0 ||
+                    strcmp(rname, "CCResult_char_CCError") == 0 ||
+                    strcmp(rname, "CCResult_size_t_CCError") == 0 ||
+                    strcmp(rname, "CCResult_voidptr_CCError") == 0 ||
+                    strcmp(rname, "CCResult_charptr_CCError") == 0)
+                    continue;
+                /* Macro returns CCError: exact E, or @as face at offset 0. */
+                apath[0] = 0;
+                if (strcmp(seen_err[si], "CCError") == 0) {
+                    if (!cemit_fmt(out,
+                            ", %s: (cc_rt_diag_record_unwrap_site(__f__, __l__), "
+                            "((%s*)(void*)&(__x__))->u.error)",
+                            rname, rname))
+                        return 0;
+                } else if (shadow_as_path_to(seen_err[si], "CCError", apath,
+                                            sizeof(apath)) &&
+                           apath[0]) {
+                    if (!cemit_fmt(out,
+                            ", %s: (cc_rt_diag_record_unwrap_site(__f__, __l__), "
+                            "(*(CCError*)(void*)&((%s*)(void*)&(__x__))->u.error))",
+                            rname, rname))
+                        return 0;
+                }
+            }
+            if (!cemit_str(out,
+                    ", default: (cc_rt_diag_record_unwrap_site(__f__, __l__), "
+                    "__cc_err_null_at(__e__, __f__, __l__)))\n"
+                    "\n"))
+                return 0;
+        }
+    }
+    /* Hoist typedefs when Result specs need prior names. Also hoist only those
+     * typedefs that are Vec element types (e.g. Pt / CharVec) before
+     * CC_VEC_DECL — not NestedCharVec-style aliases of CCVec_<Alias> (those
+     * need the element DECL first), nor structs that embed Map_. */
+    hoist_typedefs = (nseen > 0 || g_shadow_nginst > 0 || g_shadow_nvecs > 0 || g_shadow_nmaps > 0 ||
+                      g_shadow_namaps > 0);
+
+    if (hoist_typedefs) {
+        for (int i = 0; i < n; i++) {
+            if (items[i]->kind == AST_TYPEDEF_INT) {
+                int needed = (nseen > 0);
+                int vi;
+                if (items[i]->e[0] && strcmp(items[i]->e, "vech") == 0)
+                    continue;
+                /* Hoist when this alias is a Vec/Map element type name. */
+                for (vi = 0; vi < g_shadow_nvecs && !needed; vi++)
+                    if (strcmp(g_shadow_vecs[vi], items[i]->a) == 0) needed = 1;
+                if (!needed) continue;
+                if (!shadow_emit_preamble(items[i], out, cache)) return 0;
+                items[i]->lead_len = 0;
+                if (!shadow_emit_line(out, &line_ctx, items[i], "")) return 0;
+                if (items[i]->c[0] && items[i]->d[0]) {
+                    char rname[256];
+                    shadow_result_name(items[i]->c, items[i]->d, rname,
+                                       sizeof(rname));
+                    if (!cemit_fmt(out, "typedef %s %s;\n", rname, items[i]->a))
+                        return 0;
+                } else if (items[i]->b[0]) {
+                    if (!cemit_fmt(out, "typedef %s %s;\n", items[i]->b,
+                                   items[i]->a))
+                        return 0;
+                } else if (!cemit_fmt(out, "typedef int %s;\n", items[i]->a)) {
+                    return 0;
+                }
+                snprintf(items[i]->e, sizeof(items[i]->e), "vech");
+            }
+            if (items[i]->kind == AST_TYPEDEF_STRUCT) {
+                /* Hoist Result Ok/Err arms, and all structs when a generic
+                 * factory instance needs them in scope (py_expose::[T]). */
+                const char* alias =
+                    items[i]->b[0] ? items[i]->b : items[i]->a;
+                int needed = (g_shadow_nginst > 0);
+                int j;
+                for (j = 0; j < nseen; j++) {
+                    if (strcmp(seen_ok[j], alias) == 0 ||
+                        strcmp(seen_err[j], alias) == 0) {
+                        needed = 1;
+                        break;
+                    }
+                    {
+                        char okptr[128];
+                        snprintf(okptr, sizeof(okptr), "%s*", alias);
+                        if (strcmp(seen_ok[j], okptr) == 0) {
+                            needed = 1;
+                            break;
+                        }
+                    }
+                }
+                if (!needed) continue;
+                /* Hoist field-type typedefs first (FaceA/FaceB / RedisReplyKind
+                 * before DualFaceErr / RedisReply). */
+                {
+                    int k, j2;
+                    for (k = 0; k < items[i]->nkids; k++) {
+                        AstNode* f = items[i]->kids[k];
+                        const char* fty;
+                        if (!f || f->kind != AST_FIELD_SIMPLE) continue;
+                        fty = f->a;
+                        if (!fty || !fty[0] || strchr(fty, '*')) continue;
+                        for (j2 = 0; j2 < n; j2++) {
+                            const char* a2;
+                            if (items[j2]->kind == AST_TYPEDEF_ENUM) {
+                                if (strcmp(items[j2]->e, "hoist") == 0)
+                                    continue;
+                                a2 = items[j2]->b;
+                                if (!a2[0] || strcmp(a2, fty) != 0) continue;
+                                if (!shadow_emit_preamble(items[j2], out, cache))
+                                    return 0;
+                                items[j2]->lead_len = 0;
+                                if (!shadow_emit_line(out, &line_ctx, items[j2],
+                                                       ""))
+                                    return 0;
+                                if (items[j2]->a[0]) {
+                                    if (!cemit_fmt(out, "typedef enum %s {\n",
+                                                   items[j2]->a))
+                                        return 0;
+                                } else if (!cemit_str(out, "typedef enum {\n")) {
+                                    return 0;
+                                }
+                                if (items[j2]->d[0] &&
+                                    !cemit_str(out, items[j2]->d))
+                                    return 0;
+                                if (items[j2]->d[0] && !cemit_str(out, "\n"))
+                                    return 0;
+                                if (!cemit_fmt(out, "} %s;\n\n", items[j2]->b))
+                                    return 0;
+                                snprintf(items[j2]->e, sizeof(items[j2]->e),
+                                         "hoist");
+                                continue;
+                            }
+                            if (items[j2]->kind != AST_TYPEDEF_STRUCT)
+                                continue;
+                            if (strcmp(items[j2]->e, "hoist") == 0) continue;
+                            a2 = items[j2]->b[0] ? items[j2]->b
+                                                 : items[j2]->a;
+                            if (strcmp(a2, fty) != 0) continue;
+                            if (!shadow_emit_preamble(items[j2], out, cache))
+                                return 0;
+                            items[j2]->lead_len = 0;
+                            if (!shadow_emit_line(out, &line_ctx, items[j2],
+                                                   ""))
+                                return 0;
+                            if (!shadow_emit_typedef_struct(items[j2], out,
+                                                            cache, &line_ctx))
+                                return 0;
+                            snprintf(items[j2]->e, sizeof(items[j2]->e),
+                                     "hoist");
+                        }
+                    }
+                }
+                if (!shadow_emit_preamble(items[i], out, cache)) return 0;
+                items[i]->lead_len = 0;
+                if (!shadow_emit_line(out, &line_ctx, items[i], "")) return 0;
+                if (!shadow_emit_typedef_struct(items[i], out, cache, &line_ctx))
+                    return 0;
+                snprintf(items[i]->e, sizeof(items[i]->e), "hoist");
+            } else if (items[i]->kind == AST_TYPEDEF_FN_PTR) {
+                char params[512];
+                shadow_fnptr_ty_register(items[i]->b);
+                if (!shadow_emit_preamble(items[i], out, cache)) return 0;
+                items[i]->lead_len = 0;
+                if (!shadow_emit_line(out, &line_ctx, items[i], "")) return 0;
+                snprintf(params, sizeof(params), "%s",
+                         items[i]->c[0] ? items[i]->c : "void");
+                if (!cemit_fmt(out, "typedef %s (*%s)(%s);\n",
+                               items[i]->a, items[i]->b, params))
+                    return 0;
+            }
+        }
+    }
+    /* Typedefs named as Vec/slice elems or Map K/V bases (Entry, Pt, …)
+     * before CC_VEC / CC_MAP / CC_DECL_SLICE. Skip ones already Result-hoisted. */
+    {
+        int i, vi;
+        for (i = 0; i < n; i++) {
+            AstNode* it = items[i];
+            const char* alias;
+            int needed = 0;
+            if (!it || it->kind != AST_TYPEDEF_STRUCT) continue;
+            if (strcmp(it->e, "hoist") == 0 || strcmp(it->e, "vech") == 0)
+                continue;
+            alias = it->b[0] ? it->b : it->a;
+            if (!alias[0]) continue;
+            for (vi = 0; vi < g_shadow_nvecs; vi++) {
+                if (strcmp(g_shadow_vecs[vi], alias) == 0) {
+                    needed = 1;
+                    break;
+                }
+            }
+            for (vi = 0; vi < g_shadow_nslices && !needed; vi++) {
+                if (strcmp(g_shadow_slices[vi], alias) == 0) needed = 1;
+            }
+            for (vi = 0; vi < g_shadow_nmaps && !needed; vi++) {
+                const char* kv = g_shadow_maps[vi];
+                const char* us = strchr(kv, '_');
+                char part[64];
+                size_t plen, pl;
+                int side;
+                if (!us) continue;
+                for (side = 0; side < 2 && !needed; side++) {
+                    if (side == 0) {
+                        plen = (size_t)(us - kv);
+                        if (plen >= sizeof(part)) continue;
+                        memcpy(part, kv, plen);
+                        part[plen] = 0;
+                    } else {
+                        snprintf(part, sizeof(part), "%s", us + 1);
+                    }
+                    pl = strlen(part);
+                    while (pl >= 3 && strcmp(part + pl - 3, "ptr") == 0) {
+                        part[pl - 3] = 0;
+                        pl -= 3;
+                    }
+                    if (pl && strcmp(part, alias) == 0) needed = 1;
+                }
+            }
+            for (vi = 0; vi < g_shadow_namaps && !needed; vi++) {
+                const char* kv = g_shadow_amaps[vi];
+                const char* us = strchr(kv, '_');
+                char part[64];
+                size_t plen, pl;
+                int side;
+                if (!us) continue;
+                for (side = 0; side < 2 && !needed; side++) {
+                    if (side == 0) {
+                        plen = (size_t)(us - kv);
+                        if (plen >= sizeof(part)) continue;
+                        memcpy(part, kv, plen);
+                        part[plen] = 0;
+                    } else {
+                        snprintf(part, sizeof(part), "%s", us + 1);
+                    }
+                    pl = strlen(part);
+                    while (pl >= 3 && strcmp(part + pl - 3, "ptr") == 0) {
+                        part[pl - 3] = 0;
+                        pl -= 3;
+                    }
+                    if (pl && strcmp(part, alias) == 0) needed = 1;
+                }
+            }
+            if (!needed) continue;
+            if (!shadow_emit_preamble(it, out, cache)) return 0;
+            it->lead_len = 0;
+            if (!shadow_emit_line(out, &line_ctx, it, "")) return 0;
+            if (!shadow_emit_typedef_struct(it, out, cache, &line_ctx))
+                return 0;
+            /* Skip duplicate emit in the main loop. */
+            snprintf(it->e, sizeof(it->e), "vech");
+        }
+    }
+    /* Family factory bodies after typedef hoist so user types (Counter) are complete. */
     if (kind == SHADOW_EMIT_C && cache) {
         /* Instantiate CC_GENERIC_FACTORY templates / compiled factories. */
         for (int ii = 0; ii < g_shadow_nginst; ii++) {
@@ -561,506 +1084,6 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
         }
     }
 
-    /* Collect Result Ok/Err pairs first — drives specs and __cc_uw_* arms. */
-    ShadowCtx line_ctx = { .cache = cache };
-    char seen_ok[32][128];
-    char seen_err[32][128];
-    int nseen = 0;
-    int need_slice = 0, need_chan = 0, need_spawn_into = 0;
-    int hoist_typedefs = 0;
-    int has_result_hdr = 0;
-    int need_uw = 0;
-
-    for (int i = 0; i < n; i++) {
-        if (items[i]->kind == AST_RESULT_FN || items[i]->kind == AST_RESULT_LOCAL) {
-            int dup = 0;
-            for (int j = 0; j < nseen; j++) {
-                if (strcmp(seen_ok[j], items[i]->c) == 0 &&
-                    strcmp(seen_err[j], items[i]->b) == 0) { dup = 1; break; }
-            }
-            if (!dup && nseen < 32) {
-                snprintf(seen_ok[nseen], sizeof(seen_ok[0]), "%s", items[i]->c);
-                snprintf(seen_err[nseen], sizeof(seen_err[0]), "%s", items[i]->b);
-                nseen++;
-            }
-        }
-        if (items[i]->kind == AST_TYPEDEF_INT && items[i]->c[0] && items[i]->d[0]) {
-            int dup = 0;
-            for (int j = 0; j < nseen; j++) {
-                if (strcmp(seen_ok[j], items[i]->c) == 0 &&
-                    strcmp(seen_err[j], items[i]->d) == 0) { dup = 1; break; }
-            }
-            if (!dup && nseen < 32) {
-                snprintf(seen_ok[nseen], sizeof(seen_ok[0]), "%s", items[i]->c);
-                snprintf(seen_err[nseen], sizeof(seen_err[0]), "%s", items[i]->d);
-                nseen++;
-            }
-        }
-        if (items[i]->kind == AST_SLICE_VAR) need_slice = 1;
-        if (items[i]->kind == AST_CHAN_VAR) {
-            need_chan = 1;
-            /* Result-typed channel elems: ensure CCResult_* specs exist. */
-            if (strncmp(items[i]->d, "CCResult_", 9) == 0) {
-                const char* rest = items[i]->d + 9;
-                const char* us = strrchr(rest, '_');
-                char ok[64], err[64];
-                int dup = 0, j;
-                if (us && us > rest) {
-                    size_t ol = (size_t)(us - rest);
-                    if (ol >= sizeof(ok)) ol = sizeof(ok) - 1;
-                    memcpy(ok, rest, ol);
-                    ok[ol] = 0;
-                    snprintf(err, sizeof(err), "%s", us + 1);
-                    for (j = 0; j < nseen; j++) {
-                        if (strcmp(seen_ok[j], ok) == 0 &&
-                            strcmp(seen_err[j], err) == 0) {
-                            dup = 1;
-                            break;
-                        }
-                    }
-                    if (!dup && nseen < 32) {
-                        snprintf(seen_ok[nseen], sizeof(seen_ok[0]), "%s", ok);
-                        snprintf(seen_err[nseen], sizeof(seen_err[0]), "%s",
-                                 err);
-                        nseen++;
-                    }
-                }
-            }
-        }
-        if (items[i]->kind == AST_STRUCT || items[i]->kind == AST_FN ||
-            items[i]->kind == AST_STATIC_FN || items[i]->kind == AST_RESULT_FN) {
-            for (int k = 0; k < items[i]->nkids; k++) {
-                AstNode* kid = items[i]->kids[k];
-                if (kid->kind == AST_SLICE_VAR) need_slice = 1;
-                if (kid->kind == AST_CHAN_VAR) {
-                    need_chan = 1;
-                    if (strncmp(kid->d, "CCResult_", 9) == 0) {
-                        const char* rest = kid->d + 9;
-                        const char* us = strrchr(rest, '_');
-                        char ok[64], err[64];
-                        int dup = 0, j;
-                        if (us && us > rest) {
-                            size_t ol = (size_t)(us - rest);
-                            if (ol >= sizeof(ok)) ol = sizeof(ok) - 1;
-                            memcpy(ok, rest, ol);
-                            ok[ol] = 0;
-                            snprintf(err, sizeof(err), "%s", us + 1);
-                            for (j = 0; j < nseen; j++) {
-                                if (strcmp(seen_ok[j], ok) == 0 &&
-                                    strcmp(seen_err[j], err) == 0) {
-                                    dup = 1;
-                                    break;
-                                }
-                            }
-                            if (!dup && nseen < 32) {
-                                snprintf(seen_ok[nseen], sizeof(seen_ok[0]),
-                                         "%s", ok);
-                                snprintf(seen_err[nseen], sizeof(seen_err[0]),
-                                         "%s", err);
-                                nseen++;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /* Host-cc: builtins + TU-seen Result types (not a handwritten E allowlist). */
-    if (kind == SHADOW_EMIT_C) {
-        for (int i = 0; i < npass_inc; i++) {
-            if (strstr(pass_inc[i], "cc_result") ||
-                strstr(pass_inc[i], "cc_runtime") ||
-                strstr(pass_inc[i], "prelude")) {
-                has_result_hdr = 1;
-                break;
-            }
-        }
-        for (int i = 0; i < n && !need_uw; i++)
-            need_uw = shadow_node_needs_uw(items[i]);
-        if (need_uw && !has_result_hdr) {
-            if (!cemit_str(out, "#include <ccc/cc_result.h>\n\n")) return 0;
-            has_result_hdr = 1;
-        }
-        if (need_uw) {
-            int si;
-            char rname[128];
-            char apath[64];
-            /* Clang requires complete types in _Generic associations. Only
-             * arm types fully declared by <ccc/cc_result.h> (+ TU-seen
-             * specs emitted below). IoError Results need their header. */
-            {
-                int need_io = 0;
-                for (si = 0; si < nseen; si++) {
-                    if (strcmp(seen_err[si], "CCIoError") == 0) {
-                        need_io = 1;
-                        break;
-                    }
-                }
-                /* Channel send/recv returns CCResult_bool_CCIoError even when
-                 * the TU never declares a Result local of that shape. */
-                if (need_chan) {
-                    int has_bool_io = 0;
-                    for (si = 0; si < nseen; si++) {
-                        if (strcmp(seen_ok[si], "bool") == 0 &&
-                            strcmp(seen_err[si], "CCIoError") == 0) {
-                            has_bool_io = 1;
-                            break;
-                        }
-                    }
-                    if (!has_bool_io && nseen < 32) {
-                        snprintf(seen_ok[nseen], sizeof(seen_ok[0]), "bool");
-                        snprintf(seen_err[nseen], sizeof(seen_err[0]),
-                                 "CCIoError");
-                        nseen++;
-                    }
-                    need_io = 1;
-                }
-                if (need_io &&
-                    !cemit_str(out, "#include <ccc/cc_io_error.h>\n"))
-                    return 0;
-            }
-            if (!cemit_str(out,
-                    "#undef __cc_uw_is_err\n"
-                    "#undef __cc_uw_value\n"
-                    "#undef __cc_uw_err_at\n"
-                    "#define __cc_uw_is_err(__x__) _Generic((__x__), "
-                    "CCResult_int_CCError: "
-                    "(!((CCResult_int_CCError*)(void*)&(__x__))->ok), "
-                    "CCResult_bool_CCError: "
-                    "(!((CCResult_bool_CCError*)(void*)&(__x__))->ok), "
-                    "CCResult_char_CCError: "
-                    "(!((CCResult_char_CCError*)(void*)&(__x__))->ok), "
-                    "CCResult_size_t_CCError: "
-                    "(!((CCResult_size_t_CCError*)(void*)&(__x__))->ok), "
-                    "CCResult_voidptr_CCError: "
-                    "(!((CCResult_voidptr_CCError*)(void*)&(__x__))->ok), "
-                    "CCResult_charptr_CCError: "
-                    "(!((CCResult_charptr_CCError*)(void*)&(__x__))->ok)"))
-                return 0;
-            for (si = 0; si < nseen; si++) {
-                shadow_result_name(seen_ok[si], seen_err[si], rname,
-                                   sizeof(rname));
-                if (strcmp(rname, "CCResult_int_CCError") == 0 ||
-                    strcmp(rname, "CCResult_bool_CCError") == 0 ||
-                    strcmp(rname, "CCResult_char_CCError") == 0 ||
-                    strcmp(rname, "CCResult_size_t_CCError") == 0 ||
-                    strcmp(rname, "CCResult_voidptr_CCError") == 0 ||
-                    strcmp(rname, "CCResult_charptr_CCError") == 0)
-                    continue;
-                if (!cemit_fmt(out,
-                        ", %s: (!((%s*)(void*)&(__x__))->ok)", rname, rname))
-                    return 0;
-            }
-            if (!cemit_str(out,
-                    ", default: (*(void* const*)(void*)&(__x__) == (void*)0))\n"
-                    "#define __cc_uw_value(__x__) _Generic((__x__), "
-                    "CCResult_int_CCError: "
-                    "((CCResult_int_CCError*)(void*)&(__x__))->u.value, "
-                    "CCResult_bool_CCError: "
-                    "((CCResult_bool_CCError*)(void*)&(__x__))->u.value, "
-                    "CCResult_char_CCError: "
-                    "((CCResult_char_CCError*)(void*)&(__x__))->u.value, "
-                    "CCResult_size_t_CCError: "
-                    "((CCResult_size_t_CCError*)(void*)&(__x__))->u.value, "
-                    "CCResult_voidptr_CCError: "
-                    "((CCResult_voidptr_CCError*)(void*)&(__x__))->u.value, "
-                    "CCResult_charptr_CCError: "
-                    "((CCResult_charptr_CCError*)(void*)&(__x__))->u.value"))
-                return 0;
-            for (si = 0; si < nseen; si++) {
-                shadow_result_name(seen_ok[si], seen_err[si], rname,
-                                   sizeof(rname));
-                if (strcmp(rname, "CCResult_int_CCError") == 0 ||
-                    strcmp(rname, "CCResult_bool_CCError") == 0 ||
-                    strcmp(rname, "CCResult_char_CCError") == 0 ||
-                    strcmp(rname, "CCResult_size_t_CCError") == 0 ||
-                    strcmp(rname, "CCResult_voidptr_CCError") == 0 ||
-                    strcmp(rname, "CCResult_charptr_CCError") == 0 ||
-                    strcmp(seen_ok[si], "void") == 0)
-                    continue;
-                if (!cemit_fmt(out, ", %s: ((%s*)(void*)&(__x__))->u.value",
-                               rname, rname))
-                    return 0;
-            }
-            if (!cemit_str(out,
-                    ", default: (__x__))\n"
-                    "#define __cc_uw_err_at(__x__, __e__, __f__, __l__) "
-                    "_Generic((__x__), "
-                    "CCResult_int_CCError: "
-                    "(cc_rt_diag_record_unwrap_site(__f__, __l__), "
-                    "((CCResult_int_CCError*)(void*)&(__x__))->u.error), "
-                    "CCResult_bool_CCError: "
-                    "(cc_rt_diag_record_unwrap_site(__f__, __l__), "
-                    "((CCResult_bool_CCError*)(void*)&(__x__))->u.error), "
-                    "CCResult_char_CCError: "
-                    "(cc_rt_diag_record_unwrap_site(__f__, __l__), "
-                    "((CCResult_char_CCError*)(void*)&(__x__))->u.error), "
-                    "CCResult_size_t_CCError: "
-                    "(cc_rt_diag_record_unwrap_site(__f__, __l__), "
-                    "((CCResult_size_t_CCError*)(void*)&(__x__))->u.error), "
-                    "CCResult_voidptr_CCError: "
-                    "(cc_rt_diag_record_unwrap_site(__f__, __l__), "
-                    "((CCResult_voidptr_CCError*)(void*)&(__x__))->u.error), "
-                    "CCResult_charptr_CCError: "
-                    "(cc_rt_diag_record_unwrap_site(__f__, __l__), "
-                    "((CCResult_charptr_CCError*)(void*)&(__x__))->u.error)"))
-                return 0;
-            for (si = 0; si < nseen; si++) {
-                shadow_result_name(seen_ok[si], seen_err[si], rname,
-                                   sizeof(rname));
-                if (strcmp(rname, "CCResult_int_CCError") == 0 ||
-                    strcmp(rname, "CCResult_bool_CCError") == 0 ||
-                    strcmp(rname, "CCResult_char_CCError") == 0 ||
-                    strcmp(rname, "CCResult_size_t_CCError") == 0 ||
-                    strcmp(rname, "CCResult_voidptr_CCError") == 0 ||
-                    strcmp(rname, "CCResult_charptr_CCError") == 0)
-                    continue;
-                /* Macro returns CCError: exact E, or @as face at offset 0. */
-                apath[0] = 0;
-                if (strcmp(seen_err[si], "CCError") == 0) {
-                    if (!cemit_fmt(out,
-                            ", %s: (cc_rt_diag_record_unwrap_site(__f__, __l__), "
-                            "((%s*)(void*)&(__x__))->u.error)",
-                            rname, rname))
-                        return 0;
-                } else if (shadow_as_path_to(seen_err[si], "CCError", apath,
-                                            sizeof(apath)) &&
-                           apath[0]) {
-                    if (!cemit_fmt(out,
-                            ", %s: (cc_rt_diag_record_unwrap_site(__f__, __l__), "
-                            "(*(CCError*)(void*)&((%s*)(void*)&(__x__))->u.error))",
-                            rname, rname))
-                        return 0;
-                }
-            }
-            if (!cemit_str(out,
-                    ", default: (cc_rt_diag_record_unwrap_site(__f__, __l__), "
-                    "__cc_err_null_at(__e__, __f__, __l__)))\n"
-                    "\n"))
-                return 0;
-        }
-    }
-    /* Hoist typedefs when Result specs need prior names. Also hoist only those
-     * typedefs that are Vec element types (e.g. Pt / CharVec) before
-     * CC_VEC_DECL — not NestedCharVec-style aliases of CCVec_<Alias> (those
-     * need the element DECL first), nor structs that embed Map_. */
-    hoist_typedefs = (nseen > 0 || g_shadow_nvecs > 0 || g_shadow_nmaps > 0 ||
-                      g_shadow_namaps > 0);
-
-    if (hoist_typedefs) {
-        for (int i = 0; i < n; i++) {
-            if (items[i]->kind == AST_TYPEDEF_INT) {
-                int needed = (nseen > 0);
-                int vi;
-                if (items[i]->e[0] && strcmp(items[i]->e, "vech") == 0)
-                    continue;
-                /* Hoist when this alias is a Vec/Map element type name. */
-                for (vi = 0; vi < g_shadow_nvecs && !needed; vi++)
-                    if (strcmp(g_shadow_vecs[vi], items[i]->a) == 0) needed = 1;
-                if (!needed) continue;
-                if (!shadow_emit_preamble(items[i], out, cache)) return 0;
-                items[i]->lead_len = 0;
-                if (!shadow_emit_line(out, &line_ctx, items[i], "")) return 0;
-                if (items[i]->c[0] && items[i]->d[0]) {
-                    char rname[256];
-                    shadow_result_name(items[i]->c, items[i]->d, rname,
-                                       sizeof(rname));
-                    if (!cemit_fmt(out, "typedef %s %s;\n", rname, items[i]->a))
-                        return 0;
-                } else if (items[i]->b[0]) {
-                    if (!cemit_fmt(out, "typedef %s %s;\n", items[i]->b,
-                                   items[i]->a))
-                        return 0;
-                } else if (!cemit_fmt(out, "typedef int %s;\n", items[i]->a)) {
-                    return 0;
-                }
-                snprintf(items[i]->e, sizeof(items[i]->e), "vech");
-            }
-            if (items[i]->kind == AST_TYPEDEF_STRUCT) {
-                /* Only hoist structs named as Result Ok/Err arms — not
-                 * containers that embed Map_ or CCVec_ (need macros first). */
-                const char* alias =
-                    items[i]->b[0] ? items[i]->b : items[i]->a;
-                int needed = 0;
-                int j;
-                for (j = 0; j < nseen; j++) {
-                    if (strcmp(seen_ok[j], alias) == 0 ||
-                        strcmp(seen_err[j], alias) == 0) {
-                        needed = 1;
-                        break;
-                    }
-                    {
-                        char okptr[128];
-                        snprintf(okptr, sizeof(okptr), "%s*", alias);
-                        if (strcmp(seen_ok[j], okptr) == 0) {
-                            needed = 1;
-                            break;
-                        }
-                    }
-                }
-                if (!needed) continue;
-                /* Hoist field-type typedefs first (FaceA/FaceB / RedisReplyKind
-                 * before DualFaceErr / RedisReply). */
-                {
-                    int k, j2;
-                    for (k = 0; k < items[i]->nkids; k++) {
-                        AstNode* f = items[i]->kids[k];
-                        const char* fty;
-                        if (!f || f->kind != AST_FIELD_SIMPLE) continue;
-                        fty = f->a;
-                        if (!fty || !fty[0] || strchr(fty, '*')) continue;
-                        for (j2 = 0; j2 < n; j2++) {
-                            const char* a2;
-                            if (items[j2]->kind == AST_TYPEDEF_ENUM) {
-                                if (strcmp(items[j2]->e, "hoist") == 0)
-                                    continue;
-                                a2 = items[j2]->b;
-                                if (!a2[0] || strcmp(a2, fty) != 0) continue;
-                                if (!shadow_emit_preamble(items[j2], out, cache))
-                                    return 0;
-                                items[j2]->lead_len = 0;
-                                if (!shadow_emit_line(out, &line_ctx, items[j2],
-                                                       ""))
-                                    return 0;
-                                if (items[j2]->a[0]) {
-                                    if (!cemit_fmt(out, "typedef enum %s {\n",
-                                                   items[j2]->a))
-                                        return 0;
-                                } else if (!cemit_str(out, "typedef enum {\n")) {
-                                    return 0;
-                                }
-                                if (items[j2]->d[0] &&
-                                    !cemit_str(out, items[j2]->d))
-                                    return 0;
-                                if (items[j2]->d[0] && !cemit_str(out, "\n"))
-                                    return 0;
-                                if (!cemit_fmt(out, "} %s;\n\n", items[j2]->b))
-                                    return 0;
-                                snprintf(items[j2]->e, sizeof(items[j2]->e),
-                                         "hoist");
-                                continue;
-                            }
-                            if (items[j2]->kind != AST_TYPEDEF_STRUCT)
-                                continue;
-                            if (strcmp(items[j2]->e, "hoist") == 0) continue;
-                            a2 = items[j2]->b[0] ? items[j2]->b
-                                                 : items[j2]->a;
-                            if (strcmp(a2, fty) != 0) continue;
-                            if (!shadow_emit_preamble(items[j2], out, cache))
-                                return 0;
-                            items[j2]->lead_len = 0;
-                            if (!shadow_emit_line(out, &line_ctx, items[j2],
-                                                   ""))
-                                return 0;
-                            if (!shadow_emit_typedef_struct(items[j2], out,
-                                                            cache, &line_ctx))
-                                return 0;
-                            snprintf(items[j2]->e, sizeof(items[j2]->e),
-                                     "hoist");
-                        }
-                    }
-                }
-                if (!shadow_emit_preamble(items[i], out, cache)) return 0;
-                items[i]->lead_len = 0;
-                if (!shadow_emit_line(out, &line_ctx, items[i], "")) return 0;
-                if (!shadow_emit_typedef_struct(items[i], out, cache, &line_ctx))
-                    return 0;
-                snprintf(items[i]->e, sizeof(items[i]->e), "hoist");
-            } else if (items[i]->kind == AST_TYPEDEF_FN_PTR) {
-                char params[512];
-                shadow_fnptr_ty_register(items[i]->b);
-                if (!shadow_emit_preamble(items[i], out, cache)) return 0;
-                items[i]->lead_len = 0;
-                if (!shadow_emit_line(out, &line_ctx, items[i], "")) return 0;
-                snprintf(params, sizeof(params), "%s",
-                         items[i]->c[0] ? items[i]->c : "void");
-                if (!cemit_fmt(out, "typedef %s (*%s)(%s);\n",
-                               items[i]->a, items[i]->b, params))
-                    return 0;
-            }
-        }
-    }
-    /* Typedefs named as Vec/slice elems or Map K/V bases (Entry, Pt, …)
-     * before CC_VEC / CC_MAP / CC_DECL_SLICE. Skip ones already Result-hoisted. */
-    {
-        int i, vi;
-        for (i = 0; i < n; i++) {
-            AstNode* it = items[i];
-            const char* alias;
-            int needed = 0;
-            if (!it || it->kind != AST_TYPEDEF_STRUCT) continue;
-            if (strcmp(it->e, "hoist") == 0 || strcmp(it->e, "vech") == 0)
-                continue;
-            alias = it->b[0] ? it->b : it->a;
-            if (!alias[0]) continue;
-            for (vi = 0; vi < g_shadow_nvecs; vi++) {
-                if (strcmp(g_shadow_vecs[vi], alias) == 0) {
-                    needed = 1;
-                    break;
-                }
-            }
-            for (vi = 0; vi < g_shadow_nslices && !needed; vi++) {
-                if (strcmp(g_shadow_slices[vi], alias) == 0) needed = 1;
-            }
-            for (vi = 0; vi < g_shadow_nmaps && !needed; vi++) {
-                const char* kv = g_shadow_maps[vi];
-                const char* us = strchr(kv, '_');
-                char part[64];
-                size_t plen, pl;
-                int side;
-                if (!us) continue;
-                for (side = 0; side < 2 && !needed; side++) {
-                    if (side == 0) {
-                        plen = (size_t)(us - kv);
-                        if (plen >= sizeof(part)) continue;
-                        memcpy(part, kv, plen);
-                        part[plen] = 0;
-                    } else {
-                        snprintf(part, sizeof(part), "%s", us + 1);
-                    }
-                    pl = strlen(part);
-                    while (pl >= 3 && strcmp(part + pl - 3, "ptr") == 0) {
-                        part[pl - 3] = 0;
-                        pl -= 3;
-                    }
-                    if (pl && strcmp(part, alias) == 0) needed = 1;
-                }
-            }
-            for (vi = 0; vi < g_shadow_namaps && !needed; vi++) {
-                const char* kv = g_shadow_amaps[vi];
-                const char* us = strchr(kv, '_');
-                char part[64];
-                size_t plen, pl;
-                int side;
-                if (!us) continue;
-                for (side = 0; side < 2 && !needed; side++) {
-                    if (side == 0) {
-                        plen = (size_t)(us - kv);
-                        if (plen >= sizeof(part)) continue;
-                        memcpy(part, kv, plen);
-                        part[plen] = 0;
-                    } else {
-                        snprintf(part, sizeof(part), "%s", us + 1);
-                    }
-                    pl = strlen(part);
-                    while (pl >= 3 && strcmp(part + pl - 3, "ptr") == 0) {
-                        part[pl - 3] = 0;
-                        pl -= 3;
-                    }
-                    if (pl && strcmp(part, alias) == 0) needed = 1;
-                }
-            }
-            if (!needed) continue;
-            if (!shadow_emit_preamble(it, out, cache)) return 0;
-            it->lead_len = 0;
-            if (!shadow_emit_line(out, &line_ctx, it, "")) return 0;
-            if (!shadow_emit_typedef_struct(it, out, cache, &line_ctx))
-                return 0;
-            /* Skip duplicate emit in the main loop. */
-            snprintf(it->e, sizeof(it->e), "vech");
-        }
-    }
     /* Map/Vec/slice macros after typedef hoist (element types in scope). */
     if (kind == SHADOW_EMIT_C && cache) {
         if (g_shadow_nslices > 0 && !g_shadow_slice_stub) {
@@ -1299,7 +1322,24 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             strcmp(seen_err[i], "CCIoError") == 0)
             continue;
         /* Real layout + typed ctors when cc_result.h provided CC_DECL_RESULT_SPEC.
-         * Split across cemit_fmt calls (512-byte temp). */
+         * Void ok uses SPEC_VOID (no `void value` field). Split across cemit_fmt
+         * calls (512-byte temp). */
+        if (strcmp(seen_ok[i], "void") == 0) {
+            if (!cemit_fmt(out,
+                    "#ifndef %s_DEFINED\n#define %s_DEFINED 1\n"
+                    "#ifdef CC_DECL_RESULT_SPEC_VOID\n"
+                    "CC_DECL_RESULT_SPEC_VOID(%s, %s)\n#else\n"
+                    "typedef struct { int ok; union { %s error; } u; } %s;\n"
+                    "static inline %s cc_ok_%s(void) {"
+                    " %s r; r.ok = 1; return r; }\n"
+                    "static inline %s cc_err_%s(%s e) {"
+                    " %s r; r.ok = 0; r.u.error = e; return r; }\n"
+                    "#endif\n#endif\n",
+                    rname, rname, rname, seen_err[i], seen_err[i], rname, rname,
+                    rname, rname, rname, rname, seen_err[i], rname))
+                return 0;
+            continue;
+        }
         if (!cemit_fmt(out,
                 "#ifndef %s_DEFINED\n#define %s_DEFINED 1\n"
                 "#ifdef CC_DECL_RESULT_SPEC\n"

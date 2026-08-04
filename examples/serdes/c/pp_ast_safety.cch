@@ -2711,6 +2711,7 @@ static void shadow_safe_check_err_fwds(ShadowSafeCtx* ctx, AstNode* site,
 static int shadow_safe_unwrap_mode_known(const char* mode) {
     if (!mode || !mode[0]) return 0;
     if (strcmp(mode, "bang") == 0 || strcmp(mode, "bang_chain") == 0 ||
+        strncmp(mode, "bang_chain:", 11) == 0 ||
         strcmp(mode, "bang_block") == 0 || strcmp(mode, "bang_stmt") == 0 ||
         strcmp(mode, "bang_nobind") == 0 || strcmp(mode, "qmark") == 0 ||
         strcmp(mode, "qmark_bind") == 0)
@@ -2799,7 +2800,8 @@ static void shadow_safe_on_unwrap(ShadowSafeCtx* ctx, AstNode* st) {
         }
         if (strcmp(mode, "bang") == 0)
             shadow_safe_require_eh(ctx, st, NULL);
-        else if (strcmp(mode, "bang_chain") == 0) {
+        else if (strcmp(mode, "bang_chain") == 0 ||
+                 strncmp(mode, "bang_chain:", 11) == 0) {
             /* First hop may carry `!>(e){…}`; later bare `!>` need eh. */
             if (st->nbody > 0)
                 shadow_safe_check_bang_body(ctx, st, "bang_block", binder, 1);

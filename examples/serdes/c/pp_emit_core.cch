@@ -12,6 +12,7 @@ typedef enum CCGenProduceStatus {
 #endif
 int cc_emit_plan_generic_factory_names_csv(char* out, size_t cap);
 int cc_emit_plan_has_generic_factory(const char* name);
+void cc_emit_plan_snake_name(const char* name, char* out, size_t cap);
 CCGenProduceStatus cc_emit_plan_produce_generic_def(
     const char* gname, const char* mangled, const char orig_args[8][128],
     int nargs, const char* reflect_src, size_t reflect_len,
@@ -581,7 +582,8 @@ static void shadow_rewrite_char_slice_types(char* text, size_t cap) {
 }
 
 static void shadow_rewrite_at_slice(char* expr, size_t cap) {
-    char tmp[768];
+    /* Large enough for unwrap calls that embed @string / long @slice args. */
+    char tmp[8192];
     const char* p;
     char* o;
     size_t rem;
@@ -595,7 +597,36 @@ static void shadow_rewrite_at_slice(char* expr, size_t cap) {
             const char* args = p + 7;
             const char* q = args;
             int dep = 1;
+            int in_dq = 0, in_sq = 0;
             while (*q && dep > 0) {
+                if (in_dq) {
+                    if (*q == '\\' && q[1]) {
+                        q += 2;
+                        continue;
+                    }
+                    if (*q == '"') in_dq = 0;
+                    q++;
+                    continue;
+                }
+                if (in_sq) {
+                    if (*q == '\\' && q[1]) {
+                        q += 2;
+                        continue;
+                    }
+                    if (*q == '\'') in_sq = 0;
+                    q++;
+                    continue;
+                }
+                if (*q == '"') {
+                    in_dq = 1;
+                    q++;
+                    continue;
+                }
+                if (*q == '\'') {
+                    in_sq = 1;
+                    q++;
+                    continue;
+                }
                 if (*q == '(') dep++;
                 else if (*q == ')') dep--;
                 q++;
@@ -966,31 +997,43 @@ static void shadow_rewrite_generic_types_text(char* text, size_t cap) {
                         compact[ci++] = *a++;
                     }
                     compact[ci] = 0;
-                    if (compact[0] &&
-                        (strncmp(name, "CCVec", 5) == 0 ||
-                         strncmp(name, "Map", 3) == 0 ||
-                         strncmp(name, "ArrayMap", 8) == 0 ||
-                         strncmp(name, "Vec", 3) == 0 ||
-                         (name[0] >= 'A' && name[0] <= 'Z'))) {
-                        char spelled[160];
-                        if (strncmp(name, "Map", 3) == 0 && nl == 3)
-                            snprintf(spelled, sizeof(spelled), "Map_%s*",
-                                     compact);
-                        else if (strncmp(name, "ArrayMap", 8) == 0 && nl == 8)
-                            snprintf(spelled, sizeof(spelled), "ArrayMap_%s*",
-                                     compact);
-                        else if ((strncmp(name, "CCVec", 5) == 0 && nl == 5) ||
-                                 (strncmp(name, "Vec", 3) == 0 && nl == 3))
-                            snprintf(spelled, sizeof(spelled), "CCVec_%s",
-                                     compact);
-                        else
-                            snprintf(spelled, sizeof(spelled), "%.*s_%s",
-                                     (int)nl, name, compact);
-                        o += (size_t)snprintf(out + o, sizeof(out) - o, "%s",
-                                              spelled);
-                        p = r + 1;
-                        changed = 1;
-                        continue;
+                    if (compact[0]) {
+                        char fam[96];
+                        int is_type =
+                            strncmp(name, "CCVec", 5) == 0 ||
+                            strncmp(name, "Map", 3) == 0 ||
+                            strncmp(name, "ArrayMap", 8) == 0 ||
+                            strncmp(name, "Vec", 3) == 0 ||
+                            (name[0] >= 'A' && name[0] <= 'Z');
+                        int is_snake_fac = 0;
+                        if (nl + 1 < sizeof(fam)) {
+                            memcpy(fam, name, nl);
+                            fam[nl] = 0;
+                            is_snake_fac = cc_emit_plan_has_generic_factory(fam);
+                        }
+                        if (is_type || is_snake_fac) {
+                            char spelled[160];
+                            if (strncmp(name, "Map", 3) == 0 && nl == 3)
+                                snprintf(spelled, sizeof(spelled), "Map_%s*",
+                                         compact);
+                            else if (strncmp(name, "ArrayMap", 8) == 0 &&
+                                     nl == 8)
+                                snprintf(spelled, sizeof(spelled),
+                                         "ArrayMap_%s*", compact);
+                            else if ((strncmp(name, "CCVec", 5) == 0 &&
+                                      nl == 5) ||
+                                     (strncmp(name, "Vec", 3) == 0 && nl == 3))
+                                snprintf(spelled, sizeof(spelled), "CCVec_%s",
+                                         compact);
+                            else
+                                snprintf(spelled, sizeof(spelled), "%.*s_%s",
+                                         (int)nl, name, compact);
+                            o += (size_t)snprintf(out + o, sizeof(out) - o, "%s",
+                                                  spelled);
+                            p = r + 1;
+                            changed = 1;
+                            continue;
+                        }
                     }
                 }
             }
@@ -2913,16 +2956,23 @@ static void shadow_as_scan_header_text(const char* text) {
                     hook[hn] = 0;
                     if (hook[0]) shadow_create_hook_register(ty, hook);
                 }
-                /* .ufcs_dynamic / .ufcs_dynamic2 = cc_type_dynamic_call("c","W") */
+                /* .ufcs_dynamic / .ufcs_dynamic2 = cc_type_dynamic_call("c","W")
+                 * Bound the search to THIS register site — do not pick up the
+                 * next type's ufcs_dynamic2 (CCPy must not inherit CCPyObj's
+                 * cc_py_obj_callm sink). */
                 {
+                    const char* reg_end = strstr(reg + 18, "cc_type_register(\"");
+                    size_t reg_span = reg_end ? (size_t)(reg_end - reg) : 800;
                     const char* dyn = strstr(reg, ".ufcs_dynamic");
                     const char* call = strstr(reg, "cc_type_dynamic_call(\"");
                     int dest_aware = 0;
-                    if (dyn && dyn < reg + 800 &&
+                    if (reg_span > 800) reg_span = 800;
+                    if (dyn && (size_t)(dyn - reg) < reg_span &&
                         dyn[13] == '2') /* ".ufcs_dynamic2" */
                         dest_aware = 1;
-                    if (ty[0] && dyn && call && dyn < reg + 800 &&
-                        call < reg + 900 && call > dyn) {
+                    if (ty[0] && dyn && call &&
+                        (size_t)(dyn - reg) < reg_span &&
+                        (size_t)(call - reg) < reg_span + 100 && call > dyn) {
                         const char* he = call + 22; /* after open quote */
                         char callee[96], wrap[64];
                         size_t hn = 0;

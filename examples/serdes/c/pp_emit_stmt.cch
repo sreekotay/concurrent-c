@@ -363,16 +363,22 @@ static int shadow_emit_tpl_lit(CEmit* out, const char* indent, const char* msg,
                      indent, msg, buf, (unsigned)n, arena);
 }
 
+static void shadow_tpl_dedent_inplace(char* tpl, size_t cap);
+
 /* @string(`tpl`, arena) → CCString local (hand-lowered shape).
  * When policy_expr is set, `$~tag{expr}` / `${…}` use cc_string_push_policy.
  * `\${` / `\$~` / `\\` are literal (not slots). */
 static int shadow_emit_tpl_build_ex(CEmit* out, const char* tpl,
                                    const char* arena_expr, const char* indent,
                                    const char* msg_name, const char* policy_expr) {
+    char ded[4096];
     if (!cemit_fmt(out,
             "%sCCString %s = cc_string_new();\n",
             indent, msg_name))
         return 0;
+    snprintf(ded, sizeof(ded), "%s", tpl ? tpl : "");
+    shadow_tpl_dedent_inplace(ded, sizeof(ded));
+    tpl = ded;
     const char* p = tpl ? tpl : "";
     const char* lit0 = p;
     while (*p) {
@@ -739,11 +745,91 @@ static int shadow_fmt_string_stack_expr(char* dst, size_t cap, const char* tpl) 
 }
 
 /* `@string(`tpl`, arena)` → GNU statement-expr yielding CCString. */
+/* Closer-anchored dedent (matches cc_tpl_dedent_text): when the last line is
+ * only whitespace, that margin is stripped from every content line and the
+ * closer line is dropped. One-liners / empty margin → no-op.
+ * Work on a copy — never leave `tpl` half-split on early return. */
+static void shadow_tpl_dedent_inplace(char* tpl, size_t cap) {
+    char src[4096];
+    char* lines[256];
+    int nlines = 0;
+    char* p;
+    int i;
+    int mlen;
+    char out[4096];
+    size_t o = 0;
+    const char* last;
+    if (!tpl || !tpl[0] || !cap) return;
+    snprintf(src, sizeof(src), "%s", tpl);
+    p = src;
+    {
+        int ended_nl = 0;
+        while (*p && nlines < 256) {
+            lines[nlines++] = p;
+            while (*p && *p != '\n') p++;
+            if (*p == '\n') {
+                *p++ = 0;
+                ended_nl = 1;
+            } else
+                ended_nl = 0;
+        }
+        /* Trailing `\n` yields an empty closer-margin line (Python split). */
+        if (ended_nl && nlines < 256) lines[nlines++] = p;
+    }
+    if (nlines < 2) return; /* one-liner / empty */
+    last = lines[nlines - 1];
+    mlen = 0;
+    while (last[mlen] == ' ' || last[mlen] == '\t') mlen++;
+    if (last[mlen]) return; /* closer shares line with content */
+    /* Drop opener remainder (empty first line after opening tick+newline)
+     * and the closer's margin line. Empty margin (mlen==0) still drops those
+     * bookends so column-0 twins match indented templates. */
+    i = 0;
+    if (nlines > 0 && lines[0][0] == 0) i = 1;
+    for (; i < nlines - 1 && o + 1 < sizeof(out); i++) {
+        const char* s = lines[i];
+        int ind = 0;
+        int k;
+        int margin_ok = 1;
+        while (s[ind] == ' ' || s[ind] == '\t') ind++;
+        if (!s[ind]) {
+            /* Blank line passes through as newline only. */
+            out[o++] = '\n';
+            continue;
+        }
+        if (ind < mlen) {
+            ind = 0;
+            margin_ok = 0;
+        } else {
+            for (k = 0; k < mlen; k++) {
+                if (s[k] != last[k]) {
+                    margin_ok = 0;
+                    break;
+                }
+            }
+            ind = margin_ok ? mlen : 0;
+        }
+        {
+            size_t rest = strlen(s + ind);
+            if (o + rest + 2 >= sizeof(out)) break;
+            memcpy(out + o, s + ind, rest);
+            o += rest;
+            out[o++] = '\n';
+        }
+    }
+    out[o] = 0;
+    snprintf(tpl, cap, "%s", out);
+}
+
 static int shadow_fmt_string_arena_expr(char* dst, size_t cap, const char* tpl,
                                         const char* arena) {
     CEmit side;
     char name[] = "__cc_tpl";
+    char ded[4096];
     memset(&side, 0, sizeof(side));
+    snprintf(ded, sizeof(ded), "%s", tpl ? tpl : "");
+    shadow_tpl_dedent_inplace(ded, sizeof(ded));
+    tpl = ded;
     /* Build pushes into side without the CCString decl line — wrap ourselves. */
     if (!cemit_fmt(&side, "({ CCArena* __cc_tpl_arena = (%s); "
                           "CCString __cc_tpl = cc_string_new(); ",
@@ -917,7 +1003,7 @@ static void shadow_rewrite_print_and_string(char* expr, size_t cap) {
             continue;
         }
         if (strncmp(p, "@string(", 8) == 0) {
-            char tpl[256], arena[128], built[2048];
+            char tpl[4096], arena[128], built[8192];
             int sk = shadow_parse_at_string_expr_ex(p, tpl, sizeof(tpl), arena,
                                                     sizeof(arena), NULL, 0);
             const char* end = p;
@@ -1374,6 +1460,98 @@ static void shadow_register_from_text(const char* s) {
             h += strlen(pat);
         }
     }
+    /* Surface `family::[Args]` — produce mangled `family_Args` instances. */
+    h = s;
+    while ((h = strstr(h, "::[")) != NULL) {
+        const char* name = h;
+        char fam[96];
+        char compact[96];
+        size_t fl = 0, ci = 0;
+        const char* br;
+        const char* r;
+        int depth = 1;
+        while (name > s &&
+               ((name[-1] >= 'A' && name[-1] <= 'Z') ||
+                (name[-1] >= 'a' && name[-1] <= 'z') ||
+                (name[-1] >= '0' && name[-1] <= '9') || name[-1] == '_'))
+            name--;
+        fl = (size_t)(h - name);
+        if (!fl || fl >= sizeof(fam)) {
+            h += 3;
+            continue;
+        }
+        memcpy(fam, name, fl);
+        fam[fl] = 0;
+        br = h + 2;
+        r = br + 1;
+        while (*r && depth > 0) {
+            if (*r == '[') depth++;
+            else if (*r == ']') {
+                depth--;
+                if (depth == 0) break;
+            }
+            r++;
+        }
+        if (depth != 0 || *r != ']') {
+            h += 3;
+            continue;
+        }
+        {
+            const char* a = br + 1;
+            while (a < r && ci + 1 < sizeof(compact)) {
+                if (*a == ' ' || *a == '\t') {
+                    a++;
+                    continue;
+                }
+                if (*a == ',') {
+                    if (ci && compact[ci - 1] != '_') compact[ci++] = '_';
+                    a++;
+                    continue;
+                }
+                compact[ci++] = *a++;
+            }
+            compact[ci] = 0;
+        }
+        /* Member spelling `py.expose::[T]` scans as family `expose` — resolve
+         * to registered factory `py_expose` (suffix `_expose`). */
+        if (compact[0] && !cc_emit_plan_has_generic_factory(fam) &&
+            fam[0] >= 'a' && fam[0] <= 'z') {
+            char names[512];
+            if (cc_emit_plan_generic_factory_names_csv(names, sizeof(names)) >
+                0) {
+                char* tok = names;
+                size_t fl = strlen(fam);
+                while (tok && *tok) {
+                    char* comma = strchr(tok, ',');
+                    size_t nl;
+                    if (comma) *comma = 0;
+                    while (*tok == ' ') tok++;
+                    nl = strlen(tok);
+                    if (nl > fl + 1 && tok[nl - fl - 1] == '_' &&
+                        strcmp(tok + nl - fl, fam) == 0) {
+                        snprintf(fam, sizeof(fam), "%s", tok);
+                        break;
+                    }
+                    tok = comma ? comma + 1 : NULL;
+                }
+            }
+        }
+        if (compact[0] &&
+            (cc_emit_plan_has_generic_factory(fam) ||
+             (fam[0] >= 'A' && fam[0] <= 'Z') ||
+             strncmp(fam, "Map", 3) == 0 || strncmp(fam, "CCVec", 5) == 0 ||
+             strncmp(fam, "ArrayMap", 8) == 0 || strncmp(fam, "Vec", 3) == 0 ||
+             (strlen(fam) > 5 && strcmp(fam + strlen(fam) - 5, "_make") == 0))) {
+            char mangled[160];
+            snprintf(mangled, sizeof(mangled), "%s_%s", fam, compact);
+            shadow_register_mangled_ty(mangled);
+            if (cc_emit_plan_has_generic_factory(fam) ||
+                (strlen(fam) > 5 &&
+                 strcmp(fam + strlen(fam) - 5, "_make") == 0))
+                shadow_ginst_need(fam, compact);
+        }
+        h = r + 1;
+    }
 }
 
 /* 1 = recurse into fn bodies for binds (emit-time). 0 = TU prepass: register
@@ -1558,10 +1736,19 @@ static void shadow_collect_binds_node(AstNode* st) {
             return;
         }
     } else if (st->kind == AST_VAR_UNWRAP) {
+        shadow_register_from_text(st->b);
         if (st->e[0]) {
             shadow_register_from_text(st->e);
             shadow_bind_name(st->a, st->e, 0);
         }
+    } else if (st->kind == AST_STMT_UNWRAP) {
+        /* `py_expose::[T](…) !>;` — factory instance must be produced. */
+        shadow_register_from_text(st->a);
+    } else if (st->kind == AST_UFCS_STMT || st->kind == AST_UFCS_EXPR) {
+        shadow_register_from_text(st->a);
+        shadow_register_from_text(st->c);
+        /* Free-name `py_expose::[T]` lands as UFCS with empty meth when… */
+        if (st->e[0]) shadow_register_from_text(st->e);
     } else if (st->kind == AST_IF || st->kind == AST_WHILE ||
                st->kind == AST_DO_WHILE || st->kind == AST_FOR) {
         /* Free-name `lru_cache_make::[T](…)` may appear only in conditions. */
@@ -1987,7 +2174,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
         return cemit_fmt(out, "%s}\n", indent);
     }
     case AST_IF: {
-        char cond[288];
+        char cond[2048];
         if (st->e[0] && strcmp(st->e, "spawn_cond") == 0) {
             AstNode* sp = NULL;
             int k;
@@ -2023,6 +2210,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
         } else {
             if (!shadow_emit_cond_text(st, st->a, cond, sizeof(cond), ctx, out))
                 return 0;
+            if (!shadow_rewrite_bang_exprs(cond, sizeof(cond), ctx)) return 0;
         }
         /* Newline before then-stmt so `#line` from the body cannot sit
          * mid-`if (cond) #line N` (invalid C). */
@@ -2116,8 +2304,8 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
         return cemit_fmt(out, "%s%s* %s = %s;\n", indent, st->a, st->b, expr);
     }
     case AST_STMT_UNWRAP: {
-        char call[288];
-        char renamed[288];
+        char call[8192];
+        char renamed[8192];
         const char* src = st->a;
         char i1[80], i2[80];
         /* Naked print helpers (also handled on AST_CALL_ARGS). */
@@ -2131,6 +2319,24 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             snprintf(renamed, sizeof(renamed), "%s", src);
         if (!shadow_emit_channel_pair_expr(call, sizeof(call), renamed))
             shadow_emit_expr_text(st, renamed, call, sizeof(call), NULL);
+        shadow_rewrite_print_and_string(call, sizeof(call));
+        {
+            const char* pat = "__cc_tpl; }).as_slice()";
+            const char* repl = "cc_string_as_slice(&__cc_tpl); })";
+            char* hit;
+            while ((hit = strstr(call, pat)) != NULL) {
+                char tmp[8192];
+                size_t pre = (size_t)(hit - call);
+                if (pre + strlen(repl) + strlen(hit + strlen(pat)) + 1 >=
+                    sizeof(tmp))
+                    break;
+                snprintf(tmp, sizeof(tmp), "%.*s%s%s", (int)pre, call, repl,
+                         hit + strlen(pat));
+                snprintf(call, sizeof(call), "%s", tmp);
+            }
+        }
+        shadow_rewrite_at_slice(call, sizeof(call));
+        shadow_rewrite_generic_types_text(call, sizeof(call));
         if (strcmp(st->c, "bang_block") == 0 ||
             strcmp(st->c, "bang_stmt") == 0) {
             const char* bind = st->d[0] ? st->d : "e";
@@ -2283,9 +2489,10 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
         return cemit_fmt(out, "%s%s %s;\n", indent, st->a, st->b);
     }
     case AST_WHILE: {
-        char cond[288];
+        char cond[2048];
         if (!shadow_emit_cond_text(st, st->a, cond, sizeof(cond), ctx, out))
             return 0;
+        if (!shadow_rewrite_bang_exprs(cond, sizeof(cond), ctx)) return 0;
         if (!cemit_fmt(out, "%swhile (%s) {\n", indent, cond)) return 0;
         char nested[80];
         shadow_indent_nest(nested, sizeof(nested), indent, 1);
@@ -2300,6 +2507,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
     case AST_EXPR_STMT: {
         char expr[288];
         shadow_emit_expr_text(st, st->a, expr, sizeof(expr), NULL);
+        if (!shadow_rewrite_bang_exprs(expr, sizeof(expr), ctx)) return 0;
         /* send_task body: bare expr is the packed task result. */
         if (ctx && ctx->send_task_ret) {
             return cemit_fmt(out,
@@ -2390,9 +2598,10 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             if (!shadow_emit_stmt_ctx(st->body[k], out, ctx, nested, use_cleanup))
                 return 0;
         }
-        char cond[288];
+        char cond[2048];
         if (!shadow_emit_cond_text(st, st->a, cond, sizeof(cond), ctx, out))
             return 0;
+        if (!shadow_rewrite_bang_exprs(cond, sizeof(cond), ctx)) return 0;
         return cemit_fmt(out, "%s} while (%s);\n", indent, cond);
     }
     case AST_STATIC_ARR:
@@ -2637,6 +2846,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             if (cl) shadow_splice_closure_arg(raw, sizeof(raw), cl);
             if (!shadow_emit_channel_pair_expr(expr, sizeof(expr), raw))
                 shadow_emit_expr_text(st, raw, expr, sizeof(expr), formal);
+            if (!shadow_rewrite_bang_exprs(expr, sizeof(expr), ctx)) return 0;
             shadow_resolve_at_create(expr, sizeof(expr), ty, st->d[0] == '*',
                                      cl != NULL && strcmp(cl->b, "create") == 0);
         }
@@ -2709,8 +2919,8 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
         return cemit_fmt(out, "%s%s %s = %s;\n", indent, ty, st->b, expr);
     }
     case AST_UFCS_STMT: {
-        /* Room for `@string(...).println()` expansions inside the call. */
-        char call[4096];
+        /* Room for `@string(...).println()` / long @slice args. */
+        char call[8192];
         if (!shadow_emit_ufcs_to_buf(st, call, sizeof(call), NULL)) {
             /* Loud miss for instance/handle/scalar types, type-formal fails,
              * and @as retries. Other failures (fnptr members) keep a surface
@@ -2784,8 +2994,169 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             }
             return cemit_fmt(out, "%s}\n%s}\n", i1, indent);
         }
-        if (strcmp(st->d, "bang") == 0)
+        if (strcmp(st->d, "bang") == 0) {
+            /* `a()!>.b()!>.c()!>` — recv holds prior hops; meth is the last. */
+            if (strstr(st->a, "!>")) {
+                char i1[80], i2[80];
+                const char* p = st->a;
+                int hop = 0;
+                char first[2048];
+                char lowered[8192];
+                const char* bang;
+                size_t n;
+                shadow_indent_nest(i1, sizeof(i1), indent, 1);
+                shadow_indent_nest(i2, sizeof(i2), indent, 2);
+                bang = strstr(p, "!>");
+                n = (size_t)(bang - p);
+                while (n > 0 && (p[n - 1] == ' ' || p[n - 1] == '\t')) n--;
+                if (n >= sizeof(first)) n = sizeof(first) - 1;
+                memcpy(first, p, n);
+                first[n] = 0;
+                shadow_emit_expr_text(st, first, lowered, sizeof(lowered), NULL);
+                shadow_rewrite_print_and_string(lowered, sizeof(lowered));
+                shadow_rewrite_at_slice(lowered, sizeof(lowered));
+                shadow_rewrite_generic_types_text(lowered, sizeof(lowered));
+                if (!cemit_fmt(out, "%s{\n", indent)) return 0;
+                if (!cemit_fmt(out, "%s__typeof__(%s) __r0 = %s;\n", i1, lowered,
+                               lowered))
+                    return 0;
+                if (!cemit_fmt(out, "%sif (!__r0.ok) {\n", i1)) return 0;
+                if (!shadow_resync_line(out, ctx, i2)) return 0;
+                if (!shadow_emit_err_at_bind_tmp(out, ctx, i2, "e", st->b,
+                                                 "__r0"))
+                    return 0;
+                if (!shadow_emit_handler(out, ctx, "e", i2)) return 0;
+                if (!cemit_fmt(out, "%s}\n", i1)) return 0;
+                p = bang + 2;
+                while (*p) {
+                    char hop_txt[512];
+                    char recv[640];
+                    char rtmp[16];
+                    int fallible;
+                    while (*p == ' ' || *p == '\t') p++;
+                    if (!*p) break;
+                    bang = strstr(p, "!>");
+                    if (bang) {
+                        n = (size_t)(bang - p);
+                        fallible = 1;
+                    } else {
+                        n = strlen(p);
+                        fallible = 0;
+                    }
+                    while (n > 0 && (p[n - 1] == ' ' || p[n - 1] == '\t')) n--;
+                    if (!n) break;
+                    if (n >= sizeof(hop_txt)) n = sizeof(hop_txt) - 1;
+                    memcpy(hop_txt, p, n);
+                    hop_txt[n] = 0;
+                    snprintf(recv, sizeof(recv), "((__r%d).u.value)%s", hop,
+                             hop_txt);
+                    {
+                        const char* hop_ty = "CCPy*";
+                        shadow_emit_text_ufcs(lowered, sizeof(lowered), recv,
+                                              hop_ty);
+                    }
+                    shadow_rewrite_generic_types_text(lowered, sizeof(lowered));
+                    if (fallible) {
+                        snprintf(rtmp, sizeof(rtmp), "__r%d", hop + 1);
+                        if (!cemit_fmt(out,
+                                       "%s__typeof__(%s) %s = %s;\n"
+                                       "%sif (!%s.ok) {\n",
+                                       i1, lowered, rtmp, lowered, i1, rtmp))
+                            return 0;
+                        if (!shadow_resync_line(out, ctx, i2)) return 0;
+                        if (!shadow_emit_err_at_bind_tmp(out, ctx, i2, "e",
+                                                         st->b, rtmp))
+                            return 0;
+                        if (!shadow_emit_handler(out, ctx, "e", i2)) return 0;
+                        if (!cemit_fmt(out, "%s}\n", i1)) return 0;
+                        hop++;
+                        p = bang + 2;
+                    } else {
+                        /* Non-bang trailing hop — shouldn't appear; assign. */
+                        if (!cemit_fmt(out, "%s(void)%s;\n%s}\n", i1, lowered,
+                                       indent))
+                            return 0;
+                        return 1;
+                    }
+                }
+                /* Final method on the last unwrapped value. */
+                {
+                    char surface[8192];
+                    const char* targs = shadow_ufcs_e_targs(st->e);
+                    char rtmp[16];
+                    if (targs && targs[0] && st->c[0])
+                        snprintf(surface, sizeof(surface),
+                                 "((__r%d).u.value).%s::[%s](%s)", hop, st->b,
+                                 targs, st->c);
+                    else if (targs && targs[0])
+                        snprintf(surface, sizeof(surface),
+                                 "((__r%d).u.value).%s::[%s]()", hop, st->b,
+                                 targs);
+                    else if (st->c[0])
+                        snprintf(surface, sizeof(surface),
+                                 "((__r%d).u.value).%s(%s)", hop, st->b, st->c);
+                    else
+                        snprintf(surface, sizeof(surface),
+                                 "((__r%d).u.value).%s()", hop, st->b);
+                    /* Lower @string first so Python bodies are C string lits
+                     * before UFCS peel (also skips `…` in peel_left). */
+                    shadow_rewrite_print_and_string(surface, sizeof(surface));
+                    {
+                        const char* pat = "__cc_tpl; }).as_slice()";
+                        const char* repl = "cc_string_as_slice(&__cc_tpl); })";
+                        char* hit;
+                        while ((hit = strstr(surface, pat)) != NULL) {
+                            char tmp[8192];
+                            size_t pre = (size_t)(hit - surface);
+                            if (pre + strlen(repl) + strlen(hit + strlen(pat)) +
+                                    1 >=
+                                sizeof(tmp))
+                                break;
+                            snprintf(tmp, sizeof(tmp), "%.*s%s%s", (int)pre,
+                                     surface, repl, hit + strlen(pat));
+                            snprintf(surface, sizeof(surface), "%s", tmp);
+                        }
+                    }
+                    shadow_rewrite_at_slice(surface, sizeof(surface));
+                    /* Hint CCPy* so `.exec` → `cc_py_exec` (tag strips `*`). */
+                    shadow_emit_text_ufcs(lowered, sizeof(lowered), surface,
+                                          "CCPy*");
+                    shadow_rewrite_print_and_string(lowered, sizeof(lowered));
+                    {
+                        const char* pat = "__cc_tpl; }).as_slice()";
+                        const char* repl = "cc_string_as_slice(&__cc_tpl); })";
+                        char* hit;
+                        while ((hit = strstr(lowered, pat)) != NULL) {
+                            char tmp[8192];
+                            size_t pre = (size_t)(hit - lowered);
+                            if (pre + strlen(repl) + strlen(hit + strlen(pat)) +
+                                    1 >=
+                                sizeof(tmp))
+                                break;
+                            snprintf(tmp, sizeof(tmp), "%.*s%s%s", (int)pre,
+                                     lowered, repl, hit + strlen(pat));
+                            snprintf(lowered, sizeof(lowered), "%s", tmp);
+                        }
+                    }
+                    shadow_rewrite_at_slice(lowered, sizeof(lowered));
+                    shadow_rewrite_generic_types_text(lowered, sizeof(lowered));
+                    snprintf(rtmp, sizeof(rtmp), "__r%d", hop + 1);
+                    if (!cemit_fmt(out,
+                                   "%s__typeof__(%s) %s = %s;\n"
+                                   "%sif (!%s.ok) {\n",
+                                   i1, lowered, rtmp, lowered, i1, rtmp))
+                        return 0;
+                    if (!shadow_resync_line(out, ctx, i2)) return 0;
+                    if (!shadow_emit_err_at_bind_tmp(out, ctx, i2, "e", st->b,
+                                                     rtmp))
+                        return 0;
+                    if (!shadow_emit_handler(out, ctx, "e", i2)) return 0;
+                    if (!cemit_fmt(out, "%s}\n%s}\n", i1, indent)) return 0;
+                    return 1;
+                }
+            }
             return shadow_emit_try_call(out, ctx, indent, call, st->b, "e", 1);
+        }
         return cemit_fmt(out, "%s%s;\n", indent, call);
     }
     case AST_ASSIGN: {
@@ -2808,6 +3179,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             shadow_emit_expr_text(st, st->b, rhs, sizeof(rhs), sink_formal);
             if (shadow_emit_channel_pair_expr(pair, sizeof(pair), rhs))
                 snprintf(rhs, sizeof(rhs), "%s", pair);
+            if (!shadow_rewrite_bang_exprs(rhs, sizeof(rhs), ctx)) return 0;
             shadow_rewrite_result_ctors_for_var(rhs, sizeof(rhs), st->a);
         }
         /* Resolve type from bare lhs name when assign target is `v.kind`. */
@@ -3193,6 +3565,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             if (st_cl) shadow_splice_closure_arg(call, sizeof(call), st_cl);
             shadow_rewrite_slice_lit_call_args(call, sizeof(call));
             shadow_rewrite_as_call_args(call, sizeof(call));
+            if (!shadow_rewrite_bang_exprs(call, sizeof(call), ctx)) return 0;
         }
         if (strcmp(st->d, "bang") == 0)
             return shadow_emit_try_call(out, ctx, indent, call, fn, "e", 1);

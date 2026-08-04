@@ -96,14 +96,20 @@ static int shadow_ufcs_need_amp(const char* recv) {
                       strstr(recv, "->")));
 }
 
-/* Spec: trailing capital T marks a type-formal member; block_on is registered. */
+/* Spec: trailing capital T marks a type-formal member; block_on / py map
+ * helpers are registered by name. */
 static int shadow_meth_has_type_formal(const char* meth) {
     size_t n;
     if (!meth || !meth[0]) return 0;
     if (strcmp(meth, "block_on") == 0) return 1;
+    if (strcmp(meth, "map") == 0 || strcmp(meth, "as_map") == 0 ||
+        strcmp(meth, "as_list") == 0)
+        return 1;
     n = strlen(meth);
     return meth[n - 1] == 'T';
 }
+
+static int shadow_ufcs_recv_is_ident(const char* recv);
 
 /* e encoding: "" | "->" | "::T" | "->::T" */
 static int shadow_ufcs_e_arrow(const char* e) {
@@ -335,8 +341,20 @@ static int shadow_ufcs_try_dyn_sink(const char* recv, const char* meth_name,
         char tryc[160];
         shadow_sink_mangle_dest(g_shadow_sink_dest, mangled, sizeof(mangled));
         if (mangled[0]) {
+            int scalar_dest =
+                strcmp(mangled, "int") == 0 || strcmp(mangled, "long_long") == 0 ||
+                strcmp(mangled, "int64_t") == 0 || strcmp(mangled, "int32_t") == 0 ||
+                strcmp(mangled, "uint64_t") == 0 ||
+                strcmp(mangled, "double") == 0 || strcmp(mangled, "float") == 0 ||
+                strcmp(mangled, "bool") == 0 || strcmp(mangled, "size_t") == 0 ||
+                strcmp(mangled, "char") == 0;
             snprintf(tryc, sizeof(tryc), "%s_%s", ds->callee, mangled);
-            if (shadow_ufn_exists(tryc)) callee = tryc;
+            /* Header static-inline `callm_<dest>` may miss the local ufn table.
+             * Still invent for scalar dests; never invent `ts2_call_long_long`
+             * when undeclared — fall back to plain sink. */
+            if (shadow_ufn_exists(tryc) ||
+                (scalar_dest && strncmp(ds->callee, "cc_py_obj_", 10) == 0))
+                callee = tryc;
         }
     }
     return shadow_ufcs_emit_dyn_sink(recv, meth_name, args, ptr_recv, callee,
@@ -525,6 +543,87 @@ static int shadow_ufcs_recv_is_ident(const char* recv) {
     return 1;
 }
 
+/* `recv.expose::[T]` → factory family `py_expose` (snake(CCPy)_expose).
+ * Matches production cc__rewrite_member_generic_to_free_name. */
+static int shadow_ufcs_factory_member_cand(const char* recv, const char* vty,
+                                          const char* meth, char* cand,
+                                          size_t ccap) {
+    char base[192];
+    char snake[192];
+    size_t bl;
+    size_t ml;
+    if (!meth || !meth[0] || !cand || !ccap) return 0;
+    cand[0] = 0;
+    ml = strlen(meth);
+    /* Simple-ident shortcut: `py.expose` → `py_expose`. */
+    if (recv && recv[0] && shadow_ufcs_recv_is_ident(recv)) {
+        snprintf(cand, ccap, "%s_%s", recv, meth);
+        if (cc_emit_plan_has_generic_factory(cand)) return 1;
+        cand[0] = 0;
+    }
+    if (vty && vty[0]) {
+        snprintf(base, sizeof(base), "%s", vty);
+        bl = strlen(base);
+        while (bl > 0 && (base[bl - 1] == '*' || base[bl - 1] == ' '))
+            base[--bl] = 0;
+        if (bl > 2 && base[0] == 'C' && base[1] == 'C' && base[2] >= 'A' &&
+            base[2] <= 'Z')
+            memmove(base, base + 2, bl - 1);
+        cc_emit_plan_snake_name(base, snake, sizeof(snake));
+        if (snake[0]) {
+            snprintf(cand, ccap, "%s_%s", snake, meth);
+            if (cc_emit_plan_has_generic_factory(cand)) return 1;
+            cand[0] = 0;
+        }
+    }
+    /* Bang-chain hop `((__rN).u.value).expose::[T]` — recv type is unbindable;
+     * resolve by factory suffix `_*meth`. */
+    if (recv && strstr(recv, ".u.value")) {
+        char names[512];
+        if (cc_emit_plan_generic_factory_names_csv(names, sizeof(names)) > 0) {
+            char* tok = names;
+            while (tok && *tok) {
+                char* comma = strchr(tok, ',');
+                size_t nl;
+                if (comma) *comma = 0;
+                while (*tok == ' ') tok++;
+                nl = strlen(tok);
+                if (nl > ml + 1 && tok[nl - ml - 1] == '_' &&
+                    strcmp(tok + nl - ml, meth) == 0) {
+                    snprintf(cand, ccap, "%s", tok);
+                    return 1;
+                }
+                tok = comma ? comma + 1 : NULL;
+            }
+        }
+    }
+    return 0;
+}
+
+/* Compact type formal `Counter` / `K_V` for factory monomorph name. */
+static void shadow_ufcs_formal_compact(const char* formal, char* out,
+                                      size_t ocap) {
+    size_t o = 0;
+    const char* p;
+    if (!out || !ocap) return;
+    out[0] = 0;
+    if (!formal) return;
+    p = formal;
+    while (*p && o + 1 < ocap) {
+        if (*p == ' ' || *p == '\t') {
+            p++;
+            continue;
+        }
+        if (*p == ',' || *p == '*') {
+            if (o && out[o - 1] != '_') out[o++] = '_';
+            p++;
+            continue;
+        }
+        out[o++] = *p++;
+    }
+    out[o] = 0;
+}
+
 /* Emit CCSlice_T_meth(&recv), or meth((T[]){recv}) so rvalues decay to T*.
  * Declared extensions `cc_slice_<elem>_<meth>` beat the composed instance name. */
 static int shadow_ufcs_emit_slice_meth(const char* sty, const char* meth,
@@ -656,7 +755,8 @@ static int shadow_ufcs_try_result_value_hop(const char* recv,
 static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
                                    const char* args, int is_arrow,
                                    const char* elem_ty, char* dst, size_t cap) {
-    char a[160];
+    /* Args may embed multiline @slice("…") / @string(`…`) payloads. */
+    char a[4096];
     char recv_buf[192];
     const ShadowBind* rb;
     char vty[128];
@@ -672,6 +772,35 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
         strstr(recv, "fabs") || (strchr(recv, '.') && !strchr(recv, '('));
     rb = shadow_bind_for_recv(recv);
     shadow_bind_base_ty(rb, vty, sizeof(vty));
+    /* Member-generic factory before elem_ty→vty fallback: `::[T]` formal is the
+     * monomorph arg, not the receiver type (`Counter` ≠ `CCPy`). */
+    if (!is_arrow && elem_ty && elem_ty[0]) {
+        char fam[160];
+        char compact[128];
+        if (shadow_ufcs_factory_member_cand(recv, vty, meth_name, fam,
+                                           sizeof(fam))) {
+            int need_amp = 1;
+            size_t vl = strlen(vty);
+            shadow_ufcs_formal_compact(elem_ty, compact, sizeof(compact));
+            if (!compact[0]) return 0;
+            if (vl && vty[vl - 1] == '*') need_amp = 0;
+            if (recv[0] == '*' || strstr(recv, "->") ||
+                strstr(recv, ".u.value"))
+                need_amp = 0;
+            if (a[0])
+                snprintf(dst, cap, "%s_%s(%s%s, %s)", fam, compact,
+                         need_amp ? "&" : "", recv, a);
+            else
+                snprintf(dst, cap, "%s_%s(%s%s)", fam, compact,
+                         need_amp ? "&" : "", recv);
+            return 1;
+        }
+    }
+    /* Typed destination / bang-chain hop hint when the receiver has no bind
+     * (e.g. `((__r0).u.value).as_i64()` with elem_ty = CCPyObj). */
+    if (!vty[0] && elem_ty && elem_ty[0] && strchr(elem_ty, ' ') == NULL &&
+        elem_ty[0] >= 'A' && elem_ty[0] <= 'Z')
+        snprintf(vty, sizeof(vty), "%s", elem_ty);
     if (!is_arrow && !vty[0] &&
         shadow_ufcs_try_result_value_hop(recv, meth_name, a, elem_ty, dst, cap))
         return 1;
@@ -1111,6 +1240,35 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
     } else if (!is_arrow && strcmp(meth_name, "block_on") == 0) {
         if (!elem_ty || !elem_ty[0]) return 0;
         snprintf(dst, cap, "cc_block_on(%s, %s)", elem_ty, recv);
+    } else if (!is_arrow && strcmp(meth_name, "map") == 0 &&
+               (strcmp(vty, "CCPyObj") == 0 ||
+                shadow_bind_ty_has(rb, "CCPyObj") || strstr(recv, "__r"))) {
+        /* `f.map::[T](&arena, cols...)` → cc_py_obj_map(T, &f, …). */
+        if (!elem_ty || !elem_ty[0]) return 0;
+        if (a[0])
+            snprintf(dst, cap, "cc_py_obj_map(%s, &%s, %s)", elem_ty, recv, a);
+        else
+            snprintf(dst, cap, "cc_py_obj_map(%s, &%s)", elem_ty, recv);
+    } else if (!is_arrow && strcmp(meth_name, "as_map") == 0 &&
+               (strcmp(vty, "CCPyObj") == 0 ||
+                shadow_bind_ty_has(rb, "CCPyObj"))) {
+        /* `obj.as_map::[K,V](&arena, m)` — elem_ty holds "K,V" compact. */
+        if (!elem_ty || !elem_ty[0] || !a[0]) return 0;
+        {
+            char k[64], v[64];
+            const char* us = strchr(elem_ty, '_');
+            if (!us) us = strchr(elem_ty, ',');
+            if (!us) return 0;
+            {
+                size_t kl = (size_t)(us - elem_ty);
+                if (kl >= sizeof(k)) kl = sizeof(k) - 1;
+                memcpy(k, elem_ty, kl);
+                k[kl] = 0;
+                snprintf(v, sizeof(v), "%s", us + 1);
+            }
+            snprintf(dst, cap, "cc_py_obj_as_map(%s, %s, &%s, %s)", k, v, recv,
+                     a);
+        }
     } else if (strcmp(meth_name, "append") == 0) {
         /* Value recv → &s; pointer recv (sp->append) → sp. */
         if (is_arrow || recv[0] == '*' || strstr(recv, "->"))
@@ -1485,6 +1643,18 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
                               : "store_key_logical_live_bytes(&%s)",
                      recv);
         }
+    } else if (!is_arrow && strcmp(meth_name, "as_i64") == 0 &&
+               (strcmp(vty, "CCPyObj") == 0 ||
+                shadow_bind_ty_has(rb, "CCPyObj") ||
+                strstr(recv, "__r") != NULL)) {
+        snprintf(dst, cap, "cc_py_obj_as_i64(&%s)", recv);
+    } else if (!is_arrow && strcmp(meth_name, "as_slice_into") == 0 &&
+               (strcmp(vty, "CCPyObj") == 0 ||
+                shadow_bind_ty_has(rb, "CCPyObj") || strstr(recv, "__r"))) {
+        if (a[0])
+            snprintf(dst, cap, "cc_py_obj_as_slice_into(&%s, %s)", recv, a);
+        else
+            snprintf(dst, cap, "cc_py_obj_as_slice_into(&%s)", recv);
     } else if (!is_arrow && strcmp(meth_name, "as_slice") == 0) {
         if (strcmp(vty, "CCSlicePacked") == 0)
             snprintf(dst, cap, "cc_slice_packed_as_slice(&%s)", recv);
@@ -1493,8 +1663,15 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
         else if (strcmp(vty, "CCPyObj") == 0 ||
                  shadow_bind_ty_has(rb, "CCPyObj"))
             snprintf(dst, cap, "cc_py_obj_as_slice(&%s)", recv);
+        else if (strstr(recv, "cc_string_new") || strstr(recv, "__cc_tpl") ||
+                 (recv[0] == '(' && recv[1] == '{'))
+            /* @string(`…`) lowered to a GNU stmt-expr yielding CCString. */
+            snprintf(dst, cap,
+                     "({ CCString __cc_as_s = %s; cc_string_as_slice(&__cc_as_s); })",
+                     recv);
         else if (shadow_bind_ty_has(rb, "CCString") || strstr(recv, "string") ||
-                 strstr(recv, "str") || strstr(recv, "CCString"))
+                 strstr(recv, "str") || strstr(recv, "CCString") ||
+                 strcmp(vty, "CCString") == 0)
             snprintf(dst, cap, "cc_string_as_slice(&%s)", recv);
         else if (vty[0] && strncmp(vty, "CCSlice", 7) == 0)
             snprintf(dst, cap, "(%s)", recv);
@@ -1873,6 +2050,15 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
             /* Typedef / tag / CC* (CCArena.avail → arena_avail via snake). */
             snprintf(tag, sizeof(tag), "%s", vty);
         }
+        /* `CCPy*` → tag CCPy + ptr_recv; never snake `py*` → `cc_py*_exec`. */
+        {
+            size_t tl = strlen(tag);
+            while (tl && (tag[tl - 1] == '*' || tag[tl - 1] == ' ')) {
+                if (tag[tl - 1] == '*') ptr_recv = 1;
+                tag[--tl] = 0;
+            }
+        }
+        if (!ptr_recv && recv && strstr(recv, ".u.value")) ptr_recv = 1;
         if (tag[0]) {
             char composed[160];
             char snake[160];
@@ -1983,13 +2169,33 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
                     }
                     (void)strict_handle;
                 } else if (snake[0]) {
+                    /* Compose cc_py_exec / cc_thing_area. Prefer a bare-name
+                     * rival (peek_t) over inventing cc_thing_peek_t — that is
+                     * the CC-prefixed ladder. Otherwise trust the composition
+                     * for header methods not mirrored in the local ufn table.
+                     * Never invent over a registered .ufcs_dynamic sink
+                     * (CCPyObj → callm for unknown Python methods). */
                     snprintf(composed, sizeof(composed), "cc_%s_%s", snake,
                              meth_name);
-                    found = 1;
+                    if (shadow_ufn_exists(composed) ||
+                        shadow_family_accepts(tag, meth_name))
+                        found = 1;
+                    else if (!shadow_ufn_exists(meth_name) &&
+                             !shadow_dyn_sink_for(tag))
+                        found = 1;
+                    else
+                        composed[0] = 0;
                 } else {
                     snprintf(composed, sizeof(composed), "%s_%s", tag,
                              meth_name);
-                    found = 1;
+                    if (shadow_ufn_exists(composed) ||
+                        shadow_family_accepts(tag, meth_name))
+                        found = 1;
+                    else if (!shadow_ufn_exists(meth_name) &&
+                             !shadow_dyn_sink_for(tag))
+                        found = 1;
+                    else
+                        composed[0] = 0;
                 }
             }
             /* Dynamic sink outranks bare ambient names (poke etc.). */
@@ -2206,7 +2412,47 @@ static int shadow_ufcs_peel_left(char* dst, size_t cap, const char* src,
     targs[0] = 0;
     {
         const char* p = src;
+        int in_dq = 0, in_sq = 0, in_bt = 0;
         while (*p && !op) {
+            /* Do not peel UFCS inside "…" / '…' / `…` (@string Python bodies). */
+            if (in_bt) {
+                if (*p == '`') in_bt = 0;
+                p++;
+                continue;
+            }
+            if (in_dq) {
+                if (*p == '\\' && p[1]) {
+                    p += 2;
+                    continue;
+                }
+                if (*p == '"') in_dq = 0;
+                p++;
+                continue;
+            }
+            if (in_sq) {
+                if (*p == '\\' && p[1]) {
+                    p += 2;
+                    continue;
+                }
+                if (*p == '\'') in_sq = 0;
+                p++;
+                continue;
+            }
+            if (*p == '`') {
+                in_bt = 1;
+                p++;
+                continue;
+            }
+            if (*p == '"') {
+                in_dq = 1;
+                p++;
+                continue;
+            }
+            if (*p == '\'') {
+                in_sq = 1;
+                p++;
+                continue;
+            }
             if (p[0] == '-' && p[1] == '>' &&
                 ((p[2] >= 'A' && p[2] <= 'Z') || (p[2] >= 'a' && p[2] <= 'z') ||
                  p[2] == '_')) {
@@ -2253,8 +2499,8 @@ static int shadow_ufcs_peel_left(char* dst, size_t cap, const char* src,
     if (!op) return 0;
     char recv[192];
     char meth_name[64];
-    char args[160];
-    char repl[512];
+    char args[4096];
+    char repl[8192];
     const char* after = NULL;
     const char* meth;
     const char* par;
@@ -2273,7 +2519,15 @@ static int shadow_ufcs_peel_left(char* dst, size_t cap, const char* src,
     if (!par) return 0;
     if (targs[0]) formal = targs;
     if (!shadow_ufcs_args(par, args, sizeof(args), &after)) return 0;
-    if (targs[0] && !shadow_meth_has_type_formal(meth_name)) return 0;
+    if (targs[0] && !shadow_meth_has_type_formal(meth_name)) {
+        char fam[160];
+        const ShadowBind* rb0 = shadow_bind_for_recv(recv);
+        char vty0[128];
+        shadow_bind_base_ty(rb0, vty0, sizeof(vty0));
+        if (!shadow_ufcs_factory_member_cand(recv, vty0, meth_name, fam,
+                                            sizeof(fam)))
+            return 0;
+    }
     {
         const char* rstart = op;
         size_t rn, pre;
@@ -2514,7 +2768,7 @@ static int shadow_emit_ufcs_to_buf(AstNode* st, char* dst, size_t cap,
                                   const char* elem_ty) {
     /* Large enough for expanded `@string(...).println()` stmt-exprs. */
     char recv[4096];
-    char args[288];
+    char args[4096];
     const char* targs;
     const char* formal;
     int is_arrow;
@@ -2526,9 +2780,27 @@ static int shadow_emit_ufcs_to_buf(AstNode* st, char* dst, size_t cap,
     /* Explicit ::[T] wins over typed-destination inference. */
     formal = (targs && targs[0]) ? targs : elem_ty;
     if (targs && targs[0] && !shadow_meth_has_type_formal(st->b)) {
-        fprintf(stderr, "error: no type-formal member '%s'\n", st->b);
-        g_shadow_ufcs_miss = 1;
-        return 0;
+        char fam[160];
+        char fams[512];
+        const ShadowBind* rb0 = shadow_bind_for_recv(st->a);
+        char vty0[128];
+        shadow_bind_base_ty(rb0, vty0, sizeof(vty0));
+        if (!shadow_ufcs_factory_member_cand(st->a, vty0, st->b, fam,
+                                            sizeof(fam))) {
+            /* Match production wording so typo oracles (py_expse) can bind. */
+            snprintf(fam, sizeof(fam), "%s_%s", st->a, st->b);
+            fprintf(stderr,
+                    "error: type: no type-formal member '%s' for receiver type "
+                    "'%s' — `::[...]` binds a member that declares a type formal "
+                    "(allocT, block_on, as_list, as_map, map) or a registered "
+                    "generic factory named '%s'\n",
+                    st->b, st->a[0] ? st->a : "?", fam);
+            if (cc_emit_plan_generic_factory_names_csv(fams, sizeof(fams)) > 0)
+                fprintf(stderr, "  note: registered generic factories: %s\n",
+                        fams);
+            g_shadow_ufcs_miss = 1;
+            return 0;
+        }
     }
     snprintf(recv, sizeof(recv), "%s", st->a);
     args[0] = 0;
@@ -2578,6 +2850,25 @@ static int shadow_emit_ufcs_to_buf(AstNode* st, char* dst, size_t cap,
     }
     if (!shadow_ufcs_lower_parts(recv, st->b, args, is_arrow, formal, dst, cap))
         return 0; /* let leftover text peel retry (e.g. cast-prefixed recv) */
+    /* Args may still carry @string / @slice — lower before host C. */
+    shadow_rewrite_print_and_string(dst, cap);
+    {
+        const char* pat = "__cc_tpl; }).as_slice()";
+        const char* repl = "cc_string_as_slice(&__cc_tpl); })";
+        char* hit;
+        while ((hit = strstr(dst, pat)) != NULL) {
+            char tmp[8192];
+            size_t pre = (size_t)(hit - dst);
+            if (pre + strlen(repl) + strlen(hit + strlen(pat)) + 1 >= sizeof(tmp) ||
+                pre + strlen(repl) + strlen(hit + strlen(pat)) + 1 >= cap)
+                break;
+            snprintf(tmp, sizeof(tmp), "%.*s%s%s", (int)pre, dst, repl,
+                     hit + strlen(pat));
+            snprintf(dst, cap, "%s", tmp);
+        }
+    }
+    shadow_rewrite_at_slice(dst, cap);
+    shadow_rewrite_generic_types_text(dst, cap);
     return 1;
 }
 
@@ -2589,7 +2880,7 @@ static int shadow_emit_exact_ufcs_text(char* dst, size_t cap, const char* src,
     const char* p;
     char recv[192];
     char meth_name[64];
-    char args[160];
+    char args[4096];
     char targs[128];
     const char* after = NULL;
     const char* meth;
@@ -2598,43 +2889,70 @@ static int shadow_emit_exact_ufcs_text(char* dst, size_t cap, const char* src,
     size_t mi = 0;
     targs[0] = 0;
     if (!src || !src[0]) return 0;
-    for (p = src; *p && !op; p++) {
-        if (p[0] == '-' && p[1] == '>' &&
-            ((p[2] >= 'A' && p[2] <= 'Z') || (p[2] >= 'a' && p[2] <= 'z') ||
-             p[2] == '_')) {
-            const char* m = p + 2;
-            const char* q;
-            char ta[128];
-            while (*m == ' ' || *m == '\t') m++;
-            q = m;
-            while ((*q >= 'A' && *q <= 'Z') || (*q >= 'a' && *q <= 'z') ||
-                   (*q >= '0' && *q <= '9') || *q == '_')
-                q++;
-            if (shadow_ufcs_text_paren_after_meth(q, ta, sizeof(ta))) {
-                op = p;
-                is_arrow = 1;
-                snprintf(targs, sizeof(targs), "%s", ta);
-                break;
+    {
+        int in_dq = 0, in_sq = 0;
+        for (p = src; *p && !op; p++) {
+            if (in_dq) {
+                if (*p == '\\' && p[1]) {
+                    p++;
+                    continue;
+                }
+                if (*p == '"') in_dq = 0;
+                continue;
             }
-            p += 2;
-            continue;
-        }
-        if (p[0] == '.' &&
-            ((p[1] >= 'A' && p[1] <= 'Z') || (p[1] >= 'a' && p[1] <= 'z') ||
-             p[1] == '_')) {
-            const char* m = p + 1;
-            const char* q;
-            char ta[128];
-            while (*m == ' ' || *m == '\t') m++;
-            q = m;
-            while ((*q >= 'A' && *q <= 'Z') || (*q >= 'a' && *q <= 'z') ||
-                   (*q >= '0' && *q <= '9') || *q == '_')
-                q++;
-            if (shadow_ufcs_text_paren_after_meth(q, ta, sizeof(ta))) {
-                op = p;
-                is_arrow = 0;
-                snprintf(targs, sizeof(targs), "%s", ta);
-                break;
+            if (in_sq) {
+                if (*p == '\\' && p[1]) {
+                    p++;
+                    continue;
+                }
+                if (*p == '\'') in_sq = 0;
+                continue;
+            }
+            if (*p == '"') {
+                in_dq = 1;
+                continue;
+            }
+            if (*p == '\'') {
+                in_sq = 1;
+                continue;
+            }
+            if (p[0] == '-' && p[1] == '>' &&
+                ((p[2] >= 'A' && p[2] <= 'Z') || (p[2] >= 'a' && p[2] <= 'z') ||
+                 p[2] == '_')) {
+                const char* m = p + 2;
+                const char* q;
+                char ta[128];
+                while (*m == ' ' || *m == '\t') m++;
+                q = m;
+                while ((*q >= 'A' && *q <= 'Z') || (*q >= 'a' && *q <= 'z') ||
+                       (*q >= '0' && *q <= '9') || *q == '_')
+                    q++;
+                if (shadow_ufcs_text_paren_after_meth(q, ta, sizeof(ta))) {
+                    op = p;
+                    is_arrow = 1;
+                    snprintf(targs, sizeof(targs), "%s", ta);
+                    break;
+                }
+                p += 2;
+                continue;
+            }
+            if (p[0] == '.' &&
+                ((p[1] >= 'A' && p[1] <= 'Z') || (p[1] >= 'a' && p[1] <= 'z') ||
+                 p[1] == '_')) {
+                const char* m = p + 1;
+                const char* q;
+                char ta[128];
+                while (*m == ' ' || *m == '\t') m++;
+                q = m;
+                while ((*q >= 'A' && *q <= 'Z') || (*q >= 'a' && *q <= 'z') ||
+                       (*q >= '0' && *q <= '9') || *q == '_')
+                    q++;
+                if (shadow_ufcs_text_paren_after_meth(q, ta, sizeof(ta))) {
+                    op = p;
+                    is_arrow = 0;
+                    snprintf(targs, sizeof(targs), "%s", ta);
+                    break;
+                }
             }
         }
     }
@@ -2665,7 +2983,15 @@ static int shadow_emit_exact_ufcs_text(char* dst, size_t cap, const char* src,
     while (after && (*after == ' ' || *after == '\t')) after++;
     if (after && *after) return 0; /* trailing junk → not exact */
     formal = targs[0] ? targs : elem_ty;
-    if (targs[0] && !shadow_meth_has_type_formal(meth_name)) return 0;
+    if (targs[0] && !shadow_meth_has_type_formal(meth_name)) {
+        char fam[160];
+        const ShadowBind* rb0 = shadow_bind_for_recv(recv);
+        char vty0[128];
+        shadow_bind_base_ty(rb0, vty0, sizeof(vty0));
+        if (!shadow_ufcs_factory_member_cand(recv, vty0, meth_name, fam,
+                                            sizeof(fam)))
+            return 0;
+    }
     /* Reject chains: recv/args must not still contain UFCS calls. */
     {
         const char* q;
@@ -3262,9 +3588,48 @@ static void shadow_emit_text_ufcs(char* dst, size_t cap, const char* src,
      * Type_meth nor bare meth is a successful lower (leftover remains). */
     {
         const char* p = cur;
+        int in_dq = 0, in_sq = 0, in_bt = 0;
         while (*p && !g_shadow_ufcs_miss) {
             int is_arrow = 0;
             const char* mstart = NULL;
+            if (in_bt) {
+                if (*p == '`') in_bt = 0;
+                p++;
+                continue;
+            }
+            if (in_dq) {
+                if (*p == '\\' && p[1]) {
+                    p += 2;
+                    continue;
+                }
+                if (*p == '"') in_dq = 0;
+                p++;
+                continue;
+            }
+            if (in_sq) {
+                if (*p == '\\' && p[1]) {
+                    p += 2;
+                    continue;
+                }
+                if (*p == '\'') in_sq = 0;
+                p++;
+                continue;
+            }
+            if (*p == '`') {
+                in_bt = 1;
+                p++;
+                continue;
+            }
+            if (*p == '"') {
+                in_dq = 1;
+                p++;
+                continue;
+            }
+            if (*p == '\'') {
+                in_sq = 1;
+                p++;
+                continue;
+            }
             if (p[0] == '-' && p[1] == '>' &&
                 ((p[2] >= 'A' && p[2] <= 'Z') || (p[2] >= 'a' && p[2] <= 'z') ||
                  p[2] == '_')) {
@@ -3475,6 +3840,8 @@ static void shadow_emit_expr_text(AstNode* st, const char* text, char* dst,
                 if (shadow_emit_ufcs_to_buf(u, dst, cap, elem_ty)) {
                     g_shadow_sink_dest[0] = 0;
                     shadow_rewrite_closure_calls(dst, cap);
+                    shadow_rewrite_print_and_string(dst, cap);
+                    shadow_rewrite_at_slice(dst, cap);
                     if (elem_ty && strncmp(elem_ty, "CCResult_", 9) == 0)
                         shadow_rewrite_result_ctors(dst, cap, elem_ty);
                     return;
@@ -3499,12 +3866,30 @@ static void shadow_emit_expr_text(AstNode* st, const char* text, char* dst,
         snprintf(cur, sizeof(cur), "%s", tp);
     }
     shadow_rewrite_print_and_string(cur, sizeof(cur));
+    /* `@string(…).as_slice()` after template lower: stmt-expr yields CCString. */
+    {
+        const char* pat = "__cc_tpl; }).as_slice()";
+        const char* repl = "cc_string_as_slice(&__cc_tpl); })";
+        char* hit;
+        while ((hit = strstr(cur, pat)) != NULL) {
+            char tmp[8192];
+            size_t pre = (size_t)(hit - cur);
+            if (pre + strlen(repl) + strlen(hit + strlen(pat)) + 1 >= sizeof(tmp))
+                break;
+            snprintf(tmp, sizeof(tmp), "%.*s%s%s", (int)pre, cur, repl,
+                     hit + strlen(pat));
+            snprintf(cur, sizeof(cur), "%s", tmp);
+        }
+    }
+    /* Lower @slice before UFCS peel so dots inside the payload stay in a
+     * C string literal (not mistaken for method calls). */
+    shadow_rewrite_at_slice(cur, sizeof(cur));
     /* Exact UFCS / cast-wrapped UFCS: dest-aware sink. */
     {
         char cast_dest[96];
         const char* cast_call = shadow_sink_cast_dest(cur, cast_dest,
                                                      sizeof(cast_dest));
-        char exact_buf[512];
+        char exact_buf[8192];
         g_shadow_sink_dest[0] = 0;
         if (cast_call) {
             snprintf(g_shadow_sink_dest, sizeof(g_shadow_sink_dest), "%s",
@@ -3596,8 +3981,8 @@ static void shadow_rewrite_cond(char* dst, size_t cap, const char* cond) {
 /* Cond: UFCS via emit_expr_text; leftover is_err / chan send-recv checks. */
 static int shadow_emit_cond_text(AstNode* st, const char* text, char* dst,
                                 size_t cap, ShadowCtx* ctx, CEmit* out) {
-    char cur[512];
-    char nxt[512];
+    char cur[2048];
+    char nxt[2048];
     /* Diagnose bare designators on the source text before expr rewrite
      * (which may resolve `.arm` via the sole-variant fallback). */
     if (shadow_variant_diag_bare_desig(ctx, st, out, text)) return 0;

@@ -141,7 +141,7 @@ static AstNode* parse_stmt_unwrap(Parser* p) {
     int j;
     int depth;
     int c0;
-    char call[256];
+    char call[2048];
     lhs[0] = 0;
     /* `name = callee(args) !>` — assign-unwrap (parse_assign defers on `!>`). */
     if (p_peek(p).kind == TK_IDENT && p->i + 3 < p->n &&
@@ -172,11 +172,22 @@ static AstNode* parse_stmt_unwrap(Parser* p) {
         p->i = save;
         return NULL;
     }
-    if (p->i + 2 >= p->n || !tok_eq(p->toks[p->i + 1], TK_PUNCT, "(")) {
-        p->i = save;
-        return NULL;
+    /* `name(args) !>` or `name::[T](args) !>` (generic free-name factories). */
+    {
+        int par = p->i + 1;
+        if (par < p->n && tok_eq(p->toks[par], TK_PUNCT, "::")) {
+            int gend = peek_generic_type_end(p, p->i);
+            if (gend < 0 || gend >= p->n || !tok_eq(p->toks[gend], TK_PUNCT, "(")) {
+                p->i = save;
+                return NULL;
+            }
+            par = gend;
+        } else if (par >= p->n || !tok_eq(p->toks[par], TK_PUNCT, "(")) {
+            p->i = save;
+            return NULL;
+        }
+        j = par;
     }
-    j = p->i + 1;
     depth = 0;
     while (j < p->n) {
         Token t = p->toks[j];
@@ -545,14 +556,17 @@ static int parse_unwrap_ufcs_chain_tail(Parser* p, AstNode* n, Token at) {
         }
         if (tok_eq(p_peek(p), TK_PUNCT, "!>")) {
             p_next(p); /* !> */
-            if (!tok_eq(p_peek(p), TK_PUNCT, ".")) {
-                parser_fail(p, p_peek(p), "expected '.' after !> in chain");
-                return 0;
-            }
-            continue;
+            /* Another hop: !>.meth(…). Terminal !> before ;/@destroy ends chain. */
+            if (tok_eq(p_peek(p), TK_PUNCT, ".")) continue;
+            break;
         }
         break;
     }
+    /* Preserve lhs type: e is overwritten with the chain; park type on mode. */
+    char saved_ty[128];
+    saved_ty[0] = 0;
+    if (n->e[0])
+        snprintf(saved_ty, sizeof(saved_ty), "%s", n->e);
     if (!span_text(p, c0, p->i, n->e, sizeof(n->e))) {
         parser_fail(p, at, "!> chain too long");
         return 0;
@@ -561,7 +575,10 @@ static int parse_unwrap_ufcs_chain_tail(Parser* p, AstNode* n, Token at) {
         parser_fail(p, p_peek(p), "expected ';' after !> chain");
         return 0;
     }
-    snprintf(n->c, sizeof(n->c), "bang_chain");
+    if (saved_ty[0])
+        snprintf(n->c, sizeof(n->c), "bang_chain:%s", saved_ty);
+    else
+        snprintf(n->c, sizeof(n->c), "bang_chain");
     return 1;
 }
 
@@ -626,7 +643,7 @@ static AstNode* parse_var_unwrap(Parser* p) {
     p_next(p); /* = */
     int call0 = p->i;
     while (p->i < op_at) p_next(p);
-    char call[256];
+    char call[2048];
     if (!span_text(p, call0, op_at, call, sizeof(call))) {
         parser_fail(p, vname, "unwrap call expr too long");
         return NULL;
@@ -875,7 +892,7 @@ static AstNode* parse_ptr_unwrap(Parser* p) {
     p_next(p); /* = */
     int c0 = p->i;
     while (p->i < op_at) p_next(p);
-    char call[256];
+    char call[2048];
     if (!span_text(p, c0, op_at, call, sizeof(call))) {
         parser_fail(p, name, "ptr unwrap call too long");
         return NULL;

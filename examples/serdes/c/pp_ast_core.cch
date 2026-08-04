@@ -2,6 +2,11 @@
  * Included by pp_ast.cch before pp_ast_parse.cch. */
 #pragma once
 
+/* Emit-plan factory registry (libshadow_comptime) — used when mangling
+ * snake `family::[T]` spellings such as py_expose::[Counter]. */
+int cc_emit_plan_has_generic_factory(const char* name);
+int cc_emit_plan_generic_factory_names_csv(char* out, size_t cap);
+
 /* ---- closed parse keywords (comptime perfect hash) ---------------------- */
 
 typedef enum {
@@ -247,14 +252,14 @@ typedef enum {
 typedef struct AstNode AstNode;
 struct AstNode {
     AstKind kind;
-    /* Long exprs / grammar schema rows (was 256; union schema needs ~387). */
-    char a[512];
-    char b[512];
-    /* Params / long spans — nursery lower_c protos exceed 256 with source indent. */
-    char c[512];
+    /* Long exprs / @string unwrap args / grammar rows (py + templates need >512). */
+    char a[2048];
+    char b[2048];
+    /* Params / long spans — nursery lower_c protos and bang binders. */
+    char c[2048];
     /* Long raw spans: static-fn / switch / enum bodies (was 256; errno maps overflow). */
-    char d[2048];
-    char e[512];
+    char d[4096];
+    char e[2048];
     /* Attachment roles (never mix):
      *   kids  — open parent lists (fn/struct members still being filled)
      *   body  — nested stmt lists (block / if / loop / bang bodies)
@@ -716,6 +721,13 @@ static int peek_result_shape(Parser* p) {
     if (p->i + 1 >= p->n) return 0;
     t = p->toks[p->i];
     j = p->i + 1;
+    /* `long long !>(Err)` — two-token ok type before `!>`. */
+    if (t.kind == TK_IDENT && spell_eq(t.spell, "long") && j < p->n &&
+        p->toks[j].kind == TK_IDENT && spell_eq(p->toks[j].spell, "long")) {
+        j++;
+        if (j < p->n && tok_eq(p->toks[j], TK_PUNCT, "*")) j++;
+        return j < p->n && tok_eq(p->toks[j], TK_PUNCT, "!>");
+    }
     if (j < p->n && tok_eq(p->toks[j], TK_PUNCT, "*")) j++;
     if (j >= p->n || !tok_eq(p->toks[j], TK_PUNCT, "!>")) return 0;
     return t.kind == TK_IDENT || shadow_kw(t) == SHADOW_KW_VOID ||
@@ -1014,13 +1026,21 @@ static int ast_spell_type_tokens(Parser* p, int start, int end, char* dst,
         } else if (family[0] >= 'A' && family[0] <= 'Z') {
             /* PascalCase type-style: Pair::[T] / Box::[T] / user factories. */
             snprintf(dst, cap, "%s_%s", family, compact);
+        } else if (cc_emit_plan_has_generic_factory(family)) {
+            /* Registered snake factory (py_expose::[T] → py_expose_T). */
+            snprintf(dst, cap, "%s_%s", family, compact);
         } else {
-            /* Free snake name that is not a known ctor form — refuse host
-             * invent (unknown_fn::[int] → unknown_fn_int). */
+            /* Free snake name that is not a known ctor / factory — refuse
+             * host invent (unknown_fn::[int] → unknown_fn_int). */
             char msg[192];
+            char fams[512];
             snprintf(msg, sizeof(msg),
                      "unknown generic name '%s' before '::[...]'", family);
             parser_fail(p, p->toks[start], msg);
+            if (cc_emit_plan_generic_factory_names_csv(fams, sizeof(fams)) > 0)
+                fprintf(stderr,
+                        "  note: registered generic factory families: %s\n",
+                        fams);
             return 0;
         }
     }

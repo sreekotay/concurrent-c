@@ -221,6 +221,17 @@ static void shadow_lower_qmark_fallback_text(char* expr, size_t cap) {
     if (strlen(cur) < cap) snprintf(expr, cap, "%s", cur);
 }
 
+static int shadow_mode_is_bang_chain(const char* mode) {
+    return mode && (strcmp(mode, "bang_chain") == 0 ||
+                    strncmp(mode, "bang_chain:", 11) == 0);
+}
+
+static const char* shadow_bang_chain_lhs_ty(const char* mode) {
+    if (mode && strncmp(mode, "bang_chain:", 11) == 0 && mode[11])
+        return mode + 11;
+    return NULL;
+}
+
 static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
                                   const char* indent) {
     const char* call = st->b;
@@ -307,28 +318,58 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
                     i1, i1, base, acc, arm, indent);
         }
     }
-    /* e holds lhs type for bang/bang_stmt/bang_block; chain/qmark reuse e. */
+    /* e holds lhs type for bang/bang_stmt/bang_block; bang_chain parks
+     * the type on mode (`bang_chain:CCSlice`) because e is the chain. */
     const char* ty = "int";
     if ((strcmp(mode, "bang") == 0 || strcmp(mode, "bang_stmt") == 0 ||
          strcmp(mode, "bang_block") == 0) &&
         st->e[0])
         ty = st->e;
-    char callbuf[288];
+    else if (shadow_mode_is_bang_chain(mode) && shadow_bang_chain_lhs_ty(mode))
+        ty = shadow_bang_chain_lhs_ty(mode);
+    /* Large: unwrap call may embed @string(`…`) / @slice("…") args. */
+    char callbuf[8192];
+    /* bang_chain Result check must see the SOURCE call (before UFCS rewrite
+     * turns `m.get("r")` into `cc_py_obj_callm(...)`). */
+    const char* src_call = call ? call : "";
     if (shadow_emit_channel_pair_expr(callbuf, sizeof(callbuf), call))
         call = callbuf;
     else {
-        shadow_emit_expr_text(st, call, callbuf, sizeof(callbuf), NULL);
+        /* Pass lhs ty so .ufcs_dynamic2 can pick cc_py_obj_callm_<dest>. */
+        shadow_emit_expr_text(st, call, callbuf, sizeof(callbuf),
+                              (ty && ty[0] && strcmp(ty, "int") != 0) ? ty
+                                                                      : NULL);
+        /* Belt-and-suspenders: UFCS early-return paths historically skipped
+         * @slice/@string rewrite; always normalize before host C. */
+        shadow_rewrite_print_and_string(callbuf, sizeof(callbuf));
+        {
+            const char* pat = "__cc_tpl; }).as_slice()";
+            const char* repl = "cc_string_as_slice(&__cc_tpl); })";
+            char* hit;
+            while ((hit = strstr(callbuf, pat)) != NULL) {
+                char tmp[8192];
+                size_t pre = (size_t)(hit - callbuf);
+                if (pre + strlen(repl) + strlen(hit + strlen(pat)) + 1 >=
+                    sizeof(tmp))
+                    break;
+                snprintf(tmp, sizeof(tmp), "%.*s%s%s", (int)pre, callbuf, repl,
+                         hit + strlen(pat));
+                snprintf(callbuf, sizeof(callbuf), "%s", tmp);
+            }
+        }
+        shadow_rewrite_at_slice(callbuf, sizeof(callbuf));
+        shadow_rewrite_generic_types_text(callbuf, sizeof(callbuf));
         call = callbuf;
     }
-    if (strcmp(mode, "bang") == 0 || strcmp(mode, "bang_chain") == 0) {
+    if (strcmp(mode, "bang") == 0 || shadow_mode_is_bang_chain(mode)) {
         const char* val = "(__r).u.value";
-        char chained[192];
+        char chained[512];
         /* bang_chain: producer must be typable as a Result (declared fn /
          * Result spelling). Undeclared ghosts fail loud — never unwrap. */
-        if (strcmp(mode, "bang_chain") == 0) {
+        if (shadow_mode_is_bang_chain(mode)) {
             char callee[64];
             size_t ni = 0;
-            const char* p = call;
+            const char* p = src_call;
             int ok = 0;
             while (*p == ' ' || *p == '\t' || *p == '(') p++;
             while (((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
@@ -336,14 +377,22 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
                    ni + 1 < sizeof(callee))
                 callee[ni++] = *p++;
             callee[ni] = 0;
-            if (strstr(call, "CCResult_"))
+            if (strstr(src_call, "CCResult_") || strstr(call, "CCResult_"))
+                ok = 1;
+            /* UFCS hop `recv.meth(...)` / `recv->meth(...)` — Result-ness is
+             * the method's; do not require the receiver ident to be a fn. */
+            else if (strchr(src_call, '.') != NULL ||
+                     strstr(src_call, "->") != NULL)
                 ok = 1;
             else if (callee[0] &&
                      (strncmp(callee, "cc_ok", 5) == 0 ||
                       strncmp(callee, "cc_err", 6) == 0 ||
                       strncmp(callee, "cc_channel_", 11) == 0 ||
                       strncmp(callee, "cc_chan_", 8) == 0 ||
+                      strncmp(callee, "cc_py_", 6) == 0 ||
                       shadow_ufn_exists(callee)))
+                ok = 1;
+            else if (call[0] && shadow_ufn_exists(call))
                 ok = 1;
             if (!ok) {
                 const char* path = NULL;
@@ -383,7 +432,7 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
             out->err = 1;
             return 0;
         }
-        if (strcmp(mode, "bang_chain") == 0 && st->e[0]) {
+        if (shadow_mode_is_bang_chain(mode) && st->e[0]) {
             /* Multi-hop: `.a()!>.b()!.c()` → nested Result unwraps + final UFCS.
              * Optional first-hop handler body (from `!>(e){…}.next()!>`). */
             if (strstr(st->e, "!>") || st->nbody > 0) {
@@ -423,9 +472,9 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
                 }
                 if (!cemit_fmt(out, "%s}\n", i1)) return 0;
                 while (*p) {
-                    char hop_txt[128];
-                    char recv[160];
-                    char lowered[192];
+                    char hop_txt[256];
+                    char recv[320];
+                    char lowered[1024];
                     char rtmp[16];
                     const char* bang;
                     size_t n;
@@ -450,9 +499,28 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
                     else
                         snprintf(recv, sizeof(recv), "((__r%d).u.value)%s", hop,
                                  hop_txt);
-                    /* Pass lhs ty as scalar hint so `.step` / `.as_int` invent
-                     * `cc_int_*` / `cc_size_t_*` like hard-coded `.twice`. */
-                    shadow_emit_text_ufcs(lowered, sizeof(lowered), recv, ty);
+                    /* Prefer a bound/receiver-shaped hint over the lhs ty so
+                     * hops like `m.get("r")!>.as_i64()!>` lower via CCPyObj
+                     * (not inventing `cc_<lhs>_as_i64`). Scalar lhs still
+                     * works for `.step` / `.as_int` when no bind matches. */
+                    {
+                        const char* hop_ty = ty;
+                        if (strstr(recv, "__r") &&
+                            (strstr(hop_txt, "as_i64") ||
+                             strstr(hop_txt, "as_slice") ||
+                             strstr(hop_txt, "as_f64") ||
+                             strstr(hop_txt, "as_bool") ||
+                             strstr(hop_txt, "as_cstr")))
+                            hop_ty = "CCPyObj";
+                        else if (!strstr(ty, "CCPy") &&
+                                 (strstr(call, "cc_py_") ||
+                                  strstr(call, "CCPyObj") ||
+                                  strstr(src_call, ".get(") ||
+                                  strstr(src_call, "->get(")))
+                            hop_ty = "CCPyObj";
+                        shadow_emit_text_ufcs(lowered, sizeof(lowered), recv,
+                                              hop_ty);
+                    }
                     if (fallible) {
                         snprintf(rtmp, sizeof(rtmp), "__r%d", hop + 1);
                         if (!cemit_fmt(out,
@@ -480,9 +548,15 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
                     return 0;
                 return 1;
             }
-            char tmp[192];
+            char tmp[320];
+            const char* hop_ty = NULL;
             snprintf(tmp, sizeof(tmp), "((__r).u.value)%s", st->e);
-            shadow_emit_text_ufcs(chained, sizeof(chained), tmp, NULL);
+            if (strstr(st->e, "as_i64") || strstr(st->e, "as_slice") ||
+                strstr(st->e, "as_f64") || strstr(st->e, "as_bool") ||
+                strstr(st->e, "as_cstr") || strstr(call, "cc_py_") ||
+                strstr(src_call, ".get(") || strstr(src_call, "->get("))
+                hop_ty = "CCPyObj";
+            shadow_emit_text_ufcs(chained, sizeof(chained), tmp, hop_ty);
             val = chained;
         }
         return shadow_emit_try_assign(out, ctx, indent, ty, st->a, call,
@@ -889,5 +963,70 @@ static int shadow_emit_err_syntax(AstNode* st, CEmit* out, ShadowCtx* ctx,
         return shadow_emit_err_assign_ok(out, indent, st->a, assignee,
                                          lhs_result, lhs_plain, "__r");
     return cemit_fmt(out, "%s} else { (void)__r; }\n%s}\n", i1, indent);
+}
+
+/* Form P: bare `expr !>` before an infix/terminator → GNU stmt-expr value.
+ * Matches production expression-position bang (leaves `!= 7` etc. in place).
+ * Returns 1 if rewritten, 0 if no Form-P bang, -1 on hard failure. */
+static int shadow_rewrite_one_bang_expr(char* expr, size_t cap, ShadowCtx* ctx) {
+    char out[4096];
+    const char* p;
+    int op, ls, rs;
+    const char* bind;
+    CEmit hb = {0};
+    int n;
+    if (!expr || !cap) return 0;
+    p = strstr(expr, "!>");
+    if (!p) return 0;
+    op = (int)(p - expr);
+    ls = shadow_expr_lhs_start(expr, op);
+    if (ls < 0) return 0;
+    rs = op + 2;
+    while (expr[rs] == ' ' || expr[rs] == '\t' || expr[rs] == '\n') rs++;
+    /* Binder / chain / statement-body — other emit paths. */
+    if (expr[rs] == '(' || expr[rs] == '{' || expr[rs] == '.') return 0;
+    if (expr[rs] && expr[rs] != ')' && expr[rs] != ',' && expr[rs] != ';' &&
+        expr[rs] != ']' &&
+        !(expr[rs] == '!' && expr[rs + 1] == '=') &&
+        !(expr[rs] == '=' && expr[rs + 1] == '=') &&
+        expr[rs] != '<' && expr[rs] != '>' &&
+        !(expr[rs] == '&' && expr[rs + 1] == '&') &&
+        !(expr[rs] == '|' && expr[rs + 1] == '|') &&
+        expr[rs] != '+' && expr[rs] != '-' && expr[rs] != '*' &&
+        expr[rs] != '/' && expr[rs] != '%' && expr[rs] != '?')
+        return 0;
+    if (!ctx || !ctx->eh) {
+        fprintf(stderr,
+                "error: syntax: '!>' at expression position requires an "
+                "enclosing '@errhandler' in scope\n");
+        return -1;
+    }
+    bind = ctx->eh->b[0] ? ctx->eh->b : "e";
+    if (!shadow_emit_err_at_bind(&hb, ctx, "        ", bind, "unwrap") ||
+        !shadow_emit_handler(&hb, ctx, bind, "        ")) {
+        free(hb.buf);
+        return -1;
+    }
+    n = snprintf(out, sizeof(out),
+                 "%.*s({ __typeof__(%.*s) __r = (%.*s); if (!__r.ok) {\n%s"
+                 "        } __r.u.value; })%s",
+                 ls, expr, op - ls, expr + ls, op - ls, expr + ls,
+                 hb.buf ? hb.buf : "", expr + rs);
+    free(hb.buf);
+    if (n < 0 || (size_t)n >= sizeof(out) || (size_t)n >= cap) return -1;
+    snprintf(expr, cap, "%s", out);
+    return 1;
+}
+
+static int shadow_rewrite_bang_exprs(char* expr, size_t cap, ShadowCtx* ctx) {
+    int guard = 0;
+    int rc;
+    if (!expr || !cap) return 1;
+    while (guard++ < 8) {
+        rc = shadow_rewrite_one_bang_expr(expr, cap, ctx);
+        if (rc < 0) return 0;
+        if (rc == 0) break;
+    }
+    return 1;
 }
 

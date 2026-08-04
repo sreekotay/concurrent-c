@@ -664,6 +664,12 @@ static AstNode* parse_result_fn(Parser* p) {
     Token ok = p_next(p);
     char okty[64];
     slice_to(okty, sizeof(okty), ok.spell);
+    /* `long long` ok-type (mangle → long_long). */
+    if (strcmp(okty, "long") == 0 && p_peek(p).kind == TK_IDENT &&
+        spell_eq(p_peek(p).spell, "long")) {
+        p_next(p);
+        snprintf(okty, sizeof(okty), "long long");
+    }
     if (tok_eq(p_peek(p), TK_PUNCT, "*")) {
         p_next(p);
         {
