@@ -2688,8 +2688,17 @@ static AstNode* parse_var_decl(Parser* p) {
     }
     if (name_i >= p->n || p->toks[name_i].kind != TK_IDENT) return NULL;
     int si = name_i + 1;
-    if (si < p->n && tok_eq(p->toks[si], TK_PUNCT, ";")) {
+    /* `T x;` / `T *a, *b;` / `size_t n, m;` — multi-declarator beachhead
+     * (levenshtein Result fns). Stars stay on each name when comma-separated
+     * so emit prints `uint32_t *a, *b;`. */
+    if (si < p->n &&
+        (tok_eq(p->toks[si], TK_PUNCT, ";") ||
+         tok_eq(p->toks[si], TK_PUNCT, ","))) {
         char tytxt[160];
+        char names[256];
+        size_t nl = 0;
+        int multi = tok_eq(p->toks[si], TK_PUNCT, ",");
+        int stars_left = nstars;
         Token name;
         if (has_struct) {
             p_next(p); /* struct */
@@ -2706,21 +2715,82 @@ static AstNode* parse_var_decl(Parser* p) {
             p_next(p); /* type */
             slice_to(tytxt, sizeof(tytxt), ty.spell);
         }
-        while (nstars-- > 0) {
-            size_t L = strlen(tytxt);
-            if (L + 1 < sizeof(tytxt)) {
-                tytxt[L] = '*';
-                tytxt[L + 1] = 0;
+        if (!multi) {
+            while (stars_left-- > 0) {
+                size_t L = strlen(tytxt);
+                if (L + 1 < sizeof(tytxt)) {
+                    tytxt[L] = '*';
+                    tytxt[L + 1] = 0;
+                }
+                p_next(p); /* * */
             }
+            name = p_next(p);
+            p_next(p); /* ; */
+            {
+                AstNode* n = ast_new(p, AST_VAR_DECL);
+                if (!n) return NULL;
+                snprintf(n->a, sizeof(n->a), "%s", tytxt);
+                slice_to(n->b, sizeof(n->b), name.spell);
+                return n;
+            }
+        }
+        /* Multi: keep base type; pack `*a, *b` / `n, m` into n->b. */
+        names[0] = 0;
+        while (stars_left-- > 0) {
+            if (nl + 1 >= sizeof(names)) {
+                parser_fail(p, p_peek(p), "multi-declarator list too long");
+                return NULL;
+            }
+            names[nl++] = '*';
+            names[nl] = 0;
             p_next(p); /* * */
         }
         name = p_next(p);
-        p_next(p); /* ; */
-        AstNode* n = ast_new(p, AST_VAR_DECL);
-        if (!n) return NULL;
-        snprintf(n->a, sizeof(n->a), "%s", tytxt);
-        slice_to(n->b, sizeof(n->b), name.spell);
-        return n;
+        {
+            size_t pl = name.spell.len;
+            if (nl + pl + 1 >= sizeof(names)) {
+                parser_fail(p, name, "multi-declarator list too long");
+                return NULL;
+            }
+            memcpy(names + nl, name.spell.ptr, pl);
+            nl += pl;
+            names[nl] = 0;
+        }
+        while (p_accept(p, TK_PUNCT, ",")) {
+            int st = 0;
+            Token n2;
+            size_t pl;
+            while (tok_eq(p_peek(p), TK_PUNCT, "*")) {
+                st++;
+                p_next(p);
+            }
+            n2 = p_next(p);
+            if (n2.kind != TK_IDENT) {
+                parser_fail(p, n2, "expected declarator name after ','");
+                return NULL;
+            }
+            if (nl + 1 + (size_t)st + n2.spell.len + 1 >= sizeof(names)) {
+                parser_fail(p, n2, "multi-declarator list too long");
+                return NULL;
+            }
+            names[nl++] = ',';
+            while (st-- > 0) names[nl++] = '*';
+            pl = n2.spell.len;
+            memcpy(names + nl, n2.spell.ptr, pl);
+            nl += pl;
+            names[nl] = 0;
+        }
+        if (!p_accept(p, TK_PUNCT, ";")) {
+            parser_fail(p, p_peek(p), "expected ';' after declaration");
+            return NULL;
+        }
+        {
+            AstNode* n = ast_new(p, AST_VAR_DECL);
+            if (!n) return NULL;
+            snprintf(n->a, sizeof(n->a), "%s", tytxt);
+            snprintf(n->b, sizeof(n->b), "%s", names);
+            return n;
+        }
     }
     /* Type name [ expr ] ;  — or declarator `T name[:…];` */
     if (!has_struct && !is_type_slice && tok_eq(p->toks[si], TK_PUNCT, "[")) {

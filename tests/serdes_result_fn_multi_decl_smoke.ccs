@@ -1,0 +1,60 @@
+/* Serdes beachhead: Result fn body shape from levenshtein_cc —
+ *   uint32_t *a, *b; size_t n, m;
+ *   long long d = …;
+ * Previously: unexpected statement (shadow subset) on the comma. */
+#include <ccc/std/prelude.cch>
+#include <stdint.h>
+
+typedef struct Lev {
+    CCArena a;
+} Lev;
+
+static int lev__prep(Lev* self, CCSlice s1, CCSlice s2, uint32_t** a, size_t* n,
+                     uint32_t** b, size_t* m) {
+    (void)self;
+    (void)s1;
+    (void)s2;
+    *a = NULL;
+    *n = 0;
+    *b = NULL;
+    *m = 0;
+    return 0;
+}
+
+static long long lev__dist(CCArena* ar, const uint32_t* s, size_t n,
+                           const uint32_t* t, size_t m, long long sub) {
+    (void)ar;
+    (void)s;
+    (void)n;
+    (void)t;
+    (void)m;
+    (void)sub;
+    return 3;
+}
+
+static long long !>(CCError) Lev_distance(Lev* self, CCSlice s1, CCSlice s2) {
+    uint32_t *a, *b; size_t n, m;
+    if (lev__prep(self, s1, s2, &a, &n, &b, &m) != 0)
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "oom");
+    long long d = lev__dist(&self->a, a, n, b, m, 1);
+    if (d < 0) return cc_err(CC_ERR_OUT_OF_MEMORY, "oom");
+    return cc_ok(d);
+}
+
+int main(void) {
+    Lev lev = {0};
+    CCSlice s1;
+    CCSlice s2;
+    CCResult_long_long_CCError r;
+    lev.a = cc_arena_create(1 << 12);
+    s1 = cc_slice_from_cstr("ab");
+    s2 = cc_slice_from_cstr("xy");
+    r = Lev_distance(&lev, s1, s2);
+    if (!r.ok || r.u.value != 3) {
+        printf("FAIL: distance got ok=%d v=%lld\n", r.ok, (long long)r.u.value);
+        return 1;
+    }
+    cc_arena_free(&lev.a);
+    printf("serdes_result_fn_multi_decl: OK\n");
+    return 0;
+}

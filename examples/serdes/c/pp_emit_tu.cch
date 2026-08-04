@@ -837,7 +837,8 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             char args[8][64];
             char args128[8][128];
             int nargs = 0;
-            char body[8192];
+            /* py_module::[T] and friends exceed 8 KiB once methods + glue land. */
+            char body[65536];
             int fi;
             for (fi = 0; fi < g_shadow_ngfac; fi++) {
                 if (strcmp(g_shadow_gfac[fi].family, inst->family) == 0) {
