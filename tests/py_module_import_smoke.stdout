@@ -1,3 +1,7 @@
-bump 4
-bump 7
-total 7
+start 100
+bump 104
+checked 110
+raised: bump must be positive
+private_hidden True
+fresh_instance 100
+independent 110 101

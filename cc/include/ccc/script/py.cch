@@ -199,6 +199,7 @@ typedef struct CC__PySyms {
      * returning `void*` silently reinterprets the first argument as that
      * pointer, which fails in a way that looks like "unsupported". */
     CC__PyStatus (*NewInterpreterFromConfig)(void **, const void *);
+    void *(*ModuleDefInit)(void *);
     void (*EndInterpreter)(void *);
     void *(*ThreadStateSwap)(void *);
     void *(*ThreadStateGet)(void);
@@ -442,6 +443,7 @@ have_lib:
 #define CC__PY_SYM_OPT(field, name) \
     cc__py.field = (void *)0; *(void **)&cc__py.field = dlsym(cc__py.lib, name);
     CC__PY_SYM_OPT(NewInterpreterFromConfig, "Py_NewInterpreterFromConfig")
+    CC__PY_SYM_OPT(ModuleDefInit, "PyModuleDef_Init")
     CC__PY_SYM_OPT(EndInterpreter, "Py_EndInterpreter")
     CC__PY_SYM_OPT(ThreadStateSwap, "PyThreadState_Swap")
     CC__PY_SYM_OPT(ThreadStateGet, "PyThreadState_Get")
@@ -885,6 +887,10 @@ typedef struct CC__PyModuleDef {
     void *m_free;
 } CC__PyModuleDef;
 
+/* PyModuleDef_Slot: { int slot; void *value; } — Py_mod_exec is 2. */
+typedef struct CC__PyModuleDef_Slot { int slot; void *value; } CC__PyModuleDef_Slot;
+#define CC__PY_MOD_EXEC 2
+
 /* Raise `msg` as an instance of the named builtin exception class and return
  * NULL, the C-API convention a trampoline uses to report failure.  The class
  * is looked up by name because exception types are data symbols, which the
@@ -896,6 +902,23 @@ static void *cc__py_raise_as(const char *cls, const char *msg) {
     if (exc) cc__py.DecRef(exc);
     if (builtins) cc__py.DecRef(builtins);
     return NULL;
+}
+
+/* A CC error crossing into Python keeps its KIND as the exception type —
+ * what a Python caller dispatches on — with the message riding along.
+ * Kinds without a natural builtin stay RuntimeError. */
+static void *cc__py_raise_cc_error(int kind, const char *msg) {
+    const char *cls;
+    switch (kind) {
+    case CC_ERR_INVALID_ARG:   cls = "ValueError";      break;
+    case CC_ERR_NOT_FOUND:     cls = "LookupError";     break;
+    case CC_ERR_TIMEOUT:       cls = "TimeoutError";    break;
+    case CC_ERR_PERMISSION:    cls = "PermissionError"; break;
+    case CC_ERR_OUT_OF_MEMORY: cls = "MemoryError";     break;
+    case CC_ERR_OVERFLOW:      cls = "OverflowError";   break;
+    default:                   cls = "RuntimeError";    break;
+    }
+    return cc__py_raise_as(cls, msg ? msg : "cc error");
 }
 
 /* Raise `msg` as a Python exception and return NULL, the C-API convention a
@@ -2594,6 +2617,11 @@ CC_GENERIC_FACTORY(py_expose, 1) {
         int pn;
         cc_reflect_method_name(T, i, nm, sizeof(nm));
         cc_reflect_method_member(T, i, mb, sizeof(mb));
+        /* An underscore member is internal: `T__helper` reflects as
+         * `_helper` and is not exported — Python's own privacy signal,
+         * applied at the boundary.  Wrap-and-export is the rename story:
+         * the public method is one line, the implementation stays home. */
+        if (mb[0] == '_') continue;
         cc_reflect_method_params(T, i, pr, sizeof(pr));
         cc_reflect_method_args(T, i, ar, sizeof(ar));
         cc_reflect_method_ret(T, i, rt, sizeof(rt));
@@ -2661,7 +2689,8 @@ CC_DECL_RESULT_SPEC(${box}, ${rt}, ${er})
             cc_string_push_slice(&s, @emit(`
                 { ${box} r__ = ${nm}${ar};
                   if (!cc_is_ok(r__))
-                      return cc__py_raise_as("RuntimeError", cc_error(r__).message);`, arena), arena);
+                      return cc__py_raise_cc_error((int)cc_error(r__).kind,
+                                                   cc_error(r__).message);`, arena), arena);
             if (rt[0] == 'v' && rt[1] == 'o')
                 cc_string_push_slice(&s, @emit(`
                   return cc__py_none(); } }`, arena), arena);
@@ -2683,6 +2712,7 @@ CC_DECL_RESULT_SPEC(${box}, ${rt}, ${er})
         char nm[128], mb[128];
         cc_reflect_method_name(T, i, nm, sizeof(nm));
         cc_reflect_method_member(T, i, mb, sizeof(mb));
+        if (mb[0] == '_') continue;
         cc_string_push_slice(&s, @emit(`
             { "${mb}", (void *)cc__py_x_${nm}, CC__PY_METH_FASTCALL, "${mb}" },`, arena), arena);
     }
@@ -2750,6 +2780,11 @@ CC_GENERIC_FACTORY(py_module, 1) {
         int pn;
         cc_reflect_method_name(T, i, nm, sizeof(nm));
         cc_reflect_method_member(T, i, mb, sizeof(mb));
+        /* An underscore member is internal: `T__helper` reflects as
+         * `_helper` and is not exported — Python's own privacy signal,
+         * applied at the boundary.  Wrap-and-export is the rename story:
+         * the public method is one line, the implementation stays home. */
+        if (mb[0] == '_') continue;
         cc_reflect_method_params(T, i, pr, sizeof(pr));
         cc_reflect_method_args(T, i, ar, sizeof(ar));
         cc_reflect_method_ret(T, i, rt, sizeof(rt));
@@ -2807,7 +2842,8 @@ CC_DECL_RESULT_SPEC(${box}, ${rt}, ${er})
             cc_string_push_slice(&s, @emit(`
                 { ${box} r__ = ${nm}${ar};
                   if (!cc_is_ok(r__))
-                      return cc__py_raise_as("RuntimeError", cc_error(r__).message);`, arena), arena);
+                      return cc__py_raise_cc_error((int)cc_error(r__).kind,
+                                                   cc_error(r__).message);`, arena), arena);
             if (rt[0] == 'v' && rt[1] == 'o')
                 cc_string_push_slice(&s, @emit(`
                   return cc__py_none(); } }`, arena), arena);
@@ -2823,21 +2859,52 @@ CC_DECL_RESULT_SPEC(${box}, ${rt}, ${er})
                 { ${rt} v__ = ${nm}${ar}; return CC_PY_OUT(v__); } }`, arena), arena);
         }
     }
+    char destroy_sym[128];
+    destroy_sym[0] = 0;
+    for (int i = 0; i < n; i++) {
+        char nm[128], mb[128];
+        cc_reflect_method_name(T, i, nm, sizeof(nm));
+        cc_reflect_method_member(T, i, mb, sizeof(mb));
+        if (strcmp(mb, "destroy") == 0) {
+            snprintf(destroy_sym, sizeof(destroy_sym), "%s", nm);
+            break;
+        }
+    }
     cc_string_push_slice(&s, @emit(`
         static CC__PyMethodDef cc__py_tbl_${mangled}[] = {`, arena), arena);
     for (int i = 0; i < n; i++) {
         char nm[128], mb[128];
         cc_reflect_method_name(T, i, nm, sizeof(nm));
         cc_reflect_method_member(T, i, mb, sizeof(mb));
+        if (mb[0] == '_') continue;
         cc_string_push_slice(&s, @emit(`
             { "${mb}", (void *)cc__py_m_${nm}, CC__PY_METH_FASTCALL, "${mb}" },`, arena), arena);
     }
     cc_string_push_slice(&s, @emit(`
             { 0, 0, 0, 0 }
         };
+        static const ${arg(0)} *cc__py_seed_${mangled};
+        static int cc__py_exec_${mangled}(void *m__) {
+            ${arg(0)} *st = (${arg(0)} *)cc__py.ModuleGetState(m__);
+            if (!st) return -1;
+            if (cc__py_seed_${mangled}) memcpy(st, cc__py_seed_${mangled}, sizeof(*st));
+            else memset(st, 0, sizeof(*st));
+            return 0;
+        }`, arena), arena);
+    if (destroy_sym[0]) {
+        /* The type's own `destroy` method is the module state's teardown:
+         * m_free runs it when the module object deallocates, the same
+         * lifecycle rule `@destroy` applies everywhere else. */
+        cc_string_push_slice(&s, @emit(`
+        static void cc__py_mfree_${mangled}(void *m__) {
+            ${arg(0)} *st = (${arg(0)} *)cc__py.ModuleGetState(m__);
+            if (st) ${destroy_sym}(st);
+        }`, arena), arena);
+    }
+    cc_string_push_slice(&s, @emit(`
         static void *${mangled}(const char *name, const ${arg(0)} *seed) {
-            CC__PyModuleDef *def;
-            void *m;
+            static CC__PyModuleDef def;
+            static CC__PyModuleDef_Slot slots[2];
             char *nm;
             size_t ln;
             /* The import machinery calls PyInit_ with the interpreter live
@@ -2847,26 +2914,52 @@ CC_DECL_RESULT_SPEC(${box}, ${rt}, ${er})
                 return NULL;
             if (!name || !name[0])
                 return cc__py_raise("cc: py_module needs a module name");
+            cc__py_seed_${mangled} = seed;
             ln = strlen(name);
             nm = (char *)malloc(ln + 1);
             if (!nm) return cc__py_raise("cc: out of memory");
             memcpy(nm, name, ln + 1);
-            /* The def and its name outlive the call by design: CPython
-             * keeps the module def for the life of the interpreter. */
-            def = cc__py_def_new(nm, "CC extension module",
-                                 (intptr_t)sizeof(${arg(0)}),
-                                 cc__py_tbl_${mangled});
-            if (!def) { free(nm); return cc__py_raise("cc: module def allocation failed"); }
-            m = cc__py.ModuleCreate2(def, CC__PY_API_VERSION);
-            if (!m) return NULL; /* exception already set */
-            {
-                ${arg(0)} *st = (${arg(0)} *)cc__py.ModuleGetState(m);
-                if (st) {
-                    if (seed) memcpy(st, seed, sizeof(*st));
-                    else memset(st, 0, sizeof(*st));
+            if (cc__py.ModuleDefInit) {
+                /* Multi-phase init: PyInit returns the DEF, and the import
+                 * machinery creates the module and runs the exec slot — per
+                 * import, so importlib.reload re-seeds the state and a
+                 * legacy sub-interpreter gets its own instance.  The def
+                 * carries no multiple-interpreters slot: isolated
+                 * (per-interpreter GIL) interpreters stay refused until the
+                 * binding's process-global error scratch is honest there. */
+                if (!def.m_name) {
+                    def.ob_head[0] = (void *)(intptr_t)1;
+                    def.m_name = nm;
+                    def.m_doc = "CC extension module";
+                    def.m_size = (intptr_t)sizeof(${arg(0)});
+                    def.m_methods = cc__py_tbl_${mangled};
+                    slots[0].slot = CC__PY_MOD_EXEC;
+                    slots[0].value = (void *)cc__py_exec_${mangled};
+                    def.m_slots = slots;`, arena), arena);
+    if (destroy_sym[0]) {
+        cc_string_push_slice(&s, @emit(`
+                    def.m_free = (void *)cc__py_mfree_${mangled};`, arena), arena);
+    }
+    cc_string_push_slice(&s, @emit(`
+                } else {
+                    free(nm); /* def already built (re-import): name kept from the first */
                 }
+                return cc__py.ModuleDefInit(&def);
             }
-            return m;
+            /* Single-phase fallback for runtimes without PyModuleDef_Init:
+             * create-and-seed here; reload keeps state, sub-interpreters
+             * refuse the module. */
+            {
+                CC__PyModuleDef *hdef = cc__py_def_new(nm, "CC extension module",
+                                                       (intptr_t)sizeof(${arg(0)}),
+                                                       cc__py_tbl_${mangled});
+                void *m;
+                if (!hdef) { free(nm); return cc__py_raise("cc: module def allocation failed"); }
+                m = cc__py.ModuleCreate2(hdef, CC__PY_API_VERSION);
+                if (!m) return NULL; /* exception already set */
+                if (cc__py_exec_${mangled}(m) != 0) return cc__py_raise("cc: module state unavailable");
+                return m;
+            }
         }`, arena), arena);
     return cc_string_as_slice(&s);
 }

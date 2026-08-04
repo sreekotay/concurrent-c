@@ -24,7 +24,27 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 {
     CCCommand run = cc_command(&a, @slice("sh"));
     run.arg("-c");
-    CCString py = @string(`PYTHONPATH=bin python3 -c "import counter; print('bump', counter.bump(4)); print('bump', counter.bump(3)); print('total', counter.total())"`, &a);
+    /* Seeded state, stateful calls, a CC error arriving as the exception
+     * its kind maps to (INVALID_ARG -> ValueError), and the underscore
+     * member staying home. */
+    CCString py = @string(`PYTHONPATH=bin python3 -c "
+import counter
+print('start', counter.total())
+print('bump', counter.bump(4))
+print('checked', counter.bump_checked(6))
+try:
+    counter.bump_checked(-1)
+except ValueError as e:
+    print('raised:', e)
+print('private_hidden', not hasattr(counter, '_clamp'))
+import importlib.util
+spec = importlib.util.spec_from_file_location('counter', 'bin/counter.abi3.so')
+m2 = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m2)
+print('fresh_instance', m2.total())
+m2.bump(1)
+print('independent', counter.total(), m2.total())
+"`, &a);
     run.arg(py.cstr(&a));
     run.inherit_stdio();
     int rc = run.status() !>;

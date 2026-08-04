@@ -1,1 +1,1 @@
-[42, 5, 7, 42, 1, 'RuntimeError', 'TypeError', 'TypeError']
+[42, 5, 7, 42, 1, 'ValueError', 'TypeError', 'TypeError']

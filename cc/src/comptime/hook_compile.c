@@ -1,4 +1,5 @@
 #include "hook_compile.h"
+#include "preprocess/template_scan.h"
 
 #include "build/host_cc_profile.h"
 #include "util/text.h"
@@ -168,6 +169,17 @@ static int cc__chunk_contains_ufcs_shaped_call(const char* src, size_t start, si
     for (size_t i = start; i < end; ) {
         if (cc_inert_scan_step(&scan, src, end, &i)) continue;
         char c = src[i];
+        /* A backtick template is emitted TEXT: a UFCS-shaped call inside
+         * it is output for some other TU, not a call this hook TU must
+         * resolve — without this skip, a @comptime helper whose templates
+         * mention `x.y(` is silently dropped from the hook compile and
+         * dies later as an undefined symbol. */
+        if (c == '`') {
+            size_t te = 0;
+            if (cc_tpl_scan_literal(src, end, i, &te) == 0) { i = te + 1; continue; }
+            i++;
+            continue;
+        }
         if (c != '.') { i++; continue; }
         size_t dot = i;
         i++; /* every path below continues past this '.' */

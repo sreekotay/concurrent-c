@@ -5,7 +5,17 @@
  *
  * No flag says "module": the TU exports `PyInit_counter` and defines no
  * `main`, so the build links a shared object named counter.abi3.so.  Python
- * imports CC the same way CC imports Python — one boundary, two doors. */
+ * imports CC the same way CC imports Python — one boundary, two doors.
+ *
+ * The module IS the type: every function whose first parameter is Counter
+ * or Counter* becomes a module function, and the module's state is one
+ * Counter — stateful module, not a class.  Several independent counters
+ * would be several modules (or a future class surface); "constructor"
+ * means the seed below.  A fallible method's error crosses the boundary
+ * as the Python exception its KIND maps to (CC_ERR_INVALID_ARG below
+ * becomes ValueError), message intact.  An underscore member —
+ * `Counter__clamp` reflects as `_clamp` — stays internal: wrap-and-
+ * export is the rename story, and the wrapper is one line. */
 #include <ccc/script/py.cch>
 
 typedef struct Counter { long long n; } Counter;
@@ -17,7 +27,20 @@ static long long Counter_bump(Counter *self, long long by) {
 static long long Counter_total(Counter *self) {
     return self->n;
 }
+static long long Counter__clamp(Counter *self, long long v) {
+    (void)self;
+    return v > 1000 ? 1000 : v;
+}
+static long long !>(CCError) Counter_bump_checked(Counter *self, long long by) {
+    if (by <= 0) return cc_err(CC_ERR_INVALID_ARG, "bump must be positive");
+    self->n = Counter__clamp(self, self->n + by);
+    return cc_ok(self->n);
+}
+
+/* The seed is the module's initial state, copied in at import (NULL would
+ * mean zeroed).  This counter starts at 100. */
+static const Counter seed = { .n = 100 };
 
 void *PyInit_counter(void) {
-    return py_module::[Counter]("counter", NULL);
+    return py_module::[Counter]("counter", &seed);
 }

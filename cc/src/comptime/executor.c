@@ -17,7 +17,6 @@
 
 #define CC_COMPTIME_FN_MAX 32
 #define CC_COMPTIME_FN_NAME_MAX 64
-#define CC_COMPTIME_FN_DEF_MAX 16384
 
 typedef struct CCComptimeFnEntry {
     char  name[CC_COMPTIME_FN_NAME_MAX];
@@ -255,7 +254,6 @@ static int cc__try_scan_comptime_fn(const char* src, size_t len, size_t at, size
     size_t p, def_start, lparen = 0, rparen = 0, body_l = 0, body_r = 0;
     size_t name_start = 0, name_end = 0;
     char name[CC_COMPTIME_FN_NAME_MAX];
-    char def[CC_COMPTIME_FN_DEF_MAX];
     size_t dlen;
 
     if (!src || at >= len || src[at] != '@') return 0;
@@ -291,19 +289,15 @@ static int cc__try_scan_comptime_fn(const char* src, size_t len, size_t at, size
     if (!cc_find_matching_brace(src, len, body_l, &body_r)) return 0;
 
     dlen = body_r + 1 - def_start;
-    if (dlen >= sizeof(def)) {
-        snprintf(cc__comptime_fn_scan_err, sizeof(cc__comptime_fn_scan_err),
-                 "@comptime function '%s' body exceeds %zu bytes (max %zu)",
-                 name, dlen, sizeof(def) - 1);
-        return -1;
-    }
-    memcpy(def, src + def_start, dlen);
-    def[dlen] = '\0';
+    /* The registry copies (and NUL-terminates) the span itself, so the
+     * body is passed straight from the source buffer — a fixed
+     * intermediary here once imposed a silent 16K body cap for no
+     * benefit beyond its own existence. */
     {
         char ofile[1024];
         int oline = 1;
         cc__resolve_origin(src, def_start, ofile, sizeof(ofile), &oline);
-        if (cc__comptime_fn_register(name, def, dlen, oline,
+        if (cc__comptime_fn_register(name, src + def_start, dlen, oline,
                                      ofile[0] ? ofile : NULL) < 0)
             return -1;
     }

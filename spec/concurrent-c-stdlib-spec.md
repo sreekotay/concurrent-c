@@ -1844,11 +1844,61 @@ CPython finder's suffix list, so `import <name>` finds it by bare name,
 and the filename advertises the stable-ABI promise. A TU with a
 `main` stays an executable even if it mentions `PyInit_`.
 
-The seed is the initial module state (NULL for zeroed). Failure follows
-Python's convention at this boundary — NULL with the exception set —
-not a CC Result, because the caller is the import machinery. The
-trampolines, marshalling, and error conversion (a fallible method's
-error raises `RuntimeError`) are the same machinery `py_expose` emits.
+The seed is the initial module state, copied in at import (NULL for
+zeroed). Failure follows Python's convention at this boundary — NULL
+with the exception set — not a CC Result, because the caller is the
+import machinery.
+
+The trampolines, marshalling, and error conversion are the same
+machinery `py_expose` emits. A fallible method's error crosses as the
+Python exception its kind maps to, message intact — the kind is what a
+Python caller dispatches on:
+
+| CC kind | Python exception |
+|---|---|
+| `CC_ERR_INVALID_ARG` | `ValueError` |
+| `CC_ERR_NOT_FOUND` | `LookupError` |
+| `CC_ERR_TIMEOUT` | `TimeoutError` |
+| `CC_ERR_PERMISSION` | `PermissionError` |
+| `CC_ERR_OUT_OF_MEMORY` | `MemoryError` |
+| `CC_ERR_OVERFLOW` | `OverflowError` |
+| anything else | `RuntimeError` |
+
+The module IS the type. Every function whose first parameter is `T` or
+`T*` and is visible at the use site becomes a module function — except
+an underscore member: `T__helper` reflects as `_helper` and stays
+internal, Python's own privacy signal applied at the boundary. Renaming
+and exposing foreign functions need no separate mechanism: a method is
+just a function, so the export list grows by writing one — a one-line
+wrapper with the public name, calling the private implementation.
+
+The module's state is one `T` — a stateful module, not a class, which
+is the same sharing pure-Python module globals have: every importer in
+an interpreter sees the one instance. There are no Python-side
+instances, constructors, or properties: "construct" means the seed, a
+module-level function is a method that ignores its receiver, and
+several independent states are several modules. A class surface
+(`PyType_FromSpec`, real instances) would be a separate verb, not a
+growth of this one.
+
+Lifecycle facts: trampolines run with the GIL held for their whole
+body, so module state is GIL-serialized — thread-safe under today's
+CPython without locks. Module creation is multi-phase (`PyInit_` returns
+the def; the import machinery creates the module and runs the exec
+slot), so every import context gets its own seeded instance: a fresh
+spec (`importlib.util.module_from_spec`) and a legacy sub-interpreter
+each see an independent state. `importlib.reload` is CPython's usual
+extension-module no-op — state survives. Isolated sub-interpreters
+(per-interpreter GIL) remain refused: the def deliberately carries no
+multiple-interpreters slot until the binding's process-global error
+scratch is honest there. A runtime without `PyModuleDef_Init` falls back
+to single-phase creation.
+
+A type with a `destroy` method gets it wired as the module's `m_free`:
+the state tears down when the module object deallocates — the same
+lifecycle rule `@destroy` applies everywhere else. The seed remains a
+plain copy at exec time; resource acquisition belongs in methods, and
+release in `destroy`.
 
 The loader resolves symbols from the importing process itself (the
 self-probe runs before any `dlopen` of a libpython, so two runtimes can
