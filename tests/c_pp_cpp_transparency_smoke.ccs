@@ -1,0 +1,114 @@
+/* Phase 3: `#if`/`#elif`/`#else`/`#endif` are emitted for host cpp; both
+ * arms are lowered (not stage-2-evaluated away). */
+#include <ccc/std/prelude.cch>
+
+@grammar(rules) PpTok {~~~~
+    include "../examples/serdes/c/pp_tok.rules"
+~~~~}
+
+@grammar(rules) PpStmt {~~~~
+    include "../examples/serdes/c/pp_stmt.rules"
+~~~~}
+
+/* Demand grammar tiers before the umbrella pulls headers that call them. */
+static int cpp_t_keep_nop(void* env, int id, CCSlice v) {
+    (void)env; (void)id; (void)v;
+    return 0;
+}
+static void cpp_t_demand_grammars(void) {
+    CCArena gate = cc_arena_create(4096);
+    (void)PpTok_match(";", 1);
+    (void)PpTok_collect(";", 1, &gate, cpp_t_keep_nop, NULL);
+    (void)PpStmt_match("break;", 6);
+    cc_arena_free(&gate);
+}
+
+#include "../examples/serdes/c/c_pp_spike.cch"
+
+int main(void) {
+    const char* src =
+        "#if 0\n"
+        "int dead_arm = 1;\n"
+        "#else\n"
+        "int live_arm = 2;\n"
+        "#endif\n";
+    char* owned = (char*)malloc(strlen(src) + 1);
+    TapeCache cache = {0};
+    CCArena arena = cc_arena_create(1 << 20);
+    FileTape* ft;
+    Token out_buf[256];
+    Pp pp = {0};
+    Parser p = {0};
+    AstNode** items = NULL;
+    int nitems = 0;
+    int i, saw_if = 0, saw_else = 0, saw_endif = 0, saw_dead = 0, saw_live = 0;
+
+    cpp_t_demand_grammars();
+
+    if (!owned) { printf("FAIL: oom\n"); return 1; }
+    memcpy(owned, src, strlen(src) + 1);
+    ft = tape_cache_load_bytes(&cache, "<cpp-transparency>", owned, strlen(src),
+                               &arena);
+    if (!ft) { printf("FAIL: tape\n"); return 1; }
+
+    pp.cache = &cache;
+    pp.arena = &arena;
+    pp.out = out_buf;
+    pp.out_cap = 256;
+    if (!pp_run(&pp, ft)) {
+        printf("FAIL: pp_run: %s\n", pp.err_msg);
+        return 1;
+    }
+    for (i = 0; i < pp.nout; i++) {
+        Token t = out_buf[i];
+        if (t.kind == TK_IDENT && t.spell.len >= 3 && t.spell.ptr[0] == '#') {
+            if (t.spell.len >= 3 && memcmp(t.spell.ptr, "#if", 3) == 0)
+                saw_if = 1;
+            if (t.spell.len >= 5 && memcmp(t.spell.ptr, "#else", 5) == 0)
+                saw_else = 1;
+            if (t.spell.len >= 6 && memcmp(t.spell.ptr, "#endif", 6) == 0)
+                saw_endif = 1;
+        }
+        if (t.kind == TK_IDENT && spell_eq(t.spell, "dead_arm")) saw_dead = 1;
+        if (t.kind == TK_IDENT && spell_eq(t.spell, "live_arm")) saw_live = 1;
+    }
+    if (!saw_if || !saw_else || !saw_endif) {
+        printf("FAIL: stage2 missing cpp dirs if=%d else=%d endif=%d nout=%d\n",
+               saw_if, saw_else, saw_endif, pp.nout);
+        return 1;
+    }
+    if (!saw_dead || !saw_live) {
+        printf("FAIL: stage2 dropped an arm dead=%d live=%d\n", saw_dead,
+               saw_live);
+        return 1;
+    }
+
+    p.toks = out_buf;
+    p.n = pp.nout;
+    p.cache = &cache;
+    if (!parse_tu(&p, &items, &nitems)) {
+        printf("FAIL: parse_tu (%s) i=%d nout=%d\n", p.err_msg, p.i, pp.nout);
+        return 1;
+    }
+    saw_if = saw_else = saw_endif = saw_dead = saw_live = 0;
+    for (i = 0; i < nitems; i++) {
+        AstNode* it = items[i];
+        if (it->kind == AST_RAW_LINE && strcmp(it->e, "ppdir") == 0) {
+            if (strncmp(it->a, "#if", 3) == 0) saw_if = 1;
+            if (strncmp(it->a, "#else", 5) == 0) saw_else = 1;
+            if (strncmp(it->a, "#endif", 6) == 0) saw_endif = 1;
+        }
+        if (strstr(it->a, "dead_arm") || strstr(it->b, "dead_arm"))
+            saw_dead = 1;
+        if (strstr(it->a, "live_arm") || strstr(it->b, "live_arm"))
+            saw_live = 1;
+    }
+    if (!saw_if || !saw_else || !saw_endif || !saw_dead || !saw_live) {
+        printf("FAIL: AST missing pieces if=%d else=%d endif=%d dead=%d live=%d "
+               "n=%d\n",
+               saw_if, saw_else, saw_endif, saw_dead, saw_live, nitems);
+        return 1;
+    }
+    printf("cpp-transparency: both arms + host #if structure OK\n");
+    return 0;
+}

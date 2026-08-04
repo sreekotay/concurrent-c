@@ -1,7 +1,8 @@
-/* Stage 2: include splice, object-like macros, #if/#ifdef/#ifndef guards,
- * angle passthrough. Exhaustive directive policy via pp_dir static_map:
- * every name is implemented, passthrough-by-design, or a hard error —
- * never a silent permissive drop (except inside an already-skipped arm).
+/* Stage 2: include splice, object-like macros, #ifdef/#ifndef guards,
+ * angle passthrough. On the root tape, `#if`/`#elif`/`#else`/`#endif` are
+ * cpp-transparent (Phase 3): every arm is lowered and conditional lines are
+ * emitted verbatim for the host cpp. Spliced include frames keep classic
+ * operand eval/skip. Exhaustive directive policy via pp_dir static_map.
  * Requires pp_tape.cch + <ccc/std/static_map.cch>. */
 #pragma once
 
@@ -80,7 +81,7 @@ typedef struct {
     int i;         /* next index in tape->toks */
 } Frame;
 
-enum { PASS_INC_CAP = 64, SYS_INC_CAP = 16 };
+enum { PASS_INC_CAP = 64, SYS_INC_CAP = 16, CPP_DIR_CAP = 256 };
 
 typedef struct {
     TapeCache* cache;
@@ -114,6 +115,10 @@ typedef struct {
     /* Top-level #define lines preserved for .h API surface. */
     char pass_def[PASS_INC_CAP][512];
     int npass_def;
+    /* Sticky `#if`/`#elif`/`#else`/`#endif` lines injected into the AST
+     * token stream on the root tape (cpp-transparency). */
+    char cpp_dir[CPP_DIR_CAP][512];
+    int ncpp_dir;
 } Pp;
 
 static void pp_add_sys_inc(Pp* pp, const char* path) {
@@ -456,8 +461,28 @@ static int pp_skip_line(Pp* pp) {
     return 1;
 }
 
+/* Inject one root-tape cpp-conditional directive line into the AST stream. */
+static int pp_emit_cpp_dir_line(Pp* pp, Token at) {
+    Token syn;
+    char* slot;
+    if (!pp) return 0;
+    if (pp->ncpp_dir >= CPP_DIR_CAP)
+        return pp_fail_dir(pp, at, "too many #if/#elif/#else/#endif lines");
+    slot = pp->cpp_dir[pp->ncpp_dir];
+    if (!pp_capture_dir_line(pp, at, slot, sizeof(pp->cpp_dir[0])))
+        return pp_fail_dir(pp, at, "cannot capture preprocessor directive line");
+    memset(&syn, 0, sizeof(syn));
+    syn.kind = TK_IDENT;
+    syn.spell.ptr = slot;
+    syn.spell.len = strlen(slot);
+    syn.file_id = at.file_id;
+    syn.offset = at.offset;
+    pp->ncpp_dir++;
+    return pp_emit(pp, syn);
+}
+
 /* Space-blank a token's source bytes (keep newlines) so emit lead trivia
- * cannot resurrect `#if`-skipped arms from the original tape. */
+ * cannot resurrect `#ifdef`-skipped arms from the original tape. */
 static void pp_blank_token_src(FileTape* ft, Token t) {
     size_t off, end, k;
     if (!ft || !ft->bytes || !t.spell.len) return;
@@ -529,13 +554,43 @@ static int handle_include(Pp* pp) {
         return 1;
     }
     if (hdr.kind != TK_STR) { pp_skip_line(pp); return 0; }
-    /* #include "..." — splice (mid-struct / local fixtures). */
-    char path[512];
-    if (!join_path(pp->search_dir, hdr.spell, path, sizeof(path))) return 0;
-    FileTape* ft = tape_cache_load(pp->cache, path, pp->arena);
-    if (!ft) return 0;
-    pp_skip_line(pp);
-    return pp_push_tape(pp, ft);
+    /* #include "..." — splice (mid-struct / local fixtures). Prefer the
+     * directory of the including tape, then the TU search_dir. */
+    {
+        char path[512];
+        char from_dir[512];
+        FileTape* cur;
+        FileTape* ft = NULL;
+        const char* try_dirs[2];
+        int di;
+        from_dir[0] = 0;
+        cur = (pp->nf > 0) ? pp->frames[pp->nf - 1].tape : NULL;
+        if (cur && cur->path) {
+            snprintf(from_dir, sizeof(from_dir), "%s", cur->path);
+            {
+                char* slash = strrchr(from_dir, '/');
+                if (slash) *slash = 0;
+                else snprintf(from_dir, sizeof(from_dir), ".");
+            }
+        }
+        try_dirs[0] = from_dir[0] ? from_dir : NULL;
+        try_dirs[1] = pp->search_dir;
+        for (di = 0; di < 2; di++) {
+            if (!try_dirs[di]) continue;
+            if (!join_path(try_dirs[di], hdr.spell, path, sizeof(path)))
+                continue;
+            ft = tape_cache_load(pp->cache, path, pp->arena);
+            if (ft) break;
+        }
+        if (!ft) {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "cannot open #include %.*s",
+                     (int)hdr.spell.len, hdr.spell.ptr);
+            return pp_fail_dir(pp, hdr, msg);
+        }
+        pp_skip_line(pp);
+        return pp_push_tape(pp, ft);
+    }
 }
 
 static int handle_define(Pp* pp) {
@@ -603,20 +658,33 @@ static int handle_directive(Pp* pp) {
 
     switch (dir) {
     case PP_DIR_ENDIF:
-        if (pp->skip_depth > 0) pp->skip_depth--;
-        if (pp->skip_depth == 0) pp->skip_blank = 0;
+        if (pp->skip_depth > 0) {
+            pp->skip_depth--;
+            if (pp->skip_depth == 0) pp->skip_blank = 0;
+            pp_skip_line(pp);
+            return 1;
+        }
+        if (pp->nf == 1) {
+            if (!pp_emit_cpp_dir_line(pp, hash)) return 0;
+        }
         pp_skip_line(pp);
         return 1;
     case PP_DIR_ELSE:
-        if (pp->skip_depth == 1) {
-            pp->skip_depth = 0;
-            pp->skip_blank = 0;
-        } else if (pp->skip_depth == 0) {
-            pp->skip_depth = 1;
-            pp->skip_blank = 1; /* dropping an `#if` true arm */
-        } else if (pp->skip_depth > 1) {
-            /* nested skip — stay skipped */
+        if (pp->skip_depth > 0) {
+            if (pp->skip_depth == 1) {
+                pp->skip_depth = 0;
+                pp->skip_blank = 0;
+            }
+            pp_skip_line(pp);
+            return 1;
         }
+        if (pp->nf == 1) {
+            if (!pp_emit_cpp_dir_line(pp, hash)) return 0;
+            pp_skip_line(pp);
+            return 1;
+        }
+        pp->skip_depth = 1;
+        pp->skip_blank = 1;
         pp_skip_line(pp);
         return 1;
     case PP_DIR_ELIF: {
@@ -625,14 +693,17 @@ static int handle_directive(Pp* pp) {
             pp_skip_line(pp);
             return 1;
         }
+        if (pp->nf == 1 && pp->skip_depth == 0) {
+            if (!pp_emit_cpp_dir_line(pp, hash)) return 0;
+            pp_skip_line(pp);
+            return 1;
+        }
         if (pp->skip_depth == 0) {
-            /* Already took a true arm — skip this elif. */
             pp->skip_depth = 1;
             pp->skip_blank = 1;
             pp_skip_line(pp);
             return 1;
         }
-        /* skip_depth == 1: prior arm false — maybe take this one. */
         if (!pp_eval_if_operand(pp, &truth)) {
             pp_skip_line(pp);
             return pp_fail_dir(
@@ -675,6 +746,12 @@ static int handle_directive(Pp* pp) {
         int truth = 0;
         if (pp->skip_depth > 0) {
             pp->skip_depth++;
+            pp_skip_line(pp);
+            return 1;
+        }
+        /* Root tape: emit `#if` and lower every arm (host cpp selects). */
+        if (pp->nf == 1) {
+            if (!pp_emit_cpp_dir_line(pp, hash)) return 0;
             pp_skip_line(pp);
             return 1;
         }
@@ -768,6 +845,7 @@ static int pp_run(Pp* pp, FileTape* root) {
     pp->err_msg[0] = 0;
     pp->npass_inc = 0;
     pp->npass_def = 0;
+    pp->ncpp_dir = 0;
     pp->nrefuse_clo = 0;
     if (!pp_push_tape(pp, root)) return 0;
 

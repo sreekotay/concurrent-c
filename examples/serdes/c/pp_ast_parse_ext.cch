@@ -2158,6 +2158,20 @@ static AstNode* parse_external_inner(Parser* p) {
     Token t = p_peek(p);
     if (t.kind == TK_EOF) return NULL;
     AstNode* n;
+    /* cpp-transparent `#if`/`#elif`/`#else`/`#endif` lines from stage-2. */
+    if (t.kind == TK_IDENT && t.spell.len > 0 && t.spell.ptr[0] == '#') {
+        n = ast_new(p, AST_RAW_LINE);
+        if (!n) return NULL;
+        if (t.spell.len >= sizeof(n->a)) {
+            parser_fail(p, t, "preprocessor directive line too long");
+            return NULL;
+        }
+        memcpy(n->a, t.spell.ptr, t.spell.len);
+        n->a[t.spell.len] = 0;
+        snprintf(n->e, sizeof(n->e), "ppdir");
+        p_next(p);
+        return n;
+    }
     if (tok_eq(t, TK_PUNCT, "@")) {
         if (p->i + 1 < p->n && shadow_kw(p->toks[p->i + 1]) == SHADOW_KW_ASYNC) {
             n = parse_async_fn(p);
