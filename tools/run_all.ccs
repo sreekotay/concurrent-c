@@ -62,9 +62,12 @@ static const RunPolicy RUN_POLICIES[] = {
      * has paniced macOS Mach VM / pthread limits. See git history on this row. */
     { "perf_spawn_ladder", -1, 0, NULL },
 
-    /* Deadlock demos abort with exit 1 by design. */
-    { "deadlock_detect_demo", 1, 0, NULL },
-    { "complex_deadlock", 1, 0, NULL },
+    /* Deadlock demos abort with exit 124 by design (sched_v2). */
+    { "deadlock_detect_demo", 124, 0, NULL },
+    { "complex_deadlock", 124, 0, NULL },
+
+    /* Shared-object recipe: `ccc build` → *.abi3.so; not a `ccc run` binary. */
+    { "recipe_py_module", -1, 0, NULL },
 
     /* Slower under the full "all" aggregate load. */
     { "join_init_race", 0, 20, NULL },

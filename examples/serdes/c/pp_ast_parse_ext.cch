@@ -514,7 +514,18 @@ static AstNode* parse_global_var(Parser* p) {
             strcmp(tname, "atomic_int") != 0 &&
             strcmp(tname, "atomic_bool") != 0 &&
             strcmp(tname, "atomic_size_t") != 0 &&
-            strcmp(tname, "atomic_long") != 0)
+            strcmp(tname, "atomic_long") != 0 &&
+            strcmp(tname, "uint8_t") != 0 &&
+            strcmp(tname, "uint16_t") != 0 &&
+            strcmp(tname, "uint32_t") != 0 &&
+            strcmp(tname, "uint64_t") != 0 &&
+            strcmp(tname, "int8_t") != 0 &&
+            strcmp(tname, "int16_t") != 0 &&
+            strcmp(tname, "int32_t") != 0 &&
+            strcmp(tname, "int64_t") != 0 &&
+            strcmp(tname, "size_t") != 0 &&
+            strcmp(tname, "uintptr_t") != 0 &&
+            strcmp(tname, "intptr_t") != 0)
             return NULL;
     }
     int ni = ti + 1;
@@ -2105,7 +2116,13 @@ static AstNode* parse_struct(Parser* p) {
                         "expected variable name after anonymous struct");
             return NULL;
         }
-        p_next(p); /* name */
+        {
+            Token gname = p_next(p); /* name */
+            char gbuf[64];
+            slice_to(gbuf, sizeof(gbuf), gname.spell);
+            /* File-scope instance — bare uses in closures are not captures. */
+            spawn_note_global(gbuf);
+        }
         if (tok_eq(p_peek(p), TK_PUNCT, "=")) {
             int idepth = 0;
             p_next(p); /* = */

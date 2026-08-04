@@ -338,7 +338,7 @@ static int shadow_variant_proj_lhs_start(const char* s, int end, char* arm,
 
 /* Rewrite one `lhs ?> [>(bind)] rhs` occurrence. Returns 1 if rewritten. */
 static int shadow_rewrite_one_qmark(char* expr, size_t cap) {
-    char out[768];
+    char out[8192];
     const char* p;
     int op;
     int ls, le, rs, re;
@@ -505,15 +505,15 @@ static int shadow_product_host_c_ok(const char* buf, size_t len, const char** hi
             continue;
         }
         if (c == '!' && i + 1 < len && buf[i + 1] == '>') {
-            if (hit) *hit = "!>";
+            if (hit) *hit = buf + i;
             return 0;
         }
         if (c == '?' && i + 1 < len && buf[i + 1] == '>') {
-            if (hit) *hit = "?>";
+            if (hit) *hit = buf + i;
             return 0;
         }
         if (c == '=' && i + 1 < len && buf[i + 1] == '>') {
-            if (hit) *hit = "=>";
+            if (hit) *hit = buf + i;
             return 0;
         }
         if (c == '@') {
@@ -530,7 +530,7 @@ static int shadow_product_host_c_ok(const char* buf, size_t len, const char** hi
                     if (!((after >= 'a' && after <= 'z') ||
                           (after >= 'A' && after <= 'Z') ||
                           (after >= '0' && after <= '9') || after == '_')) {
-                        if (hit) *hit = bans[b];
+                        if (hit) *hit = buf + i;
                         return 0;
                     }
                 }
@@ -1511,7 +1511,9 @@ static ShadowVariant* shadow_variant_parse_proj(const char* expr, char* base,
     if (!v &&
         shadow_recv_name_before(expr, expr + acc_pos, rname, sizeof(rname)))
         v = shadow_variant_for_recv(rname);
-    if (!v) v = shadow_variant_find_by_arm(arm);
+    /* Require a typed receiver. Global arm-name lookup would rewrite plain
+     * struct fields (e.g. `r.data`) whenever any variant has arm `data`
+     * (RESP grammar), which then fails host C. */
     if (!v) return NULL;
     for (a = 0; a < v->narm; a++)
         if (strcmp(v->arms[a], arm) == 0) break;
@@ -1541,9 +1543,13 @@ static const char* shadow_variant_recv_lbound(const char* expr, const char* from
     return rs;
 }
 
+/* Must cover AST_SWITCH opaque bodies (pp_emit_stmt body[8192]). Truncation
+ * used to close braces mid-case and host-C then reported nested functions. */
+enum { SHADOW_VARIANT_REWRITE_BUF = 8192 };
+
 static void shadow_variant_packed_materialize(char* expr, size_t cap,
                                               ShadowVariant* v) {
-    char out[768];
+    char out[SHADOW_VARIANT_REWRITE_BUF];
     const char* p;
     char* o;
     size_t rem;
@@ -1713,7 +1719,7 @@ static void shadow_variant_packed_materialize(char* expr, size_t cap,
  * `.kind == .num` → `.kind == Name_num`; `v.num` → `v.u.num` for arms. */
 static void shadow_rewrite_variant_expr(char* expr, size_t cap, const char* vty) {
     ShadowVariant* v;
-    char out[768];
+    char out[SHADOW_VARIANT_REWRITE_BUF];
     const char* p;
     char* o;
     size_t rem;
@@ -1799,14 +1805,75 @@ static void shadow_rewrite_variant_expr(char* expr, size_t cap, const char* vty)
                           (*e >= '0' && *e <= '9') || *e == '_'))
                 e++;
             eq = e;
-            while (*eq == ' ' || *eq == '\t') eq++;
+            while (*eq == ' ' || *eq == '\t' || *eq == '\n' || *eq == '\r')
+                eq++;
             pre = p;
-            while (pre > expr && (pre[-1] == ' ' || pre[-1] == '\t')) pre--;
+            while (pre > expr &&
+                   (pre[-1] == ' ' || pre[-1] == '\t' || pre[-1] == '\n' ||
+                    pre[-1] == '\r'))
+                pre--;
             if (*eq == '=' && pre > expr &&
                 (pre[-1] == '{' || pre[-1] == ',')) {
+                /* Nested payload `{ .len=, .data= }` inside `.arm = {…}` /
+                 * `.u.arm = {…}` must not re-tag field names that collide with
+                 * other variant arms (RESP `.data`). Source still has `.bulk =`
+                 * before rewrite inserts `.u.`. */
+                const char* q = pre;
+                int under_u = 0;
+                int depth = 0;
+                while (q > expr) {
+                    q--;
+                    if (*q == '}') {
+                        depth++;
+                        continue;
+                    }
+                    if (*q == '{') {
+                        if (depth > 0) {
+                            depth--;
+                            continue;
+                        }
+                        /* Opening brace of this designator group — look left
+                         * for `.u.ident =` or `.arm =` (known variant arm). */
+                        const char* r = q;
+                        while (r > expr &&
+                               (r[-1] == ' ' || r[-1] == '\t' ||
+                                r[-1] == '\n' || r[-1] == '\r'))
+                            r--;
+                        if (r > expr && r[-1] == '=') {
+                            const char* id_end;
+                            const char* id;
+                            /* Step onto `=`, then left onto the last char of
+                             * the designator ident (skip spaces around `=`). */
+                            r--;
+                            if (r > expr) r--;
+                            while (r > expr &&
+                                   (*r == ' ' || *r == '\t' || *r == '\n' ||
+                                    *r == '\r'))
+                                r--;
+                            /* r is on the last char of the designator ident. */
+                            id_end = r + 1; /* exclusive */
+                            while (r > expr &&
+                                   ((r[-1] >= 'a' && r[-1] <= 'z') ||
+                                    (r[-1] >= 'A' && r[-1] <= 'Z') ||
+                                    (r[-1] >= '0' && r[-1] <= '9') ||
+                                    r[-1] == '_'))
+                                r--;
+                            id = r; /* first char of designator ident */
+                            if (id > expr && id[-1] == '.' && id_end > id) {
+                                /* Nested `{ .field = }` under any `.ident = {`
+                                 * is a payload struct — never re-tag fields
+                                 * that collide with other variant arms
+                                 * (RESP `.bulk = { .len, .data }`). */
+                                under_u = 1;
+                            }
+                        }
+                        break;
+                    }
+                }
                 ShadowVariant* mv;
                 int ma;
-                if (shadow_variant_arm_match(v, expr, p, arm, (size_t)(e - arm),
+                if (!under_u &&
+                    shadow_variant_arm_match(v, expr, p, arm, (size_t)(e - arm),
                                              &mv, &ma)) {
                     int n;
                     const char* rest = eq + 1;
@@ -1898,7 +1965,8 @@ static void shadow_rewrite_variant_expr(char* expr, size_t cap, const char* vty)
             if (!(e - arm == 4 && memcmp(arm, "kind", 4) == 0) &&
                 !(e - arm == 1 && arm[0] == 'u')) {
                 if (shadow_variant_arm_match(v, expr, p, arm, (size_t)(e - arm),
-                                             &mv, &ma)) {
+                                             &mv, &ma) &&
+                    !mv->is_packed) {
                     int n = snprintf(o, rem, "->u.%s", mv->arms[ma]);
                     if (n < 0 || (size_t)n >= rem) { rem = 0; break; }
                     o += n;
@@ -1960,7 +2028,8 @@ static void shadow_rewrite_variant_expr(char* expr, size_t cap, const char* vty)
             if (!(e - arm == 4 && memcmp(arm, "kind", 4) == 0) &&
                 !(e - arm == 1 && arm[0] == 'u')) {
                 if (shadow_variant_arm_match(v, expr, p, arm, (size_t)(e - arm),
-                                             &mv, &ma)) {
+                                             &mv, &ma) &&
+                    !mv->is_packed) {
                     int n = snprintf(o, rem, ".u.%s", mv->arms[ma]);
                     if (n < 0 || (size_t)n >= rem) { rem = 0; break; }
                     o += n;
@@ -1970,16 +2039,30 @@ static void shadow_rewrite_variant_expr(char* expr, size_t cap, const char* vty)
                 }
             }
         }
+        if (rem == 0) {
+            fprintf(stderr,
+                    "error: variant rewrite buffer full (%d bytes; refuse "
+                    "truncated emit)\n",
+                    SHADOW_VARIANT_REWRITE_BUF);
+            return;
+        }
         *o++ = *p++;
         rem--;
     cont:;
     }
     *o = 0;
+    if (*p) {
+        fprintf(stderr,
+                "error: variant rewrite buffer full (%d bytes; refuse "
+                "truncated emit)\n",
+                SHADOW_VARIANT_REWRITE_BUF);
+        return;
+    }
     if (strlen(out) < cap) snprintf(expr, cap, "%s", out);
     /* Brace inits with injected tags → compound literals `(Name){…}`.
      * Covers `= { .kind = Name_…` and bare RHS `{ .kind = Name_…`. */
     if (g_shadow_nvariants) {
-        char tmp[768];
+        char tmp[SHADOW_VARIANT_REWRITE_BUF];
         const char* q = expr;
         size_t o2 = 0;
         tmp[0] = 0;
@@ -2032,39 +2115,128 @@ static void shadow_rewrite_variant_expr(char* expr, size_t cap, const char* vty)
         tmp[o2] = 0;
         if (o2 && o2 < cap) snprintf(expr, cap, "%s", tmp);
     }
-    if (v && v->is_packed) {
+    if (v && v->is_packed)
         shadow_variant_packed_materialize(expr, cap, v);
-        /* Trim / close `{ Name__cc_set_arm(x) }` packed designated-init. */
+    /* Close / unwrap packed set calls left as
+     * `{ Name__cc_set_arm(x }` or `(Name){ Name__cc_set_arm(x }` inside a
+     * larger expression (call args, bang typeof). Runs even when the rewrite
+     * hint is not the packed variant (find_by_arm path). */
+    if (strstr(expr, "__cc_set_")) {
         {
-            char* s = expr;
-            size_t n = strlen(s);
-            char inner[512];
-            const char* src = s;
-            size_t il = n;
-            if (n >= 2 && s[0] == '{' && s[n - 1] == '}') {
-                src = s + 1;
-                il = n - 2;
-            }
-            if (il < sizeof(inner)) {
-                int depth = 0;
-                char* q;
-                memcpy(inner, src, il);
-                inner[il] = 0;
-                while (il > 0 && (inner[il - 1] == ' ' || inner[il - 1] == '\t' ||
-                                  inner[il - 1] == '}'))
-                    inner[--il] = 0;
-                if (strstr(inner, "__cc_set_")) {
-                    for (q = inner; *q; q++) {
-                        if (*q == '(') depth++;
-                        else if (*q == ')') depth--;
+            char outb[SHADOW_VARIANT_REWRITE_BUF];
+            const char* p = expr;
+            char* o = outb;
+            size_t rem = sizeof(outb) - 1;
+            const char* setmark = "__cc_set_";
+            outb[0] = 0;
+            while (*p && rem > 0) {
+                const char* hit = strstr(p, setmark);
+                const char* cast_lp = NULL;
+                const char* brace = NULL;
+                const char* call;
+                const char* q;
+                size_t pre;
+                if (!hit) {
+                    size_t left = strlen(p);
+                    if (left >= rem) left = rem - 1;
+                    memcpy(o, p, left);
+                    o += left;
+                    rem -= left;
+                    break;
+                }
+                call = hit;
+                /* Walk back over TypeName before __cc_set_ (Name__cc_set_arm). */
+                while (call > p &&
+                       ((call[-1] >= 'a' && call[-1] <= 'z') ||
+                        (call[-1] >= 'A' && call[-1] <= 'Z') ||
+                        (call[-1] >= '0' && call[-1] <= '9') ||
+                        call[-1] == '_'))
+                    call--;
+                /* Optional `(Type){` / `{` immediately before the set call. */
+                q = call;
+                while (q > p && (q[-1] == ' ' || q[-1] == '\t' ||
+                                 q[-1] == '\n' || q[-1] == '\r'))
+                    q--;
+                if (q > p && q[-1] == '{') {
+                    const char* r = q - 1;
+                    while (r > p && (r[-1] == ' ' || r[-1] == '\t')) r--;
+                    if (r > p && r[-1] == ')') {
+                        const char* lp = r - 1;
+                        int found = 0;
+                        while (lp > p) {
+                            if (lp[-1] == '(') {
+                                lp--;
+                                found = 1;
+                                break;
+                            }
+                            if (lp[-1] == ')' || lp[-1] == ';' ||
+                                lp[-1] == '{' || lp[-1] == '}')
+                                break;
+                            lp--;
+                        }
+                        if (found) {
+                            cast_lp = lp;
+                            brace = q - 1;
+                        }
+                    } else {
+                        brace = q - 1;
                     }
-                    if (depth > 0 && il + 1 < sizeof(inner)) {
-                        inner[il++] = ')';
-                        inner[il] = 0;
+                }
+                pre = (size_t)((cast_lp ? cast_lp : (brace ? brace : call)) - p);
+                if (pre >= rem) break;
+                memcpy(o, p, pre);
+                o += pre;
+                rem -= pre;
+                /* Emit from Type__cc_set_… through balanced ')' (add if missing). */
+                {
+                    const char* start = call;
+                    const char* end;
+                    int paren = 0;
+                    int started = 0;
+                    q = start;
+                    while (*q) {
+                        if (*q == '(') {
+                            paren++;
+                            started = 1;
+                        } else if (*q == ')') {
+                            paren--;
+                            if (started && paren == 0) {
+                                q++;
+                                break;
+                            }
+                        } else if (started && paren == 0)
+                            break;
+                        else if (started && paren > 0 && *q == '}')
+                            break;
+                        q++;
                     }
-                    snprintf(expr, cap, "%s", inner);
+                    end = q;
+                    {
+                        size_t clen = (size_t)(end - start);
+                        int need_close = 0;
+                        int d2 = 0;
+                        for (q = start; q < end; q++) {
+                            if (*q == '(') d2++;
+                            else if (*q == ')') d2--;
+                        }
+                        if (d2 > 0) need_close = 1;
+                        if (clen + (size_t)need_close >= rem) break;
+                        memcpy(o, start, clen);
+                        o += clen;
+                        rem -= clen;
+                        if (need_close) {
+                            *o++ = ')';
+                            rem--;
+                        }
+                    }
+                    /* Skip trailing `}` from the compound literal if present. */
+                    while (*end == ' ' || *end == '\t') end++;
+                    if (*end == '}') end++;
+                    p = end;
                 }
             }
+            *o = 0;
+            if (outb[0]) snprintf(expr, cap, "%s", outb);
         }
     }
 }
@@ -3740,6 +3912,10 @@ static ShadowVariant* shadow_variant_pick(const char* expr, const char* site,
                     memcmp(vv->arms[a], arm, alen) == 0)
                     return vv;
         }
+        /* Receiver token present (`r.data`, `c->framed`): never guess by
+         * global arm name — that rewrites ordinary struct fields whenever
+         * any variant in the TU shares the member name (e.g. grammar `data`). */
+        return hint;
     }
     if (alen + 1 <= sizeof(ab)) {
         memcpy(ab, arm, alen);

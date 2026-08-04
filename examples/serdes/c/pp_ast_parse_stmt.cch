@@ -158,12 +158,14 @@ static AstNode* parse_chan_var(Parser* p) {
     char elem_txt[64];
     char ok_txt[32];
     char err_txt[32];
+    char chan_init[256];
     Token dir;
     Token dtok;
     Token name;
     AstNode* n;
     topo_txt[0] = 0;
     ok_txt[0] = err_txt[0] = 0;
+    chan_init[0] = 0;
     if (ety.kind != TK_IDENT && ekw != SHADOW_KW_INT && ekw != SHADOW_KW_CHAR &&
         ekw != SHADOW_KW_BOOL && ekw != SHADOW_KW_SIZE_T && ekw != SHADOW_KW_VOID)
         return NULL;
@@ -514,7 +516,9 @@ static AstNode* parse_chan_var(Parser* p) {
         parser_fail(p, name, "expected channel declarator name");
         return NULL;
     }
-    /* Multi-declarator: `int[~N >] tx1, tx2;` — names packed comma-separated. */
+    /* Multi-declarator: `int[~N >] tx1, tx2;` — names packed comma-separated.
+     * Optional init `int[~N >] tx = tx_h;` packed into e as `;=expr` after
+     * ordered/topo flags (see below). */
     {
         char names[128];
         size_t nl;
@@ -538,6 +542,36 @@ static AstNode* parse_chan_var(Parser* p) {
             memcpy(names + nl, piece, pl);
             nl += pl;
             names[nl] = 0;
+        }
+        if (tok_eq(p_peek(p), TK_PUNCT, "=")) {
+            int e0;
+            int depth = 0;
+            if (strchr(names, ',')) {
+                parser_fail(p, p_peek(p),
+                            "channel init only allowed on a single "
+                            "declarator");
+                return NULL;
+            }
+            p_next(p); /* = */
+            e0 = p->i;
+            while (p->i < p->n) {
+                Token t = p_peek(p);
+                if (tok_eq(t, TK_PUNCT, "(") || tok_eq(t, TK_PUNCT, "[") ||
+                    tok_eq(t, TK_PUNCT, "{"))
+                    depth++;
+                else if (tok_eq(t, TK_PUNCT, ")") || tok_eq(t, TK_PUNCT, "]") ||
+                         tok_eq(t, TK_PUNCT, "}"))
+                    depth--;
+                else if (depth == 0 && tok_eq(t, TK_PUNCT, ";"))
+                    break;
+                p_next(p);
+            }
+            if (!ast_spell_token_range(p, e0, p->i, chan_init,
+                                       sizeof(chan_init)) &&
+                !span_text(p, e0, p->i, chan_init, sizeof(chan_init))) {
+                parser_fail(p, name, "channel init too long");
+                return NULL;
+            }
         }
         if (!p_accept(p, TK_PUNCT, ";")) {
             parser_fail(p, p_peek(p), "expected ';' after channel declaration");
@@ -588,6 +622,15 @@ static AstNode* parse_chan_var(Parser* p) {
             snprintf(base, sizeof(base), "t:%s", topo_txt);
         snprintf(n->e, sizeof(n->e), "%s%s%s", base, is_sync ? ";s" : "",
                  bp_mode == 1 ? ";dn" : bp_mode == 2 ? ";do" : "");
+        if (chan_init[0]) {
+            size_t el = strlen(n->e);
+            if (el + 2 + strlen(chan_init) + 1 < sizeof(n->e))
+                snprintf(n->e + el, sizeof(n->e) - el, ";=%s", chan_init);
+            else {
+                parser_fail(p, name, "channel init too long for meta pack");
+                return NULL;
+            }
+        }
     }
     /* Owned block: parse `.create/.destroy/.reset = (…) => {…}` into dbody. */
     if (is_owned && owned_brace >= 0 && owned_end > owned_brace) {
@@ -1877,14 +1920,33 @@ static AstNode* parse_array_map_foreach(Parser* p) {
  * Beachhead also accepts anonymous `struct { … }` types (reflect smokes). */
 static AstNode* parse_typed_init(Parser* p) {
     int has_const = 0;
+    int has_volatile = 0;
+    int has_atomic = 0;
     int has_struct = 0;
     int is_anon_struct = 0;
     int start_i = p->i;
-    if (shadow_kw(p_peek(p)) == SHADOW_KW_CONST) {
-        has_const = 1;
-        if (p->i + 4 >= p->n) return NULL;
+    int ti = start_i;
+    /* Leading cv-qualifiers: `const` / `volatile` / `_Atomic` (any order). */
+    while (ti < p->n) {
+        if (shadow_kw(p->toks[ti]) == SHADOW_KW_CONST) {
+            has_const = 1;
+            ti++;
+            continue;
+        }
+        if (spell_eq(p->toks[ti].spell, "volatile")) {
+            has_volatile = 1;
+            ti++;
+            continue;
+        }
+        if (p->toks[ti].kind == TK_IDENT &&
+            spell_eq(p->toks[ti].spell, "_Atomic")) {
+            has_atomic = 1;
+            ti++;
+            continue;
+        }
+        break;
     }
-    int ti = start_i + has_const;
+    if (ti != start_i && p->i + 4 >= p->n) return NULL;
     if (ti < p->n && shadow_kw(p->toks[ti]) == SHADOW_KW_STRUCT) {
         has_struct = 1;
         ti++;
@@ -1909,7 +1971,9 @@ static AstNode* parse_typed_init(Parser* p) {
                shadow_kw(ty) != SHADOW_KW_CHAR)
         return NULL;
     if (ti + 3 >= p->n) return NULL;
-    int ty0 = has_struct ? (start_i + has_const) : ti;
+    int ty0 = has_struct ? start_i + (has_const || has_volatile || has_atomic ? 1 : 0) : ti;
+    /* When both const and volatile precede `struct`, ty0 is after both. */
+    if (has_struct) ty0 = ti - 1; /* `struct` token index */
     int ty_end = has_struct ? -1 : peek_generic_type_end(p, ti);
     if (!has_struct && ty_end < 0) {
         int iend = peek_c_int_type_end(p, ti);
@@ -1950,26 +2014,34 @@ static AstNode* parse_typed_init(Parser* p) {
     }
     int is_type_slice = (slice_ty_end > 0);
     int ni = (ty_end > 0) ? ty_end : (is_type_slice ? slice_ty_end : ti + 1);
+    int decl_i = ni; /* start of interleaved `*` / cv declarator prefix */
     int nstars = 0;
     int post_cv_const = 0;
     int post_cv_volatile = 0;
-    while (ni < p->n && tok_eq(p->toks[ni], TK_PUNCT, "*")) {
-        nstars++;
-        ni++;
-    }
-    /* `const T* const name` / `* volatile name` — same as static_var. */
-    while (ni < p->n && p->toks[ni].kind == TK_IDENT) {
-        if (shadow_kw(p->toks[ni]) == SHADOW_KW_CONST) {
-            post_cv_const = 1;
+    /* `*`, `* const`, `* const *`, `**`, … — cv may sit between stars. */
+    for (;;) {
+        int advanced = 0;
+        while (ni < p->n && tok_eq(p->toks[ni], TK_PUNCT, "*")) {
+            nstars++;
             ni++;
-            continue;
+            advanced = 1;
         }
-        if (spell_eq(p->toks[ni].spell, "volatile")) {
-            post_cv_volatile = 1;
-            ni++;
-            continue;
+        while (ni < p->n && p->toks[ni].kind == TK_IDENT) {
+            if (shadow_kw(p->toks[ni]) == SHADOW_KW_CONST) {
+                post_cv_const = 1;
+                ni++;
+                advanced = 1;
+                continue;
+            }
+            if (spell_eq(p->toks[ni].spell, "volatile")) {
+                post_cv_volatile = 1;
+                ni++;
+                advanced = 1;
+                continue;
+            }
+            break;
         }
-        break;
+        if (!advanced) break;
     }
     if (ni >= p->n || p->toks[ni].kind != TK_IDENT) return NULL;
     int name_i = ni;
@@ -2010,7 +2082,9 @@ static AstNode* parse_typed_init(Parser* p) {
     }
     if (j >= p->n || !tok_eq(p->toks[j], TK_PUNCT, ";")) return NULL;
 
-    if (has_const) p_next(p);
+    /* Consume leading cv-qualifiers. For `struct Tag`, ti is the Tag — stop
+     * before `struct` (ty0) so the has_struct path can consume both tokens. */
+    while (p->i < (has_struct ? ty0 : ti)) p_next(p);
     char tytxt[256];
     if (is_anon_struct) {
         if (!ast_spell_token_range(p, ty0, ty_end, tytxt, sizeof(tytxt)) &&
@@ -2049,24 +2123,7 @@ static AstNode* parse_typed_init(Parser* p) {
             return NULL;
         }
     }
-    {
-        int s;
-        for (s = 0; s < nstars; s++) p_next(p);
-    }
-    {
-        int need_c = post_cv_const;
-        int need_v = post_cv_volatile;
-        while (need_c || need_v) {
-            if (need_c && shadow_kw(p_peek(p)) == SHADOW_KW_CONST) {
-                p_next(p);
-                need_c = 0;
-            } else if (need_v && spell_eq(p_peek(p).spell, "volatile")) {
-                p_next(p);
-                need_v = 0;
-            } else
-                break;
-        }
-    }
+    while (p->i < name_i) p_next(p); /* `*` / cv declarator prefix */
     Token name = p_next(p);
     char dims_txt[128] = {0};
     int decl_slice_unique = 0;
@@ -2130,26 +2187,49 @@ static AstNode* parse_typed_init(Parser* p) {
     p_next(p); /* ; */
     AstNode* n = ast_new(p, AST_TYPED_INIT);
     if (!n) return NULL;
-    if (has_const)
-        snprintf(n->a, sizeof(n->a), "const %s", tytxt);
-    else
-        snprintf(n->a, sizeof(n->a), "%s", tytxt);
+    {
+        char pref[64];
+        size_t pi = 0;
+        pref[0] = 0;
+        if (has_atomic) {
+            memcpy(pref + pi, "_Atomic ", 8);
+            pi += 8;
+        }
+        if (has_const) {
+            memcpy(pref + pi, "const ", 6);
+            pi += 6;
+        }
+        if (has_volatile) {
+            memcpy(pref + pi, "volatile ", 9);
+            pi += 9;
+        }
+        pref[pi] = 0;
+        if (pref[0])
+            snprintf(n->a, sizeof(n->a), "%s%s", pref, tytxt);
+        else
+            snprintf(n->a, sizeof(n->a), "%s", tytxt);
+    }
     slice_to(n->b, sizeof(n->b), name.spell);
     snprintf(n->c, sizeof(n->c), "%s", expr);
-    if (nstars > 0 || post_cv_const || post_cv_volatile) {
-        size_t di = 0;
-        int s;
-        for (s = 0; s < nstars && di + 1 < sizeof(n->d); s++)
-            n->d[di++] = '*';
-        if (post_cv_const && di + 7 < sizeof(n->d)) {
-            memcpy(n->d + di, " const", 6);
-            di += 6;
+    if (name_i > decl_i) {
+        /* Preserve order: `* const *` ≠ `** const`. */
+        if (!ast_spell_token_range(p, decl_i, name_i, n->d, sizeof(n->d)) &&
+            !span_text(p, decl_i, name_i, n->d, sizeof(n->d))) {
+            /* Fall back to stars-then-cv (single post-cv cluster). */
+            size_t di = 0;
+            int s;
+            for (s = 0; s < nstars && di + 1 < sizeof(n->d); s++)
+                n->d[di++] = '*';
+            if (post_cv_const && di + 7 < sizeof(n->d)) {
+                memcpy(n->d + di, " const", 6);
+                di += 6;
+            }
+            if (post_cv_volatile && di + 10 < sizeof(n->d)) {
+                memcpy(n->d + di, " volatile", 9);
+                di += 9;
+            }
+            n->d[di] = 0;
         }
-        if (post_cv_volatile && di + 10 < sizeof(n->d)) {
-            memcpy(n->d + di, " volatile", 9);
-            di += 9;
-        }
-        n->d[di] = 0;
     }
     if (dims_txt[0]) snprintf(n->e, sizeof(n->e), "%s", dims_txt);
     else if (slice_unique || decl_slice_unique)
@@ -2316,7 +2396,8 @@ static AstNode* parse_ufcs_expr_range(Parser* p, int i0, int i1) {
         }
     }
     if (call_op < 0 || call_op <= i0) return NULL;
-    /* `a.foo() && b.bar()` is two calls, not recv=`a.foo() && b`. */
+    /* `a.foo() && b.bar()` / `x + 1 <= y->cap()` are not one UFCS call with
+     * recv spanning the operator — peel lowers the trailing call in text. */
     {
         int d2 = 0, k;
         for (k = i0; k < call_op; k++) {
@@ -2329,7 +2410,14 @@ static AstNode* parse_ufcs_expr_range(Parser* p, int i0, int i1) {
                 d2--;
             else if (d2 == 0 &&
                      (tok_eq(t, TK_PUNCT, "&&") || tok_eq(t, TK_PUNCT, "||") ||
-                      tok_eq(t, TK_PUNCT, "?") || tok_eq(t, TK_PUNCT, ",")))
+                      tok_eq(t, TK_PUNCT, "?") || tok_eq(t, TK_PUNCT, ",") ||
+                      tok_eq(t, TK_PUNCT, "+") || tok_eq(t, TK_PUNCT, "-") ||
+                      tok_eq(t, TK_PUNCT, "*") || tok_eq(t, TK_PUNCT, "/") ||
+                      tok_eq(t, TK_PUNCT, "%") || tok_eq(t, TK_PUNCT, "<") ||
+                      tok_eq(t, TK_PUNCT, ">") || tok_eq(t, TK_PUNCT, "<=") ||
+                      tok_eq(t, TK_PUNCT, ">=") || tok_eq(t, TK_PUNCT, "==") ||
+                      tok_eq(t, TK_PUNCT, "!=") || tok_eq(t, TK_PUNCT, "<<") ||
+                      tok_eq(t, TK_PUNCT, ">>")))
                 return NULL;
             else if (d2 == 0 && tok_eq(t, TK_PUNCT, "&") && k + 1 < call_op &&
                      tok_eq(p->toks[k + 1], TK_PUNCT, "&"))
@@ -2985,10 +3073,34 @@ static AstNode* parse_static_arr(Parser* p) {
     return n;
 }
 
+/* Grammar-engine type prefix? Used so user helpers like RedisReply_write are
+ * structured-parsed (variant `.nil = {}`) while RespGBulk_write stays opaque
+ * when the grammar engine emitted goto-heavy bodies. */
+static int shadow_is_grammar_type_prefix(const char* name, size_t n) {
+    extern int cc_grammar_pending_ufcs_type_count(void);
+    extern const char* cc_grammar_pending_ufcs_type(int i);
+    extern int cc_variant_schema_pending_count(void);
+    extern const char* cc_variant_schema_pending_name(int i);
+    int i, nt;
+    if (!name || !n) return 0;
+    nt = cc_grammar_pending_ufcs_type_count();
+    for (i = 0; i < nt; i++) {
+        const char* t = cc_grammar_pending_ufcs_type(i);
+        if (t && strlen(t) == n && memcmp(t, name, n) == 0) return 1;
+    }
+    nt = cc_variant_schema_pending_count();
+    for (i = 0; i < nt; i++) {
+        const char* t = cc_variant_schema_pending_name(i);
+        if (t && strlen(t) == n && memcmp(t, name, n) == 0) return 1;
+    }
+    return 0;
+}
+
 /* Grammar-engine statics: opaque tape (goto/labels / large bodies). */
 static int shadow_is_grammar_static_helper(CCSlice name) {
     char buf[128];
     size_t n;
+    size_t prefix;
     if (!name.ptr || name.len == 0) return 0;
     n = name.len < sizeof(buf) - 1 ? name.len : sizeof(buf) - 1;
     memcpy(buf, name.ptr, n);
@@ -2996,20 +3108,23 @@ static int shadow_is_grammar_static_helper(CCSlice name) {
     /* Internal matchers / fills: Name__r_*, Name__m_*, Name__fill, …
      * Require a leading type prefix — not libc/CC helpers like `__cc_*`. */
     if (buf[0] != '_' && strstr(buf, "__")) return 1;
-    /* Public entry wrappers: Type_match / Type_parse / … — Type is CapCase.
-     * Do not treat snake_case tests like test_help_parse as opaque tape. */
+    /* Public entry wrappers: Type_match / Type_parse / … — Type must be a
+     * pending grammar/schema name. CapCase alone is too broad (RedisReply_write
+     * carries Concurrent-C designators and must be structured). */
     if (!(buf[0] >= 'A' && buf[0] <= 'Z')) return 0;
-    if (n >= 6 && strcmp(buf + n - 6, "_match") == 0) return 1;
-    if (n >= 6 && strcmp(buf + n - 6, "_parse") == 0) return 1;
-    if (n >= 8 && strcmp(buf + n - 8, "_prepare") == 0) return 1;
-    if (n >= 11 && strcmp(buf + n - 11, "_parse_args") == 0) return 1;
-    if (n >= 9 && strcmp(buf + n - 9, "_try_read") == 0) return 1;
-    if (n >= 7 && strcmp(buf + n - 7, "_reader") == 0) return 1;
-    if (n >= 5 && strcmp(buf + n - 5, "_read") == 0) return 1;
-    if (n >= 6 && strcmp(buf + n - 6, "_write") == 0) return 1;
-    if (n >= 8 && strcmp(buf + n - 8, "_measure") == 0) return 1;
-    if (n >= 7 && strcmp(buf + n - 7, "_to_str") == 0) return 1;
-    return 0;
+    prefix = 0;
+    if (n >= 6 && strcmp(buf + n - 6, "_match") == 0) prefix = n - 6;
+    else if (n >= 6 && strcmp(buf + n - 6, "_parse") == 0) prefix = n - 6;
+    else if (n >= 8 && strcmp(buf + n - 8, "_prepare") == 0) prefix = n - 8;
+    else if (n >= 11 && strcmp(buf + n - 11, "_parse_args") == 0) prefix = n - 11;
+    else if (n >= 9 && strcmp(buf + n - 9, "_try_read") == 0) prefix = n - 9;
+    else if (n >= 7 && strcmp(buf + n - 7, "_reader") == 0) prefix = n - 7;
+    else if (n >= 5 && strcmp(buf + n - 5, "_read") == 0) prefix = n - 5;
+    else if (n >= 6 && strcmp(buf + n - 6, "_write") == 0) prefix = n - 6;
+    else if (n >= 8 && strcmp(buf + n - 8, "_measure") == 0) prefix = n - 8;
+    else if (n >= 7 && strcmp(buf + n - 7, "_to_str") == 0) prefix = n - 7;
+    if (!prefix) return 0;
+    return shadow_is_grammar_type_prefix(buf, prefix);
 }
 
 /* static [inline] [const] Ret[*] name ( params ) { body } — stmts or raw (d). */

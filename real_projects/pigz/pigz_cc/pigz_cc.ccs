@@ -1049,7 +1049,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
             return 1;
         }
 
-        CCClosure0 reader_task = () => [in_ptr, results_tx, arena_pool] {
+        CCClosure0 reader_task = () => [in_ptr, results_tx, arena_pool, block_size] {
         long seq = 0;
         bool hit_eof = false;
         Block* prev_blk = NULL;

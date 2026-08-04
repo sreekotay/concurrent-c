@@ -53,7 +53,9 @@ typedef struct {
     int file_id;
 } FileTape;
 
-enum { TAPE_CACHE_CAP = 64, TOK_BUILD_CAP = 1 << 16 };
+/* Redis/pigz TUs warm many angle-includes into the stage-1 cache; 64
+ * filled before nested `"redis_mem.cch"` and looked like a missing file. */
+enum { TAPE_CACHE_CAP = 512, TOK_BUILD_CAP = 1 << 16 };
 
 typedef struct {
     FileTape* items[TAPE_CACHE_CAP];
@@ -254,6 +256,9 @@ static FileTape* tape_cache_load_bytes(TapeCache* c, const char* path,
         return hit;
     }
     if (c->n >= TAPE_CACHE_CAP) {
+        fprintf(stderr,
+                "error: tape cache full (%d); cannot load '%s'\n",
+                TAPE_CACHE_CAP, path ? path : "<null>");
         free(bytes);
         return NULL;
     }
@@ -292,6 +297,9 @@ static FileTape* tape_cache_load_bytes(TapeCache* c, const char* path,
 
     TokBuild b = {.toks = ft->toks, .n = 0, .cap = TOK_BUILD_CAP, .building = ft};
     if (!PpTok_collect(ft->bytes, ft->len, arena, tok_build_push, &b)) {
+        fprintf(stderr,
+                "error: tokenize failed for '%s' (often arena exhaustion)\n",
+                path ? path : "<null>");
         free(ft->path);
         free(ft->bytes);
         free(ft->toks);
@@ -307,6 +315,7 @@ static FileTape* tape_cache_load_bytes(TapeCache* c, const char* path,
 static FileTape* tape_cache_load(TapeCache* c, const char* path, CCArena* arena) {
     char* bytes = NULL;
     size_t len = 0;
+    FileTape* ft;
     if (!read_file(path, &bytes, &len)) return NULL;
     return tape_cache_load_bytes(c, path, bytes, len, arena);
 }

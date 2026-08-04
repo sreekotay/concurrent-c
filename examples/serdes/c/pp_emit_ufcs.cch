@@ -1091,6 +1091,13 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
             snprintf(dst, cap, "cc_slice_packed_len(&%s)", recv);
         } else if (vty[0] && strcmp(vty, "CCString") == 0)
             snprintf(dst, cap, "cc_string_len(&%s)", recv);
+        else if (strstr(recv, "__cc_ov_str") ||
+                 (strlen(recv) >= 4 &&
+                  strcmp(recv + strlen(recv) - 4, ".str") == 0) ||
+                 (strlen(recv) >= 5 &&
+                  strcmp(recv + strlen(recv) - 5, "->str") == 0))
+            /* Packed variant overlay / `.str` field is CCString. */
+            snprintf(dst, cap, "cc_string_len(&(%s))", recv);
         else if (strstr(recv, "__cc_tpl; })")) {
             /* Arena @string stmt-expr: fold .len() into the yield. */
             char tmp[4096];
@@ -1135,9 +1142,22 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
             snprintf(dst, cap, "%s_len(%s)", rty, recv);
         else if (rty[0] && strncmp(rty, "CCSlice_", 8) == 0)
             return shadow_ufcs_emit_slice_meth(rty, "len", recv, NULL, dst, cap);
+        else if (strcmp(rty, "CCSlicePacked") == 0)
+            snprintf(dst, cap, "cc_slice_packed_len(%s)", recv);
+        else if (strcmp(rty, "CCString") == 0)
+            snprintf(dst, cap, "cc_string_len(%s)", recv);
         else
             /* Never invent Map_CCSliceHdr_int_* — wrong-family silent C. */
             return 0;
+    } else if (!is_arrow && strcmp(meth_name, "cap") == 0 &&
+               (strcmp(vty, "CCString") == 0 || shadow_bind_ty_has(rb, "CCString") ||
+                strstr(recv, "cc_string_") || strstr(recv, "CCString") ||
+                strstr(recv, "__cc_ov_str"))) {
+        /* CCString only — Map_/ArrayMap_/CCVec_ fall through to family invent. */
+        snprintf(dst, cap, "cc_string_cap(&%s)", recv);
+    } else if (is_arrow && strcmp(meth_name, "cap") == 0 &&
+               (strcmp(vty, "CCString") == 0 || shadow_bind_ty_has(rb, "CCString"))) {
+        snprintf(dst, cap, "cc_string_cap(%s)", recv);
     } else if (!is_arrow && strcmp(meth_name, "median") == 0) {
         if (vty[0] && strncmp(vty, "CCVec_", 6) == 0)
             snprintf(dst, cap, "%s_median(&%s)", vty, recv);
@@ -1148,8 +1168,9 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
             snprintf(dst, cap, "%s_push(&%s, %s)", vty, recv, a);
         else
             snprintf(dst, cap, "CCVec_double_push(&%s, %s)", recv, a);
-    } else if (!is_arrow && strcmp(meth_name, "mean") == 0) {
-        snprintf(dst, cap, "mean(%s, %s)", recv, a);
+    } else if (!is_arrow && strcmp(meth_name, "mean") == 0 &&
+               vty[0] && strncmp(vty, "CCVec_", 6) == 0) {
+        snprintf(dst, cap, "%s_mean(&%s)", vty, recv);
     } else if (!is_arrow && strcmp(meth_name, "println") == 0) {
         /* Handle form `io.println(x)` prints args; `@string(...).println()` /
          * `s.println()` print the receiver. */
@@ -1307,6 +1328,21 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
         }
     } else if (!is_arrow && strcmp(meth_name, "send") == 0) {
         snprintf(dst, cap, "cc_channel_send(%s, %s)", recv, a);
+    } else if (!is_arrow && strcmp(meth_name, "as_list") == 0 &&
+               elem_ty && elem_ty[0]) {
+        /* `obj.as_list::[T](&arena)` → cc_py_obj_as_list(T, &obj, &arena).
+         * Must not fall through to ufcs_dynamic callm + CC_PY_ARG(arena). */
+        int need_amp = shadow_ufcs_need_amp(recv);
+        char compact[128];
+        shadow_ufcs_formal_compact(elem_ty, compact, sizeof(compact));
+        if (!compact[0]) return 0;
+        if (a[0])
+            snprintf(dst, cap, "cc_py_obj_as_list(%s, %s%s, %s)", compact,
+                     need_amp ? "&" : "", recv, a);
+        else
+            snprintf(dst, cap, "cc_py_obj_as_list(%s, %s%s, NULL)", compact,
+                     need_amp ? "&" : "", recv);
+        return 1;
     } else if (!is_arrow &&
                (strcmp(meth_name, "try_send_into") == 0 ||
                 strcmp(meth_name, "send_into") == 0)) {
@@ -1357,8 +1393,13 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
             snprintf(dst, cap, "cc_exclusive_destroy(%s)", recv);
     } else if (!is_arrow && strcmp(meth_name, "acquire") == 0) {
         snprintf(dst, cap, "cc_exclusive_mutex_acquire(&%s)", recv);
+    } else if (is_arrow && strcmp(meth_name, "acquire") == 0) {
+        /* CCExclusive* → cc_exclusive_acquire(excl, name). */
+        snprintf(dst, cap, "cc_exclusive_acquire(%s, %s)", recv, a);
     } else if (!is_arrow && strcmp(meth_name, "release") == 0) {
         snprintf(dst, cap, "cc_exclusive_guard_release(&%s)", recv);
+    } else if (is_arrow && strcmp(meth_name, "release") == 0) {
+        snprintf(dst, cap, "cc_exclusive_guard_release(%s)", recv);
     } else if (!is_arrow && strcmp(meth_name, "destroy") == 0 &&
                (strcmp(vty, "CCExclusiveGuard") == 0 ||
                 (rb && strcmp(rb->ty, "CCExclusiveGuard") == 0))) {
@@ -1751,9 +1792,21 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
                 snprintf(dst, cap, "%s_%s(&%s, %s)", vty, meth, recv, a);
         } else
             return 0;
+    } else if (!is_arrow && strcmp(meth_name, "materialize_in") == 0) {
+        /* Field receivers like `reply->data` still need & — PTR_RECV is true
+         * from embedded `->` but the slice/string value is not a pointer. */
+        if (strcmp(vty, "CCString") == 0 || shadow_bind_ty_has(rb, "CCString"))
+            snprintf(dst, cap, "cc_string_materialize_in(&(%s), %s)", recv, a);
+        else
+            snprintf(dst, cap, "cc_slice_materialize_in(&(%s), %s)", recv, a);
     } else if (!is_arrow && strcmp(meth_name, "clear") == 0) {
         int ptr_recv = SHADOW_UFCS_PTR_RECV();
-        if (vty[0] && (strncmp(vty, "Map_", 4) == 0 ||
+        if (strcmp(vty, "CCString") == 0 || shadow_bind_ty_has(rb, "CCString")) {
+            if (ptr_recv)
+                snprintf(dst, cap, "cc_string_clear(%s)", recv);
+            else
+                snprintf(dst, cap, "cc_string_clear(&%s)", recv);
+        } else if (vty[0] && (strncmp(vty, "Map_", 4) == 0 ||
                        strncmp(vty, "ArrayMap_", 9) == 0 ||
                        strncmp(vty, "CCVec_", 6) == 0)) {
             if (ptr_recv)
@@ -1762,6 +1815,11 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
                 snprintf(dst, cap, "%s_clear(&%s)", vty, recv);
         } else
             return 0;
+    } else if (is_arrow && strcmp(meth_name, "clear") == 0) {
+        if (strcmp(vty, "CCString") == 0 || shadow_bind_ty_has(rb, "CCString"))
+            snprintf(dst, cap, "cc_string_clear(%s)", recv);
+        else
+            return 0;
     } else if (strcmp(meth_name, "free") == 0) {
         /* Nursery*→free; ArenaPool.free(ptr); Arena.free()→destroy;
          * chan → cc_channel_free; else store_free.
@@ -1769,6 +1827,12 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
          * first and use exact base ty for plain arenas. */
         if (is_arrow && shadow_bind_ty_has(rb, "CCNursery")) {
             snprintf(dst, cap, "cc_nursery_free(%s)", recv);
+        } else if (shadow_bind_ty_has(rb, "CCChanTx") ||
+                   shadow_bind_ty_has(rb, "CCChanRx") ||
+                   shadow_bind_ty_has(rb, "CCChan") ||
+                   strncmp(vty, "CCChan", 6) == 0) {
+            /* Before arena/pool name heuristics — `arena_pool.free()` is a chan. */
+            snprintf(dst, cap, "cc_channel_free(%s)", recv);
         } else if (!is_arrow && a[0] &&
                    (strcmp(vty, "CCArenaPool") == 0 ||
                     (rb && strcmp(rb->ty, "CCArenaPool") == 0) ||
@@ -1785,11 +1849,6 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
                 snprintf(dst, cap, "cc_arena_destroy(%s)", recv);
             else
                 snprintf(dst, cap, "cc_arena_destroy(&%s)", recv);
-        } else if (shadow_bind_ty_has(rb, "CCChanTx") ||
-                   shadow_bind_ty_has(rb, "CCChanRx") ||
-                   shadow_bind_ty_has(rb, "CCChan") ||
-                   strncmp(vty, "CCChan", 6) == 0) {
-            snprintf(dst, cap, "cc_channel_free(%s)", recv);
         } else if (!is_arrow &&
                    (strcmp(vty, "CCExclusiveMutex") == 0 ||
                     (rb && strcmp(rb->ty, "CCExclusiveMutex") == 0))) {
@@ -2716,7 +2775,26 @@ static int shadow_format_channel_pair(char* dst, size_t cap, const char* src) {
     return 1;
 }
 
-/* cc_channel_send/recv(...) != 0 → !(__cc_chkr).ok (Result API). */
+/* Typed 2-arg cc_channel_send/recv(...) != 0 → !(__cc_chkr).ok (Result API).
+ * 3-arg raw forms return int errno — leave `== 0` / `!= 0` alone (pigz pool). */
+static int shadow_chan_call_nargs(const char* args) {
+    int depth = 0, n = 0, any = 0;
+    const char* p = args ? args : "";
+    while (*p == ' ' || *p == '\t') p++;
+    if (!*p) return 0;
+    for (; *p; p++) {
+        if (*p == '(' || *p == '[' || *p == '{') depth++;
+        else if (*p == ')' || *p == ']' || *p == '}') {
+            if (depth > 0) depth--;
+        } else if (*p == ',' && depth == 0) {
+            n++;
+            any = 1;
+        } else if (*p != ' ' && *p != '\t' && *p != '\n')
+            any = 1;
+    }
+    return any ? n + 1 : 0;
+}
+
 static int shadow_lower_chan_result_cmp(char* dst, size_t cap,
                                               const char* src) {
     const char* ops[] = { "cc_channel_send(", "cc_channel_recv(", NULL };
@@ -2731,6 +2809,8 @@ static int shadow_lower_chan_result_cmp(char* dst, size_t cap,
         if (!call) continue;
         p = call + strlen(ops[oi]) - 1; /* at '(' */
         if (!shadow_ufcs_args(p, args, sizeof(args), &after)) continue;
+        /* Raw `send/recv(ch, ptr, size)` returns int, not CCResult. */
+        if (shadow_chan_call_nargs(args) >= 3) continue;
         while (*after == ' ' || *after == '\t') after++;
         if (strncmp(after, "!= 0", 4) == 0 || strncmp(after, "!=0", 3) == 0) {
             const char* rest = after + (after[2] == ' ' ? 4 : 3);
@@ -3725,7 +3805,7 @@ static void shadow_emit_text_ufcs(char* dst, size_t cap, const char* src,
 
 /* Rewrite `c(args)` → `cc_closureN_call(c, (intptr_t)…)` for bound closures. */
 static void shadow_rewrite_closure_calls(char* expr, size_t cap) {
-    char out[768];
+    char out[8192];
     size_t o = 0;
     const char* p;
     if (!expr || !cap) return;
@@ -3826,6 +3906,19 @@ static void shadow_emit_expr_text(AstNode* st, const char* text, char* dst,
     /* Boolean / ternary mixes are multi-call — peel text, don't trust one kid. */
     int multi = text && (strstr(text, "&&") || strstr(text, "||") ||
                          strchr(text, '?'));
+    /* `await` / already-lowered `cc_block_on` must win over a structured
+     * UFCS kid: parse attaches `tx.send(...)` even when the surface was
+     * `await tx.send(...)`, and the kid would emit sync send. */
+    if (text) {
+        const char* tp = text;
+        while (*tp == ' ' || *tp == '\t') tp++;
+        if (strncmp(tp, "await", 5) == 0 &&
+            !shadow_is_id(tp[5] ? tp[5] : 0))
+            multi = 1;
+        else if (strncmp(tp, "cc_block_on", 11) == 0 &&
+                 !shadow_is_id(tp[11] ? tp[11] : 0))
+            multi = 1;
+    }
     if (st && !multi) {
         for (i = 0; i < st->ndbody; i++) {
             AstNode* u = st->dbody[i];
@@ -3915,7 +4008,8 @@ static void shadow_emit_expr_text(AstNode* st, const char* text, char* dst,
                     shadow_rewrite_result_ctors(dst, cap, elem_ty);
                 return;
             }
-            g_shadow_sink_dest[0] = 0;
+            /* Keep sink dest for peel — bang/`!>` suffix breaks exact match
+             * (`d = mod.f(x)!>` still needs callm_int64_t). */
         } else if (elem_ty && elem_ty[0]) {
             /* Whole-text exact call with typed destination. */
             snprintf(g_shadow_sink_dest, sizeof(g_shadow_sink_dest), "%s",
@@ -3932,10 +4026,11 @@ static void shadow_emit_expr_text(AstNode* st, const char* text, char* dst,
                     shadow_rewrite_result_ctors(dst, cap, elem_ty);
                 return;
             }
-            g_shadow_sink_dest[0] = 0;
+            /* Keep sink dest for text peel (same bang-suffix case). */
         }
     }
     shadow_emit_text_ufcs(dst, cap, cur, elem_ty);
+    g_shadow_sink_dest[0] = 0;
     shadow_rewrite_closure_calls(dst, cap);
     shadow_emit_leftover_qmark_rewrite(dst, cap);
     shadow_rewrite_at_slice(dst, cap);

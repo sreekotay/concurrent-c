@@ -346,7 +346,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    CCArena arena = cc_arena_create(1 << 20);
+    /* Redis/pigz TUs tokenize many nested .cch headers through this arena. */
+    CCArena arena = cc_arena_create(16 << 20);
     TapeCache cache = {0};
     FileTape* ft =
         tape_cache_load_bytes(&cache, in_path, stage1_src, stage1_len, &arena);
@@ -362,8 +363,31 @@ int main(int argc, char** argv) {
     pp.cache = &cache;
     pp.arena = &arena;
     pp.search_dir = search_dir;
-    pp_add_sys_inc(&pp, "cc/include");
-    pp_add_sys_inc(&pp, "out/include");
+    {
+        char sys_cc[256], sys_out[256];
+        const char* prefs[4];
+        int pi;
+        prefs[0] = ".";
+        prefs[1] = "..";
+        prefs[2] = "../..";
+        prefs[3] = "../../..";
+        sys_cc[0] = sys_out[0] = 0;
+        for (pi = 0; pi < 4; pi++) {
+            char probe[256];
+            if (sys_cc[0] == 0) {
+                snprintf(probe, sizeof(probe), "%s/cc/include", prefs[pi]);
+                if (access(probe, R_OK) == 0)
+                    snprintf(sys_cc, sizeof(sys_cc), "%s", probe);
+            }
+            if (sys_out[0] == 0) {
+                snprintf(probe, sizeof(probe), "%s/out/include", prefs[pi]);
+                if (access(probe, R_OK) == 0)
+                    snprintf(sys_out, sizeof(sys_out), "%s", probe);
+            }
+        }
+        pp_add_sys_inc(&pp, sys_cc[0] != 0 ? sys_cc : "cc/include");
+        pp_add_sys_inc(&pp, sys_out[0] != 0 ? sys_out : "out/include");
+    }
     pp.out = tokbuf;
     pp.out_cap = 1 << 16;
     if (!pp_run(&pp, ft)) {

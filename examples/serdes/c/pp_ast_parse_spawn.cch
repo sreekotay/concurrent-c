@@ -730,6 +730,19 @@ static void spawn_infer_caps_from_text(AstNode* n, const char* text) {
             if (*p == q) p++;
             continue;
         }
+        /* Skip numeric literals so `0xffff` is not captured as `xffff`. */
+        if (*p >= '0' && *p <= '9') {
+            if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+                p += 2;
+                while ((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f') ||
+                       (*p >= 'A' && *p <= 'F'))
+                    p++;
+            } else {
+                while (*p >= '0' && *p <= '9') p++;
+            }
+            while (*p == 'u' || *p == 'U' || *p == 'l' || *p == 'L') p++;
+            continue;
+        }
         if (((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || *p == '_')) {
             char id[64];
             size_t nlen = 0;
@@ -886,8 +899,12 @@ static void spawn_infer_value_caps_stmt(AstNode* n, AstNode* s) {
     }
 }
 
-/* Infer value captures from `int x = outer;`, assigns, and `${outer}` in body. */
+/* Infer value captures from `int x = outer;`, assigns, and `${outer}` in body.
+ * Explicit `[caps]` are a floor, not a ceiling — merge free outer idents the
+ * same way legacy does (`=> [n] { chan_send(tx,…) }` still captures `tx`).
+ * Guards: body_declares / formals / spawn_note_global'd file names / noise. */
 static void spawn_infer_value_caps(AstNode* n) {
+    if (!n) return;
     for (int k = 0; k < n->nbody; k++)
         spawn_infer_value_caps_stmt(n, n->body[k]);
 }
@@ -1051,7 +1068,6 @@ static AstNode* parse_spawn_closure_core(Parser* p) {
             }
         }
     }
-    /* Merge inferred free idents even when an explicit `[caps]` list exists. */
     spawn_infer_value_caps(n);
     return n;
 }
@@ -1235,10 +1251,7 @@ static AstNode* parse_send_task_closure(Parser* p) {
         parser_fail(p, p_peek(p), "expected ';' after send_task(...)");
         return NULL;
     }
-    /* Explicit `[caps]` already names the capture set — do not re-scan the
-     * body (pigz send_task bodies sit inside huge fns; infer otherwise
-     * slurps locals/hex noise into e and blows shadow_caps_proto). */
-    if (!n->e[0]) spawn_infer_value_caps(n);
+    spawn_infer_value_caps(n);
     return n;
 }
 

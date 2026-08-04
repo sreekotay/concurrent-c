@@ -1221,13 +1221,21 @@ static int ast_spell_token_range(Parser* p, int start, int end, char* dst,
         size_t tok_off = t.offset;
         int spelled = 0;
         piece[0] = 0;
-        /* @await fname(...) → cc_block_on(Ret, fname(...)) when fname is @async;
-         * otherwise strip (channel UFCS etc. already block in sync context).
-         * @create → __cc_at_create (resolved at emit). */
-        if (tok_eq(t, TK_PUNCT, "@") && i + 1 < end) {
-            ShadowKwKind ak = shadow_kw(p->toks[i + 1]);
-            if (ak == SHADOW_KW_AWAIT) {
-                int j = i + 2;
+        /* @await / bare await fname(...) → cc_block_on(Ret, fname(...)) when
+         * fname is @async; otherwise strip (channel UFCS etc. already block in
+         * sync context). @create → __cc_at_create (resolved at emit). */
+        {
+            int await_at = 0;
+            int await_i = -1;
+            if (tok_eq(t, TK_PUNCT, "@") && i + 1 < end &&
+                shadow_kw(p->toks[i + 1]) == SHADOW_KW_AWAIT) {
+                await_at = 1;
+                await_i = i + 1;
+            } else if (shadow_kw(t) == SHADOW_KW_AWAIT) {
+                await_i = i;
+            }
+            if (await_i >= 0) {
+                int j = await_i + 1;
                 const char* ret = NULL;
                 char fname[64];
                 int call_close = -1;
@@ -1239,8 +1247,8 @@ static int ast_spell_token_range(Parser* p, int start, int end, char* dst,
                         call_close = ast_matching_paren(p, j + 1, end);
                 }
                 if (ret && call_close > j) {
-                    char call[256];
-                    char wrap[320];
+                    char call[512];
+                    char wrap[640];
                     if (!ast_spell_token_range(p, j, call_close + 1, call,
                                                sizeof(call)))
                         return 0;
@@ -1275,22 +1283,21 @@ static int ast_spell_token_range(Parser* p, int start, int end, char* dst,
                     return 0;
                 }
                 {
-                    int j = i + 2;
-                    int call_close = -1;
-                    char wrap[384];
+                    int call_close2 = -1;
+                    char wrap[512];
                     int did = 0;
                     wrap[0] = 0;
-                    /* @await recv.send/recv(...) → block_on(channel_*_task). */
+                    /* await recv.send/recv(...) → block_on(channel_*_task). */
                     if (j + 3 < end && p->toks[j].kind == TK_IDENT &&
                         tok_eq(p->toks[j + 1], TK_PUNCT, ".") &&
                         p->toks[j + 2].kind == TK_IDENT &&
                         tok_eq(p->toks[j + 3], TK_PUNCT, "(")) {
-                        char recv[64], meth[32], args[160];
-                        call_close = ast_matching_paren(p, j + 3, end);
+                        char recv[64], meth[32], args[256];
+                        call_close2 = ast_matching_paren(p, j + 3, end);
                         slice_to(recv, sizeof(recv), p->toks[j].spell);
                         slice_to(meth, sizeof(meth), p->toks[j + 2].spell);
-                        if (call_close > j + 3)
-                            (void)ast_spell_token_range(p, j + 4, call_close,
+                        if (call_close2 > j + 3)
+                            (void)ast_spell_token_range(p, j + 4, call_close2,
                                                         args, sizeof(args));
                         else
                             args[0] = 0;
@@ -1304,9 +1311,9 @@ static int ast_spell_token_range(Parser* p, int start, int end, char* dst,
                                      "cc_block_on(intptr_t, "
                                      "cc_channel_recv_task(%s, %s))",
                                      recv, args);
-                        else if (call_close > j) {
-                            char inner[256];
-                            if (ast_spell_token_range(p, j, call_close + 1,
+                        else if (call_close2 > j) {
+                            char inner[384];
+                            if (ast_spell_token_range(p, j, call_close2 + 1,
                                                       inner, sizeof(inner)))
                                 snprintf(wrap, sizeof(wrap),
                                          "cc_block_on(intptr_t, %s)", inner);
@@ -1314,18 +1321,17 @@ static int ast_spell_token_range(Parser* p, int start, int end, char* dst,
                         did = wrap[0] != 0;
                     } else if (j + 1 < end && p->toks[j].kind == TK_IDENT &&
                                tok_eq(p->toks[j + 1], TK_PUNCT, "(")) {
-                        /* @await cc_chan_*_task(...) */
-                        char inner[256];
-                        call_close = ast_matching_paren(p, j + 1, end);
-                        if (call_close > j &&
-                            ast_spell_token_range(p, j, call_close + 1, inner,
+                        char inner[384];
+                        call_close2 = ast_matching_paren(p, j + 1, end);
+                        if (call_close2 > j &&
+                            ast_spell_token_range(p, j, call_close2 + 1, inner,
                                                   sizeof(inner))) {
                             snprintf(wrap, sizeof(wrap),
                                      "cc_block_on(intptr_t, %s)", inner);
                             did = 1;
                         }
                     }
-                    if (did && call_close > j) {
+                    if (did && call_close2 > j) {
                         CCSlice ps = { .ptr = wrap, .len = strlen(wrap) };
                         if (have_prev && tok_off >= prev_end)
                             (void)ast_copy_ws_gap(p, t, prev_end, tok_off, dst,
@@ -1335,19 +1341,22 @@ static int ast_spell_token_range(Parser* p, int start, int end, char* dst,
                                 o && ps.len &&
                                     ast_need_lex_space(dst[o - 1], wrap[0])))
                             return 0;
-                        if (ast_tok_verbatim(p, p->toks[call_close])) {
-                            prev_end = p->toks[call_close].offset +
-                                       p->toks[call_close].spell.len;
+                        if (ast_tok_verbatim(p, p->toks[call_close2])) {
+                            prev_end = p->toks[call_close2].offset +
+                                       p->toks[call_close2].spell.len;
                             have_prev = 1;
                         }
-                        i = call_close + 1;
+                        i = call_close2 + 1;
                         continue;
                     }
                 }
-                i += 2;
+                /* Strip unresolved await keyword (and optional leading @). */
+                i = await_i + 1;
+                (void)await_at;
                 continue;
             }
-            if (ak == SHADOW_KW_CREATE) {
+            if (tok_eq(t, TK_PUNCT, "@") && i + 1 < end &&
+                shadow_kw(p->toks[i + 1]) == SHADOW_KW_CREATE) {
                 /* Dest-type resolves at emit (__cc_at_create → nursery/arena/…). */
                 snprintf(piece, sizeof(piece), "__cc_at_create");
                 gend = i + 2;

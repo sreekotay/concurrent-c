@@ -127,15 +127,20 @@ static const char* shadow_host_cc(void) {
 /* Runtime object for host link. */
 static int shadow_runtime_o(char* dst, size_t cap) {
     const char* env = getenv("SHADOW_RUNTIME_O");
-    const char* cands[3];
-    int i, n = 0;
+    const char* cands[] = {
+        "out/cc/obj/runtime/concurrent_c.o",
+        "cc/obj/runtime/concurrent_c.o",
+        /* Nested project dirs: cwd is not the repo root. */
+        "../out/cc/obj/runtime/concurrent_c.o",
+        "../../out/cc/obj/runtime/concurrent_c.o",
+        "../../../out/cc/obj/runtime/concurrent_c.o",
+    };
+    int i;
     if (env && env[0] && access(env, R_OK) == 0) {
         snprintf(dst, cap, "%s", env);
         return 1;
     }
-    cands[n++] = "out/cc/obj/runtime/concurrent_c.o";
-    cands[n++] = "cc/obj/runtime/concurrent_c.o";
-    for (i = 0; i < n; i++) {
+    for (i = 0; i < (int)(sizeof(cands) / sizeof(cands[0])); i++) {
         if (access(cands[i], R_OK) == 0) {
             snprintf(dst, cap, "%s", cands[i]);
             return 1;
@@ -285,23 +290,39 @@ static ShadowHostOpts g_shadow_host_opts;
  * decls visible under -std=c11 on glibc (usleep/mkstemp/fdopen) while
  * -Werror=implicit-function-declaration stays on. Flavor (-O2/-g/NDEBUG)
  * arrives via forwarded cc_flags / opt_release / opt_debug. */
+/* Resolve a repo-relative include root that exists from the current cwd. */
+static const char* shadow_find_inc_root(const char* rel, char* buf, size_t cap) {
+    static const char* prefixes[] = { "", "../", "../../", "../../../" };
+    int i;
+    for (i = 0; i < (int)(sizeof(prefixes) / sizeof(prefixes[0])); i++) {
+        snprintf(buf, cap, "%s%s", prefixes[i], rel);
+        if (access(buf, R_OK) == 0) return buf;
+    }
+    return rel; /* best-effort fallback */
+}
+
 static int shadow_host_compile(const char* c_path, const char* o_path) {
     char cmd[8192];
+    char inc_out[256], inc_cc[256], inc_ccinc[256], inc_ex[256];
     const char* cc = shadow_host_cc();
     const char* env_cflags = getenv("CFLAGS");
     const char* extra = g_shadow_host_opts.cc_flags;
     const char* release = g_shadow_host_opts.opt_release ? "-DNDEBUG" : "";
     const char* debug = g_shadow_host_opts.opt_debug ? "-g" : "";
+    const char* i_out = shadow_find_inc_root("out/include", inc_out, sizeof(inc_out));
+    const char* i_cci = shadow_find_inc_root("cc/include", inc_ccinc, sizeof(inc_ccinc));
+    const char* i_cc = shadow_find_inc_root("cc", inc_cc, sizeof(inc_cc));
+    const char* i_ex = shadow_find_inc_root("examples", inc_ex, sizeof(inc_ex));
     int n;
     n = snprintf(cmd, sizeof(cmd),
                  "%s -std=c11 -D_DEFAULT_SOURCE"
-                 " -Iout/include -Icc/include -Icc -I. -Iexamples"
+                 " -I%s -I%s -I%s -I. -I%s"
                  " -DCC_ENABLE_XJB_FLOAT_FMT=1"
                  " -ffunction-sections -fdata-sections"
                  " -Werror=implicit-function-declaration"
                  " %s %s %s %s"
                  " -c \"%s\" -o \"%s\"",
-                 cc,
+                 cc, i_out, i_cci, i_cc, i_ex,
                  (env_cflags && env_cflags[0]) ? env_cflags : "",
                  (extra && extra[0]) ? extra : "",
                  release, debug,
@@ -320,16 +341,137 @@ static int shadow_host_compile(const char* c_path, const char* o_path) {
     return 0;
 }
 
+/* Append `-lname` if not already present (legacy cc__add_lib_to_flags). */
+static void shadow_add_lib_flag(char* ld, size_t cap, const char* lib) {
+    char flag[288];
+    size_t n;
+    if (!ld || !cap || !lib || !lib[0]) return;
+    if (strcmp(lib, "pthread") == 0 || strcmp(lib, "m") == 0) return;
+    snprintf(flag, sizeof(flag), "-l%s", lib);
+    if (strstr(ld, flag)) return;
+    n = strlen(ld);
+    if (n && n + 1 < cap) {
+        ld[n++] = ' ';
+        ld[n] = 0;
+    }
+    if (n + strlen(flag) + 1 < cap)
+        memcpy(ld + n, flag, strlen(flag) + 1);
+}
+
+/* Scan emit/source text for link("lib") directives and __CC_LINK__ markers.
+ * Pattern bytes are built at runtime so this TU's own source never contains
+ * the contiguous at-link-paren-quote sequence (legacy host link-scan
+ * matches .c text). */
+static void shadow_scan_link_directives(const char* content, size_t len,
+                                        char* ld, size_t cap) {
+    char marker[16];
+    char link_pat[8];
+    size_t marker_len;
+    size_t link_pat_len;
+    const char* p;
+    const char* end;
+    if (!content || !len || !ld || !cap) return;
+    /* "__CC_LINK__ " */
+    memcpy(marker, "__CC_LINK__", 11);
+    marker[11] = ' ';
+    marker[12] = 0;
+    marker_len = 12;
+    /* "@" "link" "(" "\"" */
+    link_pat[0] = '@';
+    link_pat[1] = 'l';
+    link_pat[2] = 'i';
+    link_pat[3] = 'n';
+    link_pat[4] = 'k';
+    link_pat[5] = '(';
+    link_pat[6] = '"';
+    link_pat[7] = 0;
+    link_pat_len = 7;
+    p = content;
+    end = content + len;
+    while (p < end) {
+        const char* pos = NULL;
+        const char* pos_m = strstr(p, marker);
+        const char* pos_l = strstr(p, link_pat);
+        if (pos_m && pos_m < end) pos = pos_m;
+        if (pos_l && pos_l < end && (!pos || pos_l < pos)) pos = pos_l;
+        if (!pos) break;
+        if (pos == pos_m) {
+            const char* lib = pos + marker_len;
+            const char* lib_end = lib;
+            while (lib_end < end && *lib_end && *lib_end != ' ' &&
+                   *lib_end != '*' && *lib_end != '\n' && *lib_end != '\r')
+                lib_end++;
+            if (lib_end > lib) {
+                char name[256];
+                size_t n = (size_t)(lib_end - lib);
+                if (n < sizeof(name)) {
+                    memcpy(name, lib, n);
+                    name[n] = 0;
+                    shadow_add_lib_flag(ld, cap, name);
+                }
+            }
+            p = lib_end;
+        } else {
+            const char* lib = pos + link_pat_len;
+            const char* q = lib;
+            while (q < end && *q && *q != '"') q++;
+            if (q > lib && q < end && *q == '"') {
+                char name[256];
+                size_t n = (size_t)(q - lib);
+                if (n < sizeof(name)) {
+                    memcpy(name, lib, n);
+                    name[n] = 0;
+                    shadow_add_lib_flag(ld, cap, name);
+                }
+                p = q + 1;
+            } else {
+                p = pos + link_pat_len;
+            }
+        }
+    }
+}
+
+static void shadow_extract_links_from_file(const char* path, char* ld,
+                                           size_t cap) {
+    FILE* f;
+    long sz;
+    char* buf;
+    size_t nread;
+    if (!path || !ld || !cap) return;
+    f = fopen(path, "rb");
+    if (!f) return;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return; }
+    sz = ftell(f);
+    if (sz <= 0) { fclose(f); return; }
+    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return; }
+    buf = (char*)malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); return; }
+    nread = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[nread] = 0;
+    shadow_scan_link_directives(buf, nread, ld, cap);
+    free(buf);
+}
+
 static int shadow_host_link(const char* o_path, const char* bin_path,
-                            const char* runtime_o) {
+                            const char* runtime_o, const char* c_path,
+                            const char* in_path) {
     char cmd[8192];
+    char extracted[1024];
     const char* cc = shadow_host_cc();
     const char* ld = g_shadow_host_opts.ld_flags;
     int n;
+    extracted[0] = 0;
+    if (ld && ld[0]) {
+        snprintf(extracted, sizeof(extracted), "%s", ld);
+    }
+    /* Pull @link / __CC_LINK__ from emit.c and the original source (headers
+     * may carry @link in comments that never make it into emit). */
+    shadow_extract_links_from_file(c_path, extracted, sizeof(extracted));
+    shadow_extract_links_from_file(in_path, extracted, sizeof(extracted));
     n = snprintf(cmd, sizeof(cmd),
                  "%s \"%s\" \"%s\" -o \"%s\" -lpthread -lm %s",
-                 cc, o_path, runtime_o, bin_path,
-                 (ld && ld[0]) ? ld : "");
+                 cc, o_path, runtime_o, bin_path, extracted);
     if (n < 0 || (size_t)n >= sizeof(cmd)) return -1;
     if (g_shadow_host_opts.dry_run) {
         fprintf(stderr, "shadow_lower: dry-run link:\n  %s\n", cmd);
@@ -423,7 +565,7 @@ static int shadow_build_host(const char* in_path, const char* bin_path,
         (void)shadow_write_u64_file(okey_path, okey);
     }
 
-    return shadow_host_link(o_path, bin_path, runtime_o);
+    return shadow_host_link(o_path, bin_path, runtime_o, c_path, in_path);
 }
 
 /* True when -o path looks like a text product (.c / .h), not a binary. */

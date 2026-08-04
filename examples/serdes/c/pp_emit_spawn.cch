@@ -1053,6 +1053,16 @@ static int shadow_emit_defer_epilogue(CEmit* out, ShadowCtx* ctx) {
     char i1[80];
     shadow_indent_nest(i1, sizeof(i1), ind, 1);
     if (!cemit_str(out, "__cc_cleanup:\n")) return 0;
+    /* @destroy (nursery wait/free) before @defer (file/channel close) —
+     * legacy order. Without this, defer-only cleanup closes inputs before
+     * producers run (pigz → 0-byte gzip). */
+    if (ctx->destroys && ctx->ndestroys > 0) {
+        int d;
+        for (d = ctx->ndestroys - 1; d >= 0; d--) {
+            if (!shadow_emit_one_destroy(ctx->destroys[d], out, ctx, ind))
+                return 0;
+        }
+    }
     /* Reverse declaration order */
     for (int i = ctx->ndefers - 1; i >= 0; i--) {
         AstNode* d = ctx->defers[i];
