@@ -1605,34 +1605,74 @@ static AstNode* parse_val_destroy(Parser* p) {
     }
 }
 
-/* break; or continue; */
+/* Source bytes for toks[i0 .. i1) (exclusive end token index). */
+static int pp_stmt_tok_span(Parser* p, int i0, int i1, const char** out_s,
+                            size_t* out_n) {
+    FileTape* ft;
+    size_t start, end;
+    if (!p || i0 < 0 || i1 <= i0 || i1 > p->n) return 0;
+    ft = (p->cache) ? tape_by_id(p->cache, p->toks[i0].file_id) : NULL;
+    if (!ft || !ft->bytes) return 0;
+    start = p->toks[i0].offset;
+    end = p->toks[i1 - 1].offset + p->toks[i1 - 1].spell.len;
+    if (end < start || end > ft->len) return 0;
+    *out_s = ft->bytes + start;
+    *out_n = end - start;
+    return 1;
+}
+
+/* PpStmt owns recognition for break/continue/goto/label/raw_line shapes. */
+static int pp_stmt_owns(Parser* p, int i0, int i1) {
+    const char* s;
+    size_t n;
+    if (!pp_stmt_tok_span(p, i0, i1, &s, &n)) return 0;
+    return PpStmt_match(s, n);
+}
+
+/* break; or continue; — shape owned by PpStmt. */
 static AstNode* parse_break_continue(Parser* p) {
     ShadowKwKind kw = shadow_kw(p_peek(p));
     if (kw != SHADOW_KW_BREAK && kw != SHADOW_KW_CONTINUE) return NULL;
+    if (p->i + 1 >= p->n || !tok_eq(p->toks[p->i + 1], TK_PUNCT, ";")) {
+        p->err = 1;
+        return NULL;
+    }
+    if (!pp_stmt_owns(p, p->i, p->i + 2)) {
+        p->err = 1;
+        return NULL;
+    }
     p_next(p);
-    if (!p_accept(p, TK_PUNCT, ";")) { p->err = 1; return NULL; }
-    AstNode* n = ast_new(p, kw == SHADOW_KW_BREAK ? AST_BREAK : AST_CONTINUE);
-    return n;
+    p_next(p); /* ; */
+    return ast_new(p, kw == SHADOW_KW_BREAK ? AST_BREAK : AST_CONTINUE);
 }
 
 /* goto label; — must win over `Type name;` (goto is an IDENT). */
 static AstNode* parse_goto(Parser* p) {
     Token t = p_peek(p);
+    Token lab;
     if (t.kind != TK_IDENT || !spell_eq(t.spell, "goto")) return NULL;
-    p_next(p);
-    Token lab = p_next(p);
-    if (lab.kind != TK_IDENT) {
-        parser_fail(p, lab, "expected label after goto");
+    if (p->i + 2 >= p->n || p->toks[p->i + 1].kind != TK_IDENT ||
+        !tok_eq(p->toks[p->i + 2], TK_PUNCT, ";")) {
+        if (p->i + 1 >= p->n || p->toks[p->i + 1].kind != TK_IDENT)
+            parser_fail(p, p->i + 1 < p->n ? p->toks[p->i + 1] : t,
+                        "expected label after goto");
+        else
+            parser_fail(p, p_peek(p), "expected ';' after goto label");
         return NULL;
     }
-    if (!p_accept(p, TK_PUNCT, ";")) {
-        parser_fail(p, p_peek(p), "expected ';' after goto label");
+    if (!pp_stmt_owns(p, p->i, p->i + 3)) {
+        parser_fail(p, t, "goto form rejected by PpStmt grammar");
         return NULL;
     }
-    AstNode* n = ast_new(p, AST_GOTO);
-    if (!n) return NULL;
-    slice_to(n->a, sizeof(n->a), lab.spell);
-    return n;
+    p_next(p); /* goto */
+    lab = p_next(p);
+    p_next(p); /* ; */
+    {
+        AstNode* n = ast_new(p, AST_GOTO);
+        if (!n) return NULL;
+        slice_to(n->a, sizeof(n->a), lab.spell);
+        return n;
+    }
 }
 
 /* label: — statement label (before another stmt or alone before `}`). */
@@ -1643,12 +1683,15 @@ static AstNode* parse_label(Parser* p) {
         return NULL;
     /* Avoid `case` / `default` (switch) and digraph typenames. */
     if (spell_eq(t.spell, "case") || spell_eq(t.spell, "default")) return NULL;
+    if (!pp_stmt_owns(p, p->i, p->i + 2)) return NULL;
     p_next(p);
     p_next(p); /* : */
-    AstNode* n = ast_new(p, AST_LABEL);
-    if (!n) return NULL;
-    slice_to(n->a, sizeof(n->a), t.spell);
-    return n;
+    {
+        AstNode* n = ast_new(p, AST_LABEL);
+        if (!n) return NULL;
+        slice_to(n->a, sizeof(n->a), t.spell);
+        return n;
+    }
 }
 
 /* do { stmts } while ( cond ) ; */
@@ -3007,7 +3050,8 @@ static AstNode* parse_static_fn(Parser* p) {
         p->soft_stmt = saved_soft;
         if (ok_stmts && p_accept(p, TK_PUNCT, "}")) return n;
 
-        /* Stmt subset miss — caller keeps one AST_RAW_LINE tape span. */
+        /* Stmt subset miss — rewind; caller keeps one AST_RAW_LINE tape span.
+         * Grammar primitive: `fallible` / PpStmt soft_unit (pp_stmt.rules). */
         p->i = fn_start;
         p->err = saved_err;
         p->nn = saved_nn;

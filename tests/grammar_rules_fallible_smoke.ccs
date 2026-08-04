@@ -1,0 +1,31 @@
+// Phase 2 engine: `fallible term` soft-succeeds on miss; `ppkind` calls the
+// host hook (weak default always misses — so a lone ppkind rule rejects).
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_grammar.cch>
+
+@grammar(rules) Soft {~~~~
+    line:   [item #'x']
+    item:   fallible [some digit]
+    digit:  charset [#'0' - #'9']
+~~~~}
+
+@grammar(rules) KindOnly {~~~~
+    tok: ppkind Ident
+~~~~}
+
+int main(void) {
+    if (!Soft_match("12x", 3)) { printf("FAIL: Soft 12x\n"); return 1; }
+    if (!Soft_match("x", 1)) { printf("FAIL: Soft soft-miss x\n"); return 1; }
+    if (Soft_match("y", 1)) { printf("FAIL: Soft bad accepted\n"); return 1; }
+
+    CCArena arena = cc_arena_create(1 << 16);
+    SoftNode* root = Soft_parse("x", 1, &arena);
+    if (!root) { printf("FAIL: Soft parse soft-miss\n"); return 1; }
+
+    if (KindOnly_match("abc", 3)) {
+        printf("FAIL: ppkind weak default matched\n");
+        return 1;
+    }
+    printf("grammar rules fallible/ppkind: OK\n");
+    return 0;
+}

@@ -1,0 +1,31 @@
+; Statement whitelist layer (Phase 2): grammar-over-tape for the simple
+; control forms. Structured arms are keep leaves; lower layers / opaque C
+; appear as fallible spans (soft miss → zero-width FALLIBLE leaf) or as
+; raw_line keeps when a full statement to ';' is recovered.
+;
+; Entry: stmt (must stay first)
+; Host: shadow_lower @grammar(rules) PpStmt; parse bridge in
+; pp_ast_parse_stmt.cch maps KEEP ids → AstNode and advances the token cursor.
+
+stmt: break_stmt | continue_stmt | goto_stmt | label_stmt | raw_line
+
+ws: any charset [#' ' #'\t' #'\r' #'\n']
+
+nondigit: charset [#'a' - #'z' #'A' - #'Z' #'_']
+idcont:   charset [#'a' - #'z' #'A' - #'Z' #'_' #'0' - #'9']
+ident:    keep [nondigit any idcont]
+
+break_stmt:    keep ["break" ws #';']
+continue_stmt: keep ["continue" ws #';']
+goto_stmt:     keep ["goto" ws ident ws #';']
+label_stmt:    keep [ident ws #':']
+
+; Opaque statement to ';' (no braces). Used when structured arms miss and
+; the host wants a tape RAW_LINE rather than a hard error.
+raw_line: keep [some complement charset [#';' #'{' #'}' #'\n'] #';']
+
+; Soft unit: try a structured form; on miss succeed with a FALLIBLE leaf
+; (promotes the former soft_stmt / ~3010 rewind contract to a primitive).
+; Not the entry rule — exercised by SoftStmt grammar / fallible smokes.
+structured: break_stmt | continue_stmt | goto_stmt | label_stmt
+soft_unit:  fallible structured

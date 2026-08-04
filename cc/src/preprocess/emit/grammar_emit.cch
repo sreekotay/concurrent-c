@@ -1383,6 +1383,26 @@ static inline CCString cc_gr_m_skip_text(CCArena* a, const char* fail) {
 `, a);
 }
 
+/* pp-token kind terminal: host supplies `cc_grammar_ppkind_at` (weak default
+ * in <ccc/cc_grammar.cch> returns 0). On match the hook advances *io. */
+static inline CCString cc_gr_m_ppkind_text(CCArena* a, const char* n, const char* kind,
+                                           int klen, const char* fail) {
+    (void)n;
+    CCString kn = cc_gr_esc_text(a, (const unsigned char*)kind, klen);
+    return @string(`    if (!cc_grammar_ppkind_at(s, n, &p, "${kn}")) goto ${fail};
+`, a);
+}
+
+/* Fallible miss leaf: zero-width tape node at the restored cursor (collect). */
+static inline CCString cc_gr_fallible_leaf_text(CCArena* a, const char* n, int rid,
+                                                 const char* fail) {
+    return @string(`    if (c->total == c->cap && !${n}__tgrow(c)) goto ${fail};
+    { ${n}Node* ndf = &c->tape[c->total++];
+      ndf->meta = ${rid}u;
+      ndf->u.bytes = (const char*)(s + p); }
+`, a);
+}
+
 /* rule reference call: class r/m (plain) or b (collect ctx), opt. __np */
 static inline CCString cc_gr_ref_call_text(CCArena* a, const char* n, const char* cls,
                                            const char* r, const char* suf, int with_ctx,

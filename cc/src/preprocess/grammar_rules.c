@@ -79,7 +79,14 @@
 
 /* ------------------------------------------------------------------ IR ---- */
 
-enum { RN_CHARSET, RN_LIT, RN_SEQ, RN_ALT, RN_SOME, RN_ANY, RN_OPT, RN_REF, RN_SKIP, RN_KEEP, RN_COLLECT };
+enum {
+    RN_CHARSET, RN_LIT, RN_SEQ, RN_ALT, RN_SOME, RN_ANY, RN_OPT, RN_REF, RN_SKIP,
+    RN_KEEP, RN_COLLECT,
+    /* Phase 2: on miss, succeed with a captured span leaf (soft-fail / raw). */
+    RN_FALLIBLE,
+    /* Phase 2: terminal over a pp-token kind name (host classifies at cursor). */
+    RN_TOKKIND
+};
 
 enum {
     R_MAX_NODES = 1024,
@@ -392,6 +399,36 @@ static int rg_parse_term(RG* g, size_t* io, int depth) {
         int nd = rg_node(g, RN_SKIP, at);
         if (nd < 0) return -1;
         *io = after;
+        return nd;
+    }
+    /* fallible term — try child; on miss, keep [start,start) as a FALLIBLE
+     * leaf and succeed with cursor unmoved (caller / outer alt may advance).
+     * Promotes serdes soft-fail (~AST_RAW_LINE) to a grammar primitive. */
+    if (rg_kw(g, p, "fallible", &after)) {
+        p = after;
+        int child = rg_parse_term(g, &p, depth);
+        if (child < 0) return -1;
+        int nd = rg_node(g, RN_FALLIBLE, at);
+        if (nd < 0) return -1;
+        g->nodes[nd].a = child;
+        *io = p;
+        return nd;
+    }
+    /* ppkind Ident — match one pp-token whose kind name equals Ident.
+     * Byte engines call weak `cc_grammar_ppkind_at(s,n,*io,name)` (1=match
+     * and advance *io; 0=miss). Token-tape hosts override that hook. */
+    if (rg_kw(g, p, "ppkind", &after)) {
+        size_t e;
+        p = rg_ws(g, after);
+        if (!rg_ident(g, p, &e) || e - p >= R_NAME_MAX)
+            return rg_fail(g, p, "expected kind name after ppkind");
+        int off = rg_pool_add(g, g->body + p, (int)(e - p), at);
+        if (off < 0) return -1;
+        int nd = rg_node(g, RN_TOKKIND, at);
+        if (nd < 0) return -1;
+        g->nodes[nd].a = off;
+        g->nodes[nd].b = (int)(e - p);
+        *io = e;
         return nd;
     }
     if (rg_kw(g, p, "charset", &after)) {
@@ -727,7 +764,11 @@ static void rf_node(const RG* g, RFirst* F, int nd, unsigned char* set, int* nul
     case RN_CHARSET: rf_union(set, g->sets[x->a]); break;
     case RN_SKIP: rf_all(set); break;
     case RN_REF: rf_rule(g, F, x->nkids, set, nullable); break;
-    case RN_KEEP: case RN_COLLECT: rf_node(g, F, x->a, set, nullable); break;
+    case RN_KEEP: case RN_COLLECT: case RN_FALLIBLE:
+        rf_node(g, F, x->a, set, nullable);
+        if (x->kind == RN_FALLIBLE) *nullable = 1;
+        break;
+    case RN_TOKKIND: rf_all(set); break; /* host classifies; conservative FIRST */
     case RN_OPT: case RN_ANY: {
         int n2 = 0; rf_node(g, F, x->a, set, &n2);
         *nullable = 1;
@@ -834,7 +875,7 @@ static int rk_rule(const RG* g, RKeeps* K, int r) {
 static int rk_node(const RG* g, RKeeps* K, int nd) {
     const RNode* x = &g->nodes[nd];
     switch (x->kind) {
-    case RN_KEEP: case RN_COLLECT: return 1;
+    case RN_KEEP: case RN_COLLECT: case RN_FALLIBLE: return 1;
     case RN_REF: return rk_rule(g, K, x->nkids);
     case RN_SOME: case RN_ANY: case RN_OPT: return rk_node(g, K, x->a);
     case RN_SEQ: case RN_ALT:
@@ -919,7 +960,8 @@ static int rg_inline_size(const RG* g, int nd, int depth) {
         for (int i = 0; i < x->nkids; i++) t += rg_inline_size(g, g->kids[x->b + i], depth + 1);
         return t;
     }
-    case RN_SOME: case RN_ANY: case RN_OPT: return 1 + rg_inline_size(g, x->a, depth + 1);
+    case RN_SOME: case RN_ANY: case RN_OPT: case RN_FALLIBLE:
+        return 1 + rg_inline_size(g, x->a, depth + 1);
     default: return 1;
     }
 }
@@ -947,7 +989,7 @@ static int rg_pure_run(const RG* g, int nd, int depth) {
         for (int i = 0; i < x->nkids; i++)
             if (!rg_pure_run(g, g->kids[x->b + i], depth + 1)) return 0;
         return 1;
-    case RN_SOME: case RN_ANY: case RN_OPT:
+    case RN_SOME: case RN_ANY: case RN_OPT: case RN_FALLIBLE:
         return rg_pure_run(g, x->a, depth + 1);
     default: return 0;
     }
@@ -995,6 +1037,9 @@ static int rg_open_node(const RG* g, RFirst* F, RRisk* R, int nd) {
     case RN_KEEP: case RN_COLLECT:
         /* anchor at entry; coincides with exit iff the body can match empty */
         return rn_nullable(g, F, x->a) || rg_open_node(g, F, R, x->a);
+    case RN_FALLIBLE:
+        /* miss path tapes a zero-width leaf at entry (= exit on miss) */
+        return 1;
     case RN_REF: return R->open_[x->nkids];
     case RN_SOME: case RN_ANY: case RN_OPT: return rg_open_node(g, F, R, x->a);
     case RN_SEQ:
@@ -1021,9 +1066,9 @@ static int rg_zr_node(const RG* g, RFirst* F, RKeeps* K, RRisk* R, int nd) {
     switch (x->kind) {
     case RN_KEEP: case RN_COLLECT: return rg_zr_node(g, F, K, R, x->a);
     case RN_REF: return R->zr_[x->nkids];
-    case RN_SOME: case RN_ANY: case RN_OPT:
+    case RN_SOME: case RN_ANY: case RN_OPT: case RN_FALLIBLE:
         /* the construct takes sv at entry: a kp site AT this position */
-        if (rk_node(g, K, x->a)) return 1;
+        if (rk_node(g, K, x->a) || x->kind == RN_FALLIBLE) return 1;
         return rg_zr_node(g, F, K, R, x->a);
     case RN_ALT:
         /* cascades take sv at entry (dispatch ALTs don't, but conservative) */
@@ -1474,6 +1519,30 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         eb_emit(e, cc_gr_goto_ok_text(e->scratch, k));
         eb_emit(e, cc_gr_restore_text(e->scratch, br, k, (kp && rk) ? 2 : kp ? 1 : 0, g->name));
         eb_emit(e, cc_gr_ok_close_text(e->scratch, k));
+        break;
+    }
+    case RN_FALLIBLE: {
+        /* Try child; on miss restore and succeed (nullable). Collect mode
+         * additionally tapes a zero-width FALLIBLE leaf at the miss site. */
+        int k = (*lbl)++;
+        int kp = e->mode == 1 ? 1 : 0;
+        char br[32];
+        snprintf(br, sizeof(br), "Lf%d", k);
+        eb_emit(e, cc_gr_save_text(e->scratch, k, kp && e->risk));
+        rg_emit_node(g, e, x->a, br, lbl, rid);
+        eb_emit(e, cc_gr_goto_ok_text(e->scratch, k));
+        eb_emit(e, cc_gr_restore_text(e->scratch, br, k,
+                                      (kp && e->risk) ? 2 : kp ? 1 : 0, g->name));
+        if (e->mode == 1) {
+            eb_emit(e, cc_gr_fallible_leaf_text(e->scratch, g->name, rid, fail));
+        }
+        eb_emit(e, cc_gr_ok_close_text(e->scratch, k));
+        break;
+    }
+    case RN_TOKKIND: {
+        e->last_pad = -1;
+        eb_emit(e, cc_gr_m_ppkind_text(e->scratch, g->name, g->pool + x->a, x->b,
+                                         fail));
         break;
     }
     case RN_ANY:
@@ -2697,6 +2766,7 @@ static void rw_mark_node(const RG* g, int nd, unsigned char* mark) {
         return;
     }
     case RN_KEEP: case RN_COLLECT: case RN_SOME: case RN_ANY: case RN_OPT:
+    case RN_FALLIBLE:
         rw_mark_node(g, x->a, mark);
         return;
     case RN_SEQ: case RN_ALT:

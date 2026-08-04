@@ -6,6 +6,10 @@
     include "../examples/serdes/c/pp_tok.rules"
 ~~~~}
 
+@grammar(rules) PpStmt {~~~~
+    include "../examples/serdes/c/pp_stmt.rules"
+~~~~}
+
 #include "../examples/serdes/c/c_pp_spike.cch"
 #include "../examples/serdes/c/shadow_comptime.h"
 #include <fcntl.h>

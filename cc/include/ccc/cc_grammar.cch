@@ -123,4 +123,14 @@ typedef struct {
 #define cc_print_usage(T, ...)   T##_print_usage(__VA_ARGS__)
 #define cc_prepare_args(T, ...)  T##_prepare(__VA_ARGS__)
 
+/* Host hook for `ppkind Ident` terminals in @grammar(rules). Return 1 and
+ * advance *io past one matching pp-token; return 0 on miss. Byte-tape hosts
+ * leave the weak default (always miss). Token-tape / serdes hosts override. */
+__attribute__((weak))
+int cc_grammar_ppkind_at(const unsigned char* s, size_t n, size_t* io,
+                         const char* kind) {
+    (void)s; (void)n; (void)io; (void)kind;
+    return 0;
+}
+
 #endif /* CCC_CC_GRAMMAR_CCH */
