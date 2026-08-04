@@ -2,9 +2,11 @@
 """Race cclev against the installed python-Levenshtein.
 
 Same inputs, same loop, wall time per call.  Upstream is rapidfuzz-backed
-C++ with bitparallel cores; cclev is a plain two-row DP behind the same
-Python-facing door — the interesting number is the crossing cost plus how
-far a straightforward CC port lands from a hand-tuned library.
+C++ with bitparallel cores; cclev answers with the same class of kernels
+(Myers/Hyyro distance, Allison-Dix LCS for ratio) above a small-input
+threshold where a two-row DP carries the load — so the short-string rows
+measure the crossing cost and the long-string rows measure kernel against
+kernel.
 
     ccc build -O real_projects/levenshtein/levenshtein_cc.ccs
     PYTHONPATH=bin python3 real_projects/levenshtein/bench.py
@@ -39,19 +41,20 @@ def race(label, fn_name, pairs, reps):
     n = reps * len(pairs)
     print(f"{label:28} cclev {t_mine/n*1e9:8.0f} ns  "
           f"upstream {t_theirs/n*1e9:8.0f} ns  "
-          f"ratio {t_mine/t_theirs:5.2f}x")
+          f"cclev/upstream {t_mine/t_theirs:5.2f}x  "
+          f"({'cclev faster' if t_mine < t_theirs else 'upstream faster'})")
 
 
 def main():
     word_pairs = [(WORDS[i], WORDS[(i * 7 + 1) % len(WORDS)]) for i in range(len(WORDS))]
     long_pairs = [(LONG[i], LONG[(i * 3 + 1) % len(LONG)]) for i in range(len(LONG))]
-    race("distance/words(3-12)", "distance", word_pairs, 30)
-    race("distance/long(200)", "distance", long_pairs, 30)
-    race("ratio/words(3-12)", "ratio", word_pairs, 30)
-    race("ratio/long(200)", "ratio", long_pairs, 30)
-    race("jaro_winkler/words(3-12)", "jaro_winkler", word_pairs, 30)
+    race("distance/words(3-12)", "distance", word_pairs, 10)
+    race("distance/long(200)", "distance", long_pairs, 10)
+    race("ratio/words(3-12)", "ratio", word_pairs, 10)
+    race("ratio/long(200)", "ratio", long_pairs, 10)
+    race("jaro_winkler/words(3-12)", "jaro_winkler", word_pairs, 10)
     race("hamming/words equal-len", "hamming",
-         [(a, "".join(reversed(a))) for a, _ in word_pairs], 30)
+         [(a, "".join(reversed(a))) for a, _ in word_pairs], 10)
 
 
 if __name__ == "__main__":

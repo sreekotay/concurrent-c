@@ -73,3 +73,9 @@ Module state as one lazily-created scratch arena — reset per call, zero
 steady-state allocation, torn down by `destroy` as the module's `m_free` —
 fell out of the py_module lifecycle as designed. The one-command build
 (`ccc build`, PyInit_ inference, `.abi3.so`) needed nothing project-specific.
+
+The bit-parallel round (Myers/Hyyro distance, Allison-Dix LCS, blocked to
+arbitrary lengths) was prototyped against the scalar DP in Python, then
+ported as plain uint64 loops: it compiled first try and passed the full
+parity sweep unchanged. Dense bit-twiddling C is just C here — no
+friction to log, which is itself the data point.

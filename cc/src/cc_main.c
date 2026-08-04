@@ -3066,6 +3066,11 @@ static void cc__write_file_text(const char* path, const char* text) {
     fclose(f);
 }
 
+/* The flavor the driver injects when neither -O nor -g is given.  Shared
+ * with cc__prebuilt_runtime_applies: a cc_flags string equal to exactly
+ * this is the driver talking, not the caller. */
+#define CC_DEFAULT_FLAVOR_CC "-O2"
+
 /* Whether the prebuilt runtime object can answer this request.
  *
  * out/cc/obj/runtime/concurrent_c.o is whatever `make -C cc` compiled: the
@@ -3073,12 +3078,15 @@ static void cc__write_file_text(const char* path, const char* text) {
  * invocation that supplies compilation inputs of its own would silently drop
  * exactly the flags the caller asked for — the artifact would not be the one
  * they requested. Any such invocation falls through to the per-variant cache,
- * which builds one object per flag set and keeps it. */
+ * which builds one object per flag set and keeps it.  The driver-injected
+ * default flavor is not a caller flag: an unflagged build carries exactly
+ * CC_DEFAULT_FLAVOR_CC in cc_flags and still means "the stock runtime". */
 static int cc__prebuilt_runtime_applies(const CCBuildOptions* opt,
                                         const char* target_part,
                                         const char* sysroot_part) {
     const char* e;
-    if (opt->cc_flags && *opt->cc_flags) return 0;
+    if (opt->cc_flags && *opt->cc_flags &&
+        strcmp(opt->cc_flags, CC_DEFAULT_FLAVOR_CC) != 0) return 0;
     if (target_part && *target_part) return 0;
     if (sysroot_part && *sysroot_part) return 0;
     /* A host CC override may not be the compiler that built the prebuilt, and
@@ -3623,9 +3631,12 @@ static int run_build_mode(int argc, char** argv) {
     if (opt_release && opt_debug) opt_release = 0;
 
     // Inject flavor defaults early (before we fold cc_flags + -D defines).
-    // - release: size-friendly dead-stripping (link) + NDEBUG (compile)
+    // - default: optimized with asserts kept — an unflagged build must not
+    //   be the slowest tier (the backend cc alone would give -O0 with no
+    //   debug info: worst of both worlds)
+    // - release: adds NDEBUG on top
     // - debug:   easy debugging
-    const char* flavor_cc = NULL;
+    const char* flavor_cc = CC_DEFAULT_FLAVOR_CC;
     if (opt_debug) flavor_cc = "-O0 -g";
     else if (opt_release) flavor_cc = "-O2 -DNDEBUG";
 
@@ -5569,8 +5580,11 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // Flavor defaults (non-build mode): apply before any user-provided --cc-flags so users can override.
-    const char* flavor_cc = NULL;
+    // Flavor defaults (non-build mode): apply before any user-provided
+    // --cc-flags so users can override.  Unflagged builds get -O2 with
+    // asserts kept — the backend cc alone would give -O0 with no debug
+    // info, the slowest tier for no benefit.
+    const char* flavor_cc = CC_DEFAULT_FLAVOR_CC;
     if (opt_debug) flavor_cc = "-O0 -g";
     else if (opt_release) flavor_cc = "-O2 -DNDEBUG";
     static char combined_cc_flags_main[2048];

@@ -427,17 +427,32 @@ static const char* cc__exec_lib_dir(char* buf, size_t cap) {
 /* Minimal comptime TU prelude: host API externs + emit-template + cc_emit_format. */
 static const char CC__EXEC_PRELUDE[] = CC_COMPTIME_EMIT_TPL_PRELUDE;
 
+/* Registry defs ride into every block/eval TU so comptime code can call
+ * @comptime fns.  Factory bodies among them use the arg() sugar the
+ * prelude defines only under CC_COMPTIME_EXEC — so a TU that carries a
+ * factory along must switch it on, exactly as the compiled-factory TU
+ * does.  Without this, a file that both includes a factory-bearing
+ * header (py.cch) and runs its own @comptime block dies with
+ * "implicit declaration of function 'arg'" inside header code the user
+ * never wrote. */
+static int cc__exec_fndefs_need_exec_define(const char* fndefs) {
+    return fndefs && strstr(fndefs, "__cc_gfac_") != NULL;
+}
+
 static char* cc__exec_build_tu(const char* body, size_t body_len) {
     static const char entry[] = "\nvoid __cc_ct_entry(void) {\n";
     static const char tail[] = "\n}\n";
+    static const char exec_def[] = "#define CC_COMPTIME_EXEC 1\n";
     const char* fndefs = cc_comptime_fn_registry_defs();
     size_t fndef_len = fndefs ? strlen(fndefs) : 0;
+    size_t ed = cc__exec_fndefs_need_exec_define(fndefs) ? sizeof(exec_def) - 1 : 0;
     size_t pre = sizeof(CC__EXEC_PRELUDE) - 1;
     size_t ent = sizeof(entry) - 1;
     size_t tl = sizeof(tail) - 1;
-    char* s = (char*)malloc(pre + fndef_len + ent + body_len + tl + 1);
+    char* s = (char*)malloc(ed + pre + fndef_len + ent + body_len + tl + 1);
     if (!s) return NULL;
     size_t o = 0;
+    if (ed) { memcpy(s + o, exec_def, ed); o += ed; }
     memcpy(s + o, CC__EXEC_PRELUDE, pre); o += pre;
     if (fndef_len) { memcpy(s + o, fndefs, fndef_len); o += fndef_len; }
     memcpy(s + o, entry, ent); o += ent;
@@ -451,15 +466,18 @@ static char* cc__exec_build_eval_tu(const char* expr) {
     static const char hdr[] = "\nlong long __cc_ce_result;\nvoid __cc_ct_entry(void) {\n"
                               "  __cc_ce_result = (long long)(";
     static const char tail[] = ");\n}\n";
+    static const char exec_def[] = "#define CC_COMPTIME_EXEC 1\n";
     const char* fndefs = cc_comptime_fn_registry_defs();
     size_t fndef_len = fndefs ? strlen(fndefs) : 0;
+    size_t ed = cc__exec_fndefs_need_exec_define(fndefs) ? sizeof(exec_def) - 1 : 0;
     size_t ex = expr ? strlen(expr) : 0;
     size_t pre = sizeof(CC__EXEC_PRELUDE) - 1;
     size_t hl = sizeof(hdr) - 1;
     size_t tl = sizeof(tail) - 1;
-    char* s = (char*)malloc(pre + fndef_len + hl + ex + tl + 1);
+    char* s = (char*)malloc(ed + pre + fndef_len + hl + ex + tl + 1);
     if (!s) return NULL;
     size_t o = 0;
+    if (ed) { memcpy(s + o, exec_def, ed); o += ed; }
     memcpy(s + o, CC__EXEC_PRELUDE, pre); o += pre;
     if (fndef_len) { memcpy(s + o, fndefs, fndef_len); o += fndef_len; }
     memcpy(s + o, hdr, hl); o += hl;

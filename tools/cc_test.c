@@ -483,6 +483,11 @@ static int get_run_timeout_for_test(const char* stem, int default_timeout_sec) {
     if (strcmp(stem, "script_oneliner_smoke") == 0) return 30;
     /* Compact goldens + hostcc + one header beachhead; keep near default. */
     if (strcmp(stem, "c_pp_shadow_emit_smoke") == 0) return 20;
+    /* Each shells out to `ccc build` of a py.cch TU: ~9s of backend -O2 on
+     * a cold cache, over the 10s default under suite parallelism. */
+    if (strcmp(stem, "py_module_import_smoke") == 0) return 30;
+    if (strcmp(stem, "py_module_double_result_smoke") == 0) return 30;
+    if (strcmp(stem, "py_levenshtein_smoke") == 0) return 30;
     return default_timeout_sec;
 }
 

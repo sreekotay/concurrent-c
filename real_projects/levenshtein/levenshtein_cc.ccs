@@ -36,6 +36,7 @@ static size_t lev__decode(CCArena *a, CCSlice s, uint32_t **out) {
     size_t i = 0, n = 0;
     uint32_t *cp = cc_arena_alloc_T_count(uint32_t, a, s.len ? s.len : 1);
     if (!cp) { *out = NULL; return 0; }
+    while (i < s.len && p[i] < 0x80) cp[n++] = p[i++];  /* ASCII prefix, branch-light */
     while (i < s.len) {
         unsigned char c = p[i];
         uint32_t v = c;
@@ -67,7 +68,9 @@ static int lev__prep(Lev *self, CCSlice s1, CCSlice s2,
 }
 
 /* Two-row DP; `sub` is the substitution cost — 1 is the classic distance,
- * 2 makes it the indel distance `ratio` normalizes. */
+ * 2 makes it the indel distance `ratio` normalizes.  This is the spec the
+ * bit-parallel kernels below must agree with; it also carries the small
+ * inputs, where its zero setup cost wins. */
 static long long lev__dp(CCArena *a, const uint32_t *s, size_t n,
                          const uint32_t *t, size_t m, long long sub) {
     size_t *prev = cc_arena_alloc_T_count(size_t, a, m + 1);
@@ -88,11 +91,314 @@ static long long lev__dp(CCArena *a, const uint32_t *s, size_t n,
     return (long long)prev[m];
 }
 
+/* Codepoint -> match-mask rows for the bit kernels.  When every pattern
+ * codepoint fits below 0x100 (ASCII and Latin-1 — most real text, and
+ * every invalid byte, which decodes as itself), the table is
+ * direct-indexed: 256 rows, one load per text char.  Otherwise a small
+ * open-addressed hash (capacity a power of two >= 2x the pattern length,
+ * so probes stay short).  Either way a miss hands back an all-zero row.
+ * 0xFFFFFFFF cannot be a key: codepoints top out at 0x10FFFF. */
+#define LEV__CP_NONE 0xFFFFFFFFu
+
+typedef struct LevPeq {
+    uint64_t *direct;    /* 256 * blocks, or NULL when hashing */
+    unsigned char *dseen;/* which direct rows were zeroed and filled */
+    uint32_t *keys;
+    uint64_t **rows;
+    uint64_t *zero;
+    size_t cap;
+    size_t blocks;
+} LevPeq;
+
+static int lev__peq_build(CCArena *ar, const uint32_t *pat, size_t m,
+                          size_t blocks, LevPeq *p) {
+    size_t cap = 8, i, b;
+    uint32_t maxcp = 0;
+    for (i = 0; i < m; i++) if (pat[i] > maxcp) maxcp = pat[i];
+    p->blocks = blocks;
+    p->zero = cc_arena_alloc_T_count(uint64_t, ar, blocks);
+    if (!p->zero) return -1;
+    for (b = 0; b < blocks; b++) p->zero[b] = 0;
+    if (maxcp < 0x100) {
+        /* Rows for absent chars are never read past a zero check, but they
+         * ARE read: lookups index straight in.  Zero only the rows the
+         * pattern touches (a 256-byte seen map) plus each miss row on
+         * demand via p->zero — memsetting all 256*blocks words per call
+         * costs more than the whole kernel on mid-size inputs. */
+        unsigned char seen[256];
+        p->direct = cc_arena_alloc_T_count(uint64_t, ar, 256 * blocks);
+        if (!p->direct) return -1;
+        memset(seen, 0, sizeof(seen));
+        for (i = 0; i < m; i++) {
+            size_t c = pat[i];
+            if (!seen[c]) {
+                seen[c] = 1;
+                memset(p->direct + c * blocks, 0, blocks * sizeof(uint64_t));
+            }
+            p->direct[c * blocks + (i >> 6)] |= (uint64_t)1 << (i & 63);
+        }
+        p->keys = NULL;
+        p->rows = NULL;
+        p->cap = 0;
+        p->dseen = cc_arena_alloc_T_count(unsigned char, ar, 256);
+        if (!p->dseen) return -1;
+        memcpy(p->dseen, seen, 256);
+        return 0;
+    }
+    p->direct = NULL;
+    while (cap < 2 * m) cap <<= 1;
+    p->keys = cc_arena_alloc_T_count(uint32_t, ar, cap);
+    p->rows = cc_arena_alloc_T_count(uint64_t *, ar, cap);
+    if (!p->keys || !p->rows) return -1;
+    p->cap = cap;
+    for (i = 0; i < cap; i++) p->keys[i] = LEV__CP_NONE;
+    for (i = 0; i < m; i++) {
+        uint32_t cp = pat[i];
+        size_t h = (size_t)(cp * 2654435761u) & (cap - 1);
+        while (p->keys[h] != LEV__CP_NONE && p->keys[h] != cp)
+            h = (h + 1) & (cap - 1);
+        if (p->keys[h] == LEV__CP_NONE) {
+            uint64_t *row = cc_arena_alloc_T_count(uint64_t, ar, blocks);
+            if (!row) return -1;
+            for (b = 0; b < blocks; b++) row[b] = 0;
+            p->keys[h] = cp;
+            p->rows[h] = row;
+        }
+        p->rows[h][i >> 6] |= (uint64_t)1 << (i & 63);
+    }
+    return 0;
+}
+
+static const uint64_t *lev__peq_row(const LevPeq *p, uint32_t cp) {
+    size_t h;
+    if (p->direct)
+        return (cp < 0x100 && p->dseen[cp]) ? p->direct + (size_t)cp * p->blocks
+                                            : p->zero;
+    h = (size_t)(cp * 2654435761u) & (p->cap - 1);
+    while (p->keys[h] != LEV__CP_NONE) {
+        if (p->keys[h] == cp) return p->rows[h];
+        h = (h + 1) & (p->cap - 1);
+    }
+    return p->zero;
+}
+
+static int lev__popcount64(uint64_t x) {
+    int c = 0;
+    while (x) { x &= x - 1; c++; }
+    return c;
+}
+
+/* Myers/Hyyro bit-parallel unit-cost edit distance: the shorter string
+ * rides the bits (one DP column per 64-bit word), the longer one drives
+ * the loop, so the whole column updates in ~15 word ops instead of 64
+ * cell visits.  Blocks chain through hin/hout, the +-1 horizontal delta
+ * at each block boundary; hin = +1 into block 0 is the first-row
+ * boundary (row 0 reads 0,1,2,...).  The last block's unused high bits
+ * run garbage, which stays harmless because every operation here only
+ * carries influence upward — the scored bit at `last_top` never hears
+ * from them. */
+static long long lev__dist_bits(CCArena *ar, const uint32_t *s, size_t n,
+                                const uint32_t *t, size_t m) {
+    LevPeq peq;
+    uint64_t *Pv, *Mv, last_top;
+    size_t blocks, rem, b, j;
+    long long score;
+    if (n > m) {
+        const uint32_t *ts = s; size_t tn = n;
+        s = t; n = m; t = ts; m = tn;
+    }
+    if (n == 0) return (long long)m;
+    blocks = (n + 63) >> 6;
+    rem = n - ((blocks - 1) << 6);
+    last_top = (uint64_t)1 << (rem - 1);
+    if (lev__peq_build(ar, s, n, blocks, &peq) != 0) return -1;
+    if (blocks == 1) {
+        /* Pattern fits one word: state lives in registers, no carries. */
+        uint64_t Pv1 = ~(uint64_t)0, Mv1 = 0;
+        score = (long long)n;
+        for (j = 0; j < m; j++) {
+            uint64_t Eq = lev__peq_row(&peq, t[j])[0];
+            uint64_t Xv = Eq | Mv1;
+            uint64_t Xh = (((Eq & Pv1) + Pv1) ^ Pv1) | Eq;
+            uint64_t Ph = Mv1 | ~(Xh | Pv1);
+            uint64_t Mh = Pv1 & Xh;
+            if (Ph & last_top) score++;
+            else if (Mh & last_top) score--;
+            Ph = (Ph << 1) | 1;
+            Mh <<= 1;
+            Pv1 = Mh | ~(Xv | Ph);
+            Mv1 = Ph & Xv;
+        }
+        return score;
+    }
+    Pv = cc_arena_alloc_T_count(uint64_t, ar, blocks);
+    Mv = cc_arena_alloc_T_count(uint64_t, ar, blocks);
+    if (!Pv || !Mv) return -1;
+    for (b = 0; b < blocks; b++) { Pv[b] = ~(uint64_t)0; Mv[b] = 0; }
+    score = (long long)n;
+    for (j = 0; j < m; j++) {
+        const uint64_t *eq = lev__peq_row(&peq, t[j]);
+        int hin = 1;
+        for (b = 0; b < blocks; b++) {
+            uint64_t Eq = eq[b], Pvb = Pv[b], Mvb = Mv[b];
+            uint64_t Xv = Eq | Mvb;
+            uint64_t Xh, Ph, Mh, top;
+            int hout;
+            if (hin < 0) Eq |= 1;
+            Xh = (((Eq & Pvb) + Pvb) ^ Pvb) | Eq;
+            Ph = Mvb | ~(Xh | Pvb);
+            Mh = Pvb & Xh;
+            top = (b == blocks - 1) ? last_top : ((uint64_t)1 << 63);
+            hout = ((Ph & top) ? 1 : 0) - ((Mh & top) ? 1 : 0);
+            Ph <<= 1;
+            Mh <<= 1;
+            if (hin > 0) Ph |= 1;
+            else if (hin < 0) Mh |= 1;
+            Pv[b] = Mh | ~(Xv | Ph);
+            Mv[b] = Ph & Xv;
+            hin = hout;
+        }
+        score += hin;
+    }
+    return score;
+}
+
+/* rapidfuzz reaches its long-string numbers with C++ templates on the
+ * block count, so every S word lives in a register.  Same move here in
+ * one @comptime block: emit lev__lcs_fx2..fx8, the LCS kernel unrolled
+ * to a fixed block count.  The code splices where this block sits —
+ * after LevPeq and the helpers it calls — and is ordinary C in the
+ * lowered output (`--emit-c-only`); block 0's carry-out is the
+ * simplified form, blocks 1..N-1 carry through. */
+@comptime {
+    for (int nb = 2; nb <= 8; nb++) {
+        @emit(CC_EMIT_AT_COMPTIME_SITE, `
+            static long long lev__lcs_fx${nb}(const LevPeq *peq, const uint32_t *t,
+                                              size_t m, size_t n, uint64_t valid) {
+                size_t j;
+            `);
+        for (int k = 0; k < nb; k++)
+            @emit(CC_EMIT_AT_COMPTIME_SITE, `
+                uint64_t S${k} = ~(uint64_t)0;
+                `);
+        @emit(CC_EMIT_AT_COMPTIME_SITE, `
+            for (j = 0; j < m; j++) {
+                const uint64_t *eq = lev__peq_row(peq, t[j]);
+                uint64_t M, U, x, x2, carry;
+                M = eq[0]; U = S0 & M; x = S0 + U;
+                carry = x < S0 ? (uint64_t)1 : 0; S0 = x | (S0 & ~M);
+            `);
+        for (int k = 1; k < nb; k++)
+            @emit(CC_EMIT_AT_COMPTIME_SITE, `
+                M = eq[${k}]; U = S${k} & M; x = S${k} + U; x2 = x + carry;
+                carry = ((x < S${k}) | (x2 < x)) ? (uint64_t)1 : 0;
+                S${k} = x2 | (S${k} & ~M);
+                `);
+        @emit(CC_EMIT_AT_COMPTIME_SITE, `
+            }
+            return (long long)n - (0
+            `);
+        for (int k = 0; k < nb; k++)
+            @emit(CC_EMIT_AT_COMPTIME_SITE, `
+                + lev__popcount64(S${k}${k == nb - 1 ? " & valid" : ""})
+                `);
+        @emit(CC_EMIT_AT_COMPTIME_SITE, `
+            );
+            }
+            `);
+    }
+}
+
+/* Bit-parallel LCS length (Allison-Dix): S holds the complemented match
+ * chain, matched bits absorb an addition carry that spreads increments
+ * up the column; the inter-block carry is exactly a bignum addition
+ * carry, detected by wraparound.  LCS = zero bits of S among the n
+ * valid positions, and the indel distance `ratio` wants is
+ * n + m - 2*LCS. */
+static long long lev__lcs_bits(CCArena *ar, const uint32_t *s, size_t n,
+                               const uint32_t *t, size_t m) {
+    LevPeq peq;
+    uint64_t *S;
+    size_t blocks, rem, b, j;
+    long long ones = 0;
+    if (n > m) {
+        const uint32_t *ts = s; size_t tn = n;
+        s = t; n = m; t = ts; m = tn;
+    }
+    if (n == 0) return 0;
+    blocks = (n + 63) >> 6;
+    rem = n - ((blocks - 1) << 6);
+    if (lev__peq_build(ar, s, n, blocks, &peq) != 0) return -1;
+    if (blocks == 1) {
+        uint64_t S1 = ~(uint64_t)0;
+        uint64_t valid = rem == 64 ? ~(uint64_t)0 : (((uint64_t)1 << rem) - 1);
+        for (j = 0; j < m; j++) {
+            uint64_t M = lev__peq_row(&peq, t[j])[0];
+            uint64_t U = S1 & M;
+            S1 = (S1 + U) | (S1 & ~M);
+        }
+        return (long long)n - lev__popcount64(S1 & valid);
+    }
+    /* Fixed-count instances up to 512 codepoints; the general loop
+     * carries the tail beyond them. */
+    {
+        uint64_t valid = rem == 64 ? ~(uint64_t)0 : (((uint64_t)1 << rem) - 1);
+        switch (blocks) {
+        case 2: return lev__lcs_fx2(&peq, t, m, n, valid);
+        case 3: return lev__lcs_fx3(&peq, t, m, n, valid);
+        case 4: return lev__lcs_fx4(&peq, t, m, n, valid);
+        case 5: return lev__lcs_fx5(&peq, t, m, n, valid);
+        case 6: return lev__lcs_fx6(&peq, t, m, n, valid);
+        case 7: return lev__lcs_fx7(&peq, t, m, n, valid);
+        case 8: return lev__lcs_fx8(&peq, t, m, n, valid);
+        default: break;
+        }
+    }
+    S = cc_arena_alloc_T_count(uint64_t, ar, blocks);
+    if (!S) return -1;
+    for (b = 0; b < blocks; b++) S[b] = ~(uint64_t)0;
+    for (j = 0; j < m; j++) {
+        const uint64_t *eq = lev__peq_row(&peq, t[j]);
+        uint64_t carry = 0;
+        for (b = 0; b < blocks; b++) {
+            uint64_t M = eq[b], Sb = S[b];
+            uint64_t U = Sb & M;
+            uint64_t x = Sb + U;
+            uint64_t c1 = (x < Sb) ? 1 : 0;
+            uint64_t x2 = x + carry;
+            uint64_t c2 = (x2 < x) ? 1 : 0;
+            carry = c1 | c2;
+            S[b] = x2 | (Sb & ~M);
+        }
+    }
+    for (b = 0; b + 1 < blocks; b++) ones += lev__popcount64(S[b]);
+    ones += lev__popcount64(S[blocks - 1] &
+                            (rem == 64 ? ~(uint64_t)0
+                                       : (((uint64_t)1 << rem) - 1)));
+    return (long long)n - ones;
+}
+
+/* One distance door for the methods: the DP carries small inputs (the
+ * bit kernels' hash setup costs more than the whole DP down there), the
+ * kernels carry the rest.  Same answers by construction — parity.py
+ * sweeps both sides of this threshold against upstream. */
+#define LEV__BITS_MIN 8
+
+static long long lev__dist(CCArena *ar, const uint32_t *s, size_t n,
+                           const uint32_t *t, size_t m, long long sub) {
+    long long l;
+    if ((n < m ? n : m) <= LEV__BITS_MIN) return lev__dp(ar, s, n, t, m, sub);
+    if (sub == 1) return lev__dist_bits(ar, s, n, t, m);
+    l = lev__lcs_bits(ar, s, n, t, m);
+    if (l < 0) return -1;
+    return (long long)(n + m) - 2 * l;
+}
+
 static long long !>(CCError) Lev_distance(Lev *self, CCSlice s1, CCSlice s2) {
     uint32_t *a, *b; size_t n, m;
     if (lev__prep(self, s1, s2, &a, &n, &b, &m) != 0)
         return cc_err(CC_ERR_OUT_OF_MEMORY, "levenshtein: scratch arena exhausted");
-    long long d = lev__dp(&self->a, a, n, b, m, 1);
+    long long d = lev__dist(&self->a, a, n, b, m, 1);
     if (d < 0) return cc_err(CC_ERR_OUT_OF_MEMORY, "levenshtein: scratch arena exhausted");
     return cc_ok(d);
 }
@@ -102,7 +408,7 @@ static double !>(CCError) Lev_ratio(Lev *self, CCSlice s1, CCSlice s2) {
     if (lev__prep(self, s1, s2, &a, &n, &b, &m) != 0)
         return cc_err(CC_ERR_OUT_OF_MEMORY, "levenshtein: scratch arena exhausted");
     if (n + m == 0) return cc_ok(1.0);
-    long long d = lev__dp(&self->a, a, n, b, m, 2);
+    long long d = lev__dist(&self->a, a, n, b, m, 2);
     if (d < 0) return cc_err(CC_ERR_OUT_OF_MEMORY, "levenshtein: scratch arena exhausted");
     return cc_ok((double)((long long)(n + m) - d) / (double)(n + m));
 }

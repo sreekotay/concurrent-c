@@ -11,8 +11,9 @@ ccc run file.ccs                    # build + run (shorthand)
 ccc build run file.ccs              # same, explicit
 ccc build run file.ccs -- --arg     # pass args to binary
 ccc --emit-c-only file.ccs          # emit C only → out/file.c
-ccc build -O file.ccs               # release build
-ccc build -g file.ccs               # debug build
+ccc build -O file.ccs               # release build (-O2 -DNDEBUG)
+ccc build -g file.ccs               # debug build (-O0 -g)
+                                    # default: -O2, asserts kept
 ```
 
 ---

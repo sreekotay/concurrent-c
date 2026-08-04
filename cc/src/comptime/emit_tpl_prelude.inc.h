@@ -151,8 +151,10 @@
     "   out-of-range index reports the factory, the index and the arity, then\n" \
     "   yields the empty fragment so the caller's factory-failed diagnostic\n" \
     "   names the instance.  Never exit(): a factory body can run in-process\n" \
-    "   under the libtcc executor.  Defined only in compiled-factory TUs\n" \
-    "   (CC_COMPTIME_EXEC), never in @comptime block TUs. */\n" \
+    "   under the libtcc executor.  Defined under CC_COMPTIME_EXEC: set by\n" \
+    "   compiled-factory TUs, and by block/eval TUs whose registry defs\n" \
+    "   carry a factory body along (its arg() calls need the sugar even\n" \
+    "   when the block itself never touches it). */\n" \
     "static CCSlice cc__tpl_arg(CCSliceArray ta, long i, CCSlice gname) {\n" \
     "  if (i < 0 || (unsigned long)i >= (unsigned long)ta.len) {\n" \
     "    char m[256];\n" \

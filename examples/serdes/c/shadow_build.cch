@@ -259,8 +259,8 @@ static uint64_t shadow_obj_cache_key(uint64_t emit_key, const char* host_cc) {
     }
     h = shadow_fnv1a64_str(h, getenv("CFLAGS"));
     h = shadow_fnv1a64_str(h, getenv("CPPFLAGS"));
-    /* Match ccc user-TU flag shape (no -O2 by default). */
-    h = shadow_fnv1a64_str(h, "-ffunction-sections-fdata-sections");
+    /* Match ccc user-TU flag shape (flavor comes via forwarded cc_flags). */
+    h = shadow_fnv1a64_str(h, "-std=c11-D_DEFAULT_SOURCE-ffunction-sections-fdata-sections");
     return h;
 }
 
@@ -281,7 +281,10 @@ typedef struct {
 
 static ShadowHostOpts g_shadow_host_opts;
 
-/* Run host cc -c with ccc-compatible flags (no -O2). Returns 0 on success. */
+/* Run host cc -c with ccc-compatible flags. -D_DEFAULT_SOURCE keeps POSIX
+ * decls visible under -std=c11 on glibc (usleep/mkstemp/fdopen) while
+ * -Werror=implicit-function-declaration stays on. Flavor (-O2/-g/NDEBUG)
+ * arrives via forwarded cc_flags / opt_release / opt_debug. */
 static int shadow_host_compile(const char* c_path, const char* o_path) {
     char cmd[8192];
     const char* cc = shadow_host_cc();
@@ -291,7 +294,7 @@ static int shadow_host_compile(const char* c_path, const char* o_path) {
     const char* debug = g_shadow_host_opts.opt_debug ? "-g" : "";
     int n;
     n = snprintf(cmd, sizeof(cmd),
-                 "%s -std=c11"
+                 "%s -std=c11 -D_DEFAULT_SOURCE"
                  " -Iout/include -Icc/include -Icc -I. -Iexamples"
                  " -DCC_ENABLE_XJB_FLOAT_FMT=1"
                  " -ffunction-sections -fdata-sections"

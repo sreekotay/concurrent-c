@@ -72,6 +72,14 @@ def main():
             a = "".join(rng.choice(alphabet) for _ in range(n))
             b = "".join(rng.choice(alphabet) for _ in range(m))
             pairs.append((a, b))
+        # Long pairs: cross the bit kernels' 64-codepoint block boundary
+        # (and the scalar/bit dispatch threshold) in every alphabet.
+        for _ in range(40):
+            n = rng.randrange(0, 250)
+            m = rng.randrange(0, 250)
+            a = "".join(rng.choice(alphabet) for _ in range(n))
+            b = "".join(rng.choice(alphabet) for _ in range(m))
+            pairs.append((a, b))
 
     for a, b in pairs:
         for name, tol in FUNCS:

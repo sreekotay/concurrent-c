@@ -96,7 +96,8 @@ The build parser implements:
 - `-O` or `--release`: add `-O2 -DNDEBUG` and enable supported section dead-stripping.
 - `-g` or `--debug`: add `-O0 -g`.
 
-If both flavor flags are present, debug wins. The driver honors `CC`, `CFLAGS`, `CPPFLAGS`, `LDFLAGS`, and the runtime build's applicable C++ flags. `--cc-bin` overrides `CC`; otherwise the driver selects an available `cc`, `gcc`, or `clang`.
+With neither flag, the driver adds `-O2` (asserts kept). If both flavor
+flags are present, debug wins. The driver honors `CC`, `CFLAGS`, `CPPFLAGS`, `LDFLAGS`, and the runtime build's applicable C++ flags. `--cc-bin` overrides `CC`; otherwise the driver selects an available `cc`, `gcc`, or `clang`.
 
 The bundled runtime is linked unless `--no-runtime` is present. The driver may reuse a compatible runtime object or build one under the output directory.
 

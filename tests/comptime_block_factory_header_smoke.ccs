@@ -1,0 +1,24 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/script/py.cch>
+#include <stdio.h>
+
+/* A @comptime block in a TU whose includes carry generic factories:
+ * the block TU sweeps every registered @comptime fn in, py.cch's
+ * factory bodies among them, and their arg() sugar must ride along
+ * (CC_COMPTIME_EXEC) even though the block itself never touches it.
+ * Without that, this file dies with "implicit declaration of function
+ * 'arg'" inside header code the user never wrote.  The site anchor is
+ * exercised too: the emitted function lands here, after `base`, and
+ * may call it. */
+static int base(void) { return 40; }
+
+@comptime {
+    for (int k = 2; k <= 2; k++)
+        cc_emit_format(CC_EMIT_AT_COMPTIME_SITE,
+                       "static int gen_two(void) { return base() + %d; }\n", k);
+}
+
+int main(void) {
+    printf("comptime_block_factory_header ok %d\n", gen_two());
+    return 0;
+}
