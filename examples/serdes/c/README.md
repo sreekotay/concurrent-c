@@ -25,6 +25,11 @@ ccc --frontend=legacy examples/hello.ccs -o /tmp/hello
 cache under `out/.cc-build/serdes/`, or `--exe` (libtcc from the emit buffer).
 Succession metric is **warm host-cc rebuild parity**, not libtcc-vs-clang.
 
+Bootstrap snapshots (deliberate freezes of lowered C + local headers) live
+under `cc/bootstrap/shadow_lower/` — see that README. Scratch emit → `latest/`;
+promote to `vN` when you choose to commit. Optional:
+`make -C cc shadow_lower-from-bootstrap`.
+
 Not a project to write a full C parser
 ([ARCHITECTURE NG-1](../../cc/docs/ARCHITECTURE.md): we *emit* C; host/TCC
 *consume* it).

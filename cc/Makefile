@@ -361,6 +361,30 @@ $(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_COMPTIM
 	@cp $@ $(SHADOW_LOWER_SCRIPT)
 	@chmod +x $(SHADOW_LOWER_SCRIPT)
 
+# Optional stage-0: host-cc the promoted bootstrap snapshot (no .ccs lower).
+# Does not replace the default $(SHADOW_LOWER_WRAPPER) rule — promote via
+# scripts/snapshot_shadow_lower.sh + scripts/promote_shadow_bootstrap.sh.
+BOOTSTRAP_ROOT := bootstrap/shadow_lower
+BOOTSTRAP_VER := $(shell cat $(BOOTSTRAP_ROOT)/last-good 2>/dev/null)
+BOOTSTRAP_DIR := $(BOOTSTRAP_ROOT)/$(BOOTSTRAP_VER)
+.PHONY: shadow_lower-from-bootstrap
+shadow_lower-from-bootstrap: $(SHADOW_TCC_OBJ) $(SHADOW_COMPTIME_LIB) $(TCC_LIB_DEP) \
+	$(OBJDIR)/runtime/concurrent_c.o $(LOWER_HEADERS_STAMP)
+	@test -n "$(BOOTSTRAP_VER)" || (echo "missing $(BOOTSTRAP_ROOT)/last-good"; exit 1)
+	@test -f "$(BOOTSTRAP_DIR)/shadow_lower.c" || \
+		(echo "missing $(BOOTSTRAP_DIR)/shadow_lower.c"; exit 1)
+	@mkdir -p $(dir $(SHADOW_LOWER_WRAPPER))
+	$(CC) $(CFLAGS) -o $(SHADOW_LOWER_WRAPPER) $(BOOTSTRAP_DIR)/shadow_lower.c \
+		-I$(BOOTSTRAP_DIR)/include -Iinclude -I../out/include \
+		-I../examples/serdes/c -I$(TCC_INC) -DSHADOW_HAVE_LIBTCC=1 \
+		$(abspath $(SHADOW_TCC_OBJ)) $(abspath $(SHADOW_COMPTIME_LIB)) \
+		$(abspath $(OBJDIR)/runtime/concurrent_c.o) \
+		-L$(TCC_LIB) -ltcc $(LDFLAGS) $(LDLIBS)
+	@mkdir -p $(dir $(SHADOW_LOWER_SCRIPT))
+	@cp $(SHADOW_LOWER_WRAPPER) $(SHADOW_LOWER_SCRIPT)
+	@chmod +x $(SHADOW_LOWER_SCRIPT)
+	@echo "built $(SHADOW_LOWER_WRAPPER) from bootstrap $(BOOTSTRAP_VER)"
+
 # Dev fallback wrapper (ccc run) — not installed as the primary CLI.
 $(SHADOW_LOWER_SCRIPT).sh: $(SHADOW_LOWER_TEMPLATE)
 	@mkdir -p $(dir $@)
