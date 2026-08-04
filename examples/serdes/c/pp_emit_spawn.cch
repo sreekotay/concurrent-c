@@ -638,19 +638,14 @@ static int shadow_emit_closure_def(AstNode* cl, CEmit* out, TapeCache* cache) {
     else
         snprintf(entry_sig, sizeof(entry_sig), "void* __p");
 
-    if (!cemit_fmt(out, "\n/* CC closure %s */\n", id)) return 0;
-
     if (!caps || !caps[0]) {
         if (arity == 0) {
-            if (!cemit_fmt(out,
-                    "static CCClosure0 cc_closure__N%s_make(void) {\n"
-                    "    return cc_closure0_make(cc_closure__N%s_entry, NULL, NULL);\n"
-                    "}\n"
-                    "static void* cc_closure__N%s_entry(void* __p) {\n"
-                    "    (void)__p;\n",
-                    id, id, id))
+            ShadowTplBind cenv[1];
+            cenv[0] = (ShadowTplBind){ "id", SHADOW_TPL_IDENT, id };
+            if (!shadow_tpl_emit(out, k_tpl_closure0_nocaps, cenv, 1))
                 return 0;
         } else {
+            if (!cemit_fmt(out, "\n/* CC closure %s */\n", id)) return 0;
             if (!cemit_fmt(out,
                     "static %s cc_closure__N%s_make(void) {\n"
                     "    return %s(cc_closure__N%s_entry, NULL, NULL);\n"
@@ -665,6 +660,7 @@ static int shadow_emit_closure_def(AstNode* cl, CEmit* out, TapeCache* cache) {
         return cemit_str(out, "    return NULL;\n}\n");
     }
 
+    if (!cemit_fmt(out, "\n/* CC closure %s */\n", id)) return 0;
     /* env struct */
     if (!cemit_fmt(out, "typedef struct cc_closure__N%s_env {\n", id)) return 0;
     {
