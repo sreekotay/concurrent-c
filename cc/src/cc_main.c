@@ -748,6 +748,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --out-stem NAME     Override the basename/stem used for generated files\n");
     fprintf(stderr, "  --no-cache          Disable incremental cache (also: CC_NO_CACHE=1)\n");
     fprintf(stderr, "  --frontend=serdes|legacy  Front end (default serdes; also: CC_FRONTEND)\n");
+    fprintf(stderr, "  --version, --v, -V  Print version (serdes 0.2.x; legacy 0.1.x)\n");
     fprintf(stderr, "  --timeout SECONDS   Kill run/test step after timeout\n");
     fprintf(stderr, "  --verbose           Print invoked commands\n");
     fprintf(stderr, "One-liners:\n");
@@ -2286,6 +2287,10 @@ static void cc__print_comptime_state(const CCBuildOptions* opt, const char* buil
  * -1 = unset (env/default), 0 = legacy, 1 = serdes. */
 static int g_frontend_serdes = -1;
 
+/* Legacy front stays on 0.1.x; serdes (default) is 0.2.x. */
+#define CCC_VERSION_LEGACY "0.1.0-dev"
+#define CCC_VERSION_SERDES "0.2.0-dev"
+
 static int cc__want_serdes_front(void) {
     if (g_frontend_serdes == 1) return 1;
     if (g_frontend_serdes == 0) return 0;
@@ -2295,6 +2300,38 @@ static int cc__want_serdes_front(void) {
         if (e && strcmp(e, "serdes") == 0) return 1;
     }
     return 1; /* default: serdes */
+}
+
+static const char* cc__version_string(void) {
+    return cc__want_serdes_front() ? CCC_VERSION_SERDES : CCC_VERSION_LEGACY;
+}
+
+static void cc__print_version(void) {
+    printf("ccc %s\n", cc__version_string());
+}
+
+static int cc__arg_is_version(const char* a) {
+    return a && (strcmp(a, "--version") == 0 || strcmp(a, "--v") == 0 ||
+                 strcmp(a, "-V") == 0);
+}
+
+/* Light scan so `ccc --frontend=legacy --version` reports 0.1.x. */
+static void cc__scan_frontend_flags(int argc, char** argv) {
+    int i;
+    for (i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--frontend") == 0) {
+            if (i + 1 >= argc) continue;
+            i++;
+            if (strcmp(argv[i], "serdes") == 0) g_frontend_serdes = 1;
+            else if (strcmp(argv[i], "legacy") == 0) g_frontend_serdes = 0;
+            continue;
+        }
+        if (strncmp(argv[i], "--frontend=", 11) == 0) {
+            const char* v = argv[i] + 11;
+            if (strcmp(v, "serdes") == 0) g_frontend_serdes = 1;
+            else if (strcmp(v, "legacy") == 0) g_frontend_serdes = 0;
+        }
+    }
 }
 
 static int cc__ends_with_ci(const char* s, const char* suf) {
@@ -5160,21 +5197,32 @@ int main(int argc, char **argv) {
             cc_diag_set_show_lowered_phase(arg + 15);
         }
     }
-    if (argc >= 2 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)) {
+    if (argc < 2) {
+        cc__print_version();
+        return 0;
+    }
+    if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
         usage(argv[0]);
         return 0;
     }
-    if (argc >= 2 && strcmp(argv[1], "--print-cflags") == 0) {
+    if (strcmp(argv[1], "--print-cflags") == 0) {
         printf("-I%s -I%s\n", g_cc_lowered_include, g_cc_include);
         return 0;
     }
-    if (argc >= 2 && strcmp(argv[1], "--print-libs") == 0) {
+    if (strcmp(argv[1], "--print-libs") == 0) {
         printf("%s -lpthread\n", g_cc_runtime_c);
         return 0;
     }
-    if (argc >= 2 && (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-V") == 0)) {
-        printf("ccc 0.1.0-dev\n");
-        return 0;
+    /* Version may appear with --frontend=… ahead of it; scan once. */
+    cc__scan_frontend_flags(argc, argv);
+    {
+        int vi;
+        for (vi = 1; vi < argc; vi++) {
+            if (cc__arg_is_version(argv[vi])) {
+                cc__print_version();
+                return 0;
+            }
+        }
     }
     /* D3.0: hidden self-test for the in-process constexpr seam.
      *   ccc __eval-const "<expr>" ["<prelude>"]   -> prints "<int64>" or "NONCONST"
@@ -5579,6 +5627,8 @@ int main(int argc, char **argv) {
     if (opt_release && opt_debug) opt_release = 0;
 
     if (pos_count == 0) {
+        /* Flags-only (e.g. already-handled --version) should not reach here;
+         * bare `ccc` is handled at startup. Remaining empty positionals → help. */
         usage(argv[0]);
         return 1;
     }

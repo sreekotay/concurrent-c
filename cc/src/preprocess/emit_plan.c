@@ -1873,12 +1873,22 @@ static size_t cc__emit_resolve_anchor_pos(CCEmitAnchor anchor, size_t site_pos,
             pos = (size_t)(hit - src);
             while (pos > 0 && src[pos - 1] != '\n') pos--;
         } else {
-            pos = cc__emit_find_logical_line(src, len, input_path, site_line,
-                                             site_pos);
+            /* No marker in this buffer. Legacy keeps harvested header
+             * `@comptime` markers via parse-input append; serdes emits from a
+             * stage1 buffer that never saw that append, so header sites
+             * (static_map in .cch) have nothing to aim at. Searching
+             * `site_line` against the TU path is wrong when the line came from
+             * a `#line` in a harvested header — e.g. pp_stage2.cch:41 colliding
+             * with shadow_lower.ccs:41 and landing *before* umbrella includes
+             * that declare PpDirSpec. Match legacy harvest-append: EOF. */
+            (void)site_line;
+            (void)site_pos;
+            (void)input_path;
+            pos = len;
         }
-        /* Serdes blanks `@comptime` without a marker; the logical-line
-         * fallback can land inside the preceding block-comment lead. Splice
-         * after the closer so wrappers are live host C, not comment text. */
+        /* Marker hit can still land inside a preceding block-comment lead
+         * (serdes layout). Splice after the closer so wrappers are live host C,
+         * not comment text. */
         if (!src || !len) return pos;
         for (k = 0; k < pos && k < len; k++) {
             if (!in_block && src[k] == '/' && k + 1 < len && src[k + 1] == '*') {

@@ -41,5 +41,6 @@ make -C cc shadow_lower-from-ccs
 ```
 
 Serdes can parse/emit `shadow_lower.ccs` (umbrella `.cch` passthrough + growable
-stage2 buffer). A host-cc-clean serdes self-emit still needs static_map fragment
-ordering vs umbrella `#include`s — use `--legacy` for `vN` until that lands.
+stage2 buffer). Header `static_map` fragments splice at EOF when markers are
+absent (after grammar + umbrella `#include`s). Prefer a serdes snapshot once
+`scripts/snapshot_shadow_lower.sh --smoke` is green; `--legacy` remains valid.
