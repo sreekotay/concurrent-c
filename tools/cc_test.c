@@ -712,9 +712,12 @@ static int run_one_test(const char* stem,
     }
 
     /* 1) Build via ccc build (this is the build system under test).
-     * Opt-in SERDES front: CC_TEST_FRONTEND=serdes or CC_FRONTEND=serdes. */
+     * Opt-in SERDES front: CC_TEST_FRONTEND=serdes or CC_FRONTEND=serdes.
+     * Pinning build diagnostics requires a cold parse — warm emit cache
+     * skips shadow_lower and would silently drop .build_stderr matches. */
     char build_cmd[3072];
-    const char* cache_flag = use_cache ? "" : "--no-cache ";
+    int cold_for_diags = (exp_build_stderr && exp_build_stderr_len > 0);
+    const char* cache_flag = (use_cache && !cold_for_diags) ? "" : "--no-cache ";
     const char* front_flag = "";
     {
         const char* fe = getenv("CC_TEST_FRONTEND");

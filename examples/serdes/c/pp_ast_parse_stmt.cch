@@ -655,22 +655,123 @@ static AstNode* parse_chan_var(Parser* p) {
     return n;
 }
 
+/* Track Result ok-type const-ness so sharing one box across `const T*` /
+ * `T*` is not silent (result_type_canonical_smoke). */
+static char g_shadow_rq_name[16][96];
+static unsigned g_shadow_rq_qual[16];
+static int g_shadow_rq_line[16];
+static int g_shadow_nrq;
+
+static void shadow_result_note_ok_qual(Parser* p, Token at, const char* okty,
+                                      const char* errty, int had_const) {
+    char mok[64], merr[64], concrete[160];
+    unsigned quals = had_const ? 1u : 0u;
+    int i, line = 1, col = 1;
+    size_t j, k;
+    if (!okty || !errty) return;
+    /* Local mangle: spaces→_, *→ptr (matches shadow_mangle_type). */
+    j = 0;
+    for (k = 0; okty[k] && j + 1 < sizeof(mok); k++) {
+        char c = okty[k];
+        if (c == ' ' || c == '\t') {
+            if (j && mok[j - 1] != '_') mok[j++] = '_';
+        } else if (c == '*') {
+            if (j + 3 < sizeof(mok) - 1) {
+                mok[j++] = 'p';
+                mok[j++] = 't';
+                mok[j++] = 'r';
+            }
+        } else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                   (c >= '0' && c <= '9') || c == '_')
+            mok[j++] = c;
+    }
+    mok[j] = 0;
+    j = 0;
+    for (k = 0; errty[k] && j + 1 < sizeof(merr); k++) {
+        char c = errty[k];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '_')
+            merr[j++] = c;
+    }
+    merr[j] = 0;
+    snprintf(concrete, sizeof(concrete), "CCResult_%s_%s", mok, merr);
+    for (i = 0; i < g_shadow_nrq; i++) {
+        if (strcmp(g_shadow_rq_name[i], concrete) != 0) continue;
+        if (g_shadow_rq_qual[i] == quals) return;
+        {
+            FileTape* ft =
+                (p && p->cache) ? tape_by_id(p->cache, at.file_id) : NULL;
+            const char* path = (ft && ft->path) ? ft->path : "<input>";
+            const char* tests = strstr(path, "tests/");
+            if (ft && ft->bytes)
+                offset_to_linecol(ft->bytes, ft->len, at.offset, &line, &col);
+            fprintf(stderr,
+                    "%s:%d:%d: warning: type: '%s' is declared with a %s "
+                    "ok type here and a %s one at line %d; qualifiers are "
+                    "not part of a box's identity, so both share one box "
+                    "and the first spelling wins\n",
+                    tests ? tests : path, line, col, concrete,
+                    quals ? "const" : "unqualified",
+                    g_shadow_rq_qual[i] ? "const" : "unqualified",
+                    g_shadow_rq_line[i]);
+        }
+        return;
+    }
+    if (g_shadow_nrq < 16) {
+        FileTape* ft =
+            (p && p->cache) ? tape_by_id(p->cache, at.file_id) : NULL;
+        if (ft && ft->bytes)
+            offset_to_linecol(ft->bytes, ft->len, at.offset, &line, &col);
+        snprintf(g_shadow_rq_name[g_shadow_nrq],
+                 sizeof(g_shadow_rq_name[0]), "%s", concrete);
+        g_shadow_rq_qual[g_shadow_nrq] = quals;
+        g_shadow_rq_line[g_shadow_nrq] = line;
+        g_shadow_nrq++;
+    }
+}
+
 /* Ok!>Err or Ok!>(Err) Name ( params ) ;|{ body } */
 static AstNode* parse_result_fn(Parser* p) {
     unsigned decl_attrs = 0;
+    int ty0, ty1;
+    char okty[96];
+    int had_const = 0;
+    int specs0 = p->i;
+    int j;
+    /* Callers may already have consumed `static`/`const` (parse_external
+     * static+result path). Look back before skipping remaining specs. */
+    for (j = p->i - 1; j >= 0 && j >= p->i - 6; j--) {
+        Token t = p->toks[j];
+        if (shadow_kw(t) == SHADOW_KW_CONST) {
+            had_const = 1;
+            break;
+        }
+        if (shadow_is_cc_storage_kw(t)) continue;
+        break;
+    }
     shadow_parser_skip_decl_specs(p, &decl_attrs);
+    for (j = specs0; j < p->i; j++) {
+        if (shadow_kw(p->toks[j]) == SHADOW_KW_CONST) {
+            had_const = 1;
+            break;
+        }
+    }
     if (!peek_result_shape(p)) return NULL;
     if (p->i + 6 >= p->n) return NULL;
-    Token ok = p_next(p);
-    char okty[64];
-    slice_to(okty, sizeof(okty), ok.spell);
-    /* `long long` ok-type (mangle → long_long). */
-    if (strcmp(okty, "long") == 0 && p_peek(p).kind == TK_IDENT &&
-        spell_eq(p_peek(p).spell, "long")) {
-        p_next(p);
-        snprintf(okty, sizeof(okty), "long long");
+    ty0 = p->i;
+    ty1 = peek_c_int_type_end(p, ty0);
+    if (ty1 > ty0) {
+        if (!ast_spell_token_range(p, ty0, ty1, okty, sizeof(okty)) &&
+            !span_text(p, ty0, ty1, okty, sizeof(okty))) {
+            parser_fail(p, p_peek(p), "result ok-type too long");
+            return NULL;
+        }
+        while (p->i < ty1) p_next(p);
+    } else {
+        Token ok = p_next(p);
+        slice_to(okty, sizeof(okty), ok.spell);
     }
-    if (tok_eq(p_peek(p), TK_PUNCT, "*")) {
+    while (tok_eq(p_peek(p), TK_PUNCT, "*")) {
         p_next(p);
         {
             size_t al = strlen(okty);
@@ -704,6 +805,11 @@ static AstNode* parse_result_fn(Parser* p) {
     if (name.kind != TK_IDENT) {
         parser_fail(p, name, "expected function name after result type");
         return NULL;
+    }
+    {
+        char errty[64];
+        slice_to(errty, sizeof(errty), err.spell);
+        shadow_result_note_ok_qual(p, name, okty, errty, had_const);
     }
     if (!p_accept(p, TK_PUNCT, "(")) { parser_fail(p, p_peek(p), "expected '('"); return NULL; }
     char param_ty[256] = {0};
@@ -2371,9 +2477,10 @@ static AstNode* parse_assign_stmt(Parser* p) {
             depth++;
         else if (tok_eq(t, TK_PUNCT, ")") || tok_eq(t, TK_PUNCT, "]") || tok_eq(t, TK_PUNCT, "}"))
             depth--;
-        else if (depth == 0 &&
+        else if (depth == 0 && eq < 0 &&
                  (tok_eq(t, TK_PUNCT, "!>") || tok_eq(t, TK_PUNCT, "?>"))) {
-            return NULL; /* stmt/var unwrap owns this form */
+            /* Bare / lhs unwrap forms — var_unwrap / stmt_unwrap own them. */
+            return NULL;
         } else if (depth == 0 && eq < 0 &&
                  (tok_eq(t, TK_PUNCT, "=") || tok_eq(t, TK_PUNCT, "+=") ||
                   tok_eq(t, TK_PUNCT, "-=") || tok_eq(t, TK_PUNCT, "*=") ||
@@ -2385,6 +2492,7 @@ static AstNode* parse_assign_stmt(Parser* p) {
         } else if (depth == 0 && tok_eq(t, TK_PUNCT, ";")) {
             break;
         }
+        /* After `=`: Form-P `sum += f() !>;` — keep scanning; emit rewrites. */
         j++;
     }
     if (eq < 0 || j >= p->n || !tok_eq(p->toks[j], TK_PUNCT, ";")) return NULL;
@@ -2397,7 +2505,7 @@ static AstNode* parse_assign_stmt(Parser* p) {
     if (!span_text(p, l0, eq, lhs, sizeof(lhs))) return NULL;
     Token op = p_next(p); /* = or += … */
     int r0 = p->i;
-    char rhs[288];
+    char rhs[2048];
     AstNode* cl = NULL;
     int had_cl = parse_call_arg_closure(p, r0, j, rhs, sizeof(rhs), "callarg",
                                         &cl);

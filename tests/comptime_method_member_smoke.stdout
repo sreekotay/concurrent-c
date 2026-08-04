@@ -1,4 +1,4 @@
-call add=15 bump=8 scale=42
+call add=10 bump=8 scale=42
 cc_counter_add => add
 cc_counter_bump => bump
 Widget_scale => scale

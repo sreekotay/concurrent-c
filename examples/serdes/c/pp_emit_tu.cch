@@ -893,92 +893,10 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                         }
                     }
                 }
-                if (tpl) {
-                    int frag_line = 0;
-                    char verr[256];
-                    const char* path_base = path;
-                    const char* slash;
-                    int oob_arg = -1;
-                    int irc;
-                    if (fi < g_shadow_ngfac && !g_shadow_gfac[fi].has_base) {
-                        const char* tests = path ? strstr(path, "tests/") : NULL;
-                        const char* pb = tests ? tests : path;
-                        slash = pb ? strrchr(pb, '/') : NULL;
-                        if (!tests && slash && slash[1]) pb = slash + 1;
-                        fprintf(stderr,
-                                "%s:%d:%d: error: type: compiled generic "
-                                "factory '%s' failed to compile: generic '%s' "
-                                "is extended but never defined (needs "
-                                "CC_GENERIC_FACTORY(%s) or "
-                                "cc_generic_register)\n",
-                                pb && pb[0] ? pb : "<input>", use_line,
-                                use_col, inst->family, inst->family,
-                                inst->family);
-                        out->err = 1;
-                        return 0;
-                    }
-                    irc = shadow_inst_generic_tpl(tpl, inst->mangled, args,
-                                                  nargs, body, sizeof(body),
-                                                  &oob_arg);
-                    if (irc < 0) {
-                        const char* tests = path ? strstr(path, "tests/") : NULL;
-                        const char* pb = tests ? tests : path;
-                        slash = pb ? strrchr(pb, '/') : NULL;
-                        if (!tests && slash && slash[1]) pb = slash + 1;
-                        fprintf(stderr,
-                                "%s:%d: error: factory '%s': arg(%d) is out of "
-                                "range (%d type argument%s)\n",
-                                pb && pb[0] ? pb : "<input>", use_line,
-                                inst->family, oob_arg, nargs,
-                                nargs == 1 ? "" : "s");
-                        out->err = 1;
-                        return 0;
-                    }
-                    if (irc == 0) {
-                        fprintf(stderr,
-                                "error: generic instantiate failed for %s\n",
-                                inst->mangled);
-                        out->err = 1;
-                        return 0;
-                    }
-                    if (cc_comptime_validate_c_fragment(body, &frag_line, verr,
-                                                        sizeof(verr)) != 0) {
-                        slash = path_base ? strrchr(path_base, '/') : NULL;
-                        if (slash && slash[1]) path_base = slash + 1;
-                        fprintf(stderr,
-                                "%s:%d:%d: error: type: compiled generic "
-                                "factory '%s' produced invalid C for '%s'\n",
-                                path_base && path_base[0] ? path_base
-                                                          : "<input>",
-                                use_line, use_col, inst->family,
-                                inst->mangled);
-                        if (frag_line > 0)
-                            fprintf(stderr,
-                                    "note: in generated definition, line %d\n",
-                                    frag_line);
-                        if (body[0]) {
-                            const char* nl = strchr(body, '\n');
-                            fprintf(stderr, ">    %d | %.*s\n",
-                                    frag_line > 0 ? frag_line : 1,
-                                    nl ? (int)(nl - body) : (int)strlen(body),
-                                    body);
-                        }
-                        fprintf(stderr,
-                                "note: re-run with --emit-c-inspect to dump "
-                                "the full translation unit\n");
-                        if (fi < g_shadow_ngfac &&
-                            g_shadow_gfac[fi].origin_file[0]) {
-                            fprintf(stderr,
-                                    "note: in @comptime factory "
-                                    "'__cc_gfac_%s' at %s:%d\n",
-                                    inst->family,
-                                    g_shadow_gfac[fi].origin_file,
-                                    g_shadow_gfac[fi].origin_line);
-                        }
-                        out->err = 1;
-                        return 0;
-                    }
-                } else if (cc_emit_plan_has_generic_factory(inst->family)) {
+                /* Prefer the compiled/registered factory when present.
+                 * Textual tpl extraction only sees the first `@emit(\`…\`)`
+                 * and cannot expand runtime slots like `${nm}` / `${box}`. */
+                if (cc_emit_plan_has_generic_factory(inst->family)) {
                     char err[512];
                     size_t rlen = root ? root->len : 0;
                     int frag_line = 0;
@@ -1069,6 +987,91 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                                         g_shadow_gfac[fi].origin_file,
                                         g_shadow_gfac[fi].origin_line);
                             }
+                        }
+                        out->err = 1;
+                        return 0;
+                    }
+                } else if (tpl) {
+                    int frag_line = 0;
+                    char verr[256];
+                    const char* path_base = path;
+                    const char* slash;
+                    int oob_arg = -1;
+                    int irc;
+                    if (fi < g_shadow_ngfac && !g_shadow_gfac[fi].has_base) {
+                        const char* tests = path ? strstr(path, "tests/") : NULL;
+                        const char* pb = tests ? tests : path;
+                        slash = pb ? strrchr(pb, '/') : NULL;
+                        if (!tests && slash && slash[1]) pb = slash + 1;
+                        fprintf(stderr,
+                                "%s:%d:%d: error: type: compiled generic "
+                                "factory '%s' failed to compile: generic '%s' "
+                                "is extended but never defined (needs "
+                                "CC_GENERIC_FACTORY(%s) or "
+                                "cc_generic_register)\n",
+                                pb && pb[0] ? pb : "<input>", use_line,
+                                use_col, inst->family, inst->family,
+                                inst->family);
+                        out->err = 1;
+                        return 0;
+                    }
+                    irc = shadow_inst_generic_tpl(tpl, inst->mangled, args,
+                                                  nargs, body, sizeof(body),
+                                                  &oob_arg);
+                    if (irc < 0) {
+                        const char* tests = path ? strstr(path, "tests/") : NULL;
+                        const char* pb = tests ? tests : path;
+                        slash = pb ? strrchr(pb, '/') : NULL;
+                        if (!tests && slash && slash[1]) pb = slash + 1;
+                        fprintf(stderr,
+                                "%s:%d: error: factory '%s': arg(%d) is out of "
+                                "range (%d type argument%s)\n",
+                                pb && pb[0] ? pb : "<input>", use_line,
+                                inst->family, oob_arg, nargs,
+                                nargs == 1 ? "" : "s");
+                        out->err = 1;
+                        return 0;
+                    }
+                    if (irc == 0) {
+                        fprintf(stderr,
+                                "error: generic instantiate failed for %s\n",
+                                inst->mangled);
+                        out->err = 1;
+                        return 0;
+                    }
+                    if (cc_comptime_validate_c_fragment(body, &frag_line, verr,
+                                                        sizeof(verr)) != 0) {
+                        slash = path_base ? strrchr(path_base, '/') : NULL;
+                        if (slash && slash[1]) path_base = slash + 1;
+                        fprintf(stderr,
+                                "%s:%d:%d: error: type: compiled generic "
+                                "factory '%s' produced invalid C for '%s'\n",
+                                path_base && path_base[0] ? path_base
+                                                          : "<input>",
+                                use_line, use_col, inst->family,
+                                inst->mangled);
+                        if (frag_line > 0)
+                            fprintf(stderr,
+                                    "note: in generated definition, line %d\n",
+                                    frag_line);
+                        if (body[0]) {
+                            const char* nl = strchr(body, '\n');
+                            fprintf(stderr, ">    %d | %.*s\n",
+                                    frag_line > 0 ? frag_line : 1,
+                                    nl ? (int)(nl - body) : (int)strlen(body),
+                                    body);
+                        }
+                        fprintf(stderr,
+                                "note: re-run with --emit-c-inspect to dump "
+                                "the full translation unit\n");
+                        if (fi < g_shadow_ngfac &&
+                            g_shadow_gfac[fi].origin_file[0]) {
+                            fprintf(stderr,
+                                    "note: in @comptime factory "
+                                    "'__cc_gfac_%s' at %s:%d\n",
+                                    inst->family,
+                                    g_shadow_gfac[fi].origin_file,
+                                    g_shadow_gfac[fi].origin_line);
                         }
                         out->err = 1;
                         return 0;

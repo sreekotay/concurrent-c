@@ -22,8 +22,12 @@ int main(void) {
     CCCounter c = { .n = 3 };
     Widget    w = { .w = 6 };
 
-    /* The short name is what the dot reaches... */
-    printf("call add=%lld bump=%lld scale=%lld\n", c.add(7), c.bump(5), w.scale(7));
+    /* The short name is what the dot reaches. Sequence side effects so the
+     * expected line does not depend on argv evaluation order. */
+    long long add = c.add(7);
+    long long bump = c.bump(5);
+    long long scale = w.scale(7);
+    printf("call add=%lld bump=%lld scale=%lld\n", add, bump, scale);
 
     /* ...and it is exactly what reflection reports as the member. */
     @comptime for (m in type_of(CCCounter).methods) { printf("%s => %s\n", m.name, m.member); }

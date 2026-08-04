@@ -1821,14 +1821,51 @@ static size_t cc__emit_resolve_anchor_pos(CCEmitAnchor anchor, size_t site_pos,
     switch (anchor) {
     case CC_EMIT_AT_COMPTIME_SITE: {
         char marker[64];
+        size_t pos;
+        size_t k;
+        int in_block = 0;
         snprintf(marker, sizeof(marker), "enum{__ccs%zu=0};", site_pos);
         const char* hit = src ? strstr(src, marker) : NULL;
         if (hit) {
-            size_t pos = (size_t)(hit - src);
+            pos = (size_t)(hit - src);
             while (pos > 0 && src[pos - 1] != '\n') pos--;
-            return pos;
+        } else {
+            pos = cc__emit_find_logical_line(src, len, input_path, site_line,
+                                             site_pos);
         }
-        return cc__emit_find_logical_line(src, len, input_path, site_line, site_pos);
+        /* Serdes blanks `@comptime` without a marker; the logical-line
+         * fallback can land inside the preceding block-comment lead. Splice
+         * after the closer so wrappers are live host C, not comment text. */
+        if (!src || !len) return pos;
+        for (k = 0; k < pos && k < len; k++) {
+            if (!in_block && src[k] == '/' && k + 1 < len && src[k + 1] == '*') {
+                in_block = 1;
+                k++;
+            } else if (in_block && src[k] == '*' && k + 1 < len &&
+                       src[k + 1] == '/') {
+                in_block = 0;
+                k++;
+            } else if (!in_block && src[k] == '/' && k + 1 < len &&
+                       src[k + 1] == '/') {
+                while (k < len && src[k] != '\n') k++;
+            } else if (!in_block && (src[k] == '"' || src[k] == '\'')) {
+                char q = src[k++];
+                while (k < len && src[k] != q) {
+                    if (src[k] == '\\' && k + 1 < len) k += 2;
+                    else k++;
+                }
+            }
+        }
+        if (in_block) {
+            while (pos + 1 < len && !(src[pos] == '*' && src[pos + 1] == '/'))
+                pos++;
+            if (pos + 1 < len) pos += 2;
+            while (pos < len &&
+                   (src[pos] == ' ' || src[pos] == '\t' || src[pos] == '\r'))
+                pos++;
+            if (pos < len && src[pos] == '\n') pos++;
+        }
+        return pos;
     }
     case CC_EMIT_BEFORE_FIRST_USE:
         return insert_pos;

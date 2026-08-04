@@ -3541,6 +3541,11 @@ static void shadow_rewrite_slice_as_call_args(char* expr, size_t cap) {
                             if (!skip && fp &&
                                 strncmp(fp->base, "CCSlice_", 8) == 0)
                                 skip = 1;
+                            /* Header helpers like cc__py_arg_ts_CCSlice_double
+                             * are not in the fnparam table — keep the typed
+                             * value when the callee name already names it. */
+                            if (!skip && b->ty[0] && strstr(callee, b->ty) != NULL)
+                                skip = 1;
                             if (!skip) {
                                 char sty[96];
                                 shadow_bind_base_ty(b, sty, sizeof(sty));

@@ -2505,7 +2505,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
     case AST_INC:
         return cemit_fmt(out, "%s%s++;\n", indent, st->a);
     case AST_EXPR_STMT: {
-        char expr[288];
+        char expr[2048];
         shadow_emit_expr_text(st, st->a, expr, sizeof(expr), NULL);
         if (!shadow_rewrite_bang_exprs(expr, sizeof(expr), ctx)) return 0;
         /* send_task body: bare expr is the packed task result. */
@@ -3161,7 +3161,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
     }
     case AST_ASSIGN: {
         char lhs[288];
-        char rhs[288];
+        char rhs[2048];
         char pair[768];
         const ShadowBind* lb;
         const char* vty = NULL;

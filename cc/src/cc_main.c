@@ -2372,9 +2372,14 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         fprintf(stderr, "cc: missing input or c_out_path\n");
         return -1;
     }
-    /* SERDES succession path: delegate .ccs link/emit to shadow_lower. */
+    /* SERDES succession path: delegate .ccs link/emit to shadow_lower.
+     * Py extension modules (`PyInit_*`, no `main`) stay on the legacy
+     * -fPIC/-shared host link until shadow_lower grows that product path. */
     if (cc__want_serdes_front() && cc__ends_with_ci(opt->in_path, ".ccs")) {
-        if (opt->mode == CC_MODE_LINK && opt->bin_out_path) {
+        char pymod[128];
+        int is_pymod =
+            cc__detect_py_module(opt->in_path, pymod, sizeof(pymod));
+        if (!is_pymod && opt->mode == CC_MODE_LINK && opt->bin_out_path) {
             if (summary_out) {
                 memset(summary_out, 0, sizeof(*summary_out));
                 summary_out->bin_out_path = opt->bin_out_path;
@@ -2382,7 +2387,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             return cc__run_shadow_lower(opt->in_path, opt->bin_out_path,
                                         opt->no_cache, opt->verbose);
         }
-        if (opt->mode == CC_MODE_EMIT_C) {
+        if (!is_pymod && opt->mode == CC_MODE_EMIT_C) {
             if (summary_out) {
                 memset(summary_out, 0, sizeof(*summary_out));
                 summary_out->c_out_path = opt->c_out_path;
@@ -2391,10 +2396,12 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             return cc__run_shadow_lower(opt->in_path, opt->c_out_path,
                                         opt->no_cache, opt->verbose);
         }
-        fprintf(stderr,
-                "cc: --frontend=serdes supports --link and --emit-c-only "
-                "(got --compile); use legacy front or emit-c-only\n");
-        return -1;
+        if (!is_pymod) {
+            fprintf(stderr,
+                    "cc: --frontend=serdes supports --link and --emit-c-only "
+                    "(got --compile); use legacy front or emit-c-only\n");
+            return -1;
+        }
     }
     if (summary_out) {
         memset(summary_out, 0, sizeof(*summary_out));

@@ -418,6 +418,15 @@ __attribute__((weak)) const char* cc_emit_plan_comptime_fragment_text(
     (void)frag_index;
     return NULL;
 }
+__attribute__((weak)) int cc_emit_plan_has_generic_factory(const char* name) {
+    (void)name;
+    return 0;
+}
+__attribute__((weak)) int cc_emit_plan_generic_factory_names_csv(char* out,
+                                                                 size_t cap) {
+    if (out && cap) out[0] = 0;
+    return 0;
+}
 
 /* Seed a CamelCase / mangled typedef name into the current scope (idempotent). */
 static void shadow_seed_typedef_name(Parser* p, const char* name, size_t n) {
@@ -570,7 +579,33 @@ static int span_text(Parser* p, int i0, int i1_excl, char* dst, size_t cap) {
         size_t start = a.offset;
         size_t end = b.offset + b.spell.len;
         FileTape* ft = tape_by_id(p->cache, a.file_id);
-        if (ft && ft->bytes && end <= ft->len && end >= start) {
+        int same_file = 1;
+        size_t spell_sum = 0;
+        /* Macro expand keeps define-site offsets on body tokens while the
+         * call's `)` / `!>` stay at the use site — a byte memcpy then slurps
+         * everything between (including `@errhandler`). Spell-concat instead. */
+        for (i = i0; i < i1_excl; i++) {
+            Token ti = p->toks[i];
+            spell_sum += ti.spell.len;
+            if (ti.file_id != a.file_id) {
+                same_file = 0;
+                break;
+            }
+            if (i > i0) {
+                Token prev = p->toks[i - 1];
+                size_t prev_end = prev.offset + prev.spell.len;
+                /* Object-like macro bodies keep define-site offsets; the next
+                 * use-site token can sit far later in the same file. */
+                if (ti.offset < prev.offset || ti.offset > prev_end + 512u) {
+                    same_file = 0;
+                    break;
+                }
+            }
+        }
+        if (same_file && end >= start &&
+            (end - start) > spell_sum + (size_t)(i1_excl - i0) * 64u + 64u)
+            same_file = 0;
+        if (same_file && ft && ft->bytes && end <= ft->len && end >= start) {
             size_t n = end - start;
             if (n + 1 > cap) {
                 if (!p->err) {
@@ -714,25 +749,24 @@ static AstNode* parse_result_fn(Parser* p);
 
 /* Peek type prefix "int" then optional CC shape before a name. */
 static int peek_int_base(Parser* p) { return shadow_kw(p_peek(p)) == SHADOW_KW_INT; }
+static int peek_c_int_type_end(Parser* p, int start);
 
 static int peek_result_shape(Parser* p) {
     int j;
     Token t;
-    if (p->i + 1 >= p->n) return 0;
-    t = p->toks[p->i];
-    j = p->i + 1;
-    /* `long long !>(Err)` — two-token ok type before `!>`. */
-    if (t.kind == TK_IDENT && spell_eq(t.spell, "long") && j < p->n &&
-        p->toks[j].kind == TK_IDENT && spell_eq(p->toks[j].spell, "long")) {
-        j++;
-        if (j < p->n && tok_eq(p->toks[j], TK_PUNCT, "*")) j++;
-        return j < p->n && tok_eq(p->toks[j], TK_PUNCT, "!>");
+    if (!p || p->i >= p->n) return 0;
+    /* `unsigned long long` / `long long` / `unsigned int` via shared peek. */
+    j = peek_c_int_type_end(p, p->i);
+    if (j < 0) {
+        t = p->toks[p->i];
+        if (!(t.kind == TK_IDENT || shadow_kw(t) == SHADOW_KW_VOID ||
+              shadow_kw(t) == SHADOW_KW_BOOL || shadow_kw(t) == SHADOW_KW_INT ||
+              shadow_kw(t) == SHADOW_KW_CHAR || shadow_kw(t) == SHADOW_KW_SIZE_T))
+            return 0;
+        j = p->i + 1;
     }
-    if (j < p->n && tok_eq(p->toks[j], TK_PUNCT, "*")) j++;
-    if (j >= p->n || !tok_eq(p->toks[j], TK_PUNCT, "!>")) return 0;
-    return t.kind == TK_IDENT || shadow_kw(t) == SHADOW_KW_VOID ||
-           shadow_kw(t) == SHADOW_KW_BOOL || shadow_kw(t) == SHADOW_KW_INT ||
-           shadow_kw(t) == SHADOW_KW_CHAR || shadow_kw(t) == SHADOW_KW_SIZE_T;
+    while (j < p->n && tok_eq(p->toks[j], TK_PUNCT, "*")) j++;
+    return j < p->n && tok_eq(p->toks[j], TK_PUNCT, "!>");
 }
 
 /* Beachhead Result name: CCResult_<ok>_<err> (int/CCError etc.; no full mangle). */

@@ -734,6 +734,80 @@ static int shadow_safe_fn_has_refcount_dec(AstNode* fn) {
     return 0;
 }
 
+/* Hand release / consume of a CCPyObj local somewhere in the enclosing fn. */
+static int shadow_safe_text_releases_py_obj(const char* text, const char* name) {
+    char needle[96];
+    const char* p;
+    size_t nlen;
+    if (!text || !name || !name[0]) return 0;
+    nlen = strlen(name);
+    if (nlen + 24 >= sizeof(needle)) return 0;
+    snprintf(needle, sizeof(needle), "cc_py_obj_release(&%s)", name);
+    if (strstr(text, needle)) return 1;
+    snprintf(needle, sizeof(needle), "cc_py_obj_release(&%s )", name);
+    if (strstr(text, needle)) return 1;
+    /* `return name;` / `return name` as a whole-word consume. */
+    p = text;
+    while ((p = strstr(p, "return")) != NULL) {
+        const char* q = p + 6;
+        while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r') q++;
+        if (strncmp(q, name, nlen) == 0 && !shadow_safe_is_word(q[nlen]))
+            return 1;
+        p += 6;
+    }
+    return 0;
+}
+
+static int shadow_safe_args_target_py_obj(const char* args, const char* name) {
+    const char* p;
+    size_t nlen;
+    if (!args || !name || !name[0]) return 0;
+    nlen = strlen(name);
+    p = args;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p == '&') {
+        p++;
+        while (*p == ' ' || *p == '\t') p++;
+        if (strncmp(p, name, nlen) == 0 && !shadow_safe_is_word(p[nlen]))
+            return 1;
+    }
+    return 0;
+}
+
+static int shadow_safe_node_releases_py_obj(AstNode* st, const char* name) {
+    int k;
+    if (!st || !name) return 0;
+    /* AST_CALL_ARGS: a=callee, b=args — not one contiguous spelling. */
+    if ((st->kind == AST_CALL_ARGS || st->kind == AST_CALL_NUM) &&
+        strcmp(st->a, "cc_py_obj_release") == 0 &&
+        shadow_safe_args_target_py_obj(st->b, name))
+        return 1;
+    if (shadow_safe_text_releases_py_obj(st->a, name) ||
+        shadow_safe_text_releases_py_obj(st->b, name) ||
+        shadow_safe_text_releases_py_obj(st->c, name) ||
+        shadow_safe_text_releases_py_obj(st->d, name) ||
+        shadow_safe_text_releases_py_obj(st->e, name))
+        return 1;
+    for (k = 0; k < st->nbody; k++)
+        if (shadow_safe_node_releases_py_obj(st->body[k], name)) return 1;
+    for (k = 0; k < st->nkids; k++)
+        if (shadow_safe_node_releases_py_obj(st->kids[k], name)) return 1;
+    return 0;
+}
+
+static int shadow_safe_fn_releases_py_obj(AstNode* fn, const char* name) {
+    int k;
+    if (!fn || !name || !name[0]) return 0;
+    if (fn->kind == AST_STATIC_FN && fn->d[0] && fn->nkids == 0 &&
+        shadow_safe_text_releases_py_obj(fn->d, name))
+        return 1;
+    for (k = 0; k < fn->nbody; k++)
+        if (shadow_safe_node_releases_py_obj(fn->body[k], name)) return 1;
+    for (k = 0; k < fn->nkids; k++)
+        if (shadow_safe_node_releases_py_obj(fn->kids[k], name)) return 1;
+    return 0;
+}
+
 static int shadow_safe_type_is_slice(const char* ty) {
     if (!ty) return 0;
     if (strcmp(ty, "CCSlice") == 0) return 1;
@@ -3118,6 +3192,8 @@ static void shadow_safe_on_spawn(ShadowSafeCtx* ctx, AstNode* st, int escapes) {
 }
 
 static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st);
+static void shadow_safe_check_field_suggest_text(ShadowSafeCtx* ctx, AstNode* st,
+                                                const char* text);
 static void shadow_safe_walk_list(ShadowSafeCtx* ctx, AstNode** xs, int n);
 
 /* Walk dbody SPAWN_CLOSURE attachments (call-arg / assign / return). */
@@ -3162,6 +3238,37 @@ static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st) {
     int saved_nvars;
     int saved_neh;
     if (!ctx || !st || ctx->err) return;
+    /* Nested-field suggest while locals are still in scope. */
+    shadow_safe_check_field_suggest_text(ctx, st, st->a);
+    if (!ctx->err) shadow_safe_check_field_suggest_text(ctx, st, st->b);
+    if (!ctx->err) shadow_safe_check_field_suggest_text(ctx, st, st->c);
+    if (!ctx->err) shadow_safe_check_field_suggest_text(ctx, st, st->d);
+    if (!ctx->err) shadow_safe_check_field_suggest_text(ctx, st, st->e);
+    if (ctx->err) return;
+    if (st->kind == AST_VAR_UNWRAP || st->kind == AST_TYPED_INIT) {
+        /* Non-recursive: only this node (kids walked below). */
+        const char* ty =
+            (st->kind == AST_VAR_UNWRAP) ? st->e : st->a;
+        const char* name =
+            (st->kind == AST_VAR_UNWRAP) ? st->a : st->b;
+        const char* mode =
+            (st->kind == AST_VAR_UNWRAP) ? st->c : "";
+        if (ty && strcmp(ty, "CCPyObj") == 0 && name && name[0] &&
+            !strstr(mode, "destroy") && !strstr(mode, "detach") &&
+            !(mode[0] && strchr(mode, 'D')) &&
+            !shadow_safe_fn_releases_py_obj(ctx->cur_fn, name)) {
+            char msg[256];
+            snprintf(msg, sizeof(msg),
+                     "ownership: `CCPyObj %s` holds a Python reference: bind "
+                     "'@destroy' so the scope releases it, consume it "
+                     "(`return %s`), or release it by hand "
+                     "(cc_py_obj_release); a dropped handle leaks the object "
+                     "with no diagnostic on either side of the boundary",
+                     name, name);
+            shadow_safe_err_at(ctx, st, msg);
+            return;
+        }
+    }
     switch (st->kind) {
     case AST_TYPEDEF_CHAN: {
         int role = 0;
@@ -3690,6 +3797,83 @@ static void shadow_safe_walk_fn(ShadowSafeCtx* ctx, AstNode* fn) {
     ctx->neh = saved_neh;
     ctx->in_async = saved_async;
     ctx->cur_fn = saved_fn;
+}
+
+/* Missing field that lives one member deep → spell `.base.field`. */
+static int shadow_safe_field_on(ShadowSafeStruct* s, const char* field) {
+    int i;
+    if (!s || !field) return 0;
+    for (i = 0; i < s->nf; i++)
+        if (strcmp(s->fname[i], field) == 0) return 1;
+    return 0;
+}
+
+static void shadow_safe_check_field_suggest_text(ShadowSafeCtx* ctx, AstNode* st,
+                                                const char* text) {
+    const char* p;
+    if (!ctx || !st || !text || ctx->err) return;
+    p = text;
+    while (*p && !ctx->err) {
+        char recv[64], field[64];
+        size_t ri = 0, fi = 0;
+        ShadowSafeVar* v;
+        ShadowSafeStruct* outer;
+        int i;
+        char nested_ty[64];
+        ShadowSafeStruct* inner;
+        if (!((p[0] >= 'A' && p[0] <= 'Z') || (p[0] >= 'a' && p[0] <= 'z') ||
+              p[0] == '_')) {
+            p++;
+            continue;
+        }
+        while (((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+                (*p >= '0' && *p <= '9') || *p == '_') &&
+               ri + 1 < sizeof(recv))
+            recv[ri++] = *p++;
+        recv[ri] = 0;
+        if (*p != '.') {
+            continue;
+        }
+        p++;
+        while (((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+                (*p >= '0' && *p <= '9') || *p == '_') &&
+               fi + 1 < sizeof(field))
+            field[fi++] = *p++;
+        field[fi] = 0;
+        if (!recv[0] || !field[0]) continue;
+        /* UFCS / method call `recv.meth(` — not a field miss. */
+        if (*p == '(' || *p == ':') continue;
+        v = NULL;
+        for (i = 0; i < ctx->nvars; i++) {
+            if (strcmp(ctx->vars[i].name, recv) == 0) {
+                v = &ctx->vars[i];
+                break;
+            }
+        }
+        if (!v || !v->ty[0]) continue;
+        outer = shadow_safe_find_struct(ctx, v->ty);
+        if (!outer) {
+            char strip[64];
+            shadow_safe_strip_ty(v->ty, strip, sizeof(strip));
+            outer = shadow_safe_find_struct(ctx, strip);
+        }
+        if (!outer || shadow_safe_field_on(outer, field)) continue;
+        /* Only the nested-suggest case — bare misses stay host/UFCS. */
+        for (i = 0; i < outer->nf; i++) {
+            shadow_safe_strip_ty(outer->fty[i], nested_ty, sizeof(nested_ty));
+            inner = shadow_safe_find_struct(ctx, nested_ty);
+            if (!inner || !shadow_safe_field_on(inner, field)) continue;
+            {
+                char msg[192];
+                snprintf(msg, sizeof(msg),
+                         "field not found: %s — member '%s' has it; "
+                         "spell '.%s.%s'",
+                         field, outer->fname[i], outer->fname[i], field);
+                shadow_safe_err_at(ctx, st, msg);
+                return;
+            }
+        }
+    }
 }
 
 /* Returns 1 on success, 0 if a safety diagnostic was emitted. */
