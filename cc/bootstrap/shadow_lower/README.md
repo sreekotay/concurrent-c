@@ -2,7 +2,7 @@
 
 Deliberate freezes of the lowered C for `examples/serdes/c/shadow_lower.ccs`
 plus its lowered local-header tree. Stage-0 builds the lowerer with host `cc`
-without re-lowering that `.ccs` through the legacy frontend.
+without re-lowering that `.ccs`.
 
 | Path | Role | Git |
 |------|------|-----|
@@ -13,24 +13,33 @@ without re-lowering that `.ccs` through the legacy frontend.
 **Source of truth** remains `examples/serdes/c/*.ccs` / `*.cch`. Snapshot
 contents are regenerate-only — do not hand-edit.
 
-## Commands
+## Default self-build
+
+`make -C cc` builds `shadow_lower` from `last-good` (`SHADOW_LOWER_SOURCE=bootstrap`).
 
 ```bash
-# Emit into latest/ (rewrites absolute includes for portability)
-./scripts/snapshot_shadow_lower.sh
+# Iterate on .ccs before promoting a new seed
+make -C cc SHADOW_LOWER_SOURCE=ccs ../out/cc/bin/shadow_lower
 
-# Optional host-cc smoke of latest/ (needs existing runtime/tcc objs)
+# Explicit aliases
+make -C cc shadow_lower-from-bootstrap
+make -C cc shadow_lower-from-ccs
+```
+
+## Snapshot / promote
+
+```bash
+# Emit into latest/ (prefers existing shadow_lower; --legacy forces ccc)
+./scripts/snapshot_shadow_lower.sh
 ./scripts/snapshot_shadow_lower.sh --smoke
+./scripts/snapshot_shadow_lower.sh --legacy   # prefer for promote until serdes
+                                             # self-emit host-ccs cleanly
 
 # Promote latest/ → vN and point last-good at it (then commit)
 ./scripts/promote_shadow_bootstrap.sh          # next vN
 ./scripts/promote_shadow_bootstrap.sh 3        # explicit v3
 ```
 
-Build the promoted seed (does not change the default self-build):
-
-```bash
-make -C cc shadow_lower-from-bootstrap
-```
-
-Default `make -C cc` still lowers `shadow_lower.ccs` via `--frontend=legacy`.
+Serdes can parse/emit `shadow_lower.ccs` (umbrella `.cch` passthrough + growable
+stage2 buffer). A host-cc-clean serdes self-emit still needs static_map fragment
+ordering vs umbrella `#include`s — use `--legacy` for `vN` until that lands.

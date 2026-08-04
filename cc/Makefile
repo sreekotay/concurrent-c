@@ -343,47 +343,57 @@ $(SHADOW_COMPTIME_LIB): $(SHADOW_COMPTIME_OBJ) $(SHADOW_COMPTIME_ENGINE_OBJS)
 	@rm -f $@
 	ar rcs $@ $^
 
-# Native shadow_lower beside ccc: emit + optional in-process libtcc --exe.
-# Falls back to scripts/shadow_lower.sh only if the native build is skipped.
-# Included pp_*.cch / shadow_*.cch are not listed individually; mtime the
-# umbrella so edits under examples/serdes/c rebuild the native lowerer.
-SHADOW_LOWER_DEPS := $(SHADOW_LOWER_CCS) $(SHADOW_BUILD_CCH) \
+# shadow_lower self-build:
+#   SHADOW_LOWER_SOURCE=bootstrap (default) — host-cc last-good snapshot
+#   SHADOW_LOWER_SOURCE=ccs — lower shadow_lower.ccs via legacy ccc
+# Promote a new seed: scripts/snapshot_shadow_lower.sh && promote_shadow_bootstrap.sh
+BOOTSTRAP_ROOT := bootstrap/shadow_lower
+BOOTSTRAP_VER := $(shell cat $(BOOTSTRAP_ROOT)/last-good 2>/dev/null)
+BOOTSTRAP_DIR := $(BOOTSTRAP_ROOT)/$(BOOTSTRAP_VER)
+SHADOW_LOWER_SOURCE ?= bootstrap
+
+SHADOW_LOWER_CCS_DEPS := $(SHADOW_LOWER_CCS) $(SHADOW_BUILD_CCH) \
 	$(wildcard ../examples/serdes/c/pp_*.cch) \
 	$(wildcard ../examples/serdes/c/shadow_*.cch) \
 	$(wildcard ../examples/serdes/c/shadow_*.h)
-$(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_COMPTIME_LIB) $(WRAPPER) $(TCC_LIB_DEP) $(RUNTIME_DYLIB)
+SHADOW_LOWER_BOOT_DEPS := $(BOOTSTRAP_DIR)/shadow_lower.c \
+	$(wildcard $(BOOTSTRAP_DIR)/include/*.h)
+
+ifeq ($(SHADOW_LOWER_SOURCE),ccs)
+$(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_CCS_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_COMPTIME_LIB) \
+	$(WRAPPER) $(TCC_LIB_DEP) $(RUNTIME_DYLIB)
 	@mkdir -p $(dir $@)
-	# Self-build must use legacy: serdes is the default and needs this binary.
+	# Legacy path: re-lower .ccs (needed when iterating before a promote).
 	CC_FRONTEND=legacy $(WRAPPER) --frontend=legacy $(SHADOW_LOWER_CCS) -o $@ --no-cache \
 		--cc-flags "-I../examples/serdes/c -I$(TCC_INC) -DSHADOW_HAVE_LIBTCC=1" \
 		--ld-flags "$(abspath $(SHADOW_TCC_OBJ)) $(abspath $(SHADOW_COMPTIME_LIB)) -L$(TCC_LIB) -ltcc"
 	@mkdir -p $(dir $(SHADOW_LOWER_SCRIPT))
 	@cp $@ $(SHADOW_LOWER_SCRIPT)
 	@chmod +x $(SHADOW_LOWER_SCRIPT)
-
-# Optional stage-0: host-cc the promoted bootstrap snapshot (no .ccs lower).
-# Does not replace the default $(SHADOW_LOWER_WRAPPER) rule — promote via
-# scripts/snapshot_shadow_lower.sh + scripts/promote_shadow_bootstrap.sh.
-BOOTSTRAP_ROOT := bootstrap/shadow_lower
-BOOTSTRAP_VER := $(shell cat $(BOOTSTRAP_ROOT)/last-good 2>/dev/null)
-BOOTSTRAP_DIR := $(BOOTSTRAP_ROOT)/$(BOOTSTRAP_VER)
-.PHONY: shadow_lower-from-bootstrap
-shadow_lower-from-bootstrap: $(SHADOW_TCC_OBJ) $(SHADOW_COMPTIME_LIB) $(TCC_LIB_DEP) \
-	$(OBJDIR)/runtime/concurrent_c.o $(LOWER_HEADERS_STAMP)
+else
+$(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_BOOT_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_COMPTIME_LIB) \
+	$(TCC_LIB_DEP) $(OBJDIR)/runtime/concurrent_c.o $(LOWER_HEADERS_STAMP)
 	@test -n "$(BOOTSTRAP_VER)" || (echo "missing $(BOOTSTRAP_ROOT)/last-good"; exit 1)
 	@test -f "$(BOOTSTRAP_DIR)/shadow_lower.c" || \
-		(echo "missing $(BOOTSTRAP_DIR)/shadow_lower.c"; exit 1)
-	@mkdir -p $(dir $(SHADOW_LOWER_WRAPPER))
-	$(CC) $(CFLAGS) -o $(SHADOW_LOWER_WRAPPER) $(BOOTSTRAP_DIR)/shadow_lower.c \
+		(echo "missing $(BOOTSTRAP_DIR)/shadow_lower.c; run snapshot+promote"; exit 1)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $(BOOTSTRAP_DIR)/shadow_lower.c \
 		-I$(BOOTSTRAP_DIR)/include -Iinclude -I../out/include \
 		-I../examples/serdes/c -I$(TCC_INC) -DSHADOW_HAVE_LIBTCC=1 \
 		$(abspath $(SHADOW_TCC_OBJ)) $(abspath $(SHADOW_COMPTIME_LIB)) \
 		$(abspath $(OBJDIR)/runtime/concurrent_c.o) \
 		-L$(TCC_LIB) -ltcc $(LDFLAGS) $(LDLIBS)
 	@mkdir -p $(dir $(SHADOW_LOWER_SCRIPT))
-	@cp $(SHADOW_LOWER_WRAPPER) $(SHADOW_LOWER_SCRIPT)
+	@cp $@ $(SHADOW_LOWER_SCRIPT)
 	@chmod +x $(SHADOW_LOWER_SCRIPT)
-	@echo "built $(SHADOW_LOWER_WRAPPER) from bootstrap $(BOOTSTRAP_VER)"
+	@echo "built $@ from bootstrap $(BOOTSTRAP_VER)"
+endif
+
+.PHONY: shadow_lower-from-bootstrap shadow_lower-from-ccs
+shadow_lower-from-bootstrap:
+	$(MAKE) SHADOW_LOWER_SOURCE=bootstrap $(SHADOW_LOWER_WRAPPER)
+shadow_lower-from-ccs:
+	$(MAKE) SHADOW_LOWER_SOURCE=ccs $(SHADOW_LOWER_WRAPPER)
 
 # Dev fallback wrapper (ccc run) — not installed as the primary CLI.
 $(SHADOW_LOWER_SCRIPT).sh: $(SHADOW_LOWER_TEMPLATE)

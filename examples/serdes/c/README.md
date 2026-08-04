@@ -26,9 +26,9 @@ cache under `out/.cc-build/serdes/`, or `--exe` (libtcc from the emit buffer).
 Succession metric is **warm host-cc rebuild parity**, not libtcc-vs-clang.
 
 Bootstrap snapshots (deliberate freezes of lowered C + local headers) live
-under `cc/bootstrap/shadow_lower/` — see that README. Scratch emit → `latest/`;
-promote to `vN` when you choose to commit. Optional:
-`make -C cc shadow_lower-from-bootstrap`.
+under `cc/bootstrap/shadow_lower/` — see that README. Default `make -C cc`
+host-ccs `last-good`; use `SHADOW_LOWER_SOURCE=ccs` to re-lower from sources.
+Scratch emit → `latest/`; promote to `vN` when you choose to commit.
 
 Not a project to write a full C parser
 ([ARCHITECTURE NG-1](../../cc/docs/ARCHITECTURE.md): we *emit* C; host/TCC

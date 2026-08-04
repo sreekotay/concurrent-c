@@ -22,9 +22,7 @@
 #include "c_pp_spike.cch"
 #include "shadow_build.cch"
 
-#ifdef SHADOW_HAVE_LIBTCC
 #include "shadow_tcc_compile.h"
-#endif
 #include "shadow_comptime.h"
 
 static int shadow_keep_nop(void* env, int id, CCSlice v) {
@@ -204,7 +202,8 @@ static int shadow_runtime_libdir(char* dst, size_t cap) {
     const char* env = getenv("SHADOW_RUNTIME_LIBDIR");
     const char* cands[4];
     char probe[1100];
-    int i, n = 0;
+    int i;
+    int n = 0;
     if (env && env[0]) {
 #if defined(__APPLE__)
         snprintf(probe, sizeof(probe), "%s/libcc_runtime.dylib", env);
@@ -360,7 +359,17 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    Token tokbuf[1 << 16];
+    /* Heap + grow: self-emit of shadow_lower.ccs splices the whole serdes
+     * tree and exceeds a fixed 64k stage2 buffer. */
+    enum { SHADOW_TOKBUF_INIT = 1 << 18 };
+    Token* tokbuf = (Token*)malloc(sizeof(Token) * (size_t)SHADOW_TOKBUF_INIT);
+    if (!tokbuf) {
+        fprintf(stderr, "%s:1:1: error: stage2 token buffer alloc failed\n",
+                in_path);
+        tape_cache_free(&cache);
+        cc_arena_free(&arena);
+        return 1;
+    }
     Pp pp = {0};
     pp.cache = &cache;
     pp.arena = &arena;
@@ -391,16 +400,19 @@ int main(int argc, char** argv) {
         pp_add_sys_inc(&pp, sys_out[0] != 0 ? sys_out : "out/include");
     }
     pp.out = tokbuf;
-    pp.out_cap = 1 << 16;
+    pp.out_cap = SHADOW_TOKBUF_INIT;
+    pp.out_grow = 1;
     if (!pp_run(&pp, ft)) {
         if (!pp.err_msg[0])
             fprintf(stderr, "%s:1:1: error: stage2 preprocess failed\n",
                     in_path);
         pp_free_macros(&pp);
+        free(pp.out);
         tape_cache_free(&cache);
         cc_arena_free(&arena);
         return 1;
     }
+    tokbuf = pp.out;
 
     /* Tables are heap/TLS via parser_ensure_storage — stack Parser is small. */
     Parser p = {0};
@@ -413,6 +425,7 @@ int main(int argc, char** argv) {
         if (!p.err_msg[0])
             fprintf(stderr, "%s:1:1: error: parse failed\n", in_path);
         pp_free_macros(&pp);
+        free(tokbuf);
         tape_cache_free(&cache);
         cc_arena_free(&arena);
         return 1;
@@ -420,6 +433,7 @@ int main(int argc, char** argv) {
 
     if (!shadow_safety_check(items, n, &cache)) {
         pp_free_macros(&pp);
+        free(tokbuf);
         tape_cache_free(&cache);
         cc_arena_free(&arena);
         return 1;
@@ -431,6 +445,7 @@ int main(int argc, char** argv) {
         fprintf(stderr, "%s:1:1: error: emit failed\n", in_path);
         pp_free_macros(&pp);
         free(emit.buf);
+        free(tokbuf);
         tape_cache_free(&cache);
         cc_arena_free(&arena);
         return 1;
@@ -439,6 +454,7 @@ int main(int argc, char** argv) {
         fprintf(stderr, "%s:1:1: error: comptime splice failed\n", in_path);
         pp_free_macros(&pp);
         free(emit.buf);
+        free(tokbuf);
         tape_cache_free(&cache);
         cc_arena_free(&arena);
         return 1;
@@ -446,7 +462,11 @@ int main(int argc, char** argv) {
 
     int rc = 0;
     if (exe_path) {
-#ifdef SHADOW_HAVE_LIBTCC
+#if !defined(SHADOW_HAVE_LIBTCC)
+        fprintf(stderr,
+                "error: --exe requires a libtcc-linked shadow_lower\n");
+        rc = 1;
+#else
         char rt_dir[1024];
         const char* incs[2];
         if (!shadow_runtime_libdir(rt_dir, sizeof(rt_dir))) {
@@ -459,10 +479,6 @@ int main(int argc, char** argv) {
                 rc = 1;
             }
         }
-#else
-        fprintf(stderr,
-                "error: --exe requires a libtcc-linked shadow_lower\n");
-        rc = 1;
 #endif
     } else if (build_bin) {
         const char* dep_paths[SHADOW_DEP_CAP];
@@ -493,6 +509,7 @@ int main(int argc, char** argv) {
     }
 
     free(emit.buf);
+    free(tokbuf);
     pp_free_macros(&pp);
     tape_cache_free(&cache);
     cc_arena_free(&arena);
