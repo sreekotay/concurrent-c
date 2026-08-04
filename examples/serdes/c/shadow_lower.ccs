@@ -239,6 +239,9 @@ int main(int argc, char** argv) {
     (void)PpTok_collect(";", 1, &gate, shadow_keep_nop, NULL);
     cc_arena_free(&gate);
 
+    /* Typed emit-template schema check — fails the self-build, not user TUs. */
+    if (!shadow_tpl_selfcheck()) return 1;
+
     const char* in_path = NULL;
     const char* out_path = NULL;
     const char* exe_path = NULL;

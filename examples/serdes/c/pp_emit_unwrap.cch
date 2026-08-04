@@ -8,6 +8,7 @@ static int shadow_emit_try_call(CEmit* out, ShadowCtx* ctx, const char* indent,
     char i1[80], i2[80];
     AstNode* saved_eh = NULL;
     AstNode* matched = NULL;
+    ShadowTplBind env[3];
     shadow_indent_nest(i1, sizeof(i1), indent, 1);
     shadow_indent_nest(i2, sizeof(i2), indent, 2);
     (void)discard_ok;
@@ -18,13 +19,10 @@ static int shadow_emit_try_call(CEmit* out, ShadowCtx* ctx, const char* indent,
         if (matched) ctx->eh = matched;
         if (matched && matched->b[0]) bind = matched->b;
     }
-    /* Polymorphic Result|pointer — host `_Generic` `__cc_uw_*` (TU-seen
-     * Result arms + prelude CCError seeds; @as faces via err_at_bind). */
-    if (!cemit_fmt(out,
-            "%s{\n"
-            "%s__typeof__(%s) __r = %s;\n"
-            "%sif (__cc_uw_is_err(__r)) {\n",
-            indent, i1, call, call, i1)) {
+    env[0] = (ShadowTplBind){ "indent", SHADOW_TPL_IDENT, indent };
+    env[1] = (ShadowTplBind){ "i1", SHADOW_TPL_IDENT, i1 };
+    env[2] = (ShadowTplBind){ "call", SHADOW_TPL_EXPR, call };
+    if (!shadow_tpl_emit(out, k_tpl_try_call_open, env, 3)) {
         if (ctx) ctx->eh = saved_eh;
         return 0;
     }
@@ -36,37 +34,44 @@ static int shadow_emit_try_call(CEmit* out, ShadowCtx* ctx, const char* indent,
         return 0;
     }
     if (ctx) ctx->eh = saved_eh;
-    return cemit_fmt(out, "%s}\n%s}\n", i1, indent);
+    return shadow_tpl_emit(out, k_tpl_try_call_close, env, 3);
 }
 
-/* Fallible call → typed local (hand-lowered unwrap). */
+/* Fallible call → typed local (typed-template unwrap). */
 static int shadow_emit_try_assign(CEmit* out, ShadowCtx* ctx, const char* indent,
                                   const char* ty_lhs, const char* name,
                                   const char* call, const char* site,
                                   const char* bind,
                                   const char* value_expr /* after ok */) {
     char i1[80], i2[80];
+    CEmit errb = {0};
+    ShadowTplBind env[8];
     shadow_indent_nest(i1, sizeof(i1), indent, 1);
     shadow_indent_nest(i2, sizeof(i2), indent, 2);
     /* Prefer .ok / field value — _Generic unwrap macros omit many Result arms.
      * value_expr is `__r.u.value` or a post-unwrap UFCS chain (bang_chain). */
     if (!value_expr || !value_expr[0]) value_expr = "__r.u.value";
-    if (!cemit_fmt(out,
-            "%s%s %s;\n"
-            "%s{\n"
-            "%s__typeof__(%s) __r = %s;\n"
-            "%sif (!__r.ok) {\n",
-            indent, ty_lhs, name, indent, i1, call, call, i1))
+    if (!shadow_resync_line(&errb, ctx, i2) ||
+        !shadow_emit_err_at_bind(&errb, ctx, i2, bind, site) ||
+        !shadow_emit_handler(&errb, ctx, bind, i2)) {
+        free(errb.buf);
         return 0;
-    if (!shadow_resync_line(out, ctx, i2)) return 0;
-    if (!shadow_emit_err_at_bind(out, ctx, i2, bind, site))
+    }
+    env[0] = (ShadowTplBind){ "indent", SHADOW_TPL_IDENT, indent };
+    env[1] = (ShadowTplBind){ "i1", SHADOW_TPL_IDENT, i1 };
+    env[2] = (ShadowTplBind){ "i2", SHADOW_TPL_IDENT, i2 };
+    env[3] = (ShadowTplBind){ "ty_lhs", SHADOW_TPL_IDENT, ty_lhs };
+    env[4] = (ShadowTplBind){ "name", SHADOW_TPL_IDENT, name };
+    env[5] = (ShadowTplBind){ "call", SHADOW_TPL_EXPR, call };
+    env[6] = (ShadowTplBind){ "value_expr", SHADOW_TPL_EXPR, value_expr };
+    env[7] = (ShadowTplBind){ "err_body", SHADOW_TPL_STMTS,
+                              errb.buf ? errb.buf : "" };
+    if (!shadow_tpl_emit(out, k_tpl_try_assign, env, 8)) {
+        free(errb.buf);
         return 0;
-    if (!shadow_emit_handler(out, ctx, bind, i2)) return 0;
-    return cemit_fmt(out,
-            "%s}\n"
-            "%s%s = %s;\n"
-            "%s}\n",
-            i1, i1, name, value_expr, indent);
+    }
+    free(errb.buf);
+    return 1;
 }
 
 static int shadow_emit_println_arg(CEmit* out, ShadowCtx* ctx, const char* arg_expr,
@@ -572,18 +577,19 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
     if (strcmp(mode, "bang_stmt") == 0 || strcmp(mode, "bang_block") == 0) {
         const char* bind = st->d[0] ? st->d : "e";
         char i1[80], i2[80];
+        ShadowTplBind env[7];
         shadow_indent_nest(i1, sizeof(i1), indent, 1);
         shadow_indent_nest(i2, sizeof(i2), indent, 2);
         /* Direct Result field access — works for http/net Results not listed
          * in the host-cc _Generic unwrap macros. */
-        if (!cemit_fmt(out,
-                "%s%s %s;\n"
-                "%s{\n"
-                "%s__typeof__(%s) __r = %s;\n"
-                "%sif (!__r.ok) {\n"
-                "%s__typeof__(__r.u.error) %s = __r.u.error;\n",
-                indent, ty, st->a, indent, i1, call, call, i1, i2, bind))
-            return 0;
+        env[0] = (ShadowTplBind){ "indent", SHADOW_TPL_IDENT, indent };
+        env[1] = (ShadowTplBind){ "i1", SHADOW_TPL_IDENT, i1 };
+        env[2] = (ShadowTplBind){ "i2", SHADOW_TPL_IDENT, i2 };
+        env[3] = (ShadowTplBind){ "ty_lhs", SHADOW_TPL_IDENT, ty };
+        env[4] = (ShadowTplBind){ "name", SHADOW_TPL_IDENT, st->a };
+        env[5] = (ShadowTplBind){ "call", SHADOW_TPL_EXPR, call };
+        env[6] = (ShadowTplBind){ "bind", SHADOW_TPL_IDENT, bind };
+        if (!shadow_tpl_emit(out, k_tpl_bang_assign_open, env, 7)) return 0;
         if (!shadow_resync_line(out, ctx, i2)) return 0;
         {
             int saved_via = ctx ? ctx->err_via_bang : 0;
@@ -604,11 +610,7 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
             }
             if (ctx) ctx->err_via_bang = saved_via;
         }
-        return cemit_fmt(out,
-                "%s}\n"
-                "%s%s = __r.u.value;\n"
-                "%s}\n",
-                i1, i1, st->a, indent);
+        return shadow_tpl_emit(out, k_tpl_bang_assign_close, env, 7);
     }
     if (strcmp(mode, "qmark") == 0) {
         char i1[80];

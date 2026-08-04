@@ -8,6 +8,7 @@
  * host diagnostics map back to the original .ccs/.cch.
  *
  *   pp_emit_core.cch — CEmit, tables, #line / lead
+ *   pp_emit_tpl.cch  — typed emit templates (hole fill + schema selfcheck)
  *   pp_emit_ufcs.cch — UFCS lower_parts + leftover peel
  *   pp_emit_stmt.cch — stmt switch + destroy helpers
  *     pp_emit_unwrap.cch — Result / bang / qmark / try_assign
@@ -23,5 +24,6 @@
 #endif
 
 #include "pp_emit_core.cch"
+#include "pp_emit_tpl.cch"
 #include "pp_emit_ufcs.cch"
 #include "pp_emit_stmt.cch"
