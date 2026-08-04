@@ -17,6 +17,15 @@
  *   size_t n = excl->acquire_range(0, shard_count, gs, 8);  // [lo, hi)
  *   cc_exclusive_guards_release(gs, n);
  *
+ * Admitted builders (the exclusive conjugation of send_into): admit a name
+ * set, run a CCClosure2 builder(slot, arena) exactly once under the held
+ * names, release.  No guards escape the call:
+ *
+ *   Reply r;
+ *   bool ran = excl->acquire_into(name, &r, &arena, builder);
+ *   bool ran = excl->acquire_sorted_into(names, count, &r, &arena, builder);
+ *   bool ran = excl->acquire_range_into(0, shard_count, &r, &arena, builder);
+ *
  * Hash-shard geometry partner (pow2 count; compose with exclusive names
  * 0..count-1):
  *
@@ -49,6 +58,8 @@
 #define CCC_CC_EXCLUSIVE_CCH
 
 #include <ccc/cc_arena.cch>
+#include <ccc/cc_closure.cch>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdatomic.h>
@@ -195,6 +206,89 @@ static inline size_t cc_exclusive_acquire_range(CCExclusive* excl,
         out[i] = cc_exclusive_acquire(excl, lo + (uint64_t)i);
     }
     return need;
+}
+
+/* ---- Admitted builders (the exclusive conjugation of send_into) ----
+ *
+ * Admit a name set, run `builder(slot, arena)` exactly once under the held
+ * names, release.  Returns true iff the builder ran; false means admission
+ * failed and the builder never ran (no locks held, *slot untouched — never
+ * a half state).  Contract on the builder:
+ *
+ *   - it is synchronous and must not suspend (same rule as any critical
+ *     section here: do not @await while names are held);
+ *   - when it returns, *slot is fully constructed and nothing reachable
+ *     from *slot aliases state guarded by the held names — own-before-
+ *     release happens inside the builder, not after the call.
+ *
+ * The builder is consumed exactly once: run under the held names, or
+ * dropped without running when admission fails (closures are single-shot —
+ * see cc_closure.cch).  `arena` is passed through to the builder for owning
+ * copies of the result; it may be NULL when the builder does not allocate. */
+
+static inline bool cc_exclusive_acquire_into(CCExclusive* excl, uint64_t name,
+                                             void* slot, CCArena* arena,
+                                             CCClosure2 builder) {
+    CCExclusiveGuard g;
+    if (!excl) {
+        cc_closure2_drop(builder);
+        return false;
+    }
+    g = cc_exclusive_acquire(excl, name);
+    cc_closure2_call(builder, (intptr_t)slot, (intptr_t)arena);
+    cc_exclusive_guard_release(&g);
+    return true;
+}
+
+/* `names` may be unsorted and may contain duplicates (acquired once, always
+ * ascending).  count == 0 runs the builder with no names held. */
+static inline bool cc_exclusive_acquire_sorted_into(CCExclusive* excl,
+                                                    const uint64_t* names,
+                                                    size_t count,
+                                                    void* slot, CCArena* arena,
+                                                    CCClosure2 builder) {
+    CCExclusiveGuard gs[CC_EXCLUSIVE_ACQUIRE_MULTI_MAX];
+    size_t n = 0;
+    if (!excl) {
+        cc_closure2_drop(builder);
+        return false;
+    }
+    if (count > 0) {
+        n = cc_exclusive_acquire_sorted(excl, names, count, gs,
+                                        (size_t)CC_EXCLUSIVE_ACQUIRE_MULTI_MAX);
+        if (n == 0) {
+            cc_closure2_drop(builder);
+            return false;
+        }
+    }
+    cc_closure2_call(builder, (intptr_t)slot, (intptr_t)arena);
+    cc_exclusive_guards_release(gs, n);
+    return true;
+}
+
+/* Names lo, lo+1, …, hi-1 ascending.  hi == lo runs the builder with no
+ * names held; hi < lo is rejected (builder does not run). */
+static inline bool cc_exclusive_acquire_range_into(CCExclusive* excl,
+                                                   uint64_t lo, uint64_t hi,
+                                                   void* slot, CCArena* arena,
+                                                   CCClosure2 builder) {
+    CCExclusiveGuard gs[CC_EXCLUSIVE_ACQUIRE_MULTI_MAX];
+    size_t n = 0;
+    if (!excl || hi < lo) {
+        cc_closure2_drop(builder);
+        return false;
+    }
+    if (hi > lo) {
+        n = cc_exclusive_acquire_range(excl, lo, hi, gs,
+                                       (size_t)CC_EXCLUSIVE_ACQUIRE_MULTI_MAX);
+        if (n == 0) {
+            cc_closure2_drop(builder);
+            return false;
+        }
+    }
+    cc_closure2_call(builder, (intptr_t)slot, (intptr_t)arena);
+    cc_exclusive_guards_release(gs, n);
+    return true;
 }
 
 /* ---- Hash-shard geometry (compose with exclusive names 0..count-1) ---- */

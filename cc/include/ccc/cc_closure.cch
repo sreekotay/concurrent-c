@@ -94,6 +94,40 @@ int cc_run_blocking_closure0(CCClosure0 c);
 void* cc_run_blocking_closure0_ptr(CCClosure0 c);
 
 
+/* Pooled allocator for closure-literal environments: CCArenaPool size
+ * classes (thread-local, cross-thread free safe), malloc above the largest
+ * class.  The generated make/drop pair calls these with sizeof(env), so no
+ * per-block header is needed.  Runtime-owned; user code does not call
+ * these directly. */
+void* cc_closure_env_alloc(size_t size);
+void cc_closure_env_free(void* p, size_t size);
+
+/* Closures are single-shot: cc_closureN_call invokes fn once and then
+ * releases the environment via drop.  A closure that is never called must
+ * instead be released exactly once with cc_closureN_drop — otherwise a
+ * pooled environment (the closure-literal lowering) leaks. */
+static inline void cc_closure0_drop(CCClosure0 c) {
+#if defined(CC_PARSER_MODE)
+    (void)c;
+#else
+    if (c.drop) c.drop(c.env);
+#endif
+}
+static inline void cc_closure1_drop(CCClosure1 c) {
+#if defined(CC_PARSER_MODE)
+    (void)c;
+#else
+    if (c.drop) c.drop(c.env);
+#endif
+}
+static inline void cc_closure2_drop(CCClosure2 c) {
+#if defined(CC_PARSER_MODE)
+    (void)c;
+#else
+    if (c.drop) c.drop(c.env);
+#endif
+}
+
 /* Invoke a 0-arg closure.  Useful when the closure is stored in a struct
  * field or any expression the compiler's closure-call rewriter does not
  * recognize (it only rewrites bare-identifier callees — see

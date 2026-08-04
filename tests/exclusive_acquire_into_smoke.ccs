@@ -1,0 +1,87 @@
+/*
+ * cc_exclusive admitted builders (_into family): acquire_into /
+ * acquire_sorted_into / acquire_range_into run a CCClosure2 builder
+ * exactly once under the held names; false means admission failed and
+ * the builder never ran (slot untouched).
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_exclusive.cch>
+#include <stdio.h>
+
+typedef struct BuildEnv {
+    int runs;
+    int value;
+} BuildEnv;
+
+static void* write_slot_builder(void* envp, intptr_t slot_i, intptr_t arena_i) {
+    BuildEnv* env = (BuildEnv*)envp;
+    int* slot = (int*)slot_i;
+    (void)arena_i;
+    env->runs++;
+    *slot = env->value;
+    return NULL;
+}
+
+int main(void) {
+    CCArena arena = @create(kilobytes(64)) @destroy;
+    CCExclusive* excl = cc_exclusive_create(&arena);
+    BuildEnv env = { 0, 0 };
+    CCClosure2 b = cc_closure2_make(write_slot_builder, &env, NULL);
+    uint64_t names[4];
+    uint64_t many[CC_EXCLUSIVE_ACQUIRE_MULTI_MAX + 1];
+    int slot = -1;
+    size_t i;
+
+    if (!excl) return 1;
+    @defer excl->destroy();
+
+    /* Single name: builder runs exactly once, slot constructed. */
+    env.value = 7;
+    if (!excl->acquire_into(3u, &slot, &arena, b)) return 2;
+    if (env.runs != 1 || slot != 7) return 3;
+
+    /* Unsorted + duplicate names: one admission, one build. */
+    names[0] = 3;
+    names[1] = 1;
+    names[2] = 3;
+    names[3] = 2;
+    env.value = 8;
+    if (!excl->acquire_sorted_into(names, 4, &slot, &arena, b)) return 4;
+    if (env.runs != 2 || slot != 8) return 5;
+
+    /* Range [0, 4). */
+    env.value = 9;
+    if (!excl->acquire_range_into(0, 4, &slot, &arena, b)) return 6;
+    if (env.runs != 3 || slot != 9) return 7;
+
+    /* Over the multi-name cap: admission fails, builder never runs. */
+    for (i = 0; i < (size_t)CC_EXCLUSIVE_ACQUIRE_MULTI_MAX + 1; i++) {
+        many[i] = (uint64_t)i;
+    }
+    slot = -1;
+    if (excl->acquire_sorted_into(many, (size_t)CC_EXCLUSIVE_ACQUIRE_MULTI_MAX + 1,
+                                  &slot, &arena, b)) return 8;
+    if (env.runs != 3 || slot != -1) return 9;
+
+    /* Reversed range: rejected, builder never runs. */
+    if (excl->acquire_range_into(4, 0, &slot, &arena, b)) return 10;
+    if (env.runs != 3 || slot != -1) return 11;
+
+    /* Empty range: builder runs with no names held. */
+    env.value = 10;
+    if (!excl->acquire_range_into(2, 2, &slot, &arena, b)) return 12;
+    if (env.runs != 4 || slot != 10) return 13;
+
+    /* Surface form: builder closure literal with captures. */
+    int captured = 11;
+    bool ran = excl->acquire_into(5u, &slot, &arena,
+        (int* out, CCArena* a) => [captured] {
+            (void)a;
+            *out = captured;
+            return NULL;
+        });
+    if (!ran || slot != 11) return 14;
+
+    puts("exclusive_acquire_into_smoke: PASS");
+    return 0;
+}

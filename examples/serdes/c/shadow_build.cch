@@ -268,11 +268,27 @@ static void shadow_cache_dir(uint64_t emit_key, char* dst, size_t cap) {
     snprintf(dst, cap, "out/.cc-build/serdes/%016llx", (unsigned long long)emit_key);
 }
 
+/* Host-build options forwarded from ccc (see cc__run_shadow_lower). */
+typedef struct {
+    int no_cache;
+    int verbose;
+    int opt_release;
+    int opt_debug;
+    int dry_run;
+    const char* cc_flags; /* may be NULL */
+    const char* ld_flags; /* may be NULL */
+} ShadowHostOpts;
+
+static ShadowHostOpts g_shadow_host_opts;
+
 /* Run host cc -c with ccc-compatible flags (no -O2). Returns 0 on success. */
 static int shadow_host_compile(const char* c_path, const char* o_path) {
-    char cmd[4096];
+    char cmd[8192];
     const char* cc = shadow_host_cc();
-    const char* cflags = getenv("CFLAGS");
+    const char* env_cflags = getenv("CFLAGS");
+    const char* extra = g_shadow_host_opts.cc_flags;
+    const char* release = g_shadow_host_opts.opt_release ? "-DNDEBUG" : "";
+    const char* debug = g_shadow_host_opts.opt_debug ? "-g" : "";
     int n;
     n = snprintf(cmd, sizeof(cmd),
                  "%s -std=c11"
@@ -280,12 +296,20 @@ static int shadow_host_compile(const char* c_path, const char* o_path) {
                  " -DCC_ENABLE_XJB_FLOAT_FMT=1"
                  " -ffunction-sections -fdata-sections"
                  " -Werror=implicit-function-declaration"
-                 " %s"
+                 " %s %s %s %s"
                  " -c \"%s\" -o \"%s\"",
                  cc,
-                 (cflags && cflags[0]) ? cflags : "",
+                 (env_cflags && env_cflags[0]) ? env_cflags : "",
+                 (extra && extra[0]) ? extra : "",
+                 release, debug,
                  c_path, o_path);
     if (n < 0 || (size_t)n >= sizeof(cmd)) return -1;
+    if (g_shadow_host_opts.dry_run) {
+        fprintf(stderr, "shadow_lower: dry-run compile:\n  %s\n", cmd);
+        return 0;
+    }
+    if (g_shadow_host_opts.verbose)
+        fprintf(stderr, "shadow_lower: %s\n", cmd);
     if (system(cmd) != 0) {
         fprintf(stderr, "error: host compile failed\n  %s\n", cmd);
         return -1;
@@ -295,13 +319,21 @@ static int shadow_host_compile(const char* c_path, const char* o_path) {
 
 static int shadow_host_link(const char* o_path, const char* bin_path,
                             const char* runtime_o) {
-    char cmd[4096];
+    char cmd[8192];
     const char* cc = shadow_host_cc();
+    const char* ld = g_shadow_host_opts.ld_flags;
     int n;
     n = snprintf(cmd, sizeof(cmd),
-                 "%s \"%s\" \"%s\" -o \"%s\" -lpthread -lm",
-                 cc, o_path, runtime_o, bin_path);
+                 "%s \"%s\" \"%s\" -o \"%s\" -lpthread -lm %s",
+                 cc, o_path, runtime_o, bin_path,
+                 (ld && ld[0]) ? ld : "");
     if (n < 0 || (size_t)n >= sizeof(cmd)) return -1;
+    if (g_shadow_host_opts.dry_run) {
+        fprintf(stderr, "shadow_lower: dry-run link:\n  %s\n", cmd);
+        return 0;
+    }
+    if (g_shadow_host_opts.verbose)
+        fprintf(stderr, "shadow_lower: %s\n", cmd);
     if (system(cmd) != 0) {
         fprintf(stderr, "error: host link failed\n  %s\n", cmd);
         return -1;

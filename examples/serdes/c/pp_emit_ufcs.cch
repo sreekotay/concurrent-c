@@ -1132,7 +1132,8 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
         else if (rty[0] && strncmp(rty, "CCSlice_", 8) == 0)
             return shadow_ufcs_emit_slice_meth(rty, "len", recv, NULL, dst, cap);
         else
-            snprintf(dst, cap, "Map_CCSliceHdr_int_len(%s)", recv);
+            /* Never invent Map_CCSliceHdr_int_* — wrong-family silent C. */
+            return 0;
     } else if (!is_arrow && strcmp(meth_name, "median") == 0) {
         if (vty[0] && strncmp(vty, "CCVec_", 6) == 0)
             snprintf(dst, cap, "%s_median(&%s)", vty, recv);
@@ -1712,11 +1713,8 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
                 snprintf(dst, cap, "%s_get_ptr(%s, %s)", vty, recv, a);
             else
                 snprintf(dst, cap, "%s_get_ptr(&%s, %s)", vty, recv, a);
-        } else if (ptr_recv) {
-            snprintf(dst, cap, "Map_CCSliceHdr_int_get_ptr(%s, %s)", recv, a);
-        } else {
-            snprintf(dst, cap, "Map_CCSliceHdr_int_get_ptr(&%s, %s)", recv, a);
-        }
+        } else
+            return 0;
     } else if (!is_arrow && strcmp(meth_name, "insert") == 0) {
         int ptr_recv = SHADOW_UFCS_PTR_RECV();
         char mapty[128];
@@ -1736,7 +1734,7 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
             else
                 snprintf(dst, cap, "%s_insert(&%s, %s)", mapty, recv, a);
         } else
-            snprintf(dst, cap, "Map_CCSliceHdr_int_insert(%s, %s)", recv, a);
+            return 0;
     } else if (strcmp(meth_name, "del") == 0 ||
                strcmp(meth_name, "remove") == 0) {
         int ptr_recv = SHADOW_UFCS_PTR_RECV();
@@ -1747,11 +1745,8 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
                 snprintf(dst, cap, "%s_%s(%s, %s)", vty, meth, recv, a);
             else
                 snprintf(dst, cap, "%s_%s(&%s, %s)", vty, meth, recv, a);
-        } else if (ptr_recv) {
-            snprintf(dst, cap, "Map_CCSliceHdr_int_%s(%s, %s)", meth, recv, a);
-        } else {
-            snprintf(dst, cap, "Map_CCSliceHdr_int_%s(&%s, %s)", meth, recv, a);
-        }
+        } else
+            return 0;
     } else if (!is_arrow && strcmp(meth_name, "clear") == 0) {
         int ptr_recv = SHADOW_UFCS_PTR_RECV();
         if (vty[0] && (strncmp(vty, "Map_", 4) == 0 ||
@@ -2848,8 +2843,36 @@ static int shadow_emit_ufcs_to_buf(AstNode* st, char* dst, size_t cap,
             }
         }
     }
-    if (!shadow_ufcs_lower_parts(recv, st->b, args, is_arrow, formal, dst, cap))
-        return 0; /* let leftover text peel retry (e.g. cast-prefixed recv) */
+    if (!shadow_ufcs_lower_parts(recv, st->b, args, is_arrow, formal, dst, cap)) {
+        /* Typed/instance receivers: diagnose and refuse peel retry.
+         * Peel is only for unbound / cast-prefixed / @string leftovers. */
+        {
+            const ShadowBind* rb_miss = shadow_bind_for_recv(st->a);
+            char vty_miss[128];
+            int instance = 0;
+            shadow_bind_base_ty(rb_miss, vty_miss, sizeof(vty_miss));
+            if (!vty_miss[0])
+                (void)shadow_ufcs_recv_slice_ty(st->a, vty_miss,
+                                                sizeof(vty_miss));
+            instance =
+                vty_miss[0] &&
+                (strncmp(vty_miss, "CCSlice_", 8) == 0 ||
+                 strcmp(vty_miss, "CCSlice") == 0 ||
+                 strncmp(vty_miss, "CCVec_", 6) == 0 ||
+                 strncmp(vty_miss, "Map_", 4) == 0 ||
+                 strncmp(vty_miss, "ArrayMap_", 9) == 0 ||
+                 strncmp(vty_miss, "CCChan", 6) == 0 ||
+                 strncmp(vty_miss, "CCResult_", 9) == 0 ||
+                 strncmp(vty_miss, "Pair_", 5) == 0 ||
+                 shadow_ufcs_is_scalar_ty(vty_miss) ||
+                 (vty_miss[0] >= 'A' && vty_miss[0] <= 'Z'));
+            if (instance) {
+                shadow_ufcs_diagnose_miss_at(st->a, st->b, NULL, 0);
+                return 0;
+            }
+        }
+        return 0; /* unbound / cast-prefixed: caller may peel leftover text */
+    }
     /* Args may still carry @string / @slice — lower before host C. */
     shadow_rewrite_print_and_string(dst, cap);
     {

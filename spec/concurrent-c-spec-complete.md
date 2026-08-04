@@ -2563,7 +2563,9 @@ operation's `CCIoError`.
 element slot is admitted. If the channel is full, has no rendezvous partner,
 or is closed/error-closed before admission, the builder does not run.
 `EAGAIN` maps to `err(CC_IO_BUSY)` through the normal channel Result envelope;
-graceful close maps to `ok(false)`.
+graceful close maps to `ok(false)`. The call consumes the builder either
+way: it is run exactly once, or dropped without running (its environment is
+released).
 
 **Rule (`send_into` backpressure):** `send_into` applies ordinary blocking
 backpressure. An implementation first may attempt direct construction. If no
@@ -4655,6 +4657,38 @@ cc_exclusive_guards_release(gs, n);
 locks held) when the unique name count exceeds `out_cap` or
 `CC_EXCLUSIVE_ACQUIRE_MULTI_MAX` (64). Partial acquires are rolled back.
 
+**Admitted builders (`_into`).** Each acquire shape has an `_into` form that
+runs a builder under the held names instead of returning guards — the
+exclusive twin of `send_into` (§7.4): admit the name set, run
+`builder(slot, arena)` exactly once, release. No guards escape the call.
+
+```c
+Reply r;
+bool ran = excl->acquire_into(name, &r, &arena,
+    (Reply* slot, CCArena* a) => [req] {
+        *slot = compute(req, a);   /* own the result before returning */
+        return NULL;
+    });
+bool ran = excl->acquire_sorted_into(names, count, &r, &arena, builder);
+bool ran = excl->acquire_range_into(lo, hi, &r, &arena, builder);  /* [lo, hi) */
+```
+
+The builder is an ordinary `CCClosure2`; builder closure literals lower as
+in `send_into`. The call returns `true` iff the builder ran. `false` means
+admission failed (invalid arguments, more than
+`CC_EXCLUSIVE_ACQUIRE_MULTI_MAX` unique names, or `hi < lo`) and the builder
+never ran: no locks are held and the slot is untouched — never a half state.
+An empty admission (`count == 0` or `hi == lo`) runs the builder once with
+no names held. The call consumes the builder either way: it is run exactly
+once, or dropped without running (its environment is released).
+
+**Rule (builder contract):** The builder is synchronous and must not suspend
+(the critical-section rule applies to the builder body). When it returns,
+`*slot` is fully constructed and nothing reachable from `*slot` aliases
+state guarded by the held names: owning the result happens inside the
+builder, before release. `arena` is passed through to the builder for owning
+copies of the result; it may be `NULL` when the builder does not allocate.
+
 **Rule (idempotent release):** `g.release()` is idempotent. After the first release, the guard's entry pointer is cleared to `NULL`; a second `release()` or `destroy()` on the same guard is a local no-op and does not touch the lock word. This is intentional so end-of-hold cleanup does not read as a double-unlock bug in review.
 
 `g.destroy()` and `@destroy` on a guard are aliases for `g.release()`.
@@ -4730,6 +4764,14 @@ size_t cc_exclusive_acquire_sorted(CCExclusive* excl, const uint64_t* names,
                                    size_t out_cap);
 size_t cc_exclusive_acquire_range(CCExclusive* excl, uint64_t lo, uint64_t hi,
                                   CCExclusiveGuard* out, size_t out_cap);
+bool cc_exclusive_acquire_into(CCExclusive* excl, uint64_t name,
+                               void* slot, CCArena* arena, CCClosure2 builder);
+bool cc_exclusive_acquire_sorted_into(CCExclusive* excl, const uint64_t* names,
+                                      size_t count, void* slot, CCArena* arena,
+                                      CCClosure2 builder);
+bool cc_exclusive_acquire_range_into(CCExclusive* excl, uint64_t lo, uint64_t hi,
+                                     void* slot, CCArena* arena,
+                                     CCClosure2 builder);
 void cc_exclusive_guards_release(CCExclusiveGuard* guards, size_t n);
 void cc_exclusive_guard_release(CCExclusiveGuard* g);
 void cc_exclusive_guard_destroy(CCExclusiveGuard* g);
@@ -4750,6 +4792,9 @@ void cc_exclusive_unlock_contended(void* entry);     /* wake one waiter */
 - `excl->acquire(name)` — resolve and acquire
 - `excl->acquire_sorted(names, count, out, out_cap)` — unique ascending multi-acquire
 - `excl->acquire_range(lo, hi, out, out_cap)` — contiguous ascending multi-acquire
+- `excl->acquire_into(name, slot, arena, builder)` — admitted builder, one name
+- `excl->acquire_sorted_into(names, count, slot, arena, builder)` — admitted builder, name set
+- `excl->acquire_range_into(lo, hi, slot, arena, builder)` — admitted builder, name range
 - `excl->destroy()` — tear down section
 - `m.acquire()` — acquire resolved mutex
 - `m.free()` — explicit reclaim

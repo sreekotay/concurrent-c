@@ -2322,15 +2322,61 @@ static int cc__find_shadow_lower(char* dst, size_t cap) {
     return -1;
 }
 
-/* Delegate .ccs build/emit to native shadow_lower (owns cache + host-cc/link). */
-static int cc__run_shadow_lower(const char* in_path, const char* out_path,
-                                int no_cache, int verbose) {
+/* Delegate .ccs build/emit to native shadow_lower (owns cache + host-cc/link).
+ * Options contract: every CCBuildOptions field is either forwarded, N/A for
+ * the serdes product path, or a hard error when set — never silently dropped. */
+static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path) {
     char shadow[PATH_MAX];
-    char* argv[8];
+    char cc_flags_arg[2048];
+    char ld_flags_arg[2048];
+    char* argv[24];
     int argc = 0;
     pid_t pid;
     int status;
-    if (!in_path || !out_path) return -1;
+    if (!opt || !opt->in_path || !out_path) return -1;
+    /* Hard-error on options shadow_lower does not implement yet. */
+    if (opt->dump_consts || opt->dump_comptime) {
+        fprintf(stderr,
+                "cc: --frontend=serdes does not support --dump-consts / "
+                "--dump-comptime (options contract)\n");
+        return -1;
+    }
+    if (opt->target_flag && opt->target_flag[0]) {
+        fprintf(stderr,
+                "cc: --frontend=serdes does not support --target yet "
+                "(options contract)\n");
+        return -1;
+    }
+    if (opt->sysroot_flag && opt->sysroot_flag[0]) {
+        fprintf(stderr,
+                "cc: --frontend=serdes does not support --sysroot yet "
+                "(options contract)\n");
+        return -1;
+    }
+    if (opt->build_override && opt->build_override[0]) {
+        fprintf(stderr,
+                "cc: --frontend=serdes does not support --build yet "
+                "(options contract)\n");
+        return -1;
+    }
+    if (opt->no_build) {
+        fprintf(stderr,
+                "cc: --frontend=serdes does not support --no-build "
+                "(options contract)\n");
+        return -1;
+    }
+    if (opt->no_runtime) {
+        fprintf(stderr,
+                "cc: --frontend=serdes does not support --no-runtime "
+                "(options contract)\n");
+        return -1;
+    }
+    if (opt->cli_count > 0) {
+        fprintf(stderr,
+                "cc: --frontend=serdes does not support comptime CLI bindings "
+                "yet (options contract)\n");
+        return -1;
+    }
     if (cc__find_shadow_lower(shadow, sizeof(shadow)) != 0) {
         fprintf(stderr,
                 "cc: --frontend=serdes requires native shadow_lower "
@@ -2338,12 +2384,26 @@ static int cc__run_shadow_lower(const char* in_path, const char* out_path,
         return -1;
     }
     argv[argc++] = shadow;
-    if (no_cache) argv[argc++] = (char*)"--no-cache";
-    argv[argc++] = (char*)in_path;
+    if (opt->no_cache) argv[argc++] = (char*)"--no-cache";
+    if (opt->verbose) argv[argc++] = (char*)"--verbose";
+    if (opt->opt_release) argv[argc++] = (char*)"--release";
+    if (opt->opt_debug) argv[argc++] = (char*)"--debug";
+    if (opt->dry_run) argv[argc++] = (char*)"--dry-run";
+    if (opt->cc_flags && opt->cc_flags[0]) {
+        snprintf(cc_flags_arg, sizeof(cc_flags_arg), "--cc-flags=%s",
+                 opt->cc_flags);
+        argv[argc++] = cc_flags_arg;
+    }
+    if (opt->ld_flags && opt->ld_flags[0]) {
+        snprintf(ld_flags_arg, sizeof(ld_flags_arg), "--ld-flags=%s",
+                 opt->ld_flags);
+        argv[argc++] = ld_flags_arg;
+    }
+    argv[argc++] = (char*)opt->in_path;
     argv[argc++] = (char*)"-o";
     argv[argc++] = (char*)out_path;
     argv[argc] = NULL;
-    if (verbose) {
+    if (opt->verbose) {
         fprintf(stderr, "cc: serdes:");
         for (int i = 0; argv[i]; ++i) fprintf(stderr, " %s", argv[i]);
         fprintf(stderr, "\n");
@@ -2384,8 +2444,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
                 memset(summary_out, 0, sizeof(*summary_out));
                 summary_out->bin_out_path = opt->bin_out_path;
             }
-            return cc__run_shadow_lower(opt->in_path, opt->bin_out_path,
-                                        opt->no_cache, opt->verbose);
+            return cc__run_shadow_lower(opt, opt->bin_out_path);
         }
         if (!is_pymod && opt->mode == CC_MODE_EMIT_C) {
             if (summary_out) {
@@ -2393,8 +2452,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
                 summary_out->c_out_path = opt->c_out_path;
                 summary_out->did_emit_c = 1;
             }
-            return cc__run_shadow_lower(opt->in_path, opt->c_out_path,
-                                        opt->no_cache, opt->verbose);
+            return cc__run_shadow_lower(opt, opt->c_out_path);
         }
         if (!is_pymod) {
             fprintf(stderr,

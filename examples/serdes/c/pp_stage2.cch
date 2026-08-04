@@ -1,5 +1,7 @@
 /* Stage 2: include splice, object-like macros, #if/#ifdef/#ifndef guards,
- * angle passthrough. Closed directive names use pp_dir static_map.
+ * angle passthrough. Exhaustive directive policy via pp_dir static_map:
+ * every name is implemented, passthrough-by-design, or a hard error —
+ * never a silent permissive drop (except inside an already-skipped arm).
  * Requires pp_tape.cch + <ccc/std/static_map.cch>. */
 #pragma once
 
@@ -10,10 +12,20 @@ typedef enum {
     PP_DIR_IF,
     PP_DIR_IFDEF,
     PP_DIR_IFNDEF,
+    PP_DIR_ELIF,
     PP_DIR_ELSE,
     PP_DIR_ENDIF,
     PP_DIR_DEFINE,
-    PP_DIR_INCLUDE
+    PP_DIR_UNDEF,
+    PP_DIR_INCLUDE,
+    /* Passthrough-by-design: drop from the AST token stream; host / .h emit
+     * does not need these from spliced bodies (pragma once is emitted for
+     * SHADOW_EMIT_H; #line/#warning are non-semantic for lower). */
+    PP_DIR_PRAGMA,
+    PP_DIR_LINE,
+    PP_DIR_WARNING,
+    /* Hard diagnostic with operand text. */
+    PP_DIR_ERROR
 } PpDirKind;
 
 typedef struct {
@@ -30,10 +42,16 @@ typedef struct {
         { "if", { PP_DIR_IF } },
         { "ifdef", { PP_DIR_IFDEF } },
         { "ifndef", { PP_DIR_IFNDEF } },
+        { "elif", { PP_DIR_ELIF } },
         { "else", { PP_DIR_ELSE } },
         { "endif", { PP_DIR_ENDIF } },
         { "define", { PP_DIR_DEFINE } },
+        { "undef", { PP_DIR_UNDEF } },
         { "include", { PP_DIR_INCLUDE } },
+        { "pragma", { PP_DIR_PRAGMA } },
+        { "line", { PP_DIR_LINE } },
+        { "warning", { PP_DIR_WARNING } },
+        { "error", { PP_DIR_ERROR } },
     };
     static_map("pp_dir", pp_dir_entries, CC_STATIC_MAP_CASE_SENSITIVE);
 }
@@ -166,11 +184,107 @@ static int spell_eq(CCSlice s, const char* lit) {
 }
 
 static int at_bol(FileTape* ft, Token t) {
-    /* Synthetic macro-expansion frames have no source bytes — never treat as
-     * directive lines (minted tokens only). */
+    /* Directive bol: only spaces/tabs may precede `#` on the physical line
+     * (C allows indented directives). Synthetic frames have no bytes. */
+    size_t i;
     if (!ft->bytes || ft->len == 0) return 0;
-    if (t.offset == 0) return 1;
-    return ft->bytes[t.offset - 1] == '\n';
+    i = t.offset;
+    while (i > 0 && ft->bytes[i - 1] != '\n') {
+        char c = ft->bytes[i - 1];
+        if (c != ' ' && c != '\t') return 0;
+        i--;
+    }
+    return 1;
+}
+
+static Macro* macro_find(Pp* pp, CCSlice name); /* used by #if operand eval */
+static int pp_raw_peek(Pp* pp, Token* out);
+static int pp_raw_next(Pp* pp, Token* out);
+
+static int pp_fail_dir(Pp* pp, Token at, const char* msg) {
+    if (!pp) return 0;
+    snprintf(pp->err_msg, sizeof(pp->err_msg), "%s", msg ? msg : "preprocess error");
+    diag_at(pp->cache, at, pp->err_msg);
+    pp->err = 1;
+    return 0;
+}
+
+/* Evaluate a stage-2 `#if` / `#elif` operand. Returns 1 and sets *truth on
+ * success; returns 0 when the form is outside the closed set (caller must
+ * hard-error — never guess the true arm). */
+static int pp_eval_if_operand(Pp* pp, int* truth) {
+    Token t0;
+    if (!truth) return 0;
+    *truth = 0;
+    if (!pp_raw_peek(pp, &t0)) return 0;
+    /* #if 0 / #if 1 */
+    if (t0.kind == TK_NUM) {
+        pp_raw_next(pp, &t0);
+        if (spell_eq(t0.spell, "1")) {
+            *truth = 1;
+            return 1;
+        }
+        if (spell_eq(t0.spell, "0")) {
+            *truth = 0;
+            return 1;
+        }
+        return 0;
+    }
+    /* #if ! defined ( IDENT )  /  #if defined ( IDENT ) */
+    {
+        int neg = 0;
+        Token t;
+        if (tok_eq(t0, TK_PUNCT, "!")) {
+            neg = 1;
+            pp_raw_next(pp, &t0);
+            if (!pp_raw_peek(pp, &t0)) return 0;
+        }
+        if (t0.kind == TK_IDENT && spell_eq(t0.spell, "defined")) {
+            Token id;
+            pp_raw_next(pp, &t0); /* defined */
+            if (!pp_raw_peek(pp, &t) || !tok_eq(t, TK_PUNCT, "(")) return 0;
+            pp_raw_next(pp, &t); /* ( */
+            if (!pp_raw_next(pp, &id) || id.kind != TK_IDENT) return 0;
+            if (!pp_raw_peek(pp, &t) || !tok_eq(t, TK_PUNCT, ")")) return 0;
+            pp_raw_next(pp, &t); /* ) */
+            *truth = macro_find(pp, id.spell) ? 1 : 0;
+            if (neg) *truth = !*truth;
+            return 1;
+        }
+    }
+    /* #if IDENT  — object-like body must be a single 0/1 token. */
+    if (t0.kind == TK_IDENT) {
+        Macro* m;
+        pp_raw_next(pp, &t0);
+        m = macro_find(pp, t0.spell);
+        if (m && m->nbody == 1 && m->body[0].kind == TK_NUM) {
+            if (spell_eq(m->body[0].spell, "1")) {
+                *truth = 1;
+                return 1;
+            }
+            if (spell_eq(m->body[0].spell, "0")) {
+                *truth = 0;
+                return 1;
+            }
+        }
+        return 0;
+    }
+    return 0;
+}
+
+static int macro_undef(Pp* pp, CCSlice name) {
+    int i;
+    if (!pp || !name.ptr) return 1;
+    for (i = 0; i < pp->nmacros; i++) {
+        if (!spell_eq(name, pp->macros[i].name)) continue;
+        free(pp->macros[i].body);
+        pp->macros[i].body = NULL;
+        pp->macros[i] = pp->macros[pp->nmacros - 1];
+        memset(&pp->macros[pp->nmacros - 1], 0, sizeof(pp->macros[0]));
+        pp->nmacros--;
+        return 1;
+    }
+    return 1; /* missing undef is a no-op (C) */
 }
 
 static Macro* macro_find(Pp* pp, CCSlice name) {
@@ -467,12 +581,25 @@ static int handle_define(Pp* pp) {
 
 static int handle_directive(Pp* pp) {
     Token hash, name;
+    char unk[128];
     if (!pp_raw_next(pp, &hash)) return 0;
     if (!pp_raw_peek(pp, &name)) return 1;
-    if (name.kind != TK_IDENT) { pp_skip_line(pp); return 1; }
+    if (name.kind != TK_IDENT) {
+        return pp_fail_dir(pp, hash, "expected preprocessor directive name after '#'");
+    }
     pp_raw_next(pp, &name);
 
     PpDirKind dir = pp_dir_of(name.spell);
+
+    /* Inside a skipped arm: only structural nesting (#if/#ifdef/#ifndef /
+     * #endif/#else/#elif) matters. Other known dirs are dropped; unknown
+     * names are also dropped here so skipped dead code cannot fail the TU. */
+    if (pp->skip_depth > 0 && dir != PP_DIR_IF && dir != PP_DIR_IFDEF &&
+        dir != PP_DIR_IFNDEF && dir != PP_DIR_ELIF && dir != PP_DIR_ELSE &&
+        dir != PP_DIR_ENDIF) {
+        pp_skip_line(pp);
+        return 1;
+    }
 
     switch (dir) {
     case PP_DIR_ENDIF:
@@ -481,19 +608,49 @@ static int handle_directive(Pp* pp) {
         pp_skip_line(pp);
         return 1;
     case PP_DIR_ELSE:
-        /* spike: toggle skip for one level */
         if (pp->skip_depth == 1) {
             pp->skip_depth = 0;
             pp->skip_blank = 0;
         } else if (pp->skip_depth == 0) {
             pp->skip_depth = 1;
             pp->skip_blank = 1; /* dropping an `#if` true arm */
+        } else if (pp->skip_depth > 1) {
+            /* nested skip — stay skipped */
         }
         pp_skip_line(pp);
         return 1;
+    case PP_DIR_ELIF: {
+        int truth = 0;
+        if (pp->skip_depth > 1) {
+            pp_skip_line(pp);
+            return 1;
+        }
+        if (pp->skip_depth == 0) {
+            /* Already took a true arm — skip this elif. */
+            pp->skip_depth = 1;
+            pp->skip_blank = 1;
+            pp_skip_line(pp);
+            return 1;
+        }
+        /* skip_depth == 1: prior arm false — maybe take this one. */
+        if (!pp_eval_if_operand(pp, &truth)) {
+            pp_skip_line(pp);
+            return pp_fail_dir(
+                pp, name,
+                "unsupported #elif operand (need 0/1, IDENT→0|1, or "
+                "defined(IDENT) / !defined(IDENT))");
+        }
+        if (truth) {
+            pp->skip_depth = 0;
+            pp->skip_blank = 0;
+        }
+        pp_skip_line(pp);
+        return 1;
+    }
     case PP_DIR_IFNDEF: {
         Token id;
-        if (!pp_raw_next(pp, &id) || id.kind != TK_IDENT) return 0;
+        if (!pp_raw_next(pp, &id) || id.kind != TK_IDENT)
+            return pp_fail_dir(pp, name, "expected identifier after #ifndef");
         if (pp->skip_depth > 0) pp->skip_depth++;
         else if (macro_find(pp, id.spell)) {
             pp->skip_depth = 1;
@@ -504,7 +661,8 @@ static int handle_directive(Pp* pp) {
     }
     case PP_DIR_IFDEF: {
         Token id;
-        if (!pp_raw_next(pp, &id) || id.kind != TK_IDENT) return 0;
+        if (!pp_raw_next(pp, &id) || id.kind != TK_IDENT)
+            return pp_fail_dir(pp, name, "expected identifier after #ifdef");
         if (pp->skip_depth > 0) pp->skip_depth++;
         else if (!macro_find(pp, id.spell)) {
             pp->skip_depth = 1;
@@ -514,64 +672,89 @@ static int handle_directive(Pp* pp) {
         return 1;
     }
     case PP_DIR_IF: {
-        /* Simple spike: #if 0 / #if 1 / #if IDENT (object-like → 0|1).
-         * Unknown forms (`#if defined(...)`, complex exprs) keep the true arm
-         * (directive lines still dropped). Known-false → skip until #else/#endif. */
-        int known = 0;
         int truth = 0;
         if (pp->skip_depth > 0) {
             pp->skip_depth++;
             pp_skip_line(pp);
             return 1;
         }
-        Token cond;
-        if (pp_raw_next(pp, &cond)) {
-            if (cond.kind == TK_NUM) {
-                if (spell_eq(cond.spell, "1")) {
-                    known = 1;
-                    truth = 1;
-                } else if (spell_eq(cond.spell, "0")) {
-                    known = 1;
-                    truth = 0;
-                }
-            } else if (cond.kind == TK_IDENT) {
-                Macro* m = macro_find(pp, cond.spell);
-                if (m && m->nbody == 1 && m->body[0].kind == TK_NUM) {
-                    if (spell_eq(m->body[0].spell, "1")) {
-                        known = 1;
-                        truth = 1;
-                    } else if (spell_eq(m->body[0].spell, "0")) {
-                        known = 1;
-                        truth = 0;
-                    }
-                }
-            }
+        if (!pp_eval_if_operand(pp, &truth)) {
+            pp_skip_line(pp);
+            return pp_fail_dir(
+                pp, name,
+                "unsupported #if operand (need 0/1, IDENT→0|1, or "
+                "defined(IDENT) / !defined(IDENT); never guess the true arm)");
         }
-        if (known && !truth) {
+        if (!truth) {
             pp->skip_depth = 1;
             pp->skip_blank = 1;
         }
         pp_skip_line(pp);
         return 1;
     }
-    default:
-        break;
-    }
-
-    if (pp->skip_depth > 0) {
-        /* Unknown dirs while skipping: drop the line. */
+    case PP_DIR_UNDEF: {
+        Token id;
+        if (pp->skip_depth > 0) {
+            pp_skip_line(pp);
+            return 1;
+        }
+        if (!pp_raw_next(pp, &id) || id.kind != TK_IDENT)
+            return pp_fail_dir(pp, name, "expected identifier after #undef");
+        (void)macro_undef(pp, id.spell);
         pp_skip_line(pp);
         return 1;
     }
-
-    switch (dir) {
+    case PP_DIR_PRAGMA:
+    case PP_DIR_LINE:
+    case PP_DIR_WARNING:
+        /* Passthrough-by-design: not spliced into the AST stream. */
+        pp_skip_line(pp);
+        return 1;
+    case PP_DIR_ERROR: {
+        char msg[160];
+        Token t;
+        size_t n = 0;
+        msg[0] = 0;
+        while (pp_raw_peek(pp, &t)) {
+            Frame* fr = &pp->frames[pp->nf - 1];
+            size_t line0, line1;
+            if (!fr->tape || !fr->tape->bytes) break;
+            line0 = pp_line_start(fr->tape, name.offset);
+            line1 = pp_line_start(fr->tape, t.offset);
+            if (line1 != line0) break;
+            pp_raw_next(pp, &t);
+            if (n && n + 1 < sizeof(msg)) msg[n++] = ' ';
+            if (t.spell.ptr && t.spell.len &&
+                n + t.spell.len < sizeof(msg) - 1) {
+                memcpy(msg + n, t.spell.ptr, t.spell.len);
+                n += t.spell.len;
+                msg[n] = 0;
+            }
+        }
+        if (!msg[0]) snprintf(msg, sizeof(msg), "#error");
+        return pp_fail_dir(pp, name, msg);
+    }
     case PP_DIR_DEFINE:
         return handle_define(pp);
     case PP_DIR_INCLUDE:
         return handle_include(pp);
+    case PP_DIR_NONE:
     default:
-        pp_skip_line(pp);
-        return 1;
+        break;
+    }
+
+    {
+        char msg[192];
+        size_t n = name.spell.len < sizeof(unk) - 1 ? name.spell.len
+                                                   : sizeof(unk) - 1;
+        memcpy(unk, name.spell.ptr, n);
+        unk[n] = 0;
+        snprintf(msg, sizeof(msg),
+                 "unknown preprocessor directive '#%s' (stage-2 policy: "
+                 "implement, passthrough-by-design, or hard error — never "
+                 "silent drop)",
+                 unk);
+        return pp_fail_dir(pp, name, msg);
     }
 }
 

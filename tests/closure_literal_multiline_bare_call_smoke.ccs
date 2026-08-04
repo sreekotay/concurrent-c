@@ -1,0 +1,59 @@
+/* Smoke: bare call of a closure VARIABLE initialized with a MULTI-LINE
+ * closure literal — two pipeline bugs surfaced by the redis integration:
+ *
+ *   1. decl recording: the closure-calls pass (Phase 3) runs before literal
+ *      lifting (Phase 5), so the declaration line carries no `;` — the decl
+ *      must still be recorded, or the bare call reaches the host compiler as
+ *      a call on a struct ("called object type 'CCClosure2' is not a
+ *      function or function pointer");
+ *
+ *   2. window resolution: the @grammar splice below adds ~120 physical lines
+ *      above the call sites, so raw physical newline counting binds the
+ *      pass's search window to unrelated text — the node's logical line must
+ *      resolve through the buffer's #line ledger. */
+#include <ccc/std/prelude.cch>
+
+@grammar(schema) BCG {~~~~
+    rules [
+        digit:  charset [#'0' - #'9']
+        number: keep [opt #'-' some digit]
+    ]
+    #'*' v: int number "\r\n"
+~~~~}
+
+int main(void) {
+    CCArena ar = cc_arena_create(1 << 16);
+    if (!ar.valid()) { printf("FAIL: arena\n"); return 1; }
+    BCG parsed;
+    if (!BCG_parse("*42\r\n", 5, &ar, &parsed) || parsed.v != 42) {
+        printf("FAIL: parse\n");
+        return 1;
+    }
+
+    int g = 0;
+    int* gp = &g;
+
+    CCClosure2 c = (int x, int y) => [gp] {
+        int sum = x + y;
+        *gp = sum;
+    };
+
+    c(40, 2);
+    if (g != 42) { printf("FAIL: closure2 bare call\n"); return 1; }
+
+    /* Same shape at a nested depth, one-parameter arity. */
+    {
+        int h = 0;
+        int* hp = &h;
+        CCClosure1 d = (int* v) => [hp] {
+            *hp = *v * 2;
+        };
+        int seed = 21;
+        d(&seed);
+        if (h != 42) { printf("FAIL: closure1 bare call\n"); return 1; }
+    }
+
+    ar.destroy();
+    printf("closure literal bare call OK\n");
+    return 0;
+}

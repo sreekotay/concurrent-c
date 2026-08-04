@@ -2904,7 +2904,10 @@ static inline void cc__chan_build_into(CCClosure2 builder, void* slot, CCArena* 
     (void)cc_closure2_call(builder, (intptr_t)slot, (intptr_t)arena);
 }
 
-static int cc__queue_enqueue_into_value(CCChan* ch, CCClosure2 builder, CCArena* arena) {
+/* `*built` is set when the builder ran (cc_closure2_call consumes the
+ * closure: it drops the environment after invoking).  Callers that see
+ * `!*built` on a failure path own the drop. */
+static int cc__queue_enqueue_into_value(CCChan* ch, CCClosure2 builder, CCArena* arena, int* built) {
     if (ch->use_ring_queue) {
         if (ch->topology == CC_CHAN_TOPO_1_1) {
             size_t tail = atomic_load_explicit(&ch->ring_tail, memory_order_relaxed);
@@ -2914,6 +2917,7 @@ static int cc__queue_enqueue_into_value(CCChan* ch, CCClosure2 builder, CCArena*
             }
 
             size_t slot_idx = tail & (ch->lfqueue_cap - 1);
+            *built = 1;
             if (ch->elem_size <= sizeof(void*)) {
                 void* packed = NULL;
                 cc__chan_build_into(builder, &packed, arena);
@@ -2935,6 +2939,7 @@ static int cc__queue_enqueue_into_value(CCChan* ch, CCClosure2 builder, CCArena*
                 if (atomic_compare_exchange_weak_explicit(&ch->ring_tail, &pos, pos + 1,
                                                           memory_order_relaxed,
                                                           memory_order_relaxed)) {
+                    *built = 1;
                     if (ch->elem_size <= sizeof(void*)) {
                         void* packed = NULL;
                         cc__chan_build_into(builder, &packed, arena);
@@ -2963,6 +2968,7 @@ static int cc__queue_enqueue_into_value(CCChan* ch, CCClosure2 builder, CCArena*
 
 #if CC_HAVE_LIBLFDS
     void* queue_val = NULL;
+    *built = 1;
     cc__chan_build_into(builder, &queue_val, arena);
     return lfds711_queue_bmm_enqueue(&ch->lfqueue_state, NULL, queue_val);
 #else
@@ -2971,11 +2977,11 @@ static int cc__queue_enqueue_into_value(CCChan* ch, CCClosure2 builder, CCArena*
 #endif
 }
 
-static int cc__chan_try_enqueue_into_lockfree_impl(CCChan* ch, CCClosure2 builder, CCArena* arena) {
+static int cc__chan_try_enqueue_into_lockfree_impl(CCChan* ch, CCClosure2 builder, CCArena* arena, int* built) {
     if (!ch->use_lockfree || ch->cap == 0 || !ch->buf) return EAGAIN;
     if (!ch->use_ring_queue && ch->elem_size > sizeof(void*)) return EAGAIN;
 
-    int ok = cc__queue_enqueue_into_value(ch, builder, arena);
+    int ok = cc__queue_enqueue_into_value(ch, builder, arena, built);
     if (ok && !ch->use_ring_queue) {
         atomic_fetch_add_explicit(&ch->lfqueue_count, 1, memory_order_release);
     }
@@ -3989,7 +3995,8 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
     return 0;
 }
 
-int cc_chan_try_send_into(CCChan* ch, CCClosure2 builder, size_t value_size, CCArena* arena) {
+static int cc__chan_try_send_into_impl(CCChan* ch, CCClosure2 builder, size_t value_size,
+                                        CCArena* arena, int* built) {
     if (!ch || !builder.fn || value_size == 0) return EINVAL;
     if (ch->is_owned || ch->is_ordered) return EINVAL;
 
@@ -4011,6 +4018,7 @@ int cc_chan_try_send_into(CCChan* ch, CCClosure2 builder, size_t value_size, CCA
                                              ? NULL
                                              : cc__chan_pop_recv_waiter(ch);
             if (rnode) {
+                *built = 1;
                 cc__chan_build_into(builder, rnode->data, arena);
                 atomic_store_explicit(&rnode->notified, CC_CHAN_NOTIFY_DATA, memory_order_release);
                 if (rnode->is_select) cc__chan_select_dbg_inc(&g_dbg_select_data_set);
@@ -4042,7 +4050,7 @@ int cc_chan_try_send_into(CCChan* ch, CCClosure2 builder, size_t value_size, CCA
             chan_inflight_dec(ch);
             return err;
         }
-        int rc = cc__chan_try_enqueue_into_lockfree_impl(ch, builder, arena);
+        int rc = cc__chan_try_enqueue_into_lockfree_impl(ch, builder, arena, built);
         chan_inflight_dec(ch);
         if (rc == 0) {
             cc__chan_post_lockfree_enqueue_signal_receivers(ch, NULL,
@@ -4070,6 +4078,7 @@ int cc_chan_try_send_into(CCChan* ch, CCClosure2 builder, size_t value_size, CCA
             pthread_mutex_unlock(&ch->mu);
             return EAGAIN;
         }
+        *built = 1;
         cc__chan_build_into(builder, rnode->data, arena);
         atomic_store_explicit(&rnode->notified, CC_CHAN_NOTIFY_DATA, memory_order_release);
         if (rnode->is_select) cc__chan_select_dbg_inc(&g_dbg_select_data_set);
@@ -4092,7 +4101,7 @@ int cc_chan_try_send_into(CCChan* ch, CCClosure2 builder, size_t value_size, CCA
     if (ch->use_lockfree && (ch->use_ring_queue || ch->elem_size <= sizeof(void*))) {
         chan_inflight_inc(ch);
         pthread_mutex_unlock(&ch->mu);
-        int rc = cc__chan_try_enqueue_into_lockfree_impl(ch, builder, arena);
+        int rc = cc__chan_try_enqueue_into_lockfree_impl(ch, builder, arena, built);
         chan_inflight_dec(ch);
         if (rc == 0) {
             cc__chan_post_lockfree_enqueue_signal_receivers(ch, NULL,
@@ -4106,6 +4115,7 @@ int cc_chan_try_send_into(CCChan* ch, CCClosure2 builder, size_t value_size, CCA
         return EAGAIN;
     }
     void* slot = (uint8_t*)ch->buf + ch->tail * ch->elem_size;
+    *built = 1;
     cc__chan_build_into(builder, slot, arena);
     ch->tail = (ch->tail + 1) % ch->cap;
     ch->count++;
@@ -4114,12 +4124,32 @@ int cc_chan_try_send_into(CCChan* ch, CCClosure2 builder, size_t value_size, CCA
     return 0;
 }
 
+/* The builder is consumed exactly once: run into an admitted slot, or
+ * dropped without running when admission fails.  cc_closure2_call drops the
+ * environment after invoking, so only the not-built failure paths drop
+ * here. */
+int cc_chan_try_send_into(CCChan* ch, CCClosure2 builder, size_t value_size, CCArena* arena) {
+    int built = 0;
+    int rc = cc__chan_try_send_into_impl(ch, builder, value_size, arena, &built);
+    if (!built) cc_closure2_drop(builder);
+    return rc;
+}
+
 int cc_chan_send_into(CCChan* ch, CCClosure2 builder, size_t value_size, CCArena* arena) {
-    int rc = cc_chan_try_send_into(ch, builder, value_size, arena);
-    if (rc != EAGAIN) return rc;
+    int built = 0;
+    int rc = cc__chan_try_send_into_impl(ch, builder, value_size, arena, &built);
+    if (rc != EAGAIN || built) {
+        /* built && rc == EAGAIN only on the liblfds enqueue-failure edge:
+         * the builder is already consumed, so do not rebuild. */
+        if (!built) cc_closure2_drop(builder);
+        return rc;
+    }
 
     void* tmp = malloc(value_size);
-    if (!tmp) return ENOMEM;
+    if (!tmp) {
+        cc_closure2_drop(builder);
+        return ENOMEM;
+    }
     cc__chan_build_into(builder, tmp, arena);
     rc = cc_chan_send(ch, tmp, value_size);
     free(tmp);

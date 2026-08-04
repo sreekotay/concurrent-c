@@ -30,11 +30,13 @@ static int shadow_keep_nop(void* env, int id, CCSlice v) {
 
 static void usage(const char* argv0) {
     fprintf(stderr,
-            "usage: %s <input.ccs|.cch> [-o output] [--exe binary] [--no-cache]\n"
+            "usage: %s <input.ccs|.cch> [-o output] [--exe binary]\n"
+            "          [--no-cache] [--verbose] [--release] [--debug] [--dry-run]\n"
+            "          [--cc-flags=FLAGS] [--ld-flags=FLAGS]\n"
             "  -o out.c/.h  lowered text\n"
             "  -o binary    host-cc build with emit/obj cache\n"
             "  --exe        libtcc from emit buffer (no .c on disk)\n"
-            "  --no-cache   force re-emit and recompile\n",
+            "  Host opts are the ccc↔shadow_lower contract; unknown flags error.\n",
             argv0);
 }
 
@@ -241,6 +243,7 @@ int main(int argc, char** argv) {
     const char* out_path = NULL;
     const char* exe_path = NULL;
     int no_cache = 0;
+    memset(&g_shadow_host_opts, 0, sizeof(g_shadow_host_opts));
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-o") == 0) {
             if (i + 1 >= argc) { usage(argv[0]); return 2; }
@@ -250,11 +253,27 @@ int main(int argc, char** argv) {
             exe_path = argv[++i];
         } else if (strcmp(argv[i], "--no-cache") == 0) {
             no_cache = 1;
+            g_shadow_host_opts.no_cache = 1;
+        } else if (strcmp(argv[i], "--verbose") == 0) {
+            g_shadow_host_opts.verbose = 1;
+        } else if (strcmp(argv[i], "--release") == 0) {
+            g_shadow_host_opts.opt_release = 1;
+        } else if (strcmp(argv[i], "--debug") == 0) {
+            g_shadow_host_opts.opt_debug = 1;
+        } else if (strcmp(argv[i], "--dry-run") == 0) {
+            g_shadow_host_opts.dry_run = 1;
+        } else if (strncmp(argv[i], "--cc-flags=", 11) == 0) {
+            g_shadow_host_opts.cc_flags = argv[i] + 11;
+        } else if (strncmp(argv[i], "--ld-flags=", 11) == 0) {
+            g_shadow_host_opts.ld_flags = argv[i] + 11;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             usage(argv[0]);
             return 0;
         } else if (argv[i][0] == '-') {
-            fprintf(stderr, "error: unknown flag %s\n", argv[i]);
+            fprintf(stderr,
+                    "error: unknown flag %s (shadow_lower options contract: "
+                    "unimplemented ccc flags must not be forwarded silently)\n",
+                    argv[i]);
             usage(argv[0]);
             return 2;
         } else if (!in_path) {

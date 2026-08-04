@@ -13,6 +13,7 @@
 
 #include "util/text.h"
 #include "visitor/pass_common.h"
+#include "visitor/text_span.h"
 
 /* Local aliases for the shared helpers */
 #define cc__is_ident_start_char cc_is_ident_start
@@ -40,6 +41,38 @@ static int cc__name_in_list(char** xs, int n, const char* s, size_t slen) {
     return 0;
 }
 
+/* Append one (name, type, flags) entry to the given scope depth.  `ty` is
+ * heap-owned and transferred on success (freed on failure/duplicate). */
+static void cc__scope_decl_push(char*** scope_names,
+                                char*** scope_types,
+                                unsigned char** scope_flags,
+                                int* scope_counts,
+                                int depth,
+                                const char* name_s,
+                                size_t name_n,
+                                char* ty,
+                                unsigned char flags) {
+    int cur_n = scope_counts[depth];
+    if (cc__name_in_list(scope_names[depth], cur_n, name_s, name_n)) { free(ty); return; }
+    char* name = (char*)malloc(name_n + 1);
+    if (!name) { free(ty); return; }
+    memcpy(name, name_s, name_n);
+    name[name_n] = '\0';
+    char** next = (char**)realloc(scope_names[depth], (size_t)(cur_n + 1) * sizeof(char*));
+    if (!next) { free(name); free(ty); return; }
+    scope_names[depth] = next;
+    char** tnext = (char**)realloc(scope_types[depth], (size_t)(cur_n + 1) * sizeof(char*));
+    if (!tnext) { free(name); free(ty); return; }
+    scope_types[depth] = tnext;
+    unsigned char* fnext = (unsigned char*)realloc(scope_flags[depth], (size_t)(cur_n + 1) * sizeof(unsigned char));
+    if (!fnext) { free(name); free(ty); return; }
+    scope_flags[depth] = fnext;
+    scope_names[depth][cur_n] = name;
+    scope_types[depth][cur_n] = ty;
+    scope_flags[depth][cur_n] = flags;
+    scope_counts[depth] = cur_n + 1;
+}
+
 static void cc__maybe_record_decl(char*** scope_names,
                                  char*** scope_types,
                                  unsigned char** scope_flags,
@@ -56,7 +89,35 @@ static void cc__maybe_record_decl(char*** scope_names,
      * or the declarator-opening paren. */
     size_t p_len = strlen(p);
     size_t semi_off = cc_find_char_top_level(p, 0, p_len, ';');
-    if (semi_off >= p_len) return;
+    if (semi_off >= p_len) {
+        /* No terminator on this line.  One multi-line shape must still be
+         * recorded: `CCClosureN name = <closure literal…` — this pass runs
+         * in Phase 3 but closure literals are lifted to `_make(...)` calls
+         * in Phase 5, so a literal-initialized closure variable's decl never
+         * shows a same-line `;`.  Without recording it here, a bare call of
+         * that variable is not rewritten to cc_closureN_call and leaks to
+         * the host compiler as a call on a struct. */
+        static const char* cl_tys[] = { "CCClosure0", "CCClosure1", "CCClosure2" };
+        for (size_t i = 0; i < sizeof(cl_tys) / sizeof(cl_tys[0]); i++) {
+            size_t tl = strlen(cl_tys[i]);
+            if (strncmp(p, cl_tys[i], tl) != 0) continue;
+            const char* q = p + tl;
+            if (*q != ' ' && *q != '\t') break;
+            while (*q == ' ' || *q == '\t') q++;
+            if (!cc__is_ident_start_char(*q)) break;
+            const char* ns = q;
+            while (cc__is_ident_char2(*q)) q++;
+            size_t nn = (size_t)(q - ns);
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q != '=') break;
+            char* ty = strdup(cl_tys[i]);
+            if (!ty) break;
+            cc__scope_decl_push(scope_names, scope_types, scope_flags,
+                                scope_counts, depth, ns, nn, ty, 0);
+            break;
+        }
+        return;
+    }
     const char* semi = p + semi_off;
     size_t lp_off = cc_find_char_top_level(p, 0, p_len, '(');
     const char* lp = (lp_off < p_len) ? (p + lp_off) : NULL;
@@ -393,6 +454,7 @@ typedef struct {
     long off_start;     /* parse-buffer offsets (exact under the diet invariant) */
     long off_end;
     const char* callee; /* identifier */
+    const char* file;   /* node's logical file (for the #line-ledger window) */
     int occ_1based;
     int arity; /* 1 or 2 */
 } CCClosureCallNode;
@@ -585,6 +647,7 @@ int cc__collect_closure_calls_edits(const CCASTRoot* root,
             .off_start = n[i].off_start,
             .off_end = n[i].off_end,
             .callee = n[i].aux_s1,
+            .file = n[i].file,
             .occ_1based = 1,
             .arity = 0,
         };
@@ -671,17 +734,37 @@ int cc__collect_closure_calls_edits(const CCASTRoot* root,
         size_t rs = cc_pass_node_exact_off(root, calls[i].off_start, in_len);
         size_t re = cc_pass_node_exact_end_off(root, calls[i].off_end, in_len);
         int occ = calls[i].occ_1based;
-        if (rs != (size_t)-1 && re != (size_t)-1 && re > rs) {
+        int exact = (rs != (size_t)-1 && re != (size_t)-1 && re > rs);
+        if (exact) {
             /* The exact window holds exactly this call — the per-line
              * occurrence rank would skip past the only occurrence. */
             occ = 1;
         } else {
-            rs = cc__offset_of_line_1based(in_src, in_len, calls[i].line_start);
-            re = cc__offset_of_line_1based(in_src, in_len, calls[i].line_end + 1);
+            /* Nodes speak LOGICAL lines; the buffer may carry #line/CC_LN
+             * splices that shift physical lines (impl-grade .cch inlining,
+             * grammar expansions).  Raw physical newline counting binds the
+             * window to unrelated text there — resolve through the buffer's
+             * line ledger instead (physical fallback is inside the helper). */
+            rs = cc_offset_for_logical_line(in_src, in_len, calls[i].file, calls[i].line_start);
+            re = cc_offset_for_logical_line(in_src, in_len, calls[i].file, calls[i].line_end + 1);
+            if (re <= rs) {
+                /* End line unmapped (or mapped behind the start) — bound the
+                 * window to the call's own physical line count instead. */
+                int span_lines = calls[i].line_end - calls[i].line_start + 2;
+                re = rs;
+                while (span_lines-- > 0 && re < in_len) {
+                    const char* nl = memchr(in_src + re, '\n', in_len - re);
+                    re = nl ? (size_t)(nl - in_src) + 1 : in_len;
+                }
+            }
         }
         if (re > in_len) re = in_len;
         size_t nm_s = 0, lp = 0, rp_end = 0;
-        if (!cc__find_nth_callee_call_span_in_range(in_src, rs, re, calls[i].callee, occ, &nm_s, &lp, &rp_end))
+        int found = cc__find_nth_callee_call_span_in_range(in_src, rs, re, calls[i].callee, occ, &nm_s, &lp, &rp_end);
+        if (!found && getenv("CC_DEBUG_CLOSURE_CALLS"))
+            fprintf(stderr, "[cc-dbg] closure call NOT located: callee=%s exact=%d line=%d..%d occ=%d window=[%zu,%zu)\n",
+                    calls[i].callee, exact, calls[i].line_start, calls[i].line_end, occ, rs, re);
+        if (!found)
             continue;
         spans[sn++] = (CCClosureCallSpan){
             .name_start = nm_s,

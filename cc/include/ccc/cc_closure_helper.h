@@ -25,8 +25,14 @@
     static void* __cc_closure_entry_##n(void* __p)
 
 /* --- Generated lowering helpers --- */
+
+/* Pooled env allocator (cc/runtime/closure.c); declared here as well so
+ * generated C that includes only this helper header still links. */
+void* cc_closure_env_alloc(size_t size);
+void cc_closure_env_free(void* p, size_t size);
+
 #define CC_CLOSURE_ENV_ALLOC(env_ty, var) \
-    env_ty* var = (env_ty*)malloc(sizeof(env_ty)); \
+    env_ty* var = (env_ty*)cc_closure_env_alloc(sizeof(env_ty)); \
     if (!(var)) abort()
 
 #define CC_CLOSURE_ENV_NURSERY_ALLOC(nursery, env_ty, var) \

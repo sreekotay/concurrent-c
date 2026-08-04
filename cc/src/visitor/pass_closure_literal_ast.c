@@ -4294,8 +4294,8 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
             cc__append_str(&defs, &defs_len, &defs_cap, "} ");
             cc__append_fmt(&defs, &defs_len, &defs_cap, "%s_env;\n", d->sym_base);
             cc__append_fmt(&defs, &defs_len, &defs_cap,
-                           "static void %s_env_drop(void* p) { if (p) free(p); }\n",
-                           d->sym_base);
+                           "static void %s_env_drop(void* p) { if (p) cc_closure_env_free(p, sizeof(%s_env)); }\n",
+                           d->sym_base, d->sym_base);
             cc__append_fmt(&defs, &defs_len, &defs_cap,
                            "static void %s_env_nursery_drop(void* p) { (void)p; }\n",
                            d->sym_base);

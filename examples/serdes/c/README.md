@@ -1,14 +1,18 @@
 # SERDES 2-stage emit experiment
 
 **Status: succession path (opt-in).** Beachhead metric on
-`./scripts/test.sh --serdes --quick` is the succession metric (~478–505 OK /
-~812 historically; score moves with coverage). Focused `scripts/test_serdes.sh`
-is architectural smoke only. Recent beachheads: stmt `typedef`, compound
-assigns, scheduled/pointer chans (`CCChanTx`/`Rx` fields + pair topo/elem),
-call-arg `=> [caps]`, `.spawn`, host-C quarantine, typed unwrap
-(`CCResult_bool_CCIoError` / `__typeof__` err bind), UFCS user-type snake
-before arena `.reset` steal, stage1 `@grammar(rules|schema)` splice (+ tape
-passthrough for generated statics; `@grammar(cli)` stays on the AST stub).
+`./scripts/test.sh --serdes --quick` is the succession metric (currently
+green on the full `--serdes` suite). Focused `scripts/test_serdes.sh`
+is architectural smoke only. The tape → whitelist-AST → tape-fallback spine
+stays; active hardening (not changing that spine):
+
+1. **UFCS peel kill** — typed/instance receivers diagnose on structured miss;
+   no `Map_CCSliceHdr_int_*` invent; leftover peel only for unbound/opaque.
+2. **Stage-2 exhaustive directives** — implement / passthrough-by-design /
+   hard error; `#if` never guesses the true arm; indented `#` recognized.
+3. **ccc↔shadow_lower options contract** — forward release/debug/flags/dry-run;
+   unset-but-unimplemented ccc options hard-error (no silent drop).
+
 Default `ccc` stays legacy. Opt in with:
 
 ```bash
