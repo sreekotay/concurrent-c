@@ -3949,6 +3949,32 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             return 1;
         }
         return cemit_fmt(out, "%s/* @%s */\n", indent, st->a);
+    case AST_RAW_LINE:
+        /* Stmt-position tape passthrough (local `enum { … };`, etc.). */
+        if (st->e[0] && strcmp(st->e, "tape") == 0 && ctx && ctx->cache) {
+            FileTape* ft = tape_by_id(ctx->cache, st->file_id);
+            size_t o0 = 0, o1 = 0;
+            char* endp = NULL;
+            if (!ft || !ft->bytes) {
+                fprintf(stderr, "error: stmt raw tape span missing file\n");
+                out->err = 1;
+                return 0;
+            }
+            o0 = (size_t)strtoull(st->a, &endp, 10);
+            o1 = (size_t)strtoull(st->b, &endp, 10);
+            if (o1 > ft->len) o1 = ft->len;
+            if (o0 > o1) o0 = o1;
+            if (o1 > o0) {
+                if (indent && indent[0] && !cemit_str(out, indent)) return 0;
+                if (!cemit_buf(out, ft->bytes + o0, o1 - o0)) return 0;
+                if (ft->bytes[o1 - 1] != '\n' && !cemit_str(out, "\n"))
+                    return 0;
+            }
+            return 1;
+        }
+        if (st->a[0])
+            return cemit_fmt(out, "%s%s\n", indent, st->a);
+        return 1;
     default:
         fprintf(stderr, "error: stmt %s not lowerable\n", ast_kind_name(st->kind));
         out->err = 1;
@@ -3982,6 +4008,7 @@ static int shadow_stmt_is_destroy(AstNode* st) {
     if (st->kind == AST_NURSERY_DESTROY) return 1;
     /* @detach transfers ownership — no scope-exit cleanup. */
     if (st->kind == AST_VAL_DESTROY) return strcmp(st->e, "_detach") != 0;
+    if (st->kind == AST_VAR_UNWRAP && shadow_mode_has_destroy(st->c)) return 1;
     return st->kind == AST_PTR_UNWRAP && shadow_mode_has_destroy(st->d);
 }
 
@@ -4049,6 +4076,14 @@ static int shadow_emit_one_destroy(AstNode* st, CEmit* out, ShadowCtx* ctx,
         ty = st->a;
         is_ptr = 1;
         bare = shadow_mode_destroy_bare(st->d);
+        dbody = st->dbody;
+        ndbody = st->ndbody;
+    } else if (st->kind == AST_VAR_UNWRAP && shadow_mode_has_destroy(st->c)) {
+        /* `CCPyObj x = … !>(e){…} @destroy;` — value local + bare destroy. */
+        name = st->a;
+        ty = st->e[0] ? st->e : "int";
+        is_ptr = 0;
+        bare = shadow_mode_destroy_bare(st->c);
         dbody = st->dbody;
         ndbody = st->ndbody;
     } else if (st->kind == AST_VAL_DESTROY) {

@@ -111,7 +111,8 @@ static ShadowKwKind shadow_kw(Token t) {
 
 /* Large tables are heap-backed (parser_ensure_storage) so stack Parser stays
  * small in spike smokes. Grammar TUs need headroom beyond the old 512. */
-enum { SCOPE_CAP = 32, NAME_CAP = 64, AST_CAP = 2048 };
+/* redis_idiomatic TU (db + resp + mem includes) exceeds 2048 nodes. */
+enum { SCOPE_CAP = 32, NAME_CAP = 64, AST_CAP = 8192 };
 
 typedef struct {
     char names[NAME_CAP][128];

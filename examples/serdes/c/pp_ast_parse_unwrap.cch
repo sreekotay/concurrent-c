@@ -832,7 +832,22 @@ static AstNode* parse_var_unwrap(Parser* p) {
                 if (!parse_unwrap_ufcs_chain_tail(p, n, vname)) return NULL;
                 return n;
             }
-            (void)p_accept(p, TK_PUNCT, ";"); /* optional — nosemi form */
+            /* `!>(e){…} @destroy;` — destroy-tail must not be left for the
+             * next stmt (CCPyObj ownership / unwrap_destroy smokes). */
+            {
+                char mode[80];
+                char bind[sizeof(n->d)];
+                snprintf(mode, sizeof(mode), "%s", n->c);
+                snprintf(bind, sizeof(bind), "%s", n->d);
+                if (!parse_destroy_tail(p, n, mode, sizeof(mode))) return NULL;
+                snprintf(n->c, sizeof(n->c), "%s", mode);
+                snprintf(n->d, sizeof(n->d), "%s", bind);
+                if (strstr(mode, "_D")) return n; /* consumed `;` */
+            }
+            if (!p_accept(p, TK_PUNCT, ";")) {
+                parser_fail(p, p_peek(p), "expected ';' after !>(...) { ... }");
+                return NULL;
+            }
             return n;
         }
         /* !>(e) stmt ; */

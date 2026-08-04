@@ -145,14 +145,14 @@ int compress_file(const char* in_path, const char* out_path, int level) {
     cc_atomic_store(&g_pipeline_error, 0);
     
     CCFile in_file;
-    if (cc_file_open(\&in_file, in_path->to_slice(), "rb") != 0) {
+    if (cc_file_open(&in_file, in_path->to_slice(), "rb") != 0) {
         fprintf(stderr, "Failed to open input: %s\n", in_path);
         return 1;
     }
     @defer cc_file_close(&in_file);
 
     CCFile out_file;
-    if (cc_file_open(\&out_file, out_path->to_slice(), "wb") != 0) {
+    if (cc_file_open(&out_file, out_path->to_slice(), "wb") != 0) {
         fprintf(stderr, "Failed to open output: %s\n", out_path);
         return 1;
     }

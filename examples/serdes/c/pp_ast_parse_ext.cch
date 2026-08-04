@@ -41,7 +41,7 @@ static AstNode* parse_fn(Parser* p) {
     p_next(p); /* ( */
     int p0 = p->i;
     while (p->i < j) p_next(p);
-    char params[256] = {0};
+    char params[4096] = {0};
     if (p0 < p->i) {
         if (!ast_spell_token_range(p, p0, p->i, params, sizeof(params)))
             return NULL;
@@ -233,7 +233,7 @@ static AstNode* parse_async_fn(Parser* p) {
         }
         p_next(p);
     }
-    char params[256];
+    char params[4096];
     if (p0 >= p->i) params[0] = 0;
     else if (!ast_spell_token_range(p, p0, p->i, params, sizeof(params))) {
         parser_fail(p, name, "async fn params too long");
@@ -1944,18 +1944,55 @@ static AstNode* parse_typedef_int(Parser* p) {
         AstNode* g = parse_typedef_generic(p);
         if (g || p->err) return g;
     }
-    if (p->i + 1 >= p->n || shadow_kw(p->toks[p->i + 1]) != SHADOW_KW_INT)
-        return NULL;
-    p_next(p);
-    p_next(p);
-    Token name = p_next(p);
-    if (name.kind != TK_IDENT) { p->err = 1; return NULL; }
-    if (!p_accept(p, TK_PUNCT, ";")) { p->err = 1; return NULL; }
-    if (!scope_add_typedef(p, name.spell)) { p->err = 1; return NULL; }
-    AstNode* n = ast_new(p, AST_TYPEDEF_INT);
-    if (!n) return NULL;
-    slice_to(n->a, sizeof(n->a), name.spell);
-    return n;
+    /* `typedef int Alias;` */
+    if (p->i + 1 < p->n && shadow_kw(p->toks[p->i + 1]) == SHADOW_KW_INT) {
+        p_next(p);
+        p_next(p);
+        Token name = p_next(p);
+        if (name.kind != TK_IDENT) { p->err = 1; return NULL; }
+        if (!p_accept(p, TK_PUNCT, ";")) { p->err = 1; return NULL; }
+        if (!scope_add_typedef(p, name.spell)) { p->err = 1; return NULL; }
+        AstNode* n = ast_new(p, AST_TYPEDEF_INT);
+        if (!n) return NULL;
+        slice_to(n->a, sizeof(n->a), name.spell);
+        return n;
+    }
+    /* `typedef Ident Alias;` / `typedef Ident* Alias;` — host builtins
+     * (`__builtin_va_list`) and opaque ABI aliases (pigz_cc stdarg.h). */
+    if (p->i + 2 < p->n && p->toks[p->i + 1].kind == TK_IDENT) {
+        int j = p->i + 2;
+        int nstars = 0;
+        Token alias;
+        Token base;
+        AstNode* n;
+        while (j < p->n && tok_eq(p->toks[j], TK_PUNCT, "*")) {
+            nstars++;
+            j++;
+        }
+        if (j < p->n && p->toks[j].kind == TK_IDENT && j + 1 < p->n &&
+            tok_eq(p->toks[j + 1], TK_PUNCT, ";")) {
+            int stars_left = nstars;
+            p_next(p); /* typedef */
+            base = p_next(p);
+            while (stars_left-- > 0) p_next(p); /* * */
+            alias = p_next(p);
+            p_next(p); /* ; */
+            if (!scope_add_typedef(p, alias.spell)) { p->err = 1; return NULL; }
+            n = ast_new(p, AST_TYPEDEF_INT);
+            if (!n) return NULL;
+            slice_to(n->a, sizeof(n->a), alias.spell);
+            slice_to(n->b, sizeof(n->b), base.spell);
+            while (nstars-- > 0) {
+                size_t L = strlen(n->b);
+                if (L + 1 < sizeof(n->b)) {
+                    n->b[L] = '*';
+                    n->b[L + 1] = 0;
+                }
+            }
+            return n;
+        }
+    }
+    return NULL;
 }
 
 /* Ident * Ident ;  — decl if typedef / CC* runtime type, else mul expr */

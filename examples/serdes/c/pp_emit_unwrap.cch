@@ -256,7 +256,8 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
         }
     }
     /* Variant `arm !> {…}` — inactive-arm handler, not Result unwrap. */
-    if ((strcmp(mode, "bang_stmt") == 0 || strcmp(mode, "bang_block") == 0) &&
+    if ((strncmp(mode, "bang_stmt", 9) == 0 ||
+         strncmp(mode, "bang_block", 10) == 0) &&
         st->b[0]) {
         char base[128], arm[64];
         int is_arrow = 0;
@@ -326,8 +327,8 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
     /* e holds lhs type for bang/bang_stmt/bang_block; bang_chain parks
      * the type on mode (`bang_chain:CCSlice`) because e is the chain. */
     const char* ty = "int";
-    if ((strcmp(mode, "bang") == 0 || strcmp(mode, "bang_stmt") == 0 ||
-         strcmp(mode, "bang_block") == 0) &&
+    if ((strcmp(mode, "bang") == 0 || strncmp(mode, "bang_stmt", 9) == 0 ||
+         strncmp(mode, "bang_block", 10) == 0) &&
         st->e[0])
         ty = st->e;
     else if (shadow_mode_is_bang_chain(mode) && shadow_bang_chain_lhs_ty(mode))
@@ -574,7 +575,8 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
         return shadow_emit_try_assign(out, ctx, indent, ty, st->a, call,
                                       "unwrap", "e", val);
     }
-    if (strcmp(mode, "bang_stmt") == 0 || strcmp(mode, "bang_block") == 0) {
+    if (strncmp(mode, "bang_stmt", 9) == 0 ||
+        strncmp(mode, "bang_block", 10) == 0) {
         const char* bind = st->d[0] ? st->d : "e";
         char i1[80], i2[80];
         ShadowTplBind env[7];
@@ -594,7 +596,8 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
         {
             int saved_via = ctx ? ctx->err_via_bang : 0;
             if (ctx) ctx->err_via_bang = 1;
-            if (strcmp(mode, "bang_stmt") == 0) {
+            if (strncmp(mode, "bang_stmt", 9) == 0 &&
+                !shadow_mode_has_destroy(mode)) {
                 if (st->nbody > 0 &&
                     !shadow_emit_stmt_ctx(st->body[0], out, ctx, i2, 0)) {
                     if (ctx) ctx->err_via_bang = saved_via;
