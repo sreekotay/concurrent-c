@@ -43,7 +43,7 @@ more complex than the underlying semantics warrant.
 - `cc_vec_*_pop(v, T* out)`  →  returns `bool`
 - `cc_map_*_get(m, k)`  →  returns `V*`
 - `backend_read(…, CCSlice* out)` / `backend_read_line(…, CCSlice* out)` — EOF is an empty slice.
-- `cc_buf_reader_next(…)` / `cc_buf_reader_read_line(…)`  →  return `CCRes(CCSlice, CCIoError)`; EOF is an empty slice.
+- `CCBufReader` / `cc_buf_reader_*`  →  `BufReader::[Src]` (`buffered` / `fill` / `read_line` / `read_exact`).
 - `cc_parsed_args_value_at(…)` / `cc_parsed_args_last_value(…)`  →  return `const CCSlice*` (NULL if absent).
 
 ### Compiler / internal notes

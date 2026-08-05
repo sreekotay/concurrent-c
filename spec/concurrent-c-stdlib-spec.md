@@ -448,21 +448,13 @@ Non-finite values format as the lowercase literals `nan`, `inf`, and `-inf`.
 
 ## File and buffered I/O
 
-`<ccc/std/io.cch>` defines:
+`<ccc/std/io.cch>` defines `CCFile` and `CCBufWriter`. Buffered reads live in
+`<ccc/std/bufio.cch>` as the generic `BufReader::[Src]`.
 
 ```c
 typedef struct {
     FILE *handle;
 } CCFile;
-
-typedef struct {
-    CCFile *file;
-    char *buf;
-    size_t cap;
-    size_t len;
-    size_t pos;
-    int eof;
-} CCBufReader;
 
 typedef struct {
     CCFile *file;
@@ -505,6 +497,11 @@ does not change the current position.
 
 `CCFile` UFCS maps file methods to `cc_file_*` and passes `&file`.
 
+Caller-buffer Duplex fill is `read_buf_into`: `bool !>(CCIoError)` with EOF
+model B (`Ok(true)` / `Ok(false)` / `Err`). `CCFile` exposes it as
+`cc_file_read_buf_into`. `CCSocket` exposes the same shape as
+`cc_socket_read_buf_into` (alias of `cc_socket_read_into`).
+
 Standard stream writes are:
 
 ```c
@@ -518,18 +515,41 @@ The automatic forms accept a slice, C string, or `CCString` value or pointer.
 These are byte writers for library code. Do not treat them as the script
 console print surface (see Script console print below).
 
-Buffered I/O uses:
+### `BufReader::[Src]`
+
+`BufReader` is a `CC_GENERIC_FACTORY` monomorph over any Duplex-compatible
+`Src` that provides `read_buf_into`. Each instance holds `Src *`, a caller-
+or arena-owned byte buffer, and cursor state.
 
 ```c
-int cc_buf_reader_init(CCBufReader *reader, CCFile *file, CCArena *arena, size_t cap);
-CCResult_CCSlice_CCIoError cc_buf_reader_next(CCBufReader *reader, size_t n);
-CCResult_CCSlice_CCIoError cc_buf_reader_read_line(CCBufReader *reader, CCArena *arena);
+BufReader::[CCSocket] br;
+br.init(&sock, stack_buf, sizeof(stack_buf));
+/* or */ br.init_arena(&sock, &arena, cap);
+
+size_t pending = br.buffered();
+bool got = br.fill() !>;                 /* Ok(false) at EOF */
+CCSlice line = br.read_line() !>;        /* view into br's buffer; strips \r */
+CCSlice bulk = br.read_exact(n) !>;      /* view; Err if short after EOF */
+CCSlice owned = br.read_line_dup(&arena) !>;
+```
+
+| Method | Role |
+|---|---|
+| `init` / `init_arena` | bind source + buffer storage |
+| `buffered` | unread bytes (`end - pos`) |
+| `fill` | compact unread; call `src->read_buf_into` on the free tail |
+| `read_line` | view through `\n` (strip trailing `\r`); `Ok(empty)` at clean EOF; `Err` if bytes remain without a newline at EOF |
+| `read_exact` | view of `n` bytes; `Err` on short read after EOF |
+| `read_line_dup` | arena-owned copy of one `read_line` |
+
+Views from `read_line` / `read_exact` are invalidated by a later compacting
+`fill`. File-only buffered writes remain:
+
+```c
 int cc_buf_writer_init(CCBufWriter *writer, CCFile *file, CCArena *arena, size_t cap);
 CCResult_size_t_CCIoError cc_buf_writer_flush(CCBufWriter *writer);
 CCResult_size_t_CCIoError cc_buf_writer_write(CCBufWriter *writer, CCSlice data);
 ```
-
-An empty successful buffered-reader result denotes EOF.
 
 ### Async file operations
 

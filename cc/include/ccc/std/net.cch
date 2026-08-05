@@ -157,6 +157,9 @@ void cc_listener_close(CCListener* ln);
  *   Ok(false) — clean peer close (recv == 0 / FIN); not an error
  *   Err(e)    — RST, timeout, and other failures
  *
+ * Caller-buffer Duplex fill name is `read_buf_into` (matches CCFile). Socket
+ * also keeps `read_into` as the historical spelling of the same ABI.
+ *
  * Non-blocking try_read is three-way: Ok(true)/Ok(false) as above;
  * would-block (EAGAIN) is Err with CC_IO_BUSY — never Ok(false).
  *
@@ -173,6 +176,12 @@ CCResult_bool_CCIoError cc_socket_read_into_deadline(CCSocket* sock,
                                                     size_t max_bytes,
                                                     size_t* out,
                                                     const CCDeadline* deadline);
+
+/* Duplex-compatible alias of read_into (BufReader::[CCSocket] fill). */
+static inline CCResult_bool_CCIoError cc_socket_read_buf_into(CCSocket* sock, char* buf,
+                                                             size_t max_bytes, size_t* out) {
+    return cc_socket_read_into(sock, buf, max_bytes, out);
+}
 
 /* Non-blocking read into caller buffer (three-way; see above). */
 CCResult_bool_CCIoError cc_socket_try_read_into(CCSocket* sock,

@@ -1085,6 +1085,9 @@ static const char CC__FRAG_PRELUDE[] =
     "#include <stdbool.h>\n"
     "#include <stdio.h>\n"
     "#include <string.h>\n"
+    /* Factories may stub TU/header Src types under this flag; the merged
+     * TU sees the real declarations instead. */
+    "#define CC_FRAGMENT_VALIDATE 1\n"
     "#line 1 \"<generic-fragment>\"\n";
 
 typedef struct {

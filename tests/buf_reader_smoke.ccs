@@ -1,0 +1,76 @@
+#define CC_BUFIO_EXTRA_GENERIC MemReader *: mem_reader_read_buf_into,
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include "buf_reader_mem.cch"
+#include <stdio.h>
+#include <string.h>
+
+int main(void) {
+    char stack[8];
+    MemReader mr;
+    BufReader::[MemReader] br;
+    CCArena a = cc_arena_heap(4 * 1024);
+    @defer a.destroy();
+
+    mr = (MemReader){ .data = "hi\r\nworld\nXY", .len = 12, .pos = 0 };
+    br.init(&mr, stack, sizeof(stack));
+
+    {
+        CCResult_CCSlice_CCIoError lr = br.read_line();
+        CCSlice line;
+        if (cc_is_err(lr)) return 1;
+        line = cc_value(lr);
+        if (line.len != 2 || memcmp(line.ptr, "hi", 2) != 0) return 1;
+    }
+    if (br.buffered() == 0) return 2;
+    {
+        CCResult_CCSlice_CCIoError lr = br.read_line();
+        CCSlice line;
+        if (cc_is_err(lr)) return 3;
+        line = cc_value(lr);
+        if (line.len != 5 || memcmp(line.ptr, "world", 5) != 0) return 3;
+    }
+    {
+        CCResult_CCSlice_CCIoError er = br.read_exact(2);
+        CCSlice exact;
+        if (cc_is_err(er)) return 4;
+        exact = cc_value(er);
+        if (exact.len != 2 || memcmp(exact.ptr, "XY", 2) != 0) return 4;
+    }
+    {
+        CCResult_CCSlice_CCIoError short_r = br.read_exact(1);
+        if (!cc_is_err(short_r)) return 5;
+    }
+
+    {
+        CCFile f;
+        BufReader::[CCFile] fbr;
+        char fbuf[32];
+        const char *path = "tests/buf_reader_smoke_input.txt";
+        FILE *w = fopen(path, "w");
+        if (!w) return 6;
+        fputs("alpha\nbeta\n", w);
+        fclose(w);
+        if (cc_file_open(&f, cc_slice_from_cstr(path), "r") != 0) return 7;
+        @defer f.close();
+        fbr.init(&f, fbuf, sizeof(fbuf));
+        {
+            CCResult_CCSlice_CCIoError or = fbr.read_line_dup(&a);
+            CCSlice owned;
+            if (cc_is_err(or)) return 8;
+            owned = cc_value(or);
+            if (owned.len != 5 || memcmp(owned.ptr, "alpha", 5) != 0) return 8;
+        }
+        {
+            CCResult_CCSlice_CCIoError lr = fbr.read_line();
+            CCSlice line;
+            if (cc_is_err(lr)) return 9;
+            line = cc_value(lr);
+            if (line.len != 4 || memcmp(line.ptr, "beta", 4) != 0) return 9;
+        }
+        remove(path);
+    }
+
+    printf("buf_reader_smoke ok\n");
+    return 0;
+}

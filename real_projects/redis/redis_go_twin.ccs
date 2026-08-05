@@ -9,6 +9,7 @@
  *   resources       →  @create / @destroy / @defer
  *   bytes           →  CCSlice (clone_into, arena.slice, as_slice)
  *   errors          →  @errhandler + !> / ?>; IO via cc_io_avail
+ *   bufio           →  BufReader::[CCSocket] (Go bufio.Reader twin)
  *
  * Not the bench/smoke server — that is redis_idiomatic.ccs.
  *
@@ -17,6 +18,7 @@
  */
 
 #include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
 #include <ccc/std/net.cch>
 #include <ccc/std/map.cch>
 #include <ccc/std/hash.cch>
@@ -88,13 +90,6 @@ typedef struct Cmd {
 typedef struct Reply {
     CCSlice wire;
 } Reply;
-
-typedef struct BufReader {
-    CCSocket* sock;
-    char buf[k_read_buf_cap];
-    size_t pos;
-    size_t end;
-} BufReader;
 
 /* --- helpers --- */
 
@@ -577,65 +572,20 @@ static Reply db_execute(DB* db, CCExclusive* excl, Cmd* c, int64_t now, CCArena*
     return out;
 }
 
-/* --- buffered RESP reader --- */
+/* --- buffered RESP reader (stdlib BufReader::[CCSocket]) --- */
 
-static size_t br_buffered(BufReader* br) { return br->end - br->pos; }
-
-static bool br_fill(BufReader* br) {
-    size_t got = 0;
-    size_t room;
-    bool !>(CCIoError) rr;
-    if (br->pos > 0 && br->pos < br->end) {
-        memmove(br->buf, br->buf + br->pos, br->end - br->pos);
-        br->end -= br->pos;
-        br->pos = 0;
-    } else if (br->pos >= br->end) {
-        br->pos = 0;
-        br->end = 0;
-    }
-    room = sizeof(br->buf) - br->end;
-    if (room == 0) return false;
-    rr = br->sock->read_into(br->buf + br->end, room, &got);
-    if (rr.is_err() || !cc_io_avail(rr)) return false;
-    br->end += got;
-    return got > 0;
-}
-
-static bool br_read_line(BufReader* br, CCSlice* out) {
-    for (;;) {
-        size_t i;
-        for (i = br->pos; i < br->end; i++) {
-            if (br->buf[i] == '\n') {
-                size_t start = br->pos;
-                size_t len = i - start;
-                if (len > 0 && br->buf[start + len - 1] == '\r') len--;
-                *out = cc_slice_from_buffer(br->buf + start, len);
-                br->pos = i + 1;
-                return true;
-            }
-        }
-        if (!br_fill(br)) return false;
-    }
-}
-
-static bool br_read_exact(BufReader* br, size_t n, CCSlice* out) {
-    while (br_buffered(br) < n) {
-        if (!br_fill(br)) return false;
-    }
-    *out = cc_slice_from_buffer(br->buf + br->pos, n);
-    br->pos += n;
-    return true;
-}
-
-static bool read_resp_command(BufReader* br, CCArena* a, Cmd* out) {
+static bool read_resp_command(BufReader::[CCSocket]* br, CCArena* a, Cmd* out) {
     @errhandler(CCError e) {
         (void)e;
         return false;
     }
+    CCResult_CCSlice_CCIoError lr;
     CCSlice line;
     size_t i;
     memset(out, 0, sizeof(*out));
-    if (!br_read_line(br, &line)) return false;
+    lr = br->read_line();
+    if (cc_is_err(lr)) return false;
+    line = cc_value(lr);
     if (line.len == 0) return false;
 
     if (line.ptr[0] != '*') {
@@ -648,7 +598,11 @@ static bool read_resp_command(BufReader* br, CCArena* a, Cmd* out) {
             end = start;
             while (end < line.len && line.ptr[end] != ' ') end++;
             part = line.sub(start, end);
-            out->args[out->argc++] = part.clone_into(a) !>;
+            {
+                CCResult_CCSlice_CCError cr = part.clone_into(a);
+                if (cr.is_err()) return false;
+                out->args[out->argc++] = cr.value();
+            }
             start = end;
         }
         if (out->argc == 0) return false;
@@ -667,6 +621,7 @@ static bool read_resp_command(BufReader* br, CCArena* a, Cmd* out) {
         n = strtol(tmp, &endp, 10);
         if (endp == tmp || n < 0 || n > k_max_args) return false;
         for (i = 0; i < (size_t)n; i++) {
+            CCResult_CCSlice_CCIoError hr, er;
             CCSlice hdr;
             CCSlice payload;
             long blen;
@@ -674,7 +629,9 @@ static bool read_resp_command(BufReader* br, CCArena* a, Cmd* out) {
             char ht[32];
             size_t hcopy;
             CCSlice part;
-            if (!br_read_line(br, &hdr)) return false;
+            hr = br->read_line();
+            if (cc_is_err(hr)) return false;
+            hdr = cc_value(hr);
             if (hdr.len == 0 || hdr.ptr[0] != '$') return false;
             hcopy = hdr.len > 1 ? hdr.len - 1 : 0;
             if (hcopy >= sizeof(ht)) return false;
@@ -682,9 +639,15 @@ static bool read_resp_command(BufReader* br, CCArena* a, Cmd* out) {
             ht[hcopy] = 0;
             blen = strtol(ht, &bend, 10);
             if (bend == ht || blen < 0) return false;
-            if (!br_read_exact(br, (size_t)blen + 2, &payload)) return false;
+            er = br->read_exact((size_t)blen + 2);
+            if (cc_is_err(er)) return false;
+            payload = cc_value(er);
             part = payload.sub(0, (size_t)blen);
-            out->args[out->argc++] = part.clone_into(a) !>;
+            {
+                CCResult_CCSlice_CCError cr = part.clone_into(a);
+                if (cr.is_err()) return false;
+                out->args[out->argc++] = cr.value();
+            }
         }
     }
     if (out->argc == 0) return false;
@@ -706,7 +669,8 @@ static bool write_all(CCSocket* sock, CCSlice data) {
 }
 
 static void handle_client(CCSocket client, DB* db, CCExclusive* excl) {
-    BufReader br = {0};
+    char read_buf[k_read_buf_cap];
+    BufReader::[CCSocket] br;
     char out[k_out_buf_cap];
     size_t out_len = 0;
     CCArena window = cc_arena_heap(16 * 1024);
@@ -718,7 +682,7 @@ static void handle_client(CCSocket client, DB* db, CCExclusive* excl) {
     @defer window.destroy();
     @defer client.close();
 
-    br.sock = &client;
+    br.init(&client, read_buf, sizeof(read_buf));
 
     for (;;) {
         size_t i;
@@ -726,7 +690,7 @@ static void handle_client(CCSocket client, DB* db, CCExclusive* excl) {
         for (i = 0; i < (size_t)k_pipeline_window; i++) {
             Cmd c;
             Reply r;
-            if (i > 0 && br_buffered(&br) == 0) break;
+            if (i > 0 && br.buffered() == 0) break;
             if (!read_resp_command(&br, &window, &c)) {
                 if (out_len) {
                     (void)write_all(&client, cc_slice_from_buffer(out, out_len));
