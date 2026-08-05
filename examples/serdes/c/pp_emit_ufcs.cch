@@ -1387,8 +1387,26 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
     } else if (is_arrow && strcmp(meth_name, "mutex") == 0) {
         snprintf(dst, cap, "cc_exclusive_mutex(%s, %s)", recv, a);
     } else if (is_arrow && strcmp(meth_name, "destroy") == 0) {
+        /* Pointer receivers: dispatch on type — do not default every
+         * `p->destroy()` to cc_exclusive_destroy (CCArena* hit that). */
         if (shadow_ufcs_is_map_ty(vty))
             snprintf(dst, cap, "%s_destroy(%s)", vty, recv);
+        else if (strcmp(vty, "CCArena") == 0 || strcmp(vty, "CCArena*") == 0 ||
+                 shadow_bind_ty_has(rb, "CCArena") ||
+                 strstr(recv, "arena") || strstr(recv, "detached"))
+            snprintf(dst, cap, "cc_arena_destroy(%s)", recv);
+        else if (strcmp(vty, "CCArenaPool") == 0 ||
+                 strcmp(vty, "CCArenaPool*") == 0 ||
+                 shadow_bind_ty_has(rb, "CCArenaPool"))
+            snprintf(dst, cap, "cc_arena_pool_destroy(%s)", recv);
+        else if (strcmp(vty, "CCExclusiveGuard") == 0 ||
+                 strcmp(vty, "CCExclusiveGuard*") == 0 ||
+                 shadow_bind_ty_has(rb, "CCExclusiveGuard"))
+            snprintf(dst, cap, "cc_exclusive_guard_destroy(%s)", recv);
+        else if (strcmp(vty, "CCNursery") == 0 ||
+                 strcmp(vty, "CCNursery*") == 0 ||
+                 shadow_bind_ty_has(rb, "CCNursery"))
+            snprintf(dst, cap, "cc_nursery_free(%s)", recv);
         else
             snprintf(dst, cap, "cc_exclusive_destroy(%s)", recv);
     } else if (!is_arrow && strcmp(meth_name, "acquire") == 0) {
