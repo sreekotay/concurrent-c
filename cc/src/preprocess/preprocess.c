@@ -9679,6 +9679,141 @@ static char* cc__rewrite_slice_types(const char* src, size_t n, const char* inpu
  * left alone.  Function-body text (where `void` might appear as a
  * local cast or pointer type) is untouched because the rewrite is
  * anchored on `@async` + an identifier followed by `(`. */
+/* Defined with the param-list reflector; used here to strip defaults for C. */
+static int cc__ct_param_default_at(const char* src, size_t ps, size_t pe,
+                                   size_t* eq_pos);
+
+/* Strip `name = literal` defaults from function parameter lists.  CC allows
+ * the spelling for reflection / py_module optional kwargs; host C does not.
+ * Call arguments like `foo(x = 1)` are left alone — only declaration-style
+ * defaults (typed declarator on the left) are removed. */
+static int cc__param_default_fn_name_ok(const char* src, size_t ns, size_t ne) {
+    size_t n = ne - ns;
+    if (n == 0) return 0;
+#define CC__PD_KW(S) (n == sizeof(S) - 1 && memcmp(src + ns, S, sizeof(S) - 1) == 0)
+    if (CC__PD_KW("if") || CC__PD_KW("for") || CC__PD_KW("while") ||
+        CC__PD_KW("switch") || CC__PD_KW("sizeof") || CC__PD_KW("_Alignof") ||
+        CC__PD_KW("alignof") || CC__PD_KW("typeof") || CC__PD_KW("__typeof__") ||
+        CC__PD_KW("_Generic") || CC__PD_KW("return") || CC__PD_KW("case") ||
+        CC__PD_KW("catch"))
+        return 0;
+#undef CC__PD_KW
+    return 1;
+}
+
+static char* cc__rewrite_param_defaults(const char* src, size_t n,
+                                        const char* input_path) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0, last_emit = 0;
+    int changed = 0;
+    CCScannerState scan;
+    if (!src || n == 0) return NULL;
+    cc_scanner_init(&scan);
+    for (size_t i = 0; i < n; ) {
+        size_t lp, rp, after, ns, ne, before;
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (src[i] != '(') { i++; continue; }
+        lp = i;
+        if (!cc_find_matching_paren(src, n, lp, &rp)) { i++; continue; }
+        after = cc_skip_ws_and_comments(src, n, rp + 1);
+        if (after >= n || (src[after] != '{' && src[after] != ';')) {
+            i = rp + 1;
+            continue;
+        }
+        before = cc_rskip_ws_and_comments(src, lp);
+        if (before == 0 || !cc_is_ident_char(src[before - 1])) {
+            i = rp + 1;
+            continue;
+        }
+        ne = before;
+        ns = ne;
+        while (ns > 0 && cc_is_ident_char(src[ns - 1])) ns--;
+        if (!cc__param_default_fn_name_ok(src, ns, ne)) {
+            i = rp + 1;
+            continue;
+        }
+        /* `recv.foo(...)` / `recv->foo(...)` are calls, not declarators. */
+        before = cc_rskip_ws_and_comments(src, ns);
+        if (before > 0 && (src[before - 1] == '.' ||
+                           (before >= 2 && src[before - 1] == '>' &&
+                            src[before - 2] == '-'))) {
+            i = rp + 1;
+            continue;
+        }
+        /* Rewrite the param list, omitting declaration-style defaults. */
+        {
+            size_t p = lp + 1;
+            size_t chunk_from = last_emit;
+            int list_changed = 0;
+            char* piece = NULL;
+            size_t piece_len = 0, piece_cap = 0;
+            cc_sb_append(&piece, &piece_len, &piece_cap, src + chunk_from,
+                         lp + 1 - chunk_from);
+            while (p < rp) {
+                CCScannerState s; cc_scanner_init(&s);
+                size_t j = p, depth = 0, comma = rp;
+                size_t ps, pe, eq;
+                int dr;
+                while (j < rp) {
+                    if (cc_scanner_skip_non_code(&s, src, rp, &j)) continue;
+                    char c = src[j];
+                    if (c == '(' || c == '[') depth++;
+                    else if (c == ')' || c == ']') { if (depth) depth--; }
+                    else if (c == ',' && depth == 0) { comma = j; break; }
+                    j++;
+                }
+                ps = p;
+                pe = comma;
+                dr = cc__ct_param_default_at(src, cc_skip_ws_and_comments(src, pe, ps),
+                                             cc_rskip_ws_and_comments(src, pe), &eq);
+                if (dr < 0) {
+                    char rel[1024];
+                    free(piece);
+                    free(out);
+                    cc_pp_error_cat(cc_path_rel_to_repo(
+                                        input_path ? input_path : "<input>", rel,
+                                        sizeof(rel)),
+                                    scan.line, scan.col, "syntax",
+                                    "parameter default must be a simple literal "
+                                    "(integer, float, string, char, NULL, true, false)");
+                    return (char*)-1;
+                }
+                if (dr > 0) {
+                    size_t keep_end = cc_rskip_ws_and_comments(src, eq);
+                    cc_sb_append(&piece, &piece_len, &piece_cap, src + ps,
+                                 keep_end > ps ? keep_end - ps : 0);
+                    if (comma < rp)
+                        cc_sb_append(&piece, &piece_len, &piece_cap, ",", 1);
+                    list_changed = 1;
+                } else {
+                    cc_sb_append(&piece, &piece_len, &piece_cap, src + ps,
+                                 comma - ps);
+                    if (comma < rp)
+                        cc_sb_append(&piece, &piece_len, &piece_cap, ",", 1);
+                }
+                p = comma + 1;
+            }
+            if (list_changed) {
+                cc_sb_append(&out, &out_len, &out_cap, piece, piece_len);
+                last_emit = rp;
+                changed = 1;
+            }
+            free(piece);
+        }
+        i = rp + 1;
+    }
+    if (!changed) {
+        free(out);
+        return NULL;
+    }
+    if (last_emit < n)
+        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    cc_sb_append(&out, &out_len, &out_cap, "", 1);
+    out_len -= 1;
+    (void)out_len;
+    return out;
+}
+
 char* cc__rewrite_async_void_ret(const char* src, size_t n) {
     if (!src || n == 0) return NULL;
     /* Early exit if no real `@async` appears outside comments/strings.
@@ -16628,6 +16763,134 @@ static int cc__ct_parse_member(const char* m, CCCtField** fs, size_t* fn, size_t
  * a form the declarator parser cannot spell exactly — or an unnamed one, which
  * has no identifier to reflect — is a bail, so the caller errors rather than
  * handing back a guessed or partial list.  Returns 1 ok, 0 bail. */
+/* Top-level bare `=` in [ps, pe), or pe if none.  Skips `==` / `!=` / compound
+ * assigns so only a parameter default introducer matches. */
+static size_t cc__ct_top_eq(const char* src, size_t ps, size_t pe) {
+    CCScannerState s; cc_scanner_init(&s);
+    size_t i = ps, depth = 0;
+    while (i < pe) {
+        if (cc_scanner_skip_non_code(&s, src, pe, &i)) continue;
+        char c = src[i];
+        if (c == '(' || c == '[' || c == '{') depth++;
+        else if (c == ')' || c == ']' || c == '}') { if (depth) depth--; }
+        else if (c == '=' && depth == 0) {
+            char prev = (i > ps) ? src[i - 1] : 0;
+            char next = (i + 1 < pe) ? src[i + 1] : 0;
+            if (next != '=' && prev != '<' && prev != '>' && prev != '!' &&
+                prev != '=' && prev != '+' && prev != '-' && prev != '*' &&
+                prev != '/' && prev != '%' && prev != '&' && prev != '|' &&
+                prev != '^')
+                return i;
+        }
+        i++;
+    }
+    return pe;
+}
+
+/* True when [a,b) is a parameter-default literal: integer/float (opt sign +
+ * suffix), string/char, or the idents NULL / true / false. */
+static int cc__ct_is_param_default_literal(const char* src, size_t a, size_t b) {
+    size_t i;
+    if (a >= b) return 0;
+    if (src[a] == '"') {
+        i = a + 1;
+        while (i < b) {
+            if (src[i] == '\\') { if (i + 1 < b) i += 2; else return 0; continue; }
+            if (src[i] == '"') {
+                i++;
+                while (i < b && (src[i] == ' ' || src[i] == '\t')) i++;
+                return i == b;
+            }
+            i++;
+        }
+        return 0;
+    }
+    if (src[a] == '\'') {
+        i = a + 1;
+        while (i < b) {
+            if (src[i] == '\\') { if (i + 1 < b) i += 2; else return 0; continue; }
+            if (src[i] == '\'') {
+                i++;
+                while (i < b && (src[i] == ' ' || src[i] == '\t')) i++;
+                return i == b;
+            }
+            i++;
+        }
+        return 0;
+    }
+    if (cc_is_ident_start(src[a])) {
+        i = a;
+        while (i < b && cc_is_ident_char(src[i])) i++;
+        size_t n = i - a;
+        int ok = (n == 4 && memcmp(src + a, "NULL", 4) == 0) ||
+                 (n == 4 && memcmp(src + a, "true", 4) == 0) ||
+                 (n == 5 && memcmp(src + a, "false", 5) == 0);
+        while (i < b && (src[i] == ' ' || src[i] == '\t')) i++;
+        return ok && i == b;
+    }
+    i = a;
+    if (src[i] == '+' || src[i] == '-') i++;
+    if (i >= b) return 0;
+    if (src[i] == '0' && i + 1 < b && (src[i + 1] == 'x' || src[i + 1] == 'X')) {
+        i += 2;
+        size_t hex = i;
+        while (i < b && isxdigit((unsigned char)src[i])) i++;
+        if (i == hex) return 0;
+    } else {
+        size_t dig = i;
+        while (i < b && src[i] >= '0' && src[i] <= '9') i++;
+        if (i < b && src[i] == '.') {
+            i++;
+            while (i < b && src[i] >= '0' && src[i] <= '9') i++;
+        }
+        if (i == dig) return 0;
+        if (i < b && (src[i] == 'e' || src[i] == 'E')) {
+            size_t e = ++i;
+            if (i < b && (src[i] == '+' || src[i] == '-')) i++;
+            while (i < b && src[i] >= '0' && src[i] <= '9') i++;
+            if (i == e || (i == e + 1 && (src[e] == '+' || src[e] == '-'))) return 0;
+        }
+    }
+    while (i < b && (src[i] == 'u' || src[i] == 'U' || src[i] == 'l' ||
+                     src[i] == 'L' || src[i] == 'f' || src[i] == 'F'))
+        i++;
+    while (i < b && (src[i] == ' ' || src[i] == '\t')) i++;
+    return i == b;
+}
+
+/* Declaration-style default at the end of param span [ps,pe).
+ * Returns 1 and sets *eq_pos when `type name = literal` is present; 0 when
+ * there is no default (including assignment expressions like `x = 1` with no
+ * type); -1 when a bare `=` is present but the RHS is not a modeled literal. */
+static int cc__ct_param_default_at(const char* src, size_t ps, size_t pe,
+                                   size_t* eq_pos) {
+    size_t eq, ds, de;
+    char* left;
+    CCCtField* fs = NULL; size_t fn = 0, fc = 0;
+    int ok;
+    if (eq_pos) *eq_pos = pe;
+    eq = cc__ct_top_eq(src, ps, pe);
+    if (eq >= pe) return 0;
+    ds = cc_skip_ws_and_comments(src, pe, eq + 1);
+    de = cc_rskip_ws_and_comments(src, pe);
+    if (de <= ds) return -1;
+    if (!cc__ct_is_param_default_literal(src, ds, de)) return -1;
+    /* Left of `=` must be a real parameter declarator — otherwise this is an
+     * assignment expression in a call argument, not a default. */
+    {
+        size_t le = cc_rskip_ws_and_comments(src, eq);
+        if (le <= ps) return 0;
+        left = cc__ct_member_normalize(src, ps, le);
+        if (!left) return -1;
+        ok = cc__ct_parse_declarator(left, strlen(left), NULL, NULL, 0, &fs, &fn, &fc);
+        free(left);
+        cc__ct_free_fields(fs, fn);
+        if (!ok) return 0;
+    }
+    if (eq_pos) *eq_pos = eq;
+    return 1;
+}
+
 static int cc__ct_parse_param_list(const char* src, size_t lp, size_t rp,
                                    CCCtField** out, size_t* out_n) {
     CCCtField* fs = NULL; size_t fn = 0, fc = 0;
@@ -16655,8 +16918,14 @@ static int cc__ct_parse_param_list(const char* src, size_t lp, size_t rp,
             size_t ps = cc_skip_ws_and_comments(src, comma, i);
             size_t pe = cc_rskip_ws_and_comments(src, comma);
             if (pe > ps) {
-                char* d = cc__ct_member_normalize(src, ps, pe);
+                size_t eq = pe;
+                int dr = cc__ct_param_default_at(src, ps, pe, &eq);
+                char* d;
                 int ok;
+                if (dr < 0) { cc__ct_free_fields(fs, fn); return 0; }
+                if (dr > 0) pe = cc_rskip_ws_and_comments(src, eq);
+                if (pe <= ps) { cc__ct_free_fields(fs, fn); return 0; }
+                d = cc__ct_member_normalize(src, ps, pe);
                 if (!d) { cc__ct_free_fields(fs, fn); return 0; }
                 ok = cc__ct_parse_declarator(d, strlen(d), NULL, NULL, 0, &fs, &fn, &fc);
                 free(d);
@@ -16763,6 +17032,52 @@ int cc_ct_reflect_param_list(const char* params, CCCtField** out, size_t* out_n)
     n = strlen(params);
     if (n < 2 || params[0] != '(' || params[n - 1] != ')') return 0;
     return cc__ct_parse_param_list(params, 0, n - 1, out, out_n);
+}
+
+int cc_ct_reflect_param_default(const char* params, int idx, char* buf, int buf_sz) {
+    size_t n, i, pidx;
+    if (buf && buf_sz > 0) buf[0] = '\0';
+    if (!params || idx < 0) return -1;
+    n = strlen(params);
+    if (n < 2 || params[0] != '(' || params[n - 1] != ')') return -1;
+    i = 1;
+    pidx = 0;
+    while (i < n - 1) {
+        CCScannerState s; cc_scanner_init(&s);
+        size_t j = i, depth = 0, comma = n - 1;
+        size_t ps, pe, eq, ds, de;
+        int dr;
+        while (j < n - 1) {
+            if (cc_scanner_skip_non_code(&s, params, n - 1, &j)) continue;
+            char c = params[j];
+            if (c == '(' || c == '[') depth++;
+            else if (c == ')' || c == ']') { if (depth) depth--; }
+            else if (c == ',' && depth == 0) { comma = j; break; }
+            j++;
+        }
+        ps = cc_skip_ws_and_comments(params, comma, i);
+        pe = cc_rskip_ws_and_comments(params, comma);
+        if ((int)pidx == idx) {
+            if (pe <= ps) return 0;
+            if (pe - ps == 4 && memcmp(params + ps, "void", 4) == 0) return 0;
+            dr = cc__ct_param_default_at(params, ps, pe, &eq);
+            if (dr < 0) return -1;
+            if (dr == 0) return 0;
+            ds = cc_skip_ws_and_comments(params, pe, eq + 1);
+            de = pe;
+            if (de <= ds || !buf || buf_sz <= 0) return (int)(de - ds);
+            {
+                size_t dn = de - ds;
+                int cap = (int)dn < buf_sz - 1 ? (int)dn : buf_sz - 1;
+                memcpy(buf, params + ds, (size_t)cap);
+                buf[cap] = '\0';
+                return cap;
+            }
+        }
+        pidx++;
+        i = comma + 1;
+    }
+    return -1;
 }
 
 void cc_ct_free_fields(CCCtField* fields, size_t n) {
@@ -18514,6 +18829,14 @@ static int cc__apply_phase1_canonical_passes(CCPassChain* chain,
     CC__CANON_STEP("cc__rewrite_inferred_result_ctors"); if (cc_pass_chain_apply(chain, cc__rewrite_inferred_result_ctors(chain->src, chain->len)) < 0) return -1;
     CC__CANON_STEP("cc__rewrite_result_types"); if (cc_pass_chain_apply(chain, cc__rewrite_result_types(chain->src, chain->len, input_path)) < 0) return -1;
     CC__CANON_STEP("cc__rewrite_result_field_sugar_pass"); if (cc_pass_chain_apply(chain, cc__rewrite_result_field_sugar_pass(chain->src, chain->len)) < 0) return -1;
+    /* Parameter defaults (`int pad = 1`) are CC spelling for reflection /
+     * py_module optional kwargs; strip them before host C sees the TU. */
+    {
+        char* pd = cc__rewrite_param_defaults(chain->src, chain->len, input_path);
+        if (pd == (char*)-1) return -1;
+        CC__CANON_STEP("cc__rewrite_param_defaults");
+        if (cc_pass_chain_apply(chain, pd) < 0) return -1;
+    }
     /* Rewrite `@async void fn(...)` -> `@async CCAsyncVoidRet fn(...)` so
      * that phase-3 reparse sees a task-returning signature (required for
      * spawn-site lowerings such as `n->spawn_async(fn(args))` to type-check).

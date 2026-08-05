@@ -324,7 +324,6 @@ static int shadow_host_compile(const char* c_path, const char* o_path) {
     n = snprintf(cmd, sizeof(cmd),
                  "%s -std=c11 -D_DEFAULT_SOURCE"
                  " -I%s -I%s -I%s -I. -I%s"
-                 " -DCC_ENABLE_XJB_FLOAT_FMT=1"
                  " -ffunction-sections -fdata-sections"
                  " -Werror=implicit-function-declaration"
                  " %s %s %s %s"

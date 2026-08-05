@@ -308,28 +308,54 @@ static const char* shadow_find_inc_root(const char* rel, char* buf, size_t cap) 
     return rel; /* best-effort fallback */
 }
 
+/* First existing colon-separated entry from CC_INCLUDE_PATH (prefix install). */
+static const char* shadow_inc_from_env(char* buf, size_t cap) {
+    const char* env = getenv("CC_INCLUDE_PATH");
+    char paths[1024];
+    char* p;
+    char* sep;
+    if (!env || !env[0]) return NULL;
+    snprintf(paths, sizeof(paths), "%s", env);
+    p = paths;
+    while (p && *p) {
+        sep = strchr(p, ':');
+        if (sep) *sep = 0;
+        if (*p && access(p, R_OK) == 0) {
+            snprintf(buf, cap, "%s", p);
+            return buf;
+        }
+        p = sep ? sep + 1 : NULL;
+    }
+    return NULL;
+}
+
 static int shadow_host_compile(const char* c_path, const char* o_path) {
     char cmd[8192];
-    char inc_out[256], inc_cc[256], inc_ccinc[256], inc_ex[256];
+    char inc_env[512], inc_out[256], inc_cc[256], inc_ccinc[256], inc_ex[256];
     const char* cc = shadow_host_cc();
     const char* env_cflags = getenv("CFLAGS");
     const char* extra = g_shadow_host_opts.cc_flags;
     const char* release = g_shadow_host_opts.opt_release ? "-DNDEBUG" : "";
     const char* debug = g_shadow_host_opts.opt_debug ? "-g" : "";
+    const char* i_env = shadow_inc_from_env(inc_env, sizeof(inc_env));
     const char* i_out = shadow_find_inc_root("out/include", inc_out, sizeof(inc_out));
     const char* i_cci = shadow_find_inc_root("cc/include", inc_ccinc, sizeof(inc_ccinc));
     const char* i_cc = shadow_find_inc_root("cc", inc_cc, sizeof(inc_cc));
     const char* i_ex = shadow_find_inc_root("examples", inc_ex, sizeof(inc_ex));
     int n;
+    /* Prefer CC_INCLUDE_PATH (ccc sets this for prefix installs). Checkout
+     * -I roots stay for in-tree builds; missing dirs are harmless. */
     n = snprintf(cmd, sizeof(cmd),
                  "%s -std=c11 -D_DEFAULT_SOURCE"
+                 "%s%s%s"
                  " -I%s -I%s -I%s -I. -I%s"
-                 " -DCC_ENABLE_XJB_FLOAT_FMT=1"
                  " -ffunction-sections -fdata-sections"
                  " -Werror=implicit-function-declaration"
                  " %s %s %s %s"
                  " -c \"%s\" -o \"%s\"",
-                 cc, i_out, i_cci, i_cc, i_ex,
+                 cc,
+                 i_env ? " -I" : "", i_env ? i_env : "", i_env ? "" : "",
+                 i_out, i_cci, i_cc, i_ex,
                  (env_cflags && env_cflags[0]) ? env_cflags : "",
                  (extra && extra[0]) ? extra : "",
                  release, debug,

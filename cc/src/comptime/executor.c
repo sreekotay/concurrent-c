@@ -796,6 +796,8 @@ static TCCState* cc__exec_new_state(CCExecErrSink* sink, char* err_buf, size_t e
     tcc_add_symbol(s, "cc_reflect_param_count", (void*)cc_reflect_param_count);
     tcc_add_symbol(s, "cc_reflect_param_name", (void*)cc_reflect_param_name);
     tcc_add_symbol(s, "cc_reflect_param_type", (void*)cc_reflect_param_type);
+    tcc_add_symbol(s, "cc_reflect_param_default", (void*)cc_reflect_param_default);
+    tcc_add_symbol(s, "cc_reflect_params_c_abi", (void*)cc_reflect_params_c_abi);
     tcc_add_symbol(s, "cc_reflect_method_member", (void*)cc_reflect_method_member);
     tcc_add_symbol(s, "cc_reflect_method_params", (void*)cc_reflect_method_params);
     tcc_add_symbol(s, "cc_reflect_method_args", (void*)cc_reflect_method_args);

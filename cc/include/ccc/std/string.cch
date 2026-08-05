@@ -277,18 +277,14 @@ uint64_t cc_string_provenance(const CCString *str);
 static inline CCSlice cc_string_persist_slice(CCArena *arena, const CCString *str);
 /* string-template(policy, `...`, a): tag is empty for ${expr}; $~name{expr} passes tag "name". */
 typedef CCSlice (*CCStringPolicy)(CCArena *arena, CCSlice tag, CCSlice value);
-#ifndef CC_ENABLE_XJB_FLOAT_FMT
-#define CC_ENABLE_XJB_FLOAT_FMT 0
-#endif
-#if CC_ENABLE_XJB_FLOAT_FMT
 #ifdef __cplusplus
 extern "C" {
 #endif
-char* cc_xjb_f64_to_string(double v, char *buf);
-char* cc_xjb_f32_to_string(float v, char *buf);
+/* Provided by cc/runtime/float_format_zmij.c (linked into the runtime object). */
+char *cc_zmij_f64_to_string(double v, char *buf);
+char *cc_zmij_f32_to_string(float v, char *buf);
 #ifdef __cplusplus
 }
-#endif
 #endif
 static inline size_t cc_string_len(const CCString *str) {
     if (!str || cc_string_failed(str)) return 0;
@@ -503,58 +499,18 @@ static inline CCString* cc_string_push_uint(CCString *str, uint64_t v, CCArena *
     return cc__string_append_u64_impl(str, v, arena);
 }
 
-/* Non-XJB float printer: aim for the same shape as dragonbox/XJB for common
- * values (0.0, 1000.0, 1.2e+23) so host TCC (no C++ XJB link on Darwin)
- * matches string_template / to_str expectations. */
-static inline CCString* cc__string_push_double_fallback(CCString *str, double v, CCArena *arena) {
-    char buf[64];
-    int n;
-    if (!str) return NULL;
-    if (isnan(v)) {
-        n = snprintf(buf, sizeof(buf), "NaN");
-    } else if (isinf(v)) {
-        n = snprintf(buf, sizeof(buf), signbit(v) ? "-inf" : "inf");
-    } else if (v == 0.0) {
-        n = snprintf(buf, sizeof(buf), signbit(v) ? "-0.0" : "0.0");
-    } else {
-        n = snprintf(buf, sizeof(buf), "%.15g", v);
-        if (n > 0 && n < (int)sizeof(buf)) {
-            int has_dot = 0, has_exp = 0, i;
-            for (i = 0; i < n; i++) {
-                if (buf[i] == '.' || buf[i] == ',') has_dot = 1;
-                if (buf[i] == 'e' || buf[i] == 'E') has_exp = 1;
-            }
-            if (!has_dot && !has_exp && n + 2 < (int)sizeof(buf)) {
-                buf[n++] = '.';
-                buf[n++] = '0';
-                buf[n] = '\0';
-            }
-        }
-    }
-    if (n < 0) return NULL;
-    return cc_string_push_buffer(str, buf, (uint32_t)n, arena);
-}
-
 static inline CCString* cc_string_push_f32(CCString *str, float v, CCArena *arena) {
-#if CC_ENABLE_XJB_FLOAT_FMT
     char buf[64];
-    char* end = cc_xjb_f32_to_string(v, buf);
+    char *end = cc_zmij_f32_to_string(v, buf);
     if (!end || end < buf || (size_t)(end - buf) > sizeof(buf)) return NULL;
     return cc_string_push_buffer(str, buf, (uint32_t)(end - buf), arena);
-#else
-    return cc__string_push_double_fallback(str, (double)v, arena);
-#endif
 }
 
 static inline CCString* cc_string_push_f64(CCString *str, double v, CCArena *arena) {
-#if CC_ENABLE_XJB_FLOAT_FMT
     char buf[64];
-    char* end = cc_xjb_f64_to_string(v, buf);
+    char *end = cc_zmij_f64_to_string(v, buf);
     if (!end || end < buf || (size_t)(end - buf) > sizeof(buf)) return NULL;
     return cc_string_push_buffer(str, buf, (uint32_t)(end - buf), arena);
-#else
-    return cc__string_push_double_fallback(str, v, arena);
-#endif
 }
 
 static inline CCString* cc_string_push_float(CCString *str, double v, CCArena *arena) {

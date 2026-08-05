@@ -1077,6 +1077,52 @@ typedef struct {
     char name[64];
 } ShadowParam;
 
+/* Peel a declaration-style `= <literal>` default from a single param piece.
+ * Leaves call-style `x = 1` alone (no type on the left). */
+static void shadow_peel_param_default(char* piece, size_t* n_io) {
+    size_t n, i, depth, eq;
+    char prev, next;
+    if (!piece || !n_io) return;
+    n = *n_io;
+    depth = 0;
+    eq = n;
+    for (i = 0; i < n; i++) {
+        char c = piece[i];
+        if (c == '(' || c == '[' || c == '{') depth++;
+        else if (c == ')' || c == ']' || c == '}') {
+            if (depth) depth--;
+        } else if (c == '=' && depth == 0) {
+            prev = i > 0 ? piece[i - 1] : 0;
+            next = i + 1 < n ? piece[i + 1] : 0;
+            if (next != '=' && prev != '<' && prev != '>' && prev != '!' &&
+                prev != '=' && prev != '+' && prev != '-' && prev != '*' &&
+                prev != '/' && prev != '%' && prev != '&' && prev != '|' &&
+                prev != '^') {
+                eq = i;
+                break;
+            }
+        }
+    }
+    if (eq >= n) return;
+    /* Need a typed declarator on the left (at least one space before the name). */
+    {
+        size_t le = eq;
+        int saw_space = 0, saw_ident = 0;
+        while (le > 0 && (piece[le - 1] == ' ' || piece[le - 1] == '\t')) le--;
+        if (le == 0) return;
+        for (i = 0; i < le; i++) {
+            if (piece[i] == ' ' || piece[i] == '\t') saw_space = 1;
+            else if ((piece[i] >= 'A' && piece[i] <= 'Z') ||
+                     (piece[i] >= 'a' && piece[i] <= 'z') || piece[i] == '_')
+                saw_ident = 1;
+        }
+        if (!saw_space || !saw_ident) return;
+    }
+    while (eq > 0 && (piece[eq - 1] == ' ' || piece[eq - 1] == '\t')) eq--;
+    piece[eq] = 0;
+    *n_io = eq;
+}
+
 static int shadow_parse_params(const char* params, ShadowParam* out, int cap) {
     const char* p = params;
     int nout = 0;
@@ -1107,6 +1153,7 @@ static int shadow_parse_params(const char* params, ShadowParam* out, int cap) {
         piece[n] = 0;
         while (n > 0 && (piece[n - 1] == ' ' || piece[n - 1] == '\t'))
             piece[--n] = 0;
+        shadow_peel_param_default(piece, &n);
         if (!n || strcmp(piece, "void") == 0) {
             if (!comma) break;
             p = comma + 1;
@@ -1225,7 +1272,8 @@ static void shadow_normalize_result_param_ty(char* ty, size_t cap) {
     snprintf(ty, cap, "%s%s", rname, rest);
 }
 
-/* Rewrite channel / Result sugar inside a param list string (fn signatures). */
+/* Rewrite channel / Result sugar inside a param list string (fn signatures).
+ * Also rebuilds when `=` is present so declaration-style defaults strip for C. */
 static void shadow_normalize_chan_params(char* params, size_t cap) {
     ShadowParam ps[16];
     int np;
@@ -1233,7 +1281,8 @@ static void shadow_normalize_chan_params(char* params, size_t cap) {
     size_t n;
     char buf[512];
     if (!params || !cap) return;
-    if (!strstr(params, "[~") && !strstr(params, "!>")) return;
+    if (!strstr(params, "[~") && !strstr(params, "!>") && !strchr(params, '='))
+        return;
     np = shadow_parse_params(params, ps, 16);
     if (np <= 0) return;
     buf[0] = 0;

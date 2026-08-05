@@ -40,23 +40,28 @@ result-spec typedefs mid-comment. Tracked as task #53;
 `tests/shcc_comment_semicolon_fail.shcc` is the tripwire, and the smoke's
 comment stays semicolon-free until the fix lands.
 
-## Keyword-only parameters cannot be spelled
+## Keyword-only (`*`) still unspelled
 
-Upstream 0.27 takes its extras keyword-only: `hamming(a, b, *, pad=True)`,
-`distance(..., weights=...)`, `score_cutoff` everywhere. py_module
-trampolines are positional-only (`METH_FASTCALL`, no kwnames handling), so
-cclev cannot even accept `pad`. The specimen bakes in upstream's defaults
-(hamming pads) and parity.py calls upstream with `pad=True` explicitly.
-Fixing this means kwargs support in the trampoline layer — a real interop
-gap, not a specimen problem.
+Defaults are spelled as C++-style literals on parameters
+(`long long pad = 1`): reflection sees them, lowering strips them for
+host C, and `py_module` fills missing kwargs from the literal. Upstream
+0.27's keyword-only marker (`hamming(a, b, *, pad=True)`) is still not
+modeled — `pad` may also be passed positionally. Weights / cutoffs are
+not exported yet.
 
-## UTF-8 decoding is hand-rolled
+## Text as `CCPyStr`, not UTF-8 `CCSlice`
 
-Python str crosses the boundary as UTF-8 bytes in a `CCSlice`; edit distance
-must count codepoints ('é' vs 'e' is one edit, not two). The specimen
-hand-rolls a ~20-line decoder into an arena. Fine once, but every
-text-processing module will write this loop; a stdlib codepoint
-iterator/decoder over `CCSlice` would erase it.
+Methods that want Unicode scalars take `CCPyStr` (call-scoped borrow of
+the Python `str`) and call `s.codepoints(arena)` — Stable-ABI UCS4 fill,
+no UTF-8 round-trip. `CCSlice` remains the UTF-8 byte view when that is
+what the API wants.
+
+## `name__helper` statics were mistaken for grammar tape
+
+Any identifier containing `__` was classified as a grammar-engine static
+and emitted as opaque tape — so UFCS inside `lev__prep` never rewrote.
+Tightened to `Name__r_` / `__m_` / `__b_` / `__fill` / `__s__*` only;
+`tests/ufcs_dunder_helper_smoke.ccs` pins it.
 
 ## Upstream semantics live in the implementation, not the docs
 

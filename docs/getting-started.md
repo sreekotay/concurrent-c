@@ -3,7 +3,6 @@
 ## Prerequisites
 
 - C compiler (gcc or clang)
-- C++ compiler (`c++`) — builds the runtime's float formatter
 - POSIX system (Linux, macOS)
 - make, git
 
@@ -15,9 +14,10 @@ cd concurrent-c
 PREFIX="$HOME/.local" ./cc-install.sh
 ```
 
-That fetches submodules, builds a patched TinyCC and the compiler, installs to
-`$PREFIX`, and verifies the install by compiling a program against it. Add
-`$PREFIX/bin` to `PATH` and `ccc` is ready:
+That fetches submodules, builds a patched TinyCC and the compiler (including
+`shadow_lower`, the default serdes front), installs both to `$PREFIX/bin`, and
+verifies the install by compiling a program against it. Add `$PREFIX/bin` to
+`PATH` and `ccc` is ready:
 
 ```bash
 ccc run hello.ccs

@@ -7,7 +7,7 @@ All dependencies are Git submodules for easy version tracking and updates.
 | Directory | Library | License | Purpose | Required for | Build |
 |-----------|---------|---------|---------|--------------|-------|
 | `tcc/` | TinyCC | LGPL 2.1 | C parser/compiler foundation | compiler build | (auto) |
-| `xjb/` | xjb | Apache-2.0 | Float/double-to-string formatting | compiler build | (auto) |
+| `zmij/` | Żmij | MIT / BSL-1.0 | Float/double-to-string formatting | compiler build | (auto) |
 | `liblfds/` | liblfds 7.1.1 | Unlicense | Optional lock-free channel queue backend | — | (auto) |
 | `bearssl/` | BearSSL | MIT | TLS support (`<std/tls.cch>`) | `<std/tls.cch>` | `make bearssl` |
 | `curl/` | libcurl | MIT | HTTP client (`<std/http.cch>`) | `<std/http.cch>` | `make curl` |
@@ -15,22 +15,23 @@ All dependencies are Git submodules for easy version tracking and updates.
 Fetch the build inputs with:
 
 ```bash
-./scripts/fetch_submodules.sh              # tcc (full) + xjb (sparse)
+./scripts/fetch_submodules.sh              # tcc (full) + zmij (sparse)
 ./scripts/fetch_submodules.sh --full       # complete trees, for submodule work
 ./scripts/fetch_submodules.sh --with-liblfds
 ```
 
 **Note**: BearSSL and libcurl are opt-in. Only build/link what you need.
 
-## xjb
+## zmij
 
-Supplies the runtime's fast float/double formatting, replacing the `snprintf`-based
-float string path. `cc/runtime/float_format_xjb.cpp` wraps it; the build compiles
-`src/ftoa.cpp` into the runtime and `make install` stages it as
-`$PREFIX/lib/ccc/runtime/vendor/xjb_ftoa.cpp`.
+Supplies the runtime's shortest float/double formatting
+([vitaut/zmij](https://github.com/vitaut/zmij)). `cc/runtime/float_format_zmij.c`
+wraps it and applies the stdlib trailing-`.0` polish; the build compiles that TU
+into the runtime and `make install` stages `zmij.c` / `zmij-c.h` under
+`$PREFIX/lib/ccc/runtime/vendor/`.
 
-Only `src/` is used. `fetch_submodules.sh` checks out that path alone — the full
-tree is ~37M, almost all of it benchmark corpora.
+`fetch_submodules.sh` checks out only the C sources — the full tree also carries
+a large test/benchmark corpus.
 
 ## liblfds
 

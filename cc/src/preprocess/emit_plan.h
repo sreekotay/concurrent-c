@@ -298,6 +298,10 @@ int cc_reflect_method_name(const char* type_name, int idx, char* buf, int buf_sz
 int cc_reflect_param_count(const char* params);
 int cc_reflect_param_name(const char* params, int idx, char* buf, int buf_sz);
 int cc_reflect_param_type(const char* params, int idx, char* buf, int buf_sz);
+/* Default literal text for params[idx] (`= 1` → `"1"`).  0 = none; -1 = bad. */
+int cc_reflect_param_default(const char* params, int idx, char* buf, int buf_sz);
+/* Parenthesized ABI form with defaults stripped — safe to emit as C. */
+int cc_reflect_params_c_abi(const char* params, char* buf, int buf_sz);
 int cc_reflect_method_member(const char* type_name, int idx, char* buf, int buf_sz);
 int cc_reflect_method_params(const char* type_name, int idx, char* buf, int buf_sz);
 int cc_reflect_method_args(const char* type_name, int idx, char* buf, int buf_sz);

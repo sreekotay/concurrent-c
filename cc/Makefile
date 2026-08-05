@@ -1,5 +1,4 @@
 CC ?= cc
-CXX ?= c++
 TCC_BIN ?=
 TCC_EXT ?= 1
 TCC_INC ?= ../third_party/tcc
@@ -47,10 +46,8 @@ ifeq ($(CC_ENABLE_TLS),1)
 endif
 ifeq ($(BUILD),debug)
   CFLAGS := $(CFLAGS_COMMON) -O0 -g
-  CXXFLAGS := $(CFLAGS_COMMON) -O0 -g -std=c++17 -fno-exceptions -fno-rtti
 else
   CFLAGS := $(CFLAGS_COMMON) -O2 -ffunction-sections -fdata-sections
-  CXXFLAGS := $(CFLAGS_COMMON) -O2 -ffunction-sections -fdata-sections -std=c++17 -fno-exceptions -fno-rtti
 endif
 # UFCS requires the patched TCC extension (AST hooks). Enforce TCC_EXT=1.
 ifneq ($(TCC_EXT),1)
@@ -87,7 +84,7 @@ endif
 
 # TinyCC host: C11 mode, -B for libtcc1.a, neutralize unimplemented
 # _Thread_local (ccc frontend TLS is process-scoped under TINYC — ccc is not
-# multi-threaded across those sites). Skip C++ XJB float merge below.
+# multi-threaded across those sites).
 ifeq ($(CC_IS_TCC),1)
   CFLAGS += -std=c11 -D_Thread_local= -D__thread=
   # liblfds has no TCC port (needs GCC __atomic_* / OS PAL).
@@ -114,12 +111,8 @@ else
 endif
 OBJS := $(SRCS:%.c=$(OBJDIR)/%.o)
 RUNTIME_CORE_OBJ := $(OBJDIR)/runtime/concurrent_c.core.o
-RUNTIME_XJB_OBJ := $(OBJDIR)/runtime/float_format_xjb.o
-ifeq ($(CC_IS_TCC),1)
-  DEPS := $(OBJS:.o=.d)
-else
-  DEPS := $(OBJS:.o=.d) $(RUNTIME_CORE_OBJ:.o=.d) $(RUNTIME_XJB_OBJ:.o=.d)
-endif
+RUNTIME_FLOAT_OBJ := $(OBJDIR)/runtime/float_format_zmij.o
+DEPS := $(OBJS:.o=.d) $(RUNTIME_CORE_OBJ:.o=.d) $(RUNTIME_FLOAT_OBJ:.o=.d)
 REAL_BINARY := bin/.ccc-bin
 CCC_SCRIPT  := bin/ccc
 CCC_WRAPPER_TEMPLATE := scripts/ccc_wrapper.sh
@@ -322,12 +315,13 @@ $(WRAPPER): $(CCC_SCRIPT)
 
 # Runtime shared lib for shadow --exe (libtcc cannot link host clang .o on Darwin).
 # Leaf soname only — run with DYLD_LIBRARY_PATH / LD_LIBRARY_PATH = this dir.
+# Host TCC needs CFLAGS (-B) so -shared finds libtcc1.a.
 $(RUNTIME_DYLIB): $(OBJDIR)/runtime/concurrent_c.o
 	@mkdir -p $(dir $@)
 ifeq ($(shell uname -s),Darwin)
-	$(CC) $(RUNTIME_DYLIB_LINK) -install_name libcc_runtime.dylib -o $@ $< -lpthread -lm
+	$(CC) $(CFLAGS) $(RUNTIME_DYLIB_LINK) -install_name libcc_runtime.dylib -o $@ $< -lpthread -lm
 else
-	$(CC) $(RUNTIME_DYLIB_LINK) -o $@ $< -lpthread -lm
+	$(CC) $(CFLAGS) $(RUNTIME_DYLIB_LINK) -o $@ $< -lpthread -lm
 endif
 
 $(SHADOW_TCC_OBJ): $(SHADOW_TCC_C) $(TCC_LIB_DEP)
@@ -377,12 +371,22 @@ $(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_BOOT_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_CO
 	@test -f "$(BOOTSTRAP_DIR)/shadow_lower.c" || \
 		(echo "missing $(BOOTSTRAP_DIR)/shadow_lower.c; run snapshot+promote"; exit 1)
 	@mkdir -p $(dir $@)
+	# Bootstrap emit uses <examples/serdes/c/*.h>; seed those from the
+	# snapshot so a clean tree (no leftover out/include) still host-ccs.
+	@mkdir -p ../out/include/examples/serdes/c
+	@if ls $(BOOTSTRAP_DIR)/include/*.h >/dev/null 2>&1; then \
+		cp -f $(BOOTSTRAP_DIR)/include/*.h ../out/include/examples/serdes/c/; \
+	fi
+	# concurrent_c.o (which unity-includes arena_state.c, the FFC_IMPL TU)
+	# must precede libshadow_comptime.a so ld never pulls the archive's own
+	# arena_state.o and double-defines the ffc_* symbols.
 	$(CC) $(CFLAGS) -o $@ $(BOOTSTRAP_DIR)/shadow_lower.c \
 		-I$(BOOTSTRAP_DIR)/include -Iinclude -I../out/include \
 		-I../examples/serdes/c -I$(TCC_INC) -DSHADOW_HAVE_LIBTCC=1 \
-		$(abspath $(SHADOW_TCC_OBJ)) $(abspath $(SHADOW_COMPTIME_LIB)) \
+		$(abspath $(SHADOW_TCC_OBJ)) \
 		$(abspath $(OBJDIR)/runtime/concurrent_c.o) \
-		-L$(TCC_LIB) -ltcc $(LDFLAGS) $(LDLIBS)
+		$(abspath $(SHADOW_COMPTIME_LIB)) \
+		$(LDFLAGS) $(LDLIBS)
 	@mkdir -p $(dir $(SHADOW_LOWER_SCRIPT))
 	@cp $@ $(SHADOW_LOWER_SCRIPT)
 	@chmod +x $(SHADOW_LOWER_SCRIPT)
@@ -407,14 +411,9 @@ $(LOWER_HEADERS_BINARY): $(LOWER_HEADERS_OBJS) $(TCC_LIB_DEP)
 
 $(OBJDIR)/runtime/concurrent_c.o: $(LOWER_HEADERS_STAMP)
 	@mkdir -p $(dir $@)
-ifeq ($(CC_IS_TCC),1)
-	# No C++ XJB under host TCC — same fallback path as user programs with CC=tcc.
-	$(CC) $(CFLAGS) -DCC_ENABLE_XJB_FLOAT_FMT=0 -MMD -MP -MF $(@:.o=.d) -c $(OUT_RUNTIME)/concurrent_c.c -o $@
-else
-	$(CC) $(CFLAGS) $(RUNTIME_PIC) -DCC_ENABLE_XJB_FLOAT_FMT=1 -MMD -MP -MF $(RUNTIME_CORE_OBJ:.o=.d) -c $(OUT_RUNTIME)/concurrent_c.c -o $(RUNTIME_CORE_OBJ)
-	$(CXX) $(CXXFLAGS) $(RUNTIME_PIC) -DCC_ENABLE_XJB_FLOAT_FMT=1 -MMD -MP -MF $(RUNTIME_XJB_OBJ:.o=.d) -c runtime/float_format_xjb.cpp -o $(RUNTIME_XJB_OBJ)
-	$(CC) -nostdlib -r -o $@ $(RUNTIME_CORE_OBJ) $(RUNTIME_XJB_OBJ)
-endif
+	$(CC) $(CFLAGS) $(RUNTIME_PIC) -MMD -MP -MF $(RUNTIME_CORE_OBJ:.o=.d) -c $(OUT_RUNTIME)/concurrent_c.c -o $(RUNTIME_CORE_OBJ)
+	$(CC) $(CFLAGS) $(RUNTIME_PIC) -MMD -MP -MF $(RUNTIME_FLOAT_OBJ:.o=.d) -c runtime/float_format_zmij.c -o $(RUNTIME_FLOAT_OBJ)
+	$(CC) -nostdlib -r -o $@ $(RUNTIME_CORE_OBJ) $(RUNTIME_FLOAT_OBJ)
 
 $(OBJDIR)/%.o: %.c | $(TCC_PATCH_STAMP)
 	@mkdir -p $(dir $@)
@@ -441,6 +440,7 @@ $(EMIT_TPL_PRELUDE): $(GEN_EMIT_TPL) $(EMIT_TPL_CORE)
 	$(GEN_EMIT_TPL)
 
 $(OBJDIR)/src/comptime/executor.o: $(EMIT_TPL_PRELUDE)
+$(OBJDIR)/src/comptime/hook_compile.o: $(EMIT_TPL_PRELUDE)
 
 .PHONY: all clean
 

@@ -13,11 +13,11 @@ PYTHONPATH=bin python3 -c "import cclev; print(cclev.distance('kitten','sitting'
 ## Exports
 
 `distance`, `ratio`, `hamming`, `jaro`, `jaro_winkler` — all over
-codepoints (a hand-rolled UTF-8 decode), matching upstream:
+codepoints (`CCPyStr` → `s.codepoints(arena)`), matching upstream:
 
 - `ratio` = `(lensum - indel) / lensum`, indel = substitution-cost-2 DP
-- `hamming` pads unequal lengths (upstream's `pad=True`; cclev cannot spell
-  the keyword-only parameter — see FRICTION.md)
+- `hamming(..., pad=1)` by default; `pad=0` raises on unequal lengths
+  (keyword-only `*` still unspelled — see FRICTION.md)
 - `jaro`: both-empty = 1.0, one-empty = 0.0, transpositions halved with
   integer division
 - `jaro_winkler`: prefix bonus 0.1 capped at 4, only above the 0.7 boost
@@ -58,18 +58,17 @@ Snapshot from `ccc build -O` + `bench.py` on Darwin arm64 (raw output under
 
 | workload | cclev | upstream | cclev/upstream |
 |---|---|---|---|
-| distance, words 3–12 | 129 ns | 261 ns | 0.49× — cclev faster |
-| distance, 200 chars | 2.6 µs | 3.2 µs | 0.81× — cclev faster |
-| ratio, words 3–12 | 105 ns | 279 ns | 0.37× — cclev faster |
-| ratio, 200 chars | 864 ns | 914 ns | 0.95× — near parity |
-| jaro_winkler, words 3–12 | 101 ns | 288 ns | 0.35× — cclev faster |
-| hamming, equal-len words | 48 ns | 112 ns | 0.43× — cclev faster |
+| distance, words 3–12 | 90 ns | 166 ns | 0.55× — cclev faster |
+| distance, 200 chars | 1.6 µs | 2.2 µs | 0.71× — cclev faster |
+| ratio, words 3–12 | 103 ns | 199 ns | 0.52× — cclev faster |
+| ratio, 200 chars | 532 ns | 634 ns | 0.84× — cclev faster |
+| jaro_winkler, words 3–12 | 117 ns | 213 ns | 0.55× — cclev faster |
+| hamming, equal-len words | 47 ns | 82 ns | 0.57× — cclev faster |
 
 Short strings: cclev wins — the abi3 crossing is cheaper than upstream's
 binding layer. Long rows sit at or ahead of rapidfuzz after the bit-parallel
-kernels and `@comptime` fixed-block specializations; the remaining residue
-is structural: Python str reaches us as UTF-8 bytes to decode, while
-upstream reads CPython's internal codepoint array and never decodes at all.
+kernels and `@comptime` fixed-block specializations; codepoints arrive via
+`CCPyStr.codepoints` (Stable-ABI UCS4) rather than a UTF-8 round-trip.
 With the scalar DP alone the long rows read 13× and 35×. (Refresh the table
 from a bench run on your machine — the crossing-dominated short rows
 especially move with the CPU.)

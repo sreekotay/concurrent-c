@@ -1,12 +1,11 @@
 # real_projects/levenshtein/bench.py snapshot (ccc build -O)
-# date: 2026-08-04T03:46:17Z
-# host: Darwin 25.0.0 arm64
-# cc:   9ce4c882
-# note: dist_fx2..fx8 + lcs_fx2..fx8 specializations
+# date: 2026-08-04
+# host: Darwin arm64
+# note: CCPyStr.codepoints + pad=1 default; dist_fx2..fx8 + lcs_fx2..fx8
 #
-distance/words(3-12)         cclev      129 ns  upstream      261 ns  cclev/upstream  0.49x  (cclev faster)
-distance/long(200)           cclev     2615 ns  upstream     3229 ns  cclev/upstream  0.81x  (cclev faster)
-ratio/words(3-12)            cclev      105 ns  upstream      279 ns  cclev/upstream  0.37x  (cclev faster)
-ratio/long(200)              cclev      864 ns  upstream      914 ns  cclev/upstream  0.95x  (cclev faster)
-jaro_winkler/words(3-12)     cclev      101 ns  upstream      288 ns  cclev/upstream  0.35x  (cclev faster)
-hamming/words equal-len      cclev       48 ns  upstream      112 ns  cclev/upstream  0.43x  (cclev faster)
+distance/words(3-12)         cclev       90 ns  upstream      166 ns  cclev/upstream  0.55x  (cclev faster)
+distance/long(200)           cclev     1592 ns  upstream     2231 ns  cclev/upstream  0.71x  (cclev faster)
+ratio/words(3-12)            cclev      103 ns  upstream      199 ns  cclev/upstream  0.52x  (cclev faster)
+ratio/long(200)              cclev      532 ns  upstream      634 ns  cclev/upstream  0.84x  (cclev faster)
+jaro_winkler/words(3-12)     cclev      117 ns  upstream      213 ns  cclev/upstream  0.55x  (cclev faster)
+hamming/words equal-len      cclev       47 ns  upstream       82 ns  cclev/upstream  0.57x  (cclev faster)

@@ -1520,9 +1520,9 @@ static int PpStmt_collect(const char* s, size_t n, CCArena* arena,
 
 
 #line 22 "examples/serdes/c/shadow_lower.ccs"
-#include <examples/serdes/c/c_pp_spike.h>
+#include "c_pp_spike.h"
 #line 23 "examples/serdes/c/shadow_lower.ccs"
-#include <examples/serdes/c/shadow_build.h>
+#include "shadow_build.h"
 #line 18 "examples/serdes/c/shadow_tcc_compile.h"
 int shadow_tcc_compile_exe(const char* c_src, const char* out_exe,
                            const char* tcc_lib_dir,

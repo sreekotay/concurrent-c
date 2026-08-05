@@ -212,6 +212,9 @@ CCResult_CCSliceHdr_CCError cc_slice_hdr_clone_into(CCSliceHdr *src, CCArena *ar
 /* Stabilize `*s` in `arena` (mutate in place). */
 bool !>(CCError) cc_slice_materialize_in(CCSlice *s, CCArena *arena);
 
+/* UTF-8 bytes → Unicode scalar values in `arena`. */
+uint32_t[:] !>(CCError) cc_slice_utf8_codepoints(const CCSlice *s, CCArena *arena);
+
 /* Checked index — same Result/error in all builds (no debug/release split). */
 char !>(CCError) cc_slice_get_checked(CCSlice *s, size_t idx);
 char !>(CCError) cc_slice_at(CCSlice *s, size_t idx);          /* alias of get_checked */
@@ -221,6 +224,15 @@ bool !>(CCError) cc_slice_set(CCSlice *s, size_t idx, char c);
 `materialize_in` is a no-op when the slice is empty, canonical/static, or
 already from `arena`'s provenance epoch; otherwise it clones into `arena` and
 replaces `*s`. It does not free the prior view. UFCS: `s.materialize_in(arena)`.
+
+`utf8_codepoints` decodes the receiver as UTF-8 into an arena-backed
+`uint32_t[:]` (element count = codepoint count). Empty input yields an empty
+typed slice without allocating. An all-ASCII prefix (and an all-ASCII slice)
+takes a widen-only fast path. Truncated sequences, bad continuations, overlong
+encodings, UTF-16 surrogates, and values above U+10FFFF return `CC_ERR_PARSE`;
+missing arena or a null non-empty pointer returns `CC_ERR_INVALID_ARG`;
+allocation failure returns `CC_ERR_OUT_OF_MEMORY`. UFCS:
+`s.utf8_codepoints(arena)`.
 
 Out-of-bounds or null-pointer index ops return `CC_ERR_INVALID_ARG`. Soft-zero
 `at` is gone. Raw `s.ptr[i]` / `((char*)s.ptr)[i]` remains an untracked Gap
@@ -410,8 +422,29 @@ families, `intptr_t_to_str`, `uintptr_t_to_str`, `float_to_str`,
 `double_to_str`, and `bool_to_str`. The `intptr_t` and `uintptr_t` helpers are
 direct per-type entry points; they are not distinct associations in
 `cc_string_from`. Integer formatting is decimal, boolean formatting is `true`
-or `false`, and floating-point formatting uses `%g` unless the optional XJB
-formatter is enabled.
+or `false`.
+
+Floating-point formatting (`float_to_str`, `double_to_str`,
+`cc_string_push_f32`, `cc_string_push_f64`, `cc_string_push_float`, and the
+`float` / `double` arms of `cc_string_from`, push/append, and `@string`
+interpolation) is locale-independent and uses the decimal point character
+`.`. For a finite value it emits a shortest correctly rounded decimal
+representation that round-trips under a correctly rounding decimal-to-binary
+parse of the same IEEE width (`binary32` for `float`, `binary64` for
+`double`):
+
+- Let \(e\) be the decimal exponent of the value in normalized scientific
+  form \(d \times 10^{e}\) with \(1 \le d < 10\). Fixed notation is used when
+  \(-4 \le e \le 15\); otherwise scientific notation is used.
+- Scientific notation uses a lowercase `e`, an explicit sign on the exponent,
+  and at least two exponent digits (for example `1.2e+23`, `1e-05`, `1e+16`).
+- Trailing zeros in the fractional significand are omitted. When fixed
+  notation would otherwise contain no decimal point (the value is an integer),
+  a trailing `.0` is appended, so every finite result contains either `.` or
+  `e` (for example `0.0`, `1000.0`, `-1.0`).
+- Negative zero formats as `-0.0`.
+
+Non-finite values format as the lowercase literals `nan`, `inf`, and `-inf`.
 
 ## File and buffered I/O
 
@@ -1850,7 +1883,22 @@ with the exception set — not a CC Result, because the caller is the
 import machinery.
 
 The trampolines, marshalling, and error conversion are the same
-machinery `py_expose` emits. A fallible method's error crosses as the
+machinery `py_expose` emits. Trampolines are registered as
+`METH_FASTCALL|METH_KEYWORDS`: positional arguments and keywords bind by
+reflected parameter name (receiver excluded). A parameter may spell a
+default as a trailing `= <literal>` (integer, float, string, char, `NULL`,
+`true`, `false`); missing arguments for those slots take the literal.
+Once a default appears, every trailing parameter must also have one.
+Host C does not receive the defaults — lowering strips them from the
+ABI signature. Unexpected names, duplicates, and missing required
+arguments raise `TypeError`. Keyword-only markers (`*`) are not modeled.
+
+`CCSlice` / `char[:]` parameters still borrow CPython's UTF-8 buffer for
+the call. `CCPyStr` parameters borrow the `str` object itself; UFCS
+`s.codepoints(arena)` materializes an arena-backed `uint32_t[:]` of Unicode
+scalars via Stable-ABI `PyUnicode_AsUCS4` (no UTF-8 round-trip).
+
+A fallible method's error crosses as the
 Python exception its kind maps to, message intact — the kind is what a
 Python caller dispatches on:
 

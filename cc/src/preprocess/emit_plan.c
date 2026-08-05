@@ -1482,6 +1482,40 @@ int cc_reflect_param_type(const char* params, int idx, char* buf, int buf_sz) {
     return cc__reflect_param_member(params, idx, 1, buf, buf_sz);
 }
 
+int cc_reflect_param_default(const char* params, int idx, char* buf, int buf_sz) {
+    return cc_ct_reflect_param_default(params, idx, buf, buf_sz);
+}
+
+int cc_reflect_params_c_abi(const char* params, char* buf, int buf_sz) {
+    CCCtField* ps = NULL;
+    size_t pn = 0, len;
+    char* acc;
+    int rc;
+    if (!params || !*params) return cc__rfl_emit("()", buf, buf_sz);
+    if (!cc_ct_reflect_param_list(params, &ps, &pn)) return -1;
+    if (pn == 0) {
+        cc_ct_free_fields(ps, pn);
+        return cc__rfl_emit("(void)", buf, buf_sz);
+    }
+    len = 3;
+    for (size_t k = 0; k < pn; k++)
+        len += strlen(ps[k].type) + 1 + strlen(ps[k].name) + 2;
+    acc = (char*)malloc(len);
+    if (!acc) { cc_ct_free_fields(ps, pn); return -1; }
+    acc[0] = '('; acc[1] = '\0';
+    for (size_t k = 0; k < pn; k++) {
+        if (k) strcat(acc, ", ");
+        strcat(acc, ps[k].type);
+        strcat(acc, " ");
+        strcat(acc, ps[k].name);
+    }
+    strcat(acc, ")");
+    cc_ct_free_fields(ps, pn);
+    rc = cc__rfl_emit(acc, buf, buf_sz);
+    free(acc);
+    return rc;
+}
+
 int cc_reflect_method_member(const char* type_name, int idx, char* buf, int buf_sz) {
     return cc__reflect_method_member(type_name, idx, CC__RM_MEMBER, buf, buf_sz);
 }

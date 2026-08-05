@@ -3136,9 +3136,25 @@ static int shadow_is_grammar_static_helper(CCSlice name) {
     n = name.len < sizeof(buf) - 1 ? name.len : sizeof(buf) - 1;
     memcpy(buf, name.ptr, n);
     buf[n] = 0;
-    /* Internal matchers / fills: Name__r_*, Name__m_*, Name__fill, …
-     * Require a leading type prefix — not libc/CC helpers like `__cc_*`. */
-    if (buf[0] != '_' && strstr(buf, "__")) return 1;
+    /* Internal matchers / fills: Name__r_*, Name__m_*, Name__b_*,
+     * Name__fill, Name__s__m_* / __s__b_* (skip-tier).  Any `__` was too
+     * broad — user helpers like `lev__prep` became opaque tape and lost
+     * UFCS.  Leading `__` (libc/CC) stays excluded. */
+    {
+        const char* dd = strstr(buf, "__");
+        if (buf[0] != '_' && dd) {
+            const char* after = dd + 2;
+            if ((after[0] == 'r' || after[0] == 'm' || after[0] == 'b') &&
+                after[1] == '_')
+                return 1;
+            if (strcmp(after, "fill") == 0 || strncmp(after, "fill_", 5) == 0)
+                return 1;
+            if (strncmp(after, "s__m_", 5) == 0 ||
+                strncmp(after, "s__b_", 5) == 0 ||
+                strncmp(after, "s__r_", 5) == 0)
+                return 1;
+        }
+    }
     /* Public entry wrappers: Type_match / Type_parse / … — Type must be a
      * pending grammar/schema name. CapCase alone is too broad (RedisReply_write
      * carries Concurrent-C designators and must be structured). */

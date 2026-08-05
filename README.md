@@ -97,8 +97,7 @@ The compiler pipeline was refactored in 2026 (M0–M5.5): diagnostics core, shar
 
 ### Install
 
-Requires `git`, `make`, a C compiler, and a C++ compiler (the runtime's float
-formatter is C++).
+Requires `git`, `make`, and a C compiler.
 
 ```bash
 git clone --filter=blob:none https://github.com/sreekotay/concurrent-c.git
@@ -106,9 +105,10 @@ cd concurrent-c
 PREFIX="$HOME/.local" ./cc-install.sh
 ```
 
-One pass: fetch submodules, patch and build TinyCC, build `ccc`, install to
-`$PREFIX`, then compile a program against the installed prefix to prove it
-works. Roughly half a minute on four cores and about 40M of disk.
+One pass: fetch submodules, patch and build TinyCC, build `ccc` and
+`shadow_lower` (default serdes front), install both to `$PREFIX/bin`, then
+compile a program against the installed prefix to prove it works. Roughly half
+a minute on four cores and about 40M of disk.
 
 `cc-install.sh` works in two modes:
 - Run from the repo root, it uses the current checkout.
@@ -149,13 +149,25 @@ make cc -j"$jobs"                    # or: make cc BUILD=debug -j"$jobs"
 Notes:
 - The build links against the patched `libtcc.a` so CC's AST hooks are available.
 - `scripts/fetch_submodules.sh` fetches only what the build needs: all of
-  `third_party/tcc`, and `third_party/xjb` sparse (one source file out of a 37M
-  tree). `third_party/liblfds` is an optional channel backend — pass
+  `third_party/tcc`, and `third_party/zmij` sparse (`zmij.c` / `zmij-c.h`).
+  `third_party/liblfds` is an optional channel backend — pass
   `--with-liblfds` to include it.
 - Today the compiler build uses `make`. The longer-term goal is to move project builds under `cc` itself.
 - Compiler outputs:
   - `cc/bin/.ccc-bin` (real binary)
   - `cc/bin/ccc` (wrapper that refreshes lowered headers, then execs the real binary)
+  - `out/cc/bin/shadow_lower` (native serdes lowerer; also copied to `cc/bin/`)
+- `shadow_lower` is host-cc'd from a committed bootstrap snapshot
+  (`cc/bootstrap/shadow_lower/$(cat last-good)/` — lowered C checked into git).
+  Source of truth remains `examples/serdes/c/*.ccs`; promote a new snapshot after
+  meaningful serdes changes (`scripts/snapshot_shadow_lower.sh` +
+  `scripts/promote_shadow_bootstrap.sh`).
+- Host-TCC self-build: on Linux you can compile `ccc` itself with the just-built
+  TinyCC (`CCC_HOST_CC=tcc ./scripts/smoke_i386.sh`, or the same env inside an
+  ILP32 container). Darwin cannot — host TCC emits ELF while the in-tree
+  `libtcc.a` is Mach-O. TinyCC also does not honor `__attribute__((weak))`;
+  production `shadow_lower` omits weak emit-plan stubs when
+  `SHADOW_HAVE_LIBTCC` is set so the link stays clean.
 
 #### Install to a prefix
 
@@ -169,23 +181,26 @@ make install-check PREFIX=/opt/ccc   # compile a program against the install
 Installed layout:
 ```
 $PREFIX/
-├── bin/ccc                      # compiler binary
+├── bin/ccc                      # compiler driver (default front: serdes)
+├── bin/shadow_lower             # serdes lowerer (required beside ccc)
 ├── include/ccc/                 # headers, as .cch and pre-lowered .h
 │   ├── cc_runtime.cch, cc_runtime.h, ...
 │   ├── std/                     # prelude.cch, vec.cch, map.cch, ...
-│   ├── script/                  # stdio.cch (print/println), file.cch, sh.cch, ...
+│   ├── script/                  # stdio.cch, file.cch, sh.cch, ...
 │   └── vendor/
 └── lib/ccc/
-    ├── runtime/                 # pre-lowered runtime source
+    ├── runtime/                 # pre-lowered runtime source (compiled on first use)
     │   ├── concurrent_c.c
-    │   └── vendor/xjb_ftoa.cpp
+    │   ├── float_format_zmij.c
+    │   └── vendor/zmij.c
     └── tcc/                     # TinyCC builtin headers + libtcc1.a
 ```
 
 An installed tree is self-contained — it never reads back into a checkout.
-Headers ship pre-lowered because lowering is a build-tree step. `ccc` writes
-build outputs to `./out` and `./bin` relative to the working directory (use
-`--out-dir` / `--bin-dir` to redirect), never into `$PREFIX`.
+Headers ship pre-lowered because lowering is a build-tree step. The driver
+resolves includes, runtime sources, and `shadow_lower` from the prefix.
+`ccc` writes build outputs to `./out` and `./bin` relative to the working
+directory (use `--out-dir` / `--bin-dir` to redirect), never into `$PREFIX`.
 
 The compiler auto-detects its include/runtime paths from the binary location. You can also override with `CC_HOME`:
 ```bash

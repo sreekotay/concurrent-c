@@ -91,12 +91,18 @@ root_s = str(root)
 inc_abs = re.compile(
     r'#include\s+"[^"]*/out/include/examples/serdes/c/([^"/]+)"'
 )
+# Serdes self-emit spells local lowered headers repo-relative in angle form;
+# a snapshot must resolve them from its own include/ dir, not a warm out/ tree.
+inc_rel = re.compile(
+    r'#include\s+<examples/serdes/c/([^>/]+)>'
+)
 line_abs = re.compile(
     r'(#line\s+\d+\s+)"' + re.escape(root_s) + r'/([^"]+)"'
 )
 
 def rewrite(text: str) -> str:
     text = inc_abs.sub(r'#include "\1"', text)
+    text = inc_rel.sub(r'#include "\1"', text)
     text = line_abs.sub(r'\1"\2"', text)
     return text
 
@@ -148,8 +154,8 @@ if [[ "$SMOKE" -eq 1 ]]; then
     -I"$ROOT/third_party/tcc" \
     -DSHADOW_HAVE_LIBTCC=1 \
     "$OBJ/shadow_tcc_compile.o" \
-    "$OBJ/libshadow_comptime.a" \
     "$OBJ/runtime/concurrent_c.o" \
+    "$OBJ/libshadow_comptime.a" \
     -L"$ROOT/third_party/tcc" -ltcc -lpthread -lm
   "$OUT_BIN" "$ROOT/examples/hello.ccs" -o "$LATEST/hello_smoke.c" --no-cache
   test -s "$LATEST/hello_smoke.c"

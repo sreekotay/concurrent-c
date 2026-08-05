@@ -217,7 +217,7 @@ see the file's `#include`s. So even header-only stdlib isn't reachable today.
   header-by-header. **Slices + arena + string + vec + hash + map landed
   (2026-05-30); Axis 1 closed. See §7b.**
 - **Compiled stdlib** (channels/liblfds, async/task runtime, atomics, format in
-  `xjb`): real objects; would need `tcc_add_file(runtime.a)` or selective
+  `zmij`): real objects; would need `tcc_add_file(runtime.a)` or selective
   `tcc_add_symbol`. Heavier and semantically odd at build time. Per §5, let it
   link-and-run if the executor can, else it is an ordinary evaluation error — no
   special prohibition. **Deferred until demanded.**
@@ -353,7 +353,7 @@ arena, string, vec, hash, **map** — now runs at comptime. **Axis 1 is closed.*
 What remains is genuinely out of reach for a comptime block: the compiled-runtime
 pieces (channels/async, task/future, exec/sched/select/nursery/closure/tls,
 io/net/dns/http/dir/process/cli, the type-erased `cc_dyn_vec`, real atomics, the
-`xjb` float formatter) — no way to drive these from comptime anyway — and the CC
+`zmij` float formatter) — no way to drive these from comptime anyway — and the CC
 *language* surface, which remains Axis 2.
 
 ---

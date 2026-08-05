@@ -1,0 +1,10 @@
+/* Parameter defaults are CC spelling for reflection / py_module optional
+ * kwargs.  Lowering strips them for host C; CC call sites still pass every
+ * argument.  Python trampolines fill missing slots from the literal. */
+static int add(int a, int b = 1) { return a + b; }
+
+int main(void) {
+    if (add(3, 1) != 4) return 1;
+    if (add(3, 10) != 13) return 2;
+    return 0;
+}

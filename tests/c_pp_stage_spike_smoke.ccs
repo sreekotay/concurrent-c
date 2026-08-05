@@ -162,6 +162,13 @@ int main(void) {
     TapeCache cache = {0};
     int pass = 1;
 
+    /* TU-surface demand: materialize PpStmt entries before the umbrella's
+     * headers call them (grammar emission keys on .ccs call sites). */
+    if (!PpStmt_match("break;", 6)) {
+        printf("FAIL: PpStmt demand\n");
+        pass = 0;
+    }
+
     pass &= test_pp_number(&arena);
     pass &= test_cc_digraphs(&arena);
     pass &= test_cache_identity(&cache, &arena);

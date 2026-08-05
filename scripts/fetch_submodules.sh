@@ -3,11 +3,11 @@
 #
 # Two of the five submodules in .gitmodules are build inputs:
 #
-#   third_party/tcc   patched TinyCC — the parser/compiler foundation. Fully
-#                     checked out: the build applies patches and compiles it.
-#   third_party/xjb   float-to-string algorithm. One file is used
-#                     (src/ftoa.cpp) out of a 37M tree that is mostly
-#                     benchmark corpora, so it is fetched sparse.
+#   third_party/tcc    patched TinyCC — the parser/compiler foundation. Fully
+#                      checked out: the build applies patches and compiles it.
+#   third_party/zmij   float-to-string (zmij.c + zmij-c.h). The upstream tree
+#                      also carries a large test/benchmark corpus, so it is
+#                      fetched sparse.
 #
 # liblfds is optional at every level: cc/runtime/channel.c probes for it with
 # __has_include and the native ring queue is the primary lock-free path either
@@ -63,23 +63,35 @@ echo "Fetching third_party/tcc..."
 git submodule sync -- third_party/tcc >/dev/null 2>&1 || true
 submodule_update third_party/tcc
 
-# xjb: check out src/ only. Sparse-checkout has to be configured before the
-# working tree is written, so the clone and the pinned-commit checkout are
-# separate steps here.
-echo "Fetching third_party/xjb (sparse: src/ only)..."
-git submodule sync -- third_party/xjb >/dev/null 2>&1 || true
-if [ "$FULL" = "1" ] || [ -d third_party/xjb/.git ] || [ -f third_party/xjb/.git ]; then
-  submodule_update third_party/xjb
+# zmij: check out the C sources only. Sparse-checkout has to be configured
+# before the working tree is written when cloning fresh.
+echo "Fetching third_party/zmij (sparse: zmij.c, zmij-c.h, LICENSE, README)..."
+git submodule sync -- third_party/zmij >/dev/null 2>&1 || true
+zmij_sparse_set() {
+  mod="$(git rev-parse --git-path modules/third_party/zmij)"
+  mkdir -p "$mod/info"
+  printf '%s\n' '/zmij.c' '/zmij-c.h' '/LICENSE' '/README.md' > "$mod/info/sparse-checkout"
+  git -C third_party/zmij config core.sparseCheckout true
+  git -C third_party/zmij sparse-checkout init --no-cone 2>/dev/null || true
+  git -C third_party/zmij read-tree -mu HEAD 2>/dev/null || true
+}
+if [ "$FULL" = "1" ]; then
+  submodule_update third_party/zmij
+elif [ -d third_party/zmij/.git ] || [ -f third_party/zmij/.git ]; then
+  submodule_update third_party/zmij
+  zmij_sparse_set
 else
-  git submodule init third_party/xjb
-  xjb_url="$(git config --get submodule.third_party/xjb.url)"
-  if [ -n "$xjb_url" ] && \
-     git clone --filter=blob:none --sparse --no-checkout "$xjb_url" third_party/xjb 2>/dev/null; then
-    git -C third_party/xjb sparse-checkout set src
-    git submodule update third_party/xjb
+  git submodule init third_party/zmij
+  zmij_url="$(git config --get submodule.third_party/zmij.url)"
+  if [ -n "$zmij_url" ] && \
+     git clone --filter=blob:none --sparse --no-checkout "$zmij_url" third_party/zmij 2>/dev/null; then
+    git -C third_party/zmij sparse-checkout init --no-cone
+    git -C third_party/zmij sparse-checkout set 'zmij.c' 'zmij-c.h' 'LICENSE' 'README.md'
+    git submodule update third_party/zmij
   else
-    rm -rf third_party/xjb
-    submodule_update third_party/xjb
+    rm -rf third_party/zmij
+    submodule_update third_party/zmij
+    zmij_sparse_set
   fi
 fi
 

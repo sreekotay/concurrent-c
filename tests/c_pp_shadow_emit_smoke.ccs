@@ -579,6 +579,9 @@ int main(void) {
     CCArena gate = cc_arena_create(4096);
     (void)PpTok_match(";", 1);
     (void)PpTok_collect(";", 1, &gate, shadow_keep_nop, NULL);
+    /* TU-surface demand: emit PpStmt entries before the umbrella's headers
+     * call them (grammar emission keys on .ccs call sites). */
+    (void)PpStmt_match("break;", 6);
     cc_arena_free(&gate);
 
     /* Compact golden matrix: mini + hard shapes. Full recipe behavior is

@@ -67,6 +67,15 @@ int main(void) {
     assert(ul.len() == 2);
     assert(ul.at(1) == 8UL);
 
+    /* Prelude uint instances (cc_slice.cch) — no duplicate CC_DECL_SLICE. */
+    uint16_t u16[:] = {1, 2, 3};
+    uint32_t u32[:] = {10u, 20u};
+    uint64_t u64[:] = {100ull};
+    assert(u16.len() == 3 && u16.at(2) == 3);
+    assert(u32.len() == 2 && u32.at(1) == 20u);
+    assert(u64.len() == 1 && u64.at(0) == 100ull);
+    assert(u32.bytes().len == 2 * sizeof(uint32_t));
+
     /* Empty braces. */
     char e[:] = {};
     assert(e.len == 0);

@@ -10,7 +10,7 @@
 
 #include <stddef.h>
 
-#define CC_HOST_PROFILE_SCHEMA 1
+#define CC_HOST_PROFILE_SCHEMA 2
 
 /* The C version CC requires of a host toolchain — the probe rejects a host
  * that cannot compile C11 `max_align_t` — and therefore the version every
@@ -28,7 +28,6 @@ typedef struct CCHostCcProfile {
     char flags[512];     /* leading-space flags: " -std=c11 -B..." */
     int is_tcc;
     int no_liblfds;      /* runtime should define CC_NO_LIBLFDS */
-    int no_xjb_float;    /* skip XJB float fmt object */
     int ok;
 } CCHostCcProfile;
 

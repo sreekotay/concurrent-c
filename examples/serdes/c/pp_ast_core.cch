@@ -3,9 +3,12 @@
 #pragma once
 
 /* Emit-plan factory registry (libshadow_comptime) — used when mangling
- * snake `family::[T]` spellings such as py_expose::[Counter]. */
+ * snake `family::[T]` spellings such as py_expose::[Counter]. Declarations
+ * stay even when stub bodies below are omitted under SHADOW_HAVE_LIBTCC. */
 int cc_emit_plan_has_generic_factory(const char* name);
 int cc_emit_plan_generic_factory_names_csv(char* out, size_t cap);
+size_t cc_emit_plan_comptime_fragment_count(void);
+const char* cc_emit_plan_comptime_fragment_text(size_t frag_index);
 
 /* ---- closed parse keywords (comptime perfect hash) ---------------------- */
 
@@ -409,25 +412,35 @@ static int scope_add_typedef(Parser* p, CCSlice name) {
     return 1;
 }
 
-/* From libshadow_comptime (emit_plan). Weak stubs so spike TUs that do not
- * link the comptime engine still resolve; strong defs win when linked. */
-__attribute__((weak)) size_t cc_emit_plan_comptime_fragment_count(void) {
+/* From libshadow_comptime (emit_plan). Stubs for spike TUs that do not link
+ * the comptime engine. Omitted when SHADOW_HAVE_LIBTCC — the production
+ * shadow_lower link always provides strong defs, and TinyCC does not honor
+ * __attribute__((weak)) (reports "defined twice"). */
+#if !defined(SHADOW_HAVE_LIBTCC)
+#if defined(__GNUC__) && !defined(__TINYC__)
+#define CC__EMIT_PLAN_STUB __attribute__((weak))
+#else
+#define CC__EMIT_PLAN_STUB static
+#endif
+CC__EMIT_PLAN_STUB size_t cc_emit_plan_comptime_fragment_count(void) {
     return 0;
 }
-__attribute__((weak)) const char* cc_emit_plan_comptime_fragment_text(
+CC__EMIT_PLAN_STUB const char* cc_emit_plan_comptime_fragment_text(
     size_t frag_index) {
     (void)frag_index;
     return NULL;
 }
-__attribute__((weak)) int cc_emit_plan_has_generic_factory(const char* name) {
+CC__EMIT_PLAN_STUB int cc_emit_plan_has_generic_factory(const char* name) {
     (void)name;
     return 0;
 }
-__attribute__((weak)) int cc_emit_plan_generic_factory_names_csv(char* out,
-                                                                 size_t cap) {
+CC__EMIT_PLAN_STUB int cc_emit_plan_generic_factory_names_csv(char* out,
+                                                              size_t cap) {
     if (out && cap) out[0] = 0;
     return 0;
 }
+#undef CC__EMIT_PLAN_STUB
+#endif
 
 /* Seed a CamelCase / mangled typedef name into the current scope (idempotent). */
 static void shadow_seed_typedef_name(Parser* p, const char* name, size_t n) {
