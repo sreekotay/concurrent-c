@@ -2,7 +2,8 @@
 
 ## Getting Started
 
-- **[Getting Started](getting-started.md)** — Install, build, and run your first program
+- **[Getting Started](getting-started.md)** — Install, first program, concurrency
+- **[Language Concepts](language-concepts.md)** — Defer, results, UFCS, slices/arenas, closures
 - **[Cheatsheet](cheatsheet.md)** — Quick reference for common patterns
 - **[Debugging](debugging.md)** — VS Code / Cursor debugging setup
 - **[ILP32 Docker smoke](ilp32-docker.md)** — Linux i386 (and planned ARM32) runtime smokes via Docker
@@ -35,11 +36,10 @@ The compiler binary is at `cc/bin/ccc`.
 #include <stdio.h>
 
 int main(void) {
-    CCNursery* n = @create(NULL) @destroy;
-    if (!n) return 1;
+    @errhandler(CCError e) cc_error_exit(e);
+    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
     n->spawn(() => printf("Hello from task A!\n"));
     n->spawn(() => printf("Hello from task B!\n"));
-    printf("Done.\n");
     return 0;
 }
 ```

@@ -1,6 +1,6 @@
 # Concurrent-C Cheatsheet
 
-Quick reference for common patterns. See [spec/](../spec/) for full details.
+Quick reference for common patterns. Concepts: [language-concepts.md](language-concepts.md). Spec: [spec/](../spec/).
 
 ---
 

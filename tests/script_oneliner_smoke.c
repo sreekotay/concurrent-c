@@ -44,9 +44,11 @@ int main(void) {
     int ec = 0;
     int failed = 0;
 
-    /* Nested `ccc -e` must not inherit suite CC_FRONTEND=serdes — each
-     * oneliner would re-enter shadow_lower and time out under --jobs. */
-    unsetenv("CC_FRONTEND");
+    /* Nested `ccc -e` must stay on the legacy front. Suite sets
+     * CC_FRONTEND=serdes; if inherited, each oneliner pays serdes cost and
+     * the whole smoke times out under --jobs. Force legacy explicitly —
+     * unsetting alone is not enough if the default front is serdes. */
+    setenv("CC_FRONTEND", "legacy", 1);
     unsetenv("CC_TEST_FRONTEND");
 
     if (!mkdtemp(tmpdir)) {

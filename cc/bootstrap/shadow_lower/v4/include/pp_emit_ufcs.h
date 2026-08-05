@@ -717,6 +717,44 @@ static int shadow_ufcs_is_map_ty(const char* vty) {
     return shadow_ufn_exists(tryc);
 }
 
+/* Exact type match: vty is `name` / `name*`, or bind base ty is `name`.
+ * Prefer this over shadow_bind_ty_has (strstr) so CCArena ≠ CCArenaPool. */
+static int shadow_ufcs_ty_is(const char* vty, const ShadowBind* rb,
+                             const char* name) {
+    char starred[128];
+    char base[96];
+    size_t n;
+    if (!name || !name[0]) return 0;
+    if (vty && vty[0]) {
+        if (strcmp(vty, name) == 0) return 1;
+        n = strlen(name);
+        if (n + 2 < sizeof(starred)) {
+            memcpy(starred, name, n);
+            starred[n] = '*';
+            starred[n + 1] = 0;
+            if (strcmp(vty, starred) == 0) return 1;
+        }
+    }
+    if (rb && rb->ty[0]) {
+        shadow_bind_base_ty(rb, base, sizeof(base));
+        if (strcmp(base, name) == 0) return 1;
+    }
+    return 0;
+}
+
+/* Strip trailing * / spaces from vty into out (for mangled Type_destroy). */
+static void shadow_ufcs_vty_base(const char* vty, char* out, size_t cap) {
+    size_t n;
+    if (!out || !cap) return;
+    out[0] = 0;
+    if (!vty || !vty[0]) return;
+    while (*vty == ' ' || *vty == '\t') vty++;
+    snprintf(out, cap, "%s", vty);
+    n = strlen(out);
+    while (n && (out[n - 1] == '*' || out[n - 1] == ' ' || out[n - 1] == '\t'))
+        out[--n] = 0;
+}
+
 /* Bang-chain hop on Result ok value: `(__rN.u.value).step()` → cc_int_step /
  * `cc_size_t_as_int` when registered as a scalar-family fn. */
 static int shadow_ufcs_try_result_value_hop(const char* recv,
@@ -1360,14 +1398,17 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
     } else if (!is_arrow && strcmp(meth_name, "fetch_add") == 0) {
         snprintf(dst, cap, "cc_atomic_fetch_add(&%s, %s)", recv, a);
     } else if (is_arrow && strcmp(meth_name, "wait") == 0) {
+        if (!shadow_ufcs_ty_is(vty, rb, "CCNursery")) return 0;
         snprintf(dst, cap, "cc_nursery_wait(%s)", recv);
     } else if (is_arrow && strcmp(meth_name, "spawn") == 0) {
         /* Raw `cc_nursery_spawn` takes (fn, arg); UFCS surface is closure. */
+        if (!shadow_ufcs_ty_is(vty, rb, "CCNursery")) return 0;
         snprintf(dst, cap, "cc_nursery_spawn_closure0(%s, %s)", recv, a);
     } else if (is_arrow && strcmp(meth_name, "spawn_async") == 0) {
         /* R1: named spawn so fibers answer via cc_rt_diag_current_async_info. */
         char callee_name[96];
         size_t ci = 0, cj = 0;
+        if (!shadow_ufcs_ty_is(vty, rb, "CCNursery")) return 0;
         while (a[ci] && (a[ci] == ' ' || a[ci] == '\t')) ci++;
         while (a[ci] && cj + 1 < sizeof(callee_name) &&
                ((a[ci] >= 'A' && a[ci] <= 'Z') || (a[ci] >= 'a' && a[ci] <= 'z') ||
@@ -1381,53 +1422,69 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
                  "cc_nursery_spawn_async_named(%s, %s, \"%s\", __FILE__, __LINE__)",
                  recv, a, callee_name);
     } else if (is_arrow && strcmp(meth_name, "spawnhybrid") == 0) {
+        if (!shadow_ufcs_ty_is(vty, rb, "CCNursery")) return 0;
         snprintf(dst, cap, "cc_nursery_spawnhybrid_closure0(%s, %s)", recv, a);
     } else if (is_arrow && strcmp(meth_name, "close_on") == 0) {
+        if (!shadow_ufcs_ty_is(vty, rb, "CCNursery")) return 0;
         snprintf(dst, cap, "cc_nursery_add_closing_tx(%s, %s)", recv, a);
     } else if (is_arrow && strcmp(meth_name, "mutex") == 0) {
+        if (!shadow_ufcs_ty_is(vty, rb, "CCExclusive")) return 0;
         snprintf(dst, cap, "cc_exclusive_mutex(%s, %s)", recv, a);
     } else if (is_arrow && strcmp(meth_name, "destroy") == 0) {
-        /* Pointer receivers: dispatch on type — do not default every
-         * `p->destroy()` to cc_exclusive_destroy (CCArena* hit that). */
-        if (shadow_ufcs_is_map_ty(vty))
-            snprintf(dst, cap, "%s_destroy(%s)", vty, recv);
-        else if (strcmp(vty, "CCArena") == 0 || strcmp(vty, "CCArena*") == 0 ||
-                 shadow_bind_ty_has(rb, "CCArena") ||
+        /* Pointer receivers: type-dispatch only. Unknown → fail loud (never
+         * invent cc_exclusive_destroy — that miscompiled CCArena*). */
+        char vbase[96];
+        char dhook[96];
+        shadow_ufcs_vty_base(vty, vbase, sizeof(vbase));
+        if (shadow_ufcs_is_map_ty(vbase) || shadow_ufcs_is_map_ty(vty))
+            snprintf(dst, cap, "%s_destroy(%s)",
+                     vbase[0] ? vbase : vty, recv);
+        else if (vbase[0] && (strncmp(vbase, "ArrayMap_", 9) == 0 ||
+                              strncmp(vbase, "Map_", 4) == 0 ||
+                              strncmp(vbase, "CCVec_", 6) == 0))
+            snprintf(dst, cap, "%s_destroy(%s)", vbase, recv);
+        else if (shadow_ufcs_ty_is(vty, rb, "CCArenaPool") ||
+                 strstr(recv, "pool"))
+            snprintf(dst, cap, "cc_arena_pool_destroy(%s)", recv);
+        else if (shadow_ufcs_ty_is(vty, rb, "CCArena") ||
                  strstr(recv, "arena") || strstr(recv, "detached"))
             snprintf(dst, cap, "cc_arena_destroy(%s)", recv);
-        else if (strcmp(vty, "CCArenaPool") == 0 ||
-                 strcmp(vty, "CCArenaPool*") == 0 ||
-                 shadow_bind_ty_has(rb, "CCArenaPool"))
-            snprintf(dst, cap, "cc_arena_pool_destroy(%s)", recv);
-        else if (strcmp(vty, "CCExclusiveGuard") == 0 ||
-                 strcmp(vty, "CCExclusiveGuard*") == 0 ||
-                 shadow_bind_ty_has(rb, "CCExclusiveGuard"))
+        else if (shadow_ufcs_ty_is(vty, rb, "CCExclusiveGuard"))
             snprintf(dst, cap, "cc_exclusive_guard_destroy(%s)", recv);
-        else if (strcmp(vty, "CCNursery") == 0 ||
-                 strcmp(vty, "CCNursery*") == 0 ||
-                 shadow_bind_ty_has(rb, "CCNursery"))
+        else if (shadow_ufcs_ty_is(vty, rb, "CCNursery"))
             snprintf(dst, cap, "cc_nursery_free(%s)", recv);
-        else
+        else if (shadow_ufcs_ty_is(vty, rb, "CCExclusive"))
             snprintf(dst, cap, "cc_exclusive_destroy(%s)", recv);
+        else if (vbase[0] && vbase[0] >= 'A' && vbase[0] <= 'Z') {
+            snprintf(dhook, sizeof(dhook), "%s_destroy", vbase);
+            if (shadow_ufn_exists(dhook))
+                snprintf(dst, cap, "%s(%s)", dhook, recv);
+            else
+                return 0;
+        } else
+            return 0;
     } else if (!is_arrow && strcmp(meth_name, "acquire") == 0) {
+        if (!shadow_ufcs_ty_is(vty, rb, "CCExclusiveMutex")) return 0;
         snprintf(dst, cap, "cc_exclusive_mutex_acquire(&%s)", recv);
     } else if (is_arrow && strcmp(meth_name, "acquire") == 0) {
         /* CCExclusive* → cc_exclusive_acquire(excl, name). */
+        if (!shadow_ufcs_ty_is(vty, rb, "CCExclusive")) return 0;
         snprintf(dst, cap, "cc_exclusive_acquire(%s, %s)", recv, a);
     } else if (!is_arrow && strcmp(meth_name, "release") == 0) {
         /* CCString.release(arena) vs CCExclusiveGuard.release(). */
-        if (strcmp(vty, "CCString") == 0 ||
-            (rb && strcmp(rb->ty, "CCString") == 0))
+        if (shadow_ufcs_ty_is(vty, rb, "CCString"))
             snprintf(dst, cap, "cc_string_release(&%s, %s)", recv, a);
-        else
+        else if (shadow_ufcs_ty_is(vty, rb, "CCExclusiveGuard"))
             snprintf(dst, cap, "cc_exclusive_guard_release(&%s)", recv);
-    } else if (is_arrow && strcmp(meth_name, "release") == 0) {
-        if (strcmp(vty, "CCString") == 0 || strcmp(vty, "CCString*") == 0 ||
-            (rb && (strcmp(rb->ty, "CCString") == 0 ||
-                    strcmp(rb->ty, "CCString*") == 0)))
-            snprintf(dst, cap, "cc_string_release(%s, %s)", recv, a);
         else
+            return 0;
+    } else if (is_arrow && strcmp(meth_name, "release") == 0) {
+        if (shadow_ufcs_ty_is(vty, rb, "CCString"))
+            snprintf(dst, cap, "cc_string_release(%s, %s)", recv, a);
+        else if (shadow_ufcs_ty_is(vty, rb, "CCExclusiveGuard"))
             snprintf(dst, cap, "cc_exclusive_guard_release(%s)", recv);
+        else
+            return 0;
     } else if (!is_arrow && strcmp(meth_name, "destroy") == 0 &&
                (strcmp(vty, "CCExclusiveGuard") == 0 ||
                 (rb && strcmp(rb->ty, "CCExclusiveGuard") == 0))) {
@@ -1844,46 +1901,56 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
         } else
             return 0;
     } else if (is_arrow && strcmp(meth_name, "clear") == 0) {
-        if (strcmp(vty, "CCString") == 0 || shadow_bind_ty_has(rb, "CCString"))
+        char vbase[96];
+        shadow_ufcs_vty_base(vty, vbase, sizeof(vbase));
+        if (shadow_ufcs_ty_is(vty, rb, "CCString"))
             snprintf(dst, cap, "cc_string_clear(%s)", recv);
+        else if (vbase[0] && (strncmp(vbase, "Map_", 4) == 0 ||
+                              strncmp(vbase, "ArrayMap_", 9) == 0 ||
+                              strncmp(vbase, "CCVec_", 6) == 0))
+            snprintf(dst, cap, "%s_clear(%s)", vbase, recv);
         else
             return 0;
     } else if (strcmp(meth_name, "free") == 0) {
         /* Nursery*→free; ArenaPool.free(ptr); Arena.free()→destroy;
-         * chan → cc_channel_free; else store_free.
-         * Note: strstr(ty,"CCArena") also matches CCArenaPool — check pool
-         * first and use exact base ty for plain arenas. */
-        if (is_arrow && shadow_bind_ty_has(rb, "CCNursery")) {
+         * chan → cc_channel_free; Store→store_free. Unknown arrow → fail loud.
+         * Note: check CCArenaPool before CCArena (exact ty_is). */
+        if (shadow_ufcs_ty_is(vty, rb, "CCNursery")) {
             snprintf(dst, cap, "cc_nursery_free(%s)", recv);
-        } else if (shadow_bind_ty_has(rb, "CCChanTx") ||
-                   shadow_bind_ty_has(rb, "CCChanRx") ||
-                   shadow_bind_ty_has(rb, "CCChan") ||
-                   strncmp(vty, "CCChan", 6) == 0) {
-            /* Before arena/pool name heuristics — `arena_pool.free()` is a chan. */
+        } else if (shadow_ufcs_ty_is(vty, rb, "CCChanTx") ||
+                   shadow_ufcs_ty_is(vty, rb, "CCChanRx") ||
+                   shadow_ufcs_ty_is(vty, rb, "CCChan") ||
+                   (vty[0] && strncmp(vty, "CCChan", 6) == 0)) {
             snprintf(dst, cap, "cc_channel_free(%s)", recv);
-        } else if (!is_arrow && a[0] &&
-                   (strcmp(vty, "CCArenaPool") == 0 ||
-                    (rb && strcmp(rb->ty, "CCArenaPool") == 0) ||
+        } else if (a[0] &&
+                   (shadow_ufcs_ty_is(vty, rb, "CCArenaPool") ||
                     strstr(recv, "pool") != NULL ||
                     strstr(recv, "_stack") != NULL)) {
-            if (!shadow_ufcs_need_amp(recv))
+            if (is_arrow || !shadow_ufcs_need_amp(recv))
                 snprintf(dst, cap, "cc_arena_pool_free(%s, %s)", recv, a);
             else
                 snprintf(dst, cap, "cc_arena_pool_free(&%s, %s)", recv, a);
-        } else if (!is_arrow &&
-                   (strcmp(vty, "CCArena") == 0 || strstr(recv, "arena") ||
-                    strstr(recv, "detached"))) {
-            if (recv[0] == '&' || recv[0] == '*')
+        } else if (shadow_ufcs_ty_is(vty, rb, "CCArena") ||
+                   strstr(recv, "arena") || strstr(recv, "detached")) {
+            if (is_arrow || recv[0] == '&' || recv[0] == '*')
                 snprintf(dst, cap, "cc_arena_destroy(%s)", recv);
             else
                 snprintf(dst, cap, "cc_arena_destroy(&%s)", recv);
-        } else if (!is_arrow &&
-                   (strcmp(vty, "CCExclusiveMutex") == 0 ||
-                    (rb && strcmp(rb->ty, "CCExclusiveMutex") == 0))) {
-            snprintf(dst, cap, "cc_exclusive_mutex_free(&%s)", recv);
-        } else if (is_arrow || recv[0] == '*' || strchr(recv, '*') ||
-                   recv[0] == '&' || strstr(recv, "->")) {
-            snprintf(dst, cap, "store_free(%s)", recv);
+        } else if (shadow_ufcs_ty_is(vty, rb, "CCExclusiveMutex")) {
+            if (is_arrow)
+                snprintf(dst, cap, "cc_exclusive_mutex_free(%s)", recv);
+            else
+                snprintf(dst, cap, "cc_exclusive_mutex_free(&%s)", recv);
+        } else if (shadow_ufcs_ty_is(vty, rb, "Store") ||
+                   (!is_arrow && (strstr(recv, "store") != NULL))) {
+            /* Recipe Store beachhead; arrow requires typed Store. */
+            if (is_arrow || recv[0] == '*' || strchr(recv, '*') ||
+                recv[0] == '&' || strstr(recv, "->"))
+                snprintf(dst, cap, "store_free(%s)", recv);
+            else
+                snprintf(dst, cap, "store_free(&%s)", recv);
+        } else if (is_arrow) {
+            return 0; /* never invent store_free / exclusive for unknown * */
         } else {
             snprintf(dst, cap, "store_free(&%s)", recv);
         }
