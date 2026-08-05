@@ -64,26 +64,27 @@ static int cc__ru_extract_ufcs_callee(const char* s, size_t n,
     char method[64];
     char recv[128];
     char recv_type[256];
-    size_t i, sep, method_a, method_b, recv_a, recv_b, k;
+    size_t sep, method_a, method_b, recv_a, recv_b, k;
     size_t pos;
     if (!s || !out || out_sz == 0 || a >= b || b > n) return 0;
     out[0] = 0;
     while (a < b && isspace((unsigned char)s[a])) a++;
     while (b > a && isspace((unsigned char)s[b - 1])) b--;
     if (a >= b || s[b - 1] != ')') return 0;
-    /* Find the top-level call's method separator nearest the final '('. */
-    i = b - 1;
+    /* Find the top-level call's '(' just before the trailing `)`.
+     * Walk from inside that `)` with depth 1; the old loop counted the
+     * trailing `)` first so the matching `(` never saw depth 0. */
     {
-        int depth = 0;
+        int depth = 1;
         size_t open = (size_t)-1;
-        while (i > a) {
-            char c = s[i];
-            if (c == ')') depth++;
-            else if (c == '(') {
-                if (depth == 0) { open = i; break; }
+        size_t j = b - 1; /* s[b-1] == ')' */
+        while (j > a) {
+            j--;
+            if (s[j] == ')') depth++;
+            else if (s[j] == '(') {
                 depth--;
+                if (depth == 0) { open = j; break; }
             }
-            i--;
         }
         if (open == (size_t)-1 || open <= a) return 0;
         k = open;
@@ -130,6 +131,8 @@ static int cc__ru_extract_ufcs_callee(const char* s, size_t n,
             before--;
             while (before > 0 && isspace((unsigned char)s[before - 1])) before--;
         }
+        /* After rskip of spaces between type and name, `before` is the
+         * exclusive end of the type token (points at the space or name). */
         ty_b = before;
         ty_a = before;
         while (ty_a > 0 && cc_is_ident_char(s[ty_a - 1])) ty_a--;
@@ -307,7 +310,14 @@ static int cc__ru_find_callee_result_type(const char* s, size_t n,
     char callee[128];
     if (!out || out_sz == 0) return 0;
     out[0] = 0;
-    if (!cc__ru_extract_plain_callee(s, call_a, call_b, callee, sizeof(callee))) {
+    /* Plain `fn(...)` first; else UFCS `recv.method(...)` → default snake
+     * callee (e.g. `part.clone_into(a)` → `cc_slice_clone_into`). Bang
+     * expression lowering used to require a plain callee here, so UFCS
+     * calls fell through to `__typeof__(recv.method(...))` + `__cc_uw_value`
+     * before AST/text UFCS could lower the call — main-pass typing then
+     * saw the sugared form and failed (`int`/`CCSliceShared` noise). */
+    if (!cc__ru_extract_callee_for_binder(s, n, call_a, call_b, callee,
+                                          sizeof(callee))) {
         return 0;
     }
 
