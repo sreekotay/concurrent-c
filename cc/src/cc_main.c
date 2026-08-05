@@ -2378,9 +2378,46 @@ static int cc__find_shadow_lower(char* dst, size_t cap) {
     return -1;
 }
 
+/* Append build.cc CC_CONST bindings as host -D flags. CLI -D names are skipped
+ * because build-mode already folded them into opt->cc_flags. */
+static int cc__append_build_cc_defines(char* buf, size_t cap, size_t* cflen,
+                                       const CCBuildOptions* opt,
+                                       const CCConstBinding* bindings,
+                                       size_t count) {
+    size_t i, j;
+    if (!buf || !cflen || !opt || (!bindings && count > 0)) return -1;
+    for (i = 0; i < count; ++i) {
+        int is_cli = 0;
+        int n;
+        if (!bindings[i].name || !bindings[i].name[0]) continue;
+        for (j = 0; j < opt->cli_count; ++j) {
+            if (opt->cli_names[j] &&
+                strcmp(opt->cli_names[j], bindings[i].name) == 0) {
+                is_cli = 1;
+                break;
+            }
+        }
+        if (is_cli) continue;
+        if (bindings[i].value == 1) {
+            n = snprintf(buf + *cflen, cap - *cflen, "%s-D%s",
+                         *cflen ? " " : "", bindings[i].name);
+        } else {
+            n = snprintf(buf + *cflen, cap - *cflen, "%s-D%s=%lld",
+                         *cflen ? " " : "", bindings[i].name,
+                         bindings[i].value);
+        }
+        if (n < 0 || (size_t)n >= cap - *cflen) {
+            fprintf(stderr, "cc: build.cc -D flags too long for native forward\n");
+            return -1;
+        }
+        *cflen += (size_t)n;
+    }
+    return 0;
+}
+
 /* Delegate .ccs build/emit to native shadow_lower (owns cache + host-cc/link).
- * Options contract: every CCBuildOptions field is either forwarded, handled by
- * a documented legacy fallback, or a hard error — never silently dropped. */
+ * Driver loads build.cc / CLI -D, handles dumps/dry-run, and forwards host
+ * flags. Options contract: forward, handle here, or hard error — never drop. */
 static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path) {
     char shadow[PATH_MAX];
     char cc_flags_buf[2048];
@@ -2391,33 +2428,18 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
     pid_t pid;
     int status;
     size_t cflen = 0;
+    CCConstBinding bindings[128];
+    size_t binding_count = 0;
     if (!opt || !opt->in_path || !out_path) return -1;
-    /* build.cc / dump paths still need the legacy front. */
-    if (opt->dump_consts || opt->dump_comptime) {
-        fprintf(stderr,
-                "cc: --dump-consts/--dump-comptime require --frontend=legacy "
-                "(native front does not load build.cc)\n");
-        return -1;
+
+    if (cc__load_const_bindings(opt, bindings, &binding_count) != 0) return -1;
+    if (opt->dump_consts && !opt->dump_comptime) {
+        for (size_t i = 0; i < binding_count; ++i) {
+            printf("CONST %s=%lld\n", bindings[i].name, bindings[i].value);
+        }
     }
-    if (opt->build_override && opt->build_override[0]) {
-        fprintf(stderr,
-                "cc: --build-file requires --frontend=legacy "
-                "(native front does not load build.cc)\n");
-        return -1;
-    }
-    if (opt->no_build) {
-        fprintf(stderr,
-                "cc: --no-build requires --frontend=legacy "
-                "(native front does not load build.cc)\n");
-        return -1;
-    }
-    if (opt->cli_count > 0) {
-        fprintf(stderr,
-                "cc: --frontend=native does not support comptime CLI bindings "
-                "yet (%zu -D binding%s); use --frontend=legacy\n",
-                opt->cli_count, opt->cli_count == 1 ? "" : "s");
-        return -1;
-    }
+    if (opt->dry_run) return 0;
+
     if (cc__find_shadow_lower(shadow, sizeof(shadow)) != 0) {
         fprintf(stderr,
                 "cc: native front requires shadow_lower "
@@ -2447,7 +2469,7 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
         }
         (void)runtime_reused;
     }
-    /* Fold --target / --sysroot / existing cc_flags (incl. CLI -D) for host cc. */
+    /* Fold --target / --sysroot / existing cc_flags (incl. CLI -D) + build.cc. */
     cc_flags_buf[0] = 0;
     if (opt->cc_flags && opt->cc_flags[0]) {
         cflen = strlen(opt->cc_flags);
@@ -2455,6 +2477,9 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
         memcpy(cc_flags_buf, opt->cc_flags, cflen);
         cc_flags_buf[cflen] = 0;
     }
+    if (cc__append_build_cc_defines(cc_flags_buf, sizeof(cc_flags_buf), &cflen,
+                                    opt, bindings, binding_count) != 0)
+        return -1;
     if (opt->target_flag && opt->target_flag[0]) {
         int n = snprintf(cc_flags_buf + cflen, sizeof(cc_flags_buf) - cflen,
                          "%s--target %s", cflen ? " " : "", opt->target_flag);
@@ -2501,7 +2526,6 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
     if (opt->verbose) argv[argc++] = (char*)"--verbose";
     if (opt->opt_release) argv[argc++] = (char*)"--release";
     if (opt->opt_debug) argv[argc++] = (char*)"--debug";
-    if (opt->dry_run) argv[argc++] = (char*)"--dry-run";
     if (opt->no_runtime) argv[argc++] = (char*)"--no-runtime";
     if (cc_flags_buf[0]) {
         snprintf(cc_flags_arg, sizeof(cc_flags_arg), "--cc-flags=%s",
@@ -2547,8 +2571,8 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         return -1;
     }
     /* Native front: delegate .ccs link/emit to shadow_lower.
-     * Py modules keep the caller's -fPIC/-shared flags (set above when
-     * PyInit_* is detected); shadow_lower forwards them to host cc/ld. */
+     * --compile = emit C via shadow_lower, then host cc -c (driver-side).
+     * Py modules keep the caller's -fPIC/-shared flags; shadow_lower forwards. */
     if (cc__want_native_front() && cc__ends_with_ci(opt->in_path, ".ccs")) {
         if (opt->mode == CC_MODE_LINK && opt->bin_out_path) {
             if (summary_out) {
@@ -2565,9 +2589,51 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             }
             return cc__run_shadow_lower(opt, opt->c_out_path);
         }
+        if (opt->mode == CC_MODE_COMPILE) {
+            char src_dir[PATH_MAX];
+            char target_part[256];
+            char sysroot_part[256];
+            const char* slash;
+            if (!opt->obj_out_path) {
+                fprintf(stderr, "cc: --compile requires an object output path\n");
+                return -1;
+            }
+            if (summary_out) {
+                memset(summary_out, 0, sizeof(*summary_out));
+                summary_out->c_out_path = opt->c_out_path;
+                summary_out->obj_out_path = opt->obj_out_path;
+                summary_out->did_emit_c = 1;
+            }
+            if (cc__run_shadow_lower(opt, opt->c_out_path) != 0) return -1;
+            if (opt->dry_run) return 0;
+            src_dir[0] = 0;
+            slash = strrchr(opt->in_path, '/');
+            if (slash && slash > opt->in_path) {
+                size_t n = (size_t)(slash - opt->in_path);
+                if (n + 1 < sizeof(src_dir)) {
+                    memcpy(src_dir, opt->in_path, n);
+                    src_dir[n] = 0;
+                }
+            }
+            target_part[0] = 0;
+            sysroot_part[0] = 0;
+            if (opt->target_flag && opt->target_flag[0])
+                snprintf(target_part, sizeof(target_part), "--target %s",
+                         opt->target_flag);
+            if (opt->sysroot_flag && opt->sysroot_flag[0])
+                snprintf(sysroot_part, sizeof(sysroot_part), "--sysroot %s",
+                         opt->sysroot_flag);
+            if (cc__compile_c_to_obj(opt, opt->c_out_path, opt->obj_out_path,
+                                     NULL, src_dir,
+                                     target_part[0] ? target_part : NULL,
+                                     sysroot_part[0] ? sysroot_part : NULL) != 0)
+                return -1;
+            if (summary_out) summary_out->did_compile_obj = 1;
+            return 0;
+        }
         fprintf(stderr,
-                "cc: --frontend=native supports --link and --emit-c-only "
-                "(got --compile); use legacy front or emit-c-only\n");
+                "cc: --frontend=native supports --link, --emit-c-only, and "
+                "--compile (unknown mode)\n");
         return -1;
     }
     if (summary_out) {
@@ -5564,6 +5630,10 @@ int main(int argc, char **argv) {
     int dump_comptime = 0;
     CCMode mode = CC_MODE_LINK;
     char out_stem_buf[128];
+    enum { max_cli_main = 64 };
+    char* cli_names_main[max_cli_main];
+    long long cli_values_main[max_cli_main];
+    size_t cli_count_main = 0;
     out_stem_buf[0] = '\0';
 
     for (int i = 1; i < argc; ++i) {
@@ -5574,6 +5644,22 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--link") == 0) { mode = CC_MODE_LINK; continue; }
         if (strcmp(argv[i], "--release") == 0 || strcmp(argv[i], "-O") == 0) { opt_release = 1; continue; }
         if (strcmp(argv[i], "--debug") == 0 || strcmp(argv[i], "-g") == 0) { opt_debug = 1; continue; }
+        if (strcmp(argv[i], "-D") == 0) {
+            fprintf(stderr, "cc: -D requires NAME or NAME=VALUE\n");
+            return 1;
+        }
+        if (strncmp(argv[i], "-D", 2) == 0) {
+            if (cli_count_main >= (size_t)max_cli_main) {
+                fprintf(stderr, "cc: too many -D defines (max %d)\n", max_cli_main);
+                return 1;
+            }
+            if (parse_define(argv[i] + 2, &cli_names_main[cli_count_main],
+                             &cli_values_main[cli_count_main]) != 0) {
+                return 1;
+            }
+            cli_count_main++;
+            continue;
+        }
         if (strcmp(argv[i], "--build-file") == 0) {
             if (i + 1 >= argc) { fprintf(stderr, "cc: --build-file requires a path\n"); usage(argv[0]); return 1; }
             build_override = argv[++i];
@@ -5689,12 +5775,24 @@ int main(int argc, char **argv) {
         if (combined_cc_flags_main[0]) strncat(combined_cc_flags_main, " ", sizeof(combined_cc_flags_main) - strlen(combined_cc_flags_main) - 1);
         strncat(combined_cc_flags_main, cc_flags, sizeof(combined_cc_flags_main) - strlen(combined_cc_flags_main) - 1);
     }
+    for (size_t i = 0; i < cli_count_main; ++i) {
+        char def[256];
+        if (cli_values_main[i] == 1) {
+            snprintf(def, sizeof(def), " -D%s", cli_names_main[i]);
+        } else {
+            snprintf(def, sizeof(def), " -D%s=%lld", cli_names_main[i],
+                     cli_values_main[i]);
+        }
+        strncat(combined_cc_flags_main, def,
+                sizeof(combined_cc_flags_main) - strlen(combined_cc_flags_main) - 1);
+    }
     cc_flags = combined_cc_flags_main[0] ? combined_cc_flags_main : cc_flags;
 
     cc_set_out_dir(out_dir, bin_dir);
     cc_refresh_host_obj_root(cc_bin);
     if (ensure_out_dir() != 0) {
         fprintf(stderr, "cc: failed to create out dirs under: %s\n", g_out_root);
+        for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
         return 1;
     }
 
@@ -5748,18 +5846,24 @@ int main(int argc, char **argv) {
             .summary = 0,
             .out_dir = g_out_root,
             .bin_dir = g_bin_root,
-            .cli_names = NULL,
-            .cli_values = NULL,
-            .cli_count = 0,
+            .cli_names = cli_names_main,
+            .cli_values = cli_values_main,
+            .cli_count = cli_count_main,
         };
         int berr = cc__load_const_bindings(&base_opt, bindings, &binding_count);
-        if (berr != 0) return 1;
+        if (berr != 0) {
+            for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
+            return 1;
+        }
         if (dump_consts) {
             for (size_t i = 0; i < binding_count; ++i) {
                 printf("CONST %s=%lld\n", bindings[i].name, bindings[i].value);
             }
         }
-        if (dry_run) return 0;
+        if (dry_run) {
+            for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
+            return 0;
+        }
         CCCompileConfig cfg = {.consts = bindings, .const_count = binding_count};
 
         char target_part[256]; char sysroot_part[256];
@@ -5770,6 +5874,7 @@ int main(int argc, char **argv) {
         char resolved_stems[64][128] = {{0}};
         if (cc__resolve_stems(inputs, input_count, out_stem_override, resolved_stems) != 0) {
             fprintf(stderr, "cc: failed to derive unique stems for inputs\n");
+            for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
             return 1;
         }
         const char* obj_paths[64];
@@ -5808,10 +5913,20 @@ int main(int argc, char **argv) {
                 obj_paths[i] = obj_bufs[i];
             }
         }
-        if (mode == CC_MODE_EMIT_C || mode == CC_MODE_COMPILE) return 0;
+        if (mode == CC_MODE_EMIT_C || mode == CC_MODE_COMPILE) {
+            for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
+            return 0;
+        }
         char runtime_path[PATH_MAX]; int runtime_reused = 0;
-        if (cc__ensure_runtime_obj(&base_opt, target_part, sysroot_part, runtime_path, sizeof(runtime_path), &runtime_reused) != 0) return 1;
-        if (cc__link_many(&base_opt, obj_paths, (size_t)input_count, runtime_path, target_part, sysroot_part, user_out) != 0) return 1;
+        if (cc__ensure_runtime_obj(&base_opt, target_part, sysroot_part, runtime_path, sizeof(runtime_path), &runtime_reused) != 0) {
+            for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
+            return 1;
+        }
+        if (cc__link_many(&base_opt, obj_paths, (size_t)input_count, runtime_path, target_part, sysroot_part, user_out) != 0) {
+            for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
+            return 1;
+        }
+        for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
         return 0;
     }
 
@@ -5866,12 +5981,27 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (mode != CC_MODE_EMIT_C) {
+    if (mode == CC_MODE_COMPILE) {
+        /* -o names the object; --obj-out is an explicit alternate. */
+        if (obj_out) {
+            strncpy(obj_path, obj_out, sizeof(obj_path));
+            obj_path[sizeof(obj_path) - 1] = '\0';
+        } else if (user_out) {
+            strncpy(obj_path, user_out, sizeof(obj_path));
+            obj_path[sizeof(obj_path) - 1] = '\0';
+        } else if (derive_default_obj(in_path_abs, obj_path, sizeof(obj_path)) !=
+                   0) {
+            fprintf(stderr, "cc: failed to derive default object output\n");
+            for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
+            return 1;
+        }
+    } else if (mode != CC_MODE_EMIT_C) {
         if (obj_out) {
             strncpy(obj_path, obj_out, sizeof(obj_path));
             obj_path[sizeof(obj_path)-1] = '\0';
         } else if (derive_default_obj(in_path_abs, obj_path, sizeof(obj_path)) != 0) {
             fprintf(stderr, "cc: failed to derive default object output\n");
+            for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
             return 1;
         }
     }
@@ -5882,6 +6012,7 @@ int main(int argc, char **argv) {
             bin_path[sizeof(bin_path)-1] = '\0';
         } else if (derive_default_bin(in_path_abs, bin_path, sizeof(bin_path)) != 0) {
             fprintf(stderr, "cc: failed to derive default binary output\n");
+            for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
             return 1;
         }
     }
@@ -5911,12 +6042,13 @@ int main(int argc, char **argv) {
         .out_dir = g_out_root,
         .bin_dir = g_bin_root,
         .no_cache = no_cache,
-        .cli_names = NULL,
-        .cli_values = NULL,
-        .cli_count = 0,
+        .cli_names = cli_names_main,
+        .cli_values = cli_values_main,
+        .cli_count = cli_count_main,
     };
     CCBuildSummary sum;
     int err = compile_with_build(&opt, &sum);
+    for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
     return err == 0 ? 0 : 1;
 }
 

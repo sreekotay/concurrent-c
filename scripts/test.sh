@@ -128,20 +128,17 @@ if [ -x "./cc/bin/ccc" ]; then
     echo "[test] CLI selftest FAILED"
     exit 1
   fi
-  # Reparse-input sanitizer regressions (ctor-priority blanking): asserts
-  # on the reparse dump, catching platform-dependent breakage (macOS SDK
-  # vs glibc __attribute__ handling) that pass/fail alone can't see here.
-  if ! sh scripts/test_reparse_sanitize.sh; then
-    echo "[test] reparse sanitize selftest FAILED"
-    exit 1
-  fi
-  # "Definition wins TU-locally" (@noblock): the lying-decl WARNING lands
-  # on build stderr, which the .ccs harness never asserts for passing
-  # tests — pinned here instead (behavior side is pinned by the
-  # autoblock_noblock_*_smoke tid oracles).
-  if ! sh scripts/test_autoblock_noblock_warn.sh; then
-    echo "[test] autoblock noblock warning selftest FAILED"
-    exit 1
+  # Legacy-only seams (reparse dumps / @noblock lying-decl warnings). Skip
+  # on the default native gate; run under --legacy or CC_TEST_FRONTEND=legacy.
+  if [ "$front" = "legacy" ]; then
+    if ! sh scripts/test_reparse_sanitize.sh; then
+      echo "[test] reparse sanitize selftest FAILED"
+      exit 1
+    fi
+    if ! sh scripts/test_autoblock_noblock_warn.sh; then
+      echo "[test] autoblock noblock warning selftest FAILED"
+      exit 1
+    fi
   fi
   # Full SERDES goldens/recipes: scripts/test_shadow.sh (not this gate).
 

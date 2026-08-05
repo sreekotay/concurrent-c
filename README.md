@@ -6,7 +6,7 @@ Concurrent‑C extends **Tiny C Compiler (TCC)** with small, upstream-friendly h
 
 Toolchain:
 - A `ccc` driver (`out/cc/bin/ccc` or wrapper `cc/bin/ccc`) that lowers `.ccs` → C (with `#line` sourcemaps) and then compiles/links with the host C compiler.
-- **Default front is native** (`shadow_lower`: tape → whitelist AST → emit C). Opt out with `--frontend=legacy` / `CC_FRONTEND=legacy` (older multipass text-rewrite path).
+- **Default front is native** (`shadow_lower`: tape → whitelist AST → emit C). `--frontend=legacy` remains for archaeology of the older multipass path.
 - A light/statically linked runtime/stdlib (header-first, prefixed APIs) under `cc/include/ccc` and `cc/runtime`.
 - A test runner (`tools/cc_test`) that drives `cc/bin/ccc` end-to-end.
 

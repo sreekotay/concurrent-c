@@ -14,14 +14,10 @@ active hardening (not changing that spine):
 2. **Stage-2 exhaustive directives** — implement / passthrough-by-design /
    hard error; `#if` never guesses the true arm; indented `#` recognized.
 3. **ccc↔shadow_lower options contract** — forward release/debug/flags/target/
-   sysroot/no-runtime/dry-run; build.cc dump paths need `--frontend=legacy`.
+   sysroot/no-runtime/dry-run; driver handles `build.cc` / `-D` / dumps /
+   `--compile` (host `-D` forward).
 
-Default `ccc` is native. Opt out with:
-
-```bash
-ccc --frontend=legacy examples/hello.ccs -o /tmp/hello
-# or: CC_FRONTEND=legacy ccc examples/hello.ccs -o /tmp/hello
-```
+Default `ccc` is native. Opt out with `--frontend=legacy` only for archaeology.
 
 `shadow_lower` is the product tool: emit text, host-cc build with emit/obj
 cache under `out/.cc-build/native/`, or `--exe` (libtcc from the emit buffer).

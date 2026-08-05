@@ -44,11 +44,8 @@ int main(void) {
     int ec = 0;
     int failed = 0;
 
-    /* Nested `ccc -e` must stay on the legacy front. Suite sets
-     * CC_FRONTEND=native; if inherited, each oneliner pays serdes cost and
-     * the whole smoke times out under --jobs. Force legacy explicitly —
-     * unsetting alone is not enough if the default front is serdes. */
-    setenv("CC_FRONTEND", "legacy", 1);
+    /* Inherit the suite front (native default). Nested -e uses the same
+     * driver path as ordinary compiles. */
     unsetenv("CC_TEST_FRONTEND");
 
     if (!mkdtemp(tmpdir)) {

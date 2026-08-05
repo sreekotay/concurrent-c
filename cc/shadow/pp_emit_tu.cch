@@ -2272,8 +2272,28 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             }
             {
                 char line[768];
+                const char* s;
                 snprintf(line, sizeof(line), "%s", it->a);
-                shadow_lower_type_of_constexpr(line, sizeof(line));
+                s = line;
+                while (*s == ' ' || *s == '\t') s++;
+                /* Host includes / directives: never run type_of text rewrite. */
+                if (*s != '#')
+                    shadow_lower_type_of_constexpr(line, sizeof(line));
+                /* Quoted local .cch → angle .h for host cc (match pass_inc). */
+                if (strncmp(s, "#include \"", 10) == 0) {
+                    size_t n = strlen(s);
+                    if (n >= 5 && strcmp(s + n - 5, ".cch\"") == 0) {
+                        char path[256];
+                        size_t plen = n - 10 - 5; /* after '#include "' before '.cch"' */
+                        if (plen > 0 && plen < sizeof(path)) {
+                            memcpy(path, s + 10, plen);
+                            path[plen] = 0;
+                            if (!cemit_fmt(out, "#include <%s.h>\n", path))
+                                return 0;
+                            break;
+                        }
+                    }
+                }
                 if (!cemit_fmt(out, "%s\n", line)) return 0;
             }
             break;

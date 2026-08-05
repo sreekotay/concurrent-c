@@ -5260,7 +5260,9 @@ static int shadow_emit_ptr_err_at_bind(CEmit* out, ShadowCtx* ctx,
 }
 
 /* `#line N "path"` when site differs from the last marker.
- * Indent with surrounding code (`#` is still the first non-whitespace). */
+ * Indent with surrounding code (`#` is still the first non-whitespace).
+ * Only whitespace may prefix `#line` — a non-space indent glues into the
+ * directive (native self-emit once produced `de#line` from a bad indent). */
 static int shadow_emit_line(CEmit* out, ShadowCtx* ctx, AstNode* st,
                             const char* indent) {
     if (!out || !ctx) return 1;
@@ -5270,6 +5272,15 @@ static int shadow_emit_line(CEmit* out, ShadowCtx* ctx, AstNode* st,
     if (ctx->line_file_id == st->file_id && ctx->line_no == line) return 1;
     char esc[512];
     shadow_escape_path(esc, sizeof(esc), path);
+    if (indent) {
+        const char* p;
+        for (p = indent; *p; p++) {
+            if (*p != ' ' && *p != '\t') {
+                indent = "";
+                break;
+            }
+        }
+    }
     if (!cemit_fmt(out, "%s#line %d \"%s\"\n", indent ? indent : "", line, esc))
         return 0;
     ctx->line_file_id = st->file_id;

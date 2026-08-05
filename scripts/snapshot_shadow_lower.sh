@@ -2,8 +2,8 @@
 # Emit shadow_lower.ccs (+ lowered local headers) into
 # cc/bootstrap/shadow_lower/latest/. Does not promote or commit.
 #
-# Prefers an existing shadow_lower binary (native self-emit). Fallback:
-#   SNAPSHOT_EMITTER=legacy  — force legacy ccc --emit-c-only
+# Prefers an existing shadow_lower binary (native self-emit).
+# Escape hatch only: --legacy / SNAPSHOT_EMITTER=legacy (ccc --frontend=legacy).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -49,21 +49,25 @@ fi
 rm -rf "$LATEST"
 mkdir -p "$LATEST/include"
 
-EMITTER="legacy"
-if [[ "$FORCE_LEGACY" -eq 0 && -n "$SHADOW" ]]; then
-  echo "[snapshot] emit via shadow_lower ($SHADOW)"
-  "$SHADOW" "$SRC" -o "$LATEST/shadow_lower.c" --no-cache
-  EMITTER="native:$SHADOW"
-else
+EMITTER=""
+if [[ "$FORCE_LEGACY" -eq 1 ]]; then
   if [[ ! -x "$CCC" ]]; then
     echo "error: missing ccc at $CCC (make -C cc)" >&2
     exit 1
   fi
-  echo "[snapshot] emit via legacy ccc ($CCC)"
+  echo "[snapshot] emit via legacy ccc ($CCC) (--legacy escape)"
   CC_FRONTEND=legacy "$CCC" --frontend=legacy --emit-c-only --no-cache \
     "$SRC" -o "$LATEST/shadow_lower.c" \
     --cc-flags "-I$ROOT/cc/shadow -I$ROOT/third_party/tcc -DSHADOW_HAVE_LIBTCC=1"
   EMITTER="legacy:$CCC"
+else
+  if [[ -z "$SHADOW" ]]; then
+    echo "error: no shadow_lower binary (make -C cc); or pass --legacy" >&2
+    exit 1
+  fi
+  echo "[snapshot] emit via shadow_lower ($SHADOW)"
+  "$SHADOW" "$SRC" -o "$LATEST/shadow_lower.c" --no-cache
+  EMITTER="native:$SHADOW"
 fi
 
 if [[ ! -s "$LATEST/shadow_lower.c" ]]; then
@@ -100,10 +104,26 @@ line_abs = re.compile(
     r'(#line\s+\d+\s+)"' + re.escape(root_s) + r'/([^"]+)"'
 )
 
+inc_bare = re.compile(r'#include\s+<([^>"/]+\.h)>')
+have_hdrs = {p.name for p in (latest / "include").glob("*.h")} if (latest / "include").is_dir() else set()
+
 def rewrite(text: str) -> str:
+    # Real glue bug is a directive line, not a comment mentioning the token.
+    n_de = len(re.findall(r'(?m)^de#line\b', text))
+    if n_de:
+        print(f"error: emit contains {n_de}× de#line "
+              f"(injected-token lead bug in shadow_attach_lead)", file=sys.stderr)
+        sys.exit(1)
     text = inc_abs.sub(r'#include "\1"', text)
     text = inc_rel.sub(r'#include "\1"', text)
     text = line_abs.sub(r'\1"\2"', text)
+    # Native emit may spell local lowered headers as bare <foo.h>.
+    def bare(m: re.Match) -> str:
+        name = m.group(1)
+        if name in have_hdrs:
+            return f'#include "{name}"'
+        return m.group(0)
+    text = inc_bare.sub(bare, text)
     return text
 
 changed = 0

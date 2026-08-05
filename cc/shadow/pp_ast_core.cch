@@ -745,6 +745,19 @@ static void shadow_attach_lead(Parser* p, AstNode* n, int start_i) {
         Token prev = p->toks[start_i - 1];
         if (prev.file_id == t.file_id) {
             size_t end = prev.offset + prev.spell.len;
+            FileTape* pft = tape_by_id(p->cache, prev.file_id);
+            /* Injected tokens (stage2 umbrella #include → <.h>) keep a tape
+             * offset at the original `"….cch"` string but point spell at a
+             * side buffer. Treating spell.len as a tape advance walks into
+             * the next line and leaves a lead like `de` (from `include`),
+             * which emit glues into `de#line`. End at EOL on the tape. */
+            if (pft && pft->bytes && prev.spell.ptr &&
+                (prev.spell.ptr < pft->bytes ||
+                 prev.spell.ptr >= pft->bytes + pft->len)) {
+                end = prev.offset;
+                while (end < pft->len && pft->bytes[end] != '\n') end++;
+                if (end < pft->len) end++;
+            }
             n->lead_off = end;
             n->lead_len = (t.offset >= end) ? (t.offset - end) : 0;
         }

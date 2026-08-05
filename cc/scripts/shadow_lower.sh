@@ -19,6 +19,7 @@ CCC="${CCC:-$ROOT/out/cc/bin/ccc}"
 if [[ ! -x "$CCC" ]]; then
   CCC="$ROOT/cc/bin/ccc"
 fi
-# Bootstrap must stay on legacy — native is the default and needs shadow_lower.
+# Chicken-egg only: no native binary yet, so run the .ccs through the legacy
+# front. Prefer the installed/built shadow_lower binary for normal use.
 exec env CC_FRONTEND=legacy "$CCC" --frontend=legacy run --no-cache \
   "$ROOT/cc/shadow/shadow_lower.ccs" -- "$@"

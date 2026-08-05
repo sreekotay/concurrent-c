@@ -27,8 +27,7 @@ ccc run hello.ccs
 ```
 
 The default front is **native** (`shadow_lower`). Use `--frontend=legacy`
-(or `CC_FRONTEND=legacy`) only when you need the older multipass path (e.g.
-some `build.cc` dump modes).
+(or `CC_FRONTEND=legacy`) only for archaeology of the older multipass path.
 
 Build outputs land in `./out` and `./bin` under whatever directory you run
 `ccc` from; `--out-dir` overrides that.

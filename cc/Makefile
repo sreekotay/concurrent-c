@@ -345,12 +345,16 @@ $(SHADOW_COMPTIME_LIB): $(SHADOW_COMPTIME_OBJ) $(SHADOW_COMPTIME_ENGINE_OBJS)
 
 # shadow_lower self-build:
 #   SHADOW_LOWER_SOURCE=bootstrap (default) — host-cc last-good snapshot
-#   SHADOW_LOWER_SOURCE=ccs — lower shadow_lower.ccs via legacy ccc
+#   SHADOW_LOWER_SOURCE=ccs — re-lower .ccs via existing native shadow_lower
 # Promote a new seed: scripts/snapshot_shadow_lower.sh && promote_shadow_bootstrap.sh
 BOOTSTRAP_ROOT := bootstrap/shadow_lower
 BOOTSTRAP_VER := $(shell cat $(BOOTSTRAP_ROOT)/last-good 2>/dev/null)
 BOOTSTRAP_DIR := $(BOOTSTRAP_ROOT)/$(BOOTSTRAP_VER)
 SHADOW_LOWER_SOURCE ?= bootstrap
+# Prefer a previously built native binary when re-lowering from .ccs.
+SHADOW_LOWER_SEED_BIN := $(firstword \
+	$(wildcard $(OUT_BINDIR)/shadow_lower) \
+	$(wildcard bin/shadow_lower))
 
 SHADOW_LOWER_CCS_DEPS := $(SHADOW_LOWER_CCS) $(SHADOW_BUILD_CCH) \
 	$(wildcard ../cc/shadow/pp_*.cch) \
@@ -361,13 +365,24 @@ SHADOW_LOWER_BOOT_DEPS := $(BOOTSTRAP_DIR)/shadow_lower.c \
 
 ifeq ($(SHADOW_LOWER_SOURCE),ccs)
 $(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_CCS_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_COMPTIME_LIB) \
-	$(WRAPPER) $(TCC_LIB_DEP) $(RUNTIME_DYLIB) $(OBJDIR)/runtime/concurrent_c.o
-	@mkdir -p $(dir $@)
-	# Legacy path: re-lower .ccs (needed when iterating before a promote).
+	$(TCC_LIB_DEP) $(RUNTIME_DYLIB) $(OBJDIR)/runtime/concurrent_c.o
+	@mkdir -p $(dir $@) $(OBJDIR)
+	@test -n "$(SHADOW_LOWER_SEED_BIN)" -a -x "$(SHADOW_LOWER_SEED_BIN)" || \
+		(echo "SHADOW_LOWER_SOURCE=ccs needs an existing shadow_lower; run: make SHADOW_LOWER_SOURCE=bootstrap"; exit 1)
+	# Native self-emit, then host-cc link (same objs as bootstrap).
 	# concurrent_c.o supplies arena_state/FFC (omitted from libshadow_comptime.a).
-	CC_FRONTEND=legacy $(WRAPPER) --frontend=legacy $(SHADOW_LOWER_CCS) -o $@ --no-cache \
-		--cc-flags "-I../cc/shadow -I$(TCC_INC) -DSHADOW_HAVE_LIBTCC=1" \
-		--ld-flags "$(abspath $(SHADOW_TCC_OBJ)) $(abspath $(OBJDIR)/runtime/concurrent_c.o) $(abspath $(SHADOW_COMPTIME_LIB)) -L$(TCC_LIB) -ltcc"
+	$(SHADOW_LOWER_SEED_BIN) $(SHADOW_LOWER_CCS) -o $(OBJDIR)/shadow_lower.emit.c --no-cache \
+		--cc-flags="-I../cc/shadow -I$(TCC_INC) -DSHADOW_HAVE_LIBTCC=1"
+	@if grep -qE '^de#line' $(OBJDIR)/shadow_lower.emit.c; then \
+		echo "error: emit contains de#line (injected-token lead bug)"; exit 1; \
+	fi
+	$(CC) $(CFLAGS) -o $@ $(OBJDIR)/shadow_lower.emit.c \
+		-I../out/include/cc/shadow -I../out/include -I../cc/include \
+		-I../cc/shadow -I$(TCC_INC) -DSHADOW_HAVE_LIBTCC=1 \
+		$(abspath $(SHADOW_TCC_OBJ)) \
+		$(abspath $(OBJDIR)/runtime/concurrent_c.o) \
+		$(abspath $(SHADOW_COMPTIME_LIB)) \
+		-L$(TCC_LIB) -ltcc $(LDFLAGS) $(LDLIBS)
 	@mkdir -p $(dir $(SHADOW_LOWER_SCRIPT))
 	@cp $@ $(SHADOW_LOWER_SCRIPT)
 	@chmod +x $(SHADOW_LOWER_SCRIPT)

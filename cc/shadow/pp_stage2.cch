@@ -667,7 +667,19 @@ static int handle_include(Pp* pp) {
                 syn.spell.ptr = slot;
                 syn.spell.len = strlen(slot);
                 syn.file_id = hdr.file_id;
-                syn.offset = hdr.offset;
+                /* Point at the `#` of the directive, not the path string —
+                 * spell lives in cpp_dir, so offset+spell.len is not a tape
+                 * span (see shadow_attach_lead injected-token EOL rule). */
+                {
+                    size_t dir_off = hdr.offset;
+                    FileTape* hft =
+                        (pp->nf > 0) ? pp->frames[pp->nf - 1].tape : NULL;
+                    if (hft && hft->bytes) {
+                        while (dir_off > 0 && hft->bytes[dir_off - 1] != '\n')
+                            dir_off--;
+                    }
+                    syn.offset = dir_off;
+                }
                 pp->ncpp_dir++;
                 for (di = 0; di < pp->nsys_inc; di++) {
                     char full[512];

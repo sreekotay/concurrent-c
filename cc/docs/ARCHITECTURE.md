@@ -74,8 +74,9 @@ Concrete corollaries for this front:
 - Typed/instance UFCS miss → diagnose; do not invent `Map_*_*` callees.
 - Snapshot angle-includes and ODR link bugs must fail the cold `make` path,
   not only the machine that generated the snapshot.
-- Driver options that native does not implement (`build.cc` dumps, comptime
-  `-D` bindings) **refuse** — they are not silently dropped.
+- Driver options the lowerer cannot honor must **refuse** or be handled in
+  `ccc` before exec — never silently dropped. `build.cc` / `-D` / dumps /
+  `--compile` are handled in the driver and forwarded as host flags.
 
 ---
 
@@ -211,8 +212,8 @@ comptime / `--exe` / driver parse hooks — not the everyday lower→run path.
 ### ADR-S6: Legacy front is opt-out, not a parallel product story
 
 **Decision:** Default `ccc` is **native** (`shadow_lower`).
-`--frontend=legacy` remains for features not yet on the contract (e.g.
-`build.cc` dumps, comptime `-D`) and for archaeology.
+`--frontend=legacy` remains for archaeology (reparse dumps, visitor-only
+warnings) and the chicken-egg `shadow_lower.sh` script when no binary exists.
 **Rejected:** Dual-default confusion; silent fallback between fronts.
 
 ---
