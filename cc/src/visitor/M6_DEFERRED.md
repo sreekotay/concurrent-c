@@ -1,5 +1,7 @@
 # M6 — Type-syntax AST tolerance (deferred)
 
+> **Scope: legacy front only.** Default `ccc` is native (`shadow_lower`).
+
 **Status:** Superseded by **M7**.
 
 > **Note (historical):** Mentions of `CC_PRE_EXPAND=1` below are the milestone-era

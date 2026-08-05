@@ -1,6 +1,11 @@
 # Result unwrap & error-syntax lowering
 
-Normative semantics live in `[spec/concurrent-c-spec-complete.md` §2.2](../../spec/concurrent-c-spec-complete.md). This document describes the **compiler implementation** only. It covers both the new-surface pass (`pass_result_unwrap.c`, primary) and the legacy `@err` surface pass (`pass_err_syntax.c`, still live during phases 1-3).
+> **Scope: legacy front implementation.** Language semantics apply to both
+> fronts; the pass files below are the multipass text-rewrite path
+> (`--frontend=legacy`). Serdes lowers the same surface in
+> `cc/shadow/pp_emit_unwrap.cch` / related emit modules.
+
+Normative semantics live in `[spec/concurrent-c-spec-complete.md` §2.2](../../spec/concurrent-c-spec-complete.md). This document describes the **legacy compiler implementation** only. It covers both the new-surface pass (`pass_result_unwrap.c`, primary) and the older `@err` surface pass (`pass_err_syntax.c`, still live during phases 1-3).
 
 ## Passes
 

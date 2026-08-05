@@ -1,5 +1,8 @@
 # M1 — Visitor refactor (migration tracker)
 
+> **Scope: legacy front only.** Default `ccc` is native (`shadow_lower`).
+> Historical tracker for the multipass visitor under `--frontend=legacy`.
+
 **Status:** Phase 2 (migration) **COMPLETE** — 2026-05-27.  20 / 20 batches landed — A, B, C, D1, D2, E, F1, F2, G, H1, I1, I2, J, J3, K1, K2, K3a, K3b, L, M.  Phase 3 (pre-flight) **COMPLETE**.  Phase 4 path (a) (macro-expanded `src_all`) **SHELVED** (2026-05-28) — probe validated CPP-on-raw-CC-syntax, but the design conflicts with CC's `CC_PARSER_MODE`-polymorphic headers/macros.  `src_all` intentionally remains the raw user `.ccs`; the speculative capture/swap plumbing was removed.  461/461 default.
 
 This is the living artifact for the M1 visitor refactor.  Every M1 commit

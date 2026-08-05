@@ -1,5 +1,9 @@
 # Comptime Instantiation Seam — unified design
 
+> **Note:** Default `ccc` is native (`shadow_lower`). Comptime still shares
+> prepare/exec/splice seams with the legacy front; product holes are tracked
+> in [cc/shadow/README.md](../../cc/shadow/README.md) (Next gaps).
+
 **Status:** proposal (2026-05-29)  
 **Goal:** Make `@comptime` as complete as the language allows, retire `CC_PARSER_MODE` stubs, and converge built-in generics (Vec/Map/Result), protocol hooks (UFCS/create/destroy), and `cc_type_info` introspection on **one compile-time seam**.
 

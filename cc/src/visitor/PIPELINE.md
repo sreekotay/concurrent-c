@@ -1,5 +1,8 @@
 # Concurrent-C Codegen Pipeline (authoritative)
 
+> **Scope: legacy front only.** Default `ccc` is native (`shadow_lower`).
+> This map is for `--frontend=legacy` / `CC_FRONTEND=legacy`.
+
 **Last updated:** 2026-07-20 (pointer to the span-anchored-passes cycle) — prior: 2026-06-01 (drift audit vs code: phantom `cc_preprocess_for_light_reparse` / `cc_preprocess_simple`, orphan passes), 2026-05-28 (post M4.a: Phase-5 closure-lift gating)
 
 > **2026-07 span-anchored-passes cycle:** the pipeline SHAPE below (stage
@@ -15,7 +18,7 @@
 
 Authoritative call-site map for `visit_codegen.c` and `parse.c`.
 
-> **WHY does the pipeline have this shape?** See [`ARCHITECTURE.md`](../../docs/ARCHITECTURE.md) — the four constraints, three layers, and six ADRs that constrain every part of the pipeline. Read it before proposing structural changes.
+> **WHY does the pipeline have this shape?** See [`LEGACY_ARCHITECTURE.md`](../../docs/LEGACY_ARCHITECTURE.md) — the four constraints, three layers, and six ADRs that constrain every part of the pipeline. Read it before proposing structural changes.
 
 Status summary: [COMPILER_CLEANUP_STATUS.md](../../docs/COMPILER_CLEANUP_STATUS.md).
 
@@ -30,7 +33,7 @@ Status summary: [COMPILER_CLEANUP_STATUS.md](../../docs/COMPILER_CLEANUP_STATUS.
 | Channel/type text | buffer + parse | text-only, no reparse | — |
 | Statement-lowering (Phase 5 closure-lift) | `cc__reparse_source_to_ast` | **gated on `=>` token presence** (2026-05-28) | **155** (was 461 unconditional pre-M4.a) |
 | Async SM | `cc__reparse_source_to_ast` | gated on `@async` / `await` token presence | 74 |
-| Final UFCS sweep | `cc__reparse_source_to_ast` | always (38% of invocations produce ≥1 edit; see ARCHITECTURE.md §6 fossil audit) | 393 |
+| Final UFCS sweep | `cc__reparse_source_to_ast` | always (38% of invocations produce ≥1 edit; see LEGACY_ARCHITECTURE.md §6 fossil audit) | 393 |
 
 **Measured totals (461 smoke suite, 2026-05-28):**
 
@@ -61,7 +64,7 @@ The legacy `cc__apply_coarse_codegen_pass()` per-collector path and the `CC_BATC
 
 **As of 2026-05-28:** the Phase-5 closure-literal lift (`cc__rewrite_closure_literals_with_nodes`) reparse + call are gated on `cc_contains_token_top_level(src_ufcs, ..., "=>")`. TUs without closure literals skip the reparse + buffer alloc entirely. 306/461 (66%) of smoke TUs benefit.
 
-**Why not fold Phase 5 into Phase 3 Stage 2?** Closure-literal lift is a *producer* for closure_calls (closure literals inside closure-typed call arg lists must be lowered to `__cc_closure_make_N()` before `cc__emit_call_replacement` extracts the arg text). That's the same producer/consumer pattern UFCS has — folding would require a 3rd Phase-3 stage with its own reparse barrier, net zero reparse savings. See [`ARCHITECTURE.md` §6 "Targets that aren't worth it"](../../docs/ARCHITECTURE.md).
+**Why not fold Phase 5 into Phase 3 Stage 2?** Closure-literal lift is a *producer* for closure_calls (closure literals inside closure-typed call arg lists must be lowered to `__cc_closure_make_N()` before `cc__emit_call_replacement` extracts the arg text). That's the same producer/consumer pattern UFCS has — folding would require a 3rd Phase-3 stage with its own reparse barrier, net zero reparse savings. See [`LEGACY_ARCHITECTURE.md` §6 "Targets that aren't worth it"](../../docs/LEGACY_ARCHITECTURE.md).
 
 ## Cached flattened reparse prelude (2026-05-30)
 

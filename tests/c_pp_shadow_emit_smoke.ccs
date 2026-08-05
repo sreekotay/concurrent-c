@@ -3,19 +3,19 @@
 #include <ccc/std/prelude.cch>
 
 @grammar(rules) PpTok {~~~~
-    include "../examples/serdes/c/pp_tok.rules"
+    include "../cc/shadow/pp_tok.rules"
 ~~~~}
 
 @grammar(rules) PpStmt {~~~~
-    include "../examples/serdes/c/pp_stmt.rules"
+    include "../cc/shadow/pp_stmt.rules"
 ~~~~}
 
-#include "../examples/serdes/c/c_pp_spike.cch"
-#include "../examples/serdes/c/shadow_comptime.h"
+#include "../cc/shadow/c_pp_spike.cch"
+#include "../cc/shadow/shadow_comptime.h"
 #include <fcntl.h>
 #include <unistd.h>
 
-static const char* FIX = "examples/serdes/c/shadow";
+static const char* FIX = "cc/shadow/shadow";
 
 static void pp_free_macros(Pp* pp) {
     for (int i = 0; i < pp->nmacros; i++) free(pp->macros[i].body);
@@ -222,7 +222,7 @@ static int test_cch_to_h_hostcc(void) {
 static int test_diag_line(void) {
     CCArena arena = cc_arena_create(1 << 20);
     TapeCache cache = {0};
-    const char* path = "examples/serdes/c/shadow/bad_token.ccs";
+    const char* path = "cc/shadow/shadow/bad_token.ccs";
     {
         FILE* f = fopen(path, "wb");
         if (!f) return 0;
@@ -366,7 +366,7 @@ static int test_safety_oracles(void) {
 static int test_cap_stage2(void) {
     CCArena arena = cc_arena_create(1 << 20);
     TapeCache cache = {0};
-    const char* path = "examples/serdes/c/shadow/cap_stage2.ccs";
+    const char* path = "cc/shadow/shadow/cap_stage2.ccs";
     FileTape* ft;
     Token tokbuf[8];
     Pp pp = {0};
@@ -412,7 +412,7 @@ static int test_cap_stage2(void) {
 static int test_cap_body(void) {
     CCArena arena = cc_arena_create(1 << 20);
     TapeCache cache = {0};
-    const char* path = "examples/serdes/c/shadow/cap_body.ccs";
+    const char* path = "cc/shadow/shadow/cap_body.ccs";
     FileTape* ft;
     Token tokbuf[4096];
     Pp pp = {0};
@@ -467,7 +467,7 @@ static int test_cap_body(void) {
 static int test_cap_field(void) {
     CCArena arena = cc_arena_create(1 << 20);
     TapeCache cache = {0};
-    const char* path = "examples/serdes/c/shadow/cap_field.ccs";
+    const char* path = "cc/shadow/shadow/cap_field.ccs";
     FileTape* ft;
     Token tokbuf[4096];
     Pp pp = {0};
@@ -610,11 +610,11 @@ int main(void) {
     if (!test_safety_oracles()) return 1;
     {
         /* Beachhead name-match only — stdlib diffs + recipes live in
-         * scripts/test_serdes_shadow.sh (keeps this smoke under cc_test's
+         * scripts/test_shadow_recipes.sh (keeps this smoke under cc_test's
          * default run timeout). */
         char cmd[512];
         snprintf(cmd, sizeof(cmd),
-                 "bash examples/serdes/c/shadow/diff_lower_header.sh");
+                 "bash cc/shadow/shadow/diff_lower_header.sh");
         int rc = system(cmd);
         if (rc != 0) {
             printf("FAIL: diff_lower_header.sh rc=%d\n", rc);

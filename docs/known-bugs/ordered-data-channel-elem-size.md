@@ -1,5 +1,8 @@
 # `ordered` on a DATA channel: accepted at parse, first plain send fails at runtime
 
+> **Legacy-front bug writeup** (`pass_channel_syntax.c`). Default `ccc` is
+> serdes; kept for archaeology.
+
 **Status:** FIXED.  **Found:** 2026-07-23, redis @variant conversion
 (declaring the reply/request channels `ordered` per the channel spec's
 delivery-order rule).  **Fixed:** 2026-07-23.

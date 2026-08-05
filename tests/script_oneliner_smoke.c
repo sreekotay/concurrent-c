@@ -45,7 +45,7 @@ int main(void) {
     int failed = 0;
 
     /* Nested `ccc -e` must stay on the legacy front. Suite sets
-     * CC_FRONTEND=serdes; if inherited, each oneliner pays serdes cost and
+     * CC_FRONTEND=native; if inherited, each oneliner pays serdes cost and
      * the whole smoke times out under --jobs. Force legacy explicitly —
      * unsetting alone is not enough if the default front is serdes. */
     setenv("CC_FRONTEND", "legacy", 1);

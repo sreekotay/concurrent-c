@@ -27,7 +27,14 @@
 cd cc && make
 ```
 
-The compiler binary is at `cc/bin/ccc`.
+Binaries: `cc/bin/ccc` (driver) and `out/cc/bin/shadow_lower` (default native
+front, host-cc'd from `cc/bootstrap/shadow_lower/last-good`). Opt out with
+`ccc --frontend=legacy` / `CC_FRONTEND=legacy`.
+
+- [Compiler architecture](../cc/docs/ARCHITECTURE.md) — default native / `shadow_lower`
+- [shadow_lower ops / layout](../cc/shadow/README.md)
+- [Bootstrap snapshots](../cc/bootstrap/shadow_lower/README.md)
+- Legacy multipass (opt-out): [LEGACY_ARCHITECTURE.md](../cc/docs/LEGACY_ARCHITECTURE.md)
 
 ## Quick Example
 

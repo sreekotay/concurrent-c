@@ -26,7 +26,8 @@ make tcc-patch-regen
 
 **0001-cc-ext-hooks.patch** - All CC extensions to TCC in a single patch:
 
-- AST stub recording system for CC visitor passes
+- AST stub recording system (used by the legacy `--frontend=legacy` visitor;
+  default native front does not consume these stub nodes for lowering)
 - External parser hooks (`ext_parser`) for CC syntax
 - UFCS (Uniform Function Call Syntax) support
 - Statement extensions: `@defer`, `spawn`, and parser-level rejection of retired `@arena` / `@nursery`

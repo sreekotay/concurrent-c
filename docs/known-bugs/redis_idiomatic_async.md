@@ -1,5 +1,8 @@
 # Compiler limitations blocking the `redis_idiomatic` `@async` migration
 
+> **Mostly legacy-front archaeology** (visitor / text-rewrite passes). Default
+> `ccc` is serdes (`shadow_lower`). Kept as a closed-bug ledger for redis.
+
 **Status:** every bug in the original migration list — the six
 originals **and** all twelve follow-ups
 ([F1]/[F2]/[F3]/[F4]/[F5]/[F6]/[F7]/[F8]/[F9]/[F11]/[F12]/[F13]) — is

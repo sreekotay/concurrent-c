@@ -56,6 +56,8 @@ real tools (e.g. `script_minify_smoke.shcc` → `examples/.../minify.shcc`).
 - `./tools/cc_test --jobs N`: parallel runs (default: online CPU count, cap 16; `CC_TEST_JOBS`)
 - `./tools/cc_test --no-cache` / `--use-cache`: control `ccc build` cache
 
-`./scripts/test.sh` defaults to the fast loop (cheap preambles + `--quick`).
-Use `CC_TEST_FULL=1` / `--full` for redis line-map / functional / tcc-patch /
+`./scripts/test.sh` defaults to the fast loop (cheap preambles + `--quick`)
+with the **native** front (`shadow_lower`). Use `--legacy` /
+`CC_TEST_FRONTEND=legacy` for the older multipass path. Use
+`CC_TEST_FULL=1` / `--full` for redis line-map / functional / tcc-patch /
 variant-shape / stress.

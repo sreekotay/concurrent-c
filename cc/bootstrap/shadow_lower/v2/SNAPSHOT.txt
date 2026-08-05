@@ -1,4 +1,4 @@
-source: examples/serdes/c/shadow_lower.ccs
+source: cc/shadow/shadow_lower.ccs
 emitter: legacy:/Users/skotay/Documents/code/concurrent-c/cc/bin/ccc
 created_utc: 2026-08-04T22:31:22Z
 git_head: 578e781c

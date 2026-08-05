@@ -1,5 +1,5 @@
 /* SERDES product build: emit/obj cache + host cc (ccc-compatible) + link.
- * Used by shadow_lower.ccs. Cache root: out/.cc-build/serdes/<fp>/. */
+ * Used by shadow_lower.ccs. Cache root: out/.cc-build/native/<fp>/. */
 #pragma once
 
 #include <stdint.h>
@@ -290,7 +290,7 @@ static uint64_t shadow_obj_cache_key(uint64_t emit_key, const char* host_cc) {
 }
 
 static void shadow_cache_dir(uint64_t emit_key, char* dst, size_t cap) {
-    snprintf(dst, cap, "out/.cc-build/serdes/%016llx", (unsigned long long)emit_key);
+    snprintf(dst, cap, "out/.cc-build/native/%016llx", (unsigned long long)emit_key);
 }
 
 /* Run host cc -c with ccc-compatible flags. -D_DEFAULT_SOURCE keeps POSIX

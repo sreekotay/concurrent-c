@@ -13,6 +13,13 @@ if [[ ! -f "$LATEST/shadow_lower.c" ]] || [[ ! -d "$LATEST/include" ]]; then
   exit 1
 fi
 
+# Portable bootstrap requires flattened includes — reject un-rewritten angles.
+if grep -R -n -E '#include[[:space:]]*<(cc/shadow|examples/serdes/c)/' "$LATEST" >/dev/null 2>&1; then
+  echo "error: $LATEST still has <cc/shadow/...> (or legacy <examples/serdes/c/...>) includes" >&2
+  echo "  re-run: ./scripts/snapshot_shadow_lower.sh  (path rewrite must flatten them)" >&2
+  exit 1
+fi
+
 if [[ $# -gt 1 ]]; then
   echo "usage: $0 [N]" >&2
   exit 2

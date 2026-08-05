@@ -12,10 +12,10 @@ set -euo pipefail
 #   --full             same as CC_TEST_FULL=1
 #   CC_TEST_QUICK=0    same as --full (escape hatch if something sets QUICK=1)
 #   --quick            explicit default (no-op unless paired with conflicting FULL)
-#   --serdes           pin harness to serdes (ccc default; explicit)
+#   --native           pin harness to native (ccc default; explicit)
 #   --legacy           pin harness to legacy front (CC_TEST_FRONTEND=legacy)
-#   --compare-front    run the harness twice (legacy then serdes) and print wall times
-#   CC_TEST_FRONTEND=serdes|legacy   same as --serdes / --legacy
+#   --compare-front    run the harness twice (legacy then native) and print wall times
+#   CC_TEST_FRONTEND=native|legacy   same as --native / --legacy
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
@@ -31,10 +31,10 @@ if [ -f "./tools/cc_test.c" ] && [ "./tools/cc_test.c" -nt "./tools/cc_test" ]; 
   cc -O2 -Wall -Wextra tools/cc_test.c -o tools/cc_test
 fi
 
-# Default: quick. Full is opt-in. Front default: serdes (ccc default).
+# Default: quick. Full is opt-in. Front default: native (ccc default).
 quick=1
 full=0
-front=serdes
+front=native
 compare_front=0
 case "${CC_TEST_FULL:-0}" in
   1|yes|true|TRUE|Yes) full=1 ;;
@@ -43,7 +43,7 @@ case "${CC_TEST_QUICK:-}" in
   0|no|false|FALSE|No) full=1 ;;
 esac
 case "${CC_TEST_FRONTEND:-}" in
-  serdes) front=serdes ;;
+  native) front=native ;;
   legacy) front=legacy ;;
 esac
 # Strip front flags before handing argv to cc_test; keep --quick/--full.
@@ -52,7 +52,7 @@ for a in "$@"; do
   case "$a" in
     --quick) quick=1; full=0; args+=("$a") ;;
     --full)  full=1; args+=("$a") ;;
-    --serdes) front=serdes ;;
+    --native) front=native ;;
     --legacy) front=legacy ;;
     --compare-front) compare_front=1 ;;
     *) args+=("$a") ;;
@@ -108,9 +108,9 @@ else
   echo "[test] full mode (jobs=$jobs)"
 fi
 
-if [ "$front" = "serdes" ] || [ "$compare_front" = 1 ]; then
+if [ "$front" = "native" ] || [ "$compare_front" = 1 ]; then
   if [ ! -x "./out/cc/bin/shadow_lower" ] && [ ! -x "./cc/bin/shadow_lower" ]; then
-    echo "[test] FAIL: serdes front needs native shadow_lower (make -C cc)"
+    echo "[test] FAIL: native front needs shadow_lower (make -C cc)"
     exit 1
   fi
 fi
@@ -143,7 +143,7 @@ if [ -x "./cc/bin/ccc" ]; then
     echo "[test] autoblock noblock warning selftest FAILED"
     exit 1
   fi
-  # Full SERDES goldens/recipes: scripts/test_serdes.sh (not this gate).
+  # Full SERDES goldens/recipes: scripts/test_shadow.sh (not this gate).
 
   if [ "$quick" = 0 ]; then
     # @async state-machine #line accuracy on the real redis port: async poll
@@ -189,14 +189,14 @@ if [ -x "./cc/bin/ccc" ]; then
       echo "[test] redis functional smoke FAILED"
       exit 1
     fi
-    if [ "$front" = "serdes" ]; then
-      if ! sh scripts/test_serdes_real_projects.sh; then
-        echo "[test] serdes real-projects smoke FAILED"
+    if [ "$front" = "native" ]; then
+      if ! sh scripts/test_shadow_real_projects.sh; then
+        echo "[test] native real-projects smoke FAILED"
         exit 1
       fi
     fi
   else
-    echo "[test] quick: skipped async_line_map / diag_cache / variant_shape / tcc_patch / redis_functional / serdes_real"
+    echo "[test] quick: skipped async_line_map / diag_cache / variant_shape / tcc_patch / redis_functional / native_real"
   fi
 fi
 
@@ -214,7 +214,7 @@ run_harness() {
 }
 
 if [ "$compare_front" = 1 ]; then
-  echo "[test] compare-front: legacy then serdes (same harness args)"
+  echo "[test] compare-front: legacy then native (same harness args)"
   t0="$(now_s)"
   set +e
   # shellcheck disable=SC2086
@@ -224,18 +224,18 @@ if [ "$compare_front" = 1 ]; then
   t1="$(now_s)"
   set +e
   # shellcheck disable=SC2086
-  run_harness serdes "$@"
-  rc_ser=$?
+  run_harness native "$@"
+  rc_nat=$?
   set -e
   t2="$(now_s)"
   leg_s="$(python3 -c "print(f'{float('$t1')-float('$t0'):.1f}')")"
-  ser_s="$(python3 -c "print(f'{float('$t2')-float('$t1'):.1f}')")"
-  ratio="$(python3 -c "a=float('$ser_s'); b=float('$leg_s'); print(f'{a/b:.2f}x' if b>0 else 'n/a')")"
+  nat_s="$(python3 -c "print(f'{float('$t2')-float('$t1'):.1f}')")"
+  ratio="$(python3 -c "a=float('$nat_s'); b=float('$leg_s'); print(f'{a/b:.2f}x' if b>0 else 'n/a')")"
   echo ""
   echo "[test] compare-front summary"
   echo "  legacy: ${leg_s}s  rc=$rc_leg  ($(CC_FRONTEND=legacy ./cc/bin/ccc --v 2>/dev/null | head -1))"
-  echo "  serdes: ${ser_s}s  rc=$rc_ser  (${ratio} of legacy wall time)  ($(CC_FRONTEND=serdes ./cc/bin/ccc --v 2>/dev/null | head -1))"
-  if [ "$rc_leg" -ne 0 ] || [ "$rc_ser" -ne 0 ]; then
+  echo "  native: ${nat_s}s  rc=$rc_nat  (${ratio} of legacy wall time)  ($(CC_FRONTEND=native ./cc/bin/ccc --v 2>/dev/null | head -1))"
+  if [ "$rc_leg" -ne 0 ] || [ "$rc_nat" -ne 0 ]; then
     exit 1
   fi
   exit 0

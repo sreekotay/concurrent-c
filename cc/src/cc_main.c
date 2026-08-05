@@ -747,8 +747,8 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --bin-dir DIR       Output dir for linked executables (default: <repo>/bin)\n");
     fprintf(stderr, "  --out-stem NAME     Override the basename/stem used for generated files\n");
     fprintf(stderr, "  --no-cache          Disable incremental cache (also: CC_NO_CACHE=1)\n");
-    fprintf(stderr, "  --frontend=serdes|legacy  Front end (default serdes; also: CC_FRONTEND)\n");
-    fprintf(stderr, "  --version, --v, -V  Print version (serdes 0.2.x; legacy 0.1.x)\n");
+    fprintf(stderr, "  --frontend=native|legacy  Front end (default native; also: CC_FRONTEND)\n");
+    fprintf(stderr, "  --version, --v, -V  Print version (native 0.2.x; legacy 0.1.x)\n");
     fprintf(stderr, "  --timeout SECONDS   Kill run/test step after timeout\n");
     fprintf(stderr, "  --verbose           Print invoked commands\n");
     fprintf(stderr, "One-liners:\n");
@@ -2277,27 +2277,43 @@ static int cc__load_const_bindings(const CCBuildOptions* opt, CCConstBinding* bi
 static void cc__print_comptime_targets(const char* build_path);
 static void cc__print_comptime_state(const CCBuildOptions* opt, const char* build_path, const CCConstBinding* bindings, size_t count);
 
-/* SERDES is the default front. Opt out: --frontend=legacy or CC_FRONTEND=legacy.
- * -1 = unset (env/default), 0 = legacy, 1 = serdes. */
-static int g_frontend_serdes = -1;
+/* Native (shadow_lower) is the default front. Opt out: --frontend=legacy.
+ * -1 = unset (env/default), 0 = legacy, 1 = native. */
+static int g_frontend_native = -1;
 
-/* Legacy front stays on 0.1.x; serdes (default) is 0.2.x. */
+/* Legacy front stays on 0.1.x; native (default) is 0.2.x. */
 #define CCC_VERSION_LEGACY "0.1.0-dev"
-#define CCC_VERSION_SERDES "0.2.0-dev"
+#define CCC_VERSION_NATIVE "0.2.0-dev"
 
-static int cc__want_serdes_front(void) {
-    if (g_frontend_serdes == 1) return 1;
-    if (g_frontend_serdes == 0) return 0;
+static int cc__set_frontend_name(const char* v) {
+    if (!v || !v[0]) return -1;
+    if (strcmp(v, "native") == 0) {
+        g_frontend_native = 1;
+        return 0;
+    }
+    if (strcmp(v, "legacy") == 0) {
+        g_frontend_native = 0;
+        return 0;
+    }
+    fprintf(stderr, "cc: --frontend must be native or legacy (got %s)\n", v);
+    return -1;
+}
+
+static int cc__want_native_front(void) {
+    if (g_frontend_native == 1) return 1;
+    if (g_frontend_native == 0) return 0;
     {
         const char* e = getenv("CC_FRONTEND");
-        if (e && strcmp(e, "legacy") == 0) return 0;
-        if (e && strcmp(e, "serdes") == 0) return 1;
+        if (!e || !e[0]) return 1; /* default: native */
+        if (strcmp(e, "legacy") == 0) return 0;
+        if (strcmp(e, "native") == 0) return 1;
+        fprintf(stderr, "cc: CC_FRONTEND must be native or legacy (got %s)\n", e);
+        exit(2);
     }
-    return 1; /* default: serdes */
 }
 
 static const char* cc__version_string(void) {
-    return cc__want_serdes_front() ? CCC_VERSION_SERDES : CCC_VERSION_LEGACY;
+    return cc__want_native_front() ? CCC_VERSION_NATIVE : CCC_VERSION_LEGACY;
 }
 
 static void cc__print_version(void) {
@@ -2309,23 +2325,25 @@ static int cc__arg_is_version(const char* a) {
                  strcmp(a, "-V") == 0);
 }
 
-/* Light scan so `ccc --frontend=legacy --version` reports 0.1.x. */
-static void cc__scan_frontend_flags(int argc, char** argv) {
+/* Light scan so `ccc --frontend=legacy --version` reports 0.1.x.
+ * Returns -1 on unknown frontend name (already diagnosed). */
+static int cc__scan_frontend_flags(int argc, char** argv) {
     int i;
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--frontend") == 0) {
-            if (i + 1 >= argc) continue;
+            if (i + 1 >= argc) {
+                fprintf(stderr, "cc: --frontend requires native|legacy\n");
+                return -1;
+            }
             i++;
-            if (strcmp(argv[i], "serdes") == 0) g_frontend_serdes = 1;
-            else if (strcmp(argv[i], "legacy") == 0) g_frontend_serdes = 0;
+            if (cc__set_frontend_name(argv[i]) != 0) return -1;
             continue;
         }
         if (strncmp(argv[i], "--frontend=", 11) == 0) {
-            const char* v = argv[i] + 11;
-            if (strcmp(v, "serdes") == 0) g_frontend_serdes = 1;
-            else if (strcmp(v, "legacy") == 0) g_frontend_serdes = 0;
+            if (cc__set_frontend_name(argv[i] + 11) != 0) return -1;
         }
     }
+    return 0;
 }
 
 static int cc__ends_with_ci(const char* s, const char* suf) {
@@ -2378,24 +2396,31 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
     if (opt->dump_consts || opt->dump_comptime) {
         fprintf(stderr,
                 "cc: --dump-consts/--dump-comptime require --frontend=legacy "
-                "(serdes does not load build.cc)\n");
+                "(native front does not load build.cc)\n");
         return -1;
     }
     if (opt->build_override && opt->build_override[0]) {
         fprintf(stderr,
                 "cc: --build-file requires --frontend=legacy "
-                "(serdes does not load build.cc)\n");
+                "(native front does not load build.cc)\n");
         return -1;
     }
     if (opt->no_build) {
         fprintf(stderr,
                 "cc: --no-build requires --frontend=legacy "
-                "(serdes does not load build.cc)\n");
+                "(native front does not load build.cc)\n");
+        return -1;
+    }
+    if (opt->cli_count > 0) {
+        fprintf(stderr,
+                "cc: --frontend=native does not support comptime CLI bindings "
+                "yet (%zu -D binding%s); use --frontend=legacy\n",
+                opt->cli_count, opt->cli_count == 1 ? "" : "s");
         return -1;
     }
     if (cc__find_shadow_lower(shadow, sizeof(shadow)) != 0) {
         fprintf(stderr,
-                "cc: serdes front requires native shadow_lower "
+                "cc: native front requires shadow_lower "
                 "(checkout: make -C cc; install: $PREFIX/bin/shadow_lower)\n");
         return -1;
     }
@@ -2434,7 +2459,7 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
         int n = snprintf(cc_flags_buf + cflen, sizeof(cc_flags_buf) - cflen,
                          "%s--target %s", cflen ? " " : "", opt->target_flag);
         if (n < 0 || (size_t)n >= sizeof(cc_flags_buf) - cflen) {
-            fprintf(stderr, "cc: --target/--cc-flags too long for serdes forward\n");
+            fprintf(stderr, "cc: --target/--cc-flags too long for native forward\n");
             return -1;
         }
         cflen += (size_t)n;
@@ -2443,7 +2468,7 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
         int n = snprintf(cc_flags_buf + cflen, sizeof(cc_flags_buf) - cflen,
                          "%s--sysroot %s", cflen ? " " : "", opt->sysroot_flag);
         if (n < 0 || (size_t)n >= sizeof(cc_flags_buf) - cflen) {
-            fprintf(stderr, "cc: --sysroot/--cc-flags too long for serdes forward\n");
+            fprintf(stderr, "cc: --sysroot/--cc-flags too long for native forward\n");
             return -1;
         }
         cflen += (size_t)n;
@@ -2454,7 +2479,7 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
         int n = snprintf(cc_flags_buf + cflen, sizeof(cc_flags_buf) - cflen,
                          "%s-I%s", cflen ? " " : "", g_cc_lowered_include);
         if (n < 0 || (size_t)n >= sizeof(cc_flags_buf) - cflen) {
-            fprintf(stderr, "cc: include path too long for serdes forward\n");
+            fprintf(stderr, "cc: include path too long for native forward\n");
             return -1;
         }
         cflen += (size_t)n;
@@ -2465,7 +2490,7 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
         int n = snprintf(cc_flags_buf + cflen, sizeof(cc_flags_buf) - cflen,
                          "%s-I%s", cflen ? " " : "", g_cc_include);
         if (n < 0 || (size_t)n >= sizeof(cc_flags_buf) - cflen) {
-            fprintf(stderr, "cc: include path too long for serdes forward\n");
+            fprintf(stderr, "cc: include path too long for native forward\n");
             return -1;
         }
         cflen += (size_t)n;
@@ -2493,7 +2518,7 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
     argv[argc++] = (char*)out_path;
     argv[argc] = NULL;
     if (opt->verbose) {
-        fprintf(stderr, "cc: serdes:");
+        fprintf(stderr, "cc: native:");
         for (int i = 0; argv[i]; ++i) fprintf(stderr, " %s", argv[i]);
         fprintf(stderr, "\n");
     }
@@ -2521,10 +2546,10 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         fprintf(stderr, "cc: missing input or c_out_path\n");
         return -1;
     }
-    /* SERDES succession path: delegate .ccs link/emit to shadow_lower.
+    /* Native front: delegate .ccs link/emit to shadow_lower.
      * Py modules keep the caller's -fPIC/-shared flags (set above when
      * PyInit_* is detected); shadow_lower forwards them to host cc/ld. */
-    if (cc__want_serdes_front() && cc__ends_with_ci(opt->in_path, ".ccs")) {
+    if (cc__want_native_front() && cc__ends_with_ci(opt->in_path, ".ccs")) {
         if (opt->mode == CC_MODE_LINK && opt->bin_out_path) {
             if (summary_out) {
                 memset(summary_out, 0, sizeof(*summary_out));
@@ -2541,7 +2566,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             return cc__run_shadow_lower(opt, opt->c_out_path);
         }
         fprintf(stderr,
-                "cc: --frontend=serdes supports --link and --emit-c-only "
+                "cc: --frontend=native supports --link and --emit-c-only "
                 "(got --compile); use legacy front or emit-c-only\n");
         return -1;
     }
@@ -3585,26 +3610,16 @@ static int run_build_mode(int argc, char** argv) {
         if (strcmp(argv[i], "--no-cache") == 0) { no_cache = 1; continue; }
         if (strcmp(argv[i], "--frontend") == 0) {
             if (i + 1 >= argc) {
-                fprintf(stderr, "cc: --frontend requires serdes|legacy\n");
+                fprintf(stderr, "cc: --frontend requires native|legacy\n");
                 goto parse_fail;
             }
             ++i;
-            if (strcmp(argv[i], "serdes") == 0) g_frontend_serdes = 1;
-            else if (strcmp(argv[i], "legacy") == 0) g_frontend_serdes = 0;
-            else {
-                fprintf(stderr, "cc: --frontend must be serdes or legacy\n");
-                goto parse_fail;
-            }
+            if (cc__set_frontend_name(argv[i]) != 0) goto parse_fail;
             continue;
         }
         if (strncmp(argv[i], "--frontend=", 11) == 0) {
             const char* v = argv[i] + 11;
-            if (strcmp(v, "serdes") == 0) g_frontend_serdes = 1;
-            else if (strcmp(v, "legacy") == 0) g_frontend_serdes = 0;
-            else {
-                fprintf(stderr, "cc: --frontend must be serdes or legacy\n");
-                goto parse_fail;
-            }
+            if (cc__set_frontend_name(v) != 0) goto parse_fail;
             continue;
         }
         if (strcmp(argv[i], "--out-dir") == 0) {
@@ -5251,7 +5266,7 @@ int main(int argc, char **argv) {
         return 0;
     }
     /* Version may appear with --frontend=… ahead of it; scan once. */
-    cc__scan_frontend_flags(argc, argv);
+    if (cc__scan_frontend_flags(argc, argv) != 0) return 2;
     {
         int vi;
         for (vi = 1; vi < argc; vi++) {
@@ -5586,27 +5601,17 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--no-cache") == 0) { no_cache = 1; continue; }
         if (strcmp(argv[i], "--frontend") == 0) {
             if (i + 1 >= argc) {
-                fprintf(stderr, "cc: --frontend requires serdes|legacy\n");
+                fprintf(stderr, "cc: --frontend requires native|legacy\n");
                 usage(argv[0]);
                 return 1;
             }
             ++i;
-            if (strcmp(argv[i], "serdes") == 0) g_frontend_serdes = 1;
-            else if (strcmp(argv[i], "legacy") == 0) g_frontend_serdes = 0;
-            else {
-                fprintf(stderr, "cc: --frontend must be serdes or legacy\n");
-                return 1;
-            }
+            if (cc__set_frontend_name(argv[i]) != 0) return 1;
             continue;
         }
         if (strncmp(argv[i], "--frontend=", 11) == 0) {
             const char* v = argv[i] + 11;
-            if (strcmp(v, "serdes") == 0) g_frontend_serdes = 1;
-            else if (strcmp(v, "legacy") == 0) g_frontend_serdes = 0;
-            else {
-                fprintf(stderr, "cc: --frontend must be serdes or legacy\n");
-                return 1;
-            }
+            if (cc__set_frontend_name(v) != 0) return 1;
             continue;
         }
         if (strcmp(argv[i], "--out-dir") == 0) {

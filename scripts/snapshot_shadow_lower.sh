@@ -2,15 +2,15 @@
 # Emit shadow_lower.ccs (+ lowered local headers) into
 # cc/bootstrap/shadow_lower/latest/. Does not promote or commit.
 #
-# Prefers an existing shadow_lower binary (serdes self-emit). Fallback:
+# Prefers an existing shadow_lower binary (native self-emit). Fallback:
 #   SNAPSHOT_EMITTER=legacy  — force legacy ccc --emit-c-only
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BOOT="$ROOT/cc/bootstrap/shadow_lower"
 LATEST="$BOOT/latest"
-SRC="$ROOT/examples/serdes/c/shadow_lower.ccs"
-HDR_SRC="$ROOT/out/include/examples/serdes/c"
+SRC="$ROOT/cc/shadow/shadow_lower.ccs"
+HDR_SRC="$ROOT/out/include/cc/shadow"
 CCC="${CCC:-$ROOT/cc/bin/ccc}"
 SHADOW="${SHADOW:-}"
 SMOKE=0
@@ -53,7 +53,7 @@ EMITTER="legacy"
 if [[ "$FORCE_LEGACY" -eq 0 && -n "$SHADOW" ]]; then
   echo "[snapshot] emit via shadow_lower ($SHADOW)"
   "$SHADOW" "$SRC" -o "$LATEST/shadow_lower.c" --no-cache
-  EMITTER="serdes:$SHADOW"
+  EMITTER="native:$SHADOW"
 else
   if [[ ! -x "$CCC" ]]; then
     echo "error: missing ccc at $CCC (make -C cc)" >&2
@@ -62,7 +62,7 @@ else
   echo "[snapshot] emit via legacy ccc ($CCC)"
   CC_FRONTEND=legacy "$CCC" --frontend=legacy --emit-c-only --no-cache \
     "$SRC" -o "$LATEST/shadow_lower.c" \
-    --cc-flags "-I$ROOT/examples/serdes/c -I$ROOT/third_party/tcc -DSHADOW_HAVE_LIBTCC=1"
+    --cc-flags "-I$ROOT/cc/shadow -I$ROOT/third_party/tcc -DSHADOW_HAVE_LIBTCC=1"
   EMITTER="legacy:$CCC"
 fi
 
@@ -77,10 +77,10 @@ if [[ -d "$HDR_SRC" ]] && ls "$HDR_SRC"/*.h >/dev/null 2>&1; then
   echo "[snapshot] copy lowered headers → $LATEST/include/"
   cp -f "$HDR_SRC"/*.h "$LATEST/include/"
 else
-  echo "[snapshot] WARN: no lowered serdes headers under $HDR_SRC" >&2
+  echo "[snapshot] WARN: no lowered shadow headers under $HDR_SRC" >&2
 fi
 
-echo "[snapshot] rewrite absolute serdes includes / #line paths"
+echo "[snapshot] rewrite absolute includes / #line paths"
 python3 - "$ROOT" "$LATEST" <<'PY'
 import pathlib, re, sys
 
@@ -89,12 +89,12 @@ latest = pathlib.Path(sys.argv[2]).resolve()
 root_s = str(root)
 
 inc_abs = re.compile(
-    r'#include\s+"[^"]*/out/include/examples/serdes/c/([^"/]+)"'
+    r'#include\s+"[^"]*/out/include/(?:cc/shadow|examples/serdes/c)/([^"/]+)"'
 )
-# Serdes self-emit spells local lowered headers repo-relative in angle form;
+# Self-emit may spell local lowered headers repo-relative in angle form;
 # a snapshot must resolve them from its own include/ dir, not a warm out/ tree.
 inc_rel = re.compile(
-    r'#include\s+<examples/serdes/c/([^>/]+)>'
+    r'#include\s+<(?:cc/shadow|examples/serdes/c)/([^>/]+)>'
 )
 line_abs = re.compile(
     r'(#line\s+\d+\s+)"' + re.escape(root_s) + r'/([^"]+)"'
@@ -125,7 +125,7 @@ if ls "$LATEST/include"/*.h >/dev/null 2>&1; then
   hdr_count=$(ls "$LATEST/include"/*.h | wc -l | tr -d ' ')
 fi
 {
-  echo "source: examples/serdes/c/shadow_lower.ccs"
+  echo "source: cc/shadow/shadow_lower.ccs"
   echo "emitter: $EMITTER"
   echo "created_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "git_head: $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
@@ -150,7 +150,7 @@ if [[ "$SMOKE" -eq 1 ]]; then
     -I"$LATEST/include" \
     -I"$ROOT/cc/include" \
     -I"$ROOT/out/include" \
-    -I"$ROOT/examples/serdes/c" \
+    -I"$ROOT/cc/shadow" \
     -I"$ROOT/third_party/tcc" \
     -DSHADOW_HAVE_LIBTCC=1 \
     "$OBJ/shadow_tcc_compile.o" \

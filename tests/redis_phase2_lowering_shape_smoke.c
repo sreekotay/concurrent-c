@@ -61,7 +61,7 @@ static char* emit_c(const char* src, const char* tag) {
     snprintf(out_path, sizeof(out_path), "tmp/redis_phase2_%s_%ld.c", tag, (long)getpid());
     snprintf(log_path, sizeof(log_path), "tmp/redis_phase2_%s_%ld.log", tag, (long)getpid());
     snprintf(cmd, sizeof(cmd),
-             "./cc/bin/ccc --frontend=serdes --emit-c-only %s -o %s > %s 2>&1", src, out_path, log_path);
+             "./cc/bin/ccc --frontend=native --emit-c-only %s -o %s > %s 2>&1", src, out_path, log_path);
     if (system(cmd) != 0) {
         fprintf(stderr, "emit-c-only failed for %s; see %s\n", src, log_path);
         return NULL;

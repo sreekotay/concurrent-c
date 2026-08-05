@@ -262,9 +262,9 @@ static int default_job_count(void) {
     return (int)n;
 }
 
-/* Parallel SERDES shadow lowerer (examples/serdes/c). Default harness skips
- * these — run scripts/test_serdes.sh (or CC_TEST_SERDES=1 / --filter c_pp_). */
-static int test_is_serdes(const char* stem) {
+/* Parallel shadow_lower smokes (cc/shadow). Default harness skips
+ * these — run scripts/test_shadow.sh (or CC_TEST_SHADOW=1 / --filter c_pp_). */
+static int test_is_shadow(const char* stem) {
     if (!stem) return 0;
     return strncmp(stem, "c_pp_", 5) == 0;
 }
@@ -719,7 +719,7 @@ static int run_one_test(const char* stem,
     }
 
     /* 1) Build via ccc build (this is the build system under test).
-     * Front: CC_TEST_FRONTEND / CC_FRONTEND = serdes|legacy (ccc default: serdes).
+     * Front: CC_TEST_FRONTEND / CC_FRONTEND = native|legacy (ccc default: native).
      * Pinning build diagnostics requires a cold parse — warm emit cache
      * skips shadow_lower / comptime and would silently drop .build_stderr and
      * .compile_err needles (host-cc may still fail with a different message). */
@@ -732,7 +732,7 @@ static int run_one_test(const char* stem,
     {
         const char* fe = getenv("CC_TEST_FRONTEND");
         if (!fe || !fe[0]) fe = getenv("CC_FRONTEND");
-        if (fe && strcmp(fe, "serdes") == 0) front_flag = "--frontend=serdes ";
+        if (fe && strcmp(fe, "native") == 0) front_flag = "--frontend=native ";
         else if (fe && strcmp(fe, "legacy") == 0) front_flag = "--frontend=legacy ";
     }
     if (ldflags_clean[0]) {
@@ -919,8 +919,8 @@ static void usage(const char* prog) {
     fprintf(stderr, "  %s [--list] [--filter SUBSTR] [--quick|--full] [--verbose] [--jobs N] [--build-timeout SECONDS] [--run-timeout SECONDS] [--use-cache|--no-cache] [--clean]\n", prog);
     fprintf(stderr, "  --quick  skip stress/lostwake/race tests (default)\n");
     fprintf(stderr, "  --full   include stress/lostwake/race tests (also CC_TEST_FULL=1)\n");
-    fprintf(stderr, "  c_pp_*   SERDES smokes skipped unless CC_TEST_SERDES=1 or --filter c_pp_\n");
-    fprintf(stderr, "  Front:   CC_TEST_FRONTEND=serdes|legacy (or CC_FRONTEND) → ccc --frontend=\n");
+    fprintf(stderr, "  c_pp_*   shadow_lower smokes skipped unless CC_TEST_SHADOW=1 or --filter c_pp_\n");
+    fprintf(stderr, "  Front:   CC_TEST_FRONTEND=native|legacy (or CC_FRONTEND) → ccc --frontend=\n");
 }
 
 int main(int argc, char** argv) {
@@ -1113,12 +1113,12 @@ int main(int argc, char** argv) {
         }
 
         if (filter && !str_contains(stem, filter) && !str_contains(path, filter)) continue;
-        /* Default suite = production ccc. SERDES c_pp_* only with opt-in or filter. */
+        /* Default suite = production ccc. c_pp_* only with opt-in or filter. */
         {
-            const char* serdes = getenv("CC_TEST_SERDES");
-            int want_serdes = (serdes && strcmp(serdes, "1") == 0) || filter != NULL;
-            if (test_is_serdes(stem) && !want_serdes) {
-                if (verbose) fprintf(stderr, "[SKIP] %s (serdes: scripts/test_serdes.sh)\n", stem);
+            const char* shadow = getenv("CC_TEST_SHADOW");
+            int want_shadow = (shadow && strcmp(shadow, "1") == 0) || filter != NULL;
+            if (test_is_shadow(stem) && !want_shadow) {
+                if (verbose) fprintf(stderr, "[SKIP] %s (shadow: scripts/test_shadow.sh)\n", stem);
                 continue;
             }
         }

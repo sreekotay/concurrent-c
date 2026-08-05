@@ -3,11 +3,11 @@
 #include <ccc/std/prelude.cch>
 
 @grammar(rules) PpTok {~~~~
-    include "../examples/serdes/c/pp_tok.rules"
+    include "../cc/shadow/pp_tok.rules"
 ~~~~}
 
 @grammar(rules) PpStmt {~~~~
-    include "../examples/serdes/c/pp_stmt.rules"
+    include "../cc/shadow/pp_stmt.rules"
 ~~~~}
 
 /* Demand grammar tiers before the umbrella pulls headers that call them. */
@@ -23,7 +23,7 @@ static void cpp_t_demand_grammars(void) {
     cc_arena_free(&gate);
 }
 
-#include "../examples/serdes/c/c_pp_spike.cch"
+#include "../cc/shadow/c_pp_spike.cch"
 
 int main(void) {
     const char* src =

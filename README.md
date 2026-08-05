@@ -5,7 +5,8 @@ Concurrent‑C extends **Tiny C Compiler (TCC)** with small, upstream-friendly h
 **License:** Dual-licensed under [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your option.
 
 Toolchain:
-- A `ccc` compiler (`out/cc/bin/ccc` or wrapper `cc/bin/ccc`) that lowers `.ccs` → C (with `#line` sourcemaps) and then optionally compiles/links using the host C compiler.
+- A `ccc` driver (`out/cc/bin/ccc` or wrapper `cc/bin/ccc`) that lowers `.ccs` → C (with `#line` sourcemaps) and then compiles/links with the host C compiler.
+- **Default front is native** (`shadow_lower`: tape → whitelist AST → emit C). Opt out with `--frontend=legacy` / `CC_FRONTEND=legacy` (older multipass text-rewrite path).
 - A light/statically linked runtime/stdlib (header-first, prefixed APIs) under `cc/include/ccc` and `cc/runtime`.
 - A test runner (`tools/cc_test`) that drives `cc/bin/ccc` end-to-end.
 
@@ -36,7 +37,7 @@ Fuller example (error policy + compose): [examples/hello.ccs](examples/hello.ccs
 - [Cheatsheet](docs/cheatsheet.md)
 - [Docs index](docs/README.md) · [Language spec](spec/concurrent-c-spec-complete.md) · [Stdlib](spec/concurrent-c-stdlib-spec.md)
 
-Compiler internals: [architecture](cc/docs/ARCHITECTURE.md), [cleanup status](cc/docs/COMPILER_CLEANUP_STATUS.md), [debug vars](cc/src/diag/DEBUG_VARS.md) (`CC_DEBUG_REPARSE`, `CC_DEBUG_DIAG`, `CC_DEBUG_LOWER`, `CC_DEBUG_SPANS`; `--show-lowered=<phase>`).
+Compiler internals: [architecture](cc/docs/ARCHITECTURE.md), [shadow_lower ops / layout](cc/shadow/README.md), [bootstrap](cc/bootstrap/shadow_lower/README.md). Legacy opt-out (`--frontend=legacy`): [legacy architecture](cc/docs/LEGACY_ARCHITECTURE.md), [cleanup status](cc/docs/COMPILER_CLEANUP_STATUS.md), [debug vars](cc/src/diag/DEBUG_VARS.md).
 
 ### Install
 
@@ -85,7 +86,7 @@ make install-check PREFIX=/opt/ccc
 
 - Links against patched `libtcc.a`. Optional channel backend: `./scripts/fetch_submodules.sh --with-liblfds`.
 - Outputs: `cc/bin/.ccc-bin`, wrapper `cc/bin/ccc`, `out/cc/bin/shadow_lower`.
-- `shadow_lower` is host-cc'd from `cc/bootstrap/shadow_lower/$(cat last-good)/`. Source of truth: `examples/serdes/c/*.ccs`. Promote with `scripts/snapshot_shadow_lower.sh` + `scripts/promote_shadow_bootstrap.sh`.
+- `shadow_lower` is host-cc'd from `cc/bootstrap/shadow_lower/$(cat last-good)/`. Source of truth: `cc/shadow/*.ccs`. Promote with `scripts/snapshot_shadow_lower.sh` + `scripts/promote_shadow_bootstrap.sh`.
 - Host-TCC self-build of `ccc`: Linux ILP32 (`CCC_HOST_CC=tcc ./scripts/smoke_i386.sh`), not Darwin (TCC ELF vs Mach-O `libtcc.a`).
 - Before pushing submodule pointer changes: `make check-submodules`.
 

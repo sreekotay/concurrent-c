@@ -1,7 +1,7 @@
 promoted_utc: 2026-08-05T00:42:26Z
 git_head: 506d5908
 --- from SNAPSHOT.txt ---
-source: examples/serdes/c/shadow_lower.ccs
+source: cc/shadow/shadow_lower.ccs
 emitter: serdes:/Users/skotay/Documents/code/concurrent-c/out/cc/bin/shadow_lower
 created_utc: 2026-08-05T00:42:21Z
 git_head: 506d5908

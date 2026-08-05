@@ -121,11 +121,11 @@ SHADOW_LOWER_TEMPLATE := scripts/shadow_lower.sh
 SHADOW_LOWER_SCRIPT := bin/shadow_lower
 SHADOW_LOWER_WRAPPER := $(OUT_BINDIR)/shadow_lower
 # Native shadow_lower (libtcc-linked) + host-built runtime dylib for --exe.
-SHADOW_LOWER_CCS := ../examples/serdes/c/shadow_lower.ccs
-SHADOW_BUILD_CCH := ../examples/serdes/c/shadow_build.cch
-SHADOW_TCC_C := ../examples/serdes/c/shadow_tcc_compile.c
+SHADOW_LOWER_CCS := ../cc/shadow/shadow_lower.ccs
+SHADOW_BUILD_CCH := ../cc/shadow/shadow_build.cch
+SHADOW_TCC_C := ../cc/shadow/shadow_tcc_compile.c
 SHADOW_TCC_OBJ := $(OBJDIR)/shadow_tcc_compile.o
-SHADOW_COMPTIME_C := ../examples/serdes/c/shadow_comptime.c
+SHADOW_COMPTIME_C := ../cc/shadow/shadow_comptime.c
 SHADOW_COMPTIME_OBJ := $(OBJDIR)/shadow_comptime.o
 OUT_LIBDIR := $(dir $(OUT_BINDIR))lib
 ifeq ($(shell uname -s),Darwin)
@@ -182,7 +182,13 @@ LOWER_HEADERS_SRCS := src/tools/lower_headers.c \
 	src/util/result_fn_registry.c
 LOWER_HEADERS_OBJS := $(LOWER_HEADERS_SRCS:%.c=$(OBJDIR)/%.o)
 # Same engine surface as lower_headers (minus its main), for prepare/exec/splice.
-SHADOW_COMPTIME_ENGINE_OBJS := $(filter-out $(OBJDIR)/src/tools/lower_headers.o,$(LOWER_HEADERS_OBJS))
+# Omit arena_state.o: it is the FFC_IMPL TU and also unity-included by
+# concurrent_c.o. Archiving it here and linking concurrent_c.o on the same
+# line is an ODR hard-error under GNU ld -fno-common (Linux/gcc). shadow_lower
+# always links concurrent_c.o for those symbols instead.
+SHADOW_COMPTIME_ENGINE_OBJS := $(filter-out \
+	$(OBJDIR)/src/tools/lower_headers.o \
+	$(OBJDIR)/runtime/arena_state.o,$(LOWER_HEADERS_OBJS))
 SHADOW_COMPTIME_LIB := $(OBJDIR)/libshadow_comptime.a
 LOWER_HEADERS_BINARY := $(OUT_BINDIR)/lower_headers
 # Stage-1 bootstrap variant: grammar engines stubbed (see BOOTSTRAP SHAPE)
@@ -326,11 +332,11 @@ endif
 
 $(SHADOW_TCC_OBJ): $(SHADOW_TCC_C) $(TCC_LIB_DEP)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -I../examples/serdes/c -c $(SHADOW_TCC_C) -o $@
+	$(CC) $(CFLAGS) -I../cc/shadow -c $(SHADOW_TCC_C) -o $@
 
 $(SHADOW_COMPTIME_OBJ): $(SHADOW_COMPTIME_C) $(TCC_LIB_DEP)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -I../examples/serdes/c -Isrc -c $(SHADOW_COMPTIME_C) -o $@
+	$(CC) $(CFLAGS) -I../cc/shadow -Isrc -c $(SHADOW_COMPTIME_C) -o $@
 
 $(SHADOW_COMPTIME_LIB): $(SHADOW_COMPTIME_OBJ) $(SHADOW_COMPTIME_ENGINE_OBJS)
 	@mkdir -p $(dir $@)
@@ -347,20 +353,21 @@ BOOTSTRAP_DIR := $(BOOTSTRAP_ROOT)/$(BOOTSTRAP_VER)
 SHADOW_LOWER_SOURCE ?= bootstrap
 
 SHADOW_LOWER_CCS_DEPS := $(SHADOW_LOWER_CCS) $(SHADOW_BUILD_CCH) \
-	$(wildcard ../examples/serdes/c/pp_*.cch) \
-	$(wildcard ../examples/serdes/c/shadow_*.cch) \
-	$(wildcard ../examples/serdes/c/shadow_*.h)
+	$(wildcard ../cc/shadow/pp_*.cch) \
+	$(wildcard ../cc/shadow/shadow_*.cch) \
+	$(wildcard ../cc/shadow/shadow_*.h)
 SHADOW_LOWER_BOOT_DEPS := $(BOOTSTRAP_DIR)/shadow_lower.c \
 	$(wildcard $(BOOTSTRAP_DIR)/include/*.h)
 
 ifeq ($(SHADOW_LOWER_SOURCE),ccs)
 $(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_CCS_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_COMPTIME_LIB) \
-	$(WRAPPER) $(TCC_LIB_DEP) $(RUNTIME_DYLIB)
+	$(WRAPPER) $(TCC_LIB_DEP) $(RUNTIME_DYLIB) $(OBJDIR)/runtime/concurrent_c.o
 	@mkdir -p $(dir $@)
 	# Legacy path: re-lower .ccs (needed when iterating before a promote).
+	# concurrent_c.o supplies arena_state/FFC (omitted from libshadow_comptime.a).
 	CC_FRONTEND=legacy $(WRAPPER) --frontend=legacy $(SHADOW_LOWER_CCS) -o $@ --no-cache \
-		--cc-flags "-I../examples/serdes/c -I$(TCC_INC) -DSHADOW_HAVE_LIBTCC=1" \
-		--ld-flags "$(abspath $(SHADOW_TCC_OBJ)) $(abspath $(SHADOW_COMPTIME_LIB)) -L$(TCC_LIB) -ltcc"
+		--cc-flags "-I../cc/shadow -I$(TCC_INC) -DSHADOW_HAVE_LIBTCC=1" \
+		--ld-flags "$(abspath $(SHADOW_TCC_OBJ)) $(abspath $(OBJDIR)/runtime/concurrent_c.o) $(abspath $(SHADOW_COMPTIME_LIB)) -L$(TCC_LIB) -ltcc"
 	@mkdir -p $(dir $(SHADOW_LOWER_SCRIPT))
 	@cp $@ $(SHADOW_LOWER_SCRIPT)
 	@chmod +x $(SHADOW_LOWER_SCRIPT)
@@ -371,18 +378,18 @@ $(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_BOOT_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_CO
 	@test -f "$(BOOTSTRAP_DIR)/shadow_lower.c" || \
 		(echo "missing $(BOOTSTRAP_DIR)/shadow_lower.c; run snapshot+promote"; exit 1)
 	@mkdir -p $(dir $@)
-	# Bootstrap emit uses <examples/serdes/c/*.h>; seed those from the
-	# snapshot so a clean tree (no leftover out/include) still host-ccs.
-	@mkdir -p ../out/include/examples/serdes/c
+	# Seed snapshot headers at angle-include paths some emits still spell
+	# (<cc/shadow/*.h>, legacy <examples/serdes/c/*.h>). v4+ rewrites those
+	# to "foo.h" + -Iinclude/; seeding keeps older snapshots host-cc clean.
+	@mkdir -p ../out/include/cc/shadow ../out/include/examples/serdes/c
 	@if ls $(BOOTSTRAP_DIR)/include/*.h >/dev/null 2>&1; then \
+		cp -f $(BOOTSTRAP_DIR)/include/*.h ../out/include/cc/shadow/; \
 		cp -f $(BOOTSTRAP_DIR)/include/*.h ../out/include/examples/serdes/c/; \
 	fi
-	# concurrent_c.o (which unity-includes arena_state.c, the FFC_IMPL TU)
-	# must precede libshadow_comptime.a so ld never pulls the archive's own
-	# arena_state.o and double-defines the ffc_* symbols.
+	# arena_state/FFC live only in concurrent_c.o (see SHADOW_COMPTIME_ENGINE_OBJS).
 	$(CC) $(CFLAGS) -o $@ $(BOOTSTRAP_DIR)/shadow_lower.c \
 		-I$(BOOTSTRAP_DIR)/include -Iinclude -I../out/include \
-		-I../examples/serdes/c -I$(TCC_INC) -DSHADOW_HAVE_LIBTCC=1 \
+		-I../cc/shadow -I$(TCC_INC) -DSHADOW_HAVE_LIBTCC=1 \
 		$(abspath $(SHADOW_TCC_OBJ)) \
 		$(abspath $(OBJDIR)/runtime/concurrent_c.o) \
 		$(abspath $(SHADOW_COMPTIME_LIB)) \
