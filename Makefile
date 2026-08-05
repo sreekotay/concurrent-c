@@ -60,16 +60,13 @@ distclean: clean
 
 PREFIX ?= /usr/local
 
-ZMIJ_C := third_party/zmij/zmij.c
-ZMIJ_H := third_party/zmij/zmij-c.h
+ZMIJ_VENDOR := cc/runtime/vendor
 TCC_DIR := third_party/tcc
 
 install: cc
 	@echo "Installing Concurrent-C to $(DESTDIR)$(PREFIX)..."
-	@test -f $(ZMIJ_C) -a -f $(ZMIJ_H) || { \
-		echo "Error: missing zmij sources under third_party/zmij/"; \
-		echo "The runtime float formatter needs the zmij submodule. Run:"; \
-		echo "    ./scripts/fetch_submodules.sh"; \
+	@test -f $(ZMIJ_VENDOR)/zmij.c -a -f $(ZMIJ_VENDOR)/zmij-c.h || { \
+		echo "Error: missing vendored zmij under $(ZMIJ_VENDOR)/"; \
 		exit 1; }
 	install -d $(DESTDIR)$(PREFIX)/bin
 	install -d $(DESTDIR)$(PREFIX)/lib/ccc/runtime
@@ -104,8 +101,10 @@ install: cc
 		install -m 644 out/runtime/*.h $(DESTDIR)$(PREFIX)/lib/ccc/runtime/; \
 	fi
 	install -m 644 cc/runtime/float_format_zmij.c $(DESTDIR)$(PREFIX)/lib/ccc/runtime/
-	install -m 644 $(ZMIJ_C) $(DESTDIR)$(PREFIX)/lib/ccc/runtime/vendor/zmij.c
-	install -m 644 $(ZMIJ_H) $(DESTDIR)$(PREFIX)/lib/ccc/runtime/vendor/zmij-c.h
+	install -m 644 $(ZMIJ_VENDOR)/zmij.c $(DESTDIR)$(PREFIX)/lib/ccc/runtime/vendor/zmij.c
+	install -m 644 $(ZMIJ_VENDOR)/zmij-c.h $(DESTDIR)$(PREFIX)/lib/ccc/runtime/vendor/zmij-c.h
+	install -m 644 $(ZMIJ_VENDOR)/LICENSE $(DESTDIR)$(PREFIX)/lib/ccc/runtime/vendor/LICENSE
+	install -m 644 $(ZMIJ_VENDOR)/ZMIJ_NOTICE.txt $(DESTDIR)$(PREFIX)/lib/ccc/runtime/vendor/ZMIJ_NOTICE.txt
 	install -m 644 $(TCC_DIR)/include/*.h $(DESTDIR)$(PREFIX)/lib/ccc/tcc/include/
 	@if [ -f $(TCC_DIR)/libtcc1.a ]; then \
 		install -m 644 $(TCC_DIR)/libtcc1.a $(DESTDIR)$(PREFIX)/lib/ccc/tcc/; \

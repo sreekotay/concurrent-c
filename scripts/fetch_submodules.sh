@@ -1,13 +1,12 @@
 #!/bin/sh
 # Fetch the submodules a compiler build needs, at the smallest size that works.
 #
-# Two of the five submodules in .gitmodules are build inputs:
+# The build-required submodule:
 #
-#   third_party/tcc    patched TinyCC — the parser/compiler foundation. Fully
-#                      checked out: the build applies patches and compiles it.
-#   third_party/zmij   float-to-string (zmij.c + zmij-c.h). The upstream tree
-#                      also carries a large test/benchmark corpus, so it is
-#                      fetched sparse.
+#   third_party/tcc   patched TinyCC — the parser/compiler foundation. Fully
+#                     checked out: the build applies patches and compiles it.
+#
+# Float formatting (Żmij) is vendored under cc/runtime/vendor/ — no submodule.
 #
 # liblfds is optional at every level: cc/runtime/channel.c probes for it with
 # __has_include and the native ring queue is the primary lock-free path either
@@ -24,8 +23,8 @@ Usage: scripts/fetch_submodules.sh [--with-liblfds] [--full]
 
 Options:
   --with-liblfds  Also fetch third_party/liblfds (optional channel backend).
-  --full          Fetch complete submodule trees; skip the sparse/partial
-                  optimizations. Use when you need to work in a submodule.
+  --full          Fetch complete submodule trees; skip partial-clone filters.
+                  Use when you need to work in a submodule.
   -h, --help      Show this help.
 EOF
 }
@@ -62,38 +61,6 @@ submodule_update() {
 echo "Fetching third_party/tcc..."
 git submodule sync -- third_party/tcc >/dev/null 2>&1 || true
 submodule_update third_party/tcc
-
-# zmij: check out the C sources only. Sparse-checkout has to be configured
-# before the working tree is written when cloning fresh.
-echo "Fetching third_party/zmij (sparse: zmij.c, zmij-c.h, LICENSE, README)..."
-git submodule sync -- third_party/zmij >/dev/null 2>&1 || true
-zmij_sparse_set() {
-  mod="$(git rev-parse --git-path modules/third_party/zmij)"
-  mkdir -p "$mod/info"
-  printf '%s\n' '/zmij.c' '/zmij-c.h' '/LICENSE' '/README.md' > "$mod/info/sparse-checkout"
-  git -C third_party/zmij config core.sparseCheckout true
-  git -C third_party/zmij sparse-checkout init --no-cone 2>/dev/null || true
-  git -C third_party/zmij read-tree -mu HEAD 2>/dev/null || true
-}
-if [ "$FULL" = "1" ]; then
-  submodule_update third_party/zmij
-elif [ -d third_party/zmij/.git ] || [ -f third_party/zmij/.git ]; then
-  submodule_update third_party/zmij
-  zmij_sparse_set
-else
-  git submodule init third_party/zmij
-  zmij_url="$(git config --get submodule.third_party/zmij.url)"
-  if [ -n "$zmij_url" ] && \
-     git clone --filter=blob:none --sparse --no-checkout "$zmij_url" third_party/zmij 2>/dev/null; then
-    git -C third_party/zmij sparse-checkout init --no-cone
-    git -C third_party/zmij sparse-checkout set 'zmij.c' 'zmij-c.h' 'LICENSE' 'README.md'
-    git submodule update third_party/zmij
-  else
-    rm -rf third_party/zmij
-    submodule_update third_party/zmij
-    zmij_sparse_set
-  fi
-fi
 
 if [ "$WITH_LIBLFDS" = "1" ]; then
   echo "Fetching third_party/liblfds..."

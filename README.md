@@ -97,7 +97,14 @@ The compiler pipeline was refactored in 2026 (M0–M5.5): diagnostics core, shar
 
 ### Install
 
-Requires `git`, `make`, and a C compiler.
+Homebrew:
+
+```bash
+brew tap sreekotay/concurrent-c https://github.com/sreekotay/concurrent-c.git
+brew install sreekotay/concurrent-c/ccc
+```
+
+Or from source (needs the usual tools: `git`, `make`, a C compiler):
 
 ```bash
 git clone --filter=blob:none https://github.com/sreekotay/concurrent-c.git
@@ -105,78 +112,59 @@ cd concurrent-c
 PREFIX="$HOME/.local" ./cc-install.sh
 ```
 
-One pass: fetch submodules, patch and build TinyCC, build `ccc` and
-`shadow_lower` (default serdes front), install both to `$PREFIX/bin`, then
-compile a program against the installed prefix to prove it works. Roughly half
-a minute on four cores and about 40M of disk.
-
-`cc-install.sh` works in two modes:
-- Run from the repo root, it uses the current checkout.
-- Run anywhere else, it clones into `$PWD/concurrent-c` (or `$CC_REPO_DIR`) first.
+Or run `cc-install.sh` from anywhere — with no checkout it clones into
+`$PWD/concurrent-c` (override with `CC_REPO_DIR`). It builds, installs to
+`$PREFIX/bin`, and compiles a small program to prove the install works.
+Roughly half a minute on four cores and about 40M of disk.
 
 ```bash
 ./cc-install.sh                                   # from an existing checkout
-PREFIX=/opt/ccc sh ./cc-install.sh                # from anywhere, custom prefix
+PREFIX=/opt/ccc ./cc-install.sh                   # custom prefix
 CC_REPO_DIR="$HOME/code/ccc" sh ./cc-install.sh   # override clone destination
 ```
 
-It also writes a repo-local `./ccc` launcher for that checkout, installs the
-Concurrent-C syntax package for VS Code and Cursor, and installs the CodeLLDB
-debugger extension when the `code` / `cursor` CLIs are present. Pass
-`--no-editor-tools` to skip the editor setup, `--add-to-path` /
+It also writes a repo-local `./ccc` launcher, and (unless you pass
+`--no-editor-tools`) installs the Concurrent-C syntax package for VS Code /
+Cursor plus CodeLLDB when those CLIs are present. Use `--add-to-path` /
 `--no-add-to-path` to control the shell-rc edit.
 
-Homebrew:
+After install, add `$PREFIX/bin` to `PATH` if needed:
+
 ```bash
-brew tap sreekotay/concurrent-c https://github.com/sreekotay/concurrent-c.git
-brew install sreekotay/concurrent-c/ccc
+ccc run hello.ccs
 ```
 
-### Build
+Build outputs land in `./out` and `./bin` relative to the working directory
+(`--out-dir` / `--bin-dir` to redirect), never into `$PREFIX`. Override the
+install tree with `CC_HOME=/opt/ccc` if the binary cannot find it.
 
-#### Build the compiler
+### Hacking on the compiler
 
-From repo root:
+From a checkout:
 
 ```bash
-./scripts/fetch_submodules.sh
+./scripts/fetch_submodules.sh          # TinyCC only; float fmt is vendored
 ./scripts/apply_tcc_patches.sh
 jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 (cd third_party/tcc && ./configure --config-cc_ext && make -j"$jobs")
-make cc -j"$jobs"                    # or: make cc BUILD=debug -j"$jobs"
+make cc -j"$jobs"                      # or: make cc BUILD=debug -j"$jobs"
+make install PREFIX=/opt/ccc           # optional; DESTDIR=… for staging
+make install-check PREFIX=/opt/ccc
 ```
 
-Notes:
-- The build links against the patched `libtcc.a` so CC's AST hooks are available.
-- `scripts/fetch_submodules.sh` fetches only what the build needs: all of
-  `third_party/tcc`, and `third_party/zmij` sparse (`zmij.c` / `zmij-c.h`).
-  `third_party/liblfds` is an optional channel backend — pass
-  `--with-liblfds` to include it.
-- Today the compiler build uses `make`. The longer-term goal is to move project builds under `cc` itself.
-- Compiler outputs:
-  - `cc/bin/.ccc-bin` (real binary)
-  - `cc/bin/ccc` (wrapper that refreshes lowered headers, then execs the real binary)
-  - `out/cc/bin/shadow_lower` (native serdes lowerer; also copied to `cc/bin/`)
-- `shadow_lower` is host-cc'd from a committed bootstrap snapshot
-  (`cc/bootstrap/shadow_lower/$(cat last-good)/` — lowered C checked into git).
-  Source of truth remains `examples/serdes/c/*.ccs`; promote a new snapshot after
-  meaningful serdes changes (`scripts/snapshot_shadow_lower.sh` +
-  `scripts/promote_shadow_bootstrap.sh`).
-- Host-TCC self-build: on Linux you can compile `ccc` itself with the just-built
-  TinyCC (`CCC_HOST_CC=tcc ./scripts/smoke_i386.sh`, or the same env inside an
-  ILP32 container). Darwin cannot — host TCC emits ELF while the in-tree
-  `libtcc.a` is Mach-O. TinyCC also does not honor `__attribute__((weak))`;
-  production `shadow_lower` omits weak emit-plan stubs when
-  `SHADOW_HAVE_LIBTCC` is set so the link stays clean.
-
-#### Install to a prefix
-
-```bash
-make install                     # install to /usr/local
-make install PREFIX=/opt/ccc     # install to custom prefix
-make install DESTDIR=/tmp/pkg    # staged install (for packaging)
-make install-check PREFIX=/opt/ccc   # compile a program against the install
-```
+Notes for contributors:
+- Links against patched `libtcc.a` (AST hooks). `third_party/liblfds` is an
+  optional channel backend (`./scripts/fetch_submodules.sh --with-liblfds`).
+- Outputs: `cc/bin/.ccc-bin`, wrapper `cc/bin/ccc`, `out/cc/bin/shadow_lower`.
+- `shadow_lower` is host-cc'd from
+  `cc/bootstrap/shadow_lower/$(cat last-good)/`. Source of truth is
+  `examples/serdes/c/*.ccs`; promote with `scripts/snapshot_shadow_lower.sh` +
+  `scripts/promote_shadow_bootstrap.sh`.
+- Host-TCC self-build of `ccc` works on Linux ILP32
+  (`CCC_HOST_CC=tcc ./scripts/smoke_i386.sh`), not Darwin (TCC ELF vs Mach-O
+  `libtcc.a`).
+- Before pushing submodule pointer changes: `make check-submodules` (or
+  `npm run check:submodules`).
 
 Installed layout:
 ```
@@ -197,26 +185,7 @@ $PREFIX/
 ```
 
 An installed tree is self-contained — it never reads back into a checkout.
-Headers ship pre-lowered because lowering is a build-tree step. The driver
-resolves includes, runtime sources, and `shadow_lower` from the prefix.
-`ccc` writes build outputs to `./out` and `./bin` relative to the working
-directory (use `--out-dir` / `--bin-dir` to redirect), never into `$PREFIX`.
-
-The compiler auto-detects its include/runtime paths from the binary location. You can also override with `CC_HOME`:
-```bash
-CC_HOME=/opt/ccc ccc run myfile.ccs
-```
-
-Before pushing a commit that changes submodule pointers, run `make check-submodules`
-or `npm run check:submodules`. This catches unreachable local-only submodule
-commits, especially `third_party/tcc`, before they break fresh clones.
-
-**Homebrew tap:** a *tap* is a Homebrew source of formulas. Adding this repo as a tap lets anyone install the head version without cloning:
-```bash
-brew tap sreekotay/concurrent-c https://github.com/sreekotay/concurrent-c.git
-brew install sreekotay/concurrent-c/ccc
-```
-After the tap is added, later updates are `brew update && brew upgrade sreekotay/concurrent-c/ccc`. Plain `brew install ccc` would only work if the formula were in Homebrew’s main repo (homebrew-core); this tap keeps the formula in your repo instead.
+Headers ship pre-lowered because lowering is a build-tree step.
 
 ---
 

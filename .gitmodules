@@ -12,6 +12,3 @@
 [submodule "third_party/curl"]
 	path = third_party/curl
 	url = https://github.com/curl/curl.git
-[submodule "third_party/zmij"]
-	path = third_party/zmij
-	url = https://github.com/vitaut/zmij.git

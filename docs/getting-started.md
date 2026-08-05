@@ -1,12 +1,15 @@
 # Getting Started with Concurrent-C
 
-## Prerequisites
-
-- C compiler (gcc or clang)
-- POSIX system (Linux, macOS)
-- make, git
-
 ## Install
+
+Homebrew:
+
+```bash
+brew tap sreekotay/concurrent-c https://github.com/sreekotay/concurrent-c.git
+brew install sreekotay/concurrent-c/ccc
+```
+
+Or from source (`git`, `make`, and a C compiler):
 
 ```bash
 git clone --filter=blob:none https://github.com/sreekotay/concurrent-c.git
@@ -14,10 +17,10 @@ cd concurrent-c
 PREFIX="$HOME/.local" ./cc-install.sh
 ```
 
-That fetches submodules, builds a patched TinyCC and the compiler (including
-`shadow_lower`, the default serdes front), installs both to `$PREFIX/bin`, and
-verifies the install by compiling a program against it. Add `$PREFIX/bin` to
-`PATH` and `ccc` is ready:
+That builds a patched TinyCC and the compiler (including `shadow_lower`, the
+default serdes front), installs both to `$PREFIX/bin`, and verifies the install
+by compiling a program against it. Add `$PREFIX/bin` to `PATH` and `ccc` is
+ready:
 
 ```bash
 ccc run hello.ccs
@@ -26,17 +29,17 @@ ccc run hello.ccs
 Build outputs land in `./out` and `./bin` under whatever directory you run
 `ccc` from; `--out-dir` overrides that.
 
-## Or build without installing
+## Hacking on the compiler (checkout builds)
 
 ```bash
-./scripts/fetch_submodules.sh
+./scripts/fetch_submodules.sh          # TinyCC; float formatting is vendored
 ./scripts/apply_tcc_patches.sh
 jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 (cd third_party/tcc && ./configure --config-cc_ext && make -j"$jobs")
 make cc -j"$jobs"
 ```
 
-The compiler is now at `./cc/bin/ccc`, usable directly from the checkout.
+The compiler is then at `./cc/bin/ccc`, usable directly from the checkout.
 
 ## Your First Program
 

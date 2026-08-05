@@ -29,8 +29,8 @@ case "$(basename "$HOST_CC")" in
   tcc) host_is_tcc=1 ;;
 esac
 
-printf '== submodules (tcc, zmij)\n'
-git submodule update --init third_party/tcc third_party/zmij
+printf '== submodules (tcc)\n'
+git submodule update --init third_party/tcc
 if [ ! -f third_party/tcc/configure ]; then
   git submodule update --checkout --force third_party/tcc
 fi

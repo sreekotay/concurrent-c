@@ -3202,7 +3202,7 @@ static int cc__runtime_obj_is_stale(const char* runtime_obj_path) {
             return 1;  // Source is newer than object
         }
     }
-    snprintf(src_path, sizeof(src_path), "%s/third_party/zmij/zmij.c", g_repo_root);
+    snprintf(src_path, sizeof(src_path), "%s/cc/runtime/vendor/zmij.c", g_repo_root);
     {
         struct stat src_stat;
         if (stat(src_path, &src_stat) == 0 && src_stat.st_mtime > obj_mtime) {

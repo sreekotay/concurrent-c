@@ -1,5 +1,6 @@
-/* Shortest float/double formatting via vitaut/zmij, plus trailing `.0` polish
- * so every finite result contains '.' or 'e' (stdlib string policy). */
+/* Shortest float/double formatting via vendored vitaut/zmij
+ * (cc/runtime/vendor/zmij.c), plus trailing `.0` polish so every finite
+ * result contains '.' or 'e' (stdlib string policy). */
 #include <stddef.h>
 #include <string.h>
 
@@ -18,25 +19,8 @@
 #endif
 #endif
 
-#if __has_include("vendor/zmij-c.h")
 #include "vendor/zmij-c.h"
-#elif __has_include("../../third_party/zmij/zmij-c.h")
-#include "../../third_party/zmij/zmij-c.h"
-#elif __has_include("../../../third_party/zmij/zmij-c.h")
-#include "../../../third_party/zmij/zmij-c.h"
-#else
-#error "zmij-c.h not found"
-#endif
-
-#if __has_include("vendor/zmij.c")
 #include "vendor/zmij.c"
-#elif __has_include("../../third_party/zmij/zmij.c")
-#include "../../third_party/zmij/zmij.c"
-#elif __has_include("../../../third_party/zmij/zmij.c")
-#include "../../../third_party/zmij/zmij.c"
-#else
-#error "zmij source not found"
-#endif
 
 /* Append ".0" when fixed notation has no decimal point and no exponent. */
 static char *cc__float_polish_dot0(char *buf, char *end) {
