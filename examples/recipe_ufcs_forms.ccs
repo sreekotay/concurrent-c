@@ -56,10 +56,9 @@ static double mean(Stats s, double bump) { return s.sum / s.n + bump; }
 
 /* 9. A fallible hop returns a Result; unwrap links into the next method. */
 static int cc_int_twice(int v) { return v * 2; }
-static CCResult_int_CCError get(int v) {
-    if (v < 0) return (CCResult_int_CCError){ .ok = false,
-        .u.error = { .message = "negative" } };
-    return (CCResult_int_CCError){ .ok = true, .u.value = v };
+static int !>(CCError) get(int v) {
+    if (v < 0) return cc_err(CC_ERR_INVALID_ARG, "negative");
+    return cc_ok(v);
 }
 
 /* !> / !>; must diverge or forward — here the helper's policy returns -1. */

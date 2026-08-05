@@ -1667,6 +1667,7 @@ static int cc__block_needs_executor(const char* src, size_t body_l, size_t body_
         if (cc_match_ident_kw(src, body_r, j, "for")) return 1;
         if (cc_match_ident_kw(src, body_r, j, "while")) return 1;
         if (cc_match_ident_kw(src, body_r, j, "do")) return 1;
+        if (cc_match_ident_kw(src, body_r, j, "switch")) return 1;
     }
     return 0;
 }

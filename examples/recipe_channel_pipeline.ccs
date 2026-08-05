@@ -18,7 +18,7 @@
 #include <ccc/script/stdio.cch>
 
 int main(void) {
-    @errhandler(CCError e) { cc_error_log(e); return 1; } //if you omit this errhandler, the naked error unwrapping (e.g. line 31) will compile error
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
 
     int[~4 >] tx;
     int[~4 <] rx;
@@ -45,7 +45,7 @@ int main(void) {
             inner->spawn(() => [tx] {
                 @errhandler(CCError e) cc_error_exit(e);
                 for (int i = 1; i <= 3; i++) {
-                    (void)tx.send(i);
+                    tx.send(i) !>;
                     println(@string(`send: ${i}`, @scratch)) !>;
                 }
             });

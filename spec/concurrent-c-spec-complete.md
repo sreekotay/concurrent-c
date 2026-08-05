@@ -5645,6 +5645,7 @@ This section documents syntactic sugar and conventions:
 - **Loops** — range and async iteration
 - **Slicing** — subslice syntax
 - **String literals** — static slices
+- **String-literal `switch` cases** — slice subject with `case "…":`
 - **Closures** — lambda syntax
 - **Type inference** — `auto` keyword
 - **Structs** — struct syntax and initialization
@@ -5695,6 +5696,40 @@ defer tx.close();        // OK: lowers to close(tx)
 int[~10 >]* tx_ptr = get_tx();
 defer tx_ptr->close();   // OK: lowers to close(tx_ptr)
 ```
+
+**String-literal `switch` cases:**
+
+A `switch` whose subject has slice type (`CCSlice` and the documented slice
+family) may use string-literal case labels:
+
+```c
+switch (name) {
+case "GET":
+    return 1;
+case "A":
+case "B":
+    return 10;
+default:
+    return 0;
+}
+```
+
+**Rule (subject):** The subject expression has a slice type. A known non-slice
+subject with string case labels is ill-formed.
+
+**Rule (labels):** Each `case` label is a simple string literal (no escape
+sequences). Consecutive string cases fall through as in C. Mixing string and
+non-string case labels in one `switch` is ill-formed. Duplicate string labels
+in one `switch` are ill-formed.
+
+**Rule (semantics):** Control flow matches ordinary C `switch` over an equality
+match of the subject against each label (as by `CCSlice_eq_cstr`).
+
+**Lowering (informative):** Runtime emission may lower string-literal cases
+through a perfect-hash / static-map-style table to an integer `switch`.
+`@comptime` execution may lower the same surface to an equality
+(`CCSlice_eq_cstr`) if/else chain. Observable behavior follows the rules above
+in both paths.
 
 **Loops:**
 
@@ -6240,7 +6275,10 @@ A `@comptime { ... }` block runs during compilation and may be used to initializ
 - `@comptime` variables
 - Compile-time-known static storage declared in the same translation unit
 
-**Rule:** Control flow inside `@comptime {}` is allowed (`if`, `for`, `while`) as long as all conditions are constant-expression decidable.
+**Rule:** Control flow inside `@comptime {}` is allowed (`if`, `for`, `while`,
+`switch`) as long as all conditions are constant-expression decidable.
+String-literal case labels (§11) are valid in `@comptime {}` with the same
+surface rules as at runtime.
 
 ---
 

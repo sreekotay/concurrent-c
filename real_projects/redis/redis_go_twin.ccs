@@ -16,7 +16,7 @@
  *   io         →  BufReader + Conn flush/write coalesce
  *   encode     →  Reply owns CCString; as_slice only at write
  *   parse      →  !> bang + slice.to_i64 (no is_err/value)
- *   db         →  ArrayMap::[CCSlicePacked, CCString] (grows like Go map)
+ *   db         →  CCShardMap (stdlib string→string shard cell)
  *   holds      →  excl->acquire_*_into(builder)
  *   lifecycle  →  @create/@destroy, @defer
  *   errors     →  T!>(E) + cc_err(@as) Io→CCError
@@ -56,13 +56,8 @@ typedef enum Hold {
     HOLD_ALL,
 } Hold;
 
-typedef struct Shard {
-    ArrayMap::[CCSlicePacked, CCString] data;
-    CCArena arena;
-} Shard;
-
 typedef struct DB {
-    Shard* shards;
+    CCShardMap* shards;
     size_t shard_count;
     uint32_t mask;
     CCArena root;
@@ -109,34 +104,18 @@ static Reply enc_bulk(CCSlice b, CCArena* a) {
 }
 static Reply enc_ok(CCArena* a) { return enc_simple("OK", a); }
 
-/* --- shard map (ArrayMap grows; packed keys in shard arena) --- */
+/* --- DB over CCShardMap cells --- */
 
-static bool shard_init(Shard* sh, size_t buckets) {
-    memset(sh, 0, sizeof(*sh));
-    sh->arena = cc_arena_malloc(1024);
-    if (!sh->arena.valid()) return false;
-    sh->data = array_map_new_count::[CCSlicePacked, CCString](&sh->arena, buckets);
-    return sh->data != NULL;
-}
-
-static void shard_free(Shard* sh) {
-    if (!sh) return;
-    if (sh->data) {
-        sh->data->destroy();
-        sh->data = NULL;
-    }
-    sh->arena.destroy();
-}
-
-static bool db_init(DB* db, size_t ncpu) {
-    size_t n = 1, i, per;
-    while (n < ncpu && n < (size_t)K_MAX_SHARDS) n <<= 1;
+/* `n` is already a power of two from cc_shard_mask_auto (1..K_MAX_SHARDS). */
+static bool db_init(DB* db, size_t n) {
+    size_t i, per;
+    if (n == 0) n = 1;
     per = 1024 / n;
     if (per < 8) per = 8;
     memset(db, 0, sizeof(*db));
-    db->root = cc_arena_heap(n * sizeof(Shard) + 64);
+    db->root = cc_arena_heap(n * sizeof(CCShardMap) + 64);
     if (!db->root.valid()) return false;
-    db->shards = cc_arena_alloc_T_count(Shard, &db->root, n);
+    db->shards = cc_arena_alloc_T_count(CCShardMap, &db->root, n);
     if (!db->shards) {
         db->root.destroy();
         return false;
@@ -144,9 +123,9 @@ static bool db_init(DB* db, size_t ncpu) {
     db->shard_count = n;
     db->mask = (uint32_t)(n - 1u);
     for (i = 0; i < n; i++) {
-        if (!shard_init(&db->shards[i], per)) {
+        if (!cc_shard_map_init(&db->shards[i], per)) {
             size_t j;
-            for (j = 0; j < i; j++) shard_free(&db->shards[j]);
+            for (j = 0; j < i; j++) cc_shard_map_destroy(&db->shards[j]);
             db->root.destroy();
             return false;
         }
@@ -157,67 +136,13 @@ static bool db_init(DB* db, size_t ncpu) {
 static void db_free(DB* db) {
     size_t i;
     if (!db) return;
-    for (i = 0; i < db->shard_count; i++) shard_free(&db->shards[i]);
+    for (i = 0; i < db->shard_count; i++) cc_shard_map_destroy(&db->shards[i]);
     db->root.destroy();
     memset(db, 0, sizeof(*db));
 }
 
 static size_t shard_of(DB* db, CCSlice key) {
     return (size_t)(cc_hash_slice(key) & db->mask);
-}
-
-static CCSlicePacked probe(CCSlicePackedView* view, CCSlice key) {
-    return cc_slice_packed_borrow_slice(view, key);
-}
-
-static void del_key(Shard* sh, CCSlice key) {
-    CCSlicePackedView view;
-    CCSlicePacked pk = probe(&view, key);
-    CCString* v = sh->data->get_ptr(pk);
-    CCSlicePacked* stored = sh->data->find_key_ptr(pk);
-    if (v) v->release(&sh->arena);
-    if (stored) {
-        CCSlicePacked doomed = *stored;
-        sh->data->del(pk);
-        doomed.release(&sh->arena);
-    } else {
-        sh->data->del(pk);
-    }
-}
-
-static bool put_kv(Shard* sh, CCSlice key, CCSlice val) {
-    CCSlicePackedView view;
-    CCSlicePacked pk = probe(&view, key);
-    CCString* cur = sh->data->get_ptr(pk);
-    CCString owned = cc_string_from(val, &sh->arena);
-    if (cc_string_failed(&owned)) return false;
-
-    if (cur) {
-        cur->release(&sh->arena);
-        *cur = owned;
-        return true;
-    }
-
-    CCSlicePacked durable = key.to_packed(&sh->arena) !>(e) {
-        (void)e;
-        owned.release(&sh->arena);
-        return false;
-    };
-    if (sh->data->insert(durable, owned) != 0) {
-        owned.release(&sh->arena);
-        durable.release(&sh->arena);
-        return false;
-    }
-    return true;
-}
-
-static Reply put_or_err(Shard* sh, CCSlice key, CCSlice val, CCArena* a) {
-    return put_kv(sh, key, val) ? enc_ok(a) : enc_err("oom", a);
-}
-
-static CCString* get_kv(Shard* sh, CCSlice key) {
-    CCSlicePackedView view;
-    return sh->data->get_ptr(probe(&view, key));
 }
 
 /* --- hold + execute (string switch is the command table) --- */
@@ -241,8 +166,8 @@ static Hold hold_for(CCSlice name) {
 }
 
 /* Kept out of the string-switch body: bang/to_i64 emit clashes with case arms. */
-static Reply exec_incr(Shard* sh, CCSlice key, CCArena* a) {
-    CCString* v = get_kv(sh, key);
+static Reply exec_incr(CCShardMap* sh, CCSlice key, CCArena* a) {
+    CCString* v = sh->get(key);
     int64_t n = 0;
     if (v) {
         CCSlice s = cc_string_as_slice(v);
@@ -255,25 +180,26 @@ static Reply exec_incr(Shard* sh, CCSlice key, CCArena* a) {
     n++;
     {
         CCString num = @string(`${n}`, a);
-        if (!put_kv(sh, key, num.as_slice())) return enc_err("oom", a);
+        if (!sh->put(key, num.as_slice())) return enc_err("oom", a);
     }
     return enc_int(n, a);
 }
 
 static Reply exec_key(DB* db, Cmd* c, size_t si, CCArena* a) {
-    Shard* sh = &db->shards[si];
+    CCShardMap* sh = &db->shards[si];
     CCSlice name = c->args[0];
     CCSlice key = c->args[1];
 
     switch (name) {
     case "GET": {
-        CCString* v = get_kv(sh, key);
+        CCString* v = sh->get(key);
         if (!v) return enc_null(a);
         return enc_bulk(v->as_slice(), a);
     }
     case "SET":
         if (c->argc < 3) return enc_err("wrong number of arguments", a);
-        return put_or_err(sh, key, c->args[2], a);
+        if (!sh->put(key, c->args[2])) return enc_err("oom", a);
+        return enc_ok(a);
     case "INCR":
         return exec_incr(sh, key, a);
     default:
@@ -289,18 +215,16 @@ static Reply exec_keys(DB* db, Cmd* c, CCArena* a) {
     case "DEL": {
         int64_t n = 0;
         for (i = 1; i < c->argc; i++) {
-            Shard* sh = &db->shards[shard_of(db, c->args[i])];
-            if (get_kv(sh, c->args[i])) {
-                n++;
-                del_key(sh, c->args[i]);
-            }
+            CCShardMap* sh = &db->shards[shard_of(db, c->args[i])];
+            if (sh->delete(c->args[i])) n++;
         }
         return enc_int(n, a);
     }
     case "EXISTS": {
         int64_t n = 0;
         for (i = 1; i < c->argc; i++) {
-            if (get_kv(&db->shards[shard_of(db, c->args[i])], c->args[i])) n++;
+            CCShardMap* sh = &db->shards[shard_of(db, c->args[i])];
+            if (sh->get(c->args[i])) n++;
         }
         return enc_int(n, a);
     }
@@ -312,7 +236,8 @@ static Reply exec_keys(DB* db, Cmd* c, CCArena* a) {
         out = cc_string_with_capacity(a, cap);
         out.append(@string(`*${nkeys}\r\n`, a), a);
         for (i = 1; i < c->argc; i++) {
-            CCString* v = get_kv(&db->shards[shard_of(db, c->args[i])], c->args[i]);
+            CCShardMap* sh = &db->shards[shard_of(db, c->args[i])];
+            CCString* v = sh->get(c->args[i]);
             if (!v) {
                 out.append("$-1\r\n", a);
             } else {
@@ -338,13 +263,13 @@ static Reply exec_all(DB* db, Cmd* c, CCArena* a) {
     case "DBSIZE": {
         int64_t n = 0;
         for (si = 0; si < db->shard_count; si++)
-            n += (int64_t)db->shards[si].data->len;
+            n += (int64_t)cc_shard_map_len(&db->shards[si]);
         return enc_int(n, a);
     }
     case "FLUSHDB":
         for (si = 0; si < db->shard_count; si++) {
-            shard_free(&db->shards[si]);
-            if (!shard_init(&db->shards[si], 8)) return enc_err("oom", a);
+            cc_shard_map_destroy(&db->shards[si]);
+            if (!cc_shard_map_init(&db->shards[si], 8)) return enc_err("oom", a);
         }
         return enc_ok(a);
     default:
@@ -580,12 +505,11 @@ int main(int argc, char** argv) {
     const char* addr = k_listen;
     DB db = {0};
     CCExclusive* excl = NULL;
-    CCShardMask ncpu_mask = cc_shard_mask_auto((size_t)K_MAX_SHARDS);
-    size_t ncpu = ncpu_mask.count ? ncpu_mask.count : 1u;
+    CCShardMask shards = cc_shard_mask_auto((size_t)K_MAX_SHARDS);
     if (argc > 1) addr = argv[1];
 
     CCArena excl_arena = @create(kilobytes(64)) @destroy;
-    if (!db_init(&db, ncpu)) {
+    if (!db_init(&db, shards.count ? shards.count : 1u)) {
         eprintln("redis_go_twin: db_init failed") !>;
         return 1;
     }

@@ -786,6 +786,36 @@ Array-map UFCS maps `insert`, `get`, `get_ptr`, `at_ptr`, `key_ptr`,
 `find_key_ptr`, `remove`, `del`, `len`, `cap`, `live_bytes`, `clear`, and
 `destroy` to the generated family.
 
+### Shard maps (`CCShardMap`)
+
+`<ccc/std/shard_map.cch>` provides an arena-owned string→string map cell.
+It owns a `CCArena` and an `ArrayMap::[CCSlicePacked, CCString]`. Lookup
+keys may be ordinary `CCSlice` values (borrow-packed for the probe); inserts
+copy the key into a durable packed slice and the value into a `CCString` in
+the map’s arena.
+
+```c
+CCShardMap m;
+m.init(64);                    // cc_shard_map_init(&m, 64)
+m.put(key, val);               // bool; false on OOM
+CCString* v = m.get(key);      // NULL if absent
+m.delete(key);                 // bool; true if an entry was removed
+size_t n = m.len();
+m.destroy();
+```
+
+**Rule (ownership):** Keys and values live in `m.arena`. `get` returns a
+pointer into the dense store (valid until the entry is overwritten, deleted,
+or the map is destroyed). `put` replaces an existing value in place (old
+value released) or inserts a new durable key+value.
+
+**Rule (UFCS):** Methods follow the stdlib `cc_shard_map_<method>` convention
+(`init`, `destroy`, `get`, `put`, `delete`, `len`).
+
+Pair with `CCShardMask` / `CCExclusive` when routing many `CCShardMap` cells
+by key hash. Prefer raw `ArrayMap` when the value type is not `CCString` or
+when the caller already owns the arena.
+
 ### Static maps
 
 `<ccc/std/static_map.cch>` provides a comptime perfect-hash map. The

@@ -50,10 +50,9 @@ int main(void) {
     /* Injected failure: fclose still runs, @defer(err) prints "rolled back",
      * @defer(ok) is skipped, error is caught here (not forwarded). */
     println("write_report (err):") !>;
-    void !>(CCError) r = write_report("/tmp/report_err.txt", 1);
-    if (r.is_err()) {
-        println(@string(`  caught: ${r.error().message}`, @scratch)) !>;
-    }
+    write_report("/tmp/report_err.txt", 1) !>(e) {
+        println(@string(`  caught: ${e.message}`, @scratch)) !>;
+    };
 
     return 0;
 }

@@ -11,6 +11,7 @@
 #include "../comptime/emit_tpl_prelude.inc.h"
 #include "preprocess/emit_limits.h"
 #include "preprocess/emit_plan.h"
+#include "preprocess/strswitch_comptime.h"
 #include "util/text.h"
 
 #include <ccc/cc_arena.cch>
@@ -1040,35 +1041,53 @@ int cc_comptime_exec_block_body(const char* body, size_t body_len,
     cc_emit_plan_host_ctx_begin(opts ? opts->site_pos : 0);
     cc__exec_start = clock();
 
-    char* tu = cc__exec_build_tu(body, body_len,
-                                 opts ? opts->input_path : NULL,
-                                 opts ? opts->site_line : 0);
-    if (!tu) {
+    {
+        char swerr[320];
+        char* lowered = cc_comptime_strswitch_rewrite(body, body_len, swerr,
+                                                     sizeof(swerr));
+        char* tu;
+        int rc = 0;
+        if (!lowered) {
+            cc_emit_plan_host_ctx_end();
+            if (err_buf && err_sz)
+                snprintf(err_buf, err_sz, "%s",
+                         swerr[0] ? swerr : "string switch rewrite failed");
+            return -1;
+        }
+        tu = cc__exec_build_tu(lowered, strlen(lowered),
+                               opts ? opts->input_path : NULL,
+                               opts ? opts->site_line : 0);
+        free(lowered);
+        if (!tu) {
+            cc_emit_plan_host_ctx_end();
+            if (err_buf && err_sz)
+                snprintf(err_buf, err_sz, "OOM building comptime TU");
+            return -1;
+        }
+        if (getenv("CC_DEBUG_COMPTIME_EXEC_DUMP")) {
+            FILE* df = fopen(getenv("CC_DEBUG_COMPTIME_EXEC_DUMP"), "wb");
+            if (df) {
+                fwrite(tu, 1, strlen(tu), df);
+                fclose(df);
+            }
+        }
+        if (setjmp(cc__exec_jb) != 0) {
+            cc__exec_in_block = 0;
+            if (err_buf && err_sz)
+                snprintf(err_buf, err_sz,
+                         "comptime execution timed out (%dms)",
+                         cc__exec_timeout_ms);
+            rc = -1;
+        } else {
+            cc__exec_in_block = 1;
+            rc = cc__exec_run_tu(tu, err_buf, err_sz);
+            cc__exec_in_block = 0;
+        }
+        free(tu);
         cc_emit_plan_host_ctx_end();
-        if (err_buf && err_sz) snprintf(err_buf, err_sz, "OOM building comptime TU");
-        return -1;
+        (void)opts;
+        return rc;
     }
-    if (getenv("CC_DEBUG_COMPTIME_EXEC_DUMP")) {
-        FILE* df = fopen(getenv("CC_DEBUG_COMPTIME_EXEC_DUMP"), "wb");
-        if (df) { fwrite(tu, 1, strlen(tu), df); fclose(df); }
-    }
-
-    int rc = 0;
-    if (setjmp(cc__exec_jb) != 0) {
-        cc__exec_in_block = 0;
-        if (err_buf && err_sz)
-            snprintf(err_buf, err_sz, "comptime execution timed out (%dms)",
-                     cc__exec_timeout_ms);
-        rc = -1;
-    } else {
-        cc__exec_in_block = 1;
-        rc = cc__exec_run_tu(tu, err_buf, err_sz);
-        cc__exec_in_block = 0;
-    }
-    free(tu);
-    cc_emit_plan_host_ctx_end();
-    (void)opts;
-    return rc;
 #endif
 }
 

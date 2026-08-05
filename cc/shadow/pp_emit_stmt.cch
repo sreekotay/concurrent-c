@@ -2256,9 +2256,14 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                     if (kid->kind == AST_RAW_LINE) {
                         if (strsw && cursor) {
                             char* nl = strchr(cursor, '\n');
+                            char line[512];
+                            size_t llen;
                             if (nl) {
-                                if (!cemit_fmt(out, "%s%.*s\n", nested,
-                                               (int)(nl - cursor), cursor))
+                                llen = (size_t)(nl - cursor);
+                                if (llen + 1 >= sizeof(line)) return 0;
+                                memcpy(line, cursor, llen);
+                                line[llen] = 0;
+                                if (!cemit_fmt(out, "%s%s\n", nested, line))
                                     return 0;
                                 cursor = nl + 1;
                             } else {
@@ -2946,22 +2951,31 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
     }
     case AST_FOR: {
         char header[768];
+        int bind_mark;
         snprintf(header, sizeof(header), "%s", st->a);
         shadow_rewrite_variant_expr(header, sizeof(header), NULL);
         if (!cemit_fmt(out, "%sfor (%s) {\n", indent, header)) return 0;
         char nested[80];
         shadow_indent_nest(nested, sizeof(nested), indent, 1);
+        /* Same as AST_BLOCK: bind body locals so UFCS sees Shard* sh etc.
+         * (otherwise get/put/delete fall through to store_* beachheads). */
+        bind_mark = shadow_push_block_binds(st->body, st->nbody);
         if (ctx) {
             if (!shadow_emit_compound_body(st->body, st->nbody, out, ctx, nested,
-                                           use_cleanup, 1))
+                                           use_cleanup, 1)) {
+                shadow_pop_fn_binds(bind_mark);
                 return 0;
+            }
         } else {
             for (int k = 0; k < st->nbody; k++) {
                 if (!shadow_emit_stmt_ctx(st->body[k], out, ctx, nested,
-                                          use_cleanup))
+                                          use_cleanup)) {
+                    shadow_pop_fn_binds(bind_mark);
                     return 0;
+                }
             }
         }
+        shadow_pop_fn_binds(bind_mark);
         return cemit_fmt(out, "%s}\n", indent);
     }
     case AST_SLICE_INIT:

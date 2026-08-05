@@ -1,0 +1,30 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+int main(void) {
+    CCShardMap m;
+    CCString* v;
+    if (!m.init(8)) return 1;
+    if (!m.put(cc_slice_from_cstr("a"), cc_slice_from_cstr("1"))) return 2;
+    if (!m.put(cc_slice_from_cstr("b"), cc_slice_from_cstr("2"))) return 3;
+    v = m.get(cc_slice_from_cstr("a"));
+    {
+        CCSlice s = v ? v->as_slice() : cc_slice_empty();
+        if (!v || !CCSlice_eq_cstr(&s, "1")) return 4;
+    }
+    if (!m.put(cc_slice_from_cstr("a"), cc_slice_from_cstr("9"))) return 5;
+    v = m.get(cc_slice_from_cstr("a"));
+    {
+        CCSlice s = v ? v->as_slice() : cc_slice_empty();
+        if (!v || !CCSlice_eq_cstr(&s, "9")) return 6;
+    }
+    if (m.len() != 2) return 7;
+    if (!m.delete(cc_slice_from_cstr("b"))) return 8;
+    if (m.get(cc_slice_from_cstr("b"))) return 9;
+    if (m.len() != 1) return 10;
+    if (m.delete(cc_slice_from_cstr("missing"))) return 11;
+    m.destroy();
+    printf("shard_map_smoke ok\n");
+    return 0;
+}

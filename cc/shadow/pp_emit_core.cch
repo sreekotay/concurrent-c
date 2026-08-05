@@ -2510,6 +2510,7 @@ static void shadow_field_register_raw(const char* ty, const char* span) {
 }
 
 static int shadow_ufn_exists(const char* name);
+static const char* shadow_ufn_unique_for_meth(const char* meth);
 static void shadow_as_register(const char* outer, const char* field,
                                const char* target);
 static void shadow_as_resolve_transitive(void);
@@ -3636,6 +3637,43 @@ static const char* shadow_ufn_first_ty(const char* name) {
         if (strcmp(g_shadow_ufns[i].name, name) == 0)
             return g_shadow_ufns[i].first_ty;
     }
+    return NULL;
+}
+
+/* Unique `Type_meth` (or bare `meth`) in the ufn table.  Skips `store_*`
+ * beachheads.  Used when the receiver bind is missing (opaque string-switch
+ * / raw bodies) so get/put/delete still lower.  When several `*_meth` exist
+ * (ArrayMap_*_get plus cc_shard_map_get), prefer the single `cc_*` hit. */
+static const char* shadow_ufn_unique_for_meth(const char* meth) {
+    const char* hit = NULL;
+    const char* cc_hit = NULL;
+    int n = 0;
+    int ncc = 0;
+    size_t mlen;
+    int i;
+    if (!meth || !meth[0]) return NULL;
+    mlen = strlen(meth);
+    for (i = 0; i < g_shadow_nufns; i++) {
+        const char* nm = g_shadow_ufns[i].name;
+        size_t nl;
+        int match = 0;
+        if (!nm || !nm[0]) continue;
+        if (strncmp(nm, "store_", 6) == 0) continue;
+        nl = strlen(nm);
+        if (strcmp(nm, meth) == 0) match = 1;
+        else if (nl > mlen + 1 && nm[nl - mlen - 1] == '_' &&
+                 strcmp(nm + (nl - mlen), meth) == 0)
+            match = 1;
+        if (!match) continue;
+        hit = nm;
+        n++;
+        if (strncmp(nm, "cc_", 3) == 0) {
+            cc_hit = nm;
+            ncc++;
+        }
+    }
+    if (n == 1) return hit;
+    if (ncc == 1) return cc_hit;
     return NULL;
 }
 

@@ -39,7 +39,7 @@ int main(void) {
                 int job;
                 while (cc_io_avail(jobs_rx.recv(&job))) {
                     println(@string(`worker: processed job ${job}`, @scratch)) !>;
-                    (void)done_tx.send(job);
+                    done_tx.send(job) !>;
                 }
             });
         }
@@ -52,7 +52,7 @@ int main(void) {
             feeder->spawn(() => [jobs_tx] {
                 @errhandler(CCError e) cc_error_exit(e);
                 for (int j = 1; j <= NUM_JOBS; j++) {
-                    (void)jobs_tx.send(j);
+                    jobs_tx.send(j) !>;
                 }
                 int n = NUM_JOBS;
                 println(@string(`feeder: sent ${n} jobs`, @scratch)) !>;
