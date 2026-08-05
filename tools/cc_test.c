@@ -719,9 +719,12 @@ static int run_one_test(const char* stem,
     /* 1) Build via ccc build (this is the build system under test).
      * Front: CC_TEST_FRONTEND / CC_FRONTEND = serdes|legacy (ccc default: serdes).
      * Pinning build diagnostics requires a cold parse — warm emit cache
-     * skips shadow_lower and would silently drop .build_stderr matches. */
+     * skips shadow_lower / comptime and would silently drop .build_stderr and
+     * .compile_err needles (host-cc may still fail with a different message). */
     char build_cmd[3072];
-    int cold_for_diags = (exp_build_stderr && exp_build_stderr_len > 0);
+    int cold_for_diags =
+        (exp_build_stderr && exp_build_stderr_len > 0) ||
+        (exp_compile_err && exp_compile_err_len > 0) || compile_fail;
     const char* cache_flag = (use_cache && !cold_for_diags) ? "" : "--no-cache ";
     const char* front_flag = "";
     {

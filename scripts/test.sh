@@ -233,8 +233,8 @@ if [ "$compare_front" = 1 ]; then
   ratio="$(python3 -c "a=float('$ser_s'); b=float('$leg_s'); print(f'{a/b:.2f}x' if b>0 else 'n/a')")"
   echo ""
   echo "[test] compare-front summary"
-  echo "  legacy: ${leg_s}s  rc=$rc_leg"
-  echo "  serdes: ${ser_s}s  rc=$rc_ser  (${ratio} of legacy wall time)"
+  echo "  legacy: ${leg_s}s  rc=$rc_leg  ($(CC_FRONTEND=legacy ./cc/bin/ccc --v 2>/dev/null | head -1))"
+  echo "  serdes: ${ser_s}s  rc=$rc_ser  (${ratio} of legacy wall time)  ($(CC_FRONTEND=serdes ./cc/bin/ccc --v 2>/dev/null | head -1))"
   if [ "$rc_leg" -ne 0 ] || [ "$rc_ser" -ne 0 ]; then
     exit 1
   fi
@@ -245,5 +245,11 @@ echo "[test] frontend=$front (CC_TEST_FRONTEND / ccc --frontend)"
 export CC_TEST_FRONTEND="$front"
 export CC_FRONTEND="$front"
 
+set +e
 # shellcheck disable=SC2086
-exec ./tools/cc_test $extra "$@"
+./tools/cc_test $extra "$@"
+rc=$?
+set -e
+ver="$(CC_FRONTEND="$front" ./cc/bin/ccc --v 2>/dev/null | head -1)"
+echo "[test] ccc: ${ver:-unknown} (frontend=$front)"
+exit "$rc"
