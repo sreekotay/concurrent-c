@@ -1,12 +1,12 @@
-// redis.go — same shape as redis_idiomatic.ccs, in Go.
+// redis.go — same shape as redis_go_twin.ccs, in Go.
 //
 // Sharded mutexes, one goroutine per conn, hold covers DB only, encode/write
 // after unlock, pipeline window.  Not full Redis.  Errors are values on the
 // normal path.
 //
-// Unlike the CCS server, RESP argv here are owned copies from parse (Go's
+// Unlike redis_idiomatic.ccs, RESP argv here are owned copies from parse (Go's
 // bufio reader does not expose a stable borrow into the fill buffer).  The
-// hold / window / shard geometry still mirrors the idiomatic port.
+// Concurrent-C twin is redis_go_twin.ccs (same command surface + acquire_into).
 //
 // Build: go build -o out/redis_go redis.go
 // Run:   ./out/redis_go [addr]   # default 127.0.0.1:6380

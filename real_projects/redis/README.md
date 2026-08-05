@@ -7,6 +7,8 @@ The supported Concurrent-C Redis variants are:
 - `redis_idiomatic.ccs` — default server (hash-sharded `CCExclusive` by CPU
   count; connection fibers execute in place). Benchmark target for
   `./bench_robust.sh`.
+- `redis_go_twin.ccs` — Go-sized teaching twin of `redis.go` (same command
+  surface; `acquire_into` for holds). Not the bench target.
 - `redis_owner.ccs` — channel / single-owner-fiber variant (historical).
 - `redis_cc/redis_cc.ccs` — future modular production port (scaffold).
 
@@ -14,6 +16,8 @@ The supported Concurrent-C Redis variants are:
 
 - `setup.sh` fetches upstream Redis into `redis_c/`
 - `redis_idiomatic.ccs` is the default single-file implementation
+- `redis_go_twin.ccs` / `redis.go` are paired minimal architecture sketches
+  (`make redis_go_twin`)
 - `redis_owner.ccs` is the N:1 owner-fiber alternative (`make redis_owner`)
 - `redis_smoke.py` is the functional smoke (basics, expiry, 1000-op pipeline,
   abrupt-disconnect storm); it spawns `out/redis_idiomatic` itself:

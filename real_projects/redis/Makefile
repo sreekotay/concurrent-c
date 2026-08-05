@@ -65,6 +65,10 @@ $(OUT_DIR)/redis_idiomatic_debug: redis_idiomatic.ccs redis_cc/redis_cc.cch redi
 $(OUT_DIR)/redis_cc: redis_cc/redis_cc.ccs redis_cc/redis_cc.cch | $(OUT_DIR)
 	$(CCC) -O -o $@ redis_cc/redis_cc.ccs --release
 
+# Go-sized teaching twin of redis.go (minimal command surface, acquire_into).
+$(OUT_DIR)/redis_go_twin: redis_go_twin.ccs | $(OUT_DIR)
+	$(CCC) -O -o $@ redis_go_twin.ccs --release
+
 redis_idiomatic: $(OUT_DIR)/redis_idiomatic
 redis_owner: $(OUT_DIR)/redis_owner
 redis_lock: $(OUT_DIR)/redis_lock
@@ -73,6 +77,7 @@ redis_idiomatic_hand: $(OUT_DIR)/redis_idiomatic_hand
 redis_idiomatic_profile: $(OUT_DIR)/redis_idiomatic_profile
 redis_idiomatic_debug: $(OUT_DIR)/redis_idiomatic_debug
 redis_cc: $(OUT_DIR)/redis_cc
+redis_go_twin: $(OUT_DIR)/redis_go_twin
 
 all: redis_idiomatic redis_cc
 
@@ -85,4 +90,4 @@ print-config:
 	@echo "REDIS_SRC_DIR=$(REDIS_SRC_DIR)"
 	@echo "REDIS_IDIOMATIC_DEFS=$(REDIS_IDIOMATIC_DEFS)"
 
-.PHONY: setup upstream redis_idiomatic redis_owner redis_lock redis_idiomatic_gen redis_idiomatic_hand redis_idiomatic_profile redis_idiomatic_debug redis_cc all clean print-config
+.PHONY: setup upstream redis_idiomatic redis_owner redis_lock redis_idiomatic_gen redis_idiomatic_hand redis_idiomatic_profile redis_idiomatic_debug redis_cc redis_go_twin all clean print-config
