@@ -1,0 +1,19 @@
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <string.h>
+
+int main(void) {
+    @errhandler(CCError e) { (void)e; return 1; }
+
+    CCArena a = cc_arena_malloc(kilobytes(1)) @destroy;
+    assert(a.base);
+
+    CCSlice long_s = @slice("the-quick-brown-fox-jumps-over-the-lazy-dog");
+    CCSlicePacked pk = long_s.to_packed(&a) !>;
+    assert(!cc_slice_packed_is_inline(&pk));
+    assert(pk.as_slice().len == long_s.len);
+
+    pk.release(&a);
+    assert(cc_slice_packed_is_empty(&pk));
+    return 0;
+}

@@ -1,0 +1,14 @@
+/* Mixing string and integer case labels is a hard error. */
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    CCSlice name = char_to_slice("GET");
+    switch (name) {
+    case "GET":
+        return 1;
+    case 2:
+        return 2;
+    default:
+        return 0;
+    }
+}

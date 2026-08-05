@@ -130,13 +130,23 @@ static void shadow_result_name(const char* ok, const char* err, char* out, size_
     snprintf(out, out_sz, "CCResult_%s_%s", mok, merr);
 }
 
-/* In result-fn bodies, rewrite cc_ok/cc_err to typed cc_ok_RNAME/cc_err_RNAME. */
+/* Defined after @as / rfn tables. */
+static int shadow_cc_err_as_project(const char* err_face, const char* arg,
+                                    char* out, size_t cap);
+static int shadow_rname_err_face(const char* rname, char* out, size_t cap);
+
+/* In result-fn bodies, rewrite cc_ok/cc_err to typed cc_ok_RNAME/cc_err_RNAME.
+ * Single-arg cc_err(e) projects e through a unique @as path when the Result
+ * error face differs from typeof(e) (same rule as @errhandler binder). */
 static void shadow_rewrite_result_ctors(char* expr, size_t cap, const char* rname) {
     char tmp[4096];
+    char err_face[64];
     const char* p;
     char* o;
     size_t rem;
     if (!expr || !cap || !rname || !rname[0]) return;
+    err_face[0] = 0;
+    (void)shadow_rname_err_face(rname, err_face, sizeof(err_face));
     p = expr;
     o = tmp;
     rem = sizeof(tmp) - 1;
@@ -176,12 +186,27 @@ static void shadow_rewrite_result_ctors(char* expr, size_t cap, const char* rnam
                 *o++ = ')';
                 rem -= 2;
             } else {
-                int n = snprintf(o, rem, "cc_err_%s(", rname);
+                char argbuf[512];
+                char proj[640];
+                size_t alen = (size_t)((q - 1) - args);
+                int n;
+                if (alen >= sizeof(argbuf)) break;
+                memcpy(argbuf, args, alen);
+                argbuf[alen] = 0;
+                {
+                    int pr = 0;
+                    if (err_face[0])
+                        pr = shadow_cc_err_as_project(err_face, argbuf, proj,
+                                                     sizeof(proj));
+                    if (pr < 0) break; /* ambiguous — leave incomplete; host */
+                    if (pr > 0)
+                        n = snprintf(o, rem, "cc_err_%s(%s)", rname, proj);
+                    else
+                        n = snprintf(o, rem, "cc_err_%s(%s)", rname, argbuf);
+                }
                 if (n < 0 || (size_t)n >= rem) break;
                 o += n;
                 rem -= (size_t)n;
-                p += 7;
-                continue;
             }
             p = q;
             continue;
@@ -667,6 +692,7 @@ typedef struct {
     int* deadline_i;      /* @with_deadline id counter */
     int defer_cleanup;    /* result fn uses @defer → goto cleanup */
     int goto_cleanup;     /* fn has @destroy/@defer → returns goto cleanup */
+    const char* soft_ret_ty; /* enclosing fn return type for soft cleanup */
     AstNode** defers;     /* borrowed defer nodes (reverse emit) */
     int ndefers;
     AstNode** destroys;   /* borrowed PTR_UNWRAP/NURSERY with @destroy */
@@ -2212,7 +2238,7 @@ static void shadow_rewrite_variant_expr(char* expr, size_t cap, const char* vty)
 /* User generic factories (CC_GENERIC_FACTORY / _EXTEND). */
 typedef struct {
     char family[64];
-    char tpl[4096];
+    char tpl[8192];
     int arity;
     int has_base; /* 0 if only CC_GENERIC_FACTORY_EXTEND seen */
     /* `#line` origin at factory definition (for invalid-C notes). */
@@ -2225,9 +2251,9 @@ typedef struct {
     char compact[96]; /* arg0_arg1 */
 } ShadowGenericInst;
 
-static ShadowGenericFactory g_shadow_gfac[4];
+static ShadowGenericFactory g_shadow_gfac[16];
 static int g_shadow_ngfac;
-static ShadowGenericInst g_shadow_ginst[16];
+static ShadowGenericInst g_shadow_ginst[32];
 static int g_shadow_nginst;
 
 /* Name → type bindings (AST+type phase). Drives capture unpack / UFCS. */
@@ -4783,7 +4809,9 @@ static void shadow_gfac_add(const char* family, int arity, const char* tpl,
                             int append, const char* origin_file,
                             int origin_line) {
     int i;
-    if (!family || !tpl || g_shadow_ngfac >= 4) return;
+    if (!family || !tpl ||
+        g_shadow_ngfac >= (int)(sizeof(g_shadow_gfac) / sizeof(g_shadow_gfac[0])))
+        return;
     for (i = 0; i < g_shadow_ngfac; i++) {
         if (strcmp(g_shadow_gfac[i].family, family) == 0) {
             if (append) {
@@ -4809,7 +4837,9 @@ static void shadow_gfac_add(const char* family, int arity, const char* tpl,
             return;
         }
     }
-    if (append && g_shadow_ngfac >= 4) return;
+    if (append &&
+        g_shadow_ngfac >= (int)(sizeof(g_shadow_gfac) / sizeof(g_shadow_gfac[0])))
+        return;
     snprintf(g_shadow_gfac[g_shadow_ngfac].family,
              sizeof(g_shadow_gfac[0].family), "%s", family);
     snprintf(g_shadow_gfac[g_shadow_ngfac].tpl, sizeof(g_shadow_gfac[0].tpl),
@@ -4829,7 +4859,10 @@ static void shadow_gfac_add(const char* family, int arity, const char* tpl,
 static void shadow_ginst_need(const char* family, const char* compact) {
     int i;
     char mangled[96];
-    if (!family || !compact || !compact[0] || g_shadow_nginst >= 16) return;
+    if (!family || !compact || !compact[0] ||
+        g_shadow_nginst >=
+            (int)(sizeof(g_shadow_ginst) / sizeof(g_shadow_ginst[0])))
+        return;
     snprintf(mangled, sizeof(mangled), "%s_%s", family, compact);
     for (i = 0; i < g_shadow_nginst; i++) {
         if (strcmp(g_shadow_ginst[i].mangled, mangled) == 0) return;
@@ -5169,16 +5202,124 @@ static void shadow_escape_path(char* dst, size_t cap, const char* path) {
 static int shadow_as_path_to(const char* outer, const char* face, char* path,
                              size_t cap) {
     int i;
+    int hits = 0;
+    const char* hit_field = NULL;
     if (!outer || !face || !path || !cap) return 0;
     path[0] = 0;
     if (strcmp(outer, face) == 0) return 1; /* exact — empty path */
     for (i = 0; i < g_shadow_nas; i++) {
         if (strcmp(g_shadow_as[i].outer, outer) != 0) continue;
         if (strcmp(g_shadow_as[i].target, face) != 0) continue;
-        snprintf(path, cap, "%s", g_shadow_as[i].field);
+        hits++;
+        hit_field = g_shadow_as[i].field;
+    }
+    if (hits == 1 && hit_field) {
+        snprintf(path, cap, "%s", hit_field);
         return 1;
     }
+    if (hits > 1) return -1; /* ambiguous */
     return 0;
+}
+
+/* Err face of CCResult_* from rfn table or common suffix. */
+static int shadow_rname_err_face(const char* rname, char* out, size_t cap) {
+    int i;
+    size_t n;
+    static const char* faces[] = {"CCIoError", "CCError", "CCNetError", NULL};
+    if (!rname || !rname[0] || !out || !cap) return 0;
+    out[0] = 0;
+    for (i = 0; i < g_shadow_nrfns; i++) {
+        if (strcmp(g_shadow_rfns[i].rname, rname) == 0 &&
+            g_shadow_rfns[i].err[0]) {
+            snprintf(out, cap, "%s", g_shadow_rfns[i].err);
+            return 1;
+        }
+    }
+    n = strlen(rname);
+    for (i = 0; faces[i]; i++) {
+        size_t fl = strlen(faces[i]);
+        if (n > fl + 1 && rname[n - fl - 1] == '_' &&
+            memcmp(rname + n - fl, faces[i], fl) == 0) {
+            snprintf(out, cap, "%s", faces[i]);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Project cc_err(arg) into Result error face F via unique @as.
+ * Returns 1 and writes projected expr; 0 leave arg as-is; -1 ambiguous. */
+static int shadow_cc_err_as_project(const char* err_face, const char* arg,
+                                    char* out, size_t cap) {
+    int ai, nas = 0;
+    char arms[768];
+    size_t ao = 0;
+    char trimmed[288];
+    const char* a;
+    size_t al;
+    size_t i;
+    int is_id;
+    if (!err_face || !err_face[0] || !arg || !out || !cap) return 0;
+    out[0] = 0;
+    a = arg;
+    while (*a == ' ' || *a == '\t' || *a == '\n' || *a == '\r') a++;
+    al = strlen(a);
+    while (al && (a[al - 1] == ' ' || a[al - 1] == '\t' || a[al - 1] == '\n' ||
+                  a[al - 1] == '\r'))
+        al--;
+    if (!al || al >= sizeof(trimmed)) return 0;
+    memcpy(trimmed, a, al);
+    trimmed[al] = 0;
+    for (ai = 0; ai < g_shadow_nas; ai++) {
+        if (strcmp(g_shadow_as[ai].target, err_face) == 0) nas++;
+    }
+    if (nas == 0) return 0;
+    /* Simple ident with a known bind: project `.path` when unique. */
+    is_id = shadow_is_id0(trimmed[0]);
+    for (i = 1; is_id && i < al; i++) {
+        if (!shadow_is_id(trimmed[i])) is_id = 0;
+    }
+    if (is_id) {
+        const ShadowBind* b = shadow_bind_lookup(trimmed);
+        char path[128];
+        int pr;
+        if (b && b->ty[0]) {
+            if (strcmp(b->ty, err_face) == 0) return 0;
+            pr = shadow_as_path_to(b->ty, err_face, path, sizeof(path));
+            if (pr < 0) {
+                fprintf(stderr,
+                        "error: cc_err: ambiguous @as path from '%s' to '%s'\n",
+                        b->ty, err_face);
+                return -1;
+            }
+            if (pr && path[0]) {
+                snprintf(out, cap, "%s.%s", trimmed, path);
+                return 1;
+            }
+            return 0;
+        }
+    }
+    /* Expression / unbound: stmt-expr + _Generic (offset-0 cast, same as
+     * @errhandler binder projection). */
+    ao = (size_t)snprintf(arms, sizeof(arms), "%s: __cc_ep", err_face);
+    for (ai = 0; ai < g_shadow_nas && ao + 96 < sizeof(arms); ai++) {
+        int n;
+        if (strcmp(g_shadow_as[ai].target, err_face) != 0) continue;
+        if (strchr(g_shadow_as[ai].field, '.'))
+            n = snprintf(arms + ao, sizeof(arms) - ao, ", %s: (__cc_ep.%s)",
+                         g_shadow_as[ai].outer, g_shadow_as[ai].field);
+        else
+            n = snprintf(arms + ao, sizeof(arms) - ao,
+                         ", %s: (*(%s*)(void*)&__cc_ep)",
+                         g_shadow_as[ai].outer, err_face);
+        if (n < 0 || (size_t)n >= sizeof(arms) - ao) break;
+        ao += (size_t)n;
+    }
+    snprintf(out, cap,
+             "({ __typeof__(%s) __cc_ep = (%s); "
+             "_Generic(__cc_ep, %s, default: __cc_ep); })",
+             trimmed, trimmed, arms);
+    return 1;
 }
 
 /* Bake file/line as string literals (production shape). `__LINE__` is an int

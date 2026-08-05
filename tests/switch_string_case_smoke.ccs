@@ -1,0 +1,40 @@
+/* String-literal case labels on a CCSlice subject lower through an
+ * emit-time perfect hash to an integer discriminant switch. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+static int classify(CCSlice name) {
+    switch (name) {
+    case "GET":
+        return 1;
+    case "SET":
+        return 2;
+    case "PING":
+        return 3;
+    default:
+        return 0;
+    }
+}
+
+static int fallthrough_pair(CCSlice name) {
+    switch (name) {
+    case "A":
+    case "B":
+        return 10;
+    default:
+        return 0;
+    }
+}
+
+int main(void) {
+    if (classify(char_to_slice("GET")) != 1) return 1;
+    if (classify(char_to_slice("SET")) != 2) return 2;
+    if (classify(char_to_slice("PING")) != 3) return 3;
+    if (classify(char_to_slice("DEL")) != 0) return 4;
+    if (fallthrough_pair(char_to_slice("A")) != 10) return 5;
+    if (fallthrough_pair(char_to_slice("B")) != 10) return 6;
+    if (fallthrough_pair(char_to_slice("C")) != 0) return 7;
+    printf("ok\n");
+    return 0;
+}

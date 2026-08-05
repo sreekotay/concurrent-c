@@ -8,7 +8,7 @@
 
 int main(void) {
     CCArena arena = @create(kilobytes(64)) @destroy;
-    CCExclusive* excl = cc_exclusive_create_sized(&arena, 8);
+    CCExclusive* excl = cc_exclusive_create(&arena, 8);
     if (!excl) return 1;
     @defer cc_exclusive_destroy(excl);
 

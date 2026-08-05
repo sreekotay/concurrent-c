@@ -694,7 +694,7 @@ static int cc__invoke_one_factory(const void* fn, const char* name, const char* 
        heap-spill); the returned slice points into it and is copied into def_out
        before we free it.  The factory's `arena` param is load-bearing. */
     {
-        CC_ARENA_STACK(factory_arena, CC_EMIT_TPL_BUF_SIZE);
+        cc_arena_stack(factory_arena, CC_EMIT_TPL_BUF_SIZE);
         result = call(cc__factory_slice_cstr(name),
                       cc__factory_slice_cstr(mangled),
                       args,

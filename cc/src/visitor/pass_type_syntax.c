@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "preprocess/type_registry.h"
 #include "util/path.h"
 #include "util/text.h"
 #include "util/text_scan.h"
@@ -1111,8 +1112,76 @@ char* cc__rewrite_inferred_result_constructors(const char* src, size_t n) {
                         }
                         cc__sb_append_cstr_local(&out, &out_len, &out_cap, use_rtype);
                         cc__sb_append_cstr_local(&out, &out_len, &out_cap, "(");
-                        /* Copy the argument */
-                        cc__sb_append_local(&out, &out_len, &out_cap, src + args_start, j - args_start);
+                        /* cc_err(e) into CCError face: project unique @as
+                         * (e.base / offset-0) so Io binders match hoist. */
+                        if (is_err && is_default_err) {
+                            size_t a0 = args_start, a1 = j;
+                            char ident[128];
+                            size_t ii = 0;
+                            int is_id = 1;
+                            char path[256];
+                            int match = -1;
+                            CCTypeRegistry* reg = cc_type_registry_get_global();
+                            while (a0 < a1 && (src[a0] == ' ' || src[a0] == '\t' ||
+                                               src[a0] == '\n' || src[a0] == '\r'))
+                                a0++;
+                            while (a1 > a0 && (src[a1 - 1] == ' ' || src[a1 - 1] == '\t' ||
+                                               src[a1 - 1] == '\n' || src[a1 - 1] == '\r'))
+                                a1--;
+                            for (ii = 0; a0 + ii < a1 && ii + 1 < sizeof(ident); ii++) {
+                                char ch = src[a0 + ii];
+                                if (!((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+                                      ch == '_' || (ii > 0 && ch >= '0' && ch <= '9'))) {
+                                    is_id = 0;
+                                    break;
+                                }
+                                ident[ii] = ch;
+                            }
+                            ident[ii] = 0;
+                            if (is_id && ii > 0 && a0 + ii == a1 && reg) {
+                                const char* oty = cc_type_registry_lookup_var(reg, ident);
+                                if (oty && oty[0] && strcmp(oty, "CCError") != 0) {
+                                    match = cc_type_registry_as_path_for_type(
+                                        reg, oty, "CCError", path, sizeof(path));
+                                    if (match == -2) {
+                                        free(out);
+                                        free(rvars);
+                                        fprintf(stderr,
+                                                "error: cc_err: ambiguous @as path "
+                                                "from '%s' to 'CCError'\n",
+                                                oty);
+                                        return NULL;
+                                    }
+                                }
+                            }
+                            if (match == 0 && path[0]) {
+                                cc__sb_append_local(&out, &out_len, &out_cap, src + a0,
+                                                    a1 - a0);
+                                cc__sb_append_cstr_local(&out, &out_len, &out_cap, ".");
+                                cc__sb_append_cstr_local(&out, &out_len, &out_cap, path);
+                            } else {
+                                /* Unbound / expr: _Generic offset-0 (CCIoError +
+                                 * face). Same model as native shadow emit. */
+                                cc__sb_append_cstr_local(
+                                    &out, &out_len, &out_cap,
+                                    "({ __typeof__(");
+                                cc__sb_append_local(&out, &out_len, &out_cap, src + a0,
+                                                    a1 - a0);
+                                cc__sb_append_cstr_local(
+                                    &out, &out_len, &out_cap,
+                                    ") __cc_ep = (");
+                                cc__sb_append_local(&out, &out_len, &out_cap, src + a0,
+                                                    a1 - a0);
+                                cc__sb_append_cstr_local(
+                                    &out, &out_len, &out_cap,
+                                    "); _Generic(__cc_ep, CCError: __cc_ep, "
+                                    "CCIoError: (*(CCError*)(void*)&__cc_ep), "
+                                    "default: __cc_ep); })");
+                            }
+                        } else {
+                            cc__sb_append_local(&out, &out_len, &out_cap,
+                                                src + args_start, j - args_start);
+                        }
                         cc__sb_append_cstr_local(&out, &out_len, &out_cap, ")");
                         last_emit = j + 1;  /* skip past the closing ')' */
                         i = j + 1;

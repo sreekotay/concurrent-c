@@ -53,13 +53,23 @@ int c = read() !>(e) { /* local */ @err(e); };
 
 [recipe_ufcs_forms.ccs](../examples/recipe_ufcs_forms.ccs) · [recipe_user_generics.ccs](../examples/recipe_user_generics.ccs)
 
-`recv.method(args)` is the function the receiver's type names.
-Declare the function → the method exists. Prefix and postfix are one call.
+`recv.method(args)` calls the function the receiver's type names.
+**Declaring that function is installing the method** — no registry, no trait, no header edit.
 
 ```c
+/* extend: one declaration */
+static double CCVec_double_median(CCVec_double* v) {
+    return v->len ? v->data[v->len / 2] : 0.0;
+}
+
+v.median();           // that function
 v.push(10);           // CCVec_int_push(&v, 10)
-n->spawn(() => …);    // cc_nursery_spawn(n, …)
+mean(u, 6.0);         // plain C
+u.mean(6.0);          // same call
 ```
+
+Parameter order for methods: **receiver first, arena last** (when an arena is needed).
+That is what makes `s.clone_into(&a)` and `clone_into(s, &a)` the same shape.
 
 Generics: `Name::[args]`. Fallible chain: unwrap (`!>` / `?>`), then the next method sees the value.
 

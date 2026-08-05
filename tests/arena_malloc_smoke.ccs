@@ -1,0 +1,21 @@
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+
+/* cc_arena_malloc: fixed root + overflow (durable store policy). */
+int main(void) {
+    CCArena a = cc_arena_malloc(64) @destroy;
+    assert(a.base);
+    assert(a.block_max == 1);
+    assert(a._flags & CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW);
+
+    /* Bigger than root → overflow malloc, individually releasable. */
+    void* p = cc_arena_alloc(&a, 128, 8);
+    assert(p);
+    assert(a._flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW);
+    assert(cc_arena_release(&a, p));
+
+    cc_arena_stack(scratch, 32);
+    assert(scratch.base);
+    assert(scratch.block_max == 0);
+    return 0;
+}

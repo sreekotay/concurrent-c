@@ -2,8 +2,8 @@
  * Named exclusive sections (v1).
  *
  *   CCArena arena = @create(kilobytes(128)) @destroy;
- *   CCExclusive* excl = cc_exclusive_create(&arena);         // map starts at 64
- *   // or: excl = cc_exclusive_create_sized(&arena, 256);    // hint → pow2
+ *   CCExclusive* excl = cc_exclusive_create(&arena, 0);      // default map (64)
+ *   // or: excl = cc_exclusive_create(&arena, 256);          // hint → pow2
  *   CCExclusiveMutex m = excl->mutex(name);  // resolve once
  *   CCExclusiveGuard g = m.acquire();
  *   ... short critical section (do not @await) ...
@@ -42,7 +42,7 @@
  * the discovery map and returns the entry to the pool.  destroy tears down
  * the create mutex and releases discovery-map tables; pooled entry storage
  * remains until the arena is freed.  The map starts at 64 slots (or the
- * sized hint, rounded up to a power of two) and grows under the create lock.
+ * capacity hint, rounded up to a power of two) and grows under the create lock.
  *
  * Lock word: 0 free, 1 locked, 2 contended (locked, waiters may be queued).
  * Uncontended acquire is an inlined CAS; release is an inlined swap to FREE.
@@ -86,11 +86,9 @@ typedef struct CCExclusiveGuard {
 
 /* Allocates section header + discovery map from `arena`.  Mutex entries are
  * arena-allocated on first resolve.  Returns NULL if arena is NULL/OOM.
- * Default initial map capacity is 64 (grows on demand). */
-CCExclusive* cc_exclusive_create(CCArena* arena);
-/* Like create, with an initial map capacity hint (rounded up to a power of
- * two; 0 means the default).  Same idea as sizing an arena up front. */
-CCExclusive* cc_exclusive_create_sized(CCArena* arena, size_t initial_cap);
+ * `initial_cap` is a map capacity hint (rounded up to a power of two);
+ * 0 selects the default (64).  The map grows on demand. */
+CCExclusive* cc_exclusive_create(CCArena* arena, size_t initial_cap);
 /* Tears down the create mutex and releases discovery-map tables; mutex
  * entry storage remains until the arena is freed. */
 void cc_exclusive_destroy(CCExclusive* excl);

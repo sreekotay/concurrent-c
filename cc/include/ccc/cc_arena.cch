@@ -764,8 +764,9 @@ static inline size_t kilobytes(size_t n) { return n * 1024; }
 static inline size_t megabytes(size_t n) { return n * 1024 * 1024; }
 static inline size_t gigabytes(size_t n) { return n * 1024 * 1024 * 1024; }
 
-// Allocate a growable arena with heap-backed storage of given initial size.
-// block_max = 0 means unbounded growth (the default for heap-created arenas).
+// Growable bump arena (request/window): heap-owned root, block_max = 0.
+// ALLOW_HEAP_OVERFLOW is on as a last resort after slabs can't grow.
+// Prefer cc_arena_malloc for durable maps that free entries individually.
 static inline CCArena cc_arena_heap(size_t bytes) {
     CCArena a = {0};
     void* buf = malloc(bytes);
@@ -773,9 +774,17 @@ static inline CCArena cc_arena_heap(size_t bytes) {
         free(buf);
         a.base = NULL;
     } else if (buf) {
-        a._flags |= CC_ARENA_FLAG_HEAP_OWNED;
+        a._flags |= CC_ARENA_FLAG_HEAP_OWNED | CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW;
         a.block_max = 0;
     }
+    return a;
+}
+
+/* Durable store arena: fixed root + overflow. Hot path bumps `bytes`; further
+ * allocs are per-object malloc that release() can free (no bump-slab growth). */
+static inline CCArena cc_arena_malloc(size_t bytes) {
+    CCArena a = cc_arena_heap(bytes);
+    if (a.base) a.block_max = 1;
     return a;
 }
 
@@ -833,19 +842,26 @@ static inline CCArena cc_arena_fixed_buffer(void *buffer, size_t capacity) {
     return cc_arena_create_buffer(buffer, capacity, CC_ARENA_FIXED);
 }
 
-// Declare `uint8_t name##_cc_stack_buf[nbytes]`, `CCArena name`, and init with
-// cc_arena_buffer(...) so stack is used first and heap overflows later.
-#define CC_ARENA_STACK(name, nbytes) \
+/* Family: cc_arena_heap / cc_arena_malloc / cc_arena_stack.
+ * Stack-first scratch: declare `uint8_t name##_cc_stack_buf[nbytes]` +
+ * `CCArena name`, bump the stack slab first, then grow (block_max = 0). */
+#define cc_arena_stack(name, nbytes) \
     uint8_t name##_cc_stack_buf[nbytes]; \
     CCArena name; \
     (void)cc_arena_buffer(&name, name##_cc_stack_buf, sizeof(name##_cc_stack_buf)); \
     (name).block_max = CC_ARENA_GROWABLE
 
-// Declare a stack-backed arena and a pool initialized from it.
-#define CC_ARENA_POOL_STACK(name, elem_size, nbytes) \
-    CC_ARENA_STACK(name##_arena, nbytes); \
+/* Compat aliases — prefer lowercase names. */
+#define CC_ARENA_STACK(name, nbytes) cc_arena_stack(name, nbytes)
+
+/* Stack-backed arena + pool initialized from it. */
+#define cc_arena_pool_stack(name, elem_size, nbytes) \
+    cc_arena_stack(name##_arena, nbytes); \
     CCArenaPool name; \
     cc_arena_pool_init(&name, &name##_arena, elem_size)
+
+#define CC_ARENA_POOL_STACK(name, elem_size, nbytes) \
+    cc_arena_pool_stack(name, elem_size, nbytes)
 
 static inline bool cc_arena_release(CCArena* arena, void* ptr) {
     if (!arena || !ptr) return false;

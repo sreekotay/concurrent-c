@@ -1,0 +1,116 @@
+/*
+ * BufReader::[Src] factory templates.
+ *
+ * Quote-splice into native TUs (angle-included bufio.h has factories stripped).
+ * Legacy harvest reads the same bodies from bufio.cch under CC_COMPTIME_SCAN —
+ * keep those in sync with this file.
+ */
+#pragma once
+
+CC_GENERIC_FACTORY(BufReader, 1) {
+    return @emit(`
+#ifdef CC_FRAGMENT_VALIDATE
+typedef struct ${arg(0)} ${arg(0)};
+typedef struct CCArena CCArena;
+#endif
+typedef struct {
+    ${arg(0)} *src;
+    char *buf;
+    size_t cap, pos, end;
+    int eof;
+} ${mangled};
+static inline void ${mangled}_init(${mangled} *r, ${arg(0)} *src, char *buf, size_t cap) {
+    if (!r) return;
+    memset(r, 0, sizeof(*r));
+    r->src = src; r->buf = buf; r->cap = cap;
+}
+static inline int ${mangled}_init_arena(${mangled} *r, ${arg(0)} *src, CCArena *a, size_t cap) {
+    char *buf;
+    if (!r || !src || !a || !cap) return -1;
+    buf = (char *)cc_arena_alloc(a, cap, 1);
+    if (!buf) return -1;
+    ${mangled}_init(r, src, buf, cap);
+    return 0;
+}
+static inline size_t ${mangled}_buffered(const ${mangled} *r) {
+    return (!r || r->end < r->pos) ? 0 : (r->end - r->pos);
+}
+static inline CCResult_bool_CCIoError ${mangled}_fill(${mangled} *r) {
+    size_t avail, n = 0;
+    CCResult_bool_CCIoError rr;
+    if (!r || !r->src || !r->buf || !r->cap)
+        return CCRes_err(bool, CCIoError, cc_io_from_errno(EINVAL));
+    if (r->eof) return CCRes_ok(bool, CCIoError, false);
+    if (r->pos > 0 && r->pos < r->end) {
+        memmove(r->buf, r->buf + r->pos, r->end - r->pos);
+        r->end -= r->pos; r->pos = 0;
+    } else if (r->pos >= r->end) { r->pos = 0; r->end = 0; }
+    avail = r->cap - r->end;
+    if (!avail) return CCRes_err(bool, CCIoError, cc_io_from_errno(EINVAL));
+    rr = _Generic((r->src),
+#ifdef CC_STD_NET_H
+        CCSocket *: cc_socket_read_buf_into,
+#endif
+        CCFile *: cc_file_read_buf_into,
+#ifdef CC_BUFIO_EXTRA_GENERIC
+        CC_BUFIO_EXTRA_GENERIC
+#endif
+        default: cc__bufio_unsupported_read
+    )(r->src, r->buf + r->end, avail, &n);
+    if (cc_is_err(rr)) return rr;
+    if (!cc_value(rr)) { r->eof = 1; return CCRes_ok(bool, CCIoError, false); }
+    r->end += n;
+    return CCRes_ok(bool, CCIoError, n > 0);
+}
+static inline CCResult_CCSlice_CCIoError ${mangled}_read_exact(${mangled} *r, size_t n) {
+    if (!r || !n) return CCRes_err(CCSlice, CCIoError, cc_io_from_errno(EINVAL));
+    while (${mangled}_buffered(r) < n) {
+        CCResult_bool_CCIoError fr = ${mangled}_fill(r);
+        if (cc_is_err(fr)) return CCRes_err(CCSlice, CCIoError, cc_error(fr));
+        if (!cc_value(fr))
+            return CCRes_err(CCSlice, CCIoError, cc_io_error_os(CC_IO_CONNECTION_CLOSED, 0));
+    }
+    { CCSlice v = cc_slice_from_buffer(r->buf + r->pos, n); r->pos += n;
+      return CCRes_ok(CCSlice, CCIoError, v); }
+}
+static inline CCResult_CCSlice_CCIoError ${mangled}_read_line(${mangled} *r) {
+    size_t i;
+    if (!r) return CCRes_err(CCSlice, CCIoError, cc_io_from_errno(EINVAL));
+    for (;;) {
+        for (i = r->pos; i < r->end; i++) {
+            if (r->buf[i] == (char)10) {
+                size_t start = r->pos, len = i - start; CCSlice v;
+                if (len && r->buf[start + len - 1] == (char)13) len--;
+                v = cc_slice_from_buffer(r->buf + start, len);
+                r->pos = i + 1;
+                return CCRes_ok(CCSlice, CCIoError, v);
+            }
+        }
+        { size_t pending = ${mangled}_buffered(r);
+          CCResult_bool_CCIoError fr = ${mangled}_fill(r);
+          if (cc_is_err(fr)) return CCRes_err(CCSlice, CCIoError, cc_error(fr));
+          if (!cc_value(fr)) {
+              if (!pending) return CCRes_ok(CCSlice, CCIoError, cc_slice_empty());
+              return CCRes_err(CCSlice, CCIoError, cc_io_error_os(CC_IO_CONNECTION_CLOSED, 0));
+          } }
+    }
+}
+`, arena);
+}
+
+CC_GENERIC_FACTORY_EXTEND(BufReader, 1) {
+    return @emit(`
+static inline CCResult_CCSlice_CCIoError ${mangled}_read_line_dup(${mangled} *r, CCArena *a) {
+    CCResult_CCSlice_CCIoError lr; CCSlice view; CCString line;
+    if (!r || !a) return CCRes_err(CCSlice, CCIoError, cc_io_from_errno(EINVAL));
+    lr = ${mangled}_read_line(r);
+    if (cc_is_err(lr)) return lr;
+    view = cc_value(lr);
+    if (!view.len) return lr;
+    line = cc_string_new();
+    if (!cc_string_push_slice(&line, view, a))
+        return CCRes_err(CCSlice, CCIoError, cc_io_error_os(CC_IO_OUT_OF_MEMORY, ENOMEM));
+    return CCRes_ok(CCSlice, CCIoError, cc_string_as_slice(&line));
+}
+`, arena);
+}

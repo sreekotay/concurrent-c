@@ -7,7 +7,7 @@ struct Point {
 };
 
 int main(void) {
-    CC_ARENA_STACK(a, 1024);
+    cc_arena_stack(a, 1024);
     
     CCArenaPool p;
     cc_arena_pool_init(&p, &a, sizeof(struct Point));
@@ -61,9 +61,9 @@ int main(void) {
     
     p_owned.destroy();
     
-    // Test CC_ARENA_POOL_STACK
+    // Test cc_arena_pool_stack
     {
-        CC_ARENA_POOL_STACK(p_stack, sizeof(struct Point), 1024);
+        cc_arena_pool_stack(p_stack, sizeof(struct Point), 1024);
         struct Point* p5 = (struct Point*)p_stack.alloc();
         if (!p5) {
             printf("FAIL: stack pool alloc\n");

@@ -2,7 +2,7 @@
  * I/O error type: CCError general face (@as) + os_code payload.
  *
  * CCIoError is usable as CCError through `base` — same preference order as
- * UFCS (@errhandler exact E, else unique @as path to handler E).
+ * UFCS / @errhandler / cc_err (exact E, else unique @as path to face F).
  */
 #ifndef CC_IO_ERROR_H
 #define CC_IO_ERROR_H

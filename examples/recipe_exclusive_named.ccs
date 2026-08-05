@@ -6,7 +6,7 @@
  * domain:
  *
  *   CCArena arena = @create(kilobytes(64)) @destroy;
- *   CCExclusive* excl = cc_exclusive_create(&arena);       // or create_sized
+ *   CCExclusive* excl = cc_exclusive_create(&arena, 0);    // 0 → default map
  *   CCExclusiveMutex m = excl->mutex(name);   // resolve once
  *   CCExclusiveGuard g = m.acquire();
  *   ... short critical section (do not @await) ...
@@ -54,7 +54,7 @@ int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
 
     CCArena excl_arena = @create(kilobytes(64)) @destroy;
-    g_excl = cc_exclusive_create(&excl_arena);
+    g_excl = cc_exclusive_create(&excl_arena, 0);
     if (!g_excl) {
         eprintln("cc_exclusive_create failed") !>;
         return 1;

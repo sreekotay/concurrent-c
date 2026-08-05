@@ -1,0 +1,12 @@
+/* String case labels require a CCSlice-shaped subject. */
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    int name = 1;
+    switch (name) {
+    case "GET":
+        return 1;
+    default:
+        return 0;
+    }
+}

@@ -1,12 +1,11 @@
-// redis.go — same shape as redis_go_twin.ccs, in Go.
+// redis.go — small incomplete Redis sketch in Go.
 //
 // Sharded mutexes, one goroutine per conn, hold covers DB only, encode/write
-// after unlock, pipeline window.  Not full Redis.  Errors are values on the
-// normal path.
+// after unlock, pipeline window.  Not full Redis.
 //
-// Unlike redis_idiomatic.ccs, RESP argv here are owned copies from parse (Go's
-// bufio reader does not expose a stable borrow into the fill buffer).  The
-// Concurrent-C twin is redis_go_twin.ccs (same command surface + acquire_into).
+// The Concurrent-C sketch with the same tiny command surface is
+// redis_go_twin.ccs (string switch, BufReader, nursery, acquire_into) — same
+// spirit of incompleteness, not a line twin of this file.
 //
 // Build: go build -o out/redis_go redis.go
 // Run:   ./out/redis_go [addr]   # default 127.0.0.1:6380

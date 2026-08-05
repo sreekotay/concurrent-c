@@ -1093,7 +1093,7 @@ int main(int argc, char** argv) {
     /* One exclusive section; mutex names are shard ids 0..N-1. */
     excl_arena = cc_arena_heap(kilobytes(64));
     @defer excl_arena.destroy();
-    excl = cc_exclusive_create_sized(&excl_arena, shard_count * 2u);
+    excl = cc_exclusive_create(&excl_arena, shard_count * 2u);
     if (!excl) {
         fprintf(stderr, "redis_idiomatic: cc_exclusive_create failed\n");
         return 1;

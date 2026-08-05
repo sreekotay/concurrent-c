@@ -1472,13 +1472,13 @@ done:
 /* ---- `@string(..., @scratch)` / `@scratch(N)` ---------------------------
  * Sugar for a function/closure-scoped stack arena passed as the @string arena
  * operand. All sites in the same function or closure body share one
- * CC_ARENA_STACK(__cc_str_scratch, max N) at that body's '{'; every arena
+ * cc_arena_stack(__cc_str_scratch, max N) at that body's '{'; every arena
  * arg rewrites to &__cc_str_scratch. Not a general expression. */
 #define CC_STR_SCRATCH_DEFAULT_BYTES 1024
 #define CC_STR_SCRATCH_MAX_SITES 256
 
 typedef struct {
-    size_t brace;   /* function/closure '{' after which to inject CC_ARENA_STACK */
+    size_t brace;   /* function/closure '{' after which to inject cc_arena_stack */
     size_t arg_s;   /* start of @scratch... in source */
     size_t arg_e;   /* exclusive end of arena arg */
     size_t nbytes;
@@ -1874,7 +1874,7 @@ static int cc__reject_orphan_at_scratch(const char* src, size_t n, const char* i
                 cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
                                 scan.line, scan.col, "syntax",
                                 "@scratch is only valid as the arena argument of @string(...); "
-                                "use CC_ARENA_STACK for a named scratch arena");
+                                "use cc_arena_stack for a named scratch arena");
                 return -1;
             }
             i = after;
@@ -1904,7 +1904,7 @@ static int cc__scratch_site_cmp_arg(const void* a, const void* b) {
 }
 
 /* Expand @scratch arena args; NULL = no sites, (char*)-1 = error.
- * One shared CC_ARENA_STACK(__cc_str_scratch, max N) per function/closure. */
+ * One shared cc_arena_stack(__cc_str_scratch, max N) per function/closure. */
 static char* cc__expand_string_scratch(const char* src, size_t n, const char* input_path) {
     CCStrScratchSite sites[CC_STR_SCRATCH_MAX_SITES];
     CCStrScratchSite by_brace[CC_STR_SCRATCH_MAX_SITES];
@@ -1945,7 +1945,7 @@ static char* cc__expand_string_scratch(const char* src, size_t n, const char* in
                 bi++;
             }
             cc__sb_append_fmt_local(&out, &out_len, &out_cap,
-                                    " CC_ARENA_STACK(__cc_str_scratch, %zu); ",
+                                    " cc_arena_stack(__cc_str_scratch, %zu); ",
                                     nbytes);
         } else {
             cc_sb_append_cstr(&out, &out_len, &out_cap, "&__cc_str_scratch");
@@ -2055,7 +2055,7 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
             {
                 /* After the template literal:
                  *   - anchored splice form `@emit(anchor, `...`)` takes NO arena;
-                 *     it is self-contained (inline CC_ARENA_STACK, splice, free).
+                 *     it is self-contained (inline cc_arena_stack, splice, free).
                  *   - return form `@emit(`...`, arena)` REQUIRES an explicit arena
                  *     and yields a CCSlice persisted into it (mirrors @string). */
                 size_t after = cc_skip_ws_and_comments(src, n, tick_e + 1);
@@ -2133,7 +2133,7 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                        copies), then free.  arena_name is a CCArena* alias so the
                        shared body rewriter sees a pointer in both forms. */
                     cc__sb_append_fmt_local(&out, &out_len, &out_cap,
-                                            "({ CC_ARENA_STACK(%s, %d); CCArena* %s = &%s; "
+                                            "({ cc_arena_stack(%s, %d); CCArena* %s = &%s; "
                                             "CCString %s = cc_string_new(); ",
                                             stack_name, CC_EMIT_TPL_BUF_SIZE,
                                             arena_name, stack_name, builder_name);
@@ -11285,7 +11285,8 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
                     if (is_short && depth == 0 && full_rtype[0]) {
                         /* Rewrite short form to typed constructor call:
                            cc_ok(x) -> cc_ok_CCResult_T_E(x)
-                           cc_err(e) -> cc_err_CCResult_T_E(e) */
+                           cc_err(e) -> cc_err_CCResult_T_E(e)
+                           Into a CCError face, project unique @as (Io→base). */
                         cc_sb_append(&out, &out_len, &out_cap, src + last_emit, macro_start - last_emit);
                         
                         if (is_ok) {
@@ -11295,8 +11296,64 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
                         }
                         cc_sb_append_cstr(&out, &out_len, &out_cap, full_rtype);
                         cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
-                        /* Copy argument */
-                        cc_sb_append(&out, &out_len, &out_cap, src + args_start, j - args_start);
+                        if (is_err && err_is_ccerror) {
+                            size_t a0 = args_start, a1 = j;
+                            char ident[128];
+                            size_t ii = 0;
+                            int is_id = 1;
+                            char path[256];
+                            int match = -1;
+                            CCTypeRegistry* reg = cc_type_registry_get_global();
+                            while (a0 < a1 && (src[a0] == ' ' || src[a0] == '\t' ||
+                                               src[a0] == '\n' || src[a0] == '\r'))
+                                a0++;
+                            while (a1 > a0 && (src[a1 - 1] == ' ' || src[a1 - 1] == '\t' ||
+                                               src[a1 - 1] == '\n' || src[a1 - 1] == '\r'))
+                                a1--;
+                            for (ii = 0; a0 + ii < a1 && ii + 1 < sizeof(ident); ii++) {
+                                char ch = src[a0 + ii];
+                                if (!((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+                                      ch == '_' || (ii > 0 && ch >= '0' && ch <= '9'))) {
+                                    is_id = 0;
+                                    break;
+                                }
+                                ident[ii] = ch;
+                            }
+                            ident[ii] = 0;
+                            if (is_id && ii > 0 && a0 + ii == a1 && reg) {
+                                const char* oty = cc_type_registry_lookup_var(reg, ident);
+                                if (oty && oty[0] && strcmp(oty, "CCError") != 0) {
+                                    match = cc_type_registry_as_path_for_type(
+                                        reg, oty, "CCError", path, sizeof(path));
+                                    if (match == -2) {
+                                        free(out);
+                                        free(rvars);
+                                        fprintf(stderr,
+                                                "error: cc_err: ambiguous @as path "
+                                                "from '%s' to 'CCError'\n",
+                                                oty);
+                                        return NULL;
+                                    }
+                                }
+                            }
+                            if (match == 0 && path[0]) {
+                                cc_sb_append(&out, &out_len, &out_cap, src + a0, a1 - a0);
+                                cc_sb_append_cstr(&out, &out_len, &out_cap, ".");
+                                cc_sb_append_cstr(&out, &out_len, &out_cap, path);
+                            } else {
+                                cc_sb_append_cstr(&out, &out_len, &out_cap,
+                                    "({ __typeof__(");
+                                cc_sb_append(&out, &out_len, &out_cap, src + a0, a1 - a0);
+                                cc_sb_append_cstr(&out, &out_len, &out_cap, ") __cc_ep = (");
+                                cc_sb_append(&out, &out_len, &out_cap, src + a0, a1 - a0);
+                                cc_sb_append_cstr(&out, &out_len, &out_cap,
+                                    "); _Generic(__cc_ep, CCError: __cc_ep, "
+                                    "CCIoError: (*(CCError*)(void*)&__cc_ep), "
+                                    "default: __cc_ep); })");
+                            }
+                        } else {
+                            cc_sb_append(&out, &out_len, &out_cap, src + args_start, j - args_start);
+                        }
                         cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
                         last_emit = j + 1;
                         i = j + 1;
@@ -18584,7 +18641,7 @@ char* cc__resolve_comptime_value(const char* src, size_t n, const char* input_pa
     if (!src || n == 0) return NULL;
     if (!cc_contains_token_top_level(src, n, "@comptime")) return NULL;
     cc__value_hoist_cache_free();
-    CC_ARENA_STACK(hoist_arena, CC_EMIT_TPL_BUF_SIZE);
+    cc_arena_stack(hoist_arena, CC_EMIT_TPL_BUF_SIZE);
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
     size_t i = 0, last = 0;

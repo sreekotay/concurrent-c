@@ -2,6 +2,67 @@
  * Included from pp_emit_stmt.cch (after stmt/destroy helpers). */
 #pragma once
 
+/* True when a typedef-struct field type is a Map_/ArrayMap_/CCVec_ product
+ * (pointer ok). Those DECL macros are emitted after the factory-hoist pass;
+ * hoisting the enclosing struct early leaves an unknown type name. */
+static int shadow_ty_is_generic_container(const char* ty) {
+    const char* p;
+    char base[128];
+    size_t n;
+    if (!ty || !ty[0]) return 0;
+    while (*ty == ' ' || *ty == '\t') ty++;
+    n = 0;
+    while (ty[n] && ty[n] != ' ' && ty[n] != '\t' && ty[n] != '*') {
+        if (n + 1 < sizeof(base)) base[n] = ty[n];
+        n++;
+    }
+    if (n >= sizeof(base)) n = sizeof(base) - 1;
+    base[n] = 0;
+    p = base;
+    return strncmp(p, "ArrayMap_", 9) == 0 || strncmp(p, "Map_", 4) == 0 ||
+           strncmp(p, "CCVec_", 6) == 0;
+}
+
+static int shadow_typedef_struct_embeds_generic_container(const AstNode* it) {
+    int k;
+    if (!it) return 0;
+    for (k = 0; k < it->nkids; k++) {
+        AstNode* f = it->kids[k];
+        if (!f) continue;
+        if (f->kind == AST_FIELD_SIMPLE && shadow_ty_is_generic_container(f->a))
+            return 1;
+        if (f->kind == AST_FIELD_INT) continue;
+        /* raw / other field shapes: best-effort scan of type text */
+        if (f->a[0] && (strstr(f->a, "ArrayMap_") || strstr(f->a, "Map_") ||
+                        strstr(f->a, "CCVec_")))
+            return 1;
+    }
+    return 0;
+}
+
+/* True when `alias` is a monomorph type argument of some factory instance
+ * (e.g. Counter in py_expose::[Counter]). BufReader::[CCSocket] does not
+ * require hoisting every user struct in the TU. */
+static int shadow_alias_is_factory_type_arg(const char* alias) {
+    int ii;
+    if (!alias || !alias[0]) return 0;
+    for (ii = 0; ii < g_shadow_nginst; ii++) {
+        const char* p = g_shadow_ginst[ii].compact;
+        while (*p) {
+            char part[64];
+            size_t n = 0;
+            while (p[n] && p[n] != '_') n++;
+            if (n >= sizeof(part)) n = sizeof(part) - 1;
+            memcpy(part, p, n);
+            part[n] = 0;
+            if (part[0] && strcmp(part, alias) == 0) return 1;
+            p += n;
+            if (*p == '_') p++;
+        }
+    }
+    return 0;
+}
+
 /* typedef struct { … } Alias; — shared by prelude + main emit. */
 static int shadow_emit_typedef_struct(AstNode* it, CEmit* out, TapeCache* cache,
                                       ShadowCtx* line_ctx) {
@@ -610,7 +671,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                             rname, rname))
                         return 0;
                 } else if (shadow_as_path_to(seen_err[si], "CCError", apath,
-                                            sizeof(apath)) &&
+                                            sizeof(apath)) > 0 &&
                            apath[0]) {
                     if (!cemit_fmt(out,
                             ", %s: (cc_rt_diag_record_unwrap_site(__f__, __l__), "
@@ -626,10 +687,10 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 return 0;
         }
     }
-    /* Hoist typedefs when Result specs need prior names. Also hoist only those
-     * typedefs that are Vec element types (e.g. Pt / CharVec) before
-     * CC_VEC_DECL — not NestedCharVec-style aliases of CCVec_<Alias> (those
-     * need the element DECL first), nor structs that embed Map_. */
+    /* Hoist typedefs when Result specs need prior names, Vec/Map element
+     * types need to precede DECL macros, or a factory type-arg struct must
+     * be complete before its factory body (py_expose::[Counter]). Factory
+     * presence alone does not hoist every TU struct. */
     hoist_typedefs = (nseen > 0 || g_shadow_nginst > 0 || g_shadow_nvecs > 0 || g_shadow_nmaps > 0 ||
                       g_shadow_namaps > 0);
 
@@ -795,26 +856,37 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 snprintf(items[i]->e, sizeof(items[i]->e), "vech");
             }
             if (items[i]->kind == AST_TYPEDEF_STRUCT) {
-                /* Hoist Result Ok/Err arms, and all structs when a generic
-                 * factory instance needs them in scope (py_expose::[T]). */
+                /* Hoist Result Ok/Err arms, and factory-needed structs
+                 * (py_expose::[T]). Do NOT hoist structs that embed
+                 * ArrayMap_/Map_/CCVec_ for factory reasons alone — those
+                 * DECL macros land after this pass; early hoist is what
+                 * broke ArrayMap + BufReader:: in one TU. */
                 const char* alias =
                     items[i]->b[0] ? items[i]->b : items[i]->a;
-                int needed = (g_shadow_nginst > 0);
+                int needed = 0;
+                int needed_result = 0;
                 int j;
                 for (j = 0; j < nseen; j++) {
                     if (strcmp(seen_ok[j], alias) == 0 ||
                         strcmp(seen_err[j], alias) == 0) {
-                        needed = 1;
+                        needed_result = 1;
                         break;
                     }
                     {
                         char okptr[128];
                         snprintf(okptr, sizeof(okptr), "%s*", alias);
                         if (strcmp(seen_ok[j], okptr) == 0) {
-                            needed = 1;
+                            needed_result = 1;
                             break;
                         }
                     }
+                }
+                if (needed_result) {
+                    needed = 1;
+                } else if (shadow_alias_is_factory_type_arg(alias) &&
+                           !shadow_typedef_struct_embeds_generic_container(
+                               items[i])) {
+                    needed = 1;
                 }
                 if (!needed) continue;
                 /* Hoist field-type typedefs first (FaceA/FaceB / RedisReplyKind
@@ -1690,6 +1762,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 ctx.defers = defers;
                 ctx.ndefers = ndefers;
                 ctx.defer_cleanup = ndefers > 0;
+                ctx.soft_ret_ty = rname;
                 shadow_vdrop_mark_push(&ctx);
                 if (ctx.defer_cleanup) {
                     if (!cemit_fmt(out,
@@ -1904,17 +1977,17 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 !cemit_fmt(out, "static %s%s %s(%s) {\n", inl, it->a, it->b,
                            params))
                 bind_ok = 0;
-            /* Soft returns + watermark: int only (retval is int). */
-            int use_c = (nsdestroys > 0 || nsdefers > 0) &&
-                        strcmp(it->a, "int") == 0;
+            /* Soft returns + watermark for any return type (void skips retval). */
+            int use_c = (nsdestroys > 0 || nsdefers > 0);
             if (bind_ok) {
+                sctx.soft_ret_ty = it->a[0] ? it->a : "int";
                 sctx.goto_cleanup = use_c;
                 shadow_vdrop_mark_push(&sctx);
                 if (!shadow_emit_scratch_if_needed(it->kids, it->nkids, sdestroys,
                                                   nsdestroys, out, body_ind))
                     bind_ok = 0;
                 if (bind_ok && use_c &&
-                    !shadow_emit_destroy_soft_vars(out, body_ind))
+                    !shadow_emit_destroy_soft_vars(out, &sctx, body_ind))
                     bind_ok = 0;
                 for (int k = 0; bind_ok && k < it->nkids; k++) {
                     if (!shadow_emit_stmt_ctx(it->kids[k], out, &sctx, body_ind,
@@ -1929,27 +2002,6 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                     bind_ok = 0;
                 if (bind_ok && nsdefers > 0 && use_c) {
                     if (!shadow_emit_defer_epilogue(out, &sctx)) bind_ok = 0;
-                } else if (bind_ok && nsdefers > 0 && !use_c) {
-                    {
-                        int di = nsdestroys - 1, fi = nsdefers - 1;
-                        while (bind_ok && (di >= 0 || fi >= 0)) {
-                            int dd = 0;
-                            if (di >= 0 && fi >= 0)
-                                dd = sdestroys[di]->tok_off >= sdefers[fi]->tok_off;
-                            else dd = (di >= 0);
-                            if (dd) {
-                                if (!shadow_emit_one_destroy(sdestroys[di], out,
-                                        &sctx, body_ind))
-                                    bind_ok = 0;
-                                di--;
-                            } else {
-                                if (!shadow_emit_one_defer(sdefers[fi], out,
-                                        &sctx, body_ind, 0))
-                                    bind_ok = 0;
-                                fi--;
-                            }
-                        }
-                    }
                 } else if (bind_ok && use_c && nsdestroys > 0 &&
                            !shadow_emit_destroy_cleanup(out, &sctx, sdestroys,
                                                         nsdestroys, body_ind)) {
@@ -2046,11 +2098,11 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 ctx.defers = defers;
                 ctx.ndefers = ndefers;
                 ctx.defer_cleanup = ndefers > 0;
-                /* Soft-return cleanup is int-retval only. */
+                /* Soft-return cleanup for any return type (void skips retval). */
                 {
                     const char* rty = it->e[0] ? it->e : "int";
-                    ctx.goto_cleanup =
-                        (ndestroys > 0 || ndefers > 0) && strcmp(rty, "int") == 0;
+                    ctx.soft_ret_ty = rty;
+                    ctx.goto_cleanup = (ndestroys > 0 || ndefers > 0);
                 }
                 if (nspawns) {
                     if (!cemit_str(out, "\n/* --- CC closure declarations --- */\n"))
@@ -2117,7 +2169,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                                                   ndestroys, out, body_ind))
                     bind_ok = 0;
                 if (bind_ok && ctx.goto_cleanup &&
-                    !shadow_emit_destroy_soft_vars(out, body_ind))
+                    !shadow_emit_destroy_soft_vars(out, &ctx, body_ind))
                     bind_ok = 0;
                 for (int k = 0; bind_ok && k < it->nkids; k++) {
                     if (!shadow_emit_stmt_ctx(it->kids[k], out, &ctx, body_ind,
@@ -2132,27 +2184,6 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                     bind_ok = 0;
                 if (bind_ok && ndefers > 0 && ctx.goto_cleanup) {
                     if (!shadow_emit_defer_epilogue(out, &ctx)) bind_ok = 0;
-                } else if (bind_ok && ndefers > 0 && !ctx.goto_cleanup) {
-                    {
-                        int di = ndestroys - 1, fi = ndefers - 1;
-                        while (bind_ok && (di >= 0 || fi >= 0)) {
-                            int dd = 0;
-                            if (di >= 0 && fi >= 0)
-                                dd = destroys[di]->tok_off >= defers[fi]->tok_off;
-                            else dd = (di >= 0);
-                            if (dd) {
-                                if (!shadow_emit_one_destroy(destroys[di], out,
-                                        &ctx, body_ind))
-                                    bind_ok = 0;
-                                di--;
-                            } else {
-                                if (!shadow_emit_one_defer(defers[fi], out, &ctx,
-                                        body_ind, 0))
-                                    bind_ok = 0;
-                                fi--;
-                            }
-                        }
-                    }
                 } else if (bind_ok && ctx.goto_cleanup &&
                            !shadow_emit_destroy_cleanup(out, &ctx, destroys,
                                                         ndestroys, body_ind)) {

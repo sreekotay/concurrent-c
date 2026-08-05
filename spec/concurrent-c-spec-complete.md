@@ -4604,13 +4604,12 @@ Construction allocates the section header and discovery map from a caller-suppli
 
 ```c
 CCArena arena = @create(kilobytes(128)) @destroy;
-CCExclusive* excl = cc_exclusive_create(&arena);
-// or: excl = cc_exclusive_create_sized(&arena, 256);  // initial map hint
+CCExclusive* excl = cc_exclusive_create(&arena, 0);     // default map (64)
+// or: excl = cc_exclusive_create(&arena, 256);         // initial map hint
 ```
 
-- `cc_exclusive_create(arena)` is equivalent to `cc_exclusive_create_sized(arena, 64)`.
-- `cc_exclusive_create_sized(arena, initial_cap)` rounds `initial_cap` up to the next power of two (minimum 2). `initial_cap == 0` selects the default capacity (64).
-- Both functions return `NULL` when `arena` is `NULL` or allocation fails.
+- `cc_exclusive_create(arena, initial_cap)` rounds `initial_cap` up to the next power of two (minimum 2). `initial_cap == 0` selects the default capacity (64).
+- Returns `NULL` when `arena` is `NULL` or allocation fails.
 
 The discovery map is an open-addressing table keyed by `uint64_t` name. It grows under an internal create mutex when load is high (approximately 75% full): capacity doubles, live entries are rehashed, and the prior table is retired. Retired tables are released with `cc_arena_release` at `cc_exclusive_destroy`, not at grow time, so lock-free lookups never observe a freed table.
 
@@ -4750,8 +4749,7 @@ In fiber context, contended waiters park on the scheduler after a bounded spin. 
 **Runtime API (normative):**
 
 ```c
-CCExclusive* cc_exclusive_create(CCArena* arena);
-CCExclusive* cc_exclusive_create_sized(CCArena* arena, size_t initial_cap);
+CCExclusive* cc_exclusive_create(CCArena* arena, size_t initial_cap);
 void cc_exclusive_destroy(CCExclusive* excl);
 
 CCExclusiveMutex cc_exclusive_mutex(CCExclusive* excl, uint64_t name);

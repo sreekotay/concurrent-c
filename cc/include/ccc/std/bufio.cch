@@ -4,15 +4,11 @@
  * Fill dispatches with _Generic on Src* to the duplex caller-buffer read
  * (EOF model B). Extend the association list when adding a new duplex type.
  *
- * The factory body is a pure @emit template so the native front can instantiate
- * it (it does not execute factory C). Keep the template under 4KiB.
+ * Factory bodies below (under CC_COMPTIME_SCAN) are for legacy harvest — keep
+ * in sync with bufio_factory.cch (native quote-splice).
  */
 #ifndef CC_STD_BUFIO_H
 #define CC_STD_BUFIO_H
-
-#ifdef CC_COMPTIME_SCAN
-#include <ccc/cc_instantiate.cch>
-#endif
 
 /* Loud fallback when Src is not in the fill _Generic list. */
 static inline CCResult_bool_CCIoError cc__bufio_unsupported_read(void *src, char *buf,
@@ -22,9 +18,9 @@ static inline CCResult_bool_CCIoError cc__bufio_unsupported_read(void *src, char
     return CCRes_err(bool, CCIoError, cc_io_error_os(CC_IO_INVALID_ARGUMENT, EINVAL));
 }
 
-/* Host C (runtime / ufcs) must not parse factory sugar; scanners define
- * CC_COMPTIME_SCAN (legacy) or inherit it from shadow_lower's stage-2 macros. */
 #ifdef CC_COMPTIME_SCAN
+#include <ccc/cc_instantiate.cch>
+
 CC_GENERIC_FACTORY(BufReader, 1) {
     return @emit(`
 #ifdef CC_FRAGMENT_VALIDATE
@@ -65,7 +61,6 @@ static inline CCResult_bool_CCIoError ${mangled}_fill(${mangled} *r) {
     } else if (r->pos >= r->end) { r->pos = 0; r->end = 0; }
     avail = r->cap - r->end;
     if (!avail) return CCRes_err(bool, CCIoError, cc_io_from_errno(EINVAL));
-    /* CCSocket may be only forward-declared when net.cch is not included. */
     rr = _Generic((r->src),
 #ifdef CC_STD_NET_H
         CCSocket *: cc_socket_read_buf_into,

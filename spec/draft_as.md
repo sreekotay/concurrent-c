@@ -175,7 +175,24 @@ null or empty), not a raw `e.message` that may be unset.
 Set `CC_DEBUG_ERRHANDLER_AS` to log each successful dispatch as exact,
 `@as` (with the dotted path), or ambient `CCError` (Result `E` unresolved).
 
-## 6. Out of scope
+## 6. Result constructor projection
+
+When constructing or forwarding into a Result whose error face is `F`
+(`cc_err(e)` in a `T!>(F)` function, or an assignment/initializer of a
+`T!>(F)` value):
+
+1. If `typeof(e)` is `F`, use `e`.
+2. Else if there is a unique `@as` embed path from `typeof(e)` to `F`,
+   project (`e.path`, e.g. `e.base`).
+3. Else the program is ill-formed — no guessing among multiple faces.
+
+Bang binders keep the exact Result error type `E`. Projection happens at
+the constructor sink, not at bind time, so `!>(e) { use e.os_code;
+return cc_err(e); }` still sees the derived payload inside the binder.
+The reverse direction (`F` → richer outer) is never synthesized here;
+enrichment stays explicit (`cc_io_error(e)` and peers).
+
+## 7. Out of scope
 
 - Field promotion (`tmp.handle` without naming `file`)
 - Virtual dispatch
@@ -183,7 +200,5 @@ Set `CC_DEBUG_ERRHANDLER_AS` to log each successful dispatch as exact,
   form may use the same layout facts
 - `@as` on non-struct types
 - Construction chaining (`@create` through `@as` fields)
-- General by-value conversion of the outer type to an `@as` type outside
-  `@errhandler` binder projection
 - Anonymous `@as` fields; a `@super` spelling
 - Synthesized full-chain destroy symbols

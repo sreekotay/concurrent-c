@@ -65,11 +65,9 @@ $(OUT_DIR)/redis_idiomatic_debug: redis_idiomatic.ccs redis_cc/redis_cc.cch redi
 $(OUT_DIR)/redis_cc: redis_cc/redis_cc.ccs redis_cc/redis_cc.cch | $(OUT_DIR)
 	$(CCC) -O -o $@ redis_cc/redis_cc.ccs --release
 
-# Go-sized teaching twin of redis.go (minimal command surface, acquire_into).
+# Lightweight CC Redis sketch (redis.go command surface; string switch + BufReader).
 $(OUT_DIR)/redis_go_twin: redis_go_twin.ccs | $(OUT_DIR)
-	# BufReader::[Src] factory needs legacy harvest (CC_COMPTIME_SCAN); native
-	# shadow only extracts pure @emit templates from scanned factories.
-	$(CCC) --frontend=legacy -O -o $@ redis_go_twin.ccs --release
+	$(CCC) -O -o $@ redis_go_twin.ccs --release
 
 redis_idiomatic: $(OUT_DIR)/redis_idiomatic
 redis_owner: $(OUT_DIR)/redis_owner

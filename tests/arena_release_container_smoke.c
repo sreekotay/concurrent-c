@@ -26,10 +26,8 @@ static void test_empty_heap_overflow_rejected(void) {
 }
 
 static CCArena make_heap_overflow_arena(void) {
-    CCArena arena = cc_arena_heap(8192);
+    CCArena arena = cc_arena_malloc(8192);
     assert(arena.base != NULL);
-    arena.block_max = 1;
-    assert(cc_arena_set_heap_overflow(&arena, true));
     return arena;
 }
 
