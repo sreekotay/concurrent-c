@@ -1,0 +1,22 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+typedef struct { int head; double tail; } NameSlot;
+
+/* ${f.name} pastes the field spelling into an identifier; ${f.index} the
+ * ordinal. Both must survive for-unroll inside the emit template. */
+@comptime for (f in type_of(NameSlot).fields) {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        enum { NameSlot_${f.name}_i = ${f.index} };
+    `);
+}
+
+int main(void) {
+    if (NameSlot_head_i != 0) return 1;
+    if (NameSlot_tail_i != 1) return 2;
+    printf("comptime_emit_name_slot_smoke head=%d tail=%d\n",
+           (int)NameSlot_head_i, (int)NameSlot_tail_i);
+    return 0;
+}

@@ -1,0 +1,28 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+/* Outer @comptime if chooses which @emit runs; the chosen emit still has an
+ * inner @comptime if that must prune dead arms. Untaken outer emit body is
+ * itself a dead arm with undefined symbols. */
+@comptime if (type_of(int).kind == CC_TK_PRIMITIVE) {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        @comptime if (1) {
+            enum { EMIT_CROSS_LAYER_N = 9 };
+        } else {
+            emit_cross_inner_dead();
+        }
+    `);
+} else {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        emit_cross_outer_dead();
+        enum { EMIT_CROSS_LAYER_N = -1 };
+    `);
+}
+
+int main(void) {
+    if (EMIT_CROSS_LAYER_N != 9) return 1;
+    printf("comptime_emit_cross_layer_smoke n=%d\n", (int)EMIT_CROSS_LAYER_N);
+    return 0;
+}

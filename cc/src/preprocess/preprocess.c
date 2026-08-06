@@ -18523,8 +18523,18 @@ static char* cc__resolve_comptime_if_once(const char* src, size_t n, const char*
 
         cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
         if (keep_r > keep_l) {
+            /* A kept arm that contains `@emit(\`...\`)` must still run under
+             * libtcc after the surrounding `@comptime if` vanishes. Without
+             * this wrap the bare `@emit` is lowered but never executed —
+             * silent empty splice. An else-chain keep (nested `@comptime if`
+             * text) stays unwrapped so the fixpoint can resolve it. */
+            int keep_is_chain = (!val && else_kind == ELSE_CHAIN);
+            int wrap_exec = !keep_is_chain &&
+                            cc_template_body_needs_emit_exec(src, n, keep_l, keep_r);
             cc__sb_emit_newlines(&out, &out_len, &out_cap, src, i, keep_l);
+            if (wrap_exec) cc_sb_append_cstr(&out, &out_len, &out_cap, "@comptime { ");
             cc_sb_append(&out, &out_len, &out_cap, src + keep_l, keep_r - keep_l);
+            if (wrap_exec) cc_sb_append_cstr(&out, &out_len, &out_cap, " } ");
             cc__sb_emit_newlines(&out, &out_len, &out_cap, src, keep_r, construct_end);
         } else {
             cc__sb_emit_newlines(&out, &out_len, &out_cap, src, i, construct_end);

@@ -1,0 +1,24 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+typedef struct { int a; double b; } ForInside;
+
+/* `@comptime for` written inside the `@emit` backtick body must unroll
+ * (slots substituted) before the fragment is spliced — never leave
+ * `@comptime for` / bare `$` for the host. */
+@comptime {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        @comptime for (f in type_of(ForInside).fields) {
+            enum { ForInside_slot_${f.index} = ${f.index} };
+        }
+    `);
+}
+
+int main(void) {
+    if (ForInside_slot_0 != 0) return 1;
+    if (ForInside_slot_1 != 1) return 2;
+    printf("comptime_emit_for_inside_smoke ok\n");
+    return 0;
+}
