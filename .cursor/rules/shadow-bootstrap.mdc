@@ -1,0 +1,36 @@
+---
+description: shadow_lower source-of-truth and bootstrap promote loop — never hand-edit vN
+globs: cc/shadow/**,cc/bootstrap/shadow_lower/**,out/include/cc/shadow/**,scripts/snapshot_shadow_lower.sh,scripts/promote_shadow_bootstrap.sh
+alwaysApply: false
+---
+
+# shadow_lower bootstrap — edit source, then promote
+
+## Source of truth
+
+- Edit only `cc/shadow/*.ccs` / `*.cch`.
+- Committed `cc/bootstrap/shadow_lower/vN/` is **regenerate-only**. Never hand-edit `vN/include/*.h`, `vN/shadow_lower.c`, or patch `last-good`'s tree in place to "land" a fix.
+
+## Ship loop (required when face changes should stick)
+
+```bash
+# 1. Edit cc/shadow/*.cch
+# 2. Rebuild lowerer from sources (seed re-lowers .ccs)
+make -C cc SHADOW_LOWER_SOURCE=ccs ../out/cc/bin/shadow_lower
+# 3. Snapshot (+ host-cc smoke)
+./scripts/snapshot_shadow_lower.sh --smoke
+# 4. Promote → new vN, flip last-good
+./scripts/promote_shadow_bootstrap.sh
+# 5. Human-gated commit of last-good + vN
+```
+
+Default `make -C cc` builds from `last-good` (`SHADOW_LOWER_SOURCE=bootstrap`). That does **not** pick up uncommitted `.cch` edits until you ccs-rebuild and promote.
+
+## Faces vs bootstrap
+
+- `out/include/cc/shadow/*.h` is a **build product** (seeded from `last-good`, copied into `latest/` by snapshot). Do not `cp` raw `*.cch` onto those paths (include spelling / rewrite mismatch).
+- Standalone re-lower of some faces hangs — interim iteration via an `out/include` face patch matching the `.cch` is allowed **only as a local build aid**. It is not a substitute for snapshot/promote. Never copy that patch into an existing `vN/`.
+
+## Docs
+
+Full detail: `cc/bootstrap/shadow_lower/README.md`, constraint C4 in `cc/docs/ARCHITECTURE.md`.

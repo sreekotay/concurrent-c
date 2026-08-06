@@ -92,6 +92,7 @@ typedef struct {
     int in_block_comment;
     int in_str;
     int in_chr;
+    int in_tpl;         /* Inside a backtick template literal */
     int in_pp;          /* Inside a preprocessor directive (#define / #include / etc.) */
     int pp_continued;   /* Previous non-WS char on the current pp line was '\\' */
     int at_line_start;  /* Last non-whitespace was a newline (or BOF) */
@@ -105,6 +106,7 @@ static void cc_scanner_init(CCScannerState* s) {
     s->in_block_comment = 0;
     s->in_str = 0;
     s->in_chr = 0;
+    s->in_tpl = 0;
     s->in_pp = 0;
     s->pp_continued = 0;
     s->at_line_start = 1;
@@ -174,6 +176,18 @@ static int cc_scanner_skip_non_code(CCScannerState* s, const char* src, size_t n
         return 1;
     }
 
+    /* Inside an unterminated backtick template (fallback path). */
+    if (s->in_tpl) {
+        if (c == '\\' && i + 1 < n) {
+            *pos += 2;
+            s->col++;
+        } else {
+            if (c == '`') s->in_tpl = 0;
+            (*pos)++;
+        }
+        return 1;
+    }
+
 
     /* Inside a preprocessor directive (#define, #include, #if, ...).
      * Skip until the end of the logical line (handles backslash-newline
@@ -219,10 +233,28 @@ static int cc_scanner_skip_non_code(CCScannerState* s, const char* src, size_t n
     if (c == '\n') s->at_line_start = 1;
     else if (c != ' ' && c != '\t') s->at_line_start = 0;
 
-    /* Check for start of comment/string */
+    /* Check for start of comment/string/template */
     if (c == '/' && c2 == '/') { s->in_line_comment = 1; *pos += 2; s->col++; return 1; }
     if (c == '/' && c2 == '*') { s->in_block_comment = 1; *pos += 2; s->col++; return 1; }
     if (c == '"') { s->in_str = 1; (*pos)++; return 1; }
+    if (c == '`') {
+        size_t tick_end = 0;
+        /* Opening tick already counted in s->col above. Skip the rest of the
+         * literal as one inert region so apostrophes inside cannot open a
+         * char literal (e.g. `don't` in -e oneliners). */
+        if (cc_tpl_scan_literal(src, n, i, &tick_end) == 0) {
+            size_t k;
+            for (k = i + 1; k <= tick_end; k++) {
+                if (src[k] == '\n') { s->line++; s->col = 1; }
+                else s->col++;
+            }
+            *pos = tick_end + 1;
+            return 1;
+        }
+        s->in_tpl = 1;
+        (*pos)++;
+        return 1;
+    }
     if (c == '\'') { s->in_chr = 1; (*pos)++; return 1; }
     
     /* At actual code - undo the col++ since caller will handle this char */
@@ -12605,7 +12637,7 @@ static void cc__index_declares(CCPathTextCache* slot) {
          * from being harvested. */
         if (slot->text[i] == '#' && scan.at_line_start && !scan.in_pp &&
             !scan.in_line_comment && !scan.in_block_comment &&
-            !scan.in_str && !scan.in_chr) {
+            !scan.in_str && !scan.in_chr && !scan.in_tpl) {
             size_t noff = 0, nl = 0;
             int fnlike = 0;
             if (cc_scan_define_head(slot->text, slot->len, i, &noff, &nl, &fnlike) &&

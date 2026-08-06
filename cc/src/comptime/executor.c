@@ -308,12 +308,11 @@ static int cc__try_scan_comptime_fn(const char* src, size_t len, size_t at, size
 
 int cc_comptime_fn_registry_scan(const char* src, size_t len) {
     size_t i = 0;
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0, in_tpl = 0;
     if (!src || len == 0) return 0;
     cc_comptime_fn_registry_clear();
-    /* Skip comments and string/char literals: `@comptime` in prose (e.g. a
-     * comment that says "a @comptime function") or inside a string is not a
-     * real definition and must not be scanned as one. */
+    /* Skip comments, strings, char literals, and backtick templates:
+     * `@comptime` in prose (e.g. a comment or `don't`) is not a definition. */
     while (i < len) {
         char c = src[i];
         char c2 = (i + 1 < len) ? src[i + 1] : 0;
@@ -321,9 +320,11 @@ int cc_comptime_fn_registry_scan(const char* src, size_t len) {
         if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
         if (in_str) { if (c == '\\') { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
         if (in_chr) { if (c == '\\') { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        if (in_tpl) { if (c == '\\') { i += 2; continue; } if (c == '`') in_tpl = 0; i++; continue; }
         if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
         if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
         if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '`') { in_tpl = 1; i++; continue; }
         if (c == '\'') { in_chr = 1; i++; continue; }
         if (c == '@') {
             size_t end = 0;
@@ -613,23 +614,127 @@ static const char* cc__litproj_helpers(void) {
     return cached;
 }
 
+/* True when a harvested comptime def still carries CC surface that libtcc's
+ * C parser cannot accept (`@…` / `@emit`, or backtick templates). Content-
+ * based so any unlowered body is excluded — not only `__cc_gfac_*` names. */
+static int cc__exec_litproj_def_has_unlowered_surface(const char* def,
+                                                      size_t len) {
+    size_t i = 0;
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    if (!def || len == 0) return 0;
+    while (i < len) {
+        char c = def[i];
+        char c2 = (i + 1 < len) ? def[i + 1] : 0;
+        if (in_lc) {
+            if (c == '\n') in_lc = 0;
+            i++;
+            continue;
+        }
+        if (in_bc) {
+            if (c == '*' && c2 == '/') {
+                in_bc = 0;
+                i += 2;
+                continue;
+            }
+            i++;
+            continue;
+        }
+        if (in_str) {
+            if (c == '\\' && c2) {
+                i += 2;
+                continue;
+            }
+            if (c == '"') in_str = 0;
+            i++;
+            continue;
+        }
+        if (in_chr) {
+            if (c == '\\' && c2) {
+                i += 2;
+                continue;
+            }
+            if (c == '\'') in_chr = 0;
+            i++;
+            continue;
+        }
+        if (c == '/' && c2 == '/') {
+            in_lc = 1;
+            i += 2;
+            continue;
+        }
+        if (c == '/' && c2 == '*') {
+            in_bc = 1;
+            i += 2;
+            continue;
+        }
+        if (c == '"') {
+            in_str = 1;
+            i++;
+            continue;
+        }
+        if (c == '\'') {
+            in_chr = 1;
+            i++;
+            continue;
+        }
+        if (c == '@' || c == '`') return 1;
+        i++;
+    }
+    return 0;
+}
+
+/* Value-position litproj only needs lowered user `@comptime` fns (e.g. fib).
+ * Registry entries that still contain unlowered `@` / backtick surface must
+ * not enter the libtcc TU — `@` trips CONFIG_CC_EXT's closure primary. */
+static char* cc__exec_litproj_user_fndefs(size_t* out_len) {
+    size_t len = 0;
+    char* buf = NULL;
+    size_t i;
+    if (out_len) *out_len = 0;
+    for (i = 0; i < cc__comptime_fn_count; i++) {
+        const CCComptimeFnEntry* e = &cc__comptime_fns[i];
+        size_t need;
+        char* nb;
+        if (!e->def || e->def_len == 0) continue;
+        if (cc__exec_litproj_def_has_unlowered_surface(e->def, e->def_len))
+            continue;
+        need = len + e->def_len + 2;
+        nb = (char*)realloc(buf, need);
+        if (!nb) {
+            free(buf);
+            return NULL;
+        }
+        buf = nb;
+        memcpy(buf + len, e->def, e->def_len);
+        len += e->def_len;
+        buf[len++] = '\n';
+        buf[len] = '\0';
+    }
+    if (out_len) *out_len = len;
+    return buf;
+}
+
 static char* cc__exec_build_litproj_tu(const char* expr) {
     static const char hdr[] =
         "\nvoid __cc_ct_entry(void) {\n  __cc_lit_begin();\n  cc_lit_project((";
     static const char tail[] = "));\n  __cc_lit_finish();\n}\n";
-    const char* fndefs = cc_comptime_fn_registry_defs();
+    size_t fndef_len = 0;
+    char* fndefs = cc__exec_litproj_user_fndefs(&fndef_len);
     const char* helpers = cc__litproj_helpers();
-    size_t fndef_len = fndefs ? strlen(fndefs) : 0;
     size_t ex = expr ? strlen(expr) : 0;
     size_t pre = sizeof(CC__EXEC_PRELUDE) - 1;
     size_t hp = helpers ? strlen(helpers) : 0;
     size_t hl = sizeof(hdr) - 1;
     size_t tl = sizeof(tail) - 1;
     char* s = (char*)malloc(pre + fndef_len + hp + hl + ex + tl + 1);
-    if (!s) return NULL;
+    if (!s) {
+        free(fndefs);
+        return NULL;
+    }
     size_t o = 0;
     memcpy(s + o, CC__EXEC_PRELUDE, pre); o += pre;
     if (fndef_len) { memcpy(s + o, fndefs, fndef_len); o += fndef_len; }
+    free(fndefs);
     if (hp) { memcpy(s + o, helpers, hp); o += hp; }
     memcpy(s + o, hdr, hl); o += hl;
     memcpy(s + o, expr, ex); o += ex;

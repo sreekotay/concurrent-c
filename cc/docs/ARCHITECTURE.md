@@ -123,10 +123,13 @@ must produce a working `shadow_lower` without already having native.
 `cc/bootstrap/shadow_lower/vN/` (pointer `last-good`). Source of truth remains
 `cc/shadow/`. Ship face changes via
 `SHADOW_LOWER_SOURCE=ccs` → `snapshot_shadow_lower.sh` →
-`promote_shadow_bootstrap.sh` — never by copying `*.cch` onto
-`out/include/cc/shadow/*.h`. Promote is deliberate; cold rebuild on a
-second platform is part of the gate — not optional smoke on the
-generating machine only.
+`promote_shadow_bootstrap.sh` — never by hand-editing an existing `vN/`,
+never by patching `last-good`'s tree in place, and never by copying `*.cch`
+onto `out/include/cc/shadow/*.h`. Promote creates a **new** `vN` and flips
+`last-good`; that is the only way a face change enters the committed seed.
+Cold rebuild on a second platform is part of the gate — not optional smoke
+on the generating machine only. See
+[`cc/bootstrap/shadow_lower/README.md`](../bootstrap/shadow_lower/README.md).
 
 ### C5. Comptime is a seam, not the lowerer
 

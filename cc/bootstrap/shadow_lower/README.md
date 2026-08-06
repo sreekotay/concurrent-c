@@ -14,10 +14,20 @@ re-lowering that `.ccs`.
 **Source of truth** remains `cc/shadow/*.ccs` / `*.cch`. Snapshot
 contents are regenerate-only — do not hand-edit.
 
+### Never (common failure modes)
+
+| Don't | Why | Do instead |
+|-------|-----|------------|
+| Hand-edit `vN/include/*.h` or `vN/shadow_lower.c` | Committed seeds are regenerate-only; in-place patches skip promote and diverge from `.cch` | Edit `cc/shadow/*.cch`, then snapshot → promote |
+| Patch `last-good`'s tree to "land" a fix | Leaves `last-good` pointing at a mutated seed; next cold clone rebuild is wrong | Promote a new `vN` and flip `last-good` |
+| `cp` raw `cc/shadow/*.cch` → `out/include/cc/shadow/*.h` | Relative includes and snapshot path-rewriting disagree; looks synced, tree is broken | Rebuild via `SHADOW_LOWER_SOURCE=ccs`, then snapshot (copies faces into `latest/`) |
+| Assume default `make -C cc` picked up `.cch` edits | Default builds from `last-good` (`SHADOW_LOWER_SOURCE=bootstrap`) | `SHADOW_LOWER_SOURCE=ccs` while iterating; promote when the face should stick |
+
 `out/include/cc/shadow/*.h` is a **build product** (seeded from `last-good`
-on bootstrap builds, refreshed by snapshot). Never `cp` raw `cc/shadow/*.cch`
-onto those paths: `.cch` relative includes and snapshot path-rewriting disagree,
-and the copy looks like a successful sync while leaving a broken tree.
+on bootstrap builds, refreshed into `latest/` by snapshot). Interim face
+patches under `out/include` (when standalone re-lower hangs) are a **local
+build aid only** — never copy them into an existing `vN/`; snapshot/promote
+is what freezes them.
 
 ## Iterate → ship
 
@@ -26,8 +36,11 @@ and the copy looks like a successful sync while leaving a broken tree.
 | Edit | `cc/shadow/*.cch` | Source of truth |
 | Rebuild lowerer | `make -C cc SHADOW_LOWER_SOURCE=ccs ../out/cc/bin/shadow_lower` | Seed binary re-lowers from sources (`-I../cc/shadow`) |
 | Snapshot | `./scripts/snapshot_shadow_lower.sh --smoke` | Emit → `latest/` + lowered headers |
-| Promote | `./scripts/promote_shadow_bootstrap.sh` | `latest/` → `vN`, flip `last-good` |
+| Promote | `./scripts/promote_shadow_bootstrap.sh` | `latest/` → **new** `vN`, flip `last-good` |
 | Commit | `git add …/last-good …/vN` | Human-gated |
+
+A fix is not in the committed seed until promote has created the new `vN`
+and `last-good` points at it.
 
 ## Default self-build
 

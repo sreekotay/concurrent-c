@@ -137,11 +137,10 @@ static inline size_t cc__arena_malloc_usable_bytes(void* ptr) {
 #endif
 }
 
-/* Optional debug ownership table for heap-overflow pointers.
- * When CC_DEBUG_ARENA_OVERFLOW_OWNERSHIP is non-zero, the permissive
- * overflow release/realloc paths refuse pointers not previously recorded
- * for that arena (foreign / stale / wrong-arena). No-op when unset. */
-#if defined(CC_DEBUG_ARENA_OVERFLOW_OWNERSHIP) && CC_DEBUG_ARENA_OVERFLOW_OWNERSHIP
+/* Ownership table for heap-overflow pointers. Overflow release/realloc refuse
+ * pointers not previously recorded for that arena (foreign / stale /
+ * wrong-arena). Always on — permissive "free anything" was indistinguishable
+ * from a successful owned release and freed foreign slab pointers. */
 typedef struct CCArenaOvfOwnNode {
     struct CCArenaOvfOwnNode *next;
     CCArena *arena;
@@ -212,30 +211,6 @@ static inline void cc__arena_ovf_own_clear_arena(CCArena *arena) {
         }
     }
 }
-#else
-static inline void cc__arena_ovf_own_add(CCArena *arena, void *ptr) {
-    (void)arena;
-    (void)ptr;
-}
-static inline bool cc__arena_ovf_own_take(CCArena *arena, void *ptr) {
-    (void)arena;
-    (void)ptr;
-    return true;
-}
-static inline bool cc__arena_ovf_own_has(CCArena *arena, void *ptr) {
-    (void)arena;
-    (void)ptr;
-    return true;
-}
-static inline void cc__arena_ovf_own_replace(CCArena *arena, void *oldp, void *newp) {
-    (void)arena;
-    (void)oldp;
-    (void)newp;
-}
-static inline void cc__arena_ovf_own_clear_arena(CCArena *arena) {
-    (void)arena;
-}
-#endif
 
 static inline void* cc__arena_alloc_heap_overflow(CCArena* arena, size_t size, size_t align) {
     if (!arena || !(arena->_flags & CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW) || size == 0) return NULL;
@@ -392,7 +367,12 @@ static inline void *cc_arena_alloc(CCArena *arena, size_t size, size_t align) {
         }
     }
 
-    return cc__arena_alloc_heap_overflow(arena, size, align);  // budget exhausted or OOM
+    /* Heap overflow is the escape for unbounded (block_max==0) growth OOM
+     * and for fixed/malloc arenas (block_max==1). A bounded budget (N>1)
+     * must fail closed at the slab limit — spilling would defeat block_max. */
+    if (arena->block_max == 0 || arena->block_max == 1)
+        return cc__arena_alloc_heap_overflow(arena, size, align);
+    return NULL;
 }
 
 // Same ownership rules as cc_arena_alloc_local: one exclusive thread/fiber only.

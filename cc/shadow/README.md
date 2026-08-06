@@ -26,8 +26,10 @@ Succession metric is **warm host-cc rebuild parity**, not libtcc-vs-clang.
 Bootstrap snapshots (deliberate freezes of lowered C + local headers) live
 under `cc/bootstrap/shadow_lower/` — see that README for the full
 edit → `SHADOW_LOWER_SOURCE=ccs` → snapshot → promote loop. Default
-`make -C cc` host-ccs `last-good`. Do **not** hand-copy `*.cch` into
-`out/include/cc/shadow/*.h`; those headers are snapshot/bootstrap products.
+`make -C cc` host-ccs `last-good`. Do **not** hand-edit committed `vN/`
+trees; do **not** hand-copy `*.cch` into `out/include/cc/shadow/*.h`
+(those headers are snapshot/bootstrap products). A `.cch` fix is not in the
+seed until promote flips `last-good` to a new `vN`.
 
 ## Spine
 
@@ -302,8 +304,9 @@ Prioritized by fail mass × language value on native-quick:
    - Leftover-text `cc_println(({…@scratch…}))` reclaim (structured
      `AST_PRINTLN_TPL` only so far).
    - Standalone re-lower of `pp_emit_ufcs.cch` hangs — iterate via
-     `out/include` face patch or umbrella until fixed; snapshot/promote when
-     the beachhead should stick in `last-good`.
+     `out/include` face patch (local build aid) or umbrella until fixed;
+     then snapshot/promote a **new** `vN` so it sticks in `last-good`.
+     Never hand-patch an existing bootstrap `vN/` instead of promoting.
    - `@as` forwarding; remaining UFCS leftover peel kill.
 
 ## Explicit tool

@@ -1,3 +1,5 @@
+#include <ccc/cc_io_error.cch>
+
 #define CC_BUFIO_EXTRA_GENERIC MemReader *: mem_reader_read_buf_into,
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_instantiate.cch>
