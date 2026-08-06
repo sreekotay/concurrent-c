@@ -648,10 +648,10 @@ static void shadow_rewrite_at_slice(char* expr, size_t cap) {
     snprintf(expr, cap, "%s", tmp);
 }
 
-/* Rewrite #include <… .cch> → #include <… .h> for host/TCC consumption. */
+/* Rewrite #include <… .h> → #include <… .h> for host/TCC consumption. */
 static void shadow_rewrite_pass_inc(char* dst, size_t cap, const char* src) {
     size_t n = src ? strlen(src) : 0;
-    /* "...foo.cch>" → "...foo.h>" */
+    /* "...foo.h>" → "...foo.h>" */
     if (n >= 5 && src[n - 5] == '.' && src[n - 4] == 'c' && src[n - 3] == 'c' &&
         src[n - 2] == 'h' && src[n - 1] == '>') {
         snprintf(dst, cap, "%.*s.h>", (int)(n - 5), src);
@@ -2534,11 +2534,11 @@ static int shadow_is_ident_char(char c) {
 
 static const char* shadow_family_header_for(const char* base) {
     if (!base || !base[0]) return NULL;
-    if (strncmp(base, "CCSlice_", 8) == 0) return "cc_slice.cch";
-    if (strncmp(base, "CCVec_", 6) == 0) return "std/vec.cch";
-    if (strncmp(base, "ArrayMap_", 9) == 0) return "std/array_map.cch";
-    if (strncmp(base, "Map_", 4) == 0) return "std/map_impl.cch";
-    if (strncmp(base, "CCResult_", 9) == 0) return "cc_result.cch";
+    if (strncmp(base, "CCSlice_", 8) == 0) return "cc_slice.h";
+    if (strncmp(base, "CCVec_", 6) == 0) return "std/vec.h";
+    if (strncmp(base, "ArrayMap_", 9) == 0) return "std/array_map.h";
+    if (strncmp(base, "Map_", 4) == 0) return "std/map_impl.h";
+    if (strncmp(base, "CCResult_", 9) == 0) return "cc_result.h";
     return NULL;
 }
 
@@ -2702,7 +2702,7 @@ static int shadow_cc_slice_erased_has(const char* method) {
         size_t i;
         csv[0] = 0;
         loaded = 1;
-        if (shadow_family_header_read("cc_slice.cch", &fsrc, &fn) && fsrc) {
+        if (shadow_family_header_read("cc_slice.h", &fsrc, &fn) && fsrc) {
             for (i = 0; i + 10 < fn; i++) {
                 const char* pref = NULL;
                 size_t plen = 0;
@@ -3241,7 +3241,7 @@ static void shadow_as_scan_nested_incs(const char* text, int depth) {
         if (n > 2 && strcmp(rel + n - 2, ".h") == 0) {
             rel[n - 2] = 0;
             if (n + 2 < sizeof(rel)) {
-                strcat(rel, ".cch");
+                strcat(rel, ".h");
             }
         }
         if (strncmp(rel, "ccc/", 4) == 0) {
@@ -3286,7 +3286,7 @@ static void shadow_as_scan_pass_inc(char pass_inc[][256], int npass_inc) {
         rel[n] = 0;
         if (n > 2 && strcmp(rel + n - 2, ".h") == 0) {
             rel[n - 2] = 0;
-            strcat(rel, ".cch");
+            strcat(rel, ".h");
         }
         /* strip ccc/ prefix for cc/include/ccc/ layout */
         if (strncmp(rel, "ccc/", 4) == 0) {

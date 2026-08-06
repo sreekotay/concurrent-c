@@ -2283,7 +2283,7 @@ static int g_frontend_native = -1;
 
 /* Legacy front stays on 0.1.x; native (default) is 0.2.x. */
 #define CCC_VERSION_LEGACY "0.1.0-dev"
-#define CCC_VERSION_NATIVE "0.2.1"
+#define CCC_VERSION_NATIVE "0.2.2"
 
 static int cc__set_frontend_name(const char* v) {
     if (!v || !v[0]) return -1;
