@@ -119,8 +119,16 @@ static void cc_scanner_init(CCScannerState* s) {
  * Returns 0 if we're at actual code (caller should process the character).
  * Updates *pos to skip multi-char sequences.
  * Updates s->line and s->col to track position.
+ *
+ * skip_templates: when non-zero (default), well-formed `...` literals are one
+ * inert region (apostrophes inside cannot open char literals). When zero,
+ * backticks are left as code so callers that substitute loop vars into
+ * `@emit` / `@string` bodies (`f.index` inside `${...}`), or that resolve
+ * nested `@comptime if`/`for` after that substitution, can see them.
  */
-static int cc_scanner_skip_non_code(CCScannerState* s, const char* src, size_t n, size_t* pos) {
+static int cc_scanner_skip_non_code_ex(CCScannerState* s, const char* src,
+                                       size_t n, size_t* pos,
+                                       int skip_templates) {
     size_t i = *pos;
     if (i >= n) return 0;
     
@@ -238,10 +246,16 @@ static int cc_scanner_skip_non_code(CCScannerState* s, const char* src, size_t n
     if (c == '/' && c2 == '*') { s->in_block_comment = 1; *pos += 2; s->col++; return 1; }
     if (c == '"') { s->in_str = 1; (*pos)++; return 1; }
     if (c == '`') {
+        if (!skip_templates) {
+            /* Leave ticks + body as code (comptime-for slot substitution). */
+            if (c != '\n') s->col--;
+            return 0;
+        }
         size_t tick_end = 0;
-        /* Opening tick already counted in s->col above. Skip the rest of the
+        /* Opening tick already counted in s->col above. Skip a well-formed
          * literal as one inert region so apostrophes inside cannot open a
-         * char literal (e.g. `don't` in -e oneliners). */
+         * char literal (e.g. `don't` in -e oneliners). Leave unterminated
+         * ticks as code so callers (scan_to_top_level / @string) diagnose. */
         if (cc_tpl_scan_literal(src, n, i, &tick_end) == 0) {
             size_t k;
             for (k = i + 1; k <= tick_end; k++) {
@@ -251,9 +265,8 @@ static int cc_scanner_skip_non_code(CCScannerState* s, const char* src, size_t n
             *pos = tick_end + 1;
             return 1;
         }
-        s->in_tpl = 1;
-        (*pos)++;
-        return 1;
+        if (c != '\n') s->col--;
+        return 0;
     }
     if (c == '\'') { s->in_chr = 1; (*pos)++; return 1; }
     
@@ -261,6 +274,11 @@ static int cc_scanner_skip_non_code(CCScannerState* s, const char* src, size_t n
     if (c != '\n') s->col--;
     
     return 0;
+}
+
+static int cc_scanner_skip_non_code(CCScannerState* s, const char* src, size_t n,
+                                    size_t* pos) {
+    return cc_scanner_skip_non_code_ex(s, src, n, pos, 1);
 }
 
 /* ========================================================================== */
@@ -18117,7 +18135,11 @@ static void cc__ct_append_field_body(char** out, size_t* ol, size_t* oc,
     CCScannerState s; cc_scanner_init(&s);
     size_t i = bs, emit = bs;
     while (i < be) {
-        if (cc_scanner_skip_non_code(&s, body, be, &i)) continue;
+        /* Walk into backtick `@emit` / `@string` bodies: loop slots like
+         * `${f.index}` / `${m.name}` live there. Skipping templates as inert
+         * leaves `$` for libtcc ("lvalue expected"). */
+        if (cc_scanner_skip_non_code_ex(&s, body, be, &i, /*skip_templates=*/0))
+            continue;
         if ((i == 0 || !cc_is_ident_char(body[i - 1])) &&
             i + lvlen <= be && memcmp(body + i, lv, lvlen) == 0 &&
             (i + lvlen == be || !cc_is_ident_char(body[i + lvlen]))) {
@@ -18408,7 +18430,12 @@ static char* cc__resolve_comptime_if_once(const char* src, size_t n, const char*
     int type_prelude_built = 0;
     cc_scanner_init(&scan);
     while (i < n) {
-        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        /* Walk into `@emit` / `@string` backticks: after `@comptime for`
+         * substitutes `m.fallible` etc. inside a template, the nested
+         * `@comptime if` must still be visible to this sweep. Skipping
+         * templates here leaves `@comptime if (0) { ... }` for the host. */
+        if (cc_scanner_skip_non_code_ex(&scan, src, n, &i, /*skip_templates=*/0))
+            continue;
         if (src[i] != '@' || i + ATCN > n || memcmp(src + i, ATC, ATCN) != 0) { i++; continue; }
         /* D4.0: `@comptime for (F in type_of(T).fields) { ... }` — expand here
          * (outermost-first) before the `@comptime if` handling below. */

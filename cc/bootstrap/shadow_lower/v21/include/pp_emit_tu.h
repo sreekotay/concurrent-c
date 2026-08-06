@@ -2371,7 +2371,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                     size_t n = strlen(s);
                     if (n >= 5 && strcmp(s + n - 5, ".cch\"") == 0) {
                         char path[256];
-                        size_t plen = n - 10 - 5; /* after '#include "' before '.cch"' */
+                        size_t plen = n - 10 - 5; /* after '#include "' before '.h"' */
                         if (plen > 0 && plen < sizeof(path)) {
                             memcpy(path, s + 10, plen);
                             path[plen] = 0;
