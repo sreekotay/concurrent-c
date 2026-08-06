@@ -2,9 +2,9 @@
 #include <ccc/std/prelude.cch>
 
 @async int oracle_body(int[~4 >] tx, int[~4 <] rx, int v) {
-    if (@await tx.send(v) != 0) return -1;
+    @await tx.send(v) !>;
     int reply;
-    if (@await rx.recv(&reply) != 0) return -2;
+    @await rx.recv(&reply) !>;
     int x = cc_diag_oracle_undeclared_in_async(reply);   /* line 8 */
     return x;
 }

@@ -5,20 +5,23 @@
 
 @async int sender(CCChanTx tx) {
     int val = 42;
-    intptr_t rc = @await tx.send(val);
-    printf("typed sender: sent %d, rc=%ld\n", val, (long)rc);
-    return (int)rc;
+    @await tx.send(val) !>;
+    printf("typed sender: sent %d\n", val);
+    return 0;
 }
 
 @async int receiver(CCChanRx rx) {
     int val = 0;
-    intptr_t rc = @await rx.recv(&val);
-    printf("typed receiver: received %d, rc=%ld\n", val, (long)rc);
-    assert(rc == 0);
+    @await rx.recv(&val) !>;
+    printf("typed receiver: received %d\n", val);
     return val;
 }
 
 int main(void) {
+    @errhandler(CCIoError e) {
+        fprintf(stderr, "channel err: %s\n", e.message);
+        return 1;
+    }
     int[~4 >] tx;
     int[~4 <] rx;
     cc_channel_pair(&tx, &rx);

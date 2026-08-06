@@ -10,6 +10,9 @@
  *   Channel send/recv are suspension points inside @async.
  *   Async functions compose: pipeline awaits echo, then bump — one
  *   stack, two suspend regions, no spawn.
+ *
+ * @await tx.send / rx.recv share the sync surface: bool !>(CCIoError).
+ * @async T!>(E) returns pack through the task ABI; @await yields T!>(E).
  */
 
 #include <ccc/cc_runtime.cch>
@@ -17,15 +20,12 @@
 #include <ccc/script/stdio.cch>
 
 /* Suspends twice on the channel, then returns the echoed value. */
-@async int echo_through_channel(CCChanTx tx, CCChanRx rx, int value) {
-    if (@await tx.send(value) != 0)
-        return -1;
-
+@async int !>(CCError) echo_through_channel(CCChanTx tx, CCChanRx rx, int value) {
+    @errhandler(CCError e) { return cc_err(e); }
+    @await tx.send(value) !>;
     int received = 0;
-    if (@await rx.recv(&received) != 0)
-        return -2;
-
-    return received;
+    @await rx.recv(&received) !>;
+    return cc_ok(received);
 }
 
 /* Ordinary async step — no channel, still awaitable. */
@@ -33,13 +33,11 @@
     return value + 1;
 }
 
-/* Composition: await echo, then await bump. Sibling tasks would need a
- * nursery + join; here the call stack itself suspends. */
-@async int pipeline(CCChanTx tx, CCChanRx rx, int value) {
-    int echoed = @await echo_through_channel(tx, rx, value);
-    if (echoed < 0)
-        return echoed;
-    return @await bump(echoed);
+/* Composition: await echo (Result), then await bump. */
+@async int !>(CCError) pipeline(CCChanTx tx, CCChanRx rx, int value) {
+    @errhandler(CCError e) { return cc_err(e); }
+    int echoed = @await echo_through_channel(tx, rx, value) !>;
+    return cc_ok(@await bump(echoed));
 }
 
 int main(void) {
@@ -51,7 +49,7 @@ int main(void) {
     CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
 
     /* Sync main drives the whole async stack with one @await. */
-    int result = @await pipeline(tx, rx, 41);
+    int result = @await pipeline(tx, rx, 41) !>;
 
     println(@string(`pipeline result: ${result} (expected 42)`, @scratch)) !>;
     return (result == 42) ? 0 : 1;

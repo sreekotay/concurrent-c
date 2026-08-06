@@ -1,6 +1,5 @@
 /* Test that UFCS channel ops with @await in @async functions work correctly.
-   This uses the ergonomic form: `@await tx.send(val)` instead of the explicit
-   cc_chan_send_task() call. */
+   Ergonomic form: `@await tx.send(val)` → bool !>(CCIoError) (sync surface). */
 #include <ccc/cc_runtime.cch>
 #include <ccc/std/task.cch>
 #include <stdio.h>
@@ -8,21 +7,23 @@
 
 @async int sender(CCChanTx tx) {
     int val = 42;
-    /* Ergonomic form: tx.send(val) under @await emits cc_chan_send_task() */
-    intptr_t rc = @await tx.send(val);
-    printf("sender: sent %d, rc=%ld\n", val, (long)rc);
-    return (int)rc;
+    @await tx.send(val) !>;
+    printf("sender: sent %d\n", val);
+    return 0;
 }
 
 @async int receiver(CCChanRx rx) {
     int val = 0;
-    /* Ergonomic form: rx.recv(&val) under @await emits cc_chan_recv_task() */
-    intptr_t rc = @await rx.recv(&val);
-    printf("receiver: received %d, rc=%ld\n", val, (long)rc);
+    @await rx.recv(&val) !>;
+    printf("receiver: received %d\n", val);
     return val;
 }
 
 int main(void) {
+    @errhandler(CCIoError e) {
+        fprintf(stderr, "channel err: %s\n", e.message);
+        return 1;
+    }
     int[~4 >] tx;
     int[~4 <] rx;
     cc_channel_pair(&tx, &rx);

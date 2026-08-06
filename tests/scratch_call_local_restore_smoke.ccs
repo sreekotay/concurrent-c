@@ -1,0 +1,24 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/script/stdio.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* Bound @scratch string must survive a later call-local @string temp
+ * (println restores to the pre-temp watermark, not a full reset). */
+int main(void) {
+    @errhandler(CCError e) {
+        cc_error_log(e);
+        return 1;
+    }
+    const char* a = "alpha";
+    const char* b = "beta";
+    CCString kept = @string(`kept:${a}`, @scratch);
+    println(@string(`temp:${b}`, @scratch)) !>;
+    CCSlice sl = cc_string_as_slice(&kept);
+    if (sl.len != 10 || memcmp(sl.ptr, "kept:alpha", 10) != 0) {
+        fprintf(stderr, "kept string clobbered after call-local scratch temp\n");
+        return 1;
+    }
+    printf("%.*s\n", (int)sl.len, (const char*)sl.ptr);
+    return 0;
+}

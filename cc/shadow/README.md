@@ -24,9 +24,10 @@ cache under `out/.cc-build/native/`, or `--exe` (libtcc from the emit buffer).
 Succession metric is **warm host-cc rebuild parity**, not libtcc-vs-clang.
 
 Bootstrap snapshots (deliberate freezes of lowered C + local headers) live
-under `cc/bootstrap/shadow_lower/` — see that README. Default `make -C cc`
-host-ccs `last-good`; use `SHADOW_LOWER_SOURCE=ccs` to re-lower from sources.
-Scratch emit → `latest/`; promote to `vN` when you choose to commit.
+under `cc/bootstrap/shadow_lower/` — see that README for the full
+edit → `SHADOW_LOWER_SOURCE=ccs` → snapshot → promote loop. Default
+`make -C cc` host-ccs `last-good`. Do **not** hand-copy `*.cch` into
+`out/include/cc/shadow/*.h`; those headers are snapshot/bootstrap products.
 
 ## Spine
 
@@ -278,8 +279,32 @@ Prioritized by fail mass × language value on native-quick:
    Remaining holes: compiled-factory dylib path, type-register/UFCS comptime,
    header-local static_map, reflect factories (~24 comptime fails)
 3. **`@variant` AST + emit** — no whitelist surface yet (~4 ebf + ~20 bf)
-4. **Real `@async` / `@await` SM** — replace poll-wrapper beachhead
-5. UFCS leftovers; `@as` forwarding; `@string` templates
+4. **Real `@async` / `@await` SM** — replace poll-wrapper beachhead.
+   - Landed: `@await tx.send` / `rx.recv` → sync `bool !>(CCIoError)` via
+     `cc_chan_result_from_errno` at the await edge (recipe + UFCS smokes).
+   - Landed: `@async T!>(E)` — body returns `CCResult_*`; poll packs via
+     `malloc` (POLL tasks have no fiber `result_buf`); `@await` copies out and
+     frees. Smokes: `tests/async_result_return_smoke.ccs`,
+     `examples/recipe_async_await.ccs`.
+   - Still open: replace the poll-wrapper beachhead with a real state machine.
+5. **UFCS / `@string` / `@scratch`**
+   - Landed beachhead: `shadow_ufcs_fmt_call` builds call spellings with
+     `@string(\`…\`, @scratch)` + `cc_arena_reset` after copy into `dst`;
+     wired on invent / scalar / Result-value hop. Call-local
+     `println(@string(…, @scratch))` checkpoints/restores the shared scratch
+     (bound `@string(..., @scratch)` stays valid). Spec §9.1.4 call-local
+     reclaim. Smoke: `tests/scratch_call_local_restore_smoke.ccs`.
+   - Grow `fmt_call` to more call-shaped invent sites; leave cold `snprintf`
+     ladders alone until touched.
+   - Fixed-to-`cap` invent waist (fail loud on overflow; no growable spike).
+   - Assignment / ternary `@string(..., @scratch)` must inject
+     `__cc_str_scratch` (today only decl-init does).
+   - Leftover-text `cc_println(({…@scratch…}))` reclaim (structured
+     `AST_PRINTLN_TPL` only so far).
+   - Standalone re-lower of `pp_emit_ufcs.cch` hangs — iterate via
+     `out/include` face patch or umbrella until fixed; snapshot/promote when
+     the beachhead should stick in `last-good`.
+   - `@as` forwarding; remaining UFCS leftover peel kill.
 
 ## Explicit tool
 

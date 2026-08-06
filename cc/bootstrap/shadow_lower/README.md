@@ -14,6 +14,21 @@ re-lowering that `.ccs`.
 **Source of truth** remains `cc/shadow/*.ccs` / `*.cch`. Snapshot
 contents are regenerate-only — do not hand-edit.
 
+`out/include/cc/shadow/*.h` is a **build product** (seeded from `last-good`
+on bootstrap builds, refreshed by snapshot). Never `cp` raw `cc/shadow/*.cch`
+onto those paths: `.cch` relative includes and snapshot path-rewriting disagree,
+and the copy looks like a successful sync while leaving a broken tree.
+
+## Iterate → ship
+
+| Step | Command | Effect |
+|------|---------|--------|
+| Edit | `cc/shadow/*.cch` | Source of truth |
+| Rebuild lowerer | `make -C cc SHADOW_LOWER_SOURCE=ccs ../out/cc/bin/shadow_lower` | Seed binary re-lowers from sources (`-I../cc/shadow`) |
+| Snapshot | `./scripts/snapshot_shadow_lower.sh --smoke` | Emit → `latest/` + lowered headers |
+| Promote | `./scripts/promote_shadow_bootstrap.sh` | `latest/` → `vN`, flip `last-good` |
+| Commit | `git add …/last-good …/vN` | Human-gated |
+
 ## Default self-build
 
 `make -C cc` builds `shadow_lower` from `last-good` (`SHADOW_LOWER_SOURCE=bootstrap`).

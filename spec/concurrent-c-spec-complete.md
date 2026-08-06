@@ -5146,7 +5146,7 @@ The arena form is unchanged: the same template with an arena yields an owned `St
 
 `@scratch` and `@scratch(N)` are legal **only** as the arena argument of `@string` (including `@string(policy, \`...\`, @scratch)` and `@string(expr, @scratch)`). They are not expressions, not general `CCArena*` values, and not a revival of retired `@arena { }` blocks.
 
-**Lowering.** All `@string(..., @scratch)` / `@scratch(N)` sites in the same function or closure body share one stack arena injected at the start of that body. Sites bump-allocate; they do not reset between uses:
+**Lowering.** All `@string(..., @scratch)` / `@scratch(N)` sites in the same function or closure body share one stack arena injected at the start of that body:
 
 ```c
 int main(void) {
@@ -5160,6 +5160,8 @@ int main(void) {
 - Nested closures get their own shared scratch (C shadowing of `__cc_str_scratch`).
 - Overflow follows `CC_ARENA_STACK` (stack-first, then ordinary growth / `String` poison rules).
 - Freestanding `@scratch` (or use outside `@string`) is a compile error. Prefer `CC_ARENA_STACK` / `cc_arena_heap` for named or long-lived arenas.
+
+**Call-local reclaim.** A call-local `@string(..., @scratch)` (e.g. `println(@string(\`…\`, @scratch))`) checkpoints the shared scratch before building the temp and restores after the consuming call. Earlier bound products in the same function remain valid; the temp's bump (and any extent growth for that temp) is reclaimed. Bound forms (`CCString s = @string(..., @scratch)`) keep their bytes for the function/closure lifetime and do not restore around the initializer.
 
 **Escape (normative).** Products of `@string(..., @scratch)` have function/closure lifetime. It is a compile-time error to:
 

@@ -874,9 +874,14 @@ static inline bool cc_arena_release(CCArena* arena, void* ptr) {
             cc__arena_report_release_error("double release or live_allocs mismatch", ptr);
             return false;
         }
-        arena->_flags |= CC_ARENA_FLAG_NON_REWINDABLE;
+        /* Last live alloc on the root slab: full bump rewind — arena is empty
+         * again, so stay in epoch/checkpoint mode. Any other release punches a
+         * logical hole and flips to count/release (non-rewindable). */
         if (block == arena && prev_live == 1) {
             CC_ATOMIC_STORE(&arena->offset, 0);
+            arena->_flags &= ~CC_ARENA_FLAG_NON_REWINDABLE;
+        } else {
+            arena->_flags |= CC_ARENA_FLAG_NON_REWINDABLE;
         }
         return true;
     }
@@ -1437,15 +1442,17 @@ static inline void* cc_arena_pool_iter_next(CCArenaPoolIter* it) {
  *    "detach requires a heap-rooted arena."
  *
  * 2. The rewind-vs-release mode flip is half-loud. cc_arena_release() reports
- *    double-release / foreign pointers, but after the first release (or heap-
- *    overflow alloc) sets CC_ARENA_FLAG_NON_REWINDABLE, checkpoint() silently
- *    returns a null checkpoint and restore() silently no-ops — the symptom is
- *    creeping RSS, not a message. Emit a debug fprintf-once at the first nulled
- *    checkpoint ("arena is release-mode; checkpoints disabled").
+ *    double-release / foreign pointers; last-live root release rewinds and
+ *    clears NON_REWINDABLE (back in epoch mode). A non-last release (or heap-
+ *    overflow alloc) still sets NON_REWINDABLE, after which checkpoint()
+ *    silently returns a null checkpoint and restore() silently no-ops — the
+ *    symptom is creeping RSS, not a message. Emit a debug fprintf-once at the
+ *    first nulled checkpoint ("arena is release-mode; checkpoints disabled").
  *
  * 3. Document the modal lifecycle explicitly: an arena is EITHER epoch/rewind
- *    (checkpoint/restore/reset) OR count/release (cc_arena_release, auto-rewind
- *    on last release) — chosen implicitly by first use, mutually exclusive.
+ *    (checkpoint/restore/reset) OR count/release (cc_arena_release; last-live
+ *    root release returns to epoch mode) — flipped by first non-last release
+ *    or heap-overflow alloc.
  *
  * 4. cc_arena_alloc_local still does an atomic FETCH_ADD on live_allocs — the
  *    single-owner tier pays half the sync tax it exists to avoid. Consider a
