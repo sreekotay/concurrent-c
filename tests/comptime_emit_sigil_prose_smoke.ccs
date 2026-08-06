@@ -1,0 +1,23 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* `!>` / `?>` in @emit comments and string prose must stay text through
+ * prepare (skip_templates=0 walks) and host splice — never become operators. */
+@comptime {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        /* prose: result !> and ?> stay words */
+        enum { EMIT_SIGIL_N = ${3} };
+        static const char *emit_sigil_msg = "sigil !> and ?>";
+        `);
+}
+
+int main(void) {
+    if (EMIT_SIGIL_N != 3) return 1;
+    if (!strstr(emit_sigil_msg, "!>")) return 2;
+    if (!strstr(emit_sigil_msg, "?>")) return 3;
+    printf("comptime_emit_sigil_prose_smoke n=%d msg=%s\n",
+           (int)EMIT_SIGIL_N, emit_sigil_msg);
+    return 0;
+}

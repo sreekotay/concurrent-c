@@ -1,0 +1,13 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+
+/* Under-indented content line vs closer margin must hard-fail for @emit,
+ * same rule as @string — never silently re-margin. */
+@comptime {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        enum { EMIT_UNDER_N = 1 };
+    four spaces only
+        `);
+}
+
+int main(void) { return 0; }

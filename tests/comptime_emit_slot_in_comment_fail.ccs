@@ -1,0 +1,16 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_type.cch>
+
+typedef struct { int a; } SlotCmt;
+
+/* for-subst skips comments, so `${f.index}` inside a comment is still a
+ * live slot at emit-exec — must hard-fail, not splice garbage / succeed. */
+@comptime for (f in type_of(SlotCmt).fields) {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        /* slot left live: ${f.index} */
+        enum { SlotCmt_ok = 1 };
+    `);
+}
+
+int main(void) { return 0; }

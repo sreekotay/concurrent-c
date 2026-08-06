@@ -1,0 +1,40 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+typedef struct { int head; char mid; } Sink;
+
+/* One template: for-unroll + ${f.name}/${f.index} + don't/apostrophe + nested
+ * if prune with undefined dead arms + else-if chain. If any walk/skip seam
+ * regresses, the host build or the runtime checks fail. */
+@comptime for (f in type_of(Sink).fields) {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        /* don't touch 'f' — odd apostrophes must stay prose */
+        @comptime if (1) {
+            enum { Sink_${f.name}_i = ${f.index} };
+        } else {
+            sink_true_dead_${f.index}();
+        }
+        @comptime if (0) {
+            sink_false_dead_${f.index}();
+        } else @comptime if (f.index == 0) {
+            enum { Sink_first_mark = 100 + ${f.index} };
+        } else {
+            enum { Sink_rest_mark_${f.index} = 200 + ${f.index} };
+        }
+        static const char *sink_note_${f.index} = "don't sink 'emit' scanners";
+    `);
+}
+
+int main(void) {
+    if (Sink_head_i != 0) return 1;
+    if (Sink_mid_i != 1) return 2;
+    if (Sink_first_mark != 100) return 3;
+    if (Sink_rest_mark_1 != 201) return 4;
+    if (sink_note_0[0] != 'd' || sink_note_1[0] != 'd') return 5;
+    printf("comptime_emit_kitchen_sink_smoke head=%d mid=%d first=%d rest=%d\n",
+           (int)Sink_head_i, (int)Sink_mid_i,
+           (int)Sink_first_mark, (int)Sink_rest_mark_1);
+    return 0;
+}

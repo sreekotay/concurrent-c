@@ -1,0 +1,27 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+typedef struct Inner { int p; int q; } Inner;
+typedef struct Outer { Inner left; Inner right; } Outer;
+
+/* Nested for inside emit: outer fields × inner fields of f.type. */
+@comptime {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        @comptime for (f in type_of(Outer).fields) {
+            @comptime for (g in type_of(f.type).fields) {
+                enum { Outer_${f.name}_${g.name} = ${f.index} * 10 + ${g.index} };
+            }
+        }
+    `);
+}
+
+int main(void) {
+    if (Outer_left_p != 0) return 1;
+    if (Outer_left_q != 1) return 2;
+    if (Outer_right_p != 10) return 3;
+    if (Outer_right_q != 11) return 4;
+    printf("comptime_emit_nested_for_smoke ok\n");
+    return 0;
+}
