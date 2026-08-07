@@ -23,7 +23,7 @@ int main(void) {
         assert(tmp.path.len + 1 < sizeof(path_copy));
         memcpy(path_copy, tmp.path.ptr, tmp.path.len + 1);
 
-        CCSlice msg = cc_slice_from_cstr("via-as\n");
+        CCSlice msg = CC_SLICE_LIT("via-as\n");
         CCRes(size_t, CCIoError) wr = tmp.write(msg);
         assert(cc_is_ok(wr));
         assert(cc_value(wr) == msg.len);

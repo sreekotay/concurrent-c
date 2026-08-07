@@ -534,7 +534,8 @@ static int shadow_product_host_c_ok(const char* buf, size_t len, const char** hi
     return 1;
 }
 
-/* Rewrite @slice(lit) → cc_slice_from_cstr(lit) for host-cc (preprocess seam). */
+/* Rewrite @slice(lit) → CC_SLICE_LIT(lit). Optional sugar; call-arg lits
+ * coerce the same way without @slice. */
 /* Surface `char[:…]` / `char[0:]` → CCSlice (grammar seam / raw fields). */
 static void shadow_rewrite_char_slice_types(char* text, size_t cap) {
     char tmp[2048];
@@ -625,18 +626,11 @@ static void shadow_rewrite_at_slice(char* expr, size_t cap) {
                 q++;
             }
             if (dep == 0) {
-                int n = snprintf(o, rem, "cc_slice_from_cstr(");
+                size_t alen = (size_t)((q - 1) - args);
+                int n = snprintf(o, rem, "CC_SLICE_LIT(%.*s)", (int)alen, args);
                 if (n < 0 || (size_t)n >= rem) break;
                 o += n;
                 rem -= (size_t)n;
-                p = args;
-                while (p < q - 1 && rem > 0) {
-                    *o++ = *p++;
-                    rem--;
-                }
-                if (rem < 2) break;
-                *o++ = ')';
-                rem--;
                 p = q;
                 continue;
             }

@@ -32,6 +32,17 @@
  *   CCShardMask shards = cc_shard_mask_auto(64);
  *   size_t i = shards.index(hash);   // UFCS: cc_shard_mask_index(&shards, hash)
  *
+ * Shard hold bundle (guards[] + n). CCShardMap embeds CCShardDomain via @as
+ * so `maps.hold_all()` / `hold_one` / `hold_sorted` UFCS to these helpers:
+ *
+ *   CCShardDomain d = cc_shard_domain(excl, shards);
+ *   CCShardHold h = d.hold_one(si);
+ *   CCShardHold h = d.hold_sorted(names, nnames);
+ *   CCShardHold h = d.hold_all();
+ *   if (!h.held()) …;   // admission failed
+ *   …
+ *   h.release();        // LIFO; idempotent
+ *
  * Prefer acquire/release over lock/unlock: release is intentionally
  * idempotent (NULL entry after first call), so a second release is a local
  * no-op and should not read as a double-unlock bug in review.
@@ -62,6 +73,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 #include <stdatomic.h>
 
 #ifdef __cplusplus
@@ -341,6 +353,74 @@ CCShardMask cc_shard_mask_auto(size_t max);
 static inline size_t cc_shard_mask_index(const CCShardMask* m, uint64_t hash) {
     if (!m || m->count == 0) return 0;
     return (size_t)hash & m->mask;
+}
+
+/* ---- Shard hold bundle (exclusive names 0..count-1) ----
+ *
+ * Wraps the guards[] + n ceremony.  Pair a CCExclusive with a CCShardMask
+ * (or count); routing keys → shard ids stays in the caller. */
+
+typedef struct CCShardHold {
+    CCExclusiveGuard gs[CC_EXCLUSIVE_ACQUIRE_MULTI_MAX];
+    size_t n; /* 0 = not held / admission failed */
+} CCShardHold;
+
+typedef struct CCShardDomain {
+    CCExclusive* excl;
+    CCShardMask mask;
+} CCShardDomain;
+
+static inline CCShardDomain cc_shard_domain(CCExclusive* excl,
+                                           CCShardMask mask) {
+    CCShardDomain d;
+    d.excl = excl;
+    d.mask = mask;
+    return d;
+}
+
+static inline bool cc_shard_hold_held(const CCShardHold* h) {
+    return h != NULL && h->n > 0;
+}
+
+static inline void cc_shard_hold_release(CCShardHold* h) {
+    if (!h || h->n == 0) return;
+    cc_exclusive_guard_release_n(h->gs, h->n);
+    h->n = 0;
+}
+
+static inline void cc_shard_hold_destroy(CCShardHold* h) {
+    cc_shard_hold_release(h);
+}
+
+static inline CCShardHold cc_shard_domain_hold_one(CCShardDomain* d,
+                                                  uint64_t si) {
+    CCShardHold h;
+    memset(&h, 0, sizeof(h));
+    if (!d || !d->excl || d->mask.count == 0) return h;
+    if (si >= (uint64_t)d->mask.count) return h;
+    h.gs[0] = cc_exclusive_acquire(d->excl, si);
+    h.n = 1;
+    return h;
+}
+
+static inline CCShardHold cc_shard_domain_hold_sorted(CCShardDomain* d,
+                                                     const uint64_t* names,
+                                                     size_t count) {
+    CCShardHold h;
+    memset(&h, 0, sizeof(h));
+    if (!d || !d->excl || !names || count == 0) return h;
+    h.n = cc_exclusive_acquire_sorted(d->excl, names, count, h.gs,
+                                      (size_t)CC_EXCLUSIVE_ACQUIRE_MULTI_MAX);
+    return h;
+}
+
+static inline CCShardHold cc_shard_domain_hold_all(CCShardDomain* d) {
+    CCShardHold h;
+    memset(&h, 0, sizeof(h));
+    if (!d || !d->excl || d->mask.count == 0) return h;
+    h.n = cc_exclusive_acquire_range(d->excl, 0, (uint64_t)d->mask.count, h.gs,
+                                     (size_t)CC_EXCLUSIVE_ACQUIRE_MULTI_MAX);
+    return h;
 }
 
 #ifdef __cplusplus

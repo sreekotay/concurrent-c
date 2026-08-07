@@ -56,11 +56,11 @@ int main(void) {
     int64_t bulk_value = 0;
     int64_t argc_value = 0;
     CCError err = {0};
-    int rc = rr_try_read_bulk_buffered_local(char_to_slice("42"), &bulk_value, &err);
+    int rc = rr_try_read_bulk_buffered_local(CC_SLICE_LIT("42"), &bulk_value, &err);
     assert(rc == 0);
     assert(bulk_value == 42);
 
-    rc = rr_try_read_args_buffered_local(char_to_slice("42"), &argc, &argc_value, &err);
+    rc = rr_try_read_args_buffered_local(CC_SLICE_LIT("42"), &argc, &argc_value, &err);
     assert(rc == 0);
     assert(argc == 1);
     assert(argc_value == 42);

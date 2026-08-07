@@ -5,7 +5,7 @@
  * fenced body verbatim (never tokenized), and rewrite the whole declaration into
  * a synthesized @comptime block that calls the named engine:
  *
- *     @comptime { engine(cc_slice_from_cstr("Name"),
+ *     @comptime { engine(CC_SLICE_LIT("Name"),
  *                        cc_slice_from_buffer((void*)"<escaped bytes>", <len>),
  *                        "<file>", <line>); }
  *
@@ -304,7 +304,7 @@ char* cc_rewrite_grammar_decls_text(const char* src, size_t n, const char* input
 
                 /* User engine: synthesized @comptime call (one physical line). */
                 snprintf(head, sizeof(head),
-                         "@comptime { %s(cc_slice_from_cstr(\"%s\"), "
+                         "@comptime { %s(CC_SLICE_LIT(\"%s\"), "
                          "cc_slice_from_buffer((void*)\"",
                          engine, name);
                 cc_sb_append_cstr(&out, &out_len, &out_cap, head);

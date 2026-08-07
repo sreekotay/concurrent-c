@@ -1,11 +1,11 @@
 // redis.go — small incomplete Redis sketch in Go.
 //
-// Sharded mutexes, one goroutine per conn, hold covers DB only, encode/write
-// after unlock, pipeline window.  Not full Redis.
+// Sharded mutexes, one goroutine per conn, pipeline window.
+// Encode may run under shard locks; socket write is after unlock.
+// Not full Redis.
 //
 // The Concurrent-C sketch with the same tiny command surface is
-// redis_go_twin.ccs (string switch, BufReader, nursery, acquire_into) — same
-// spirit of incompleteness, not a line twin of this file.
+// redis_async_sketch.ccs — same spirit of incompleteness, not a line twin.
 //
 // Build: go build -o out/redis_go redis.go
 // Run:   ./out/redis_go [addr]   # default 127.0.0.1:6380
@@ -34,6 +34,7 @@ const (
 	outBufCap      = 8 * 1024
 	pipelineWindow = 16
 	maxArgs        = 16
+	maxBulk        = 64 * 1024
 	defaultListen  = "127.0.0.1:6380"
 )
 
@@ -62,14 +63,9 @@ const (
 	cmdUnknown
 )
 
-type entry struct {
-	val       string
-	expiresAt int64 // unix ms; 0 = none
-}
-
 type shard struct {
 	mu   sync.Mutex
-	data map[string]entry
+	data map[string]string
 }
 
 type DB struct {
@@ -84,7 +80,7 @@ func newDB(ncpu int) *DB {
 	}
 	s := make([]*shard, n)
 	for i := range s {
-		s[i] = &shard{data: make(map[string]entry)}
+		s[i] = &shard{data: make(map[string]string)}
 	}
 	return &DB{shards: s, mask: uint32(n - 1)}
 }
@@ -94,12 +90,6 @@ func (db *DB) shardIdx(key string) int {
 	_, _ = h.Write([]byte(key))
 	return int(h.Sum32() & db.mask)
 }
-
-func (db *DB) live(e entry, now int64) bool {
-	return e.expiresAt == 0 || e.expiresAt > now
-}
-
-// --- hold policy (same idea: name → how many locks) ---
 
 func holdFor(k cmdKind) holdKind {
 	switch k {
@@ -143,8 +133,6 @@ func parseKind(name string) cmdKind {
 	}
 }
 
-// --- RESP (minimal, real enough) ---
-
 type cmd struct {
 	kind cmdKind
 	args [][]byte // owned copies from parse — window-local
@@ -160,7 +148,6 @@ func readRESPCommand(br *bufio.Reader) (cmd, error) {
 		return cmd{}, errIncomplete
 	}
 
-	// Inline: PING\r\n
 	if line[0] != '*' {
 		parts := bytes.Fields(line)
 		if len(parts) == 0 {
@@ -173,7 +160,6 @@ func readRESPCommand(br *bufio.Reader) (cmd, error) {
 		return cmd{kind: parseKind(string(args[0])), args: args}, nil
 	}
 
-	// Array: *N\r\n$len\r\n...\r\n
 	n, err := strconv.Atoi(string(line[1:]))
 	if err != nil || n < 0 || n > maxArgs {
 		return cmd{}, fmt.Errorf("bad argc")
@@ -189,14 +175,14 @@ func readRESPCommand(br *bufio.Reader) (cmd, error) {
 			return cmd{}, fmt.Errorf("bad bulk hdr")
 		}
 		blen, err := strconv.Atoi(string(hdr[1:]))
-		if err != nil || blen < 0 {
+		if err != nil || blen < 0 || blen > maxBulk {
 			return cmd{}, fmt.Errorf("bad bulk len")
 		}
 		buf := make([]byte, blen+2)
 		if _, err := io.ReadFull(br, buf); err != nil {
 			return cmd{}, err
 		}
-		args = append(args, buf[:blen]) // drop \r\n; own the slice
+		args = append(args, buf[:blen])
 	}
 	if len(args) == 0 {
 		return cmd{}, fmt.Errorf("empty command")
@@ -216,8 +202,6 @@ func encodeBulk(b []byte) []byte {
 	return []byte("$" + strconv.Itoa(len(b)) + "\r\n" + string(b) + "\r\n")
 }
 func encodeOK() []byte { return encodeSimple("OK") }
-
-// --- execute under hold (DB only) ---
 
 type reply struct {
 	wire []byte
@@ -245,7 +229,7 @@ func (db *DB) withShards(idxs []int, fn func()) {
 	fn()
 }
 
-func (db *DB) execute(c cmd, now int64) reply {
+func (db *DB) execute(c cmd) reply {
 	switch c.kind {
 	case cmdPing:
 		if len(c.args) > 1 {
@@ -266,7 +250,6 @@ func (db *DB) execute(c cmd, now int64) reply {
 
 	switch h {
 	case holdNone:
-		// already handled
 	case holdKey:
 		if len(c.args) < 2 {
 			return reply{wire: encodeError("wrong number of arguments")}
@@ -274,7 +257,7 @@ func (db *DB) execute(c cmd, now int64) reply {
 		key := string(c.args[1])
 		si := db.shardIdx(key)
 		db.withShards([]int{si}, func() {
-			out = db.execKey(c, key, si, now)
+			out = db.execKey(c, key, si)
 		})
 	case holdKeys:
 		if len(c.args) < 2 {
@@ -285,7 +268,7 @@ func (db *DB) execute(c cmd, now int64) reply {
 			idxs = append(idxs, db.shardIdx(string(a)))
 		}
 		db.withShards(idxs, func() {
-			out = db.execKeys(c, now)
+			out = db.execKeys(c)
 		})
 	case holdAll:
 		idxs := make([]int, len(db.shards))
@@ -293,62 +276,53 @@ func (db *DB) execute(c cmd, now int64) reply {
 			idxs[i] = i
 		}
 		db.withShards(idxs, func() {
-			out = db.execAll(c, now)
+			out = db.execAll(c)
 		})
 	}
 	return out
 }
 
-func (db *DB) execKey(c cmd, key string, si int, now int64) reply {
+func (db *DB) execKey(c cmd, key string, si int) reply {
 	sh := db.shards[si]
 	switch c.kind {
 	case cmdGet:
-		e, ok := sh.data[key]
-		if !ok || !db.live(e, now) {
-			if ok {
-				delete(sh.data, key)
-			}
+		v, ok := sh.data[key]
+		if !ok {
 			return reply{wire: encodeBulk(nil)}
 		}
-		return reply{wire: encodeBulk([]byte(e.val))}
+		return reply{wire: encodeBulk([]byte(v))}
 	case cmdSet:
 		if len(c.args) < 3 {
 			return reply{wire: encodeError("wrong number of arguments")}
 		}
-		sh.data[key] = entry{val: string(c.args[2])}
+		sh.data[key] = string(c.args[2])
 		return reply{wire: encodeOK()}
 	case cmdIncr:
-		e, ok := sh.data[key]
 		var n int64
-		if ok && db.live(e, now) {
+		if v, ok := sh.data[key]; ok {
 			var err error
-			n, err = strconv.ParseInt(e.val, 10, 64)
+			n, err = strconv.ParseInt(v, 10, 64)
 			if err != nil {
 				return reply{wire: encodeError("value is not an integer")}
 			}
-		} else if ok {
-			delete(sh.data, key)
-			e = entry{}
 		}
 		n++
-		sh.data[key] = entry{val: strconv.FormatInt(n, 10), expiresAt: e.expiresAt}
+		sh.data[key] = strconv.FormatInt(n, 10)
 		return reply{wire: encodeInt(n)}
 	}
 	return reply{wire: encodeError("internal")}
 }
 
-func (db *DB) execKeys(c cmd, now int64) reply {
+func (db *DB) execKeys(c cmd) reply {
 	switch c.kind {
 	case cmdDel:
 		var n int64
 		for _, a := range c.args[1:] {
 			key := string(a)
 			sh := db.shards[db.shardIdx(key)]
-			if e, ok := sh.data[key]; ok {
-				if db.live(e, now) {
-					n++
-				}
+			if _, ok := sh.data[key]; ok {
 				delete(sh.data, key)
+				n++
 			}
 		}
 		return reply{wire: encodeInt(n)}
@@ -357,10 +331,8 @@ func (db *DB) execKeys(c cmd, now int64) reply {
 		for _, a := range c.args[1:] {
 			key := string(a)
 			sh := db.shards[db.shardIdx(key)]
-			if e, ok := sh.data[key]; ok && db.live(e, now) {
+			if _, ok := sh.data[key]; ok {
 				n++
-			} else if ok {
-				delete(sh.data, key)
 			}
 		}
 		return reply{wire: encodeInt(n)}
@@ -371,45 +343,34 @@ func (db *DB) execKeys(c cmd, now int64) reply {
 		for _, a := range keys {
 			key := string(a)
 			sh := db.shards[db.shardIdx(key)]
-			e, ok := sh.data[key]
-			if !ok || !db.live(e, now) {
-				if ok {
-					delete(sh.data, key)
-				}
+			v, ok := sh.data[key]
+			if !ok {
 				buf.WriteString("$-1\r\n")
 				continue
 			}
-			buf.WriteString("$" + strconv.Itoa(len(e.val)) + "\r\n" + e.val + "\r\n")
+			buf.WriteString("$" + strconv.Itoa(len(v)) + "\r\n" + v + "\r\n")
 		}
 		return reply{wire: buf.Bytes()}
 	}
 	return reply{wire: encodeError("internal")}
 }
 
-func (db *DB) execAll(c cmd, now int64) reply {
+func (db *DB) execAll(c cmd) reply {
 	switch c.kind {
 	case cmdDBSize:
 		var n int64
 		for _, sh := range db.shards {
-			for k, e := range sh.data {
-				if db.live(e, now) {
-					n++
-				} else {
-					delete(sh.data, k)
-				}
-			}
+			n += int64(len(sh.data))
 		}
 		return reply{wire: encodeInt(n)}
 	case cmdFlushDB:
 		for _, sh := range db.shards {
-			sh.data = make(map[string]entry)
+			sh.data = make(map[string]string)
 		}
 		return reply{wire: encodeOK()}
 	}
 	return reply{wire: encodeError("internal")}
 }
-
-// --- connection: parse → window → acquire/exec → write ---
 
 func handleClient(conn net.Conn, db *DB) {
 	defer conn.Close()
@@ -427,9 +388,6 @@ func handleClient(conn net.Conn, db *DB) {
 	}
 
 	for {
-		// Pipeline window: block for the first command, then drain up to
-		// pipelineWindow-1 more that are already in the read buffer
-		// (same idea as CCS rr_cmd_next over a filled reader).
 		for i := 0; i < pipelineWindow; i++ {
 			if i > 0 && br.Buffered() == 0 {
 				break
@@ -444,15 +402,13 @@ func handleClient(conn net.Conn, db *DB) {
 					return
 				}
 				if i > 0 {
-					// Partial trailing frame: flush what we have and close.
 					_ = flush()
 					return
 				}
 				_, _ = conn.Write(encodeError(err.Error()))
 				return
 			}
-			now := time.Now().UnixMilli()
-			r := db.execute(c, now) // locks inside; wire already encoded
+			r := db.execute(c)
 			if len(out)+len(r.wire) > outBufCap {
 				if err := flush(); err != nil {
 					return

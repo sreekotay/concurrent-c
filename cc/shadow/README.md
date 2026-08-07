@@ -23,13 +23,15 @@ Default `ccc` is native. Opt out with `--frontend=legacy` only for archaeology.
 cache under `out/.cc-build/native/`, or `--exe` (libtcc from the emit buffer).
 Succession metric is **warm host-cc rebuild parity**, not libtcc-vs-clang.
 
-Bootstrap snapshots (deliberate freezes of lowered C + local headers) live
-under `cc/bootstrap/shadow_lower/` — see that README for the full
-edit → `SHADOW_LOWER_SOURCE=ccs` → snapshot → promote loop. Default
-`make -C cc` host-ccs `last-good`. Do **not** hand-edit committed `vN/`
-trees; do **not** hand-copy `*.cch` into `out/include/cc/shadow/*.h`
-(those headers are snapshot/bootstrap products). A `.cch` fix is not in the
-seed until promote flips `last-good` to a new `vN`.
+**Edit `cc/shadow/*.cch` (and `shadow_lower.ccs`) only.** That is the sole
+source of truth for parse/emit/UFCS behavior. Bootstrap snapshots under
+`cc/bootstrap/shadow_lower/` are regenerate-only freezes — see that README
+for edit → `SHADOW_LOWER_SOURCE=ccs` → snapshot → promote. Default
+`make -C cc` host-ccs `last-good` and will **overwrite**
+`out/include/cc/shadow/*.h` from the seed; patching those headers (or
+copying raw `.cch` onto them) is not a fix. A `.cch` change is not in the
+default binary until you rebuild from ccs and, for cold clones, promote a
+new `vN`.
 
 ## Spine
 

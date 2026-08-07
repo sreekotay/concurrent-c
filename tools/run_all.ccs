@@ -130,7 +130,7 @@ static void write_log(CCArena* arena, const char* path, const char* suffix,
     if (!full_path) return;
 
     CCFile f;
-    if (cc_file_open(&f, full_path->to_slice(), "w") != 0) return;
+    if (cc_file_open(&f, cc_slice_cstr(full_path), "w") != 0) return;
     CCSlice slice = cc_slice_from_parts((void*)data, len, CC_SLICE_ID_UNTRACKED, len);
     (void)cc_file_write(&f, slice);
     cc_file_close(&f);
@@ -201,7 +201,7 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
     printf("\n=== %s ===\n", label);
     ensure_log_dir(arena);
 
-    CCSliceArray files = cc_glob(pattern->to_slice(), arena) !>(e) {
+    CCSliceArray files = cc_glob(cc_slice_cstr(pattern), arena) !>(e) {
         printf("  glob failed for %s: %s (os=%d)\n", pattern,
                cc_io_error_str(e), (int)e.os_code);
         stats->failed++;

@@ -31,13 +31,13 @@ typedef struct CommandEntry {
 }
 
 int main(void) {
-    const CommandSpec* get = commands_get(char_to_slice("get"));
-    const CommandSpec* mget = commands_get(char_to_slice("MGET"));
-    const CommandSpec* set = commands_get(char_to_slice("Set"));
+    const CommandSpec* get = commands_get(CC_SLICE_LIT("get"));
+    const CommandSpec* mget = commands_get(CC_SLICE_LIT("MGET"));
+    const CommandSpec* set = commands_get(CC_SLICE_LIT("Set"));
     if (!get || get->kind != CMD_GET || get->min_args != 1) return 1;
     if (!mget || mget->kind != CMD_MGET || mget->max_args != -1) return 2;
     if (!set || set->kind != CMD_SET || set->min_args != 2) return 3;
-    if (commands_get(char_to_slice("NOPE"))) return 4;
+    if (commands_get(CC_SLICE_LIT("NOPE"))) return 4;
     puts("comptime_static_map_smoke: PASS");
     return 0;
 }

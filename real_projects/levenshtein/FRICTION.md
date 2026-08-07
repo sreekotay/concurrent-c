@@ -28,17 +28,15 @@ shipping the module as a companion `.src` file the test copies into place.
 The scanners have a shared template-mode discipline; these three don't use it
 for this case yet.
 
-## A semicolon inside a leading comment corrupts the .shcc emit plan
+## Fixed: semicolon in a leading comment broke `@destroy` on `.shcc`
 
-The smoke test's header comment said "'é' is one edit; an astral-plane
-char is one edit" — and the whole file stopped compiling with
-`';' expected (got '@')` on a wrong line. Bisection (unicode, quotes,
-line counts, template size — all innocent) landed on the one character
-that mattered: the `;` inside the comment. The .shcc emit plan anchors
-its prelude insert position on it without comment awareness and splices
-result-spec typedefs mid-comment. Tracked as task #53;
-`tests/shcc_comment_semicolon_fail.shcc` is the tripwire, and the smoke's
-comment stays semicolon-free until the fix lands.
+A header comment containing `;` made `CCArena a = … @destroy` die with
+`';' expected (got '@')`. The emit-plan insert story was a misread —
+prelude insert already skips block comments. The real hole was the
+builtin-owned `@destroy` rewrite: its statement-start walk treated any
+byte `;`/`{`/`}` as a boundary, so a `;` inside the leading comment
+became the anchor and the rewrite skipped the site. Pinned by
+`tests/shcc_comment_semicolon_smoke.shcc`.
 
 ## Keyword-only (`*`) still unspelled
 

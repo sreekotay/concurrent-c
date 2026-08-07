@@ -40,7 +40,23 @@ void cc_nursery_cancel(CCNursery* n);
 // blocked mask. The nursery pointer must remain valid until a signal fires
 // or the process exits. Returns 0 on success, otherwise an errno-style value.
 #line 36 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_nursery.cch"
-int cc_nursery_cancel_on_signals(CCNursery* n, const int* signos, size_t count);
+CCResult_void_CCError cc_nursery_on_signals_n(CCNursery* n, const int* signos,
+                                               size_t count, CCClosure1 handler);
+
+CCResult_void_CCError cc_nursery_on_shutdown(CCNursery* n, CCClosure1 handler);
+
+CCResult_void_CCError cc_nursery_cancel_on_signals_n(CCNursery* n,
+                                                     const int* signos,
+                                                     size_t count);
+
+#define cc_nursery_cancel_on_signals(n, ...)                                       \
+    cc_nursery_cancel_on_signals_n(                                                \
+        (n), (const int[]){__VA_ARGS__},                                           \
+        sizeof((const int[]){__VA_ARGS__}) / sizeof(int))
+
+static inline CCResult_void_CCError cc_nursery_cancel_on_shutdown(CCNursery* n) {
+    return cc_nursery_cancel_on_signals(n, SIGINT, SIGTERM);
+}
 
 // Set an absolute deadline for the nursery (CLOCK_REALTIME). Zeroed timespec clears.
 #line 39 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_nursery.cch"

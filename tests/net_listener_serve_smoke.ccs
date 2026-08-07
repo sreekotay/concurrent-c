@@ -11,7 +11,7 @@ int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
 
     const char* addr = "127.0.0.1:18766";
-    CCListener ln = cc_tcp_listen(addr, strlen(addr)) !>(e) {
+    CCListener ln = cc_tcp_listen(cc_slice_cstr(addr)) !>(e) {
         eprintln(@string(`listen: ${e}`, @scratch)) !>;
         return 1;
     };
@@ -21,7 +21,7 @@ int main(void) {
         CCNursery* server = cc_nursery_create(NULL) !> @destroy;
 
         server->spawn(() => [@safe &ln, server] {
-            CCClosure1 on_conn = (CCSocket* client) => [server] {
+            ln.serve(server, (CCSocket* client) => [server] {
                 CCSocket c = *client;
                 char buf[8] = {0};
                 size_t n = 0;
@@ -30,8 +30,7 @@ int main(void) {
                 (void)c.write("ok", 2);
                 c.close();
                 server->cancel();
-            };
-            ln.serve(server, on_conn);
+            });
         });
 
         CCSocket conn = cc_tcp_connect(addr, strlen(addr)) !>(e) {

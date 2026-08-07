@@ -258,13 +258,16 @@ CCResult_CCSocket_CCNetError cc_tcp_connect(const char* addr, size_t addr_len) {
  * TCP Server
  * ============================================================================ */
 
-CCResult_CCListener_CCNetError cc_tcp_listen(const char* addr, size_t addr_len) {
+CCResult_CCListener_CCNetError cc_tcp_listen(CCSlice addr) {
     CCListener ln = {.fd = -1, .flags = 0, .watcher = NULL};
     CCNetError err = CC_NET_OK;
 
     struct sockaddr_storage sa;
     socklen_t sa_len;
-    if (parse_addr(addr, addr_len, &sa, &sa_len, &err) < 0) {
+    if (!addr.ptr) {
+        return cc_err_CCResult_CCListener_CCNetError(CC_NET_INVALID_ADDRESS);
+    }
+    if (parse_addr((const char*)addr.ptr, addr.len, &sa, &sa_len, &err) < 0) {
         return cc_err_CCResult_CCListener_CCNetError(err);
     }
 

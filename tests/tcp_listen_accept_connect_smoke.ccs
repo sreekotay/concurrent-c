@@ -27,7 +27,7 @@ int main(void) {
         return 1;
     }
 
-    CCListener ln = cc_tcp_listen(PORT, sizeof(PORT) - 1) !>(e) {
+    CCListener ln = cc_tcp_listen(CC_SLICE_LIT(PORT)) !>(e) {
         fprintf(stderr, "tcp_listen_accept_connect_smoke: listen err=%d\n", (int)e);
         return 1;
     };
@@ -52,7 +52,7 @@ int main(void) {
 
     {
         int saw_err = 0;
-        CCListener bad = cc_tcp_listen("not-a-host", 10) !>(e) {
+        CCListener bad = cc_tcp_listen("not-a-host") !>(e) {
             (void)e;
             saw_err = 1;
             goto after_bad_listen;

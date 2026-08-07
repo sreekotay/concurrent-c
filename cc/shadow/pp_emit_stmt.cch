@@ -478,7 +478,7 @@ static int shadow_emit_tpl_build_ex(CEmit* out, const char* tpl,
             if (policy_expr && policy_expr[0]) {
                 if (!cemit_fmt(out,
                         "%scc_string_push_policy(&%s, %s, %s, "
-                        "cc_slice_from_cstr(\"%s\"), "
+                        "CC_SLICE_LIT(\"%s\"), "
                         "cc__string_slot_from_int((%s), %s));\n",
                         indent, msg_name, policy_expr, arena_expr, tag, uexpr,
                         arena_expr))
@@ -2073,7 +2073,8 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                 if (ctx) ctx->err_via_bang = 1;
                 if (strcmp(st->e, "bang_stmt") == 0) {
                     if (st->nbody > 0 &&
-                        !shadow_emit_stmt_ctx(st->body[0], out, ctx, i2, 0)) {
+                        !shadow_emit_stmt_ctx(st->body[0], out, ctx, i2,
+                                              use_cleanup)) {
                         if (ctx) ctx->err_via_bang = saved_via;
                         return 0;
                     }
@@ -2081,7 +2082,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                     int k;
                     for (k = 0; k < st->nbody; k++) {
                         if (!shadow_emit_stmt_ctx(st->body[k], out, ctx, i2,
-                                                  0)) {
+                                                  use_cleanup)) {
                             if (ctx) ctx->err_via_bang = saved_via;
                             return 0;
                         }
@@ -3160,7 +3161,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             }
             shadow_variant_track_drop(ctx, st->b, vty);
         }
-        /* Slice inits: string lit → const_char_to_slice; `{}` → empty. */
+        /* Slice inits: string lit → sizeof-static; `{}` → empty. */
         if (ty && (strcmp(ty, "CCSlice") == 0 ||
                    strcmp(ty, "CCSliceUnique") == 0 ||
                    strcmp(ty, "const CCSlice") == 0)) {
@@ -3170,7 +3171,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             else if (!shadow_slc_already_wrapped(expr, el) &&
                      shadow_slc_is_string_lit(expr, el)) {
                 char wrap[540];
-                snprintf(wrap, sizeof(wrap), "const_char_to_slice(%s)", expr);
+                snprintf(wrap, sizeof(wrap), "CC_SLICE_LIT(%s)", expr);
                 snprintf(expr, sizeof(expr), "%s", wrap);
             }
         } else if (ty && strncmp(ty, "CCSlice_", 8) == 0 &&

@@ -49,10 +49,10 @@ int main(void) {
     AsOuter o = {0};
     o.outer_tag = 1;
     o.mid.mid_tag = 2;
-    assert(o.open(cc_slice_from_cstr("tmp/as_transitive_smoke.txt"), "w") == 0);
+    assert(o.open(CC_SLICE_LIT("tmp/as_transitive_smoke.txt"), "w") == 0);
 
     /* UFCS through two @as hops */
-    CCSlice msg = cc_slice_from_cstr("nested\n");
+    CCSlice msg = CC_SLICE_LIT("nested\n");
     CCRes(size_t, CCIoError) wr = o.write(msg);
     assert(cc_is_ok(wr));
     assert(cc_value(wr) == msg.len);

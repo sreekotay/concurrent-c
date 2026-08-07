@@ -1,24 +1,24 @@
 /* String-switch case bodies must keep local binds so UFCS resolves
- * (CCShardMap* sh → cc_shard_map_get), not invent store_get. */
+ * (CCShard* sh → cc_shard_get), not invent store_get. */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
 static int run(CCSlice name) {
-    CCShardMap m;
-    if (!m.init(8)) return -1;
-    if (!m.put(cc_slice_from_cstr("k"), cc_slice_from_cstr("v"))) return -2;
+    CCShard m;
+    if (!m.init()) return -1;
+    if (!m.put(CC_SLICE_LIT("k"), CC_SLICE_LIT("v"))) return -2;
     switch (name) {
     case "GET": {
-        CCShardMap* sh = &m;
-        CCString* v = sh->get(cc_slice_from_cstr("k"));
+        CCShard* sh = &m;
+        CCString* v = sh->get(CC_SLICE_LIT("k"));
         CCSlice s = v ? v->as_slice() : cc_slice_empty();
         int ok = v && CCSlice_eq_cstr(&s, "v");
         m.destroy();
         return ok ? 1 : 0;
     }
     case "DEL": {
-        CCShardMap* sh = &m;
-        int ok = sh->delete(cc_slice_from_cstr("k")) ? 1 : 0;
+        CCShard* sh = &m;
+        int ok = sh->delete(CC_SLICE_LIT("k")) ? 1 : 0;
         m.destroy();
         return ok;
     }
@@ -29,8 +29,8 @@ static int run(CCSlice name) {
 }
 
 int main(void) {
-    if (run(cc_slice_from_cstr("GET")) != 1) return 1;
-    if (run(cc_slice_from_cstr("DEL")) != 1) return 2;
+    if (run(CC_SLICE_LIT("GET")) != 1) return 1;
+    if (run(CC_SLICE_LIT("DEL")) != 1) return 2;
     printf("ufcs_string_switch_bind_smoke ok\n");
     return 0;
 }

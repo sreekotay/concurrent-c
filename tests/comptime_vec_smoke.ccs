@@ -23,7 +23,7 @@
     int third = ((int*)v.data)[2];
 
     /* hash.cch: hash a stable string, fold to a small tag for the test. */
-    CCSlice key = char_to_slice("comptime");
+    CCSlice key = CC_SLICE_LIT("comptime");
     uint64_t h = cc_hash_slice(key);
     int tag = (int)(h % 1000);
 

@@ -518,7 +518,7 @@ int main(int argc, char** argv) {
     }
     @defer excl->destroy();
 
-    CCListener ln = cc_tcp_listen(addr, strlen(addr)) !>(e) {
+    CCListener ln = cc_tcp_listen(cc_slice_cstr(addr)) !>(e) {
         eprintln(@string(`listen: ${e}`, @scratch)) !>;
         return 1;
     };

@@ -114,7 +114,7 @@ int main(int argc, char** argv) {
 
     bool test_mode = parse_test_flag(argc, argv);
 
-    CCListener ln = cc_tcp_listen(PORT, sizeof(PORT) - 1) !>(e) {
+    CCListener ln = cc_tcp_listen(CC_SLICE_LIT(PORT)) !>(e) {
         println(@string(`listen error: ${e}`, @scratch)) !>;
         return 1;
     };

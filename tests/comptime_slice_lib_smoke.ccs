@@ -7,13 +7,13 @@
  * Here we trim/compare/hash CCSlices at compile time and drive emission off the
  * results. */
 @comptime {
-    CCSlice s = char_to_slice("  hello  ");
+    CCSlice s = CC_SLICE_LIT("  hello  ");
     CCSlice t = cc_slice_trim(&s);
     int ok = cc_slice_eq_cstr(&t, "hello") ? 1 : 0;
     int n = (int)t.len;
 
-    CCSlice csv = char_to_slice("red,green,blue");
-    CCSlice comma = char_to_slice(",");
+    CCSlice csv = CC_SLICE_LIT("red,green,blue");
+    CCSlice comma = CC_SLICE_LIT(",");
     int parts = (int)cc_slice_count(csv, comma) + 1;
 
     @emit(CC_EMIT_AFTER_PRELUDE, `enum { SLICE_TRIM_OK = ${ok} };`);

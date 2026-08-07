@@ -7,7 +7,7 @@
 #include "visitor/edit_buffer.h"
 
 /* Wrap string-literal call args whose corresponding parameter is CCSlice /
- * char[:0] (by value) with const_char_to_slice(...).  Literals only — no
+ * char[:] / char[:0] (by value) with CC_SLICE_LIT(lit). Literals only — no
  * char[N] / char* variable coercion.
  *
  * Runs as Phase-3 stage 1.5 (after UFCS, before autoblock) so lowered

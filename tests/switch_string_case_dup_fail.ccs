@@ -2,7 +2,7 @@
 #include <ccc/std/prelude.cch>
 
 int main(void) {
-    CCSlice name = char_to_slice("GET");
+    CCSlice name = CC_SLICE_LIT("GET");
     switch (name) {
     case "GET":
         return 1;

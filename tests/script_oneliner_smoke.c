@@ -76,7 +76,7 @@ int main(void) {
 
     /* 3) predeclared io (+ a via implication) */
     snprintf(cmd, sizeof(cmd),
-             "./cc/bin/ccc -e 'io.println(char_to_slice(\"via-io\")) !>;'");
+             "./cc/bin/ccc -e 'io.println(CC_SLICE_LIT(\"via-io\")) !>;'");
     if (run_capture(cmd, out, sizeof(out), &ec) != 0 || ec != 0) {
         fprintf(stderr, "FAIL io predecl (exit %d):\n%s\n", ec, out);
         failed = 1;

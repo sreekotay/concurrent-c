@@ -116,10 +116,10 @@ int main(void) {
         store.put(key.as_slice(), request_id * 10) !>;
     }
 
-    int* user1 = store.get(char_to_slice("user:1"));
+    int* user1 = store.get(CC_SLICE_LIT("user:1"));
     if (!user1 || *user1 != 10) return 2;
 
-    if (!store.delete(char_to_slice("user:1"))) return 3;
+    if (!store.delete(CC_SLICE_LIT("user:1"))) return 3;
 
     Map::[CCSliceHdr, int] entries = store.entries;
     size_t n = entries->len();

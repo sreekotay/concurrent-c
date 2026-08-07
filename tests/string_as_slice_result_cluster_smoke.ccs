@@ -20,7 +20,7 @@ static int64_t !>(CCError) increment_and_store(char[:] key, int64_t value) {
 }
 
 int main(void) {
-    int64_t !>(CCError) out = increment_and_store(char_to_slice("k"), 41);
+    int64_t !>(CCError) out = increment_and_store(CC_SLICE_LIT("k"), 41);
     assert(out.is_ok());
     assert(out.value() == 41);
     return 0;

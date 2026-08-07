@@ -120,13 +120,16 @@ A fresh clone with only host `cc` (plus patched `libtcc.a` for the driver)
 must produce a working `shadow_lower` without already having native.
 
 **Therefore:** committed bootstrap snapshots under
-`cc/bootstrap/shadow_lower/vN/` (pointer `last-good`). Source of truth remains
-`cc/shadow/`. Ship face changes via
+`cc/bootstrap/shadow_lower/vN/` (pointer `last-good`). Source of truth is
+only `cc/shadow/*.ccs` / `*.cch` — every behavior fix is edited there first.
+`out/include/cc/shadow/*.h` is a build product, not a second source tree.
+Ship face changes via
 `SHADOW_LOWER_SOURCE=ccs` → `snapshot_shadow_lower.sh` →
-`promote_shadow_bootstrap.sh` — never by hand-editing an existing `vN/`,
-never by patching `last-good`'s tree in place, and never by copying `*.cch`
-onto `out/include/cc/shadow/*.h`. Promote creates a **new** `vN` and flips
-`last-good`; that is the only way a face change enters the committed seed.
+`promote_shadow_bootstrap.sh` — never by editing `out/include` or an existing
+`vN/` to “land” a fix, never by patching `last-good`'s tree in place, and
+never by copying `*.cch` onto `out/include/cc/shadow/*.h`. Promote creates a
+**new** `vN` and flips `last-good`; that is the only way a face change enters
+the committed seed.
 Cold rebuild on a second platform is part of the gate — not optional smoke
 on the generating machine only. See
 [`cc/bootstrap/shadow_lower/README.md`](../bootstrap/shadow_lower/README.md).

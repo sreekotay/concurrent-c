@@ -40,7 +40,7 @@ after_value:
 after_ptr:
 
     /* Also after a successful listen decl (the original Phase-2 probe shape). */
-    CCListener live = cc_tcp_listen("127.0.0.1:18771", 15) !>(ne) {
+    CCListener live = cc_tcp_listen("127.0.0.1:18771") !>(ne) {
         take_net_err(ne);
         return 4;
     };

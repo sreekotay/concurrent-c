@@ -1,0 +1,11 @@
+/* Whitelist parsers + parse_tu (umbrella).
+ * Requires pp_ast_core.cch.
+ *
+ *   pp_ast_parse_stmt.cch — control-flow + dispatch
+ *     pp_ast_parse_unwrap.cch — unwrap / bang / result local
+ *     pp_ast_parse_spawn.cch — spawn / closure / capture infer
+ *   pp_ast_parse_ext.cch — TU / externals
+ */
+#pragma once
+#include "pp_ast_parse_stmt.h"
+#include "pp_ast_parse_ext.h"

@@ -70,7 +70,7 @@ int main(int argc, char** argv) {
     char addr[64];
     snprintf(addr, sizeof(addr), "127.0.0.1:%d", port);
 
-    CCListener ln = cc_tcp_listen(addr, strlen(addr)) !>(e) {
+    CCListener ln = cc_tcp_listen(cc_slice_cstr(addr)) !>(e) {
         fprintf(stderr, "ping_server listen error: %d\n", (int)e);
         return 1;
     };

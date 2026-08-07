@@ -22,7 +22,7 @@ typedef struct Cmd {
     }
     if (!br || !out || !a) return cc_err(CC_ERR_INVALID_ARG, "null");
     out->argc = 1;
-    out->args[0] = cc_slice_from_cstr("ok");
+    out->args[0] = CC_SLICE_LIT("ok");
     return cc_ok(1);
 }
 

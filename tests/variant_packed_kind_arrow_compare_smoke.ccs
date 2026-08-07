@@ -19,7 +19,7 @@ static int probe(PV* v) {
 
 int main(void) {
     PV a = { .n = 7 };
-    PV b = { .s = cc_string_from_slice(NULL, char_to_slice("x")) };
+    PV b = { .s = cc_string_from_slice(NULL, CC_SLICE_LIT("x")) };
     int r = probe(&a) + probe(&b);     /* a=.n -> 10 ; b=.s -> 20 */
     printf("r=%d\n", r);
     return r == 30 ? 0 : 1;

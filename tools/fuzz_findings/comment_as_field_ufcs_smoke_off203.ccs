@@ -12,15 +12,15 @@ typedef struct {
 int main(void) {
     AsFileWrap w = {0};
     w.tag = 7;
-    assert(w.open(cc_slice_from_cstr("tmp/as_field_ufcs_smoke.txt"), "w") == 0);
+    assert(w.open(CC_SLICE_LIT("tmp/as_field_ufcs_smoke.txt"), "w") == 0);
 
-    CCSlice msg = cc_slice_from_cstr("hello-as\n");
+    CCSlice msg = CC_SLICE_LIT("hello-as\n");
     CCRes(size_t, CCIoError) wr = w.write(msg);
     assert(cc_is_ok(wr));
     assert(cc_value(wr) == msg.len);
 
     /* Explicit member path still works. */
-    CCRes(size_t, CCIoError) wr2 = w.file.write(cc_slice_from_cstr("more\n"));
+    CCRes(size_t, CCIoError) wr2 = w.file.write(CC_SLICE_LIT("more\n"));
     assert(cc_is_ok(wr2));
     assert(cc_value(wr2) == 5);
 

@@ -49,6 +49,25 @@ int main(void) {
     if (n != 0) return 9;
 
     if (shared != 2) return 10;
+
+    /* CCShardHold / CCShardDomain wraps guards[] + n. */
+    {
+        CCShardMask mask8 = cc_shard_mask_make(8);
+        CCShardDomain d = cc_shard_domain(excl, mask8);
+        CCShardHold hold = d.hold_sorted(names, 4);
+        if (!hold.held() || hold.n != 3) return 14;
+        hold.release();
+        if (hold.held()) return 15;
+        hold = d.hold_all();
+        if (!hold.held() || hold.n != 8) return 16;
+        hold.release();
+        hold = d.hold_one(3);
+        if (!hold.held() || hold.n != 1) return 17;
+        hold.release();
+        hold = d.hold_one(99); /* out of range */
+        if (hold.held()) return 18;
+    }
+
     puts("exclusive_shard_acquire_smoke: PASS");
     return 0;
 }

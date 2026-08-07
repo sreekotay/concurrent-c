@@ -11,23 +11,25 @@ re-lowering that `.ccs`.
 | `vN/` | Promoted snapshot | Committed when you choose |
 | `last-good` | Pointer to the active `vN` | Committed |
 
-**Source of truth** remains `cc/shadow/*.ccs` / `*.cch`. Snapshot
-contents are regenerate-only — do not hand-edit.
+**Source of truth is only `cc/shadow/*.ccs` / `*.cch`.** Every lowerer
+behavior fix (parse, emit, UFCS, closures, …) is edited there first. Snapshot
+`vN/` trees and `out/include/cc/shadow/*.h` are regenerate-only products —
+never the place you land a fix.
 
 ### Never (common failure modes)
 
 | Don't | Why | Do instead |
 |-------|-----|------------|
+| Edit `out/include/cc/shadow/*.h` to fix a bug | Bootstrap `make -C cc` recopies `last-good` over those headers; the bug returns and the `.cch` never changed | Edit `cc/shadow/*.cch`, then ccs rebuild → snapshot → promote |
 | Hand-edit `vN/include/*.h` or `vN/shadow_lower.c` | Committed seeds are regenerate-only; in-place patches skip promote and diverge from `.cch` | Edit `cc/shadow/*.cch`, then snapshot → promote |
 | Patch `last-good`'s tree to "land" a fix | Leaves `last-good` pointing at a mutated seed; next cold clone rebuild is wrong | Promote a new `vN` and flip `last-good` |
-| `cp` raw `cc/shadow/*.cch` → `out/include/cc/shadow/*.h` | Relative includes and snapshot path-rewriting disagree; looks synced, tree is broken | Rebuild via `SHADOW_LOWER_SOURCE=ccs`, then snapshot (copies faces into `latest/`) |
+| `cp` raw `cc/shadow/*.cch` → `out/include/cc/shadow/*.h` | Relative includes and snapshot path-rewriting disagree; looks synced, tree is broken | Rebuild via `SHADOW_LOWER_SOURCE=ccs`, then snapshot |
 | Assume default `make -C cc` picked up `.cch` edits | Default builds from `last-good` (`SHADOW_LOWER_SOURCE=bootstrap`) | `SHADOW_LOWER_SOURCE=ccs` while iterating; promote when the face should stick |
+| Lower a single face `.cch` with `shadow_lower …/pp_emit_ufcs.cch -o …` | Those files are include fragments, not standalone TUs; the lowerer can hang | Change the `.cch`, rebuild the whole lowerer, snapshot |
 
 `out/include/cc/shadow/*.h` is a **build product** (seeded from `last-good`
-on bootstrap builds, refreshed into `latest/` by snapshot). Interim face
-patches under `out/include` (when standalone re-lower hangs) are a **local
-build aid only** — never copy them into an existing `vN/`; snapshot/promote
-is what freezes them.
+on bootstrap builds, copied into `latest/` by snapshot). It is not a second
+source tree.
 
 ## Iterate → ship
 

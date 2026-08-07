@@ -84,7 +84,7 @@ int main(void) {
 
     /* Declarator position without initializer; plain assignment works. */
     char u[:];
-    u = const_char_to_slice("x");
+    u = CC_SLICE_LIT("x");
     assert(u.len == 1);
 
     /* Byte helpers on char slices unchanged; on typed slices they are

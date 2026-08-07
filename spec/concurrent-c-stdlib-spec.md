@@ -1235,7 +1235,7 @@ TCP listen, accept, and connect return Result (`T!>(CCNetError)`, lowered as
 
 ```c
 CCResult_CCSocket_CCNetError cc_tcp_connect(const char *addr, size_t addr_len);
-CCResult_CCListener_CCNetError cc_tcp_listen(const char *addr, size_t addr_len);
+CCResult_CCListener_CCNetError cc_tcp_listen(CCSlice addr);
 CCResult_CCSocket_CCNetError cc_listener_accept(CCListener *listener);
 void cc_listener_close(CCListener *listener);
 
@@ -1253,11 +1253,13 @@ CCSlice cc_socket_peer_addr(CCSocket *socket, CCArena *arena, CCNetError *out_er
 CCSlice cc_socket_local_addr(CCSocket *socket, CCArena *arena, CCNetError *out_err);
 ```
 
-`addr` is a length-delimited `host:port`, IPv4 `address:port`, or bracketed
-IPv6 address. Idiomatic use is unwrap sugar on the greppable `cc_*` names:
+Listen `addr` is a NUL-terminated borrow (`char[:0]` / `CCSlice`), same shape
+as `cc_file_open`'s path. Connect still takes a length-delimited
+`host:port` / IPv4 `address:port` / bracketed IPv6. Idiomatic use is unwrap
+sugar on the greppable `cc_*` names:
 
 ```c
-CCListener ln = cc_tcp_listen(addr, len) !>;
+CCListener ln = cc_tcp_listen(addr) !>;
 CCSocket sock = cc_listener_accept(&ln) !>;
 CCSocket client = cc_tcp_connect(addr, len) !>;
 ```

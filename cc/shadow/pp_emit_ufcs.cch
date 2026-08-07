@@ -3,8 +3,10 @@
  * Requires pp_emit_core.cch. */
 #pragma once
 
-/* Defined in pp_emit_stmt.cch (after this include). */
+/* Defined in pp_emit_stmt.cch / pp_emit_spawn.cch (after this include). */
 static void shadow_rewrite_print_and_string(char* expr, size_t cap);
+static AstNode* shadow_expr_closure_kid(AstNode* st);
+static void shadow_splice_closure_arg(char* expr, size_t cap, AstNode* cl);
 
 /* Extract receiver immediately before `.` / `->` at `op`.
  * Accepts ident, a->b.c chains, parenthesized expr, or call ending in `)`. */
@@ -1142,8 +1144,18 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
     } else if (!is_arrow && strcmp(meth_name, "len") == 0) {
         if (vty[0] && strncmp(vty, "CCSlice_", 8) == 0)
             return shadow_ufcs_emit_slice_meth(vty, "len", recv, NULL, dst, cap);
+        if (shadow_ufcs_ty_is(vty, rb, "CCShardMap")) {
+            if (SHADOW_UFCS_PTR_RECV())
+                snprintf(dst, cap, "cc_shard_map_len(%s)", recv);
+            else
+                snprintf(dst, cap, "cc_shard_map_len(&%s)", recv);
+        } else if (shadow_ufcs_ty_is(vty, rb, "CCShard")) {
+            if (SHADOW_UFCS_PTR_RECV())
+                snprintf(dst, cap, "cc_shard_len(%s)", recv);
+            else
+                snprintf(dst, cap, "cc_shard_len(&%s)", recv);
         /* Maps before packed — ty may be ArrayMap_CCSlicePacked_int. */
-        if (vty[0] && (strncmp(vty, "CCVec_", 6) == 0 ||
+        } else if (vty[0] && (strncmp(vty, "CCVec_", 6) == 0 ||
                        strncmp(vty, "Map_", 4) == 0 ||
                        strncmp(vty, "ArrayMap_", 9) == 0)) {
             if (SHADOW_UFCS_PTR_RECV())
@@ -1321,6 +1333,12 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
             snprintf(dst, cap, "cc_slice_%s(&%s)", meth_name, recv);
         else
             snprintf(dst, cap, "cc_slice_%s(&(%s))", meth_name, recv);
+    } else if (strcmp(meth_name, "at") == 0 &&
+               shadow_ufcs_ty_is(vty, rb, "CCShardMap")) {
+        if (SHADOW_UFCS_PTR_RECV() || is_arrow)
+            snprintf(dst, cap, "cc_shard_map_at(%s, %s)", recv, a);
+        else
+            snprintf(dst, cap, "cc_shard_map_at(&%s, %s)", recv, a);
     } else if (!is_arrow && strcmp(meth_name, "at") == 0) {
         if (vty[0] && strncmp(vty, "CCSlice_", 8) == 0)
             return shadow_ufcs_emit_slice_meth(vty, "at", recv, a, dst, cap);
@@ -1549,6 +1567,8 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
             snprintf(dst, cap, "cc_slice_packed_release(%s, &%s)", a, recv);
         else if (shadow_ufcs_ty_is(vty, rb, "CCExclusiveGuard"))
             snprintf(dst, cap, "cc_exclusive_guard_release(&%s)", recv);
+        else if (shadow_ufcs_ty_is(vty, rb, "CCShardHold"))
+            snprintf(dst, cap, "cc_shard_hold_release(&%s)", recv);
         else
             return 0;
     } else if (is_arrow && strcmp(meth_name, "release") == 0) {
@@ -1558,6 +1578,8 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
             snprintf(dst, cap, "cc_slice_packed_release(%s, %s)", a, recv);
         else if (shadow_ufcs_ty_is(vty, rb, "CCExclusiveGuard"))
             snprintf(dst, cap, "cc_exclusive_guard_release(%s)", recv);
+        else if (shadow_ufcs_ty_is(vty, rb, "CCShardHold"))
+            snprintf(dst, cap, "cc_shard_hold_release(%s)", recv);
         else
             return 0;
     } else if (!is_arrow && strcmp(meth_name, "destroy") == 0 &&
@@ -1678,29 +1700,22 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
                 snprintf(dst, cap, "cc_socket_write(&%s, %s)", recv, a);
         } else
             return 0; /* no ambient write by method name */
-    } else if (strcmp(meth_name, "to_slice") == 0) {
-        /* `p->to_slice()` / `p.to_slice()` on C string pointers. */
+    } else if (strcmp(meth_name, "to_slice_n") == 0) {
+        /* `p->to_slice_n(n)` — counted; no strlen. */
         const char* ty = rb ? rb->ty : vty;
         int is_unsigned = ty && strstr(ty, "unsigned char") != NULL;
         int is_signed = ty && strstr(ty, "signed char") != NULL && !is_unsigned;
         int is_const = ty && strstr(ty, "const") != NULL;
-        if (is_unsigned && is_const)
-            snprintf(dst, cap, "const_unsigned_char_to_slice(%s)", recv);
-        else if (is_unsigned)
-            snprintf(dst, cap, "unsigned_char_to_slice(%s)", recv);
-        else if (is_signed && is_const)
-            snprintf(dst, cap, "const_signed_char_to_slice(%s)", recv);
-        else if (is_signed)
-            snprintf(dst, cap, "signed_char_to_slice(%s)", recv);
+        const char* fn;
+        if (is_unsigned && is_const) fn = "const_unsigned_char_to_slice_n";
+        else if (is_unsigned) fn = "unsigned_char_to_slice_n";
+        else if (is_signed && is_const) fn = "const_signed_char_to_slice_n";
+        else if (is_signed) fn = "signed_char_to_slice_n";
         else if (is_const || (ty && strstr(ty, "char")))
-            snprintf(dst, cap,
-                     is_const ? "const_char_to_slice(%s)" : "char_to_slice(%s)",
-                     recv);
+            fn = is_const ? "const_char_to_slice_n" : "char_to_slice_n";
         else
-            /* Untyped beachhead: arrow/dot to_slice on pointer-ish idents. */
-            snprintf(dst, cap,
-                     is_arrow ? "const_char_to_slice(%s)" : "char_to_slice(%s)",
-                     recv);
+            fn = is_arrow ? "const_char_to_slice_n" : "char_to_slice_n";
+        snprintf(dst, cap, "%s(%s, %s)", fn, recv, a);
     } else if (!is_arrow && strcmp(meth_name, "read_into") == 0) {
         if (!shadow_ufcs_need_amp(recv))
             snprintf(dst, cap, "cc_socket_read_into(%s, %s)", recv, a);
@@ -1820,7 +1835,7 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
                     size_t ci = 3;
                     size_t ti;
                     const char* r;
-                    /* CCShardMap* → cc_shard_map_get (strip pointer stars). */
+                    /* CCShard* → cc_shard_get (strip pointer stars). */
                     shadow_ufcs_vty_base(tag, base, sizeof(base));
                     r = base[0] ? base + 2 : tag + 2;
                     ccs[0] = 'c'; ccs[1] = 'c'; ccs[2] = '_';
@@ -3074,6 +3089,9 @@ static int shadow_lower_chan_result_cmp(char* dst, size_t cap,
 
 static void shadow_rewrite_ufcs(char* dst, size_t cap, const char* src,
                                 const char* elem_ty);
+static void shadow_rewrite_slice_lit_call_args(char* expr, size_t cap);
+static void shadow_rewrite_as_call_args(char* expr, size_t cap);
+static void shadow_rewrite_slice_as_call_args(char* expr, size_t cap);
 
 /* Structured UFCS → C via lower_parts (no text reconstruct on the call). */
 static int shadow_emit_ufcs_to_buf(AstNode* st, char* dst, size_t cap,
@@ -3186,6 +3204,16 @@ static int shadow_emit_ufcs_to_buf(AstNode* st, char* dst, size_t cap,
     }
     shadow_rewrite_at_slice(dst, cap);
     shadow_rewrite_generic_types_text(dst, cap);
+    /* Call-arg `=>` lifted onto dbody — splice make() into the lowered call. */
+    {
+        AstNode* cl = shadow_expr_closure_kid(st);
+        if (cl) shadow_splice_closure_arg(dst, cap, cl);
+    }
+    /* Structured UFCS used to skip lit coerce (only the text-peel path ran
+     * it) — `return c->err("…")` stayed a bare C string. */
+    shadow_rewrite_slice_as_call_args(dst, cap);
+    shadow_rewrite_slice_lit_call_args(dst, cap);
+    shadow_rewrite_as_call_args(dst, cap);
     return 1;
 }
 
@@ -3358,7 +3386,9 @@ static int shadow_slc_known_arg(const char* callee, int arg_index) {
         return arg_index == 1 || arg_index == 2;
     if (strcmp(callee, "cc_file_read_path") == 0) return arg_index == 0;
     if (strcmp(callee, "cc_file_write_path") == 0) return arg_index == 0;
+    if (strcmp(callee, "cc_file_write") == 0) return arg_index == 1;
     if (strcmp(callee, "cc_sh_run") == 0) return arg_index == 0;
+    if (strcmp(callee, "cc_tcp_listen") == 0) return arg_index == 0;
     return 0;
 }
 
@@ -3386,7 +3416,8 @@ static int shadow_slc_is_string_lit(const char* s, size_t n) {
 
 static int shadow_slc_already_wrapped(const char* s, size_t n) {
     static const char* wraps[] = {
-        "const_char_to_slice", "char_to_slice", "cc_slice_from_cstr",
+        "cc_slice_from_static", "CC_SLICE_LIT", "cc_slice_cstr",
+        "char_to_slice_n", "const_char_to_slice_n",
     };
     size_t i = 0, k;
     while (i < n && (s[i] == ' ' || s[i] == '\t')) i++;
@@ -3507,7 +3538,12 @@ static void shadow_rewrite_slice_lit_call_args(char* expr, size_t cap) {
                                           strcmp(fp->base, "CCSliceUnique") ==
                                               0 ||
                                           strcmp(fp->base, "CCSliceShared") ==
-                                              0));
+                                              0 ||
+                                          strcmp(fp->base, "char[:]") == 0 ||
+                                          strcmp(fp->base, "char[:0]") == 0 ||
+                                          strcmp(fp->base, "char[:!]") == 0 ||
+                                          strcmp(fp->base, "char[:0!]") == 0 ||
+                                          strcmp(fp->base, "char[::]") == 0));
                                     if (want_slc &&
                                         !shadow_slc_already_wrapped(
                                             cur + lead, al - lead) &&
@@ -3515,12 +3551,27 @@ static void shadow_rewrite_slice_lit_call_args(char* expr, size_t cap) {
                                                                  al - lead)) {
                                         o += (size_t)snprintf(
                                             out + o, sizeof(out) - o,
-                                            "const_char_to_slice(%.*s)",
+                                            "CC_SLICE_LIT(%.*s)",
                                             (int)(al - lead), cur + lead);
                                     } else {
-                                        o += (size_t)snprintf(
-                                            out + o, sizeof(out) - o, "%.*s",
-                                            (int)al, cur);
+                                        /* Nested calls (e.g. cc_is_err(f.write(
+                                         * "x"))) must rewrite inner CCSlice
+                                         * lit args — outer callee consumes the
+                                         * whole call as one arg. */
+                                        char abuf[4096];
+                                        if (al + 1 < sizeof(abuf)) {
+                                            memcpy(abuf, cur, al);
+                                            abuf[al] = 0;
+                                            shadow_rewrite_slice_lit_call_args(
+                                                abuf, sizeof(abuf));
+                                            o += (size_t)snprintf(
+                                                out + o, sizeof(out) - o, "%s",
+                                                abuf);
+                                        } else {
+                                            o += (size_t)snprintf(
+                                                out + o, sizeof(out) - o,
+                                                "%.*s", (int)al, cur);
+                                        }
                                     }
                                 }
                             }
@@ -4179,6 +4230,10 @@ static void shadow_emit_expr_text(AstNode* st, const char* text, char* dst,
                     shadow_rewrite_closure_calls(dst, cap);
                     shadow_rewrite_print_and_string(dst, cap);
                     shadow_rewrite_at_slice(dst, cap);
+                    /* ufcs_to_buf already lit-coerces; keep as_call here for
+                     * any print/string rewrite that reintroduced bare lits. */
+                    shadow_rewrite_slice_lit_call_args(dst, cap);
+                    shadow_rewrite_as_call_args(dst, cap);
                     if (elem_ty && strncmp(elem_ty, "CCResult_", 9) == 0)
                         shadow_rewrite_result_ctors(dst, cap, elem_ty);
                     return;

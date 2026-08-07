@@ -3,7 +3,7 @@
 #include <stdio.h>
 
 @comptime {
-    CCSlice m = cc_slice_from_cstr("get");
+    CCSlice m = CC_SLICE_LIT("get");
     int v = 0;
     int ft = 0;
     switch (m) {
@@ -17,7 +17,7 @@
         v = -1;
         break;
     }
-    switch (cc_slice_from_cstr("B")) {
+    switch (CC_SLICE_LIT("B")) {
     case "A":
     case "B":
         ft = 10;

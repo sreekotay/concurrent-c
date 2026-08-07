@@ -8,8 +8,8 @@
 #include "impl_cch_header_helper.cch"
 
 int main(void) {
-    char[:] a = char_to_slice("40");
-    char[:] b = char_to_slice("2");
+    char[:] a = CC_SLICE_LIT("40");
+    char[:] b = CC_SLICE_LIT("2");
     printf("sum=%lld\n", (long long)helper_sum(a, b));
     printf("cell=%lld\n", (long long)helper_cell_roundtrip(7));
     return 0;

@@ -1,5 +1,5 @@
 ---
-description: shadow_lower source-of-truth and bootstrap promote loop — never hand-edit vN
+description: shadow_lower source-of-truth and bootstrap promote loop — never hand-edit vN or out/include
 globs: cc/shadow/**,cc/bootstrap/shadow_lower/**,out/include/cc/shadow/**,scripts/snapshot_shadow_lower.sh,scripts/promote_shadow_bootstrap.sh
 alwaysApply: false
 ---
@@ -8,8 +8,9 @@ alwaysApply: false
 
 ## Source of truth
 
-- Edit only `cc/shadow/*.ccs` / `*.cch`.
+- **Fixes always land in `cc/shadow/*.ccs` / `*.cch` first.** That is the only source of truth for parse/emit/UFCS behavior.
 - Committed `cc/bootstrap/shadow_lower/vN/` is **regenerate-only**. Never hand-edit `vN/include/*.h`, `vN/shadow_lower.c`, or patch `last-good`'s tree in place to "land" a fix.
+- `out/include/cc/shadow/*.h` is a **build product**, not a second source tree. Never edit those headers to fix a bug — default `make -C cc` recopies `last-good` over them and the bug returns. Never `cp` raw `*.cch` onto those paths.
 
 ## Ship loop (required when face changes should stick)
 
@@ -28,8 +29,8 @@ Default `make -C cc` builds from `last-good` (`SHADOW_LOWER_SOURCE=bootstrap`). 
 
 ## Faces vs bootstrap
 
-- `out/include/cc/shadow/*.h` is a **build product** (seeded from `last-good`, copied into `latest/` by snapshot). Do not `cp` raw `*.cch` onto those paths (include spelling / rewrite mismatch).
-- Standalone re-lower of some faces hangs — interim iteration via an `out/include` face patch matching the `.cch` is allowed **only as a local build aid**. It is not a substitute for snapshot/promote. Never copy that patch into an existing `vN/`.
+- Snapshot copies lowered faces into `latest/`; promote freezes them into a new `vN`.
+- Do not lower a single face `.cch` as a standalone TU (include fragments; can hang). Change the `.cch`, rebuild the whole lowerer, then snapshot.
 
 ## Docs
 

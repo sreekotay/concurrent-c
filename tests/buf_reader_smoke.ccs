@@ -53,7 +53,7 @@ int main(void) {
         if (!w) return 6;
         fputs("alpha\nbeta\n", w);
         fclose(w);
-        if (cc_file_open(&f, cc_slice_from_cstr(path), "r") != 0) return 7;
+        if (cc_file_open(&f, cc_slice_cstr(path), "r") != 0) return 7;
         @defer f.close();
         fbr.init(&f, fbuf, sizeof(fbuf));
         {

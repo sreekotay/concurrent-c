@@ -13,13 +13,13 @@ int main(void) {
         fprintf(stderr, "open failed\n");
         return 1;
     }
-    if (cc_is_err(f.write(char_to_slice("ok\n")))) {
+    if (cc_is_err(f.write("ok\n"))) {
         f.close();
         return 1;
     }
     f.close();
 
-    assert(cc_path_exists(path->to_slice())); /* non-literal still needs wrap/UFCS */
+    assert(cc_path_exists(cc_slice_cstr(path))); /* non-literal still needs wrap/UFCS */
     unlink(path);
 
     printf("slice_literal_coerce_smoke: PASS\n");

@@ -523,12 +523,42 @@ static char* cc__rewrite_builtin_owned_decl_annotations(const char* src, size_t 
             continue;
         }
 
+        /* Statement start = first code byte after prior `;`/`{`/`}`.
+         * Skip delimiters that sit inside comments (task #53: a `;` in a
+         * leading block comment must not mid-anchor `@destroy`).  Do not
+         * call full-TU `cc_rfind_char_top_level` here — after include
+         * expand the span exceeds its 1MiB mask and the fallback is
+         * comment-blind again. */
         stmt_s = i;
-        while (stmt_s > 0 &&
-               src[stmt_s - 1] != ';' &&
-               src[stmt_s - 1] != '{' &&
-               src[stmt_s - 1] != '}') {
-            stmt_s--;
+        while (stmt_s > 0) {
+            while (stmt_s > 0 &&
+                   src[stmt_s - 1] != ';' &&
+                   src[stmt_s - 1] != '{' &&
+                   src[stmt_s - 1] != '}') {
+                stmt_s--;
+            }
+            if (stmt_s == 0) break;
+            {
+                size_t delim = stmt_s - 1;
+                int in_bc = 0;
+                size_t k = delim;
+                /* Non-nested block comments: walking left, opener-first
+                 * means `delim` is inside; closer-first means outside. */
+                while (k > 0) {
+                    if (k >= 2 && src[k - 2] == '*' && src[k - 1] == '/') {
+                        in_bc = 0;
+                        break;
+                    }
+                    if (k >= 2 && src[k - 2] == '/' && src[k - 1] == '*') {
+                        in_bc = 1;
+                        break;
+                    }
+                    k--;
+                }
+                if (!in_bc && !cc_scan_pos_in_line_comment(src, delim))
+                    break;
+            }
+            stmt_s--; /* step onto inert delim and keep seeking */
         }
         stmt_s = cc_skip_ws_and_comments(src, n, stmt_s);
         if (!cc__pp_find_top_level_equal(src, stmt_s, i, &eq)) {
@@ -1294,7 +1324,7 @@ static int cc__rewrite_template_body(char** out,
                                         "cc_string_push_policy(&%s, %s, %s, ",
                                         builder_name, policy_name, arena_name);
                 if (piece.kind == CC_TPL_PIECE_TAGGED_SLOT) {
-                    cc_sb_append_cstr(out, out_len, out_cap, "cc_slice_from_cstr(");
+                    cc_sb_append_cstr(out, out_len, out_cap, "CC_SLICE_LIT(");
                     cc__append_c_string_escaped(out, out_len, out_cap,
                                                 src + piece.tag_off, piece.tag_len);
                     cc_sb_append_cstr(out, out_len, out_cap, "), ");
@@ -2035,7 +2065,8 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                 return (char*)-1;
             }
             cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
-            cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_slice_from_cstr(");
+            /* Same expansion as call-arg lit coerce; @slice is optional sugar. */
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "CC_SLICE_LIT(");
             cc_sb_append(&out, &out_len, &out_cap, src + arg_s, arg_e - arg_s);
             cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
             rewrite_count++;
@@ -9473,7 +9504,7 @@ static int cc__slice_instance_for_elem(const char* src, size_t elem_s, size_t el
 }
 
 /* Lower a slice declaration initializer:
- *   `= "lit"` -> `= const_char_to_slice("lit")`      (char element type)
+ *   `= "lit"` -> `= CC_SLICE_LIT("lit")`      (char element type)
  *   `= {...}` -> hidden block-scope backing array + view:
  *                `T __cc_slb_N[] = {...}; CCSlice N =
  *                 cc_slice_from_buffer(buf, element-count)`
@@ -9588,7 +9619,7 @@ static size_t cc__slice_emit_decl_init(char** out, size_t* out_len, size_t* out_
                 ie--;
             cc_sb_append_cstr(out, out_len, out_cap, "CCSlice ");
             cc_sb_append(out, out_len, out_cap, src + name_s, name_e - name_s);
-            cc_sb_append_cstr(out, out_len, out_cap, " = const_char_to_slice(");
+            cc_sb_append_cstr(out, out_len, out_cap, " = CC_SLICE_LIT(");
             cc_sb_append(out, out_len, out_cap, src + p, ie - p);
             cc_sb_append_cstr(out, out_len, out_cap, ")");
             return end;

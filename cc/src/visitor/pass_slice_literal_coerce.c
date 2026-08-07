@@ -100,13 +100,15 @@ static int cc__slc_type_is_slice_value(const char* ty) {
 
 static int cc__slc_arg_already_wrapped(const char* s, size_t a, size_t b) {
     static const char* wraps[] = {
-        "const_char_to_slice",
-        "char_to_slice",
-        "cc_slice_from_cstr",
-        "unsigned_char_to_slice",
-        "signed_char_to_slice",
-        "const_unsigned_char_to_slice",
-        "const_signed_char_to_slice",
+        "cc_slice_from_static",
+        "CC_SLICE_LIT",
+        "cc_slice_cstr",
+        "char_to_slice_n",
+        "const_char_to_slice_n",
+        "unsigned_char_to_slice_n",
+        "signed_char_to_slice_n",
+        "const_unsigned_char_to_slice_n",
+        "const_signed_char_to_slice_n",
     };
     size_t i = cc_skip_ws_and_comments(s, b, a);
     size_t k;
@@ -139,20 +141,20 @@ static int cc__slc_known_slice_arg(const char* callee, int arg_index) {
     if (strcmp(callee, "cc_script_path_join") == 0) return arg_index == 0 || arg_index == 1;
     if (strcmp(callee, "cc_file_read_path") == 0) return arg_index == 0;
     if (strcmp(callee, "cc_file_write_path") == 0) return arg_index == 0;
+    if (strcmp(callee, "cc_file_write") == 0) return arg_index == 1;
     if (strcmp(callee, "cc_sh_run") == 0) return arg_index == 0;
+    if (strcmp(callee, "cc_tcp_listen") == 0) return arg_index == 0;
     if (strcmp(callee, "cc_cwd") == 0) return 0;
     return 0;
 }
 
 static int cc__slc_skip_callee(const char* callee) {
     if (!callee) return 1;
-    if (strcmp(callee, "const_char_to_slice") == 0) return 1;
-    if (strcmp(callee, "char_to_slice") == 0) return 1;
-    if (strcmp(callee, "cc_slice_from_cstr") == 0) return 1;
-    if (strcmp(callee, "unsigned_char_to_slice") == 0) return 1;
-    if (strcmp(callee, "signed_char_to_slice") == 0) return 1;
-    if (strcmp(callee, "const_unsigned_char_to_slice") == 0) return 1;
-    if (strcmp(callee, "const_signed_char_to_slice") == 0) return 1;
+    if (strcmp(callee, "cc_slice_from_static") == 0) return 1;
+    if (strcmp(callee, "CC_SLICE_LIT") == 0) return 1;
+    if (strcmp(callee, "cc_slice_cstr") == 0) return 1;
+    if (strcmp(callee, "char_to_slice_n") == 0) return 1;
+    if (strcmp(callee, "const_char_to_slice_n") == 0) return 1;
     return 0;
 }
 
@@ -443,16 +445,22 @@ int cc__collect_slice_literal_coerce_edits(const CCASTRoot* root,
             if (!want_slice) continue;
 
             arg_n = trim_e - trim_a;
-            need = (int)(sizeof("const_char_to_slice()") + arg_n);
+            /* CC_SLICE_LIT("...") — sizeof-based; no strlen. */
+            need = (int)(sizeof("CC_SLICE_LIT()") + arg_n);
             repl = (char*)malloc((size_t)need);
             if (!repl) {
                 cc_callee_occ_index_free(occ_idx);
                 return -1;
             }
-            memcpy(repl, "const_char_to_slice(", 20);
-            memcpy(repl + 20, in_src + trim_a, arg_n);
-            repl[20 + arg_n] = ')';
-            repl[20 + arg_n + 1] = '\0';
+            {
+                int nw = snprintf(repl, (size_t)need, "CC_SLICE_LIT(%.*s)",
+                                  (int)arg_n, in_src + trim_a);
+                if (nw < 0 || nw >= need) {
+                    free(repl);
+                    cc_callee_occ_index_free(occ_idx);
+                    return -1;
+                }
+            }
             if (cc_edit_buffer_add(eb, trim_a, trim_e, repl, 0, "slice_literal_coerce") < 0) {
                 free(repl);
                 cc_callee_occ_index_free(occ_idx);

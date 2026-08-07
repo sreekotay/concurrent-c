@@ -34,7 +34,7 @@ static bool fill(CCArena* a, Cmd* out, CCSlice line) {
 int main(void) {
     CCArena a = cc_arena_heap(1024) @destroy;
     Cmd c;
-    if (!fill(&a, &c, char_to_slice("GET key"))) return 1;
+    if (!fill(&a, &c, CC_SLICE_LIT("GET key"))) return 1;
     if (c.argc != 2) return 2;
     if (c.args[0].len != 3 || memcmp(c.args[0].ptr, "GET", 3) != 0) return 3;
     if (c.args[1].len != 3 || memcmp(c.args[1].ptr, "key", 3) != 0) return 4;

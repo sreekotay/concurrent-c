@@ -28,13 +28,13 @@ static int fallthrough_pair(CCSlice name) {
 }
 
 int main(void) {
-    if (classify(char_to_slice("GET")) != 1) return 1;
-    if (classify(char_to_slice("SET")) != 2) return 2;
-    if (classify(char_to_slice("PING")) != 3) return 3;
-    if (classify(char_to_slice("DEL")) != 0) return 4;
-    if (fallthrough_pair(char_to_slice("A")) != 10) return 5;
-    if (fallthrough_pair(char_to_slice("B")) != 10) return 6;
-    if (fallthrough_pair(char_to_slice("C")) != 0) return 7;
+    if (classify(CC_SLICE_LIT("GET")) != 1) return 1;
+    if (classify(CC_SLICE_LIT("SET")) != 2) return 2;
+    if (classify(CC_SLICE_LIT("PING")) != 3) return 3;
+    if (classify(CC_SLICE_LIT("DEL")) != 0) return 4;
+    if (fallthrough_pair(CC_SLICE_LIT("A")) != 10) return 5;
+    if (fallthrough_pair(CC_SLICE_LIT("B")) != 10) return 6;
+    if (fallthrough_pair(CC_SLICE_LIT("C")) != 0) return 7;
     printf("ok\n");
     return 0;
 }

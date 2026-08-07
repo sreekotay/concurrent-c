@@ -1,10 +1,8 @@
 /* The levenshtein specimen builds and imports: distance/ratio/hamming/
- * jaro/jaro_winkler on fixed pairs, codepoints not bytes -- e-acute and
- * an astral-plane char are one edit each (spelled as escapes).  Full
+ * jaro/jaro_winkler on fixed pairs, codepoints not bytes — e-acute and
+ * an astral-plane char are one edit each (spelled as escapes). Full
  * parity against the pip package lives in real_projects/levenshtein/
- * parity.py -- this smoke needs only python3.  NOTE this comment must
- * stay semicolon-free (task #53: a stray one corrupts the emit plan's
- * insert position in .shcc files). */
+ * parity.py; this smoke needs only python3. */
 CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 
 {
