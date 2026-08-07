@@ -1,4 +1,7 @@
-check_submodules  Ensure git submodules are reachable / present.
-fmt               clang-format -i under cc/ (no-op if clang-format missing).
-lint              clang-format --dry-run --Werror under cc/.
-lint_scanners     Scanner-hygiene ratchet (hand-rolled comment/string machines).
+check_submodules       Ensure git submodules are reachable / present.
+fmt                    clang-format -i under cc/ (no-op if clang-format missing).
+fuzz_comment           Comment-insertion fuzzer: an inserted comment must not change behavior.
+fuzz_mutate            Mutation fuzzer: no input may crash the compiler or hit internal errors.
+lint                   clang-format --dry-run --Werror under cc/.
+lint_scanners          Scanner-hygiene ratchet (hand-rolled comment/string machines).
+lint_soft_return_emit  Soft-return / watermark emit-shape ratchet (spec §5.1).

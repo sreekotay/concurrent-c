@@ -2,8 +2,8 @@
 # Emit shadow_lower.ccs (+ lowered local headers) into
 # cc/bootstrap/shadow_lower/latest/. Does not promote or commit.
 #
-# Prefers an existing shadow_lower binary (native self-emit).
-# Escape hatch only: --legacy / SNAPSHOT_EMITTER=legacy (ccc --frontend=legacy).
+# Native self-emit only: requires an existing shadow_lower binary
+# (make -C cc / SHADOW_LOWER_SOURCE=ccs). The old --legacy ccc escape is gone.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -11,17 +11,19 @@ BOOT="$ROOT/cc/bootstrap/shadow_lower"
 LATEST="$BOOT/latest"
 SRC="$ROOT/cc/shadow/shadow_lower.ccs"
 HDR_SRC="$ROOT/out/include/cc/shadow"
-CCC="${CCC:-$ROOT/cc/bin/ccc}"
 SHADOW="${SHADOW:-}"
 SMOKE=0
-FORCE_LEGACY=0
 
 for arg in "$@"; do
   case "$arg" in
     --smoke) SMOKE=1 ;;
-    --legacy) FORCE_LEGACY=1 ;;
+    --legacy)
+      echo "error: --legacy snapshot emit is retired; use native shadow_lower" >&2
+      echo "  make -C cc SHADOW_LOWER_SOURCE=ccs ../out/cc/bin/shadow_lower" >&2
+      exit 2
+      ;;
     -h|--help)
-      echo "usage: $0 [--smoke] [--legacy]"
+      echo "usage: $0 [--smoke]"
       exit 0
       ;;
     *)
@@ -30,10 +32,6 @@ for arg in "$@"; do
       ;;
   esac
 done
-
-if [[ "${SNAPSHOT_EMITTER:-}" == "legacy" ]]; then
-  FORCE_LEGACY=1
-fi
 
 if [[ ! -f "$SRC" ]]; then
   echo "error: missing $SRC" >&2
@@ -49,34 +47,21 @@ fi
 rm -rf "$LATEST"
 mkdir -p "$LATEST/include"
 
-EMITTER=""
-if [[ "$FORCE_LEGACY" -eq 1 ]]; then
-  if [[ ! -x "$CCC" ]]; then
-    echo "error: missing ccc at $CCC (make -C cc)" >&2
-    exit 1
-  fi
-  echo "[snapshot] emit via legacy ccc ($CCC) (--legacy escape)"
-  CC_FRONTEND=legacy "$CCC" --frontend=legacy --emit-c-only --no-cache \
-    "$SRC" -o "$LATEST/shadow_lower.c" \
-    --cc-flags "-I$ROOT/cc/shadow -I$ROOT/third_party/tcc -DSHADOW_HAVE_LIBTCC=1"
-  EMITTER="legacy:$CCC"
-else
-  if [[ -z "$SHADOW" ]]; then
-    echo "error: no shadow_lower binary (make -C cc); or pass --legacy" >&2
-    exit 1
-  fi
-  echo "[snapshot] emit via shadow_lower ($SHADOW)"
-  "$SHADOW" "$SRC" -o "$LATEST/shadow_lower.c" --no-cache
-  EMITTER="native:$SHADOW"
+if [[ -z "$SHADOW" ]]; then
+  echo "error: no shadow_lower binary (make -C cc)" >&2
+  exit 1
 fi
+echo "[snapshot] emit via shadow_lower ($SHADOW)"
+"$SHADOW" "$SRC" -o "$LATEST/shadow_lower.c" --no-cache
+EMITTER="native:$SHADOW"
 
 if [[ ! -s "$LATEST/shadow_lower.c" ]]; then
   echo "error: emit produced empty $LATEST/shadow_lower.c" >&2
   exit 1
 fi
 
-# Companion lowered headers (legacy header lowerer). Needed when the emit
-# still #includes local .h faces; harmless if emit inlined everything.
+# Companion lowered headers from out/include. Needed when the emit still
+# #includes local .h faces; harmless if emit inlined everything.
 if [[ -d "$HDR_SRC" ]] && ls "$HDR_SRC"/*.h >/dev/null 2>&1; then
   echo "[snapshot] copy lowered headers → $LATEST/include/"
   cp -f "$HDR_SRC"/*.h "$LATEST/include/"

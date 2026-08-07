@@ -60,11 +60,9 @@ make -C cc shadow_lower-from-ccs
 ## Snapshot / promote
 
 ```bash
-# Emit into latest/ (prefers existing shadow_lower; --legacy forces ccc)
+# Emit into latest/ (native self-emit; requires shadow_lower binary)
 ./scripts/snapshot_shadow_lower.sh
 ./scripts/snapshot_shadow_lower.sh --smoke
-./scripts/snapshot_shadow_lower.sh --legacy   # prefer for promote until native self-emit is clean
-                                             # self-emit host-ccs cleanly
 
 # Promote latest/ → vN and point last-good at it (then commit)
 ./scripts/promote_shadow_bootstrap.sh          # next vN
@@ -91,5 +89,5 @@ that still contains `<cc/shadow/...>`.
 
 Serdes can parse/emit `shadow_lower.ccs` (umbrella `.cch` passthrough + growable
 stage2 buffer). Header `static_map` fragments splice at EOF when markers are
-absent (after grammar + umbrella `#include`s). Prefer a native snapshot once
-`scripts/snapshot_shadow_lower.sh --smoke` is green; `--legacy` remains valid.
+absent (after grammar + umbrella `#include`s). Snapshot is native self-emit only
+(`scripts/snapshot_shadow_lower.sh --smoke`).

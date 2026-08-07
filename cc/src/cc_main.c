@@ -628,7 +628,14 @@ static void cc_init_paths(const char* argv0) {
         snprintf(g_cc_lowered_include, sizeof(g_cc_lowered_include), "%s/out/include", g_repo_root);
         // Prefer the compiler-build runtime object (built by `make -C cc`) which now lives under out/.
         snprintf(g_cc_runtime_o, sizeof(g_cc_runtime_o), "%s/out/cc/obj/runtime/concurrent_c.o", g_repo_root);
-        snprintf(g_cc_runtime_c, sizeof(g_cc_runtime_c), "%s/cc/runtime/concurrent_c.c", g_repo_root);
+        /* Prefer rewritten runtime (ccc wrapper rewrites .cch includes to .h).
+         * Compiling cc/runtime sources directly feeds host-cc raw @as sugar. */
+        snprintf(g_cc_runtime_c, sizeof(g_cc_runtime_c),
+                 "%s/out/runtime/concurrent_c.c", g_repo_root);
+        if (access(g_cc_runtime_c, F_OK) != 0) {
+            snprintf(g_cc_runtime_c, sizeof(g_cc_runtime_c),
+                     "%s/cc/runtime/concurrent_c.c", g_repo_root);
+        }
     }
 
     // Fingerprint the REAL compiler binary for emit/obj cache keys.
@@ -2283,7 +2290,7 @@ static int g_frontend_native = -1;
 
 /* Legacy front stays on 0.1.x; native (default) is 0.2.x. */
 #define CCC_VERSION_LEGACY "0.1.0-dev"
-#define CCC_VERSION_NATIVE "0.2.2"
+#define CCC_VERSION_NATIVE "0.2.3"
 
 static int cc__set_frontend_name(const char* v) {
     if (!v || !v[0]) return -1;

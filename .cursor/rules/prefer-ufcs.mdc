@@ -23,13 +23,9 @@ cc_shard_get(sh, key);
 conn_lit(c, "$-1\r\n");
 ```
 
-Use a local pointer when peel drops `&` on `ptr->field.meth()`:
-
-```ccs
-CCShardMap* maps = &db->maps;
-maps->shard(si);
-maps->init(excl, mask);
-```
+Value fields on a pointer outer use dot UFCS on the field
+(`db->maps.count()`, `c->out.clear()`). Prefer that over peeling a local
+`T* field = &p->field` solely to get arrow UFCS.
 
 For value locals, dot UFCS is preferred (`db.maps.count()`, `maps.destroy()`). Prefer that over `cc_shard_map_*` free calls.
 

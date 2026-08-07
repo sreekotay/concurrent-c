@@ -4,7 +4,9 @@
  * Lifetimes:
  *   Cmd.args      → clone_into(cmd arena) for one execute (not BufReader views)
  *   shard arenas  → durable keys/values (put copies; delete releases packed entries)
- *   Conn.out      → encode only; flush after shard release (never socket I/O under hold)
+ *   Conn.out      → encode only into stack arena (8K) that spills to heap;
+ *                   flush after shard release (never socket I/O under hold)
+ *   CCShardHold   → always acquire + @defer hold.release() (idempotent if !held)
  *
  * Build: `make redis_async_sketch`
  * Run:   ./out/redis_async_sketch [addr]   # default 127.0.0.1:6381
@@ -51,8 +53,8 @@ typedef struct Cmd {
 
 typedef struct Conn {
     CCSocket* sock;
-    char out[K_OUT_BUF];
-    size_t out_len;
+    CCArena* arena; /* stack root + GROWABLE spill; reset on flush */
+    CCString out;   /* contiguous encode buffer in arena */
 } Conn;
 
 static bool write_all(CCSocket* sock, char[:] data) {
@@ -69,29 +71,35 @@ static bool write_all(CCSocket* sock, char[:] data) {
 }
 
 static bool conn_flush(Conn* c) {
-    if (!c || c->out_len == 0) return true;
-    char[:] data = cc_slice_from_buffer(c->out, c->out_len);
-    c->out_len = 0;
-    return write_all(c->sock, data);
+    char[:] data;
+    bool ok;
+    if (!c || !c->arena) return true;
+    data = c->out.as_slice();
+    if (data.len == 0) return true;
+    ok = write_all(c->sock, data);
+    c->out.release(c->arena); /* detach heap; clear() would leave a stale ptr */
+    c->arena->reset();        /* reclaim bump / overflow for the next window */
+    return ok;
 }
 
-/* Encode-only: never flush/socket — safe under a shard hold. */
+/* Encode-only: never flush/socket — safe under a shard hold.
+ * Stack slab first; arena spills to heap so large GET/MGET do not hard-fail. */
 static bool conn_write(Conn* c, char[:] data) {
-    if (!c || data.len == 0) return true;
-    if (c->out_len + data.len > sizeof(c->out)) return false;
-    memcpy(c->out + c->out_len, data.ptr, data.len);
-    c->out_len += data.len;
+    if (!c || !c->arena || data.len == 0) return true;
+    if (!c->out.push_slice(data, c->arena) || c->out.failed()) return false;
     return true;
 }
 
-static bool conn_lit(Conn* c, char[:] s) { return c->write(s); }
+static bool conn_lit(Conn* c, const char* s) {
+    return c->write(cc_slice_cstr(s));
+}
 
-static bool conn_simple(Conn* c, char[:] s) {
+static bool conn_simple(Conn* c, const char* s) {
     CCString line = @string(`+${s}\r\n`, @scratch);
     return c->write(line.as_slice());
 }
 
-static bool conn_err(Conn* c, char[:] s) {
+static bool conn_err(Conn* c, const char* s) {
     CCString line = @string(`-ERR ${s}\r\n`, @scratch);
     return c->write(line.as_slice());
 }
@@ -196,9 +204,8 @@ static bool exec_key(DB* db, Cmd* c, size_t si, Conn* conn) {
 static bool exec_keys(DB* db, Cmd* c, Conn* conn) {
     CCShardMap* maps = &db->maps;
     char[:] name = c->args[0];
-    size_t i;
+    size_t i, nkeys;
     int64_t n;
-    size_t nkeys;
     CCShard* sh;
     CCString* v;
 
@@ -267,7 +274,6 @@ static size_t unique_shards(DB* db, Cmd* c, uint64_t* names, size_t cap) {
 
 static bool execute(DB* db, Cmd* c, Conn* conn) {
     Hold h = HOLD_NONE;
-    bool ok = true;
     char[:] name;
     size_t i;
 
@@ -295,25 +301,24 @@ static bool execute(DB* db, Cmd* c, Conn* conn) {
         if (c->argc < 2) return conn->err("wrong number of arguments");
         si = shard_of(db, c->args[1]);
         CCShardHold hold = maps->hold_one((uint64_t)si);
+        @defer hold.release();
         if (!hold.held()) return conn->err("shard admission failed");
-        ok = exec_key(db, c, si, conn);
-        hold.release();
-    } else if (h == HOLD_KEYS) {
+        return exec_key(db, c, si, conn);
+    }
+    if (h == HOLD_KEYS) {
         uint64_t names[K_MAX_SHARDS];
         size_t nnames;
         if (c->argc < 2) return conn->err("wrong number of arguments");
         nnames = unique_shards(db, c, names, (size_t)K_MAX_SHARDS);
         CCShardHold hold = maps->hold_sorted(names, nnames);
+        @defer hold.release();
         if (!hold.held()) return conn->err("shard admission failed");
-        ok = exec_keys(db, c, conn);
-        hold.release();
-    } else {
-        CCShardHold hold = maps->hold_all();
-        if (!hold.held()) return conn->err("shard admission failed");
-        ok = exec_all(db, c, conn);
-        hold.release();
+        return exec_keys(db, c, conn);
     }
-    return ok;
+    CCShardHold hold = maps->hold_all();
+    @defer hold.release();
+    if (!hold.held()) return conn->err("shard admission failed");
+    return exec_all(db, c, conn);
 }
 
 static bool !>(CCError) read_cmd(BufReader::[CCSocket]* br, CCArena* arena, Cmd* out) {
@@ -381,10 +386,14 @@ static bool !>(CCError) read_cmd(BufReader::[CCSocket]* br, CCArena* arena, Cmd*
 static void handle_client(CCSocket client, DB* db) {
     char read_buf[K_READ_BUF];
     char cmd_buf[K_CMD_ARENA];
+    char out_slab[K_OUT_BUF];
     BufReader::[CCSocket] br;
-    Conn conn = { .sock = &client, .out_len = 0 };
+    CCArena arena =
+        cc_arena_create_buffer(out_slab, sizeof(out_slab), CC_ARENA_GROWABLE)
+        @destroy;
+    Conn conn = { .sock = &client, .arena = &arena, .out = cc_string_new() };
     @defer client.close();
-    @defer (void)conn.flush(); /* pending replies on any return */
+    @defer (void)conn.flush(); /* exit-only: pending replies on return */
     br.init(&client, read_buf, sizeof(read_buf));
 
     for (;;) {
@@ -395,14 +404,14 @@ static void handle_client(CCSocket client, DB* db) {
             CCArena cmd_a = @create(cmd_buf, sizeof(cmd_buf)) @destroy;
 
             bool ok = read_cmd(&br, &cmd_a, &c) !>(e) {
-                if (!(i > 0 || e.kind == CC_ERR_CLOSED))
-                    (void)conn.err(cc_slice_cstr(cc_error_str(e)));
+                if (i == 0 && e.kind != CC_ERR_CLOSED)
+                    (void)conn.err(cc_error_str(e));
                 return;
             };
             if (!ok) return;
             if (!execute(db, &c, &conn)) return;
         }
-        /* Steady-state: ship the pipeline window (not only on exit). */
+        /* Steady-state: checked ship (defer alone would swallow write failure). */
         if (!conn.flush()) return;
     }
 }

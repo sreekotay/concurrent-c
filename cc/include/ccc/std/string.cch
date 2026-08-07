@@ -74,7 +74,8 @@ typedef struct CCStringHeapHeader {
  *
  * Poisoned semantics: every push* is a sticky no-op returning NULL,
  * cc_string_len() reads 0, as_slice() is empty, cstr() is NULL. Check with
- * cc_string_failed(); cc_string_clear() resets to a valid empty string. */
+ * cc_string_failed(); clear() empties in place (keeps backing); release()
+ * drops heap and zeroes the struct — use release before arena reset. */
 #define CC_STRING_LEN_POISON UINT32_MAX
 static inline bool cc_string_failed(const CCString *str) {
     return str && str->len == CC_STRING_LEN_POISON;
@@ -393,8 +394,7 @@ static inline char *cc_string_reserve(CCString *str, size_t need, CCArena *arena
     return str->data;
 }
 
-/* Frees out-of-line storage for strings that left the inline buffer. Caller
- * should clear *str after this if the struct is discarded. */
+/* Frees out-of-line storage only; does not zero *str. Prefer release(). */
 static inline void cc_string_release_heap(CCString *str) {
     CCStringHeapHeader *header;
     if (!str) return;
@@ -404,6 +404,11 @@ static inline void cc_string_release_heap(CCString *str) {
     if (header && header->arena) (void)cc_arena_release(header->arena, header);
 }
 
+/* End ownership of heap backing (via arena_release) and zero *str.
+ * clear() only sets len=0 and keeps ptr/cap — unsafe before arena->reset()
+ * when the string spilled into that arena. After release, push* may reuse
+ * the (empty) struct; a dedicated encode arena still needs reset to reclaim
+ * bump space. */
 static inline void cc_string_release(CCString *str, CCArena *arena) {
     CCStringHeapHeader *header;
     CCArena *owner;
@@ -943,6 +948,9 @@ static inline CCString* cc_string_push_slice(CCString *str, CCSlice data, CCAren
     if (data.len > UINT32_MAX) return NULL;
     return cc_string_push_buffer(str, (const char *)data.ptr, (uint32_t)data.len, arena);
 }
+/* Empty in place: len=0, keep capacity and any arena heap pointer.
+ * Not a detach — do not arena->reset() while a cleared string still
+ * references that arena; use release() instead. */
 static inline CCString* cc_string_clear(CCString *str) {
     char *dst;
     if (!str) return NULL;

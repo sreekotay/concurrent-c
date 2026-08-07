@@ -37,15 +37,14 @@
  *
  *   CCShardDomain d = cc_shard_domain(excl, shards);
  *   CCShardHold h = d.hold_one(si);
- *   CCShardHold h = d.hold_sorted(names, nnames);
- *   CCShardHold h = d.hold_all();
- *   if (!h.held()) …;   // admission failed
+ *   @defer h.release();           // always pair acquire + defer
+ *   if (!h.held()) …;             // admission failed (release is no-op)
  *   …
- *   h.release();        // LIFO; idempotent
  *
- * Prefer acquire/release over lock/unlock: release is intentionally
- * idempotent (NULL entry after first call), so a second release is a local
- * no-op and should not read as a double-unlock bug in review.
+ * Same shape for hold_sorted / hold_all. Prefer acquire/release over
+ * lock/unlock: release is intentionally idempotent (n cleared after first
+ * call), so defer-after-failed-admission and a second release are local
+ * no-ops — not double-unlock bugs in review.
  *
  * Storage (section header, discovery map, mutex entries) is allocated from
  * the caller-supplied arena.  Mutex entries come from an arena pool on that

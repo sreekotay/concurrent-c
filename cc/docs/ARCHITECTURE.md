@@ -222,8 +222,9 @@ comptime / `--exe` / driver parse hooks — not the everyday lower→run path.
 ### ADR-S6: Legacy front is opt-out, not a parallel product story
 
 **Decision:** Default `ccc` is **native** (`shadow_lower`).
-`--frontend=legacy` remains for archaeology (reparse dumps, visitor-only
-warnings) and the chicken-egg `shadow_lower.sh` script when no binary exists.
+`--frontend=legacy` remains for archaeology only (reparse dumps, visitor-only
+warnings). Snapshot / `shadow_lower.sh` use the native binary — no legacy
+chicken-egg emit path.
 **Rejected:** Dual-default confusion; silent fallback between fronts.
 
 ---

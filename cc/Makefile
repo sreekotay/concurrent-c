@@ -370,6 +370,13 @@ $(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_CCS_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_COM
 	@mkdir -p $(dir $@) $(OBJDIR)
 	@test -n "$(SHADOW_LOWER_SEED_BIN)" -a -x "$(SHADOW_LOWER_SEED_BIN)" || \
 		(echo "SHADOW_LOWER_SOURCE=ccs needs an existing shadow_lower; run: make SHADOW_LOWER_SOURCE=bootstrap"; exit 1)
+	# Host-cc of emit.c prefers out/include/cc/shadow/*.h over .cch. Sync the
+	# lit-coerce face from source before compile so .cch edits are not shadowed
+	# by a stale last-good copy (scripts/patch_ufcs_slice_lit_face.py).
+	@mkdir -p ../out/include/cc/shadow
+	@if [ -f ../out/include/cc/shadow/pp_emit_ufcs.h ]; then \
+		python3 ../scripts/patch_ufcs_slice_lit_face.py; \
+	fi
 	# Native self-emit, then host-cc link (same objs as bootstrap).
 	# concurrent_c.o supplies arena_state/FFC (omitted from libshadow_comptime.a).
 	$(SHADOW_LOWER_SEED_BIN) $(SHADOW_LOWER_CCS) -o $(OBJDIR)/shadow_lower.emit.c --no-cache \
