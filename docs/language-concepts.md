@@ -7,7 +7,7 @@ Recipes: [examples/README.md](../examples/README.md#learning-path-recommended-or
 
 ## 1. Cleanup binds to a place
 
-[recipe_defer_cleanup.ccs](../examples/recipe_defer_cleanup.ccs) · [recipe_unwrap_destroy_forms.ccs](../examples/recipe_unwrap_destroy_forms.ccs)
+[recipe_defer_cleanup.ccs](../examples/recipe_defer_cleanup.ccs) · [recipe_unwrap_destroy_forms.ccs](../examples/recipe_unwrap_destroy_forms.ccs) · Spec §5.1 / §4.2.2 / §2.2
 
 | Bind | Meaning |
 |------|---------|
@@ -23,6 +23,8 @@ CCNursery* n = cc_nursery_create(NULL) !> @destroy;
 
 If the unwrap fails, the binding never exists — destroy does not run.
 Named `@defer` can be `@cancel`led; `@defer(ok)` / `@defer(err)` gate on result returns.
+Registration is visible in source; discharge sites (soft-return epilogue,
+cancelled-resume, never-entered `env_drop`) are defined by the spec emit.
 
 ---
 

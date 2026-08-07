@@ -7,7 +7,7 @@ CURL_BUILD := $(CURL_DIR)/build
 .PHONY: all cc clean distclean fmt lint example smoke test tools
 .PHONY: install install-check uninstall
 .PHONY: runtime-variant-smoke fuzz-check
-.PHONY: tcc-patch-apply tcc-patch-regen tcc-update-check check-submodules lint-scanners test-strict
+.PHONY: tcc-patch-apply tcc-patch-regen tcc-update-check check-submodules lint-scanners lint-soft-return-emit test-strict
 .PHONY: deps bearssl bearssl-clean curl curl-clean deps-update
 .PHONY: examples-check stress-check perf-check full-check
 .PHONY: perf-baseline perf-regress perf-regress-oracle
@@ -143,6 +143,10 @@ lint:
 # hand-rolled comment/string state machines outside the canonical scanners.
 lint-scanners:
 	@./tools/dev.shcc @lint_scanners
+
+# Soft-return / watermark emit-shape ratchet (spec §5.1 conformance).
+lint-soft-return-emit:
+	@./tools/dev.shcc @lint_soft_return_emit
 
 # Offsets golden smoke (PASS_CLEANUP_PLAN phase 1): the full suite with the
 # UFCS byte-offset self-check FATAL.  Any drift between recorded offsets and

@@ -38,7 +38,7 @@ artifact.
 
 These are normative. Where a construct could be defined more than one way, the reading that upholds these wins.
 
-1. **No magic.** New behavior must be as predictable as C. A program is understood from what is on screen plus its lowering — never from hidden runtime policy.
+1. **No magic.** New behavior must be as predictable as C. A program is understood from what is on screen plus its lowering — never from hidden runtime policy. Cleanup registration (`@defer` / `@destroy` / owned capture) is visible in source; where hooks run (scope exit, soft-return epilogue, cancelled-resume, never-entered `env_drop`) is defined by this specification’s emit and observable in the lowered transcript.
 2. **The lowering is the language.** The source-to-C lowering is part of this specification, not an implementation detail (see intro). Two conforming implementations produce lowerings with identical observable behavior.
 3. **Library-owned policy.** The compiler provides compile-time registration,
    emission, and dispatch seams. Libraries own concrete type-family emission,
@@ -46,6 +46,7 @@ These are normative. Where a construct could be defined more than one way, the r
 4. **No silent drop.** Every fallible result must be used. The safe forms (`?>`, `!>`) force handling at compile time; the explicit/lowered form traps loudly at runtime. Absence (nullable) may opt into the same unwrap protocol but is not forced into it.
 5. **Local resolution.** Cleanup (`@destroy`/`@defer`), error handlers (inline or function-level only), and dispatch (receiver type) resolve to a site visible at the use — never a dynamic search. Behaviors therefore compose by stacking, not by interaction.
 6. **Binding is semantic.** *Where* a construct attaches (declaration vs. statement) determines its static guarantees, even when the runtime lowering is identical. `@destroy` is RAII because it binds to the declaration; `@defer` is a statement.
+7. **Cleanup ledgers.** A cleanup ledger has two discharge authorities: the entered frame (always), and external closure `env_drop` (never-entered only).
 
 ---
 
@@ -635,6 +636,43 @@ The default idiom is reserve-then-write (`send_into` / `try_send_into`, same fam
 
 **Rule (pointer-alias capture mutation):** Value-capturing `T* p = &local` into a task/thread closure and then writing through `*p` / `p->field` is a compile-time error (same class as mutating a reference capture). Use the shipped `cc_atomic_*` surface, a registered synchronization library, or `@unsafe`.
 
+**Capture list modes:**
+
+| Spelling | Meaning |
+|----------|---------|
+| `x` | By-value copy into the env |
+| `&x` / `@safe &x` | Borrow (pointer in env); not destroyed on drop |
+| `@own x` | Owned value or owned pointer; destroyed on never-entered drop (below) |
+
+`@own` on a pointer requires a destroyable pointee (registered destroy hook for
+the pointee type). `@own` is not `@as`: owning a field does not make the outer
+type an is-a embed of that field’s type.
+
+**Rule (dropped without call):** When a single-shot closure is destroyed without
+the body having been entered, the implementation runs `env_drop`, which destroys
+each owned capture in reverse capture-list order, then frees the environment.
+Borrow / `@safe` captures are not destroyed. Owned captures are destroyed in
+`env_drop`; the body uses them and must not also destroy them. After a
+successful call, `env_drop` still runs; destroy hooks are idempotent (or fields
+are already inert).
+
+```c
+static void cc_closure__N_env_drop(void* p) {
+    cc_closure__N_env* e = (cc_closure__N_env*)p;
+    if (!e) return;
+    /* reverse capture-list order for @own fields */
+    if (e->cap) { type_destroy(e->cap); e->cap = NULL; }
+    free(e);
+}
+```
+
+The compiler generates `env_drop` from the capture list and each owned capture’s
+registered destroy. Hook order among owned captures is the capture-list order,
+LIFO’d. Fixtures for this path target never-entered closures only (e.g.
+`send_into` builder not built, cancel-before-start). They do not use “consumer
+stopped receiving after `send_task`” — that API spawns at send, so the body
+usually runs.
+
 ```c
 void ok_pattern() {
     CCArena a = cc_arena_heap(kilobytes(64));
@@ -991,7 +1029,7 @@ CCRes(MyData, MyError) my_function(int arg);
 3. Error values are accessible only via an explicit `(ident)` binder on `?>` or `!>`. Neither operator creates an implicit `e` / `err` binding. The bare expression-position `!>;` form synthesizes a fresh internal binder that threads the error value through the inlined handler body.
 4. `CALL !>;` at statement position runs the nearest in-scope `@errhandler` whose parameter type exactly matches the call's Result error type `E` (else, when `E` has a unique `@as` path to a handler parameter type `F`, that handler — see `@as` fields draft §5), or the success path if the call succeeded. No match is ill-formed. If that matching handler's body textually contains the call (same-`E` re-entry), the program is ill-formed — report via a helper such as `cc_error_log` / `cc_error_exit`, or an inline `!> { abort(); }`, not bare `!>;` inside the same-`E` handler.
 5. `@err(IDENT);` inside a `!>` body forwards the bound error to the matching `@errhandler` for that unwrap's `E`. It is a **structured control-flow transfer** (not a returning call): any statement textually following it in the same block is unreachable and is a compile error.
-6. `@errhandler(E e) STMT;` or `@errhandler(E e) { ... }` registers a block-local handler for Result error type `E`. The statement form is a thin forward (typically `cc_error_exit(e);`); the block form holds multiple statements. `CALL !>;` is the hoist of `CALL !>(e) STMT` when `STMT` is that handler body. When reached via `CALL !>;` at statement position, the handler body runs and control returns to the statement after the call — the handler may end in any statement. When reached via an `@err(e);` forward, via a bare expression-position `!>;`, or via an expression-position `!>` whose body inlines the handler, control never returns, so the handler body **must visibly diverge**. Concretely: if any `@err(e);` targets a handler, or any expression-position `!>;` inlines a handler, that handler's body must end in one of:
+6. `@errhandler(E e) STMT;` or `@errhandler(E e) { ... }` registers a block-local handler for Result error type `E`. The statement form is a thin forward (typically `cc_error_exit(e);`); the block form holds multiple statements. `CALL !>;` is the hoist of `CALL !>(e) STMT` when `STMT` is that handler body. When reached via `CALL !>;` at statement position, the handler body runs and control returns to the statement after the call — the handler may end in any statement. When reached via an `@err(e);` forward, via a bare expression-position `!>;`, or via an expression-position `!>` whose body inlines the handler, control never returns, so the handler body **must visibly diverge**. A `return` (or other soft-return) from the handler body discharges the enclosing function’s `@defer` / `@destroy` ledger via the same epilogue as any other return in that function (§5.1). Concretely: if any `@err(e);` targets a handler, or any expression-position `!>;` inlines a handler, that handler's body must end in one of:
   - `return EXPR;` / `return;`
     - `break;` / `continue;`
     - `goto LABEL;`
@@ -1511,6 +1549,19 @@ No source forcibly interrupts running C code. Each operation defines whether it
 checks before parking, after waking, or both, and which in-band result it
 returns. §8.5 lists the public sources and observation points.
 
+**Rule (no cleanup at park):** `@defer` / `@destroy` hooks do not run at a
+suspension point. A parked fiber still holds its resources; destroying them at
+park would tear state a resumed frame still needs.
+
+**Rule (entered vs never-entered):** External destruction of a closure
+environment may run capture cleanup only when the closure body has never been
+entered. Once a frame has entered, only that frame’s own exit path may
+discharge its cleanup ledger — including cancelled-resume, where park returns
+an error, the frame takes normal exits, and LIFO hooks run in the fiber. A
+canceller must not invoke the closure’s `drop` path for an in-flight or parked
+frame. (Fixture: park holding `@destroy` resources, cancel, assert hooks ran
+in the fiber in LIFO order — not at the canceller.)
+
 **@scoped Placement Rules (Normative):**
 
 `@scoped` can appear in the following positions:
@@ -1793,7 +1844,7 @@ cc_arena_free(&a);  // BUG: spawned task may still be using s
 
 **Thread-safe allocation:** Arenas use atomic operations (lock-free compare-and-swap or spin-locks) to make allocation thread-safe. A synchronized bump allocator adds ~10-20ns overhead per allocation vs unsynchronized, but is still ~4x faster than `malloc`. The benefit of "all arena slices are safely shareable across threads" outweighs this minor cost.
 
-**Manual lifetime management:** The caller, not the runtime, is responsible for coordinating `arena_free`/`arena_reset` with thread lifecycle. This avoids the overhead of reference counting or cycle detection. It also gives users explicit control: a thread can hold slices from a long-lived arena while other threads allocate and reset scratch arenas independently.
+**Manual lifetime management:** The caller, not the runtime, is responsible for coordinating `arena_free`/`arena_reset` with thread lifecycle. Arena lifetime for borrows is **epoch provenance** (§2.2 arena epoch pin on capture): capturing or sending a non-unique arena-backed view pins the epoch until the join scope ends; epoch-ending ops while a pin is live are ill-formed when statically visible. Arenas are not refcounted. If a future refcounted arena type exists, it is a distinct type with its own rules. Callers retain explicit control: a thread can hold slices from a long-lived arena while other threads allocate and reset scratch arenas independently.
 
 **Non-goal:** Arenas do **not** provide automatic deallocation or generational lifetimes. Users must ensure all threads have finished using an arena before resetting or freeing it. Violations are not caught automatically in release builds.
 
@@ -1809,7 +1860,22 @@ cc_arena_free(&a);  // BUG: spawned task may still be using s
 - LIFO order.
 - No exceptions or unwinding.
 
-**Note (vs `@errhandler`):** `@defer` / `@defer(err)` schedule work at **scope exit** (or only when the function returns error/success). `**@errhandler`** defines behavior when a `call() !>;` statement or an `@err(e);` forward observes an **error**—at the unwrap site, not deferred to exit. See §3.1.
+**Soft-return and registration watermark.** A `return` inside a function that
+has function-scope `@defer` / `@destroy` (or that must unwind nested block/loop
+life, or open call-local `@scratch` checkpoints) lowers to a soft-return:
+optional scratch restores, optional nested scope life, then `goto` the function
+cleanup epilogue. Each function-scope cleanup site stamps a high-water mark at
+its declaration; the epilogue runs site `i` only when the mark shows that site
+was reached. Block/loop scopes use an analogous per-scope mark so break /
+continue / soft-return do not name unreached locals.
+
+**Conformance.** In any function with registered function-scope cleanup, every
+`return` lowers to the soft-goto form that reaches the cleanup epilogue. Every
+cleanup statement in that epilogue sits under its registration-threshold guard.
+Implementations that emit a bare `return` or an unguarded hook for such a
+function are non-conforming.
+
+**Note (vs `@errhandler`):** `@defer` / `@defer(err)` schedule work at **scope exit** (or only when the function returns error/success). `**@errhandler`** defines behavior when a `call() !>;` statement or an `@err(e);` forward observes an **error**—at the unwrap site, not deferred to exit. Soft-return from an `@errhandler` body (including a bang-binder handler) uses the same cleanup epilogue as any other return in that function. See §3.1.
 
 ```c
 CCArena scratch = cc_arena_heap(kilobytes(64));

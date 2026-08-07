@@ -1,0 +1,70 @@
+/*
+ * Spec §4.2.2 / §5.1: cancel a fiber parked after @destroy/@defer registration.
+ * Hooks must run on the fiber's own exit path (LIFO), not via external drop of
+ * a never-entered body.
+ *
+ * Park on the nursery cancel wake (cc_nursery_cancel_wait). Channel recv is a
+ * poor fixture here: unbuffered rendezvous and mutex wait_empty intentionally
+ * ignore nursery cancel once committed to the waiter list.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+
+static cc_atomic_int g_parked;
+static int g_order[8];
+static int g_n;
+static int g_destroy_n;
+
+static void note(int id) {
+    if (g_n < 8) g_order[g_n++] = id;
+}
+
+int main(void) {
+    g_n = 0;
+    g_destroy_n = 0;
+    cc_atomic_store(&g_parked, 0);
+
+    {
+        CCNursery* n = @create(NULL) @destroy;
+        if (!n) return 2;
+
+        if (n->spawn(() => [n] {
+                /* Register 1, destroy(2), 3 — LIFO exit order: 3, 2, 1. */
+                @defer { note(1); };
+                CCArena a = cc_arena_heap(kilobytes(1)) @destroy {
+                    note(2);
+                    g_destroy_n++;
+                };
+                (void)a;
+                @defer { note(3); };
+
+                uint32_t gen = cc_nursery_cancel_gen(n);
+                cc_atomic_store(&g_parked, 1);
+                cc_nursery_cancel_wait(n, gen, 30000);
+            }) != 0) {
+            return 3;
+        }
+
+        while (cc_atomic_load(&g_parked) == 0) {
+            cc_yield();
+        }
+        /* Let cancel_wait commit PARKED before cancel. */
+        cc_sleep_ms(5);
+        cc_nursery_cancel(n);
+    }
+
+    if (g_n != 3 || g_order[0] != 3 || g_order[1] != 2 || g_order[2] != 1) {
+        fprintf(stderr,
+                "FAIL cancel_parked: n=%d order=[%d,%d,%d] destroy_n=%d\n", g_n,
+                g_order[0], g_order[1], g_order[2], g_destroy_n);
+        return 10;
+    }
+    if (g_destroy_n != 1) {
+        fprintf(stderr, "FAIL cancel_parked: destroy_n=%d\n", g_destroy_n);
+        return 11;
+    }
+
+    printf("cancel_parked_destroy_smoke: PASS\n");
+    return 0;
+}

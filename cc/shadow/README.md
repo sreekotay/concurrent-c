@@ -105,7 +105,7 @@ Smoke goldens keep a trimmed twin set only:
 `shadow/error_face_frag.cch` — trimmed `CCError` face from `cc_result`
 (`CCErrorKind`, brace init, `static inline const char*`, long `switch` bodies).
 `shadow/io_error_frag.cch` — trimmed `CCIoError` on that face (`#include`
-splice, `/*@as*/`, `const char*` helpers, errno `switch`; no `_Generic` /
+splice, `@as`, `const char*` helpers, errno `switch`; no `_Generic` /
 `CC_DECL_RESULT_SPEC`).
 
 ```bash
@@ -296,8 +296,10 @@ Prioritized by fail mass × language value on native-quick:
      `@string(\`…\`, @scratch)` + `cc_arena_reset` after copy into `dst`;
      wired on invent / scalar / Result-value hop. Call-local
      `println(@string(…, @scratch))` checkpoints/restores the shared scratch
-     (bound `@string(..., @scratch)` stays valid). Spec §9.1.4 call-local
-     reclaim. Smoke: `tests/scratch_call_local_restore_smoke.ccs`.
+     (bound `@string(..., @scratch)` stays valid). Soft-return / break /
+     continue restore open call-local checkpoints before leaving. Spec §9.1.4
+     call-local reclaim. Smokes: `tests/scratch_call_local_restore_smoke.ccs`,
+     `tests/scratch_soft_return_restore_smoke.ccs`.
    - Grow `fmt_call` to more call-shaped invent sites; leave cold `snprintf`
      ladders alone until touched.
    - Fixed-to-`cap` invent waist (fail loud on overflow; no growable spike).

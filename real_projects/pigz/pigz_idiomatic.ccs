@@ -103,13 +103,6 @@ static CompressedResult* compress_block(Block* blk, int level) {
     return res;
 }
 
-/* Owns `blk` (including blk->arena); frees block storage after compression. */
-static CompressedResult* compress_owned_block(Block* blk) {
-    CompressedResult* out = compress_block(blk, 6);
-    blk->arena.free();
-    return out;
-}
-
 static bool write_all_or_fail(CCFile* f, CCSlice data, const char* what) {
     CCResult_size_t_CCIoError wr = cc_file_write(f, data);
     if (cc_is_err(wr)) {
@@ -219,7 +212,9 @@ int compress_file(const char* in_path, const char* out_path) {
 
             bool is_last = cap->is_last;
             results_tx.send_task(() => [cap] {
-                return compress_owned_block(cap);
+                CompressedResult* out = compress_block(cap, 6);
+                cap->arena.free();
+                return out;
             });
 
             if (is_last) break;

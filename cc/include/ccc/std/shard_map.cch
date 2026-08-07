@@ -164,7 +164,7 @@ static inline bool cc_shard_delete(CCShard* m, CCSlice key) {
 
 typedef struct CCShardMap {
     /* Hold API: maps.hold_one / hold_sorted / hold_all (UFCS via @as). */
-    CCShardDomain domain /*@as*/;
+    CCShardDomain domain @as;
     CCShard* shards;
     CCArena root; /* storage for shards[] */
 } CCShardMap;

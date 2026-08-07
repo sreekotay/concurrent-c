@@ -670,10 +670,14 @@ enum {
     SHADOW_DEFER_SCOPE_MAX = 32,
     SHADOW_DEFER_SCOPE_DEFERS = 16
 };
+/* One lexical block/loop body: @defer and @destroy sites in source order.
+ * Runtime `__cc_shw_<id>` gates cleanups so unreached mid-body sites are
+ * skipped on break/continue/soft-return (same contract as fn __cc_defer_hw). */
 typedef struct {
-    AstNode* defers[SHADOW_DEFER_SCOPE_DEFERS];
-    int ndefers;
+    AstNode* life[SHADOW_DEFER_SCOPE_DEFERS];
+    int nlife;
     int is_loop;
+    int shw_id; /* __cc_shw_<id> */
 } ShadowDeferScope;
 
 enum { SHADOW_EH_STACK_CAP = 8 };
@@ -712,7 +716,13 @@ typedef struct {
     int nvdrop_marks;
     ShadowDeferScope defer_stack[SHADOW_DEFER_SCOPE_MAX];
     int defer_depth;
+    /* Open call-local `println(@string(..., @scratch))` checkpoints
+     * (`__cc_scratch_cpN`). Soft-return / break / continue restore these
+     * before leaving — fallthrough still pops via shadow_scratch_cp_pop. */
+    int scratch_cp_depth;
 } ShadowCtx;
+
+enum { SHADOW_SCRATCH_CP_MAX = 16 };
 
 static const char* shadow_eh_bind(ShadowCtx* ctx) {
     if (ctx && ctx->eh && ctx->eh->b[0]) return ctx->eh->b;

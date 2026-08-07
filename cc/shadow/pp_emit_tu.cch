@@ -1824,8 +1824,9 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                     if (!cemit_fmt(out,
                             "%s%s __cc_retval = {0};\n"
                             "%sint __cc_ret_set = 0;\n"
-                            "%sint __cc_ret_err = 0;\n",
-                            body_ind, rname, body_ind, body_ind))
+                            "%sint __cc_ret_err = 0;\n"
+                            "%sint __cc_defer_hw = 0;\n",
+                            body_ind, rname, body_ind, body_ind, body_ind))
                         bind_ok = 0;
                 }
                 if (bind_ok &&
@@ -1835,6 +1836,9 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 for (int k = 0; bind_ok && k < it->nkids; k++) {
                     if (!shadow_emit_stmt_ctx(it->kids[k], out, &ctx, body_ind,
                                               0))
+                        bind_ok = 0;
+                    if (bind_ok && ctx.defer_cleanup &&
+                        !shadow_emit_hw_bump(out, &ctx, it->kids[k], body_ind))
                         bind_ok = 0;
                 }
                 if (bind_ok &&

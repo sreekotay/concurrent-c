@@ -1,0 +1,313 @@
+/*
+ * Block/loop-scoped @destroy + @defer must run on fn soft-return iff
+ * registered — the layer under fn __cc_defer_hw.
+ *
+ * Redis handle_client shape: loop-local arena @destroy, then bang/if return
+ * to fn cleanup. Soft-return used to jump straight to __cc_cleanup and skip
+ * the iteration's destroy (fixed-buffer hid it; heap/canary does not).
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+static int g_ad;
+static int g_bd;
+static int g_af;
+static int g_bf;
+static int g_close;
+static int g_order[16];
+static int g_norder;
+
+static void poke(int* slot, int id) {
+    if (slot) (*slot)++;
+    if (g_norder < 16) g_order[g_norder++] = id;
+}
+
+static CCResult_int_CCError boom(void) {
+    return cc_err(CC_ERR_INVALID_ARG, "boom");
+}
+
+typedef struct FakeLn { int ready; } FakeLn;
+static void fake_close(FakeLn* ln) {
+    g_close++;
+    if (!ln || !ln->ready) {
+        fprintf(stderr, "FAIL: close unready\n");
+        g_close = -999;
+    }
+}
+
+/* --- 1: return before loop-local @destroy — must NOT destroy --- */
+static int ret_before_loop_destroy(void) {
+    @defer { poke(&g_af, 1); };
+    for (int i = 0; i < 1; i++) {
+        if (1) return 10;
+        CCArena a = cc_arena_heap(kilobytes(1)) @destroy {
+            poke(&g_ad, 20);
+        };
+        (void)a;
+    }
+    return 0;
+}
+
+/* --- 2: return after loop-local @destroy — MUST destroy, then fn defer --- */
+static int ret_after_loop_destroy(void) {
+    g_norder = 0;
+    @defer { poke(&g_af, 1); };
+    for (int i = 0; i < 1; i++) {
+        CCArena a = cc_arena_heap(kilobytes(1)) @destroy {
+            poke(&g_ad, 20);
+        };
+        (void)a;
+        if (1) return 11;
+    }
+    return 0;
+}
+
+/* --- 3: bang return after loop destroy (redis read_cmd fail shape) --- */
+static int bang_after_loop_destroy(void) {
+    g_norder = 0;
+    @defer { poke(&g_af, 1); };
+    for (int i = 0; i < 1; i++) {
+        CCArena a = cc_arena_heap(kilobytes(1)) @destroy {
+            poke(&g_ad, 20);
+        };
+        (void)a;
+        int x = boom() !>(e) {
+            (void)e;
+            return 12;
+        };
+        (void)x;
+    }
+    return 0;
+}
+
+/* --- 4: bang return BEFORE loop destroy --- */
+static int bang_before_loop_destroy(void) {
+    @defer { poke(&g_af, 1); };
+    for (int i = 0; i < 1; i++) {
+        int x = boom() !>(e) {
+            (void)e;
+            return 13;
+        };
+        (void)x;
+        CCArena a = cc_arena_heap(kilobytes(1)) @destroy {
+            poke(&g_ad, 20);
+        };
+        (void)a;
+    }
+    return 0;
+}
+
+/* --- 5: nested block destroy + defer; return mid --- */
+static int nested_block_mid_return(void) {
+    g_norder = 0;
+    @defer { poke(&g_af, 1); };
+    {
+        @defer { poke(&g_bf, 2); };
+        CCArena a = cc_arena_heap(kilobytes(1)) @destroy {
+            poke(&g_ad, 20);
+        };
+        (void)a;
+        if (1) return 14;
+        CCArena b = cc_arena_heap(kilobytes(1)) @destroy {
+            poke(&g_bd, 21);
+        };
+        (void)b;
+    }
+    return 0;
+}
+
+/* --- 6: continue must run loop destroy; next iter fresh --- */
+static int continue_runs_loop_destroy(void) {
+    int iters = 0;
+    for (int i = 0; i < 3; i++) {
+        CCArena a = cc_arena_heap(kilobytes(1)) @destroy {
+            poke(&g_ad, 20);
+        };
+        (void)a;
+        iters++;
+        if (i < 2) continue;
+    }
+    return iters;
+}
+
+/* --- 7: break after destroy --- */
+static int break_after_loop_destroy(void) {
+    for (int i = 0; i < 3; i++) {
+        CCArena a = cc_arena_heap(kilobytes(1)) @destroy {
+            poke(&g_ad, 20);
+        };
+        (void)a;
+        break;
+    }
+    return 15;
+}
+
+/* --- 8: redis-shaped — fn defers + loop destroy + listen-fail FakeLn --- */
+static int redis_shaped_listen_and_loop(int fail_listen, int fail_after_cmd) {
+    FakeLn ln;
+    memset(&ln, 0xA5, sizeof(ln));
+    @defer { poke(&g_af, 1); };
+    if (fail_listen) {
+        int x = boom() !>(e) {
+            (void)e;
+            return 16;
+        };
+        (void)x;
+    }
+    ln.ready = 1;
+    @defer { fake_close(&ln); };
+    for (int i = 0; i < 2; i++) {
+        CCArena cmd = cc_arena_heap(kilobytes(1)) @destroy {
+            poke(&g_ad, 20);
+        };
+        (void)cmd;
+        if (fail_after_cmd && i == 0) {
+            int x = boom() !>(e) {
+                (void)e;
+                return 17;
+            };
+            (void)x;
+        }
+    }
+    return 18;
+}
+
+/* --- 9: two loop destroys + defer interleaved; return after first destroy --- */
+static int interleaved_loop_life(void) {
+    g_norder = 0;
+    for (int i = 0; i < 1; i++) {
+        @defer { poke(&g_af, 1); };
+        CCArena a = cc_arena_heap(kilobytes(1)) @destroy {
+            poke(&g_ad, 20);
+        };
+        (void)a;
+        if (1) return 19;
+        @defer { poke(&g_bf, 2); };
+        CCArena b = cc_arena_heap(kilobytes(1)) @destroy {
+            poke(&g_bd, 21);
+        };
+        (void)b;
+    }
+    return 0;
+}
+
+/* --- 10: pathological depth — 3 nested blocks, return at each depth --- */
+static int deep_nested_return(int depth_fail) {
+    g_norder = 0;
+    {
+        CCArena a0 = cc_arena_heap(kilobytes(1)) @destroy { poke(&g_ad, 30); };
+        (void)a0;
+        if (depth_fail == 0) return 20;
+        {
+            CCArena a1 = cc_arena_heap(kilobytes(1)) @destroy { poke(&g_bd, 31); };
+            (void)a1;
+            if (depth_fail == 1) return 21;
+            {
+                CCArena a2 = cc_arena_heap(kilobytes(1)) @destroy {
+                    poke(&g_af, 32);
+                };
+                (void)a2;
+                if (depth_fail == 2) return 22;
+            }
+        }
+    }
+    return 23;
+}
+
+static int check(const char* name, int ok) {
+    if (!ok) {
+        fprintf(stderr, "FAIL %s\n", name);
+        return 0;
+    }
+    return 1;
+}
+
+int main(void) {
+    int rc;
+
+    g_ad = g_bd = g_af = g_bf = 0;
+    rc = ret_before_loop_destroy();
+    if (!check("ret_before_loop_destroy",
+               rc == 10 && g_ad == 0 && g_af == 1))
+        return 1;
+
+    g_ad = g_bd = g_af = g_bf = 0;
+    g_norder = 0;
+    rc = ret_after_loop_destroy();
+    /* LIFO at return site: loop destroy then fn defer */
+    if (!check("ret_after_loop_destroy",
+               rc == 11 && g_ad == 1 && g_af == 1 && g_norder == 2 &&
+                   g_order[0] == 20 && g_order[1] == 1))
+        return 1;
+
+    g_ad = g_af = 0;
+    g_norder = 0;
+    rc = bang_after_loop_destroy();
+    if (!check("bang_after_loop_destroy",
+               rc == 12 && g_ad == 1 && g_af == 1 && g_order[0] == 20 &&
+                   g_order[1] == 1))
+        return 1;
+
+    g_ad = g_af = 0;
+    rc = bang_before_loop_destroy();
+    if (!check("bang_before_loop_destroy",
+               rc == 13 && g_ad == 0 && g_af == 1))
+        return 1;
+
+    g_ad = g_bd = g_af = g_bf = 0;
+    g_norder = 0;
+    rc = nested_block_mid_return();
+    if (!check("nested_block_mid_return",
+               rc == 14 && g_ad == 1 && g_bd == 0 && g_bf == 1 && g_af == 1))
+        return 1;
+
+    g_ad = 0;
+    rc = continue_runs_loop_destroy();
+    if (!check("continue_runs_loop_destroy", rc == 3 && g_ad == 3)) return 1;
+
+    g_ad = 0;
+    rc = break_after_loop_destroy();
+    if (!check("break_after_loop_destroy", rc == 15 && g_ad == 1)) return 1;
+
+    g_ad = g_af = g_close = 0;
+    rc = redis_shaped_listen_and_loop(1, 0);
+    if (!check("redis listen fail",
+               rc == 16 && g_af == 1 && g_close == 0 && g_ad == 0))
+        return 1;
+
+    g_ad = g_af = g_close = 0;
+    rc = redis_shaped_listen_and_loop(0, 1);
+    if (!check("redis cmd fail after destroy",
+               rc == 17 && g_af == 1 && g_close == 1 && g_ad == 1))
+        return 1;
+
+    g_ad = g_af = g_close = 0;
+    rc = redis_shaped_listen_and_loop(0, 0);
+    if (!check("redis success",
+               rc == 18 && g_af == 1 && g_close == 1 && g_ad == 2))
+        return 1;
+
+    g_ad = g_bd = g_af = g_bf = 0;
+    g_norder = 0;
+    rc = interleaved_loop_life();
+    if (!check("interleaved_loop_life",
+               rc == 19 && g_ad == 1 && g_bd == 0 && g_af == 1 && g_bf == 0))
+        return 1;
+
+    g_ad = g_bd = g_af = 0;
+    rc = deep_nested_return(0);
+    if (!check("deep0", rc == 20 && g_ad == 1 && g_bd == 0 && g_af == 0))
+        return 1;
+    g_ad = g_bd = g_af = 0;
+    rc = deep_nested_return(1);
+    if (!check("deep1", rc == 21 && g_ad == 1 && g_bd == 1 && g_af == 0))
+        return 1;
+    g_ad = g_bd = g_af = 0;
+    rc = deep_nested_return(2);
+    if (!check("deep2", rc == 22 && g_ad == 1 && g_bd == 1 && g_af == 1))
+        return 1;
+
+    printf("defer_scope_soft_return_smoke: PASS\n");
+    return 0;
+}

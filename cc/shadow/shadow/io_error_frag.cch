@@ -5,7 +5,7 @@
 #include "error_face_frag.cch"
 
 typedef struct {
-    CCError base /*@as*/;
+    CCError base @as;
     int32_t os_code;
 } CCIoError;
 
