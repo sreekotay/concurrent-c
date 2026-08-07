@@ -33,7 +33,9 @@ typedef struct CCShardMap {
 static inline bool cc_shard_map_init(CCShardMap* m, size_t buckets) {
     if (!m) return false;
     memset(m, 0, sizeof(*m));
-    m->arena = cc_arena_malloc(1024);
+    /* 64KiB root keeps a typical hot working set on the bump slab; overflow
+     * still handles large values with stamped per-object malloc. */
+    m->arena = cc_arena_malloc(64 * 1024);
     if (!cc_arena_valid(&m->arena)) return false;
     m->data = CCShardMapTable_init_count(&m->arena, buckets);
     return m->data != NULL;

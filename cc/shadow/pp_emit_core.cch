@@ -2316,15 +2316,19 @@ static int g_shadow_ndsinks;
 /* Active destination type for .ufcs_dynamic2 (whole-RHS / cast only). */
 static char g_shadow_sink_dest[96];
 
-/* Local fn param bases for @as arg coerce (fn, arg_index → T / stars). */
+/* Local fn param bases for @as arg coerce + autoblock unpack casts
+ * (fn, arg_index → T / stars). Cap matches UFN scale; silent drop hid
+ * typed casts (DB* → intptr_t*). */
+enum { SHADOW_FNPARAM_CAP = 512 };
 typedef struct {
     char fn[64];
     char base[64];
     int stars;
     int argi;
 } ShadowFnParam;
-static ShadowFnParam g_shadow_fnparams[64];
+static ShadowFnParam g_shadow_fnparams[SHADOW_FNPARAM_CAP];
 static int g_shadow_nfnparams;
+static int g_shadow_fnparam_overflow;
 
 /* Set when a typed UFCS miss was diagnosed — fail the emit product. */
 static int g_shadow_ufcs_miss;
@@ -2824,6 +2828,7 @@ static void shadow_chan_reset(void) {
     g_shadow_ndsinks = 0;
     g_shadow_sink_dest[0] = 0;
     g_shadow_nfnparams = 0;
+    g_shadow_fnparam_overflow = 0;
     g_shadow_nfields = 0;
     g_shadow_ufcs_miss = 0;
     g_shadow_string_stack_diag = 0;
@@ -3854,8 +3859,18 @@ static void shadow_as_resolve_transitive(void) {
 
 static void shadow_fnparam_register(const char* fn, int argi, const char* base,
                                     int stars) {
-    if (!fn || !fn[0] || !base || !base[0] || g_shadow_nfnparams >= 64) return;
-    if (argi < 0) return;
+    if (!fn || !fn[0] || !base || !base[0] || argi < 0) return;
+    if (g_shadow_nfnparams >= SHADOW_FNPARAM_CAP) {
+        if (!g_shadow_fnparam_overflow) {
+            fprintf(stderr,
+                    "error: too many fn param type entries for autoblock "
+                    "(>%d); typed pointer casts would silently degrade\n",
+                    SHADOW_FNPARAM_CAP);
+            g_shadow_fnparam_overflow = 1;
+            g_shadow_ufcs_miss = 1; /* fail the emit product */
+        }
+        return;
+    }
     snprintf(g_shadow_fnparams[g_shadow_nfnparams].fn,
              sizeof(g_shadow_fnparams[0].fn), "%s", fn);
     snprintf(g_shadow_fnparams[g_shadow_nfnparams].base,

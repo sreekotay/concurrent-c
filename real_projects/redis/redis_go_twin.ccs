@@ -41,7 +41,7 @@
 #include <string.h>
 #include <signal.h>
 
-#define K_READ_BUF   (64 * 1024)
+#define K_READ_BUF   (16 * 1024)
 #define K_OUT_BUF    (8 * 1024)
 #define K_PIPELINE   16
 #define K_MAX_ARGS   16
@@ -296,7 +296,6 @@ static size_t unique_shards(DB* db, Cmd* c, uint64_t* names, size_t cap) {
 static Reply execute(DB* db, CCExclusive* excl, Cmd* c, CCArena* a) {
     Reply out = {0};
     Hold h = HOLD_NONE;
-    bool admitted = 1;
 
     if (c->argc == 0) return enc_err("empty command", a);
     {
@@ -319,30 +318,27 @@ static Reply execute(DB* db, CCExclusive* excl, Cmd* c, CCArena* a) {
         size_t si;
         if (c->argc < 2) return enc_err("wrong number of arguments", a);
         si = shard_of(db, c->args[1]);
-        admitted = excl->acquire_into((uint64_t)si, &out, a,
-            (Reply* slot, CCArena* arena) => [db, c, si] {
-                *slot = exec_key(db, c, si, arena);
-                return NULL;
-            });
+        CCExclusiveGuard g = excl->acquire((uint64_t)si);
+        out = exec_key(db, c, si, a);
+        g.release();
     } else if (h == HOLD_KEYS) {
         uint64_t names[K_MAX_SHARDS];
-        size_t nnames;
+        CCExclusiveGuard gs[K_MAX_SHARDS];
+        size_t nnames, n;
         if (c->argc < 2) return enc_err("wrong number of arguments", a);
         nnames = unique_shards(db, c, names, (size_t)K_MAX_SHARDS);
-        admitted = excl->acquire_sorted_into(names, nnames, &out, a,
-            (Reply* slot, CCArena* arena) => [db, c] {
-                *slot = exec_keys(db, c, arena);
-                return NULL;
-            });
+        n = excl->acquire_sorted(names, nnames, gs, (size_t)K_MAX_SHARDS);
+        if (n == 0) return enc_err("shard admission failed", a);
+        out = exec_keys(db, c, a);
+        gs->release_n(n);
     } else {
-        admitted = excl->acquire_range_into(0, (uint64_t)db->shard_count, &out, a,
-            (Reply* slot, CCArena* arena) => [db, c] {
-                *slot = exec_all(db, c, arena);
-                return NULL;
-            });
+        CCExclusiveGuard gs[K_MAX_SHARDS];
+        size_t n = excl->acquire_range(0, (uint64_t)db->shard_count, gs,
+                                       (size_t)K_MAX_SHARDS);
+        if (n == 0) return enc_err("shard admission failed", a);
+        out = exec_all(db, c, a);
+        gs->release_n(n);
     }
-
-    if (!admitted) return enc_err("shard admission failed", a);
     return out;
 }
 
@@ -544,6 +540,7 @@ int main(int argc, char** argv) {
                     (void)e;
                     break;
                 };
+                (void)client.set_nodelay(1);
                 server->spawn(() => [@safe &db, excl, client] {
                     handle_client(client, &db, excl);
                 });

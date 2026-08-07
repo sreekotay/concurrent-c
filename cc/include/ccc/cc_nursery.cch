@@ -75,13 +75,13 @@ int cc_nursery_spawn_async_closure0(CCNursery* n, CCAsyncClosure0 c);
 // Spawn an async closure on the hybrid/V2 path.
 int cc_nursery_spawnhybrid_async_closure0(CCNursery* n, CCAsyncClosure0 c);
 // Spawn an existing async task under nursery ownership without blocking a worker.
+// Surface UFCS: `n->spawn(async_fn(...))` (also `n->spawn_async(...)` alias).
 int cc_nursery_spawn_async(CCNursery* n, CCTask task);
 /* R1 — spawn an async task and stamp its fiber with user-facing naming
  * (callee name + spawn-site file/line) so any code running inside the
  * fiber can answer "what task am I?" via `cc_rt_diag_current_async_info`.
- * The strings must outlive the fiber; the spawn-site lowering in
- * preprocess.c (UFCS for `n->spawn_async(...)`) supplies C string
- * literals, which trivially satisfy that. */
+ * The strings must outlive the fiber; UFCS for `n->spawn(callee(...))`
+ * (and the `spawn_async` alias) supplies C string literals. */
 int cc_nursery_spawn_async_named(CCNursery* n, CCTask task,
                                   const char* diag_user_name,
                                   const char* diag_file,

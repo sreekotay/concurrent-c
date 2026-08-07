@@ -15,7 +15,7 @@
  *   CCExclusiveGuard gs[8];
  *   size_t n = excl->acquire_sorted(names, count, gs, 8);
  *   size_t n = excl->acquire_range(0, shard_count, gs, 8);  // [lo, hi)
- *   cc_exclusive_guards_release(gs, n);
+ *   gs->release_n(n);     // LIFO; arrow decays the array to CCExclusiveGuard*
  *
  * Admitted builders (the exclusive conjugation of send_into): admit a name
  * set, run a CCClosure2 builder(slot, arena) exactly once under the held
@@ -146,12 +146,18 @@ static inline void cc_exclusive_guard_destroy(CCExclusiveGuard* g) {
 /* Max names for one acquire_sorted / acquire_range call (stack sort bound). */
 enum { CC_EXCLUSIVE_ACQUIRE_MULTI_MAX = 64 };
 
-/* Release `n` guards in reverse order (LIFO).  Idempotent per guard. */
-static inline void cc_exclusive_guards_release(CCExclusiveGuard* guards, size_t n) {
+/* Release `n` guards in reverse order (LIFO). Idempotent per guard.
+ * UFCS: `gs->release_n(n)` / `p.release_n(n)` (recv is CCExclusiveGuard*). */
+static inline void cc_exclusive_guard_release_n(CCExclusiveGuard* guards, size_t n) {
     while (n > 0) {
         n--;
         cc_exclusive_guard_release(&guards[n]);
     }
+}
+
+/* Legacy spelling of release_n (same LIFO semantics). */
+static inline void cc_exclusive_guards_release(CCExclusiveGuard* guards, size_t n) {
+    cc_exclusive_guard_release_n(guards, n);
 }
 
 /* Acquire each unique name in ascending order.  `names` may be unsorted and

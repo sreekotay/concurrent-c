@@ -341,6 +341,24 @@ CCResult_CCSocket_CCNetError cc_listener_accept(CCListener* ln) {
     }
 }
 
+void cc_listener_serve(CCListener* ln, CCNursery* n, CCClosure1 on_conn) {
+    if (!ln || !n) {
+        cc_closure1_drop(on_conn);
+        return;
+    }
+    /* Borrow-call: cc_closure1_call is single-shot (drops env). An accept
+     * loop must invoke on_conn many times, then drop once at the end. */
+    while (!cc_nursery_is_cancelled(n)) {
+        CCResult_CCSocket_CCNetError ar = cc_listener_accept(ln);
+        CCSocket client;
+        if (cc_is_err(ar)) break;
+        client = cc_value(ar);
+        if (on_conn.fn)
+            (void)on_conn.fn(on_conn.env, (intptr_t)&client);
+    }
+    cc_closure1_drop(on_conn);
+}
+
 void cc_listener_close(CCListener* ln) {
     if (!ln) return;
     if (ln->watcher) {
@@ -524,6 +542,13 @@ void cc_socket_shutdown(CCSocket* sock, CCShutdownMode mode, CCNetError* out_err
     if (shutdown(sock->fd, how) < 0) {
         *out_err = errno_to_net_error(errno);
     }
+}
+
+int cc_socket_set_nodelay(CCSocket* sock, int on) {
+    int v;
+    if (!sock || sock->fd < 0) return -1;
+    v = on ? 1 : 0;
+    return setsockopt(sock->fd, IPPROTO_TCP, TCP_NODELAY, &v, sizeof(v));
 }
 
 void cc_socket_close(CCSocket* sock) {

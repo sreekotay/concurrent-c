@@ -13,6 +13,8 @@
 #include <ccc/cc_slice.cch>
 #include <ccc/cc_result.cch>
 #include <ccc/cc_sched.cch>
+#include <ccc/cc_closure.cch>
+#include <ccc/cc_nursery.cch>
 #include <ccc/cc_type.cch>
 #include <ccc/cc_ufcs.cch>
 #include "io.cch"
@@ -146,6 +148,14 @@ CCResult_CCSocket_CCNetError cc_listener_accept(CCListener* ln);
 /* Async accept */
 /* @async CCResult_CCSocket_CCNetError cc_listener_accept_async(CCListener* ln); */
 
+/* Accept until `n` is cancelled (or accept fails).
+ * Each connection is handed to `on_conn` as `CCSocket*` (arg0) for the
+ * duration of that call — copy or n->spawn(async_fn(...)) before returning.
+ * `on_conn` is borrow-invoked each accept (not single-shot); serve takes
+ * ownership and drops it when the loop ends.
+ * UFCS: `ln.serve(nursery, on_conn)`. */
+void cc_listener_serve(CCListener* ln, CCNursery* n, CCClosure1 on_conn);
+
 /* Close listener */
 void cc_listener_close(CCListener* ln);
 
@@ -214,6 +224,10 @@ void cc_socket_shutdown(CCSocket* sock, CCShutdownMode mode, CCNetError* out_err
 
 /* Close socket */
 void cc_socket_close(CCSocket* sock);
+
+/* TCP_NODELAY — disable Nagle (UFCS: `sock.set_nodelay(1)`).
+ * Returns 0 on success, -1 on failure (invalid sock / setsockopt). */
+int cc_socket_set_nodelay(CCSocket* sock, int on);
 
 /* Address info */
 CCSlice cc_socket_peer_addr(CCSocket* sock, CCArena* arena, CCNetError* out_err);

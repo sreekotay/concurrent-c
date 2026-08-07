@@ -1,0 +1,47 @@
+/* Autoblock thunk must unpack pointer args as (T*), not (intptr_t*) /
+ * bare (intptr_t) — broken for `Reply execute(DB*, …, Cmd*, …)` style. */
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_closure.cch>
+#include <ccc/std/task.cch>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct DB {
+    int n;
+} DB;
+typedef struct Cmd {
+    int x;
+} Cmd;
+typedef struct Reply {
+    int v;
+} Reply;
+
+/* Undecorated sync callee → autoblock-wrapped from @async. */
+static Reply execute(DB* db, Cmd* c, int* scratch) {
+    Reply r = {0};
+    if (!db || !c || !scratch) {
+        r.v = -1;
+        return r;
+    }
+    *scratch = db->n + c->x;
+    r.v = *scratch;
+    return r;
+}
+
+@async int serve(DB* db) {
+    Cmd c = {.x = 7};
+    int scratch = 0;
+    Reply r = execute(db, &c, &scratch);
+    return r.v;
+}
+
+int main(void) {
+    DB db = {.n = 35};
+    int got = cc_block_on(int, serve(&db));
+    if (got != 42) {
+        fprintf(stderr, "expected 42 got %d\n", got);
+        return 1;
+    }
+    printf("autoblock_typed_pointer_args_smoke ok\n");
+    return 0;
+}

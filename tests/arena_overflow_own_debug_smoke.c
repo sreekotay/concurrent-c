@@ -3,8 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Overflow ownership is always tracked: foreign / wrong-arena overflow
- * release and realloc are refused instead of calling free/realloc. */
+/* Overflow ownership is stamped in the block header: foreign / wrong-arena
+ * overflow release and realloc are refused instead of calling free/realloc. */
 int main(void) {
     uint8_t buf[64];
     CCArena a = cc_arena_create_buffer(buf, sizeof(buf), CC_ARENA_FIXED);

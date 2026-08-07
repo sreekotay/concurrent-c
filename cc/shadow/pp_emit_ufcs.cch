@@ -1465,15 +1465,20 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
     } else if (is_arrow && strcmp(meth_name, "wait") == 0) {
         if (!shadow_ufcs_ty_is(vty, rb, "CCNursery")) return 0;
         snprintf(dst, cap, "cc_nursery_wait(%s)", recv);
-    } else if (is_arrow && strcmp(meth_name, "spawn") == 0) {
-        /* Raw `cc_nursery_spawn` takes (fn, arg); UFCS surface is closure. */
-        if (!shadow_ufcs_ty_is(vty, rb, "CCNursery")) return 0;
-        snprintf(dst, cap, "cc_nursery_spawn_closure0(%s, %s)", recv, a);
-    } else if (is_arrow && strcmp(meth_name, "spawn_async") == 0) {
-        /* R1: named spawn so fibers answer via cc_rt_diag_current_async_info. */
+    } else if (is_arrow &&
+               (strcmp(meth_name, "spawn") == 0 ||
+                strcmp(meth_name, "spawn_async") == 0)) {
+        /* One surface: n->spawn(...).
+         *   () => {…}     → sync fiber (closure0)
+         *   async_fn(…)   → @async task (named spawn_async)
+         * spawn_async kept as an explicit alias for the task form. */
         char callee_name[96];
         size_t ci = 0, cj = 0;
         if (!shadow_ufcs_ty_is(vty, rb, "CCNursery")) return 0;
+        if (strcmp(meth_name, "spawn") == 0 && strstr(a, "=>")) {
+            snprintf(dst, cap, "cc_nursery_spawn_closure0(%s, %s)", recv, a);
+            return 1;
+        }
         while (a[ci] && (a[ci] == ' ' || a[ci] == '\t')) ci++;
         while (a[ci] && cj + 1 < sizeof(callee_name) &&
                ((a[ci] >= 'A' && a[ci] <= 'Z') || (a[ci] >= 'a' && a[ci] <= 'z') ||

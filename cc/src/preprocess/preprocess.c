@@ -5786,6 +5786,7 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
         int string_like = 0;
         int slice_like = 0;
         int nursery_like = 0;
+        int nursery_spawn_named = 0; /* task-form spawn → spawn_async_named */
         int chan_tx = 0;
         int chan_rx = 0;
         int map_decl_like = 0;
@@ -6597,17 +6598,39 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                 cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
             } else if (nursery_like) {
                 if (strcmp(method_name, "spawn") == 0) {
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_nursery_spawn_closure0");
+                    /* Closure `() =>` → spawn_closure0; else @async task. */
+                    size_t as = paren_pos + 1;
+                    size_t ae = paren_end;
+                    int has_arrow = 0;
+                    size_t k;
+                    int depth = 0;
+                    as = cc_skip_ws_and_comments(src, ae, as);
+                    ae = cc_rskip_ws_and_comments(src, ae);
+                    if (ae < as) ae = as;
+                    for (k = as; k + 1 < ae; k++) {
+                        char ch = src[k];
+                        if (ch == '(' || ch == '[' || ch == '{') depth++;
+                        else if (ch == ')' || ch == ']' || ch == '}') {
+                            if (depth) depth--;
+                        } else if (depth == 0 && ch == '=' && src[k + 1] == '>') {
+                            has_arrow = 1;
+                            break;
+                        }
+                    }
+                    if (has_arrow) {
+                        cc_sb_append_cstr(&out, &out_len, &out_cap,
+                                         "cc_nursery_spawn_closure0");
+                    } else {
+                        nursery_spawn_named = 1;
+                        cc_sb_append_cstr(&out, &out_len, &out_cap,
+                                         "cc_nursery_spawn_async_named");
+                    }
                 } else if (strcmp(method_name, "spawnhybrid") == 0) {
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_nursery_spawnhybrid_closure0");
                 } else if (strcmp(method_name, "close_on") == 0) {
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_nursery_add_closing_tx");
                 } else if (strcmp(method_name, "spawn_async") == 0) {
-                    /* R1: route to the naming variant so the new fiber
-                     * carries the user-facing task name + spawn-site
-                     * source location for `cc_rt_diag_current_async_info`.
-                     * The trailing `, "callee", __FILE__, __LINE__` is
-                     * appended below in the args-emit block. */
+                    nursery_spawn_named = 1;
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_nursery_spawn_async_named");
                 } else {
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_nursery_");
@@ -6647,12 +6670,8 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                 cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
                 cc_sb_append(&out, &out_len, &out_cap, src + args_start, args_end - args_start);
             }
-            /* R1: trailing `, "callee", __FILE__, __LINE__` for the
-             * `spawn_async` -> `cc_nursery_spawn_async_named` rewrite.
-             * `__FILE__` and `__LINE__` are resolved by TCC against the
-             * `#line` directives CC emits, so they report the user's
-             * source location, not the generated C path/line. */
-            if (nursery_like && strcmp(method_name, "spawn_async") == 0) {
+            /* R1: trailing diag args for task-form spawn / spawn_async. */
+            if (nursery_spawn_named) {
                 char callee_name[96];
                 size_t ci = args_start;
                 size_t cj = 0;
@@ -6662,9 +6681,6 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                 }
                 callee_name[cj] = '\0';
                 if (cj == 0 || ci >= args_end || src[ci] != '(') {
-                    /* Args don't start with a plain `ident(`; fall back to
-                     * the literal "<async>".  Keeps the wiring robust for
-                     * cases like `n->spawn_async(make_task() + foo)`. */
                     snprintf(callee_name, sizeof(callee_name), "%s", "<async>");
                 }
                 cc_sb_append_cstr(&out, &out_len, &out_cap, ", \"");
