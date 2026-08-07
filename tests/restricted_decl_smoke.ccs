@@ -10,8 +10,7 @@ typedef struct Conn {
 } Conn;
 
 @restricted Encode on Conn {
-    out_len, buf,
-    write
+    r: out_len, buf, write;
 }
 
 static int conn_write(Conn* c, const char* data) {
@@ -26,6 +25,7 @@ int main(void) {
     memset(&c, 0, sizeof(c));
     enc = &c; /* narrow: Conn* → restricted */
     (void)enc->write("");
+    (void)enc->out_len;
     printf("ok\n");
     return 0;
 }

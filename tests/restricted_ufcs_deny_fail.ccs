@@ -8,8 +8,7 @@ typedef struct Conn {
 } Conn;
 
 @restricted Encode on Conn {
-    out_len,
-    write
+    r: out_len, write;
 }
 
 static int conn_write(Conn* c, const char* data) {

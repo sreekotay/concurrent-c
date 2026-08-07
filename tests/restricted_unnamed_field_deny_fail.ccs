@@ -1,0 +1,21 @@
+/* Unlisted field on unnamed-restricted Base (not first-arg / not init). */
+#include <ccc/std/prelude.cch>
+
+typedef struct Box {
+    int secret;
+    int len;
+} Box;
+
+@restricted on Box {
+    r: len, bump;
+};
+
+static int leak(int n, Box* b) {
+    (void)n;
+    return b->secret; /* ill-formed: Box* is not first param */
+}
+
+int main(void) {
+    Box b = { .secret = 1, .len = 0 };
+    return leak(0, &b);
+}

@@ -52,6 +52,13 @@ typedef struct {
     size_t alen;
 } CCSlice;
 
+/* Unnamed facet (enforced by shadow_lower for the whole slice family —
+ * CCSlice / Unique / Shared / Packed / Hdr / CCSlice_T). Ordinary sites:
+ * field loads + UFCS OK; field stores denied. First-param CCSlice* bodies
+ * are trusted (stdlib + user methods). Equivalent surface:
+ *   @restricted on CCSlice { r: *; };
+ * (Not written live here: angle-includes are host-C passthrough.) */
+
 /* Surface type sugar:
    - `T[:]`   lowers to `CCSlice`
    - `T[n:]`  lowers to `CCSlice`

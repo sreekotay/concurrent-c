@@ -379,7 +379,9 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
     }
     /* AST+type: one normalize/bind walk before emit (not per-expr string soup). */
     shadow_collect_binds(items, n);
-    /* @restricted modes before UFCS/field checks (erased typedefs emit later). */
+    /* @restricted modes before UFCS/field checks (erased typedefs emit later).
+     * Builtins first (slice family); TU decls may redeclare if compatible. */
+    shadow_restrict_register_builtins();
     shadow_restrict_register_from_items(items, n);
 
     /* Collect Result Ok/Err pairs first — drives specs and __cc_uw_* arms. */
@@ -1889,6 +1891,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
         }
         case AST_STATIC_FN: {
             char params[512];
+            char ret[160];
             /* Skip duplicate grammar entry-point functions (Name_match).
              * Grammar rules expansion can produce multiple parse passes of
              * the same entry function. */
@@ -1906,8 +1909,11 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                                  sizeof(emitted_fns[0]), "%s", it->b);
                 }
             }
+            snprintf(ret, sizeof(ret), "%s", it->a[0] ? it->a : "int");
+            shadow_rewrite_slice_types(ret, sizeof(ret));
             snprintf(params, sizeof(params), "%s",
                      it->c[0] ? it->c : "void");
+            shadow_rewrite_slice_types(params, sizeof(params));
             shadow_normalize_chan_params(params, sizeof(params));
             const char* inl =
                 (it->e[0] && strcmp(it->e, "inline") == 0) ? "inline " : "";
@@ -1937,7 +1943,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 if (!shadow_tpl_kv(out,
                                    "static ${inl}${ret} ${name}(${params}) { "
                                    "${fn}(",
-                                   "inl", inl, "ret", it->a, "name", it->b,
+                                   "inl", inl, "ret", ret, "name", it->b,
                                    "params", params, "fn", fn, NULL) ||
                     !cemit_str(out, args) ||
                     !cemit_str(out, "); }\n\n"))
@@ -1957,13 +1963,13 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 shadow_restrict_check_text(body);
                 shadow_pop_fn_binds(one_mark);
                 if (g_shadow_restrict_diag) return 0;
-                if (!cemit_fmt(out, "static %s%s %s(%s) { %s }\n\n", inl, it->a,
+                if (!cemit_fmt(out, "static %s%s %s(%s) { %s }\n\n", inl, ret,
                                it->b, params, body))
                     return 0;
                 break;
             }
             if (it->d[0] && it->nkids == 0) {
-                if (!cemit_fmt(out, "static %s%s %s(%s) {\n", inl, it->a, it->b,
+                if (!cemit_fmt(out, "static %s%s %s(%s) {\n", inl, ret, it->b,
                                params))
                     return 0;
                 char body[2048];
@@ -2048,13 +2054,13 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 }
             }
             if (bind_ok &&
-                !cemit_fmt(out, "static %s%s %s(%s) {\n", inl, it->a, it->b,
+                !cemit_fmt(out, "static %s%s %s(%s) {\n", inl, ret, it->b,
                            params))
                 bind_ok = 0;
             /* Soft returns + watermark for any return type (void skips retval). */
             int use_c = (nsdestroys > 0 || nsdefers > 0);
             if (bind_ok) {
-                sctx.soft_ret_ty = it->a[0] ? it->a : "int";
+                sctx.soft_ret_ty = ret;
                 sctx.goto_cleanup = use_c;
                 shadow_vdrop_mark_push(&sctx);
                 if (!shadow_emit_scratch_if_needed(it->kids, it->nkids, sdestroys,

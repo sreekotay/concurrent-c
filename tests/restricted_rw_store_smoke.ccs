@@ -1,0 +1,26 @@
+/* rw: permits both load and store. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct Conn {
+    int sock;
+    int out_len;
+} Conn;
+
+@restricted Mut on Conn {
+    rw: out_len;
+}
+
+static void use_mut(@restricted(Mut) Conn* enc) {
+    int n = enc->out_len;
+    enc->out_len = n + 1;
+}
+
+int main(void) {
+    Conn c;
+    memset(&c, 0, sizeof(c));
+    use_mut(&c);
+    printf("ok\n");
+    return 0;
+}

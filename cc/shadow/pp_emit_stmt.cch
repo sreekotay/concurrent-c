@@ -1687,12 +1687,34 @@ static int g_shadow_collect_fn_locals;
 static void shadow_collect_binds_node(AstNode* st) {
     int k;
     if (!st) return;
-    /* Register generic typedef aliases before var binds that use them. */
-    if (st->kind == AST_TYPEDEF_INT && st->b[0] &&
-        (strncmp(st->b, "ArrayMap_", 9) == 0 || strncmp(st->b, "Map_", 4) == 0 ||
-         strncmp(st->b, "CCVec_", 6) == 0)) {
+    /* Register typedef aliases before var binds that use them (incl.
+     * ConnEnc → Conn_Restrict_Encode* so @restricted checks stay transparent). */
+    if (st->kind == AST_TYPEDEF_INT && st->a[0] && st->b[0]) {
         shadow_register_mangled_ty(st->b);
         shadow_td_alias_register(st->a, st->b);
+    }
+    if (st->kind == AST_AT_STMT && strcmp(st->a, "restricted") == 0 &&
+        st->e[0]) {
+        const char* hash = strchr(st->e, '#');
+        if (hash && hash[1]) {
+            char mangled[160];
+            char base_ty[192];
+            const char* alias = hash + 1;
+            size_t ml = (size_t)(hash - st->e);
+            int is_ptr = 0;
+            if (ml >= sizeof(mangled)) ml = sizeof(mangled) - 1;
+            memcpy(mangled, st->e, ml);
+            mangled[ml] = 0;
+            if (alias[0] == '*') {
+                is_ptr = 1;
+                alias++;
+            }
+            if (is_ptr)
+                snprintf(base_ty, sizeof(base_ty), "%s*", mangled);
+            else
+                snprintf(base_ty, sizeof(base_ty), "%s", mangled);
+            shadow_td_alias_register(alias, base_ty);
+        }
     }
     if (st->kind == AST_TYPED_INIT || st->kind == AST_VAL_DESTROY ||
         st->kind == AST_VAR_DECL) {
@@ -1911,14 +1933,35 @@ static void shadow_collect_binds(AstNode** items, int n) {
 /* Emit-time: collect this fn's params+locals, return mark for pop. */
 static int shadow_push_fn_binds(AstNode* fn) {
     int mark = g_shadow_nbinds;
+    const char* fname = NULL;
     g_shadow_collect_fn_locals = 1;
     shadow_collect_binds_node(fn);
     g_shadow_collect_fn_locals = 0;
+    /* Unnamed @restricted: first-param Base/Base* → trusted body. */
+    g_shadow_restrict_trusted_base[0] = 0;
+    if (fn) {
+        if (fn->kind == AST_STATIC_FN || fn->kind == AST_ASYNC_FN)
+            fname = fn->b;
+        else if (fn->kind == AST_FN || fn->kind == AST_RESULT_FN)
+            fname = fn->a;
+        if (fname && fname[0]) {
+            const ShadowFnParam* fp = shadow_fnparam_lookup(fname, 0);
+            ShadowRestrict* rr;
+            if (fp && fp->base[0]) {
+                rr = shadow_restrict_find_for_ty(fp->base);
+                if (rr && shadow_restrict_is_unnamed(rr))
+                    snprintf(g_shadow_restrict_trusted_base,
+                             sizeof(g_shadow_restrict_trusted_base), "%s",
+                             rr->base);
+            }
+        }
+    }
     return mark;
 }
 
 static void shadow_pop_fn_binds(int mark) {
     g_shadow_nbinds = mark;
+    g_shadow_restrict_trusted_base[0] = 0;
 }
 
 /* Bind decls in a compound body (skips nested AST_BLOCK via collect). */
@@ -2049,7 +2092,14 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
     /* Markers: next stmt's lead already covers the gap (avoid double blanks). */
     if (st->kind == AST_ERRHANDLER || st->kind == AST_DEFER)
         return 1;
-    shadow_restrict_check_text(st->a);
+    /* Assign lhs is a store through the field (op lives in st->c). */
+    if (st->kind == AST_ASSIGN) {
+        g_shadow_restrict_lhs_store = 1;
+        shadow_restrict_check_text(st->a);
+        g_shadow_restrict_lhs_store = 0;
+    } else {
+        shadow_restrict_check_text(st->a);
+    }
     shadow_restrict_check_text(st->b);
     shadow_restrict_check_text(st->c);
     shadow_restrict_check_text(st->d);
@@ -2725,12 +2775,8 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             return cemit_fmt(out, "%stypedef %s %s;\n", indent, rname, st->a);
         }
         if (st->b[0]) {
-            /* Generic typedef: register ArrayMap_/Map_ instance + alias. */
             shadow_register_mangled_ty(st->b);
-            if (strncmp(st->b, "ArrayMap_", 9) == 0 ||
-                strncmp(st->b, "Map_", 4) == 0 ||
-                strncmp(st->b, "CCVec_", 6) == 0)
-                shadow_td_alias_register(st->a, st->b);
+            shadow_td_alias_register(st->a, st->b);
             return cemit_fmt(out, "%stypedef %s %s;\n", indent, st->b, st->a);
         }
         return cemit_fmt(out, "%stypedef int %s;\n", indent, st->a);
@@ -2981,7 +3027,9 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                     raw[--n] = 0;
             }
         }
-        shadow_emit_expr_text(st, raw, init, sizeof(init), formal);
+        /* Same as AST_PTR_INIT: channel_pair → create_named before UFCS peel. */
+        if (!shadow_emit_channel_pair_expr(init, sizeof(init), raw))
+            shadow_emit_expr_text(st, raw, init, sizeof(init), formal);
         shadow_resolve_at_create(init, sizeof(init), st->a, is_ptr, cl != NULL);
         if (cl) shadow_splice_closure_arg(init, sizeof(init), cl);
         if (has_bang) {
@@ -3932,11 +3980,46 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             shadow_emit_text_ufcs(lowered, sizeof(lowered), st->c, NULL);
             return cemit_fmt(out, "%s%s;\n", indent, lowered);
         }
-        if (strcmp(st->a, "restricted") == 0 && st->b[0] && st->d[0]) {
-            /* Erased view: typedef Base Base_Restrict_Mode; */
+        if (strcmp(st->a, "restricted") == 0 && st->d[0]) {
+            /* Named: typedef Base Base_Restrict_Mode (+ optional alias).
+             * Unnamed: allow-list on Base itself — no parallel typedef. */
+            char mangled[160];
+            const char* hash;
             if (!shadow_restrict_register(st->d, st->b, st->c)) return 0;
-            return cemit_fmt(out, "%stypedef %s %s;\n", indent, st->d,
-                             st->e[0] ? st->e : "/*restricted*/");
+            if (!st->b[0]) return 1;
+            mangled[0] = 0;
+            hash = st->e[0] ? strchr(st->e, '#') : NULL;
+            if (hash) {
+                size_t ml = (size_t)(hash - st->e);
+                if (ml >= sizeof(mangled)) ml = sizeof(mangled) - 1;
+                memcpy(mangled, st->e, ml);
+                mangled[ml] = 0;
+            } else if (st->e[0]) {
+                snprintf(mangled, sizeof(mangled), "%s", st->e);
+            }
+            if (!mangled[0]) snprintf(mangled, sizeof(mangled), "/*restricted*/");
+            if (!cemit_fmt(out, "%stypedef %s %s;\n", indent, st->d, mangled))
+                return 0;
+            if (hash && hash[1]) {
+                const char* alias = hash + 1;
+                int is_ptr = 0;
+                char base_ty[192];
+                if (alias[0] == '*') {
+                    is_ptr = 1;
+                    alias++;
+                }
+                if (is_ptr)
+                    snprintf(base_ty, sizeof(base_ty), "%s*", mangled);
+                else
+                    snprintf(base_ty, sizeof(base_ty), "%s", mangled);
+                shadow_td_alias_register(alias, base_ty);
+                if (is_ptr)
+                    return cemit_fmt(out, "%stypedef %s* %s;\n", indent,
+                                     mangled, alias);
+                return cemit_fmt(out, "%stypedef %s %s;\n", indent, mangled,
+                                 alias);
+            }
+            return 1;
         }
         if (strcmp(st->a, "grammar") == 0 && st->b[0]) {
             /* Beachhead @grammar(cli) T { flag --test … } */

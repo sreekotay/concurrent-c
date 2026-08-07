@@ -3254,10 +3254,25 @@ static AstNode* parse_static_fn(Parser* p) {
         return NULL;
     int ni = ri + 1;
     int is_long_long = 0;
+    int is_slice = 0;
+    int is_slice_unique = 0;
     if (rty.kind == TK_IDENT && spell_eq(rty.spell, "long") && ni < p->n &&
         p->toks[ni].kind == TK_IDENT && spell_eq(p->toks[ni].spell, "long")) {
         is_long_long = 1;
         ni++;
+    }
+    /* `Ret[:]` / `Ret[:!]` before the name (type-position slice sugar). */
+    if (ni + 2 < p->n && tok_eq(p->toks[ni], TK_PUNCT, "[") &&
+        tok_eq(p->toks[ni + 1], TK_PUNCT, ":")) {
+        if (tok_eq(p->toks[ni + 2], TK_PUNCT, "]")) {
+            is_slice = 1;
+            ni += 3;
+        } else if (ni + 3 < p->n && tok_eq(p->toks[ni + 2], TK_PUNCT, "!") &&
+                   tok_eq(p->toks[ni + 3], TK_PUNCT, "]")) {
+            is_slice = 1;
+            is_slice_unique = 1;
+            ni += 4;
+        }
     }
     int is_ptr = 0;
     if (ni < p->n && tok_eq(p->toks[ni], TK_PUNCT, "*")) {
@@ -3273,6 +3288,12 @@ static AstNode* parse_static_fn(Parser* p) {
     if (has_const) p_next(p); /* const */
     p_next(p); /* ret */
     if (is_long_long) p_next(p); /* long (second) */
+    if (is_slice) {
+        p_next(p); /* [ */
+        p_next(p); /* : */
+        if (is_slice_unique) p_next(p); /* ! */
+        p_next(p); /* ] */
+    }
     if (is_ptr) p_next(p); /* * */
     Token name = p_next(p);
     p_next(p); /* ( */
@@ -3344,7 +3365,25 @@ static AstNode* parse_static_fn(Parser* p) {
         int saved_soft = p->soft_stmt;
         AstNode* n = ast_new(p, AST_STATIC_FN);
         if (!n) return NULL;
-        if (is_long_long) {
+        if (is_slice) {
+            /* Keep sugar in a[]; emit rewrites via shadow_rewrite_slice_types. */
+            if (is_slice_unique) {
+                if (has_const)
+                    snprintf(n->a, sizeof(n->a), "const %.*s[:!]%s",
+                             (int)rty.spell.len, rty.spell.ptr,
+                             is_ptr ? "*" : "");
+                else
+                    snprintf(n->a, sizeof(n->a), "%.*s[:!]%s",
+                             (int)rty.spell.len, rty.spell.ptr,
+                             is_ptr ? "*" : "");
+            } else if (has_const) {
+                snprintf(n->a, sizeof(n->a), "const %.*s[:]%s",
+                         (int)rty.spell.len, rty.spell.ptr, is_ptr ? "*" : "");
+            } else {
+                snprintf(n->a, sizeof(n->a), "%.*s[:]%s", (int)rty.spell.len,
+                         rty.spell.ptr, is_ptr ? "*" : "");
+            }
+        } else if (is_long_long) {
             if (has_const)
                 snprintf(n->a, sizeof(n->a), "const long long%s", is_ptr ? "*" : "");
             else

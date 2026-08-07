@@ -17,7 +17,7 @@ int main(void) {
         return 1;
     }
 
-    CCArena a = cc_arena_heap(kilobytes(1)) !> @destroy;
+    CCArena a = cc_arena_heap(kilobytes(1)) @destroy;
     /* Stabilize: static/canonical bytes outlive any arena reset. */
     char[:] msg = cc_slice_from_static((void*)"payload!", 8);
 

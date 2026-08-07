@@ -8,7 +8,7 @@ typedef struct Conn {
 } Conn;
 
 @restricted Encode on Conn {
-    out_len
+    r: out_len;
 }
 
 static void take_full(Conn* c) { (void)c; }

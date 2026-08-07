@@ -1,0 +1,15 @@
+/* char[:] / T[:] as static-fn return types must lower (not raw tape). */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static char[:] mk_bytes(void) {
+    char buf[4] = "hi";
+    return cc_slice_from_buffer(buf, 2);
+}
+
+int main(void) {
+    char[:] s = mk_bytes();
+    if (s.len != 2) return 1;
+    printf("ok\n");
+    return 0;
+}

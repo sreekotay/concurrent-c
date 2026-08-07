@@ -6,7 +6,7 @@
  *   shard arenas  → durable keys/values (put copies; delete releases packed entries)
  *   Conn.out      → encode only into stack arena (8K) that spills to heap;
  *                   flush after shard release (never socket I/O under hold)
- *   @restricted Encode on Conn → exec_* take encode view (no sock/flush);
+ *   ConnEnc (= @restricted Encode) → execute/exec_* encode-only (no sock/flush);
  *                   handle_client keeps Conn* for flush (draft_facets.md)
  *   encode/flush  → bool !>(CCError): Ok = buffered/shipped; Redis -ERR is Ok
  *   CCShardHold   → acquire + @defer hold.release(); then if (!held()) …
@@ -70,11 +70,10 @@ typedef struct Conn {
     CCString out;   /* contiguous encode buffer in arena */
 } Conn;
 
-/* Encode phase under shard hold: no sock, no flush (spec/draft_facets.md). */
-@restricted Encode on Conn {
-    arena, out,
-    write, lit, simple, err, ok, pong, null, integer, bulk, array_len
-}
+/* Encode phase: methods only (no sock/flush; fields stay behind Conn* bodies). */
+typedef @restricted Encode on Conn {
+    r: write, lit, simple, err, ok, pong, null, integer, bulk, array_*;
+} *ConnEnc;
 
 static bool !>(CCError) write_all(CCSocket* sock, char[:] data) {
     size_t off = 0;
@@ -94,16 +93,10 @@ static bool !>(CCError) conn_flush(Conn* c) {
         return cc_err(CC_ERR_INVALID_ARG, "conn flush: null");
     data = c->out.as_slice();
     if (data.len == 0) return cc_ok(true);
-    write_all(c->sock, data) !>(e) {
-        c->out = cc_string_new();
-        c->arena->reset();
-        return cc_err(e);
-    };
-    /* Dedicated encode arena: drop the handle, then reset reclaim.
-     * release() is for shared/durable arenas; here reset owns reclaim.
-     * clear() alone would leave a stale ptr across reset. */
-    c->out = cc_string_new();
-    c->arena->reset();
+    /* LIFO: release handle, then reclaim the encode arena. */
+    @defer c->arena->reset();
+    @defer c->out.release(c->arena);
+    write_all(c->sock, data) !>(e) { return cc_err(e); };
     return cc_ok(true);
 }
 
@@ -192,7 +185,7 @@ static Hold hold_for(char[:] name) {
 }
 
 static bool !>(CCError) exec_incr(CCShard* sh, char[:] key,
-                                  @restricted(Encode) Conn* conn) {
+                                  ConnEnc conn) {
     CCString* v = sh->get(key);
     int64_t n = 0;
     if (v) {
@@ -210,7 +203,7 @@ static bool !>(CCError) exec_incr(CCShard* sh, char[:] key,
 }
 
 static bool !>(CCError) exec_key(DB* db, Cmd* c, size_t si,
-                                 @restricted(Encode) Conn* conn) {
+                                 ConnEnc conn) {
     CCShardMap* maps = &db->maps;
     CCShard* sh = maps->shard(si);
     char[:] name = c->args[0];
@@ -235,7 +228,7 @@ static bool !>(CCError) exec_key(DB* db, Cmd* c, size_t si,
 }
 
 static bool !>(CCError) exec_keys(DB* db, Cmd* c,
-                                  @restricted(Encode) Conn* conn) {
+                                  ConnEnc conn) {
     @errhandler(CCError e) { return cc_err(e); }
     CCShardMap* maps = &db->maps;
     char[:] name = c->args[0];
@@ -277,7 +270,7 @@ static bool !>(CCError) exec_keys(DB* db, Cmd* c,
 }
 
 static bool !>(CCError) exec_all(DB* db, Cmd* c,
-                                 @restricted(Encode) Conn* conn) {
+                                 ConnEnc conn) {
     CCShardMap* maps = &db->maps;
     char[:] name = c->args[0];
     switch (name) {
@@ -307,7 +300,9 @@ static size_t unique_shards(DB* db, Cmd* c, uint64_t* names, size_t cap) {
     return n;
 }
 
-static bool !>(CCError) execute(DB* db, Cmd* c, Conn* conn) {
+/* Encode phase only — ship (flush/sock) stays on Conn* in handle_client. */
+static bool !>(CCError) execute(DB* db, Cmd* c,
+                                ConnEnc conn) {
     Hold h = HOLD_NONE;
     char[:] name;
     size_t i;
