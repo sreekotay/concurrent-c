@@ -1,0 +1,15 @@
+#ifndef COMPTIME_EMIT_HEADER_FOR_CCH
+#define COMPTIME_EMIT_HEADER_FOR_CCH
+
+#include <ccc/cc_instantiate.cch>
+
+/* Harvested header @comptime+@emit with don't prose. */
+@comptime {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        /* don't harvest 'hdr' */
+        enum { HdrEmit_note = 1 };
+        static const char *hdr_emit_msg = "don't break header emit";
+    `);
+}
+
+#endif

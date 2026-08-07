@@ -1,0 +1,10 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+
+/* Opening backtick never closes — must name @emit, not a vague parse slip. */
+@comptime {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        enum { PATH_EMIT_UNTERM = 1 };
+}
+
+int main(void) { return 0; }

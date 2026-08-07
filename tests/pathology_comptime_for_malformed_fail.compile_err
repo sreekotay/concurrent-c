@@ -1,0 +1,2 @@
+malformed `@comptime for`
+expected `@comptime for (NAME in

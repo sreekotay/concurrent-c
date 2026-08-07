@@ -1,0 +1,37 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+
+/* Nested `@comptime if` depth inside one @emit — stress the resolve fixpoint
+ * (cap 64). Only the deepest taken arm may remain; every other arm is poison. */
+@comptime {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        @comptime if (1) {
+          @comptime if (1) {
+            @comptime if (1) {
+              @comptime if (1) {
+                @comptime if (1) {
+                  @comptime if (1) {
+                    @comptime if (1) {
+                      @comptime if (1) {
+                        @comptime if (0) { ifix_dead_a(); }
+                        else @comptime if (0) { ifix_dead_b(); }
+                        else @comptime if (1) {
+                          enum { EMIT_IFIX_N = 13 };
+                        } else { ifix_dead_c(); }
+                      } else { ifix_dead_d(); }
+                    } else { ifix_dead_e(); }
+                  } else { ifix_dead_f(); }
+                } else { ifix_dead_g(); }
+              } else { ifix_dead_h(); }
+            } else { ifix_dead_i(); }
+          } else { ifix_dead_j(); }
+        } else { ifix_dead_k(); }
+    `);
+}
+
+int main(void) {
+    if (EMIT_IFIX_N != 13) return 1;
+    printf("comptime_emit_ifixpoint_smoke n=%d\n", (int)EMIT_IFIX_N);
+    return 0;
+}

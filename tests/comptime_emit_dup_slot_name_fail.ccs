@@ -1,0 +1,14 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_type.cch>
+
+typedef struct Dup { int a; int b; } Dup;
+
+/* Two fields emit the same top-level symbol — must not link silently. */
+@comptime for (f in type_of(Dup).fields) {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        int emit_dup_collide(void) { return ${f.index}; }
+    `);
+}
+
+int main(void) { return emit_dup_collide(); }

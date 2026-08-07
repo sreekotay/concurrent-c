@@ -1,0 +1,29 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+typedef struct Dual { int x; int y; } Dual;
+
+/* Same for-unroll emits to AFTER_PRELUDE and AT_COMPTIME_SITE; both must
+ * land, with slots and an inner prune. Site-anchored fragment is a static
+ * fn so main can call it after the for site. */
+@comptime for (f in type_of(Dual).fields) {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        enum { Dual_pre_${f.name} = ${f.index} + 1 };
+    `);
+    @emit(CC_EMIT_AT_COMPTIME_SITE, `
+        @comptime if (1) {
+            static int dual_site_${f.name}(void) { return ${f.index} + 10; }
+        } else {
+            dual_site_dead();
+        }
+    `);
+}
+
+int main(void) {
+    if (Dual_pre_x != 1 || Dual_pre_y != 2) return 1;
+    if (dual_site_x() != 10 || dual_site_y() != 11) return 2;
+    printf("comptime_emit_dual_anchor_smoke ok\n");
+    return 0;
+}

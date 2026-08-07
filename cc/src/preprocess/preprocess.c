@@ -18127,6 +18127,8 @@ static void cc__ct_split_ret(const char* ty, const char** ok_s, size_t* ok_n,
     }
 }
 
+static int cc__span_has_comptime_ctrl(const char* src, size_t n, size_t lo, size_t hi);
+
 static void cc__ct_append_field_body(char** out, size_t* ol, size_t* oc,
                                      const char* body, size_t bs, size_t be,
                                      const char* lv, size_t lvlen,
@@ -18377,7 +18379,11 @@ static int cc__try_expand_comptime_for(const char* src, size_t n, const char* in
 
     cc_sb_append(out, out_len, out_cap, src + *io_last_emit, i - *io_last_emit);
     {
-        int wrap_exec = cc_template_body_needs_emit_exec(src, n, bb + 1, bb_close);
+        /* Wrap only when the for body is emit-ready and has no further
+         * `@comptime if`/`for` outside templates. Otherwise the wrap
+         * imprisons unexpanded control flow in a libtcc `@comptime { }`. */
+        int wrap_exec = cc_template_body_needs_emit_exec(src, n, bb + 1, bb_close) &&
+                        !cc__span_has_comptime_ctrl(src, n, bb + 1, bb_close);
         for (size_t fi = 0; fi < nf; fi++) {
             if (wrap_exec) cc_sb_append_cstr(out, out_len, out_cap, "@comptime { ");
             cc__ct_append_field_body(out, out_len, out_cap, src, bb + 1, bb_close,
@@ -18389,6 +18395,35 @@ static int cc__try_expand_comptime_for(const char* src, size_t n, const char* in
     *io_last_emit = bb_close + 1;
     *io_i = bb_close + 1;
     return 1;
+}
+
+/* True when [lo, hi) has a `@comptime if` / `@comptime for` outside templates.
+ * Used so if-prune wrap-for-exec does not imprison an unexpanded for/if inside
+ * `@comptime { }` (libtcc would then see `@` — silent wrong path). For-inside
+ * emit backticks are ignored (skip_templates). */
+static int cc__span_has_comptime_ctrl(const char* src, size_t n, size_t lo, size_t hi) {
+    static const char ATC[] = "@comptime";
+    const size_t ATCN = sizeof(ATC) - 1;
+    CCScannerState scan;
+    size_t i;
+    if (!src || lo >= hi || hi > n) return 0;
+    cc_scanner_init(&scan);
+    i = lo;
+    while (i < hi) {
+        if (cc_scanner_skip_non_code(&scan, src, hi, &i)) continue;
+        if (src[i] == '@' && i + ATCN <= hi && memcmp(src + i, ATC, ATCN) == 0 &&
+            (i + ATCN == hi || !cc_is_ident_char(src[i + ATCN]))) {
+            size_t p = cc_skip_ws_and_comments(src, hi, i + ATCN);
+            if (p + 3 <= hi && memcmp(src + p, "for", 3) == 0 &&
+                (p + 3 == hi || !cc_is_ident_char(src[p + 3])))
+                return 1;
+            if (p + 2 <= hi && src[p] == 'i' && src[p + 1] == 'f' &&
+                (p + 2 == hi || !cc_is_ident_char(src[p + 2])))
+                return 1;
+        }
+        i++;
+    }
+    return 0;
 }
 
 /* One sweep: resolve each *outermost* `@comptime if`/`@comptime for`
@@ -18478,9 +18513,28 @@ static char* cc__resolve_comptime_if_once(const char* src, size_t n, const char*
             return (char*)-1;
         }
         size_t tb = cc_skip_ws_and_comments(src, n, pred_close + 1);
-        if (tb >= n || src[tb] != '{') { i++; continue; }
+        if (tb >= n || src[tb] != '{') {
+            /* Must not silently skip — that looks like "no work" while the
+             * programmer wrote a `@comptime if`. */
+            fprintf(stderr,
+                    "%s: error: `@comptime if` body must be `{ ... }` "
+                    "(got bare statement or end of input).\n",
+                    input_path ? input_path : "<input>");
+            free(type_prelude);
+            free(reflect_view);
+            free(out);
+            return (char*)-1;
+        }
         size_t tb_close;
-        if (!cc_find_matching_brace(src, n, tb, &tb_close)) { i++; continue; }
+        if (!cc_find_matching_brace(src, n, tb, &tb_close)) {
+            fprintf(stderr,
+                    "%s: error: unterminated `{` in `@comptime if` body.\n",
+                    input_path ? input_path : "<input>");
+            free(type_prelude);
+            free(reflect_view);
+            free(out);
+            return (char*)-1;
+        }
 
         /* Else arm: none, `else { ... }`, or `else @comptime if ...` (chain). */
         enum { ELSE_NONE, ELSE_BLOCK, ELSE_CHAIN } else_kind = ELSE_NONE;
@@ -18526,10 +18580,13 @@ static char* cc__resolve_comptime_if_once(const char* src, size_t n, const char*
             /* A kept arm that contains `@emit(\`...\`)` must still run under
              * libtcc after the surrounding `@comptime if` vanishes. Without
              * this wrap the bare `@emit` is lowered but never executed —
-             * silent empty splice. An else-chain keep (nested `@comptime if`
-             * text) stays unwrapped so the fixpoint can resolve it. */
+             * silent empty splice. Do not wrap when the arm still has an
+             * outer `@comptime for`/`if` — for-expand (or a later if prune)
+             * will wrap; wrapping now feeds unexpanded `@` to libtcc.
+             * Else-chains stay unwrapped so the fixpoint can resolve them. */
             int keep_is_chain = (!val && else_kind == ELSE_CHAIN);
             int wrap_exec = !keep_is_chain &&
+                            !cc__span_has_comptime_ctrl(src, n, keep_l, keep_r) &&
                             cc_template_body_needs_emit_exec(src, n, keep_l, keep_r);
             cc__sb_emit_newlines(&out, &out_len, &out_cap, src, i, keep_l);
             if (wrap_exec) cc_sb_append_cstr(&out, &out_len, &out_cap, "@comptime { ");
@@ -18552,6 +18609,96 @@ static char* cc__resolve_comptime_if_once(const char* src, size_t n, const char*
     return out;
 }
 
+/* After if/for fixpoint, an arm that kept both `@emit` and a nested for may
+ * leave a bare `@emit` at depth 0 once the for is peeled away. Wrap those
+ * so libtcc still executes them (same as for-expand / if-prune wrap). */
+static char* cc__wrap_orphan_anchored_emits(const char* src, size_t n) {
+    typedef struct { size_t lo, hi; } Span;
+    Span* covered = NULL;
+    size_t covered_n = 0, covered_cap = 0;
+    Span* orphans = NULL;
+    size_t orphans_n = 0, orphans_cap = 0;
+    CCScannerState scan;
+    size_t i = 0;
+    static const char ATC[] = "@comptime";
+    const size_t ATCN = sizeof(ATC) - 1;
+    if (!src || !n) return NULL;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        size_t sig_after = 0;
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (src[i] == '@' && i + ATCN <= n && memcmp(src + i, ATC, ATCN) == 0 &&
+            (i + ATCN == n || !cc_is_ident_char(src[i + ATCN]))) {
+            size_t p = cc_skip_ws_and_comments(src, n, i + ATCN);
+            if (p < n && src[p] == '{') {
+                size_t close = 0;
+                if (cc_find_matching_brace(src, n, p, &close)) {
+                    if (covered_n == covered_cap) {
+                        size_t nc = covered_cap ? covered_cap * 2 : 8;
+                        Span* nb = (Span*)realloc(covered, nc * sizeof(Span));
+                        if (!nb) { free(covered); free(orphans); return (char*)-1; }
+                        covered = nb; covered_cap = nc;
+                    }
+                    covered[covered_n].lo = i;
+                    covered[covered_n].hi = close + 1;
+                    covered_n++;
+                    i = close + 1;
+                    continue;
+                }
+            }
+        }
+        if (src[i] == '@' && cc__sigil_delim_after(src, n, i, "@emit", '(', &sig_after)) {
+            size_t lp = sig_after - 1; /* '(' */
+            size_t rp = 0;
+            size_t arg1 = cc_skip_ws_and_comments(src, n, sig_after);
+            /* Return-form `@emit(\`...\`, arena)` is an expression — do not
+             * wrap. Only anchored splice `@emit(ANCHOR, \`...\`)` is a stmt. */
+            if (arg1 < n && src[arg1] == '`') { i++; continue; }
+            if (cc_find_matching_paren(src, n, lp, &rp)) {
+                int inside = 0;
+                size_t k;
+                for (k = 0; k < covered_n; k++) {
+                    if (i >= covered[k].lo && rp < covered[k].hi) { inside = 1; break; }
+                }
+                if (!inside) {
+                    if (orphans_n == orphans_cap) {
+                        size_t nc = orphans_cap ? orphans_cap * 2 : 8;
+                        Span* nb = (Span*)realloc(orphans, nc * sizeof(Span));
+                        if (!nb) { free(covered); free(orphans); return (char*)-1; }
+                        orphans = nb; orphans_cap = nc;
+                    }
+                    orphans[orphans_n].lo = i;
+                    orphans[orphans_n].hi = rp + 1;
+                    orphans_n++;
+                }
+                i = rp + 1;
+                continue;
+            }
+        }
+        i++;
+    }
+    free(covered);
+    if (!orphans_n) { free(orphans); return NULL; }
+    {
+        char* out = NULL;
+        size_t ol = 0, oc = 0, last = 0, oi;
+        for (oi = 0; oi < orphans_n; oi++) {
+            cc_sb_append(&out, &ol, &oc, src + last, orphans[oi].lo - last);
+            cc_sb_append_cstr(&out, &ol, &oc, "@comptime { ");
+            cc_sb_append(&out, &ol, &oc, src + orphans[oi].lo,
+                         orphans[oi].hi - orphans[oi].lo);
+            cc_sb_append_cstr(&out, &ol, &oc, "; } ");
+            last = orphans[oi].hi;
+            /* Skip a trailing ';' already present — we emitted one. */
+            size_t s = cc_skip_ws_and_comments(src, n, last);
+            if (s < n && src[s] == ';') last = s + 1;
+        }
+        if (last < n) cc_sb_append(&out, &ol, &oc, src + last, n - last);
+        free(orphans);
+        return out ? out : strdup("");
+    }
+}
+
 /* Re-run the sweep to a fixpoint so nested `@comptime if` inside a kept branch
  * (only visible after the outer splice) is also resolved. */
 char* cc__resolve_comptime_if(const char* src, size_t n, const char* input_path) {
@@ -18569,6 +18716,14 @@ char* cc__resolve_comptime_if(const char* src, size_t n, const char* input_path)
         cur = r;
         in = cur;
         inn = strlen(cur);
+    }
+    {
+        char* wrapped = cc__wrap_orphan_anchored_emits(in, inn);
+        if (wrapped == (char*)-1) { free(cur); free(normalized); return (char*)-1; }
+        if (wrapped) {
+            free(cur);
+            cur = wrapped;
+        }
     }
     free(normalized);
     return cur;

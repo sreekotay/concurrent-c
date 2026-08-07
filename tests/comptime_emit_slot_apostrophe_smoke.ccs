@@ -1,0 +1,21 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* Slot jammed against apostrophe prose — classic scanner wedge. */
+@comptime {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        enum { EMIT_SLOT_APOS = ${9} };
+        static const char *emit_sa_msg = "it's${9}don't";
+        static const char *emit_sa_msg2 = "x'${9}'y";
+        `);
+}
+
+int main(void) {
+    if (EMIT_SLOT_APOS != 9) return 1;
+    if (strcmp(emit_sa_msg, "it's9don't") != 0) return 2;
+    if (strcmp(emit_sa_msg2, "x'9'y") != 0) return 3;
+    printf("comptime_emit_slot_apostrophe_smoke ok\n");
+    return 0;
+}

@@ -1,0 +1,11 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_type.cch>
+
+typedef struct PathForBad { int a; } PathForBad;
+
+/* Missing `in` — must describe the expected shape. */
+@comptime for (f type_of(PathForBad).fields) {
+    (void)f;
+}
+
+int main(void) { return 0; }

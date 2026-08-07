@@ -1,0 +1,43 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+typedef struct Multi { int p; int q; } Multi;
+
+/* Several independent @comptime blocks each emit; interleaved with a for
+ * and an if-selected emit. Ordering/anchors must not drop fragments. */
+@comptime {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        enum { MULTI_A = 1 };
+    `);
+}
+
+@comptime if (1) {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        enum { MULTI_B = 2 };
+    `);
+} else {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        multi_dead_b();
+    `);
+}
+
+@comptime for (f in type_of(Multi).fields) {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        enum { MULTI_${f.name} = 10 + ${f.index} };
+    `);
+}
+
+@comptime {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        @comptime if (0) { multi_dead_c(); } else { enum { MULTI_C = 3 }; }
+    `);
+}
+
+int main(void) {
+    if (MULTI_A != 1 || MULTI_B != 2 || MULTI_C != 3) return 1;
+    if (MULTI_p != 10 || MULTI_q != 11) return 2;
+    printf("comptime_emit_multi_block_smoke ok\n");
+    return 0;
+}

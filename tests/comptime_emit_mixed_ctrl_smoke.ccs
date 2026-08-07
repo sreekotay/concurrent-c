@@ -1,0 +1,38 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+typedef struct MixA { int p; } MixA;
+typedef struct MixB { int q; int r; } MixB;
+
+/* Alternating if/for layers with emits at different depths — wrap-ctrl
+ * must never imprison an unexpanded for, and every live emit must splice. */
+@comptime if (1) {
+    @comptime for (f in type_of(MixA).fields) {
+        @comptime if (f.index == 0) {
+            @emit(CC_EMIT_AFTER_PRELUDE, `
+                enum { MIX_A_${f.name} = 1 };
+            `);
+            @comptime for (g in type_of(MixB).fields) {
+                @emit(CC_EMIT_AFTER_PRELUDE, `
+                    /* don't mix 'ctrl' */
+                    @comptime if (1) {
+                        enum { MIX_B_${f.name}_${g.name} = 10 + ${g.index} };
+                    } else { mix_ctrl_dead(); }
+                `);
+            }
+        } else {
+            mix_a_dead();
+        }
+    }
+} else {
+    @emit(CC_EMIT_AFTER_PRELUDE, ` mix_outer_dead(); `);
+}
+
+int main(void) {
+    if (MIX_A_p != 1) return 1;
+    if (MIX_B_p_q != 10 || MIX_B_p_r != 11) return 2;
+    printf("comptime_emit_mixed_ctrl_smoke ok\n");
+    return 0;
+}

@@ -1,0 +1,15 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+/* Multiline block comment between receiver and `.method(` — must lower,
+ * not fall through to a host "no member" that hides UFCS. */
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(32)) @destroy;
+    Vec::[int] v = vec_new::[int](&a);
+    v /*
+       break across lines; don't desync
+    */ .push(11);
+    if (v.len() != 1 || *v.get(0) != 11) return 1;
+    printf("ufcs_multiline_recv_comment_smoke ok\n");
+    return 0;
+}

@@ -1,0 +1,9 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+
+/* Anchored @emit without a backtick template. */
+@comptime {
+    @emit(CC_EMIT_AFTER_PRELUDE, enum { PATH_EMIT_NO_TICK = 1 });
+}
+
+int main(void) { return 0; }

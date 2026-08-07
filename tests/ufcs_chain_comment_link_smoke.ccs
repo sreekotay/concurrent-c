@@ -1,0 +1,16 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+/* Comment between chain links must not split the UFCS chain. */
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(32)) @destroy;
+    Vec::[int] v = vec_new::[int](&a);
+    v.push(1);
+    v.push(2);
+    v.push(3);
+    size_t n = v.as_slice().sub(0, 2) /*link*/ .len();
+    size_t n2 = v.as_slice() /*don't*/ .sub(1, 2).len();
+    if (n != 2 || n2 != 1) return 1;
+    printf("ufcs_chain_comment_link_smoke ok\n");
+    return 0;
+}

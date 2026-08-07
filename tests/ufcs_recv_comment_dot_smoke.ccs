@@ -1,0 +1,16 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+/* Comment between receiver and `.method(` — must still UFCS-lower.
+ * (name↔`(` gaps are covered by ufcs_comment_gate_smoke; recv↔`.` is not.) */
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(32)) @destroy;
+    Vec::[int] v = vec_new::[int](&a);
+    v /*gap*/ .push(7);
+    v /* don't */ .push(8);
+    v /* `tick` prose */ .push(9);
+    if (v.len() != 3) return 1;
+    if (*v.get(0) != 7 || *v.get(2) != 9) return 2;
+    printf("ufcs_recv_comment_dot_smoke ok\n");
+    return 0;
+}

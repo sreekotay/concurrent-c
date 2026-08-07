@@ -1,0 +1,1 @@
+comptime_emit_dollar_escape_smoke msg=price $$6 don't
