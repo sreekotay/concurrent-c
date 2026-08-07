@@ -120,6 +120,53 @@ def main() -> int:
         if n != 1:
             print(f"warn: to_slice_n sync failed n={n}", file=sys.stderr)
 
+    # Sync spawn(CCClosure0 value) → spawn_closure0 (not only `=>` literals).
+    m = re.search(
+        r"        if \(!shadow_ufcs_ty_is\(vty, rb, \"CCNursery\"\)\) return 0;\n"
+        r"        /\* Closure form:.*?\n"
+        r"        while \(a\[ci\] && \(a\[ci\] == ' ' \|\| a\[ci\] == '\\t'\)\) ci\+\+;",
+        cch,
+        re.S,
+    )
+    if not m:
+        print("error: spawn closure0 block missing in .cch", file=sys.stderr)
+        return 1
+    t2, n = re.subn(
+        r"        if \(!shadow_ufcs_ty_is\(vty, rb, \"CCNursery\"\)\) return 0;\n"
+        r"(?:        /\* Closure form:.*?\n)?"
+        r"(?:        if \(strcmp\(meth_name, \"spawn\"\) == 0 && strstr\(a, \"=>\"\)\) \{\n"
+        r"            snprintf\(dst, cap, \"cc_nursery_spawn_closure0\(%s, %s\)\", recv, a\);\n"
+        r"            return 1;\n"
+        r"        \}\n)?"
+        r"        while \(a\[ci\] && \(a\[ci\] == ' ' \|\| a\[ci\] == '\\t'\)\) ci\+\+;",
+        m.group(0),
+        t,
+        count=1,
+        flags=re.S,
+    )
+    if n != 1:
+        print(f"error: spawn closure0 sync failed n={n}", file=sys.stderr)
+        return 1
+    t = t2
+
+    # Sync PTR_RECV: never treat embedded `->` in a field path as pointer recv.
+    good_ptr = (
+        "#define SHADOW_UFCS_PTR_RECV()                                                   \\\n"
+        "    (is_arrow || path_is_ptr ||                                                   \\\n"
+        "     (!walked_fields && rb && strchr(rb->ty, '*') != NULL &&                      \\\n"
+        "      strchr(recv, '.') == NULL && strstr(recv, \"->\") == NULL) ||                \\\n"
+        "     recv[0] == '&')"
+    )
+    t2, n = re.subn(
+        r"#define SHADOW_UFCS_PTR_RECV\(\)[^\n]+",
+        good_ptr,
+        t,
+    )
+    if n < 1:
+        print("warn: SHADOW_UFCS_PTR_RECV sync failed", file=sys.stderr)
+    else:
+        t = t2
+
     # Sync lit-call rewrite (nested cc_is_err(f.write("…")) recurse + char[:] want).
     m = re.search(
         r"/\* Wrap string lits at known CCSlice params: cc_path_exists\(\".\"\) etc\. \*/\n"

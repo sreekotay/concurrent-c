@@ -6,9 +6,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <ccc/std/prelude.cch>
-#include <ccc/cc_channel.cch>
-#include <ccc/std/string.cch>
+/* Host-C: include lowered .h (bare @as lives only in .cch source). */
+#include <ccc/std/prelude.h>
+#include <ccc/cc_channel.h>
+#include <ccc/std/string.h>
 
 #include "comptime/symbols.h"
 #include "parser/symsig.h"
@@ -2655,8 +2656,58 @@ static int emit_desugared_call(char* out,
         return snprintf(out, cap, "cc_nursery_add_closing_tx(&%s, %s)", recv, args_rewritten);
     }
     if (ctx.recv_type_name &&
-        (strcmp(ctx.recv_type_name, "CCNursery") == 0 || strcmp(ctx.recv_type_name, "CCNursery*") == 0) &&
-        strcmp(method, "spawn_async") == 0) {
+        (strcmp(ctx.recv_type_name, "CCNursery") == 0 ||
+         strcmp(ctx.recv_type_name, "CCNursery*") == 0) &&
+        (strcmp(method, "spawn") == 0 || strcmp(method, "spawn_async") == 0)) {
+        int is_closure0 = 0;
+        if (strcmp(method, "spawn") == 0 && has_args && args_rewritten) {
+            if (strstr(args_rewritten, "=>")) {
+                is_closure0 = 1;
+            } else {
+                CCTypeRegistry* reg = cc_type_graph_active_registry(
+                    cc_type_graph_get_global());
+                const char* aty = NULL;
+                char abuf[256];
+                size_t ai = 0;
+                size_t al = 0;
+                while (args_rewritten[ai] &&
+                       isspace((unsigned char)args_rewritten[ai]))
+                    ai++;
+                while (args_rewritten[ai + al] &&
+                       cc_is_ident_char(args_rewritten[ai + al]))
+                    al++;
+                if (al && al < sizeof(abuf)) {
+                    memcpy(abuf, args_rewritten + ai, al);
+                    abuf[al] = '\0';
+                    {
+                        size_t rest = ai + al;
+                        while (args_rewritten[rest] &&
+                               isspace((unsigned char)args_rewritten[rest]))
+                            rest++;
+                        if (!args_rewritten[rest] && reg) {
+                            if (g_ufcs_source_text) {
+                                int rip = 0;
+                                aty = cc_type_registry_resolve_receiver_expr_at(
+                                    reg, abuf, g_ufcs_source_text,
+                                    g_ufcs_source_offset, &rip);
+                            }
+                            if (!aty)
+                                aty = cc_type_registry_resolve_expr_type(reg,
+                                                                        abuf);
+                        }
+                    }
+                }
+                if (aty && strstr(aty, "CCClosure0"))
+                    is_closure0 = 1;
+                else if (strstr(args_rewritten, "cc_closure") &&
+                         strstr(args_rewritten, "_make"))
+                    is_closure0 = 1;
+            }
+        }
+        if (is_closure0) {
+            return snprintf(out, cap, "cc_nursery_spawn_closure0(%s, %s)", recv,
+                            args_rewritten);
+        }
         if (!has_args || !args_rewritten) {
             return snprintf(out, cap, "cc_nursery_spawn_async_named(%s, ", recv);
         }

@@ -16,6 +16,7 @@
 - **[Build](../spec/concurrent-c-build.md)** — Compiler driver, outputs, cache, and target graph
 - **[Grammar and SERDES](../spec/cc_serdes.md)** — Grammar engines and serialization operations
 - **[Variants](../spec/draft_variants.md)** — Tagged-union semantics and packed layout
+- **[Restricted access](../spec/draft_facets.md)** — `@restricted` allow-list views (draft)
 - **[Allocator Strategy](../spec/draft_alloc_strategy.md)** — Arena release and heap-overflow behavior
 - **[Fiber Scheduler](../spec/concurrent-c-scheduler.md)** — Scheduler state machine and park/wake contract
 - **[Scheduler ops runbook](scheduler-ops-runbook.md)** — Build/test/diagnose loops for the scheduler

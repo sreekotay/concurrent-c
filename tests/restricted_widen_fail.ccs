@@ -1,0 +1,25 @@
+/* Restricted → full Conn* must not convert (const-shaped). */
+#include <ccc/std/prelude.cch>
+#include <string.h>
+
+typedef struct Conn {
+    int sock;
+    int out_len;
+} Conn;
+
+@restricted Encode on Conn {
+    out_len
+}
+
+static void take_full(Conn* c) { (void)c; }
+
+static void use_enc(@restricted(Encode) Conn* enc) {
+    take_full(enc); /* ill-formed: widen */
+}
+
+int main(void) {
+    Conn c;
+    memset(&c, 0, sizeof(c));
+    use_enc(&c);
+    return 0;
+}

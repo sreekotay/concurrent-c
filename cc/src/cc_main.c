@@ -1629,6 +1629,136 @@ static int cc__is_raw_c(const char* path) {
     return path && cc__ends_with(path, ".c");
 }
 
+/* Rewrite `#include … .cch` → `.h` so host cc resolves lowered headers under
+ * out/include. Bare `@as` stays in .cch source; host never opens those files. */
+static char* cc__rewrite_cch_includes_buf(const char* src, size_t n, int* changed) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0, last_emit = 0, i = 0;
+    if (changed) *changed = 0;
+    if (!src) return NULL;
+    while (i < n) {
+        if (i + 5 <= n &&
+            (strncmp(src + i, ".cch>", 5) == 0 || strncmp(src + i, ".cch\"", 5) == 0)) {
+            char closer = src[i + 4];
+            if (!out) {
+                out_cap = n + 64;
+                out = (char*)malloc(out_cap);
+                if (!out) return NULL;
+            }
+            size_t chunk = i - last_emit;
+            if (out_len + chunk + 4 > out_cap) {
+                out_cap = (out_len + chunk + 4) * 2;
+                char* nb = (char*)realloc(out, out_cap);
+                if (!nb) {
+                    free(out);
+                    return NULL;
+                }
+                out = nb;
+            }
+            memcpy(out + out_len, src + last_emit, chunk);
+            out_len += chunk;
+            out[out_len++] = '.';
+            out[out_len++] = 'h';
+            out[out_len++] = closer;
+            i += 5;
+            last_emit = i;
+            if (changed) *changed = 1;
+            continue;
+        }
+        i++;
+    }
+    if (!changed || !*changed) {
+        free(out);
+        return NULL;
+    }
+    if (last_emit < n) {
+        size_t tail = n - last_emit;
+        if (out_len + tail + 1 > out_cap) {
+            out_cap = out_len + tail + 1;
+            char* nb = (char*)realloc(out, out_cap);
+            if (!nb) {
+                free(out);
+                return NULL;
+            }
+            out = nb;
+        }
+        memcpy(out + out_len, src + last_emit, tail);
+        out_len += tail;
+    }
+    out[out_len] = '\0';
+    return out;
+}
+
+/* Write a host-safe copy of a raw .c TU to dst (.cch includes → .h). Always
+ * produces dst (copy when unchanged) so compile uses a stable cache path. */
+static int cc__materialize_host_c(const char* src, const char* dst) {
+    FILE* in;
+    char* buf = NULL;
+    char* rewritten = NULL;
+    long len;
+    size_t nread;
+    int changed = 0;
+    const char* to_write;
+    size_t to_write_len;
+    FILE* out;
+    char dir[PATH_MAX];
+
+    if (!src || !dst || !src[0] || !dst[0]) return -1;
+    if (strcmp(src, dst) == 0) {
+        fprintf(stderr,
+                "cc: internal error: host materialize refuses in-place rewrite "
+                "of %s (would leave .cch includes for host cc)\n",
+                src);
+        return -1;
+    }
+    in = fopen(src, "rb");
+    if (!in) return -1;
+    if (fseek(in, 0, SEEK_END) != 0) {
+        fclose(in);
+        return -1;
+    }
+    len = ftell(in);
+    if (len < 0 || fseek(in, 0, SEEK_SET) != 0) {
+        fclose(in);
+        return -1;
+    }
+    buf = (char*)malloc((size_t)len + 1);
+    if (!buf) {
+        fclose(in);
+        return -1;
+    }
+    nread = fread(buf, 1, (size_t)len, in);
+    fclose(in);
+    buf[nread] = '\0';
+
+    rewritten = cc__rewrite_cch_includes_buf(buf, nread, &changed);
+    to_write = rewritten ? rewritten : buf;
+    to_write_len = rewritten ? strlen(rewritten) : nread;
+
+    cc__dir_of_path(dst, dir, sizeof(dir));
+    if (dir[0] && cc__mkdir_p(dir) != 0) {
+        free(buf);
+        free(rewritten);
+        return -1;
+    }
+    out = fopen(dst, "wb");
+    if (!out) {
+        free(buf);
+        free(rewritten);
+        return -1;
+    }
+    if (fwrite(to_write, 1, to_write_len, out) != to_write_len) {
+        fclose(out);
+        free(buf);
+        free(rewritten);
+        return -1;
+    }
+    fclose(out);
+    free(buf);
+    free(rewritten);
+    return 0;
+}
+
 /* Fold a file's *content* into an FNV-1a hash.  Missing/unreadable files fold a
  * stable sentinel so that creating the file later changes the hash. */
 static uint64_t cc__fold_file_content(uint64_t h, const char* path) {
@@ -2141,7 +2271,15 @@ static int cc__build_target_objs_rec(int idx,
         cc__dir_of_path(src_abs, src_dir, sizeof(src_dir));
 
         const int is_raw_c = cc__is_raw_c(src_abs);
-        const char* c_for_compile = is_raw_c ? src_abs : c_out;
+        if (is_raw_c) {
+            /* Host-safe copy: .cch includes → .h (lowered under out/include). */
+            if (cc__materialize_host_c(src_abs, c_out) != 0) {
+                fprintf(stderr, "cc: failed to materialize host C %s -> %s\n",
+                        src_abs, c_out);
+                return -1;
+            }
+        }
+        const char* c_for_compile = c_out;
 
         // Use a cache stem that is unique per target.
         char cache_stem[256];
@@ -2677,10 +2815,11 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             summary_out->did_emit_c = 0;
         }
         if (opt->mode == CC_MODE_EMIT_C) {
-            // If user requested an output path, copy; otherwise do nothing.
+            /* Host-safe emit: rewrite .cch includes → .h when writing out. */
             if (opt->c_out_path && strcmp(opt->c_out_path, opt->in_path) != 0) {
-                if (cc__copy_file(opt->in_path, opt->c_out_path) != 0) {
-                    fprintf(stderr, "cc: failed to copy %s -> %s\n", opt->in_path, opt->c_out_path);
+                if (cc__materialize_host_c(opt->in_path, opt->c_out_path) != 0) {
+                    fprintf(stderr, "cc: failed to materialize host C %s -> %s\n",
+                            opt->in_path, opt->c_out_path);
                     return -1;
                 }
                 if (summary_out) {
@@ -2689,6 +2828,23 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
                 }
             }
             return 0;
+        }
+        /* COMPILE/LINK: materialize before host cc (c_out_path ≠ in_path). */
+        if (!opt->c_out_path || strcmp(opt->c_out_path, opt->in_path) == 0) {
+            fprintf(stderr,
+                    "cc: internal error: raw .c compile needs a distinct host "
+                    "materialize path (got %s)\n",
+                    opt->c_out_path ? opt->c_out_path : "(null)");
+            return -1;
+        }
+        if (cc__materialize_host_c(opt->in_path, opt->c_out_path) != 0) {
+            fprintf(stderr, "cc: failed to materialize host C %s -> %s\n",
+                    opt->in_path, opt->c_out_path);
+            return -1;
+        }
+        if (summary_out) {
+            summary_out->reuse_emit_c = 0;
+            summary_out->did_emit_c = 1;
         }
     }
 
@@ -2790,7 +2946,8 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
     cc__derive_d_path_from_stem(stem, dep_path, sizeof(dep_path));
     char src_dir[PATH_MAX];
     cc__dir_of_path(opt->in_path, src_dir, sizeof(src_dir));
-    const char* c_for_compile = is_raw_c ? opt->in_path : opt->c_out_path;
+    /* Raw .c was materialized to c_out_path with .cch→.h includes. */
+    const char* c_for_compile = opt->c_out_path;
     if (cache_ok) {
         uint64_t h = 1469598103934665603ULL;
         if (is_raw_c) {
@@ -2799,6 +2956,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             h = cc__fnv1a64_str(h, opt->in_path);
             h = cc__fnv1a64_i64(h, in_sig.mtime_sec);
             h = cc__fnv1a64_i64(h, in_sig.size);
+            h = cc__fold_file_content(h, opt->in_path);
         } else {
             h = cc__fnv1a64_i64(h, (long long)emit_key);
         }
@@ -4649,11 +4807,18 @@ static int run_build_mode(int argc, char** argv) {
             char meta_path[PATH_MAX];
             snprintf(meta_path, sizeof(meta_path), "%s/%s.meta", g_cache_root, stem);
             int is_raw_c = cc__is_raw_c(inputs[i]);
-            const char* c_for_compile = is_raw_c ? inputs[i] : c_bufs[i];
+            if (is_raw_c) {
+                if (cc__materialize_host_c(inputs[i], c_bufs[i]) != 0) {
+                    fprintf(stderr, "cc: failed to materialize host C %s -> %s\n",
+                            inputs[i], c_bufs[i]);
+                    goto parse_fail;
+                }
+                emit_built++;
+            }
+            const char* c_for_compile = c_bufs[i];
 
             if (is_raw_c) {
-                // No CC lowering for .c inputs.
-                emit_reused++;
+                /* Host materialize above; no CC lowering. */
             } else if (cache_ok) {
                 CCFileSig in_sig;
                 in_sig.mtime_sec = 0;
@@ -4863,15 +5028,13 @@ static int run_build_mode(int argc, char** argv) {
             goto parse_fail;
         }
     } else {
-        if (raw_c) {
-            strncpy(c_out, in_path_abs, sizeof(c_out));
-            c_out[sizeof(c_out)-1] = '\0';
-        } else {
-            if (derive_default_output(in_path_abs, c_out, sizeof(c_out)) != 0) {
-                fprintf(stderr, "cc: failed to derive default C output\n");
-                goto parse_fail;
-            }
+        /* Raw .c still gets a distinct out path: host materialize rewrites
+         * .cch includes → .h before cc sees the TU. */
+        if (derive_default_output(in_path_abs, c_out, sizeof(c_out)) != 0) {
+            fprintf(stderr, "cc: failed to derive default C output\n");
+            goto parse_fail;
         }
+        (void)raw_c;
     }
 
     if (mode != CC_MODE_EMIT_C) {
@@ -5901,11 +6064,16 @@ int main(int argc, char **argv) {
             cc__dir_of_path(inputs[i], src_dir_bufs[i], sizeof(src_dir_bufs[i]));
 
             int is_raw_c = cc__is_raw_c(inputs[i]);
-            const char* c_for_compile = is_raw_c ? inputs[i] : c_bufs[i];
+            if (is_raw_c) {
+                if (cc__materialize_host_c(inputs[i], c_bufs[i]) != 0) {
+                    fprintf(stderr, "cc: failed to materialize host C %s -> %s\n",
+                            inputs[i], c_bufs[i]);
+                    return 1;
+                }
+            }
+            const char* c_for_compile = c_bufs[i];
             if (mode == CC_MODE_EMIT_C) {
-                if (is_raw_c) {
-                    if (cc__copy_file(inputs[i], c_bufs[i]) != 0) return 1;
-                } else {
+                if (!is_raw_c) {
                     int err = cc__compile_with_env(NULL, inputs[i], c_bufs[i], &cfg);
                     if (err != 0) return 1;
                 }
@@ -5977,15 +6145,11 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "cc: failed to derive C output from --out-stem\n");
                 return 1;
             }
-        } else if (raw_c) {
-            strncpy(c_out, in_path_abs, sizeof(c_out));
-            c_out[sizeof(c_out)-1] = '\0';
-        } else {
-            if (derive_default_output(in_path_abs, c_out, sizeof(c_out)) != 0) {
-                fprintf(stderr, "cc: failed to derive default C output\n");
-                return 1;
-            }
+        } else if (derive_default_output(in_path_abs, c_out, sizeof(c_out)) != 0) {
+            fprintf(stderr, "cc: failed to derive default C output\n");
+            return 1;
         }
+        (void)raw_c;
     }
 
     if (mode == CC_MODE_COMPILE) {

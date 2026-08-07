@@ -8,8 +8,13 @@
  *   maps.init(excl, mask);
  *   CCShardHold h = maps.hold_all();
  *   @defer h.release();          // always pair with acquire
+ *   if (!h.held()) …;            // admission failed — release is a no-op
  *   CCShard* sh = maps.shard(si);
  *   sh->put(k, v);   // copies into the shard arena
+ *
+ * Hold contract (see cc_exclusive.cch): release() is idempotent and a
+ * no-op when held() is false (n == 0). Safe to @defer release before the
+ * held() check; failed admission is not a double-unlock.
  *
  * Cell ownership (read once):
  *   put(k, v)     copies key+value into the shard arena (views OK as inputs)
@@ -164,7 +169,7 @@ static inline bool cc_shard_delete(CCShard* m, CCSlice key) {
 
 typedef struct CCShardMap {
     /* Hold API: maps.hold_one / hold_sorted / hold_all (UFCS via @as). */
-    CCShardDomain domain /*@as*/;
+    CCShardDomain domain @as;
     CCShard* shards;
     CCArena root; /* storage for shards[] */
 } CCShardMap;

@@ -413,6 +413,15 @@ int main(int argc, char** argv) {
         return 1;
     }
     tokbuf = pp.out;
+    if (!shadow_rewrite_restricted_type_sugar(tokbuf, &pp.nout)) {
+        fprintf(stderr, "%s:1:1: error: @restricted type sugar rewrite failed\n",
+                in_path);
+        pp_free_macros(&pp);
+        free(tokbuf);
+        tape_cache_free(&cache);
+        cc_arena_free(&arena);
+        return 1;
+    }
 
     /* Tables are heap/TLS via parser_ensure_storage — stack Parser is small. */
     Parser p = {0};

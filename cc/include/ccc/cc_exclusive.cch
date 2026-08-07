@@ -381,6 +381,7 @@ static inline bool cc_shard_hold_held(const CCShardHold* h) {
     return h != NULL && h->n > 0;
 }
 
+/* Idempotent: no-op when !held() (n==0) or after a prior release. */
 static inline void cc_shard_hold_release(CCShardHold* h) {
     if (!h || h->n == 0) return;
     cc_exclusive_guard_release_n(h->gs, h->n);

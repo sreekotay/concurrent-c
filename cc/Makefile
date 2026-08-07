@@ -290,6 +290,8 @@ $(OBJDIR)/src/preprocess/grammar_rules.o: CFLAGS += -I$(ENGINE_GEN_DIR)
 # ("ccc/cc_arena.h: No such file") and incremental trees build by ordering
 # luck only.  Still acyclic: stage-1 → stamp → grammar_rules.o → full tool.
 $(OBJDIR)/src/preprocess/grammar_rules.o: $(LOWER_HEADERS_STAMP)
+# ufcs.c includes lowered <ccc/*.h> (bare @as stays in .cch only).
+$(OBJDIR)/src/visitor/ufcs.o: $(LOWER_HEADERS_STAMP)
 
 .PHONY: test-build-stub
 test-build-stub: $(WRAPPER)

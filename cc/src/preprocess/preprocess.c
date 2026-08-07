@@ -6629,10 +6629,12 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                 cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
             } else if (nursery_like) {
                 if (strcmp(method_name, "spawn") == 0) {
-                    /* Closure `() =>` → spawn_closure0; else @async task. */
+                    /* Closure `() =>` / CCClosure0 value → spawn_closure0;
+                     * else @async task → spawn_async_named. */
                     size_t as = paren_pos + 1;
                     size_t ae = paren_end;
                     int has_arrow = 0;
+                    int is_closure0 = 0;
                     size_t k;
                     int depth = 0;
                     as = cc_skip_ws_and_comments(src, ae, as);
@@ -6649,6 +6651,39 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                         }
                     }
                     if (has_arrow) {
+                        is_closure0 = 1;
+                    } else if (as < ae) {
+                        /* Bare / dotted CCClosure0 value: look up arg type. */
+                        char aname[96];
+                        char aty[256];
+                        size_t ni = 0;
+                        size_t p = as;
+                        while (p < ae && ni + 1 < sizeof(aname) &&
+                               cc_is_ident_char(src[p])) {
+                            aname[ni++] = src[p++];
+                        }
+                        aname[ni] = '\0';
+                        p = cc_skip_ws_and_comments(src, ae, p);
+                        if (ni && p >= ae &&
+                            cc__lookup_scoped_ufcs_var_type(src, sep_pos, aname,
+                                                           aty, sizeof(aty)) &&
+                            strstr(aty, "CCClosure0") != NULL) {
+                            is_closure0 = 1;
+                        } else if (as + 10 < ae &&
+                                   memcmp(src + as, "cc_closure", 10) == 0) {
+                            /* cc_closure__N…_make() / similar. */
+                            size_t q = as;
+                            while (q < ae && src[q] != '(') q++;
+                            if (q < ae && src[q] == '(') {
+                                const char* mk = src + as;
+                                size_t mlen = q - as;
+                                if (mlen >= 5 &&
+                                    memcmp(mk + mlen - 5, "_make", 5) == 0)
+                                    is_closure0 = 1;
+                            }
+                        }
+                    }
+                    if (is_closure0) {
                         cc_sb_append_cstr(&out, &out_len, &out_cap,
                                          "cc_nursery_spawn_closure0");
                     } else {
