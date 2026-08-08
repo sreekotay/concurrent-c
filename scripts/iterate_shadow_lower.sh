@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# One-liner for the shadow_lower edit loop.
+# One-liner for the shadow_lower edit loop (lowerer faces only).
+# For stdlib / cold smoke / first checkout, see docs/build-when.md.
 #
 # Default (iterate): rebuild lowerer from cc/shadow/*.ccs via the live seed.
 #   ./scripts/iterate_shadow_lower.sh
@@ -8,7 +9,7 @@
 #   ./scripts/iterate_shadow_lower.sh --ship           # ccs → snapshot → promote
 #   ./scripts/iterate_shadow_lower.sh --ship --smoke   # + host-cc hello smoke
 #
-# Does not commit. After --ship: git add last-good + the new vN/.
+# Does not commit. After --ship: git add last-good + the new vN/; then cold-check.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -27,6 +28,9 @@ usage: ./scripts/iterate_shadow_lower.sh [--ship] [--smoke]
   (default)  make -C cc SHADOW_LOWER_SOURCE=ccs …/shadow_lower
   --ship     then snapshot + promote (new vN, flip last-good)
   --smoke    with --ship: snapshot --smoke (host-cc + hello emit)
+
+  Stdlib edits → make -C cc lower-headers (not this script).
+  When to run what → docs/build-when.md
 
 EOF
       exit 0

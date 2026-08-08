@@ -33,7 +33,10 @@ source tree.
 
 ## Iterate → ship
 
-One-liner (preferred):
+Repo-wide “when to run what” (stdlib vs lowerer vs cold smoke):
+[docs/build-when.md](../../../docs/build-when.md).
+
+This directory is only about freezing `shadow_lower` seeds:
 
 ```bash
 ./scripts/iterate_shadow_lower.sh                 # edit-loop: ccs rebuild only
@@ -46,6 +49,7 @@ One-liner (preferred):
 | Rebuild lowerer | `./scripts/iterate_shadow_lower.sh` | Seed re-lowers from sources |
 | Ship seed | `./scripts/iterate_shadow_lower.sh --ship [--smoke]` | Snapshot → new `vN` → flip `last-good` → host-cc |
 | Commit | `git add …/last-good …/vN` | Human-gated |
+| Cold check | `./scripts/smoke_bootstrap_fresh.sh` then `./scripts/smoke_i386.sh` | Before push |
 
 A fix is not in the committed seed until promote has created the new `vN`
 and `last-good` points at it.
@@ -75,24 +79,19 @@ make -C cc shadow_lower-from-ccs
 ./scripts/promote_shadow_bootstrap.sh 3        # explicit v3
 ```
 
-**Before flipping `last-good`, run a cold rebuild on a second platform.**
-`--smoke` only proves the generating machine can host-cc the snapshot; it does
-not catch macOS-only path resolution or GNU ld ODR issues.
+**Before pushing a new `last-good`, run cold checks** (see
+[build-when.md → Verify cold](../../../docs/build-when.md#verify-cold--second-platform)).
+`--smoke` on ship only proves this machine can host-cc the snapshot.
 
 ```bash
-# Same machine, wiped products (simulates fresh clone after tcc is built)
-./scripts/smoke_bootstrap_fresh.sh
-
-# Linux ILP32 (Docker) — highest-leverage catch for Darwin-only promotes
-# Clean /work sandbox; RO-mounts the repo (does not dirty host out/).
-./scripts/smoke_i386.sh
+./scripts/smoke_bootstrap_fresh.sh   # wiped out/ on this host
+./scripts/smoke_i386.sh              # Linux ILP32 Docker (RO mount)
 # optional: CCC_HOST_CC=tcc ./scripts/smoke_i386.sh
 ```
 
-A cold `make -C cc -jN` must succeed without a warm `out/`: header seeding is
-`out/runtime/.seed.stamp`, independent of `.headers_lowered.stamp`, so
-stage-1 `lower_headers` does not recurse. If a promote breaks that, fix the
-seed/Makefile before landing `last-good`.
+Cold `make -C cc -jN` must succeed without a warm `out/` (seed stamp is
+`out/runtime/.seed.stamp`, separate from `.headers_lowered.stamp`). If a
+promote breaks that, fix the seed/Makefile before landing `last-good`.
 
 `snapshot_shadow_lower.sh` rewrites both absolute quoted includes and
 repo-relative angle includes (`<cc/shadow/foo.h>` → `"foo.h"`) so the

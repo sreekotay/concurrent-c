@@ -4,6 +4,10 @@ Build and run Concurrent-C **natively** inside a 32-bit Linux container so
 pointer width, comptime `TARGET_PTR_WIDTH`, and the linked runtime all match
 (`sizeof(void*) == 4`).
 
+**When to run this:** before pushing a new `shadow_lower` `last-good`, or when
+changing the cold build graph — not on every stdlib edit. See
+[build-when.md](build-when.md).
+
 Darwin 32-bit targets are not supported.
 
 ## i386 (supported)

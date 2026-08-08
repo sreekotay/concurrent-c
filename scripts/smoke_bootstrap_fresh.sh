@@ -6,6 +6,9 @@
 #   * ODR clashes linking concurrent_c.o + libshadow_comptime.a on GNU ld
 #   * stage-1 seed stamp must not recurse under make -j
 #
+# When: after seed promote / build-graph changes — not every stdlib edit.
+# See docs/build-when.md.
+#
 # Usage (from repo root):
 #   ./scripts/smoke_bootstrap_fresh.sh
 #   ./scripts/smoke_i386.sh   # Linux ILP32 via Docker (preferred second leg)

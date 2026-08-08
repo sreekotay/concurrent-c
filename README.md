@@ -74,32 +74,21 @@ Build outputs: `./out` and `./bin` relative to the working directory (`--out-dir
 
 ### Hacking on the compiler
 
-Cold / fresh checkout:
+**When to run what:** [docs/build-when.md](docs/build-when.md)
+(install / first checkout / stdlib / lowerer / ship seed / cold smoke).
 
 ```bash
-./scripts/fetch_submodules.sh          # TinyCC; float formatting is vendored
+./scripts/fetch_submodules.sh
 ./scripts/apply_tcc_patches.sh
 jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 (cd third_party/tcc && ./configure --config-cc_ext && make -j"$jobs" libtcc.a tcc libtcc1.a)
-make cc -j"$jobs"                      # or: make cc BUILD=debug -j"$jobs"
+make cc -j"$jobs"
 ./cc/bin/ccc run examples/hello.ccs
-make install PREFIX=/opt/ccc           # optional; DESTDIR=… for staging
-make install-check PREFIX=/opt/ccc
 ```
 
-Verify a wiped tree (and Linux ILP32) still builds:
-
-```bash
-./scripts/smoke_bootstrap_fresh.sh     # rm out/ + make -C cc from last-good
-./scripts/smoke_i386.sh                # clean i386 Docker sandbox (RO mount)
-```
-
-- Links against patched `libtcc.a`. Optional channel backend: `./scripts/fetch_submodules.sh --with-liblfds`.
-- Outputs: `cc/bin/.ccc-bin`, wrapper `cc/bin/ccc`, `out/cc/bin/shadow_lower`.
-- `shadow_lower` is host-cc'd from `cc/bootstrap/shadow_lower/$(cat last-good)/`. Source of truth: `cc/shadow/*.ccs`. Iterate: `./scripts/iterate_shadow_lower.sh`; ship a seed: `./scripts/iterate_shadow_lower.sh --ship --smoke`.
-- Host-TCC self-build of `ccc`: Linux ILP32 (`CCC_HOST_CC=tcc ./scripts/smoke_i386.sh`), not Darwin (TCC ELF vs Mach-O `libtcc.a`).
-- Before pushing submodule pointer changes: `make check-submodules`.
-- Full notes: [getting started → hacking](docs/getting-started.md#hacking-on-the-compiler-checkout-builds).
+Optional install from the tree: `make install PREFIX=/opt/ccc` and
+`make install-check PREFIX=/opt/ccc`. Before pushing submodule pointer
+changes: `make check-submodules`.
 
 Installed layout:
 

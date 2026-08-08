@@ -31,4 +31,5 @@ Default `make -C cc` builds from `last-good` (`SHADOW_LOWER_SOURCE=bootstrap`). 
 
 ## Docs
 
-Full detail: `cc/bootstrap/shadow_lower/README.md`, constraint C4 in `cc/docs/ARCHITECTURE.md`.
+When to run iterate vs ship vs cold smoke: `docs/build-when.md`.
+Full bootstrap detail: `cc/bootstrap/shadow_lower/README.md`, constraint C4 in `cc/docs/ARCHITECTURE.md`.

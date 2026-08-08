@@ -3,10 +3,11 @@
 ## Getting Started
 
 - **[Getting Started](getting-started.md)** — Install, first program, concurrency
+- **[When to run what](build-when.md)** — Install vs checkout vs stdlib vs lowerer vs ship vs cold smoke
 - **[Language Concepts](language-concepts.md)** — Defer, results, UFCS, slices/arenas, closures
 - **[Cheatsheet](cheatsheet.md)** — Quick reference for common patterns
 - **[Debugging](debugging.md)** — VS Code / Cursor debugging setup
-- **[ILP32 Docker smoke](ilp32-docker.md)** — Linux i386 (and planned ARM32) runtime smokes via Docker
+- **[ILP32 Docker smoke](ilp32-docker.md)** — Linux i386 / ARM32 runtime smokes via Docker
 
 ## Reference
 
@@ -24,33 +25,18 @@
 
 ## Building the Compiler
 
-From a fresh clone (see [Getting Started → Hacking](getting-started.md#hacking-on-the-compiler-checkout-builds)):
+**When to run what:** [build-when.md](build-when.md).
 
-```bash
-./scripts/fetch_submodules.sh
-./scripts/apply_tcc_patches.sh
-jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
-(cd third_party/tcc && ./configure --config-cc_ext && make -j"$jobs" libtcc.a tcc libtcc1.a)
-make cc -j"$jobs"
-./cc/bin/ccc run examples/hello.ccs
-```
-
-Cold-tree checks:
-
-```bash
-./scripts/smoke_bootstrap_fresh.sh   # wipe out/ + rebuild from last-good
-./scripts/smoke_i386.sh              # clean Linux i386 Docker sandbox
-```
-
-Binaries: `cc/bin/ccc` (driver) and `out/cc/bin/shadow_lower` (default native
-front, host-cc'd from `cc/bootstrap/shadow_lower/last-good`). Opt out with
-`ccc --frontend=legacy` / `CC_FRONTEND=legacy`.
+First checkout and day-to-day edit loops are there. Architecture / bootstrap
+detail:
 
 - [Compiler architecture](../cc/docs/ARCHITECTURE.md) — default native / `shadow_lower`
 - [shadow_lower ops / layout](../cc/shadow/README.md)
 - [Bootstrap snapshots](../cc/bootstrap/shadow_lower/README.md)
 - [ILP32 Docker smoke](ilp32-docker.md)
 - Legacy multipass (opt-out): [LEGACY_ARCHITECTURE.md](../cc/docs/LEGACY_ARCHITECTURE.md)
+
+Opt out of the native front with `ccc --frontend=legacy` / `CC_FRONTEND=legacy`.
 
 ## Quick Example
 

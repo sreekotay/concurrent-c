@@ -34,42 +34,25 @@ Build outputs land in `./out` and `./bin` under whatever directory you run
 
 ## Hacking on the compiler (checkout builds)
 
-Cold / fresh checkout (no warm `out/`):
+**When to run which command:** [build-when.md](build-when.md) (install vs first
+checkout vs stdlib vs lowerer iterate vs ship seed vs cold smoke).
+
+First checkout (once; same as `cc-install.sh` minus `$PREFIX`):
 
 ```bash
-./scripts/fetch_submodules.sh          # TinyCC; float formatting is vendored
+./scripts/fetch_submodules.sh
 ./scripts/apply_tcc_patches.sh
 jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 (cd third_party/tcc && ./configure --config-cc_ext && make -j"$jobs" libtcc.a tcc libtcc1.a)
-make cc -j"$jobs"                      # ccc + shadow_lower from last-good + lowered headers
+make cc -j"$jobs"
 ./cc/bin/ccc run examples/hello.ccs
 ```
 
-Same path as `./cc-install.sh` (minus the `$PREFIX` install). Parallel `-j`
-cold builds are supported: stage-1 header seeding is a separate stamp so it
-does not recurse into `make lower_headers_stage1`.
-
-Prove a wiped tree still builds (after TCC is already built once):
-
-```bash
-./scripts/smoke_bootstrap_fresh.sh     # rm -rf out cc/bin bin → make -C cc → hello
-```
-
-Second platform (Linux ILP32 via Docker; catches GNU ld / Darwin-only seeds):
-
-```bash
-./scripts/smoke_i386.sh                # RO mount + clean /work sandbox
-```
-
-Day-to-day after the first build:
-
-| Changing… | Command |
-|-----------|---------|
-| Stdlib / runtime headers (`cc/include/ccc`, `cc/runtime`) | `make -C cc lower-headers` (or `make cc`) then rebuild your program |
-| Lowerer faces (`cc/shadow/*.cch`) | `./scripts/iterate_shadow_lower.sh` |
-| Freeze a new `shadow_lower` seed | `./scripts/iterate_shadow_lower.sh --ship --smoke` then commit `last-good` + `vN` |
-
-The compiler is at `./cc/bin/ccc`; the native front is `./out/cc/bin/shadow_lower`.
+After that: stdlib → `make -C cc lower-headers`; lowerer faces →
+`./scripts/iterate_shadow_lower.sh`; ship seed →
+`./scripts/iterate_shadow_lower.sh --ship --smoke` then cold checks in
+[build-when.md](build-when.md). Binaries: `./cc/bin/ccc`,
+`./out/cc/bin/shadow_lower`.
 
 ## Your First Program
 
