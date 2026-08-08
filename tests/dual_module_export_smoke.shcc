@@ -36,7 +36,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
     run.arg("-c");
     CCString sh = @string(`
     set -e
-    # ls -i is portable (GNU/BSD); `stat -c` is GNU-only.
+    # ls -i is portable (GNU/BSD); GNU-only "stat -c" is not.
     a=$(ls -i bin/dual_gauge.abi3.so | awk '{print $1}')
     b=$(ls -i bin/dual_gauge.node | awk '{print $1}')
     if [ "$a" = "$b" ]; then echo "hardlinked true"; else echo "hardlinked false"; fi
