@@ -60,6 +60,44 @@ static double[:] Counter_row(Counter *self) {
     return CCSlice_double_from_buffer(v, 3);
 }
 
+/* Outbound: JS hands CC an object; CC calls back through it natively —
+ * the dynamic sink, with the declared destination joining resolution. */
+static long long !>(CCError) Counter_apply(Counter *self, CCJsVal obj) {
+    @errhandler(CCError e) { return cc_err(e); }
+    (void)self;
+    long long v = obj.step(21) !>;
+    return cc_ok(v);
+}
+/* The environment of the call in flight: source text as bootstrap glue. */
+static long long !>(CCError) Counter_eval42(Counter *self, CCJs *js) {
+    @errhandler(CCError e) { return cc_err(e); }
+    (void)self;
+    long long v = js->eval(@slice("6 * 7")) !>;
+    return cc_ok(v);
+}
+/* The chain form still works: plain eval yields a value, hops extract. */
+static long long !>(CCError) Counter_eval_chain(Counter *self, CCJs *js) {
+    @errhandler(CCError e) { return cc_err(e); }
+    (void)self;
+    long long v = js->eval(@slice("6 * 6"))!>.as_i64()!>;
+    return cc_ok(v);
+}
+/* Typed eval: the scalar form without the extraction hop. */
+static long long !>(CCError) Counter_eval_typed(Counter *self, CCJs *js) {
+    @errhandler(CCError e) { return cc_err(e); }
+    (void)self;
+    long long v = js->eval_i64(@slice("40 + 2")) !>;
+    return cc_ok(v);
+}
+/* globalThis, property-called like any other value. */
+static long long !>(CCError) Counter_gparse(Counter *self, CCJs *js) {
+    @errhandler(CCError e) { return cc_err(e); }
+    (void)self;
+    CCJsVal g = js->global() !> @destroy;
+    long long v = g.parseInt("42") !>;
+    return cc_ok(v);
+}
+
 /* The seed is the module's initial state, copied in at registration. */
 static const Counter seed = { .n = 100 };
 

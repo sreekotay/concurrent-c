@@ -368,11 +368,11 @@ static int shadow_ufcs_try_dyn_sink(const char* recv, const char* meth_name,
             snprintf(tryc, sizeof(tryc), "%s_%s", ds->callee, mangled);
             if (shadow_ufn_exists(tryc) ||
                 (inventable && strncmp(ds->callee, "cc_py_obj_", 10) == 0) ||
-                (js_installed && strncmp(ds->callee, "cc_js_", 6) == 0))
+                (js_installed && strncmp(ds->callee, "cc_js_val_", 10) == 0))
                 callee = tryc;
             else if (scalar_dest &&
                      (strncmp(ds->callee, "cc_py_obj_", 10) == 0 ||
-                      strncmp(ds->callee, "cc_js_", 6) == 0)) {
+                      strncmp(ds->callee, "cc_js_val_", 10) == 0)) {
                 /* Do not fall back to plain callm — that silently yields
                  * CCPyObj→scalar host noise (ufcs_dest_not_installed_fail). */
                 if (!g_shadow_ufcs_miss) {

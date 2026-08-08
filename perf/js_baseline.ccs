@@ -84,6 +84,42 @@ static void Math_destroy(Math *self) {
     self->series = NULL;
     self->slen = 0;
 }
+/* Outbound rungs: crossing out of CC at three arities, against global
+ * functions the driver defines.  One method call carries the whole timed
+ * loop, so per-call cost is the inner count's share. */
+static long long !>(CCError) Math_cc_to_js0(Math *self, CCJs *js, long long n) {
+    @errhandler(CCError e) { return cc_err(e); }
+    CCJsVal g = js->global() !> @destroy;
+    long long t = 0;
+    for (long long i = 0; i < n; i++) {
+        long long v = g.noargs_js() !>;
+        t += v;
+    }
+    self->calls += n;
+    return cc_ok(t);
+}
+static long long !>(CCError) Math_cc_to_js1(Math *self, CCJs *js, long long n) {
+    @errhandler(CCError e) { return cc_err(e); }
+    CCJsVal g = js->global() !> @destroy;
+    long long t = 0;
+    for (long long i = 0; i < n; i++) {
+        long long v = g.one_js(i) !>;
+        t += v;
+    }
+    self->calls += n;
+    return cc_ok(t);
+}
+static long long !>(CCError) Math_cc_to_js3(Math *self, CCJs *js, long long n) {
+    @errhandler(CCError e) { return cc_err(e); }
+    CCJsVal g = js->global() !> @destroy;
+    long long t = 0;
+    for (long long i = 0; i < n; i++) {
+        long long v = g.mul_add_js(3, i, 7) !>;
+        t += v;
+    }
+    self->calls += n;
+    return cc_ok(t);
+}
 
 /* The napi floor: the same add, hand-written against the raw symbol table
  * — no bind, no _Generic, no scratch, no state.  `js_to_cc` minus this is

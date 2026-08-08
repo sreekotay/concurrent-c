@@ -31,15 +31,84 @@
 
 #include <dlfcn.h>
 #include <limits.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include <ccc/cc_arena.cch>
 #include <ccc/cc_compat.cch>
 #include <ccc/cc_result.cch>
 #include <ccc/cc_slice.cch>
 #include <ccc/cc_type.cch>
+
+/* ---- outbound types ----
+ *
+ * `CCJs` names the environment a call runs under; `CCJsVal` a JavaScript
+ * value anchored to it.  A value produced during a call (a parameter, a
+ * property, an eval result) is CALL-SCOPED — valid until the trampoline
+ * returns; `.hold()` re-anchors it on a reference that survives into
+ * later calls into the same environment, released by `@destroy`. */
+typedef struct CCJs {
+    int ready;
+    CCArena *arena; /* error text + default extract backing */
+    void *env;
+} CCJs;
+
+typedef struct CCJsVal {
+    void *env;
+    void *v;    /* napi_value; call-scoped unless `ref` re-anchors it */
+    void *ref;  /* napi_ref from .hold(); owned, released by @destroy */
+} CCJsVal;
+
+/* JavaScript failure with a CCError face: default @errhandler(CCError)
+ * prints it; exact @errhandler(CCJsError) claims it. */
+typedef struct CCJsError {
+    CCError base @as;
+    /* `error.name` (`TypeError`, `RangeError`, …) and `error.stack`, both
+     * anchored in the handle's scratch arena.  Empty when the failure came
+     * from the binding rather than from JavaScript. */
+    CCSlice name;
+    CCSlice stack;
+} CCJsError;
+
+#ifndef CCResult_CCJs_CCJsError_DEFINED
+#define CCResult_CCJs_CCJsError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCJs_CCJsError, CCJs, CCJsError)
+#endif
+#ifndef CCResult_CCJsVal_CCJsError_DEFINED
+#define CCResult_CCJsVal_CCJsError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCJsVal_CCJsError, CCJsVal, CCJsError)
+#endif
+#ifndef CCResult_void_CCJsError_DEFINED
+#define CCResult_void_CCJsError_DEFINED 1
+CC_DECL_RESULT_SPEC_VOID(CCResult_void_CCJsError, CCJsError)
+#endif
+#ifndef CCResult_double_CCJsError_DEFINED
+#define CCResult_double_CCJsError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_double_CCJsError, double, CCJsError)
+#endif
+#ifndef CCResult_float_CCJsError_DEFINED
+#define CCResult_float_CCJsError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_float_CCJsError, float, CCJsError)
+#endif
+#ifndef CCResult_int_CCJsError_DEFINED
+#define CCResult_int_CCJsError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_int_CCJsError, int, CCJsError)
+#endif
+#ifndef CCResult_int64_t_CCJsError_DEFINED
+#define CCResult_int64_t_CCJsError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_int64_t_CCJsError, int64_t, CCJsError)
+#endif
+#ifndef CCResult_long_long_CCJsError_DEFINED
+#define CCResult_long_long_CCJsError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_long_long_CCJsError, long long, CCJsError)
+#endif
+#ifndef CCResult_CCSlice_CCJsError_DEFINED
+#define CCResult_CCSlice_CCJsError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCSlice_CCJsError, CCSlice, CCJsError)
+#endif
 
 /* ---- Node-API shapes ----
  *
@@ -104,6 +173,18 @@ typedef struct CC__JsSyms {
                              void **out);
     int (*CreateTypedarray)(void *env, int type, size_t length,
                             void *arraybuffer, size_t byte_offset, void **out);
+    int (*GetGlobal)(void *env, void **out);
+    int (*RunScript)(void *env, void *script, void **out);
+    int (*CallFunction)(void *env, void *recv, void *func, size_t argc,
+                        void *const *argv, void **out);
+    int (*CreateObject)(void *env, void **out);
+    int (*IsExceptionPending)(void *env, _Bool *out);
+    int (*GetAndClearLastException)(void *env, void **out);
+    int (*CoerceToString)(void *env, void *value, void **out);
+    int (*CreateReference)(void *env, void *value, uint32_t initial,
+                           void **out);
+    int (*GetReferenceValue)(void *env, void *ref, void **out);
+    int (*DeleteReference)(void *env, void *ref);
     /* Optional (see cc__js_load): NULL when the runtime predates BigInt
      * (Node < 10.7).  An integer beyond 2^53 then answers at the call —
      * a RangeError naming the gap — rather than truncating. */
@@ -185,6 +266,16 @@ static int cc__js_load(void) {
     CC__JS_SYM(GetTypedarrayInfo, "napi_get_typedarray_info")
     CC__JS_SYM(CreateArraybuffer, "napi_create_arraybuffer")
     CC__JS_SYM(CreateTypedarray, "napi_create_typedarray")
+    CC__JS_SYM(GetGlobal, "napi_get_global")
+    CC__JS_SYM(RunScript, "napi_run_script")
+    CC__JS_SYM(CallFunction, "napi_call_function")
+    CC__JS_SYM(CreateObject, "napi_create_object")
+    CC__JS_SYM(IsExceptionPending, "napi_is_exception_pending")
+    CC__JS_SYM(GetAndClearLastException, "napi_get_and_clear_last_exception")
+    CC__JS_SYM(CoerceToString, "napi_coerce_to_string")
+    CC__JS_SYM(CreateReference, "napi_create_reference")
+    CC__JS_SYM(GetReferenceValue, "napi_get_reference_value")
+    CC__JS_SYM(DeleteReference, "napi_delete_reference")
 #undef CC__JS_SYM
 #define CC__JS_SYM_OPT(field, name) \
     cc__js.field = (void *)0; *(void **)&cc__js.field = dlsym(cc__js.lib, name);
@@ -226,6 +317,10 @@ typedef struct CC__JsMark {
     size_t top;
     CC__JsOwned *owned;
 } CC__JsMark;
+
+/* Scratch arena for the next `cc__js_err` copy; NULL keeps the static
+ * buffer.  Bound at public entries from the handle's arena. */
+static CC_JS_THREAD_LOCAL CCArena *cc__js_err_arena;
 
 static inline CC__JsMark cc__js_mark(void) {
     CC__JsMark m;
@@ -457,6 +552,17 @@ static int cc__js_inq_cstr(const char **dst, void *env, void *o) {
     return 0;
 }
 
+/* A `CCJsVal` parameter is the catch-all: any JS value, borrowed for the
+ * call — the door through which JS hands CC a function or object to call
+ * back into. */
+static int cc__js_inq_jsval(CCJsVal *dst, void *env, void *o) {
+    if (!o) return -1;
+    dst->env = env;
+    dst->v = o;
+    dst->ref = NULL;
+    return 0;
+}
+
 /* ---- typed slices <-> arrays ----
  *
  * `napi_typedarray_type`, mirrored (stable enum order since Node-API 1;
@@ -666,6 +772,7 @@ CC__JS_IN_WRAP(float, float, "a number")
 CC__JS_IN_WRAP(bool, _Bool, "a boolean")
 CC__JS_IN_WRAP(slice, CCSlice, "a string")
 CC__JS_IN_WRAP(cstr, const char *, "a string")
+CC__JS_IN_WRAP(jsval, CCJsVal, "a value")
 
 #define CC__JS_IN_SUPPORTED(lv)                             \
     _Generic(&(lv),                                         \
@@ -688,6 +795,7 @@ CC__JS_IN_WRAP(cstr, const char *, "a string")
         CCSlice_int64_t *: 1,                               \
         CCSlice_float *: 1,                                 \
         CCSlice_double *: 1,                                \
+        CCJsVal *: 1,                                       \
         const char **: 1,                                   \
         char **: 1,                                         \
         default: 0)
@@ -721,6 +829,7 @@ extern int cc__js_in_unsupported(
         CCSlice_int64_t *: cc__js_in_ts_CCSlice_int64_t,    \
         CCSlice_float *: cc__js_in_ts_CCSlice_float,        \
         CCSlice_double *: cc__js_in_ts_CCSlice_double,      \
+        CCJsVal *: cc__js_in_jsval,                         \
         const char **: cc__js_in_cstr,                      \
         char **: cc__js_in_cstr,                            \
         default: cc__js_in_unsupported)(&(lv), (env), (o), #lv))
@@ -749,6 +858,7 @@ extern int cc__js_in_unsupported(
         CCSlice_int64_t *: cc__js_inq_ts_CCSlice_int64_t,   \
         CCSlice_float *: cc__js_inq_ts_CCSlice_float,       \
         CCSlice_double *: cc__js_inq_ts_CCSlice_double,     \
+        CCJsVal *: cc__js_inq_jsval,                        \
         const char **: cc__js_inq_cstr,                     \
         char **: cc__js_inq_cstr)(&(lv), (env), (o))
 
@@ -818,6 +928,9 @@ static void *cc__js_out_cstr(void *env, const char *s) {
     return r;
 }
 
+/* Defined after the outbound section (needs cc__js_val_cur). */
+static void *cc__js_out_jsval(void *env, CCJsVal v);
+
 #define CC__JS_OUT_SUPPORTED(v)                             \
     _Generic((v),                                           \
         int: 1,                                             \
@@ -839,6 +952,7 @@ static void *cc__js_out_cstr(void *env, const char *s) {
         CCSlice_int64_t: 1,                                 \
         CCSlice_float: 1,                                   \
         CCSlice_double: 1,                                  \
+        CCJsVal: 1,                                         \
         const char *: 1,                                    \
         char *: 1,                                          \
         default: 0)
@@ -870,6 +984,7 @@ extern void *cc__js_out_unsupported(
         CCSlice_int64_t: cc__js_out_ts_CCSlice_int64_t,     \
         CCSlice_float: cc__js_out_ts_CCSlice_float,         \
         CCSlice_double: cc__js_out_ts_CCSlice_double,       \
+        CCJsVal: cc__js_out_jsval,                          \
         const char *: cc__js_out_cstr,                      \
         char *: cc__js_out_cstr,                            \
         default: cc__js_out_unsupported)((env), (v)))
@@ -1004,6 +1119,840 @@ static int cc__js_bind(void *env, void **argv, size_t argc, int want,
     return 0;
 }
 
+/* ============================================================
+ * Outbound: CC calls JavaScript.
+ *
+ * The whole surface is ONE rule, the same rule the Python twin has:
+ * `obj.anything(args…)` is the JavaScript property, called natively with
+ * `obj` as `this`, and `!>` is how a JavaScript failure becomes a CC
+ * error.  Everything else is spelling: `js.eval` / `js.exec` run source
+ * text, `js.global()` is `globalThis`, values extract with `.as_f64()` /
+ * `.as_i64()` / `.as_slice(&arena)`, and `.hold()` re-anchors a value to
+ * survive the call that produced it.
+ * ============================================================ */
+
+/* Copy a JS string value's UTF-8 into the error arena (empty on any
+ * failure — diagnostics never raise). */
+static CCSlice cc__js_text_into_err_arena(void *env, void *s) {
+    size_t len = 0, got = 0;
+    char *dst;
+    if (!s || !cc__js_err_arena) return cc_slice_empty();
+    if (cc__js.GetValueStringUtf8(env, s, NULL, 0, &len) != 0)
+        return cc_slice_empty();
+    dst = (char *)cc_arena_alloc(cc__js_err_arena, len + 1, 1);
+    if (!dst) return cc_slice_empty();
+    if (cc__js.GetValueStringUtf8(env, s, dst, len + 1, &got) != 0)
+        return cc_slice_empty();
+    return cc_slice_from_buffer(dst, got);
+}
+
+static CCSlice cc__js_prop_text(void *env, void *obj, const char *name) {
+    void *p = NULL, *s = NULL;
+    _Bool junk = 0;
+    CCSlice out;
+    if (!obj || cc__js.GetNamedProperty(env, obj, name, &p) != 0 || !p)
+        return cc_slice_empty();
+    if (cc__js.CoerceToString(env, p, &s) != 0) {
+        (void)cc__js.IsExceptionPending(env, &junk);
+        if (junk) { void *e = NULL; cc__js.GetAndClearLastException(env, &e); }
+        return cc_slice_empty();
+    }
+    out = cc__js_text_into_err_arena(env, s);
+    return out;
+}
+
+/* Capture the pending exception (or the prefilled cc__js_errbuf) into a
+ * CCJsError.  When cc__js_err_arena is set the message copies there;
+ * otherwise it stays in the process-static buffer. */
+static CCJsError cc__js_err(void *env, const char *ctx) {
+    CCJsError e;
+    const char *msg_src;
+    memset(&e, 0, sizeof(e));
+    if (env && cc__js.lib && cc__js.IsExceptionPending) {
+        _Bool pending = 0;
+        if (cc__js.IsExceptionPending(env, &pending) == 0 && pending) {
+            void *exc = NULL;
+            if (cc__js.GetAndClearLastException(env, &exc) == 0 && exc) {
+                char msg[320];
+                size_t got = 0;
+                void *ms = NULL, *mp = NULL;
+                msg[0] = 0;
+                if (cc__js.GetNamedProperty(env, exc, "message", &mp) == 0 &&
+                    mp && cc__js.CoerceToString(env, mp, &ms) == 0)
+                    (void)cc__js.GetValueStringUtf8(env, ms, msg, sizeof(msg),
+                                                    &got);
+                if (!msg[0]) {
+                    void *es = NULL;
+                    if (cc__js.CoerceToString(env, exc, &es) == 0)
+                        (void)cc__js.GetValueStringUtf8(env, es, msg,
+                                                        sizeof(msg), &got);
+                }
+                snprintf(cc__js_errbuf, sizeof(cc__js_errbuf), "js: %s: %s",
+                         ctx, msg[0] ? msg : "unknown error");
+                e.name = cc__js_prop_text(env, exc, "name");
+                e.stack = cc__js_prop_text(env, exc, "stack");
+                {
+                    /* Property reads above may have raised; never leave one
+                     * pending on the diagnostic path. */
+                    _Bool p2 = 0;
+                    if (cc__js.IsExceptionPending(env, &p2) == 0 && p2) {
+                        void *junk = NULL;
+                        cc__js.GetAndClearLastException(env, &junk);
+                    }
+                }
+                goto have_msg;
+            }
+        }
+    }
+    if (!cc__js_errbuf[0])
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf), "js: %s failed", ctx);
+have_msg:
+    msg_src = cc__js_errbuf;
+    if (cc__js_err_arena) {
+        size_t n = strlen(msg_src);
+        char *dst = (char *)cc_arena_alloc(cc__js_err_arena, n + 1, 1);
+        if (dst) {
+            memcpy(dst, msg_src, n + 1);
+            e.base = CC_ERROR(CC_ERR_INTERNAL, dst);
+            return e;
+        }
+    }
+    e.base = CC_ERROR(CC_ERR_INTERNAL, msg_src);
+    return e;
+}
+
+/* The live napi_value a CCJsVal names: held values re-fetch through the
+ * reference (their call-scoped value is stale by design). */
+static inline void *cc__js_val_cur(const CCJsVal *v) {
+    if (!v || !v->env) return NULL;
+    if (v->ref) {
+        void *out = NULL;
+        if (cc__js.GetReferenceValue(v->env, v->ref, &out) != 0) return NULL;
+        return out;
+    }
+    return v->v;
+}
+
+/* ---- dynamic sink: obj.anything(args…) ----
+ *
+ * Tagged argument for the sink.  CC_JS_ARG lifts each call argument by
+ * static type; the call core re-materializes it as a JS value.  A named
+ * argument (`js_kw`) folds into one trailing plain object — JavaScript's
+ * own keyword convention. */
+typedef struct CCJsArg {
+    int kind; /* 0=i64 1=f64 2=cstr 3=slice 4=val 5=bool 6=typed slice */
+    const char *kwname;
+    long long i; /* kind 6: esz | is_float<<8 | is_signed<<9 */
+    double f;
+    const void *p;
+    size_t n;
+} CCJsArg;
+
+#define CC__JS_MAX_CALL_ARGS 32
+
+static inline CCJsArg cc__js_arg_i(long long v) {
+    CCJsArg a = {0};
+    a.i = v;
+    return a;
+}
+static inline CCJsArg cc__js_arg_f(double v) {
+    CCJsArg a = {0};
+    a.kind = 1;
+    a.f = v;
+    return a;
+}
+static inline CCJsArg cc__js_arg_cstr(const char *s) {
+    CCJsArg a = {0};
+    a.kind = 2;
+    a.p = s;
+    a.n = s ? strlen(s) : 0;
+    return a;
+}
+static inline CCJsArg cc__js_arg_slice(CCSlice s) {
+    CCJsArg a = {0};
+    a.kind = 3;
+    a.p = s.ptr;
+    a.n = s.len;
+    return a;
+}
+static inline CCJsArg cc__js_arg_val(CCJsVal v) {
+    CCJsArg a = {0};
+    a.kind = 4;
+    a.p = cc__js_val_cur(&v);
+    return a;
+}
+static inline CCJsArg cc__js_arg_bool(int v) {
+    CCJsArg a = {0};
+    a.kind = 5;
+    a.i = v ? 1 : 0;
+    return a;
+}
+static inline CCJsArg cc__js_arg_tslice(CCSlice s, int esz, int isf, int iss) {
+    CCJsArg a = {0};
+    a.kind = 6;
+    a.p = s.ptr;
+    a.n = s.len;
+    a.i = (long long)((esz & 0xff) | (isf ? 0x100 : 0) | (iss ? 0x200 : 0));
+    return a;
+}
+static inline CCJsArg cc__js_arg_pass(CCJsArg a) { return a; }
+static inline CCJsArg cc__js_arg_named(const char *name, CCJsArg a) {
+    a.kwname = name;
+    return a;
+}
+
+#define CC__JS_TSARG_ARM(NAME, T)                                              \
+    static inline CCJsArg cc__js_arg_ts_##NAME(NAME s) {                       \
+        return cc__js_arg_tslice(s.base, (int)sizeof(T),                       \
+                                 _Generic((T)0, float: 1, double: 1,           \
+                                          default: 0),                         \
+                                 (((T)-1) < ((T)1) ? 1 : 0));                  \
+    }
+CC__JS_TSARG_ARM(CCSlice_short, short)
+CC__JS_TSARG_ARM(CCSlice_int, int)
+CC__JS_TSARG_ARM(CCSlice_long, long)
+CC__JS_TSARG_ARM(CCSlice_long_long, long long)
+CC__JS_TSARG_ARM(CCSlice_int16_t, int16_t)
+CC__JS_TSARG_ARM(CCSlice_int32_t, int32_t)
+CC__JS_TSARG_ARM(CCSlice_int64_t, int64_t)
+CC__JS_TSARG_ARM(CCSlice_float, float)
+CC__JS_TSARG_ARM(CCSlice_double, double)
+#undef CC__JS_TSARG_ARM
+
+#define CC_JS_ARG(x)                                        \
+    _Generic((x),                                           \
+        double: cc__js_arg_f,                               \
+        float: cc__js_arg_f,                                \
+        int: cc__js_arg_i,                                  \
+        long: cc__js_arg_i,                                 \
+        long long: cc__js_arg_i,                            \
+        unsigned int: cc__js_arg_i,                         \
+        unsigned long: cc__js_arg_i,                        \
+        unsigned long long: cc__js_arg_i,                   \
+        char *: cc__js_arg_cstr,                            \
+        const char *: cc__js_arg_cstr,                      \
+        CCSlice: cc__js_arg_slice,                          \
+        CCSlice_short: cc__js_arg_ts_CCSlice_short,         \
+        CCSlice_int: cc__js_arg_ts_CCSlice_int,             \
+        CCSlice_long: cc__js_arg_ts_CCSlice_long,           \
+        CCSlice_long_long: cc__js_arg_ts_CCSlice_long_long, \
+        CCSlice_int16_t: cc__js_arg_ts_CCSlice_int16_t,     \
+        CCSlice_int32_t: cc__js_arg_ts_CCSlice_int32_t,     \
+        CCSlice_int64_t: cc__js_arg_ts_CCSlice_int64_t,     \
+        CCSlice_float: cc__js_arg_ts_CCSlice_float,         \
+        CCSlice_double: cc__js_arg_ts_CCSlice_double,       \
+        CCJsVal: cc__js_arg_val,                            \
+        CCJsArg: cc__js_arg_pass,                           \
+        _Bool: cc__js_arg_bool)(x)
+
+/* `obj.f(1, js_kw("width", 4))` — a keyword argument folds into one
+ * trailing plain object, JavaScript's own convention. */
+#define js_kw(name, value) cc__js_arg_named((name), CC_JS_ARG(value))
+
+/* Materialize one lifted argument as a JS value; NULL with cc__js_errbuf
+ * set on failure. */
+static void *cc__js_arg_value(void *env, const CCJsArg *a) {
+    void *v = NULL;
+    switch (a->kind) {
+    case 0: return cc__js_out_ll(env, a->i);
+    case 1:
+        if (cc__js.CreateDouble(env, a->f, &v) != 0) return NULL;
+        return v;
+    case 2:
+    case 3:
+        if (cc__js.CreateStringUtf8(env, a->p ? (const char *)a->p : "",
+                                    a->n, &v) != 0)
+            return NULL;
+        return v;
+    case 4: return (void *)a->p;
+    case 5:
+        if (cc__js.GetBoolean(env, (int)a->i, &v) != 0) return NULL;
+        return v;
+    case 6: {
+        CCSlice s;
+        s.ptr = (void *)(uintptr_t)a->p;
+        s.len = a->n;
+        return cc__js_out_tslice(env, s, (int)(a->i & 0xff),
+                                 (int)((a->i >> 8) & 1),
+                                 (int)((a->i >> 9) & 1));
+    }
+    default: return NULL;
+    }
+}
+
+/* The call core: get the property, call it with the receiver as `this`.
+ * Arguments arrive as an array of lifted CCJsArg (the UFCS lowering's
+ * form); the variadic entries below adapt onto it. */
+static CCResult_CCJsVal_CCJsError cc__js_val_callm_n(CCJsVal *obj,
+                                                     const char *method,
+                                                     int argc,
+                                                     const CCJsArg *argv) {
+    void *env;
+    void *recv;
+    void *fn = NULL;
+    void *av[CC__JS_MAX_CALL_ARGS];
+    void *bag = NULL;
+    void *r = NULL;
+    int i, npos = 0, nkw = 0;
+    CCJsVal out;
+    cc__js_errbuf[0] = 0;
+    if (!obj || !obj->env || argc < 0 || argc > CC__JS_MAX_CALL_ARGS) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: %s: bad receiver or too many arguments", method);
+        return cc_err_CCResult_CCJsVal_CCJsError(cc__js_err(NULL, method));
+    }
+    env = obj->env;
+    recv = cc__js_val_cur(obj);
+    if (!recv || cc__js.GetNamedProperty(env, recv, method, &fn) != 0 || !fn)
+        return cc_err_CCResult_CCJsVal_CCJsError(cc__js_err(env, method));
+    for (i = 0; i < argc; i++)
+        if (argv[i].kwname) nkw++;
+    if (nkw > 0 && cc__js.CreateObject(env, &bag) != 0)
+        return cc_err_CCResult_CCJsVal_CCJsError(cc__js_err(env, method));
+    for (i = 0; i < argc; i++) {
+        void *v = cc__js_arg_value(env, &argv[i]);
+        if (!v) {
+            snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                     "js: %s: argument %d does not marshal", method, i + 1);
+            return cc_err_CCResult_CCJsVal_CCJsError(cc__js_err(env, method));
+        }
+        if (argv[i].kwname) {
+            if (cc__js.SetNamedProperty(env, bag, argv[i].kwname, v) != 0)
+                return cc_err_CCResult_CCJsVal_CCJsError(
+                    cc__js_err(env, method));
+        } else {
+            av[npos++] = v;
+        }
+    }
+    if (bag) av[npos++] = bag;
+    if (cc__js.CallFunction(env, recv, fn, (size_t)npos, av, &r) != 0)
+        return cc_err_CCResult_CCJsVal_CCJsError(cc__js_err(env, method));
+    memset(&out, 0, sizeof(out));
+    out.env = env;
+    out.v = r;
+    return cc_ok_CCResult_CCJsVal_CCJsError(out);
+}
+
+static inline CCResult_CCJsVal_CCJsError cc__js_val_callm_v(CCJsVal *obj,
+                                                            const char *method,
+                                                            int argc,
+                                                            va_list ap) {
+    CCJsArg tmp[CC__JS_MAX_CALL_ARGS];
+    int i;
+    if (argc < 0) argc = 0;
+    if (argc > CC__JS_MAX_CALL_ARGS) argc = CC__JS_MAX_CALL_ARGS + 1;
+    for (i = 0; i < argc && i < CC__JS_MAX_CALL_ARGS; i++)
+        tmp[i] = va_arg(ap, CCJsArg);
+    return cc__js_val_callm_n(obj, method, argc, tmp);
+}
+
+static inline CCResult_CCJsVal_CCJsError cc_js_val_callm(CCJsVal *obj,
+                                                         const char *method,
+                                                         int argc, ...) {
+    CCResult_CCJsVal_CCJsError r;
+    va_list ap;
+    va_start(ap, argc);
+    r = cc__js_val_callm_v(obj, method, argc, ap);
+    va_end(ap);
+    return r;
+}
+
+/* Destination-typed variants: `.ufcs_dynamic2` resolution composes
+ * `cc_js_val_callm_<mangled dest>` at `T v = obj.method(args…)` sites.
+ * Each runs the shared core, extracts the destination through the quiet
+ * cores, and needs no release — the intermediate is call-scoped. */
+static inline CCResult_double_CCJsError cc_js_val_callm_double(
+        CCJsVal *obj, const char *method, int argc, ...) {
+    CCResult_CCJsVal_CCJsError r;
+    double v = 0;
+    va_list ap;
+    va_start(ap, argc);
+    r = cc__js_val_callm_v(obj, method, argc, ap);
+    va_end(ap);
+    if (!r.ok) return cc_err_CCResult_double_CCJsError(r.u.error);
+    if (cc__js_inq_double(&v, r.u.value.env, r.u.value.v) != 0) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: %s: result is not a number", method);
+        return cc_err_CCResult_double_CCJsError(
+            cc__js_err(r.u.value.env, method));
+    }
+    return cc_ok_CCResult_double_CCJsError(v);
+}
+
+/* Spelled out rather than macro-minted: UFCS compose-and-verify checks a
+ * composed callee's name TEXTUALLY, so a token-pasted definition is
+ * invisible to it and the site would fall back to the plain sink. */
+static inline CCResult_int64_t_CCJsError cc_js_val_callm_int64_t(
+        CCJsVal *obj, const char *method, int argc, ...) {
+    CCResult_CCJsVal_CCJsError r;
+    long long v = 0;
+    int rc;
+    va_list ap;
+    va_start(ap, argc);
+    r = cc__js_val_callm_v(obj, method, argc, ap);
+    va_end(ap);
+    if (!r.ok) return cc_err_CCResult_int64_t_CCJsError(r.u.error);
+    rc = cc__js_inq_ll(r.u.value.env, r.u.value.v, &v);
+    if (rc != 0) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 rc == -2 ? "js: %s: result out of range"
+                          : "js: %s: result is not an integer",
+                 method);
+        return cc_err_CCResult_int64_t_CCJsError(
+            cc__js_err(r.u.value.env, method));
+    }
+    return cc_ok_CCResult_int64_t_CCJsError((int64_t)v);
+}
+
+static inline CCResult_long_long_CCJsError cc_js_val_callm_long_long(
+        CCJsVal *obj, const char *method, int argc, ...) {
+    CCResult_CCJsVal_CCJsError r;
+    long long v = 0;
+    int rc;
+    va_list ap;
+    va_start(ap, argc);
+    r = cc__js_val_callm_v(obj, method, argc, ap);
+    va_end(ap);
+    if (!r.ok) return cc_err_CCResult_long_long_CCJsError(r.u.error);
+    rc = cc__js_inq_ll(r.u.value.env, r.u.value.v, &v);
+    if (rc != 0) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 rc == -2 ? "js: %s: result out of range"
+                          : "js: %s: result is not an integer",
+                 method);
+        return cc_err_CCResult_long_long_CCJsError(
+            cc__js_err(r.u.value.env, method));
+    }
+    return cc_ok_CCResult_long_long_CCJsError((long long)v);
+}
+
+static inline CCResult_int_CCJsError cc_js_val_callm_int(
+        CCJsVal *obj, const char *method, int argc, ...) {
+    CCResult_CCJsVal_CCJsError r;
+    long long v = 0;
+    int rc;
+    va_list ap;
+    va_start(ap, argc);
+    r = cc__js_val_callm_v(obj, method, argc, ap);
+    va_end(ap);
+    if (!r.ok) return cc_err_CCResult_int_CCJsError(r.u.error);
+    rc = cc__js_inq_ll(r.u.value.env, r.u.value.v, &v);
+    if (rc != 0 || v < INT_MIN || v > INT_MAX) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: %s: result out of range for int destination", method);
+        return cc_err_CCResult_int_CCJsError(cc__js_err(r.u.value.env, method));
+    }
+    return cc_ok_CCResult_int_CCJsError((int)v);
+}
+
+static inline CCResult_float_CCJsError cc_js_val_callm_float(
+        CCJsVal *obj, const char *method, int argc, ...) {
+    CCResult_CCJsVal_CCJsError r;
+    double v = 0;
+    va_list ap;
+    va_start(ap, argc);
+    r = cc__js_val_callm_v(obj, method, argc, ap);
+    va_end(ap);
+    if (!r.ok) return cc_err_CCResult_float_CCJsError(r.u.error);
+    if (cc__js_inq_double(&v, r.u.value.env, r.u.value.v) != 0) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: %s: result is not a number", method);
+        return cc_err_CCResult_float_CCJsError(
+            cc__js_err(r.u.value.env, method));
+    }
+    return cc_ok_CCResult_float_CCJsError((float)v);
+}
+
+/* ---- value operations (UFCS: `v.get(...)`, `v.as_f64()`, …) ---- */
+
+static inline CCResult_CCJsVal_CCJsError cc_js_val_get(CCJsVal *obj,
+                                                       const char *name) {
+    void *p = NULL;
+    void *cur;
+    CCJsVal out;
+    cc__js_errbuf[0] = 0;
+    if (!obj || !obj->env)
+        return cc_err_CCResult_CCJsVal_CCJsError(cc__js_err(NULL, name));
+    cur = cc__js_val_cur(obj);
+    if (!cur || cc__js.GetNamedProperty(obj->env, cur, name, &p) != 0)
+        return cc_err_CCResult_CCJsVal_CCJsError(cc__js_err(obj->env, name));
+    memset(&out, 0, sizeof(out));
+    out.env = obj->env;
+    out.v = p;
+    return cc_ok_CCResult_CCJsVal_CCJsError(out);
+}
+
+static inline CCResult_double_CCJsError cc_js_val_as_f64(CCJsVal *obj) {
+    double v = 0;
+    cc__js_errbuf[0] = 0;
+    if (!obj || !obj->env ||
+        cc__js_inq_double(&v, obj->env, cc__js_val_cur(obj)) != 0) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: as_f64: not a number");
+        return cc_err_CCResult_double_CCJsError(
+            cc__js_err(obj ? obj->env : NULL, "as_f64"));
+    }
+    return cc_ok_CCResult_double_CCJsError(v);
+}
+
+static inline CCResult_int64_t_CCJsError cc_js_val_as_i64(CCJsVal *obj) {
+    long long v = 0;
+    cc__js_errbuf[0] = 0;
+    if (!obj || !obj->env ||
+        cc__js_inq_ll(obj->env, cc__js_val_cur(obj), &v) != 0) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: as_i64: not an integer");
+        return cc_err_CCResult_int64_t_CCJsError(
+            cc__js_err(obj ? obj->env : NULL, "as_i64"));
+    }
+    return cc_ok_CCResult_int64_t_CCJsError((int64_t)v);
+}
+
+/* String(value), copied into `arena`, NUL-terminated. */
+static inline CCResult_CCSlice_CCJsError cc_js_val_as_slice_into(
+        CCJsVal *obj, CCArena *arena) {
+    void *s = NULL;
+    size_t len = 0, got = 0;
+    CCSlice out;
+    cc__js_errbuf[0] = 0;
+    if (!obj || !obj->env || !arena) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: as_slice needs a value and an arena");
+        return cc_err_CCResult_CCSlice_CCJsError(
+            cc__js_err(obj ? obj->env : NULL, "as_slice"));
+    }
+    if (cc__js.CoerceToString(obj->env, cc__js_val_cur(obj), &s) != 0 ||
+        cc__js.GetValueStringUtf8(obj->env, s, NULL, 0, &len) != 0)
+        return cc_err_CCResult_CCSlice_CCJsError(
+            cc__js_err(obj->env, "as_slice"));
+    out = cc_arena_alloc_slice_bytes(arena, len + 1);
+    if (!out.ptr) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: as_slice: arena exhausted");
+        return cc_err_CCResult_CCSlice_CCJsError(
+            cc__js_err(obj->env, "as_slice"));
+    }
+    if (cc__js.GetValueStringUtf8(obj->env, s, (char *)out.ptr, len + 1,
+                                  &got) != 0)
+        return cc_err_CCResult_CCSlice_CCJsError(
+            cc__js_err(obj->env, "as_slice"));
+    out.len = got;
+    return cc_ok_CCResult_CCSlice_CCJsError(out);
+}
+
+static inline CCResult_CCSlice_CCJsError cc_js_val_as_slice(CCJsVal *obj,
+                                                            CCArena *arena) {
+    return cc_js_val_as_slice_into(obj, arena);
+}
+
+/* Re-anchor a call-scoped value on a reference that survives into later
+ * calls into the same environment.  The held value releases with
+ * `@destroy` (or by hand); using it after its environment tears down is
+ * outside the contract. */
+static inline CCResult_CCJsVal_CCJsError cc_js_val_hold(CCJsVal *obj) {
+    void *ref = NULL;
+    CCJsVal out;
+    cc__js_errbuf[0] = 0;
+    if (!obj || !obj->env || !cc__js_val_cur(obj)) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf), "js: hold: no value");
+        return cc_err_CCResult_CCJsVal_CCJsError(
+            cc__js_err(obj ? obj->env : NULL, "hold"));
+    }
+    if (cc__js.CreateReference(obj->env, cc__js_val_cur(obj), 1, &ref) != 0)
+        return cc_err_CCResult_CCJsVal_CCJsError(cc__js_err(obj->env, "hold"));
+    memset(&out, 0, sizeof(out));
+    out.env = obj->env;
+    out.ref = ref;
+    return cc_ok_CCResult_CCJsVal_CCJsError(out);
+}
+
+/* Idempotent; a borrow (no ref) releases as a no-op. */
+static inline void cc_js_val_release(CCJsVal *obj) {
+    if (!obj) return;
+    if (obj->ref && obj->env && cc__js.lib)
+        cc__js.DeleteReference(obj->env, obj->ref);
+    obj->env = NULL;
+    obj->v = NULL;
+    obj->ref = NULL;
+}
+
+/* ---- the environment handle ---- */
+
+static inline void cc_js_close(CCJs *js) {
+    /* Guest mode: the host owns the environment; closing forgets it. */
+    if (!js) return;
+    js->ready = 0;
+    js->arena = NULL;
+    js->env = NULL;
+}
+
+static inline CCResult_CCJsVal_CCJsError cc_js_global(CCJs *js) {
+    void *g = NULL;
+    CCJsVal out;
+    cc__js_errbuf[0] = 0;
+    cc__js_err_arena = js ? js->arena : NULL;
+    if (!js || !js->ready || cc__js.GetGlobal(js->env, &g) != 0)
+        return cc_err_CCResult_CCJsVal_CCJsError(
+            cc__js_err(js ? js->env : NULL, "global"));
+    memset(&out, 0, sizeof(out));
+    out.env = js->env;
+    out.v = g;
+    return cc_ok_CCResult_CCJsVal_CCJsError(out);
+}
+
+/* Running source text — bootstrap glue, not a call path.  Both run in the
+ * environment's global scope, so a definition from one call is visible to
+ * the next.
+ *
+ * `eval` is deliberately NOT a real member: it resolves through the CCJs
+ * dynamic sink below, so the declared destination joins resolution —
+ * `long long v = js->eval(src) !>` extracts directly, the same rule the
+ * CCJsVal sink gives `g.parseInt("42")`.  This is the implementation the
+ * sink and the typed wrappers share. */
+static inline CCResult_CCJsVal_CCJsError cc__js_eval(CCJs *js, CCSlice src) {
+    void *script = NULL, *r = NULL;
+    CCJsVal out;
+    cc__js_errbuf[0] = 0;
+    cc__js_err_arena = js ? js->arena : NULL;
+    if (!js || !js->ready)
+        return cc_err_CCResult_CCJsVal_CCJsError(cc__js_err(NULL, "eval"));
+    if (cc__js.CreateStringUtf8(js->env, src.ptr ? (const char *)src.ptr : "",
+                                src.len, &script) != 0 ||
+        cc__js.RunScript(js->env, script, &r) != 0)
+        return cc_err_CCResult_CCJsVal_CCJsError(cc__js_err(js->env, "eval"));
+    memset(&out, 0, sizeof(out));
+    out.env = js->env;
+    out.v = r;
+    return cc_ok_CCResult_CCJsVal_CCJsError(out);
+}
+
+/* Typed eval — the common "evaluate to a scalar" forms, without the
+ * extraction hop: `js->eval_i64(src)` is `js->eval(src)!>.as_i64()` in
+ * one Result.  (A destination-typed `eval` itself — `long long v =
+ * js->eval(src) !>` — needs destination-aware resolution of REAL
+ * callees, which only dynamic-sink members have today.) */
+static inline CCResult_int64_t_CCJsError cc_js_eval_i64(CCJs *js,
+                                                        CCSlice src) {
+    CCResult_CCJsVal_CCJsError r = cc__js_eval(js, src);
+    long long v = 0;
+    if (!r.ok) return cc_err_CCResult_int64_t_CCJsError(r.u.error);
+    if (cc__js_inq_ll(r.u.value.env, r.u.value.v, &v) != 0) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: eval: result is not an integer");
+        return cc_err_CCResult_int64_t_CCJsError(
+            cc__js_err(r.u.value.env, "eval"));
+    }
+    return cc_ok_CCResult_int64_t_CCJsError((int64_t)v);
+}
+
+static inline CCResult_double_CCJsError cc_js_eval_f64(CCJs *js,
+                                                       CCSlice src) {
+    CCResult_CCJsVal_CCJsError r = cc__js_eval(js, src);
+    double v = 0;
+    if (!r.ok) return cc_err_CCResult_double_CCJsError(r.u.error);
+    if (cc__js_inq_double(&v, r.u.value.env, r.u.value.v) != 0) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: eval: result is not a number");
+        return cc_err_CCResult_double_CCJsError(
+            cc__js_err(r.u.value.env, "eval"));
+    }
+    return cc_ok_CCResult_double_CCJsError(v);
+}
+
+static inline CCResult_void_CCJsError cc_js_exec(CCJs *js, CCSlice src) {
+    CCResult_CCJsVal_CCJsError r = cc__js_eval(js, src);
+    if (!r.ok) {
+        CCResult_void_CCJsError e;
+        memset(&e, 0, sizeof(e));
+        e.ok = false;
+        e.u.error = r.u.error;
+        return e;
+    }
+    return cc_ok_CCResult_void_CCJsError();
+}
+
+/* ---- the CCJs dynamic sink ----
+ *
+ * `.ufcs_dynamic2` for the handle itself, so the declared destination
+ * joins resolution for the members that produce values from source text.
+ * Real members (`exec`, `global`, `eval_i64`, …) win resolution as
+ * always; the sink carries the dynamic ones — today that is `eval`.  An
+ * unknown member is a loud error naming it, not a silent lookup. */
+static CCResult_CCJsVal_CCJsError cc__js_host_callm_n(CCJs *js,
+                                                      const char *method,
+                                                      int argc,
+                                                      const CCJsArg *argv) {
+    cc__js_errbuf[0] = 0;
+    cc__js_err_arena = js ? js->arena : NULL;
+    if (!js || !js->ready) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: %s: handle not ready", method ? method : "?");
+        return cc_err_CCResult_CCJsVal_CCJsError(cc__js_err(NULL, method));
+    }
+    /* The handle's member set is small and closed, and sink resolution
+     * outruns the header-blind snake compose — so every member dispatches
+     * here.  `eval_i64`/`eval_f64` are eval; the destination variant (or
+     * the typed C function, called directly) does the extraction. */
+    if (method && argc == 1 && (argv[0].kind == 2 || argv[0].kind == 3) &&
+        (strcmp(method, "eval") == 0 || strcmp(method, "eval_i64") == 0 ||
+         strcmp(method, "eval_f64") == 0 || strcmp(method, "exec") == 0)) {
+        CCSlice src;
+        src.ptr = (void *)(uintptr_t)argv[0].p;
+        src.len = argv[0].n;
+        return cc__js_eval(js, src);
+    }
+    if (method && argc == 0 && strcmp(method, "global") == 0)
+        return cc_js_global(js);
+    snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+             "js: CCJs has no method '%s' (members: eval(src), eval_i64, "
+             "eval_f64, exec, global)",
+             method ? method : "?");
+    return cc_err_CCResult_CCJsVal_CCJsError(cc__js_err(NULL, method));
+}
+
+static inline CCResult_CCJsVal_CCJsError cc_js_callm(CCJs *js,
+                                                     const char *method,
+                                                     int argc, ...) {
+    CCJsArg tmp[CC__JS_MAX_CALL_ARGS];
+    int i;
+    va_list ap;
+    if (argc < 0) argc = 0;
+    if (argc > CC__JS_MAX_CALL_ARGS) argc = CC__JS_MAX_CALL_ARGS;
+    va_start(ap, argc);
+    for (i = 0; i < argc; i++) tmp[i] = va_arg(ap, CCJsArg);
+    va_end(ap);
+    return cc__js_host_callm_n(js, method, argc, tmp);
+}
+
+static inline CCResult_double_CCJsError cc_js_callm_double(
+        CCJs *js, const char *method, int argc, ...) {
+    CCJsArg tmp[CC__JS_MAX_CALL_ARGS];
+    int i;
+    double v = 0;
+    CCResult_CCJsVal_CCJsError r;
+    va_list ap;
+    if (argc < 0) argc = 0;
+    if (argc > CC__JS_MAX_CALL_ARGS) argc = CC__JS_MAX_CALL_ARGS;
+    va_start(ap, argc);
+    for (i = 0; i < argc; i++) tmp[i] = va_arg(ap, CCJsArg);
+    va_end(ap);
+    r = cc__js_host_callm_n(js, method, argc, tmp);
+    if (!r.ok) return cc_err_CCResult_double_CCJsError(r.u.error);
+    if (cc__js_inq_double(&v, r.u.value.env, r.u.value.v) != 0) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: %s: result is not a number", method);
+        return cc_err_CCResult_double_CCJsError(
+            cc__js_err(r.u.value.env, method));
+    }
+    return cc_ok_CCResult_double_CCJsError(v);
+}
+
+static inline CCResult_float_CCJsError cc_js_callm_float(
+        CCJs *js, const char *method, int argc, ...) {
+    CCJsArg tmp[CC__JS_MAX_CALL_ARGS];
+    int i;
+    double v = 0;
+    CCResult_CCJsVal_CCJsError r;
+    va_list ap;
+    if (argc < 0) argc = 0;
+    if (argc > CC__JS_MAX_CALL_ARGS) argc = CC__JS_MAX_CALL_ARGS;
+    va_start(ap, argc);
+    for (i = 0; i < argc; i++) tmp[i] = va_arg(ap, CCJsArg);
+    va_end(ap);
+    r = cc__js_host_callm_n(js, method, argc, tmp);
+    if (!r.ok) return cc_err_CCResult_float_CCJsError(r.u.error);
+    if (cc__js_inq_double(&v, r.u.value.env, r.u.value.v) != 0) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: %s: result is not a number", method);
+        return cc_err_CCResult_float_CCJsError(
+            cc__js_err(r.u.value.env, method));
+    }
+    return cc_ok_CCResult_float_CCJsError((float)v);
+}
+
+static inline CCResult_int64_t_CCJsError cc_js_callm_int64_t(
+        CCJs *js, const char *method, int argc, ...) {
+    CCJsArg tmp[CC__JS_MAX_CALL_ARGS];
+    int i, rc;
+    long long v = 0;
+    CCResult_CCJsVal_CCJsError r;
+    va_list ap;
+    if (argc < 0) argc = 0;
+    if (argc > CC__JS_MAX_CALL_ARGS) argc = CC__JS_MAX_CALL_ARGS;
+    va_start(ap, argc);
+    for (i = 0; i < argc; i++) tmp[i] = va_arg(ap, CCJsArg);
+    va_end(ap);
+    r = cc__js_host_callm_n(js, method, argc, tmp);
+    if (!r.ok) return cc_err_CCResult_int64_t_CCJsError(r.u.error);
+    rc = cc__js_inq_ll(r.u.value.env, r.u.value.v, &v);
+    if (rc != 0) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 rc == -2 ? "js: %s: result out of range"
+                          : "js: %s: result is not an integer",
+                 method);
+        return cc_err_CCResult_int64_t_CCJsError(
+            cc__js_err(r.u.value.env, method));
+    }
+    return cc_ok_CCResult_int64_t_CCJsError((int64_t)v);
+}
+
+static inline CCResult_long_long_CCJsError cc_js_callm_long_long(
+        CCJs *js, const char *method, int argc, ...) {
+    CCJsArg tmp[CC__JS_MAX_CALL_ARGS];
+    int i, rc;
+    long long v = 0;
+    CCResult_CCJsVal_CCJsError r;
+    va_list ap;
+    if (argc < 0) argc = 0;
+    if (argc > CC__JS_MAX_CALL_ARGS) argc = CC__JS_MAX_CALL_ARGS;
+    va_start(ap, argc);
+    for (i = 0; i < argc; i++) tmp[i] = va_arg(ap, CCJsArg);
+    va_end(ap);
+    r = cc__js_host_callm_n(js, method, argc, tmp);
+    if (!r.ok) return cc_err_CCResult_long_long_CCJsError(r.u.error);
+    rc = cc__js_inq_ll(r.u.value.env, r.u.value.v, &v);
+    if (rc != 0) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 rc == -2 ? "js: %s: result out of range"
+                          : "js: %s: result is not an integer",
+                 method);
+        return cc_err_CCResult_long_long_CCJsError(
+            cc__js_err(r.u.value.env, method));
+    }
+    return cc_ok_CCResult_long_long_CCJsError((long long)v);
+}
+
+static inline CCResult_int_CCJsError cc_js_callm_int(
+        CCJs *js, const char *method, int argc, ...) {
+    CCJsArg tmp[CC__JS_MAX_CALL_ARGS];
+    int i, rc;
+    long long v = 0;
+    CCResult_CCJsVal_CCJsError r;
+    va_list ap;
+    if (argc < 0) argc = 0;
+    if (argc > CC__JS_MAX_CALL_ARGS) argc = CC__JS_MAX_CALL_ARGS;
+    va_start(ap, argc);
+    for (i = 0; i < argc; i++) tmp[i] = va_arg(ap, CCJsArg);
+    va_end(ap);
+    r = cc__js_host_callm_n(js, method, argc, tmp);
+    if (!r.ok) return cc_err_CCResult_int_CCJsError(r.u.error);
+    rc = cc__js_inq_ll(r.u.value.env, r.u.value.v, &v);
+    if (rc != 0 || v < INT_MIN || v > INT_MAX) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: %s: result out of range for int destination", method);
+        return cc_err_CCResult_int_CCJsError(
+            cc__js_err(r.u.value.env, method));
+    }
+    return cc_ok_CCResult_int_CCJsError((int)v);
+}
+
+/* A CCJsVal return hands back the value it names (held values deref). */
+static void *cc__js_out_jsval(void *env, CCJsVal v) {
+    void *cur = cc__js_val_cur(&v);
+    if (!cur) return cc__js_undefined(env);
+    return cur;
+}
+
 /* One exported method: the JS name and its trampoline. */
 typedef struct CC__JsMethod {
     const char *name;
@@ -1076,23 +2025,41 @@ CC_GENERIC_FACTORY(js_module, 1) {
             char pr_abi[256];
             char cap[16];
             int has_str = 0;
+            int inject[64];
+            int inj_ptr[64];
+            int jwant = 0;
+            if (pn > 64) {
+                cc_emit_error("js_module::[T]: too many parameters");
+                return cc_slice_empty();
+            }
             if (cc_reflect_params_c_abi(pr, pr_abi, sizeof(pr_abi)) < 0) {
                 cc_emit_error("js_module::[T]: cannot strip parameter defaults "
                               "for a C forward declaration");
                 return cc_slice_empty();
             }
-            snprintf(argc, sizeof(argc), "%d", pn - 1);
-            /* argv capacity is arity + 1 (a possible trailing bag): napi
-             * pads argv to the capacity you pass with `undefined`, so a
-             * static 32 makes every call pay ~30 dead writes. */
-            snprintf(cap, sizeof(cap), "%d", pn);
-            /* Scratch mark/restore only when some parameter copies into
-             * scratch (strings); scalar-only methods skip it entirely. */
+            /* A `CCJs *` (or `CCJs`) parameter is the HOST, not an
+             * argument: the trampoline wires it to the environment of the
+             * call in flight, and JavaScript never sees it — the same
+             * reading reflection already gives the first parameter.  The
+             * scratch mark/restore emits only when some parameter copies
+             * into scratch (strings, converted arrays). */
             for (int k = 1; k < pn; k++) {
                 char pty[192];
+                size_t ptl;
                 cc_reflect_param_type(pr, k, pty, sizeof(pty));
+                ptl = strlen(pty);
+                inject[k] = strncmp(pty, "CCJs", 4) == 0 &&
+                            (pty[4] == 0 || pty[4] == ' ' || pty[4] == '*');
+                inj_ptr[k] = inject[k] && ptl && pty[ptl - 1] == '*';
+                if (!inject[k]) jwant++;
                 if (strstr(pty, "CCSlice") || strstr(pty, "char")) has_str = 1;
             }
+            /* argv capacity is the JS-visible arity + 1 (a possible
+             * trailing bag): napi pads argv to the capacity you pass with
+             * `undefined`, so a static 32 makes every call pay ~30 dead
+             * writes. */
+            snprintf(argc, sizeof(argc), "%d", jwant);
+            snprintf(cap, sizeof(cap), "%d", jwant + 1);
             mark_decl = has_str ? "CC__JsMark mark__ = cc__js_mark();" : "";
             rel = has_str ? "cc__js_release(mark__); " : "";
             if (er[0]) {
@@ -1122,9 +2089,26 @@ CC_DECL_RESULT_SPEC(${box}, ${rt}, ${er})
                 if (!cc__st__) return cc__js_fail(env__, "cc: module state unavailable");
                 ${p0t} ${p0n} = ${p0ptr ? "cc__st__" : "*cc__st__"};`, arena), arena);
             }
-            if (pn == 1) {
-                /* Zero parameters and zero arguments is the common call;
-                 * bind runs only to report arity or a keyword bag. */
+            /* Injected host parameters bind first, whatever the JS arity. */
+            {
+                char pty[192], pnm[128];
+                for (int k = 1; k < pn; k++) {
+                    if (!inject[k]) continue;
+                    cc_reflect_param_type(pr, k, pty, sizeof(pty));
+                    cc_reflect_param_name(pr, k, pnm, sizeof(pnm));
+                    if (inj_ptr[k]) {
+                        cc_string_push_slice(&s, @emit(`
+                CCJs cc__jsh_${pnm}__ = { 1, (CCArena *)0, env__ };
+                CCJs *${pnm} = &cc__jsh_${pnm}__;`, arena), arena);
+                    } else {
+                        cc_string_push_slice(&s, @emit(`
+                CCJs ${pnm} = { 1, (CCArena *)0, env__ };`, arena), arena);
+                    }
+                }
+            }
+            if (jwant == 0) {
+                /* No JS-visible parameters: bind runs only to report
+                 * arity or a keyword bag on a nonempty call. */
                 cc_string_push_slice(&s, @emit(`
                 if (argc__ != 0 &&
                     cc__js_bind(env__, argv__, argc__, 0,
@@ -1136,11 +2120,13 @@ CC_DECL_RESULT_SPEC(${box}, ${rt}, ${er})
                 char opt_lit[512];
                 size_t noff = 0, ooff = 0;
                 int seen_default = 0;
+                int jn = 0;
                 names_lit[0] = 0;
                 opt_lit[0] = 0;
                 for (int k = 1; k < pn; k++) {
                     char pnm[128], def[128];
                     int dlen;
+                    if (inject[k]) continue;
                     cc_reflect_param_name(pr, k, pnm, sizeof(pnm));
                     dlen = cc_reflect_param_default(pr, k, def, sizeof(def));
                     if (dlen < 0) {
@@ -1154,7 +2140,7 @@ CC_DECL_RESULT_SPEC(${box}, ${rt}, ${er})
                                       "trailing parameter");
                         return cc_slice_empty();
                     }
-                    if (k > 1) {
+                    if (jn > 0) {
                         if (noff + 2 >= sizeof(names_lit)) break;
                         names_lit[noff++] = ',';
                         names_lit[noff++] = ' ';
@@ -1174,6 +2160,7 @@ CC_DECL_RESULT_SPEC(${box}, ${rt}, ${er})
                         if (wr < 0 || (size_t)wr >= sizeof(opt_lit) - ooff) break;
                         ooff += (size_t)wr;
                     }
+                    jn++;
                 }
                 cc_string_push_slice(&s, @emit(`
                 static const char *const names__[] = { ${names_lit} };
@@ -1182,9 +2169,11 @@ CC_DECL_RESULT_SPEC(${box}, ${rt}, ${er})
                 ${mark_decl}`, arena), arena);
                 {
                     char pty[192], pnm[128], idx[16], def[128];
-                    /* Parameter locals, declared once; both paths fill
-                     * them and join at the label. */
+                    int jidx;
+                    /* JS-visible parameter locals, declared once; both
+                     * paths fill them and join at the label. */
                     for (int k = 1; k < pn; k++) {
+                        if (inject[k]) continue;
                         cc_reflect_param_type(pr, k, pty, sizeof(pty));
                         cc_reflect_param_name(pr, k, pnm, sizeof(pnm));
                         cc_string_push_slice(&s, @emit(`
@@ -1200,9 +2189,11 @@ CC_DECL_RESULT_SPEC(${box}, ${rt}, ${er})
                      * extra copy per argument. */
                     cc_string_push_slice(&s, @emit(`
                 if (argc__ == ${argc}u`, arena), arena);
+                    jidx = 0;
                     for (int k = 1; k < pn; k++) {
+                        if (inject[k]) continue;
                         cc_reflect_param_name(pr, k, pnm, sizeof(pnm));
-                        snprintf(idx, sizeof(idx), "%d", k - 1);
+                        snprintf(idx, sizeof(idx), "%d", jidx++);
                         cc_string_push_slice(&s, @emit(`
                     && CC_JS_INF(${pnm}, env__, argv__[${idx}]) == 0`, arena), arena);
                     }
@@ -1211,11 +2202,13 @@ CC_DECL_RESULT_SPEC(${box}, ${rt}, ${er})
                                 optional__, bound__, "${mb}") != 0) {
                     ${rel}return (void *)0;
                 }`, arena), arena);
+                    jidx = 0;
                     for (int k = 1; k < pn; k++) {
                         int dlen;
+                        if (inject[k]) continue;
                         cc_reflect_param_name(pr, k, pnm, sizeof(pnm));
                         dlen = cc_reflect_param_default(pr, k, def, sizeof(def));
-                        snprintf(idx, sizeof(idx), "%d", k - 1);
+                        snprintf(idx, sizeof(idx), "%d", jidx++);
                         if (dlen > 0) {
                             cc_string_push_slice(&s, @emit(`
                 if (!bound__[${idx}] || cc__js_is_undef(env__, bound__[${idx}])) ${pnm} = ${def};
@@ -1332,5 +2325,18 @@ CC_DECL_RESULT_SPEC(${box}, ${rt}, ${er})
         }`, arena), arena);
     return cc_string_as_slice(&s);
 }
+
+#ifdef CC_COMPTIME_SCAN
+@comptime {
+    (void)cc_type_register("CCJs", (CCTypeHooks){
+        .destroy = cc_type_destroy_call("cc_js_close"),
+        .ufcs_dynamic2 = cc_type_dynamic_call("cc_js_callm", "CC_JS_ARG"),
+    });
+    (void)cc_type_register("CCJsVal", (CCTypeHooks){
+        .destroy = cc_type_destroy_call("cc_js_val_release"),
+        .ufcs_dynamic2 = cc_type_dynamic_call("cc_js_val_callm", "CC_JS_ARG"),
+    });
+}
+#endif
 
 #endif /* CC_SCRIPT_JS_H */

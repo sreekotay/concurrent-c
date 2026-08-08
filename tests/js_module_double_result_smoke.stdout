@@ -14,3 +14,8 @@ filled 9 9 9
 row Float64Array 1.5,2.5,3
 roundtrip 7
 badelem: argument `xs` expects an Array or TypedArray
+apply 42
+eval42 42
+eval_chain 36
+eval_i64 42
+gparse 42

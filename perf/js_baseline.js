@@ -64,13 +64,14 @@ function nowMs() {
 // Runs `fn(k)` (returning a checksum) warm, then `samples` times timed.
 // Returns { ns, sum } with ns the median ns/call and sum the checksum,
 // verified identical across samples.
-function bench(mode, fn) {
-  fn(WARM);
+function bench(mode, fn, per) {
+  per = per || iters;
+  fn(Math.min(per, WARM));
   const ms = [];
   let sum;
   for (let s = 0; s < samples; s++) {
     const t0 = nowMs();
-    const r = fn(iters);
+    const r = fn(per);
     ms.push(nowMs() - t0);
     if (sum !== undefined && r !== sum) {
       console.error(`MISMATCH ${mode}: sample disagreement ${r} vs ${sum}`);
@@ -79,7 +80,7 @@ function bench(mode, fn) {
     sum = r;
   }
   const md = median(ms);
-  const ns = (md * 1e6) / iters;
+  const ns = (md * 1e6) / per;
   console.log(`  ${mode.padEnd(14)} ${md.toFixed(2).padStart(9)} ms  ${ns.toFixed(1).padStart(9)} ns/call`);
   console.log(`RESULT scalar ${mode} ns_per_call ${ns.toFixed(1)}`);
   return { ns, sum };
@@ -181,6 +182,32 @@ const js_to_cc_big = bench('js_to_cc_big', (k) => {
   }
 }
 
+// ---- outbound: crossing out of CC, at three arities ----
+//
+//   cc_to_js_0/1/3  CC calls a global JS function        the other direction
+//   js_to_js        the same function called from JS     cc_to_js's control
+//
+// One addon call carries the whole timed loop (a tenth of iters: these are
+// the slowest scalar modes), so ns/call is the inner count's share.
+globalThis.noargs_js = () => 1;
+globalThis.one_js = (x) => x;
+globalThis.mul_add_js = (x, k, z) => x * k + z;
+const on = Math.max(1, Math.floor(iters / 10));
+console.log(`\noutbound (${on} calls):`);
+const cc_to_js_0 = bench('cc_to_js_0', (k) => m.cc_to_js0(k), on);
+const cc_to_js_1 = bench('cc_to_js_1', (k) => m.cc_to_js1(k), on);
+const cc_to_js_3 = bench('cc_to_js_3', (k) => m.cc_to_js3(k), on);
+const js_to_js = bench('js_to_js', (k) => {
+  const f = globalThis.mul_add_js;
+  let r = 0;
+  for (let i = 0; i < k; i++) r += f(3, i, 7);
+  return r;
+}, on);
+if (cc_to_js_3.sum !== js_to_js.sum) {
+  console.error(`MISMATCH cc_to_js: ${cc_to_js_3.sum} vs ${js_to_js.sum}`);
+  process.exit(1);
+}
+
 // ---- bulk: where the data lives decides the form ----
 //
 //   js_typed_sum   JS loop over a Float64Array     the typed JS floor
@@ -263,6 +290,9 @@ console.log(`RESULT ratio binding_vs_napi_floor x ${r2.toFixed(2)}`);
 console.log(`RESULT ratio prop_vs_hoisted x ${r3.toFixed(2)}`);
 console.log(`RESULT ratio str_vs_add x ${r5.toFixed(2)}`);
 console.log(`RESULT ratio big_vs_add x ${r6.toFixed(2)}`);
+const r9 = cc_to_js_3.ns / js_to_js.ns;
+console.log(`  cc_to_js_3 / js_to_js   ${r9.toFixed(2).padStart(5)}x   crossing out of CC vs a JS call`);
+console.log(`RESULT ratio cc_to_js_vs_js_to_js x ${r9.toFixed(2)}`);
 const r7 = recv_array.ms / recv_typed.ms;
 const r8 = recv_typed.ms / js_typed_sum.ms;
 console.log(`  recv_array / recv_typed ${r7.toFixed(1).padStart(5)}x   what the zero-copy borrow removes`);

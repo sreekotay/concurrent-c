@@ -29,7 +29,7 @@ The standard library provides these headers under `<ccc/std/...>`:
 
 Portable atomics are provided separately by `<ccc/cc_atomic.cch>`, Python
 interop by `<ccc/script/py.cch>`, and JavaScript interop by
-`<ccc/script/js.cch>` (draft — module door implemented).
+`<ccc/script/js.cch>` (draft — guest surface implemented).
 
 `<ccc/std/prelude.cch>` includes the core runtime headers and the stdlib slice,
 string, I/O, vector, map-forward, array-map, directory, process, command,
@@ -2071,8 +2071,12 @@ Python.
 
 ## JavaScript interop
 
-Status: draft — `js_module::[T]`, its marshaling, and the loader are
-implemented; the rest is not.
+Status: draft — the guest surface is implemented: `js_module::[T]` and
+its marshaling, the loader, and the outbound direction inside an
+exported call (a `CCJs *` parameter is the host, wired by the trampoline
+and invisible to JS; `global`/`eval`/`exec`; the `CCJsVal` sink with
+destination-typed variants; `.get`/`.as_*`/`.hold`).  Hosting
+(`cc_js_new`) and engines are not.
 
 ### Model
 

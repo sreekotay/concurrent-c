@@ -57,6 +57,11 @@ const row = c.row();
 console.log('row', row.constructor.name, Array.from(row).join(','));
 console.log('roundtrip', c.sum(c.row()));
 try { c.sum(['x']); } catch (e) { console.log('badelem:', e.message); }
+console.log('apply', c.apply({step: (x) => x * 2}));
+console.log('eval42', c.eval42());
+console.log('eval_chain', c.eval_chain());
+console.log('eval_i64', c.eval_typed());
+console.log('gparse', c.gparse());
 "`, &a);
     run.arg(js.cstr(&a));
     run.inherit_stdio();

@@ -352,14 +352,9 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
     if (shadow_emit_channel_pair_expr(callbuf, sizeof(callbuf), call))
         call = callbuf;
     else {
-        /* Pass lhs ty so .ufcs_dynamic2 can pick cc_py_obj_callm_<dest> —
-         * but only when the call IS the whole right-hand side.  In a hop
-         * chain the destination belongs to the LAST hop; a producer that
-         * consumed it would extract too early (`js->eval(..)!>.as_i64()!>`
-         * must not run eval through the long-long variant). */
+        /* Pass lhs ty so .ufcs_dynamic2 can pick cc_py_obj_callm_<dest>. */
         shadow_emit_expr_text(st, call, callbuf, sizeof(callbuf),
-                              (!(shadow_mode_is_bang_chain(mode) && st->e[0]) &&
-                               ty && ty[0] && strcmp(ty, "int") != 0) ? ty
+                              (ty && ty[0] && strcmp(ty, "int") != 0) ? ty
                                                                       : NULL);
         /* Belt-and-suspenders: UFCS early-return paths historically skipped
          * @slice/@string rewrite; always normalize before host C. */
