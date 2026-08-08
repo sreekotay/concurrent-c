@@ -659,19 +659,22 @@ static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
         case REDIS_CMD_GET:
             return db_get(db, req->argv[0], reply_arena, &clock);
         case REDIS_CMD_SET:
-            return db_set(db, req->argv[0], req->argv[1], 0);
+            db_set(db, req->argv[0], req->argv[1], 0) !>;
+            return cc_ok(reply_simple("OK"));
         case REDIS_CMD_SETNX:
             return db_setnx(db, req->argv[0], req->argv[1], &clock);
         case REDIS_CMD_SETEX: {
             char[:] secs_arg = req->argv[1];
             int64_t seconds = secs_arg.to_i64() !>;
-            return db_set_with_ttl(db, req->argv[0], req->argv[2],
-                                   expire_seconds_to_rel_ms(seconds), &clock);
+            db_set_with_ttl(db, req->argv[0], req->argv[2],
+                            expire_seconds_to_rel_ms(seconds), &clock) !>;
+            return cc_ok(reply_simple("OK"));
         }
         case REDIS_CMD_PSETEX: {
             char[:] ms_arg = req->argv[1];
             int64_t ms = ms_arg.to_i64() !>;
-            return db_set_with_ttl(db, req->argv[0], req->argv[2], ms, &clock);
+            db_set_with_ttl(db, req->argv[0], req->argv[2], ms, &clock) !>;
+            return cc_ok(reply_simple("OK"));
         }
         case REDIS_CMD_APPEND:
             return db_append(db, req->argv[0], req->argv[1], &req->arena, &clock);
@@ -704,7 +707,8 @@ static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
         case REDIS_CMD_MGET:
             return db_mget(db, req->argv, req->argc, reply_arena, &clock);
         case REDIS_CMD_MSET:
-            return db_mset(db, req->argv, req->argc);
+            db_mset(db, req->argv, req->argc) !>;
+            return cc_ok(reply_simple("OK"));
         case REDIS_CMD_EXPIRE: {
             char[:] secs_arg = req->argv[1];
             int64_t seconds = secs_arg.to_i64() !>;

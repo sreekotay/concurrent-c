@@ -26,6 +26,27 @@
 
 static double now_s(void){struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return t.tv_sec+t.tv_nsec/1e9;}
 
+/* Force prior stores to [p, p+n) to complete — encode benches write a buffer
+ * that is otherwise never read, and -O2 DSE turns that into a no-op. */
+static void sink_buf(const void* p, size_t n) {
+#if defined(__GNUC__) || defined(__clang__)
+    __asm__ __volatile__("" : : "r"(p), "r"(n) : "memory");
+#else
+    volatile unsigned char x = 0;
+    const unsigned char* b = (const unsigned char*)p;
+    if (n) { x ^= b[0]; x ^= b[n - 1]; }
+    (void)x;
+#endif
+}
+
+static size_t put_u(char* d, unsigned long long u) {
+    char nb[21]; int nl = 0;
+    do { nb[nl++] = (char)('0' + (u % 10)); u /= 10; } while (u);
+    size_t o = 0;
+    while (nl) d[o++] = nb[--nl];
+    return o;
+}
+
 /* hand-rolled reference: same job, same zero-copy contract */
 typedef struct { const char* p; size_t len; } HArg;
 static long hand_parse(const char* s, size_t n, HArg* args, int max_args, unsigned long long* bytes) {
@@ -105,52 +126,71 @@ int main(int argc, char** argv) {
         eprintln(@string(`MISMATCH gen ${gc}/${gb} hand ${hc}/${hb}`, &pa)) !>;
         return 1;
     }
-    /* ENCODE: generated writer vs hand snprintf — the Redis-client hot path */
+    /* ENCODE: generated writer vs hand — Redis-client hot path.
+     * Each cmd varies key/value with j (same shape as the parse corpus).
+     * sink_buf keeps writes live under -O2 DSE. */
     {
         RespCmd cmd = { .argc = 0, .args_n = 3 };
         cmd.args[0].data = cc_slice_from_buffer((void*)"SET", 3);
-        cmd.args[1].data = cc_slice_from_buffer((void*)"key:12345", 9);
-        cmd.args[2].data = cc_slice_from_buffer((void*)"value-12345-xxxxxxxx", 20);
         char* eb = (char*)malloc((size_t)NCMD * 64);
-        size_t en = 0;
+        char key[32], val[48];
+        size_t en = 0, en_hand = 0;
+        size_t cap = (size_t)NCMD * 64;
+
         best = 1e18;
         for (int t = 0; t < T; t++) { double t0 = now_s();
             for (int i = 0; i < K; i++) {
                 en = 0;
                 for (int j = 0; j < NCMD; j++) {
-                    size_t w = RespCmd_write(&cmd, eb + en, (size_t)NCMD * 64 - en);
+                    size_t kl = 0; key[kl++] = 'k'; key[kl++] = 'e'; key[kl++] = 'y'; key[kl++] = ':';
+                    kl += put_u(key + kl, (unsigned long long)j);
+                    size_t vl = 0; val[vl++] = 'v'; val[vl++] = 'a'; val[vl++] = 'l'; val[vl++] = 'u';
+                    val[vl++] = 'e'; val[vl++] = '-';
+                    vl += put_u(val + vl, (unsigned long long)j);
+                    memcpy(val + vl, "-xxxxxxxx", 9); vl += 9;
+                    cmd.args[1].data = cc_slice_from_buffer(key, kl);
+                    cmd.args[2].data = cc_slice_from_buffer(val, vl);
+                    size_t w = RespCmd_write(&cmd, eb + en, cap - en);
                     if (!w) { eprintln("encode FAIL") !>; return 1; }
                     en += w;
                 }
+                sink_buf(eb, en);
             }
             double dt = now_s() - t0; if (dt < best) best = dt; }
         println(@string(`resp enc gen  ${en*(double)K/best/1e6} MB/s  ${NCMD*(double)K/best/1e6} Mcmd/s`, &pa)) !>;
+
         best = 1e18;
         for (int t = 0; t < T; t++) { double t0 = now_s();
             for (int i = 0; i < K; i++) {
-                en = 0;
+                en_hand = 0;
                 for (int j = 0; j < NCMD; j++) {
+                    size_t kl = 0; key[kl++] = 'k'; key[kl++] = 'e'; key[kl++] = 'y'; key[kl++] = ':';
+                    kl += put_u(key + kl, (unsigned long long)j);
+                    size_t vl = 0; val[vl++] = 'v'; val[vl++] = 'a'; val[vl++] = 'l'; val[vl++] = 'u';
+                    val[vl++] = 'e'; val[vl++] = '-';
+                    vl += put_u(val + vl, (unsigned long long)j);
+                    memcpy(val + vl, "-xxxxxxxx", 9); vl += 9;
                     /* fair peer: dynamic ints + memcpy from parts, no checks */
-                    char* d = eb + en; size_t o = 0;
-                    d[o++] = '*';
-                    { unsigned long long u = (unsigned long long)3; char nb[21]; int nl = 0;
-                      do { nb[nl++] = (char)('0' + u % 10); u /= 10; } while (u);
-                      while (nl) d[o++] = nb[--nl]; }
-                    d[o++] = '\r'; d[o++] = '\n';
+                    char* d = eb + en_hand; size_t o = 0;
+                    d[o++] = '*'; o += put_u(d + o, 3); d[o++] = '\r'; d[o++] = '\n';
+                    const char* parts[3] = { "SET", key, val };
+                    size_t plens[3] = { 3, kl, vl };
                     for (int a2 = 0; a2 < 3; a2++) {
-                        d[o++] = '$';
-                        { unsigned long long u = (unsigned long long)cmd.args[a2].data.len; char nb[21]; int nl = 0;
-                          do { nb[nl++] = (char)('0' + u % 10); u /= 10; } while (u);
-                          while (nl) d[o++] = nb[--nl]; }
+                        d[o++] = '$'; o += put_u(d + o, (unsigned long long)plens[a2]);
                         d[o++] = '\r'; d[o++] = '\n';
-                        memcpy(d + o, cmd.args[a2].data.ptr, cmd.args[a2].data.len); o += cmd.args[a2].data.len;
+                        memcpy(d + o, parts[a2], plens[a2]); o += plens[a2];
                         d[o++] = '\r'; d[o++] = '\n';
                     }
-                    en += o;
+                    en_hand += o;
                 }
+                sink_buf(eb, en_hand);
             }
             double dt = now_s() - t0; if (dt < best) best = dt; }
-        println(@string(`resp enc hand ${en*(double)K/best/1e6} MB/s  ${NCMD*(double)K/best/1e6} Mcmd/s  (dynamic, unchecked)`, &pa)) !>;
+        if (en_hand != en) {
+            eprintln(@string(`ENCODE LEN MISMATCH gen ${en} hand ${en_hand}`, &pa)) !>;
+            return 1;
+        }
+        println(@string(`resp enc hand ${en_hand*(double)K/best/1e6} MB/s  ${NCMD*(double)K/best/1e6} Mcmd/s  (dynamic, unchecked)`, &pa)) !>;
         free(eb);
     }
 

@@ -1,0 +1,53 @@
+tmp dir: /var/folders/z2/sbp4rc4n757cljxzfw3sddh00000gn/T/bench_robust.XXXXXX.JSYVFyLiH5
+[warmup]
+   idiomatic set   rps=2105263.25
+   upstream  set   rps=1526717.62
+[mem] CC.MEMLOG post-warmup
+[round 1/8]
+   idiomatic set   rps=2531645.50
+   upstream  set   rps=1526717.62
+[round 2/8]
+   upstream  set   rps=1515151.50
+   idiomatic set   rps=2564102.50
+[round 3/8]
+   idiomatic set   rps=2531645.50
+   upstream  set   rps=1503759.38
+[round 4/8]
+   idiomatic set   rps=2580645.25
+   upstream  set   rps=1498127.38
+[round 5/8]
+   upstream  set   rps=1532567.00
+   idiomatic set   rps=2666666.50
+[round 6/8]
+   upstream  set   rps=1520912.50
+   idiomatic set   rps=2631579.00
+[round 7/8]
+   upstream  set   rps=1544401.50
+   idiomatic set   rps=2649006.75
+[round 8/8]
+   idiomatic set   rps=2721088.50
+   upstream  set   rps=1538461.62
+[mem] CC.MEMLOG final
+
+== bench_robust summary ==
+rounds=8 requests_per_round=400000 clients=50 pipeline=16 cc_workers=default
+labels=upstream,idiomatic include_sketch=0 include_go=0
+sample_interval=0.05s  samples_taken: upstream=70  idiomatic=70
+
+[SET]
+  label          mean   median      min      max   stddev    cv%
+  upstream     1.523M   1.524M   1.498M   1.544M   0.016M   1.1%
+  idiomatic    2.610M   2.606M   2.532M   2.721M   0.068M   2.6%
+  idiomatic/upstream median: 1.710x  (SEPARATED)
+
+[RESOURCE PEAKS] (sampled every 0.05 s across the whole run)
+  label        peak_rss   peak_threads
+  upstream       12.5MB              3
+  idiomatic      19.7MB             11
+
+[MEM GAP] footprint − (map+key+value live); remainder ≈ runtime/fibers/overflow/frag
+  phase           footprint    logical        gap      map      key    value     arenas        src
+  owner-ready     1680.00MB     44.6KB  1679.96MB   44.6KB       0B       0B     60.9KB     maxrss
+  post-warmup    19920.00MB     4.42MB 19915.58MB   2.92MB   1.50MB       0B     9.11MB     maxrss
+  final          20176.00MB     4.44MB 20171.56MB   2.92MB   1.53MB       0B     9.21MB     maxrss
+

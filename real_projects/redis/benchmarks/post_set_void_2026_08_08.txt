@@ -1,0 +1,88 @@
+tmp dir: /var/folders/z2/sbp4rc4n757cljxzfw3sddh00000gn/T/bench_robust.XXXXXX.woiUNjXT9P
+[warmup]
+   go        set   rps=1648351.62
+   idiomatic set   rps=2112676.00
+   upstream  set   rps=1388888.88
+   idiomatic get   rps=1948052.00
+   upstream  get   rps=1785714.25
+   go        get   rps=1910828.00
+[mem] CC.MEMLOG post-warmup
+[round 1/6]
+   go        set   rps=1829268.25
+   upstream  set   rps=1500000.00
+   idiomatic set   rps=2380952.25
+   idiomatic get   rps=2542372.75
+   upstream  get   rps=1923076.88
+   go        get   rps=2255639.00
+[round 2/6]
+   upstream  set   rps=1477832.50
+   idiomatic set   rps=2521008.25
+   go        set   rps=1734104.12
+   idiomatic get   rps=2586207.00
+   go        get   rps=2325581.50
+   upstream  get   rps=1875000.00
+[round 3/6]
+   upstream  set   rps=1456310.62
+   go        set   rps=1923076.88
+   idiomatic set   rps=2419355.00
+   upstream  get   rps=1492537.25
+   idiomatic get   rps=2238806.00
+   go        get   rps=1999999.88
+[round 4/6]
+   upstream  set   rps=1435406.62
+   go        set   rps=2222222.25
+   idiomatic set   rps=2542372.75
+   idiomatic get   rps=2586207.00
+   go        get   rps=2040816.38
+   upstream  get   rps=1587301.62
+[round 5/6]
+   idiomatic set   rps=2439024.25
+   upstream  set   rps=1333333.38
+   go        set   rps=1060070.75
+   go        get   rps=2189781.00
+   upstream  get   rps=1840490.75
+   idiomatic get   rps=2564102.50
+[round 6/6]
+   go        set   rps=2222222.25
+   idiomatic set   rps=2631579.00
+   upstream  set   rps=1456310.62
+   upstream  get   rps=1886792.50
+   go        get   rps=2068965.62
+   idiomatic get   rps=2419355.00
+[mem] CC.MEMLOG final
+
+== bench_robust summary ==
+rounds=6 requests_per_round=300000 clients=50 pipeline=16 cc_workers=default
+labels=upstream,idiomatic,go include_sketch=0 include_go=1
+sample_interval=0.05s  samples_taken: upstream=123  idiomatic=123  go=123
+
+[SET]
+  label          mean   median      min      max   stddev    cv%
+  upstream     1.443M   1.456M   1.333M   1.500M   0.058M   4.0%
+  idiomatic    2.489M   2.480M   2.381M   2.632M   0.093M   3.7%
+  go           1.832M   1.876M   1.060M   2.222M   0.429M  23.4%
+  idiomatic/upstream median: 1.703x  (SEPARATED)
+  go/upstream median: 1.288x  (OVERLAP)
+  idiomatic/go median: 1.322x  (SEPARATED)
+
+[GET]
+  label          mean   median      min      max   stddev    cv%
+  upstream     1.768M   1.858M   1.493M   1.923M   0.181M  10.2%
+  idiomatic    2.490M   2.553M   2.239M   2.586M   0.138M   5.5%
+  go           2.147M   2.129M   2.000M   2.326M   0.130M   6.1%
+  idiomatic/upstream median: 1.374x  (SEPARATED)
+  go/upstream median: 1.146x  (SEPARATED)
+  idiomatic/go median: 1.199x  (OVERLAP)
+
+[RESOURCE PEAKS] (sampled every 0.05 s across the whole run)
+  label        peak_rss   peak_threads
+  upstream       12.1MB              3
+  idiomatic      19.6MB             11
+  go             34.5MB             11
+
+[MEM GAP] footprint − (map+key+value live); remainder ≈ runtime/fibers/overflow/frag
+  phase           footprint    logical        gap      map      key    value     arenas        src
+  owner-ready     1712.00MB     44.6KB  1711.96MB   44.6KB       0B       0B     60.9KB     maxrss
+  post-warmup    19744.00MB     4.37MB 19739.63MB   2.92MB   1.45MB       0B     8.92MB     maxrss
+  final          20096.00MB     4.44MB 20091.56MB   2.92MB   1.53MB       0B     9.21MB     maxrss
+

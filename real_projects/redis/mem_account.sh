@@ -40,7 +40,10 @@ run_pair() {
   sleep 0.35
   wait_port "$port"
   sample_vmmap "${label}_idle" "$pid"
-  "$BENCH" -h 127.0.0.1 -p "$port" -n 400000 -c 50 -P 16 -q -r 50000 -t set,get,incr >/tmp/mem_account_${label}_bench.log 2>&1 &
+  # Default cell matches the stable gamut winner: c=50 r=100k d=3 P=16.
+  "$BENCH" -h 127.0.0.1 -p "$port" -n "${REQUESTS:-300000}" -c "${CLIENTS:-50}" \
+      -P "${PIPELINE:-16}" -q -r "${RANDOM_KEYS:-100000}" -d "${DATA_SIZE:-3}" \
+      -t "${BENCH_TESTS:-set,get}" >/tmp/mem_account_${label}_bench.log 2>&1 &
   local bp=$!
   sleep 2
   sample_vmmap "${label}_load" "$pid"

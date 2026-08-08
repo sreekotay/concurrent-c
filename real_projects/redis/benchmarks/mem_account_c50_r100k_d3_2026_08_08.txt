@@ -1,0 +1,298 @@
+== mem_account fixed cell ==
+c=50 r=100000 d=3 P=16 n=300000 set,get
+tmp=/var/folders/z2/sbp4rc4n757cljxzfw3sddh00000gn/T/mem_acct.XXXXXX.Jzd407m2hC
+
+idle_rss_kb: idiomatic=2016 upstream=4304
+
+-------- idiomatic idle vmmap -summary --------
+Process:         redis_idiomatic [73573]
+Path:            /Users/USER/Documents/*/redis_idiomatic
+Load Address:    0x102698000
+Identifier:      redis_idiomatic
+Version:         0
+Code Type:       ARM64
+Platform:        macOS
+Parent Process:  zsh [73572]
+Target Type:     live task
+
+Date/Time:       2026-08-08 01:55:34.100 -0400
+Launch Time:     2026-08-08 01:55:34.010 -0400
+OS Version:      macOS 26.6 (25G72)
+Report Version:  7
+Analysis Tool:   /usr/bin/vmmap
+
+Physical footprint:         1360K
+Physical footprint (peak):  1360K
+Idle exit:                  untracked
+----
+
+ReadOnly portion of Libraries: Total=578.6M resident=21.4M(4%) swapped_out_or_unallocated=557.2M(96%)
+Writable regions: Total=95.7M written=992K(1%) resident=320K(0%) swapped_out=672K(1%) unallocated=94.7M(99%)
+
+                                VIRTUAL RESIDENT    DIRTY  SWAPPED VOLATILE   NONVOL    EMPTY   REGION 
+REGION TYPE                        SIZE     SIZE     SIZE     SIZE     SIZE     SIZE     SIZE    COUNT (non-coalesced) 
+===========                     ======= ========    =====  ======= ========   ======    =====  ======= 
+Kernel Alloc Once                   32K       0K       0K      16K       0K       0K       0K        1 
+MALLOC guard page                 3504K       0K       0K       0K       0K       0K       0K        4 
+MALLOC metadata                    752K       0K       0K     224K       0K       0K       0K        4 
+MALLOC_SMALL                      12.0M       0K       0K     144K       0K       0K       0K        3         see MALLOC ZONE table below
+MALLOC_TINY                       4096K      16K      16K      64K       0K       0K       0K        1         see MALLOC ZONE table below
+Memory Tag 22                     64.0M      16K      16K       0K       0K       0K       0K        1 
+STACK GUARD                       56.1M       0K       0K       0K       0K       0K       0K        6 
+Stack                             10.6M      32K      32K      96K       0K       0K       0K        6 
+VM_ALLOCATE                       4128K       0K       0K     144K       0K       0K       0K        2 
+__AUTH                              35K      35K       0K       0K       0K       0K       0K       12 
+__AUTH_CONST                       225K     191K       0K       0K       0K       0K       0K       45 
+__DATA                             222K     146K      32K      58K       0K       0K       0K       35 
+__DATA_CONST                       106K     106K       0K       0K       0K       0K       0K       43 
+__DATA_DIRTY                       153K      54K      32K     100K       0K       0K       0K       35 
+__LINKEDIT                       572.3M    15.7M       0K       0K       0K       0K       0K        2 
+__OBJC_RO                         79.2M    42.2M       0K       0K       0K       0K       0K        1 
+__OBJC_RW                         2599K    2160K       0K      23K       0K       0K       0K        1 
+__TEXT                            6460K    5916K       0K       0K       0K       0K       0K       46 
+__TPRO_CONST                       128K      80K      16K      16K       0K       0K       0K        2 
+page table in kernel               240K     240K     240K       0K       0K       0K       0K        1 
+shared memory                       48K      32K      32K       0K       0K       0K       0K        2 
+unused but dirty shlib __DATA       74K      16K      16K      58K       0K       0K       0K       26 
+===========                     ======= ========    =====  ======= ========   ======    =====  ======= 
+TOTAL                            816.5M    66.7M     432K     944K       0K       0K       0K      279 
+
+                                 VIRTUAL   RESIDENT      DIRTY    SWAPPED ALLOCATION      BYTES DIRTY+SWAP          REGION
+MALLOC ZONE                         SIZE       SIZE       SIZE       SIZE      COUNT  ALLOCATED  FRAG SIZE  % FRAG   COUNT
+===========                      =======  =========  =========  =========  =========  =========  =========  ======  ======
+DefaultMallocZone_0x102c38000      16.7M        16K        16K       416K        278       170K       262K     61%       6
+
+
+-------- upstream idle vmmap -summary --------
+Process:         redis-server [73574]
+Path:            /Users/USER/Documents/*/redis-server
+Load Address:    0x104d24000
+Identifier:      redis-server
+Version:         0
+Code Type:       ARM64
+Platform:        macOS
+Parent Process:  zsh [73572]
+Target Type:     live task
+
+Date/Time:       2026-08-08 01:55:35.330 -0400
+Launch Time:     2026-08-08 01:55:34.011 -0400
+OS Version:      macOS 26.6 (25G72)
+Report Version:  7
+Analysis Tool:   /usr/bin/vmmap
+
+Physical footprint:         2608K
+Physical footprint (peak):  2608K
+Idle exit:                  untracked
+----
+
+ReadOnly portion of Libraries: Total=580.8M resident=22.4M(4%) swapped_out_or_unallocated=558.4M(96%)
+Writable regions: Total=109.3M written=1968K(2%) resident=608K(1%) swapped_out=1360K(1%) unallocated=107.4M(98%)
+
+                                VIRTUAL RESIDENT    DIRTY  SWAPPED VOLATILE   NONVOL    EMPTY   REGION 
+REGION TYPE                        SIZE     SIZE     SIZE     SIZE     SIZE     SIZE     SIZE    COUNT (non-coalesced) 
+===========                     ======= ========    =====  ======= ========   ======    =====  ======= 
+Kernel Alloc Once                   32K      16K      16K       0K       0K       0K       0K        1 
+MALLOC guard page                 3264K       0K       0K       0K       0K       0K       0K        4 
+MALLOC metadata                    752K       0K       0K     288K       0K       0K       0K        4 
+MALLOC_SMALL                      16.0M     192K     192K     800K       0K       0K       0K        4         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              4096K       0K       0K      32K       0K       0K       0K        1         see MALLOC ZONE table below
+MALLOC_TINY                       4096K      64K      64K      64K       0K       0K       0K        1         see MALLOC ZONE table below
+Memory Tag 22                     64.0M      16K      16K       0K       0K       0K       0K        1 
+STACK GUARD                       56.1M       0K       0K       0K       0K       0K       0K        4 
+Stack                             20.1M      16K      16K      80K       0K       0K       0K        4 
+__AUTH                              35K      35K       0K       0K       0K       0K       0K       12 
+__AUTH_CONST                       225K     191K       0K       0K       0K       0K       0K       45 
+__DATA                             718K     253K      91K     400K       0K       0K       0K       35 
+__DATA_CONST                       122K     122K       0K       0K       0K       0K       0K       43 
+__DATA_DIRTY                       153K      97K      75K      57K       0K       0K       0K       35 
+__LINKEDIT                       572.7M    15.7M       0K       0K       0K       0K       0K        2 
+__OBJC_RO                         79.2M    42.2M       0K       0K       0K       0K       0K        1 
+__OBJC_RW                         2599K    2160K       0K      23K       0K       0K       0K        1 
+__TEXT                            8332K    6892K       0K       0K       0K       0K       0K       46 
+__TPRO_CONST                       128K      16K      16K      16K       0K       0K       0K        2 
+page table in kernel               256K     256K     256K       0K       0K       0K       0K        1 
+shared memory                       48K      48K      48K       0K       0K       0K       0K        2 
+unused but dirty shlib __DATA       74K      58K      58K      16K       0K       0K       0K       26 
+===========                     ======= ========    =====  ======= ========   ======    =====  ======= 
+TOTAL                            832.4M    68.0M     848K    1776K       0K       0K       0K      275 
+
+                                 VIRTUAL   RESIDENT      DIRTY    SWAPPED ALLOCATION      BYTES DIRTY+SWAP          REGION
+MALLOC ZONE                         SIZE       SIZE       SIZE       SIZE      COUNT  ALLOCATED  FRAG SIZE  % FRAG   COUNT
+===========                      =======  =========  =========  =========  =========  =========  =========  ======  ======
+DefaultMallocZone_0x105498000      24.7M       256K       256K      1152K      16207       986K       422K     30%       8
+
+
+-------- load --------
+mid_load_rss_kb: idiomatic=18336 upstream=10976
+post_load_rss_kb: idiomatic=18336 upstream=10976
+
+-------- idiomatic post-load vmmap -summary --------
+Process:         redis_idiomatic [73573]
+Path:            /Users/USER/Documents/*/redis_idiomatic
+Load Address:    0x102698000
+Identifier:      redis_idiomatic
+Version:         0
+Code Type:       ARM64
+Platform:        macOS
+Parent Process:  zsh [73572]
+Target Type:     live task
+
+Date/Time:       2026-08-08 01:55:37.736 -0400
+Launch Time:     2026-08-08 01:55:34.010 -0400
+OS Version:      macOS 26.6 (25G72)
+Report Version:  7
+Analysis Tool:   /usr/bin/vmmap
+
+Physical footprint:         18.7M
+Physical footprint (peak):  18.7M
+Idle exit:                  untracked
+----
+
+ReadOnly portion of Libraries: Total=578.6M resident=21.3M(4%) swapped_out_or_unallocated=557.3M(96%)
+Writable regions: Total=209.7M written=18.3M(9%) resident=16.8M(8%) swapped_out=1568K(1%) unallocated=191.4M(91%)
+
+                                VIRTUAL RESIDENT    DIRTY  SWAPPED VOLATILE   NONVOL    EMPTY   REGION 
+REGION TYPE                        SIZE     SIZE     SIZE     SIZE     SIZE     SIZE     SIZE    COUNT (non-coalesced) 
+===========                     ======= ========    =====  ======= ========   ======    =====  ======= 
+Kernel Alloc Once                   32K       0K       0K      16K       0K       0K       0K        1 
+MALLOC guard page                 3504K       0K       0K       0K       0K       0K       0K        4 
+MALLOC metadata                    752K     192K     192K      96K       0K       0K       0K        4 
+MALLOC_SMALL                      20.0M    10.5M    10.5M     960K       0K       0K       0K        5         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              4096K      16K      16K     416K       0K       0K       0K        1         see MALLOC ZONE table below
+MALLOC_TINY                       4096K      64K      64K      32K       0K       0K       0K        1         see MALLOC ZONE table below
+Memory Tag 22                     64.0M      16K      16K       0K       0K       0K       0K        1 
+STACK GUARD                       56.2M       0K       0K       0K       0K       0K       0K       12 
+Stack                             13.8M     176K     176K      48K       0K       0K       0K       12 
+VM_ALLOCATE                      102.8M    5632K    5632K       0K       0K       0K       0K       51 
+__AUTH                              35K      35K       0K       0K       0K       0K       0K       12 
+__AUTH_CONST                       225K     191K       0K       0K       0K       0K       0K       45 
+__DATA                             222K     189K      75K      16K       0K       0K       0K       35 
+__DATA_CONST                       106K     106K       0K       0K       0K       0K       0K       43 
+__DATA_DIRTY                       153K     113K      91K      41K       0K       0K       0K       35 
+__LINKEDIT                       572.3M    15.5M       0K       0K       0K       0K       0K        2 
+__OBJC_RO                         79.2M    41.5M       0K       0K       0K       0K       0K        1 
+__OBJC_RW                         2599K    2160K       0K      23K       0K       0K       0K        1 
+__TEXT                            6460K    5932K       0K       0K       0K       0K       0K       46 
+__TPRO_CONST                       128K      32K      16K      16K       0K       0K       0K        2 
+page table in kernel               304K     304K     304K       0K       0K       0K       0K        1 
+shared memory                       48K      32K      32K       0K       0K       0K       0K        2 
+unused but dirty shlib __DATA       74K      42K      42K      32K       0K       0K       0K       26 
+===========                     ======= ========    =====  ======= ========   ======    =====  ======= 
+TOTAL                            930.6M    82.4M    17.0M    1696K       0K       0K       0K      343 
+
+                                 VIRTUAL   RESIDENT      DIRTY    SWAPPED ALLOCATION      BYTES DIRTY+SWAP          REGION
+MALLOC ZONE                         SIZE       SIZE       SIZE       SIZE      COUNT  ALLOCATED  FRAG SIZE  % FRAG   COUNT
+===========                      =======  =========  =========  =========  =========  =========  =========  ======  ======
+DefaultMallocZone_0x102c38000      28.7M      10.8M      10.8M      1504K      94943      9251K      3277K     27%       9
+
+
+-------- upstream post-load vmmap -summary --------
+Process:         redis-server [73574]
+Path:            /Users/USER/Documents/*/redis-server
+Load Address:    0x104d24000
+Identifier:      redis-server
+Version:         0
+Code Type:       ARM64
+Platform:        macOS
+Parent Process:  zsh [73572]
+Target Type:     live task
+
+Date/Time:       2026-08-08 01:55:38.238 -0400
+Launch Time:     2026-08-08 01:55:34.011 -0400
+OS Version:      macOS 26.6 (25G72)
+Report Version:  7
+Analysis Tool:   /usr/bin/vmmap
+
+Physical footprint:         10.3M
+Physical footprint (peak):  10.3M
+Idle exit:                  untracked
+----
+
+ReadOnly portion of Libraries: Total=580.8M resident=22.4M(4%) swapped_out_or_unallocated=558.5M(96%)
+Writable regions: Total=121.3M written=9088K(7%) resident=6992K(6%) swapped_out=2096K(2%) unallocated=112.4M(93%)
+
+                                VIRTUAL RESIDENT    DIRTY  SWAPPED VOLATILE   NONVOL    EMPTY   REGION 
+REGION TYPE                        SIZE     SIZE     SIZE     SIZE     SIZE     SIZE     SIZE    COUNT (non-coalesced) 
+===========                     ======= ========    =====  ======= ========   ======    =====  ======= 
+Kernel Alloc Once                   32K      16K      16K       0K       0K       0K       0K        1 
+MALLOC guard page                 3264K       0K       0K       0K       0K       0K       0K        4 
+MALLOC metadata                    752K     224K     224K     112K       0K       0K       0K        4 
+MALLOC_SMALL                      28.0M    6304K    6176K    1792K       0K       0K       0K        7         see MALLOC ZONE table below
+MALLOC_SMALL (empty)              4096K       0K       0K       0K       0K       0K       0K        1         see MALLOC ZONE table below
+MALLOC_TINY                       4096K     112K     112K      16K       0K       0K       0K        1         see MALLOC ZONE table below
+Memory Tag 22                     64.0M      16K      16K       0K       0K       0K       0K        1 
+STACK GUARD                       56.1M       0K       0K       0K       0K       0K       0K        4 
+Stack                             20.1M      16K      16K      80K       0K       0K       0K        4 
+__AUTH                              35K      35K       0K       0K       0K       0K       0K       12 
+__AUTH_CONST                       225K     191K       0K       0K       0K       0K       0K       45 
+__DATA                             718K     397K     235K     256K       0K       0K       0K       35 
+__DATA_CONST                       122K     122K       0K       0K       0K       0K       0K       43 
+__DATA_DIRTY                       153K      97K      75K      57K       0K       0K       0K       35 
+__LINKEDIT                       572.7M    15.5M       0K       0K       0K       0K       0K        2 
+__OBJC_RO                         79.2M    41.5M       0K       0K       0K       0K       0K        1 
+__OBJC_RW                         2599K    2160K       0K      23K       0K       0K       0K        1 
+__TEXT                            8332K    7004K       0K       0K       0K       0K       0K       46 
+__TPRO_CONST                       128K      32K      16K      16K       0K       0K       0K        2 
+page table in kernel               256K     256K     256K       0K       0K       0K       0K        1 
+shared memory                       48K      48K      48K       0K       0K       0K       0K        2 
+unused but dirty shlib __DATA       74K      58K      58K      16K       0K       0K       0K       26 
+===========                     ======= ========    =====  ======= ========   ======    =====  ======= 
+TOTAL                            844.4M    73.7M    7248K    2368K       0K       0K       0K      278 
+
+                                 VIRTUAL   RESIDENT      DIRTY    SWAPPED ALLOCATION      BYTES DIRTY+SWAP          REGION
+MALLOC ZONE                         SIZE       SIZE       SIZE       SIZE      COUNT  ALLOCATED  FRAG SIZE  % FRAG   COUNT
+===========                      =======  =========  =========  =========  =========  =========  =========  ======  ======
+DefaultMallocZone_0x105498000      36.7M      6608K      6480K      1920K     138542      6966K      1434K     18%      11
+
+
+-------- idiomatic.log (MEMLOG / mem_report) --------
+16:redis_idiomatic: mem[owner-ready] arena_key6_slab_sizes_B (root_first 1024) sum=1024
+17:redis_idiomatic: mem[owner-ready] arena_key7_slab_sizes_B (root_first 1024) sum=1024
+18:redis_idiomatic: mem[owner-ready] arena_value_slab_sizes_B (root_first 1024) sum=1024
+19:redis_idiomatic: mem[owner-ready] arena_committed_B map slabs=1024 ovf=52160 ext_meta=0 gross=53184 | key(sum) slabs=8192 ovf=0 ext_meta=0 gross=8192 | value slabs=1024 ovf=0 ext_meta=0 gross=1024 | db_arenas_gross_sum=62400
+20:redis_idiomatic: mem[idle] entries=0 buckets=2048 keys allocs=0 bytes=0 live=0 | values allocs=0 bytes=0 live=0 | map_live=45696 | total_live=45696
+21:redis_idiomatic: mem[idle] arena_initial_root_B map=1024(heap_overflow) key=1024(heap_overflow×8 shards) value=1024(heap_overflow)
+22:redis_idiomatic: mem[idle] arena_map_slab_sizes_B (root_first 1024) sum=1024
+23:redis_idiomatic: mem[idle] arena_key0_slab_sizes_B (root_first 1024) sum=1024
+24:redis_idiomatic: mem[idle] arena_key1_slab_sizes_B (root_first 1024) sum=1024
+25:redis_idiomatic: mem[idle] arena_key2_slab_sizes_B (root_first 1024) sum=1024
+26:redis_idiomatic: mem[idle] arena_key3_slab_sizes_B (root_first 1024) sum=1024
+27:redis_idiomatic: mem[idle] arena_key4_slab_sizes_B (root_first 1024) sum=1024
+28:redis_idiomatic: mem[idle] arena_key5_slab_sizes_B (root_first 1024) sum=1024
+29:redis_idiomatic: mem[idle] arena_key6_slab_sizes_B (root_first 1024) sum=1024
+30:redis_idiomatic: mem[idle] arena_key7_slab_sizes_B (root_first 1024) sum=1024
+31:redis_idiomatic: mem[idle] arena_value_slab_sizes_B (root_first 1024) sum=1024
+32:redis_idiomatic: mem[idle] arena_committed_B map slabs=1024 ovf=52160 ext_meta=0 gross=53184 | key(sum) slabs=8192 ovf=0 ext_meta=0 gross=8192 | value slabs=1024 ovf=0 ext_meta=0 gross=1024 | db_arenas_gross_sum=62400
+33:redis_idiomatic: mem[idle] getrusage maxrss=2064384 (kilobytes on Linux/most Unix)
+34:redis_idiomatic: mem[idle] worker_hint=8 sched_workers=0 (fiber stacks: VM reserve ~2MiB each, commit on touch; see cc/runtime/fiber_sched.c MCO_USE_VMEM_ALLOCATOR)
+35:redis_idiomatic: mem[idle] map shards=8 len=0 buckets=2048 live_bytes=45696 (sharded array_map)
+36:redis_idiomatic: mem[idle] model: map/value shared + per-shard key arenas; fixed root+overflow; keys/values releasable individually
+37:redis_idiomatic: mem_gap phase=idle footprint_B=2113929216 source=maxrss logical_B=45696 gap_B=2113883520 map_B=45696 key_B=0 value_B=0 arenas_gross_B=62400 workers=8 fiber_reserve_hint_B=16777216 note=runtime+fibers+overflow+frag+untracked
+38:redis_idiomatic: mem[post-load] entries=95017 buckets=131072 keys allocs=95017 bytes=1520272 live=1520272 | values allocs=0 bytes=0 live=0 | map_live=3058368 | total_live=4578640
+39:redis_idiomatic: mem[post-load] arena_initial_root_B map=1024(heap_overflow) key=1024(heap_overflow×8 shards) value=1024(heap_overflow)
+40:redis_idiomatic: mem[post-load] arena_map_slab_sizes_B (root_first 1024) sum=1024
+41:redis_idiomatic: mem[post-load] arena_key0_slab_sizes_B (root_first 1024) sum=1024
+42:redis_idiomatic: mem[post-load] arena_key1_slab_sizes_B (root_first 1024) sum=1024
+43:redis_idiomatic: mem[post-load] arena_key2_slab_sizes_B (root_first 1024) sum=1024
+44:redis_idiomatic: mem[post-load] arena_key3_slab_sizes_B (root_first 1024) sum=1024
+45:redis_idiomatic: mem[post-load] arena_key4_slab_sizes_B (root_first 1024) sum=1024
+46:redis_idiomatic: mem[post-load] arena_key5_slab_sizes_B (root_first 1024) sum=1024
+47:redis_idiomatic: mem[post-load] arena_key6_slab_sizes_B (root_first 1024) sum=1024
+48:redis_idiomatic: mem[post-load] arena_key7_slab_sizes_B (root_first 1024) sum=1024
+49:redis_idiomatic: mem[post-load] arena_value_slab_sizes_B (root_first 1024) sum=1024
+50:redis_idiomatic: mem[post-load] arena_committed_B map slabs=1024 ovf=3277760 ext_meta=0 gross=3278784 | key(sum) slabs=8192 ovf=6054976 ext_meta=0 gross=6063168 | value slabs=1024 ovf=0 ext_meta=0 gross=1024 | db_arenas_gross_sum=9342976
+51:redis_idiomatic: mem[post-load] getrusage maxrss=19906560 (kilobytes on Linux/most Unix)
+52:redis_idiomatic: mem[post-load] worker_hint=8 sched_workers=0 (fiber stacks: VM reserve ~2MiB each, commit on touch; see cc/runtime/fiber_sched.c MCO_USE_VMEM_ALLOCATOR)
+53:redis_idiomatic: mem[post-load] map shards=8 len=95017 buckets=131072 live_bytes=3058368 (sharded array_map)
+54:redis_idiomatic: mem[post-load] model: map/value shared + per-shard key arenas; fixed root+overflow; keys/values releasable individually
+55:redis_idiomatic: mem_gap phase=post-load footprint_B=20384317440 source=maxrss logical_B=4578640 gap_B=20379738800 map_B=3058368 key_B=1520272 value_B=0 arenas_gross_B=9342976 workers=8 fiber_reserve_hint_B=16777216 note=runtime+fibers+overflow+frag+untracked
+
+-------- bench rps --------
+idiomatic:
+ SET: rps=0.0 (overall: 0.0) avg_msec=0.000 (overall: 0.000)                                                            SET: 1538461.62 requests per second, p50=0.271 msec
+ GET: rps=96320.0 (overall: 445925.9) avg_msec=1.050 (overall: 1.050)                                                                     GET: 1048951.00 requests per second, p50=0.303 msec
+
+upstream:
+ SET: rps=0.0 (overall: 0.0) avg_msec=0.000 (overall: 0.000)                                                            SET: rps=516416.0 (overall: 516416.0) avg_msec=1.416 (overall: 1.416)                                                                      SET: 674157.31 requests per second, p50=0.655 msec
+ GET: rps=249322.8 (overall: 1091862.1) avg_msec=0.651 (overall: 0.651)                                                                       GET: 1621621.62 requests per second, p50=0.343 msec
+

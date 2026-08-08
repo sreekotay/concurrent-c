@@ -90,9 +90,11 @@ static inline size_t cc_shard_len(const CCShard* m) {
 static inline CCString* cc_shard_get(CCShard* m, CCSlice key) {
     CCSlicePackedView view;
     CCSlicePacked pk;
+    size_t h;
     if (!m || !m->data) return NULL;
     pk = cc_slice_packed_borrow_slice(&view, key);
-    return CCShardMapTable_get_ptr(m->data, pk);
+    h = cc_map_hash_slice_packed(pk);
+    return CCShardMapTable_get_ptr_h(m->data, pk, h);
 }
 
 static inline bool cc_shard_contains(CCShard* m, CCSlice key) {
@@ -114,13 +116,15 @@ static inline bool cc_shard_get_into(CCShard* m, CCSlice key, CCArena* arena,
 static inline bool cc_shard_put(CCShard* m, CCSlice key, CCSlice val) {
     CCSlicePackedView view;
     CCSlicePacked pk;
+    size_t h;
     CCString* cur;
     CCString owned;
     CCResult_CCSlicePacked_CCError packed;
     CCSlicePacked durable;
     if (!m || !m->data) return false;
     pk = cc_slice_packed_borrow_slice(&view, key);
-    cur = CCShardMapTable_get_ptr(m->data, pk);
+    h = cc_map_hash_slice_packed(pk);
+    cur = CCShardMapTable_get_ptr_h(m->data, pk, h);
     owned = cc_string_from_slice(&m->arena, val);
     if (cc_string_failed(&owned)) return false;
 
@@ -147,21 +151,19 @@ static inline bool cc_shard_put(CCShard* m, CCSlice key, CCSlice val) {
 static inline bool cc_shard_delete(CCShard* m, CCSlice key) {
     CCSlicePackedView view;
     CCSlicePacked pk;
+    size_t bucket = 0;
+    size_t di;
     CCString* v;
-    CCSlicePacked* stored;
+    CCSlicePacked doomed;
     if (!m || !m->data) return false;
     pk = cc_slice_packed_borrow_slice(&view, key);
-    v = CCShardMapTable_get_ptr(m->data, pk);
-    stored = CCShardMapTable_find_key_ptr(m->data, pk);
-    if (!v && !stored) return false;
+    di = CCShardMapTable_find_dense(m->data, pk, &bucket);
+    if (di == SIZE_MAX) return false;
+    v = CCShardMapTable_at_ptr(m->data, di);
+    doomed = *CCShardMapTable_key_ptr(m->data, di);
     if (v) cc_string_release(v, &m->arena);
-    if (stored) {
-        CCSlicePacked doomed = *stored;
-        (void)CCShardMapTable_del(m->data, pk);
-        cc_slice_packed_release(&m->arena, &doomed);
-    } else {
-        (void)CCShardMapTable_del(m->data, pk);
-    }
+    if (!CCShardMapTable_del_at(m->data, di, bucket)) return false;
+    cc_slice_packed_release(&m->arena, &doomed);
     return true;
 }
 

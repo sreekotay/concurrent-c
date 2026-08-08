@@ -115,8 +115,9 @@ static bool !>(CCError) conn_write(Conn* c, char[:] data) {
     return cc_ok(true);
 }
 
-static bool !>(CCError) conn_lit(Conn* c, const char* s) {
-    return c->write(cc_slice_cstr(s));
+/* Fixed wire bytes → lit(char[:]) (lits → CC_SLICE_LIT). Interpolated → @string. */
+static bool !>(CCError) conn_lit(Conn* c, char[:] s) {
+    return c->write(s);
 }
 
 static bool !>(CCError) conn_simple(Conn* c, const char* s) {
@@ -129,8 +130,8 @@ static bool !>(CCError) conn_err(Conn* c, const char* s) {
     return c->write(line.as_slice());
 }
 
-static bool !>(CCError) conn_ok(Conn* c) { return c->simple("OK"); }
-static bool !>(CCError) conn_pong(Conn* c) { return c->simple("PONG"); }
+static bool !>(CCError) conn_ok(Conn* c) { return c->lit("+OK\r\n"); }
+static bool !>(CCError) conn_pong(Conn* c) { return c->lit("+PONG\r\n"); }
 static bool !>(CCError) conn_null(Conn* c) { return c->lit("$-1\r\n"); }
 
 static bool !>(CCError) conn_integer(Conn* c, int64_t v) {

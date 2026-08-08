@@ -1,0 +1,489 @@
+Analysis of sampling redis-server (pid 93270) every 1 millisecond
+Process:         redis-server [93270]
+Path:            /Users/USER/Documents/*/redis-server
+Load Address:    0x100c00000
+Identifier:      redis-server
+Version:         0
+Code Type:       ARM64
+Platform:        macOS
+Parent Process:  bash [93263]
+Target Type:     live task
+
+Date/Time:       2026-08-08 02:06:37.311 -0400
+Launch Time:     2026-08-08 02:06:36.506 -0400
+OS Version:      macOS 26.6 (25G72)
+Report Version:  7
+Analysis Tool:   /usr/bin/sample
+
+Physical footprint:         9968K
+Physical footprint (peak):  10.7M
+Idle exit:                  untracked
+----
+
+Call graph:
+    5124 Thread_11973372   DispatchQueue_1: com.apple.main-thread  (serial)
+    + 5124 start  (in dyld) + 6992  [0x188ff04e4]
+    +   5124 main  (in redis-server) + 29924  [0x100c6bfd8]
+    +     3335 aeProcessEvents  (in redis-server) + 768  [0x100c3be10]
+    +     ! 3335 kevent  (in libsystem_kernel.dylib) + 8  [0x18937dfc4]
+    +     1552 aeProcessEvents  (in redis-server) + 1184  [0x100c3bfb0]
+    +     ! 1552 connSocketEventHandler  (in redis-server) + 200  [0x100da60cc]
+    +     !   1250 readQueryFromClient  (in redis-server) + 1628  [0x100c7619c]
+    +     !   : 475 processInputBuffer  (in redis-server) + 4892  [0x100c776c8]
+    +     !   : | 436 processCommand  (in redis-server) + 3836  [0x100c5b1f4]
+    +     !   : | + 370 call  (in redis-server) + 576  [0x100c58c10]
+    +     !   : | + ! 363 setCommand  (in redis-server) + 100  [0x100cb1998]
+    +     !   : | + ! : 257 setGenericCommand  (in redis-server) + 1172  [0x100cb14d4]
+    +     !   : | + ! : | 231 setKeyByLink  (in redis-server) + 204  [0x100c8f748]
+    +     !   : | + ! : | + 133 dbSetValue  (in redis-server) + 888  [0x100c8ef10]
+    +     !   : | + ! : | + ! 79 kvobjSet  (in redis-server) + 640  [0x100c875c0]
+    +     !   : | + ! : | + ! : 61 zmalloc_usable  (in redis-server) + 56  [0x100c71260]
+    +     !   : | + ! : | + ! : | 17 _xzm_xzone_malloc_tiny  (in libsystem_malloc.dylib) + 284,40,...  [0x1891dd058,0x1891dcf64,...]
+    +     !   : | + ! : | + ! : | 15 _xzm_xzone_malloc_freelist_outlined  (in libsystem_malloc.dylib) + 324  [0x1891de7e4]
+    +     !   : | + ! : | + ! : | + 5 _xzm_xzone_find_and_malloc_from_freelist_chunk  (in libsystem_malloc.dylib) + 168  [0x1891df024]
+    +     !   : | + ! : | + ! : | + ! 5 _xzm_chunk_list_pop  (in libsystem_malloc.dylib) + 160,0  [0x1891df988,0x1891df8e8]
+    +     !   : | + ! : | + ! : | + 5 _xzm_xzone_find_and_malloc_from_freelist_chunk  (in libsystem_malloc.dylib) + 336  [0x1891df0cc]
+    +     !   : | + ! : | + ! : | + ! 5 _xzm_xzone_malloc_from_freelist_chunk  (in libsystem_malloc.dylib) + 588,88,...  [0x1891dedcc,0x1891debd8,...]
+    +     !   : | + ! : | + ! : | + 5 _xzm_xzone_find_and_malloc_from_freelist_chunk  (in libsystem_malloc.dylib) + 76,184,...  [0x1891defc8,0x1891df034,...]
+    +     !   : | + ! : | + ! : | 7 _malloc_zone_malloc  (in libsystem_malloc.dylib) + 100,16,...  [0x1891e7120,0x1891e70cc,...]
+    +     !   : | + ! : | + ! : | 6 _xzm_xzone_malloc_freelist_outlined  (in libsystem_malloc.dylib) + 248  [0x1891de798]
+    +     !   : | + ! : | + ! : | + 6 _xzm_xzone_malloc_from_freelist_chunk  (in libsystem_malloc.dylib) + 200,28,...  [0x1891dec48,0x1891deb9c,...]
+    +     !   : | + ! : | + ! : | 6 _xzm_xzone_malloc_freelist_outlined  (in libsystem_malloc.dylib) + 28,208,...  [0x1891de6bc,0x1891de770,...]
+    +     !   : | + ! : | + ! : | 4 <deduplicated_symbol>  (in libsystem_malloc.dylib) + 0,172,...  [0x1891d715c,0x1891d7208,...]
+    +     !   : | + ! : | + ! : | 2 _xzm_xzone_find_and_malloc_from_freelist_chunk  (in libsystem_malloc.dylib) + 1924,1936  [0x1891df700,0x1891df70c]
+    +     !   : | + ! : | + ! : | 2 _xzm_xzone_malloc  (in libsystem_malloc.dylib) + 0,324  [0x1891d7950,0x1891d7a94]
+    +     !   : | + ! : | + ! : | 1 DYLD-STUB$$malloc  (in redis-server) + 4  [0x100dc7f28]
+    +     !   : | + ! : | + ! : | 1 _xzm_xzone_malloc_from_freelist_chunk  (in libsystem_malloc.dylib) + 680  [0x1891dee28]
+    +     !   : | + ! : | + ! : 10 zmalloc_usable  (in redis-server) + 80  [0x100c71278]
+    +     !   : | + ! : | + ! : | 7 malloc_size  (in libsystem_malloc.dylib) + 124  [0x1891b40b0]
+    +     !   : | + ! : | + ! : | + 7 xzm_malloc_zone_size  (in libsystem_malloc.dylib) + 724,20,...  [0x1891e27e0,0x1891e2520,...]
+    +     !   : | + ! : | + ! : | 3 malloc_size  (in libsystem_malloc.dylib) + 0,52,...  [0x1891b4034,0x1891b4068,...]
+    +     !   : | + ! : | + ! : 6 zmalloc_usable  (in redis-server) + 8,56,...  [0x100c71230,0x100c71260,...]
+    +     !   : | + ! : | + ! : 1 _xzm_xzone_malloc_freelist_outlined  (in libsystem_malloc.dylib) + 808  [0x1891de9c8]
+    +     !   : | + ! : | + ! : 1 malloc_size  (in libsystem_malloc.dylib) + 244  [0x1891b4128]
+    +     !   : | + ! : | + ! 33 kvobjSet  (in redis-server) + 1144  [0x100c877b8]
+    +     !   : | + ! : | + ! : 13 decrRefCount  (in redis-server) + 404  [0x100c87a28]
+    +     !   : | + ! : | + ! : | 5 malloc_size  (in libsystem_malloc.dylib) + 124  [0x1891b40b0]
+    +     !   : | + ! : | + ! : | + 5 xzm_malloc_zone_size  (in libsystem_malloc.dylib) + 40,108,...  [0x1891e2534,0x1891e2578,...]
+    +     !   : | + ! : | + ! : | 5 malloc_size  (in libsystem_malloc.dylib) + 16,52,...  [0x1891b4044,0x1891b4068,...]
+    +     !   : | + ! : | + ! : | 3 DYLD-STUB$$malloc_size  (in redis-server) + 4  [0x100dc7f34]
+    +     !   : | + ! : | + ! : 8 _xzm_free  (in libsystem_malloc.dylib) + 996,924,...  [0x1891d84fc,0x1891d84b4,...]
+    +     !   : | + ! : | + ! : 4 _xzm_free  (in libsystem_malloc.dylib) + 352  [0x1891d8278]
+    +     !   : | + ! : | + ! : | 3 _platform_memset  (in libsystem_platform.dylib) + 180,208  [0x1893c5144,0x1893c5160]
+    +     !   : | + ! : | + ! : | 1 __bzero  (in libsystem_platform.dylib) + 0  [0x1893c5030]
+    +     !   : | + ! : | + ! : 3 _free  (in libsystem_malloc.dylib) + 0,64,...  [0x1891e7cd0,0x1891e7d10,...]
+    +     !   : | + ! : | + ! : 3 decrRefCount  (in redis-server) + 24,72,...  [0x100c878ac,0x100c878dc,...]
+    +     !   : | + ! : | + ! : 1 DYLD-STUB$$free  (in redis-server) + 4  [0x100dc7d24]
+    +     !   : | + ! : | + ! : 1 decrRefCount  (in redis-server) + 424  [0x100c87a3c]
+    +     !   : | + ! : | + ! :   1 _tlv_get_addr  (in libdyld.dylib) + 20  [0x188fb839c]
+    +     !   : | + ! : | + ! 16 kvobjSet  (in redis-server) + 688,16,...  [0x100c875f0,0x100c87350,...]
+    +     !   : | + ! : | + ! 2 kvobjSet  (in redis-server) + 836  [0x100c87684]
+    +     !   : | + ! : | + ! : 1 DYLD-STUB$$memcpy  (in redis-server) + 4  [0x100dc7f58]
+    +     !   : | + ! : | + ! : 1 _platform_memmove  (in libsystem_platform.dylib) + 428  [0x1893c550c]
+    +     !   : | + ! : | + ! 2 kvobjSet  (in redis-server) + 952  [0x100c876f8]
+    +     !   : | + ! : | + ! : 2 _platform_memmove  (in libsystem_platform.dylib) + 452  [0x1893c5524]
+    +     !   : | + ! : | + ! 1 _xzm_free  (in libsystem_malloc.dylib) + 1560  [0x1891d8730]
+    +     !   : | + ! : | + 54 dbSetValue  (in redis-server) + 2120  [0x100c8f3e0]
+    +     !   : | + ! : | + ! 18 _xzm_free  (in libsystem_malloc.dylib) + 780,996,...  [0x1891d8424,0x1891d84fc,...]
+    +     !   : | + ! : | + ! 11 decrRefCount  (in redis-server) + 404  [0x100c87a28]
+    +     !   : | + ! : | + ! : 7 malloc_size  (in libsystem_malloc.dylib) + 124  [0x1891b40b0]
+    +     !   : | + ! : | + ! : | 7 xzm_malloc_zone_size  (in libsystem_malloc.dylib) + 20,512,...  [0x1891e2520,0x1891e270c,...]
+    +     !   : | + ! : | + ! : 4 malloc_size  (in libsystem_malloc.dylib) + 16,52,...  [0x1891b4044,0x1891b4068,...]
+    +     !   : | + ! : | + ! 10 decrRefCount  (in redis-server) + 24,436,...  [0x100c878ac,0x100c87a48,...]
+    +     !   : | + ! : | + ! 5 _xzm_free  (in libsystem_malloc.dylib) + 352  [0x1891d8278]
+    +     !   : | + ! : | + ! : 4 _platform_memset  (in libsystem_platform.dylib) + 180,176,...  [0x1893c5144,0x1893c5140,...]
+    +     !   : | + ! : | + ! : 1 __bzero  (in libsystem_platform.dylib) + 0  [0x1893c5030]
+    +     !   : | + ! : | + ! 3 _free  (in libsystem_malloc.dylib) + 0,36,...  [0x1891e7cd0,0x1891e7cf4,...]
+    +     !   : | + ! : | + ! 3 _xzm_chunk_list_slot_push  (in libsystem_malloc.dylib) + 128  [0x1891e09f8]
+    +     !   : | + ! : | + ! : 3 _xzm_chunk_list_push  (in libsystem_malloc.dylib) + 44,96  [0x1891df870,0x1891df8a4]
+    +     !   : | + ! : | + ! 2 _xzm_chunk_list_slot_push  (in libsystem_malloc.dylib) + 32,100  [0x1891e0998,0x1891e09dc]
+    +     !   : | + ! : | + ! 2 malloc_size  (in libsystem_malloc.dylib) + 236,244  [0x1891b4120,0x1891b4128]
+    +     !   : | + ! : | + 21 dbSetValue  (in redis-server) + 144,304,...  [0x100c8ec28,0x100c8ecc8,...]
+    +     !   : | + ! : | + 4 dbSetValue  (in redis-server) + 1144  [0x100c8f010]
+    +     !   : | + ! : | + ! 4 getObjectLength  (in redis-server) + 16,0,...  [0x100c89280,0x100c89270,...]
+    +     !   : | + ! : | + 3 _xzm_free  (in libsystem_malloc.dylib) + 1384  [0x1891d8680]
+    +     !   : | + ! : | + 2 dbSetValue  (in redis-server) + 80  [0x100c8ebe8]
+    +     !   : | + ! : | + ! 2 getKeySlot  (in redis-server) + 472  [0x100c8cda8]
+    +     !   : | + ! : | + 2 dbSetValue  (in redis-server) + 176  [0x100c8ec48]
+    +     !   : | + ! : | + ! 2 getObjectLength  (in redis-server) + 172,300  [0x100c8931c,0x100c8939c]
+    +     !   : | + ! : | + 2 dbSetValue  (in redis-server) + 488  [0x100c8ed80]
+    +     !   : | + ! : | + ! 2 moduleFireServerEvent  (in redis-server) + 0,1412  [0x100d70a70,0x100d70ff4]
+    +     !   : | + ! : | + 2 dbSetValue  (in redis-server) + 608  [0x100c8edf8]
+    +     !   : | + ! : | + ! 2 signalKeyAsReadyLogic  (in redis-server) + 12  [0x100d4af74]
+    +     !   : | + ! : | + 2 dbSetValue  (in redis-server) + 920  [0x100c8ef30]
+    +     !   : | + ! : | + ! 2 dictSetKeyAtLink  (in redis-server) + 296,340  [0x100c3ed88,0x100c3edb4]
+    +     !   : | + ! : | + 2 dictSetKeyAtLink  (in redis-server) + 356  [0x100c3edc4]
+    +     !   : | + ! : | + 1 dbSetValue  (in redis-server) + 616  [0x100c8ee00]
+    +     !   : | + ! : | + ! 1 decrRefCount  (in redis-server) + 24  [0x100c878ac]
+    +     !   : | + ! : | + 1 decrRefCount  (in redis-server) + 92  [0x100c878f0]
+    +     !   : | + ! : | + 1 moduleFireServerEvent  (in redis-server) + 1436  [0x100d7100c]
+    +     !   : | + ! : | + 1 signalKeyAsReadyLogic  (in redis-server) + 460  [0x100d4b134]
+    +     !   : | + ! : | 7 setKeyByLink  (in redis-server) + 48,0,...  [0x100c8f6ac,0x100c8f67c,...]
+    +     !   : | + ! : | 6 setKeyByLink  (in redis-server) + 364  [0x100c8f7e8]
+    +     !   : | + ! : | + 6 trackingInvalidateKey  (in redis-server) + 52,40,...  [0x100da4df4,0x100da4de8,...]
+    +     !   : | + ! : | 5 setKeyByLink  (in redis-server) + 236  [0x100c8f768]
+    +     !   : | + ! : | + 3 notifyKeyspaceEventImpl  (in redis-server) + 2568,48  [0x100d48cc0,0x100d482e8]
+    +     !   : | + ! : | + 1 moduleNotifyKeyspaceEvent  (in redis-server) + 748  [0x100d6a2d8]
+    +     !   : | + ! : | + 1 notifyKeyspaceEventImpl  (in redis-server) + 100  [0x100d4831c]
+    +     !   : | + ! : | +   1 moduleNotifyKeyspaceEvent  (in redis-server) + 24  [0x100d6a004]
+    +     !   : | + ! : | 4 trackingInvalidateKey  (in redis-server) + 1008,1016  [0x100da51b0,0x100da51b8]
+    +     !   : | + ! : | 3 notifyKeyspaceEventImpl  (in redis-server) + 2600  [0x100d48ce0]
+    +     !   : | + ! : | 1 dbSetValue  (in redis-server) + 2144  [0x100c8f3f8]
+    +     !   : | + ! : 79 setGenericCommand  (in redis-server) + 424  [0x100cb11e8]
+    +     !   : | + ! : | 64 lookupKey  (in redis-server) + 96  [0x100c8c95c]
+    +     !   : | + ! : | + 32 dictFindLinkInternal  (in redis-server) + 280,288,...  [0x100c3eb50,0x100c3eb58,...]
+    +     !   : | + ! : | + 25 dictFindLinkInternal  (in redis-server) + 336  [0x100c3eb88]
+    +     !   : | + ! : | + ! 18 dictSdsCompareKV  (in redis-server) + 260  [0x100c488dc]
+    +     !   : | + ! : | + ! : 18 _platform_memcmp  (in libsystem_platform.dylib) + 96,104,...  [0x1893c2f70,0x1893c2f78,...]
+    +     !   : | + ! : | + ! 7 dictSdsCompareKV  (in redis-server) + 28,76,...  [0x100c487f4,0x100c48824,...]
+    +     !   : | + ! : | + 7 dictFindLinkInternal  (in redis-server) + 88  [0x100c3ea90]
+    +     !   : | + ! : | +   7 dictGenHashFunction  (in redis-server) + 176,184,...  [0x100c3caec,0x100c3caf4,...]
+    +     !   : | + ! : | 8 lookupKey  (in redis-server) + 16,36,...  [0x100c8c90c,0x100c8c920,...]
+    +     !   : | + ! : | 4 lookupKey  (in redis-server) + 180  [0x100c8c9b0]
+    +     !   : | + ! : | + 4 expireIfNeeded  (in redis-server) + 12,236  [0x100c8cdbc,0x100c8ce9c]
+    +     !   : | + ! : | 3 lookupKey  (in redis-server) + 52  [0x100c8c930]
+    +     !   : | + ! : |   3 getKeySlot  (in redis-server) + 4  [0x100c8cbd4]
+    +     !   : | + ! : 17 setGenericCommand  (in redis-server) + 1664  [0x100cb16c0]
+    +     !   : | + ! : | 9 addReply  (in redis-server) + 40,272,...  [0x100c7dde4,0x100c7decc,...]
+    +     !   : | + ! : | 5 _addReplyToBufferOrList  (in redis-server) + 352  [0x100c7b4b4]
+    +     !   : | + ! : | + 5 _platform_memmove  (in libsystem_platform.dylib) + 452,0,...  [0x1893c5524,0x1893c5360,...]
+    +     !   : | + ! : | 3 _addReplyToBufferOrList  (in redis-server) + 388,244  [0x100c7b4d8,0x100c7b448]
+    +     !   : | + ! : 4 setGenericCommand  (in redis-server) + 1280  [0x100cb1540]
+    +     !   : | + ! : | 4 notifyKeyspaceEventImpl  (in redis-server) + 36,40,...  [0x100d482dc,0x100d482e0,...]
+    +     !   : | + ! : 2 setGenericCommand  (in redis-server) + 432  [0x100cb11f0]
+    +     !   : | + ! : 2 setKeyByLink  (in redis-server) + 380  [0x100c8f7f8]
+    +     !   : | + ! : 1 _addReplyToBufferOrList  (in redis-server) + 492  [0x100c7b540]
+    +     !   : | + ! : 1 lookupKey  (in redis-server) + 300  [0x100c8ca28]
+    +     !   : | + ! 5 setCommand  (in redis-server) + 56  [0x100cb196c]
+    +     !   : | + ! : 5 tryObjectEncodingEx  (in redis-server) + 24,144,...  [0x100c88ed4,0x100c88f4c,...]
+    +     !   : | + ! 1 parseExtendedStringArgumentsOrReply  (in redis-server) + 1132  [0x100cb1e14]
+    +     !   : | + ! 1 setCommand  (in redis-server) + 8  [0x100cb193c]
+    +     !   : | + 25 call  (in redis-server) + 1944,148,...  [0x100c59168,0x100c58a64,...]
+    +     !   : | + 8 call  (in redis-server) + 176  [0x100c58a80]
+    +     !   : | + ! 8 getMonotonicUs_aarch64  (in redis-server) + 0  [0x100da7890]
+    +     !   : | + 6 call  (in redis-server) + 1792  [0x100c590d0]
+    +     !   : | + ! 6 alsoPropagate  (in redis-server) + 104,24,...  [0x100c57a70,0x100c57a20,...]
+    +     !   : | + 5 call  (in redis-server) + 1916  [0x100c5914c]
+    +     !   : | + ! 5 postExecutionUnitOperations  (in redis-server) + 60,844,...  [0x100c57c80,0x100c57f90,...]
+    +     !   : | + 4 call  (in redis-server) + 308  [0x100c58b04]
+    +     !   : | + ! 4 gettimeofday  (in libsystem_c.dylib) + 56  [0x18924fdc0]
+    +     !   : | + !   4 __commpage_gettimeofday_internal  (in libsystem_kernel.dylib) + 44  [0x189379c24]
+    +     !   : | + !     4 mach_absolute_time  (in libsystem_kernel.dylib) + 108  [0x18937810c]
+    +     !   : | + 3 call  (in redis-server) + 632  [0x100c58c48]
+    +     !   : | + ! 3 getMonotonicUs_aarch64  (in redis-server) + 0  [0x100da7890]
+    +     !   : | + 3 call  (in redis-server) + 2836  [0x100c594e4]
+    +     !   : | + ! 3 freeClientOriginalArgv  (in redis-server) + 12,176  [0x100c82b44,0x100c82be8]
+    +     !   : | + 3 clusterSlotStatsAddCpuDuration  (in redis-server) + 276  [0x100d2bd0c]
+    +     !   : | + 2 call  (in redis-server) + 1920  [0x100c59150]
+    +     !   : | + ! 2 trackingHandlePendingKeyInvalidations  (in redis-server) + 16,556  [0x100da5204,0x100da5420]
+    +     !   : | + 2 hotkeyStatsUpdateCurrentCmd  (in redis-server) + 644,648  [0x100db5464,0x100db5468]
+    +     !   : | + 1 call  (in redis-server) + 1000  [0x100c58db8]
+    +     !   : | + ! 1 slowlogPushEntryIfNeeded  (in redis-server) + 1028  [0x100d2cb28]
+    +     !   : | + 1 call  (in redis-server) + 1292  [0x100c58edc]
+    +     !   : | + ! 1 clusterSlotStatsAddCpuDuration  (in redis-server) + 32  [0x100d2bc18]
+    +     !   : | + 1 call  (in redis-server) + 1624  [0x100c59028]
+    +     !   : | + ! 1 hotkeyStatsUpdateCurrentCmd  (in redis-server) + 24  [0x100db51f8]
+    +     !   : | + 1 call  (in redis-server) + 1928  [0x100c59158]
+    +     !   : | + ! 1 clusterSlotStatsAddNetworkBytesOutForUserClient  (in redis-server) + 32  [0x100d2b8dc]
+    +     !   : | + 1 setCommand  (in redis-server) + 104  [0x100cb199c]
+    +     !   : | 29 processCommand  (in redis-server) + 408,3052,...  [0x100c5a490,0x100c5aee4,...]
+    +     !   : | 3 processCommand  (in redis-server) + 708  [0x100c5a5bc]
+    +     !   : | + 3 commandCheckExistence  (in redis-server) + 0,24  [0x100c59878,0x100c59890]
+    +     !   : | 2 evictClients  (in redis-server) + 172,176  [0x100c84ee4,0x100c84ee8]
+    +     !   : | 2 processCommand  (in redis-server) + 2624  [0x100c5ad38]
+    +     !   : | + 2 evictClients  (in redis-server) + 24,36  [0x100c84e50,0x100c84e5c]
+    +     !   : | 1 ACLCheckAllUserCommandPerm  (in redis-server) + 108  [0x100d9fb5c]
+    +     !   : | 1 commandCheckExistence  (in redis-server) + 52  [0x100c598ac]
+    +     !   : | 1 moduleCallCommandFilters  (in redis-server) + 332  [0x100d65464]
+    +     !   : 295 processInputBuffer  (in redis-server) + 2364  [0x100c76ce8]
+    +     !   : | 256 createStringObject  (in redis-server) + 52  [0x100c880d8]
+    +     !   : | + 163 zmalloc_usable  (in redis-server) + 56  [0x100c71260]
+    +     !   : | + ! 48 _xzm_xzone_malloc_tiny  (in libsystem_malloc.dylib) + 256,264,...  [0x1891dd03c,0x1891dd044,...]
+    +     !   : | + ! 29 _xzm_xzone_malloc_freelist_outlined  (in libsystem_malloc.dylib) + 324  [0x1891de7e4]
+    +     !   : | + ! : 15 _xzm_xzone_find_and_malloc_from_freelist_chunk  (in libsystem_malloc.dylib) + 336  [0x1891df0cc]
+    +     !   : | + ! : | 15 _xzm_xzone_malloc_from_freelist_chunk  (in libsystem_malloc.dylib) + 200,588,...  [0x1891dec48,0x1891dedcc,...]
+    +     !   : | + ! : 8 _xzm_xzone_find_and_malloc_from_freelist_chunk  (in libsystem_malloc.dylib) + 168  [0x1891df024]
+    +     !   : | + ! : | 8 _xzm_chunk_list_pop  (in libsystem_malloc.dylib) + 12,44,...  [0x1891df8f4,0x1891df914,...]
+    +     !   : | + ! : 5 _xzm_xzone_find_and_malloc_from_freelist_chunk  (in libsystem_malloc.dylib) + 76,204  [0x1891defc8,0x1891df048]
+    +     !   : | + ! : 1 _xzm_xzone_malloc_from_freelist_chunk  (in libsystem_malloc.dylib) + 680  [0x1891dee28]
+    +     !   : | + ! 19 _malloc_zone_malloc  (in libsystem_malloc.dylib) + 100,44,...  [0x1891e7120,0x1891e70e8,...]
+    +     !   : | + ! 19 _xzm_xzone_malloc  (in libsystem_malloc.dylib) + 324,8,...  [0x1891d7a94,0x1891d7958,...]
+    +     !   : | + ! 19 _xzm_xzone_malloc_freelist_outlined  (in libsystem_malloc.dylib) + 36,84,...  [0x1891de6c4,0x1891de6f4,...]
+    +     !   : | + ! 18 <deduplicated_symbol>  (in libsystem_malloc.dylib) + 164,212,...  [0x1891d7200,0x1891d7230,...]
+    +     !   : | + ! 6 _xzm_xzone_malloc_freelist_outlined  (in libsystem_malloc.dylib) + 248  [0x1891de798]
+    +     !   : | + ! : 6 _xzm_xzone_malloc_from_freelist_chunk  (in libsystem_malloc.dylib) + 84,28,...  [0x1891debd4,0x1891deb9c,...]
+    +     !   : | + ! 3 DYLD-STUB$$malloc  (in redis-server) + 4  [0x100dc7f28]
+    +     !   : | + ! 2 _xzm_xzone_find_and_malloc_from_freelist_chunk  (in libsystem_malloc.dylib) + 1928  [0x1891df704]
+    +     !   : | + 68 zmalloc_usable  (in redis-server) + 80  [0x100c71278]
+    +     !   : | + ! 36 malloc_size  (in libsystem_malloc.dylib) + 124  [0x1891b40b0]
+    +     !   : | + ! : 36 xzm_malloc_zone_size  (in libsystem_malloc.dylib) + 40,152,...  [0x1891e2534,0x1891e25a4,...]
+    +     !   : | + ! 20 malloc_size  (in libsystem_malloc.dylib) + 16,84,...  [0x1891b4044,0x1891b4088,...]
+    +     !   : | + ! 8 DYLD-STUB$$malloc_size  (in redis-server) + 4  [0x100dc7f34]
+    +     !   : | + ! 4 xzm_malloc_zone_size  (in libsystem_malloc.dylib) + 732  [0x1891e27e8]
+    +     !   : | + 15 zmalloc_usable  (in redis-server) + 92,8,...  [0x100c71284,0x100c71230,...]
+    +     !   : | + 6 zmalloc_usable  (in redis-server) + 100  [0x100c7128c]
+    +     !   : | + ! 6 _tlv_get_addr  (in libdyld.dylib) + 20  [0x188fb839c]
+    +     !   : | + 2 _xzm_xzone_malloc_freelist_outlined  (in libsystem_malloc.dylib) + 808  [0x1891de9c8]
+    +     !   : | + 2 malloc_size  (in libsystem_malloc.dylib) + 244  [0x1891b4128]
+    +     !   : | 20 createStringObject  (in redis-server) + 148  [0x100c88138]
+    +     !   : | + 20 _platform_memmove  (in libsystem_platform.dylib) + 460,452,...  [0x1893c552c,0x1893c5524,...]
+    +     !   : | 16 createStringObject  (in redis-server) + 12,100,...  [0x100c880b0,0x100c88108,...]
+    +     !   : | 3 zmalloc_usable  (in redis-server) + 212  [0x100c712fc]
+    +     !   : 145 processInputBuffer  (in redis-server) + 4836  [0x100c77690]
+    +     !   : | 61 dictPrefetcherRun  (in redis-server) + 228,160,...  [0x100c357a4,0x100c35760,...]
+    +     !   : | 29 dictPrefetcherRun  (in redis-server) + 624  [0x100c35930]
+    +     !   : | + 28 dictSdsCompareKV  (in redis-server) + 260  [0x100c488dc]
+    +     !   : | + ! 27 _platform_memcmp  (in libsystem_platform.dylib) + 96,104,...  [0x1893c2f70,0x1893c2f78,...]
+    +     !   : | + ! 1 dictSdsCompareKV  (in redis-server) + 268  [0x100c488e4]
+    +     !   : | + 1 dictSdsCompareKV  (in redis-server) + 124  [0x100c48854]
+    +     !   : | 24 dictPrefetcherRun  (in redis-server) + 396  [0x100c3584c]
+    +     !   : | + 24 dbDictPrefetchEntryKey  (in redis-server) + 16,8,...  [0x100c48be0,0x100c48bd8,...]
+    +     !   : | 14 prefetchCommands  (in redis-server) + 520  [0x100c36018]
+    +     !   : | + 10 dictGenHashFunction  (in redis-server) + 176,160,...  [0x100c3caec,0x100c3cadc,...]
+    +     !   : | + 4 dictSdsHash  (in redis-server) + 56,4,...  [0x100c48614,0x100c485e0,...]
+    +     !   : | 13 prefetchCommands  (in redis-server) + 220,104,...  [0x100c35eec,0x100c35e78,...]
+    +     !   : | 2 dictPrefetcherRun  (in redis-server) + 544  [0x100c358e0]
+    +     !   : | + 2 kvGetKey  (in redis-server) + 0  [0x100c48bc0]
+    +     !   : | 2 dictPrefetcherRun  (in redis-server) + 644  [0x100c35944]
+    +     !   : |   2 dbDictPrefetchEntryValue  (in redis-server) + 4,32  [0x100c48bec,0x100c48c08]
+    +     !   : 114 processInputBuffer  (in redis-server) + 4904  [0x100c776d4]
+    +     !   : | 110 commandProcessed  (in redis-server) + 304  [0x100c7bf8c]
+    +     !   : | + 103 resetClientInternal  (in redis-server) + 48  [0x100c7bc50]
+    +     !   : | + ! 88 freeClientPendingCommands  (in redis-server) + 468  [0x100c7996c]
+    +     !   : | + ! : 25 decrRefCount  (in redis-server) + 404  [0x100c87a28]
+    +     !   : | + ! : | 12 malloc_size  (in libsystem_malloc.dylib) + 16,88,...  [0x1891b4044,0x1891b408c,...]
+    +     !   : | + ! : | 11 malloc_size  (in libsystem_malloc.dylib) + 124  [0x1891b40b0]
+    +     !   : | + ! : | + 11 xzm_malloc_zone_size  (in libsystem_malloc.dylib) + 20,48,...  [0x1891e2520,0x1891e253c,...]
+    +     !   : | + ! : | 2 DYLD-STUB$$malloc_size  (in redis-server) + 4  [0x100dc7f34]
+    +     !   : | + ! : 19 _xzm_free  (in libsystem_malloc.dylib) + 28,232,...  [0x1891d8134,0x1891d8200,...]
+    +     !   : | + ! : 12 _xzm_free  (in libsystem_malloc.dylib) + 352  [0x1891d8278]
+    +     !   : | + ! : | 11 _platform_memset  (in libsystem_platform.dylib) + 180  [0x1893c5144]
+    +     !   : | + ! : | 1 DYLD-STUB$$_platform_bzero  (in libsystem_malloc.dylib) + 12  [0x1891ef87c]
+    +     !   : | + ! : 11 _free  (in libsystem_malloc.dylib) + 0,36,...  [0x1891e7cd0,0x1891e7cf4,...]
+    +     !   : | + ! : 8 decrRefCount  (in redis-server) + 436,0,...  [0x100c87a48,0x100c87894,...]
+    +     !   : | + ! : 4 _xzm_chunk_list_slot_push  (in libsystem_malloc.dylib) + 128  [0x1891e09f8]
+    +     !   : | + ! : | 4 _xzm_chunk_list_push  (in libsystem_malloc.dylib) + 44,12,...  [0x1891df870,0x1891df850,...]
+    +     !   : | + ! : 3 decrRefCount  (in redis-server) + 424  [0x100c87a3c]
+    +     !   : | + ! : | 3 _tlv_get_addr  (in libdyld.dylib) + 20  [0x188fb839c]
+    +     !   : | + ! : 2 DYLD-STUB$$free  (in redis-server) + 4  [0x100dc7d24]
+    +     !   : | + ! : 2 _xzm_chunk_list_push  (in libsystem_malloc.dylib) + 152,156  [0x1891df8dc,0x1891df8e0]
+    +     !   : | + ! : 1 _xzm_chunk_list_slot_push  (in libsystem_malloc.dylib) + 32  [0x1891e0998]
+    +     !   : | + ! : 1 malloc_size  (in libsystem_malloc.dylib) + 244  [0x1891b4128]
+    +     !   : | + ! 9 freeClientPendingCommands  (in redis-server) + 128,704,...  [0x100c79818,0x100c79a58,...]
+    +     !   : | + ! 2 _xzm_chunk_list_slot_push  (in libsystem_malloc.dylib) + 260  [0x1891e0a7c]
+    +     !   : | + ! 2 _xzm_free  (in libsystem_malloc.dylib) + 1384,1560  [0x1891d8680,0x1891d8730]
+    +     !   : | + ! 2 decrRefCount  (in redis-server) + 92  [0x100c878f0]
+    +     !   : | + 7 resetClientInternal  (in redis-server) + 348,20,...  [0x100c7bd7c,0x100c7bc34,...]
+    +     !   : | 3 resetClientInternal  (in redis-server) + 476  [0x100c7bdfc]
+    +     !   : | 1 commandProcessed  (in redis-server) + 60  [0x100c7be98]
+    +     !   : 94 processInputBuffer  (in redis-server) + 1440,1556,...  [0x100c7694c,0x100c769c0,...]
+    +     !   : 45 processInputBuffer  (in redis-server) + 476  [0x100c76588]
+    +     !   : | 26 preprocessCommand  (in redis-server) + 104  [0x100c59d8c]
+    +     !   : | + 25 strcasecmp_l  (in libsystem_c.dylib) + 76,112,...  [0x18924fb20,0x18924fb44,...]
+    +     !   : | + 1 DYLD-STUB$$strcasecmp  (in redis-server) + 4  [0x100dc82dc]
+    +     !   : | 13 preprocessCommand  (in redis-server) + 424,20,...  [0x100c59ecc,0x100c59d38,...]
+    +     !   : | 3 setGetKeys  (in redis-server) + 436,428  [0x100c99400,0x100c993f8]
+    +     !   : | 2 preprocessCommand  (in redis-server) + 1416  [0x100c5a2ac]
+    +     !   : | + 2 extractSlotFromKeysResult  (in redis-server) + 8  [0x100d121dc]
+    +     !   : | 1 strcasecmp_l  (in libsystem_c.dylib) + 256  [0x18924fbd4]
+    +     !   : 45 processInputBuffer  (in redis-server) + 1552  [0x100c769bc]
+    +     !   : | 38 _platform_memchr  (in libsystem_platform.dylib) + 84,0,...  [0x1893c2e54,0x1893c2e00,...]
+    +     !   : | 7 DYLD-STUB$$memchr  (in redis-server) + 4,0  [0x100dc7f40,0x100dc7f3c]
+    +     !   : 8 processInputBuffer  (in redis-server) + 4920  [0x100c776e4]
+    +     !   : | 3 updateClientMemUsageAndBucket  (in redis-server) + 24  [0x100c497a4]
+    +     !   : | + 2 pthread_self  (in libsystem_pthread.dylib) + 0,28  [0x1893b7590,0x1893b75ac]
+    +     !   : | + 1 DYLD-STUB$$pthread_self  (in redis-server) + 4  [0x100dc8120]
+    +     !   : | 3 updateClientMemUsageAndBucket  (in redis-server) + 36,256,...  [0x100c497b0,0x100c4988c,...]
+    +     !   : | 2 updateClientMemUsageAndBucket  (in redis-server) + 36  [0x100c497b0]
+    +     !   : |   2 DYLD-STUB$$pthread_equal  (in redis-server) + 4  [0x100dc8084]
+    +     !   : 7 processInputBuffer  (in redis-server) + 4832  [0x100c7768c]
+    +     !   : | 7 addCommandToBatch  (in redis-server) + 184,316,...  [0x100c36138,0x100c361bc,...]
+    +     !   : 6 processInputBuffer  (in redis-server) + 1320  [0x100c768d4]
+    +     !   : | 6 _platform_strchr  (in libsystem_platform.dylib) + 48,64  [0x1893c5690,0x1893c56a0]
+    +     !   : 5 createStringObject  (in redis-server) + 232  [0x100c8818c]
+    +     !   : 3 commandProcessed  (in redis-server) + 668  [0x100c7c0f8]
+    +     !   : 3 preprocessCommand  (in redis-server) + 280  [0x100c59e3c]
+    +     !   : 2 processInputBuffer  (in redis-server) + 68  [0x100c763f0]
+    +     !   : | 2 statsUpdateActiveClients  (in redis-server) + 0,404  [0x100c51cb8,0x100c51e4c]
+    +     !   : 1 processCommand  (in redis-server) + 3668  [0x100c5b14c]
+    +     !   : 1 processInputBuffer  (in redis-server) + 5316  [0x100c77870]
+    +     !   : | 1 updateClientMemUsageAndBucket  (in redis-server) + 24  [0x100c497a4]
+    +     !   : |   1 pthread_self  (in libsystem_pthread.dylib) + 28  [0x1893b75ac]
+    +     !   : 1 updateClientMemUsageAndBucket  (in redis-server) + 932  [0x100c49b30]
+    +     !   294 readQueryFromClient  (in redis-server) + 1020  [0x100c75f3c]
+    +     !   : 293 connSocketRead  (in redis-server) + 24  [0x100da6e30]
+    +     !   : | 293 read  (in libsystem_kernel.dylib) + 8  [0x18937891c]
+    +     !   : 1 connSocketRead  (in redis-server) + 24  [0x100da6e30]
+    +     !   5 readQueryFromClient  (in redis-server) + 1024,248,...  [0x100c75f40,0x100c75c38,...]
+    +     !   1 readQueryFromClient  (in redis-server) + 876  [0x100c75eac]
+    +     !   : 1 _sdsMakeRoomFor  (in redis-server) + 0  [0x100c6d6c0]
+    +     !   1 readQueryFromClient  (in redis-server) + 1092  [0x100c75f84]
+    +     !   : 1 sdsIncrLen  (in redis-server) + 0  [0x100c6e1b4]
+    +     !   1 readQueryFromClient  (in redis-server) + 1696  [0x100c761e0]
+    +     !     1 resetReusableQueryBuf  (in redis-server) + 288  [0x100c77cfc]
+    +     228 aeProcessEvents  (in redis-server) + 496  [0x100c3bd00]
+    +     ! 228 beforeSleep  (in redis-server) + 8744  [0x100c54088]
+    +     !   228 handleClientsWithPendingWrites  (in redis-server) + 344  [0x100c8334c]
+    +     !     221 writeToClient  (in redis-server) + 368  [0x100c7fe90]
+    +     !     : 219 connSocketWrite  (in redis-server) + 24  [0x100da6d50]
+    +     !     : | 219 write  (in libsystem_kernel.dylib) + 8  [0x18937b834]
+    +     !     : 1 connSocketWrite  (in redis-server) + 0  [0x100da6d38]
+    +     !     : 1 write  (in libsystem_kernel.dylib) + 40  [0x18937b854]
+    +     !     6 writeToClient  (in redis-server) + 368,32,...  [0x100c7fe90,0x100c7fd40,...]
+    +     !     1 writeToClient  (in redis-server) + 564  [0x100c7ff54]
+    +     !       1 updateClientMemUsageAndBucket  (in redis-server) + 0  [0x100c4978c]
+    +     5 aeProcessEvents  (in redis-server) + 1052  [0x100c3bf2c]
+    +     ! 4 afterSleep  (in redis-server) + 440  [0x100c54530]
+    +     ! : 3 localtime_r  (in libsystem_c.dylib) + 68  [0x18924feb4]
+    +     ! : | 2 _st_localsub  (in libsystem_c.dylib) + 72,372  [0x189251cd8,0x189251e04]
+    +     ! : | 1 _st_localsub  (in libsystem_c.dylib) + 520  [0x189251e98]
+    +     ! : |   1 timesub  (in libsystem_c.dylib) + 672  [0x189252180]
+    +     ! : 1 localtime_r  (in libsystem_c.dylib) + 52  [0x18924fea4]
+    +     ! :   1 tzsetwall_basic  (in libsystem_c.dylib) + 76  [0x1892501f4]
+    +     ! :     1 notify_check_tz  (in libsystem_c.dylib) + 44  [0x1892503c0]
+    +     ! :       1 notify_check  (in libsystem_notify.dylib) + 332  [0x18d8044c8]
+    +     ! :         1 ???  (in libsystem_notify.dylib)  load address 0x18d803000 + 0x59e8  [0x18d8089e8]
+    +     ! :           1 os_set_32_ptr_find  (in libsystem_collections.dylib) + 132  [0x1991faef0]
+    +     ! 1 afterSleep  (in redis-server) + 288  [0x100c54498]
+    +     !   1 getMonotonicUs_aarch64  (in redis-server) + 0  [0x100da7890]
+    +     3 aeProcessEvents  (in redis-server) + 232  [0x100c3bbf8]
+    +     ! 3 serverCron  (in redis-server) + 1504  [0x100c4cc3c]
+    +     !   2 cronUpdateMemoryStats  (in redis-server) + 260  [0x100c4c5b0]
+    +     !   : 2 task_for_pid  (in libsystem_kernel.dylib) + 8  [0x189377c1c]
+    +     !   1 cronUpdateMemoryStats  (in redis-server) + 44  [0x100c4c4d8]
+    +     1 aeProcessEvents  (in redis-server) + 660  [0x100c3bda4]
+    5124 Thread_11973374: bio_close_file
+    + 5124 thread_start  (in libsystem_pthread.dylib) + 8  [0x1893b6c1c]
+    +   5124 _pthread_start  (in libsystem_pthread.dylib) + 136  [0x1893bbc58]
+    +     5124 bioProcessBackgroundJobs  (in redis-server) + 244  [0x100d337d8]
+    +       5124 _pthread_cond_wait  (in libsystem_pthread.dylib) + 980  [0x1893bc128]
+    +         5124 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x18937b50c]
+    5124 Thread_11973375: bio_aof
+    + 5124 thread_start  (in libsystem_pthread.dylib) + 8  [0x1893b6c1c]
+    +   5124 _pthread_start  (in libsystem_pthread.dylib) + 136  [0x1893bbc58]
+    +     5124 bioProcessBackgroundJobs  (in redis-server) + 244  [0x100d337d8]
+    +       5124 _pthread_cond_wait  (in libsystem_pthread.dylib) + 980  [0x1893bc128]
+    +         5124 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x18937b50c]
+    5124 Thread_11973376: bio_lazy_free
+      5124 thread_start  (in libsystem_pthread.dylib) + 8  [0x1893b6c1c]
+        5124 _pthread_start  (in libsystem_pthread.dylib) + 136  [0x1893bbc58]
+          5124 bioProcessBackgroundJobs  (in redis-server) + 244  [0x100d337d8]
+            5124 _pthread_cond_wait  (in libsystem_pthread.dylib) + 980  [0x1893bc128]
+              5124 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x18937b50c]
+
+Total number in stack (recursive counted multiple, when >=5):
+        9       malloc_size  (in libsystem_malloc.dylib) + 0  [0x1891b4034]
+        6       _xzm_free  (in libsystem_malloc.dylib) + 0  [0x1891d8118]
+        6       _xzm_xzone_malloc_from_freelist_chunk  (in libsystem_malloc.dylib) + 0  [0x1891deb80]
+        6       decrRefCount  (in redis-server) + 0  [0x100c87894]
+        6       xzm_malloc_zone_size  (in libsystem_malloc.dylib) + 0  [0x1891e250c]
+        5       malloc_size  (in libsystem_malloc.dylib) + 124  [0x1891b40b0]
+
+Sort by top of stack, same collapsed (when >= 5):
+        __psynch_cvwait  (in libsystem_kernel.dylib)        15372
+        kevent  (in libsystem_kernel.dylib)        3335
+        read  (in libsystem_kernel.dylib)        293
+        write  (in libsystem_kernel.dylib)        220
+        processInputBuffer  (in redis-server)        94
+        xzm_malloc_zone_size  (in libsystem_malloc.dylib)        70
+        _xzm_xzone_malloc_tiny  (in libsystem_malloc.dylib)        65
+        dictPrefetcherRun  (in redis-server)        61
+        _xzm_free  (in libsystem_malloc.dylib)        51
+        malloc_size  (in libsystem_malloc.dylib)        50
+        _platform_memcmp  (in libsystem_platform.dylib)        45
+        _platform_memchr  (in libsystem_platform.dylib)        38
+        _xzm_xzone_malloc_from_freelist_chunk  (in libsystem_malloc.dylib)        34
+        dictFindLinkInternal  (in redis-server)        32
+        processCommand  (in redis-server)        30
+        _platform_memmove  (in libsystem_platform.dylib)        28
+        _xzm_xzone_malloc_freelist_outlined  (in libsystem_malloc.dylib)        28
+        _malloc_zone_malloc  (in libsystem_malloc.dylib)        26
+        strcasecmp_l  (in libsystem_c.dylib)        26
+        call  (in redis-server)        25
+        decrRefCount  (in redis-server)        25
+        dbDictPrefetchEntryKey  (in redis-server)        24
+        zmalloc_usable  (in redis-server)        24
+        <deduplicated_symbol>  (in libsystem_malloc.dylib)        22
+        dbSetValue  (in redis-server)        22
+        _xzm_xzone_malloc  (in libsystem_malloc.dylib)        21
+        createStringObject  (in redis-server)        21
+        _platform_memset  (in libsystem_platform.dylib)        18
+        _free  (in libsystem_malloc.dylib)        17
+        dictGenHashFunction  (in redis-server)        17
+        kvobjSet  (in redis-server)        16
+        preprocessCommand  (in redis-server)        16
+        _xzm_xzone_find_and_malloc_from_freelist_chunk  (in libsystem_malloc.dylib)        14
+        DYLD-STUB$$malloc_size  (in redis-server)        13
+        _xzm_chunk_list_pop  (in libsystem_malloc.dylib)        13
+        prefetchCommands  (in redis-server)        13
+        getMonotonicUs_aarch64  (in redis-server)        12
+        _tlv_get_addr  (in libdyld.dylib)        10
+        notifyKeyspaceEventImpl  (in redis-server)        10
+        resetClientInternal  (in redis-server)        10
+        trackingInvalidateKey  (in redis-server)        10
+        _xzm_chunk_list_push  (in libsystem_malloc.dylib)        9
+        addReply  (in redis-server)        9
+        dictSdsCompareKV  (in redis-server)        9
+        freeClientPendingCommands  (in redis-server)        9
+        lookupKey  (in redis-server)        9
+        setKeyByLink  (in redis-server)        9
+        DYLD-STUB$$memchr  (in redis-server)        7
+        addCommandToBatch  (in redis-server)        7
+        _platform_strchr  (in libsystem_platform.dylib)        6
+        alsoPropagate  (in redis-server)        6
+        getObjectLength  (in redis-server)        6
+        writeToClient  (in redis-server)        6
+        _xzm_chunk_list_slot_push  (in libsystem_malloc.dylib)        5
+        getKeySlot  (in redis-server)        5
+        postExecutionUnitOperations  (in redis-server)        5
+        readQueryFromClient  (in redis-server)        5
+        tryObjectEncodingEx  (in redis-server)        5
+        updateClientMemUsageAndBucket  (in redis-server)        5
+
+Binary Images:
+       0x100c00000 -        0x100e1f28f +redis-server (0) <45C9DFD1-3471-372B-A5F6-C9029FC7CE24> /Users/*/Documents/*/redis-server
+       0x188f48000 -        0x188f9ab4b  libobjc.A.dylib (951.7) <40277974-D20C-3EC8-B25C-43AE30D8CC60> /usr/lib/libobjc.A.dylib
+       0x188f9b000 -        0x188fcfd58  libdyld.dylib (1387) <634959D0-592E-349C-B549-B91F2FF09858> /usr/lib/system/libdyld.dylib
+       0x188fd0000 -        0x1890834ff  dyld (1.0.0 - 1387) <DF42DD9D-AD11-33A7-8849-9AD5DF30A274> /usr/lib/dyld
+       0x189084000 -        0x189087228  libsystem_blocks.dylib (96) <A712B95E-BCEE-3F12-9F9B-58E6C2060E53> /usr/lib/system/libsystem_blocks.dylib
+       0x189088000 -        0x1890dc55f  libxpc.dylib (3102.160.5) <40BBE226-77D4-332E-9DA8-F0B5BACFB86D> /usr/lib/system/libxpc.dylib
+       0x1890dd000 -        0x1890fd9ff  libsystem_trace.dylib (1861.160.4) <E043667E-AD01-3228-837F-A381F32F2B30> /usr/lib/system/libsystem_trace.dylib
+       0x1890fe000 -        0x1891ac5f7  libcorecrypto.dylib (1922.160.10) <D54389FC-4078-370D-A863-9FEF16E00DFD> /usr/lib/system/libcorecrypto.dylib
+       0x1891ad000 -        0x1891fd257  libsystem_malloc.dylib (812.160.5) <971CDCFE-4D20-300E-A1D6-EC8672FDD258> /usr/lib/system/libsystem_malloc.dylib
+       0x1891fe000 -        0x18924523f  libdispatch.dylib (1542.160.2) <243E06A0-7BFF-3C3F-8A9B-D7732729B361> /usr/lib/system/libdispatch.dylib
+       0x189246000 -        0x189248ffb  libsystem_featureflags.dylib (103) <5E7CDBD5-44AB-34C0-A0F5-FC72F6116CDC> /usr/lib/system/libsystem_featureflags.dylib
+       0x189249000 -        0x1892ca1e7  libsystem_c.dylib (1752.160.4) <FDC4E366-5C14-3A1E-BC35-D933D28CDCF3> /usr/lib/system/libsystem_c.dylib
+       0x1892cb000 -        0x18935bae7  libc++.1.dylib (2100.43) <C6DC2145-7B94-3E01-ADE5-96A6C2D078BC> /usr/lib/libc++.1.dylib
+       0x18935c000 -        0x18937675f  libc++abi.dylib (2100.43) <DDE77B06-5E25-380B-85B7-BA1A27D09021> /usr/lib/libc++abi.dylib
+       0x189377000 -        0x1893b42e7  libsystem_kernel.dylib (12377.161.13) <7CFB3A10-ADB2-32C4-99B5-922A111B3224> /usr/lib/system/libsystem_kernel.dylib
+       0x1893b5000 -        0x1893c1b3b  libsystem_pthread.dylib (539.100.4) <12342372-0084-37A5-9EA6-2E4DC940C685> /usr/lib/system/libsystem_pthread.dylib
+       0x1893c2000 -        0x1893ca963  libsystem_platform.dylib (375.120.2) <4C6BD0FE-25F2-38D8-BE5C-24DAC1DEDCFB> /usr/lib/system/libsystem_platform.dylib
+       0x1893cb000 -        0x1893fa6eb  libsystem_info.dylib (600) <7402662E-F235-3F48-BB65-F64C8CF0F2BB> /usr/lib/system/libsystem_info.dylib
+       0x18d398000 -        0x18d3a1e5f  libsystem_darwin.dylib (1752.160.4) <A095E4FE-0EE1-34DF-B00A-7D349FBC55E0> /usr/lib/system/libsystem_darwin.dylib
+       0x18d803000 -        0x18d8151b6  libsystem_notify.dylib (348.160.3) <F9B1BAFF-4D09-3A1F-839B-189C21EB5FBB> /usr/lib/system/libsystem_notify.dylib
+       0x18fad4000 -        0x18faeef7b  libsystem_networkextension.dylib (2226.160.6) <01D14A9E-16DC-372C-8AA8-CC7AD39E797F> /usr/lib/system/libsystem_networkextension.dylib
+       0x18fb71000 -        0x18fb88fdf  libsystem_asl.dylib (406) <FF57F6FA-F3A1-343D-815D-57B769D31445> /usr/lib/system/libsystem_asl.dylib
+       0x19172a000 -        0x191732387  libsystem_symptoms.dylib (2169.160.3) <CE07A0DF-31B6-3528-B7CE-91CAD89AA519> /usr/lib/system/libsystem_symptoms.dylib
+       0x1959cf000 -        0x195a075b7  libsystem_containermanager.dylib (725.160.3) <2E14025A-52C2-361D-8A8F-5DD45825A2C9> /usr/lib/system/libsystem_containermanager.dylib
+       0x196de1000 -        0x196de55d7  libsystem_configuration.dylib (1405.160.3) <A14ED142-2F56-33A6-A23C-EEB8417DC90E> /usr/lib/system/libsystem_configuration.dylib
+       0x196de6000 -        0x196dec99f  libsystem_sandbox.dylib (2680.160.6) <6592D3CE-38C6-3C08-9EA5-75D64F37993F> /usr/lib/system/libsystem_sandbox.dylib
+       0x198441000 -        0x1984441fb  libquarantine.dylib (196.160.2) <78C5B827-8152-358D-90E9-B02F02A68B17> /usr/lib/system/libquarantine.dylib
+       0x198be0000 -        0x198be6d03  libsystem_coreservices.dylib (191.5.1) <F335DA14-69E8-336E-85A3-11EE239255F0> /usr/lib/system/libsystem_coreservices.dylib
+       0x19916f000 -        0x1991aca77  libsystem_m.dylib (3312.100.1) <3739A40F-2C17-3503-92D6-098141E56E89> /usr/lib/system/libsystem_m.dylib
+       0x1991ae000 -        0x1991b1527  libmacho.dylib (1387) <3E43AF47-AD89-3BB4-82B9-A9533F4334DF> /usr/lib/system/libmacho.dylib
+       0x1991cb000 -        0x1991d83a7  libcommonCrypto.dylib (600035) <72D94140-1281-3886-971B-37C810403C03> /usr/lib/system/libcommonCrypto.dylib
+       0x1991d9000 -        0x1991e2ca3  libunwind.dylib (2100.2) <B21A1015-83D4-31D8-BA41-88688962D9A6> /usr/lib/system/libunwind.dylib
+       0x1991eb000 -        0x1991f5bef  libcopyfile.dylib (240.160.2.0.1) <58F425CF-7D4F-34FD-9620-706A2A7F8BDC> /usr/lib/system/libcopyfile.dylib
+       0x1991f6000 -        0x1991f9987  libcompiler_rt.dylib (103.3) <D60A9B54-A909-3FD5-93B9-3F38BE0A2BE8> /usr/lib/system/libcompiler_rt.dylib
+       0x1991fa000 -        0x1991fe78b  libsystem_collections.dylib (1752.160.4) <BDA28F78-F479-3C22-B9C7-4ABCB6801592> /usr/lib/system/libsystem_collections.dylib
+       0x1991ff000 -        0x1992024cf  libsystem_secinit.dylib (168.100.7) <C85AF062-AA9B-35BB-904C-C055B2C21602> /usr/lib/system/libsystem_secinit.dylib
+       0x199203000 -        0x199205bf7  libremovefile.dylib (85.100.6) <DA9C2B48-7A9C-32EA-888D-6C7AEB5250E6> /usr/lib/system/libremovefile.dylib
+       0x199206000 -        0x199206f27  libkeymgr.dylib (31) <18EFA1CE-C535-3EAC-BC2C-7955593B7382> /usr/lib/system/libkeymgr.dylib
+       0x199207000 -        0x19920fe37  libsystem_dnssd.dylib (2881.160.4) <2C4C3043-008E-3BD8-BC29-AB9AD235DBA9> /usr/lib/system/libsystem_dnssd.dylib
+       0x199210000 -        0x19921509b  libcache.dylib (95) <EA7C2E0B-52BF-3D45-9A33-38F54A535452> /usr/lib/system/libcache.dylib
+       0x199216000 -        0x199217ce3  libSystem.B.dylib (1356) <4CC4CAD6-45A6-361E-9343-DE636A0B5C02> /usr/lib/libSystem.B.dylib
+       0x28d1bf000 -        0x28d1c6349  libRosetta.dylib (367.9) <F41D814B-FE1F-311A-A778-5F0699628188> /usr/lib/libRosetta.dylib
+       0x28edd2000 -        0x28edd5a4b  libsystem_darwindirectory.dylib (122) <6C03D78B-BFAB-3C7A-B713-50881791EE08> /usr/lib/system/libsystem_darwindirectory.dylib
+       0x28edd6000 -        0x28ede039b  libsystem_eligibility.dylib (319.160.17) <A279E124-8499-3FFC-A788-655070028F97> /usr/lib/system/libsystem_eligibility.dylib
+       0x28ede1000 -        0x28ede888b  libsystem_sanitizers.dylib (26.1) <C92FAEE5-DAED-3340-96B3-0C42B005ADF9> /usr/lib/system/libsystem_sanitizers.dylib
+       0x28ede9000 -        0x28ede9bb7  libsystem_trial.dylib (474.2.18.2) <2FF186A6-F448-38CD-9A30-8B5B1AEFCA10> /usr/lib/system/libsystem_trial.dylib

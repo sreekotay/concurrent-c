@@ -294,6 +294,8 @@ static size_t unique_shards(RedisDb* db, char[:]* keys, size_t nkeys,
 }
 
 /* --- Conn encode (sketch) ------------------------------------------------ */
+/* Fixed wire bytes → lit(char[:]) (string lits coerce to CC_SLICE_LIT).
+ * Interpolated headers → @string into @scratch, then one write into out. */
 
 static bool !>(CCError) write_all(CCSocket* sock, char[:] data) {
     size_t off = 0;
@@ -331,8 +333,8 @@ static bool !>(CCError) redis_conn_write(RedisConn* c, char[:] data) {
     return cc_ok(true);
 }
 
-static bool !>(CCError) redis_conn_lit(RedisConn* c, const char* s) {
-    return c->write(cc_slice_cstr(s));
+static bool !>(CCError) redis_conn_lit(RedisConn* c, char[:] s) {
+    return c->write(s);
 }
 
 static bool !>(CCError) redis_conn_simple(RedisConn* c, const char* s) {
@@ -345,8 +347,8 @@ static bool !>(CCError) redis_conn_err(RedisConn* c, const char* s) {
     return c->write(line.as_slice());
 }
 
-static bool !>(CCError) redis_conn_ok(RedisConn* c) { return c->simple("OK"); }
-static bool !>(CCError) redis_conn_pong(RedisConn* c) { return c->simple("PONG"); }
+static bool !>(CCError) redis_conn_ok(RedisConn* c) { return c->lit("+OK\r\n"); }
+static bool !>(CCError) redis_conn_pong(RedisConn* c) { return c->lit("+PONG\r\n"); }
 static bool !>(CCError) redis_conn_null(RedisConn* c) { return c->lit("$-1\r\n"); }
 
 static bool !>(CCError) redis_conn_integer(RedisConn* c, int64_t v) {
@@ -463,7 +465,8 @@ static bool !>(CCError) enc_wire_result(RedisConnEnc enc,
         /* Clone under hold (sketch/go). Prep/install races under load. */
         if (!payload_ok(cmd->argc, 2, 2, 0))
             return enc->err("wrong number of arguments");
-        return enc_ok_result(enc, db_set(db, keys[0], keys[1], 0));
+        db_set(db, keys[0], keys[1], 0) !>;
+        return enc->ok();
     case "SETNX":
         if (!payload_ok(cmd->argc, 2, 2, 0))
             return enc->err("wrong number of arguments");
@@ -475,9 +478,9 @@ static bool !>(CCError) enc_wire_result(RedisConnEnc enc,
             return enc->err("wrong number of arguments");
         secs_arg = keys[1];
         seconds = secs_arg.to_i64() !>;
-        return enc_ok_result(
-            enc, db_set_with_ttl(db, keys[0], keys[2],
-                                 expire_seconds_to_rel_ms(seconds), &clock));
+        db_set_with_ttl(db, keys[0], keys[2],
+                        expire_seconds_to_rel_ms(seconds), &clock) !>;
+        return enc->ok();
     }
     case "PSETEX": {
         char[:] ms_arg;
@@ -486,8 +489,8 @@ static bool !>(CCError) enc_wire_result(RedisConnEnc enc,
             return enc->err("wrong number of arguments");
         ms_arg = keys[1];
         ms = ms_arg.to_i64() !>;
-        return enc_ok_result(
-            enc, db_set_with_ttl(db, keys[0], keys[2], ms, &clock));
+        db_set_with_ttl(db, keys[0], keys[2], ms, &clock) !>;
+        return enc->ok();
     }
     case "APPEND":
         if (!payload_ok(cmd->argc, 2, 2, 0))
@@ -659,7 +662,8 @@ static bool !>(CCError) enc_wire_result(RedisConnEnc enc,
     case "MSET":
         if (!payload_ok(cmd->argc, 2, -1, 2))
             return enc->err("wrong number of arguments");
-        return enc_ok_result(enc, db_mset(db, keys, nkeys));
+        db_mset(db, keys, nkeys) !>;
+        return enc->ok();
     default:
         return enc->err("internal");
     }

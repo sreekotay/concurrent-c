@@ -208,16 +208,16 @@ static inline int cc_array_map_core_ensure_buckets(CCArrayMapCore *m,
     return 0;
 }
 
-static inline size_t cc_array_map_core_lookup(const CCArrayMapCore *m,
-                                              const CCArrayMapKind *k,
-                                              const void *key,
-                                              size_t *out_bucket) {
-    size_t h;
+/* Probe with a precomputed hash.  `out_bucket` receives the occupied
+ * bucket on hit, else the first tomb or empty slot for insert. */
+static inline size_t cc_array_map_core_lookup_h(const CCArrayMapCore *m,
+                                                const CCArrayMapKind *k,
+                                                const void *key, size_t h,
+                                                size_t *out_bucket) {
     uint32_t want_frag;
     uint32_t d;
     size_t first_tomb = SIZE_MAX;
-    if (!m || !m->buckets || !m->bucket_mask) return SIZE_MAX;
-    h = k->hash(key);
+    if (!m || !m->buckets || !m->bucket_mask || !k) return SIZE_MAX;
     want_frag = cc_array_map_hash_frag8(h);
     for (d = 0; d < 2048u; d++) {
         size_t b = (h + cc_array_map_quad(d)) & m->bucket_mask;
@@ -248,6 +248,37 @@ static inline size_t cc_array_map_core_lookup(const CCArrayMapCore *m,
     return SIZE_MAX;
 }
 
+static inline size_t cc_array_map_core_lookup(const CCArrayMapCore *m,
+                                              const CCArrayMapKind *k,
+                                              const void *key,
+                                              size_t *out_bucket) {
+    if (!m || !k || !key) return SIZE_MAX;
+    return cc_array_map_core_lookup_h(m, k, key, k->hash(key), out_bucket);
+}
+
+/* Remove a row already located by lookup(_h). */
+static inline bool cc_array_map_core_del_at(CCArrayMapCore *m,
+                                            const CCArrayMapKind *k, size_t di,
+                                            size_t bucket) {
+    size_t last;
+    if (!m || !k || !m->buckets || di >= m->len || bucket == SIZE_MAX)
+        return false;
+    last = m->len - 1u;
+    m->buckets[bucket] = CC_ARRAY_MAP_TOMB;
+    m->tomb_count++;
+    if (di != last) {
+        void *lp = cc_array_map_core_slot(m, k, last);
+        size_t mb = 0;
+        size_t mh = k->hash(lp);
+        size_t mdi = cc_array_map_core_lookup_h(m, k, lp, mh, &mb);
+        memcpy(cc_array_map_core_slot(m, k, di), lp, k->slot_size);
+        if (mdi != SIZE_MAX && mb != SIZE_MAX)
+            m->buckets[mb] = cc_array_map_pack_slot(di, mh);
+    }
+    m->len--;
+    return true;
+}
+
 static inline int cc_array_map_core_insert(CCArrayMapCore *m,
                                            const CCArrayMapKind *k,
                                            const void *key, const void *val) {
@@ -255,13 +286,14 @@ static inline int cc_array_map_core_insert(CCArrayMapCore *m,
     size_t di;
     size_t h;
     void *sp;
-    if (!m) return -1;
+    if (!m || !k || !key || !val) return -1;
     if (m->len >= (size_t)CC_ARRAY_MAP_MAX_LEN) return -1;
-    di = cc_array_map_core_lookup(m, k, key, &bucket);
+    h = k->hash(key);
+    di = cc_array_map_core_lookup_h(m, k, key, h, &bucket);
     if (di == SIZE_MAX) {
         if (cc_array_map_core_ensure_buckets(m, k, m->len + 1u) != 0) return -1;
         if (cc_array_map_core_reserve_dense(m, k, m->len + 1u) != 0) return -1;
-        di = cc_array_map_core_lookup(m, k, key, &bucket);
+        di = cc_array_map_core_lookup_h(m, k, key, h, &bucket);
     }
     if (di != SIZE_MAX) {
         memcpy((char *)cc_array_map_core_slot(m, k, di) + k->val_off, val,
@@ -271,7 +303,6 @@ static inline int cc_array_map_core_insert(CCArrayMapCore *m,
     if (bucket == SIZE_MAX || !m->buckets) return -1;
     if (m->buckets[bucket] == CC_ARRAY_MAP_TOMB && m->tomb_count)
         m->tomb_count--;
-    h = k->hash(key);
     sp = cc_array_map_core_slot(m, k, m->len);
     memcpy(sp, key, k->key_size);
     memcpy((char *)sp + k->val_off, val, k->val_size);
@@ -285,24 +316,10 @@ static inline bool cc_array_map_core_del(CCArrayMapCore *m,
                                          const void *key) {
     size_t bucket = 0;
     size_t di;
-    size_t last;
-    if (!m || !m->buckets) return false;
+    if (!m || !m->buckets || !k || !key) return false;
     di = cc_array_map_core_lookup(m, k, key, &bucket);
     if (di == SIZE_MAX) return false;
-    last = m->len - 1u;
-    m->buckets[bucket] = CC_ARRAY_MAP_TOMB;
-    m->tomb_count++;
-    if (di != last) {
-        void *lp = cc_array_map_core_slot(m, k, last);
-        size_t mb = 0;
-        size_t mdi = cc_array_map_core_lookup(m, k, lp, &mb);
-        size_t mh = k->hash(lp);
-        memcpy(cc_array_map_core_slot(m, k, di), lp, k->slot_size);
-        if (mdi != SIZE_MAX && mb != SIZE_MAX)
-            m->buckets[mb] = cc_array_map_pack_slot(di, mh);
-    }
-    m->len--;
-    return true;
+    return cc_array_map_core_del_at(m, k, di, bucket);
 }
 
 static inline void cc_array_map_core_clear(CCArrayMapCore *m) {
@@ -427,9 +444,25 @@ static inline CCArrayMapCore *cc_array_map_core_init_count(CCArena *arena,
         cc_array_map_core_clear((CCArrayMapCore *)m);                                 \
     }                                                                                 \
                                                                                       \
+    static inline size_t Name##_find_dense_h(Name *m, K key, size_t hash,             \
+                                             size_t *out_bucket) {                    \
+        return cc_array_map_core_lookup_h((const CCArrayMapCore *)m, Name##__kind(),  \
+                                          &key, hash, out_bucket);                    \
+    }                                                                                 \
+                                                                                      \
+    static inline size_t Name##_find_dense(Name *m, K key, size_t *out_bucket) {      \
+        return cc_array_map_core_lookup((const CCArrayMapCore *)m, Name##__kind(),    \
+                                        &key, out_bucket);                            \
+    }                                                                                 \
+                                                                                      \
+    static inline V *Name##_get_ptr_h(Name *m, K key, size_t hash) {                  \
+        size_t di = Name##_find_dense_h(m, key, hash, NULL);                         \
+        if (di == SIZE_MAX) return NULL;                                              \
+        return &m->dense[di].val;                                                     \
+    }                                                                                 \
+                                                                                      \
     static inline V *Name##_get_ptr(Name *m, K key) {                                 \
-        size_t di = cc_array_map_core_lookup((const CCArrayMapCore *)m,               \
-                                             Name##__kind(), &key, NULL);             \
+        size_t di = Name##_find_dense(m, key, NULL);                                  \
         if (di == SIZE_MAX) return NULL;                                              \
         return &m->dense[di].val;                                                     \
     }                                                                                 \
@@ -449,9 +482,14 @@ static inline CCArrayMapCore *cc_array_map_core_init_count(CCArena *arena,
     }                                                                                 \
                                                                                       \
     /* Pointer to the stored key equal to `key` (for owned-key reclaim). */         \
+    static inline K *Name##_find_key_ptr_h(Name *m, K key, size_t hash) {             \
+        size_t di = Name##_find_dense_h(m, key, hash, NULL);                         \
+        if (di == SIZE_MAX) return NULL;                                              \
+        return &m->dense[di].key;                                                     \
+    }                                                                                 \
+                                                                                      \
     static inline K *Name##_find_key_ptr(Name *m, K key) {                            \
-        size_t di = cc_array_map_core_lookup((const CCArrayMapCore *)m,               \
-                                             Name##__kind(), &key, NULL);             \
+        size_t di = Name##_find_dense(m, key, NULL);                                  \
         if (di == SIZE_MAX) return NULL;                                              \
         return &m->dense[di].key;                                                     \
     }                                                                                 \
@@ -459,6 +497,11 @@ static inline CCArrayMapCore *cc_array_map_core_init_count(CCArena *arena,
     static inline int Name##_insert(Name *m, K key, V val) {                          \
         return cc_array_map_core_insert((CCArrayMapCore *)m, Name##__kind(), &key,    \
                                         &val);                                        \
+    }                                                                                 \
+                                                                                      \
+    static inline bool Name##_del_at(Name *m, size_t di, size_t bucket) {             \
+        return cc_array_map_core_del_at((CCArrayMapCore *)m, Name##__kind(), di,      \
+                                        bucket);                                      \
     }                                                                                 \
                                                                                       \
     static inline bool Name##_del(Name *m, K key) {                                   \

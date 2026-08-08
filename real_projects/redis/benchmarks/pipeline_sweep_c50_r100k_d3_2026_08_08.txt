@@ -1,0 +1,119 @@
+== pipeline sweep ==
+c=50 r=100000 d=3 n=150000 set,get REPEATS=3
+
+[P=1]
+  idiomatic set  warmup rps=178359.09
+  upstream  set  warmup rps=222882.62
+  go        set  warmup rps=169109.36
+  upstream  get  warmup rps=204638.48
+  idiomatic get  warmup rps=186799.52
+  go        get  warmup rps=159066.81
+  go        set  r1     rps=187500.00
+  idiomatic set  r1     rps=218023.25
+  upstream  set  r1     rps=208044.38
+  go        get  r1     rps=152284.27
+  idiomatic get  r1     rps=206611.56
+  upstream  get  r1     rps=174825.17
+  idiomatic set  r2     rps=176886.80
+  go        set  r2     rps=134649.92
+  upstream  set  r2     rps=208333.33
+  go        get  r2     rps=183598.53
+  upstream  get  r2     rps=219619.31
+  idiomatic get  r2     rps=230769.23
+  upstream  set  r3     rps=224550.91
+  go        set  r3     rps=167785.23
+  idiomatic set  r3     rps=187734.66
+  upstream  get  r3     rps=182926.83
+  idiomatic get  r3     rps=182260.02
+  go        get  r3     rps=137488.55
+[P=8]
+  go        set  warmup rps=1119403.00
+  idiomatic set  warmup rps=1119403.00
+  upstream  set  warmup rps=1086956.50
+  idiomatic get  warmup rps=1293103.50
+  upstream  get  warmup rps=1250000.00
+  go        get  warmup rps=1013513.50
+  go        set  r1     rps=993377.50
+  idiomatic set  r1     rps=1260504.12
+  upstream  set  r1     rps=1071428.62
+  go        get  r1     rps=1153846.25
+  upstream  get  r1     rps=1304347.75
+  idiomatic get  r1     rps=1304347.75
+  go        set  r2     rps=1239669.38
+  upstream  set  r2     rps=1102941.12
+  idiomatic set  r2     rps=1363636.38
+  idiomatic get  r2     rps=1530612.25
+  go        get  r2     rps=1271186.38
+  upstream  get  r2     rps=1401869.12
+  upstream  set  r3     rps=1063829.75
+  go        set  r3     rps=1282051.25
+  idiomatic set  r3     rps=1500000.00
+  idiomatic get  r3     rps=1546391.75
+  upstream  get  r3     rps=1500000.00
+  go        get  r3     rps=1315789.50
+[P=16]
+  upstream  set  warmup rps=1351351.38
+  go        set  warmup rps=1923076.88
+  idiomatic set  warmup rps=1578947.38
+  upstream  get  warmup rps=1948052.00
+  idiomatic get  warmup rps=1898734.12
+  go        get  warmup rps=1485148.50
+  idiomatic set  r1     rps=1102941.12
+  go        set  r1     rps=1485148.50
+  upstream  set  r1     rps=1351351.38
+  go        get  r1     rps=2173913.00
+  idiomatic get  r1     rps=2083333.38
+  upstream  get  r1     rps=2027027.00
+  idiomatic set  r2     rps=1530612.25
+  go        set  r2     rps=2083333.38
+  upstream  set  r2     rps=1376146.88
+  upstream  get  r2     rps=1785714.25
+  go        get  r2     rps=2142857.25
+  idiomatic get  r2     rps=2027027.00
+  go        set  r3     rps=1973684.25
+  upstream  set  r3     rps=1428571.50
+  idiomatic set  r3     rps=2112676.00
+  go        get  r3     rps=2380952.25
+  idiomatic get  r3     rps=2272727.25
+  upstream  get  r3     rps=1999999.88
+[P=64]
+  idiomatic set  warmup rps=2459278.75
+  upstream  set  warmup rps=1948259.75
+  go        set  warmup rps=3571428.50
+  go        get  warmup rps=3750000.00
+  idiomatic get  warmup rps=2678857.00
+  upstream  get  warmup rps=2778074.00
+  go        set  r1     rps=3409454.50
+  upstream  set  r1     rps=1923282.00
+  idiomatic set  r1     rps=2307938.50
+  idiomatic get  r1     rps=2239044.75
+  go        get  r1     rps=3333688.75
+  upstream  get  r1     rps=2830490.50
+  idiomatic set  r2     rps=2272969.75
+  go        set  r2     rps=2542644.00
+  upstream  set  r2     rps=1807421.75
+  go        get  r2     rps=3333688.75
+  idiomatic get  r2     rps=2631859.75
+  upstream  get  r2     rps=2830490.50
+  idiomatic set  r3     rps=2631859.75
+  upstream  set  r3     rps=1973894.75
+  go        set  r3     rps=2381206.25
+  upstream  get  r3     rps=2419613.00
+  idiomatic get  r3     rps=2307938.50
+  go        get  r3     rps=2459278.75
+
+== summary median RPS / cv% ==
+
+[SET]
+   P     ups med     cv     idi med     cv      go med     cv    id/up   go/up
+   1     0.208M   4.5%     0.188M  11.4%     0.168M  15.9%    0.90x   0.81x
+   8     1.071M   1.9%     1.364M   8.8%     1.240M  12.6%    1.27x   1.16x
+  16     1.376M   2.9%     1.531M  33.1%     1.974M  16.1%    1.11x   1.43x
+  64     1.923M   4.4%     2.308M   8.6%     2.543M  21.7%    1.20x   1.32x
+
+[GET]
+   P     ups med     cv     idi med     cv      go med     cv    id/up   go/up
+   1     0.183M  13.0%     0.207M  11.7%     0.152M  15.5%    1.13x   0.83x
+   8     1.402M   7.0%     1.531M   8.8%     1.271M   6.6%    1.09x   0.91x
+  16     2.000M   6.6%     2.083M   6.2%     2.174M   6.0%    1.04x   1.09x
+  64     2.830M   8.4%     2.308M   9.1%     3.334M  15.1%    0.82x   1.18x

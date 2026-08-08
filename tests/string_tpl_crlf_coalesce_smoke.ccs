@@ -1,0 +1,25 @@
+/* @string `\r\n` must lower to one push_buffer (not two 1-byte pushes).
+ * Runtime oracle: template with escapes + slot builds the wire form. */
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+
+int main(void) {
+    const char* s = "OK";
+    CCArena a = cc_arena_heap(kilobytes(1)) @destroy;
+    CCString line = @string(`+${s}\r\n`, &a);
+    assert(line.len() == 5);
+    assert(memcmp(line.data(), "+OK\r\n", 5) == 0);
+
+    CCString hdr = @string(`:${42}\r\n`, &a);
+    assert(hdr.len() == 5);
+    assert(memcmp(hdr.data(), ":42\r\n", 5) == 0);
+
+    CCString plain = @string(`pre\r\npost`, &a);
+    assert(plain.len() == 9);
+    assert(memcmp(plain.data(), "pre\r\npost", 9) == 0);
+
+    puts("ok");
+    return 0;
+}

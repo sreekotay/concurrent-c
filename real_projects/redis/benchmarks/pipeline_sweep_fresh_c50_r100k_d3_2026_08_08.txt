@@ -1,0 +1,120 @@
+== pipeline sweep (fresh servers per P) ==
+c=50 r=100000 d=3 n=150000 set,get REPEATS=3
+
+[P=1]
+  go        set  warmup rps=119808.31
+  idiomatic set  warmup rps=141911.06
+  upstream  set  warmup rps=193798.45
+  upstream  get  warmup rps=203252.05
+  idiomatic get  warmup rps=209205.02
+  go        get  warmup rps=182704.03
+  go        set  r1     rps=188679.23
+  upstream  set  r1     rps=218978.09
+  idiomatic set  r1     rps=199468.09
+  upstream  get  r1     rps=195567.14
+  go        get  r1     rps=179640.72
+  idiomatic get  r1     rps=209205.02
+  upstream  set  r2     rps=186567.16
+  go        set  r2     rps=158227.84
+  idiomatic set  r2     rps=173010.39
+  go        get  r2     rps=175644.03
+  idiomatic get  r2     rps=205761.33
+  upstream  get  r2     rps=219619.31
+  upstream  set  r3     rps=218340.62
+  idiomatic set  r3     rps=217391.31
+  go        set  r3     rps=185185.19
+  idiomatic get  r3     rps=189873.41
+  upstream  get  r3     rps=216138.33
+  go        get  r3     rps=180505.42
+[P=8]
+  go        set  warmup rps=1119403.00
+  idiomatic set  warmup rps=955414.00
+  upstream  set  warmup rps=1162790.75
+  upstream  get  warmup rps=1442307.62
+  idiomatic get  warmup rps=1388888.88
+  go        get  warmup rps=1388888.88
+  idiomatic set  r1     rps=1376146.88
+  go        set  r1     rps=1327433.62
+  upstream  set  r1     rps=1250000.00
+  idiomatic get  r1     rps=1415094.38
+  go        get  r1     rps=1327433.62
+  upstream  get  r1     rps=1500000.00
+  upstream  set  r2     rps=1200000.00
+  go        set  r2     rps=1327433.62
+  idiomatic set  r2     rps=1351351.38
+  go        get  r2     rps=1200000.00
+  upstream  get  r2     rps=1500000.00
+  idiomatic get  r2     rps=1388888.88
+  go        set  r3     rps=1327433.62
+  idiomatic set  r3     rps=1401869.12
+  upstream  set  r3     rps=1239669.38
+  idiomatic get  r3     rps=1428571.50
+  go        get  r3     rps=1209677.50
+  upstream  get  r3     rps=1401869.12
+[P=16]
+  upstream  set  warmup rps=1401869.12
+  idiomatic set  warmup rps=2380952.25
+  go        set  warmup rps=2307692.50
+  go        get  warmup rps=2380952.25
+  upstream  get  warmup rps=2027027.00
+  idiomatic get  warmup rps=2500000.00
+  idiomatic set  r1     rps=2542372.75
+  upstream  set  r1     rps=1562500.00
+  go        set  r1     rps=2343750.00
+  idiomatic get  r1     rps=2631579.00
+  go        get  r1     rps=1829268.25
+  upstream  get  r1     rps=1875000.00
+  idiomatic set  r2     rps=2542372.75
+  upstream  set  r2     rps=1530612.25
+  go        set  r2     rps=2380952.25
+  upstream  get  r2     rps=1999999.88
+  idiomatic get  r2     rps=2343750.00
+  go        get  r2     rps=2112676.00
+  go        set  r3     rps=2307692.50
+  idiomatic set  r3     rps=2380952.25
+  upstream  set  r3     rps=1530612.25
+  go        get  r3     rps=2380952.25
+  upstream  get  r3     rps=2027027.00
+  idiomatic get  r3     rps=2238806.00
+[P=64]
+  upstream  set  warmup rps=1428723.88
+  go        set  warmup rps=2344000.00
+  idiomatic set  warmup rps=2884615.25
+  upstream  get  warmup rps=2727563.75
+  go        get  warmup rps=3658536.50
+  idiomatic get  warmup rps=3947789.50
+  upstream  set  r1     rps=1764894.12
+  go        set  r1     rps=3333688.75
+  idiomatic set  r1     rps=3333688.75
+  idiomatic get  r1     rps=3409454.50
+  go        get  r1     rps=3333688.75
+  upstream  get  r1     rps=2830490.50
+  go        set  r2     rps=3000320.00
+  upstream  set  r2     rps=1923282.00
+  idiomatic set  r2     rps=3947368.50
+  go        get  r2     rps=3658926.75
+  idiomatic get  r2     rps=4286171.50
+  upstream  get  r2     rps=2884923.00
+  upstream  set  r3     rps=1807421.75
+  idiomatic set  r3     rps=3750400.00
+  go        set  r3     rps=3000320.00
+  upstream  get  r3     rps=2678857.00
+  go        get  r3     rps=3571428.50
+  idiomatic get  r3     rps=4167111.25
+
+== summary median RPS / cv% (fresh servers) ==
+
+[SET]
+   P     ups med     cv     idi med     cv      go med     cv    id/up   go/up
+   1     0.218M   8.5%     0.199M  11.2%     0.185M   9.0%    0.91x   0.85x
+   8     1.240M   2.1%     1.376M   1.8%     1.327M   0.0%    1.11x   1.07x
+  16     1.531M   1.2%     2.542M   3.7%     2.344M   1.6%    1.66x   1.53x
+  64     1.807M   4.5%     3.750M   8.4%     3.000M   6.4%    2.07x   1.66x
+
+[GET]
+   P     ups med     cv     idi med     cv      go med     cv    id/up   go/up
+   1     0.216M   6.0%     0.206M   5.0%     0.180M   1.4%    0.95x   0.83x
+   8     1.500M   3.8%     1.415M   1.4%     1.210M   5.9%    0.94x   0.81x
+  16     2.000M   4.1%     2.344M   8.7%     2.113M  13.1%    1.17x   1.06x
+  64     2.830M   3.8%     4.167M  11.4%     3.571M   4.7%    1.47x   1.26x
+wrote real_projects/redis/benchmarks/pipeline_sweep_fresh_c50_r100k_d3_2026_08_08.txt

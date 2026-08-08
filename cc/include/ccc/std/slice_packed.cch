@@ -260,12 +260,44 @@ static inline void cc_slice_packed_release(CCArena *arena, CCSlicePacked *r) {
     r->w = 0;
 }
 
+/* Bytes + length without building a CCSlice (hot map probe path). */
+static inline const char *cc_slice_packed_data_len(const CCSlicePacked *r,
+                                                  uint32_t *out_len) {
+    if (!r || r->w == 0) {
+        if (out_len) *out_len = 0;
+        return NULL;
+    }
+    if (cc_slice_packed_is_inline(r)) {
+        const unsigned char *b = cc__slice_packed_bytes_const(r);
+        uint32_t len = (uint32_t)(b[0] >> 1);
+        if (out_len) *out_len = len;
+        return len ? (const char *)&b[1] : NULL;
+    }
+    if (cc_slice_packed_is_view(r)) {
+        const CCSlicePackedView *v =
+            (const CCSlicePackedView *)(void *)(r->w & ~(uintptr_t)3u);
+        if (!v) {
+            if (out_len) *out_len = 0;
+            return NULL;
+        }
+        if (out_len) *out_len = v->len;
+        return v->data;
+    }
+    {
+        char *data = (char *)(void *)r->w;
+        uint32_t len = ((uint32_t *)(void *)data)[-1];
+        if (out_len) *out_len = len;
+        return data;
+    }
+}
+
 static inline size_t cc_map_hash_slice_packed(CCSlicePacked r) {
-    CCSlice s = cc_slice_packed_as_slice(&r);
+    uint32_t len = 0;
+    const unsigned char *p =
+        (const unsigned char *)cc_slice_packed_data_len(&r, &len);
     size_t h = 2166136261U;
-    const unsigned char *p = (const unsigned char *)s.ptr;
     size_t i;
-    for (i = 0; i < s.len; ++i) h ^= p[i], h *= 16777619;
+    for (i = 0; i < (size_t)len; ++i) h ^= p[i], h *= 16777619;
     /* Murmur-style finalizer so high bits (ArrayMap hash frag) avalanche. */
     h ^= h >> 16;
     h *= (size_t)0x85ebca6bu;
@@ -276,20 +308,18 @@ static inline size_t cc_map_hash_slice_packed(CCSlicePacked r) {
 }
 
 static inline int cc_map_eq_slice_packed(CCSlicePacked a, CCSlicePacked b) {
-    uint32_t la;
-    uint32_t lb;
-    CCSlice sa;
-    CCSlice sb;
+    uint32_t la = 0;
+    uint32_t lb = 0;
+    const char *pa;
+    const char *pb;
     if (a.w == b.w) return 1;
-    la = cc_slice_packed_len(&a);
-    lb = cc_slice_packed_len(&b);
-    if (la != lb) return 0;
-    if (la == 0) return 1;
     /* Inline packs full payload in `w`; unequal words ⇒ unequal keys. */
     if (cc_slice_packed_is_inline(&a) && cc_slice_packed_is_inline(&b)) return 0;
-    sa = cc_slice_packed_as_slice(&a);
-    sb = cc_slice_packed_as_slice(&b);
-    return sa.ptr && sb.ptr && memcmp(sa.ptr, sb.ptr, (size_t)la) == 0;
+    pa = cc_slice_packed_data_len(&a, &la);
+    pb = cc_slice_packed_data_len(&b, &lb);
+    if (la != lb) return 0;
+    if (la == 0) return 1;
+    return pa && pb && memcmp(pa, pb, (size_t)la) == 0;
 }
 
 #endif /* CC_STD_SLICE_PACKED_H */
