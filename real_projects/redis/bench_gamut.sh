@@ -42,6 +42,9 @@ IDIOMATIC_PORT="${IDIOMATIC_PORT:-6393}"
 GO_PORT="${GO_PORT:-6397}"
 FIXED_KEYS="${FIXED_KEYS:-100000}"
 FIXED_DATA="${FIXED_DATA:-3}"
+# Pause after each cell so macOS ephemeral ports can recycle (c=100 flakes
+# with "Can't assign requested address" under back-to-back redis-benchmark).
+CELL_PAUSE_SEC="${CELL_PAUSE_SEC:-1.5}"
 
 TS="$(date +%Y%m%d_%H%M%S)"
 OUT="${OUT:-$SCRIPT_DIR/benchmarks/gamut_${TS}.txt}"
@@ -189,6 +192,9 @@ for c in $CLIENTS_SWEEP; do
         printf " %s=%s" "$label" "$(sample_rss "$(pid_for "$label")")"
       done
       printf "\n"
+      if [[ -n "${CELL_PAUSE_SEC}" && "${CELL_PAUSE_SEC}" != "0" ]]; then
+        sleep "$CELL_PAUSE_SEC"
+      fi
     done
   done
 done
