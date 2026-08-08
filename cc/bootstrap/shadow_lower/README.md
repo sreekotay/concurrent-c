@@ -84,9 +84,15 @@ not catch macOS-only path resolution or GNU ld ODR issues.
 ./scripts/smoke_bootstrap_fresh.sh
 
 # Linux ILP32 (Docker) — highest-leverage catch for Darwin-only promotes
+# Clean /work sandbox; RO-mounts the repo (does not dirty host out/).
 ./scripts/smoke_i386.sh
 # optional: CCC_HOST_CC=tcc ./scripts/smoke_i386.sh
 ```
+
+A cold `make -C cc -jN` must succeed without a warm `out/`: header seeding is
+`out/runtime/.seed.stamp`, independent of `.headers_lowered.stamp`, so
+stage-1 `lower_headers` does not recurse. If a promote breaks that, fix the
+seed/Makefile before landing `last-good`.
 
 `snapshot_shadow_lower.sh` rewrites both absolute quoted includes and
 repo-relative angle includes (`<cc/shadow/foo.h>` → `"foo.h"`) so the

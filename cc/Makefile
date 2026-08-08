@@ -183,10 +183,10 @@ LOWER_HEADERS_SRCS := src/tools/lower_headers.c \
 	src/util/result_fn_registry.c
 LOWER_HEADERS_OBJS := $(LOWER_HEADERS_SRCS:%.c=$(OBJDIR)/%.o)
 # Same engine surface as lower_headers (minus its main), for prepare/exec/splice.
-# Omit arena_state.o: it is the FFC_IMPL TU and also unity-included by
-# concurrent_c.o. Archiving it here and linking concurrent_c.o on the same
-# line is an ODR hard-error under GNU ld -fno-common (Linux/gcc). shadow_lower
-# always links concurrent_c.o for those symbols instead.
+# Omit arena_state.o from the archive: FFC_IMPL is also unity-included by
+# concurrent_c.o — linking both is an ODR hard-error under GNU ld. Tool
+# binaries (lower_headers*) still link arena_state.o for prov_counter/FFC;
+# shadow_lower links concurrent_c.o instead.
 SHADOW_COMPTIME_ENGINE_OBJS := $(filter-out \
 	$(OBJDIR)/src/tools/lower_headers.o \
 	$(OBJDIR)/runtime/arena_state.o,$(LOWER_HEADERS_OBJS))
@@ -245,13 +245,20 @@ lower-headers: $(LOWER_HEADERS_STAMP)
 # fresh clone / smoke_bootstrap_fresh) seeds a crude host-C out/include so
 # stage-1 can compile, then overwrites with a proper lower. Warm path reuses
 # an existing stage-1 binary (survives `make clean`) without relinking it.
-$(LOWER_HEADERS_STAMP): $(LOWER_HEADERS_INPUTS) $(wildcard runtime/*.c runtime/*.h)
+# Crude host-C seed of out/include + out/runtime. Stage-1 comps against this;
+# must not depend on LOWER_HEADERS_STAMP (cold -j recursion).
+$(OUT_RUNTIME)/.seed.stamp: $(LOWER_HEADERS_INPUTS) $(wildcard runtime/*.c runtime/*.h)
+	@mkdir -p $(OUT_INCLUDE) $(OUT_RUNTIME)
+	@echo "seed headers for stage-1 lower_headers..."
+	@bash ../scripts/seed_headers_for_stage1.sh \
+		"$(abspath include)" "$(abspath $(OUT_INCLUDE))" \
+		"$(abspath runtime)" "$(abspath $(OUT_RUNTIME))"
+	@touch $@
+
+$(LOWER_HEADERS_STAMP): $(LOWER_HEADERS_INPUTS) $(wildcard runtime/*.c runtime/*.h) \
+		$(OUT_RUNTIME)/.seed.stamp
 	@mkdir -p $(OUT_INCLUDE) $(OUT_RUNTIME)
 	@if [ ! -x "$(LOWER_HEADERS1_BINARY)" ]; then \
-		echo "seed headers for stage-1 lower_headers..."; \
-		bash ../scripts/seed_headers_for_stage1.sh \
-			"$(abspath include)" "$(abspath $(OUT_INCLUDE))" \
-			"$(abspath runtime)" "$(abspath $(OUT_RUNTIME))"; \
 		$(MAKE) $(LOWER_HEADERS1_BINARY); \
 	fi
 	@$(LOWER_HEADERS1_BINARY) include $(OUT_INCLUDE) --rewrite-includes runtime $(OUT_RUNTIME)
@@ -472,13 +479,17 @@ $(OBJDIR)/runtime/concurrent_c.o: $(LOWER_HEADERS_STAMP)
 	$(CC) $(CFLAGS) $(RUNTIME_PIC) -MMD -MP -MF $(RUNTIME_FLOAT_OBJ:.o=.d) -c runtime/float_format_zmij.c -o $(RUNTIME_FLOAT_OBJ)
 	$(CC) -nostdlib -r -o $@ $(RUNTIME_CORE_OBJ) $(RUNTIME_FLOAT_OBJ)
 
-# Source still spells `#include <ccc/….cch>`; host-cc the rewrite under out/runtime.
-$(OBJDIR)/runtime/arena_state.o: $(LOWER_HEADERS_STAMP) $(OUT_RUNTIME)/arena_state.c
+# arena_state.o for lower_headers*: compile the seeded rewrite (has .h includes).
+# Depend on the seed stamp only — never LOWER_HEADERS_STAMP (breaks cold -j).
+$(OBJDIR)/runtime/arena_state.o: $(OUT_RUNTIME)/.seed.stamp
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -MMD -MP -MF $(@:.o=.d) -c $(OUT_RUNTIME)/arena_state.c -o $@
 
-# Host objects that `#include <ccc/*.h>` need the stamp first.
-$(OBJS): $(LOWER_HEADERS_STAMP)
+# Host ccc objects that `#include <ccc/*.h>` need the stamp first.
+# Stage-1 lower_headers objs must NOT: the stamp recipe runs
+# `$(MAKE) lower_headers_stage1`, and those objs share paths with $(OBJS).
+# A stamp dep here recurses forever on a cold -j build (ILP32 VM).
+$(filter-out $(LOWER_HEADERS1_OBJS),$(OBJS)): $(LOWER_HEADERS_STAMP)
 
 $(OBJDIR)/%.o: %.c | $(TCC_PATCH_STAMP)
 	@mkdir -p $(dir $@)

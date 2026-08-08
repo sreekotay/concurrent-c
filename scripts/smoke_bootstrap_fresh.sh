@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # smoke_bootstrap_fresh.sh — wipe build products and rebuild from the committed
-# shadow_lower bootstrap (last-good). Catches macOS-only / warm-out/ snapshots:
+# shadow_lower bootstrap (last-good). Canonical cold-tree check after TCC exists:
+#   * fresh-clone graph: no warm out/include or stage-1 binary
 #   * angle-include paths that need a seeded out/include/cc/shadow
 #   * ODR clashes linking concurrent_c.o + libshadow_comptime.a on GNU ld
+#   * stage-1 seed stamp must not recurse under make -j
 #
 # Usage (from repo root):
 #   ./scripts/smoke_bootstrap_fresh.sh

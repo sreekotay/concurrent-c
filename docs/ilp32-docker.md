@@ -35,9 +35,13 @@ docker run --rm --platform linux/386 \
 
 The harness (inside `/work`):
 
-1. Rebuilds patched TinyCC and `ccc`
+1. Wipes prior products and rebuilds patched TinyCC + `ccc` from
+   `last-good` (true cold tree — same graph as a fresh clone)
 2. Checks `ccc` and a linked `hello` binary with `file` — expect `ELF 32-bit`
-3. Runs a curated runtime suite (hello, channels, fibers, atomics, nursery)
+3. Asserts `libshadow_comptime.a` omits `arena_state.o` (GNU ld ODR)
+4. Runs a curated runtime suite (hello, channels, fibers, atomics, nursery)
+
+Use this before promoting a new `shadow_lower` bootstrap seed.
 
 On a native 32-bit Linux host you can run the harness in-tree:
 

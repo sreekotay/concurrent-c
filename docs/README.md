@@ -24,8 +24,22 @@
 
 ## Building the Compiler
 
+From a fresh clone (see [Getting Started → Hacking](getting-started.md#hacking-on-the-compiler-checkout-builds)):
+
 ```bash
-cd cc && make
+./scripts/fetch_submodules.sh
+./scripts/apply_tcc_patches.sh
+jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+(cd third_party/tcc && ./configure --config-cc_ext && make -j"$jobs" libtcc.a tcc libtcc1.a)
+make cc -j"$jobs"
+./cc/bin/ccc run examples/hello.ccs
+```
+
+Cold-tree checks:
+
+```bash
+./scripts/smoke_bootstrap_fresh.sh   # wipe out/ + rebuild from last-good
+./scripts/smoke_i386.sh              # clean Linux i386 Docker sandbox
 ```
 
 Binaries: `cc/bin/ccc` (driver) and `out/cc/bin/shadow_lower` (default native
@@ -35,6 +49,7 @@ front, host-cc'd from `cc/bootstrap/shadow_lower/last-good`). Opt out with
 - [Compiler architecture](../cc/docs/ARCHITECTURE.md) — default native / `shadow_lower`
 - [shadow_lower ops / layout](../cc/shadow/README.md)
 - [Bootstrap snapshots](../cc/bootstrap/shadow_lower/README.md)
+- [ILP32 Docker smoke](ilp32-docker.md)
 - Legacy multipass (opt-out): [LEGACY_ARCHITECTURE.md](../cc/docs/LEGACY_ARCHITECTURE.md)
 
 ## Quick Example
