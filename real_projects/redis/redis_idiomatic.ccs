@@ -13,8 +13,7 @@
  *   RedisConnEnc   → @restricted Encode (no sock/flush)
  *   CCShardHold    → acquire inside execute (same shape as redis.go /
  *                    redis_async_sketch); encode under hold; release before
- *                    the next command / flush. Domain mutexes are pinned
- *                    (resolve once at startup).
+ *                    the next command / flush
  *
  * Shape (go + sketch): parse → execute(hold → exec_* → encode) → flush.
  * One string-switch maps the folded name to RedisOp; hold + leaf dispatch
@@ -1062,10 +1061,6 @@ int main(int argc, char** argv) {
     }
     @defer excl->destroy();
     CCShardDomain shards = cc_shard_domain(excl, mask);
-    if (!shards.pin(&excl_arena)) {
-        eprintln("redis_idiomatic: shard pin failed") !>;
-        return 1;
-    }
 
     size_t nshards = db.shard_count;
     println(@string(`redis_idiomatic listening on ${addr} shards=${nshards}`,

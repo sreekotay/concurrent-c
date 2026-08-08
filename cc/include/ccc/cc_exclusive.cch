@@ -36,7 +36,6 @@
  * so `maps.hold_all()` / `hold_one` / `hold_sorted` UFCS to these helpers:
  *
  *   CCShardDomain d = cc_shard_domain(excl, shards);
- *   d.pin(arena);                 // optional: resolve mutexes once
  *   CCShardHold h = d.hold_one(si);
  *   @defer h.release();           // always pair acquire + defer
  *   if (!h.held()) …;             // admission failed (release is no-op)
@@ -368,9 +367,6 @@ typedef struct CCShardHold {
 typedef struct CCShardDomain {
     CCExclusive* excl;
     CCShardMask mask;
-    /* Optional: excl->mutex(i) for i in [0, mask.count), arena-owned.
-     * When set, hold_* acquire via these handles (no per-admit map lookup). */
-    CCExclusiveMutex* pinned;
 } CCShardDomain;
 
 static inline CCShardDomain cc_shard_domain(CCExclusive* excl,
@@ -378,24 +374,7 @@ static inline CCShardDomain cc_shard_domain(CCExclusive* excl,
     CCShardDomain d;
     d.excl = excl;
     d.mask = mask;
-    d.pinned = NULL;
     return d;
-}
-
-/* Resolve shard mutexes once into `arena`. Safe to call again (no-op if
- * already pinned). Returns 0 on OOM / bad args. */
-static inline bool cc_shard_domain_pin(CCShardDomain* d, CCArena* arena) {
-    size_t i, n;
-    CCExclusiveMutex* ms;
-    if (!d || !d->excl || !arena || d->mask.count == 0) return false;
-    if (d->pinned) return true;
-    n = d->mask.count;
-    ms = (CCExclusiveMutex*)cc_arena_alloc(arena, n * sizeof(*ms),
-                                           _Alignof(CCExclusiveMutex));
-    if (!ms) return false;
-    for (i = 0; i < n; i++) ms[i] = cc_exclusive_mutex(d->excl, (uint64_t)i);
-    d->pinned = ms;
-    return true;
 }
 
 static inline bool cc_shard_hold_held(const CCShardHold* h) {
@@ -413,23 +392,13 @@ static inline void cc_shard_hold_destroy(CCShardHold* h) {
     cc_shard_hold_release(h);
 }
 
-static inline CCExclusiveGuard cc_shard_domain_acquire_name(CCShardDomain* d,
-                                                           uint64_t si) {
-    CCExclusiveGuard g;
-    g._entry = NULL;
-    if (!d || !d->excl) return g;
-    if (d->pinned && si < (uint64_t)d->mask.count)
-        return cc_exclusive_mutex_acquire(&d->pinned[si]);
-    return cc_exclusive_acquire(d->excl, si);
-}
-
 static inline CCShardHold cc_shard_domain_hold_one(CCShardDomain* d,
                                                   uint64_t si) {
     CCShardHold h;
     memset(&h, 0, sizeof(h));
     if (!d || !d->excl || d->mask.count == 0) return h;
     if (si >= (uint64_t)d->mask.count) return h;
-    h.gs[0] = cc_shard_domain_acquire_name(d, si);
+    h.gs[0] = cc_exclusive_acquire(d->excl, si);
     h.n = 1;
     return h;
 }
@@ -440,37 +409,8 @@ static inline CCShardHold cc_shard_domain_hold_sorted(CCShardDomain* d,
     CCShardHold h;
     memset(&h, 0, sizeof(h));
     if (!d || !d->excl || !names || count == 0) return h;
-    if (!d->pinned) {
-        h.n = cc_exclusive_acquire_sorted(d->excl, names, count, h.gs,
-                                          (size_t)CC_EXCLUSIVE_ACQUIRE_MULTI_MAX);
-        return h;
-    }
-    /* Pinned path: same unique-ascending admit as acquire_sorted. */
-    {
-        uint64_t tmp[CC_EXCLUSIVE_ACQUIRE_MULTI_MAX];
-        size_t i, j, n = 0;
-        if (count > (size_t)CC_EXCLUSIVE_ACQUIRE_MULTI_MAX) return h;
-        for (i = 0; i < count; i++) tmp[i] = names[i];
-        for (i = 1; i < count; i++) {
-            uint64_t v = tmp[i];
-            j = i;
-            while (j > 0 && tmp[j - 1] > v) {
-                tmp[j] = tmp[j - 1];
-                j--;
-            }
-            tmp[j] = v;
-        }
-        for (i = 0; i < count; i++) {
-            if (i > 0 && tmp[i] == tmp[i - 1]) continue;
-            if (tmp[i] >= (uint64_t)d->mask.count) {
-                cc_exclusive_guards_release(h.gs, n);
-                memset(&h, 0, sizeof(h));
-                return h;
-            }
-            h.gs[n++] = cc_exclusive_mutex_acquire(&d->pinned[tmp[i]]);
-        }
-        h.n = n;
-    }
+    h.n = cc_exclusive_acquire_sorted(d->excl, names, count, h.gs,
+                                      (size_t)CC_EXCLUSIVE_ACQUIRE_MULTI_MAX);
     return h;
 }
 
@@ -478,19 +418,8 @@ static inline CCShardHold cc_shard_domain_hold_all(CCShardDomain* d) {
     CCShardHold h;
     memset(&h, 0, sizeof(h));
     if (!d || !d->excl || d->mask.count == 0) return h;
-    if (!d->pinned) {
-        h.n = cc_exclusive_acquire_range(d->excl, 0, (uint64_t)d->mask.count,
-                                         h.gs,
-                                         (size_t)CC_EXCLUSIVE_ACQUIRE_MULTI_MAX);
-        return h;
-    }
-    {
-        size_t i, n = d->mask.count;
-        if (n > (size_t)CC_EXCLUSIVE_ACQUIRE_MULTI_MAX) return h;
-        for (i = 0; i < n; i++)
-            h.gs[i] = cc_exclusive_mutex_acquire(&d->pinned[i]);
-        h.n = n;
-    }
+    h.n = cc_exclusive_acquire_range(d->excl, 0, (uint64_t)d->mask.count, h.gs,
+                                     (size_t)CC_EXCLUSIVE_ACQUIRE_MULTI_MAX);
     return h;
 }
 
