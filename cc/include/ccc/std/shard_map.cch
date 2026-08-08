@@ -199,10 +199,16 @@ static inline bool cc_shard_map_init(CCShardMap* m, CCExclusive* excl,
     memset(m, 0, sizeof(*m));
     m->domain = cc_shard_domain(excl, mask);
     n = mask.count;
-    m->root = cc_arena_heap(n * sizeof(CCShard) + 64);
+    m->root = cc_arena_heap(n * sizeof(CCShard) +
+                            n * sizeof(CCExclusiveMutex) + 64);
     if (!cc_arena_valid(&m->root)) return false;
     m->shards = cc_arena_alloc_T_count(CCShard, &m->root, n);
     if (!m->shards) {
+        cc_arena_destroy(&m->root);
+        memset(m, 0, sizeof(*m));
+        return false;
+    }
+    if (!cc_shard_domain_pin(&m->domain, &m->root)) {
         cc_arena_destroy(&m->root);
         memset(m, 0, sizeof(*m));
         return false;
