@@ -522,8 +522,8 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
         cur_len = strlen(buf_inc);
     }
 
-    /* Pass 0b2: `@as` field marker → block comment so lowered .h is valid C
-     * while destroy/UFCS ingest can still see the attribute. */
+    /* Pass 0b2: erase `@as` so lowered .h is plain host C (attribute lives
+     * in the .cch / Concurrent-C AST only). */
     buf_as = cc_rewrite_as_attr_to_comment(cur, cur_len);
     if (buf_as) {
         cur = buf_as;

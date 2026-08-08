@@ -5,21 +5,24 @@
 # ~20x the source's line count.  Pre-fix the blob carried NO #line
 # accounting, so host-compiler diagnostics and debugger lines inside it
 # mapped to last-directive-above + physical drift — for
-# redis_idiomatic.ccs (1717 lines) a diagnostic inside the owner-loop
-# poll fn was reported at redis_idiomatic.ccs:1964, past EOF.  The
-# emitter now drops a masked per-statement marker (async_ast.c,
-# cc__emit_src_line_marker) and every coordinate-stamping pass computes
-# USER lines via the buffer's #line/CC_LN ledger (util/text.h,
-# cc_user_line_for_offset) instead of raw newline counts.
+# redis_idiomatic_spawn_async.ccs a diagnostic inside an @async poll
+# fn was reported past EOF.  The emitter now drops a masked
+# per-statement marker (async_ast.c, cc__emit_src_line_marker) and every
+# coordinate-stamping pass computes USER lines via the buffer's
+# #line/CC_LN ledger (util/text.h, cc_user_line_for_offset) instead of
+# raw newline counts.
 #
 # This test pins the composed result on the emitted C of the real redis
-# port (idiomatic + owner, emit-c'd in parallel — each is a multi-second
-# full lower, which dominated sequential wall time):
+# @async ports (spawn_async twin + owner, emit-c'd in parallel — each is
+# a multi-second full lower, which dominated sequential wall time):
 #   1) the async poll functions carry #line directives at all (the
 #      per-statement markers survived to the final write), and
 #   2) NO #line-mapped coordinate for the .ccs exceeds the source file's
 #      line count (the cpp mapping model: `#line N` makes the next
 #      physical line N, +1 per line until the next directive).
+#
+# Default redis_idiomatic.ccs is sync-fiber (no @async); the spawn_async
+# twin is the line-map subject.
 set -eu
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
@@ -29,14 +32,14 @@ fail() { echo "[test_async_line_map] FAIL: $1" >&2; exit 1; }
 
 command -v python3 >/dev/null 2>&1 || fail "python3 is required for the mapping check"
 
-SRC=real_projects/redis/redis_idiomatic.ccs
+SRC=real_projects/redis/redis_idiomatic_spawn_async.ccs
 OWNER_SRC=real_projects/redis/redis_owner.ccs
 [ -f "$SRC" ] || fail "missing $SRC"
 [ -f "$OWNER_SRC" ] || fail "missing $OWNER_SRC"
 
 out_dir="$(mktemp -d)"
 trap 'rm -rf "$out_dir"' EXIT
-emitted="$out_dir/redis_idiomatic.c"
+emitted="$out_dir/redis_idiomatic_spawn_async.c"
 owner_emitted="$out_dir/redis_owner.c"
 
 # (2) no mapped coordinate exceeds the source's line count.
@@ -94,9 +97,9 @@ wait "$pid_owner" || owner_rc=$?
 # (1) async poll fns exist and the machine region is #line-mapped.
 grep -q '__cc_async_handle_client_[0-9]*_poll' "$emitted" \
   || fail "handle_client poll fn not found in emitted C (async lowering shape drifted)"
-n_dirs=$(grep -c '#line [0-9][0-9]* ".*redis_idiomatic\.ccs"' "$emitted" || true)
+n_dirs=$(grep -c '#line [0-9][0-9]* ".*redis_idiomatic_spawn_async\.ccs"' "$emitted" || true)
 [ "$n_dirs" -ge 50 ] \
-  || fail "expected >=50 #line directives citing redis_idiomatic.ccs in emitted C, got $n_dirs (per-statement async markers missing?)"
+  || fail "expected >=50 #line directives citing redis_idiomatic_spawn_async.ccs in emitted C, got $n_dirs (per-statement async markers missing?)"
 check_no_map_past_eof "$emitted" "$SRC" || exit 1
 
 # (2b) Owner-fiber variant (thickest async machinery since the table-lock

@@ -57,6 +57,7 @@ int c = read() !>(e) { /* local */ @err(e); };
 
 `recv.method(args)` calls the function the receiver's type names.
 **Declaring that function is installing the method** — no registry, no trait, no header edit.
+Method and free forms are the same API (`v.push(10)` ↔ `CCVec_int_push(&v, 10)`); Concurrent-C examples prefer the method form.
 
 ```c
 /* extend: one declaration */
@@ -75,21 +76,48 @@ That is what makes `s.clone_into(&a)` and `clone_into(s, &a)` the same shape.
 
 Generics: `Name::[args]`. Fallible chain: unwrap (`!>` / `?>`), then the next method sees the value.
 
+**Print** (include `<ccc/script/stdio.cch>`): naked `println` / `eprintln` at statement start, flipped on the data, or `io.println` when you have an `io` handle. Templates need an arena — prefer `@scratch` for throwaways.
+
+```c
+println("hi") !>;
+println(@string(`n=${n}`, @scratch)) !>;
+@string(`n=${n}`, @scratch).println() !>;
+```
+
 ---
 
 ## 4. Slices remember where bytes live
 
-[recipe_arena_scope.ccs](../examples/recipe_arena_scope.ccs) · [recipe_long_lived_store.ccs](../examples/recipe_long_lived_store.ccs)
+[recipe_arena_scope.ccs](../examples/recipe_arena_scope.ccs) · [recipe_long_lived_store.ccs](../examples/recipe_long_lived_store.ccs) · [Restricted access](../spec/draft_facets.md)
 
 `T[:]` is a view with provenance (stack, arena, static, unique, …).
-Arenas bump-allocate; one `@destroy` frees the bump.
+`char[:0]` is the NUL-terminated (sentinel) refinement — prefer `char[:0] s = "hi";` for string literals.
+Arenas bump-allocate. Ordinary slice sites allow loads and UFCS; field stores (`s.len = …`) are denied (`@restricted` on the slice family).
+
+| Arena | Storage | Typical use |
+|-------|---------|-------------|
+| `cc_arena_heap(n) @destroy` | malloc root; `@destroy` frees | request / long bump |
+| `cc_arena_stack(name, n)` | stack slab first (may grow) | hot-path / frame scratch |
+| `@scratch` | compiler stack scratch | `@string` / one-shot print |
 
 ```c
+/* Heap — owns the root; destroy at end of scope. */
 CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+char* p = a.allocT(64);
+
+/* Stack — buffer lives in the frame; good for short work. */
+cc_arena_stack(tmp, 1024);
+char* q = tmp.allocT(32);
+
+/* Scratch — only for throwaway templates / println. */
+println(@string(`len=${a.remaining()}`, @scratch)) !>;
+
+char[:0] hi = "hi";
 ```
 
 A view must not outlive its storage — no stack/arena borrow into an outliving task or channel send.
 Own crossing that boundary: unique (`T[:!]` / `cc_adopt`), static, or write into the channel (`send_into`).
+Do not send or capture a slice from `@scratch` or a stack arena past the frame.
 
 Same `[…]` family: `T[n]` arrays, `T[~n >]` / `T[~n <]` channels.
 

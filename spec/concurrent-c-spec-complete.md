@@ -367,6 +367,11 @@ Result types (`T!>(E)`) support these methods via UFCS:
 
 This section documents recommended style for Concurrent-C code.
 
+**UFCS.** Method and free spellings name the same API when both exist
+(`recv.method(args)` ↔ `cc_type_method(&recv, args)`). Concurrent-C examples
+prefer the method form on the semantic receiver; the free twin remains valid
+(lowered C, host headers, and sites where the receiver is awkward).
+
 ### Type Annotation Spacing
 
 **Rule:** Type constructors are written **without spaces**. This applies to all compound type syntax.
@@ -424,10 +429,12 @@ int ! IoError read_int (char [ : ] data) {
 
 Erasure is a spelling: `xs.base` reads the raw element-counted core; passing an instance by value where `CCSlice` is expected autocasts through `bytes()` (scaled). Byte-oriented `CCSlice` methods remain reachable on instances through the `@as` retry; element-wise shadows win by name when declared. Two initializer forms lower specially:
 
-- `char s[:] = "lit";` — the slice views the static string literal; `len` excludes the terminating NUL.
+- `char[:0] s = "lit";` / `char[:] s = "lit";` / `CCSlice s = "lit";` (and Unique/Shared) — a string literal initializing a by-value slice lowers to `CC_SLICE_LIT(lit)`: a canonical static view; `len` excludes the terminating NUL. Prefer the sentinel spelling `char[:0]` when the bytes are known NUL-terminated.
 - `T xs[:] = {a, b, c};` — the elements materialize in a hidden block-scope backing array; the slice is an untracked view with `len` = element count. The view shares the enclosing block's lifetime, like the C array it replaces.
 
 `{0}` and designated initializers (`{ .ptr = p, .len = n }`) remain ordinary C struct initialization of the slice header, not element lists.
+
+Ordinary sites on the slice family deny field stores (`s.len = …`); loads and UFCS remain open. See `draft_facets.md` (§7b) for the unnamed `@restricted on CCSlice { r: *; }` facet.
 
 ---
 
@@ -5134,7 +5141,7 @@ String  <primitive>.to_str(Arena* a);           // e.g. 42.to_str(&arena)
 - Template slots are string-oriented. Accepted slot forms are `char*`, `char[:]`, and `String`; non-string values may bridge through `expr.to_str(a)` if the receiver type provides that UFCS conversion.
 - Interpolation syntax: only `${expr}` and `$~tag{expr}` start a slot (where `tag` is a C identifier). `${expr}` is **untagged**—the policy gets an empty tag slice and the value slice. `$~tag{expr}` is **tagged**—the policy gets the tag slice `"tag"` and the value slice, so policies can distinguish holes (metadata, escaping tiers, i18n keys, and so on). Any other `$` in the template is literal text, so ordinary uses like prices or macros do not need escaping.
 - To emit a literal `${` or `$~tag{` sequence, prefix `$` with backslash: `\${` and `\$~…` are not slots; the backslash is removed and the string helpers emit the remainder (same rules as other template backslash escapes, e.g. an even run of `\` before `$` restores slot parsing, as in `\\${x}`).
-- Backtick template bodies preserve whitespace, indentation, and embedded newlines exactly as written, matching ordinary JavaScript template-literal whitespace behavior (no implicit dedent or trim).
+- Backtick template bodies follow **Template literal dedent** above. Unwrap and Result sigils (`!>`, `?>`) that appear as characters inside a backtick `@string` / `@emit` template body are template text, not operators.
 
 Example:
 
@@ -5272,13 +5279,13 @@ CCSlice cc_slice_from_cstr(const char *cstr);  /* alias of char_to_slice */
 p->to_slice();   /* UFCS: char* → char_to_slice, const char* → const_char_to_slice */
 ```
 
-**Rule (call-site slice literal coerce):** A string literal argument whose
-corresponding parameter is by-value `CCSlice`, `char[:0]`, `CCSliceShared`, or
-`CCSliceUnique` is rewritten to `const_char_to_slice(lit)` in phase-3. TCC
-parser-mode accepts the bare literal. Pointer parameters (`const char *`,
-`char *`, including file `mode`) and non-literal `char[N]` / `char*` variables
-are not coerced — wrap variables with `p->to_slice()` / `char_to_slice(p)`.
-This is not general `char[N]` UFCS.
+**Rule (slice string-literal coerce):** A string literal whose destination is
+by-value `CCSlice`, `char[:]`, `char[:0]`, `CCSliceShared`, or `CCSliceUnique`
+— as a call argument or as a local/field initializer — lowers to
+`CC_SLICE_LIT(lit)` (sizeof-static; `len` excludes NUL). Pointer parameters
+(`const char *`, `char *`, including file `mode`) and non-literal `char[N]` /
+`char*` variables are not coerced — wrap variables with `p->to_slice()` /
+`char_to_slice(p)` / `cc_slice_cstr(p)`. This is not general `char[N]` UFCS.
 
 #### 9.2.1 Core Methods
 
@@ -5415,12 +5422,16 @@ applies an entry rewrite before the ordinary Concurrent-C pipeline:
    `CCError`. `CCIoError` Results reach this handler via `@as` (`base`);
    Io constructors fill the face message so the print is not blank.
 5. Token-gated script predecls `a` / `io` / `in` / `args` (same bindings as
-   one-liner mode) are injected into the synthetic `main` wrap only — the
-   top-level statement body — when the identifier appears as a code token
-   there and that body does not already declare the name. `in` implies
-   `io`; `io` implies `a`. `@task` bodies are not predeclared and declare
-   these names explicitly when needed. One-liner `-n`/`-p` locals `line` /
-   `nr` are not ambient file predecls.
+   one-liner mode; see `draft_script_oneliners.md` §1.1) are injected into
+   the synthetic `main` wrap only — the top-level statement body — when the
+   identifier appears as a code token there and that body does not already
+   declare the name. Injected shapes: `a` is a 1 MiB arena; `io` is
+   `CCStdio` on a private `__cc_io_arena` (not `a`); `in` is `char[:]` from
+   `io.read_all() !>`; `args` is `CCSlice` over `argv + 1`. `in` implies
+   `io`; `io` implies its arena (and thus `a` only when `a` is also
+   referenced). `@task` bodies are not predeclared and declare these names
+   explicitly when needed. One-liner `-n`/`-p` locals `line` / `nr` are not
+   ambient file predecls.
 6. An explicit top-level `main` together with any MAIN-classified top-level
    statement is ill-formed.
 7. Stamp provenance so diagnostics refer to the original `.shcc`: raw
@@ -5502,7 +5513,7 @@ headers below. Scripts do not `#include` the prelude; the driver injects it.
 
 | Header | Role |
 | ------ | ---- |
-| `<ccc/script/stdio.cch>` | `CCStdio` reads; flipped console print on data receivers |
+| `<ccc/script/stdio.cch>` | `CCStdio` reads; console print (`io.println` / data UFCS / naked aliases) |
 | `<ccc/std/cli.cch>` | `@grammar(cli)` runtime (`cc_parse_args` / `cc_prepare_args` / `cc_print_usage`) |
 | `<ccc/script/pathx.cch>` | Repo-root discovery and `char[:0]` path join |
 | `<ccc/script/file.cch>` | Read / write / copy / print by `char[:0]` path |
@@ -5513,7 +5524,7 @@ Arena parameters follow the stdlib convention: **arena last** on allocating
 APIs. Fallible script helpers return `T !>(CCError)` (or the corresponding
 `CCResult_*_CCError` form) unless noted.
 
-#### 9.5.4 `CCStdio` and flipped print
+#### 9.5.4 `CCStdio` and console print
 
 ```c
 CCArena a = @create(megabytes(1)) @destroy;
@@ -5525,26 +5536,32 @@ io.write_all(out.as_slice()) !>;
 
 `CCStdio` binds an arena for growing reads (`read_all` / `read_line`) and
 offers `write_all` / `println` / `eprintln` that take a `CCSlice` or
-`CCString`. Console output prefers the **naked aliases at statement start**
-(no `io` argument). Member UFCS on the data remains available:
+`CCString`. When script `io` is in scope, preferred examples are handle-first.
+Data-first UFCS and naked aliases remain valid (UFCS either way on the chosen
+receiver):
 
 ```c
-println("literal") !>;             /* preferred: naked alias → cc_println */
-println(path) !>;                  /* CCSlice / char[:0] */
-eprintln(line) !>;                 /* CCString */
-println(@string(`n=${n}`, &a)) !>;
-fprintln(STDERR_FILENO, path) !>;  /* naked: fd first, then data */
+io.println(path) !>;               /* preferred when io is in scope */
+io.eprintln(line) !>;
+io.println(@string(`n=${n}`, &a)) !>;
 
 path.println() !>;                 /* also OK: UFCS on data */
+"literal".println() !>;            /* lit/cstr → CCSlice temp → cc_slice_* */
+println(path) !>;                  /* naked alias → cc_println */
 path.fprintln(STDERR_FILENO) !>;   /* UFCS: data, then fd */
+fprintln(STDERR_FILENO, path) !>;  /* naked: fd first, then data */
 ```
+
+When the *data* is the UFCS receiver, `CCSlice` / `CCString` call `cc_slice_*` /
+`cc_string_*`; C string and string-literal receivers coerce to a `CCSlice`
+temporary then `cc_slice_*`. There is no `cc_char_*` UFCS print family
+(`cc_char_*` / `_Generic` arms are free-sugar / lowered-C only).
 
 Returns are `CCResult_size_t_CCError` (same as `CCStdio.println`). Short names
 `print` / `println` / `eprint` / `eprintln` / `fprint` / `fprintln` are not
-user macros — a function-like `#define println(x)` would steal UFCS
+free macros — a function-like `#define println(x)` would steal UFCS
 `x.println()`. The `cc_print*` macros exist as lowered-C sugar (driver inject,
-naked-alias targets, `-E` desugar); script and recipe source prefer naked
-`println` / `eprintln` / `fprintln` at the start of the statement.
+naked-alias targets, `-E` desugar).
 The injected default `@errhandler(CCError)` prints with
 `(void)cc_eprintln(cc_error_str(e))`. Custom handlers should report via
 `cc_error_log` / `cc_error_exit` (or `!> { abort(); }` on the print Result) —
@@ -5836,12 +5853,12 @@ s[..]            // equivalent to s
 
 **String literals:**
 
-String literals used as slice values have static provenance (`owner = NULL`) and
-are sendable. Call-site coerce (§9.2.0) wraps a bare literal at a by-value
-`CCSlice` / `char[:0]` / `CCSliceShared` / `CCSliceUnique` parameter. Initializer
-position (`char[:] s = "hello"`) is not auto-wrapped; write
-`char[:] s = const_char_to_slice("hello")` (or an equivalent helper). Variables
-still need `p->to_slice()` / `char_to_slice(p)`.
+String literals used as slice values have static provenance and are sendable.
+Slice string-literal coerce (§9.2.0) wraps a bare literal at a by-value
+`CCSlice` / `char[:]` / `char[:0]` / `CCSliceShared` / `CCSliceUnique`
+parameter or initializer as `CC_SLICE_LIT(lit)`. Prefer `char[:0] s = "hello";`
+for sentinel borrows. Non-literal `char*` / `char[N]` variables still need
+`p->to_slice()` / `char_to_slice(p)` / `cc_slice_cstr(p)`.
 
 **Closures:**
 

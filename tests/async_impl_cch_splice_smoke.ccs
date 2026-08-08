@@ -11,8 +11,8 @@
 #include "async_impl_cch_splice_helper.cch"
 
 @async int worker(int base, int scale) {
-    char[:] a = CC_SLICE_LIT("40");
-    char[:] b = CC_SLICE_LIT("2");
+    char[:0] a = "40";
+    char[:0] b = "2";
     int64_t s = splice_pad_sum(a, b);
     int64_t pad = splice_pad_fold((int64_t)base);
     return (int)(s + pad + (int64_t)scale);

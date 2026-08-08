@@ -1927,6 +1927,7 @@ static AstNode* parse_array_map_foreach(Parser* p) {
 /* [const] Type[*] name [dims] = expr|{init} ;  (no unwrap / @destroy)
  * Beachhead also accepts anonymous `struct { … }` types (reflect smokes). */
 static AstNode* parse_typed_init(Parser* p) {
+    int has_static = 0;
     int has_const = 0;
     int has_volatile = 0;
     int has_atomic = 0;
@@ -1934,6 +1935,13 @@ static AstNode* parse_typed_init(Parser* p) {
     int is_anon_struct = 0;
     int start_i = p->i;
     int ti = start_i;
+    /* Optional local `static` (e.g. `static char buf[4096];` in a fn body).
+     * Without this, soft_stmt misses and the whole static fn falls to raw
+     * tape — leaving `char[:]` unlowered. */
+    if (ti < p->n && shadow_kw(p->toks[ti]) == SHADOW_KW_STATIC) {
+        has_static = 1;
+        ti++;
+    }
     /* Leading cv-qualifiers: `const` / `volatile` / `_Atomic` (any order). */
     while (ti < p->n) {
         if (shadow_kw(p->toks[ti]) == SHADOW_KW_CONST) {
@@ -2215,6 +2223,10 @@ static AstNode* parse_typed_init(Parser* p) {
         char pref[64];
         size_t pi = 0;
         pref[0] = 0;
+        if (has_static) {
+            memcpy(pref + pi, "static ", 7);
+            pi += 7;
+        }
         if (has_atomic) {
             memcpy(pref + pi, "_Atomic ", 8);
             pi += 8;
@@ -3275,10 +3287,31 @@ static AstNode* parse_static_fn(Parser* p) {
         return NULL;
     int ni = ri + 1;
     int is_long_long = 0;
+    int is_unsigned = 0;
+    int is_unsigned_long = 0;
     int is_slice = 0;
     int is_slice_unique = 0;
-    if (rty.kind == TK_IDENT && spell_eq(rty.spell, "long") && ni < p->n &&
-        p->toks[ni].kind == TK_IDENT && spell_eq(p->toks[ni].spell, "long")) {
+    /* `unsigned` / `unsigned long` / `unsigned long long` / `unsigned int`. */
+    if (rty.kind == TK_IDENT && spell_eq(rty.spell, "unsigned")) {
+        is_unsigned = 1;
+        if (ni < p->n && p->toks[ni].kind == TK_IDENT &&
+            spell_eq(p->toks[ni].spell, "long")) {
+            is_unsigned_long = 1;
+            ni++;
+            if (ni < p->n && p->toks[ni].kind == TK_IDENT &&
+                spell_eq(p->toks[ni].spell, "long")) {
+                is_long_long = 1;
+                ni++;
+            }
+        } else if (ni < p->n &&
+                   (shadow_kw(p->toks[ni]) == SHADOW_KW_INT ||
+                    (p->toks[ni].kind == TK_IDENT &&
+                     spell_eq(p->toks[ni].spell, "int")))) {
+            ni++; /* unsigned int */
+        }
+    } else if (rty.kind == TK_IDENT && spell_eq(rty.spell, "long") &&
+               ni < p->n && p->toks[ni].kind == TK_IDENT &&
+               spell_eq(p->toks[ni].spell, "long")) {
         is_long_long = 1;
         ni++;
     }
@@ -3307,8 +3340,13 @@ static AstNode* parse_static_fn(Parser* p) {
     p_next(p); /* static */
     if (has_inline) p_next(p); /* inline */
     if (has_const) p_next(p); /* const */
-    p_next(p); /* ret */
-    if (is_long_long) p_next(p); /* long (second) */
+    p_next(p); /* ret (or unsigned / long) */
+    if (is_unsigned) {
+        /* Consumed `unsigned`; optional int/long/long long already in ni. */
+        while (p->i < ni) p_next(p);
+    } else if (is_long_long) {
+        p_next(p); /* long (second) */
+    }
     if (is_slice) {
         p_next(p); /* [ */
         p_next(p); /* : */
@@ -3351,7 +3389,14 @@ static AstNode* parse_static_fn(Parser* p) {
             o += (size_t)snprintf(line + o, sizeof(line) - o, "inline ");
         if (has_const)
             o += (size_t)snprintf(line + o, sizeof(line) - o, "const ");
-        if (is_long_long)
+        if (is_unsigned && is_long_long)
+            o += (size_t)snprintf(line + o, sizeof(line) - o,
+                                  "unsigned long long");
+        else if (is_unsigned_long)
+            o += (size_t)snprintf(line + o, sizeof(line) - o, "unsigned long");
+        else if (is_unsigned)
+            o += (size_t)snprintf(line + o, sizeof(line) - o, "unsigned");
+        else if (is_long_long)
             o += (size_t)snprintf(line + o, sizeof(line) - o, "long long");
         else
             o += (size_t)snprintf(line + o, sizeof(line) - o, "%.*s",
@@ -3404,6 +3449,26 @@ static AstNode* parse_static_fn(Parser* p) {
                 snprintf(n->a, sizeof(n->a), "%.*s[:]%s", (int)rty.spell.len,
                          rty.spell.ptr, is_ptr ? "*" : "");
             }
+        } else if (is_unsigned && is_long_long) {
+            if (has_const)
+                snprintf(n->a, sizeof(n->a), "const unsigned long long%s",
+                         is_ptr ? "*" : "");
+            else
+                snprintf(n->a, sizeof(n->a), "unsigned long long%s",
+                         is_ptr ? "*" : "");
+        } else if (is_unsigned_long) {
+            if (has_const)
+                snprintf(n->a, sizeof(n->a), "const unsigned long%s",
+                         is_ptr ? "*" : "");
+            else
+                snprintf(n->a, sizeof(n->a), "unsigned long%s",
+                         is_ptr ? "*" : "");
+        } else if (is_unsigned) {
+            if (has_const)
+                snprintf(n->a, sizeof(n->a), "const unsigned%s",
+                         is_ptr ? "*" : "");
+            else
+                snprintf(n->a, sizeof(n->a), "unsigned%s", is_ptr ? "*" : "");
         } else if (is_long_long) {
             if (has_const)
                 snprintf(n->a, sizeof(n->a), "const long long%s", is_ptr ? "*" : "");
@@ -3816,6 +3881,9 @@ static AstNode* parse_stmt_inner(Parser* p) {
     }
     if (shadow_kw(t) == SHADOW_KW_STATIC) {
         n = parse_static_arr(p);
+        if (n || p->err) return n;
+        /* Local `static T name[N];` / `static T name = …;` */
+        n = parse_typed_init(p);
         if (n || p->err) return n;
     }
     if (shadow_kw(t) == SHADOW_KW_INT) {

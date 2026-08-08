@@ -142,13 +142,15 @@ void cc_slice_destroy(CCSlice *s);
 is an alias of `char_to_slice`. In Concurrent-C, `p->to_slice()` is UFCS:
 `char*` → `char_to_slice`, `const char*` → `const_char_to_slice` (generic
 cv-qualifier peel in the UFCS lowerer; signedness variants likewise).
-At a call site, a string literal whose parameter is by-value `CCSlice`,
-`char[:0]`, `CCSliceShared`, or `CCSliceUnique` is rewritten to
-`const_char_to_slice(lit)` (phase-3). Pointer parameters and non-literal
-`char[N]` / `char*` variables are not coerced — use `p->to_slice()` /
-`char_to_slice(p)`. Host-included C headers may spell the same ABI as
-`CCSlice`; Concurrent-C path and CLI string surfaces are `char[:0]`
-(NUL-terminated borrow).
+A string literal whose destination is by-value `CCSlice`, `char[:]`,
+`char[:0]`, `CCSliceShared`, or `CCSliceUnique` — call argument or
+local/field initializer — lowers to `CC_SLICE_LIT(lit)` (sizeof-static;
+`len` excludes NUL). Prefer `char[:0] s = "hi"` for sentinel borrows.
+Pointer parameters and non-literal `char[N]` / `char*` variables are not
+coerced — use `p->to_slice()` / `char_to_slice(p)` / `cc_slice_cstr(p)`.
+Host-included C headers may spell the same ABI as `CCSlice`; Concurrent-C
+path and CLI string surfaces are `char[:0]` (NUL-terminated borrow).
+Ordinary slice-family sites deny field stores; see `draft_facets.md` §7b.
 `cc_adopt` registers the supplied deleter and produces a unique,
 non-transferable slice. `cc_slice_destroy` invokes that deleter at most once
 for a still-registered unique slice and then clears the slice.
@@ -605,35 +607,41 @@ helpers implement POSIX path syntax only: `cc_path_sep()` is `/`, and
 
 `<ccc/script/stdio.cch>` (script prelude, not `<ccc/std/…>`) defines
 `CCStdio` for arena-backed stdin reads and line-oriented console writes.
-Console output is UFCS on the data — no `CCStdio` argument:
+When script `io` is in scope, preferred examples are handle-first. Data-first
+UFCS and naked aliases remain valid (UFCS either way on the chosen receiver):
 
 ```c
-path.println() !>;                    /* CCSlice / char[:0] */
-line.eprintln() !>;                   /* CCString */
-"literal".println() !>;               /* string literal / cstr */
-cstr_ptr.println() !>;                /* const char * / char * */
-@string(`n=${n}`, &a).println() !>;
+io.println(path) !>;                  /* preferred when io is in scope */
+io.eprintln(line) !>;
+io.println(@string(`n=${n}`, &a)) !>;
+
+path.println() !>;                    /* also OK: UFCS on data */
+"literal".println() !>;               /* lit/cstr → CCSlice → cc_slice_* */
+cstr_ptr.println() !>;
+println(path) !>;                     /* naked alias → cc_println */
 path.fprintln(STDERR_FILENO) !>;
 ```
 
-The prefix spelling is the same call: `println("literal") !>;` and
-`println(@string(`n=${n}`, &a)) !>;` alias the declared `cc_println`
-family (core spec, naked-calls rule) — four aliased names, with any
-translation-unit binding of the name taking the call unchanged. Which
-spelling to write is style.
+When the *data* is the UFCS receiver, `CCSlice` / `CCString` call
+`cc_slice_*` / `cc_string_*`; C string and string-literal receivers coerce to
+a `CCSlice` temporary then `cc_slice_*`. There is no `cc_char_*` UFCS print
+family (`cc_char_*` / `_Generic` arms are free-sugar / lowered-C only).
+
+The prefix spelling aliases the declared `cc_println` family (core spec,
+naked-calls rule) — with any translation-unit binding of the name taking the
+call unchanged.
 
 Guidelines:
 
-- Put the payload in the receiver; choose `println` / `eprintln` / `fprintln`
-  for the sink.
-- Prefer `@string(…).println()` for formatted temps; do not wrap temps in
-  `cc_println`.
-- `cc_println` / `cc_eprintln` are lowered-C sugar only (driver-injected
-  default `@errhandler`, `-E` desugar). New script source uses UFCS.
+- Prefer `io.println(data)` / `io.eprintln(data)` when `io` is in scope.
+- Data-first and naked forms remain valid; choose `println` / `eprintln` /
+  `fprintln` for the sink.
+- Prefer `io.println(@string(…))` (or data-first on the temp) for formatted
+  output; do not wrap temps in `cc_println` in new script source.
+- `cc_println` / `cc_eprintln` are lowered-C sugar (driver-injected default
+  `@errhandler`, `-E` desugar).
 - Inside a custom `@errhandler` body, discard with a bound receiver
   (`CCString msg = …; (void)msg.eprintln();`). Do not use `!>` there.
-- `CCStdio.println` / `eprintln` remain available for sink-first writes when
-  an `io` value is already in hand; flipped form is the default style.
 - `<ccc/std/io.cch>` `cc_std_out_write` / `cc_std_err_write` remain the
   byte-writer API for non-script library code.
 

@@ -16,11 +16,12 @@
 
 #include "build/build.h"
 #include "build/host_cc_profile.h"
-#include <ccc/cc_build_helpers.cch>
+#include <ccc/cc_build_helpers.h>
 #include "driver.h"
 #include "diag/diag.h"
 #include "visitor/pass_common.h"
 #include "preprocess/preprocess.h"
+#include "preprocess/script_entry.h"
 #include "preprocess/script_oneliner.h"
 #include "comptime/const_eval.h"
 
@@ -30,6 +31,9 @@ static int ensure_out_dir(void);
 static int cc__selftest_const_eval(int argc, char** argv);
 static void cc__stem_from_path(const char* path, char* out, size_t cap);
 static int run_build_mode(int argc, char** argv);
+static char* cc__read_all_file(const char* path, size_t* out_len);
+static int cc__write_file_bytes(const char* path, const char* data, size_t len);
+static int cc__mkdir_p(const char* path);
 
 // `--emit-c-inspect[=PATH]`: dump the merged translation unit for inspection.
 // On a clean build it is the full pre-parse merged TU; on a build that fails in
@@ -2428,7 +2432,7 @@ static int g_frontend_native = -1;
 
 /* Legacy front stays on 0.1.x; native (default) is 0.2.x. */
 #define CCC_VERSION_LEGACY "0.1.0-dev"
-#define CCC_VERSION_NATIVE "0.2.4"
+#define CCC_VERSION_NATIVE "0.2.6"
 
 static int cc__set_frontend_name(const char* v) {
     if (!v || !v[0]) return -1;
@@ -2560,14 +2564,87 @@ static int cc__append_build_cc_defines(char* buf, size_t cap, size_t* cflen,
     return 0;
 }
 
-/* Delegate .ccs build/emit to native shadow_lower (owns cache + host-cc/link).
+/* .shcc → content-keyed .ccs for native shadow_lower (prelude / main /
+ * default @errhandler / @task). Host compile stays on whatever CC= is. */
+static int cc__materialize_shcc_for_native(const char* shcc_path, char* out_ccs,
+                                           size_t cap) {
+    char* raw = NULL;
+    char* rewritten = NULL;
+    size_t raw_len = 0;
+    size_t rw_len = 0;
+    uint64_t h;
+    char dir[PATH_MAX];
+    char path[PATH_MAX];
+    char tmp[PATH_MAX];
+    if (!shcc_path || !out_ccs || !cap) return -1;
+    out_ccs[0] = '\0';
+    raw = cc__read_all_file(shcc_path, &raw_len);
+    if (!raw) {
+        fprintf(stderr, "cc: cannot read %s\n", shcc_path);
+        return -1;
+    }
+    rewritten = cc_script_rewrite_source(shcc_path, raw, raw_len, &rw_len);
+    free(raw);
+    if (!rewritten) {
+        fprintf(stderr, "cc: .shcc rewrite failed for %s\n", shcc_path);
+        return -1;
+    }
+    /* Same naked print→cc_* alias as legacy canonicalize (shadow has no
+     * preprocessor pass for it). Member UFCS left untouched. */
+    {
+        char* prints = cc_rewrite_naked_print_aliases(rewritten, rw_len);
+        if (prints) {
+            free(rewritten);
+            rewritten = prints;
+            rw_len = strlen(rewritten);
+        }
+    }
+    h = 1469598103934665603ULL;
+    h = cc__fnv1a64_str(h, shcc_path);
+    h = cc__fnv1a64_update(h, rewritten, rw_len);
+    snprintf(dir, sizeof(dir), "%s/shcc_native", g_cache_root);
+    if (cc__mkdir_p(dir) != 0) {
+        free(rewritten);
+        return -1;
+    }
+    /* Per-process path: parallel cc_test must not race a shared wrap file. */
+    snprintf(path, sizeof(path), "%s/%016llx.%d.ccs", dir, (unsigned long long)h,
+             (int)getpid());
+    if (!file_exists(path)) {
+        snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+        if (cc__write_file_bytes(tmp, rewritten, rw_len) != 0) {
+            unlink(tmp);
+            free(rewritten);
+            return -1;
+        }
+        if (rename(tmp, path) != 0) {
+            unlink(tmp);
+            if (!file_exists(path)) {
+                free(rewritten);
+                return -1;
+            }
+        }
+    }
+    free(rewritten);
+    if (strlen(path) + 1 > cap) {
+        fprintf(stderr, "cc: shcc wrap path too long\n");
+        return -1;
+    }
+    snprintf(out_ccs, cap, "%s", path);
+    return 0;
+}
+
+/* Delegate .ccs/.shcc build/emit to native shadow_lower (owns cache + host-cc/link).
  * Driver loads build.cc / CLI -D, handles dumps/dry-run, and forwards host
- * flags. Options contract: forward, handle here, or hard error — never drop. */
+ * flags. Options contract: forward, handle here, or hard error — never drop.
+ * .shcc is rewritten to a temp .ccs first (script entry); host CC is unchanged. */
 static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path) {
     char shadow[PATH_MAX];
     char cc_flags_buf[2048];
     char cc_flags_arg[2200];
     char ld_flags_arg[2048];
+    char shcc_wrap[PATH_MAX];
+    CCBuildOptions opt_local;
     char* argv[28];
     int argc = 0;
     pid_t pid;
@@ -2576,6 +2653,15 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
     CCConstBinding bindings[128];
     size_t binding_count = 0;
     if (!opt || !opt->in_path || !out_path) return -1;
+
+    if (cc_path_is_shcc(opt->in_path)) {
+        if (cc__materialize_shcc_for_native(opt->in_path, shcc_wrap,
+                                            sizeof(shcc_wrap)) != 0)
+            return -1;
+        opt_local = *opt;
+        opt_local.in_path = shcc_wrap;
+        opt = &opt_local;
+    }
 
     if (cc__load_const_bindings(opt, bindings, &binding_count) != 0) return -1;
     if (opt->dump_consts && !opt->dump_comptime) {
@@ -2715,10 +2801,13 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         fprintf(stderr, "cc: missing input or c_out_path\n");
         return -1;
     }
-    /* Native front: delegate .ccs link/emit to shadow_lower.
+    /* Native front: delegate .ccs/.shcc link/emit to shadow_lower.
+     * .shcc is script-rewritten to a temp .ccs inside cc__run_shadow_lower.
      * --compile = emit C via shadow_lower, then host cc -c (driver-side).
      * Py modules keep the caller's -fPIC/-shared flags; shadow_lower forwards. */
-    if (cc__want_native_front() && cc__ends_with_ci(opt->in_path, ".ccs")) {
+    if (cc__want_native_front() &&
+        (cc__ends_with_ci(opt->in_path, ".ccs") ||
+         cc__ends_with_ci(opt->in_path, ".shcc"))) {
         if (opt->mode == CC_MODE_LINK && opt->bin_out_path) {
             if (summary_out) {
                 memset(summary_out, 0, sizeof(*summary_out));

@@ -12,10 +12,8 @@
  * all-shard) named exclusive locks; redis_owner.ccs by one owner fiber
  * (always init with shard_count=1).
  *
- * Include AFTER redis_cc/redis_cc.cch (types) and after the reply
- * builders (reply_simple/reply_bulk/reply_integer/reply_null/reply_wire,
- * reply_wire_encode_into_arena, reply_arena_alloc_slice): builders are
- * the reply vocabulary db_* functions speak.
+ * Include AFTER redis_cc/redis_cc.cch (types) and redis_reply.cch
+ * (Resp write schemas + reply_* builders db_* speak).
  */
 #ifndef REDIS_DB_CCH
 #define REDIS_DB_CCH
@@ -369,7 +367,8 @@ static void db_release_key_packed(RedisDb* db, CCSlicePacked* k) {
     if (!db || !k) return;
     if (cc_slice_packed_is_empty(k) || cc_slice_packed_is_inline(k) ||
         cc_slice_packed_is_view(k)) {
-        k->w = 0;
+        /* Clear via release helper (packed `.w` store is restricted). */
+        cc_slice_packed_release(NULL, k);
         return;
     }
     sh = db_shard_at(db, db_shard_index_for_packed(db, *k));
@@ -625,7 +624,7 @@ static RedisReply !>(CCError) db_get(RedisDb* db, char[:] key,
         case .num: {
             int64_t n = val->num;
             char[:] text = @string(`${n}`);
-            CCSlice bytes = reply_arena_alloc_slice(reply_arena, text.len) !>;
+            char[:] bytes = reply_arena_alloc_slice(reply_arena, text.len) !>;
             memcpy((char*)bytes.ptr, text.ptr, text.len);
             return cc_ok(reply_bulk(bytes));
         }
@@ -635,7 +634,8 @@ static RedisReply !>(CCError) db_get(RedisDb* db, char[:] key,
 
 /* DEL/EXISTS share the variadic count shape: lazy expiry means a key that
  * timed out counts as absent for both (lookup_live reaps it first). */
-static RedisReply db_del(RedisDb* db, CCSlice* keys, size_t nkeys, DbCmdClock* clock) {
+static RedisReply db_del(RedisDb* db, char[:]* keys, size_t nkeys,
+                         DbCmdClock* clock) {
     int64_t removed = 0;
     if (!db || !db->shards) return reply_integer(0);
     for (size_t i = 0; i < nkeys; ++i) {
@@ -647,7 +647,8 @@ static RedisReply db_del(RedisDb* db, CCSlice* keys, size_t nkeys, DbCmdClock* c
     return reply_integer(removed);
 }
 
-static RedisReply db_exists(RedisDb* db, CCSlice* keys, size_t nkeys, DbCmdClock* clock) {
+static RedisReply db_exists(RedisDb* db, char[:]* keys, size_t nkeys,
+                            DbCmdClock* clock) {
     int64_t found = 0;
     for (size_t i = 0; i < nkeys; ++i) {
         if (db_lookup_live(db, keys[i], clock)) found++;
@@ -698,7 +699,7 @@ static RedisReply !>(CCError) db_append(RedisDb* db,
         return cc_ok(reply_integer((int64_t)suffix.len));
     }
     RedisValue* val = &cell->val;
-    CCSlice old = cc_slice_empty();
+    char[:] old = cc_slice_empty();
     switch (val) {
         case .str: old = val->str.as_slice(); break;
         case .num: {
@@ -706,7 +707,7 @@ static RedisReply !>(CCError) db_append(RedisDb* db,
              * @string buffer is block-scoped and must not escape this case. */
             int64_t n = val->num;
             char[:] text = @string(`${n}`);
-            CCSlice copy = cc_arena_alloc_slice_bytes(scratch, text.len);
+            char[:] copy = cc_arena_alloc_slice_bytes(scratch, text.len);
             if (!copy.ptr) {
                 return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "append staging OOM"));
             }
@@ -716,7 +717,7 @@ static RedisReply !>(CCError) db_append(RedisDb* db,
         }
     }
     size_t new_len = old.len + suffix.len;
-    CCSlice combined = cc_arena_alloc_slice_bytes(scratch, new_len);
+    char[:] combined = cc_arena_alloc_slice_bytes(scratch, new_len);
     if (new_len > 0 && !combined.ptr) {
         return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "append staging OOM"));
     }
@@ -815,7 +816,7 @@ static RedisReply !>(CCError) db_persist(RedisDb* db, char[:] key, DbCmdClock* c
 /* MGET → WIRE array in reply_arena.  Pass 1 reaps; pass 2 re-reads with
  * a stable clock; encode size from cc_measure (one alloc). */
 static RedisReply !>(CCError) db_mget(RedisDb* db,
-                                      CCSlice* keys,
+                                      char[:]* keys,
                                       size_t nkeys,
                                       CCArena* reply_arena,
                                       DbCmdClock* clock) {
@@ -824,7 +825,7 @@ static RedisReply !>(CCError) db_mget(RedisDb* db,
         (void)db_lookup_live(db, keys[i], clock);
     }
 
-    CCSlice vals[REDIS_ARGV_MAX] = {0};
+    char[:] vals[REDIS_ARGV_MAX] = {0};
     bool found[REDIS_ARGV_MAX] = {0};
     for (size_t i = 0; i < nkeys; ++i) {
         RedisEntry* cell = db_lookup_live(db, keys[i], clock);
@@ -840,7 +841,7 @@ static RedisReply !>(CCError) db_mget(RedisDb* db,
                      * stable bytes for the encode below. */
                     int64_t n = val->num;
                     char[:] text = @string(`${n}`);
-                    CCSlice bytes = reply_arena_alloc_slice(reply_arena, text.len) !>;
+                    char[:] bytes = reply_arena_alloc_slice(reply_arena, text.len) !>;
                     memcpy((char*)bytes.ptr, text.ptr, text.len);
                     vals[i] = bytes;
                     break;
@@ -862,16 +863,17 @@ static RedisReply !>(CCError) db_mget(RedisDb* db,
     if (need == 0 || need > (size_t)k_reply_encode_cap_max) {
         return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "mget reply encode overflow"));
     }
-    CCSlice out = reply_arena_alloc_slice(reply_arena, need) !>;
+    char[:] out = reply_arena_alloc_slice(reply_arena, need) !>;
     size_t w = cc_write(RespGBulkArray, &arr, (char*)out.ptr, out.len);
     if (w != need) {
         return cc_err(CC_ERROR(CC_ERR_INTERNAL, "mget encode: write size != measure"));
     }
-    out.len = w;
+    out.truncate(w) !>;
     return cc_ok(reply_wire(out));
 }
 
-static RedisReply !>(CCError) db_mset(RedisDb* db, CCSlice* args, size_t argc) {
+static RedisReply !>(CCError) db_mset(RedisDb* db, char[:]* args,
+                                      size_t argc) {
     @errhandler(CCError e) { return cc_err(e); }
     for (size_t i = 0; i + 1 < argc; i += 2) {
         db_set(db, args[i], args[i + 1], 0) !>;
@@ -971,7 +973,7 @@ static RedisReply !>(CCError) db_keys(RedisDb* db,
                 if (!kp) continue;
                 int64_t exp = db_expires_get(db, *kp);
                 if (exp != 0 && clock.now() >= exp) continue;
-                CCSlice ks = kp->as_slice();
+                char[:] ks = kp->as_slice();
                 if (!glob_match(pat, pattern.len, (const char*)ks.ptr, ks.len)) continue;
                 matched++;
                 RespGReply elem = wire_bulk(ks);
@@ -994,7 +996,7 @@ static RedisReply !>(CCError) db_keys(RedisDb* db,
         return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "keys reply encode overflow"));
     }
 
-    CCSlice out = reply_arena_alloc_slice(reply_arena, need) !>;
+    char[:] out = reply_arena_alloc_slice(reply_arena, need) !>;
     char* dst = (char*)out.ptr;
     size_t off = cc_write(RespGArrayHdr, &hdr, dst, out.len);
     if (off != hdr_sz) {
@@ -1010,7 +1012,7 @@ static RedisReply !>(CCError) db_keys(RedisDb* db,
                 if (!kp) continue;
                 int64_t exp = db_expires_get(db, *kp);
                 if (exp != 0 && clock.now() >= exp) continue;
-                CCSlice ks = kp->as_slice();
+                char[:] ks = kp->as_slice();
                 if (!glob_match(pat, pattern.len, (const char*)ks.ptr, ks.len)) continue;
                 RespGReply elem = wire_bulk(ks);
                 size_t w = cc_write(RespGReply, &elem, dst + off, out.len - off);
@@ -1024,7 +1026,7 @@ static RedisReply !>(CCError) db_keys(RedisDb* db,
     if (off != need) {
         return cc_err(CC_ERROR(CC_ERR_INTERNAL, "keys encode: write size != measure"));
     }
-    out.len = off;
+    out.truncate(off) !>;
     return cc_ok(reply_wire(out));
 }
 

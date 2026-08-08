@@ -1,4 +1,4 @@
-/* redis-style glob for KEYS. Included into redis_idiomatic.ccs. */
+/* redis-style glob for KEYS. Included into redis_idiomatic*.ccs. */
 #ifndef REDIS_IDIOMATIC_GLOB_CCH
 #define REDIS_IDIOMATIC_GLOB_CCH
 

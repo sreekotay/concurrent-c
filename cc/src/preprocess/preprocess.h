@@ -161,6 +161,9 @@ char* cc_rewrite_local_cch_includes_to_lowered_headers(const char* src,
                                                        const char* input_path);
 char* cc_rewrite_system_cch_includes_to_lowered_headers(const char* src,
                                                         size_t input_len);
+/* Naked print/println/fprint/… call aliases → cc_* (script surface).
+ * Comment/string-aware; member position untouched. NULL if unchanged. */
+char* cc_rewrite_naked_print_aliases(const char* src, size_t n);
 void cc_reset_included_cch_sources(void);
 
 /* Enumerate .cch paths registered for this TU (harvest / include rewrite).

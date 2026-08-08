@@ -11,8 +11,8 @@
 #include <stdarg.h>
 #include <stdint.h>
 
-#include <ccc/cc_slice.cch>
-#include <ccc/cc_arena.cch>
+#include <ccc/cc_slice.h>
+#include <ccc/cc_arena.h>
 
 #include "header/lower_header.h"
 #include "comptime/const_eval.h"
@@ -7051,7 +7051,7 @@ static int cc__tu_defines_fnlike_macro(const char* src, size_t n, const char* na
     return cc_text_defines_fnlike_macro(src, n, name);
 }
 
-static char* cc__rewrite_naked_print_aliases(const char* src, size_t n) {
+char* cc_rewrite_naked_print_aliases(const char* src, size_t n) {
     /* Longest-first so fprintln wins over fprint, etc. */
     static const char* const names[] = {
         "fprintln", "eprintln", "println", "fprint", "eprint", "print"
@@ -18457,6 +18457,56 @@ static int cc__try_expand_comptime_for(const char* src, size_t n, const char* in
                     input_path ? input_path : "<input>", (int)(te - ts), src + ts);
             return -1;
         }
+        /* CPP reflection views drop comments, so the @as block-comment marker
+         * vanishes and f.is_as flakes to 0. Host-reflect callbacks may also
+         * omit the bit. Overlay from the pre-expansion TU (naked @as). */
+        if (!want_params && !want_methods && fields && nf > 0) {
+            int need_as = 0;
+            size_t fi;
+            for (fi = 0; fi < nf; fi++) {
+                if (fields[fi].name && !fields[fi].is_as) {
+                    need_as = 1;
+                    break;
+                }
+            }
+            if (need_as) {
+                CCCtField* as_fields = NULL;
+                size_t as_nf = 0;
+                size_t as_bo = 0, as_bc = 0;
+                /* Prefer the pre-expansion TU (`src`); fall back to the
+                 * reflection view when that is a distinct buffer that still
+                 * carries the marker (some hosts keep comments). */
+                int parsed =
+                    cc__ct_find_struct_body(src, n, src + ts, te - ts, &as_bo,
+                                            &as_bc) &&
+                    cc__ct_parse_fields_from_body(src, as_bo, as_bc, &as_fields,
+                                                  &as_nf);
+                if (!parsed && rsrc != src) {
+                    as_fields = NULL;
+                    as_nf = 0;
+                    parsed =
+                        cc__ct_find_struct_body(rsrc, rn, src + ts, te - ts,
+                                                &as_bo, &as_bc) &&
+                        cc__ct_parse_fields_from_body(rsrc, as_bo, as_bc,
+                                                      &as_fields, &as_nf);
+                }
+                if (parsed) {
+                    size_t aj;
+                    for (fi = 0; fi < nf; fi++) {
+                        if (!fields[fi].name || fields[fi].is_as) continue;
+                        for (aj = 0; aj < as_nf; aj++) {
+                            if (as_fields[aj].is_as && as_fields[aj].name &&
+                                strcmp(fields[fi].name, as_fields[aj].name) ==
+                                    0) {
+                                fields[fi].is_as = 1;
+                                break;
+                            }
+                        }
+                    }
+                    cc__ct_free_fields(as_fields, as_nf);
+                }
+            }
+        }
     }
 
     cc_sb_append(out, out_len, out_cap, src + *io_last_emit, i - *io_last_emit);
@@ -19157,7 +19207,7 @@ static int cc__apply_phase1_canonical_passes(CCPassChain* chain,
     if (!skip_comptime_surface &&
         cc_pass_chain_apply(chain, cc__resolve_comptime_if(chain->src, chain->len, input_path)) < 0) return -1;
     CC__CANON_STEP("cc__canonicalize_with_deadline_syntax"); if (cc_pass_chain_apply(chain, cc__canonicalize_with_deadline_syntax(chain->src, chain->len)) < 0) return -1;
-    CC__CANON_STEP("cc__rewrite_naked_print_aliases"); if (cc_pass_chain_apply(chain, cc__rewrite_naked_print_aliases(chain->src, chain->len)) < 0) return -1;
+    CC__CANON_STEP("cc_rewrite_naked_print_aliases"); if (cc_pass_chain_apply(chain, cc_rewrite_naked_print_aliases(chain->src, chain->len)) < 0) return -1;
     cc_note_tu_map_key_pairs(chain->src, chain->len);
     CC__CANON_STEP("cc__normalize_template_recv_chains"); if (cc_pass_chain_apply(chain, cc__normalize_template_recv_chains(chain->src, chain->len)) < 0) return -1;
     if (!skip_comptime_surface &&

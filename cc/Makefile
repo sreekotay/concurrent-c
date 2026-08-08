@@ -381,6 +381,7 @@ $(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_CCS_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_COM
 	fi
 	# Native self-emit, then host-cc link (same objs as bootstrap).
 	# concurrent_c.o supplies arena_state/FFC (omitted from libshadow_comptime.a).
+	CC_INCLUDE_PATH="$(abspath $(OUT_INCLUDE)):$(abspath include)" \
 	$(SHADOW_LOWER_SEED_BIN) $(SHADOW_LOWER_CCS) -o $(OBJDIR)/shadow_lower.emit.c --no-cache \
 		--cc-flags="-I../cc/shadow -I$(TCC_INC) -DSHADOW_HAVE_LIBTCC=1"
 	@if grep -qE '^de#line' $(OBJDIR)/shadow_lower.emit.c; then \

@@ -9,7 +9,7 @@
 #include <stdio.h>
 #include <limits.h>
 
-#include <ccc/cc_arena.cch>
+#include <ccc/cc_arena.h>
 
 #include "comptime/executor.h"
 #include "comptime/hook_compile.h"

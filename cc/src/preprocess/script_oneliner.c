@@ -24,6 +24,11 @@
     "CCArena __cc_io_arena = @create(megabytes(1)) @destroy;\n"
 #define CC_OL_PREDECL_IO "CCStdio io = @create(&__cc_io_arena) @destroy;\n"
 #define CC_OL_PREDECL_IN "char[:] in = io.read_all() !>;\n"
+/* Injected as erased CCSlice — same shape legacy lowers `char *[:]` to.
+ * Keep the sugar out of the magic text so native shadow does not need it. */
+#define CC_OL_PREDECL_ARGS                                                 \
+    "CCSlice args = { .ptr = (char *)(argv + 1), "                         \
+    ".len = (size_t)(argc > 1 ? argc - 1 : 0) };\n"
 
 static void cc__ol_apply_implications(CCScriptOnelinerPredecls* p) {
     if (!p) return;
@@ -188,6 +193,7 @@ static size_t cc__ol_predecl_bytes(const CCScriptOnelinerPredecls* p);
 typedef struct {
     int saw_CCArena;
     int saw_CCStdio;
+    int saw_CCSlice;
     int decl_a;
     int decl_io;
     int decl_in;
@@ -201,11 +207,19 @@ static void cc__ol_decl_on_ident(const char* src, size_t len, size_t i,
     if (cc_match_ident_kw(src, len, i, "CCArena")) {
         d->saw_CCArena = 1;
         d->saw_CCStdio = 0;
+        d->saw_CCSlice = 0;
         return;
     }
     if (cc_match_ident_kw(src, len, i, "CCStdio")) {
         d->saw_CCStdio = 1;
         d->saw_CCArena = 0;
+        d->saw_CCSlice = 0;
+        return;
+    }
+    if (cc_match_ident_kw(src, len, i, "CCSlice")) {
+        d->saw_CCSlice = 1;
+        d->saw_CCArena = 0;
+        d->saw_CCStdio = 0;
         return;
     }
     if (d->saw_CCArena && cc_match_ident_kw(src, len, i, "a")) {
@@ -229,6 +243,7 @@ static void cc__ol_decl_on_ident(const char* src, size_t len, size_t i,
         if (j > 0 && src[j - 1] == ']') d->decl_in = 1;
         d->saw_CCArena = 0;
         d->saw_CCStdio = 0;
+        d->saw_CCSlice = 0;
         return;
     }
     if (cc_match_ident_kw(src, len, i, "args")) {
@@ -236,13 +251,17 @@ static void cc__ol_decl_on_ident(const char* src, size_t len, size_t i,
         while (j > 0 && (src[j - 1] == ' ' || src[j - 1] == '\t' ||
                          src[j - 1] == '\n' || src[j - 1] == '\r'))
             j--;
+        /* `char *[:] args` (legacy surface) or `CCSlice args` (injected). */
         if (j > 0 && src[j - 1] == ']') d->decl_args = 1;
+        if (d->saw_CCSlice) d->decl_args = 1;
         d->saw_CCArena = 0;
         d->saw_CCStdio = 0;
+        d->saw_CCSlice = 0;
         return;
     }
     d->saw_CCArena = 0;
     d->saw_CCStdio = 0;
+    d->saw_CCSlice = 0;
 }
 
 void cc_script_oneliner_suppress_existing_decls(const char* src, size_t len,
@@ -338,9 +357,7 @@ char* cc_script_oneliner_predecls_for(const char* src, size_t len,
         o += sizeof(s) - 1;
     }
     if (p.want_args) {
-        static const char s[] =
-            "char *[:] args = { .ptr = (char *)(argv + 1), "
-            ".len = (size_t)(argc > 1 ? argc - 1 : 0) };\n";
+        static const char s[] = CC_OL_PREDECL_ARGS;
         if (ind_len) {
             memcpy(out + o, indent, ind_len);
             o += ind_len;
@@ -521,9 +538,7 @@ static size_t cc__ol_predecl_bytes(const CCScriptOnelinerPredecls* p) {
     if (p->want_in)
         n += sizeof(CC_OL_PREDECL_IN) - 1;
     if (p->want_args)
-        n += sizeof("char *[:] args = { .ptr = (char *)(argv + 1), "
-                    ".len = (size_t)(argc > 1 ? argc - 1 : 0) };\n") -
-             1;
+        n += sizeof(CC_OL_PREDECL_ARGS) - 1;
     /* line/nr are declared inside the -n loop, not as ambient predecls. */
     if (n) n += 1;
     return n;
@@ -555,9 +570,7 @@ static size_t cc__ol_append_predecls(char* out, size_t o, size_t cap,
         o += n;
     }
     if (p->want_args) {
-        static const char s[] =
-            "char *[:] args = { .ptr = (char *)(argv + 1), "
-            ".len = (size_t)(argc > 1 ? argc - 1 : 0) };\n";
+        static const char s[] = CC_OL_PREDECL_ARGS;
         size_t n = sizeof(s) - 1;
         if (o + n < cap) memcpy(out + o, s, n);
         o += n;

@@ -5,8 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <ccc/cc_slice.cch>
-#include <ccc/cc_arena.cch>
+#include <ccc/cc_slice.h>
+#include <ccc/cc_arena.h>
 
 #include "preprocess/preprocess.h"
 #include "preprocess/type_registry.h"

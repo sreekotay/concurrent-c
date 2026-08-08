@@ -1271,9 +1271,12 @@ static inline int cc_is_non_decl_stmt_type(const char* type_name) {
  * type macros, and rejects non-declaration statements (assignments to fields,
  * function calls, etc.).
  */
-/* Rewrite field attribute `@as` to a block comment marker (`/@as/` with
- * stars) so TCC accepts the TU while field collectors can still see it.
- * Returns malloc'd buffer or NULL when unchanged / OOM. */
+/* Rewrite field attribute `@as` to a block-comment marker so host C / TCC
+ * accept the TU while field collectors and comptime `type_of(T).fields`
+ * still see the composition bit (marker spelling: slash-star @as star-slash).
+ * Stripping the attribute entirely made `f.is_as` flake to 0.
+ * Skips comments and string/char literals. Returns malloc'd buffer or NULL
+ * when unchanged / OOM. */
 static inline char* cc_rewrite_as_attr_to_comment(const char* src, size_t n) {
     size_t i = 0;
     size_t out_cap;

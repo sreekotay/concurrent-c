@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include <ccc/cc_arena.cch>
+#include <ccc/cc_arena.h>
 
 #define CC_COMPTIME_FN_NAME_MAX 64
 

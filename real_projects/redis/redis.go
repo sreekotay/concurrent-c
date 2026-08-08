@@ -6,6 +6,7 @@
 //
 // The Concurrent-C sketch with the same tiny command surface is
 // redis_async_sketch.ccs — same spirit of incompleteness, not a line twin.
+// Full CC server: redis_idiomatic.ccs (sketch I/O + complete command surface).
 //
 // Build: go build -o out/redis_go redis.go
 // Run:   ./out/redis_go [addr]   # default 127.0.0.1:6380

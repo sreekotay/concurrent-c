@@ -1,4 +1,4 @@
-#include <ccc/cc_build_helpers.cch>
+#include <ccc/cc_build_helpers.h>
 
 #include <ctype.h>
 #include <stdio.h>

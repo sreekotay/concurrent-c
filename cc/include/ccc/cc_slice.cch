@@ -96,7 +96,7 @@ typedef CCSlice CCSliceShared;
  * as Vec and Map families. */
 #define CC_DECL_SLICE_SPEC(NAME, T)                                            \
     typedef struct NAME {                                                      \
-        CCSlice base /*@as*/;                                                  \
+        CCSlice base @as;                                                      \
     } NAME;                                                                    \
     static inline NAME NAME##_from_buffer(T *p, size_t count) {                \
         NAME s;                                                                \
@@ -252,15 +252,16 @@ static inline CCSlice const_signed_char_to_slice_n(const signed char *p,
 
 /* NUL-terminated C string → untracked view (strlen). No UFCS — call this
  * only at a trust boundary where the pointer is known to be a cstr. Prefer
- * CC_SLICE_LIT / @slice for literals and to_slice_n for counted buffers. */
+ * literal init / @slice for literals and to_slice_n for counted buffers. */
 static inline CCSlice cc_slice_cstr(const char *cstr) {
     if (!cstr) return cc_slice_empty();
     return cc_slice_from_buffer((void *)cstr, strlen(cstr));
 }
 
 /* String literal → canonical static slice. `lit` must be a string literal
- * token so sizeof(lit) is the array size (includes NUL). In .ccs prefer
- * @slice("..."). */
+ * token so sizeof(lit) is the array size (includes NUL). Concurrent-C surface
+ * prefers `char[:0] s = "…"` (or `@slice("…")`); both lower to this form.
+ * Host C may call `CC_SLICE_LIT` directly. */
 #define CC_SLICE_LIT(lit) \
     cc_slice_from_static((void *)(lit), sizeof(lit) - 1u)
 

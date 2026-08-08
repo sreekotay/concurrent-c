@@ -26,7 +26,8 @@
  *
  * Build: `make redis_owner`.  Compare vs default: `./bench_lock_cmp.sh`
  * (labels: owner vs idiomatic).  Default server is `redis_idiomatic.ccs`
- * (table-wide CCExclusive).
+ * (sketch I/O + full RedisDb, table-wide CCExclusive).  @async twin:
+ * `redis_idiomatic_spawn_async.ccs`.
  *
  * Memory: always emits parseable `mem_gap` at phase stamps (post-preload,
  * owner-ready, CC.MEMLOG [phase]).  Gap = process footprint − (map+key+value
@@ -142,7 +143,7 @@ static void redis_conn_destroy(RedisConn* conn);
 static void redis_conn_release_slot(RedisConn* conn, RedisRequest* req);
 /* Defined with the reply path below; the owner's array-reply builders
  * (MGET/KEYS) allocate through it into conn->reply_arena. */
-static CCSlice !>(CCError) reply_arena_alloc_slice(CCArena* reply_arena, size_t n);
+static char[:] !>(CCError) reply_arena_alloc_slice(CCArena* reply_arena, size_t n);
 
 /* After drain-to-zero (see RedisConn lifetime), free the conn. */
 @comptime {
@@ -245,7 +246,7 @@ static bool slice_eq_ignore_case(char[:] s, const char* cstr) {
 ~~~~}
 
 static RespParseStatus gen_try_read_args_buffered(RespReader* r,
-                                                  CCSlice* args,
+                                                  char[:]* args,
                                                   size_t cap,
                                                   size_t* out_argc,
                                                   CCError* err) {
@@ -373,7 +374,7 @@ static RedisReply io_err_reply(CCIoError err) {
     return reply_error(cc_io_error_str(err));
 }
 
-static RedisReply reply_bulk(CCSlice s) {
+static RedisReply reply_bulk(char[:] s) {
     RedisReply r;
     r.kind = REDIS_REPLY_BULK_STRING;
     r.data = s;
@@ -396,7 +397,7 @@ static RedisReply reply_integer(int64_t v) {
 }
 
 /* Opaque RESP already in reply_arena (arrays+nil; ensure_owned is a no-op). */
-static RedisReply reply_wire(CCSlice s) {
+static RedisReply reply_wire(char[:] s) {
     RedisReply r;
     r.kind = REDIS_REPLY_WIRE;
     r.data = s;
@@ -405,11 +406,11 @@ static RedisReply reply_wire(CCSlice s) {
 
 /* RedisReply → socket bytes.  RespGReply is encode-only; NULL_BULK uses
  * RespGBulk's nil arm. */
-static inline RespGReply wire_bulk(CCSlice data) {
+static inline RespGReply wire_bulk(char[:] data) {
     return (RespGReply){ .bulk = { .len = (long long)data.len, .data = data } };
 }
 
-static inline RespGBulk wire_bulk_or_nil(CCSlice data, bool found) {
+static inline RespGBulk wire_bulk_or_nil(char[:] data, bool found) {
     if (!found) return (RespGBulk){ .nil = {} };
     return (RespGBulk){ .data = { .payload = data } };
 }
@@ -457,14 +458,14 @@ static size_t RedisReply_write(const RedisReply* reply, char* dst, size_t cap) {
 /* Encode into reply_arena via cc_measure (exact size; one alloc + write). */
 enum { k_reply_encode_cap_max = 1 << 30 };
 
-static CCSlice !>(CCError) reply_wire_encode_into_arena(const RespGReply* wire,
+static char[:] !>(CCError) reply_wire_encode_into_arena(const RespGReply* wire,
                                                         CCArena* reply_arena) {
     @errhandler(CCError e) { return cc_err(e); }
     size_t need = cc_measure(RespGReply, wire);
     if (need == 0 || need > (size_t)k_reply_encode_cap_max) {
         return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "reply encode overflow"));
     }
-    CCSlice out = reply_arena_alloc_slice(reply_arena, need) !>;
+    char[:] out = reply_arena_alloc_slice(reply_arena, need) !>;
     size_t w = cc_write(RespGReply, wire, (char*)out.ptr, out.len);
     if (w != need) {
         return cc_err(CC_ERROR(CC_ERR_INTERNAL, "reply encode: write size != measure"));
@@ -490,11 +491,11 @@ static RedisReply !>(CCError) config_get_reply(char[:] key, CCArena* reply_arena
     RespGReply arr = {
         .array = { .n = (long long)n, .items = items, .items_n = n }
     };
-    CCSlice out = reply_wire_encode_into_arena(&arr, reply_arena) !>;
+    char[:] out = reply_wire_encode_into_arena(&arr, reply_arena) !>;
     return cc_ok(reply_wire(out));
 }
 
-static bool !>(CCError) decode_request_shape(CCSlice* args,
+static bool !>(CCError) decode_request_shape(char[:]* args,
                                              size_t argc,
                                              RedisCommandKind* out_kind,
                                              size_t* out_arg_start,
@@ -600,7 +601,7 @@ static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
     /* Parse BEFORE taking a pool slot: incomplete frames are the common
      * refill case and must not touch req_pool / argv_buf at all.  Args
      * borrow read_buf until we materialize into req->arena below. */
-    CCSlice args[k_argv_cap] = {0};
+    char[:] args[k_argv_cap] = {0};
     size_t argc = 0;
     CCError perr = {0};
     RespParseStatus argc_status =
@@ -766,7 +767,7 @@ static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
 }
 
 
-static bool write_all(CCSocket* sock, CCSlice data) {
+static bool write_all(CCSocket* sock, char[:] data) {
     size_t off = 0;
     const int write_deadline_ms = 1000;
     CCDeadline deadline = cc_deadline_after_ms(write_deadline_ms);
@@ -786,7 +787,7 @@ static bool write_all(CCSocket* sock, CCSlice data) {
 
 static bool redis_conn_flush_out(RedisConn* conn) {
     if (!conn || conn->out_len == 0) return true;
-    CCSlice data = {
+    char[:] data = {
         .ptr = conn->out_buf,
         .len = conn->out_len,
     };
@@ -794,7 +795,7 @@ static bool redis_conn_flush_out(RedisConn* conn) {
     return write_all(conn->sock, data);
 }
 
-static bool redis_conn_write_bytes(RedisConn* conn, CCSlice data) {
+static bool redis_conn_write_bytes(RedisConn* conn, char[:] data) {
     if (!conn || data.len == 0) return true;
     if (data.len > redis_conn_out_buf_bytes) {
         return conn->flush_out() && write_all(conn->sock, data);
@@ -859,8 +860,8 @@ static bool redis_conn_write_reply(RedisConn* conn, const RedisReply* reply) {
     return conn->write_wire_reply(&wire);
 }
 
-static CCSlice !>(CCError) reply_arena_alloc_slice(CCArena* reply_arena, size_t n) {
-    CCSlice s = cc_arena_alloc_slice_bytes(reply_arena, n);
+static char[:] !>(CCError) reply_arena_alloc_slice(CCArena* reply_arena, size_t n) {
+    char[:] s = cc_arena_alloc_slice_bytes(reply_arena, n);
     if (n > 0 && !s.ptr) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "reply encode OOM"));
     return cc_ok(s);
 }

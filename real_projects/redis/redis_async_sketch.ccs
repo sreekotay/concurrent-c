@@ -4,8 +4,10 @@
  * Lifetimes:
  *   Cmd.args      → clone_into(cmd arena) for one execute (not BufReader views)
  *   shard arenas  → durable keys/values (put copies; delete releases packed entries)
- *   Conn.out      → encode only into stack arena (8K) that spills to heap;
- *                   flush after shard release (never socket I/O under hold)
+ *   Conn.out      → encode coalesce (8K stack slab, growable spill); flush
+ *                   after shard release (never socket I/O under hold).
+ *                   Format lines with @string(..., @scratch) then write into out
+ *                   — scratch is stack-local; one append into the coalesce buf.
  *   ConnEnc (= @restricted Encode) → execute/exec_* encode-only (no sock/flush);
  *                   handle_client keeps Conn* for flush (draft_facets.md)
  *   encode/flush  → bool !>(CCError): Ok = buffered/shipped; Redis -ERR is Ok
@@ -20,6 +22,8 @@
  *   RESP array. Connection dies on Err, so the client sees malformed
  *   protocol rather than a clean close on heap exhaustion — not worth
  *   two-phase encode here; just know it.
+ *
+ * Full server (same I/O shape, full command surface): redis_idiomatic.ccs.
  *
  * Build: `make redis_async_sketch`
  * Run:   ./out/redis_async_sketch [addr]   # default 127.0.0.1:6381
@@ -101,12 +105,12 @@ static bool !>(CCError) conn_flush(Conn* c) {
 }
 
 /* Encode-only: never flush/socket — safe under a shard hold.
- * Stack slab first; arena spills to heap so large GET/MGET do not hard-fail. */
+ * Format on @scratch (stack), then one append into Conn.out. */
 static bool !>(CCError) conn_write(Conn* c, char[:] data) {
     if (!c || !c->arena)
-        return cc_err(CC_ERR_INVALID_ARG, "conn write: null");
+        return cc_err(CC_ERR_INVALID_ARG, "conn encode: null");
     if (data.len == 0) return cc_ok(true);
-    if (!c->out.push_slice(data, c->arena) || c->out.failed())
+    if (!c->out.append(data, c->arena) || c->out.failed())
         return cc_err(CC_ERR_OUT_OF_MEMORY, "conn encode oom");
     return cc_ok(true);
 }

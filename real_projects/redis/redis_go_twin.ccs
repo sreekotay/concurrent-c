@@ -22,7 +22,7 @@
  *   errors     →  T!>(E) + cc_err(@as) Io→CCError
  *   nursery    →  cancel_on_signals; accept task; @destroy joins
  *
- * Full server: redis_idiomatic.ccs.
+ * Full server (sketch I/O grown up): redis_idiomatic.ccs.
  *
  * Build: `make redis_go_twin`
  * Run:   ./out/redis_go_twin [addr]   # default 127.0.0.1:6380

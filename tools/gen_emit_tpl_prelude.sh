@@ -26,17 +26,17 @@ TMP="$OUT.tmp.$$"
     "#include <stdlib.h>\n" \
     "#include <stdbool.h>\n" \
     "#include <ctype.h>\n" \
-    "#include <ccc/cc_slice.cch>\n" \
-    "#include <ccc/cc_arena.cch>\n" \
-    "/* cc_arena.cch declares this extern (defined in the compiled runtime). The\n" \
+    "#include <ccc/cc_slice.h>\n" \
+    "#include <ccc/cc_arena.h>\n" \
+    "/* cc_arena.h declares this extern (defined in the compiled runtime). The\n" \
     "   comptime TU is standalone (never linked against the runtime), so define a\n" \
     "   per-TU instance here — provenance ids only need uniqueness within one run. */\n" \
     "cc_atomic_u64 cc_arena_prov_counter = 0;\n" \
     "#define CC_COMPTIME 1\n" \
-    "#include <ccc/std/string.cch>\n" \
-    "#include <ccc/std/vec.cch>\n" \
-    "#include <ccc/std/hash.cch>\n" \
-    "#include <ccc/std/map.cch>\n" \
+    "#include <ccc/std/string.h>\n" \
+    "#include <ccc/std/vec.h>\n" \
+    "#include <ccc/std/hash.h>\n" \
+    "#include <ccc/std/map.h>\n" \
     "/* Typed maps are file-scope (CC_MAP_DECL_ARENA -> static-inline defs), so a\n" \
     "   comptime block can't declare its own; pre-declare common key types. */\n" \
     "CC_MAP_DECL_ARENA(int, int, CCMapII, cc_map_hash_i32, cc_map_eq_i32)\n" \

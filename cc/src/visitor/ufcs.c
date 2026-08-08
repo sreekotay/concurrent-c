@@ -537,40 +537,12 @@ static int cc__is_cstr_literal_recv(const char* recv) {
     return end > p && end[-1] == '"';
 }
 
-/* UFCS lowered name for cstr print methods (`cc_const_char_println`, …). */
-static const char* cc__cstr_print_callee(const char* type_name, const char* method,
-                                         const char* recv) {
-    int is_const = 0;
-    if (!method) return NULL;
-    if (strcmp(method, "print") != 0 && strcmp(method, "println") != 0 &&
-        strcmp(method, "eprint") != 0 && strcmp(method, "eprintln") != 0 &&
-        strcmp(method, "fprint") != 0 && strcmp(method, "fprintln") != 0) {
-        return NULL;
-    }
-    if (cc__is_cstr_literal_recv(recv)) {
-        is_const = 1;
-    } else if (cc__is_cstr_recv_type(type_name)) {
-        const char* t = type_name;
-        while (*t == ' ' || *t == '\t') t++;
-        is_const = (strncmp(t, "const ", 6) == 0) ||
-                   (strstr(t, " const") != NULL);
-    } else {
-        return NULL;
-    }
-    if (is_const) {
-        if (strcmp(method, "print") == 0) return "cc_const_char_print";
-        if (strcmp(method, "println") == 0) return "cc_const_char_println";
-        if (strcmp(method, "eprint") == 0) return "cc_const_char_eprint";
-        if (strcmp(method, "eprintln") == 0) return "cc_const_char_eprintln";
-        if (strcmp(method, "fprint") == 0) return "cc_const_char_fprint";
-        return "cc_const_char_fprintln";
-    }
-    if (strcmp(method, "print") == 0) return "cc_char_print";
-    if (strcmp(method, "println") == 0) return "cc_char_println";
-    if (strcmp(method, "eprint") == 0) return "cc_char_eprint";
-    if (strcmp(method, "eprintln") == 0) return "cc_char_eprintln";
-    if (strcmp(method, "fprint") == 0) return "cc_char_fprint";
-    return "cc_char_fprintln";
+/* True when cstr / string-lit print should coerce → CCSlice → cc_slice_*. */
+static int cc__is_cstr_print_method(const char* method) {
+    if (!method) return 0;
+    return strcmp(method, "print") == 0 || strcmp(method, "println") == 0 ||
+           strcmp(method, "eprint") == 0 || strcmp(method, "eprintln") == 0 ||
+           strcmp(method, "fprint") == 0 || strcmp(method, "fprintln") == 0;
 }
 
 static int cc__is_slice_recv_type(const char* type_name) {
@@ -2613,14 +2585,24 @@ static int emit_desugared_call(char* out,
                                : snprintf(out, cap, "%s(%s, %s)", callee, recv, args_rewritten);
         }
     }
-    /* cstr / string-literal print: always pass char* by value (never &p). */
-    {
-        const char* callee = cc__cstr_print_callee(ctx.recv_type_name, method, recv);
-        if (callee) {
-            if (!has_args || !args_rewritten || !args_rewritten[0])
-                return snprintf(out, cap, "%s(%s)", callee, recv);
-            return snprintf(out, cap, "%s(%s, %s)", callee, recv, args_rewritten);
-        }
+    /* cstr / string-lit print: coerce to CCSlice, then one slice path.
+     * Not a peer cc_char_* UFCS family (those remain free _Generic sugar). */
+    if (cc__is_cstr_print_method(method) &&
+        (cc__is_cstr_literal_recv(recv) ||
+         cc__is_cstr_recv_type(ctx.recv_type_name))) {
+        char coerce[512];
+        if (cc__is_cstr_literal_recv(recv))
+            snprintf(coerce, sizeof(coerce), "CC_SLICE_LIT(%s)", recv);
+        else
+            snprintf(coerce, sizeof(coerce),
+                     "cc_slice_cstr((const char *)(%s))", recv);
+        if (has_args && args_rewritten && args_rewritten[0])
+            return snprintf(out, cap,
+                            "({ CCSlice __cc_pv = %s; cc_slice_%s(&__cc_pv, %s); })",
+                            coerce, method, args_rewritten);
+        return snprintf(out, cap,
+                        "({ CCSlice __cc_pv = %s; cc_slice_%s(&__cc_pv); })",
+                        coerce, method);
     }
     /* Scalar value receiver (`d.halve()`): `cc_<mangled type>_<method>`,
      * receiver by value (never &d). Composes only when that function is

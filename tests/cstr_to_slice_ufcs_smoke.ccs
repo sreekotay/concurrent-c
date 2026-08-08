@@ -12,7 +12,7 @@ int main(void) {
     /* Trust-boundary cstr helper (no UFCS). */
     char[:0] a = cc_slice_cstr(path);
     char[:0] b = cc_slice_cstr(mut);
-    char[:0] c = CC_SLICE_LIT("literal");
+    char[:0] c = "literal";
     char[:0] e = cc_slice_cstr(east);
 
     /* Counted UFCS — length is explicit, not strlen-hiding. */

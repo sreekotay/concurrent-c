@@ -286,11 +286,12 @@ slice contract is “no field writes.”
   without listing them on the public surface.
 - Keyed by `(unnamed-default, slice type-family)`; instantiation does not
   fork the facet (`char[:]` and `int[:]` share it).
-- Bare `r: *` is not this contract — it re-opens every field load.
 
 Named modes (`@restricted Encode on Conn`) remain for multiple facets on
 one owned type. Unnamed + first-arg exception is the default for open
-families such as slices.
+families such as slices. Prefer narrow globs on types that mix unrelated
+capabilities (see Conn / Encode in §2); the slice family's `r: *` is the
+default open-observe, no-field-write contract.
 
 ## 8. Ill-formed cases
 

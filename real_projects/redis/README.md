@@ -4,15 +4,16 @@ This project mirrors the structure of `real_projects/pigz/`, but targets Redis.
 
 The supported Concurrent-C Redis variants are:
 
-- `redis_idiomatic.ccs` — default server (hash-sharded `CCExclusive` by CPU
-  count; connection fibers execute in place). Benchmark target for
-  `./bench_robust.sh`.
+- `redis_idiomatic.ccs` — default / complete server: sketch control flow
+  (hold → encode into Conn → flush) over full RedisDb. Shared reply helpers
+  in `redis_reply.cch`. Benchmark target for `./bench_robust.sh`.
+- `redis_async_sketch.ccs` — tiny command surface twin of `redis.go`
+  (`ln.serve` + Conn encode). Teaching peer of the complete server.
+  Default listen `127.0.0.1:6381`. Not the bench target.
 - `redis_go_twin.ccs` — Go-sized teaching twin of `redis.go` (same command
   surface; `acquire_into` for holds). Not the bench target.
-- `redis_async_sketch.ccs` — same tiny command surface as `redis_go_twin`,
-  with `ln.serve` + `n->spawn(() => handle_client(...))` per connection
-  (sync fiber; BufReader parks). Default listen `127.0.0.1:6381`.
-  Not the bench target.
+- `redis_idiomatic_spawn_async.ccs` — `@async` / `spawn_async` twin of the
+  default (fixed `out_buf` encode). Optional; used by the async line-map gate.
 - `redis_owner.ccs` — channel / single-owner-fiber variant (historical).
 - `redis_cc/redis_cc.ccs` — future modular production port (scaffold).
 
@@ -20,10 +21,11 @@ The supported Concurrent-C Redis variants are:
 
 - `setup.sh` fetches upstream Redis into `redis_c/`
 - `redis_idiomatic.ccs` is the default single-file implementation
+- `redis_async_sketch.ccs` is the tiny sketch sibling (`make redis_async_sketch`)
 - `redis_go_twin.ccs` / `redis.go` are paired minimal architecture sketches
   (`make redis_go_twin`)
-- `redis_async_sketch.ccs` is the async-IO sibling of that sketch
-  (`make redis_async_sketch`)
+- `redis_idiomatic_spawn_async.ccs` is the `@async` alternate shell
+  (`make redis_idiomatic_spawn_async`)
 - `redis_owner.ccs` is the N:1 owner-fiber alternative (`make redis_owner`)
 - `redis_smoke.py` is the functional smoke (basics, expiry, 1000-op pipeline,
   abrupt-disconnect storm); it spawns `out/redis_idiomatic` itself:
@@ -54,16 +56,15 @@ The intended git boundary is:
 
 Default (`redis_idiomatic`) shape:
 
-1. accept loop
-2. one fiber per client connection
-3. RESP decode on the connection side
-4. execute under a per-shard named exclusive (`CCExclusive`; shard count =
+1. accept via `ln.serve` + one sync fiber per connection
+2. RESP decode on the connection side (grammar; argv borrows read buffer)
+3. execute under a per-shard named exclusive (`CCExclusive`; shard count =
    next power of two of online CPUs — no user tuning). Optional
    `CC_REDIS_SHARDS` is a bench override only.
-5. RESP encode on the connection side after release
+4. RESP encode into Conn.out after hold release; flush at end of pipeline window
 
 `redis_owner` instead routes commands over channels to a single owner fiber
-(step 4–5 differ; always one shard).
+(step 3–4 differ; always one shard).
 
 ## Bootstrap
 

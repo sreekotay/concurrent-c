@@ -14,7 +14,7 @@
 #include "preprocess/strswitch_comptime.h"
 #include "util/text.h"
 
-#include <ccc/cc_arena.cch>
+#include <ccc/cc_arena.h>
 
 #define CC_COMPTIME_FN_MAX 32
 #define CC_COMPTIME_FN_NAME_MAX 64
@@ -873,15 +873,39 @@ static TCCState* cc__exec_new_state(CCExecErrSink* sink, char* err_buf, size_t e
      * (slices/arena/string) so `@comptime` code can use CC library functions,
      * not just libc + host verbs (COMPTIME_CAPABILITY_MODEL.md §7a, Axis 1).
      * CC_INCLUDE_PATH is the compiler's own header search path (lowered .h dir
-     * then raw .cch dir), colon-separated; mirror it into the executor. */
+     * then raw .cch dir), colon-separated; mirror it into the executor.
+     * Prefer lowered `.h` (bare `@as` lives only in `.cch`). When the env is
+     * unset (direct shadow_lower / tooling), probe checkout defaults. */
     {
         const char* inc = getenv("CC_INCLUDE_PATH");
+        char tmp[2048];
+        char* save = NULL;
         if (inc && inc[0]) {
-            char tmp[2048];
             snprintf(tmp, sizeof(tmp), "%s", inc);
-            char* save = NULL;
             for (char* tok = strtok_r(tmp, ":", &save); tok; tok = strtok_r(NULL, ":", &save))
                 if (tok[0]) tcc_add_include_path(s, tok);
+        } else {
+            static const char* fallbacks[] = {
+                "out/include",
+                "../out/include",
+                "cc/include",
+                "../cc/include",
+                "include",
+                NULL,
+            };
+            int fi;
+            for (fi = 0; fallbacks[fi]; fi++) {
+                char probe[1024];
+                snprintf(probe, sizeof(probe), "%s/ccc/cc_slice.h", fallbacks[fi]);
+                if (access(probe, R_OK) == 0)
+                    tcc_add_include_path(s, fallbacks[fi]);
+                else {
+                    snprintf(probe, sizeof(probe), "%s/ccc/cc_slice.cch",
+                             fallbacks[fi]);
+                    if (access(probe, R_OK) == 0)
+                        tcc_add_include_path(s, fallbacks[fi]);
+                }
+            }
         }
     }
     if (tcc_set_output_type(s, TCC_OUTPUT_MEMORY) < 0) {

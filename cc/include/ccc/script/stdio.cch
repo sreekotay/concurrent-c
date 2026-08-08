@@ -226,14 +226,16 @@ static inline CCResult_bool_CCError cc_stdio_read_line(CCStdio *io, CCSlice *out
     return cc_ok_CCResult_bool_CCError(true);
 }
 
-/* ---- Flipped print: data.println(), not io.println(data) -------------------
+/* ---- Console print ---------------------------------------------------------
  *
- * Console writes return CCResult_size_t_CCError (same as CCStdio.println) so
- * `!>` dispatches to the default @errhandler(CCError). No CCStdio arg — stdout
- * / stderr / fd are the sink.
+ * Prefer `io.println(data)` when CCStdio is in scope. Data-first
+ * (`path.println()`) and naked `println(data)` remain valid (UFCS either way).
+ * Console writes return CCResult_size_t_CCError so `!>` dispatches to the
+ * default @errhandler(CCError).
  *
- * UFCS: `path.println()` → `cc_slice_println(&path)`.
- * Temps: `@string(`…`, &a).println()`. */
+ * Data receiver: `path.println()` → `cc_slice_println(&path)`.
+ * Cstr / string lit as data receivers coerce to CCSlice then cc_slice_*.
+ * Temps: `io.println(@string(`…`, &a))` or `@string(`…`, &a).println()`. */
 
 static inline CCResult_size_t_CCError cc__script_io_from_ioerr(CCResult_size_t_CCIoError r) {
     if (cc_is_err(r)) {
@@ -324,8 +326,8 @@ static inline CCResult_size_t_CCError cc_string_fprintln(CCString *s, int fd) {
     return cc_slice_fprintln(&view, fd);
 }
 
-/* UFCS lowered callees for char* / const char* / string-literal receivers.
- * Emit shape: `cc_const_char_println(p)` / `"hi".println()` → same (by value). */
+/* Free-sugar / _Generic arms only (cc_println(cstr)). Not UFCS surface —
+ * script `p.println()` / `"hi".println()` coerce to CCSlice then cc_slice_*. */
 static inline CCResult_size_t_CCError cc_const_char_print(const char *s) {
     CCSlice view = s ? cc_slice_cstr(s) : cc_slice_empty();
     return cc_slice_print(&view);
