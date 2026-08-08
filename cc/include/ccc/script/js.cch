@@ -40,6 +40,56 @@
 #include <ccc/cc_arena.cch>
 #include <ccc/cc_compat.cch>
 #include <ccc/cc_result.cch>
+
+/* Build-detection declaration, read textually by the driver: a TU that
+ * exports this entry and defines no `main` builds as a shared module
+ * with this suffix; the `js_module::[T]` type formal names the artifact
+ * (Counter → counter.node), the source stem when none is spelled. */
+#ifndef CC_MODULE_ENTRY
+#define CC_MODULE_ENTRY(...)
+#endif
+CC_MODULE_ENTRY("napi_register_module_v1", ".node", "js_module")
+
+/* Export sugar, declared beside the entry it guarantees.  A TU spells
+ * one directive per exported type:
+ *
+ *     @comptime cc_js_export("Counter", &seed);
+ *
+ * and the compiler's template pass expands ALL of a TU's directives into
+ * the one registration below (Node-API has a single entry per addon), at
+ * the last directive's position so every seed static is in scope.  With
+ * one export the type's methods land on the module itself; with several,
+ * each lands under its snake-case name — that policy lives in
+ * `cc__js_exports_ns` below, not in the compiler.  The expansion is the
+ * same text a hand-written registration spells, and the explicit stanza
+ * stays legal. */
+#ifndef CC_MODULE_EXPORT
+#define CC_MODULE_EXPORT(...)
+#endif
+CC_MODULE_EXPORT(cc_js_export,
+    "void *napi_register_module_v1(CCJsEnv cc__env, CCJsExports cc__exports) {\n"
+    "$each{    js_module::[$T](cc__env, cc__js_exports_ns(cc__env, cc__exports, \"$name\", $count), $seed);\n}"
+    "    return cc__exports;\n"
+    "}\n")
+
+/* The entry-point contract, typed: Node-API spells both as napi's own
+ * opaque pointers, and these aliases are documentation with the same
+ * ABI — the environment the host hands in, and the module object being
+ * filled.  The CALLER is the host's module loader: `require()` dlopens
+ * the artifact, resolves this symbol by name, and calls it once per
+ * environment — the main thread at first require, and again for every
+ * worker_thread that requires the module (which is why registration
+ * allocates fresh state per call).  The canonical registration reads:
+ *
+ *     void *napi_register_module_v1(CCJsEnv env, CCJsExports exports) {
+ *         return js_module::[Counter](env, exports, &seed);
+ *     }
+ *
+ * This is guest mode: someone else created the environment.  Hosting
+ * (`cc_js_new`, spec §JavaScript interop) is the other door — CC
+ * creates the environment, and .node artifacts load into it. */
+typedef void *CCJsEnv;
+typedef void *CCJsExports;
 #include <ccc/cc_slice.cch>
 #include <ccc/cc_type.cch>
 
@@ -370,6 +420,22 @@ static inline void *cc__js_scratch(size_t n) {
 static void *cc__js_fail(void *env, const char *msg) {
     if (cc__js.ThrowError) cc__js.ThrowError(env, NULL, msg);
     return NULL;
+}
+
+/* Aggregated registration (see CC_MODULE_EXPORT above): with one
+ * exported type the module IS the type — methods land on `exports`
+ * directly; with several, each type's methods land under its own name.
+ * Failure throws — a namespace that cannot be created must not silently
+ * flatten into the parent. */
+static inline void *cc__js_exports_ns(void *env, void *exports,
+                                      const char *name, int total) {
+    void *ns = NULL;
+    if (total <= 1) return exports;
+    if (cc__js_load() != 0) return NULL;
+    if (cc__js.CreateObject(env, &ns) != 0 ||
+        cc__js.SetNamedProperty(env, exports, name, ns) != 0)
+        return cc__js_fail(env, "cc: cannot create the module namespace");
+    return ns;
 }
 
 static const char *cc__js_err_code(int kind) {
@@ -1596,6 +1662,92 @@ static CCResult_CCSlice_CCJsError cc__js_val_map_raw(CCJsVal *fobj,
     return cc_ok_CCResult_CCSlice_CCJsError(out);
 }
 
+/* Destination-typed rows: `double[:] ys = f.map(&a, cols…) !>` binds the
+ * typed slice directly — the lowering composes `cc__js_val_map_<dest>`
+ * when the destination (or the spelled `::[T]`) is a typed slice, and
+ * the raw worker otherwise.  Spelled longhand: macro-minted names are
+ * invisible to compose-then-verify. */
+#ifndef CCResult_CCSlice_double_CCJsError_DEFINED
+#define CCResult_CCSlice_double_CCJsError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCSlice_double_CCJsError, CCSlice_double, CCJsError)
+#endif
+#ifndef CCResult_CCSlice_float_CCJsError_DEFINED
+#define CCResult_CCSlice_float_CCJsError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCSlice_float_CCJsError, CCSlice_float, CCJsError)
+#endif
+#ifndef CCResult_CCSlice_int64_t_CCJsError_DEFINED
+#define CCResult_CCSlice_int64_t_CCJsError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCSlice_int64_t_CCJsError, CCSlice_int64_t, CCJsError)
+#endif
+#ifndef CCResult_CCSlice_long_long_CCJsError_DEFINED
+#define CCResult_CCSlice_long_long_CCJsError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCSlice_long_long_CCJsError, CCSlice_long_long, CCJsError)
+#endif
+#ifndef CCResult_CCSlice_int_CCJsError_DEFINED
+#define CCResult_CCSlice_int_CCJsError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCSlice_int_CCJsError, CCSlice_int, CCJsError)
+#endif
+
+static inline CCResult_CCSlice_double_CCJsError cc__js_val_map_CCSlice_double(
+        CCJsVal *fobj, CCArena *arena, int esz, int isf, int argc,
+        const CCJsArg *argv) {
+    CCResult_CCSlice_CCJsError r =
+        cc__js_val_map_raw(fobj, arena, esz, isf, argc, argv);
+    CCSlice_double out;
+    if (!r.ok)
+        return cc_err_CCResult_CCSlice_double_CCJsError(r.u.error);
+    out.base = r.u.value;
+    return cc_ok_CCResult_CCSlice_double_CCJsError(out);
+}
+
+static inline CCResult_CCSlice_float_CCJsError cc__js_val_map_CCSlice_float(
+        CCJsVal *fobj, CCArena *arena, int esz, int isf, int argc,
+        const CCJsArg *argv) {
+    CCResult_CCSlice_CCJsError r =
+        cc__js_val_map_raw(fobj, arena, esz, isf, argc, argv);
+    CCSlice_float out;
+    if (!r.ok)
+        return cc_err_CCResult_CCSlice_float_CCJsError(r.u.error);
+    out.base = r.u.value;
+    return cc_ok_CCResult_CCSlice_float_CCJsError(out);
+}
+
+static inline CCResult_CCSlice_int64_t_CCJsError cc__js_val_map_CCSlice_int64_t(
+        CCJsVal *fobj, CCArena *arena, int esz, int isf, int argc,
+        const CCJsArg *argv) {
+    CCResult_CCSlice_CCJsError r =
+        cc__js_val_map_raw(fobj, arena, esz, isf, argc, argv);
+    CCSlice_int64_t out;
+    if (!r.ok)
+        return cc_err_CCResult_CCSlice_int64_t_CCJsError(r.u.error);
+    out.base = r.u.value;
+    return cc_ok_CCResult_CCSlice_int64_t_CCJsError(out);
+}
+
+static inline CCResult_CCSlice_long_long_CCJsError cc__js_val_map_CCSlice_long_long(
+        CCJsVal *fobj, CCArena *arena, int esz, int isf, int argc,
+        const CCJsArg *argv) {
+    CCResult_CCSlice_CCJsError r =
+        cc__js_val_map_raw(fobj, arena, esz, isf, argc, argv);
+    CCSlice_long_long out;
+    if (!r.ok)
+        return cc_err_CCResult_CCSlice_long_long_CCJsError(r.u.error);
+    out.base = r.u.value;
+    return cc_ok_CCResult_CCSlice_long_long_CCJsError(out);
+}
+
+static inline CCResult_CCSlice_int_CCJsError cc__js_val_map_CCSlice_int(
+        CCJsVal *fobj, CCArena *arena, int esz, int isf, int argc,
+        const CCJsArg *argv) {
+    CCResult_CCSlice_CCJsError r =
+        cc__js_val_map_raw(fobj, arena, esz, isf, argc, argv);
+    CCSlice_int out;
+    if (!r.ok)
+        return cc_err_CCResult_CCSlice_int_CCJsError(r.u.error);
+    out.base = r.u.value;
+    return cc_ok_CCResult_CCSlice_int_CCJsError(out);
+}
+
 /* Column lift: CC_JS_ARG applied to each vararg, counted — explicit per
  * arity, matching the Python twin.  Past 8 columns the count selects a
  * poison arm whose name IS the message. */
@@ -1940,6 +2092,25 @@ static inline CCResult_void_CCJsError cc_js_exec(CCJs *js, CCSlice src) {
     }
     return cc_ok_CCResult_void_CCJsError();
 }
+
+/* Source text accepts a bare string literal: the macro lifts `char *`
+ * through a slice view and passes `CCSlice` through unchanged — the
+ * function above stays the callee (a macro's own name does not
+ * re-expand inside its expansion). */
+static inline CCSlice cc__js_src_slice(CCSlice s) { return s; }
+static inline CCSlice cc__js_src_cstr(const char *s) {
+    CCSlice v;
+    v.ptr = (void *)(uintptr_t)s;
+    v.len = s ? strlen(s) : 0;
+    return v;
+}
+#define cc__js_src(x) _Generic((x),                         \
+        char *: cc__js_src_cstr,                            \
+        const char *: cc__js_src_cstr,                      \
+        CCSlice: cc__js_src_slice)(x)
+#define cc_js_exec(js, src) cc_js_exec((js), cc__js_src(src))
+#define cc_js_eval_i64(js, src) cc_js_eval_i64((js), cc__js_src(src))
+#define cc_js_eval_f64(js, src) cc_js_eval_f64((js), cc__js_src(src))
 
 /* ---- the CCJs dynamic sink ----
  *

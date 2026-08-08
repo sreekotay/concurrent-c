@@ -29,6 +29,36 @@
 #include <ccc/cc_slice.cch>
 #include <ccc/cc_type.cch>
 
+/* Build-detection declaration, read textually by the driver: a TU that
+ * exports a `PyInit_*` entry and defines no `main` builds as a shared
+ * module with this suffix, and the symbol's own suffix names the
+ * artifact (PyInit_counter → counter.abi3.so — the .abi3 tag is in every
+ * CPython finder's suffix list and advertises the stable-ABI promise the
+ * binding keeps). */
+#ifndef CC_MODULE_ENTRY
+#define CC_MODULE_ENTRY(...)
+#endif
+CC_MODULE_ENTRY("PyInit_*", ".abi3.so")
+
+/* Export sugar, declared beside the entry it guarantees.  A TU spells
+ * one directive per exported type:
+ *
+ *     @comptime cc_py_export("Counter", &seed);
+ *
+ * and the compiler's template pass expands each IN PLACE to exactly the
+ * init a hand-written module spells (independent stanzas — CPython
+ * resolves one init per module name, so every export is its own entry):
+ *
+ *     void *PyInit_counter(void) { return py_module::[Counter]("counter", &seed); }
+ *
+ * The name is the type lowered to snake, or the string override in the
+ * third argument.  The explicit stanza stays legal. */
+#ifndef CC_MODULE_EXPORT
+#define CC_MODULE_EXPORT(...)
+#endif
+CC_MODULE_EXPORT(cc_py_export,
+    "$each{void *PyInit_$name(void) { return py_module::[$T](\"$name\", $seed); }\n}")
+
 #define CC__PY_NAME_CACHE 32
 
 typedef struct CCPy {
@@ -53,6 +83,9 @@ typedef struct CCPy {
      * threading rule instead of inventing a new one. */
     struct { const char *key; void *name; } names[CC__PY_NAME_CACHE];
     int name_count;
+    /* sys.getrefcount, resolved once — the py_buf retained-export check
+     * runs per view, and importing sys per call was most of its cost. */
+    void *sys_getrefcount;
 } CCPy;
 
 typedef struct CCPyObj {
@@ -166,6 +199,9 @@ typedef struct CC__PySyms {
      * drop again.  These read the tuple directly and borrow. */
     /* Zero-copy borrow of a contiguous CC buffer.  Limited API since 3.3. */
     void *(*MemoryViewFromMemory)(char *, intptr_t, int);
+    /* Optional: one-shot typed view over a filled Py_buffer — the fast
+     * py_buf path; absent, the view is built bytes-first and cast. */
+    void *(*MemoryViewFromBuffer)(void *);
     /* Outbound-call fast path.  `GetAttrString` builds a temporary Python
      * string for the name on EVERY call — allocate, hash, look up, free —
      * which dominated the cost of calling into Python.  With the name kept as
@@ -446,6 +482,7 @@ have_lib:
      * thread-state calls are stable ABI but only needed alongside it. */
 #define CC__PY_SYM_OPT(field, name) \
     cc__py.field = (void *)0; *(void **)&cc__py.field = dlsym(cc__py.lib, name);
+    CC__PY_SYM_OPT(MemoryViewFromBuffer, "PyMemoryView_FromBuffer")
     CC__PY_SYM_OPT(NewInterpreterFromConfig, "Py_NewInterpreterFromConfig")
     CC__PY_SYM_OPT(ModuleDefInit, "PyModuleDef_Init")
     CC__PY_SYM_OPT(EndInterpreter, "Py_EndInterpreter")
@@ -1765,6 +1802,9 @@ static inline void cc_py_close(CCPy *py) {
             cc__py_cur_tstate = back;
         }
     }
+    if (py->sys_getrefcount && cc__py.DecRef && !py->owns_interp)
+        cc__py.DecRef(py->sys_getrefcount);
+    py->sys_getrefcount = NULL;
     py->ready = 0;
     py->arena = NULL;
     py->tstate = NULL;
@@ -1853,6 +1893,23 @@ static inline CCResult_void_CCPyError cc_py_exec(CCPy *py, CCSlice code) {
     cc__py.DecRef(r);
     return cc_ok_CCResult_void_CCPyError();
 }
+
+/* Source text accepts a bare string literal: the macro lifts `char *`
+ * through a slice view and passes `CCSlice` through unchanged — the
+ * function above stays the callee (a macro's own name does not
+ * re-expand inside its expansion). */
+static inline CCSlice cc__py_src_slice(CCSlice s) { return s; }
+static inline CCSlice cc__py_src_cstr(const char *s) {
+    CCSlice v;
+    v.ptr = (void *)(uintptr_t)s;
+    v.len = s ? strlen(s) : 0;
+    return v;
+}
+#define cc__py_src(x) _Generic((x),                         \
+        char *: cc__py_src_cstr,                            \
+        const char *: cc__py_src_cstr,                      \
+        CCSlice: cc__py_src_slice)(x)
+#define cc_py_exec(py, src) cc_py_exec((py), cc__py_src(src))
 
 /* Internal: `py.eval(...)` resolves through the CCPy dynamic sink so the
  * declared destination joins resolution (`double v = py.eval(...) !>`),
@@ -2073,11 +2130,13 @@ static inline CCPyArg cc__py_arg_named(const char *name, CCPyArg a) {
 static inline CCPyArg cc__py_arg_pass(CCPyArg a) { return a; }
 
 /* Retarget a typed-slice argument (kind 6) at the buffer borrow (kind 7):
- * same pointer, length restated in BYTES because a memoryview carries no
- * element type.  Only a typed slice has a contiguous run to borrow, so any
- * other argument is left exactly as it was and marshals normally — passing
- * `py_buf` something that is not a buffer changes nothing rather than
- * silently producing an empty view. */
+ * same pointer, length restated in BYTES for the raw view; the element
+ * descriptor rides along and the materialized memoryview is cast to the
+ * element format, so Python sees values, not bytes.  Only a typed slice
+ * has a contiguous run to borrow, so any other argument is left exactly
+ * as it was and marshals normally — passing `py_buf` something that is
+ * not a buffer changes nothing rather than silently producing an empty
+ * view. */
 static inline CCPyArg cc__py_arg_buffer(CCPyArg a) {
     if (a.kind != 6 || !a.p) return a;
     a.n = a.n * (size_t)(a.i & 0xff);
@@ -2236,6 +2295,92 @@ static inline CCResult_CCSlice_CCPyError cc__py_obj_map_raw(
     return cc_ok_CCResult_CCSlice_CCPyError(out);
 }
 
+/* Destination-typed rows: `double[:] ys = f.map(&a, cols…) !>` binds the
+ * typed slice directly — the lowering composes `cc__py_obj_map_<dest>`
+ * when the destination (or the spelled `::[T]`) is a typed slice, and
+ * the raw worker otherwise.  Spelled longhand: macro-minted names are
+ * invisible to compose-then-verify. */
+#ifndef CCResult_CCSlice_double_CCPyError_DEFINED
+#define CCResult_CCSlice_double_CCPyError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCSlice_double_CCPyError, CCSlice_double, CCPyError)
+#endif
+#ifndef CCResult_CCSlice_float_CCPyError_DEFINED
+#define CCResult_CCSlice_float_CCPyError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCSlice_float_CCPyError, CCSlice_float, CCPyError)
+#endif
+#ifndef CCResult_CCSlice_int64_t_CCPyError_DEFINED
+#define CCResult_CCSlice_int64_t_CCPyError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCSlice_int64_t_CCPyError, CCSlice_int64_t, CCPyError)
+#endif
+#ifndef CCResult_CCSlice_long_long_CCPyError_DEFINED
+#define CCResult_CCSlice_long_long_CCPyError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCSlice_long_long_CCPyError, CCSlice_long_long, CCPyError)
+#endif
+#ifndef CCResult_CCSlice_int_CCPyError_DEFINED
+#define CCResult_CCSlice_int_CCPyError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCSlice_int_CCPyError, CCSlice_int, CCPyError)
+#endif
+
+static inline CCResult_CCSlice_double_CCPyError cc__py_obj_map_CCSlice_double(
+        CCPyObj *fobj, CCArena *arena, int esz, int isf, int argc,
+        const CCPyArg *argv) {
+    CCResult_CCSlice_CCPyError r =
+        cc__py_obj_map_raw(fobj, arena, esz, isf, argc, argv);
+    CCSlice_double out;
+    if (!r.ok)
+        return cc_err_CCResult_CCSlice_double_CCPyError(r.u.error);
+    out.base = r.u.value;
+    return cc_ok_CCResult_CCSlice_double_CCPyError(out);
+}
+
+static inline CCResult_CCSlice_float_CCPyError cc__py_obj_map_CCSlice_float(
+        CCPyObj *fobj, CCArena *arena, int esz, int isf, int argc,
+        const CCPyArg *argv) {
+    CCResult_CCSlice_CCPyError r =
+        cc__py_obj_map_raw(fobj, arena, esz, isf, argc, argv);
+    CCSlice_float out;
+    if (!r.ok)
+        return cc_err_CCResult_CCSlice_float_CCPyError(r.u.error);
+    out.base = r.u.value;
+    return cc_ok_CCResult_CCSlice_float_CCPyError(out);
+}
+
+static inline CCResult_CCSlice_int64_t_CCPyError cc__py_obj_map_CCSlice_int64_t(
+        CCPyObj *fobj, CCArena *arena, int esz, int isf, int argc,
+        const CCPyArg *argv) {
+    CCResult_CCSlice_CCPyError r =
+        cc__py_obj_map_raw(fobj, arena, esz, isf, argc, argv);
+    CCSlice_int64_t out;
+    if (!r.ok)
+        return cc_err_CCResult_CCSlice_int64_t_CCPyError(r.u.error);
+    out.base = r.u.value;
+    return cc_ok_CCResult_CCSlice_int64_t_CCPyError(out);
+}
+
+static inline CCResult_CCSlice_long_long_CCPyError cc__py_obj_map_CCSlice_long_long(
+        CCPyObj *fobj, CCArena *arena, int esz, int isf, int argc,
+        const CCPyArg *argv) {
+    CCResult_CCSlice_CCPyError r =
+        cc__py_obj_map_raw(fobj, arena, esz, isf, argc, argv);
+    CCSlice_long_long out;
+    if (!r.ok)
+        return cc_err_CCResult_CCSlice_long_long_CCPyError(r.u.error);
+    out.base = r.u.value;
+    return cc_ok_CCResult_CCSlice_long_long_CCPyError(out);
+}
+
+static inline CCResult_CCSlice_int_CCPyError cc__py_obj_map_CCSlice_int(
+        CCPyObj *fobj, CCArena *arena, int esz, int isf, int argc,
+        const CCPyArg *argv) {
+    CCResult_CCSlice_CCPyError r =
+        cc__py_obj_map_raw(fobj, arena, esz, isf, argc, argv);
+    CCSlice_int out;
+    if (!r.ok)
+        return cc_err_CCResult_CCSlice_int_CCPyError(r.u.error);
+    out.base = r.u.value;
+    return cc_ok_CCResult_CCSlice_int_CCPyError(out);
+}
+
 /* Column lift: CC_PY_ARG applied to each vararg, counted.  Explicit per
  * arity — recursion tricks save lines and cost readability. */
 #define CC__PY_NARG_(a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, \
@@ -2302,6 +2447,39 @@ static inline void *cc__py_name_obj(CCPy *home, const char *method) {
  * `CCPyArg` into the call frame and another back out through `va_arg`; a
  * caller holding an array pays neither, and the array form is what the UFCS
  * lowering emits.  The variadic entry points below adapt onto this. */
+/* sys.getrefcount, held on the handle (released in cc_py_close): the
+ * py_buf retained-export check runs per view. */
+static inline void *cc__py_getrefcount(CCPy *py) {
+    if (!py) return NULL;
+    if (!py->sys_getrefcount && cc__py.ImportModule && cc__py.GetAttrString) {
+        void *sysm = cc__py.ImportModule("sys");
+        if (sysm) {
+            py->sys_getrefcount = cc__py.GetAttrString(sysm, "getrefcount");
+            cc__py.DecRef(sysm);
+        }
+        if (!py->sys_getrefcount && cc__py.ErrClear) cc__py.ErrClear();
+    }
+    return py->sys_getrefcount;
+}
+
+/* mv.release() through the interned name and a vectorcall; the
+ * string-keyed CallMethod shape stays as the fallback. */
+static inline void cc__py_view_release(CCPy *py, void *view) {
+    void *rel = NULL;
+    void *nm = py ? cc__py_name_obj(py, "release") : NULL;
+    if (nm && cc__py.GetAttr && cc__py.Vectorcall) {
+        void *m = cc__py.GetAttr(view, nm);
+        if (m) {
+            rel = cc__py.Vectorcall(m, NULL, 0, NULL);
+            cc__py.DecRef(m);
+        }
+    } else if (cc__py.CallMethod) {
+        rel = cc__py.CallMethod(view, "release", NULL);
+    }
+    if (rel) cc__py.DecRef(rel);
+    else if (cc__py.ErrClear) cc__py.ErrClear();
+}
+
 static inline CCResult_CCPyObj_CCPyError cc__py_obj_callm_n(CCPyObj *obj,
                                                             const char *method,
                                                             int argc,
@@ -2313,11 +2491,26 @@ static inline CCResult_CCPyObj_CCPyError cc__py_obj_callm_n(CCPyObj *obj,
     void *av[CC__PY_MAX_CALL_ARGS];
     void *views[CC__PY_MAX_CALL_ARGS];
     int view_arg[CC__PY_MAX_CALL_ARGS];
+    /* Py_buffer backing for one-shot typed views (format/shape must stay
+     * valid while the view lives; the view is call-scoped, released
+     * below, and a view kept past release answers ValueError before any
+     * field is read). */
+    CC__PyBuffer vpb[CC__PY_MAX_CALL_ARGS];
+    intptr_t vshape[CC__PY_MAX_CALL_ARGS];
+    char vfmt[CC__PY_MAX_CALL_ARGS][2];
     int i, nkw = 0, npos = 0, pi = 0, use_vec = 0, nviews = 0;
     cc__py_bind_err_obj(obj);
     if (!obj || !obj->o || argc < 0)
         return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err(method));
-    {
+    if (method && strcmp(method, "invoke") == 0) {
+        /* `f.invoke(args…)` calls the VALUE itself — the hot path for a
+         * held callable (np.get("dot") once, invoke per call): no
+         * attribute lookup rides on the call.  This shadows a Python
+         * attribute literally named `invoke`; an object that really has
+         * one is reached as f.get("invoke") plus .invoke() on the get. */
+        attr = obj->o;
+        cc__py.IncRef(attr);
+    } else {
         void *nm = cc__py_name_obj(obj->home, method);
         attr = (nm && cc__py.GetAttr) ? cc__py.GetAttr(obj->o, nm)
                                       : cc__py.GetAttrString(obj->o, method);
@@ -2417,16 +2610,73 @@ static inline CCResult_CCPyObj_CCPyError cc__py_obj_callm_n(CCPyObj *obj,
              * rebuilds a contiguous array from them, which is the whole cost
              * of the crossing when both sides already agree on the layout.
              *
+             * The view carries the slice's ELEMENT format (`d`, `q`, …), not
+             * bytes: `len(mv)` is the element count, `sum(mv)` sums values,
+             * and numpy's asarray wraps it typed — a bytes-shaped view made
+             * every consumer restate the dtype the slice already knew.
+             *
              * The borrow is CALL-SCOPED: the view is released when the call
              * returns (below), so the callee computes through it or copies.
              * A callee that kept a buffer export (numpy.frombuffer, a nested
              * memoryview) fails the call at the boundary; one that kept the
              * view itself gets ValueError on a later touch — never a read
              * through freed CC memory.  Read-only either way. */
-            v = (a.p && cc__py.MemoryViewFromMemory)
-                  ? cc__py.MemoryViewFromMemory((char *)(uintptr_t)a.p,
-                                                (intptr_t)a.n, 0x100 /* PyBUF_READ */)
-                  : NULL;
+            {
+                int esz = (int)(a.i & 0xff);
+                int isf = (int)((a.i >> 8) & 1);
+                int iss = (int)((a.i >> 9) & 1);
+                const char *fmt =
+                    isf ? (esz == 4 ? "f" : "d")
+                        : esz == 1 ? (iss ? "b" : "B")
+                        : esz == 2 ? (iss ? "h" : "H")
+                        : esz == 4 ? (iss ? "i" : "I")
+                                   : (iss ? "q" : "Q");
+                v = NULL;
+                if (a.p && cc__py.MemoryViewFromBuffer &&
+                    nviews < CC__PY_MAX_CALL_ARGS) {
+                    /* One shot: the filled Py_buffer carries the element
+                     * format, no cast call rides on the argument. */
+                    CC__PyBuffer *pb = &vpb[nviews];
+                    memset(pb, 0, sizeof(*pb));
+                    vfmt[nviews][0] = fmt[0];
+                    vfmt[nviews][1] = 0;
+                    vshape[nviews] = (intptr_t)(a.n / (size_t)(esz ? esz : 1));
+                    pb->buf = (void *)(uintptr_t)a.p;
+                    pb->len = (intptr_t)a.n;
+                    pb->itemsize = esz ? esz : 1;
+                    pb->readonly = 1;
+                    pb->ndim = 1;
+                    pb->format = vfmt[nviews];
+                    pb->shape = &vshape[nviews];
+                    v = cc__py.MemoryViewFromBuffer(pb);
+                    if (!v && cc__py.ErrClear) cc__py.ErrClear();
+                }
+                if (!v && a.p && cc__py.MemoryViewFromMemory) {
+                    v = cc__py.MemoryViewFromMemory((char *)(uintptr_t)a.p,
+                                                    (intptr_t)a.n,
+                                                    0x100 /* PyBUF_READ */);
+                    if (v) {
+                        void *cast = cc__py.CallMethod
+                                         ? cc__py.CallMethod(v, "cast", "s", fmt)
+                                         : NULL;
+                        if (!cast) {
+                            /* No silent bytes view — the callee would
+                             * compute on uint8 and be indistinguishable
+                             * from success. */
+                            cc__py.DecRef(v);
+                            v = NULL;
+                            snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                                     "python: %s: py_buf view cast to '%s' "
+                                     "failed",
+                                     method, fmt);
+                            if (cc__py.ErrClear) cc__py.ErrClear();
+                        } else {
+                            cc__py.DecRef(v);
+                            v = cast;
+                        }
+                    }
+                }
+            }
             if (v && nviews < CC__PY_MAX_CALL_ARGS) {
                 cc__py.IncRef(v); /* the record's own reference */
                 views[nviews] = v;
@@ -2482,15 +2732,31 @@ static inline CCResult_CCPyObj_CCPyError cc__py_obj_callm_n(CCPyObj *obj,
      * exception stays primary and the views just drop with their
      * references (no Python calls with an exception pending). */
     if (nviews > 0) {
-        void *sysm = r ? cc__py.ImportModule("sys") : NULL;
+        /* sys.getrefcount is resolved once per handle; each check is one
+         * vectorcall, not an import plus a string-keyed method call. */
+        void *grc = r ? cc__py_getrefcount(obj->home) : NULL;
         for (i = 0; i < nviews && r; i++) {
-            long long rc = 0;
-            if (sysm && cc__py.CallMethod) {
-                void *rco = cc__py.CallMethod(sysm, "getrefcount", "O", views[i]);
+            /* The clean-view count depends on how getrefcount is called:
+             * a vectorcall passes the view borrowed (record ref only, 1);
+             * the CallMethod fallback adds its argument-tuple ref (2). */
+            long long rc = 0, clean = 0;
+            if (grc && cc__py.Vectorcall) {
+                void *rco = cc__py.Vectorcall(grc, &views[i], 1, NULL);
                 if (rco) { rc = cc__py.LongAsLongLong(rco); cc__py.DecRef(rco); }
                 else if (cc__py.ErrClear) cc__py.ErrClear();
+                clean = 1;
+            } else if (cc__py.CallMethod) {
+                void *sysm = cc__py.ImportModule("sys");
+                if (sysm) {
+                    void *rco =
+                        cc__py.CallMethod(sysm, "getrefcount", "O", views[i]);
+                    if (rco) { rc = cc__py.LongAsLongLong(rco); cc__py.DecRef(rco); }
+                    else if (cc__py.ErrClear) cc__py.ErrClear();
+                    cc__py.DecRef(sysm);
+                }
+                clean = 2;
             }
-            if (rc > 2) {
+            if (clean && rc > clean) {
                 char rctx[160];
                 int k;
                 snprintf(rctx, sizeof(rctx),
@@ -2499,26 +2765,16 @@ static inline CCResult_CCPyObj_CCPyError cc__py_obj_callm_n(CCPyObj *obj,
                          method, view_arg[i] + 1);
                 cc__py.DecRef(r);
                 for (k = 0; k < nviews; k++) {
-                    void *rel = cc__py.CallMethod
-                                  ? cc__py.CallMethod(views[k], "release", NULL)
-                                  : NULL;
-                    if (rel) cc__py.DecRef(rel);
-                    else if (cc__py.ErrClear) cc__py.ErrClear();
+                    cc__py_view_release(obj->home, views[k]);
                     cc__py.DecRef(views[k]);
                 }
-                if (sysm) cc__py.DecRef(sysm);
                 cc__py_errbuf[0] = 0;
                 snprintf(cc__py_errbuf, sizeof(cc__py_errbuf), "python: %s", rctx);
                 return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err(rctx));
             }
         }
-        if (sysm) cc__py.DecRef(sysm);
         for (i = 0; i < nviews; i++) {
-            if (r && cc__py.CallMethod) {
-                void *rel = cc__py.CallMethod(views[i], "release", NULL);
-                if (rel) cc__py.DecRef(rel);
-                else if (cc__py.ErrClear) cc__py.ErrClear();
-            }
+            if (r) cc__py_view_release(obj->home, views[i]);
             cc__py.DecRef(views[i]);
         }
     }
@@ -3178,12 +3434,20 @@ CC_DECL_RESULT_SPEC(${box}, ${rt}, ${er})
  * links a shared object — the source declares what it is; there is no
  * flag.  The seed may be NULL for zeroed module state.
  *
- * The caller here is CPython's import machinery, so failure follows
- * Python's convention — NULL, with the exception set when an
- * interpreter exists to hold one — not a CC Result.  The method
- * trampolines are the same shape `py_expose` emits (same reflection,
- * same marshal macros), under a distinct symbol prefix so both
- * factories can instantiate for one type in one TU. */
+ * The CALLER is CPython's import machinery: `import counter` matches
+ * counter.abi3.so on sys.path, dlopens it, and derives the symbol from
+ * the module name — "PyInit_" + name — which is why the symbol, the
+ * factory's name string, and the artifact filename are one name spelled
+ * three ways, and the build's naming rule keeps them from drifting.
+ * Called once per interpreter: under multi-phase init the return is the
+ * module DEFINITION and each (sub)interpreter builds its own module
+ * from it, seeding fresh state — the twin of Node calling the napi
+ * entry once per worker environment.  Failure follows Python's
+ * convention — NULL, with the exception set when an interpreter exists
+ * to hold one — not a CC Result.  The method trampolines are the same
+ * shape `py_expose` emits (same reflection, same marshal macros), under
+ * a distinct symbol prefix so both factories can instantiate for one
+ * type in one TU. */
 CC_GENERIC_FACTORY(py_module, 1) {
     CCString s = cc_string_new();
     char T[192];

@@ -1,0 +1,33 @@
+js_numpy engine=node v22.22.2 n=1000000 samples=7
+
+bulk (1000000 doubles, one Float64Array end to end):
+  js_sum             1.309 ms
+RESULT bulk js_sum ms 1.309
+  np_sum             0.369 ms
+RESULT bulk np_sum ms 0.369
+  js_dot             1.308 ms
+RESULT bulk js_dot ms 1.308
+  np_dot             0.158 ms
+RESULT bulk np_dot ms 0.158
+  js_std             2.554 ms
+RESULT bulk js_std ms 2.554
+  np_std             1.678 ms
+RESULT bulk np_std ms 1.678
+
+boundary (16-element arrays, 20000 calls):
+  np_dot_16         53.589 ms      2679 ns/call
+RESULT scalar np_dot_16 ns_per_call 2679
+  js_dot_16          0.405 ms        20 ns/call
+RESULT scalar js_dot_16 ns_per_call 20
+
+ratios (naive JS loop = 1.0):
+  np_sum / js_sum    0.28x
+  np_dot / js_dot    0.12x
+  np_std / js_std    0.66x
+RESULT ratio np_sum_vs_js x 0.28
+RESULT ratio np_dot_vs_js x 0.12
+RESULT ratio np_std_vs_js x 0.66
+
+numpy is computing directly on the Float64Array's memory: the
+borrow (JS->CC) and the memoryview (CC->numpy) both carry the
+same pointer; no copy exists on the path.

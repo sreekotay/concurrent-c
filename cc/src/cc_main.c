@@ -966,39 +966,185 @@ static int derive_default_bin(const char* in_path, char* out_buf, size_t out_buf
     return derive_path_from_stem(stem, g_bin_root, "", out_buf, out_buf_size);
 }
 
-/* A TU that exports a foreign runtime's entry point and defines no `main`
- * is an extension module — the source declares the artifact, so the build
- * obeys: PIC objects, a `-shared` link, the runtime's own suffix as the
- * default output.  There is no flag; the entry-point convention is the
- * declaration.  Two conventions are recognized: `PyInit_<name>` (CPython;
- * the symbol names the artifact) and `napi_register_module_v1` (Node-API;
- * addons are file-named, so the artifact takes the source stem).
- * Comment/string-opaque scan of the raw file; `main` beats either entry so
- * an embed-style program that mentions both stays an executable.  Returns
- * 1 with `name_out` filled for a Python module, 1 with `*is_js` set (and
- * `name_out` empty) for a Node-API addon; Python wins if both appear. */
-static int cc__detect_ext_module(const char* in_path, char* name_out, size_t cap,
-                                 int* is_js) {
-    FILE* f;
+/* Extension-module conventions are DECLARED by the stdlib, not built into
+ * the driver.  A header the TU includes spells
+ *
+ *     CC_MODULE_ENTRY("PyInit_*", ".abi3.so")
+ *     CC_MODULE_ENTRY("napi_register_module_v1", ".node", "js_module")
+ *
+ * (the macro itself expands to nothing) and the driver implements one
+ * mechanism: a TU that exports a declared entry point and defines no
+ * `main` is an extension module — PIC objects, a `-shared` link, the
+ * declared suffix as the default output.  The artifact name follows the
+ * declaration too: a trailing `*` in the entry means the symbol's own
+ * suffix names it (`PyInit_counter` → counter); a third argument names a
+ * factory whose `::[T]` type formal names it, camel lowered to snake
+ * (`js_module::[Counter]` → counter); with neither, the source stem
+ * does.  `main` beats any entry, so an embed-style program that mentions
+ * one stays an executable.  Declarations are read from the TU's
+ * `<ccc/…>` includes (one nested level), resolved against the input's
+ * repo root, the compiler's own install tree, and CC_INCLUDE_PATH; the
+ * first declared entry that matches wins. */
+typedef struct {
+    char entry[96];
+    char suffix[32];
+    char factory[64];
+    char export_dir[64]; /* CC_MODULE_EXPORT directive beside the entry */
+    int wildcard;
+} CCModuleEntryDecl;
+
+static char* cc__read_file_all(const char* path, size_t* out_len) {
+    FILE* f = fopen(path, "rb");
     char* buf;
     long n;
-    int found = 0, has_main = 0, found_js = 0;
-    if (!in_path || !name_out || cap == 0 || !is_js) return 0;
-    name_out[0] = '\0';
-    *is_js = 0;
-    f = fopen(in_path, "rb");
-    if (!f) return 0;
+    if (!f) return NULL;
     fseek(f, 0, SEEK_END);
     n = ftell(f);
     fseek(f, 0, SEEK_SET);
-    if (n <= 0 || n > 16 * 1024 * 1024) { fclose(f); return 0; }
+    if (n <= 0 || n > 16 * 1024 * 1024) { fclose(f); return NULL; }
     buf = (char*)malloc((size_t)n + 1);
-    if (!buf) { fclose(f); return 0; }
-    if (fread(buf, 1, (size_t)n, f) != (size_t)n) { free(buf); fclose(f); return 0; }
+    if (!buf) { fclose(f); return NULL; }
+    if (fread(buf, 1, (size_t)n, f) != (size_t)n) {
+        free(buf);
+        fclose(f);
+        return NULL;
+    }
     buf[n] = '\0';
     fclose(f);
+    if (out_len) *out_len = (size_t)n;
+    return buf;
+}
+
+/* Harvest CC_MODULE_ENTRY declarations from one header text. */
+static int cc__module_entry_scan_decls(const char* buf, CCModuleEntryDecl* d,
+                                       int cap, int nd) {
+    const char* p = buf;
+    while ((p = strstr(p, "CC_MODULE_ENTRY")) != NULL && nd < cap) {
+        const char* q = p + 15;
+        char* args[3] = { d[nd].entry, d[nd].suffix, d[nd].factory };
+        size_t caps[3] = { sizeof(d[nd].entry), sizeof(d[nd].suffix),
+                           sizeof(d[nd].factory) };
+        int a;
+        p = q;
+        while (*q == ' ' || *q == '\t') q++;
+        if (*q != '(') continue;
+        q++;
+        d[nd].entry[0] = d[nd].suffix[0] = d[nd].factory[0] = 0;
+        d[nd].export_dir[0] = 0;
+        d[nd].wildcard = 0;
+        for (a = 0; a < 3; a++) {
+            size_t m = 0;
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q != '"') break;
+            q++;
+            while (*q && *q != '"' && m + 1 < caps[a]) args[a][m++] = *q++;
+            args[a][m] = 0;
+            if (*q != '"') break;
+            q++;
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q != ',') break;
+            q++;
+        }
+        if (d[nd].entry[0] && d[nd].suffix[0]) {
+            size_t el = strlen(d[nd].entry);
+            if (d[nd].entry[el - 1] == '*') {
+                d[nd].entry[el - 1] = 0;
+                d[nd].wildcard = 1;
+            }
+            if (d[nd].entry[0]) nd++;
+        }
+    }
+    return nd;
+}
+
+/* The export directive declared beside the entries in the same header:
+ * `CC_MODULE_EXPORT(<ident>, "…")`.  The `#define CC_MODULE_EXPORT(...)`
+ * guard has `...` first and parses as nothing. */
+static void cc__module_export_dir_scan(const char* text, char* out, size_t cap) {
+    const char* p = text;
+    out[0] = 0;
+    while ((p = strstr(p, "CC_MODULE_EXPORT")) != NULL) {
+        const char* q = p + 16;
+        size_t m = 0;
+        p = q;
+        while (*q == ' ' || *q == '\t') q++;
+        if (*q != '(') continue;
+        q++;
+        while (*q == ' ' || *q == '\t') q++;
+        while ((isalnum((unsigned char)*q) || *q == '_') && m + 1 < cap)
+            out[m++] = *q++;
+        out[m] = 0;
+        while (*q == ' ' || *q == '\t') q++;
+        if (m == 0 || *q != ',') { out[0] = 0; continue; }
+        return;
+    }
+}
+
+/* Collect declarations from the TU's `<ccc/…>` includes, one level deep
+ * (resolution + include walk shared with the export-directive pass). */
+static int cc__module_entry_collect(const char* buf, const char* in_path,
+                                    CCModuleEntryDecl* d, int cap) {
+    int nd = 0;
+    int depth;
+    char rels[24][192];
+    int nrel, scanned = 0;
+    nrel = cc_module_collect_ccc_includes(buf, rels, 24, 0);
+    for (depth = 0; depth < 2; depth++) {
+        int end = nrel;
+        for (; scanned < end; scanned++) {
+            char* text = cc_module_header_read_text(rels[scanned], in_path);
+            int before;
+            if (!text) continue;
+            before = nd;
+            nd = cc__module_entry_scan_decls(text, d, cap, nd);
+            if (nd > before) {
+                char dir[64];
+                int e;
+                cc__module_export_dir_scan(text, dir, sizeof(dir));
+                for (e = before; e < nd; e++)
+                    snprintf(d[e].export_dir, sizeof(d[e].export_dir), "%s",
+                             dir);
+            }
+            if (depth == 0)
+                nrel = cc_module_collect_ccc_includes(text, rels, 24, nrel);
+            free(text);
+        }
+    }
+    return nd;
+}
+
+static int cc__detect_ext_module(const char* in_path, char* name_out, size_t cap,
+                                 char* suffix_out, size_t scap) {
+    char* buf;
+    size_t len = 0;
+    CCModuleEntryDecl decls[8];
+    int nd, hit = -1, has_main = 0;
+    if (!in_path || !name_out || cap == 0 || !suffix_out || scap == 0) return 0;
+    name_out[0] = '\0';
+    suffix_out[0] = '\0';
+    buf = cc__read_file_all(in_path, &len);
+    if (!buf) return 0;
+    nd = cc__module_entry_collect(buf, in_path, decls,
+                                  (int)(sizeof(decls) / sizeof(decls[0])));
+    if (nd == 0) { free(buf); return 0; }
+    /* `@comptime <directive>(...)` sites: an export directive guarantees
+     * an emitted entry, so it is entry evidence AND the name source (the
+     * first site's type, camel lowered to snake, or its override). */
     {
-        size_t i = 0, len = (size_t)n;
+        int e;
+        for (e = 0; e < nd; e++) {
+            char nm[128];
+            if (!decls[e].export_dir[0]) continue;
+            if (cc_module_export_tu_artifact(buf, len, decls[e].export_dir, nm,
+                                             sizeof(nm)) > 0 &&
+                (hit < 0 || e < hit)) {
+                hit = e;
+                snprintf(name_out, cap, "%s", nm);
+            }
+        }
+    }
+    {
+        size_t i = 0;
         while (i < len) {
             char c = buf[i];
             char c2 = (i + 1 < len) ? buf[i + 1] : 0;
@@ -1019,8 +1165,11 @@ static int cc__detect_ext_module(const char* in_path, char* name_out, size_t cap
                 }
                 continue;
             }
+            if (i > 0 && (isalnum((unsigned char)buf[i - 1]) || buf[i - 1] == '_')) {
+                i++;
+                continue;
+            }
             if (c == 'm' && i + 4 < len && memcmp(buf + i, "main", 4) == 0 &&
-                (i == 0 || !(isalnum((unsigned char)buf[i - 1]) || buf[i - 1] == '_')) &&
                 !(isalnum((unsigned char)buf[i + 4]) || buf[i + 4] == '_')) {
                 size_t k = i + 4;
                 while (k < len && (buf[k] == ' ' || buf[k] == '\t')) k++;
@@ -1028,34 +1177,97 @@ static int cc__detect_ext_module(const char* in_path, char* name_out, size_t cap
                 i += 4;
                 continue;
             }
-            if (!found && c == 'P' && i + 7 < len && memcmp(buf + i, "PyInit_", 7) == 0 &&
-                (i == 0 || !(isalnum((unsigned char)buf[i - 1]) || buf[i - 1] == '_'))) {
-                size_t k = i + 7, s = k, m = 0;
-                while (k < len && (isalnum((unsigned char)buf[k]) || buf[k] == '_')) k++;
-                if (k > s) {
-                    while (s + m < k && m + 1 < cap) { name_out[m] = buf[s + m]; m++; }
-                    name_out[m] = '\0';
-                    found = 1;
+            {
+                int e;
+                for (e = 0; e < nd; e++) {
+                    size_t el = strlen(decls[e].entry);
+                    if (i + el > len || memcmp(buf + i, decls[e].entry, el) != 0)
+                        continue;
+                    if (decls[e].wildcard) {
+                        size_t k = i + el, s = k, m = 0;
+                        while (k < len &&
+                               (isalnum((unsigned char)buf[k]) || buf[k] == '_'))
+                            k++;
+                        if (k == s) continue;
+                        if (hit < 0 || e < hit) {
+                            hit = e;
+                            while (s + m < k && m + 1 < cap) {
+                                name_out[m] = buf[s + m];
+                                m++;
+                            }
+                            name_out[m] = '\0';
+                        }
+                        i = k;
+                        break;
+                    }
+                    if (i + el < len &&
+                        (isalnum((unsigned char)buf[i + el]) || buf[i + el] == '_'))
+                        continue;
+                    if (hit < 0 || e < hit) {
+                        if (hit != e) name_out[0] = '\0';
+                        hit = e;
+                    }
+                    i += el;
+                    break;
                 }
-                i = k;
-                continue;
+                if (e < nd) continue;
             }
-            if (!found_js && c == 'n' && i + 24 <= len &&
-                memcmp(buf + i, "napi_register_module_v1", 23) == 0 &&
-                (i == 0 || !(isalnum((unsigned char)buf[i - 1]) || buf[i - 1] == '_')) &&
-                (i + 23 >= len || !(isalnum((unsigned char)buf[i + 23]) || buf[i + 23] == '_'))) {
-                found_js = 1;
-                i += 23;
-                continue;
+            /* `<factory>::[T]` — the registration's type formal names the
+             * artifact, camel lowered to snake.  A name source only: the
+             * entry symbol itself decides module-ness, so a factory used
+             * without the entry never silently produces an addon with no
+             * registration. */
+            {
+                int e;
+                for (e = 0; e < nd; e++) {
+                    size_t fl;
+                    size_t k;
+                    if (!decls[e].factory[0]) continue;
+                    fl = strlen(decls[e].factory);
+                    if (i + fl + 3 > len ||
+                        memcmp(buf + i, decls[e].factory, fl) != 0)
+                        continue;
+                    k = i + fl;
+                    while (k < len && (buf[k] == ' ' || buf[k] == '\t')) k++;
+                    if (k + 2 >= len || buf[k] != ':' || buf[k + 1] != ':' ||
+                        buf[k + 2] != '[')
+                        continue;
+                    k += 3;
+                    while (k < len && (buf[k] == ' ' || buf[k] == '\t')) k++;
+                    {
+                        size_t s = k, m = 0, q;
+                        while (k < len &&
+                               (isalnum((unsigned char)buf[k]) || buf[k] == '_'))
+                            k++;
+                        if (k == s) continue;
+                        if (!name_out[0] && (hit < 0 || decls[hit].factory ==
+                                                            decls[e].factory)) {
+                            for (q = s; q < k && m + 2 < cap; q++) {
+                                char ch = buf[q];
+                                if (ch >= 'A' && ch <= 'Z') {
+                                    if (q > s) name_out[m++] = '_';
+                                    name_out[m++] = (char)(ch - 'A' + 'a');
+                                } else {
+                                    name_out[m++] = ch;
+                                }
+                            }
+                            name_out[m] = '\0';
+                        }
+                        i = k;
+                        break;
+                    }
+                }
+                if (e < nd) continue;
             }
             i++;
         }
     }
     free(buf);
-    if (has_main || (!found && !found_js)) { name_out[0] = '\0'; return 0; }
-    if (found) return 1; /* Python wins if both appear */
-    *is_js = 1;
-    name_out[0] = '\0';
+    if (has_main || hit < 0) {
+        name_out[0] = '\0';
+        return 0;
+    }
+    snprintf(suffix_out, scap, "%s", decls[hit].suffix);
     return 1;
 }
 
@@ -5110,20 +5322,21 @@ static int run_build_mode(int argc, char** argv) {
         }
     }
 
-    /* Extension module: a foreign entry point exported, no `main` —
-     * `PyInit_<name>` (CPython) or `napi_register_module_v1` (Node-API). */
-    static char pymod_name[128];
-    static char pymod_ccflags[1024];
-    static char pymod_ldflags[1024];
-    static int jsmod;
-    if (cc__detect_ext_module(in_path_abs, pymod_name, sizeof(pymod_name),
-                              &jsmod)) {
-        snprintf(pymod_ccflags, sizeof(pymod_ccflags), "%s%s-fPIC",
+    /* Extension module: a stdlib-declared entry point exported, no `main`
+     * (see CC_MODULE_ENTRY above) — the declaration carries the suffix
+     * and the naming rule. */
+    static char extmod_name[128];
+    static char extmod_suffix[32];
+    static char extmod_ccflags[1024];
+    static char extmod_ldflags[1024];
+    if (cc__detect_ext_module(in_path_abs, extmod_name, sizeof(extmod_name),
+                              extmod_suffix, sizeof(extmod_suffix))) {
+        snprintf(extmod_ccflags, sizeof(extmod_ccflags), "%s%s-fPIC",
                  cc_flags ? cc_flags : "", (cc_flags && cc_flags[0]) ? " " : "");
-        cc_flags = pymod_ccflags;
-        snprintf(pymod_ldflags, sizeof(pymod_ldflags), "%s%s-shared",
+        cc_flags = extmod_ccflags;
+        snprintf(extmod_ldflags, sizeof(extmod_ldflags), "%s%s-shared",
                  ld_flags ? ld_flags : "", (ld_flags && ld_flags[0]) ? " " : "");
-        ld_flags = pymod_ldflags;
+        ld_flags = extmod_ldflags;
     }
 
     int raw_c = cc__is_raw_c(in_path_abs);
@@ -5159,23 +5372,17 @@ static int run_build_mode(int argc, char** argv) {
         if (user_out) {
             strncpy(bin_path, user_out, sizeof(bin_path));
             bin_path[sizeof(bin_path)-1] = '\0';
-        } else if (pymod_name[0]) {
-            /* The module names its artifact.  The .abi3 tag is in every
-             * CPython finder's suffix list, so `import <name>` works the
-             * same as a plain .so — and the filename then advertises the
-             * stable-ABI promise the binding actually keeps: one built
-             * module for every supported 3.x. */
-            if (derive_path_from_stem(pymod_name, g_bin_root, ".abi3.so",
-                                      bin_path, sizeof(bin_path)) != 0) {
-                fprintf(stderr, "cc: failed to derive module output\n");
-                goto parse_fail;
-            }
-        } else if (jsmod) {
-            /* Node-API addons are file-named — `require('./x.node')` names
-             * the artifact, not a symbol — so the source stem names it. */
-            char jstem[128];
-            cc__stem_from_path(in_path_abs, jstem, sizeof(jstem));
-            if (derive_path_from_stem(jstem, g_bin_root, ".node",
+        } else if (extmod_suffix[0]) {
+            /* The declaration names the artifact: the entry symbol's
+             * suffix (PyInit_counter → counter.abi3.so), the factory's
+             * type formal (js_module::[Counter] → counter.node), or the
+             * source stem when the declaration offers no name. */
+            char mstem[128];
+            if (extmod_name[0])
+                snprintf(mstem, sizeof(mstem), "%s", extmod_name);
+            else
+                cc__stem_from_path(in_path_abs, mstem, sizeof(mstem));
+            if (derive_path_from_stem(mstem, g_bin_root, extmod_suffix,
                                       bin_path, sizeof(bin_path)) != 0) {
                 fprintf(stderr, "cc: failed to derive module output\n");
                 goto parse_fail;

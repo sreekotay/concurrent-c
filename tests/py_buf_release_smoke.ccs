@@ -22,9 +22,8 @@ int main(void) {
     CCPy py = cc_py_new(&a) !>;
 
     py.exec(@string(`
-        import struct
         def total(mv):
-            return sum(struct.unpack('<%dd' % (len(mv) // 8), mv))
+            return float(sum(mv))
         def copy_then_return(mv):
             return float(len(bytes(mv)))
         g_view = None

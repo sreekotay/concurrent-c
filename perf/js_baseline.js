@@ -43,7 +43,7 @@
 
 'use strict';
 const path = require('path');
-const m = require(path.join(process.cwd(), 'bin', 'js_baseline.node'));
+const m = require(path.join(process.cwd(), 'bin', 'math.node'));
 
 const iters = Math.max(1, parseInt(process.argv[2] || '300000', 10));
 const samples = Math.min(64, Math.max(1, parseInt(process.argv[3] || '7', 10)));

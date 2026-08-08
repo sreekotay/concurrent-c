@@ -1618,7 +1618,11 @@ long long n = py.eval(@slice("1 << 40")) !>;
 ### Objects and calls
 
 `CCPyObj` is opaque. `.get(name)` reads an attribute; `.call(name, args…)`
-calls a method; both return `CCPyObj !>(CCPyError)`. Arguments marshal by
+calls a method; both return `CCPyObj !>(CCPyError)`. `.invoke(args…)`
+calls the VALUE itself — the hot path for a held callable
+(`CCPyObj dot = np.get("dot")` once, invoke per call): no attribute
+lookup rides on the call. It shadows a Python attribute literally named
+`invoke`; an object that really has one is reached through `.get`. Arguments marshal by
 type: `int` / `int64_t` → Python `int`, `double` → `float`, `bool` →
 `bool`, `CCSlice` / `char[:0]` → `str`, a typed slice (`double[:]` is
 `CCSlice_double`, …) → `list` of its scalar element type, `CCPyObj` →
@@ -1634,11 +1638,14 @@ per element and the layout is rebuilt on the far side even when both sides
 already agree on it.
 
 `py_buf(x)` hands the slice over as a `memoryview` onto the CC buffer instead,
-copying nothing:
+copying nothing. The view carries the slice's element format (`d` for a
+`double[:]`), so `len(mv)` counts elements, `sum(mv)` sums values, and
+`numpy.asarray(mv)` wraps the buffer typed — no consumer restates a dtype
+the slice already knew:
 
 ```c
 double s = m.sum_buffer(py_buf(xs)) !>;     /* CC side   */
-np.frombuffer(mv, dtype=np.float64).sum()   #  Python side
+np.asarray(mv).sum()                        #  Python side, zero-copy
 ```
 
 The view borrows, and the borrow ends with the call: when the call
@@ -1929,9 +1936,7 @@ CPython extension entry point must do:
 typedef struct Counter { long long n; } Counter;
 static long long Counter_bump(Counter *self, long long by) { return self->n += by; }
 
-void *PyInit_counter(void) {
-    return py_module::[Counter]("counter", NULL);
-}
+@comptime cc_py_export("Counter");
 ```
 
 ```python
@@ -1939,13 +1944,36 @@ import counter          # Python owns main; CC is the module
 counter.bump(4)
 ```
 
+`cc_py_export(Type[, seed[, "name"]])` expands, per site and in place, to
+exactly the init a hand-written module spells:
+
+```c
+void *PyInit_counter(void) { return py_module::[Counter]("counter", NULL); }
+```
+
+The name is the type lowered to snake case, or the string override;
+spelling the init by hand stays legal, and the two lower identically.
+Several exports in one TU are several independent inits — CPython
+resolves one init per module name — with the artifact named by the
+first.
+
 There is no flag and no keyword: a TU that exports `PyInit_<name>` and
 defines no `main` IS a Python extension module — CPython's own
-entry-point convention is the declaration — and the build obeys: PIC
+entry-point convention is the declaration, and an export directive is
+the same declaration, since it guarantees the emitted entry — and the
+build obeys: PIC
 objects, a shared link, `<name>.abi3.so` as the default output — the abi3 tag is in every
 CPython finder's suffix list, so `import <name>` finds it by bare name,
 and the filename advertises the stable-ABI promise. A TU with a
 `main` stays an executable even if it mentions `PyInit_`.
+
+Installation is path resolution, as for the JS twin: any directory on
+`sys.path` (or `PYTHONPATH`) that holds `counter.abi3.so` makes
+`import counter` work, and `importlib.util.spec_from_file_location`
+loads by bare path. A pip package is a folder convention over it, and
+the `.abi3` tag makes the wheel matrix one binary per platform — not
+per platform × Python version — with no compiler on the installing
+machine.
 
 The seed is the initial module state, copied in at import (NULL for
 zeroed). Failure follows Python's convention at this boundary — NULL
@@ -2163,15 +2191,13 @@ of a runtime.
 a napi addon entry point must return:
 
 ```c
-/* counter.ccs — `ccc build counter.ccs` produces counter.node */
+/* any-name.ccs — `js_module::[Counter]` names the build: counter.node */
 #include <ccc/script/js.cch>
 
 typedef struct Counter { long long n; } Counter;
 static long long Counter_bump(Counter *self, long long by = 1) { return self->n += by; }
 
-void *napi_register_module_v1(void *env, void *exports) {
-    return js_module::[Counter](env, exports, NULL);
-}
+@comptime cc_js_export("Counter");
 ```
 
 ```js
@@ -2179,12 +2205,49 @@ const counter = require('./counter.node');   // JS owns main; CC is the module
 counter.bump(4);
 ```
 
+`cc_js_export(Type[, seed[, "name"]])` differs from its Python twin in
+one way Node-API forces: an addon has a single entry, so ALL of a TU's
+export directives feed one registration, emitted at the last directive
+(every seed static is in scope there). One export lands the type's
+methods on the module itself; several land each type under its
+snake-case name — a policy that lives in the header's
+`cc__js_exports_ns` helper, not the compiler. The single-export
+expansion is the registration a hand-written addon spells:
+
+```c
+void *napi_register_module_v1(CCJsEnv env, CCJsExports exports) {
+    js_module::[Counter](env, cc__js_exports_ns(env, exports, "counter", 1), NULL);
+    return exports;
+}
+```
+
+and spelling the entry by hand stays legal.
+
 There is no flag and no keyword: a TU that exports
 `napi_register_module_v1` and defines no `main` IS a napi addon —
-Node-API's own entry-point convention is the declaration — and the build
-obeys: PIC objects, a shared link, `<name>.node` as the default output.
-A TU with a `main` stays an executable even if it mentions the entry
-point.
+Node-API's own entry-point convention is the declaration, and an export
+directive is the same declaration, since it guarantees the emitted
+entry — and the build obeys: PIC objects, a shared link, `<name>.node`
+as the default output.  The export (or the registration it expands to)
+names the artifact: `cc_js_export("Counter")` builds `counter.node`
+whatever the source file is called (camel lowers to snake), the source
+stem naming a hand-rolled addon that spells no factory.  A TU with a
+`main` stays an executable even if it mentions the entry point.
+
+The convention itself is header-declared, not compiler-known: each
+script header spells its entry point, suffix, and naming rule through
+`CC_MODULE_ENTRY(entry, suffix[, factory])` — a no-op macro the driver
+reads textually — so a new embedding brings its own build convention by
+declaring it.  The export sugar is declared the same way:
+`CC_MODULE_EXPORT(directive, "template")` beside the entry pairs the
+directive's spelling with the stanza it expands to.  The compiler
+implements one template language — `$T`, `$name`, `$seed`, `$count`,
+and a single `$each{...}` region — and one placement rule: a template
+that is nothing but its `$each` region expands every site in place
+(independent stanzas, the Python shape), one with text around the
+region aggregates every site into a single stanza at the last
+(the Node-API shape).  What an embedding's registration looks like is
+stdlib prose, not compiler code.
 
 The module is the type, under the same reflection rules as
 `py_module::[T]`: every visible function whose first parameter is `T` or
@@ -2213,6 +2276,26 @@ One built artifact serves every napi host on a platform: Node, Electron,
 Bun, Deno — and a CC QuickJS host (below). Failure at this boundary
 follows JavaScript's convention — throw — not a CC Result, because the
 caller is the host's module loader.
+
+Installation is path resolution, not registration: `require(path)` IS
+the loader, so a bare `.node` path already works. An npm package is a
+folder convention over it — `package.json` naming an `index.js` that
+requires the binary:
+
+```
+counter/
+  package.json          { "name": "counter", "main": "index.js" }
+  index.js              module.exports = require(
+                            `./prebuilds/${process.platform}-${process.arch}/counter.node`);
+  prebuilds/linux-x64/counter.node
+  prebuilds/darwin-arm64/counter.node
+```
+
+That folder resolves with `require('counter')` after `npm install`, and
+with `require('/path/to/counter')` with no npm at all. Because the
+artifact is stable-ABI, `prebuilds/` holds one binary per PLATFORM, not
+per platform × Node version — the rebuild matrix `node-gyp` exists to
+manage does not arise, and no compiler runs on the installing machine.
 
 ### Binding CC into JS: `js_expose::[T]`
 

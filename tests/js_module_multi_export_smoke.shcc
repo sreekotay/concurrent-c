@@ -1,0 +1,41 @@
+/* Aggregated export directives: two `@comptime cc_js_export(...)` sites
+ * in one TU become one registration, each type namespaced under its
+ * snake-case name, the artifact named by the first export
+ * (PairCounter → bin/pair_counter.node).  The module is
+ * js_module_multi_export_mod.ccs. */
+CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+
+{
+    CCCommand which = cc_command(&a, @slice("sh"));
+    which.arg("-c");
+    which.arg("command -v node >/dev/null 2>&1");
+    int rc = which.status() !>;
+    if (rc != 0) { "SKIP (no node)".println() !>; return 0; }
+}
+
+{
+    CCCommand build = cc_command(&a, @slice("./cc/bin/ccc"));
+    build.arg("build");
+    build.arg("tests/js_module_multi_export_mod.ccs");
+    build.inherit_stdio();
+    int rc = build.status() !>;
+    if (rc != 0) { "build failed".println() !>; return 1; }
+}
+
+{
+    CCCommand run = cc_command(&a, @slice("sh"));
+    run.arg("-c");
+    CCString js = @string(`node -e "
+const m = require(process.cwd() + '/bin/pair_counter.node');
+console.log('namespaces', Object.keys(m).sort().join(','));
+console.log('bump', m.pair_counter.bump(4));
+console.log('bump_default', m.pair_counter.bump());
+console.log('half', m.pair_halver.half(10));
+console.log('flat_hidden', typeof m.bump === 'undefined');
+"`, &a);
+    run.arg(js.cstr(&a));
+    run.inherit_stdio();
+    int rc = run.status() !>;
+    if (rc != 0) { "import failed".println() !>; return 1; }
+}
+return 0;

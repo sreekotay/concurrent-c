@@ -241,6 +241,21 @@ static char* shadow_ct_stage1_src(const char* input_path, size_t* out_n) {
     buf = shadow_ct_read_file(input_path, &n);
     if (!buf) return NULL;
 
+    /* `@comptime <directive>(...);` module-export sugar expands to the
+     * entry stanza BEFORE the blank pass below — a bare `@comptime` decl
+     * is otherwise space-blanked, and the stanza is plain C the
+     * whitelist emit must carry.  Same engine as the driver's prepare. */
+    r = cc_rewrite_module_export_directives_text(buf, n, input_path);
+    if (r == (char*)-1) {
+        free(buf);
+        return NULL;
+    }
+    if (r) {
+        free(buf);
+        buf = r;
+        n = strlen(buf);
+    }
+
     r = cc__resolve_comptime_if(buf, n, input_path);
     if (r == (char*)-1) {
         free(buf);

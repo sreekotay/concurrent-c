@@ -1,0 +1,5 @@
+namespaces pair_counter,pair_halver
+bump 104
+bump_default 105
+half 5.25
+flat_hidden true

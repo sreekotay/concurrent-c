@@ -5,7 +5,7 @@
 
 CCPy py = cc_py_new(&a) !> @destroy;
 
-py.exec(@slice("def triple(x):\n    return x * 3\n")) !>;
+py.exec("def triple(x):\n    return x * 3\n") !>;
 CCPyObj v = py.eval(@slice("triple(14)")) !> @destroy;
 int64_t n = v.as_i64() !>;
 println(@string(`triple=${n}`, &a)) !>;

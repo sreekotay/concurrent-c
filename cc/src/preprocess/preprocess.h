@@ -306,6 +306,25 @@ char* cc_rewrite_type_scoped_calls_text(const char* src, size_t n);
  * (char*)-1 = malformed (diagnostic printed). */
 char* cc_rewrite_static_map_calls_text(const char* src, size_t n, const char* input_path);
 
+/* `@comptime <directive>("Type", seed[, "name"]);` → the entry stanza the
+ * header-declared CC_MODULE_EXPORT template spells (see the pass for the
+ * template language).  NULL = no sites; (char*)-1 = malformed (diagnostic
+ * printed). */
+char* cc_rewrite_module_export_directives_text(const char* src, size_t n, const char* input_path);
+
+/* Detection pre-scan: how many `@comptime <directive>(...)` sites the TU
+ * has (0 also on malformed — the compile pass re-scans loudly); the first
+ * site's module name lands in name_out. */
+int cc_module_export_tu_artifact(const char* src, size_t n, const char* directive, char* name_out, size_t cap);
+
+/* Resolve + read a `<ccc/…>` header against the input's repo root, the
+ * compiler's install tree, and CC_INCLUDE_PATH.  Caller frees. */
+char* cc_module_header_read_text(const char* rel, const char* in_path);
+
+/* Append `<ccc/…>` include paths in `buf` to rels[] (deduplicated);
+ * returns the new count. */
+int cc_module_collect_ccc_includes(const char* buf, char (*rels)[192], int cap, int nrel);
+
 /* Scan a backtick template literal starting at tick_pos (which must point at '`').
  * On success sets *tick_end_out to the closing backtick index and returns 0. */
 int cc_scan_template_literal_end(const char* src, size_t n, size_t tick_pos, size_t* tick_end_out);

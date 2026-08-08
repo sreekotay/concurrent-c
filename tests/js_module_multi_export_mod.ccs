@@ -1,0 +1,26 @@
+/* Two exports in one TU aggregate into ONE registration: the compiler's
+ * template pass feeds every `@comptime cc_js_export(...)` site into the
+ * single napi_register_module_v1 (emitted at the last site), and each
+ * type lands under its snake-case name — one export would land flat.
+ * The artifact takes the first export's name: pair_counter.node.  Paired
+ * smoke: js_module_multi_export_smoke.shcc. */
+#include <ccc/script/js.cch>
+
+typedef struct PairCounter { long long n; } PairCounter;
+
+static long long PairCounter_bump(PairCounter *self, long long by = 1) {
+    self->n += by;
+    return self->n;
+}
+
+typedef struct PairHalver { double bias; } PairHalver;
+
+static double PairHalver_half(PairHalver *self, double x) {
+    return x / 2.0 + self->bias;
+}
+
+static const PairCounter cseed = { .n = 100 };
+static const PairHalver hseed = { .bias = 0.25 };
+
+@comptime cc_js_export("PairCounter", &cseed);
+@comptime cc_js_export("PairHalver", &hseed);

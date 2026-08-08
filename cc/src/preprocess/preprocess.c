@@ -17745,6 +17745,605 @@ char* cc_rewrite_static_map_calls_text(const char* src, size_t n, const char* in
     return out.p;
 }
 
+/* ---- module export directives ----------------------------------------
+ *
+ * A module embedding declares its export sugar in its own header, beside
+ * the CC_MODULE_ENTRY it guarantees:
+ *
+ *     CC_MODULE_EXPORT(cc_py_export,
+ *         "$each{void *PyInit_$name(void) { ... }\n}")
+ *
+ * and `@comptime <directive>("Type", seed[, "name"]);` sites in a TU
+ * expand from that template.  The compiler implements one template
+ * language — `$T` (the exported type), `$name` (its snake-case name, or
+ * the string override), `$seed` (the seed expression, `NULL` when
+ * omitted), `$count` (how many sites the TU has), and exactly one
+ * `$each{...}` region — and the stdlib spells what an entry stanza looks
+ * like.  A template that is nothing but its `$each` region expands every
+ * site in place (independent stanzas, one per type); a template with
+ * text around the region aggregates: every site feeds the one region and
+ * the single stanza lands at the LAST site, where every seed static is
+ * already in scope, earlier sites vanishing.  The spliced text is the
+ * same registration a hand-written module spells — the explicit stanza
+ * stays legal, and everything downstream (parse, factories, codegen)
+ * cannot tell the two apart. */
+
+static char* cc__mex_read_file(const char* path) {
+    FILE* f = fopen(path, "rb");
+    char* buf;
+    long n;
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (n <= 0 || n > 16 * 1024 * 1024) { fclose(f); return NULL; }
+    buf = (char*)malloc((size_t)n + 1);
+    if (!buf) { fclose(f); return NULL; }
+    if (fread(buf, 1, (size_t)n, f) != (size_t)n) { free(buf); fclose(f); return NULL; }
+    buf[n] = '\0';
+    fclose(f);
+    return buf;
+}
+
+/* Resolve a `<ccc/…>` include against the roots a build can run from:
+ * the input's repo root (walking up for cc/include), the compiler's own
+ * install tree, and CC_INCLUDE_PATH.  The single resolver shared with
+ * the driver's module-entry detection. */
+char* cc_module_header_read_text(const char* rel, const char* in_path) {
+    char cand[PATH_MAX];
+    char base[PATH_MAX];
+    char* text;
+    if (!rel || !in_path) return NULL;
+    /* A buffer that already went through include lowering spells the
+     * header as its `.h` product; the declarations live in the `.cch`
+     * source, so try the twin when the literal name misses. */
+    {
+        size_t rl = strlen(rel);
+        if (rl > 2 && strcmp(rel + rl - 2, ".h") == 0 && rl + 3 < PATH_MAX) {
+            char twin[192 + 4];
+            snprintf(twin, sizeof(twin), "%.*s.cch", (int)(rl - 2), rel);
+            text = cc_module_header_read_text(twin, in_path);
+            if (text) return text;
+        }
+    }
+    {
+        const char* rr = getenv("CC_REPO_ROOT");
+        if (rr && rr[0]) {
+            snprintf(cand, sizeof(cand), "%s/cc/include/%s", rr, rel);
+            if ((text = cc__mex_read_file(cand)) != NULL) return text;
+        }
+    }
+    if (realpath(in_path, base)) {
+        char* slash;
+        while ((slash = strrchr(base, '/')) != NULL) {
+            *slash = 0;
+            if (!base[0]) break;
+            snprintf(cand, sizeof(cand), "%s/cc/include/%s", base, rel);
+            if ((text = cc__mex_read_file(cand)) != NULL) return text;
+        }
+    }
+    {
+        ssize_t sn = readlink("/proc/self/exe", base, sizeof(base) - 1);
+        if (sn > 0) {
+            char* slash;
+            base[sn] = 0;
+            slash = strrchr(base, '/');
+            if (slash) {
+                *slash = 0;
+                snprintf(cand, sizeof(cand), "%s/../include/%s", base, rel);
+                if ((text = cc__mex_read_file(cand)) != NULL) return text;
+                snprintf(cand, sizeof(cand), "%s/../../cc/include/%s", base, rel);
+                if ((text = cc__mex_read_file(cand)) != NULL) return text;
+            }
+        }
+    }
+    {
+        const char* env = getenv("CC_INCLUDE_PATH");
+        if (env && env[0]) {
+            char paths[2048];
+            char* p;
+            snprintf(paths, sizeof(paths), "%s", env);
+            p = paths;
+            while (p && *p) {
+                char* sep = strchr(p, ':');
+                if (sep) *sep = 0;
+                if (*p) {
+                    snprintf(cand, sizeof(cand), "%s/%s", p, rel);
+                    if ((text = cc__mex_read_file(cand)) != NULL) return text;
+                }
+                p = sep ? sep + 1 : NULL;
+            }
+        }
+    }
+    return NULL;
+}
+
+/* Append `<ccc/…>` include paths found in `buf` to rels[], deduplicated.
+ * Returns the new count. */
+int cc_module_collect_ccc_includes(const char* buf, char (*rels)[192], int cap,
+                                   int nrel) {
+    const char* p = buf;
+    while ((p = strstr(p, "#include")) != NULL && nrel < cap) {
+        const char* lt = p + 8;
+        const char* gt;
+        size_t rl;
+        int k, dup = 0;
+        p += 8;
+        while (*lt == ' ' || *lt == '\t') lt++;
+        if (*lt != '<') continue;
+        lt++;
+        gt = strchr(lt, '>');
+        if (!gt) continue;
+        rl = (size_t)(gt - lt);
+        if (rl == 0 || rl >= 192) continue;
+        if (strncmp(lt, "ccc/", 4) != 0) continue;
+        for (k = 0; k < nrel; k++)
+            if (strncmp(rels[k], lt, rl) == 0 && rels[k][rl] == 0) { dup = 1; break; }
+        if (dup) continue;
+        memcpy(rels[nrel], lt, rl);
+        rels[nrel][rl] = 0;
+        nrel++;
+    }
+    return nrel;
+}
+
+typedef struct {
+    char directive[64];
+    char* tpl; /* malloc'd, escapes decoded, adjacent literals joined */
+} CCMexTpl;
+
+/* Parse `CC_MODULE_EXPORT(<ident>, "…" "…")` declarations out of one
+ * header text.  The `#define CC_MODULE_EXPORT(...)` guard parses as no
+ * declaration — its first argument is `...`, not an identifier. */
+static int cc__mex_scan_tpls(const char* text, CCMexTpl* t, int cap, int nt) {
+    size_t n = strlen(text);
+    size_t i = 0;
+    while (nt < cap) {
+        const char* hit = strstr(text + i, "CC_MODULE_EXPORT");
+        size_t j, dl;
+        char dir[64];
+        char* tpl = NULL;
+        size_t tl = 0, tc = 0;
+        if (!hit) break;
+        i = (size_t)(hit - text);
+        j = i + (sizeof("CC_MODULE_EXPORT") - 1);
+        if ((i > 0 && cc_is_ident_char(text[i - 1])) ||
+            (j < n && cc_is_ident_char(text[j]))) { i = j; continue; }
+        j = cc_skip_ws_and_comments(text, n, j);
+        if (j >= n || text[j] != '(') { i = j; continue; }
+        j = cc_skip_ws_and_comments(text, n, j + 1);
+        dl = 0;
+        while (j < n && cc_is_ident_char(text[j]) && dl + 1 < sizeof(dir))
+            dir[dl++] = text[j++];
+        dir[dl] = 0;
+        if (!dl) { i = j; continue; }
+        j = cc_skip_ws_and_comments(text, n, j);
+        if (j >= n || text[j] != ',') { i = j; continue; }
+        j = cc_skip_ws_and_comments(text, n, j + 1);
+        while (j < n && text[j] == '"') {
+            char seg[2048];
+            if (!cc_parse_c_string_literal(text, n, &j, seg, sizeof(seg))) {
+                free(tpl);
+                tpl = NULL;
+                tl = 0;
+                break;
+            }
+            cc_sb_append(&tpl, &tl, &tc, seg, strlen(seg));
+            j = cc_skip_ws_and_comments(text, n, j);
+        }
+        if (!tpl || !tl || j >= n || text[j] != ')') { free(tpl); i = j; continue; }
+        {
+            int k, dup = 0;
+            for (k = 0; k < nt; k++)
+                if (strcmp(t[k].directive, dir) == 0) { dup = 1; break; }
+            if (dup) { free(tpl); i = j; continue; }
+        }
+        snprintf(t[nt].directive, sizeof(t[nt].directive), "%s", dir);
+        t[nt].tpl = tpl;
+        nt++;
+        i = j;
+    }
+    return nt;
+}
+
+/* Collect templates from the TU's `<ccc/…>` includes, one nested level —
+ * the same depth the driver's entry detection reads. */
+static int cc__mex_collect_templates(const char* src, const char* in_path,
+                                     CCMexTpl* t, int cap) {
+    char rels[24][192];
+    int nrel, scanned = 0, nt = 0, depth;
+    nrel = cc_module_collect_ccc_includes(src, rels, 24, 0);
+    for (depth = 0; depth < 2; depth++) {
+        int end = nrel;
+        for (; scanned < end; scanned++) {
+            char* text = cc_module_header_read_text(rels[scanned], in_path);
+            if (!text) continue;
+            nt = cc__mex_scan_tpls(text, t, cap, nt);
+            if (depth == 0)
+                nrel = cc_module_collect_ccc_includes(text, rels, 24, nrel);
+            free(text);
+        }
+    }
+    return nt;
+}
+
+/* Camel lowered to snake: Counter → counter, RowMap → row_map.  The same
+ * rule the driver's factory name-source applies. */
+static void cc__mex_snake(const char* t, char* out, size_t cap) {
+    size_t m = 0, q;
+    for (q = 0; t[q] && m + 2 < cap; q++) {
+        char ch = t[q];
+        if (ch >= 'A' && ch <= 'Z') {
+            if (q > 0) out[m++] = '_';
+            out[m++] = (char)(ch - 'A' + 'a');
+        } else {
+            out[m++] = ch;
+        }
+    }
+    out[m] = 0;
+}
+
+typedef struct {
+    size_t start; /* at the '@' */
+    size_t end;   /* one past the ';' */
+    char type_name[96];
+    char name[96];
+    char seed[256];
+} CCMexSite;
+
+/* Scan the TU for `@comptime <directive>(args);` statements.  Malformed
+ * sites are hard errors (quiet mode suppresses the report for the
+ * detection pre-scan; the compile pass repeats the scan loudly). */
+static int cc__mex_scan_sites(const char* src, size_t n, const char* directive,
+                              CCMexSite* sites, int cap, const char* input_path,
+                              int quiet, int* out_err) {
+    CCScannerState s;
+    size_t i = 0;
+    int ns = 0;
+    size_t dl = strlen(directive);
+    const char* in = input_path ? input_path : "<input>";
+    cc_scanner_init(&s);
+    while (i < n) {
+        size_t j, lpar, rpar = 0, semi;
+        size_t starts[4], ends[4];
+        int nargs;
+        CCMexSite* st;
+        if (cc_scanner_skip_non_code(&s, src, n, &i)) continue;
+        if (src[i] != '@' || !cc_match_ident_kw(src, n, i + 1, "comptime")) {
+            i++;
+            continue;
+        }
+        j = cc_skip_ws_and_comments(src, n, i + 1 + (sizeof("comptime") - 1));
+        if (!cc_match_ident_kw(src, n, j, directive)) { i++; continue; }
+        j = cc_skip_ws_and_comments(src, n, j + dl);
+        if (j >= n || src[j] != '(') { i++; continue; }
+        lpar = j;
+        if (!cc_find_matching_paren(src, n, lpar, &rpar)) {
+            if (!quiet)
+                fprintf(stderr, "%s: error: %s: unterminated argument list\n",
+                        in, directive);
+            *out_err = 1;
+            return ns;
+        }
+        semi = cc_skip_ws_and_comments(src, n, rpar + 1);
+        if (semi >= n || src[semi] != ';') {
+            if (!quiet)
+                fprintf(stderr, "%s: error: %s: expected ';' after the export "
+                                "directive\n",
+                        in, directive);
+            *out_err = 1;
+            return ns;
+        }
+        if (ns >= cap) {
+            if (!quiet)
+                fprintf(stderr, "%s: error: %s: too many export directives in "
+                                "one TU (max %d)\n",
+                        in, directive, cap);
+            *out_err = 1;
+            return ns;
+        }
+        nargs = cc__sm_split_args(src, lpar, rpar, starts, ends, 4);
+        st = &sites[ns];
+        memset(st, 0, sizeof *st);
+        st->start = i;
+        st->end = semi + 1;
+        {
+            const char* a0;
+            size_t a0l;
+            if (nargs < 1 || nargs > 3) {
+                if (!quiet)
+                    fprintf(stderr, "%s: error: %s takes (\"Type\"[, seed[, "
+                                    "\"name\"]])\n",
+                            in, directive);
+                *out_err = 1;
+                return ns;
+            }
+            a0 = src + starts[0];
+            a0l = ends[0] - starts[0];
+            cc__sm_trim(&a0, &a0l);
+            if (a0l == 0) {
+                if (!quiet)
+                    fprintf(stderr, "%s: error: %s: needs the exported type — "
+                                    "%s(\"Type\", &seed)\n",
+                            in, directive, directive);
+                *out_err = 1;
+                return ns;
+            }
+            if (a0[0] == '"') {
+                size_t p = (size_t)(a0 - src);
+                if (!cc_parse_c_string_literal(src, n, &p, st->type_name,
+                                               sizeof(st->type_name)))
+                    st->type_name[0] = 0;
+            } else if (a0l < sizeof(st->type_name)) {
+                memcpy(st->type_name, a0, a0l);
+                st->type_name[a0l] = 0;
+            }
+            {
+                size_t q;
+                int ok = st->type_name[0] != 0 &&
+                         !(st->type_name[0] >= '0' && st->type_name[0] <= '9');
+                for (q = 0; ok && st->type_name[q]; q++)
+                    if (!cc_is_ident_char(st->type_name[q])) ok = 0;
+                if (!ok) {
+                    if (!quiet)
+                        fprintf(stderr, "%s: error: %s: '%.*s' is not a type "
+                                        "name\n",
+                                in, directive, (int)a0l, a0);
+                    *out_err = 1;
+                    return ns;
+                }
+            }
+        }
+        if (nargs >= 2) {
+            const char* a1 = src + starts[1];
+            size_t a1l = ends[1] - starts[1];
+            cc__sm_trim(&a1, &a1l);
+            if (a1l == 0 || a1l >= sizeof(st->seed)) {
+                if (!quiet)
+                    fprintf(stderr, "%s: error: %s: seed expression missing or "
+                                    "too long\n",
+                            in, directive);
+                *out_err = 1;
+                return ns;
+            }
+            memcpy(st->seed, a1, a1l);
+            st->seed[a1l] = 0;
+        } else {
+            snprintf(st->seed, sizeof(st->seed), "NULL");
+        }
+        if (nargs >= 3) {
+            const char* a2 = src + starts[2];
+            size_t a2l = ends[2] - starts[2];
+            size_t p;
+            cc__sm_trim(&a2, &a2l);
+            p = (size_t)(a2 - src);
+            if (a2l == 0 || a2[0] != '"' ||
+                !cc_parse_c_string_literal(src, n, &p, st->name,
+                                           sizeof(st->name))) {
+                if (!quiet)
+                    fprintf(stderr, "%s: error: %s: the module-name override "
+                                    "must be a string literal\n",
+                            in, directive);
+                *out_err = 1;
+                return ns;
+            }
+        } else {
+            cc__mex_snake(st->type_name, st->name, sizeof(st->name));
+        }
+        ns++;
+        i = semi + 1;
+    }
+    return ns;
+}
+
+/* Split `head $each{body} tail`.  Exactly one region, braces balanced. */
+static int cc__mex_tpl_split(const char* tpl, const char** head, size_t* hl,
+                             const char** body, size_t* bl, const char** tail,
+                             size_t* tl) {
+    const char* e = strstr(tpl, "$each{");
+    const char* b;
+    const char* p;
+    size_t depth = 1;
+    if (!e || strstr(e + 1, "$each{")) return 0;
+    b = e + 6;
+    p = b;
+    while (*p) {
+        if (*p == '{') depth++;
+        else if (*p == '}') {
+            depth--;
+            if (!depth) break;
+        }
+        p++;
+    }
+    if (depth) return 0;
+    *head = tpl;
+    *hl = (size_t)(e - tpl);
+    *body = b;
+    *bl = (size_t)(p - b);
+    *tail = p + 1;
+    *tl = strlen(p + 1);
+    return 1;
+}
+
+/* Substitute one site into the $each body. */
+static int cc__mex_expand(CCSmBuf* out, const char* body, size_t bl,
+                          const CCMexSite* st, int count) {
+    size_t i = 0;
+    while (i < bl) {
+        if (body[i] == '$') {
+            if (i + 5 <= bl && memcmp(body + i, "$name", 5) == 0 &&
+                (i + 5 == bl || !cc_is_ident_char(body[i + 5]))) {
+                if (!cc__sm_append(out, st->name, strlen(st->name))) return 0;
+                i += 5;
+                continue;
+            }
+            if (i + 5 <= bl && memcmp(body + i, "$seed", 5) == 0 &&
+                (i + 5 == bl || !cc_is_ident_char(body[i + 5]))) {
+                if (!cc__sm_append(out, st->seed, strlen(st->seed))) return 0;
+                i += 5;
+                continue;
+            }
+            if (i + 6 <= bl && memcmp(body + i, "$count", 6) == 0 &&
+                (i + 6 == bl || !cc_is_ident_char(body[i + 6]))) {
+                char nb[16];
+                int nn = snprintf(nb, sizeof nb, "%d", count);
+                if (!cc__sm_append(out, nb, (size_t)nn)) return 0;
+                i += 6;
+                continue;
+            }
+            if (i + 2 <= bl && body[i + 1] == 'T' &&
+                (i + 2 == bl || !cc_is_ident_char(body[i + 2]))) {
+                if (!cc__sm_append(out, st->type_name, strlen(st->type_name)))
+                    return 0;
+                i += 2;
+                continue;
+            }
+        }
+        if (!cc__sm_append(out, body + i, 1)) return 0;
+        i++;
+    }
+    return 1;
+}
+
+/* Detection pre-scan for the driver: does the TU spell this directive,
+ * and what artifact does the first site name?  Quiet — a malformed site
+ * reads as "not a module" here and errors articulately at compile. */
+int cc_module_export_tu_artifact(const char* src, size_t n,
+                                 const char* directive, char* name_out,
+                                 size_t cap) {
+    CCMexSite sites[16];
+    int err = 0, ns;
+    if (!src || !directive || !directive[0] || !name_out || cap == 0) return 0;
+    if (!strstr(src, directive)) return 0;
+    ns = cc__mex_scan_sites(src, n, directive, sites,
+                            (int)(sizeof(sites) / sizeof(sites[0])), NULL, 1,
+                            &err);
+    if (err || ns <= 0) return 0;
+    snprintf(name_out, cap, "%s", sites[0].name);
+    return ns;
+}
+
+char* cc_rewrite_module_export_directives_text(const char* src, size_t n,
+                                               const char* input_path) {
+    CCMexTpl tpls[8];
+    typedef struct {
+        size_t start, end;
+        char* text;
+    } CCMexRepl;
+    CCMexRepl repls[128];
+    int nt = 0, nr = 0, ti, failed = 0;
+    if (!src || n == 0) return NULL;
+    /* Cheap gate before any header read: a bare `@comptime <ident>(`
+     * statement shape must appear (`if`/`for` and block forms excluded). */
+    {
+        int shape = 0;
+        const char* p = src;
+        while ((p = strstr(p, "@comptime")) != NULL) {
+            const char* q = p + 9;
+            char id[64];
+            size_t m = 0;
+            p += 9;
+            while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r') q++;
+            while (cc_is_ident_char(*q) && m + 1 < sizeof(id)) id[m++] = *q++;
+            id[m] = 0;
+            if (!m || strcmp(id, "if") == 0 || strcmp(id, "for") == 0) continue;
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q == '(') { shape = 1; break; }
+        }
+        if (!shape) return NULL;
+    }
+    nt = cc__mex_collect_templates(src, input_path, tpls,
+                                   (int)(sizeof(tpls) / sizeof(tpls[0])));
+    if (nt <= 0) return NULL;
+
+    for (ti = 0; ti < nt && !failed; ti++) {
+        CCMexSite sites[16];
+        int ns, err = 0, si;
+        const char *head, *body, *tail;
+        size_t hl, bl, tl;
+        ns = cc__mex_scan_sites(src, n, tpls[ti].directive, sites,
+                                (int)(sizeof(sites) / sizeof(sites[0])),
+                                input_path, 0, &err);
+        if (err) { failed = 1; break; }
+        if (ns <= 0) continue;
+        if (!cc__mex_tpl_split(tpls[ti].tpl, &head, &hl, &body, &bl, &tail,
+                               &tl)) {
+            fprintf(stderr, "%s: error: %s: CC_MODULE_EXPORT template needs "
+                            "exactly one $each{...} region\n",
+                    input_path ? input_path : "<input>", tpls[ti].directive);
+            failed = 1;
+            break;
+        }
+        if (nr + ns > (int)(sizeof(repls) / sizeof(repls[0]))) { failed = 1; break; }
+        if (hl == 0 && tl == 0) {
+            /* Independent stanzas: each site expands in place. */
+            for (si = 0; si < ns && !failed; si++) {
+                CCSmBuf eb = { 0 };
+                if (!cc__mex_expand(&eb, body, bl, &sites[si], ns)) {
+                    free(eb.p);
+                    failed = 1;
+                    break;
+                }
+                repls[nr].start = sites[si].start;
+                repls[nr].end = sites[si].end;
+                repls[nr].text = eb.p ? eb.p : (char*)calloc(1, 1);
+                nr++;
+            }
+        } else {
+            /* One aggregate stanza at the LAST site — every seed static
+             * is in scope by then; earlier sites vanish. */
+            CCSmBuf eb = { 0 };
+            int ok = cc__sm_append(&eb, head, hl);
+            for (si = 0; ok && si < ns; si++)
+                ok = cc__mex_expand(&eb, body, bl, &sites[si], ns);
+            ok = ok && cc__sm_append(&eb, tail, tl);
+            if (!ok) {
+                free(eb.p);
+                failed = 1;
+                break;
+            }
+            for (si = 0; si < ns - 1; si++) {
+                repls[nr].start = sites[si].start;
+                repls[nr].end = sites[si].end;
+                repls[nr].text = (char*)calloc(1, 1);
+                nr++;
+            }
+            repls[nr].start = sites[ns - 1].start;
+            repls[nr].end = sites[ns - 1].end;
+            repls[nr].text = eb.p ? eb.p : (char*)calloc(1, 1);
+            nr++;
+        }
+    }
+    for (ti = 0; ti < nt; ti++) free(tpls[ti].tpl);
+    if (failed || nr == 0) {
+        int r;
+        for (r = 0; r < nr; r++) free(repls[r].text);
+        return failed ? (char*)-1 : NULL;
+    }
+    /* Splice, ordered by site position (directives may interleave). */
+    {
+        CCSmBuf out = { 0 };
+        size_t pos = 0;
+        int r, k, ok = 1;
+        for (r = 1; r < nr; r++) {
+            CCMexRepl tmp = repls[r];
+            for (k = r; k > 0 && repls[k - 1].start > tmp.start; k--)
+                repls[k] = repls[k - 1];
+            repls[k] = tmp;
+        }
+        for (r = 0; r < nr && ok; r++) {
+            ok = cc__sm_append(&out, src + pos, repls[r].start - pos) &&
+                 cc__sm_append(&out, repls[r].text,
+                               repls[r].text ? strlen(repls[r].text) : 0);
+            pos = repls[r].end;
+        }
+        ok = ok && cc__sm_append(&out, src + pos, n - pos);
+        for (r = 0; r < nr; r++) free(repls[r].text);
+        if (!ok) { free(out.p); return (char*)-1; }
+        return out.p;
+    }
+}
+
 /* ---- enum reflection (edge-push #1) ---------------------------------- */
 
 static void cc__ct_free_enum_members(CCCtEnumMember* m, size_t n) {

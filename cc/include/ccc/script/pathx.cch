@@ -22,13 +22,21 @@
 #endif
 
 static inline int cc__script_is_repo_root(CCSlice dir) {
+    /* Bounding the directory leaves room for the longest marker suffix,
+     * so the append can never truncate (a path that long is past
+     * PATH_MAX and no repo root anyway) — and the bound is what keeps
+     * -Wformat-truncation quiet on toolchains that prove the overflow. */
     char marker[PATH_MAX];
+    enum { CC__SCRIPT_DIR_MAX = PATH_MAX - 40 };
     if (!dir.ptr || dir.len == 0) return 0;
-    snprintf(marker, sizeof(marker), "%s/cc/src/cc_main.c", (const char *)dir.ptr);
+    snprintf(marker, sizeof(marker), "%.*s/cc/src/cc_main.c",
+             CC__SCRIPT_DIR_MAX, (const char *)dir.ptr);
     if (cc_path_exists(cc_slice_cstr(marker))) return 1;
-    snprintf(marker, sizeof(marker), "%s/perf/compiler_baseline.txt", (const char *)dir.ptr);
+    snprintf(marker, sizeof(marker), "%.*s/perf/compiler_baseline.txt",
+             CC__SCRIPT_DIR_MAX, (const char *)dir.ptr);
     if (cc_path_exists(cc_slice_cstr(marker))) return 1;
-    snprintf(marker, sizeof(marker), "%s/.git", (const char *)dir.ptr);
+    snprintf(marker, sizeof(marker), "%.*s/.git",
+             CC__SCRIPT_DIR_MAX, (const char *)dir.ptr);
     return cc_path_exists(cc_slice_cstr(marker)) ? 1 : 0;
 }
 

@@ -52,6 +52,20 @@ int cc_comptime_prepare_source(char** inout_buf, size_t* inout_len,
         }
     }
 
+    /* `@comptime <directive>(...);` module-export sugar: expand the
+     * header-declared CC_MODULE_EXPORT template into the same entry
+     * stanza a hand-written registration spells, before any other pass
+     * reads the TU — the splice is indistinguishable from source. */
+    {
+        char* mex = cc_rewrite_module_export_directives_text(*inout_buf, *inout_len, input_path);
+        if (mex == (char*)-1) return -1;
+        if (mex) {
+            free(*inout_buf);
+            *inout_buf = mex;
+            *inout_len = strlen(mex);
+        }
+    }
+
     /* Type-scoped calls (`Tweet.parse(...)` -> `Tweet_parse(...)`) rewrite
      * AFTER the grammar splice so lowered names emitted by the engines count
      * as visible; must happen before the C parse (syntax error otherwise). */

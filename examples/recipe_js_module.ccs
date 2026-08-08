@@ -1,14 +1,13 @@
 /* A Node-API addon, in one command:
  *
  *     ccc build examples/recipe_js_module.ccs
- *     node -e "const c = require('./bin/recipe_js_module.node'); console.log(c.bump(4))"
+ *     node -e "const c = require('./bin/counter.node'); console.log(c.bump(4))"
  *
- * No flag says "module": the TU exports `napi_register_module_v1` and
- * defines no `main`, so the build links a shared object named
- * recipe_js_module.node — Node-API addons are file-named, so the source
- * stem names the artifact.  One built artifact loads in any Node-API host:
- * Node, Electron, Bun, Deno.  JS imports CC the same way CC imports
- * Python — one boundary, two doors.
+ * No flag says "module": the TU exports its type and defines no `main`,
+ * so the build links a shared object — and the export names it
+ * (Counter → counter.node).  One built artifact loads in any Node-API
+ * host: Node, Electron, Bun, Deno.  JS imports CC the same way CC
+ * imports Python — one boundary, two doors.
  *
  * The module IS the type: every function whose first parameter is Counter
  * or Counter* becomes a module function, and the module's state is one
@@ -41,10 +40,14 @@ static long long !>(CCError) Counter_bump_checked(Counter *self, long long by) {
     return cc_ok(self->n);
 }
 
-/* The seed is the module's initial state, copied in at registration (NULL
- * would mean zeroed).  This counter starts at 100. */
+/* The seed is the module's initial state, copied in at registration
+ * (NULL would mean zeroed).  This counter starts at 100.  The export
+ * emits the guest-mode entry — the registration Node's module loader
+ * calls with the environment it owns — and names the artifact:
+ * counter.node.  Spelling that entry by hand stays legal (see
+ * CC_MODULE_EXPORT in <ccc/script/js.cch> for the exact stanza this
+ * expands to); several exports in one TU aggregate into one module,
+ * each type under its snake-case name. */
 static const Counter seed = { .n = 100 };
 
-void *napi_register_module_v1(void *env, void *exports) {
-    return js_module::[Counter](env, exports, &seed);
-}
+@comptime cc_js_export("Counter", &seed);

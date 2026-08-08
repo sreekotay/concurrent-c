@@ -13,20 +13,12 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
     if (rc != 0) { "SKIP (no node)".println() !>; return 0; }
 }
 
-{
-    CCCommand stage = cc_command(&a, @slice("sh"));
-    stage.arg("-c");
-    stage.arg("mkdir -p out/jsmod_dblres && "
-              "cp tests/js_module_double_result_mod.src out/jsmod_dblres/counter.ccs");
-    stage.inherit_stdio();
-    int rc = stage.status() !>;
-    if (rc != 0) { "stage failed".println() !>; return 1; }
-}
-
+/* No staging: `js_module::[Counter]` names the artifact, so building the
+ * fixture where it lives produces bin/counter.node. */
 {
     CCCommand build = cc_command(&a, @slice("./cc/bin/ccc"));
     build.arg("build");
-    build.arg("out/jsmod_dblres/counter.ccs");
+    build.arg("tests/js_module_double_result_mod.ccs");
     build.inherit_stdio();
     int rc = build.status() !>;
     if (rc != 0) { "build failed".println() !>; return 1; }

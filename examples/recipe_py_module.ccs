@@ -3,9 +3,10 @@
  *     ccc build examples/recipe_py_module.ccs
  *     PYTHONPATH=bin python3 -c "import counter; print(counter.bump(4))"
  *
- * No flag says "module": the TU exports `PyInit_counter` and defines no
- * `main`, so the build links a shared object named counter.abi3.so.  Python
- * imports CC the same way CC imports Python — one boundary, two doors.
+ * No flag says "module": the TU exports its type and defines no `main`,
+ * so the build links a shared object — and the export names it
+ * (Counter → counter.abi3.so).  Python imports CC the same way CC
+ * imports Python — one boundary, two doors.
  *
  * The module IS the type: every function whose first parameter is Counter
  * or Counter* becomes a module function, and the module's state is one
@@ -38,9 +39,10 @@ static long long !>(CCError) Counter_bump_checked(Counter *self, long long by) {
 }
 
 /* The seed is the module's initial state, copied in at import (NULL would
- * mean zeroed).  This counter starts at 100. */
+ * mean zeroed).  This counter starts at 100.  The export emits the init
+ * CPython's import machinery resolves by name — spelling
+ * `PyInit_counter` by hand stays legal (see CC_MODULE_EXPORT in
+ * <ccc/script/py.cch> for the exact stanza this expands to). */
 static const Counter seed = { .n = 100 };
 
-void *PyInit_counter(void) {
-    return py_module::[Counter]("counter", &seed);
-}
+@comptime cc_py_export("Counter", &seed);

@@ -18,20 +18,12 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
     if (rc != 0) { "SKIP (no python3)".println() !>; return 0; }
 }
 
-{
-    CCCommand stage = cc_command(&a, @slice("sh"));
-    stage.arg("-c");
-    stage.arg("mkdir -p out/pymod_dblres && "
-              "cp tests/py_module_double_result_mod.src out/pymod_dblres/halver.ccs");
-    stage.inherit_stdio();
-    int rc = stage.status() !>;
-    if (rc != 0) { "stage failed".println() !>; return 1; }
-}
-
+/* No staging: `PyInit_halver` names the artifact, so building the
+ * fixture where it lives produces bin/halver.abi3.so. */
 {
     CCCommand build = cc_command(&a, @slice("./cc/bin/ccc"));
     build.arg("build");
-    build.arg("out/pymod_dblres/halver.ccs");
+    build.arg("tests/py_module_double_result_mod.ccs");
     build.inherit_stdio();
     int rc = build.status() !>;
     if (rc != 0) { "build failed".println() !>; return 1; }

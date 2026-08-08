@@ -1,6 +1,7 @@
 /* The other door, JS edition: Node imports CC.  A TU exporting
  * `napi_register_module_v1` and no `main` builds — in one command, no
- * flag — as recipe_js_module.node, and `require()` runs CC code with
+ * flag — as counter.node — `js_module::[Counter]` names the artifact — and
+ * `require()` runs CC code with
  * module state.  Skips where no node executable is on PATH (the .node
  * needs a host to import it). */
 CCArena a = cc_arena_heap(megabytes(1)) @destroy;
@@ -30,7 +31,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
      * arriving as the class its kind maps to with `code` carrying the kind
      * name, and the underscore member staying home. */
     CCString js = @string(`node -e "
-const c = require(process.cwd() + '/bin/recipe_js_module.node');
+const c = require(process.cwd() + '/bin/counter.node');
 console.log('start', c.total());
 console.log('bump', c.bump(4));
 console.log('kw', c.bump({by: 2}));

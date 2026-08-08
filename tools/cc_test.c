@@ -492,6 +492,7 @@ static int get_run_timeout_for_test(const char* stem, int default_timeout_sec) {
      * js.cch TU, then a node import run. */
     if (strcmp(stem, "js_module_import_smoke") == 0) return 30;
     if (strcmp(stem, "js_module_double_result_smoke") == 0) return 30;
+    if (strcmp(stem, "js_module_multi_export_smoke") == 0) return 30;
     if (strcmp(stem, "py_module_kwargs_smoke") == 0) return 30;
     if (strcmp(stem, "py_levenshtein_smoke") == 0) return 30;
     return default_timeout_sec;
@@ -1116,6 +1117,11 @@ int main(int argc, char** argv) {
                 }
                 if (!(ends_with(nm, ".c") || ends_with(nm, ".ccs") ||
                       ends_with(nm, ".shcc")))
+                    continue;
+                /* `<name>_mod.ccs` is a paired smoke's module fixture (an
+                 * extension-module TU with no main), not a test — the
+                 * owning smoke builds and exercises it. */
+                if (ends_with(nm, "_mod.ccs"))
                     continue;
                 if (all_n == all_cap) {
                     int nc = all_cap ? all_cap * 2 : 64;

@@ -19,15 +19,12 @@ static double Counter_scale(Counter *self, double k) {
     return (double)self->n * k;
 }
 static const char *Counter_label(Counter *self) {
-    (void)self;
     return "counter";
 }
 static long long Counter_big(Counter *self) {
-    (void)self;
     return 1LL << 60;
 }
 static long long Counter__clamp(Counter *self, long long v) {
-    (void)self;
     return v > 1000 ? 1000 : v;
 }
 static long long !>(CCError) Counter_bump_checked(Counter *self, long long by) {
@@ -36,7 +33,6 @@ static long long !>(CCError) Counter_bump_checked(Counter *self, long long by) {
     return cc_ok(self->n);
 }
 static double !>(CCError) Counter_half(Counter *self, double x) {
-    (void)self;
     if (x < 0) return cc_err(CC_ERR_INVALID_ARG, "x must be non-negative");
     return cc_ok(x / 2.0);
 }
@@ -44,19 +40,16 @@ static double !>(CCError) Counter_half(Counter *self, double x) {
  * converts per element — same sum either way. */
 static double Counter_sum(Counter *self, double[:] xs) {
     double acc = 0;
-    (void)self;
     for (size_t i = 0; i < xs.base.len; i++) acc += ((double *)xs.base.ptr)[i];
     return acc;
 }
 /* The borrow is writable: writes land in the caller's TypedArray. */
 static void Counter_fill(Counter *self, double[:] xs, double v) {
-    (void)self;
     for (size_t i = 0; i < xs.base.len; i++) ((double *)xs.base.ptr)[i] = v;
 }
 /* A typed-slice return materializes as a fresh Float64Array. */
 static double[:] Counter_row(Counter *self) {
     static double v[3] = { 1.5, 2.5, 3.0 };
-    (void)self;
     return CCSlice_double_from_buffer(v, 3);
 }
 
@@ -64,55 +57,47 @@ static double[:] Counter_row(Counter *self) {
  * the dynamic sink, with the declared destination joining resolution. */
 static long long !>(CCError) Counter_apply(Counter *self, CCJsVal obj) {
     @errhandler(CCError e) { return cc_err(e); }
-    (void)self;
     long long v = obj.step(21) !>;
     return cc_ok(v);
 }
 /* The environment of the call in flight: source text as bootstrap glue. */
 static long long !>(CCError) Counter_eval42(Counter *self, CCJs *js) {
     @errhandler(CCError e) { return cc_err(e); }
-    (void)self;
-    long long v = js->eval(@slice("6 * 7")) !>;
+    long long v = js->eval("6 * 7") !>;
     return cc_ok(v);
 }
 /* The chain form still works: plain eval yields a value, hops extract. */
 static long long !>(CCError) Counter_eval_chain(Counter *self, CCJs *js) {
     @errhandler(CCError e) { return cc_err(e); }
-    (void)self;
-    long long v = js->eval(@slice("6 * 6"))!>.as_i64()!>;
+    long long v = js->eval("6 * 6")!>.as_i64()!>;
     return cc_ok(v);
 }
 /* Typed eval: the scalar form without the extraction hop. */
 static long long !>(CCError) Counter_eval_typed(Counter *self, CCJs *js) {
     @errhandler(CCError e) { return cc_err(e); }
-    (void)self;
-    long long v = js->eval_i64(@slice("40 + 2")) !>;
+    long long v = js->eval_i64("40 + 2") !>;
     return cc_ok(v);
 }
 /* Hop chains, pydemo-shape: properties link, the end extracts — by the
  * declared destination (a sink call), or by an as_* hop. */
 static long long !>(CCError) Counter_chain_floor(Counter *self, CCJs *js) {
     @errhandler(CCError e) { return cc_err(e); }
-    (void)self;
     long long v = js->global()!>.get("Math")!>.floor(3.7) !>;
     return cc_ok(v);
 }
 static double !>(CCError) Counter_chain_pi(Counter *self, CCJs *js) {
     @errhandler(CCError e) { return cc_err(e); }
-    (void)self;
     double v = js->global()!>.get("Math")!>.get("PI")!>.as_f64()!>;
     return cc_ok(v);
 }
 static long long !>(CCError) Counter_chain_pid(Counter *self, CCJs *js) {
     @errhandler(CCError e) { return cc_err(e); }
-    (void)self;
     long long v = js->global()!>.get("process")!>.get("pid")!>.as_i64()!>;
     return cc_ok(v);
 }
 /* globalThis, property-called like any other value. */
 static long long !>(CCError) Counter_gparse(Counter *self, CCJs *js) {
     @errhandler(CCError e) { return cc_err(e); }
-    (void)self;
     CCJsVal g = js->global() !> @destroy;
     long long v = g.parseInt("42") !>;
     return cc_ok(v);
@@ -123,17 +108,19 @@ static long long !>(CCError) Counter_gparse(Counter *self, CCJs *js) {
 static double !>(CCError) Counter_rowmap(Counter *self, CCJsVal f,
                                          double[:] xs, int64_t[:] ks) {
     @errhandler(CCError e) { return cc_err(e); }
-    (void)self;
     CCArena a = cc_arena_heap(megabytes(1)) @destroy;
-    CCSlice out = f.map::[double](&a, xs, ks) !>;
+    /* The destination names the element type — no spelled formal. */
+    double[:] ys = f.map(&a, xs, ks) !>;
     double s = 0;
-    for (size_t i = 0; i < out.len; i++) s += ((const double *)out.ptr)[i];
+    for (size_t i = 0; i < ys.base.len; i++)
+        s += ((const double *)ys.base.ptr)[i];
     return cc_ok(s);
 }
 
-/* The seed is the module's initial state, copied in at registration. */
+/* The seed is the module's initial state, copied in at registration;
+ * `js_module::[Counter]` names the artifact — counter.node. */
 static const Counter seed = { .n = 100 };
 
-void *napi_register_module_v1(void *env, void *exports) {
+void *napi_register_module_v1(CCJsEnv env, CCJsExports exports) {
     return js_module::[Counter](env, exports, &seed);
 }

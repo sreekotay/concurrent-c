@@ -1,0 +1,87 @@
+/* numpy from Node, through CC — the two boundaries composed:
+ *
+ *   Float64Array ──borrow──> double[:] ──py_buf──> memoryview ──asarray──> ndarray
+ *        (JS)      zero-copy    (CC)     zero-copy   (Python)   zero-copy  (numpy)
+ *
+ * A JS typed array whose element type matches the parameter borrows into
+ * CC (§js.cch); `py_buf` re-lends the same run to Python as a memoryview;
+ * numpy's asarray wraps that buffer in place.  numpy computes directly on
+ * V8's heap memory — no copy exists anywhere on the path.
+ *
+ *   ./cc/bin/ccc build perf/js_numpy.ccs
+ *   node perf/js_numpy.js [n] [samples]
+ *
+ * The driver owns timing, controls, and cross-checks; this module is the
+ * bridge.  Skips cleanly (init() answers 0) without libpython or numpy. */
+#include <ccc/script/js.cch>
+#include <ccc/script/py.cch>
+
+typedef struct Np {
+    CCArena arena;
+    CCPy py;
+    CCPyObj np;
+    /* Held callables: the attribute lookup happens once at init, and
+     * each call is a direct invoke — the hot-small-call shape. */
+    CCPyObj np_sum;
+    CCPyObj np_dot;
+    CCPyObj np_std;
+    int ready;
+} Np;
+
+/* Lazy: the seed cannot run code, so the interpreter and the numpy import
+ * happen on the first call.  0 means "no libpython or no numpy" — the
+ * driver's cue to skip, not an error. */
+static long long !>(CCError) Np_init(Np *self) {
+    @errhandler(CCError e) { return cc_err(e); }
+    if (self->ready) return cc_ok(1LL);
+    if (!cc_py_available()) return cc_ok(0LL);
+    self->arena = cc_arena_heap(megabytes(4));
+    CCPy *py = &self->py;
+    *py = cc_py_new(&self->arena) !>;
+    CCResult_CCPyObj_CCPyError np = py->import("numpy");
+    if (!np.is_ok()) return cc_ok(0LL);
+    self->np = CCResult_CCPyObj_CCPyError_value(np);
+    CCPyObj *npp = &self->np;
+    self->np_sum = npp->get("sum") !>;
+    self->np_dot = npp->get("dot") !>;
+    self->np_std = npp->get("std") !>;
+    self->ready = 1;
+    return cc_ok(1LL);
+}
+
+static double !>(CCError) Np_sum(Np *self, double[:] xs) {
+    @errhandler(CCError e) { return cc_err(e); }
+    CCPyObj *f = &self->np_sum;
+    double v = f->invoke(py_buf(xs)) !>;
+    return cc_ok(v);
+}
+
+static double !>(CCError) Np_dot(Np *self, double[:] xs, double[:] ys) {
+    @errhandler(CCError e) { return cc_err(e); }
+    CCPyObj *f = &self->np_dot;
+    double v = f->invoke(py_buf(xs), py_buf(ys)) !>;
+    return cc_ok(v);
+}
+
+/* Standard deviation: a rung the naive JS control must do in two passes. */
+static double !>(CCError) Np_std(Np *self, double[:] xs) {
+    @errhandler(CCError e) { return cc_err(e); }
+    CCPyObj *f = &self->np_std;
+    double v = f->invoke(py_buf(xs)) !>;
+    return cc_ok(v);
+}
+
+static void Np_destroy(Np *self) {
+    if (!self->ready) return;
+    cc_py_obj_release(&self->np_sum);
+    cc_py_obj_release(&self->np_dot);
+    cc_py_obj_release(&self->np_std);
+    cc_py_obj_release(&self->np);
+    cc_py_close(&self->py);
+    cc_arena_destroy(&self->arena);
+    self->ready = 0;
+}
+
+void *napi_register_module_v1(CCJsEnv env, CCJsExports exports) {
+    return js_module::[Np](env, exports, NULL);
+}

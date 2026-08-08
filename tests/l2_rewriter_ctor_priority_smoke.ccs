@@ -13,7 +13,9 @@
  * The test exercises:
  *   - constructor with a priority — should run on startup.
  *   - destructor with a priority — should run at exit.
- *   - several priorities (low / high) — all stripped.
+ *   - several priorities (low / high) — all stripped.  Values sit
+ *     above 100: 0-100 are implementation-reserved, and the host
+ *     compiler warns on them (the harness fails a warning build).
  *   - a plain `__attribute__((constructor))` mixed in — must NOT
  *     be touched (the rewriter only matches the priority form).
  *   - a plain `__attribute__((noreturn))` on a function — must
@@ -22,15 +24,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-static int ran_ctor_42 = 0;
-static int ran_ctor_99 = 0;
+static int ran_ctor_142 = 0;
+static int ran_ctor_199 = 0;
 static int ran_ctor_plain = 0;
 
-__attribute__((constructor(42)))
-static void ctor_at_42(void) { ran_ctor_42 = 1; }
+__attribute__((constructor(142)))
+static void ctor_at_142(void) { ran_ctor_142 = 1; }
 
-__attribute__((constructor(99)))
-static void ctor_at_99(void) { ran_ctor_99 = 1; }
+__attribute__((constructor(199)))
+static void ctor_at_199(void) { ran_ctor_199 = 1; }
 
 __attribute__((constructor))
 static void ctor_plain(void) { ran_ctor_plain = 1; }
@@ -40,8 +42,8 @@ __attribute__((unused))
 static int unused_value = 7;
 
 int main(void) {
-    if (!ran_ctor_42)    { printf("FAIL: ctor_at_42 did not run\n"); return 1; }
-    if (!ran_ctor_99)    { printf("FAIL: ctor_at_99 did not run\n"); return 1; }
+    if (!ran_ctor_142)    { printf("FAIL: ctor_at_142 did not run\n"); return 1; }
+    if (!ran_ctor_199)    { printf("FAIL: ctor_at_199 did not run\n"); return 1; }
     if (!ran_ctor_plain) { printf("FAIL: ctor_plain did not run\n"); return 1; }
     (void)unused_value;
     printf("l2 rewriter ctor priority: OK\n");

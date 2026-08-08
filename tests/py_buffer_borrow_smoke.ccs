@@ -16,15 +16,17 @@ int main(void) {
     if (!cc_py_available()) { puts("SKIP (no libpython)"); return 0; }
     CCPy py = cc_py_new(&a) !>;
 
+    /* The view is element-typed (`d` here): `sum(mv)` sums doubles,
+     * `len(mv)` counts elements, `.nbytes` restates the raw size. */
     py.exec(@slice(
-        "import struct\n"
         "def sum_d(mv):\n"
-        "    n = len(mv) // 8\n"
-        "    return float(sum(struct.unpack('<%dd' % n, mv.tobytes())))\n"
+        "    return float(sum(mv))\n"
         "def nbytes(mv):\n"
-        "    return len(mv)\n"
+        "    return mv.nbytes\n"
         "def readonly(mv):\n"
-        "    return 1 if mv.readonly else 0\n")) !>;
+        "    return 1 if mv.readonly else 0\n"
+        "def count(x):\n"
+        "    return len(x)\n")) !>;
 
     CCPyObj m = py.import("__main__") !> @destroy;
 
@@ -34,7 +36,7 @@ int main(void) {
     int64_t ro = m.readonly(py_buf(xs)) !>;
 
     /* Same slice the ordinary way still marshals as a list of scalars. */
-    int64_t as_list_len = m.nbytes(xs) !>;
+    int64_t as_list_len = m.count(xs) !>;
 
     printf("sum=%.1f bytes=%lld readonly=%lld list_len=%lld\n",
            s, (long long)nb, (long long)ro, (long long)as_list_len);
