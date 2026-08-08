@@ -1,0 +1,92 @@
+/* Result-fn switch with @defer + shard hold + @restricted UFCS.
+ *
+ * Was: no !> in the body → opaque switch → text UFCS peel stopped at the
+ * first unbound/local site → `enc->ok`/`err` diagnosed as empty methods on
+ * Conn_Restrict_Enc.
+ *
+ * Fix: `@defer`/`@destroy` force structured switch parse (compound_body).
+ *
+ * Expect PASS:
+ *   ccc tests/switch_defer_restricted_ufcs_smoke.ccs -o /tmp/x && /tmp/x
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_exclusive.cch>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct Conn {
+    int n;
+    char last[32];
+} Conn;
+
+typedef @restricted Enc on Conn {
+    r: n, err, ok;
+} *ConnEnc;
+
+static bool !>(CCError) conn_err(Conn* c, const char* msg) {
+    if (!c) return cc_err(CC_ERR_INVALID_ARG, "null");
+    snprintf(c->last, sizeof(c->last), "ERR:%s", msg ? msg : "");
+    c->n++;
+    return cc_ok(true);
+}
+
+static bool !>(CCError) conn_ok(Conn* c) {
+    if (!c) return cc_err(CC_ERR_INVALID_ARG, "null");
+    snprintf(c->last, sizeof(c->last), "OK");
+    c->n++;
+    return cc_ok(true);
+}
+
+typedef enum Op { OP_A = 0, OP_B, OP_C } Op;
+
+@noblock static bool !>(CCError) execute(ConnEnc enc, Op op,
+                                         CCShardDomain* shards) {
+    @errhandler(CCError e) { return cc_err(e); }
+
+    switch (op) {
+    case OP_A: {
+        CCShardHold hold = shards->hold_one(0);
+        @defer hold.release();
+        if (!hold.held()) return enc->err("admission");
+        return enc->ok();
+    }
+    case OP_B: {
+        CCShardHold hold = shards->hold_all();
+        @defer hold.release();
+        if (!hold.held()) return enc->err("admission");
+        return enc->ok();
+    }
+    case OP_C:
+    default:
+        return enc->err("unsupported");
+    }
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fail\n");
+        return 1;
+    }
+    CCArena arena = @create(kilobytes(64)) @destroy;
+    CCExclusive* excl = cc_exclusive_create(&arena, 0);
+    CCShardMask mask;
+    CCShardDomain d;
+    Conn c = {0};
+    ConnEnc enc = &c;
+    if (!excl) return 1;
+    @defer excl->destroy();
+    mask = cc_shard_mask_make(1);
+    d = cc_shard_domain(excl, mask);
+    execute(enc, OP_A, &d) !>;
+    if (strcmp(c.last, "OK") != 0) {
+        fprintf(stderr, "bad last=%s\n", c.last);
+        return 2;
+    }
+    execute(enc, OP_C, &d) !>;
+    if (strncmp(c.last, "ERR:", 4) != 0) {
+        fprintf(stderr, "bad last=%s\n", c.last);
+        return 3;
+    }
+    puts("ok");
+    return 0;
+}
