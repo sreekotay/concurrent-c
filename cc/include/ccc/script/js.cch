@@ -192,6 +192,10 @@ typedef struct CC__JsSyms {
     int (*CreateBigintU64)(void *env, uint64_t value, void **out);
     int (*GetValueBigintI64)(void *env, void *value, int64_t *out,
                              _Bool *lossless);
+    /* Bulk loops open a scope per row so a million-row map does not pin a
+     * million handles until the native frame returns. */
+    int (*OpenHandleScope)(void *env, void **out);
+    int (*CloseHandleScope)(void *env, void *scope);
 } CC__JsSyms;
 
 static CC__JsSyms cc__js;
@@ -276,6 +280,8 @@ static int cc__js_load(void) {
     CC__JS_SYM(CreateReference, "napi_create_reference")
     CC__JS_SYM(GetReferenceValue, "napi_get_reference_value")
     CC__JS_SYM(DeleteReference, "napi_delete_reference")
+    CC__JS_SYM(OpenHandleScope, "napi_open_handle_scope")
+    CC__JS_SYM(CloseHandleScope, "napi_close_handle_scope")
 #undef CC__JS_SYM
 #define CC__JS_SYM_OPT(field, name) \
     cc__js.field = (void *)0; *(void **)&cc__js.field = dlsym(cc__js.lib, name);
@@ -1456,6 +1462,170 @@ static inline CCResult_CCJsVal_CCJsError cc_js_val_callm(CCJsVal *obj,
     va_end(ap);
     return r;
 }
+
+/* Bulk rows: `f.map::[T](&arena, cols...)` calls the held JS function once
+ * per row — each argument is a typed slice (a column), row r's call is
+ * `f(col0[r], col1[r], ...)`, and the results land in a typed run of `T`.
+ * Columns may have DIFFERENT element types, but every column must have the
+ * same length.
+ *
+ * The point is what it does NOT do per row: no property lookup, no UFCS
+ * dispatch, no Result box — one crossing carries the whole batch, and the
+ * driver loop pays only per-element boxing plus the callee itself.  A row
+ * whose call throws reports that row; a result that does not convert to
+ * `T` names the row.  Nothing is written past the failing row. */
+static inline void *cc__js_box_elem(void *env, const CCJsArg *col,
+                                    size_t row) {
+    int esz = (int)(col->i & 0xff);
+    int isf = (int)((col->i >> 8) & 1);
+    const unsigned char *e = (const unsigned char *)col->p + row * (size_t)esz;
+    CCJsArg t;
+    memset(&t, 0, sizeof(t));
+    if (isf) {
+        t.kind = 1;
+        t.f = esz == 4 ? (double)*(const float *)e : *(const double *)e;
+    } else {
+        t.kind = 0;
+        t.i = esz == 1 ? *(const signed char *)e
+            : esz == 2 ? *(const short *)e
+            : esz == 4 ? *(const int *)e
+                       : *(const long long *)e;
+    }
+    return cc__js_arg_value(env, &t);
+}
+
+static inline int cc__js_elem_store(void *env, void *res, int esz, int isf,
+                                    unsigned char *dst) {
+    if (isf) {
+        double d;
+        if (cc__js_inq_double(&d, env, res) != 0) return -1;
+        if (esz == 4) *(float *)dst = (float)d;
+        else *(double *)dst = d;
+        return 0;
+    }
+    {
+        long long v;
+        if (cc__js_inq_ll(env, res, &v) != 0) return -1;
+        switch (esz) {
+        case 1: *(signed char *)dst = (signed char)v; break;
+        case 2: *(short *)dst = (short)v; break;
+        case 4: *(int *)dst = (int)v; break;
+        default: *(long long *)dst = v; break;
+        }
+        return 0;
+    }
+}
+
+static CCResult_CCSlice_CCJsError cc__js_val_map_raw(CCJsVal *fobj,
+                                                     CCArena *arena, int esz,
+                                                     int isf, int argc,
+                                                     const CCJsArg *argv) {
+    void *env;
+    void *fn;
+    void *recv;
+    size_t nrows, r;
+    CCSlice out;
+    int c;
+    cc__js_errbuf[0] = 0;
+    if (!fobj || !fobj->env || !arena || argc < 1 || argc > 8) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: map: needs a callable, an arena, and 1..8 columns");
+        return cc_err_CCResult_CCSlice_CCJsError(cc__js_err(NULL, "map"));
+    }
+    env = fobj->env;
+    fn = cc__js_val_cur(fobj);
+    if (!fn || cc__js.GetUndefined(env, &recv) != 0)
+        return cc_err_CCResult_CCSlice_CCJsError(cc__js_err(env, "map"));
+    for (c = 0; c < argc; c++) {
+        if (argv[c].kind != 6 || (!argv[c].p && argv[c].n)) {
+            snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                     "js: map: column %d is not a typed slice", c);
+            return cc_err_CCResult_CCSlice_CCJsError(cc__js_err(env, "map"));
+        }
+    }
+    nrows = argv[0].n;
+    for (c = 1; c < argc; c++) {
+        if (argv[c].n != nrows) {
+            snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                     "js: map: column %d length %zu, column 0 length %zu",
+                     c, argv[c].n, nrows);
+            return cc_err_CCResult_CCSlice_CCJsError(cc__js_err(env, "map"));
+        }
+    }
+    out = cc_arena_alloc_slice_bytes(arena, nrows * (size_t)esz);
+    if (!out.ptr && nrows > 0) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: map: arena exhausted (%zu rows)", nrows);
+        return cc_err_CCResult_CCSlice_CCJsError(cc__js_err(env, "map"));
+    }
+    for (r = 0; r < nrows; r++) {
+        void *scope = NULL;
+        void *av[8];
+        void *res = NULL;
+        int rc;
+        if (cc__js.OpenHandleScope(env, &scope) != 0)
+            return cc_err_CCResult_CCSlice_CCJsError(cc__js_err(env, "map"));
+        for (c = 0; c < argc; c++) {
+            av[c] = cc__js_box_elem(env, &argv[c], r);
+            if (!av[c]) {
+                cc__js.CloseHandleScope(env, scope);
+                snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                         "js: map: row %zu: argument does not box", r);
+                return cc_err_CCResult_CCSlice_CCJsError(
+                    cc__js_err(env, "map"));
+            }
+        }
+        if (cc__js.CallFunction(env, recv, fn, (size_t)argc, av, &res) != 0) {
+            char rctx[32];
+            CCResult_CCSlice_CCJsError e;
+            snprintf(rctx, sizeof(rctx), "map row %zu", r);
+            e = cc_err_CCResult_CCSlice_CCJsError(cc__js_err(env, rctx));
+            cc__js.CloseHandleScope(env, scope);
+            return e;
+        }
+        rc = cc__js_elem_store(env, res, esz, isf,
+                               (unsigned char *)out.ptr + r * (size_t)esz);
+        cc__js.CloseHandleScope(env, scope);
+        if (rc != 0) {
+            snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                     "js: map: row %zu: result does not convert", r);
+            return cc_err_CCResult_CCSlice_CCJsError(cc__js_err(env, "map"));
+        }
+    }
+    out.len = nrows;
+    return cc_ok_CCResult_CCSlice_CCJsError(out);
+}
+
+/* Column lift: CC_JS_ARG applied to each vararg, counted — explicit per
+ * arity, matching the Python twin.  Past 8 columns the count selects a
+ * poison arm whose name IS the message. */
+#define CC__JS_NARG_(a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, \
+                     a13, a14, a15, a16, N, ...) N
+#define CC__JS_NARG(...) CC__JS_NARG_(__VA_ARGS__, \
+        16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1)
+#define CC__JS_MAPA1(a) CC_JS_ARG(a)
+#define CC__JS_MAPA2(a, b) CC_JS_ARG(a), CC_JS_ARG(b)
+#define CC__JS_MAPA3(a, b, c) CC_JS_ARG(a), CC_JS_ARG(b), CC_JS_ARG(c)
+#define CC__JS_MAPA4(a, b, c, d) CC__JS_MAPA3(a, b, c), CC_JS_ARG(d)
+#define CC__JS_MAPA5(a, b, c, d, e) CC__JS_MAPA4(a, b, c, d), CC_JS_ARG(e)
+#define CC__JS_MAPA6(a, b, c, d, e, f) CC__JS_MAPA5(a, b, c, d, e), CC_JS_ARG(f)
+#define CC__JS_MAPA7(a, b, c, d, e, f, g) CC__JS_MAPA6(a, b, c, d, e, f), CC_JS_ARG(g)
+#define CC__JS_MAPA8(a, b, c, d, e, f, g, h) CC__JS_MAPA7(a, b, c, d, e, f, g), CC_JS_ARG(h)
+#define CC__JS_MAPA9(...)  cc__js_map_takes_at_most_8_columns
+#define CC__JS_MAPA10(...) cc__js_map_takes_at_most_8_columns
+#define CC__JS_MAPA11(...) cc__js_map_takes_at_most_8_columns
+#define CC__JS_MAPA12(...) cc__js_map_takes_at_most_8_columns
+#define CC__JS_MAPA13(...) cc__js_map_takes_at_most_8_columns
+#define CC__JS_MAPA14(...) cc__js_map_takes_at_most_8_columns
+#define CC__JS_MAPA15(...) cc__js_map_takes_at_most_8_columns
+#define CC__JS_MAPA16(...) cc__js_map_takes_at_most_8_columns
+#define CC__JS_MAPCAT_(a, b) a##b
+#define CC__JS_MAPCAT(a, b) CC__JS_MAPCAT_(a, b)
+/* Declared before it is defined as a macro, so the Result registry can
+ * type a `cc_js_val_map(...) !>` call site (same trick as the Python
+ * twin); the symbol is never defined — the macro intercepts every call. */
+CCResult_CCSlice_CCJsError cc_js_val_map(void *never_defined, ...);
+#define cc_js_val_map(T, obj, arena, ...)     cc__js_val_map_raw((obj), (arena), (int)sizeof(T),         _Generic((T)0, float: 1, double: 1, default: 0),         CC__JS_NARG(__VA_ARGS__),         (const CCJsArg[]){             CC__JS_MAPCAT(CC__JS_MAPA, CC__JS_NARG(__VA_ARGS__))(__VA_ARGS__) })
 
 /* Destination-typed variants: `.ufcs_dynamic2` resolution composes
  * `cc_js_val_callm_<mangled dest>` at `T v = obj.method(args…)` sites.

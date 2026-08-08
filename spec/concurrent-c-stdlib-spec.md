@@ -1606,6 +1606,15 @@ expression as `CCPyObj !>(CCPyError)`. Both evaluate in the interpreter's
 and to `py.import("__main__")`. They route through `builtins.exec` / `eval`
 rather than `PyRun_*`, which is outside the limited ABI.
 
+`eval` resolves through the handle's own destination-aware sink, so a
+typed destination extracts directly — no intermediate object in user
+space, the same resolution `CCPyObj` calls get:
+
+```c
+double d = py.eval(@slice("2.5 * triple(2)")) !>;
+long long n = py.eval(@slice("1 << 40")) !>;
+```
+
 ### Objects and calls
 
 `CCPyObj` is opaque. `.get(name)` reads an attribute; `.call(name, args…)`
@@ -2075,8 +2084,9 @@ Status: draft — the guest surface is implemented: `js_module::[T]` and
 its marshaling, the loader, and the outbound direction inside an
 exported call (a `CCJs *` parameter is the host, wired by the trampoline
 and invisible to JS; `global`/`eval`/`exec`; the `CCJsVal` sink with
-destination-typed variants; `.get`/`.as_*`/`.hold`).  Hosting
-(`cc_js_new`) and engines are not.
+destination-typed variants; `.get`/`.as_*`/`.hold`; `f.map::[T]` row
+batching).  Hosting (`cc_js_new`), engines, `js_expose`, and
+`as_list`/`as_map` are not.
 
 ### Model
 

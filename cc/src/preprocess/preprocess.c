@@ -316,6 +316,7 @@ static const char* cc__py_elem_kind_token(const char* ty) {
     if (strcmp(ty, "int") == 0) return "CC__PY_EL_INT";
     return "CC__PY_EL_SLICE";
 }
+
 static int cc__find_matching_bracket(const char* b, size_t bl, size_t lbracket, size_t* out_rbracket);
 
 /* Initialize chain with source buffer (buffer is NOT owned by chain) */
@@ -5961,15 +5962,41 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
          * lowers to cc_block_on(T, task).  The type comes from the
          * explicit `::[T]` or from the declared destination. */
         {
-            /* Python sequence/mapping extraction: the type argument names
-             * the element type(s), and the worker macros take them as a
-             * leading argument — the same shape as cc_arena_alloc_T. */
-            int py_recv = (strcmp(recv_type_base, "CCPyObj") == 0 ||
-                           strcmp(recv_type_base, "CCPyObj*") == 0);
-            int is_as_list = py_recv && strcmp(method_name, "as_list") == 0;
-            int is_as_map = py_recv && strcmp(method_name, "as_map") == 0;
-            int is_pymap = py_recv && strcmp(method_name, "map") == 0;
-            if (is_as_list || is_as_map || is_pymap) {
+            /* Sequence/mapping extraction and row batching: the type
+             * argument names the element type(s), and the worker macros
+             * take them as a leading argument — the same shape as
+             * cc_arena_alloc_T.  The worker resolves by what the
+             * receiver's header installs (cc_py_obj_as_list,
+             * cc_js_val_map, …): snake-compose it and require it be TU-
+             * or header-visible — no receiver-type names here. */
+            int is_as_list = strcmp(method_name, "as_list") == 0;
+            int is_as_map = strcmp(method_name, "as_map") == 0;
+            int is_tf_map = strcmp(method_name, "map") == 0;
+            char tf_worker[400];
+            tf_worker[0] = 0;
+            /* Only a `::[...]` site engages the worker: a bare `.map(f)`
+             * on a dynamic receiver stays an ordinary member call (a JS
+             * array's own .map is real), while a spelled type formal
+             * binds the batch worker. */
+            if ((is_as_list || is_as_map || is_tf_map) && targ_b > targ_a &&
+                recv_type_base[0]) {
+                char base[192], snake[192];
+                size_t bl;
+                snprintf(base, sizeof(base), "%s", recv_type_base);
+                bl = strlen(base);
+                while (bl > 0 && (base[bl - 1] == '*' || base[bl - 1] == ' '))
+                    base[--bl] = 0;
+                if (bl > 2 && base[0] == 'C' && base[1] == 'C' &&
+                    base[2] >= 'A' && base[2] <= 'Z')
+                    memmove(base, base + 2, bl - 1);
+                cc_emit_plan_snake_name(base, snake, sizeof(snake));
+                snprintf(tf_worker, sizeof(tf_worker), "cc_%s_%s", snake,
+                         method_name);
+                if (!(cc__ufcs_fn_name_in_text(src, n, tf_worker) ||
+                      cc_included_cch_contains_fn(tf_worker)))
+                    tf_worker[0] = 0;
+            }
+            if (tf_worker[0]) {
                 char targs[192];
                 targs[0] = 0;
                 if (targ_b > targ_a) {
@@ -5986,7 +6013,7 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                                     is_as_list
                                         ? "as_list needs its element type: "
                                           "obj.as_list::[T](&arena)"
-                                    : is_pymap
+                                    : is_tf_map
                                         ? "map needs its result element type: "
                                           "f.map::[T](&arena, cols...)"
                                         : "as_map needs its key and value types: "
@@ -5997,10 +6024,8 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                 }
                 cc_sb_append(&out, &out_len, &out_cap, src + last_emit,
                              recv_start - last_emit);
-                cc_sb_append_cstr(&out, &out_len, &out_cap,
-                                  is_as_list ? "cc_py_obj_as_list("
-                                  : is_pymap ? "cc_py_obj_map("
-                                             : "cc_py_obj_as_map(");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, tf_worker);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
                 cc_sb_append_cstr(&out, &out_len, &out_cap, targs);
                 cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
                 if (!recv_is_ptr)
@@ -8851,7 +8876,8 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                 size_t mlen = strlen(pynames[pk]);
                 size_t ms = cc_skip_ws_and_comments(src, n, i + 1);
                 size_t br, rb = 0, lp, rp = 0, rs;
-                if (ms + mlen > n || memcmp(src + ms, pynames[pk], mlen) != 0)
+                if (ms + mlen > n || memcmp(src + ms, pynames[pk], mlen) != 0 ||
+                    (ms + mlen < n && cc_is_ident_char(src[ms + mlen])))
                     continue;
                 br = cc_skip_ws_and_comments(src, n, ms + mlen);
                 if (br + 2 >= n || src[br] != ':' || src[br + 1] != ':' ||

@@ -19,3 +19,7 @@ eval42 42
 eval_chain 36
 eval_i64 42
 gparse 42
+chain_floor 3
+chain_pi 3.141592653589793
+chain_pid_ok true
+rowmap 25.25

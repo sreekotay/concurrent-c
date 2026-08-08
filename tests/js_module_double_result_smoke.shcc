@@ -62,6 +62,12 @@ console.log('eval42', c.eval42());
 console.log('eval_chain', c.eval_chain());
 console.log('eval_i64', c.eval_typed());
 console.log('gparse', c.gparse());
+console.log('chain_floor', c.chain_floor());
+console.log('chain_pi', c.chain_pi());
+console.log('chain_pid_ok', c.chain_pid() === process.pid);
+console.log('rowmap', c.rowmap((x, k) => x * k + 0.25,
+                               new Float64Array([1.5, 2.5, 3.5]),
+                               new BigInt64Array([2n, 3n, 4n])));
 "`, &a);
     run.arg(js.cstr(&a));
     run.inherit_stdio();

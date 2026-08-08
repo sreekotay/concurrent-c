@@ -272,6 +272,35 @@ if (m.series_prep(N) !== N) { console.error('series_prep failed'); process.exit(
 const send_typed = benchBulk('send_typed', () => m.series().length);
 if (send_typed.got !== N) { console.error('MISMATCH send_typed'); process.exit(1); }
 
+// ---- rows: the batching ladder (py_baseline's row_call / row_map / row_py) ----
+//
+//   row_call   CC crosses per row (three scalar args)   the per-call form
+//   row_map    f.map::[double] — one crossing            the batched form
+//   row_js     the same rows looped natively in JS       the control
+//
+// Same three heterogeneous columns everywhere; sums must agree.
+const RN = Math.max(1, Math.floor(N / 10));
+console.log(`\nrows (${RN} rows):`);
+if (m.rows_prep(RN) !== RN) { console.error('rows_prep failed'); process.exit(1); }
+const RX = new Float64Array(RN), RK = new Array(RN), RZ = new Float64Array(RN);
+for (let i = 0; i < RN; i++) {
+  RX[i] = (i % 1000) * 0.5;
+  RK[i] = (i % 7) + 1;
+  RZ[i] = 0.25;
+}
+const row_call = benchBulk('row_call', () => m.rows_call());
+const row_map = benchBulk('row_map', () => m.rows_map((x, k, z) => x * k + z));
+const row_js = benchBulk('row_js', () => {
+  const f = globalThis.mul_add_js;
+  let acc = 0;
+  for (let i = 0; i < RN; i++) acc += f(RX[i], RK[i], RZ[i]);
+  return acc;
+});
+if (row_call.got !== row_js.got || row_map.got !== row_js.got) {
+  console.error(`MISMATCH rows: call=${row_call.got} map=${row_map.got} js=${row_js.got}`);
+  process.exit(1);
+}
+
 console.log('\nratios (native control = 1.0):');
 const r1 = js_to_cc.ns / js_call_mega.ns;
 const r2 = js_to_cc.ns / js_to_cc_raw.ns;
@@ -299,5 +328,11 @@ console.log(`  recv_array / recv_typed ${r7.toFixed(1).padStart(5)}x   what the 
 console.log(`  recv_typed / js_typed   ${r8.toFixed(2).padStart(5)}x   one crossing over the typed JS floor`);
 console.log(`RESULT ratio recv_array_vs_typed x ${r7.toFixed(1)}`);
 console.log(`RESULT ratio recv_typed_vs_js_typed x ${r8.toFixed(2)}`);
+const r10 = row_call.ms / row_map.ms;
+const r11 = row_map.ms / row_js.ms;
+console.log(`  row_call / row_map      ${r10.toFixed(1).padStart(5)}x   what one-crossing batching removes`);
+console.log(`  row_map / row_js        ${r11.toFixed(2).padStart(5)}x   the batched crossing over native JS rows`);
+console.log(`RESULT ratio row_call_vs_map x ${r10.toFixed(1)}`);
+console.log(`RESULT ratio row_map_vs_js x ${r11.toFixed(2)}`);
 
 console.log(`\nagree=${js_inline.sum} calls=${m.calls()}`);

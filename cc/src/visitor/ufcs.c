@@ -2887,12 +2887,34 @@ static int emit_desugared_call(char* out,
             if (outer_real) return dispatch_n;
         }
         /* Sink-typed receiver whose dispatch produced a synthetic (unreal)
-         * callee: real methods won above; route the rest to the sink. */
+         * callee: real methods won above; route the rest to the sink.
+         * Dispatch declining (dispatch_n < 0) must not skip the real-member
+         * check — a TU- or header-declared snake twin (cc_py_import,
+         * cc_js_eval_i64, …) outranks the sink here exactly as it does in
+         * the text passes. */
         if (has_dyn && !has_as) {
-            int sn = cc__emit_dynamic_sink(out, cap, recv, method, recv_is_ptr,
-                                           args_rewritten, has_args,
-                                           ctx.recv_type_base);
-            if (sn >= 0) return sn;
+            char comp[256];
+            if (dispatch_n < 0 &&
+                cc_ufcs_compose_default_callee(comp, sizeof(comp),
+                                               ctx.recv_type_base, method) &&
+                cc__ufcs_fn_name_is_real(comp)) {
+                int n = snprintf(out, cap, "%s(%s%s%s%s%s)", comp,
+                                 recv_is_ptr ? "(" : "&(", recv, ")",
+                                 has_args && args_rewritten &&
+                                         args_rewritten[0]
+                                     ? ", "
+                                     : "",
+                                 has_args && args_rewritten ? args_rewritten
+                                                            : "");
+                if (n < 0 || (size_t)n >= cap) return -1;
+                return n;
+            }
+            {
+                int sn = cc__emit_dynamic_sink(out, cap, recv, method,
+                                               recv_is_ptr, args_rewritten,
+                                               has_args, ctx.recv_type_base);
+                if (sn >= 0) return sn;
+            }
             if (dispatch_n >= 0) return dispatch_n;
         }
         if (has_as) {

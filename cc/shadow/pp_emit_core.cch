@@ -2624,7 +2624,8 @@ typedef struct {
     char ty[64];
     char callee[96];
     char wrap[64];
-    int dest_aware; /* .ufcs_dynamic2 */
+    int dest_aware;      /* .ufcs_dynamic2 */
+    int returns_result;  /* plain callee declares a CCResult_ return */
 } ShadowDynSink;
 static ShadowDynSink g_shadow_dsinks[16];
 static int g_shadow_ndsinks;
@@ -3863,8 +3864,53 @@ static void shadow_niche_register(const char* ty, unsigned size, unsigned align,
     g_shadow_nniches++;
 }
 
+/* Does `text` declare `name` with a CCResult_ return?  Decl-shaped probe:
+ * an occurrence of `name(` whose declaration head (this line, or this
+ * line plus the previous for a wrapped head) spells `CCResult_` with no
+ * `=` after it — an assignment from the callee is a use, not a decl. */
+static int shadow_text_fn_returns_result(const char* text, const char* name) {
+    const char* p = text;
+    size_t nl;
+    if (!text || !name || !name[0]) return 0;
+    nl = strlen(name);
+    while ((p = strstr(p, name)) != NULL) {
+        const char* q = p + nl;
+        const char* w = p;
+        if ((p > text && shadow_is_ident_char(p[-1])) ||
+            shadow_is_ident_char(*q)) {
+            p += nl;
+            continue;
+        }
+        while (*q == ' ' || *q == '\t') q++;
+        if (*q != '(') {
+            p += nl;
+            continue;
+        }
+        {
+            int nls = 0;
+            while (w > text && (size_t)(p - w) < 220) {
+                if (w[-1] == '\n' && ++nls == 2) break;
+                w--;
+            }
+        }
+        {
+            char head[224];
+            const char* rr;
+            size_t hn = (size_t)(p - w);
+            if (hn >= sizeof(head)) hn = sizeof(head) - 1;
+            memcpy(head, w, hn);
+            head[hn] = 0;
+            rr = strstr(head, "CCResult_");
+            if (rr && !strchr(rr, '=')) return 1;
+        }
+        p += nl;
+    }
+    return 0;
+}
+
 static void shadow_dyn_sink_register(const char* ty, const char* callee,
-                                     const char* wrap, int dest_aware) {
+                                     const char* wrap, int dest_aware,
+                                     int returns_result) {
     int i;
     if (!ty || !ty[0] || !callee || !callee[0] || !wrap || !wrap[0]) return;
     if (g_shadow_ndsinks >= 16) return;
@@ -3875,6 +3921,7 @@ static void shadow_dyn_sink_register(const char* ty, const char* callee,
             snprintf(g_shadow_dsinks[i].wrap, sizeof(g_shadow_dsinks[0].wrap),
                      "%s", wrap);
             g_shadow_dsinks[i].dest_aware = dest_aware;
+            g_shadow_dsinks[i].returns_result = returns_result;
             return;
         }
     }
@@ -3885,6 +3932,7 @@ static void shadow_dyn_sink_register(const char* ty, const char* callee,
     snprintf(g_shadow_dsinks[g_shadow_ndsinks].wrap,
              sizeof(g_shadow_dsinks[0].wrap), "%s", wrap);
     g_shadow_dsinks[g_shadow_ndsinks].dest_aware = dest_aware;
+    g_shadow_dsinks[g_shadow_ndsinks].returns_result = returns_result;
     g_shadow_ndsinks++;
 }
 
@@ -3896,6 +3944,20 @@ static const ShadowDynSink* shadow_dyn_sink_for(const char* ty) {
             return &g_shadow_dsinks[i];
     }
     return NULL;
+}
+
+/* Header-visible callables: the production resolver's own oracle,
+ * linked in via libshadow_comptime.  The ufn table above holds
+ * TU-defined functions only, which left compose-then-verify sites blind
+ * to header-installed families (cc_py_obj_callm_double,
+ * cc_js_callm_int64_t, …) and grew per-header whitelists in the faces.
+ * One index answers both the driver and the faces, so the two can never
+ * disagree about what a header installs. */
+extern int cc_included_cch_contains_fn(const char* name);
+
+static int shadow_hdr_fn_exists(const char* name) {
+    if (!name || !name[0]) return 0;
+    return cc_included_cch_contains_fn(name);
 }
 
 /* Scan header text for `Type field @as;` and cc_type_register destroy hooks. */
@@ -4115,8 +4177,10 @@ static void shadow_as_scan_header_text(const char* text) {
                             memcpy(wrap, q2, wn);
                             wrap[wn] = 0;
                             if (callee[0] && wrap[0])
-                                shadow_dyn_sink_register(ty, callee, wrap,
-                                                         dest_aware);
+                                shadow_dyn_sink_register(
+                                    ty, callee, wrap, dest_aware,
+                                    shadow_text_fn_returns_result(text,
+                                                                  callee));
                         }
                     }
                 }

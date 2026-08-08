@@ -1854,7 +1854,11 @@ static inline CCResult_void_CCPyError cc_py_exec(CCPy *py, CCSlice code) {
     return cc_ok_CCResult_void_CCPyError();
 }
 
-static inline CCResult_CCPyObj_CCPyError cc_py_eval(CCPy *py, CCSlice expr) {
+/* Internal: `py.eval(...)` resolves through the CCPy dynamic sink so the
+ * declared destination joins resolution (`double v = py.eval(...) !>`),
+ * exactly like the JS twin — a public snake twin here would outrank the
+ * sink and pin every eval to CCPyObj. */
+static inline CCResult_CCPyObj_CCPyError cc__py_eval(CCPy *py, CCSlice expr) {
     const char *src;
     void *b, *g, *r = NULL;
     cc__py_bind_err_py(py);
@@ -2141,13 +2145,30 @@ static inline void *cc__py_box_elem(const CCPyArg *col, size_t row) {
     }
 }
 
+/* The (elem size, floatness) pair is the cross-embedding worker shape —
+ * the parser-mode rewrite emits it textually, so no type token rides in
+ * the call.  Python stores by kind: floats widen to double, integers land
+ * as int64 or int. */
 static inline CCResult_CCSlice_CCPyError cc__py_obj_map_raw(
-        CCPyObj *fobj, CCArena *arena, CCPyElemKind outkind,
+        CCPyObj *fobj, CCArena *arena, int out_esz, int out_isf,
         int argc, const CCPyArg *argv) {
-    size_t nrows, r, esz = cc__py_elem_size(outkind);
+    CCPyElemKind outkind;
+    size_t nrows, r, esz;
     CCSlice out;
     int c;
     cc__py_bind_err_obj(fobj);
+    if (out_isf)
+        outkind = CC__PY_EL_F64;
+    else if (out_esz == 8)
+        outkind = CC__PY_EL_I64;
+    else if (out_esz == 4)
+        outkind = CC__PY_EL_INT;
+    else {
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: map: unsupported result element (size %d)", out_esz);
+        return cc_err_CCResult_CCSlice_CCPyError(cc__py_err("map"));
+    }
+    esz = cc__py_elem_size(outkind);
     if (!fobj || !fobj->o || !arena || argc < 1 || argc > 8) {
         snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
                  "python: map: needs a callable, an arena, and 1..8 columns");
@@ -2251,7 +2272,7 @@ static inline CCResult_CCSlice_CCPyError cc__py_obj_map_raw(
  * the macro below intercepts every call — so nothing references it at
  * link time. */
 CCResult_CCSlice_CCPyError cc_py_obj_map(void *never_defined, ...);
-#define cc_py_obj_map(T, obj, arena, ...)     cc__py_obj_map_raw((obj), (arena), cc__py_elem_kind_of_##T,         CC__PY_NARG(__VA_ARGS__),         (const CCPyArg[]){             CC__PY_MAPCAT(CC__PY_MAPA, CC__PY_NARG(__VA_ARGS__))(__VA_ARGS__) })
+#define cc_py_obj_map(T, obj, arena, ...)     cc__py_obj_map_raw((obj), (arena), (int)sizeof(T),         _Generic((T)0, float: 1, double: 1, default: 0),         CC__PY_NARG(__VA_ARGS__),         (const CCPyArg[]){             CC__PY_MAPCAT(CC__PY_MAPA, CC__PY_NARG(__VA_ARGS__))(__VA_ARGS__) })
 
 
 /* `obj.method(args…)` sink core: builds an argument tuple and calls the
@@ -2693,6 +2714,170 @@ static inline CCResult_long_long_CCPyError cc_py_obj_callm_long_long(
     cc_py_obj_release(&o);
     if (!v.ok) return cc_err_CCResult_long_long_CCPyError(v.u.error);
     return cc_ok_CCResult_long_long_CCPyError((long long)v.u.value);
+}
+
+/* ---- the CCPy dynamic sink ----
+ *
+ * `.ufcs_dynamic2` for the interpreter handle itself, so the declared
+ * destination joins resolution for the members that produce values from
+ * source text.  Real members (`exec`, `import`, `close`, …) are
+ * header-visible and win resolution as always; the sink carries the
+ * dynamic ones — today that is `eval`.  An unknown member is a loud
+ * error naming it, not a silent lookup. */
+static CCResult_CCPyObj_CCPyError cc__py_host_callm_n(CCPy *py,
+                                                      const char *method,
+                                                      int argc,
+                                                      const CCPyArg *argv) {
+    cc__py_bind_err_py(py);
+    if (!py || !py->ready) {
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: %s: handle not ready", method ? method : "?");
+        return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err(method));
+    }
+    if (method && argc == 1 && (argv[0].kind == 2 || argv[0].kind == 3) &&
+        strcmp(method, "eval") == 0) {
+        CCSlice src;
+        src.ptr = (void *)(uintptr_t)argv[0].p;
+        src.len = argv[0].n;
+        return cc__py_eval(py, src);
+    }
+    snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+             "python: CCPy has no dynamic method '%s' (dynamic members: "
+             "eval(src))",
+             method ? method : "?");
+    return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err(method));
+}
+
+static inline CCResult_CCPyObj_CCPyError cc_py_callm(CCPy *py,
+                                                     const char *method,
+                                                     int argc, ...) {
+    CCPyArg tmp[CC__PY_MAX_CALL_ARGS];
+    int i;
+    va_list ap;
+    if (argc < 0) argc = 0;
+    if (argc > CC__PY_MAX_CALL_ARGS) argc = CC__PY_MAX_CALL_ARGS;
+    va_start(ap, argc);
+    for (i = 0; i < argc; i++) tmp[i] = va_arg(ap, CCPyArg);
+    va_end(ap);
+    return cc__py_host_callm_n(py, method, argc, tmp);
+}
+
+/* Destination-typed variants: `.ufcs_dynamic2` resolution composes
+ * `cc_py_callm_<mangled dest>` at `T v = py.eval(...)` sites.  Each runs
+ * the sink core, extracts the destination type, and releases the
+ * intermediate object — it never reaches user space, so no @destroy. */
+static inline CCResult_double_CCPyError cc_py_callm_double(
+        CCPy *py, const char *method, int argc, ...) {
+    CCPyArg tmp[CC__PY_MAX_CALL_ARGS];
+    int i;
+    CCResult_CCPyObj_CCPyError r;
+    CCPyObj o;
+    CCResult_double_CCPyError out;
+    va_list ap;
+    if (argc < 0) argc = 0;
+    if (argc > CC__PY_MAX_CALL_ARGS) argc = CC__PY_MAX_CALL_ARGS;
+    va_start(ap, argc);
+    for (i = 0; i < argc; i++) tmp[i] = va_arg(ap, CCPyArg);
+    va_end(ap);
+    r = cc__py_host_callm_n(py, method, argc, tmp);
+    if (!r.ok) return cc_err_CCResult_double_CCPyError(r.u.error);
+    o = r.u.value;
+    out = cc_py_obj_as_f64(&o);
+    cc_py_obj_release(&o);
+    return out;
+}
+
+static inline CCResult_float_CCPyError cc_py_callm_float(
+        CCPy *py, const char *method, int argc, ...) {
+    CCPyArg tmp[CC__PY_MAX_CALL_ARGS];
+    int i;
+    CCResult_CCPyObj_CCPyError r;
+    CCPyObj o;
+    CCResult_double_CCPyError d;
+    va_list ap;
+    if (argc < 0) argc = 0;
+    if (argc > CC__PY_MAX_CALL_ARGS) argc = CC__PY_MAX_CALL_ARGS;
+    va_start(ap, argc);
+    for (i = 0; i < argc; i++) tmp[i] = va_arg(ap, CCPyArg);
+    va_end(ap);
+    r = cc__py_host_callm_n(py, method, argc, tmp);
+    if (!r.ok) return cc_err_CCResult_float_CCPyError(r.u.error);
+    o = r.u.value;
+    d = cc_py_obj_as_f64(&o);
+    cc_py_obj_release(&o);
+    if (!d.ok) return cc_err_CCResult_float_CCPyError(d.u.error);
+    return cc_ok_CCResult_float_CCPyError((float)d.u.value);
+}
+
+static inline CCResult_int64_t_CCPyError cc_py_callm_int64_t(
+        CCPy *py, const char *method, int argc, ...) {
+    CCPyArg tmp[CC__PY_MAX_CALL_ARGS];
+    int i;
+    CCResult_CCPyObj_CCPyError r;
+    CCPyObj o;
+    CCResult_int64_t_CCPyError out;
+    va_list ap;
+    if (argc < 0) argc = 0;
+    if (argc > CC__PY_MAX_CALL_ARGS) argc = CC__PY_MAX_CALL_ARGS;
+    va_start(ap, argc);
+    for (i = 0; i < argc; i++) tmp[i] = va_arg(ap, CCPyArg);
+    va_end(ap);
+    r = cc__py_host_callm_n(py, method, argc, tmp);
+    if (!r.ok) return cc_err_CCResult_int64_t_CCPyError(r.u.error);
+    o = r.u.value;
+    out = cc__py_obj_take_i64(&o, method);
+    cc_py_obj_release(&o);
+    return out;
+}
+
+static inline CCResult_long_long_CCPyError cc_py_callm_long_long(
+        CCPy *py, const char *method, int argc, ...) {
+    CCPyArg tmp[CC__PY_MAX_CALL_ARGS];
+    int i;
+    CCResult_CCPyObj_CCPyError r;
+    CCPyObj o;
+    CCResult_int64_t_CCPyError v;
+    va_list ap;
+    if (argc < 0) argc = 0;
+    if (argc > CC__PY_MAX_CALL_ARGS) argc = CC__PY_MAX_CALL_ARGS;
+    va_start(ap, argc);
+    for (i = 0; i < argc; i++) tmp[i] = va_arg(ap, CCPyArg);
+    va_end(ap);
+    r = cc__py_host_callm_n(py, method, argc, tmp);
+    if (!r.ok) return cc_err_CCResult_long_long_CCPyError(r.u.error);
+    o = r.u.value;
+    v = cc__py_obj_take_i64(&o, method);
+    cc_py_obj_release(&o);
+    if (!v.ok) return cc_err_CCResult_long_long_CCPyError(v.u.error);
+    return cc_ok_CCResult_long_long_CCPyError((long long)v.u.value);
+}
+
+static inline CCResult_int_CCPyError cc_py_callm_int(
+        CCPy *py, const char *method, int argc, ...) {
+    CCPyArg tmp[CC__PY_MAX_CALL_ARGS];
+    int i;
+    CCResult_CCPyObj_CCPyError r;
+    CCPyObj o;
+    CCResult_int64_t_CCPyError v;
+    va_list ap;
+    if (argc < 0) argc = 0;
+    if (argc > CC__PY_MAX_CALL_ARGS) argc = CC__PY_MAX_CALL_ARGS;
+    va_start(ap, argc);
+    for (i = 0; i < argc; i++) tmp[i] = va_arg(ap, CCPyArg);
+    va_end(ap);
+    r = cc__py_host_callm_n(py, method, argc, tmp);
+    if (!r.ok) return cc_err_CCResult_int_CCPyError(r.u.error);
+    o = r.u.value;
+    v = cc__py_obj_take_i64(&o, method);
+    cc_py_obj_release(&o);
+    if (!v.ok) return cc_err_CCResult_int_CCPyError(v.u.error);
+    if (v.u.value < (int64_t)INT_MIN || v.u.value > (int64_t)INT_MAX) {
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: %s: result out of range for int destination",
+                 method);
+        return cc_err_CCResult_int_CCPyError(cc__py_err(method));
+    }
+    return cc_ok_CCResult_int_CCPyError((int)v.u.value);
 }
 
 /* str(obj) copied into `arena`; NUL-terminated (char[:0] compatible).
@@ -3275,6 +3460,7 @@ CC_DECL_RESULT_SPEC(${box}, ${rt}, ${er})
 @comptime {
     (void)cc_type_register("CCPy", (CCTypeHooks){
         .destroy = cc_type_destroy_call("cc_py_close"),
+        .ufcs_dynamic2 = cc_type_dynamic_call("cc_py_callm", "CC_PY_ARG"),
     });
     (void)cc_type_register("CCPyObj", (CCTypeHooks){
         .destroy = cc_type_destroy_call("cc_py_obj_release"),

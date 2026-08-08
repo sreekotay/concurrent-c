@@ -20,6 +20,11 @@ typedef struct Math {
     long long calls;
     double *series;
     long long slen;
+    /* Row columns (rows_prep fills; rows_call / rows_map consume). */
+    double *rx;
+    long long *rk;
+    double *rz;
+    long long rn;
 } Math;
 
 static long long Math_add(Math *self, long long a, long long b) {
@@ -83,6 +88,59 @@ static void Math_destroy(Math *self) {
     free(self->series);
     self->series = NULL;
     self->slen = 0;
+    free(self->rx);
+    free(self->rk);
+    free(self->rz);
+    self->rx = NULL;
+    self->rk = NULL;
+    self->rz = NULL;
+    self->rn = 0;
+}
+/* Rows ladder, the batching question py_baseline prices: the same three
+ * heterogeneous columns crossed per row versus carried in one crossing.
+ * rows_prep fills CC-owned columns outside the timed region. */
+static long long Math_rows_prep(Math *self, long long n) {
+    if (n < 1) n = 1;
+    free(self->rx);
+    free(self->rk);
+    free(self->rz);
+    self->rx = (double *)malloc((size_t)n * sizeof(double));
+    self->rk = (long long *)malloc((size_t)n * sizeof(long long));
+    self->rz = (double *)malloc((size_t)n * sizeof(double));
+    if (!self->rx || !self->rk || !self->rz) { self->rn = 0; return 0; }
+    for (long long i = 0; i < n; i++) {
+        self->rx[i] = (double)(i % 1000) * 0.5;
+        self->rk[i] = (i % 7) + 1;
+        self->rz[i] = 0.25;
+    }
+    self->rn = n;
+    return n;
+}
+/* Per-row crossing: one JS call per row through the global function. */
+static double !>(CCError) Math_rows_call(Math *self, CCJs *js) {
+    @errhandler(CCError e) { return cc_err(e); }
+    CCJsVal g = js->global() !> @destroy;
+    double acc = 0;
+    for (long long i = 0; i < self->rn; i++) {
+        double v = g.mul_add_js(self->rx[i], self->rk[i], self->rz[i]) !>;
+        acc += v;
+    }
+    self->calls += self->rn;
+    return cc_ok(acc);
+}
+/* One crossing carries the whole batch: the callable runs once per row,
+ * results land in a typed run. */
+static double !>(CCError) Math_rows_map(Math *self, CCJsVal f) {
+    @errhandler(CCError e) { return cc_err(e); }
+    CCArena a = cc_arena_heap(megabytes(32)) @destroy;
+    double[:] xs = CCSlice_double_from_buffer(self->rx, (size_t)self->rn);
+    long long[:] ks = CCSlice_long_long_from_buffer(self->rk, (size_t)self->rn);
+    double[:] zs = CCSlice_double_from_buffer(self->rz, (size_t)self->rn);
+    CCSlice out = f.map::[double](&a, xs, ks, zs) !>;
+    double acc = 0;
+    for (size_t i = 0; i < out.len; i++) acc += ((const double *)out.ptr)[i];
+    self->calls += 1;
+    return cc_ok(acc);
 }
 /* Outbound rungs: crossing out of CC at three arities, against global
  * functions the driver defines.  One method call carries the whole timed

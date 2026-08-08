@@ -89,6 +89,26 @@ static long long !>(CCError) Counter_eval_typed(Counter *self, CCJs *js) {
     long long v = js->eval_i64(@slice("40 + 2")) !>;
     return cc_ok(v);
 }
+/* Hop chains, pydemo-shape: properties link, the end extracts — by the
+ * declared destination (a sink call), or by an as_* hop. */
+static long long !>(CCError) Counter_chain_floor(Counter *self, CCJs *js) {
+    @errhandler(CCError e) { return cc_err(e); }
+    (void)self;
+    long long v = js->global()!>.get("Math")!>.floor(3.7) !>;
+    return cc_ok(v);
+}
+static double !>(CCError) Counter_chain_pi(Counter *self, CCJs *js) {
+    @errhandler(CCError e) { return cc_err(e); }
+    (void)self;
+    double v = js->global()!>.get("Math")!>.get("PI")!>.as_f64()!>;
+    return cc_ok(v);
+}
+static long long !>(CCError) Counter_chain_pid(Counter *self, CCJs *js) {
+    @errhandler(CCError e) { return cc_err(e); }
+    (void)self;
+    long long v = js->global()!>.get("process")!>.get("pid")!>.as_i64()!>;
+    return cc_ok(v);
+}
 /* globalThis, property-called like any other value. */
 static long long !>(CCError) Counter_gparse(Counter *self, CCJs *js) {
     @errhandler(CCError e) { return cc_err(e); }
@@ -96,6 +116,19 @@ static long long !>(CCError) Counter_gparse(Counter *self, CCJs *js) {
     CCJsVal g = js->global() !> @destroy;
     long long v = g.parseInt("42") !>;
     return cc_ok(v);
+}
+
+/* Bulk rows: one crossing calls the JS callable once per row over typed
+ * columns (mixed element types on purpose); the typed results sum here. */
+static double !>(CCError) Counter_rowmap(Counter *self, CCJsVal f,
+                                         double[:] xs, int64_t[:] ks) {
+    @errhandler(CCError e) { return cc_err(e); }
+    (void)self;
+    CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+    CCSlice out = f.map::[double](&a, xs, ks) !>;
+    double s = 0;
+    for (size_t i = 0; i < out.len; i++) s += ((const double *)out.ptr)[i];
+    return cc_ok(s);
 }
 
 /* The seed is the module's initial state, copied in at registration. */
