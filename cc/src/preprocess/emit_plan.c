@@ -1301,10 +1301,11 @@ static void cc__field_reg_append_rf_tables(char** out, size_t* out_len,
         CCCtFieldRegEntry* e = &cc__field_reg[i];
         char hdr[256];
         if (!e->type_name || !e->type_name[0]) continue;
+        /* Attr before `static`: Apple Clang 17 -Wunused-const-variable. */
         snprintf(hdr, sizeof(hdr),
                  "/* CC reflect fields:%s */\n"
-                 "static const struct { const char* name; const char* type; "
-                 "int is_as; } __cc_rf_%s[] = {\n",
+                 "__attribute__((unused)) static const struct { const char* name; "
+                 "const char* type; int is_as; } __cc_rf_%s[] = {\n",
                  e->type_name, e->type_name);
         cc_sb_append_cstr(out, out_len, out_cap, hdr);
         for (j = 0; j < e->n; j++) {
@@ -1315,8 +1316,8 @@ static void cc__field_reg_append_rf_tables(char** out, size_t* out_len,
             cc_sb_append_cstr(out, out_len, out_cap, row);
         }
         snprintf(hdr, sizeof(hdr),
-                 "};\nstatic const int __cc_rf_%s_n = %d;\n\n", e->type_name,
-                 e->n);
+                 "};\n__attribute__((unused)) static const int __cc_rf_%s_n = %d;\n\n",
+                 e->type_name, e->n);
         cc_sb_append_cstr(out, out_len, out_cap, hdr);
     }
 }
@@ -1948,6 +1949,7 @@ void cc_emit_warning_at(const char* file, int line, const char* msg) {
 static void cc__exec_visit_block(const char* src, size_t len,
                                  size_t body_l, size_t body_r, void* ctx) {
     const char* input_path = (const char*)ctx;
+    (void)len;
     if (!cc__block_needs_executor(src, body_l, body_r)) return;
     if (cc__exec_range_contains(body_l, body_r)) return;
 
@@ -2282,6 +2284,7 @@ static int cc__scan_fn_def_names(const char* text, char names[][128], int cap) {
  * `src`/`len` is the line-aligned body buffer used to derive @comptime origins. */
 void cc_emit_plan_warn_duplicate_symbols(const char* src, size_t len,
                                          const char* input_path) {
+    (void)src; (void)len;
     if (cc__comptime_frag_count == 0) return;
     char relbuf[1024];
     const char* rel_input = cc_path_rel_to_repo(input_path ? input_path : "<input>",

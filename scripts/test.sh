@@ -108,9 +108,29 @@ else
   echo "[test] full mode (jobs=$jobs)"
 fi
 
+# Rebuild the compiler when missing or broken (e.g. after `make -C cc clean`
+# wiped .ccc-bin / out/include). Avoids a false "const-eval FAILED" from the
+# wrapper remaining while the real binary is gone.
+need_cc=0
+if [ ! -x "./cc/bin/.ccc-bin" ]; then need_cc=1; fi
 if [ "$front" = "native" ] || [ "$compare_front" = 1 ]; then
   if [ ! -x "./out/cc/bin/shadow_lower" ] && [ ! -x "./cc/bin/shadow_lower" ]; then
-    echo "[test] FAIL: native front needs shadow_lower (make -C cc)"
+    need_cc=1
+  fi
+fi
+if [ "$need_cc" = 0 ] && [ -x "./cc/bin/ccc" ]; then
+  if ! ./cc/bin/ccc __eval-const --selftest >/dev/null 2>&1; then
+    need_cc=1
+  fi
+fi
+if [ "$need_cc" = 1 ]; then
+  echo "[test] building compiler (make -C cc)"
+  make -C cc all
+fi
+
+if [ "$front" = "native" ] || [ "$compare_front" = 1 ]; then
+  if [ ! -x "./out/cc/bin/shadow_lower" ] && [ ! -x "./cc/bin/shadow_lower" ]; then
+    echo "[test] FAIL: native front needs shadow_lower (make -C cc failed?)"
     exit 1
   fi
 fi

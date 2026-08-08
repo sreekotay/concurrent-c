@@ -1579,7 +1579,7 @@ upd:
     shadow_variant_update_drop(v);
 }
 
-static void shadow_variant_register(const char* name, char arms[][64],
+static void __attribute__((unused)) shadow_variant_register(const char* name, char arms[][64],
                                     const int* is_void, int narm) {
     char tys[8][96];
     memset(tys, 0, sizeof(tys));
@@ -3249,9 +3249,9 @@ static void shadow_restrict_register_from_items(AstNode** items, int n) {
             (void)shadow_restrict_register(it->d, it->b, it->c);
         if (it->kids && it->nkids > 0)
             shadow_restrict_register_from_items(it->kids, it->nkids);
-        if (it->body && it->nbody > 0)
+        if (it->nbody > 0)
             shadow_restrict_register_from_items(it->body, it->nbody);
-        if (it->dbody && it->ndbody > 0)
+        if (it->ndbody > 0)
             shadow_restrict_register_from_items(it->dbody, it->ndbody);
     }
 }
@@ -5728,7 +5728,7 @@ static void shadow_bind_base_ty(const ShadowBind* b, char* dst, size_t cap) {
         dst[--n] = 0;
 }
 
-static void shadow_family_snake(const char* family, char* out, size_t cap) {
+static void __attribute__((unused)) shadow_family_snake(const char* family, char* out, size_t cap) {
     size_t i;
     if (!family || !cap) return;
     for (i = 0; family[i] && i + 1 < cap; i++) {
@@ -6167,7 +6167,7 @@ static void shadow_chan_register_ex(const char* name, const char* cap, int order
     g_shadow_nchans++;
 }
 
-static void shadow_chan_register(const char* name, const char* cap, int ordered) {
+static void __attribute__((unused)) shadow_chan_register(const char* name, const char* cap, int ordered) {
     shadow_chan_register_ex(name, cap, ordered, NULL, NULL, 0, 0);
 }
 

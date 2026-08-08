@@ -92,9 +92,11 @@ static int shadow_emit_reflect_field_table(AstNode* it, CEmit* out) {
     if (!cemit_fmt(out, "/* CC reflect fields:%s (is_as from AST; not on struct) */\n",
                    alias))
         return 0;
+    /* Attr before `static`: Apple Clang 17 ignores unused between type and
+     * name for `static const` aggregates (-Wunused-const-variable). */
     if (!cemit_fmt(out,
-                   "static const struct { const char* name; const char* type; "
-                   "int is_as; } __cc_rf_%s[] = {\n",
+                   "__attribute__((unused)) static const struct { const char* name; "
+                   "const char* type; int is_as; } __cc_rf_%s[] = {\n",
                    alias))
         return 0;
     for (k = 0; k < it->nkids; k++) {
@@ -129,7 +131,10 @@ static int shadow_emit_reflect_field_table(AstNode* it, CEmit* out) {
         }
         n++;
     }
-    if (!cemit_fmt(out, "};\nstatic const int __cc_rf_%s_n = %d;\n\n", alias, n))
+    if (!cemit_fmt(out,
+                   "};\n__attribute__((unused)) static const int __cc_rf_%s_n = "
+                   "%d;\n\n",
+                   alias, n))
         return 0;
     if (n > 0 && n <= 64)
         (void)cc_ct_field_reg_put(alias, names, types_store, is_as_arr, n);
@@ -311,6 +316,22 @@ static int shadow_node_needs_result_api(AstNode* n) {
     return 0;
 }
 
+/* Grammar entry-point dedup (`Name_match` / `Name_rule_count`) is per emit
+ * only. Type-pass and main-pass each call shadow_emit; leaking this table
+ * across them silently drops user helpers whose names merely end in
+ * `_match` (e.g. redis `glob_match`) after the type-pass already emitted them. */
+static char g_shadow_emitted_grammar_fns[16][64];
+static int g_shadow_n_emitted_grammar_fns;
+
+static int shadow_grammar_entry_fn_name(const char* name) {
+    size_t n;
+    if (!name || !name[0]) return 0;
+    n = strlen(name);
+    if (n >= 6 && strcmp(name + (n - 6), "_match") == 0) return 1;
+    if (n >= 11 && strcmp(name + (n - 11), "_rule_count") == 0) return 1;
+    return 0;
+}
+
 static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                        ShadowEmitKind kind, char pass_inc[][256], int npass_inc,
                        char pass_def[][512], int npass_def,
@@ -323,6 +344,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
     g_file_header_lead_done = 0;
     g_shadow_async_id = 60000;
     g_shadow_closure_id = 1;
+    g_shadow_n_emitted_grammar_fns = 0;
     /* Pre-scan send_task receivers so ordered channel_pair can select task
      * machinery before the send_task site is emitted. */
     {
@@ -1985,19 +2007,22 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             char ret[160];
             /* Skip duplicate grammar entry-point functions (Name_match).
              * Grammar rules expansion can produce multiple parse passes of
-             * the same entry function. */
+             * the same entry function within one emit. */
             {
-                static char emitted_fns[16][64];
-                static int n_emitted_fns;
                 int dup = 0, ef;
-                if (strstr(it->b, "_match") || strstr(it->b, "_rule_count")) {
-                    for (ef = 0; ef < n_emitted_fns; ef++) {
-                        if (strcmp(emitted_fns[ef], it->b) == 0) { dup = 1; break; }
+                if (shadow_grammar_entry_fn_name(it->b)) {
+                    for (ef = 0; ef < g_shadow_n_emitted_grammar_fns; ef++) {
+                        if (strcmp(g_shadow_emitted_grammar_fns[ef], it->b) == 0) {
+                            dup = 1;
+                            break;
+                        }
                     }
                     if (dup) break;
-                    if (n_emitted_fns < 16)
-                        snprintf(emitted_fns[n_emitted_fns++],
-                                 sizeof(emitted_fns[0]), "%s", it->b);
+                    if (g_shadow_n_emitted_grammar_fns < 16)
+                        snprintf(g_shadow_emitted_grammar_fns
+                                     [g_shadow_n_emitted_grammar_fns++],
+                                 sizeof(g_shadow_emitted_grammar_fns[0]), "%s",
+                                 it->b);
                 }
             }
             snprintf(ret, sizeof(ret), "%s", it->a[0] ? it->a : "int");
@@ -2007,7 +2032,12 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             shadow_rewrite_slice_types(params, sizeof(params));
             shadow_normalize_chan_params(params, sizeof(params));
             const char* inl =
-                (it->e[0] && strcmp(it->e, "inline") == 0) ? "inline " : "";
+                (it->e[0] && strstr(it->e, "inline")) ? "inline " : "";
+            /* Keep grammar emit's post-`static` placement (CC-parse-safe). */
+            const char* unused_attr =
+                (it->e[0] && strstr(it->e, "unused"))
+                    ? "__attribute__((unused)) "
+                    : "";
             /* One-liner wrapper before emitting `{` + newline. */
             if (it->nkids == 1 && it->kids[0]->kind == AST_CALL_ARGS) {
                 AstNode* c = it->kids[0];
@@ -2032,10 +2062,11 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                  * text; never feed that through a cemit_fmt value slot that
                  * shares a short temp with the whole one-liner. */
                 if (!shadow_tpl_kv(out,
-                                   "static ${inl}${ret} ${name}(${params}) { "
+                                   "static ${attr}${inl}${ret} ${name}(${params}) { "
                                    "${fn}(",
-                                   "inl", inl, "ret", ret, "name", it->b,
-                                   "params", params, "fn", fn, NULL) ||
+                                   "attr", unused_attr, "inl", inl, "ret", ret,
+                                   "name", it->b, "params", params, "fn", fn,
+                                   NULL) ||
                     !cemit_str(out, args) ||
                     !cemit_str(out, "); }\n\n"))
                     return 0;
@@ -2054,14 +2085,14 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 shadow_restrict_check_text(body);
                 shadow_pop_fn_binds(one_mark);
                 if (g_shadow_restrict_diag) return 0;
-                if (!cemit_fmt(out, "static %s%s %s(%s) { %s }\n\n", inl, ret,
-                               it->b, params, body))
+                if (!cemit_fmt(out, "static %s%s%s %s(%s) { %s }\n\n",
+                               unused_attr, inl, ret, it->b, params, body))
                     return 0;
                 break;
             }
             if (it->d[0] && it->nkids == 0) {
-                if (!cemit_fmt(out, "static %s%s %s(%s) {\n", inl, ret, it->b,
-                               params))
+                if (!cemit_fmt(out, "static %s%s%s %s(%s) {\n", unused_attr, inl,
+                               ret, it->b, params))
                     return 0;
                 char body[2048];
                 shadow_rewrite_ufcs(body, sizeof(body), it->d, NULL);
@@ -2145,8 +2176,8 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 }
             }
             if (bind_ok &&
-                !cemit_fmt(out, "static %s%s %s(%s) {\n", inl, ret, it->b,
-                           params))
+                !cemit_fmt(out, "static %s%s%s %s(%s) {\n", unused_attr, inl,
+                           ret, it->b, params))
                 bind_ok = 0;
             /* Soft returns + watermark for any return type (void skips retval). */
             int use_c = (nsdestroys > 0 || nsdefers > 0);
@@ -2612,12 +2643,14 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
     return !out->err;
 }
 
-static int shadow_emit_c(AstNode** items, int n, TapeCache* cache, CEmit* out) {
+static int __attribute__((unused)) shadow_emit_c(AstNode** items, int n,
+                                                  TapeCache* cache, CEmit* out) {
     return shadow_emit(items, n, cache, out, SHADOW_EMIT_C, NULL, 0, NULL, 0,
                        NULL);
 }
 
-static int shadow_emit_h(AstNode** items, int n, TapeCache* cache, CEmit* out) {
+static int __attribute__((unused)) shadow_emit_h(AstNode** items, int n,
+                                                  TapeCache* cache, CEmit* out) {
     return shadow_emit(items, n, cache, out, SHADOW_EMIT_H, NULL, 0, NULL, 0,
                        NULL);
 }

@@ -3210,7 +3210,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             int empty = (strcmp(st->c, "{}") == 0 || strcmp(st->c, "{ }") == 0);
             /* `char[:]` and pointer-elem `T*[:]` erase to CCSlice. */
             int is_char = (strcmp(st->a, "char") == 0) ||
-                          (st->a && strchr(st->a, '*') != NULL);
+                          (strchr(st->a, '*') != NULL);
             int is_desig = (strstr(st->c, ".ptr") != NULL ||
                             strstr(st->c, ".len") != NULL);
             if (is_char && empty && !g_shadow_slice_stub)

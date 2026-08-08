@@ -1127,7 +1127,8 @@ static int parse_at_string_arena(Parser* p, char* dst, size_t cap,
     dst[n] = 0;
     return 1;
 }
-static int parse_at_string_scratch(Parser* p, char* dst, size_t cap) {
+static int __attribute__((unused)) parse_at_string_scratch(Parser* p, char* dst,
+                                                           size_t cap) {
     return parse_at_string_arena(p, dst, cap, NULL, 0);
 }
 
@@ -2015,15 +2016,12 @@ static AstNode* parse_typed_init(Parser* p) {
      * (unique forms record `!` for safety). */
     int slice_ty_end = -1;
     int slice_unique = 0;
-    int slice_elem0 = ti;
-    int slice_elem1 = -1;
     if (!has_struct && !is_anon_struct) {
         int te = (ty_end > 0) ? ty_end : peek_slice_elem_type_end(p, ti, p->n);
         if (te > ti && te < p->n && tok_eq(p->toks[te], TK_PUNCT, "[")) {
             int mend = peek_slice_brack_end(p, te, p->n, &slice_unique);
             if (mend > 0) {
                 slice_ty_end = mend;
-                slice_elem1 = te;
                 ty_end = mend; /* consume through `]` */
             }
         }
@@ -3226,10 +3224,14 @@ static int shadow_is_grammar_static_helper(CCSlice name) {
     n = name.len < sizeof(buf) - 1 ? name.len : sizeof(buf) - 1;
     memcpy(buf, name.ptr, n);
     buf[n] = 0;
-    /* Internal matchers / fills: Name__r_*, Name__m_*, Name__b_*,
-     * Name__fill, Name__s__m_* / __s__b_* (skip-tier).  Any `__` was too
-     * broad — user helpers like `lev__prep` became opaque tape and lost
-     * UFCS.  Leading `__` (libc/CC) stays excluded. */
+    /* Internal matchers / fills / writers: Name__r_*, Name__m_*, Name__b_*,
+     * Name__fill, Name__s__m_* / __s__b_* (skip-tier), Name__w* (schema
+     * write helpers with raw `.u`).  Any `__` was too broad — user helpers
+     * like `lev__prep` became opaque tape and lost UFCS.  Leading `__`
+     * (libc/CC) stays excluded.
+     * `__w*` used to fall into opaque tape only because
+     * `static __attribute__((unused))` broke parse_static_fn; once attrs
+     * are skipped they must stay opaque or safety rejects schema `.u`. */
     {
         const char* dd = strstr(buf, "__");
         if (buf[0] != '_' && dd) {
@@ -3237,6 +3239,7 @@ static int shadow_is_grammar_static_helper(CCSlice name) {
             if ((after[0] == 'r' || after[0] == 'm' || after[0] == 'b') &&
                 after[1] == '_')
                 return 1;
+            if (after[0] == 'w') return 1; /* __wput / __wchk / __wmeasure */
             if (strcmp(after, "fill") == 0 || strncmp(after, "fill_", 5) == 0)
                 return 1;
             if (strncmp(after, "s__m_", 5) == 0 ||
@@ -3264,20 +3267,82 @@ static int shadow_is_grammar_static_helper(CCSlice name) {
     return shadow_is_grammar_type_prefix(buf, prefix);
 }
 
-/* static [inline] [const] Ret[*] name ( params ) { body } — stmts or raw (d). */
+/* Advance index past one `__attribute__((…))` (nested parens). Unchanged if
+ * toks[i] is not `__attribute__`. */
+static int shadow_skip_attribute_at(Parser* p, int i) {
+    int depth;
+    if (!p || i < 0 || i >= p->n) return i;
+    if (p->toks[i].kind != TK_IDENT ||
+        !spell_eq(p->toks[i].spell, "__attribute__"))
+        return i;
+    i++;
+    if (i >= p->n || !tok_eq(p->toks[i], TK_PUNCT, "(")) return i;
+    depth = 0;
+    while (i < p->n) {
+        if (tok_eq(p->toks[i], TK_PUNCT, "(")) {
+            depth++;
+            i++;
+        } else if (tok_eq(p->toks[i], TK_PUNCT, ")")) {
+            depth--;
+            i++;
+            if (depth == 0) return i;
+        } else {
+            i++;
+        }
+    }
+    return i;
+}
+
+static int shadow_skip_attributes_at(Parser* p, int i) {
+    int next;
+    for (;;) {
+        next = shadow_skip_attribute_at(p, i);
+        if (next == i) return i;
+        i = next;
+    }
+}
+
+/* Consume `__attribute__((…))*` at the current parse cursor. */
+static void shadow_skip_attributes(Parser* p) {
+    int next;
+    if (!p) return;
+    for (;;) {
+        next = shadow_skip_attribute_at(p, p->i);
+        if (next == p->i) return;
+        p->i = next;
+    }
+}
+
+/* static [attr] [inline] [attr] [const] [attr] Ret[*] name ( params ) { body }
+ * — stmts or raw (d). Attributes after `static` (grammar emit's
+ * `__attribute__((unused))` placement) must be skipped so Node_* helpers
+ * stay AST_STATIC_FN and register for UFCS; otherwise they fall through to
+ * opaque tape and `nd->count()` dies as "not declared". */
 static AstNode* parse_static_fn(Parser* p) {
     if (shadow_kw(p_peek(p)) != SHADOW_KW_STATIC) return NULL;
     if (p->i + 4 >= p->n) return NULL;
-    int ri = p->i + 1;
+    int ri0 = p->i + 1;
+    int ri = shadow_skip_attributes_at(p, ri0);
     int has_inline = 0;
     int has_const = 0;
+    int has_unused = 0;
     if (ri < p->n && shadow_kw(p->toks[ri]) == SHADOW_KW_INLINE) {
         has_inline = 1;
-        ri++;
+        ri = shadow_skip_attributes_at(p, ri + 1);
     }
     if (ri < p->n && shadow_kw(p->toks[ri]) == SHADOW_KW_CONST) {
         has_const = 1;
-        ri++;
+        ri = shadow_skip_attributes_at(p, ri + 1);
+    }
+    {
+        int j;
+        for (j = ri0; j < ri; j++) {
+            if (p->toks[j].kind == TK_IDENT &&
+                spell_eq(p->toks[j].spell, "unused")) {
+                has_unused = 1;
+                break;
+            }
+        }
     }
     if (ri >= p->n) return NULL;
     Token rty = p->toks[ri];
@@ -3338,8 +3403,15 @@ static AstNode* parse_static_fn(Parser* p) {
 
     int fn_start = p->i;
     p_next(p); /* static */
-    if (has_inline) p_next(p); /* inline */
-    if (has_const) p_next(p); /* const */
+    shadow_skip_attributes(p);
+    if (has_inline) {
+        p_next(p); /* inline */
+        shadow_skip_attributes(p);
+    }
+    if (has_const) {
+        p_next(p); /* const */
+        shadow_skip_attributes(p);
+    }
     p_next(p); /* ret (or unsigned / long) */
     if (is_unsigned) {
         /* Consumed `unsigned`; optional int/long/long long already in ni. */
@@ -3486,7 +3558,12 @@ static AstNode* parse_static_fn(Parser* p) {
         }
         slice_to(n->b, sizeof(n->b), name.spell);
         snprintf(n->c, sizeof(n->c), "%s", params);
-        if (has_inline) snprintf(n->e, sizeof(n->e), "inline");
+        if (has_inline && has_unused)
+            snprintf(n->e, sizeof(n->e), "inline unused");
+        else if (has_unused)
+            snprintf(n->e, sizeof(n->e), "unused");
+        else if (has_inline)
+            snprintf(n->e, sizeof(n->e), "inline");
         if (p->pending_fn_attrs) {
             shadow_fn_attr_register(n->b, p->pending_fn_attrs, 1);
             p->pending_fn_attrs = 0;

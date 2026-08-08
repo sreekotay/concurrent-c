@@ -225,13 +225,13 @@ void cc_note_tu_map_key_pairs(const char* src, size_t n);
 int cc_slice_spec_tu_needs_decl(const char* src, size_t n,
                                 const char* name, const char* elem);
 
-/* Splice known local lowered headers (`out/include/.../*.h` from quoted .cch)
+/* Splice known local lowered headers (`*.h` under out/include from quoted .cch)
  * into the codegen/UFCS buffer so phase3 sees their bodies with parent-TU
  * symbols.  Returns malloc'd text, or NULL when unchanged. Caller frees. */
 char* cc_splice_local_lowered_headers_for_codegen(const char* src, size_t n);
 
 /* After phase3 UFCS: write marked splice regions back to their .h files and
- * collapse each region to `#include "path"`.  Updates *src/*n in place
+ * collapse each region to `#include "path"`.  Updates *src and *n in place
  * (may realloc).  Returns 0 on success, -1 on I/O failure. */
 int cc_writeback_local_lowered_headers_from_codegen(char** src, size_t* n);
 

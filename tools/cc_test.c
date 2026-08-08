@@ -720,14 +720,11 @@ static int run_one_test(const char* stem,
 
     /* 1) Build via ccc build (this is the build system under test).
      * Front: CC_TEST_FRONTEND / CC_FRONTEND = native|legacy (ccc default: native).
-     * Pinning build diagnostics requires a cold parse — warm emit cache
-     * skips shadow_lower / comptime and would silently drop .build_stderr and
-     * .compile_err needles (host-cc may still fail with a different message). */
+     * Emit cache is keyed by source bytes + toolchain bytes; warm hits replay
+     * lowering diagnostics from emit.c.diag. Erroring emits are not cached.
+     * Do not force --no-cache for diag/fail tests — that papers over cache bugs. */
     char build_cmd[3072];
-    int cold_for_diags =
-        (exp_build_stderr && exp_build_stderr_len > 0) ||
-        (exp_compile_err && exp_compile_err_len > 0) || compile_fail;
-    const char* cache_flag = (use_cache && !cold_for_diags) ? "" : "--no-cache ";
+    const char* cache_flag = use_cache ? "" : "--no-cache ";
     const char* front_flag = "";
     {
         const char* fe = getenv("CC_TEST_FRONTEND");
@@ -798,18 +795,43 @@ static int run_one_test(const char* stem,
         return 1;
     }
 
-    /* Optional pin for compile-time diagnostics on successful builds (warnings). */
-    if (exp_build_stderr && exp_build_stderr_len) {
+    /* Compile-time diagnostics on successful builds:
+     * - `.build_stderr` pin: require those needles (intentional warnings).
+     * - `*_smoke` without a pin: build stderr must contain no `warning:`. */
+    {
         unsigned char* build_err_buf = NULL;
         size_t build_err_len = 0;
         (void)read_entire_file_alloc(build_err_txt, &build_err_buf, &build_err_len);
-        if (expect_contains_lines("build_stderr", build_err_buf, build_err_len,
-                                  exp_build_stderr, exp_build_stderr_len) != 0) {
-            log_failure_files(stem, out_txt, err_txt, build_err_txt);
-            free(build_err_buf);
-            arg_runs_clear(&runs);
-            free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(exp_build_stderr); free(ldflags);
-            return 1;
+        if (exp_build_stderr && exp_build_stderr_len) {
+            if (expect_contains_lines("build_stderr", build_err_buf, build_err_len,
+                                      exp_build_stderr, exp_build_stderr_len) != 0) {
+                log_failure_files(stem, out_txt, err_txt, build_err_txt);
+                free(build_err_buf);
+                arg_runs_clear(&runs);
+                free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(exp_build_stderr); free(ldflags);
+                return 1;
+            }
+        } else if (ends_with(stem, "_smoke") && build_err_buf && build_err_len >= 8) {
+            const char* p = (const char*)build_err_buf;
+            size_t i;
+            int saw_warn = 0;
+            for (i = 0; i + 8 <= build_err_len; i++) {
+                if (strncmp(p + i, "warning:", 8) == 0) {
+                    saw_warn = 1;
+                    break;
+                }
+            }
+            if (saw_warn) {
+                fprintf(stderr,
+                        "[FAIL] %s: smoke build produced warning(s); "
+                        "fix them or pin expected needles in %s.build_stderr\n",
+                        stem, stem);
+                log_failure_files(stem, out_txt, err_txt, build_err_txt);
+                free(build_err_buf);
+                arg_runs_clear(&runs);
+                free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(exp_build_stderr); free(ldflags);
+                return 1;
+            }
         }
         free(build_err_buf);
     }

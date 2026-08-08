@@ -29,6 +29,7 @@ int main(void) {
     fprintf(stderr, "ufcs_accept_errhandler_neterr_smoke: expected value UFCS accept failure\n");
     return 2;
 after_value:
+    ; /* null stmt: label + decl is a C23 extension under -std=c11 */
 
     CCSocket s2 = ln_ptr->accept() !>(ne) {
         take_net_err(ne);
@@ -38,6 +39,7 @@ after_value:
     fprintf(stderr, "ufcs_accept_errhandler_neterr_smoke: expected ptr UFCS accept failure\n");
     return 3;
 after_ptr:
+    ;
 
     /* Also after a successful listen decl (the original Phase-2 probe shape). */
     CCListener live = cc_tcp_listen("127.0.0.1:18771") !>(ne) {

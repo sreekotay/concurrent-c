@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 static int shadow_build_ends_with(const char* s, const char* suf) {
     size_t n, m;
@@ -124,9 +125,74 @@ static const char* shadow_host_cc(void) {
     return (cc && cc[0]) ? cc : "cc";
 }
 
-/* Runtime object for host link. */
+/* Host TCC needs `-B` for include/ + libtcc1.a (uninstalled tree). Match
+ * cc_main / host_cc_profile so CC=…/tcc can compile emitted product C. */
+static int shadow_host_is_tcc(const char* cc) {
+    size_t n;
+    if (!cc || !cc[0]) return 0;
+    n = strlen(cc);
+    if (n >= 3 && strcmp(cc + n - 3, "tcc") == 0) return 1;
+    if (n >= 7 && strcmp(cc + n - 7, "tcc.exe") == 0) return 1;
+    if (strstr(cc, "/tcc") || strstr(cc, "\\tcc")) return 1;
+    return 0;
+}
+
+static const char* shadow_tcc_lib_dir(const char* cc, char* buf, size_t cap) {
+    const char* env = getenv("CC_TCC_LIB_PATH");
+    char from_bin[512];
+    const char* cands[8];
+    size_t nc = 0;
+    size_t i;
+    if (env && env[0]) cands[nc++] = env;
+    if (cc && cc[0]) {
+        size_t n = strlen(cc);
+        if (n + 1 < sizeof(from_bin)) {
+            memcpy(from_bin, cc, n + 1);
+            char* slash = strrchr(from_bin, '/');
+            if (slash && slash != from_bin) {
+                *slash = 0;
+                cands[nc++] = from_bin;
+            }
+        }
+    }
+    cands[nc++] = "third_party/tcc";
+    cands[nc++] = "../third_party/tcc";
+    cands[nc++] = "../../third_party/tcc";
+    for (i = 0; i < nc; i++) {
+        char probe[600];
+        if (!cands[i] || !cands[i][0]) continue;
+        snprintf(probe, sizeof(probe), "%s/include/stdbool.h", cands[i]);
+        if (access(probe, R_OK) == 0) {
+            snprintf(buf, cap, "%s", cands[i]);
+            return buf;
+        }
+    }
+    return NULL;
+}
+
+/* Append " -Bdir" when host is TCC; returns 1 if appended. */
+static int shadow_append_tcc_B(char* cmd, size_t cap, const char* cc) {
+    char dir[512];
+    char flag[540];
+    const char* libdir;
+    size_t n;
+    if (!cmd || !cap || !shadow_host_is_tcc(cc)) return 0;
+    libdir = shadow_tcc_lib_dir(cc, dir, sizeof(dir));
+    if (!libdir) return 0;
+    snprintf(flag, sizeof(flag), " -B%s", libdir);
+    n = strlen(cmd);
+    if (n + strlen(flag) + 1 >= cap) return 0;
+    memcpy(cmd + n, flag, strlen(flag) + 1);
+    return 1;
+}
+
+/* Runtime object for host link.
+ * Host TCC cannot link the `make -C cc` Mach-O concurrent_c.o (TCC emits ELF
+ * objects on Darwin and links them into Mach-O). Prefer SHADOW_RUNTIME_O from
+ * ccc (host-fingerprint cache); refuse the clang prebuilt when CC is tcc. */
 static int shadow_runtime_o(char* dst, size_t cap) {
     const char* env = getenv("SHADOW_RUNTIME_O");
+    const char* cc = shadow_host_cc();
     const char* cands[] = {
         "out/cc/obj/runtime/concurrent_c.o",
         "cc/obj/runtime/concurrent_c.o",
@@ -140,6 +206,12 @@ static int shadow_runtime_o(char* dst, size_t cap) {
         snprintf(dst, cap, "%s", env);
         return 1;
     }
+    if (shadow_host_is_tcc(cc)) {
+        fprintf(stderr,
+                "error: host TCC needs a TCC-built runtime object\n"
+                "  set SHADOW_RUNTIME_O (ccc build does this) or use CC=cc\n");
+        return 0;
+    }
     for (i = 0; i < (int)(sizeof(cands) / sizeof(cands[0])); i++) {
         if (access(cands[i], R_OK) == 0) {
             snprintf(dst, cap, "%s", cands[i]);
@@ -150,29 +222,44 @@ static int shadow_runtime_o(char* dst, size_t cap) {
     return 0;
 }
 
-/* Emit key: input content + tool sig + include roots + comptime/tcc libs.
+/* Toolchain (compiler) identity: content bytes of shadow_lower + comptime/tcc
+ * libs.  mtime is deliberately ignored — a rebuild that produces identical
+ * bytes must keep warm hits; a byte change must miss.  Memoized per process
+ * (ccc forks a fresh shadow_lower per build). */
+static uint64_t shadow_toolchain_content_fp(const char* self_path) {
+    static uint64_t cached = 0;
+    static int cached_ok = 0;
+    static char cached_self[512];
+    uint64_t h;
+    if (cached_ok && self_path && strcmp(cached_self, self_path) == 0)
+        return cached;
+    h = 1469598103934665603ULL;
+    h = shadow_fnv1a64_str(h, "\x03" "toolchain:");
+    h = shadow_fnv1a64_str(h, self_path ? self_path : "");
+    h = shadow_fold_file_content(h, self_path);
+    h = shadow_fold_file_content(h, "out/cc/obj/libshadow_comptime.a");
+    h = shadow_fold_file_content(h, "third_party/tcc/libtcc.a");
+    /* Include root *paths* only; header bytes are validated via emit.deps. */
+    h = shadow_fnv1a64_str(h, "out/include");
+    h = shadow_fnv1a64_str(h, "cc/include");
+    cached = h;
+    cached_ok = 1;
+    if (self_path)
+        snprintf(cached_self, sizeof(cached_self), "%s", self_path);
+    else
+        cached_self[0] = 0;
+    return h;
+}
+
+/* Emit key: source content bytes + toolchain content bytes.
  * Transitive tapes / harvested .cch / `#pragma cc_depends` are not folded
  * here — they live in emit.deps (+ emit.deps.key) written on cold emit. */
 static uint64_t shadow_emit_cache_key(const char* in_path, const char* self_path) {
     uint64_t h = 1469598103934665603ULL;
-    ShadowFileSig in_sig = {0}, self_sig = {0};
+    h = shadow_fnv1a64_str(h, "\x01" "src:");
     h = shadow_fnv1a64_str(h, in_path ? in_path : "");
-    if (shadow_stat_sig(in_path, &in_sig) == 0) {
-        h = shadow_fnv1a64_i64(h, in_sig.mtime_sec);
-        h = shadow_fnv1a64_i64(h, in_sig.size);
-    }
     h = shadow_fold_file_content(h, in_path);
-    h = shadow_fnv1a64_str(h, self_path ? self_path : "");
-    if (self_path && shadow_stat_sig(self_path, &self_sig) == 0) {
-        h = shadow_fnv1a64_i64(h, self_sig.mtime_sec);
-        h = shadow_fnv1a64_i64(h, self_sig.size);
-    }
-    h = shadow_fnv1a64_str(h, "out/include");
-    h = shadow_fnv1a64_str(h, "cc/include");
-    /* Comptime prepare/exec/splice identity (product path uses these libs). */
-    h = shadow_fnv1a64_str(h, "\x03" "toolchain:");
-    h = shadow_fold_file_content(h, "out/cc/obj/libshadow_comptime.a");
-    h = shadow_fold_file_content(h, "third_party/tcc/libtcc.a");
+    h ^= shadow_toolchain_content_fp(self_path);
     return h;
 }
 
@@ -267,20 +354,26 @@ typedef struct {
 
 static ShadowHostOpts g_shadow_host_opts;
 
-/* Obj key: emit key + host cc id + flag fingerprint.
+/* Obj key: emit key + host compiler content bytes + flag fingerprint.
  * Must fold every host-compile input (cc_flags, release/debug, no_runtime)
  * so warm tu.o is never reused across incompatible builds. */
 static uint64_t shadow_obj_cache_key(uint64_t emit_key, const char* host_cc) {
     uint64_t h = emit_key;
-    ShadowFileSig cc_sig = {0};
+    h = shadow_fnv1a64_str(h, "\x04" "hostcc:");
     h = shadow_fnv1a64_str(h, host_cc ? host_cc : "cc");
-    if (host_cc && host_cc[0] == '/' && shadow_stat_sig(host_cc, &cc_sig) == 0) {
-        h = shadow_fnv1a64_i64(h, cc_sig.mtime_sec);
-        h = shadow_fnv1a64_i64(h, cc_sig.size);
-    }
+    /* Absolute host cc: fold bytes. PATH-resolved "cc" keeps the name only
+     * (same limitation as before; prefer CC=/abs/path for strict identity). */
+    if (host_cc && host_cc[0] == '/')
+        h = shadow_fold_file_content(h, host_cc);
     h = shadow_fnv1a64_str(h, getenv("CFLAGS"));
     h = shadow_fnv1a64_str(h, getenv("CPPFLAGS"));
     h = shadow_fnv1a64_str(h, "-std=c11-D_DEFAULT_SOURCE-ffunction-sections-fdata-sections");
+    if (shadow_host_is_tcc(host_cc)) {
+        char tcc_dir[512];
+        const char* libdir = shadow_tcc_lib_dir(host_cc, tcc_dir, sizeof(tcc_dir));
+        h = shadow_fnv1a64_str(h, "-Btcc");
+        h = shadow_fnv1a64_str(h, libdir);
+    }
     h = shadow_fnv1a64_str(h, g_shadow_host_opts.cc_flags);
     h = shadow_fnv1a64_str(h, g_shadow_host_opts.ld_flags);
     h = shadow_fnv1a64_i64(h, g_shadow_host_opts.opt_release ? 1 : 0);
@@ -361,6 +454,25 @@ static int shadow_host_compile(const char* c_path, const char* o_path) {
                  release, debug,
                  c_path, o_path);
     if (n < 0 || (size_t)n >= sizeof(cmd)) return -1;
+    /* Insert -B before -c: TCC needs libtcc1 + its include/ for stdbool.h. */
+    if (shadow_host_is_tcc(cc)) {
+        char* cflag = strstr(cmd, " -c ");
+        char dir[512];
+        const char* libdir = shadow_tcc_lib_dir(cc, dir, sizeof(dir));
+        if (cflag && libdir) {
+            char rebuilt[8192];
+            size_t head = (size_t)(cflag - cmd);
+            int m = snprintf(rebuilt, sizeof(rebuilt), "%.*s -B%s%s",
+                             (int)head, cmd, libdir, cflag);
+            if (m < 0 || (size_t)m >= sizeof(rebuilt)) return -1;
+            snprintf(cmd, sizeof(cmd), "%s", rebuilt);
+        } else if (!shadow_append_tcc_B(cmd, sizeof(cmd), cc)) {
+            fprintf(stderr,
+                    "error: host TCC '%s' needs -B (missing third_party/tcc)\n",
+                    cc);
+            return -1;
+        }
+    }
     if (g_shadow_host_opts.dry_run) {
         fprintf(stderr, "shadow_lower: dry-run compile:\n  %s\n", cmd);
         return 0;
@@ -512,6 +624,12 @@ static int shadow_host_link(const char* o_path, const char* bin_path,
                      cc, o_path, runtime_o, bin_path, extracted);
     }
     if (n < 0 || (size_t)n >= sizeof(cmd)) return -1;
+    if (shadow_host_is_tcc(cc) && !shadow_append_tcc_B(cmd, sizeof(cmd), cc)) {
+        fprintf(stderr,
+                "error: host TCC '%s' needs -B (missing third_party/tcc)\n",
+                cc);
+        return -1;
+    }
     if (g_shadow_host_opts.dry_run) {
         fprintf(stderr, "shadow_lower: dry-run link:\n  %s\n", cmd);
         return 0;
@@ -523,6 +641,128 @@ static int shadow_host_link(const char* o_path, const char* bin_path,
         return -1;
     }
     return 0;
+}
+
+/* Capture fd 2 around cold emit so warnings can be persisted beside emit.c.
+ * Process-local slot keeps the type out of shadow_lower.ccs (type-pass TCC). */
+static int g_shadow_diag_saved_err = -1;
+static int g_shadow_diag_cap_fd = -1;
+static char g_shadow_diag_tmp[640];
+
+static int shadow_diag_cap_begin(void) {
+    char tmpl[] = "/tmp/shadow_diag.XXXXXX";
+    int fd;
+    if (g_shadow_diag_saved_err >= 0) return -1; /* nested */
+    g_shadow_diag_cap_fd = -1;
+    g_shadow_diag_tmp[0] = 0;
+    fd = mkstemp(tmpl);
+    if (fd < 0) return -1;
+    snprintf(g_shadow_diag_tmp, sizeof(g_shadow_diag_tmp), "%s", tmpl);
+    fflush(stderr);
+    g_shadow_diag_saved_err = dup(2);
+    if (g_shadow_diag_saved_err < 0 || dup2(fd, 2) < 0) {
+        if (g_shadow_diag_saved_err >= 0) close(g_shadow_diag_saved_err);
+        close(fd);
+        unlink(tmpl);
+        g_shadow_diag_saved_err = -1;
+        return -1;
+    }
+    g_shadow_diag_cap_fd = fd;
+    return 0;
+}
+
+/* Restore stderr, echo capture, optionally return malloc'd bytes (caller frees).
+ * Returns capture length (>=0), or -1 if capture was not active. */
+static long shadow_diag_cap_end(char** out_buf, size_t* out_len) {
+    long cap_len = 0;
+    char* buf = NULL;
+    if (out_buf) *out_buf = NULL;
+    if (out_len) *out_len = 0;
+    if (g_shadow_diag_saved_err < 0) return -1;
+    fflush(stderr);
+    dup2(g_shadow_diag_saved_err, 2);
+    close(g_shadow_diag_saved_err);
+    g_shadow_diag_saved_err = -1;
+    if (lseek(g_shadow_diag_cap_fd, 0, SEEK_SET) == 0) {
+        char chunk[4096];
+        ssize_t n;
+        size_t alloc = 0, used = 0;
+        while ((n = read(g_shadow_diag_cap_fd, chunk, sizeof(chunk))) > 0) {
+            fwrite(chunk, 1, (size_t)n, stderr);
+            if (out_buf) {
+                if (used + (size_t)n + 1 > alloc) {
+                    size_t na = alloc ? alloc * 2 : 4096;
+                    char* nb;
+                    while (na < used + (size_t)n + 1) na *= 2;
+                    nb = (char*)realloc(buf, na);
+                    if (!nb) {
+                        free(buf);
+                        buf = NULL;
+                        used = 0;
+                        alloc = 0;
+                    } else {
+                        buf = nb;
+                        alloc = na;
+                    }
+                }
+                if (buf) {
+                    memcpy(buf + used, chunk, (size_t)n);
+                    used += (size_t)n;
+                }
+            }
+            cap_len += (long)n;
+        }
+        if (buf) {
+            buf[used] = 0;
+            if (out_buf) *out_buf = buf;
+            if (out_len) *out_len = used;
+        }
+    }
+    close(g_shadow_diag_cap_fd);
+    g_shadow_diag_cap_fd = -1;
+    if (g_shadow_diag_tmp[0]) unlink(g_shadow_diag_tmp);
+    g_shadow_diag_tmp[0] = 0;
+    return cap_len;
+}
+
+/* Warm-cache diagnostic replay (ccache-style).  Lowering warnings are
+ * fprintf(stderr) during cold emit; bytes are persisted as emit.c.diag and
+ * replayed on hit so warm builds print the same diagnostics as cold ones. */
+static int shadow_diag_sidecar_path(const char* c_path, char* out, size_t cap) {
+    int n;
+    if (!out || cap == 0) return -1;
+    out[0] = 0;
+    if (!c_path) return -1;
+    n = snprintf(out, cap, "%s.diag", c_path);
+    if (n < 0 || (size_t)n >= cap) {
+        out[0] = 0;
+        return -1;
+    }
+    return 0;
+}
+
+static void shadow_replay_diag_sidecar(const char* c_path) {
+    char path[640];
+    FILE* f;
+    char buf[4096];
+    size_t n;
+    if (shadow_diag_sidecar_path(c_path, path, sizeof(path)) != 0) return;
+    f = fopen(path, "rb");
+    if (!f) return;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
+        fwrite(buf, 1, n, stderr);
+    fclose(f);
+}
+
+static void shadow_write_diag_sidecar(const char* c_path, const char* diag,
+                                      size_t diag_len) {
+    char path[640];
+    if (shadow_diag_sidecar_path(c_path, path, sizeof(path)) != 0) return;
+    if (!diag || diag_len == 0) {
+        unlink(path);
+        return;
+    }
+    (void)shadow_write_file(path, diag, diag_len);
 }
 
 /* True if emit.c is cached for this input (skip parse/emit).
@@ -548,11 +788,14 @@ static int shadow_emit_cache_hit(const char* in_path, const char* self_path,
 /* Host build from emit buffer or existing cached emit.c.
  * If emit_buf is NULL, require a warm emit cache hit.
  * dep_paths: transitive inputs observed on the cold path (may be NULL/0
- * when reusing a prior sidecar). */
+ * when reusing a prior sidecar).
+ * diag_buf: lowering stderr captured on cold emit (warnings); written as
+ * emit.c.diag and replayed on warm reuse. */
 static int shadow_build_host(const char* in_path, const char* bin_path,
                              const char* emit_buf, size_t emit_len,
                              const char* self_path, int no_cache,
-                             const char* const* dep_paths, int ndeps) {
+                             const char* const* dep_paths, int ndeps,
+                             const char* diag_buf, size_t diag_len) {
     uint64_t ekey, okey, prev;
     char dir[512], c_path[600], o_path[600], ekey_path[600], okey_path[600];
     char runtime_o[512];
@@ -577,6 +820,7 @@ static int shadow_build_host(const char* in_path, const char* bin_path,
         shadow_read_u64_file(ekey_path, &prev) == 0 && prev == ekey &&
         shadow_emit_deps_match(dir)) {
         reuse_emit = 1;
+        shadow_replay_diag_sidecar(c_path);
     } else {
         if (!emit_buf) {
             fprintf(stderr, "error: emit cache miss and no emit buffer\n");
@@ -590,11 +834,20 @@ static int shadow_build_host(const char* in_path, const char* bin_path,
             fprintf(stderr, "error: cannot write %s\n", c_path);
             return -1;
         }
-        (void)shadow_write_u64_file(ekey_path, ekey);
-        if (dep_paths && ndeps > 0)
-            (void)shadow_emit_deps_save(dir, dep_paths, ndeps);
-        else
-            (void)shadow_emit_deps_save(dir, NULL, 0);
+        if (cache_ok) {
+            (void)shadow_write_u64_file(ekey_path, ekey);
+            if (dep_paths && ndeps > 0)
+                (void)shadow_emit_deps_save(dir, dep_paths, ndeps);
+            else
+                (void)shadow_emit_deps_save(dir, NULL, 0);
+            shadow_write_diag_sidecar(c_path, diag_buf, diag_len);
+        } else {
+            /* --no-cache: keep emit.c for this host compile, but do not
+             * publish emit.key — a later cached run must not warm-hit a
+             * no-sidecar entry left by a forced cold build. */
+            unlink(ekey_path);
+            shadow_write_diag_sidecar(c_path, NULL, 0);
+        }
     }
 
     if (!(cache_ok && reuse_emit && shadow_file_exists(o_path) &&

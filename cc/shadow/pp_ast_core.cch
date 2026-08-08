@@ -394,7 +394,7 @@ static void scope_push(Parser* p) {
     p->scopes[p->ns++] = (Scope){0};
 }
 
-static void scope_pop(Parser* p) {
+static void __attribute__((unused)) scope_pop(Parser* p) {
     if (p->ns > 0) p->ns--;
 }
 
@@ -588,7 +588,7 @@ static void slice_to(char* dst, size_t cap, CCSlice s) {
 }
 
 /* Byte length of toks[i0 .. i1_excl) without copying (0 when empty/invalid). */
-static size_t span_text_len(Parser* p, int i0, int i1_excl) {
+static size_t __attribute__((unused)) span_text_len(Parser* p, int i0, int i1_excl) {
     int i;
     if (!p || i0 < 0 || i1_excl > p->n || i0 >= i1_excl) return 0;
     {

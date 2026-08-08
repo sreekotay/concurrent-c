@@ -744,6 +744,9 @@ static int handle_directive(Pp* pp) {
     if (!pp_raw_next(pp, &hash)) return 0;
     if (!pp_raw_peek(pp, &name)) return 1;
     if (name.kind != TK_IDENT) {
+        /* Grammar/schema `#'$'` / `#':'` at bol (indent allowed): `#` then a
+         * char-lit. Not a CPP directive — emit `#` for the grammar seam. */
+        if (name.kind == TK_CHR) return pp_emit(pp, hash);
         return pp_fail_dir(pp, hash, "expected preprocessor directive name after '#'");
     }
     pp_raw_next(pp, &name);

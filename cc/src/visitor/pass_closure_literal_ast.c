@@ -3228,7 +3228,7 @@ static char* cc__make_call_expr(const CCClosureDesc* d) {
 }
 
 /* milestone 4b: marker offsets (closure-head positions derived from
- * /*CC_CLO:N*\/ anchors) passed down from the public wrapper.  When
+ * CC_CLO:N comment anchors) passed down from the public wrapper.  When
  * `marker_n` equals the in-TU closure-node count, each closure's start
  * offset is taken verbatim from `marker_offs[k]` (exact, comment-safe)
  * rather than the (line,col)+arrow-scan heuristic + recovery fallback. */
@@ -3245,8 +3245,8 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
                                             char** out_defs,
                                             size_t* out_defs_len);
 
-/* Public entry point.  Scan the codegen buffer for the /*CC_CLO:N*\/
- * closure-ID markers — injected at parse-build time for user closures and by
+/* Public entry point.  Scan the codegen buffer for CC_CLO:N closure-ID
+ * comment markers — injected at parse-build time for user closures and by
  * every closure SYNTHESIZER (autoblock) for generated ones — record each
  * closure-head offset (the byte just past its marker), then neutralize the
  * marker comments to spaces in a private working copy.  Spaces preserve every
@@ -3523,7 +3523,7 @@ static int cc__rewrite_closure_literals_with_nodes_impl(const CCASTRoot* root,
             fprintf(stderr,
                     "cc: internal error: closure marker/node count mismatch "
                     "(markers=%d closures=%d) in %s — a closure producer did "
-                    "not emit its /*CC_CLO:N*/ marker, or #if-skip pruning "
+                    "not emit its CC_CLO:N marker, or #if-skip pruning "
                     "miscounted\n",
                     marker_n, idx_n, path);
         }

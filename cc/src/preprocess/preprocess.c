@@ -53,7 +53,7 @@ void cc_ufcs_reset_dest_trap_dedup(void) {
 }
 
 /* Test-only: cache CC_UFCS_BASELINE once (additive harness). */
-static int cc__ufcs_baseline_cached(void) {
+static int __attribute__((unused)) cc__ufcs_baseline_cached(void) {
     static int checked;
     static int on;
     if (!checked) {
@@ -4522,7 +4522,8 @@ static void cc__ufcs_scope_idx_build_ex(const char* src, size_t n,
     g_ufcs_scope_idx.ready = 1;
 }
 
-static void cc__ufcs_scope_idx_build(const char* src, size_t n) {
+static void __attribute__((unused)) cc__ufcs_scope_idx_build(const char* src,
+                                                             size_t n) {
     cc__ufcs_scope_idx_build_ex(src, n, NULL, NULL, 0, NULL, NULL, 0);
 }
 
@@ -6193,8 +6194,6 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
              * (`ln.accept()` with no explicit `cc_listener_accept` in the TU)
              * unlowered through canonicalize's pre-splice `!>` expansion,
              * so binders fell through to the ambient `CCError` _Generic arm. */
-            int is_cc_std = (recv_type_base[0] == 'C' && recv_type_base[1] == 'C' &&
-                             recv_type_base[2] >= 'A' && recv_type_base[2] <= 'Z');
             /* Types with named `@as` embeds: leave member calls for the AST
              * UFCS pass (as-retry / flat `.destroy()`). Inventing a CC*
              * snake_case twin here invents missing callees like
@@ -7615,7 +7614,7 @@ typedef struct { char name[288]; unsigned quals; int line; } CCResultQualSeen;
 static CCResultQualSeen* g_result_quals = NULL;
 static size_t g_result_qual_count = 0, g_result_qual_cap = 0;
 
-static void cc__result_quals_reset(void) {
+static void __attribute__((unused)) cc__result_quals_reset(void) {
     free(g_result_quals);
     g_result_quals = NULL;
     g_result_qual_count = g_result_qual_cap = 0;
@@ -14565,7 +14564,7 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                  * Also splice nested locals that still contain method-call
                  * UFCS even when they are not themselves impl-grade (the
                  * redis_db → redis_mem shape).  Interface-lowering those to
-                 * out/include/*.h leaves nested-only methods (e.g.
+                 * out/include star-dot-h leaves nested-only methods (e.g.
                  * ArrayMap.live_bytes) dependent on a later UFCS splice /
                  * writeback that can miss or half-rewrite on some hosts. */
                 if (realpath(child_path, child_abs)) {
@@ -18324,7 +18323,7 @@ static void cc__ct_append_field_body(char** out, size_t* ol, size_t* oc,
 }
 
 /* Try to expand a `@comptime for` whose `@comptime` keyword is at *io_i.
- * Returns 1 = expanded (out appended, *io_i/*io_last_emit advanced past the
+ * Returns 1 = expanded (out appended, *io_i and *io_last_emit advanced past the
  * construct), 0 = not a `@comptime for` here (caller handles `@comptime if`),
  * -1 = hard error. */
 static int cc__try_expand_comptime_for(const char* src, size_t n, const char* input_path,

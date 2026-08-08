@@ -241,8 +241,19 @@ lower-headers: $(LOWER_HEADERS_STAMP)
 # makes the whole graph acyclic and truly clean-buildable.  (Previously the
 # stamp needed the FULL tool while several of its objects latently needed
 # the stamp's output; clean trees only built by ordering luck.)
-$(LOWER_HEADERS_STAMP): $(LOWER_HEADERS1_BINARY) $(LOWER_HEADERS_INPUTS) $(wildcard runtime/*.c runtime/*.h)
+# Header stamp: real lower via stage-1. Cold path (no stage-1 binary yet —
+# fresh clone / smoke_bootstrap_fresh) seeds a crude host-C out/include so
+# stage-1 can compile, then overwrites with a proper lower. Warm path reuses
+# an existing stage-1 binary (survives `make clean`) without relinking it.
+$(LOWER_HEADERS_STAMP): $(LOWER_HEADERS_INPUTS) $(wildcard runtime/*.c runtime/*.h)
 	@mkdir -p $(OUT_INCLUDE) $(OUT_RUNTIME)
+	@if [ ! -x "$(LOWER_HEADERS1_BINARY)" ]; then \
+		echo "seed headers for stage-1 lower_headers..."; \
+		bash ../scripts/seed_headers_for_stage1.sh \
+			"$(abspath include)" "$(abspath $(OUT_INCLUDE))" \
+			"$(abspath runtime)" "$(abspath $(OUT_RUNTIME))"; \
+		$(MAKE) $(LOWER_HEADERS1_BINARY); \
+	fi
 	@$(LOWER_HEADERS1_BINARY) include $(OUT_INCLUDE) --rewrite-includes runtime $(OUT_RUNTIME)
 	@touch $@
 
@@ -372,10 +383,11 @@ $(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_CCS_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_COM
 	@mkdir -p $(dir $@) $(OBJDIR)
 	@test -n "$(SHADOW_LOWER_SEED_BIN)" -a -x "$(SHADOW_LOWER_SEED_BIN)" || \
 		(echo "SHADOW_LOWER_SOURCE=ccs needs an existing shadow_lower; run: make SHADOW_LOWER_SOURCE=bootstrap"; exit 1)
-	# Host-cc of emit.c prefers out/include/cc/shadow/*.h over .cch. Sync the
-	# lit-coerce face from source before compile so .cch edits are not shadowed
-	# by a stale last-good copy (scripts/patch_ufcs_slice_lit_face.py).
+	# Host-cc of emit.c prefers out/include/cc/shadow/*.h over .cch. Sync
+	# cache/build helpers + lit-coerce face so .cch edits are not shadowed by
+	# a stale last-good copy (scripts/patch_ufcs_slice_lit_face.py).
 	@mkdir -p ../out/include/cc/shadow
+	@cp -f $(SHADOW_BUILD_CCH) ../out/include/cc/shadow/shadow_build.h
 	@if [ -f ../out/include/cc/shadow/pp_emit_ufcs.h ]; then \
 		python3 ../scripts/patch_ufcs_slice_lit_face.py; \
 	fi
@@ -393,7 +405,7 @@ $(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_CCS_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_COM
 		$(abspath $(SHADOW_TCC_OBJ)) \
 		$(abspath $(OBJDIR)/runtime/concurrent_c.o) \
 		$(abspath $(SHADOW_COMPTIME_LIB)) \
-		-L$(TCC_LIB) -ltcc $(LDFLAGS) $(LDLIBS)
+		$(LDFLAGS) $(LDLIBS)
 	@mkdir -p $(dir $(SHADOW_LOWER_SCRIPT))
 	@cp $@ $(SHADOW_LOWER_SCRIPT)
 	@chmod +x $(SHADOW_LOWER_SCRIPT)
@@ -447,6 +459,14 @@ $(OBJDIR)/runtime/concurrent_c.o: $(LOWER_HEADERS_STAMP)
 	$(CC) $(CFLAGS) $(RUNTIME_PIC) -MMD -MP -MF $(RUNTIME_CORE_OBJ:.o=.d) -c $(OUT_RUNTIME)/concurrent_c.c -o $(RUNTIME_CORE_OBJ)
 	$(CC) $(CFLAGS) $(RUNTIME_PIC) -MMD -MP -MF $(RUNTIME_FLOAT_OBJ:.o=.d) -c runtime/float_format_zmij.c -o $(RUNTIME_FLOAT_OBJ)
 	$(CC) -nostdlib -r -o $@ $(RUNTIME_CORE_OBJ) $(RUNTIME_FLOAT_OBJ)
+
+# Source still spells `#include <ccc/….cch>`; host-cc the rewrite under out/runtime.
+$(OBJDIR)/runtime/arena_state.o: $(LOWER_HEADERS_STAMP) $(OUT_RUNTIME)/arena_state.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -MMD -MP -MF $(@:.o=.d) -c $(OUT_RUNTIME)/arena_state.c -o $@
+
+# Host objects that `#include <ccc/*.h>` need the stamp first.
+$(OBJS): $(LOWER_HEADERS_STAMP)
 
 $(OBJDIR)/%.o: %.c | $(TCC_PATCH_STAMP)
 	@mkdir -p $(dir $@)

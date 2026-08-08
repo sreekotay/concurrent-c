@@ -424,7 +424,10 @@ bool cc_cancelled(void) {
  * Used by channel waits to detect cancellation. */
 uint32_t cc_nursery_cancel_gen(const CCNursery* n) {
     if (!n) return 0;
-    return atomic_load_explicit(&n->cancel_wake.value, memory_order_acquire);
+    /* Cast away const: TCC treats atomic_load through a const object as
+     * assignment to a read-only location. */
+    return atomic_load_explicit(&((CCNursery*)n)->cancel_wake.value,
+                                memory_order_acquire);
 }
 
 /* Wait on the nursery's cancel primitive with timeout (ms).

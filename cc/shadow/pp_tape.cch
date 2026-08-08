@@ -40,7 +40,9 @@ static int tok_eq(Token t, TokKind k, const char* lit) {
     return t.kind == k && t.spell.len == n && memcmp(t.spell.ptr, lit, n) == 0;
 }
 
-static int tok_is_ident(Token t, const char* lit) { return tok_eq(t, TK_IDENT, lit); }
+static int __attribute__((unused)) tok_is_ident(Token t, const char* lit) {
+    return tok_eq(t, TK_IDENT, lit);
+}
 
 /* ---- stage-1 file tape cache -------------------------------------------- */
 
@@ -179,8 +181,17 @@ static FileTape* tape_by_id(TapeCache* c, int file_id) {
     return NULL;
 }
 
+/* Count of error diagnostics printed this process (reset per TU).  A cold
+ * emit that printed errors must not be cached — warm would skip the diag. */
+static int g_shadow_diag_errors = 0;
+
+static void shadow_diag_errors_reset(void) { g_shadow_diag_errors = 0; }
+
+static int shadow_diag_errors(void) { return g_shadow_diag_errors; }
+
 static void diag_at(TapeCache* cache, Token t, const char* msg) {
     FileTape* ft = tape_by_id(cache, t.file_id);
+    g_shadow_diag_errors++;
     if (!ft || !ft->bytes) {
         fprintf(stderr, "error: %s\n", msg);
         return;
@@ -357,7 +368,6 @@ static FileTape* tape_cache_load_bytes(TapeCache* c, const char* path,
 static FileTape* tape_cache_load(TapeCache* c, const char* path, CCArena* arena) {
     char* bytes = NULL;
     size_t len = 0;
-    FileTape* ft;
     if (!read_file(path, &bytes, &len)) return NULL;
     return tape_cache_load_bytes(c, path, bytes, len, arena);
 }

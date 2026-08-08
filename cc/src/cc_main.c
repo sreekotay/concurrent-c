@@ -820,6 +820,7 @@ static void usage_build(const char* prog) {
     fprintf(stderr, "  export-make Generate Makefile fragment for legacy build integration\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Build flavors:\n");
+    fprintf(stderr, "  (default)       -O1 (asserts kept)\n");
     fprintf(stderr, "  -g, --debug     Add -O0 -g (and disable release dead-stripping)\n");
     fprintf(stderr, "  -O, --release   Add -O2 -DNDEBUG and enable dead-stripping (smaller binaries)\n");
     fprintf(stderr, "\n");
@@ -3496,7 +3497,7 @@ static void cc__write_file_text(const char* path, const char* text) {
 /* The flavor the driver injects when neither -O nor -g is given.  Shared
  * with cc__prebuilt_runtime_applies: a cc_flags string equal to exactly
  * this is the driver talking, not the caller. */
-#define CC_DEFAULT_FLAVOR_CC "-O2"
+#define CC_DEFAULT_FLAVOR_CC "-O1"
 
 /* Whether the prebuilt runtime object can answer this request.
  *
@@ -4043,11 +4044,10 @@ static int run_build_mode(int argc, char** argv) {
     if (opt_release && opt_debug) opt_release = 0;
 
     // Inject flavor defaults early (before we fold cc_flags + -D defines).
-    // - default: optimized with asserts kept — an unflagged build must not
-    //   be the slowest tier (the backend cc alone would give -O0 with no
-    //   debug info: worst of both worlds)
-    // - release: adds NDEBUG on top
-    // - debug:   easy debugging
+    // - default: -O1 with asserts kept — faster host compiles than -O2,
+    //   still not the unflagged backend -O0 (no debug info) trap
+    // - release: -O2 -DNDEBUG + dead-strip
+    // - debug:   -O0 -g
     const char* flavor_cc = CC_DEFAULT_FLAVOR_CC;
     if (opt_debug) flavor_cc = "-O0 -g";
     else if (opt_release) flavor_cc = "-O2 -DNDEBUG";
@@ -6021,9 +6021,9 @@ int main(int argc, char **argv) {
     }
 
     // Flavor defaults (non-build mode): apply before any user-provided
-    // --cc-flags so users can override.  Unflagged builds get -O2 with
-    // asserts kept — the backend cc alone would give -O0 with no debug
-    // info, the slowest tier for no benefit.
+    // --cc-flags so users can override.  Unflagged builds get -O1 with
+    // asserts kept — faster host compiles than -O2; -O/--release still
+    // selects -O2 -DNDEBUG.
     const char* flavor_cc = CC_DEFAULT_FLAVOR_CC;
     if (opt_debug) flavor_cc = "-O0 -g";
     else if (opt_release) flavor_cc = "-O2 -DNDEBUG";

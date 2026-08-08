@@ -45,7 +45,7 @@ static const char* cc__core_builtin_result_types[] = {
  * reference that hits a predeclared name.
  *
  * Keep in sync with the `CC_DECL_RESULT_SPEC(...)` invocations in the
- * ccc/std/*.cch headers. */
+ * ccc/std star-dot-cch headers. */
 static const CCStdlibPredeclaredResult cc__stdlib_predeclared_result_specs[] = {
     { "CCResult_CCSlice_CCIoError",          "CCSlice",  "CCIoError",         "CCSlice",        "CCIoError" },
     { "CCResult_size_t_CCIoError",           "size_t",   "CCIoError",         "size_t",         "CCIoError" },
