@@ -4692,11 +4692,14 @@ static int shadow_emit_one_destroy(AstNode* st, CEmit* out, ShadowCtx* ctx,
     const char* body_ind = indent;
     /* Already inside cleanup — don't re-enter via soft returns. */
     int saved_goto = ctx ? ctx->goto_cleanup : 0;
+    char syn_line[192];
     if (ctx) ctx->goto_cleanup = 0;
     int ok = 1;
     if (hw_idx >= 0) {
-        if (!cemit_fmt(out, "%sif (__cc_defer_hw > %d) {\n", outer, hw_idx))
-            return 0;
+        /* Pin gate to the @destroy/@defer site (not the return's `#line`). */
+        snprintf(syn_line, sizeof(syn_line), "%sif (__cc_defer_hw > %d) {\n",
+                 outer, hw_idx);
+        if (!shadow_emit_pinned_block(out, ctx, st, "", syn_line)) return 0;
         shadow_indent_nest(gate_ind, sizeof(gate_ind), outer, 1);
         body_ind = gate_ind;
     }
@@ -4704,11 +4707,11 @@ static int shadow_emit_one_destroy(AstNode* st, CEmit* out, ShadowCtx* ctx,
     /* Registered-type hooks first (nursery/chan/arena), then arena-pointer
      * release beachhead — order matters for CCNursery* … @destroy. */
     if (is_nur) {
-        if (!cemit_fmt(out,
-                "%s{\n"
-                "%scc_nursery_wait(%s);\n",
-                body_ind, nested, name))
-            ok = 0;
+        snprintf(syn_line, sizeof(syn_line), "%s{\n", body_ind);
+        if (!shadow_emit_pinned_block(out, ctx, st, "", syn_line)) ok = 0;
+        snprintf(syn_line, sizeof(syn_line), "%scc_nursery_wait(%s);\n", nested,
+                 name);
+        if (ok && !shadow_emit_pinned_block(out, ctx, st, "", syn_line)) ok = 0;
         else if (!bare) {
             for (int k = 0; k < ndbody && ok; k++) {
                 if (!shadow_dbody_is_stmt(dbody[k])) continue;
@@ -4718,11 +4721,11 @@ static int shadow_emit_one_destroy(AstNode* st, CEmit* out, ShadowCtx* ctx,
                 if (!shadow_emit_stmt_ctx(body[k], out, ctx, nested, 0)) ok = 0;
             }
         }
-        if (ok && !cemit_fmt(out,
-                "%scc_nursery_free(%s);\n"
-                "%s}\n",
-                nested, name, body_ind))
-            ok = 0;
+        snprintf(syn_line, sizeof(syn_line), "%scc_nursery_free(%s);\n", nested,
+                 name);
+        if (ok && !shadow_emit_pinned_block(out, ctx, st, "", syn_line)) ok = 0;
+        snprintf(syn_line, sizeof(syn_line), "%s}\n", body_ind);
+        if (ok && !shadow_emit_pinned_block(out, ctx, st, "", syn_line)) ok = 0;
     } else if (is_chan) {
         if (!bare && (ndbody || nbody)) {
             if (!cemit_fmt(out, "%s{\n", body_ind)) ok = 0;
@@ -4863,7 +4866,8 @@ static int shadow_emit_one_destroy(AstNode* st, CEmit* out, ShadowCtx* ctx,
         }
     }
     if (ok && hw_idx >= 0) {
-        if (!cemit_fmt(out, "%s}\n", outer)) ok = 0;
+        snprintf(syn_line, sizeof(syn_line), "%s}\n", outer);
+        if (!shadow_emit_pinned_block(out, ctx, st, "", syn_line)) ok = 0;
     }
     if (ctx) ctx->goto_cleanup = saved_goto;
     return ok;
@@ -4917,15 +4921,20 @@ static int shadow_emit_hw_bump(CEmit* out, ShadowCtx* ctx, AstNode* st,
 
 static int shadow_emit_soft_return(CEmit* out, ShadowCtx* ctx,
                                   const char* indent) {
+    char line[160];
     const char* rty = (ctx && ctx->soft_ret_ty && ctx->soft_ret_ty[0])
                           ? ctx->soft_ret_ty
                           : "int";
-    if (strcmp(rty, "void") == 0)
-        return cemit_fmt(out, "%sreturn;\n", indent);
-    return cemit_fmt(out,
-            "%sif (__cc_ret_set) return __cc_retval;\n"
-            "%sreturn __cc_retval;\n",
-            indent, indent);
+    if (!indent) indent = "    ";
+    if (strcmp(rty, "void") == 0) {
+        snprintf(line, sizeof(line), "%sreturn;\n", indent);
+        return shadow_emit_pinned_block(out, ctx, NULL, "", line);
+    }
+    snprintf(line, sizeof(line), "%sif (__cc_ret_set) return __cc_retval;\n",
+             indent);
+    if (!shadow_emit_pinned_block(out, ctx, NULL, "", line)) return 0;
+    snprintf(line, sizeof(line), "%sreturn __cc_retval;\n", indent);
+    return shadow_emit_pinned_block(out, ctx, NULL, "", line);
 }
 
 /* Soft-return: capture return value first, then restore open call-local
@@ -4963,6 +4972,22 @@ static int shadow_emit_soft_goto_cleanup(CEmit* out, ShadowCtx* ctx,
             return cemit_fmt(out, "%sreturn;\n", indent);
         return cemit_fmt(out, "%sreturn %s;\n", indent, set_retval_expr);
     }
+    /* Fn-cleanup with no nested scratch/unwind: brace + retval / ret_set /
+     * goto on ONE physical line under the return's `#line`. A multi-line
+     * expansion without per-line ledger entries drifts past source EOF. */
+    if (fn_cleanup && !need_scratch && !need_unwind) {
+        if (is_void || !have_val) {
+            if (!cemit_fmt(out,
+                    "%s{ %s__cc_ret_set = 1; goto __cc_cleanup; }\n",
+                    indent, extra))
+                return 0;
+        } else if (!cemit_fmt(out,
+                "%s{ __cc_retval = %s; %s__cc_ret_set = 1; goto __cc_cleanup; }\n",
+                indent, set_retval_expr, extra)) {
+            return 0;
+        }
+        return 1;
+    }
     braced = need_unwind || fn_cleanup || need_scratch;
     if (braced) {
         if (!cemit_fmt(out, "%s{\n", indent)) return 0;
@@ -4978,9 +5003,8 @@ static int shadow_emit_soft_goto_cleanup(CEmit* out, ShadowCtx* ctx,
                 return 0;
         } else if (!cemit_fmt(out,
                 "%s__cc_retval = %s;\n"
-                "%s__cc_ret_set = 1;\n"
-                "%s%s",
-                body_ind, set_retval_expr, body_ind, body_ind, extra)) {
+                "%s%s__cc_ret_set = 1;\n",
+                body_ind, set_retval_expr, body_ind, extra)) {
             return 0;
         }
     } else if (have_val && !is_void && (need_unwind || need_scratch)) {
@@ -5017,10 +5041,13 @@ static int shadow_emit_soft_goto_cleanup(CEmit* out, ShadowCtx* ctx,
 static int shadow_emit_destroy_cleanup(CEmit* out, ShadowCtx* ctx,
                                       AstNode** destroys, int ndestroys,
                                       const char* indent) {
-    if (!cemit_str(out, "__cc_cleanup:\n")) return 0;
+    /* Pin label to the return site (real user line). */
+    if (!shadow_emit_pinned_block(out, ctx, NULL, "", "__cc_cleanup:\n"))
+        return 0;
     for (int d = ndestroys - 1; d >= 0; d--) {
         if (!shadow_emit_one_destroy(destroys[d], out, ctx, indent)) return 0;
     }
+    /* Soft return: re-pin each physical line to the return site. */
     return shadow_emit_soft_return(out, ctx, indent);
 }
 

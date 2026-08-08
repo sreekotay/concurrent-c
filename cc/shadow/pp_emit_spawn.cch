@@ -667,7 +667,20 @@ static int shadow_emit_closure_formals(AstNode* cl, CEmit* out) {
     return 1;
 }
 
+static int shadow_emit_closure_def_raw(AstNode* cl, CEmit* out,
+                                       TapeCache* cache);
+
 static int shadow_emit_closure_def(AstNode* cl, CEmit* out, TapeCache* cache) {
+    CEmit syn = {0};
+    ShadowCtx pin = { .cache = cache, .site = cl };
+    int ok = shadow_emit_closure_def_raw(cl, &syn, cache);
+    if (ok && syn.buf && syn.buf[0])
+        ok = shadow_emit_pinned_block(out, &pin, cl, "", syn.buf);
+    free(syn.buf);
+    return ok;
+}
+
+static int shadow_emit_closure_def_raw(AstNode* cl, CEmit* out, TapeCache* cache) {
     const char* id = cl->d[0] ? cl->d : "1";
     const char* caps = cl->e;
     const char* ccty = shadow_closure_cc_ty(cl);
@@ -935,6 +948,7 @@ static int shadow_emit_scope_life(const ShadowDeferScope* sc, CEmit* out,
                                   int always_only, int before_tok_off) {
     int i;
     char gate[80];
+    char line[96];
     if (!sc || sc->nlife <= 0) return 1;
     if (!indent) indent = "    ";
     for (i = sc->nlife - 1; i >= 0; i--) {
@@ -945,17 +959,20 @@ static int shadow_emit_scope_life(const ShadowDeferScope* sc, CEmit* out,
             n->tok_off >= (size_t)before_tok_off)
             continue;
         if (is_def && always_only && n->c[0]) continue;
-        if (!cemit_fmt(out, "%sif (__cc_shw%d > %d) {\n", indent, sc->shw_id,
-                       i))
-            return 0;
+        /* Pin gate + body to the @destroy/@defer declaration site. */
+        snprintf(line, sizeof(line), "%sif (__cc_shw%d > %d) {\n", indent,
+                 sc->shw_id, i);
+        if (!shadow_emit_pinned_block(out, ctx, n, "", line)) return 0;
         shadow_indent_nest(gate, sizeof(gate), indent, 1);
+        if (!shadow_pin_line(out, ctx, n, gate)) return 0;
         if (is_def) {
             if (!shadow_emit_one_defer(n, out, ctx, gate, always_only))
                 return 0;
         } else {
             if (!shadow_emit_one_destroy(n, out, ctx, gate)) return 0;
         }
-        if (!cemit_fmt(out, "%s}\n", indent)) return 0;
+        snprintf(line, sizeof(line), "%s}\n", indent);
+        if (!shadow_emit_pinned_block(out, ctx, n, "", line)) return 0;
     }
     return 1;
 }
@@ -1180,11 +1197,16 @@ static int shadow_emit_compound_body(AstNode** body, int nbody, CEmit* out,
 
 
 static int shadow_emit_defer_epilogue(CEmit* out, ShadowCtx* ctx) {
+    AstNode* ret_site;
     if (!ctx || !ctx->ndefers) return 1;
     const char* ind = ctx->body_indent ? ctx->body_indent : "    ";
     char i1[80];
     shadow_indent_nest(i1, sizeof(i1), ind, 1);
-    if (!cemit_str(out, "__cc_cleanup:\n")) return 0;
+    /* Preserve the return site â defer bodies overwrite ctx->site. */
+    ret_site = ctx->site;
+    /* Cleanup label + soft-return pin to the return, not the last @defer. */
+    if (!shadow_emit_pinned_block(out, ctx, ret_site, "", "__cc_cleanup:\n"))
+        return 0;
     /* Interleave @destroy and @defer in reverse declaration order (tok_off)
      * so later-declared resources are released before earlier ones. */
     {
@@ -1207,9 +1229,9 @@ static int shadow_emit_defer_epilogue(CEmit* out, ShadowCtx* ctx) {
             }
         }
     }
+    ctx->site = ret_site;
     return shadow_emit_soft_return(out, ctx, ind);
 }
-
 
 static int shadow_collect_spawns(AstNode* st, AstNode** spawns, int* nspawns,
                                 int cap) {

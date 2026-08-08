@@ -212,7 +212,7 @@ static void db_release_value(RedisDb* db, CCString* value) {
     if (value->heap_data()) {
         CCStringHeapHeader* header = cc__string_heap_header(value);
         db_mem_stats_note_value_release(value->cap());
-        /* Prep path (db_prep_value): malloc-backed, header->arena == NULL. */
+        /* Malloc-backed heap string (header->arena == NULL). */
         if (header && !header->arena) {
             free(header);
             *value = (CCString){0};
@@ -220,58 +220,6 @@ static void db_release_value(RedisDb* db, CCString* value) {
         }
     }
     value->release(&db->value_arena);
-}
-
-/* Outside-lock durable value for redis_idiomatic's SET path.  Short values
- * stay inline; larger payloads use malloc so prep does not touch shared db
- * arenas.  Keys are not prepped here — install borrow-looks up, then clones
- * into key_arena only on miss (avoids malloc+discard on overwrite). */
-static CCString !>(CCError) db_prep_value(char[:] src) {
-    size_t cap;
-    if (src.len > (size_t)UINT32_MAX) {
-        return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db prep value too long"));
-    }
-    if (src.len + 1 <= CC_STRING_INLINE_CAP) {
-        CCString s = cc_string_new();
-        if (src.len) {
-            if (!src.ptr) {
-                return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db prep value without ptr"));
-            }
-            memcpy(s.inline_buf, src.ptr, src.len);
-        }
-        s.inline_buf[src.len] = '\0';
-        s.len = (uint32_t)src.len;
-        return cc_ok(s);
-    }
-    cap = db_string_cap_8x(src.len);
-    if (cap == 0) {
-        return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db prep value cap overflow"));
-    }
-    {
-        size_t total = sizeof(CCStringHeapHeader) + cap;
-        CCStringHeapHeader* header =
-            (CCStringHeapHeader*)malloc(total);
-        CCString s;
-        if (!header) {
-            return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db prep value alloc failed"));
-        }
-        header->arena = NULL;
-        header->provenance = CC_SLICE_ID_UNTRACKED;
-        s = (CCString){0};
-        s.data = (char*)(header + 1);
-        s.cap = (uint32_t)cap;
-        if (src.len) {
-            if (!src.ptr) {
-                free(header);
-                return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "db prep value without ptr"));
-            }
-            memcpy(s.data, src.ptr, src.len);
-        }
-        s.data[src.len] = '\0';
-        s.len = (uint32_t)src.len;
-        db_mem_stats_note_value_alloc(s.cap());
-        return cc_ok(s);
-    }
 }
 
 /* Replace path for an existing STR-arm payload.  In-place overwrite when
@@ -549,66 +497,6 @@ static RedisReply !>(CCError) db_set(RedisDb* db, char[:] key, char[:] value, in
     CCString owned_str =
         db_clone_value_into_arena(&db->value_arena, value, "entry value clone failed") !>;
     db_insert_new_entry(db, key, (RedisValue){ .str = owned_str }, expires_at_ms) !>;
-    return cc_ok(reply_simple("OK"));
-}
-
-/* SET under a table hold: `owned_value` is already durable (db_prep_value,
- * called outside the hold) and `key` is only a borrow for the lookup.  Hit:
- * swing the value.  Miss: clone the key into key_arena, then insert.  Plain
- * SET skips expires entirely while the TTL map is empty.
- *
- * Every error path before the value is installed releases owned_value; once
- * the entry is live it belongs to the map, so a later expires failure must
- * not (hence the explicit checks rather than an error handler). */
-static RedisReply !>(CCError) db_set_install(RedisDb* db,
-                                             char[:] key,
-                                             CCString owned_value,
-                                             int64_t expires_at_ms) {
-    if (!db || !db->shards) {
-        db_release_value(db, &owned_value);
-        return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db lookup failed"));
-    }
-
-    RedisEntry* cell = db_find_entry(db, key);
-    if (cell) {
-        RedisDbShard* sh = db_shard_for_key(db, key);
-        RedisValue* val = &cell->val;
-        if (val->kind == .str) {
-            CCString doomed = val->str;
-            db_release_value(db, &doomed);
-        }
-        *val = (RedisValue){ .str = owned_value };
-        if (expires_at_ms != 0 || (sh && sh->expires && sh->expires.len() > 0)) {
-            void !>(CCError) exp = db_expires_set(db, key, expires_at_ms);
-            if (exp.is_err()) return cc_err(exp.error());
-        }
-        return cc_ok(reply_simple("OK"));
-    }
-
-    {
-        CCSlicePacked !>(CCError) kr = db_clone_key_packed(db, key);
-        if (kr.is_err()) {
-            db_release_value(db, &owned_value);
-            return cc_err(kr.error());
-        }
-        CCSlicePacked owned_key = kr.value();
-        RedisEntry entry;
-        entry.val = (RedisValue){ .str = owned_value };
-        void !>(CCError) inserted = db_insert_value(db, owned_key, entry);
-        if (inserted.is_err()) {
-            db_release_value(db, &owned_value);
-            db_release_key_packed(db, &owned_key);
-            return cc_err(inserted.error());
-        }
-        if (expires_at_ms != 0) {
-            RedisDbShard* sh = db_shard_at(db, db_shard_index_for_packed(db, owned_key));
-            if (!sh || !sh->expires || sh->expires.insert(owned_key, expires_at_ms) != 0) {
-                /* Entry is live without TTL — same as a plain SET that later
-                 * fails EXPIRE; surface OOM rather than rolling back. */
-                return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "db expires insert failed"));
-            }
-        }
-    }
     return cc_ok(reply_simple("OK"));
 }
 

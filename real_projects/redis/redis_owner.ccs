@@ -26,8 +26,7 @@
  *
  * Build: `make redis_owner`.  Compare vs default: `./bench_lock_cmp.sh`
  * (labels: owner vs idiomatic).  Default server is `redis_idiomatic.ccs`
- * (sketch I/O + full RedisDb, table-wide CCExclusive).  @async twin:
- * `redis_idiomatic_spawn_async.ccs`.
+ * (sketch I/O + full RedisDb, shard holds).
  *
  * Memory: always emits parseable `mem_gap` at phase stamps (post-preload,
  * owner-ready, CC.MEMLOG [phase]).  Gap = process footprint − (map+key+value
@@ -470,7 +469,7 @@ static char[:] !>(CCError) reply_wire_encode_into_arena(const RespGReply* wire,
     if (w != need) {
         return cc_err(CC_ERROR(CC_ERR_INTERNAL, "reply encode: write size != measure"));
     }
-    out.len = w;
+    out.truncate(w) !>;
     return cc_ok(out);
 }
 
@@ -567,7 +566,9 @@ static RedisRequest* redis_request_slot_commit(RedisRequestSlot* slot) {
     return req;
 }
 
-static RedisRequestSlot !>(CCError) redis_conn_request_slot(RedisConn* conn) {
+/* Out-param form avoids Result Ok = RedisRequest* / RedisRequestSlot, which
+ * Result-hoists the struct before RedisConn's forward decl is emitted. */
+static void !>(CCError) redis_conn_request_slot(RedisConn* conn, RedisRequest** out) {
     /* The pool slot IS a RedisRequest; req->arena wraps the trailing
      * req->argv_buf for argv clones (heap-spills on overflow). */
     RedisRequest* req = (RedisRequest*)cc_arena_pool_alloc(&conn->req_pool);
@@ -586,7 +587,8 @@ static RedisRequestSlot !>(CCError) redis_conn_request_slot(RedisConn* conn) {
         cc_arena_pool_free(&conn->req_pool, req);
         return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "request arena init failed"));
     }
-    return cc_ok((RedisRequestSlot){ .conn = conn, .req = req });
+    if (out) *out = req;
+    return cc_ok();
 }
 
 /* Wire argv slots = schema items cap (exported as RespGCmd_args_cap). */
@@ -616,7 +618,9 @@ static bool !>(CCError) rr_req_iter_next(ReqIter* it, RedisRequest** out) {
     size_t req_argc = 0;
     decode_request_shape(args, argc, &kind, &arg_start, &req_argc) !>(e) { return cc_err(e); };
 
-    RedisRequestSlot slot = redis_conn_request_slot(conn) !>;
+    RedisRequest* pooled = NULL;
+    redis_conn_request_slot(conn, &pooled) !>;
+    RedisRequestSlot slot = { .conn = conn, .req = pooled };
     @defer redis_request_slot_release(&slot);
     RedisRequest* req = slot.req;
 
@@ -787,10 +791,7 @@ static bool write_all(CCSocket* sock, char[:] data) {
 
 static bool redis_conn_flush_out(RedisConn* conn) {
     if (!conn || conn->out_len == 0) return true;
-    char[:] data = {
-        .ptr = conn->out_buf,
-        .len = conn->out_len,
-    };
+    char[:] data = cc_slice_from_buffer(conn->out_buf, conn->out_len);
     conn->out_len = 0;
     return write_all(conn->sock, data);
 }
@@ -947,6 +948,23 @@ static inline void reply_arena_reset(RedisConn* conn) {
     cc_arena_reset(&conn->reply_arena);
 }
 
+/* Explicit builder: sugar closures that capture @async frame locals lower
+ * pointer levels wrong (`RedisRequest*` → `RedisRequest**`). */
+typedef struct OwnerReplyEnv {
+    RedisDb* db;
+    RedisRequest* req;
+} OwnerReplyEnv;
+
+static void* owner_reply_entry(void* env, intptr_t slot_i, intptr_t arena_i) {
+    OwnerReplyEnv* e = (OwnerReplyEnv*)env;
+    RedisReply* slot = (RedisReply*)slot_i;
+    CCArena* arena = (CCArena*)arena_i;
+    RedisReply !>(CCError) built = execute_request(e->db, e->req, arena);
+    if (built.is_err()) *slot = err_reply(built.error());
+    else *slot = built.value();
+    return NULL;
+}
+
 /* Owner loop: drain requests, execute, reply.  `db` is stack-local so
  * it can't outlive the owner and nobody else can take its address. */
 @async int owner_loop(ReqRx req_rx) {
@@ -1000,17 +1018,11 @@ static inline void reply_arena_reset(RedisConn* conn) {
             return 0;
         }
 
-        /* Reserve-then-write.  [dbp = &db]: value-capture pointer (not [&db]). */
+        /* Reserve-then-write (explicit CCClosure2 — see owner_reply_entry). */
+        OwnerReplyEnv build_env = { .db = &db, .req = req };
+        CCClosure2 builder = cc_closure2_make(owner_reply_entry, &build_env, NULL);
         bool !>(CCIoError) queued =
-            conn->reply_tx.try_send_into(
-                (slot, arena) => [dbp = &db, req] {
-                    RedisReply !>(CCError) built =
-                        execute_request(dbp, req, arena);
-                    if (built.is_err()) *slot = err_reply(built.error());
-                    else *slot = built.value();
-                    return NULL;
-                },
-                &conn->reply_arena);
+            cc_channel_try_send_into(conn->reply_tx, builder, &conn->reply_arena);
         if (cc_is_err(queued)) {
             cc_channel_close(conn->reply_tx, queued.error());
             continue;
@@ -1026,11 +1038,13 @@ static inline void reply_arena_reset(RedisConn* conn) {
 }
 
 /* Direct boundaries from handle_client.  Channel/socket waits are fiber-aware:
- * these helpers may park the current fiber but do not block the OS worker. */
-@noblock static RedisPipelineStatus !>(CCError) submit_pipeline_window(RedisConn* conn,
-                                                            ReqTx req_tx,
-                                                            ReqIter* req_iter,
-                                                            RedisPipelineWindow* window) {
+ * these helpers may park the current fiber but do not block the OS worker.
+ * Status is returned as int so Result hoist does not need the enum before
+ * redis_cc forward decls (RedisPipelineStatus !>(E) races that order). */
+@noblock static int !>(CCError) submit_pipeline_window(RedisConn* conn,
+                                                      ReqTx req_tx,
+                                                      ReqIter* req_iter,
+                                                      RedisPipelineWindow* window) {
     @errhandler(CCError e) { return cc_err(e); }
     if (!window) return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "pipeline window null"));
 
@@ -1044,13 +1058,13 @@ static inline void reply_arena_reset(RedisConn* conn) {
         bool !>(CCIoError) send_res = cc_channel_send(req_tx, req);
         if (cc_is_err(send_res) || !send_res.u.value) {
             redis_conn_release_slot(conn, req);
-            return cc_ok(REDIS_PIPELINE_OWNER_UNAVAILABLE);
+            return cc_ok((int)REDIS_PIPELINE_OWNER_UNAVAILABLE);
         }
         redis_pipeline_window_accept(window);
         conn->inflight++;
     }
 
-    return cc_ok(REDIS_PIPELINE_OK);
+    return cc_ok((int)REDIS_PIPELINE_OK);
 }
 
 @noblock static RedisPipelineStatus drain_pipeline_window(RedisConn* conn, RedisPipelineWindow* window) {
@@ -1096,8 +1110,8 @@ static inline void reply_arena_reset(RedisConn* conn) {
         /* Submit: up to k_pipeline_reply_cap parsed requests to the owner.  Every
          * accepted request owes exactly one RedisReply back on reply_rx. */
         RedisPipelineWindow window = redis_pipeline_window_start();
-        RedisPipelineStatus submit_status =
-            submit_pipeline_window(conn, req_tx, &req_iter, &window) !>;
+        int submit_rc = submit_pipeline_window(conn, req_tx, &req_iter, &window) !>;
+        RedisPipelineStatus submit_status = (RedisPipelineStatus)submit_rc;
         if (submit_status == REDIS_PIPELINE_OWNER_UNAVAILABLE) {
             (void)conn->write_reply_now(reply_error("ERR owner channel unavailable"));
             return 0;

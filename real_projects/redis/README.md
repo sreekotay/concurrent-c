@@ -7,14 +7,12 @@ The supported Concurrent-C Redis variants are:
 - `redis_idiomatic.ccs` — default / complete server: sketch control flow
   (hold → encode into Conn → flush) over full RedisDb. Shared reply helpers
   in `redis_reply.cch`. Benchmark target for `./bench_robust.sh`.
-- `redis_async_sketch.ccs` — tiny command surface twin of `redis.go`
+- `redis_async_sketch.ccs` — tiny command surface peer of `redis.go`
   (`ln.serve` + Conn encode). Teaching peer of the complete server.
   Default listen `127.0.0.1:6381`. Not the bench target.
-- `redis_go_twin.ccs` — Go-sized teaching twin of `redis.go` (same command
-  surface; `acquire_into` for holds). Not the bench target.
-- `redis_idiomatic_spawn_async.ccs` — `@async` / `spawn_async` twin of the
-  default (fixed `out_buf` encode). Optional; used by the async line-map gate.
-- `redis_owner.ccs` — channel / single-owner-fiber variant (historical).
+- `redis.go` — same tiny surface in Go (architecture reference only).
+- `redis_owner.ccs` — channel / single-owner-fiber variant (historical;
+  still used by the async line-map gate and lock-compare benches).
 - `redis_cc/redis_cc.ccs` — future modular production port (scaffold).
 
 ## Layout
@@ -22,10 +20,7 @@ The supported Concurrent-C Redis variants are:
 - `setup.sh` fetches upstream Redis into `redis_c/`
 - `redis_idiomatic.ccs` is the default single-file implementation
 - `redis_async_sketch.ccs` is the tiny sketch sibling (`make redis_async_sketch`)
-- `redis_go_twin.ccs` / `redis.go` are paired minimal architecture sketches
-  (`make redis_go_twin`)
-- `redis_idiomatic_spawn_async.ccs` is the `@async` alternate shell
-  (`make redis_idiomatic_spawn_async`)
+- `redis.go` is the Go architecture reference (`go build -o out/redis_go redis.go`)
 - `redis_owner.ccs` is the N:1 owner-fiber alternative (`make redis_owner`)
 - `redis_smoke.py` is the functional smoke (basics, expiry, 1000-op pipeline,
   abrupt-disconnect storm); it spawns `out/redis_idiomatic` itself:

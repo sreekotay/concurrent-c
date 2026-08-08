@@ -62,18 +62,10 @@ $(OUT_DIR)/redis_idiomatic_profile: redis_idiomatic.ccs redis_cc/redis_cc.cch re
 $(OUT_DIR)/redis_idiomatic_debug: redis_idiomatic.ccs redis_cc/redis_cc.cch redis_db.cch | $(OUT_DIR)
 	$(CCC) -o $@ redis_idiomatic.ccs --cc-flags "$(REDIS_IDIOMATIC_DEFS) -g -Og"
 
-# @async / spawn_async twin (fixed out_buf encode). Optional; not the bench default.
-$(OUT_DIR)/redis_idiomatic_spawn_async: redis_idiomatic_spawn_async.ccs redis_cc/redis_cc.cch redis_db.cch redis_mem.cch redis_glob.cch redis_resp.cch | $(OUT_DIR)
-	$(CCC) -O -o $@ redis_idiomatic_spawn_async.ccs --release --cc-flags "$(REDIS_IDIOMATIC_DEFS)"
-
 $(OUT_DIR)/redis_cc: redis_cc/redis_cc.ccs redis_cc/redis_cc.cch | $(OUT_DIR)
 	$(CCC) -O -o $@ redis_cc/redis_cc.ccs --release
 
-# Lightweight CC Redis sketch (redis.go command surface; string switch + BufReader).
-$(OUT_DIR)/redis_go_twin: redis_go_twin.ccs | $(OUT_DIR)
-	$(CCC) -O -o $@ redis_go_twin.ccs --release
-
-# Same tiny command surface as redis_go_twin; sync fiber + ln.serve + Conn encode.
+# Tiny command surface (redis.go); sync fiber + ln.serve + Conn encode.
 $(OUT_DIR)/redis_async_sketch: redis_async_sketch.ccs | $(OUT_DIR)
 	$(CCC) -O -o $@ redis_async_sketch.ccs --release
 
@@ -84,9 +76,7 @@ redis_idiomatic_gen: $(OUT_DIR)/redis_idiomatic_gen
 redis_idiomatic_hand: $(OUT_DIR)/redis_idiomatic_hand
 redis_idiomatic_profile: $(OUT_DIR)/redis_idiomatic_profile
 redis_idiomatic_debug: $(OUT_DIR)/redis_idiomatic_debug
-redis_idiomatic_spawn_async: $(OUT_DIR)/redis_idiomatic_spawn_async
 redis_cc: $(OUT_DIR)/redis_cc
-redis_go_twin: $(OUT_DIR)/redis_go_twin
 redis_async_sketch: $(OUT_DIR)/redis_async_sketch
 
 all: redis_idiomatic redis_cc
@@ -100,4 +90,4 @@ print-config:
 	@echo "REDIS_SRC_DIR=$(REDIS_SRC_DIR)"
 	@echo "REDIS_IDIOMATIC_DEFS=$(REDIS_IDIOMATIC_DEFS)"
 
-.PHONY: setup upstream redis_idiomatic redis_owner redis_lock redis_idiomatic_gen redis_idiomatic_hand redis_idiomatic_profile redis_idiomatic_debug redis_idiomatic_spawn_async redis_cc redis_go_twin redis_async_sketch all clean print-config
+.PHONY: setup upstream redis_idiomatic redis_owner redis_lock redis_idiomatic_gen redis_idiomatic_hand redis_idiomatic_profile redis_idiomatic_debug redis_cc redis_async_sketch all clean print-config

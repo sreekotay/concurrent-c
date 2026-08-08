@@ -2209,9 +2209,14 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                                                         nsdestroys, body_ind)) {
                     bind_ok = 0;
                 }
-                if (bind_ok && !cemit_str(out, "}\n\n")) bind_ok = 0;
+                /* Pin fn close + closure banner to the fn site (real line). */
+                if (bind_ok &&
+                    !shadow_emit_pinned_block(out, &sctx, it, "", "}\n\n"))
+                    bind_ok = 0;
                 if (bind_ok && nsspawns) {
-                    if (!cemit_str(out, "\n/* --- CC generated closures --- */\n"))
+                    if (!shadow_emit_pinned_block(
+                            out, &sctx, it, "",
+                            "/* --- CC generated closures --- */\n\n"))
                         bind_ok = 0;
                     for (int s = 0; bind_ok && s < nsspawns; s++) {
                         if (!shadow_emit_closure_def(sspawns[s], out, cache))
@@ -2396,9 +2401,13 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                     strcmp(it->e, "void") == 0) {
                     if (!cemit_fmt(out, "%sreturn 0;\n", body_ind)) bind_ok = 0;
                 }
-                if (bind_ok && !cemit_str(out, "}\n")) bind_ok = 0;
+                if (bind_ok &&
+                    !shadow_emit_pinned_block(out, &ctx, it, "", "}\n"))
+                    bind_ok = 0;
                 if (bind_ok && nspawns) {
-                    if (!cemit_str(out, "\n/* --- CC generated closures --- */\n"))
+                    if (!shadow_emit_pinned_block(
+                            out, &ctx, it, "",
+                            "\n/* --- CC generated closures --- */\n\n"))
                         bind_ok = 0;
                     for (int s = 0; bind_ok && s < nspawns; s++) {
                         if (!shadow_emit_closure_def(spawns[s], out, cache))

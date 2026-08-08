@@ -11,8 +11,14 @@
  *   Conn.out       → encode coalesce (8K slab + growable); flush after
  *                    the window (never socket I/O under hold)
  *   RedisConnEnc   → @restricted Encode (no sock/flush)
- *   shard holds    → only in run_pipeline_window; cover mutate/snapshot
- *                    and Conn encode (bytes copied into out under hold)
+ *   CCShardHold    → acquire inside execute (same shape as redis.go /
+ *                    redis_async_sketch); encode under hold; release before
+ *                    the next command / flush
+ *
+ * Shape (go + sketch): parse → execute(hold → exec_* → encode) → flush.
+ * Dispatch is string-switch on the folded command name. Leaf cmds encode
+ * on Conn under hold (MGET/KEYS stream array_len+bulks). CONFIG GET still
+ * stages WIRE in reply_arena.
  *
  * Build: `make redis_idiomatic`.  Tiny peer: `redis_async_sketch.ccs`.
  */
@@ -21,7 +27,6 @@
 #include <ccc/cc_instantiate.cch>
 #include <ccc/std/net.cch>
 #include <ccc/std/map.cch>
-#include <ccc/std/static_map.cch>
 #include <ccc/std/string.cch>
 #include <ccc/script/stdio.cch>
 #include <stdio.h>
@@ -55,7 +60,7 @@ typedef @restricted Encode on RedisConn {
     include "redis_resp.rules"
 ~~~~}
 
-/* Write schemas (db_mget / db_keys / CONFIG). Must live in the .ccs —
+/* Write schemas (CONFIG). Must live in the .ccs —
  * #'…' is not safe inside #included .cch (cpp). */
 @grammar(schema) RespGReply {~~~~
     use Resp
@@ -150,115 +155,23 @@ static RespParseStatus gen_try_read_args_buffered(RespReader* r,
     }
 }
 
+/* Shard geometry only — not critical-section shape (SET prep is in execute). */
 typedef enum RedisCmdHold {
-    REDIS_HOLD_KEY = 0,
-    REDIS_HOLD_NONE,
-    REDIS_HOLD_INSTALL,
+    REDIS_HOLD_NONE = 0,
+    REDIS_HOLD_KEY,
     REDIS_HOLD_KEYS,
     REDIS_HOLD_ALL,
 } RedisCmdHold;
-
-typedef struct RedisCommandSpec {
-    RedisCommandKind kind;
-    int min_args;
-    int max_args;
-    int args_multiple;
-} RedisCommandSpec;
-
-typedef struct RedisCommandEntry {
-    const char* key;
-    RedisCommandSpec value;
-} RedisCommandEntry;
-
-@comptime {
-    RedisCommandEntry commands[] = {
-        { "PING", { REDIS_CMD_PING, 0, 1, 0 } },
-        { "ECHO", { REDIS_CMD_ECHO, 1, 1, 0 } },
-        { "GET", { REDIS_CMD_GET, 1, 1, 0 } },
-        { "SET", { REDIS_CMD_SET, 2, 2, 0 } },
-        { "SETNX", { REDIS_CMD_SETNX, 2, 2, 0 } },
-        { "SETEX", { REDIS_CMD_SETEX, 3, 3, 0 } },
-        { "PSETEX", { REDIS_CMD_PSETEX, 3, 3, 0 } },
-        { "APPEND", { REDIS_CMD_APPEND, 2, 2, 0 } },
-        { "STRLEN", { REDIS_CMD_STRLEN, 1, 1, 0 } },
-        { "TYPE", { REDIS_CMD_TYPE, 1, 1, 0 } },
-        { "DEL", { REDIS_CMD_DEL, 1, -1, 0 } },
-        { "EXISTS", { REDIS_CMD_EXISTS, 1, -1, 0 } },
-        { "INCR", { REDIS_CMD_INCR, 1, 1, 0 } },
-        { "DECR", { REDIS_CMD_DECR, 1, 1, 0 } },
-        { "INCRBY", { REDIS_CMD_INCRBY, 2, 2, 0 } },
-        { "DECRBY", { REDIS_CMD_DECRBY, 2, 2, 0 } },
-        { "MGET", { REDIS_CMD_MGET, 1, -1, 0 } },
-        { "MSET", { REDIS_CMD_MSET, 2, -1, 2 } },
-        { "EXPIRE", { REDIS_CMD_EXPIRE, 2, 2, 0 } },
-        { "PEXPIRE", { REDIS_CMD_PEXPIRE, 2, 2, 0 } },
-        { "TTL", { REDIS_CMD_TTL, 1, 1, 0 } },
-        { "PTTL", { REDIS_CMD_PTTL, 1, 1, 0 } },
-        { "PERSIST", { REDIS_CMD_PERSIST, 1, 1, 0 } },
-        { "DBSIZE", { REDIS_CMD_DBSIZE, 0, 0, 0 } },
-        { "FLUSHDB", { REDIS_CMD_FLUSHDB, 0, 1, 0 } },
-        { "FLUSHALL", { REDIS_CMD_FLUSHALL, 0, 1, 0 } },
-        { "KEYS", { REDIS_CMD_KEYS, 1, 1, 0 } },
-        { "CC.MEMLOG", { REDIS_CMD_CC_MEMLOG, 0, 1, 0 } },
-    };
-    static_map("redis_commands", commands, CC_STATIC_MAP_ASCII_CI);
-}
-
-static const RedisCommandSpec* cmd_spec(char[:] cmd, size_t argc) {
-    const RedisCommandSpec* spec = redis_commands_get(cmd);
-    if (!spec ||
-        argc < (size_t)spec->min_args ||
-        (spec->max_args >= 0 && argc > (size_t)spec->max_args) ||
-        (spec->args_multiple > 0 && argc % (size_t)spec->args_multiple != 0)) {
-        return NULL;
-    }
-    return spec;
-}
 
 enum { k_argv_cap = RespGCmd_args_cap };
 _Static_assert(REDIS_ARGV_MAX + 1 == RespGCmd_args_cap,
                "REDIS_ARGV_MAX must equal RespGCmd_args_cap - 1");
 
+/* args[0] = command name (folded upper); args[1..] = payload. */
 typedef struct RedisCmd {
-    RedisCommandKind kind;
     char[:] args[k_argv_cap];
-    size_t arg_start;
     size_t argc;
 } RedisCmd;
-
-static bool slice_eq_ignore_case(char[:] s, const char* cstr) {
-    size_t len = strlen(cstr);
-    if (s.len != len) return 0;
-    for (size_t i = 0; i < len; ++i) {
-        char a = ((const char*)s.ptr)[i];
-        char b = cstr[i];
-        if (a >= 'a' && a <= 'z') a = (char)(a - 'a' + 'A');
-        if (b >= 'a' && b <= 'z') b = (char)(b - 'a' + 'A');
-        if (a != b) return 0;
-    }
-    return 1;
-}
-
-static bool !>(CCError) decode_request_shape(RedisCmd* out, size_t raw_argc) {
-    if (raw_argc < 1) return cc_err(CC_ERROR(CC_ERR_PARSE, "empty command"));
-    if (slice_eq_ignore_case(out->args[0], "CONFIG")) {
-        if (raw_argc != 3 || !slice_eq_ignore_case(out->args[1], "GET")) {
-            return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "ERR unsupported command"));
-        }
-        out->kind = REDIS_CMD_CONFIG_GET;
-        out->arg_start = 2;
-        out->argc = 1;
-        return cc_ok(1);
-    }
-    const RedisCommandSpec* spec = cmd_spec(out->args[0], raw_argc - 1);
-    if (!spec) {
-        return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "ERR unsupported command"));
-    }
-    out->kind = spec->kind;
-    out->arg_start = 1;
-    out->argc = raw_argc - 1;
-    return cc_ok(1);
-}
 
 typedef struct ReqIter {
     RespReader* reader;
@@ -272,6 +185,23 @@ typedef struct ReqIter {
     return rr_fill(reader, sock);
 }
 
+static void fold_ascii_upper(char[:] s) {
+    size_t i;
+    for (i = 0; i < s.len; i++) {
+        if (s.ptr[i] >= 'a' && s.ptr[i] <= 'z')
+            s.ptr[i] = (char)(s.ptr[i] - 32);
+    }
+}
+
+/* payload = argc - 1 (command name at args[0]). max < 0 → unbounded. */
+static bool payload_ok(size_t argc, size_t min, int max, int multiple) {
+    size_t n = argc > 0 ? argc - 1 : 0;
+    if (n < min) return 0;
+    if (max >= 0 && n > (size_t)max) return 0;
+    if (multiple > 0 && n % (size_t)multiple != 0) return 0;
+    return 1;
+}
+
 static bool !>(CCError) rr_cmd_next(ReqIter* it, RedisCmd* out) {
     size_t raw_argc = 0;
     CCError perr = {0};
@@ -280,53 +210,52 @@ static bool !>(CCError) rr_cmd_next(ReqIter* it, RedisCmd* out) {
                                    &raw_argc, &perr);
     if (st == RESP_PARSE_INCOMPLETE) return cc_ok(0);
     if (st == RESP_PARSE_ERROR) return cc_err(perr);
-    decode_request_shape(out, raw_argc) !>(e) { return cc_err(e); };
+    if (raw_argc < 1)
+        return cc_err(CC_ERROR(CC_ERR_PARSE, "empty command"));
+    out->argc = raw_argc;
+    fold_ascii_upper(out->args[0]);
     return cc_ok(1);
 }
 
 #include "redis_db.cch"
 
-static RedisCmdHold hold_for(RedisCommandKind kind) {
-    switch (kind) {
-        case REDIS_CMD_SET:
-            return REDIS_HOLD_INSTALL;
-        case REDIS_CMD_PING:
-        case REDIS_CMD_ECHO:
-        case REDIS_CMD_CONFIG_GET:
-            return REDIS_HOLD_NONE;
-        case REDIS_CMD_GET:
-        case REDIS_CMD_SETNX:
-        case REDIS_CMD_SETEX:
-        case REDIS_CMD_PSETEX:
-        case REDIS_CMD_APPEND:
-        case REDIS_CMD_STRLEN:
-        case REDIS_CMD_TYPE:
-        case REDIS_CMD_INCR:
-        case REDIS_CMD_DECR:
-        case REDIS_CMD_INCRBY:
-        case REDIS_CMD_DECRBY:
-        case REDIS_CMD_EXPIRE:
-        case REDIS_CMD_PEXPIRE:
-        case REDIS_CMD_TTL:
-        case REDIS_CMD_PTTL:
-        case REDIS_CMD_PERSIST:
-            return REDIS_HOLD_KEY;
-        case REDIS_CMD_DEL:
-        case REDIS_CMD_EXISTS:
-        case REDIS_CMD_MGET:
-        case REDIS_CMD_MSET:
-            return REDIS_HOLD_KEYS;
-        case REDIS_CMD_DBSIZE:
-        case REDIS_CMD_FLUSHDB:
-        case REDIS_CMD_FLUSHALL:
-        case REDIS_CMD_KEYS:
-        case REDIS_CMD_CC_MEMLOG:
-            return REDIS_HOLD_ALL;
+static RedisCmdHold hold_for(char[:] name) {
+    switch (name) {
+    case "GET":
+    case "SET":
+    case "SETNX":
+    case "SETEX":
+    case "PSETEX":
+    case "APPEND":
+    case "STRLEN":
+    case "TYPE":
+    case "INCR":
+    case "DECR":
+    case "INCRBY":
+    case "DECRBY":
+    case "EXPIRE":
+    case "PEXPIRE":
+    case "TTL":
+    case "PTTL":
+    case "PERSIST":
+        return REDIS_HOLD_KEY;
+    case "DEL":
+    case "EXISTS":
+    case "MGET":
+    case "MSET":
+        return REDIS_HOLD_KEYS;
+    case "DBSIZE":
+    case "FLUSHDB":
+    case "FLUSHALL":
+    case "KEYS":
+    case "CC.MEMLOG":
+        return REDIS_HOLD_ALL;
+    default:
+        return REDIS_HOLD_NONE;
     }
-    abort();
 }
 
-static size_t redis_shard_count(const char** src_out) {
+static CCShardMask redis_shard_mask(const char** src_out) {
     const char* s = getenv("CC_REDIS_SHARDS");
     unsigned long n;
     char* end = NULL;
@@ -334,43 +263,34 @@ static size_t redis_shard_count(const char** src_out) {
     if (!s || !s[0]) {
         if (src_out) *src_out = "auto from ncpu";
         mask = cc_shard_mask_auto((size_t)REDIS_DB_MAX_SHARDS);
-        return mask.count ? mask.count : 1u;
+        return mask.count ? mask : cc_shard_mask_make(1u);
     }
     n = strtoul(s, &end, 10);
     if (end == s || (end && *end != 0) || n == 0 ||
         n > (unsigned long)REDIS_DB_MAX_SHARDS) {
         if (src_out) *src_out = "auto from ncpu (bad CC_REDIS_SHARDS)";
         mask = cc_shard_mask_auto((size_t)REDIS_DB_MAX_SHARDS);
-        return mask.count ? mask.count : 1u;
+        return mask.count ? mask : cc_shard_mask_make(1u);
     }
     if (src_out) *src_out = "CC_REDIS_SHARDS override";
     mask = cc_shard_mask_clamp((size_t)n, (size_t)REDIS_DB_MAX_SHARDS);
-    return mask.count ? mask.count : 1u;
+    return mask.count ? mask : cc_shard_mask_make(1u);
 }
 
-static size_t shard_guards_acquire_key_set(CCExclusive* excl,
-                                           RedisDb* db,
-                                           char[:]* keys,
-                                           size_t nkeys,
-                                           size_t stride,
-                                           CCExclusiveGuard* guards,
-                                           size_t guards_cap) {
-    uint64_t names[REDIS_DB_MAX_SHARDS];
-    size_t nnames = 0;
-    size_t i;
+/* Unique shard ids for a key list (MGET/DEL stride=1, MSET stride=2). */
+static size_t unique_shards(RedisDb* db, char[:]* keys, size_t nkeys,
+                            size_t stride, uint64_t* names, size_t cap) {
+    size_t n = 0, i, j;
     if (stride == 0) stride = 1;
     for (i = 0; i < nkeys; i += stride) {
-        size_t si = db_shard_index_for_key(db, keys[i]);
-        size_t j;
+        uint64_t si = (uint64_t)db_shard_index_for_key(db, keys[i]);
         int seen = 0;
-        for (j = 0; j < nnames; j++) {
-            if (names[j] == (uint64_t)si) { seen = 1; break; }
+        for (j = 0; j < n; j++) {
+            if (names[j] == si) { seen = 1; break; }
         }
-        if (!seen && nnames < (size_t)REDIS_DB_MAX_SHARDS) {
-            names[nnames++] = (uint64_t)si;
-        }
+        if (!seen && n < cap) names[n++] = si;
     }
-    return excl->acquire_sorted(names, nnames, guards, guards_cap);
+    return n;
 }
 
 /* --- Conn encode (sketch) ------------------------------------------------ */
@@ -476,143 +396,447 @@ static bool !>(CCError) redis_conn_write_reply(RedisConn* c,
     }
 }
 
-static RedisReply reply_or_err(RedisReply !>(CCError) built) {
-    return built.is_err() ? err_reply(built.error()) : built.value();
+/* DB Err → Redis -ERR on the wire (Ok); do not close the connection. */
+static bool !>(CCError) enc_fail(RedisConnEnc enc, CCError e) {
+    const char* msg = e.message ? e.message : "internal error";
+    if (msg[0] == 'E' && msg[1] == 'R' && msg[2] == 'R' && msg[3] == ' ')
+        msg += 4;
+    return enc->err(msg);
 }
 
-/* Encode a DB RedisReply into Conn (errors → -ERR wire). */
-static bool !>(CCError) enc_db_reply(RedisConnEnc enc,
-                                     RedisReply !>(CCError) built) {
-    RedisReply r = reply_or_err(built);
+static bool !>(CCError) enc_ok_result(RedisConnEnc enc,
+                                      RedisReply !>(CCError) built) {
+    if (built.is_err()) return enc_fail(enc, built.error());
+    return enc->ok();
+}
+
+static bool !>(CCError) enc_int_result(RedisConnEnc enc,
+                                       RedisReply !>(CCError) built) {
+    RedisReply r;
+    if (built.is_err()) return enc_fail(enc, built.error());
+    r = built.value();
+    return enc->integer(r.int_value);
+}
+
+/* MGET/KEYS/CONFIG: still staged as RedisReply WIRE in reply_arena. */
+static bool !>(CCError) enc_wire_result(RedisConnEnc enc,
+                                        RedisReply !>(CCError) built) {
+    RedisReply r;
+    if (built.is_err()) return enc_fail(enc, built.error());
+    r = built.value();
     return enc->write_reply(&r);
 }
 
-/* Hold path: DB work + encode into Conn (sketch shape). SET is HOLD_INSTALL. */
-@noblock static bool !>(CCError) execute(RedisDb* db, RedisCmd* cmd,
-                                         RedisConnEnc enc) {
+/* --- exec_* under hold: leaf → Conn; arrays stay WIRE --------------------- */
+
+@noblock static bool !>(CCError) exec_key(RedisDb* db, RedisCmd* cmd,
+                                          RedisConnEnc enc) {
     @errhandler(CCError e) { return cc_err(e); }
-    char[:]* argv = cmd->args + cmd->arg_start;
-    size_t argc = cmd->argc;
+    char[:] name = cmd->args[0];
+    char[:]* keys = cmd->args + 1;
     CCArena* reply_arena = &enc->reply_arena;
     DbCmdClock clock = {0};
-    switch (cmd->kind) {
-        case REDIS_CMD_PING:
-            if (argc == 1) return enc->bulk(argv[0]);
-            return enc->pong();
-        case REDIS_CMD_ECHO:
-            return enc->bulk(argv[0]);
-        case REDIS_CMD_CONFIG_GET:
-            return enc_db_reply(enc, config_get_reply(argv[0], reply_arena));
-        case REDIS_CMD_GET:
-            return enc_db_reply(enc, db_get(db, argv[0], reply_arena, &clock));
-        case REDIS_CMD_SETNX:
-            return enc_db_reply(enc, db_setnx(db, argv[0], argv[1], &clock));
-        case REDIS_CMD_SETEX: {
-            char[:] secs_arg = argv[1];
-            int64_t seconds = secs_arg.to_i64() !>;
-            return enc_db_reply(
-                enc, db_set_with_ttl(db, argv[0], argv[2],
-                                     expire_seconds_to_rel_ms(seconds),
-                                     &clock));
+    switch (name) {
+    case "GET": {
+        RedisEntry* cell;
+        RedisValue* val;
+        if (!payload_ok(cmd->argc, 1, 1, 0))
+            return enc->err("wrong number of arguments");
+        cell = db_lookup_live(db, keys[0], &clock);
+        if (!cell) return enc->null();
+        val = &cell->val;
+        switch (val) {
+        case .str:
+            return enc->bulk(val->str.as_slice());
+        case .num: {
+            /* Render into reply_arena: Conn.bulk copies under hold. */
+            int64_t n = val->num;
+            char[:] text = @string(`${n}`);
+            char[:] bytes = reply_arena_alloc_slice(reply_arena, text.len) !>;
+            memcpy((char*)bytes.ptr, text.ptr, text.len);
+            return enc->bulk(bytes);
         }
-        case REDIS_CMD_PSETEX: {
-            char[:] ms_arg = argv[1];
-            int64_t ms = ms_arg.to_i64() !>;
-            return enc_db_reply(
-                enc, db_set_with_ttl(db, argv[0], argv[2], ms, &clock));
         }
-        case REDIS_CMD_APPEND:
-            return enc_db_reply(
-                enc, db_append(db, argv[0], argv[1], reply_arena, &clock));
-        case REDIS_CMD_STRLEN: {
-            RedisReply r = db_strlen(db, argv[0], &clock);
-            return enc->write_reply(&r);
+        return enc->err("corrupt value cell");
+    }
+    case "SET":
+        /* Clone under hold (sketch/go). Prep/install races under load. */
+        if (!payload_ok(cmd->argc, 2, 2, 0))
+            return enc->err("wrong number of arguments");
+        return enc_ok_result(enc, db_set(db, keys[0], keys[1], 0));
+    case "SETNX":
+        if (!payload_ok(cmd->argc, 2, 2, 0))
+            return enc->err("wrong number of arguments");
+        return enc_int_result(enc, db_setnx(db, keys[0], keys[1], &clock));
+    case "SETEX": {
+        char[:] secs_arg;
+        int64_t seconds;
+        if (!payload_ok(cmd->argc, 3, 3, 0))
+            return enc->err("wrong number of arguments");
+        secs_arg = keys[1];
+        seconds = secs_arg.to_i64() !>;
+        return enc_ok_result(
+            enc, db_set_with_ttl(db, keys[0], keys[2],
+                                 expire_seconds_to_rel_ms(seconds), &clock));
+    }
+    case "PSETEX": {
+        char[:] ms_arg;
+        int64_t ms;
+        if (!payload_ok(cmd->argc, 3, 3, 0))
+            return enc->err("wrong number of arguments");
+        ms_arg = keys[1];
+        ms = ms_arg.to_i64() !>;
+        return enc_ok_result(
+            enc, db_set_with_ttl(db, keys[0], keys[2], ms, &clock));
+    }
+    case "APPEND":
+        if (!payload_ok(cmd->argc, 2, 2, 0))
+            return enc->err("wrong number of arguments");
+        return enc_int_result(
+            enc, db_append(db, keys[0], keys[1], reply_arena, &clock));
+    case "STRLEN": {
+        RedisEntry* cell;
+        RedisValue* val;
+        if (!payload_ok(cmd->argc, 1, 1, 0))
+            return enc->err("wrong number of arguments");
+        cell = db_lookup_live(db, keys[0], &clock);
+        if (!cell) return enc->integer(0);
+        val = &cell->val;
+        switch (val) {
+        case .str:
+            return enc->integer((int64_t)val->str.len());
+        case .num: {
+            int64_t n = val->num;
+            char[:] text = @string(`${n}`);
+            return enc->integer((int64_t)text.len);
         }
-        case REDIS_CMD_TYPE: {
-            RedisReply r = db_type(db, argv[0], &clock);
-            return enc->write_reply(&r);
         }
-        case REDIS_CMD_DEL: {
-            RedisReply r = db_del(db, argv, argc, &clock);
-            return enc->write_reply(&r);
+        return enc->integer(0);
+    }
+    case "TYPE":
+        if (!payload_ok(cmd->argc, 1, 1, 0))
+            return enc->err("wrong number of arguments");
+        return enc->simple(db_lookup_live(db, keys[0], &clock) ? "string"
+                                                               : "none");
+    case "INCR":
+        if (!payload_ok(cmd->argc, 1, 1, 0))
+            return enc->err("wrong number of arguments");
+        return enc_int_result(enc, db_incrby(db, keys[0], 1, &clock));
+    case "DECR":
+        if (!payload_ok(cmd->argc, 1, 1, 0))
+            return enc->err("wrong number of arguments");
+        return enc_int_result(enc, db_incrby(db, keys[0], -1, &clock));
+    case "INCRBY": {
+        char[:] delta_arg;
+        int64_t delta;
+        if (!payload_ok(cmd->argc, 2, 2, 0))
+            return enc->err("wrong number of arguments");
+        delta_arg = keys[1];
+        delta = delta_arg.to_i64() !>;
+        return enc_int_result(enc, db_incrby(db, keys[0], delta, &clock));
+    }
+    case "DECRBY": {
+        char[:] delta_arg;
+        int64_t delta;
+        int64_t neg;
+        if (!payload_ok(cmd->argc, 2, 2, 0))
+            return enc->err("wrong number of arguments");
+        delta_arg = keys[1];
+        delta = delta_arg.to_i64() !>;
+        neg = cc_sub_i64_checked(0, delta) !> {
+            return enc->err("decrement would overflow");
+        };
+        return enc_int_result(enc, db_incrby(db, keys[0], neg, &clock));
+    }
+    case "EXPIRE": {
+        char[:] secs_arg;
+        int64_t seconds;
+        if (!payload_ok(cmd->argc, 2, 2, 0))
+            return enc->err("wrong number of arguments");
+        secs_arg = keys[1];
+        seconds = secs_arg.to_i64() !>;
+        return enc_int_result(
+            enc, db_expire_rel_ms(db, keys[0],
+                                  expire_seconds_to_rel_ms(seconds), &clock));
+    }
+    case "PEXPIRE": {
+        char[:] ms_arg;
+        int64_t ms;
+        if (!payload_ok(cmd->argc, 2, 2, 0))
+            return enc->err("wrong number of arguments");
+        ms_arg = keys[1];
+        ms = ms_arg.to_i64() !>;
+        return enc_int_result(enc, db_expire_rel_ms(db, keys[0], ms, &clock));
+    }
+    case "TTL":
+        if (!payload_ok(cmd->argc, 1, 1, 0))
+            return enc->err("wrong number of arguments");
+        return enc->integer(db_ttl(db, keys[0], 0, &clock).int_value);
+    case "PTTL":
+        if (!payload_ok(cmd->argc, 1, 1, 0))
+            return enc->err("wrong number of arguments");
+        return enc->integer(db_ttl(db, keys[0], 1, &clock).int_value);
+    case "PERSIST":
+        if (!payload_ok(cmd->argc, 1, 1, 0))
+            return enc->err("wrong number of arguments");
+        return enc_int_result(enc, db_persist(db, keys[0], &clock));
+    default:
+        return enc->err("internal");
+    }
+}
+
+@noblock static bool !>(CCError) exec_keys(RedisDb* db, RedisCmd* cmd,
+                                           RedisConnEnc enc) {
+    @errhandler(CCError e) { return cc_err(e); }
+    char[:] name = cmd->args[0];
+    char[:]* keys = cmd->args + 1;
+    size_t nkeys = cmd->argc > 0 ? cmd->argc - 1 : 0;
+    CCArena* reply_arena = &enc->reply_arena;
+    DbCmdClock clock = {0};
+    switch (name) {
+    case "DEL": {
+        size_t i;
+        int64_t removed = 0;
+        if (!payload_ok(cmd->argc, 1, -1, 0))
+            return enc->err("wrong number of arguments");
+        for (i = 0; i < nkeys; i++) {
+            RedisEntry* cell = db_lookup_live(db, keys[i], &clock);
+            if (!cell) continue;
+            db_remove_entry(db, keys[i], cell);
+            removed++;
         }
-        case REDIS_CMD_EXISTS: {
-            RedisReply r = db_exists(db, argv, argc, &clock);
-            return enc->write_reply(&r);
+        return enc->integer(removed);
+    }
+    case "EXISTS": {
+        size_t i;
+        int64_t found = 0;
+        if (!payload_ok(cmd->argc, 1, -1, 0))
+            return enc->err("wrong number of arguments");
+        for (i = 0; i < nkeys; i++) {
+            if (db_lookup_live(db, keys[i], &clock)) found++;
         }
-        case REDIS_CMD_INCR:
-            return enc_db_reply(enc, db_incrby(db, argv[0], 1, &clock));
-        case REDIS_CMD_DECR:
-            return enc_db_reply(enc, db_incrby(db, argv[0], -1, &clock));
-        case REDIS_CMD_INCRBY: {
-            char[:] delta_arg = argv[1];
-            int64_t delta = delta_arg.to_i64() !>;
-            return enc_db_reply(enc, db_incrby(db, argv[0], delta, &clock));
+        return enc->integer(found);
+    }
+    case "MGET": {
+        size_t i;
+        if (!payload_ok(cmd->argc, 1, -1, 0))
+            return enc->err("wrong number of arguments");
+        /* Sketch shape: header then bulks. Mid-encode Err truncates the
+         * array on the wire (conn closes) — same caveat as the sketch. */
+        {
+            bool wrote = enc->array_len(nkeys) !>;
+            (void)wrote;
         }
-        case REDIS_CMD_DECRBY: {
-            char[:] delta_arg = argv[1];
-            int64_t delta = delta_arg.to_i64() !>;
-            int64_t neg = cc_sub_i64_checked(0, delta) !> {
-                return cc_err(CC_ERROR(CC_ERR_INVALID_ARG,
-                                       "ERR decrement would overflow"));
-            };
-            return enc_db_reply(enc, db_incrby(db, argv[0], neg, &clock));
-        }
-        case REDIS_CMD_MGET:
-            return enc_db_reply(enc, db_mget(db, argv, argc, reply_arena, &clock));
-        case REDIS_CMD_MSET:
-            return enc_db_reply(enc, db_mset(db, argv, argc));
-        case REDIS_CMD_EXPIRE: {
-            char[:] secs_arg = argv[1];
-            int64_t seconds = secs_arg.to_i64() !>;
-            return enc_db_reply(
-                enc, db_expire_rel_ms(db, argv[0],
-                                      expire_seconds_to_rel_ms(seconds),
-                                      &clock));
-        }
-        case REDIS_CMD_PEXPIRE: {
-            char[:] ms_arg = argv[1];
-            int64_t ms = ms_arg.to_i64() !>;
-            return enc_db_reply(enc, db_expire_rel_ms(db, argv[0], ms, &clock));
-        }
-        case REDIS_CMD_TTL: {
-            RedisReply r = db_ttl(db, argv[0], 0, &clock);
-            return enc->write_reply(&r);
-        }
-        case REDIS_CMD_PTTL: {
-            RedisReply r = db_ttl(db, argv[0], 1, &clock);
-            return enc->write_reply(&r);
-        }
-        case REDIS_CMD_PERSIST:
-            return enc_db_reply(enc, db_persist(db, argv[0], &clock));
-        case REDIS_CMD_DBSIZE: {
-            RedisReply r = db_dbsize(db, &clock);
-            return enc->write_reply(&r);
-        }
-        case REDIS_CMD_FLUSHDB:
-        case REDIS_CMD_FLUSHALL: {
-            RedisReply r = db_flush(db);
-            return enc->write_reply(&r);
-        }
-        case REDIS_CMD_KEYS:
-            return enc_db_reply(enc, db_keys(db, argv[0], reply_arena, &clock));
-        case REDIS_CMD_CC_MEMLOG: {
-            const char* phase = "cc-memlog";
-            char phase_buf[64];
-            if (argc >= 1 && argv[0].ptr && argv[0].len > 0) {
-                size_t n = argv[0].len < sizeof(phase_buf) - 1 ? argv[0].len
-                                                             : sizeof(phase_buf) - 1;
-                memcpy(phase_buf, argv[0].ptr, n);
-                phase_buf[n] = '\0';
-                phase = phase_buf;
+        for (i = 0; i < nkeys; i++) {
+            RedisEntry* cell = db_lookup_live(db, keys[i], &clock);
+            RedisValue* val;
+            bool wrote;
+            if (!cell) {
+                wrote = enc->null() !>;
+                (void)wrote;
+                continue;
             }
-            db_dump_mem_stats(db, phase);
-            redis_mem_report_impl(db, phase);
-            return enc->ok();
+            val = &cell->val;
+            switch (val) {
+            case .str:
+                wrote = enc->bulk(val->str.as_slice()) !>;
+                (void)wrote;
+                break;
+            case .num: {
+                int64_t n = val->num;
+                char[:] text = @string(`${n}`);
+                char[:] bytes =
+                    reply_arena_alloc_slice(reply_arena, text.len) !>;
+                memcpy((char*)bytes.ptr, text.ptr, text.len);
+                wrote = enc->bulk(bytes) !>;
+                (void)wrote;
+                break;
+            }
+            }
         }
-        case REDIS_CMD_SET:
-        default:
+        return cc_ok(true);
+    }
+    case "MSET":
+        if (!payload_ok(cmd->argc, 2, -1, 2))
+            return enc->err("wrong number of arguments");
+        return enc_ok_result(enc, db_mset(db, keys, nkeys));
+    default:
+        return enc->err("internal");
+    }
+}
+
+@noblock static bool !>(CCError) exec_all(RedisDb* db, RedisCmd* cmd,
+                                          RedisConnEnc enc) {
+    @errhandler(CCError e) { return cc_err(e); }
+    char[:] name = cmd->args[0];
+    char[:]* keys = cmd->args + 1;
+    DbCmdClock clock = {0};
+    switch (name) {
+    case "DBSIZE":
+        if (!payload_ok(cmd->argc, 0, 0, 0))
+            return enc->err("wrong number of arguments");
+        return enc->integer(db_dbsize(db, &clock).int_value);
+    case "FLUSHDB":
+    case "FLUSHALL":
+        if (!payload_ok(cmd->argc, 0, 1, 0))
+            return enc->err("wrong number of arguments");
+        (void)db_flush(db);
+        return enc->ok();
+    case "KEYS": {
+        /* Two passes under HOLD_ALL: count, then array_len + bulks. */
+        enum { k_keys_pattern_max = 512 };
+        char[:] pattern;
+        const char* pat;
+        size_t matched = 0;
+        size_t si, i;
+        bool wrote;
+        if (!payload_ok(cmd->argc, 1, 1, 0))
+            return enc->err("wrong number of arguments");
+        pattern = keys[0];
+        if (pattern.len > (size_t)k_keys_pattern_max)
+            return enc->err("KEYS pattern too long");
+        pat = (const char*)pattern.ptr;
+        if (db && db->shards) {
+            for (si = 0; si < db->shard_count; ++si) {
+                RedisDbShard* sh = &db->shards[si];
+                size_t n = sh->entries ? sh->entries.len() : 0;
+                for (i = 0; i < n; ++i) {
+                    CCSlicePacked* kp = sh->entries.key_ptr(i);
+                    int64_t exp;
+                    char[:] ks;
+                    if (!kp) continue;
+                    exp = db_expires_get(db, *kp);
+                    if (exp != 0 && clock.now() >= exp) continue;
+                    ks = kp->as_slice();
+                    if (!glob_match(pat, pattern.len, (const char*)ks.ptr,
+                                    ks.len))
+                        continue;
+                    matched++;
+                }
+            }
+        }
+        wrote = enc->array_len(matched) !>;
+        (void)wrote;
+        if (db && db->shards) {
+            for (si = 0; si < db->shard_count; ++si) {
+                RedisDbShard* sh = &db->shards[si];
+                size_t n = sh->entries ? sh->entries.len() : 0;
+                for (i = 0; i < n; ++i) {
+                    CCSlicePacked* kp = sh->entries.key_ptr(i);
+                    int64_t exp;
+                    char[:] ks;
+                    if (!kp) continue;
+                    exp = db_expires_get(db, *kp);
+                    if (exp != 0 && clock.now() >= exp) continue;
+                    ks = kp->as_slice();
+                    if (!glob_match(pat, pattern.len, (const char*)ks.ptr,
+                                    ks.len))
+                        continue;
+                    wrote = enc->bulk(ks) !>;
+                    (void)wrote;
+                }
+            }
+        }
+        return cc_ok(true);
+    }
+    case "CC.MEMLOG": {
+        const char* phase = "cc-memlog";
+        char phase_buf[64];
+        if (!payload_ok(cmd->argc, 0, 1, 0))
+            return enc->err("wrong number of arguments");
+        if (cmd->argc >= 2 && keys[0].ptr && keys[0].len > 0) {
+            size_t n = keys[0].len < sizeof(phase_buf) - 1 ? keys[0].len
+                                                           : sizeof(phase_buf) - 1;
+            memcpy(phase_buf, keys[0].ptr, n);
+            phase_buf[n] = '\0';
+            phase = phase_buf;
+        }
+        db_dump_mem_stats(db, phase);
+        redis_mem_report_impl(db, phase);
+        return enc->ok();
+    }
+    default:
+        return enc->err("internal");
+    }
+}
+
+/* Hold + work + encode (redis.go / sketch execute). */
+@noblock static bool !>(CCError) execute(RedisDb* db, CCShardDomain* shards,
+                                         RedisCmd* cmd, RedisConnEnc enc) {
+    @errhandler(CCError e) { return cc_err(e); }
+    char[:] name;
+    RedisCmdHold h;
+
+    if (cmd->argc == 0) return enc->err("empty command");
+    name = cmd->args[0];
+
+    /* No-hold commands (sketch: handle before hold_for). */
+    switch (name) {
+    case "PING":
+        if (!payload_ok(cmd->argc, 0, 1, 0))
+            return enc->err("wrong number of arguments");
+        if (cmd->argc == 2) return enc->bulk(cmd->args[1]);
+        return enc->pong();
+    case "ECHO":
+        if (!payload_ok(cmd->argc, 1, 1, 0))
+            return enc->err("wrong number of arguments");
+        return enc->bulk(cmd->args[1]);
+    case "CONFIG":
+        if (cmd->argc != 3) return enc->err("unsupported command");
+        fold_ascii_upper(cmd->args[1]);
+        if (cmd->args[1].len != 3 ||
+            cmd->args[1].ptr[0] != 'G' ||
+            cmd->args[1].ptr[1] != 'E' ||
+            cmd->args[1].ptr[2] != 'T') {
             return enc->err("unsupported command");
+        }
+        return enc_wire_result(
+            enc, config_get_reply(cmd->args[2], &enc->reply_arena));
+    default:
+        break;
+    }
+
+    h = hold_for(name);
+    if (h == REDIS_HOLD_NONE) return enc->err("unsupported command");
+
+    if (h == REDIS_HOLD_KEY) {
+        CCShardHold hold;
+        if (cmd->argc < 2) return enc->err("wrong number of arguments");
+        hold = shards->hold_one(
+            (uint64_t)db_shard_index_for_key(db, cmd->args[1]));
+        @defer hold.release();
+        if (!hold.held()) return enc->err("shard admission failed");
+        return exec_key(db, cmd, enc);
+    }
+
+    if (h == REDIS_HOLD_KEYS) {
+        uint64_t names[REDIS_DB_MAX_SHARDS];
+        size_t stride = 1u;
+        size_t nkeys;
+        size_t nnames;
+        CCShardHold hold;
+        if (cmd->argc < 2) return enc->err("wrong number of arguments");
+        switch (name) {
+        case "MSET":
+            stride = 2u;
+            break;
+        default:
+            break;
+        }
+        nkeys = cmd->argc - 1;
+        nnames = unique_shards(db, cmd->args + 1, nkeys, stride, names,
+                               (size_t)REDIS_DB_MAX_SHARDS);
+        hold = shards->hold_sorted(names, nnames);
+        @defer hold.release();
+        if (!hold.held()) return enc->err("shard admission failed");
+        return exec_keys(db, cmd, enc);
+    }
+
+    {
+        CCShardHold hold = shards->hold_all();
+        @defer hold.release();
+        if (!hold.held()) return enc->err("shard admission failed");
+        return exec_all(db, cmd, enc);
     }
 }
 
@@ -652,10 +876,10 @@ static bool db_setup(RedisDb* db, size_t shard_count, const char* shard_src) {
     return 1;
 }
 
-/* Single acquire site.  Hold covers DB work + Conn encode; flush after. */
+/* Pipeline window: parse → execute → flush (hold lives inside execute). */
 @noblock static bool !>(CCError) run_pipeline_window(RedisConn* conn,
                                                      RedisDb* db,
-                                                     CCExclusive* excl,
+                                                     CCShardDomain* shards,
                                                      ReqIter* req_iter,
                                                      size_t* n_out) {
     @errhandler(CCError e) { return cc_err(e); }
@@ -669,72 +893,10 @@ static bool db_setup(RedisDb* db, size_t shard_count, const char* shard_src) {
         if (!has) break;
         n++;
         *n_out = n;
-
-        char[:]* argv = cmd.args + cmd.arg_start;
-        size_t argc = (size_t)cmd.argc;
-        CCExclusiveGuard guards[REDIS_DB_MAX_SHARDS];
-        size_t n_guards = 0;
-        RedisConnEnc enc = conn;
-
-        switch (hold_for(cmd.kind)) {
-            case REDIS_HOLD_NONE:
-                execute(db, &cmd, enc) !>(e) {
-                    (void)e;
-                    return cc_ok(0);
-                };
-                break;
-
-            case REDIS_HOLD_INSTALL: {
-                CCString pre_val = db_prep_value(argv[1]) !>;
-                guards[0] = excl->acquire(
-                    (uint64_t)db_shard_index_for_key(db, argv[0]));
-                n_guards = 1;
-                @defer guards->release_n(n_guards);
-                RedisReply r = reply_or_err(db_set_install(db, argv[0], pre_val, 0));
-                enc->write_reply(&r) !>(e) {
-                    (void)e;
-                    return cc_ok(0);
-                };
-                break;
-            }
-
-            case REDIS_HOLD_KEY: {
-                guards[0] = excl->acquire(
-                    (uint64_t)db_shard_index_for_key(db, argv[0]));
-                n_guards = 1;
-                @defer guards->release_n(n_guards);
-                execute(db, &cmd, enc) !>(e) {
-                    (void)e;
-                    return cc_ok(0);
-                };
-                break;
-            }
-
-            case REDIS_HOLD_KEYS: {
-                size_t stride = (cmd.kind == REDIS_CMD_MSET) ? 2u : 1u;
-                n_guards = shard_guards_acquire_key_set(
-                    excl, db, argv, argc, stride, guards,
-                    (size_t)REDIS_DB_MAX_SHARDS);
-                @defer guards->release_n(n_guards);
-                execute(db, &cmd, enc) !>(e) {
-                    (void)e;
-                    return cc_ok(0);
-                };
-                break;
-            }
-
-            case REDIS_HOLD_ALL: {
-                n_guards = excl->acquire_range(
-                    0, (uint64_t)db->shard_count, guards,
-                    (size_t)REDIS_DB_MAX_SHARDS);
-                @defer guards->release_n(n_guards);
-                execute(db, &cmd, enc) !>(e) {
-                    (void)e;
-                    return cc_ok(0);
-                };
-                break;
-            }
-        }
+        execute(db, shards, &cmd, conn) !>(e) {
+            (void)e;
+            return cc_ok(0);
+        };
     }
 
     conn->flush() !>(e) {
@@ -744,7 +906,7 @@ static bool db_setup(RedisDb* db, size_t shard_count, const char* shard_src) {
     return cc_ok(1);
 }
 
-static void handle_client(CCSocket client, RedisDb* db, CCExclusive* excl) {
+static void handle_client(CCSocket client, RedisDb* db, CCShardDomain* shards) {
     char out_slab[k_out_buf];
     CCArena out_arena =
         cc_arena_create_buffer(out_slab, sizeof(out_slab), CC_ARENA_GROWABLE)
@@ -776,7 +938,7 @@ static void handle_client(CCSocket client, RedisDb* db, CCExclusive* excl) {
 
         size_t n_cmds = 0;
         bool window_ok =
-            run_pipeline_window(&conn, db, excl, &req_iter, &n_cmds) !>;
+            run_pipeline_window(&conn, db, shards, &req_iter, &n_cmds) !>;
         if (!window_ok) return;
 
         if (n_cmds == (size_t)k_pipeline_window_cap && reader.start < reader.end)
@@ -815,18 +977,19 @@ int main(int argc, char** argv) {
 
     RedisDb db = {0};
     const char* shard_src = NULL;
-    size_t shard_count = redis_shard_count(&shard_src);
-    if (!db_setup(&db, shard_count, shard_src)) return 1;
+    CCShardMask mask = redis_shard_mask(&shard_src);
+    if (!db_setup(&db, mask.count, shard_src)) return 1;
     @defer db_free_all(&db);
 
     CCArena excl_arena = cc_arena_heap(kilobytes(64));
     @defer excl_arena.destroy();
-    CCExclusive* excl = cc_exclusive_create(&excl_arena, shard_count * 2u);
+    CCExclusive* excl = cc_exclusive_create(&excl_arena, mask.count * 2u);
     if (!excl) {
         eprintln("redis_idiomatic: exclusive failed") !>;
         return 1;
     }
     @defer excl->destroy();
+    CCShardDomain shards = cc_shard_domain(excl, mask);
 
     size_t nshards = db.shard_count;
     println(@string(`redis_idiomatic listening on ${addr} shards=${nshards}`,
@@ -835,12 +998,12 @@ int main(int argc, char** argv) {
     CCNursery* server = cc_nursery_create(NULL) !> @destroy;
     server->cancel_on_signals(SIGINT, SIGTERM) !>;
 
-    server->spawn(() => [@safe &db, @safe &ln, excl, server] {
-        ln.serve(server, (CCSocket* accepted) => [@safe &db, excl, server] {
+    server->spawn(() => [@safe &db, @safe &ln, @safe &shards, server] {
+        ln.serve(server, (CCSocket* accepted) => [@safe &db, @safe &shards, server] {
             CCSocket client = *accepted;
             (void)client.set_nodelay(1);
-            server->spawn(() => [@safe &db, excl, client] {
-                handle_client(client, &db, excl);
+            server->spawn(() => [@safe &db, @safe &shards, client] {
+                handle_client(client, &db, &shards);
             });
         });
     });

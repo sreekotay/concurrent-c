@@ -6492,6 +6492,47 @@ static int shadow_resync_line(CEmit* out, ShadowCtx* ctx, const char* indent) {
     return ok;
 }
 
+/* Pin the next physical line to a real user site. Unlike shadow_emit_line,
+ * always re-emits `#line` even when the site matches the last marker — so a
+ * multi-line synthetic expansion can stay on one source line (cpp would
+ * otherwise walk N, N+1, … past EOF). `st` NULL → ctx->site. */
+static int shadow_pin_line(CEmit* out, ShadowCtx* ctx, AstNode* st,
+                           const char* indent) {
+    AstNode* site = st ? st : (ctx ? ctx->site : NULL);
+    AstNode* saved;
+    int ok;
+    if (!out || !ctx || !site) return 1;
+    saved = ctx->site;
+    ctx->site = site;
+    ctx->line_file_id = 0;
+    ctx->line_no = 0;
+    ok = shadow_emit_line(out, ctx, site, indent);
+    if (!ok) ctx->site = saved;
+    return ok;
+}
+
+/* Emit `block` (newline-terminated lines) with `#line` re-pinned to `st`
+ * before every physical line. */
+static int shadow_emit_pinned_block(CEmit* out, ShadowCtx* ctx, AstNode* st,
+                                    const char* indent, const char* block) {
+    const char* p;
+    const char* line;
+    if (!out || !block) return 0;
+    p = block;
+    while (*p) {
+        line = p;
+        while (*p && *p != '\n') p++;
+        if (!shadow_pin_line(out, ctx, st, indent)) return 0;
+        if (*p == '\n') {
+            if (!cemit_buf(out, line, (size_t)(p - line) + 1)) return 0;
+            p++;
+        } else if (!cemit_str(out, line)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 /* Prefer indent of first real stmt; else 4 spaces. */
 static void shadow_pick_body_indent(AstNode** kids, int nkids, char* dst,
                                     size_t cap) {

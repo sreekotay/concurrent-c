@@ -266,86 +266,101 @@ static int shadow_emit_async_fn(AstNode* it, CEmit* out, TapeCache* cache) {
         shadow_pop_fn_binds(bind_mark);
     }
 
-    if (!cemit_fmt(out,
-            "static CCFutureStatus %s_poll(void* __p, intptr_t* __o, int* __e) {\n"
-            "  (void)__e;\n"
-            "  %s_frame* __f = (%s_frame*)__p;\n"
-            "  if (!__f) return CC_FUTURE_ERR;\n",
-            base, base, base))
-        return 0;
-    if (!cemit_str(out,
-            "  for (;;) {\n"
-            "  switch (__f->__st) {\n"
-            "    case 0:\n"
-            "      __f->__st = 1;\n"
-            "      /* fallthrough */\n"
-            "    case 1: {\n"))
-        return 0;
-    if (is_void) {
-        if (!cemit_fmt(out, "      %s_body(__f);\n      __f->__r = 0;\n", base))
-            return 0;
-    } else if (is_result_ret) {
-        /* Pack Result on the heap — POLL tasks have no fiber result_buf.
-         * Await wrap copies out and frees (see ast_spell await). */
-        if (!cemit_fmt(out,
-                "      {\n"
-                "        %s __cc_ar = %s_body(__f);\n"
-                "        %s* __cc_arp = (%s*)malloc(sizeof(*__cc_arp));\n"
-                "        if (__cc_arp) *__cc_arp = __cc_ar;\n"
-                "        __f->__r = (intptr_t)(void*)__cc_arp;\n"
-                "      }\n",
-                it->a, base, it->a, it->a))
-            return 0;
-    } else if (!cemit_fmt(out, "      __f->__r = (intptr_t)%s_body(__f);\n",
-                          base)) {
-        return 0;
+    /* Poll/drop/task-make: pin every physical line to the @async fn site so
+     * cpp does not walk past the body's last `#line` toward source EOF. */
+    {
+        CEmit syn = {0};
+        ShadowCtx pin = { .cache = cache, .site = it };
+        int ok = 1;
+        if (!cemit_fmt(&syn,
+                "static CCFutureStatus %s_poll(void* __p, intptr_t* __o, int* __e) {\n"
+                "  (void)__e;\n"
+                "  %s_frame* __f = (%s_frame*)__p;\n"
+                "  if (!__f) return CC_FUTURE_ERR;\n",
+                base, base, base))
+            ok = 0;
+        if (ok && !cemit_str(&syn,
+                "  for (;;) {\n"
+                "  switch (__f->__st) {\n"
+                "    case 0:\n"
+                "      __f->__st = 1;\n"
+                "      /* fallthrough */\n"
+                "    case 1: {\n"))
+            ok = 0;
+        if (ok && is_void) {
+            if (!cemit_fmt(&syn, "      %s_body(__f);\n      __f->__r = 0;\n",
+                           base))
+                ok = 0;
+        } else if (ok && is_result_ret) {
+            if (!cemit_fmt(&syn,
+                    "      {\n"
+                    "        %s __cc_ar = %s_body(__f);\n"
+                    "        %s* __cc_arp = (%s*)malloc(sizeof(*__cc_arp));\n"
+                    "        if (__cc_arp) *__cc_arp = __cc_ar;\n"
+                    "        __f->__r = (intptr_t)(void*)__cc_arp;\n"
+                    "      }\n",
+                    it->a, base, it->a, it->a))
+                ok = 0;
+        } else if (ok && !cemit_fmt(&syn,
+                                    "      __f->__r = (intptr_t)%s_body(__f);\n",
+                                    base)) {
+            ok = 0;
+        }
+        if (ok && !cemit_str(&syn,
+                "      __f->__st = 999;\n"
+                "      continue;\n"
+                "    }\n"
+                "    case 999: {\n"
+                "      if (__o) *__o = __f->__r;\n"
+                "      return CC_FUTURE_READY;\n"
+                "    }\n"
+                "    default:\n"
+                "      return CC_FUTURE_ERR;\n"
+                "  }\n"
+                "  }\n"
+                "}\n\n"))
+            ok = 0;
+        if (ok && !cemit_fmt(&syn, "static void %s_drop(void* __p) {\n", base))
+            ok = 0;
+        if (ok && !cemit_fmt(&syn, "  %s_frame* __f = (%s_frame*)__p;\n", base,
+                             base))
+            ok = 0;
+        if (ok && !cemit_str(&syn,
+                "  if (!__f) return;\n"
+                "  for (int __i = 0; __i < 1; __i++) {\n"
+                "    cc_task_intptr_free(&__f->__t[__i]);\n"
+                "  }\n"
+                "  free(__f);\n"
+                "}\n\n"))
+            ok = 0;
+        if (ok && !cemit_fmt(&syn, "CCTaskIntptr %s(%s) {\n", it->b, params))
+            ok = 0;
+        if (ok && !cemit_fmt(&syn,
+                "  %s_frame* __f = (%s_frame*)calloc(1, sizeof(%s_frame));\n",
+                base, base, base))
+            ok = 0;
+        if (ok && !cemit_str(&syn,
+                "  if (!__f) {\n"
+                "    CCTaskIntptr __t;\n"
+                "    memset(&__t, 0, sizeof(__t));\n"
+                "    return __t;\n"
+                "  }\n"
+                "  __f->__st = 0;\n"))
+            ok = 0;
+        for (k = 0; ok && k < np; k++) {
+            if (!cemit_fmt(&syn, "  __f->__p_%s = %s;\n", ps[k].name,
+                           ps[k].name))
+                ok = 0;
+        }
+        if (ok && !cemit_fmt(&syn,
+                "  return cc_task_intptr_make_poll_ex(%s_poll, NULL, __f, %s_drop);\n"
+                "}\n\n",
+                base, base))
+            ok = 0;
+        if (ok && syn.buf)
+            ok = shadow_emit_pinned_block(out, &pin, it, "", syn.buf);
+        free(syn.buf);
+        if (!ok) return 0;
     }
-    if (!cemit_str(out,
-            "      __f->__st = 999;\n"
-            "      continue;\n"
-            "    }\n"
-            "    case 999: {\n"
-            "      if (__o) *__o = __f->__r;\n"
-            "      return CC_FUTURE_READY;\n"
-            "    }\n"
-            "    default:\n"
-            "      return CC_FUTURE_ERR;\n"
-            "  }\n"
-            "  }\n"
-            "}\n\n"))
-        return 0;
-    if (!cemit_fmt(out, "static void %s_drop(void* __p) {\n", base)) return 0;
-    if (!cemit_fmt(out, "  %s_frame* __f = (%s_frame*)__p;\n", base, base))
-        return 0;
-    if (!cemit_str(out,
-            "  if (!__f) return;\n"
-            "  for (int __i = 0; __i < 1; __i++) {\n"
-            "    cc_task_intptr_free(&__f->__t[__i]);\n"
-            "  }\n"
-            "  free(__f);\n"
-            "}\n\n"))
-        return 0;
-    if (!cemit_fmt(out, "CCTaskIntptr %s(%s) {\n", it->b, params)) return 0;
-    if (!cemit_fmt(out,
-            "  %s_frame* __f = (%s_frame*)calloc(1, sizeof(%s_frame));\n",
-            base, base, base))
-        return 0;
-    if (!cemit_str(out,
-            "  if (!__f) {\n"
-            "    CCTaskIntptr __t;\n"
-            "    memset(&__t, 0, sizeof(__t));\n"
-            "    return __t;\n"
-            "  }\n"
-            "  __f->__st = 0;\n"))
-        return 0;
-    for (k = 0; k < np; k++) {
-        if (!cemit_fmt(out, "  __f->__p_%s = %s;\n", ps[k].name, ps[k].name))
-            return 0;
-    }
-    if (!cemit_fmt(out,
-            "  return cc_task_intptr_make_poll_ex(%s_poll, NULL, __f, %s_drop);\n"
-            "}\n\n",
-            base, base))
-        return 0;
     return 1;
 }
