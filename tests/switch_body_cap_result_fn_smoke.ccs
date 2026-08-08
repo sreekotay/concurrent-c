@@ -1,0 +1,231 @@
+/*
+ * Fat Result-fn switch that used to break (ConnEnc was a red herring):
+ *
+ *   static bool !>(CCError) f(...) {
+ *     switch (k) { … many arms with `!>`; body length >= 4096 … }
+ *   }
+ *
+ * Was: structured body[64] miss → opaque d[4096] → silent NULL → raw `!>`.
+ * Now: body[256] keeps fat !> switches structured; opaque bodies larger
+ * than d[] stay on the tape (span_off/span_len) instead of NULL.
+ *
+ * Expect PASS:
+ *   ./cc/bin/ccc --no-cache build --emit-c-only \
+ *     tests/switch_body_cap_result_fn_smoke.ccs -o /tmp/x.c
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/script/stdio.cch>
+
+static int64_t !>(CCError) parse_i(char[:] s) {
+    return s.to_i64();
+}
+
+static bool !>(CCError) execute_fat(int k, char[:] arg) {
+    @errhandler(CCError e) { return cc_err(e); }
+    switch (k) {
+    case 0: {
+        char[:] _pad = CC_SLICE_LIT("pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad");
+        (void)_pad;
+        int64_t v = parse_i(arg) !>;
+        return cc_ok(v == (int64_t)0);
+    }
+    case 1: {
+        char[:] _pad = CC_SLICE_LIT("pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad");
+        (void)_pad;
+        int64_t v = parse_i(arg) !>;
+        return cc_ok(v == (int64_t)1);
+    }
+    case 2: {
+        char[:] _pad = CC_SLICE_LIT("pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad");
+        (void)_pad;
+        int64_t v = parse_i(arg) !>;
+        return cc_ok(v == (int64_t)2);
+    }
+    case 3: {
+        char[:] _pad = CC_SLICE_LIT("pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad");
+        (void)_pad;
+        int64_t v = parse_i(arg) !>;
+        return cc_ok(v == (int64_t)3);
+    }
+    case 4: {
+        char[:] _pad = CC_SLICE_LIT("pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad");
+        (void)_pad;
+        int64_t v = parse_i(arg) !>;
+        return cc_ok(v == (int64_t)4);
+    }
+    case 5: {
+        char[:] _pad = CC_SLICE_LIT("pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad");
+        (void)_pad;
+        int64_t v = parse_i(arg) !>;
+        return cc_ok(v == (int64_t)5);
+    }
+    case 6: {
+        char[:] _pad = CC_SLICE_LIT("pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad");
+        (void)_pad;
+        int64_t v = parse_i(arg) !>;
+        return cc_ok(v == (int64_t)6);
+    }
+    case 7: {
+        char[:] _pad = CC_SLICE_LIT("pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad");
+        (void)_pad;
+        int64_t v = parse_i(arg) !>;
+        return cc_ok(v == (int64_t)7);
+    }
+    case 8: {
+        char[:] _pad = CC_SLICE_LIT("pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad");
+        (void)_pad;
+        int64_t v = parse_i(arg) !>;
+        return cc_ok(v == (int64_t)8);
+    }
+    case 9: {
+        char[:] _pad = CC_SLICE_LIT("pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad");
+        (void)_pad;
+        int64_t v = parse_i(arg) !>;
+        return cc_ok(v == (int64_t)9);
+    }
+    case 10: {
+        char[:] _pad = CC_SLICE_LIT("pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad");
+        (void)_pad;
+        int64_t v = parse_i(arg) !>;
+        return cc_ok(v == (int64_t)10);
+    }
+    case 11: {
+        char[:] _pad = CC_SLICE_LIT("pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad");
+        (void)_pad;
+        int64_t v = parse_i(arg) !>;
+        return cc_ok(v == (int64_t)11);
+    }
+    case 12: {
+        char[:] _pad = CC_SLICE_LIT("pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad");
+        (void)_pad;
+        int64_t v = parse_i(arg) !>;
+        return cc_ok(v == (int64_t)12);
+    }
+    case 13: {
+        char[:] _pad = CC_SLICE_LIT("pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad");
+        (void)_pad;
+        int64_t v = parse_i(arg) !>;
+        return cc_ok(v == (int64_t)13);
+    }
+    case 14: {
+        char[:] _pad = CC_SLICE_LIT("pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad");
+        (void)_pad;
+        int64_t v = parse_i(arg) !>;
+        return cc_ok(v == (int64_t)14);
+    }
+    case 15: {
+        char[:] _pad = CC_SLICE_LIT("pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad");
+        (void)_pad;
+        int64_t v = parse_i(arg) !>;
+        return cc_ok(v == (int64_t)15);
+    }
+    case 16: {
+        char[:] _pad = CC_SLICE_LIT("pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad");
+        (void)_pad;
+        int64_t v = parse_i(arg) !>;
+        return cc_ok(v == (int64_t)16);
+    }
+    case 17: {
+        char[:] _pad = CC_SLICE_LIT("pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad");
+        (void)_pad;
+        int64_t v = parse_i(arg) !>;
+        return cc_ok(v == (int64_t)17);
+    }
+    case 18: {
+        char[:] _pad = CC_SLICE_LIT("pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad");
+        (void)_pad;
+        int64_t v = parse_i(arg) !>;
+        return cc_ok(v == (int64_t)18);
+    }
+    case 19: {
+        char[:] _pad = CC_SLICE_LIT("pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad");
+        (void)_pad;
+        int64_t v = parse_i(arg) !>;
+        return cc_ok(v == (int64_t)19);
+    }
+    case 20: {
+        char[:] _pad = CC_SLICE_LIT("pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad");
+        (void)_pad;
+        int64_t v = parse_i(arg) !>;
+        return cc_ok(v == (int64_t)20);
+    }
+    case 21: {
+        char[:] _pad = CC_SLICE_LIT("pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad");
+        (void)_pad;
+        int64_t v = parse_i(arg) !>;
+        return cc_ok(v == (int64_t)21);
+    }
+    case 22: {
+        char[:] _pad = CC_SLICE_LIT("pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad");
+        (void)_pad;
+        int64_t v = parse_i(arg) !>;
+        return cc_ok(v == (int64_t)22);
+    }
+    case 23: {
+        char[:] _pad = CC_SLICE_LIT("pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad");
+        (void)_pad;
+        int64_t v = parse_i(arg) !>;
+        return cc_ok(v == (int64_t)23);
+    }
+    case 24: {
+        char[:] _pad = CC_SLICE_LIT("pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad");
+        (void)_pad;
+        int64_t v = parse_i(arg) !>;
+        return cc_ok(v == (int64_t)24);
+    }
+    case 25: {
+        char[:] _pad = CC_SLICE_LIT("pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad");
+        (void)_pad;
+        int64_t v = parse_i(arg) !>;
+        return cc_ok(v == (int64_t)25);
+    }
+    case 26: {
+        char[:] _pad = CC_SLICE_LIT("pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad");
+        (void)_pad;
+        int64_t v = parse_i(arg) !>;
+        return cc_ok(v == (int64_t)26);
+    }
+    case 27: {
+        char[:] _pad = CC_SLICE_LIT("pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad");
+        (void)_pad;
+        int64_t v = parse_i(arg) !>;
+        return cc_ok(v == (int64_t)27);
+    }
+    case 28: {
+        char[:] _pad = CC_SLICE_LIT("pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad");
+        (void)_pad;
+        int64_t v = parse_i(arg) !>;
+        return cc_ok(v == (int64_t)28);
+    }
+    case 29: {
+        char[:] _pad = CC_SLICE_LIT("pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad");
+        (void)_pad;
+        int64_t v = parse_i(arg) !>;
+        return cc_ok(v == (int64_t)29);
+    }
+    case 30: {
+        char[:] _pad = CC_SLICE_LIT("pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad");
+        (void)_pad;
+        int64_t v = parse_i(arg) !>;
+        return cc_ok(v == (int64_t)30);
+    }
+    case 31: {
+        char[:] _pad = CC_SLICE_LIT("pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad");
+        (void)_pad;
+        int64_t v = parse_i(arg) !>;
+        return cc_ok(v == (int64_t)31);
+    }
+    default: {
+        int64_t v = parse_i(arg) !>;
+        return cc_ok(v < 0);
+    }
+    }
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    bool ok = execute_fat(3, cc_slice_cstr("3")) !>;
+    if (ok) println("ok") !>;
+    else println("no") !>;
+    return 0;
+}
