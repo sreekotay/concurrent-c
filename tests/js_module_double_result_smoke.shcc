@@ -14,7 +14,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 }
 
 /* No staging: `js_module::[Counter]` names the artifact, so building the
- * fixture where it lives produces bin/counter.node. */
+ * fixture where it lives produces bin/gamut_counter.node. */
 {
     CCCommand build = cc_command(&a, @slice("./cc/bin/ccc"));
     build.arg("build");
@@ -28,7 +28,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
     CCCommand run = cc_command(&a, @slice("sh"));
     run.arg("-c");
     CCString js = @string(`node -e "
-const c = require(process.cwd() + '/bin/counter.node');
+const c = require(process.cwd() + '/bin/gamut_counter.node');
 console.log('scale', c.scale(0.5));
 console.log('label', c.label());
 const b = c.big();

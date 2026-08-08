@@ -1113,15 +1113,50 @@ static int cc__module_entry_collect(const char* buf, const char* in_path,
     return nd;
 }
 
-static int cc__detect_ext_module(const char* in_path, char* name_out, size_t cap,
-                                 char* suffix_out, size_t scap) {
+/* One buildable artifact of an extension-module TU.  A TU that spells
+ * entries for several embeddings (both export directives, or both
+ * explicit stanzas) is DUAL-TARGET: the compiled shared object is
+ * identical under every entry — all stanzas are always compiled in and
+ * every embedding resolves its runtime lazily — so the targets differ
+ * only in artifact name.  `tag` narrows via --module=<tag>, derived
+ * from the header's export directive (cc_py_export → py). */
+typedef struct {
+    char name[128];
+    char suffix[32];
+    char tag[32];
+} CCExtModTarget;
+
+static void cc__tag_from_directive(const char* dir, char* out, size_t cap) {
+    size_t l;
+    out[0] = 0;
+    if (!dir || !dir[0]) return;
+    l = strlen(dir);
+    if (strncmp(dir, "cc_", 3) == 0 && l > 10 &&
+        strcmp(dir + l - 7, "_export") == 0) {
+        size_t m = l - 10;
+        if (m + 1 > cap) m = cap - 1;
+        memcpy(out, dir + 3, m);
+        out[m] = 0;
+    } else {
+        snprintf(out, cap, "%s", dir);
+    }
+}
+
+/* Scan the TU for every declared entry with evidence — an exported entry
+ * symbol, or an export directive (which guarantees the emitted entry).
+ * Fills tg[] in declaration order (first = primary) and returns the
+ * count; 0 when the TU defines `main` (main beats any entry) or spells
+ * no entry at all. */
+static int cc__detect_ext_module(const char* in_path, CCExtModTarget* tg,
+                                 int tcap) {
     char* buf;
     size_t len = 0;
     CCModuleEntryDecl decls[8];
-    int nd, hit = -1, has_main = 0;
-    if (!in_path || !name_out || cap == 0 || !suffix_out || scap == 0) return 0;
-    name_out[0] = '\0';
-    suffix_out[0] = '\0';
+    int found[8] = { 0 };
+    char names[8][128];
+    int nd, has_main = 0;
+    if (!in_path || !tg || tcap <= 0) return 0;
+    memset(names, 0, sizeof(names));
     buf = cc__read_file_all(in_path, &len);
     if (!buf) return 0;
     nd = cc__module_entry_collect(buf, in_path, decls,
@@ -1136,10 +1171,9 @@ static int cc__detect_ext_module(const char* in_path, char* name_out, size_t cap
             char nm[128];
             if (!decls[e].export_dir[0]) continue;
             if (cc_module_export_tu_artifact(buf, len, decls[e].export_dir, nm,
-                                             sizeof(nm)) > 0 &&
-                (hit < 0 || e < hit)) {
-                hit = e;
-                snprintf(name_out, cap, "%s", nm);
+                                             sizeof(nm)) > 0) {
+                found[e] = 1;
+                snprintf(names[e], sizeof(names[e]), "%s", nm);
             }
         }
     }
@@ -1189,13 +1223,13 @@ static int cc__detect_ext_module(const char* in_path, char* name_out, size_t cap
                                (isalnum((unsigned char)buf[k]) || buf[k] == '_'))
                             k++;
                         if (k == s) continue;
-                        if (hit < 0 || e < hit) {
-                            hit = e;
-                            while (s + m < k && m + 1 < cap) {
-                                name_out[m] = buf[s + m];
+                        found[e] = 1;
+                        if (!names[e][0]) {
+                            while (s + m < k && m + 1 < sizeof(names[e])) {
+                                names[e][m] = buf[s + m];
                                 m++;
                             }
-                            name_out[m] = '\0';
+                            names[e][m] = '\0';
                         }
                         i = k;
                         break;
@@ -1203,10 +1237,7 @@ static int cc__detect_ext_module(const char* in_path, char* name_out, size_t cap
                     if (i + el < len &&
                         (isalnum((unsigned char)buf[i + el]) || buf[i + el] == '_'))
                         continue;
-                    if (hit < 0 || e < hit) {
-                        if (hit != e) name_out[0] = '\0';
-                        hit = e;
-                    }
+                    found[e] = 1;
                     i += el;
                     break;
                 }
@@ -1240,18 +1271,17 @@ static int cc__detect_ext_module(const char* in_path, char* name_out, size_t cap
                                (isalnum((unsigned char)buf[k]) || buf[k] == '_'))
                             k++;
                         if (k == s) continue;
-                        if (!name_out[0] && (hit < 0 || decls[hit].factory ==
-                                                            decls[e].factory)) {
-                            for (q = s; q < k && m + 2 < cap; q++) {
+                        if (!names[e][0]) {
+                            for (q = s; q < k && m + 2 < sizeof(names[e]); q++) {
                                 char ch = buf[q];
                                 if (ch >= 'A' && ch <= 'Z') {
-                                    if (q > s) name_out[m++] = '_';
-                                    name_out[m++] = (char)(ch - 'A' + 'a');
+                                    if (q > s) names[e][m++] = '_';
+                                    names[e][m++] = (char)(ch - 'A' + 'a');
                                 } else {
-                                    name_out[m++] = ch;
+                                    names[e][m++] = ch;
                                 }
                             }
-                            name_out[m] = '\0';
+                            names[e][m] = '\0';
                         }
                         i = k;
                         break;
@@ -1263,12 +1293,48 @@ static int cc__detect_ext_module(const char* in_path, char* name_out, size_t cap
         }
     }
     free(buf);
-    if (has_main || hit < 0) {
-        name_out[0] = '\0';
-        return 0;
+    if (has_main) return 0;
+    {
+        int e, nt = 0;
+        for (e = 0; e < nd && nt < tcap; e++) {
+            if (!found[e]) continue;
+            snprintf(tg[nt].name, sizeof(tg[nt].name), "%s", names[e]);
+            snprintf(tg[nt].suffix, sizeof(tg[nt].suffix), "%s",
+                     decls[e].suffix);
+            cc__tag_from_directive(decls[e].export_dir, tg[nt].tag,
+                                   sizeof(tg[nt].tag));
+            nt++;
+        }
+        return nt;
     }
-    snprintf(suffix_out, scap, "%s", decls[hit].suffix);
-    return 1;
+}
+
+/* Hardlink dst to src (same bytes under a second name); copy when the
+ * filesystem refuses links. */
+static int cc__link_or_copy(const char* src, const char* dst) {
+    unlink(dst);
+    if (link(src, dst) == 0) return 0;
+    {
+        FILE* in = fopen(src, "rb");
+        FILE* out = in ? fopen(dst, "wb") : NULL;
+        char buf[65536];
+        size_t got;
+        if (!in || !out) {
+            if (in) fclose(in);
+            if (out) fclose(out);
+            return -1;
+        }
+        while ((got = fread(buf, 1, sizeof(buf), in)) > 0) {
+            if (fwrite(buf, 1, got, out) != got) {
+                fclose(in);
+                fclose(out);
+                return -1;
+            }
+        }
+        fclose(in);
+        if (fclose(out) != 0) return -1;
+        return chmod(dst, 0755) == 0 ? 0 : -1;
+    }
 }
 
 static const char* pick_cc_bin(const char* override) {
@@ -4074,6 +4140,7 @@ static int run_build_mode(int argc, char** argv) {
     const char* obj_out = NULL;
     const char* build_override = NULL;
     const char* cc_bin = NULL;
+    const char* module_narrow = NULL; // --module=<tag> dual-target narrowing
     const char* cc_flags = NULL;
     const char* ld_flags = NULL;
     const char* target_flag = NULL;
@@ -4243,6 +4310,17 @@ static int run_build_mode(int argc, char** argv) {
         if (strcmp(argv[i], "--target") == 0) {
             if (i + 1 >= argc) { fprintf(stderr, "cc: --target requires a value\n"); goto parse_fail; }
             target_flag = argv[++i];
+            continue;
+        }
+        /* Dual-target module narrowing: build only the named embedding's
+         * artifact (tag from the header's export directive: py, js). */
+        if (strcmp(argv[i], "--module") == 0) {
+            if (i + 1 >= argc) { fprintf(stderr, "cc: --module requires a target tag (e.g. py, js)\n"); goto parse_fail; }
+            module_narrow = argv[++i];
+            continue;
+        }
+        if (strncmp(argv[i], "--module=", 9) == 0) {
+            module_narrow = argv[i] + 9;
             continue;
         }
         if (strcmp(argv[i], "--sysroot") == 0) {
@@ -5324,13 +5402,32 @@ static int run_build_mode(int argc, char** argv) {
 
     /* Extension module: a stdlib-declared entry point exported, no `main`
      * (see CC_MODULE_ENTRY above) — the declaration carries the suffix
-     * and the naming rule. */
-    static char extmod_name[128];
-    static char extmod_suffix[32];
+     * and the naming rule.  A TU may target several embeddings at once;
+     * the object is identical under every entry, so secondaries become
+     * hardlinked names after the primary links (below). */
+    static CCExtModTarget extmod_tg[4];
     static char extmod_ccflags[1024];
     static char extmod_ldflags[1024];
-    if (cc__detect_ext_module(in_path_abs, extmod_name, sizeof(extmod_name),
-                              extmod_suffix, sizeof(extmod_suffix))) {
+    int extmod_nt = cc__detect_ext_module(
+        in_path_abs, extmod_tg, (int)(sizeof(extmod_tg) / sizeof(extmod_tg[0])));
+    if (module_narrow && module_narrow[0]) {
+        int w = 0, e;
+        for (e = 0; e < extmod_nt; e++)
+            if (strcmp(extmod_tg[e].tag, module_narrow) == 0)
+                extmod_tg[w++] = extmod_tg[e];
+        if (extmod_nt == 0 || w == 0) {
+            fprintf(stderr, "cc: --module=%s: this TU spells no such entry"
+                            " (targets:",
+                    module_narrow);
+            for (e = 0; e < extmod_nt; e++)
+                fprintf(stderr, " %s",
+                        extmod_tg[e].tag[0] ? extmod_tg[e].tag : "<untagged>");
+            fprintf(stderr, "%s)\n", extmod_nt ? "" : " none");
+            goto parse_fail;
+        }
+        extmod_nt = w;
+    }
+    if (extmod_nt > 0) {
         snprintf(extmod_ccflags, sizeof(extmod_ccflags), "%s%s-fPIC",
                  cc_flags ? cc_flags : "", (cc_flags && cc_flags[0]) ? " " : "");
         cc_flags = extmod_ccflags;
@@ -5372,17 +5469,19 @@ static int run_build_mode(int argc, char** argv) {
         if (user_out) {
             strncpy(bin_path, user_out, sizeof(bin_path));
             bin_path[sizeof(bin_path)-1] = '\0';
-        } else if (extmod_suffix[0]) {
-            /* The declaration names the artifact: the entry symbol's
-             * suffix (PyInit_counter → counter.abi3.so), the factory's
-             * type formal (js_module::[Counter] → counter.node), or the
-             * source stem when the declaration offers no name. */
+        } else if (extmod_nt > 0) {
+            /* The declaration names the artifact: the export directive's
+             * type or override, the entry symbol's suffix (PyInit_counter
+             * → counter.abi3.so), the factory's type formal
+             * (js_module::[Counter] → counter.node), or the source stem
+             * when the declaration offers no name.  The primary target
+             * (first declared) names the linked file. */
             char mstem[128];
-            if (extmod_name[0])
-                snprintf(mstem, sizeof(mstem), "%s", extmod_name);
+            if (extmod_tg[0].name[0])
+                snprintf(mstem, sizeof(mstem), "%s", extmod_tg[0].name);
             else
                 cc__stem_from_path(in_path_abs, mstem, sizeof(mstem));
-            if (derive_path_from_stem(mstem, g_bin_root, extmod_suffix,
+            if (derive_path_from_stem(mstem, g_bin_root, extmod_tg[0].suffix,
                                       bin_path, sizeof(bin_path)) != 0) {
                 fprintf(stderr, "cc: failed to derive module output\n");
                 goto parse_fail;
@@ -5429,6 +5528,30 @@ static int run_build_mode(int argc, char** argv) {
         free(cli_names[i]);
     }
     if (compile_err != 0) return compile_err;
+
+    /* Dual-target module: every declared entry is compiled into the one
+     * shared object, so secondary targets are the same file under their
+     * own names — hardlinks (copy when the filesystem refuses).  `-o`
+     * names exactly one artifact and skips siblings; --module narrows. */
+    if (mode == CC_MODE_LINK && !user_out && extmod_nt > 1) {
+        int e;
+        for (e = 1; e < extmod_nt; e++) {
+            char sib[PATH_MAX];
+            char sstem[128];
+            if (extmod_tg[e].name[0])
+                snprintf(sstem, sizeof(sstem), "%s", extmod_tg[e].name);
+            else
+                cc__stem_from_path(in_path_abs, sstem, sizeof(sstem));
+            if (derive_path_from_stem(sstem, g_bin_root, extmod_tg[e].suffix,
+                                      sib, sizeof(sib)) != 0 ||
+                cc__link_or_copy(bin_path, sib) != 0) {
+                fprintf(stderr, "cc: dual-target: cannot produce %s%s\n",
+                        sstem, extmod_tg[e].suffix);
+                return 1;
+            }
+            if (verbose) fprintf(stderr, "cc: dual-target: %s\n", sib);
+        }
+    }
 
     if (step == CC_BUILD_STEP_RUN) {
         // Print project-specific options (if any) when requested explicitly.
@@ -5504,8 +5627,8 @@ static int cc__selftest_const_eval(int argc, char** argv) {
 static int cc__flag_takes_value(const char* a) {
     static const char* v[] = {
         "-o", "-D", "--build-file", "--out-stem", "--out-dir", "--bin-dir",
-        "--cc-bin", "--cc-flags", "--ld-flags", "--target", "--sysroot",
-        "--obj-out", "--graph-out", "--timeout", "--format",
+        "--cc-bin", "--cc-flags", "--ld-flags", "--target", "--module",
+        "--sysroot", "--obj-out", "--graph-out", "--timeout", "--format",
         "-e", "-E", "--save", "--save-to", "--doc",
     };
     for (size_t i = 0; i < sizeof(v) / sizeof(v[0]); ++i) {

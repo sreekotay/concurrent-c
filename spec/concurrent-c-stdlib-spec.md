@@ -2249,6 +2249,64 @@ region aggregates every site into a single stanza at the last
 (the Node-API shape).  What an embedding's registration looks like is
 stdlib prose, not compiler code.
 
+A TU may export to several embeddings at once — both directives (or
+both explicit stanzas) in one file:
+
+```c
+@comptime cc_py_export("Counter", &seed);
+@comptime cc_js_export("Counter", &seed);
+```
+
+One build produces one shared object under every declared name
+(`counter.abi3.so` and `counter.node`, hardlinked): every entry is
+always compiled in and each embedding resolves its runtime lazily at
+first use, so the bytes are identical and an unused entry costs
+nothing in any host.  `--module=<tag>` narrows the build to one
+embedding's artifact — the tag comes from the export directive's
+spelling (`cc_py_export` → `py`) — and an unknown tag reports the
+targets the TU spells.  `-o` names exactly one artifact.  A TU that
+wants only one embedding in a given build can also just say so in
+ordinary C: `#ifdef` around an export directive works, because the
+directive is a statement like any other.
+
+### The generic bridge: any Python module from Node
+
+`npm/cc-python` is one addon (an ordinary CC module TU) that makes
+every Python library importable from JavaScript:
+
+```js
+const py = require('cc-python').create();   // an Isolation Domain
+const np = py.import('numpy');
+const norm = np.linalg.norm(new Float64Array([3, 4]));   // 5 — zero copy
+py.destroy();   // one sweep: every handle, the arena, the interpreter ref
+```
+
+The addon exposes primitive operations — create, import, getattr,
+invoke, release, close — over opaque handles (`CCJsExt`, Node-API
+Externals), and a small Proxy wrapper makes attribute chains and calls
+read as JavaScript.  One materialization rule holds at every boundary
+crossing: a scalar (bool, str, int — `BigInt` past 2^53 — float, None
+→ `undefined`) arrives as the JS scalar, anything else stays a held
+reference wrapped in a proxy; `String(proxy)` is Python `str()`.
+Integral JS numbers cross as Python `int`, fractional as `float`.
+Typed-array arguments cross as zero-copy memoryview leases pinned for
+the call, with the `py_buf` retention check guarding the lease.
+
+The bridge is an Isolation Domain — the ownership unit of the interop
+model.  It owns its interpreter handle, its arena, and every Python
+reference minted through it; proxies are borrows that strong-reference
+their bridge.  Teardown is one atomic sweep with two doors: `destroy()`
+(also `Symbol.dispose`, so `using py = ...` scopes it) revokes
+immediately — every outstanding handle answers `bridge is closed`,
+object finalizers reduce to frees, double destroy is a no-op — and the
+GC runs the same sweep from the domain's single finalizer when the
+whole graph is unreachable.  Handles never cross domains: a second
+`create()` is fully isolated and rejects the first domain's objects at
+the door.  `stats()` reports the live-handle count; `release(proxy)`
+drops one early.  The mirrored direction — Python importing Node —
+requires a hosted JavaScript engine (`cc_js_new`) and follows the same
+domain model.
+
 The module is the type, under the same reflection rules as
 `py_module::[T]`: every visible function whose first parameter is `T` or
 `T*` becomes a module function; an underscore member stays internal; the

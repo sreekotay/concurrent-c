@@ -1,0 +1,12 @@
+pi 3.141592653589793
+sqrt 4
+hypot 5
+floor_int 2
+sep_is_str true
+str_coerce true
+release_drops true
+gc_drops true
+cross_domain true
+py2_closed true
+after_close true
+double_destroy_ok true

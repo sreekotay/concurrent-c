@@ -1,0 +1,8 @@
+{
+  "name": "cc-python",
+  "version": "0.1.0",
+  "description": "Python from Node over the Concurrent-C bridge: import any Python module, call it with zero-copy typed arrays, host-controlled lifetime.",
+  "main": "index.js",
+  "license": "MIT",
+  "keywords": ["python", "interop", "napi", "concurrent-c"]
+}

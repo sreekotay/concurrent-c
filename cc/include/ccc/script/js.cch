@@ -228,6 +228,10 @@ typedef struct CC__JsSyms {
     int (*CallFunction)(void *env, void *recv, void *func, size_t argc,
                         void *const *argv, void **out);
     int (*CreateObject)(void *env, void **out);
+    int (*CreateExternal)(void *env, void *data,
+                          void (*fin)(void *env, void *data, void *hint),
+                          void *hint, void **out);
+    int (*GetValueExternal)(void *env, void *value, void **out);
     int (*IsExceptionPending)(void *env, _Bool *out);
     int (*GetAndClearLastException)(void *env, void **out);
     int (*CoerceToString)(void *env, void *value, void **out);
@@ -324,6 +328,8 @@ static int cc__js_load(void) {
     CC__JS_SYM(RunScript, "napi_run_script")
     CC__JS_SYM(CallFunction, "napi_call_function")
     CC__JS_SYM(CreateObject, "napi_create_object")
+    CC__JS_SYM(CreateExternal, "napi_create_external")
+    CC__JS_SYM(GetValueExternal, "napi_get_value_external")
     CC__JS_SYM(IsExceptionPending, "napi_is_exception_pending")
     CC__JS_SYM(GetAndClearLastException, "napi_get_and_clear_last_exception")
     CC__JS_SYM(CoerceToString, "napi_coerce_to_string")
@@ -635,6 +641,33 @@ static int cc__js_inq_jsval(CCJsVal *dst, void *env, void *o) {
     return 0;
 }
 
+/* ---- opaque externals ----
+ *
+ * `CCJsExt` crosses a C pointer into JavaScript as a Node-API External:
+ * an opaque value the JS side can hold and hand back but never open.
+ * Returning one creates the External — `finalize` (napi's own signature,
+ * optional) runs when the GC collects the value; taking one as a
+ * parameter unwraps the pointer (`finalize`/`hint` read as NULL — the
+ * creator keeps them).  The bridge layers (interop domains, module
+ * handles) build on exactly this. */
+typedef struct CCJsExt {
+    void *ptr;
+    void (*finalize)(void *env, void *data, void *hint);
+    void *hint;
+} CCJsExt;
+
+static int cc__js_inq_ext(CCJsExt *dst, void *env, void *o) {
+    int t = 0;
+    void *p = NULL;
+    if (!o || cc__js.Typeof(env, o, &t) != 0 || t != CC__JS_T_EXTERNAL)
+        return -1;
+    if (cc__js.GetValueExternal(env, o, &p) != 0) return -1;
+    dst->ptr = p;
+    dst->finalize = 0;
+    dst->hint = 0;
+    return 0;
+}
+
 /* ---- typed slices <-> arrays ----
  *
  * `napi_typedarray_type`, mirrored (stable enum order since Node-API 1;
@@ -845,6 +878,7 @@ CC__JS_IN_WRAP(bool, _Bool, "a boolean")
 CC__JS_IN_WRAP(slice, CCSlice, "a string")
 CC__JS_IN_WRAP(cstr, const char *, "a string")
 CC__JS_IN_WRAP(jsval, CCJsVal, "a value")
+CC__JS_IN_WRAP(ext, CCJsExt, "an external handle")
 
 #define CC__JS_IN_SUPPORTED(lv)                             \
     _Generic(&(lv),                                         \
@@ -868,6 +902,7 @@ CC__JS_IN_WRAP(jsval, CCJsVal, "a value")
         CCSlice_float *: 1,                                 \
         CCSlice_double *: 1,                                \
         CCJsVal *: 1,                                       \
+        CCJsExt *: 1,                                       \
         const char **: 1,                                   \
         char **: 1,                                         \
         default: 0)
@@ -902,6 +937,7 @@ extern int cc__js_in_unsupported(
         CCSlice_float *: cc__js_in_ts_CCSlice_float,        \
         CCSlice_double *: cc__js_in_ts_CCSlice_double,      \
         CCJsVal *: cc__js_in_jsval,                         \
+        CCJsExt *: cc__js_in_ext,                           \
         const char **: cc__js_in_cstr,                      \
         char **: cc__js_in_cstr,                            \
         default: cc__js_in_unsupported)(&(lv), (env), (o), #lv))
@@ -931,6 +967,7 @@ extern int cc__js_in_unsupported(
         CCSlice_float *: cc__js_inq_ts_CCSlice_float,       \
         CCSlice_double *: cc__js_inq_ts_CCSlice_double,     \
         CCJsVal *: cc__js_inq_jsval,                        \
+        CCJsExt *: cc__js_inq_ext,                          \
         const char **: cc__js_inq_cstr,                     \
         char **: cc__js_inq_cstr)(&(lv), (env), (o))
 
@@ -1003,6 +1040,13 @@ static void *cc__js_out_cstr(void *env, const char *s) {
 /* Defined after the outbound section (needs cc__js_val_cur). */
 static void *cc__js_out_jsval(void *env, CCJsVal v);
 
+static void *cc__js_out_ext(void *env, CCJsExt v) {
+    void *r = NULL;
+    if (cc__js.CreateExternal(env, v.ptr, v.finalize, v.hint, &r) != 0)
+        return cc__js_fail(env, "cc: external allocation failed");
+    return r;
+}
+
 #define CC__JS_OUT_SUPPORTED(v)                             \
     _Generic((v),                                           \
         int: 1,                                             \
@@ -1025,6 +1069,7 @@ static void *cc__js_out_jsval(void *env, CCJsVal v);
         CCSlice_float: 1,                                   \
         CCSlice_double: 1,                                  \
         CCJsVal: 1,                                         \
+        CCJsExt: 1,                                         \
         const char *: 1,                                    \
         char *: 1,                                          \
         default: 0)
@@ -1057,6 +1102,7 @@ extern void *cc__js_out_unsupported(
         CCSlice_float: cc__js_out_ts_CCSlice_float,         \
         CCSlice_double: cc__js_out_ts_CCSlice_double,       \
         CCJsVal: cc__js_out_jsval,                          \
+        CCJsExt: cc__js_out_ext,                            \
         const char *: cc__js_out_cstr,                      \
         char *: cc__js_out_cstr,                            \
         default: cc__js_out_unsupported)((env), (v)))

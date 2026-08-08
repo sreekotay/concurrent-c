@@ -1,0 +1,67 @@
+/* The generic Python bridge for Node: require('cc-python').create()
+ * returns an Isolation Domain; attribute chains are getattr, calls are
+ * invoke, scalar results materialize as JS scalars, held references
+ * proxy.  destroy() is one-sweep revocation: use-after-close answers
+ * articulately, double destroy is a no-op, a handle from one bridge is
+ * rejected by another, and GC of dropped proxies releases their Python
+ * references (--expose-gc rung).  The addon is
+ * npm/cc-python/src/cc_python.ccs. */
+CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+
+{
+    CCCommand which = cc_command(&a, @slice("sh"));
+    which.arg("-c");
+    which.arg("command -v node >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1");
+    int rc = which.status() !>;
+    if (rc != 0) { "SKIP (need node + python3)".println() !>; return 0; }
+}
+
+{
+    CCCommand build = cc_command(&a, @slice("./cc/bin/ccc"));
+    build.arg("build");
+    build.arg("npm/cc-python/src/cc_python.ccs");
+    build.inherit_stdio();
+    int rc = build.status() !>;
+    if (rc != 0) { "build failed".println() !>; return 1; }
+}
+
+{
+    CCCommand run = cc_command(&a, @slice("sh"));
+    run.arg("-c");
+    CCString js = @string(`node --expose-gc -e "
+const ccpy = require(process.cwd() + '/npm/cc-python');
+const py = ccpy.create();
+const math = py.import('math');
+console.log('pi', math.pi);
+console.log('sqrt', math.sqrt(16));
+console.log('hypot', math.hypot(3, 4));
+console.log('floor_int', math.floor(2.9));
+const os = py.import('os');
+console.log('sep_is_str', typeof os.sep === 'string');
+console.log('str_coerce', String(math.floor(7.5)) === '7');
+const held = py.import('collections');
+const before = py.stats();
+py.release(held);
+console.log('release_drops', py.stats() === before - 1);
+(function scope() { void py.import('json').dumps; })();
+const live = py.stats();
+global.gc();
+setTimeout(() => {
+  console.log('gc_drops', py.stats() < live);
+  const py2 = ccpy.create();
+  const m2 = py2.import('math');
+  try { py.release(m2); } catch (e) { console.log('cross_domain', e.message.includes('another bridge')); }
+  py2.destroy();
+  console.log('py2_closed', py2.closed);
+  py.destroy();
+  try { py.import('os'); } catch (e) { console.log('after_close', e.message.includes('closed')); }
+  py.destroy();
+  console.log('double_destroy_ok', py.closed);
+}, 50);
+"`, &a);
+    run.arg(js.cstr(&a));
+    run.inherit_stdio();
+    int rc = run.status() !>;
+    if (rc != 0) { "bridge checks failed".println() !>; return 1; }
+}
+return 0;

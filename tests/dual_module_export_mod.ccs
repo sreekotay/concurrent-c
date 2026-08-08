@@ -1,0 +1,19 @@
+/* Dual-target module: one TU, both export directives, ONE shared object
+ * under two names (hardlinked — every entry is compiled in and each
+ * embedding resolves its runtime lazily, so the bytes are identical).
+ * `--module=py|js` narrows to one artifact.  Paired smoke:
+ * dual_module_export_smoke.shcc. */
+#include <ccc/script/py.cch>
+#include <ccc/script/js.cch>
+
+typedef struct DualGauge { long long n; } DualGauge;
+
+static long long DualGauge_bump(DualGauge *self, long long by = 1) {
+    self->n += by;
+    return self->n;
+}
+
+static const DualGauge seed = { .n = 7 };
+
+@comptime cc_py_export("DualGauge", &seed);
+@comptime cc_js_export("DualGauge", &seed);

@@ -1,0 +1,479 @@
+/* cc-python: the generic Python bridge for Node.
+ *
+ *     const py = require('cc-python').create();   // an Isolation Domain
+ *     const np = py.import('numpy');
+ *     const s  = np.array([1, 2, 3]).sum();
+ *     py.destroy();                                // one sweep: everything
+ *
+ * The addon exposes primitive operations (create / import / getattr /
+ * invoke / release / destroy) over opaque handles; index.js wraps them
+ * in a Proxy so attribute chains and calls read as ordinary JavaScript.
+ *
+ * Ownership is the Isolation Domain model: a domain owns its
+ * interpreter handle, its arena, and every Python reference minted
+ * through it.  Proxies are borrows — each holds a strong JS reference
+ * to its domain (index.js), so the GC can only collect the domain when
+ * the whole graph is unreachable, and the domain External's finalizer
+ * runs the same single sweep `destroy()` runs.  destroy() is
+ * revocation: every outstanding handle answers "bridge is closed"
+ * afterwards, object finalizers become frees of their boxes, and
+ * double destroy is a quiet no-op.  Buffers cross as leases: a typed
+ * array argument is a zero-copy memoryview pinned for the call, and
+ * the py_buf retention check catches a callee that keeps it. */
+#include <ccc/script/js.cch>
+#include <ccc/script/py.cch>
+
+typedef struct CcPyDom CcPyDom;
+typedef struct CcPyObjBox CcPyObjBox;
+
+/* One Python reference owned by a domain.  The box is malloc'd (not
+ * arena) because its External finalizer can run after the domain is
+ * swept: the sweep releases the Python reference and nulls `dom`, and
+ * the finalizer's only remaining job is freeing the box. */
+struct CcPyObjBox {
+    CcPyDom *dom;
+    CCPyObj obj;
+    CcPyObjBox *next;
+    CcPyObjBox *prev;
+    int released;
+};
+
+struct CcPyDom {
+    CCArena arena;
+    CCPy py;
+    void *none; /* owned builtins.None, for result probing */
+    CcPyObjBox *head;
+    long long live;
+    int closed;
+};
+
+/* The single sweep, shared by destroy() and the GC finalizer: release
+ * every live Python reference, orphan the boxes (their finalizers just
+ * free), close the interpreter handle, drop the arena.  After this the
+ * domain box answers only `closed` until its own finalizer frees it. */
+static void ccpy__dom_sweep(CcPyDom *d) {
+    CcPyObjBox *b = d->head;
+    while (b) {
+        CcPyObjBox *nx = b->next;
+        if (!b->released) {
+            cc_py_obj_release(&b->obj);
+            b->released = 1;
+        }
+        b->dom = NULL;
+        b->next = NULL;
+        b->prev = NULL;
+        b = nx;
+    }
+    d->head = NULL;
+    d->live = 0;
+    if (d->none) {
+        cc__py.DecRef(d->none);
+        d->none = NULL;
+    }
+    cc_py_close(&d->py);
+    cc_arena_destroy(&d->arena);
+    d->closed = 1;
+}
+
+static void ccpy__dom_finalize(void *env, void *data, void *hint) {
+    CcPyDom *d = (CcPyDom *)data;
+    (void)env;
+    (void)hint;
+    if (!d) return;
+    if (!d->closed) ccpy__dom_sweep(d);
+    free(d);
+}
+
+static void ccpy__obj_finalize(void *env, void *data, void *hint) {
+    CcPyObjBox *b = (CcPyObjBox *)data;
+    (void)env;
+    (void)hint;
+    if (!b) return;
+    if (b->dom && !b->released) {
+        cc_py_obj_release(&b->obj);
+        b->released = 1;
+        if (b->prev) b->prev->next = b->next;
+        else b->dom->head = b->next;
+        if (b->next) b->next->prev = b->prev;
+        b->dom->live--;
+    }
+    free(b);
+}
+
+/* Register a fresh owned reference with the domain; the returned
+ * External carries the box and its finalizer. */
+static CCJsExt ccpy__box(CcPyDom *d, CCPyObj o) {
+    CcPyObjBox *b = (CcPyObjBox *)calloc(1, sizeof *b);
+    CCJsExt e = { 0 };
+    if (!b) {
+        cc_py_obj_release(&o);
+        return e; /* e.ptr NULL — callers turn this into an error */
+    }
+    b->dom = d;
+    b->obj = o;
+    b->next = d->head;
+    if (d->head) d->head->prev = b;
+    d->head = b;
+    d->live++;
+    e.ptr = b;
+    e.finalize = ccpy__obj_finalize;
+    return e;
+}
+
+/* Unbox + guard: the domain must be open, the object must belong to it
+ * and still be held.  Every op routes through these two so the error
+ * text is the same at every door. */
+static CcPyDom *ccpy__dom(CCJsExt dom) {
+    CcPyDom *d = (CcPyDom *)dom.ptr;
+    return (d && !d->closed) ? d : NULL;
+}
+
+static CcPyObjBox *ccpy__objbox(CcPyDom *d, CCJsExt obj) {
+    CcPyObjBox *b = (CcPyObjBox *)obj.ptr;
+    if (!b || b->dom != d || b->released) return NULL;
+    return b;
+}
+
+static int ccpy__result_to_js(CcPyDom *d, void *env, CCPyObj r, void **out);
+
+/* The module: stateless — every operation names its domain. */
+typedef struct CcPython {
+    int ok;
+} CcPython;
+
+static CCJsExt !>(CCError) CcPython_create(CcPython *self) {
+    (void)self;
+    CcPyDom *d = (CcPyDom *)calloc(1, sizeof *d);
+    if (!d) return cc_err(CC_ERR_IO, "cc-python: out of memory");
+    d->arena = cc_arena_heap(megabytes(4));
+    {
+        CCResult_CCPy_CCPyError r = cc_py_new(&d->arena);
+        if (!r.ok) {
+            cc_arena_destroy(&d->arena);
+            free(d);
+            return cc_err(CC_ERR_IO, "cc-python: no Python runtime "
+                                     "(is libpython installed, or set "
+                                     "CC_LIBPYTHON?)");
+        }
+        d->py = r.u.value;
+    }
+    {
+        void *b = cc__py.ImportModule("builtins");
+        if (b) {
+            d->none = cc__py.GetAttrString(b, "None");
+            cc__py.DecRef(b);
+        }
+        if (!d->none && cc__py.ErrClear) cc__py.ErrClear();
+    }
+    {
+        CCJsExt e = { 0 };
+        e.ptr = d;
+        e.finalize = ccpy__dom_finalize;
+        return cc_ok(e);
+    }
+}
+
+/* Revocation: idempotent, immediate.  The box stays until the GC
+ * finalizes the External; every op on it answers "closed".  (Named
+ * `close` because a module method named `destroy` is the reflection
+ * convention for the module finalizer.) */
+static void CcPython_close(CcPython *self, CCJsExt dom) {
+    CcPyDom *d = (CcPyDom *)dom.ptr;
+    (void)self;
+    if (d && !d->closed) ccpy__dom_sweep(d);
+}
+
+static _Bool CcPython_closed(CcPython *self, CCJsExt dom) {
+    CcPyDom *d = (CcPyDom *)dom.ptr;
+    (void)self;
+    return !d || d->closed;
+}
+
+/* Live handle count — the lifetime-introspection door: a debug hook can
+ * assert a scope released what it minted. */
+static long long CcPython_stats(CcPython *self, CCJsExt dom) {
+    CcPyDom *d = ccpy__dom(dom);
+    (void)self;
+    return d ? d->live : -1;
+}
+
+static CCJsExt !>(CCError) CcPython_pyimport(CcPython *self, CCJsExt dom,
+                                             const char *name) {
+    CcPyDom *d = ccpy__dom(dom);
+    (void)self;
+    if (!d) return cc_err(CC_ERR_INVALID_ARG, "cc-python: bridge is closed");
+    {
+        /* Ownership transfers straight into the domain's box. */
+        CCResult_CCPyObj_CCPyError r = cc_py_import(&d->py, name);
+        if (!r.ok) return cc_err_CCResult_CCJsExt_CCError(r.u.error.base);
+        {
+            CCJsExt e = ccpy__box(d, r.u.value);
+            if (!e.ptr) return cc_err(CC_ERR_IO, "cc-python: out of memory");
+            return cc_ok(e);
+        }
+    }
+}
+
+/* Attribute access materializes exactly as a call result does: a scalar
+ * attribute (math.pi) IS the scalar; anything else stays a held handle
+ * (np.linalg) for the Proxy to keep chaining.  One rule at every
+ * boundary crossing. */
+static CCJsVal !>(CCError) CcPython_getattr(CcPython *self, CCJs *js,
+                                            CCJsExt dom, CCJsExt obj,
+                                            const char *name) {
+    CcPyDom *d = ccpy__dom(dom);
+    CcPyObjBox *b;
+    (void)self;
+    if (!d) return cc_err(CC_ERR_INVALID_ARG, "cc-python: bridge is closed");
+    b = ccpy__objbox(d, obj);
+    if (!b)
+        return cc_err(CC_ERR_INVALID_ARG,
+                      "cc-python: handle is released or belongs to another "
+                      "bridge");
+    {
+        /* Ownership transfers into the box or releases in the probe. */
+        CCResult_CCPyObj_CCPyError r = cc_py_obj_get(&b->obj, name);
+        if (!r.ok) return cc_err_CCResult_CCJsVal_CCError(r.u.error.base);
+        {
+            void *out = NULL;
+            if (ccpy__result_to_js(d, js->env, r.u.value, &out) != 0)
+                return cc_err(CC_ERR_IO, "cc-python: cannot materialize the "
+                                         "attribute");
+            {
+                CCJsVal jv = { 0 };
+                jv.env = js->env;
+                jv.v = out;
+                return cc_ok(jv);
+            }
+        }
+    }
+}
+
+/* Early release of one handle; answers the domain's remaining live
+ * count so a scope can assert it dropped what it minted. */
+static long long !>(CCError) CcPython_release(CcPython *self, CCJsExt dom,
+                                              CCJsExt obj) {
+    CcPyDom *d = ccpy__dom(dom);
+    CcPyObjBox *b;
+    (void)self;
+    if (!d) return cc_err(CC_ERR_INVALID_ARG, "cc-python: bridge is closed");
+    b = ccpy__objbox(d, obj);
+    if (!b)
+        return cc_err(CC_ERR_INVALID_ARG,
+                      "cc-python: handle is released or belongs to another "
+                      "bridge");
+    cc_py_obj_release(&b->obj);
+    b->released = 1;
+    if (b->prev) b->prev->next = b->next;
+    else d->head = b->next;
+    if (b->next) b->next->prev = b->prev;
+    b->next = NULL;
+    b->prev = NULL;
+    d->live--;
+    return cc_ok(d->live);
+}
+
+/* JS argument array → CCPyArg row.  Numbers with integral values cross
+ * as Python int (JavaScript has one number type, and Python APIs that
+ * want a float accept an int — the reverse is not true); typed arrays
+ * cross as zero-copy memoryview leases; externals pass the held
+ * reference through. */
+static int ccpy__arg_from_js(CcPyDom *d, void *env, void *v, CCPyArg *out,
+                             char *errbuf, size_t errcap) {
+    int t = 0;
+    if (cc__js.Typeof(env, v, &t) != 0) {
+        snprintf(errbuf, errcap, "cc-python: cannot read an argument");
+        return -1;
+    }
+    if (t == CC__JS_T_NUMBER) {
+        double dd = 0;
+        cc__js.GetValueDouble(env, v, &dd);
+        if (dd == (double)(long long)dd && dd >= -9007199254740992.0 &&
+            dd <= 9007199254740992.0)
+            *out = cc__py_arg_i((long long)dd);
+        else
+            *out = cc__py_arg_f(dd);
+        return 0;
+    }
+    if (t == CC__JS_T_BOOLEAN) {
+        _Bool bv = 0;
+        cc__js.GetValueBool(env, v, &bv);
+        *out = cc__py_arg_bool(bv ? 1 : 0);
+        return 0;
+    }
+    if (t == CC__JS_T_STRING) {
+        CCSlice s;
+        if (cc__js_inq_slice(&s, env, v) != 0) {
+            snprintf(errbuf, errcap, "cc-python: cannot read a string argument");
+            return -1;
+        }
+        *out = cc__py_arg_slice(s);
+        return 0;
+    }
+    if (t == CC__JS_T_EXTERNAL) {
+        void *p = NULL;
+        CcPyObjBox *b;
+        cc__js.GetValueExternal(env, v, &p);
+        b = (CcPyObjBox *)p;
+        if (!b || b->dom != d || b->released) {
+            snprintf(errbuf, errcap,
+                     "cc-python: an argument handle is released or belongs "
+                     "to another bridge");
+            return -1;
+        }
+        *out = cc__py_arg_obj(b->obj);
+        return 0;
+    }
+    {
+        _Bool ta = 0;
+        if (cc__js.IsTypedarray(env, v, &ta) == 0 && ta) {
+            int tt = 0;
+            size_t len = 0;
+            void *data = NULL;
+            void *ab = NULL;
+            size_t off = 0;
+            int esz = 0, isf = 0, iss = 1;
+            if (cc__js.GetTypedarrayInfo(env, v, &tt, &len, &data, &ab, &off) != 0) {
+                snprintf(errbuf, errcap, "cc-python: cannot read a typed array");
+                return -1;
+            }
+            switch (tt) {
+            case CC__JS_TA_FLOAT64: esz = 8; isf = 1; break;
+            case CC__JS_TA_FLOAT32: esz = 4; isf = 1; break;
+            case CC__JS_TA_INT32:   esz = 4; break;
+            case CC__JS_TA_BIGINT64: esz = 8; break;
+            default:
+                snprintf(errbuf, errcap,
+                         "cc-python: unsupported typed-array element type");
+                return -1;
+            }
+            {
+                CCSlice s = { (char *)data, len };
+                *out = cc__py_arg_buffer(cc__py_arg_tslice(s, esz, isf, iss));
+            }
+            return 0;
+        }
+    }
+    snprintf(errbuf, errcap,
+             "cc-python: unsupported argument (pass numbers, strings, "
+             "booleans, typed arrays, or bridge handles)");
+    return -1;
+}
+
+/* Python result → JS value.  Scalars materialize (bool, str, int —
+ * BigInt past 2^53 — float, None → undefined); anything else stays a
+ * held reference, registered with the domain and returned as a handle
+ * for the Proxy to wrap. */
+static int ccpy__result_to_js(CcPyDom *d, void *env, CCPyObj r, void **out) {
+    void *o = r.o;
+    /* bool first — Python bool is a subtype of int. */
+    {
+        void *t = cc__py.BoolFromLong(1);
+        void *f = cc__py.BoolFromLong(0);
+        int is_t = (o == t), is_f = (o == f);
+        if (t) cc__py.DecRef(t);
+        if (f) cc__py.DecRef(f);
+        if (is_t || is_f) {
+            cc_py_obj_release(&r);
+            return cc__js.GetBoolean(env, is_t, out);
+        }
+    }
+    if (d->none && o == d->none) {
+        cc_py_obj_release(&r);
+        return cc__js.GetUndefined(env, out);
+    }
+    {
+        intptr_t n = 0;
+        const char *s = cc__py.AsUTF8AndSize(o, &n);
+        if (s) {
+            int rc = cc__js.CreateStringUtf8(env, s, (size_t)n, out);
+            cc_py_obj_release(&r);
+            return rc;
+        }
+        if (cc__py.ErrClear) cc__py.ErrClear();
+    }
+    {
+        CCResult_int64_t_CCPyError iv = cc_py_obj_as_i64(&r);
+        if (iv.ok) {
+            void *v = cc__js_out_ll(env, (long long)iv.u.value);
+            cc_py_obj_release(&r);
+            if (!v) return -1;
+            *out = v;
+            return 0;
+        }
+        if (cc__py.ErrClear) cc__py.ErrClear();
+    }
+    {
+        CCResult_double_CCPyError fv = cc_py_obj_as_f64(&r);
+        if (fv.ok) {
+            int rc = cc__js.CreateDouble(env, fv.u.value, out);
+            cc_py_obj_release(&r);
+            return rc;
+        }
+        if (cc__py.ErrClear) cc__py.ErrClear();
+    }
+    {
+        CCJsExt e = ccpy__box(d, r);
+        if (!e.ptr) return -1;
+        return cc__js.CreateExternal(env, e.ptr, e.finalize, e.hint, out);
+    }
+}
+
+static CCJsVal !>(CCError) CcPython_invoke(CcPython *self, CCJs *js,
+                                           CCJsExt dom, CCJsExt fn,
+                                           CCJsVal args) {
+    CcPyDom *d = ccpy__dom(dom);
+    CcPyObjBox *fb;
+    CCPyArg argv[CC__PY_MAX_CALL_ARGS];
+    uint32_t argc = 0, i;
+    _Bool isarr = 0;
+    char errbuf[160];
+    CC__JsMark mark;
+    (void)self;
+    if (!d) return cc_err(CC_ERR_INVALID_ARG, "cc-python: bridge is closed");
+    fb = ccpy__objbox(d, fn);
+    if (!fb)
+        return cc_err(CC_ERR_INVALID_ARG,
+                      "cc-python: handle is released or belongs to another "
+                      "bridge");
+    if (cc__js.IsArray(js->env, args.v, &isarr) != 0 || !isarr)
+        return cc_err(CC_ERR_INVALID_ARG,
+                      "cc-python: invoke wants an argument ARRAY");
+    if (cc__js.GetArrayLength(js->env, args.v, &argc) != 0 ||
+        argc > CC__PY_MAX_CALL_ARGS)
+        return cc_err(CC_ERR_INVALID_ARG, "cc-python: too many arguments");
+    mark = cc__js_mark();
+    for (i = 0; i < argc; i++) {
+        void *el = NULL;
+        if (cc__js.GetElement(js->env, args.v, i, &el) != 0 ||
+            ccpy__arg_from_js(d, js->env, el, &argv[i], errbuf,
+                              sizeof(errbuf)) != 0) {
+            cc__js_release(mark);
+            return cc_err(CC_ERR_INVALID_ARG, errbuf);
+        }
+    }
+    {
+        CCPyObj *f = &fb->obj;
+        CCResult_CCPyObj_CCPyError r =
+            cc__py_obj_callm_n(f, "invoke", (int)argc, argv);
+        cc__js_release(mark);
+        if (!r.ok)
+            return cc_err_CCResult_CCJsVal_CCError(r.u.error.base);
+        {
+            void *out = NULL;
+            if (ccpy__result_to_js(d, js->env, r.u.value, &out) != 0)
+                return cc_err(CC_ERR_IO, "cc-python: cannot materialize the "
+                                         "result");
+            {
+                CCJsVal jv = { 0 };
+                jv.env = js->env;
+                jv.v = out;
+                return cc_ok(jv);
+            }
+        }
+    }
+}
+
+static const CcPython seed = { .ok = 1 };
+
+@comptime cc_js_export("CcPython", &seed);

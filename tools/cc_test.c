@@ -493,6 +493,10 @@ static int get_run_timeout_for_test(const char* stem, int default_timeout_sec) {
     if (strcmp(stem, "js_module_import_smoke") == 0) return 30;
     if (strcmp(stem, "js_module_double_result_smoke") == 0) return 30;
     if (strcmp(stem, "js_module_multi_export_smoke") == 0) return 30;
+    /* Three inner `ccc build`s (dual + two narrowing runs) + both hosts. */
+    if (strcmp(stem, "dual_module_export_smoke") == 0) return 60;
+    /* Inner `ccc build` of the js.cch+py.cch bridge TU, then a node run. */
+    if (strcmp(stem, "cc_python_bridge_smoke") == 0) return 60;
     if (strcmp(stem, "py_module_kwargs_smoke") == 0) return 30;
     if (strcmp(stem, "py_levenshtein_smoke") == 0) return 30;
     return default_timeout_sec;

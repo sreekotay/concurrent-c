@@ -1,0 +1,5 @@
+hardlinked true
+py 10
+js 12
+narrowed js-only
+no such entry (targets: py js)
