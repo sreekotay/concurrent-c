@@ -16564,12 +16564,19 @@ static char* cc__normalize_cc_type_of_to_type_of(const char* src, size_t n) {
     return out;
 }
 
-/* Fix B: include-expanded view for reflection (struct bodies from headers). */
+/* Fix B: include-expanded view for reflection (struct bodies from headers).
+ * Strip `@as` before CPP so generic TCC never sees CC attributes; `is_as`
+ * comes from the pre-strip TU overlay (or future reflect tables), not from
+ * comment markers the preprocessor would drop. */
 static char* cc__build_reflection_view(const char* src, size_t n,
                                        const char* input_path,
                                        size_t* out_n) {
     size_t exp_len = 0;
-    char* expanded = cc_cpp_expand(src, n, input_path, &exp_len);
+    char* stripped = cc_rewrite_as_attr_to_comment(src, n);
+    const char* in = stripped ? stripped : src;
+    size_t in_n = stripped ? strlen(stripped) : n;
+    char* expanded = cc_cpp_expand(in, in_n, input_path, &exp_len);
+    free(stripped);
     if (expanded && exp_len > 0) {
         *out_n = exp_len;
         return expanded;
@@ -18026,7 +18033,8 @@ int cc_ct_canonical_name(const char* base, const char* const* args, int nargs,
 }
 
 /* Phase-2 unified engine: load struct fields via cc_reflect_field_* instead of
- * parsing the struct body from source when CC_COMPTIME_UNIFIED_EXEC=1. */
+ * parsing the struct body from source when CC_COMPTIME_UNIFIED_EXEC=1.
+ * `is_as` comes from the reflect source (must be Concurrent-C, pre-strip). */
 static int cc__ct_load_fields_via_reflect(const char* tname, size_t tlen,
                                           CCCtField** out, size_t* out_n) {
     if (!tname || tlen == 0 || tlen >= 256) return 0;
@@ -18039,13 +18047,20 @@ static int cc__ct_load_fields_via_reflect(const char* tname, size_t tlen,
     if (!fs) return 0;
     for (int i = 0; i < nf; i++) {
         char nbuf[256], tbuf[256];
+        int as;
         if (cc_reflect_field_name(name, i, nbuf, (int)sizeof(nbuf)) < 0 ||
             cc_reflect_field_type(name, i, tbuf, (int)sizeof(tbuf)) < 0) {
             cc__ct_free_fields(fs, (size_t)nf);
             return 0;
         }
+        as = cc_reflect_field_is_as(name, i);
+        if (as < 0) {
+            cc__ct_free_fields(fs, (size_t)nf);
+            return 0;
+        }
         fs[i].name = strdup(nbuf);
         fs[i].type = strdup(tbuf);
+        fs[i].is_as = as ? 1 : 0;
         if (!fs[i].name || !fs[i].type) {
             cc__ct_free_fields(fs, (size_t)nf);
             return 0;
@@ -18425,6 +18440,15 @@ static int cc__try_expand_comptime_for(const char* src, size_t n, const char* in
     size_t rn = reflect_src ? reflect_n : n;
     {
         int unified = cc_comptime_unified_exec_enabled();
+        int from_cc_src = 0;
+        char tname_buf[256];
+        size_t tname_len = (te > ts) ? (te - ts) : 0;
+        if (tname_len >= sizeof(tname_buf)) tname_len = sizeof(tname_buf) - 1;
+        if (tname_len > 0) {
+            memcpy(tname_buf, src + ts, tname_len);
+            tname_buf[tname_len] = '\0';
+        } else
+            tname_buf[0] = '\0';
         if (want_params) {
             if (!cc__ct_parse_param_list(src, plist_lp, plist_rp, &fields, &nf)) {
                 fprintf(stderr,
@@ -18436,7 +18460,10 @@ static int cc__try_expand_comptime_for(const char* src, size_t n, const char* in
                 return -1;
             }
         } else if (want_methods) {
-            if (!cc__ct_load_methods(rsrc, rn, src + ts, te - ts, &fields, &nf)) {
+            /* Methods: prefer Concurrent-C TU text, then include-expanded view. */
+            if (!cc__ct_load_methods(src, n, src + ts, te - ts, &fields, &nf) &&
+                !(rsrc != src &&
+                  cc__ct_load_methods(rsrc, rn, src + ts, te - ts, &fields, &nf))) {
                 fprintf(stderr,
                         "%s: error: `@comptime for ... .methods` found no method of "
                         "`%.*s` — a method is a function whose first parameter is "
@@ -18444,10 +18471,35 @@ static int cc__try_expand_comptime_for(const char* src, size_t n, const char* in
                         input_path ? input_path : "<input>", (int)(te - ts), src + ts);
                 return -1;
             }
-        } else if (unified && cc__ct_load_fields_via_reflect(src + ts, te - ts, &fields, &nf)) {
-            /* fields loaded via host reflection callbacks */
-        } else if (!cc__ct_find_struct_body(rsrc, rn, src + ts, te - ts, &body_o, &body_c) ||
-                   !cc__ct_parse_fields_from_body(rsrc, body_o, body_c, &fields, &nf)) {
+        } else if (cc__ct_find_struct_body(src, n, src + ts, te - ts, &body_o,
+                                           &body_c)) {
+            /* Body in Concurrent-C: parse must succeed or refuse — do not
+             * fall through to a partial type-pass registry table. */
+            if (!cc__ct_parse_fields_from_body(src, body_o, body_c, &fields,
+                                               &nf)) {
+                cc__ct_free_fields(fields, nf);
+                fprintf(stderr,
+                        "%s: error: `@comptime for` needs an in-scope struct type "
+                        "with simple fields; `%.*s` is unknown or has unsupported "
+                        "field forms (arrays/bitfields/function-pointers/"
+                        "multiple-declarators/nested aggregates).\n",
+                        input_path ? input_path : "<input>", (int)(te - ts),
+                        src + ts);
+                return -1;
+            }
+            from_cc_src = 1;
+        } else if ((unified || cc_ct_field_reg_has(tname_buf)) &&
+                   cc__ct_load_fields_via_reflect(src + ts, te - ts, &fields,
+                                                  &nf)) {
+            /* Host reflect / type-pass registry when no CC body in this TU. */
+            from_cc_src = 1;
+        } else if (rsrc != src &&
+                   cc__ct_find_struct_body(rsrc, rn, src + ts, te - ts, &body_o,
+                                           &body_c) &&
+                   cc__ct_parse_fields_from_body(rsrc, body_o, body_c, &fields,
+                                                 &nf)) {
+            /* Header-only types after include expand — layout from view. */
+        } else {
             cc__ct_free_fields(fields, nf);
             fprintf(stderr,
                     "%s: error: `@comptime for` needs an in-scope struct type with "
@@ -18457,54 +18509,29 @@ static int cc__try_expand_comptime_for(const char* src, size_t n, const char* in
                     input_path ? input_path : "<input>", (int)(te - ts), src + ts);
             return -1;
         }
-        /* CPP reflection views drop comments, so the @as block-comment marker
-         * vanishes and f.is_as flakes to 0. Host-reflect callbacks may also
-         * omit the bit. Overlay from the pre-expansion TU (naked @as). */
-        if (!want_params && !want_methods && fields && nf > 0) {
-            int need_as = 0;
-            size_t fi;
-            for (fi = 0; fi < nf; fi++) {
-                if (fields[fi].name && !fields[fi].is_as) {
-                    need_as = 1;
-                    break;
-                }
-            }
-            if (need_as) {
-                CCCtField* as_fields = NULL;
-                size_t as_nf = 0;
-                size_t as_bo = 0, as_bc = 0;
-                /* Prefer the pre-expansion TU (`src`); fall back to the
-                 * reflection view when that is a distinct buffer that still
-                 * carries the marker (some hosts keep comments). */
-                int parsed =
-                    cc__ct_find_struct_body(src, n, src + ts, te - ts, &as_bo,
-                                            &as_bc) &&
-                    cc__ct_parse_fields_from_body(src, as_bo, as_bc, &as_fields,
-                                                  &as_nf);
-                if (!parsed && rsrc != src) {
-                    as_fields = NULL;
-                    as_nf = 0;
-                    parsed =
-                        cc__ct_find_struct_body(rsrc, rn, src + ts, te - ts,
-                                                &as_bo, &as_bc) &&
-                        cc__ct_parse_fields_from_body(rsrc, as_bo, as_bc,
-                                                      &as_fields, &as_nf);
-                }
-                if (parsed) {
-                    size_t aj;
-                    for (fi = 0; fi < nf; fi++) {
-                        if (!fields[fi].name || fields[fi].is_as) continue;
-                        for (aj = 0; aj < as_nf; aj++) {
-                            if (as_fields[aj].is_as && as_fields[aj].name &&
-                                strcmp(fields[fi].name, as_fields[aj].name) ==
-                                    0) {
-                                fields[fi].is_as = 1;
-                                break;
-                            }
+        /* Header-only / CPP-view path: copy is_as from Concurrent-C (TU +
+         * included .cch). Never treat stripped host C as the attribute source. */
+        if (!want_params && !want_methods && !from_cc_src && fields && nf > 0) {
+            char tname[256];
+            size_t tlen = te - ts;
+            CCCtField* as_fields = NULL;
+            size_t as_nf = 0;
+            size_t fi, aj;
+            if (tlen >= sizeof(tname)) tlen = sizeof(tname) - 1;
+            memcpy(tname, src + ts, tlen);
+            tname[tlen] = '\0';
+            if (cc_ct_reflect_struct_fields(src, n, tname, &as_fields, &as_nf)) {
+                for (fi = 0; fi < nf; fi++) {
+                    if (!fields[fi].name || fields[fi].is_as) continue;
+                    for (aj = 0; aj < as_nf; aj++) {
+                        if (as_fields[aj].is_as && as_fields[aj].name &&
+                            strcmp(fields[fi].name, as_fields[aj].name) == 0) {
+                            fields[fi].is_as = 1;
+                            break;
                         }
                     }
-                    cc__ct_free_fields(as_fields, as_nf);
                 }
+                cc__ct_free_fields(as_fields, as_nf);
             }
         }
     }
@@ -18591,6 +18618,9 @@ static char* cc__resolve_comptime_if_once(const char* src, size_t n, const char*
         reflect_view = cc__build_reflection_view(src, n, input_path, &reflect_n);
     }
     const char* reflect_src = reflect_view ? reflect_view : src;
+    /* Host reflect verbs parse Concurrent-C (naked `@as`), not the stripped
+     * CPP view. Set before any `@comptime for` / unified field load. */
+    cc_emit_plan_set_reflect_source(src, n);
     /* D3.1b: in-scope type definitions for the TCC layout fallback, built lazily
      * (and once) the first time a predicate needs the host evaluator. */
     char* type_prelude = NULL;

@@ -465,6 +465,8 @@ static char* cc__exec_build_tu(const char* body, size_t body_len,
     static const char tail[] = "\n}\n";
     static const char exec_def[] = "#define CC_COMPTIME_EXEC 1\n";
     const char* fndefs = cc_comptime_fn_registry_defs();
+    char* slim = cc_ct_field_reg_slim_prelude();
+    size_t slim_len = slim ? strlen(slim) : 0;
     size_t fndef_len = fndefs ? strlen(fndefs) : 0;
     size_t ed = cc__exec_fndefs_need_exec_define(fndefs) ? sizeof(exec_def) - 1 : 0;
     size_t pre = sizeof(CC__EXEC_PRELUDE) - 1;
@@ -478,17 +480,23 @@ static char* cc__exec_build_tu(const char* body, size_t body_len,
         int n = snprintf(line_dir, sizeof(line_dir), "#line %d \"%s\"\n", line, file);
         if (n > 0 && (size_t)n < sizeof(line_dir)) ld = (size_t)n;
     }
-    char* s = (char*)malloc(ed + pre + fndef_len + ent + ld + body_len + tl + 1);
-    if (!s) return NULL;
+    char* s = (char*)malloc(ed + pre + slim_len + fndef_len + ent + ld + body_len +
+                            tl + 1);
+    if (!s) {
+        free(slim);
+        return NULL;
+    }
     size_t o = 0;
     if (ed) { memcpy(s + o, exec_def, ed); o += ed; }
     memcpy(s + o, CC__EXEC_PRELUDE, pre); o += pre;
+    if (slim_len) { memcpy(s + o, slim, slim_len); o += slim_len; }
     if (fndef_len) { memcpy(s + o, fndefs, fndef_len); o += fndef_len; }
     memcpy(s + o, entry, ent); o += ent;
     if (ld) { memcpy(s + o, line_dir, ld); o += ld; }
     memcpy(s + o, body, body_len); o += body_len;
     memcpy(s + o, tail, tl); o += tl;
     s[o] = '\0';
+    free(slim);
     return s;
 }
 
@@ -498,22 +506,29 @@ static char* cc__exec_build_eval_tu(const char* expr) {
     static const char tail[] = ");\n}\n";
     static const char exec_def[] = "#define CC_COMPTIME_EXEC 1\n";
     const char* fndefs = cc_comptime_fn_registry_defs();
+    char* slim = cc_ct_field_reg_slim_prelude();
+    size_t slim_len = slim ? strlen(slim) : 0;
     size_t fndef_len = fndefs ? strlen(fndefs) : 0;
     size_t ed = cc__exec_fndefs_need_exec_define(fndefs) ? sizeof(exec_def) - 1 : 0;
     size_t ex = expr ? strlen(expr) : 0;
     size_t pre = sizeof(CC__EXEC_PRELUDE) - 1;
     size_t hl = sizeof(hdr) - 1;
     size_t tl = sizeof(tail) - 1;
-    char* s = (char*)malloc(ed + pre + fndef_len + hl + ex + tl + 1);
-    if (!s) return NULL;
+    char* s = (char*)malloc(ed + pre + slim_len + fndef_len + hl + ex + tl + 1);
+    if (!s) {
+        free(slim);
+        return NULL;
+    }
     size_t o = 0;
     if (ed) { memcpy(s + o, exec_def, ed); o += ed; }
     memcpy(s + o, CC__EXEC_PRELUDE, pre); o += pre;
+    if (slim_len) { memcpy(s + o, slim, slim_len); o += slim_len; }
     if (fndef_len) { memcpy(s + o, fndefs, fndef_len); o += fndef_len; }
     memcpy(s + o, hdr, hl); o += hl;
     memcpy(s + o, expr, ex); o += ex;
     memcpy(s + o, tail, tl); o += tl;
     s[o] = '\0';
+    free(slim);
     return s;
 }
 
@@ -920,6 +935,7 @@ static TCCState* cc__exec_new_state(CCExecErrSink* sink, char* err_buf, size_t e
     tcc_add_symbol(s, "cc_reflect_field_count", (void*)cc_reflect_field_count);
     tcc_add_symbol(s, "cc_reflect_field_name", (void*)cc_reflect_field_name);
     tcc_add_symbol(s, "cc_reflect_field_type", (void*)cc_reflect_field_type);
+    tcc_add_symbol(s, "cc_reflect_field_is_as", (void*)cc_reflect_field_is_as);
     tcc_add_symbol(s, "cc_result_box_name", (void*)cc_result_box_name);
     tcc_add_symbol(s, "cc_reflect_method_count", (void*)cc_reflect_method_count);
     tcc_add_symbol(s, "cc_reflect_method_name", (void*)cc_reflect_method_name);

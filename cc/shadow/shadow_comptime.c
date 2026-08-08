@@ -147,6 +147,43 @@ static char* shadow_ct_blank_comptime(const char* src, size_t n) {
                 i = body_r + 1;
                 continue;
             }
+            /* Type-pass / stage1: blank `@comptime for|if (...) {…}` so
+             * whitelist parse sees plain C; expand runs on the original later. */
+            if (cc_match_ident_kw(src, n, body_l, "for") ||
+                cc_match_ident_kw(src, n, body_l, "if")) {
+                size_t kw_len = cc_match_ident_kw(src, n, body_l, "for") ? 3 : 2;
+                size_t lp = cc_skip_ws_and_comments(src, n, body_l + kw_len);
+                size_t rp = 0, end = 0, after;
+                if (lp >= n || src[lp] != '(' ||
+                    !cc_find_matching_paren(src, n, lp, &rp)) {
+                    i++;
+                    continue;
+                }
+                after = cc_skip_ws_and_comments(src, n, rp + 1);
+                if (after >= n || src[after] != '{' ||
+                    !cc_find_matching_brace(src, n, after, &body_r)) {
+                    i++;
+                    continue;
+                }
+                end = body_r;
+                /* `@comptime if (…) {…} else {…}` */
+                if (kw_len == 2) {
+                    size_t e = cc_skip_ws_and_comments(src, n, body_r + 1);
+                    if (e + 4 <= n && memcmp(src + e, "else", 4) == 0 &&
+                        (e + 4 >= n || !cc_is_ident_char(src[e + 4]))) {
+                        size_t eb = cc_skip_ws_and_comments(src, n, e + 4);
+                        size_t er;
+                        if (eb < n && src[eb] == '{' &&
+                            cc_find_matching_brace(src, n, eb, &er))
+                            end = er;
+                    }
+                }
+                for (size_t k = i; k <= end; ++k) {
+                    if (out[k] != '\n') out[k] = ' ';
+                }
+                i = end + 1;
+                continue;
+            }
             /* @comptime fn/const decl — blank through body or ';'. */
             {
                 size_t p = body_l, lpar = 0, rpar = 0, end = 0;
@@ -247,21 +284,13 @@ static char* shadow_ct_stage1_src(const char* input_path, size_t* out_n) {
     }
 }
 
-int shadow_comptime_exec_file(const char* input_path, char** out_stage1_src,
-                              size_t* out_stage1_len) {
+/* Shared load: file + .cch→.h rewrite + header harvest. */
+static char* shadow_ct_load_with_harvest(const char* input_path, size_t* out_n) {
     char* buf;
     size_t n = 0;
-    if (out_stage1_src) *out_stage1_src = NULL;
-    if (out_stage1_len) *out_stage1_len = 0;
-    if (!input_path || !input_path[0]) return -1;
-    shadow_ct_ensure_repo_root(input_path);
+    if (out_n) *out_n = 0;
     buf = shadow_ct_read_file(input_path, &n);
-    if (!buf) {
-        fprintf(stderr, "%s:1:1: error: comptime: cannot read input\n",
-                input_path);
-        return -1;
-    }
-
+    if (!buf) return NULL;
     cc_reset_included_cch_sources();
     {
         char* lowered =
@@ -283,6 +312,46 @@ int shadow_comptime_exec_file(const char* input_path, char** out_stage1_src,
     shadow_ct_append_harvest(&buf, &n, cc_harvest_local_header_factories());
     shadow_ct_append_harvest(&buf, &n, cc_harvest_header_comptime_functions());
     shadow_ct_append_harvest(&buf, &n, cc_harvest_local_header_comptime_blocks());
+    if (out_n) *out_n = n;
+    return buf;
+}
+
+char* shadow_comptime_type_pass_src(const char* input_path, size_t* out_n) {
+    char* buf;
+    size_t n = 0;
+    char* blanked;
+    if (out_n) *out_n = 0;
+    if (!input_path || !input_path[0]) return NULL;
+    shadow_ct_ensure_repo_root(input_path);
+    buf = shadow_ct_load_with_harvest(input_path, &n);
+    if (!buf) return NULL;
+    /* Skip the second whitelist lower when the TU (incl. harvest) has no
+     * `@comptime` — field registry is only consumed by comptime exec. */
+    if (!cc_contains_token_top_level(buf, n, "@comptime")) {
+        free(buf);
+        return NULL;
+    }
+    blanked = shadow_ct_blank_comptime(buf, n);
+    free(buf);
+    if (!blanked) return NULL;
+    if (out_n) *out_n = strlen(blanked);
+    return blanked;
+}
+
+int shadow_comptime_exec_file(const char* input_path, char** out_stage1_src,
+                              size_t* out_stage1_len) {
+    char* buf;
+    size_t n = 0;
+    if (out_stage1_src) *out_stage1_src = NULL;
+    if (out_stage1_len) *out_stage1_len = 0;
+    if (!input_path || !input_path[0]) return -1;
+    shadow_ct_ensure_repo_root(input_path);
+    buf = shadow_ct_load_with_harvest(input_path, &n);
+    if (!buf) {
+        fprintf(stderr, "%s:1:1: error: comptime: cannot read input\n",
+                input_path);
+        return -1;
+    }
 
     if (cc_comptime_prepare_source(&buf, &n, input_path) != 0) {
         free(buf);
@@ -290,6 +359,8 @@ int shadow_comptime_exec_file(const char* input_path, char** out_stage1_src,
     }
     cc_emit_plan_clear_generic_factory_registrations();
     cc_emit_plan_clear_comptime_fragments();
+    /* Field is_as comes from type-pass registry via cc_reflect_field_*;
+     * reflect_src stays Concurrent-C for methods / fallbacks. */
     if (cc_emit_plan_exec_comptime_blocks(buf, n, input_path) != 0) {
         free(buf);
         return -1;

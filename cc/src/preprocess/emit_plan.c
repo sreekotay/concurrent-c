@@ -1243,6 +1243,167 @@ const void* cc_emit_plan_host_type_of(const char* name) {
 static const char* cc__reflect_src = NULL;
 static size_t cc__reflect_src_len = 0;
 
+/* In-memory field graph from lower-then-TCC type pass (emit `__cc_rf_*`). */
+typedef struct CCCtFieldRegEntry {
+    char* type_name;
+    char** names;
+    char** types;
+    int* is_as;
+    int n;
+} CCCtFieldRegEntry;
+
+static CCCtFieldRegEntry* cc__field_reg = NULL;
+static size_t cc__field_reg_n = 0;
+static size_t cc__field_reg_cap = 0;
+static char* cc__field_reg_lowered_c = NULL;
+
+void cc_ct_field_reg_clear(void) {
+    size_t i, j;
+    for (i = 0; i < cc__field_reg_n; i++) {
+        CCCtFieldRegEntry* e = &cc__field_reg[i];
+        for (j = 0; j < (size_t)e->n; j++) {
+            free(e->names[j]);
+            free(e->types[j]);
+        }
+        free(e->names);
+        free(e->types);
+        free(e->is_as);
+        free(e->type_name);
+    }
+    free(cc__field_reg);
+    cc__field_reg = NULL;
+    cc__field_reg_n = 0;
+    cc__field_reg_cap = 0;
+    free(cc__field_reg_lowered_c);
+    cc__field_reg_lowered_c = NULL;
+}
+
+void cc_ct_field_reg_set_lowered_c(char* owned_c) {
+    /* Keep typedefs/structs only — drop functions/main from the type-pass TU. */
+    char* slim = NULL;
+    if (owned_c && owned_c[0])
+        slim = cc_ct_extract_type_decls_prelude(owned_c, strlen(owned_c));
+    free(owned_c);
+    free(cc__field_reg_lowered_c);
+    cc__field_reg_lowered_c = slim;
+}
+
+const char* cc_ct_field_reg_lowered_c(void) {
+    return cc__field_reg_lowered_c;
+}
+
+/* Rebuild `__cc_rf_*` tables from the in-memory registry (plain C). */
+static void cc__field_reg_append_rf_tables(char** out, size_t* out_len,
+                                           size_t* out_cap) {
+    size_t i;
+    int j;
+    for (i = 0; i < cc__field_reg_n; i++) {
+        CCCtFieldRegEntry* e = &cc__field_reg[i];
+        char hdr[256];
+        if (!e->type_name || !e->type_name[0]) continue;
+        snprintf(hdr, sizeof(hdr),
+                 "/* CC reflect fields:%s */\n"
+                 "static const struct { const char* name; const char* type; "
+                 "int is_as; } __cc_rf_%s[] = {\n",
+                 e->type_name, e->type_name);
+        cc_sb_append_cstr(out, out_len, out_cap, hdr);
+        for (j = 0; j < e->n; j++) {
+            char row[384];
+            snprintf(row, sizeof(row), "    { \"%s\", \"%s\", %d },\n",
+                     e->names[j] ? e->names[j] : "",
+                     e->types[j] ? e->types[j] : "", e->is_as[j] ? 1 : 0);
+            cc_sb_append_cstr(out, out_len, out_cap, row);
+        }
+        snprintf(hdr, sizeof(hdr),
+                 "};\nstatic const int __cc_rf_%s_n = %d;\n\n", e->type_name,
+                 e->n);
+        cc_sb_append_cstr(out, out_len, out_cap, hdr);
+    }
+}
+
+char* cc_ct_field_reg_slim_prelude(void) {
+    /* TCC sessions already carry user typedefs via the emit-tpl prelude /
+     * fndefs / body — re-injecting type-pass typedefs redefines structs
+     * (static_map, header harvest). Only `__cc_rf_*` tables are unique. */
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    cc__field_reg_append_rf_tables(&out, &out_len, &out_cap);
+    return out;
+}
+
+static CCCtFieldRegEntry* cc__field_reg_find(const char* type_name) {
+    size_t i;
+    if (!type_name || !type_name[0]) return NULL;
+    for (i = 0; i < cc__field_reg_n; i++) {
+        if (strcmp(cc__field_reg[i].type_name, type_name) == 0)
+            return &cc__field_reg[i];
+    }
+    return NULL;
+}
+
+int cc_ct_field_reg_has(const char* type_name) {
+    return cc__field_reg_find(type_name) != NULL;
+}
+
+int cc_ct_field_reg_put(const char* type_name, const char* const* names,
+                        const char* const* types, const int* is_as, int n) {
+    CCCtFieldRegEntry* e;
+    int i;
+    if (!type_name || !type_name[0] || n < 0) return -1;
+    if (n > 0 && (!names || !types || !is_as)) return -1;
+    e = cc__field_reg_find(type_name);
+    if (e) {
+        for (i = 0; i < e->n; i++) {
+            free(e->names[i]);
+            free(e->types[i]);
+        }
+        free(e->names);
+        free(e->types);
+        free(e->is_as);
+        e->names = NULL;
+        e->types = NULL;
+        e->is_as = NULL;
+        e->n = 0;
+    } else {
+        if (cc__field_reg_n >= cc__field_reg_cap) {
+            size_t nc = cc__field_reg_cap ? cc__field_reg_cap * 2 : 32;
+            CCCtFieldRegEntry* nb = (CCCtFieldRegEntry*)realloc(
+                cc__field_reg, nc * sizeof(CCCtFieldRegEntry));
+            if (!nb) return -1;
+            cc__field_reg = nb;
+            cc__field_reg_cap = nc;
+        }
+        e = &cc__field_reg[cc__field_reg_n++];
+        memset(e, 0, sizeof(*e));
+        e->type_name = strdup(type_name);
+        if (!e->type_name) {
+            cc__field_reg_n--;
+            return -1;
+        }
+    }
+    if (n == 0) return 0;
+    e->names = (char**)calloc((size_t)n, sizeof(char*));
+    e->types = (char**)calloc((size_t)n, sizeof(char*));
+    e->is_as = (int*)calloc((size_t)n, sizeof(int));
+    if (!e->names || !e->types || !e->is_as) {
+        free(e->names);
+        free(e->types);
+        free(e->is_as);
+        e->names = NULL;
+        e->types = NULL;
+        e->is_as = NULL;
+        return -1;
+    }
+    for (i = 0; i < n; i++) {
+        e->names[i] = strdup(names[i] ? names[i] : "");
+        e->types[i] = strdup(types[i] ? types[i] : "");
+        e->is_as[i] = is_as[i] ? 1 : 0;
+        if (!e->names[i] || !e->types[i]) return -1;
+    }
+    e->n = n;
+    return 0;
+}
+
 void cc_emit_plan_set_reflect_source(const char* src, size_t len) {
     cc__reflect_src = src;
     cc__reflect_src_len = len;
@@ -1263,10 +1424,14 @@ char* cc_emit_plan_reflect_type_prelude(void) {
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
     const CCResultSpecTable* tbl = cc_result_spec_table_get_global();
-    if (cc__reflect_src && cc__reflect_src_len > 0)
+    /* Prefer plain-C typedefs from the type pass over CC-source extract. */
+    if (cc__field_reg_lowered_c && cc__field_reg_lowered_c[0]) {
+        cc_sb_append_cstr(&out, &out_len, &out_cap, cc__field_reg_lowered_c);
+    } else if (cc__reflect_src && cc__reflect_src_len > 0) {
         types = cc_ct_extract_type_decls_prelude(cc__reflect_src, cc__reflect_src_len);
-    if (types && types[0]) cc_sb_append_cstr(&out, &out_len, &out_cap, types);
-    free(types);
+        if (types && types[0]) cc_sb_append_cstr(&out, &out_len, &out_cap, types);
+        free(types);
+    }
     if (tbl) {
         for (size_t i = 0; i < tbl->count; i++) {
             const CCResultSpec* sp = cc_result_spec_table_get(tbl, i);
@@ -1297,28 +1462,44 @@ static int cc__rfl_emit(const char* s, char* out, int out_sz) {
 }
 
 int cc_reflect_field_count(const char* type_name) {
+    CCCtFieldRegEntry* e = cc__field_reg_find(type_name);
     CCCtField* fields = NULL;
     size_t nf = 0;
-    if (!cc_ct_reflect_struct_fields(cc__reflect_src, cc__reflect_src_len,
-                                     type_name, &fields, &nf))
-        return -1;
-    cc_ct_free_fields(fields, nf);
-    return (int)nf;
+    /* Concurrent-C reflect owns count/name/type when reflect source is set:
+     * whitelist type-pass tables are incomplete (arrays, multi-declarators,
+     * unmodelable forms). Do not fall back to registry after a CC refuse —
+     * that would turn all-or-nothing -1 into a partial hit. */
+    if (cc__reflect_src && cc__reflect_src_len > 0) {
+        if (!cc_ct_reflect_struct_fields(cc__reflect_src, cc__reflect_src_len,
+                                         type_name, &fields, &nf))
+            return -1;
+        cc_ct_free_fields(fields, nf);
+        return (int)nf;
+    }
+    if (e) return e->n;
+    return -1;
 }
 
 static int cc__reflect_field_member(const char* type_name, int idx, int want_type,
                                     char* buf, int buf_sz) {
-    if (buf && buf_sz > 0) buf[0] = '\0';
+    CCCtFieldRegEntry* e;
     CCCtField* fields = NULL;
     size_t nf = 0;
-    if (!cc_ct_reflect_struct_fields(cc__reflect_src, cc__reflect_src_len,
-                                     type_name, &fields, &nf))
-        return -1;
     int rc = -1;
-    if (idx >= 0 && (size_t)idx < nf)
-        rc = cc__rfl_emit(want_type ? fields[idx].type : fields[idx].name, buf, buf_sz);
-    cc_ct_free_fields(fields, nf);
-    return rc;
+    if (buf && buf_sz > 0) buf[0] = '\0';
+    if (cc__reflect_src && cc__reflect_src_len > 0) {
+        if (!cc_ct_reflect_struct_fields(cc__reflect_src, cc__reflect_src_len,
+                                         type_name, &fields, &nf))
+            return -1;
+        if (idx >= 0 && (size_t)idx < nf)
+            rc = cc__rfl_emit(want_type ? fields[idx].type : fields[idx].name,
+                              buf, buf_sz);
+        cc_ct_free_fields(fields, nf);
+        return rc;
+    }
+    e = cc__field_reg_find(type_name);
+    if (!e || idx < 0 || idx >= e->n) return -1;
+    return cc__rfl_emit(want_type ? e->types[idx] : e->names[idx], buf, buf_sz);
 }
 
 int cc_reflect_field_name(const char* type_name, int idx, char* buf, int buf_sz) {
@@ -1327,6 +1508,23 @@ int cc_reflect_field_name(const char* type_name, int idx, char* buf, int buf_sz)
 
 int cc_reflect_field_type(const char* type_name, int idx, char* buf, int buf_sz) {
     return cc__reflect_field_member(type_name, idx, 1, buf, buf_sz);
+}
+
+int cc_reflect_field_is_as(const char* type_name, int idx) {
+    CCCtFieldRegEntry* e = cc__field_reg_find(type_name);
+    CCCtField* fields = NULL;
+    size_t nf = 0;
+    int rc = -1;
+    if (e) {
+        if (idx < 0 || idx >= e->n) return -1;
+        return e->is_as[idx] ? 1 : 0;
+    }
+    if (!cc_ct_reflect_struct_fields(cc__reflect_src, cc__reflect_src_len,
+                                     type_name, &fields, &nf))
+        return -1;
+    if (idx >= 0 && (size_t)idx < nf) rc = fields[idx].is_as ? 1 : 0;
+    cc_ct_free_fields(fields, nf);
+    return rc;
 }
 
 /* --- method reflection host verbs ---

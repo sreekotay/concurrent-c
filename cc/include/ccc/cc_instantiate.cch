@@ -31,6 +31,7 @@ extern void cc_emit_raw(int anchor, const char* ptr, size_t len);
 extern int cc_reflect_field_count(const char* type_name);
 extern int cc_reflect_field_name(const char* type_name, int idx, char* buf, int buf_sz);
 extern int cc_reflect_field_type(const char* type_name, int idx, char* buf, int buf_sz);
+extern int cc_reflect_field_is_as(const char* type_name, int idx);
 extern int cc_result_box_name(const char* ok_type, const char* err_type, char* buf, int buf_sz);
 extern int cc_reflect_method_count(const char* type_name);
 extern int cc_reflect_method_name(const char* type_name, int idx, char* buf, int buf_sz);
@@ -76,13 +77,19 @@ typedef struct CCReflectField {
     char name[128];
     char type[128];
     int index;
+    int is_as;
 } CCReflectField;
 
 static inline int cc_reflect_field_at(const char* type_name, int idx, CCReflectField* out) {
+    int as;
     if (!out || idx < 0) return -1;
     out->index = idx;
+    out->is_as = 0;
     if (cc_reflect_field_name(type_name, idx, out->name, (int)sizeof(out->name)) < 0) return -1;
     if (cc_reflect_field_type(type_name, idx, out->type, (int)sizeof(out->type)) < 0) return -1;
+    as = cc_reflect_field_is_as(type_name, idx);
+    if (as < 0) return -1;
+    out->is_as = as ? 1 : 0;
     return 0;
 }
 

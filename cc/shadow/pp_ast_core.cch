@@ -9,6 +9,9 @@ int cc_emit_plan_has_generic_factory(const char* name);
 int cc_emit_plan_generic_factory_names_csv(char* out, size_t cap);
 size_t cc_emit_plan_comptime_fragment_count(void);
 const char* cc_emit_plan_comptime_fragment_text(size_t frag_index);
+/* Lower-then-TCC field registry (libshadow_comptime). */
+int cc_ct_field_reg_put(const char* type_name, const char* const* names,
+                        const char* const* types, const int* is_as, int n);
 
 /* ---- closed parse keywords (comptime perfect hash) ---------------------- */
 

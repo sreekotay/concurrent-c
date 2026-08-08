@@ -178,10 +178,9 @@ int cc_build_parse_input(const char* file_buf,
     cc_unwrap_destroy_set_symbols(NULL);
     if (!canonical) { free(buf); goto fail; }
 
-    /* `@as` on struct fields is CC surface syntax; rewrite to a block-comment
-     * marker so TCC accepts the TU. Field collectors recognize the comment.
-     * (Comptime field reflection overlays is_as from pre-CPP source because
-     * include-expanded views drop comments.) */
+    /* `@as` is AST / reflect-table only — erase from host-C-shaped buffers.
+     * Comptime harvests `is_as` from Concurrent-C source before this strip
+     * (or from emitted tables); never from comment markers. */
     {
         size_t clen = strlen(canonical);
         char* as_rw = cc_rewrite_as_attr_to_comment(canonical, clen);

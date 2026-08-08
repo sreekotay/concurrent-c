@@ -3509,7 +3509,8 @@ static AstNode* parse_static_fn(Parser* p) {
         if (ok_stmts && p_accept(p, TK_PUNCT, "}")) return n;
 
         /* Soft miss with Concurrent-C still in the body must not become raw
-         * tape — that leaves !>/@/=> unlowered. Plain-C bodies may rewind. */
+         * tape — that leaves !>/@/=>/[:] / :: unlowered. Plain-C bodies may
+         * rewind. */
         if (!ok_stmts) {
             int j = body0;
             int d = 1;
@@ -3520,7 +3521,9 @@ static AstNode* parse_static_fn(Parser* p) {
                 else if (tok_eq(t, TK_PUNCT, "}")) d--;
                 else if (tok_eq(t, TK_PUNCT, "!>") || tok_eq(t, TK_PUNCT, "?>") ||
                          tok_eq(t, TK_PUNCT, "=>") || tok_eq(t, TK_PUNCT, "@") ||
-                         tok_eq(t, TK_PUNCT, "::")) {
+                         tok_eq(t, TK_PUNCT, "::") ||
+                         (tok_eq(t, TK_PUNCT, "[") && j + 1 < p->n &&
+                          tok_eq(p->toks[j + 1], TK_PUNCT, ":"))) {
                     at = t;
                     p->nn = saved_nn;
                     p->nkstore = saved_nk;

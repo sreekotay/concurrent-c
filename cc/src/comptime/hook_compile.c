@@ -19,6 +19,7 @@
 
 #include "executor.h"
 #include "header/lower_header.h"
+#include "preprocess/emit_plan.h"
 #include "preprocess/preprocess.h"
 #include "preprocess/type_registry.h"
 #include "util/cache_evict.h"
@@ -895,6 +896,15 @@ static int cc__build_compile_and_load(const char* input_path,
         cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "#define CC_COMPTIME_EXEC 1\n");
         cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, CC_COMPTIME_EMIT_TPL_PRELUDE);
         cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "\n");
+        {
+            /* Typedefs + __cc_rf_* from type pass — not the full product TU. */
+            char* slim = cc_ct_field_reg_slim_prelude();
+            if (slim && slim[0]) {
+                cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, slim);
+                cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "\n");
+            }
+            free(slim);
+        }
         cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, isolated_body);
         cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "\n");
     } else if (needs_cc_preprocess && !source_is_header) {

@@ -78,6 +78,64 @@ static int shadow_params_mention_type(const char* params, const char* alias) {
     return 0;
 }
 
+/* Emit C reflect table for a typedef alias (attrs are not on the struct).
+ * Also registers the table in `cc_ct_field_reg_*` for lower-then-TCC comptime. */
+static int shadow_emit_reflect_field_table(AstNode* it, CEmit* out) {
+    const char* alias;
+    int k, n = 0;
+    const char* names[64];
+    const char* types_store[64];
+    char typebuf[64][160];
+    int is_as_arr[64];
+    if (!it || !out || !it->b[0] || it->nkids <= 0) return 1;
+    alias = it->b;
+    if (!cemit_fmt(out, "/* CC reflect fields:%s (is_as from AST; not on struct) */\n",
+                   alias))
+        return 0;
+    if (!cemit_fmt(out,
+                   "static const struct { const char* name; const char* type; "
+                   "int is_as; } __cc_rf_%s[] = {\n",
+                   alias))
+        return 0;
+    for (k = 0; k < it->nkids; k++) {
+        AstNode* f = it->kids[k];
+        const char* fname = NULL;
+        char fty[160];
+        int is_as = 0;
+        fty[0] = 0;
+        if (f->kind == AST_FIELD_INT) {
+            fname = f->a;
+            snprintf(fty, sizeof(fty), "int");
+        } else if (f->kind == AST_FIELD_SIMPLE) {
+            if (f->e[0] && strcmp(f->e, "raw") == 0) continue;
+            fname = f->b;
+            snprintf(fty, sizeof(fty), "%s", f->a);
+            shadow_rewrite_char_slice_types(fty, sizeof(fty));
+            if (f->e[0] && strcmp(f->e, "as") == 0) is_as = 1;
+        } else if (f->kind == AST_SLICE_VAR) {
+            fname = f->a;
+            snprintf(fty, sizeof(fty), "%s", shadow_slice_ty("int"));
+        } else {
+            continue;
+        }
+        if (!fname || !fname[0]) continue;
+        if (!cemit_fmt(out, "    { \"%s\", \"%s\", %d },\n", fname, fty, is_as))
+            return 0;
+        if (n < 64) {
+            names[n] = fname;
+            snprintf(typebuf[n], sizeof(typebuf[n]), "%s", fty);
+            types_store[n] = typebuf[n];
+            is_as_arr[n] = is_as;
+        }
+        n++;
+    }
+    if (!cemit_fmt(out, "};\nstatic const int __cc_rf_%s_n = %d;\n\n", alias, n))
+        return 0;
+    if (n > 0 && n <= 64)
+        (void)cc_ct_field_reg_put(alias, names, types_store, is_as_arr, n);
+    return 1;
+}
+
 /* typedef struct { … } Alias; — shared by prelude + main emit. */
 static int shadow_emit_typedef_struct(AstNode* it, CEmit* out, TapeCache* cache,
                                       ShadowCtx* line_ctx) {
@@ -99,6 +157,7 @@ static int shadow_emit_typedef_struct(AstNode* it, CEmit* out, TapeCache* cache,
         if (!cemit_fmt(out, "typedef struct { %s %s; } %s;\n\n",
                        fty, f->b, it->b))
             return 0;
+        if (!shadow_emit_reflect_field_table(it, out)) return 0;
         return 1;
     }
     if (it->a[0]) {
@@ -169,6 +228,7 @@ static int shadow_emit_typedef_struct(AstNode* it, CEmit* out, TapeCache* cache,
         }
     }
     if (!cemit_fmt(out, "} %s;\n\n", it->b)) return 0;
+    if (!shadow_emit_reflect_field_table(it, out)) return 0;
     return 1;
 }
 

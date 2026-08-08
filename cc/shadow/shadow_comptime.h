@@ -9,6 +9,19 @@
 extern "C" {
 #endif
 
+/* Lower-then-TCC type pass: read input, rewrite includes, harvest, space-blank
+ * all `@comptime` constructs (blocks / for / if) so whitelist parse+emit can
+ * populate `cc_ct_field_reg_*` from `__cc_rf_*` tables before comptime exec.
+ * Returns NULL (skip type pass) when the harvested TU has no `@comptime`.
+ * Caller frees. */
+char* shadow_comptime_type_pass_src(const char* input_path, size_t* out_n);
+
+/* Field registry (libshadow_comptime) — filled during type-pass emit. */
+void cc_ct_field_reg_clear(void);
+int cc_ct_field_reg_put(const char* type_name, const char* const* names,
+                        const char* const* types, const int* is_as, int n);
+void cc_ct_field_reg_set_lowered_c(char* owned_c);
+
 /* Prepare + execute @comptime blocks for `input_path` (reads the file).
  * Populates the process-global emit-plan fragment table.
  * On success, if `out_stage1_src` is non-NULL, fills it with a malloc'd

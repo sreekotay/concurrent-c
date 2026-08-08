@@ -1,0 +1,9 @@
+promoted_utc: 2026-08-08T02:18:34Z
+git_head: 804b029e
+--- from SNAPSHOT.txt ---
+source: cc/shadow/shadow_lower.ccs
+emitter: native:/Users/skotay/Documents/code/concurrent-c/out/cc/bin/shadow_lower
+created_utc: 2026-08-08T02:18:29Z
+git_head: 804b029e
+emit_bytes: 97926
+header_count: 26
