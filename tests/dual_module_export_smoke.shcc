@@ -36,8 +36,9 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
     run.arg("-c");
     CCString sh = @string(`
     set -e
-    a=$(stat -c %i bin/dual_gauge.abi3.so)
-    b=$(stat -c %i bin/dual_gauge.node)
+    # ls -i is portable (GNU/BSD); `stat -c` is GNU-only.
+    a=$(ls -i bin/dual_gauge.abi3.so | awk '{print $1}')
+    b=$(ls -i bin/dual_gauge.node | awk '{print $1}')
     if [ "$a" = "$b" ]; then echo "hardlinked true"; else echo "hardlinked false"; fi
     PYTHONPATH=bin python3 -c "import dual_gauge; print('py', dual_gauge.bump(3))"
     node -e "console.log('js', require(process.cwd() + '/bin/dual_gauge.node').bump(5))"
