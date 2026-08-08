@@ -86,7 +86,7 @@ make install-check PREFIX=/opt/ccc
 
 - Links against patched `libtcc.a`. Optional channel backend: `./scripts/fetch_submodules.sh --with-liblfds`.
 - Outputs: `cc/bin/.ccc-bin`, wrapper `cc/bin/ccc`, `out/cc/bin/shadow_lower`.
-- `shadow_lower` is host-cc'd from `cc/bootstrap/shadow_lower/$(cat last-good)/`. Source of truth: `cc/shadow/*.ccs`. Promote with `scripts/snapshot_shadow_lower.sh` + `scripts/promote_shadow_bootstrap.sh`.
+- `shadow_lower` is host-cc'd from `cc/bootstrap/shadow_lower/$(cat last-good)/`. Source of truth: `cc/shadow/*.ccs`. Iterate: `./scripts/iterate_shadow_lower.sh`; ship a seed: `./scripts/iterate_shadow_lower.sh --ship --smoke`.
 - Host-TCC self-build of `ccc`: Linux ILP32 (`CCC_HOST_CC=tcc ./scripts/smoke_i386.sh`), not Darwin (TCC ELF vs Mach-O `libtcc.a`).
 - Before pushing submodule pointer changes: `make check-submodules`.
 

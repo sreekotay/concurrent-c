@@ -33,12 +33,18 @@ source tree.
 
 ## Iterate → ship
 
+One-liner (preferred):
+
+```bash
+./scripts/iterate_shadow_lower.sh                 # edit-loop: ccs rebuild only
+./scripts/iterate_shadow_lower.sh --ship --smoke  # freeze: ccs → snapshot → promote → bootstrap build
+```
+
 | Step | Command | Effect |
 |------|---------|--------|
 | Edit | `cc/shadow/*.cch` | Source of truth |
-| Rebuild lowerer | `make -C cc SHADOW_LOWER_SOURCE=ccs ../out/cc/bin/shadow_lower` | Seed binary re-lowers from sources (`-I../cc/shadow`) |
-| Snapshot | `./scripts/snapshot_shadow_lower.sh --smoke` | Emit → `latest/` + lowered headers |
-| Promote | `./scripts/promote_shadow_bootstrap.sh` | `latest/` → **new** `vN`, flip `last-good` |
+| Rebuild lowerer | `./scripts/iterate_shadow_lower.sh` | Seed re-lowers from sources |
+| Ship seed | `./scripts/iterate_shadow_lower.sh --ship [--smoke]` | Snapshot → new `vN` → flip `last-good` → host-cc |
 | Commit | `git add …/last-good …/vN` | Human-gated |
 
 A fix is not in the committed seed until promote has created the new `vN`
@@ -49,7 +55,7 @@ and `last-good` points at it.
 `make -C cc` builds `shadow_lower` from `last-good` (`SHADOW_LOWER_SOURCE=bootstrap`).
 
 ```bash
-# Iterate on .ccs before promoting a new seed
+# Same as ./scripts/iterate_shadow_lower.sh
 make -C cc SHADOW_LOWER_SOURCE=ccs ../out/cc/bin/shadow_lower
 
 # Explicit aliases

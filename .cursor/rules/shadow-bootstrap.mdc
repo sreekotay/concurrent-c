@@ -1,6 +1,6 @@
 ---
 description: shadow_lower source-of-truth and bootstrap promote loop — never hand-edit vN or out/include
-globs: cc/shadow/**,cc/bootstrap/shadow_lower/**,out/include/cc/shadow/**,scripts/snapshot_shadow_lower.sh,scripts/promote_shadow_bootstrap.sh
+globs: cc/shadow/**,cc/bootstrap/shadow_lower/**,out/include/cc/shadow/**,scripts/iterate_shadow_lower.sh,scripts/snapshot_shadow_lower.sh,scripts/promote_shadow_bootstrap.sh
 alwaysApply: false
 ---
 
@@ -16,13 +16,10 @@ alwaysApply: false
 
 ```bash
 # 1. Edit cc/shadow/*.cch
-# 2. Rebuild lowerer from sources (seed re-lowers .ccs)
-make -C cc SHADOW_LOWER_SOURCE=ccs ../out/cc/bin/shadow_lower
-# 3. Snapshot (+ host-cc smoke)
-./scripts/snapshot_shadow_lower.sh --smoke
-# 4. Promote → new vN, flip last-good
-./scripts/promote_shadow_bootstrap.sh
-# 5. Human-gated commit of last-good + vN
+# 2. Iterate (ccs rebuild) or ship (snapshot + promote + bootstrap build)
+./scripts/iterate_shadow_lower.sh                 # day-to-day
+./scripts/iterate_shadow_lower.sh --ship --smoke  # freeze into last-good
+# 3. Human-gated commit of last-good + vN
 ```
 
 Default `make -C cc` builds from `last-good` (`SHADOW_LOWER_SOURCE=bootstrap`). That does **not** pick up uncommitted `.cch` edits until you ccs-rebuild and promote.

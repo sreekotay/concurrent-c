@@ -387,7 +387,11 @@ $(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_CCS_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_COM
 	# cache/build helpers + lit-coerce face so .cch edits are not shadowed by
 	# a stale last-good copy (scripts/patch_ufcs_slice_lit_face.py).
 	@mkdir -p ../out/include/cc/shadow
-	@cp -f $(SHADOW_BUILD_CCH) ../out/include/cc/shadow/shadow_build.h
+	@# Preserve mtimes when content is unchanged (avoids dirtying dependents).
+	@if [ ! -f ../out/include/cc/shadow/shadow_build.h ] || \
+	    ! cmp -s $(SHADOW_BUILD_CCH) ../out/include/cc/shadow/shadow_build.h; then \
+		cp -f $(SHADOW_BUILD_CCH) ../out/include/cc/shadow/shadow_build.h; \
+	fi
 	@if [ -f ../out/include/cc/shadow/pp_emit_ufcs.h ]; then \
 		python3 ../scripts/patch_ufcs_slice_lit_face.py; \
 	fi
@@ -420,9 +424,17 @@ $(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_BOOT_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_CO
 	# (<cc/shadow/*.h>, legacy <examples/serdes/c/*.h>). v4+ rewrites those
 	# to "foo.h" + -Iinclude/; seeding keeps older snapshots host-cc clean.
 	@mkdir -p ../out/include/cc/shadow ../out/include/examples/serdes/c
+	@# Copy-if-different: identical last-good headers must not bump mtimes.
 	@if ls $(BOOTSTRAP_DIR)/include/*.h >/dev/null 2>&1; then \
-		cp -f $(BOOTSTRAP_DIR)/include/*.h ../out/include/cc/shadow/; \
-		cp -f $(BOOTSTRAP_DIR)/include/*.h ../out/include/examples/serdes/c/; \
+		for f in $(BOOTSTRAP_DIR)/include/*.h; do \
+			b=$$(basename "$$f"); \
+			for dest in ../out/include/cc/shadow/$$b \
+			            ../out/include/examples/serdes/c/$$b; do \
+				if [ ! -f "$$dest" ] || ! cmp -s "$$f" "$$dest"; then \
+					cp -f "$$f" "$$dest"; \
+				fi; \
+			done; \
+		done; \
 	fi
 	# arena_state/FFC live only in concurrent_c.o (see SHADOW_COMPTIME_ENGINE_OBJS).
 	$(CC) $(CFLAGS) -o $@ $(BOOTSTRAP_DIR)/shadow_lower.c \
