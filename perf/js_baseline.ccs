@@ -1,0 +1,114 @@
+/* The JS -> CC boundary, priced against native JavaScript — the inbound
+ * half of the ladder `perf/py_baseline.ccs` runs for Python.  Guest mode
+ * inverts the harness: the host owns `main`, so the benchmark is this
+ * addon plus the driver that times it:
+ *
+ *   ./cc/bin/ccc build perf/js_baseline.ccs
+ *   node perf/js_baseline.js [iters] [samples]
+ *
+ * The driver owns the rung table, warmup, medians, cross-checks, and
+ * RESULT lines; this module is the CC side every rung calls into.  The
+ * outbound rungs (cc_to_js, rows/map, bulk) land with the surfaces that
+ * enable them; when hosting lands (`cc_js_new`), the same module logic
+ * drives host mode from CC.
+ *
+ * `calls` makes every crossing pay a real state write, the same shape the
+ * Python Math module has. */
+#include <ccc/script/js.cch>
+
+typedef struct Math {
+    long long calls;
+    double *series;
+    long long slen;
+} Math;
+
+static long long Math_add(Math *self, long long a, long long b) {
+    self->calls += 1;
+    return a + b;
+}
+static long long Math_mul_add(Math *self, long long x, long long k, long long z) {
+    self->calls += 1;
+    return x * k + z;
+}
+/* Inbound string rung: Node-API copies string bytes out (no borrowed
+ * UTF-8), so a str argument prices the copy — a cost the Python boundary
+ * does not pay. */
+static long long Math_str_len(Math *self, CCSlice s) {
+    self->calls += 1;
+    return (long long)s.len;
+}
+/* BigInt rung: an argument beyond 2^53 takes the BigInt path.  Returns
+ * the small remainder so the driver's accumulator stays a number. */
+static long long Math_big_echo(Math *self, long long x) {
+    self->calls += 1;
+    return x - 9007199254740992LL; /* 2^53 */
+}
+/* The C floor, run where it lives: one crossing carries the whole loop. */
+static long long Math_c_native_sum(Math *self, long long iters) {
+    Math local = { .calls = 0 };
+    long long t = 0;
+    for (long long i = 0; i < iters; i++) t += Math_mul_add(&local, 3, i, 7);
+    self->calls += local.calls;
+    return t;
+}
+static long long Math_calls(Math *self) {
+    return self->calls;
+}
+/* Bulk rungs.  A matching Float64Array borrows zero-copy; a plain Array
+ * converts per element — the two inbound forms py_baseline prices as
+ * recv_buf / recv_list. */
+static double Math_sum_f64(Math *self, double[:] xs) {
+    double acc = 0;
+    self->calls += 1;
+    for (size_t i = 0; i < xs.base.len; i++) acc += ((double *)xs.base.ptr)[i];
+    return acc;
+}
+/* State-owned series, built outside the timed region; `series` returns it
+ * as a typed slice the boundary copies into a fresh Float64Array — the
+ * outbound form. */
+static long long Math_series_prep(Math *self, long long n) {
+    if (n < 1) n = 1;
+    free(self->series);
+    self->series = (double *)malloc((size_t)n * sizeof(double));
+    if (!self->series) { self->slen = 0; return 0; }
+    for (long long i = 0; i < n; i++)
+        self->series[i] = (double)(i % 1000) * 0.5;
+    self->slen = n;
+    return n;
+}
+static double[:] Math_series(Math *self) {
+    return CCSlice_double_from_buffer(self->series, (size_t)self->slen);
+}
+static void Math_destroy(Math *self) {
+    free(self->series);
+    self->series = NULL;
+    self->slen = 0;
+}
+
+/* The napi floor: the same add, hand-written against the raw symbol table
+ * — no bind, no _Generic, no scratch, no state.  `js_to_cc` minus this is
+ * the price of the generated binding itself; this alone is the crossing
+ * cost no binding can go below. */
+static void *cc__raw_add(void *env, void *info) {
+    void *argv[2];
+    size_t argc = 2;
+    double a = 0, b = 0;
+    void *r = (void *)0;
+    if (cc__js.GetCbInfo(env, info, &argc, argv, (void **)0, (void **)0) != 0)
+        return (void *)0;
+    if (cc__js.GetValueDouble(env, argv[0], &a) != 0) return (void *)0;
+    if (cc__js.GetValueDouble(env, argv[1], &b) != 0) return (void *)0;
+    if (cc__js.CreateDouble(env, a + b, &r) != 0) return (void *)0;
+    return r;
+}
+
+void *napi_register_module_v1(void *env, void *exports) {
+    void *ex = js_module::[Math](env, exports, NULL);
+    void *fn = (void *)0;
+    if (!ex) return (void *)0;
+    if (cc__js.CreateFunction(env, "raw_add", CC__JS_AUTO_LENGTH,
+                              (void *)cc__raw_add, (void *)0, &fn) != 0 ||
+        cc__js.SetNamedProperty(env, exports, "raw_add", fn) != 0)
+        return cc__js_fail(env, "cc: raw_add registration failed");
+    return ex;
+}

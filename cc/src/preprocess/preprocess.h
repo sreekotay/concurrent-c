@@ -43,6 +43,10 @@ int cc_ct_reflect_type_methods(const char* src, size_t len, const char* type_nam
  * declarator parser cannot model — every parameter or none, since a dropped one
  * would silently renumber the rest. */
 int cc_ct_reflect_param_list(const char* params, CCCtField** out, size_t* out_n);
+/* `T[:]` slice sugar in a reflected spelling → the lowered instance name
+ * (`CCSlice_<elem>`; char family plain `CCSlice`).  Malloc'd, or NULL when
+ * no sugar is present. */
+char* cc_ct_slice_sugar_rewrite(const char* decl);
 /* Default literal for params[idx] (`pad = 1` → `"1"`).  0 = none; -1 = bad. */
 int cc_ct_reflect_param_default(const char* params, int idx, char* buf, int buf_sz);
 void cc_ct_free_fields(CCCtField* fields, size_t n);

@@ -966,20 +966,26 @@ static int derive_default_bin(const char* in_path, char* out_buf, size_t out_buf
     return derive_path_from_stem(stem, g_bin_root, "", out_buf, out_buf_size);
 }
 
-/* A TU that exports `PyInit_<name>` and defines no `main` is a CPython
- * extension module — the source declares the artifact, so the build obeys:
- * PIC objects, a `-shared` link, `<name>.so` as the default output.  There
- * is no flag; CPython's own entry-point convention is the declaration.
- * Comment/string-opaque scan of the raw file; `main` beats `PyInit_` so an
- * embed-style program that mentions both stays an executable.  Returns 1
- * and fills `name_out` when the TU is a module. */
-static int cc__detect_py_module(const char* in_path, char* name_out, size_t cap) {
+/* A TU that exports a foreign runtime's entry point and defines no `main`
+ * is an extension module — the source declares the artifact, so the build
+ * obeys: PIC objects, a `-shared` link, the runtime's own suffix as the
+ * default output.  There is no flag; the entry-point convention is the
+ * declaration.  Two conventions are recognized: `PyInit_<name>` (CPython;
+ * the symbol names the artifact) and `napi_register_module_v1` (Node-API;
+ * addons are file-named, so the artifact takes the source stem).
+ * Comment/string-opaque scan of the raw file; `main` beats either entry so
+ * an embed-style program that mentions both stays an executable.  Returns
+ * 1 with `name_out` filled for a Python module, 1 with `*is_js` set (and
+ * `name_out` empty) for a Node-API addon; Python wins if both appear. */
+static int cc__detect_ext_module(const char* in_path, char* name_out, size_t cap,
+                                 int* is_js) {
     FILE* f;
     char* buf;
     long n;
-    int found = 0, has_main = 0;
-    if (!in_path || !name_out || cap == 0) return 0;
+    int found = 0, has_main = 0, found_js = 0;
+    if (!in_path || !name_out || cap == 0 || !is_js) return 0;
     name_out[0] = '\0';
+    *is_js = 0;
     f = fopen(in_path, "rb");
     if (!f) return 0;
     fseek(f, 0, SEEK_END);
@@ -1034,11 +1040,22 @@ static int cc__detect_py_module(const char* in_path, char* name_out, size_t cap)
                 i = k;
                 continue;
             }
+            if (!found_js && c == 'n' && i + 24 <= len &&
+                memcmp(buf + i, "napi_register_module_v1", 23) == 0 &&
+                (i == 0 || !(isalnum((unsigned char)buf[i - 1]) || buf[i - 1] == '_')) &&
+                (i + 23 >= len || !(isalnum((unsigned char)buf[i + 23]) || buf[i + 23] == '_'))) {
+                found_js = 1;
+                i += 23;
+                continue;
+            }
             i++;
         }
     }
     free(buf);
-    if (has_main || !found) { name_out[0] = '\0'; return 0; }
+    if (has_main || (!found && !found_js)) { name_out[0] = '\0'; return 0; }
+    if (found) return 1; /* Python wins if both appear */
+    *is_js = 1;
+    name_out[0] = '\0';
     return 1;
 }
 
@@ -5093,11 +5110,14 @@ static int run_build_mode(int argc, char** argv) {
         }
     }
 
-    /* Python extension module: `PyInit_<name>` exported, no `main`. */
+    /* Extension module: a foreign entry point exported, no `main` —
+     * `PyInit_<name>` (CPython) or `napi_register_module_v1` (Node-API). */
     static char pymod_name[128];
     static char pymod_ccflags[1024];
     static char pymod_ldflags[1024];
-    if (cc__detect_py_module(in_path_abs, pymod_name, sizeof(pymod_name))) {
+    static int jsmod;
+    if (cc__detect_ext_module(in_path_abs, pymod_name, sizeof(pymod_name),
+                              &jsmod)) {
         snprintf(pymod_ccflags, sizeof(pymod_ccflags), "%s%s-fPIC",
                  cc_flags ? cc_flags : "", (cc_flags && cc_flags[0]) ? " " : "");
         cc_flags = pymod_ccflags;
@@ -5146,6 +5166,16 @@ static int run_build_mode(int argc, char** argv) {
              * stable-ABI promise the binding actually keeps: one built
              * module for every supported 3.x. */
             if (derive_path_from_stem(pymod_name, g_bin_root, ".abi3.so",
+                                      bin_path, sizeof(bin_path)) != 0) {
+                fprintf(stderr, "cc: failed to derive module output\n");
+                goto parse_fail;
+            }
+        } else if (jsmod) {
+            /* Node-API addons are file-named — `require('./x.node')` names
+             * the artifact, not a symbol — so the source stem names it. */
+            char jstem[128];
+            cc__stem_from_path(in_path_abs, jstem, sizeof(jstem));
+            if (derive_path_from_stem(jstem, g_bin_root, ".node",
                                       bin_path, sizeof(bin_path)) != 0) {
                 fprintf(stderr, "cc: failed to derive module output\n");
                 goto parse_fail;

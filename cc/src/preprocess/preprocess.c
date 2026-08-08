@@ -17064,6 +17064,71 @@ static int cc__ct_param_default_at(const char* src, size_t ps, size_t pe,
     return 1;
 }
 
+/* `T[:] name` slice sugar in a reflected spelling: reflection reads the
+ * pre-lowering snapshot, but factories emit host C, so the sugar rewrites
+ * to the instance name the lowering itself produces — `CCSlice_<elem>`
+ * under the canonical type mangle, the char family staying plain
+ * `CCSlice`.  Returns a malloc'd rewrite, or NULL when `decl` carries no
+ * slice sugar (the caller keeps its string). */
+char* cc_ct_slice_sugar_rewrite(const char* decl) {
+    size_t n, i, lb = 0, rb, ee;
+    int have = 0, is_char = 0;
+    char norm[128];
+    size_t nn = 0;
+    char mangled[128];
+    char head[160];
+    char* out;
+    if (!decl) return NULL;
+    n = strlen(decl);
+    for (i = 0; i + 1 < n; i++) {
+        if (decl[i] == '[') {
+            size_t k = i + 1;
+            while (k < n && (decl[k] == ' ' || decl[k] == '\t')) k++;
+            if (k < n && decl[k] == ':') { lb = i; have = 1; break; }
+        }
+    }
+    if (!have) return NULL;
+    ee = lb;
+    while (ee > 0 && (decl[ee - 1] == ' ' || decl[ee - 1] == '\t')) ee--;
+    i = 0;
+    while (i < ee) {
+        size_t ts;
+        while (i < ee && (decl[i] == ' ' || decl[i] == '\t')) i++;
+        if (i >= ee) break;
+        if (!cc_is_ident_start(decl[i])) return NULL;
+        if (nn > 0 && nn + 1 < sizeof(norm)) norm[nn++] = ' ';
+        ts = nn;
+        while (i < ee && cc_is_ident_char(decl[i])) {
+            if (nn + 1 >= sizeof(norm)) return NULL;
+            norm[nn++] = decl[i++];
+        }
+        if (nn - ts == 4 && memcmp(norm + ts, "char", 4) == 0) is_char = 1;
+    }
+    norm[nn] = '\0';
+    if (nn == 0) return NULL;
+    rb = lb;
+    while (rb < n && decl[rb] != ']') rb++;
+    if (rb >= n) return NULL;
+    if (is_char) {
+        snprintf(head, sizeof(head), "CCSlice");
+    } else {
+        cc__mangle_type_name(norm, nn, mangled, sizeof(mangled));
+        if (!mangled[0]) return NULL;
+        if ((size_t)snprintf(head, sizeof(head), "CCSlice_%s", mangled) >=
+            sizeof(head))
+            return NULL;
+    }
+    {
+        const char* rest = decl + rb + 1;
+        while (*rest == ' ' || *rest == '\t') rest++;
+        out = (char*)malloc(strlen(head) + 1 + strlen(rest) + 1);
+        if (!out) return NULL;
+        strcpy(out, head);
+        if (*rest) { strcat(out, " "); strcat(out, rest); }
+    }
+    return out;
+}
+
 static int cc__ct_parse_param_list(const char* src, size_t lp, size_t rp,
                                    CCCtField** out, size_t* out_n) {
     CCCtField* fs = NULL; size_t fn = 0, fc = 0;
@@ -17098,7 +17163,25 @@ static int cc__ct_parse_param_list(const char* src, size_t lp, size_t rp,
                 if (dr < 0) { cc__ct_free_fields(fs, fn); return 0; }
                 if (dr > 0) pe = cc_rskip_ws_and_comments(src, eq);
                 if (pe <= ps) { cc__ct_free_fields(fs, fn); return 0; }
-                d = cc__ct_member_normalize(src, ps, pe);
+                /* Slice sugar rewrites BEFORE normalization: `[:]` reads
+                 * as a bitfield to the member grammar, so the raw span is
+                 * rewritten to the lowered instance name first. */
+                {
+                    char* raw = (char*)malloc(pe - ps + 1);
+                    char* rw = NULL;
+                    if (raw) {
+                        memcpy(raw, src + ps, pe - ps);
+                        raw[pe - ps] = '\0';
+                        rw = cc_ct_slice_sugar_rewrite(raw);
+                        free(raw);
+                    }
+                    if (rw) {
+                        d = cc__ct_member_normalize(rw, 0, strlen(rw));
+                        free(rw);
+                    } else {
+                        d = cc__ct_member_normalize(src, ps, pe);
+                    }
+                }
                 if (!d) { cc__ct_free_fields(fs, fn); return 0; }
                 ok = cc__ct_parse_declarator(d, strlen(d), NULL, NULL, 0, &fs, &fn, &fc);
                 free(d);

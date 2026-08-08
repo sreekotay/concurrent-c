@@ -1589,14 +1589,19 @@ static int cc__reflect_method_member(const char* type_name, int idx, int want,
         case CC__RM_PARAMS: rc = cc__rfl_emit(m->params ? m->params : "(void)", buf, buf_sz); break;
         case CC__RM_ARGS:   rc = cc__rm_args_of(m->params, buf, buf_sz); break;
         case CC__RM_RET: {
-            /* The ok half: everything before `!>`, trailing blanks trimmed. */
+            /* The ok half: everything before `!>`, trailing blanks trimmed.
+             * Slice sugar (`double[:]`) rewrites to its lowered instance
+             * name — a factory splices this into host C. */
             size_t n = bang ? (size_t)(bang - m->type) : strlen(m->type ? m->type : "");
             char* ok;
             while (n > 0 && (m->type[n - 1] == ' ' || m->type[n - 1] == '\t')) n--;
             ok = (char*)malloc(n + 1);
             if (ok) {
+                char* rw;
                 memcpy(ok, m->type, n); ok[n] = '\0';
-                rc = cc__rfl_emit(ok, buf, buf_sz);
+                rw = cc_ct_slice_sugar_rewrite(ok);
+                rc = cc__rfl_emit(rw ? rw : ok, buf, buf_sz);
+                free(rw);
                 free(ok);
             }
             break;

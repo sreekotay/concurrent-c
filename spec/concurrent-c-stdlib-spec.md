@@ -27,8 +27,9 @@ The standard library provides these headers under `<ccc/std/...>`:
 - `http.cch`
 - `hash.cch`
 
-Portable atomics are provided separately by `<ccc/cc_atomic.cch>`, and
-Python interop by `<ccc/script/py.cch>`.
+Portable atomics are provided separately by `<ccc/cc_atomic.cch>`, Python
+interop by `<ccc/script/py.cch>`, and JavaScript interop by
+`<ccc/script/js.cch>` (draft — module door implemented).
 
 `<ccc/std/prelude.cch>` includes the core runtime headers and the stdlib slice,
 string, I/O, vector, map-forward, array-map, directory, process, command,
@@ -2067,4 +2068,334 @@ Python.
 - `fork` without `exec` while an interpreter is live
 - Non-limited C API (interpreter internals)
 - Async integration (interpreter calls stay blocking-shaped)
+
+## JavaScript interop
+
+Status: draft — `js_module::[T]`, its marshaling, and the loader are
+implemented; the rest is not.
+
+### Model
+
+The surface is native binding, in both directions: a CC type becomes a
+JavaScript module whose functions are compiled trampolines, and a
+JavaScript value binds into CC as an anchored handle whose calls are
+native calls. No call on the surface routes through evaluation of source
+text; running source text exists separately, as bootstrap glue.
+
+An environment anchors JavaScript values the way an interpreter anchors
+Python objects (§Python interop): every value has a home environment, its
+lifetime ends no later than its home's, and nothing crosses homes
+implicitly.
+
+| Type | Role |
+| ---- | ---- |
+| `CCJs` | one environment handle; `arena` is its scratch; `engine` names its backend |
+| `CCJsVal` | a value reference, anchored to its home `CCJs` |
+| `CCJsError` | a JavaScript exception with a `CCError base @as` face (§4) |
+
+```c
+#include <ccc/script/js.cch>
+
+CCJs js = cc_js_new(&a) !> @destroy;
+CCJsVal m = js.import("./stats.node") !> @destroy;
+double s = m.mean(xs) !>;
+```
+
+The binding ABI is Node-API: a versioned, engine-neutral C ABI that every
+napi host (Node, Electron, Bun, Deno) implements, and that CC itself
+implements over an engine it embeds. One binding layer serves every
+backend; only where the symbols come from differs.
+
+### Loading and engines
+
+Symbols resolve with `dlopen`/`dlsym` at first use; no CC binary carries a
+JavaScript dependency by existing. Resolution is the contract:
+
+- A required symbol that does not resolve fails at table load, naming the
+  symbol.
+- An optional symbol leaves its slot empty, and the call that needs it
+  reports cleanly at that call — a capability answer, never a stub that
+  reports success.
+- All binding is `RTLD_NOW`. A lazy failure would surface mid-call, far
+  from the resolution that caused it.
+
+The probe order: the process itself first (inside a napi host the symbols
+are already present, and loading an engine would put two runtimes in one
+process), then the `CC_LIBJS` override, then `libnode`, then the QuickJS
+backend. `cc_js_available()` is the boolean form of the question and IS
+the loader, so the probe and the constructor cannot disagree.
+
+Engines differ in what they carry — `libnode` brings the Node standard
+library and event loop; QuickJS brings a small runtime with cheap
+isolation and no event loop — so engine identity is never silent:
+
+- `js.engine` names the backend the handle got, and every `CCJsError`
+  message carries it.
+- `cc_js_new(&arena)` takes the first backend in probe order.
+  `cc_js_new_with(&arena, CC_JS_QUICKJS)` (or `CC_JS_NODE`) demands one
+  and fails cleanly when it is not loadable, naming what was demanded and
+  what was found.
+
+What a given engine build resolves is observed, not authored: a probe
+program reports each table slot (resolved from host, implemented over the
+engine, absent), and dated snapshots collect under `perf/baselines/` the
+way benchmark baselines do. The spec does not enumerate symbols; the
+table in `js.cch` is the one source of truth for what the surface asks
+of a runtime.
+
+### Binding CC into JS: `js_module::[T]`
+
+`js_module::[T]` creates a Node-API module from a CC type — which is what
+a napi addon entry point must return:
+
+```c
+/* counter.ccs — `ccc build counter.ccs` produces counter.node */
+#include <ccc/script/js.cch>
+
+typedef struct Counter { long long n; } Counter;
+static long long Counter_bump(Counter *self, long long by = 1) { return self->n += by; }
+
+void *napi_register_module_v1(void *env, void *exports) {
+    return js_module::[Counter](env, exports, NULL);
+}
+```
+
+```js
+const counter = require('./counter.node');   // JS owns main; CC is the module
+counter.bump(4);
+```
+
+There is no flag and no keyword: a TU that exports
+`napi_register_module_v1` and defines no `main` IS a napi addon —
+Node-API's own entry-point convention is the declaration — and the build
+obeys: PIC objects, a shared link, `<name>.node` as the default output.
+A TU with a `main` stays an executable even if it mentions the entry
+point.
+
+The module is the type, under the same reflection rules as
+`py_module::[T]`: every visible function whose first parameter is `T` or
+`T*` becomes a module function; an underscore member stays internal; the
+receiver is the module's state, reached through the function's data slot;
+the seed is the initial state, copied in at registration (NULL for
+zeroed); a type with a `destroy` method gets it wired as the module's
+finalizer. Parameter defaults bind as for Python exports. A call may
+pass a trailing plain object whose properties bind by reflected parameter
+name — JavaScript's own keyword convention — with unexpected names,
+duplicates, and missing required arguments reported as `TypeError`.
+
+Return shapes map by declaration: a valued method returns its marshalled
+value, a `void` method returns `undefined`, and a `T !>(E)` method throws
+at the boundary. The thrown error's class follows the CC kind — what a
+JavaScript caller dispatches on — and its `code` property carries the CC
+kind name, message intact:
+
+| CC kind | JS error class |
+|---|---|
+| `CC_ERR_INVALID_ARG` | `TypeError` |
+| `CC_ERR_OVERFLOW` | `RangeError` |
+| anything else | `Error` |
+
+One built artifact serves every napi host on a platform: Node, Electron,
+Bun, Deno — and a CC QuickJS host (below). Failure at this boundary
+follows JavaScript's convention — throw — not a CC Result, because the
+caller is the host's module loader.
+
+### Binding CC into JS: `js_expose::[T]`
+
+`js_expose::[T]` is the same exposure into an environment the CC program
+owns: it installs the type as `globalThis.cc.<name>`, the way any
+embedder installs host bindings, with the same reflection, trampolines,
+and error mapping as `js_module`. The name is host-scoped on purpose:
+`cc.counter` declares a dependency on running under CC and can never
+shadow an importable package.
+
+```c
+js.expose::[Counter]("counter", &seed) !>;
+```
+
+The registrar returns the environment, so registrations chain.
+Registration fails host-side with a plain `CCError`.
+
+### Binding JS into CC
+
+`CCJsVal` is opaque. `obj.anything(args…)` calls the property natively:
+the property key is created once per handle and held, the bound function
+value is called directly with natively marshalled arguments — a call
+costs like a call, never like an evaluation. `.get(name)` reads a
+property; both return `CCJsVal !>(CCJsError)`; `!>` links hops as for
+Python.
+
+Arguments marshal by static type: `bool` → `boolean`, `double`/`float` →
+`number`, `CCSlice` / `char[:0]` → `string`, a typed slice → a new
+`TypedArray` of the matching element type (one copy), `CCJsVal` → itself
+(same home required).
+
+A typed-slice parameter of an exported method receives a JS array both
+ways, priced by agreement: a `TypedArray` whose element type MATCHES the
+destination borrows the caller's buffer for the call — zero copy — and
+the borrow is WRITABLE: writes land in the caller's array, the in-place
+idiom every napi addon uses.  A plain `Array`, or a `TypedArray` of a
+different element type, converts per element into call scratch — raw
+memory is only borrowed when both sides agree on what it means, so a
+`Float32Array` asked for as `double[:]` converts rather than being
+reinterpreted.  Both the borrow and the scratch copy end with the call; a
+callee keeping the run past its return must copy.  A typed-slice RETURN
+materializes a fresh `TypedArray` (one `ArrayBuffer`, one copy); the CC
+side keeps owning its buffer.  `int64_t[:]` pairs with `BigInt64Array`.
+Because `Array` and `TypedArray` are `typeof === 'object'`, the
+trailing-object keyword convention excludes them: a trailing array is an
+argument, never a keyword bag.
+
+Integers follow one lossless rule both directions. A JavaScript `number`
+is a double, so a CC integer whose magnitude is at most 2^53 marshals as
+`number` and a larger one marshals as `BigInt`; inbound, an integer
+destination accepts `number` and `BigInt` alike, range-checked against
+the destination — a value that does not fit is an error naming the
+argument, never a truncation.
+
+`js_kw(name, value)` makes an argument bind by name: all named arguments
+of a call fold into one trailing plain object, JavaScript's own
+convention. `js_buf(x)` hands a typed slice over as an external
+`ArrayBuffer` on the CC buffer, copying nothing. The borrow ends with the
+call: the buffer is detached when the call returns, so every retained
+reference — including a `TypedArray` built on it — is zero-length
+afterwards and a later touch throws in the engine, never a read through
+freed CC memory. The view is writable, and writes land in the CC buffer;
+pass a copy to withhold write access. Detachment is engine-enforced,
+so the borrow rule holds with no escape.
+
+`obj.as_list::[T](&arena)` converts an `Array` or `TypedArray` to a typed
+run of `T`; a `TypedArray` whose element type matches `T` is read with
+one `memcpy`, anything else takes the per-element walk with the same
+result. `obj.as_map::[K, V](&arena, m)` fills a Map from a `Map` or a
+plain object's own enumerable properties. `f.map::[T](&arena, cols…)`
+calls a callable once per row across column slices in one crossing, as
+for Python.
+
+The dynamic sink is destination-aware, with the same destination-typed
+variants and extraction semantics as `CCPyObj`; explicit extraction
+(`.as_f64()`, `.as_i64()`, `.as_slice()`) remains for held values.
+Inbound strings copy into arena scratch — Node-API exposes no borrowed
+UTF-8 — so a `CCSlice` parameter of an exported method is arena-backed
+rather than a borrow of engine memory.
+
+A `@variant` value crosses by arm, which is how a union-typed JavaScript
+value binds natively — typed once at the boundary, checked projection
+after. Outbound — a variant argument, or an exported method's variant
+return — marshals the active arm by the rules above; a `void` arm
+crosses as `null`. Inbound — a variant destination
+`V v = obj.m(args…) !>;`, or a variant parameter of an exported method —
+the arm is selected by the value's JavaScript runtime type: `boolean`
+the `_Bool` arm; `number` and `BigInt` the numeric arm, range-checked as
+always; `string` the slice arm, anchored in the handle's scratch arena;
+a `TypedArray` the typed-slice arm of its element type; `null` and
+`undefined` the `void` arm; any other value the `CCJsVal` arm when the
+variant has one. Each class may claim at most one arm — a variant
+offering two arms to one class is rejected at the use site, at compile
+time. A value no arm accepts is reported at the boundary it crossed:
+`TypeError` at an exported parameter, `CCJsError` at a CC destination,
+naming the JavaScript type and the arms either way.
+
+`@variant(packed)` binds identically — packing keeps the variant's
+semantics surface, and marshalling goes through semantics, never layout —
+so a packed `some`/`none` optional is the natural binding of a
+JavaScript `T | null`, in both directions.
+
+Ownership follows the Python rule: a local `CCJsVal` must bind
+`@destroy`, be returned, or be released by hand; the destroy hook
+releases the reference, and releasing after the home environment is gone
+is a no-op.
+
+### Errors
+
+```c
+typedef struct {
+    CCError base @as;   /* kind + message: String(error), arena-copied */
+    CCSlice name;       /* error class: `TypeError`, `RangeError`, … */
+    CCSlice stack;      /* error.stack; empty if none */
+} CCJsError;
+```
+
+A JavaScript exception surfaces as `CCJsError`: `name` is the error's
+class, `stack` its formatted stack, both anchored in the handle's scratch
+arena. The default `@errhandler(CCError)` prints the face; an exact
+`@errhandler(CCJsError)` claims it.
+
+### Threads and blocking
+
+Environment calls are blocking-shaped: ill-formed in `@noblock` context,
+serialized per environment. The thread rule is per backend, and it is the
+one place the backends differ on the surface:
+
+- A napi host environment belongs to its event-loop thread. Calls are
+  calling-thread-only, and a fiber holding a call into such an
+  environment must not migrate OS threads across it. There is no attach
+  operation to make migration safe; cross-thread entry (a queued
+  trampoline over a threadsafe function, parking the fiber on a channel)
+  is future work.
+- A QuickJS environment requires serialized access but is not pinned to
+  an OS thread, so a handle may migrate between calls; per-environment
+  serialization is the whole rule.
+
+### Environments
+
+`cc_js_new` yields an environment. Inside a napi host process the first
+handle takes the host's environment; every later call — and every call in
+a standalone process — creates one, where the backend can: each QuickJS
+handle is its own runtime, so isolation is real and cheap; a backend that
+cannot create another environment fails with that reason rather than
+aliasing an existing one. There is no pool type; a set of environments is
+an ordinary array of `CCJs`.
+
+### A CC host is a napi host
+
+The QuickJS backend implements the Node-API surface as real exported
+symbols, so a CC program hosting QuickJS IS a napi host: a `.node`
+artifact loads through the environment's module loader —
+
+```js
+import { bump } from './counter.node';
+```
+
+— its undefined `napi_*` references resolving against the process exactly
+as they resolve against a `node` binary, `RTLD_NOW`, an unresolved symbol
+failing at import and naming itself. An addon authored with
+`js_module::[T]` resolves by construction: it references only what the
+backend implements. A foreign addon loads when its references resolve;
+one that asks for a capability the host lacks — an event loop, async
+work — is answered at the asking call, not with a stub. The same artifact
+loads in Node and in a CC host: one compiled module, every host, without
+relinking either.
+
+### Running source text
+
+`js.exec(src)` runs statements and `js.eval(expr)` yields the completion
+value, both in the environment's global scope, so a definition from one
+call is visible to the next. Both are bootstrap glue — defining a helper,
+selecting options — not a call path; everything after definition flows
+through bound calls.
+
+### Benchmarks
+
+`perf/js_baseline.ccs` prices the boundary in both directions against
+native JavaScript controls on the same rung — a call into CC against a
+same-shape JS→JS call, a call out of CC against the same function called
+from JS, and bulk transfer (`TypedArray` marshal, `js_buf` borrow,
+typed-array extraction) against reductions over data each side already
+owns — with every mode's answer cross-checked, per backend. The
+composition workload — a napi host calling a CC module that reaches an
+embedded Python interpreter, one `TypedArray` crossing both boundaries
+with zero copies — prices the two interop surfaces end to end against the
+same computation run in-process.
+
+### Out of scope
+
+- Full Node-API compatibility for arbitrary foreign addons (event loop,
+  async work, `napi_define_class`, wrap/unwrap, threadsafe functions)
+- Promise and async integration (environment calls stay blocking-shaped)
+- The Node standard library under a QuickJS host
+- Using one handle from more than one OS thread concurrently
+- A class surface (real JS instances of a CC type) — a separate verb,
+  not a growth of this one
+- Deep container conversion (object/array graphs ↔ CC collections)
 - Implicit cross-home use or implicit moves

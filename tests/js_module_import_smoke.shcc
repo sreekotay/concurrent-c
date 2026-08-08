@@ -1,0 +1,47 @@
+/* The other door, JS edition: Node imports CC.  A TU exporting
+ * `napi_register_module_v1` and no `main` builds — in one command, no
+ * flag — as recipe_js_module.node, and `require()` runs CC code with
+ * module state.  Skips where no node executable is on PATH (the .node
+ * needs a host to import it). */
+CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+
+{
+    CCCommand which = cc_command(&a, @slice("sh"));
+    which.arg("-c");
+    which.arg("command -v node >/dev/null 2>&1");
+    int rc = which.status() !>;
+    if (rc != 0) { "SKIP (no node)".println() !>; return 0; }
+}
+
+{
+    CCCommand build = cc_command(&a, @slice("./cc/bin/ccc"));
+    build.arg("build");
+    build.arg("examples/recipe_js_module.ccs");
+    build.inherit_stdio();
+    int rc = build.status() !>;
+    if (rc != 0) { "build failed".println() !>; return 1; }
+}
+
+{
+    CCCommand run = cc_command(&a, @slice("sh"));
+    run.arg("-c");
+    /* Seeded state, stateful calls, a parameter default taken positionally
+     * and bound through the trailing-object keyword convention, a CC error
+     * arriving as the class its kind maps to with `code` carrying the kind
+     * name, and the underscore member staying home. */
+    CCString js = @string(`node -e "
+const c = require(process.cwd() + '/bin/recipe_js_module.node');
+console.log('start', c.total());
+console.log('bump', c.bump(4));
+console.log('kw', c.bump({by: 2}));
+console.log('default', c.bump());
+console.log('checked', c.bump_checked(3));
+try { c.bump_checked(-1); } catch (e) { console.log('raised:', e.constructor.name, e.code + ':', e.message); }
+console.log('private_hidden', typeof c._clamp === 'undefined');
+"`, &a);
+    run.arg(js.cstr(&a));
+    run.inherit_stdio();
+    int rc = run.status() !>;
+    if (rc != 0) { "import failed".println() !>; return 1; }
+}
+return 0;

@@ -1,0 +1,66 @@
+/* The wider marshal gamut through one staged addon: a double method and a
+ * `double !>(CCError)` method (the predeclared-Result collision the
+ * Python twin pins), a string return, BigInt out at 2^60 and a BigInt
+ * argument, arity and unexpected-keyword and wrong-type reports, and both
+ * fallible shapes.  The module is js_module_double_result_mod.src. */
+CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+
+{
+    CCCommand which = cc_command(&a, @slice("sh"));
+    which.arg("-c");
+    which.arg("command -v node >/dev/null 2>&1");
+    int rc = which.status() !>;
+    if (rc != 0) { "SKIP (no node)".println() !>; return 0; }
+}
+
+{
+    CCCommand stage = cc_command(&a, @slice("sh"));
+    stage.arg("-c");
+    stage.arg("mkdir -p out/jsmod_dblres && "
+              "cp tests/js_module_double_result_mod.src out/jsmod_dblres/counter.ccs");
+    stage.inherit_stdio();
+    int rc = stage.status() !>;
+    if (rc != 0) { "stage failed".println() !>; return 1; }
+}
+
+{
+    CCCommand build = cc_command(&a, @slice("./cc/bin/ccc"));
+    build.arg("build");
+    build.arg("out/jsmod_dblres/counter.ccs");
+    build.inherit_stdio();
+    int rc = build.status() !>;
+    if (rc != 0) { "build failed".println() !>; return 1; }
+}
+
+{
+    CCCommand run = cc_command(&a, @slice("sh"));
+    run.arg("-c");
+    CCString js = @string(`node -e "
+const c = require(process.cwd() + '/bin/counter.node');
+console.log('scale', c.scale(0.5));
+console.log('label', c.label());
+const b = c.big();
+console.log('big', typeof b, b.toString());
+console.log('bigint_arg', c.bump(1n));
+try { c.bump(1, 2); } catch (e) { console.log('arity:', e.message); }
+try { c.bump({wrong: 1}); } catch (e) { console.log('unexpected:', e.message); }
+try { c.bump('x'); } catch (e) { console.log('badtype:', e.message); }
+console.log('half', c.half(5));
+try { c.half(-1); } catch (e) { console.log('half_raised:', e.constructor.name, e.code + ':', e.message); }
+console.log('sum_array', c.sum([1, 2, 3.5]));
+console.log('sum_typed', c.sum(new Float64Array([1, 2, 3.5])));
+console.log('sum_f32', c.sum(new Float32Array([1, 2, 3.5])));
+const buf = new Float64Array(3);
+c.fill(buf, 9);
+console.log('filled', buf[0], buf[1], buf[2]);
+const row = c.row();
+console.log('row', row.constructor.name, Array.from(row).join(','));
+console.log('roundtrip', c.sum(c.row()));
+try { c.sum(['x']); } catch (e) { console.log('badelem:', e.message); }
+"`, &a);
+    run.arg(js.cstr(&a));
+    run.inherit_stdio();
+    int rc = run.status() !>;
+    if (rc != 0) { "import failed".println() !>; return 1; }
+}
+return 0;

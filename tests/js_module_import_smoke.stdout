@@ -1,0 +1,7 @@
+start 100
+bump 104
+kw 106
+default 107
+checked 110
+raised: TypeError CC_ERR_INVALID_ARG: bump must be positive
+private_hidden true

@@ -1,0 +1,16 @@
+scale 50
+label counter
+big bigint 1152921504606846976
+bigint_arg 101
+arity: bump() takes 1 positional argument but 2 were given
+unexpected: bump() got an unexpected argument 'wrong'
+badtype: argument `by` expects an integer
+half 2.5
+half_raised: TypeError CC_ERR_INVALID_ARG: x must be non-negative
+sum_array 6.5
+sum_typed 6.5
+sum_f32 6.5
+filled 9 9 9
+row Float64Array 1.5,2.5,3
+roundtrip 7
+badelem: argument `xs` expects an Array or TypedArray

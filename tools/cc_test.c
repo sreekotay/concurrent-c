@@ -488,6 +488,10 @@ static int get_run_timeout_for_test(const char* stem, int default_timeout_sec) {
      * a cold cache, over the 10s default under suite parallelism. */
     if (strcmp(stem, "py_module_import_smoke") == 0) return 30;
     if (strcmp(stem, "py_module_double_result_smoke") == 0) return 30;
+    /* Same shape as the py module smokes: shells out to `ccc build` of a
+     * js.cch TU, then a node import run. */
+    if (strcmp(stem, "js_module_import_smoke") == 0) return 30;
+    if (strcmp(stem, "js_module_double_result_smoke") == 0) return 30;
     if (strcmp(stem, "py_module_kwargs_smoke") == 0) return 30;
     if (strcmp(stem, "py_levenshtein_smoke") == 0) return 30;
     return default_timeout_sec;

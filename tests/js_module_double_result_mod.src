@@ -1,0 +1,68 @@
+/* Node-API addon over one Counter state.  Exercises scalar marshal both
+ * directions, a string return, a parameter default bound positionally and
+ * by trailing-object keyword, BigInt in and out across 2^53, underscore
+ * privacy, and fallible methods crossing as the error class their kind
+ * maps to — including a `double !>(CCError)` method, pinning the
+ * predeclared-Result collision the Python twin pins. */
+#include <ccc/script/js.cch>
+
+typedef struct Counter { long long n; } Counter;
+
+static long long Counter_bump(Counter *self, long long by = 1) {
+    self->n += by;
+    return self->n;
+}
+static long long Counter_total(Counter *self) {
+    return self->n;
+}
+static double Counter_scale(Counter *self, double k) {
+    return (double)self->n * k;
+}
+static const char *Counter_label(Counter *self) {
+    (void)self;
+    return "counter";
+}
+static long long Counter_big(Counter *self) {
+    (void)self;
+    return 1LL << 60;
+}
+static long long Counter__clamp(Counter *self, long long v) {
+    (void)self;
+    return v > 1000 ? 1000 : v;
+}
+static long long !>(CCError) Counter_bump_checked(Counter *self, long long by) {
+    if (by <= 0) return cc_err(CC_ERR_INVALID_ARG, "bump must be positive");
+    self->n = Counter__clamp(self, self->n + by);
+    return cc_ok(self->n);
+}
+static double !>(CCError) Counter_half(Counter *self, double x) {
+    (void)self;
+    if (x < 0) return cc_err(CC_ERR_INVALID_ARG, "x must be non-negative");
+    return cc_ok(x / 2.0);
+}
+/* A matching Float64Array borrows zero-copy; an Array or a Float32Array
+ * converts per element — same sum either way. */
+static double Counter_sum(Counter *self, double[:] xs) {
+    double acc = 0;
+    (void)self;
+    for (size_t i = 0; i < xs.base.len; i++) acc += ((double *)xs.base.ptr)[i];
+    return acc;
+}
+/* The borrow is writable: writes land in the caller's TypedArray. */
+static void Counter_fill(Counter *self, double[:] xs, double v) {
+    (void)self;
+    for (size_t i = 0; i < xs.base.len; i++) ((double *)xs.base.ptr)[i] = v;
+}
+/* A typed-slice return materializes as a fresh Float64Array. */
+static double[:] Counter_row(Counter *self) {
+    static double v[3] = { 1.5, 2.5, 3.0 };
+    (void)self;
+    return CCSlice_double_from_buffer(v, 3);
+}
+
+/* The seed is the module's initial state, copied in at registration. */
+static const Counter seed = { .n = 100 };
+
+void *napi_register_module_v1(void *env, void *exports) {
+    return js_module::[Counter](env, exports, &seed);
+}
