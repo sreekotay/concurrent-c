@@ -16564,28 +16564,6 @@ static char* cc__normalize_cc_type_of_to_type_of(const char* src, size_t n) {
     return out;
 }
 
-/* Fix B: include-expanded view for reflection (struct bodies from headers).
- * Strip `@as` before CPP so generic TCC never sees CC attributes; `is_as`
- * comes from the pre-strip TU overlay (or future reflect tables), not from
- * comment markers the preprocessor would drop. */
-static char* cc__build_reflection_view(const char* src, size_t n,
-                                       const char* input_path,
-                                       size_t* out_n) {
-    size_t exp_len = 0;
-    char* stripped = cc_rewrite_as_attr_to_comment(src, n);
-    const char* in = stripped ? stripped : src;
-    size_t in_n = stripped ? strlen(stripped) : n;
-    char* expanded = cc_cpp_expand(in, in_n, input_path, &exp_len);
-    free(stripped);
-    if (expanded && exp_len > 0) {
-        *out_n = exp_len;
-        return expanded;
-    }
-    free(expanded);
-    *out_n = n;
-    return NULL;
-}
-
 /* ============================================================
  * D4.0: `@comptime for (F in type_of(T).fields) { BODY }`
  * compile-time field iteration.  Unrolls BODY once per declared
@@ -18350,7 +18328,6 @@ static void cc__ct_append_field_body(char** out, size_t* ol, size_t* oc,
  * construct), 0 = not a `@comptime for` here (caller handles `@comptime if`),
  * -1 = hard error. */
 static int cc__try_expand_comptime_for(const char* src, size_t n, const char* input_path,
-                                       const char* reflect_src, size_t reflect_n,
                                        char** out, size_t* out_len, size_t* out_cap,
                                        size_t* io_i, size_t* io_last_emit) {
     size_t i = *io_i;
@@ -18436,11 +18413,7 @@ static int cc__try_expand_comptime_for(const char* src, size_t n, const char* in
 
     CCCtField* fields = NULL; size_t nf = 0;
     size_t body_o, body_c;
-    const char* rsrc = reflect_src ? reflect_src : src;
-    size_t rn = reflect_src ? reflect_n : n;
     {
-        int unified = cc_comptime_unified_exec_enabled();
-        int from_cc_src = 0;
         char tname_buf[256];
         size_t tname_len = (te > ts) ? (te - ts) : 0;
         if (tname_len >= sizeof(tname_buf)) tname_len = sizeof(tname_buf) - 1;
@@ -18460,10 +18433,8 @@ static int cc__try_expand_comptime_for(const char* src, size_t n, const char* in
                 return -1;
             }
         } else if (want_methods) {
-            /* Methods: prefer Concurrent-C TU text, then include-expanded view. */
-            if (!cc__ct_load_methods(src, n, src + ts, te - ts, &fields, &nf) &&
-                !(rsrc != src &&
-                  cc__ct_load_methods(rsrc, rn, src + ts, te - ts, &fields, &nf))) {
+            /* TU text, then registered included `.cch` (no CPP expand view). */
+            if (!cc_ct_reflect_type_methods(src, n, tname_buf, &fields, &nf)) {
                 fprintf(stderr,
                         "%s: error: `@comptime for ... .methods` found no method of "
                         "`%.*s` — a method is a function whose first parameter is "
@@ -18487,18 +18458,10 @@ static int cc__try_expand_comptime_for(const char* src, size_t n, const char* in
                         src + ts);
                 return -1;
             }
-            from_cc_src = 1;
-        } else if ((unified || cc_ct_field_reg_has(tname_buf)) &&
-                   cc__ct_load_fields_via_reflect(src + ts, te - ts, &fields,
+        } else if (cc__ct_load_fields_via_reflect(src + ts, te - ts, &fields,
                                                   &nf)) {
-            /* Host reflect / type-pass registry when no CC body in this TU. */
-            from_cc_src = 1;
-        } else if (rsrc != src &&
-                   cc__ct_find_struct_body(rsrc, rn, src + ts, te - ts, &body_o,
-                                           &body_c) &&
-                   cc__ct_parse_fields_from_body(rsrc, body_o, body_c, &fields,
-                                                 &nf)) {
-            /* Header-only types after include expand — layout from view. */
+            /* Header-only / harvested types: host reflect walks included
+             * `.cch` (+ registry for is_as). No full-TU CPP expand. */
         } else {
             cc__ct_free_fields(fields, nf);
             fprintf(stderr,
@@ -18508,31 +18471,6 @@ static int cc__try_expand_comptime_for(const char* src, size_t n, const char* in
                     "aggregates).\n",
                     input_path ? input_path : "<input>", (int)(te - ts), src + ts);
             return -1;
-        }
-        /* Header-only / CPP-view path: copy is_as from Concurrent-C (TU +
-         * included .cch). Never treat stripped host C as the attribute source. */
-        if (!want_params && !want_methods && !from_cc_src && fields && nf > 0) {
-            char tname[256];
-            size_t tlen = te - ts;
-            CCCtField* as_fields = NULL;
-            size_t as_nf = 0;
-            size_t fi, aj;
-            if (tlen >= sizeof(tname)) tlen = sizeof(tname) - 1;
-            memcpy(tname, src + ts, tlen);
-            tname[tlen] = '\0';
-            if (cc_ct_reflect_struct_fields(src, n, tname, &as_fields, &as_nf)) {
-                for (fi = 0; fi < nf; fi++) {
-                    if (!fields[fi].name || fields[fi].is_as) continue;
-                    for (aj = 0; aj < as_nf; aj++) {
-                        if (as_fields[aj].is_as && as_fields[aj].name &&
-                            strcmp(fields[fi].name, as_fields[aj].name) == 0) {
-                            fields[fi].is_as = 1;
-                            break;
-                        }
-                    }
-                }
-                cc__ct_free_fields(as_fields, as_nf);
-            }
         }
     }
 
@@ -18600,26 +18538,8 @@ static char* cc__resolve_comptime_if_once(const char* src, size_t n, const char*
     const size_t ATCN = sizeof(ATC) - 1;
     size_t i = 0;
     if (!cc_contains_token_top_level(src, n, "@comptime")) return NULL;
-    /* Fix B: include-expanded view for struct-body reflection.
-     *
-     * `cc__build_reflection_view` runs a full TCC CPP expansion of the TU
-     * (≈the cost of a whole parse) and is only ever consumed by
-     * `cc__try_expand_comptime_for` below, which fires solely for
-     * `@comptime for (F in type_of(T).fields)`.  The vast majority of TUs
-     * contain no `@comptime` construct at all, yet this function is invoked
-     * (in a fixpoint) from three pipeline sites per compile — so the
-     * unconditional expansion was a dominant, pure-waste hotspot.  Gate it on
-     * the presence of an actual `@comptime` token in code; when absent, the
-     * scan loop below never enters the `@comptime` branch, so skipping the
-     * view is behaviourally identical. */
-    size_t reflect_n = n;
-    char* reflect_view = NULL;
-    if (cc_contains_token_top_level(src, n, "@comptime")) {
-        reflect_view = cc__build_reflection_view(src, n, input_path, &reflect_n);
-    }
-    const char* reflect_src = reflect_view ? reflect_view : src;
-    /* Host reflect verbs parse Concurrent-C (naked `@as`), not the stripped
-     * CPP view. Set before any `@comptime for` / unified field load. */
+    /* Host reflect verbs parse Concurrent-C (naked `@as`) + included `.cch`.
+     * Header-only `@comptime for` does not need a full-TU CPP expand view. */
     cc_emit_plan_set_reflect_source(src, n);
     /* D3.1b: in-scope type definitions for the TCC layout fallback, built lazily
      * (and once) the first time a predicate needs the host evaluator. */
@@ -18638,9 +18558,8 @@ static char* cc__resolve_comptime_if_once(const char* src, size_t n, const char*
          * (outermost-first) before the `@comptime if` handling below. */
         {
             int fr = cc__try_expand_comptime_for(src, n, input_path,
-                                                 reflect_src, reflect_n,
                                                  &out, &out_len, &out_cap, &i, &last_emit);
-            if (fr == -1) { free(type_prelude); free(reflect_view); free(out); return (char*)-1; }
+            if (fr == -1) { free(type_prelude); free(out); return (char*)-1; }
             if (fr == 1) { changed = 1; continue; }
         }
         size_t p = cc_skip_ws_and_comments(src, n, i + ATCN);
@@ -18670,7 +18589,6 @@ static char* cc__resolve_comptime_if_once(const char* src, size_t n, const char*
                     "user type's kind/layout.\n",
                     input_path ? input_path : "<input>");
             free(type_prelude);
-            free(reflect_view);
             free(out);
             return (char*)-1;
         }
@@ -18683,7 +18601,6 @@ static char* cc__resolve_comptime_if_once(const char* src, size_t n, const char*
                     "(got bare statement or end of input).\n",
                     input_path ? input_path : "<input>");
             free(type_prelude);
-            free(reflect_view);
             free(out);
             return (char*)-1;
         }
@@ -18693,7 +18610,6 @@ static char* cc__resolve_comptime_if_once(const char* src, size_t n, const char*
                     "%s: error: unterminated `{` in `@comptime if` body.\n",
                     input_path ? input_path : "<input>");
             free(type_prelude);
-            free(reflect_view);
             free(out);
             return (char*)-1;
         }
@@ -18717,7 +18633,6 @@ static char* cc__resolve_comptime_if_once(const char* src, size_t n, const char*
                         "or `else @comptime if (...) { ... }`.\n",
                         input_path ? input_path : "<input>");
                 free(type_prelude);
-                free(reflect_view);
                 free(out);
                 return (char*)-1;
             }
@@ -18762,12 +18677,11 @@ static char* cc__resolve_comptime_if_once(const char* src, size_t n, const char*
         i = construct_end;
         changed = 1;
     }
-    if (!changed) { free(type_prelude); free(reflect_view); free(out); return NULL; }
+    if (!changed) { free(type_prelude); free(out); return NULL; }
     if (last_emit < n)
         cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
     if (!out) out = strdup(""); /* whole construct(s) elided to empty */
     free(type_prelude);
-    free(reflect_view);
     return out;
 }
 

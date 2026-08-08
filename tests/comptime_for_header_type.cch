@@ -1,0 +1,11 @@
+#ifndef COMPTIME_FOR_HEADER_TYPE_CCH
+#define COMPTIME_FOR_HEADER_TYPE_CCH
+
+/* Type lives only in this header — `@comptime for` in the TU must find it
+ * via included `.cch` reflect, not a full-TU CPP expand view. */
+typedef struct {
+    int a;
+    int b;
+} HdrForOnly;
+
+#endif

@@ -150,8 +150,9 @@ product and comptime session buffers must not carry them (no comment-encoded
 contains `@comptime` (blank those sites, whitelist emit → `__cc_rf_T[]` +
 `cc_ct_field_reg_*`); TCC sessions get a **slim prelude** (`__cc_rf_*`
 tables only — not full type-pass TUs or re-injected typedefs). Comptime
-prepare/exec reads `is_as`
-from that registry via `cc_reflect_field_*`, then the product lower runs.
+prepare/exec reads `is_as` from that registry via `cc_reflect_field_*`;
+header-only `.fields` / `.methods` use Concurrent-C text plus registered
+included `.cch` (no full-TU CPP reflection view). Then the product lower runs.
 Post-emit `shadow_product_host_c_ok` refuses leftover CC surface (`!>`, `[:]`,
 `::`, `@as`, …), skipping preprocessor lines.
 
