@@ -18105,15 +18105,30 @@ static int cc__ct_load_methods(const char* src, size_t n,
                 if (pl <= tlen || memcmp(pp, tname, tlen) != 0) { i = rp + 1; continue; }
                 if (cc_is_ident_char(pp[tlen])) { i = rp + 1; continue; }
             }
-            /* Return type: back to the previous top-level delimiter. */
+            /* Return type: back to the previous top-level delimiter.
+             * Drop storage / function specs (`static`, `inline`, `@async`, …)
+             * but keep cv-qualifiers — factories emit forward decls from
+             * `m.ret` / `cc_reflect_method_ret`, and `const char *` vs
+             * `char *` is a conflicting declaration. */
             ds = cc__scan_back_to_delim(src, ns);
-            ds = cc__skip_leading_decl_specs(src, ds);
             {
+                unsigned quals = 0;
                 char ty[256];
+                char body[256];
                 size_t de = cc_rskip_ws_and_comments(src, ns);
-                size_t nl = ne - ns, tl = (de > ds) ? de - ds : 0;
-                if (tl >= sizeof(ty)) tl = sizeof(ty) - 1;
-                memcpy(ty, src + ds, tl); ty[tl] = 0;
+                size_t nl = ne - ns, tl;
+                ds = cc__skip_leading_decl_specs_ex(src, ds, &quals);
+                tl = (de > ds) ? de - ds : 0;
+                if (tl >= sizeof(body)) tl = sizeof(body) - 1;
+                memcpy(body, src + ds, tl); body[tl] = 0;
+                if (quals) {
+                    char qn[64];
+                    cc__qual_names(quals, qn, sizeof(qn));
+                    if (snprintf(ty, sizeof(ty), "%s %s", qn, body) < 0)
+                        ty[0] = 0;
+                } else {
+                    memcpy(ty, body, tl + 1);
+                }
                 if (nl > 0 && !cc__ct_push_field(&fs, &fn, &fc, src + ns, nl, ty)) {
                     cc__ct_free_fields(fs, fn);
                     return 0;

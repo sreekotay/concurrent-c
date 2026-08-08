@@ -37,10 +37,13 @@ consistent when changing comptime ordering.
 - `comptime/emit_tpl_prelude.inc.h` — **generated** libtcc prelude (`tools/gen_emit_tpl_prelude.sh`)
 - `cc_emit_tpl.cch` — user/dylib-facing header; includes `cc_emit_tpl_core.inc.cch`
 
-Regenerate the libtcc prelude after editing the core:
+Regenerate the libtcc prelude after editing the core **or** the reflect/
+instantiate decls in `cc_instantiate.cch` (those live in the generator's
+TAIL, not in the core):
 
 ```sh
 tools/gen_emit_tpl_prelude.sh
+# then commit emit_tpl_prelude.inc.h if it changed
 ```
 
 ## User-facing `@emit` projection

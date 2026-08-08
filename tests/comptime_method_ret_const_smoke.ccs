@@ -1,0 +1,63 @@
+/* Method reflection must keep leading cv-qualifiers on return types.
+ * Factories (and the py path) emit forward decls from cc_reflect_method_ret;
+ * dropping `const` turns `const char *Foo_label` into a conflicting `char *`
+ * prototype. */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct Counter { int n; } Counter;
+
+static const char *Counter_label(Counter *self) {
+    (void)self;
+    return "counter";
+}
+
+static volatile int *Counter_flag(Counter *self, volatile int *p) {
+    (void)self;
+    return p;
+}
+
+CC_GENERIC_FACTORY(RetConstFwd, 1) {
+    CCString s = cc_string_new();
+    const char *T = arg(0).ptr;
+    int n = cc_reflect_method_count(T);
+    int i;
+    if (n < 0) return cc_slice_empty();
+    for (i = 0; i < n; i++) {
+        char nm[128], pr[256], ar[256], rt[128];
+        cc_reflect_method_name(T, i, nm, sizeof(nm));
+        cc_reflect_method_params(T, i, pr, sizeof(pr));
+        cc_reflect_method_args(T, i, ar, sizeof(ar));
+        cc_reflect_method_ret(T, i, rt, sizeof(rt));
+        if (strcmp(nm, "Counter_label") == 0) {
+            if (strncmp(rt, "const ", 6) != 0) return cc_slice_empty();
+        } else if (strcmp(nm, "Counter_flag") == 0) {
+            if (strncmp(rt, "volatile ", 9) != 0) return cc_slice_empty();
+        } else {
+            continue;
+        }
+        /* Forward decl + thin wrapper: host C must accept both against the
+         * real definitions (the conflict that dropping cv used to cause). */
+        cc_string_push_slice(&s, @emit(`
+            static ${rt} ${nm}${pr};
+            static ${rt} w_${nm}${pr} { return ${nm}${ar}; }`, arena), arena);
+    }
+    cc_string_push_slice(&s, @emit(`
+        typedef int ${mangled};`, arena), arena);
+    return cc_string_as_slice(&s);
+}
+
+int main(void) {
+    RetConstFwd::[Counter] tag = 0;
+    volatile int flag = 7;
+    Counter c = { .n = 1 };
+    const char *lab;
+    volatile int *fp;
+    (void)tag;
+    lab = w_Counter_label(&c);
+    fp = w_Counter_flag(&c, &flag);
+    printf("label=%s flag=%d\n", lab, fp ? (int)*fp : -1);
+    return (lab && strcmp(lab, "counter") == 0 && fp && *fp == 7) ? 0 : 1;
+}

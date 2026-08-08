@@ -1,5 +1,9 @@
 #!/bin/sh
 # Generate cc/src/comptime/emit_tpl_prelude.inc.h from cc_emit_tpl_core.inc.cch
+#
+# Middle: lowered lines from the core. TAIL (reflect / instantiate surface) is
+# hardcoded here and must stay aligned with cc/include/ccc/cc_instantiate.cch
+# (e.g. cc_reflect_field_is_as / CCReflectField.is_as).
 set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CORE="$ROOT/cc/include/ccc/cc_emit_tpl_core.inc.cch"
@@ -64,6 +68,7 @@ HDR
     "extern int cc_reflect_field_count(const char* type_name);\n" \
     "extern int cc_reflect_field_name(const char* type_name, int idx, char* buf, int buf_sz);\n" \
     "extern int cc_reflect_field_type(const char* type_name, int idx, char* buf, int buf_sz);\n" \
+    "extern int cc_reflect_field_is_as(const char* type_name, int idx);\n" \
     "extern int cc_reflect_enum_count(const char* enum_name);\n" \
     "extern int cc_reflect_enum_name(const char* enum_name, int idx, char* buf, int buf_sz);\n" \
     "extern int cc_reflect_enum_value(const char* enum_name, int idx, long long* out);\n" \
@@ -73,12 +78,16 @@ HDR
     "extern int cc_reflect_tagged_name(const char* tag, int idx, char* buf, int buf_sz);\n" \
     "enum { CC_REFLECT_KIND_UNKNOWN=0, CC_REFLECT_KIND_PRIMITIVE=1," \
     " CC_REFLECT_KIND_POINTER=2, CC_REFLECT_KIND_STRUCT=3, CC_REFLECT_KIND_ENUM=4 };\n" \
-    "typedef struct CCReflectField { char name[128]; char type[128]; int index; } CCReflectField;\n" \
+    "typedef struct CCReflectField { char name[128]; char type[128]; int index; int is_as; } CCReflectField;\n" \
     "static inline int cc_reflect_field_at(const char* type_name, int idx, CCReflectField* out) {\n" \
+    "  int as;\n" \
     "  if (!out || idx < 0) return -1;\n" \
-    "  out->index = idx;\n" \
+    "  out->index = idx; out->is_as = 0;\n" \
     "  if (cc_reflect_field_name(type_name, idx, out->name, (int)sizeof(out->name)) < 0) return -1;\n" \
     "  if (cc_reflect_field_type(type_name, idx, out->type, (int)sizeof(out->type)) < 0) return -1;\n" \
+    "  as = cc_reflect_field_is_as(type_name, idx);\n" \
+    "  if (as < 0) return -1;\n" \
+    "  out->is_as = as ? 1 : 0;\n" \
     "  return 0;\n" \
     "}\n" \
     "typedef struct CCReflectEnumMember { char name[128]; long long value; int index; } CCReflectEnumMember;\n" \
