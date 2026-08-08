@@ -19,9 +19,11 @@
 #define REDIS_DB_CCH
 
 /* Arenas: shared map/value (table blob + CCString backing); per-shard key
- * arenas so concurrent shard inserts never share an allocator.  Each uses a
- * tiny root + heap overflow so packed keys / values can be released on
- * DEL/FLUSH. */
+ * arenas so concurrent shard inserts never share an allocator.
+ * Map/value use fixed-root + per-object malloc overflow (individual free).
+ * Keys use growable slabs — redis-benchmark keys are ~16B (heap-form packed),
+ * and one-malloc-per-key destroys probe locality at large N. DEL of a key
+ * is logical until FLUSH/destroy (slab bump); FLUSH still tears the arena. */
 
 /* Probe key: stack borrow of request bytes (not durable — do not insert). */
 static inline CCSlicePacked db_key_packed_borrow(CCSlicePackedView* view, char[:] key) {
@@ -139,6 +141,12 @@ static bool db_init_overflow_arena(CCArena* a, size_t root_bytes) {
     return a->valid();
 }
 
+/* Growable slabs for durable packed keys (locality under find_dense_h). */
+static bool db_init_key_arena(CCArena* a, size_t root_bytes) {
+    *a = cc_arena_heap(root_bytes);
+    return a->valid();
+}
+
 static void db_destroy_shard_key_arenas(RedisDb* db) {
     size_t i;
     if (!db || !db->shards) return;
@@ -163,7 +171,8 @@ static bool db_init(RedisDb* db, size_t bucket_count, size_t shard_count) {
     if (shard_count == 0 || shard_count > (size_t)REDIS_DB_MAX_SHARDS) return false;
     if ((shard_count & (shard_count - 1u)) != 0) return false;
     const size_t map_value_heap_root = 1024;
-    const size_t key_arena_root = 1024;
+    /* ~1MiB/shard root: ~50k×16B keys before a new slab; grows as needed. */
+    const size_t key_arena_root = megabytes(1);
     memset(db, 0, sizeof(*db));
     db->shard_count = shard_count;
     db->shard_mask = shard_count - 1u;
@@ -183,7 +192,7 @@ static bool db_init(RedisDb* db, size_t bucket_count, size_t shard_count) {
     per_shard = bucket_count / shard_count;
     if (per_shard < 8u) per_shard = 8u;
     for (i = 0; i < shard_count; ++i) {
-        if (!db_init_overflow_arena(&db->shards[i].key_arena, key_arena_root))
+        if (!db_init_key_arena(&db->shards[i].key_arena, key_arena_root))
             goto fail;
         db->shards[i].entries =
             array_map_new_count::[CCSlicePacked, RedisEntry](&db->map_arena, per_shard);
@@ -440,13 +449,27 @@ static void db_remove_entry(RedisDb* db, char[:] key, RedisEntry* cell) {
 }
 
 /* THE read path: every command that touches a key goes through here so
- * expired entries die on first contact (lazy expiration, no active cycle). */
+ * expired entries die on first contact (lazy expiration, no active cycle).
+ * One hash serves entries + expires; empty expires skips the side probe. */
 static RedisEntry* db_lookup_live(RedisDb* db, char[:] key, DbCmdClock* clock) {
-    RedisEntry* cell = db_find_entry(db, key);
+    CCSlicePackedView view;
+    CCSlicePacked kh;
+    size_t h;
+    RedisDbShard* sh;
+    RedisEntry* cell;
+    if (!db || !db->shards) return NULL;
+    kh = db_key_packed_borrow(&view, key);
+    h = cc_map_hash_slice_packed(kh);
+    sh = db_shard_at(db, db_shard_index_for_hash(db, h));
+    if (!sh || !sh->entries) return NULL;
+    cell = sh->entries.get_ptr_h(kh, h);
     if (!cell) return NULL;
-    if (db_key_expired(db, key, clock)) {
-        db_remove_entry(db, key, cell);
-        return NULL;
+    if (sh->expires && sh->expires.len() > 0) {
+        int64_t* ep = sh->expires.get_ptr_h(kh, h);
+        if (ep && *ep != 0 && clock.now() >= *ep) {
+            db_remove_entry(db, key, cell);
+            return NULL;
+        }
     }
     return cell;
 }

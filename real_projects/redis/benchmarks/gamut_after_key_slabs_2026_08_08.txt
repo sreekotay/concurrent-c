@@ -1,0 +1,266 @@
+== bench_gamut ==
+clients=[10 50 100] keys=[50000 100000 1000000] data=[3]
+repeats=5 requests=200000 pipeline=16 tests=set,get include_go=0
+labels=upstream idiomatic
+
+[cell c=10 r=50000 d=3]
+  upstream  set  warmup rps=1550387.62
+  idiomatic set  warmup rps=2409638.75
+  idiomatic get  warmup rps=2564102.50
+  upstream  get  warmup rps=2061855.62
+  idiomatic set  r1     rps=2531645.50
+  upstream  set  r1     rps=1666666.75
+  idiomatic get  r1     rps=2500000.00
+  upstream  get  r1     rps=2083333.38
+  upstream  set  r2     rps=1639344.25
+  idiomatic set  r2     rps=2469135.75
+  upstream  get  r2     rps=1818181.88
+  idiomatic get  r2     rps=1219512.12
+  idiomatic set  r3     rps=2597402.50
+  upstream  set  r3     rps=1612903.25
+  upstream  get  r3     rps=2061855.62
+  idiomatic get  r3     rps=2666666.50
+  idiomatic set  r4     rps=2777778.00
+  upstream  set  r4     rps=1626016.25
+  idiomatic get  r4     rps=2816901.25
+  upstream  get  r4     rps=2150537.50
+  idiomatic set  r5     rps=2857142.75
+  upstream  set  r5     rps=1639344.25
+  idiomatic get  r5     rps=2857142.75
+  upstream  get  r5     rps=2083333.38
+  rss_kb: upstream=8272 idiomatic=7776
+[cell c=10 r=100000 d=3]
+  idiomatic set  warmup rps=336700.34
+  upstream  set  warmup rps=1538461.62
+  upstream  get  warmup rps=2083333.38
+  idiomatic get  warmup rps=2857142.75
+  upstream  set  r1     rps=1639344.25
+  idiomatic set  r1     rps=2816901.25
+  upstream  get  r1     rps=2083333.38
+  idiomatic get  r1     rps=2739726.00
+  upstream  set  r2     rps=1612903.25
+  idiomatic set  r2     rps=2739726.00
+  upstream  get  r2     rps=2061855.62
+  idiomatic get  r2     rps=2816901.25
+  idiomatic set  r3     rps=2816901.25
+  upstream  set  r3     rps=1612903.25
+  upstream  get  r3     rps=2061855.62
+  idiomatic get  r3     rps=2816901.25
+  upstream  set  r4     rps=1612903.25
+  idiomatic set  r4     rps=2409638.75
+  upstream  get  r4     rps=2061855.62
+  idiomatic get  r4     rps=2857142.75
+  idiomatic set  r5     rps=2777778.00
+  upstream  set  r5     rps=1626016.25
+  upstream  get  r5     rps=2083333.38
+  idiomatic get  r5     rps=2173913.00
+  rss_kb: upstream=10256 idiomatic=9488
+[cell c=10 r=1000000 d=3]
+  upstream  set  warmup rps=1538461.62
+  idiomatic set  warmup rps=2409638.75
+  upstream  get  warmup rps=1886792.50
+  idiomatic get  warmup rps=2941176.25
+  upstream  set  r1     rps=1739130.38
+  idiomatic set  r1     rps=2816901.25
+  idiomatic get  r1     rps=2857142.75
+  upstream  get  r1     rps=2150537.50
+  upstream  set  r2     rps=1626016.25
+  idiomatic set  r2     rps=2197802.25
+  idiomatic get  r2     rps=2857142.75
+  upstream  get  r2     rps=2020202.00
+  upstream  set  r3     rps=1324503.38
+  idiomatic set  r3     rps=2857142.75
+  idiomatic get  r3     rps=2857142.75
+  upstream  get  r3     rps=1694915.25
+  upstream  set  r4     rps=1652892.62
+  idiomatic set  r4     rps=2857142.75
+  upstream  get  r4     rps=2061855.62
+  idiomatic get  r4     rps=2857142.75
+  idiomatic set  r5     rps=2702702.75
+  upstream  set  r5     rps=1639344.25
+  upstream  get  r5     rps=2040816.38
+  idiomatic get  r5     rps=2702702.75
+  rss_kb: upstream=56416 idiomatic=57840
+[cell c=50 r=50000 d=3]
+  idiomatic set  warmup rps=2409638.75
+  upstream  set  warmup rps=1600000.00
+  idiomatic get  warmup rps=2985074.50
+  upstream  get  warmup rps=2105263.25
+  upstream  set  r1     rps=1612903.25
+  idiomatic set  r1     rps=2941176.25
+  upstream  get  r1     rps=2127659.75
+  idiomatic get  r1     rps=2985074.50
+  idiomatic set  r2     rps=2898550.75
+  upstream  set  r2     rps=1600000.00
+  idiomatic get  r2     rps=2941176.25
+  upstream  get  r2     rps=2127659.75
+  idiomatic set  r3     rps=2985074.50
+  upstream  set  r3     rps=1600000.00
+  upstream  get  r3     rps=2105263.25
+  idiomatic get  r3     rps=2985074.50
+  upstream  set  r4     rps=1587301.50
+  idiomatic set  r4     rps=2857142.75
+  idiomatic get  r4     rps=2985074.50
+  upstream  get  r4     rps=2105263.25
+  upstream  set  r5     rps=1449275.38
+  idiomatic set  r5     rps=2985074.50
+  idiomatic get  r5     rps=2985074.50
+  upstream  get  r5     rps=2150537.50
+  rss_kb: upstream=53280 idiomatic=62960
+[cell c=50 r=100000 d=3]
+  idiomatic set  warmup rps=2409638.75
+  upstream  set  warmup rps=1600000.00
+  upstream  get  warmup rps=2083333.38
+  idiomatic get  warmup rps=2941176.25
+  idiomatic set  r1     rps=2941176.25
+  upstream  set  r1     rps=1600000.00
+  idiomatic get  r1     rps=2985074.50
+  upstream  get  r1     rps=2105263.25
+  idiomatic set  r2     rps=2985074.50
+  upstream  set  r2     rps=1600000.00
+  idiomatic get  r2     rps=2857142.75
+  upstream  get  r2     rps=2105263.25
+  idiomatic set  r3     rps=2857142.75
+  upstream  set  r3     rps=1587301.50
+  upstream  get  r3     rps=2105263.25
+  idiomatic get  r3     rps=2898550.75
+  upstream  set  r4     rps=1587301.50
+  idiomatic set  r4     rps=2941176.25
+  upstream  get  r4     rps=2040816.38
+  idiomatic get  r4     rps=2857142.75
+  upstream  set  r5     rps=1587301.50
+  idiomatic set  r5     rps=2898550.75
+  upstream  get  r5     rps=2083333.38
+  idiomatic get  r5     rps=2857142.75
+  rss_kb: upstream=53280 idiomatic=63008
+[cell c=50 r=1000000 d=3]
+  upstream  set  warmup rps=1492537.25
+  idiomatic set  warmup rps=2272727.25
+  idiomatic get  warmup rps=2325581.25
+  upstream  get  warmup rps=2105263.25
+  upstream  set  r1     rps=1600000.00
+  idiomatic set  r1     rps=2272727.25
+  upstream  get  r1     rps=2150537.50
+  idiomatic get  r1     rps=2272727.25
+  upstream  set  r2     rps=1587301.50
+  idiomatic set  r2     rps=2298850.75
+  idiomatic get  r2     rps=2247191.00
+  upstream  get  r2     rps=2061855.62
+  upstream  set  r3     rps=1503759.38
+  idiomatic set  r3     rps=2222222.25
+  idiomatic get  r3     rps=2222222.25
+  upstream  get  r3     rps=2150537.50
+  upstream  set  r4     rps=1574803.12
+  idiomatic set  r4     rps=2197802.25
+  idiomatic get  r4     rps=2173913.00
+  upstream  get  r4     rps=1449275.38
+  idiomatic set  r5     rps=2173913.00
+  upstream  set  r5     rps=1574803.12
+  idiomatic get  r5     rps=2173913.00
+  upstream  get  r5     rps=2127659.75
+  rss_kb: upstream=61760 idiomatic=55696
+[cell c=100 r=50000 d=3]
+  upstream  set  warmup rps=1470588.12
+  idiomatic set  warmup rps=2985074.50
+  upstream  get  warmup rps=2061855.62
+  idiomatic get  warmup rps=2941176.25
+  upstream  set  r1     rps=1587301.50
+  idiomatic set  r1     rps=2985074.50
+  idiomatic get  r1     rps=2941176.25
+  upstream  get  r1     rps=2083333.38
+  upstream  set  r2     rps=1587301.50
+  idiomatic set  r2     rps=2941176.25
+  upstream  get  r2     rps=2083333.38
+  idiomatic get  r2     rps=2941176.25
+  idiomatic set  r3     rps=3030303.00
+  upstream  set  r3     rps=1574803.12
+  idiomatic get  r3     rps=2941176.25
+  upstream  get  r3     rps=2083333.38
+  upstream  set  r4     rps=1562499.88
+  idiomatic set  r4     rps=2985074.50
+  idiomatic get  r4     rps=2941176.25
+  upstream  get  r4     rps=1923076.88
+  upstream  set  r5     rps=1587301.50
+  idiomatic set  r5     rps=2985074.50
+  idiomatic get  r5     rps=2898550.75
+  upstream  get  r5     rps=2061855.62
+  rss_kb: upstream=62640 idiomatic=62064
+[cell c=100 r=100000 d=3]
+  idiomatic set  warmup rps=2222222.25
+  upstream  set  warmup rps=1574803.12
+  upstream  get  warmup rps=2173913.00
+  idiomatic get  warmup rps=2857142.75
+  upstream  set  r1     rps=1574803.12
+  idiomatic set  r1     rps=2941176.25
+  idiomatic get  r1     rps=2857142.75
+  upstream  get  r1     rps=2040816.38
+  upstream  set  r2     rps=1574803.12
+  idiomatic set  r2     rps=2898550.75
+  upstream  get  r2     rps=2083333.38
+  idiomatic get  r2     rps=2857142.75
+  idiomatic set  r3     rps=2941176.25
+  upstream  set  r3     rps=1587301.50
+  upstream  get  r3     rps=2061855.62
+  idiomatic get  r3     rps=2857142.75
+  idiomatic set  r4     rps=2941176.25
+  upstream  set  r4     rps=1574803.12
+  upstream  get  r4     rps=2061855.62
+  idiomatic get  r4     rps=2941176.25
+  idiomatic set  r5     rps=2597402.50
+  upstream  set  r5     rps=1574803.12
+  upstream  get  r5     rps=2083333.38
+  idiomatic get  r5     rps=2857142.75
+  rss_kb: upstream=62688 idiomatic=61808
+[cell c=100 r=1000000 d=3]
+  upstream  set  warmup rps=1449275.38
+  idiomatic set  warmup rps=2150537.50
+  upstream  get  warmup rps=2061855.62
+  idiomatic get  warmup rps=2150537.50
+  idiomatic set  r1     rps=1869158.88
+  upstream  set  r1     rps=1587301.50
+  upstream  get  r1     rps=2061855.62
+  idiomatic get  r1     rps=2083333.38
+  upstream  set  r2     rps=1587301.50
+  idiomatic set  r2     rps=1739130.38
+  idiomatic get  r2     rps=1923076.88
+  upstream  get  r2     rps=2105263.25
+  idiomatic set  r3     rps=1980198.00
+  upstream  set  r3     rps=1562499.88
+  idiomatic get  r3     rps=1904762.00
+  upstream  get  r3     rps=2040816.38
+  upstream  set  r4     rps=1562499.88
+  idiomatic set  r4     rps=1980198.00
+  upstream  get  r4     rps=2061855.62
+  idiomatic get  r4     rps=1923076.88
+  upstream  set  r5     rps=1538461.62
+  idiomatic set  r5     rps=1960784.38
+  idiomatic get  r5     rps=1923076.88
+  upstream  get  r5     rps=2040816.38
+  rss_kb: upstream=65920 idiomatic=69360
+
+== gamut summary (median RPS over measured rounds) ==
+
+[SET]
+  fixed: data=3  pipeline=16  n=200000
+           r  ups@c 10  idi@c 10  ups@c 50  idi@c 50  ups@c100  idi@c100
+       50000    1.639M    2.597M    1.600M    2.941M    1.587M    2.985M
+      100000    1.613M    2.778M    1.587M    2.941M    1.575M    2.941M
+     1000000    1.639M    2.817M    1.575M    2.222M    1.562M    1.961M
+  ratios vs upstream (idiomatic, go):
+    r=50000  c10:1.58x/n/a  c50:1.84x/n/a  c100:1.88x/n/a
+    r=100000  c10:1.72x/n/a  c50:1.85x/n/a  c100:1.87x/n/a
+    r=1000000  c10:1.72x/n/a  c50:1.41x/n/a  c100:1.25x/n/a
+
+[GET]
+  fixed: data=3  pipeline=16  n=200000
+           r  ups@c 10  idi@c 10  ups@c 50  idi@c 50  ups@c100  idi@c100
+       50000    2.083M    2.667M    2.128M    2.985M    2.083M    2.941M
+      100000    2.062M    2.817M    2.105M    2.857M    2.062M    2.857M
+     1000000    2.041M    2.857M    2.128M    2.222M    2.062M    1.923M
+  ratios vs upstream (idiomatic, go):
+    r=50000  c10:1.28x/n/a  c50:1.40x/n/a  c100:1.41x/n/a
+    r=100000  c10:1.37x/n/a  c50:1.36x/n/a  c100:1.39x/n/a
+    r=1000000  c10:1.40x/n/a  c50:1.04x/n/a  c100:0.93x/n/a
+
+csv: /var/folders/z2/sbp4rc4n757cljxzfw3sddh00000gn/T/bench_gamut.XXXXXX.q2YaathooA/results.csv
+log: benchmarks/gamut_after_key_slabs_2026_08_08.txt

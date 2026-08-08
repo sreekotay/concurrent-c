@@ -1,0 +1,76 @@
+== bench_gamut ==
+clients=[50 100] keys=[1000000] data=[3]
+repeats=5 requests=200000 pipeline=16 tests=set,get include_go=0
+labels=upstream idiomatic
+
+[cell c=50 r=1000000 d=3]
+  upstream  set  warmup rps=1503759.38
+  idiomatic set  warmup rps=2500000.00
+  idiomatic get  warmup rps=2702702.75
+  upstream  get  warmup rps=2298850.75
+  idiomatic set  r1     rps=2439024.25
+  upstream  set  r1     rps=1257861.62
+  idiomatic get  r1     rps=2739726.00
+  upstream  get  r1     rps=2040816.38
+  idiomatic set  r2     rps=2631579.00
+  upstream  set  r2     rps=1680672.25
+  idiomatic get  r2     rps=2739726.00
+  upstream  get  r2     rps=1886792.50
+  upstream  set  r3     rps=1041666.69
+  idiomatic set  r3     rps=2247191.00
+  idiomatic get  r3     rps=2702702.75
+  upstream  get  r3     rps=1612903.25
+  idiomatic set  r4     rps=2702702.75
+  upstream  set  r4     rps=1600000.00
+  upstream  get  r4     rps=2222222.25
+  idiomatic get  r4     rps=2531645.50
+  upstream  set  r5     rps=1626016.25
+  idiomatic set  r5     rps=2631579.00
+  upstream  get  r5     rps=1851851.75
+  idiomatic get  r5     rps=2298850.75
+  rss_kb: upstream=55936 idiomatic=64000
+[cell c=100 r=1000000 d=3]
+  upstream  set  warmup rps=1481481.38
+  idiomatic set  warmup rps=2739726.00
+  idiomatic get  warmup rps=2666666.50
+  upstream  get  warmup rps=2105263.25
+  idiomatic set  r1     rps=2597402.50
+  upstream  set  r1     rps=1612903.25
+  idiomatic get  r1     rps=2739726.00
+  upstream  get  r1     rps=2127659.75
+  upstream  set  r2     rps=1612903.25
+  idiomatic set  r2     rps=2816901.25
+  idiomatic get  r2     rps=2898550.75
+  upstream  get  r2     rps=1834862.38
+  idiomatic set  r3     rps=2631579.00
+  upstream  set  r3     rps=1574803.12
+  idiomatic get  r3     rps=2777778.00
+  upstream  get  r3     rps=2040816.38
+  upstream  set  r4     rps=1481481.38
+  idiomatic set  r4     rps=1941747.62
+  upstream  get  r4     rps=2000000.00
+  idiomatic get  r4     rps=2272727.25
+  upstream  set  r5     rps=1538461.62
+  idiomatic set  r5     rps=2564102.50
+  upstream  get  r5     rps=1980198.00
+  idiomatic get  r5     rps=2666666.50
+  rss_kb: upstream=64352 idiomatic=77616
+
+== gamut summary (median RPS over measured rounds) ==
+
+[SET]
+  fixed: data=3  pipeline=16  n=200000
+           r  ups@c 50  idi@c 50  ups@c100  idi@c100
+     1000000    1.600M    2.632M    1.575M    2.597M
+  ratios vs upstream (idiomatic, go):
+    r=1000000  c50:1.64x/n/a  c100:1.65x/n/a
+
+[GET]
+  fixed: data=3  pipeline=16  n=200000
+           r  ups@c 50  idi@c 50  ups@c100  idi@c100
+     1000000    1.887M    2.703M    2.000M    2.740M
+  ratios vs upstream (idiomatic, go):
+    r=1000000  c50:1.43x/n/a  c100:1.37x/n/a
+
+csv: /var/folders/z2/sbp4rc4n757cljxzfw3sddh00000gn/T/bench_gamut.XXXXXX.cjmDxOSLg9/results.csv
+log: benchmarks/gamut_1m_slabs_prefetch_rebench_2026_08_08.txt

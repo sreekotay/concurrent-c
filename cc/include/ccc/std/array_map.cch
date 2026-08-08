@@ -221,7 +221,14 @@ static inline size_t cc_array_map_core_lookup_h(const CCArrayMapCore *m,
     want_frag = cc_array_map_hash_frag8(h);
     for (d = 0; d < 2048u; d++) {
         size_t b = (h + cc_array_map_quad(d)) & m->bucket_mask;
-        uint32_t slot = m->buckets[b];
+        uint32_t slot;
+        /* Overlap the next probe slot load with this slot's work. */
+        if (d + 1u < 2048u) {
+            size_t bn =
+                (h + cc_array_map_quad(d + 1u)) & m->bucket_mask;
+            cc_array_map_prefetch(&m->buckets[bn]);
+        }
+        slot = m->buckets[b];
         if (slot == CC_ARRAY_MAP_EMPTY) {
             if (out_bucket)
                 *out_bucket = (first_tomb != SIZE_MAX) ? first_tomb : b;
