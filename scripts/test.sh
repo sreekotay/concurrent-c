@@ -12,6 +12,8 @@ set -euo pipefail
 #   --full             same as CC_TEST_FULL=1
 #   CC_TEST_QUICK=0    same as --full (escape hatch if something sets QUICK=1)
 #   --quick            explicit default (no-op unless paired with conflicting FULL)
+#   --O0 / -O0         host-compile harness bins with -O0 (faster cold builds)
+#   CC_TEST_O0=1       same as --O0
 #   --native           pin harness to native (ccc default; explicit)
 #   --legacy           pin harness to legacy front (CC_TEST_FRONTEND=legacy)
 #   --compare-front    run the harness twice (legacy then native) and print wall times
@@ -36,22 +38,27 @@ quick=1
 full=0
 front=native
 compare_front=0
+opt_o0=0
 case "${CC_TEST_FULL:-0}" in
   1|yes|true|TRUE|Yes) full=1 ;;
 esac
 case "${CC_TEST_QUICK:-}" in
   0|no|false|FALSE|No) full=1 ;;
 esac
+case "${CC_TEST_O0:-0}" in
+  1|yes|true|TRUE|Yes) opt_o0=1 ;;
+esac
 case "${CC_TEST_FRONTEND:-}" in
   native) front=native ;;
   legacy) front=legacy ;;
 esac
-# Strip front flags before handing argv to cc_test; keep --quick/--full.
+# Strip front flags before handing argv to cc_test; keep --quick/--full/--O0.
 args=()
 for a in "$@"; do
   case "$a" in
     --quick) quick=1; full=0; args+=("$a") ;;
     --full)  full=1; args+=("$a") ;;
+    --O0|-O0) opt_o0=1; args+=("--O0") ;;
     --native) front=native ;;
     --legacy) front=legacy ;;
     --compare-front) compare_front=1 ;;
@@ -87,6 +94,15 @@ extra=""
 if [ "$has_jobs" = 0 ]; then
   extra="$extra --jobs $jobs"
 fi
+if [ "$opt_o0" = 1 ]; then
+  has_o0=0
+  for a in "$@"; do
+    if [ "$a" = "--O0" ] || [ "$a" = "-O0" ]; then has_o0=1; break; fi
+  done
+  if [ "$has_o0" = 0 ]; then
+    extra="$extra --O0"
+  fi
+fi
 if [ "$quick" = 1 ]; then
   has_quick=0
   for a in "$@"; do
@@ -95,7 +111,7 @@ if [ "$quick" = 1 ]; then
   if [ "$has_quick" = 0 ]; then
     extra="$extra --quick"
   fi
-  echo "[test] default (quick): skipping heavy preambles + stress/race tests (jobs=$jobs)"
+  echo "[test] default (quick): skipping heavy preambles + stress/race tests (jobs=$jobs${opt_o0:+, -O0})"
   echo "[test] tip: CC_TEST_FULL=1 or --full for redis line-map / functional / tcc-patch / stress"
 else
   has_full=0
@@ -105,7 +121,7 @@ else
   if [ "$has_full" = 0 ]; then
     extra="$extra --full"
   fi
-  echo "[test] full mode (jobs=$jobs)"
+  echo "[test] full mode (jobs=$jobs${opt_o0:+, -O0})"
 fi
 
 # Rebuild the compiler when missing or broken (e.g. after `make -C cc clean`

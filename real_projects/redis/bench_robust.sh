@@ -19,6 +19,9 @@
 #   SKETCH_PORT      default 6395 (when INCLUDE_SKETCH=1)
 #   INCLUDE_SKETCH   1 = also bench redis_async_sketch (default 0)
 #   SKETCH_BIN       path to sketch binary
+#   GO_PORT          default 6397 (when INCLUDE_GO=1)
+#   INCLUDE_GO       1 = also bench redis.go (default 0)
+#   GO_BIN           path to redis_go binary
 #   SAMPLE_INTERVAL  seconds between rss/thread samples (default 0.05)
 #   MEMLOG_ON_EXIT   request idiomatic CC.MEMLOG before summary (default 1)
 #   MEMLOG_AFTER_WARMUP  CC.MEMLOG post-warmup after round 0 (default 1)
@@ -30,7 +33,9 @@ BENCH_BIN="$SCRIPT_DIR/redis_c/src/redis-benchmark"
 UPSTREAM_BIN="$SCRIPT_DIR/redis_c/src/redis-server"
 IDIOMATIC_BIN="${IDIOMATIC_BIN:-$SCRIPT_DIR/out/redis_idiomatic}"
 SKETCH_BIN="${SKETCH_BIN:-$SCRIPT_DIR/out/redis_async_sketch}"
+GO_BIN="${GO_BIN:-$SCRIPT_DIR/out/redis_go}"
 INCLUDE_SKETCH="${INCLUDE_SKETCH:-0}"
+INCLUDE_GO="${INCLUDE_GO:-0}"
 
 REPEATS="${REPEATS:-6}"
 REQUESTS="${REQUESTS:-500000}"
@@ -41,6 +46,7 @@ BENCH_TESTS="${BENCH_TESTS:-set,get,incr}"
 UPSTREAM_PORT="${UPSTREAM_PORT:-6391}"
 IDIOMATIC_PORT="${IDIOMATIC_PORT:-6393}"
 SKETCH_PORT="${SKETCH_PORT:-6395}"
+GO_PORT="${GO_PORT:-6397}"
 SAMPLE_INTERVAL="${SAMPLE_INTERVAL:-0.05}"
 MEMLOG_ON_EXIT="${MEMLOG_ON_EXIT:-1}"
 MEMLOG_AFTER_WARMUP="${MEMLOG_AFTER_WARMUP:-1}"
@@ -57,11 +63,17 @@ need "$IDIOMATIC_BIN" "redis_idiomatic"
 if [[ "$INCLUDE_SKETCH" == "1" ]]; then
     need "$SKETCH_BIN" "redis_async_sketch"
 fi
+if [[ "$INCLUDE_GO" == "1" ]]; then
+    need "$GO_BIN" "redis_go"
+fi
 
 # Labels shuffled each (round, cmd). Order is presentation-stable in summary.
 LABELS=(upstream idiomatic)
 if [[ "$INCLUDE_SKETCH" == "1" ]]; then
     LABELS+=(sketch)
+fi
+if [[ "$INCLUDE_GO" == "1" ]]; then
+    LABELS+=(go)
 fi
 LABELS_PY="$(printf "'%s'," "${LABELS[@]}")"
 LABELS_PY="[${LABELS_PY%,}]"
@@ -124,10 +136,20 @@ if [[ "$INCLUDE_SKETCH" == "1" ]]; then
     ALL_PIDS="$ALL_PIDS $SKETCH_PID"
 fi
 
+GO_PID=""
+if [[ "$INCLUDE_GO" == "1" ]]; then
+    "$GO_BIN" "127.0.0.1:$GO_PORT" >"$TMP_DIR/go.log" 2>&1 &
+    GO_PID=$!
+    ALL_PIDS="$ALL_PIDS $GO_PID"
+fi
+
 wait_port "$UPSTREAM_PORT"
 wait_port "$IDIOMATIC_PORT"
 if [[ "$INCLUDE_SKETCH" == "1" ]]; then
     wait_port "$SKETCH_PORT"
+fi
+if [[ "$INCLUDE_GO" == "1" ]]; then
+    wait_port "$GO_PORT"
 fi
 
 check_server_alive() {
@@ -194,6 +216,12 @@ if [[ "$INCLUDE_SKETCH" == "1" ]]; then
     SKETCH_SAMPLER_PID=$!
     ALL_PIDS="$ALL_PIDS $SKETCH_SAMPLER_PID"
 fi
+GO_SAMPLER_PID=""
+if [[ "$INCLUDE_GO" == "1" ]]; then
+    python3 "$TMP_DIR/sampler.py" "$GO_PID" "$TMP_DIR/go_samples.txt" "$SAMPLE_INTERVAL" &
+    GO_SAMPLER_PID=$!
+    ALL_PIDS="$ALL_PIDS $GO_SAMPLER_PID"
+fi
 
 ulimit -n 65536 2>/dev/null || ulimit -n 8192 2>/dev/null || true
 
@@ -238,6 +266,7 @@ port_for() {
         upstream)  echo "$UPSTREAM_PORT"  ;;
         idiomatic) echo "$IDIOMATIC_PORT" ;;
         sketch)    echo "$SKETCH_PORT"    ;;
+        go)        echo "$GO_PORT"        ;;
         *) echo "unknown label: $1" >&2; exit 1 ;;
     esac
 }
@@ -247,6 +276,7 @@ pid_for() {
         upstream)  echo "$UPSTREAM_PID"  ;;
         idiomatic) echo "$IDIOMATIC_PID" ;;
         sketch)    echo "$SKETCH_PID"    ;;
+        go)        echo "$GO_PID"        ;;
         *) echo "unknown label: $1" >&2; exit 1 ;;
     esac
 }
@@ -256,6 +286,7 @@ log_for() {
         upstream)  echo "$TMP_DIR/upstream.log"  ;;
         idiomatic) echo "$TMP_DIR/idiomatic.log" ;;
         sketch)    echo "$TMP_DIR/sketch.log"    ;;
+        go)        echo "$TMP_DIR/go.log"        ;;
         *) echo "unknown label: $1" >&2; exit 1 ;;
     esac
 }
@@ -308,7 +339,7 @@ print(' '.join(labels))")"
 done
 
 # --- stop samplers and let them flush ---
-for p in "$UPSTREAM_SAMPLER_PID" "$IDIOMATIC_SAMPLER_PID" $SKETCH_SAMPLER_PID; do
+for p in "$UPSTREAM_SAMPLER_PID" "$IDIOMATIC_SAMPLER_PID" $SKETCH_SAMPLER_PID $GO_SAMPLER_PID; do
     [[ -n "$p" ]] || continue
     kill "$p" 2>/dev/null || true
     wait "$p" 2>/dev/null || true
@@ -429,7 +460,7 @@ def read_idiomatic_memlog(path):
 print()
 print("== bench_robust summary ==")
 print(f"rounds={$REPEATS} requests_per_round={$REQUESTS} clients={$CLIENTS} pipeline={$PIPELINE} cc_workers={'$CC_WORKERS_OVERRIDE' or 'default'}")
-print(f"labels={','.join(labels)} include_sketch={'$INCLUDE_SKETCH'}")
+print(f"labels={','.join(labels)} include_sketch={'$INCLUDE_SKETCH'} include_go={'$INCLUDE_GO'}")
 samp = "  ".join(f"{lab}={sample_peaks[lab]['n']}" for lab in labels)
 print(f"sample_interval={$SAMPLE_INTERVAL}s  samples_taken: {samp}")
 print()
@@ -448,16 +479,20 @@ for cmd in cmds:
     ups = by.get((cmd, "upstream"), [])
     idm = by.get((cmd, "idiomatic"), [])
     sk  = by.get((cmd, "sketch"), [])
+    go  = by.get((cmd, "go"), [])
+    def ratio_line(a_name, a, b_name, b):
+        ratio = statistics.median(a) / statistics.median(b)
+        overlap = not (max(a) < min(b) or max(b) < min(a))
+        tag = "OVERLAP" if overlap else "SEPARATED"
+        print(f"  {a_name}/{b_name} median: {ratio:.3f}x  ({tag})")
     if ups and idm:
-        ratio = statistics.median(idm) / statistics.median(ups)
-        overlap = not (max(idm) < min(ups) or max(ups) < min(idm))
-        tag = "OVERLAP" if overlap else "SEPARATED"
-        print(f"  idiomatic/upstream median: {ratio:.3f}x  ({tag})")
+        ratio_line("idiomatic", idm, "upstream", ups)
+    if ups and go:
+        ratio_line("go", go, "upstream", ups)
     if ups and sk:
-        ratio = statistics.median(sk) / statistics.median(ups)
-        overlap = not (max(sk) < min(ups) or max(ups) < min(sk))
-        tag = "OVERLAP" if overlap else "SEPARATED"
-        print(f"  sketch/upstream median:    {ratio:.3f}x  ({tag})")
+        ratio_line("sketch", sk, "upstream", ups)
+    if idm and go:
+        ratio_line("idiomatic", idm, "go", go)
     if idm and sk:
         ratio = statistics.median(idm) / statistics.median(sk)
         print(f"  idiomatic/sketch median:   {ratio:.3f}x")

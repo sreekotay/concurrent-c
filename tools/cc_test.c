@@ -652,6 +652,7 @@ static int run_one_test(const char* stem,
                         const char* out_dir,
                         const char* bin_dir,
                         int use_cache,
+                        int opt_o0,
                         int build_timeout_sec,
                         int run_timeout_sec) {
     char bin_out[512];
@@ -725,6 +726,9 @@ static int run_one_test(const char* stem,
      * Do not force --no-cache for diag/fail tests — that papers over cache bugs. */
     char build_cmd[3072];
     const char* cache_flag = use_cache ? "" : "--no-cache ";
+    /* Append after ccc's default -O2 so the host sees `-O2 -O0` and last wins.
+     * Space form required: `--cc-flags=-O0` is parsed as an input path. */
+    const char* o0_flag = opt_o0 ? "--cc-flags -O0 " : "";
     const char* front_flag = "";
     {
         const char* fe = getenv("CC_TEST_FRONTEND");
@@ -734,15 +738,15 @@ static int run_one_test(const char* stem,
     }
     if (ldflags_clean[0]) {
         snprintf(build_cmd, sizeof(build_cmd),
-                 "./cc/bin/ccc build %s%s--out-dir %s --bin-dir %s --link %s -o %s --ld-flags \"%s\"",
-                 cache_flag, front_flag,
+                 "./cc/bin/ccc build %s%s%s--out-dir %s --bin-dir %s --link %s -o %s --ld-flags \"%s\"",
+                 cache_flag, front_flag, o0_flag,
                  (out_dir && out_dir[0]) ? out_dir : "out",
                  (bin_dir && bin_dir[0]) ? bin_dir : "bin",
                  input_path, bin_out, ldflags_clean);
     } else {
         snprintf(build_cmd, sizeof(build_cmd),
-                 "./cc/bin/ccc build %s%s--out-dir %s --bin-dir %s --link %s -o %s",
-                 cache_flag, front_flag,
+                 "./cc/bin/ccc build %s%s%s--out-dir %s --bin-dir %s --link %s -o %s",
+                 cache_flag, front_flag, o0_flag,
                  (out_dir && out_dir[0]) ? out_dir : "out",
                  (bin_dir && bin_dir[0]) ? bin_dir : "bin",
                  input_path, bin_out);
@@ -938,9 +942,12 @@ static int run_one_test(const char* stem,
 
 static void usage(const char* prog) {
     fprintf(stderr, "Usage:\n");
-    fprintf(stderr, "  %s [--list] [--filter SUBSTR] [--quick|--full] [--verbose] [--jobs N] [--build-timeout SECONDS] [--run-timeout SECONDS] [--use-cache|--no-cache] [--clean]\n", prog);
+    fprintf(stderr, "  %s [--list] [--filter SUBSTR] [--quick|--full] [--verbose] [--jobs N]\n", prog);
+    fprintf(stderr, "       [--build-timeout SECONDS] [--run-timeout SECONDS]\n");
+    fprintf(stderr, "       [--use-cache|--no-cache] [--O0] [--clean]\n");
     fprintf(stderr, "  --quick  skip stress/lostwake/race tests (default)\n");
     fprintf(stderr, "  --full   include stress/lostwake/race tests (also CC_TEST_FULL=1)\n");
+    fprintf(stderr, "  --O0     host-compile test bins with -O0 (faster cold builds; also CC_TEST_O0=1)\n");
     fprintf(stderr, "  c_pp_*   shadow_lower smokes skipped unless CC_TEST_SHADOW=1 or --filter c_pp_\n");
     fprintf(stderr, "  Front:   CC_TEST_FRONTEND=native|legacy (or CC_FRONTEND) → ccc --frontend=\n");
 }
@@ -952,6 +959,7 @@ int main(int argc, char** argv) {
     int jobs = default_job_count();
     int quick = 1; /* default: skip heavy stress/race; --full for the complete set */
     int use_cache = 1; /* default on; cold runs reuse shared concurrent_c.o / .c outs */
+    int opt_o0 = 0;    /* host -O0 for faster cold compiles (default stays ccc -O2) */
     int clean = 0;
     int build_timeout_sec = 300;
     int run_timeout_sec = 10;
@@ -962,6 +970,10 @@ int main(int argc, char** argv) {
         if (strcmp(argv[i], "--full") == 0) { quick = 0; continue; }
         if (strcmp(argv[i], "--use-cache") == 0) { use_cache = 1; continue; }
         if (strcmp(argv[i], "--no-cache") == 0) { use_cache = 0; continue; }
+        if (strcmp(argv[i], "--O0") == 0 || strcmp(argv[i], "-O0") == 0) {
+            opt_o0 = 1;
+            continue;
+        }
         if (strcmp(argv[i], "--clean") == 0) { clean = 1; continue; }
         if (strcmp(argv[i], "--build-timeout") == 0) {
             if (i + 1 >= argc) { fprintf(stderr, "--build-timeout requires a value\n"); return 2; }
@@ -1004,6 +1016,15 @@ int main(int argc, char** argv) {
     {
         const char* env = getenv("CC_TEST_NO_CACHE");
         if (env && strcmp(env, "1") == 0) use_cache = 0;
+    }
+    {
+        const char* env = getenv("CC_TEST_O0");
+        if (env && (strcmp(env, "1") == 0 || strcmp(env, "yes") == 0 ||
+                    strcmp(env, "true") == 0))
+            opt_o0 = 1;
+        if (env && (strcmp(env, "0") == 0 || strcmp(env, "no") == 0 ||
+                    strcmp(env, "false") == 0))
+            opt_o0 = 0;
     }
     {
         const char* env = getenv("CC_TEST_FULL");
@@ -1163,7 +1184,9 @@ int main(int argc, char** argv) {
 
         ran++;
         if (jobs <= 1) {
-            if (run_one_test(stem, path, compile_fail, verbose, "out", "bin", use_cache, build_timeout_sec, run_timeout_sec) != 0) {
+            if (run_one_test(stem, path, compile_fail, verbose, "out", "bin",
+                             use_cache, opt_o0, build_timeout_sec,
+                             run_timeout_sec) != 0) {
                 failed++;
                 add_failed_name(stem);
             }
@@ -1188,7 +1211,9 @@ int main(int argc, char** argv) {
             snprintf(bin_dir, sizeof(bin_dir), "bin/.cc_test/%s", stem);
             (void)ensure_dir_p(out_dir);
             (void)ensure_dir_p(bin_dir);
-            int rc = run_one_test(stem, path, compile_fail, verbose, out_dir, bin_dir, use_cache, build_timeout_sec, run_timeout_sec);
+            int rc = run_one_test(stem, path, compile_fail, verbose, out_dir,
+                                  bin_dir, use_cache, opt_o0, build_timeout_sec,
+                                  run_timeout_sec);
             _exit(rc == 0 ? 0 : 1);
         }
 

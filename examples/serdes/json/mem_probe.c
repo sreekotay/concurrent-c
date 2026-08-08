@@ -1,6 +1,7 @@
 /* One-shot DOM memory probe: ours (arena bump) vs yyjson (tracked alc).
- *   gcc -O2 -I ../../../cc/include mem_probe.c ../../../cc/runtime/arena_state.c \
- *       yyjson.c -o mem_probe && ./mem_probe twitter.json
+ *   gcc -O2 -I ../../../out/include -I ../../../cc/include mem_probe.c \
+ *       ../../../out/runtime/arena_state.c yyjson.c -o mem_probe \
+ *       && ./mem_probe twitter.json
  */
 #include "json.h"
 #include "yyjson.h"
