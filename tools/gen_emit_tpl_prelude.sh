@@ -10,6 +10,7 @@ if [ ! -f "$CORE" ]; then
   exit 1
 fi
 
+TMP="$OUT.tmp.$$"
 {
   cat <<'HDR'
 #ifndef CC_COMPTIME_EMIT_TPL_PRELUDE_INC_H
@@ -25,17 +26,17 @@ fi
     "#include <stdlib.h>\n" \
     "#include <stdbool.h>\n" \
     "#include <ctype.h>\n" \
-    "#include <ccc/cc_slice.cch>\n" \
-    "#include <ccc/cc_arena.cch>\n" \
-    "/* cc_arena.cch declares this extern (defined in the compiled runtime). The\n" \
+    "#include <ccc/cc_slice.h>\n" \
+    "#include <ccc/cc_arena.h>\n" \
+    "/* cc_arena.h declares this extern (defined in the compiled runtime). The\n" \
     "   comptime TU is standalone (never linked against the runtime), so define a\n" \
     "   per-TU instance here — provenance ids only need uniqueness within one run. */\n" \
     "cc_atomic_u64 cc_arena_prov_counter = 0;\n" \
     "#define CC_COMPTIME 1\n" \
-    "#include <ccc/std/string.cch>\n" \
-    "#include <ccc/std/vec.cch>\n" \
-    "#include <ccc/std/hash.cch>\n" \
-    "#include <ccc/std/map.cch>\n" \
+    "#include <ccc/std/string.h>\n" \
+    "#include <ccc/std/vec.h>\n" \
+    "#include <ccc/std/hash.h>\n" \
+    "#include <ccc/std/map.h>\n" \
     "/* Typed maps are file-scope (CC_MAP_DECL_ARENA -> static-inline defs), so a\n" \
     "   comptime block can't declare its own; pre-declare common key types. */\n" \
     "CC_MAP_DECL_ARENA(int, int, CCMapII, cc_map_hash_i32, cc_map_eq_i32)\n" \
@@ -119,8 +120,10 @@ HDR
     "   out-of-range index reports the factory, the index and the arity, then\n" \
     "   yields the empty fragment so the caller's factory-failed diagnostic\n" \
     "   names the instance.  Never exit(): a factory body can run in-process\n" \
-    "   under the libtcc executor.  Defined only in compiled-factory TUs\n" \
-    "   (CC_COMPTIME_EXEC), never in @comptime block TUs. */\n" \
+    "   under the libtcc executor.  Defined under CC_COMPTIME_EXEC: set by\n" \
+    "   compiled-factory TUs, and by block/eval TUs whose registry defs\n" \
+    "   carry a factory body along (its arg() calls need the sugar even\n" \
+    "   when the block itself never touches it). */\n" \
     "static CCSlice cc__tpl_arg(CCSliceArray ta, long i, CCSlice gname) {\n" \
     "  if (i < 0 || (unsigned long)i >= (unsigned long)ta.len) {\n" \
     "    char m[256];\n" \
@@ -138,6 +141,7 @@ HDR
 
 #endif /* CC_COMPTIME_EMIT_TPL_PRELUDE_INC_H */
 TAIL
-} > "$OUT"
+} > "$TMP"
+mv -f "$TMP" "$OUT"
 
 echo "gen_emit_tpl_prelude: wrote $OUT"

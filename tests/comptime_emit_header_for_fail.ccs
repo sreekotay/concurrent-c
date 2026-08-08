@@ -1,0 +1,6 @@
+#include <ccc/std/prelude.cch>
+#include "comptime_emit_header_for_fail.cch"
+
+/* Pin: `@comptime for` inside a harvested .cch must not silently succeed
+ * under native shadow (subset cannot lower it yet). */
+int main(void) { return HdrForFail_x_i; }

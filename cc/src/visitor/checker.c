@@ -1612,7 +1612,7 @@ static int cc__walk_assign(int idx,
             if (lv && lhs_depth >= 0 && lhs_depth < *io_scope_n - 1) {
                 cc__emit_err_cat(ctx, n, CC_ERR_SLICE, "@scratch string escapes scope");
                 fprintf(stderr, "  note: cannot assign @string(..., @scratch) into an outer-scope variable\n");
-                fprintf(stderr, "  hint: pass an explicit CCArena (or CC_ARENA_STACK) for longer-lived strings\n");
+                fprintf(stderr, "  hint: pass an explicit CCArena (or cc_arena_stack) for longer-lived strings\n");
                 ctx->errors++;
                 return -1;
             }
@@ -1655,7 +1655,7 @@ static int cc__walk_return(int idx,
     if (cc__subtree_mentions_scratch_value(nodes, kids, idx, scopes, *io_scope_n)) {
         cc__emit_err_cat(ctx, n, CC_ERR_SLICE, "@scratch string escapes scope");
         fprintf(stderr, "  note: @string(..., @scratch) products must not leave the enclosing function or closure\n");
-        fprintf(stderr, "  hint: pass an explicit CCArena (or CC_ARENA_STACK) for longer-lived strings\n");
+        fprintf(stderr, "  hint: pass an explicit CCArena (or cc_arena_stack) for longer-lived strings\n");
         ctx->errors++;
         return -1;
     }

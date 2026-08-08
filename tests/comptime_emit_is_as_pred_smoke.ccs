@@ -1,0 +1,33 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+typedef struct Core { int v; } Core;
+typedef struct Shell { Core core @as; int tag; } Shell;
+
+/* f.is_as predicate *inside* the emit template after for-subst. */
+@comptime for (f in type_of(Shell).fields) {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        /* don't as-pred 'shell' */
+        @comptime if (f.is_as) {
+            enum { Shell_as_${f.name} = 1 };
+        } else {
+            enum { Shell_plain_${f.name} = 2 };
+        }
+        @comptime if (!f.is_as) {
+            enum { Shell_notas_${f.name} = 3 };
+        } else {
+            enum { Shell_is_${f.name} = 4 };
+        }
+    `);
+}
+
+int main(void) {
+    if (Shell_as_core != 1) return 1;
+    if (Shell_plain_tag != 2) return 2;
+    if (Shell_is_core != 4) return 3;
+    if (Shell_notas_tag != 3) return 4;
+    printf("comptime_emit_is_as_pred_smoke ok\n");
+    return 0;
+}

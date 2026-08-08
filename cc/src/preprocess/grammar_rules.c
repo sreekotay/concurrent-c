@@ -1137,7 +1137,7 @@ typedef struct {
     char** buf; size_t* len; size_t* cap; RFirst* F; RKeeps* K;
     int mode; int dk; int risk; int dom;
     int last_pad; int omit_lead_pad;
-    /* piece-scratch arena: stack-rooted, heap-overflow (CC_ARENA_STACK at
+    /* piece-scratch arena: stack-rooted, heap-overflow (cc_arena_stack at
      * the driver entries). Contents are valid only until the next eb_emit —
      * every text piece is copied into the output buffer and the scratch
      * rewinds to its stack root (overflow extents freed). */
@@ -1614,7 +1614,7 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
     char* out = NULL; size_t len = 0, cap = 0;
     RFirst* F = (RFirst*)calloc(1, sizeof(RFirst));
     RKeeps* K = (RKeeps*)calloc(1, sizeof(RKeeps));
-    CC_ARENA_STACK(sc, 32768);   /* piece scratch: stack root, heap overflow */
+    cc_arena_stack(sc, 32768);   /* piece scratch: stack root, heap overflow */
     EB e = { &out, &len, &cap, F, K, 0, -1, 0, 0, -1, -1, &sc };
     int lbl = 0;
     if (!F || !K) { free(F); free(K); return NULL; }
@@ -3874,7 +3874,7 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
     /* piece scratch: stack root, heap overflow only for oversized pieces.
      * Declared before any `goto done` so the free at done: is always safe
      * (cc_arena_free releases overflow extents only; the root is stack). */
-    CC_ARENA_STACK(sc, 32768);
+    cc_arena_stack(sc, 32768);
     if (!ss) { snprintf(err, err_sz, "@grammar(schema): out of memory"); return NULL; }
     ss->b = body; ss->n = body_len; ss->line0 = line;
     ss->uterm = -1;

@@ -44,9 +44,8 @@ int main(void) {
     int ec = 0;
     int failed = 0;
 
-    /* Nested `ccc -e` must not inherit suite CC_FRONTEND=serdes — each
-     * oneliner would re-enter shadow_lower and time out under --jobs. */
-    unsetenv("CC_FRONTEND");
+    /* Inherit the suite front (native default). Nested -e uses the same
+     * driver path as ordinary compiles. */
     unsetenv("CC_TEST_FRONTEND");
 
     if (!mkdtemp(tmpdir)) {
@@ -77,7 +76,7 @@ int main(void) {
 
     /* 3) predeclared io (+ a via implication) */
     snprintf(cmd, sizeof(cmd),
-             "./cc/bin/ccc -e 'io.println(char_to_slice(\"via-io\")) !>;'");
+             "./cc/bin/ccc -e 'io.println(CC_SLICE_LIT(\"via-io\")) !>;'");
     if (run_capture(cmd, out, sizeof(out), &ec) != 0 || ec != 0) {
         fprintf(stderr, "FAIL io predecl (exit %d):\n%s\n", ec, out);
         failed = 1;

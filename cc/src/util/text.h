@@ -1271,9 +1271,14 @@ static inline int cc_is_non_decl_stmt_type(const char* type_name) {
  * type macros, and rejects non-declaration statements (assignments to fields,
  * function calls, etc.).
  */
-/* Rewrite field attribute `@as` to a block comment marker (`/@as/` with
- * stars) so TCC accepts the TU while field collectors can still see it.
- * Returns malloc'd buffer or NULL when unchanged / OOM. */
+/* Strip field attribute `@as` (and legacy slash-star @as star-slash markers).
+ * Attributes are AST / reflect-table facts — they must not appear in host C or
+ * in anything fed to generic TCC. Comptime `f.is_as` is harvested from the
+ * pre-strip Concurrent-C source (or emitted tables), never recovered from
+ * comment markers. Skips comments and string/char literals. Returns malloc'd
+ * buffer or NULL when unchanged / OOM.
+ *
+ * Name kept for call-site stability; behavior is erase, not comment-encode. */
 static inline char* cc_rewrite_as_attr_to_comment(const char* src, size_t n) {
     size_t i = 0;
     size_t out_cap;
@@ -1281,7 +1286,7 @@ static inline char* cc_rewrite_as_attr_to_comment(const char* src, size_t n) {
     char* out;
     int changed = 0;
     if (!src || n == 0) return NULL;
-    out_cap = n + 64;
+    out_cap = n + 8;
     out = (char*)malloc(out_cap + 1);
     if (!out) return NULL;
     while (i < n) {
@@ -1321,6 +1326,12 @@ static inline char* cc_rewrite_as_attr_to_comment(const char* src, size_t n) {
             continue;
         }
         if (i + 1 < n && src[i] == '/' && src[i + 1] == '*') {
+            /* Drop legacy product marker entirely (was a semantic channel). */
+            if (i + 7 <= n && memcmp(src + i, "/*@as*/", 7) == 0) {
+                i += 7;
+                changed = 1;
+                continue;
+            }
             while (i + 1 < n && !(src[i] == '*' && src[i + 1] == '/')) {
                 if (w + 1 > out_cap) {
                     size_t nc = out_cap * 2 + 64;
@@ -1344,16 +1355,8 @@ static inline char* cc_rewrite_as_attr_to_comment(const char* src, size_t n) {
         }
         if (i + 3 <= n && src[i] == '@' && src[i + 1] == 'a' && src[i + 2] == 's' &&
             (i + 3 == n || !cc_is_ident_char(src[i + 3]))) {
-            static const char rep[] = "/*@as*/";
-            size_t rlen = sizeof(rep) - 1;
-            if (w + rlen > out_cap) {
-                size_t nc = out_cap * 2 + 64;
-                char* nb = (char*)realloc(out, nc + 1);
-                if (!nb) { free(out); return NULL; }
-                out = nb; out_cap = nc;
-            }
-            memcpy(out + w, rep, rlen);
-            w += rlen;
+            /* Erase `@as` and a single preceding space if present. */
+            if (w > 0 && (out[w - 1] == ' ' || out[w - 1] == '\t')) w--;
             i += 3;
             changed = 1;
             continue;

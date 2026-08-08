@@ -1,0 +1,69 @@
+/*
+ * Soft-return must evaluate `return expr` before nested block @defer.
+ * Redis hold shape: @defer hold.release(); return exec_*(...);
+ * used to release first, then call — bind-then-return was the workaround.
+ */
+#include <stdio.h>
+
+static int g_held;
+static int g_release_runs;
+static int g_use_saw_held;
+
+static void release_hold(void) {
+    g_release_runs++;
+    g_held = 0;
+}
+
+static int use_while_held(void) {
+    g_use_saw_held = g_held;
+    return g_held ? 42 : -1;
+}
+
+static int tail_return_under_block_defer(void) {
+    g_held = 1;
+    {
+        @defer release_hold();
+        return use_while_held();
+    }
+}
+
+/* Same order with a fn-level @defer present (soft-goto + nested unwind). */
+static int g_fn_defer_runs;
+
+static int nested_then_fn_defer(void) {
+    g_held = 1;
+    g_fn_defer_runs = 0;
+    @defer { g_fn_defer_runs++; };
+    {
+        @defer release_hold();
+        return use_while_held();
+    }
+}
+
+int main(void) {
+    int v;
+
+    g_release_runs = 0;
+    g_use_saw_held = 0;
+    v = tail_return_under_block_defer();
+    if (v != 42 || g_use_saw_held != 1 || g_release_runs != 1 || g_held != 0) {
+        fprintf(stderr,
+                "FAIL block-only: v=%d saw_held=%d releases=%d held=%d\n",
+                v, g_use_saw_held, g_release_runs, g_held);
+        return 1;
+    }
+
+    g_release_runs = 0;
+    g_use_saw_held = 0;
+    v = nested_then_fn_defer();
+    if (v != 42 || g_use_saw_held != 1 || g_release_runs != 1 ||
+        g_fn_defer_runs != 1 || g_held != 0) {
+        fprintf(stderr,
+                "FAIL nested+fn: v=%d saw_held=%d releases=%d fn=%d held=%d\n",
+                v, g_use_saw_held, g_release_runs, g_fn_defer_runs, g_held);
+        return 1;
+    }
+
+    printf("defer_block_return_expr_order_smoke: PASS\n");
+    return 0;
+}

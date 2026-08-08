@@ -2194,7 +2194,8 @@ static void cc__cg_sb_append(char** out, size_t* out_len, size_t* out_cap, const
     (*out)[*out_len] = 0;
 }
 
-static void cc__cg_sb_append_cstr(char** out, size_t* out_len, size_t* out_cap, const char* s) {
+static void __attribute__((unused))
+cc__cg_sb_append_cstr(char** out, size_t* out_len, size_t* out_cap, const char* s) {
     if (s) cc__cg_sb_append(out, out_len, out_cap, s, strlen(s));
 }
 
@@ -6312,7 +6313,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
            @comptime blanking. */
         cc__strip_trailing_ws_in_place(src_ufcs, &src_ufcs_len);
 
-        /* Persist post-UFCS local .cch bodies back to out/include/*.h and
+        /* Persist post-UFCS local .cch bodies back to out/include .h files and
          * collapse splice markers to #include so the host .c does not
          * duplicate definitions. */
         if (cc_writeback_local_lowered_headers_from_codegen(&src_ufcs, &src_ufcs_len) != 0) {

@@ -17,7 +17,9 @@ int main(void) {
             nested keeps its extra four
         line two
         `, &a);
-    printf("[%.*s]\n", (int)t.as_slice().len, (const char *)t.as_slice().ptr);
+    /* Locals: UFCS `.len` cast is dropped on emit today (`(int)s.len` stays). */
+    CCSlice ts = t.as_slice();
+    printf("[%.*s]\n", (int)ts.len, (const char*)ts.ptr);
 
     /* Column-0 twin: byte-identical result. */
     CCString z = @string(`
@@ -25,19 +27,22 @@ line one
     nested keeps its extra four
 line two
 `, &a);
+    CCSlice zs = z.as_slice();
     printf("same=%d\n",
-           t.as_slice().len == z.as_slice().len &&
-           memcmp(t.as_slice().ptr, z.as_slice().ptr, z.as_slice().len) == 0);
+           ts.len == zs.len &&
+           memcmp(ts.ptr, zs.ptr, zs.len) == 0);
 
     /* Inline one-liner: closer shares the line, no dedent. */
     CCString one = @string(`  two leading spaces stay`, &a);
-    printf("[%.*s]\n", (int)one.as_slice().len, (const char *)one.as_slice().ptr);
+    CCSlice ones = one.as_slice();
+    printf("[%.*s]\n", (int)ones.len, (const char*)ones.ptr);
 
     /* Interpolation is untouched by the margin strip. */
     int n = 7;
     CCString ip = @string(`
         n=${n}
         `, &a);
-    printf("[%.*s]\n", (int)ip.as_slice().len, (const char *)ip.as_slice().ptr);
+    CCSlice ips = ip.as_slice();
+    printf("[%.*s]\n", (int)ips.len, (const char*)ips.ptr);
     return 0;
 }

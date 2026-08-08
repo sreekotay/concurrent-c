@@ -1,0 +1,23 @@
+/* Unlisted field access on restricted receiver. */
+#include <ccc/std/prelude.cch>
+#include <string.h>
+
+typedef struct Conn {
+    int sock;
+    int out_len;
+} Conn;
+
+@restricted Encode on Conn {
+    r: out_len;
+}
+
+static void use_enc(@restricted(Encode) Conn* enc) {
+    (void)enc->sock; /* ill-formed */
+}
+
+int main(void) {
+    Conn c;
+    memset(&c, 0, sizeof(c));
+    use_enc(&c);
+    return 0;
+}

@@ -24,7 +24,7 @@ static void* write_slot_builder(void* envp, intptr_t slot_i, intptr_t arena_i) {
 
 int main(void) {
     CCArena arena = @create(kilobytes(64)) @destroy;
-    CCExclusive* excl = cc_exclusive_create(&arena);
+    CCExclusive* excl = cc_exclusive_create(&arena, 0);
     BuildEnv env = { 0, 0 };
     CCClosure2 b = cc_closure2_make(write_slot_builder, &env, NULL);
     uint64_t names[4];

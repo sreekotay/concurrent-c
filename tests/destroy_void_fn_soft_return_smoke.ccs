@@ -1,0 +1,74 @@
+/* void functions must soft-return through @destroy/@defer cleanup.
+ * Previously: @destroy alone was silently dropped; @destroy+@defer
+ * referenced an undeclared __cc_defer_hw (int-only soft cleanup). */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int g_destroy;
+static int g_defer;
+
+static void early_destroy_only(void) {
+    CCArena a = cc_arena_heap(kilobytes(1)) @destroy {
+        g_destroy++;
+    };
+    (void)a;
+    return;
+}
+
+static void fallthrough_destroy_only(void) {
+    CCArena a = cc_arena_heap(kilobytes(1)) @destroy {
+        g_destroy++;
+    };
+    (void)a;
+}
+
+static void early_destroy_and_defer(void) {
+    CCArena a = cc_arena_heap(kilobytes(1)) @destroy {
+        g_destroy++;
+    };
+    @defer { g_defer++; };
+    (void)a;
+    return;
+}
+
+static void fallthrough_destroy_and_defer(void) {
+    CCArena a = cc_arena_heap(kilobytes(1)) @destroy {
+        g_destroy++;
+    };
+    @defer { g_defer++; };
+    (void)a;
+}
+
+int main(void) {
+    g_destroy = g_defer = 0;
+    early_destroy_only();
+    if (g_destroy != 1 || g_defer != 0) {
+        printf("FAIL early_destroy_only d=%d f=%d\n", g_destroy, g_defer);
+        return 1;
+    }
+
+    g_destroy = g_defer = 0;
+    fallthrough_destroy_only();
+    if (g_destroy != 1 || g_defer != 0) {
+        printf("FAIL fallthrough_destroy_only d=%d f=%d\n", g_destroy, g_defer);
+        return 1;
+    }
+
+    g_destroy = g_defer = 0;
+    early_destroy_and_defer();
+    if (g_destroy != 1 || g_defer != 1) {
+        printf("FAIL early_destroy_and_defer d=%d f=%d\n", g_destroy, g_defer);
+        return 1;
+    }
+
+    g_destroy = g_defer = 0;
+    fallthrough_destroy_and_defer();
+    if (g_destroy != 1 || g_defer != 1) {
+        printf("FAIL fallthrough_destroy_and_defer d=%d f=%d\n", g_destroy,
+               g_defer);
+        return 1;
+    }
+
+    printf("destroy_void_fn_soft_return_smoke: OK\n");
+    return 0;
+}

@@ -23,8 +23,8 @@ step()  { printf '\n== %s\n' "$*"; }
 ok()    { printf '  OK   %s\n' "$*"; }
 fail()  { printf '  FAIL %s\n' "$*"; }
 
-step "submodules (tcc, xjb)"
-git submodule update --init third_party/tcc third_party/xjb
+step "submodules (tcc)"
+git submodule update --init third_party/tcc
 # Work around partial clones leaving an empty worktree behind a valid .git link.
 if [ ! -f third_party/tcc/configure ]; then
   git submodule update --checkout --force third_party/tcc

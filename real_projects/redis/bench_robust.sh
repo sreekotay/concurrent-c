@@ -1,9 +1,8 @@
 #!/bin/bash
 # bench_robust.sh — order-free, warmup-discarded bench for upstream redis-server
-# vs redis_idiomatic.  Both servers are started once and run concurrently on
-# their respective ports; each repeat randomises the binary order for every
-# command so systematic order biases (thermal drift, TIME_WAIT backlog
-# accumulating through the run, scheduler warmup) average out.
+# vs redis_idiomatic (and optionally redis_async_sketch). Servers start once and
+# run concurrently on their ports; each repeat randomises binary order per
+# command so thermal / TIME_WAIT / scheduler bias averages out.
 #
 # Output: one summary block per command with mean/stddev/min/median/max/range
 # in RPS, computed over REPEATS rounds (first round is warmup, discarded).
@@ -17,6 +16,12 @@
 #   BENCH_TESTS      comma-separated command list (default set,get)
 #   UPSTREAM_PORT    default 6391
 #   IDIOMATIC_PORT   default 6393
+#   SKETCH_PORT      default 6395 (when INCLUDE_SKETCH=1)
+#   INCLUDE_SKETCH   1 = also bench redis_async_sketch (default 0)
+#   SKETCH_BIN       path to sketch binary
+#   GO_PORT          default 6397 (when INCLUDE_GO=1)
+#   INCLUDE_GO       1 = also bench redis.go (default 0)
+#   GO_BIN           path to redis_go binary
 #   SAMPLE_INTERVAL  seconds between rss/thread samples (default 0.05)
 #   MEMLOG_ON_EXIT   request idiomatic CC.MEMLOG before summary (default 1)
 #   MEMLOG_AFTER_WARMUP  CC.MEMLOG post-warmup after round 0 (default 1)
@@ -27,6 +32,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BENCH_BIN="$SCRIPT_DIR/redis_c/src/redis-benchmark"
 UPSTREAM_BIN="$SCRIPT_DIR/redis_c/src/redis-server"
 IDIOMATIC_BIN="${IDIOMATIC_BIN:-$SCRIPT_DIR/out/redis_idiomatic}"
+SKETCH_BIN="${SKETCH_BIN:-$SCRIPT_DIR/out/redis_async_sketch}"
+GO_BIN="${GO_BIN:-$SCRIPT_DIR/out/redis_go}"
+INCLUDE_SKETCH="${INCLUDE_SKETCH:-0}"
+INCLUDE_GO="${INCLUDE_GO:-0}"
 
 REPEATS="${REPEATS:-6}"
 REQUESTS="${REQUESTS:-500000}"
@@ -36,6 +45,8 @@ RANDOM_KEYS="${RANDOM_KEYS:-50000}"
 BENCH_TESTS="${BENCH_TESTS:-set,get,incr}"
 UPSTREAM_PORT="${UPSTREAM_PORT:-6391}"
 IDIOMATIC_PORT="${IDIOMATIC_PORT:-6393}"
+SKETCH_PORT="${SKETCH_PORT:-6395}"
+GO_PORT="${GO_PORT:-6397}"
 SAMPLE_INTERVAL="${SAMPLE_INTERVAL:-0.05}"
 MEMLOG_ON_EXIT="${MEMLOG_ON_EXIT:-1}"
 MEMLOG_AFTER_WARMUP="${MEMLOG_AFTER_WARMUP:-1}"
@@ -49,6 +60,23 @@ need() {
 need "$BENCH_BIN" "redis-benchmark"
 need "$UPSTREAM_BIN" "redis-server"
 need "$IDIOMATIC_BIN" "redis_idiomatic"
+if [[ "$INCLUDE_SKETCH" == "1" ]]; then
+    need "$SKETCH_BIN" "redis_async_sketch"
+fi
+if [[ "$INCLUDE_GO" == "1" ]]; then
+    need "$GO_BIN" "redis_go"
+fi
+
+# Labels shuffled each (round, cmd). Order is presentation-stable in summary.
+LABELS=(upstream idiomatic)
+if [[ "$INCLUDE_SKETCH" == "1" ]]; then
+    LABELS+=(sketch)
+fi
+if [[ "$INCLUDE_GO" == "1" ]]; then
+    LABELS+=(go)
+fi
+LABELS_PY="$(printf "'%s'," "${LABELS[@]}")"
+LABELS_PY="[${LABELS_PY%,}]"
 
 TMP_DIR="$(mktemp -d -t bench_robust.XXXXXX)"
 echo "tmp dir: $TMP_DIR" >&2
@@ -72,7 +100,7 @@ sys.exit(1)
 PY
 }
 
-# --- start both servers concurrently ---
+# --- start servers concurrently ---
 "$UPSTREAM_BIN"  --save "" --appendonly no --port "$UPSTREAM_PORT" >"$TMP_DIR/upstream.log"  2>&1 &
 UPSTREAM_PID=$!
 CC_WORKERS_OVERRIDE="${CC_WORKERS:-}"
@@ -96,8 +124,33 @@ fi
 IDIOMATIC_PID=$!
 ALL_PIDS="$UPSTREAM_PID $IDIOMATIC_PID"
 
+SKETCH_PID=""
+if [[ "$INCLUDE_SKETCH" == "1" ]]; then
+    # Sketch takes host:port (idiomatic takes bare port).
+    if [[ -n "$env_prefix" ]]; then
+        env $env_prefix "$SKETCH_BIN" "127.0.0.1:$SKETCH_PORT" >"$TMP_DIR/sketch.log" 2>&1 &
+    else
+        "$SKETCH_BIN" "127.0.0.1:$SKETCH_PORT" >"$TMP_DIR/sketch.log" 2>&1 &
+    fi
+    SKETCH_PID=$!
+    ALL_PIDS="$ALL_PIDS $SKETCH_PID"
+fi
+
+GO_PID=""
+if [[ "$INCLUDE_GO" == "1" ]]; then
+    "$GO_BIN" "127.0.0.1:$GO_PORT" >"$TMP_DIR/go.log" 2>&1 &
+    GO_PID=$!
+    ALL_PIDS="$ALL_PIDS $GO_PID"
+fi
+
 wait_port "$UPSTREAM_PORT"
 wait_port "$IDIOMATIC_PORT"
+if [[ "$INCLUDE_SKETCH" == "1" ]]; then
+    wait_port "$SKETCH_PORT"
+fi
+if [[ "$INCLUDE_GO" == "1" ]]; then
+    wait_port "$GO_PORT"
+fi
 
 check_server_alive() {
     local label="$1"
@@ -157,6 +210,18 @@ UPSTREAM_SAMPLER_PID=$!
 python3 "$TMP_DIR/sampler.py" "$IDIOMATIC_PID" "$TMP_DIR/idiomatic_samples.txt" "$SAMPLE_INTERVAL" &
 IDIOMATIC_SAMPLER_PID=$!
 ALL_PIDS="$ALL_PIDS $UPSTREAM_SAMPLER_PID $IDIOMATIC_SAMPLER_PID"
+SKETCH_SAMPLER_PID=""
+if [[ "$INCLUDE_SKETCH" == "1" ]]; then
+    python3 "$TMP_DIR/sampler.py" "$SKETCH_PID" "$TMP_DIR/sketch_samples.txt" "$SAMPLE_INTERVAL" &
+    SKETCH_SAMPLER_PID=$!
+    ALL_PIDS="$ALL_PIDS $SKETCH_SAMPLER_PID"
+fi
+GO_SAMPLER_PID=""
+if [[ "$INCLUDE_GO" == "1" ]]; then
+    python3 "$TMP_DIR/sampler.py" "$GO_PID" "$TMP_DIR/go_samples.txt" "$SAMPLE_INTERVAL" &
+    GO_SAMPLER_PID=$!
+    ALL_PIDS="$ALL_PIDS $GO_SAMPLER_PID"
+fi
 
 ulimit -n 65536 2>/dev/null || ulimit -n 8192 2>/dev/null || true
 
@@ -200,6 +265,28 @@ port_for() {
     case "$1" in
         upstream)  echo "$UPSTREAM_PORT"  ;;
         idiomatic) echo "$IDIOMATIC_PORT" ;;
+        sketch)    echo "$SKETCH_PORT"    ;;
+        go)        echo "$GO_PORT"        ;;
+        *) echo "unknown label: $1" >&2; exit 1 ;;
+    esac
+}
+
+pid_for() {
+    case "$1" in
+        upstream)  echo "$UPSTREAM_PID"  ;;
+        idiomatic) echo "$IDIOMATIC_PID" ;;
+        sketch)    echo "$SKETCH_PID"    ;;
+        go)        echo "$GO_PID"        ;;
+        *) echo "unknown label: $1" >&2; exit 1 ;;
+    esac
+}
+
+log_for() {
+    case "$1" in
+        upstream)  echo "$TMP_DIR/upstream.log"  ;;
+        idiomatic) echo "$TMP_DIR/idiomatic.log" ;;
+        sketch)    echo "$TMP_DIR/sketch.log"    ;;
+        go)        echo "$TMP_DIR/go.log"        ;;
         *) echo "unknown label: $1" >&2; exit 1 ;;
     esac
 }
@@ -214,21 +301,23 @@ for r in $(seq 0 "$REPEATS"); do
     echo >&2 "$tag"
     for cmd in "${CMDS[@]}"; do
         # Shuffle binary order for this (round, cmd) using python-backed rng.
-        order_str="$(python3 -c "import random, sys
-labels=['upstream','idiomatic']
+        order_str="$(python3 -c "import random
+labels=$LABELS_PY
 random.shuffle(labels)
 print(' '.join(labels))")"
         read -ra ORDER <<< "$order_str"
         for label in "${ORDER[@]}"; do
             out="$TMP_DIR/${label}_${cmd}_r${r}.log"
-            check_server_alive "upstream" "$UPSTREAM_PID" "$TMP_DIR/upstream.log"
-            check_server_alive "idiomatic" "$IDIOMATIC_PID" "$TMP_DIR/idiomatic.log"
+            for alive in "${LABELS[@]}"; do
+                check_server_alive "$alive" "$(pid_for "$alive")" "$(log_for "$alive")"
+            done
             if ! run_one "$label" "$(port_for "$label")" "$cmd" "$out"; then
                 echo >&2 "   $label $cmd: benchmark command failed; log=$out"
                 exit 1
             fi
-            check_server_alive "upstream" "$UPSTREAM_PID" "$TMP_DIR/upstream.log"
-            check_server_alive "idiomatic" "$IDIOMATIC_PID" "$TMP_DIR/idiomatic.log"
+            for alive in "${LABELS[@]}"; do
+                check_server_alive "$alive" "$(pid_for "$alive")" "$(log_for "$alive")"
+            done
             # command is uppercased in bench output (e.g. SET)
             upper="$(echo "$cmd" | tr '[:lower:]' '[:upper:]')"
             rps="$(extract_rps "$upper" "$out" || true)"
@@ -250,7 +339,8 @@ print(' '.join(labels))")"
 done
 
 # --- stop samplers and let them flush ---
-for p in "$UPSTREAM_SAMPLER_PID" "$IDIOMATIC_SAMPLER_PID"; do
+for p in "$UPSTREAM_SAMPLER_PID" "$IDIOMATIC_SAMPLER_PID" $SKETCH_SAMPLER_PID $GO_SAMPLER_PID; do
+    [[ -n "$p" ]] || continue
     kill "$p" 2>/dev/null || true
     wait "$p" 2>/dev/null || true
 done
@@ -272,7 +362,7 @@ for r in rows:
     by[(r["cmd"], r["label"])].append(float(r["rps"]))
 
 cmds = sorted({r["cmd"] for r in rows}, key=lambda c: ["set","get","incr"].index(c) if c in ["set","get","incr"] else 99)
-labels = ["upstream", "idiomatic"]
+labels = $LABELS_PY
 
 def read_samples(path):
     peaks = {"rss_kb": 0, "threads": 0, "n": 0}
@@ -293,10 +383,7 @@ def read_samples(path):
         pass
     return peaks
 
-sample_peaks = {
-    "upstream":  read_samples("$TMP_DIR/upstream_samples.txt"),
-    "idiomatic": read_samples("$TMP_DIR/idiomatic_samples.txt"),
-}
+sample_peaks = {lab: read_samples(f"$TMP_DIR/{lab}_samples.txt") for lab in labels}
 
 def fmt(x): return f"{x/1e6:.3f}M"
 def fmt_mb(kb): return f"{kb/1024:.1f}MB" if kb else "  n/a"
@@ -373,7 +460,9 @@ def read_idiomatic_memlog(path):
 print()
 print("== bench_robust summary ==")
 print(f"rounds={$REPEATS} requests_per_round={$REQUESTS} clients={$CLIENTS} pipeline={$PIPELINE} cc_workers={'$CC_WORKERS_OVERRIDE' or 'default'}")
-print(f"sample_interval={$SAMPLE_INTERVAL}s  samples_taken: upstream={sample_peaks['upstream']['n']}  idiomatic={sample_peaks['idiomatic']['n']}")
+print(f"labels={','.join(labels)} include_sketch={'$INCLUDE_SKETCH'} include_go={'$INCLUDE_GO'}")
+samp = "  ".join(f"{lab}={sample_peaks[lab]['n']}" for lab in labels)
+print(f"sample_interval={$SAMPLE_INTERVAL}s  samples_taken: {samp}")
 print()
 for cmd in cmds:
     print(f"[{cmd.upper()}]")
@@ -389,11 +478,24 @@ for cmd in cmds:
         print(f"  {label:<10} {fmt(mean):>8} {fmt(med):>8} {fmt(min(vals)):>8} {fmt(max(vals)):>8} {fmt(sd):>8} {cv:>5.1f}%")
     ups = by.get((cmd, "upstream"), [])
     idm = by.get((cmd, "idiomatic"), [])
-    if ups and idm:
-        ratio = statistics.median(idm) / statistics.median(ups)
-        overlap = not (max(idm) < min(ups) or max(ups) < min(idm))
+    sk  = by.get((cmd, "sketch"), [])
+    go  = by.get((cmd, "go"), [])
+    def ratio_line(a_name, a, b_name, b):
+        ratio = statistics.median(a) / statistics.median(b)
+        overlap = not (max(a) < min(b) or max(b) < min(a))
         tag = "OVERLAP" if overlap else "SEPARATED"
-        print(f"  idiomatic/upstream median: {ratio:.3f}x  ({tag})")
+        print(f"  {a_name}/{b_name} median: {ratio:.3f}x  ({tag})")
+    if ups and idm:
+        ratio_line("idiomatic", idm, "upstream", ups)
+    if ups and go:
+        ratio_line("go", go, "upstream", ups)
+    if ups and sk:
+        ratio_line("sketch", sk, "upstream", ups)
+    if idm and go:
+        ratio_line("idiomatic", idm, "go", go)
+    if idm and sk:
+        ratio = statistics.median(idm) / statistics.median(sk)
+        print(f"  idiomatic/sketch median:   {ratio:.3f}x")
     print()
 
 print("[RESOURCE PEAKS] (sampled every $SAMPLE_INTERVAL s across the whole run)")

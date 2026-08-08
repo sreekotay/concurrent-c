@@ -1,0 +1,27 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* Pathological apostrophe density in comments + strings next to slots.
+ * Must not desync the template scanner. */
+@comptime {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        /* it's don't ''weird''' and 'x' */
+        enum { PATH_APOS_N = ${11} };
+        static const char *path_apos_a = "it's";
+        static const char *path_apos_b = "don't";
+        static const char *path_apos_c = "''";
+        static const char *path_apos_d = "x'${11}'y";
+        `);
+}
+
+int main(void) {
+    if (PATH_APOS_N != 11) return 1;
+    if (strcmp(path_apos_a, "it's") != 0) return 2;
+    if (strcmp(path_apos_b, "don't") != 0) return 3;
+    if (strcmp(path_apos_c, "''") != 0) return 4;
+    if (strcmp(path_apos_d, "x'11'y") != 0) return 5;
+    printf("pathology_apos_soup_smoke ok\n");
+    return 0;
+}

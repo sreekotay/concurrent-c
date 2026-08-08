@@ -1,0 +1,30 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+typedef struct Trip { int a; int b; } Trip;
+
+/* One for-unroll hits all three anchors; each fragment must land. */
+@comptime for (f in type_of(Trip).fields) {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        enum { Trip_pre_${f.name} = ${f.index} };
+    `);
+    @emit(CC_EMIT_BEFORE_FIRST_USE, `
+        @comptime if (1) {
+            static int trip_bfu_${f.name}(void) { return 20 + ${f.index}; }
+        } else { trip_bfu_dead(); }
+    `);
+    @emit(CC_EMIT_AT_COMPTIME_SITE, `
+        /* don't trip 'site' */
+        static int trip_site_${f.name}(void) { return 30 + ${f.index}; }
+    `);
+}
+
+int main(void) {
+    if (Trip_pre_a != 0 || Trip_pre_b != 1) return 1;
+    if (trip_bfu_a() != 20 || trip_bfu_b() != 21) return 2;
+    if (trip_site_a() != 30 || trip_site_b() != 31) return 3;
+    printf("comptime_emit_triple_anchor_smoke ok\n");
+    return 0;
+}

@@ -1,0 +1,54 @@
+/* CCListener.serve: accept until nursery cancel; on_conn gets CCSocket*. */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/net.cch>
+#include <ccc/script/stdio.cch>
+#include <stdio.h>
+#include <string.h>
+
+static int g_served = 0;
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    const char* addr = "127.0.0.1:18766";
+    CCListener ln = cc_tcp_listen(cc_slice_cstr(addr)) !>(e) {
+        eprintln(@string(`listen: ${e}`, @scratch)) !>;
+        return 1;
+    };
+    @defer ln.close();
+
+    {
+        CCNursery* server = cc_nursery_create(NULL) !> @destroy;
+
+        server->spawn(() => [@safe &ln, server] {
+            ln.serve(server, (CCSocket* client) => [server] {
+                CCSocket c = *client;
+                char buf[8] = {0};
+                size_t n = 0;
+                (void)c.read_into(buf, sizeof(buf), &n);
+                if (n >= 2 && buf[0] == 'h' && buf[1] == 'i') g_served = 1;
+                (void)c.write("ok", 2);
+                c.close();
+                server->cancel();
+            });
+        });
+
+        CCSocket conn = cc_tcp_connect(addr, strlen(addr)) !>(e) {
+            eprintln(@string(`connect: ${e}`, @scratch)) !>;
+            return 1;
+        };
+        @defer conn.close();
+        (void)conn.write("hi", 2);
+        char got[8] = {0};
+        size_t n = 0;
+        (void)conn.read_into(got, sizeof(got), &n);
+        if (!g_served || n != 2 || got[0] != 'o' || got[1] != 'k') {
+            fprintf(stderr, "serve smoke failed served=%d n=%zu got=%.2s\n",
+                    g_served, n, got);
+            return 1;
+        }
+    }
+
+    printf("net_listener_serve_smoke ok\n");
+    return 0;
+}

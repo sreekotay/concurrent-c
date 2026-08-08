@@ -6,8 +6,9 @@
  *   access: per tweet, get id / text / user.screen_name —
  *           tape linear (key,value) walk  vs  per-shape hash table
  *
- * Build: gcc -O2 -I ../../../cc/include bench_shape.c \
- *        ../../../cc/runtime/arena_state.c -o bench_shape
+ * Build (lowered headers/runtime — not raw .cch):
+ *   gcc -O2 -I ../../../out/include -I ../../../cc/include bench_shape.c \
+ *       ../../../out/runtime/arena_state.c -o bench_shape
  * Run:   ./bench_shape twitter.json [K] [T]
  */
 #include "json.h"

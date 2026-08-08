@@ -291,6 +291,133 @@ static inline CCResult_bool_CCError CCSliceUnique_truncate(CCSliceUnique* s, siz
     return cc_slice_truncate((CCSlice*)s, n);
 }
 
+/*
+ * UTF-8 bytes → Unicode scalar values (codepoints), arena-backed.
+ *
+ * UFCS: `s.utf8_codepoints(arena)` → `uint32_t[:]`.  Arena last.  The
+ * returned slice's `len` is the codepoint count; storage lives until the
+ * arena resets.  Empty input yields an empty typed slice (no allocation).
+ *
+ * ASCII (every byte < 0x80) takes a widen-only fast path — 8-byte SWAR
+ * gulps while the high bit stays clear, then a scalar tail.  Invalid
+ * UTF-8 — truncated sequence, bad continuation, overlong form, surrogate,
+ * or value above U+10FFFF — returns CC_ERR_PARSE; there is no replacement
+ * or pass-through of the offending byte.
+ */
+#ifndef CCResult_CCSlice_uint32_t_CCError_DEFINED
+#define CCResult_CCSlice_uint32_t_CCError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCSlice_uint32_t_CCError, CCSlice_uint32_t, CCError)
+#endif
+
+static inline CCResult_CCSlice_uint32_t_CCError
+cc_slice_utf8_codepoints(const CCSlice *s_ptr, CCArena *arena) {
+    CCSlice s = s_ptr ? *s_ptr : cc_slice_empty();
+    const unsigned char *p = (const unsigned char *)s.ptr;
+    size_t i = 0, n = 0;
+    uint32_t *cp;
+    CCSlice base;
+    CCSlice_uint32_t out;
+    if (!arena) {
+        return cc_err_CCResult_CCSlice_uint32_t_CCError(
+            CC_ERROR(CC_ERR_INVALID_ARG, "utf8_codepoints without arena"));
+    }
+    if (s.len == 0) {
+        memset(&out, 0, sizeof(out));
+        return cc_ok_CCResult_CCSlice_uint32_t_CCError(out);
+    }
+    if (!p) {
+        return cc_err_CCResult_CCSlice_uint32_t_CCError(
+            CC_ERROR(CC_ERR_INVALID_ARG, "utf8_codepoints: null pointer"));
+    }
+    base = cc_arena_alloc_slice(arena, sizeof(uint32_t), s.len, _Alignof(uint32_t));
+    if (!base.ptr) {
+        return cc_err_CCResult_CCSlice_uint32_t_CCError(
+            CC_ERROR(CC_ERR_OUT_OF_MEMORY, "utf8_codepoints"));
+    }
+    cp = (uint32_t *)base.ptr;
+    /* ASCII prefix in 8-byte gulps: one wide high-bit test, then a fixed
+     * widen the compiler unrolls. */
+    while (i + 8 <= s.len) {
+        uint64_t w;
+        memcpy(&w, p + i, 8);
+        if (w & 0x8080808080808080ull) break;
+        for (size_t k = 0; k < 8; k++) cp[n + k] = p[i + k];
+        n += 8;
+        i += 8;
+    }
+    while (i < s.len && p[i] < 0x80) cp[n++] = p[i++];
+    while (i < s.len) {
+        unsigned char c = p[i];
+        uint32_t v;
+        size_t more;
+        size_t k;
+        if (c < 0x80) {
+            cp[n++] = c;
+            i++;
+            continue;
+        }
+        if (c < 0xC2) {
+            return cc_err_CCResult_CCSlice_uint32_t_CCError(
+                CC_ERROR(CC_ERR_PARSE, "utf8_codepoints: invalid leading byte"));
+        } else if (c < 0xE0) {
+            v = c & 0x1Fu;
+            more = 1;
+        } else if (c < 0xF0) {
+            v = c & 0x0Fu;
+            more = 2;
+        } else if (c < 0xF5) {
+            v = c & 0x07u;
+            more = 3;
+        } else {
+            return cc_err_CCResult_CCSlice_uint32_t_CCError(
+                CC_ERROR(CC_ERR_PARSE, "utf8_codepoints: invalid leading byte"));
+        }
+        if (i + more >= s.len) {
+            return cc_err_CCResult_CCSlice_uint32_t_CCError(
+                CC_ERROR(CC_ERR_PARSE, "utf8_codepoints: truncated sequence"));
+        }
+        for (k = 1; k <= more; k++) {
+            unsigned char cont = p[i + k];
+            if ((cont & 0xC0u) != 0x80u) {
+                return cc_err_CCResult_CCSlice_uint32_t_CCError(
+                    CC_ERROR(CC_ERR_PARSE, "utf8_codepoints: bad continuation"));
+            }
+            v = (v << 6) | (uint32_t)(cont & 0x3Fu);
+        }
+        /* Reject overlong encodings and UTF-16 surrogates. */
+        if (more == 1 && v < 0x80u) {
+            return cc_err_CCResult_CCSlice_uint32_t_CCError(
+                CC_ERROR(CC_ERR_PARSE, "utf8_codepoints: overlong encoding"));
+        }
+        if (more == 2 && v < 0x800u) {
+            return cc_err_CCResult_CCSlice_uint32_t_CCError(
+                CC_ERROR(CC_ERR_PARSE, "utf8_codepoints: overlong encoding"));
+        }
+        if (more == 3 && v < 0x10000u) {
+            return cc_err_CCResult_CCSlice_uint32_t_CCError(
+                CC_ERROR(CC_ERR_PARSE, "utf8_codepoints: overlong encoding"));
+        }
+        if (v >= 0xD800u && v <= 0xDFFFu) {
+            return cc_err_CCResult_CCSlice_uint32_t_CCError(
+                CC_ERROR(CC_ERR_PARSE, "utf8_codepoints: surrogate code point"));
+        }
+        if (v > 0x10FFFFu) {
+            return cc_err_CCResult_CCSlice_uint32_t_CCError(
+                CC_ERROR(CC_ERR_PARSE, "utf8_codepoints: code point out of range"));
+        }
+        cp[n++] = v;
+        i += more + 1;
+    }
+    base.len = n;
+    out.base = base;
+    return cc_ok_CCResult_CCSlice_uint32_t_CCError(out);
+}
+
+static inline CCResult_CCSlice_uint32_t_CCError
+CCSlice_utf8_codepoints(const CCSlice *s, CCArena *arena) {
+    return cc_slice_utf8_codepoints(s, arena);
+}
+
 static inline CCResult_int64_t_CCError cc_add_i64_checked(int64_t a, int64_t b) {
     int64_t r;
 #ifdef CC__HAS_OVERFLOW_BUILTINS

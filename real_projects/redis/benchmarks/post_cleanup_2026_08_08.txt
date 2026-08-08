@@ -1,0 +1,118 @@
+tmp dir: /var/folders/z2/sbp4rc4n757cljxzfw3sddh00000gn/T/bench_robust.XXXXXX.IWxveYNlDK
+[warmup]
+   idiomatic set   rps=2314814.75
+   sketch    set   rps=2202643.25
+   upstream  set   rps=1340482.62
+   idiomatic get   rps=2463054.25
+   upstream  get   rps=1805054.12
+   sketch    get   rps=2487562.25
+   upstream  incr  rps=1736111.12
+   idiomatic incr  rps=2551020.50
+   sketch    incr  rps=2631579.00
+[mem] CC.MEMLOG post-warmup
+[round 1/6]
+   sketch    set   rps=2538071.00
+   upstream  set   rps=1396648.00
+   idiomatic set   rps=2403846.00
+   sketch    get   rps=2392344.50
+   idiomatic get   rps=2450980.50
+   upstream  get   rps=1213592.25
+   idiomatic incr  rps=1416430.62
+   sketch    incr  rps=642673.50
+   upstream  incr  rps=1818181.75
+[round 2/6]
+   sketch    set   rps=2617801.00
+   upstream  set   rps=1416430.62
+   idiomatic set   rps=2617801.00
+   idiomatic get   rps=2673796.75
+   sketch    get   rps=2673796.75
+   upstream  get   rps=1865671.62
+   sketch    incr  rps=2762431.00
+   upstream  incr  rps=1805054.12
+   idiomatic incr  rps=2688172.00
+[round 3/6]
+   sketch    set   rps=2631579.00
+   idiomatic set   rps=2577319.50
+   upstream  set   rps=1358695.62
+   sketch    get   rps=2487562.25
+   idiomatic get   rps=2617801.00
+   upstream  get   rps=1700680.25
+   upstream  incr  rps=1838235.25
+   sketch    incr  rps=2645502.75
+   idiomatic incr  rps=2358490.50
+[round 4/6]
+   upstream  set   rps=1396648.00
+   sketch    set   rps=2590673.50
+   idiomatic set   rps=2283105.00
+   sketch    get   rps=2155172.50
+   upstream  get   rps=1824817.62
+   idiomatic get   rps=2551020.50
+   upstream  incr  rps=1838235.25
+   idiomatic incr  rps=2659574.50
+   sketch    incr  rps=2631579.00
+[round 5/6]
+   idiomatic set   rps=2100840.25
+   sketch    set   rps=2538071.00
+   upstream  set   rps=1305483.12
+   upstream  get   rps=1838235.25
+   sketch    get   rps=2577319.50
+   idiomatic get   rps=2590673.50
+   idiomatic incr  rps=2659574.50
+   sketch    incr  rps=2590673.50
+   upstream  incr  rps=1858736.12
+[round 6/6]
+   upstream  set   rps=1381215.50
+   sketch    set   rps=2538071.00
+   idiomatic set   rps=2463054.25
+   idiomatic get   rps=2500000.00
+   upstream  get   rps=1879699.25
+   sketch    get   rps=2475247.50
+   upstream  incr  rps=1824817.62
+   sketch    incr  rps=2512562.75
+   idiomatic incr  rps=2604166.75
+[mem] CC.MEMLOG final
+
+== bench_robust summary ==
+rounds=6 requests_per_round=500000 clients=50 pipeline=16 cc_workers=default
+labels=upstream,idiomatic,sketch include_sketch=1
+sample_interval=0.05s  samples_taken: upstream=272  idiomatic=271  sketch=270
+
+[SET]
+  label          mean   median      min      max   stddev    cv%
+  upstream     1.376M   1.389M   1.305M   1.416M   0.039M   2.9%
+  idiomatic    2.408M   2.433M   2.101M   2.618M   0.193M   8.0%
+  sketch       2.576M   2.564M   2.538M   2.632M   0.043M   1.7%
+  idiomatic/upstream median: 1.752x  (SEPARATED)
+  sketch/upstream median:    1.846x  (SEPARATED)
+  idiomatic/sketch median:   0.949x
+
+[GET]
+  label          mean   median      min      max   stddev    cv%
+  upstream     1.720M   1.832M   1.214M   1.880M   0.256M  14.9%
+  idiomatic    2.564M   2.571M   2.451M   2.674M   0.081M   3.2%
+  sketch       2.460M   2.481M   2.155M   2.674M   0.178M   7.2%
+  idiomatic/upstream median: 1.404x  (SEPARATED)
+  sketch/upstream median:    1.355x  (SEPARATED)
+  idiomatic/sketch median:   1.036x
+
+[INCR]
+  label          mean   median      min      max   stddev    cv%
+  upstream     1.831M   1.832M   1.805M   1.859M   0.019M   1.0%
+  idiomatic    2.398M   2.632M   1.416M   2.688M   0.496M  20.7%
+  sketch       2.298M   2.611M   0.643M   2.762M   0.815M  35.5%
+  idiomatic/upstream median: 1.437x  (OVERLAP)
+  sketch/upstream median:    1.426x  (OVERLAP)
+  idiomatic/sketch median:   1.008x
+
+[RESOURCE PEAKS] (sampled every 0.05 s across the whole run)
+  label        peak_rss   peak_threads
+  upstream       12.4MB              3
+  idiomatic      19.1MB             11
+  sketch         18.9MB             11
+
+[MEM GAP] footprint − (map+key+value live); remainder ≈ runtime/fibers/overflow/frag
+  phase           footprint    logical        gap      map      key    value     arenas        src
+  owner-ready     1680.00MB     44.6KB  1679.96MB   44.6KB       0B       0B     60.9KB     maxrss
+  post-warmup    19552.00MB     4.63MB 19547.37MB   2.92MB   1.72MB       0B     9.21MB     maxrss
+  final          19552.00MB     4.63MB 19547.37MB   2.92MB   1.72MB       0B     9.21MB     maxrss
+

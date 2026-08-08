@@ -1,0 +1,14 @@
+/* Duplicate string case labels are a hard error. */
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    CCSlice name = CC_SLICE_LIT("GET");
+    switch (name) {
+    case "GET":
+        return 1;
+    case "GET":
+        return 2;
+    default:
+        return 0;
+    }
+}

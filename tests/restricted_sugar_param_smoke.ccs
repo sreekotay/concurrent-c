@@ -1,0 +1,32 @@
+/* Param sugar @restricted(Encode) Conn* — narrow from Conn*. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct Conn {
+    int sock;
+    int out_len;
+    char buf[32];
+} Conn;
+
+@restricted Encode on Conn {
+    r: out_len, buf, write;
+}
+
+static int conn_write(Conn* c, const char* data) {
+    (void)c;
+    (void)data;
+    return 1;
+}
+
+static int use_enc(@restricted(Encode) Conn* enc) {
+    return enc->write("x");
+}
+
+int main(void) {
+    Conn c;
+    memset(&c, 0, sizeof(c));
+    if (!use_enc(&c)) return 1;
+    printf("ok\n");
+    return 0;
+}

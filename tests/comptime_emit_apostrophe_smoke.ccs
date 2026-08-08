@@ -1,0 +1,20 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+
+/* Apostrophes inside @emit backticks must not reopen char literals while the
+ * for/if resolve walk leaves templates as code. Odd counts + don't. */
+@comptime {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        /* note: don't strip this; it's the author's note */
+        enum { EMIT_APOS_N = ${42} };
+        static const char *emit_apos_msg = "don't break 'emit' scanners";
+    `);
+}
+
+int main(void) {
+    if (EMIT_APOS_N != 42) return 1;
+    if (emit_apos_msg[0] != 'd') return 2;
+    printf("comptime_emit_apostrophe_smoke n=%d msg=%s\n", (int)EMIT_APOS_N, emit_apos_msg);
+    return 0;
+}

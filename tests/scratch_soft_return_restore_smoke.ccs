@@ -1,0 +1,60 @@
+/*
+ * Soft-return inside call-local `eprintln(@string(..., @scratch))` must
+ * restore the scratch watermark before leaving (same contract as fallthrough
+ * `cc_arena_restore`). Otherwise fn @defer still sees the elevated offset
+ * from the temp string, and bound `@string(..., @scratch)` products are at
+ * risk of later clobber.
+ *
+ * Force the bang body via close(2) so the write fails with EBADF.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/script/stdio.cch>
+#include <stdio.h>
+#include <unistd.h>
+
+static size_t g_rem_kept;
+static size_t g_rem_defer;
+static int g_kept_ok;
+
+static int run_soft(void) {
+    int saved = dup(STDERR_FILENO);
+    g_rem_kept = 0;
+    g_rem_defer = 0;
+    g_kept_ok = 0;
+
+    CCString kept = @string(`kept:alpha`, @scratch);
+    g_rem_kept = cc_arena_remaining(&__cc_str_scratch);
+
+    @defer {
+        CCSlice sl = cc_string_as_slice(&kept);
+        g_kept_ok = (sl.len == 10 && sl.ptr &&
+                     sl.ptr[0] == 'k' && sl.ptr[9] == 'a');
+        g_rem_defer = cc_arena_remaining(&__cc_str_scratch);
+        if (saved >= 0) {
+            (void)dup2(saved, STDERR_FILENO);
+            close(saved);
+        }
+    };
+
+    close(STDERR_FILENO);
+    eprintln(@string(`temp:0123456789abcdefghij`, @scratch)) !> {
+        return 7;
+    };
+    return 0;
+}
+
+int main(void) {
+    int rc = run_soft();
+    int rem_ok = (g_rem_defer == g_rem_kept);
+    printf("rc=%d rem_ok=%d kept_ok=%d\n", rc, rem_ok, g_kept_ok);
+    if (rc != 7 || !g_kept_ok || !rem_ok) {
+        fprintf(stderr,
+                "FAIL: expected rc=7 kept_ok=1 rem_ok=1 "
+                "(scratch restore before soft-return); "
+                "rem_kept=%zu rem_defer=%zu\n",
+                g_rem_kept, g_rem_defer);
+        return 1;
+    }
+    printf("scratch_soft_return_restore_smoke: PASS\n");
+    return 0;
+}

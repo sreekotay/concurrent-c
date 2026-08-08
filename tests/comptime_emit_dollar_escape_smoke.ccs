@@ -1,0 +1,21 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* `$$` is a literal dollar next to a real `${n}` slot inside @emit. */
+@comptime {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        enum { EMIT_DOLLAR_N = ${6} };
+        static const char *emit_dollar_msg = "price $$${6} don't";
+        `);
+}
+
+int main(void) {
+    if (EMIT_DOLLAR_N != 6) return 1;
+    /* Today @emit leaves `$$` as two dollars then pastes the slot (`$$6`).
+     * Pin that so a silent flip to @string-style `$$`→`$` is noticed. */
+    if (strcmp(emit_dollar_msg, "price $$6 don't") != 0) return 2;
+    printf("comptime_emit_dollar_escape_smoke msg=%s\n", emit_dollar_msg);
+    return 0;
+}

@@ -9,7 +9,7 @@
 # Env:
 #   CCC_ILP32_ARCH   i386 | arm
 #   CCC_HOST_CC      Host C compiler for building ccc (default: cc).
-#                    `tcc` self-builds ccc with TinyCC (no XJB merge).
+#                    `tcc` self-builds ccc with TinyCC.
 #   BUILD            debug|release (default: debug)
 #   CCC_ILP32_JOBS   parallel make jobs (default: nproc or 4)
 #
@@ -58,6 +58,8 @@ case "$ARCH" in
 esac
 
 step "ILP32 host ($ARCH, $machine)"
+# Cold make from wiped out/ — catches bootstrap ODR (GNU ld) and bad
+# snapshot includes. Same path as: rm -rf out && make && ccc hello.
 ./scripts/build_ilp32_toolchain.sh
 
 failures=0
@@ -72,9 +74,17 @@ run_one() {
   fi
 }
 
-step "assert linked program is ELF 32-bit"
+step "bootstrap archive has no arena_state.o (ODR)"
+lib_a="$(find out -name libshadow_comptime.a 2>/dev/null | head -1 || true)"
+[ -n "$lib_a" ] || die "libshadow_comptime.a missing after toolchain build"
+if ar t "$lib_a" | grep -q 'arena_state\.o'; then
+  die "$lib_a still contains arena_state.o (ODR with concurrent_c.o)"
+fi
+ok "libshadow_comptime.a omits arena_state.o"
+
+step "assert linked program is ELF 32-bit (serdes default)"
 rm -f out/hello bin/hello 2>/dev/null || true
-./cc/bin/ccc build --no-cache examples/hello.ccs
+./cc/bin/ccc build --frontend=native --no-cache examples/hello.ccs
 hello_bin=""
 for cand in out/hello bin/hello; do
   if [ -x "$cand" ]; then hello_bin="$cand"; break; fi

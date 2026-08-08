@@ -1,5 +1,4 @@
 CC ?= cc
-CXX ?= c++
 TCC_BIN ?=
 TCC_EXT ?= 1
 TCC_INC ?= ../third_party/tcc
@@ -47,10 +46,8 @@ ifeq ($(CC_ENABLE_TLS),1)
 endif
 ifeq ($(BUILD),debug)
   CFLAGS := $(CFLAGS_COMMON) -O0 -g
-  CXXFLAGS := $(CFLAGS_COMMON) -O0 -g -std=c++17 -fno-exceptions -fno-rtti
 else
   CFLAGS := $(CFLAGS_COMMON) -O2 -ffunction-sections -fdata-sections
-  CXXFLAGS := $(CFLAGS_COMMON) -O2 -ffunction-sections -fdata-sections -std=c++17 -fno-exceptions -fno-rtti
 endif
 # UFCS requires the patched TCC extension (AST hooks). Enforce TCC_EXT=1.
 ifneq ($(TCC_EXT),1)
@@ -87,7 +84,7 @@ endif
 
 # TinyCC host: C11 mode, -B for libtcc1.a, neutralize unimplemented
 # _Thread_local (ccc frontend TLS is process-scoped under TINYC — ccc is not
-# multi-threaded across those sites). Skip C++ XJB float merge below.
+# multi-threaded across those sites).
 ifeq ($(CC_IS_TCC),1)
   CFLAGS += -std=c11 -D_Thread_local= -D__thread=
   # liblfds has no TCC port (needs GCC __atomic_* / OS PAL).
@@ -114,12 +111,8 @@ else
 endif
 OBJS := $(SRCS:%.c=$(OBJDIR)/%.o)
 RUNTIME_CORE_OBJ := $(OBJDIR)/runtime/concurrent_c.core.o
-RUNTIME_XJB_OBJ := $(OBJDIR)/runtime/float_format_xjb.o
-ifeq ($(CC_IS_TCC),1)
-  DEPS := $(OBJS:.o=.d)
-else
-  DEPS := $(OBJS:.o=.d) $(RUNTIME_CORE_OBJ:.o=.d) $(RUNTIME_XJB_OBJ:.o=.d)
-endif
+RUNTIME_FLOAT_OBJ := $(OBJDIR)/runtime/float_format_zmij.o
+DEPS := $(OBJS:.o=.d) $(RUNTIME_CORE_OBJ:.o=.d) $(RUNTIME_FLOAT_OBJ:.o=.d)
 REAL_BINARY := bin/.ccc-bin
 CCC_SCRIPT  := bin/ccc
 CCC_WRAPPER_TEMPLATE := scripts/ccc_wrapper.sh
@@ -128,11 +121,11 @@ SHADOW_LOWER_TEMPLATE := scripts/shadow_lower.sh
 SHADOW_LOWER_SCRIPT := bin/shadow_lower
 SHADOW_LOWER_WRAPPER := $(OUT_BINDIR)/shadow_lower
 # Native shadow_lower (libtcc-linked) + host-built runtime dylib for --exe.
-SHADOW_LOWER_CCS := ../examples/serdes/c/shadow_lower.ccs
-SHADOW_BUILD_CCH := ../examples/serdes/c/shadow_build.cch
-SHADOW_TCC_C := ../examples/serdes/c/shadow_tcc_compile.c
+SHADOW_LOWER_CCS := ../cc/shadow/shadow_lower.ccs
+SHADOW_BUILD_CCH := ../cc/shadow/shadow_build.cch
+SHADOW_TCC_C := ../cc/shadow/shadow_tcc_compile.c
 SHADOW_TCC_OBJ := $(OBJDIR)/shadow_tcc_compile.o
-SHADOW_COMPTIME_C := ../examples/serdes/c/shadow_comptime.c
+SHADOW_COMPTIME_C := ../cc/shadow/shadow_comptime.c
 SHADOW_COMPTIME_OBJ := $(OBJDIR)/shadow_comptime.o
 OUT_LIBDIR := $(dir $(OUT_BINDIR))lib
 ifeq ($(shell uname -s),Darwin)
@@ -168,6 +161,7 @@ LOWER_HEADERS_SRCS := src/tools/lower_headers.c \
 	src/preprocess/type_graph.c \
 	src/preprocess/variant_lower.c \
 	src/preprocess/emit_plan.c \
+	src/preprocess/strswitch_comptime.c \
 	src/parser/symsig.c \
 	src/result_spec.c \
 	runtime/arena_state.c \
@@ -189,7 +183,13 @@ LOWER_HEADERS_SRCS := src/tools/lower_headers.c \
 	src/util/result_fn_registry.c
 LOWER_HEADERS_OBJS := $(LOWER_HEADERS_SRCS:%.c=$(OBJDIR)/%.o)
 # Same engine surface as lower_headers (minus its main), for prepare/exec/splice.
-SHADOW_COMPTIME_ENGINE_OBJS := $(filter-out $(OBJDIR)/src/tools/lower_headers.o,$(LOWER_HEADERS_OBJS))
+# Omit arena_state.o: it is the FFC_IMPL TU and also unity-included by
+# concurrent_c.o. Archiving it here and linking concurrent_c.o on the same
+# line is an ODR hard-error under GNU ld -fno-common (Linux/gcc). shadow_lower
+# always links concurrent_c.o for those symbols instead.
+SHADOW_COMPTIME_ENGINE_OBJS := $(filter-out \
+	$(OBJDIR)/src/tools/lower_headers.o \
+	$(OBJDIR)/runtime/arena_state.o,$(LOWER_HEADERS_OBJS))
 SHADOW_COMPTIME_LIB := $(OBJDIR)/libshadow_comptime.a
 LOWER_HEADERS_BINARY := $(OUT_BINDIR)/lower_headers
 # Stage-1 bootstrap variant: grammar engines stubbed (see BOOTSTRAP SHAPE)
@@ -241,8 +241,19 @@ lower-headers: $(LOWER_HEADERS_STAMP)
 # makes the whole graph acyclic and truly clean-buildable.  (Previously the
 # stamp needed the FULL tool while several of its objects latently needed
 # the stamp's output; clean trees only built by ordering luck.)
-$(LOWER_HEADERS_STAMP): $(LOWER_HEADERS1_BINARY) $(LOWER_HEADERS_INPUTS) $(wildcard runtime/*.c runtime/*.h)
+# Header stamp: real lower via stage-1. Cold path (no stage-1 binary yet —
+# fresh clone / smoke_bootstrap_fresh) seeds a crude host-C out/include so
+# stage-1 can compile, then overwrites with a proper lower. Warm path reuses
+# an existing stage-1 binary (survives `make clean`) without relinking it.
+$(LOWER_HEADERS_STAMP): $(LOWER_HEADERS_INPUTS) $(wildcard runtime/*.c runtime/*.h)
 	@mkdir -p $(OUT_INCLUDE) $(OUT_RUNTIME)
+	@if [ ! -x "$(LOWER_HEADERS1_BINARY)" ]; then \
+		echo "seed headers for stage-1 lower_headers..."; \
+		bash ../scripts/seed_headers_for_stage1.sh \
+			"$(abspath include)" "$(abspath $(OUT_INCLUDE))" \
+			"$(abspath runtime)" "$(abspath $(OUT_RUNTIME))"; \
+		$(MAKE) $(LOWER_HEADERS1_BINARY); \
+	fi
 	@$(LOWER_HEADERS1_BINARY) include $(OUT_INCLUDE) --rewrite-includes runtime $(OUT_RUNTIME)
 	@touch $@
 
@@ -290,6 +301,8 @@ $(OBJDIR)/src/preprocess/grammar_rules.o: CFLAGS += -I$(ENGINE_GEN_DIR)
 # ("ccc/cc_arena.h: No such file") and incremental trees build by ordering
 # luck only.  Still acyclic: stage-1 → stamp → grammar_rules.o → full tool.
 $(OBJDIR)/src/preprocess/grammar_rules.o: $(LOWER_HEADERS_STAMP)
+# ufcs.c includes lowered <ccc/*.h> (bare @as stays in .cch only).
+$(OBJDIR)/src/visitor/ufcs.o: $(LOWER_HEADERS_STAMP)
 
 .PHONY: test-build-stub
 test-build-stub: $(WRAPPER)
@@ -322,21 +335,22 @@ $(WRAPPER): $(CCC_SCRIPT)
 
 # Runtime shared lib for shadow --exe (libtcc cannot link host clang .o on Darwin).
 # Leaf soname only — run with DYLD_LIBRARY_PATH / LD_LIBRARY_PATH = this dir.
+# Host TCC needs CFLAGS (-B) so -shared finds libtcc1.a.
 $(RUNTIME_DYLIB): $(OBJDIR)/runtime/concurrent_c.o
 	@mkdir -p $(dir $@)
 ifeq ($(shell uname -s),Darwin)
-	$(CC) $(RUNTIME_DYLIB_LINK) -install_name libcc_runtime.dylib -o $@ $< -lpthread -lm
+	$(CC) $(CFLAGS) $(RUNTIME_DYLIB_LINK) -install_name libcc_runtime.dylib -o $@ $< -lpthread -lm
 else
-	$(CC) $(RUNTIME_DYLIB_LINK) -o $@ $< -lpthread -lm
+	$(CC) $(CFLAGS) $(RUNTIME_DYLIB_LINK) -o $@ $< -lpthread -lm
 endif
 
 $(SHADOW_TCC_OBJ): $(SHADOW_TCC_C) $(TCC_LIB_DEP)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -I../examples/serdes/c -c $(SHADOW_TCC_C) -o $@
+	$(CC) $(CFLAGS) -I../cc/shadow -c $(SHADOW_TCC_C) -o $@
 
 $(SHADOW_COMPTIME_OBJ): $(SHADOW_COMPTIME_C) $(TCC_LIB_DEP)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -I../examples/serdes/c -Isrc -c $(SHADOW_COMPTIME_C) -o $@
+	$(CC) $(CFLAGS) -I../cc/shadow -Isrc -c $(SHADOW_COMPTIME_C) -o $@
 
 $(SHADOW_COMPTIME_LIB): $(SHADOW_COMPTIME_OBJ) $(SHADOW_COMPTIME_ENGINE_OBJS)
 	@mkdir -p $(dir $@)
@@ -345,28 +359,53 @@ $(SHADOW_COMPTIME_LIB): $(SHADOW_COMPTIME_OBJ) $(SHADOW_COMPTIME_ENGINE_OBJS)
 
 # shadow_lower self-build:
 #   SHADOW_LOWER_SOURCE=bootstrap (default) — host-cc last-good snapshot
-#   SHADOW_LOWER_SOURCE=ccs — lower shadow_lower.ccs via legacy ccc
+#   SHADOW_LOWER_SOURCE=ccs — re-lower .ccs via existing native shadow_lower
 # Promote a new seed: scripts/snapshot_shadow_lower.sh && promote_shadow_bootstrap.sh
 BOOTSTRAP_ROOT := bootstrap/shadow_lower
 BOOTSTRAP_VER := $(shell cat $(BOOTSTRAP_ROOT)/last-good 2>/dev/null)
 BOOTSTRAP_DIR := $(BOOTSTRAP_ROOT)/$(BOOTSTRAP_VER)
 SHADOW_LOWER_SOURCE ?= bootstrap
+# Prefer a previously built native binary when re-lowering from .ccs.
+SHADOW_LOWER_SEED_BIN := $(firstword \
+	$(wildcard $(OUT_BINDIR)/shadow_lower) \
+	$(wildcard bin/shadow_lower))
 
 SHADOW_LOWER_CCS_DEPS := $(SHADOW_LOWER_CCS) $(SHADOW_BUILD_CCH) \
-	$(wildcard ../examples/serdes/c/pp_*.cch) \
-	$(wildcard ../examples/serdes/c/shadow_*.cch) \
-	$(wildcard ../examples/serdes/c/shadow_*.h)
+	$(wildcard ../cc/shadow/pp_*.cch) \
+	$(wildcard ../cc/shadow/shadow_*.cch) \
+	$(wildcard ../cc/shadow/shadow_*.h)
 SHADOW_LOWER_BOOT_DEPS := $(BOOTSTRAP_DIR)/shadow_lower.c \
 	$(wildcard $(BOOTSTRAP_DIR)/include/*.h)
 
 ifeq ($(SHADOW_LOWER_SOURCE),ccs)
 $(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_CCS_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_COMPTIME_LIB) \
-	$(WRAPPER) $(TCC_LIB_DEP) $(RUNTIME_DYLIB)
-	@mkdir -p $(dir $@)
-	# Legacy path: re-lower .ccs (needed when iterating before a promote).
-	CC_FRONTEND=legacy $(WRAPPER) --frontend=legacy $(SHADOW_LOWER_CCS) -o $@ --no-cache \
-		--cc-flags "-I../examples/serdes/c -I$(TCC_INC) -DSHADOW_HAVE_LIBTCC=1" \
-		--ld-flags "$(abspath $(SHADOW_TCC_OBJ)) $(abspath $(SHADOW_COMPTIME_LIB)) -L$(TCC_LIB) -ltcc"
+	$(TCC_LIB_DEP) $(RUNTIME_DYLIB) $(OBJDIR)/runtime/concurrent_c.o
+	@mkdir -p $(dir $@) $(OBJDIR)
+	@test -n "$(SHADOW_LOWER_SEED_BIN)" -a -x "$(SHADOW_LOWER_SEED_BIN)" || \
+		(echo "SHADOW_LOWER_SOURCE=ccs needs an existing shadow_lower; run: make SHADOW_LOWER_SOURCE=bootstrap"; exit 1)
+	# Host-cc of emit.c prefers out/include/cc/shadow/*.h over .cch. Sync
+	# cache/build helpers + lit-coerce face so .cch edits are not shadowed by
+	# a stale last-good copy (scripts/patch_ufcs_slice_lit_face.py).
+	@mkdir -p ../out/include/cc/shadow
+	@cp -f $(SHADOW_BUILD_CCH) ../out/include/cc/shadow/shadow_build.h
+	@if [ -f ../out/include/cc/shadow/pp_emit_ufcs.h ]; then \
+		python3 ../scripts/patch_ufcs_slice_lit_face.py; \
+	fi
+	# Native self-emit, then host-cc link (same objs as bootstrap).
+	# concurrent_c.o supplies arena_state/FFC (omitted from libshadow_comptime.a).
+	CC_INCLUDE_PATH="$(abspath $(OUT_INCLUDE)):$(abspath include)" \
+	$(SHADOW_LOWER_SEED_BIN) $(SHADOW_LOWER_CCS) -o $(OBJDIR)/shadow_lower.emit.c --no-cache \
+		--cc-flags="-I../cc/shadow -I$(TCC_INC) -DSHADOW_HAVE_LIBTCC=1"
+	@if grep -qE '^de#line' $(OBJDIR)/shadow_lower.emit.c; then \
+		echo "error: emit contains de#line (injected-token lead bug)"; exit 1; \
+	fi
+	$(CC) $(CFLAGS) -o $@ $(OBJDIR)/shadow_lower.emit.c \
+		-I../out/include/cc/shadow -I../out/include -I../cc/include \
+		-I../cc/shadow -I$(TCC_INC) -DSHADOW_HAVE_LIBTCC=1 \
+		$(abspath $(SHADOW_TCC_OBJ)) \
+		$(abspath $(OBJDIR)/runtime/concurrent_c.o) \
+		$(abspath $(SHADOW_COMPTIME_LIB)) \
+		$(LDFLAGS) $(LDLIBS)
 	@mkdir -p $(dir $(SHADOW_LOWER_SCRIPT))
 	@cp $@ $(SHADOW_LOWER_SCRIPT)
 	@chmod +x $(SHADOW_LOWER_SCRIPT)
@@ -377,12 +416,22 @@ $(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_BOOT_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_CO
 	@test -f "$(BOOTSTRAP_DIR)/shadow_lower.c" || \
 		(echo "missing $(BOOTSTRAP_DIR)/shadow_lower.c; run snapshot+promote"; exit 1)
 	@mkdir -p $(dir $@)
+	# Seed snapshot headers at angle-include paths some emits still spell
+	# (<cc/shadow/*.h>, legacy <examples/serdes/c/*.h>). v4+ rewrites those
+	# to "foo.h" + -Iinclude/; seeding keeps older snapshots host-cc clean.
+	@mkdir -p ../out/include/cc/shadow ../out/include/examples/serdes/c
+	@if ls $(BOOTSTRAP_DIR)/include/*.h >/dev/null 2>&1; then \
+		cp -f $(BOOTSTRAP_DIR)/include/*.h ../out/include/cc/shadow/; \
+		cp -f $(BOOTSTRAP_DIR)/include/*.h ../out/include/examples/serdes/c/; \
+	fi
+	# arena_state/FFC live only in concurrent_c.o (see SHADOW_COMPTIME_ENGINE_OBJS).
 	$(CC) $(CFLAGS) -o $@ $(BOOTSTRAP_DIR)/shadow_lower.c \
 		-I$(BOOTSTRAP_DIR)/include -Iinclude -I../out/include \
-		-I../examples/serdes/c -I$(TCC_INC) -DSHADOW_HAVE_LIBTCC=1 \
-		$(abspath $(SHADOW_TCC_OBJ)) $(abspath $(SHADOW_COMPTIME_LIB)) \
+		-I../cc/shadow -I$(TCC_INC) -DSHADOW_HAVE_LIBTCC=1 \
+		$(abspath $(SHADOW_TCC_OBJ)) \
 		$(abspath $(OBJDIR)/runtime/concurrent_c.o) \
-		-L$(TCC_LIB) -ltcc $(LDFLAGS) $(LDLIBS)
+		$(abspath $(SHADOW_COMPTIME_LIB)) \
+		$(LDFLAGS) $(LDLIBS)
 	@mkdir -p $(dir $(SHADOW_LOWER_SCRIPT))
 	@cp $@ $(SHADOW_LOWER_SCRIPT)
 	@chmod +x $(SHADOW_LOWER_SCRIPT)
@@ -407,14 +456,17 @@ $(LOWER_HEADERS_BINARY): $(LOWER_HEADERS_OBJS) $(TCC_LIB_DEP)
 
 $(OBJDIR)/runtime/concurrent_c.o: $(LOWER_HEADERS_STAMP)
 	@mkdir -p $(dir $@)
-ifeq ($(CC_IS_TCC),1)
-	# No C++ XJB under host TCC — same fallback path as user programs with CC=tcc.
-	$(CC) $(CFLAGS) -DCC_ENABLE_XJB_FLOAT_FMT=0 -MMD -MP -MF $(@:.o=.d) -c $(OUT_RUNTIME)/concurrent_c.c -o $@
-else
-	$(CC) $(CFLAGS) $(RUNTIME_PIC) -DCC_ENABLE_XJB_FLOAT_FMT=1 -MMD -MP -MF $(RUNTIME_CORE_OBJ:.o=.d) -c $(OUT_RUNTIME)/concurrent_c.c -o $(RUNTIME_CORE_OBJ)
-	$(CXX) $(CXXFLAGS) $(RUNTIME_PIC) -DCC_ENABLE_XJB_FLOAT_FMT=1 -MMD -MP -MF $(RUNTIME_XJB_OBJ:.o=.d) -c runtime/float_format_xjb.cpp -o $(RUNTIME_XJB_OBJ)
-	$(CC) -nostdlib -r -o $@ $(RUNTIME_CORE_OBJ) $(RUNTIME_XJB_OBJ)
-endif
+	$(CC) $(CFLAGS) $(RUNTIME_PIC) -MMD -MP -MF $(RUNTIME_CORE_OBJ:.o=.d) -c $(OUT_RUNTIME)/concurrent_c.c -o $(RUNTIME_CORE_OBJ)
+	$(CC) $(CFLAGS) $(RUNTIME_PIC) -MMD -MP -MF $(RUNTIME_FLOAT_OBJ:.o=.d) -c runtime/float_format_zmij.c -o $(RUNTIME_FLOAT_OBJ)
+	$(CC) -nostdlib -r -o $@ $(RUNTIME_CORE_OBJ) $(RUNTIME_FLOAT_OBJ)
+
+# Source still spells `#include <ccc/….cch>`; host-cc the rewrite under out/runtime.
+$(OBJDIR)/runtime/arena_state.o: $(LOWER_HEADERS_STAMP) $(OUT_RUNTIME)/arena_state.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -MMD -MP -MF $(@:.o=.d) -c $(OUT_RUNTIME)/arena_state.c -o $@
+
+# Host objects that `#include <ccc/*.h>` need the stamp first.
+$(OBJS): $(LOWER_HEADERS_STAMP)
 
 $(OBJDIR)/%.o: %.c | $(TCC_PATCH_STAMP)
 	@mkdir -p $(dir $@)
@@ -441,6 +493,7 @@ $(EMIT_TPL_PRELUDE): $(GEN_EMIT_TPL) $(EMIT_TPL_CORE)
 	$(GEN_EMIT_TPL)
 
 $(OBJDIR)/src/comptime/executor.o: $(EMIT_TPL_PRELUDE)
+$(OBJDIR)/src/comptime/hook_compile.o: $(EMIT_TPL_PRELUDE)
 
 .PHONY: all clean
 

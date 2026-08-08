@@ -85,7 +85,7 @@ static ScanStats scan_slurp(const char* path) {
     CCArena a = cc_arena_heap(megabytes(4));
     @defer cc_arena_free(&a);
     CCFile f;
-    if (cc_file_open(&f, char_to_slice((char*)path), "rb") != 0) {
+    if (cc_file_open(&f, cc_slice_cstr((char*)path), "rb") != 0) {
         fprintf(stderr, "bench_line_scan: open failed: %s\n", path);
         abort();
     }
@@ -106,7 +106,7 @@ static ScanStats scan_sync(const char* path) {
     CCArena scratch = cc_arena_heap(megabytes(1));
     @defer cc_arena_free(&scratch);
     CCFile f;
-    if (cc_file_open(&f, char_to_slice((char*)path), "rb") != 0) {
+    if (cc_file_open(&f, cc_slice_cstr((char*)path), "rb") != 0) {
         fprintf(stderr, "bench_line_scan: open failed: %s\n", path);
         abort();
     }
@@ -159,7 +159,7 @@ static ScanStats scan_chan(const char* path) {
 
         n->spawn(() => [tx, path] {
             CCFile f;
-            if (cc_file_open(&f, char_to_slice((char*)path), "rb") != 0) {
+            if (cc_file_open(&f, cc_slice_cstr((char*)path), "rb") != 0) {
                 fprintf(stderr, "bench_line_scan: open failed: %s\n", path);
                 abort();
             }
@@ -265,8 +265,8 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    k_ctx = char_to_slice((char*)"cc__reparse_source_to_ast_ctx(");
-    k_ex = char_to_slice((char*)"cc__reparse_source_to_ast_ex(");
+    k_ctx = CC_SLICE_LIT("cc__reparse_source_to_ast_ctx(");
+    k_ex = CC_SLICE_LIT("cc__reparse_source_to_ast_ex(");
 
     FILE* hf = fopen(path, "rb");
     if (!hf) {

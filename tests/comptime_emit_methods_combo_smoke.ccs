@@ -1,0 +1,36 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+typedef struct Box { int v; } Box;
+static int box_get(Box *self) { return self->v; }
+static void box_bump(Box *self) { self->v++; }
+
+/* Method reflection inside emit: ${m.name}, ret_void prune, don't prose. */
+@comptime for (m in type_of(Box).methods) {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        /* method don't skip: prose only — slots in comments are not substituted */
+        @comptime if (m.ret_void) {
+            enum { Box_void_${m.name} = 1 };
+        } else {
+            enum { Box_val_${m.name} = 2 };
+        }
+        @comptime if (0) {
+            box_method_dead();
+        } else {
+            enum { Box_idx_${m.name} = m.index };
+        }
+    `);
+}
+
+int main(void) {
+    if (Box_val_box_get != 2) return 1;
+    if (Box_void_box_bump != 1) return 2;
+    if (Box_idx_box_get != 0 && Box_idx_box_get != 1) return 3;
+    if (Box_idx_box_bump != 0 && Box_idx_box_bump != 1) return 4;
+    if (Box_idx_box_get == Box_idx_box_bump) return 5;
+    printf("comptime_emit_methods_combo_smoke get=%d bump=%d\n",
+           (int)Box_idx_box_get, (int)Box_idx_box_bump);
+    return 0;
+}

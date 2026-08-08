@@ -1,0 +1,39 @@
+/*
+ * Regression: `return` inside a declaration-attached `!>(e){…}` handler must
+ * soft-return through fn @defer/@destroy cleanup (goto __cc_cleanup), same as
+ * a bare `if (…) return`.
+ *
+ * Found via redis_async_sketch listen-failure path: sibling if-returns rewrote;
+ * the bang-handler return was a raw `return 1`.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int g_cleanup = 0;
+
+static CCResult_int_CCError boom(void) {
+    return cc_err(CC_ERR_INVALID_ARG, "boom");
+}
+
+static int run_fail(void) {
+    @defer { g_cleanup++; };
+
+    int x = boom() !>(e) {
+        (void)e;
+        return 7;
+    };
+    (void)x;
+    return 0;
+}
+
+int main(void) {
+    g_cleanup = 0;
+    int rc = run_fail();
+    printf("rc=%d cleanup=%d\n", rc, g_cleanup);
+    if (rc != 7 || g_cleanup != 1) {
+        fprintf(stderr, "FAIL: expected rc=7 cleanup=1\n");
+        return 1;
+    }
+    printf("defer_bang_handler_return_smoke: PASS\n");
+    return 0;
+}

@@ -11,17 +11,17 @@
     "#include <stdlib.h>\n" \
     "#include <stdbool.h>\n" \
     "#include <ctype.h>\n" \
-    "#include <ccc/cc_slice.cch>\n" \
-    "#include <ccc/cc_arena.cch>\n" \
-    "/* cc_arena.cch declares this extern (defined in the compiled runtime). The\n" \
+    "#include <ccc/cc_slice.h>\n" \
+    "#include <ccc/cc_arena.h>\n" \
+    "/* cc_arena.h declares this extern (defined in the compiled runtime). The\n" \
     "   comptime TU is standalone (never linked against the runtime), so define a\n" \
     "   per-TU instance here — provenance ids only need uniqueness within one run. */\n" \
     "cc_atomic_u64 cc_arena_prov_counter = 0;\n" \
     "#define CC_COMPTIME 1\n" \
-    "#include <ccc/std/string.cch>\n" \
-    "#include <ccc/std/vec.cch>\n" \
-    "#include <ccc/std/hash.cch>\n" \
-    "#include <ccc/std/map.cch>\n" \
+    "#include <ccc/std/string.h>\n" \
+    "#include <ccc/std/vec.h>\n" \
+    "#include <ccc/std/hash.h>\n" \
+    "#include <ccc/std/map.h>\n" \
     "/* Typed maps are file-scope (CC_MAP_DECL_ARENA -> static-inline defs), so a\n" \
     "   comptime block can't declare its own; pre-declare common key types. */\n" \
     "CC_MAP_DECL_ARENA(int, int, CCMapII, cc_map_hash_i32, cc_map_eq_i32)\n" \
@@ -95,6 +95,7 @@
     "extern int cc_reflect_field_count(const char* type_name);\n" \
     "extern int cc_reflect_field_name(const char* type_name, int idx, char* buf, int buf_sz);\n" \
     "extern int cc_reflect_field_type(const char* type_name, int idx, char* buf, int buf_sz);\n" \
+    "extern int cc_reflect_field_is_as(const char* type_name, int idx);\n" \
     "extern int cc_reflect_enum_count(const char* enum_name);\n" \
     "extern int cc_reflect_enum_name(const char* enum_name, int idx, char* buf, int buf_sz);\n" \
     "extern int cc_reflect_enum_value(const char* enum_name, int idx, long long* out);\n" \
@@ -104,12 +105,16 @@
     "extern int cc_reflect_tagged_name(const char* tag, int idx, char* buf, int buf_sz);\n" \
     "enum { CC_REFLECT_KIND_UNKNOWN=0, CC_REFLECT_KIND_PRIMITIVE=1," \
     " CC_REFLECT_KIND_POINTER=2, CC_REFLECT_KIND_STRUCT=3, CC_REFLECT_KIND_ENUM=4 };\n" \
-    "typedef struct CCReflectField { char name[128]; char type[128]; int index; } CCReflectField;\n" \
+    "typedef struct CCReflectField { char name[128]; char type[128]; int index; int is_as; } CCReflectField;\n" \
     "static inline int cc_reflect_field_at(const char* type_name, int idx, CCReflectField* out) {\n" \
+    "  int as;\n" \
     "  if (!out || idx < 0) return -1;\n" \
-    "  out->index = idx;\n" \
+    "  out->index = idx; out->is_as = 0;\n" \
     "  if (cc_reflect_field_name(type_name, idx, out->name, (int)sizeof(out->name)) < 0) return -1;\n" \
     "  if (cc_reflect_field_type(type_name, idx, out->type, (int)sizeof(out->type)) < 0) return -1;\n" \
+    "  as = cc_reflect_field_is_as(type_name, idx);\n" \
+    "  if (as < 0) return -1;\n" \
+    "  out->is_as = as ? 1 : 0;\n" \
     "  return 0;\n" \
     "}\n" \
     "typedef struct CCReflectEnumMember { char name[128]; long long value; int index; } CCReflectEnumMember;\n" \

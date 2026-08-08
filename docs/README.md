@@ -2,7 +2,8 @@
 
 ## Getting Started
 
-- **[Getting Started](getting-started.md)** — Install, build, and run your first program
+- **[Getting Started](getting-started.md)** — Install, first program, concurrency
+- **[Language Concepts](language-concepts.md)** — Defer, results, UFCS, slices/arenas, closures
 - **[Cheatsheet](cheatsheet.md)** — Quick reference for common patterns
 - **[Debugging](debugging.md)** — VS Code / Cursor debugging setup
 - **[ILP32 Docker smoke](ilp32-docker.md)** — Linux i386 (and planned ARM32) runtime smokes via Docker
@@ -15,6 +16,7 @@
 - **[Build](../spec/concurrent-c-build.md)** — Compiler driver, outputs, cache, and target graph
 - **[Grammar and SERDES](../spec/cc_serdes.md)** — Grammar engines and serialization operations
 - **[Variants](../spec/draft_variants.md)** — Tagged-union semantics and packed layout
+- **[Restricted access](../spec/draft_facets.md)** — `@restricted` allow-list views (draft)
 - **[Allocator Strategy](../spec/draft_alloc_strategy.md)** — Arena release and heap-overflow behavior
 - **[Fiber Scheduler](../spec/concurrent-c-scheduler.md)** — Scheduler state machine and park/wake contract
 - **[Scheduler ops runbook](scheduler-ops-runbook.md)** — Build/test/diagnose loops for the scheduler
@@ -26,7 +28,14 @@
 cd cc && make
 ```
 
-The compiler binary is at `cc/bin/ccc`.
+Binaries: `cc/bin/ccc` (driver) and `out/cc/bin/shadow_lower` (default native
+front, host-cc'd from `cc/bootstrap/shadow_lower/last-good`). Opt out with
+`ccc --frontend=legacy` / `CC_FRONTEND=legacy`.
+
+- [Compiler architecture](../cc/docs/ARCHITECTURE.md) — default native / `shadow_lower`
+- [shadow_lower ops / layout](../cc/shadow/README.md)
+- [Bootstrap snapshots](../cc/bootstrap/shadow_lower/README.md)
+- Legacy multipass (opt-out): [LEGACY_ARCHITECTURE.md](../cc/docs/LEGACY_ARCHITECTURE.md)
 
 ## Quick Example
 
@@ -35,11 +44,10 @@ The compiler binary is at `cc/bin/ccc`.
 #include <stdio.h>
 
 int main(void) {
-    CCNursery* n = @create(NULL) @destroy;
-    if (!n) return 1;
+    @errhandler(CCError e) cc_error_exit(e);
+    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
     n->spawn(() => printf("Hello from task A!\n"));
     n->spawn(() => printf("Hello from task B!\n"));
-    printf("Done.\n");
     return 0;
 }
 ```

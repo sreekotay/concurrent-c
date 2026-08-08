@@ -1,0 +1,27 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+
+/* Empty then/else bodies are valid; dead arm poison still proves prune. */
+@comptime if (1) {
+} else {
+    path_empty_if_dead();
+}
+
+@comptime if (0) {
+    path_empty_if_dead2();
+} else {
+}
+
+@comptime {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        @comptime if (1) { } else { path_empty_emit_dead(); }
+        enum { PATH_EMPTY_IF_N = 1 };
+    `);
+}
+
+int main(void) {
+    if (PATH_EMPTY_IF_N != 1) return 1;
+    printf("pathology_empty_if_smoke ok\n");
+    return 0;
+}

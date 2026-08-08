@@ -1,0 +1,14 @@
+#include <ccc/std/prelude.cch>
+
+typedef struct {
+    CCFile file @as;
+    int tag;
+} AsCommentMiss;
+
+/* Missing method across a comment gap must still be a UFCS diagnostic —
+ * not a host "no member" that hides the pass. */
+int main(void) {
+    AsCommentMiss w = {0};
+    w /*as*/ .no_such_method();
+    return 0;
+}

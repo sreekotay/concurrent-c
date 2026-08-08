@@ -1,0 +1,37 @@
+/* @async T!>(E): Result return packs through task ABI; @await yields T!>(E). */
+#include <ccc/cc_runtime.cch>
+#include <ccc/script/stdio.cch>
+#include <stdio.h>
+
+@async int !>(CCError) echo(CCChanTx tx, CCChanRx rx, int v) {
+    @errhandler(CCError e) { return cc_err(e); }
+    @await tx.send(v) !>;
+    int got = 0;
+    @await rx.recv(&got) !>;
+    return cc_ok(got);
+}
+
+@async int !>(CCError) pipeline(CCChanTx tx, CCChanRx rx, int v) {
+    @errhandler(CCError e) { return cc_err(e); }
+    int x = @await echo(tx, rx, v) !>;
+    return cc_ok(x + 1);
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "async_result_return: %s\n", e.message);
+        return 1;
+    }
+
+    int[~1 >] tx;
+    int[~1 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
+
+    int result = @await pipeline(tx, rx, 41) !>;
+    if (result != 42) {
+        fprintf(stderr, "expected 42 got %d\n", result);
+        return 2;
+    }
+    printf("async_result_return_smoke: PASS\n");
+    return 0;
+}

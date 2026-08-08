@@ -2,26 +2,28 @@
 # Emit shadow_lower.ccs (+ lowered local headers) into
 # cc/bootstrap/shadow_lower/latest/. Does not promote or commit.
 #
-# Prefers an existing shadow_lower binary (serdes self-emit). Fallback:
-#   SNAPSHOT_EMITTER=legacy  — force legacy ccc --emit-c-only
+# Native self-emit only: requires an existing shadow_lower binary
+# (make -C cc / SHADOW_LOWER_SOURCE=ccs). The old --legacy ccc escape is gone.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BOOT="$ROOT/cc/bootstrap/shadow_lower"
 LATEST="$BOOT/latest"
-SRC="$ROOT/examples/serdes/c/shadow_lower.ccs"
-HDR_SRC="$ROOT/out/include/examples/serdes/c"
-CCC="${CCC:-$ROOT/cc/bin/ccc}"
+SRC="$ROOT/cc/shadow/shadow_lower.ccs"
+HDR_SRC="$ROOT/out/include/cc/shadow"
 SHADOW="${SHADOW:-}"
 SMOKE=0
-FORCE_LEGACY=0
 
 for arg in "$@"; do
   case "$arg" in
     --smoke) SMOKE=1 ;;
-    --legacy) FORCE_LEGACY=1 ;;
+    --legacy)
+      echo "error: --legacy snapshot emit is retired; use native shadow_lower" >&2
+      echo "  make -C cc SHADOW_LOWER_SOURCE=ccs ../out/cc/bin/shadow_lower" >&2
+      exit 2
+      ;;
     -h|--help)
-      echo "usage: $0 [--smoke] [--legacy]"
+      echo "usage: $0 [--smoke]"
       exit 0
       ;;
     *)
@@ -30,10 +32,6 @@ for arg in "$@"; do
       ;;
   esac
 done
-
-if [[ "${SNAPSHOT_EMITTER:-}" == "legacy" ]]; then
-  FORCE_LEGACY=1
-fi
 
 if [[ ! -f "$SRC" ]]; then
   echo "error: missing $SRC" >&2
@@ -49,38 +47,29 @@ fi
 rm -rf "$LATEST"
 mkdir -p "$LATEST/include"
 
-EMITTER="legacy"
-if [[ "$FORCE_LEGACY" -eq 0 && -n "$SHADOW" ]]; then
-  echo "[snapshot] emit via shadow_lower ($SHADOW)"
-  "$SHADOW" "$SRC" -o "$LATEST/shadow_lower.c" --no-cache
-  EMITTER="serdes:$SHADOW"
-else
-  if [[ ! -x "$CCC" ]]; then
-    echo "error: missing ccc at $CCC (make -C cc)" >&2
-    exit 1
-  fi
-  echo "[snapshot] emit via legacy ccc ($CCC)"
-  CC_FRONTEND=legacy "$CCC" --frontend=legacy --emit-c-only --no-cache \
-    "$SRC" -o "$LATEST/shadow_lower.c" \
-    --cc-flags "-I$ROOT/examples/serdes/c -I$ROOT/third_party/tcc -DSHADOW_HAVE_LIBTCC=1"
-  EMITTER="legacy:$CCC"
+if [[ -z "$SHADOW" ]]; then
+  echo "error: no shadow_lower binary (make -C cc)" >&2
+  exit 1
 fi
+echo "[snapshot] emit via shadow_lower ($SHADOW)"
+"$SHADOW" "$SRC" -o "$LATEST/shadow_lower.c" --no-cache
+EMITTER="native:$SHADOW"
 
 if [[ ! -s "$LATEST/shadow_lower.c" ]]; then
   echo "error: emit produced empty $LATEST/shadow_lower.c" >&2
   exit 1
 fi
 
-# Companion lowered headers (legacy header lowerer). Needed when the emit
-# still #includes local .h faces; harmless if emit inlined everything.
+# Companion lowered headers from out/include. Needed when the emit still
+# #includes local .h faces; harmless if emit inlined everything.
 if [[ -d "$HDR_SRC" ]] && ls "$HDR_SRC"/*.h >/dev/null 2>&1; then
   echo "[snapshot] copy lowered headers → $LATEST/include/"
   cp -f "$HDR_SRC"/*.h "$LATEST/include/"
 else
-  echo "[snapshot] WARN: no lowered serdes headers under $HDR_SRC" >&2
+  echo "[snapshot] WARN: no lowered shadow headers under $HDR_SRC" >&2
 fi
 
-echo "[snapshot] rewrite absolute serdes includes / #line paths"
+echo "[snapshot] rewrite absolute includes / #line paths"
 python3 - "$ROOT" "$LATEST" <<'PY'
 import pathlib, re, sys
 
@@ -89,15 +78,37 @@ latest = pathlib.Path(sys.argv[2]).resolve()
 root_s = str(root)
 
 inc_abs = re.compile(
-    r'#include\s+"[^"]*/out/include/examples/serdes/c/([^"/]+)"'
+    r'#include\s+"[^"]*/out/include/(?:cc/shadow|examples/serdes/c)/([^"/]+)"'
+)
+# Self-emit may spell local lowered headers repo-relative in angle form;
+# a snapshot must resolve them from its own include/ dir, not a warm out/ tree.
+inc_rel = re.compile(
+    r'#include\s+<(?:cc/shadow|examples/serdes/c)/([^>/]+)>'
 )
 line_abs = re.compile(
     r'(#line\s+\d+\s+)"' + re.escape(root_s) + r'/([^"]+)"'
 )
 
+inc_bare = re.compile(r'#include\s+<([^>"/]+\.h)>')
+have_hdrs = {p.name for p in (latest / "include").glob("*.h")} if (latest / "include").is_dir() else set()
+
 def rewrite(text: str) -> str:
+    # Real glue bug is a directive line, not a comment mentioning the token.
+    n_de = len(re.findall(r'(?m)^de#line\b', text))
+    if n_de:
+        print(f"error: emit contains {n_de}× de#line "
+              f"(injected-token lead bug in shadow_attach_lead)", file=sys.stderr)
+        sys.exit(1)
     text = inc_abs.sub(r'#include "\1"', text)
+    text = inc_rel.sub(r'#include "\1"', text)
     text = line_abs.sub(r'\1"\2"', text)
+    # Native emit may spell local lowered headers as bare <foo.h>.
+    def bare(m: re.Match) -> str:
+        name = m.group(1)
+        if name in have_hdrs:
+            return f'#include "{name}"'
+        return m.group(0)
+    text = inc_bare.sub(bare, text)
     return text
 
 changed = 0
@@ -119,7 +130,7 @@ if ls "$LATEST/include"/*.h >/dev/null 2>&1; then
   hdr_count=$(ls "$LATEST/include"/*.h | wc -l | tr -d ' ')
 fi
 {
-  echo "source: examples/serdes/c/shadow_lower.ccs"
+  echo "source: cc/shadow/shadow_lower.ccs"
   echo "emitter: $EMITTER"
   echo "created_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "git_head: $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
@@ -144,12 +155,12 @@ if [[ "$SMOKE" -eq 1 ]]; then
     -I"$LATEST/include" \
     -I"$ROOT/cc/include" \
     -I"$ROOT/out/include" \
-    -I"$ROOT/examples/serdes/c" \
+    -I"$ROOT/cc/shadow" \
     -I"$ROOT/third_party/tcc" \
     -DSHADOW_HAVE_LIBTCC=1 \
     "$OBJ/shadow_tcc_compile.o" \
-    "$OBJ/libshadow_comptime.a" \
     "$OBJ/runtime/concurrent_c.o" \
+    "$OBJ/libshadow_comptime.a" \
     -L"$ROOT/third_party/tcc" -ltcc -lpthread -lm
   "$OUT_BIN" "$ROOT/examples/hello.ccs" -o "$LATEST/hello_smoke.c" --no-cache
   test -s "$LATEST/hello_smoke.c"

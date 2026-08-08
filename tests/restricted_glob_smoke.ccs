@@ -1,0 +1,33 @@
+/* Trailing-* globs (UFCS type-register rule) on r: methods/fields. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct Conn {
+    int sock;
+    int out_len;
+    int get_hits;
+} Conn;
+
+@restricted Encode on Conn {
+    r: out_*, get_*, write;
+}
+
+static int conn_write(Conn* c, const char* data) {
+    (void)data;
+    if (c) c->get_hits++;
+    return 1;
+}
+
+static int use_enc(@restricted(Encode) Conn* enc) {
+    (void)enc->out_len; /* out_* */
+    return enc->write("x");
+}
+
+int main(void) {
+    Conn c;
+    memset(&c, 0, sizeof(c));
+    if (!use_enc(&c)) return 1;
+    printf("ok\n");
+    return 0;
+}

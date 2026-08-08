@@ -1,0 +1,8 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+
+@comptime {
+    @emit(CC_EMIT_NOWHERE, `enum { PATH_EMIT_BAD_ANCHOR = 1 };`);
+}
+
+int main(void) { return 0; }

@@ -53,7 +53,7 @@ static void fill_values(size_t* values, int count) {
 }
 
 static void verify_same_output(const size_t* values, int count) {
-    CC_ARENA_STACK(tmp, STACK_ARENA_BYTES);
+    cc_arena_stack(tmp, STACK_ARENA_BYTES);
     for (int i = 0; i < count && i < 16; i++) {
         size_t value = values[i];
         CCString hdr_str = @string(`$${value}\r\n`, &tmp);
@@ -69,7 +69,7 @@ static void verify_same_output(const size_t* values, int count) {
 }
 
 static double run_cc_template_loop(const size_t* values, int value_count, int iterations) {
-    CC_ARENA_STACK(tmp, STACK_ARENA_BYTES);
+    cc_arena_stack(tmp, STACK_ARENA_BYTES);
     size_t sum = 0;
     unsigned char mark = 0;
     double start = time_now_ms();

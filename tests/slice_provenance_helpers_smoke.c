@@ -45,15 +45,15 @@ int main(void) {
         }
     }
 
-    CCSlice left = char_to_slice("foo");
-    CCSlice right = char_to_slice("bar");
+    CCSlice left = CC_SLICE_LIT("foo");
+    CCSlice right = CC_SLICE_LIT("bar");
     CCSlice joined = cc_slice_concat2(left, right, &arena);
     if (!joined.ptr || !cc_slice_is_from_arena_epoch(joined, &arena)) {
         fprintf(stderr, "expected concat slice to carry arena provenance\n");
         return 7;
     }
 
-    CCSlice path = cc_path_join(&arena, char_to_slice("/tmp"), char_to_slice("file"));
+    CCSlice path = cc_path_join(&arena, CC_SLICE_LIT("/tmp"), CC_SLICE_LIT("file"));
     if (!path.ptr || !cc_slice_is_from_arena_epoch(path, &arena)) {
         fprintf(stderr, "expected path join to carry arena provenance\n");
         return 8;

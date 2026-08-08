@@ -1,0 +1,34 @@
+/* Transparent typedef alias of @restricted sugar. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct Conn {
+    int sock;
+    int out_len;
+} Conn;
+
+@restricted Encode on Conn {
+    r: out_len, write;
+}
+
+typedef @restricted(Encode) Conn* ConnEnc;
+
+static int conn_write(Conn* c, const char* data) {
+    (void)c;
+    (void)data;
+    return 1;
+}
+
+static int use(ConnEnc enc) {
+    (void)enc->out_len;
+    return enc->write("x");
+}
+
+int main(void) {
+    Conn c;
+    memset(&c, 0, sizeof(c));
+    if (!use(&c)) return 1;
+    printf("ok\n");
+    return 0;
+}

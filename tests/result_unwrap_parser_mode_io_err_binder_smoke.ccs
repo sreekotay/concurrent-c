@@ -26,7 +26,7 @@ static bool remove_dir(const char* path) {
     }
     // Expression-position `!>(e)` binder — untyped.  Body passes `e` to
     // a `CCIoError`-typed parameter.  This is the F8 shape.
-    return cc_dir_remove(path->to_slice()) !>(e) {
+    return cc_dir_remove(cc_slice_cstr(path)) !>(e) {
         consume_io_err(e);
         return false;
     };

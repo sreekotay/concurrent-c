@@ -10,8 +10,10 @@
 #include <ccc/cc_sched.cch>
 #include <ccc/cc_closure.cch>
 #include <ccc/cc_chan_handle.cch>
+#include <ccc/cc_result.cch>
 #include <ccc/cc_type.cch>
 #include <ccc/cc_ufcs.cch>
+#include <signal.h>
 
 typedef struct CCChan CCChan;
 
@@ -25,15 +27,33 @@ CCNursery* cc_nursery_create(CCNursery* parent);
 // Cancel all tasks (sets flag; tasks must poll cooperatively).
 void cc_nursery_cancel(CCNursery* n);
 
-// Cancel the nursery when any of the listed process signals (e.g. SIGINT,
-// SIGTERM) arrives. Blocks the signals on the calling thread via
-// pthread_sigmask so they propagate to spawned worker threads, then runs a
-// detached handler that sigwait()s on the set and calls cc_nursery_cancel(n).
-//
-// Call once, BEFORE spawning tasks into `n`, so worker threads inherit the
-// blocked mask. The nursery pointer must remain valid until a signal fires
-// or the process exits. Returns 0 on success, otherwise an errno-style value.
-int cc_nursery_cancel_on_signals(CCNursery* n, const int* signos, size_t count);
+/* Install a handler for process signals. Blocks those signals on the calling
+ * thread (pthread_sigmask) so workers inherit the mask, then detaches a
+ * sigwait thread that invokes handler(n) once (CCClosure1, single-shot).
+ *
+ * Call once, BEFORE spawning into `n`. Nursery must outlive the wait.
+ *
+ *   n->on_shutdown((CCNursery* n) => { n->cancel(); }) !>;
+ *   n->cancel_on_signals(SIGINT, SIGTERM) !>;   // cancel-only
+ *   n->cancel_on_shutdown() !>;
+ * Dynamic lists: on_signals_n / cancel_on_signals_n. */
+CCResult_void_CCError cc_nursery_on_signals_n(CCNursery* n, const int* signos,
+                                               size_t count, CCClosure1 handler);
+
+CCResult_void_CCError cc_nursery_on_shutdown(CCNursery* n, CCClosure1 handler);
+
+CCResult_void_CCError cc_nursery_cancel_on_signals_n(CCNursery* n,
+                                                     const int* signos,
+                                                     size_t count);
+
+#define cc_nursery_cancel_on_signals(n, ...)                                       \
+    cc_nursery_cancel_on_signals_n(                                                \
+        (n), (const int[]){__VA_ARGS__},                                           \
+        sizeof((const int[]){__VA_ARGS__}) / sizeof(int))
+
+static inline CCResult_void_CCError cc_nursery_cancel_on_shutdown(CCNursery* n) {
+    return cc_nursery_cancel_on_signals(n, SIGINT, SIGTERM);
+}
 
 // Set an absolute deadline for the nursery (CLOCK_REALTIME). Zeroed timespec clears.
 void cc_nursery_set_deadline(CCNursery* n, struct timespec abs_deadline);
@@ -75,13 +95,13 @@ int cc_nursery_spawn_async_closure0(CCNursery* n, CCAsyncClosure0 c);
 // Spawn an async closure on the hybrid/V2 path.
 int cc_nursery_spawnhybrid_async_closure0(CCNursery* n, CCAsyncClosure0 c);
 // Spawn an existing async task under nursery ownership without blocking a worker.
+// Surface UFCS: `n->spawn(async_fn(...))` (also `n->spawn_async(...)` alias).
 int cc_nursery_spawn_async(CCNursery* n, CCTask task);
 /* R1 — spawn an async task and stamp its fiber with user-facing naming
  * (callee name + spawn-site file/line) so any code running inside the
  * fiber can answer "what task am I?" via `cc_rt_diag_current_async_info`.
- * The strings must outlive the fiber; the spawn-site lowering in
- * preprocess.c (UFCS for `n->spawn_async(...)`) supplies C string
- * literals, which trivially satisfy that. */
+ * The strings must outlive the fiber; UFCS for `n->spawn(callee(...))`
+ * (and the `spawn_async` alias) supplies C string literals. */
 int cc_nursery_spawn_async_named(CCNursery* n, CCTask task,
                                   const char* diag_user_name,
                                   const char* diag_file,

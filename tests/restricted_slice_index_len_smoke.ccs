@@ -1,0 +1,16 @@
+/* Slice .len used as an index on an assign lhs is a load, not a store. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+int main(void) {
+    char buf[8];
+    char[:0] src = "hi";
+    memset(buf, 0, sizeof(buf));
+    if (src.len >= sizeof(buf)) return 1;
+    memcpy(buf, src.ptr, src.len);
+    buf[src.len] = '\0';
+    if (strcmp(buf, "hi") != 0) return 2;
+    printf("ok\n");
+    return 0;
+}

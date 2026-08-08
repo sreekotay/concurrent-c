@@ -12,10 +12,12 @@ set -euo pipefail
 #   --full             same as CC_TEST_FULL=1
 #   CC_TEST_QUICK=0    same as --full (escape hatch if something sets QUICK=1)
 #   --quick            explicit default (no-op unless paired with conflicting FULL)
-#   --serdes           pin harness to serdes (ccc default; explicit)
+#   --O0 / -O0         host-compile harness bins with -O0 (faster cold builds)
+#   CC_TEST_O0=1       same as --O0
+#   --native           pin harness to native (ccc default; explicit)
 #   --legacy           pin harness to legacy front (CC_TEST_FRONTEND=legacy)
-#   --compare-front    run the harness twice (legacy then serdes) and print wall times
-#   CC_TEST_FRONTEND=serdes|legacy   same as --serdes / --legacy
+#   --compare-front    run the harness twice (legacy then native) and print wall times
+#   CC_TEST_FRONTEND=native|legacy   same as --native / --legacy
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
@@ -31,28 +33,33 @@ if [ -f "./tools/cc_test.c" ] && [ "./tools/cc_test.c" -nt "./tools/cc_test" ]; 
   cc -O2 -Wall -Wextra tools/cc_test.c -o tools/cc_test
 fi
 
-# Default: quick. Full is opt-in. Front default: serdes (ccc default).
+# Default: quick. Full is opt-in. Front default: native (ccc default).
 quick=1
 full=0
-front=serdes
+front=native
 compare_front=0
+opt_o0=0
 case "${CC_TEST_FULL:-0}" in
   1|yes|true|TRUE|Yes) full=1 ;;
 esac
 case "${CC_TEST_QUICK:-}" in
   0|no|false|FALSE|No) full=1 ;;
 esac
+case "${CC_TEST_O0:-0}" in
+  1|yes|true|TRUE|Yes) opt_o0=1 ;;
+esac
 case "${CC_TEST_FRONTEND:-}" in
-  serdes) front=serdes ;;
+  native) front=native ;;
   legacy) front=legacy ;;
 esac
-# Strip front flags before handing argv to cc_test; keep --quick/--full.
+# Strip front flags before handing argv to cc_test; keep --quick/--full/--O0.
 args=()
 for a in "$@"; do
   case "$a" in
     --quick) quick=1; full=0; args+=("$a") ;;
     --full)  full=1; args+=("$a") ;;
-    --serdes) front=serdes ;;
+    --O0|-O0) opt_o0=1; args+=("--O0") ;;
+    --native) front=native ;;
     --legacy) front=legacy ;;
     --compare-front) compare_front=1 ;;
     *) args+=("$a") ;;
@@ -87,6 +94,15 @@ extra=""
 if [ "$has_jobs" = 0 ]; then
   extra="$extra --jobs $jobs"
 fi
+if [ "$opt_o0" = 1 ]; then
+  has_o0=0
+  for a in "$@"; do
+    if [ "$a" = "--O0" ] || [ "$a" = "-O0" ]; then has_o0=1; break; fi
+  done
+  if [ "$has_o0" = 0 ]; then
+    extra="$extra --O0"
+  fi
+fi
 if [ "$quick" = 1 ]; then
   has_quick=0
   for a in "$@"; do
@@ -95,7 +111,7 @@ if [ "$quick" = 1 ]; then
   if [ "$has_quick" = 0 ]; then
     extra="$extra --quick"
   fi
-  echo "[test] default (quick): skipping heavy preambles + stress/race tests (jobs=$jobs)"
+  echo "[test] default (quick): skipping heavy preambles + stress/race tests (jobs=$jobs${opt_o0:+, -O0})"
   echo "[test] tip: CC_TEST_FULL=1 or --full for redis line-map / functional / tcc-patch / stress"
 else
   has_full=0
@@ -105,12 +121,32 @@ else
   if [ "$has_full" = 0 ]; then
     extra="$extra --full"
   fi
-  echo "[test] full mode (jobs=$jobs)"
+  echo "[test] full mode (jobs=$jobs${opt_o0:+, -O0})"
 fi
 
-if [ "$front" = "serdes" ] || [ "$compare_front" = 1 ]; then
+# Rebuild the compiler when missing or broken (e.g. after `make -C cc clean`
+# wiped .ccc-bin / out/include). Avoids a false "const-eval FAILED" from the
+# wrapper remaining while the real binary is gone.
+need_cc=0
+if [ ! -x "./cc/bin/.ccc-bin" ]; then need_cc=1; fi
+if [ "$front" = "native" ] || [ "$compare_front" = 1 ]; then
   if [ ! -x "./out/cc/bin/shadow_lower" ] && [ ! -x "./cc/bin/shadow_lower" ]; then
-    echo "[test] FAIL: serdes front needs native shadow_lower (make -C cc)"
+    need_cc=1
+  fi
+fi
+if [ "$need_cc" = 0 ] && [ -x "./cc/bin/ccc" ]; then
+  if ! ./cc/bin/ccc __eval-const --selftest >/dev/null 2>&1; then
+    need_cc=1
+  fi
+fi
+if [ "$need_cc" = 1 ]; then
+  echo "[test] building compiler (make -C cc)"
+  make -C cc all
+fi
+
+if [ "$front" = "native" ] || [ "$compare_front" = 1 ]; then
+  if [ ! -x "./out/cc/bin/shadow_lower" ] && [ ! -x "./cc/bin/shadow_lower" ]; then
+    echo "[test] FAIL: native front needs shadow_lower (make -C cc failed?)"
     exit 1
   fi
 fi
@@ -128,22 +164,19 @@ if [ -x "./cc/bin/ccc" ]; then
     echo "[test] CLI selftest FAILED"
     exit 1
   fi
-  # Reparse-input sanitizer regressions (ctor-priority blanking): asserts
-  # on the reparse dump, catching platform-dependent breakage (macOS SDK
-  # vs glibc __attribute__ handling) that pass/fail alone can't see here.
-  if ! sh scripts/test_reparse_sanitize.sh; then
-    echo "[test] reparse sanitize selftest FAILED"
-    exit 1
+  # Legacy-only seams (reparse dumps / @noblock lying-decl warnings). Skip
+  # on the default native gate; run under --legacy or CC_TEST_FRONTEND=legacy.
+  if [ "$front" = "legacy" ]; then
+    if ! sh scripts/test_reparse_sanitize.sh; then
+      echo "[test] reparse sanitize selftest FAILED"
+      exit 1
+    fi
+    if ! sh scripts/test_autoblock_noblock_warn.sh; then
+      echo "[test] autoblock noblock warning selftest FAILED"
+      exit 1
+    fi
   fi
-  # "Definition wins TU-locally" (@noblock): the lying-decl WARNING lands
-  # on build stderr, which the .ccs harness never asserts for passing
-  # tests — pinned here instead (behavior side is pinned by the
-  # autoblock_noblock_*_smoke tid oracles).
-  if ! sh scripts/test_autoblock_noblock_warn.sh; then
-    echo "[test] autoblock noblock warning selftest FAILED"
-    exit 1
-  fi
-  # Full SERDES goldens/recipes: scripts/test_serdes.sh (not this gate).
+  # Full SERDES goldens/recipes: scripts/test_shadow.sh (not this gate).
 
   if [ "$quick" = 0 ]; then
     # @async state-machine #line accuracy on the real redis port: async poll
@@ -189,14 +222,14 @@ if [ -x "./cc/bin/ccc" ]; then
       echo "[test] redis functional smoke FAILED"
       exit 1
     fi
-    if [ "$front" = "serdes" ]; then
-      if ! sh scripts/test_serdes_real_projects.sh; then
-        echo "[test] serdes real-projects smoke FAILED"
+    if [ "$front" = "native" ]; then
+      if ! sh scripts/test_shadow_real_projects.sh; then
+        echo "[test] native real-projects smoke FAILED"
         exit 1
       fi
     fi
   else
-    echo "[test] quick: skipped async_line_map / diag_cache / variant_shape / tcc_patch / redis_functional / serdes_real"
+    echo "[test] quick: skipped async_line_map / diag_cache / variant_shape / tcc_patch / redis_functional / native_real"
   fi
 fi
 
@@ -214,7 +247,7 @@ run_harness() {
 }
 
 if [ "$compare_front" = 1 ]; then
-  echo "[test] compare-front: legacy then serdes (same harness args)"
+  echo "[test] compare-front: legacy then native (same harness args)"
   t0="$(now_s)"
   set +e
   # shellcheck disable=SC2086
@@ -224,18 +257,18 @@ if [ "$compare_front" = 1 ]; then
   t1="$(now_s)"
   set +e
   # shellcheck disable=SC2086
-  run_harness serdes "$@"
-  rc_ser=$?
+  run_harness native "$@"
+  rc_nat=$?
   set -e
   t2="$(now_s)"
   leg_s="$(python3 -c "print(f'{float('$t1')-float('$t0'):.1f}')")"
-  ser_s="$(python3 -c "print(f'{float('$t2')-float('$t1'):.1f}')")"
-  ratio="$(python3 -c "a=float('$ser_s'); b=float('$leg_s'); print(f'{a/b:.2f}x' if b>0 else 'n/a')")"
+  nat_s="$(python3 -c "print(f'{float('$t2')-float('$t1'):.1f}')")"
+  ratio="$(python3 -c "a=float('$nat_s'); b=float('$leg_s'); print(f'{a/b:.2f}x' if b>0 else 'n/a')")"
   echo ""
   echo "[test] compare-front summary"
   echo "  legacy: ${leg_s}s  rc=$rc_leg  ($(CC_FRONTEND=legacy ./cc/bin/ccc --v 2>/dev/null | head -1))"
-  echo "  serdes: ${ser_s}s  rc=$rc_ser  (${ratio} of legacy wall time)  ($(CC_FRONTEND=serdes ./cc/bin/ccc --v 2>/dev/null | head -1))"
-  if [ "$rc_leg" -ne 0 ] || [ "$rc_ser" -ne 0 ]; then
+  echo "  native: ${nat_s}s  rc=$rc_nat  (${ratio} of legacy wall time)  ($(CC_FRONTEND=native ./cc/bin/ccc --v 2>/dev/null | head -1))"
+  if [ "$rc_leg" -ne 0 ] || [ "$rc_nat" -ne 0 ]; then
     exit 1
   fi
   exit 0

@@ -1,0 +1,28 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* @emit prose carries UFCS-shaped `v.push(` plus don't/apostrophes.
+ * Must not desync skip_templates=0 walks, rewrite the string, or drop
+ * the spliced fragment. */
+@comptime {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        /* don't lower v.push(1) — prose only */
+        enum { EMIT_UFCS_PROSE_N = ${5} };
+        static const char *emit_ufcs_prose_msg = "v.push(1) don't";
+        static const char *emit_ufcs_prose_msg2 = "it's xs.len()";
+    `);
+}
+
+int main(void) {
+    if (EMIT_UFCS_PROSE_N != 5) return 1;
+    if (!strstr(emit_ufcs_prose_msg, "push") ||
+        !strstr(emit_ufcs_prose_msg, "don't"))
+        return 2;
+    if (!strstr(emit_ufcs_prose_msg2, "it's") ||
+        !strstr(emit_ufcs_prose_msg2, "len"))
+        return 3;
+    printf("emit_ufcs_prose_dont_smoke ok\n");
+    return 0;
+}

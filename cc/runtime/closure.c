@@ -46,7 +46,18 @@ typedef struct {
     int ready;
 } CCEnvPools;
 
+#if defined(__TINYC__)
+/* Host TCC has no _Thread_local; park pools in the pthread TLS bundle. */
+static CCEnvPools* cc__env_pools_ptr(void) {
+    cc_rt_tls* t = cc_rt_tls_get();
+    if (!t) return NULL;
+    if (!t->env_pools) t->env_pools = calloc(1, sizeof(CCEnvPools));
+    return (CCEnvPools*)t->env_pools;
+}
+#define cc__env_pools (*cc__env_pools_ptr())
+#else
 static _Thread_local CCEnvPools cc__env_pools;
+#endif
 
 static int cc__env_class_for(size_t size) {
     for (int i = 0; i < CC__ENV_NCLASS; i++) {

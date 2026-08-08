@@ -1,0 +1,25 @@
+/* Alias must not escape the restriction. */
+#include <ccc/std/prelude.cch>
+#include <string.h>
+
+typedef struct Conn {
+    int sock;
+    int out_len;
+} Conn;
+
+@restricted Encode on Conn {
+    r: out_len;
+}
+
+typedef @restricted(Encode) Conn* ConnEnc;
+
+static void use(ConnEnc enc) {
+    (void)enc->sock; /* ill-formed */
+}
+
+int main(void) {
+    Conn c;
+    memset(&c, 0, sizeof(c));
+    use(&c);
+    return 0;
+}

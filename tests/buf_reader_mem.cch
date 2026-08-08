@@ -1,0 +1,32 @@
+#ifndef BUF_READER_MEM_CCH
+#define BUF_READER_MEM_CCH
+
+#include <ccc/cc_io_error.cch>
+#include <string.h>
+
+typedef struct MemReader {
+    const char *data;
+    size_t len;
+    size_t pos;
+} MemReader;
+
+static inline CCResult_bool_CCIoError mem_reader_read_buf_into(struct MemReader *r,
+                                                              char *buf, size_t max,
+                                                              size_t *out) {
+    size_t n;
+    if (!r || !buf || !out || max == 0) {
+        return CCRes_err(bool, CCIoError, cc_io_from_errno(EINVAL));
+    }
+    if (r->pos >= r->len) {
+        *out = 0;
+        return CCRes_ok(bool, CCIoError, false);
+    }
+    n = r->len - r->pos;
+    if (n > max) n = max;
+    memcpy(buf, r->data + r->pos, n);
+    r->pos += n;
+    *out = n;
+    return CCRes_ok(bool, CCIoError, true);
+}
+
+#endif /* BUF_READER_MEM_CCH */

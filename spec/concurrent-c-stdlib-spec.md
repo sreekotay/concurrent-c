@@ -142,13 +142,15 @@ void cc_slice_destroy(CCSlice *s);
 is an alias of `char_to_slice`. In Concurrent-C, `p->to_slice()` is UFCS:
 `char*` → `char_to_slice`, `const char*` → `const_char_to_slice` (generic
 cv-qualifier peel in the UFCS lowerer; signedness variants likewise).
-At a call site, a string literal whose parameter is by-value `CCSlice`,
-`char[:0]`, `CCSliceShared`, or `CCSliceUnique` is rewritten to
-`const_char_to_slice(lit)` (phase-3). Pointer parameters and non-literal
-`char[N]` / `char*` variables are not coerced — use `p->to_slice()` /
-`char_to_slice(p)`. Host-included C headers may spell the same ABI as
-`CCSlice`; Concurrent-C path and CLI string surfaces are `char[:0]`
-(NUL-terminated borrow).
+A string literal whose destination is by-value `CCSlice`, `char[:]`,
+`char[:0]`, `CCSliceShared`, or `CCSliceUnique` — call argument or
+local/field initializer — lowers to `CC_SLICE_LIT(lit)` (sizeof-static;
+`len` excludes NUL). Prefer `char[:0] s = "hi"` for sentinel borrows.
+Pointer parameters and non-literal `char[N]` / `char*` variables are not
+coerced — use `p->to_slice()` / `char_to_slice(p)` / `cc_slice_cstr(p)`.
+Host-included C headers may spell the same ABI as `CCSlice`; Concurrent-C
+path and CLI string surfaces are `char[:0]` (NUL-terminated borrow).
+Ordinary slice-family sites deny field stores; see `draft_facets.md` §7b.
 `cc_adopt` registers the supplied deleter and produces a unique,
 non-transferable slice. `cc_slice_destroy` invokes that deleter at most once
 for a still-registered unique slice and then clears the slice.
@@ -212,6 +214,9 @@ CCResult_CCSliceHdr_CCError cc_slice_hdr_clone_into(CCSliceHdr *src, CCArena *ar
 /* Stabilize `*s` in `arena` (mutate in place). */
 bool !>(CCError) cc_slice_materialize_in(CCSlice *s, CCArena *arena);
 
+/* UTF-8 bytes → Unicode scalar values in `arena`. */
+uint32_t[:] !>(CCError) cc_slice_utf8_codepoints(const CCSlice *s, CCArena *arena);
+
 /* Checked index — same Result/error in all builds (no debug/release split). */
 char !>(CCError) cc_slice_get_checked(CCSlice *s, size_t idx);
 char !>(CCError) cc_slice_at(CCSlice *s, size_t idx);          /* alias of get_checked */
@@ -221,6 +226,15 @@ bool !>(CCError) cc_slice_set(CCSlice *s, size_t idx, char c);
 `materialize_in` is a no-op when the slice is empty, canonical/static, or
 already from `arena`'s provenance epoch; otherwise it clones into `arena` and
 replaces `*s`. It does not free the prior view. UFCS: `s.materialize_in(arena)`.
+
+`utf8_codepoints` decodes the receiver as UTF-8 into an arena-backed
+`uint32_t[:]` (element count = codepoint count). Empty input yields an empty
+typed slice without allocating. An all-ASCII prefix (and an all-ASCII slice)
+takes a widen-only fast path. Truncated sequences, bad continuations, overlong
+encodings, UTF-16 surrogates, and values above U+10FFFF return `CC_ERR_PARSE`;
+missing arena or a null non-empty pointer returns `CC_ERR_INVALID_ARG`;
+allocation failure returns `CC_ERR_OUT_OF_MEMORY`. UFCS:
+`s.utf8_codepoints(arena)`.
 
 Out-of-bounds or null-pointer index ops return `CC_ERR_INVALID_ARG`. Soft-zero
 `at` is gone. Raw `s.ptr[i]` / `((char*)s.ptr)[i]` remains an untracked Gap
@@ -410,26 +424,39 @@ families, `intptr_t_to_str`, `uintptr_t_to_str`, `float_to_str`,
 `double_to_str`, and `bool_to_str`. The `intptr_t` and `uintptr_t` helpers are
 direct per-type entry points; they are not distinct associations in
 `cc_string_from`. Integer formatting is decimal, boolean formatting is `true`
-or `false`, and floating-point formatting uses `%g` unless the optional XJB
-formatter is enabled.
+or `false`.
+
+Floating-point formatting (`float_to_str`, `double_to_str`,
+`cc_string_push_f32`, `cc_string_push_f64`, `cc_string_push_float`, and the
+`float` / `double` arms of `cc_string_from`, push/append, and `@string`
+interpolation) is locale-independent and uses the decimal point character
+`.`. For a finite value it emits a shortest correctly rounded decimal
+representation that round-trips under a correctly rounding decimal-to-binary
+parse of the same IEEE width (`binary32` for `float`, `binary64` for
+`double`):
+
+- Let \(e\) be the decimal exponent of the value in normalized scientific
+  form \(d \times 10^{e}\) with \(1 \le d < 10\). Fixed notation is used when
+  \(-4 \le e \le 15\); otherwise scientific notation is used.
+- Scientific notation uses a lowercase `e`, an explicit sign on the exponent,
+  and at least two exponent digits (for example `1.2e+23`, `1e-05`, `1e+16`).
+- Trailing zeros in the fractional significand are omitted. When fixed
+  notation would otherwise contain no decimal point (the value is an integer),
+  a trailing `.0` is appended, so every finite result contains either `.` or
+  `e` (for example `0.0`, `1000.0`, `-1.0`).
+- Negative zero formats as `-0.0`.
+
+Non-finite values format as the lowercase literals `nan`, `inf`, and `-inf`.
 
 ## File and buffered I/O
 
-`<ccc/std/io.cch>` defines:
+`<ccc/std/io.cch>` defines `CCFile` and `CCBufWriter`. Buffered reads live in
+`<ccc/std/bufio.cch>` as the generic `BufReader::[Src]`.
 
 ```c
 typedef struct {
     FILE *handle;
 } CCFile;
-
-typedef struct {
-    CCFile *file;
-    char *buf;
-    size_t cap;
-    size_t len;
-    size_t pos;
-    int eof;
-} CCBufReader;
 
 typedef struct {
     CCFile *file;
@@ -472,6 +499,11 @@ does not change the current position.
 
 `CCFile` UFCS maps file methods to `cc_file_*` and passes `&file`.
 
+Caller-buffer Duplex fill is `read_buf_into`: `bool !>(CCIoError)` with EOF
+model B (`Ok(true)` / `Ok(false)` / `Err`). `CCFile` exposes it as
+`cc_file_read_buf_into`. `CCSocket` exposes the same shape as
+`cc_socket_read_buf_into` (alias of `cc_socket_read_into`).
+
 Standard stream writes are:
 
 ```c
@@ -485,18 +517,41 @@ The automatic forms accept a slice, C string, or `CCString` value or pointer.
 These are byte writers for library code. Do not treat them as the script
 console print surface (see Script console print below).
 
-Buffered I/O uses:
+### `BufReader::[Src]`
+
+`BufReader` is a `CC_GENERIC_FACTORY` monomorph over any Duplex-compatible
+`Src` that provides `read_buf_into`. Each instance holds `Src *`, a caller-
+or arena-owned byte buffer, and cursor state.
 
 ```c
-int cc_buf_reader_init(CCBufReader *reader, CCFile *file, CCArena *arena, size_t cap);
-CCResult_CCSlice_CCIoError cc_buf_reader_next(CCBufReader *reader, size_t n);
-CCResult_CCSlice_CCIoError cc_buf_reader_read_line(CCBufReader *reader, CCArena *arena);
+BufReader::[CCSocket] br;
+br.init(&sock, stack_buf, sizeof(stack_buf));
+/* or */ br.init_arena(&sock, &arena, cap);
+
+size_t pending = br.buffered();
+bool got = br.fill() !>;                 /* Ok(false) at EOF */
+CCSlice line = br.read_line() !>;        /* view into br's buffer; strips \r */
+CCSlice bulk = br.read_exact(n) !>;      /* view; Err if short after EOF */
+CCSlice owned = br.read_line_dup(&arena) !>;
+```
+
+| Method | Role |
+|---|---|
+| `init` / `init_arena` | bind source + buffer storage |
+| `buffered` | unread bytes (`end - pos`) |
+| `fill` | compact unread; call `src->read_buf_into` on the free tail |
+| `read_line` | view through `\n` (strip trailing `\r`); `Ok(empty)` at clean EOF; `Err` if bytes remain without a newline at EOF |
+| `read_exact` | view of `n` bytes; `Err` on short read after EOF |
+| `read_line_dup` | arena-owned copy of one `read_line` |
+
+Views from `read_line` / `read_exact` are invalidated by a later compacting
+`fill`. File-only buffered writes remain:
+
+```c
 int cc_buf_writer_init(CCBufWriter *writer, CCFile *file, CCArena *arena, size_t cap);
 CCResult_size_t_CCIoError cc_buf_writer_flush(CCBufWriter *writer);
 CCResult_size_t_CCIoError cc_buf_writer_write(CCBufWriter *writer, CCSlice data);
 ```
-
-An empty successful buffered-reader result denotes EOF.
 
 ### Async file operations
 
@@ -552,35 +607,41 @@ helpers implement POSIX path syntax only: `cc_path_sep()` is `/`, and
 
 `<ccc/script/stdio.cch>` (script prelude, not `<ccc/std/…>`) defines
 `CCStdio` for arena-backed stdin reads and line-oriented console writes.
-Console output is UFCS on the data — no `CCStdio` argument:
+When script `io` is in scope, preferred examples are handle-first. Data-first
+UFCS and naked aliases remain valid (UFCS either way on the chosen receiver):
 
 ```c
-path.println() !>;                    /* CCSlice / char[:0] */
-line.eprintln() !>;                   /* CCString */
-"literal".println() !>;               /* string literal / cstr */
-cstr_ptr.println() !>;                /* const char * / char * */
-@string(`n=${n}`, &a).println() !>;
+io.println(path) !>;                  /* preferred when io is in scope */
+io.eprintln(line) !>;
+io.println(@string(`n=${n}`, &a)) !>;
+
+path.println() !>;                    /* also OK: UFCS on data */
+"literal".println() !>;               /* lit/cstr → CCSlice → cc_slice_* */
+cstr_ptr.println() !>;
+println(path) !>;                     /* naked alias → cc_println */
 path.fprintln(STDERR_FILENO) !>;
 ```
 
-The prefix spelling is the same call: `println("literal") !>;` and
-`println(@string(`n=${n}`, &a)) !>;` alias the declared `cc_println`
-family (core spec, naked-calls rule) — four aliased names, with any
-translation-unit binding of the name taking the call unchanged. Which
-spelling to write is style.
+When the *data* is the UFCS receiver, `CCSlice` / `CCString` call
+`cc_slice_*` / `cc_string_*`; C string and string-literal receivers coerce to
+a `CCSlice` temporary then `cc_slice_*`. There is no `cc_char_*` UFCS print
+family (`cc_char_*` / `_Generic` arms are free-sugar / lowered-C only).
+
+The prefix spelling aliases the declared `cc_println` family (core spec,
+naked-calls rule) — with any translation-unit binding of the name taking the
+call unchanged.
 
 Guidelines:
 
-- Put the payload in the receiver; choose `println` / `eprintln` / `fprintln`
-  for the sink.
-- Prefer `@string(…).println()` for formatted temps; do not wrap temps in
-  `cc_println`.
-- `cc_println` / `cc_eprintln` are lowered-C sugar only (driver-injected
-  default `@errhandler`, `-E` desugar). New script source uses UFCS.
+- Prefer `io.println(data)` / `io.eprintln(data)` when `io` is in scope.
+- Data-first and naked forms remain valid; choose `println` / `eprintln` /
+  `fprintln` for the sink.
+- Prefer `io.println(@string(…))` (or data-first on the temp) for formatted
+  output; do not wrap temps in `cc_println` in new script source.
+- `cc_println` / `cc_eprintln` are lowered-C sugar (driver-injected default
+  `@errhandler`, `-E` desugar).
 - Inside a custom `@errhandler` body, discard with a bound receiver
   (`CCString msg = …; (void)msg.eprintln();`). Do not use `!>` there.
-- `CCStdio.println` / `eprintln` remain available for sink-first writes when
-  an `io` value is already in hand; flipped form is the default style.
 - `<ccc/std/io.cch>` `cc_std_out_write` / `cc_std_err_write` remain the
   byte-writer API for non-script library code.
 
@@ -732,6 +793,36 @@ same key hash/eq selection as `Map::[K, V]` for built-in key kinds (`int`,
 Array-map UFCS maps `insert`, `get`, `get_ptr`, `at_ptr`, `key_ptr`,
 `find_key_ptr`, `remove`, `del`, `len`, `cap`, `live_bytes`, `clear`, and
 `destroy` to the generated family.
+
+### Shard maps (`CCShardMap`)
+
+`<ccc/std/shard_map.cch>` provides an arena-owned string→string map cell.
+It owns a `CCArena` and an `ArrayMap::[CCSlicePacked, CCString]`. Lookup
+keys may be ordinary `CCSlice` values (borrow-packed for the probe); inserts
+copy the key into a durable packed slice and the value into a `CCString` in
+the map’s arena.
+
+```c
+CCShardMap m;
+m.init(64);                    // cc_shard_map_init(&m, 64)
+m.put(key, val);               // bool; false on OOM
+CCString* v = m.get(key);      // NULL if absent
+m.delete(key);                 // bool; true if an entry was removed
+size_t n = m.len();
+m.destroy();
+```
+
+**Rule (ownership):** Keys and values live in `m.arena`. `get` returns a
+pointer into the dense store (valid until the entry is overwritten, deleted,
+or the map is destroyed). `put` replaces an existing value in place (old
+value released) or inserts a new durable key+value.
+
+**Rule (UFCS):** Methods follow the stdlib `cc_shard_map_<method>` convention
+(`init`, `destroy`, `get`, `put`, `delete`, `len`).
+
+Pair with `CCShardMask` / `CCExclusive` when routing many `CCShardMap` cells
+by key hash. Prefer raw `ArrayMap` when the value type is not `CCString` or
+when the caller already owns the arena.
 
 ### Static maps
 
@@ -1152,7 +1243,7 @@ TCP listen, accept, and connect return Result (`T!>(CCNetError)`, lowered as
 
 ```c
 CCResult_CCSocket_CCNetError cc_tcp_connect(const char *addr, size_t addr_len);
-CCResult_CCListener_CCNetError cc_tcp_listen(const char *addr, size_t addr_len);
+CCResult_CCListener_CCNetError cc_tcp_listen(CCSlice addr);
 CCResult_CCSocket_CCNetError cc_listener_accept(CCListener *listener);
 void cc_listener_close(CCListener *listener);
 
@@ -1170,11 +1261,13 @@ CCSlice cc_socket_peer_addr(CCSocket *socket, CCArena *arena, CCNetError *out_er
 CCSlice cc_socket_local_addr(CCSocket *socket, CCArena *arena, CCNetError *out_err);
 ```
 
-`addr` is a length-delimited `host:port`, IPv4 `address:port`, or bracketed
-IPv6 address. Idiomatic use is unwrap sugar on the greppable `cc_*` names:
+Listen `addr` is a NUL-terminated borrow (`char[:0]` / `CCSlice`), same shape
+as `cc_file_open`'s path. Connect still takes a length-delimited
+`host:port` / IPv4 `address:port` / bracketed IPv6. Idiomatic use is unwrap
+sugar on the greppable `cc_*` names:
 
 ```c
-CCListener ln = cc_tcp_listen(addr, len) !>;
+CCListener ln = cc_tcp_listen(addr) !>;
 CCSocket sock = cc_listener_accept(&ln) !>;
 CCSocket client = cc_tcp_connect(addr, len) !>;
 ```
@@ -1850,7 +1943,22 @@ with the exception set — not a CC Result, because the caller is the
 import machinery.
 
 The trampolines, marshalling, and error conversion are the same
-machinery `py_expose` emits. A fallible method's error crosses as the
+machinery `py_expose` emits. Trampolines are registered as
+`METH_FASTCALL|METH_KEYWORDS`: positional arguments and keywords bind by
+reflected parameter name (receiver excluded). A parameter may spell a
+default as a trailing `= <literal>` (integer, float, string, char, `NULL`,
+`true`, `false`); missing arguments for those slots take the literal.
+Once a default appears, every trailing parameter must also have one.
+Host C does not receive the defaults — lowering strips them from the
+ABI signature. Unexpected names, duplicates, and missing required
+arguments raise `TypeError`. Keyword-only markers (`*`) are not modeled.
+
+`CCSlice` / `char[:]` parameters still borrow CPython's UTF-8 buffer for
+the call. `CCPyStr` parameters borrow the `str` object itself; UFCS
+`s.codepoints(arena)` materializes an arena-backed `uint32_t[:]` of Unicode
+scalars via Stable-ABI `PyUnicode_AsUCS4` (no UTF-8 round-trip).
+
+A fallible method's error crosses as the
 Python exception its kind maps to, message intact — the kind is what a
 Python caller dispatches on:
 

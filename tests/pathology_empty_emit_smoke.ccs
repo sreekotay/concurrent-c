@@ -1,0 +1,13 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+
+/* Empty template is legal — splice nothing, still succeed. */
+@comptime {
+    @emit(CC_EMIT_AFTER_PRELUDE, ``);
+}
+
+int main(void) {
+    printf("pathology_empty_emit_smoke ok\n");
+    return 0;
+}

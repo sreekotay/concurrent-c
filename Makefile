@@ -7,7 +7,7 @@ CURL_BUILD := $(CURL_DIR)/build
 .PHONY: all cc clean distclean fmt lint example smoke test tools
 .PHONY: install install-check uninstall
 .PHONY: runtime-variant-smoke fuzz-check
-.PHONY: tcc-patch-apply tcc-patch-regen tcc-update-check check-submodules lint-scanners test-strict
+.PHONY: tcc-patch-apply tcc-patch-regen tcc-update-check check-submodules lint-scanners lint-soft-return-emit test-strict
 .PHONY: deps bearssl bearssl-clean curl curl-clean deps-update
 .PHONY: examples-check stress-check perf-check full-check
 .PHONY: perf-baseline perf-regress perf-regress-oracle
@@ -36,37 +36,37 @@ distclean: clean
 #   make install DESTDIR=/tmp/pkg    # staged install for packaging
 #
 # The installed layout:
-#   $PREFIX/bin/ccc                   - compiler binary
+#   $PREFIX/bin/ccc                   - compiler driver (default front: serdes)
+#   $PREFIX/bin/shadow_lower          - serdes lowerer (required beside ccc)
 #   $PREFIX/include/ccc/**/*.cch      - standard library headers
 #   $PREFIX/include/ccc/**/*.h        - the same headers, pre-lowered
 #   $PREFIX/lib/ccc/runtime/*.c,.h    - pre-lowered runtime source and internal headers
 #   $PREFIX/lib/ccc/runtime/vendor/   - vendored third-party runtime sources
 #
-# An installed tree is self-contained: the driver resolves headers and runtime
-# from the prefix (cc_init_paths in cc/src/cc_main.c) and never reaches back
-# into a checkout. Two consequences shape the recipe below:
+# An installed tree is self-contained: the driver resolves headers, runtime,
+# and shadow_lower from the prefix (cc_init_paths / cc__find_shadow_lower) and
+# never reaches back into a checkout. Consequences:
 #
 #   * ccc must be the real binary. cc/bin/ccc and out/cc/bin/ccc are wrappers
 #     that reach siblings by relative path; those paths do not survive
 #     relocation into a prefix.
+#   * shadow_lower must ship next to ccc — serdes is the default front.
 #   * .cch headers and runtime sources must ship pre-lowered. Lowering is a
-#     build-tree step (out/cc/bin/lower_headers, driven by the cc/bin/ccc
-#     wrapper), so an installed driver cannot do it on demand.
+#     build-tree step (out/cc/bin/lower_headers), so an installed driver
+#     cannot do it on demand.
 #
 # `make install-check` compiles a program against the installed prefix and is
 # the check that both of those actually hold.
 
 PREFIX ?= /usr/local
 
-XJB_FTOA := third_party/xjb/src/ftoa.cpp
+ZMIJ_VENDOR := cc/runtime/vendor
 TCC_DIR := third_party/tcc
 
 install: cc
 	@echo "Installing Concurrent-C to $(DESTDIR)$(PREFIX)..."
-	@test -f $(XJB_FTOA) || { \
-		echo "Error: missing $(XJB_FTOA)"; \
-		echo "The runtime float formatter needs the xjb submodule. Run:"; \
-		echo "    ./scripts/fetch_submodules.sh"; \
+	@test -f $(ZMIJ_VENDOR)/zmij.c -a -f $(ZMIJ_VENDOR)/zmij-c.h || { \
+		echo "Error: missing vendored zmij under $(ZMIJ_VENDOR)/"; \
 		exit 1; }
 	install -d $(DESTDIR)$(PREFIX)/bin
 	install -d $(DESTDIR)$(PREFIX)/lib/ccc/runtime
@@ -75,7 +75,15 @@ install: cc
 	install -d $(DESTDIR)$(PREFIX)/include/ccc/script
 	install -d $(DESTDIR)$(PREFIX)/include/ccc/vendor
 	install -d $(DESTDIR)$(PREFIX)/lib/ccc/tcc/include
+	@test -x cc/bin/.ccc-bin || { echo "Error: missing cc/bin/.ccc-bin (make cc)"; exit 1; }
+	@test -x out/cc/bin/shadow_lower -o -x cc/bin/shadow_lower || { \
+		echo "Error: missing shadow_lower (make -C cc); serdes front needs it"; exit 1; }
 	install -m 755 cc/bin/.ccc-bin $(DESTDIR)$(PREFIX)/bin/ccc
+	@if [ -x out/cc/bin/shadow_lower ]; then \
+		install -m 755 out/cc/bin/shadow_lower $(DESTDIR)$(PREFIX)/bin/shadow_lower; \
+	else \
+		install -m 755 cc/bin/shadow_lower $(DESTDIR)$(PREFIX)/bin/shadow_lower; \
+	fi
 	install -m 644 cc/include/ccc/*.cch $(DESTDIR)$(PREFIX)/include/ccc/
 	install -m 644 cc/include/ccc/std/*.cch $(DESTDIR)$(PREFIX)/include/ccc/std/
 	install -m 644 cc/include/ccc/script/*.cch $(DESTDIR)$(PREFIX)/include/ccc/script/
@@ -92,8 +100,11 @@ install: cc
 	@if [ -n "$$(ls out/runtime/*.h 2>/dev/null)" ]; then \
 		install -m 644 out/runtime/*.h $(DESTDIR)$(PREFIX)/lib/ccc/runtime/; \
 	fi
-	install -m 644 cc/runtime/float_format_xjb.cpp $(DESTDIR)$(PREFIX)/lib/ccc/runtime/
-	install -m 644 $(XJB_FTOA) $(DESTDIR)$(PREFIX)/lib/ccc/runtime/vendor/xjb_ftoa.cpp
+	install -m 644 cc/runtime/float_format_zmij.c $(DESTDIR)$(PREFIX)/lib/ccc/runtime/
+	install -m 644 $(ZMIJ_VENDOR)/zmij.c $(DESTDIR)$(PREFIX)/lib/ccc/runtime/vendor/zmij.c
+	install -m 644 $(ZMIJ_VENDOR)/zmij-c.h $(DESTDIR)$(PREFIX)/lib/ccc/runtime/vendor/zmij-c.h
+	install -m 644 $(ZMIJ_VENDOR)/LICENSE $(DESTDIR)$(PREFIX)/lib/ccc/runtime/vendor/LICENSE
+	install -m 644 $(ZMIJ_VENDOR)/ZMIJ_NOTICE.txt $(DESTDIR)$(PREFIX)/lib/ccc/runtime/vendor/ZMIJ_NOTICE.txt
 	install -m 644 $(TCC_DIR)/include/*.h $(DESTDIR)$(PREFIX)/lib/ccc/tcc/include/
 	@if [ -f $(TCC_DIR)/libtcc1.a ]; then \
 		install -m 644 $(TCC_DIR)/libtcc1.a $(DESTDIR)$(PREFIX)/lib/ccc/tcc/; \
@@ -108,7 +119,7 @@ install-check:
 	test -x "$$ccc_bin" || { echo "install-check: $$ccc_bin is not executable"; exit 1; }; \
 	work="$$(mktemp -d)"; \
 	trap 'rm -rf "$$work"' EXIT INT TERM; \
-	printf '#include <ccc/std/prelude.cch>\n#include <ccc/script/stdio.cch>\n\nint main(void) {\n    CCArena a = cc_arena_heap(kilobytes(4));\n    CCVec::[int] v = cc_vec_new::[int](&a);\n    v.push(41);\n    print("install-check ok\\n");\n    cc_arena_free(&a);\n    return *v.get(0) == 41 ? 0 : 1;\n}\n' > "$$work/install_check.ccs"; \
+	printf '#include <ccc/std/prelude.cch>\n#include <stdio.h>\n\nint main(void) {\n    CCArena a = cc_arena_heap(kilobytes(4));\n    CCVec::[int] v = cc_vec_new::[int](&a);\n    v.push(41);\n    int got = *v.get(0);\n    printf("install-check ok\\n");\n    cc_arena_free(&a);\n    return got == 41 ? 0 : 1;\n}\n' > "$$work/install_check.ccs"; \
 	echo "install-check: compiling against $(DESTDIR)$(PREFIX) in $$work"; \
 	( cd "$$work" && "$$ccc_bin" run install_check.ccs ) || { \
 		echo "install-check: FAILED — the installed prefix cannot compile a program"; exit 1; }; \
@@ -117,6 +128,7 @@ install-check:
 uninstall:
 	@echo "Uninstalling Concurrent-C from $(DESTDIR)$(PREFIX)..."
 	rm -f $(DESTDIR)$(PREFIX)/bin/ccc
+	rm -f $(DESTDIR)$(PREFIX)/bin/shadow_lower
 	rm -rf $(DESTDIR)$(PREFIX)/lib/ccc
 	rm -rf $(DESTDIR)$(PREFIX)/include/ccc
 	@echo "Uninstalled."
@@ -131,6 +143,10 @@ lint:
 # hand-rolled comment/string state machines outside the canonical scanners.
 lint-scanners:
 	@./tools/dev.shcc @lint_scanners
+
+# Soft-return / watermark emit-shape ratchet (spec §5.1 conformance).
+lint-soft-return-emit:
+	@./tools/dev.shcc @lint_soft_return_emit
 
 # Offsets golden smoke (PASS_CLEANUP_PLAN phase 1): the full suite with the
 # UFCS byte-offset self-check FATAL.  Any drift between recorded offsets and

@@ -1,0 +1,33 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+typedef struct Bang { int u; int v; } Bang;
+
+/* After for-subst, `!f.index` / `!!f.index` must fold inside emit. Dead
+ * arms prove prune; don't prose keeps the apostrophe scanner honest. */
+@comptime for (f in type_of(Bang).fields) {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        /* don't use '!' as a char wedge */
+        @comptime if (!f.index) {
+            enum { Bang_zero_${f.name} = 7 };
+        } else {
+            enum { Bang_nz_${f.name} = 8 };
+        }
+        @comptime if (!!f.index) {
+            enum { Bang_pos_${f.name} = 9 };
+        } else {
+            enum { Bang_notpos_${f.name} = 6 };
+        }
+    `);
+}
+
+int main(void) {
+    if (Bang_zero_u != 7) return 1;
+    if (Bang_nz_v != 8) return 2;
+    if (Bang_notpos_u != 6) return 3;
+    if (Bang_pos_v != 9) return 4;
+    printf("comptime_emit_bang_pred_smoke ok\n");
+    return 0;
+}

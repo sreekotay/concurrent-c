@@ -1,0 +1,6 @@
+#include <ccc/std/prelude.cch>
+
+@comptime if (1) {
+    int path_unterm = 1;
+
+int main(void) { return 0; }

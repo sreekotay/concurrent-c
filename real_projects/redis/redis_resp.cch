@@ -85,7 +85,7 @@ static bool !>(CCIoError) rr_fill(RespReader* r, CCSocket* sock) {
 static bool !>(CCIoError) rr_try_fill(RespReader* r, CCSocket* sock) {
     return rr_fill_common(r, sock, true);
 }
-static size_t !>(CCError) parse_inline_args(CCSlice line, CCSlice* args, size_t cap) {
+static size_t !>(CCError) parse_inline_args(char[:] line, char[:]* args, size_t cap) {
     size_t argc = 0;
     size_t pos = 0;
     const char* data = (const char*)line.ptr;
@@ -94,7 +94,7 @@ static size_t !>(CCError) parse_inline_args(CCSlice line, CCSlice* args, size_t 
         if (pos >= line.len) break;
         size_t start = pos;
         while (pos < line.len && data[pos] != ' ') pos++;
-        args[argc++] = CCSlice_sub(&line, start, pos);
+        args[argc++] = line.sub(start, pos);
     }
     /* Blank inline line (`\r\n` / whitespace-only): argc 0.  Callers skip
      * like Redis — do not turn it into a parse error. */

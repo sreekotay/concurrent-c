@@ -1,0 +1,30 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct Mix { int a; int b; } Mix;
+
+/* Same for body: @emit fragment + @string value. Apostrophes in both.
+ * String result is used at runtime; emit defines an enum. */
+@comptime for (f in type_of(Mix).fields) {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        /* don't mix 'emit' */
+        enum { Mix_em_${f.name} = ${f.index} };
+    `);
+}
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(32)) @destroy;
+    if (Mix_em_a != 0 || Mix_em_b != 1) return 1;
+
+    CCString s0 = @string(`don't field-0=${0}`, &arena);
+    CCString s1 = @string(`don't field-1=${1}`, &arena);
+    if (!strstr(cc_string_cstr(&s0, &arena), "don't")) return 2;
+    if (!strstr(cc_string_cstr(&s1, &arena), "1")) return 3;
+
+    printf("comptime_emit_string_mix_smoke a=%d b=%d\n",
+           (int)Mix_em_a, (int)Mix_em_b);
+    return 0;
+}

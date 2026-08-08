@@ -13,6 +13,8 @@
 #include <ccc/cc_slice.cch>
 #include <ccc/cc_result.cch>
 #include <ccc/cc_sched.cch>
+#include <ccc/cc_closure.cch>
+#include <ccc/cc_nursery.cch>
 #include <ccc/cc_type.cch>
 #include <ccc/cc_ufcs.cch>
 #include "io.cch"
@@ -136,8 +138,9 @@ CCResult_CCSocket_CCNetError cc_tcp_connect(const char* addr, size_t addr_len);
  * ============================================================================ */
 
 /* Listen on addr ("0.0.0.0:8080", "[::]:8080").
- * On error the returned listener has fd == -1. */
-CCResult_CCListener_CCNetError cc_tcp_listen(const char* addr, size_t addr_len);
+ * `addr` is a NUL-terminated borrow (char[:0] / CCSlice), same shape as
+ * cc_file_open's path. On error the returned listener has fd == -1. */
+CCResult_CCListener_CCNetError cc_tcp_listen(CCSlice addr);
 
 /* Accept connection (blocking / fiber-parked).
  * On error the returned socket has fd == -1. */
@@ -145,6 +148,14 @@ CCResult_CCSocket_CCNetError cc_listener_accept(CCListener* ln);
 
 /* Async accept */
 /* @async CCResult_CCSocket_CCNetError cc_listener_accept_async(CCListener* ln); */
+
+/* Accept until `n` is cancelled (or accept fails).
+ * Each connection is handed to `on_conn` as `CCSocket*` (arg0) for the
+ * duration of that call — copy or n->spawn(async_fn(...)) before returning.
+ * `on_conn` is borrow-invoked each accept (not single-shot); serve takes
+ * ownership and drops it when the loop ends.
+ * UFCS: `ln.serve(nursery, on_conn)`. */
+void cc_listener_serve(CCListener* ln, CCNursery* n, CCClosure1 on_conn);
 
 /* Close listener */
 void cc_listener_close(CCListener* ln);
@@ -156,6 +167,9 @@ void cc_listener_close(CCListener* ln);
  *   Ok(true)  — got bytes (payload in out-param)
  *   Ok(false) — clean peer close (recv == 0 / FIN); not an error
  *   Err(e)    — RST, timeout, and other failures
+ *
+ * Caller-buffer Duplex fill name is `read_buf_into` (matches CCFile). Socket
+ * also keeps `read_into` as the historical spelling of the same ABI.
  *
  * Non-blocking try_read is three-way: Ok(true)/Ok(false) as above;
  * would-block (EAGAIN) is Err with CC_IO_BUSY — never Ok(false).
@@ -173,6 +187,12 @@ CCResult_bool_CCIoError cc_socket_read_into_deadline(CCSocket* sock,
                                                     size_t max_bytes,
                                                     size_t* out,
                                                     const CCDeadline* deadline);
+
+/* Duplex-compatible alias of read_into (BufReader::[CCSocket] fill). */
+static inline CCResult_bool_CCIoError cc_socket_read_buf_into(CCSocket* sock, char* buf,
+                                                             size_t max_bytes, size_t* out) {
+    return cc_socket_read_into(sock, buf, max_bytes, out);
+}
 
 /* Non-blocking read into caller buffer (three-way; see above). */
 CCResult_bool_CCIoError cc_socket_try_read_into(CCSocket* sock,
@@ -205,6 +225,10 @@ void cc_socket_shutdown(CCSocket* sock, CCShutdownMode mode, CCNetError* out_err
 
 /* Close socket */
 void cc_socket_close(CCSocket* sock);
+
+/* TCP_NODELAY — disable Nagle (UFCS: `sock.set_nodelay(1)`).
+ * Returns 0 on success, -1 on failure (invalid sock / setsockopt). */
+int cc_socket_set_nodelay(CCSocket* sock, int on);
 
 /* Address info */
 CCSlice cc_socket_peer_addr(CCSocket* sock, CCArena* arena, CCNetError* out_err);

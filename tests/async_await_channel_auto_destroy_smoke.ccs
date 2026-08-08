@@ -3,31 +3,28 @@
  *
  *   - @async fn suspends on channel send/recv.
  *   - @await runs it from synchronous main (lowered to cc_block_on).
- *   - `CCChan* ch = cc_channel_pair(&tx, &rx) !>(e) { ... } @destroy;`
+ *   - @await tx.send / rx.recv are bool !>(CCIoError) (sync surface).
+ *   - `CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;`
  *     relies on the builtin-owned destroy action registered for CCChan*
- *     (cc_channel_free) to free the channel at scope exit.
+ *     (cc_channel_free) to free the channel at scope exit; null-as-error
+ *     uses the enclosing @errhandler.
  */
 
 #include <ccc/cc_runtime.cch>
 #include <stdio.h>
 
 @async int echo_through_channel(CCChanTx tx, CCChanRx rx, int value) {
-    if (@await tx.send(value) != 0)
-        return -1;
-
+    @await tx.send(value) !>;
     int received = 0;
-    if (@await rx.recv(&received) != 0)
-        return -2;
-
+    @await rx.recv(&received) !>;
     return received;
 }
 
 int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
     int[~1 >] tx;
     int[~1 <] rx;
-    CCChan* ch = cc_channel_pair(&tx, &rx)
-        !>(e) { fprintf(stderr, "fatal: %s\n", e.message); return 1; }
-        @destroy;
+    CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
 
     int result = @await echo_through_channel(tx, rx, 42);
 

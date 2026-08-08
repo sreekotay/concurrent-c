@@ -2,8 +2,8 @@
  * Named exclusive sections (v1).
  *
  *   CCArena arena = @create(kilobytes(128)) @destroy;
- *   CCExclusive* excl = cc_exclusive_create(&arena);         // map starts at 64
- *   // or: excl = cc_exclusive_create_sized(&arena, 256);    // hint → pow2
+ *   CCExclusive* excl = cc_exclusive_create(&arena, 0);      // default map (64)
+ *   // or: excl = cc_exclusive_create(&arena, 256);          // hint → pow2
  *   CCExclusiveMutex m = excl->mutex(name);  // resolve once
  *   CCExclusiveGuard g = m.acquire();
  *   ... short critical section (do not @await) ...
@@ -15,7 +15,7 @@
  *   CCExclusiveGuard gs[8];
  *   size_t n = excl->acquire_sorted(names, count, gs, 8);
  *   size_t n = excl->acquire_range(0, shard_count, gs, 8);  // [lo, hi)
- *   cc_exclusive_guards_release(gs, n);
+ *   gs->release_n(n);     // LIFO; arrow decays the array to CCExclusiveGuard*
  *
  * Admitted builders (the exclusive conjugation of send_into): admit a name
  * set, run a CCClosure2 builder(slot, arena) exactly once under the held
@@ -32,9 +32,19 @@
  *   CCShardMask shards = cc_shard_mask_auto(64);
  *   size_t i = shards.index(hash);   // UFCS: cc_shard_mask_index(&shards, hash)
  *
- * Prefer acquire/release over lock/unlock: release is intentionally
- * idempotent (NULL entry after first call), so a second release is a local
- * no-op and should not read as a double-unlock bug in review.
+ * Shard hold bundle (guards[] + n). CCShardMap embeds CCShardDomain via @as
+ * so `maps.hold_all()` / `hold_one` / `hold_sorted` UFCS to these helpers:
+ *
+ *   CCShardDomain d = cc_shard_domain(excl, shards);
+ *   CCShardHold h = d.hold_one(si);
+ *   @defer h.release();           // always pair acquire + defer
+ *   if (!h.held()) …;             // admission failed (release is no-op)
+ *   …
+ *
+ * Same shape for hold_sorted / hold_all. Prefer acquire/release over
+ * lock/unlock: release is intentionally idempotent (n cleared after first
+ * call), so defer-after-failed-admission and a second release are local
+ * no-ops — not double-unlock bugs in review.
  *
  * Storage (section header, discovery map, mutex entries) is allocated from
  * the caller-supplied arena.  Mutex entries come from an arena pool on that
@@ -42,7 +52,7 @@
  * the discovery map and returns the entry to the pool.  destroy tears down
  * the create mutex and releases discovery-map tables; pooled entry storage
  * remains until the arena is freed.  The map starts at 64 slots (or the
- * sized hint, rounded up to a power of two) and grows under the create lock.
+ * capacity hint, rounded up to a power of two) and grows under the create lock.
  *
  * Lock word: 0 free, 1 locked, 2 contended (locked, waiters may be queued).
  * Uncontended acquire is an inlined CAS; release is an inlined swap to FREE.
@@ -62,6 +72,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 #include <stdatomic.h>
 
 #ifdef __cplusplus
@@ -86,11 +97,9 @@ typedef struct CCExclusiveGuard {
 
 /* Allocates section header + discovery map from `arena`.  Mutex entries are
  * arena-allocated on first resolve.  Returns NULL if arena is NULL/OOM.
- * Default initial map capacity is 64 (grows on demand). */
-CCExclusive* cc_exclusive_create(CCArena* arena);
-/* Like create, with an initial map capacity hint (rounded up to a power of
- * two; 0 means the default).  Same idea as sizing an arena up front. */
-CCExclusive* cc_exclusive_create_sized(CCArena* arena, size_t initial_cap);
+ * `initial_cap` is a map capacity hint (rounded up to a power of two);
+ * 0 selects the default (64).  The map grows on demand. */
+CCExclusive* cc_exclusive_create(CCArena* arena, size_t initial_cap);
 /* Tears down the create mutex and releases discovery-map tables; mutex
  * entry storage remains until the arena is freed. */
 void cc_exclusive_destroy(CCExclusive* excl);
@@ -148,12 +157,18 @@ static inline void cc_exclusive_guard_destroy(CCExclusiveGuard* g) {
 /* Max names for one acquire_sorted / acquire_range call (stack sort bound). */
 enum { CC_EXCLUSIVE_ACQUIRE_MULTI_MAX = 64 };
 
-/* Release `n` guards in reverse order (LIFO).  Idempotent per guard. */
-static inline void cc_exclusive_guards_release(CCExclusiveGuard* guards, size_t n) {
+/* Release `n` guards in reverse order (LIFO). Idempotent per guard.
+ * UFCS: `gs->release_n(n)` / `p.release_n(n)` (recv is CCExclusiveGuard*). */
+static inline void cc_exclusive_guard_release_n(CCExclusiveGuard* guards, size_t n) {
     while (n > 0) {
         n--;
         cc_exclusive_guard_release(&guards[n]);
     }
+}
+
+/* Legacy spelling of release_n (same LIFO semantics). */
+static inline void cc_exclusive_guards_release(CCExclusiveGuard* guards, size_t n) {
+    cc_exclusive_guard_release_n(guards, n);
 }
 
 /* Acquire each unique name in ascending order.  `names` may be unsorted and
@@ -337,6 +352,75 @@ CCShardMask cc_shard_mask_auto(size_t max);
 static inline size_t cc_shard_mask_index(const CCShardMask* m, uint64_t hash) {
     if (!m || m->count == 0) return 0;
     return (size_t)hash & m->mask;
+}
+
+/* ---- Shard hold bundle (exclusive names 0..count-1) ----
+ *
+ * Wraps the guards[] + n ceremony.  Pair a CCExclusive with a CCShardMask
+ * (or count); routing keys → shard ids stays in the caller. */
+
+typedef struct CCShardHold {
+    CCExclusiveGuard gs[CC_EXCLUSIVE_ACQUIRE_MULTI_MAX];
+    size_t n; /* 0 = not held / admission failed */
+} CCShardHold;
+
+typedef struct CCShardDomain {
+    CCExclusive* excl;
+    CCShardMask mask;
+} CCShardDomain;
+
+static inline CCShardDomain cc_shard_domain(CCExclusive* excl,
+                                           CCShardMask mask) {
+    CCShardDomain d;
+    d.excl = excl;
+    d.mask = mask;
+    return d;
+}
+
+static inline bool cc_shard_hold_held(const CCShardHold* h) {
+    return h != NULL && h->n > 0;
+}
+
+/* Idempotent: no-op when !held() (n==0) or after a prior release. */
+static inline void cc_shard_hold_release(CCShardHold* h) {
+    if (!h || h->n == 0) return;
+    cc_exclusive_guard_release_n(h->gs, h->n);
+    h->n = 0;
+}
+
+static inline void cc_shard_hold_destroy(CCShardHold* h) {
+    cc_shard_hold_release(h);
+}
+
+static inline CCShardHold cc_shard_domain_hold_one(CCShardDomain* d,
+                                                  uint64_t si) {
+    CCShardHold h;
+    memset(&h, 0, sizeof(h));
+    if (!d || !d->excl || d->mask.count == 0) return h;
+    if (si >= (uint64_t)d->mask.count) return h;
+    h.gs[0] = cc_exclusive_acquire(d->excl, si);
+    h.n = 1;
+    return h;
+}
+
+static inline CCShardHold cc_shard_domain_hold_sorted(CCShardDomain* d,
+                                                     const uint64_t* names,
+                                                     size_t count) {
+    CCShardHold h;
+    memset(&h, 0, sizeof(h));
+    if (!d || !d->excl || !names || count == 0) return h;
+    h.n = cc_exclusive_acquire_sorted(d->excl, names, count, h.gs,
+                                      (size_t)CC_EXCLUSIVE_ACQUIRE_MULTI_MAX);
+    return h;
+}
+
+static inline CCShardHold cc_shard_domain_hold_all(CCShardDomain* d) {
+    CCShardHold h;
+    memset(&h, 0, sizeof(h));
+    if (!d || !d->excl || d->mask.count == 0) return h;
+    h.n = cc_exclusive_acquire_range(d->excl, 0, (uint64_t)d->mask.count, h.gs,
+                                     (size_t)CC_EXCLUSIVE_ACQUIRE_MULTI_MAX);
+    return h;
 }
 
 #ifdef __cplusplus

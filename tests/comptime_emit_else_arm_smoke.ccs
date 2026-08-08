@@ -1,0 +1,27 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+/* Outer predicate false → else arm's @emit must still wrap/exec (the
+ * wrap_exec path for ELSE_BLOCK). Taken arm is undefined-laden. */
+@comptime if (type_of(int).kind == CC_TK_STRUCT) {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        emit_else_arm_then_dead();
+        enum { EMIT_ELSE_ARM_N = -1 };
+    `);
+} else {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        @comptime if (0) {
+            emit_else_arm_inner_dead();
+        } else {
+            enum { EMIT_ELSE_ARM_N = 11 };
+        }
+    `);
+}
+
+int main(void) {
+    if (EMIT_ELSE_ARM_N != 11) return 1;
+    printf("comptime_emit_else_arm_smoke n=%d\n", (int)EMIT_ELSE_ARM_N);
+    return 0;
+}

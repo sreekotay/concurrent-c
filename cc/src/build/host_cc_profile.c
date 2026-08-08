@@ -216,8 +216,6 @@ static int cc__hp_load(const char* path, CCHostCcProfile* out) {
             strncpy(out->flags, line + 6, sizeof(out->flags) - 1);
         } else if (strncmp(line, "is_tcc=", 7) == 0) out->is_tcc = atoi(line + 7);
         else if (strncmp(line, "no_liblfds=", 11) == 0) out->no_liblfds = atoi(line + 11);
-        else if (strncmp(line, "no_xjb_float=", 13) == 0)
-            out->no_xjb_float = atoi(line + 13);
         else if (strncmp(line, "ok=", 3) == 0) out->ok = atoi(line + 3);
     }
     fclose(f);
@@ -237,7 +235,6 @@ static int cc__hp_save(const char* path, const CCHostCcProfile* p) {
     fprintf(f, "flags=%s\n", p->flags);
     fprintf(f, "is_tcc=%d\n", p->is_tcc);
     fprintf(f, "no_liblfds=%d\n", p->no_liblfds);
-    fprintf(f, "no_xjb_float=%d\n", p->no_xjb_float);
     fprintf(f, "ok=%d\n", p->ok);
     fclose(f);
     if (rename(tmp, path) != 0) {
@@ -330,7 +327,6 @@ static int cc__hp_probe(const char* cc_bin,
     } else if (out->is_tcc) {
         /* TCC has stdatomic but no liblfds PAL. */
         out->no_liblfds = 1;
-        out->no_xjb_float = 1;
     }
 
     if (need_B || need_std) out->is_tcc = out->is_tcc || need_B;

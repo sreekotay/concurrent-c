@@ -1,0 +1,32 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+typedef struct { int x; int y; } ForIf;
+
+/* for *and* if both live inside the emit backticks; dead arms prove prune
+ * after for-subst of f.index. */
+@comptime {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        @comptime for (f in type_of(ForIf).fields) {
+            @comptime if (1) {
+                enum { ForIf_live_${f.index} = ${f.index} * 3 };
+            } else {
+                for_if_dead_true();
+            }
+            @comptime if (0) {
+                for_if_dead_false();
+            } else {
+                enum { ForIf_else_${f.index} = ${f.index} + 30 };
+            }
+        }
+    `);
+}
+
+int main(void) {
+    if (ForIf_live_0 != 0 || ForIf_live_1 != 3) return 1;
+    if (ForIf_else_0 != 30 || ForIf_else_1 != 31) return 2;
+    printf("comptime_emit_for_if_inside_smoke ok\n");
+    return 0;
+}

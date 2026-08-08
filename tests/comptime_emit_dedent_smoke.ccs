@@ -1,0 +1,21 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* Closer-anchored dedent applies to @emit templates too: content means
+ * column 0 after margin strip, so the spliced C is not accidentally indented
+ * into a broken fragment. */
+@comptime {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        enum { EMIT_DEDENT_N = ${5} };
+        static const char *emit_dedent_line = "col0";
+        `);
+}
+
+int main(void) {
+    if (EMIT_DEDENT_N != 5) return 1;
+    if (strcmp(emit_dedent_line, "col0") != 0) return 2;
+    printf("comptime_emit_dedent_smoke n=%d\n", (int)EMIT_DEDENT_N);
+    return 0;
+}

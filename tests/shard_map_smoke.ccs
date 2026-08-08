@@ -1,0 +1,59 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_exclusive.cch>
+#include <stdio.h>
+#include <string.h>
+
+int main(void) {
+    CCArena excl_arena = @create(kilobytes(64)) @destroy;
+    CCExclusive* excl = cc_exclusive_create(&excl_arena, 0);
+    CCShardMask mask = cc_shard_mask_make(4);
+    CCShardMap maps = {0};
+    CCShard* sh;
+    CCShardHold hold;
+    CCString owned;
+    CCString* v;
+    cc_arena_stack(scratch, 512);
+
+    if (!excl) return 1;
+    @defer excl->destroy();
+    if (!maps.init(excl, mask)) return 2;
+    @defer maps.destroy();
+
+    if (maps.count() != 4) return 3;
+    sh = maps.shard(maps.index(1u));
+    if (!sh) return 4;
+    if (!sh->put(CC_SLICE_LIT("a"), CC_SLICE_LIT("1"))) return 5;
+    if (!sh->put(CC_SLICE_LIT("b"), CC_SLICE_LIT("2"))) return 6;
+
+    if (!sh->contains(CC_SLICE_LIT("a"))) return 7;
+    if (sh->contains(CC_SLICE_LIT("missing"))) return 8;
+
+    v = sh->get(CC_SLICE_LIT("a"));
+    {
+        CCSlice s = v ? v->as_slice() : cc_slice_empty();
+        if (!v || !CCSlice_eq_cstr(&s, "1")) return 9;
+    }
+
+    /* @as: hold_* on the map. */
+    hold = maps.hold_one((uint64_t)maps.index(1u));
+    if (!hold.held()) return 10;
+    hold.release();
+    hold = maps.hold_all();
+    if (!hold.held() || hold.n != 4) return 11;
+    hold.release();
+    if (hold.held()) return 12;
+
+    if (!sh->get_into(CC_SLICE_LIT("a"), &scratch, &owned)) return 13;
+    if (cc_string_failed(&owned)) return 14;
+    {
+        CCSlice s = owned.as_slice();
+        if (!CCSlice_eq_cstr(&s, "1")) return 15;
+    }
+
+    if ((&maps)->len() != 2) return 16;
+    if (!maps.reset()) return 17;
+    if ((&maps)->len() != 0) return 18;
+
+    printf("shard_map_smoke ok\n");
+    return 0;
+}

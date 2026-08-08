@@ -9,22 +9,25 @@ int main(void) {
     char const *east = "east-const";
     unsigned char *ubytes = (unsigned char *)"ubytes";
 
-    char[:0] a = path->to_slice();          /* → const_char_to_slice */
-    char[:0] b = mut->to_slice();           /* → char_to_slice */
-    char[:0] c = char_to_slice("literal");
-    char[:0] d = const_char_to_slice(path);
-    char[:0] e = east->to_slice();          /* east-const → const_char_to_slice */
-    char[:0] f = ubytes->to_slice();        /* → unsigned_char_to_slice */
+    /* Trust-boundary cstr helper (no UFCS). */
+    char[:0] a = cc_slice_cstr(path);
+    char[:0] b = cc_slice_cstr(mut);
+    char[:0] c = "literal";
+    char[:0] e = cc_slice_cstr(east);
+
+    /* Counted UFCS — length is explicit, not strlen-hiding. */
+    char[:0] f = ubytes->to_slice_n(6);
+    char[:0] g = mut->to_slice_n(5);
 
     assert(a.len == strlen(path));
     assert(CCSlice_eq_cstr(&a, path));
     assert(CCSlice_eq_cstr(&b, "hello"));
     assert(CCSlice_eq_cstr(&c, "literal"));
-    assert(CCSlice_eq_cstr(&d, path));
     assert(CCSlice_eq_cstr(&e, "east-const"));
     assert(CCSlice_eq_cstr(&f, "ubytes"));
-    assert(char_to_slice(NULL).len == 0);
-    assert(const_char_to_slice(NULL).len == 0);
+    assert(CCSlice_eq_cstr(&g, "hello"));
+    assert(cc_slice_cstr(NULL).len == 0);
+    assert(char_to_slice_n(NULL, 0).len == 0);
 
     printf("cstr_to_slice_ufcs_smoke: PASS\n");
     return 0;

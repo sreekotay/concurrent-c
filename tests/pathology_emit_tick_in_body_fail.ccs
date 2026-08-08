@@ -1,0 +1,13 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+
+/* A raw backtick inside the emit body closes the template early — diagnose
+ * as unterminated @emit (the closer is consumed mid-body). */
+@comptime {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        /* nested tick: `oops` */
+        enum { PATH_TICK_BODY = 1 };
+    `);
+}
+
+int main(void) { return 0; }

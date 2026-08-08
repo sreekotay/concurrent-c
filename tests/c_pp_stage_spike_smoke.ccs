@@ -1,18 +1,18 @@
 /* Spike: stage-1 pp-token cache + stage-2 include stitch / object-like macros
- * / typedef-oracle AST for C and Concurrent-C. See examples/serdes/c/README.md. */
+ * / typedef-oracle AST for C and Concurrent-C. See cc/shadow/README.md. */
 #include <ccc/std/prelude.cch>
 
 @grammar(rules) PpTok {~~~~
-    include "../examples/serdes/c/pp_tok.rules"
+    include "../cc/shadow/pp_tok.rules"
 ~~~~}
 
 @grammar(rules) PpStmt {~~~~
-    include "../examples/serdes/c/pp_stmt.rules"
+    include "../cc/shadow/pp_stmt.rules"
 ~~~~}
 
-#include "../examples/serdes/c/c_pp_spike.cch"
+#include "../cc/shadow/c_pp_spike.cch"
 
-static const char* FIX = "examples/serdes/c/fixtures";
+static const char* FIX = "cc/shadow/fixtures";
 
 static void pp_free_macros(Pp* pp) {
     for (int i = 0; i < pp->nmacros; i++) free(pp->macros[i].body);
@@ -161,6 +161,13 @@ int main(void) {
     CCArena arena = cc_arena_create(1 << 20);
     TapeCache cache = {0};
     int pass = 1;
+
+    /* TU-surface demand: materialize PpStmt entries before the umbrella's
+     * headers call them (grammar emission keys on .ccs call sites). */
+    if (!PpStmt_match("break;", 6)) {
+        printf("FAIL: PpStmt demand\n");
+        pass = 0;
+    }
 
     pass &= test_pp_number(&arena);
     pass &= test_cc_digraphs(&arena);

@@ -20,7 +20,7 @@ class Ccc < Formula
   depends_on "make" => :build
 
   def install
-    # Fetches the tcc and xjb submodules the build needs (liblfds is optional).
+    # Fetches the tcc submodule the build needs (liblfds is optional).
     system "./scripts/fetch_submodules.sh"
     system "./scripts/apply_tcc_patches.sh"
     cd "third_party/tcc" do

@@ -13,7 +13,7 @@ int main(void) {
     if (!src.valid() || !dst.valid()) return 1;
 
     /* Canonical / static: no-op. */
-    CCSlice lit = char_to_slice("GET");
+    CCSlice lit = CC_SLICE_LIT("GET");
     void* lit_ptr = lit.ptr;
     lit.materialize_in(&dst) !>;
     if (lit.ptr != lit_ptr || lit.len != 3) return 2;
@@ -41,7 +41,7 @@ int main(void) {
 
     /* CCString: heap in src → materialize into dst (longer than inline cap). */
     CCString owned =
-        cc_string_from_slice(&src, char_to_slice("hello-materialize-world"));
+        cc_string_from_slice(&src, CC_SLICE_LIT("hello-materialize-world"));
     if (cc_string_failed(&owned) || cc_string_is_inline(&owned)) return 9;
     owned.materialize_in(&dst) !>;
     if (cc_string_arena(&owned) != &dst &&
@@ -50,7 +50,7 @@ int main(void) {
     if (view.len != 23 || memcmp(view.ptr, "hello-materialize-world", 23) != 0) return 11;
 
     /* Inline string stays put. */
-    CCString tiny = cc_string_from_slice(&src, char_to_slice("hi"));
+    CCString tiny = cc_string_from_slice(&src, CC_SLICE_LIT("hi"));
     if (cc_string_failed(&tiny) || !cc_string_is_inline(&tiny)) return 12;
     tiny.materialize_in(&dst) !>;
     if (!cc_string_is_inline(&tiny)) return 13;

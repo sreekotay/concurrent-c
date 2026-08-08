@@ -1,19 +1,23 @@
 # Macro-generated CC syntax tests
 
+> **Mostly legacy-front archaeology.** Default `ccc` is native
+> (`shadow_lower`). Notes below about pre-expand / visitor reparse apply to
+> `--frontend=legacy`. Prefer native for new macro surface unless diagnosing
+> the opt-out path.
+
 **Status:** M7.A + M7.B + M7.C (partial) + M7.C3 (M1-lite plumbing)
-shipped, and pre-expand is now the default (2026-05-26 flip). 447/447
-smoke pass under the new default (pre-expand on) AND under the legacy
-`CC_PRE_EXPAND=0` (or `CC_PRE_EXPAND=`) path. The earlier
+shipped, and pre-expand is now the only initial-parse path on the legacy
+front (2026-05-26 flip; `CC_PRE_EXPAND` later collapsed to inert). The earlier
 `CC_PRE_EXPAND_REPARSE=1` opt-in was removed: CPP-expanding the
 final reparse buffer broke AST coord alignment with the visitor's
 working buffer in 4 unrelated tests (`async_chan_await_works_smoke`,
 `async_channel_typed_lowered_smoke`, `call_site_noblock_smoke`,
-`ufcs_nested_std_io_smoke`); the proper fix for that is the M1
+`ufcs_nested_std_io_smoke`); the proper fix for that was the M1
 visitor swap. The M7.C3 plumbing means the channel-pair scanner
 CAN now resolve macro-generated chan handle decls (e.g.
 `CHAN(int) tx;` → `int[~4 >] tx;`) by falling back to
 `CCASTRoot.parse_buffer_pre_relower`; the remaining blocker for end-
-to-end macro CHAN compile is the reparse path itself, which still
+to-end macro CHAN compile on legacy is the reparse path itself, which still
 re-runs phase-1+phase-3 on the raw user source and trips on
 unexpanded macros. See
 [`../../cc/docs/COMPILER_CLEANUP_STATUS.md`](../../cc/docs/COMPILER_CLEANUP_STATUS.md).

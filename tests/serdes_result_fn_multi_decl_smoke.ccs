@@ -47,8 +47,8 @@ int main(void) {
     CCSlice s2;
     CCResult_long_long_CCError r;
     lev.a = cc_arena_create(1 << 12);
-    s1 = cc_slice_from_cstr("ab");
-    s2 = cc_slice_from_cstr("xy");
+    s1 = CC_SLICE_LIT("ab");
+    s2 = CC_SLICE_LIT("xy");
     r = Lev_distance(&lev, s1, s2);
     if (!r.ok || r.u.value != 3) {
         printf("FAIL: distance got ok=%d v=%lld\n", r.ok, (long long)r.u.value);

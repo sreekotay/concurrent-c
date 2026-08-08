@@ -1,6 +1,7 @@
 /* json.h harness: throughput + zero-copy rate.
- * Prefer ./bench.sh; manual: gcc -O2 -I ../../../cc/include bench.c \
- *   ../../../cc/runtime/arena_state.c -o bench && ./bench twitter.json 400 5
+ * Prefer ./bench.sh; manual (lowered headers/runtime — not raw .cch):
+ *   gcc -O2 -I ../../../out/include -I ../../../cc/include bench.c \
+ *     ../../../out/runtime/arena_state.c -o bench && ./bench twitter.json 400 5
  * Pass -c to also verify a correctness checksum. The verification parse+walk
  * runs OUTSIDE the timed region, so -c never skews the reported timing. */
 #include "json.h"

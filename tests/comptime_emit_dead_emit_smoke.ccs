@@ -1,0 +1,29 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+/* Dead @emit arm must not splice. If it does, DEAD_EMIT_LEAKED exists and
+ * the live check still passes — so we also require the leaked symbol ABSENT
+ * by only referencing the live one, and poison the dead fragment with a
+ * duplicate of the live name at a wrong value (host would reject redef). */
+@comptime if (0) {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        enum { DEAD_EMIT_LIVE_N = 999 };
+        dead_emit_must_not_run();
+    `);
+} else {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        @comptime if (1) {
+            enum { DEAD_EMIT_LIVE_N = 4 };
+        } else {
+            dead_emit_inner();
+        }
+    `);
+}
+
+int main(void) {
+    if (DEAD_EMIT_LIVE_N != 4) return 1;
+    printf("comptime_emit_dead_emit_smoke n=%d\n", (int)DEAD_EMIT_LIVE_N);
+    return 0;
+}

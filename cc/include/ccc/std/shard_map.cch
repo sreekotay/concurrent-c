@@ -1,0 +1,283 @@
+/*
+ * CCShardMap — sharded string→string store (cells + exclusive domain).
+ *
+ * One cell is CCShard (arena-owned map). The map embeds CCShardDomain via
+ * @as and also forwards hold_* under the map snake names:
+ *
+ *   CCShardMap maps;
+ *   maps.init(excl, mask);
+ *   CCShardHold h = maps.hold_all();
+ *   @defer h.release();          // always pair with acquire
+ *   if (!h.held()) …;            // admission failed — release is a no-op
+ *   CCShard* sh = maps.shard(si);
+ *   sh->put(k, v);   // copies into the shard arena
+ *
+ * Hold contract (see cc_exclusive.cch): release() is idempotent and a
+ * no-op when held() is false (n == 0). Safe to @defer release before the
+ * held() check; failed admission is not a double-unlock.
+ *
+ * Cell ownership (read once):
+ *   put(k, v)     copies key+value into the shard arena (views OK as inputs)
+ *   get(k)        interior pointer — only under the shard hold; do not stash
+ *   get_into(...) clones into a caller arena — safe after the shard hold
+ *   contains(k)   presence only (no value pointer)
+ *   delete(k)     frees the packed key and value in the shard arena
+ *
+ * Call sites prefer char[:] for keys/values (length-keyed, not char[:0]).
+ * This header keeps CCSlice so it lowers to host-compileable .h (same ABI).
+ */
+#ifndef CC_STD_SHARD_MAP_H
+#define CC_STD_SHARD_MAP_H
+
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+#include <stdbool.h>
+#include <ccc/cc_arena.cch>
+#include <ccc/cc_result.cch>
+#include <ccc/cc_exclusive.cch>
+#include <ccc/std/string.cch>
+#include <ccc/std/slice_packed.cch>
+#include <ccc/std/array_map.cch>
+
+CC_ARRAY_MAP_DECL(CCSlicePacked, CCString, CCShardMapTable,
+                  cc_map_hash_slice_packed, cc_map_eq_slice_packed)
+
+/* ---- One shard cell ---- */
+
+typedef struct CCShard {
+    CCShardMapTable* data;
+    CCArena arena;
+} CCShard;
+
+/* Root slab for a shard arena. Hot working set stays on the bump; large
+ * values overflow via stamped per-object malloc (see cc_arena). */
+#ifndef CC_SHARD_MAP_ARENA_ROOT
+#define CC_SHARD_MAP_ARENA_ROOT (64 * 1024)
+#endif
+
+static inline bool cc_shard_init_count(CCShard* m, size_t buckets) {
+    if (!m) return false;
+    memset(m, 0, sizeof(*m));
+    m->arena = cc_arena_malloc(CC_SHARD_MAP_ARENA_ROOT);
+    if (!cc_arena_valid(&m->arena)) return false;
+    if (buckets == 0)
+        m->data = CCShardMapTable_init(&m->arena);
+    else
+        m->data = CCShardMapTable_init_count(&m->arena, buckets);
+    return m->data != NULL;
+}
+
+static inline bool cc_shard_init(CCShard* m) {
+    return cc_shard_init_count(m, 0);
+}
+
+static inline void cc_shard_destroy(CCShard* m) {
+    if (!m) return;
+    if (m->data) {
+        CCShardMapTable_destroy(m->data);
+        m->data = NULL;
+    }
+    cc_arena_destroy(&m->arena);
+}
+
+static inline size_t cc_shard_len(const CCShard* m) {
+    if (!m || !m->data) return 0;
+    return CCShardMapTable_len(m->data);
+}
+
+/* Interior pointer — only under the shard hold; do not stash past release. */
+static inline CCString* cc_shard_get(CCShard* m, CCSlice key) {
+    CCSlicePackedView view;
+    CCSlicePacked pk;
+    if (!m || !m->data) return NULL;
+    pk = cc_slice_packed_borrow_slice(&view, key);
+    return CCShardMapTable_get_ptr(m->data, pk);
+}
+
+static inline bool cc_shard_contains(CCShard* m, CCSlice key) {
+    return cc_shard_get(m, key) != NULL;
+}
+
+static inline bool cc_shard_get_into(CCShard* m, CCSlice key, CCArena* arena,
+                                    CCString* out) {
+    CCString* v;
+    if (!out) return false;
+    memset(out, 0, sizeof(*out));
+    if (!arena) return false;
+    v = cc_shard_get(m, key);
+    if (!v) return false;
+    *out = cc_string_from_slice(arena, cc_string_as_slice(v));
+    return true;
+}
+
+static inline bool cc_shard_put(CCShard* m, CCSlice key, CCSlice val) {
+    CCSlicePackedView view;
+    CCSlicePacked pk;
+    CCString* cur;
+    CCString owned;
+    CCResult_CCSlicePacked_CCError packed;
+    CCSlicePacked durable;
+    if (!m || !m->data) return false;
+    pk = cc_slice_packed_borrow_slice(&view, key);
+    cur = CCShardMapTable_get_ptr(m->data, pk);
+    owned = cc_string_from_slice(&m->arena, val);
+    if (cc_string_failed(&owned)) return false;
+
+    if (cur) {
+        cc_string_release(cur, &m->arena);
+        *cur = owned;
+        return true;
+    }
+
+    packed = cc_slice_to_packed(&key, &m->arena);
+    if (!cc_is_ok(packed)) {
+        cc_string_release(&owned, &m->arena);
+        return false;
+    }
+    durable = packed.u.value;
+    if (CCShardMapTable_insert(m->data, durable, owned) != 0) {
+        cc_string_release(&owned, &m->arena);
+        cc_slice_packed_release(&m->arena, &durable);
+        return false;
+    }
+    return true;
+}
+
+static inline bool cc_shard_delete(CCShard* m, CCSlice key) {
+    CCSlicePackedView view;
+    CCSlicePacked pk;
+    CCString* v;
+    CCSlicePacked* stored;
+    if (!m || !m->data) return false;
+    pk = cc_slice_packed_borrow_slice(&view, key);
+    v = CCShardMapTable_get_ptr(m->data, pk);
+    stored = CCShardMapTable_find_key_ptr(m->data, pk);
+    if (!v && !stored) return false;
+    if (v) cc_string_release(v, &m->arena);
+    if (stored) {
+        CCSlicePacked doomed = *stored;
+        (void)CCShardMapTable_del(m->data, pk);
+        cc_slice_packed_release(&m->arena, &doomed);
+    } else {
+        (void)CCShardMapTable_del(m->data, pk);
+    }
+    return true;
+}
+
+/* ---- Sharded map (cells + domain @as) ---- */
+
+typedef struct CCShardMap {
+    /* Hold API: maps.hold_one / hold_sorted / hold_all (UFCS via @as). */
+    CCShardDomain domain @as;
+    CCShard* shards;
+    CCArena root; /* storage for shards[] */
+} CCShardMap;
+
+static inline size_t cc_shard_map_count(const CCShardMap* m) {
+    if (!m) return 0;
+    return m->domain.mask.count;
+}
+
+static inline size_t cc_shard_map_index(const CCShardMap* m, uint64_t hash) {
+    if (!m) return 0;
+    return cc_shard_mask_index(&m->domain.mask, hash);
+}
+
+/* Named `shard` (not `at`) so UFCS does not collide with cc_slice_at. */
+static inline CCShard* cc_shard_map_shard(CCShardMap* m, size_t si) {
+    if (!m || !m->shards || si >= m->domain.mask.count) return NULL;
+    return &m->shards[si];
+}
+
+static inline bool cc_shard_map_init(CCShardMap* m, CCExclusive* excl,
+                                    CCShardMask mask) {
+    size_t i, n;
+    if (!m || !excl || mask.count == 0) return false;
+    memset(m, 0, sizeof(*m));
+    m->domain = cc_shard_domain(excl, mask);
+    n = mask.count;
+    m->root = cc_arena_heap(n * sizeof(CCShard) + 64);
+    if (!cc_arena_valid(&m->root)) return false;
+    m->shards = cc_arena_alloc_T_count(CCShard, &m->root, n);
+    if (!m->shards) {
+        cc_arena_destroy(&m->root);
+        memset(m, 0, sizeof(*m));
+        return false;
+    }
+    for (i = 0; i < n; i++) {
+        if (!cc_shard_init(&m->shards[i])) {
+            size_t j;
+            for (j = 0; j < i; j++) cc_shard_destroy(&m->shards[j]);
+            cc_arena_destroy(&m->root);
+            memset(m, 0, sizeof(*m));
+            return false;
+        }
+    }
+    return true;
+}
+
+static inline void cc_shard_map_destroy(CCShardMap* m) {
+    size_t i, n;
+    if (!m) return;
+    n = m->domain.mask.count;
+    if (m->shards) {
+        for (i = 0; i < n; i++) cc_shard_destroy(&m->shards[i]);
+        m->shards = NULL;
+    }
+    cc_arena_destroy(&m->root);
+    memset(m, 0, sizeof(*m));
+}
+
+/* Re-init every cell (FLUSHDB). Keeps domain / shard count. */
+static inline bool cc_shard_map_reset(CCShardMap* m) {
+    size_t i, n;
+    if (!m || !m->shards) return false;
+    n = m->domain.mask.count;
+    for (i = 0; i < n; i++) {
+        cc_shard_destroy(&m->shards[i]);
+        if (!cc_shard_init(&m->shards[i])) return false;
+    }
+    return true;
+}
+
+static inline size_t cc_shard_map_len(const CCShardMap* m) {
+    size_t i, n, total = 0;
+    if (!m || !m->shards) return 0;
+    n = m->domain.mask.count;
+    for (i = 0; i < n; i++) total += cc_shard_len(&m->shards[i]);
+    return total;
+}
+
+/* Hold forwards — same as domain @as UFCS; named so the snake ladder
+ * resolves when @as retry is not on the peel path. */
+static inline CCShardHold cc_shard_map_hold_one(CCShardMap* m, uint64_t si) {
+    if (!m) {
+        CCShardHold h;
+        memset(&h, 0, sizeof(h));
+        return h;
+    }
+    return cc_shard_domain_hold_one(&m->domain, si);
+}
+
+static inline CCShardHold cc_shard_map_hold_sorted(CCShardMap* m,
+                                                  const uint64_t* names,
+                                                  size_t count) {
+    if (!m) {
+        CCShardHold h;
+        memset(&h, 0, sizeof(h));
+        return h;
+    }
+    return cc_shard_domain_hold_sorted(&m->domain, names, count);
+}
+
+static inline CCShardHold cc_shard_map_hold_all(CCShardMap* m) {
+    if (!m) {
+        CCShardHold h;
+        memset(&h, 0, sizeof(h));
+        return h;
+    }
+    return cc_shard_domain_hold_all(&m->domain);
+}
+
+#endif /* CC_STD_SHARD_MAP_H */

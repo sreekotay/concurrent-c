@@ -7,9 +7,9 @@ int main(void) {
 
     Map::[CCSlice, int] m = map_new::[CCSlice, int](&arena);
 
-    CCSlice k1 = char_to_slice("alpha");
-    CCSlice k2 = char_to_slice("beta");
-    CCSlice k3 = char_to_slice("gamma");
+    CCSlice k1 = CC_SLICE_LIT("alpha");
+    CCSlice k2 = CC_SLICE_LIT("beta");
+    CCSlice k3 = CC_SLICE_LIT("gamma");
 
     m.insert(k1, 11);
     m.insert(k2, 22);

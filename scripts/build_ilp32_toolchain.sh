@@ -5,7 +5,7 @@
 # Env:
 #   CCC_HOST_CC   Host C compiler for building ccc (default: cc).
 #                 Set to `tcc` to self-build ccc with the just-built
-#                 third_party/tcc/tcc (Linux only; skips XJB C++ merge).
+#                 third_party/tcc/tcc (Linux only).
 #   BUILD         debug|release (default: debug)
 #   CCC_ILP32_JOBS
 set -euo pipefail
@@ -22,7 +22,6 @@ ptr_bytes="$(printf '#include <stdio.h>\nint main(void){printf("%%zu",sizeof(voi
 [ "$ptr_bytes" = "4" ] || die "expected ILP32 sizeof(void*)==4, got $ptr_bytes"
 
 export CFLAGS="-D_FILE_OFFSET_BITS=64 ${CFLAGS:-}"
-export CXXFLAGS="-D_FILE_OFFSET_BITS=64 ${CXXFLAGS:-}"
 export CPPFLAGS="-D_FILE_OFFSET_BITS=64 ${CPPFLAGS:-}"
 
 host_is_tcc=0
@@ -30,11 +29,8 @@ case "$(basename "$HOST_CC")" in
   tcc) host_is_tcc=1 ;;
 esac
 
-printf '== submodules (tcc%s)\n' "$([ "$host_is_tcc" = 1 ] && echo '' || echo ', xjb')"
+printf '== submodules (tcc)\n'
 git submodule update --init third_party/tcc
-if [ "$host_is_tcc" != 1 ]; then
-  git submodule update --init third_party/xjb
-fi
 if [ ! -f third_party/tcc/configure ]; then
   git submodule update --checkout --force third_party/tcc
 fi

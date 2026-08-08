@@ -1,0 +1,44 @@
+/* ArrayMap:: field + BufReader:: in one TU — DECL must precede the struct.
+ * Regression: factory-driven typedef hoist used to emit the struct before
+ * CC_ARRAY_MAP_DECL when any CC_GENERIC_FACTORY instance was present. */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/std/net.cch>
+#include <ccc/std/map.cch>
+#include <ccc/std/hash.cch>
+#include <ccc/std/string.cch>
+#include <stdio.h>
+
+typedef struct Shard {
+    ArrayMap::[CCSlicePacked, CCString] data;
+    CCArena arena;
+} Shard;
+
+static void touch_br(CCSocket* s) {
+    char buf[64];
+    BufReader::[CCSocket] br;
+    br.init(s, buf, sizeof(buf));
+    (void)br.buffered();
+}
+
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(64));
+    Shard sh;
+    CCSlicePackedView view;
+    CCSlicePacked pk;
+    CCString val;
+    if (!a.base) return 1;
+    sh.arena = a;
+    sh.data = array_map_new_count::[CCSlicePacked, CCString](&sh.arena, 8);
+    if (!sh.data) return 2;
+    pk = cc_slice_packed_borrow_slice(&view, CC_SLICE_LIT("k"));
+    val = cc_string_new();
+    if (!val.push_slice(CC_SLICE_LIT("v"), &sh.arena)) return 3;
+    if (sh.data->insert(pk, val) != 0) return 4;
+    if (!sh.data->get_ptr(pk)) return 5;
+    (void)&touch_br;
+    sh.data->destroy();
+    a.destroy();
+    printf("ok\n");
+    return 0;
+}

@@ -92,7 +92,7 @@ static void run_test_client(void) {
         return;
     };
     if (!ok) got = 0;
-    CCSlice got_slice = { .ptr = buf, .len = got, .alen = got };
+    CCSlice got_slice = cc_slice_from_buffer(buf, got);
     println(@string(`test client got ${got} bytes: ${got_slice}`, @scratch)) !>;
     sock.close();
 }
@@ -114,7 +114,7 @@ int main(int argc, char** argv) {
 
     bool test_mode = parse_test_flag(argc, argv);
 
-    CCListener ln = cc_tcp_listen(PORT, sizeof(PORT) - 1) !>(e) {
+    CCListener ln = cc_tcp_listen(CC_SLICE_LIT(PORT)) !>(e) {
         println(@string(`listen error: ${e}`, @scratch)) !>;
         return 1;
     };

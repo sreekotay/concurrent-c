@@ -7,10 +7,6 @@
 set -e
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
-INC="$repo/cc/include"; RT="$repo/cc/runtime/arena_state.c"
-# Dead-strip like ccc --release does (see json/bench.sh)
-case "$(uname)" in Darwin) LDGC="-Wl,-dead_strip";; *) LDGC="-Wl,--gc-sections";; esac
-CC="${CC:-gcc} -O2 -ffunction-sections -fdata-sections $LDGC"
 CCC="$repo/cc/bin/ccc"
 NCMD=${1:-100000}; K=${2:-30}
 
@@ -25,9 +21,10 @@ need_build() {
   return 1
 }
 
-if need_build "$here/bench_resp" "$here/bench_resp.ccs" "$CCC" "$RT"; then
-  (cd "$repo" && "$CCC" build "$here/bench_resp.ccs" --out-dir "$here/.gen" >/dev/null)
-  $CC -I "$repo/out/include" -I "$INC" "$here/.gen/bench_resp.c" "$RT" -o "$here/bench_resp"
+# Full ccc link — do not host-compile generated C against raw .cch / cc/runtime.
+if need_build "$here/bench_resp" "$here/bench_resp.ccs" "$CCC"; then
+  (cd "$repo" && "$CCC" build --release "$here/bench_resp.ccs" \
+    -o "$here/bench_resp" --out-dir "$here/.gen" >/dev/null)
 fi
 
 "$here/bench_resp" "$NCMD" "$K"

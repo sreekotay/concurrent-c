@@ -280,7 +280,7 @@ CCResult_bool_CCIoError cc_dir_create_all(CCSlice path_sl) {
             char saved = buf[i];
             buf[i] = '\0';
 
-            if (!cc_path_exists(char_to_slice(buf))) {
+            if (!cc_path_exists(cc_slice_cstr(buf))) {
 #ifdef _WIN32
                 if (!CreateDirectoryA(buf, NULL)) {
                     DWORD err = GetLastError();
@@ -469,7 +469,7 @@ static int glob_add(CCGlobBuilder* b, CCArena* arena, const char* path, size_t l
     memcpy(copy, path, len);
     copy[len] = '\0';
 
-    b->arr.items[b->arr.len] = char_to_slice(copy);
+    b->arr.items[b->arr.len] = cc_slice_cstr(copy);
     b->arr.len++;
     return 0;
 }
@@ -481,7 +481,7 @@ static int glob_recurse(CCArena* arena, CCGlobBuilder* b,
 static int glob_dir(CCArena* arena, CCGlobBuilder* b,
                     const char* dir, const char* pattern, int recursive,
                     CCIoError* err) {
-    CCResult_CCDirIterptr_CCIoError iter_res = cc_dir_open(arena, char_to_slice(dir));
+    CCResult_CCDirIterptr_CCIoError iter_res = cc_dir_open(arena, cc_slice_cstr(dir));
     if (cc_is_err(iter_res)) {
         *err = cc_unwrap_err(iter_res);
         return -1;
@@ -525,7 +525,7 @@ static int glob_dir(CCArena* arena, CCGlobBuilder* b,
                 }
             }
         } else {
-            if (cc_glob_match(char_to_slice(pattern), char_to_slice(name))) {
+            if (cc_glob_match(cc_slice_cstr(pattern), cc_slice_cstr(name))) {
                 if (glob_add(b, arena, full_path, path_len, err) != 0) {
                     cc_dir_close(iter);
                     return -1;
@@ -544,7 +544,7 @@ static int glob_recurse(CCArena* arena, CCGlobBuilder* b,
     if (glob_dir(arena, b, dir, pattern, recursive, err) != 0) return -1;
 
     /* Recurse into subdirectories */
-    CCResult_CCDirIterptr_CCIoError iter_res = cc_dir_open(arena, char_to_slice(dir));
+    CCResult_CCDirIterptr_CCIoError iter_res = cc_dir_open(arena, cc_slice_cstr(dir));
     if (cc_is_err(iter_res)) {
         *err = cc_unwrap_err(iter_res);
         return -1;

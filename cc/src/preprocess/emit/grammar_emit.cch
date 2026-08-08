@@ -106,19 +106,21 @@ static inline CCString cc_gr_number_fast_tail_text(CCArena* a, int k) {
  * everywhere.  Includes the lazy ffc number accessor (borrow stays the
  * default; ffc runs on use; FFC_IMPL lives in cc/runtime/arena_state.c). */
 static inline CCString cc_gr_node_api_text(CCArena* a, const char* n) {
-    return @string(`static int ${n}Node_id(const ${n}Node* nd) { return (int)(nd->meta & 0xFFu); }
-static int ${n}Node_is_list(const ${n}Node* nd) { return (int)((nd->meta >> 8) & 1u); }
-static size_t ${n}Node_len(const ${n}Node* nd) { return (size_t)(nd->meta >> 10); }
-static ${n}Node* ${n}Node_first(${n}Node* nd) {
+    /* unused: full node API is always emitted; TU may use only a subset.
+     * Attr after `static` (not between type and name) — CC parse accepts that. */
+    return @string(`static __attribute__((unused)) int ${n}Node_id(const ${n}Node* nd) { return (int)(nd->meta & 0xFFu); }
+static __attribute__((unused)) int ${n}Node_is_list(const ${n}Node* nd) { return (int)((nd->meta >> 8) & 1u); }
+static __attribute__((unused)) size_t ${n}Node_len(const ${n}Node* nd) { return (size_t)(nd->meta >> 10); }
+static __attribute__((unused)) ${n}Node* ${n}Node_first(${n}Node* nd) {
     return ${n}Node_is_list(nd) && (nd->meta >> 10) > 1 ? nd + 1 : 0; }
-static ${n}Node* ${n}Node_next(${n}Node* nd, ${n}Node* parent) {
+static __attribute__((unused)) ${n}Node* ${n}Node_next(${n}Node* nd, ${n}Node* parent) {
     ${n}Node* nx = nd + (${n}Node_is_list(nd) ? (size_t)(nd->meta >> 10) : 1);
     return nx < parent + (size_t)(parent->meta >> 10) ? nx : 0; }
-static size_t ${n}Node_count(${n}Node* nd) {
+static __attribute__((unused)) size_t ${n}Node_count(${n}Node* nd) {
     size_t k = 0;
     for (${n}Node* ch = ${n}Node_first(nd); ch; ch = ${n}Node_next(ch, nd)) k++;
     return k; }
-static void ${n}Node_slice(const ${n}Node* nd, CCSlice* out) {
+static __attribute__((unused)) void ${n}Node_slice(const ${n}Node* nd, CCSlice* out) {
     size_t l = (size_t)(nd->meta >> 10);
     if ((nd->meta >> 9) & 1u)
         *out = cc_slice_from_parts((void*)nd->u.bytes, l,
@@ -127,7 +129,7 @@ static void ${n}Node_slice(const ${n}Node* nd, CCSlice* out) {
         *out = cc_slice_from_buffer((void*)nd->u.bytes, l);
 }
 #include <ccc/vendor/ffc.h>
-static inline double ${n}Node_as_f64(const ${n}Node* nd) {
+static inline __attribute__((unused)) double ${n}Node_as_f64(const ${n}Node* nd) {
     if ((nd->meta >> 8) & 1u) return 0.0;
     { double v = 0.0; size_t l = (size_t)(nd->meta >> 10);
       ffc_parse_options o; o.format = FFC_PRESET_JSON; o.decimal_point = '.';
@@ -563,8 +565,9 @@ static inline CCString cc_gr_x_head_text(CCArena* a, const char* g, const char* 
 }
 
 static inline CCString cc_gr_x_tail_text(CCArena* a, const char* fail) {
+    /* Some matchers never jump to fail (unfailing bodies); keep the label. */
     return @string(`    *io = p; return 1;
-${fail}:
+${fail}: __attribute__((unused));
     return 0;
 }
 `, a);
@@ -1267,7 +1270,7 @@ static inline CCString cc_gr_fill_zero_text(CCArena* a) {
 static inline CCString cc_gr_fill_tail_text(CCArena* a, const char* fail) {
     return @string(`    *io = p;
     return 1;
-${fail}:
+${fail}: __attribute__((unused));
     return 0;
 }
 `, a);
@@ -1667,7 +1670,7 @@ static inline CCString cc_gr_rules_manifest_close_text(CCArena* a) {
 
 static inline CCString cc_gr_rules_typedef_text(CCArena* a, const char* n, int nrules) {
     return @string(`typedef struct { int rule_count; } ${n};
-static inline int ${n}_rule_count(void) { return ${nrules}; }
+static inline __attribute__((unused)) int ${n}_rule_count(void) { return ${nrules}; }
 `, a);
 }
 
@@ -1682,7 +1685,7 @@ static inline CCString cc_gr_short_item_text(CCArena* a, int v) {
 
 /* derived restore: cold backward pop of nodes born at/after the resume pos */
 static inline CCString cc_gr_unwind_fn_text(CCArena* a, const char* n) {
-    return @string(`static __attribute__((noinline)) void ${n}__unwind(${n}__ctx* c, const unsigned char* sv) {
+    return @string(`static __attribute__((noinline, unused)) void ${n}__unwind(${n}__ctx* c, const unsigned char* sv) {
     while (c->total > 1 && (const unsigned char*)c->tape[c->total - 1].u.bytes >= sv)
         c->total--;
     while (c->bdepth > 0 && c->bstack[c->bdepth - 1] >= c->total) c->bdepth--;

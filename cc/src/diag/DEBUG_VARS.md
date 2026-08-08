@@ -1,5 +1,10 @@
 # CC_DEBUG_* environment variables (I6)
 
+> **Mostly legacy front.** These variables instrument the multipass
+> text-rewrite / reparse path (`--frontend=legacy`). Default native
+> (`shadow_lower`) does not use the Phase-N reparse loop; use
+> `ccc --emit-c-inspect` / `out/.cc-build/native/` for that front.
+
 All debug output uses the prefix `[cc:<phase>]`.
 
 | Variable | Effect |

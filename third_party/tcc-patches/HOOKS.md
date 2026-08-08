@@ -39,7 +39,8 @@ The CC frontend implements these hooks in `cc/src/parser/cc_ext_parser.c`, which
 
 ## 2. AST Stub Recording
 
-Records lightweight AST nodes during parsing for CC visitor passes to rewrite.
+Records lightweight AST nodes during parsing for the legacy CC visitor
+passes (`--frontend=legacy`) to rewrite.
 
 ```c
 // tcc.h - Node types
@@ -125,7 +126,7 @@ PUB_FUNC struct CCASTStubRoot* cc_tcc_parse_to_ast(
 );
 ```
 
-Returns the recorded AST nodes for CC visitor passes to process.
+Returns the recorded AST nodes for legacy CC visitor passes to process.
 
 ## 6. Exposed TCC Internals
 

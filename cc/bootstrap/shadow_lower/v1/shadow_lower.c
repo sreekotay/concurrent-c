@@ -10,8 +10,8 @@
 typedef intptr_t CCAbIntptr;
 #include <ccc/cc_closure_helper.h>
 
-#line 1 "examples/serdes/c/shadow_lower.ccs"
-/* SERDES shadow lowerer — successor front (opt-in via ccc --frontend=serdes).
+#line 1 "cc/shadow/shadow_lower.ccs"
+/* Native shadow_lower — default ccc front (--frontend=native).
  *
  * Usage:
  *   shadow_lower <in.ccs|.cch> [-o out] [--exe binary] [--no-cache]
@@ -24,7 +24,7 @@ typedef intptr_t CCAbIntptr;
 #include <ccc/std/prelude.h>
 #include <unistd.h>
 
-#line 14 "examples/serdes/c/shadow_lower.ccs"
+#line 14 "cc/shadow/shadow_lower.ccs"
 /* @grammar(rules) PpTok (line 14): 21 rule(s). API:
  *   cc_match(PpTok, s, n)                     -> PpTok_match
  *   cc_parse(PpTok, s, n, arena)              -> PpTok_parse -> PpTokNode* tape
@@ -892,7 +892,7 @@ static int PpTok_collect(const char* s, size_t n, CCArena* arena,
     } }
     return 1;
 }
-#line 18 "examples/serdes/c/shadow_lower.ccs"
+#line 18 "cc/shadow/shadow_lower.ccs"
 /* @grammar(rules) PpStmt (line 18): 12 rule(s). API:
  *   cc_match(PpStmt, s, n)                     -> PpStmt_match
  *   cc_parse(PpStmt, s, n, arena)              -> PpStmt_parse -> PpStmtNode* tape
@@ -1209,7 +1209,7 @@ static int PpStmt_collect(const char* s, size_t n, CCArena* arena,
     } }
     return 1;
 }
-#line 22 "examples/serdes/c/shadow_lower.ccs"
+#line 22 "cc/shadow/shadow_lower.ccs"
 #include "c_pp_spike.h"
 #include "shadow_build.h"
 
@@ -1689,7 +1689,7 @@ int main(int argc, char** argv) {
     cc_arena_free(&arena);
     return rc;
 }
-#line 41 "examples/serdes/c/pp_stage2.cch"
+#line 41 "cc/shadow/pp_stage2.cch"
 static const char* const pp_dir__keys[13] = {
     "if",
     "ifdef",
@@ -1831,10 +1831,10 @@ static const PpDirSpec* pp_dir_get(CCSlice key) {
     if (!pp_dir__key_eq(key, (size_t)idx)) return NULL;
     return &pp_dir__values[idx];
 }
-#line 42 "examples/serdes/c/pp_stage2.cch"
+#line 42 "cc/shadow/pp_stage2.cch"
 enum{__ccs78322=0};
 
-#line 60 "examples/serdes/c/pp_ast_core.cch"
+#line 60 "cc/shadow/pp_ast_core.cch"
 static const char* const shadow_kw__keys[35] = {
     "int",
     "void",
@@ -2234,7 +2234,7 @@ static const ShadowKwSpec* shadow_kw_get(CCSlice key) {
     if (!shadow_kw__key_eq(key, (size_t)idx)) return NULL;
     return &shadow_kw__values[idx];
 }
-#line 61 "examples/serdes/c/pp_ast_core.cch"
+#line 61 "cc/shadow/pp_ast_core.cch"
 enum{__ccs79365=0};
 
 

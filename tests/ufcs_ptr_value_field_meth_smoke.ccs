@@ -1,0 +1,33 @@
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <string.h>
+
+/* Regression: p->value_field.meth() must resolve from the final field type
+ * (CCString value → take address). Embedded `->` in the path must not mark
+ * the receiver as already a pointer. */
+typedef struct Holder {
+    CCString out;
+} Holder;
+
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    assert(a.base);
+
+    Holder h = {0};
+    Holder* p = &h;
+    h.out = cc_string_with_capacity(&a, 32);
+
+    assert(p->out.push_slice(@slice("hi"), &a));
+    assert(!p->out.failed());
+    assert(p->out.len() == 2);
+
+    char[:] s = p->out.as_slice();
+    assert(s.len == 2);
+    assert(memcmp(s.ptr, "hi", 2) == 0);
+
+    p->out.clear();
+    assert(p->out.len() == 0);
+    assert(p->out.as_slice().len == 0);
+
+    return 0;
+}

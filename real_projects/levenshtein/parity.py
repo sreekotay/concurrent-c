@@ -43,9 +43,8 @@ FUNCS = [
 
 def upstream_call(name, a, b):
     if name == "hamming":
-        # cclev always pads; upstream 0.27 raises on unequal lengths
-        # unless asked.  Padding is the keyword-only extra parameter's
-        # behavior, which cclev cannot spell (see FRICTION.md).
+        # Default pad matches upstream pad=True; keyword-only `*` is still
+        # unspelled on the CC side (positional pad is accepted).
         return upstream.hamming(a, b, pad=True)
     return getattr(upstream, name)(a, b)
 
@@ -56,6 +55,27 @@ def check(name, tol, a, b):
     ok = got == want if tol == 0 else abs(got - want) <= tol
     if not ok:
         print(f"MISMATCH {name}({a!r}, {b!r}): cclev={got!r} upstream={want!r}")
+    return ok
+
+
+def check_hamming_pad():
+    """Default pads; pad=False / pad=0 rejects unequal lengths."""
+    ok = True
+    if cclev.hamming("ab", "a") != upstream.hamming("ab", "a", pad=True):
+        print("MISMATCH hamming default pad")
+        ok = False
+    try:
+        cclev.hamming("ab", "a", pad=False)
+        print("MISMATCH hamming pad=False should raise")
+        ok = False
+    except Exception:
+        pass
+    try:
+        upstream.hamming("ab", "a", pad=False)
+        print("MISMATCH upstream pad=False should raise")
+        ok = False
+    except Exception:
+        pass
     return ok
 
 
@@ -86,8 +106,11 @@ def main():
             total += 1
             failures += 0 if check(name, tol, a, b) else 1
 
+    total += 1
+    failures += 0 if check_hamming_pad() else 1
+
     print(f"parity: {total - failures}/{total} ok "
-          f"({len(pairs)} pairs x {len(FUNCS)} functions)")
+          f"({len(pairs)} pairs x {len(FUNCS)} functions + pad)")
     return 1 if failures else 0
 
 

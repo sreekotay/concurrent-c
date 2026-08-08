@@ -33,8 +33,8 @@ $(REDIS_SRC_DIR)/src/redis-benchmark: $(REDIS_SRC_DIR)/src/redis-server
 
 upstream: $(REDIS_SRC_DIR)/src/redis-server $(REDIS_SRC_DIR)/src/redis-cli $(REDIS_SRC_DIR)/src/redis-benchmark
 
-# Default: table-wide CCExclusive; connection fibers execute in place.
-$(OUT_DIR)/redis_idiomatic: redis_idiomatic.ccs redis_cc/redis_cc.cch redis_db.cch redis_mem.cch redis_glob.cch redis_resp.cch | $(OUT_DIR)
+# Default: full RedisDb + sketch I/O (ln.serve, Conn.out encode, sync fiber).
+$(OUT_DIR)/redis_idiomatic: redis_idiomatic.ccs redis_cc/redis_cc.cch redis_db.cch redis_reply.cch redis_mem.cch redis_glob.cch redis_resp.cch | $(OUT_DIR)
 	$(CCC) -O -o $@ redis_idiomatic.ccs --release --cc-flags "$(REDIS_IDIOMATIC_DEFS)"
 
 # Channel/owner-fiber variant (historical N:1 request path).
@@ -65,6 +65,10 @@ $(OUT_DIR)/redis_idiomatic_debug: redis_idiomatic.ccs redis_cc/redis_cc.cch redi
 $(OUT_DIR)/redis_cc: redis_cc/redis_cc.ccs redis_cc/redis_cc.cch | $(OUT_DIR)
 	$(CCC) -O -o $@ redis_cc/redis_cc.ccs --release
 
+# Tiny command surface (redis.go); sync fiber + ln.serve + Conn encode.
+$(OUT_DIR)/redis_async_sketch: redis_async_sketch.ccs | $(OUT_DIR)
+	$(CCC) -O -o $@ redis_async_sketch.ccs --release
+
 redis_idiomatic: $(OUT_DIR)/redis_idiomatic
 redis_owner: $(OUT_DIR)/redis_owner
 redis_lock: $(OUT_DIR)/redis_lock
@@ -73,6 +77,7 @@ redis_idiomatic_hand: $(OUT_DIR)/redis_idiomatic_hand
 redis_idiomatic_profile: $(OUT_DIR)/redis_idiomatic_profile
 redis_idiomatic_debug: $(OUT_DIR)/redis_idiomatic_debug
 redis_cc: $(OUT_DIR)/redis_cc
+redis_async_sketch: $(OUT_DIR)/redis_async_sketch
 
 all: redis_idiomatic redis_cc
 
@@ -85,4 +90,4 @@ print-config:
 	@echo "REDIS_SRC_DIR=$(REDIS_SRC_DIR)"
 	@echo "REDIS_IDIOMATIC_DEFS=$(REDIS_IDIOMATIC_DEFS)"
 
-.PHONY: setup upstream redis_idiomatic redis_owner redis_lock redis_idiomatic_gen redis_idiomatic_hand redis_idiomatic_profile redis_idiomatic_debug redis_cc all clean print-config
+.PHONY: setup upstream redis_idiomatic redis_owner redis_lock redis_idiomatic_gen redis_idiomatic_hand redis_idiomatic_profile redis_idiomatic_debug redis_cc redis_async_sketch all clean print-config

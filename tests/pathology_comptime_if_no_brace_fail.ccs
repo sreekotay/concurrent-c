@@ -1,0 +1,6 @@
+#include <ccc/std/prelude.cch>
+
+/* Bare statement after `@comptime if` must hard-fail — never silently drop. */
+@comptime if (1) int path_if_no_brace = 1;
+
+int main(void) { return 0; }

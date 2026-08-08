@@ -1,0 +1,22 @@
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <string.h>
+
+/* CCString* p; p->as_slice() — arrow UFCS (not only (*p).as_slice()). */
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(1)) @destroy;
+    assert(a.base);
+
+    CCString s = cc_string_from_slice(&a, @slice("hello"));
+    CCString* p = &s;
+
+    char[:] v = p->as_slice();
+    assert(v.len == 5);
+    assert(memcmp(v.ptr, "hello", 5) == 0);
+
+    /* Dot form still works. */
+    char[:] d = s.as_slice();
+    assert(d.len == 5);
+
+    return 0;
+}

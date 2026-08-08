@@ -24,11 +24,12 @@
  * Nodes allocate with cc_arena_alloc_local (single-owner request tier); nodes and
  * materialized strings share one arena, reset wholesale between parses.
  *
- * Link with cc/runtime/arena_state.c (defines cc_arena_prov_counter).
+ * Host-C oracle: include lowered <ccc/*.h> (not raw .cch — those carry @as).
+ * Link with out/runtime/arena_state.c (defines cc_arena_prov_counter + FFC_IMPL).
  */
 #ifndef CC_JSON_H
 #define CC_JSON_H
-#include <ccc/cc_arena.cch>          /* pulls cc_slice.cch */
+#include <ccc/cc_arena.h>            /* pulls cc_slice.h */
 #include <ccc/vendor/ffc.h>          /* JsonNode_as_f64 — link arena_state.c (FFC_IMPL) */
 #include <stdint.h>
 #include <stdbool.h>

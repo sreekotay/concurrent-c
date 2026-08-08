@@ -78,11 +78,9 @@ int main(void) {
 
     /* Heap-overflow arena: packed heap payload can be released individually. */
     {
-        CCArena ovf = cc_arena_heap(64);
+        CCArena ovf = cc_arena_malloc(64);
         CCSlicePacked hp;
         if (!ovf.base) return 21;
-        ovf.block_max = 1;
-        if (!cc_arena_set_heap_overflow(&ovf, true)) return 22;
         {
             CCSlice long_s = cc_slice_from_buffer(long_buf, sizeof(long_buf));
             CCResult_CCSlicePacked_CCError rr = long_s.to_packed(&ovf);

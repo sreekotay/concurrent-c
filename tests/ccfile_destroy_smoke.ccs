@@ -8,7 +8,7 @@
 
 static CCFile !>(CCIoError) file_open_w(const char* path) {
     CCFile f = {0};
-    if (cc_file_open(&f, cc_slice_from_cstr(path), "w") != 0)
+    if (cc_file_open(&f, cc_slice_cstr(path), "w") != 0)
         return cc_err(cc_io_from_errno(errno ? errno : EINVAL));
     return cc_ok(f);
 }

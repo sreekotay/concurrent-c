@@ -1,0 +1,3 @@
+Żmij (https://github.com/vitaut/zmij) — float/double to shortest decimal string.
+Vendored files: zmij.c, zmij-c.h. License: MIT (see LICENSE in this directory).
+Upstream commit at vendor time: 8289609d8f9e6beea1f20d1a56d9f25e1d441359

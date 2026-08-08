@@ -37,7 +37,7 @@ int cc_template_next_piece(const char* src, size_t n,
 int cc_tpl_scan_literal(const char* src, size_t n, size_t tick_pos, size_t* tick_end_out);
 
 /* True when [body_s, body_e) contains `@emit(` with a backtick template (needs
- * comptime exec after `@comptime for` unrolling). */
+ * comptime exec after `@comptime for` unrolling or `@comptime if` prune). */
 int cc_template_body_needs_emit_exec(const char* src, size_t n,
                                      size_t body_s, size_t body_e);
 

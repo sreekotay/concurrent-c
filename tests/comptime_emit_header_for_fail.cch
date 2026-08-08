@@ -1,0 +1,11 @@
+#ifndef COMPTIME_EMIT_HEADER_FOR_FAIL_CCH
+#define COMPTIME_EMIT_HEADER_FOR_FAIL_CCH
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_type.cch>
+typedef struct HdrForFail { int x; } HdrForFail;
+@comptime for (f in type_of(HdrForFail).fields) {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        enum { HdrForFail_${f.name}_i = ${f.index} };
+    `);
+}
+#endif

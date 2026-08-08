@@ -1,0 +1,7 @@
+#include <ccc/std/prelude.cch>
+
+@comptime if (0) {
+    int path_else_then = 1;
+} else int path_else_bare = 2;
+
+int main(void) { return 0; }

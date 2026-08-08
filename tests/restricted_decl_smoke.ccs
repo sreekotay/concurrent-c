@@ -1,0 +1,31 @@
+/* @restricted mode decl → mangled typedef (spec/draft_facets.md). */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct Conn {
+    int sock; /* stand-in for a ship-only field */
+    int out_len;
+    char buf[32];
+} Conn;
+
+@restricted Encode on Conn {
+    r: out_len, buf, write;
+}
+
+static int conn_write(Conn* c, const char* data) {
+    (void)c;
+    (void)data;
+    return 1;
+}
+
+int main(void) {
+    Conn c;
+    Conn_Restrict_Encode* enc;
+    memset(&c, 0, sizeof(c));
+    enc = &c; /* narrow: Conn* → restricted */
+    (void)enc->write("");
+    (void)enc->out_len;
+    printf("ok\n");
+    return 0;
+}

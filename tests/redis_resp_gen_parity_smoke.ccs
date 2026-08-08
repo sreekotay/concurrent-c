@@ -14,7 +14,7 @@
 
 /* project-local deps of redis_resp.cch, provided by redis_idiomatic.ccs in
  * the real build — minimal faithful versions here */
-static int64_t !>(CCError) parse_i64(CCSlice s) {
+static int64_t !>(CCError) parse_i64(char[:] s) {
     const char* p = (const char*)s.ptr;
     size_t n = s.len, i = 0;
     int neg = 0;
@@ -33,7 +33,7 @@ static int64_t !>(CCError) parse_i64(CCSlice s) {
  * Retired from the server (the grammar reader is the only production
  * path in redis_idiomatic.ccs); preserved here verbatim so the schema
  * face stays pinned against an independent protocol implementation. */
-static bool rr_try_read_line(RespReader* r, CCSlice* out) {
+static bool rr_try_read_line(RespReader* r, char[:]* out) {
     for (size_t i = r->start; i + 1 < r->end; ++i) {
         if (r->data[i] == '\r' && r->data[i + 1] == '\n') {
             *out = cc_slice_from_parts(r->data + r->start,
@@ -46,9 +46,9 @@ static bool rr_try_read_line(RespReader* r, CCSlice* out) {
     }
     return false;
 }
-static RespParseStatus rr_try_read_bulk_buffered(RespReader* r, CCSlice* out, CCError* err) {
+static RespParseStatus rr_try_read_bulk_buffered(RespReader* r, char[:]* out, CCError* err) {
     size_t saved_start = r->start;
-    CCSlice line = {0};
+    char[:] line = {0};
     if (!rr_try_read_line(r, &line)) return RESP_PARSE_INCOMPLETE;
 
     if (line.len < 2 || ((const char*)line.ptr)[0] != '$') {
@@ -96,12 +96,12 @@ static RespParseStatus rr_try_read_bulk_buffered(RespReader* r, CCSlice* out, CC
     return RESP_PARSE_OK;
 }
 static RespParseStatus rr_try_read_args_buffered(RespReader* r,
-                                                 CCSlice* args,
+                                                 char[:]* args,
                                                  size_t cap,
                                                  size_t* out_argc,
                                                  CCError* err) {
     size_t saved_start = r->start;
-    CCSlice line = {0};
+    char[:] line = {0};
     if (!rr_try_read_line(r, &line)) return RESP_PARSE_INCOMPLETE;
 
     if (!(line.len > 0 && ((const char*)line.ptr)[0] == '*')) {
@@ -172,7 +172,7 @@ static RespParseStatus rr_try_read_args_buffered(RespReader* r,
  * INSIDE an inline line is a parse error here but accepted by the hand
  * reader's \r\n pair scan. */
 static RespParseStatus gen_try_read_args_buffered(RespReader* r,
-                                                  CCSlice* args,
+                                                  char[:]* args,
                                                   size_t cap,
                                                   size_t* out_argc,
                                                   CCError* err,
@@ -211,7 +211,7 @@ static RespParseStatus gen_try_read_args_buffered(RespReader* r,
 /* ---- parity harness: identical streams, many chunkings, equal event logs ---- */
 typedef struct { int status; size_t argc; unsigned long hash; } Ev;
 
-static unsigned long ev_hash(CCSlice* args, size_t argc) {
+static unsigned long ev_hash(char[:]* args, size_t argc) {
     unsigned long h = 5381;
     for (size_t i = 0; i < argc; i++) {
         const unsigned char* p = (const unsigned char*)args[i].ptr;
@@ -231,7 +231,7 @@ static int drive(const char* stream, size_t slen, size_t chunk, int use_gen,
     for (;;) {
         /* drain */
         for (;;) {
-            CCSlice args[4];
+            char[:] args[4];
             size_t argc = 0;
             CCError err = {0};
             RespParseStatus st = use_gen

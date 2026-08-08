@@ -262,9 +262,9 @@ static int default_job_count(void) {
     return (int)n;
 }
 
-/* Parallel SERDES shadow lowerer (examples/serdes/c). Default harness skips
- * these — run scripts/test_serdes.sh (or CC_TEST_SERDES=1 / --filter c_pp_). */
-static int test_is_serdes(const char* stem) {
+/* Parallel shadow_lower smokes (cc/shadow). Default harness skips
+ * these — run scripts/test_shadow.sh (or CC_TEST_SHADOW=1 / --filter c_pp_). */
+static int test_is_shadow(const char* stem) {
     if (!stem) return 0;
     return strncmp(stem, "c_pp_", 5) == 0;
 }
@@ -479,14 +479,16 @@ static int get_run_timeout_for_test(const char* stem, int default_timeout_sec) {
     if (strcmp(stem, "chan_park_wake_lostwake_stress_smoke") == 0) return 20;
     /* Emits both Redis variants; ~7s each under -O0 toolchains. */
     if (strcmp(stem, "redis_phase2_lowering_shape_smoke") == 0) return 30;
-    /* Many nested ccc -e/-E subprocesses; ~9s alone, flaky at default 10s. */
-    if (strcmp(stem, "script_oneliner_smoke") == 0) return 30;
+    /* Many nested ccc -e/-E subprocesses; ~11s alone, can exceed 30s under
+     * --jobs contention (each child competes for CPU with the suite). */
+    if (strcmp(stem, "script_oneliner_smoke") == 0) return 60;
     /* Compact goldens + hostcc + one header beachhead; keep near default. */
     if (strcmp(stem, "c_pp_shadow_emit_smoke") == 0) return 20;
     /* Each shells out to `ccc build` of a py.cch TU: ~9s of backend -O2 on
      * a cold cache, over the 10s default under suite parallelism. */
     if (strcmp(stem, "py_module_import_smoke") == 0) return 30;
     if (strcmp(stem, "py_module_double_result_smoke") == 0) return 30;
+    if (strcmp(stem, "py_module_kwargs_smoke") == 0) return 30;
     if (strcmp(stem, "py_levenshtein_smoke") == 0) return 30;
     return default_timeout_sec;
 }
@@ -650,6 +652,7 @@ static int run_one_test(const char* stem,
                         const char* out_dir,
                         const char* bin_dir,
                         int use_cache,
+                        int opt_o0,
                         int build_timeout_sec,
                         int run_timeout_sec) {
     char bin_out[512];
@@ -717,33 +720,33 @@ static int run_one_test(const char* stem,
     }
 
     /* 1) Build via ccc build (this is the build system under test).
-     * Front: CC_TEST_FRONTEND / CC_FRONTEND = serdes|legacy (ccc default: serdes).
-     * Pinning build diagnostics requires a cold parse — warm emit cache
-     * skips shadow_lower / comptime and would silently drop .build_stderr and
-     * .compile_err needles (host-cc may still fail with a different message). */
+     * Front: CC_TEST_FRONTEND / CC_FRONTEND = native|legacy (ccc default: native).
+     * Emit cache is keyed by source bytes + toolchain bytes; warm hits replay
+     * lowering diagnostics from emit.c.diag. Erroring emits are not cached.
+     * Do not force --no-cache for diag/fail tests — that papers over cache bugs. */
     char build_cmd[3072];
-    int cold_for_diags =
-        (exp_build_stderr && exp_build_stderr_len > 0) ||
-        (exp_compile_err && exp_compile_err_len > 0) || compile_fail;
-    const char* cache_flag = (use_cache && !cold_for_diags) ? "" : "--no-cache ";
+    const char* cache_flag = use_cache ? "" : "--no-cache ";
+    /* Append after ccc's default -O2 so the host sees `-O2 -O0` and last wins.
+     * Space form required: `--cc-flags=-O0` is parsed as an input path. */
+    const char* o0_flag = opt_o0 ? "--cc-flags -O0 " : "";
     const char* front_flag = "";
     {
         const char* fe = getenv("CC_TEST_FRONTEND");
         if (!fe || !fe[0]) fe = getenv("CC_FRONTEND");
-        if (fe && strcmp(fe, "serdes") == 0) front_flag = "--frontend=serdes ";
+        if (fe && strcmp(fe, "native") == 0) front_flag = "--frontend=native ";
         else if (fe && strcmp(fe, "legacy") == 0) front_flag = "--frontend=legacy ";
     }
     if (ldflags_clean[0]) {
         snprintf(build_cmd, sizeof(build_cmd),
-                 "./cc/bin/ccc build %s%s--out-dir %s --bin-dir %s --link %s -o %s --ld-flags \"%s\"",
-                 cache_flag, front_flag,
+                 "./cc/bin/ccc build %s%s%s--out-dir %s --bin-dir %s --link %s -o %s --ld-flags \"%s\"",
+                 cache_flag, front_flag, o0_flag,
                  (out_dir && out_dir[0]) ? out_dir : "out",
                  (bin_dir && bin_dir[0]) ? bin_dir : "bin",
                  input_path, bin_out, ldflags_clean);
     } else {
         snprintf(build_cmd, sizeof(build_cmd),
-                 "./cc/bin/ccc build %s%s--out-dir %s --bin-dir %s --link %s -o %s",
-                 cache_flag, front_flag,
+                 "./cc/bin/ccc build %s%s%s--out-dir %s --bin-dir %s --link %s -o %s",
+                 cache_flag, front_flag, o0_flag,
                  (out_dir && out_dir[0]) ? out_dir : "out",
                  (bin_dir && bin_dir[0]) ? bin_dir : "bin",
                  input_path, bin_out);
@@ -796,18 +799,43 @@ static int run_one_test(const char* stem,
         return 1;
     }
 
-    /* Optional pin for compile-time diagnostics on successful builds (warnings). */
-    if (exp_build_stderr && exp_build_stderr_len) {
+    /* Compile-time diagnostics on successful builds:
+     * - `.build_stderr` pin: require those needles (intentional warnings).
+     * - `*_smoke` without a pin: build stderr must contain no `warning:`. */
+    {
         unsigned char* build_err_buf = NULL;
         size_t build_err_len = 0;
         (void)read_entire_file_alloc(build_err_txt, &build_err_buf, &build_err_len);
-        if (expect_contains_lines("build_stderr", build_err_buf, build_err_len,
-                                  exp_build_stderr, exp_build_stderr_len) != 0) {
-            log_failure_files(stem, out_txt, err_txt, build_err_txt);
-            free(build_err_buf);
-            arg_runs_clear(&runs);
-            free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(exp_build_stderr); free(ldflags);
-            return 1;
+        if (exp_build_stderr && exp_build_stderr_len) {
+            if (expect_contains_lines("build_stderr", build_err_buf, build_err_len,
+                                      exp_build_stderr, exp_build_stderr_len) != 0) {
+                log_failure_files(stem, out_txt, err_txt, build_err_txt);
+                free(build_err_buf);
+                arg_runs_clear(&runs);
+                free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(exp_build_stderr); free(ldflags);
+                return 1;
+            }
+        } else if (ends_with(stem, "_smoke") && build_err_buf && build_err_len >= 8) {
+            const char* p = (const char*)build_err_buf;
+            size_t i;
+            int saw_warn = 0;
+            for (i = 0; i + 8 <= build_err_len; i++) {
+                if (strncmp(p + i, "warning:", 8) == 0) {
+                    saw_warn = 1;
+                    break;
+                }
+            }
+            if (saw_warn) {
+                fprintf(stderr,
+                        "[FAIL] %s: smoke build produced warning(s); "
+                        "fix them or pin expected needles in %s.build_stderr\n",
+                        stem, stem);
+                log_failure_files(stem, out_txt, err_txt, build_err_txt);
+                free(build_err_buf);
+                arg_runs_clear(&runs);
+                free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(exp_build_stderr); free(ldflags);
+                return 1;
+            }
         }
         free(build_err_buf);
     }
@@ -914,11 +942,14 @@ static int run_one_test(const char* stem,
 
 static void usage(const char* prog) {
     fprintf(stderr, "Usage:\n");
-    fprintf(stderr, "  %s [--list] [--filter SUBSTR] [--quick|--full] [--verbose] [--jobs N] [--build-timeout SECONDS] [--run-timeout SECONDS] [--use-cache|--no-cache] [--clean]\n", prog);
+    fprintf(stderr, "  %s [--list] [--filter SUBSTR] [--quick|--full] [--verbose] [--jobs N]\n", prog);
+    fprintf(stderr, "       [--build-timeout SECONDS] [--run-timeout SECONDS]\n");
+    fprintf(stderr, "       [--use-cache|--no-cache] [--O0] [--clean]\n");
     fprintf(stderr, "  --quick  skip stress/lostwake/race tests (default)\n");
     fprintf(stderr, "  --full   include stress/lostwake/race tests (also CC_TEST_FULL=1)\n");
-    fprintf(stderr, "  c_pp_*   SERDES smokes skipped unless CC_TEST_SERDES=1 or --filter c_pp_\n");
-    fprintf(stderr, "  Front:   CC_TEST_FRONTEND=serdes|legacy (or CC_FRONTEND) → ccc --frontend=\n");
+    fprintf(stderr, "  --O0     host-compile test bins with -O0 (faster cold builds; also CC_TEST_O0=1)\n");
+    fprintf(stderr, "  c_pp_*   shadow_lower smokes skipped unless CC_TEST_SHADOW=1 or --filter c_pp_\n");
+    fprintf(stderr, "  Front:   CC_TEST_FRONTEND=native|legacy (or CC_FRONTEND) → ccc --frontend=\n");
 }
 
 int main(int argc, char** argv) {
@@ -928,6 +959,7 @@ int main(int argc, char** argv) {
     int jobs = default_job_count();
     int quick = 1; /* default: skip heavy stress/race; --full for the complete set */
     int use_cache = 1; /* default on; cold runs reuse shared concurrent_c.o / .c outs */
+    int opt_o0 = 0;    /* host -O0 for faster cold compiles (default stays ccc -O2) */
     int clean = 0;
     int build_timeout_sec = 300;
     int run_timeout_sec = 10;
@@ -938,6 +970,10 @@ int main(int argc, char** argv) {
         if (strcmp(argv[i], "--full") == 0) { quick = 0; continue; }
         if (strcmp(argv[i], "--use-cache") == 0) { use_cache = 1; continue; }
         if (strcmp(argv[i], "--no-cache") == 0) { use_cache = 0; continue; }
+        if (strcmp(argv[i], "--O0") == 0 || strcmp(argv[i], "-O0") == 0) {
+            opt_o0 = 1;
+            continue;
+        }
         if (strcmp(argv[i], "--clean") == 0) { clean = 1; continue; }
         if (strcmp(argv[i], "--build-timeout") == 0) {
             if (i + 1 >= argc) { fprintf(stderr, "--build-timeout requires a value\n"); return 2; }
@@ -980,6 +1016,15 @@ int main(int argc, char** argv) {
     {
         const char* env = getenv("CC_TEST_NO_CACHE");
         if (env && strcmp(env, "1") == 0) use_cache = 0;
+    }
+    {
+        const char* env = getenv("CC_TEST_O0");
+        if (env && (strcmp(env, "1") == 0 || strcmp(env, "yes") == 0 ||
+                    strcmp(env, "true") == 0))
+            opt_o0 = 1;
+        if (env && (strcmp(env, "0") == 0 || strcmp(env, "no") == 0 ||
+                    strcmp(env, "false") == 0))
+            opt_o0 = 0;
     }
     {
         const char* env = getenv("CC_TEST_FULL");
@@ -1111,12 +1156,12 @@ int main(int argc, char** argv) {
         }
 
         if (filter && !str_contains(stem, filter) && !str_contains(path, filter)) continue;
-        /* Default suite = production ccc. SERDES c_pp_* only with opt-in or filter. */
+        /* Default suite = production ccc. c_pp_* only with opt-in or filter. */
         {
-            const char* serdes = getenv("CC_TEST_SERDES");
-            int want_serdes = (serdes && strcmp(serdes, "1") == 0) || filter != NULL;
-            if (test_is_serdes(stem) && !want_serdes) {
-                if (verbose) fprintf(stderr, "[SKIP] %s (serdes: scripts/test_serdes.sh)\n", stem);
+            const char* shadow = getenv("CC_TEST_SHADOW");
+            int want_shadow = (shadow && strcmp(shadow, "1") == 0) || filter != NULL;
+            if (test_is_shadow(stem) && !want_shadow) {
+                if (verbose) fprintf(stderr, "[SKIP] %s (shadow: scripts/test_shadow.sh)\n", stem);
                 continue;
             }
         }
@@ -1139,7 +1184,9 @@ int main(int argc, char** argv) {
 
         ran++;
         if (jobs <= 1) {
-            if (run_one_test(stem, path, compile_fail, verbose, "out", "bin", use_cache, build_timeout_sec, run_timeout_sec) != 0) {
+            if (run_one_test(stem, path, compile_fail, verbose, "out", "bin",
+                             use_cache, opt_o0, build_timeout_sec,
+                             run_timeout_sec) != 0) {
                 failed++;
                 add_failed_name(stem);
             }
@@ -1164,7 +1211,9 @@ int main(int argc, char** argv) {
             snprintf(bin_dir, sizeof(bin_dir), "bin/.cc_test/%s", stem);
             (void)ensure_dir_p(out_dir);
             (void)ensure_dir_p(bin_dir);
-            int rc = run_one_test(stem, path, compile_fail, verbose, out_dir, bin_dir, use_cache, build_timeout_sec, run_timeout_sec);
+            int rc = run_one_test(stem, path, compile_fail, verbose, out_dir,
+                                  bin_dir, use_cache, opt_o0, build_timeout_sec,
+                                  run_timeout_sec);
             _exit(rc == 0 ? 0 : 1);
         }
 

@@ -1,0 +1,48 @@
+/* Beachhead: CCIoError on error_face_frag (no _Generic / no CC_DECL_RESULT_SPEC). */
+#pragma once
+#include <stdint.h>
+#include <errno.h>
+#include "error_face_frag.cch"
+
+typedef struct {
+    CCError base @as;
+    int32_t os_code;
+} CCIoError;
+
+static inline CCIoError cc_io_error_os(CCErrorKind kind, int os_code) {
+    CCIoError e;
+    e.base = __cc_error_make(kind, cc_error_kind_str(kind));
+    e.os_code = (int32_t)os_code;
+    return e;
+}
+
+static inline CCIoError __cc_io_error_from_kind(CCErrorKind kind) {
+    return cc_io_error_os(kind, 0);
+}
+
+static inline CCIoError __cc_io_error_from_cc_error(CCError e) {
+    CCIoError r;
+    r.base = e;
+    r.os_code = 0;
+    return r;
+}
+
+static inline const char* cc_io_error_str(CCIoError e) {
+    return cc_error_str(e.base);
+}
+
+static inline CCIoError cc_io_from_errno(int err) {
+    CCErrorKind kind = CC_ERR_IO;
+    switch (err) {
+        case EACCES: kind = CC_ERR_PERMISSION; break;
+        case ENOENT: kind = CC_ERR_NOT_FOUND; break;
+        case EINVAL: kind = CC_ERR_INVALID_ARG; break;
+        case EINTR:  kind = CC_ERR_INTERRUPTED; break;
+        case ENOMEM: kind = CC_ERR_OUT_OF_MEMORY; break;
+        case EBUSY:  kind = CC_ERR_WOULD_BLOCK; break;
+        case EPIPE:  kind = CC_ERR_CLOSED; break;
+        case 0:      kind = CC_ERR_IO; break;
+        default:     kind = CC_ERR_IO; break;
+    }
+    return cc_io_error_os(kind, err);
+}

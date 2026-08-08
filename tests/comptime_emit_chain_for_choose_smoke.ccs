@@ -1,0 +1,33 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+typedef struct Ch { int a; int b; int c; } Ch;
+
+/* Outer else-if chooses a for+emit; dead arms poison. */
+@comptime if (0) {
+    @emit(CC_EMIT_AFTER_PRELUDE, ` chain_for_wrong_nf(); `);
+} else @comptime if (1) {
+    @comptime for (f in type_of(Ch).fields) {
+        @emit(CC_EMIT_AFTER_PRELUDE, `
+            @comptime if (f.index == 1) {
+                enum { CHAIN_FOR_MID = ${f.index} * 5 };
+            } else @comptime if (f.index == 0) {
+                enum { CHAIN_FOR_HEAD_${f.name} = 100 };
+            } else {
+                enum { CHAIN_FOR_TAIL_${f.name} = 200 };
+            }
+        `);
+    }
+} else {
+    @emit(CC_EMIT_AFTER_PRELUDE, ` chain_for_tail_dead(); `);
+}
+
+int main(void) {
+    if (CHAIN_FOR_HEAD_a != 100) return 1;
+    if (CHAIN_FOR_MID != 5) return 2;
+    if (CHAIN_FOR_TAIL_c != 200) return 3;
+    printf("comptime_emit_chain_for_choose_smoke ok\n");
+    return 0;
+}

@@ -640,7 +640,7 @@ static int cc_try_cc_at_stmt(void) {
         }
         if (strcmp(cc_at, "scratch") == 0) {
             tcc_error("@scratch is only valid as the arena argument of "
-                      "@string(...); use CC_ARENA_STACK for a named scratch "
+                      "@string(...); use cc_arena_stack for a named scratch "
                       "arena");
             next(); /* consume 'scratch' */
             if (tok == '(') {

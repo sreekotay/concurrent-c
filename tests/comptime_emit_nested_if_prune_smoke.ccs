@@ -1,0 +1,32 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+typedef struct { int a; double b; } PrunePair;
+
+/* Dead arms name undefined identifiers: if they survive into the spliced
+ * fragment, the host build fails. Taken arms alone must remain. */
+@comptime for (f in type_of(PrunePair).fields) {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        @comptime if (1) {
+            enum { PrunePair_live_${f.index} = ${f.index} };
+        } else {
+            this_true_dead_arm_must_not_compile();
+        }
+        @comptime if (0) {
+            this_false_dead_arm_must_not_compile();
+        } else {
+            enum { PrunePair_else_${f.index} = ${f.index} + 10 };
+        }
+    `);
+}
+
+int main(void) {
+    if (PrunePair_live_0 != 0) return 1;
+    if (PrunePair_live_1 != 1) return 2;
+    if (PrunePair_else_0 != 10) return 3;
+    if (PrunePair_else_1 != 11) return 4;
+    printf("comptime_emit_nested_if_prune_smoke ok\n");
+    return 0;
+}

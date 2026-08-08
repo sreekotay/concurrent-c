@@ -12,7 +12,8 @@
  * Semantics matched to upstream 0.27 (rapidfuzz-backed):
  *   distance      unit-cost edit distance over CODEPOINTS, not bytes
  *   ratio         (lensum - indel_distance) / lensum; empty/empty = 1.0
- *   hamming       padded: unequal lengths count the overhang as mismatches
+ *   hamming       pad=1 by default; unequal lengths count overhang as mismatches
+ *                 (pad=0 raises on length mismatch, matching upstream)
  *   jaro          both-empty = 1.0, one-empty = 0.0
  *   jaro_winkler  prefix bonus 0.1, capped at 4
  *
@@ -20,6 +21,7 @@
  * steady-state does zero allocation — and `destroy` tears it down as the
  * module's m_free. */
 #include <ccc/script/py.cch>
+#include <ccc/std/slice.cch>
 #include <stdint.h>
 #include <string.h>
 
@@ -27,44 +29,32 @@ typedef struct Lev {
     CCArena a;
 } Lev;
 
-/* UTF-8 -> codepoints, arena-backed.  Upstream operates on Python str,
- * which reaches us as UTF-8 bytes; equality must mean "same character",
- * so 'é' vs 'e' is one edit, not two.  An invalid byte decodes as itself
- * (never seen from CPython, which hands over valid UTF-8). */
-static size_t lev__decode(CCArena *a, CCSlice s, uint32_t **out) {
-    const unsigned char *p = (const unsigned char *)s.ptr;
-    size_t i = 0, n = 0;
-    uint32_t *cp = cc_arena_alloc_T_count(uint32_t, a, s.len ? s.len : 1);
-    if (!cp) { *out = NULL; return 0; }
-    while (i < s.len && p[i] < 0x80) cp[n++] = p[i++];  /* ASCII prefix, branch-light */
-    while (i < s.len) {
-        unsigned char c = p[i];
-        uint32_t v = c;
-        size_t more = 0;
-        if (c >= 0xF0)      { v = c & 0x07; more = 3; }
-        else if (c >= 0xE0) { v = c & 0x0F; more = 2; }
-        else if (c >= 0xC0) { v = c & 0x1F; more = 1; }
-        if (i + more < s.len) {
-            for (size_t k = 1; k <= more; k++) v = (v << 6) | (p[i + k] & 0x3F);
-            i += more + 1;
-        } else {
-            v = c;
-            i++;
-        }
-        cp[n++] = v;
-    }
-    *out = cp;
-    return n;
-}
-
-static int lev__prep(Lev *self, CCSlice s1, CCSlice s2,
-                     uint32_t **a, size_t *n, uint32_t **b, size_t *m) {
+/* Python str arrives as CCPyStr (call-scoped borrow); `s.codepoints(arena)`
+ * fills UCS4 via the Stable ABI — no UTF-8 round-trip.  Equality is by
+ * codepoint, so 'é' vs 'e' is one edit, not two. */
+static int lev__ensure_arena(Lev *self) {
     if (!self->a.base) self->a = cc_arena_heap(kilobytes(256));
     if (!self->a.base) return -1;
     cc_arena_reset(&self->a);
-    *n = lev__decode(&self->a, s1, a);
-    *m = lev__decode(&self->a, s2, b);
-    return (*a && *b) ? 0 : -1;
+    return 0;
+}
+
+static int lev__prep(Lev *self, CCPyStr s1, CCPyStr s2,
+                     uint32_t **a, size_t *n, uint32_t **b, size_t *m) {
+    CCResult_CCSlice_uint32_t_CCError ra, rb;
+    CCSlice_uint32_t ca, cb;
+    if (lev__ensure_arena(self) != 0) return -1;
+    ra = s1.codepoints(&self->a);
+    if (CCResult_CCSlice_uint32_t_CCError_is_err(ra)) return -1;
+    rb = s2.codepoints(&self->a);
+    if (CCResult_CCSlice_uint32_t_CCError_is_err(rb)) return -1;
+    ca = CCResult_CCSlice_uint32_t_CCError_value(ra);
+    cb = CCResult_CCSlice_uint32_t_CCError_value(rb);
+    *a = (uint32_t *)ca.base.ptr;
+    *n = ca.base.len;
+    *b = (uint32_t *)cb.base.ptr;
+    *m = cb.base.len;
+    return 0;
 }
 
 /* Two-row DP; `sub` is the substitution cost — 1 is the classic distance,
@@ -182,10 +172,13 @@ static const uint64_t *lev__peq_row(const LevPeq *p, uint32_t cp) {
     return p->zero;
 }
 
+/* Constant-time SWAR popcount: LCS state words run about half-set, where
+ * the bit-clearing loop's cost peaks. */
 static int lev__popcount64(uint64_t x) {
-    int c = 0;
-    while (x) { x &= x - 1; c++; }
-    return c;
+    x -= (x >> 1) & 0x5555555555555555ull;
+    x = (x & 0x3333333333333333ull) + ((x >> 2) & 0x3333333333333333ull);
+    x = (x + (x >> 4)) & 0x0F0F0F0F0F0F0F0Full;
+    return (int)((x * 0x0101010101010101ull) >> 56);
 }
 
 /* rapidfuzz reaches its long-string numbers with C++ templates on the
@@ -462,7 +455,7 @@ static long long lev__dist(CCArena *ar, const uint32_t *s, size_t n,
     return (long long)(n + m) - 2 * l;
 }
 
-static long long !>(CCError) Lev_distance(Lev *self, CCSlice s1, CCSlice s2) {
+static long long !>(CCError) Lev_distance(Lev *self, CCPyStr s1, CCPyStr s2) {
     uint32_t *a, *b; size_t n, m;
     if (lev__prep(self, s1, s2, &a, &n, &b, &m) != 0)
         return cc_err(CC_ERR_OUT_OF_MEMORY, "levenshtein: scratch arena exhausted");
@@ -471,7 +464,7 @@ static long long !>(CCError) Lev_distance(Lev *self, CCSlice s1, CCSlice s2) {
     return cc_ok(d);
 }
 
-static double !>(CCError) Lev_ratio(Lev *self, CCSlice s1, CCSlice s2) {
+static double !>(CCError) Lev_ratio(Lev *self, CCPyStr s1, CCPyStr s2) {
     uint32_t *a, *b; size_t n, m;
     if (lev__prep(self, s1, s2, &a, &n, &b, &m) != 0)
         return cc_err(CC_ERR_OUT_OF_MEMORY, "levenshtein: scratch arena exhausted");
@@ -481,10 +474,13 @@ static double !>(CCError) Lev_ratio(Lev *self, CCSlice s1, CCSlice s2) {
     return cc_ok((double)((long long)(n + m) - d) / (double)(n + m));
 }
 
-static long long !>(CCError) Lev_hamming(Lev *self, CCSlice s1, CCSlice s2) {
+static long long !>(CCError) Lev_hamming(Lev *self, CCPyStr s1, CCPyStr s2,
+                                         long long pad = 1) {
     uint32_t *a, *b; size_t n, m;
     if (lev__prep(self, s1, s2, &a, &n, &b, &m) != 0)
         return cc_err(CC_ERR_OUT_OF_MEMORY, "levenshtein: scratch arena exhausted");
+    if (!pad && n != m)
+        return cc_err(CC_ERR_INVALID_ARG, "hamming: length mismatch");
     {
         size_t lo = n < m ? n : m, hi = n < m ? m : n;
         long long d = (long long)(hi - lo);
@@ -529,7 +525,7 @@ static double lev__jaro(const uint32_t *a, size_t n, const uint32_t *b, size_t m
     }
 }
 
-static double !>(CCError) Lev_jaro(Lev *self, CCSlice s1, CCSlice s2) {
+static double !>(CCError) Lev_jaro(Lev *self, CCPyStr s1, CCPyStr s2) {
     uint32_t *a, *b; size_t n, m;
     if (lev__prep(self, s1, s2, &a, &n, &b, &m) != 0)
         return cc_err(CC_ERR_OUT_OF_MEMORY, "levenshtein: scratch arena exhausted");
@@ -538,7 +534,7 @@ static double !>(CCError) Lev_jaro(Lev *self, CCSlice s1, CCSlice s2) {
     return cc_ok(j);
 }
 
-static double !>(CCError) Lev_jaro_winkler(Lev *self, CCSlice s1, CCSlice s2) {
+static double !>(CCError) Lev_jaro_winkler(Lev *self, CCPyStr s1, CCPyStr s2) {
     uint32_t *a, *b; size_t n, m;
     if (lev__prep(self, s1, s2, &a, &n, &b, &m) != 0)
         return cc_err(CC_ERR_OUT_OF_MEMORY, "levenshtein: scratch arena exhausted");

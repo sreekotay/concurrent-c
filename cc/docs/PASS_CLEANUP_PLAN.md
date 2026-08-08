@@ -1,5 +1,9 @@
 # Compiler-Internals Deep Cycle: span-anchored passes
 
+> **Scope: legacy front only.** Default: [`ARCHITECTURE.md`](ARCHITECTURE.md).
+> This plan is about the multipass path — see
+> [`LEGACY_ARCHITECTURE.md`](LEGACY_ARCHITECTURE.md).
+
 Position (settled): **text is the INTERFACE** — emitted C, lowered headers,
 comptime output all stay text; that stability thesis stands. The problem is
 INTERNAL: passes that have AST access still locate their edits by re-scanning

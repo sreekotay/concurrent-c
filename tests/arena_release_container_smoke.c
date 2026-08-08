@@ -26,10 +26,8 @@ static void test_empty_heap_overflow_rejected(void) {
 }
 
 static CCArena make_heap_overflow_arena(void) {
-    CCArena arena = cc_arena_heap(8192);
+    CCArena arena = cc_arena_malloc(8192);
     assert(arena.base != NULL);
-    arena.block_max = 1;
-    assert(cc_arena_set_heap_overflow(&arena, true));
     return arena;
 }
 
@@ -44,10 +42,27 @@ static void test_direct_release(ArenaFactory make_arena) {
 
     assert(cc_arena_release(&arena, p));
     assert(cc_atomic_load(&arena.live_allocs) == 0);
+    /* Last-live root release rewinds and stays epoch/checkpointable. */
+    assert((arena._flags & CC_ARENA_FLAG_NON_REWINDABLE) == 0);
+    {
+        CCArenaCheckpoint cp = cc_arena_checkpoint(&arena);
+        assert(cp.arena == &arena);
+    }
 
     void *q = cc_arena_alloc(&arena, 32, 8);
     assert(q == p);
     assert(cc_atomic_load(&arena.live_allocs) == 1);
+
+    /* Non-last release: hole stays; flip to count/release mode. */
+    void *r = cc_arena_alloc(&arena, 32, 8);
+    assert(r != NULL);
+    assert(cc_arena_release(&arena, q));
+    assert(cc_atomic_load(&arena.live_allocs) == 1);
+    assert((arena._flags & CC_ARENA_FLAG_NON_REWINDABLE) != 0);
+    {
+        CCArenaCheckpoint cp = cc_arena_checkpoint(&arena);
+        assert(cp.arena == NULL);
+    }
 
     cc_arena_free(&arena);
 }

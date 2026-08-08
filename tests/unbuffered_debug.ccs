@@ -21,19 +21,11 @@ CCChan* g_ch;
 void cc_fiber_dump_state(const char* reason);
 
 @async int sender(int id) {
-    printf("S%d: STARTED\n", id);
-    fflush(stdout);
     for (int i = 0; i < MSGS_PER; i++) {
         int val = id * 100 + i;
         printf("S%d: sending %d...\n", id, val);
         fflush(stdout);
-        intptr_t rc = @await g_tx.send(val);
-        printf("S%d: send returned rc=%ld\n", id, (long)rc);
-        fflush(stdout);
-        if (rc != 0) {
-            printf("S%d: send failed rc=%ld\n", id, (long)rc);
-            return -1;
-        }
+        @await g_tx.send(val) !>;
         cc_atomic_fetch_add(&g_sent, 1);
         printf("S%d: sent %d (total=%d)\n", id, val, cc_atomic_load(&g_sent));
         fflush(stdout);
@@ -43,19 +35,11 @@ void cc_fiber_dump_state(const char* reason);
 }
 
 @async int receiver(int id) {
-    printf("R%d: STARTED\n", id);
-    fflush(stdout);
     for (int i = 0; i < MSGS_PER; i++) {
         int val = 0;
         printf("R%d: receiving...\n", id);
         fflush(stdout);
-        intptr_t rc = @await g_rx.recv(&val);
-        printf("R%d: recv returned rc=%ld val=%d\n", id, (long)rc, val);
-        fflush(stdout);
-        if (rc != 0) {
-            printf("R%d: recv failed rc=%ld\n", id, (long)rc);
-            return -1;
-        }
+        @await g_rx.recv(&val) !>;
         cc_atomic_fetch_add(&g_recv, 1);
         printf("R%d: got %d (total=%d)\n", id, val, cc_atomic_load(&g_recv));
         fflush(stdout);
@@ -65,6 +49,10 @@ void cc_fiber_dump_state(const char* reason);
 }
 
 int main(void) {
+    @errhandler(CCIoError e) {
+        fprintf(stderr, "channel err: %s\n", e.message);
+        return 1;
+    }
     printf("unbuffered_debug: %d senders, %d receivers, %d msgs each\n",
            NUM_SENDERS, NUM_RECEIVERS, MSGS_PER);
     fflush(stdout);

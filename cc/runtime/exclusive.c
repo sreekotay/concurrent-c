@@ -659,7 +659,7 @@ static size_t cc__exclusive_round_cap(size_t initial_cap) {
     return cap;
 }
 
-CCExclusive* cc_exclusive_create_sized(CCArena* arena, size_t initial_cap) {
+CCExclusive* cc_exclusive_create(CCArena* arena, size_t initial_cap) {
     if (!arena) return NULL;
 
     CCExclusive* excl = (CCExclusive*)cc_arena_alloc(
@@ -688,10 +688,6 @@ CCExclusive* cc_exclusive_create_sized(CCArena* arena, size_t initial_cap) {
         }
     }
     return excl;
-}
-
-CCExclusive* cc_exclusive_create(CCArena* arena) {
-    return cc_exclusive_create_sized(arena, CC_EXCLUSIVE_DEFAULT_CAP);
 }
 
 void cc_exclusive_destroy(CCExclusive* excl) {

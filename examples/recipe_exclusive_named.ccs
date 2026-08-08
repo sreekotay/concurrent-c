@@ -5,13 +5,13 @@
  * fibers must briefly mutate the same named resource, use a CCExclusive
  * domain:
  *
- *   CCArena arena = @create(kilobytes(64)) @destroy;
- *   CCExclusive* excl = cc_exclusive_create(&arena);       // or create_sized
- *   CCExclusiveMutex m = excl->mutex(name);   // resolve once
+ *   CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+ *   CCExclusive* excl = cc_exclusive_create(&arena, 0);    // 0 → default map
+ *   CCExclusiveMutex m = cc_exclusive_mutex(excl, name);   // resolve once
  *   CCExclusiveGuard g = m.acquire();
  *   ... short critical section (do not @await) ...
  *   g.release();                              // idempotent (local held bit)
- *   excl->destroy();
+ *   cc_exclusive_destroy(excl);
  *
  * Same name in one domain ⇒ same lock. Different domains never collide.
  * Keep critical sections short; park/await under the lock stalls others.
@@ -33,7 +33,7 @@ static Counter g_shared;                 /* guarded by name=1 */
 static Counter g_private[NUM_WORKERS];   /* each guarded by name=100+id */
 
 static void bump_shared(int iters) {
-    CCExclusiveMutex m = g_excl->mutex(1); /* resolve once per worker */
+    CCExclusiveMutex m = cc_exclusive_mutex(g_excl, 1); /* resolve once per worker */
     for (int i = 0; i < iters; i++) {
         CCExclusiveGuard g = m.acquire();
         g_shared.value++;
@@ -42,7 +42,7 @@ static void bump_shared(int iters) {
 }
 
 static void bump_private(int worker_id, int iters) {
-    CCExclusiveMutex m = g_excl->mutex((uint64_t)(100 + worker_id));
+    CCExclusiveMutex m = cc_exclusive_mutex(g_excl, (uint64_t)(100 + worker_id));
     for (int i = 0; i < iters; i++) {
         CCExclusiveGuard g = m.acquire();
         g_private[worker_id].value++;
@@ -53,8 +53,8 @@ static void bump_private(int worker_id, int iters) {
 int main(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
 
-    CCArena excl_arena = @create(kilobytes(64)) @destroy;
-    g_excl = cc_exclusive_create(&excl_arena);
+    CCArena excl_arena = cc_arena_heap(kilobytes(64)) @destroy;
+    g_excl = cc_exclusive_create(&excl_arena, 0);
     if (!g_excl) {
         eprintln("cc_exclusive_create failed") !>;
         return 1;
@@ -92,7 +92,7 @@ int main(void) {
     println(@string(`shared  = ${g_shared.value} (expect ${expect})`, @scratch)) !>;
     println(@string(`private = ${private_sum} (expect ${expect})`, @scratch)) !>;
 
-    g_excl->destroy();
+    cc_exclusive_destroy(g_excl);
     g_excl = NULL;
 
     if (g_shared.value != expect || private_sum != expect) return 1;

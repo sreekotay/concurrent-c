@@ -56,7 +56,7 @@ static bool !>(CCError) store_init(Store* store) {
 static CCSliceHdr !>(CCError) store_anchor_key(Store* store, char[:] key) {
     if (!store) return cc_err(CC_ERR_INVALID_ARG, "anchor without store");
     CCSliceHdr view = key.hdr();
-    CCSliceHdr stable = cc_slice_hdr_clone_into(&view, &store->key_arena) !>(e) { return cc_err(e); };
+    CCSliceHdr stable = view.clone_into(&store->key_arena) !>(e) { return cc_err(e); };
     store->key_insert_bytes += key.len;
     return cc_ok(stable);
 }
@@ -106,8 +106,7 @@ int main(void) {
 
     /* Request checkpoints model short-lived input.  The store keeps only the
      * anchored copies; each checkpoint restore drops request scratch bytes. */
-    CCArena request_arena = cc_arena_heap(kilobytes(1));
-    @defer request_arena.destroy();
+    CCArena request_arena = cc_arena_heap(kilobytes(1)) @destroy;
     if (!request_arena.valid()) return 1;
 
     for (int request_id = 0; request_id < 3; request_id++) {
@@ -117,10 +116,10 @@ int main(void) {
         store.put(key.as_slice(), request_id * 10) !>;
     }
 
-    int* user1 = store.get(char_to_slice("user:1"));
+    int* user1 = store.get(CC_SLICE_LIT("user:1"));
     if (!user1 || *user1 != 10) return 2;
 
-    if (!store.delete(char_to_slice("user:1"))) return 3;
+    if (!store.delete(CC_SLICE_LIT("user:1"))) return 3;
 
     Map::[CCSliceHdr, int] entries = store.entries;
     size_t n = entries->len();

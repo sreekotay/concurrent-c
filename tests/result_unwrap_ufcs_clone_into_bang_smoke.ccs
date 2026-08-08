@@ -1,0 +1,43 @@
+/* Postfix `recv.method(...) !>` must type the Result via UFCS callee
+ * extract (legacy bang used to leave `__typeof__(part.clone_into(a))` and
+ * fail main-pass with a bogus int/CCSliceShared error). */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct {
+    CCSlice args[8];
+    size_t argc;
+} Cmd;
+
+static bool fill(CCArena* a, Cmd* out, CCSlice line) {
+    @errhandler(CCError e) {
+        (void)e;
+        return false;
+    }
+    size_t start = 0;
+    memset(out, 0, sizeof(*out));
+    while (start < line.len && out->argc < 8) {
+        size_t end;
+        CCSlice part;
+        while (start < line.len && line.ptr[start] == ' ') start++;
+        if (start >= line.len) break;
+        end = start;
+        while (end < line.len && line.ptr[end] != ' ') end++;
+        part = line.sub(start, end);
+        out->args[out->argc++] = part.clone_into(a) !>;
+        start = end;
+    }
+    return out->argc > 0;
+}
+
+int main(void) {
+    CCArena a = cc_arena_heap(1024) @destroy;
+    Cmd c;
+    if (!fill(&a, &c, CC_SLICE_LIT("GET key"))) return 1;
+    if (c.argc != 2) return 2;
+    if (c.args[0].len != 3 || memcmp(c.args[0].ptr, "GET", 3) != 0) return 3;
+    if (c.args[1].len != 3 || memcmp(c.args[1].ptr, "key", 3) != 0) return 4;
+    printf("ok argc=%zu\n", c.argc);
+    return 0;
+}

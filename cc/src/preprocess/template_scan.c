@@ -321,9 +321,11 @@ char* cc_tpl_dedent_text(const char* src, size_t n, const char* input_path,
     if (!src || n == 0 || !memchr(src, '`', n)) return NULL;
     cc_inert_scan_init(&sc, NULL);
     while (i < n) {
-        if (cc_inert_scan_step(&sc, src, n, &i)) continue;
-        if (src[i] != '`') { i++; continue; }
-        {
+        /* This pass's subject is backtick templates — detect them before
+         * inert_scan, which treats `...` as an inert region (so apostrophes
+         * inside don't open char literals for other scanners). */
+        if (!sc.in_line_comment && !sc.in_block_comment && !sc.in_str &&
+            !sc.in_chr && !sc.in_pp && !sc.in_tpl && src[i] == '`') {
             size_t tick_s = i, tick_e = 0;
             size_t ls, mlen, open_nl, p;
             int alone = 1;
@@ -381,7 +383,10 @@ char* cc_tpl_dedent_text(const char* src, size_t n, const char* input_path,
             changed = 1;
             last_emit = tick_e + 1;
             i = tick_e + 1;
+            continue;
         }
+        if (cc_inert_scan_step(&sc, src, n, &i)) continue;
+        i++;
     }
     if (!changed) { free(out); return NULL; }
     cc_sb_append(&out, &olen, &ocap, src + last_emit, n - last_emit);

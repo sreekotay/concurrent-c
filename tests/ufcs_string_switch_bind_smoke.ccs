@@ -1,0 +1,36 @@
+/* String-switch case bodies must keep local binds so UFCS resolves
+ * (CCShard* sh → cc_shard_get), not invent store_get. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int run(CCSlice name) {
+    CCShard m;
+    if (!m.init()) return -1;
+    if (!m.put(CC_SLICE_LIT("k"), CC_SLICE_LIT("v"))) return -2;
+    switch (name) {
+    case "GET": {
+        CCShard* sh = &m;
+        CCString* v = sh->get(CC_SLICE_LIT("k"));
+        CCSlice s = v ? v->as_slice() : cc_slice_empty();
+        int ok = v && CCSlice_eq_cstr(&s, "v");
+        m.destroy();
+        return ok ? 1 : 0;
+    }
+    case "DEL": {
+        CCShard* sh = &m;
+        int ok = sh->delete(CC_SLICE_LIT("k")) ? 1 : 0;
+        m.destroy();
+        return ok;
+    }
+    default:
+        m.destroy();
+        return -3;
+    }
+}
+
+int main(void) {
+    if (run(CC_SLICE_LIT("GET")) != 1) return 1;
+    if (run(CC_SLICE_LIT("DEL")) != 1) return 2;
+    printf("ufcs_string_switch_bind_smoke ok\n");
+    return 0;
+}

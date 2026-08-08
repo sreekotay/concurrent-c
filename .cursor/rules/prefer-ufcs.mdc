@@ -1,0 +1,32 @@
+---
+description: Prefer UFCS call form over free-function snake names in Concurrent-C
+alwaysApply: true
+---
+
+# Prefer UFCS
+
+In `.ccs` / `.cch` call sites, **always prefer UFCS** over the free-function form of the same API.
+
+```ccs
+// prefer
+db.maps.count();
+maps->hold_one(si);
+hold.release();
+sh->get(key);
+c->lit("$-1\r\n");
+
+// avoid (same APIs)
+cc_shard_map_count(&db.maps);
+cc_shard_map_hold_one(maps, si);
+cc_shard_hold_release(&hold);
+cc_shard_get(sh, key);
+conn_lit(c, "$-1\r\n");
+```
+
+Value fields on a pointer outer use dot UFCS on the field
+(`db->maps.count()`, `c->out.clear()`). Prefer that over peeling a local
+`T* field = &p->field` solely to get arrow UFCS.
+
+For value locals, dot UFCS is preferred (`db.maps.count()`, `maps.destroy()`). Prefer that over `cc_shard_map_*` free calls.
+
+Free-function names are for lowered/host C and definitions — not the surface idiom in sketches and examples.

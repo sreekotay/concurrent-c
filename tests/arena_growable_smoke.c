@@ -238,6 +238,14 @@ int main(void) {
             printf("FAIL: overflow byte accounting after release\n");
             return 7;
         }
+        /* Individual overflow release makes the epoch non-rewindable. */
+        {
+            CCArenaCheckpoint cp = cc_arena_checkpoint(&a);
+            if (cp.arena != NULL) {
+                printf("FAIL: checkpoint should be disabled after overflow release\n");
+                return 7;
+            }
+        }
 
         void *moved_src = cc_arena_alloc(&a, 64, 8);
         CCArena moved_dst = cc_arena_heap(1024);
@@ -269,16 +277,12 @@ int main(void) {
             printf("FAIL: foreign alloc\n");
             return 7;
         }
-        if (!cc_arena_release(&a, foreign)) {
-            printf("FAIL: permissive fallback free\n");
+        /* Overflow ownership is fail-closed: foreign pointers are refused. */
+        if (cc_arena_release(&a, foreign)) {
+            printf("FAIL: foreign overflow release should be refused\n");
             return 7;
         }
-
-        CCArenaCheckpoint cp = cc_arena_checkpoint(&a);
-        if (cp.arena != NULL) {
-            printf("FAIL: checkpoint should be disabled after release/spill\n");
-            return 7;
-        }
+        free(foreign);
 
         cc_arena_reset(&a);
         if (a._flags & (CC_ARENA_FLAG_USED_HEAP_OVERFLOW | CC_ARENA_FLAG_NON_REWINDABLE)) {

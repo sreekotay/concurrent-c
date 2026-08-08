@@ -1,13 +1,12 @@
 #!/bin/sh
 # Fetch the submodules a compiler build needs, at the smallest size that works.
 #
-# Two of the five submodules in .gitmodules are build inputs:
+# The build-required submodule:
 #
 #   third_party/tcc   patched TinyCC — the parser/compiler foundation. Fully
 #                     checked out: the build applies patches and compiles it.
-#   third_party/xjb   float-to-string algorithm. One file is used
-#                     (src/ftoa.cpp) out of a 37M tree that is mostly
-#                     benchmark corpora, so it is fetched sparse.
+#
+# Float formatting (Żmij) is vendored under cc/runtime/vendor/ — no submodule.
 #
 # liblfds is optional at every level: cc/runtime/channel.c probes for it with
 # __has_include and the native ring queue is the primary lock-free path either
@@ -24,8 +23,8 @@ Usage: scripts/fetch_submodules.sh [--with-liblfds] [--full]
 
 Options:
   --with-liblfds  Also fetch third_party/liblfds (optional channel backend).
-  --full          Fetch complete submodule trees; skip the sparse/partial
-                  optimizations. Use when you need to work in a submodule.
+  --full          Fetch complete submodule trees; skip partial-clone filters.
+                  Use when you need to work in a submodule.
   -h, --help      Show this help.
 EOF
 }
@@ -62,26 +61,6 @@ submodule_update() {
 echo "Fetching third_party/tcc..."
 git submodule sync -- third_party/tcc >/dev/null 2>&1 || true
 submodule_update third_party/tcc
-
-# xjb: check out src/ only. Sparse-checkout has to be configured before the
-# working tree is written, so the clone and the pinned-commit checkout are
-# separate steps here.
-echo "Fetching third_party/xjb (sparse: src/ only)..."
-git submodule sync -- third_party/xjb >/dev/null 2>&1 || true
-if [ "$FULL" = "1" ] || [ -d third_party/xjb/.git ] || [ -f third_party/xjb/.git ]; then
-  submodule_update third_party/xjb
-else
-  git submodule init third_party/xjb
-  xjb_url="$(git config --get submodule.third_party/xjb.url)"
-  if [ -n "$xjb_url" ] && \
-     git clone --filter=blob:none --sparse --no-checkout "$xjb_url" third_party/xjb 2>/dev/null; then
-    git -C third_party/xjb sparse-checkout set src
-    git submodule update third_party/xjb
-  else
-    rm -rf third_party/xjb
-    submodule_update third_party/xjb
-  fi
-fi
 
 if [ "$WITH_LIBLFDS" = "1" ]; then
   echo "Fetching third_party/liblfds..."

@@ -1,0 +1,36 @@
+/* Unbraced `if (cond) p = make_pair(...)` must brace-wrap the structy
+ * autoblock expansion (bare `T __cc_ab_ret_N;` is not a C statement there). */
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_closure.cch>
+#include <ccc/std/task.cch>
+#include <pthread.h>
+#include <stdio.h>
+
+typedef struct {
+    intptr_t tid;
+    int value;
+} Pair;
+
+static intptr_t g_main_tid = 0;
+
+static Pair make_pair(int value) {
+    Pair p = { .tid = (intptr_t)pthread_self(), .value = value };
+    return p;
+}
+
+@async int f(int use) {
+    Pair p = {0};
+    if (use) p = make_pair(42);
+    return (p.tid == g_main_tid) ? 0 : p.value;
+}
+
+int main(void) {
+    g_main_tid = (intptr_t)pthread_self();
+    int r = cc_block_on(int, f(1));
+    if (r != 42) {
+        fprintf(stderr, "expected 42 got %d\n", r);
+        return 1;
+    }
+    printf("autoblock_if_struct_assign_smoke ok\n");
+    return 0;
+}

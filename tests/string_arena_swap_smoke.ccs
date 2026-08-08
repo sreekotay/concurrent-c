@@ -29,7 +29,7 @@ int main(void) {
     /* Release through stored owner; passed arena is ignored when header owns. */
     cc_string_release(&s, &other);
 
-    /* Wrong-arena release with overflow off: refuse, do not free. */
+    /* Wrong-arena release: refuse (overflow ownership is always tracked). */
     {
         void *p = cc_arena_alloc(&first, 32, 8);
         if (!p) return 10;

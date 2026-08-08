@@ -12,11 +12,17 @@
 set -e
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
-INC="$repo/cc/include"; RT="$repo/cc/runtime/arena_state.c"
+# Host C must use lowered headers/runtime — raw .cch carries Concurrent-C surface
+# (@as etc.) that gcc cannot parse. out/include first; cc/include second for
+# plain vendor headers (ffc.h) that lower-headers does not copy.
+OUT_INC="$repo/out/include"
+INC="$repo/cc/include"
+RT="$repo/out/runtime/arena_state.c"
+CCC="$repo/cc/bin/ccc"
 # Dead-strip like ccc --release does: without it every binary carries the
 # runtime TU's full ffc surface (~35 KB dead) and size comparisons lie.
 case "$(uname)" in Darwin) LDGC="-Wl,-dead_strip";; *) LDGC="-Wl,--gc-sections";; esac
-CC="${CC:-gcc} -O2 -ffunction-sections -fdata-sections $LDGC -I $INC"
+CC="${CC:-gcc} -O2 -ffunction-sections -fdata-sections $LDGC -I$OUT_INC -I$INC"
 YY=0; GEN=0; WR=0; SH=0; DM=0; CHK=""
 while :; do
   case "$1" in
@@ -40,7 +46,12 @@ need_build() {  # $1=binary  rest=sources — rebuild if missing or any source n
   return 1
 }
 
-if need_build "$here/bench" "$here/bench.c" "$here/json.h" "$RT"; then
+if [ ! -f "$OUT_INC/ccc/cc_arena.h" ] || [ ! -f "$RT" ]; then
+  echo "lowered headers/runtime missing — run: make -C $repo/cc lower-headers" >&2
+  exit 1
+fi
+
+if need_build "$here/bench" "$here/bench.c" "$here/json.h" "$RT" "$OUT_INC/ccc/cc_arena.h"; then
   $CC "$here/bench.c" "$RT" -o "$here/bench"
 fi
 if [ "$YY" = 1 ]; then
@@ -50,38 +61,36 @@ if [ "$YY" = 1 ]; then
   fi
 fi
 if [ "$GEN" = 1 ]; then
-  CCC="$repo/cc/bin/ccc"
   if [ ! -x "$CCC" ]; then
     echo "-g: compiler not built ($CCC missing) — run: make -C $repo/cc"; exit 1
   fi
-  if need_build "$here/bench_gen" "$here/bench_grammar.ccs" "$CCC" "$RT"; then
-    (cd "$repo" && "$CCC" build "$here/bench_grammar.ccs" --out-dir "$here/.gen" >/dev/null)
-    $CC -I "$repo/out/include" "$here/.gen/bench_grammar.c" "$RT" -o "$here/bench_gen"
+  if need_build "$here/bench_gen" "$here/bench_grammar.ccs" "$CCC"; then
+    (cd "$repo" && "$CCC" build --release "$here/bench_grammar.ccs" \
+      -o "$here/bench_gen" --out-dir "$here/.gen" >/dev/null)
   fi
 fi
 if [ "$SH" = 1 ]; then
-  if need_build "$here/bench_shape" "$here/bench_shape.c" "$here/json_shape.h" "$here/json.h" "$RT"; then
+  if need_build "$here/bench_shape" "$here/bench_shape.c" "$here/json_shape.h" \
+                "$here/json.h" "$RT" "$OUT_INC/ccc/cc_arena.h"; then
     $CC "$here/bench_shape.c" "$RT" -o "$here/bench_shape"
   fi
 fi
 if [ "$DM" = 1 ]; then
-  CCC="$repo/cc/bin/ccc"
   if [ ! -x "$CCC" ]; then
     echo "-d: compiler not built ($CCC missing) — run: make -C $repo/cc"; exit 1
   fi
-  if need_build "$here/bench_dom" "$here/bench_dom.ccs" "$CCC" "$RT"; then
-    (cd "$repo" && "$CCC" build "$here/bench_dom.ccs" --out-dir "$here/.gend" >/dev/null)
-    $CC -I "$repo/out/include" -I "$repo/cc/include" "$here/.gend/bench_dom.c" "$RT" -o "$here/bench_dom"
+  if need_build "$here/bench_dom" "$here/bench_dom.ccs" "$CCC"; then
+    (cd "$repo" && "$CCC" build --release "$here/bench_dom.ccs" \
+      -o "$here/bench_dom" --out-dir "$here/.gend" >/dev/null)
   fi
 fi
 if [ "$WR" = 1 ]; then
-  CCC="$repo/cc/bin/ccc"
   if [ ! -x "$CCC" ]; then
     echo "-w: compiler not built ($CCC missing) — run: make -C $repo/cc"; exit 1
   fi
-  if need_build "$here/bench_write" "$here/bench_write.ccs" "$CCC" "$RT"; then
-    (cd "$repo" && "$CCC" build "$here/bench_write.ccs" --out-dir "$here/.genw" >/dev/null)
-    $CC -I "$repo/out/include" "$here/.genw/bench_write.c" "$RT" -o "$here/bench_write"
+  if need_build "$here/bench_write" "$here/bench_write.ccs" "$CCC"; then
+    (cd "$repo" && "$CCC" build --release "$here/bench_write.ccs" \
+      -o "$here/bench_write" --out-dir "$here/.genw" >/dev/null)
   fi
 fi
 

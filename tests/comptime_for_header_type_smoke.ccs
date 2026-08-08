@@ -1,0 +1,17 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_type.cch>
+#include "comptime_for_header_type.cch"
+#include <stdio.h>
+
+@comptime for (f in type_of(HdrForOnly).fields) {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        enum { HdrForOnly_${f.name}_i = ${f.index} };
+    `);
+}
+
+int main(void) {
+    if (HdrForOnly_a_i != 0) return 1;
+    if (HdrForOnly_b_i != 1) return 2;
+    printf("comptime_for_header_type_smoke ok\n");
+    return 0;
+}

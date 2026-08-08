@@ -1,5 +1,8 @@
 # UFCS: registered-type method calls unresolved in one band of a large TU
 
+> **Legacy-front bug writeup** (visitor reparse blanking). Default `ccc` is
+> serdes; kept for archaeology.
+
 **Status:** FIXED (root cause was not UFCS).  **Found:** 2026-07-21, redis
 write-family refactor.  **Fixed:** 2026-07-21.
 

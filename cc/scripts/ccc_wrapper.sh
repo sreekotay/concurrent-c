@@ -40,7 +40,7 @@ if [ "${1:-}" = "--shadow-lower" ]; then
 fi
 if [ "${1:-}" = "--shadow-run" ]; then
     shift
-    exec bash "$REPO_ROOT/examples/serdes/c/shadow/run_via_seam.sh" "$@"
+    exec bash "$REPO_ROOT/cc/shadow/shadow/run_via_seam.sh" "$@"
 fi
 
 CCH_DIR="$CC_DIR/include"

@@ -1,5 +1,9 @@
 # CCC Pass Inventory
 
+> **Scope: legacy front only.** Default `ccc` is native (`shadow_lower`).
+> New language work lands in `cc/shadow/`; text-rewrite passes here
+> run only under `--frontend=legacy`.
+
 This document maps all compilation passes and preprocessing transforms, with consolidation candidates.
 
 **Last updated**: 2026-07-20 (invariant #8 rewritten — closure markers are now the ONLY identity) — prior: 2026-06-01 (drift audit vs code: line counts, phantom/retired passes, omitted passes), 2026-05-28 (post Phase-3 two-stage batched flip — see [COMPILER_CLEANUP_STATUS.md](../../docs/COMPILER_CLEANUP_STATUS.md), [PIPELINE.md](PIPELINE.md))
@@ -13,7 +17,7 @@ This document maps all compilation passes and preprocessing transforms, with con
 > [`PASS_CLEANUP_PLAN.md`](../../docs/PASS_CLEANUP_PLAN.md), which wins on
 > conflict.
 
-> **WHY this many passes? WHY this split between text and AST?** See [`ARCHITECTURE.md`](../../docs/ARCHITECTURE.md) §2 (the four constraints) and §3 (the three architectural layers). The Phase 1–9 numbering below is an artifact of how the code grew; the three layers in ARCHITECTURE.md are the right mental model.
+> **WHY this many passes? WHY this split between text and AST?** See [`LEGACY_ARCHITECTURE.md`](../../docs/LEGACY_ARCHITECTURE.md) §2 (the four constraints) and §3 (the three architectural layers). The Phase 1–9 numbering below is an artifact of how the code grew; the three layers in LEGACY_ARCHITECTURE.md are the right mental model.
 
 ## Invariants for new text scanners (MUST follow)
 
@@ -343,8 +347,8 @@ was reanalyzed and found to be a non-win. Closure-literal lift is a *producer* f
 closure_calls (closure literals inside closure-typed call arg lists must be lowered
 to `__cc_closure_make_N()` before `cc__emit_call_replacement` extracts the arg text).
 Folding it into Phase 3 Stage 2 would require a 3rd Phase-3 stage with its own reparse
-barrier — net zero reparse savings. See [`ARCHITECTURE.md` §6 "Targets that aren't
-worth it"](../../docs/ARCHITECTURE.md).
+barrier — net zero reparse savings. See [`LEGACY_ARCHITECTURE.md` §6 "Targets that aren't
+worth it"](../../docs/LEGACY_ARCHITECTURE.md).
 
 **What actually shipped (M4.a, 2026-05-28):** the Phase-5 reparse + closure-pass call
 were gated on `cc_contains_token_top_level(src_ufcs, ..., "=>")` in

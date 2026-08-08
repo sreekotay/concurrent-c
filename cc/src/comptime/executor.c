@@ -11,9 +11,10 @@
 #include "../comptime/emit_tpl_prelude.inc.h"
 #include "preprocess/emit_limits.h"
 #include "preprocess/emit_plan.h"
+#include "preprocess/strswitch_comptime.h"
 #include "util/text.h"
 
-#include <ccc/cc_arena.cch>
+#include <ccc/cc_arena.h>
 
 #define CC_COMPTIME_FN_MAX 32
 #define CC_COMPTIME_FN_NAME_MAX 64
@@ -307,12 +308,11 @@ static int cc__try_scan_comptime_fn(const char* src, size_t len, size_t at, size
 
 int cc_comptime_fn_registry_scan(const char* src, size_t len) {
     size_t i = 0;
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0, in_tpl = 0;
     if (!src || len == 0) return 0;
     cc_comptime_fn_registry_clear();
-    /* Skip comments and string/char literals: `@comptime` in prose (e.g. a
-     * comment that says "a @comptime function") or inside a string is not a
-     * real definition and must not be scanned as one. */
+    /* Skip comments, strings, char literals, and backtick templates:
+     * `@comptime` in prose (e.g. a comment or `don't`) is not a definition. */
     while (i < len) {
         char c = src[i];
         char c2 = (i + 1 < len) ? src[i + 1] : 0;
@@ -320,9 +320,11 @@ int cc_comptime_fn_registry_scan(const char* src, size_t len) {
         if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
         if (in_str) { if (c == '\\') { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
         if (in_chr) { if (c == '\\') { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        if (in_tpl) { if (c == '\\') { i += 2; continue; } if (c == '`') in_tpl = 0; i++; continue; }
         if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
         if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
         if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '`') { in_tpl = 1; i++; continue; }
         if (c == '\'') { in_chr = 1; i++; continue; }
         if (c == '@') {
             size_t end = 0;
@@ -463,6 +465,8 @@ static char* cc__exec_build_tu(const char* body, size_t body_len,
     static const char tail[] = "\n}\n";
     static const char exec_def[] = "#define CC_COMPTIME_EXEC 1\n";
     const char* fndefs = cc_comptime_fn_registry_defs();
+    char* slim = cc_ct_field_reg_slim_prelude();
+    size_t slim_len = slim ? strlen(slim) : 0;
     size_t fndef_len = fndefs ? strlen(fndefs) : 0;
     size_t ed = cc__exec_fndefs_need_exec_define(fndefs) ? sizeof(exec_def) - 1 : 0;
     size_t pre = sizeof(CC__EXEC_PRELUDE) - 1;
@@ -476,17 +480,23 @@ static char* cc__exec_build_tu(const char* body, size_t body_len,
         int n = snprintf(line_dir, sizeof(line_dir), "#line %d \"%s\"\n", line, file);
         if (n > 0 && (size_t)n < sizeof(line_dir)) ld = (size_t)n;
     }
-    char* s = (char*)malloc(ed + pre + fndef_len + ent + ld + body_len + tl + 1);
-    if (!s) return NULL;
+    char* s = (char*)malloc(ed + pre + slim_len + fndef_len + ent + ld + body_len +
+                            tl + 1);
+    if (!s) {
+        free(slim);
+        return NULL;
+    }
     size_t o = 0;
     if (ed) { memcpy(s + o, exec_def, ed); o += ed; }
     memcpy(s + o, CC__EXEC_PRELUDE, pre); o += pre;
+    if (slim_len) { memcpy(s + o, slim, slim_len); o += slim_len; }
     if (fndef_len) { memcpy(s + o, fndefs, fndef_len); o += fndef_len; }
     memcpy(s + o, entry, ent); o += ent;
     if (ld) { memcpy(s + o, line_dir, ld); o += ld; }
     memcpy(s + o, body, body_len); o += body_len;
     memcpy(s + o, tail, tl); o += tl;
     s[o] = '\0';
+    free(slim);
     return s;
 }
 
@@ -496,22 +506,29 @@ static char* cc__exec_build_eval_tu(const char* expr) {
     static const char tail[] = ");\n}\n";
     static const char exec_def[] = "#define CC_COMPTIME_EXEC 1\n";
     const char* fndefs = cc_comptime_fn_registry_defs();
+    char* slim = cc_ct_field_reg_slim_prelude();
+    size_t slim_len = slim ? strlen(slim) : 0;
     size_t fndef_len = fndefs ? strlen(fndefs) : 0;
     size_t ed = cc__exec_fndefs_need_exec_define(fndefs) ? sizeof(exec_def) - 1 : 0;
     size_t ex = expr ? strlen(expr) : 0;
     size_t pre = sizeof(CC__EXEC_PRELUDE) - 1;
     size_t hl = sizeof(hdr) - 1;
     size_t tl = sizeof(tail) - 1;
-    char* s = (char*)malloc(ed + pre + fndef_len + hl + ex + tl + 1);
-    if (!s) return NULL;
+    char* s = (char*)malloc(ed + pre + slim_len + fndef_len + hl + ex + tl + 1);
+    if (!s) {
+        free(slim);
+        return NULL;
+    }
     size_t o = 0;
     if (ed) { memcpy(s + o, exec_def, ed); o += ed; }
     memcpy(s + o, CC__EXEC_PRELUDE, pre); o += pre;
+    if (slim_len) { memcpy(s + o, slim, slim_len); o += slim_len; }
     if (fndef_len) { memcpy(s + o, fndefs, fndef_len); o += fndef_len; }
     memcpy(s + o, hdr, hl); o += hl;
     memcpy(s + o, expr, ex); o += ex;
     memcpy(s + o, tail, tl); o += tl;
     s[o] = '\0';
+    free(slim);
     return s;
 }
 
@@ -612,23 +629,127 @@ static const char* cc__litproj_helpers(void) {
     return cached;
 }
 
+/* True when a harvested comptime def still carries CC surface that libtcc's
+ * C parser cannot accept (`@…` / `@emit`, or backtick templates). Content-
+ * based so any unlowered body is excluded — not only `__cc_gfac_*` names. */
+static int cc__exec_litproj_def_has_unlowered_surface(const char* def,
+                                                      size_t len) {
+    size_t i = 0;
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    if (!def || len == 0) return 0;
+    while (i < len) {
+        char c = def[i];
+        char c2 = (i + 1 < len) ? def[i + 1] : 0;
+        if (in_lc) {
+            if (c == '\n') in_lc = 0;
+            i++;
+            continue;
+        }
+        if (in_bc) {
+            if (c == '*' && c2 == '/') {
+                in_bc = 0;
+                i += 2;
+                continue;
+            }
+            i++;
+            continue;
+        }
+        if (in_str) {
+            if (c == '\\' && c2) {
+                i += 2;
+                continue;
+            }
+            if (c == '"') in_str = 0;
+            i++;
+            continue;
+        }
+        if (in_chr) {
+            if (c == '\\' && c2) {
+                i += 2;
+                continue;
+            }
+            if (c == '\'') in_chr = 0;
+            i++;
+            continue;
+        }
+        if (c == '/' && c2 == '/') {
+            in_lc = 1;
+            i += 2;
+            continue;
+        }
+        if (c == '/' && c2 == '*') {
+            in_bc = 1;
+            i += 2;
+            continue;
+        }
+        if (c == '"') {
+            in_str = 1;
+            i++;
+            continue;
+        }
+        if (c == '\'') {
+            in_chr = 1;
+            i++;
+            continue;
+        }
+        if (c == '@' || c == '`') return 1;
+        i++;
+    }
+    return 0;
+}
+
+/* Value-position litproj only needs lowered user `@comptime` fns (e.g. fib).
+ * Registry entries that still contain unlowered `@` / backtick surface must
+ * not enter the libtcc TU — `@` trips CONFIG_CC_EXT's closure primary. */
+static char* cc__exec_litproj_user_fndefs(size_t* out_len) {
+    size_t len = 0;
+    char* buf = NULL;
+    size_t i;
+    if (out_len) *out_len = 0;
+    for (i = 0; i < cc__comptime_fn_count; i++) {
+        const CCComptimeFnEntry* e = &cc__comptime_fns[i];
+        size_t need;
+        char* nb;
+        if (!e->def || e->def_len == 0) continue;
+        if (cc__exec_litproj_def_has_unlowered_surface(e->def, e->def_len))
+            continue;
+        need = len + e->def_len + 2;
+        nb = (char*)realloc(buf, need);
+        if (!nb) {
+            free(buf);
+            return NULL;
+        }
+        buf = nb;
+        memcpy(buf + len, e->def, e->def_len);
+        len += e->def_len;
+        buf[len++] = '\n';
+        buf[len] = '\0';
+    }
+    if (out_len) *out_len = len;
+    return buf;
+}
+
 static char* cc__exec_build_litproj_tu(const char* expr) {
     static const char hdr[] =
         "\nvoid __cc_ct_entry(void) {\n  __cc_lit_begin();\n  cc_lit_project((";
     static const char tail[] = "));\n  __cc_lit_finish();\n}\n";
-    const char* fndefs = cc_comptime_fn_registry_defs();
+    size_t fndef_len = 0;
+    char* fndefs = cc__exec_litproj_user_fndefs(&fndef_len);
     const char* helpers = cc__litproj_helpers();
-    size_t fndef_len = fndefs ? strlen(fndefs) : 0;
     size_t ex = expr ? strlen(expr) : 0;
     size_t pre = sizeof(CC__EXEC_PRELUDE) - 1;
     size_t hp = helpers ? strlen(helpers) : 0;
     size_t hl = sizeof(hdr) - 1;
     size_t tl = sizeof(tail) - 1;
     char* s = (char*)malloc(pre + fndef_len + hp + hl + ex + tl + 1);
-    if (!s) return NULL;
+    if (!s) {
+        free(fndefs);
+        return NULL;
+    }
     size_t o = 0;
     memcpy(s + o, CC__EXEC_PRELUDE, pre); o += pre;
     if (fndef_len) { memcpy(s + o, fndefs, fndef_len); o += fndef_len; }
+    free(fndefs);
     if (hp) { memcpy(s + o, helpers, hp); o += hp; }
     memcpy(s + o, hdr, hl); o += hl;
     memcpy(s + o, expr, ex); o += ex;
@@ -767,15 +888,39 @@ static TCCState* cc__exec_new_state(CCExecErrSink* sink, char* err_buf, size_t e
      * (slices/arena/string) so `@comptime` code can use CC library functions,
      * not just libc + host verbs (COMPTIME_CAPABILITY_MODEL.md §7a, Axis 1).
      * CC_INCLUDE_PATH is the compiler's own header search path (lowered .h dir
-     * then raw .cch dir), colon-separated; mirror it into the executor. */
+     * then raw .cch dir), colon-separated; mirror it into the executor.
+     * Prefer lowered `.h` (bare `@as` lives only in `.cch`). When the env is
+     * unset (direct shadow_lower / tooling), probe checkout defaults. */
     {
         const char* inc = getenv("CC_INCLUDE_PATH");
+        char tmp[2048];
+        char* save = NULL;
         if (inc && inc[0]) {
-            char tmp[2048];
             snprintf(tmp, sizeof(tmp), "%s", inc);
-            char* save = NULL;
             for (char* tok = strtok_r(tmp, ":", &save); tok; tok = strtok_r(NULL, ":", &save))
                 if (tok[0]) tcc_add_include_path(s, tok);
+        } else {
+            static const char* fallbacks[] = {
+                "out/include",
+                "../out/include",
+                "cc/include",
+                "../cc/include",
+                "include",
+                NULL,
+            };
+            int fi;
+            for (fi = 0; fallbacks[fi]; fi++) {
+                char probe[1024];
+                snprintf(probe, sizeof(probe), "%s/ccc/cc_slice.h", fallbacks[fi]);
+                if (access(probe, R_OK) == 0)
+                    tcc_add_include_path(s, fallbacks[fi]);
+                else {
+                    snprintf(probe, sizeof(probe), "%s/ccc/cc_slice.cch",
+                             fallbacks[fi]);
+                    if (access(probe, R_OK) == 0)
+                        tcc_add_include_path(s, fallbacks[fi]);
+                }
+            }
         }
     }
     if (tcc_set_output_type(s, TCC_OUTPUT_MEMORY) < 0) {
@@ -790,12 +935,15 @@ static TCCState* cc__exec_new_state(CCExecErrSink* sink, char* err_buf, size_t e
     tcc_add_symbol(s, "cc_reflect_field_count", (void*)cc_reflect_field_count);
     tcc_add_symbol(s, "cc_reflect_field_name", (void*)cc_reflect_field_name);
     tcc_add_symbol(s, "cc_reflect_field_type", (void*)cc_reflect_field_type);
+    tcc_add_symbol(s, "cc_reflect_field_is_as", (void*)cc_reflect_field_is_as);
     tcc_add_symbol(s, "cc_result_box_name", (void*)cc_result_box_name);
     tcc_add_symbol(s, "cc_reflect_method_count", (void*)cc_reflect_method_count);
     tcc_add_symbol(s, "cc_reflect_method_name", (void*)cc_reflect_method_name);
     tcc_add_symbol(s, "cc_reflect_param_count", (void*)cc_reflect_param_count);
     tcc_add_symbol(s, "cc_reflect_param_name", (void*)cc_reflect_param_name);
     tcc_add_symbol(s, "cc_reflect_param_type", (void*)cc_reflect_param_type);
+    tcc_add_symbol(s, "cc_reflect_param_default", (void*)cc_reflect_param_default);
+    tcc_add_symbol(s, "cc_reflect_params_c_abi", (void*)cc_reflect_params_c_abi);
     tcc_add_symbol(s, "cc_reflect_method_member", (void*)cc_reflect_method_member);
     tcc_add_symbol(s, "cc_reflect_method_params", (void*)cc_reflect_method_params);
     tcc_add_symbol(s, "cc_reflect_method_args", (void*)cc_reflect_method_args);
@@ -1038,35 +1186,53 @@ int cc_comptime_exec_block_body(const char* body, size_t body_len,
     cc_emit_plan_host_ctx_begin(opts ? opts->site_pos : 0);
     cc__exec_start = clock();
 
-    char* tu = cc__exec_build_tu(body, body_len,
-                                 opts ? opts->input_path : NULL,
-                                 opts ? opts->site_line : 0);
-    if (!tu) {
+    {
+        char swerr[320];
+        char* lowered = cc_comptime_strswitch_rewrite(body, body_len, swerr,
+                                                     sizeof(swerr));
+        char* tu;
+        int rc = 0;
+        if (!lowered) {
+            cc_emit_plan_host_ctx_end();
+            if (err_buf && err_sz)
+                snprintf(err_buf, err_sz, "%s",
+                         swerr[0] ? swerr : "string switch rewrite failed");
+            return -1;
+        }
+        tu = cc__exec_build_tu(lowered, strlen(lowered),
+                               opts ? opts->input_path : NULL,
+                               opts ? opts->site_line : 0);
+        free(lowered);
+        if (!tu) {
+            cc_emit_plan_host_ctx_end();
+            if (err_buf && err_sz)
+                snprintf(err_buf, err_sz, "OOM building comptime TU");
+            return -1;
+        }
+        if (getenv("CC_DEBUG_COMPTIME_EXEC_DUMP")) {
+            FILE* df = fopen(getenv("CC_DEBUG_COMPTIME_EXEC_DUMP"), "wb");
+            if (df) {
+                fwrite(tu, 1, strlen(tu), df);
+                fclose(df);
+            }
+        }
+        if (setjmp(cc__exec_jb) != 0) {
+            cc__exec_in_block = 0;
+            if (err_buf && err_sz)
+                snprintf(err_buf, err_sz,
+                         "comptime execution timed out (%dms)",
+                         cc__exec_timeout_ms);
+            rc = -1;
+        } else {
+            cc__exec_in_block = 1;
+            rc = cc__exec_run_tu(tu, err_buf, err_sz);
+            cc__exec_in_block = 0;
+        }
+        free(tu);
         cc_emit_plan_host_ctx_end();
-        if (err_buf && err_sz) snprintf(err_buf, err_sz, "OOM building comptime TU");
-        return -1;
+        (void)opts;
+        return rc;
     }
-    if (getenv("CC_DEBUG_COMPTIME_EXEC_DUMP")) {
-        FILE* df = fopen(getenv("CC_DEBUG_COMPTIME_EXEC_DUMP"), "wb");
-        if (df) { fwrite(tu, 1, strlen(tu), df); fclose(df); }
-    }
-
-    int rc = 0;
-    if (setjmp(cc__exec_jb) != 0) {
-        cc__exec_in_block = 0;
-        if (err_buf && err_sz)
-            snprintf(err_buf, err_sz, "comptime execution timed out (%dms)",
-                     cc__exec_timeout_ms);
-        rc = -1;
-    } else {
-        cc__exec_in_block = 1;
-        rc = cc__exec_run_tu(tu, err_buf, err_sz);
-        cc__exec_in_block = 0;
-    }
-    free(tu);
-    cc_emit_plan_host_ctx_end();
-    (void)opts;
-    return rc;
 #endif
 }
 
@@ -1083,6 +1249,9 @@ static const char CC__FRAG_PRELUDE[] =
     "#include <stdbool.h>\n"
     "#include <stdio.h>\n"
     "#include <string.h>\n"
+    /* Factories may stub TU/header Src types under this flag; the merged
+     * TU sees the real declarations instead. */
+    "#define CC_FRAGMENT_VALIDATE 1\n"
     "#line 1 \"<generic-fragment>\"\n";
 
 typedef struct {

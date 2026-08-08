@@ -1,0 +1,32 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+typedef struct Base2 { int v; } Base2;
+static int base2_get(Base2 *self) { return self->v; }
+static int base2_dbl(Base2 *self) { return self->v * 2; }
+typedef struct Wrap2 { Base2 base @as; int tag; } Wrap2;
+
+/* as-composition reflection driving @emit (not just printf unroll). */
+@comptime for (f in type_of(Wrap2).fields) {
+    @comptime if (f.is_as) {
+        @comptime for (m in type_of(f.type).methods) {
+            @emit(CC_EMIT_AFTER_PRELUDE, `
+                /* don't compose 'as' */
+                @comptime if (1) {
+                    enum { Wrap2_${f.name}_${m.name}_mark = 1 };
+                } else {
+                    wrap2_dead();
+                }
+            `);
+        }
+    }
+}
+
+int main(void) {
+    if (Wrap2_base_base2_get_mark != 1) return 1;
+    if (Wrap2_base_base2_dbl_mark != 1) return 2;
+    printf("comptime_emit_as_compose_smoke ok\n");
+    return 0;
+}

@@ -200,11 +200,11 @@ Compare-only (skip capture): `./tools/cc_perf_check.shcc --current PATH`
 
 Re-run `make perf-baseline` / `./tools/perf.shcc @perf_baseline` (or
 `./tools/perf.shcc @perf_regress --update`) **after** any intentional change
-that legitimately changes one of these numbers — e.g., a new visitor pass,
-deliberately adding a reparse for a new feature, or a major LOC cleanup. The
-new numbers should be committed in the same PR that introduces the change so
-reviewers can see the perf delta.
+that legitimately changes one of these numbers — e.g., a legacy-front
+visitor/reparse change, a serdes emit-path change that alters suite shape,
+or a major LOC cleanup. The new numbers should be committed in the same PR
+that introduces the change so reviewers can see the perf delta.
 
 ### Historical context
 
-`baseline_M0.txt` (deleted 2026-05-28) was an empty placeholder created at the start of the M1 visitor refactor — it tracked the same idea but was never populated with actual measurements. The current `compiler_baseline.txt` captures the **post-M4.a state** (after the Phase-3 batching flip, fossil sweeps, and Phase-5 gating; see [`cc/docs/ARCHITECTURE.md` §6](../cc/docs/ARCHITECTURE.md) for what landed).
+`baseline_M0.txt` (deleted 2026-05-28) was an empty placeholder created at the start of the M1 visitor refactor — it tracked the same idea but was never populated with actual measurements. The current `compiler_baseline.txt` captures the **post-M4.a state** (after the Phase-3 batching flip, fossil sweeps, and Phase-5 gating; see [`cc/docs/LEGACY_ARCHITECTURE.md` §6](../cc/docs/LEGACY_ARCHITECTURE.md) for what landed).

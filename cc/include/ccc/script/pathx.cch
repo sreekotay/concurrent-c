@@ -25,11 +25,11 @@ static inline int cc__script_is_repo_root(CCSlice dir) {
     char marker[PATH_MAX];
     if (!dir.ptr || dir.len == 0) return 0;
     snprintf(marker, sizeof(marker), "%s/cc/src/cc_main.c", (const char *)dir.ptr);
-    if (cc_path_exists(char_to_slice(marker))) return 1;
+    if (cc_path_exists(cc_slice_cstr(marker))) return 1;
     snprintf(marker, sizeof(marker), "%s/perf/compiler_baseline.txt", (const char *)dir.ptr);
-    if (cc_path_exists(char_to_slice(marker))) return 1;
+    if (cc_path_exists(cc_slice_cstr(marker))) return 1;
     snprintf(marker, sizeof(marker), "%s/.git", (const char *)dir.ptr);
-    return cc_path_exists(char_to_slice(marker)) ? 1 : 0;
+    return cc_path_exists(cc_slice_cstr(marker)) ? 1 : 0;
 }
 
 static inline CCSlice cc__script_dup_cstr(CCArena *arena, const char *s) {
@@ -56,7 +56,7 @@ static inline CCResult_CCSlice_CCError cc_script_repo_root(CCSlice argv0,
     }
     start[0] = '\0';
     if (getcwd(start, sizeof(start)) == NULL) start[0] = '\0';
-    if ((!start[0] || !cc__script_is_repo_root(char_to_slice(start)))
+    if ((!start[0] || !cc__script_is_repo_root(cc_slice_cstr(start)))
         && argv0.ptr && argv0.len) {
         char tmp[PATH_MAX];
         if (realpath((const char *)argv0.ptr, tmp)) {
@@ -75,7 +75,7 @@ static inline CCResult_CCSlice_CCError cc_script_repo_root(CCSlice argv0,
     strncpy(cur, start, sizeof(cur) - 1);
     cur[sizeof(cur) - 1] = '\0';
     for (;;) {
-        if (cc__script_is_repo_root(char_to_slice(cur))) {
+        if (cc__script_is_repo_root(cc_slice_cstr(cur))) {
             CCSlice out = cc__script_dup_cstr(arena, cur);
             if (!out.ptr) {
                 return cc_err_CCResult_CCSlice_CCError(

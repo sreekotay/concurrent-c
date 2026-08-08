@@ -1,0 +1,9 @@
+/* Slice family: field stores denied at ordinary sites. */
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    char buf[4] = "hi";
+    char[:] s = cc_slice_from_buffer(buf, 2);
+    s.len = 1; /* ill-formed */
+    return (int)s.len;
+}

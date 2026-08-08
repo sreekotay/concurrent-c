@@ -37,6 +37,7 @@ typedef struct cc_rt_tls {
     cc_rt_tls_wake_batch wake_batch;
     char task_v2_result[48];
     void* excl_ring;         /* cc__excl_evt_ring_t* */
+    void* env_pools;         /* closure.c CCEnvPools* (heap, process-lived) */
 } cc_rt_tls;
 
 static pthread_key_t cc_rt_tls_key;

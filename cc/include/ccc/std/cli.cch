@@ -55,14 +55,12 @@ typedef struct CCCliFillResult {
 
 /* Borrow a NUL-terminated token as a char[:0]-compatible view (ptr[len]==0). */
 static inline CCSlice cc__cli_cstr_slice(const char *text) {
-    if (!text) return cc_slice_empty();
-    return char_to_slice(text);
+    return cc_slice_cstr(text);
 }
 
 /* Argv tokens: same NUL sentinel, untracked lifetime (not immortal static). */
 static inline CCSlice cc__cli_argv_slice(const char *text) {
-    if (!text) return cc_slice_empty();
-    return cc_slice_from_buffer((void *)text, strlen(text));
+    return cc_slice_cstr(text);
 }
 
 static inline const char *cc_cli_prog(int argc, char **argv) {

@@ -1,0 +1,22 @@
+/* @async bool !>(E) must pack as CCResult_bool_*, not the int default. */
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+
+@async bool !>(CCError) flag(int v) {
+    if (v < 0) return cc_err(CC_ERR_INVALID_ARG, "neg");
+    return cc_ok(v != 0);
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "async_result_bool: %s\n", e.message);
+        return 1;
+    }
+    bool a = @await flag(1) !>;
+    bool b = @await flag(0) !>;
+    if (!a || b) return 2;
+    bool boom = @await flag(-1) !>;
+    (void)boom;
+    fprintf(stderr, "expected errhandler on flag(-1)\n");
+    return 3;
+}

@@ -1,0 +1,37 @@
+/* String-literal case labels inside @comptime {} — eq-chain lower for libtcc. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+@comptime {
+    CCSlice m = CC_SLICE_LIT("get");
+    int v = 0;
+    int ft = 0;
+    switch (m) {
+    case "get":
+        v = 1;
+        break;
+    case "put":
+        v = 2;
+        break;
+    default:
+        v = -1;
+        break;
+    }
+    switch (CC_SLICE_LIT("B")) {
+    case "A":
+    case "B":
+        ft = 10;
+        break;
+    default:
+        ft = 0;
+        break;
+    }
+    @emit(CC_EMIT_AFTER_PRELUDE, `enum { CT_SW_V = ${v}, CT_SW_FT = ${ft} };`);
+}
+
+int main(void) {
+    if (CT_SW_V != 1) return 1;
+    if (CT_SW_FT != 10) return 2;
+    printf("comptime_string_switch_smoke ok v=%d ft=%d\n", CT_SW_V, CT_SW_FT);
+    return 0;
+}

@@ -13,23 +13,21 @@ Counts come from `corpus/*/verdict.md`. Gap means off-surface escape
 | | Count |
 |--|------:|
 | Corpus entries | 27 |
-| **prevented** (protected surface blocks the shape) | 18 |
+| **prevented** (protected surface blocks the shape) | 19 |
 | **mitigated** (idiom dissolves it; C-shaped rewrite still compiles) | 6 |
-| **still_expressible** claim-A miss | 2 |
+| **still_expressible** claim-A miss | 1 |
 | **still_expressible** `parity: rust_unsafe` | 1 |
 
-**Claim-A miss 1:** bare `T*` as a channel payload
+**Claim-A miss:** bare `T*` as a channel payload
 ([SHAPE-T7-bare-pointer-channel](corpus/SHAPE-T7-bare-pointer-channel/)).
 Left open on purpose: redis-style pool handles are protocol lifetime, not
 message ownership. Closing it needs an allowlist/brand we are not taking.
 
-**Claim-A miss 2:** writable slice `.len`
-([CVE-2015-7547](corpus/CVE-2015-7547/)). Growing a buffer idiomatically
-yields a new `char[:]` carrying pointer and length together, but assigning
-`.len` on a live slice reconstructs the glibc desync — old pointer, new
-length — and `at`/`set` then bound against the lie. Safe Rust has no
-writable length on `&mut [u8]`. Where miss 1 requires a raw `T*`, this one
-is reachable by plain field assignment on the checked surface itself.
+**Closed this round:** writable slice `.len`
+([CVE-2015-7547](corpus/CVE-2015-7547/)) — unnamed `@restricted` on the
+slice family denies `.len` / `.ptr` stores at ordinary sites
+(`slice-len-write-ban`). Grow returns a new `char[:]`; the desync
+assignment is ill-formed.
 
 **Rust parity miss (not claim A):** wrong deleter on `cc_adopt` /
 `from_raw` ([SHAPE-T8-adopt-wrong-deleter](corpus/SHAPE-T8-adopt-wrong-deleter/)).
@@ -72,15 +70,13 @@ Idiom works; escape hatch still compiles:
 
 Both languages win by staying on their surface. Concurrent-C’s forced seams
 (unique, nursery join, channel-stable borrow, Result, schema `bytes len`,
-checked index, exhaustive variant switch) cover most claim-A shapes in this
-corpus. Remaining honesty:
+checked index, slice len/ptr store ban, exhaustive variant switch) cover
+most claim-A shapes in this corpus. Remaining honesty:
 
 1. Bare pointer **handles** on channels — protocol, not Send lattice.
-2. Writable slice `.len` — a lying length defeats the checked index surface
-   without any raw pointer.
-3. Raw `.ptr` / `malloc` — Gap, like `unsafe`.
-4. T6 stop/join — mitigated until nursery-only stop is language policy.
-5. T2 frame escape — tracked for stack slices, not for `&`-captured scalars.
+2. Raw `.ptr` / `malloc` — Gap, like `unsafe`.
+3. T6 stop/join — mitigated until nursery-only stop is language policy.
+4. T2 frame escape — tracked for stack slices, not for `&`-captured scalars.
 
 Do not treat this folder as a product guarantee. It is a language instrument:
 hits validate seams; misses feed backlog or conscious Gaps.

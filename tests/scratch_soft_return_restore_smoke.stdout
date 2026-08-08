@@ -1,0 +1,2 @@
+rc=7 rem_ok=1 kept_ok=1
+scratch_soft_return_restore_smoke: PASS

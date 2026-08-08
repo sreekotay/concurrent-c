@@ -79,6 +79,7 @@ typedef struct {
     int  in_block_comment;
     int  in_str;
     int  in_chr;
+    int  in_tpl;         /* inside a backtick template literal */
     char qch;            /* quote char for the active string literal */
     int  in_pp;          /* inside a preprocessor directive body */
     int  pp_continued;   /* prev non-WS char was '\' (line continuation) */
@@ -116,6 +117,7 @@ static inline void cc_inert_scan_init(CCInertScan* s, const char* user_file) {
     s->in_block_comment = 0;
     s->in_str = 0;
     s->in_chr = 0;
+    s->in_tpl = 0;
     s->qch = 0;
     s->in_pp = 0;
     s->pp_continued = 0;
@@ -199,8 +201,8 @@ static inline void cc__inert_scan_try_parse_line_directive(CCInertScan* s,
  * `*pos` is at real code (caller is responsible for advancing).
  *
  * This is the same contract as `cc_scanner_skip_non_code` in
- * `cc/src/preprocess/preprocess.c`, just with the addition of
- * `#line`-directive tracking. */
+ * `cc/src/preprocess/preprocess.c` (comments / strings / chars /
+ * backtick templates / pp bodies), plus `#line`-directive tracking. */
 static inline int cc_inert_scan_step(CCInertScan* s, const char* src,
                                       size_t n, size_t* pos) {
     if (!s || !src || !pos || *pos >= n) return 0;
@@ -262,7 +264,16 @@ static inline int cc_inert_scan_step(CCInertScan* s, const char* src,
         return 1;
     }
 
-    /* Detect entry into a comment / string / char literal / pp directive. */
+    /* Backtick template: prose is not code; an apostrophe inside must not
+     * open a char literal that never closes and swallows the rest of the TU. */
+    if (s->in_tpl) {
+        if (c == '\\' && i + 1 < n) { *pos = i + 2; return 1; }
+        if (c == '`') { s->in_tpl = 0; }
+        *pos = i + 1;
+        return 1;
+    }
+
+    /* Detect entry into a comment / string / char literal / template / pp. */
     if (c == '/' && c2 == '/') {
         s->in_line_comment = 1;
         *pos = i + 2;
@@ -275,6 +286,11 @@ static inline int cc_inert_scan_step(CCInertScan* s, const char* src,
     }
     if (c == '"') {
         s->in_str = 1; s->qch = '"';
+        *pos = i + 1;
+        return 1;
+    }
+    if (c == '`') {
+        s->in_tpl = 1;
         *pos = i + 1;
         return 1;
     }

@@ -30,15 +30,6 @@ typedef struct {
     char *buf;
     size_t cap;
     size_t len;
-    size_t pos;
-    int eof;
-} CCBufReader;
-
-typedef struct {
-    CCFile *file;
-    char *buf;
-    size_t cap;
-    size_t len;
 } CCBufWriter;
 
 // Result types.  Historically the parser-mode paths aliased
@@ -388,83 +379,7 @@ static inline CCSlice cc_path_basename(CCArena *arena, CCSlice path) {
 }
 
 // ------------------------- Buffered reader/writer --------------------------
-
-static inline int cc_buf_reader_init(CCBufReader *r, CCFile *f, CCArena *arena, size_t cap) {
-    if (!r || !f || !arena || cap == 0) return -1;
-    memset(r, 0, sizeof(*r));
-    r->file = f;
-    r->buf = (char *)cc_arena_alloc(arena, cap, sizeof(char));
-    if (!r->buf) return -1;
-    r->cap = cap;
-    r->len = 0;
-    r->pos = 0;
-    r->eof = 0;
-    return 0;
-}
-
-// Refill buffer. Returns Ok(slice) (empty slice = EOF) or Err(e).
-static inline CCRes(CCSlice, CCIoError) cc_buf_reader_next(CCBufReader *r, size_t n) {
-    if (!r || !r->file || !r->file->handle || n == 0) {
-        return CCRes_err(CCSlice, CCIoError, cc_io_from_errno(EINVAL));
-    }
-    if (r->eof) {
-        return CCRes_ok(CCSlice, CCIoError, cc_slice_empty());
-    }
-    if (n > r->cap) n = r->cap;
-    size_t got = fread(r->buf, 1, n, r->file->handle);
-    if (got == 0) {
-        if (feof(r->file->handle)) {
-            r->eof = 1;
-            return CCRes_ok(CCSlice, CCIoError, cc_slice_empty());
-        }
-        if (ferror(r->file->handle)) {
-            return CCRes_err(CCSlice, CCIoError, cc_io_from_errno(errno));
-        }
-        // No data, no EOF/error - treat as EOF
-        return CCRes_ok(CCSlice, CCIoError, cc_slice_empty());
-    }
-    r->pos = 0;
-    r->len = got;
-    if (feof(r->file->handle)) r->eof = 1;
-    CCSlice slice = cc_slice_from_parts(r->buf, got, CC_SLICE_ID_UNTRACKED, r->cap);
-    return CCRes_ok(CCSlice, CCIoError, slice);
-}
-
-// Read one line from buffered reader. Returns Ok(slice) (empty slice = EOF) or Err(e).
-// Appends buffer spans via memchr + push_slice (not per-byte push_char).
-static inline CCRes(CCSlice, CCIoError) cc_buf_reader_read_line(CCBufReader *r, CCArena *arena) {
-    CCString line;
-    if (!r || !r->file || !r->file->handle || !arena) {
-        return CCRes_err(CCSlice, CCIoError, cc_io_from_errno(EINVAL));
-    }
-    line = cc_string_new();
-    for (;;) {
-        char *start;
-        size_t avail;
-        char *nl;
-        size_t take;
-        if (r->pos >= r->len) {
-            CCRes(CCSlice, CCIoError) fill = cc_buf_reader_next(r, r->cap);
-            if (cc_is_err(fill)) return fill;
-            if (cc_value(fill).len == 0) {
-                if (line.len == 0)
-                    return CCRes_ok(CCSlice, CCIoError, cc_slice_empty());
-                break;
-            }
-        }
-        if (r->pos >= r->len) break;
-        start = r->buf + r->pos;
-        avail = r->len - r->pos;
-        nl = (char *)memchr(start, '\n', avail);
-        take = nl ? (size_t)(nl - start) + 1 : avail;
-        if (!cc_string_push_slice(&line, cc_slice_from_buffer(start, take), arena)) {
-            return CCRes_err(CCSlice, CCIoError, cc_io_error_os(CC_IO_OUT_OF_MEMORY, ENOMEM));
-        }
-        r->pos += take;
-        if (nl) break;
-    }
-    return CCRes_ok(CCSlice, CCIoError, cc_string_as_slice(&line));
-}
+#include "bufio.cch"
 
 static inline int cc_buf_writer_init(CCBufWriter *w, CCFile *f, CCArena *arena, size_t cap) {
     if (!w || !f || !arena || cap == 0) return -1;

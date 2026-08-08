@@ -1,0 +1,26 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_type.cch>
+#include "comptime_emit_header_for.cch"
+#include <stdio.h>
+#include <string.h>
+
+typedef struct HdrEmit { int x; int y; } HdrEmit;
+
+/* For-unroll in the TU; header contributes a harvested emit with don't. */
+@comptime for (f in type_of(HdrEmit).fields) {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        @comptime if (1) {
+            enum { HdrEmit_${f.name}_i = ${f.index} };
+        } else {
+            hdr_emit_dead();
+        }
+    `);
+}
+
+int main(void) {
+    if (HdrEmit_note != 1) return 1;
+    if (!strstr(hdr_emit_msg, "don't")) return 2;
+    if (HdrEmit_x_i != 0 || HdrEmit_y_i != 1) return 3;
+    printf("comptime_emit_header_for_smoke ok\n");
+    return 0;
+}

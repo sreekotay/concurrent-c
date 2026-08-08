@@ -76,14 +76,14 @@ static inline int cc_script_task_exe(int argc, char **argv, const char *rel_exe)
     }
     a = cc_arena_create(megabytes(1));
     root_r = cc_script_repo_root(
-        argv && argv[0] ? char_to_slice(argv[0]) : cc_slice_empty(), &a);
+        argv && argv[0] ? cc_slice_cstr(argv[0]) : cc_slice_empty(), &a);
     if (cc_is_err(root_r)) {
         fprintf(stderr, "shcc: %s\n", cc_error(root_r).message);
         cc_arena_destroy(&a);
         return 1;
     }
     root = cc_value(root_r);
-    exe = cc_script_path_join(root, char_to_slice(rel_exe), &a);
+    exe = cc_script_path_join(root, cc_slice_cstr(rel_exe), &a);
     cmd = cc_command(&a, exe);
     (void)cc_command_cwd(&cmd, root);
     (void)cc_command_inherit_stdio(&cmd);
@@ -132,7 +132,7 @@ static inline int cc_script_task_shcc(int argc, char **argv, const char *rel_too
     }
     a = cc_arena_create(megabytes(1));
     root_r = cc_script_repo_root(
-        argv && argv[0] ? char_to_slice(argv[0]) : cc_slice_empty(), &a);
+        argv && argv[0] ? cc_slice_cstr(argv[0]) : cc_slice_empty(), &a);
     if (cc_is_err(root_r)) {
         fprintf(stderr, "shcc: %s\n", cc_error(root_r).message);
         cc_arena_destroy(&a);
@@ -145,9 +145,9 @@ static inline int cc_script_task_shcc(int argc, char **argv, const char *rel_too
         cc_arena_destroy(&a);
         return 1;
     }
-    bin_rel = cc_script_path_join(char_to_slice("bin"), stem, &a);
+    bin_rel = cc_script_path_join(CC_SLICE_LIT("bin"), stem, &a);
     bin = cc_script_path_join(root, bin_rel, &a);
-    ccc = cc_script_path_join(root, char_to_slice("cc/bin/ccc"), &a);
+    ccc = cc_script_path_join(root, CC_SLICE_LIT("cc/bin/ccc"), &a);
 
     build = cc_command(&a, ccc);
     (void)cc_command_cwd(&build, root);

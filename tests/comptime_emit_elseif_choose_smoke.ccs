@@ -1,0 +1,32 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+/* Outer else-if chain selects among three @emit arms; only the middle
+ * arm's fragment may exist. Untaken arms carry undefined symbols. */
+@comptime if (0) {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        emit_choose_head_dead();
+        enum { EMIT_CHOOSE_N = 1 };
+    `);
+} else @comptime if (1) {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        @comptime if (1) {
+            enum { EMIT_CHOOSE_N = 22 };
+        } else {
+            emit_choose_inner_dead();
+        }
+    `);
+} else {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        emit_choose_tail_dead();
+        enum { EMIT_CHOOSE_N = 3 };
+    `);
+}
+
+int main(void) {
+    if (EMIT_CHOOSE_N != 22) return 1;
+    printf("comptime_emit_elseif_choose_smoke n=%d\n", (int)EMIT_CHOOSE_N);
+    return 0;
+}

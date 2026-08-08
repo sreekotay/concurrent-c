@@ -21,7 +21,7 @@ int main(void) {
     AsArgWrap w = {0};
     AsArgWrap *p = &w;
     w.tag = 9;
-    assert(w.open(cc_slice_from_cstr("tmp/as_arg_coerce_smoke.txt"), "w") == 0);
+    assert(w.open(CC_SLICE_LIT("tmp/as_arg_coerce_smoke.txt"), "w") == 0);
 
     g_got = NULL;
     takes_file(&w);          /* → takes_file(&w.file) */

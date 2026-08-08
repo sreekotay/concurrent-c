@@ -83,7 +83,7 @@ typedef struct RedisRequest {
     RedisConn* conn;
     RedisCommandKind kind;
     size_t argc;
-    CCSlice argv[REDIS_ARGV_MAX];
+    char[:] argv[REDIS_ARGV_MAX];
     /* argv-clone scratch: req->arena wraps argv_buf and heap-spills
      * on overflow.  Pairing kept at the tail so sizeof(RedisRequest)
      * is the exact pool-slot size. */
@@ -93,7 +93,7 @@ typedef struct RedisRequest {
 
 typedef struct RedisReply {
     RedisReplyKind kind;
-    CCSlice data;
+    char[:] data;
     int64_t int_value;
 } RedisReply;
 

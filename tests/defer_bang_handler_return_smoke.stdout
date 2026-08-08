@@ -1,0 +1,2 @@
+rc=7 cleanup=1
+defer_bang_handler_return_smoke: PASS

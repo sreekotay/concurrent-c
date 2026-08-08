@@ -4,7 +4,9 @@
 > module and no `cc_codegen_emit` entry point — code emission lives in the AST-visitor
 > layer at [`cc/src/visitor/visit_codegen.c`](../visitor/visit_codegen.c). This file is
 > kept as a marker for a possible future extraction; see
-> [`cc/docs/ARCHITECTURE.md`](../../docs/ARCHITECTURE.md) for the actual pipeline.
+> [`LEGACY_ARCHITECTURE.md`](../../docs/LEGACY_ARCHITECTURE.md) for the
+> legacy visitor emit path; default front:
+> [`ARCHITECTURE.md`](../../docs/ARCHITECTURE.md).
 
 Intended scope (currently implemented in `visit_codegen.c`): emit C11 for CC constructs — sync functions lower directly; async functions become state machines; UFCS desugaring, channel ops (async vs sync), `send_take` ownership transfer, slice ABI, and results lowering.
 

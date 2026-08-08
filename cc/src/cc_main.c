@@ -16,11 +16,12 @@
 
 #include "build/build.h"
 #include "build/host_cc_profile.h"
-#include <ccc/cc_build_helpers.cch>
+#include <ccc/cc_build_helpers.h>
 #include "driver.h"
 #include "diag/diag.h"
 #include "visitor/pass_common.h"
 #include "preprocess/preprocess.h"
+#include "preprocess/script_entry.h"
 #include "preprocess/script_oneliner.h"
 #include "comptime/const_eval.h"
 
@@ -30,6 +31,9 @@ static int ensure_out_dir(void);
 static int cc__selftest_const_eval(int argc, char** argv);
 static void cc__stem_from_path(const char* path, char* out, size_t cap);
 static int run_build_mode(int argc, char** argv);
+static char* cc__read_all_file(const char* path, size_t* out_len);
+static int cc__write_file_bytes(const char* path, const char* data, size_t len);
+static int cc__mkdir_p(const char* path);
 
 // `--emit-c-inspect[=PATH]`: dump the merged translation unit for inspection.
 // On a clean build it is the full pre-parse merged TU; on a build that fails in
@@ -628,7 +632,14 @@ static void cc_init_paths(const char* argv0) {
         snprintf(g_cc_lowered_include, sizeof(g_cc_lowered_include), "%s/out/include", g_repo_root);
         // Prefer the compiler-build runtime object (built by `make -C cc`) which now lives under out/.
         snprintf(g_cc_runtime_o, sizeof(g_cc_runtime_o), "%s/out/cc/obj/runtime/concurrent_c.o", g_repo_root);
-        snprintf(g_cc_runtime_c, sizeof(g_cc_runtime_c), "%s/cc/runtime/concurrent_c.c", g_repo_root);
+        /* Prefer rewritten runtime (ccc wrapper rewrites .cch includes to .h).
+         * Compiling cc/runtime sources directly feeds host-cc raw @as sugar. */
+        snprintf(g_cc_runtime_c, sizeof(g_cc_runtime_c),
+                 "%s/out/runtime/concurrent_c.c", g_repo_root);
+        if (access(g_cc_runtime_c, F_OK) != 0) {
+            snprintf(g_cc_runtime_c, sizeof(g_cc_runtime_c),
+                     "%s/cc/runtime/concurrent_c.c", g_repo_root);
+        }
     }
 
     // Fingerprint the REAL compiler binary for emit/obj cache keys.
@@ -747,8 +758,8 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --bin-dir DIR       Output dir for linked executables (default: <repo>/bin)\n");
     fprintf(stderr, "  --out-stem NAME     Override the basename/stem used for generated files\n");
     fprintf(stderr, "  --no-cache          Disable incremental cache (also: CC_NO_CACHE=1)\n");
-    fprintf(stderr, "  --frontend=serdes|legacy  Front end (default serdes; also: CC_FRONTEND)\n");
-    fprintf(stderr, "  --version, --v, -V  Print version (serdes 0.2.x; legacy 0.1.x)\n");
+    fprintf(stderr, "  --frontend=native|legacy  Front end (default native; also: CC_FRONTEND)\n");
+    fprintf(stderr, "  --version, --v, -V  Print version (native 0.2.x; legacy 0.1.x)\n");
     fprintf(stderr, "  --timeout SECONDS   Kill run/test step after timeout\n");
     fprintf(stderr, "  --verbose           Print invoked commands\n");
     fprintf(stderr, "One-liners:\n");
@@ -809,6 +820,7 @@ static void usage_build(const char* prog) {
     fprintf(stderr, "  export-make Generate Makefile fragment for legacy build integration\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Build flavors:\n");
+    fprintf(stderr, "  (default)       -O2 (asserts kept)\n");
     fprintf(stderr, "  -g, --debug     Add -O0 -g (and disable release dead-stripping)\n");
     fprintf(stderr, "  -O, --release   Add -O2 -DNDEBUG and enable dead-stripping (smaller binaries)\n");
     fprintf(stderr, "\n");
@@ -1036,12 +1048,6 @@ static const char* pick_cc_bin(const char* override) {
     if (env && *env) return env;
     // Fallback list.
     return "cc";
-}
-
-static const char* pick_cxx_bin(void) {
-    const char* env = getenv("CXX");
-    if (env && *env) return env;
-    return "c++";
 }
 
 static int run_cmd(const char* cmd, int verbose) {
@@ -1628,6 +1634,136 @@ static int cc__is_raw_c(const char* path) {
     return path && cc__ends_with(path, ".c");
 }
 
+/* Rewrite `#include … .cch` → `.h` so host cc resolves lowered headers under
+ * out/include. Bare `@as` stays in .cch source; host never opens those files. */
+static char* cc__rewrite_cch_includes_buf(const char* src, size_t n, int* changed) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0, last_emit = 0, i = 0;
+    if (changed) *changed = 0;
+    if (!src) return NULL;
+    while (i < n) {
+        if (i + 5 <= n &&
+            (strncmp(src + i, ".cch>", 5) == 0 || strncmp(src + i, ".cch\"", 5) == 0)) {
+            char closer = src[i + 4];
+            if (!out) {
+                out_cap = n + 64;
+                out = (char*)malloc(out_cap);
+                if (!out) return NULL;
+            }
+            size_t chunk = i - last_emit;
+            if (out_len + chunk + 4 > out_cap) {
+                out_cap = (out_len + chunk + 4) * 2;
+                char* nb = (char*)realloc(out, out_cap);
+                if (!nb) {
+                    free(out);
+                    return NULL;
+                }
+                out = nb;
+            }
+            memcpy(out + out_len, src + last_emit, chunk);
+            out_len += chunk;
+            out[out_len++] = '.';
+            out[out_len++] = 'h';
+            out[out_len++] = closer;
+            i += 5;
+            last_emit = i;
+            if (changed) *changed = 1;
+            continue;
+        }
+        i++;
+    }
+    if (!changed || !*changed) {
+        free(out);
+        return NULL;
+    }
+    if (last_emit < n) {
+        size_t tail = n - last_emit;
+        if (out_len + tail + 1 > out_cap) {
+            out_cap = out_len + tail + 1;
+            char* nb = (char*)realloc(out, out_cap);
+            if (!nb) {
+                free(out);
+                return NULL;
+            }
+            out = nb;
+        }
+        memcpy(out + out_len, src + last_emit, tail);
+        out_len += tail;
+    }
+    out[out_len] = '\0';
+    return out;
+}
+
+/* Write a host-safe copy of a raw .c TU to dst (.cch includes → .h). Always
+ * produces dst (copy when unchanged) so compile uses a stable cache path. */
+static int cc__materialize_host_c(const char* src, const char* dst) {
+    FILE* in;
+    char* buf = NULL;
+    char* rewritten = NULL;
+    long len;
+    size_t nread;
+    int changed = 0;
+    const char* to_write;
+    size_t to_write_len;
+    FILE* out;
+    char dir[PATH_MAX];
+
+    if (!src || !dst || !src[0] || !dst[0]) return -1;
+    if (strcmp(src, dst) == 0) {
+        fprintf(stderr,
+                "cc: internal error: host materialize refuses in-place rewrite "
+                "of %s (would leave .cch includes for host cc)\n",
+                src);
+        return -1;
+    }
+    in = fopen(src, "rb");
+    if (!in) return -1;
+    if (fseek(in, 0, SEEK_END) != 0) {
+        fclose(in);
+        return -1;
+    }
+    len = ftell(in);
+    if (len < 0 || fseek(in, 0, SEEK_SET) != 0) {
+        fclose(in);
+        return -1;
+    }
+    buf = (char*)malloc((size_t)len + 1);
+    if (!buf) {
+        fclose(in);
+        return -1;
+    }
+    nread = fread(buf, 1, (size_t)len, in);
+    fclose(in);
+    buf[nread] = '\0';
+
+    rewritten = cc__rewrite_cch_includes_buf(buf, nread, &changed);
+    to_write = rewritten ? rewritten : buf;
+    to_write_len = rewritten ? strlen(rewritten) : nread;
+
+    cc__dir_of_path(dst, dir, sizeof(dir));
+    if (dir[0] && cc__mkdir_p(dir) != 0) {
+        free(buf);
+        free(rewritten);
+        return -1;
+    }
+    out = fopen(dst, "wb");
+    if (!out) {
+        free(buf);
+        free(rewritten);
+        return -1;
+    }
+    if (fwrite(to_write, 1, to_write_len, out) != to_write_len) {
+        fclose(out);
+        free(buf);
+        free(rewritten);
+        return -1;
+    }
+    fclose(out);
+    free(buf);
+    free(rewritten);
+    return 0;
+}
+
 /* Fold a file's *content* into an FNV-1a hash.  Missing/unreadable files fold a
  * stable sentinel so that creating the file later changes the hash. */
 static uint64_t cc__fold_file_content(uint64_t h, const char* path) {
@@ -2140,7 +2276,15 @@ static int cc__build_target_objs_rec(int idx,
         cc__dir_of_path(src_abs, src_dir, sizeof(src_dir));
 
         const int is_raw_c = cc__is_raw_c(src_abs);
-        const char* c_for_compile = is_raw_c ? src_abs : c_out;
+        if (is_raw_c) {
+            /* Host-safe copy: .cch includes → .h (lowered under out/include). */
+            if (cc__materialize_host_c(src_abs, c_out) != 0) {
+                fprintf(stderr, "cc: failed to materialize host C %s -> %s\n",
+                        src_abs, c_out);
+                return -1;
+            }
+        }
+        const char* c_for_compile = c_out;
 
         // Use a cache stem that is unique per target.
         char cache_stem[256];
@@ -2283,27 +2427,43 @@ static int cc__load_const_bindings(const CCBuildOptions* opt, CCConstBinding* bi
 static void cc__print_comptime_targets(const char* build_path);
 static void cc__print_comptime_state(const CCBuildOptions* opt, const char* build_path, const CCConstBinding* bindings, size_t count);
 
-/* SERDES is the default front. Opt out: --frontend=legacy or CC_FRONTEND=legacy.
- * -1 = unset (env/default), 0 = legacy, 1 = serdes. */
-static int g_frontend_serdes = -1;
+/* Native (shadow_lower) is the default front. Opt out: --frontend=legacy.
+ * -1 = unset (env/default), 0 = legacy, 1 = native. */
+static int g_frontend_native = -1;
 
-/* Legacy front stays on 0.1.x; serdes (default) is 0.2.x. */
+/* Legacy front stays on 0.1.x; native (default) is 0.2.x. */
 #define CCC_VERSION_LEGACY "0.1.0-dev"
-#define CCC_VERSION_SERDES "0.2.0-dev"
+#define CCC_VERSION_NATIVE "0.2.6"
 
-static int cc__want_serdes_front(void) {
-    if (g_frontend_serdes == 1) return 1;
-    if (g_frontend_serdes == 0) return 0;
+static int cc__set_frontend_name(const char* v) {
+    if (!v || !v[0]) return -1;
+    if (strcmp(v, "native") == 0) {
+        g_frontend_native = 1;
+        return 0;
+    }
+    if (strcmp(v, "legacy") == 0) {
+        g_frontend_native = 0;
+        return 0;
+    }
+    fprintf(stderr, "cc: --frontend must be native or legacy (got %s)\n", v);
+    return -1;
+}
+
+static int cc__want_native_front(void) {
+    if (g_frontend_native == 1) return 1;
+    if (g_frontend_native == 0) return 0;
     {
         const char* e = getenv("CC_FRONTEND");
-        if (e && strcmp(e, "legacy") == 0) return 0;
-        if (e && strcmp(e, "serdes") == 0) return 1;
+        if (!e || !e[0]) return 1; /* default: native */
+        if (strcmp(e, "legacy") == 0) return 0;
+        if (strcmp(e, "native") == 0) return 1;
+        fprintf(stderr, "cc: CC_FRONTEND must be native or legacy (got %s)\n", e);
+        exit(2);
     }
-    return 1; /* default: serdes */
 }
 
 static const char* cc__version_string(void) {
-    return cc__want_serdes_front() ? CCC_VERSION_SERDES : CCC_VERSION_LEGACY;
+    return cc__want_native_front() ? CCC_VERSION_NATIVE : CCC_VERSION_LEGACY;
 }
 
 static void cc__print_version(void) {
@@ -2315,23 +2475,25 @@ static int cc__arg_is_version(const char* a) {
                  strcmp(a, "-V") == 0);
 }
 
-/* Light scan so `ccc --frontend=legacy --version` reports 0.1.x. */
-static void cc__scan_frontend_flags(int argc, char** argv) {
+/* Light scan so `ccc --frontend=legacy --version` reports 0.1.x.
+ * Returns -1 on unknown frontend name (already diagnosed). */
+static int cc__scan_frontend_flags(int argc, char** argv) {
     int i;
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--frontend") == 0) {
-            if (i + 1 >= argc) continue;
+            if (i + 1 >= argc) {
+                fprintf(stderr, "cc: --frontend requires native|legacy\n");
+                return -1;
+            }
             i++;
-            if (strcmp(argv[i], "serdes") == 0) g_frontend_serdes = 1;
-            else if (strcmp(argv[i], "legacy") == 0) g_frontend_serdes = 0;
+            if (cc__set_frontend_name(argv[i]) != 0) return -1;
             continue;
         }
         if (strncmp(argv[i], "--frontend=", 11) == 0) {
-            const char* v = argv[i] + 11;
-            if (strcmp(v, "serdes") == 0) g_frontend_serdes = 1;
-            else if (strcmp(v, "legacy") == 0) g_frontend_serdes = 0;
+            if (cc__set_frontend_name(argv[i] + 11) != 0) return -1;
         }
     }
+    return 0;
 }
 
 static int cc__ends_with_ci(const char* s, const char* suf) {
@@ -2350,6 +2512,11 @@ static int cc__find_shadow_lower(char* dst, size_t cap) {
         snprintf(dst, cap, "%s", env);
         return 0;
     }
+    /* Prefix install: $PREFIX/bin/ccc + $PREFIX/bin/shadow_lower. */
+    if (g_layout_installed && g_repo_root[0]) {
+        snprintf(dst, cap, "%s/bin/shadow_lower", g_repo_root);
+        if (access(dst, X_OK) == 0) return 0;
+    }
     if (g_repo_root[0]) {
         snprintf(dst, cap, "%s/out/cc/bin/shadow_lower", g_repo_root);
         if (access(dst, X_OK) == 0) return 0;
@@ -2361,46 +2528,180 @@ static int cc__find_shadow_lower(char* dst, size_t cap) {
     return -1;
 }
 
-/* Delegate .ccs build/emit to native shadow_lower (owns cache + host-cc/link).
- * Options contract: every CCBuildOptions field is either forwarded, handled by
- * a documented legacy fallback, or a hard error — never silently dropped. */
+/* Append build.cc CC_CONST bindings as host -D flags. CLI -D names are skipped
+ * because build-mode already folded them into opt->cc_flags. */
+static int cc__append_build_cc_defines(char* buf, size_t cap, size_t* cflen,
+                                       const CCBuildOptions* opt,
+                                       const CCConstBinding* bindings,
+                                       size_t count) {
+    size_t i, j;
+    if (!buf || !cflen || !opt || (!bindings && count > 0)) return -1;
+    for (i = 0; i < count; ++i) {
+        int is_cli = 0;
+        int n;
+        if (!bindings[i].name || !bindings[i].name[0]) continue;
+        for (j = 0; j < opt->cli_count; ++j) {
+            if (opt->cli_names[j] &&
+                strcmp(opt->cli_names[j], bindings[i].name) == 0) {
+                is_cli = 1;
+                break;
+            }
+        }
+        if (is_cli) continue;
+        if (bindings[i].value == 1) {
+            n = snprintf(buf + *cflen, cap - *cflen, "%s-D%s",
+                         *cflen ? " " : "", bindings[i].name);
+        } else {
+            n = snprintf(buf + *cflen, cap - *cflen, "%s-D%s=%lld",
+                         *cflen ? " " : "", bindings[i].name,
+                         bindings[i].value);
+        }
+        if (n < 0 || (size_t)n >= cap - *cflen) {
+            fprintf(stderr, "cc: build.cc -D flags too long for native forward\n");
+            return -1;
+        }
+        *cflen += (size_t)n;
+    }
+    return 0;
+}
+
+/* .shcc → content-keyed .ccs for native shadow_lower (prelude / main /
+ * default @errhandler / @task). Host compile stays on whatever CC= is. */
+static int cc__materialize_shcc_for_native(const char* shcc_path, char* out_ccs,
+                                           size_t cap) {
+    char* raw = NULL;
+    char* rewritten = NULL;
+    size_t raw_len = 0;
+    size_t rw_len = 0;
+    uint64_t h;
+    char dir[PATH_MAX];
+    char path[PATH_MAX];
+    char tmp[PATH_MAX];
+    if (!shcc_path || !out_ccs || !cap) return -1;
+    out_ccs[0] = '\0';
+    raw = cc__read_all_file(shcc_path, &raw_len);
+    if (!raw) {
+        fprintf(stderr, "cc: cannot read %s\n", shcc_path);
+        return -1;
+    }
+    rewritten = cc_script_rewrite_source(shcc_path, raw, raw_len, &rw_len);
+    free(raw);
+    if (!rewritten) {
+        fprintf(stderr, "cc: .shcc rewrite failed for %s\n", shcc_path);
+        return -1;
+    }
+    /* Same naked print→cc_* alias as legacy canonicalize (shadow has no
+     * preprocessor pass for it). Member UFCS left untouched. */
+    {
+        char* prints = cc_rewrite_naked_print_aliases(rewritten, rw_len);
+        if (prints) {
+            free(rewritten);
+            rewritten = prints;
+            rw_len = strlen(rewritten);
+        }
+    }
+    h = 1469598103934665603ULL;
+    h = cc__fnv1a64_str(h, shcc_path);
+    h = cc__fnv1a64_update(h, rewritten, rw_len);
+    snprintf(dir, sizeof(dir), "%s/shcc_native", g_cache_root);
+    if (cc__mkdir_p(dir) != 0) {
+        free(rewritten);
+        return -1;
+    }
+    /* Per-process path: parallel cc_test must not race a shared wrap file. */
+    snprintf(path, sizeof(path), "%s/%016llx.%d.ccs", dir, (unsigned long long)h,
+             (int)getpid());
+    if (!file_exists(path)) {
+        snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+        if (cc__write_file_bytes(tmp, rewritten, rw_len) != 0) {
+            unlink(tmp);
+            free(rewritten);
+            return -1;
+        }
+        if (rename(tmp, path) != 0) {
+            unlink(tmp);
+            if (!file_exists(path)) {
+                free(rewritten);
+                return -1;
+            }
+        }
+    }
+    free(rewritten);
+    if (strlen(path) + 1 > cap) {
+        fprintf(stderr, "cc: shcc wrap path too long\n");
+        return -1;
+    }
+    snprintf(out_ccs, cap, "%s", path);
+    return 0;
+}
+
+/* Delegate .ccs/.shcc build/emit to native shadow_lower (owns cache + host-cc/link).
+ * Driver loads build.cc / CLI -D, handles dumps/dry-run, and forwards host
+ * flags. Options contract: forward, handle here, or hard error — never drop.
+ * .shcc is rewritten to a temp .ccs first (script entry); host CC is unchanged. */
 static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path) {
     char shadow[PATH_MAX];
     char cc_flags_buf[2048];
     char cc_flags_arg[2200];
     char ld_flags_arg[2048];
+    char shcc_wrap[PATH_MAX];
+    CCBuildOptions opt_local;
     char* argv[28];
     int argc = 0;
     pid_t pid;
     int status;
     size_t cflen = 0;
+    CCConstBinding bindings[128];
+    size_t binding_count = 0;
     if (!opt || !opt->in_path || !out_path) return -1;
-    /* build.cc / dump paths still need the legacy front. */
-    if (opt->dump_consts || opt->dump_comptime) {
-        fprintf(stderr,
-                "cc: --dump-consts/--dump-comptime require --frontend=legacy "
-                "(serdes does not load build.cc)\n");
-        return -1;
+
+    if (cc_path_is_shcc(opt->in_path)) {
+        if (cc__materialize_shcc_for_native(opt->in_path, shcc_wrap,
+                                            sizeof(shcc_wrap)) != 0)
+            return -1;
+        opt_local = *opt;
+        opt_local.in_path = shcc_wrap;
+        opt = &opt_local;
     }
-    if (opt->build_override && opt->build_override[0]) {
-        fprintf(stderr,
-                "cc: --build-file requires --frontend=legacy "
-                "(serdes does not load build.cc)\n");
-        return -1;
+
+    if (cc__load_const_bindings(opt, bindings, &binding_count) != 0) return -1;
+    if (opt->dump_consts && !opt->dump_comptime) {
+        for (size_t i = 0; i < binding_count; ++i) {
+            printf("CONST %s=%lld\n", bindings[i].name, bindings[i].value);
+        }
     }
-    if (opt->no_build) {
-        fprintf(stderr,
-                "cc: --no-build requires --frontend=legacy "
-                "(serdes does not load build.cc)\n");
-        return -1;
-    }
+    if (opt->dry_run) return 0;
+
     if (cc__find_shadow_lower(shadow, sizeof(shadow)) != 0) {
         fprintf(stderr,
-                "cc: serdes front requires native shadow_lower "
-                "(make -C cc ../out/cc/bin/shadow_lower)\n");
+                "cc: native front requires shadow_lower "
+                "(checkout: make -C cc; install: $PREFIX/bin/shadow_lower)\n");
         return -1;
     }
-    /* Fold --target / --sysroot / existing cc_flags (incl. CLI -D) for host cc. */
+    /* Installed / non-prebuilt layouts: build or locate concurrent_c.o and
+     * hand it to shadow_lower (it only probes checkout-relative paths). */
+    {
+        char runtime_obj[PATH_MAX];
+        int runtime_reused = 0;
+        const char* target_part =
+            (opt->target_flag && opt->target_flag[0]) ? opt->target_flag : NULL;
+        const char* sysroot_part =
+            (opt->sysroot_flag && opt->sysroot_flag[0]) ? opt->sysroot_flag : NULL;
+        if (!opt->no_runtime &&
+            cc__ensure_runtime_obj(opt, target_part, sysroot_part, runtime_obj,
+                                   sizeof(runtime_obj), &runtime_reused) != 0)
+            return -1;
+        if (!opt->no_runtime && runtime_obj[0]) {
+            if (setenv("SHADOW_RUNTIME_O", runtime_obj, 1) != 0) {
+                fprintf(stderr, "cc: setenv SHADOW_RUNTIME_O failed\n");
+                return -1;
+            }
+        } else {
+            unsetenv("SHADOW_RUNTIME_O");
+        }
+        (void)runtime_reused;
+    }
+    /* Fold --target / --sysroot / existing cc_flags (incl. CLI -D) + build.cc. */
     cc_flags_buf[0] = 0;
     if (opt->cc_flags && opt->cc_flags[0]) {
         cflen = strlen(opt->cc_flags);
@@ -2408,11 +2709,14 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
         memcpy(cc_flags_buf, opt->cc_flags, cflen);
         cc_flags_buf[cflen] = 0;
     }
+    if (cc__append_build_cc_defines(cc_flags_buf, sizeof(cc_flags_buf), &cflen,
+                                    opt, bindings, binding_count) != 0)
+        return -1;
     if (opt->target_flag && opt->target_flag[0]) {
         int n = snprintf(cc_flags_buf + cflen, sizeof(cc_flags_buf) - cflen,
                          "%s--target %s", cflen ? " " : "", opt->target_flag);
         if (n < 0 || (size_t)n >= sizeof(cc_flags_buf) - cflen) {
-            fprintf(stderr, "cc: --target/--cc-flags too long for serdes forward\n");
+            fprintf(stderr, "cc: --target/--cc-flags too long for native forward\n");
             return -1;
         }
         cflen += (size_t)n;
@@ -2421,7 +2725,29 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
         int n = snprintf(cc_flags_buf + cflen, sizeof(cc_flags_buf) - cflen,
                          "%s--sysroot %s", cflen ? " " : "", opt->sysroot_flag);
         if (n < 0 || (size_t)n >= sizeof(cc_flags_buf) - cflen) {
-            fprintf(stderr, "cc: --sysroot/--cc-flags too long for serdes forward\n");
+            fprintf(stderr, "cc: --sysroot/--cc-flags too long for native forward\n");
+            return -1;
+        }
+        cflen += (size_t)n;
+    }
+    /* Absolute include roots: installed prefix has no checkout-relative
+     * out/include or cc/include for shadow_lower's hardcoded -I probes. */
+    if (g_cc_lowered_include[0] && file_exists(g_cc_lowered_include)) {
+        int n = snprintf(cc_flags_buf + cflen, sizeof(cc_flags_buf) - cflen,
+                         "%s-I%s", cflen ? " " : "", g_cc_lowered_include);
+        if (n < 0 || (size_t)n >= sizeof(cc_flags_buf) - cflen) {
+            fprintf(stderr, "cc: include path too long for native forward\n");
+            return -1;
+        }
+        cflen += (size_t)n;
+    }
+    if (g_cc_include[0] && file_exists(g_cc_include) &&
+        (!g_cc_lowered_include[0] ||
+         strcmp(g_cc_include, g_cc_lowered_include) != 0)) {
+        int n = snprintf(cc_flags_buf + cflen, sizeof(cc_flags_buf) - cflen,
+                         "%s-I%s", cflen ? " " : "", g_cc_include);
+        if (n < 0 || (size_t)n >= sizeof(cc_flags_buf) - cflen) {
+            fprintf(stderr, "cc: include path too long for native forward\n");
             return -1;
         }
         cflen += (size_t)n;
@@ -2432,7 +2758,6 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
     if (opt->verbose) argv[argc++] = (char*)"--verbose";
     if (opt->opt_release) argv[argc++] = (char*)"--release";
     if (opt->opt_debug) argv[argc++] = (char*)"--debug";
-    if (opt->dry_run) argv[argc++] = (char*)"--dry-run";
     if (opt->no_runtime) argv[argc++] = (char*)"--no-runtime";
     if (cc_flags_buf[0]) {
         snprintf(cc_flags_arg, sizeof(cc_flags_arg), "--cc-flags=%s",
@@ -2449,7 +2774,7 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
     argv[argc++] = (char*)out_path;
     argv[argc] = NULL;
     if (opt->verbose) {
-        fprintf(stderr, "cc: serdes:");
+        fprintf(stderr, "cc: native:");
         for (int i = 0; argv[i]; ++i) fprintf(stderr, " %s", argv[i]);
         fprintf(stderr, "\n");
     }
@@ -2477,10 +2802,13 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         fprintf(stderr, "cc: missing input or c_out_path\n");
         return -1;
     }
-    /* SERDES succession path: delegate .ccs link/emit to shadow_lower.
-     * Py modules keep the caller's -fPIC/-shared flags (set above when
-     * PyInit_* is detected); shadow_lower forwards them to host cc/ld. */
-    if (cc__want_serdes_front() && cc__ends_with_ci(opt->in_path, ".ccs")) {
+    /* Native front: delegate .ccs/.shcc link/emit to shadow_lower.
+     * .shcc is script-rewritten to a temp .ccs inside cc__run_shadow_lower.
+     * --compile = emit C via shadow_lower, then host cc -c (driver-side).
+     * Py modules keep the caller's -fPIC/-shared flags; shadow_lower forwards. */
+    if (cc__want_native_front() &&
+        (cc__ends_with_ci(opt->in_path, ".ccs") ||
+         cc__ends_with_ci(opt->in_path, ".shcc"))) {
         if (opt->mode == CC_MODE_LINK && opt->bin_out_path) {
             if (summary_out) {
                 memset(summary_out, 0, sizeof(*summary_out));
@@ -2496,9 +2824,51 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             }
             return cc__run_shadow_lower(opt, opt->c_out_path);
         }
+        if (opt->mode == CC_MODE_COMPILE) {
+            char src_dir[PATH_MAX];
+            char target_part[256];
+            char sysroot_part[256];
+            const char* slash;
+            if (!opt->obj_out_path) {
+                fprintf(stderr, "cc: --compile requires an object output path\n");
+                return -1;
+            }
+            if (summary_out) {
+                memset(summary_out, 0, sizeof(*summary_out));
+                summary_out->c_out_path = opt->c_out_path;
+                summary_out->obj_out_path = opt->obj_out_path;
+                summary_out->did_emit_c = 1;
+            }
+            if (cc__run_shadow_lower(opt, opt->c_out_path) != 0) return -1;
+            if (opt->dry_run) return 0;
+            src_dir[0] = 0;
+            slash = strrchr(opt->in_path, '/');
+            if (slash && slash > opt->in_path) {
+                size_t n = (size_t)(slash - opt->in_path);
+                if (n + 1 < sizeof(src_dir)) {
+                    memcpy(src_dir, opt->in_path, n);
+                    src_dir[n] = 0;
+                }
+            }
+            target_part[0] = 0;
+            sysroot_part[0] = 0;
+            if (opt->target_flag && opt->target_flag[0])
+                snprintf(target_part, sizeof(target_part), "--target %s",
+                         opt->target_flag);
+            if (opt->sysroot_flag && opt->sysroot_flag[0])
+                snprintf(sysroot_part, sizeof(sysroot_part), "--sysroot %s",
+                         opt->sysroot_flag);
+            if (cc__compile_c_to_obj(opt, opt->c_out_path, opt->obj_out_path,
+                                     NULL, src_dir,
+                                     target_part[0] ? target_part : NULL,
+                                     sysroot_part[0] ? sysroot_part : NULL) != 0)
+                return -1;
+            if (summary_out) summary_out->did_compile_obj = 1;
+            return 0;
+        }
         fprintf(stderr,
-                "cc: --frontend=serdes supports --link and --emit-c-only "
-                "(got --compile); use legacy front or emit-c-only\n");
+                "cc: --frontend=native supports --link, --emit-c-only, and "
+                "--compile (unknown mode)\n");
         return -1;
     }
     if (summary_out) {
@@ -2535,10 +2905,11 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             summary_out->did_emit_c = 0;
         }
         if (opt->mode == CC_MODE_EMIT_C) {
-            // If user requested an output path, copy; otherwise do nothing.
+            /* Host-safe emit: rewrite .cch includes → .h when writing out. */
             if (opt->c_out_path && strcmp(opt->c_out_path, opt->in_path) != 0) {
-                if (cc__copy_file(opt->in_path, opt->c_out_path) != 0) {
-                    fprintf(stderr, "cc: failed to copy %s -> %s\n", opt->in_path, opt->c_out_path);
+                if (cc__materialize_host_c(opt->in_path, opt->c_out_path) != 0) {
+                    fprintf(stderr, "cc: failed to materialize host C %s -> %s\n",
+                            opt->in_path, opt->c_out_path);
                     return -1;
                 }
                 if (summary_out) {
@@ -2547,6 +2918,23 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
                 }
             }
             return 0;
+        }
+        /* COMPILE/LINK: materialize before host cc (c_out_path ≠ in_path). */
+        if (!opt->c_out_path || strcmp(opt->c_out_path, opt->in_path) == 0) {
+            fprintf(stderr,
+                    "cc: internal error: raw .c compile needs a distinct host "
+                    "materialize path (got %s)\n",
+                    opt->c_out_path ? opt->c_out_path : "(null)");
+            return -1;
+        }
+        if (cc__materialize_host_c(opt->in_path, opt->c_out_path) != 0) {
+            fprintf(stderr, "cc: failed to materialize host C %s -> %s\n",
+                    opt->in_path, opt->c_out_path);
+            return -1;
+        }
+        if (summary_out) {
+            summary_out->reuse_emit_c = 0;
+            summary_out->did_emit_c = 1;
         }
     }
 
@@ -2648,7 +3036,8 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
     cc__derive_d_path_from_stem(stem, dep_path, sizeof(dep_path));
     char src_dir[PATH_MAX];
     cc__dir_of_path(opt->in_path, src_dir, sizeof(src_dir));
-    const char* c_for_compile = is_raw_c ? opt->in_path : opt->c_out_path;
+    /* Raw .c was materialized to c_out_path with .cch→.h includes. */
+    const char* c_for_compile = opt->c_out_path;
     if (cache_ok) {
         uint64_t h = 1469598103934665603ULL;
         if (is_raw_c) {
@@ -2657,6 +3046,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             h = cc__fnv1a64_str(h, opt->in_path);
             h = cc__fnv1a64_i64(h, in_sig.mtime_sec);
             h = cc__fnv1a64_i64(h, in_sig.size);
+            h = cc__fold_file_content(h, opt->in_path);
         } else {
             h = cc__fnv1a64_i64(h, (long long)emit_key);
         }
@@ -2987,7 +3377,6 @@ static int cc__compile_c_to_obj(const CCBuildOptions* opt,
     // This enables the linker to dead-strip unused runtime code.
     // TCC doesn't support these flags.
     if (!is_tcc) {
-        strncat(cmd, " -DCC_ENABLE_XJB_FLOAT_FMT=1", sizeof(cmd) - strlen(cmd) - 1);
         strncat(cmd, " -ffunction-sections -fdata-sections", sizeof(cmd) - strlen(cmd) - 1);
         /* C23 semantics: an undeclared function is a compile error AT THE
          * USER'S LINE (via #line sourcemaps), not an implicit int that
@@ -3010,11 +3399,10 @@ static int cc__compile_c_to_obj(const CCBuildOptions* opt,
 }
 
 /* The three commands that produce a runtime object: compile the runtime TU,
- * compile the C++ float formatter, merge them with `-r`. Under a TCC host the
- * first writes the final object and the other two stay empty. */
+ * compile the C float formatter, merge them with `-r`. */
 typedef struct {
     char core[4096];
-    char xjb[4096];
+    char float_fmt[4096];
     char merge[4096];
 } CCRuntimeCmds;
 
@@ -3135,8 +3523,6 @@ static int cc__prebuilt_runtime_applies(const CCBuildOptions* opt,
     if ((e = getenv("CC")) != NULL && *e) return 0;
     if ((e = getenv("CFLAGS")) != NULL && *e) return 0;
     if ((e = getenv("CPPFLAGS")) != NULL && *e) return 0;
-    /* CXXFLAGS feeds the xjb TU, which the prebuilt has already merged in. */
-    if ((e = getenv("CXXFLAGS")) != NULL && *e) return 0;
     return 1;
 }
 
@@ -3151,7 +3537,7 @@ static int cc__runtime_obj_is_stale(const char* runtime_obj_path) {
     const char* runtime_sources[] = {
         "concurrent_c.c", "scheduler.c", "fiber_sched.c", "nursery.c",
         "channel.c", "fiber.c", "exec.c", "closure.c", "task_intptr.c",
-        "float_format_xjb.cpp",
+        "float_format_zmij.c",
         NULL
     };
     char src_path[PATH_MAX];
@@ -3162,7 +3548,7 @@ static int cc__runtime_obj_is_stale(const char* runtime_obj_path) {
             return 1;  // Source is newer than object
         }
     }
-    snprintf(src_path, sizeof(src_path), "%s/third_party/xjb/src/ftoa.cpp", g_repo_root);
+    snprintf(src_path, sizeof(src_path), "%s/cc/runtime/vendor/zmij.c", g_repo_root);
     {
         struct stat src_stat;
         if (stat(src_path, &src_stat) == 0 && src_stat.st_mtime > obj_mtime) {
@@ -3179,26 +3565,24 @@ static int cc__runtime_obj_is_stale(const char* runtime_obj_path) {
 static void cc__runtime_build_cmds(const CCBuildOptions* opt, const char* cc_bin, int is_tcc,
                                    const CCHostCcProfile* host_prof,
                                    const char* target_part, const char* sysroot_part,
-                                   const char* obj, const char* core_obj, const char* xjb_obj,
-                                   const char* xjb_src, CCRuntimeCmds* out) {
+                                   const char* obj, const char* core_obj, const char* float_obj,
+                                   const char* float_src, CCRuntimeCmds* out) {
     const char* ccflags_env = getenv("CFLAGS");
-    const char* cxxflags_env = getenv("CXXFLAGS");
     const char* cppflags_env = getenv("CPPFLAGS");
-    out->core[0] = out->xjb[0] = out->merge[0] = '\0';
+    out->core[0] = out->float_fmt[0] = out->merge[0] = '\0';
 
-    snprintf(out->core, sizeof(out->core), "%s %s %s %s %s -DCC_ENABLE_ASYNC -DCC_ENABLE_XJB_FLOAT_FMT=%d -I%s -I%s -I%s -I%s -c %s -o %s",
+    snprintf(out->core, sizeof(out->core), "%s %s %s %s %s -DCC_ENABLE_ASYNC -I%s -I%s -I%s -I%s -c %s -o %s",
              cc_bin,
              ccflags_env ? ccflags_env : "",
              cppflags_env ? cppflags_env : "",
              target_part ? target_part : "",
              sysroot_part ? sysroot_part : "",
-             (host_prof->ok ? host_prof->no_xjb_float : is_tcc) ? 0 : 1,
              g_cc_lowered_include,
              g_cc_include,
              g_cc_dir,
              g_repo_root,
              g_cc_runtime_c,
-             is_tcc ? obj : core_obj);
+             core_obj);
     if (host_prof->ok ? host_prof->no_liblfds : is_tcc) {
         /* liblfds has no TCC port (needs GCC __atomic_* / OS PAL). Native ring
          * queue remains the primary lock-free path when CC_NO_LIBLFDS is set. */
@@ -3212,11 +3596,9 @@ static void cc__runtime_build_cmds(const CCBuildOptions* opt, const char* cc_bin
     if (!is_tcc)
         strncat(out->core, " -ffunction-sections -fdata-sections", sizeof(out->core) - strlen(out->core) - 1);
 
-    if (is_tcc) return;
-
-    snprintf(out->xjb, sizeof(out->xjb), "%s %s %s %s %s -std=c++17 -fno-exceptions -fno-rtti -DCC_ENABLE_XJB_FLOAT_FMT=1 -I%s -I%s -I%s -I%s -c %s -o %s",
-             pick_cxx_bin(),
-             cxxflags_env ? cxxflags_env : "",
+    snprintf(out->float_fmt, sizeof(out->float_fmt), "%s %s %s %s %s -I%s -I%s -I%s -I%s -c %s -o %s",
+             cc_bin,
+             ccflags_env ? ccflags_env : "",
              cppflags_env ? cppflags_env : "",
              target_part ? target_part : "",
              sysroot_part ? sysroot_part : "",
@@ -3224,13 +3606,16 @@ static void cc__runtime_build_cmds(const CCBuildOptions* opt, const char* cc_bin
              g_cc_include,
              g_cc_dir,
              g_repo_root,
-             xjb_src,
-             xjb_obj);
+             float_src,
+             float_obj);
+    cc__append_host_cc_flags(out->float_fmt, sizeof(out->float_fmt), cc_bin);
     if (opt->cc_flags && *opt->cc_flags) {
-        strncat(out->xjb, " ", sizeof(out->xjb) - strlen(out->xjb) - 1);
-        strncat(out->xjb, opt->cc_flags, sizeof(out->xjb) - strlen(out->xjb) - 1);
+        strncat(out->float_fmt, " ", sizeof(out->float_fmt) - strlen(out->float_fmt) - 1);
+        strncat(out->float_fmt, opt->cc_flags, sizeof(out->float_fmt) - strlen(out->float_fmt) - 1);
     }
-    strncat(out->xjb, " -ffunction-sections -fdata-sections", sizeof(out->xjb) - strlen(out->xjb) - 1);
+    if (!is_tcc)
+        strncat(out->float_fmt, " -ffunction-sections -fdata-sections",
+                sizeof(out->float_fmt) - strlen(out->float_fmt) - 1);
 
     snprintf(out->merge, sizeof(out->merge), "%s %s %s %s -nostdlib -r %s %s -o %s",
              cc_bin,
@@ -3238,7 +3623,7 @@ static void cc__runtime_build_cmds(const CCBuildOptions* opt, const char* cc_bin
              sysroot_part ? sysroot_part : "",
              cppflags_env ? cppflags_env : "",
              core_obj,
-             xjb_obj,
+             float_obj,
              obj);
 }
 
@@ -3298,10 +3683,10 @@ static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
     // Host-native runtime objects under <cache>/host/<fp>/.
     char runtime_obj[PATH_MAX];
     char runtime_core_obj[PATH_MAX];
-    char runtime_xjb_obj[PATH_MAX];
-    char runtime_xjb_src[PATH_MAX];
+    char runtime_float_obj[PATH_MAX];
+    char runtime_float_src[PATH_MAX];
     const char* rt_root = g_host_obj_root[0] ? g_host_obj_root : g_out_root;
-    snprintf(runtime_xjb_src, sizeof(runtime_xjb_src), "%s/runtime/float_format_xjb.cpp", g_cc_dir);
+    snprintf(runtime_float_src, sizeof(runtime_float_src), "%s/runtime/float_format_zmij.c", g_cc_dir);
 
     /* Name the objects after a hash of the commands that build them, so each
      * variant gets its own file. <cache>/host/<fp>/ is keyed on the host CC
@@ -3309,25 +3694,25 @@ static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
      * flip rebuild the runtime. Derive the hash from commands written against
      * placeholder output paths, since the real paths contain the hash. */
     CCRuntimeCmds probe;
-    char ph_obj[PATH_MAX], ph_core[PATH_MAX], ph_xjb[PATH_MAX];
+    char ph_obj[PATH_MAX], ph_core[PATH_MAX], ph_float[PATH_MAX];
     snprintf(ph_obj, sizeof(ph_obj), "%s/runtime.o", rt_root);
     snprintf(ph_core, sizeof(ph_core), "%s/runtime.core.o", rt_root);
-    snprintf(ph_xjb, sizeof(ph_xjb), "%s/runtime.xjb.o", rt_root);
+    snprintf(ph_float, sizeof(ph_float), "%s/runtime.float.o", rt_root);
     cc__runtime_build_cmds(opt, cc_bin, is_tcc, &host_prof, target_part, sysroot_part,
-                           ph_obj, ph_core, ph_xjb, runtime_xjb_src, &probe);
+                           ph_obj, ph_core, ph_float, runtime_float_src, &probe);
     uint64_t vh = cc__fnv1a64(probe.core, strlen(probe.core), 0);
-    vh = cc__fnv1a64(probe.xjb, strlen(probe.xjb), vh);
+    vh = cc__fnv1a64(probe.float_fmt, strlen(probe.float_fmt), vh);
     vh = cc__fnv1a64(probe.merge, strlen(probe.merge), vh);
     char variant[17];
     snprintf(variant, sizeof(variant), "%016llx", (unsigned long long)vh);
 
     snprintf(runtime_obj, sizeof(runtime_obj), "%s/runtime-%s.o", rt_root, variant);
     snprintf(runtime_core_obj, sizeof(runtime_core_obj), "%s/runtime-%s.core.o", rt_root, variant);
-    snprintf(runtime_xjb_obj, sizeof(runtime_xjb_obj), "%s/runtime-%s.xjb.o", rt_root, variant);
+    snprintf(runtime_float_obj, sizeof(runtime_float_obj), "%s/runtime-%s.float.o", rt_root, variant);
 
     CCRuntimeCmds cmds;
     cc__runtime_build_cmds(opt, cc_bin, is_tcc, &host_prof, target_part, sysroot_part,
-                           runtime_obj, runtime_core_obj, runtime_xjb_obj, runtime_xjb_src, &cmds);
+                           runtime_obj, runtime_core_obj, runtime_float_obj, runtime_float_src, &cmds);
 
     /* Reuse the cached object when the very same commands produced it and
      * nothing it was built from has changed. The recipe is the authority, not
@@ -3337,9 +3722,9 @@ static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
      * runtime object to fall back on — recompiles the whole runtime TU on every
      * run. */
     char recipe_path[PATH_MAX];
-    char recipe[sizeof(cmds.core) + sizeof(cmds.xjb) + sizeof(cmds.merge) + 4];
+    char recipe[sizeof(cmds.core) + sizeof(cmds.float_fmt) + sizeof(cmds.merge) + 4];
     snprintf(recipe_path, sizeof(recipe_path), "%s.recipe", runtime_obj);
-    snprintf(recipe, sizeof(recipe), "%s\n%s\n%s\n", cmds.core, cmds.xjb, cmds.merge);
+    snprintf(recipe, sizeof(recipe), "%s\n%s\n%s\n", cmds.core, cmds.float_fmt, cmds.merge);
     if (file_exists(runtime_obj) && cc__file_text_equals(recipe_path, recipe)) {
         struct stat obj_st;
         if (stat(runtime_obj, &obj_st) == 0 && obj_st.st_mtime >= cc__runtime_inputs_mtime()) {
@@ -3351,10 +3736,8 @@ static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
     }
 
     if (run_cmd(cmds.core, opt->verbose) != 0) return -1;
-    if (!is_tcc) {
-        if (run_cmd(cmds.xjb, opt->verbose) != 0) return -1;
-        if (run_cmd(cmds.merge, opt->verbose) != 0) return -1;
-    }
+    if (run_cmd(cmds.float_fmt, opt->verbose) != 0) return -1;
+    if (run_cmd(cmds.merge, opt->verbose) != 0) return -1;
     cc__write_file_text(recipe_path, recipe);
     strncpy(out_runtime_path, runtime_obj, out_runtime_cap);
     out_runtime_path[out_runtime_cap - 1] = '\0';
@@ -3548,26 +3931,16 @@ static int run_build_mode(int argc, char** argv) {
         if (strcmp(argv[i], "--no-cache") == 0) { no_cache = 1; continue; }
         if (strcmp(argv[i], "--frontend") == 0) {
             if (i + 1 >= argc) {
-                fprintf(stderr, "cc: --frontend requires serdes|legacy\n");
+                fprintf(stderr, "cc: --frontend requires native|legacy\n");
                 goto parse_fail;
             }
             ++i;
-            if (strcmp(argv[i], "serdes") == 0) g_frontend_serdes = 1;
-            else if (strcmp(argv[i], "legacy") == 0) g_frontend_serdes = 0;
-            else {
-                fprintf(stderr, "cc: --frontend must be serdes or legacy\n");
-                goto parse_fail;
-            }
+            if (cc__set_frontend_name(argv[i]) != 0) goto parse_fail;
             continue;
         }
         if (strncmp(argv[i], "--frontend=", 11) == 0) {
             const char* v = argv[i] + 11;
-            if (strcmp(v, "serdes") == 0) g_frontend_serdes = 1;
-            else if (strcmp(v, "legacy") == 0) g_frontend_serdes = 0;
-            else {
-                fprintf(stderr, "cc: --frontend must be serdes or legacy\n");
-                goto parse_fail;
-            }
+            if (cc__set_frontend_name(v) != 0) goto parse_fail;
             continue;
         }
         if (strcmp(argv[i], "--out-dir") == 0) {
@@ -3671,11 +4044,9 @@ static int run_build_mode(int argc, char** argv) {
     if (opt_release && opt_debug) opt_release = 0;
 
     // Inject flavor defaults early (before we fold cc_flags + -D defines).
-    // - default: optimized with asserts kept — an unflagged build must not
-    //   be the slowest tier (the backend cc alone would give -O0 with no
-    //   debug info: worst of both worlds)
-    // - release: adds NDEBUG on top
-    // - debug:   easy debugging
+    // - default: -O2 with asserts kept (use test harness --O0 for fast cold compiles)
+    // - release: -O2 -DNDEBUG + dead-strip
+    // - debug:   -O0 -g
     const char* flavor_cc = CC_DEFAULT_FLAVOR_CC;
     if (opt_debug) flavor_cc = "-O0 -g";
     else if (opt_release) flavor_cc = "-O2 -DNDEBUG";
@@ -4524,11 +4895,18 @@ static int run_build_mode(int argc, char** argv) {
             char meta_path[PATH_MAX];
             snprintf(meta_path, sizeof(meta_path), "%s/%s.meta", g_cache_root, stem);
             int is_raw_c = cc__is_raw_c(inputs[i]);
-            const char* c_for_compile = is_raw_c ? inputs[i] : c_bufs[i];
+            if (is_raw_c) {
+                if (cc__materialize_host_c(inputs[i], c_bufs[i]) != 0) {
+                    fprintf(stderr, "cc: failed to materialize host C %s -> %s\n",
+                            inputs[i], c_bufs[i]);
+                    goto parse_fail;
+                }
+                emit_built++;
+            }
+            const char* c_for_compile = c_bufs[i];
 
             if (is_raw_c) {
-                // No CC lowering for .c inputs.
-                emit_reused++;
+                /* Host materialize above; no CC lowering. */
             } else if (cache_ok) {
                 CCFileSig in_sig;
                 in_sig.mtime_sec = 0;
@@ -4738,15 +5116,13 @@ static int run_build_mode(int argc, char** argv) {
             goto parse_fail;
         }
     } else {
-        if (raw_c) {
-            strncpy(c_out, in_path_abs, sizeof(c_out));
-            c_out[sizeof(c_out)-1] = '\0';
-        } else {
-            if (derive_default_output(in_path_abs, c_out, sizeof(c_out)) != 0) {
-                fprintf(stderr, "cc: failed to derive default C output\n");
-                goto parse_fail;
-            }
+        /* Raw .c still gets a distinct out path: host materialize rewrites
+         * .cch includes → .h before cc sees the TU. */
+        if (derive_default_output(in_path_abs, c_out, sizeof(c_out)) != 0) {
+            fprintf(stderr, "cc: failed to derive default C output\n");
+            goto parse_fail;
         }
+        (void)raw_c;
     }
 
     if (mode != CC_MODE_EMIT_C) {
@@ -5214,7 +5590,7 @@ int main(int argc, char **argv) {
         return 0;
     }
     /* Version may appear with --frontend=… ahead of it; scan once. */
-    cc__scan_frontend_flags(argc, argv);
+    if (cc__scan_frontend_flags(argc, argv) != 0) return 2;
     {
         int vi;
         for (vi = 1; vi < argc; vi++) {
@@ -5512,6 +5888,10 @@ int main(int argc, char **argv) {
     int dump_comptime = 0;
     CCMode mode = CC_MODE_LINK;
     char out_stem_buf[128];
+    enum { max_cli_main = 64 };
+    char* cli_names_main[max_cli_main];
+    long long cli_values_main[max_cli_main];
+    size_t cli_count_main = 0;
     out_stem_buf[0] = '\0';
 
     for (int i = 1; i < argc; ++i) {
@@ -5522,6 +5902,22 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--link") == 0) { mode = CC_MODE_LINK; continue; }
         if (strcmp(argv[i], "--release") == 0 || strcmp(argv[i], "-O") == 0) { opt_release = 1; continue; }
         if (strcmp(argv[i], "--debug") == 0 || strcmp(argv[i], "-g") == 0) { opt_debug = 1; continue; }
+        if (strcmp(argv[i], "-D") == 0) {
+            fprintf(stderr, "cc: -D requires NAME or NAME=VALUE\n");
+            return 1;
+        }
+        if (strncmp(argv[i], "-D", 2) == 0) {
+            if (cli_count_main >= (size_t)max_cli_main) {
+                fprintf(stderr, "cc: too many -D defines (max %d)\n", max_cli_main);
+                return 1;
+            }
+            if (parse_define(argv[i] + 2, &cli_names_main[cli_count_main],
+                             &cli_values_main[cli_count_main]) != 0) {
+                return 1;
+            }
+            cli_count_main++;
+            continue;
+        }
         if (strcmp(argv[i], "--build-file") == 0) {
             if (i + 1 >= argc) { fprintf(stderr, "cc: --build-file requires a path\n"); usage(argv[0]); return 1; }
             build_override = argv[++i];
@@ -5549,27 +5945,17 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--no-cache") == 0) { no_cache = 1; continue; }
         if (strcmp(argv[i], "--frontend") == 0) {
             if (i + 1 >= argc) {
-                fprintf(stderr, "cc: --frontend requires serdes|legacy\n");
+                fprintf(stderr, "cc: --frontend requires native|legacy\n");
                 usage(argv[0]);
                 return 1;
             }
             ++i;
-            if (strcmp(argv[i], "serdes") == 0) g_frontend_serdes = 1;
-            else if (strcmp(argv[i], "legacy") == 0) g_frontend_serdes = 0;
-            else {
-                fprintf(stderr, "cc: --frontend must be serdes or legacy\n");
-                return 1;
-            }
+            if (cc__set_frontend_name(argv[i]) != 0) return 1;
             continue;
         }
         if (strncmp(argv[i], "--frontend=", 11) == 0) {
             const char* v = argv[i] + 11;
-            if (strcmp(v, "serdes") == 0) g_frontend_serdes = 1;
-            else if (strcmp(v, "legacy") == 0) g_frontend_serdes = 0;
-            else {
-                fprintf(stderr, "cc: --frontend must be serdes or legacy\n");
-                return 1;
-            }
+            if (cc__set_frontend_name(v) != 0) return 1;
             continue;
         }
         if (strcmp(argv[i], "--out-dir") == 0) {
@@ -5635,8 +6021,7 @@ int main(int argc, char **argv) {
 
     // Flavor defaults (non-build mode): apply before any user-provided
     // --cc-flags so users can override.  Unflagged builds get -O2 with
-    // asserts kept — the backend cc alone would give -O0 with no debug
-    // info, the slowest tier for no benefit.
+    // asserts kept; -O/--release still selects -O2 -DNDEBUG.
     const char* flavor_cc = CC_DEFAULT_FLAVOR_CC;
     if (opt_debug) flavor_cc = "-O0 -g";
     else if (opt_release) flavor_cc = "-O2 -DNDEBUG";
@@ -5647,12 +6032,24 @@ int main(int argc, char **argv) {
         if (combined_cc_flags_main[0]) strncat(combined_cc_flags_main, " ", sizeof(combined_cc_flags_main) - strlen(combined_cc_flags_main) - 1);
         strncat(combined_cc_flags_main, cc_flags, sizeof(combined_cc_flags_main) - strlen(combined_cc_flags_main) - 1);
     }
+    for (size_t i = 0; i < cli_count_main; ++i) {
+        char def[256];
+        if (cli_values_main[i] == 1) {
+            snprintf(def, sizeof(def), " -D%s", cli_names_main[i]);
+        } else {
+            snprintf(def, sizeof(def), " -D%s=%lld", cli_names_main[i],
+                     cli_values_main[i]);
+        }
+        strncat(combined_cc_flags_main, def,
+                sizeof(combined_cc_flags_main) - strlen(combined_cc_flags_main) - 1);
+    }
     cc_flags = combined_cc_flags_main[0] ? combined_cc_flags_main : cc_flags;
 
     cc_set_out_dir(out_dir, bin_dir);
     cc_refresh_host_obj_root(cc_bin);
     if (ensure_out_dir() != 0) {
         fprintf(stderr, "cc: failed to create out dirs under: %s\n", g_out_root);
+        for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
         return 1;
     }
 
@@ -5706,18 +6103,24 @@ int main(int argc, char **argv) {
             .summary = 0,
             .out_dir = g_out_root,
             .bin_dir = g_bin_root,
-            .cli_names = NULL,
-            .cli_values = NULL,
-            .cli_count = 0,
+            .cli_names = cli_names_main,
+            .cli_values = cli_values_main,
+            .cli_count = cli_count_main,
         };
         int berr = cc__load_const_bindings(&base_opt, bindings, &binding_count);
-        if (berr != 0) return 1;
+        if (berr != 0) {
+            for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
+            return 1;
+        }
         if (dump_consts) {
             for (size_t i = 0; i < binding_count; ++i) {
                 printf("CONST %s=%lld\n", bindings[i].name, bindings[i].value);
             }
         }
-        if (dry_run) return 0;
+        if (dry_run) {
+            for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
+            return 0;
+        }
         CCCompileConfig cfg = {.consts = bindings, .const_count = binding_count};
 
         char target_part[256]; char sysroot_part[256];
@@ -5728,6 +6131,7 @@ int main(int argc, char **argv) {
         char resolved_stems[64][128] = {{0}};
         if (cc__resolve_stems(inputs, input_count, out_stem_override, resolved_stems) != 0) {
             fprintf(stderr, "cc: failed to derive unique stems for inputs\n");
+            for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
             return 1;
         }
         const char* obj_paths[64];
@@ -5747,11 +6151,16 @@ int main(int argc, char **argv) {
             cc__dir_of_path(inputs[i], src_dir_bufs[i], sizeof(src_dir_bufs[i]));
 
             int is_raw_c = cc__is_raw_c(inputs[i]);
-            const char* c_for_compile = is_raw_c ? inputs[i] : c_bufs[i];
+            if (is_raw_c) {
+                if (cc__materialize_host_c(inputs[i], c_bufs[i]) != 0) {
+                    fprintf(stderr, "cc: failed to materialize host C %s -> %s\n",
+                            inputs[i], c_bufs[i]);
+                    return 1;
+                }
+            }
+            const char* c_for_compile = c_bufs[i];
             if (mode == CC_MODE_EMIT_C) {
-                if (is_raw_c) {
-                    if (cc__copy_file(inputs[i], c_bufs[i]) != 0) return 1;
-                } else {
+                if (!is_raw_c) {
                     int err = cc__compile_with_env(NULL, inputs[i], c_bufs[i], &cfg);
                     if (err != 0) return 1;
                 }
@@ -5766,10 +6175,20 @@ int main(int argc, char **argv) {
                 obj_paths[i] = obj_bufs[i];
             }
         }
-        if (mode == CC_MODE_EMIT_C || mode == CC_MODE_COMPILE) return 0;
+        if (mode == CC_MODE_EMIT_C || mode == CC_MODE_COMPILE) {
+            for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
+            return 0;
+        }
         char runtime_path[PATH_MAX]; int runtime_reused = 0;
-        if (cc__ensure_runtime_obj(&base_opt, target_part, sysroot_part, runtime_path, sizeof(runtime_path), &runtime_reused) != 0) return 1;
-        if (cc__link_many(&base_opt, obj_paths, (size_t)input_count, runtime_path, target_part, sysroot_part, user_out) != 0) return 1;
+        if (cc__ensure_runtime_obj(&base_opt, target_part, sysroot_part, runtime_path, sizeof(runtime_path), &runtime_reused) != 0) {
+            for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
+            return 1;
+        }
+        if (cc__link_many(&base_opt, obj_paths, (size_t)input_count, runtime_path, target_part, sysroot_part, user_out) != 0) {
+            for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
+            return 1;
+        }
+        for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
         return 0;
     }
 
@@ -5813,23 +6232,34 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "cc: failed to derive C output from --out-stem\n");
                 return 1;
             }
-        } else if (raw_c) {
-            strncpy(c_out, in_path_abs, sizeof(c_out));
-            c_out[sizeof(c_out)-1] = '\0';
-        } else {
-            if (derive_default_output(in_path_abs, c_out, sizeof(c_out)) != 0) {
-                fprintf(stderr, "cc: failed to derive default C output\n");
-                return 1;
-            }
+        } else if (derive_default_output(in_path_abs, c_out, sizeof(c_out)) != 0) {
+            fprintf(stderr, "cc: failed to derive default C output\n");
+            return 1;
         }
+        (void)raw_c;
     }
 
-    if (mode != CC_MODE_EMIT_C) {
+    if (mode == CC_MODE_COMPILE) {
+        /* -o names the object; --obj-out is an explicit alternate. */
+        if (obj_out) {
+            strncpy(obj_path, obj_out, sizeof(obj_path));
+            obj_path[sizeof(obj_path) - 1] = '\0';
+        } else if (user_out) {
+            strncpy(obj_path, user_out, sizeof(obj_path));
+            obj_path[sizeof(obj_path) - 1] = '\0';
+        } else if (derive_default_obj(in_path_abs, obj_path, sizeof(obj_path)) !=
+                   0) {
+            fprintf(stderr, "cc: failed to derive default object output\n");
+            for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
+            return 1;
+        }
+    } else if (mode != CC_MODE_EMIT_C) {
         if (obj_out) {
             strncpy(obj_path, obj_out, sizeof(obj_path));
             obj_path[sizeof(obj_path)-1] = '\0';
         } else if (derive_default_obj(in_path_abs, obj_path, sizeof(obj_path)) != 0) {
             fprintf(stderr, "cc: failed to derive default object output\n");
+            for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
             return 1;
         }
     }
@@ -5840,6 +6270,7 @@ int main(int argc, char **argv) {
             bin_path[sizeof(bin_path)-1] = '\0';
         } else if (derive_default_bin(in_path_abs, bin_path, sizeof(bin_path)) != 0) {
             fprintf(stderr, "cc: failed to derive default binary output\n");
+            for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
             return 1;
         }
     }
@@ -5869,12 +6300,13 @@ int main(int argc, char **argv) {
         .out_dir = g_out_root,
         .bin_dir = g_bin_root,
         .no_cache = no_cache,
-        .cli_names = NULL,
-        .cli_values = NULL,
-        .cli_count = 0,
+        .cli_names = cli_names_main,
+        .cli_values = cli_values_main,
+        .cli_count = cli_count_main,
     };
     CCBuildSummary sum;
     int err = compile_with_build(&opt, &sum);
+    for (size_t i = 0; i < cli_count_main; ++i) free(cli_names_main[i]);
     return err == 0 ? 0 : 1;
 }
 

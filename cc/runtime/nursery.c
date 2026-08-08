@@ -301,40 +301,86 @@ void cc_nursery_cancel(CCNursery* n) {
 typedef struct {
     CCNursery* nursery;
     sigset_t set;
+    CCClosure1 handler;
 } cc_nursery_signal_ctx;
+
+static void* cc__nursery_cancel_only(void* env, intptr_t arg0) {
+    (void)env;
+    CCNursery* n = (CCNursery*)(uintptr_t)arg0;
+    if (n) cc_nursery_cancel(n);
+    return NULL;
+}
 
 static void* cc__nursery_signal_thread(void* arg) {
     cc_nursery_signal_ctx* ctx = (cc_nursery_signal_ctx*)arg;
     int sig = 0;
     if (sigwait(&ctx->set, &sig) == 0 && ctx->nursery) {
-        cc_nursery_cancel(ctx->nursery);
+        (void)cc_closure1_call(ctx->handler, (intptr_t)(uintptr_t)ctx->nursery);
+    } else {
+        cc_closure1_drop(ctx->handler);
     }
     free(ctx);
     return NULL;
 }
 
-int cc_nursery_cancel_on_signals(CCNursery* n, const int* signos, size_t count) {
-    if (!n || !signos || count == 0) return EINVAL;
-    cc_nursery_signal_ctx* ctx = (cc_nursery_signal_ctx*)malloc(sizeof(*ctx));
-    if (!ctx) return ENOMEM;
+static CCResult_void_CCError cc__nursery_install_signals(CCNursery* n,
+                                                         const int* signos,
+                                                         size_t count,
+                                                         CCClosure1 handler) {
+    if (!n || !signos || count == 0 || !handler.fn) {
+        cc_closure1_drop(handler);
+        return cc_err_CCResult_void_CCError(
+            CC_ERROR(CC_ERR_INVALID_ARG, "nursery signal install: bad args"));
+    }
+    cc_nursery_signal_ctx* ctx =
+        (cc_nursery_signal_ctx*)malloc(sizeof(*ctx));
+    if (!ctx) {
+        cc_closure1_drop(handler);
+        return cc_err_CCResult_void_CCError(
+            CC_ERROR(CC_ERR_OUT_OF_MEMORY, "nursery signal install: oom"));
+    }
     ctx->nursery = n;
+    ctx->handler = handler;
     sigemptyset(&ctx->set);
     for (size_t i = 0; i < count; ++i) {
         sigaddset(&ctx->set, signos[i]);
     }
     int rc = pthread_sigmask(SIG_BLOCK, &ctx->set, NULL);
     if (rc != 0) {
+        cc_closure1_drop(handler);
         free(ctx);
-        return rc;
+        return cc_err_CCResult_void_CCError(
+            CC_ERROR(CC_ERR_INTERNAL, "nursery signal install: sigmask failed"));
     }
     pthread_t tid;
     rc = pthread_create(&tid, NULL, cc__nursery_signal_thread, ctx);
     if (rc != 0) {
+        cc_closure1_drop(handler);
         free(ctx);
-        return rc;
+        return cc_err_CCResult_void_CCError(
+            CC_ERROR(CC_ERR_INTERNAL, "nursery signal install: thread failed"));
     }
     pthread_detach(tid);
-    return 0;
+    return cc_ok_CCResult_void_CCError();
+}
+
+CCResult_void_CCError cc_nursery_on_signals_n(CCNursery* n, const int* signos,
+                                              size_t count, CCClosure1 handler) {
+    return cc__nursery_install_signals(n, signos, count, handler);
+}
+
+CCResult_void_CCError cc_nursery_on_shutdown(CCNursery* n, CCClosure1 handler) {
+    static const int sigs[] = { SIGINT, SIGTERM };
+    return cc_nursery_on_signals_n(n, sigs, sizeof(sigs) / sizeof(sigs[0]),
+                                   handler);
+}
+
+CCResult_void_CCError cc_nursery_cancel_on_signals_n(CCNursery* n,
+                                                     const int* signos,
+                                                     size_t count) {
+    CCClosure1 cancel_only =
+        cc_closure1_make(cc__nursery_cancel_only, NULL, NULL);
+    return cc_nursery_on_signals_n(n, signos, count, cancel_only);
 }
 
 void cc_nursery_set_deadline(CCNursery* n, struct timespec abs_deadline) {
@@ -378,7 +424,10 @@ bool cc_cancelled(void) {
  * Used by channel waits to detect cancellation. */
 uint32_t cc_nursery_cancel_gen(const CCNursery* n) {
     if (!n) return 0;
-    return atomic_load_explicit(&n->cancel_wake.value, memory_order_acquire);
+    /* Cast away const: TCC treats atomic_load through a const object as
+     * assignment to a read-only location. */
+    return atomic_load_explicit(&((CCNursery*)n)->cancel_wake.value,
+                                memory_order_acquire);
 }
 
 /* Wait on the nursery's cancel primitive with timeout (ms).

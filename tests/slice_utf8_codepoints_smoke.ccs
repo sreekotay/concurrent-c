@@ -1,0 +1,158 @@
+/* char[:].utf8_codepoints(arena) / cc_slice_utf8_codepoints — UTF-8 → uint32_t[:].
+ *
+ * Pins UFCS + free-function spellings, ASCII SWAR widen, multi-byte scalars,
+ * and CC_ERR_PARSE on invalid input (no quiet replacement). */
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(4)) @destroy;
+    if (!arena.valid()) return 1;
+
+    /* Empty: no allocation, empty typed slice. */
+    {
+        char[:] s = cc_slice_empty();
+        CCResult_CCSlice_uint32_t_CCError r = s.utf8_codepoints(&arena);
+        assert(r.is_ok());
+        uint32_t[:] cps = r.value();
+        assert(cps.base.len == 0);
+        assert(cps.base.ptr == NULL);
+    }
+
+    /* Free-function spelling (object first, arena last). */
+    {
+        char[:] s = @slice("hi");
+        CCResult_CCSlice_uint32_t_CCError r = cc_slice_utf8_codepoints(&s, &arena);
+        assert(r.is_ok());
+        uint32_t[:] cps = r.value();
+        assert(cps.base.len == 2);
+        assert(cps.at(0) == (uint32_t)'h');
+        assert(cps.at(1) == (uint32_t)'i');
+        assert(cc_slice_is_from_arena_epoch(cps.base, &arena));
+    }
+
+    /* UFCS family wrapper. */
+    {
+        char[:] s = @slice("z");
+        CCResult_CCSlice_uint32_t_CCError r = CCSlice_utf8_codepoints(&s, &arena);
+        assert(r.is_ok());
+        uint32_t[:] cps = r.value();
+        assert(cps.base.len == 1);
+        assert(cps.at(0) == (uint32_t)'z');
+    }
+
+    /* ASCII widen, including a run past the 8-byte SWAR gulp. */
+    {
+        char[:] s = @slice("AbcdefghXY"); /* 10 ASCII */
+        CCResult_CCSlice_uint32_t_CCError r = s.utf8_codepoints(&arena);
+        assert(r.is_ok());
+        uint32_t[:] cps = r.value();
+        assert(cps.base.len == 10);
+        assert(cps.at(0) == (uint32_t)'A');
+        assert(cps.at(7) == (uint32_t)'h');
+        assert(cps.at(8) == (uint32_t)'X');
+        assert(cps.at(9) == (uint32_t)'Y');
+    }
+
+    /* 2-byte: é U+00E9 = C3 A9 */
+    {
+        char[:] s = @slice("héllo");
+        CCResult_CCSlice_uint32_t_CCError r = s.utf8_codepoints(&arena);
+        assert(r.is_ok());
+        uint32_t[:] cps = r.value();
+        assert(cps.base.len == 5);
+        assert(cps.at(0) == (uint32_t)'h');
+        assert(cps.at(1) == 0xE9u);
+        assert(cps.at(4) == (uint32_t)'o');
+    }
+
+    /* 3-byte: € U+20AC = E2 82 AC */
+    {
+        const char raw[] = "\xE2\x82\xAC";
+        char[:] s = cc_slice_from_buffer((char *)raw, 3);
+        CCResult_CCSlice_uint32_t_CCError r = s.utf8_codepoints(&arena);
+        assert(r.is_ok());
+        uint32_t[:] cps = r.value();
+        assert(cps.base.len == 1);
+        assert(cps.at(0) == 0x20ACu);
+    }
+
+    /* 4-byte astral: 𝕋 U+1D54A */
+    {
+        const char raw[] = "\xF0\x9D\x95\x8A";
+        char[:] s = cc_slice_from_buffer((char *)raw, 4);
+        CCResult_CCSlice_uint32_t_CCError r = s.utf8_codepoints(&arena);
+        assert(r.is_ok());
+        uint32_t[:] cps = r.value();
+        assert(cps.base.len == 1);
+        assert(cps.at(0) == 0x1D54Au);
+    }
+
+    /* Mixed: 8 ASCII then a 2-byte scalar (SWAR then multi-byte). */
+    {
+        const char raw[] = "abcdefgh\xC3\xA9";
+        char[:] s = cc_slice_from_buffer((char *)raw, 10);
+        CCResult_CCSlice_uint32_t_CCError r = s.utf8_codepoints(&arena);
+        assert(r.is_ok());
+        uint32_t[:] cps = r.value();
+        assert(cps.base.len == 9);
+        assert(cps.at(7) == (uint32_t)'h');
+        assert(cps.at(8) == 0xE9u);
+    }
+
+    /* Invalid: truncated, overlong, surrogate, bad continuation, out of range. */
+    {
+        const char trunc[] = "\xC3";
+        char[:] s = cc_slice_from_buffer((char *)trunc, 1);
+        CCResult_CCSlice_uint32_t_CCError r = s.utf8_codepoints(&arena);
+        assert(r.is_err());
+        assert(r.error().kind == CC_ERR_PARSE);
+    }
+    {
+        const char overlong[] = "\xC0\x80"; /* NUL as 2-byte */
+        char[:] s = cc_slice_from_buffer((char *)overlong, 2);
+        CCResult_CCSlice_uint32_t_CCError r = s.utf8_codepoints(&arena);
+        assert(r.is_err());
+        assert(r.error().kind == CC_ERR_PARSE);
+    }
+    {
+        const char sur[] = "\xED\xA0\x80"; /* U+D800 */
+        char[:] s = cc_slice_from_buffer((char *)sur, 3);
+        CCResult_CCSlice_uint32_t_CCError r = s.utf8_codepoints(&arena);
+        assert(r.is_err());
+        assert(r.error().kind == CC_ERR_PARSE);
+    }
+    {
+        const char badcont[] = "\xC3\x20"; /* space is not a continuation */
+        char[:] s = cc_slice_from_buffer((char *)badcont, 2);
+        CCResult_CCSlice_uint32_t_CCError r = s.utf8_codepoints(&arena);
+        assert(r.is_err());
+        assert(r.error().kind == CC_ERR_PARSE);
+    }
+    {
+        const char hi[] = "\xF5\x80\x80\x80"; /* leading >= F5 */
+        char[:] s = cc_slice_from_buffer((char *)hi, 4);
+        CCResult_CCSlice_uint32_t_CCError r = s.utf8_codepoints(&arena);
+        assert(r.is_err());
+        assert(r.error().kind == CC_ERR_PARSE);
+    }
+
+    /* Missing arena / null non-empty pointer. */
+    {
+        char[:] s = @slice("x");
+        CCResult_CCSlice_uint32_t_CCError r = s.utf8_codepoints(NULL);
+        assert(r.is_err());
+        assert(r.error().kind == CC_ERR_INVALID_ARG);
+    }
+    {
+        char[:] s = cc_slice_from_buffer(NULL, 1);
+        CCResult_CCSlice_uint32_t_CCError r = cc_slice_utf8_codepoints(&s, &arena);
+        assert(r.is_err());
+        assert(r.error().kind == CC_ERR_INVALID_ARG);
+    }
+
+    printf("ok\n");
+    return 0;
+}

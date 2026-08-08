@@ -1,0 +1,29 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+/* else-if chain inside an @emit backtick body. Untaken arms reference
+ * undefined symbols so a missed prune fails the host compile. */
+@comptime {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        @comptime if (0) {
+            emit_elseif_head_never();
+            enum { EMIT_ELSEIF_CHOICE = -1 };
+        } else @comptime if (0) {
+            emit_elseif_mid_never();
+            enum { EMIT_ELSEIF_CHOICE = -2 };
+        } else @comptime if (1) {
+            enum { EMIT_ELSEIF_CHOICE = 7 };
+        } else {
+            emit_elseif_tail_never();
+            enum { EMIT_ELSEIF_CHOICE = -3 };
+        }
+    `);
+}
+
+int main(void) {
+    if (EMIT_ELSEIF_CHOICE != 7) return 1;
+    printf("comptime_emit_elseif_chain_smoke choice=%d\n", (int)EMIT_ELSEIF_CHOICE);
+    return 0;
+}

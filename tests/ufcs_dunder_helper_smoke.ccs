@@ -1,0 +1,29 @@
+/* UFCS inside `name__helper` statics must lower — `__` alone is not a
+ * grammar-tape signal (only Name__r_/__m_/__b_/__fill/__s__*). */
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdio.h>
+#include <stdint.h>
+
+typedef struct Box {
+    CCArena a;
+} Box;
+
+static int box__decode(Box *self, CCSlice s, size_t *n_out) {
+    CCResult_CCSlice_uint32_t_CCError r = s.utf8_codepoints(&self->a);
+    if (r.is_err()) return -1;
+    *n_out = r.value().base.len;
+    return 0;
+}
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(1)) @destroy;
+    Box b = { .a = arena };
+    size_t n = 0;
+    assert(box__decode(&b, @slice("héllo"), &n) == 0);
+    assert(n == 5);
+    assert(box__decode(&b, @slice("AbcdefghXY"), &n) == 0);
+    assert(n == 10);
+    printf("ok\n");
+    return 0;
+}

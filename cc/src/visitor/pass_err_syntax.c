@@ -1003,7 +1003,7 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
              * living between (say) `{` and `CALL() !>` gets blanked when the
              * rewrite rewinds `ol` to `ito[stmt_start]` and overwrites the
              * span with only newlines (see examples/hello.ccs repro where
-             * the `/*future: ...*\/` block between `int main() {` and
+             * the future-marker block comment between `int main() {` and
              * `cc_nursery_create()` was disappearing). */
             {
                 size_t tmp_a = stmt_start, tmp_b = err_at;

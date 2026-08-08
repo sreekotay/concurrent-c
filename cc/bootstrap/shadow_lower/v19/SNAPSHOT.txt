@@ -1,0 +1,6 @@
+source: cc/shadow/shadow_lower.ccs
+emitter: native:/Users/skotay/Documents/code/concurrent-c/out/cc/bin/shadow_lower
+created_utc: 2026-08-06T00:32:19Z
+git_head: 03198a58
+emit_bytes: 99709
+header_count: 26

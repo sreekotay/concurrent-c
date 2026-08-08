@@ -58,14 +58,15 @@ predecls; they declare `a` / `io` / `in` / `args` explicitly when needed.
 | Name | Type | Declaration |
 | ---- | ---- | ----------- |
 | `a` | `CCArena` | `@create(megabytes(1)) @destroy` |
-| `io` | `CCStdio` | `@create(&a) @destroy` |
+| `io` | `CCStdio` | private `__cc_io_arena` + `@create(&__cc_io_arena) @destroy` |
 | `in` | `char[:]` | `io.read_all() !>` |
-| `args` | `char *[:]` | `{ .ptr = (char *)(argv + 1), .len = (size_t)(argc > 1 ? argc - 1 : 0) }` |
+| `args` | `CCSlice` | `{ .ptr = (char *)(argv + 1), .len = (size_t)(argc > 1 ? argc - 1 : 0) }` |
 | `line` | `char[:]` | current input line (`-n` / `-p` only; loop-local) |
 | `nr` | `size_t` | 1-based line counter (`-n` / `-p` only; loop-local) |
 
-Using `in` implies `io`; using `io` implies `a`. Using `line` or `nr`
-implies `io` (and thus `a`). `-E`, `-n`, and `-p` force `io` / `a`.
+Using `in` implies `io`; using `io` implies its private arena (and `a` only
+when `a` is also referenced). Using `line` or `nr` implies `io`. `-E`, `-n`,
+and `-p` force `io` (and `a` when needed).
 
 The predeclared arena `a` is fixed at 1 MiB initial capacity (arena growth on
 overflow still applies where the allocator allows it). Large `in = read_all()`
@@ -107,17 +108,19 @@ message so the print is not blank. A script may register additional
 handlers for other error types in the same scope; they coexist with the
 default by type match.
 
-### 1.4 Flipped console print
+### 1.4 Console print
 
-Script prelude provides console print as UFCS on the data (no `io`
-argument). Receivers include `CCSlice`, `CCString`, C strings, and string
-literals:
+When `io` is in scope, prefer handle-first UFCS. Data-first and naked aliases
+remain valid (UFCS either way). Cstr / string-literal *data* receivers coerce
+to `CCSlice` then `cc_slice_*` (no `cc_char_*` UFCS family):
 
 ```c
-path.println() !>;
-line.eprintln() !>;
+io.println(path) !>;
+io.eprintln(line) !>;
+io.println(@string(`n=${n}`, &a)) !>;
+path.println() !>;                 /* also OK */
 "literal".println() !>;
-@string(`n=${n}`, &a).println() !>;
+println(path) !>;                  /* naked alias */
 path.fprint(STDERR_FILENO) !>;
 ```
 
@@ -125,7 +128,7 @@ Short names `println` / `eprintln` are not free macros — a function-like
 `#define println(x)` would steal UFCS `x.println()`. Returns are
 `CCResult_size_t_CCError` (same as `CCStdio.println`). The macros
 `cc_print` / `cc_println` / `cc_eprint` / `cc_eprintln` are lowered-C only
-(driver inject, `-E` desugar in §1); script source uses UFCS.
+(driver inject, `-E` desugar in §1).
 
 ## 2. Toolbox
 

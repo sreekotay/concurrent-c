@@ -1,10 +1,15 @@
 # Compiler cleanup status (M0–M5.5)
 
+> **Scope: legacy front only.** Default architecture:
+> [`ARCHITECTURE.md`](ARCHITECTURE.md). This workstream tracks the multipass
+> text-rewrite / `--frontend=legacy` path — see
+> [`LEGACY_ARCHITECTURE.md`](LEGACY_ARCHITECTURE.md).
+
 **Last updated:** 2026-05-31
 **Smoke suite:** ~506 tests passing as of 2026-05-31. The live count is whatever
 `tools/cc_test` reports; the perf regression guard pins the exact `suite_tests`
 number in [`perf/compiler_baseline.txt`](../../perf/compiler_baseline.txt). Pre-expand
-is now the **only** initial-parse path — the `CC_PRE_EXPAND` opt-out (and the legacy
+is now the **only** initial-parse path on the legacy front — the `CC_PRE_EXPAND` opt-out (and the
 non-expanded path) were collapsed 2026-05-29 and the env var is now inert (see
 "Pre-expand collapse" note below).
 
@@ -21,7 +26,7 @@ non-expanded path) were collapsed 2026-05-29 and the env var is now inert (see
 > `cc_type_of("T")` parse-path/emit-path dual-spelling is *also* separate and
 > untouched by this collapse.
 
-> **Reading order:** [`ARCHITECTURE.md`](ARCHITECTURE.md) is the *why* (constraints, layers, ADRs, non-goals). This doc is the *what / when* (milestones, ship status, next work). [`PIPELINE.md`](../src/visitor/PIPELINE.md) is the *where* (call-site map). [`PASS_INVENTORY.md`](../src/visitor/PASS_INVENTORY.md) is the *how* (per-pass catalog).
+> **Reading order:** [`LEGACY_ARCHITECTURE.md`](LEGACY_ARCHITECTURE.md) is the *why* (constraints, layers, ADRs, non-goals). This doc is the *what / when* (milestones, ship status, next work). [`PIPELINE.md`](../src/visitor/PIPELINE.md) is the *where* (call-site map). [`PASS_INVENTORY.md`](../src/visitor/PASS_INVENTORY.md) is the *how* (per-pass catalog).
 
 ### Recent (this session — 2026-05-27)
 
@@ -56,7 +61,7 @@ This is the single source of truth for the compiler cleanup workstream (M0–M5.
 |-----------|------|-----------|
 | **M1** | `cc_build_parse_input()` in `parse.c` | `visit_codegen.c` still duplicates prep; source map not threaded through codegen |
 | **M2** | `cc__apply_batched_phase3_passes()` — **two-stage batched is now the only Phase-3 path (2026-05-28)**: Stage 1 = UFCS, Stage 2 = closure_calls + autoblock + await_normalize. Phase-3 reparses 4 → 2. All four collectors emit per-span edits. 461/461 tests pass. | Stage 1's mandatory reparse could fold into the closure-literal reparse — see M6_DEFERRED. |
-| **M4** | **M4.a shipped 2026-05-28**: Phase-5 closure-lift reparse + closure pass gated on `=>` token presence. Smoke-suite Phase-5 reparses 461 → 155 (−66%). **M4.d shipped 2026-05-28**: `cc_diag_mangle_symbol` integrated for all emitted closure-helper names (entry/make/make_nursery/env/env_drop/env_nursery_drop). Symbols are now location-tagged (`cc_closure__N<id>__line<L>_col<C>_<role>`), so any closure that appears in a backtrace, profile, or symbol table is self-locating from the symbol alone. 461/461 tests pass; reparse counts unchanged. | **M4.b/c deferred** (per-span migration of `cc__rewrite_closure_literals_with_nodes` internals; fold Phase 5 into Phase 3 Stage 2) — found to have zero reparse-savings payoff (closure_literals is a producer for closure_calls; folding needs a 3rd stage with its own reparse). See [ARCHITECTURE.md §6 "Targets that aren't worth it"](ARCHITECTURE.md). |
+| **M4** | **M4.a shipped 2026-05-28**: Phase-5 closure-lift reparse + closure pass gated on `=>` token presence. Smoke-suite Phase-5 reparses 461 → 155 (−66%). **M4.d shipped 2026-05-28**: `cc_diag_mangle_symbol` integrated for all emitted closure-helper names (entry/make/make_nursery/env/env_drop/env_nursery_drop). Symbols are now location-tagged (`cc_closure__N<id>__line<L>_col<C>_<role>`), so any closure that appears in a backtrace, profile, or symbol table is self-locating from the symbol alone. 461/461 tests pass; reparse counts unchanged. | **M4.b/c deferred** (per-span migration of `cc__rewrite_closure_literals_with_nodes` internals; fold Phase 5 into Phase 3 Stage 2) — found to have zero reparse-savings payoff (closure_literals is a producer for closure_calls; folding needs a 3rd stage with its own reparse). See [LEGACY_ARCHITECTURE.md §6 "Targets that aren't worth it"](LEGACY_ARCHITECTURE.md). |
 | **M5.5** | `cc_macro_recognizer.c` hooks registered at parse | **Token synthesis into TCC lexer not implemented** — `#define CHAN(T) T[~4 >]` still fails; see [tests/macro/README.md](../../tests/macro/README.md) |
 | **Runtime R0** | `cc/runtime/cc_rt_diag.c` stubs in runtime | R4, R5 (e.g. exact send/recv source location at the stuck-on site) not implemented |
 | **Runtime R1** | per-fiber name + spawn-site `(file, line)`; UFCS lowering wired; `cc_rt_diag_current_async_info` user API | only `@async` spawns named today — closure spawn / legacy `cc_nursery_spawn` still anonymous |
@@ -639,7 +644,7 @@ Then in priority order (independent of M1):
    - **M4.a**: Phase-5 closure-lift gated on `=>` presence. Smoke-suite Phase-5 reparses 461 → 155 (−66%).
    - **M4.d**: `cc_diag_mangle_symbol` integrated for all emitted closure-helper names. Symbols like `cc_closure__N7__line42_col15_entry` replace opaque `__cc_closure_entry_7` — self-locating in backtraces / profiles / symbol tables.
 
-   **M4.b/c deferred** (no perf payoff — see [ARCHITECTURE.md §6 "Targets that aren't worth it"](ARCHITECTURE.md)).
+   **M4.b/c deferred** (no perf payoff — see [LEGACY_ARCHITECTURE.md §6 "Targets that aren't worth it"](LEGACY_ARCHITECTURE.md)).
 9. **Runtime R1+** — consume serialized `.ccs.map` from compile
 10. **M5.5 fallback** — only if M7/M1 turns out to need TCC-side help after all; otherwise drop. Current evidence says drop.
 

@@ -28,11 +28,11 @@ static inline CompactSlice compact_from_slice(CCSlice s) {
 }
 
 static CCSlice clone_cstr(CCArena *arena, const char *s) {
-    return cc_slice_clone(arena, char_to_slice(s));
+    return cc_slice_clone(arena, cc_slice_cstr(s));
 }
 
 static CompactSlice clone_value(CCArena *arena, const char *s) {
-    CCSlice src = char_to_slice(s);
+    CCSlice src = cc_slice_cstr(s);
     size_t n = src.len + 1;
     char *buf = (char *)cc_arena_alloc(arena, n, 1);
     if (!buf) return (CompactSlice){0};
@@ -60,7 +60,7 @@ static int run_arena_map(void) {
     for (int rep = 0; rep < 200000; rep++) {
         char key_buf[32];
         snprintf(key_buf, sizeof(key_buf), "key:%d", rep % 2000);
-        CCSlice query = char_to_slice(key_buf);
+        CCSlice query = cc_slice_cstr(key_buf);
         CompactSlice *cell = SliceCompactMap_get_ptr(m, query);
         if (!cell) {
             fprintf(stderr, "arena map: missing cell at rep=%d\n", rep);

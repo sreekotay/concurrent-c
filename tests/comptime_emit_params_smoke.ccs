@@ -1,0 +1,29 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+typedef struct Par { int v; } Par;
+static int par_add(Par *self, int x, int y) { return self->v + x + y; }
+
+/* Nested for over m.params inside @emit — one enum per parameter. */
+@comptime for (m in type_of(Par).methods) {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        /* don't skip 'params' */
+        @comptime for (p in m.params) {
+            @comptime if (1) {
+                enum { Par_${m.name}_p${p.index}_${p.name} = ${p.index} };
+            } else {
+                params_dead();
+            }
+        }
+    `);
+}
+
+int main(void) {
+    if (Par_par_add_p0_self != 0) return 1;
+    if (Par_par_add_p1_x != 1) return 2;
+    if (Par_par_add_p2_y != 2) return 3;
+    printf("comptime_emit_params_smoke ok\n");
+    return 0;
+}

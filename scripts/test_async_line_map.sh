@@ -1,20 +1,20 @@
 #!/bin/sh
-# @async state-machine #line accuracy on a real project.
+# @async state-machine #line accuracy.
 #
 # The async lowering replaces each @async fn with a poll/frame/drop blob
 # ~20x the source's line count.  Pre-fix the blob carried NO #line
 # accounting, so host-compiler diagnostics and debugger lines inside it
-# mapped to last-directive-above + physical drift — for
-# redis_idiomatic.ccs (1717 lines) a diagnostic inside the owner-loop
-# poll fn was reported at redis_idiomatic.ccs:1964, past EOF.  The
-# emitter now drops a masked per-statement marker (async_ast.c,
-# cc__emit_src_line_marker) and every coordinate-stamping pass computes
-# USER lines via the buffer's #line/CC_LN ledger (util/text.h,
-# cc_user_line_for_offset) instead of raw newline counts.
+# mapped to last-directive-above + physical drift — a diagnostic inside
+# an @async poll fn was reported past EOF.  The emitter now drops a masked
+# per-statement marker (async_ast.c, cc__emit_src_line_marker) and every
+# coordinate-stamping pass computes USER lines via the buffer's
+# #line/CC_LN ledger (util/text.h, cc_user_line_for_offset) instead of
+# raw newline counts.
 #
-# This test pins the composed result on the emitted C of the real redis
-# port (idiomatic + owner, emit-c'd in parallel — each is a multi-second
-# full lower, which dominated sequential wall time):
+# This test pins the composed result on:
+#   - tests/async_line_map_fixture.ccs — thick-enough @async handle_client
+#   - real_projects/redis/redis_owner.ccs — real-project owner_loop machinery
+# Checks:
 #   1) the async poll functions carry #line directives at all (the
 #      per-statement markers survived to the final write), and
 #   2) NO #line-mapped coordinate for the .ccs exceeds the source file's
@@ -29,14 +29,14 @@ fail() { echo "[test_async_line_map] FAIL: $1" >&2; exit 1; }
 
 command -v python3 >/dev/null 2>&1 || fail "python3 is required for the mapping check"
 
-SRC=real_projects/redis/redis_idiomatic.ccs
+SRC=tests/async_line_map_fixture.ccs
 OWNER_SRC=real_projects/redis/redis_owner.ccs
 [ -f "$SRC" ] || fail "missing $SRC"
 [ -f "$OWNER_SRC" ] || fail "missing $OWNER_SRC"
 
 out_dir="$(mktemp -d)"
 trap 'rm -rf "$out_dir"' EXIT
-emitted="$out_dir/redis_idiomatic.c"
+emitted="$out_dir/async_line_map_fixture.c"
 owner_emitted="$out_dir/redis_owner.c"
 
 # (2) no mapped coordinate exceeds the source's line count.
@@ -71,32 +71,32 @@ if bad:
 PYEOF
 }
 
-# Two full redis emit-c builds dominate wall time (~4s each). They are
-# independent — overlap them. Need `build --emit-c-only` (not
-# --emit-c-inspect): inspect stops before async poll/frame lowering.
-idiomatic_log="$out_dir/idiomatic.log"
+# Fixture emit is cheap; owner is the heavy full lower — overlap them.
+# Need `build --emit-c-only` (not --emit-c-inspect): inspect stops before
+# async poll/frame lowering.
+fixture_log="$out_dir/fixture.log"
 owner_log="$out_dir/owner.log"
 "$CCC" build --no-cache --emit-c-only "$SRC" -o "$emitted" \
-  >"$idiomatic_log" 2>&1 &
-pid_idiomatic=$!
+  >"$fixture_log" 2>&1 &
+pid_fixture=$!
 "$CCC" build --no-cache --emit-c-only "$OWNER_SRC" -o "$owner_emitted" \
   >"$owner_log" 2>&1 &
 pid_owner=$!
-idiomatic_rc=0
+fixture_rc=0
 owner_rc=0
-wait "$pid_idiomatic" || idiomatic_rc=$?
+wait "$pid_fixture" || fixture_rc=$?
 wait "$pid_owner" || owner_rc=$?
-[ "$idiomatic_rc" -eq 0 ] || fail "emit-c-only build of $SRC failed"
-[ "$owner_rc" -eq 0 ] || fail "emit-c-only build of $OWNER_SRC failed"
+[ "$fixture_rc" -eq 0 ] || fail "emit-c-only build of $SRC failed: $(tail -n 40 "$fixture_log")"
+[ "$owner_rc" -eq 0 ] || fail "emit-c-only build of $OWNER_SRC failed: $(tail -n 40 "$owner_log")"
 [ -s "$emitted" ] || fail "no emitted C produced"
 [ -s "$owner_emitted" ] || fail "no emitted C produced for $OWNER_SRC"
 
 # (1) async poll fns exist and the machine region is #line-mapped.
 grep -q '__cc_async_handle_client_[0-9]*_poll' "$emitted" \
   || fail "handle_client poll fn not found in emitted C (async lowering shape drifted)"
-n_dirs=$(grep -c '#line [0-9][0-9]* ".*redis_idiomatic\.ccs"' "$emitted" || true)
+n_dirs=$(grep -c '#line [0-9][0-9]* ".*async_line_map_fixture\.ccs"' "$emitted" || true)
 [ "$n_dirs" -ge 50 ] \
-  || fail "expected >=50 #line directives citing redis_idiomatic.ccs in emitted C, got $n_dirs (per-statement async markers missing?)"
+  || fail "expected >=50 #line directives citing async_line_map_fixture.ccs in emitted C, got $n_dirs (per-statement async markers missing?)"
 check_no_map_past_eof "$emitted" "$SRC" || exit 1
 
 # (2b) Owner-fiber variant (thickest async machinery since the table-lock
@@ -129,8 +129,12 @@ int worker(void) {
 CCS
 "$CCC" build --no-cache --emit-c-only "$mini" -o "$mini_c" >/dev/null 2>&1 \
   || fail "emit-c-only build of the defer/return EOF fixture failed"
-grep -q '__cc_ret_set_[0-9]* = 1; goto __cc_cleanup_[0-9]*;' "$mini_c" \
+grep -q '__cc_ret_set = 1; goto __cc_cleanup; }' "$mini_c" \
   || fail "return-cleanup blob not emitted on one physical line (drift-prone shape)"
+# Cleanup label + soft-return lines must stay pinned to the return's real
+# source line (re-#line each physical line — not a fake <cc-synthetic> file).
+grep -q '#line 10 "' "$mini_c" \
+  || fail "return site #line 10 missing for cleanup pin"
 check_no_map_past_eof "$mini_c" "$mini" || exit 1
 
 echo "[test_async_line_map] OK"

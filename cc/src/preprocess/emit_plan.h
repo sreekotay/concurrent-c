@@ -284,9 +284,27 @@ const void* cc_emit_plan_host_type_of(const char* name);
  * Returns: field count (>=0) or -1 for an unknown type; for name/type the
  * number of bytes written (excluding NUL) or -1 if idx is out of range. */
 void cc_emit_plan_set_reflect_source(const char* src, size_t len);
+
+/* Lower-then-TCC field registry: populated from shadow emit `__cc_rf_*`
+ * tables (plain C). `cc_reflect_field_is_as` prefers this; count/name/type
+ * prefer Concurrent-C reflect source when set (registry is incomplete). */
+void cc_ct_field_reg_clear(void);
+int cc_ct_field_reg_put(const char* type_name, const char* const* names,
+                        const char* const* types, const int* is_as, int n);
+int cc_ct_field_reg_has(const char* type_name);
+/* Optional owned lowered-C typedef unit (from type-pass emit; slimmed). */
+void cc_ct_field_reg_set_lowered_c(char* owned_c);
+const char* cc_ct_field_reg_lowered_c(void);
+/* `__cc_rf_*` tables for TCC (no typedefs — those collide with session types).
+ * Typedefs stay in `cc_ct_field_reg_lowered_c` for reflect_type_prelude. Caller frees. */
+char* cc_ct_field_reg_slim_prelude(void);
+
 int cc_reflect_field_count(const char* type_name);
 int cc_reflect_field_name(const char* type_name, int idx, char* buf, int buf_sz);
 int cc_reflect_field_type(const char* type_name, int idx, char* buf, int buf_sz);
+/* 1 if field idx is a `@as` embed, 0 if not, -1 if unknown type / bad idx.
+ * Prefers lowered registry; else Concurrent-C reflect source. */
+int cc_reflect_field_is_as(const char* type_name, int idx);
 
 /* Method reflection: the value-level face of `type_of(T).methods`, so a
  * compiled factory enumerates what the `@comptime for` surface does.
@@ -298,6 +316,10 @@ int cc_reflect_method_name(const char* type_name, int idx, char* buf, int buf_sz
 int cc_reflect_param_count(const char* params);
 int cc_reflect_param_name(const char* params, int idx, char* buf, int buf_sz);
 int cc_reflect_param_type(const char* params, int idx, char* buf, int buf_sz);
+/* Default literal text for params[idx] (`= 1` → `"1"`).  0 = none; -1 = bad. */
+int cc_reflect_param_default(const char* params, int idx, char* buf, int buf_sz);
+/* Parenthesized ABI form with defaults stripped — safe to emit as C. */
+int cc_reflect_params_c_abi(const char* params, char* buf, int buf_sz);
 int cc_reflect_method_member(const char* type_name, int idx, char* buf, int buf_sz);
 int cc_reflect_method_params(const char* type_name, int idx, char* buf, int buf_sz);
 int cc_reflect_method_args(const char* type_name, int idx, char* buf, int buf_sz);

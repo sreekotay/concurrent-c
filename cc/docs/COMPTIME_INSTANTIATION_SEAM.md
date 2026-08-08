@@ -1,5 +1,9 @@
 # Comptime Instantiation Seam — unified design
 
+> **Note:** Default `ccc` is native (`shadow_lower`). Comptime still shares
+> prepare/exec/splice seams with the legacy front; product holes are tracked
+> in [cc/shadow/README.md](../../cc/shadow/README.md) (Next gaps).
+
 **Status:** proposal (2026-05-29)  
 **Goal:** Make `@comptime` as complete as the language allows, retire `CC_PARSER_MODE` stubs, and converge built-in generics (Vec/Map/Result), protocol hooks (UFCS/create/destroy), and `cc_type_info` introspection on **one compile-time seam**.
 
@@ -975,8 +979,9 @@ defs, blocks calling registered comptime fns route through libtcc. Proof:
   `cc__resolve_comptime_if` entry; `@comptime for` header accepts canonical form
   only (dual-handling removed from the resolver; `pass_check_type_of` still accepts
   both spellings for user code).
-- **Fix B:** include-expanded view (`cc_cpp_expand`) for `cc__ct_find_struct_body`
-  only — header-defined structs visible to `@comptime for`. Local-buffer prelude
+- **Fix B (retired):** full-TU `cc_cpp_expand` reflection view removed.
+  Header-defined structs for `@comptime for` come from registered included
+  `.cch` text via `cc_ct_reflect_*` / host reflect. Local-buffer prelude still
   kept for TCC layout predicates (expanded headers poison the evaluator).
 
 **Proof:** `tests/comptime_crc_table_smoke` — `@comptime {}` loop builds a CRC32

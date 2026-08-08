@@ -8,7 +8,7 @@ typedef struct {
 } Point;
 
 int main(void) {
-    CC_ARENA_STACK(a, 1024);
+    cc_arena_stack(a, 1024);
     
     CCArenaPool p;
     cc_arena_pool_init(&p, &a, sizeof(Point));

@@ -1,0 +1,34 @@
+/* Unlisted UFCS method on restricted receiver. */
+#include <ccc/std/prelude.cch>
+#include <string.h>
+
+typedef struct Conn {
+    int sock;
+    int out_len;
+} Conn;
+
+@restricted Encode on Conn {
+    r: out_len, write;
+}
+
+static int conn_write(Conn* c, const char* data) {
+    (void)c;
+    (void)data;
+    return 1;
+}
+
+static int conn_flush(Conn* c) {
+    (void)c;
+    return 1;
+}
+
+static void use_enc(@restricted(Encode) Conn* enc) {
+    (void)enc->flush(); /* ill-formed */
+}
+
+int main(void) {
+    Conn c;
+    memset(&c, 0, sizeof(c));
+    use_enc(&c);
+    return 0;
+}

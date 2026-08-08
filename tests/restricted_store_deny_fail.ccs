@@ -1,0 +1,23 @@
+/* r: allows field load, not store. */
+#include <ccc/std/prelude.cch>
+#include <string.h>
+
+typedef struct Conn {
+    int sock;
+    int out_len;
+} Conn;
+
+@restricted Encode on Conn {
+    r: out_len;
+}
+
+static void use_enc(@restricted(Encode) Conn* enc) {
+    enc->out_len = 1; /* ill-formed: store needs w:/rw: */
+}
+
+int main(void) {
+    Conn c;
+    memset(&c, 0, sizeof(c));
+    use_enc(&c);
+    return 0;
+}

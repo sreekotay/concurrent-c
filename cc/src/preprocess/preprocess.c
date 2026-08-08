@@ -11,8 +11,8 @@
 #include <stdarg.h>
 #include <stdint.h>
 
-#include <ccc/cc_slice.cch>
-#include <ccc/cc_arena.cch>
+#include <ccc/cc_slice.h>
+#include <ccc/cc_arena.h>
 
 #include "header/lower_header.h"
 #include "comptime/const_eval.h"
@@ -53,7 +53,7 @@ void cc_ufcs_reset_dest_trap_dedup(void) {
 }
 
 /* Test-only: cache CC_UFCS_BASELINE once (additive harness). */
-static int cc__ufcs_baseline_cached(void) {
+static int __attribute__((unused)) cc__ufcs_baseline_cached(void) {
     static int checked;
     static int on;
     if (!checked) {
@@ -92,6 +92,7 @@ typedef struct {
     int in_block_comment;
     int in_str;
     int in_chr;
+    int in_tpl;         /* Inside a backtick template literal */
     int in_pp;          /* Inside a preprocessor directive (#define / #include / etc.) */
     int pp_continued;   /* Previous non-WS char on the current pp line was '\\' */
     int at_line_start;  /* Last non-whitespace was a newline (or BOF) */
@@ -105,6 +106,7 @@ static void cc_scanner_init(CCScannerState* s) {
     s->in_block_comment = 0;
     s->in_str = 0;
     s->in_chr = 0;
+    s->in_tpl = 0;
     s->in_pp = 0;
     s->pp_continued = 0;
     s->at_line_start = 1;
@@ -117,8 +119,16 @@ static void cc_scanner_init(CCScannerState* s) {
  * Returns 0 if we're at actual code (caller should process the character).
  * Updates *pos to skip multi-char sequences.
  * Updates s->line and s->col to track position.
+ *
+ * skip_templates: when non-zero (default), well-formed `...` literals are one
+ * inert region (apostrophes inside cannot open char literals). When zero,
+ * backticks are left as code so callers that substitute loop vars into
+ * `@emit` / `@string` bodies (`f.index` inside `${...}`), or that resolve
+ * nested `@comptime if`/`for` after that substitution, can see them.
  */
-static int cc_scanner_skip_non_code(CCScannerState* s, const char* src, size_t n, size_t* pos) {
+static int cc_scanner_skip_non_code_ex(CCScannerState* s, const char* src,
+                                       size_t n, size_t* pos,
+                                       int skip_templates) {
     size_t i = *pos;
     if (i >= n) return 0;
     
@@ -174,6 +184,18 @@ static int cc_scanner_skip_non_code(CCScannerState* s, const char* src, size_t n
         return 1;
     }
 
+    /* Inside an unterminated backtick template (fallback path). */
+    if (s->in_tpl) {
+        if (c == '\\' && i + 1 < n) {
+            *pos += 2;
+            s->col++;
+        } else {
+            if (c == '`') s->in_tpl = 0;
+            (*pos)++;
+        }
+        return 1;
+    }
+
 
     /* Inside a preprocessor directive (#define, #include, #if, ...).
      * Skip until the end of the logical line (handles backslash-newline
@@ -219,16 +241,44 @@ static int cc_scanner_skip_non_code(CCScannerState* s, const char* src, size_t n
     if (c == '\n') s->at_line_start = 1;
     else if (c != ' ' && c != '\t') s->at_line_start = 0;
 
-    /* Check for start of comment/string */
+    /* Check for start of comment/string/template */
     if (c == '/' && c2 == '/') { s->in_line_comment = 1; *pos += 2; s->col++; return 1; }
     if (c == '/' && c2 == '*') { s->in_block_comment = 1; *pos += 2; s->col++; return 1; }
     if (c == '"') { s->in_str = 1; (*pos)++; return 1; }
+    if (c == '`') {
+        if (!skip_templates) {
+            /* Leave ticks + body as code (comptime-for slot substitution). */
+            if (c != '\n') s->col--;
+            return 0;
+        }
+        size_t tick_end = 0;
+        /* Opening tick already counted in s->col above. Skip a well-formed
+         * literal as one inert region so apostrophes inside cannot open a
+         * char literal (e.g. `don't` in -e oneliners). Leave unterminated
+         * ticks as code so callers (scan_to_top_level / @string) diagnose. */
+        if (cc_tpl_scan_literal(src, n, i, &tick_end) == 0) {
+            size_t k;
+            for (k = i + 1; k <= tick_end; k++) {
+                if (src[k] == '\n') { s->line++; s->col = 1; }
+                else s->col++;
+            }
+            *pos = tick_end + 1;
+            return 1;
+        }
+        if (c != '\n') s->col--;
+        return 0;
+    }
     if (c == '\'') { s->in_chr = 1; (*pos)++; return 1; }
     
     /* At actual code - undo the col++ since caller will handle this char */
     if (c != '\n') s->col--;
     
     return 0;
+}
+
+static int cc_scanner_skip_non_code(CCScannerState* s, const char* src, size_t n,
+                                    size_t* pos) {
+    return cc_scanner_skip_non_code_ex(s, src, n, pos, 1);
 }
 
 /* ========================================================================== */
@@ -473,12 +523,42 @@ static char* cc__rewrite_builtin_owned_decl_annotations(const char* src, size_t 
             continue;
         }
 
+        /* Statement start = first code byte after prior `;`/`{`/`}`.
+         * Skip delimiters that sit inside comments (task #53: a `;` in a
+         * leading block comment must not mid-anchor `@destroy`).  Do not
+         * call full-TU `cc_rfind_char_top_level` here — after include
+         * expand the span exceeds its 1MiB mask and the fallback is
+         * comment-blind again. */
         stmt_s = i;
-        while (stmt_s > 0 &&
-               src[stmt_s - 1] != ';' &&
-               src[stmt_s - 1] != '{' &&
-               src[stmt_s - 1] != '}') {
-            stmt_s--;
+        while (stmt_s > 0) {
+            while (stmt_s > 0 &&
+                   src[stmt_s - 1] != ';' &&
+                   src[stmt_s - 1] != '{' &&
+                   src[stmt_s - 1] != '}') {
+                stmt_s--;
+            }
+            if (stmt_s == 0) break;
+            {
+                size_t delim = stmt_s - 1;
+                int in_bc = 0;
+                size_t k = delim;
+                /* Non-nested block comments: walking left, opener-first
+                 * means `delim` is inside; closer-first means outside. */
+                while (k > 0) {
+                    if (k >= 2 && src[k - 2] == '*' && src[k - 1] == '/') {
+                        in_bc = 0;
+                        break;
+                    }
+                    if (k >= 2 && src[k - 2] == '/' && src[k - 1] == '*') {
+                        in_bc = 1;
+                        break;
+                    }
+                    k--;
+                }
+                if (!in_bc && !cc_scan_pos_in_line_comment(src, delim))
+                    break;
+            }
+            stmt_s--; /* step onto inert delim and keep seeking */
         }
         stmt_s = cc_skip_ws_and_comments(src, n, stmt_s);
         if (!cc__pp_find_top_level_equal(src, stmt_s, i, &eq)) {
@@ -1244,7 +1324,7 @@ static int cc__rewrite_template_body(char** out,
                                         "cc_string_push_policy(&%s, %s, %s, ",
                                         builder_name, policy_name, arena_name);
                 if (piece.kind == CC_TPL_PIECE_TAGGED_SLOT) {
-                    cc_sb_append_cstr(out, out_len, out_cap, "cc_slice_from_cstr(");
+                    cc_sb_append_cstr(out, out_len, out_cap, "CC_SLICE_LIT(");
                     cc__append_c_string_escaped(out, out_len, out_cap,
                                                 src + piece.tag_off, piece.tag_len);
                     cc_sb_append_cstr(out, out_len, out_cap, "), ");
@@ -1472,13 +1552,13 @@ done:
 /* ---- `@string(..., @scratch)` / `@scratch(N)` ---------------------------
  * Sugar for a function/closure-scoped stack arena passed as the @string arena
  * operand. All sites in the same function or closure body share one
- * CC_ARENA_STACK(__cc_str_scratch, max N) at that body's '{'; every arena
+ * cc_arena_stack(__cc_str_scratch, max N) at that body's '{'; every arena
  * arg rewrites to &__cc_str_scratch. Not a general expression. */
 #define CC_STR_SCRATCH_DEFAULT_BYTES 1024
 #define CC_STR_SCRATCH_MAX_SITES 256
 
 typedef struct {
-    size_t brace;   /* function/closure '{' after which to inject CC_ARENA_STACK */
+    size_t brace;   /* function/closure '{' after which to inject cc_arena_stack */
     size_t arg_s;   /* start of @scratch... in source */
     size_t arg_e;   /* exclusive end of arena arg */
     size_t nbytes;
@@ -1874,7 +1954,7 @@ static int cc__reject_orphan_at_scratch(const char* src, size_t n, const char* i
                 cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
                                 scan.line, scan.col, "syntax",
                                 "@scratch is only valid as the arena argument of @string(...); "
-                                "use CC_ARENA_STACK for a named scratch arena");
+                                "use cc_arena_stack for a named scratch arena");
                 return -1;
             }
             i = after;
@@ -1904,7 +1984,7 @@ static int cc__scratch_site_cmp_arg(const void* a, const void* b) {
 }
 
 /* Expand @scratch arena args; NULL = no sites, (char*)-1 = error.
- * One shared CC_ARENA_STACK(__cc_str_scratch, max N) per function/closure. */
+ * One shared cc_arena_stack(__cc_str_scratch, max N) per function/closure. */
 static char* cc__expand_string_scratch(const char* src, size_t n, const char* input_path) {
     CCStrScratchSite sites[CC_STR_SCRATCH_MAX_SITES];
     CCStrScratchSite by_brace[CC_STR_SCRATCH_MAX_SITES];
@@ -1945,7 +2025,7 @@ static char* cc__expand_string_scratch(const char* src, size_t n, const char* in
                 bi++;
             }
             cc__sb_append_fmt_local(&out, &out_len, &out_cap,
-                                    " CC_ARENA_STACK(__cc_str_scratch, %zu); ",
+                                    " cc_arena_stack(__cc_str_scratch, %zu); ",
                                     nbytes);
         } else {
             cc_sb_append_cstr(&out, &out_len, &out_cap, "&__cc_str_scratch");
@@ -1985,7 +2065,8 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                 return (char*)-1;
             }
             cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
-            cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_slice_from_cstr(");
+            /* Same expansion as call-arg lit coerce; @slice is optional sugar. */
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "CC_SLICE_LIT(");
             cc_sb_append(&out, &out_len, &out_cap, src + arg_s, arg_e - arg_s);
             cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
             rewrite_count++;
@@ -2055,7 +2136,7 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
             {
                 /* After the template literal:
                  *   - anchored splice form `@emit(anchor, `...`)` takes NO arena;
-                 *     it is self-contained (inline CC_ARENA_STACK, splice, free).
+                 *     it is self-contained (inline cc_arena_stack, splice, free).
                  *   - return form `@emit(`...`, arena)` REQUIRES an explicit arena
                  *     and yields a CCSlice persisted into it (mirrors @string). */
                 size_t after = cc_skip_ws_and_comments(src, n, tick_e + 1);
@@ -2133,7 +2214,7 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                        copies), then free.  arena_name is a CCArena* alias so the
                        shared body rewriter sees a pointer in both forms. */
                     cc__sb_append_fmt_local(&out, &out_len, &out_cap,
-                                            "({ CC_ARENA_STACK(%s, %d); CCArena* %s = &%s; "
+                                            "({ cc_arena_stack(%s, %d); CCArena* %s = &%s; "
                                             "CCString %s = cc_string_new(); ",
                                             stack_name, CC_EMIT_TPL_BUF_SIZE,
                                             arena_name, stack_name, builder_name);
@@ -4441,7 +4522,8 @@ static void cc__ufcs_scope_idx_build_ex(const char* src, size_t n,
     g_ufcs_scope_idx.ready = 1;
 }
 
-static void cc__ufcs_scope_idx_build(const char* src, size_t n) {
+static void __attribute__((unused)) cc__ufcs_scope_idx_build(const char* src,
+                                                             size_t n) {
     cc__ufcs_scope_idx_build_ex(src, n, NULL, NULL, 0, NULL, NULL, 0);
 }
 
@@ -5736,6 +5818,7 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
         int string_like = 0;
         int slice_like = 0;
         int nursery_like = 0;
+        int nursery_spawn_named = 0; /* task-form spawn → spawn_async_named */
         int chan_tx = 0;
         int chan_rx = 0;
         int map_decl_like = 0;
@@ -6111,8 +6194,6 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
              * (`ln.accept()` with no explicit `cc_listener_accept` in the TU)
              * unlowered through canonicalize's pre-splice `!>` expansion,
              * so binders fell through to the ambient `CCError` _Generic arm. */
-            int is_cc_std = (recv_type_base[0] == 'C' && recv_type_base[1] == 'C' &&
-                             recv_type_base[2] >= 'A' && recv_type_base[2] <= 'Z');
             /* Types with named `@as` embeds: leave member calls for the AST
              * UFCS pass (as-retry / flat `.destroy()`). Inventing a CC*
              * snake_case twin here invents missing callees like
@@ -6547,17 +6628,74 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                 cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
             } else if (nursery_like) {
                 if (strcmp(method_name, "spawn") == 0) {
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_nursery_spawn_closure0");
+                    /* Closure `() =>` / CCClosure0 value → spawn_closure0;
+                     * else @async task → spawn_async_named. */
+                    size_t as = paren_pos + 1;
+                    size_t ae = paren_end;
+                    int has_arrow = 0;
+                    int is_closure0 = 0;
+                    size_t k;
+                    int depth = 0;
+                    as = cc_skip_ws_and_comments(src, ae, as);
+                    ae = cc_rskip_ws_and_comments(src, ae);
+                    if (ae < as) ae = as;
+                    for (k = as; k + 1 < ae; k++) {
+                        char ch = src[k];
+                        if (ch == '(' || ch == '[' || ch == '{') depth++;
+                        else if (ch == ')' || ch == ']' || ch == '}') {
+                            if (depth) depth--;
+                        } else if (depth == 0 && ch == '=' && src[k + 1] == '>') {
+                            has_arrow = 1;
+                            break;
+                        }
+                    }
+                    if (has_arrow) {
+                        is_closure0 = 1;
+                    } else if (as < ae) {
+                        /* Bare / dotted CCClosure0 value: look up arg type. */
+                        char aname[96];
+                        char aty[256];
+                        size_t ni = 0;
+                        size_t p = as;
+                        while (p < ae && ni + 1 < sizeof(aname) &&
+                               cc_is_ident_char(src[p])) {
+                            aname[ni++] = src[p++];
+                        }
+                        aname[ni] = '\0';
+                        p = cc_skip_ws_and_comments(src, ae, p);
+                        if (ni && p >= ae &&
+                            cc__lookup_scoped_ufcs_var_type(src, sep_pos, aname,
+                                                           aty, sizeof(aty)) &&
+                            strstr(aty, "CCClosure0") != NULL) {
+                            is_closure0 = 1;
+                        } else if (as + 10 < ae &&
+                                   memcmp(src + as, "cc_closure", 10) == 0) {
+                            /* cc_closure__N…_make() / similar. */
+                            size_t q = as;
+                            while (q < ae && src[q] != '(') q++;
+                            if (q < ae && src[q] == '(') {
+                                const char* mk = src + as;
+                                size_t mlen = q - as;
+                                if (mlen >= 5 &&
+                                    memcmp(mk + mlen - 5, "_make", 5) == 0)
+                                    is_closure0 = 1;
+                            }
+                        }
+                    }
+                    if (is_closure0) {
+                        cc_sb_append_cstr(&out, &out_len, &out_cap,
+                                         "cc_nursery_spawn_closure0");
+                    } else {
+                        nursery_spawn_named = 1;
+                        cc_sb_append_cstr(&out, &out_len, &out_cap,
+                                         "cc_nursery_spawn_async_named");
+                    }
                 } else if (strcmp(method_name, "spawnhybrid") == 0) {
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_nursery_spawnhybrid_closure0");
                 } else if (strcmp(method_name, "close_on") == 0) {
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_nursery_add_closing_tx");
                 } else if (strcmp(method_name, "spawn_async") == 0) {
-                    /* R1: route to the naming variant so the new fiber
-                     * carries the user-facing task name + spawn-site
-                     * source location for `cc_rt_diag_current_async_info`.
-                     * The trailing `, "callee", __FILE__, __LINE__` is
-                     * appended below in the args-emit block. */
+                    nursery_spawn_named = 1;
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_nursery_spawn_async_named");
                 } else {
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_nursery_");
@@ -6597,12 +6735,8 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                 cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
                 cc_sb_append(&out, &out_len, &out_cap, src + args_start, args_end - args_start);
             }
-            /* R1: trailing `, "callee", __FILE__, __LINE__` for the
-             * `spawn_async` -> `cc_nursery_spawn_async_named` rewrite.
-             * `__FILE__` and `__LINE__` are resolved by TCC against the
-             * `#line` directives CC emits, so they report the user's
-             * source location, not the generated C path/line. */
-            if (nursery_like && strcmp(method_name, "spawn_async") == 0) {
+            /* R1: trailing diag args for task-form spawn / spawn_async. */
+            if (nursery_spawn_named) {
                 char callee_name[96];
                 size_t ci = args_start;
                 size_t cj = 0;
@@ -6612,9 +6746,6 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                 }
                 callee_name[cj] = '\0';
                 if (cj == 0 || ci >= args_end || src[ci] != '(') {
-                    /* Args don't start with a plain `ident(`; fall back to
-                     * the literal "<async>".  Keeps the wiring robust for
-                     * cases like `n->spawn_async(make_task() + foo)`. */
                     snprintf(callee_name, sizeof(callee_name), "%s", "<async>");
                 }
                 cc_sb_append_cstr(&out, &out_len, &out_cap, ", \"");
@@ -6919,7 +7050,7 @@ static int cc__tu_defines_fnlike_macro(const char* src, size_t n, const char* na
     return cc_text_defines_fnlike_macro(src, n, name);
 }
 
-static char* cc__rewrite_naked_print_aliases(const char* src, size_t n) {
+char* cc_rewrite_naked_print_aliases(const char* src, size_t n) {
     /* Longest-first so fprintln wins over fprint, etc. */
     static const char* const names[] = {
         "fprintln", "eprintln", "println", "fprint", "eprint", "print"
@@ -7483,7 +7614,7 @@ typedef struct { char name[288]; unsigned quals; int line; } CCResultQualSeen;
 static CCResultQualSeen* g_result_quals = NULL;
 static size_t g_result_qual_count = 0, g_result_qual_cap = 0;
 
-static void cc__result_quals_reset(void) {
+static void __attribute__((unused)) cc__result_quals_reset(void) {
     free(g_result_quals);
     g_result_quals = NULL;
     g_result_qual_count = g_result_qual_cap = 0;
@@ -9407,7 +9538,7 @@ static int cc__slice_instance_for_elem(const char* src, size_t elem_s, size_t el
 }
 
 /* Lower a slice declaration initializer:
- *   `= "lit"` -> `= const_char_to_slice("lit")`      (char element type)
+ *   `= "lit"` -> `= CC_SLICE_LIT("lit")`      (char element type)
  *   `= {...}` -> hidden block-scope backing array + view:
  *                `T __cc_slb_N[] = {...}; CCSlice N =
  *                 cc_slice_from_buffer(buf, element-count)`
@@ -9522,7 +9653,7 @@ static size_t cc__slice_emit_decl_init(char** out, size_t* out_len, size_t* out_
                 ie--;
             cc_sb_append_cstr(out, out_len, out_cap, "CCSlice ");
             cc_sb_append(out, out_len, out_cap, src + name_s, name_e - name_s);
-            cc_sb_append_cstr(out, out_len, out_cap, " = const_char_to_slice(");
+            cc_sb_append_cstr(out, out_len, out_cap, " = CC_SLICE_LIT(");
             cc_sb_append(out, out_len, out_cap, src + p, ie - p);
             cc_sb_append_cstr(out, out_len, out_cap, ")");
             return end;
@@ -9679,6 +9810,141 @@ static char* cc__rewrite_slice_types(const char* src, size_t n, const char* inpu
  * left alone.  Function-body text (where `void` might appear as a
  * local cast or pointer type) is untouched because the rewrite is
  * anchored on `@async` + an identifier followed by `(`. */
+/* Defined with the param-list reflector; used here to strip defaults for C. */
+static int cc__ct_param_default_at(const char* src, size_t ps, size_t pe,
+                                   size_t* eq_pos);
+
+/* Strip `name = literal` defaults from function parameter lists.  CC allows
+ * the spelling for reflection / py_module optional kwargs; host C does not.
+ * Call arguments like `foo(x = 1)` are left alone — only declaration-style
+ * defaults (typed declarator on the left) are removed. */
+static int cc__param_default_fn_name_ok(const char* src, size_t ns, size_t ne) {
+    size_t n = ne - ns;
+    if (n == 0) return 0;
+#define CC__PD_KW(S) (n == sizeof(S) - 1 && memcmp(src + ns, S, sizeof(S) - 1) == 0)
+    if (CC__PD_KW("if") || CC__PD_KW("for") || CC__PD_KW("while") ||
+        CC__PD_KW("switch") || CC__PD_KW("sizeof") || CC__PD_KW("_Alignof") ||
+        CC__PD_KW("alignof") || CC__PD_KW("typeof") || CC__PD_KW("__typeof__") ||
+        CC__PD_KW("_Generic") || CC__PD_KW("return") || CC__PD_KW("case") ||
+        CC__PD_KW("catch"))
+        return 0;
+#undef CC__PD_KW
+    return 1;
+}
+
+static char* cc__rewrite_param_defaults(const char* src, size_t n,
+                                        const char* input_path) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0, last_emit = 0;
+    int changed = 0;
+    CCScannerState scan;
+    if (!src || n == 0) return NULL;
+    cc_scanner_init(&scan);
+    for (size_t i = 0; i < n; ) {
+        size_t lp, rp, after, ns, ne, before;
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (src[i] != '(') { i++; continue; }
+        lp = i;
+        if (!cc_find_matching_paren(src, n, lp, &rp)) { i++; continue; }
+        after = cc_skip_ws_and_comments(src, n, rp + 1);
+        if (after >= n || (src[after] != '{' && src[after] != ';')) {
+            i = rp + 1;
+            continue;
+        }
+        before = cc_rskip_ws_and_comments(src, lp);
+        if (before == 0 || !cc_is_ident_char(src[before - 1])) {
+            i = rp + 1;
+            continue;
+        }
+        ne = before;
+        ns = ne;
+        while (ns > 0 && cc_is_ident_char(src[ns - 1])) ns--;
+        if (!cc__param_default_fn_name_ok(src, ns, ne)) {
+            i = rp + 1;
+            continue;
+        }
+        /* `recv.foo(...)` / `recv->foo(...)` are calls, not declarators. */
+        before = cc_rskip_ws_and_comments(src, ns);
+        if (before > 0 && (src[before - 1] == '.' ||
+                           (before >= 2 && src[before - 1] == '>' &&
+                            src[before - 2] == '-'))) {
+            i = rp + 1;
+            continue;
+        }
+        /* Rewrite the param list, omitting declaration-style defaults. */
+        {
+            size_t p = lp + 1;
+            size_t chunk_from = last_emit;
+            int list_changed = 0;
+            char* piece = NULL;
+            size_t piece_len = 0, piece_cap = 0;
+            cc_sb_append(&piece, &piece_len, &piece_cap, src + chunk_from,
+                         lp + 1 - chunk_from);
+            while (p < rp) {
+                CCScannerState s; cc_scanner_init(&s);
+                size_t j = p, depth = 0, comma = rp;
+                size_t ps, pe, eq;
+                int dr;
+                while (j < rp) {
+                    if (cc_scanner_skip_non_code(&s, src, rp, &j)) continue;
+                    char c = src[j];
+                    if (c == '(' || c == '[') depth++;
+                    else if (c == ')' || c == ']') { if (depth) depth--; }
+                    else if (c == ',' && depth == 0) { comma = j; break; }
+                    j++;
+                }
+                ps = p;
+                pe = comma;
+                dr = cc__ct_param_default_at(src, cc_skip_ws_and_comments(src, pe, ps),
+                                             cc_rskip_ws_and_comments(src, pe), &eq);
+                if (dr < 0) {
+                    char rel[1024];
+                    free(piece);
+                    free(out);
+                    cc_pp_error_cat(cc_path_rel_to_repo(
+                                        input_path ? input_path : "<input>", rel,
+                                        sizeof(rel)),
+                                    scan.line, scan.col, "syntax",
+                                    "parameter default must be a simple literal "
+                                    "(integer, float, string, char, NULL, true, false)");
+                    return (char*)-1;
+                }
+                if (dr > 0) {
+                    size_t keep_end = cc_rskip_ws_and_comments(src, eq);
+                    cc_sb_append(&piece, &piece_len, &piece_cap, src + ps,
+                                 keep_end > ps ? keep_end - ps : 0);
+                    if (comma < rp)
+                        cc_sb_append(&piece, &piece_len, &piece_cap, ",", 1);
+                    list_changed = 1;
+                } else {
+                    cc_sb_append(&piece, &piece_len, &piece_cap, src + ps,
+                                 comma - ps);
+                    if (comma < rp)
+                        cc_sb_append(&piece, &piece_len, &piece_cap, ",", 1);
+                }
+                p = comma + 1;
+            }
+            if (list_changed) {
+                cc_sb_append(&out, &out_len, &out_cap, piece, piece_len);
+                last_emit = rp;
+                changed = 1;
+            }
+            free(piece);
+        }
+        i = rp + 1;
+    }
+    if (!changed) {
+        free(out);
+        return NULL;
+    }
+    if (last_emit < n)
+        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    cc_sb_append(&out, &out_len, &out_cap, "", 1);
+    out_len -= 1;
+    (void)out_len;
+    return out;
+}
+
 char* cc__rewrite_async_void_ret(const char* src, size_t n) {
     if (!src || n == 0) return NULL;
     /* Early exit if no real `@async` appears outside comments/strings.
@@ -11150,7 +11416,8 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
                     if (is_short && depth == 0 && full_rtype[0]) {
                         /* Rewrite short form to typed constructor call:
                            cc_ok(x) -> cc_ok_CCResult_T_E(x)
-                           cc_err(e) -> cc_err_CCResult_T_E(e) */
+                           cc_err(e) -> cc_err_CCResult_T_E(e)
+                           Into a CCError face, project unique @as (Io→base). */
                         cc_sb_append(&out, &out_len, &out_cap, src + last_emit, macro_start - last_emit);
                         
                         if (is_ok) {
@@ -11160,8 +11427,64 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
                         }
                         cc_sb_append_cstr(&out, &out_len, &out_cap, full_rtype);
                         cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
-                        /* Copy argument */
-                        cc_sb_append(&out, &out_len, &out_cap, src + args_start, j - args_start);
+                        if (is_err && err_is_ccerror) {
+                            size_t a0 = args_start, a1 = j;
+                            char ident[128];
+                            size_t ii = 0;
+                            int is_id = 1;
+                            char path[256];
+                            int match = -1;
+                            CCTypeRegistry* reg = cc_type_registry_get_global();
+                            while (a0 < a1 && (src[a0] == ' ' || src[a0] == '\t' ||
+                                               src[a0] == '\n' || src[a0] == '\r'))
+                                a0++;
+                            while (a1 > a0 && (src[a1 - 1] == ' ' || src[a1 - 1] == '\t' ||
+                                               src[a1 - 1] == '\n' || src[a1 - 1] == '\r'))
+                                a1--;
+                            for (ii = 0; a0 + ii < a1 && ii + 1 < sizeof(ident); ii++) {
+                                char ch = src[a0 + ii];
+                                if (!((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+                                      ch == '_' || (ii > 0 && ch >= '0' && ch <= '9'))) {
+                                    is_id = 0;
+                                    break;
+                                }
+                                ident[ii] = ch;
+                            }
+                            ident[ii] = 0;
+                            if (is_id && ii > 0 && a0 + ii == a1 && reg) {
+                                const char* oty = cc_type_registry_lookup_var(reg, ident);
+                                if (oty && oty[0] && strcmp(oty, "CCError") != 0) {
+                                    match = cc_type_registry_as_path_for_type(
+                                        reg, oty, "CCError", path, sizeof(path));
+                                    if (match == -2) {
+                                        free(out);
+                                        free(rvars);
+                                        fprintf(stderr,
+                                                "error: cc_err: ambiguous @as path "
+                                                "from '%s' to 'CCError'\n",
+                                                oty);
+                                        return NULL;
+                                    }
+                                }
+                            }
+                            if (match == 0 && path[0]) {
+                                cc_sb_append(&out, &out_len, &out_cap, src + a0, a1 - a0);
+                                cc_sb_append_cstr(&out, &out_len, &out_cap, ".");
+                                cc_sb_append_cstr(&out, &out_len, &out_cap, path);
+                            } else {
+                                cc_sb_append_cstr(&out, &out_len, &out_cap,
+                                    "({ __typeof__(");
+                                cc_sb_append(&out, &out_len, &out_cap, src + a0, a1 - a0);
+                                cc_sb_append_cstr(&out, &out_len, &out_cap, ") __cc_ep = (");
+                                cc_sb_append(&out, &out_len, &out_cap, src + a0, a1 - a0);
+                                cc_sb_append_cstr(&out, &out_len, &out_cap,
+                                    "); _Generic(__cc_ep, CCError: __cc_ep, "
+                                    "CCIoError: (*(CCError*)(void*)&__cc_ep), "
+                                    "default: __cc_ep); })");
+                            }
+                        } else {
+                            cc_sb_append(&out, &out_len, &out_cap, src + args_start, j - args_start);
+                        }
                         cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
                         last_emit = j + 1;
                         i = j + 1;
@@ -12413,7 +12736,7 @@ static void cc__index_declares(CCPathTextCache* slot) {
          * from being harvested. */
         if (slot->text[i] == '#' && scan.at_line_start && !scan.in_pp &&
             !scan.in_line_comment && !scan.in_block_comment &&
-            !scan.in_str && !scan.in_chr) {
+            !scan.in_str && !scan.in_chr && !scan.in_tpl) {
             size_t noff = 0, nl = 0;
             int fnlike = 0;
             if (cc_scan_define_head(slot->text, slot->len, i, &noff, &nl, &fnlike) &&
@@ -14241,7 +14564,7 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                  * Also splice nested locals that still contain method-call
                  * UFCS even when they are not themselves impl-grade (the
                  * redis_db → redis_mem shape).  Interface-lowering those to
-                 * out/include/*.h leaves nested-only methods (e.g.
+                 * out/include star-dot-h leaves nested-only methods (e.g.
                  * ArrayMap.live_bytes) dependent on a later UFCS splice /
                  * writeback that can miss or half-rewrite on some hosts. */
                 if (realpath(child_path, child_abs)) {
@@ -16240,21 +16563,6 @@ static char* cc__normalize_cc_type_of_to_type_of(const char* src, size_t n) {
     return out;
 }
 
-/* Fix B: include-expanded view for reflection (struct bodies from headers). */
-static char* cc__build_reflection_view(const char* src, size_t n,
-                                       const char* input_path,
-                                       size_t* out_n) {
-    size_t exp_len = 0;
-    char* expanded = cc_cpp_expand(src, n, input_path, &exp_len);
-    if (expanded && exp_len > 0) {
-        *out_n = exp_len;
-        return expanded;
-    }
-    free(expanded);
-    *out_n = n;
-    return NULL;
-}
-
 /* ============================================================
  * D4.0: `@comptime for (F in type_of(T).fields) { BODY }`
  * compile-time field iteration.  Unrolls BODY once per declared
@@ -16628,6 +16936,134 @@ static int cc__ct_parse_member(const char* m, CCCtField** fs, size_t* fn, size_t
  * a form the declarator parser cannot spell exactly — or an unnamed one, which
  * has no identifier to reflect — is a bail, so the caller errors rather than
  * handing back a guessed or partial list.  Returns 1 ok, 0 bail. */
+/* Top-level bare `=` in [ps, pe), or pe if none.  Skips `==` / `!=` / compound
+ * assigns so only a parameter default introducer matches. */
+static size_t cc__ct_top_eq(const char* src, size_t ps, size_t pe) {
+    CCScannerState s; cc_scanner_init(&s);
+    size_t i = ps, depth = 0;
+    while (i < pe) {
+        if (cc_scanner_skip_non_code(&s, src, pe, &i)) continue;
+        char c = src[i];
+        if (c == '(' || c == '[' || c == '{') depth++;
+        else if (c == ')' || c == ']' || c == '}') { if (depth) depth--; }
+        else if (c == '=' && depth == 0) {
+            char prev = (i > ps) ? src[i - 1] : 0;
+            char next = (i + 1 < pe) ? src[i + 1] : 0;
+            if (next != '=' && prev != '<' && prev != '>' && prev != '!' &&
+                prev != '=' && prev != '+' && prev != '-' && prev != '*' &&
+                prev != '/' && prev != '%' && prev != '&' && prev != '|' &&
+                prev != '^')
+                return i;
+        }
+        i++;
+    }
+    return pe;
+}
+
+/* True when [a,b) is a parameter-default literal: integer/float (opt sign +
+ * suffix), string/char, or the idents NULL / true / false. */
+static int cc__ct_is_param_default_literal(const char* src, size_t a, size_t b) {
+    size_t i;
+    if (a >= b) return 0;
+    if (src[a] == '"') {
+        i = a + 1;
+        while (i < b) {
+            if (src[i] == '\\') { if (i + 1 < b) i += 2; else return 0; continue; }
+            if (src[i] == '"') {
+                i++;
+                while (i < b && (src[i] == ' ' || src[i] == '\t')) i++;
+                return i == b;
+            }
+            i++;
+        }
+        return 0;
+    }
+    if (src[a] == '\'') {
+        i = a + 1;
+        while (i < b) {
+            if (src[i] == '\\') { if (i + 1 < b) i += 2; else return 0; continue; }
+            if (src[i] == '\'') {
+                i++;
+                while (i < b && (src[i] == ' ' || src[i] == '\t')) i++;
+                return i == b;
+            }
+            i++;
+        }
+        return 0;
+    }
+    if (cc_is_ident_start(src[a])) {
+        i = a;
+        while (i < b && cc_is_ident_char(src[i])) i++;
+        size_t n = i - a;
+        int ok = (n == 4 && memcmp(src + a, "NULL", 4) == 0) ||
+                 (n == 4 && memcmp(src + a, "true", 4) == 0) ||
+                 (n == 5 && memcmp(src + a, "false", 5) == 0);
+        while (i < b && (src[i] == ' ' || src[i] == '\t')) i++;
+        return ok && i == b;
+    }
+    i = a;
+    if (src[i] == '+' || src[i] == '-') i++;
+    if (i >= b) return 0;
+    if (src[i] == '0' && i + 1 < b && (src[i + 1] == 'x' || src[i + 1] == 'X')) {
+        i += 2;
+        size_t hex = i;
+        while (i < b && isxdigit((unsigned char)src[i])) i++;
+        if (i == hex) return 0;
+    } else {
+        size_t dig = i;
+        while (i < b && src[i] >= '0' && src[i] <= '9') i++;
+        if (i < b && src[i] == '.') {
+            i++;
+            while (i < b && src[i] >= '0' && src[i] <= '9') i++;
+        }
+        if (i == dig) return 0;
+        if (i < b && (src[i] == 'e' || src[i] == 'E')) {
+            size_t e = ++i;
+            if (i < b && (src[i] == '+' || src[i] == '-')) i++;
+            while (i < b && src[i] >= '0' && src[i] <= '9') i++;
+            if (i == e || (i == e + 1 && (src[e] == '+' || src[e] == '-'))) return 0;
+        }
+    }
+    while (i < b && (src[i] == 'u' || src[i] == 'U' || src[i] == 'l' ||
+                     src[i] == 'L' || src[i] == 'f' || src[i] == 'F'))
+        i++;
+    while (i < b && (src[i] == ' ' || src[i] == '\t')) i++;
+    return i == b;
+}
+
+/* Declaration-style default at the end of param span [ps,pe).
+ * Returns 1 and sets *eq_pos when `type name = literal` is present; 0 when
+ * there is no default (including assignment expressions like `x = 1` with no
+ * type); -1 when a bare `=` is present but the RHS is not a modeled literal. */
+static int cc__ct_param_default_at(const char* src, size_t ps, size_t pe,
+                                   size_t* eq_pos) {
+    size_t eq, ds, de;
+    char* left;
+    CCCtField* fs = NULL; size_t fn = 0, fc = 0;
+    int ok;
+    if (eq_pos) *eq_pos = pe;
+    eq = cc__ct_top_eq(src, ps, pe);
+    if (eq >= pe) return 0;
+    ds = cc_skip_ws_and_comments(src, pe, eq + 1);
+    de = cc_rskip_ws_and_comments(src, pe);
+    if (de <= ds) return -1;
+    if (!cc__ct_is_param_default_literal(src, ds, de)) return -1;
+    /* Left of `=` must be a real parameter declarator — otherwise this is an
+     * assignment expression in a call argument, not a default. */
+    {
+        size_t le = cc_rskip_ws_and_comments(src, eq);
+        if (le <= ps) return 0;
+        left = cc__ct_member_normalize(src, ps, le);
+        if (!left) return -1;
+        ok = cc__ct_parse_declarator(left, strlen(left), NULL, NULL, 0, &fs, &fn, &fc);
+        free(left);
+        cc__ct_free_fields(fs, fn);
+        if (!ok) return 0;
+    }
+    if (eq_pos) *eq_pos = eq;
+    return 1;
+}
+
 static int cc__ct_parse_param_list(const char* src, size_t lp, size_t rp,
                                    CCCtField** out, size_t* out_n) {
     CCCtField* fs = NULL; size_t fn = 0, fc = 0;
@@ -16655,8 +17091,14 @@ static int cc__ct_parse_param_list(const char* src, size_t lp, size_t rp,
             size_t ps = cc_skip_ws_and_comments(src, comma, i);
             size_t pe = cc_rskip_ws_and_comments(src, comma);
             if (pe > ps) {
-                char* d = cc__ct_member_normalize(src, ps, pe);
+                size_t eq = pe;
+                int dr = cc__ct_param_default_at(src, ps, pe, &eq);
+                char* d;
                 int ok;
+                if (dr < 0) { cc__ct_free_fields(fs, fn); return 0; }
+                if (dr > 0) pe = cc_rskip_ws_and_comments(src, eq);
+                if (pe <= ps) { cc__ct_free_fields(fs, fn); return 0; }
+                d = cc__ct_member_normalize(src, ps, pe);
                 if (!d) { cc__ct_free_fields(fs, fn); return 0; }
                 ok = cc__ct_parse_declarator(d, strlen(d), NULL, NULL, 0, &fs, &fn, &fc);
                 free(d);
@@ -16763,6 +17205,52 @@ int cc_ct_reflect_param_list(const char* params, CCCtField** out, size_t* out_n)
     n = strlen(params);
     if (n < 2 || params[0] != '(' || params[n - 1] != ')') return 0;
     return cc__ct_parse_param_list(params, 0, n - 1, out, out_n);
+}
+
+int cc_ct_reflect_param_default(const char* params, int idx, char* buf, int buf_sz) {
+    size_t n, i, pidx;
+    if (buf && buf_sz > 0) buf[0] = '\0';
+    if (!params || idx < 0) return -1;
+    n = strlen(params);
+    if (n < 2 || params[0] != '(' || params[n - 1] != ')') return -1;
+    i = 1;
+    pidx = 0;
+    while (i < n - 1) {
+        CCScannerState s; cc_scanner_init(&s);
+        size_t j = i, depth = 0, comma = n - 1;
+        size_t ps, pe, eq, ds, de;
+        int dr;
+        while (j < n - 1) {
+            if (cc_scanner_skip_non_code(&s, params, n - 1, &j)) continue;
+            char c = params[j];
+            if (c == '(' || c == '[') depth++;
+            else if (c == ')' || c == ']') { if (depth) depth--; }
+            else if (c == ',' && depth == 0) { comma = j; break; }
+            j++;
+        }
+        ps = cc_skip_ws_and_comments(params, comma, i);
+        pe = cc_rskip_ws_and_comments(params, comma);
+        if ((int)pidx == idx) {
+            if (pe <= ps) return 0;
+            if (pe - ps == 4 && memcmp(params + ps, "void", 4) == 0) return 0;
+            dr = cc__ct_param_default_at(params, ps, pe, &eq);
+            if (dr < 0) return -1;
+            if (dr == 0) return 0;
+            ds = cc_skip_ws_and_comments(params, pe, eq + 1);
+            de = pe;
+            if (de <= ds || !buf || buf_sz <= 0) return (int)(de - ds);
+            {
+                size_t dn = de - ds;
+                int cap = (int)dn < buf_sz - 1 ? (int)dn : buf_sz - 1;
+                memcpy(buf, params + ds, (size_t)cap);
+                buf[cap] = '\0';
+                return cap;
+            }
+        }
+        pidx++;
+        i = comma + 1;
+    }
+    return -1;
 }
 
 void cc_ct_free_fields(CCCtField* fields, size_t n) {
@@ -17522,7 +18010,8 @@ int cc_ct_canonical_name(const char* base, const char* const* args, int nargs,
 }
 
 /* Phase-2 unified engine: load struct fields via cc_reflect_field_* instead of
- * parsing the struct body from source when CC_COMPTIME_UNIFIED_EXEC=1. */
+ * parsing the struct body from source when CC_COMPTIME_UNIFIED_EXEC=1.
+ * `is_as` comes from the reflect source (must be Concurrent-C, pre-strip). */
 static int cc__ct_load_fields_via_reflect(const char* tname, size_t tlen,
                                           CCCtField** out, size_t* out_n) {
     if (!tname || tlen == 0 || tlen >= 256) return 0;
@@ -17535,13 +18024,20 @@ static int cc__ct_load_fields_via_reflect(const char* tname, size_t tlen,
     if (!fs) return 0;
     for (int i = 0; i < nf; i++) {
         char nbuf[256], tbuf[256];
+        int as;
         if (cc_reflect_field_name(name, i, nbuf, (int)sizeof(nbuf)) < 0 ||
             cc_reflect_field_type(name, i, tbuf, (int)sizeof(tbuf)) < 0) {
             cc__ct_free_fields(fs, (size_t)nf);
             return 0;
         }
+        as = cc_reflect_field_is_as(name, i);
+        if (as < 0) {
+            cc__ct_free_fields(fs, (size_t)nf);
+            return 0;
+        }
         fs[i].name = strdup(nbuf);
         fs[i].type = strdup(tbuf);
+        fs[i].is_as = as ? 1 : 0;
         if (!fs[i].name || !fs[i].type) {
             cc__ct_free_fields(fs, (size_t)nf);
             return 0;
@@ -17705,6 +18201,8 @@ static void cc__ct_split_ret(const char* ty, const char** ok_s, size_t* ok_n,
     }
 }
 
+static int cc__span_has_comptime_ctrl(const char* src, size_t n, size_t lo, size_t hi);
+
 static void cc__ct_append_field_body(char** out, size_t* ol, size_t* oc,
                                      const char* body, size_t bs, size_t be,
                                      const char* lv, size_t lvlen,
@@ -17713,7 +18211,11 @@ static void cc__ct_append_field_body(char** out, size_t* ol, size_t* oc,
     CCScannerState s; cc_scanner_init(&s);
     size_t i = bs, emit = bs;
     while (i < be) {
-        if (cc_scanner_skip_non_code(&s, body, be, &i)) continue;
+        /* Walk into backtick `@emit` / `@string` bodies: loop slots like
+         * `${f.index}` / `${m.name}` live there. Skipping templates as inert
+         * leaves `$` for libtcc ("lvalue expected"). */
+        if (cc_scanner_skip_non_code_ex(&s, body, be, &i, /*skip_templates=*/0))
+            continue;
         if ((i == 0 || !cc_is_ident_char(body[i - 1])) &&
             i + lvlen <= be && memcmp(body + i, lv, lvlen) == 0 &&
             (i + lvlen == be || !cc_is_ident_char(body[i + lvlen]))) {
@@ -17821,11 +18323,10 @@ static void cc__ct_append_field_body(char** out, size_t* ol, size_t* oc,
 }
 
 /* Try to expand a `@comptime for` whose `@comptime` keyword is at *io_i.
- * Returns 1 = expanded (out appended, *io_i/*io_last_emit advanced past the
+ * Returns 1 = expanded (out appended, *io_i and *io_last_emit advanced past the
  * construct), 0 = not a `@comptime for` here (caller handles `@comptime if`),
  * -1 = hard error. */
 static int cc__try_expand_comptime_for(const char* src, size_t n, const char* input_path,
-                                       const char* reflect_src, size_t reflect_n,
                                        char** out, size_t* out_len, size_t* out_cap,
                                        size_t* io_i, size_t* io_last_emit) {
     size_t i = *io_i;
@@ -17911,10 +18412,15 @@ static int cc__try_expand_comptime_for(const char* src, size_t n, const char* in
 
     CCCtField* fields = NULL; size_t nf = 0;
     size_t body_o, body_c;
-    const char* rsrc = reflect_src ? reflect_src : src;
-    size_t rn = reflect_src ? reflect_n : n;
     {
-        int unified = cc_comptime_unified_exec_enabled();
+        char tname_buf[256];
+        size_t tname_len = (te > ts) ? (te - ts) : 0;
+        if (tname_len >= sizeof(tname_buf)) tname_len = sizeof(tname_buf) - 1;
+        if (tname_len > 0) {
+            memcpy(tname_buf, src + ts, tname_len);
+            tname_buf[tname_len] = '\0';
+        } else
+            tname_buf[0] = '\0';
         if (want_params) {
             if (!cc__ct_parse_param_list(src, plist_lp, plist_rp, &fields, &nf)) {
                 fprintf(stderr,
@@ -17926,7 +18432,8 @@ static int cc__try_expand_comptime_for(const char* src, size_t n, const char* in
                 return -1;
             }
         } else if (want_methods) {
-            if (!cc__ct_load_methods(rsrc, rn, src + ts, te - ts, &fields, &nf)) {
+            /* TU text, then registered included `.cch` (no CPP expand view). */
+            if (!cc_ct_reflect_type_methods(src, n, tname_buf, &fields, &nf)) {
                 fprintf(stderr,
                         "%s: error: `@comptime for ... .methods` found no method of "
                         "`%.*s` — a method is a function whose first parameter is "
@@ -17934,10 +18441,27 @@ static int cc__try_expand_comptime_for(const char* src, size_t n, const char* in
                         input_path ? input_path : "<input>", (int)(te - ts), src + ts);
                 return -1;
             }
-        } else if (unified && cc__ct_load_fields_via_reflect(src + ts, te - ts, &fields, &nf)) {
-            /* fields loaded via host reflection callbacks */
-        } else if (!cc__ct_find_struct_body(rsrc, rn, src + ts, te - ts, &body_o, &body_c) ||
-                   !cc__ct_parse_fields_from_body(rsrc, body_o, body_c, &fields, &nf)) {
+        } else if (cc__ct_find_struct_body(src, n, src + ts, te - ts, &body_o,
+                                           &body_c)) {
+            /* Body in Concurrent-C: parse must succeed or refuse — do not
+             * fall through to a partial type-pass registry table. */
+            if (!cc__ct_parse_fields_from_body(src, body_o, body_c, &fields,
+                                               &nf)) {
+                cc__ct_free_fields(fields, nf);
+                fprintf(stderr,
+                        "%s: error: `@comptime for` needs an in-scope struct type "
+                        "with simple fields; `%.*s` is unknown or has unsupported "
+                        "field forms (arrays/bitfields/function-pointers/"
+                        "multiple-declarators/nested aggregates).\n",
+                        input_path ? input_path : "<input>", (int)(te - ts),
+                        src + ts);
+                return -1;
+            }
+        } else if (cc__ct_load_fields_via_reflect(src + ts, te - ts, &fields,
+                                                  &nf)) {
+            /* Header-only / harvested types: host reflect walks included
+             * `.cch` (+ registry for is_as). No full-TU CPP expand. */
+        } else {
             cc__ct_free_fields(fields, nf);
             fprintf(stderr,
                     "%s: error: `@comptime for` needs an in-scope struct type with "
@@ -17951,7 +18475,11 @@ static int cc__try_expand_comptime_for(const char* src, size_t n, const char* in
 
     cc_sb_append(out, out_len, out_cap, src + *io_last_emit, i - *io_last_emit);
     {
-        int wrap_exec = cc_template_body_needs_emit_exec(src, n, bb + 1, bb_close);
+        /* Wrap only when the for body is emit-ready and has no further
+         * `@comptime if`/`for` outside templates. Otherwise the wrap
+         * imprisons unexpanded control flow in a libtcc `@comptime { }`. */
+        int wrap_exec = cc_template_body_needs_emit_exec(src, n, bb + 1, bb_close) &&
+                        !cc__span_has_comptime_ctrl(src, n, bb + 1, bb_close);
         for (size_t fi = 0; fi < nf; fi++) {
             if (wrap_exec) cc_sb_append_cstr(out, out_len, out_cap, "@comptime { ");
             cc__ct_append_field_body(out, out_len, out_cap, src, bb + 1, bb_close,
@@ -17963,6 +18491,35 @@ static int cc__try_expand_comptime_for(const char* src, size_t n, const char* in
     *io_last_emit = bb_close + 1;
     *io_i = bb_close + 1;
     return 1;
+}
+
+/* True when [lo, hi) has a `@comptime if` / `@comptime for` outside templates.
+ * Used so if-prune wrap-for-exec does not imprison an unexpanded for/if inside
+ * `@comptime { }` (libtcc would then see `@` — silent wrong path). For-inside
+ * emit backticks are ignored (skip_templates). */
+static int cc__span_has_comptime_ctrl(const char* src, size_t n, size_t lo, size_t hi) {
+    static const char ATC[] = "@comptime";
+    const size_t ATCN = sizeof(ATC) - 1;
+    CCScannerState scan;
+    size_t i;
+    if (!src || lo >= hi || hi > n) return 0;
+    cc_scanner_init(&scan);
+    i = lo;
+    while (i < hi) {
+        if (cc_scanner_skip_non_code(&scan, src, hi, &i)) continue;
+        if (src[i] == '@' && i + ATCN <= hi && memcmp(src + i, ATC, ATCN) == 0 &&
+            (i + ATCN == hi || !cc_is_ident_char(src[i + ATCN]))) {
+            size_t p = cc_skip_ws_and_comments(src, hi, i + ATCN);
+            if (p + 3 <= hi && memcmp(src + p, "for", 3) == 0 &&
+                (p + 3 == hi || !cc_is_ident_char(src[p + 3])))
+                return 1;
+            if (p + 2 <= hi && src[p] == 'i' && src[p + 1] == 'f' &&
+                (p + 2 == hi || !cc_is_ident_char(src[p + 2])))
+                return 1;
+        }
+        i++;
+    }
+    return 0;
 }
 
 /* One sweep: resolve each *outermost* `@comptime if`/`@comptime for`
@@ -17980,39 +18537,28 @@ static char* cc__resolve_comptime_if_once(const char* src, size_t n, const char*
     const size_t ATCN = sizeof(ATC) - 1;
     size_t i = 0;
     if (!cc_contains_token_top_level(src, n, "@comptime")) return NULL;
-    /* Fix B: include-expanded view for struct-body reflection.
-     *
-     * `cc__build_reflection_view` runs a full TCC CPP expansion of the TU
-     * (≈the cost of a whole parse) and is only ever consumed by
-     * `cc__try_expand_comptime_for` below, which fires solely for
-     * `@comptime for (F in type_of(T).fields)`.  The vast majority of TUs
-     * contain no `@comptime` construct at all, yet this function is invoked
-     * (in a fixpoint) from three pipeline sites per compile — so the
-     * unconditional expansion was a dominant, pure-waste hotspot.  Gate it on
-     * the presence of an actual `@comptime` token in code; when absent, the
-     * scan loop below never enters the `@comptime` branch, so skipping the
-     * view is behaviourally identical. */
-    size_t reflect_n = n;
-    char* reflect_view = NULL;
-    if (cc_contains_token_top_level(src, n, "@comptime")) {
-        reflect_view = cc__build_reflection_view(src, n, input_path, &reflect_n);
-    }
-    const char* reflect_src = reflect_view ? reflect_view : src;
+    /* Host reflect verbs parse Concurrent-C (naked `@as`) + included `.cch`.
+     * Header-only `@comptime for` does not need a full-TU CPP expand view. */
+    cc_emit_plan_set_reflect_source(src, n);
     /* D3.1b: in-scope type definitions for the TCC layout fallback, built lazily
      * (and once) the first time a predicate needs the host evaluator. */
     char* type_prelude = NULL;
     int type_prelude_built = 0;
     cc_scanner_init(&scan);
     while (i < n) {
-        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        /* Walk into `@emit` / `@string` backticks: after `@comptime for`
+         * substitutes `m.fallible` etc. inside a template, the nested
+         * `@comptime if` must still be visible to this sweep. Skipping
+         * templates here leaves `@comptime if (0) { ... }` for the host. */
+        if (cc_scanner_skip_non_code_ex(&scan, src, n, &i, /*skip_templates=*/0))
+            continue;
         if (src[i] != '@' || i + ATCN > n || memcmp(src + i, ATC, ATCN) != 0) { i++; continue; }
         /* D4.0: `@comptime for (F in type_of(T).fields) { ... }` — expand here
          * (outermost-first) before the `@comptime if` handling below. */
         {
             int fr = cc__try_expand_comptime_for(src, n, input_path,
-                                                 reflect_src, reflect_n,
                                                  &out, &out_len, &out_cap, &i, &last_emit);
-            if (fr == -1) { free(type_prelude); free(reflect_view); free(out); return (char*)-1; }
+            if (fr == -1) { free(type_prelude); free(out); return (char*)-1; }
             if (fr == 1) { changed = 1; continue; }
         }
         size_t p = cc_skip_ws_and_comments(src, n, i + ATCN);
@@ -18042,14 +18588,30 @@ static char* cc__resolve_comptime_if_once(const char* src, size_t n, const char*
                     "user type's kind/layout.\n",
                     input_path ? input_path : "<input>");
             free(type_prelude);
-            free(reflect_view);
             free(out);
             return (char*)-1;
         }
         size_t tb = cc_skip_ws_and_comments(src, n, pred_close + 1);
-        if (tb >= n || src[tb] != '{') { i++; continue; }
+        if (tb >= n || src[tb] != '{') {
+            /* Must not silently skip — that looks like "no work" while the
+             * programmer wrote a `@comptime if`. */
+            fprintf(stderr,
+                    "%s: error: `@comptime if` body must be `{ ... }` "
+                    "(got bare statement or end of input).\n",
+                    input_path ? input_path : "<input>");
+            free(type_prelude);
+            free(out);
+            return (char*)-1;
+        }
         size_t tb_close;
-        if (!cc_find_matching_brace(src, n, tb, &tb_close)) { i++; continue; }
+        if (!cc_find_matching_brace(src, n, tb, &tb_close)) {
+            fprintf(stderr,
+                    "%s: error: unterminated `{` in `@comptime if` body.\n",
+                    input_path ? input_path : "<input>");
+            free(type_prelude);
+            free(out);
+            return (char*)-1;
+        }
 
         /* Else arm: none, `else { ... }`, or `else @comptime if ...` (chain). */
         enum { ELSE_NONE, ELSE_BLOCK, ELSE_CHAIN } else_kind = ELSE_NONE;
@@ -18070,7 +18632,6 @@ static char* cc__resolve_comptime_if_once(const char* src, size_t n, const char*
                         "or `else @comptime if (...) { ... }`.\n",
                         input_path ? input_path : "<input>");
                 free(type_prelude);
-                free(reflect_view);
                 free(out);
                 return (char*)-1;
             }
@@ -18092,8 +18653,21 @@ static char* cc__resolve_comptime_if_once(const char* src, size_t n, const char*
 
         cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
         if (keep_r > keep_l) {
+            /* A kept arm that contains `@emit(\`...\`)` must still run under
+             * libtcc after the surrounding `@comptime if` vanishes. Without
+             * this wrap the bare `@emit` is lowered but never executed —
+             * silent empty splice. Do not wrap when the arm still has an
+             * outer `@comptime for`/`if` — for-expand (or a later if prune)
+             * will wrap; wrapping now feeds unexpanded `@` to libtcc.
+             * Else-chains stay unwrapped so the fixpoint can resolve them. */
+            int keep_is_chain = (!val && else_kind == ELSE_CHAIN);
+            int wrap_exec = !keep_is_chain &&
+                            !cc__span_has_comptime_ctrl(src, n, keep_l, keep_r) &&
+                            cc_template_body_needs_emit_exec(src, n, keep_l, keep_r);
             cc__sb_emit_newlines(&out, &out_len, &out_cap, src, i, keep_l);
+            if (wrap_exec) cc_sb_append_cstr(&out, &out_len, &out_cap, "@comptime { ");
             cc_sb_append(&out, &out_len, &out_cap, src + keep_l, keep_r - keep_l);
+            if (wrap_exec) cc_sb_append_cstr(&out, &out_len, &out_cap, " } ");
             cc__sb_emit_newlines(&out, &out_len, &out_cap, src, keep_r, construct_end);
         } else {
             cc__sb_emit_newlines(&out, &out_len, &out_cap, src, i, construct_end);
@@ -18102,13 +18676,102 @@ static char* cc__resolve_comptime_if_once(const char* src, size_t n, const char*
         i = construct_end;
         changed = 1;
     }
-    if (!changed) { free(type_prelude); free(reflect_view); free(out); return NULL; }
+    if (!changed) { free(type_prelude); free(out); return NULL; }
     if (last_emit < n)
         cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
     if (!out) out = strdup(""); /* whole construct(s) elided to empty */
     free(type_prelude);
-    free(reflect_view);
     return out;
+}
+
+/* After if/for fixpoint, an arm that kept both `@emit` and a nested for may
+ * leave a bare `@emit` at depth 0 once the for is peeled away. Wrap those
+ * so libtcc still executes them (same as for-expand / if-prune wrap). */
+static char* cc__wrap_orphan_anchored_emits(const char* src, size_t n) {
+    typedef struct { size_t lo, hi; } Span;
+    Span* covered = NULL;
+    size_t covered_n = 0, covered_cap = 0;
+    Span* orphans = NULL;
+    size_t orphans_n = 0, orphans_cap = 0;
+    CCScannerState scan;
+    size_t i = 0;
+    static const char ATC[] = "@comptime";
+    const size_t ATCN = sizeof(ATC) - 1;
+    if (!src || !n) return NULL;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        size_t sig_after = 0;
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (src[i] == '@' && i + ATCN <= n && memcmp(src + i, ATC, ATCN) == 0 &&
+            (i + ATCN == n || !cc_is_ident_char(src[i + ATCN]))) {
+            size_t p = cc_skip_ws_and_comments(src, n, i + ATCN);
+            if (p < n && src[p] == '{') {
+                size_t close = 0;
+                if (cc_find_matching_brace(src, n, p, &close)) {
+                    if (covered_n == covered_cap) {
+                        size_t nc = covered_cap ? covered_cap * 2 : 8;
+                        Span* nb = (Span*)realloc(covered, nc * sizeof(Span));
+                        if (!nb) { free(covered); free(orphans); return (char*)-1; }
+                        covered = nb; covered_cap = nc;
+                    }
+                    covered[covered_n].lo = i;
+                    covered[covered_n].hi = close + 1;
+                    covered_n++;
+                    i = close + 1;
+                    continue;
+                }
+            }
+        }
+        if (src[i] == '@' && cc__sigil_delim_after(src, n, i, "@emit", '(', &sig_after)) {
+            size_t lp = sig_after - 1; /* '(' */
+            size_t rp = 0;
+            size_t arg1 = cc_skip_ws_and_comments(src, n, sig_after);
+            /* Return-form `@emit(\`...\`, arena)` is an expression — do not
+             * wrap. Only anchored splice `@emit(ANCHOR, \`...\`)` is a stmt. */
+            if (arg1 < n && src[arg1] == '`') { i++; continue; }
+            if (cc_find_matching_paren(src, n, lp, &rp)) {
+                int inside = 0;
+                size_t k;
+                for (k = 0; k < covered_n; k++) {
+                    if (i >= covered[k].lo && rp < covered[k].hi) { inside = 1; break; }
+                }
+                if (!inside) {
+                    if (orphans_n == orphans_cap) {
+                        size_t nc = orphans_cap ? orphans_cap * 2 : 8;
+                        Span* nb = (Span*)realloc(orphans, nc * sizeof(Span));
+                        if (!nb) { free(covered); free(orphans); return (char*)-1; }
+                        orphans = nb; orphans_cap = nc;
+                    }
+                    orphans[orphans_n].lo = i;
+                    orphans[orphans_n].hi = rp + 1;
+                    orphans_n++;
+                }
+                i = rp + 1;
+                continue;
+            }
+        }
+        i++;
+    }
+    free(covered);
+    if (!orphans_n) { free(orphans); return NULL; }
+    {
+        char* out = NULL;
+        size_t ol = 0, oc = 0, last = 0, oi;
+        for (oi = 0; oi < orphans_n; oi++) {
+            cc_sb_append(&out, &ol, &oc, src + last, orphans[oi].lo - last);
+            cc_sb_append_cstr(&out, &ol, &oc, "@comptime { ");
+            cc_sb_append(&out, &ol, &oc, src + orphans[oi].lo,
+                         orphans[oi].hi - orphans[oi].lo);
+            cc_sb_append_cstr(&out, &ol, &oc, "; } ");
+            last = orphans[oi].hi;
+            /* Skip a trailing ';' already present — we emitted one. */
+            size_t s = cc_skip_ws_and_comments(src, n, last);
+            if (s < n && src[s] == ';') last = s + 1;
+        }
+        if (last < n) cc_sb_append(&out, &ol, &oc, src + last, n - last);
+        free(orphans);
+        return out ? out : strdup("");
+    }
 }
 
 /* Re-run the sweep to a fixpoint so nested `@comptime if` inside a kept branch
@@ -18128,6 +18791,14 @@ char* cc__resolve_comptime_if(const char* src, size_t n, const char* input_path)
         cur = r;
         in = cur;
         inn = strlen(cur);
+    }
+    {
+        char* wrapped = cc__wrap_orphan_anchored_emits(in, inn);
+        if (wrapped == (char*)-1) { free(cur); free(normalized); return (char*)-1; }
+        if (wrapped) {
+            free(cur);
+            cur = wrapped;
+        }
     }
     free(normalized);
     return cur;
@@ -18269,7 +18940,7 @@ char* cc__resolve_comptime_value(const char* src, size_t n, const char* input_pa
     if (!src || n == 0) return NULL;
     if (!cc_contains_token_top_level(src, n, "@comptime")) return NULL;
     cc__value_hoist_cache_free();
-    CC_ARENA_STACK(hoist_arena, CC_EMIT_TPL_BUF_SIZE);
+    cc_arena_stack(hoist_arena, CC_EMIT_TPL_BUF_SIZE);
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
     size_t i = 0, last = 0;
@@ -18479,7 +19150,7 @@ static int cc__apply_phase1_canonical_passes(CCPassChain* chain,
     if (!skip_comptime_surface &&
         cc_pass_chain_apply(chain, cc__resolve_comptime_if(chain->src, chain->len, input_path)) < 0) return -1;
     CC__CANON_STEP("cc__canonicalize_with_deadline_syntax"); if (cc_pass_chain_apply(chain, cc__canonicalize_with_deadline_syntax(chain->src, chain->len)) < 0) return -1;
-    CC__CANON_STEP("cc__rewrite_naked_print_aliases"); if (cc_pass_chain_apply(chain, cc__rewrite_naked_print_aliases(chain->src, chain->len)) < 0) return -1;
+    CC__CANON_STEP("cc_rewrite_naked_print_aliases"); if (cc_pass_chain_apply(chain, cc_rewrite_naked_print_aliases(chain->src, chain->len)) < 0) return -1;
     cc_note_tu_map_key_pairs(chain->src, chain->len);
     CC__CANON_STEP("cc__normalize_template_recv_chains"); if (cc_pass_chain_apply(chain, cc__normalize_template_recv_chains(chain->src, chain->len)) < 0) return -1;
     if (!skip_comptime_surface &&
@@ -18514,6 +19185,14 @@ static int cc__apply_phase1_canonical_passes(CCPassChain* chain,
     CC__CANON_STEP("cc__rewrite_inferred_result_ctors"); if (cc_pass_chain_apply(chain, cc__rewrite_inferred_result_ctors(chain->src, chain->len)) < 0) return -1;
     CC__CANON_STEP("cc__rewrite_result_types"); if (cc_pass_chain_apply(chain, cc__rewrite_result_types(chain->src, chain->len, input_path)) < 0) return -1;
     CC__CANON_STEP("cc__rewrite_result_field_sugar_pass"); if (cc_pass_chain_apply(chain, cc__rewrite_result_field_sugar_pass(chain->src, chain->len)) < 0) return -1;
+    /* Parameter defaults (`int pad = 1`) are CC spelling for reflection /
+     * py_module optional kwargs; strip them before host C sees the TU. */
+    {
+        char* pd = cc__rewrite_param_defaults(chain->src, chain->len, input_path);
+        if (pd == (char*)-1) return -1;
+        CC__CANON_STEP("cc__rewrite_param_defaults");
+        if (cc_pass_chain_apply(chain, pd) < 0) return -1;
+    }
     /* Rewrite `@async void fn(...)` -> `@async CCAsyncVoidRet fn(...)` so
      * that phase-3 reparse sees a task-returning signature (required for
      * spawn-site lowerings such as `n->spawn_async(fn(args))` to type-check).

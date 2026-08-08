@@ -253,7 +253,6 @@ static int cc__as_arg_is_explicit_cast(const char* s, size_t a, size_t b,
     size_t e = b;
     size_t rp;
     char tmp[256];
-    size_t tn = 0;
     if (out_has_amp) *out_has_amp = 0;
     if (out_cast_base) out_cast_base[0] = '\0';
     if (out_ident) out_ident[0] = '\0';

@@ -20,7 +20,7 @@
 
 typedef struct Counter { long long n; } Counter;
 
-static long long Counter_bump(Counter *self, long long by) {
+static long long Counter_bump(Counter *self, long long by = 1) {
     self->n += by;
     return self->n;
 }

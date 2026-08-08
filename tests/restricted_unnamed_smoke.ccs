@@ -1,0 +1,34 @@
+/* Unnamed @restricted on Base: init like const; first-arg body trusted. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct Box {
+    int secret;
+    int len;
+} Box;
+
+@restricted on Box {
+    r: len, bump;
+};
+
+static int box_bump(Box* b) {
+    /* First param is Box* → unrestricted body. */
+    b->secret++; /* proves init wrote .secret */
+    b->len++;
+    return b->secret;
+}
+
+static int read_len(int n, Box* b) {
+    (void)n;
+    return b->len;
+}
+
+int main(void) {
+    /* Designated init may name any field (const-shaped construction). */
+    Box b = { .secret = 7, .len = 0 };
+    if (b.bump() != 8) return 1; /* 7 from init + 1 in trusted body */
+    if (b.len != 1) return 1;
+    if (read_len(0, &b) != 1) return 1;
+    printf("ok\n");
+    return 0;
+}

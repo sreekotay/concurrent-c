@@ -1,0 +1,1 @@
+comptime_emit_apostrophe_smoke n=42 msg=don't break 'emit' scanners

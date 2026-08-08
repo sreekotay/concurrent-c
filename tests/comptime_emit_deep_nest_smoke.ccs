@@ -1,0 +1,46 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+typedef struct Cell { int a; int b; } Cell;
+static int cell_sum(Cell *self) { return self->a + self->b; }
+static void cell_clear(Cell *self) { self->a = self->b = 0; }
+
+/* Depth: outer if → for fields → emit → for methods → if prune → slots.
+ * Dead arms at every layer carry undefined symbols. */
+@comptime if (type_of(int).kind == CC_TK_PRIMITIVE) {
+    @comptime for (f in type_of(Cell).fields) {
+        @emit(CC_EMIT_AFTER_PRELUDE, `
+            /* don't deep-nest 'emit' */
+            @comptime for (m in type_of(Cell).methods) {
+                @comptime if (f.index == 0) {
+                    @comptime if (m.ret_void) {
+                        enum { Deep_${f.name}_${m.name}_void = 1 };
+                    } else {
+                        enum { Deep_${f.name}_${m.name}_val = 2 };
+                    }
+                } else {
+                    @comptime if (0) {
+                        deep_dead_inner();
+                    } else {
+                        enum { Deep_tail_${f.name}_${m.name} = 10 + ${f.index} };
+                    }
+                }
+            }
+        `);
+    }
+} else {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        deep_outer_dead();
+    `);
+}
+
+int main(void) {
+    if (Deep_a_cell_sum_val != 2) return 1;
+    if (Deep_a_cell_clear_void != 1) return 2;
+    if (Deep_tail_b_cell_sum != 11) return 3;
+    if (Deep_tail_b_cell_clear != 11) return 4;
+    printf("comptime_emit_deep_nest_smoke ok\n");
+    return 0;
+}

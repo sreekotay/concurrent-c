@@ -18,7 +18,7 @@ int main(void) {
     close(fd);
 
     CCFile f = {0};
-    if (cc_file_open(&f, char_to_slice(path), "rb") != 0) abort();
+    if (cc_file_open(&f, cc_slice_cstr(path), "rb") != 0) abort();
     @defer cc_file_close(&f);
     unlink(path);
 

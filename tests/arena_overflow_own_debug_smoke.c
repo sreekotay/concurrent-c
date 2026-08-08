@@ -1,11 +1,10 @@
-#define CC_DEBUG_ARENA_OVERFLOW_OWNERSHIP 1
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* With overflow ownership debug, foreign / wrong-arena overflow release and
- * realloc are refused instead of calling free/realloc. */
+/* Overflow ownership is stamped in the block header: foreign / wrong-arena
+ * overflow release and realloc are refused instead of calling free/realloc. */
 int main(void) {
     uint8_t buf[64];
     CCArena a = cc_arena_create_buffer(buf, sizeof(buf), CC_ARENA_FIXED);

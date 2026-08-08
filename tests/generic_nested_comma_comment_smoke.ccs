@@ -1,0 +1,17 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+/* Comma inside a comment in nested `::[]` must not split type args
+ * (would silently monomorphize the wrong arity). */
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(64)) @destroy;
+    Map::[int, /* bait, not a sep, */ CCVec::[int]] m =
+        map_new::[int, CCVec::[int]](&a);
+    CCVec::[int] inner = cc_vec_new::[int](&a);
+    inner.push(9);
+    m.insert(1, inner);
+    CCVec::[int] *got = m.get_ptr(1);
+    if (!got || got->len() != 1 || *got->get(0) != 9) return 1;
+    printf("generic_nested_comma_comment_smoke ok\n");
+    return 0;
+}

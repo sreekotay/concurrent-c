@@ -52,6 +52,13 @@ typedef struct {
     size_t alen;
 } CCSlice;
 
+/* Unnamed facet (enforced by shadow_lower for the whole slice family —
+ * CCSlice / Unique / Shared / Packed / Hdr / CCSlice_T). Ordinary sites:
+ * field loads + UFCS OK; field stores denied. First-param CCSlice* bodies
+ * are trusted (stdlib + user methods). Equivalent surface:
+ *   @restricted on CCSlice { r: *; };
+ * (Not written live here: angle-includes are host-C passthrough.) */
+
 /* Surface type sugar:
    - `T[:]`   lowers to `CCSlice`
    - `T[n:]`  lowers to `CCSlice`
@@ -89,7 +96,7 @@ typedef CCSlice CCSliceShared;
  * as Vec and Map families. */
 #define CC_DECL_SLICE_SPEC(NAME, T)                                            \
     typedef struct NAME {                                                      \
-        CCSlice base /*@as*/;                                                  \
+        CCSlice base @as;                                                      \
     } NAME;                                                                    \
     static inline NAME NAME##_from_buffer(T *p, size_t count) {                \
         NAME s;                                                                \
@@ -202,6 +209,9 @@ CC_DECL_SLICE_SPEC(CCSlice_long_long, long long)
 CC_DECL_SLICE(int16_t)
 CC_DECL_SLICE(int32_t)
 CC_DECL_SLICE(int64_t)
+CC_DECL_SLICE(uint16_t)
+CC_DECL_SLICE(uint32_t)
+CC_DECL_SLICE(uint64_t)
 CC_DECL_SLICE(float)
 CC_DECL_SLICE(double)
 
@@ -213,37 +223,47 @@ static inline CCSlice cc_slice_from_parts(void *ptr,
     return s;
 }
 
-/* NUL-terminated C string → borrowed char[:0] / CCSlice view.
- * UFCS: `p->to_slice()` lowers to `char_to_slice` / `const_char_to_slice`
- * via the generic cv-qualifier peel in cc_arena.cch. */
-static inline CCSlice char_to_slice(const char *cstr) {
+/* Counted char* → untracked view. Prefer for buffers with a known length.
+ * UFCS: `p->to_slice_n(n)` → char_to_slice_n / const_char_to_slice_n. */
+static inline CCSlice char_to_slice_n(const char *p, size_t n) {
+    if (!p) return cc_slice_empty();
+    return cc_slice_from_buffer((void *)p, n);
+}
+
+static inline CCSlice const_char_to_slice_n(const char *p, size_t n) {
+    return char_to_slice_n(p, n);
+}
+
+/* Multi-word / signedness variants from UFCS type mangling. */
+static inline CCSlice unsigned_char_to_slice_n(const unsigned char *p, size_t n) {
+    return char_to_slice_n((const char *)p, n);
+}
+static inline CCSlice signed_char_to_slice_n(const signed char *p, size_t n) {
+    return char_to_slice_n((const char *)p, n);
+}
+static inline CCSlice const_unsigned_char_to_slice_n(const unsigned char *p,
+                                                    size_t n) {
+    return unsigned_char_to_slice_n(p, n);
+}
+static inline CCSlice const_signed_char_to_slice_n(const signed char *p,
+                                                  size_t n) {
+    return signed_char_to_slice_n(p, n);
+}
+
+/* NUL-terminated C string → untracked view (strlen). No UFCS — call this
+ * only at a trust boundary where the pointer is known to be a cstr. Prefer
+ * literal init / @slice for literals and to_slice_n for counted buffers. */
+static inline CCSlice cc_slice_cstr(const char *cstr) {
     if (!cstr) return cc_slice_empty();
-    size_t len = strlen(cstr);
-    return cc_slice_from_static((void *)cstr, len);
+    return cc_slice_from_buffer((void *)cstr, strlen(cstr));
 }
 
-static inline CCSlice const_char_to_slice(const char *cstr) {
-    return char_to_slice(cstr);
-}
-
-/* Multi-word / signedness variants from UFCS type mangling
- * (`unsigned char*` → `unsigned_char_to_slice`). */
-static inline CCSlice unsigned_char_to_slice(const unsigned char *cstr) {
-    return char_to_slice((const char *)cstr);
-}
-static inline CCSlice signed_char_to_slice(const signed char *cstr) {
-    return char_to_slice((const char *)cstr);
-}
-static inline CCSlice const_unsigned_char_to_slice(const unsigned char *cstr) {
-    return unsigned_char_to_slice(cstr);
-}
-static inline CCSlice const_signed_char_to_slice(const signed char *cstr) {
-    return signed_char_to_slice(cstr);
-}
-
-static inline CCSlice cc_slice_from_cstr(const char *cstr) {
-    return char_to_slice(cstr);
-}
+/* String literal → canonical static slice. `lit` must be a string literal
+ * token so sizeof(lit) is the array size (includes NUL). Concurrent-C surface
+ * prefers `char[:0] s = "…"` (or `@slice("…")`); both lower to this form.
+ * Host C may call `CC_SLICE_LIT` directly. */
+#define CC_SLICE_LIT(lit) \
+    cc_slice_from_static((void *)(lit), sizeof(lit) - 1u)
 
 static inline bool CCSlice_is_empty(CCSlice* s) {
     return !s || s->len == 0;

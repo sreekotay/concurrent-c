@@ -43,6 +43,8 @@ int cc_ct_reflect_type_methods(const char* src, size_t len, const char* type_nam
  * declarator parser cannot model — every parameter or none, since a dropped one
  * would silently renumber the rest. */
 int cc_ct_reflect_param_list(const char* params, CCCtField** out, size_t* out_n);
+/* Default literal for params[idx] (`pad = 1` → `"1"`).  0 = none; -1 = bad. */
+int cc_ct_reflect_param_default(const char* params, int idx, char* buf, int buf_sz);
 void cc_ct_free_fields(CCCtField* fields, size_t n);
 
 /* The file's in-scope type definitions as a compilable prelude, for contexts
@@ -159,6 +161,9 @@ char* cc_rewrite_local_cch_includes_to_lowered_headers(const char* src,
                                                        const char* input_path);
 char* cc_rewrite_system_cch_includes_to_lowered_headers(const char* src,
                                                         size_t input_len);
+/* Naked print/println/fprint/… call aliases → cc_* (script surface).
+ * Comment/string-aware; member position untouched. NULL if unchanged. */
+char* cc_rewrite_naked_print_aliases(const char* src, size_t n);
 void cc_reset_included_cch_sources(void);
 
 /* Enumerate .cch paths registered for this TU (harvest / include rewrite).
@@ -220,13 +225,13 @@ void cc_note_tu_map_key_pairs(const char* src, size_t n);
 int cc_slice_spec_tu_needs_decl(const char* src, size_t n,
                                 const char* name, const char* elem);
 
-/* Splice known local lowered headers (`out/include/.../*.h` from quoted .cch)
+/* Splice known local lowered headers (`*.h` under out/include from quoted .cch)
  * into the codegen/UFCS buffer so phase3 sees their bodies with parent-TU
  * symbols.  Returns malloc'd text, or NULL when unchanged. Caller frees. */
 char* cc_splice_local_lowered_headers_for_codegen(const char* src, size_t n);
 
 /* After phase3 UFCS: write marked splice regions back to their .h files and
- * collapse each region to `#include "path"`.  Updates *src/*n in place
+ * collapse each region to `#include "path"`.  Updates *src and *n in place
  * (may realloc).  Returns 0 on success, -1 on I/O failure. */
 int cc_writeback_local_lowered_headers_from_codegen(char** src, size_t* n);
 
