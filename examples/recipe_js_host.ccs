@@ -1,0 +1,74 @@
+/*
+ * Recipe: hosting Node from CC
+ *
+ * The other direction of the JS story: instead of Node importing a CC
+ * module (`js_module::[T]`), CC boots a full Node — V8, libuv, the
+ * whole npm ecosystem — INSIDE this process:
+ *
+ *     ccc run examples/recipe_js_host.ccs
+ *
+ * First use compiles a small embedder shim against the node development
+ * headers (Debian/Ubuntu: `apt install libnode-dev`) and caches it;
+ * after that, opening a hosted Node costs ~200ms and zero IPC.
+ *
+ * The handle owns the runtime — `cc_js_host_new(&a) !> @destroy`, the
+ * same lifetime rule as `cc_py_new`.  A Node-API environment belongs to
+ * its event-loop thread, so the door is `host.run(fn, ctx)`: the
+ * closure runs ON that thread with a live `CCJs`, where the whole guest
+ * surface — eval, exec, Results — just works.  `globalThis.__ccRequire`
+ * is a require anchored at the process working directory: the Node
+ * stdlib and anything `npm install` put in ./node_modules are one call
+ * away.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/script/js.cch>
+#include <stdio.h>
+
+static void main_js(CCJs *js, void *ctx) {
+    (void)ctx;
+    @errhandler(CCJsError e) {
+        fprintf(stderr, "js: %s\n", e.base.message);
+        return;
+    }
+
+    /* The guest-mode surface, unchanged — UFCS chains and `!>`. */
+    double v = js->global()!>.get("Math")!>.sqrt(2.0) !>;
+    printf("Math.sqrt(2)   = %.6f\n", v);
+
+    /* State persists across runs: the environment is one live Node. */
+    js->exec("globalThis.hits = (globalThis.hits ?? 0) + 1") !>;
+
+    /* The require door: real Node modules, not a subset. */
+    CCSlice s =
+        js->global()!>.__ccRequire("os")!>.platform()!>.as_slice(js->arena) !>;
+    printf("os.platform()  = %.*s\n", (int)s.len, (const char *)s.ptr);
+
+    long long hits = js->eval("globalThis.hits")!>.as_i64() !>;
+    printf("hits           = %lld\n", hits);
+}
+
+int main(void) {
+    @errhandler(CCJsError e) {
+        fprintf(stderr, "fatal: %s\n", e.base.message);
+        return 1;
+    }
+
+    /* Degrade cleanly where the node dev headers or libnode are absent —
+     * the same probe-then-commit posture cc_py_available() takes. */
+    if (system("{ test -e /usr/include/node/node.h"
+               " || test -e /usr/local/include/node/node.h"
+               " || test -n \"$CC_NODE_INCLUDE\"; }"
+               " && command -v c++ >/dev/null 2>&1"
+               " && { ldconfig -p 2>/dev/null | grep -q libnode"
+               " || test -n \"$CC_LIBNODE\"; }") != 0) {
+        puts("SKIP (need libnode-dev + c++)");
+        return 0;
+    }
+
+    CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+
+    CCJsHost host = cc_js_host_new(&a) !> @destroy;
+    host.run(main_js, NULL) !>;
+    host.run(main_js, NULL) !>; /* hits = 2: same live Node */
+    return 0;
+}

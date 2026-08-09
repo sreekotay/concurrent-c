@@ -1,0 +1,78 @@
+/* Hosted Node: CC creates the environment.  cc_js_host_new() boots a
+ * full libnode inside this process (first use compiles the embedded
+ * shim against the system node headers) and hands back the handle that
+ * owns it; run() posts each closure ON the loop thread with a live
+ * CCJs, where the guest-mode surface — eval, exec, Results — just
+ * works.  Rungs prove the boot, the __ccRequire door to real modules,
+ * state persisting across runs, an error crossing as a Result, the
+ * once-per-process refusals (second live handle, run after close, new
+ * after close), and a clean process exit (no wedged loop thread). */
+#include <ccc/std/prelude.cch>
+#include <ccc/script/js.cch>
+
+static void rung_basics(CCJs *js, void *ctx) {
+    (void)ctx;
+    CCResult_int64_t_CCJsError ri = cc_js_eval_i64(js, "6*7");
+    printf("eval_i64 %s\n", ri.ok && ri.u.value == 42 ? "true" : "false");
+    CCResult_int64_t_CCJsError rr = cc_js_eval_i64(
+        js, "globalThis.__ccRequire('path').join('a','b').length");
+    printf("require_door %s\n", rr.ok && rr.u.value == 3 ? "true" : "false");
+    CCResult_void_CCJsError rs = cc_js_exec(js, "globalThis.ccState = 41");
+    printf("state_set %s\n", rs.ok ? "true" : "false");
+}
+
+static void rung_state(CCJs *js, void *ctx) {
+    (void)ctx;
+    CCResult_int64_t_CCJsError r =
+        cc_js_eval_i64(js, "globalThis.ccState + 1");
+    printf("state_persists %s\n", r.ok && r.u.value == 42 ? "true" : "false");
+    CCResult_int64_t_CCJsError e = cc_js_eval_i64(js, "nope.nope");
+    printf("error_is_result %s\n",
+           !e.ok && e.u.error.name.len > 0 ? "true" : "false");
+}
+
+int main(void) {
+    CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+
+    /* The harness runs this file standalone too: skip — same gate as the
+     * smoke — where the node dev headers, c++, or libnode are absent. */
+    if (system("{ test -e /usr/include/node/node.h"
+               " || test -e /usr/local/include/node/node.h"
+               " || test -n \"$CC_NODE_INCLUDE\"; }"
+               " && command -v c++ >/dev/null 2>&1"
+               " && { ldconfig -p 2>/dev/null | grep -q libnode"
+               " || test -n \"$CC_LIBNODE\"; }") != 0) {
+        printf("SKIP (need libnode-dev + c++)\n");
+        return 0;
+    }
+
+    CCResult_CCJsHost_CCJsError mk = cc_js_host_new(&a);
+    if (!mk.ok) {
+        printf("new failed: %s\n", mk.u.error.base.message);
+        return 1;
+    }
+    CCJsHost host = mk.u.value;
+    printf("new %s\n", host.open ? "true" : "false");
+
+    /* Node embeds once per process: a second live handle is refused,
+     * naming the constraint. */
+    CCResult_CCJsHost_CCJsError second = cc_js_host_new(&a);
+    printf("second_new_refused %s\n",
+           !second.ok && strstr(second.u.error.base.message, "already hosts")
+               ? "true" : "false");
+
+    CCResult_void_CCJsError r1 = cc_js_host_run(&host, rung_basics, NULL);
+    if (!r1.ok) { printf("run1 failed\n"); return 1; }
+    CCResult_void_CCJsError r2 = cc_js_host_run(&host, rung_state, NULL);
+    if (!r2.ok) { printf("run2 failed\n"); return 1; }
+
+    cc_js_host_close(&host);
+    CCResult_void_CCJsError after = cc_js_host_run(&host, rung_state, NULL);
+    printf("run_after_close_refused %s\n", !after.ok ? "true" : "false");
+    CCResult_CCJsHost_CCJsError again = cc_js_host_new(&a);
+    printf("new_after_close_refused %s\n", !again.ok ? "true" : "false");
+
+    /* Reaching this return proves teardown released the loop thread. */
+    printf("clean_exit true\n");
+    return 0;
+}

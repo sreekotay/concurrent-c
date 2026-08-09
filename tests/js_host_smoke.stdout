@@ -1,0 +1,10 @@
+new true
+second_new_refused true
+eval_i64 true
+require_door true
+state_set true
+state_persists true
+error_is_result true
+run_after_close_refused true
+new_after_close_refused true
+clean_exit true

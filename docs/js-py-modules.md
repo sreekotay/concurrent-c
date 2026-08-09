@@ -55,23 +55,38 @@ Probe with `cc_py_available()` when you want a clean skip without libpython.
 Costs for this door: [`perf/py_baseline.ccs`](../perf/py_baseline.ccs) ·
 [`perf/baselines/py_baseline_20260809.txt`](../perf/baselines/py_baseline_20260809.txt).
 
-**JavaScript** — same UFCS call surface (`Math.sqrt`, hop chains), but
-**Node owns the environment today**: there is no `cc_js_new` yet (no
-in-process engine constructor), so the runnable demo is guest mode — build
-a tiny `.node`, call into JS from CC methods, drive it with `node`:
+**JavaScript** — same UFCS call surface, same lifetime rule, and CC can
+own the environment: `cc_js_host_new(&a) !> @destroy` boots a full Node
+(V8, libuv, npm modules) *inside* the process, and the handle owns it.
+A Node-API environment belongs to its event-loop thread, so the door is
+`host.run(fn, ctx)` — the closure runs on that thread with a live
+`CCJs`, where the guest surface holds unchanged, and
+`globalThis.__ccRequire` reaches anything `npm install` put in the
+working directory:
 
-```sh
-ccc examples/js/jsdemo.shcc
-# → Math.sqrt(2.0) = 1.414…   Math.pow(2,10) = 1024  …
+```c
+static void main_js(CCJs *js, void *ctx) {
+    double v = js->global()!>.get("Math")!>.sqrt(2.0) !>;
+    CCSlice s =
+        js->global()!>.__ccRequire("os")!>.platform()!>.as_slice(js->arena) !>;
+}
+
+CCJsHost host = cc_js_host_new(&a) !> @destroy;
+host.run(main_js, NULL) !>;
 ```
 
-Sources: [`examples/js/jsdemo.shcc`](../examples/js/jsdemo.shcc) +
-[`examples/js/jsdemo_mod.ccs`](../examples/js/jsdemo_mod.ccs). Standalone
-hosting (`CCJs js = cc_js_new(&a) !> @destroy` mirroring `cc_py_new`) is
-spec’d in the [stdlib JS section](../spec/concurrent-c-stdlib-spec.md) but
-not implemented — needs an engine backend (QuickJS / libnode) and the
-constructor. Until then, any-npm-package from Python uses the process
-bridge [`concurrent-c-node`](../pypi/cc-node).
+```sh
+ccc examples/js/jsdemo.shcc           # pydemo's twin, hosted; needs libnode-dev
+ccc run examples/recipe_js_host.ccs   # fuller tour: state across runs, ~200ms warm open
+```
+
+Sources: [`examples/js/jsdemo.shcc`](../examples/js/jsdemo.shcc) ·
+[`examples/recipe_js_host.ccs`](../examples/recipe_js_host.ccs) ·
+guest mode: [`examples/js/jsdemo_mod.ccs`](../examples/js/jsdemo_mod.ccs).  First use
+compiles a small embedder shim against the node development headers
+(Debian/Ubuntu: `apt install libnode-dev`) and caches it under
+`~/.cache/concurrent-c/js-host`.  From Python, any-npm-package goes
+through the process bridge [`concurrent-c-node`](../pypi/cc-node).
 
 ## Module export — Node / Python own main
 

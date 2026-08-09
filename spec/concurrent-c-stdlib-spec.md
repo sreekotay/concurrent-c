@@ -2161,8 +2161,9 @@ its marshaling, the loader, and the outbound direction inside an
 exported call (a `CCJs *` parameter is the host, wired by the trampoline
 and invisible to JS; `global`/`eval`/`exec`; the `CCJsVal` sink with
 destination-typed variants; `.get`/`.as_*`/`.hold`; `f.map::[T]` row
-batching).  Hosting (`cc_js_new`), engines, `js_expose`, and
-`as_list`/`as_map` are not.
+batching).  Hosting libnode (`cc_js_host_new`, `run`, `@destroy`) is
+implemented.  Engine choice (`cc_js_new` probe order, the QuickJS
+backend), `js_expose`, and `as_list`/`as_map` are not.
 
 ### Model
 
@@ -2232,6 +2233,37 @@ engine, absent), and dated snapshots collect under `perf/baselines/` the
 way benchmark baselines do. The spec does not enumerate symbols; the
 table in `js.cch` is the one source of truth for what the surface asks
 of a runtime.
+
+### Hosting libnode: CC creates the environment
+
+`CCJsHost host = cc_js_host_new(&arena) !> @destroy` boots a full Node —
+V8, libuv, the Node standard library — inside the process, on a
+dedicated thread that owns the environment and its event loop; the
+handle's lifetime is the runtime's, released by `@destroy` (or
+`cc_js_host_close`).  The embedder surface is C++ and cannot be
+resolved with `dlsym`, so first use compiles a small shim (source
+embedded in `js.cch`) against the node development headers and links
+`libnode`; the artifacts cache under `~/.cache/concurrent-c/js-host`,
+keyed by source hash, so a recompile happens when the shim changes and
+never per run.  Discovery overrides: `CC_NODE_INCLUDE` (header
+directory), `CC_LIBNODE` (library), `CC_JS_HOST_CACHE` (cache
+directory).  A micro probe addon, required during bootstrap, hands its
+`napi_env` back to the shim — embedders cannot mint one directly.
+
+A napi environment belongs to its loop thread, so the door is
+`host.run(fn, ctx)`: the closure runs on that thread with a live
+`CCJs`, where the whole guest surface — `eval`, `exec`, `global`,
+`CCJsVal` chains — holds.  Calls are post-and-wait and do not nest; a
+closure already on the loop thread uses the surface directly.  The
+bootstrap installs `globalThis.__ccRequire`, a require anchored at the
+process working directory, so evaluated source reaches installed
+node_modules.
+
+Node initializes once per process, and the constructor answers rather
+than degrades: `cc_js_host_new` is refused while a handle is live
+(share it), after a close (nothing reopens), and inside an existing
+Node-API host (guest mode) — two engines in one process is never what
+anyone means.
 
 ### Binding CC into JS: `js_module::[T]`
 
@@ -2373,10 +2405,11 @@ before the reply so async package APIs look synchronous, a Python
 callable crosses as a JS function (JS calling conventions apply) with
 exceptions mapping both ways, and the domain rules — cross-domain
 rejection, the stats ledger, idempotent destroy with articulate doors
-after, child lifetime bound to the bridge — are the same rules.  An
-in-process flavor over a hosted engine (`cc_js_new`) remains open as a
-zero-IPC tier; the shared-memory lease transport layers onto this wire
-without changing the surface.
+after, child lifetime bound to the bridge — are the same rules.  The zero-IPC
+tier exists at the CC level as hosted libnode (§Hosting libnode); an
+in-process flavor of this Python bridge over it remains open.  The
+shared-memory lease transport layers onto this wire without changing
+the surface.
 
 Async-ness enters through one primitive: `py.task(callable)` binds a
 held callable to the domain's execution lane and returns an async

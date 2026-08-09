@@ -532,7 +532,10 @@ static int cc__py_spawn_resolve(const char *exe, char *lib_out, size_t cap) {
             snprintf(cands[nc++], sizeof(cands[0]), "%s/%s", fwprefix, soname);
         for (i = 0; i < nc; i++) {
             if (stat(cands[i], &st) == 0) {
-                snprintf(lib_out, cap, "%s", cands[i]);
+                /* The precision bound (row size - 1) is what keeps
+                 * -Wformat-truncation quiet: with a variable index the
+                 * compiler sizes cands[i] as the whole array. */
+                snprintf(lib_out, cap, "%.4095s", cands[i]);
                 return 0;
             }
         }

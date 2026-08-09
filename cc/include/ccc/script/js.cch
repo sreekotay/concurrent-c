@@ -36,6 +36,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <ccc/cc_arena.cch>
 #include <ccc/cc_compat.cch>
@@ -86,8 +88,8 @@ CC_MODULE_EXPORT(cc_js_export,
  *     }
  *
  * This is guest mode: someone else created the environment.  Hosting
- * (`cc_js_new`, spec §JavaScript interop) is the other door — CC
- * creates the environment, and .node artifacts load into it. */
+ * (`cc_js_host_new`, below) is the other door — CC boots libnode and
+ * owns the environment, and the same surface runs on its loop thread. */
 typedef void *CCJsEnv;
 typedef void *CCJsExports;
 #include <ccc/cc_slice.cch>
@@ -284,9 +286,19 @@ static int cc__js_sym(void *lib, const char *name, void *slot) {
     return 0;
 }
 
+/* Set by cc_js_host_new: the shim's dlopen handle, whose dependency
+ * chain (libnode) serves every napi symbol. */
+static void *cc__js_host_lib;
+
 static int cc__js_load(void) {
     const char *override;
     if (cc__js.lib) return 0;
+    /* A hosted engine (cc_js_host_new) beats every probe: the process
+     * deliberately embeds THAT node. */
+    if (cc__js_host_lib) {
+        cc__js.lib = cc__js_host_lib;
+        goto have_lib;
+    }
     /* Self-probe first: inside a Node-API host — an addon the host loaded,
      * or a binary that embeds one — the symbols are already in this
      * process, and loading any other runtime would put two engines in it.
@@ -315,6 +327,7 @@ static int cc__js_load(void) {
                  "probe cc_js_available() to degrade)");
         return -1;
     }
+have_lib:;
 #define CC__JS_SYM(field, name) \
     if (cc__js_sym(cc__js.lib, name, &cc__js.field) != 0) return -1;
     CC__JS_SYM(GetUndefined, "napi_get_undefined")
@@ -2740,6 +2753,562 @@ CC_DECL_RESULT_SPEC(${box}, ${rt}, ${er})
     return cc_string_as_slice(&s);
 }
 
+/* ---- hosting: CC creates the environment (libnode) ----
+ *
+ * The other door.  Guest mode above waits for a Node-API host to call
+ * the addon entry; `CCJsHost host = cc_js_host_new(&a) !> @destroy`
+ * boots a full Node — V8, libuv, npm modules — INSIDE this process on
+ * its own thread, and `host.run(fn, ctx)` runs a CC closure ON that
+ * thread with a live `CCJs`, where the whole surface above (eval,
+ * global, CCJsVal chains) just works.  The bootstrap installs
+ * `globalThis.__ccRequire`, a require anchored at the process working
+ * directory, so `js->eval("__ccRequire('pkg')…")` reaches installed
+ * node_modules.
+ *
+ * The embedder API is C++ (mangled, version-fluid — not dlsym-able), so
+ * first use compiles a small shim, embedded below, against the node
+ * development headers and links libnode (Debian/Ubuntu:
+ * `apt install libnode-dev`; discovery overrides: CC_NODE_INCLUDE for the
+ * header directory, CC_LIBNODE for the library).  A micro probe addon,
+ * required during bootstrap, hands its napi_env back to the shim —
+ * embedders cannot mint one directly.  Both artifacts cache under
+ * ~/.cache/concurrent-c/js-host (CC_JS_HOST_CACHE overrides), keyed by a
+ * hash of their source: a recompile happens when this header's shim
+ * changes, never per run.
+ *
+ * Node initializes once per process, and the errors say so rather than
+ * degrade: the constructor refuses while a handle is live (share it),
+ * after a close (nothing reopens), and inside an existing Node-API host
+ * (guest mode) — two engines in one process is never what anyone means.
+ * `run` is post-and-wait and NOT reentrant: a closure already on the
+ * loop thread calls the surface directly instead of posting through the
+ * door again. */
+
+static const char cc__js_host_probe_text[] =
+    "/* cc js host probe: generated from ccc/script/js.cch */\n"
+    "#ifdef __cplusplus\n"
+    "extern \"C\" {\n"
+    "#endif\n"
+    "void cc__js_host_adopt(void *env);\n"
+    "void *napi_register_module_v1(void *env, void *exports) {\n"
+    "    cc__js_host_adopt(env);\n"
+    "    return exports;\n"
+    "}\n"
+    "#ifdef __cplusplus\n"
+    "}\n"
+    "#endif\n";
+
+static const char cc__js_host_shim_text[] =
+    "// cc js host shim: generated from ccc/script/js.cch.  Boots a full\n"
+    "// Node (libnode) inside the process; one thread owns the environment\n"
+    "// and its libuv loop; a uv_async door posts C callbacks onto that\n"
+    "// thread, each invoked with the napi_env the probe addon adopted.\n"
+    "#include <node.h>\n"
+    "#include <uv.h>\n"
+    "#include <cstdio>\n"
+    "#include <condition_variable>\n"
+    "#include <memory>\n"
+    "#include <mutex>\n"
+    "#include <string>\n"
+    "#include <thread>\n"
+    "#include <vector>\n"
+    "using node::CommonEnvironmentSetup;\n"
+    "using node::MultiIsolatePlatform;\n"
+    "extern \"C\" {\n"
+    "typedef void (*cc_js_host_fn)(void *napi_env_ptr, void *data);\n"
+    "struct CcJsHost;\n"
+    "CcJsHost *cc_js_host_start(const char *probe, char *err, size_t errcap);\n"
+    "int cc_js_host_run(CcJsHost *h, cc_js_host_fn fn, void *data);\n"
+    "void cc_js_host_stop(CcJsHost *h);\n"
+    "void cc__js_host_adopt(void *env);\n"
+    "}\n"
+    "struct CcJsHostCall { cc_js_host_fn fn; void *data; bool done = false; };\n"
+    "struct CcJsHost {\n"
+    "    std::thread thread;\n"
+    "    std::mutex mu;\n"
+    "    std::condition_variable cv;\n"
+    "    std::vector<CcJsHostCall *> queue;\n"
+    "    uv_async_t *wake = nullptr;\n"
+    "    void *adopted_env = nullptr;\n"
+    "    v8::Isolate *isolate = nullptr;\n"
+    "    v8::Global<v8::Context> context;\n"
+    "    bool up = false, failed = false, stopping = false;\n"
+    "    std::string err, probe;\n"
+    "};\n"
+    "static CcJsHost *g_booting = nullptr;\n"
+    "extern \"C\" void cc__js_host_adopt(void *env) {\n"
+    "    if (g_booting) g_booting->adopted_env = env;\n"
+    "}\n"
+    "static void cc__drain(CcJsHost *h) {\n"
+    "    for (;;) {\n"
+    "        CcJsHostCall *c = nullptr;\n"
+    "        {\n"
+    "            std::lock_guard<std::mutex> lk(h->mu);\n"
+    "            if (h->queue.empty()) return;\n"
+    "            c = h->queue.front();\n"
+    "            h->queue.erase(h->queue.begin());\n"
+    "        }\n"
+    "        {\n"
+    "            // napi creates handles in the current HandleScope, and\n"
+    "            // none is open inside uv_run: scope each call.\n"
+    "            v8::HandleScope hs(h->isolate);\n"
+    "            v8::Context::Scope cs(h->context.Get(h->isolate));\n"
+    "            c->fn(h->adopted_env, c->data);\n"
+    "        }\n"
+    "        {\n"
+    "            std::lock_guard<std::mutex> lk(h->mu);\n"
+    "            c->done = true;\n"
+    "        }\n"
+    "        h->cv.notify_all();\n"
+    "    }\n"
+    "}\n"
+    "static void cc__fail(CcJsHost *h, std::string why) {\n"
+    "    std::lock_guard<std::mutex> lk(h->mu);\n"
+    "    h->failed = true;\n"
+    "    h->err = std::move(why);\n"
+    "    h->cv.notify_all();\n"
+    "}\n"
+    "static void cc__thread_main(CcJsHost *h) {\n"
+    "    std::vector<std::string> args = {\"cc-js-host\"};\n"
+    "    std::unique_ptr<node::InitializationResult> init =\n"
+    "        node::InitializeOncePerProcess(args,\n"
+    "            {node::ProcessInitializationFlags::kNoInitializeV8,\n"
+    "             node::ProcessInitializationFlags::kNoInitializeNodeV8Platform});\n"
+    "    if (init->early_return() != 0)\n"
+    "        return cc__fail(h, \"node initialization failed\");\n"
+    "    std::unique_ptr<MultiIsolatePlatform> platform =\n"
+    "        MultiIsolatePlatform::Create(4);\n"
+    "    v8::V8::InitializePlatform(platform.get());\n"
+    "    v8::V8::Initialize();\n"
+    "    std::vector<std::string> errors;\n"
+    "    std::unique_ptr<CommonEnvironmentSetup> setup =\n"
+    "        CommonEnvironmentSetup::Create(platform.get(), &errors,\n"
+    "                                       init->args(), init->exec_args());\n"
+    "    if (!setup) {\n"
+    "        std::string why = \"node environment setup failed\";\n"
+    "        for (const std::string &e : errors) why += \": \" + e;\n"
+    "        return cc__fail(h, why);\n"
+    "    }\n"
+    "    {\n"
+    "        v8::Locker locker(setup->isolate());\n"
+    "        v8::Isolate::Scope isolate_scope(setup->isolate());\n"
+    "        v8::HandleScope handle_scope(setup->isolate());\n"
+    "        v8::Context::Scope context_scope(setup->context());\n"
+    "        // LoadEnvironment's own require reaches builtins only; files\n"
+    "        // go through the createRequire door — probe first, then users.\n"
+    "        std::string src =\n"
+    "            \"const { createRequire } = require('module');\"\n"
+    "            \"globalThis.__ccRequire = createRequire(process.cwd() + '/');\"\n"
+    "            \"globalThis.__ccRequire('\";\n"
+    "        src += h->probe;\n"
+    "        src += \"');\";\n"
+    "        g_booting = h;\n"
+    "        v8::MaybeLocal<v8::Value> ret =\n"
+    "            node::LoadEnvironment(setup->env(), src.c_str());\n"
+    "        g_booting = nullptr;\n"
+    "        if (ret.IsEmpty() || !h->adopted_env)\n"
+    "            return cc__fail(h, h->adopted_env\n"
+    "                                   ? \"node bootstrap failed\"\n"
+    "                                   : \"probe addon did not adopt an env\");\n"
+    "        h->isolate = setup->isolate();\n"
+    "        h->context.Reset(setup->isolate(), setup->context());\n"
+    "        h->wake = new uv_async_t;\n"
+    "        h->wake->data = h;\n"
+    "        uv_async_init(setup->event_loop(), h->wake, [](uv_async_t *a) {\n"
+    "            CcJsHost *hh = static_cast<CcJsHost *>(a->data);\n"
+    "            bool stop;\n"
+    "            {\n"
+    "                std::lock_guard<std::mutex> lk(hh->mu);\n"
+    "                stop = hh->stopping;\n"
+    "            }\n"
+    "            cc__drain(hh);\n"
+    "            // Closing the wake IS the shutdown: SpinEventLoop returns\n"
+    "            // when no live handles remain (uv_stop alone re-enters).\n"
+    "            // Senders hold the mutex and check `stopping` first, so no\n"
+    "            // send can land once this close is reachable.\n"
+    "            if (stop)\n"
+    "                uv_close(reinterpret_cast<uv_handle_t *>(a),\n"
+    "                         [](uv_handle_t *hd) {\n"
+    "                             delete reinterpret_cast<uv_async_t *>(hd);\n"
+    "                         });\n"
+    "        });\n"
+    "        {\n"
+    "            std::lock_guard<std::mutex> lk(h->mu);\n"
+    "            h->up = true;\n"
+    "        }\n"
+    "        h->cv.notify_all();\n"
+    "        (void)node::SpinEventLoop(setup->env());\n"
+    "        cc__drain(h); // stragglers complete before teardown\n"
+    "        node::Stop(setup->env());\n"
+    "        h->context.Reset();\n"
+    "    }\n"
+    "    setup.reset();\n"
+    "    v8::V8::Dispose();\n"
+    "    v8::V8::DisposePlatform();\n"
+    "    node::TearDownOncePerProcess();\n"
+    "}\n"
+    "extern \"C\" CcJsHost *cc_js_host_start(const char *probe, char *err,\n"
+    "                                       size_t errcap) {\n"
+    "    CcJsHost *h = new CcJsHost;\n"
+    "    h->probe = probe ? probe : \"\";\n"
+    "    h->thread = std::thread(cc__thread_main, h);\n"
+    "    std::unique_lock<std::mutex> lk(h->mu);\n"
+    "    h->cv.wait(lk, [&] { return h->up || h->failed; });\n"
+    "    if (h->failed) {\n"
+    "        if (err && errcap) snprintf(err, errcap, \"%s\", h->err.c_str());\n"
+    "        lk.unlock();\n"
+    "        h->thread.join();\n"
+    "        delete h;\n"
+    "        return nullptr;\n"
+    "    }\n"
+    "    return h;\n"
+    "}\n"
+    "extern \"C\" int cc_js_host_run(CcJsHost *h, cc_js_host_fn fn, void *data) {\n"
+    "    if (!h) return -1;\n"
+    "    CcJsHostCall call{fn, data};\n"
+    "    {\n"
+    "        // Send under the mutex: `stopping` gates the close of the wake\n"
+    "        // handle, so a send outside the lock could race it.\n"
+    "        std::lock_guard<std::mutex> lk(h->mu);\n"
+    "        if (h->stopping) return -1;\n"
+    "        h->queue.push_back(&call);\n"
+    "        uv_async_send(h->wake);\n"
+    "    }\n"
+    "    std::unique_lock<std::mutex> lk(h->mu);\n"
+    "    h->cv.wait(lk, [&] { return call.done; });\n"
+    "    return 0;\n"
+    "}\n"
+    "extern \"C\" void cc_js_host_stop(CcJsHost *h) {\n"
+    "    if (!h) return;\n"
+    "    {\n"
+    "        std::lock_guard<std::mutex> lk(h->mu);\n"
+    "        if (h->stopping) return;\n"
+    "        h->stopping = true;\n"
+    "        uv_async_send(h->wake);\n"
+    "    }\n"
+    "    h->thread.join();\n"
+    "    delete h;\n"
+    "}\n";
+
+static void *cc__js_hostd;      /* CcJsHost* from the shim */
+static void *(*cc__js_host_start_f)(const char *, char *, size_t);
+static int (*cc__js_host_run_f)(void *, void (*)(void *, void *), void *);
+static void (*cc__js_host_stop_f)(void *);
+static int cc__js_host_torn;    /* closed once — node embeds once per process */
+
+static unsigned long cc__js_host_hash(const char *s) {
+    unsigned long h = 5381;
+    while (*s) h = h * 33 + (unsigned char)*s++;
+    return h;
+}
+
+static int cc__js_host_mkdirs(const char *path) {
+    char buf[384];
+    size_t i;
+    snprintf(buf, sizeof(buf), "%.376s", path);
+    for (i = 1; buf[i]; i++) {
+        if (buf[i] != '/') continue;
+        buf[i] = 0;
+        (void)mkdir(buf, 0755);
+        buf[i] = '/';
+    }
+    (void)mkdir(buf, 0755);
+    return 0;
+}
+
+static int cc__js_host_cache_dir(char *out, size_t cap) {
+    const char *base = getenv("CC_JS_HOST_CACHE");
+    const char *home;
+    if (base && base[0]) snprintf(out, cap, "%.360s", base);
+    else if ((home = getenv("HOME")) && home[0])
+        snprintf(out, cap, "%.320s/.cache/concurrent-c/js-host", home);
+    else snprintf(out, cap, "/tmp/cc-js-host");
+    return cc__js_host_mkdirs(out);
+}
+
+/* Write-aside + rename: content-hashed names mean present == right, and
+ * parallel first users race benignly (both write, last rename wins). */
+static int cc__js_host_write(const char *path, const char *text) {
+    char tmp[448];
+    FILE *f;
+    struct stat st;
+    if (stat(path, &st) == 0) return 0;
+    snprintf(tmp, sizeof(tmp), "%.420s.tmp%ld", path, (long)getpid());
+    f = fopen(tmp, "w");
+    if (!f) return -1;
+    fputs(text, f);
+    if (fclose(f) != 0) { remove(tmp); return -1; }
+    if (rename(tmp, path) != 0) { remove(tmp); return -1; }
+    return 0;
+}
+
+/* First ~3 lines of the compiler's stderr, flattened, for the error. */
+static void cc__js_host_log_head(const char *log, char *out, size_t cap) {
+    FILE *f = fopen(log, "r");
+    size_t n = 0;
+    int c;
+    out[0] = 0;
+    if (!f) return;
+    while (n + 1 < cap && (c = fgetc(f)) != EOF)
+        out[n++] = (char)(c == '\n' ? ' ' : c);
+    out[n] = 0;
+    fclose(f);
+}
+
+static const char *cc__js_host_inc(void) {
+    static const char *cands[] = {"/usr/include/node",
+                                  "/usr/local/include/node",
+                                  "/opt/homebrew/include/node", 0};
+    const char *o = getenv("CC_NODE_INCLUDE");
+    struct stat st;
+    char probe[384];
+    int i;
+    if (o && o[0]) return o;
+    for (i = 0; cands[i]; i++) {
+        snprintf(probe, sizeof(probe), "%.360s/node.h", cands[i]);
+        if (stat(probe, &st) == 0) return cands[i];
+    }
+    return NULL;
+}
+
+static int cc__js_host_compile(const char *src, const char *out,
+                               const char *inc, const char *libnode,
+                               const char *log, const char *what) {
+    char cmd[3072], head[280];
+    const char *cxx = getenv("CXX");
+    int rc;
+    if (!cxx || !cxx[0]) cxx = "c++";
+#if defined(__APPLE__)
+    const char *undef = "-Wl,-undefined,dynamic_lookup";
+#else
+    const char *undef = "";
+#endif
+    snprintf(cmd, sizeof(cmd),
+             "%.200s -std=c++17 -O2 -fPIC -shared -pthread '%.420s' "
+             "-I'%.360s' %.360s %.60s -o '%.420s' 2>'%.420s'",
+             cxx, src, inc, libnode, undef, out, log);
+    rc = system(cmd);
+    if (rc == 0) return 0;
+    cc__js_host_log_head(log, head, sizeof(head));
+    snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+             "js: host %.10s compile failed (log: %.140s): %.270s",
+             what, log, head);
+    return -1;
+}
+
+/* Ensure both cached artifacts exist; fill in their paths. */
+static int cc__js_host_build(char *shim_so, size_t so_cap, char *probe_node,
+                             size_t pn_cap) {
+    char dir[384], src[448], log[448], tmp[448];
+    struct stat st;
+    unsigned long tag = cc__js_host_hash(cc__js_host_shim_text) ^
+                        (cc__js_host_hash(cc__js_host_probe_text) << 1);
+    const char *inc, *libnode;
+    if (cc__js_host_cache_dir(dir, sizeof(dir)) != 0) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: host cache dir %.360s is not writable", dir);
+        return -1;
+    }
+    snprintf(shim_so, so_cap, "%.360s/cc_js_host_%08lx.so", dir, tag);
+    snprintf(probe_node, pn_cap, "%.360s/cc_js_probe_%08lx.node", dir, tag);
+    if (stat(shim_so, &st) == 0 && stat(probe_node, &st) == 0) return 0;
+    inc = cc__js_host_inc();
+    if (!inc) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: hosting needs the node development headers: no "
+                 "node.h under /usr/include/node or /usr/local/include/node "
+                 "(Debian/Ubuntu: apt install libnode-dev; or set "
+                 "CC_NODE_INCLUDE to the header directory)");
+        return -1;
+    }
+    libnode = getenv("CC_LIBNODE");
+    if (!libnode || !libnode[0]) libnode = "-lnode";
+    snprintf(log, sizeof(log), "%.360s/compile_%08lx.log", dir, tag);
+    /* The shim. */
+    snprintf(src, sizeof(src), "%.360s/cc_js_host_%08lx.cpp", dir, tag);
+    if (cc__js_host_write(src, cc__js_host_shim_text) != 0) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: cannot write host shim source %.420s", src);
+        return -1;
+    }
+    snprintf(tmp, sizeof(tmp), "%.400s.tmp%ld", shim_so, (long)getpid());
+    if (cc__js_host_compile(src, tmp, inc, libnode, log, "shim") != 0)
+        return -1;
+    if (rename(tmp, shim_so) != 0) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: cannot place host shim %.400s", shim_so);
+        return -1;
+    }
+    /* The probe addon (undefined cc__js_host_adopt resolves at load time
+     * from the shim, which is dlopened RTLD_GLOBAL first). */
+    snprintf(src, sizeof(src), "%.360s/cc_js_probe_%08lx.cpp", dir, tag);
+    if (cc__js_host_write(src, cc__js_host_probe_text) != 0) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: cannot write host probe source %.420s", src);
+        return -1;
+    }
+    snprintf(tmp, sizeof(tmp), "%.400s.tmp%ld", probe_node, (long)getpid());
+    if (cc__js_host_compile(src, tmp, inc, "", log, "probe") != 0) return -1;
+    if (rename(tmp, probe_node) != 0) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: cannot place host probe %.400s", probe_node);
+        return -1;
+    }
+    return 0;
+}
+
+/* The handle: one CCJsHost owns the process's embedded node, and its
+ * lifetime IS the runtime's — `@destroy` (or cc_js_host_close) tears the
+ * environment down.  Node initializes once per process, so the
+ * constructor refuses while a handle is live (share it) and after a
+ * close (nothing can reopen). */
+typedef struct CCJsHost {
+    int open;       /* this handle owns the process host */
+    CCArena *arena; /* error text + closure scratch */
+} CCJsHost;
+
+#ifndef CCResult_CCJsHost_CCJsError_DEFINED
+#define CCResult_CCJsHost_CCJsError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCJsHost_CCJsError, CCJsHost, CCJsError)
+#endif
+
+static CCResult_void_CCJsError cc__js_host_err(void) {
+    CCResult_void_CCJsError e;
+    memset(&e, 0, sizeof(e));
+    e.ok = false;
+    e.u.error = cc__js_err(NULL, "host");
+    return e;
+}
+
+static CCResult_CCJsHost_CCJsError cc__js_host_errh(void) {
+    CCResult_CCJsHost_CCJsError e;
+    memset(&e, 0, sizeof(e));
+    e.ok = false;
+    e.u.error = cc__js_err(NULL, "host");
+    return e;
+}
+
+static inline CCResult_CCJsHost_CCJsError cc_js_host_new(CCArena *arena) {
+    char shim_so[448], probe_node[448], why[380];
+    void *h;
+    CCJsHost out;
+    cc__js_errbuf[0] = 0;
+    cc__js_err_arena = arena;
+    if (cc__js_hostd) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: host_new: this process already hosts a node (node "
+                 "embeds once per process); share the live CCJsHost");
+        return cc__js_host_errh();
+    }
+    if (cc__js_host_torn) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: host_new: node embeds once per process; a closed "
+                 "host cannot reopen");
+        return cc__js_host_errh();
+    }
+    {
+        /* Inside a Node-API host already (guest mode)?  Refuse loudly:
+         * booting libnode here would put two engines in one process. */
+        void *self = dlopen(NULL, RTLD_NOW | RTLD_GLOBAL);
+        int guest = self && dlsym(self, "napi_create_function") != NULL;
+        if (self) dlclose(self);
+        if (guest) {
+            snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                     "js: host_new: this process already has a Node-API "
+                     "engine (guest mode); use the surface directly instead "
+                     "of hosting a second one");
+            return cc__js_host_errh();
+        }
+    }
+    if (cc__js_host_build(shim_so, sizeof(shim_so), probe_node,
+                          sizeof(probe_node)) != 0)
+        return cc__js_host_errh();
+    if (!cc__js_host_lib) {
+        /* RTLD_GLOBAL: the probe addon's undefined cc__js_host_adopt —
+         * and every napi symbol an addon needs — resolves through this
+         * handle's dependency chain (libnode). */
+        cc__js_host_lib = dlopen(shim_so, RTLD_NOW | RTLD_GLOBAL);
+        if (!cc__js_host_lib) {
+            snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                     "js: host shim dlopen failed: %.400s", dlerror());
+            return cc__js_host_errh();
+        }
+    }
+    if (cc__js_sym(cc__js_host_lib, "cc_js_host_start",
+                   &cc__js_host_start_f) != 0 ||
+        cc__js_sym(cc__js_host_lib, "cc_js_host_run",
+                   &cc__js_host_run_f) != 0 ||
+        cc__js_sym(cc__js_host_lib, "cc_js_host_stop",
+                   &cc__js_host_stop_f) != 0)
+        return cc__js_host_errh();
+    if (cc__js_load() != 0) return cc__js_host_errh();
+    why[0] = 0;
+    h = cc__js_host_start_f(probe_node, why, sizeof(why));
+    if (!h) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: host_new: %.360s", why[0] ? why : "start failed");
+        return cc__js_host_errh();
+    }
+    cc__js_hostd = h;
+    memset(&out, 0, sizeof(out));
+    out.open = 1;
+    out.arena = arena;
+    return cc_ok_CCResult_CCJsHost_CCJsError(out);
+}
+
+typedef struct CC__JsHostThunk {
+    void (*fn)(CCJs *js, void *ctx);
+    void *ctx;
+    CCArena *arena;
+} CC__JsHostThunk;
+
+static void cc__js_host_tramp(void *env, void *data) {
+    CC__JsHostThunk *t = (CC__JsHostThunk *)data;
+    CCJs js;
+    js.ready = 1;
+    js.arena = t->arena;
+    js.env = env;
+    t->fn(&js, t->ctx);
+}
+
+static inline CCResult_void_CCJsError
+cc_js_host_run(CCJsHost *host, void (*fn)(CCJs *js, void *ctx), void *ctx) {
+    CC__JsHostThunk t;
+    cc__js_errbuf[0] = 0;
+    cc__js_err_arena = host ? host->arena : NULL;
+    if (!host || !host->open || !cc__js_hostd) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: run: host is closed (cc_js_host_new first)");
+        return cc__js_host_err();
+    }
+    if (!fn) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: run: no callback");
+        return cc__js_host_err();
+    }
+    t.fn = fn;
+    t.ctx = ctx;
+    t.arena = host->arena;
+    if (cc__js_host_run_f(cc__js_hostd, cc__js_host_tramp, &t) != 0) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: run: host is stopping");
+        return cc__js_host_err();
+    }
+    return cc_ok_CCResult_void_CCJsError();
+}
+
+/* The @destroy hook; idempotent.  Values held from the torn-down
+ * environment are dead after this returns — the same rule guest close
+ * applies. */
+static inline void cc_js_host_close(CCJsHost *host) {
+    if (!host || !host->open) return;
+    host->open = 0;
+    if (!cc__js_hostd) return;
+    cc__js_host_stop_f(cc__js_hostd);
+    cc__js_hostd = NULL;
+    cc__js_host_torn = 1;
+}
+
 #ifdef CC_COMPTIME_SCAN
 @comptime {
     (void)cc_type_register("CCJs", (CCTypeHooks){
@@ -2749,6 +3318,9 @@ CC_DECL_RESULT_SPEC(${box}, ${rt}, ${er})
     (void)cc_type_register("CCJsVal", (CCTypeHooks){
         .destroy = cc_type_destroy_call("cc_js_val_release"),
         .ufcs_dynamic2 = cc_type_dynamic_call("cc_js_val_callm", "CC_JS_ARG"),
+    });
+    (void)cc_type_register("CCJsHost", (CCTypeHooks){
+        .destroy = cc_type_destroy_call("cc_js_host_close"),
     });
 }
 #endif

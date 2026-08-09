@@ -108,6 +108,10 @@ And *which packages* it sees is the working directory's
 Run Python in your project, get your project's packages: `npm install`
 next to your program is the whole setup.
 
+(Writing Concurrent-C itself rather than Python?  There is a zero-IPC
+tier: `cc_js_host_new(&a)` boots libnode *inside* your CC program — see
+[`examples/recipe_js_host.ccs`](https://github.com/sreekotay/concurrent-c/blob/main/examples/recipe_js_host.ccs).)
+
 ## Publishing
 
 From the Concurrent-C repo root (packs this wheel and the npm sibling):

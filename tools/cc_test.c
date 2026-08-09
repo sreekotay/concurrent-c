@@ -493,6 +493,9 @@ static int get_run_timeout_for_test(const char* stem, int default_timeout_sec) {
     if (strcmp(stem, "js_module_import_smoke") == 0) return 30;
     if (strcmp(stem, "js_module_double_result_smoke") == 0) return 30;
     if (strcmp(stem, "js_module_multi_export_smoke") == 0) return 30;
+    /* Inner `ccc build` of the hosting TU, plus a first-use C++ compile
+     * of the embedded libnode shim on a cold cache. */
+    if (strcmp(stem, "js_host_smoke") == 0) return 60;
     /* Three inner `ccc build`s (dual + two narrowing runs) + both hosts. */
     if (strcmp(stem, "dual_module_export_smoke") == 0) return 60;
     /* Inner `ccc build` of the js.cch+py.cch bridge TU, then a node run. */

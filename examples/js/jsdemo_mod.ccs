@@ -1,10 +1,10 @@
 /*
- * Guest-mode companion for examples/js/jsdemo.shcc.
+ * Guest mode: Node owns the environment; CC calls into it with the same
+ * UFCS + !> surface hosting uses (cc_js_host_new — the hosted twin is
+ * examples/js/jsdemo.shcc).  Build + drive via:
  *
- * Node owns the environment; CC calls into it with the same UFCS + !>
- * surface hosting will use once cc_js_new lands.  Build + drive via:
- *
- *     ccc examples/js/jsdemo.shcc
+ *     ccc build examples/js/jsdemo_mod.ccs
+ *     node -e "const d = require('./bin/js_demo.node'); console.log(d.sqrt2())"
  */
 #include <ccc/script/js.cch>
 
