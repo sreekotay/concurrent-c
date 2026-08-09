@@ -2354,6 +2354,22 @@ graphs — parameterized pipelines shipping N calls as one job, the
 calling convention a process-isolated domain will reuse — and answers
 articulately until it exists.
 
+A JavaScript function passed as an argument crosses as a Python
+callable, completing the duplex: a sync call's callback reenters on the
+main thread; a lane call's callback releases the GIL, posts through the
+threadsafe function, and waits while the main thread runs the function
+— which is what keeps concurrent sync work and the event loop live
+mid-callback.  Values cross by the standard rules in both directions;
+a JS throw becomes a Python exception carrying its message.  Callbacks
+are synchronous: a Promise return is refused articulately, because a
+callback awaiting its own domain is the one irreducible deadlock —
+submitting fire-and-forget tasks and nested sync calls both compose.
+One lifetime rule: a registered callback pins its domain until
+revocation (the sweep releases the function references on the main
+thread), an orphaned callable raises `bridge is closed` in Python, and
+a callback may revoke its own bridge mid-call — the in-flight call
+completes, then the drain runs.
+
 The module is the type, under the same reflection rules as
 `py_module::[T]`: every visible function whose first parameter is `T` or
 `T*` becomes a module function; an underscore member stays internal; the

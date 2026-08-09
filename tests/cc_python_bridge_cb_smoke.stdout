@@ -1,0 +1,15 @@
+sync_map true
+lane_map true
+string_returns true
+throw_surfaces_sync true
+throw_surfaces_lane true
+promise_return_refused true
+nested_sync_in_callback true
+callback_submits_task true
+retained_fires_sync true
+retained_fires_lane true
+reentrant_destroy_completes true
+reentrant_destroy_revokes true
+reentrant_destroy_closes true
+main_closed true
+cb suite done

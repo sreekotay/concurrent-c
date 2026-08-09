@@ -65,6 +65,31 @@ result is delivered.  An idle lane never keeps the process alive.
 parameterized pipelines that ship N Python calls as one job (and, later,
 across a process boundary) — and says so articulately until it exists.
 
+## Callbacks: JS functions as Python callables
+
+A JS function passed as an *argument* crosses as a Python callable:
+
+```js
+builtins.list(builtins.map((x) => x * 2, pyList));        // sync: reenters
+await py.task(builtins.list)(builtins.map(jsFn, pyList)); // lane: hops home
+```
+
+On the lane, the executor releases the GIL and waits while the main
+thread runs your function — so concurrent sync bridge work proceeds and
+the loop stays free to serve the callback.  Arguments materialize by
+the usual rule (scalars as scalars, held objects as proxies); returns
+cross back the same way.  A JS throw becomes a Python exception with
+your message, catchable in Python or surfacing as the call's error.
+Callbacks are **synchronous in v1**: returning a Promise is refused
+articulately (awaiting your own domain from inside a callback is the
+one true deadlock, so the shape is unrepresentable); *submitting* tasks
+fire-and-forget and making nested sync bridge calls both compose.
+Lifetime is one rule: a registered callback pins the domain until
+`destroy()` — the sweep releases the function references, and a
+callable that outlives its bridge raises `bridge is closed` in Python.
+A callback may even destroy its own bridge mid-call: the in-flight call
+finishes, then the drain runs.
+
 ## Numbers
 
 JavaScript has one number type; integral values cross as Python `int`,

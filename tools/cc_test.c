@@ -501,6 +501,8 @@ static int get_run_timeout_for_test(const char* stem, int default_timeout_sec) {
     if (strcmp(stem, "cc_python_bridge_mem_smoke") == 0) return 120;
     /* Bridge build + ~1.5s of deliberate Python sleeps across domains. */
     if (strcmp(stem, "cc_python_bridge_async_smoke") == 0) return 120;
+    /* Bridge build + callback round-trips across two domains. */
+    if (strcmp(stem, "cc_python_bridge_cb_smoke") == 0) return 120;
     if (strcmp(stem, "py_module_kwargs_smoke") == 0) return 30;
     if (strcmp(stem, "py_levenshtein_smoke") == 0) return 30;
     return default_timeout_sec;

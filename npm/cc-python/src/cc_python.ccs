@@ -33,6 +33,8 @@
 typedef struct CcPyDom CcPyDom;
 typedef struct CcPyObjBox CcPyObjBox;
 typedef struct CcPyJob CcPyJob;
+typedef struct CcJsCbBox CcJsCbBox;
+typedef struct CcJsCbReq CcJsCbReq;
 
 /* One Python reference owned by a domain.  Boxes live IN the domain's
  * arena — nothing about a domain is malloc'd — and recycle through a
@@ -59,7 +61,10 @@ struct CcPyObjBox {
  * and its napi_refs pin every typed-array buffer from submit to
  * completion — the lease spans the job, not a stack frame. */
 #define CCPY__JOB_MAX_ARGS 16
+/* Everything posted through the tsfn starts with `what`: 0 = job (and
+ * the drain sentinel), 1 = a callback request from the lane. */
 struct CcPyJob {
+    int what; /* 0 */
     CcPyJob *next;
     void *fn; /* owned PyObject*, DecRef'd by the executor */
     CCPyArg args[CCPY__JOB_MAX_ARGS];
@@ -76,6 +81,37 @@ struct CcPyJob {
     char errmsg[240];
     void *deferred; /* settled on the main thread; NULL for the sentinel */
     int rejected; /* drained before running */
+};
+
+/* A JS function registered as a Python callable.  Arena-owned and
+ * domain-listed; the napi_ref pins the function until REVOCATION (the
+ * documented rule: a registered callback pins the domain — destroy()
+ * breaks the cycle), deleted at sweep on the main thread. */
+struct CcJsCbBox {
+    CcPyDom *dom;
+    void *fnref;
+    CcJsCbBox *next;
+    int dead;
+};
+
+/* One lane-side callback invocation, stack-allocated in the trampoline:
+ * the executor releases the GIL, posts this through the tsfn, and waits;
+ * the main thread runs the JS function and fills the tagged result. */
+struct CcJsCbReq {
+    int what; /* 1 */
+    CcJsCbBox *box;
+    void *argv[CCPY__JOB_MAX_ARGS]; /* owned PyObject refs; main consumes */
+    int argc;
+    int done;
+    int failed;
+    char errmsg[240];
+    int rkind; /* 0 f64, 1 i64, 2 bool, 3 str, 4 none, 5 obj */
+    double rf;
+    long long ri;
+    const char *rstr; /* job-arena copy (domain is not idle mid-callback) */
+    size_t rlen;
+    void *robj; /* owned PyObject, IncRef'd on main under the GIL */
+    pthread_cond_t cv; /* signaled under d->mu */
 };
 
 struct CcPyDom {
@@ -115,6 +151,10 @@ struct CcPyDom {
     void *close_deferred; /* settled by the sentinel's completion */
     int tsfn_reffed;
     CcPyJob sentinel; /* posted once by the exiting executor */
+    /* JS-callback bridging */
+    CcJsCbBox *cb_head;
+    void *main_env; /* the creating thread's env: case-1 calls, ref cleanup */
+    pthread_t main_tid;
 };
 
 /* The last outstanding External — object or domain, whichever collects
@@ -146,11 +186,30 @@ static void ccpy__dom_sweep(CcPyDom *d) {
     }
     d->head = NULL;
     d->live = 0;
+    /* Callback registrations: deleting the napi_refs needs the main
+     * thread's env, and every sweep path runs there. */
+    {
+        CcJsCbBox *cb = d->cb_head;
+        while (cb) {
+            if (cb->fnref && d->main_env)
+                cc__js.DeleteReference(d->main_env, cb->fnref);
+            cb->fnref = NULL;
+            cb->dead = 1;
+            cb = cb->next;
+        }
+        d->cb_head = NULL;
+    }
     if (d->none) {
         cc__py.DecRef(d->none);
         d->none = NULL;
     }
     cc_py_close(&d->py);
+    /* Closing an isolated interpreter leaves the PROCESS interpreter's
+     * state current (cc_py_close does that so later releases have a
+     * thread state) — which means this thread now HOLDS the process
+     * GIL, and another domain's lane would block on it forever.  The
+     * bridge's discipline everywhere: never keep a GIL between ops. */
+    cc_py_thread_leave();
     d->closed = 1;
 }
 
@@ -234,6 +293,337 @@ static int ccpy__ext_make(CcPyDom *d, void *env, CcPyObjBox *b, void **out) {
         return -1;
     d->ext_outstanding++;
     return 0;
+}
+
+static int ccpy__result_to_js(CcPyDom *d, void *env, CCPyObj r, void **out);
+
+/* ---- JS callbacks crossing into Python ------------------------------ */
+
+/* PyMethodDef mirror (stable layout since forever). */
+typedef struct CcPyMethodDefMirror {
+    const char *ml_name;
+    void *(*ml_meth)(void *self, void *args);
+    int ml_flags;
+    const char *ml_doc;
+} CcPyMethodDefMirror;
+#define CC__PY_METH_VARARGS 0x0001
+
+static void *ccpy__cb_trampoline(void *self, void *args);
+
+static CcPyMethodDefMirror ccpy__cb_def = {
+    "cc_js_callback",
+    ccpy__cb_trampoline,
+    CC__PY_METH_VARARGS,
+    "JavaScript function held by a cc-python bridge",
+};
+
+/* Pending-exception text, coerced to a string; clears the exception. */
+static void ccpy__js_exc_text(void *env, char *buf, size_t cap) {
+    void *exc = NULL;
+    void *str = NULL;
+    size_t got = 0;
+    snprintf(buf, cap, "callback threw");
+    if (cc__js.GetAndClearLastException(env, &exc) != 0 || !exc) return;
+    if (cc__js.CoerceToString(env, exc, &str) != 0 || !str) return;
+    if (cc__js.GetValueStringUtf8(env, str, buf, cap, &got) != 0)
+        snprintf(buf, cap, "callback threw");
+}
+
+/* JS return value -> tagged result (shared by both call paths).  Fills
+ * req-style fields via out-pointers; GIL-needing pieces (the handle
+ * IncRef) attach around themselves.  Returns 0, or -1 with errmsg. */
+static int ccpy__cb_ret_tag(CcPyDom *d, void *env, void *ret, int *rkind,
+                            double *rf, long long *ri, const char **rstr,
+                            size_t *rlen, void **robj, char *errmsg,
+                            size_t errcap) {
+    int t = 0;
+    if (!ret) {
+        *rkind = 4;
+        return 0;
+    }
+    cc__js.Typeof(env, ret, &t);
+    switch (t) {
+    case CC__JS_T_UNDEFINED:
+    case CC__JS_T_NULL:
+        *rkind = 4;
+        return 0;
+    case CC__JS_T_NUMBER: {
+        double dd = 0;
+        cc__js.GetValueDouble(env, ret, &dd);
+        if (dd == (double)(long long)dd && dd >= -9007199254740992.0 &&
+            dd <= 9007199254740992.0) {
+            *rkind = 1;
+            *ri = (long long)dd;
+        } else {
+            *rkind = 0;
+            *rf = dd;
+        }
+        return 0;
+    }
+    case CC__JS_T_BOOLEAN: {
+        _Bool b = 0;
+        cc__js.GetValueBool(env, ret, &b);
+        *rkind = 2;
+        *ri = b ? 1 : 0;
+        return 0;
+    }
+    case CC__JS_T_STRING: {
+        size_t len = 0, got = 0;
+        char *copy;
+        if (cc__js.GetValueStringUtf8(env, ret, NULL, 0, &len) != 0) break;
+        copy = (char *)cc_arena_alloc(&d->job_arena, len + 1, 16);
+        if (!copy) break;
+        if (cc__js.GetValueStringUtf8(env, ret, copy, len + 1, &got) != 0)
+            break;
+        *rkind = 3;
+        *rstr = copy;
+        *rlen = got;
+        return 0;
+    }
+    case CC__JS_T_EXTERNAL: {
+        void *pp = NULL;
+        CcPyObjBox *b;
+        cc__js.GetValueExternal(env, ret, &pp);
+        b = (CcPyObjBox *)pp;
+        if (!b || b->dom != d || b->released) {
+            snprintf(errmsg, errcap, "cc-python: the callback returned a "
+                                     "released or foreign handle");
+            return -1;
+        }
+        cc__py_attach(&d->py);
+        cc__py.IncRef(b->obj.o);
+        *robj = b->obj.o;
+        if (d->async_mode) cc_py_thread_leave();
+        *rkind = 5;
+        return 0;
+    }
+    case CC__JS_T_OBJECT: {
+        _Bool has = 0;
+        if (cc__js.HasNamedProperty(env, ret, "then", &has) == 0 && has) {
+            snprintf(errmsg, errcap,
+                     "cc-python: callbacks are synchronous in v1 — return a "
+                     "value, not a Promise");
+            return -1;
+        }
+        break;
+    }
+    default:
+        break;
+    }
+    snprintf(errmsg, errcap, "cc-python: unsupported callback return (use "
+                             "scalars, strings, or bridge handles)");
+    return -1;
+}
+
+/* Tagged result -> Python value (executor side, GIL held). */
+static void *ccpy__cb_tag_to_py(CcPyDom *d, int rkind, double rf, long long ri,
+                                const char *rstr, size_t rlen, void *robj) {
+    switch (rkind) {
+    case 0: return cc__py.FloatFromDouble(rf);
+    case 1: return cc__py.LongFromLongLong(ri);
+    case 2: return cc__py.BoolFromLong((long)ri);
+    case 3: return cc__py.UnicodeFromStringAndSize(rstr, (intptr_t)rlen);
+    case 4:
+        if (d->none) {
+            cc__py.IncRef(d->none);
+            return d->none;
+        }
+        break;
+    case 5: return robj; /* already owned */
+    default: break;
+    }
+    return cc__py_raise("cc-python: corrupt callback result");
+}
+
+/* Case 1: callback fires on the main thread inside a sync call — plain
+ * reentrancy, GIL held throughout except across the JS call itself. */
+static void *ccpy__cb_call_main(CcPyDom *d, CcJsCbBox *box, void *args,
+                                int n) {
+    void *jsargs[CCPY__JOB_MAX_ARGS];
+    void *env = d->main_env;
+    void *fnv = NULL;
+    void *undef = NULL;
+    void *ret = NULL;
+    int i;
+    int rkind = -1;
+    double rf = 0;
+    long long ri = 0;
+    const char *rstr = NULL;
+    size_t rlen = 0;
+    void *robj = NULL;
+    char errmsg[240];
+    for (i = 0; i < n; i++) {
+        CCPyObj r;
+        void *o = cc__py.TupleGetItem(args, (intptr_t)i); /* borrowed */
+        cc__py.IncRef(o);
+        r.o = o;
+        r.home = &d->py;
+        if (ccpy__result_to_js(d, env, r, &jsargs[i]) != 0)
+            return cc__py_raise("cc-python: cannot marshal a callback "
+                                "argument");
+    }
+    if (cc__js.GetReferenceValue(env, box->fnref, &fnv) != 0 || !fnv)
+        return cc__py_raise("cc-python: the callback function is gone");
+    cc__js.GetUndefined(env, &undef);
+    if (cc__js.CallFunction(env, undef, fnv, (size_t)n, jsargs, &ret) != 0) {
+        ccpy__js_exc_text(env, errmsg, sizeof(errmsg));
+        return cc__py_raise(errmsg);
+    }
+    if (ccpy__cb_ret_tag(d, env, ret, &rkind, &rf, &ri, &rstr, &rlen, &robj,
+                         errmsg, sizeof(errmsg)) != 0)
+        return cc__py_raise(errmsg);
+    return ccpy__cb_tag_to_py(d, rkind, rf, ri, rstr, rlen, robj);
+}
+
+/* Case 2: callback fires on the lane.  Release the GIL — that is what
+ * lets concurrent sync bridge work proceed and the loop stay free to
+ * service us — post through the tsfn, wait, reacquire, convert. */
+static void *ccpy__cb_call_lane(CcPyDom *d, CcJsCbBox *box, void *args,
+                                int n) {
+    CcJsCbReq req;
+    int i;
+    memset(&req, 0, sizeof(req));
+    req.what = 1;
+    req.box = box;
+    req.argc = n;
+    for (i = 0; i < n; i++) {
+        void *o = cc__py.TupleGetItem(args, (intptr_t)i); /* borrowed */
+        cc__py.IncRef(o);
+        req.argv[i] = o; /* main consumes these */
+    }
+    pthread_cond_init(&req.cv, NULL);
+    cc_py_thread_leave();
+    cc__js.CallTsfn(d->tsfn, &req, 1);
+    pthread_mutex_lock(&d->mu);
+    while (!req.done) pthread_cond_wait(&req.cv, &d->mu);
+    pthread_mutex_unlock(&d->mu);
+    pthread_cond_destroy(&req.cv);
+    cc__py_attach(&d->py);
+    if (req.failed) return cc__py_raise(req.errmsg);
+    return ccpy__cb_tag_to_py(d, req.rkind, req.rf, req.ri, req.rstr,
+                              req.rlen, req.robj);
+}
+
+static void *ccpy__cb_trampoline(void *self, void *args) {
+    CcJsCbBox *box =
+        cc__py.CapsuleGetPointer
+            ? (CcJsCbBox *)cc__py.CapsuleGetPointer(self, "cc-python.cb")
+            : NULL;
+    CcPyDom *d;
+    intptr_t n;
+    if (!box) return cc__py_raise("cc-python: corrupt callback capsule");
+    d = box->dom;
+    if (box->dead || !d || d->closed)
+        return cc__py_raise("cc-python: bridge is closed");
+    n = args ? cc__py.TupleSize(args) : 0;
+    if (n > CCPY__JOB_MAX_ARGS)
+        return cc__py_raise("cc-python: too many callback arguments");
+    if (pthread_equal(pthread_self(), d->main_tid))
+        return ccpy__cb_call_main(d, box, args, (int)n);
+    if (d->async_mode && pthread_equal(pthread_self(), d->exec))
+        return ccpy__cb_call_lane(d, box, args, (int)n);
+    return cc__py_raise("cc-python: callbacks must run on the bridge's "
+                        "threads");
+}
+
+/* Main-thread service for a lane-side callback request. */
+static void ccpy__cb_service(void *env, CcJsCbReq *req) {
+    CcJsCbBox *box = req->box;
+    CcPyDom *d = box->dom;
+    void *jsargs[CCPY__JOB_MAX_ARGS];
+    void *fnv = NULL;
+    void *undef = NULL;
+    void *ret = NULL;
+    int i;
+    int failed = 0;
+    if (box->dead || d->closed) {
+        snprintf(req->errmsg, sizeof(req->errmsg),
+                 "cc-python: bridge is closed");
+        failed = 1;
+    }
+    if (!failed) {
+        /* Convert the owned Python args under the GIL (the lane released
+         * it before posting). */
+        cc__py_attach(&d->py);
+        for (i = 0; i < req->argc; i++) {
+            CCPyObj r;
+            r.o = req->argv[i];
+            r.home = &d->py;
+            req->argv[i] = NULL;
+            if (ccpy__result_to_js(d, env, r, &jsargs[i]) != 0) {
+                snprintf(req->errmsg, sizeof(req->errmsg),
+                         "cc-python: cannot marshal a callback argument");
+                failed = 1;
+                break;
+            }
+        }
+        cc_py_thread_leave();
+    }
+    if (!failed &&
+        (cc__js.GetReferenceValue(env, box->fnref, &fnv) != 0 || !fnv)) {
+        snprintf(req->errmsg, sizeof(req->errmsg),
+                 "cc-python: the callback function is gone");
+        failed = 1;
+    }
+    if (!failed) {
+        cc__js.GetUndefined(env, &undef);
+        if (cc__js.CallFunction(env, undef, fnv, (size_t)req->argc, jsargs,
+                                &ret) != 0) {
+            ccpy__js_exc_text(env, req->errmsg, sizeof(req->errmsg));
+            failed = 1;
+        }
+    }
+    if (!failed &&
+        ccpy__cb_ret_tag(d, env, ret, &req->rkind, &req->rf, &req->ri,
+                         &req->rstr, &req->rlen, &req->robj, req->errmsg,
+                         sizeof(req->errmsg)) != 0)
+        failed = 1;
+    req->failed = failed;
+    pthread_mutex_lock(&d->mu);
+    req->done = 1;
+    pthread_cond_signal(&req->cv);
+    pthread_mutex_unlock(&d->mu);
+}
+
+/* Wrap a JS function as a Python callable registered with the domain.
+ * Main thread, GIL held.  Returns an owned PyObject or NULL (errbuf). */
+static void *ccpy__cb_wrap(CcPyDom *d, void *env, void *fnval, char *errbuf,
+                           size_t errcap) {
+    CcJsCbBox *box;
+    void *capsule;
+    void *callable;
+    void *ref = NULL;
+    if (!cc__py.CFunctionNewEx || !cc__py.CapsuleNew ||
+        !cc__py.CapsuleGetPointer) {
+        snprintf(errbuf, errcap, "cc-python: this Python runtime cannot mint "
+                                 "callables (needs PyCFunction_NewEx)");
+        return NULL;
+    }
+    box = (CcJsCbBox *)cc_arena_alloc(&d->arena, sizeof(*box), 16);
+    if (!box) {
+        snprintf(errbuf, errcap, "cc-python: out of memory");
+        return NULL;
+    }
+    memset(box, 0, sizeof(*box));
+    if (cc__js.CreateReference(env, fnval, 1, &ref) != 0) {
+        snprintf(errbuf, errcap, "cc-python: cannot pin the callback");
+        return NULL;
+    }
+    box->dom = d;
+    box->fnref = ref;
+    box->next = d->cb_head;
+    d->cb_head = box;
+    capsule = cc__py.CapsuleNew(box, "cc-python.cb", NULL);
+    callable = capsule ? cc__py.CFunctionNewEx(&ccpy__cb_def, capsule, NULL)
+                       : NULL;
+    if (capsule) cc__py.DecRef(capsule); /* the callable holds it */
+    if (!callable) {
+        if (cc__py.ErrClear) cc__py.ErrClear();
+        snprintf(errbuf, errcap, "cc-python: cannot mint the callback "
+                                 "callable");
+        return NULL;
+    }
+    return callable;
 }
 
 /* ---- the async lane ------------------------------------------------- */
@@ -385,8 +775,13 @@ static void ccpy__reject(void *env, void *deferred, const char *msg) {
  * it safe for the sentinel to end the interpreter. */
 static void ccpy__async_complete(void *env, void *jscb, void *ctx, void *data) {
     CcPyDom *d = (CcPyDom *)ctx;
-    CcPyJob *j = (CcPyJob *)data;
+    CcPyJob *j;
     (void)jscb;
+    if (*(int *)data == 1) {
+        ccpy__cb_service(env, (CcJsCbReq *)data);
+        return;
+    }
+    j = (CcPyJob *)data;
     if (j->rkind == 7) {
         pthread_join(d->exec, NULL);
         if (!d->closed) ccpy__dom_sweep(d);
@@ -577,6 +972,8 @@ static CCJsVal !>(CCError) CcPython_create(CcPython *self, CCJs *js) {
             return cc_err(CC_ERR_IO, "cc-python: external allocation failed");
         }
         d->ext_outstanding++;
+        d->main_env = js->env;
+        d->main_tid = pthread_self();
         {
             CCJsVal jv = { 0 };
             jv.env = js->env;
@@ -716,11 +1113,24 @@ static long long !>(CCError) CcPython_release(CcPython *self, CCJsExt dom,
  * cross as zero-copy memoryview leases; externals pass the held
  * reference through. */
 static int ccpy__arg_from_js(CcPyDom *d, void *env, void *v, CCPyArg *out,
-                             char *errbuf, size_t errcap) {
+                             void **owned_out, char *errbuf, size_t errcap) {
     int t = 0;
+    if (owned_out) *owned_out = NULL;
     if (cc__js.Typeof(env, v, &t) != 0) {
         snprintf(errbuf, errcap, "cc-python: cannot read an argument");
         return -1;
+    }
+    if (t == CC__JS_T_FUNCTION) {
+        /* A JS function crosses as a minted Python callable (caller holds
+         * the GIL); the caller owns the fresh reference. */
+        CCPyObj tmp;
+        void *callable = ccpy__cb_wrap(d, env, v, errbuf, errcap);
+        if (!callable) return -1;
+        tmp.o = callable;
+        tmp.home = &d->py;
+        *out = cc__py_arg_obj(tmp);
+        if (owned_out) *owned_out = callable;
+        return 0;
     }
     if (t == CC__JS_T_NUMBER) {
         double dd = 0;
@@ -866,6 +1276,7 @@ static CCJsVal !>(CCError) CcPython_invoke(CcPython *self, CCJs *js,
     CcPyDom *d = ccpy__dom(dom);
     CcPyObjBox *fb;
     CCPyArg argv[CC__PY_MAX_CALL_ARGS];
+    void *owned[CC__PY_MAX_CALL_ARGS]; /* minted callables to drop post-call */
     uint32_t argc = 0, i;
     _Bool isarr = 0;
     CC__JsMark mark;
@@ -883,11 +1294,17 @@ static CCJsVal !>(CCError) CcPython_invoke(CcPython *self, CCJs *js,
         argc > CC__PY_MAX_CALL_ARGS)
         return cc_err(CC_ERR_INVALID_ARG, "cc-python: too many arguments");
     mark = cc__js_mark();
+    /* Minting callables and (on an async domain) refcounts need the GIL. */
+    cc__py_attach(&d->py);
     for (i = 0; i < argc; i++) {
         void *el = NULL;
         if (cc__js.GetElement(js->env, args.v, i, &el) != 0 ||
-            ccpy__arg_from_js(d, js->env, el, &argv[i], ccpy__errbuf,
-                              sizeof(ccpy__errbuf)) != 0) {
+            ccpy__arg_from_js(d, js->env, el, &argv[i], &owned[i],
+                              ccpy__errbuf, sizeof(ccpy__errbuf)) != 0) {
+            uint32_t k;
+            for (k = 0; k < i; k++)
+                if (owned[k]) cc__py.DecRef(owned[k]);
+            if (d->async_mode) cc_py_thread_leave();
             cc__js_release(mark);
             return cc_err(CC_ERR_INVALID_ARG, ccpy__errbuf);
         }
@@ -896,6 +1313,8 @@ static CCJsVal !>(CCError) CcPython_invoke(CcPython *self, CCJs *js,
         CCPyObj *f = &fb->obj;
         CCResult_CCPyObj_CCPyError r =
             cc__py_obj_callm_n(f, "invoke", (int)argc, argv);
+        for (i = 0; i < argc; i++)
+            if (owned[i]) cc__py.DecRef(owned[i]);
         cc__js_release(mark);
         if (!r.ok) {
             if (d->async_mode) cc_py_thread_leave();
@@ -929,6 +1348,17 @@ static int ccpy__arg_pack_async(CcPyDom *d, void *env, void *v, CcPyJob *j,
     if (cc__js.Typeof(env, v, &t) != 0) {
         snprintf(errbuf, errcap, "cc-python: cannot read an argument");
         return -1;
+    }
+    if (t == CC__JS_T_FUNCTION) {
+        /* A JS function crosses as a minted Python callable; the JOB owns
+         * the fresh reference (its kind-4 sweep releases it). */
+        CCPyObj tmp;
+        void *callable = ccpy__cb_wrap(d, env, v, errbuf, errcap);
+        if (!callable) return -1;
+        tmp.o = callable;
+        tmp.home = &d->py;
+        *out = cc__py_arg_obj(tmp);
+        return 0;
     }
     if (t == CC__JS_T_NUMBER) {
         double dd = 0;
