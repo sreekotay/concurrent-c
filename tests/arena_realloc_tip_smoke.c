@@ -71,6 +71,56 @@ int main(void) {
     }
 
     cc_arena_free(&a);
+
+    /* Local tier: same tip contract, non-atomic owner path. */
+    {
+        CCArena loc = cc_arena_heap(kilobytes(4));
+        unsigned char *lp;
+        void *lgrown;
+        size_t loff;
+        if (!loc.base) {
+            printf("FAIL: local heap\n");
+            return 1;
+        }
+        lp = (unsigned char *)cc_arena_alloc_local(&loc, 64, 8);
+        if (!lp) {
+            printf("FAIL: alloc_local\n");
+            return 1;
+        }
+        memset(lp, 0xcd, 64);
+        loff = *(size_t *)&loc.offset;
+        lgrown = cc_arena_realloc_local(&loc, lp, 64, 128, 8);
+        if (lgrown != lp) {
+            printf("FAIL: realloc_local tip grow in-place\n");
+            return 1;
+        }
+        if (*(size_t *)&loc.offset != loff + 64) {
+            printf("FAIL: realloc_local tip offset\n");
+            return 1;
+        }
+        if (cc_arena_realloc_local(&loc, lp, 128, 32, 8) != lp) {
+            printf("FAIL: realloc_local tip shrink\n");
+            return 1;
+        }
+        /* Bury tip — local must return NULL; grow falls through. */
+        if (!cc_arena_alloc_local(&loc, 16, 8)) {
+            printf("FAIL: local pad\n");
+            return 1;
+        }
+        if (cc_arena_realloc_local(&loc, lp, 32, 64, 8) != NULL) {
+            printf("FAIL: realloc_local non-tip should miss\n");
+            return 1;
+        }
+        {
+            void *moved = cc_arena_realloc_local_grow(&loc, lp, 32, 64, 8);
+            if (!moved || moved == lp) {
+                printf("FAIL: realloc_local_grow non-tip move\n");
+                return 1;
+            }
+        }
+        cc_arena_free(&loc);
+    }
+
     printf("arena_realloc_tip_smoke OK\n");
     return 0;
 }

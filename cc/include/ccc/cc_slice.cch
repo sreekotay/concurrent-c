@@ -1,11 +1,14 @@
 /*
  * Slice ABI and helpers.
  *
- * Layout matches the codegen contract: {ptr,len,id,alen} (32 bytes on 64-bit).
+ * Layout matches the codegen contract: {ptr,len,id} (24 bytes on 64-bit).
  * - ptr  : data pointer (`char*` so `s.ptr[i]` indexes bytes; ABI width matches `T*`)
  * - len  : logical length of the view
  * - id   : provenance/uniqueness token (0 if not tracked)
- * - alen : available length from ptr to the end of the original allocation
+ *
+ * Capacity of a backing allocation is not part of this ABI. Subslice /
+ * send_take eligibility uses `id` flags (`CC_SLICE_ID_SUBSLICE`, uniqueness,
+ * transferability) plus `len` — not a preserved available-length field.
  *
  * Most helpers are header-only. FFI adopt (`cc_adopt`) + `cc_slice_destroy`
  * need a small runtime registry (see cc/runtime/slice_adopt.c).
@@ -49,7 +52,6 @@ typedef struct {
     char *ptr;
     size_t len;
     uint64_t id;   // allocation id | flags
-    size_t alen;
 } CCSlice;
 
 /* Unnamed facet (enforced by shadow_lower for the whole slice family —
@@ -80,7 +82,7 @@ typedef CCSlice CCSliceShared;
  * is the visible erasure spelling; `@as` supplies method retry into the
  * byte helpers and arg-position autocast. Element-wise methods and the
  * scaled `bytes()` view come from this template with sizeof(T) in
- * hand. len/alen on a typed slice count ELEMENTS; `bytes()` converts
+ * hand. `len` on a typed slice counts ELEMENTS; `bytes()` converts
  * to an honestly byte-measured CCSlice. char slices stay bare CCSlice
  * (bytes are their elements).
  *
@@ -116,18 +118,19 @@ typedef CCSlice CCSliceShared;
         r.base.ptr = s ? s->base.ptr + a * sizeof(T) : 0;                      \
         r.base.len = b - a;                                                    \
         r.base.id = s ? ((s->base.id & ~CC_SLICE_ID_UNIQUE) |                  \
-                         (s->base.id ? CC_SLICE_ID_SUBSLICE : 0))              \
+                         ((a != 0 || b != n ||                                 \
+                           (s->base.id & CC_SLICE_ID_SUBSLICE))                \
+                              ? CC_SLICE_ID_SUBSLICE                           \
+                              : 0))                                            \
                       : 0;                                                     \
-        r.base.alen = s ? (s->base.alen > a ? s->base.alen - a : 0) : 0;       \
         return r;                                                              \
     }                                                                          \
-    /* Honest byte view: len/alen scale by sizeof(T). */                       \
+    /* Honest byte view: len scales by sizeof(T). */                           \
     static inline CCSlice NAME##_bytes(NAME *s) {                              \
         CCSlice r = {0};                                                       \
         if (!s) return r;                                                      \
         r = s->base;                                                           \
         r.len *= sizeof(T);                                                    \
-        r.alen *= sizeof(T);                                                   \
         return r;                                                              \
     }
 
@@ -136,12 +139,22 @@ typedef CCSlice CCSliceShared;
 
 /* Scalar instances are declared after cc_slice_from_buffer below. */
 
-/* Untracked {ptr,len} view. Narrowing from CCSlice drops id/alen; use
- * cc_slice_hdr_slice for an untracked CCSlice (UFCS: sh.slice()). */
+/* Untracked {ptr,len} view — the lean wire/borrow face.
+ * Schema `bytes` binds emit this (no id). Convert with:
+ *   s.hdr()           CCSlice → CCSliceHdr   (drop provenance)
+ *   h.as_slice()      CCSliceHdr → CCSlice   (untracked widen; family twin of
+ *                                            packed/vec/string `.as_slice()`)
+ *   h.slice()         alias of as_slice
+ *   hdr_from_buffer   construct Hdr without a full CCSlice detour */
 typedef struct {
     char *ptr;
     size_t len;
 } CCSliceHdr;
+
+static inline CCSliceHdr cc_slice_hdr_from_buffer(void *ptr, size_t len) {
+    CCSliceHdr h = { (char *)ptr, len };
+    return h;
+}
 
 static inline CCSliceHdr cc_slice_hdr(CCSlice *s) {
     CCSliceHdr h = {0};
@@ -151,7 +164,7 @@ static inline CCSliceHdr cc_slice_hdr(CCSlice *s) {
     return h;
 }
 
-/* UFCS: `slice.hdr()` lowers to `CCSlice_hdr(&slice)` (slice-family hook). */
+/* UFCS: `slice.hdr()` → `CCSlice_hdr(&slice)`. */
 static inline CCSliceHdr CCSlice_hdr(CCSlice *s) { return cc_slice_hdr(s); }
 
 static inline CCSlice cc_slice_empty(void) {
@@ -188,18 +201,32 @@ static inline bool cc_slice_is_untracked(CCSlice s) { return cc_slice_is_untrack
 static inline CCSlice cc_slice_from_buffer(void *ptr, size_t len) {
     // Creates an UNTRACKED slice. Treat this as unknown lifetime at channel or
     // async boundaries; use cc_slice_from_static for immortal/static storage.
-    CCSlice s = {ptr, len, CC_SLICE_ID_UNTRACKED, len};
+    CCSlice s = {ptr, len, CC_SLICE_ID_UNTRACKED};
     return s;
 }
 
 static inline CCSlice cc_slice_from_static(void *ptr, size_t len) {
-    CCSlice s = {ptr, len, cc_slice_make_id(CC_SLICE_ID_CANONICAL_ALLOC, false, false, false), len};
+    CCSlice s = {ptr, len, cc_slice_make_id(CC_SLICE_ID_CANONICAL_ALLOC, false, false, false)};
     return s;
 }
 
-static inline CCSlice cc_slice_hdr_slice(CCSliceHdr *sh) {
+/* Widen Hdr → untracked CCSlice (id=0). Family name matches
+ * packed/vec/string `.as_slice()`. */
+static inline CCSlice cc_slice_hdr_as_slice(const CCSliceHdr *sh) {
     if (!sh) return cc_slice_empty();
     return cc_slice_from_buffer(sh->ptr, sh->len);
+}
+
+static inline CCSlice CCSliceHdr_as_slice(const CCSliceHdr *sh) {
+    return cc_slice_hdr_as_slice(sh);
+}
+
+/* Aliases: older spelling + short UFCS `.slice()`. */
+static inline CCSlice cc_slice_hdr_slice(const CCSliceHdr *sh) {
+    return cc_slice_hdr_as_slice(sh);
+}
+static inline CCSlice CCSliceHdr_slice(const CCSliceHdr *sh) {
+    return cc_slice_hdr_as_slice(sh);
 }
 
 CC_DECL_SLICE(short)
@@ -215,11 +242,8 @@ CC_DECL_SLICE(uint64_t)
 CC_DECL_SLICE(float)
 CC_DECL_SLICE(double)
 
-static inline CCSlice cc_slice_from_parts(void *ptr,
-                                          size_t len,
-                                          uint64_t id,
-                                          size_t available_len) {
-    CCSlice s = {ptr, len, id, available_len};
+static inline CCSlice cc_slice_from_parts(void *ptr, size_t len, uint64_t id) {
+    CCSlice s = {ptr, len, id};
     return s;
 }
 
@@ -270,19 +294,16 @@ static inline bool CCSlice_is_empty(CCSlice* s) {
 }
 static inline bool cc_slice_is_empty(CCSlice* s) { return CCSlice_is_empty(s); }
 
-static inline size_t cc_slice_capacity(CCSlice s) {
-    return s.alen ? s.alen : s.len;
-}
-
 static inline CCSlice cc__slice_sub_value(CCSlice s, size_t start, size_t end) {
     if (start > end || end > s.len) {
         return cc_slice_empty();
     }
     uint8_t *base = (uint8_t *)s.ptr;
     uint64_t id = cc_slice_clear_flags(s.id, CC_SLICE_ID_UNIQUE);
-    // Preserve transferability; set subslice flag when not covering the full allocation.
-    bool covers_full_alloc = (start == 0) && (end == s.len) && (s.alen == 0 || s.len == s.alen);
-    if (covers_full_alloc) {
+    /* Full-range of a non-subslice keeps is_subslice clear; any proper
+     * subrange, or a full-range of an existing subslice, sets it. */
+    bool covers_full = (start == 0) && (end == s.len) && !cc_slice_is_subslice_id(s.id);
+    if (covers_full) {
         id = cc_slice_clear_flags(id, CC_SLICE_ID_SUBSLICE);
     } else {
         id |= CC_SLICE_ID_SUBSLICE;
@@ -291,8 +312,6 @@ static inline CCSlice cc__slice_sub_value(CCSlice s, size_t start, size_t end) {
         .ptr = base ? (char *)(base + start) : NULL,
         .len = end - start,
         .id = id,
-        // Preserve allocation length (not view length).
-        .alen = s.alen ? s.alen : s.len,
     };
     return sub;
 }

@@ -84,7 +84,7 @@
     "    if (!buf || cap == 0) return cc_slice_empty();\n" \
     "    if (pos >= cap) return cc_slice_empty();\n" \
     "    buf[pos] = '\\0';\n" \
-    "    return cc_slice_from_parts(buf, pos, CC_SLICE_ID_UNTRACKED, cap);\n" \
+    "    return cc_slice_from_parts(buf, pos, CC_SLICE_ID_UNTRACKED);\n" \
     "}\n" \
     "typedef enum { CC_EMIT_AFTER_PRELUDE=0, CC_EMIT_BEFORE_FIRST_USE=1," \
     " CC_EMIT_AT_COMPTIME_SITE=2 } CCEmitAnchor;\n" \

@@ -46,3 +46,20 @@ void cc__grammar_note_ufcs_type(const char* type_name) { (void)type_name; }
 int cc_grammar_pending_ufcs_type_count(void) { return 0; }
 
 const char* cc_grammar_pending_ufcs_type(int i) { (void)i; return ""; }
+
+int cc_grammar_pending_ufcs_field_count(void) { return 0; }
+
+const char* cc_grammar_pending_ufcs_field_type(int i) {
+    (void)i;
+    return "";
+}
+
+const char* cc_grammar_pending_ufcs_field_name(int i) {
+    (void)i;
+    return "";
+}
+
+const char* cc_grammar_pending_ufcs_field_fty(int i) {
+    (void)i;
+    return "";
+}

@@ -92,7 +92,7 @@ CompressedResult* !>(CCIoError) compress_block(Block* blk, int level) {
         out_buf[pos++] = (in_len >> 16) & 0xff;
         out_buf[pos++] = (in_len >> 24) & 0xff;
 
-        res->data = cc_slice_from_parts(out_buf, pos, CC_SLICE_ID_UNTRACKED, pos);
+        res->data = cc_slice_from_parts(out_buf, pos, CC_SLICE_ID_UNTRACKED);
         cc_atomic_fetch_add(&g_bytes_in, blk->data.len);
         cc_atomic_fetch_add(&g_bytes_out, pos);
         cc_atomic_fetch_add(&g_blocks_done, 1);

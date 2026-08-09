@@ -13,7 +13,7 @@ int main(void) {
         char* backing = cc_arena_alloc_T_count(char, &buf, 64);
         if (!backing) return 1;
         memset(backing, 'a', 64);
-        char[:] view = cc_slice_from_parts(backing, 64, 0, 64);
+        char[:] view = cc_slice_from_parts(backing, 64, 0);
         if (view.len != 64) return 2;
         cc_arena_free(&buf);
     }
@@ -23,7 +23,7 @@ int main(void) {
         if (!backing) return 3;
         memset(backing, 'b', 32);
         {
-            char[:] view = cc_slice_from_parts(backing, 32, 0, 32);
+            char[:] view = cc_slice_from_parts(backing, 32, 0);
             if (view.len != 32) return 4;
         }
         /* Earlier sibling's `view`/`buf` must not count as a live borrow here. */

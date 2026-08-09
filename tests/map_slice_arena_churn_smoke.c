@@ -8,21 +8,19 @@
 typedef struct {
     void *ptr;
     uint32_t len;
-    uint32_t alen;
     uint64_t id;
 } CompactSlice;
 
 CC_MAP_DECL_ARENA(CCSlice, CompactSlice, SliceCompactMap, cc_map_hash_slice, cc_map_eq_slice);
 
 static inline CCSlice compact_as_slice(CompactSlice s) {
-    return cc_slice_from_parts(s.ptr, (size_t)s.len, s.id, (size_t)s.alen);
+    return cc_slice_from_parts(s.ptr, (size_t)s.len, s.id);
 }
 
 static inline CompactSlice compact_from_slice(CCSlice s) {
     CompactSlice out;
     out.ptr = s.ptr;
     out.len = (uint32_t)s.len;
-    out.alen = (uint32_t)cc_slice_capacity(s);
     out.id = s.id;
     return out;
 }
@@ -38,7 +36,7 @@ static CompactSlice clone_value(CCArena *arena, const char *s) {
     if (!buf) return (CompactSlice){0};
     memcpy(buf, s, src.len);
     buf[src.len] = '\0';
-    return compact_from_slice(cc_slice_from_parts(buf, src.len, 0, n));
+    return compact_from_slice(cc_slice_from_parts(buf, src.len, 0));
 }
 
 static int run_arena_map(void) {

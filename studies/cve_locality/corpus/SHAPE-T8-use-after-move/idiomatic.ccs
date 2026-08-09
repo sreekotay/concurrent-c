@@ -17,7 +17,7 @@ int main(void) {
     if (!p) return 1;
     memset(p, 'u', 8);
     /* unique + transferable provenance — move-only */
-    char[:!] owned = cc_slice_from_parts(p, 8, cc_slice_make_id(1, true, true, false), 8);
+    char[:!] owned = cc_slice_from_parts(p, 8, cc_slice_make_id(1, true, true, false));
 
     char[:!] other = cc_move(owned);
     /* owned is moved; other is the sole owner */

@@ -38,8 +38,7 @@ static bool rr_try_read_line(RespReader* r, char[:]* out) {
         if (r->data[i] == '\r' && r->data[i + 1] == '\n') {
             *out = cc_slice_from_parts(r->data + r->start,
                                        i - r->start,
-                                       CC_SLICE_ID_UNTRACKED,
-                                       i - r->start);
+                                       CC_SLICE_ID_UNTRACKED);
             r->start = i + 2;
             return true;
         }
@@ -90,8 +89,7 @@ static RespParseStatus rr_try_read_bulk_buffered(RespReader* r, char[:]* out, CC
 
     *out = cc_slice_from_parts(r->data + r->start,
                                (size_t)n,
-                               CC_SLICE_ID_UNTRACKED,
-                               (size_t)n);
+                               CC_SLICE_ID_UNTRACKED);
     r->start += need;
     return RESP_PARSE_OK;
 }
@@ -145,7 +143,7 @@ static RespParseStatus rr_try_read_args_buffered(RespReader* r,
 @grammar(schema) GArg {~~~~
     rules [
         digit:  charset [#'0' - #'9']
-        number: keep [opt #'-' some digit]
+        number: keep [some digit]
     ]
     #'$' len: int number "\r\n"
     data: bytes len
@@ -155,7 +153,7 @@ static RespParseStatus rr_try_read_args_buffered(RespReader* r,
 @grammar(schema) GCmd {~~~~
     rules [
         digit:  charset [#'0' - #'9']
-        number: keep [opt #'-' some digit]
+        number: keep [some digit]
         lchar:  complement charset [#'\r' #'\n']
         line:   keep [any lchar]
     ]
@@ -199,7 +197,8 @@ static RespParseStatus gen_try_read_args_buffered(RespReader* r,
             *err = CC_ERROR(CC_ERR_PARSE, "unsupported argument count");
             return RESP_PARSE_ERROR;
         }
-        for (size_t i = 0; i < c.framed.args_n; i++) args[i] = c.framed.args[i].data;
+        for (size_t i = 0; i < c.framed.args_n; i++)
+            args[i] = c.framed.args[i].data.as_slice();
         *out_argc = c.framed.args_n;
         r->start += pos;
         return RESP_PARSE_OK;

@@ -513,7 +513,7 @@ int cc__collect_as_arg_coerce_edits(const CCASTRoot* root,
                      * `&xs` / pointer outers stay as-written — the type
                      * error they produce is the honest one. Typed slice
                      * instances erase SCALED: the byte world must receive
-                     * byte-measured len/alen, and the template's bytes()
+                     * byte-measured len, and the template's bytes()
                      * knows sizeof(T). */
                     const char* ts_prefix = NULL;
                     if (has_amp || outer_is_ptr) continue;

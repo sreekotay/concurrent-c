@@ -46,4 +46,11 @@ void cc__grammar_registry_reset(void);
 int cc_grammar_pending_ufcs_type_count(void);
 const char* cc_grammar_pending_ufcs_type(int i);
 
+/* Schema bind fields for UFCS path walks (`c.framed.args[i].data.slice()`).
+ * Noted at grammar emit; shadow installs into the struct-field table. */
+int cc_grammar_pending_ufcs_field_count(void);
+const char* cc_grammar_pending_ufcs_field_type(int i);
+const char* cc_grammar_pending_ufcs_field_name(int i);
+const char* cc_grammar_pending_ufcs_field_fty(int i);
+
 #endif /* CC_GRAMMAR_ENGINE_H */

@@ -244,7 +244,7 @@ static inline CCSlice JsonNode_slice(const JsonNode* n){
     uint64_t l = JSON_LEN(n->meta);
     uint64_t id = JSON_COW(n->meta) ? cc_slice_make_id(JSON_ARENA_ID,true,false,false)
                                     : cc_slice_make_id(JSON_SRC_ID,false,false,true);
-    return cc_slice_from_parts((void*)n->u.bytes, l, id, l);
+    return cc_slice_from_parts((void*)n->u.bytes, l, id);
 }
 
 static inline double JsonNode_as_f64(const JsonNode* n){

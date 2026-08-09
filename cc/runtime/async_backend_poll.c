@@ -59,7 +59,7 @@ static int backend_read_all(void* ctx, CCFile *file, CCArena *arena, CCSlice* ou
     }
     out->ptr = buf;
     out->len = off;
-    out->id = 0; out->alen = off;
+    out->id = 0;
     CC_ASYNC_HANDLE_ALLOC(h, 1);
     int err = 0;
     cc_chan_send(h->done, &err, sizeof(int));
@@ -90,7 +90,6 @@ static int backend_read(void* ctx, CCFile *file, CCArena *arena, size_t n, CCSli
     out->ptr = (off == 0) ? NULL : buf;
     out->len = off;
     out->id = 0;
-    out->alen = (off == 0) ? 0 : n;
     CC_ASYNC_HANDLE_ALLOC(h, 1);
     int err = 0;
     cc_chan_send(h->done, &err, sizeof(int));
@@ -123,7 +122,6 @@ static int backend_read_line(void* ctx, CCFile *file, CCArena *arena, CCSlice* o
     out->ptr = (len == 0) ? NULL : buf;
     out->len = len;
     out->id = 0;
-    out->alen = (len == 0) ? 0 : cap;
     CC_ASYNC_HANDLE_ALLOC(h, 1);
     int err = 0;
     cc_chan_send(h->done, &err, sizeof(int));

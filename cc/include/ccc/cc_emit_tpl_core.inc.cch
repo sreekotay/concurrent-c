@@ -64,5 +64,5 @@ static inline CCSlice cc_emit_tpl_finish(char *buf, size_t pos, size_t cap) {
     if (!buf || cap == 0) return cc_slice_empty();
     if (pos >= cap) return cc_slice_empty();
     buf[pos] = '\0';
-    return cc_slice_from_parts(buf, pos, CC_SLICE_ID_UNTRACKED, cap);
+    return cc_slice_from_parts(buf, pos, CC_SLICE_ID_UNTRACKED);
 }

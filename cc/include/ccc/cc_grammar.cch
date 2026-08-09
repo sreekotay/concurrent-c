@@ -31,6 +31,10 @@
  *   cc_write(Cmd, &v, dst, cap)             schema: FORMAT (inverted parse) ->
  *                                           bytes written, 0 = didn't fit;
  *                                           length/count fields are DERIVED
+ *   cc_write_unchecked(Cmd, &v, dst)        schema: same bytes as cc_write when
+ *                                           capacity is already proven
+ *                                           (measure / reserved buffer);
+ *                                           UFCS: v.write_unchecked(dst)
  *   cc_measure(Cmd, &v)                     schema: exact encoded size with no
  *                                           destination (0 = cannot emit /
  *                                           invalid kind); same derivation as
@@ -97,7 +101,7 @@ typedef struct {
     int present;
     long long i;                  /* CC_GK_INT */
     double f;                     /* CC_GK_FLOAT */
-    CCSlice s;                    /* CC_GK_SLICE / CC_GK_BYTES */
+    CCSlice s;                    /* CC_GK_SLICE; CC_GK_BYTES widened from Hdr */
     const void* items;            /* CC_GK_ITEMS: elements (of field->etype) */
     size_t items_n;
     const CCGramField* field;
@@ -111,6 +115,7 @@ typedef struct {
 #define cc_next(T, ...)    T##Reader_next(__VA_ARGS__)
 #define cc_at_end(T, ...)  T##Reader_at_end(__VA_ARGS__)
 #define cc_write(T, ...)   T##_write(__VA_ARGS__)
+#define cc_write_unchecked(T, ...) T##_write_unchecked(__VA_ARGS__)
 #define cc_measure(T, ...) T##_measure(__VA_ARGS__)
 #define cc_format(T, ...)  T##_to_str(__VA_ARGS__)
 #define cc_get(T, ...)     T##_get(__VA_ARGS__)

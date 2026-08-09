@@ -1,0 +1,708 @@
+/*
+ * Arena lifetime chaos — mixed lifetimes, tip bury/grow, individual release,
+ * overflow, shared concurrent use. Checksums survivors so silent corruption
+ * or wrong reclaim cannot pass. Reports RSS peak / residual.
+ *
+ * Fail-closed: integrity, ovf drain, residual gross, double-release, and
+ * (when RSS sampling works) soft residual RSS bound after free.
+ *
+ * Build (link host mem_sample.o — #if in headers is stripped by shadow_lower):
+ *   cc -O2 -c stress/mem_sample.c -o stress/out/mem_sample.o
+ *   ./cc/bin/ccc build --release stress/arena_lifetime_chaos.ccs \
+ *       -o stress/out/arena_lifetime_chaos --ld-flags stress/out/mem_sample.o
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_arena.cch>
+#include <ccc/cc_atomic.cch>
+#include "mem_sample.h"
+#include <stdio.h>
+#include <string.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <time.h>
+
+#define SLOTS                4096
+#define CHAOS_OPS            120000
+#define RELEASE_SCRAMBLE_N   50000
+#define CONC_WORKERS         8
+#define CONC_OPS_EACH        8000
+#define ROOT_CHAOS           (256 * 1024)   /* small → force extents + ovf */
+#define ROOT_FAT             (4 * 1024 * 1024)
+#define MAX_RESIDUAL_GROSS   (512 * 1024)
+/* Soft: RSS lags free and first-touch of large static slabs faults pages in.
+ * Only fail if still hugely elevated vs process start. Prefer gross/ovf for
+ * reclaim; Linux VmHWM/cgroup_peak for peak scoreboards. */
+#define MAX_RSS_RESIDUAL     (96 * 1024 * 1024)
+
+typedef struct {
+    unsigned char *ptr;
+    uint32_t size;
+    uint32_t tag;      /* fill pattern seed */
+    uint32_t gen;
+    int live;
+} Slot;
+
+typedef struct {
+    size_t peak_rss;   /* best of sampled current / HWM / cgroup peak */
+    size_t start_rss;
+    size_t cgroup_peak;
+    int ok;
+} RssTrack;
+
+static void rss_begin(RssTrack *t) {
+    StressMemSample s = stress_mem_sample();
+    t->ok = s.ok;
+    t->start_rss = s.current;
+    t->peak_rss = s.current;
+    t->cgroup_peak = s.cgroup_ok ? s.cgroup_peak : 0;
+}
+
+static void rss_touch(RssTrack *t) {
+    StressMemSample s;
+    size_t best;
+    if (!t->ok) return;
+    s = stress_mem_sample();
+    best = stress_mem_best_peak(&s, t->peak_rss);
+    if (s.ok && s.current > t->peak_rss) t->peak_rss = s.current;
+    if (best > t->peak_rss) t->peak_rss = best;
+    if (s.cgroup_ok && s.cgroup_peak > t->cgroup_peak) t->cgroup_peak = s.cgroup_peak;
+}
+
+static double now_sec(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
+static int fail(const char *msg) {
+    printf("FAIL: %s\n", msg);
+    return 1;
+}
+
+static uint32_t lcg(uint32_t *s) {
+    *s = (*s * 1664525u) + 1013904223u;
+    return *s;
+}
+
+static void paint(unsigned char *p, uint32_t n, uint32_t tag) {
+    uint32_t i;
+    for (i = 0; i < n; i++)
+        p[i] = (unsigned char)(tag + i * 17u);
+}
+
+static int check_paint(const unsigned char *p, uint32_t n, uint32_t tag) {
+    uint32_t i;
+    for (i = 0; i < n; i++) {
+        if (p[i] != (unsigned char)(tag + i * 17u))
+            return 0;
+    }
+    return 1;
+}
+
+static size_t slot_size(uint32_t r) {
+    return 16 + (r % 512);
+}
+
+static int verify_live(Slot *slots, size_t nslots, size_t *live_out) {
+    size_t i;
+    size_t live = 0;
+    for (i = 0; i < nslots; i++) {
+        if (!slots[i].live) continue;
+        live++;
+        if (!slots[i].ptr) return fail("live slot null ptr");
+        if (!check_paint(slots[i].ptr, slots[i].size, slots[i].tag))
+            return fail("survivor checksum mismatch (corruption or use-after-reclaim)");
+    }
+    if (live_out) *live_out = live;
+    return 0;
+}
+
+static void kill_slot(CCArena *a, Slot *s) {
+    if (!s->live || !s->ptr) return;
+    (void)cc_arena_release(a, s->ptr);
+    s->ptr = NULL;
+    s->live = 0;
+    s->size = 0;
+}
+
+/* Deterministic chaos: alloc / release / tip-grow / bury / verify interleaved. */
+static int bench_mixed_lifetime_chaos(void) {
+    CCArena a = cc_arena_heap(ROOT_CHAOS);
+    Slot *slots;
+    uint32_t rng = 0xC0FFEEu;
+    size_t i;
+    size_t ops_alloc = 0, ops_rel = 0, ops_tip = 0, ops_bury = 0;
+    size_t tip_moves = 0;
+    unsigned char *tip = NULL;
+    size_t tip_sz = 0;
+    size_t live = 0;
+    size_t peak_gross = 0, peak_ovf = 0;
+    RssTrack rss;
+    double t0;
+    size_t g, o;
+
+    slots = (Slot *)calloc(SLOTS, sizeof(Slot));
+    if (!slots) {
+        cc_arena_free(&a);
+        return fail("slots OOM");
+    }
+
+    rss_begin(&rss);
+    t0 = now_sec();
+    printf("  mixed_lifetime: ops=%d slots=%d root=%d\n", CHAOS_OPS, SLOTS, ROOT_CHAOS);
+
+    for (i = 0; i < CHAOS_OPS; i++) {
+        uint32_t r = lcg(&rng);
+        int op = (int)(r % 8u);
+        size_t si = (size_t)(lcg(&rng) % SLOTS);
+
+        /* Force tip / release / bury paths (LCG alone can under-sample). */
+        if ((i % 34u) == 0) op = 5;      /* bury */
+        else if ((i % 34u) == 1) op = 4; /* tip grow while buried → expect moves */
+        else if ((i % 19u) == 0) op = 3; /* release */
+
+        if ((i & 4095u) == 0) rss_touch(&rss);
+
+        if (op <= 2) {
+            /* Alloc into slot (replace → release old first). */
+            size_t n = slot_size(lcg(&rng));
+            uint32_t tag = lcg(&rng);
+            unsigned char *p;
+            if (slots[si].live) kill_slot(&a, &slots[si]);
+            p = (unsigned char *)cc_arena_alloc(&a, n, 8);
+            if (!p) {
+                free(slots);
+                cc_arena_free(&a);
+                return fail("chaos alloc");
+            }
+            paint(p, (uint32_t)n, tag);
+            slots[si].ptr = p;
+            slots[si].size = (uint32_t)n;
+            slots[si].tag = tag;
+            slots[si].gen++;
+            slots[si].live = 1;
+            ops_alloc++;
+            /* New alloc buries the bump tip; tip ptr stays live (may move on grow). */
+        } else if (op == 3) {
+            if (slots[si].live) {
+                kill_slot(&a, &slots[si]);
+                ops_rel++;
+            }
+        } else if (op == 4) {
+            /* Tip grow: dedicated tip object. */
+            size_t want = tip_sz + 24 + (r % 40);
+            void *np = cc_arena_realloc(&a, &a, tip, tip_sz, want, 8);
+            if (!np) {
+                free(slots);
+                cc_arena_free(&a);
+                return fail("chaos tip realloc");
+            }
+            if (tip && np != tip) tip_moves++;
+            tip = (unsigned char *)np;
+            if (tip_sz == 0) paint(tip, (uint32_t)want, 0xA11Au);
+            else tip[tip_sz] = (unsigned char)i;
+            tip_sz = want;
+            ops_tip++;
+        } else if (op == 5) {
+            /* Bury tip with a pad alloc. */
+            size_t n = 32 + (r % 200);
+            void *pad = cc_arena_alloc(&a, n, 8);
+            if (!pad) {
+                free(slots);
+                cc_arena_free(&a);
+                return fail("chaos bury");
+            }
+            ((unsigned char *)pad)[0] = 0xBD;
+            ops_bury++;
+            /* tip may no longer be tip — next grow may move */
+        } else if (op == 6) {
+            /* Large alloc → often overflow under small root + budget. */
+            size_t n = 2048 + (r % 8192);
+            uint32_t tag = lcg(&rng);
+            unsigned char *p;
+            if (slots[si].live) kill_slot(&a, &slots[si]);
+            p = (unsigned char *)cc_arena_alloc(&a, n, 16);
+            if (!p) {
+                free(slots);
+                cc_arena_free(&a);
+                return fail("chaos large alloc");
+            }
+            paint(p, (uint32_t)n, tag);
+            slots[si].ptr = p;
+            slots[si].size = (uint32_t)n;
+            slots[si].tag = tag;
+            slots[si].live = 1;
+            ops_alloc++;
+        } else {
+            /* Integrity sweep of a slice of slots. */
+            size_t j;
+            size_t base = si;
+            for (j = 0; j < 64; j++) {
+                size_t k = (base + j) % SLOTS;
+                if (!slots[k].live) continue;
+                if (!check_paint(slots[k].ptr, slots[k].size, slots[k].tag)) {
+                    free(slots);
+                    cc_arena_free(&a);
+                    return fail("mid-chaos checksum");
+                }
+            }
+        }
+
+        g = cc_arena_committed_gross_bytes(&a);
+        o = cc_arena_overflow_raw_bytes(&a);
+        if (g > peak_gross) peak_gross = g;
+        if (o > peak_ovf) peak_ovf = o;
+    }
+
+    if (verify_live(slots, SLOTS, &live)) {
+        free(slots);
+        cc_arena_free(&a);
+        return 1;
+    }
+    if (tip && tip_sz > 0 && tip[0] != (unsigned char)0xA11A) {
+        free(slots);
+        cc_arena_free(&a);
+        return fail("tip paint broken");
+    }
+
+    rss_touch(&rss);
+    printf("  mixed_lifetime: live=%zu alloc=%zu rel=%zu tip=%zu bury=%zu tip_moves=%zu "
+           "peak_gross=%zu peak_ovf=%zu peak_rss=%zu (Δ%zd) %.3fs\n",
+           live, ops_alloc, ops_rel, ops_tip, ops_bury, tip_moves, peak_gross, peak_ovf,
+           rss.ok ? rss.peak_rss : 0,
+           rss.ok ? (ssize_t)rss.peak_rss - (ssize_t)rss.start_rss : (ssize_t)-1,
+           now_sec() - t0);
+
+    if (!(a._flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW) && a.block_idx == 0) {
+        free(slots);
+        cc_arena_free(&a);
+        return fail("chaos expected extent growth or overflow on small root");
+    }
+    if (ops_tip > 100 && tip_moves == 0) {
+        free(slots);
+        cc_arena_free(&a);
+        return fail("chaos tip never moved despite bury-before-tip cadence");
+    }
+
+    /* Double-release an overflow or slab survivor — must fail closed. */
+    {
+        size_t di;
+        for (di = 0; di < SLOTS; di++) {
+            if (!slots[di].live) continue;
+            if (!cc_arena_release(&a, slots[di].ptr)) {
+                free(slots);
+                cc_arena_free(&a);
+                return fail("first release should succeed");
+            }
+            if (cc_arena_release(&a, slots[di].ptr)) {
+                free(slots);
+                cc_arena_free(&a);
+                return fail("double-release returned success (must fail closed)");
+            }
+            slots[di].live = 0;
+            slots[di].ptr = NULL;
+            break;
+        }
+    }
+
+    cc_arena_reset(&a);
+    if (a.ovf_head != NULL || cc_arena_overflow_raw_bytes(&a) != 0) {
+        free(slots);
+        cc_arena_free(&a);
+        return fail("chaos reset left overflow");
+    }
+    if (a.block_idx != 0 || a.prev != NULL) {
+        free(slots);
+        cc_arena_free(&a);
+        return fail("chaos reset left extents");
+    }
+    if (cc_arena_committed_gross_bytes(&a) > MAX_RESIDUAL_GROSS) {
+        free(slots);
+        cc_arena_free(&a);
+        return fail("chaos residual gross after reset");
+    }
+
+    cc_arena_free(&a);
+    free(slots);
+    {
+        StressMemSample end = stress_mem_sample();
+        printf("  mixed_lifetime: after_free rss=%zu residual_vs_start=%zd hwm=%zu cgroup_peak=%zu\n",
+               end.ok ? end.current : 0,
+               (rss.ok && end.ok) ? (ssize_t)end.current - (ssize_t)rss.start_rss : (ssize_t)-1,
+               end.hwm_ok ? end.hwm : 0,
+               end.cgroup_ok ? end.cgroup_peak : rss.cgroup_peak);
+        if (rss.ok && end.ok) {
+            size_t resid = end.current > rss.start_rss ? end.current - rss.start_rss : 0;
+            if (resid > MAX_RSS_RESIDUAL)
+                return fail("RSS residual after free pathological");
+        }
+    }
+    return 0;
+}
+
+/* Alloc many → scramble-release half → grow survivors → reset; track RSS. */
+static int bench_release_scramble(void) {
+    CCArena a = cc_arena_heap(ROOT_CHAOS);
+    unsigned char **ptrs;
+    uint32_t *tags;
+    uint32_t *sizes;
+    uint8_t *alive;
+    uint32_t rng = 0xBADC0DEu;
+    size_t i;
+    size_t live = 0;
+    size_t released = 0;
+    size_t peak_gross = 0;
+    size_t peak_ovf = 0;
+    RssTrack rss;
+    double t0;
+
+    ptrs = (unsigned char **)calloc(RELEASE_SCRAMBLE_N, sizeof(*ptrs));
+    tags = (uint32_t *)calloc(RELEASE_SCRAMBLE_N, sizeof(*tags));
+    sizes = (uint32_t *)calloc(RELEASE_SCRAMBLE_N, sizeof(*sizes));
+    alive = (uint8_t *)calloc(RELEASE_SCRAMBLE_N, 1);
+    if (!ptrs || !tags || !sizes || !alive) {
+        free(ptrs); free(tags); free(sizes); free(alive);
+        cc_arena_free(&a);
+        return fail("scramble OOM");
+    }
+
+    rss_begin(&rss);
+    t0 = now_sec();
+    for (i = 0; i < RELEASE_SCRAMBLE_N; i++) {
+        size_t n = 24 + (lcg(&rng) % 400);
+        uint32_t tag = lcg(&rng);
+        ptrs[i] = (unsigned char *)cc_arena_alloc(&a, n, 8);
+        if (!ptrs[i]) {
+            free(ptrs); free(tags); free(sizes); free(alive);
+            cc_arena_free(&a);
+            return fail("scramble alloc");
+        }
+        paint(ptrs[i], (uint32_t)n, tag);
+        tags[i] = tag;
+        sizes[i] = (uint32_t)n;
+        alive[i] = 1;
+        live++;
+    }
+    rss_touch(&rss);
+    peak_gross = cc_arena_committed_gross_bytes(&a);
+    peak_ovf = cc_arena_overflow_raw_bytes(&a);
+
+    /* Scramble-release ~half via Fisher–Yates index order. */
+    {
+        size_t *order = (size_t *)malloc(RELEASE_SCRAMBLE_N * sizeof(size_t));
+        size_t k;
+        if (!order) {
+            free(ptrs); free(tags); free(sizes); free(alive);
+            cc_arena_free(&a);
+            return fail("order OOM");
+        }
+        for (i = 0; i < RELEASE_SCRAMBLE_N; i++) order[i] = i;
+        for (i = RELEASE_SCRAMBLE_N; i > 1; i--) {
+            size_t j = (size_t)(lcg(&rng) % i);
+            size_t tmp = order[i - 1];
+            order[i - 1] = order[j];
+            order[j] = tmp;
+        }
+        for (k = 0; k < RELEASE_SCRAMBLE_N / 2; k++) {
+            size_t idx = order[k];
+            if (!alive[idx]) continue;
+            if (!cc_arena_release(&a, ptrs[idx])) {
+                free(order); free(ptrs); free(tags); free(sizes); free(alive);
+                cc_arena_free(&a);
+                return fail("scramble release");
+            }
+            alive[idx] = 0;
+            ptrs[idx] = NULL;
+            live--;
+            released++;
+        }
+        free(order);
+    }
+
+    /* Grow every remaining survivor (many will move — tip buried). */
+    for (i = 0; i < RELEASE_SCRAMBLE_N; i++) {
+        size_t want;
+        void *np;
+        if (!alive[i]) continue;
+        want = (size_t)sizes[i] + 64 + (i % 50);
+        np = cc_arena_realloc(&a, &a, ptrs[i], sizes[i], want, 8);
+        if (!np) {
+            free(ptrs); free(tags); free(sizes); free(alive);
+            cc_arena_free(&a);
+            return fail("scramble realloc");
+        }
+        ptrs[i] = (unsigned char *)np;
+        /* Re-paint full new size — old prefix may have moved. */
+        paint(ptrs[i], (uint32_t)want, tags[i]);
+        sizes[i] = (uint32_t)want;
+    }
+
+    for (i = 0; i < RELEASE_SCRAMBLE_N; i++) {
+        if (!alive[i]) continue;
+        if (!check_paint(ptrs[i], sizes[i], tags[i])) {
+            free(ptrs); free(tags); free(sizes); free(alive);
+            cc_arena_free(&a);
+            return fail("scramble survivor corrupt after realloc");
+        }
+    }
+
+    rss_touch(&rss);
+    {
+        size_t g = cc_arena_committed_gross_bytes(&a);
+        size_t o = cc_arena_overflow_raw_bytes(&a);
+        if (g > peak_gross) peak_gross = g;
+        if (o > peak_ovf) peak_ovf = o;
+    }
+
+    printf("  release_scramble: n=%d released=%zu live=%zu peak_gross=%zu peak_ovf=%zu "
+           "peak_rss=%zu (Δ%zd) %.3fs\n",
+           RELEASE_SCRAMBLE_N, released, live, peak_gross, peak_ovf,
+           rss.ok ? rss.peak_rss : 0,
+           rss.ok ? (ssize_t)rss.peak_rss - (ssize_t)rss.start_rss : (ssize_t)-1,
+           now_sec() - t0);
+
+    if (a._flags & CC_ARENA_FLAG_NON_REWINDABLE) {
+        /* expected after individual releases */
+    } else {
+        free(ptrs); free(tags); free(sizes); free(alive);
+        cc_arena_free(&a);
+        return fail("expected NON_REWINDABLE after mid-lifetime releases");
+    }
+
+    cc_arena_reset(&a);
+    if (a.ovf_head || cc_arena_overflow_raw_bytes(&a) || a.prev || a.block_idx != 0) {
+        free(ptrs); free(tags); free(sizes); free(alive);
+        cc_arena_free(&a);
+        return fail("scramble reset incomplete");
+    }
+    cc_arena_free(&a);
+    free(ptrs); free(tags); free(sizes); free(alive);
+
+    {
+        StressMemSample end = stress_mem_sample();
+        printf("  release_scramble: after_free rss=%zu residual_vs_start=%zd hwm=%zu cgroup_peak=%zu\n",
+               end.ok ? end.current : 0,
+               (rss.ok && end.ok) ? (ssize_t)end.current - (ssize_t)rss.start_rss : (ssize_t)-1,
+               end.hwm_ok ? end.hwm : 0,
+               end.cgroup_ok ? end.cgroup_peak : rss.cgroup_peak);
+    }
+    return 0;
+}
+
+cc_atomic_int g_shared_fail = 0;
+cc_atomic_int g_shared_ops = 0;
+CCArena g_shared;
+
+#define SHARED_WS 256
+
+static void shared_worker(int wid) {
+    unsigned char *local[SHARED_WS];
+    uint32_t tags[SHARED_WS];
+    uint32_t sizes[SHARED_WS];
+    uint8_t alive[SHARED_WS];
+    uint32_t rng = 0x1000u + (uint32_t)wid * 0x9E37u;
+    size_t i;
+    size_t op;
+
+    memset(alive, 0, sizeof(alive));
+    for (op = 0; op < CONC_OPS_EACH; op++) {
+        uint32_t r = lcg(&rng);
+        size_t si = (size_t)(r % SHARED_WS);
+        int kind = (int)(r % 5u);
+        if (kind <= 2) {
+            size_t nsz = 16 + (lcg(&rng) % 300);
+            uint32_t tag = lcg(&rng);
+            unsigned char *p;
+            if (alive[si]) {
+                if (!cc_arena_release(&g_shared, local[si])) {
+                    cc_atomic_fetch_add(&g_shared_fail, 1);
+                    return;
+                }
+                alive[si] = 0;
+            }
+            p = (unsigned char *)cc_arena_alloc(&g_shared, nsz, 8);
+            if (!p) {
+                cc_atomic_fetch_add(&g_shared_fail, 1);
+                return;
+            }
+            paint(p, (uint32_t)nsz, tag);
+            local[si] = p;
+            tags[si] = tag;
+            sizes[si] = (uint32_t)nsz;
+            alive[si] = 1;
+        } else if (kind == 3) {
+            if (alive[si]) {
+                if (!cc_arena_release(&g_shared, local[si])) {
+                    cc_atomic_fetch_add(&g_shared_fail, 1);
+                    return;
+                }
+                alive[si] = 0;
+            }
+        } else {
+            if (alive[si] && !check_paint(local[si], sizes[si], tags[si])) {
+                cc_atomic_fetch_add(&g_shared_fail, 1);
+                return;
+            }
+        }
+        cc_atomic_fetch_add(&g_shared_ops, 1);
+    }
+    for (i = 0; i < SHARED_WS; i++) {
+        if (!alive[i]) continue;
+        if (!check_paint(local[i], sizes[i], tags[i])) {
+            cc_atomic_fetch_add(&g_shared_fail, 1);
+            return;
+        }
+        (void)cc_arena_release(&g_shared, local[i]);
+    }
+}
+
+/*
+ * Shared fixed slab + concurrent alloc/release (CAS bump path).
+ * Grow/ovf lists are not synchronized — do not stress those under concurrency.
+ */
+static uint8_t g_shared_buf[32 * 1024 * 1024];
+
+static int bench_shared_concurrent_mixed(void) {
+    RssTrack rss;
+    double t0;
+    int w;
+
+    memset(&g_shared, 0, sizeof(g_shared));
+    if (cc_arena_buffer(&g_shared, g_shared_buf, sizeof(g_shared_buf)) != 0)
+        return fail("shared buffer init");
+    g_shared.block_max = 1;
+    if (!cc_arena_set_heap_overflow(&g_shared, false))
+        return fail("disable shared overflow");
+
+    cc_atomic_store(&g_shared_fail, 0);
+    cc_atomic_store(&g_shared_ops, 0);
+    rss_begin(&rss);
+    t0 = now_sec();
+
+    {
+        CCNursery *n = @create(NULL) @destroy;
+        if (!n) return fail("nursery");
+        for (w = 0; w < CONC_WORKERS; w++) {
+            int wid = w;
+            n->spawn(() => {
+                shared_worker(wid);
+            });
+        }
+    }
+
+    rss_touch(&rss);
+    {
+        int fails = cc_atomic_load(&g_shared_fail);
+        int ops = cc_atomic_load(&g_shared_ops);
+        printf("  shared_concurrent(fixed): workers=%d ops=%d fail=%d live_gross=%zu "
+               "peak_rss=%zu (Δ%zd) %.3fs\n",
+               CONC_WORKERS, ops, fails,
+               cc_arena_committed_gross_bytes(&g_shared),
+               rss.ok ? rss.peak_rss : 0,
+               rss.ok ? (ssize_t)rss.peak_rss - (ssize_t)rss.start_rss : (ssize_t)-1,
+               now_sec() - t0);
+        if (fails != 0)
+            return fail("shared concurrent integrity/release failure");
+        if (ops != CONC_WORKERS * CONC_OPS_EACH)
+            return fail("shared concurrent ops incomplete");
+    }
+
+    cc_arena_reset(&g_shared);
+    if (CC_ATOMIC_LOAD(&g_shared.offset) != 0 &&
+        CC_ATOMIC_LOAD(&g_shared.live_allocs) != 0) {
+        /* After release-all, live should be 0; offset may be non-zero if
+         * NON_REWINDABLE holes remain — reset clears. */
+    }
+    if (CC_ATOMIC_LOAD(&g_shared.live_allocs) != 0)
+        return fail("shared live_allocs nonzero after worker cleanup+reset");
+    return 0;
+}
+
+/* Fat-root tip stays in place while unrelated short-lived allocs churn via release. */
+static int bench_tip_vs_churn_release(void) {
+    CCArena a = cc_arena_heap(ROOT_FAT);
+    unsigned char *tip = NULL;
+    size_t tip_sz = 0, moves = 0;
+    size_t i;
+    RssTrack rss;
+    double t0 = now_sec();
+
+    rss_begin(&rss);
+    for (i = 0; i < 30000; i++) {
+        size_t want = tip_sz + 16 + (i % 13);
+        void *np = cc_arena_realloc(&a, &a, tip, tip_sz, want, 8);
+        unsigned char *ephemeral;
+        size_t en;
+        if (!np) {
+            cc_arena_free(&a);
+            return fail("tip churn realloc");
+        }
+        if (tip && np != tip) moves++;
+        tip = (unsigned char *)np;
+        if (tip_sz == 0) paint(tip, (uint32_t)want, 0x711u);
+        tip_sz = want;
+
+        en = 48 + (i % 100);
+        ephemeral = (unsigned char *)cc_arena_alloc(&a, en, 8);
+        if (!ephemeral) {
+            cc_arena_free(&a);
+            return fail("ephemeral alloc");
+        }
+        ephemeral[0] = (unsigned char)i;
+        /* Ephemeral alloc buries tip; release does not restore tip-ness while
+         * tip remains live → next tip grow should often move. */
+        if (!cc_arena_release(&a, ephemeral)) {
+            cc_arena_free(&a);
+            return fail("ephemeral release");
+        }
+        if ((i & 8191u) == 0) rss_touch(&rss);
+    }
+
+    if (tip_sz >= 4 && tip[0] != (unsigned char)0x711u) {
+        cc_arena_free(&a);
+        return fail("tip prefix corrupt");
+    }
+
+    printf("  tip_vs_churn_release: tip_sz=%zu moves=%zu (expect >0 once buried) "
+           "gross=%zu peak_rss_delta=%zd %.3fs\n",
+           tip_sz, moves, cc_arena_committed_gross_bytes(&a),
+           rss.ok ? (ssize_t)rss.peak_rss - (ssize_t)rss.start_rss : (ssize_t)-1,
+           now_sec() - t0);
+    if (moves == 0) {
+        cc_arena_free(&a);
+        return fail("expected tip moves after ephemeral bury+release");
+    }
+    cc_arena_free(&a);
+    return 0;
+}
+
+int main(void) {
+    StressMemSample rss0 = stress_mem_sample();
+    printf("arena_lifetime_chaos: start_rss=%zu hwm=%zu cgroup_peak=%zu\n",
+           rss0.ok ? rss0.current : 0, rss0.hwm_ok ? rss0.hwm : 0,
+           rss0.cgroup_ok ? rss0.cgroup_peak : 0);
+
+    if (bench_mixed_lifetime_chaos()) return 1;
+    if (bench_release_scramble()) return 2;
+    if (bench_tip_vs_churn_release()) return 3;
+    if (bench_shared_concurrent_mixed()) return 4;
+
+    {
+        StressMemSample rss1 = stress_mem_sample();
+        size_t peak = stress_mem_best_peak(&rss1, rss1.ok ? rss1.current : 0);
+        printf("arena_lifetime_chaos: PASS end_rss=%zu delta=%zd hwm=%zu cgroup_peak=%zu best_peak=%zu\n",
+               rss1.ok ? rss1.current : 0,
+               (rss0.ok && rss1.ok) ? (ssize_t)rss1.current - (ssize_t)rss0.current : (ssize_t)-1,
+               rss1.hwm_ok ? rss1.hwm : 0,
+               rss1.cgroup_ok ? rss1.cgroup_peak : 0,
+               peak);
+        if (rss0.ok && rss1.ok) {
+            size_t resid = rss1.current > rss0.current ? rss1.current - rss0.current : 0;
+            if (resid > MAX_RSS_RESIDUAL)
+                return fail("end RSS residual pathological");
+        }
+    }
+    return 0;
+}

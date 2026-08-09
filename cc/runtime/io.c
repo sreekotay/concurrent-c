@@ -52,7 +52,7 @@ CCResult_CCSlice_CCIoError cc_file_read_all(CCFile *file, CCArena *arena) {
         return cc_err_CCResult_CCSlice_CCIoError(cc_io_from_errno(errno));
     }
     buf[read] = '\0';
-    CCSlice slice = cc_slice_from_parts(buf, read, CC_SLICE_ID_UNTRACKED, read + 1);
+    CCSlice slice = cc_slice_from_parts(buf, read, CC_SLICE_ID_UNTRACKED);
     return cc_ok_CCResult_CCSlice_CCIoError(slice);
 }
 

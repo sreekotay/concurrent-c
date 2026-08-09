@@ -63,7 +63,7 @@ static int cc__adopt_take(uint64_t alloc_id, void** out_base, CCSliceDeleter* ou
 CCSliceUnique cc_adopt(void* ptr, size_t nbytes, CCSliceDeleter deleter) {
     if (!ptr && nbytes == 0) {
         return cc_slice_from_parts(NULL, 0,
-                                   cc_slice_make_id(0, true, false, false), 0);
+                                   cc_slice_make_id(0, true, false, false));
     }
     if (!ptr) return cc_slice_empty();
 
@@ -71,12 +71,10 @@ CCSliceUnique cc_adopt(void* ptr, size_t nbytes, CCSliceDeleter deleter) {
     if (cc__adopt_register(alloc_id, ptr, deleter) != 0) {
         /* OOM registering — still hand back a unique view; caller must free. */
         return cc_slice_from_parts(ptr, nbytes,
-                                   cc_slice_make_id(alloc_id, true, false, false),
-                                   nbytes);
+                                   cc_slice_make_id(alloc_id, true, false, false));
     }
     return cc_slice_from_parts(ptr, nbytes,
-                               cc_slice_make_id(alloc_id, true, false, false),
-                               nbytes);
+                               cc_slice_make_id(alloc_id, true, false, false));
 }
 
 void cc_slice_destroy(CCSlice* s) {

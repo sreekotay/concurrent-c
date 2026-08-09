@@ -41,7 +41,7 @@ int main(void) {
         w = Bulk_write(&b, buf, sizeof buf);
         if (!bytes_are(buf, w, "$-1\r\n")) { printf("FAIL: write nil\n"); return 1; }
 
-        b = (Bulk){ .data = { .payload = cc_slice_from_buffer((void*)"hi", 2) } };
+        b = (Bulk){ .data = { .payload = cc_slice_hdr_from_buffer((void*)"hi", 2) } };
         b.len = 999;
         w = Bulk_write(&b, buf, sizeof buf);
         if (!bytes_are(buf, w, "$2\r\nhi\r\n")) { printf("FAIL: write data\n"); return 1; }
@@ -70,9 +70,9 @@ int main(void) {
     /* array of bulk-or-nil */
     {
         Bulk elems[3] = {
-            (Bulk){ .data = { .payload = cc_slice_from_buffer((void*)"a", 1) } },
+            (Bulk){ .data = { .payload = cc_slice_hdr_from_buffer((void*)"a", 1) } },
             (Bulk){ .nil = {} },
-            (Bulk){ .data = { .payload = cc_slice_from_buffer((void*)"bc", 2) } },
+            (Bulk){ .data = { .payload = cc_slice_hdr_from_buffer((void*)"bc", 2) } },
         };
 
         BulkArray arr;

@@ -141,7 +141,7 @@ CCSlice cc_slice_empty(void);
 CCSlice cc_slice_from_buffer(void *ptr, size_t len);
 CCSlice cc_slice_from_static(void *ptr, size_t len);
 CCSlice cc_slice_hdr_slice(CCSliceHdr *sh);
-CCSlice cc_slice_from_parts(void *ptr, size_t len, uint64_t id, size_t available_len);
+CCSlice cc_slice_from_parts(void *ptr, size_t len, uint64_t id);
 CCSlice char_to_slice(const char *cstr);
 CCSlice const_char_to_slice(const char *cstr); /* alias; UFCS for const char* */
 CCSlice unsigned_char_to_slice(const unsigned char *cstr);
@@ -176,7 +176,6 @@ The query and view operations are:
 
 ```c
 bool cc_slice_is_empty(CCSlice *s);
-size_t cc_slice_capacity(CCSlice s);
 const char *cc_slice_str(CCSlice *s);
 const uint8_t *cc_slice_bytes(CCSlice *s);
 bool cc_slice_is_ascii(CCSlice s);
@@ -2414,6 +2413,22 @@ revocation (the sweep releases the function references on the main
 thread), an orphaned callable raises `bridge is closed` in Python, and
 a callback may revoke its own bridge mid-call — the in-flight call
 completes, then the drain runs.
+
+`create({mode: 'async'})` makes the domain an execution lane as well:
+one executor thread per domain runs every call FIFO — Python is serial
+under its per-interpreter GIL, so a lane loses nothing within a domain,
+and concurrent domains parallelize — while calls return Promises and
+the event loop stays live.  Python exceptions arrive as rejections with
+the sync bridge's messages; attribute access stays synchronous.  A job
+owns its Python references and holds a `napi_ref` on every typed-array
+buffer, so the lease spans submit to completion and neither `release`
+nor the GC can dangle in-flight work.  Teardown is revoke-then-drain:
+`destroy()` (a Promise in async mode) rejects queued calls immediately,
+lets the in-flight call finish, and runs the one sweep after the last
+result is delivered — the executor retires its interpreter thread state
+before the interpreter ends.  An idle lane does not keep the process
+alive, and a dropped, never-destroyed async domain drains the same way
+from its finalizer.
 
 The module is the type, under the same reflection rules as
 `py_module::[T]`: every visible function whose first parameter is `T` or

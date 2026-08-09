@@ -38,7 +38,7 @@ int main(void) {
     cc_arena_reset(&arena);
     /* Stale header reconstructed only to probe epoch bits — borrow scope ended above. */
     {
-        CCSlice stale = cc_slice_from_parts((void*)"x", 1, cc_slice_make_id(old_alloc_id, false, false, false), 1);
+        CCSlice stale = cc_slice_from_parts((void*)"x", 1, cc_slice_make_id(old_alloc_id, false, false, false));
         if (cc_slice_is_from_arena_epoch(stale, &arena)) {
             fprintf(stderr, "expected reset to invalidate old arena epoch\n");
             return 6;

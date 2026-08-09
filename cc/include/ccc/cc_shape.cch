@@ -352,7 +352,7 @@ static inline CCSlice cc_shape_slice(const CCShapeVal* v) {
     size_t l = cc_shape_len(v);
     uint64_t id = cc_shape_cow(v) ? cc_slice_make_id(3ULL, true, false, false)
                                   : cc_slice_make_id(2ULL, false, false, true);
-    return cc_slice_from_parts((void*)v->u.bytes, l, id, l);
+    return cc_slice_from_parts((void*)v->u.bytes, l, id);
 }
 
 #endif /* CCC_CC_SHAPE_CCH */

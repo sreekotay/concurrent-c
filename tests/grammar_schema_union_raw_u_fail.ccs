@@ -14,6 +14,6 @@
 ~~~~}
 
 int main(void) {
-    Bulk b = { .data = { .payload = cc_slice_from_buffer((void*)"x", 1) } };
+    Bulk b = { .data = { .payload = cc_slice_hdr_from_buffer((void*)"x", 1) } };
     return (int)b.u.data.payload.len; /* ERROR: raw schema union reach-in */
 }

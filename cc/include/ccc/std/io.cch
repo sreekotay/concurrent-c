@@ -87,7 +87,7 @@ static inline CCRes(bool, CCIoError) cc_file_read_into(CCFile *file, CCArena *ar
         return CCRes_ok(bool, CCIoError, false);
     }
     // Got data - return Ok(true)
-    *out = cc_slice_from_parts(buf, got, CC_SLICE_ID_UNTRACKED, n);
+    *out = cc_slice_from_parts(buf, got, CC_SLICE_ID_UNTRACKED);
     return CCRes_ok(bool, CCIoError, true);
 }
 

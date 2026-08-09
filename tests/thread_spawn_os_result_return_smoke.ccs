@@ -1,0 +1,148 @@
+/*
+ * thread_spawn_os_result_return_smoke.ccs
+ *
+ * Regression for pigz_pthread NULL→deadlock (2026-08):
+ *
+ *   cc_thread_spawn entry that packed results in a *function-local*
+ *   `typedef struct { T* __result; } __result_t` had its `return storage`
+ *   stripped by shadow_lower (treated like send_task result sugar). The
+ *   thread fell off the end → join saw NULL → consumer bailed → producer
+ *   parked on a full channel (exit 124). First block seq=0 made a wrong
+ *   ordered_recv double-deref look identical.
+ *
+ * Lock the working OS-thread protocol used by pigz_pthread:
+ *   - return the payload pointer directly from the thread entry
+ *   - FIFO CCTask channel + cc_block_on_intptr (no ordered_recv unwrap)
+ *   - seq starts at 0 (would false-NULL under double-deref)
+ *   - on NULL payload, close the channel so the producer cannot hang
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define NUM_ITEMS 8
+#define CHAN_CAP  3
+
+typedef struct {
+    long seq;
+    int value;
+} Payload;
+
+cc_atomic_int g_failed = 0;
+cc_atomic_int g_pipeline_error = 0;
+
+void* compute(void* arg) {
+    Payload* p = (Payload*)arg;
+    p->value = (int)(p->seq * p->seq);
+    /* Direct payload return — do not pack into a local __result_t here. */
+    return (void*)p;
+}
+
+static int task_recv_payload(CCChanRx rx, Payload** out) {
+    CCTask task;
+    int rc = cc_chan_recv(rx.raw, &task, sizeof(task));
+    if (rc == EPIPE) return 0;
+    if (rc != 0) return -1;
+    if (task.kind != CC_TASK_KIND_SPAWN) {
+        printf("FAIL: expected SPAWN kind, got %d\n", (int)task.kind);
+        return -1;
+    }
+    *out = (Payload*)cc_block_on_intptr(task);
+    return 1;
+}
+
+int main(void) {
+    cc_atomic_store(&g_failed, 0);
+    cc_atomic_store(&g_pipeline_error, 0);
+
+    CCTask[~CHAN_CAP >] tx;
+    CCTask[~CHAN_CAP <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+
+    {
+        CCNursery* consumer = @create(NULL, () => [rx] {
+            Payload* p = NULL;
+            long expect = 0;
+            int rc;
+            int got = 0;
+            while ((rc = task_recv_payload(rx, &p)) == 1) {
+                if (!p) {
+                    printf("FAIL: join returned NULL at expect_seq=%ld "
+                           "(OS-thread result return was lost)\n", expect);
+                    cc_atomic_store(&g_failed, 1);
+                    cc_atomic_store(&g_pipeline_error, 1);
+                    cc_channel_close(rx, cc_io_error(CC_IO_OTHER));
+                    break;
+                }
+                if (p->seq != expect) {
+                    printf("FAIL: ORDER expected=%ld got=%ld\n", expect, p->seq);
+                    cc_atomic_store(&g_failed, 1);
+                }
+                int want = (int)(expect * expect);
+                if (p->value != want) {
+                    printf("FAIL: seq=%ld value=%d want=%d\n", p->seq, p->value, want);
+                    cc_atomic_store(&g_failed, 1);
+                }
+                free(p);
+                expect++;
+                got++;
+            }
+            if (rc < 0) {
+                printf("FAIL: task_recv_payload error\n");
+                cc_atomic_store(&g_failed, 1);
+                cc_channel_close(rx, cc_io_error(CC_IO_OTHER));
+            }
+            if (!cc_atomic_load(&g_pipeline_error) && got != NUM_ITEMS) {
+                printf("FAIL: got %d items, expected %d\n", got, NUM_ITEMS);
+                cc_atomic_store(&g_failed, 1);
+            }
+        }) @destroy;
+        if (!consumer) {
+            printf("FAIL: consumer nursery\n");
+            return 1;
+        }
+
+        CCNursery* producer = @create(consumer, () => [tx] {
+            for (long i = 0; i < NUM_ITEMS; i++) {
+                if (cc_atomic_load(&g_pipeline_error)) break;
+                Payload* p = (Payload*)malloc(sizeof(Payload));
+                if (!p) {
+                    cc_atomic_store(&g_failed, 1);
+                    break;
+                }
+                p->seq = i;
+                p->value = -1;
+                CCTask task = cc_thread_spawn(compute, p);
+                if (task.kind != CC_TASK_KIND_SPAWN) {
+                    printf("FAIL: INVALID spawn at seq=%ld\n", i);
+                    free(p);
+                    cc_atomic_store(&g_failed, 1);
+                    cc_atomic_store(&g_pipeline_error, 1);
+                    break;
+                }
+                if (cc_chan_send(tx.raw, &task, sizeof(task)) != 0) {
+                    (void)cc_block_on_intptr(task);
+                    break;
+                }
+            }
+        }) @destroy {
+            chan_close(tx);
+        };
+        if (!producer) {
+            chan_close(tx);
+            printf("FAIL: producer nursery\n");
+            return 1;
+        }
+    }
+
+    cc_channel_free(ch);
+
+    if (cc_atomic_load(&g_failed)) {
+        printf("thread_spawn_os_result_return_smoke: FAIL\n");
+        return 1;
+    }
+    printf("thread_spawn_os_result_return_smoke: PASS\n");
+    return 0;
+}

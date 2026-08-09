@@ -131,7 +131,7 @@ static void write_log(CCArena* arena, const char* path, const char* suffix,
 
     CCFile f;
     if (cc_file_open(&f, cc_slice_cstr(full_path), "w") != 0) return;
-    CCSlice slice = cc_slice_from_parts((void*)data, len, CC_SLICE_ID_UNTRACKED, len);
+    CCSlice slice = cc_slice_from_parts((void*)data, len, CC_SLICE_ID_UNTRACKED);
     (void)cc_file_write(&f, slice);
     cc_file_close(&f);
 }

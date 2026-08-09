@@ -23,7 +23,7 @@ static int jstr(const char* p, size_t n, CCSlice* out, CCArena* arena) {
         default: dst[o++] = e; break;
         }
     }
-    *out = cc_slice_from_parts(dst, o, cc_slice_make_id(3ULL, true, false, false), o);
+    *out = cc_slice_from_parts(dst, o, cc_slice_make_id(3ULL, true, false, false));
     return 1;
 }
 

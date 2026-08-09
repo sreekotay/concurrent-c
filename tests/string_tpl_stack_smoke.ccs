@@ -4,8 +4,8 @@
  * `@string(`...`)` with no arena is legal iff every interpolation has a
  * statically boundable max formatted width (integer types, bool, char).
  * Lowering emits a block-scoped stack buffer sized exactly from the bound
- * and yields a `char[:]` borrow (NOT a CCString).  The buffer's capacity is
- * the compile-time bound, observable through the slice's cap. */
+ * and yields a `char[:]` borrow (NOT a CCString).  The stack buffer is sized
+ * to the compile-time bound; the slice carries only the written `len`. */
 #include <ccc/std/prelude.cch>
 #include <assert.h>
 #include <stdint.h>
@@ -20,21 +20,19 @@ int main(void) {
     int v = 42;
     char[:] s = @string(`v=${v}!`);
     assert(s.eq_cstr("v=42!"));
-    /* sized exactly from the bound: "v=" (2) + int bound (11) + "!" (1) */
-    assert(s.alen == 14);
+    assert(s.len == 5); /* "v=42!" — buffer bound is larger; not on the slice */
 
     /* i64: full-width value fits the 20-byte bound exactly */
     int64_t big = INT64_MIN;
     char[:] m = @string(`${big}`);
     assert(m.eq_cstr("-9223372036854775808"));
     assert(m.len == 20);
-    assert(m.alen == 20);
 
     /* u64 max */
     uint64_t u = UINT64_MAX;
     char[:] us = @string(`${u}`);
     assert(us.eq_cstr("18446744073709551615"));
-    assert(us.alen == 20);
+    assert(us.len == 20);
 
     /* bool + char + mixed literals */
     bool flag = true;

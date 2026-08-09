@@ -147,7 +147,8 @@ static RespParseStatus gen_try_read_args_buffered(RespReader* r,
             }
             r->start += pos;
             if (c.framed.args_n == 0) continue;
-            for (size_t i = 0; i < c.framed.args_n; i++) args[i] = c.framed.args[i].data;
+            for (size_t i = 0; i < c.framed.args_n; i++)
+                args[i] = c.framed.args[i].data.as_slice();
             *out_argc = c.framed.args_n;
             return RESP_PARSE_OK;
         }

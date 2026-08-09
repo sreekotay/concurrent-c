@@ -22,7 +22,7 @@ make -C "$SCRIPT_DIR/../../cc" > /dev/null
 make -C "$SCRIPT_DIR/../../cc" lower-headers > /dev/null
 
 # Ensure binaries are built
-make pigz pigz_cc pigz_idiomatic pigz_pthread pigz_hybrid > /dev/null
+make pigz pigz_cc pigz_idiomatic pigz_pthread > /dev/null
 go build -ldflags="-s -w" -o out/pigz_go pigz_go.go > /dev/null
 ZIG_AVAILABLE=0
 if command -v zig >/dev/null 2>&1 && [ -f "$ZIG_SOURCE" ]; then
@@ -53,12 +53,12 @@ if [ ! -f "$INPUT_FILE" ]; then
 fi
 
 # --- benchmark definitions: name, cmd, flags ---
-# Note: CC (Pthread) is held at index 2 because the ratio summary below uses it
-# as the baseline. CC (Hybrid) follows immediately after so the v2 hybrid
-# scheduler is compared apples-to-apples with its pthread sibling.
-BENCH_NAMES=("CC (Idiomatic)" "CC (Full)" "CC (Pthread)" "CC (Hybrid)" "Go (CGO+zlib)")
-BENCH_CMDS=("$OUT_DIR/pigz_idiomatic" "$OUT_DIR/pigz_cc" "$OUT_DIR/pigz_pthread" "$OUT_DIR/pigz_hybrid" "$OUT_DIR/pigz_go")
-BENCH_FLAGS=("" "-k -f" "" "" "")
+# CC (Pthread) is index 2 — ratio summary below uses it as baseline.
+# Always pass -k for pigz-compatible CLIs so a run cannot unlink the corpus
+# (that is what aborted the interleaved loop under set -e).
+BENCH_NAMES=("CC (Idiomatic)" "CC (Full)" "CC (Pthread)" "Go (CGO+zlib)")
+BENCH_CMDS=("$OUT_DIR/pigz_idiomatic" "$OUT_DIR/pigz_cc" "$OUT_DIR/pigz_pthread" "$OUT_DIR/pigz_go")
+BENCH_FLAGS=("" "-k -f" "" "")
 if [ "$ZIG_AVAILABLE" -eq 1 ]; then
     BENCH_NAMES+=("Zig")
     BENCH_CMDS+=("$ZIG_BIN")
@@ -95,24 +95,36 @@ fi
 echo "=========================================================="
 echo ""
 
+# Work on a copy so gzip-style unlink (-k omitted / buggy keep) cannot
+# destroy the corpus mid-interleave under set -e.
+WORK_FILE="$DATA_DIR/.bench_work_${SIZE_MB}mb.bin"
+restore_work() {
+    if [ ! -f "$WORK_FILE" ]; then
+        cp "$INPUT_FILE" "$WORK_FILE"
+    fi
+}
+cp "$INPUT_FILE" "$WORK_FILE"
+
 # Measure RSS once per benchmark before the main loop
 echo "Measuring RSS (one pass per binary)..."
 for ((b=0; b<N; b++)); do
-    rm -f "$INPUT_FILE.gz"
+    restore_work
+    rm -f "$WORK_FILE.gz"
     cmd="${BENCH_CMDS[$b]}"
     flags="${BENCH_FLAGS[$b]}"
     if [[ "$OSTYPE" == "darwin"* ]]; then
-        rss_bytes=$(/usr/bin/time -l $cmd $flags "$INPUT_FILE" > /dev/null 2>&1 || \
-                    /usr/bin/time -l $cmd $flags "$INPUT_FILE" 2>&1 >/dev/null | \
+        rss_bytes=$(/usr/bin/time -l $cmd $flags "$WORK_FILE" > /dev/null 2>&1 || \
+                    /usr/bin/time -l $cmd $flags "$WORK_FILE" 2>&1 >/dev/null | \
                     grep "maximum resident set size" | awk '{print $1}')
         # Retry with stderr redirect
-        rss_raw=$(2>&1 /usr/bin/time -l $cmd $flags "$INPUT_FILE" > /dev/null | grep "maximum resident set size" | awk '{print $1}')
+        rss_raw=$(2>&1 /usr/bin/time -l $cmd $flags "$WORK_FILE" > /dev/null | grep "maximum resident set size" | awk '{print $1}')
         if [ -n "$rss_raw" ] && [ "$rss_raw" -gt 0 ] 2>/dev/null; then
             RSS_VALS[$b]=$(python3 -c "print(f'{$rss_raw/1024/1024:.0f}')")
         fi
     fi
 done
-rm -f "$INPUT_FILE.gz"
+rm -f "$WORK_FILE.gz"
+restore_work
 echo ""
 
 # --- Interleaved timing runs ---
@@ -124,11 +136,12 @@ echo ""
 for ((r=0; r<RUNS; r++)); do
     printf "  %3d" $((r+1))
     for ((b=0; b<N; b++)); do
-        rm -f "$INPUT_FILE.gz"
+        restore_work
+        rm -f "$WORK_FILE.gz"
         cmd="${BENCH_CMDS[$b]}"
         flags="${BENCH_FLAGS[$b]}"
         T0=$(python3 -c 'import time; print(time.time())')
-        $cmd $flags "$INPUT_FILE" > /dev/null 2>&1
+        $cmd $flags "$WORK_FILE" > /dev/null 2>&1
         T1=$(python3 -c 'import time; print(time.time())')
         elapsed=$(python3 -c "print(f'{$T1-$T0:.3f}')")
         ALL_TIMES[$((b*RUNS + r))]="$elapsed"
@@ -140,7 +153,7 @@ for ((r=0; r<RUNS; r++)); do
     done
     echo ""
 done
-rm -f "$INPUT_FILE.gz"
+rm -f "$WORK_FILE" "$WORK_FILE.gz"
 
 # --- Summary ---
 echo ""

@@ -70,7 +70,8 @@ int main(void) {
             sz = 0;
             for (i = 0; i < tip_steps; i++) {
                 size_t want = sz + 16 + (i % 17);
-                void *np = cc_arena_realloc(&tip, &tip, p, sz, want, 8);
+                /* Single-owner tip: local tier (peer bumps are non-atomic too). */
+                void *np = cc_arena_realloc_local_grow(&tip, p, sz, want, 8);
                 if (!np) {
                     cc_arena_free(&tip);
                     return 2;
@@ -95,7 +96,7 @@ int main(void) {
         t0 = now_ms();
         for (i = 0; i < bulk_n; i++) {
             size_t n = bulk_size(i);
-            unsigned char *q = (unsigned char *)cc_arena_alloc(&bulk, n, 8);
+            unsigned char *q = (unsigned char *)cc_arena_alloc_local_grow(&bulk, n, 8);
             if (!q) {
                 cc_arena_free(&bulk);
                 return 4;
@@ -138,7 +139,7 @@ int main(void) {
         c.block_max = (uint16_t)block_max;
         for (j = 0; j < churn_each; j++) {
             size_t n = 16 + (j * 31) % 256;
-            if (!cc_arena_alloc(&c, n, 8)) {
+            if (!cc_arena_alloc_local_grow(&c, n, 8)) {
                 cc_arena_free(&c);
                 return 8;
             }

@@ -88,6 +88,8 @@ over the rule grammar, not separate grammar dialects.
 `@grammar(schema)` declares a typed wire structure and emits direct-to-struct
 parse and write projections. A product schema lowers named primitive, slice,
 byte, nested-schema, and repeated-item fields into a generated C struct.
+A `bytes` field is a `CCSliceHdr` (`{ptr,len}` wire borrow). A kept string /
+line field remains a `CCSlice` (provenance and optional codec materialize).
 
 The stable schema operations are:
 

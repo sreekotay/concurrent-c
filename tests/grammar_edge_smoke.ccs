@@ -20,7 +20,7 @@ static int vc(const char* p, size_t n, CCSlice* out, CCArena* arena) {
     size_t o = 0;
     for (size_t i = 0; i < n; i++)
         if (p[i] != '%') dst[o++] = p[i];
-    *out = cc_slice_from_parts(dst, o, cc_slice_make_id(3ULL, true, false, false), o);
+    *out = cc_slice_from_parts(dst, o, cc_slice_make_id(3ULL, true, false, false));
     return 1;
 }
 

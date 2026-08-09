@@ -280,7 +280,8 @@ static RespParseStatus gen_try_read_args_buffered(RespReader* r,
             }
             r->start += pos;
             if (c.framed.args_n == 0) continue; /* *0 — Redis no-op */
-            for (size_t i = 0; i < c.framed.args_n; i++) args[i] = c.framed.args[i].data;
+            for (size_t i = 0; i < c.framed.args_n; i++)
+                args[i] = c.framed.args[i].data.as_slice();
             *out_argc = c.framed.args_n;
             return RESP_PARSE_OK;
         }
@@ -406,12 +407,12 @@ static RedisReply reply_wire(char[:] s) {
 /* RedisReply → socket bytes.  RespGReply is encode-only; NULL_BULK uses
  * RespGBulk's nil arm. */
 static inline RespGReply wire_bulk(char[:] data) {
-    return (RespGReply){ .bulk = { .len = (long long)data.len, .data = data } };
+    return (RespGReply){ .bulk = { .len = (long long)data.len, .data = data.hdr() } };
 }
 
 static inline RespGBulk wire_bulk_or_nil(char[:] data, bool found) {
     if (!found) return (RespGBulk){ .nil = {} };
-    return (RespGBulk){ .data = { .payload = data } };
+    return (RespGBulk){ .data = { .payload = data.hdr() } };
 }
 
 /* Structured arms → RespGReply.  WIRE and NULL_BULK are handled by the
@@ -837,7 +838,7 @@ static bool redis_conn_write_wire_reply(RedisConn* conn, const RespGReply* wire)
         size_t hw = cc_write(RespGBulkHdr, &hdr, conn->out_buf, redis_conn_out_buf_bytes);
         if (hw == 0) return false;
         conn->out_len = hw; /* buffer is empty after the flush above */
-        return conn->write_bytes(wire->bulk.data) &&
+        return conn->write_bytes(wire->bulk.data.as_slice()) &&
                conn->write_bytes(CC_SLICE_LIT("\r\n"));
     }
     return false;

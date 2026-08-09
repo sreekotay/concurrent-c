@@ -16,7 +16,7 @@ int main(void) {
     CCArena taken = a.detach();
     uint64_t id = cc_slice_make_id(taken.provenance, false, false, false);
     Block b = {
-        .data = cc_slice_from_parts(buf, 13, id, 32),
+        .data = cc_slice_from_parts(buf, 13, id),
         .arena = taken,
     };
 

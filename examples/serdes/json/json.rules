@@ -6,7 +6,10 @@ ws:      any charset [#' ' #'\t' #'\r' #'\n']
 digit:   charset [#'0' - #'9']
 onenine: charset [#'1' - #'9']
 hexd:    charset [#'0' - #'9' #'a' - #'f' #'A' - #'F']
-strchar: complement charset [#'"' #'\\' #'\0' - #'\t' #'\n' #'\r']
+; Structural ends only — matches the hand json.h oracle (trusted corpora).
+; Raw controls in strings are not rejected by the fast scan; escapes still
+; go through `esc`. SWAR then packs as quote+backslash with T=0.
+strchar: complement charset [#'"' #'\\']
 esc:     [#'\\' [[#'u' hexd hexd hexd hexd]
                 | charset [#'"' #'\\' #'/' #'b' #'f' #'n' #'r' #'t']]]
 string:  [#'"' any [some strchar | esc] #'"']

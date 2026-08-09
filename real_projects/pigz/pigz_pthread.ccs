@@ -3,8 +3,12 @@
  *
  * Same compression and handoff semantics as pigz_idiomatic.ccs: compress_block
  * returns a plain CompressedResult* (NULL on failure); the consumer treats NULL
- * as a pipeline error. The transport is an ordered CCTask channel (OS-thread
+ * as a pipeline error. The transport is a FIFO CCTask channel (OS-thread
  * workers) instead of send_task on fibers.
+ *
+ * Note: do NOT pack results in a local struct named __result_t / field
+ * __result inside the thread entry — shadow_lower treats that like send_task
+ * result sugar and can drop the explicit `return`, so joins see NULL.
  */
 
 #include <ccc/std/prelude.cch>
@@ -90,7 +94,7 @@ static CompressedResult* compress_block(Block* blk, int level) {
     out_buf[pos++] = (in_len >> 16) & 0xff;
     out_buf[pos++] = (in_len >> 24) & 0xff;
 
-    res->data = cc_slice_from_parts(out_buf, pos, CC_SLICE_ID_UNTRACKED, pos);
+    res->data = cc_slice_from_parts(out_buf, pos, CC_SLICE_ID_UNTRACKED);
     cc_atomic_fetch_add(&g_bytes_in, blk->data.len);
     cc_atomic_fetch_add(&g_bytes_out, pos);
     cc_atomic_fetch_add(&g_blocks_done, 1);
@@ -123,21 +127,24 @@ static bool write_all_or_fail(CCFile* f, CCSlice data, const char* what) {
     return true;
 }
 
+/* OS-thread entry: return the payload pointer directly (not a __result wrapper). */
 void* compress_task_wrapper(void* arg) {
     Block* blk = (Block*)arg;
-    CompressedResult* res = compress_owned_block(blk);
+    return (void*)compress_owned_block(blk);
+}
 
-    typedef struct { CompressedResult* __result; } __result_t;
-    __result_t* storage = (__result_t*)cc_task_result_ptr(sizeof(__result_t));
-    if (!storage) {
-        /* cc_thread_spawn doesn't have fiber-local storage;
-           fall back to malloc for the tiny result wrapper */
-        storage = (__result_t*)malloc(sizeof(__result_t));
-        if (!storage) return NULL;
+/* Join next CCTask from the FIFO channel; payload is the thread return value. */
+static int pthread_task_recv(CCChanRx rx, CompressedResult** out) {
+    CCTask task;
+    int rc = cc_chan_recv(rx.raw, &task, sizeof(task));
+    if (rc == EPIPE) return 0;
+    if (rc != 0) return -1;
+    if (task.kind != CC_TASK_KIND_SPAWN) {
+        fprintf(stderr, "pthread_task_recv: expected SPAWN task, kind=%d\n", (int)task.kind);
+        return -1;
     }
-
-    storage->__result = res;
-    return storage;
+    *out = (CompressedResult*)cc_block_on_intptr(task);
+    return 1;
 }
 
 int compress_file(const char* in_path, const char* out_path, int level) {
@@ -167,13 +174,14 @@ int compress_file(const char* in_path, const char* out_path, int level) {
     CCFile* out_ptr = &out_file;
 
     CCNursery* consumer = @create(NULL, () => [out_ptr, tasks_rx] {
-        void* result;
+        CompressedResult* r = NULL;
         long expect_seq = 0;
-        while (ordered_recv(tasks_rx, &result) == 1) {
-            CompressedResult* r = (CompressedResult*)result;
+        int rc;
+        while ((rc = pthread_task_recv(tasks_rx, &r)) == 1) {
             if (!r) {
                 fprintf(stderr, "compress task failed (OOM or zlib error)\n");
                 cc_atomic_store(&g_pipeline_error, 1);
+                cc_channel_close(tasks_rx, cc_io_error(CC_IO_OTHER));
                 break;
             }
             if (r->seq != expect_seq) {
@@ -183,9 +191,14 @@ int compress_file(const char* in_path, const char* out_path, int level) {
             expect_seq++;
             if (!write_all_or_fail(out_ptr, r->data, "compressed output")) {
                 cc_arena_free(&r->arena);
+                cc_channel_close(tasks_rx, cc_io_error(CC_IO_OTHER));
                 break;
             }
             cc_arena_free(&r->arena);
+        }
+        if (rc < 0) {
+            cc_atomic_store(&g_pipeline_error, 1);
+            cc_channel_close(tasks_rx, cc_io_error(CC_IO_OTHER));
         }
     }) @destroy;
     if (!consumer) {
@@ -220,9 +233,18 @@ int compress_file(const char* in_path, const char* out_path, int level) {
             
             bool is_last = blk->is_last;
             
-            // KEY DIFFERENCE: cc_thread_spawn instead of cc_fiber_spawn_task
             CCTask task = cc_thread_spawn(compress_task_wrapper, blk);
-            cc_chan_send(tasks_tx.raw, &task, sizeof(task));
+            if (task.kind != CC_TASK_KIND_SPAWN) {
+                fprintf(stderr, "cc_thread_spawn failed seq=%ld\n", blk->seq);
+                cc_arena_free(&blk->arena);
+                cc_atomic_store(&g_pipeline_error, 1);
+                break;
+            }
+            if (cc_chan_send(tasks_tx.raw, &task, sizeof(task)) != 0) {
+                /* Channel closed by consumer on error — drop in-flight task. */
+                (void)cc_block_on_intptr(task);
+                break;
+            }
             
             if (is_last) break;
         }

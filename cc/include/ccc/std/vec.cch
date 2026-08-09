@@ -117,7 +117,7 @@ static inline void* __cc_vec_generic_data(__CCVecGeneric *v) {
 }
 static inline CCSlice __cc_vec_generic_as_slice(__CCVecGeneric *v) {
     if (!v || !v->data) return cc_slice_empty();
-    return cc_slice_from_parts(v->data, v->len, CC_SLICE_ID_UNTRACKED, v->len);
+    return cc_slice_from_parts(v->data, v->len, CC_SLICE_ID_UNTRACKED);
 }
 
 /*
