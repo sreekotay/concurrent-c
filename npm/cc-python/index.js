@@ -251,8 +251,13 @@ class ProcBridge {
     this._cbs = new Map();
     this._nextCb = 1;
     this._closed = false;
+    this._dead = false;
+    this._closePending = false;
+    this._cbInflight = 0;
     this._closeWaiters = [];
+    this._destroyPromise = null;
     this._shmOut = [];
+    this._trackShm = true;
     this._child = spawn(exe, [path.join(__dirname, 'broker.py')], {
       stdio: ['pipe', 'pipe', 'inherit'],
       env: Object.assign({}, process.env, { CC_PY_SHM_DIR: SHM_DIR }),
@@ -266,8 +271,10 @@ class ProcBridge {
   }
 
   _die(why) {
-    if (this._closed) return;
+    if (this._dead) return;
+    this._dead = true;
     this._closed = true;
+    this._closePending = false;
     const pending = this._pending.splice(0);
     for (const p of pending) p.reject(new Error('concurrent-c-python: ' + why));
     for (const w of this._closeWaiters.splice(0)) w();
@@ -280,14 +287,29 @@ class ProcBridge {
     if (obj && obj.cb) {
       // A callback request from the child, arriving mid-call: run the JS
       // function (awaiting whatever it awaits) and reply on its line.
+      // destroy() from inside the cb defers stdin teardown until cbr
+      // is sent — otherwise the broker hangs on its sync read.
       const fn = this._cbs.get(obj.cbid);
+      this._cbInflight++;
       Promise.resolve()
         .then(() => {
           if (!fn) throw new Error('unknown callback ' + obj.cbid);
           return fn(...(obj.args || []).map((a) => this._decode(a)));
         })
-        .then((r) => this._send({ cbr: this._encode(r) }),
-              (e) => this._send({ e: String(e && e.message || e) }));
+        .then((r) => {
+          // Child consumes cbr spills; do not stage them on _shmOut or a
+          // sibling _req settle may unlink before the broker reads.
+          const prev = this._trackShm;
+          this._trackShm = false;
+          try { this._send({ cbr: this._encode(r) }); }
+          finally { this._trackShm = prev; }
+        },
+              (e) => this._send({ e: String(e && e.message || e) }))
+        .finally(() => {
+          this._cbInflight--;
+          if (this._closePending && this._cbInflight === 0)
+            this._tearDownChild();
+        });
       return;
     }
     const p = this._pending.shift();
@@ -295,17 +317,27 @@ class ProcBridge {
   }
 
   _send(obj) {
-    this._child.stdin.write(JSON.stringify(obj) + '\n');
+    // Allow cbr after destroy-from-callback (closePending); block else.
+    if (this._dead || (this._closed && !this._closePending)) return;
+    const stdin = this._child && this._child.stdin;
+    if (!stdin || stdin.destroyed || stdin.writableEnded) return;
+    try {
+      stdin.write(JSON.stringify(obj) + '\n');
+    } catch (e) { /* torn down mid-flight */ }
   }
 
   _req(obj) {
     if (this._closed)
       return Promise.reject(new Error('concurrent-c-python: bridge is closed'));
+    // Args were _encode'd before this call; take ownership of whatever
+    // spill paths they staged so a pipelined sibling settle cannot
+    // unlink them (Promise.all + multi-MB args).
+    const owned = this._shmOut.splice(0);
     return new Promise((resolve, reject) => {
       const sweep = () => {
         // The child unlinks spill files as it decodes them; this sweep
         // only matters when it died first (ENOENT is the normal case).
-        for (const p of this._shmOut.splice(0)) {
+        for (const p of owned) {
           try { fs.unlinkSync(p); } catch (e) { /* consumed */ }
         }
       };
@@ -360,7 +392,7 @@ class ProcBridge {
         const p = path.join(SHM_DIR,
                             'ccpy-' + process.pid + '-' + (++shmSeq));
         fs.writeFileSync(p, buf);
-        this._shmOut.push(p);
+        if (this._trackShm) this._shmOut.push(p);
         return { $shm: p, t: kind };
       }
       return { $ta: kind, b64: buf.toString('base64') };
@@ -388,6 +420,15 @@ class ProcBridge {
     if (v.$nf !== undefined)
       return v.$nf === 'inf' ? Infinity : v.$nf === '-inf' ? -Infinity
                                                            : NaN;
+    if (v.$shm !== undefined || v.shm !== undefined) {
+      const path = v.$shm !== undefined ? v.$shm : v.shm;
+      const kind = v.t || v.$t;
+      const buf = fs.readFileSync(path);
+      try { fs.unlinkSync(path); } catch (e) { /* consumed */ }
+      const C = TA_CTOR[kind];
+      return new C(buf.buffer, buf.byteOffset,
+                   buf.byteLength / C.BYTES_PER_ELEMENT);
+    }
     if (v.$ta !== undefined || v.ta !== undefined) {
       const kind = v.$ta !== undefined ? v.$ta : v.ta;
       const buf = Buffer.from(v.b64, 'base64');
@@ -468,18 +509,43 @@ class ProcBridge {
     return this._pythonExe;
   }
   destroy() {
-    if (this._closed) return Promise.resolve();
-    const done = new Promise((resolve) => {
+    if (this._dead) return Promise.resolve();
+    if (this._destroyPromise) return this._destroyPromise;
+    this._closed = true;
+    this._destroyPromise = new Promise((resolve) => {
       this._closeWaiters.push(resolve);
-      this._child.on('exit', () => resolve());
     });
-    this._req({ op: 'close' }).catch(() => {});
-    try { this._child.stdin.end(); } catch (e) { /* already gone */ }
+    if (this._cbInflight > 0) {
+      // Farewell must not land in the broker's cbr slot.
+      this._closePending = true;
+      return this._destroyPromise;
+    }
+    this._tearDownChild();
+    return this._destroyPromise;
+  }
+
+  _tearDownChild() {
+    this._closePending = false;
+    this._closed = true;
+    try {
+      const stdin = this._child.stdin;
+      if (stdin && !stdin.destroyed && !stdin.writableEnded) {
+        try { stdin.write(JSON.stringify({ op: 'close' }) + '\n'); }
+        catch (e) { /* ignore */ }
+        try { stdin.end(); } catch (e) { /* ignore */ }
+      }
+    } catch (e) { /* ignore */ }
     const child = this._child;
     const t = setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) {} },
                          2000);
     t.unref();
-    return done.then(() => { clearTimeout(t); this._die('bridge is closed'); });
+    // _die (via exit) resolves closeWaiters; also resolve if already dead.
+    if (this._dead) {
+      clearTimeout(t);
+      for (const w of this._closeWaiters.splice(0)) w();
+    } else {
+      this._child.once('exit', () => clearTimeout(t));
+    }
   }
   close() { return this.destroy(); }
   [Symbol.dispose]() { this.destroy(); }

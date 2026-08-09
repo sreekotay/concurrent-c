@@ -143,6 +143,40 @@ const ccpy = require(process.cwd() + '/npm/cc-python');
     py.destroy();
   }
 
+  // 6b. Keep-past-return: a callee that stashes the memoryview is caught
+  //     at the lease boundary; the domain stays healthy for later leases.
+  {
+    const py = ccpy.create();
+    const b = py.import('builtins');
+    const g = b.dict();
+    b.exec(
+      'G=[]\n'
+      + 'def keep(mv):\n'
+      + '  G.append(mv)\n'
+      + '  return len(mv)\n'
+      + 'def sum_ok(mv):\n'
+      + '  return float(sum(mv))\n',
+      g
+    );
+    const keep = b.eval('keep', g);
+    const sumOk = b.eval('sum_ok', g);
+    const buf = new Float64Array(32);
+    buf.fill(2);
+    let caught = false;
+    try { keep(buf); } catch (e) {
+      caught = /retained by the callee|borrow ends/.test(e.message);
+    }
+    out('keep_past_return', caught);
+    out('keep_past_return_alive', sumOk(buf) === 64);
+    const keepT = py.task(keep);
+    let laneCaught = false;
+    try { await keepT(buf); } catch (e) {
+      laneCaught = /retained by the callee|borrow ends/.test(e.message);
+    }
+    out('keep_past_return_lane', laneCaught);
+    py.destroy();
+  }
+
   // 7. Released-handle abuse: as receiver, as argument, and re-released
   //    — three articulate errors, no UB.
   {

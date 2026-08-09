@@ -153,7 +153,8 @@ def _encode_val(v):
     Unlike `_encode` (top-level reply shape), this returns the naked
     JSON value or a tagged form — callables and other live objects
     cross as {"$h": id}, never as a raw Python object (json.dumps
-    would raise)."""
+    would raise).  1-D buffers cross as {"$ta":...}/{"$shm":...}
+    so JS callbacks see typed arrays, not opaque handles."""
     if isinstance(v, float) and not math.isfinite(v):
         return {'$nf': 'inf' if v == math.inf
                 else '-inf' if v == -math.inf else 'nan'}
@@ -165,6 +166,31 @@ def _encode_val(v):
         return v
     if isinstance(v, float):
         return v
+    np = _np()
+    if np is not None and isinstance(v, np.ndarray) and v.ndim == 1:
+        key = _TA_BY_DTYPE.get(str(v.dtype))
+        if key is not None:
+            raw = np.ascontiguousarray(v).tobytes()
+            if len(raw) > _SPILL and _shm_dir:
+                return {'$shm': _shm_write(raw), 't': key}
+            return {'$ta': key,
+                    'b64': base64.b64encode(raw).decode('ascii')}
+    try:
+        import array as _array
+        if isinstance(v, _array.array):
+            key = None
+            for k, (tc, _) in _TA.items():
+                if tc == v.typecode:
+                    key = k
+                    break
+            if key is not None:
+                raw = v.tobytes()
+                if len(raw) > _SPILL and _shm_dir:
+                    return {'$shm': _shm_write(raw), 't': key}
+                return {'$ta': key,
+                        'b64': base64.b64encode(raw).decode('ascii')}
+    except Exception:
+        pass
     return {'$h': _put(v)}
 
 

@@ -283,7 +283,8 @@ Same language as `.ccs`; script prelude + synthetic `main` when you omit
 [spec §9.5](../spec/concurrent-c-spec-complete.md#95-script-library-shcc--cccscript).
 
 ```bash
-ccc examples/py/pydemo.shcc
+ccc examples/py/pydemo.shcc         # CC hosts Python
+ccc examples/js/jsdemo.shcc         # CC→JS (guest; Node owns env)
 ./tools/perf.shcc @                 # list @task entries
 ```
 

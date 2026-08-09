@@ -385,7 +385,8 @@ What the driver does for a `.shcc` unit:
 - Treats a bare `ccc path/to/tool.shcc …` as **run** (shebang-friendly)
 
 ```bash
-ccc examples/py/pydemo.shcc          # implicit run
+ccc examples/py/pydemo.shcc          # CC hosts Python
+ccc examples/js/jsdemo.shcc          # CC→JS call surface (Node owns env)
 ccc run tools/cc_perf_check.shcc -- --help
 ./tools/perf.shcc @                  # list @task entries
 ```
@@ -396,8 +397,9 @@ Shebang from a repo checkout (cwd = repo root):
 #!/usr/bin/env -S ./cc/bin/ccc
 ```
 
-Try [examples/py/pydemo.shcc](../examples/py/pydemo.shcc) (Python from a script)
-or [tools/cc_perf_check.shcc](../tools/cc_perf_check.shcc). Full rules:
+Try [examples/py/pydemo.shcc](../examples/py/pydemo.shcc),
+[examples/js/jsdemo.shcc](../examples/js/jsdemo.shcc), or
+[tools/cc_perf_check.shcc](../tools/cc_perf_check.shcc). Full rules:
 [Language spec §9.5 — Script Library](../spec/concurrent-c-spec-complete.md#95-script-library-shcc--cccscript);
 one-liners: [draft_script_oneliners.md](../spec/draft_script_oneliners.md).
 

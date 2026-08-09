@@ -1,6 +1,13 @@
-# Native modules for Node **and** Python, from one file
+# JS / Python interop — host **or** export
 
-**Packages**
+One boundary, two doors (same headers, same marshalling):
+
+| Door | Who owns `main` | What you get |
+|------|-----------------|--------------|
+| **Hosting** | Concurrent-C | `cc_py_new` / (JS) host an engine; call foreign packages with UFCS + `!>` |
+| **Module export** | Node or CPython | one `.ccs` → `.node` and/or `.abi3.so`; they `require` / `import` your type |
+
+**Process bridges** (any foreign package, heavier):
 
 - **Python from Node** — npm [`concurrent-c-python`](https://www.npmjs.com/package/concurrent-c-python) · in-tree [`npm/cc-python`](../npm/cc-python)
 - **JavaScript from Python** — pip [`concurrent-c-node`](https://pypi.org/project/concurrent-c-node/) · in-tree [`pypi/cc-node`](../pypi/cc-node)
@@ -11,8 +18,65 @@ Publish both (bump patch versions, pack, upload):
 
 [Concurrent-C](https://github.com/sreekotay/concurrent-c) is a strict
 C11-superset preprocessor: `.ccs` lowers to plain C and compiles with
-your host C compiler.  Write a page of it, get a native module for
-either ecosystem — or both from the same file:
+your host C compiler.
+
+## Hosting — CC owns main
+
+Open an interpreter, import a package, call it. Failures are Results;
+attributes are methods; typed destinations extract scalars without an
+extra binding.
+
+**Python** — script form [`examples/py/pydemo.shcc`](../examples/py/pydemo.shcc)
+(fuller tour: [`examples/recipe_py_interop.ccs`](../examples/recipe_py_interop.ccs)):
+
+```c
+#!/usr/bin/env -S ./cc/bin/ccc
+#include <ccc/script/py.cch>
+
+CCPy py = cc_py_new(&a) !> @destroy;
+
+CCPyObj math = py.import("math") !> @destroy;
+double v = math.sqrt(2.0) !>;
+double pv = math.pow(2.0, 10) !>;
+
+CCPyObj stats = py.import("statistics") !> @destroy;
+double xs[:] = {1.0, 2.0, 3.0, 4.0, 42.0};
+double mv = stats.mean(xs) !>;
+
+CCSlice vs = py.import("sys")!>.get("version")!>.as_slice()!>;
+```
+
+```sh
+ccc examples/py/pydemo.shcc
+# or:  ccc run examples/recipe_py_interop.ccs
+```
+
+Probe with `cc_py_available()` when you want a clean skip without libpython.
+Costs for this door: [`perf/py_baseline.ccs`](../perf/py_baseline.ccs) ·
+[`perf/baselines/py_baseline_20260809.txt`](../perf/baselines/py_baseline_20260809.txt).
+
+**JavaScript** — same UFCS call surface (`Math.sqrt`, hop chains), but
+**Node owns the environment today**: there is no `cc_js_new` yet (no
+in-process engine constructor), so the runnable demo is guest mode — build
+a tiny `.node`, call into JS from CC methods, drive it with `node`:
+
+```sh
+ccc examples/js/jsdemo.shcc
+# → Math.sqrt(2.0) = 1.414…   Math.pow(2,10) = 1024  …
+```
+
+Sources: [`examples/js/jsdemo.shcc`](../examples/js/jsdemo.shcc) +
+[`examples/js/jsdemo_mod.ccs`](../examples/js/jsdemo_mod.ccs). Standalone
+hosting (`CCJs js = cc_js_new(&a) !> @destroy` mirroring `cc_py_new`) is
+spec’d in the [stdlib JS section](../spec/concurrent-c-stdlib-spec.md) but
+not implemented — needs an engine backend (QuickJS / libnode) and the
+constructor. Until then, any-npm-package from Python uses the process
+bridge [`concurrent-c-node`](../pypi/cc-node).
+
+## Module export — Node / Python own main
+
+Write a page of Concurrent-C, get a native module for either ecosystem —
+or both from the same file:
 
 ```c
 #include <ccc/script/py.cch>
@@ -129,12 +193,18 @@ can export it to Python and Node — the reflection only looks at the
 
 | you want | use | cost per call |
 |---|---|---|
-| *your* C/CC compute in JS or Python | **a module (this page)** | 40-94ns |
+| call *Python packages* from CC | **hosting** — [`pydemo.shcc`](../examples/py/pydemo.shcc) / [`recipe_py_interop.ccs`](../examples/recipe_py_interop.ccs) | see `py_baseline` |
+| call *into JS* from CC (guest) | [`jsdemo.shcc`](../examples/js/jsdemo.shcc) (Node owns env; same UFCS) | napi trampoline |
+| *your* C/CC compute in JS or Python | **module export** (below) | 40-94ns |
 | any *Python package* from Node, in-process | `npm i concurrent-c-python` | ~5µs sync, zero-copy buffers |
 | N×numpy, crash isolation, per-domain venvs | `concurrent-c-python` isolated domains | ~125µs RTT, shm bulk |
 | any *npm package* from Python | `pip install concurrent-c-node` | ~300µs RTT, shm bulk |
 
-Worked examples: [`examples/recipe_js_module.ccs`](../examples/recipe_js_module.ccs),
+**Hosting / call-out demos:** [`examples/py/pydemo.shcc`](../examples/py/pydemo.shcc)
+(Python, CC owns main), [`examples/js/jsdemo.shcc`](../examples/js/jsdemo.shcc)
+(JS guest, Node owns main), [`examples/recipe_py_interop.ccs`](../examples/recipe_py_interop.ccs).
+
+**Module export:** [`examples/recipe_js_module.ccs`](../examples/recipe_js_module.ccs),
 [`examples/recipe_py_module.ccs`](../examples/recipe_py_module.ccs),
 [`tests/dual_module_export_mod.ccs`](../tests/dual_module_export_mod.ccs)
 (dual-target), [`tests/js_module_double_result_mod.ccs`](../tests/js_module_double_result_mod.ccs)
@@ -150,7 +220,13 @@ catalogued in [`perf/baselines/README.md`](../perf/baselines/README.md):
 [`js_baseline_node_20260809.txt`](../perf/baselines/js_baseline_node_20260809.txt),
 [`py_baseline_20260809.txt`](../perf/baselines/py_baseline_20260809.txt)).
 
-**Native modules** (this page — your code, in-process, reflected):
+**Hosting** (CC owns main — Python packages in-process):
+
+| crossing | cost |
+|---|---|
+| see [`py_baseline_20260809.txt`](../perf/baselines/py_baseline_20260809.txt) | embed / call / buffer paths |
+
+**Native modules** (export — your code, in-process, reflected):
 
 | crossing | cost |
 |---|---|

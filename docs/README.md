@@ -3,6 +3,7 @@
 ## Getting Started
 
 - **[Getting Started](getting-started.md)** — Install, first program, arenas/lifetimes, concurrency, [`.shcc` scripts](getting-started.md#shcc-scripts), learning path
+- **[JS / Python interop](js-py-modules.md)** — hosting (`pydemo.shcc`) and native module export
 - **[When to run what](build-when.md)** — Install vs checkout vs stdlib vs lowerer vs ship vs cold smoke
 - **[Language Concepts](language-concepts.md)** — Defer, results, UFCS, arenas/provenance, closures
 - **[Cheatsheet](cheatsheet.md)** — Quick reference for common patterns

@@ -75,6 +75,12 @@ Python dependency), one marshalling ruleset, and one benchmark
 ([`perf/py_baseline.ccs`](../perf/py_baseline.ccs); latest receipt
 [`perf/baselines/py_baseline_20260809.txt`](../perf/baselines/py_baseline_20260809.txt)).
 `examples/py/pydemo.shcc` is the same embed door in script form.
+`examples/js/jsdemo.shcc` is the JS call-out surface in guest mode (Node
+owns the env — `cc_js_new` hosting is not implemented yet):
+
+```bash
+./cc/bin/ccc examples/js/jsdemo.shcc    # build js_demo.node + Math.sqrt/… via node
+```
 
 ### Comparison: where Rust wins (data races)
 

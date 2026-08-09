@@ -6,6 +6,12 @@ dict_in true
 nonfinite_out true
 async_awaited true
 python_callback true
+callback_return_handle true
+callback_return_handle_nested true
+thenable_reject true
+destroy_from_callback true
+thenable_typed_array true
+import_module true
 py_exc_to_js true
 py_exc_roundtrip true
 missing_package true

@@ -11,6 +11,9 @@ graph_release_collects true
 mixed_order_finalizers true
 lease_sum true
 lease_rss_flat true
+keep_past_return true
+keep_past_return_alive true
+keep_past_return_lane true
 released_as_receiver true
 released_as_argument true
 released_again true

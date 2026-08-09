@@ -18,7 +18,12 @@
  *   big_payload_hail — deep / wide JSON-ish trees both directions
  *   isolated_handle_boomerang — isolated wire: JS cb returns nested callables
  *   isolated_pipeline_cbs     — Promise.all + nested cbs on one child
+ *   isolated_destroy_from_cb  — destroy() inside JS cb while broker waits cbr
+ *   callback_buffer_path      — typed arrays on nested cbr (inline+spill)
+ *   parking_shm               — Promise.all spill args × nested async cbs
  *   keep_past_return — callee stashes memoryview; articulate under load
+ *   asyncio_lane_storm        — coro + awaited cb + destroy-from-await
+ *   release_during_suspend    — release/GC while stage-1 cb promise pending
  *   mixed_hammer     — sync queue-jumps a busy lane while ticks must live
  *   lease_blender    — subarray / GC / zero-copy churn under load
  */
@@ -541,7 +546,219 @@ async function keepPastReturn() {
   ok('keep_past_return_lane', laneCaught === (FULL ? 20 : 8));
 }
 
-/* ---- 12. Mixed sync + lane hammer --------------------------------------- */
+/* ---- 12. Isolated destroy-from-JS-cb ------------------------------------ */
+async function isolatedDestroyFromCb() {
+  console.log('=== isolated_destroy_from_cb ===');
+  const rounds = FULL ? 24 : 10;
+  const t0 = hr();
+  let got = 0, closed = 0, late = 0;
+  for (let r = 0; r < rounds; r++) {
+    const py = ccpy.create({ isolated: true });
+    const b = py.import('builtins');
+    const apply = await b.eval('lambda f: f()');
+    try {
+      const v = await apply(() => { py.destroy(); return 42; });
+      if (v === 42 || (typeof v === 'string' && /closed/.test(v))) got++;
+    } catch (e) {
+      if (/closed|exited/.test(e.message)) got++;
+      else throw e;
+    }
+    if (py.closed) closed++;
+    try { await py.import('math').pi; }
+    catch (e) { if (/closed/.test(e.message)) late++; }
+    try { await py.destroy(); } catch (_) {}
+  }
+  result('isolated_destroy_from_cb_ms %s', nsToMs(hr() - t0).toFixed(1));
+  result('isolated_destroy_from_cb_rounds %d', rounds);
+  ok('isolated_destroy_from_cb_got', got === rounds);
+  ok('isolated_destroy_from_cb_closed', closed === rounds);
+  ok('isolated_destroy_from_cb_late', late === rounds);
+}
+
+/* ---- 13. Callback buffer path (in-process + isolated) ------------------- */
+async function callbackBufferPath() {
+  console.log('=== callback_buffer_path ===');
+  const t0 = hr();
+  // In-process: copy out of a leased buffer inside Python (no retain).
+  {
+    const py = ccpy.create();
+    const b = py.import('builtins');
+    const math = py.import('math');
+    const g = b.dict();
+    b.exec('def dbl(xs):\n  return [float(x) * 2 for x in xs]\n', g);
+    const dbl = b.eval('dbl', g);
+    const buf = new Float64Array([1, 2, 3, 4]);
+    const mapped = dbl(buf);
+    const okMap = String(mapped) === '[2.0, 4.0, 6.0, 8.0]' ||
+                  String(mapped) === '[2, 4, 6, 8]';
+    const big = new Float64Array((1 << 16) / 8 + 8);
+    big.fill(1);
+    const s = math.fsum(big);
+    py.destroy();
+    ok('callback_buffer_path_inproc_map', okMap);
+    ok('callback_buffer_path_inproc_spill', s === big.length);
+  }
+  // Isolated: buffer as cb arg AND return (inline + spill via cbr).
+  {
+    const py = ccpy.create({ isolated: true });
+    const b = py.import('builtins');
+    const apply = await b.eval(
+      'lambda f, a: (lambda b: float(sum(b)))(f(a))');
+    const small = new Float64Array([1, 2, 3, 4]);
+    const doubled = await apply((a) => {
+      const out = new Float64Array(a.length);
+      for (let i = 0; i < a.length; i++) out[i] = a[i] * 2;
+      return out;
+    }, small);
+    const big = new Float64Array((1 << 16) / 8 + 16);
+    big.fill(3);
+    const bigSum = await apply((a) => {
+      // Echo spill-sized buffer back through cbr.
+      return a;
+    }, big);
+    // Python → JS cb as typed array (broker $ta/$shm), not opaque $h.
+    const pya = await b.eval('lambda f: f(__import__("array").array("d", [5,6,7]))');
+    let fromPy = 0;
+    await pya((a) => {
+      fromPy = a.length && a[0] === 5 ? a.length : -1;
+      return 0;
+    });
+    await py.destroy();
+    ok('callback_buffer_path_iso_small', doubled === 20);
+    ok('callback_buffer_path_iso_spill', bigSum === big.length * 3);
+    ok('callback_buffer_path_iso_py_ta', fromPy === 3);
+  }
+  result('callback_buffer_path_ms %s', nsToMs(hr() - t0).toFixed(1));
+}
+
+/* ---- 14. Parking × shm -------------------------------------------------- */
+async function parkingShm() {
+  console.log('=== parking_shm ===');
+  const py = ccpy.create({ isolated: true });
+  const b = py.import('builtins');
+  const apply = await b.eval('lambda f, a: float(sum(f(a)))');
+  const N = FULL ? 24 : 12;
+  const ELEMS = (1 << 16) / 8 + 32; // spill
+  const t0 = hr();
+  // Promise.all pipelines spill-sized args; async nested cbs park later ops.
+  const jobs = [];
+  for (let i = 0; i < N; i++) {
+    const buf = new Float64Array(ELEMS);
+    buf.fill(2);
+    jobs.push(apply(async (a) => {
+      await sleep(1);
+      return a;
+    }, buf));
+  }
+  const vals = await Promise.all(jobs);
+  await py.destroy();
+  result('parking_shm_ms %s', nsToMs(hr() - t0).toFixed(1));
+  result('parking_shm_n %d', N);
+  result('parking_shm_elems %d', ELEMS);
+  ok('parking_shm_sums', vals.every((v) => v === ELEMS * 2));
+}
+
+/* ---- 15. asyncio lane storm --------------------------------------------- */
+async function asyncioLaneStorm() {
+  console.log('=== asyncio_lane_storm ===');
+  const py = ccpy.create();
+  const b = py.import('builtins');
+  const ns = b.dict();
+  b.exec(
+    'import asyncio\n'
+    + 'async def work(tag, n):\n'
+    + '    await asyncio.sleep(n)\n'
+    + '    return tag\n'
+    + 'async def fetch2(cb, x):\n'
+    + '    v = await cb(x)\n'
+    + '    return v * 2\n'
+    + 'async def forever():\n'
+    + '    await asyncio.sleep(3600)\n',
+    ns
+  );
+  const work = ns.get('work');
+  const fetch2 = ns.get('fetch2');
+  const N = FULL ? 40 : 16;
+  const t0 = hr();
+  const tags = await Promise.all(
+    Array.from({ length: N }, (_, i) => py.task(work)('t' + i, 0.005))
+  );
+  let fetchOk = 0;
+  for (let i = 0; i < N; i++) {
+    const r = await py.task(fetch2)(async (x) => {
+      await sleep(2);
+      return x + 1;
+    }, i);
+    if (r === (i + 1) * 2) fetchOk++;
+  }
+  // Destroy while an awaited cb is still pending.
+  const py2 = ccpy.create();
+  const b2 = py2.import('builtins');
+  const ns2 = b2.dict();
+  b2.exec(
+    'import asyncio\n'
+    + 'async def fetch2(cb, x):\n'
+    + '    v = await cb(x)\n'
+    + '    return v\n',
+    ns2
+  );
+  let destroyReject = false;
+  const hung = py2.task(ns2.get('fetch2'))(async () => {
+    await sleep(500);
+    return 1;
+  }, 0);
+  const got = hung.then(() => 'ok', (e) => (/closed/.test(e.message) ? 'rej' : 'other'));
+  await sleep(20);
+  await py2.destroy();
+  destroyReject = (await got) === 'rej';
+  py.destroy();
+  result('asyncio_lane_storm_ms %s', nsToMs(hr() - t0).toFixed(1));
+  ok('asyncio_lane_storm_work', tags.length === N && String(tags[0]) === 't0');
+  ok('asyncio_lane_storm_fetch', fetchOk === N);
+  ok('asyncio_lane_storm_destroy', destroyReject);
+}
+
+/* ---- 16. release / GC during stage-1 suspension ------------------------- */
+async function releaseDuringSuspend() {
+  console.log('=== release_during_suspend ===');
+  const py = ccpy.create();
+  const b = py.import('builtins');
+  const math = py.import('math');
+  const ns = b.dict();
+  b.exec(
+    'def score(fetch, user):\n'
+    + '    row = fetch(user)\n'
+    + '    return user + ":" + str(row)\n',
+    ns
+  );
+  const score = ns.get('score');
+  const sqrt = math.sqrt;
+  const t0 = hr();
+  // Lane so the event loop stays live while Python awaits the JS cb.
+  const laneScore = py.task(score);
+  let ticks = 0;
+  const tick = setInterval(() => { ticks++; }, 1);
+  await sleep(15);
+  let h2 = math.ceil;
+  const r = await laneScore(async (user) => {
+    await sleep(40);
+    try { py.release(h2); } catch (_) {}
+    h2 = null;
+    if (global.gc) global.gc();
+    return await py.task(sqrt)(49);
+  }, 'bob');
+  await sleep(15);
+  clearInterval(tick);
+  const alive = math.floor(3.7) === 3;
+  py.destroy();
+  result('release_during_suspend_ms %s', nsToMs(hr() - t0).toFixed(1));
+  result('release_during_suspend_ticks %d', ticks);
+  ok('release_during_suspend_result', String(r) === 'bob:7.0' || String(r) === 'bob:7');
+  ok('release_during_suspend_alive', alive);
+  ok('release_during_suspend_loop', ticks >= 5);
+}
+
+/* ---- 17. Mixed sync + lane hammer --------------------------------------- */
 async function mixedHammer(numpyOk) {
   console.log('=== mixed_hammer ===');
   const py = ccpy.create();
@@ -587,7 +804,7 @@ async function mixedHammer(numpyOk) {
   ok('mixed_hammer_loop_alive', ticks >= 5);
 }
 
-/* ---- 13. Lease blender -------------------------------------------------- */
+/* ---- 18. Lease blender -------------------------------------------------- */
 async function leaseBlender() {
   console.log('=== lease_blender ===');
   const py = ccpy.create();
@@ -639,7 +856,12 @@ async function leaseBlender() {
   await bigPayloadHail();
   await isolatedHandleBoomerang();
   await isolatedPipelineCbs();
+  await isolatedDestroyFromCb();
+  await callbackBufferPath();
+  await parkingShm();
   await keepPastReturn();
+  await asyncioLaneStorm();
+  await releaseDuringSuspend();
   await mixedHammer(numpyOk);
   await leaseBlender();
 

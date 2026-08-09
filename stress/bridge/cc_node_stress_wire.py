@@ -434,6 +434,156 @@ def ledger_churn() -> None:
     ok("ledger_churn_require", joined == "a/b/c")
 
 
+def callback_buffer_path() -> None:
+    """Typed arrays cross the nested cbr path (inline + spill)."""
+    print("=== callback_buffer_path ===")
+    js = cc_node.create()
+    # JS → Python cb with a buffer; Python returns a transformed buffer.
+    roundtrip = js.eval(
+        "(cb, a) => { const b = cb(a); return b instanceof Float64Array "
+        "? b.reduce((s, x) => s + x, 0) : -1; }"
+    )
+    small = array.array("d", [1.0, 2.0, 3.0, 4.0])
+    # Spill-sized
+    n_big = (1 << 16) // 8 + 8  # just over 64KiB of f64
+    big = array.array("d", [1.0] * n_big)
+    t0 = time.perf_counter()
+
+    def double(a):
+        # a may be numpy or array.array
+        if hasattr(a, "tolist"):
+            xs = a.tolist() if not hasattr(a, "__len__") else list(a)
+        else:
+            xs = list(a)
+        return array.array("d", [x * 2 for x in xs])
+
+    s_small = roundtrip(double, small)
+    s_big = roundtrip(double, big)
+    # Return buffer from Python cb that JS then maps.
+    mapped = js.eval("(cb) => Array.from(cb()).reduce((s, x) => s + x, 0)")
+    s_ret = mapped(lambda: array.array("d", [10.0, 20.0, 30.0]))
+    js.destroy()
+    result("callback_buffer_path_ms %.1f", (time.perf_counter() - t0) * 1000)
+    ok("callback_buffer_path_small", s_small == 20.0)
+    ok("callback_buffer_path_big", s_big == float(n_big * 2))
+    ok("callback_buffer_path_ret", s_ret == 60.0)
+
+
+def child_crash_storm() -> None:
+    """Node child dies mid-call / mid-callback: host rejects, no hang."""
+    print("=== child_crash_storm ===")
+    import signal as _signal
+    rounds = 20 if FULL else 10
+    t0 = time.perf_counter()
+    mid_call = 0
+    mid_cb = 0
+    late = 0
+    for i in range(rounds):
+        js = cc_node.create()
+        if i % 2 == 0:
+            boom = js.eval("() => process.exit(9)")
+            try:
+                boom()
+            except Exception as e:
+                if "exit" in str(e).lower() or "closed" in str(e).lower():
+                    mid_call += 1
+        else:
+            # Kill the child while the broker is blocked on cbr.
+            pid = js.eval("() => process.pid")()
+            caller = js.eval("(f) => f(1)")
+
+            def boom(_x):
+                os.kill(int(pid), _signal.SIGKILL)
+                return 1
+
+            try:
+                caller(boom)
+            except Exception as e:
+                if "exit" in str(e).lower() or "closed" in str(e).lower():
+                    mid_cb += 1
+        if js.closed:
+            late += 1
+        else:
+            try:
+                js.eval("1+1")
+            except Exception as e:
+                if "closed" in str(e).lower() or "exit" in str(e).lower():
+                    late += 1
+            try:
+                js.destroy()
+            except Exception:
+                pass
+    result("child_crash_storm_ms %.1f", (time.perf_counter() - t0) * 1000)
+    result("child_crash_storm_rounds %d", rounds)
+    ok("child_crash_storm_mid_call", mid_call == (rounds + 1) // 2)
+    ok("child_crash_storm_mid_cb", mid_cb == rounds // 2)
+    ok("child_crash_storm_late", late == rounds)
+
+
+def thenable_typed_array() -> None:
+    """Awaited thenables that resolve to typed arrays (inline + spill)."""
+    print("=== thenable_typed_array ===")
+    js = cc_node.create()
+    small = js.eval("async () => new Float64Array([1, 2, 3, 4])")
+    n_big = (1 << 16) // 8 + 16
+    big = js.eval(
+        "async () => { const a = new Float64Array(%d); a.fill(2); return a; }"
+        % n_big
+    )
+    t0 = time.perf_counter()
+    a = small()
+    b = big()
+    # Mix with a rejecting thenable so encode path stays demuxed.
+    try:
+        js.eval("async () => { throw new Error('ta-boom'); }")()
+        rej_ok = False
+    except cc_node.JsError as e:
+        rej_ok = "ta-boom" in str(e)
+    js.destroy()
+    sa = list(a) if hasattr(a, "__iter__") else []
+    sb = list(b) if hasattr(b, "__iter__") else []
+    result("thenable_typed_array_ms %.1f", (time.perf_counter() - t0) * 1000)
+    ok("thenable_typed_array_small", sa == [1.0, 2.0, 3.0, 4.0])
+    ok("thenable_typed_array_big", len(sb) == n_big and sb[0] == 2.0)
+    ok("thenable_typed_array_rej", rej_ok)
+
+
+def import_module_storm() -> None:
+    """ESM import_module door under ledger churn (vs require)."""
+    print("=== import_module_storm ===")
+    js = cc_node.create()
+    n = 40 if FULL else 16
+    t0 = time.perf_counter()
+    # node: namespace is ESM-friendly on modern Node.
+    fs = js.import_module("node:fs")
+    path = js.import_module("node:path")
+    joined = path.join("a", "b")
+    # existsSync should be a bound method handle.
+    exists = fs.existsSync
+    here = exists(__file__) if callable(exists) else False
+    # Churn: re-import + release + stats.
+    ok_n = 0
+    for i in range(n):
+        m = js.import_module("node:path")
+        if m.join("x", "y") == "x/y":
+            ok_n += 1
+        if i % 5 == 0:
+            js.release(m)
+        _ = js.stats()
+    # Thenable namespace: fs.promises.readFile is async — await is free.
+    promises = fs.promises
+    read = promises.readFile
+    # Use a tiny existing file.
+    text = read(__file__, "utf8")
+    js.destroy()
+    result("import_module_storm_ms %.1f", (time.perf_counter() - t0) * 1000)
+    result("import_module_storm_n %d", n)
+    ok("import_module_storm_join", joined == "a/b")
+    ok("import_module_storm_exists", here is True)
+    ok("import_module_storm_churn", ok_n == n)
+    ok("import_module_storm_read", isinstance(text, str) and "import_module" in text)
+
+
 def cross_domain_barrage() -> None:
     """Many domains; cross-handle misuse stays articulate; no wire bleed."""
     print("=== cross_domain_barrage ===")
@@ -484,6 +634,10 @@ def main() -> int:
     thenable_storm()
     thenable_reject_storm()
     destroy_from_callback()
+    callback_buffer_path()
+    child_crash_storm()
+    thenable_typed_array()
+    import_module_storm()
     ledger_churn()
     shm_hail()
     teardown_derby()

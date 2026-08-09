@@ -55,6 +55,10 @@ except cc_node.JsError as e:
 js2 = cc_node.create()
 caller = js2.eval("(f) => f()")
 out("destroy_from_callback", caller(lambda: (js2.destroy(), 7)[1]) == 7 and js2.closed)
+ta = js.eval("async () => new Float64Array([1, 2, 3])")
+out("thenable_typed_array", list(ta()) == [1.0, 2.0, 3.0])
+fs = js.import_module("node:path")
+out("import_module", fs.join("a", "b") == "a/b")
 thrower = js.eval("(f) => { try { f(); return 'no'; } catch (e) { return 'js saw: ' + e.message; } }")
 def boom():
     raise ValueError("from python")

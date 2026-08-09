@@ -1,0 +1,44 @@
+/*
+ * Guest-mode companion for examples/js/jsdemo.shcc.
+ *
+ * Node owns the environment; CC calls into it with the same UFCS + !>
+ * surface hosting will use once cc_js_new lands.  Build + drive via:
+ *
+ *     ccc examples/js/jsdemo.shcc
+ */
+#include <ccc/script/js.cch>
+
+typedef struct JsDemo { int _; } JsDemo;
+
+static double !>(CCError) JsDemo_sqrt2(JsDemo *self, CCJs *js) {
+    @errhandler(CCError e) { return cc_err(e); }
+    (void)self;
+    double v = js->global()!>.get("Math")!>.sqrt(2.0) !>;
+    return cc_ok(v);
+}
+
+static double !>(CCError) JsDemo_pow(JsDemo *self, CCJs *js,
+                                    double base, double exp) {
+    @errhandler(CCError e) { return cc_err(e); }
+    (void)self;
+    double v = js->global()!>.get("Math")!>.pow(base, exp) !>;
+    return cc_ok(v);
+}
+
+static long long !>(CCError) JsDemo_floor(JsDemo *self, CCJs *js, double x) {
+    @errhandler(CCError e) { return cc_err(e); }
+    (void)self;
+    long long v = js->global()!>.get("Math")!>.floor(x) !>;
+    return cc_ok(v);
+}
+
+static long long !>(CCError) JsDemo_pid(JsDemo *self, CCJs *js) {
+    @errhandler(CCError e) { return cc_err(e); }
+    (void)self;
+    long long v = js->global()!>.get("process")!>.get("pid")!>.as_i64()!>;
+    return cc_ok(v);
+}
+
+static const JsDemo seed = { ._= 0 };
+
+@comptime cc_js_export("JsDemo", &seed);

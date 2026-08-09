@@ -17,51 +17,10 @@ const ccpy = require(process.cwd() + '/npm/cc-python');
 
 (async () => {
   const py = ccpy.create({ isolated: true });
-  const np = py.import('numpy');
   const b = py.import('builtins');
 
-  // 1. numpy IN A CHILD — no subinterpreter refusal, full C extensions.
-  {
-    const buf = new Float64Array([1, 2, 3, 4]);
-    out('numpy_in_child', (await np.sum(buf)) === 10);
-  }
-
-  // 2. Values cross by the wire rules: small arrays inline as typed
-  //    arrays, big ones stay handles, scalars are scalars, non-finite
-  //    floats survive.
-  {
-    const small = await np.arange(5);
-    out('small_array_inlines', small.constructor === BigInt64Array &&
-        small.length === 5 && small[4] === 4n);
-    const big = await np.zeros(1 << 17);
-    out('big_array_is_handle', typeof big === 'function');
-    out('handle_chains', (await big.mean()) === 0);
-    out('nonfinite_crosses', (await b.float('-inf')) === -Infinity);
-    // Big buffers spill through shared memory, both directions, and the
-    // spill files are consumed — none stray.
-    const wide = new Float64Array(1 << 18).map((_, i) => (i % 89) * 0.5);
-    let want = 0;
-    for (const v of wide) want += v;
-    out('shm_arg_integrity', Math.abs((await np.sum(wide)) - want) < 1e-6);
-    const echoed = await (await np.arange(1 << 18)).toTypedArray();
-    out('shm_result_integrity', echoed.length === (1 << 18) &&
-        echoed[(1 << 18) - 1] === BigInt((1 << 18) - 1));
-    {
-      const dir = fs.existsSync('/dev/shm') ? '/dev/shm' : os.tmpdir();
-      const stray = fs.readdirSync(dir).filter(
-          (f) => f.startsWith('ccpy-' + process.pid + '-'));
-      out('shm_no_strays', stray.length === 0);
-    }
-  }
-
-  // 3. Lazy chains: np.linalg.norm is ZERO round trips until the call.
-  {
-    const norm = np.linalg.norm; // no awaits anywhere on the path
-    out('lazy_chain_call', (await norm(new Float64Array([3, 4]))) === 5);
-  }
-
-  // 4. JS callbacks cross the wire — and may be async (the child blocks
-  //    on its line; the parent awaits whatever it likes first).
+  // 1. Wire edges that need no numpy — pin before the numpy gate so a
+  //    direct `node …_proc.js` without numpy still covers them.
   {
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const mapped = await b.list(await b.map(async (x) => {
@@ -80,6 +39,58 @@ const ccpy = require(process.cwd() + '/npm/cc-python');
       return await f(10);
     }));
     out('pipelined_nested_cbs', JSON.stringify(piped) === '[10,11,12,13]');
+    out('nonfinite_crosses', (await b.float('-inf')) === -Infinity);
+    // destroy() inside a JS callback must not hang the cbr wait.
+    {
+      const pyD = ccpy.create({ isolated: true });
+      const bD = pyD.import('builtins');
+      const applyD = await bD.eval('lambda f: f()');
+      let v = null;
+      try { v = await applyD(() => { pyD.destroy(); return 7; }); }
+      catch (e) { v = /closed|exited/.test(e.message) ? 7 : null; }
+      out('isolated_destroy_from_cb', v === 7 && pyD.closed);
+    }
+  }
+
+  const np = py.import('numpy');
+
+  // 2. numpy IN A CHILD — no subinterpreter refusal, full C extensions.
+  {
+    const buf = new Float64Array([1, 2, 3, 4]);
+    out('numpy_in_child', (await np.sum(buf)) === 10);
+  }
+
+  // 3. Values cross by the wire rules: small arrays inline as typed
+  //    arrays, big ones stay handles, scalars are scalars, non-finite
+  //    floats survive.
+  {
+    const small = await np.arange(5);
+    out('small_array_inlines', small.constructor === BigInt64Array &&
+        small.length === 5 && small[4] === 4n);
+    const big = await np.zeros(1 << 17);
+    out('big_array_is_handle', typeof big === 'function');
+    out('handle_chains', (await big.mean()) === 0);
+    // Big buffers spill through shared memory, both directions, and the
+    // spill files are consumed — none stray.
+    const wide = new Float64Array(1 << 18).map((_, i) => (i % 89) * 0.5);
+    let want = 0;
+    for (const v of wide) want += v;
+    out('shm_arg_integrity', Math.abs((await np.sum(wide)) - want) < 1e-6);
+    const echoed = await (await np.arange(1 << 18)).toTypedArray();
+    out('shm_result_integrity', echoed.length === (1 << 18) &&
+        echoed[(1 << 18) - 1] === BigInt((1 << 18) - 1));
+    {
+      const dir = fs.existsSync('/dev/shm') ? '/dev/shm' : os.tmpdir();
+      const stray = fs.readdirSync(dir).filter(
+          (f) => f.startsWith('ccpy-' + process.pid + '-'));
+      out('shm_no_strays', stray.length === 0);
+    }
+  }
+
+  // 4. Lazy chains: np.linalg.norm is ZERO round trips until the call.
+  {
+    const norm = np.linalg.norm; // no awaits anywhere on the path
+    out('lazy_chain_call', (await norm(new Float64Array([3, 4]))) === 5);
   }
 
   // 5. Exceptions keep "Type: message".
