@@ -118,6 +118,47 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     console.log('RESULT overlap_gain x %s', (serial / overlapped).toFixed(2));
   }
 
+  // numpy OVERLAPPED WITH numpy, one domain: BLAS releases the GIL, so
+  // a sync dot on main runs WHILE a task dot runs on the lane — two
+  // numpy computations, two cores, one interpreter.  BLAS's own thread
+  // pool COMPETES with this (each call already fans out, and bulk dot
+  // is bandwidth-bound), so the pattern wants pinned BLAS:
+  //
+  //   OPENBLAS_NUM_THREADS=1 node examples/js_numpy_bridge_async.js
+  //
+  // — measured 2.02x pinned (perfect two-lane scaling) vs 0.44x letting
+  // the pools fight.  Alternating best-of-3 as above.
+  {
+    const iters = 10;
+    let serial = Infinity;
+    let overlapped = Infinity;
+    dotSync(a, b);
+    await dot(a, b);
+    for (let trial = 0; trial < 3; trial++) {
+      let t0 = process.hrtime.bigint();
+      for (let i = 0; i < iters; i++) {
+        dotSync(a, b); // numpy on main...
+        dotSync(a, b); // ...then numpy on main again
+      }
+      serial = Math.min(serial, Number(process.hrtime.bigint() - t0) / iters);
+
+      t0 = process.hrtime.bigint();
+      for (let i = 0; i < iters; i++) {
+        const p = dot(a, b); // numpy on the lane (GIL released in BLAS)...
+        dotSync(a, b);       // ...numpy on main, same interpreter
+        await p;
+      }
+      overlapped =
+        Math.min(overlapped, Number(process.hrtime.bigint() - t0) / iters);
+    }
+    const pinned = process.env.OPENBLAS_NUM_THREADS === '1' ||
+                   process.env.OMP_NUM_THREADS === '1';
+    console.log('RESULT numpy_x2_blas_pinned %s', pinned ? 'true' : 'false');
+    console.log('RESULT numpy_x2_serial_ms %s', (serial / 1e6).toFixed(2));
+    console.log('RESULT numpy_x2_overlapped_ms %s', (overlapped / 1e6).toFixed(2));
+    console.log('RESULT numpy_x2_gain x %s', (serial / overlapped).toFixed(2));
+  }
+
   console.log('RESULT live_handles n %d', py.stats());
   await py.destroy();
   console.log('done');

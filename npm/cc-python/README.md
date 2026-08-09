@@ -76,6 +76,43 @@ GC mid-flight cannot dangle it.  `destroy()` rejects queued calls
 immediately, lets the in-flight call finish, and sweeps after the last
 result is delivered.  An idle lane never keeps the process alive.
 
+### Parallel numpy, today
+
+Three real parallelism tiers, all measured
+([`examples/js_numpy_bridge_async.js`](examples/js_numpy_bridge_async.js),
+[`examples/js_two_interp.js`](examples/js_two_interp.js)):
+
+**numpy ∥ your JavaScript** — the lane runs numpy while the main thread
+computes: balanced work lands at **1.8x**, wall clock ≈ max instead of
+sum.
+
+**numpy ∥ numpy, one interpreter** — BLAS releases the GIL, so a sync
+call on main overlaps a task call on the lane.  numpy's own BLAS thread
+pool competes with this (each call already fans out), so the pattern
+wants pinned BLAS — then the lane owns the parallelism:
+
+```sh
+OPENBLAS_NUM_THREADS=1 node app.js
+```
+```js
+const dot = np.dot, dotT = py.task(np.dot);
+const p = dotT(a, b);   // numpy on the lane...
+dot(c, d);              // ...numpy on main, same interpreter
+await p;                // measured: 2.02x — perfect two-lane scaling
+```
+
+**numpy ∥ sibling interpreters** — every `create()` after the first is
+an isolated subinterpreter with its **own GIL**: real multi-core Python,
+sharing buffers zero-copy through JS as neutral ground (one
+`Float64Array` leased into both).  Measured: 5.7ms + 24.5ms of work in
+two domains completes together in 20.1ms.  The one honest limit:
+**numpy itself refuses subinterpreters** (the CPython C-extension rule
+— the refusal is articulate, not a crash), so sibling domains compute
+in pure Python or GIL-releasing stdlib today.  N independent
+numpy-capable interpreters is exactly what **process-isolated domains**
+(the next tier — full CPython per child, crash isolation, per-domain
+venvs) deliver.
+
 `py.task(jsClosure)` is reserved for recorded batch graphs —
 parameterized pipelines that ship N Python calls as one job (and, later,
 across a process boundary) — and says so articulately until it exists.

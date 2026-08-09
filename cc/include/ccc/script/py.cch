@@ -465,7 +465,7 @@ static int cc__py_spawn_resolve(const char *exe, char *lib_out, size_t cap) {
     FILE *p;
     if (strchr(exe, '\'')) {
         snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
-                 "python: interpreter path contains a quote: %s", exe);
+                 "python: interpreter path contains a quote: %.360s", exe);
         return -1;
     }
     snprintf(cmd, sizeof(cmd),
@@ -483,7 +483,7 @@ static int cc__py_spawn_resolve(const char *exe, char *lib_out, size_t cap) {
     }
     if (!libdir[0] || !soname[0]) {
         snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
-                 "python: cannot interrogate '%s' (not a working python?)",
+                 "python: cannot interrogate '%.360s' (not a working python?)",
                  exe);
         return -1;
     }
@@ -491,8 +491,9 @@ static int cc__py_spawn_resolve(const char *exe, char *lib_out, size_t cap) {
         size_t sl = strlen(soname);
         if (sl > 2 && strcmp(soname + sl - 2, ".a") == 0) {
             snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
-                     "python: '%s' was built with a static libpython (%s) — "
-                     "embedding needs a shared runtime (--enable-shared)",
+                     "python: '%.240s' was built with a static libpython "
+                     "(%.100s) — embedding needs a shared runtime "
+                     "(--enable-shared)",
                      exe, soname);
             return -1;
         }
@@ -502,8 +503,8 @@ static int cc__py_spawn_resolve(const char *exe, char *lib_out, size_t cap) {
         struct stat st;
         if (stat(lib_out, &st) != 0) {
             snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
-                     "python: '%s' names its runtime as %s, which does not "
-                     "exist", exe, lib_out);
+                     "python: '%.200s' names its runtime as %.240s, which "
+                     "does not exist", exe, lib_out);
             return -1;
         }
     }
@@ -520,7 +521,7 @@ static int cc__py_sel_resolve(const char *spec, const char *how,
     prog_out[0] = 0;
     if (!spec || !spec[0] || stat(spec, &st) != 0) {
         snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
-                 "python: %s does not exist: %s", how,
+                 "python: %.40s does not exist: %.360s", how,
                  spec && spec[0] ? spec : "(empty)");
         return -1;
     }
@@ -530,8 +531,8 @@ static int cc__py_sel_resolve(const char *spec, const char *how,
         snprintf(cfg, sizeof(cfg), "%s/pyvenv.cfg", spec);
         if (stat(cfg, &st) != 0) {
             snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
-                     "python: %s is not a venv (no pyvenv.cfg): %s", how,
-                     spec);
+                     "python: %.40s is not a venv (no pyvenv.cfg): %.360s",
+                     how, spec);
             return -1;
         }
         snprintf(exe, sizeof(exe), "%s/bin/python", spec);
@@ -539,7 +540,7 @@ static int cc__py_sel_resolve(const char *spec, const char *how,
             snprintf(exe, sizeof(exe), "%s/bin/python3", spec);
         if (stat(exe, &st) != 0) {
             snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
-                     "python: %s venv has no bin/python: %s", how, spec);
+                     "python: %.40s venv has no bin/python: %.360s", how, spec);
             return -1;
         }
         if (cc__py_spawn_resolve(exe, lib_out, lib_cap) != 0) return -1;
@@ -582,7 +583,7 @@ static inline int cc_py_use(const char *spec) {
             strcmp(prog, cc__py_sel_prog) == 0)
             return 0; /* same choice, settled */
         snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
-                 "python: the runtime is already loaded (%s%s%s) — one "
+                 "python: the runtime is already loaded (%.300s%.16s%.32s) — one "
                  "runtime per process; per-domain runtimes arrive with "
                  "process-isolated domains",
                  cc__py_sel_lib[0] ? cc__py_sel_lib : "via discovery",
@@ -637,7 +638,8 @@ static int cc__py_load(void) {
         cc__py.lib = dlopen(cc__py_sel_lib, RTLD_NOW | RTLD_GLOBAL);
         if (!cc__py.lib) {
             snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
-                     "python: dlopen failed for the %s runtime %s: %s",
+                     "python: dlopen failed for the %.32s runtime %.300s: "
+                     "%.100s",
                      cc__py_sel_how, cc__py_sel_lib, dlerror());
             return -1;
         }
@@ -678,7 +680,8 @@ static int cc__py_load(void) {
             cc__py.lib = dlopen(cc__py_sel_lib, RTLD_NOW | RTLD_GLOBAL);
             if (!cc__py.lib) {
                 snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
-                         "python: dlopen failed for the %s runtime %s: %s",
+                         "python: dlopen failed for the %.32s runtime %.300s: "
+                         "%.100s",
                          how, cc__py_sel_lib, dlerror());
                 return -1;
             }
@@ -2009,7 +2012,7 @@ static inline CCResult_CCPy_CCPyError cc_py_new(CCArena *arena) {
         if (cc__py_sel_prog[0]) {
             if (!cc__py.SetProgramName || !cc__py.DecodeLocale) {
                 snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
-                         "python: this runtime cannot adopt %s (needs "
+                         "python: this runtime cannot adopt %.360s (needs "
                          "Py_SetProgramName + Py_DecodeLocale)",
                          cc__py_sel_prog);
                 return cc_err_CCResult_CCPy_CCPyError(cc__py_err("cc_py_new"));
@@ -2020,7 +2023,7 @@ static inline CCResult_CCPy_CCPyError cc_py_new(CCArena *arena) {
                     cc__py_progw = cc__py.DecodeLocale(cc__py_sel_prog, NULL);
                 if (!cc__py_progw) {
                     snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
-                             "python: cannot decode program path %s",
+                             "python: cannot decode program path %.360s",
                              cc__py_sel_prog);
                     return cc_err_CCResult_CCPy_CCPyError(
                         cc__py_err("cc_py_new"));
