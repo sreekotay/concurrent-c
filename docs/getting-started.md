@@ -36,14 +36,32 @@ PREFIX="$HOME/.local" ./cc-install.sh
 That builds the toolchain (and its TinyCC comptime dependency), installs under
 `$PREFIX`, and compiles a small program to prove the install. Put `$PREFIX/bin`
 on `PATH` (the script can edit your shell rc via `--add-to-path`).
-
-`cc-install.sh` also works from an existing checkout, accepts a custom
-`PREFIX`, and (unless `--no-editor-tools`) installs the Concurrent-C syntax
-package for VS Code / Cursor plus CodeLLDB when those CLIs are present. See
-the script’s `--help` and [Debugging](debugging.md).
+`cc-install.sh` also works from an existing checkout with a custom `PREFIX`.
 
 Build outputs from `ccc` land in `./out` and `./bin` under the directory you
 run from (`--out-dir` / `--bin-dir`); never into `$PREFIX`.
+
+### VS Code / Cursor syntax (required for a good edit experience)
+
+> **Install the Concurrent-C syntax extension** — not on the marketplace.
+> Highlighting for `.ccs` / `.cch` / `.shcc` ships in-tree.
+>
+> | How you installed `ccc` | What to do |
+> |-------------------------|------------|
+> | **`./cc-install.sh`** | Already done (unless you passed `--no-editor-tools`). Also tries CodeLLDB when the `code` / `cursor` CLI exists. |
+> | **Homebrew** (or you skipped editor tools) | From a clone of this repo: |
+>
+> ```bash
+> git clone --filter=blob:none https://github.com/sreekotay/concurrent-c.git
+> cd concurrent-c
+> ./vscode/ccs-syntax/install-local.sh --both   # VS Code + Cursor
+> ```
+>
+> Then **Developer: Reload Window**. Open a `.ccs` file — language mode should
+> read **Concurrent-C**.
+>
+> Details: [`vscode/ccs-syntax/README.md`](../vscode/ccs-syntax/README.md).
+> Debug configs: [Debugging](debugging.md).
 
 ## Your first program
 
