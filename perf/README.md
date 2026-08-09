@@ -67,22 +67,21 @@ Run an individual benchmark directly:
 
 Three boundaries, three places — don't mix them:
 
-| Layer | API | Latency benches | Adversarial storms | Receipts |
-|-------|-----|-----------------|--------------------|----------|
-| **CC embeds Python** | `CCPy` / `cc_py_new` | [`py_baseline.ccs`](py_baseline.ccs), [`py_matplotlib_workload.ccs`](py_matplotlib_workload.ccs) | *(add under `perf/` / `stress/` — pure `ccc run`)* | [`baselines/py_baseline_20260809.txt`](baselines/py_baseline_20260809.txt) |
-| **Native modules** (JS/Python import CC) | `js_module::[T]` / `py_module::[T]` | [`js_baseline.ccs`](js_baseline.ccs)+[`.js`](js_baseline.js), [`js_numpy.ccs`](js_numpy.ccs)+[`.js`](js_numpy.js) | `ccc build` then host driver (same as latency) | [`js_baseline_node_20260809.txt`](baselines/js_baseline_node_20260809.txt), [`js_numpy_node_20260808.txt`](baselines/js_numpy_node_20260808.txt), [`js_py_modules_20260809.txt`](baselines/js_py_modules_20260809.txt) |
-| **Package bridges** (Node↔Python process) | `concurrent-c-python` / `concurrent-c-node` | [`npm/cc-python/examples/`](../npm/cc-python/examples/), [`pypi/cc-node/…/examples/`](../pypi/cc-node/cc_node/examples/) | [`js_bridge_chaos.js`](../npm/cc-python/examples/js_bridge_chaos.js), [`stress_wire.py`](../pypi/cc-node/cc_node/examples/stress_wire.py) | [`baselines/`](baselines/) (bridge + multiprocess rows) |
+| Layer | API | Latency benches (stay put) | Adversarial storms | Receipts |
+|-------|-----|----------------------------|--------------------|----------|
+| **CC embeds Python** | `CCPy` / `cc_py_new` | [`py_baseline.ccs`](py_baseline.ccs), [`py_matplotlib_workload.ccs`](py_matplotlib_workload.ccs) | *(future: `stress/` pure `ccc run`)* | [`baselines/py_baseline_20260809.txt`](baselines/py_baseline_20260809.txt) |
+| **Native modules** (JS/Python import CC) | `js_module::[T]` / `py_module::[T]` | [`js_baseline.ccs`](js_baseline.ccs)+[`.js`](js_baseline.js), [`js_numpy.ccs`](js_numpy.ccs)+[`.js`](js_numpy.js) | host driver after `ccc build` | [`js_baseline_node_20260809.txt`](baselines/js_baseline_node_20260809.txt), [`js_numpy_node_20260808.txt`](baselines/js_numpy_node_20260808.txt), [`js_py_modules_20260809.txt`](baselines/js_py_modules_20260809.txt) |
+| **Package bridges** (Node↔Python process) | `concurrent-c-python` / `concurrent-c-node` | [`npm/cc-python/examples/`](../npm/cc-python/examples/), [`pypi/cc-node/…/examples/`](../pypi/cc-node/cc_node/examples/) | **[`stress/bridge/`](../stress/bridge/)** | [`baselines/`](baselines/) (bridge + multiprocess rows) |
 
 ```bash
-# Latency (CC embed / native module)
+# Latency (stay under perf/ + package examples/)
 ./cc/bin/ccc run --release perf/py_baseline.ccs
 ./cc/bin/ccc build --release perf/js_baseline.ccs && node perf/js_baseline.js
+node npm/cc-python/examples/js_numpy_bridge.js
 
-# Package-bridge chaos (host-driven; not in run_all --perf)
-OPENBLAS_NUM_THREADS=1 node npm/cc-python/examples/js_bridge_chaos.js
-CHAOS_SCALE=full OPENBLAS_NUM_THREADS=1 node npm/cc-python/examples/js_bridge_chaos.js
-python -m cc_node.examples.stress_wire
-CC_NODE_STRESS=full python -m cc_node.examples.stress_wire
+# Package-bridge storms (consolidated; host-driven — not in run_all)
+./stress/bridge/run.sh
+CHAOS_SCALE=full ./stress/bridge/run.sh
 ```
 
 `run_all --perf` skips `js_baseline` / `js_numpy` (need `ccc build` + `node`).
@@ -90,75 +89,110 @@ Full catalog + capture recipes: [`baselines/README.md`](baselines/README.md).
 
 ## Scheduler And Robustness Comparisons
 
-These compare Concurrent-C against pthread and Go baselines on scheduler fairness and robustness under adversarial workloads.
+The **Neckbeard Challenges** are six cross-language gauntlets
+(`./perf/run_neckbeard_challenges.sh`). Each sub-script prints its own
+per-language verdict; the harness forwards those blocks verbatim (no
+single-scalar summary that strips kidnappers-drained, wake primitive,
+peak threads, etc.).
 
-| Comparison | Script | What it measures | What the result highlights |
-|-----------|--------|------------------|----------------------------|
-| **Syscall Kidnapping** | `compare_syscall.sh` | Scheduler responsiveness when many OS workers are trapped in blocking syscalls. | Replacement workers keep the runtime making progress. |
-| **Thundering Herd** | `compare_herd.sh` | Wake-up efficiency when many parked waiters are contending for one event. | Wake exactly one waiter instead of stampeding the herd. |
-| **Channel Isolation** | `compare_contention.sh` | Cross-channel interference when independent pipelines are hammered concurrently. | Low coupling across wake/sleep, scheduler, and allocator paths. |
-| **Channel Stability (4 workers)** | `contention_workers4_stability.sh` | Outlier frequency in the 4-worker channel-isolation case. | Tracks how often trials drift toward serial-like placement. |
-| **Noisy Neighbor** | `compare_preemption.sh` | Scheduler fairness when one heartbeat task competes with CPU hogs that never yield. | Whether latency-sensitive work stays responsive under CPU pressure. |
-| **Arena Allocation** | `compare_arena.sh` | Pure bump-pointer allocation throughput with private arenas and no shared allocator contention. | Measures the per-fiber arena strategy directly. |
+| # | Comparison | Script | What it measures | What the result highlights |
+|---|-----------|--------|------------------|----------------------------|
+| 1 | **Syscall Kidnapping** | `compare_syscall.sh` | Scheduler responsiveness when many OS workers are trapped in blocking syscalls. | Replacement workers keep the runtime making progress; CC drains all kidnappers like a 1:1 runtime. |
+| 2 | **Thundering Herd** | `compare_herd.sh` | Wake-up efficiency when many parked waiters are contending for one event. | Wake exactly one waiter instead of stampeding the herd. |
+| 3 | **Channel Isolation** | `compare_contention_stability.sh` | Cross-channel interference when independent pipelines are hammered concurrently. | Low coupling across wake/sleep, scheduler, and allocator paths. |
+| 4 | **Noisy Neighbor** | `compare_preemption.sh` | Scheduler fairness when one heartbeat task competes with CPU hogs that never yield. | Whether latency-sensitive work stays responsive under CPU pressure. |
+| 5 | **Arena Allocation** | `compare_arena.sh` | Pure bump-pointer allocation throughput with private arenas and no shared allocator contention. | Measures the per-fiber arena strategy directly (Go/Zig rows are cross-strategy context). |
+| 6 | **Named Exclusive Lock** | `compare_exclusive_named_lock.sh` | Zipf lock-by-name product throughput (directory+lock+scheduler) and single-caller serial fast-path cost. | Named `CCExclusive` / mutex-by-name vs Go `sync.Map`, Rust `RwLock<HashMap>`, Zig `Io.RwLock`. |
 
-Run the comparison suite:
+Related (not one of the six): `contention_workers4_stability.sh` tracks outlier frequency in the 4-worker channel-isolation case.
 
 ```bash
 ./perf/run_neckbeard_challenges.sh
 ```
 
-Latest results from the comparison suite:
+Latest committed record: [`benchmarks/neckbeard_2026_07_26.txt`](benchmarks/neckbeard_2026_07_26.txt)
+(full per-sample logs). Headline tables from that run:
 
 ```text
 =================================================================
-CONCURRENT-C: SCHEDULER AND ROBUSTNESS COMPARISONS
+CONCURRENT-C: THE NECKBEARD CHALLENGES
 =================================================================
-Running all robustness and fairness comparisons...
 
-[1/5] Syscall Kidnapping Challenge...
+[1/6] Syscall Kidnapping Challenge...
 -----------------------------------------------------------------
-Implementation       Heartbeats
-Pthread              54
-Concurrent-C         55
-Go                   54
------------------------------------------------------------------
-
-[2/5] Thundering Herd Challenge...
------------------------------------------------------------------
-Implementation       Avg Latency (ms)
-Pthread              3.7678
-Concurrent-C         0.0144
-Go                   0.0136
+Implementation       Heartbeats   Kidnappers Completed
+Pthread (Adler)      29           100 / 100
+Concurrent-C         30           100 / 100
+Go                   28           100 / 100
+Zig                  30           100 / 100
 -----------------------------------------------------------------
 
-[3/5] Channel Isolation Challenge...
+[2/6] Thundering Herd Challenge...
 -----------------------------------------------------------------
-Implementation       Interference
-Pthread              41.20%
-Concurrent-C         9.10%
-Go                   -14.16%
------------------------------------------------------------------
-
-[4/5] Noisy Neighbor Challenge...
------------------------------------------------------------------
-Implementation       Heartbeats
-Pthread              59
-Concurrent-C         55
-Go                   48
+Implementation               Avg Latency (ms)   Wake primitive
+Pthread (condvar)            0.1096             pthread_cond_signal
+Pthread (pipe herd)          0.9170             pipe write (herd case)
+Concurrent-C                 0.0526             chan wake-one
+Go                           0.8447             chan wake-one
+Zig                          0.8678             std.Thread.Condition.signal
 -----------------------------------------------------------------
 
-[5/5] Arena Contention Challenge...
+[3/6] Channel Isolation Challenge...
+min / mean / max
+--------------------------------------------------------------------------
+Implementation       Baseline (ms)          Contention (ms)        Interference %
+Pthread              4.70 / 4.78 / 4.88     38.71 / 44.99 / 50.62  702.26 / 843.10 / 970.64
+Concurrent-C         2.29 / 2.45 / 2.85     4.36 / 4.69 / 5.14     70.60 / 92.29 / 108.77
+Go                   5.42 / 5.53 / 5.67     6.31 / 6.66 / 6.87     16.43 / 20.51 / 24.88
+Zig                  5.79 / 6.43 / 6.82     21.44 / 48.60 / 89.29  227.73 / 659.05 / 1325.87
+--------------------------------------------------------------------------
+
+[4/6] Noisy Neighbor Challenge...
+-----------------------------------------------------------------
+Implementation         Heartbeats   Peak Threads
+Pthread (1:1)          29           17
+Concurrent-C (4w)      29           18
+Go (4P)                25           6
+Zig (1:1)              29           17
+-----------------------------------------------------------------
+
+[5/6] Arena Contention Challenge...
 -----------------------------------------------------------------
 Implementation       Throughput (M/sec)
-Pthread (Arena)      699.79
-Concurrent-C (Arena) 1011.12
-Go (mcache)          4752.49
+Pthread (Arena)      737.46
+Concurrent-C (Arena) 502.01
+Go (stack-promoted)  5759.54
+Zig (c_allocator)    89.25
 -----------------------------------------------------------------
 
+[6/6] Named Exclusive Lock Challenge...
+SUMMARY (median lock-ops/s; higher is better)
 =================================================================
+lang           zipf_product_ops/s  serial_fastpath_ops/s
+cc                       40960524              457796853
+go                       23441163              367731556
+rust                      3206081              212394070
+zig                       6970615              437636761
+=================================================================
+
 ALL CHALLENGES COMPLETED
 =================================================================
 ```
+
+To refresh the committed record (quiet machine, release toolchain present):
+
+```bash
+{
+  echo "=== Neckbeard Challenges (six cross-language) ==="
+  echo "Date: $(date)"
+  echo "Commit: $(git rev-parse --short HEAD)"
+  echo "Command: ./perf/run_neckbeard_challenges.sh"
+  echo ""
+  ./perf/run_neckbeard_challenges.sh
+} > "perf/benchmarks/neckbeard_$(date +%Y_%m_%d).txt"
+```
+
+Then point the "latest record" link above (and in the root README) at the new file.
 
 ## Go Comparison
 
@@ -185,6 +219,7 @@ Use these scripts to compare against the Go runtime directly.
 - Negative interference in Channel Isolation means concurrent load did not slow the independent channel pairs down.
 - **Syscall Kidnapping:** CC's V2 sysmon orphan-and-replaces workers pinned in blocking syscalls (detach off-pool, fresh worker takes the slot), so CC drains all kidnappers like a 1:1 runtime instead of capping at worker count. Any "tops out near N" baseline in the harness text is the *non-promoting* M:N strawman CC beats, not CC's behavior.
 - **Arena Contention compares strategies, not one workload.** CC and Pthread run true bump arenas (pointer-bump, no per-alloc free) — apples-to-apples, and they land close. The harness's Go and Zig rows are *different strategies*: Go's non-escaping `make([]byte,16)` is **stack-promoted** by escape analysis (verified `does not escape` — it never reaches mcache), so its huge number is stack-bump throughput; Zig uses `c_allocator` malloc/free per alloc. Treat the headline as CC-vs-Pthread arena parity; the Go/Zig columns are cross-strategy context, not a like-for-like win/loss.
+- **Named Exclusive Lock:** Zipf product ops/s includes each runtime's name-directory + lock + scheduler; serial fast-path is one resolved mutex, one caller, no parallel scheduler. Same Zipf RNG/CDF and env knobs across languages (`CC_EXCL_*` — see the fairness contract at the top of `compare_exclusive_named_lock.sh`). Medians of timed trials; higher is better.
 - High jitter in herd tests usually points to OS scheduling overhead rather than channel semantics.
 - The Noisy Neighbor score is just total heartbeat ticks over the fixed run window, so higher is better.
 

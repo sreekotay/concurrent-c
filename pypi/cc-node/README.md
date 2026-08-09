@@ -108,6 +108,15 @@ And *which packages* it sees is the working directory's
 Run Python in your project, get your project's packages: `npm install`
 next to your program is the whole setup.
 
+## Publishing
+
+From the Concurrent-C repo root (packs this wheel and the npm sibling):
+
+```
+./scripts/publish_bridges.sh              # → out/pypi/concurrent_c_node-* (+ npm tgz)
+./scripts/publish_bridges.sh --publish    # pack, then twine upload + npm publish
+```
+
 ## Measured
 
 From `python -m cc_node.examples.bench_wire` (sources under
@@ -134,9 +143,9 @@ buffers — no npm install needed):
 `python -m cc_node.examples.use_node`.
 
 Adversarial multi-child storm (fanout, callback blizzard, shm hail,
-teardown derby): `python -m cc_node.examples.stress_wire`
-(`CC_NODE_STRESS=full` for bigger N) — see
-[`perf/README.md`](https://github.com/sreekotay/concurrent-c/blob/main/perf/README.md#js--python-interop).
+teardown derby): [`stress/bridge/`](https://github.com/sreekotay/concurrent-c/tree/main/stress/bridge)
+— `./stress/bridge/run.sh` (`CHAOS_SCALE=full` for bigger N; latency demos
+stay in `cc_node/examples/`).
 
 And when the hot path is YOUR code rather than an npm package, skip the
 wire entirely: a page of Concurrent-C (or C) exports as a native module

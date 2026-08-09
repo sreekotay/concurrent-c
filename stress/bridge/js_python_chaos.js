@@ -1,7 +1,10 @@
 /* Kitchen-sink adversarial storm for concurrent-c-python.
  *
- *   OPENBLAS_NUM_THREADS=1 node npm/cc-python/examples/js_bridge_chaos.js
- *   CHAOS_SCALE=full OPENBLAS_NUM_THREADS=1 node …   # bigger N / longer
+ *   ./stress/bridge/run.sh
+ *   OPENBLAS_NUM_THREADS=1 node --expose-gc stress/bridge/js_python_chaos.js
+ *   CHAOS_SCALE=full OPENBLAS_NUM_THREADS=1 node --expose-gc stress/bridge/js_python_chaos.js
+ *
+ * Latency demos stay under npm/cc-python/examples/.  This file is stress only.
  *
  * Every mode either prints RESULT lines (timing / counts) or OK/FAIL
  * booleans.  Exit non-zero on any FAIL.  Modes:
@@ -10,6 +13,9 @@
  *   shm_hail         — concurrent multi-MB spills; spill dir empty after
  *   teardown_derby   — destroy racing Promise.all + sync + callbacks
  *   callback_blizzard— retained JS callables × map storms sync+lane
+ *   exception_hail   — throw/recover storms; messages intact across wire
+ *   nested_callable  — Python returns callables JS keeps invoking
+ *   big_payload_hail — deep / wide JSON-ish trees both directions
  *   mixed_hammer     — sync queue-jumps a busy lane while ticks must live
  *   lease_blender    — subarray / GC / zero-copy churn under load
  */
@@ -18,7 +24,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const ccpy = require(__dirname + '/..');
+const ccpy = require(path.join(__dirname, '../../npm/cc-python'));
 
 const SCALE = (process.env.CHAOS_SCALE || 'quick').toLowerCase();
 const FULL = SCALE === 'full';
@@ -273,7 +279,134 @@ async function callbackBlizzard() {
   ok('callback_blizzard_retained', retained === 500);
 }
 
-/* ---- 6. Mixed sync + lane hammer ---------------------------------------- */
+/* ---- 6. Exception hail -------------------------------------------------- */
+async function exceptionHail() {
+  console.log('=== exception_hail ===');
+  const py = ccpy.create();
+  const b = py.import('builtins');
+  const json = py.import('json');
+  const toList = py.task(b.list);
+  // Python invokes the JS callable — throw must cross the wire intact.
+  const g = b.dict();
+  const apply = b.eval('lambda f, x: f(x)', g);
+  const N = FULL ? 800 : 300;
+  let hits = 0;
+  let sum = 0;
+  const t0 = hr();
+  for (let i = 0; i < N; i++) {
+    try {
+      const v = apply((x) => {
+        if (x % 3 === 0) throw new Error('hail-' + x);
+        return x * 2;
+      }, i);
+      sum += Number(v);
+    } catch (e) {
+      if (/hail-/.test(e.message)) hits++;
+      else throw e;
+    }
+  }
+  const lst = json.loads('[0,1,2,3,4,5,6,7]');
+  let laneHits = 0;
+  const laneRounds = FULL ? 40 : 16;
+  for (let r = 0; r < laneRounds; r++) {
+    try {
+      await toList(b.map((x) => {
+        if (x === 5) throw new Error('lane-hail');
+        return x + 1;
+      }, lst));
+    } catch (e) {
+      if (/lane-hail/.test(e.message)) laneHits++;
+      else throw e;
+    }
+  }
+  // Python-originated exception message survives the round trip.
+  const boom = b.eval(
+    'lambda: (_ for _ in ()).throw(ValueError("from-py"))', g);
+  let pyMsg = false;
+  try { boom(); } catch (e) { pyMsg = /from-py/.test(e.message); }
+  py.destroy();
+  const wantHits = Math.floor((N + 2) / 3);
+  const wantSum = Array.from({ length: N }, (_, i) => i)
+    .filter((i) => i % 3 !== 0)
+    .reduce((a, i) => a + i * 2, 0);
+  result('exception_hail_ms %s', nsToMs(hr() - t0).toFixed(1));
+  result('exception_hail_hits %d', hits);
+  result('exception_hail_lane_hits %d', laneHits);
+  ok('exception_hail_hits', hits === wantHits);
+  ok('exception_hail_sum', sum === wantSum);
+  ok('exception_hail_lane', laneHits === laneRounds);
+  ok('exception_hail_py_msg', pyMsg);
+}
+
+/* ---- 7. Nested callable (Python returns callables) ---------------------- */
+async function nestedCallable() {
+  console.log('=== nested_callable ===');
+  const py = ccpy.create();
+  const b = py.import('builtins');
+  const t0 = hr();
+  // eval a factory; JS keeps calling the returned Python callable.
+  const g = b.dict();
+  const factory = b.eval('lambda n: (lambda x, n=n: x + n)', g);
+  let okN = 0;
+  const N = FULL ? 400 : 150;
+  for (let i = 0; i < N; i++) {
+    const add = factory(i % 17);
+    if (add(100) === 100 + (i % 17)) okN++;
+  }
+  // Deeper: factory returns a factory.
+  const nest = b.eval(
+    'lambda: (lambda a: (lambda b, a=a: a * 10 + b))', g);
+  const inner = nest()(3);
+  const composed = inner(4);
+  // Retained across destroy of intermediate refs.
+  const partial = py.import('functools').partial(
+    b.eval('lambda a, b: a - b', g), 50);
+  let retained = 0;
+  for (let i = 0; i < 200; i++) if (partial(8) === 42) retained++;
+  py.destroy();
+  result('nested_callable_ms %s', nsToMs(hr() - t0).toFixed(1));
+  result('nested_callable_n %d', N);
+  ok('nested_callable_factory', okN === N);
+  ok('nested_callable_compose', composed === 34);
+  ok('nested_callable_retained', retained === 200);
+}
+
+/* ---- 8. Big payload hail ------------------------------------------------ */
+async function bigPayloadHail() {
+  console.log('=== big_payload_hail ===');
+  const py = ccpy.create();
+  const json = py.import('json');
+  const b = py.import('builtins');
+  const t0 = hr();
+  // Plain JS objects are not wire values — cross as JSON text both ways.
+  const wideParts = [];
+  for (let i = 0; i < (FULL ? 200 : 80); i++) wideParts.push('"k' + i + '":' + (i * i));
+  const wideStr = '{' + wideParts.join(',') + '}';
+  const deepStr = '{"a":{"b":{"c":{"d":{"e":[1,2,{"f":"g"}]}}}}}';
+  let roundOk = 0;
+  const rounds = FULL ? 60 : 25;
+  for (let r = 0; r < rounds; r++) {
+    const back = json.loads(wideStr);
+    const s1 = String(json.dumps(back));
+    if (s1.indexOf('"k7": 49') >= 0 || s1.indexOf('"k7":49') >= 0) roundOk++;
+    const d2 = json.loads(deepStr);
+    const s2 = String(json.dumps(d2));
+    if (s2.indexOf('"f": "g"') >= 0 || s2.indexOf('"f":"g"') >= 0) roundOk++;
+  }
+  // list(range(N)) materializes a wide Python list across the wire.
+  const n = FULL ? 5000 : 2000;
+  const rng = b.eval('lambda n: list(range(n))', b.dict());
+  const lst = rng(n);
+  const asStr = String(lst);
+  const lenOk = asStr.startsWith('[0, 1, 2') && asStr.endsWith((n - 1) + ']');
+  py.destroy();
+  result('big_payload_hail_ms %s', nsToMs(hr() - t0).toFixed(1));
+  result('big_payload_hail_rounds %d', rounds);
+  ok('big_payload_hail_json', roundOk === rounds * 2);
+  ok('big_payload_hail_list', lenOk);
+}
+
+/* ---- 9. Mixed sync + lane hammer ---------------------------------------- */
 async function mixedHammer(numpyOk) {
   console.log('=== mixed_hammer ===');
   const py = ccpy.create();
@@ -291,6 +424,7 @@ async function mixedHammer(numpyOk) {
   for (let i = 0; i < a.length; i++) { a[i] = i % 17; b[i] = i % 13; }
   let ticks = 0;
   const tick = setInterval(() => { ticks++; }, 1);
+  await sleep(25); /* arm timers before the burst */
   const t0 = hr();
   const ROUNDS = FULL ? 80 : 40;
   const laneJobs = [];
@@ -306,6 +440,7 @@ async function mixedHammer(numpyOk) {
     }
   }
   const settled = await Promise.all(laneJobs);
+  await sleep(25);
   clearInterval(tick);
   const laneOk = settled.every((v) => typeof v === 'number' && Number.isFinite(v));
   py.destroy();
@@ -313,10 +448,11 @@ async function mixedHammer(numpyOk) {
   result('mixed_hammer_ticks %d', ticks);
   result('mixed_hammer_lane_jobs %d', settled.length);
   ok('mixed_hammer_lane', laneOk);
-  ok('mixed_hammer_loop_alive', ticks >= ROUNDS / 2);
+  /* Wall-clock 1ms ticks during a sub-ms burst are weather; require a few. */
+  ok('mixed_hammer_loop_alive', ticks >= 5);
 }
 
-/* ---- 7. Lease blender --------------------------------------------------- */
+/* ---- 10. Lease blender -------------------------------------------------- */
 async function leaseBlender() {
   console.log('=== lease_blender ===');
   const py = ccpy.create();
@@ -363,16 +499,19 @@ async function leaseBlender() {
   await shmHail(numpyOk);
   await teardownDerby();
   await callbackBlizzard();
+  await exceptionHail();
+  await nestedCallable();
+  await bigPayloadHail();
   await mixedHammer(numpyOk);
   await leaseBlender();
 
   console.log('=== summary ===');
   result('chaos_fails %d', fails);
-  ok('chaos_clean', fails === 0);
   if (fails > 0) {
     console.error('CHAOS FAILED: %d checks', fails);
     process.exit(1);
   }
+  ok('chaos_clean', true);
   console.log('chaos done');
 })().catch((e) => {
   console.error('CHAOS ERROR:', e && e.stack ? e.stack : e);

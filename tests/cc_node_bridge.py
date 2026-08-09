@@ -39,6 +39,12 @@ out("async_awaited", adouble(21) == 42)
 # JS calling conventions apply: Array.map calls f(value, index, array).
 mapper = js.eval("(f, xs) => xs.map(f)")
 out("python_callback", mapper(lambda x, *rest: x * 3, [1, 2, 3]) == [3, 6, 9])
+# Returning a JS handle from a Python callback must not trip the wire
+# (GC release used to nest _req and steal the outer reply).
+nest = js.eval("(cb) => cb((x) => x + 1)")
+out("callback_return_handle", nest(lambda g: g)(40) == 41)
+nest2 = js.eval("(cb) => cb((x) => cb((y) => x + y)(3))(10)")
+out("callback_return_handle_nested", nest2(lambda f: f) == 13)
 thrower = js.eval("(f) => { try { f(); return 'no'; } catch (e) { return 'js saw: ' + e.message; } }")
 def boom():
     raise ValueError("from python")

@@ -107,9 +107,11 @@ class JsHandle:
                                      " (closed)" if self._d.closed else "")
 
     def __del__(self):
+        # Never nest a sync wire op from GC into an in-flight _req — that
+        # steals the outer reply (e.g. returning a callback arg handle).
         try:
             if not self._d.closed:
-                self._d._req("release", h=self._h)
+                self._d._queue_release(self._h)
         except Exception:
             pass
 
@@ -137,6 +139,9 @@ class Bridge:
         self._cbs = {}
         self._ncb = 1
         self._shm_out = []
+        self._depth = 0
+        self._parked = {}
+        self._pending_release = []
         _live.append(self)
 
     # ---- wire ----
@@ -146,6 +151,56 @@ class Bridge:
         self._p.stdin.write(line.encode("utf-8"))
         self._p.stdin.flush()
 
+    def _queue_release(self, hid):
+        self._pending_release.append(hid)
+        if self._depth == 0:
+            self._flush_releases()
+
+    def _flush_releases(self):
+        while self._pending_release and not self.closed:
+            hid = self._pending_release.pop(0)
+            try:
+                self._req("release", h=hid)
+            except Exception:
+                pass
+
+    def _flush_shm(self):
+        # The child unlinks spill files as it decodes; this sweep only
+        # matters when it died first (ENOENT is the normal case).
+        for path in self._shm_out:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        del self._shm_out[:]
+
+    def _take_reply(self, msg):
+        if "e" in msg:
+            raise JsError(msg["e"])
+        return self._decode_result(msg)
+
+    def _wait_reply(self, rid):
+        parked = self._parked.pop(rid, None)
+        if parked is not None:
+            return self._take_reply(parked)
+        while True:
+            line = self._p.stdout.readline()
+            if not line:
+                self.closed = True
+                raise JsError("cc-node: the node child exited")
+            msg = json.loads(line)
+            if "cb" in msg:
+                self._serve_callback(msg)
+                continue
+            mid = msg.get("id")
+            if mid == rid:
+                return self._take_reply(msg)
+            if mid is not None:
+                # Nested _req (GC release, etc.) can overtake; park by id.
+                self._parked[mid] = msg
+                continue
+            raise JsError("cc-node: protocol violation (unexpected reply)")
+
     def _req(self, op, **kw):
         if self.closed:
             raise JsError("cc-node: bridge is closed")
@@ -153,35 +208,19 @@ class Bridge:
         self._nid += 1
         kw["id"] = rid
         kw["op"] = op
+        self._depth += 1
         try:
-            self._send(kw)
-        except (BrokenPipeError, ValueError):
-            self.closed = True
-            raise JsError("cc-node: the node child exited") from None
-        try:
-            while True:
-                line = self._p.stdout.readline()
-                if not line:
-                    self.closed = True
-                    raise JsError("cc-node: the node child exited")
-                msg = json.loads(line)
-                if "cb" in msg:
-                    self._serve_callback(msg)
-                    continue
-                if msg.get("id") == rid:
-                    if "e" in msg:
-                        raise JsError(msg["e"])
-                    return self._decode_result(msg)
-                raise JsError("cc-node: protocol violation (unexpected reply)")
+            try:
+                self._send(kw)
+            except (BrokenPipeError, ValueError):
+                self.closed = True
+                raise JsError("cc-node: the node child exited") from None
+            return self._wait_reply(rid)
         finally:
-            # The child unlinks spill files as it decodes; this sweep only
-            # matters when it died first (ENOENT is the normal case).
-            for path in self._shm_out:
-                try:
-                    os.unlink(path)
-                except OSError:
-                    pass
-            del self._shm_out[:]
+            self._depth -= 1
+            if self._depth == 0:
+                self._flush_shm()
+                self._flush_releases()
 
     def _serve_callback(self, msg):
         fn = self._cbs.get(msg["cb"])

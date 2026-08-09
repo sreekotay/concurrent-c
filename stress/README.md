@@ -40,14 +40,33 @@ Stress tests that push the compiler and runtime with demanding patterns.
 |------|-------------|
 | `deadlock_detect_demo` | Intentional deadlock to demo detection (watchdog default-on) |
 
+## Package bridges (host-driven)
+
+Node↔Python process storms live under [`bridge/`](bridge/) — not `.ccs`, so
+`run_all --stress` does not pick them up. Latency demos stay in
+`npm/cc-python/examples/` and `pypi/cc-node/cc_node/examples/`.
+
+```bash
+./stress/bridge/run.sh
+CHAOS_SCALE=full ./stress/bridge/run.sh
+```
+
+| File | What it hammers |
+|------|-----------------|
+| `bridge/js_python_chaos.js` | crash isolation, domain fanout, shm hail, teardown derby, callback blizzard, mixed sync/lane, lease churn |
+| `bridge/cc_node_stress_wire.py` | multi-child fanout, callback blizzard, shm hail, teardown derby, eval storm |
+
 ## Running
 
 ```bash
 # Run a single test
 ./cc/bin/ccc run stress/channel_flood.ccs
 
-# Run all stress tests
+# Run all .ccs stress tests
 make stress-check
+
+# Package-bridge storms (need node + python3)
+./stress/bridge/run.sh
 
 # Cross-lang arena *speed* compare (shuffled multi-trial; includes malloc baseline)
 # Happy-path bulk is sized to fit slabs — judge tip/bulk/reset ms, not reclaim thesis.

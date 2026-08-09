@@ -265,9 +265,16 @@ One runtime per process: after the first load, a matching `usePython`
 is a no-op and a different one throws, naming what already loaded.
 Per-domain runtimes arrive with process-isolated domains.
 
-## Building
+## Building / publishing
 
-The addon is ordinary Concurrent-C:
+From the repo root, clean-pack (and optionally upload npm + the pip sibling):
+
+```
+./scripts/publish_bridges.sh              # → out/concurrent-c-python-*.tgz (+ pip wheel)
+./scripts/publish_bridges.sh --publish    # pack, then npm publish + twine upload
+```
+
+The addon itself is ordinary Concurrent-C:
 
 ```
 ccc build npm/cc-python/src/cc_python.ccs   # → bin/cc_python.node
@@ -316,5 +323,5 @@ print machine-comparable `RESULT` lines, so re-measuring on your box is
 one command.
 
 Adversarial kitchen-sink (crash isolation, shm hail, teardown races,
-callback blizzard): [`examples/js_bridge_chaos.js`](examples/js_bridge_chaos.js)
-— see also [`perf/README.md`](../../perf/README.md#js--python-interop).
+callback blizzard): [`stress/bridge/`](../../stress/bridge/) —
+`./stress/bridge/run.sh` (latency demos stay in `examples/`).

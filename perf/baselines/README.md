@@ -22,15 +22,17 @@ Compiler suite metrics live separately in
 | Python → Node wire (`concurrent-c-node`) | [`cc_node_bridge_py_20260809.txt`](cc_node_bridge_py_20260809.txt) | `python -m cc_node.examples.bench_wire` |
 | Node → CC → numpy compose | [`js_numpy_node_20260808.txt`](js_numpy_node_20260808.txt) | `ccc build perf/js_numpy.ccs && node perf/js_numpy.js` |
 
-### Adversarial storms (no dated receipt yet — print RESULT / OK)
+### Adversarial storms ([`stress/bridge/`](../../stress/bridge/) — not examples)
 
 | Storm | Command |
 |-------|---------|
-| Node→Python kitchen-sink | `OPENBLAS_NUM_THREADS=1 node npm/cc-python/examples/js_bridge_chaos.js` (`CHAOS_SCALE=full` for bigger N) |
-| Python→Node multi-child | `python -m cc_node.examples.stress_wire` (`CC_NODE_STRESS=full`) |
+| Both bridges | `./stress/bridge/run.sh` (`CHAOS_SCALE=full` for bigger N) |
+| Node→Python kitchen-sink | `OPENBLAS_NUM_THREADS=1 node --expose-gc stress/bridge/js_python_chaos.js` |
+| Python→Node multi-child | `PYTHONPATH=pypi/cc-node python3 stress/bridge/cc_node_stress_wire.py` |
 
-Redirect a clean run into `perf/baselines/<name>_$(date +%Y%m%d).txt` the same
-way as the latency benches when you want a receipt.
+Latency demos stay under `npm/cc-python/examples/` and
+`pypi/cc-node/cc_node/examples/`. Redirect a clean storm run into
+`perf/baselines/<name>_$(date +%Y%m%d).txt` when you want a receipt.
 
 Older dated files in this directory are history — keep them.
 
