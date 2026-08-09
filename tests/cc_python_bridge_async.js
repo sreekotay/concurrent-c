@@ -105,15 +105,34 @@ const ccpy = require(process.cwd() + '/npm/cc-python');
   }
 
   // 5. Revoke-then-drain: destroy mid-queue lets the in-flight call
-  //    finish and rejects everything queued behind it.
+  //    finish and rejects everything queued behind it.  "In-flight" must
+  //    be PROVEN, not assumed: under suite load destroy can beat the
+  //    executor to the queue, and a job revoked before pickup rejects —
+  //    correctly.  The callback handshake pins job one as executing
+  //    before the revocation lands.
   {
     const py = ccpy.create();
+    const b5 = py.import('builtins');
+    const ns5 = b5.dict();
+    b5.exec('import time\n' +
+            'def started(cb, n):\n' +
+            '    cb()\n' +
+            '    time.sleep(n)\n', ns5);
+    let startedGo;
+    const startedP = new Promise((r) => { startedGo = r; });
     const zzz = py.task(py.import('time').sleep);
-    const inflight = zzz(0.2);
+    const inflight = py.task(ns5.get('started'))(() => startedGo(), 0.25)
+        .then((v) => v, () => 'inflight-rejected');
+    await startedP; // the callback ran — job one is past pickup
+    // ...and past the callback WAIT: while an executor waits on a
+    // callback it services its own queue (nested servicing), which
+    // would RUN jobs submitted now.  The buffer covers its wake into
+    // time.sleep, where the queue genuinely sits still.
+    await sleep(50);
     // Outcome handlers attach at creation: the rejections settle while
     // the in-flight await is still pending, and a rejection that crosses
     // a turn unhandled is fatal to the process.
-    const queued = [zzz(0.1), zzz(0.1), zzz(0.1)].map((p) =>
+    const queued = [zzz(0.05), zzz(0.05), zzz(0.05)].map((p) =>
       p.then(() => 'resolved',
              (e) => (/closed/.test(e.message) ? 'rejected' : 'other')));
     const done = py.destroy();
