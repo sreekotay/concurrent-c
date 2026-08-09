@@ -234,7 +234,7 @@ static inline CCSlice cc_slice_concat_into(void *dst, size_t cap, const CCSlice 
         memcpy(out + off, parts[i].ptr, parts[i].len);
         off += parts[i].len;
     }
-    return cc_slice_from_parts(dst, total, CC_SLICE_ID_UNTRACKED, cap);
+    return cc_slice_from_parts(dst, total, CC_SLICE_ID_UNTRACKED);
 }
 
 static inline CCSlice cc_slice_concat_many(CCArena *arena, const CCSlice *parts, size_t count) {
@@ -972,8 +972,7 @@ static inline CCSlice cc_string_as_slice(const CCString *str) {
     data = cc_string_data_const(str);
     if (!data) return cc_slice_empty();
     return cc_slice_from_parts((void *)data, str->len,
-                               cc_slice_make_id(cc_string_provenance(str), false, false, false),
-                               str->cap);
+                               cc_slice_make_id(cc_string_provenance(str), false, false, false));
 }
 static inline const char *cc_string_cstr(CCString *str, CCArena *arena) {
     char *data;
@@ -1068,7 +1067,7 @@ static inline CCStringStackBuf cc__string_stack_char(CCStringStackBuf b, char v)
 }
 
 static inline CCSlice cc__string_stack_slice(CCStringStackBuf b) {
-    return cc_slice_from_parts(b.buf, b.len, CC_SLICE_ID_UNTRACKED, b.cap);
+    return cc_slice_from_parts(b.buf, b.len, CC_SLICE_ID_UNTRACKED);
 }
 
 /* Max formatted width per slot type: worst-case decimal digits + sign

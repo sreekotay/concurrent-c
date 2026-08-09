@@ -3326,6 +3326,7 @@ static AstNode* parse_static_fn(Parser* p) {
     int has_inline = 0;
     int has_const = 0;
     int has_unused = 0;
+    int has_always_inline = 0;
     if (ri < p->n && shadow_kw(p->toks[ri]) == SHADOW_KW_INLINE) {
         has_inline = 1;
         ri = shadow_skip_attributes_at(p, ri + 1);
@@ -3337,11 +3338,10 @@ static AstNode* parse_static_fn(Parser* p) {
     {
         int j;
         for (j = ri0; j < ri; j++) {
-            if (p->toks[j].kind == TK_IDENT &&
-                spell_eq(p->toks[j].spell, "unused")) {
-                has_unused = 1;
-                break;
-            }
+            if (p->toks[j].kind != TK_IDENT) continue;
+            if (spell_eq(p->toks[j].spell, "unused")) has_unused = 1;
+            if (spell_eq(p->toks[j].spell, "always_inline"))
+                has_always_inline = 1;
         }
     }
     if (ri >= p->n) return NULL;
@@ -3558,12 +3558,22 @@ static AstNode* parse_static_fn(Parser* p) {
         }
         slice_to(n->b, sizeof(n->b), name.spell);
         snprintf(n->c, sizeof(n->c), "%s", params);
-        if (has_inline && has_unused)
-            snprintf(n->e, sizeof(n->e), "inline unused");
-        else if (has_unused)
-            snprintf(n->e, sizeof(n->e), "unused");
-        else if (has_inline)
-            snprintf(n->e, sizeof(n->e), "inline");
+        {
+            char fl[64];
+            size_t fo = 0;
+            fl[0] = 0;
+            if (has_inline)
+                fo += (size_t)snprintf(fl + fo, sizeof(fl) - fo, "%sinline",
+                                       fo ? " " : "");
+            if (has_unused)
+                fo += (size_t)snprintf(fl + fo, sizeof(fl) - fo, "%sunused",
+                                       fo ? " " : "");
+            if (has_always_inline)
+                fo += (size_t)snprintf(fl + fo, sizeof(fl) - fo,
+                                       "%salways_inline", fo ? " " : "");
+            (void)fo;
+            if (fl[0]) snprintf(n->e, sizeof(n->e), "%s", fl);
+        }
         if (p->pending_fn_attrs) {
             shadow_fn_attr_register(n->b, p->pending_fn_attrs, 1);
             p->pending_fn_attrs = 0;

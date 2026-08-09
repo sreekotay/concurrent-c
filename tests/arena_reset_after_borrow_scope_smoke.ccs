@@ -9,7 +9,7 @@ int main(void) {
         char* backing = cc_arena_alloc_T_count(char, &buf, 64);
         if (!backing) return 1;
         memset(backing, 'x', 64);
-        char[:] view = cc_slice_from_parts(backing, 64, 0, 64);
+        char[:] view = cc_slice_from_parts(backing, 64, 0);
         if (view.len != 64) return 2;
     }
     cc_arena_reset(&buf);

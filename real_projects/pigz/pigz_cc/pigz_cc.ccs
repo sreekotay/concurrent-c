@@ -800,14 +800,14 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     0x03         // OS = Unix
                 };
                 write_failed = !write_all_or_fail(out_ptr,
-                    cc_slice_from_parts(header, 10, CC_SLICE_ID_UNTRACKED, 10),
+                    cc_slice_from_parts(header, 10, CC_SLICE_ID_UNTRACKED),
                     "failed to write gzip header");
                 
                 // Write filename if present
                 if (!write_failed && g.name != NULL) {
                     size_t nlen = strlen(g.name) + 1;
                     write_failed = !write_all_or_fail(out_ptr,
-                        cc_slice_from_parts(g.name, nlen, CC_SLICE_ID_UNTRACKED, nlen),
+                        cc_slice_from_parts(g.name, nlen, CC_SLICE_ID_UNTRACKED),
                         "failed to write filename to header");
                 }
                 
@@ -815,7 +815,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                 if (!write_failed && g.comment != NULL) {
                     size_t clen = strlen(g.comment) + 1;
                     write_failed = !write_all_or_fail(out_ptr,
-                        cc_slice_from_parts(g.comment, clen, CC_SLICE_ID_UNTRACKED, clen),
+                        cc_slice_from_parts(g.comment, clen, CC_SLICE_ID_UNTRACKED),
                         "failed to write comment to header");
                 }
             } else if (g.form == 1) {
@@ -830,7 +830,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                 header[0] = (head >> 8) & 0xff;
                 header[1] = head & 0xff;
                 write_failed = !write_all_or_fail(out_ptr,
-                    cc_slice_from_parts(header, 2, CC_SLICE_ID_UNTRACKED, 2),
+                    cc_slice_from_parts(header, 2, CC_SLICE_ID_UNTRACKED),
                     "failed to write zlib header");
             } else if (g.form == 2) {
                 // zip local header (single entry; central directory written at end)
@@ -854,11 +854,11 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                 header[26] = (unsigned char)(zip_name_len & 0xff);
                 header[27] = (unsigned char)((zip_name_len >> 8) & 0xff);
                 write_failed = !write_all_or_fail(out_ptr,
-                    cc_slice_from_parts(header, 30, CC_SLICE_ID_UNTRACKED, 30),
+                    cc_slice_from_parts(header, 30, CC_SLICE_ID_UNTRACKED),
                     "failed to write zip header");
                 if (!write_failed && zip_name_len) {
                     write_failed = !write_all_or_fail(out_ptr,
-                        cc_slice_from_parts((void*)zip_name, zip_name_len, CC_SLICE_ID_UNTRACKED, zip_name_len),
+                        cc_slice_from_parts((void*)zip_name, zip_name_len, CC_SLICE_ID_UNTRACKED),
                         "failed to write zip filename");
                 }
             }
@@ -926,7 +926,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                 trailer[6] = (total_len >> 16) & 0xff;
                 trailer[7] = (total_len >> 24) & 0xff;
                 write_failed = !write_all_or_fail(out_ptr,
-                    cc_slice_from_parts(trailer, 8, CC_SLICE_ID_UNTRACKED, 8),
+                    cc_slice_from_parts(trailer, 8, CC_SLICE_ID_UNTRACKED),
                     "failed to write gzip trailer");
             } else if (g.form == 1) {
                 // zlib trailer: Adler-32 (4 bytes)
@@ -936,7 +936,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                 trailer[2] = (global_crc >> 8) & 0xff;
                 trailer[3] = global_crc & 0xff;
                 write_failed = !write_all_or_fail(out_ptr,
-                    cc_slice_from_parts(trailer, 4, CC_SLICE_ID_UNTRACKED, 4),
+                    cc_slice_from_parts(trailer, 4, CC_SLICE_ID_UNTRACKED),
                     "failed to write zlib trailer");
             } else if (g.form == 2) {
                 // Proper single-entry zip: data descriptor + central directory + EOCD.
@@ -964,7 +964,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     dd[14] = (unsigned char)((usize >> 16) & 0xff);
                     dd[15] = (unsigned char)((usize >> 24) & 0xff);
                     write_failed = !write_all_or_fail(out_ptr,
-                        cc_slice_from_parts(dd, 16, CC_SLICE_ID_UNTRACKED, 16),
+                        cc_slice_from_parts(dd, 16, CC_SLICE_ID_UNTRACKED),
                         "failed to write zip data descriptor");
 
                     if (!write_failed) {
@@ -996,11 +996,11 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         // extra len, comment len = 0
                         // relative offset of local header = 0
                         write_failed = !write_all_or_fail(out_ptr,
-                            cc_slice_from_parts(cd, 46, CC_SLICE_ID_UNTRACKED, 46),
+                            cc_slice_from_parts(cd, 46, CC_SLICE_ID_UNTRACKED),
                             "failed to write zip central directory");
                         if (!write_failed && zip_name_len) {
                             write_failed = !write_all_or_fail(out_ptr,
-                                cc_slice_from_parts((void*)zip_name, zip_name_len, CC_SLICE_ID_UNTRACKED, zip_name_len),
+                                cc_slice_from_parts((void*)zip_name, zip_name_len, CC_SLICE_ID_UNTRACKED),
                                 "failed to write zip central directory name");
                         }
 
@@ -1020,7 +1020,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                             eocd[18] = (unsigned char)((cd_off >> 16) & 0xff);
                             eocd[19] = (unsigned char)((cd_off >> 24) & 0xff);
                             write_failed = !write_all_or_fail(out_ptr,
-                                cc_slice_from_parts(eocd, 22, CC_SLICE_ID_UNTRACKED, 22),
+                                cc_slice_from_parts(eocd, 22, CC_SLICE_ID_UNTRACKED),
                                 "failed to write zip end record");
                         }
                     }

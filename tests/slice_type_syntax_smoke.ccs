@@ -9,7 +9,7 @@ int main(void) {
     char[:0] sent = "hi";
     assert(CCSlice_eq_cstr(&sent, "hi"));
     assert(cc_slice_is_canonical(sent));
-    char[:0!] u = cc_slice_from_parts(NULL, 0, cc_slice_make_id(1, true, true, false), 0);
+    char[:0!] u = cc_slice_from_parts(NULL, 0, cc_slice_make_id(1, true, true, false));
     (void)u;
     return 0;
 }

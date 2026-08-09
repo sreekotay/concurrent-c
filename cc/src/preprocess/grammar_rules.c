@@ -1142,6 +1142,9 @@ typedef struct {
      * every text piece is copied into the output buffer and the scratch
      * rewinds to its stack root (overflow extents freed). */
     CCArena* scratch;
+    /* Structured helpers (Type__fk_N) emitted beside opaque __fill tape —
+     * spliced in before fill_head so they are file-scope STATIC_FNs. */
+    char** helpers; size_t* helpers_len; size_t* helpers_cap;
 } EB;
 
 static int rw_pad_rule(const RG* g, RFirst* F, RKeeps* K, int nd);
@@ -1194,6 +1197,18 @@ static void eb_emit(EB* e, CCString t) {
     cc_arena_reset(e->scratch);
 }
 
+static void eb_emit_helper(EB* e, CCString t) {
+    if (e->helpers) {
+        CCSlice sl = cc_string_as_slice(&t);
+        if (sl.len)
+            cc_sb_append(e->helpers, e->helpers_len, e->helpers_cap,
+                         (const char*)sl.ptr, sl.len);
+        cc_arena_reset(e->scratch);
+        return;
+    }
+    eb_emit(e, t);
+}
+
 static void rg_emit_swar_run(EB* e, int k, int T, int b1, int b2) {
     eb_emit(e, cc_gr_swar_run_text(e->scratch, k, T, b1, b2));
 }
@@ -1211,6 +1226,16 @@ static CCString rg_cs_expr_cs(const RG* g, int cs, CCArena* a) {
         return cc_gr_cse_bytes_text(a, bytes[0], n > 1 ? bytes[1] : 0,
                                     n > 2 ? bytes[2] : 0, n > 3 ? bytes[3] : 0, n);
     return cc_gr_cse_bitset_text(a, g->name, cs);
+}
+
+/* After SWAR: T=0 + two stop bytes → unrolled quote/backslash-style tail;
+ * otherwise the authoritative charset run (bitset / range / bytes). */
+static void rg_emit_swar_tail(EB* e, const RG* g, int cs, int T, int b1, int b2) {
+    if (T == 0 && b1 >= 0 && b2 >= 0) {
+        eb_emit(e, cc_gr_swar_tail_stops2_text(e->scratch, b1, b2));
+        return;
+    }
+    eb_emit(e, cc_gr_cs_run_text(e->scratch, rg_cs_expr_cs(g, cs, e->scratch)));
 }
 
 /* ---- JSON-number shape: int · opt frac · opt exp, with int early-out ---- */
@@ -1552,11 +1577,16 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
             int scs = -1, sesc = -1;
             if (rg_scan_body_alt(g, e->F, x->a, &scs, &sesc)) {
                 int k = (*lbl)++;
-                int T, b1, b2;
+                int T = -1, b1 = -1, b2 = -1, did_swar = 0;
                 eb_emit(e, cc_gr_forever_open_text(e->scratch));
-                if (rf_popcount(g->sets[scs]) >= 64 && rf_swar_stop(g->sets[scs], &T, &b1, &b2))
+                if (rf_popcount(g->sets[scs]) >= 64 && rf_swar_stop(g->sets[scs], &T, &b1, &b2)) {
                     rg_emit_swar_run(e, k, T, b1, b2);
-                eb_emit(e, cc_gr_cs_run_text(e->scratch, rg_cs_expr_cs(g, scs, e->scratch)));
+                    did_swar = 1;
+                }
+                if (did_swar)
+                    rg_emit_swar_tail(e, g, scs, T, b1, b2);
+                else
+                    eb_emit(e, cc_gr_cs_run_text(e->scratch, rg_cs_expr_cs(g, scs, e->scratch)));
                 {
                     char br[32];
                     snprintf(br, sizeof(br), "Le%d", k);
@@ -1579,11 +1609,16 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
                 eb_emit(e, cc_gr_m_cs1_text(e->scratch, rg_cs_expr_cs(g, cs, e->scratch), fail));
             }
             {
-                int T, b1, b2;
-                if (rf_popcount(g->sets[cs]) >= 64 && rf_swar_stop(g->sets[cs], &T, &b1, &b2))
+                int T = -1, b1 = -1, b2 = -1, did_swar = 0;
+                if (rf_popcount(g->sets[cs]) >= 64 && rf_swar_stop(g->sets[cs], &T, &b1, &b2)) {
                     rg_emit_swar_run(e, (*lbl)++, T, b1, b2);
+                    did_swar = 1;
+                }
+                if (did_swar)
+                    rg_emit_swar_tail(e, g, cs, T, b1, b2);
+                else
+                    eb_emit(e, cc_gr_cs_run_text(e->scratch, rg_cs_expr_cs(g, cs, e->scratch)));
             }
-            eb_emit(e, cc_gr_cs_run_text(e->scratch, rg_cs_expr_cs(g, cs, e->scratch)));
             break;
         }
         if (x->kind == RN_SOME) {
@@ -1615,7 +1650,7 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
     RFirst* F = (RFirst*)calloc(1, sizeof(RFirst));
     RKeeps* K = (RKeeps*)calloc(1, sizeof(RKeeps));
     cc_arena_stack(sc, 32768);   /* piece scratch: stack root, heap overflow */
-    EB e = { &out, &len, &cap, F, K, 0, -1, 0, 0, -1, -1, &sc };
+    EB e = { &out, &len, &cap, F, K, 0, -1, 0, 0, -1, -1, &sc, NULL, NULL, NULL };
     int lbl = 0;
     if (!F || !K) { free(F); free(K); return NULL; }
     e.dom = want_dom;
@@ -2616,6 +2651,17 @@ static char cc__schema_reg[32][S_NAME]; static int cc__schema_nreg;
  * codegen phase registers each with the native Type_method hook */
 static char cc__ufcs_types[64][80]; static int cc__ufcs_ntypes;
 
+/* Schema bind fields → shadow UFCS field table (product + union-arm binds
+ * flattened onto the outer type so `.framed.args` walks before variant
+ * rewrite inserts `.u.`). */
+typedef struct {
+    char type[80];
+    char field[S_NAME];
+    char fty[80];
+} CCGrammarUfcsField;
+static CCGrammarUfcsField cc__ufcs_fields[192];
+static int cc__ufcs_nfields;
+
 void cc__grammar_note_ufcs_type(const char* type_name) {
     for (int i = 0; i < cc__ufcs_ntypes; i++)
         if (strcmp(cc__ufcs_types[i], type_name) == 0) return;
@@ -2623,15 +2669,73 @@ void cc__grammar_note_ufcs_type(const char* type_name) {
     snprintf(cc__ufcs_types[cc__ufcs_ntypes++], sizeof(cc__ufcs_types[0]), "%s", type_name);
 }
 
+static void cc__grammar_note_ufcs_field(const char* type_name, const char* field,
+                                       const char* fty) {
+    int i;
+    if (!type_name || !type_name[0] || !field || !field[0] || !fty || !fty[0])
+        return;
+    for (i = 0; i < cc__ufcs_nfields; i++) {
+        if (strcmp(cc__ufcs_fields[i].type, type_name) == 0 &&
+            strcmp(cc__ufcs_fields[i].field, field) == 0) {
+            if (!cc__ufcs_fields[i].fty[0])
+                snprintf(cc__ufcs_fields[i].fty, sizeof(cc__ufcs_fields[i].fty),
+                         "%s", fty);
+            return;
+        }
+    }
+    if (cc__ufcs_nfields >=
+        (int)(sizeof(cc__ufcs_fields) / sizeof(cc__ufcs_fields[0])))
+        return;
+    snprintf(cc__ufcs_fields[cc__ufcs_nfields].type,
+             sizeof(cc__ufcs_fields[0].type), "%s", type_name);
+    snprintf(cc__ufcs_fields[cc__ufcs_nfields].field,
+             sizeof(cc__ufcs_fields[0].field), "%s", field);
+    snprintf(cc__ufcs_fields[cc__ufcs_nfields].fty,
+             sizeof(cc__ufcs_fields[0].fty), "%s", fty);
+    cc__ufcs_nfields++;
+}
+
+static void cc__grammar_note_bind_field(const char* type_name, const STerm* t) {
+    char ptr[S_NAME + 2];
+    const char* fty = NULL;
+    if (!type_name || !t || !t->field[0]) return;
+    if (t->kind == SK_BIND_INT) fty = "long long";
+    else if (t->kind == SK_BIND_FLOAT) fty = "double";
+    else if (t->kind == SK_BIND_SLICE) fty = "CCSlice";
+    else if (t->kind == SK_BIND_BYTES) fty = "CCSliceHdr";
+    else if (t->kind == SK_BIND_ITEMS) {
+        if (t->cap > 0)
+            fty = t->etype;
+        else {
+            snprintf(ptr, sizeof(ptr), "%s*", t->etype);
+            fty = ptr;
+        }
+    } else
+        return;
+    cc__grammar_note_ufcs_field(type_name, t->field, fty);
+}
+
 int cc_grammar_pending_ufcs_type_count(void) { return cc__ufcs_ntypes; }
 const char* cc_grammar_pending_ufcs_type(int i) {
     return (i >= 0 && i < cc__ufcs_ntypes) ? cc__ufcs_types[i] : NULL;
+}
+
+int cc_grammar_pending_ufcs_field_count(void) { return cc__ufcs_nfields; }
+const char* cc_grammar_pending_ufcs_field_type(int i) {
+    return (i >= 0 && i < cc__ufcs_nfields) ? cc__ufcs_fields[i].type : NULL;
+}
+const char* cc_grammar_pending_ufcs_field_name(int i) {
+    return (i >= 0 && i < cc__ufcs_nfields) ? cc__ufcs_fields[i].field : NULL;
+}
+const char* cc_grammar_pending_ufcs_field_fty(int i) {
+    return (i >= 0 && i < cc__ufcs_nfields) ? cc__ufcs_fields[i].fty : NULL;
 }
 
 void cc__grammar_registry_reset(void) {
     for (int i = 0; i < cc__rules_nreg; i++) free(cc__rules_reg[i].body);
     memset(cc__rules_reg, 0, sizeof cc__rules_reg);
     cc__rules_nreg = 0; cc__schema_nreg = 0; cc__ufcs_ntypes = 0;
+    cc__ufcs_nfields = 0;
 }
 
 static void cc__register_rules(const char* name, const char* body, size_t blen) {
@@ -3013,6 +3117,9 @@ static int rs_int_run_shape(const RG* g, int rule, int* out_neg) {
         }
         neg = 1;
         digits = rg_effective(g, g->kids[x->b + 1]);
+    } else if (g->nodes[ch].kind == RN_SEQ && g->nodes[ch].nkids == 1) {
+        /* `keep [some digit]` — brackets wrap a singleton SEQ */
+        digits = rg_effective(g, g->kids[g->nodes[ch].b]);
     } else {
         digits = ch;
     }
@@ -3521,50 +3628,47 @@ static void rs_emit_get(SS* ss, EB* e, const char* name) {
     }
     if (cnt == 0) eb_emit(e, cc_gr_ftable_empty_row_text(e->scratch));
     eb_emit(e, cc_gr_ftable_close_text(e->scratch));
-    eb_emit(e, cc_gr_field_fn_head_text(e->scratch, name));
-    {
-        unsigned char done[S_MAX_TERMS] = {0};
-        for (int i = 0; i < cnt; i++) {
-            if (done[i]) continue;
-            size_t L = strlen(ss->terms[order[i]].field);
-            eb_emit(e, cc_gr_get_case_text(e->scratch, (int)L));
-            for (int j = i; j < cnt; j++) {
-                const STerm* t = &ss->terms[order[j]];
-                if (done[j] || strlen(t->field) != L) continue;
-                done[j] = 1;
-                eb_emit(e, cc_gr_field_hit_text(e->scratch, t->field, (int)L, name, j));
-            }
-            eb_emit(e, cc_gr_get_break_text(e->scratch));
-        }
+    /* Field-name MPH — structured helper so shadow applies strswitch. */
+    eb_emit(e, cc_gr_fk_get_open_text(e->scratch, name));
+    for (int i = 0; i < cnt; i++) {
+        const STerm* t = &ss->terms[order[i]];
+        eb_emit(e, cc_gr_fk_case_text(e->scratch, (const unsigned char*)t->field,
+                                        (int)strlen(t->field), i));
     }
+    eb_emit(e, cc_gr_fk_fn_close_text(e->scratch));
+    eb_emit(e, cc_gr_field_fn_head_text(e->scratch, name));
+    for (int i = 0; i < cnt; i++)
+        eb_emit(e, cc_gr_field_ord_hit_text(e->scratch, name, i));
     eb_emit(e, cc_gr_switch_end_ret0_text(e->scratch));
     /* compiled get: dispatch straight to member reads — the field table is
      * the reflective face, this is the fast one */
     eb_emit(e, cc_gr_get_fn_head_text(e->scratch, name));
-    {
-        unsigned char done[S_MAX_TERMS] = {0};
-        for (int i = 0; i < cnt; i++) {
-            if (done[i]) continue;
-            size_t L = strlen(ss->terms[order[i]].field);
-            eb_emit(e, cc_gr_get_case_text(e->scratch, (int)L));
-            for (int j = i; j < cnt; j++) {
-                const STerm* t = &ss->terms[order[j]];
-                if (done[j] || strlen(t->field) != L) continue;
-                done[j] = 1;
-                eb_emit(e, cc_gr_get_hit_open_text(e->scratch, t->field, (int)L, rs_gk(t), name, j));
-                eb_emit(e, cc_gr_get_present_text(e->scratch, ss->presence, j));
-                {
-                    int vk = t->kind == SK_BIND_INT ? 0
-                           : t->kind == SK_BIND_FLOAT ? 1
-                           : (t->kind == SK_BIND_ITEMS || t->kind == SK_NARROW_LIST) ? 2 : 3;
-                    eb_emit(e, cc_gr_get_value_text(e->scratch, vk, t->field));
-                }
-                eb_emit(e, cc_gr_get_hit_close_text(e->scratch));
-            }
-            eb_emit(e, cc_gr_get_break_text(e->scratch));
+    for (int i = 0; i < cnt; i++) {
+        const STerm* t = &ss->terms[order[i]];
+        eb_emit(e, cc_gr_get_ord_hit_open_text(e->scratch, rs_gk(t), name, i));
+        eb_emit(e, cc_gr_get_present_text(e->scratch, ss->presence, i));
+        {
+            int vk = t->kind == SK_BIND_INT ? 0
+                   : t->kind == SK_BIND_FLOAT ? 1
+                   : (t->kind == SK_BIND_ITEMS || t->kind == SK_NARROW_LIST) ? 2
+                   : t->kind == SK_BIND_BYTES ? 4 : 3;
+            eb_emit(e, cc_gr_get_value_text(e->scratch, vk, t->field));
         }
+        eb_emit(e, cc_gr_get_hit_close_text(e->scratch));
     }
     eb_emit(e, cc_gr_switch_end_ret0_text(e->scratch));
+}
+
+/* Emit Type__fk_<site> for a fields/narrow key table (wire keys → ordinals). */
+static void rs_emit_fk_helper(EB* e, const SS* ss, const STerm* t, int site) {
+    const char* n = cc__sname ? cc__sname : "Schema";
+    eb_emit_helper(e, cc_gr_fk_fn_open_text(e->scratch, n, site));
+    for (int i = 0; i < t->k_cnt; i++) {
+        const SKey* ki = &ss->keys[t->kidx[i]];
+        eb_emit_helper(e, cc_gr_fk_case_text(e->scratch, (const unsigned char*)ki->key,
+                                               (int)strlen(ki->key), i));
+    }
+    eb_emit_helper(e, cc_gr_fk_fn_close_text(e->scratch));
 }
 
 static void rs_emit_write(SS* ss, const RG* g, EB* e, int* lbl, const char* name) {
@@ -3596,26 +3700,15 @@ static void rs_emit_narrow_members(SS* ss, RG* g, EB* e, int* lbl, const STerm* 
     eb_emit(e, cc_gr_key_span_text(e->scratch, k, g->name, g->rules[w->key_rule].name, fail));
     rw_emit_pads(g, e, w->mpad_b, w->nmpad_b, fail);
     eb_emit(e, cc_gr_kv_check_text(e->scratch, w->kv_b, fail));
-    eb_emit(e, cc_gr_key_switch_open_text(e->scratch, k));
-    {
-        unsigned char done[S_MAX_KEYS] = {0};
-        for (int i = 0; i < t->k_cnt; i++) {
-            if (done[i]) continue;
-            const SKey* ki = &ss->keys[t->kidx[i]];
-            size_t L = strlen(ki->key);
-            eb_emit(e, cc_gr_key_case_text(e->scratch, (int)L));
-            for (int j = i; j < t->k_cnt; j++) {
-                const SKey* kj = &ss->keys[t->kidx[j]];
-                if (done[j] || strlen(kj->key) != L) continue;
-                done[j] = 1;
-                eb_emit(e, cc_gr_key_memcmp_open_text(e->scratch, k, (const unsigned char*)kj->key, (int)L));
-                rw_emit_pads(g, e, w->vpad_a, w->nvpad_a, fail);
-                rs_emit_term(ss, g, e, lbl, kj->term, fail);
-                rw_emit_pads(g, e, w->vpad_b, w->nvpad_b, fail);
-                eb_emit(e, cc_gr_key_break_text(e->scratch));
-            }
-            eb_emit(e, cc_gr_key_goto_dflt_text(e->scratch, k));
-        }
+    rs_emit_fk_helper(e, ss, t, k);
+    eb_emit(e, cc_gr_key_fk_switch_open_text(e->scratch, k, cc__sname ? cc__sname : "Schema"));
+    for (int i = 0; i < t->k_cnt; i++) {
+        const SKey* ki = &ss->keys[t->kidx[i]];
+        eb_emit(e, cc_gr_key_ord_case_text(e->scratch, i));
+        rw_emit_pads(g, e, w->vpad_a, w->nvpad_a, fail);
+        rs_emit_term(ss, g, e, lbl, ki->term, fail);
+        rw_emit_pads(g, e, w->vpad_b, w->nvpad_b, fail);
+        eb_emit(e, cc_gr_key_ord_break_text(e->scratch));
     }
     eb_emit(e, cc_gr_key_default_text(e->scratch, k));
     eb_emit(e, cc_gr_pad_call6_text(e->scratch, g->name, rs_class(g, e->K, w->val_rule),
@@ -3655,25 +3748,14 @@ static void rs_emit_fields(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, const
     rs_emit_pad(g, e, ss->rfpad, fail);
     eb_emit(e, cc_gr_kv_check_text(e->scratch, ss->fkv, fail));
     rs_emit_pad(g, e, ss->rfpad, fail);
-    /* key dispatch: switch on length, memcmp chain within a length class */
-    eb_emit(e, cc_gr_key_switch_open_text(e->scratch, k));
-    {
-        unsigned char done[S_MAX_KEYS] = {0};
-        for (int i = 0; i < t->k_cnt; i++) {
-            if (done[i]) continue;
-            const SKey* ki = &ss->keys[t->kidx[i]];
-            size_t L = strlen(ki->key);
-            eb_emit(e, cc_gr_key_case_text(e->scratch, (int)L));
-            for (int j = i; j < t->k_cnt; j++) {
-                const SKey* kj = &ss->keys[t->kidx[j]];
-                if (done[j] || strlen(kj->key) != L) continue;
-                done[j] = 1;
-                eb_emit(e, cc_gr_key_memcmp_open_text(e->scratch, k, (const unsigned char*)kj->key, (int)L));
-                rs_emit_term(ss, g, e, lbl, kj->term, fail);
-                eb_emit(e, cc_gr_key_break_text(e->scratch));
-            }
-            eb_emit(e, cc_gr_key_goto_dflt_text(e->scratch, k));
-        }
+    /* key dispatch: MPH ordinal helper + integer switch (not length+memcmp) */
+    rs_emit_fk_helper(e, ss, t, k);
+    eb_emit(e, cc_gr_key_fk_switch_open_text(e->scratch, k, cc__sname ? cc__sname : "Schema"));
+    for (int i = 0; i < t->k_cnt; i++) {
+        const SKey* ki = &ss->keys[t->kidx[i]];
+        eb_emit(e, cc_gr_key_ord_case_text(e->scratch, i));
+        rs_emit_term(ss, g, e, lbl, ki->term, fail);
+        eb_emit(e, cc_gr_key_ord_break_text(e->scratch));
     }
     eb_emit(e, cc_gr_key_default_text(e->scratch, k));
     if (ss->rfelse >= 0)
@@ -3871,6 +3953,7 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
     SS* ss = (SS*)calloc(1, sizeof(SS));
     RG* g = NULL; RFirst* F = NULL; RKeeps* K = NULL;
     char* out = NULL; size_t len = 0, cap = 0;
+    char* helpers = NULL; size_t helpers_len = 0, helpers_cap = 0;
     /* piece scratch: stack root, heap overflow only for oversized pieces.
      * Declared before any `goto done` so the free at done: is always safe
      * (cc_arena_free releases overflow extents only; the root is stack). */
@@ -4111,15 +4194,17 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
     cc__sname = name;
     cc__fpfx[0] = '\0';
     {
-        EB e = { &out, &len, &cap, F, K, 0, -1, 0, 0, -1, -1, &sc };
-        int lbl = 0;
-        unsigned char local_xdone[R_MAX_RULES];
-        unsigned char* xdone = reg ? reg->x_done : local_xdone;
-        memset(local_xdone, 0, sizeof local_xdone);
-        eb_emit(&e, cc_gr_schema_manifest_text(e.scratch, name, line,
+    EB e = { &out, &len, &cap, F, K, 0, -1, 0, 0, -1, -1, &sc,
+             &helpers, &helpers_len, &helpers_cap };
+    int lbl = 0;
+    unsigned char local_xdone[R_MAX_RULES];
+    unsigned char* xdone = reg ? reg->x_done : local_xdone;
+    memset(local_xdone, 0, sizeof local_xdone);
+    eb_emit(&e, cc_gr_schema_manifest_text(e.scratch, name, line,
                       reg ? "use " : "inline rules", reg ? ss->usename : "",
                       rs_formatable(ss, g)
                           ? " *   cc_write(T, &v, dst, cap) / T.write(...)           -> T_write (format: derived lengths)\n"
+                            " *   cc_write_unchecked(T, &v, dst) / v.write_unchecked(dst) -> T_write_unchecked\n"
                             " *   cc_measure(T, &v) / v.measure()                   -> T_measure (exact size; 0 = cannot emit)\n"
                             " *   cc_format(T, &v, arena) / v.to_str(arena)         -> T_to_str\n"
                           : ""));
@@ -4214,9 +4299,11 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                 const STerm* t = &ss->terms[order[i]];
                 int vk = t->kind == SK_BIND_INT ? 0
                        : t->kind == SK_BIND_FLOAT ? 1
-                       : (t->kind == SK_BIND_SLICE || t->kind == SK_BIND_BYTES) ? 2
+                       : t->kind == SK_BIND_SLICE ? 2
+                       : t->kind == SK_BIND_BYTES ? 5
                        : t->cap > 0 ? 3 : 4;
                 eb_emit(&e, cc_gr_member_text(e.scratch, vk, t->etype, t->field, t->cap));
+                cc__grammar_note_bind_field(name, t);
             }
             if (ss->presence)
                 eb_emit(&e, cc_gr_presence_member_text(e.scratch));
@@ -4229,18 +4316,27 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                         const STerm* t = &ss->terms[ss->uv[vi].t[j]];
                         if (t->kind == SK_BIND_INT) {
                             eb_emit(&e, cc_gr_umember_text(e.scratch, 0, t->etype, t->field, 0));
+                            cc__grammar_note_bind_field(name, t);
                             nmembers++;
                         } else if (t->kind == SK_BIND_FLOAT) {
                             eb_emit(&e, cc_gr_umember_text(e.scratch, 1, t->etype, t->field, 0));
+                            cc__grammar_note_bind_field(name, t);
                             nmembers++;
-                        } else if (t->kind == SK_BIND_SLICE || t->kind == SK_BIND_BYTES) {
+                        } else if (t->kind == SK_BIND_SLICE) {
                             eb_emit(&e, cc_gr_umember_text(e.scratch, 2, t->etype, t->field, 0));
+                            cc__grammar_note_bind_field(name, t);
+                            nmembers++;
+                        } else if (t->kind == SK_BIND_BYTES) {
+                            eb_emit(&e, cc_gr_umember_text(e.scratch, 5, t->etype, t->field, 0));
+                            cc__grammar_note_bind_field(name, t);
                             nmembers++;
                         } else if (t->kind == SK_BIND_ITEMS && t->cap > 0) {
                             eb_emit(&e, cc_gr_umember_text(e.scratch, 3, t->etype, t->field, t->cap));
+                            cc__grammar_note_bind_field(name, t);
                             nmembers++;
                         } else if (t->kind == SK_BIND_ITEMS) {
                             eb_emit(&e, cc_gr_umember_text(e.scratch, 4, t->etype, t->field, 0));
+                            cc__grammar_note_bind_field(name, t);
                             nmembers++;
                         }
                     }
@@ -4281,26 +4377,47 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                 (void)cc_variant_schema_pending_add(name, nreg, arms, voids);
             }
         }
-        eb_emit(&e, cc_gr_fill_head_text(e.scratch, name));
-        /* zero the struct only when some bind is conditional (inside a
-         * fields dispatch): a body whose binds are all unconditional terms
-         * assigns every member on the success path — missing-member zeroing
-         * is a fields-combinator semantic, not a product-schema one. */
+        /* Collect Type__fk_N during fill body, then splice ahead of __fill
+         * so helpers are file-scope (shadow parses + strswitch). */
         {
-            int conditional = 0;
-            for (int ti = 0; ti < ss->nterms && !conditional; ti++)
-                if (ss->terms[ti].kind == SK_FIELDS ||
-                    ss->terms[ti].kind == SK_NARROW_MEMBERS) conditional = 1;
-            if (conditional) {
-                eb_emit(&e, cc_gr_fill_zero_text(e.scratch));
+            size_t fill_at = len;
+            eb_emit(&e, cc_gr_fill_head_text(e.scratch, name));
+            /* zero the struct only when some bind is conditional (inside a
+             * fields dispatch): a body whose binds are all unconditional terms
+             * assigns every member on the success path — missing-member zeroing
+             * is a fields-combinator semantic, not a product-schema one. */
+            {
+                int conditional = 0;
+                for (int ti = 0; ti < ss->nterms && !conditional; ti++)
+                    if (ss->terms[ti].kind == SK_FIELDS ||
+                        ss->terms[ti].kind == SK_NARROW_MEMBERS) conditional = 1;
+                if (conditional) {
+                    eb_emit(&e, cc_gr_fill_zero_text(e.scratch));
+                }
             }
-        }
-        {
-            char fail[16];
-            snprintf(fail, sizeof(fail), "Lz%d", lbl++);
-            for (int i = 0; i < ss->nbody; i++)
-                rs_emit_term(ss, g, &e, &lbl, ss->body[i], fail);
-            eb_emit(&e, cc_gr_fill_tail_text(e.scratch, fail));
+            {
+                char fail[16];
+                snprintf(fail, sizeof(fail), "Lz%d", lbl++);
+                for (int i = 0; i < ss->nbody; i++)
+                    rs_emit_term(ss, g, &e, &lbl, ss->body[i], fail);
+                eb_emit(&e, cc_gr_fill_tail_text(e.scratch, fail));
+            }
+            if (helpers_len > 0) {
+                size_t need = len + helpers_len + 1;
+                if (need > cap) {
+                    size_t nc = cap ? cap : 256;
+                    while (nc < need) nc *= 2;
+                    char* nb = (char*)realloc(out, nc);
+                    if (!nb) { free(helpers); helpers = NULL; helpers_len = 0;
+                        snprintf(err, err_sz, "@grammar(schema) %s: out of memory", name);
+                        free(out); out = NULL; goto done; }
+                    out = nb; cap = nc;
+                }
+                memmove(out + fill_at + helpers_len, out + fill_at, len - fill_at);
+                memcpy(out + fill_at, helpers, helpers_len);
+                len += helpers_len;
+                free(helpers); helpers = NULL; helpers_len = 0; helpers_cap = 0;
+            }
         }
         eb_emit(&e, cc_gr_parse_fn_text(e.scratch, name));
         /* incremental entry: parse ONE value at *pos, advance it — pipelines
@@ -4342,8 +4459,11 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
         {
             int fmtable = rs_formatable(ss, g);
             int want_write = rs_has_token(src, src_len, name, "_write") ||
+                             rs_has_token(src, src_len, name, "_write_unchecked") ||
                              rs_has_op(src, src_len, "cc_write", name) ||
-                             rs_has_dot(src, src_len, name, "write");
+                             rs_has_op(src, src_len, "cc_write_unchecked", name) ||
+                             rs_has_dot(src, src_len, name, "write") ||
+                             rs_has_dot(src, src_len, name, "write_unchecked");
             int want_measure = rs_has_token(src, src_len, name, "_measure") ||
                                rs_has_op(src, src_len, "cc_measure", name) ||
                                rs_has_dot(src, src_len, name, "measure") ||
@@ -4354,7 +4474,8 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                              (fmtable && rs_any_method_demand(src, src_len, "to_str"));
             if (!want_write && fmtable &&
                 (want_tostr || want_measure ||
-                 rs_any_method_demand(src, src_len, "write")))
+                 rs_any_method_demand(src, src_len, "write") ||
+                 rs_any_method_demand(src, src_len, "write_unchecked")))
                 want_write = 1;   /* element writers / to_str / measure substrate */
             if ((want_write || want_tostr || want_measure) && !fmtable) {
                 const char* vn = NULL;
@@ -4393,6 +4514,7 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
         snprintf(cc__schema_reg[cc__schema_nreg++], S_NAME, "%s", name);
 
 done:
+    free(helpers);
     cc_arena_free(&sc);
     free(ss); free(g); free(F); free(K);
     return out;

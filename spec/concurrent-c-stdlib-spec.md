@@ -141,7 +141,7 @@ CCSlice cc_slice_empty(void);
 CCSlice cc_slice_from_buffer(void *ptr, size_t len);
 CCSlice cc_slice_from_static(void *ptr, size_t len);
 CCSlice cc_slice_hdr_slice(CCSliceHdr *sh);
-CCSlice cc_slice_from_parts(void *ptr, size_t len, uint64_t id, size_t available_len);
+CCSlice cc_slice_from_parts(void *ptr, size_t len, uint64_t id);
 CCSlice char_to_slice(const char *cstr);
 CCSlice const_char_to_slice(const char *cstr); /* alias; UFCS for const char* */
 CCSlice unsigned_char_to_slice(const unsigned char *cstr);
@@ -176,7 +176,6 @@ The query and view operations are:
 
 ```c
 bool cc_slice_is_empty(CCSlice *s);
-size_t cc_slice_capacity(CCSlice s);
 const char *cc_slice_str(CCSlice *s);
 const uint8_t *cc_slice_bytes(CCSlice *s);
 bool cc_slice_is_ascii(CCSlice s);

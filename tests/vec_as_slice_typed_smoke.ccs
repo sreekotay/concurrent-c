@@ -26,7 +26,7 @@ int main(void) {
     CCSlice_double mid = s.sub(0, 2);
     assert(mid.len() == 2);
 
-    /* bytes() erases scaled: len and alen in bytes. */
+    /* bytes() erases scaled: len in bytes. */
     CCSlice erased = s.bytes();
     assert(erased.len == 3 * sizeof(double));
 

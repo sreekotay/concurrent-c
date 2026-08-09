@@ -60,8 +60,7 @@ static inline CCSlice cc_vec_as_slice(const CCVec *v) {
     if (!v || !v->data) return cc_slice_empty();
     return cc_slice_from_parts(v->data,
                                v->len,
-                               cc_slice_make_id(cc_vec_provenance(v), false, false, false),
-                               cc_vec_cap(v));
+                               cc_slice_make_id(cc_vec_provenance(v), false, false, false));
 }
 
 static inline void cc_vec_apply_slice(CCVec *v, CCSlice slice) {
@@ -146,8 +145,7 @@ static inline CCSlice cc_vec_as_slice(const CCVec *v) {
     if (!v || !v->data) return cc_slice_empty();
     return cc_slice_from_parts(v->data,
                                v->len,
-                               cc_slice_make_id(cc_vec_provenance(v), false, false, false),
-                               cc_vec_cap(v));
+                               cc_slice_make_id(cc_vec_provenance(v), false, false, false));
 }
 
 static inline void cc_vec_apply_slice(CCVec *v, CCSlice slice) {

@@ -14,6 +14,6 @@
 ~~~~}
 
 int main(void) {
-    Bulk b = { .data = { .payload = cc_slice_from_buffer((void*)"x", 1) } };
+    Bulk b = { .data = { .payload = cc_slice_hdr_from_buffer((void*)"x", 1) } };
     return (int)b.data.payload.len; /* ERROR: not dominated */
 }

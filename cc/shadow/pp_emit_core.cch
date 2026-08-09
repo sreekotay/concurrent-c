@@ -3284,11 +3284,29 @@ typedef struct {
 static ShadowStructField g_shadow_fields[192];
 static int g_shadow_nfields;
 
+/* Field declarator base: `args[16]` / `args [16]` → `args` for UFCS walks. */
+static void shadow_field_ident_norm(const char* field, char* out, size_t cap) {
+    size_t n = 0;
+    if (!out || !cap) return;
+    out[0] = 0;
+    if (!field || !field[0]) return;
+    while (field[n] && field[n] != '[' && field[n] != ' ' && field[n] != '\t' &&
+           n + 1 < cap)
+        n++;
+    if (!n) return;
+    memcpy(out, field, n);
+    out[n] = 0;
+}
+
 static void shadow_field_register_ex(const char* ty, const char* field,
                                      const char* field_ty) {
     int i;
     const char* fty = field_ty;
+    char fname[64];
     if (!ty || !ty[0] || !field || !field[0]) return;
+    shadow_field_ident_norm(field, fname, sizeof(fname));
+    if (!fname[0]) return;
+    field = fname;
     if (g_shadow_nfields >= (int)(sizeof(g_shadow_fields) / sizeof(g_shadow_fields[0]))) {
         static int reported;
         if (!reported) {
@@ -4541,6 +4559,10 @@ static void shadow_map_ufcs_install(const char* map_name) {
  * UFCS targets even when matchers live in AST_RAW_LINE tape passthrough. */
 extern int cc_grammar_pending_ufcs_type_count(void);
 extern const char* cc_grammar_pending_ufcs_type(int i);
+extern int cc_grammar_pending_ufcs_field_count(void);
+extern const char* cc_grammar_pending_ufcs_field_type(int i);
+extern const char* cc_grammar_pending_ufcs_field_name(int i);
+extern const char* cc_grammar_pending_ufcs_field_fty(int i);
 
 static void shadow_grammar_ufcs_install(void) {
     static const char* methods[] = {
@@ -4548,7 +4570,8 @@ static void shadow_grammar_ufcs_install(void) {
         "reader", "get", "next", "at_end", "_fill", "__wmeasure", "__wput"
     };
     int nt = cc_grammar_pending_ufcs_type_count();
-    int ti;
+    int nf = cc_grammar_pending_ufcs_field_count();
+    int ti, fi;
     size_t mi;
     for (ti = 0; ti < nt; ti++) {
         const char* type = cc_grammar_pending_ufcs_type(ti);
@@ -4565,6 +4588,14 @@ static void shadow_grammar_ufcs_install(void) {
             snprintf(callee, sizeof(callee), "%s_%s", type, methods[mi]);
             shadow_ufn_register(callee, fty);
         }
+    }
+    /* Bind fields (incl. union-arm binds flattened onto the schema type). */
+    for (fi = 0; fi < nf; fi++) {
+        const char* type = cc_grammar_pending_ufcs_field_type(fi);
+        const char* field = cc_grammar_pending_ufcs_field_name(fi);
+        const char* fty = cc_grammar_pending_ufcs_field_fty(fi);
+        if (!type || !field || !fty) continue;
+        shadow_field_register_ex(type, field, fty);
     }
 }
 

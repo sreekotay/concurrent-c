@@ -86,6 +86,7 @@ static int shadow_emit_reflect_field_table(AstNode* it, CEmit* out) {
     const char* names[64];
     const char* types_store[64];
     char typebuf[64][160];
+    char namebuf[64][64];
     int is_as_arr[64];
     if (!it || !out || !it->b[0] || it->nkids <= 0) return 1;
     alias = it->b;
@@ -103,6 +104,7 @@ static int shadow_emit_reflect_field_table(AstNode* it, CEmit* out) {
         AstNode* f = it->kids[k];
         const char* fname = NULL;
         char fty[160];
+        char fnorm[64];
         int is_as = 0;
         fty[0] = 0;
         if (f->kind == AST_FIELD_INT) {
@@ -121,10 +123,15 @@ static int shadow_emit_reflect_field_table(AstNode* it, CEmit* out) {
             continue;
         }
         if (!fname || !fname[0]) continue;
+        /* Reflect / UFCS share the base identifier (`args`, not `args[16]`). */
+        shadow_field_ident_norm(fname, fnorm, sizeof(fnorm));
+        if (!fnorm[0]) continue;
+        fname = fnorm;
         if (!cemit_fmt(out, "    { \"%s\", \"%s\", %d },\n", fname, fty, is_as))
             return 0;
         if (n < 64) {
-            names[n] = fname;
+            snprintf(namebuf[n], sizeof(namebuf[n]), "%s", fname);
+            names[n] = namebuf[n];
             snprintf(typebuf[n], sizeof(typebuf[n]), "%s", fty);
             types_store[n] = typebuf[n];
             is_as_arr[n] = is_as;
@@ -2043,6 +2050,12 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 (it->e[0] && strstr(it->e, "unused"))
                     ? "__attribute__((unused)) "
                     : "";
+            /* Schema key MPH helpers (`Type__fk_*`) need forced inlining into
+             * opaque __fill — plain `inline` leaves an out-of-line call. */
+            const char* always_attr =
+                (it->e[0] && strstr(it->e, "always_inline"))
+                    ? "__attribute__((always_inline)) "
+                    : "";
             /* One-liner wrapper before emitting `{` + newline. */
             if (it->nkids == 1 && it->kids[0]->kind == AST_CALL_ARGS) {
                 AstNode* c = it->kids[0];
@@ -2067,11 +2080,11 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                  * text; never feed that through a cemit_fmt value slot that
                  * shares a short temp with the whole one-liner. */
                 if (!shadow_tpl_kv(out,
-                                   "static ${attr}${inl}${ret} ${name}(${params}) { "
+                                   "static ${attr}${alw}${inl}${ret} ${name}(${params}) { "
                                    "${fn}(",
-                                   "attr", unused_attr, "inl", inl, "ret", ret,
-                                   "name", it->b, "params", params, "fn", fn,
-                                   NULL) ||
+                                   "attr", unused_attr, "alw", always_attr,
+                                   "inl", inl, "ret", ret, "name", it->b,
+                                   "params", params, "fn", fn, NULL) ||
                     !cemit_str(out, args) ||
                     !cemit_str(out, "); }\n\n"))
                     return 0;
@@ -2090,14 +2103,15 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 shadow_restrict_check_text(body);
                 shadow_pop_fn_binds(one_mark);
                 if (g_shadow_restrict_diag) return 0;
-                if (!cemit_fmt(out, "static %s%s%s %s(%s) { %s }\n\n",
-                               unused_attr, inl, ret, it->b, params, body))
+                if (!cemit_fmt(out, "static %s%s%s%s %s(%s) { %s }\n\n",
+                               unused_attr, always_attr, inl, ret, it->b, params,
+                               body))
                     return 0;
                 break;
             }
             if (it->d[0] && it->nkids == 0) {
-                if (!cemit_fmt(out, "static %s%s%s %s(%s) {\n", unused_attr, inl,
-                               ret, it->b, params))
+                if (!cemit_fmt(out, "static %s%s%s%s %s(%s) {\n", unused_attr,
+                               always_attr, inl, ret, it->b, params))
                     return 0;
                 char body[2048];
                 shadow_rewrite_ufcs(body, sizeof(body), it->d, NULL);
@@ -2181,7 +2195,8 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 }
             }
             if (bind_ok &&
-                !cemit_fmt(out, "static %s%s%s %s(%s) {\n", unused_attr, inl,
+                !cemit_fmt(out, "static %s%s%s%s %s(%s) {\n", unused_attr,
+                           always_attr, inl,
                            ret, it->b, params))
                 bind_ok = 0;
             /* Soft returns + watermark for any return type (void skips retval). */

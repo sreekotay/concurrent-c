@@ -56,9 +56,7 @@ CCSlice cc_string_as_slice(const CCString *str) {
     return cc_slice_from_parts(
         (void *)data,
         str->len,
-        cc_slice_make_id(cc_string_provenance(str), false, false, false),
-        str->cap
-    );
+        cc_slice_make_id(cc_string_provenance(str), false, false, false));
 }
 
 const char *cc_string_cstr(CCString *str, CCArena *arena) {

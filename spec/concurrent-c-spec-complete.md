@@ -425,7 +425,7 @@ int ! IoError read_int (char [ : ] data) {
 
 **Slice declarations:** type position and declarator position are equivalent — `char[:] s` ≡ `char s[:]`, in locals, parameters, and struct fields alike.
 
-**Typed slice instances:** a non-char element type instantiates the slice generic: `double[:]` is `CCSlice_double`, a distinct struct declared by the `CC_DECL_SLICE_SPEC(Name, T)` template — `CCSlice base @as;` plus element-wise methods with `sizeof(T)` in hand, named `Name_<member>` (the same instance-prefix convention as Vec and Map families). `len()`/`at(i)`/`sub(a,b)` count and index elements (`sub` returns the same instance type); `bytes()` returns an honestly byte-measured `CCSlice` (`len`/`alen` scale by `sizeof(T)`). Scalar instances are pre-declared in `cc_slice.cch`; any other element type auto-instantiates at first use — the compiler splices the declaration after the element's definition, exactly as it splices Vec/Map monomorphs. A hand-written declaration (`CC_DECL_SLICE(T)` for a single-token element, `CC_DECL_SLICE_SPEC(Name, T)` otherwise) is honored and suppresses the splice, for plain-C consumers and headers. Instance types are distinct in `_Generic`, so type-directed dispatch (e.g. dynamic-sink marshaling) sees the element type in any expression position.
+**Typed slice instances:** a non-char element type instantiates the slice generic: `double[:]` is `CCSlice_double`, a distinct struct declared by the `CC_DECL_SLICE_SPEC(Name, T)` template — `CCSlice base @as;` plus element-wise methods with `sizeof(T)` in hand, named `Name_<member>` (the same instance-prefix convention as Vec and Map families). `len()`/`at(i)`/`sub(a,b)` count and index elements (`sub` returns the same instance type); `bytes()` returns an honestly byte-measured `CCSlice` (`len` scales by `sizeof(T)`). Scalar instances are pre-declared in `cc_slice.cch`; any other element type auto-instantiates at first use — the compiler splices the declaration after the element's definition, exactly as it splices Vec/Map monomorphs. A hand-written declaration (`CC_DECL_SLICE(T)` for a single-token element, `CC_DECL_SLICE_SPEC(Name, T)` otherwise) is honored and suppresses the splice, for plain-C consumers and headers. Instance types are distinct in `_Generic`, so type-directed dispatch (e.g. dynamic-sink marshaling) sees the element type in any expression position.
 
 Erasure is a spelling: `xs.base` reads the raw element-counted core; passing an instance by value where `CCSlice` is expected autocasts through `bytes()` (scaled). Byte-oriented `CCSlice` methods remain reachable on instances through the `@as` retry; element-wise shadows win by name when declared. Two initializer forms lower specially:
 
@@ -1291,7 +1291,7 @@ int!>(Error)[~10 >] results_tx;          // sender for channel of results
 
 Slices are *views*; they do not own memory.
 
-**Rule (`T[n:]` semantics):** `T[n:]` is a slice type with a compile-time known length `n`. It has the same ABI as `T[:]` (32 bytes), but the type system statically guarantees `len == n`. This enables bounds-checked indexing to elide runtime checks. `T[n:]` implicitly converts to `T[:]` (information is erased, not lost).
+**Rule (`T[n:]` semantics):** `T[n:]` is a slice type with a compile-time known length `n`. It has the same ABI as `T[:]` (24 bytes on 64-bit), but the type system statically guarantees `len == n`. This enables bounds-checked indexing to elide runtime checks. `T[n:]` implicitly converts to `T[:]` (information is erased, not lost).
 
 **Rule (`!` marker semantics):** The `!` suffix on a slice type is a **type-level uniqueness guarantee**. A value typed `T[:!]` or `T[:k!]` is statically required to carry `id.is_unique=1` at the ABI level (§3.4) — i.e., the compiler rejects any assignment, copy, or parameter pass that would duplicate it outside a move context (`cc_move()`, `return`, `send_take`). Use `T[:!]` in function signatures to **demand** that callers hand over ownership. `T[:]` by contrast says nothing about uniqueness at the type level — the value may or may not be unique; the compiler relies on the runtime `is_unique` bit to enforce copy rules at the call site.
 
@@ -1314,7 +1314,7 @@ Slices are *views*; they do not own memory.
 
 ---
 
-### 3.4 Slice ABI (32 bytes)
+### 3.4 Slice ABI (24 bytes on 64-bit)
 
 All slices lower to the following ABI:
 
@@ -1323,9 +1323,11 @@ struct Slice_T {
     T*       ptr;      // 8 bytes: element pointer
     size_t   len;      // 8 bytes: element count
     uint64_t id;       // 8 bytes: allocation ID with flags (see below)
-    size_t   alen;     // 8 bytes: allocation length (for send_take eligibility)
 };
 ```
+
+Backing-store capacity is not part of the slice ABI. Owners that need
+remaining room (strings, vecs, arenas) keep capacity on the owner.
 
 **ID field encoding:**
 
@@ -1454,19 +1456,18 @@ When a slice value is derived from another slice (subslicing):
 | **Allocation ID (bits 0–60)**  | Preserved exactly                                                                              |
 | `**is_unique` (bit 63)**       | Cleared (0) — derived slices are borrowed views, only the original owning slice remains unique |
 | `**is_transferable` (bit 61)** | Preserved exactly — but borrowed views are never transferable because `is_unique == 0`         |
-| `**is_subslice` (bit 62)**     | Set to 1 iff the derived slice does not cover the entire allocation                            |
-| `**alen`**                     | Preserved as the allocation length for all derived slices                                      |
+| `**is_subslice` (bit 62)**     | Set to 1 iff the derived slice is a proper subrange, or a full-range view of an existing subslice |
 
 
 `**is_subslice` computation:**
 
-- `s[..]` where `s.len == s.alen` → `is_subslice = 0`
-- `s[0..s.len]` → `is_subslice = 0`
-- `s[a..b]` where `a != 0` or `b != s.alen` → `is_subslice = 1`
+- Full-range of a non-subslice (`start == 0 && end == s.len && !is_subslice(s)`) → `is_subslice = 0`
+- Proper subrange (`start != 0` or `end != s.len`) → `is_subslice = 1`
+- Full-range of an existing subslice → `is_subslice = 1`
 
-This guarantees that full-range subslices remain eligible for transfer (if the source was transferable), while partial subslices are rejected — with no runtime table required.
+This guarantees that only the owning unique non-subslice remains eligible for transfer, while derived views are rejected — with no runtime table required.
 
-**Rule (ptr invariant):** For tracked allocations (unique slices from `recv()` or `adopt()`), the `ptr` field of the owning unique slice is always the allocation base pointer. Subslicing adjusts `ptr` (and `len`) but preserves `alen`. This invariant, combined with `is_subslice`, ensures `send_take` eligibility is decidable without runtime lookup: `is_subslice == 0` implies `ptr` equals the allocation base and `len == alen`.
+**Rule (ptr invariant):** For tracked allocations (unique slices from `recv()` or `adopt()`), the `ptr` field of the owning unique slice is always the allocation base pointer. Subslicing adjusts `ptr` and `len` and sets `is_subslice`. Combined with uniqueness and transferability flags, `send_take` eligibility is decidable without runtime lookup: unique + transferable + `!is_subslice`.
 
 **Slice capture rules:** Stack slices cannot be captured in thread/task closures (compile-time enforced). Arena slices can be captured if the arena provably outlives the thread/task. Unique slices (from `recv()`) can always be captured. See §2.2 for complete capture rules.
 
@@ -5196,7 +5197,7 @@ Policy-tagged slots (`$~tag{expr}`) require an arena and are not available in th
 
 **Semantics (normative).**
 
-- The buffer is a block-scoped `char[K]` where `K` is an integer constant expression: the decoded literal byte count plus the sum of the per-slot bounds above. The yielded slice's capacity (`alen`) equals `K` exactly.
+- The buffer is a block-scoped `char[K]` where `K` is an integer constant expression: the decoded literal byte count plus the sum of the per-slot bounds above. The yielded slice's `len` is the written byte count; `K` is the buffer size and is not carried on the slice.
 - The slice is a borrow with **block lifetime and stack provenance**: it stays valid for the rest of the enclosing block, including across later statements and nested blocks. Each `@string` site gets its own buffer.
 - The form is a pure expression and may appear anywhere an expression may (initializer, argument position, …).
 - `bool` formats as `true` / `false`; integers format in decimal.
@@ -5205,7 +5206,7 @@ Policy-tagged slots (`$~tag{expr}`) require an arena and are not available in th
 
 ```c
 int v = 42;
-char[:] s = @string(`v=${v}!`);   // "v=42!"; s.alen == 2 + 11 + 1
+char[:] s = @string(`v=${v}!`);   // "v=42!"; buffer bound K = 2 + 11 + 1
 take_slice(@string(`arg=${v}`));  // expression position
 ```
 
@@ -7298,9 +7299,8 @@ struct Slice_T {
     T*       ptr;      // 8 bytes (pointer)
     size_t   len;      // 8 bytes (length)
     uint64_t id;       // 8 bytes (allocation ID + flags)
-    size_t   alen;     // 8 bytes (arena-allocated length)
 };
-// sizeof(Slice_T) = 32 bytes on 64-bit platforms
+// sizeof(Slice_T) = 24 bytes on 64-bit platforms
 ```
 
 **ID field encoding (bit layout):**
@@ -7312,7 +7312,7 @@ Bit 61: is_transferable   (1 = safe to send_take across threads)
 Bits 0–60: allocation_id  (0 = static/untracked)
 ```
 
-**32-bit platforms:** Slice layout is implementation-defined. Implementations may use smaller pointer/size fields (4 bytes each) resulting in 20–24 byte slices, or preserve 64-bit fields for compatibility. Portable code should not assume slice size.
+**32-bit platforms:** Slice layout is implementation-defined. Implementations may use smaller pointer/size fields (4 bytes each) resulting in 12–16 byte slices, or preserve 64-bit fields for compatibility. Portable code should not assume slice size.
 
 **Duration layout:**
 

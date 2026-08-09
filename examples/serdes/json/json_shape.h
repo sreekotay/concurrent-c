@@ -497,7 +497,7 @@ static inline CCSlice JShVal_slice(const JShVal* v) {
     uint64_t l = JSON_LEN(v->meta);
     uint64_t id = JSON_COW(v->meta) ? cc_slice_make_id(JSON_ARENA_ID, true, false, false)
                                     : cc_slice_make_id(JSON_SRC_ID, false, false, true);
-    return cc_slice_from_parts((void*)v->u.bytes, l, id, l);
+    return cc_slice_from_parts((void*)v->u.bytes, l, id);
 }
 
 #endif /* CC_JSON_SHAPE_H */

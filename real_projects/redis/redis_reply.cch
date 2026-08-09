@@ -73,12 +73,12 @@ static RedisReply reply_wire(char[:] s) {
 }
 
 static inline RespGReply wire_bulk(char[:] data) {
-    return (RespGReply){ .bulk = { .len = (long long)data.len, .data = data } };
+    return (RespGReply){ .bulk = { .len = (long long)data.len, .data = data.hdr() } };
 }
 
 static inline RespGBulk wire_bulk_or_nil(char[:] data, bool found) {
     if (!found) return (RespGBulk){ .nil = {} };
-    return (RespGBulk){ .data = { .payload = data } };
+    return (RespGBulk){ .data = { .payload = data.hdr() } };
 }
 
 static bool redis_reply_to_wire(const RedisReply* reply, RespGReply* wire) {

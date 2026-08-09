@@ -5,10 +5,12 @@
 #include <ccc/script/stdio.cch>
 #include <time.h>
 
+/* Bulk lengths are non-negative: `keep [some digit]` (no opt '-') so the
+ * fused int run has no sign branch — same as the hand RESP path. */
 @grammar(schema) RespArg {~~~~
     rules [
         digit:  charset [#'0' - #'9']
-        number: keep [opt #'-' some digit]
+        number: keep [some digit]
     ]
     #'$' len: int number "\r\n"
     data: bytes len
@@ -18,7 +20,7 @@
 @grammar(schema) RespCmd {~~~~
     rules [
         digit:  charset [#'0' - #'9']
-        number: keep [opt #'-' some digit]
+        number: keep [some digit]
     ]
     #'*' argc: int number "\r\n"
     args: items RespArg argc cap 16
@@ -131,7 +133,7 @@ int main(int argc, char** argv) {
      * sink_buf keeps writes live under -O2 DSE. */
     {
         RespCmd cmd = { .argc = 0, .args_n = 3 };
-        cmd.args[0].data = cc_slice_from_buffer((void*)"SET", 3);
+        cmd.args[0].data = cc_slice_hdr_from_buffer((void*)"SET", 3);
         char* eb = (char*)malloc((size_t)NCMD * 64);
         char key[32], val[48];
         size_t en = 0, en_hand = 0;
@@ -148,9 +150,10 @@ int main(int argc, char** argv) {
                     val[vl++] = 'e'; val[vl++] = '-';
                     vl += put_u(val + vl, (unsigned long long)j);
                     memcpy(val + vl, "-xxxxxxxx", 9); vl += 9;
-                    cmd.args[1].data = cc_slice_from_buffer(key, kl);
-                    cmd.args[2].data = cc_slice_from_buffer(val, vl);
-                    size_t w = RespCmd_write(&cmd, eb + en, cap - en);
+                    cmd.args[1].data = cc_slice_hdr_from_buffer(key, kl);
+                    cmd.args[2].data = cc_slice_hdr_from_buffer(val, vl);
+                    /* reserved buffer — unchecked face matches hand peer */
+                    size_t w = cmd.write_unchecked(eb + en);
                     if (!w) { eprintln("encode FAIL") !>; return 1; }
                     en += w;
                 }

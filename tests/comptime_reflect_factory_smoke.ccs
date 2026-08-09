@@ -47,7 +47,7 @@ typedef struct {
             (int)mangled.len, (char*)mangled.ptr, i, ft);
     }
     if (n <= 0) return cc_slice_empty();
-    return cc_slice_from_parts(buf, (size_t)n, CC_SLICE_ID_UNTRACKED, sizeof(buf));
+    return cc_slice_from_parts(buf, (size_t)n, CC_SLICE_ID_UNTRACKED);
 }
 
 @comptime {

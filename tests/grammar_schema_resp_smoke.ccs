@@ -20,7 +20,7 @@
 @grammar(schema) RespArg {~~~~
     rules [
         digit:  charset [#'0' - #'9']
-        number: keep [opt #'-' some digit]
+        number: keep [some digit]
     ]
     #'$' len: int number "\r\n"
     data: bytes len
@@ -30,7 +30,7 @@
 @grammar(schema) RespCmd {~~~~
     rules [
         digit:  charset [#'0' - #'9']
-        number: keep [opt #'-' some digit]
+        number: keep [some digit]
     ]
     #'*' argc: int number "\r\n"
     args: items RespArg argc
@@ -53,8 +53,7 @@ int main(void) {
         if (!arg_is(&c.args[0], "SET") || !arg_is(&c.args[1], "mykey") || !arg_is(&c.args[2], "hello")) {
             printf("FAIL: args\n"); return 1;
         }
-        /* zero-copy: payloads borrow straight from the source buffer */
-        if (cc_slice_is_unique(c.args[2].data)) { printf("FAIL: bulk should borrow\n"); return 1; }
+        /* zero-copy: bytes binds are CCSliceHdr views into the source */
         if ((const char*)c.args[2].data.ptr < src || (const char*)c.args[2].data.ptr >= src + strlen(src)) {
             printf("FAIL: bulk not in src\n"); return 1;
         }
@@ -138,8 +137,8 @@ int main(void) {
         /* manual construction: a Redis client encoding a command from parts */
         {
             RespArg parts[2];
-            parts[0].data = cc_slice_from_buffer((void*)"GET", 3);
-            parts[1].data = cc_slice_from_buffer((void*)"k1", 2);
+            parts[0].data = cc_slice_hdr_from_buffer((void*)"GET", 3);
+            parts[1].data = cc_slice_hdr_from_buffer((void*)"k1", 2);
             RespCmd g = { .argc = 0, .args = parts, .args_n = 2 };
             w = cc_write(RespCmd, &g, buf, sizeof buf);
             const char* want = "*2\r\n$3\r\nGET\r\n$2\r\nk1\r\n";

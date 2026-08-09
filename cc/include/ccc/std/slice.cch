@@ -264,13 +264,13 @@ static inline CCResult_bool_CCError CCSlice_set(CCSlice* s, size_t idx, char c) 
  *   out.truncate(off) !>;      // narrow a fill buffer to the bytes written
  *
  * Shrink-only, so the window never names memory the slice did not already
- * name. `ptr`, `id`, and `alen` are left alone: provenance and uniqueness
- * survive, and `cc_slice_destroy` still resolves the deleter from the
- * registered base. The pointer receiver never copies, so this is available on
- * a move-only `T[:!]` owner, where a view-producing `sub` is not.
+ * name. `ptr` and `id` are left alone: provenance and uniqueness survive, and
+ * `cc_slice_destroy` still resolves the deleter from the registered base. The
+ * pointer receiver never copies, so this is available on a move-only `T[:!]`
+ * owner, where a view-producing `sub` is not.
  *
- * Growing back toward `alen` is deliberately absent: those bytes may be
- * uninitialized, which is a read-of-garbage the length alone cannot rule out.
+ * Growing is deliberately absent: bytes beyond `len` are not part of the
+ * slice ABI and may be uninitialized.
  */
 static inline CCResult_bool_CCError cc_slice_truncate(CCSlice* s, size_t n) {
     if (!s) {

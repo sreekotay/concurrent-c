@@ -84,7 +84,7 @@ static inline CCResult_CCSlice_CCError cc_stdio_read_all(CCStdio *io) {
         memcpy(total + total_len, buf, n);
         total_len += n;
     }
-    CCSlice slice = cc_slice_from_parts(total, total_len, CC_SLICE_ID_UNTRACKED, total_cap);
+    CCSlice slice = cc_slice_from_parts(total, total_len, CC_SLICE_ID_UNTRACKED);
     return cc_ok_CCResult_CCSlice_CCError(slice);
 }
 
@@ -273,7 +273,7 @@ static inline CCResult_size_t_CCError cc__script_write_fd_nl(int fd, CCSlice dat
     CCResult_size_t_CCError r2;
     if (cc_is_err(r)) return r;
     n = cc_value(r);
-    r2 = cc__script_write_fd(fd, cc_slice_from_parts(&nl, 1, CC_SLICE_ID_UNTRACKED, 1));
+    r2 = cc__script_write_fd(fd, cc_slice_from_parts(&nl, 1, CC_SLICE_ID_UNTRACKED));
     if (cc_is_err(r2)) return r2;
     return cc_ok_CCResult_size_t_CCError(n + cc_value(r2));
 }

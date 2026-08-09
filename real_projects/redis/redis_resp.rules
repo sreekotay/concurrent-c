@@ -1,4 +1,6 @@
 ; Shared RESP leaf recognizers for schemas via `use "redis_resp.rules" as Resp`.
+; Keep opt '-' — RESP integers can be negative; bulk-length schemas that want
+; the unsigned fused run should inline `keep [some digit]` instead.
 digit:  charset [#'0' - #'9']
 number: keep [opt #'-' some digit]
 lchar:  complement charset [#'\r' #'\n']

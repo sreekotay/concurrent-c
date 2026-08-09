@@ -18,12 +18,11 @@ int main(void) {
     memcpy(out.ptr, "PONG", 4);
     void* base = out.ptr;
     uint64_t id = out.id;
-    size_t alen = out.alen;
 
     out.truncate(4) !>;
     if (out.len != 4) return 3;
-    /* Pointer, provenance, and allocation extent all survive the narrow. */
-    if (out.ptr != base || out.id != id || out.alen != alen) return 4;
+    /* Pointer and provenance survive the narrow. */
+    if (out.ptr != base || out.id != id) return 4;
     if (memcmp(out.ptr, "PONG", 4) != 0) return 5;
 
     /* Idempotent at the current length, and to zero. */
@@ -40,8 +39,7 @@ int main(void) {
     if (!lying.is_err()) return 9;
     if (ans.len != 16) return 10;
 
-    /* Refused even within the allocation: truncate never grows back into
-     * bytes that may be uninitialized. */
+    /* Refused beyond the current view: truncate never grows. */
     ans.truncate(8) !>;
     if (ans.len != 8) return 11;
     CCResult_bool_CCError regrow = cc_slice_truncate(&ans, 16);
@@ -60,7 +58,6 @@ int main(void) {
     u.truncate(8) !>;
     if (u.len != 8) return 16;
     if (!cc_slice_is_unique_id(u.id)) return 17;
-    if (u.alen != 64) return 18;
 
     puts("slice_truncate_smoke: PASS");
     return 0;

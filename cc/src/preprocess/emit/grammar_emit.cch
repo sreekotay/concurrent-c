@@ -79,6 +79,21 @@ static inline CCString cc_gr_swar_run_text(CCArena* a, int k, int T, int b1, int
     return o;
 }
 
+/* Short-string tail after SWAR when stops are exactly two specific bytes
+ * (JSON strchar: quote+backslash, T=0). Unrolled scan beats a bitset
+ * probe on the common sub-16B remainder. */
+static inline CCString cc_gr_swar_tail_stops2_text(CCArena* a, int b1, int b2) {
+    return @string(`    while (p + 4 <= n) {
+      if (s[p] == ${b1} || s[p] == ${b2}) break;
+      if (s[p + 1] == ${b1} || s[p + 1] == ${b2}) { p += 1; break; }
+      if (s[p + 2] == ${b1} || s[p + 2] == ${b2}) { p += 2; break; }
+      if (s[p + 3] == ${b1} || s[p + 3] == ${b2}) { p += 3; break; }
+      p += 4;
+    }
+    while (p < n && s[p] != ${b1} && s[p] != ${b2}) p++;
+`, a);
+}
+
 /* ---- JSON-number fast path, the tail after the int part ----
  * Emitted after the int-shape scan: if the next byte is not . / e / E the
  * frac/exp scaffolding is skipped entirely (the common path for ids and
@@ -124,7 +139,7 @@ static __attribute__((unused)) void ${n}Node_slice(const ${n}Node* nd, CCSlice* 
     size_t l = (size_t)(nd->meta >> 10);
     if ((nd->meta >> 9) & 1u)
         *out = cc_slice_from_parts((void*)nd->u.bytes, l,
-                   cc_slice_make_id(3ULL, true, false, false), l);
+                   cc_slice_make_id(3ULL, true, false, false));
     else
         *out = cc_slice_from_buffer((void*)nd->u.bytes, l);
 }
@@ -546,6 +561,11 @@ static inline CCString cc_gr_write_entry_text(CCArena* a, const char* n) {
     if (!${n}__wchk(v, dst, cap, &o)) return 0;
     return o;
 }
+/* Unchecked: caller proved capacity (measure, or reserved buffer). Same
+ * bytes as _write on success; hot path for redis-client / framing encode. */
+static __attribute__((unused)) size_t ${n}_write_unchecked(const ${n}* v, char* dst) {
+    return ${n}__wput(v, dst);
+}
 `, a);
 }
 
@@ -672,10 +692,11 @@ static inline CCString cc_gr_bind_slice_borrow_text(CCArena* a, int k,
 static inline CCString cc_gr_bytes_term_text(CCArena* a, int k, const char* cpfx,
                                              const char* cfield, const char* fpfx,
                                              const char* field, const char* fail) {
+    /* CCSliceHdr: wire borrow is {ptr,len}; full CCSlice keeps provenance id. */
     return @string(`    { long long L${k} = out->${cpfx}${cfield};
       if (L${k} < 0) goto ${fail};
       if ((unsigned long long)L${k} > (unsigned long long)(n - p)) { *cc_inc = 1; goto ${fail}; }
-      out->${fpfx}${field} = cc_slice_from_buffer((void*)(s + p), (size_t)L${k});
+      out->${fpfx}${field} = cc_slice_hdr_from_buffer((void*)(s + p), (size_t)L${k});
       p += (size_t)L${k}; }
 `, a);
 }
@@ -789,16 +810,35 @@ static inline CCString cc_gr_lit1_term_text(CCArena* a, int b, const char* fail)
 
 static inline CCString cc_gr_litn_term_text(CCArena* a, const unsigned char* lit, int len,
                                             const char* fail) {
-    CCString esc = cc_gr_esc_text(a, lit, len);
-    return @string(`    if (p + ${len} > n) { *cc_inc = 1; goto ${fail}; }
-    if (memcmp(s + p, "${esc}", ${len}) != 0) goto ${fail};
-    p += ${len};
-`, a);
+    /* Short lits (CRLF, "\r\n", small delimiters): per-byte compares beat
+     * memcmp at redis / framing density — libc call + setup dominates. */
+    CCString o = cc_string_new();
+    cc_gr__cat(&o, @string(`    if (p + ${len} > n) { *cc_inc = 1; goto ${fail}; }
+`, a), a);
+    if (len > 0 && len <= 4) {
+        cc_gr__cat(&o, @string(`    if (`, a), a);
+        for (int i = 0; i < len; i++) {
+            int b = (int)lit[i];
+            CCString c = cc_gr_chr_text(a, b);
+            if (i) cc_gr__cat(&o, @string(` || `, a), a);
+            cc_gr__cat(&o, @string(`s[p + ${i}] != ${b} /*${c}*/`, a), a);
+        }
+        cc_gr__cat(&o, @string(`) goto ${fail};
+`, a), a);
+    } else {
+        CCString esc = cc_gr_esc_text(a, lit, len);
+        cc_gr__cat(&o, @string(`    if (memcmp(s + p, "${esc}", ${len}) != 0) goto ${fail};
+`, a), a);
+    }
+    cc_gr__cat(&o, @string(`    p += ${len};
+`, a), a);
+    return o;
 }
 
 /* ---- key-dispatch pieces, shared by the delimited fields form and the
- * narrowed member-list form: capture the key span, switch on length,
- * memcmp chain within a length class, unknown keys to the Ld arm ---- */
+ * narrowed member-list form: capture the key span, MPH ordinal via a
+ * structured Type__fk_N helper (string-switch — not opaque tape), then
+ * switch on the ordinal inside __fill ---- */
 static inline CCString cc_gr_key_span_text(CCArena* a, int k, const char* g,
                                            const char* r, const char* fail) {
     return @string(`    { size_t xa${k}, xb${k}; int xd${k};
@@ -814,36 +854,54 @@ static inline CCString cc_gr_kv_check_text(CCArena* a, int b, const char* fail) 
 `, a);
 }
 
-static inline CCString cc_gr_key_switch_open_text(CCArena* a, int k) {
-    return @string(`      switch (xb${k} - xa${k}) {
+/* Per-fields-site ordinal helper — `__fk_` is outside the opaque-helper
+ * set so shadow parses the body and applies strswitch MPH. */
+static inline CCString cc_gr_fk_fn_open_text(CCArena* a, const char* n, int site) {
+    return @string(`static inline __attribute__((always_inline)) int ${n}__fk_${site}(CCSlice k) {
+    switch (k) {
 `, a);
 }
 
-static inline CCString cc_gr_key_case_text(CCArena* a, int len) {
-    return @string(`      case ${len}:
-`, a);
-}
-
-static inline CCString cc_gr_key_memcmp_open_text(CCArena* a, int k,
-                                                  const unsigned char* key, int len) {
+static inline CCString cc_gr_fk_case_text(CCArena* a, const unsigned char* key, int len,
+                                          int ord) {
     CCString esc = cc_gr_esc_text(a, key, len);
-    return @string(`        if (memcmp(s + xa${k}, "${esc}", ${len}) == 0) {
+    return @string(`    case "${esc}": return ${ord};
 `, a);
 }
 
-static inline CCString cc_gr_key_break_text(CCArena* a) {
-    return @string(`          break; }
+static inline CCString cc_gr_fk_fn_close_text(CCArena* a) {
+    return @string(`    default: return -1;
+    }
+}
 `, a);
 }
 
-static inline CCString cc_gr_key_goto_dflt_text(CCArena* a, int k) {
-    return @string(`        goto Ld${k};
+/* Shared reflective helper (field-name keys) — no site suffix. */
+static inline CCString cc_gr_fk_get_open_text(CCArena* a, const char* n) {
+    return @string(`static inline __attribute__((always_inline)) int ${n}__fk(CCSlice k) {
+    switch (k) {
+`, a);
+}
+
+static inline CCString cc_gr_key_fk_switch_open_text(CCArena* a, int k, const char* n) {
+    return @string(`      { CCSlice k${k} = cc_slice_from_buffer((void*)(s + xa${k}), xb${k} - xa${k});
+      switch (${n}__fk_${k}(k${k})) {
+`, a);
+}
+
+static inline CCString cc_gr_key_ord_case_text(CCArena* a, int ord) {
+    return @string(`      case ${ord}:
+`, a);
+}
+
+static inline CCString cc_gr_key_ord_break_text(CCArena* a) {
+    return @string(`        break;
 `, a);
 }
 
 static inline CCString cc_gr_key_default_text(CCArena* a, int k) {
     return @string(`      default: goto Ld${k};
-      }
+      } }
       goto Ln${k};
 Ld${k}:
 `, a);
@@ -898,28 +956,19 @@ static inline CCString cc_gr_ftable_close_text(CCArena* a) {
 
 static inline CCString cc_gr_field_fn_head_text(CCArena* a, const char* n) {
     return @string(`static __attribute__((unused)) const CCGramField* ${n}_field(const char* k, size_t kl) {
-    switch (kl) {
+    CCSlice ks = cc_slice_from_buffer((void*)k, kl);
+    switch (${n}__fk(ks)) {
 `, a);
 }
 
-static inline CCString cc_gr_get_case_text(CCArena* a, int len) {
-    return @string(`    case ${len}:
-`, a);
-}
-
-static inline CCString cc_gr_field_hit_text(CCArena* a, const char* field, int len,
-                                            const char* n, int j) {
-    return @string(`        if (memcmp(k, "${field}", ${len}) == 0) return &${n}__fields[${j}];
-`, a);
-}
-
-static inline CCString cc_gr_get_break_text(CCArena* a) {
-    return @string(`        break;
+static inline CCString cc_gr_field_ord_hit_text(CCArena* a, const char* n, int j) {
+    return @string(`    case ${j}: return &${n}__fields[${j}];
 `, a);
 }
 
 static inline CCString cc_gr_switch_end_ret0_text(CCArena* a) {
-    return @string(`    }
+    return @string(`    default: break;
+    }
     return 0;
 }
 `, a);
@@ -929,15 +978,15 @@ static inline CCString cc_gr_switch_end_ret0_text(CCArena* a) {
  * the reflective face, this is the fast one */
 static inline CCString cc_gr_get_fn_head_text(CCArena* a, const char* n) {
     return @string(`static __attribute__((unused)) int ${n}_get(const ${n}* v, const char* k, CCGramValue* out) {
-    size_t kl = strlen(k);
+    CCSlice ks = cc_slice_from_buffer((void*)k, strlen(k));
     (void)v;
-    switch (kl) {
+    switch (${n}__fk(ks)) {
 `, a);
 }
 
-static inline CCString cc_gr_get_hit_open_text(CCArena* a, const char* field, int len,
-                                               const char* gk, const char* n, int j) {
-    return @string(`        if (memcmp(k, "${field}", ${len}) == 0) {
+static inline CCString cc_gr_get_ord_hit_open_text(CCArena* a, const char* gk,
+                                                   const char* n, int j) {
+    return @string(`    case ${j}: {
             out->kind = ${gk};
             out->field = &${n}__fields[${j}];
 `, a);
@@ -951,7 +1000,7 @@ static inline CCString cc_gr_get_present_text(CCArena* a, int presence, int j) {
 `, a);
 }
 
-/* vk: 0 int, 1 float, 2 items, 3 slice */
+/* vk: 0 int, 1 float, 2 items, 3 slice (CCSlice), 4 bytes (CCSliceHdr→CCSlice) */
 static inline CCString cc_gr_get_value_text(CCArena* a, int vk, const char* field) {
     if (vk == 0)
         return @string(`            out->i = v->${field};
@@ -961,6 +1010,9 @@ static inline CCString cc_gr_get_value_text(CCArena* a, int vk, const char* fiel
 `, a);
     if (vk == 2)
         return @string(`            out->items = v->${field}; out->items_n = v->${field}_n;
+`, a);
+    if (vk == 4)
+        return @string(`            out->s = cc_slice_hdr_slice(&v->${field});
 `, a);
     return @string(`            out->s = v->${field};
 `, a);
@@ -1173,7 +1225,8 @@ static inline CCString cc_gr_struct_open_text(CCArena* a, const char* n) {
 `, a);
 }
 
-/* vk: 0 int, 1 float, 2 slice, 3 cap-array, 4 arena pointer */
+/* vk: 0 int, 1 float, 2 slice (CCSlice), 3 cap-array, 4 arena pointer,
+ *     5 bytes (CCSliceHdr) */
 static inline CCString cc_gr_member_text(CCArena* a, int vk, const char* T,
                                          const char* field, int cap) {
     if (vk == 0) return @string(`    long long ${field};
@@ -1183,6 +1236,8 @@ static inline CCString cc_gr_member_text(CCArena* a, int vk, const char* T,
     if (vk == 2) return @string(`    CCSlice ${field};
 `, a);
     if (vk == 3) return @string(`    ${T} ${field}[${cap}]; size_t ${field}_n;
+`, a);
+    if (vk == 5) return @string(`    CCSliceHdr ${field};
 `, a);
     return @string(`    ${T}* ${field}; size_t ${field}_n;
 `, a);
@@ -1198,6 +1253,8 @@ static inline CCString cc_gr_umember_text(CCArena* a, int vk, const char* T,
     if (vk == 2) return @string(`            CCSlice ${field};
 `, a);
     if (vk == 3) return @string(`            ${T} ${field}[${cap}]; size_t ${field}_n;
+`, a);
+    if (vk == 5) return @string(`            CCSliceHdr ${field};
 `, a);
     return @string(`            struct ${T}* ${field}; size_t ${field}_n;
 `, a);
@@ -1254,7 +1311,9 @@ static inline CCString cc_gr_items_cap_text(CCArena* a, const char* sname,
 }
 
 static inline CCString cc_gr_fill_head_text(CCArena* a, const char* n) {
-    return @string(`static int ${n}__fill(const unsigned char* s, size_t n, size_t* io,
+    /* always_inline: counted `items T` loops and pipeline `Name_read` call
+     * sites otherwise pay a full call per frame/arg at wire density. */
+    return @string(`static inline __attribute__((always_inline)) int ${n}__fill(const unsigned char* s, size_t n, size_t* io,
         CCArena* arena, ${n}* out, int* cc_inc, int cc_depth) {
     (void)cc_inc; (void)cc_depth;
     size_t p = *io;
