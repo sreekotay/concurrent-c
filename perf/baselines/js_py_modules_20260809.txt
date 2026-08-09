@@ -1,0 +1,7 @@
+# Native-module hot paths (docs/js-py-modules.md) — 2026-08-09
+# x86_64 4-vCPU, node v22.22.2, python3.11; artifacts dead-stripped
+# bin/counter.node 26176 bytes; bin/counter.abi3.so 35432; gamut 61728
+RESULT node_module_hot_call_ns 40
+RESULT node_module_16elem_slice_sum_ns 94
+RESULT node_module_1m_slice_sum_ms 1.30
+RESULT python_module_hot_call_ns 68

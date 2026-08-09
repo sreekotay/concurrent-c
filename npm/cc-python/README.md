@@ -268,6 +268,11 @@ ccc build npm/cc-python/src/cc_python.ccs   # → bin/cc_python.node
 `index.js` finds it at `npm/cc-python/bin/` or the repo `bin/`, or wherever
 `CC_PYTHON_ADDON` points.  One stable-ABI binary per platform.
 
+And when the hot path is YOUR code rather than a Python package, skip
+the bridge entirely: a page of Concurrent-C (or C) exports as a native
+module for Node and Python both — 40-90ns calls, 26KB artifacts.  See
+[Native modules for Node and Python](../../docs/js-py-modules.md).
+
 ## Measured
 
 From [`examples/js_numpy_bridge.js`](examples/js_numpy_bridge.js) — plain

@@ -37,6 +37,12 @@ Fuller example (error policy + compose): [examples/hello.ccs](examples/hello.ccs
 - [Cheatsheet](docs/cheatsheet.md)
 - [Docs index](docs/README.md) · [Language spec](spec/concurrent-c-spec-complete.md) · [Stdlib](spec/concurrent-c-stdlib-spec.md)
 
+### Python & JavaScript interop
+
+- [Native modules for Node and Python](docs/js-py-modules.md) — one CC (or C) file → a 26KB `.node` **and** a stable-ABI `.abi3.so`; 40-90ns calls, zero-copy buffers
+- [`npm/cc-python`](npm/cc-python) — Python from Node: any module, zero-copy typed arrays, async lanes, N×numpy isolated domains
+- [`pypi/cc-node`](pypi/cc-node) — JavaScript and npm packages from Python, same domain model mirrored
+
 Compiler internals: [architecture](cc/docs/ARCHITECTURE.md), [shadow_lower ops / layout](cc/shadow/README.md), [bootstrap](cc/bootstrap/shadow_lower/README.md). Legacy opt-out (`--frontend=legacy`): [legacy architecture](cc/docs/LEGACY_ARCHITECTURE.md), [cleanup status](cc/docs/COMPILER_CLEANUP_STATUS.md), [debug vars](cc/src/diag/DEBUG_VARS.md).
 
 ### Install

@@ -50,3 +50,8 @@ The wire is strict request/response JSON over stdio with the
 shared-memory spill for bulk data — the same discipline the isolated
 cc-python domains speak, mirrored.  True pinned zero-copy leases
 remain future work.
+
+And when the hot path is YOUR code rather than an npm package, skip the
+wire entirely: a page of Concurrent-C (or C) exports as a native module
+for Python and Node both — 40-90ns calls, stable-ABI artifacts.  See
+[Native modules for Node and Python](../../docs/js-py-modules.md).
