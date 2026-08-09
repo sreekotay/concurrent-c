@@ -28,14 +28,20 @@ ccc build counter.ccs        # → bin/counter.node + bin/counter.abi3.so
 
 Use in JavaScript:
 
-```sh
-node -e "const c = require('./bin/counter.node'); console.log(c.bump(4))"
+```js
+const counter = require('./bin/counter.node');
+
+counter.bump(4);          // 4
+counter.bump({ by: 2 });  // 6 — a trailing object binds arguments by name
 ```
 
 Use in Python:
 
-```sh
-PYTHONPATH=bin python3 -c "import counter; print(counter.bump(4))"
+```python
+import counter            # bin/ on PYTHONPATH
+
+counter.bump(4)           # 4
+counter.bump(by=2)        # 6 — real keyword arguments
 ```
 
 No flag says "module": the TU exports a type and defines no `main`, so
