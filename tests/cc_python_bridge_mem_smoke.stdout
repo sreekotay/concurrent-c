@@ -8,6 +8,7 @@ storm_survived_gc true
 graph_pins_domain true
 graph_alive_works true
 graph_release_collects true
+mixed_order_finalizers true
 lease_sum true
 lease_rss_flat true
 released_as_receiver true

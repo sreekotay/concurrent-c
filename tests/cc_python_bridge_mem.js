@@ -107,6 +107,26 @@ const ccpy = require(process.cwd() + '/npm/cc-python');
     out('graph_release_collects', collected);
   }
 
+  // 5b. Whole-graph death with 500 live handles: the domain and object
+  //     finalizers run in whatever order the GC picks, and the arena —
+  //     which owns every box — must outlive the last of them.
+  {
+    let wr;
+    (() => {
+      const py = ccpy.create();
+      wr = new WeakRef(py);
+      const math = py.import('math');
+      const keep = [];
+      for (let i = 0; i < 500; i++) keep.push(math.sqrt);
+    })();
+    let collected = false;
+    for (let i = 0; i < 20 && !collected; i++) {
+      await gcNow();
+      collected = wr.deref() === undefined;
+    }
+    out('mixed_order_finalizers', collected);
+  }
+
   // 6. Repeated big leases: a 8MB Float64Array crosses as a zero-copy
   //    view ten times; the sum is exact and the process does not grow by
   //    ten copies.

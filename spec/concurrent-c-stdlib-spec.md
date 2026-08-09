@@ -2310,13 +2310,19 @@ the call, with the `py_buf` retention check guarding the lease.
 
 The bridge is an Isolation Domain — the ownership unit of the interop
 model.  It owns its interpreter handle, its arena, and every Python
-reference minted through it; proxies are borrows that strong-reference
-their bridge.  Teardown is one atomic sweep with two doors: `destroy()`
-(also `Symbol.dispose`, so `using py = ...` scopes it) revokes
-immediately — every outstanding handle answers `bridge is closed`,
-object finalizers reduce to frees, double destroy is a no-op — and the
-GC runs the same sweep from the domain's single finalizer when the
-whole graph is unreachable.  Handles never cross domains: a second
+reference minted through it — the domain record and every handle box
+live IN the arena, nothing is separately allocated — and proxies are
+borrows that strong-reference their bridge.  The domain has two
+distinct lifetimes.  `destroy()` (also `Symbol.dispose`, so
+`using py = ...` scopes it) is REVOCATION: one sweep releases every
+Python reference and closes the interpreter, every outstanding handle
+answers `bridge is closed`, and double destroy is a no-op; the GC runs
+the same sweep from the domain's finalizer when the whole graph is
+unreachable.  The arena's REAL life ends separately, when the last
+outstanding External — the domain's own or any handle's — is
+collected: finalizers are bookkeeping decrements, and whichever runs
+last takes the arena and everything in it down in one free, so no
+finalizer ordering the GC picks can dangle a box.  Handles never cross domains: a second
 `create()` is fully isolated and rejects the first domain's objects at
 the door.  `stats()` reports the live-handle count; `release(proxy)`
 drops one early.  The mirrored direction — Python importing Node —

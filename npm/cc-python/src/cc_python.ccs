@@ -11,58 +11,78 @@
  *
  * Ownership is the Isolation Domain model: a domain owns its
  * interpreter handle, its arena, and every Python reference minted
- * through it.  Proxies are borrows — each holds a strong JS reference
- * to its domain (index.js), so the GC can only collect the domain when
- * the whole graph is unreachable, and the domain External's finalizer
- * runs the same single sweep `destroy()` runs.  destroy() is
- * revocation: every outstanding handle answers "bridge is closed"
- * afterwards, object finalizers become frees of their boxes, and
- * double destroy is a quiet no-op.  Buffers cross as leases: a typed
- * array argument is a zero-copy memoryview pinned for the call, and
- * the py_buf retention check catches a callee that keeps it. */
+ * through it — and everything, the domain struct and the handle boxes
+ * included, lives IN the arena; nothing is malloc'd.  Proxies are
+ * borrows — each holds a strong JS reference to its domain (index.js),
+ * so the GC can only collect the domain when the whole graph is
+ * unreachable.  The domain has two distinct lifetimes: destroy() is
+ * REVOCATION — Python references released, interpreter closed, every
+ * outstanding handle answers "bridge is closed", double destroy a
+ * quiet no-op — while the arena's REAL life ends when the last
+ * outstanding External (the domain's own or any handle's) is
+ * collected: finalizers are bookkeeping decrements, and whichever runs
+ * last takes the arena and everything in it down in one free.  Buffers
+ * cross as leases: a typed array argument is a zero-copy memoryview
+ * pinned for the call, and the py_buf retention check catches a callee
+ * that keeps it. */
 #include <ccc/script/js.cch>
 #include <ccc/script/py.cch>
 
 typedef struct CcPyDom CcPyDom;
 typedef struct CcPyObjBox CcPyObjBox;
 
-/* One Python reference owned by a domain.  The box is malloc'd (not
- * arena) because its External finalizer can run after the domain is
- * swept: the sweep releases the Python reference and nulls `dom`, and
- * the finalizer's only remaining job is freeing the box. */
+/* One Python reference owned by a domain.  Boxes live IN the domain's
+ * arena — nothing about a domain is malloc'd — and recycle through a
+ * free list once their External is collected, so a long-lived domain's
+ * arena is bounded by its peak simultaneous handles, not its history. */
 struct CcPyObjBox {
     CcPyDom *dom;
     CCPyObj obj;
-    CcPyObjBox *next;
+    CcPyObjBox *next; /* live list; free list after collection */
     CcPyObjBox *prev;
     int released;
 };
 
+/* The domain, allocated from its own arena.  Two lifetimes, deliberately
+ * distinct: `closed` is REVOCATION (close()/GC sweep — Python refs
+ * released, interpreter closed, every op answers articulately), while
+ * `ext_outstanding` counts the Externals still alive in JS (the domain's
+ * own plus one per box) and is the domain's REAL life: whichever
+ * finalizer decrements it to zero destroys the arena, and the domain,
+ * its boxes, and everything else it holds go with it in one free. */
 struct CcPyDom {
     CCArena arena;
     CCPy py;
     void *none; /* owned builtins.None, for result probing */
     CcPyObjBox *head;
+    CcPyObjBox *free_boxes;
     long long live;
+    long long ext_outstanding;
     int closed;
 };
 
-/* The single sweep, shared by destroy() and the GC finalizer: release
- * every live Python reference, orphan the boxes (their finalizers just
- * free), close the interpreter handle, drop the arena.  After this the
- * domain box answers only `closed` until its own finalizer frees it. */
+/* The last outstanding External — object or domain, whichever collects
+ * last — takes the arena (and the domain inside it) down. */
+static void ccpy__dom_unref(CcPyDom *d) {
+    if (--d->ext_outstanding > 0) return;
+    {
+        CCArena tmp = d->arena;
+        cc_arena_destroy(&tmp); /* d is inside it — gone now */
+    }
+}
+
+/* Revocation, shared by close() and the GC finalizer: release every
+ * live Python reference and close the interpreter handle.  The arena
+ * stays — boxes must outlive their Externals' finalizers — so after
+ * this the domain answers only `closed` until its real life ends. */
 static void ccpy__dom_sweep(CcPyDom *d) {
     CcPyObjBox *b = d->head;
     while (b) {
-        CcPyObjBox *nx = b->next;
         if (!b->released) {
             cc_py_obj_release(&b->obj);
             b->released = 1;
         }
-        b->dom = NULL;
-        b->next = NULL;
-        b->prev = NULL;
-        b = nx;
+        b = b->next;
     }
     d->head = NULL;
     d->live = 0;
@@ -71,8 +91,29 @@ static void ccpy__dom_sweep(CcPyDom *d) {
         d->none = NULL;
     }
     cc_py_close(&d->py);
-    cc_arena_destroy(&d->arena);
     d->closed = 1;
+}
+
+static void ccpy__obj_finalize(void *env, void *data, void *hint) {
+    CcPyObjBox *b = (CcPyObjBox *)data;
+    CcPyDom *d;
+    (void)env;
+    (void)hint;
+    if (!b || !b->dom) return;
+    d = b->dom;
+    if (!d->closed) {
+        if (!b->released) {
+            cc_py_obj_release(&b->obj);
+            b->released = 1;
+            if (b->prev) b->prev->next = b->next;
+            else d->head = b->next;
+            if (b->next) b->next->prev = b->prev;
+            d->live--;
+        }
+        b->next = d->free_boxes;
+        d->free_boxes = b;
+    }
+    ccpy__dom_unref(d);
 }
 
 static void ccpy__dom_finalize(void *env, void *data, void *hint) {
@@ -81,43 +122,48 @@ static void ccpy__dom_finalize(void *env, void *data, void *hint) {
     (void)hint;
     if (!d) return;
     if (!d->closed) ccpy__dom_sweep(d);
-    free(d);
+    ccpy__dom_unref(d);
 }
 
-static void ccpy__obj_finalize(void *env, void *data, void *hint) {
-    CcPyObjBox *b = (CcPyObjBox *)data;
-    (void)env;
-    (void)hint;
-    if (!b) return;
-    if (b->dom && !b->released) {
-        cc_py_obj_release(&b->obj);
-        b->released = 1;
-        if (b->prev) b->prev->next = b->next;
-        else b->dom->head = b->next;
-        if (b->next) b->next->prev = b->prev;
-        b->dom->live--;
-    }
-    free(b);
-}
-
-/* Register a fresh owned reference with the domain; the returned
- * External carries the box and its finalizer. */
-static CCJsExt ccpy__box(CcPyDom *d, CCPyObj o) {
-    CcPyObjBox *b = (CcPyObjBox *)calloc(1, sizeof *b);
-    CCJsExt e = { 0 };
+/* Register a fresh owned reference with the domain.  The box comes from
+ * the free list or the arena; the caller mints the External (and the
+ * ext_outstanding count) via ccpy__ext_make, or rolls back via
+ * ccpy__box_undo if it cannot. */
+static CcPyObjBox *ccpy__box(CcPyDom *d, CCPyObj o) {
+    CcPyObjBox *b = d->free_boxes;
+    if (b) d->free_boxes = b->next;
+    else b = (CcPyObjBox *)cc_arena_alloc(&d->arena, sizeof(*b), 16);
     if (!b) {
         cc_py_obj_release(&o);
-        return e; /* e.ptr NULL — callers turn this into an error */
+        return NULL;
     }
+    memset(b, 0, sizeof(*b));
     b->dom = d;
     b->obj = o;
     b->next = d->head;
     if (d->head) d->head->prev = b;
     d->head = b;
     d->live++;
-    e.ptr = b;
-    e.finalize = ccpy__obj_finalize;
-    return e;
+    return b;
+}
+
+static void ccpy__box_undo(CcPyDom *d, CcPyObjBox *b) {
+    cc_py_obj_release(&b->obj);
+    if (b->prev) b->prev->next = b->next;
+    else d->head = b->next;
+    if (b->next) b->next->prev = b->prev;
+    d->live--;
+    b->next = d->free_boxes;
+    d->free_boxes = b;
+}
+
+/* Mint the External that carries a box; counting happens ONLY here and
+ * in the finalizers, so a creation failure cannot strand the count. */
+static int ccpy__ext_make(CcPyDom *d, void *env, CcPyObjBox *b, void **out) {
+    if (cc__js.CreateExternal(env, b, ccpy__obj_finalize, NULL, out) != 0)
+        return -1;
+    d->ext_outstanding++;
+    return 0;
 }
 
 /* Unbox + guard: the domain must be open, the object must belong to it
@@ -146,16 +192,23 @@ typedef struct CcPython {
     int ok;
 } CcPython;
 
-static CCJsExt !>(CCError) CcPython_create(CcPython *self) {
+static CCJsVal !>(CCError) CcPython_create(CcPython *self, CCJs *js) {
+    CCArena ar = cc_arena_heap(megabytes(4));
+    CcPyDom *d = (CcPyDom *)cc_arena_alloc(&ar, sizeof(*d), 16);
     (void)self;
-    CcPyDom *d = (CcPyDom *)calloc(1, sizeof *d);
-    if (!d) return cc_err(CC_ERR_IO, "cc-python: out of memory");
-    d->arena = cc_arena_heap(megabytes(4));
+    if (!d) {
+        cc_arena_destroy(&ar);
+        return cc_err(CC_ERR_IO, "cc-python: out of memory");
+    }
+    memset(d, 0, sizeof(*d));
+    /* The domain lives in its own arena; from here every allocation and
+     * every teardown path goes through d->arena. */
+    d->arena = ar;
     {
         CCResult_CCPy_CCPyError r = cc_py_new(&d->arena);
         if (!r.ok) {
-            cc_arena_destroy(&d->arena);
-            free(d);
+            CCArena tmp = d->arena;
+            cc_arena_destroy(&tmp);
             return cc_err(CC_ERR_IO, "cc-python: no Python runtime "
                                      "(is libpython installed, or set "
                                      "CC_LIBPYTHON?)");
@@ -171,10 +224,22 @@ static CCJsExt !>(CCError) CcPython_create(CcPython *self) {
         if (!d->none && cc__py.ErrClear) cc__py.ErrClear();
     }
     {
-        CCJsExt e = { 0 };
-        e.ptr = d;
-        e.finalize = ccpy__dom_finalize;
-        return cc_ok(e);
+        void *ext = NULL;
+        if (cc__js.CreateExternal(js->env, d, ccpy__dom_finalize, NULL,
+                                  &ext) != 0) {
+            CCArena tmp;
+            ccpy__dom_sweep(d);
+            tmp = d->arena;
+            cc_arena_destroy(&tmp);
+            return cc_err(CC_ERR_IO, "cc-python: external allocation failed");
+        }
+        d->ext_outstanding = 1;
+        {
+            CCJsVal jv = { 0 };
+            jv.env = js->env;
+            jv.v = ext;
+            return cc_ok(jv);
+        }
     }
 }
 
@@ -202,19 +267,30 @@ static long long CcPython_stats(CcPython *self, CCJsExt dom) {
     return d ? d->live : -1;
 }
 
-static CCJsExt !>(CCError) CcPython_pyimport(CcPython *self, CCJsExt dom,
-                                             const char *name) {
+static CCJsVal !>(CCError) CcPython_pyimport(CcPython *self, CCJs *js,
+                                             CCJsExt dom, const char *name) {
     CcPyDom *d = ccpy__dom(dom);
     (void)self;
     if (!d) return cc_err(CC_ERR_INVALID_ARG, "cc-python: bridge is closed");
     {
         /* Ownership transfers straight into the domain's box. */
         CCResult_CCPyObj_CCPyError r = cc_py_import(&d->py, name);
-        if (!r.ok) return cc_err_CCResult_CCJsExt_CCError(r.u.error.base);
+        if (!r.ok) return cc_err_CCResult_CCJsVal_CCError(r.u.error.base);
         {
-            CCJsExt e = ccpy__box(d, r.u.value);
-            if (!e.ptr) return cc_err(CC_ERR_IO, "cc-python: out of memory");
-            return cc_ok(e);
+            CcPyObjBox *b = ccpy__box(d, r.u.value);
+            void *ext = NULL;
+            if (!b) return cc_err(CC_ERR_IO, "cc-python: out of memory");
+            if (ccpy__ext_make(d, js->env, b, &ext) != 0) {
+                ccpy__box_undo(d, b);
+                return cc_err(CC_ERR_IO,
+                              "cc-python: external allocation failed");
+            }
+            {
+                CCJsVal jv = { 0 };
+                jv.env = js->env;
+                jv.v = ext;
+                return cc_ok(jv);
+            }
         }
     }
 }
@@ -418,9 +494,13 @@ static int ccpy__result_to_js(CcPyDom *d, void *env, CCPyObj r, void **out) {
         if (cc__py.ErrClear) cc__py.ErrClear();
     }
     {
-        CCJsExt e = ccpy__box(d, r);
-        if (!e.ptr) return -1;
-        return cc__js.CreateExternal(env, e.ptr, e.finalize, e.hint, out);
+        CcPyObjBox *b = ccpy__box(d, r);
+        if (!b) return -1;
+        if (ccpy__ext_make(d, env, b, out) != 0) {
+            ccpy__box_undo(d, b);
+            return -1;
+        }
+        return 0;
     }
 }
 
