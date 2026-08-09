@@ -1,6 +1,10 @@
 # Concurrent-C Cheatsheet
 
-Quick reference for common patterns. Concepts: [language-concepts.md](language-concepts.md). Spec: [spec/](../spec/).
+Quick reference. Tutorial: [getting-started.md](getting-started.md) ·
+concepts: [language-concepts.md](language-concepts.md) · recipes:
+[examples/README.md](../examples/README.md#learning-path-recommended-order) ·
+spec: [spec/](../spec/). Prefer **UFCS** at call sites (`n->spawn`, `tx.send`,
+`io.println`).
 
 ---
 
@@ -9,388 +13,295 @@ Quick reference for common patterns. Concepts: [language-concepts.md](language-c
 ```bash
 ccc run file.ccs                    # build + run
 ccc build run file.ccs              # same, explicit
-ccc build run file.ccs -- --arg     # pass args to binary
+ccc build run file.ccs -- --arg     # args to the binary
+ccc path/to/tool.shcc [args…]       # .shcc → implicit run (shebang-friendly)
 ccc --emit-c-only file.ccs          # emit C only → out/file.c
-ccc build -O file.ccs               # release build (-O2 -DNDEBUG)
-ccc build -g file.ccs               # debug build (-O0 -g)
+ccc build -O file.ccs               # release (-O2 -DNDEBUG)
+ccc build -g file.ccs               # debug (-O0 -g)
                                     # default: -O2, asserts kept
+```
+
+Outputs: `./out` (generated C) and `./bin` (binaries), relative to cwd.
+
+---
+
+## Cleanup: `@defer` / `@destroy`
+
+`@destroy` is **`@defer` sugar on a declaration** — same LIFO scope-exit ledger.
+Bodyless `@destroy` calls the type’s registered destroy. With `!>`, cleanup
+schedules only if unwrap succeeds.
+
+```c
+FILE* f = fopen("data.txt", "r");
+@defer fclose(f);                              // statement on the scope
+
+CCNursery* n = cc_nursery_create(NULL) !> @destroy;   // binding + defer destroy
+CCArena a = cc_arena_heap(kilobytes(4)) @destroy;     // non-Result create
 ```
 
 ---
 
-## Structured Concurrency
+## Results (`T!>(E)`)
+
+Two operators; everything else is a modifier:
+
+| | Error becomes |
+|--|--|
+| `?>` | a **value** — `x ?> default` / `x ?>(e) …` |
+| `!>` | **code** that must leave — `x !> { … }` / `x !>;` |
 
 ```c
-#include <ccc/cc_runtime.cch>
+@errhandler(CCError e) cc_error_exit(e);   // policy for bare !>;
 
-// Basic nursery - waits for all spawned tasks
+int a = read() ?> 30;
+int b = read() !>;                         // → @errhandler
+int c = read() !>(e) { /* local */ @err(e); };
+CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+```
+
+Tasks do not inherit `@errhandler` — re-bind inside each spawn body.
+
+---
+
+## Print
+
+Prefer `io.println` when a `CCStdio` handle is in scope (`<ccc/script/stdio.cch>`):
+
+```c
+CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+CCStdio io = cc_stdio_create(&a);
+io.println("hi") !>;
+io.println(@string(`n=${n}`, @scratch)) !>;
+/* also fine: println("hi") !>;  /  msg.println() !>; */
+```
+
+---
+
+## Structured concurrency
+
+```c
+@errhandler(CCError e) cc_error_exit(e);
 {
-    CCNursery* n = @create(NULL) @destroy;
-    if (!n) return 1;
+    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
     n->spawn(() => do_work());
     n->spawn(() => do_other_work());
 }
-// Both tasks complete before this line
-
-// Nested nurseries
-{
-    CCNursery* outer = @create(NULL) @destroy;
-    if (!outer) return 1;
-    outer->spawn(() => {
-        CCNursery* inner = @create(NULL) @destroy;
-        if (!inner) return 1;
-        inner->spawn(subtask1());
-        inner->spawn(subtask2());
-        return 0;
-    });
-}
+/* both tasks finished — nursery @destroy waited */
 ```
+
+Nested: `cc_nursery_create(outer)` parents the inner nursery under `outer`.
 
 ---
 
 ## Channels
 
 ```c
-// Declare sender (>) and receiver (<)
-int[~10 >] tx;   // capacity 10, sender
-int[~10 <] rx;   // capacity 10, receiver
-channel_pair(&tx, &rx);
+@errhandler(CCError e) cc_error_exit(e);
 
-// Send and receive
-chan_send(tx, 42);
-int val;
-chan_recv(rx, &val);
+int[~10 >] tx;
+int[~10 <] rx;
+CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
 
-// Close sender when done
-chan_close(tx);
-
-// Check if channel closed
-if (chan_recv(rx, &val) != 0) {
-    // channel closed
-}
-
-// Iterate until closed
 {
-    CCNursery* producer = @create(NULL) @destroy {
-        chan_close(tx);
-    };
-    if (!producer) return 1;
-    producer->spawn([tx]() => {
-        for (int i = 0; i < 10; i++) chan_send(tx, i);
+    CCNursery* outer = cc_nursery_create(NULL) !> @destroy;
+
+    outer->spawn(() => [rx] {
+        @errhandler(CCError e) cc_error_exit(e);
+        int v;
+        while (cc_io_avail(rx.recv(&v)))
+            printf("got %d\n", v);
     });
-    int v;
-    while (chan_recv(rx, &v) == 0) {
-        printf("%d\n", v);
+
+    {
+        CCNursery* inner = cc_nursery_create(outer) !> @destroy;
+        (void)inner->close_on(tx);          // close tx when inner joins
+        inner->spawn(() => [tx] {
+            @errhandler(CCError e) cc_error_exit(e);
+            for (int i = 0; i < 5; i++)
+                tx.send(i) !>;
+        });
     }
 }
 ```
 
+Consumer outside, producer + `close_on` inside. Full recipe:
+[recipe_channel_pipeline.ccs](../examples/recipe_channel_pipeline.ccs).
+
 ---
 
-## Timeouts & Cancellation
+## Closures / captures
+
+Spawn takes a closure. Captures into a task are copies (value) unless `&`.
 
 ```c
-// Deadline scope - cooperative timeout
-@with_deadline(1000) {  // 1000ms
-    CCDeadline* dl = cc_current_deadline();
-    while (!cc_deadline_expired(dl)) {
+n->spawn(() => { … });                 // no capture list
+n->spawn(() => [x] { use(x); });       // value
+n->spawn(() => [&x] { use(x); });      // reference (still no shared mutation)
+```
+
+Re-bind `@errhandler` inside the task. Do not capture stack / `@scratch` slices
+past the frame; arena slices pin the arena until join.
+
+---
+
+## Arenas (lifetime annotation)
+
+Size the root for the typical live set. Default heap/stack: bump in root → up
+to 4 slabs (~1.5×) → **heap overflow** (`malloc`, still arena-owned; freed on
+reset / `@destroy`).
+
+```c
+CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+char* p = a.allocT(64);
+char[:] s = a.alloc_slice_bytes(32);   // arena provenance
+
+cc_arena_stack(tmp, 1024);             // same growth policy; stack root
+a.reset();                             // drain epoch; reuse root
+
+/* @scratch — throwaway @string / print only; do not capture or send */
+io.println(@string(`len=${s.len}`, @scratch)) !>;
+```
+
+Slices (`T[:]`) carry provenance. Views must not outlive their arena.
+Details: [getting-started § Arenas](getting-started.md#arenas-lifetime-not-just-malloc).
+
+---
+
+## Absence (no `T?`)
+
+| Shape | Use when |
+|-------|----------|
+| `T*` / bool+out | missing lookup / pop |
+| empty slice | EOF / no bytes |
+| `T!>(E)` | operation failed |
+
+---
+
+## Timeouts & cancellation
+
+```c
+@with_deadline(millis(50)) {
+    while (!cc_deadline_expired(cc_current_deadline())) {
         do_work();
+        cc_sleep_ms(10);                 // cancellation-aware
     }
 }
 
-// Check cancellation in tasks
+@with_deadline(millis(50)) as dl {       // bind handle
+    while (!cc_deadline_expired(dl)) { … }
+}
+
 if (cc_is_cancelled()) return;
-
-// Sleep (cancellation-aware)
-cc_sleep_ms(100);
 ```
 
 ---
 
-## Memory: Arenas
+## Async / await
+
+Prefer `n->spawn` for sibling work. Prefer `@async` / `@await` for one
+suspendable call stack. Recipe: [recipe_async_await.ccs](../examples/recipe_async_await.ccs).
 
 ```c
-// Heap-backed arena (recommended)
-{
-    CCArena arena = @create(kilobytes(4)) @destroy;
-    if (!arena.base) return 1;
-    void* buf = cc_arena_alloc(&arena, 1024, 8);
-    char* str = cc_arena_strdup(&arena, "hello");
-    // auto-freed at scope exit
-}
+@async int bump(int value) { return value + 1; }
 
-// Reset arena (reuse memory)
-{
-    CCArena arena = @create(kilobytes(4)) @destroy;
-    if (!arena.base) return 1;
-    for (int i = 0; i < 100; i++) {
-        void* tmp = cc_arena_alloc(&arena, 64, 8);
-        process(tmp);
-        cc_arena_reset(&arena);  // reuse for next iteration
-    }
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    int result = @await bump(41);
+    return result == 42 ? 0 : 1;
 }
 ```
 
 ---
 
-## Cleanup: Defer
+## `.shcc` scripts
 
-```c
-FILE* f = fopen("data.txt", "r");
-@defer fclose(f);
-// ... use f ...
-// fclose() called automatically on scope exit
+Same language as `.ccs`; script prelude + synthetic `main` when you omit
+`main`. Ambient `a` / `io` / `in` / `args` when those names appear.
+`ccc tool.shcc` is an implicit run. See
+[getting-started § `.shcc`](getting-started.md#shcc-scripts) and
+[spec §9.5](../spec/concurrent-c-spec-complete.md#95-script-library-shcc--cccscript).
 
-// Multiple defers run in reverse order
-@defer printf("3\n");
-@defer printf("2\n");
-@defer printf("1\n");
-// prints: 1, 2, 3
+```bash
+ccc examples/py/pydemo.shcc
+./tools/perf.shcc @                 # list @task entries
 ```
 
 ---
 
-## "Maybe present" values (optionals are retired)
+## Common patterns (pointers)
 
-Concurrent-C no longer has an `Optional<T>` / `T?` surface. For values that may
-be absent, pick the shape that matches the operation:
-
-```c
-// Nullable pointer — best for container lookups and struct fields.
-int* hit = m.get(key);
-if (hit) { use(*hit); }
-
-// Bool + out-parameter — best for pop / next iterators.
-int out;
-if (v.pop(&out)) { use(out); }
-
-// In-band sentinel — best for stream reads (empty slice = EOF).
-CCSlice chunk = buf.next();
-if (chunk.len == 0) { /* EOF */ }
-
-// Result — best for fallible operations with a real error channel.
-int !>(CCError) lookup(int key);
-```
-
-See `cc/include/ccc/DEPRECATIONS.md` for the full migration matrix.
+| Pattern | Recipe |
+|---------|--------|
+| Worker pool | [recipe_worker_pool.ccs](../examples/recipe_worker_pool.ccs) |
+| Fan-out / captures | [recipe_fanout_capture.ccs](../examples/recipe_fanout_capture.ccs) |
+| Ordered parallel | [recipe_ordered_parallel.ccs](../examples/recipe_ordered_parallel.ccs) |
+| Channel pipeline | [recipe_channel_pipeline.ccs](../examples/recipe_channel_pipeline.ccs) |
 
 ---
 
-## Results (`T!>(E)`)
+## Build system (`build.cc`)
 
 ```c
-typedef struct { int code; } MyError;
-
-int!>(MyError) divide(int a, int b) {
-    if (b == 0) return cc_err((MyError){.code = 1});
-    return cc_ok(a / b);
-}
-
-// Usage
-int!>(MyError) result = divide(10, 2);
-if (cc_is_ok(result)) {
-    printf("result: %d\n", cc_unwrap_ok(result));
-} else {
-    printf("error: %d\n", cc_unwrap_err(result).code);
-}
-
-// Propagate errors with !>
-int!>(MyError) caller(void) {
-    int val = divide(10, 0) !>(e) return cc_err(e);  // returns early on error
-    return cc_ok(val * 2);
-}
-```
-
----
-
-## Closures
-
-```c
-CCNursery* n = @create(NULL) @destroy;
-if (!n) return 1;
-
-// Lambda syntax
-n->spawn(() => printf("hello\n"));
-
-// With captures (value by default)
-int x = 42;
-n->spawn([x]() => printf("x = %d\n", x));
-
-// Reference capture
-n->spawn([&x]() => { x++; });
-
-// Explicit copy capture
-n->spawn([=x]() => printf("x = %d\n", x));
-```
-
----
-
-## Common Patterns
-
-### Worker Pool
-```c
-{
-    int[~100 >] jobs_tx;
-    int[~100 <] jobs_rx;
-    channel_pair(&jobs_tx, &jobs_rx);
-
-    CCNursery* workers = @create(NULL) @destroy;
-    if (!workers) return 1;
-    for (int i = 0; i < 4; i++) {
-        workers->spawn([jobs_rx]() => {
-            int job;
-            while (chan_recv(jobs_rx, &job) == 0) {
-                process(job);
-            }
-        });
-    }
-
-    CCNursery* feeder = @create(workers) @destroy {
-        chan_close(jobs_tx);
-    };
-    if (!feeder) return 1;
-    feeder->spawn([jobs_tx]() => {
-        for (int j = 0; j < 100; j++) {
-            chan_send(jobs_tx, j);
-        }
-    });
-}
-```
-
-### Fan-out / Fan-in
-```c
-{
-    int[~16 >] results_tx;
-    int[~16 <] results_rx;
-    channel_pair(&results_tx, &results_rx);
-
-    CCNursery* workers = @create(NULL) @destroy {
-        chan_close(results_tx);
-    };
-    if (!workers) return 1;
-    for (int i = 0; i < 16; i++) {
-        workers->spawn([i, results_tx]() => {
-            int result = compute(i);
-            chan_send(results_tx, result);
-        });
-    }
-
-    int sum = 0, r;
-    while (chan_recv(results_rx, &r) == 0) {
-        sum += r;
-    }
-    printf("total: %d\n", sum);
-}
-```
-
-### Producer/Consumer Pipeline
-```c
-{
-    int[~10 >] tx;
-    int[~10 <] rx;
-    channel_pair(&tx, &rx);
-
-    CCNursery* producer = @create(NULL) @destroy {
-        chan_close(tx);
-    };
-    if (!producer) return 1;
-    producer->spawn([tx]() => {
-        for (int i = 0; i < 100; i++) {
-            chan_send(tx, i);
-        }
-    });
-
-    int v;
-    while (chan_recv(rx, &v) == 0) {
-        printf("got %d\n", v);
-    }
-}
-```
-
----
-
-## Build System (`build.cc`)
-
-```c
-// build.cc
 CC_TARGET main exe main.ccs utils.ccs
 CC_TARGET_LIBS main pthread
 CC_DEFAULT main
-
-// Multi-target
-CC_TARGET lib obj lib.ccs
-CC_TARGET app exe app.ccs
-CC_TARGET_DEPS app lib
 ```
 
 ```bash
-ccc build                           # build default target
+ccc build                           # default target
 ccc build run                       # build + run default
-ccc build list                      # show targets
-ccc build app                       # build specific target
+ccc build list
 ccc build --build-file path/build.cc
 ```
 
 ---
 
-## Python Interop (one boundary, two doors)
+## Python & JS
 
 ```c
 #include <ccc/script/py.cch>
+#include <ccc/script/js.cch>
 ```
 
-**CC embeds Python** (CC owns main):
+**Embed Python** (CC owns `main`): [recipe_py_interop.ccs](../examples/recipe_py_interop.ccs).
+
+**One file → native modules** (no `main` + export): [js-py-modules.md](js-py-modules.md).
 
 ```c
-if (!cc_py_available()) { puts("SKIP (no libpython)"); return 0; }
-CCPy py = cc_py_new(&arena) !> @destroy;
-py.exec(@string(`
-    def f(x):
-        return x * 2
-    `, &arena).as_slice()) !>;   // closer's indent = margin, stripped per line
-CCPyObj m = py.import("__main__") !> @destroy;
-int64_t v = m.f(21) !>;                       // dynamic member call
-double s = m.total(py_buf(xs)) !>;            // zero-copy view, call-scoped borrow
-CCSlice out = f.map::[double](&a, xs, ks) !>; // N calls, one crossing
-```
-
-**Python imports CC** (Python owns main):
-
-```c
-void *PyInit_counter(void) {                  // CPython's own convention
-    return py_module::[Counter]("counter", NULL);
-}
+@comptime cc_py_export("Counter", &seed);   // → .abi3.so
+@comptime cc_js_export("Counter", &seed);   // → .node
 ```
 
 ```bash
-ccc build counter.ccs      # PyInit_ + no main → counter.abi3.so, one command
+ccc build counter.ccs
 PYTHONPATH=bin python3 -c "import counter; counter.bump(4)"
 ```
 
-One binding for both (dlopen'd stable ABI — no link-time Python
-dependency; one built module serves every 3.x). Costs are measured in
-`perf/py_baseline.ccs`; full semantics in the stdlib spec's Python
-section.
+Bridges: npm [`concurrent-c-python`](https://www.npmjs.com/package/concurrent-c-python),
+pip [`concurrent-c-node`](https://pypi.org/project/concurrent-c-node/).
 
 ---
 
-## Environment Variables
+## Environment
 
 | Variable | Purpose |
 |----------|---------|
-| `CC` | C compiler (default: cc/gcc/clang) |
-| `CC_OUT_DIR` | Generated C + objects (default: out/) |
-| `CC_BIN_DIR` | Linked executables (default: bin/) |
+| `CC` | Host C compiler |
+| `CC_OUT_DIR` | Generated C + objects (default `out/`) |
+| `CC_BIN_DIR` | Linked executables (default `bin/`) |
+| `CC_HOME` | Override install tree resolution |
 | `CC_NO_CACHE` | Disable incremental cache |
-| `CC_CACHE_MAX_MB` | Per-directory cap on the content-addressed caches (0 = uncapped) |
-| `CC_CACHE_EVICT_INTERVAL` | Min seconds between cache sweeps (default 60) |
+| `CC_CACHE_MAX_MB` | Cache cap (0 = uncapped) |
+| `CC_CACHE_EVICT_INTERVAL` | Min seconds between sweeps (default 60) |
 
 ---
 
 ## Includes
 
 ```c
-#include <ccc/cc_runtime.cch>     // Core runtime (owned nurseries, channels)
-#include <ccc/std/prelude.cch>    // Convenience (kilobytes, heap arena, etc.)
-#include <ccc/cc_atomic.cch>      // Portable atomics
+#include <ccc/cc_runtime.cch>      // nurseries, channels, core
+#include <ccc/std/prelude.cch>     // kilobytes, common std
+#include <ccc/script/stdio.cch>    // CCStdio / io.println
+#include <ccc/script/prelude.cch>  // forced in for .shcc; usable from .ccs too
+#include <ccc/cc_atomic.cch>       // portable atomics
 ```
