@@ -42,5 +42,5 @@ npm/cc-python/vendor/
 
 # python package build products
 pypi/cc-node/build/
-pypi/cc-node/cc_node.egg-info/
+pypi/cc-node/*.egg-info/
 __pycache__/
