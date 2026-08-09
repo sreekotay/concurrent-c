@@ -6,7 +6,7 @@ Pick the row that matches what you are doing. Do not stack unrelated steps.
 
 | Goal | Command |
 |------|---------|
-| Install `ccc` (Homebrew) | `brew install sreekotay/concurrent-c/ccc` |
+| Install `ccc` (Homebrew) | `brew install --HEAD sreekotay/concurrent-c/ccc` |
 | Install from source | `PREFIX="$HOME/.local" ./cc-install.sh` |
 
 Then: `ccc run hello.ccs`. You do **not** need the hacking scripts below.

@@ -2,7 +2,7 @@
 
 ## Getting Started
 
-- **[Getting Started](getting-started.md)** — Install, first program, concurrency
+- **[Getting Started](getting-started.md)** — Install, first program, language surface, concurrency, learning path
 - **[When to run what](build-when.md)** — Install vs checkout vs stdlib vs lowerer vs ship vs cold smoke
 - **[Language Concepts](language-concepts.md)** — Defer, results, UFCS, slices/arenas, closures
 - **[Cheatsheet](cheatsheet.md)** — Quick reference for common patterns

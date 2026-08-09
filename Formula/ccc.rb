@@ -6,7 +6,7 @@
 #
 # Or add as a tap and install head:
 #   brew tap sreekotay/concurrent-c https://github.com/sreekotay/concurrent-c.git
-#   brew install sreekotay/concurrent-c/ccc
+#   brew install --HEAD sreekotay/concurrent-c/ccc
 #
 # After install, `ccc` is on PATH. The driver finds runtime and headers from
 # the installed layout (prefix/bin/ccc -> prefix/include, prefix/lib/ccc/runtime).

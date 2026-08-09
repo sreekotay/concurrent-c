@@ -85,7 +85,7 @@ Homebrew:
 
 ```bash
 brew tap sreekotay/concurrent-c https://github.com/sreekotay/concurrent-c.git
-brew install sreekotay/concurrent-c/ccc
+brew install --HEAD sreekotay/concurrent-c/ccc
 ```
 
 Or from source (`git`, `make`, a C compiler):

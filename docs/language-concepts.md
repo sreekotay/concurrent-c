@@ -9,19 +9,24 @@ Recipes: [examples/README.md](../examples/README.md#learning-path-recommended-or
 
 [recipe_defer_cleanup.ccs](../examples/recipe_defer_cleanup.ccs) · [recipe_unwrap_destroy_forms.ccs](../examples/recipe_unwrap_destroy_forms.ccs) · Spec §5.1 / §4.2.2 / §2.2
 
+`@destroy` is **`@defer` sugar on a declaration**: same scope-exit LIFO ledger,
+attached to the binding instead of written as a following statement. Bodyless
+`@destroy` runs the type’s registered destroy; a block is an explicit defer body.
+With `!>`, cleanup is scheduled only if the unwrap succeeds (no binding → no defer).
+
 | Bind | Meaning |
 |------|---------|
 | `@defer` | A **statement**: run this when the **scope** exits (LIFO) |
-| `@destroy` | A **declaration**: clean up when **this binding** ends |
+| `@destroy` | Same defer, written on the **declaration** (RAII spelling) |
 
 ```c
 FILE* f = fopen(path, "r");
 @defer fclose(f);
 
+/* sugar for: unwrap, bind n, then @defer the nursery destroy */
 CCNursery* n = cc_nursery_create(NULL) !> @destroy;
 ```
 
-If the unwrap fails, the binding never exists — destroy does not run.
 Named `@defer` can be `@cancel`led; `@defer(ok)` / `@defer(err)` gate on result returns.
 Registration is visible in source; discharge sites (soft-return epilogue,
 cancelled-resume, never-entered `env_drop`) are defined by the spec emit.
