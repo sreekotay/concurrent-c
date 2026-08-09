@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Package-bridge adversarial storms (host-driven — not picked up by run_all).
 #
-#   ./stress/bridge/run.sh           # quick
-#   CHAOS_SCALE=full ./stress/bridge/run.sh
+#   ./stress/bridge/run.sh                      # quick
+#   CHAOS_SCALE=full ./stress/bridge/run.sh     # bigger N
+#   CHAOS_SCALE=soak ./stress/bridge/run.sh     # + multi-second RSS soaks
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"

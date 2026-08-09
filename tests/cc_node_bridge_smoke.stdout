@@ -12,6 +12,7 @@ thenable_reject true
 destroy_from_callback true
 thenable_typed_array true
 import_module true
+destroy_during_thenable true
 py_exc_to_js true
 py_exc_roundtrip true
 missing_package true

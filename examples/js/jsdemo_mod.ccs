@@ -8,7 +8,7 @@
  */
 #include <ccc/script/js.cch>
 
-typedef struct JsDemo { int _; } JsDemo;
+typedef struct JsDemo { int dummy; } JsDemo;
 
 static double !>(CCError) JsDemo_sqrt2(JsDemo *self, CCJs *js) {
     @errhandler(CCError e) { return cc_err(e); }
@@ -39,6 +39,6 @@ static long long !>(CCError) JsDemo_pid(JsDemo *self, CCJs *js) {
     return cc_ok(v);
 }
 
-static const JsDemo seed = { ._= 0 };
+static const JsDemo seed = { .dummy = 0 };
 
 @comptime cc_js_export("JsDemo", &seed);

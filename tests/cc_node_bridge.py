@@ -3,6 +3,8 @@ in for npm ones (same resolution path, no install step in CI).
 Deterministic booleans; the paired smoke pins them."""
 import hashlib
 import sys
+import threading
+import time
 
 sys.path.insert(0, "pypi/cc-node")
 import cc_node  # noqa: E402
@@ -59,6 +61,29 @@ ta = js.eval("async () => new Float64Array([1, 2, 3])")
 out("thenable_typed_array", list(ta()) == [1.0, 2.0, 3.0])
 fs = js.import_module("node:path")
 out("import_module", fs.join("a", "b") == "a/b")
+# Cross-thread destroy during a slow thenable: no hang; settle or reject.
+js3 = cc_node.create()
+slow = js3.eval(
+    "async () => { await new Promise(r => setTimeout(r, 120)); return 99 }")
+_box = {"v": None, "e": None}
+
+def _worker():
+    try:
+        _box["v"] = slow()
+    except Exception as e:
+        _box["e"] = e
+
+_th = threading.Thread(target=_worker)
+_th.start()
+time.sleep(0.01)
+js3.destroy()
+_th.join(timeout=5)
+out("destroy_during_thenable",
+    (not _th.is_alive()) and js3.closed and (
+        _box["v"] == 99 or (
+            _box["e"] is not None and (
+                "closed" in str(_box["e"]).lower()
+                or "exit" in str(_box["e"]).lower()))))
 thrower = js.eval("(f) => { try { f(); return 'no'; } catch (e) { return 'js saw: ' + e.message; } }")
 def boom():
     raise ValueError("from python")

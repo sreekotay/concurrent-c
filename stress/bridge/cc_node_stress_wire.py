@@ -3,19 +3,19 @@
     ./stress/bridge/run.sh
     PYTHONPATH=pypi/cc-node python3 stress/bridge/cc_node_stress_wire.py
     CHAOS_SCALE=full PYTHONPATH=pypi/cc-node python3 stress/bridge/cc_node_stress_wire.py
+    CHAOS_SCALE=soak PYTHONPATH=pypi/cc-node python3 stress/bridge/cc_node_stress_wire.py
 
 Latency demos stay under pypi/cc-node/cc_node/examples/.  This file is stress only.
 
-Modes: multi-child fanout, callback blizzard, handle boomerang,
-exception hail, thenable storm (+ reject), destroy-from-callback,
-ledger churn, shm hail, teardown derby, eval storm, cross-domain
-barrage.  RESULT lines + OK booleans; non-zero exit on any FAIL.
+RESULT lines + OK booleans; non-zero exit on any FAIL.
 """
 from __future__ import annotations
 
 import array
 import gc
 import os
+import platform
+import resource
 import sys
 import threading
 import time
@@ -24,12 +24,28 @@ _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 sys.path.insert(0, os.path.join(_ROOT, "pypi", "cc-node"))
 import cc_node  # noqa: E402
 
-# CHAOS_SCALE preferred; CC_NODE_STRESS kept as alias.
+# CHAOS_SCALE: quick < full < soak (soak implies full sizes + long RSS).
 SCALE = (os.environ.get("CHAOS_SCALE")
          or os.environ.get("CC_NODE_STRESS")
          or "quick").lower()
-FULL = SCALE == "full"
+SOAK = SCALE == "soak"
+FULL = SCALE in ("full", "soak")
 fails = 0
+MB = 1024 * 1024
+
+
+def rss_bytes() -> int:
+    """Best-effort current RSS (macOS maxrss is bytes; Linux VmRSS)."""
+    if platform.system() == "Darwin":
+        return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
 
 
 def ok(name: str, cond: bool) -> None:
@@ -625,6 +641,189 @@ def cross_domain_barrage() -> None:
     ok("cross_domain_barrage_late", late == n)
 
 
+def destroy_during_thenable() -> None:
+    """Cross-thread destroy while another thread blocks on a slow thenable.
+
+    Contract: no hang; bridge ends closed; the in-flight call either
+    completes or rejects with closed/exit — never silent success after
+    a hard teardown that killed the child mid-reply.
+    """
+    print("=== destroy_during_thenable ===")
+    rounds = 30 if SOAK else (20 if FULL else 10)
+    delay_ms = 300 if SOAK else 150
+    t0 = time.perf_counter()
+    settled = 0
+    rejected = 0
+    hung = 0
+    for _ in range(rounds):
+        js = cc_node.create()
+        slow = js.eval(
+            "async () => { await new Promise(r => setTimeout(r, %d)); "
+            "return 99; }" % delay_ms
+        )
+        box = {"v": None, "e": None}
+
+        def worker():
+            try:
+                box["v"] = slow()
+            except Exception as e:
+                box["e"] = e
+
+        th = threading.Thread(target=worker)
+        th.start()
+        time.sleep(0.01)
+        js.destroy()
+        th.join(timeout=10)
+        if th.is_alive():
+            hung += 1
+            continue
+        if box["v"] == 99:
+            settled += 1
+        elif box["e"] is not None and (
+            "closed" in str(box["e"]).lower()
+            or "exit" in str(box["e"]).lower()
+        ):
+            rejected += 1
+        if not js.closed:
+            try:
+                js.destroy()
+            except Exception:
+                pass
+    result("destroy_during_thenable_ms %.1f", (time.perf_counter() - t0) * 1000)
+    result("destroy_during_thenable_settled %d", settled)
+    result("destroy_during_thenable_rejected %d", rejected)
+    ok("destroy_during_thenable_no_hang", hung == 0)
+    ok("destroy_during_thenable_accounted",
+       settled + rejected == rounds and hung == 0)
+
+
+def mixed_thenable_hammer() -> None:
+    """Overlap a slow thenable on domain A with sync traffic on domain B.
+
+    Same-bridge multi-thread _req would race the wire; two domains are
+    the supported shape (mirrors cc-python multi-domain overlap).
+    """
+    print("=== mixed_thenable_hammer ===")
+    js_a = cc_node.create()
+    js_b = cc_node.create()
+    slow = js_a.eval(
+        "async (n) => { await new Promise(r => setTimeout(r, n)); return n; }"
+    )
+    sync = js_b.eval("(x) => x * x")
+    n_sync = 80 if SOAK else (40 if FULL else 20)
+    t0 = time.perf_counter()
+    box = {"v": None, "e": None}
+
+    def worker():
+        try:
+            box["v"] = slow(80)
+        except Exception as e:
+            box["e"] = e
+
+    th = threading.Thread(target=worker)
+    th.start()
+    acc = 0
+    for i in range(n_sync):
+        acc += sync(i)
+    th.join(timeout=10)
+    js_a.destroy()
+    js_b.destroy()
+    result("mixed_thenable_hammer_ms %.1f", (time.perf_counter() - t0) * 1000)
+    ok("mixed_thenable_hammer_sync", acc == sum(i * i for i in range(n_sync)))
+    ok("mixed_thenable_hammer_async",
+       box["v"] == 80 and box["e"] is None and not th.is_alive())
+
+
+def big_payload_hail() -> None:
+    """Mirror cc-python big_payload: wide/deep plain data both directions."""
+    print("=== big_payload_hail ===")
+    js = cc_node.create()
+    wide_n = 200 if SOAK else (120 if FULL else 60)
+    wide = {"k%d" % i: i * i for i in range(wide_n)}
+    deep = {"a": {"b": {"c": {"d": {"e": [1, 2, {"f": "g"}]}}}}}
+    echo = js.eval("(o) => o")
+    pick = js.eval("(o) => o.k7")
+    dig = js.eval("(o) => o.a.b.c.d.e[2].f")
+    rounds = 40 if SOAK else (20 if FULL else 10)
+    t0 = time.perf_counter()
+    ok_n = 0
+    for _ in range(rounds):
+        back = echo(wide)
+        if pick(back) == 49 and dig(deep) == "g":
+            ok_n += 1
+    # Large plain list (no shm) — exercises JSON line size.
+    n_list = 3000 if SOAK else (1500 if FULL else 500)
+    lst = js.eval("(a) => a.length")(list(range(n_list)))
+    js.destroy()
+    result("big_payload_hail_ms %.1f", (time.perf_counter() - t0) * 1000)
+    result("big_payload_hail_rounds %d", rounds)
+    ok("big_payload_hail_json", ok_n == rounds)
+    ok("big_payload_hail_list", lst == n_list)
+
+
+def retained_callback_storm() -> None:
+    """Mirror retained callable: one Python cb kept alive across many JS calls."""
+    print("=== retained_callback_storm ===")
+    js = cc_node.create()
+    apply = js.eval("(f, n) => { let s = 0; for (let i = 0; i < n; i++) s += f(i); return s; }")
+    n = 500 if SOAK else (300 if FULL else 120)
+    t0 = time.perf_counter()
+
+    def retained(x):
+        return x * 3
+
+    total = apply(retained, n)
+    # Same function object again — must not double-register / desync.
+    total2 = apply(retained, n)
+    js.destroy()
+    want = sum(i * 3 for i in range(n))
+    result("retained_callback_storm_ms %.1f", (time.perf_counter() - t0) * 1000)
+    ok("retained_callback_storm_total", total == want and total2 == want)
+
+
+def rss_soak() -> None:
+    """Long create/churn/destroy loop; RSS must not climb without bound."""
+    print("=== rss_soak ===")
+    # Quick: short; full: medium; soak: multi-second.
+    if SOAK:
+        seconds, ops_per = 8.0, 40
+        limit_mb = 512
+    elif FULL:
+        seconds, ops_per = 3.0, 25
+        limit_mb = 384
+    else:
+        seconds, ops_per = 1.0, 15
+        limit_mb = 256
+    r0 = rss_bytes()
+    t0 = time.perf_counter()
+    cycles = 0
+    acc = 0
+    while time.perf_counter() - t0 < seconds:
+        js = cc_node.create()
+        f = js.eval("(x) => x + 1")
+        for i in range(ops_per):
+            acc += f(i)
+            if i % 7 == 0:
+                tmp = js.eval("(x) => x")
+                acc += tmp(i)
+        js.destroy()
+        cycles += 1
+        if cycles % 5 == 0:
+            gc.collect()
+    # Force a few more GC passes so deferred releases land.
+    gc.collect()
+    r1 = rss_bytes()
+    delta = max(0, r1 - r0)
+    result("rss_soak_ms %.1f", (time.perf_counter() - t0) * 1000)
+    result("rss_soak_cycles %d", cycles)
+    result("rss_soak_rss0_mb %.1f", r0 / MB)
+    result("rss_soak_rss1_mb %.1f", r1 / MB)
+    result("rss_soak_delta_mb %.1f", delta / MB)
+    ok("rss_soak_cycles", cycles >= (20 if SOAK else (8 if FULL else 3)))
+    ok("rss_soak_acc", acc > 0)
+    ok("rss_soak_rss", delta < limit_mb * MB)
+
+
 def main() -> int:
     print("cc_node_stress_wire scale=%s" % SCALE)
     multi_child_fanout()
@@ -634,15 +833,20 @@ def main() -> int:
     thenable_storm()
     thenable_reject_storm()
     destroy_from_callback()
+    destroy_during_thenable()
+    mixed_thenable_hammer()
     callback_buffer_path()
     child_crash_storm()
     thenable_typed_array()
     import_module_storm()
+    big_payload_hail()
+    retained_callback_storm()
     ledger_churn()
     shm_hail()
     teardown_derby()
     eval_storm()
     cross_domain_barrage()
+    rss_soak()
     print("=== summary ===")
     result("stress_fails %d", fails)
     ok("stress_clean", fails == 0)

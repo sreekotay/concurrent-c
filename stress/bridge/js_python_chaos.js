@@ -2,30 +2,12 @@
  *
  *   ./stress/bridge/run.sh
  *   OPENBLAS_NUM_THREADS=1 node --expose-gc stress/bridge/js_python_chaos.js
- *   CHAOS_SCALE=full OPENBLAS_NUM_THREADS=1 node --expose-gc stress/bridge/js_python_chaos.js
+ *   CHAOS_SCALE=full|soak …
  *
  * Latency demos stay under npm/cc-python/examples/.  This file is stress only.
  *
  * Every mode either prints RESULT lines (timing / counts) or OK/FAIL
- * booleans.  Exit non-zero on any FAIL.  Modes:
- *   crash_storm      — N isolated domains; random _exit mid-flight; survivors work
- *   domain_fanout    — spawn/import/destroy fanout under wire load
- *   shm_hail         — concurrent multi-MB spills; spill dir empty after
- *   teardown_derby   — destroy racing Promise.all + sync + callbacks
- *   callback_blizzard— retained JS callables × map storms sync+lane
- *   exception_hail   — throw/recover storms; messages intact across wire
- *   nested_callable  — Python returns callables JS keeps invoking
- *   big_payload_hail — deep / wide JSON-ish trees both directions
- *   isolated_handle_boomerang — isolated wire: JS cb returns nested callables
- *   isolated_pipeline_cbs     — Promise.all + nested cbs on one child
- *   isolated_destroy_from_cb  — destroy() inside JS cb while broker waits cbr
- *   callback_buffer_path      — typed arrays on nested cbr (inline+spill)
- *   parking_shm               — Promise.all spill args × nested async cbs
- *   keep_past_return — callee stashes memoryview; articulate under load
- *   asyncio_lane_storm        — coro + awaited cb + destroy-from-await
- *   release_during_suspend    — release/GC while stage-1 cb promise pending
- *   mixed_hammer     — sync queue-jumps a busy lane while ticks must live
- *   lease_blender    — subarray / GC / zero-copy churn under load
+ * booleans.  Exit non-zero on any FAIL.  CHAOS_SCALE: quick < full < soak.
  */
 'use strict';
 
@@ -35,7 +17,8 @@ const path = require('path');
 const ccpy = require(path.join(__dirname, '../../npm/cc-python'));
 
 const SCALE = (process.env.CHAOS_SCALE || 'quick').toLowerCase();
-const FULL = SCALE === 'full';
+const SOAK = SCALE === 'soak';
+const FULL = SCALE === 'full' || SOAK;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const rss = () => process.memoryUsage().rss;
 const MB = 1024 * 1024;
@@ -804,7 +787,100 @@ async function mixedHammer(numpyOk) {
   ok('mixed_hammer_loop_alive', ticks >= 5);
 }
 
-/* ---- 18. Lease blender -------------------------------------------------- */
+/* ---- 18. Destroy during slow isolated thenable (cross-task) ------------- */
+async function destroyDuringThenable() {
+  console.log('=== destroy_during_thenable ===');
+  const rounds = SOAK ? 24 : (FULL ? 16 : 8);
+  const delay = SOAK ? 250 : 120;
+  const t0 = hr();
+  let settled = 0, rejected = 0;
+  for (let r = 0; r < rounds; r++) {
+    const py = ccpy.create({ isolated: true });
+    const b = py.import('builtins');
+    const sleeper = await b.eval(
+      'lambda n: (__import__("time").sleep(n), 99)[1]');
+    const p = sleeper(delay / 1000);
+    await sleep(15);
+    await py.destroy();
+    try {
+      const v = await p;
+      if (v === 99) settled++;
+      else rejected++; // unexpected shape counts against clean reject path
+    } catch (e) {
+      if (/closed|exited/.test(e.message)) rejected++;
+      else throw e;
+    }
+  }
+  result('destroy_during_thenable_ms %s', nsToMs(hr() - t0).toFixed(1));
+  result('destroy_during_thenable_settled %d', settled);
+  result('destroy_during_thenable_rejected %d', rejected);
+  ok('destroy_during_thenable_accounted', settled + rejected === rounds);
+}
+
+/* ---- 19. RSS soak (create/churn/destroy) -------------------------------- */
+async function rssSoak() {
+  console.log('=== rss_soak ===');
+  const seconds = SOAK ? 8 : (FULL ? 3 : 1);
+  const ops = SOAK ? 30 : (FULL ? 20 : 12);
+  const limitMb = SOAK ? 512 : (FULL ? 384 : 256);
+  const r0 = rss();
+  const t0 = hr();
+  let cycles = 0;
+  let acc = 0;
+  const deadline = Date.now() + seconds * 1000;
+  while (Date.now() < deadline) {
+    const py = ccpy.create();
+    const math = py.import('math');
+    for (let i = 0; i < ops; i++) {
+      acc += math.floor(i + 0.2);
+      if (i % 5 === 0) void math.sqrt;
+    }
+    py.destroy();
+    cycles++;
+    if (cycles % 4 === 0 && global.gc) global.gc();
+  }
+  if (global.gc) { global.gc(); await sleep(20); global.gc(); }
+  const r1 = rss();
+  const delta = Math.max(0, r1 - r0);
+  result('rss_soak_ms %s', nsToMs(hr() - t0).toFixed(1));
+  result('rss_soak_cycles %d', cycles);
+  result('rss_soak_rss0_mb %s', (r0 / MB).toFixed(1));
+  result('rss_soak_rss1_mb %s', (r1 / MB).toFixed(1));
+  result('rss_soak_delta_mb %s', (delta / MB).toFixed(1));
+  ok('rss_soak_cycles', cycles >= (SOAK ? 15 : (FULL ? 6 : 2)));
+  ok('rss_soak_acc', acc > 0);
+  ok('rss_soak_rss', delta < limitMb * MB);
+}
+
+/* ---- 20. Isolated RSS soak (process children) --------------------------- */
+async function rssSoakIsolated() {
+  console.log('=== rss_soak_isolated ===');
+  const seconds = SOAK ? 6 : (FULL ? 2.5 : 0.8);
+  const limitMb = SOAK ? 768 : (FULL ? 512 : 384);
+  const r0 = rss();
+  const t0 = hr();
+  let cycles = 0;
+  let acc = 0;
+  const deadline = Date.now() + seconds * 1000;
+  while (Date.now() < deadline) {
+    const py = ccpy.create({ isolated: true });
+    const b = py.import('builtins');
+    const f = await b.eval('lambda x: x + 1');
+    for (let i = 0; i < 10; i++) acc += await f(i);
+    await py.destroy();
+    cycles++;
+  }
+  if (global.gc) { global.gc(); await sleep(20); }
+  const delta = Math.max(0, rss() - r0);
+  result('rss_soak_isolated_ms %s', nsToMs(hr() - t0).toFixed(1));
+  result('rss_soak_isolated_cycles %d', cycles);
+  result('rss_soak_isolated_delta_mb %s', (delta / MB).toFixed(1));
+  ok('rss_soak_isolated_cycles', cycles >= (SOAK ? 8 : (FULL ? 3 : 1)));
+  ok('rss_soak_isolated_acc', acc > 0);
+  ok('rss_soak_isolated_rss', delta < limitMb * MB);
+}
+
+/* ---- 21. Lease blender -------------------------------------------------- */
 async function leaseBlender() {
   console.log('=== lease_blender ===');
   const py = ccpy.create();
@@ -862,8 +938,11 @@ async function leaseBlender() {
   await keepPastReturn();
   await asyncioLaneStorm();
   await releaseDuringSuspend();
+  await destroyDuringThenable();
   await mixedHammer(numpyOk);
   await leaseBlender();
+  await rssSoak();
+  await rssSoakIsolated();
 
   console.log('=== summary ===');
   result('chaos_fails %d', fails);

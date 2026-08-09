@@ -50,6 +50,23 @@ const ccpy = require(process.cwd() + '/npm/cc-python');
       catch (e) { v = /closed|exited/.test(e.message) ? 7 : null; }
       out('isolated_destroy_from_cb', v === 7 && pyD.closed);
     }
+    // Destroy while a slow child call is in flight.
+    {
+      const pyS = ccpy.create({ isolated: true });
+      const bS = pyS.import('builtins');
+      const sleeper = await bS.eval(
+        'lambda n: (__import__("time").sleep(n), 99)[1]');
+      const p = sleeper(0.15);
+      await new Promise((r) => setTimeout(r, 20));
+      await pyS.destroy();
+      let settled = false, rejected = false;
+      try {
+        settled = (await p) === 99;
+      } catch (e) {
+        rejected = /closed|exited/.test(e.message);
+      }
+      out('destroy_during_thenable', (settled || rejected) && pyS.closed);
+    }
   }
 
   const np = py.import('numpy');
