@@ -1297,10 +1297,16 @@ static inline CCString cc_gr_items_cap_text(CCArena* a, const char* sname,
 `, a);
 }
 
-static inline CCString cc_gr_fill_head_text(CCArena* a, const char* n) {
-    /* always_inline: counted `items T` loops and pipeline `Name_read` call
-     * sites otherwise pay a full call per frame/arg at wire density. */
-    return @string(`static inline __attribute__((always_inline)) int ${n}__fill(const unsigned char* s, size_t n, size_t* io,
+static inline CCString cc_gr_fill_head_text(CCArena* a, const char* n,
+                                            int force_inline) {
+    /* always_inline splices LEAF fills into counted `items T` loops and
+     * pipeline `Name_read` call sites, which otherwise pay a full call
+     * per frame/arg at wire density.  A fill that itself calls other
+     * fills stays a plain function: nested schemas recurse (a union
+     * carrying items of its own type), and gcc hard-errors on
+     * always_inline recursion. */
+    const char* al = force_inline ? " __attribute__((always_inline))" : "";
+    return @string(`static inline${al} int ${n}__fill(const unsigned char* s, size_t n, size_t* io,
         CCArena* arena, ${n}* out, int* cc_inc, int cc_depth) {
     (void)cc_inc; (void)cc_depth;
     size_t p = *io;
