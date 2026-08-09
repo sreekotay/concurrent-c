@@ -84,15 +84,16 @@ const ccpy = require(process.cwd() + '/npm/cc-python');
     const py = ccpy.create({ mode: 'async' });
     const tm = py.import('time');
     const inflight = tm.sleep(0.2);
-    const queued = [tm.sleep(0.1), tm.sleep(0.1), tm.sleep(0.1)];
+    // Outcome handlers attach at creation: the rejections settle while
+    // the in-flight await is still pending, and a rejection that crosses
+    // a turn unhandled is fatal to the process.
+    const queued = [tm.sleep(0.1), tm.sleep(0.1), tm.sleep(0.1)].map((p) =>
+      p.then(() => 'resolved',
+             (e) => (/closed/.test(e.message) ? 'rejected' : 'other')));
     const done = py.destroy();
     out('inflight_completes', (await inflight) === undefined);
-    let rejections = 0;
-    for (const q of queued) {
-      try { await q; }
-      catch (e) { if (/closed/.test(e.message)) rejections++; }
-    }
-    out('queued_reject', rejections === 3);
+    const outcomes = await Promise.all(queued);
+    out('queued_reject', outcomes.join(',') === 'rejected,rejected,rejected');
     await done;
     out('drain_resolves', py.closed);
   }
