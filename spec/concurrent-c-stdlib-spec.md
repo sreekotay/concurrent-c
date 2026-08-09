@@ -2325,9 +2325,26 @@ last takes the arena and everything in it down in one free, so no
 finalizer ordering the GC picks can dangle a box.  Handles never cross domains: a second
 `create()` is fully isolated and rejects the first domain's objects at
 the door.  `stats()` reports the live-handle count; `release(proxy)`
-drops one early.  The mirrored direction — Python importing Node —
-requires a hosted JavaScript engine (`cc_js_new`) and follows the same
-domain model.
+drops one early.
+
+The mirrored direction exists as `pypi/cc-node`: Python importing
+JavaScript, npm packages included.  No engine embedding — the domain IS
+a spawned `node` child, so Python gets real Node (full stdlib, native
+addons, whatever `npm install` put in the host's cwd) and process
+isolation for free.  The wire is strict request/response JSON over
+stdio; the same rules hold pointed the other way: plain data (finite
+numbers, strings, booleans, None, lists/dicts of the same) crosses by
+value with non-finite floats tagged rather than nulled, everything else
+is a domain-owned handle whose attribute access is property lookup
+(methods arrive bound), a thenable result is awaited in the child
+before the reply so async package APIs look synchronous, a Python
+callable crosses as a JS function (JS calling conventions apply) with
+exceptions mapping both ways, and the domain rules — cross-domain
+rejection, the stats ledger, idempotent destroy with articulate doors
+after, child lifetime bound to the bridge — are the same rules.  An
+in-process flavor over a hosted engine (`cc_js_new`) remains open as a
+zero-IPC tier; the shared-memory lease transport layers onto this wire
+without changing the surface.
 
 Async-ness enters through one primitive: `py.task(callable)` binds a
 held callable to the domain's execution lane and returns an async
