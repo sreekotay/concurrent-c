@@ -13,7 +13,7 @@ Toolchain:
 - A `ccc` driver (`out/cc/bin/ccc` or wrapper `cc/bin/ccc`) that lowers `.ccs` → C (with `#line` sourcemaps) and then compiles/links with the host C compiler (`cc`, `clang`, …).
 - A light/statically linked runtime/stdlib (header-first, prefixed APIs) under `cc/include/ccc` and `cc/runtime`.
 - A test runner (`tools/cc_test`) that drives `cc/bin/ccc` end-to-end.
-- Vendored TinyCC is used for some compiler internals (`CONFIG_CC_EXT`).
+- Vendored TinyCC runs **comptime** (`CONFIG_CC_EXT`); it can also be selected as a host-C backend if desired.
 
 ```c
 #include <ccc/cc_runtime.cch>      // core runtime
@@ -158,7 +158,9 @@ Test conventions: `tests/README.md`. Build driver / cache / outputs: [build spec
 
 ### Updating TCC
 
-Patch: `third_party/tcc-patches/0001-cc-ext-hooks.patch`. Fork branch: `origin/mob` on `https://github.com/sreekotay/tinycc.git`.
+TinyCC is the **comptime** engine (and an optional host-C backend). Patch:
+`third_party/tcc-patches/0001-cc-ext-hooks.patch`. Fork branch: `origin/mob`
+on `https://github.com/sreekotay/tinycc.git`.
 
 ```bash
 make tcc-patch-apply
@@ -166,6 +168,8 @@ make tcc-patch-regen
 make tcc-update-check
 ```
 
-`third_party/tcc` is usually detached HEAD (parent pins the commit). Push CC TCC changes to `origin/mob`.
+`third_party/tcc` is usually detached HEAD (parent pins the commit). Push CC
+TCC changes to `origin/mob`.
 
-Upgrade loop: update submodule → `tcc-patch-apply` → fix → `tcc-patch-regen` → push submodule to `origin/mob` → `tcc-update-check`.
+Upgrade loop: update submodule → `tcc-patch-apply` → fix → `tcc-patch-regen` →
+push submodule to `origin/mob` → `tcc-update-check`.
