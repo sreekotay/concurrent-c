@@ -657,12 +657,14 @@ const char* cc_emit_plan_lookup_generic_factory_handler(const char* name) {
     return r ? r->handler_name : NULL;
 }
 
-/* ABI mirrors cc_slice.cch / cc_arena.cch for dylib factory calls. */
+/* ABI mirrors cc_slice.cch / cc_arena.cch for dylib factory calls.
+ * Must stay layout-identical to CCSlice ({ptr,len,id} — 24 bytes on
+ * 64-bit). A stale trailing `alen` here made type_args.items[i] for i>=1
+ * read the previous slot's padding as the next slice's ptr. */
 typedef struct CCFactorySlice {
     void*    ptr;
     size_t   len;
     uint64_t id;
-    size_t   alen;
 } CCFactorySlice;
 
 typedef struct {

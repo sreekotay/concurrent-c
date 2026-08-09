@@ -41,9 +41,9 @@
     ]
 ~~~~}
 
-static int slice_is(CCSlice v, const char* want) {
+static int slice_is(CCSliceHdr v, const char* want) {
     size_t l = strlen(want);
-    return v.len == l && memcmp(v.ptr, want, l) == 0;
+    return v.len == l && v.ptr && memcmp(v.ptr, want, l) == 0;
 }
 
 int main(void) {
@@ -55,12 +55,12 @@ int main(void) {
         if (!Reply_parse("+OK\r\n", 5, &arena, &r) || r.kind != Reply_simple) {
             printf("FAIL: simple\n"); return 1; }
         if (r.kind == .simple) {
-            if (!slice_is(r.simple.s, "OK")) { printf("FAIL: simple payload\n"); return 1; }
+            if (!slice_is(r.simple.s.hdr(), "OK")) { printf("FAIL: simple payload\n"); return 1; }
         }
         if (!Reply_parse("-ERR bad key\r\n", 14, &arena, &r) || r.kind != Reply_error) {
             printf("FAIL: error\n"); return 1; }
         if (r.kind == .error) {
-            if (!slice_is(r.error.msg, "ERR bad key")) { printf("FAIL: error payload\n"); return 1; }
+            if (!slice_is(r.error.msg.hdr(), "ERR bad key")) { printf("FAIL: error payload\n"); return 1; }
         }
         if (!Reply_parse(":1234\r\n", 7, &arena, &r) || r.kind != Reply_integer) {
             printf("FAIL: integer\n"); return 1; }
@@ -143,7 +143,7 @@ int main(void) {
         if (!Cmd_parse("PING\r\n", 6, &arena, &c) || c.kind != Cmd_plain) {
             printf("FAIL: inline\n"); return 1; }
         if (c.kind == .plain) {
-            if (!slice_is(c.plain.text, "PING")) { printf("FAIL: inline text\n"); return 1; }
+            if (!slice_is(c.plain.text.hdr(), "PING")) { printf("FAIL: inline text\n"); return 1; }
         }
     }
 
