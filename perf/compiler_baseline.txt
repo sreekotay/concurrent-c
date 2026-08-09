@@ -1,7 +1,8 @@
 # Compiler perf baseline
 # Captured: 2026-08-09T19:49Z
 # Host: Darwin 25.6.0 arm64
-# Suite: tools/cc_test (jobs=8)
+# Suite: tools/cc_test (jobs=8), default frontend=native
+# Note: reparses_*=0 under native — CC_DEBUG_REPARSE only logs on --frontend=legacy.
 # Read perf/README.md "Compiler perf baseline" section for what each metric guards against.
 
 # Static metrics (visitor source code shape)

@@ -133,6 +133,11 @@ A worked tour (builtin Node modules, chains, callbacks, thenables,
 buffers — no npm install needed):
 `python -m cc_node.examples.use_node`.
 
+Adversarial multi-child storm (fanout, callback blizzard, shm hail,
+teardown derby): `python -m cc_node.examples.stress_wire`
+(`CC_NODE_STRESS=full` for bigger N) — see
+[`perf/README.md`](https://github.com/sreekotay/concurrent-c/blob/main/perf/README.md#js--python-interop).
+
 And when the hot path is YOUR code rather than an npm package, skip the
 wire entirely: a page of Concurrent-C (or C) exports as a native module
 for Python and Node both — 40-90ns calls, stable-ABI artifacts.  See

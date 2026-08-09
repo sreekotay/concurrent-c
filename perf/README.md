@@ -65,16 +65,28 @@ Run an individual benchmark directly:
 
 ### JS / Python Interop
 
-| Benchmark | What it measures | Dated receipts |
-|-----------|------------------|----------------|
-| `py_baseline.ccs` | CC embeds Python — scalar / row / bulk ladder vs native controls | [`baselines/py_baseline_20260809.txt`](baselines/py_baseline_20260809.txt) |
-| `js_baseline.ccs` + `js_baseline.js` | Node → CC module ladder (`ccc build` then `node`) | [`baselines/js_baseline_node_20260809.txt`](baselines/js_baseline_node_20260809.txt) |
-| `js_numpy.ccs` + `js_numpy.js` | Float64Array → CC → numpy zero-copy compose | [`baselines/js_numpy_node_20260808.txt`](baselines/js_numpy_node_20260808.txt) |
+Three boundaries, three places — don't mix them:
 
-Bridge packages (`concurrent-c-python`, `concurrent-c-node`) and native-module
-hot-path receipts live under [`baselines/`](baselines/) — see
-[`baselines/README.md`](baselines/README.md) for the full catalog and capture
-recipes.
+| Layer | API | Latency benches | Adversarial storms | Receipts |
+|-------|-----|-----------------|--------------------|----------|
+| **CC embeds Python** | `CCPy` / `cc_py_new` | [`py_baseline.ccs`](py_baseline.ccs), [`py_matplotlib_workload.ccs`](py_matplotlib_workload.ccs) | *(add under `perf/` / `stress/` — pure `ccc run`)* | [`baselines/py_baseline_20260809.txt`](baselines/py_baseline_20260809.txt) |
+| **Native modules** (JS/Python import CC) | `js_module::[T]` / `py_module::[T]` | [`js_baseline.ccs`](js_baseline.ccs)+[`.js`](js_baseline.js), [`js_numpy.ccs`](js_numpy.ccs)+[`.js`](js_numpy.js) | `ccc build` then host driver (same as latency) | [`js_baseline_node_20260809.txt`](baselines/js_baseline_node_20260809.txt), [`js_numpy_node_20260808.txt`](baselines/js_numpy_node_20260808.txt), [`js_py_modules_20260809.txt`](baselines/js_py_modules_20260809.txt) |
+| **Package bridges** (Node↔Python process) | `concurrent-c-python` / `concurrent-c-node` | [`npm/cc-python/examples/`](../npm/cc-python/examples/), [`pypi/cc-node/…/examples/`](../pypi/cc-node/cc_node/examples/) | [`js_bridge_chaos.js`](../npm/cc-python/examples/js_bridge_chaos.js), [`stress_wire.py`](../pypi/cc-node/cc_node/examples/stress_wire.py) | [`baselines/`](baselines/) (bridge + multiprocess rows) |
+
+```bash
+# Latency (CC embed / native module)
+./cc/bin/ccc run --release perf/py_baseline.ccs
+./cc/bin/ccc build --release perf/js_baseline.ccs && node perf/js_baseline.js
+
+# Package-bridge chaos (host-driven; not in run_all --perf)
+OPENBLAS_NUM_THREADS=1 node npm/cc-python/examples/js_bridge_chaos.js
+CHAOS_SCALE=full OPENBLAS_NUM_THREADS=1 node npm/cc-python/examples/js_bridge_chaos.js
+python -m cc_node.examples.stress_wire
+CC_NODE_STRESS=full python -m cc_node.examples.stress_wire
+```
+
+`run_all --perf` skips `js_baseline` / `js_numpy` (need `ccc build` + `node`).
+Full catalog + capture recipes: [`baselines/README.md`](baselines/README.md).
 
 ## Scheduler And Robustness Comparisons
 
@@ -180,44 +192,43 @@ Use these scripts to compare against the Go runtime directly.
 
 ## Compiler perf baseline
 
-Separate from the runtime benchmarks above, the compiler itself has a perf baseline tracked in [`compiler_baseline.txt`](compiler_baseline.txt). It captures the metrics the recent visitor refactor (M2 Phase-3 batching, M4.a Phase-5 gating, fossil sweeps) was measured against — without a baseline, any future change touching `cc/src/visitor/` or `cc/src/parser/` could silently regress reparse counts or wall time. The baseline + a tiny regression check guard against that.
+Tracked in [`compiler_baseline.txt`](compiler_baseline.txt). Captured by
+`scripts/capture_baseline.sh` against the **default (native) frontend**
+smoke suite (`tools/cc_test --jobs 8`).
+
+### Is it accurate?
+
+| Metric | Accurate now? | Notes |
+|--------|---------------|-------|
+| `reparse_sites_visit_codegen`, `loc_*` | **Yes** | Static greps of `cc/src/visitor/` — still meaningful for the legacy visitor tree that ships in-tree. |
+| `suite_tests` | **Yes** | Current native smoke count (1006 as of 2026-08-09). Catches skipped/added tests. |
+| `reparses_*` | **Numerically yes, as a guard no** | Default capture sees **0** because `CC_DEBUG_REPARSE` only logs from the **legacy** visitor pipeline. Native does not emit `[cc:reparse]` lines, so these no longer catch "extra reparse" regressions under the default front. To measure legacy reparses again: `CC_TEST_FRONTEND=legacy CC_DEBUG_REPARSE=1` (many smokes fail on legacy today — not the default gate). |
+| `wall_real_seconds` | **Snapshot only** | Never fails the check; host noise dominates. |
+
+So: **commit the file after intentional suite/LOC shape changes**; do **not**
+treat `reparses_total=0` as "the compiler does no work" — it means "native
+emits no visitor reparse counters."
 
 ### Workflow
 
 ```bash
-make perf-baseline     # capture current numbers into perf/compiler_baseline.txt
-make perf-regress      # compare current numbers vs the committed baseline
+make perf-baseline     # capture → perf/compiler_baseline.txt
+make perf-regress      # compare vs committed baseline (.shcc; bash oracle: make perf-regress-oracle)
 ```
-
-Make routes both through `tools/perf.shcc` tasks (`@perf_baseline`,
-`@perf_regress`). Those invoke `scripts/capture_baseline.sh` and
-`tools/cc_perf_check.shcc` respectively. Both target a warm smoke-suite
-run (`tools/cc_test --jobs 8`) and take ~60-100s.
-
-`tools/cc_perf_check.sh` remains as a bash oracle
-(`make perf-regress-oracle` → `@perf_oracle`).
-Compare-only (skip capture): `./tools/cc_perf_check.shcc --current PATH`
-(or `./tools/perf.shcc @perf_regress --current PATH`).
 
 ### What each metric guards against
 
 | Metric | Source | Regression rule | What it catches |
 |--------|--------|-----------------|-----------------|
-| `reparse_sites_visit_codegen` | static grep | must equal baseline | A new `cc__reparse_source_to_ast_(ctx\|ex)` call site appearing somewhere — every new reparse site is an architectural decision worth reviewing. |
-| `loc_visit_codegen`, `loc_closure_pass`, `loc_visitor_dir` | `wc -l` | NOTICE if growth > +25% | Catches accidental code bloat in the most-rewritten files; not a hard fail (legit features grow code). |
-| `suite_tests` | `cc_test:` line | must equal baseline | Detects accidentally-skipped or accidentally-added tests. |
-| `reparses_phase3`, `reparses_statement_lowering`, `reparses_async_lowering`, `reparses_final_ufcs`, `reparses_total` | `CC_DEBUG_REPARSE=1` aggregated across suite | must be ≤ baseline | The big one. Deterministic per pipeline shape. Any code that newly forces an unconditional reparse — e.g., dropping a `cc_contains_token_top_level` gate, or merging the phase-3 stages so they reparse twice — fails this check. |
-| `wall_real_seconds` | `/usr/bin/time -p` on warm suite | **informational only — never fails** | Wall time on a developer machine is dominated by OS scheduler noise; we measured 48s → 66s back-to-back on an unmodified tree. The deterministic reparse counts are the real perf guard. Wall-clock is reported as OK (≤ +5%), INFO (≤ +30%), or NOTICE (> +30% — a manual look is warranted if reparse counts are unchanged but wall is way off). |
+| `reparse_sites_visit_codegen` | static grep | must equal baseline | A new `cc__reparse_source_to_ast_(ctx\|ex)` call site in the legacy visitor. |
+| `loc_visit_codegen`, `loc_closure_pass`, `loc_visitor_dir` | `wc -l` | NOTICE if growth > +25% | Accidental bloat in visitor sources. |
+| `suite_tests` | `cc_test:` line | must equal baseline | Accidentally skipped or added smoke tests. |
+| `reparses_*` | `CC_DEBUG_REPARSE=1` on suite | must be ≤ baseline | **Legacy-front only.** Under native (default) these stay 0. |
+| `wall_real_seconds` | `/usr/bin/time -p` | informational | OK / INFO / NOTICE bands only — never fails. |
 
-### When to update the baseline
+### When to update
 
-Re-run `make perf-baseline` / `./tools/perf.shcc @perf_baseline` (or
-`./tools/perf.shcc @perf_regress --update`) **after** any intentional change
-that legitimately changes one of these numbers — e.g., a legacy-front
-visitor/reparse change, a serdes emit-path change that alters suite shape,
-or a major LOC cleanup. The new numbers should be committed in the same PR
-that introduces the change so reviewers can see the perf delta.
-
-### Historical context
-
-`baseline_M0.txt` (deleted 2026-05-28) was an empty placeholder created at the start of the M1 visitor refactor — it tracked the same idea but was never populated with actual measurements. The current `compiler_baseline.txt` captures the **post-M4.a state** (after the Phase-3 batching flip, fossil sweeps, and Phase-5 gating; see [`cc/docs/LEGACY_ARCHITECTURE.md` §6](../cc/docs/LEGACY_ARCHITECTURE.md) for what landed).
+`make perf-baseline` after intentional suite-shape or visitor-LOC changes;
+commit the new file in the same PR. Capture aggregates reparse lines from the
+instrumented cold run *before* the warm timed pass (see
+`scripts/capture_baseline.sh`).

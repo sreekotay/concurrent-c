@@ -314,3 +314,7 @@ work completes together in 16.4ms.
 Numbers swing ±40% run-to-run on a small shared VM; the example files
 print machine-comparable `RESULT` lines, so re-measuring on your box is
 one command.
+
+Adversarial kitchen-sink (crash isolation, shm hail, teardown races,
+callback blizzard): [`examples/js_bridge_chaos.js`](examples/js_bridge_chaos.js)
+— see also [`perf/README.md`](../../perf/README.md#js--python-interop).
