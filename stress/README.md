@@ -21,6 +21,10 @@ Stress tests that push the compiler and runtime with demanding patterns.
 | `unbuffered_rendezvous` | 50 producer/consumer pairs (sync) | Unbuffered channel rendezvous |
 | `arena_concurrent` | 10 tasks allocating from shared arena | Arena thread safety |
 | `arena_memory_storm` | Tip, stranding, budget→ovf, reset ping-pong, mixed align, churn, stack spill, concurrent nursery arenas | RSS / waste / reset reclaim |
+| `arena_lifetime_chaos` | Mixed lifetimes, scramble-release, tip-vs-churn, shared fixed concurrent; checksums + RSS peak/residual (link `mem_sample.o`) | Lifetime / reclaim / false-pass |
+| `arena_mixed_lifetime_bench` | Idiomatic mixed-lifetime RESULT peer (arena+release) | Cross-lang strategy compare |
+| `c/` `go/` `zig/mixed_lifetime_bench.*` | malloc / GC peers (same workload, idiomatic reclaim) | Cross-lang baseline |
+| `compare_mixed_lifetime.sh` | Shuffled multi-trial idiomatic mixed-lifetime compare | Strategy tradeoff map |
 | `arena_memory_bench` | Heavy RESULT peer (tip/bulk/ovf/reset/churn) | Arena happy path vs escape |
 | `c/` `go/` `zig/arena_memory_bench.*` | C / Go / Zig bump peers (same protocol) | Cross-lang baseline |
 | `c/malloc_memory_bench.c` | Raw malloc/realloc baseline (same size streams) | Is plain malloc faster? |
@@ -59,6 +63,15 @@ make stress-check
 
 # Opposite case: cc_arena_malloc used for tons of scratch allocs
 ./stress/compare_arena_malloc_cost.sh
+
+# Idiomatic mixed-lifetime compare (arena+release vs malloc vs GC)
+./stress/compare_mixed_lifetime.sh
+# MIX_LIFE_QUICK=1 ./stress/compare_mixed_lifetime.sh
+#
+# Memory: judge reclaim by arena gross/ovf; RSS peak is color. On Linux,
+# RESULT lines also carry VmHWM + cgroup memory.peak (best in a container).
+# macOS end-RSS often lags free — not leak proof.
+# Shared helper: stress/mem_sample.h + mem_sample.c (host .o linked into CC bins).
 
 # Run with sanitizers (TSan/ASan)
 ./scripts/stress_sanitize.sh tsan

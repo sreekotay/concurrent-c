@@ -1,0 +1,140 @@
+/*
+ * Idiomatic mixed-lifetime peer: malloc / free / realloc / free-rest.
+ */
+#include "../mem_sample.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <time.h>
+#include <sys/types.h>
+
+static size_t env_zu(const char *k, size_t d) {
+    const char *v = getenv(k);
+    if (!v || !*v) return d;
+    return (size_t)strtoull(v, NULL, 10);
+}
+
+static double now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1e3 + (double)ts.tv_nsec * 1e-6;
+}
+
+static size_t item_size(size_t i) {
+    return 24 + (i * 17) % 400;
+}
+
+static uint32_t lcg(uint32_t *s) {
+    *s = (*s * 1664525u) + 1013904223u;
+    return *s;
+}
+
+int main(void) {
+    size_t n = env_zu("MIX_LIFE_N", 200000);
+    uint32_t seed = (uint32_t)env_zu("MIX_LIFE_SEED", 0xC0FFEEu);
+    unsigned char **ptrs;
+    uint32_t *sizes;
+    uint8_t *alive;
+    size_t *order;
+    size_t i, freed = 0, live = 0, peak_live = 0;
+    double t0, t, alloc_ms, midfree_ms, grow_ms, reclaim_ms, total_ms;
+    size_t rss0, sampled_peak, best_peak, rss1, cgroup_peak;
+    volatile size_t sink = 0;
+    uint32_t rng = seed;
+    StressMemSample m0, m1, m;
+
+    ptrs = (unsigned char **)calloc(n, sizeof(*ptrs));
+    sizes = (uint32_t *)calloc(n, sizeof(*sizes));
+    alive = (uint8_t *)calloc(n, 1);
+    order = (size_t *)malloc(n * sizeof(size_t));
+    if (!ptrs || !sizes || !alive || !order) return 1;
+
+    printf("mixed_lifetime(c malloc): n=%zu seed=%u\n", n, seed);
+
+    m0 = stress_mem_sample();
+    rss0 = m0.ok ? m0.current : 0;
+    sampled_peak = rss0;
+    t0 = now_ms();
+
+    t = now_ms();
+    for (i = 0; i < n; i++) {
+        size_t sz = item_size(i);
+        ptrs[i] = (unsigned char *)malloc(sz);
+        if (!ptrs[i]) return 2;
+        ptrs[i][0] = (unsigned char)i;
+        sink ^= ptrs[i][0];
+        sizes[i] = (uint32_t)sz;
+        alive[i] = 1;
+        live++;
+    }
+    alloc_ms = now_ms() - t;
+    peak_live = live;
+    m = stress_mem_sample();
+    if (m.ok && m.current > sampled_peak) sampled_peak = m.current;
+
+    for (i = 0; i < n; i++) order[i] = i;
+    for (i = n; i > 1; i--) {
+        size_t j = (size_t)(lcg(&rng) % i);
+        size_t tmp = order[i - 1];
+        order[i - 1] = order[j];
+        order[j] = tmp;
+    }
+
+    t = now_ms();
+    for (i = 0; i < n / 2; i++) {
+        size_t idx = order[i];
+        if (!alive[idx]) continue;
+        free(ptrs[idx]);
+        alive[idx] = 0;
+        ptrs[idx] = NULL;
+        live--;
+        freed++;
+    }
+    midfree_ms = now_ms() - t;
+
+    t = now_ms();
+    for (i = 0; i < n; i++) {
+        size_t want;
+        unsigned char *np;
+        if (!alive[i]) continue;
+        want = (size_t)sizes[i] + 48 + (i % 64);
+        np = (unsigned char *)realloc(ptrs[i], want);
+        if (!np) return 4;
+        ptrs[i] = np;
+        ptrs[i][0] = (unsigned char)(i ^ 0x5a);
+        sink ^= ptrs[i][0];
+        sizes[i] = (uint32_t)want;
+    }
+    grow_ms = now_ms() - t;
+    m = stress_mem_sample();
+    if (m.ok && m.current > sampled_peak) sampled_peak = m.current;
+
+    t = now_ms();
+    for (i = 0; i < n; i++) {
+        if (!alive[i]) continue;
+        free(ptrs[i]);
+        alive[i] = 0;
+        live--;
+    }
+    reclaim_ms = now_ms() - t;
+
+    total_ms = now_ms() - t0;
+    m1 = stress_mem_sample();
+    rss1 = m1.ok ? m1.current : 0;
+    best_peak = stress_mem_best_peak(&m1, sampled_peak);
+    cgroup_peak = m1.cgroup_ok ? m1.cgroup_peak : 0;
+
+    printf("RESULT lang=c strategy=malloc n=%zu freed=%zu peak_live=%zu "
+           "alloc_ms=%.3f midfree_ms=%.3f grow_ms=%.3f reclaim_ms=%.3f total_ms=%.3f "
+           "rss_peak_delta=%zd rss_end_delta=%zd hwm=%zu cgroup_peak=%zu sink=%zu\n",
+           n, freed, peak_live, alloc_ms, midfree_ms, grow_ms, reclaim_ms, total_ms,
+           (ssize_t)best_peak - (ssize_t)rss0, (ssize_t)rss1 - (ssize_t)rss0,
+           m1.hwm_ok ? m1.hwm : 0, cgroup_peak, (size_t)sink);
+
+    free(ptrs);
+    free(sizes);
+    free(alive);
+    free(order);
+    return 0;
+}
