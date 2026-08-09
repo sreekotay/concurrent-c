@@ -135,18 +135,65 @@ All tasks completed.
 
 ## Language surface (day one)
 
-Concurrent-C keeps C’s model and adds a small surface. Learn these next in
-[Language Concepts](language-concepts.md); the one-line map:
+Concurrent-C keeps C’s model and adds a small surface. Two ideas show up in
+almost every example — **UFCS** and **destroy registration** — so treat them as
+day-one, not advanced.
 
 | Idea | Spellings |
 |------|-----------|
-| Cleanup | `@defer …` (statement on the scope). `@destroy` is the same defer ledger, written on the **declaration** — bodyless form calls the type’s registered destroy |
-| Errors as values | `T!>(E)`, then `?>` (default) or `!>` / `!>;` (must leave); `!> @destroy` = successful unwrap + deferred destroy |
-| Methods | `recv.method(args)` — ordinary functions; prefer UFCS at call sites |
+| Cleanup | `@defer …` / `@destroy` (defer sugar on a binding; bodyless → registered destroy) |
+| Errors as values | `T!>(E)`, then `?>` or `!>` / `!>;`; `!> @destroy` = unwrap + deferred destroy |
+| Methods (UFCS) | `recv.method(args)` — ordinary functions; prefer this form |
 | Arenas / slices | bump allocator as a **lifetime**; `T[:]` views carry provenance (below) |
-| Closures | `() => …`, `[x]() => …`, `[&x]() => …` — tasks re-bind `@errhandler` |
+| Closures | `() => …`, `() => [x] { … }`, `() => [&x] { … }` — tasks re-bind `@errhandler` |
 
-Quick reference: [Cheatsheet](cheatsheet.md). Full rules: [language spec](../spec/concurrent-c-spec-complete.md).
+### UFCS — methods are ordinary functions
+
+`recv.method(args)` calls the function the **receiver’s type** names. Declaring
+that function *is* installing the method — no trait, no separate registry for
+dispatch. Method and free forms are the same API; Concurrent-C examples prefer
+the method form:
+
+```c
+n->spawn(() => { … });     // not cc_nursery_spawn(n, …)
+tx.send(i) !>;             // not cc_chan_send(tx, i)
+io.println("hi") !>;       // not cc_stdio_println(&io, "hi")
+v.push(10);                // == CCVec_int_push(&v, 10)
+u.mean(6.0);               // == mean(u, 6.0)  (bare-name: 1st param fits)
+```
+
+Receiver first (arena last when needed). Fallible chain: unwrap (`!>` / `?>`),
+then the next method sees the value. Full matrix:
+[recipe_ufcs_forms.ccs](../examples/recipe_ufcs_forms.ccs) ·
+[Language Concepts §3](language-concepts.md#3-methods-are-ordinary-functions).
+
+### Destroy registration — what bodyless `@destroy` calls
+
+`@destroy` is `@defer` on a declaration. A **block** is an explicit defer body
+(always fine). **Bodyless** `@destroy` looks up a destroy (or pre-destroy) hook
+registered for that type — if none is known, compile error.
+
+Stdlib owners ship registered (`CCNursery*` waits then frees, `CCArena` frees
+slabs + overflow, channels, `CCPy`, …). For your own types, register at
+`@comptime`:
+
+```c
+static void my_res_close(MyRes* r) { /* … */ }
+
+@comptime {
+    (void)cc_type_register("MyRes", (CCTypeHooks){
+        .destroy = cc_type_destroy_call("my_res_close"),
+    });
+}
+
+MyRes r = my_res_open() !> @destroy;   // → defer my_res_close
+```
+
+Hook order when both exist: registered pre-destroy → call-site `@destroy { … }`
+body → registered destroy (nursery: wait → your body → free). Details:
+[Language Concepts §1](language-concepts.md#1-cleanup-binds-to-a-place).
+
+Quick reference: [Cheatsheet](cheatsheet.md). Spec: [language spec](../spec/concurrent-c-spec-complete.md).
 
 ## Arenas (lifetime, not just malloc)
 

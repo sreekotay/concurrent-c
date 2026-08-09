@@ -3,8 +3,7 @@
 Quick reference. Tutorial: [getting-started.md](getting-started.md) ·
 concepts: [language-concepts.md](language-concepts.md) · recipes:
 [examples/README.md](../examples/README.md#learning-path-recommended-order) ·
-spec: [spec/](../spec/). Prefer **UFCS** at call sites (`n->spawn`, `tx.send`,
-`io.println`).
+spec: [spec/](../spec/).
 
 ---
 
@@ -25,18 +24,58 @@ Outputs: `./out` (generated C) and `./bin` (binaries), relative to cwd.
 
 ---
 
-## Cleanup: `@defer` / `@destroy`
+## UFCS
 
-`@destroy` is **`@defer` sugar on a declaration** — same LIFO scope-exit ledger.
-Bodyless `@destroy` calls the type’s registered destroy. With `!>`, cleanup
-schedules only if unwrap succeeds.
+One rule: `recv.method(args)` calls the function the **receiver’s type** names.
+Declaring that function installs the method. Prefer UFCS over the free-function
+spelling of the same API.
+
+```c
+n->spawn(() => { … });      // cc_nursery_spawn(n, …)
+tx.send(i) !>;              // channel send
+io.println("hi") !>;
+v.push(10);                 // CCVec_int_push(&v, 10)
+u.mean(6.0);                // mean(u, 6.0) — bare-name tier
+get(21)!>.twice();          // unwrap, then method on the value
+```
+
+Receiver first; arena last when needed. Recipe:
+[recipe_ufcs_forms.ccs](../examples/recipe_ufcs_forms.ccs).
+
+---
+
+## Cleanup: `@defer` / `@destroy` / registration
+
+`@destroy` is **`@defer` sugar on a declaration** — same LIFO ledger. With `!>`,
+cleanup schedules only if unwrap succeeds.
+
+| Form | Meaning |
+|------|---------|
+| `@defer stmt;` | Statement: run on scope exit |
+| `T x = … @destroy { … };` | Explicit defer body on the binding (no registry needed) |
+| `T x = … @destroy;` | Bodyless → type’s **registered** destroy / pre-destroy |
+
+Bodyless `@destroy` with no registered hook is a **compile error**. Stdlib types
+ship hooks (`CCNursery*`, `CCArena`, channels, …). Register your own:
+
+```c
+@comptime {
+    (void)cc_type_register("MyRes", (CCTypeHooks){
+        .destroy = cc_type_destroy_call("my_res_close"),
+    });
+}
+MyRes r = my_res_open() !> @destroy;
+```
+
+Order when both exist: registered pre-destroy → `@destroy { body }` → registered
+destroy. Nursery = wait → body → free.
 
 ```c
 FILE* f = fopen("data.txt", "r");
-@defer fclose(f);                              // statement on the scope
+@defer fclose(f);
 
-CCNursery* n = cc_nursery_create(NULL) !> @destroy;   // binding + defer destroy
-CCArena a = cc_arena_heap(kilobytes(4)) @destroy;     // non-Result create
+CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
 ```
 
 ---
