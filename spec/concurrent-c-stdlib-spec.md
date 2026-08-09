@@ -2329,21 +2329,30 @@ drops one early.  The mirrored direction — Python importing Node —
 requires a hosted JavaScript engine (`cc_js_new`) and follows the same
 domain model.
 
-`create({mode: 'async'})` makes the domain an execution lane as well:
-one executor thread per domain runs every call FIFO — Python is serial
-under its per-interpreter GIL, so a lane loses nothing within a domain,
-and concurrent domains parallelize — while calls return Promises and
-the event loop stays live.  Python exceptions arrive as rejections with
-the sync bridge's messages; attribute access stays synchronous.  A job
-owns its Python references and holds a `napi_ref` on every typed-array
-buffer, so the lease spans submit to completion and neither `release`
-nor the GC can dangle in-flight work.  Teardown is revoke-then-drain:
-`destroy()` (a Promise in async mode) rejects queued calls immediately,
-lets the in-flight call finish, and runs the one sweep after the last
-result is delivered — the executor retires its interpreter thread state
-before the interpreter ends.  An idle lane does not keep the process
-alive, and a dropped, never-destroyed async domain drains the same way
-from its finalizer.
+Async-ness enters through one primitive: `py.task(callable)` binds a
+held callable to the domain's execution lane and returns an async
+function — every call through it is a Promise.  The lane is latent
+(one thread per domain, started by the first task call) and FIFO:
+Python is serial under its per-interpreter GIL, so a lane loses
+nothing within a domain, concurrent domains parallelize, and the event
+loop stays live while Python works.  Everything else on the bridge
+stays synchronous, and handles pass freely between sync and task calls
+— asynchrony is a property of the call site, never of the handle or
+the domain.  A sync call on a busy domain waits for the in-flight
+task's GIL and then runs ahead of the queue.  Python exceptions arrive
+as rejections with the sync bridge's messages.  A job owns its Python
+references and holds a `napi_ref` on every typed-array buffer, so the
+lease spans submit to completion and neither `release` nor the GC can
+dangle in-flight work.  `destroy()` always returns a Promise and is
+revoke-then-drain: queued calls reject immediately, the in-flight call
+finishes, and the one sweep runs after the last result is delivered —
+the executor retires its interpreter thread state before the
+interpreter ends.  An idle lane does not keep the process alive; a
+dropped, never-destroyed domain drains the same way from its
+finalizer.  `py.task(jsClosure)` is reserved for recorded batch
+graphs — parameterized pipelines shipping N calls as one job, the
+calling convention a process-isolated domain will reuse — and answers
+articulately until it exists.
 
 The module is the type, under the same reflection rules as
 `py_module::[T]`: every visible function whose first parameter is `T` or

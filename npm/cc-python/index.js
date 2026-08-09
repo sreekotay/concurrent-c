@@ -60,10 +60,6 @@ function wrap(bridge, handle) {
       return materialize(bridge, native.getattr(bridge._dom, handle, prop));
     },
     apply(t, thisArg, args) {
-      if (bridge._async) {
-        return native.invoke_async(bridge._dom, handle, args.map(unwrapArg))
-          .then((r) => materialize(bridge, r));
-      }
       return materialize(bridge,
                          native.invoke(bridge._dom, handle,
                                        args.map(unwrapArg)));
@@ -72,14 +68,36 @@ function wrap(bridge, handle) {
 }
 
 class Bridge {
-  // mode 'async': calls return Promises and run on the domain's executor
-  // thread (one lane per domain, FIFO; concurrent domains parallelize).
-  // Attribute access stays synchronous — lookups are dict probes; note
-  // that one may wait on the in-flight call's per-interpreter GIL.
-  constructor(opts) {
-    this._async = !!(opts && (opts.mode === 'async' || opts.async));
-    this._dom = native.create(this._async ? 1 : 0);
+  constructor() {
+    this._dom = native.create();
     this._strHandle = null;
+  }
+  // THE async primitive: task(bridgeCallable) binds it to the domain's
+  // executor lane (latent — first task call starts it) and returns an
+  // async function.  Every call through it is a Promise; everything
+  // else on the bridge stays synchronous.  FIFO within a domain,
+  // parallel across domains (per-interpreter GILs).  A plain JS closure
+  // is the reserved recorded-batch form (parameterized graphs) — not
+  // implemented yet, and says so.
+  task(fn) {
+    if (typeof fn === 'function' && !(HANDLE in fn)) {
+      throw new Error(
+        'cc-python: batch thunks (recorded graphs) are not implemented ' +
+        'yet — pass a bridge callable like py.task(np.linalg.norm)');
+    }
+    const h = unwrapArg(fn);
+    if (h === null || h === undefined || typeof h !== 'object') {
+      throw new Error('cc-python: task wants a bridge callable');
+    }
+    const bridge = this;
+    return (...args) => {
+      try {
+        return native.invoke_async(bridge._dom, h, args.map(unwrapArg))
+          .then((r) => materialize(bridge, r));
+      } catch (e) {
+        return Promise.reject(e); // a closed bridge rejects, never throws
+      }
+    };
   }
   _str() {
     if (!this._strHandle) {
@@ -100,11 +118,11 @@ class Bridge {
   get closed() {
     return native.closed(this._dom);
   }
+  // Always a Promise: resolved immediately when no lane ever started,
+  // after the revoke-then-drain when one did.
   destroy() {
     this._strHandle = null;
-    if (this._async) return native.close_async(this._dom);
-    native.close(this._dom);
-    return undefined;
+    return native.close_async(this._dom);
   }
   close() {
     return this.destroy();
@@ -113,10 +131,10 @@ class Bridge {
     this.destroy();
   }
   [Symbol.asyncDispose]() {
-    return Promise.resolve(this.destroy());
+    return this.destroy();
   }
 }
 
 module.exports = {
-  create(opts) { return new Bridge(opts); },
+  create() { return new Bridge(); },
 };

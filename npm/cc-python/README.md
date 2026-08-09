@@ -27,31 +27,43 @@ py.destroy();   // one sweep: every handle, the arena, the interpreter ref
 - `py.stats()` is the live-handle count; `py.release(proxy)` drops one
   early and returns the remainder.
 
-## Async mode
+## Async: `py.task`
+
+Async-ness enters through exactly one primitive:
 
 ```js
-const py = require('cc-python').create({ mode: 'async' });
+const py = require('cc-python').create();       // no modes
 const np = py.import('numpy');
 
-const norm = await np.linalg.norm(new Float64Array(1_000_000));
+const norm = py.task(np.linalg.norm);           // bind to the lane once
+await norm(new Float64Array(1_000_000));        // hot loop, off-thread
+await py.task(math.sqrt)(16);                   // one-shot, same primitive
 
-await py.destroy();   // revoke, drain, then the same one-sweep teardown
+await py.destroy();   // always a Promise: revoke, drain, one sweep
 ```
 
-An async domain is also an **execution lane**: every call runs on the
-domain's own thread, FIFO, and returns a Promise — the Node event loop
-stays live while Python works, and `Promise.all` across *domains* is
-real parallelism (each concurrent domain holds its own per-interpreter
-GIL).  Python exceptions arrive as rejections with the same messages
-the sync bridge throws.  Attribute access stays synchronous (lookups
-are dict probes; one may briefly wait on the in-flight call's GIL).
+Everything else stays synchronous — `math.pi`, exploratory chains,
+cheap calls — and a call site tells you the truth: a task call is a
+Promise, everything else blocks.  Every domain has a latent **execution
+lane** (one thread, started on first task call): task calls run there
+FIFO — Python is serial under its per-interpreter GIL, so a lane loses
+nothing within a domain — the Node event loop stays live while Python
+works, and `Promise.all` across *domains* is real parallelism.  Python
+exceptions arrive as rejections with the sync bridge's messages, and
+handles pass freely between sync and task calls — flavor was never a
+property of the handle.  A sync call on a busy domain waits for the
+in-flight task's GIL, then jumps the queue: that is the meaning of
+choosing sync at a call site.
 
 Lifetimes extend, not bend: a job owns its Python references and pins
 its typed-array buffers from submit to completion, so `release()` or
-GC mid-flight cannot dangle it.  `destroy()` returns a Promise —
-revocation is immediate (queued calls reject with `bridge is closed`),
-the in-flight call finishes, and the sweep runs after the last result
-is delivered.  An idle async domain never keeps the process alive.
+GC mid-flight cannot dangle it.  `destroy()` rejects queued calls
+immediately, lets the in-flight call finish, and sweeps after the last
+result is delivered.  An idle lane never keeps the process alive.
+
+`py.task(jsClosure)` is reserved for recorded batch graphs —
+parameterized pipelines that ship N Python calls as one job (and, later,
+across a process boundary) — and says so articulately until it exists.
 
 ## Numbers
 

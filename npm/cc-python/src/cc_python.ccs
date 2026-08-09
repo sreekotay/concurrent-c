@@ -535,8 +535,7 @@ typedef struct CcPython {
     int ok;
 } CcPython;
 
-static CCJsVal !>(CCError) CcPython_create(CcPython *self, CCJs *js,
-                                           long long mode = 0) {
+static CCJsVal !>(CCError) CcPython_create(CcPython *self, CCJs *js) {
     CCArena ar = cc_arena_heap(megabytes(4));
     CcPyDom *d = (CcPyDom *)cc_arena_alloc(&ar, sizeof(*d), 16);
     (void)self;
@@ -567,29 +566,17 @@ static CCJsVal !>(CCError) CcPython_create(CcPython *self, CCJs *js,
         }
         if (!d->none && cc__py.ErrClear) cc__py.ErrClear();
     }
-    if (mode == 1 && ccpy__lane_start(d, js->env) != 0) {
-        CCArena tmp;
-        ccpy__dom_sweep(d);
-        tmp = d->arena;
-        cc_arena_destroy(&tmp);
-        return cc_err(CC_ERR_IO, "cc-python: async mode needs Node-API "
-                                 "promises + threadsafe functions");
-    }
     {
         void *ext = NULL;
         if (cc__js.CreateExternal(js->env, d, ccpy__dom_finalize, NULL,
                                   &ext) != 0) {
             CCArena tmp;
-            if (d->async_mode) ccpy__lane_close(d, js->env, NULL);
             ccpy__dom_sweep(d);
             tmp = d->arena;
             cc_arena_destroy(&tmp);
             return cc_err(CC_ERR_IO, "cc-python: external allocation failed");
         }
         d->ext_outstanding++;
-        /* Async: release the fresh interpreter's GIL so the lane can
-         * attach; sync main-thread ops hand off per call. */
-        if (d->async_mode) cc_py_thread_leave();
         {
             CCJsVal jv = { 0 };
             jv.env = js->env;
@@ -1069,9 +1056,14 @@ static CCJsVal !>(CCError) CcPython_invoke_async(CcPython *self, CCJs *js,
     _Bool isarr = 0;
     (void)self;
     if (!d) return cc_err(CC_ERR_INVALID_ARG, "cc-python: bridge is closed");
-    if (!d->async_mode)
-        return cc_err(CC_ERR_INVALID_ARG,
-                      "cc-python: this bridge is not in async mode");
+    if (!d->async_mode) {
+        /* The lane is latent: first task call starts it.  Main may hold
+         * this interpreter's GIL from sync work — the lane needs it. */
+        if (ccpy__lane_start(d, js->env) != 0)
+            return cc_err(CC_ERR_IO, "cc-python: async needs Node-API "
+                                     "promises + threadsafe functions");
+        cc_py_thread_leave();
+    }
     fb = ccpy__objbox(d, fn);
     if (!fb)
         return cc_err(CC_ERR_INVALID_ARG,
@@ -1143,12 +1135,22 @@ static CCJsVal !>(CCError) CcPython_close_async(CcPython *self, CCJs *js,
     void *deferred = NULL;
     void *promise = NULL;
     (void)self;
-    if (!d || !d->async_mode)
-        return cc_err(CC_ERR_INVALID_ARG,
-                      "cc-python: this bridge is not in async mode");
+    if (!d)
+        return cc_err(CC_ERR_INVALID_ARG, "cc-python: not a bridge handle");
+    if (!cc__js.CreatePromise)
+        return cc_err(CC_ERR_IO, "cc-python: async needs Node-API promises");
     if (cc__js.CreatePromise(js->env, &deferred, &promise) != 0)
         return cc_err(CC_ERR_IO, "cc-python: promise allocation failed");
-    ccpy__lane_close(d, js->env, deferred);
+    if (d->async_mode) {
+        ccpy__lane_close(d, js->env, deferred);
+    } else {
+        /* No lane ever started: the sweep is synchronous, the promise
+         * only keeps destroy()'s shape uniform. */
+        void *u = NULL;
+        if (!d->closed) ccpy__dom_sweep(d);
+        cc__js.GetUndefined(js->env, &u);
+        cc__js.ResolveDeferred(js->env, deferred, u);
+    }
     {
         CCJsVal jv = { 0 };
         jv.env = js->env;
