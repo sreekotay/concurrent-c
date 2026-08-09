@@ -1,0 +1,76 @@
+js_baseline engine=node v23.11.0 iters=300000 samples=7
+
+scalar (one add / one mul-add per call):
+  c_native            0.00 ms        0.0 ns/call
+RESULT scalar c_native ns_per_call 0.0
+  js_inline           2.19 ms        7.3 ns/call
+RESULT scalar js_inline ns_per_call 7.3
+  js_call             0.23 ms        0.8 ns/call
+RESULT scalar js_call ns_per_call 0.8
+  js_call_mega        1.43 ms        4.8 ns/call
+RESULT scalar js_call_mega ns_per_call 4.8
+  js_to_cc_raw        4.53 ms       15.1 ns/call
+RESULT scalar js_to_cc_raw ns_per_call 15.1
+  js_to_cc            5.21 ms       17.4 ns/call
+RESULT scalar js_to_cc ns_per_call 17.4
+  js_to_cc_prop       5.35 ms       17.8 ns/call
+RESULT scalar js_to_cc_prop ns_per_call 17.8
+  js_to_cc_str       13.36 ms       44.5 ns/call
+RESULT scalar js_to_cc_str ns_per_call 44.5
+  js_to_cc_big        5.73 ms       19.1 ns/call
+RESULT scalar js_to_cc_big ns_per_call 19.1
+
+outbound (30000 calls):
+  cc_to_js_0          2.81 ms       93.6 ns/call
+RESULT scalar cc_to_js_0 ns_per_call 93.6
+  cc_to_js_1          2.81 ms       93.7 ns/call
+RESULT scalar cc_to_js_1 ns_per_call 93.7
+  cc_to_js_3          3.42 ms      113.8 ns/call
+RESULT scalar cc_to_js_3 ns_per_call 113.8
+  js_to_js            0.08 ms        2.6 ns/call
+RESULT scalar js_to_js ns_per_call 2.6
+
+bulk (1000000 doubles):
+  js_typed_sum        0.65 ms
+RESULT bulk js_typed_sum ms 0.65
+  js_array_sum        0.64 ms
+RESULT bulk js_array_sum ms 0.64
+  recv_typed          0.74 ms
+RESULT bulk recv_typed ms 0.74
+  recv_array         28.89 ms
+RESULT bulk recv_array ms 28.89
+  send_typed          0.70 ms
+RESULT bulk send_typed ms 0.70
+
+rows (100000 rows):
+  row_call           12.80 ms
+RESULT bulk row_call ms 12.80
+  row_map             8.53 ms
+RESULT bulk row_map ms 8.53
+  row_js              0.11 ms
+RESULT bulk row_js ms 0.11
+
+ratios (native control = 1.0):
+  js_to_cc / js_call_mega  3.65x   crossing into CC vs a real JS call
+  js_to_cc / js_to_cc_raw  1.15x   the generated binding vs the napi floor
+  js_to_cc_prop/js_to_cc   1.03x   the per-call property lookup
+  js_inline / c_native    5268.4x   the two floors
+  js_to_cc_str/js_to_cc    2.57x   the string copy-in
+  js_to_cc_big/js_to_cc    1.10x   the BigInt path
+RESULT ratio js_to_cc_vs_js_call_mega x 3.65
+RESULT ratio binding_vs_napi_floor x 1.15
+RESULT ratio prop_vs_hoisted x 1.03
+RESULT ratio str_vs_add x 2.57
+RESULT ratio big_vs_add x 1.10
+  cc_to_js_3 / js_to_js   44.02x   crossing out of CC vs a JS call
+RESULT ratio cc_to_js_vs_js_to_js x 44.02
+  recv_array / recv_typed  39.0x   what the zero-copy borrow removes
+  recv_typed / js_typed    1.13x   one crossing over the typed JS floor
+RESULT ratio recv_array_vs_typed x 39.0
+RESULT ratio recv_typed_vs_js_typed x 1.13
+  row_call / row_map        1.5x   what one-crossing batching removes
+  row_map / row_js        79.67x   the batched crossing over native JS rows
+RESULT ratio row_call_vs_map x 1.5
+RESULT ratio row_map_vs_js x 79.67
+
+agree=45001950000 calls=12270025

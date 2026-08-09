@@ -149,10 +149,10 @@ day-one, not advanced.
 
 ### UFCS — methods are ordinary functions
 
-`recv.method(args)` calls the function the **receiver’s type** names. Declaring
-that function *is* installing the method — no trait, no separate registry for
-dispatch. Method and free forms are the same API; Concurrent-C examples prefer
-the method form:
+`recv.method(args)` calls the function the **receiver’s type** names. For the
+usual path, **declaring that function *is* installing the method** — no trait
+and no `cc_type_register` step (unlike bodyless `@destroy`). Method and free
+forms are the same API; Concurrent-C examples prefer the method form:
 
 ```c
 n->spawn(() => { … });     // not cc_nursery_spawn(n, …)
@@ -160,6 +160,25 @@ tx.send(i) !>;             // not cc_chan_send(tx, i)
 io.println("hi") !>;       // not cc_stdio_println(&io, "hi")
 v.push(10);                // == CCVec_int_push(&v, 10)
 u.mean(6.0);               // == mean(u, 6.0)  (bare-name: 1st param fits)
+
+/* extend a family: one declaration */
+static double CCVec_double_median(CCVec_double* v) {
+    return v->len ? v->data[v->len / 2] : 0.0;
+}
+v.median();
+```
+
+**UFCS registration** (optional, library-author): a type can also register a
+`.ufcs` lowerer so `x.method` rewrites through a naming family (`cc_<type>_…`,
+nursery/channel hooks, …). Stdlib types do this; you usually don’t until you
+own a family:
+
+```c
+@comptime {
+    (void)cc_type_register("MyHandle*", (CCTypeHooks){
+        .ufcs = my_handle_ufcs_lower_c,   /* → cc_my_handle_<method>(…) */
+    });
+}
 ```
 
 Receiver first (arena last when needed). Fallible chain: unwrap (`!>` / `?>`),

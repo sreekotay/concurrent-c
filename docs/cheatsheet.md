@@ -27,16 +27,31 @@ Outputs: `./out` (generated C) and `./bin` (binaries), relative to cwd.
 ## UFCS
 
 One rule: `recv.method(args)` calls the function the **receiver’s type** names.
-Declaring that function installs the method. Prefer UFCS over the free-function
-spelling of the same API.
+**Usual path — no registration:** declaring the function installs the method
+(contrast bodyless `@destroy`, which needs a registered destroy hook). Prefer
+UFCS over the free-function spelling of the same API.
 
 ```c
 n->spawn(() => { … });      // cc_nursery_spawn(n, …)
-tx.send(i) !>;              // channel send
+tx.send(i) !>;
 io.println("hi") !>;
 v.push(10);                 // CCVec_int_push(&v, 10)
 u.mean(6.0);                // mean(u, 6.0) — bare-name tier
 get(21)!>.twice();          // unwrap, then method on the value
+
+static double CCVec_double_median(CCVec_double* v) { … }
+v.median();                 // declare = install
+```
+
+**Optional registration** (stdlib / your families): `.ufcs` on `cc_type_register`
+supplies a custom lowerer (`cc_<type>_method`, nursery/channel hooks, …):
+
+```c
+@comptime {
+    (void)cc_type_register("MyHandle*", (CCTypeHooks){
+        .ufcs = my_handle_ufcs_lower_c,
+    });
+}
 ```
 
 Receiver first; arena last when needed. Recipe:
