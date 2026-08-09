@@ -27,7 +27,7 @@ import os
 import subprocess
 
 __all__ = ["create", "JsError", "JsHandle", "__version__"]
-__version__ = "0.2.0"
+__version__ = "0.4.0"
 
 # Typed buffers cross as typed arrays; big ones spill through shared
 # memory (tmpfs where available) — one memcpy per side, receiver
