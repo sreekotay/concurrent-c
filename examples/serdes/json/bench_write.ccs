@@ -4,10 +4,10 @@
 //
 //   ./bench_write <corpus.json> [K]
 //
-// Correctness uses Name_write (checked __wchk); the hot bench uses
-// Name.write_unchecked (__wput) against a buffer sized from the corpus —
-// same shape as RESP encode. The escape encoder is table-driven (memcpy
-// clean runs). Corpora that don't parse as a Feed are skipped.
+// The generated Name_write is the single-pass CHECKED writer (__wchk);
+// parity here means bounds checking is free at this grain. The escape
+// encoder is table-driven (memcpy clean runs). Corpora that don't parse
+// as a Feed are skipped.
 #include <ccc/std/prelude.cch>
 #include <stdlib.h>
 #include <ccc/script/stdio.cch>
@@ -85,10 +85,9 @@ int main(int argc, char** argv) {
     }
 
     char* out = (char*)malloc(rd * 2 + 4096);
-    size_t w = Feed_write(&feed, out, rd * 2 + 4096);
+    size_t cap = rd * 2 + 4096;
+    size_t w = Feed_write(&feed, out, cap);
     if (!w) { eprintln("write FAIL") !>; return 1; }
-    size_t wu = feed.write_unchecked(out);
-    if (wu != w) { eprintln("write_unchecked size FAIL") !>; return 1; }
     /* sanity: reparse round-trip */
     {
         Feed rt;
@@ -96,7 +95,7 @@ int main(int argc, char** argv) {
             eprintln("roundtrip FAIL") !>; return 1;
         }
     }
-    char* hout = (char*)malloc(rd * 2 + 4096);
+    char* hout = (char*)malloc(cap);
     size_t hw = hand_write(&feed, hout);
     if (hw != w || memcmp(hout, out, w) != 0) {
         eprintln(@string(`MISMATCH gen=${w} hand=${hw}`, &pa)) !>;
@@ -109,7 +108,7 @@ int main(int argc, char** argv) {
     for (int r = 0; r < 5; r++) {
         double t0 = now_s();
         for (int i = 0; i < K; i++) {
-            size_t x = feed.write_unchecked(out);
+            size_t x = Feed_write(&feed, out, cap);
             if (x != w) { eprintln("bench FAIL") !>; return 1; }
         }
         double dt = now_s() - t0;
