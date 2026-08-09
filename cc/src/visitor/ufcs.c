@@ -9,6 +9,7 @@
 /* Host-C: include lowered .h (bare @as lives only in .cch source). */
 #include <ccc/std/prelude.h>
 #include <ccc/cc_channel.h>
+#include <ccc/cc_ufcs_families.h>
 #include <ccc/std/string.h>
 
 #include "comptime/symbols.h"
@@ -2565,28 +2566,16 @@ static int emit_desugared_call(char* out,
         if (n == CC_UFCS_EMIT_FIELD_WINS) return CC_UFCS_EMIT_FIELD_WINS;
         /* n == CC_UFCS_EMIT_UNRESOLVED or snprintf error: fall through. */
     }
-    /* Ambient namespace receivers (mirror shadow g_shadow_ufcs_ambient). */
+    /* Ambient namespace receivers — shared cc_ufcs_ambient_rows. */
     {
-        static const struct {
-            const char* recv;
-            const char* meth;
-            const char* callee;
-        } ambient[] = {
-            { "cc_std_out", "write", "cc_std_out_write_auto" },
-            { "std_out", "write", "cc_std_out_write_auto" },
-            { "cc_std_err", "write", "cc_std_err_write_auto" },
-            { "std_err", "write", "cc_std_err_write_auto" },
-            { NULL, NULL, NULL },
-        };
         size_t ai;
-        for (ai = 0; ambient[ai].recv; ai++) {
-            if (strcmp(recv, ambient[ai].recv) != 0 ||
-                strcmp(method, ambient[ai].meth) != 0)
+        for (ai = 0; cc_ufcs_ambient_rows[ai].recv; ai++) {
+            const CcUfcsAmbientRow* row = &cc_ufcs_ambient_rows[ai];
+            if (strcmp(recv, row->recv) != 0 || strcmp(method, row->meth) != 0)
                 continue;
             if (!has_args || !args_rewritten)
-                return snprintf(out, cap, "%s(", ambient[ai].callee);
-            return snprintf(out, cap, "%s(%s)", ambient[ai].callee,
-                            args_rewritten);
+                return snprintf(out, cap, "%s(", row->callee);
+            return snprintf(out, cap, "%s(%s)", row->callee, args_rewritten);
         }
     }
     if (strcmp(method, "to_str") == 0) {

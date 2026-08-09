@@ -53,4 +53,20 @@ static inline const char* cc_ufcs_family_header_suffix(const char* base) {
     return NULL;
 }
 
+/* Ambient namespace UFCS — single table for host visitor + shadow lower.
+ * `std_out.write(x)` → `cc_std_out_write_auto(x)`. */
+typedef struct {
+    const char* recv;
+    const char* meth;
+    const char* callee;
+} CcUfcsAmbientRow;
+
+static const CcUfcsAmbientRow cc_ufcs_ambient_rows[] = {
+    { "cc_std_out", "write", "cc_std_out_write_auto" },
+    { "std_out",    "write", "cc_std_out_write_auto" },
+    { "cc_std_err", "write", "cc_std_err_write_auto" },
+    { "std_err",    "write", "cc_std_err_write_auto" },
+    { NULL, NULL, NULL },
+};
+
 #endif /* CC_UFCS_FAMILIES_H */

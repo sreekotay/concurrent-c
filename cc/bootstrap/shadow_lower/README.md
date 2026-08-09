@@ -11,6 +11,9 @@ re-lowering that `.ccs`.
 | `vN/` | Promoted snapshot | Committed when you choose |
 | `last-good` | Pointer to the active `vN` | Committed |
 
+Keep `last-good` plus one or two prior `vN` for rollback. Older seeds are
+safe to delete once cold smoke is green — they are not needed to build.
+
 **Source of truth is only `cc/shadow/*.ccs` / `*.cch`.** Every lowerer
 behavior fix (parse, emit, UFCS, closures, …) is edited there first. Snapshot
 `vN/` trees and `out/include/cc/shadow/*.h` are regenerate-only products —
