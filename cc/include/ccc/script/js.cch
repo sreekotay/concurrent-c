@@ -244,6 +244,24 @@ typedef struct CC__JsSyms {
      * a RangeError naming the gap — rather than truncating. */
     int (*CreateBigintI64)(void *env, int64_t value, void **out);
     int (*CreateBigintU64)(void *env, uint64_t value, void **out);
+    /* Optional: the async surface (promises + threadsafe functions,
+     * Node-API 1/4).  A bridge's async mode requires them and says so at
+     * creation; the sync surface never touches them. */
+    int (*CreatePromise)(void *env, void **deferred, void **promise);
+    int (*ResolveDeferred)(void *env, void *deferred, void *value);
+    int (*RejectDeferred)(void *env, void *deferred, void *value);
+    int (*CreateError)(void *env, void *code, void *msg, void **out);
+    int (*CreateTsfn)(void *env, void *func, void *async_resource,
+                      void *async_resource_name, size_t max_queue,
+                      size_t initial_threads, void *finalize_data,
+                      void *finalize_cb, void *context,
+                      void (*call_js)(void *env, void *js_cb, void *ctx,
+                                      void *data),
+                      void **out);
+    int (*CallTsfn)(void *tsfn, void *data, int mode);
+    int (*ReleaseTsfn)(void *tsfn, int mode);
+    int (*RefTsfn)(void *env, void *tsfn);
+    int (*UnrefTsfn)(void *env, void *tsfn);
     int (*GetValueBigintI64)(void *env, void *value, int64_t *out,
                              _Bool *lossless);
     /* Bulk loops open a scope per row so a million-row map does not pin a
@@ -343,6 +361,15 @@ static int cc__js_load(void) {
     cc__js.field = (void *)0; *(void **)&cc__js.field = dlsym(cc__js.lib, name);
     CC__JS_SYM_OPT(CreateBigintI64, "napi_create_bigint_int64")
     CC__JS_SYM_OPT(CreateBigintU64, "napi_create_bigint_uint64")
+    CC__JS_SYM_OPT(CreatePromise, "napi_create_promise")
+    CC__JS_SYM_OPT(ResolveDeferred, "napi_resolve_deferred")
+    CC__JS_SYM_OPT(RejectDeferred, "napi_reject_deferred")
+    CC__JS_SYM_OPT(CreateError, "napi_create_error")
+    CC__JS_SYM_OPT(CreateTsfn, "napi_create_threadsafe_function")
+    CC__JS_SYM_OPT(CallTsfn, "napi_call_threadsafe_function")
+    CC__JS_SYM_OPT(ReleaseTsfn, "napi_release_threadsafe_function")
+    CC__JS_SYM_OPT(RefTsfn, "napi_ref_threadsafe_function")
+    CC__JS_SYM_OPT(UnrefTsfn, "napi_unref_threadsafe_function")
     CC__JS_SYM_OPT(GetValueBigintI64, "napi_get_value_bigint_int64")
 #undef CC__JS_SYM_OPT
     return 0;

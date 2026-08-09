@@ -244,6 +244,7 @@ typedef struct CC__PySyms {
     void *(*ThreadStateNew)(void *);
     void (*ThreadStateClear)(void *);
     void (*ThreadStateDelete)(void *);
+    void (*ThreadStateDeleteCurrent)(void);
     void *(*InterpreterStateGet)(void);
     void *(*EvalSaveThread)(void);
     void (*EvalRestoreThread)(void *);
@@ -367,6 +368,48 @@ static inline void cc__py_attach(CCPy *py) {
     if (cc__py_cur_tstate) (void)cc__py.EvalSaveThread();
     cc__py.EvalRestoreThread(ts);
     cc__py_cur_tstate = ts;
+}
+
+/* Release whatever GIL this thread holds (no-op when it holds none).
+ * An async embedding calls this after finishing work on an interpreter
+ * another thread also serves — a held GIL would otherwise block that
+ * thread until this one's NEXT attach happens to hand it off. */
+static inline void cc_py_thread_leave(void) {
+    if (!cc__py_cur_tstate) return;
+    if (cc__py.EvalSaveThread) (void)cc__py.EvalSaveThread();
+    cc__py_cur_tstate = NULL;
+}
+
+/* Retire THIS thread's cached state for `py`'s interpreter — the last
+ * act of a worker thread that attached to it.  Py_EndInterpreter is a
+ * fatal "not the last thread" while any second thread state exists, so
+ * every worker must detach before the owning thread closes the handle.
+ * The creating thread's own state is not this thread's to delete (the
+ * close path ends it with the interpreter); a thread that never
+ * attached is a no-op. */
+static inline void cc_py_thread_detach(CCPy *py) {
+    int i;
+    if (!py || !py->interp) return;
+    for (i = 0; i < cc__py_tls_n; i++) {
+        void *ts;
+        if (cc__py_tls[i].interp != py->interp) continue;
+        ts = cc__py_tls[i].tstate;
+        cc__py_tls[i] = cc__py_tls[--cc__py_tls_n];
+        if (ts == py->tstate) return; /* the creation state — not ours */
+        if (!cc__py.EvalRestoreThread || !cc__py.ThreadStateClear ||
+            !cc__py.ThreadStateDeleteCurrent)
+            return;
+        if (cc__py_cur_tstate != ts) {
+            if (cc__py_cur_tstate && cc__py.EvalSaveThread)
+                (void)cc__py.EvalSaveThread();
+            cc__py.EvalRestoreThread(ts);
+        }
+        cc__py.ThreadStateClear(ts);
+        /* Releases the GIL and leaves no thread current. */
+        cc__py.ThreadStateDeleteCurrent();
+        cc__py_cur_tstate = NULL;
+        return;
+    }
 }
 
 static inline void cc__py_bind_err_arena(CCArena *arena) {
@@ -512,6 +555,7 @@ have_lib:
     CC__PY_SYM_OPT(ThreadStateNew, "PyThreadState_New")
     CC__PY_SYM_OPT(ThreadStateClear, "PyThreadState_Clear")
     CC__PY_SYM_OPT(ThreadStateDelete, "PyThreadState_Delete")
+    CC__PY_SYM_OPT(ThreadStateDeleteCurrent, "PyThreadState_DeleteCurrent")
     CC__PY_SYM_OPT(InterpreterStateGet, "PyInterpreterState_Get")
     CC__PY_SYM_OPT(EvalSaveThread, "PyEval_SaveThread")
     CC__PY_SYM_OPT(EvalRestoreThread, "PyEval_RestoreThread")
