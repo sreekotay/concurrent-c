@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <ccc/cc_ufcs_families.h>
+
 #include "result_spec.h"
 #include "util/text.h"
 
@@ -470,6 +472,9 @@ const char* cc_type_registry_lookup_var(CCTypeRegistry* reg, const char* var_nam
 
 int cc_type_registry_add_alias(CCTypeRegistry* reg, const char* alias_name, const char* type_name) {
     if (!reg || !alias_name || !type_name) return -1;
+    /* Invariant: aliases are short → canonical only. Never register a
+     * family/canonical spelling as a key (host UFCS rewrite stays positive). */
+    if (cc_ufcs_type_is_known_family_base(alias_name)) return 0;
     for (size_t i = 0; i < reg->alias_count; i++) {
         if (strcmp(reg->aliases[i].alias_name, alias_name) == 0) {
             if (strcmp(reg->aliases[i].type_name, type_name) == 0) return 0;
@@ -492,6 +497,8 @@ int cc_type_registry_add_alias(CCTypeRegistry* reg, const char* alias_name, cons
 
 const char* cc_type_registry_lookup_alias(CCTypeRegistry* reg, const char* alias_name) {
     if (!reg || !alias_name) return NULL;
+    /* Dual of add_alias: family/canonical spellings are never alias keys. */
+    if (cc_ufcs_type_is_known_family_base(alias_name)) return NULL;
     for (size_t i = 0; i < reg->alias_count; i++) {
         if (strcmp(reg->aliases[i].alias_name, alias_name) == 0) {
             return reg->aliases[i].type_name;

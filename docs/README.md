@@ -2,10 +2,10 @@
 
 ## Getting Started
 
-- **[Getting Started](getting-started.md)** — Install, first program, arenas/lifetimes, concurrency, [`.shcc` scripts](getting-started.md#shcc-scripts), learning path
+- **[Getting Started](getting-started.md)** — Install, first program, [arenas name a lifetime](getting-started.md#arenas-name-a-lifetime), concurrency, [`.shcc` scripts](getting-started.md#shcc-scripts), learning path
 - **[JS / Python interop](js-py-modules.md)** — hosting (`pydemo.shcc`) and native module export
 - **[When to run what](build-when.md)** — Install vs checkout vs stdlib vs lowerer vs ship vs cold smoke
-- **[Language Concepts](language-concepts.md)** — Defer, results, UFCS, arenas/provenance, closures
+- **[Language Concepts](language-concepts.md)** — Defer, results, UFCS, arenas (lifetime vs alloc policy) / provenance, closures
 - **[Cheatsheet](cheatsheet.md)** — Quick reference for common patterns
 - **[Debugging](debugging.md)** — VS Code / Cursor debugging setup
 - **[ILP32 Docker smoke](ilp32-docker.md)** — Linux i386 / ARM32 runtime smokes via Docker

@@ -32,6 +32,7 @@ void cc_type_registry_clear(CCTypeRegistry* reg);
 /* Variable type tracking */
 int cc_type_registry_add_var(CCTypeRegistry* reg, const char* var_name, const char* type_name);
 const char* cc_type_registry_lookup_var(CCTypeRegistry* reg, const char* var_name);
+/* short → canonical only; refuses known family/canonical spellings as keys. */
 int cc_type_registry_add_alias(CCTypeRegistry* reg, const char* alias_name, const char* type_name);
 const char* cc_type_registry_lookup_alias(CCTypeRegistry* reg, const char* alias_name);
 size_t cc_type_registry_alias_count(CCTypeRegistry* reg);

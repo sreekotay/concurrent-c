@@ -1673,11 +1673,12 @@ This section defines the allocation model and lifetime boundaries:
 - **§5.1 `@defer`** — scoped cleanup
 - **§5.2 Scoped arena lifetimes** — ordinary lexical scopes with `@destroy`
 
-Arenas own memory; slices are views into arena-owned storage. An arena is a
-**lifetime annotation**: size the root for that lifetime's live set. Heap
-overflow and mid-lifetime `cc_arena_release` are escape hatches, not the
-steady-state path. Prefer a separate arena when lifetimes diverge rather than
-long-lived release churn.
+An arena names a lifetime. Its allocation strategy is an implementation
+policy for storage belonging to that lifetime. Slices are views into that
+storage. Size the root for the lifetime's typical live set. Heap overflow and
+mid-lifetime `cc_arena_release` are escape hatches, not the steady-state path.
+Prefer a separate arena when lifetimes diverge rather than long-lived release
+churn.
 
 When the slab/`block_max` budget cannot satisfy an allocation and heap overflow
 is disabled (or fails), allocation returns `NULL`. Exhaustion is never

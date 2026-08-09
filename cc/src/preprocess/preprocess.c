@@ -3573,8 +3573,6 @@ static void cc__normalize_bool_family_type(char* type_name, size_t type_name_sz)
     snprintf(type_name, type_name_sz, "%s", tmp);
 }
 
-static int cc__type_is_known_ufcs_family_base(const char* type_name);
-
 static int cc__ufcs_fn_name_in_text(const char* src, size_t n, const char* name) {
     size_t nlen;
     if (!src || !name || !name[0]) return 0;
@@ -3948,13 +3946,10 @@ static void cc__normalize_ufcs_type_name(char* out, size_t out_sz, const char* t
         if (base_len >= sizeof(base_name)) base_len = sizeof(base_name) - 1;
         memcpy(base_name, start, base_len);
         base_name[base_len] = '\0';
-        if (cc__type_is_known_ufcs_family_base(base_name)) {
-            snprintf(out, out_sz, "%s", base_name);
-        } else if (reg && (alias = cc_type_registry_lookup_alias(reg, base_name)) && *alias) {
+        if (reg && (alias = cc_type_registry_lookup_alias(reg, base_name)) && *alias)
             snprintf(out, out_sz, "%s", alias);
-        } else {
+        else
             snprintf(out, out_sz, "%s", base_name);
-        }
         while (ptr_count-- > 0 && strlen(out) + 1 < out_sz) strcat(out, "*");
     }
 }
@@ -3965,10 +3960,6 @@ static int cc__type_is_parser_vec(const char* type_name) {
 
 static int cc__type_is_parser_map(const char* type_name) {
     return cc_ufcs_type_is_parser_map(type_name);
-}
-
-static int cc__type_is_known_ufcs_family_base(const char* type_name) {
-    return cc_ufcs_type_is_known_family_base(type_name);
 }
 
 static const char* cc__lookup_ufcs_var_type(const CCUfcsVarInfo* vars, size_t var_count, const char* name) {
@@ -4020,11 +4011,6 @@ static void cc__resolve_registered_alias_type_name(CCTypeRegistry* reg,
     if (len >= sizeof(base)) len = sizeof(base) - 1;
     memcpy(base, type_name, len);
     base[len] = '\0';
-    if (cc__type_is_known_ufcs_family_base(base)) {
-        snprintf(out, out_sz, "%s", base);
-        while (ptr_count-- > 0 && strlen(out) + 1 < out_sz) strcat(out, "*");
-        return;
-    }
     if (reg) alias = cc_type_registry_lookup_alias(reg, base);
     snprintf(out, out_sz, "%s", (alias && *alias) ? alias : base);
     while (ptr_count-- > 0 && strlen(out) + 1 < out_sz) strcat(out, "*");
@@ -4143,6 +4129,7 @@ static const char* cc__ufcs_idx_typedef_before(size_t limit,
     size_t i;
     if (!alias_name || !alias_name[0] || !out_type || out_type_sz == 0) return NULL;
     out_type[0] = '\0';
+    if (cc_ufcs_type_is_known_family_base(alias_name)) return NULL;
     for (i = 0; i < g_ufcs_scope_idx.n_typedefs; i++) {
         const CCUfcsIdxTypedef* td = &g_ufcs_scope_idx.typedefs[i];
         if (td->pos >= limit) break;
@@ -4357,7 +4344,9 @@ static void cc__ufcs_scope_idx_build_ex(const char* src, size_t n,
                 if (cc__parse_typedef_alias_stmt(src + typedef_start, src + i,
                                                  td_name, sizeof(td_name),
                                                  td_type, sizeof(td_type)) &&
-                    td_name[0]) {
+                    td_name[0] &&
+                    /* Family/canonical spellings are not alias keys. */
+                    !cc_ufcs_type_is_known_family_base(td_name)) {
                     CCUfcsIdxTypedef* slot;
                     char normalized[256];
                     if (g_ufcs_scope_idx.n_typedefs == g_ufcs_scope_idx.typedefs_cap) {
@@ -4416,12 +4405,11 @@ static void cc__ufcs_scope_idx_build_ex(const char* src, size_t n,
                 snprintf(slot->name, sizeof(slot->name), "%s", decl_name);
                 cc__normalize_ufcs_type_name(slot->type, sizeof(slot->type),
                                              decl_type);
-                if (reg && !cc__type_is_known_ufcs_family_base(slot->type))
+                if (reg)
                     alias = cc_type_registry_lookup_alias(reg, slot->type);
                 if (alias && *alias)
                     snprintf(slot->type, sizeof(slot->type), "%s", alias);
-                if (!cc__type_is_known_ufcs_family_base(slot->type) &&
-                    cc__ufcs_idx_typedef_before(i, slot->type, alias_type,
+                if (cc__ufcs_idx_typedef_before(i, slot->type, alias_type,
                                                sizeof(alias_type)))
                     snprintf(slot->type, sizeof(slot->type), "%s", alias_type);
                 g_ufcs_scope_idx.n_decls++;
@@ -4693,6 +4681,7 @@ static const char* cc__lookup_scoped_type_alias(const char* src,
     CCScannerState scan;
     if (!src || !alias_name || !alias_name[0] || !out_type || out_type_sz == 0) return NULL;
     out_type[0] = '\0';
+    if (cc_ufcs_type_is_known_family_base(alias_name)) return NULL;
     if (g_ufcs_scope_idx.ready && g_ufcs_scope_idx.src == src)
         return cc__ufcs_idx_typedef_before(limit, alias_name, out_type, out_type_sz);
     cc_scanner_init(&scan);
@@ -5227,7 +5216,6 @@ static int cc__resolve_generic_ufcs_receiver_type(const char* recv,
         char alias_type[256];
         cc__copy_type_base(base_type, sizeof(base_type), out_type);
         if (base_type[0] &&
-            !cc__type_is_known_ufcs_family_base(base_type) &&
             cc__lookup_scoped_type_alias(source_text, use_offset, base_type, alias_type, sizeof(alias_type))) {
             size_t stars = 0;
             size_t out_len = strlen(out_type);
@@ -5241,8 +5229,7 @@ static int cc__resolve_generic_ufcs_receiver_type(const char* recv,
         char alias_type[256];
         cc__copy_type_base(base_type, sizeof(base_type), out_type);
         if (base_type[0] &&
-            strcmp(base_type, out_type) != 0 &&
-            !cc__type_is_known_ufcs_family_base(base_type)) {
+            strcmp(base_type, out_type) != 0) {
             if (cc__lookup_scoped_type_alias(source_text, use_offset, base_type, alias_type, sizeof(alias_type))) {
                 size_t stars = 0;
                 size_t out_len = strlen(out_type);
@@ -5250,7 +5237,7 @@ static int cc__resolve_generic_ufcs_receiver_type(const char* recv,
                 snprintf(out_type, out_type_sz, "%s", alias_type);
                 while (stars-- > 0 && strlen(out_type) + 1 < out_type_sz) strcat(out_type, "*");
             }
-        } else if (base_type[0] && !cc__type_is_known_ufcs_family_base(base_type)) {
+        } else if (base_type[0]) {
             if (cc__lookup_scoped_type_alias(source_text, use_offset, base_type, alias_type, sizeof(alias_type))) {
                 snprintf(out_type, out_type_sz, "%s", alias_type);
             }
@@ -5322,7 +5309,6 @@ cc__ufcs_recv_field_walk:
             char alias_type[256];
             cc__copy_type_base(resolved_base, sizeof(resolved_base), out_type);
             if (resolved_base[0] &&
-                !cc__type_is_known_ufcs_family_base(resolved_base) &&
                 cc__lookup_scoped_type_alias(source_text, use_offset, resolved_base, alias_type, sizeof(alias_type))) {
                 size_t stars = 0;
                 size_t out_len = strlen(out_type);
@@ -5857,7 +5843,7 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
         }
         cc__copy_type_base(recv_type_base, sizeof(recv_type_base), recv_type);
         cc__normalize_bool_family_type(recv_type_base, sizeof(recv_type_base));
-        if (reg && !cc__type_is_known_ufcs_family_base(recv_type_base)) {
+        if (reg) {
             const char* alias = cc_type_registry_lookup_alias(reg, recv_type_base);
             if (alias && *alias) {
                 size_t star_count = 0;
@@ -5872,7 +5858,7 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                 cc__normalize_bool_family_type(recv_type_base, sizeof(recv_type_base));
             }
         }
-        if (!cc__type_is_known_ufcs_family_base(recv_type_base)) {
+        {
             char alias_type[256];
             if (cc__lookup_scoped_type_alias(src, sep_pos, recv_type_base, alias_type, sizeof(alias_type))) {
                 size_t star_count = 0;

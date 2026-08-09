@@ -205,18 +205,21 @@ past the frame; arena slices pin the arena until join.
 
 ---
 
-## Arenas (lifetime annotation)
+## Arenas name a lifetime
 
-Size the root for the typical live set. Default heap/stack: bump in root → up
-to 4 slabs (~1.5×) → **heap overflow** (`malloc`, still arena-owned; freed on
-reset / `@destroy`).
+**An arena names a lifetime. Its allocation strategy is an implementation
+policy for storage belonging to that lifetime.**
+
+Size the root for the typical live set of that lifetime. Default heap/stack
+policy: bump in root → up to 4 slabs (~1.5×) → **heap overflow** (`malloc`,
+still arena-owned; freed on reset / `@destroy`).
 
 ```c
-CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+CCArena a = cc_arena_heap(kilobytes(4)) @destroy;  // names the lifetime
 char* p = a.allocT(64);
 char[:] s = a.alloc_slice_bytes(32);   // arena provenance
 
-cc_arena_stack(tmp, 1024);             // same growth policy; stack root
+cc_arena_stack(tmp, 1024);             // same policy; stack root
 a.reset();                             // drain epoch; reuse root
 
 /* @scratch — throwaway @string / print only; do not capture or send */
@@ -224,7 +227,7 @@ io.println(@string(`len=${s.len}`, @scratch)) !>;
 ```
 
 Slices (`T[:]`) carry provenance. Views must not outlive their arena.
-Details: [getting-started § Arenas](getting-started.md#arenas-lifetime-not-just-malloc).
+Details: [getting-started § Arenas](getting-started.md#arenas-name-a-lifetime).
 
 ---
 

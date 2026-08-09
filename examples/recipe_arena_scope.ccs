@@ -1,10 +1,11 @@
 /*
  * Recipe: Scoped Memory (Arena)
  *
- * Arenas are bump-allocated memory with O(1) reset. @destroy frees the
- * arena at scope exit — in a loop body, that's once per iteration, so
- * each "request" gets a clean arena. Checkpoints let you peel back
- * scratch work without tearing down the whole arena.
+ * An arena names a lifetime. Its allocation strategy (bump slabs, growth,
+ * overflow) is an implementation policy for storage belonging to that
+ * lifetime. @destroy ends the lifetime at scope exit — in a loop body,
+ * that's once per iteration, so each "request" gets a clean epoch.
+ * Checkpoints peel back scratch without ending the whole lifetime.
  */
 #include <ccc/std/prelude.cch>
 #include <stdlib.h>

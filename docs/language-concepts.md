@@ -101,20 +101,24 @@ io.println(@string(`n=${n}`, @scratch)) !>;
 
 [recipe_arena_scope.ccs](../examples/recipe_arena_scope.ccs) · [recipe_long_lived_store.ccs](../examples/recipe_long_lived_store.ccs) · [Allocator strategy](../spec/draft_alloc_strategy.md) · [Restricted access](../spec/draft_facets.md)
 
-An arena is a **lifetime annotation**: the `CCArena` binding owns the epoch;
-size the root for that lifetime’s typical live set. Slices are views — `T[:]`
-carries provenance (stack, arena, static, unique, …) so the compiler can reject
-views that outlive their storage. `char[:0]` is the NUL-terminated refinement —
-prefer `char[:0] s = "hi";` for string literals.
+**An arena names a lifetime. Its allocation strategy is an implementation
+policy for storage belonging to that lifetime.**
 
-Arenas bump-allocate. Ordinary slice sites allow loads and UFCS; field stores
-(`s.len = …`) are denied (`@restricted` on the slice family).
+The `CCArena` binding *is* that lifetime (the epoch). Size the root for the
+typical live set of that lifetime; choose heap/stack/fixed/overflow as
+**policy** for how its storage is obtained — not a separate allocator identity.
+Slices are views — `T[:]` carries provenance (stack, arena, static, unique, …)
+so the compiler can reject views that outlive their storage. `char[:0]` is the
+NUL-terminated refinement — prefer `char[:0] s = "hi";` for string literals.
 
-| Arena | Storage / growth | Typical use |
-|-------|------------------|-------------|
-| `cc_arena_heap(n) @destroy` | Heap root `n`; up to 4 slabs (~1.5×), then **heap overflow** (`malloc`, still arena-owned) | request / window |
-| `cc_arena_stack(name, n)` | Same policy; root on the stack | hot-path / frame scratch |
-| `@scratch` | Compiler stack scratch | `@string` / one-shot print |
+Ordinary slice sites allow loads and UFCS; field stores (`s.len = …`) are
+denied (`@restricted` on the slice family).
+
+| Arena | Lifetime + storage policy | Typical use |
+|-------|---------------------------|-------------|
+| `cc_arena_heap(n) @destroy` | Named lifetime; heap root `n`, up to 4 slabs (~1.5×), then **heap overflow** (`malloc`, still arena-owned) | request / window |
+| `cc_arena_stack(name, n)` | Same lifetime idea; root on the stack | hot-path / frame scratch |
+| `@scratch` | Throwaway compiler stack scratch (not a long-lived named epoch) | `@string` / one-shot print |
 
 ```c
 /* Heap — owns the root; @destroy frees slabs + overflow. */
@@ -133,13 +137,13 @@ io.println(@string(`len=${a.remaining()}`, @scratch)) !>;
 char[:0] hi = "hi";
 ```
 
-**Auto overflow:** when the current slab cannot fit an alloc, heap/stack arenas
-grow within `block_max` (default 4), then spill to overflow `malloc`. Overflow
-bytes remain owned by the arena — `reset` / `@destroy` frees them too. A tiny
-root still allocates; it just spends more time in overflow. Prefer another
-arena when lifetimes diverge; treat `cc_arena_release` / overflow as escape
-hatches, not the steady path. Fixed arenas with overflow off return `NULL` on
-exhaustion (never silent success).
+**Auto overflow (policy detail):** when the current slab cannot fit an alloc,
+heap/stack arenas grow within `block_max` (default 4), then spill to overflow
+`malloc`. Overflow bytes still belong to that same named lifetime — `reset` /
+`@destroy` frees them too. A tiny root still allocates; it just spends more
+time in overflow. Prefer another arena when lifetimes diverge; treat
+`cc_arena_release` / overflow as escape hatches, not the steady path. Fixed
+arenas with overflow off return `NULL` on exhaustion (never silent success).
 
 A view must not outlive its storage — no stack/arena borrow into an outliving
 task or channel send. Capturing a non-unique arena slice into a nursery **pins**

@@ -3,8 +3,8 @@
 Concurrent-C is a **strict C11-superset**: you write `.ccs` (or `.cch`
 headers, or `.shcc` scripts — [below](#shcc-scripts)), the `ccc` driver lowers
 it to plain C (with `#line` sourcemaps), and your **host C compiler** builds the
-binary. Structured concurrency, results, UFCS, slices/arenas, and a header-first
-runtime ship with the language.
+binary. Structured concurrency, results, UFCS, slices/arenas (an arena names a
+lifetime), and a header-first runtime ship with the language.
 
 You do **not** need to build the compiler from a checkout to use the language.
 Install `ccc`, run a program, then follow the examples learning path.
@@ -109,7 +109,7 @@ What that program uses:
 | `@errhandler(…)` | Scope policy for fallible unwraps that use bare `!>;` |
 | `T!>(E)` / `!>` | Fallible value; `!>` unwraps or runs error code |
 | `!> @destroy` | Unwrap, then schedule cleanup — **`@destroy` is `@defer` sugar attached to the binding** (same LIFO ledger; only runs if the unwrap succeeded) |
-| `CCArena` / `CCStdio` | Arena = allocator **and** lifetime for the window; `io` borrows it — prefer **`io.println(…)`** (see [Arenas](#arenas-lifetime-not-just-malloc)) |
+| `CCArena` / `CCStdio` | Arena **names** the window’s lifetime; growth/overflow is storage policy — prefer **`io.println(…)`** (see [Arenas](#arenas-name-a-lifetime)) |
 | `CCNursery*` | Structured-concurrency scope: teardown waits for spawned tasks |
 | `n->spawn(() => [io] { … })` | UFCS spawn of a closure; capture `io` by value into the task |
 
@@ -143,7 +143,7 @@ UFCS show up in almost every example — treat them as day-one, not advanced.
 | Cleanup | `@defer …` / `@destroy` (defer sugar on a binding; bodyless → registered destroy) |
 | Errors as values | `T!>(E)`, then `?>` or `!>` / `!>;`; `!> @destroy` = unwrap + deferred destroy |
 | Methods (UFCS) | `recv.method(args)` — ordinary functions; prefer this form |
-| Arenas / slices | bump allocator as a **lifetime**; `T[:]` views carry provenance (below) |
+| Arenas / slices | arena **names a lifetime**; alloc strategy is policy for that lifetime’s storage; `T[:]` views carry provenance (below) |
 | Closures | `() => …`, `() => [x] { … }`, `() => [&x] { … }` — tasks re-bind `@errhandler` |
 
 ### Destroy registration — what bodyless `@destroy` calls
@@ -235,24 +235,29 @@ then the next method sees the value (`get(21)!>.twice()`). Full matrix:
 
 Quick reference: [Cheatsheet](cheatsheet.md). Spec: [language spec](../spec/concurrent-c-spec-complete.md).
 
-## Arenas (lifetime, not just malloc)
+## Arenas name a lifetime
 
-An arena is Concurrent-C’s usual allocator **and** a lifetime annotation: the
-`CCArena` binding is the scope that owns the bytes. Allocate into it; when the
-arena is destroyed (or reset), every allocation from that epoch is gone.
+**An arena names a lifetime. Its allocation strategy is an implementation
+policy for storage belonging to that lifetime.**
+
+The `CCArena` binding is that lifetime: allocate into it; when it is destroyed
+(or reset), every allocation from that epoch is gone. Heap vs stack root,
+slab growth, and overflow are **how** storage for that lifetime is obtained —
+not a second concept of “allocator object” separate from the lifetime.
 Slices (`T[:]`) remember which arena (or stack / static / unique) they came
 from — that provenance is what the compiler uses to reject “view outlives
 storage.”
 
 ```c
-CCArena a = cc_arena_heap(kilobytes(4)) @destroy;  /* lifetime = this binding */
+CCArena a = cc_arena_heap(kilobytes(4)) @destroy;  /* names this lifetime */
 CCStdio io = cc_stdio_create(&a);
 char* p = a.allocT(64);
 char[:] s = a.alloc_slice_bytes(32);               /* arena provenance */
 io.println(@string(`len=${s.len}`, @scratch)) !>;  /* @scratch: throwaway only */
 ```
 
-**How growth works** (`cc_arena_heap` / `cc_arena_stack` defaults):
+**Allocation policy** (`cc_arena_heap` / `cc_arena_stack` defaults) — storage
+for the named lifetime, not a different lifetime model:
 
 1. Bump-allocate in the **root** slab of size `N` (size `N` for the typical live set).
 2. When the root is full, grow with more slabs (up to four, ~1.5× each).
@@ -266,8 +271,8 @@ Prefer a second arena when lifetimes diverge rather than churning
 
 | Constructor | Role |
 |-------------|------|
-| `cc_arena_heap(N) @destroy` | Heap root; default grow + overflow — request / window scratch |
-| `cc_arena_stack(name, N)` | Same policy; root on the stack — hot frame scratch |
+| `cc_arena_heap(N) @destroy` | Names a lifetime; heap root + default grow/overflow policy |
+| `cc_arena_stack(name, N)` | Same lifetime idea; root on the stack — hot frame scratch |
 | `@scratch` | Compiler stack scratch for one-shot `@string` / print — do not capture or send |
 
 Rules of thumb: a view must not outlive its arena; do not capture stack /

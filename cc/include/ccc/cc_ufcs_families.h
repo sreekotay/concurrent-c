@@ -16,7 +16,10 @@ static inline int cc_ufcs_type_is_parser_map(const char* type_name) {
                          strncmp(type_name, "__CC_ARRAY_MAP", 14) == 0);
 }
 
-/* Exact / prefix bases trusted as UFCS family receivers (no alias rewrite). */
+/* Canonical family / mangled spellings — never valid typedef *alias keys*.
+ * Registry add_alias refuses these; rewrite sites chase aliases positively
+ * (lookup hit → use; miss → keep spelling). Do not grow this list for UFCS
+ * dispatch — that lives in shadow tables. */
 static inline int cc_ufcs_type_is_known_family_base(const char* type_name) {
     if (!type_name || !type_name[0]) return 0;
     return strncmp(type_name, "CCVec_", 6) == 0 ||

@@ -12,9 +12,11 @@ runtime behavior required by the main specification.
 
 ## Ownership handle
 
-`CCArena` is the ownership handle for arena allocations and arena-backed
-containers. Existing constructors and container APIs continue to take
-`CCArena*`; allocation does not require a separate general allocator object.
+An arena names a lifetime. Its allocation strategy is an implementation
+policy for storage belonging to that lifetime. `CCArena` is the handle for
+that lifetime and for arena-backed containers. Existing constructors and
+container APIs take `CCArena*`; allocation does not require a separate
+general allocator object.
 
 ## Constructors and root sizing
 
