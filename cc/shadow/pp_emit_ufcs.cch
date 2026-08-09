@@ -944,23 +944,30 @@ static int shadow_ufcs_emit_unary_life(const char* fn, const char* recv,
 }
 
 /* .free() — typed only. Args form is CCArenaPool-only; else unary from table /
- * CCChan* prefix. */
+ * CCChan* prefix. Channel handles are by-value in `_Generic` (never `&recv`). */
 static int shadow_ufcs_emit_free(const char* vty, const ShadowBind* rb,
                                  const char* recv, const char* args,
                                  int is_arrow_or_ptr, char* dst, size_t cap) {
     const ShadowUfcsLife* life;
+    int chan;
     if (!recv || !dst || !cap) return 0;
     if (!args) args = "";
     if (args[0] && shadow_ufcs_ty_is(vty, rb, "CCArenaPool"))
         return shadow_ufcs_fmt_call(dst, cap, "cc_arena_pool_free",
                                    is_arrow_or_ptr ? "" : "&", recv, args);
-    if (vty && vty[0] && strncmp(vty, "CCChan", 6) == 0)
-        return shadow_ufcs_emit_unary_life("cc_channel_free", recv,
-                                          is_arrow_or_ptr, dst, cap);
+    chan = (vty && vty[0] && strncmp(vty, "CCChan", 6) == 0) ||
+           shadow_ufcs_ty_is(vty, rb, "CCChan") ||
+           shadow_ufcs_ty_is(vty, rb, "CCChanTx") ||
+           shadow_ufcs_ty_is(vty, rb, "CCChanRx");
+    if (chan)
+        return shadow_ufcs_fmt_call(dst, cap, "cc_channel_free", "", recv, NULL);
     life = shadow_ufcs_life_lookup(vty, rb);
-    if (life && life->free_fn)
+    if (life && life->free_fn) {
+        if (strcmp(life->free_fn, "cc_channel_free") == 0)
+            return shadow_ufcs_fmt_call(dst, cap, life->free_fn, "", recv, NULL);
         return shadow_ufcs_emit_unary_life(life->free_fn, recv, is_arrow_or_ptr,
                                           dst, cap);
+    }
     return 0;
 }
 

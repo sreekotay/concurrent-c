@@ -2033,6 +2033,28 @@ static void shadow_collect_binds_node(AstNode* st) {
     } else if (st->kind == AST_CALL_ARGS || st->kind == AST_EXPR_STMT) {
         shadow_register_from_text(st->a);
         shadow_register_from_text(st->b);
+        /* Macro ctors that declare a name in arg0 — bind for UFCS. */
+        if (st->kind == AST_CALL_ARGS && st->a[0] && st->b[0]) {
+            const char* ty = NULL;
+            if (strcmp(st->a, "cc_arena_pool_stack") == 0 ||
+                strcmp(st->a, "CC_ARENA_POOL_STACK") == 0)
+                ty = "CCArenaPool";
+            else if (strcmp(st->a, "cc_arena_stack") == 0 ||
+                     strcmp(st->a, "CC_ARENA_STACK") == 0)
+                ty = "CCArena";
+            if (ty) {
+                char name[96];
+                size_t ni = 0;
+                const char* p = st->b;
+                while (*p == ' ' || *p == '\t') p++;
+                while (((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+                        (*p >= '0' && *p <= '9') || *p == '_') &&
+                       ni + 1 < sizeof(name))
+                    name[ni++] = *p++;
+                name[ni] = 0;
+                if (name[0]) shadow_bind_name(name, ty, 0);
+            }
+        }
     } else if (st->kind == AST_RETURN_EXPR || st->kind == AST_RETURN_CC) {
         shadow_register_from_text(st->a);
         shadow_register_from_text(st->b);
