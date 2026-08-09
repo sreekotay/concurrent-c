@@ -2310,18 +2310,40 @@ the call, with the `py_buf` retention check guarding the lease.
 
 The bridge is an Isolation Domain — the ownership unit of the interop
 model.  It owns its interpreter handle, its arena, and every Python
-reference minted through it; proxies are borrows that strong-reference
-their bridge.  Teardown is one atomic sweep with two doors: `destroy()`
-(also `Symbol.dispose`, so `using py = ...` scopes it) revokes
-immediately — every outstanding handle answers `bridge is closed`,
-object finalizers reduce to frees, double destroy is a no-op — and the
-GC runs the same sweep from the domain's single finalizer when the
-whole graph is unreachable.  Handles never cross domains: a second
+reference minted through it — the domain record and every handle box
+live IN the arena, nothing is separately allocated — and proxies are
+borrows that strong-reference their bridge.  The domain has two
+distinct lifetimes.  `destroy()` (also `Symbol.dispose`, so
+`using py = ...` scopes it) is REVOCATION: one sweep releases every
+Python reference and closes the interpreter, every outstanding handle
+answers `bridge is closed`, and double destroy is a no-op; the GC runs
+the same sweep from the domain's finalizer when the whole graph is
+unreachable.  The arena's REAL life ends separately, when the last
+outstanding External — the domain's own or any handle's — is
+collected: finalizers are bookkeeping decrements, and whichever runs
+last takes the arena and everything in it down in one free, so no
+finalizer ordering the GC picks can dangle a box.  Handles never cross domains: a second
 `create()` is fully isolated and rejects the first domain's objects at
 the door.  `stats()` reports the live-handle count; `release(proxy)`
 drops one early.  The mirrored direction — Python importing Node —
 requires a hosted JavaScript engine (`cc_js_new`) and follows the same
 domain model.
+
+`create({mode: 'async'})` makes the domain an execution lane as well:
+one executor thread per domain runs every call FIFO — Python is serial
+under its per-interpreter GIL, so a lane loses nothing within a domain,
+and concurrent domains parallelize — while calls return Promises and
+the event loop stays live.  Python exceptions arrive as rejections with
+the sync bridge's messages; attribute access stays synchronous.  A job
+owns its Python references and holds a `napi_ref` on every typed-array
+buffer, so the lease spans submit to completion and neither `release`
+nor the GC can dangle in-flight work.  Teardown is revoke-then-drain:
+`destroy()` (a Promise in async mode) rejects queued calls immediately,
+lets the in-flight call finish, and runs the one sweep after the last
+result is delivered — the executor retires its interpreter thread state
+before the interpreter ends.  An idle lane does not keep the process
+alive, and a dropped, never-destroyed async domain drains the same way
+from its finalizer.
 
 The module is the type, under the same reflection rules as
 `py_module::[T]`: every visible function whose first parameter is `T` or

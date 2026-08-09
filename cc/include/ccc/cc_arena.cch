@@ -1353,6 +1353,14 @@ static inline void cc_arena_pool_init(CCArenaPool* p, CCArena* a, size_t sz) {
     p->elem_size = (sz > sizeof(void*)) ? sz : sizeof(void*);
     cc_atomic_store(&p->freelist, 0);
     p->_flags = 0;
+    /* Pool elements must live on the slab chain: the iterator walks it,
+     * and reset/free reclaim tier-3 overflow independently of the pool's
+     * freelist — an element spilled there would vanish from iteration
+     * and dangle in the freelist after a reset.  The pool contract
+     * already dedicates the arena to this pool alone, so lift the slab
+     * budget and grow extents instead.  A deliberately FIXED arena keeps
+     * its hard cap (allocation fails closed there). */
+    if (a && a->block_max != CC_ARENA_FIXED) a->block_max = CC_ARENA_GROWABLE;
 }
 
 // Initialize a fixed-size pool with its own heap-backed arena.

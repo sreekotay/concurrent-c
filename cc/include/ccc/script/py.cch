@@ -244,6 +244,7 @@ typedef struct CC__PySyms {
     void *(*ThreadStateNew)(void *);
     void (*ThreadStateClear)(void *);
     void (*ThreadStateDelete)(void *);
+    void (*ThreadStateDeleteCurrent)(void);
     void *(*InterpreterStateGet)(void);
     void *(*EvalSaveThread)(void);
     void (*EvalRestoreThread)(void *);
@@ -288,19 +289,45 @@ static CCArena *cc__py_err_arena;
 #define CC_THREAD_LOCAL _Thread_local
 #endif
 
-#define CC__PY_TLS_MAX 8
 typedef struct CC__PyTls {
     void *interp;
     void *tstate;
 } CC__PyTls;
-static CC_THREAD_LOCAL CC__PyTls cc__py_tls[CC__PY_TLS_MAX];
+/* This thread's (interpreter → thread state) map.  GROWS — a fixed cap
+ * once made the ninth concurrent interpreter unseedable, after which an
+ * attach silently ran the call in whichever interpreter was current and
+ * a later cache fill minted a SECOND state for the unseeded one, which
+ * Py_EndInterpreter answers with a fatal "not the last thread". */
+static CC_THREAD_LOCAL CC__PyTls *cc__py_tls;
 static CC_THREAD_LOCAL int cc__py_tls_n;
+static CC_THREAD_LOCAL int cc__py_tls_cap;
 /* Which thread state THIS thread currently holds the GIL on. */
 static CC_THREAD_LOCAL void *cc__py_cur_tstate;
 /* The process interpreter's state, so teardown of an isolated one can leave
  * a valid interpreter current instead of none. */
 static void *cc__py_main_tstate;
 static void *cc__py_main_interp;
+
+static inline int cc__py_tls_push(void *interp, void *tstate) {
+    if (cc__py_tls_n >= cc__py_tls_cap) {
+        int nc = cc__py_tls_cap ? cc__py_tls_cap * 2 : 8;
+        CC__PyTls *np =
+            (CC__PyTls *)realloc(cc__py_tls, (size_t)nc * sizeof(*np));
+        if (!np) {
+            /* An unseeded interpreter is a wrong-interpreter call waiting
+             * to happen — say so at the position that caused it. */
+            fprintf(stderr, "cc: python: out of memory caching an "
+                            "interpreter thread state\n");
+            return -1;
+        }
+        cc__py_tls = np;
+        cc__py_tls_cap = nc;
+    }
+    cc__py_tls[cc__py_tls_n].interp = interp;
+    cc__py_tls[cc__py_tls_n].tstate = tstate;
+    cc__py_tls_n++;
+    return 0;
+}
 
 /* This thread's state for `interp`, made on first touch. NULL if the runtime
  * cannot make one. */
@@ -310,13 +337,11 @@ static inline void *cc__py_tls_for(void *interp) {
     for (i = 0; i < cc__py_tls_n; i++) {
         if (cc__py_tls[i].interp == interp) return cc__py_tls[i].tstate;
     }
-    if (cc__py_tls_n >= CC__PY_TLS_MAX || !cc__py.ThreadStateNew) return NULL;
+    if (!cc__py.ThreadStateNew) return NULL;
     {
         void *ts = cc__py.ThreadStateNew(interp);
         if (!ts) return NULL;
-        cc__py_tls[cc__py_tls_n].interp = interp;
-        cc__py_tls[cc__py_tls_n].tstate = ts;
-        cc__py_tls_n++;
+        if (cc__py_tls_push(interp, ts) != 0) return NULL;
         return ts;
     }
 }
@@ -328,10 +353,7 @@ static inline void cc__py_tls_seed(void *interp, void *tstate) {
     for (i = 0; i < cc__py_tls_n; i++) {
         if (cc__py_tls[i].interp == interp) return;
     }
-    if (cc__py_tls_n >= CC__PY_TLS_MAX) return;
-    cc__py_tls[cc__py_tls_n].interp = interp;
-    cc__py_tls[cc__py_tls_n].tstate = tstate;
-    cc__py_tls_n++;
+    (void)cc__py_tls_push(interp, tstate);
 }
 
 /* Entering an interpreter is a GIL handoff: leaving one releases its lock
@@ -346,6 +368,48 @@ static inline void cc__py_attach(CCPy *py) {
     if (cc__py_cur_tstate) (void)cc__py.EvalSaveThread();
     cc__py.EvalRestoreThread(ts);
     cc__py_cur_tstate = ts;
+}
+
+/* Release whatever GIL this thread holds (no-op when it holds none).
+ * An async embedding calls this after finishing work on an interpreter
+ * another thread also serves — a held GIL would otherwise block that
+ * thread until this one's NEXT attach happens to hand it off. */
+static inline void cc_py_thread_leave(void) {
+    if (!cc__py_cur_tstate) return;
+    if (cc__py.EvalSaveThread) (void)cc__py.EvalSaveThread();
+    cc__py_cur_tstate = NULL;
+}
+
+/* Retire THIS thread's cached state for `py`'s interpreter — the last
+ * act of a worker thread that attached to it.  Py_EndInterpreter is a
+ * fatal "not the last thread" while any second thread state exists, so
+ * every worker must detach before the owning thread closes the handle.
+ * The creating thread's own state is not this thread's to delete (the
+ * close path ends it with the interpreter); a thread that never
+ * attached is a no-op. */
+static inline void cc_py_thread_detach(CCPy *py) {
+    int i;
+    if (!py || !py->interp) return;
+    for (i = 0; i < cc__py_tls_n; i++) {
+        void *ts;
+        if (cc__py_tls[i].interp != py->interp) continue;
+        ts = cc__py_tls[i].tstate;
+        cc__py_tls[i] = cc__py_tls[--cc__py_tls_n];
+        if (ts == py->tstate) return; /* the creation state — not ours */
+        if (!cc__py.EvalRestoreThread || !cc__py.ThreadStateClear ||
+            !cc__py.ThreadStateDeleteCurrent)
+            return;
+        if (cc__py_cur_tstate != ts) {
+            if (cc__py_cur_tstate && cc__py.EvalSaveThread)
+                (void)cc__py.EvalSaveThread();
+            cc__py.EvalRestoreThread(ts);
+        }
+        cc__py.ThreadStateClear(ts);
+        /* Releases the GIL and leaves no thread current. */
+        cc__py.ThreadStateDeleteCurrent();
+        cc__py_cur_tstate = NULL;
+        return;
+    }
 }
 
 static inline void cc__py_bind_err_arena(CCArena *arena) {
@@ -491,6 +555,7 @@ have_lib:
     CC__PY_SYM_OPT(ThreadStateNew, "PyThreadState_New")
     CC__PY_SYM_OPT(ThreadStateClear, "PyThreadState_Clear")
     CC__PY_SYM_OPT(ThreadStateDelete, "PyThreadState_Delete")
+    CC__PY_SYM_OPT(ThreadStateDeleteCurrent, "PyThreadState_DeleteCurrent")
     CC__PY_SYM_OPT(InterpreterStateGet, "PyInterpreterState_Get")
     CC__PY_SYM_OPT(EvalSaveThread, "PyEval_SaveThread")
     CC__PY_SYM_OPT(EvalRestoreThread, "PyEval_RestoreThread")
@@ -1707,12 +1772,28 @@ static inline CCResult_CCPy_CCPyError cc_py_new(CCArena *arena) {
         py.arena = arena;
         py.owns_interp = 0;
         py.isolated = 0;
-        if (cc__py.ThreadStateGet) py.tstate = cc__py.ThreadStateGet();
-        if (cc__py.InterpreterStateGet) py.interp = cc__py.InterpreterStateGet();
-        /* Py_Initialize leaves this thread state current, holding the GIL. */
-        cc__py_cur_tstate = py.tstate;
-        cc__py_main_tstate = py.tstate;
-        cc__py_main_interp = py.interp;
+        if (cc__py_main_tstate) {
+            /* Re-take after a close reclaimed it: a sibling interpreter
+             * may be current, so make the process state current first —
+             * ThreadStateGet would otherwise hand back the WRONG one. */
+            if (cc__py_cur_tstate != cc__py_main_tstate) {
+                if (cc__py_cur_tstate && cc__py.EvalSaveThread)
+                    cc__py.EvalSaveThread();
+                if (cc__py.EvalRestoreThread)
+                    cc__py.EvalRestoreThread(cc__py_main_tstate);
+                cc__py_cur_tstate = cc__py_main_tstate;
+            }
+            py.tstate = cc__py_main_tstate;
+            py.interp = cc__py_main_interp;
+        } else {
+            if (cc__py.ThreadStateGet) py.tstate = cc__py.ThreadStateGet();
+            if (cc__py.InterpreterStateGet)
+                py.interp = cc__py.InterpreterStateGet();
+            /* Py_Initialize leaves this state current, holding the GIL. */
+            cc__py_cur_tstate = py.tstate;
+            cc__py_main_tstate = py.tstate;
+            cc__py_main_interp = py.interp;
+        }
         cc__py_tls_seed(py.interp, py.tstate);
         (void)cc__py_install_namespace(arena);
         return cc_ok_CCResult_CCPy_CCPyError(py);
@@ -1804,6 +1885,13 @@ static inline void cc_py_close(CCPy *py) {
     }
     if (py->sys_getrefcount && cc__py.DecRef && !py->owns_interp)
         cc__py.DecRef(py->sys_getrefcount);
+    /* Closing the process interpreter's handle RECLAIMS it: the next
+     * cc_py_new re-takes it (state intact, never finalized) instead of
+     * paying for an isolated interpreter it did not ask for — sequential
+     * create/close churn stays on one interpreter. */
+    if (!py->owns_interp && py->ready && py->interp &&
+        py->interp == cc__py_main_interp)
+        cc__py_main_taken = 0;
     py->sys_getrefcount = NULL;
     py->ready = 0;
     py->arena = NULL;
