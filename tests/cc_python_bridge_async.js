@@ -24,7 +24,10 @@ const ccpy = require(process.cwd() + '/npm/cc-python');
     out('mixed_interleave', math.floor(7.9) === 7); // sync between awaits
     let rejected = false;
     try { await sqrt(-1); }
-    catch (e) { rejected = /math domain error/.test(e.message); }
+    catch (e) {
+      /* 3.13-: "math domain error"; 3.14+: "expected a nonnegative input…" */
+      rejected = /math domain error|nonnegative input/.test(e.message);
+    }
     out('python_error_rejects', rejected);
     // A handle minted sync crosses into an async call on the same domain.
     const builtins = py.import('builtins');

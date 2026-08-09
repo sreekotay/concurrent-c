@@ -11,9 +11,10 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 {
     CCCommand which = cc_command(&a, @slice("sh"));
     which.arg("-c");
-    which.arg("command -v node >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1");
+    which.arg("command -v node >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 "
+              "&& python3 -c 'import numpy' >/dev/null 2>&1");
     int rc = which.status() !>;
-    if (rc != 0) { "SKIP (need node + python3)".println() !>; return 0; }
+    if (rc != 0) { "SKIP (need node + python3 + numpy)".println() !>; return 0; }
 }
 
 {

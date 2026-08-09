@@ -918,6 +918,27 @@ static int run_one_test(const char* stem,
         (void)read_entire_file_alloc(out_txt, &out_buf, &out_len);
         (void)read_entire_file_alloc(err_txt, &err_buf, &err_len);
 
+        /* Optional-dep smokes print `SKIP (…)` and exit 0. Honor that even
+         * when a success-path `.stdout` oracle is present. */
+        {
+            size_t i = 0;
+            while (i < out_len &&
+                   (out_buf[i] == ' ' || out_buf[i] == '\t' || out_buf[i] == '\r' ||
+                    out_buf[i] == '\n'))
+                i++;
+            if (i + 5 <= out_len && memcmp(out_buf + i, "SKIP ", 5) == 0) {
+                if (verbose) {
+                    size_t eol = i;
+                    while (eol < out_len && out_buf[eol] != '\n') eol++;
+                    fprintf(stderr, "[SKIP] %s: %.*s\n", stem, (int)(eol - i),
+                            (const char*)out_buf + i);
+                }
+                free(out_buf);
+                free(err_buf);
+                continue;
+            }
+        }
+
         const unsigned char* want_out = NULL;
         size_t want_out_len = 0;
         const unsigned char* want_err = NULL;
