@@ -11,7 +11,7 @@
  * max(js, numpy) instead of their sum. */
 'use strict';
 
-const ccpy = require(process.cwd() + '/npm/cc-python');
+const ccpy = require(__dirname + '/..'); // the package (works in-repo and installed)
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 

@@ -11,7 +11,7 @@
  * lanes genuinely overlap under their own GILs. */
 'use strict';
 
-const ccpy = require(process.cwd() + '/npm/cc-python');
+const ccpy = require(__dirname + '/..'); // the package (works in-repo and installed)
 
 (async () => {
   const A = ccpy.create();

@@ -124,8 +124,11 @@ const np = py.import('numpy');          // zero round trips — chains are lazy
 const s  = await np.sum(buf);           // cross-process is natively async
 ```
 
-Each child resolves its Python by the same ambient order as everything
-else (`VIRTUAL_ENV`, then `./.venv`, then `python3`) — and because each
+Every door on an isolated domain is async — `stats()`, `release()`,
+and `str()` return Promises too, and buffer-shaped values come back
+via `await arr.toTypedArray()`.  Each child resolves its Python by the
+same ambient order as everything else (`VIRTUAL_ENV`, then `./.venv`,
+then `python3`; `iso.pythonExe` reports the choice) — and because each
 domain is its own process, the choice can also be **per-domain**, which
 the in-process tier cannot offer:
 
