@@ -63,6 +63,19 @@ Run an individual benchmark directly:
 | `cancellation_avalanche.ccs` | Teardown speed and cleanup correctness for blocked task trees. |
 | `mpmc_worker_pool.ccs` | Buffered producer -> worker-pool throughput and work distribution. |
 
+### JS / Python Interop
+
+| Benchmark | What it measures | Dated receipts |
+|-----------|------------------|----------------|
+| `py_baseline.ccs` | CC embeds Python — scalar / row / bulk ladder vs native controls | [`baselines/py_baseline_20260809.txt`](baselines/py_baseline_20260809.txt) |
+| `js_baseline.ccs` + `js_baseline.js` | Node → CC module ladder (`ccc build` then `node`) | [`baselines/js_baseline_node_20260809.txt`](baselines/js_baseline_node_20260809.txt) |
+| `js_numpy.ccs` + `js_numpy.js` | Float64Array → CC → numpy zero-copy compose | [`baselines/js_numpy_node_20260808.txt`](baselines/js_numpy_node_20260808.txt) |
+
+Bridge packages (`concurrent-c-python`, `concurrent-c-node`) and native-module
+hot-path receipts live under [`baselines/`](baselines/) — see
+[`baselines/README.md`](baselines/README.md) for the full catalog and capture
+recipes.
+
 ## Scheduler And Robustness Comparisons
 
 These compare Concurrent-C against pthread and Go baselines on scheduler fairness and robustness under adversarial workloads.

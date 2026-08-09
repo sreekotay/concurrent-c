@@ -1,22 +1,22 @@
 # Compiler perf baseline
-# Captured: 2026-05-28T20:23Z
-# Host: Darwin 25.4.0 arm64
+# Captured: 2026-08-09T19:49Z
+# Host: Darwin 25.6.0 arm64
 # Suite: tools/cc_test (jobs=8)
 # Read perf/README.md "Compiler perf baseline" section for what each metric guards against.
 
 # Static metrics (visitor source code shape)
-reparse_sites_visit_codegen=9
-loc_visit_codegen=5517
-loc_closure_pass=3457
-loc_visitor_dir=32736
+reparse_sites_visit_codegen=11
+loc_visit_codegen=6393
+loc_closure_pass=4701
+loc_visitor_dir=41320
 
-# Dynamic metrics (per-stage reparse counts across 461 tests)
-suite_tests=461
-reparses_phase3=548
-reparses_statement_lowering=155
-reparses_async_lowering=74
-reparses_final_ufcs=393
-reparses_total=1170
+# Dynamic metrics (per-stage reparse counts across 1006 tests)
+suite_tests=1006
+reparses_phase3=0
+reparses_statement_lowering=0
+reparses_async_lowering=0
+reparses_final_ufcs=0
+reparses_total=0
 
 # Wall-clock (warm run, with build cache + scratch dir reused)
-wall_real_seconds=48.08
+wall_real_seconds=104.29

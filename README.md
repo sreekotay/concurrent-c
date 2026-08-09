@@ -40,7 +40,7 @@ Fuller example (error policy + compose): [examples/hello.ccs](examples/hello.ccs
 - [Getting Started](docs/getting-started.md) — install, first program, concurrency
 - [Language Concepts](docs/language-concepts.md) — defer, results, UFCS, slices/arenas, closures
 - [Cheatsheet](docs/cheatsheet.md)
-- [Performance](https://github.com/sreekotay/concurrent-c/tree/main/perf) — benches, baselines, Neckbeard gauntlets (`perf/`)
+- [Performance](perf/) — benches, [interop baselines](perf/baselines/), [compiler baseline](perf/compiler_baseline.txt), Neckbeard gauntlets
 - [Docs index](docs/README.md) · [Language spec](spec/concurrent-c-spec-complete.md) · [Stdlib](spec/concurrent-c-stdlib-spec.md)
 
 ### Python & JavaScript interop
@@ -51,7 +51,8 @@ Fuller example (error policy + compose): [examples/hello.ccs](examples/hello.ccs
 
 ### Real programs, measured
 
-Full bench suite and dated receipts: **[Performance](https://github.com/sreekotay/concurrent-c/tree/main/perf)**.
+Full bench suite: **[perf/](perf/)**. Dated JS/Python receipts:
+**[perf/baselines/](perf/baselines/)** ([catalog](perf/baselines/README.md)).
 
 Specimens under [`real_projects/`](real_projects/) hold one bar for
 tutorial, idiomatic, and production code — and race their upstreams

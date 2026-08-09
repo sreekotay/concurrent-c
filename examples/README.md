@@ -72,8 +72,9 @@ PYTHONPATH=bin python3 -c "import counter; print(counter.bump(4))"
 
 Both directions share one binding (dlopen'd stable ABI, no link-time
 Python dependency), one marshalling ruleset, and one benchmark
-(`perf/py_baseline.ccs`). `examples/py/pydemo.shcc` is the same embed
-door in script form.
+([`perf/py_baseline.ccs`](../perf/py_baseline.ccs); latest receipt
+[`perf/baselines/py_baseline_20260809.txt`](../perf/baselines/py_baseline_20260809.txt)).
+`examples/py/pydemo.shcc` is the same embed door in script form.
 
 ### Comparison: where Rust wins (data races)
 

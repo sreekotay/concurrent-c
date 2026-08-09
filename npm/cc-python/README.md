@@ -138,6 +138,7 @@ const b = ccpy.create({ isolated: true, python: '/usr/bin/python3.11' });
 ```
 
 Measured ([`examples/js_multiprocess_numpy.js`](examples/js_multiprocess_numpy.js),
+[`js_multiprocess_numpy_node_20260809.txt`](../../perf/baselines/js_multiprocess_numpy_node_20260809.txt),
 BLAS pinned): the same numpy workload on 4 domains runs **2-4x faster**
 than on one (3.97x — linear — at our shared 4-vCPU box's quietest;
 steal time bounds the rest).  The costs are real and stated: ~100-440ms
@@ -284,7 +285,8 @@ module for Node and Python both — 40-90ns calls, 26KB artifacts.  See
 
 From [`examples/js_numpy_bridge.js`](examples/js_numpy_bridge.js) — plain
 `node`, `require('concurrent-c-python')`, numpy 2.5.1 on a 4-vCPU x86-64 box
-(baselines checked into the repo under `perf/baselines/`):
+([`perf/baselines/js_numpy_bridge_node_20260809.txt`](../../perf/baselines/js_numpy_bridge_node_20260809.txt);
+catalog: [`perf/baselines/README.md`](../../perf/baselines/README.md)):
 
 | what | result |
 |---|---|
@@ -295,6 +297,7 @@ From [`examples/js_numpy_bridge.js`](examples/js_numpy_bridge.js) — plain
 | bridge size | **~100KB `.node`, libc-only** |
 
 From [`examples/js_numpy_bridge_async.js`](examples/js_numpy_bridge_async.js)
+([`js_numpy_bridge_async_node_20260809.txt`](../../perf/baselines/js_numpy_bridge_async_node_20260809.txt))
 — what the lane buys:
 
 | what | result |

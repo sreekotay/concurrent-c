@@ -49,29 +49,25 @@ loc_visitor_dir=$(find "$ROOT/cc/src/visitor" -name '*.c' -type f -exec cat {} +
 
 echo "[capture] clearing scratch and running smoke suite with CC_DEBUG_REPARSE=1 (jobs=$JOBS)..."
 rm -rf "$ROOT/out/.cc_test" "$ROOT/bin/.cc_test"
-# Run twice: discard first (cold) to get a warm wall-time number that matches
-# day-to-day developer workflow (incremental builds, cached preprocessor state).
-# Tolerate noisier first run for stage counts (still deterministic per-TU).
+# Cold instrumented run: collect per-stage reparse counts before the warm
+# timed run overwrites *.build.stderr without CC_DEBUG_REPARSE.
+# Native frontend emits no visitor reparse lines (counts stay 0); legacy still does.
 CC_DEBUG_REPARSE=1 "$ROOT/tools/cc_test" --jobs "$JOBS" >/dev/null 2>&1 || {
   echo "[capture] FATAL: smoke suite failed; refusing to capture a broken baseline" >&2
   exit 1
 }
 
-# Now do a warm timed run. /usr/bin/time -p writes "real X.XX..." to its own
-# stderr; cc_test ALSO writes its progress + "cc_test: N passed" to stderr.
-# Combine the two streams into one file and parse out both lines.
-echo "[capture] timing warm suite..."
-( /usr/bin/time -p "$ROOT/tools/cc_test" --jobs "$JOBS" ) >/tmp/cc_baseline.combined 2>&1 || true
-wall_real=$(awk '/^real/ {print $2}' /tmp/cc_baseline.combined)
-suite_pass=$(awk '/^cc_test:/ {print $2}' /tmp/cc_baseline.combined)
-
 echo "[capture] aggregating per-stage reparse counts from $ROOT/out/.cc_test/**/*.build.stderr..."
 # Group by the first space-delimited token after `stage=` to get a stable
 # categorical name (`phase3`, `statement-lowering`, `async-lowering`,
 # `final-UFCS`). Comments inside source explain why splits stay categorical.
-reparse_data=$(find "$ROOT/out/.cc_test" -name '*.build.stderr' -exec grep -hE '^\[cc:reparse\]' {} + 2>/dev/null \
-  | awk -F'stage=' '{split($2,a," "); print a[1]}' \
-  | sort | uniq -c | awk '{print $2"="$1}')
+# `|| true`: empty grep under pipefail must not abort capture.
+reparse_data=$(
+  find "$ROOT/out/.cc_test" -name '*.build.stderr' -print0 2>/dev/null \
+    | xargs -0 grep -hE '^\[cc:reparse\]' 2>/dev/null \
+    | awk -F'stage=' '{split($2,a," "); print a[1]}' \
+    | sort | uniq -c | awk '{print $2"="$1}' || true
+)
 
 # Extract individual stage counts (default to 0 if a stage is absent post-fix).
 get_stage() { echo "$reparse_data" | awk -F'=' -v k="$1" '$1==k {print $2; found=1} END {if (!found) print 0}'; }
@@ -80,6 +76,17 @@ r_stmtlower=$(get_stage statement-lowering)
 r_asynclower=$(get_stage async-lowering)
 r_finalufcs=$(get_stage final-UFCS)
 r_total=$(echo "$reparse_data" | awk -F'=' 'BEGIN{s=0} {s+=$2} END{print s}')
+
+# Warm timed run. /usr/bin/time -p writes "real X.XX..." to its own stderr;
+# cc_test ALSO writes its progress + "cc_test: N passed" to stderr.
+echo "[capture] timing warm suite..."
+( /usr/bin/time -p "$ROOT/tools/cc_test" --jobs "$JOBS" ) >/tmp/cc_baseline.combined 2>&1 || true
+wall_real=$(awk '/^real/ {print $2}' /tmp/cc_baseline.combined)
+suite_pass=$(awk '/^cc_test:/ {print $2}' /tmp/cc_baseline.combined)
+if [[ -z "${suite_pass}" ]]; then
+  echo "[capture] FATAL: could not parse suite pass count from warm run" >&2
+  exit 1
+fi
 
 echo "[capture] writing $OUT"
 {

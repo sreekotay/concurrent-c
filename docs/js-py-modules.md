@@ -140,7 +140,11 @@ Worked examples: [`examples/recipe_js_module.ccs`](../examples/recipe_js_module.
 
 One coherent day on a 4-vCPU x86-64 shared VM (node 22, python 3.11,
 numpy 2.5; this box swings ±40% run to run — dated baselines with the
-exact RESULT lines live under [`perf/baselines/`](../perf/baselines/)).
+exact RESULT lines live under [`perf/baselines/`](../perf/baselines/),
+catalogued in [`perf/baselines/README.md`](../perf/baselines/README.md):
+[`js_py_modules_20260809.txt`](../perf/baselines/js_py_modules_20260809.txt),
+[`js_baseline_node_20260809.txt`](../perf/baselines/js_baseline_node_20260809.txt),
+[`py_baseline_20260809.txt`](../perf/baselines/py_baseline_20260809.txt)).
 
 **Native modules** (this page — your code, in-process, reflected):
 

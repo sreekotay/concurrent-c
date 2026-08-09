@@ -112,8 +112,9 @@ next to your program is the whole setup.
 
 From `python -m cc_node.examples.bench_wire` (sources under
 [`cc_node/examples/`](https://github.com/sreekotay/concurrent-c/blob/main/pypi/cc-node/cc_node/examples/))
-on a 4-vCPU x86-64 box, node 22 / python 3.11 (dated baselines under
-`perf/baselines/` in the repo):
+on a 4-vCPU x86-64 box, node 22 / python 3.11
+([`perf/baselines/cc_node_bridge_py_20260809.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/cc_node_bridge_py_20260809.txt);
+catalog: [`perf/baselines/README.md`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/README.md)):
 
 | what | result |
 |---|---|

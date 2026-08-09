@@ -23,6 +23,7 @@
 - **[Fiber Scheduler](../spec/concurrent-c-scheduler.md)** — Scheduler state machine and park/wake contract
 - **[Scheduler ops runbook](scheduler-ops-runbook.md)** — Build/test/diagnose loops for the scheduler
 - **[Examples](../examples/)** — Working code examples with [learning path](../examples/README.md#learning-path-recommended-order)
+- **[Performance](../perf/)** — Runtime benches, [interop baselines](../perf/baselines/), [compiler baseline](../perf/compiler_baseline.txt)
 
 ## Building the Compiler
 
