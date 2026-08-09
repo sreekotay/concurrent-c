@@ -54,8 +54,13 @@ Heap and stack default to root capacity `N`, `block_max = 4`, then malloc
 overflow. Size `N` for typical request live traffic so allocations stay in
 slabs; a tiny root still works but spills. Do not use `cc_arena_malloc` for
 large scratch storms — that path is fixed-root overflow, not extent growth.
-Normative growth, overflow, and release rules are in
-`spec/concurrent-c-spec-complete.md` §5 and `spec/draft_alloc_strategy.md`.
+Typed pointers use `cc_arena_alloc_T` / `cc_arena_alloc_T_count` (UFCS:
+`arena.allocT()` / `arena.allocT(n)`). Tracked byte slices use
+`cc_arena_alloc_slice_bytes` (UFCS: `arena.alloc_slice_bytes(n)`); failure
+yields an empty slice. Exhausted allocation with overflow disabled returns
+`NULL` / empty — never a success-looking no-op. Normative growth, overflow,
+and release rules are in `spec/concurrent-c-spec-complete.md` §5 and
+`spec/draft_alloc_strategy.md`.
 
 ## Generic factories and UFCS
 
@@ -213,11 +218,13 @@ Slice UFCS maps `hdr`, `len`, `trim`, `trim_left`, `trim_right`, `sub`,
 one `T`, `arena.allocT(n)` allocates `n` — the element type comes from
 the declared pointer destination (`T* p = arena.allocT(n)`) or
 explicitly via `arena.allocT::[T](n)`. Both lower to
-`cc_arena_alloc_T` / `cc_arena_alloc_T_count`. An optional `@destroy`
-on the declaration releases the allocation through its owning arena at
-scope exit (`cc_arena_release`); where the slab cannot reclaim
-individually, the release is a semantic no-op and the declaration
-still states the allocation's scope.
+`cc_arena_alloc_T` / `cc_arena_alloc_T_count` and return `NULL` on
+exhaustion. An optional `@destroy` on the declaration calls
+`cc_arena_release` at scope exit. Release returns `false` and emits a
+diagnostic when the pointer is not owned by the arena; a successful
+mid-slab release punches a hole and marks the arena non-rewindable
+unless it was the last live root allocation (which rewinds the tip).
+The declaration still states the allocation's scope.
 
 ### Arena-backed slice operations
 
@@ -812,33 +819,43 @@ Array-map UFCS maps `insert`, `get`, `get_ptr`, `at_ptr`, `key_ptr`,
 
 ### Shard maps (`CCShardMap`)
 
-`<ccc/std/shard_map.cch>` provides an arena-owned string→string map cell.
-It owns a `CCArena` and an `ArrayMap::[CCSlicePacked, CCString]`. Lookup
-keys may be ordinary `CCSlice` values (borrow-packed for the probe); inserts
-copy the key into a durable packed slice and the value into a `CCString` in
-the map’s arena.
+`<ccc/std/shard_map.cch>` provides a sharded string→string store: an array of
+`CCShard` cells plus a `CCShardDomain` (`CCExclusive` + `CCShardMask`). Each
+cell owns a `cc_arena_malloc` arena and an
+`ArrayMap::[CCSlicePacked, CCString]`. Lookup keys may be ordinary `CCSlice`
+values (borrow-packed for the probe); inserts copy the key into a durable
+packed slice and the value into a `CCString` in that shard’s arena.
 
 ```c
-CCShardMap m;
-m.init(64);                    // cc_shard_map_init(&m, 64)
-m.put(key, val);               // bool; false on OOM
-CCString* v = m.get(key);      // NULL if absent
-m.delete(key);                 // bool; true if an entry was removed
-size_t n = m.len();
-m.destroy();
+CCShardMap maps;
+maps.init(excl, mask);                 // cc_shard_map_init(&maps, excl, mask)
+CCShardHold h = maps.hold_all();       // or hold_one / hold_sorted
+@defer h.release();                    // idempotent; no-op if !h.held()
+if (!h.held()) { /* admission failed */ }
+
+CCShard* sh = maps.shard(si);
+sh->put(key, val);                     // bool; false on OOM
+CCString* v = sh->get(key);            // interior pointer — only under hold
+bool ok = sh->get_into(key, &out_arena, &owned);  // clone; safe after release
+sh->delete(key);                       // bool; true if removed
+size_t n = maps.len();
+maps.destroy();
 ```
 
-**Rule (ownership):** Keys and values live in `m.arena`. `get` returns a
-pointer into the dense store (valid until the entry is overwritten, deleted,
-or the map is destroyed). `put` replaces an existing value in place (old
-value released) or inserts a new durable key+value.
+**Rule (ownership):** Keys and values live in the shard cell arena.
+`get` returns an interior pointer valid only while that shard is held.
+`get_into` clones into a caller arena for use after release. `put` replaces
+an existing value in place (old value released) or inserts a new durable
+key+value. Failed `init` / `put` returns `false` — never a silent empty map
+write.
 
-**Rule (UFCS):** Methods follow the stdlib `cc_shard_map_<method>` convention
-(`init`, `destroy`, `get`, `put`, `delete`, `len`).
+**Rule (UFCS):** Map methods follow `cc_shard_map_<method>`
+(`init`, `destroy`, `reset`, `len`, `count`, `shard`, `hold_one`,
+`hold_sorted`, `hold_all`). Cell methods follow `cc_shard_<method>`
+(`put`, `get`, `get_into`, `contains`, `delete`, `len`).
 
-Pair with `CCShardMask` / `CCExclusive` when routing many `CCShardMap` cells
-by key hash. Prefer raw `ArrayMap` when the value type is not `CCString` or
-when the caller already owns the arena.
+Prefer raw `ArrayMap` when the value type is not `CCString` or when the
+caller already owns a single arena without sharding.
 
 ### Static maps
 
