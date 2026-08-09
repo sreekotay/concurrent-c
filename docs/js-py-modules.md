@@ -20,9 +20,21 @@ static const Counter seed = { .n = 0 };
 @comptime cc_js_export("Counter", &seed);   // → bin/counter.node
 ```
 
+Build (one line):
+
 ```sh
-ccc build counter.ccs
+ccc build counter.ccs        # → bin/counter.node + bin/counter.abi3.so
+```
+
+Use in JavaScript:
+
+```sh
 node -e "const c = require('./bin/counter.node'); console.log(c.bump(4))"
+```
+
+Use in Python:
+
+```sh
 PYTHONPATH=bin python3 -c "import counter; print(counter.bump(4))"
 ```
 
@@ -109,4 +121,54 @@ Worked examples: [`examples/recipe_js_module.ccs`](../examples/recipe_js_module.
 [`examples/recipe_py_module.ccs`](../examples/recipe_py_module.ccs),
 [`tests/dual_module_export_mod.ccs`](../tests/dual_module_export_mod.ccs)
 (dual-target), [`tests/js_module_double_result_mod.ccs`](../tests/js_module_double_result_mod.ccs)
-(the gamut).  Baseline numbers: `perf/baselines/js_py_modules_20260809.txt`.
+(the gamut).
+
+## Every crossing, measured
+
+One coherent day on a 4-vCPU x86-64 shared VM (node 22, python 3.11,
+numpy 2.5; this box swings ±40% run to run — dated baselines with the
+exact RESULT lines live under [`perf/baselines/`](../perf/baselines/)).
+
+**Native modules** (this page — your code, in-process, reflected):
+
+| crossing | cost |
+|---|---|
+| Node → CC call | **40ns** |
+| Python → CC call | **68ns** |
+| Node → CC, 16-elem `Float64Array` zero-copy borrow + sum | 94ns |
+| Node → CC, 1M-elem slice sum | 1.3ms (memory-bound) |
+| artifact | 26KB `.node` / 35KB `.abi3.so` |
+
+**`cc-python`, in-process** (any Python package from Node, zero-copy):
+
+| crossing | cost |
+|---|---|
+| sync call, 16-elem dot (the crossing itself) | 5.3µs |
+| 1M-elem `np.dot`, zero-copy lease | 239µs — 5.7x the JS loop (best recorded 158µs / 8.45x) |
+| lane (task) call, 1M dot | 232µs — off-thread for free |
+| lane pipelined, 16-elem | 11µs |
+| event-loop liveness during bulk numpy | 99 ticks/100ms via lane, 0 sync |
+| JS ∥ numpy overlap (balanced) | 1.81x |
+| numpy ∥ numpy, one interpreter, BLAS pinned | 1.60-2.02x |
+
+**`cc-python`, isolated domains** (full CPython per child):
+
+| crossing | cost |
+|---|---|
+| spawn + import numpy | ~100-440ms (warm/cold) |
+| wire round trip | ~125µs |
+| 8MB argument, shm spill | 6.6ms (base64 wire before it: 153ms — 23x) |
+| 4 domains, same numpy workload | 2-4x vs one (3.97x at the box's quietest) |
+
+**`cc-node`** (any npm package from Python):
+
+| crossing | cost |
+|---|---|
+| spawn a node child | 28ms |
+| wire round trip | 116µs |
+| Python-callback round trip (JS → Python → JS) | 238µs |
+| 8MB `array('d')` argument, shm spill | 9.2ms (as a JSON list: 583ms — 63x) |
+
+The gradient is the point: **ns** when the code is yours (a module),
+**µs** in-process when the package is Python's, **~100µs + shm** when
+you want processes between you — and every tier states its costs.
