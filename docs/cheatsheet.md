@@ -7,14 +7,13 @@ Quick reference for common patterns. Concepts: [language-concepts.md](language-c
 ## Build & Run
 
 ```bash
-ccc run file.ccs                    # build + run (shorthand; native default)
+ccc run file.ccs                    # build + run
 ccc build run file.ccs              # same, explicit
 ccc build run file.ccs -- --arg     # pass args to binary
 ccc --emit-c-only file.ccs          # emit C only → out/file.c
 ccc build -O file.ccs               # release build (-O2 -DNDEBUG)
 ccc build -g file.ccs               # debug build (-O0 -g)
                                     # default: -O2, asserts kept
-ccc --frontend=legacy file.ccs      # older multipass text-rewrite front
 ```
 
 ---
@@ -380,7 +379,6 @@ section.
 | Variable | Purpose |
 |----------|---------|
 | `CC` | C compiler (default: cc/gcc/clang) |
-| `CC_FRONTEND` | `native` (default) or `legacy` |
 | `CC_OUT_DIR` | Generated C + objects (default: out/) |
 | `CC_BIN_DIR` | Linked executables (default: bin/) |
 | `CC_NO_CACHE` | Disable incremental cache |

@@ -17,17 +17,13 @@ cd concurrent-c
 PREFIX="$HOME/.local" ./cc-install.sh
 ```
 
-That builds a patched TinyCC and the compiler (including `shadow_lower`, the
-default native front), installs both to `$PREFIX/bin`, and verifies the install
-by compiling a program against it. Add `$PREFIX/bin` to `PATH` and `ccc` is
-ready:
+That builds the compiler (and its TinyCC build dependency), installs to
+`$PREFIX/bin`, and verifies the install by compiling a program against it.
+Add `$PREFIX/bin` to `PATH` and `ccc` is ready:
 
 ```bash
 ccc run hello.ccs
 ```
-
-The default front is **native** (`shadow_lower`). Use `--frontend=legacy`
-(or `CC_FRONTEND=legacy`) only for archaeology of the older multipass path.
 
 Build outputs land in `./out` and `./bin` under whatever directory you run
 `ccc` from; `--out-dir` overrides that.

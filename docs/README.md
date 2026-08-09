@@ -30,13 +30,10 @@
 First checkout and day-to-day edit loops are there. Architecture / bootstrap
 detail:
 
-- [Compiler architecture](../cc/docs/ARCHITECTURE.md) — default native / `shadow_lower`
+- [Compiler architecture](../cc/docs/ARCHITECTURE.md)
 - [shadow_lower ops / layout](../cc/shadow/README.md)
 - [Bootstrap snapshots](../cc/bootstrap/shadow_lower/README.md)
 - [ILP32 Docker smoke](ilp32-docker.md)
-- Legacy multipass (opt-out): [LEGACY_ARCHITECTURE.md](../cc/docs/LEGACY_ARCHITECTURE.md)
-
-Opt out of the native front with `ccc --frontend=legacy` / `CC_FRONTEND=legacy`.
 
 ## Quick Example
 

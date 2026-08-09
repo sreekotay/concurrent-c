@@ -4,17 +4,16 @@
 
 Concurrent‑C is a **strict C11-superset preprocessor**: `.ccs` lowers to
 plain C and compiles with your **host C compiler**. Structured concurrency,
-results, UFCS, slices/arenas, and a header-first runtime ship with the
-language — not a TCC backend.
+results, comptime, UFCS, slices/arenas, and a header-first runtime ship with the
+language.
 
 **License:** Dual-licensed under [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your option.
 
 Toolchain:
 - A `ccc` driver (`out/cc/bin/ccc` or wrapper `cc/bin/ccc`) that lowers `.ccs` → C (with `#line` sourcemaps) and then compiles/links with the host C compiler (`cc`, `clang`, …).
-- **Default front is native** (`shadow_lower`: tape → whitelist AST → emit C). `--frontend=legacy` remains for archaeology of the older multipass path.
 - A light/statically linked runtime/stdlib (header-first, prefixed APIs) under `cc/include/ccc` and `cc/runtime`.
 - A test runner (`tools/cc_test`) that drives `cc/bin/ccc` end-to-end.
-- Vendored TinyCC is a build-time dependency for some compiler internals (`CONFIG_CC_EXT` hooks) — not the code-generation backend for your programs.
+- Vendored TinyCC is used for some compiler internals (`CONFIG_CC_EXT`).
 
 ```c
 #include <ccc/cc_runtime.cch>      // core runtime
@@ -75,7 +74,7 @@ tutorial, idiomatic, and production code — and race their upstreams
   counted as backlog: **19 prevented, 6 mitigated, 2 still expressible**
   — every demo builds and runs.
 
-Compiler internals: [architecture](cc/docs/ARCHITECTURE.md), [shadow_lower ops / layout](cc/shadow/README.md), [bootstrap](cc/bootstrap/shadow_lower/README.md). Legacy opt-out (`--frontend=legacy`): [legacy architecture](cc/docs/LEGACY_ARCHITECTURE.md), [cleanup status](cc/docs/COMPILER_CLEANUP_STATUS.md), [debug vars](cc/src/diag/DEBUG_VARS.md).
+Compiler internals: [architecture](cc/docs/ARCHITECTURE.md), [shadow_lower ops / layout](cc/shadow/README.md), [bootstrap](cc/bootstrap/shadow_lower/README.md), [debug vars](cc/src/diag/DEBUG_VARS.md).
 
 ### Install
 
