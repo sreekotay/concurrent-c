@@ -1,0 +1,7 @@
+# python3 pypi/cc-node/examples/bench_wire.py — Python + one spawned node child
+# 2026-08-09 x86_64 4-vCPU shared VM, node v22.22.2, python3.11
+RESULT spawn_ms 28
+RESULT rtt_us 116
+RESULT callback_roundtrip_us 238
+RESULT bulk_8mb_shm_ms 9.2
+RESULT bulk_8mb_json_list_ms 583

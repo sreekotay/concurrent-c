@@ -11,6 +11,10 @@ requires-python = ">=3.8"
 license = { text = "MIT" }
 keywords = ["javascript", "node", "npm", "interop", "concurrent-c"]
 
+[project.urls]
+Repository = "https://github.com/sreekotay/concurrent-c"
+Documentation = "https://github.com/sreekotay/concurrent-c/blob/main/pypi/cc-node/README.md"
+
 [tool.setuptools]
 packages = ["cc_node"]
 
