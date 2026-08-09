@@ -456,6 +456,8 @@ static inline int cc_arena_buffer(CCArena *arena, void *buffer, size_t capacity)
 // per-fiber arenas. Current slab only: if this block is full, returns NULL even
 // when block_max allows growth. For local then grow/spill, use
 // cc_arena_alloc_local_grow / cc_arena_realloc_local_grow.
+// Opt-in at exclusive call sites (shape, request scratch); stdlib defaults stay
+// on cc_arena_alloc so a shared arena never silently becomes UB.
 static inline void *cc_arena_alloc_local(CCArena *arena, size_t size, size_t align) {
     if (!arena || !arena->base || size == 0) return NULL;
     size_t off = *(size_t *)&arena->offset;  // non-atomic read (single-owner fast path)
@@ -863,6 +865,8 @@ static inline void *cc_arena_realloc_local_grow(CCArena *arena,
     return out;
 }
 
+/* Typed alloc defaults to the *shared* path (safe for any arena). Prefer
+ * cc_arena_alloc_T*_local_grow at call sites that exclusively own the arena. */
 #define cc_arena_alloc_T(T, arena) \
     ((T*)cc_arena_alloc((arena), sizeof(T), _Alignof(T)))
 
@@ -1944,12 +1948,13 @@ static inline void* cc_arena_pool_iter_next(CCArenaPoolIter* it) {
  *    Flip is first non-last release or heap-overflow alloc. checkpoint() now
  *    fprintf-once when disabled; restore() of a null handle still no-ops.
  *
- * 3. Typed alloc macros (`cc_arena_alloc_T`) still default to the concurrent
- *    CAS path. Prefer `*_local` / `*_local_grow` at fiber-owned call sites;
- *    global default flip needs a shared-arena audit (stdlib pass).
+ * 3. Stdlib defaults stay on shared `cc_arena_alloc` (safe). Opt into
+ *    `*_local_grow` only at exclusive-owner call sites (request/scratch fiber);
+ *    do not blanket-flip macros or vec/string/containers.
  *
  * 4. Pool freelist packs pointers into 48 bits (CC__POOL_PTR_MASK); add an
  *    init-time check that pool addresses fit the mask (LA57 insurance).
+ *    Pool bump allocs stay on shared `cc_arena_alloc` (lock-free freelist).
  */
 
 #endif // CC_ARENA_H

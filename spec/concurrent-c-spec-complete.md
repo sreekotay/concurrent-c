@@ -1711,12 +1711,12 @@ void cc_arena_restore(CCArenaCheckpoint checkpoint);
 // Allocation (grows when block_max allows; see Growable arenas)
 void* cc_arena_alloc(CCArena* a, size_t nbytes, size_t align);
 void* cc_arena_alloc_local(CCArena* a, size_t nbytes, size_t align);       // current slab only, non-atomic
-void* cc_arena_alloc_local_grow(CCArena* a, size_t nbytes, size_t align);   // local then cc_arena_alloc if full
+void* cc_arena_alloc_local_grow(CCArena* a, size_t nbytes, size_t align);   // local tip, unlocked grow, then ovf
 void* cc_arena_realloc_local(CCArena* a, void* p, size_t old_n, size_t new_n, size_t align);       // tip fit only
-void* cc_arena_realloc_local_grow(CCArena* a, void* p, size_t old_n, size_t new_n, size_t align);  // local then realloc
+void* cc_arena_realloc_local_grow(CCArena* a, void* p, size_t old_n, size_t new_n, size_t align);  // local tip then local grow/copy
 #define arena_alloc(T, arena, count)  // tracked, count elements
 #define arena_alloc1(T, arena)        // tracked, 1 element
-// Macros: cc_arena_alloc_T_*, cc_arena_alloc_T_*_local, cc_arena_alloc_T_*_local_grow
+// Macros: cc_arena_alloc_T_* (shared default), cc_arena_alloc_T_*_local, cc_arena_alloc_T_*_local_grow
 
 int cc_arena_would_fit(const CCArena* a, size_t nbytes, size_t align);  // current slab only (no grow)
 
@@ -1860,7 +1860,7 @@ cc_arena_free(&a);  // BUG: spawned task may still be using s
 
 **Non-goal:** Arenas do **not** provide automatic deallocation or generational lifetimes. Users must ensure all threads have finished using an arena before resetting or freeing it. Violations are not caught automatically in release builds.
 
-**Note:** For single-owner hot paths, `cc_arena_alloc_local` / `cc_arena_alloc_local_grow` and `cc_arena_realloc_local` / `cc_arena_realloc_local_grow` reduce overhead vs the atomic allocator; they are the supported alternative to a separate `Bump` type for the common per-fiber arena case.
+**Note:** For single-owner hot paths, `cc_arena_alloc_local` / `cc_arena_alloc_local_grow` and `cc_arena_realloc_local` / `cc_arena_realloc_local_grow` reduce overhead vs the atomic allocator; they are the supported alternative to a separate `Bump` type for the common per-fiber arena case. Stdlib defaults (`cc_arena_alloc`, `cc_arena_alloc_T`, slice helpers) stay on the shared path — opt into `*_local*` only where exclusive ownership is assured.
 
 ---
 
