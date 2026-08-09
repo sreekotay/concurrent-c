@@ -1,0 +1,12 @@
+neg_dollar_key true
+neg_unsupported_set true
+neg_nonfinite_ok true
+neg_foreign_arg true
+neg_use_after_release true
+neg_call_noncallable true
+neg_missing_package true
+neg_after_close_eval true
+neg_after_close_stats true
+neg_destroy_idempotent true
+neg_sibling_alive true
+cc-node neg suite done

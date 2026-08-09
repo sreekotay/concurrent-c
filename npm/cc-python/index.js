@@ -207,7 +207,7 @@ function resolvePythonExe(spec) {
 
 function rwrap(bridge, h, chain) {
   const target = function () {};
-  target[RHANDLE] = { h, chain };
+  target[RHANDLE] = { h, chain, bridge };
   return new Proxy(target, {
     get(t, prop) {
       if (prop === RHANDLE) return t[RHANDLE];
@@ -370,6 +370,8 @@ class ProcBridge {
     if (t === 'function') {
       if (v[RHANDLE]) {
         const r = v[RHANDLE];
+        if (r.bridge && r.bridge !== this)
+          throw new Error('concurrent-c-python: handle belongs to another bridge');
         if (r.chain.length)
           throw new Error('concurrent-c-python: pass the awaited value, not an ' +
                           'attribute path');
@@ -464,7 +466,7 @@ class ProcBridge {
     // chains stay synchronous:
     const bridge = this;
     const target = function () {};
-    target[RHANDLE] = { h: null, chain: [], pending: p };
+    target[RHANDLE] = { h: null, chain: [], pending: p, bridge };
     p.then((r) => { target[RHANDLE].h = r.h; }, () => {});
     return new Proxy(target, {
       get(t, prop) {
@@ -556,7 +558,7 @@ class ProcBridge {
 // to extend, one to use.
 function rlazy(bridge, pending, chain) {
   const target = function () {};
-  target[RHANDLE] = { h: null, chain, pending };
+  target[RHANDLE] = { h: null, chain, pending, bridge };
   return new Proxy(target, {
     get(t, prop) {
       if (prop === RHANDLE) return t[RHANDLE];

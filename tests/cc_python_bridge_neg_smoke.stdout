@@ -1,0 +1,16 @@
+neg_inproc_dollar_key true
+neg_inproc_unsupported_set true
+neg_inproc_foreign_arg true
+neg_inproc_use_after_release true
+neg_inproc_release_again true
+neg_inproc_keep_past_return true
+neg_inproc_after_close true
+neg_inproc_destroy_idempotent true
+neg_iso_dollar_key true
+neg_iso_bigint true
+neg_iso_lazy_import_fail true
+neg_iso_pass_unresolved true
+neg_iso_foreign_arg true
+neg_iso_after_close true
+neg_iso_sibling_alive true
+cc-python neg suite done
