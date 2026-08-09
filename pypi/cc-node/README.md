@@ -29,9 +29,11 @@ array in **9ms** where the same values as a JSON list take 583ms.
 
 ```
 pip install concurrent-c-node   # needs node on PATH (or point at one)
+python -m cc_node.examples.use_node
+python -m cc_node.examples.bench_wire
 ```
 
-Import stays `import cc_node`. The mirror of
+Import stays `import cc_node`. Examples ship in the wheel. The mirror of
 [`concurrent-c-python`](https://github.com/sreekotay/concurrent-c/tree/main/npm/cc-python)
 — same domain model, same materialization rules, pointed the other way:
 
@@ -108,7 +110,8 @@ next to your program is the whole setup.
 
 ## Measured
 
-From [`examples/bench_wire.py`](https://github.com/sreekotay/concurrent-c/blob/main/pypi/cc-node/examples/bench_wire.py)
+From `python -m cc_node.examples.bench_wire` (sources under
+[`cc_node/examples/`](https://github.com/sreekotay/concurrent-c/blob/main/pypi/cc-node/cc_node/examples/))
 on a 4-vCPU x86-64 box, node 22 / python 3.11 (dated baselines under
 `perf/baselines/` in the repo):
 
@@ -127,7 +130,7 @@ future work.
 
 A worked tour (builtin Node modules, chains, callbacks, thenables,
 buffers — no npm install needed):
-[`examples/use_node.py`](https://github.com/sreekotay/concurrent-c/blob/main/pypi/cc-node/examples/use_node.py).
+`python -m cc_node.examples.use_node`.
 
 And when the hot path is YOUR code rather than an npm package, skip the
 wire entirely: a page of Concurrent-C (or C) exports as a native module
