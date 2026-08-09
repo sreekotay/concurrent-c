@@ -1,0 +1,16 @@
+coro_resolves true
+tasks_interleave true
+readiness_order true
+awaited_js_callback true
+loop_live_during_await true
+same_domain_compose true
+exc_type_and_message true
+rejection_caught_in_python true
+exc_double_crossing true
+exc_triple_hop true
+sync_task_in_loop_mode true
+sync_suspension_in_loop_mode true
+pending_task_cancelled true
+destroy_lands true
+main_closed true
+aio suite done

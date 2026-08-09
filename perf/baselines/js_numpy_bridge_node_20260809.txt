@@ -1,0 +1,12 @@
+# node perf/js_numpy_bridge.js — plain node + require('cc-python') + numpy 2.5.1
+# 2026-08-09 x86_64, node v22.22.2, python3.13
+RESULT bridge_dot_1m ms 7.898 ns/call 157960
+RESULT js_loop_dot_1m ms 66.746 ns/call 1334916
+RESULT speedup_vs_js_loop x 8.45
+RESULT bridge_sum_1m ms 16.683 ns/call 333663
+RESULT bridge_std_1m ms 36.335 ns/call 1816766
+RESULT bridge_dot_16 ms 101.826 ns/call 5091
+RESULT lane_dot_16_await_each ms 153.214 ns/call 76607
+RESULT lane_dot_16_pipelined ms 34.569 ns/call 17285
+RESULT lane_dot_1m ms 14.414 ns/call 288278
+RESULT live_handles n 4

@@ -27,31 +27,114 @@ py.destroy();   // one sweep: every handle, the arena, the interpreter ref
 - `py.stats()` is the live-handle count; `py.release(proxy)` drops one
   early and returns the remainder.
 
-## Async mode
+## Async: `py.task`
+
+Async-ness enters through exactly one primitive:
 
 ```js
-const py = require('cc-python').create({ mode: 'async' });
+const py = require('cc-python').create();       // no modes
 const np = py.import('numpy');
 
-const norm = await np.linalg.norm(new Float64Array(1_000_000));
+const norm = py.task(np.linalg.norm);           // bind to the lane once
+await norm(new Float64Array(1_000_000));        // hot loop, off-thread
+await py.task(math.sqrt)(16);                   // one-shot, same primitive
 
-await py.destroy();   // revoke, drain, then the same one-sweep teardown
+await py.destroy();   // always a Promise: revoke, drain, one sweep
 ```
 
-An async domain is also an **execution lane**: every call runs on the
-domain's own thread, FIFO, and returns a Promise — the Node event loop
-stays live while Python works, and `Promise.all` across *domains* is
-real parallelism (each concurrent domain holds its own per-interpreter
-GIL).  Python exceptions arrive as rejections with the same messages
-the sync bridge throws.  Attribute access stays synchronous (lookups
-are dict probes; one may briefly wait on the in-flight call's GIL).
+Everything else stays synchronous — `math.pi`, exploratory chains,
+cheap calls — and a call site tells you the truth: a task call is a
+Promise, everything else blocks.  Every domain has a latent **execution
+lane** (one thread, started on first task call): task calls run there
+FIFO — Python is serial under its per-interpreter GIL, so a lane loses
+nothing within a domain — the Node event loop stays live while Python
+works, and `Promise.all` across *domains* is real parallelism.  Python
+exceptions arrive as rejections with the sync bridge's messages, and
+handles pass freely between sync and task calls — flavor was never a
+property of the handle.  A sync call on a busy domain waits for the
+in-flight task's GIL, then jumps the queue: that is the meaning of
+choosing sync at a call site.
 
 Lifetimes extend, not bend: a job owns its Python references and pins
 its typed-array buffers from submit to completion, so `release()` or
-GC mid-flight cannot dangle it.  `destroy()` returns a Promise —
-revocation is immediate (queued calls reject with `bridge is closed`),
-the in-flight call finishes, and the sweep runs after the last result
-is delivered.  An idle async domain never keeps the process alive.
+GC mid-flight cannot dangle it.  `destroy()` rejects queued calls
+immediately, lets the in-flight call finish, and sweeps after the last
+result is delivered.  An idle lane never keeps the process alive.
+
+`py.task(jsClosure)` is reserved for recorded batch graphs —
+parameterized pipelines that ship N Python calls as one job (and, later,
+across a process boundary) — and says so articulately until it exists.
+
+## async def: the asyncio lane
+
+A task call that returns a **coroutine** becomes an asyncio task on the
+lane's own event loop — engaged lazily by the first one, so the plain
+FIFO path (and its latency) is untouched until you use `async def`:
+
+```js
+const ns = b.dict();
+b.exec(`
+import asyncio
+async def crawl(fetch, urls):
+    return await asyncio.gather(*(fetch(u) for u in urls.split(',')))
+`, ns);
+await py.task(ns.get('crawl'))(jsFetch, 'a,b,c');
+```
+
+Tasks interleave — two staggered sleeps run in max, not sum, and
+completion follows readiness, not submission order.  Inside a task, an
+awaited JS callback returns an **awaitable**: `await cb(x)` suspends
+only that task while the loop keeps running its siblings, and the
+callback's promise may itself lean on tasks of the same domain.  Sync
+callables keep every earlier shape, loop mode or not: *sync nests one
+deep, async composes freely.*
+
+Exceptions keep `Type: message` in both directions and across any
+number of crossings: a coroutine's `ValueError: bad input` is the JS
+rejection's message; a JS rejection raises `RuntimeError` at the
+Python `await` (catchable there), and uncaught it crosses back with its
+text intact.  `destroy()` cancels pending tasks — their promises answer
+`bridge is closed` — then drains and sweeps as always.
+
+## Callbacks: JS functions as Python callables
+
+A JS function passed as an *argument* crosses as a Python callable:
+
+```js
+builtins.list(builtins.map((x) => x * 2, pyList));        // sync: reenters
+await py.task(builtins.list)(builtins.map(jsFn, pyList)); // lane: hops home
+```
+
+On the lane, the executor releases the GIL and waits while the main
+thread runs your function — so concurrent sync bridge work proceeds and
+the loop stays free to serve the callback.  Arguments materialize by
+the usual rule (scalars as scalars, held objects as proxies); returns
+cross back the same way.  A JS throw becomes a Python exception with
+your message, catchable in Python or surfacing as the call's error.
+
+A lane-side callback may be **async**: return a Promise and the Python
+call *suspends* — GIL released — until it settles.  From Python the
+callable is still plainly synchronous: `cb(x)` returns the settled
+value, or raises with the rejection's text.  While a callback is
+suspended, the executor services its own queue, so the promise may even
+depend on a task of the *same* domain:
+
+```js
+await py.task(helper)(async (x) => {
+  const row = await fetchThing(x);       // the loop is live meanwhile
+  return await py.task(np.mean)(row);    // same domain — runs nested
+}, seed);
+```
+
+Suspensions nest LIFO and unwind as promises settle.  A *sync* bridge
+call still refuses a thenable return articulately — main cannot block
+on its own event loop — and the message points at `py.task`.
+Lifetime is one rule: a registered callback pins the domain until
+`destroy()` — the sweep releases the function references, and a
+callable that outlives its bridge raises `bridge is closed` in Python.
+A callback may even destroy its own bridge mid-call (or mid-suspension):
+the in-flight call finishes when its promise settles, then the drain
+runs.
 
 ## Numbers
 

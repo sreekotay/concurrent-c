@@ -1,0 +1,28 @@
+/* The symmetric bridge: Python using JavaScript.  cc-node spawns one
+ * node child per domain (no engine hosting — the process IS the
+ * isolation) and speaks strict request/response JSON: packages resolve
+ * from the host's cwd, plain data crosses by value, everything else is
+ * a domain-owned handle, thenable results are awaited in the child so
+ * async package APIs need nothing special, Python callables cross as
+ * JS functions with exceptions mapping both ways, and the domain rules
+ * hold — cross-domain rejection, articulate doors after destroy,
+ * idempotent teardown, `with` scoping.  Rungs live in
+ * tests/cc_node_bridge.py; the package is pypi/cc-node. */
+CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+
+{
+    CCCommand which = cc_command(&a, @slice("sh"));
+    which.arg("-c");
+    which.arg("command -v node >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1");
+    int rc = which.status() !>;
+    if (rc != 0) { "SKIP (need node + python3)".println() !>; return 0; }
+}
+
+{
+    CCCommand run = cc_command(&a, @slice("python3"));
+    run.arg("tests/cc_node_bridge.py");
+    run.inherit_stdio();
+    int rc = run.status() !>;
+    if (rc != 0) { "cc-node suite failed".println() !>; return 1; }
+}
+return 0;

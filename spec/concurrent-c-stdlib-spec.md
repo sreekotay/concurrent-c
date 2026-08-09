@@ -2324,9 +2324,95 @@ last takes the arena and everything in it down in one free, so no
 finalizer ordering the GC picks can dangle a box.  Handles never cross domains: a second
 `create()` is fully isolated and rejects the first domain's objects at
 the door.  `stats()` reports the live-handle count; `release(proxy)`
-drops one early.  The mirrored direction — Python importing Node —
-requires a hosted JavaScript engine (`cc_js_new`) and follows the same
-domain model.
+drops one early.
+
+The mirrored direction exists as `pypi/cc-node`: Python importing
+JavaScript, npm packages included.  No engine embedding — the domain IS
+a spawned `node` child, so Python gets real Node (full stdlib, native
+addons, whatever `npm install` put in the host's cwd) and process
+isolation for free.  The wire is strict request/response JSON over
+stdio; the same rules hold pointed the other way: plain data (finite
+numbers, strings, booleans, None, lists/dicts of the same) crosses by
+value with non-finite floats tagged rather than nulled, everything else
+is a domain-owned handle whose attribute access is property lookup
+(methods arrive bound), a thenable result is awaited in the child
+before the reply so async package APIs look synchronous, a Python
+callable crosses as a JS function (JS calling conventions apply) with
+exceptions mapping both ways, and the domain rules — cross-domain
+rejection, the stats ledger, idempotent destroy with articulate doors
+after, child lifetime bound to the bridge — are the same rules.  An
+in-process flavor over a hosted engine (`cc_js_new`) remains open as a
+zero-IPC tier; the shared-memory lease transport layers onto this wire
+without changing the surface.
+
+Async-ness enters through one primitive: `py.task(callable)` binds a
+held callable to the domain's execution lane and returns an async
+function — every call through it is a Promise.  The lane is latent
+(one thread per domain, started by the first task call) and FIFO:
+Python is serial under its per-interpreter GIL, so a lane loses
+nothing within a domain, concurrent domains parallelize, and the event
+loop stays live while Python works.  Everything else on the bridge
+stays synchronous, and handles pass freely between sync and task calls
+— asynchrony is a property of the call site, never of the handle or
+the domain.  A sync call on a busy domain waits for the in-flight
+task's GIL and then runs ahead of the queue.  Python exceptions arrive
+as rejections with the sync bridge's messages.  A job owns its Python
+references and holds a `napi_ref` on every typed-array buffer, so the
+lease spans submit to completion and neither `release` nor the GC can
+dangle in-flight work.  `destroy()` always returns a Promise and is
+revoke-then-drain: queued calls reject immediately, the in-flight call
+finishes, and the one sweep runs after the last result is delivered —
+the executor retires its interpreter thread state before the
+interpreter ends.  An idle lane does not keep the process alive; a
+dropped, never-destroyed domain drains the same way from its
+finalizer.  `py.task(jsClosure)` is reserved for recorded batch
+graphs — parameterized pipelines shipping N calls as one job, the
+calling convention a process-isolated domain will reuse — and answers
+articulately until it exists.
+
+A JavaScript function passed as an argument crosses as a Python
+callable, completing the duplex: a sync call's callback reenters on the
+main thread; a lane call's callback releases the GIL, posts through the
+threadsafe function, and waits while the main thread runs the function
+— which is what keeps concurrent sync work and the event loop live
+mid-callback.  Values cross by the standard rules in both directions;
+a JS throw becomes a Python exception carrying its message.
+
+A lane call's callback may return a thenable: the request suspends —
+GIL still released — until the promise settles, and the Python call
+site receives the settled value or raises with the rejection's text; to
+Python the callable stays plainly synchronous.  While a request is
+suspended the executor thread services its own queue, so a promise may
+depend on tasks of the same domain — the awaited job runs nested
+beneath the suspended frame, its completion settles the promise on the
+main thread, and the settle resumes the executor.  Suspensions nest
+LIFO; queued work under a suspended revocation drains as rejections;
+and the suspended call itself completes when its promise settles, after
+which the drain proceeds.  A sync call's callback still refuses a
+thenable — the main thread cannot block on its own event loop — with a
+message naming the task form.
+
+A task call whose Python call returns a coroutine schedules it on the
+lane's own asyncio loop, engaged lazily by the first coroutine — until
+then the lane is the plain FIFO above, and after, submissions pump
+through the loop.  Tasks interleave: completion follows readiness, not
+submission order, and the job settles its promise at task completion.
+Inside a task, an invoked JS callback returns an awaitable future
+rather than blocking — only the awaiting task suspends, the loop keeps
+running its siblings, and the callback's promise may lean on further
+tasks of the same domain, which pump on the same loop.  Sync callables
+keep every earlier shape in loop mode, the blocking suspension
+included: sync nests one deep, async composes freely.  Exception text
+is `Type: message` in both directions and is preserved across repeated
+boundary crossings — a coroutine's exception is the rejection's
+message; a rejection raises at the Python await (catchable there) and
+re-raises across if uncaught.  Revocation cancels pending tasks — their
+promises answer closed — then drains and sweeps as ever.
+One lifetime rule: a registered callback pins its domain until
+revocation (the sweep releases the function references on the main
+thread), an orphaned callable raises `bridge is closed` in Python, and
+a callback may revoke its own bridge mid-call — the in-flight call
+completes, then the drain runs.
 
 `create({mode: 'async'})` makes the domain an execution lane as well:
 one executor thread per domain runs every call FIFO — Python is serial

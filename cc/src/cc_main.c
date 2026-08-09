@@ -820,9 +820,9 @@ static void usage_build(const char* prog) {
     fprintf(stderr, "  export-make Generate Makefile fragment for legacy build integration\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Build flavors:\n");
-    fprintf(stderr, "  (default)       -O2 (asserts kept)\n");
-    fprintf(stderr, "  -g, --debug     Add -O0 -g (and disable release dead-stripping)\n");
-    fprintf(stderr, "  -O, --release   Add -O2 -DNDEBUG and enable dead-stripping (smaller binaries)\n");
+    fprintf(stderr, "  (default)       -O2 (asserts kept), dead-strip at link\n");
+    fprintf(stderr, "  -g, --debug     Add -O0 -g (and disable dead-stripping)\n");
+    fprintf(stderr, "  -O, --release   Add -O2 -DNDEBUG (dead-strip stays on)\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Options: same as main help (use `%s --help` for full list)\n", prog);
     fprintf(stderr, "\n");
@@ -3420,10 +3420,14 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
 
     const char* link_extra = "";
     int link_is_tcc = cc__is_tcc(cc_bin);
+    /* Dead-strip is the default: objects are always compiled with
+     * -ffunction-sections/-fdata-sections (prebuilt runtime included), so
+     * the linker flag is pure win.  Debug builds opt out — stripped
+     * sections make for confusing symbolication. */
 #if defined(__APPLE__)
-    if (opt && opt->opt_release && !link_is_tcc) link_extra = "-Wl,-dead_strip";
+    if (opt && !opt->opt_debug && !link_is_tcc) link_extra = "-Wl,-dead_strip";
 #elif defined(__linux__)
-    if (opt && opt->opt_release && !link_is_tcc) link_extra = "-Wl,--gc-sections";
+    if (opt && !opt->opt_debug && !link_is_tcc) link_extra = "-Wl,--gc-sections";
 #endif
 
     char link_meta_path[PATH_MAX];
@@ -5433,6 +5437,59 @@ static int run_build_mode(int argc, char** argv) {
         cc_flags = extmod_ccflags;
         snprintf(extmod_ldflags, sizeof(extmod_ldflags), "%s%s-shared",
                  ld_flags ? ld_flags : "", (ld_flags && ld_flags[0]) ? " " : "");
+        /* A -shared link exports every symbol by default, which makes each
+         * one a dead-strip root: --gc-sections keeps the entire runtime.
+         * Exporting only the embedding entry points (the dynamic loader
+         * looks those up by name; nothing else is anyone's ABI) lets the
+         * linker collect everything the module never calls — the same
+         * artifact drops ~5x.  The list is static across both embeddings,
+         * so one file serves every module build. */
+#if defined(__linux__) || defined(__APPLE__)
+        if (!cc__is_tcc(pick_cc_bin(cc_bin))) {
+#if defined(__APPLE__)
+            static const char* ver_body = "_napi_register_module_v1\n_PyInit_*\n";
+            static const char* ver_flag = " -Wl,-exported_symbols_list,";
+#else
+            static const char* ver_body =
+                "{ global: napi_register_module_v1; PyInit_*; local: *; };\n";
+            static const char* ver_flag = " -Wl,--version-script=";
+#endif
+            static char ver_path[PATH_MAX];
+            char ver_dir[PATH_MAX];
+            struct stat ver_st;
+            int ver_ok;
+            snprintf(ver_dir, sizeof(ver_dir), "%s/.cc-build", g_out_root);
+            snprintf(ver_path, sizeof(ver_path), "%s/extmod-exports.ver", ver_dir);
+            (void)cc__mkdir_p(ver_dir);
+            /* The content is a constant, but concurrent module builds all
+             * name this path — never truncate in place (a parallel link may
+             * be reading it); write aside and rename, which is atomic. */
+            ver_ok = stat(ver_path, &ver_st) == 0 &&
+                     ver_st.st_size == (off_t)strlen(ver_body);
+            if (!ver_ok) {
+                char tmp_path[PATH_MAX + 32];
+                snprintf(tmp_path, sizeof(tmp_path), "%s.%d.tmp", ver_path,
+                         (int)getpid());
+                FILE* vf = fopen(tmp_path, "w");
+                if (vf) {
+                    fputs(ver_body, vf);
+                    fclose(vf);
+                    ver_ok = rename(tmp_path, ver_path) == 0;
+                    if (!ver_ok) unlink(tmp_path);
+                }
+            }
+            if (ver_ok) {
+                strncat(extmod_ldflags, ver_flag,
+                        sizeof(extmod_ldflags) - strlen(extmod_ldflags) - 1);
+                strncat(extmod_ldflags, ver_path,
+                        sizeof(extmod_ldflags) - strlen(extmod_ldflags) - 1);
+            } else {
+                fprintf(stderr, "cc: warning: cannot write %s; the module will "
+                                "export all symbols (and dead-strip nothing)\n",
+                        ver_path);
+            }
+        }
+#endif
         ld_flags = extmod_ldflags;
     }
 

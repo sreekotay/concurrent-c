@@ -245,6 +245,10 @@ typedef struct CC__PySyms {
     void (*ThreadStateClear)(void *);
     void (*ThreadStateDelete)(void *);
     void (*ThreadStateDeleteCurrent)(void);
+    /* Optional: minting Python callables from C (JS-callback bridging). */
+    void *(*CFunctionNewEx)(void *def, void *self, void *module);
+    void *(*CapsuleNew)(void *ptr, const char *name, void *dtor);
+    void *(*CapsuleGetPointer)(void *capsule, const char *name);
     void *(*InterpreterStateGet)(void);
     void *(*EvalSaveThread)(void);
     void (*EvalRestoreThread)(void *);
@@ -556,6 +560,9 @@ have_lib:
     CC__PY_SYM_OPT(ThreadStateClear, "PyThreadState_Clear")
     CC__PY_SYM_OPT(ThreadStateDelete, "PyThreadState_Delete")
     CC__PY_SYM_OPT(ThreadStateDeleteCurrent, "PyThreadState_DeleteCurrent")
+    CC__PY_SYM_OPT(CFunctionNewEx, "PyCFunction_NewEx")
+    CC__PY_SYM_OPT(CapsuleNew, "PyCapsule_New")
+    CC__PY_SYM_OPT(CapsuleGetPointer, "PyCapsule_GetPointer")
     CC__PY_SYM_OPT(InterpreterStateGet, "PyInterpreterState_Get")
     CC__PY_SYM_OPT(EvalSaveThread, "PyEval_SaveThread")
     CC__PY_SYM_OPT(EvalRestoreThread, "PyEval_RestoreThread")

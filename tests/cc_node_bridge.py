@@ -1,0 +1,91 @@
+"""cc-node rungs: Python using JavaScript — builtin Node packages stand
+in for npm ones (same resolution path, no install step in CI).
+Deterministic booleans; the paired smoke pins them."""
+import hashlib
+import sys
+
+sys.path.insert(0, "pypi/cc-node")
+import cc_node  # noqa: E402
+
+
+def out(name, cond):
+    print(name, "true" if cond else "false")
+
+
+js = cc_node.create()
+
+# 1. Packages: require resolves, chained calls, string results.
+path = js.require("path")
+out("require_builtin", path.join("a", "b") == "a/b")
+crypto = js.require("crypto")
+h = crypto.createHash("sha256")
+h2 = h.update("cc")  # returns the hash object: handle chaining
+digest = h2.digest("hex")
+out("handle_chain", digest == hashlib.sha256(b"cc").hexdigest())
+
+# 2. Plain data crosses by value, both directions.
+out("array_out", js.eval("[1, 2, 3].map(x => x * 2)") == [2, 4, 6])
+out("dict_out", js.eval("({a: 1, b: [true, null, 's']})") ==
+    {"a": 1, "b": [True, None, "s"]})
+pick = js.eval("(o) => o.a + o.b.length")
+out("dict_in", pick({"a": 2, "b": [1, 2, 3]}) == 5)
+out("nonfinite_out", str(js.eval("0/0")) == "nan")
+
+# 3. Async JS is free: the broker awaits thenables before replying.
+adouble = js.eval("async (x) => { await new Promise(r => setTimeout(r, 20)); return x * 2 }")
+out("async_awaited", adouble(21) == 42)
+
+# 4. Python callables cross as JS functions; exceptions cross back.
+# JS calling conventions apply: Array.map calls f(value, index, array).
+mapper = js.eval("(f, xs) => xs.map(f)")
+out("python_callback", mapper(lambda x, *rest: x * 3, [1, 2, 3]) == [3, 6, 9])
+thrower = js.eval("(f) => { try { f(); return 'no'; } catch (e) { return 'js saw: ' + e.message; } }")
+def boom():
+    raise ValueError("from python")
+out("py_exc_to_js", thrower(boom) == "js saw: from python")
+caller = js.eval("(f) => f()")
+try:
+    caller(boom)
+    out("py_exc_roundtrip", False)
+except cc_node.JsError as e:
+    out("py_exc_roundtrip", "from python" in str(e))
+
+# 5. Errors are articulate: missing packages, non-callable handles.
+try:
+    js.require("definitely_not_a_package_xyz")
+    out("missing_package", False)
+except cc_node.JsError as e:
+    out("missing_package", "Cannot find" in str(e))
+
+# 6. The ledger: stats counts handles; release drops them.
+before = js.stats()
+tmp = js.require("os")
+grew = js.stats() == before + 1
+js.release(tmp)
+out("stats_ledger", grew and js.stats() == before)
+
+# 7. Isolation: a second domain rejects the first one's handles.
+other = cc_node.create()
+try:
+    other.release(path)
+    out("cross_domain", False)
+except cc_node.JsError as e:
+    out("cross_domain", "another bridge" in str(e))
+other.destroy()
+
+# 8. Teardown: destroy is idempotent, every door answers after.
+js.destroy()
+js.destroy()
+out("destroy_idempotent", js.closed)
+try:
+    path.join("x")
+    out("after_close", False)
+except cc_node.JsError as e:
+    out("after_close", "closed" in str(e))
+
+# 9. Context manager scoping.
+with cc_node.create() as scoped:
+    out("with_scope", scoped.require("os").platform() == sys.platform.replace("linux2", "linux"))
+out("with_closes", scoped.closed)
+
+print("cc-node suite done")
