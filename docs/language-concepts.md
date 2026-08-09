@@ -95,36 +95,54 @@ io.println(@string(`n=${n}`, @scratch)) !>;
 
 ## 4. Slices remember where bytes live
 
-[recipe_arena_scope.ccs](../examples/recipe_arena_scope.ccs) · [recipe_long_lived_store.ccs](../examples/recipe_long_lived_store.ccs) · [Restricted access](../spec/draft_facets.md)
+[recipe_arena_scope.ccs](../examples/recipe_arena_scope.ccs) · [recipe_long_lived_store.ccs](../examples/recipe_long_lived_store.ccs) · [Allocator strategy](../spec/draft_alloc_strategy.md) · [Restricted access](../spec/draft_facets.md)
 
-`T[:]` is a view with provenance (stack, arena, static, unique, …).
-`char[:0]` is the NUL-terminated (sentinel) refinement — prefer `char[:0] s = "hi";` for string literals.
-Arenas bump-allocate. Ordinary slice sites allow loads and UFCS; field stores (`s.len = …`) are denied (`@restricted` on the slice family).
+An arena is a **lifetime annotation**: the `CCArena` binding owns the epoch;
+size the root for that lifetime’s typical live set. Slices are views — `T[:]`
+carries provenance (stack, arena, static, unique, …) so the compiler can reject
+views that outlive their storage. `char[:0]` is the NUL-terminated refinement —
+prefer `char[:0] s = "hi";` for string literals.
 
-| Arena | Storage | Typical use |
-|-------|---------|-------------|
-| `cc_arena_heap(n) @destroy` | malloc root; `@destroy` frees | request / long bump |
-| `cc_arena_stack(name, n)` | stack slab first (may grow) | hot-path / frame scratch |
-| `@scratch` | compiler stack scratch | `@string` / one-shot print |
+Arenas bump-allocate. Ordinary slice sites allow loads and UFCS; field stores
+(`s.len = …`) are denied (`@restricted` on the slice family).
+
+| Arena | Storage / growth | Typical use |
+|-------|------------------|-------------|
+| `cc_arena_heap(n) @destroy` | Heap root `n`; up to 4 slabs (~1.5×), then **heap overflow** (`malloc`, still arena-owned) | request / window |
+| `cc_arena_stack(name, n)` | Same policy; root on the stack | hot-path / frame scratch |
+| `@scratch` | Compiler stack scratch | `@string` / one-shot print |
 
 ```c
-/* Heap — owns the root; destroy at end of scope. */
+/* Heap — owns the root; @destroy frees slabs + overflow. */
 CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+CCStdio io = cc_stdio_create(&a);
 char* p = a.allocT(64);
+char[:] s = a.alloc_slice_bytes(32);   /* arena provenance */
 
 /* Stack — buffer lives in the frame; good for short work. */
 cc_arena_stack(tmp, 1024);
 char* q = tmp.allocT(32);
 
-/* Scratch — only for throwaway templates / println. */
-println(@string(`len=${a.remaining()}`, @scratch)) !>;
+/* Scratch — only for throwaway templates / print. */
+io.println(@string(`len=${a.remaining()}`, @scratch)) !>;
 
 char[:0] hi = "hi";
 ```
 
-A view must not outlive its storage — no stack/arena borrow into an outliving task or channel send.
-Own crossing that boundary: unique (`T[:!]` / `cc_adopt`), static, or write into the channel (`send_into`).
-Do not send or capture a slice from `@scratch` or a stack arena past the frame.
+**Auto overflow:** when the current slab cannot fit an alloc, heap/stack arenas
+grow within `block_max` (default 4), then spill to overflow `malloc`. Overflow
+bytes remain owned by the arena — `reset` / `@destroy` frees them too. A tiny
+root still allocates; it just spends more time in overflow. Prefer another
+arena when lifetimes diverge; treat `cc_arena_release` / overflow as escape
+hatches, not the steady path. Fixed arenas with overflow off return `NULL` on
+exhaustion (never silent success).
+
+A view must not outlive its storage — no stack/arena borrow into an outliving
+task or channel send. Capturing a non-unique arena slice into a nursery **pins**
+that arena’s epoch until join (reset/destroy while pinned is a compile error).
+Own crossing that boundary: unique (`T[:!]` / `cc_adopt`), static, or write into
+the channel (`send_into`). Do not send or capture a slice from `@scratch` or a
+stack arena past the frame.
 
 Same `[…]` family: `T[n]` arrays, `T[~n >]` / `T[~n <]` channels.
 

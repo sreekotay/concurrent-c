@@ -90,7 +90,7 @@ What that program uses:
 | `@errhandler(…)` | Scope policy for fallible unwraps that use bare `!>;` |
 | `T!>(E)` / `!>` | Fallible value; `!>` unwraps or runs error code |
 | `!> @destroy` | Unwrap, then schedule cleanup — **`@destroy` is `@defer` sugar attached to the binding** (same LIFO ledger; only runs if the unwrap succeeded) |
-| `CCArena` / `CCStdio` | Scratch for script I/O; prefer **`io.println(…)`** when a handle is in scope (naked `println` / data-first `.println()` still work) |
+| `CCArena` / `CCStdio` | Arena = allocator **and** lifetime for the window; `io` borrows it — prefer **`io.println(…)`** (see [Arenas](#arenas-lifetime-not-just-malloc)) |
 | `CCNursery*` | Structured-concurrency scope: teardown waits for spawned tasks |
 | `n->spawn(() => [io] { … })` | UFCS spawn of a closure; capture `io` by value into the task |
 
@@ -124,10 +124,52 @@ Concurrent-C keeps C’s model and adds a small surface. Learn these next in
 | Cleanup | `@defer …` (statement on the scope). `@destroy` is the same defer ledger, written on the **declaration** — bodyless form calls the type’s registered destroy |
 | Errors as values | `T!>(E)`, then `?>` (default) or `!>` / `!>;` (must leave); `!> @destroy` = successful unwrap + deferred destroy |
 | Methods | `recv.method(args)` — ordinary functions; prefer UFCS at call sites |
-| Slices / arenas | `T[:]`, `cc_arena_heap` / `@scratch`, provenance rules |
+| Arenas / slices | bump allocator as a **lifetime**; `T[:]` views carry provenance (below) |
 | Closures | `() => …`, `[x]() => …`, `[&x]() => …` — tasks re-bind `@errhandler` |
 
 Quick reference: [Cheatsheet](cheatsheet.md). Full rules: [language spec](../spec/concurrent-c-spec-complete.md).
+
+## Arenas (lifetime, not just malloc)
+
+An arena is Concurrent-C’s usual allocator **and** a lifetime annotation: the
+`CCArena` binding is the scope that owns the bytes. Allocate into it; when the
+arena is destroyed (or reset), every allocation from that epoch is gone.
+Slices (`T[:]`) remember which arena (or stack / static / unique) they came
+from — that provenance is what the compiler uses to reject “view outlives
+storage.”
+
+```c
+CCArena a = cc_arena_heap(kilobytes(4)) @destroy;  /* lifetime = this binding */
+CCStdio io = cc_stdio_create(&a);
+char* p = a.allocT(64);
+char[:] s = a.alloc_slice_bytes(32);               /* arena provenance */
+io.println(@string(`len=${s.len}`, @scratch)) !>;  /* @scratch: throwaway only */
+```
+
+**How growth works** (`cc_arena_heap` / `cc_arena_stack` defaults):
+
+1. Bump-allocate in the **root** slab of size `N` (size `N` for the typical live set).
+2. When the root is full, grow with more slabs (up to four, ~1.5× each).
+3. Past that budget, **heap overflow** kicks in: `malloc` for the request, still
+   owned by the arena — freed on `reset` / `@destroy`, same as slab bytes.
+
+So a tiny root still works; traffic just spends more time in overflow (costlier
+alloc and drain). Overflow is the escape hatch, not the steady-state path.
+Prefer a second arena when lifetimes diverge rather than churning
+`cc_arena_release` on a long-lived one.
+
+| Constructor | Role |
+|-------------|------|
+| `cc_arena_heap(N) @destroy` | Heap root; default grow + overflow — request / window scratch |
+| `cc_arena_stack(name, N)` | Same policy; root on the stack — hot frame scratch |
+| `@scratch` | Compiler stack scratch for one-shot `@string` / print — do not capture or send |
+
+Rules of thumb: a view must not outlive its arena; do not capture stack /
+`@scratch` slices into a task or channel. Capturing an arena slice into a
+nursery **pins** that arena until join (no reset/destroy while the pin is live).
+More: [Language Concepts §4](language-concepts.md#4-slices-remember-where-bytes-live),
+[recipe_arena_scope.ccs](../examples/recipe_arena_scope.ccs),
+[allocator strategy](../spec/draft_alloc_strategy.md).
 
 ## Concurrency
 
