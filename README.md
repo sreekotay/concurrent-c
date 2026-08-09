@@ -43,6 +43,32 @@ Fuller example (error policy + compose): [examples/hello.ccs](examples/hello.ccs
 - [`npm/cc-python`](npm/cc-python) — Python from Node: any module, zero-copy typed arrays, async lanes, N×numpy isolated domains
 - [`pypi/cc-node`](pypi/cc-node) — JavaScript and npm packages from Python, same domain model mirrored
 
+### Real programs, measured
+
+Specimens under [`real_projects/`](real_projects/) hold one bar for
+tutorial, idiomatic, and production code — and race their upstreams
+(dated baselines with full output live in each folder's `benchmarks/`):
+
+- [**pigz**](real_projects/pigz/) — parallel gzip, feature-complete next
+  to upstream C: **191 MB/s vs upstream pigz's 166 MB/s** on 100MB
+  (fiber scheduler vs pthreads), plus an idiomatic pipeline file you can
+  read in one sitting.
+- [**Redis**](real_projects/redis/) — the data-plane subset benched with
+  `redis-benchmark` against upstream: parity at one connection, **SET at
+  P=16: 2.90M vs 2.38M rps**.
+- [**levenshtein**](real_projects/levenshtein/) — a CPython extension in
+  CC vs the upstream C extension: **1.4-1.9x faster** across
+  distance/ratio/jaro (90ns vs 166ns on short words).
+- [**The Neckbeard Challenges**](perf/run_neckbeard_challenges.sh) — six
+  cross-language robustness gauntlets (syscall kidnapping, wake storms,
+  fairness, named locks) run head-to-head against pthreads, Go, and Zig,
+  each sub-benchmark's verdict printed verbatim:
+  [latest record](perf/benchmarks/neckbeard_2026_07_26.txt).
+- [**CVE locality study**](studies/cve_locality/) — 27 real CVE/shape
+  reconstructions under idiomatic CC, pre-registered rules, misses
+  counted as backlog: **19 prevented, 6 mitigated, 2 still expressible**
+  — every demo builds and runs.
+
 Compiler internals: [architecture](cc/docs/ARCHITECTURE.md), [shadow_lower ops / layout](cc/shadow/README.md), [bootstrap](cc/bootstrap/shadow_lower/README.md). Legacy opt-out (`--frontend=legacy`): [legacy architecture](cc/docs/LEGACY_ARCHITECTURE.md), [cleanup status](cc/docs/COMPILER_CLEANUP_STATUS.md), [debug vars](cc/src/diag/DEBUG_VARS.md).
 
 ### Install
