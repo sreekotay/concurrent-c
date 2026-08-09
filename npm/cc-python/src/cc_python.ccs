@@ -66,6 +66,7 @@ struct CcPyObjBox {
 struct CcPyJob {
     int what; /* 0 */
     CcPyJob *next;
+    CcPyDom *dom;
     void *fn; /* owned PyObject*, DecRef'd by the executor */
     CCPyArg args[CCPY__JOB_MAX_ARGS];
     int argc;
@@ -81,6 +82,10 @@ struct CcPyJob {
     char errmsg[240];
     void *deferred; /* settled on the main thread; NULL for the sentinel */
     int rejected; /* drained before running */
+    /* stage-2: a call that returned a coroutine becomes an asyncio task;
+     * the job completes at task-done, not at call-return */
+    int scheduled;
+    void *task; /* owned asyncio.Task while on the scheduled list */
 };
 
 /* A JS function registered as a Python callable.  Arena-owned and
@@ -120,6 +125,13 @@ struct CcJsCbReq {
     void *robj; /* owned PyObject, IncRef'd on main under the GIL */
     pthread_cond_t cv; /* signaled under d->mu */
     CcJsCbReq *up; /* next-outer suspended request (waiter stack) */
+    /* stage-2: a callback invoked from inside an asyncio task returns an
+     * awaitable instead of blocking.  The record then lives in the
+     * domain arena (the trampoline returns immediately), `fut` is the
+     * loop-thread future the settle fills, and the condvar fields are
+     * unused.  `up` doubles as the freelist link. */
+    int aio;
+    void *fut; /* owned asyncio.Future */
 };
 
 struct CcPyDom {
@@ -166,16 +178,46 @@ struct CcPyDom {
                            * executor notices new work and revocation */
     void *main_env; /* the creating thread's env: case-1 calls, ref cleanup */
     pthread_t main_tid;
+    /* ---- stage-2: the asyncio lane ----
+     * Engaged lazily by the first coroutine result: the executor thread
+     * hands itself to loop.run_forever(), submissions pump via
+     * call_soon_threadsafe, coroutine jobs interleave as tasks, and a
+     * callback invoked from inside a task returns an awaitable future.
+     * The sync FIFO path (and its latency) is untouched until then. */
+    int loop_mode;
+    int loop_closed;
+    void *aio; /* owned asyncio module */
+    void *loop; /* owned event loop */
+    void *pump; /* owned C pump callable (capsule carries the domain) */
+    void *rterr; /* owned builtins.RuntimeError, for future rejections */
+    CcJsCbReq *cbreq_free; /* recycled arena-resident aio requests */
+    CcPyJob *sched_head; /* jobs living as asyncio tasks (via j->next) */
+    long long sched_live; /* |sched_head| — gates idle unref/resets */
+    long long cb_live; /* outstanding aio callback futures — same gate */
 };
 
 /* The last outstanding External — object or domain, whichever collects
- * last — takes the arena (and the domain inside it) down. */
+ * last — takes the arena (and the domain inside it) down.  The count is
+ * mutex-guarded because stage-2 settles release holds from the loop
+ * thread; zero is still only reachable on the main thread (the lane's
+ * own hold outlives the loop thread and releases at the sentinel), so
+ * the destroy below never races the executor. */
 static void ccpy__dom_unref(CcPyDom *d) {
-    if (--d->ext_outstanding > 0) return;
+    long long left;
+    pthread_mutex_lock(&d->mu);
+    left = --d->ext_outstanding;
+    pthread_mutex_unlock(&d->mu);
+    if (left > 0) return;
     {
         CCArena tmp = d->arena;
         cc_arena_destroy(&tmp); /* d is inside it — gone now */
     }
+}
+
+static void ccpy__dom_hold(CcPyDom *d) {
+    pthread_mutex_lock(&d->mu);
+    d->ext_outstanding++;
+    pthread_mutex_unlock(&d->mu);
 }
 
 /* Revocation, shared by close() and the GC finalizer: release every
@@ -209,6 +251,22 @@ static void ccpy__dom_sweep(CcPyDom *d) {
             cb = cb->next;
         }
         d->cb_head = NULL;
+    }
+    if (d->aio) {
+        cc__py.DecRef(d->aio);
+        d->aio = NULL;
+    }
+    if (d->loop) {
+        cc__py.DecRef(d->loop);
+        d->loop = NULL;
+    }
+    if (d->pump) {
+        cc__py.DecRef(d->pump);
+        d->pump = NULL;
+    }
+    if (d->rterr) {
+        cc__py.DecRef(d->rterr);
+        d->rterr = NULL;
     }
     if (d->none) {
         cc__py.DecRef(d->none);
@@ -272,7 +330,12 @@ static void ccpy__dom_finalize(void *env, void *data, void *hint) {
 static CcPyObjBox *ccpy__box(CcPyDom *d, CCPyObj o) {
     CcPyObjBox *b = d->free_boxes;
     if (b) d->free_boxes = b->next;
-    else b = (CcPyObjBox *)cc_arena_alloc(&d->arena, sizeof(*b), 16);
+    else {
+        /* the loop thread also allocates from this arena (aio requests) */
+        pthread_mutex_lock(&d->mu);
+        b = (CcPyObjBox *)cc_arena_alloc(&d->arena, sizeof(*b), 16);
+        pthread_mutex_unlock(&d->mu);
+    }
     if (!b) {
         cc_py_obj_release(&o);
         return NULL;
@@ -302,12 +365,15 @@ static void ccpy__box_undo(CcPyDom *d, CcPyObjBox *b) {
 static int ccpy__ext_make(CcPyDom *d, void *env, CcPyObjBox *b, void **out) {
     if (cc__js.CreateExternal(env, b, ccpy__obj_finalize, NULL, out) != 0)
         return -1;
-    d->ext_outstanding++;
+    ccpy__dom_hold(d);
     return 0;
 }
 
 static int ccpy__result_to_js(CcPyDom *d, void *env, CCPyObj r, void **out);
 static void ccpy__exec_run(CcPyDom *d, CcPyJob *j);
+static int ccpy__aio_in_task(CcPyDom *d);
+static void *ccpy__cb_call_aio(CcPyDom *d, CcJsCbBox *box, void *args, int n);
+static void ccpy__aio_req_finish(CcPyDom *d, CcJsCbReq *req);
 
 /* ---- JS callbacks crossing into Python ------------------------------ */
 
@@ -539,6 +605,13 @@ static void *ccpy__cb_call_lane(CcPyDom *d, CcJsCbBox *box, void *args,
                 pthread_mutex_unlock(&d->mu);
                 ccpy__exec_run(d, nj);
                 cc_py_thread_leave();
+                if (nj->scheduled) {
+                    /* the nested call became an asyncio task: it runs
+                     * once this suspension unwinds and exec_main hands
+                     * the thread to the loop — no completion yet */
+                    pthread_mutex_lock(&d->mu);
+                    continue;
+                }
                 pthread_mutex_lock(&d->mu);
                 d->pending_done++;
                 pthread_mutex_unlock(&d->mu);
@@ -574,8 +647,15 @@ static void *ccpy__cb_trampoline(void *self, void *args) {
         return cc__py_raise("cc-python: too many callback arguments");
     if (pthread_equal(pthread_self(), d->main_tid))
         return ccpy__cb_call_main(d, box, args, (int)n);
-    if (d->async_mode && pthread_equal(pthread_self(), d->exec))
+    if (d->async_mode && pthread_equal(pthread_self(), d->exec)) {
+        /* Inside an asyncio task the callback returns an awaitable —
+         * only that task suspends, the loop keeps running.  Sync
+         * callables (pump callbacks: current_task is None) keep the
+         * blocking stage-1 shape. */
+        if (ccpy__aio_in_task(d))
+            return ccpy__cb_call_aio(d, box, args, (int)n);
         return ccpy__cb_call_lane(d, box, args, (int)n);
+    }
     return cc__py_raise("cc-python: callbacks must run on the bridge's "
                         "threads");
 }
@@ -589,6 +669,15 @@ static void ccpy__cb_settle(CcPyDom *d, CcJsCbReq *req) {
     req->done = 1;
     pthread_cond_signal(&req->cv);
     pthread_mutex_unlock(&d->mu);
+}
+
+/* One conclusion door for both request flavors: a stack request wakes
+ * the blocked executor; an arena (awaitable) request hands its tags to
+ * the loop thread, which settles the future. */
+static void ccpy__cb_conclude(CcPyDom *d, CcJsCbReq *req) {
+    req->done = 1; /* main is the only writer; guards double-settle */
+    if (req->aio) ccpy__aio_req_finish(d, req);
+    else ccpy__cb_settle(d, req);
 }
 
 static void *ccpy__cb_then_ok(void *env, void *info) {
@@ -607,7 +696,7 @@ static void *ccpy__cb_then_ok(void *env, void *info) {
                          &req->ri, &req->rstr, &req->rlen, &req->robj,
                          req->errmsg, sizeof(req->errmsg)) != 0)
         req->failed = 1;
-    ccpy__cb_settle(d, req);
+    ccpy__cb_conclude(d, req);
     return NULL;
 }
 
@@ -629,7 +718,7 @@ static void *ccpy__cb_then_err(void *env, void *info) {
         (void)cc__js.GetValueStringUtf8(env, str, req->errmsg,
                                         sizeof(req->errmsg), &got);
     req->failed = 1;
-    ccpy__cb_settle(req->box->dom, req);
+    ccpy__cb_conclude(req->box->dom, req);
     return NULL;
 }
 
@@ -756,10 +845,7 @@ static void ccpy__cb_service(void *env, CcJsCbReq *req) {
                          sizeof(req->errmsg)) != 0)
         failed = 1;
     req->failed = failed;
-    pthread_mutex_lock(&d->mu);
-    req->done = 1;
-    pthread_cond_signal(&req->cv);
-    pthread_mutex_unlock(&d->mu);
+    ccpy__cb_conclude(d, req);
 }
 
 /* Wrap a JS function as a Python callable registered with the domain.
@@ -776,7 +862,9 @@ static void *ccpy__cb_wrap(CcPyDom *d, void *env, void *fnval, char *errbuf,
                                  "callables (needs PyCFunction_NewEx)");
         return NULL;
     }
+    pthread_mutex_lock(&d->mu);
     box = (CcJsCbBox *)cc_arena_alloc(&d->arena, sizeof(*box), 16);
+    pthread_mutex_unlock(&d->mu);
     if (!box) {
         snprintf(errbuf, errcap, "cc-python: out of memory");
         return NULL;
@@ -805,10 +893,90 @@ static void *ccpy__cb_wrap(CcPyDom *d, void *env, void *fnval, char *errbuf,
 
 /* ---- the async lane ------------------------------------------------- */
 
+/* Tag one owned Python value into a job's result slots — shared by the
+ * direct call path and the asyncio task-done path. */
+static void ccpy__job_tag(CcPyDom *d, CcPyJob *j, CCPyObj val) {
+    {
+        void *o = val.o;
+        void *t = cc__py.BoolFromLong(1);
+        void *f = cc__py.BoolFromLong(0);
+        int is_t = (o == t), is_f = (o == f);
+        if (t) cc__py.DecRef(t);
+        if (f) cc__py.DecRef(f);
+        if (is_t || is_f) {
+            j->rkind = 2;
+            j->ri = is_t;
+            cc_py_obj_release(&val);
+            return;
+        }
+    }
+    if (d->none && val.o == d->none) {
+        j->rkind = 4;
+        cc_py_obj_release(&val);
+        return;
+    }
+    {
+        intptr_t n = 0;
+        const char *s = cc__py.AsUTF8AndSize(val.o, &n);
+        if (s) {
+            char *copy =
+                (char *)cc_arena_alloc(&d->exec_arena, (size_t)n + 1, 16);
+            if (copy) {
+                memcpy(copy, s, (size_t)n);
+                copy[n] = 0;
+                j->rkind = 3;
+                j->rstr = copy;
+                j->rlen = (size_t)n;
+                cc_py_obj_release(&val);
+                return;
+            }
+        }
+        if (cc__py.ErrClear) cc__py.ErrClear();
+    }
+    {
+        CCResult_int64_t_CCPyError iv = cc_py_obj_as_i64(&val);
+        if (iv.ok) {
+            j->rkind = 1;
+            j->ri = (long long)iv.u.value;
+            cc_py_obj_release(&val);
+            return;
+        }
+        if (cc__py.ErrClear) cc__py.ErrClear();
+    }
+    {
+        CCResult_double_CCPyError fv = cc_py_obj_as_f64(&val);
+        if (fv.ok) {
+            j->rkind = 0;
+            j->rf = fv.u.value;
+            cc_py_obj_release(&val);
+            return;
+        }
+        if (cc__py.ErrClear) cc__py.ErrClear();
+    }
+    j->rkind = 5;
+    j->robj = val.o; /* keep the reference for the main thread */
+}
+
+/* A coroutine object and nothing else: `cr_code` is coroutine-specific
+ * (generators spell gi_code), so no asyncio import on the probe path. */
+static int ccpy__is_coro(void *o) {
+    void *a = cc__py.GetAttrString(o, "cr_code");
+    if (!a) {
+        if (cc__py.ErrClear) cc__py.ErrClear();
+        return 0;
+    }
+    cc__py.DecRef(a);
+    return 1;
+}
+
+static int ccpy__aio_schedule(CcPyDom *d, CcPyJob *j, CCPyObj coro);
+
 /* Executor side of one job: attach this thread to the domain's
  * interpreter, run the call, convert a scalar result in place (a held
  * result keeps its reference for the main thread to box), and drop the
- * job's own Python references. */
+ * job's own Python references.  A coroutine result does not complete
+ * here: it becomes an asyncio task (engaging loop mode on first use)
+ * and the job posts at task-done. */
 static void ccpy__exec_run(CcPyDom *d, CcPyJob *j) {
     CCResult_CCPyObj_CCPyError r;
     int i;
@@ -830,65 +998,675 @@ static void ccpy__exec_run(CcPyDom *d, CcPyJob *j) {
                                         : "python error");
         return;
     }
-    {
-        void *o = r.u.value.o;
-        void *t = cc__py.BoolFromLong(1);
-        void *f = cc__py.BoolFromLong(0);
-        int is_t = (o == t), is_f = (o == f);
-        if (t) cc__py.DecRef(t);
-        if (f) cc__py.DecRef(f);
-        if (is_t || is_f) {
-            j->rkind = 2;
-            j->ri = is_t;
-            cc_py_obj_release(&r.u.value);
-            return;
-        }
-    }
-    if (d->none && r.u.value.o == d->none) {
-        j->rkind = 4;
-        cc_py_obj_release(&r.u.value);
+    if (ccpy__is_coro(r.u.value.o)) {
+        if (ccpy__aio_schedule(d, j, r.u.value) == 0) j->scheduled = 1;
+        /* on failure the schedule tagged rkind 6 and the job posts */
         return;
     }
+    ccpy__job_tag(d, j, r.u.value);
+}
+
+/* ---- stage-2: the asyncio loop on the lane -------------------------- */
+
+static void *ccpy__aio_pump(void *self, void *args);
+static void *ccpy__aio_taskdone(void *self, void *args);
+static void *ccpy__aio_settle(void *self, void *args);
+
+static CcPyMethodDefMirror ccpy__pump_def = {
+    "cc_pump", ccpy__aio_pump, CC__PY_METH_VARARGS,
+    "cc-python job pump (runs on the lane's asyncio loop)",
+};
+static CcPyMethodDefMirror ccpy__taskdone_def = {
+    "cc_task_done", ccpy__aio_taskdone, CC__PY_METH_VARARGS,
+    "cc-python task completion (posts the job's result)",
+};
+static CcPyMethodDefMirror ccpy__settle_def = {
+    "cc_settle", ccpy__aio_settle, CC__PY_METH_VARARGS,
+    "cc-python future settle (fills an awaited callback's result)",
+};
+
+static void *ccpy__py_none(CcPyDom *d) {
+    if (d->none) {
+        cc__py.IncRef(d->none);
+        return d->none;
+    }
+    return cc__py_raise("cc-python: interpreter has no None");
+}
+
+/* "Type: message" from an exception OBJECT (not a pending error) — the
+ * shape exception text keeps in BOTH crossing directions. */
+static void ccpy__exc_text(CcPyDom *d, void *exc, char *buf, size_t cap) {
+    const char *tn = NULL;
+    intptr_t tl = 0;
+    const char *ms = NULL;
+    intptr_t ml = 0;
+    void *cls = cc__py.GetAttrString(exc, "__class__");
+    void *nm = cls ? cc__py.GetAttrString(cls, "__name__") : NULL;
+    void *msg = NULL;
+    if (nm) tn = cc__py.AsUTF8AndSize(nm, &tl);
     {
-        intptr_t n = 0;
-        const char *s = cc__py.AsUTF8AndSize(r.u.value.o, &n);
-        if (s) {
-            char *copy =
-                (char *)cc_arena_alloc(&d->exec_arena, (size_t)n + 1, 16);
-            if (copy) {
-                memcpy(copy, s, (size_t)n);
-                copy[n] = 0;
-                j->rkind = 3;
-                j->rstr = copy;
-                j->rlen = (size_t)n;
-                cc_py_obj_release(&r.u.value);
-                return;
+        CCPyObj e;
+        e.o = exc;
+        e.home = &d->py;
+        {
+            CCResult_CCPyObj_CCPyError r =
+                cc__py_obj_callm_n(&e, "__str__", 0, NULL);
+            if (r.ok) {
+                msg = r.u.value.o;
+                ms = cc__py.AsUTF8AndSize(msg, &ml);
             }
         }
+    }
+    if (cc__py.ErrClear) cc__py.ErrClear();
+    if (tn && ms && ml > 0)
+        snprintf(buf, cap, "%.*s: %.*s", (int)tl, tn, (int)ml, ms);
+    else if (tn) snprintf(buf, cap, "%.*s", (int)tl, tn);
+    else snprintf(buf, cap, "python task failed");
+    if (msg) cc__py.DecRef(msg);
+    if (nm) cc__py.DecRef(nm);
+    if (cls) cc__py.DecRef(cls);
+}
+
+static int ccpy__truthy(CcPyDom *d, CCPyObj *v) {
+    CCResult_int64_t_CCPyError iv = cc_py_obj_as_i64(v);
+    (void)d;
+    if (iv.ok) return iv.u.value != 0;
+    if (cc__py.ErrClear) cc__py.ErrClear();
+    return 0;
+}
+
+/* Engage loop mode: import asyncio, build the loop and the pump.  Lane
+ * thread, GIL held.  Idempotent; failure is the caller's articulate
+ * error (never a silent sync fallback). */
+static int ccpy__aio_ensure(CcPyDom *d) {
+    void *aio;
+    void *loop = NULL;
+    void *pump = NULL;
+    void *rterr = NULL;
+    if (d->loop_mode) return 0;
+    if (!cc__py.CFunctionNewEx || !cc__py.CapsuleNew ||
+        !cc__py.CapsuleGetPointer)
+        return -1;
+    aio = cc__py.ImportModule("asyncio");
+    if (!aio) {
         if (cc__py.ErrClear) cc__py.ErrClear();
+        return -1;
     }
     {
-        CCResult_int64_t_CCPyError iv = cc_py_obj_as_i64(&r.u.value);
-        if (iv.ok) {
-            j->rkind = 1;
-            j->ri = (long long)iv.u.value;
-            cc_py_obj_release(&r.u.value);
-            return;
+        CCPyObj m;
+        m.o = aio;
+        m.home = &d->py;
+        {
+            CCResult_CCPyObj_CCPyError r =
+                cc__py_obj_callm_n(&m, "new_event_loop", 0, NULL);
+            if (!r.ok) {
+                cc__py.DecRef(aio);
+                return -1;
+            }
+            loop = r.u.value.o;
         }
-        if (cc__py.ErrClear) cc__py.ErrClear();
     }
     {
-        CCResult_double_CCPyError fv = cc_py_obj_as_f64(&r.u.value);
-        if (fv.ok) {
-            j->rkind = 0;
-            j->rf = fv.u.value;
-            cc_py_obj_release(&r.u.value);
-            return;
-        }
-        if (cc__py.ErrClear) cc__py.ErrClear();
+        void *cap = cc__py.CapsuleNew(d, "cc-python.dom", NULL);
+        pump = cap ? cc__py.CFunctionNewEx(&ccpy__pump_def, cap, NULL) : NULL;
+        if (cap) cc__py.DecRef(cap);
     }
-    j->rkind = 5;
-    j->robj = r.u.value.o; /* keep the reference for the main thread */
+    {
+        void *b = cc__py.ImportModule("builtins");
+        if (b) {
+            rterr = cc__py.GetAttrString(b, "RuntimeError");
+            cc__py.DecRef(b);
+        }
+        if (!rterr && cc__py.ErrClear) cc__py.ErrClear();
+    }
+    if (!pump) {
+        if (cc__py.ErrClear) cc__py.ErrClear();
+        cc__py.DecRef(loop);
+        cc__py.DecRef(aio);
+        if (rterr) cc__py.DecRef(rterr);
+        return -1;
+    }
+    pthread_mutex_lock(&d->mu);
+    d->aio = aio;
+    d->loop = loop;
+    d->pump = pump;
+    d->rterr = rterr;
+    d->loop_mode = 1;
+    pthread_mutex_unlock(&d->mu);
+    return 0;
+}
+
+/* Coroutine -> asyncio task, job completes at task-done.  Lane thread,
+ * GIL held; owns (and releases) the coroutine either way. */
+static int ccpy__aio_schedule(CcPyDom *d, CcPyJob *j, CCPyObj coro) {
+    void *task = NULL;
+    if (ccpy__aio_ensure(d) != 0) {
+        j->rkind = 6;
+        snprintf(j->errmsg, sizeof(j->errmsg),
+                 "cc-python: the call returned a coroutine but this Python "
+                 "runtime cannot host an asyncio lane (needs asyncio and "
+                 "PyCFunction_NewEx)");
+        cc_py_obj_release(&coro);
+        return -1;
+    }
+    {
+        CCPyObj lo;
+        CCPyArg a;
+        lo.o = d->loop;
+        lo.home = &d->py;
+        a = cc__py_arg_obj(coro);
+        {
+            CCResult_CCPyObj_CCPyError r =
+                cc__py_obj_callm_n(&lo, "create_task", 1, &a);
+            cc_py_obj_release(&coro);
+            if (!r.ok) {
+                j->rkind = 6;
+                snprintf(j->errmsg, sizeof(j->errmsg), "%s",
+                         r.u.error.base.message ? r.u.error.base.message
+                                                : "cannot schedule the task");
+                return -1;
+            }
+            task = r.u.value.o;
+        }
+    }
+    {
+        void *cap = cc__py.CapsuleNew(j, "cc-python.job", NULL);
+        void *dcb =
+            cap ? cc__py.CFunctionNewEx(&ccpy__taskdone_def, cap, NULL) : NULL;
+        if (cap) cc__py.DecRef(cap);
+        if (!dcb) {
+            CCPyObj t;
+            t.o = task;
+            t.home = &d->py;
+            if (cc__py.ErrClear) cc__py.ErrClear();
+            {
+                CCResult_CCPyObj_CCPyError rc =
+                    cc__py_obj_callm_n(&t, "cancel", 0, NULL);
+                if (rc.ok) cc_py_obj_release(&rc.u.value);
+                else if (cc__py.ErrClear) cc__py.ErrClear();
+            }
+            cc__py.DecRef(task);
+            j->rkind = 6;
+            snprintf(j->errmsg, sizeof(j->errmsg),
+                     "cc-python: cannot mint the task callback");
+            return -1;
+        }
+        {
+            CCPyObj t;
+            CCPyObj dv;
+            CCPyArg da;
+            t.o = task;
+            t.home = &d->py;
+            dv.o = dcb;
+            dv.home = &d->py;
+            da = cc__py_arg_obj(dv);
+            {
+                CCResult_CCPyObj_CCPyError r2 =
+                    cc__py_obj_callm_n(&t, "add_done_callback", 1, &da);
+                cc__py.DecRef(dcb);
+                if (!r2.ok) {
+                    if (cc__py.ErrClear) cc__py.ErrClear();
+                    cc__py.DecRef(task);
+                    j->rkind = 6;
+                    snprintf(j->errmsg, sizeof(j->errmsg),
+                             "cc-python: cannot attach the task callback");
+                    return -1;
+                }
+                cc_py_obj_release(&r2.u.value);
+            }
+        }
+    }
+    j->task = task;
+    pthread_mutex_lock(&d->mu);
+    j->next = d->sched_head;
+    d->sched_head = j;
+    d->sched_live++;
+    pthread_mutex_unlock(&d->mu);
+    return 0;
+}
+
+/* Task completion — loop thread, GIL held.  Tags the job (result,
+ * exception as "Type: message", or the drain rejection) and posts it. */
+static void *ccpy__aio_taskdone(void *self, void *args) {
+    CcPyJob *j = cc__py.CapsuleGetPointer
+                     ? (CcPyJob *)cc__py.CapsuleGetPointer(self, "cc-python.job")
+                     : NULL;
+    CcPyDom *d;
+    void *task;
+    if (!j) return cc__py_raise("cc-python: corrupt task capsule");
+    d = j->dom;
+    task = (args && cc__py.TupleSize(args) > 0)
+               ? cc__py.TupleGetItem(args, 0) /* borrowed */
+               : NULL;
+    pthread_mutex_lock(&d->mu);
+    {
+        CcPyJob **pp = &d->sched_head;
+        while (*pp && *pp != j) pp = &(*pp)->next;
+        if (*pp) {
+            *pp = j->next;
+            d->sched_live--;
+        }
+    }
+    pthread_mutex_unlock(&d->mu);
+    j->next = NULL;
+    if (j->task) {
+        cc__py.DecRef(j->task);
+        j->task = NULL;
+    }
+    if (!task) {
+        j->rkind = 6;
+        snprintf(j->errmsg, sizeof(j->errmsg), "cc-python: task vanished");
+    } else {
+        CCPyObj t;
+        t.o = task;
+        t.home = &d->py;
+        {
+            CCResult_CCPyObj_CCPyError rc =
+                cc__py_obj_callm_n(&t, "cancelled", 0, NULL);
+            int was_cancelled = 0;
+            if (rc.ok) {
+                was_cancelled = ccpy__truthy(d, &rc.u.value);
+                cc_py_obj_release(&rc.u.value);
+            } else if (cc__py.ErrClear) {
+                cc__py.ErrClear();
+            }
+            if (was_cancelled) {
+                j->rejected = 1; /* settles as "bridge is closed" */
+            } else {
+                CCResult_CCPyObj_CCPyError re =
+                    cc__py_obj_callm_n(&t, "exception", 0, NULL);
+                if (!re.ok) {
+                    j->rkind = 6;
+                    snprintf(j->errmsg, sizeof(j->errmsg), "%s",
+                             re.u.error.base.message
+                                 ? re.u.error.base.message
+                                 : "python task failed");
+                } else if (re.u.value.o && re.u.value.o != d->none) {
+                    j->rkind = 6;
+                    ccpy__exc_text(d, re.u.value.o, j->errmsg,
+                                   sizeof(j->errmsg));
+                    cc_py_obj_release(&re.u.value);
+                } else {
+                    cc_py_obj_release(&re.u.value);
+                    {
+                        CCResult_CCPyObj_CCPyError rr =
+                            cc__py_obj_callm_n(&t, "result", 0, NULL);
+                        if (rr.ok) {
+                            ccpy__job_tag(d, j, rr.u.value);
+                        } else {
+                            j->rkind = 6;
+                            snprintf(j->errmsg, sizeof(j->errmsg), "%s",
+                                     rr.u.error.base.message
+                                         ? rr.u.error.base.message
+                                         : "python task failed");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    pthread_mutex_lock(&d->mu);
+    d->pending_done++;
+    pthread_mutex_unlock(&d->mu);
+    cc__js.CallTsfn(d->tsfn, j, 1);
+    return ccpy__py_none(d);
+}
+
+/* The queue, serviced from the loop: run sync calls inline (they block
+ * the loop — choosing sync is choosing that), schedule coroutines, and
+ * under `stopping` reject the backlog and stop the loop.  Loop thread,
+ * GIL held throughout. */
+static void *ccpy__aio_pump(void *self, void *args) {
+    CcPyDom *d = cc__py.CapsuleGetPointer
+                     ? (CcPyDom *)cc__py.CapsuleGetPointer(self, "cc-python.dom")
+                     : NULL;
+    (void)args;
+    if (!d) return cc__py_raise("cc-python: corrupt pump capsule");
+    for (;;) {
+        CcPyJob *j;
+        int stopping;
+        pthread_mutex_lock(&d->mu);
+        j = d->qhead;
+        if (j) {
+            d->qhead = j->next;
+            if (!d->qhead) d->qtail = NULL;
+            j->next = NULL;
+        }
+        stopping = d->stopping;
+        pthread_mutex_unlock(&d->mu);
+        if (!j) {
+            if (stopping) {
+                CCPyObj lo;
+                lo.o = d->loop;
+                lo.home = &d->py;
+                {
+                    CCResult_CCPyObj_CCPyError r =
+                        cc__py_obj_callm_n(&lo, "stop", 0, NULL);
+                    if (r.ok) cc_py_obj_release(&r.u.value);
+                    else if (cc__py.ErrClear) cc__py.ErrClear();
+                }
+            }
+            break;
+        }
+        if (stopping) {
+            j->rejected = 1;
+            pthread_mutex_lock(&d->mu);
+            d->pending_done++;
+            pthread_mutex_unlock(&d->mu);
+            cc__js.CallTsfn(d->tsfn, j, 1);
+            continue;
+        }
+        ccpy__exec_run(d, j); /* attach is idempotent; the GIL stays */
+        if (!j->scheduled) {
+            pthread_mutex_lock(&d->mu);
+            d->pending_done++;
+            pthread_mutex_unlock(&d->mu);
+            cc__js.CallTsfn(d->tsfn, j, 1);
+        }
+    }
+    return ccpy__py_none(d);
+}
+
+/* An awaitable callback's future settles here, on the loop thread with
+ * the GIL — set_result/set_exception are loop-affine.  Frees the
+ * request and drops its arena hold. */
+static void *ccpy__aio_settle(void *self, void *args) {
+    CcJsCbReq *req =
+        cc__py.CapsuleGetPointer
+            ? (CcJsCbReq *)cc__py.CapsuleGetPointer(self, "cc-python.req")
+            : NULL;
+    CcPyDom *d;
+    (void)args;
+    if (!req) return cc__py_raise("cc-python: corrupt settle capsule");
+    d = req->box->dom;
+    {
+        CCPyObj f;
+        int already = 0;
+        f.o = req->fut;
+        f.home = &d->py;
+        {
+            CCResult_CCPyObj_CCPyError r =
+                cc__py_obj_callm_n(&f, "done", 0, NULL);
+            if (r.ok) {
+                already = ccpy__truthy(d, &r.u.value);
+                cc_py_obj_release(&r.u.value);
+            } else if (cc__py.ErrClear) {
+                cc__py.ErrClear();
+            }
+        }
+        if (!already && req->failed) {
+            /* rejection -> RuntimeError carrying the reason's text */
+            void *exc = NULL;
+            if (d->rterr) {
+                CCPyObj rt;
+                CCSlice sl = { req->errmsg, strlen(req->errmsg) };
+                CCPyArg a;
+                rt.o = d->rterr;
+                rt.home = &d->py;
+                a = cc__py_arg_slice(sl);
+                {
+                    CCResult_CCPyObj_CCPyError r =
+                        cc__py_obj_callm_n(&rt, "invoke", 1, &a);
+                    if (r.ok) exc = r.u.value.o;
+                    else if (cc__py.ErrClear) cc__py.ErrClear();
+                }
+            }
+            if (exc) {
+                CCPyObj ev;
+                CCPyArg a;
+                ev.o = exc;
+                ev.home = &d->py;
+                a = cc__py_arg_obj(ev);
+                {
+                    CCResult_CCPyObj_CCPyError r =
+                        cc__py_obj_callm_n(&f, "set_exception", 1, &a);
+                    if (r.ok) cc_py_obj_release(&r.u.value);
+                    else if (cc__py.ErrClear) cc__py.ErrClear();
+                }
+                cc__py.DecRef(exc);
+            }
+        } else if (!already) {
+            void *val = ccpy__cb_tag_to_py(d, req->rkind, req->rf, req->ri,
+                                           req->rstr, req->rlen, req->robj);
+            if (val) {
+                CCPyObj vv;
+                CCPyArg a;
+                vv.o = val;
+                vv.home = &d->py;
+                a = cc__py_arg_obj(vv);
+                {
+                    CCResult_CCPyObj_CCPyError r =
+                        cc__py_obj_callm_n(&f, "set_result", 1, &a);
+                    if (r.ok) cc_py_obj_release(&r.u.value);
+                    else if (cc__py.ErrClear) cc__py.ErrClear();
+                }
+                cc__py.DecRef(val);
+            } else if (cc__py.ErrClear) {
+                cc__py.ErrClear();
+            }
+        } else if (req->robj) {
+            cc__py.DecRef(req->robj); /* cancelled future: unconsumed tag */
+        }
+    }
+    cc__py.DecRef(req->fut);
+    pthread_mutex_lock(&d->mu);
+    req->up = d->cbreq_free;
+    d->cbreq_free = req;
+    d->cb_live--;
+    pthread_mutex_unlock(&d->mu);
+    ccpy__dom_unref(d);
+    return ccpy__py_none(d);
+}
+
+/* Main-side conclusion of an awaitable request: hand the tags to the
+ * loop thread.  After revocation has closed the interpreter the drop is
+ * silent — the future's task was already cancelled at drain. */
+static void ccpy__aio_req_finish(CcPyDom *d, CcJsCbReq *req) {
+    int dead;
+    int handed = 0;
+    pthread_mutex_lock(&d->mu);
+    dead = d->closed;
+    pthread_mutex_unlock(&d->mu);
+    if (!dead) {
+        cc__py_attach(&d->py);
+        {
+            void *cap = cc__py.CapsuleNew(req, "cc-python.req", NULL);
+            void *settle =
+                cap ? cc__py.CFunctionNewEx(&ccpy__settle_def, cap, NULL)
+                    : NULL;
+            if (cap) cc__py.DecRef(cap);
+            if (settle) {
+                CCPyObj lo;
+                CCPyObj sv;
+                CCPyArg a;
+                lo.o = d->loop;
+                lo.home = &d->py;
+                sv.o = settle;
+                sv.home = &d->py;
+                a = cc__py_arg_obj(sv);
+                {
+                    CCResult_CCPyObj_CCPyError r = cc__py_obj_callm_n(
+                        &lo, "call_soon_threadsafe", 1, &a);
+                    if (r.ok) {
+                        cc_py_obj_release(&r.u.value);
+                        handed = 1;
+                    } else if (cc__py.ErrClear) {
+                        cc__py.ErrClear(); /* loop closed mid-flight */
+                    }
+                }
+                cc__py.DecRef(settle);
+            } else if (cc__py.ErrClear) {
+                cc__py.ErrClear();
+            }
+            if (!handed) {
+                if (req->fut) cc__py.DecRef(req->fut);
+                if (req->robj) cc__py.DecRef(req->robj);
+            }
+        }
+        cc_py_thread_leave();
+    }
+    if (handed) return; /* the settle frees the request */
+    pthread_mutex_lock(&d->mu);
+    req->up = d->cbreq_free;
+    d->cbreq_free = req;
+    d->cb_live--;
+    pthread_mutex_unlock(&d->mu);
+    ccpy__dom_unref(d);
+}
+
+/* Callback invoked from inside a task: mint a future, post the request,
+ * return the future for Python to await.  Loop thread, GIL held. */
+static void *ccpy__cb_call_aio(CcPyDom *d, CcJsCbBox *box, void *args, int n) {
+    CcJsCbReq *req;
+    void *fut = NULL;
+    int i;
+    pthread_mutex_lock(&d->mu);
+    req = d->cbreq_free;
+    if (req) d->cbreq_free = req->up;
+    else req = (CcJsCbReq *)cc_arena_alloc(&d->arena, sizeof(*req), 16);
+    pthread_mutex_unlock(&d->mu);
+    if (!req) return cc__py_raise("cc-python: out of memory");
+    memset(req, 0, sizeof(*req));
+    req->what = 1;
+    req->aio = 1;
+    req->box = box;
+    req->argc = n;
+    {
+        CCPyObj lo;
+        lo.o = d->loop;
+        lo.home = &d->py;
+        {
+            CCResult_CCPyObj_CCPyError r =
+                cc__py_obj_callm_n(&lo, "create_future", 0, NULL);
+            if (!r.ok) {
+                pthread_mutex_lock(&d->mu);
+                req->up = d->cbreq_free;
+                d->cbreq_free = req;
+                pthread_mutex_unlock(&d->mu);
+                return cc__py_raise("cc-python: cannot create the future");
+            }
+            fut = r.u.value.o;
+        }
+    }
+    req->fut = fut; /* the request's own reference */
+    cc__py.IncRef(fut); /* the caller's awaitable */
+    for (i = 0; i < n; i++) {
+        void *o = cc__py.TupleGetItem(args, (intptr_t)i); /* borrowed */
+        cc__py.IncRef(o);
+        req->argv[i] = o; /* main consumes these */
+    }
+    pthread_mutex_lock(&d->mu);
+    d->cb_live++;
+    pthread_mutex_unlock(&d->mu);
+    ccpy__dom_hold(d); /* the request pins the arena until its settle */
+    cc__js.CallTsfn(d->tsfn, req, 1);
+    return fut;
+}
+
+/* Is this frame inside an asyncio task?  current_task() discriminates:
+ * pump callbacks answer None (sync semantics), task frames answer the
+ * task (awaitable semantics). */
+static int ccpy__aio_in_task(CcPyDom *d) {
+    CCPyObj m;
+    int in = 0;
+    if (!d->loop_mode) return 0;
+    m.o = d->aio;
+    m.home = &d->py;
+    {
+        CCResult_CCPyObj_CCPyError r =
+            cc__py_obj_callm_n(&m, "current_task", 0, NULL);
+        if (!r.ok) {
+            if (cc__py.ErrClear) cc__py.ErrClear();
+            return 0;
+        }
+        in = r.u.value.o && r.u.value.o != d->none;
+        cc_py_obj_release(&r.u.value);
+    }
+    return in;
+}
+
+/* Loop mode's thread body: pump once (jobs may have queued between
+ * engagement and here), run until revocation stops the loop, then
+ * cancel-drain every task so its done-callback posts, reject the
+ * stragglers, and close.  Attaches the GIL; leaves it to the caller. */
+static void ccpy__exec_loop(CcPyDom *d) {
+    CCPyObj lo;
+    cc__py_attach(&d->py);
+    lo.o = d->loop;
+    lo.home = &d->py;
+    {
+        CCPyObj pv;
+        CCPyArg a;
+        pv.o = d->pump;
+        pv.home = &d->py;
+        a = cc__py_arg_obj(pv);
+        {
+            CCResult_CCPyObj_CCPyError r =
+                cc__py_obj_callm_n(&lo, "call_soon", 1, &a);
+            if (r.ok) cc_py_obj_release(&r.u.value);
+            else if (cc__py.ErrClear) cc__py.ErrClear();
+        }
+    }
+    {
+        CCResult_CCPyObj_CCPyError r =
+            cc__py_obj_callm_n(&lo, "run_forever", 0, NULL);
+        if (r.ok) cc_py_obj_release(&r.u.value);
+        else if (cc__py.ErrClear) cc__py.ErrClear();
+    }
+    for (;;) {
+        void *task = NULL;
+        pthread_mutex_lock(&d->mu);
+        if (d->sched_head) {
+            task = d->sched_head->task;
+            cc__py.IncRef(task);
+        }
+        pthread_mutex_unlock(&d->mu);
+        if (!task) break;
+        {
+            CCPyObj t;
+            t.o = task;
+            t.home = &d->py;
+            {
+                CCResult_CCPyObj_CCPyError rc =
+                    cc__py_obj_callm_n(&t, "cancel", 0, NULL);
+                if (rc.ok) cc_py_obj_release(&rc.u.value);
+                else if (cc__py.ErrClear) cc__py.ErrClear();
+            }
+            {
+                CCPyArg a = cc__py_arg_obj(t);
+                CCResult_CCPyObj_CCPyError rr =
+                    cc__py_obj_callm_n(&lo, "run_until_complete", 1, &a);
+                if (rr.ok) cc_py_obj_release(&rr.u.value);
+                else if (cc__py.ErrClear) cc__py.ErrClear(); /* CancelledError */
+            }
+        }
+        cc__py.DecRef(task);
+    }
+    for (;;) {
+        CcPyJob *j;
+        pthread_mutex_lock(&d->mu);
+        j = d->qhead;
+        if (j) {
+            d->qhead = j->next;
+            if (!d->qhead) d->qtail = NULL;
+            j->next = NULL;
+        }
+        pthread_mutex_unlock(&d->mu);
+        if (!j) break;
+        j->rejected = 1;
+        pthread_mutex_lock(&d->mu);
+        d->pending_done++;
+        pthread_mutex_unlock(&d->mu);
+        cc__js.CallTsfn(d->tsfn, j, 1);
+    }
+    {
+        CCResult_CCPyObj_CCPyError r = cc__py_obj_callm_n(&lo, "close", 0, NULL);
+        if (r.ok) cc_py_obj_release(&r.u.value);
+        else if (cc__py.ErrClear) cc__py.ErrClear();
+    }
+    pthread_mutex_lock(&d->mu);
+    d->loop_closed = 1;
+    pthread_mutex_unlock(&d->mu);
 }
 
 /* The lane: pop, run, post; under `stopping`, queued jobs settle as
@@ -899,11 +1677,21 @@ static void *ccpy__exec_main(void *arg) {
     CcPyDom *d = (CcPyDom *)arg;
     pthread_mutex_lock(&d->mu);
     for (;;) {
-        while (!d->qhead && !d->stopping) {
-            if (!d->inflight && d->pending_done == 0)
+        /* Once loop mode engages (first coroutine — possibly scheduled
+         * from a nested suspension), the loop owns this thread. */
+        if (d->loop_mode) {
+            pthread_mutex_unlock(&d->mu);
+            ccpy__exec_loop(d);
+            cc_py_thread_leave();
+            pthread_mutex_lock(&d->mu);
+            break;
+        }
+        while (!d->qhead && !d->stopping && !d->loop_mode) {
+            if (!d->inflight && d->pending_done == 0 && d->sched_live == 0)
                 cc_arena_reset(&d->exec_arena);
             pthread_cond_wait(&d->cv, &d->mu);
         }
+        if (d->loop_mode) continue;
         if (!d->qhead) break; /* stopping and drained */
         {
             CcPyJob *j = d->qhead;
@@ -924,6 +1712,7 @@ static void *ccpy__exec_main(void *arg) {
             cc_py_thread_leave();
             pthread_mutex_lock(&d->mu);
             d->inflight = 0;
+            if (j->scheduled) continue; /* posts at task-done; loop next */
             d->pending_done++;
             pthread_mutex_unlock(&d->mu);
             cc__js.CallTsfn(d->tsfn, j, 1);
@@ -1015,7 +1804,8 @@ static void ccpy__async_complete(void *env, void *jscb, void *ctx, void *data) {
         j->next = d->job_free;
         d->job_free = j;
         d->pending_done--;
-        idle = !d->qhead && !d->inflight && d->pending_done == 0;
+        idle = !d->qhead && !d->inflight && d->pending_done == 0 &&
+               d->sched_live == 0 && d->cb_live == 0;
         pthread_mutex_unlock(&d->mu);
         if (idle) {
             cc_arena_reset(&d->job_arena);
@@ -1035,8 +1825,8 @@ static int ccpy__lane_start(CcPyDom *d, void *env) {
     if (!cc__js.CreateTsfn || !cc__js.CreatePromise || !cc__js.CreateError ||
         !cc__js.RefTsfn || !cc__js.UnrefTsfn)
         return -1;
-    pthread_mutex_init(&d->mu, NULL);
-    pthread_cond_init(&d->cv, NULL);
+    /* d->mu / d->cv are initialized at creation — the lifetime count
+     * needs the mutex on every domain, laned or not. */
     d->job_arena = cc_arena_heap(megabytes(1));
     d->exec_arena = cc_arena_heap(megabytes(1));
     cc__js.CreateStringUtf8(env, "cc-python", 9, &name);
@@ -1046,9 +1836,11 @@ static int ccpy__lane_start(CcPyDom *d, void *env) {
         return -1;
     cc__js.UnrefTsfn(env, d->tsfn);
     d->async_mode = 1;
-    d->ext_outstanding++; /* the lane holds the arena until its sentinel */
+    ccpy__dom_hold(d); /* the lane holds the arena until its sentinel */
     if (pthread_create(&d->exec, NULL, ccpy__exec_main, d) != 0) {
+        pthread_mutex_lock(&d->mu);
         d->ext_outstanding--;
+        pthread_mutex_unlock(&d->mu);
         cc__js.ReleaseTsfn(d->tsfn, 0);
         d->tsfn = NULL;
         return -1;
@@ -1079,7 +1871,31 @@ static void ccpy__lane_close(CcPyDom *d, void *env, void *deferred) {
     /* A suspended lane callback drains queued jobs from its own wait —
      * it must see `stopping` to reject them. */
     if (d->cb_waiter) pthread_cond_signal(&d->cb_waiter->cv);
-    pthread_mutex_unlock(&d->mu);
+    {
+        int loop_mode = d->loop_mode;
+        pthread_mutex_unlock(&d->mu);
+        if (loop_mode) {
+            /* wake the loop so the pump sees `stopping` and stops it */
+            cc__py_attach(&d->py);
+            {
+                CCPyObj lo;
+                CCPyObj pv;
+                CCPyArg a;
+                lo.o = d->loop;
+                lo.home = &d->py;
+                pv.o = d->pump;
+                pv.home = &d->py;
+                a = cc__py_arg_obj(pv);
+                {
+                    CCResult_CCPyObj_CCPyError r =
+                        cc__py_obj_callm_n(&lo, "call_soon_threadsafe", 1, &a);
+                    if (r.ok) cc_py_obj_release(&r.u.value);
+                    else if (cc__py.ErrClear) cc__py.ErrClear();
+                }
+            }
+            cc_py_thread_leave();
+        }
+    }
 }
 
 /* Unbox + guard: the domain must be open, the object must belong to it
@@ -1120,7 +1936,10 @@ static CCJsVal !>(CCError) CcPython_create(CcPython *self, CCJs *js) {
     }
     memset(d, 0, sizeof(*d));
     /* The domain lives in its own arena; from here every allocation and
-     * every teardown path goes through d->arena. */
+     * every teardown path goes through d->arena.  The mutex guards the
+     * queue AND the lifetime count, so every domain gets one. */
+    pthread_mutex_init(&d->mu, NULL);
+    pthread_cond_init(&d->cv, NULL);
     d->arena = ar;
     {
         CCResult_CCPy_CCPyError r = cc_py_new(&d->arena);
@@ -1151,7 +1970,7 @@ static CCJsVal !>(CCError) CcPython_create(CcPython *self, CCJs *js) {
             cc_arena_destroy(&tmp);
             return cc_err(CC_ERR_IO, "cc-python: external allocation failed");
         }
-        d->ext_outstanding++;
+        ccpy__dom_hold(d);
         d->main_env = js->env;
         d->main_tid = pthread_self();
         {
@@ -1689,9 +2508,14 @@ static CCJsVal !>(CCError) CcPython_invoke_async(CcPython *self, CCJs *js,
     j = d->job_free;
     if (j) d->job_free = j->next;
     pthread_mutex_unlock(&d->mu);
-    if (!j) j = (CcPyJob *)cc_arena_alloc(&d->arena, sizeof(*j), 16);
+    if (!j) {
+        pthread_mutex_lock(&d->mu); /* the loop thread allocates here too */
+        j = (CcPyJob *)cc_arena_alloc(&d->arena, sizeof(*j), 16);
+        pthread_mutex_unlock(&d->mu);
+    }
     if (!j) return cc_err(CC_ERR_IO, "cc-python: out of memory");
     memset(j, 0, sizeof(*j));
+    j->dom = d;
     /* Refcounts (handle args, the callable) need the GIL; the executor
      * yields it between jobs. */
     cc__py_attach(&d->py);
@@ -1731,7 +2555,32 @@ static CCJsVal !>(CCError) CcPython_invoke_async(CcPython *self, CCJs *js,
          * — wake the innermost waiter too, or a job submitted DURING the
          * suspension (the deadlock-dissolving case) sits unnoticed. */
         if (d->cb_waiter) pthread_cond_signal(&d->cb_waiter->cv);
-        pthread_mutex_unlock(&d->mu);
+        {
+            int loop_mode = d->loop_mode;
+            pthread_mutex_unlock(&d->mu);
+            if (loop_mode) {
+                /* the executor lives inside run_forever now — wake it
+                 * through the loop, not the condvar */
+                cc__py_attach(&d->py);
+                {
+                    CCPyObj lo;
+                    CCPyObj pv;
+                    CCPyArg a;
+                    lo.o = d->loop;
+                    lo.home = &d->py;
+                    pv.o = d->pump;
+                    pv.home = &d->py;
+                    a = cc__py_arg_obj(pv);
+                    {
+                        CCResult_CCPyObj_CCPyError r = cc__py_obj_callm_n(
+                            &lo, "call_soon_threadsafe", 1, &a);
+                        if (r.ok) cc_py_obj_release(&r.u.value);
+                        else if (cc__py.ErrClear) cc__py.ErrClear();
+                    }
+                }
+                cc_py_thread_leave();
+            }
+        }
         {
             CCJsVal jv = { 0 };
             jv.env = js->env;

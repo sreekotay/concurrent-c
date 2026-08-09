@@ -65,6 +65,37 @@ result is delivered.  An idle lane never keeps the process alive.
 parameterized pipelines that ship N Python calls as one job (and, later,
 across a process boundary) — and says so articulately until it exists.
 
+## async def: the asyncio lane
+
+A task call that returns a **coroutine** becomes an asyncio task on the
+lane's own event loop — engaged lazily by the first one, so the plain
+FIFO path (and its latency) is untouched until you use `async def`:
+
+```js
+const ns = b.dict();
+b.exec(`
+import asyncio
+async def crawl(fetch, urls):
+    return await asyncio.gather(*(fetch(u) for u in urls.split(',')))
+`, ns);
+await py.task(ns.get('crawl'))(jsFetch, 'a,b,c');
+```
+
+Tasks interleave — two staggered sleeps run in max, not sum, and
+completion follows readiness, not submission order.  Inside a task, an
+awaited JS callback returns an **awaitable**: `await cb(x)` suspends
+only that task while the loop keeps running its siblings, and the
+callback's promise may itself lean on tasks of the same domain.  Sync
+callables keep every earlier shape, loop mode or not: *sync nests one
+deep, async composes freely.*
+
+Exceptions keep `Type: message` in both directions and across any
+number of crossings: a coroutine's `ValueError: bad input` is the JS
+rejection's message; a JS rejection raises `RuntimeError` at the
+Python `await` (catchable there), and uncaught it crosses back with its
+text intact.  `destroy()` cancels pending tasks — their promises answer
+`bridge is closed` — then drains and sweeps as always.
+
 ## Callbacks: JS functions as Python callables
 
 A JS function passed as an *argument* crosses as a Python callable:

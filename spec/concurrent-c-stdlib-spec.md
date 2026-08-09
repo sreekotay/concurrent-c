@@ -2392,6 +2392,23 @@ and the suspended call itself completes when its promise settles, after
 which the drain proceeds.  A sync call's callback still refuses a
 thenable — the main thread cannot block on its own event loop — with a
 message naming the task form.
+
+A task call whose Python call returns a coroutine schedules it on the
+lane's own asyncio loop, engaged lazily by the first coroutine — until
+then the lane is the plain FIFO above, and after, submissions pump
+through the loop.  Tasks interleave: completion follows readiness, not
+submission order, and the job settles its promise at task completion.
+Inside a task, an invoked JS callback returns an awaitable future
+rather than blocking — only the awaiting task suspends, the loop keeps
+running its siblings, and the callback's promise may lean on further
+tasks of the same domain, which pump on the same loop.  Sync callables
+keep every earlier shape in loop mode, the blocking suspension
+included: sync nests one deep, async composes freely.  Exception text
+is `Type: message` in both directions and is preserved across repeated
+boundary crossings — a coroutine's exception is the rejection's
+message; a rejection raises at the Python await (catchable there) and
+re-raises across if uncaught.  Revocation cancels pending tasks — their
+promises answer closed — then drains and sweeps as ever.
 One lifetime rule: a registered callback pins its domain until
 revocation (the sweep releases the function references on the main
 thread), an orphaned callable raises `bridge is closed` in Python, and
