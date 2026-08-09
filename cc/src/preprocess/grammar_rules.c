@@ -1142,9 +1142,6 @@ typedef struct {
      * every text piece is copied into the output buffer and the scratch
      * rewinds to its stack root (overflow extents freed). */
     CCArena* scratch;
-    /* Structured helpers (Type__fk_N) emitted beside opaque __fill tape —
-     * spliced in before fill_head so they are file-scope STATIC_FNs. */
-    char** helpers; size_t* helpers_len; size_t* helpers_cap;
 } EB;
 
 static int rw_pad_rule(const RG* g, RFirst* F, RKeeps* K, int nd);
@@ -1197,18 +1194,6 @@ static void eb_emit(EB* e, CCString t) {
     cc_arena_reset(e->scratch);
 }
 
-static void eb_emit_helper(EB* e, CCString t) {
-    if (e->helpers) {
-        CCSlice sl = cc_string_as_slice(&t);
-        if (sl.len)
-            cc_sb_append(e->helpers, e->helpers_len, e->helpers_cap,
-                         (const char*)sl.ptr, sl.len);
-        cc_arena_reset(e->scratch);
-        return;
-    }
-    eb_emit(e, t);
-}
-
 static void rg_emit_swar_run(EB* e, int k, int T, int b1, int b2) {
     eb_emit(e, cc_gr_swar_run_text(e->scratch, k, T, b1, b2));
 }
@@ -1226,16 +1211,6 @@ static CCString rg_cs_expr_cs(const RG* g, int cs, CCArena* a) {
         return cc_gr_cse_bytes_text(a, bytes[0], n > 1 ? bytes[1] : 0,
                                     n > 2 ? bytes[2] : 0, n > 3 ? bytes[3] : 0, n);
     return cc_gr_cse_bitset_text(a, g->name, cs);
-}
-
-/* After SWAR: T=0 + two stop bytes → unrolled quote/backslash-style tail;
- * otherwise the authoritative charset run (bitset / range / bytes). */
-static void rg_emit_swar_tail(EB* e, const RG* g, int cs, int T, int b1, int b2) {
-    if (T == 0 && b1 >= 0 && b2 >= 0) {
-        eb_emit(e, cc_gr_swar_tail_stops2_text(e->scratch, b1, b2));
-        return;
-    }
-    eb_emit(e, cc_gr_cs_run_text(e->scratch, rg_cs_expr_cs(g, cs, e->scratch)));
 }
 
 /* ---- JSON-number shape: int · opt frac · opt exp, with int early-out ---- */
@@ -1577,16 +1552,11 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
             int scs = -1, sesc = -1;
             if (rg_scan_body_alt(g, e->F, x->a, &scs, &sesc)) {
                 int k = (*lbl)++;
-                int T = -1, b1 = -1, b2 = -1, did_swar = 0;
+                int T, b1, b2;
                 eb_emit(e, cc_gr_forever_open_text(e->scratch));
-                if (rf_popcount(g->sets[scs]) >= 64 && rf_swar_stop(g->sets[scs], &T, &b1, &b2)) {
+                if (rf_popcount(g->sets[scs]) >= 64 && rf_swar_stop(g->sets[scs], &T, &b1, &b2))
                     rg_emit_swar_run(e, k, T, b1, b2);
-                    did_swar = 1;
-                }
-                if (did_swar)
-                    rg_emit_swar_tail(e, g, scs, T, b1, b2);
-                else
-                    eb_emit(e, cc_gr_cs_run_text(e->scratch, rg_cs_expr_cs(g, scs, e->scratch)));
+                eb_emit(e, cc_gr_cs_run_text(e->scratch, rg_cs_expr_cs(g, scs, e->scratch)));
                 {
                     char br[32];
                     snprintf(br, sizeof(br), "Le%d", k);
@@ -1609,16 +1579,11 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
                 eb_emit(e, cc_gr_m_cs1_text(e->scratch, rg_cs_expr_cs(g, cs, e->scratch), fail));
             }
             {
-                int T = -1, b1 = -1, b2 = -1, did_swar = 0;
-                if (rf_popcount(g->sets[cs]) >= 64 && rf_swar_stop(g->sets[cs], &T, &b1, &b2)) {
+                int T, b1, b2;
+                if (rf_popcount(g->sets[cs]) >= 64 && rf_swar_stop(g->sets[cs], &T, &b1, &b2))
                     rg_emit_swar_run(e, (*lbl)++, T, b1, b2);
-                    did_swar = 1;
-                }
-                if (did_swar)
-                    rg_emit_swar_tail(e, g, cs, T, b1, b2);
-                else
-                    eb_emit(e, cc_gr_cs_run_text(e->scratch, rg_cs_expr_cs(g, cs, e->scratch)));
             }
+            eb_emit(e, cc_gr_cs_run_text(e->scratch, rg_cs_expr_cs(g, cs, e->scratch)));
             break;
         }
         if (x->kind == RN_SOME) {
@@ -1650,7 +1615,7 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
     RFirst* F = (RFirst*)calloc(1, sizeof(RFirst));
     RKeeps* K = (RKeeps*)calloc(1, sizeof(RKeeps));
     cc_arena_stack(sc, 32768);   /* piece scratch: stack root, heap overflow */
-    EB e = { &out, &len, &cap, F, K, 0, -1, 0, 0, -1, -1, &sc, NULL, NULL, NULL };
+    EB e = { &out, &len, &cap, F, K, 0, -1, 0, 0, -1, -1, &sc };
     int lbl = 0;
     if (!F || !K) { free(F); free(K); return NULL; }
     e.dom = want_dom;
@@ -3659,18 +3624,6 @@ static void rs_emit_get(SS* ss, EB* e, const char* name) {
     eb_emit(e, cc_gr_switch_end_ret0_text(e->scratch));
 }
 
-/* Emit Type__fk_<site> for a fields/narrow key table (wire keys → ordinals). */
-static void rs_emit_fk_helper(EB* e, const SS* ss, const STerm* t, int site) {
-    const char* n = cc__sname ? cc__sname : "Schema";
-    eb_emit_helper(e, cc_gr_fk_fn_open_text(e->scratch, n, site));
-    for (int i = 0; i < t->k_cnt; i++) {
-        const SKey* ki = &ss->keys[t->kidx[i]];
-        eb_emit_helper(e, cc_gr_fk_case_text(e->scratch, (const unsigned char*)ki->key,
-                                               (int)strlen(ki->key), i));
-    }
-    eb_emit_helper(e, cc_gr_fk_fn_close_text(e->scratch));
-}
-
 static void rs_emit_write(SS* ss, const RG* g, EB* e, int* lbl, const char* name) {
     for (int md = RW_MEASURE; md <= RW_CHK; md++) {
         WAcc w;
@@ -3700,15 +3653,26 @@ static void rs_emit_narrow_members(SS* ss, RG* g, EB* e, int* lbl, const STerm* 
     eb_emit(e, cc_gr_key_span_text(e->scratch, k, g->name, g->rules[w->key_rule].name, fail));
     rw_emit_pads(g, e, w->mpad_b, w->nmpad_b, fail);
     eb_emit(e, cc_gr_kv_check_text(e->scratch, w->kv_b, fail));
-    rs_emit_fk_helper(e, ss, t, k);
-    eb_emit(e, cc_gr_key_fk_switch_open_text(e->scratch, k, cc__sname ? cc__sname : "Schema"));
-    for (int i = 0; i < t->k_cnt; i++) {
-        const SKey* ki = &ss->keys[t->kidx[i]];
-        eb_emit(e, cc_gr_key_ord_case_text(e->scratch, i));
-        rw_emit_pads(g, e, w->vpad_a, w->nvpad_a, fail);
-        rs_emit_term(ss, g, e, lbl, ki->term, fail);
-        rw_emit_pads(g, e, w->vpad_b, w->nvpad_b, fail);
-        eb_emit(e, cc_gr_key_ord_break_text(e->scratch));
+    eb_emit(e, cc_gr_key_switch_open_text(e->scratch, k));
+    {
+        unsigned char done[S_MAX_KEYS] = {0};
+        for (int i = 0; i < t->k_cnt; i++) {
+            if (done[i]) continue;
+            const SKey* ki = &ss->keys[t->kidx[i]];
+            size_t L = strlen(ki->key);
+            eb_emit(e, cc_gr_key_case_text(e->scratch, (int)L));
+            for (int j = i; j < t->k_cnt; j++) {
+                const SKey* kj = &ss->keys[t->kidx[j]];
+                if (done[j] || strlen(kj->key) != L) continue;
+                done[j] = 1;
+                eb_emit(e, cc_gr_key_memcmp_open_text(e->scratch, k, (const unsigned char*)kj->key, (int)L));
+                rw_emit_pads(g, e, w->vpad_a, w->nvpad_a, fail);
+                rs_emit_term(ss, g, e, lbl, kj->term, fail);
+                rw_emit_pads(g, e, w->vpad_b, w->nvpad_b, fail);
+                eb_emit(e, cc_gr_key_break_text(e->scratch));
+            }
+            eb_emit(e, cc_gr_key_goto_dflt_text(e->scratch, k));
+        }
     }
     eb_emit(e, cc_gr_key_default_text(e->scratch, k));
     eb_emit(e, cc_gr_pad_call6_text(e->scratch, g->name, rs_class(g, e->K, w->val_rule),
@@ -3748,14 +3712,25 @@ static void rs_emit_fields(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, const
     rs_emit_pad(g, e, ss->rfpad, fail);
     eb_emit(e, cc_gr_kv_check_text(e->scratch, ss->fkv, fail));
     rs_emit_pad(g, e, ss->rfpad, fail);
-    /* key dispatch: MPH ordinal helper + integer switch (not length+memcmp) */
-    rs_emit_fk_helper(e, ss, t, k);
-    eb_emit(e, cc_gr_key_fk_switch_open_text(e->scratch, k, cc__sname ? cc__sname : "Schema"));
-    for (int i = 0; i < t->k_cnt; i++) {
-        const SKey* ki = &ss->keys[t->kidx[i]];
-        eb_emit(e, cc_gr_key_ord_case_text(e->scratch, i));
-        rs_emit_term(ss, g, e, lbl, ki->term, fail);
-        eb_emit(e, cc_gr_key_ord_break_text(e->scratch));
+    /* key dispatch: switch on length, memcmp chain within a length class */
+    eb_emit(e, cc_gr_key_switch_open_text(e->scratch, k));
+    {
+        unsigned char done[S_MAX_KEYS] = {0};
+        for (int i = 0; i < t->k_cnt; i++) {
+            if (done[i]) continue;
+            const SKey* ki = &ss->keys[t->kidx[i]];
+            size_t L = strlen(ki->key);
+            eb_emit(e, cc_gr_key_case_text(e->scratch, (int)L));
+            for (int j = i; j < t->k_cnt; j++) {
+                const SKey* kj = &ss->keys[t->kidx[j]];
+                if (done[j] || strlen(kj->key) != L) continue;
+                done[j] = 1;
+                eb_emit(e, cc_gr_key_memcmp_open_text(e->scratch, k, (const unsigned char*)kj->key, (int)L));
+                rs_emit_term(ss, g, e, lbl, kj->term, fail);
+                eb_emit(e, cc_gr_key_break_text(e->scratch));
+            }
+            eb_emit(e, cc_gr_key_goto_dflt_text(e->scratch, k));
+        }
     }
     eb_emit(e, cc_gr_key_default_text(e->scratch, k));
     if (ss->rfelse >= 0)
@@ -3953,7 +3928,6 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
     SS* ss = (SS*)calloc(1, sizeof(SS));
     RG* g = NULL; RFirst* F = NULL; RKeeps* K = NULL;
     char* out = NULL; size_t len = 0, cap = 0;
-    char* helpers = NULL; size_t helpers_len = 0, helpers_cap = 0;
     /* piece scratch: stack root, heap overflow only for oversized pieces.
      * Declared before any `goto done` so the free at done: is always safe
      * (cc_arena_free releases overflow extents only; the root is stack). */
@@ -4194,8 +4168,7 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
     cc__sname = name;
     cc__fpfx[0] = '\0';
     {
-    EB e = { &out, &len, &cap, F, K, 0, -1, 0, 0, -1, -1, &sc,
-             &helpers, &helpers_len, &helpers_cap };
+    EB e = { &out, &len, &cap, F, K, 0, -1, 0, 0, -1, -1, &sc };
     int lbl = 0;
     unsigned char local_xdone[R_MAX_RULES];
     unsigned char* xdone = reg ? reg->x_done : local_xdone;
@@ -4377,47 +4350,26 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                 (void)cc_variant_schema_pending_add(name, nreg, arms, voids);
             }
         }
-        /* Collect Type__fk_N during fill body, then splice ahead of __fill
-         * so helpers are file-scope (shadow parses + strswitch). */
+        eb_emit(&e, cc_gr_fill_head_text(e.scratch, name));
+        /* zero the struct only when some bind is conditional (inside a
+         * fields dispatch): a body whose binds are all unconditional terms
+         * assigns every member on the success path — missing-member zeroing
+         * is a fields-combinator semantic, not a product-schema one. */
         {
-            size_t fill_at = len;
-            eb_emit(&e, cc_gr_fill_head_text(e.scratch, name));
-            /* zero the struct only when some bind is conditional (inside a
-             * fields dispatch): a body whose binds are all unconditional terms
-             * assigns every member on the success path — missing-member zeroing
-             * is a fields-combinator semantic, not a product-schema one. */
-            {
-                int conditional = 0;
-                for (int ti = 0; ti < ss->nterms && !conditional; ti++)
-                    if (ss->terms[ti].kind == SK_FIELDS ||
-                        ss->terms[ti].kind == SK_NARROW_MEMBERS) conditional = 1;
-                if (conditional) {
-                    eb_emit(&e, cc_gr_fill_zero_text(e.scratch));
-                }
+            int conditional = 0;
+            for (int ti = 0; ti < ss->nterms && !conditional; ti++)
+                if (ss->terms[ti].kind == SK_FIELDS ||
+                    ss->terms[ti].kind == SK_NARROW_MEMBERS) conditional = 1;
+            if (conditional) {
+                eb_emit(&e, cc_gr_fill_zero_text(e.scratch));
             }
-            {
-                char fail[16];
-                snprintf(fail, sizeof(fail), "Lz%d", lbl++);
-                for (int i = 0; i < ss->nbody; i++)
-                    rs_emit_term(ss, g, &e, &lbl, ss->body[i], fail);
-                eb_emit(&e, cc_gr_fill_tail_text(e.scratch, fail));
-            }
-            if (helpers_len > 0) {
-                size_t need = len + helpers_len + 1;
-                if (need > cap) {
-                    size_t nc = cap ? cap : 256;
-                    while (nc < need) nc *= 2;
-                    char* nb = (char*)realloc(out, nc);
-                    if (!nb) { free(helpers); helpers = NULL; helpers_len = 0;
-                        snprintf(err, err_sz, "@grammar(schema) %s: out of memory", name);
-                        free(out); out = NULL; goto done; }
-                    out = nb; cap = nc;
-                }
-                memmove(out + fill_at + helpers_len, out + fill_at, len - fill_at);
-                memcpy(out + fill_at, helpers, helpers_len);
-                len += helpers_len;
-                free(helpers); helpers = NULL; helpers_len = 0; helpers_cap = 0;
-            }
+        }
+        {
+            char fail[16];
+            snprintf(fail, sizeof(fail), "Lz%d", lbl++);
+            for (int i = 0; i < ss->nbody; i++)
+                rs_emit_term(ss, g, &e, &lbl, ss->body[i], fail);
+            eb_emit(&e, cc_gr_fill_tail_text(e.scratch, fail));
         }
         eb_emit(&e, cc_gr_parse_fn_text(e.scratch, name));
         /* incremental entry: parse ONE value at *pos, advance it — pipelines
@@ -4514,7 +4466,6 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
         snprintf(cc__schema_reg[cc__schema_nreg++], S_NAME, "%s", name);
 
 done:
-    free(helpers);
     cc_arena_free(&sc);
     free(ss); free(g); free(F); free(K);
     return out;

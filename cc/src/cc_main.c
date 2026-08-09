@@ -1124,6 +1124,8 @@ typedef struct {
     char name[128];
     char suffix[32];
     char tag[32];
+    char entry[96]; /* CC_MODULE_ENTRY prefix (PyInit_ / napi_…) */
+    int wildcard;   /* entry was declared with a trailing * */
 } CCExtModTarget;
 
 static void cc__tag_from_directive(const char* dir, char* out, size_t cap) {
@@ -1303,6 +1305,9 @@ static int cc__detect_ext_module(const char* in_path, CCExtModTarget* tg,
                      decls[e].suffix);
             cc__tag_from_directive(decls[e].export_dir, tg[nt].tag,
                                    sizeof(tg[nt].tag));
+            snprintf(tg[nt].entry, sizeof(tg[nt].entry), "%s",
+                     decls[e].entry);
+            tg[nt].wildcard = decls[e].wildcard;
             nt++;
         }
         return nt;
@@ -5439,43 +5444,112 @@ static int run_build_mode(int argc, char** argv) {
                  ld_flags ? ld_flags : "", (ld_flags && ld_flags[0]) ? " " : "");
         /* A -shared link exports every symbol by default, which makes each
          * one a dead-strip root: --gc-sections keeps the entire runtime.
-         * Exporting only the embedding entry points (the dynamic loader
-         * looks those up by name; nothing else is anyone's ABI) lets the
-         * linker collect everything the module never calls — the same
-         * artifact drops ~5x.  The list is static across both embeddings,
-         * so one file serves every module build. */
+         * Exporting only this TU's embedding entry points (the dynamic
+         * loader looks those up by name; nothing else is anyone's ABI)
+         * lets the linker collect everything the module never calls —
+         * the same artifact drops ~5x.
+         *
+         * The list is per-TU: Darwin's -exported_symbols_list requires
+         * every named symbol to exist, so a Python-only module cannot
+         * list _napi_register_module_v1 (and vice versa). Dual-target
+         * TUs list every detected entry; --module= narrows the list to
+         * the kept artifacts. */
 #if defined(__linux__) || defined(__APPLE__)
         if (!cc__is_tcc(pick_cc_bin(cc_bin))) {
-#if defined(__APPLE__)
-            static const char* ver_body = "_napi_register_module_v1\n_PyInit_*\n";
-            static const char* ver_flag = " -Wl,-exported_symbols_list,";
-#else
-            static const char* ver_body =
-                "{ global: napi_register_module_v1; PyInit_*; local: *; };\n";
-            static const char* ver_flag = " -Wl,--version-script=";
-#endif
-            static char ver_path[PATH_MAX];
+            char ver_body[512];
+            size_t vb = 0;
+            int te;
+            char ver_path[PATH_MAX];
             char ver_dir[PATH_MAX];
-            struct stat ver_st;
-            int ver_ok;
+            int ver_ok = 0;
+#if defined(__APPLE__)
+            static const char* ver_flag = " -Wl,-exported_symbols_list,";
+            ver_body[0] = 0;
+            for (te = 0; te < extmod_nt; te++) {
+                char line[160];
+                int n;
+                if (!extmod_tg[te].entry[0]) continue;
+                if (extmod_tg[te].wildcard && extmod_tg[te].name[0])
+                    n = snprintf(line, sizeof(line), "_%s%s\n",
+                                 extmod_tg[te].entry, extmod_tg[te].name);
+                else if (extmod_tg[te].wildcard)
+                    n = snprintf(line, sizeof(line), "_%s*\n",
+                                 extmod_tg[te].entry);
+                else
+                    n = snprintf(line, sizeof(line), "_%s\n",
+                                 extmod_tg[te].entry);
+                if (n < 0 || (size_t)n >= sizeof(line) ||
+                    vb + (size_t)n >= sizeof(ver_body))
+                    break;
+                memcpy(ver_body + vb, line, (size_t)n);
+                vb += (size_t)n;
+                ver_body[vb] = 0;
+            }
+#else
+            static const char* ver_flag = " -Wl,--version-script=";
+            vb = (size_t)snprintf(ver_body, sizeof(ver_body), "{ global:");
+            for (te = 0; te < extmod_nt && vb + 2 < sizeof(ver_body); te++) {
+                char sym[160];
+                int n;
+                if (!extmod_tg[te].entry[0]) continue;
+                if (extmod_tg[te].wildcard && extmod_tg[te].name[0])
+                    n = snprintf(sym, sizeof(sym), " %s%s;",
+                                 extmod_tg[te].entry, extmod_tg[te].name);
+                else if (extmod_tg[te].wildcard)
+                    n = snprintf(sym, sizeof(sym), " %s*;",
+                                 extmod_tg[te].entry);
+                else
+                    n = snprintf(sym, sizeof(sym), " %s;",
+                                 extmod_tg[te].entry);
+                if (n < 0 || (size_t)n >= sizeof(sym) ||
+                    vb + (size_t)n >= sizeof(ver_body))
+                    break;
+                memcpy(ver_body + vb, sym, (size_t)n);
+                vb += (size_t)n;
+            }
+            {
+                const char* tail = " local: *; };\n";
+                size_t tl = strlen(tail);
+                if (vb + tl < sizeof(ver_body)) {
+                    memcpy(ver_body + vb, tail, tl + 1);
+                    vb += tl;
+                }
+            }
+#endif
             snprintf(ver_dir, sizeof(ver_dir), "%s/.cc-build", g_out_root);
-            snprintf(ver_path, sizeof(ver_path), "%s/extmod-exports.ver", ver_dir);
+            /* Content varies by TU/target — name the file from a short
+             * digest of the body so py-only / js-only / dual don't race
+             * a shared path, and concurrent links never see a truncate. */
+            {
+                unsigned h = 2166136261u;
+                size_t i;
+                for (i = 0; i < vb; i++) {
+                    h ^= (unsigned char)ver_body[i];
+                    h *= 16777619u;
+                }
+                snprintf(ver_path, sizeof(ver_path),
+                         "%s/extmod-exports-%08x.ver", ver_dir, h);
+            }
             (void)cc__mkdir_p(ver_dir);
-            /* The content is a constant, but concurrent module builds all
-             * name this path — never truncate in place (a parallel link may
-             * be reading it); write aside and rename, which is atomic. */
-            ver_ok = stat(ver_path, &ver_st) == 0 &&
-                     ver_st.st_size == (off_t)strlen(ver_body);
-            if (!ver_ok) {
-                char tmp_path[PATH_MAX + 32];
-                snprintf(tmp_path, sizeof(tmp_path), "%s.%d.tmp", ver_path,
-                         (int)getpid());
-                FILE* vf = fopen(tmp_path, "w");
-                if (vf) {
-                    fputs(ver_body, vf);
-                    fclose(vf);
-                    ver_ok = rename(tmp_path, ver_path) == 0;
-                    if (!ver_ok) unlink(tmp_path);
+            if (vb > 0) {
+                struct stat ver_st;
+                ver_ok = stat(ver_path, &ver_st) == 0 &&
+                         ver_st.st_size == (off_t)vb;
+                if (!ver_ok) {
+                    char tmp_path[PATH_MAX + 32];
+                    snprintf(tmp_path, sizeof(tmp_path), "%s.%d.tmp", ver_path,
+                             (int)getpid());
+                    FILE* vf = fopen(tmp_path, "w");
+                    if (vf) {
+                        if (fwrite(ver_body, 1, vb, vf) == vb) {
+                            fclose(vf);
+                            ver_ok = rename(tmp_path, ver_path) == 0;
+                            if (!ver_ok) unlink(tmp_path);
+                        } else {
+                            fclose(vf);
+                            unlink(tmp_path);
+                        }
+                    }
                 }
             }
             if (ver_ok) {

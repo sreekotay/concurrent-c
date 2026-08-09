@@ -79,21 +79,6 @@ static inline CCString cc_gr_swar_run_text(CCArena* a, int k, int T, int b1, int
     return o;
 }
 
-/* Short-string tail after SWAR when stops are exactly two specific bytes
- * (JSON strchar: quote+backslash, T=0). Unrolled scan beats a bitset
- * probe on the common sub-16B remainder. */
-static inline CCString cc_gr_swar_tail_stops2_text(CCArena* a, int b1, int b2) {
-    return @string(`    while (p + 4 <= n) {
-      if (s[p] == ${b1} || s[p] == ${b2}) break;
-      if (s[p + 1] == ${b1} || s[p + 1] == ${b2}) { p += 1; break; }
-      if (s[p + 2] == ${b1} || s[p + 2] == ${b2}) { p += 2; break; }
-      if (s[p + 3] == ${b1} || s[p + 3] == ${b2}) { p += 3; break; }
-      p += 4;
-    }
-    while (p < n && s[p] != ${b1} && s[p] != ${b2}) p++;
-`, a);
-}
-
 /* ---- JSON-number fast path, the tail after the int part ----
  * Emitted after the int-shape scan: if the next byte is not . / e / E the
  * frac/exp scaffolding is skipped entirely (the common path for ids and
@@ -836,9 +821,8 @@ static inline CCString cc_gr_litn_term_text(CCArena* a, const unsigned char* lit
 }
 
 /* ---- key-dispatch pieces, shared by the delimited fields form and the
- * narrowed member-list form: capture the key span, MPH ordinal via a
- * structured Type__fk_N helper (string-switch — not opaque tape), then
- * switch on the ordinal inside __fill ---- */
+ * narrowed member-list form: capture the key span, switch on length,
+ * memcmp chain within a length class, unknown keys to the Ld arm ---- */
 static inline CCString cc_gr_key_span_text(CCArena* a, int k, const char* g,
                                            const char* r, const char* fail) {
     return @string(`    { size_t xa${k}, xb${k}; int xd${k};
@@ -854,10 +838,44 @@ static inline CCString cc_gr_kv_check_text(CCArena* a, int b, const char* fail) 
 `, a);
 }
 
-/* Per-fields-site ordinal helper — `__fk_` is outside the opaque-helper
- * set so shadow parses the body and applies strswitch MPH. */
-static inline CCString cc_gr_fk_fn_open_text(CCArena* a, const char* n, int site) {
-    return @string(`static inline __attribute__((always_inline)) int ${n}__fk_${site}(CCSlice k) {
+static inline CCString cc_gr_key_switch_open_text(CCArena* a, int k) {
+    return @string(`      switch (xb${k} - xa${k}) {
+`, a);
+}
+
+static inline CCString cc_gr_key_case_text(CCArena* a, int len) {
+    return @string(`      case ${len}:
+`, a);
+}
+
+static inline CCString cc_gr_key_memcmp_open_text(CCArena* a, int k,
+                                                  const unsigned char* key, int len) {
+    CCString esc = cc_gr_esc_text(a, key, len);
+    return @string(`        if (memcmp(s + xa${k}, "${esc}", ${len}) == 0) {
+`, a);
+}
+
+static inline CCString cc_gr_key_break_text(CCArena* a) {
+    return @string(`          break; }
+`, a);
+}
+
+static inline CCString cc_gr_key_goto_dflt_text(CCArena* a, int k) {
+    return @string(`        goto Ld${k};
+`, a);
+}
+
+static inline CCString cc_gr_key_default_text(CCArena* a, int k) {
+    return @string(`      default: goto Ld${k};
+      }
+      goto Ln${k};
+Ld${k}:
+`, a);
+}
+
+/* Reflective Type__fk — field-name string-switch (structured; not opaque). */
+static inline CCString cc_gr_fk_get_open_text(CCArena* a, const char* n) {
+    return @string(`static inline __attribute__((always_inline)) int ${n}__fk(CCSlice k) {
     switch (k) {
 `, a);
 }
@@ -873,37 +891,6 @@ static inline CCString cc_gr_fk_fn_close_text(CCArena* a) {
     return @string(`    default: return -1;
     }
 }
-`, a);
-}
-
-/* Shared reflective helper (field-name keys) — no site suffix. */
-static inline CCString cc_gr_fk_get_open_text(CCArena* a, const char* n) {
-    return @string(`static inline __attribute__((always_inline)) int ${n}__fk(CCSlice k) {
-    switch (k) {
-`, a);
-}
-
-static inline CCString cc_gr_key_fk_switch_open_text(CCArena* a, int k, const char* n) {
-    return @string(`      { CCSlice k${k} = cc_slice_from_buffer((void*)(s + xa${k}), xb${k} - xa${k});
-      switch (${n}__fk_${k}(k${k})) {
-`, a);
-}
-
-static inline CCString cc_gr_key_ord_case_text(CCArena* a, int ord) {
-    return @string(`      case ${ord}:
-`, a);
-}
-
-static inline CCString cc_gr_key_ord_break_text(CCArena* a) {
-    return @string(`        break;
-`, a);
-}
-
-static inline CCString cc_gr_key_default_text(CCArena* a, int k) {
-    return @string(`      default: goto Ld${k};
-      } }
-      goto Ln${k};
-Ld${k}:
 `, a);
 }
 

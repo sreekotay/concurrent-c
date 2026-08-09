@@ -660,7 +660,9 @@ const char* cc_emit_plan_lookup_generic_factory_handler(const char* name) {
 
 /* The slice ABI mirror lives in factory_abi.h (shared with the loader,
  * which verifies it against the comptime side's sizeof(CCSlice) probe
- * before any factory runs). */
+ * before any factory runs).  It must stay layout-identical to CCSlice
+ * ({ptr,len,id}): the stale trailing `alen` made type_args.items[i]
+ * for i>=1 read the previous slot's padding as the next slice's ptr. */
 static CCFactorySlice cc__factory_slice_cstr(const char* s) {
     CCFactorySlice sl = {0};
     if (s) { sl.ptr = (void*)s; sl.len = strlen(s); }
