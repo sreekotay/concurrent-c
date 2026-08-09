@@ -2463,6 +2463,24 @@ before the interpreter ends.  An idle lane does not keep the process
 alive, and a dropped, never-destroyed async domain drains the same way
 from its finalizer.
 
+An isolated domain is a FULL CPython child process speaking the same
+line-JSON wire discipline as the cc-node bridge, mirrored: plain data by
+value (non-finite floats tagged), small one-dimensional arrays inline as
+typed buffers, everything else a child-side handle, JS functions as wire
+callbacks by strict alternation (the child blocks on its reply line; the
+parent may await freely before answering).  Cross-process is natively
+async — attribute chains extend lazily with zero round trips and resolve
+in one; a call is a Promise — and the limits are stated where they live:
+bulk arrays copy across the wire until the shared-memory lease tier, and
+a coroutine result runs to completion in the child (parallelism is
+domains, each a whole process).  numpy loads in every isolated domain —
+the subinterpreter refusal does not apply — N domains are N GILs in N
+processes, a child crash rejects the domain's promises while the parent
+survives, and per-domain interpreter/venv selection is honest here
+(`python:` at creation), where the in-process form is process-wide.
+Revocation is child teardown: close is answered, stdin ends, a
+straggler is killed, and every outstanding promise settles as closed.
+
 The module is the type, under the same reflection rules as
 `py_module::[T]`: every visible function whose first parameter is `T` or
 `T*` becomes a module function; an underscore member stays internal; the

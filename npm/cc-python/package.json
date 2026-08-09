@@ -15,6 +15,7 @@
   "files": [
     "index.js",
     "install.js",
+    "broker.py",
     "README.md",
     "examples/",
     "bin/",

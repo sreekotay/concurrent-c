@@ -101,17 +101,35 @@ dot(c, d);              // ...numpy on main, same interpreter
 await p;                // measured: 2.02x — perfect two-lane scaling
 ```
 
-**numpy ∥ sibling interpreters** — every `create()` after the first is
-an isolated subinterpreter with its **own GIL**: real multi-core Python,
-sharing buffers zero-copy through JS as neutral ground (one
-`Float64Array` leased into both).  Measured: 5.7ms + 24.5ms of work in
-two domains completes together in 20.1ms.  The one honest limit:
-**numpy itself refuses subinterpreters** (the CPython C-extension rule
-— the refusal is articulate, not a crash), so sibling domains compute
-in pure Python or GIL-releasing stdlib today.  N independent
-numpy-capable interpreters is exactly what **process-isolated domains**
-(the next tier — full CPython per child, crash isolation, per-domain
-venvs) deliver.
+**numpy ∥ sibling interpreters** — every in-process `create()` after
+the first is an isolated subinterpreter with its **own GIL**: real
+multi-core Python, sharing buffers zero-copy through JS as neutral
+ground (one `Float64Array` leased into both).  Measured: 5.7ms + 24.5ms
+of work in two domains completes together in 20.1ms.  The honest limit:
+**numpy itself refuses subinterpreters** (the CPython C-extension
+rule — articulate, not a crash), which is what the fourth tier is for.
+
+**N × numpy: isolated domains** — `create({ isolated: true })` spawns a
+FULL CPython child per domain: numpy in every one, N domains are N GILs
+on N cores, a child crash is a rejected promise (the parent survives),
+and per-domain python/venv selection is honest:
+
+```js
+const py = ccpy.create({ isolated: true, python: '/home/app/.venv' });
+const np = py.import('numpy');          // zero round trips — chains are lazy
+const s  = await np.sum(buf);           // cross-process is natively async
+```
+
+Measured ([`examples/js_multiprocess_numpy.js`](examples/js_multiprocess_numpy.js),
+BLAS pinned): the same numpy workload on 1 → 2 → 4 domains scales
+**1.00x → 2.13x → 3.97x** on a 4-core box — linear.  The costs are real
+and stated: ~440ms to spawn a child and import numpy, ~134µs per wire
+round trip (vs ~5µs in-process), and bulk arrays currently **copy**
+across the wire (small ones inline; big ones stay child-side handles —
+prefer chaining on the handle to round-tripping data).  Pick the tier
+by workload: in-process for hot fine-grained calls and zero-copy
+buffers, isolated for N-way parallel numpy, crash isolation, and
+per-domain environments.
 
 `py.task(jsClosure)` is reserved for recorded batch graphs —
 parameterized pipelines that ship N Python calls as one job (and, later,
