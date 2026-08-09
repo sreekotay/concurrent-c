@@ -1,11 +1,11 @@
-/* The generic Python bridge for Node: require('cc-python').create()
- * returns an Isolation Domain; attribute chains are getattr, calls are
- * invoke, scalar results materialize as JS scalars, held references
- * proxy.  destroy() is one-sweep revocation: use-after-close answers
- * articulately, double destroy is a no-op, a handle from one bridge is
- * rejected by another, and GC of dropped proxies releases their Python
- * references (--expose-gc rung).  The addon is
- * npm/cc-python/src/cc_python.ccs. */
+/* The generic Python bridge for Node: require('concurrent-c-python')
+ * (or the in-repo path) returns an Isolation Domain; attribute chains
+ * are getattr, calls are invoke, scalar results materialize as JS
+ * scalars, held references proxy.  destroy() is one-sweep revocation:
+ * use-after-close answers articulately, double destroy is a no-op, a
+ * handle from one bridge is rejected by another, and GC of dropped
+ * proxies releases their Python references (--expose-gc rung).  The
+ * addon is npm/cc-python/src/cc_python.ccs. */
 CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 
 {

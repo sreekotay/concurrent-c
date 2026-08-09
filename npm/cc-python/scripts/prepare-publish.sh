@@ -1,5 +1,5 @@
 #!/bin/sh
-# Assemble the publishable cc-python package: prebuilt addon for THIS
+# Assemble the publishable concurrent-c-python package: prebuilt addon for THIS
 # platform + vendored lowered-C sources for every other one.
 #
 #   npm/cc-python/scripts/prepare-publish.sh          (from the repo root)
@@ -37,9 +37,17 @@ cc -O2 -fPIC -ffunction-sections -fdata-sections -I$PKG/vendor/include \
    -c $PKG/vendor/cc_python.c -o "$TMP/tu.o"
 cc -O2 -fPIC -DCC_ENABLE_ASYNC -ffunction-sections -fdata-sections \
    -I$PKG/vendor/include -c $PKG/vendor/runtime/concurrent_c.c -o "$TMP/rt.o"
-printf '{ global: napi_register_module_v1; local: *; };\n' > "$TMP/exports.ver"
+# Darwin and ELF take different export-map shapes (same as install.js).
+if [ "$(uname -s)" = Darwin ]; then
+  printf '_napi_register_module_v1\n' > "$TMP/exports.ver"
+  LINK_EXTRA="-Wl,-dead_strip -Wl,-exported_symbols_list,$TMP/exports.ver"
+else
+  printf '{ global: napi_register_module_v1; local: *; };\n' > "$TMP/exports.ver"
+  LINK_EXTRA="-Wl,--gc-sections -Wl,--version-script=$TMP/exports.ver"
+fi
+# shellcheck disable=SC2086
 cc "$TMP/tu.o" "$TMP/rt.o" -shared -o "$TMP/probe.node" -lpthread -lm -ldl \
-   -Wl,--gc-sections -Wl,--version-script="$TMP/exports.ver"
+   $LINK_EXTRA
 CC_PYTHON_ADDON="$TMP/probe.node" node -e '
 const py = require(process.cwd() + "/npm/cc-python").create();
 if (py.import("math").sqrt(16) !== 4) throw new Error("probe failed");

@@ -1,4 +1,4 @@
-# cc-python
+# concurrent-c-python
 
 Python from Node. Any module, zero copies, host-controlled lifetime.
 
@@ -7,7 +7,7 @@ strict C11-superset preprocessor: `.ccs` lowers to plain C and compiles
 with your host C compiler.
 
 ```js
-const py = require('cc-python').create();
+const py = require('concurrent-c-python').create();
 const np = py.import('numpy');
 
 const a = new Float64Array(1_000_000).map((_, i) => i % 97);
@@ -26,8 +26,8 @@ linked dependency: libc.  No node-gyp, no Python headers at build time
 N-API's stable ABI means one binary per platform serves every node.
 
 ```
-npm install cc-python     # prebuilt where shipped; otherwise compiles
-                          # from vendored C with nothing but `cc`
+npm install concurrent-c-python   # prebuilt where shipped; otherwise
+                                  # compiles from vendored C with `cc`
 ```
 
 - **Attribute chains are Python** — `np.linalg.norm` walks getattr;
@@ -51,7 +51,7 @@ npm install cc-python     # prebuilt where shipped; otherwise compiles
 Async-ness enters through exactly one primitive:
 
 ```js
-const py = require('cc-python').create();       // no modes
+const py = require('concurrent-c-python').create();  // no modes
 const np = py.import('numpy');
 
 const norm = py.task(np.linalg.norm);           // bind to the lane once
@@ -238,7 +238,7 @@ first — and every explicit or ambient choice that is broken fails
 loudly, never falling through to the wrong Python:
 
 ```js
-const ccpy = require('cc-python');
+const ccpy = require('concurrent-c-python');
 
 ccpy.usePython('/home/app/.venv');          // a venv directory
 ccpy.usePython('/usr/bin/python3.11');      // an interpreter executable
@@ -257,7 +257,7 @@ ccpy.python();  // { loaded, version, lib, how } — the introspection door
    that venv is simply used.
 4. **Ambient `./.venv`** — a project-local venv (the uv / poetry
    convention) is picked up from the working directory, the same way
-   the sibling `cc-node` bridge resolves `node_modules`.
+   the sibling `concurrent-c-node` bridge resolves `node_modules`.
 5. Discovery (soname walk, 3.13 → 3.10).
 
 One runtime per process: after the first load, a matching `usePython`
@@ -283,7 +283,7 @@ module for Node and Python both — 40-90ns calls, 26KB artifacts.  See
 ## Measured
 
 From [`examples/js_numpy_bridge.js`](examples/js_numpy_bridge.js) — plain
-`node`, `require('cc-python')`, numpy 2.5.1 on a 4-vCPU x86-64 box
+`node`, `require('concurrent-c-python')`, numpy 2.5.1 on a 4-vCPU x86-64 box
 (baselines checked into the repo under `perf/baselines/`):
 
 | what | result |

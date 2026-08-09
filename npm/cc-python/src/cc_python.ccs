@@ -1,6 +1,6 @@
-/* cc-python: the generic Python bridge for Node.
+/* concurrent-c-python: the generic Python bridge for Node.
  *
- *     const py = require('cc-python').create();   // an Isolation Domain
+ *     const py = require('concurrent-c-python').create();  // Isolation Domain
  *     const np = py.import('numpy');
  *     const s  = np.array([1, 2, 3]).sum();
  *     py.destroy();                                // one sweep: everything
@@ -1829,7 +1829,7 @@ static int ccpy__lane_start(CcPyDom *d, void *env) {
      * needs the mutex on every domain, laned or not. */
     d->job_arena = cc_arena_heap(megabytes(1));
     d->exec_arena = cc_arena_heap(megabytes(1));
-    cc__js.CreateStringUtf8(env, "cc-python", 9, &name);
+    cc__js.CreateStringUtf8(env, "concurrent-c-python", 20, &name);
     if (!name ||
         cc__js.CreateTsfn(env, NULL, NULL, name, 0, 1, NULL, NULL, d,
                           ccpy__async_complete, &d->tsfn) != 0)

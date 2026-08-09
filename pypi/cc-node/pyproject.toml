@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "cc-node"
+name = "concurrent-c-node"
 version = "0.2.0"
 description = "JavaScript and npm packages from Python over the Concurrent-C bridge: one spawned Node child per domain, host-controlled lifetime."
 readme = "README.md"

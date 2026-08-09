@@ -1,4 +1,4 @@
-# node npm/cc-python/examples/js_numpy_bridge.js — plain node + require('cc-python') + numpy 2.5.1
+# node npm/cc-python/examples/js_numpy_bridge.js — plain node + require('concurrent-c-python') + numpy 2.5.1
 # 2026-08-09 x86_64 4-vCPU shared VM, node v22.22.2, python3.11
 # (coherent same-day set; earlier best-of runs: dot_1m 158us, speedup 8.45x —
 #  this box swings ±40% run to run)

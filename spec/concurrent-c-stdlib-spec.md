@@ -2323,7 +2323,7 @@ directive is a statement like any other.
 every Python library importable from JavaScript:
 
 ```js
-const py = require('cc-python').create();   // an Isolation Domain
+const py = require('concurrent-c-python').create();  // an Isolation Domain
 const np = py.import('numpy');
 const norm = np.linalg.norm(new Float64Array([3, 4]));   // 5 — zero copy
 py.destroy();   // one sweep: every handle, the arena, the interpreter ref

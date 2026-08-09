@@ -45,8 +45,8 @@ Fuller example (error policy + compose): [examples/hello.ccs](examples/hello.ccs
 ### Python & JavaScript interop
 
 - [Native modules for Node and Python](docs/js-py-modules.md) — one CC (or C) file → a 26KB `.node` **and** a stable-ABI `.abi3.so`; 40-90ns calls, zero-copy buffers
-- [`npm/cc-python`](npm/cc-python) — Python from Node: any module, zero-copy typed arrays, async lanes, N×numpy isolated domains
-- [`pypi/cc-node`](pypi/cc-node) — JavaScript and npm packages from Python, same domain model mirrored
+- [`npm/cc-python`](npm/cc-python) (`concurrent-c-python`) — Python from Node: any module, zero-copy typed arrays, async lanes, N×numpy isolated domains
+- [`pypi/cc-node`](pypi/cc-node) (`concurrent-c-node`) — JavaScript and npm packages from Python, same domain model mirrored
 
 ### Real programs, measured
 

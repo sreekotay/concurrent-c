@@ -20,11 +20,11 @@ const binDir = path.join(__dirname, 'bin');
 const target = path.join(binDir, 'cc_python-' + plat + '.node');
 
 if (fs.existsSync(target)) {
-  console.log('cc-python: using prebuilt addon for ' + plat);
+  console.log('concurrent-c-python: using prebuilt addon for ' + plat);
   process.exit(0);
 }
 if (process.env.CC_PYTHON_SKIP_BUILD === '1') {
-  console.log('cc-python: CC_PYTHON_SKIP_BUILD=1 — no addon installed');
+  console.log('concurrent-c-python: CC_PYTHON_SKIP_BUILD=1 — no addon installed');
   process.exit(0);
 }
 
@@ -33,7 +33,7 @@ const tuC = path.join(vendor, 'cc_python.c');
 const rtC = path.join(vendor, 'runtime', 'concurrent_c.c');
 const inc = path.join(vendor, 'include');
 if (!fs.existsSync(tuC) || !fs.existsSync(rtC)) {
-  console.error('cc-python: no prebuilt for ' + plat +
+  console.error('concurrent-c-python: no prebuilt for ' + plat +
                 ' and no vendored sources in this package.');
   process.exit(1);
 }
@@ -49,7 +49,7 @@ function pickCompiler() {
 
 const cc = pickCompiler();
 if (!cc) {
-  console.error('cc-python: no C compiler found (set CC, or install ' +
+  console.error('concurrent-c-python: no C compiler found (set CC, or install ' +
                 'cc/clang/gcc) — cannot build the addon for ' + plat);
   process.exit(1);
 }
@@ -69,11 +69,11 @@ const common = ['-O2', '-fPIC', '-ffunction-sections', '-fdata-sections',
 const tuO = path.join(binDir, 'tu-' + plat + '.o');
 const rtO = path.join(binDir, 'rt-' + plat + '.o');
 
-console.log('cc-python: building addon for ' + plat + ' with ' + cc + ' ...');
+console.log('concurrent-c-python: building addon for ' + plat + ' with ' + cc + ' ...');
 function run(label, args) {
   const r = spawnSync(cc, args, { stdio: 'inherit' });
   if (r.status !== 0) {
-    console.error('cc-python: ' + label + ' failed (compiler exit ' +
+    console.error('concurrent-c-python: ' + label + ' failed (compiler exit ' +
                   r.status + '). Set CC_PYTHON_ADDON to a prebuilt addon, ' +
                   'or CC_PYTHON_SKIP_BUILD=1 to install without one.');
     process.exit(1);
@@ -88,11 +88,11 @@ run('link', [tuO, rtO, '-shared', '-o', target, '-lpthread', '-lm', '-ldl']
       ? ['-Wl,-dead_strip', '-Wl,-exported_symbols_list,' + exportsFile]
       : ['-Wl,--gc-sections', '-Wl,--version-script=' + exportsFile]));
 if (!fs.existsSync(target)) {
-  console.error('cc-python: source build produced no addon.');
+  console.error('concurrent-c-python: source build produced no addon.');
   process.exit(1);
 }
 for (const f of [exportsFile, tuO, rtO]) {
   try { fs.unlinkSync(f); } catch (e) { /* cosmetic */ }
 }
-console.log('cc-python: built ' + path.relative(__dirname, target) +
+console.log('concurrent-c-python: built ' + path.relative(__dirname, target) +
             ' (' + fs.statSync(target).size + ' bytes)');

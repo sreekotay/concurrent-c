@@ -1,3 +1,14 @@
+Metadata-Version: 2.4
+Name: concurrent-c-node
+Version: 0.2.0
+Summary: JavaScript and npm packages from Python over the Concurrent-C bridge: one spawned Node child per domain, host-controlled lifetime.
+License: MIT
+Project-URL: Repository, https://github.com/sreekotay/concurrent-c
+Project-URL: Documentation, https://github.com/sreekotay/concurrent-c/blob/main/pypi/cc-node/README.md
+Keywords: javascript,node,npm,interop,concurrent-c
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+
 # concurrent-c-node
 
 JavaScript — and every npm package — from Python.

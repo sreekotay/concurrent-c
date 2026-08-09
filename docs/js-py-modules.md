@@ -52,7 +52,7 @@ What you get, measured (4-vCPU x86-64, node 22 / python 3.11):
 
 | | |
 |---|---|
-| call from Node | **40ns** (~130x the generic `cc-python` bridge's 5.3µs crossing) |
+| call from Node | **40ns** (~130x the generic `concurrent-c-python` bridge's 5.3µs crossing) |
 | call from Python | **68ns** |
 | 16-element `Float64Array` → zero-copy slice → sum | **94ns** |
 | 1M-element slice sum | 1.3ms (memory-bound C loop) |
@@ -121,9 +121,9 @@ can export it to Python and Node — the reflection only looks at the
 | you want | use | cost per call |
 |---|---|---|
 | *your* C/CC compute in JS or Python | **a module (this page)** | 40-94ns |
-| any *Python package* from Node, in-process | `npm i cc-python` | ~5µs sync, zero-copy buffers |
-| N×numpy, crash isolation, per-domain venvs | `cc-python` isolated domains | ~125µs RTT, shm bulk |
-| any *npm package* from Python | `pip install cc-node` | ~300µs RTT, shm bulk |
+| any *Python package* from Node, in-process | `npm i concurrent-c-python` | ~5µs sync, zero-copy buffers |
+| N×numpy, crash isolation, per-domain venvs | `concurrent-c-python` isolated domains | ~125µs RTT, shm bulk |
+| any *npm package* from Python | `pip install concurrent-c-node` | ~300µs RTT, shm bulk |
 
 Worked examples: [`examples/recipe_js_module.ccs`](../examples/recipe_js_module.ccs),
 [`examples/recipe_py_module.ccs`](../examples/recipe_py_module.ccs),
@@ -147,7 +147,7 @@ exact RESULT lines live under [`perf/baselines/`](../perf/baselines/)).
 | Node → CC, 1M-elem slice sum | 1.3ms (memory-bound) |
 | artifact | 26KB `.node` / 35KB `.abi3.so` |
 
-**`cc-python`, in-process** (any Python package from Node, zero-copy):
+**`concurrent-c-python`, in-process** (any Python package from Node, zero-copy):
 
 | crossing | cost |
 |---|---|
@@ -159,7 +159,7 @@ exact RESULT lines live under [`perf/baselines/`](../perf/baselines/)).
 | JS ∥ numpy overlap (balanced) | 1.81x |
 | numpy ∥ numpy, one interpreter, BLAS pinned | 1.60-2.02x |
 
-**`cc-python`, isolated domains** (full CPython per child):
+**`concurrent-c-python`, isolated domains** (full CPython per child):
 
 | crossing | cost |
 |---|---|
@@ -168,7 +168,7 @@ exact RESULT lines live under [`perf/baselines/`](../perf/baselines/)).
 | 8MB argument, shm spill | 6.6ms (base64 wire before it: 153ms — 23x) |
 | 4 domains, same numpy workload | 2-4x vs one (3.97x at the box's quietest) |
 
-**`cc-node`** (any npm package from Python):
+**`concurrent-c-node`** (any npm package from Python):
 
 | crossing | cost |
 |---|---|

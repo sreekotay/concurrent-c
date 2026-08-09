@@ -1,6 +1,6 @@
-/* cc-python: Python from Node over the Concurrent-C bridge.
+/* concurrent-c-python: Python from Node over the Concurrent-C bridge.
  *
- *     const py = require('cc-python').create();   // an Isolation Domain
+ *     const py = require('concurrent-c-python').create();  // Isolation Domain
  *     const np = py.import('numpy');
  *     const s  = np.linalg.norm(new Float64Array([3, 4]));   // 5
  *     py.destroy();   // one sweep — every handle, arena, interpreter ref
@@ -32,7 +32,7 @@ function locateAddon() {
   if (!inRepo) candidates.push(repoAddon);
   for (const c of candidates) if (fs.existsSync(c)) return c;
   throw new Error(
-    'cc-python: no addon for ' + plat + ' (reinstall to run the source ' +
+    'concurrent-c-python: no addon for ' + plat + ' (reinstall to run the source ' +
     'build, build it with `ccc build npm/cc-python/src/cc_python.ccs`, or ' +
     'set CC_PYTHON_ADDON); looked at: ' + candidates.join(', '));
 }
@@ -92,12 +92,12 @@ class Bridge {
   task(fn) {
     if (typeof fn === 'function' && !(HANDLE in fn)) {
       throw new Error(
-        'cc-python: batch thunks (recorded graphs) are not implemented ' +
+        'concurrent-c-python: batch thunks (recorded graphs) are not implemented ' +
         'yet — pass a bridge callable like py.task(np.linalg.norm)');
     }
     const h = unwrapArg(fn);
     if (h === null || h === undefined || typeof h !== 'object') {
-      throw new Error('cc-python: task wants a bridge callable');
+      throw new Error('concurrent-c-python: task wants a bridge callable');
     }
     const bridge = this;
     return (...args) => {
@@ -185,22 +185,22 @@ function resolvePythonExe(spec) {
     if (fs.existsSync(path.join(abs, 'pyvenv.cfg'))) {
       const exe = asVenv(abs);
       if (exe) return exe;
-      throw new Error('cc-python: venv has no bin/python: ' + abs);
+      throw new Error('concurrent-c-python: venv has no bin/python: ' + abs);
     }
     if (fs.existsSync(abs)) return abs;
-    throw new Error('cc-python: python does not exist: ' + abs);
+    throw new Error('concurrent-c-python: python does not exist: ' + abs);
   }
   // Ambient, mirroring the in-process order: VIRTUAL_ENV, ./.venv, PATH.
   if (process.env.VIRTUAL_ENV) {
     const exe = asVenv(process.env.VIRTUAL_ENV);
     if (exe) return exe;
-    throw new Error('cc-python: VIRTUAL_ENV has no bin/python: ' +
+    throw new Error('concurrent-c-python: VIRTUAL_ENV has no bin/python: ' +
                     process.env.VIRTUAL_ENV);
   }
   if (fs.existsSync(path.join('.venv', 'pyvenv.cfg'))) {
     const exe = asVenv(path.resolve('.venv'));
     if (exe) return exe;
-    throw new Error('cc-python: ./.venv has no bin/python');
+    throw new Error('concurrent-c-python: ./.venv has no bin/python');
   }
   return 'python3';
 }
@@ -269,7 +269,7 @@ class ProcBridge {
     if (this._closed) return;
     this._closed = true;
     const pending = this._pending.splice(0);
-    for (const p of pending) p.reject(new Error('cc-python: ' + why));
+    for (const p of pending) p.reject(new Error('concurrent-c-python: ' + why));
     for (const w of this._closeWaiters.splice(0)) w();
     this._cbs.clear();
   }
@@ -300,7 +300,7 @@ class ProcBridge {
 
   _req(obj) {
     if (this._closed)
-      return Promise.reject(new Error('cc-python: bridge is closed'));
+      return Promise.reject(new Error('concurrent-c-python: bridge is closed'));
     return new Promise((resolve, reject) => {
       const sweep = () => {
         // The child unlinks spill files as it decodes them; this sweep
@@ -332,17 +332,17 @@ class ProcBridge {
     if (t === 'string' || t === 'boolean') return v;
     if (t === 'bigint') {
       if (v >= -(2n ** 53n) && v <= 2n ** 53n) return Number(v);
-      throw new Error('cc-python: bigint beyond 2^53 cannot cross the ' +
+      throw new Error('concurrent-c-python: bigint beyond 2^53 cannot cross the ' +
                       'wire yet');
     }
     if (t === 'function') {
       if (v[RHANDLE]) {
         const r = v[RHANDLE];
         if (r.chain.length)
-          throw new Error('cc-python: pass the awaited value, not an ' +
+          throw new Error('concurrent-c-python: pass the awaited value, not an ' +
                           'attribute path');
         if (r.h === null)
-          throw new Error('cc-python: this module has not landed yet — ' +
+          throw new Error('concurrent-c-python: this module has not landed yet — ' +
                           'await any use of it before passing it as an ' +
                           'argument');
         return { $h: r.h };
@@ -370,13 +370,13 @@ class ProcBridge {
       const o = {};
       for (const k of Object.keys(v)) {
         if (k.startsWith('$'))
-          throw new Error('cc-python: object keys starting with $ are ' +
+          throw new Error('concurrent-c-python: object keys starting with $ are ' +
                           'reserved on the wire');
         o[k] = this._encode(v[k]);
       }
       return o;
     }
-    throw new Error('cc-python: unsupported argument for an isolated ' +
+    throw new Error('concurrent-c-python: unsupported argument for an isolated ' +
                     'domain (numbers, strings, booleans, typed arrays, ' +
                     'plain objects/arrays, functions, or this domain\'s ' +
                     'handles)');
@@ -435,7 +435,7 @@ class ProcBridge {
         return rlazy(bridge, p, [prop]);
       },
       apply() {
-        throw new Error('cc-python: a module is not callable');
+        throw new Error('concurrent-c-python: a module is not callable');
       },
     });
   }
@@ -446,10 +446,10 @@ class ProcBridge {
   }
   release(proxy) {
     const r = proxy && proxy[RHANDLE];
-    if (!r) return Promise.reject(new Error('cc-python: not a handle'));
+    if (!r) return Promise.reject(new Error('concurrent-c-python: not a handle'));
     if (r.chain && r.chain.length)
       return Promise.reject(new Error(
-        'cc-python: attribute paths are not held handles — await the ' +
+        'concurrent-c-python: attribute paths are not held handles — await the ' +
         'value, then release what it returns'));
     const bridge = this;
     const settle = (h) => bridge._req({ op: 'release', h }).then((x) => x.v);
@@ -530,7 +530,7 @@ module.exports = {
     if (opts && opts.isolated) return new ProcBridge(opts);
     if (opts && opts.python)
       throw new Error(
-        'cc-python: the in-process runtime is process-wide — choose it ' +
+        'concurrent-c-python: the in-process runtime is process-wide — choose it ' +
         'with usePython(...); per-domain python needs { isolated: true }');
     return new Bridge();
   },
@@ -543,7 +543,7 @@ module.exports = {
   // ambient VIRTUAL_ENV / ./.venv forms.
   usePython(spec) {
     if (typeof spec !== 'string' || !spec)
-      throw new TypeError('cc-python: usePython wants a path (venv dir, ' +
+      throw new TypeError('concurrent-c-python: usePython wants a path (venv dir, ' +
                           'python executable, or libpython)');
     native.use_python(path.resolve(spec));
   },

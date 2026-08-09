@@ -1,4 +1,4 @@
-/* The magic demo, pure: plain node + require('cc-python') + numpy.
+/* The magic demo, pure: plain node + require('concurrent-c-python') + numpy.
  * No bespoke module, no build step — the generic bridge, timed.
  *
  *   node npm/cc-python/examples/js_numpy_bridge.js

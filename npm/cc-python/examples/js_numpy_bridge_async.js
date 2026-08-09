@@ -1,4 +1,4 @@
-/* The magic demo, async form: plain node + require('cc-python') +
+/* The magic demo, async form: plain node + require('concurrent-c-python') +
  * numpy through py.task — what the lane BUYS, measured.
  *
  *   node npm/cc-python/examples/js_numpy_bridge_async.js
