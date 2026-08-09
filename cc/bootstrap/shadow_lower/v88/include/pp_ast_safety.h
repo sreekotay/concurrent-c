@@ -3294,13 +3294,24 @@ static void shadow_safe_walk_stmt(ShadowSafeCtx* ctx, AstNode* st) {
     if (!ctx->err) shadow_safe_check_field_suggest_text(ctx, st, st->e);
     if (ctx->err) return;
     if (st->kind == AST_VAR_UNWRAP || st->kind == AST_TYPED_INIT) {
-        /* Non-recursive: only this node (kids walked below). */
-        const char* ty =
-            (st->kind == AST_VAR_UNWRAP) ? st->e : st->a;
+        /* Non-recursive: only this node (kids walked below).
+         * VAR_UNWRAP: bang keeps lhs type in e; qmark parks type in d /
+         * qmark_bind:Type (e is the fallback expr). */
+        const char* ty = NULL;
         const char* name =
             (st->kind == AST_VAR_UNWRAP) ? st->a : st->b;
         const char* mode =
             (st->kind == AST_VAR_UNWRAP) ? st->c : "";
+        if (st->kind == AST_TYPED_INIT)
+            ty = st->a;
+        else if (strcmp(mode, "qmark") == 0)
+            ty = st->d[0] ? st->d : "int";
+        else if (strncmp(mode, "qmark_bind:", 11) == 0)
+            ty = mode[11] ? mode + 11 : "int";
+        else if (strncmp(mode, "bang_chain:", 11) == 0 && mode[11])
+            ty = mode + 11;
+        else
+            ty = st->e;
         if (ty && strcmp(ty, "CCPyObj") == 0 && name && name[0] &&
             !strstr(mode, "destroy") && !strstr(mode, "detach") &&
             !(mode[0] && strchr(mode, 'D')) &&

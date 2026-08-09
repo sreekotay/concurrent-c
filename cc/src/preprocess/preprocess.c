@@ -13,6 +13,7 @@
 
 #include <ccc/cc_slice.h>
 #include <ccc/cc_arena.h>
+#include <ccc/cc_ufcs_families.h>
 
 #include "header/lower_header.h"
 #include "comptime/const_eval.h"
@@ -3959,32 +3960,15 @@ static void cc__normalize_ufcs_type_name(char* out, size_t out_sz, const char* t
 }
 
 static int cc__type_is_parser_vec(const char* type_name) {
-    return type_name && strncmp(type_name, "__CC_VEC", 8) == 0;
+    return cc_ufcs_type_is_parser_vec(type_name);
 }
 
 static int cc__type_is_parser_map(const char* type_name) {
-    return type_name && (strncmp(type_name, "__CC_MAP", 8) == 0 ||
-                         strncmp(type_name, "__CC_ARRAY_MAP", 14) == 0);
+    return cc_ufcs_type_is_parser_map(type_name);
 }
 
 static int cc__type_is_known_ufcs_family_base(const char* type_name) {
-    if (!type_name || !type_name[0]) return 0;
-    return strncmp(type_name, "CCVec_", 6) == 0 ||
-           strncmp(type_name, "ArrayMap_", 9) == 0 ||
-           strncmp(type_name, "Map_", 4) == 0 ||
-           strcmp(type_name, "CCString") == 0 ||
-           strcmp(type_name, "CCSlice") == 0 ||
-           strcmp(type_name, "CCSliceUnique") == 0 ||
-           strcmp(type_name, "CCSliceShared") == 0 ||
-           strcmp(type_name, "CCArena") == 0 ||
-           strcmp(type_name, "CCNursery") == 0 ||
-           strcmp(type_name, "CCCommand") == 0 ||
-           strcmp(type_name, "CCFile") == 0 ||
-           strncmp(type_name, "CCResult_", 9) == 0 ||
-           strncmp(type_name, "CCChanTx_", 9) == 0 ||
-           strncmp(type_name, "CCChanRx_", 9) == 0 ||
-           cc__type_is_parser_vec(type_name) ||
-           cc__type_is_parser_map(type_name);
+    return cc_ufcs_type_is_known_family_base(type_name);
 }
 
 static const char* cc__lookup_ufcs_var_type(const CCUfcsVarInfo* vars, size_t var_count, const char* name) {
@@ -13239,15 +13223,14 @@ static const char* cc__ufcs_chan_handle_members(const char* base) {
 const char* cc_ufcs_family_header_for(const char* base) {
     CCTypeRegistry* reg;
     size_t i, n;
+    const char* suf;
     if (!base || !base[0]) return NULL;
-    if (strncmp(base, "CCResult_", 9) == 0) return "cc_result.cch";
     if (strncmp(base, "CCChanTx", 8) == 0 || strncmp(base, "CCChanRx", 8) == 0 ||
         strcmp(base, "CCChan") == 0)
         return NULL; /* handle allowlist, not a ##_ header */
     if (cc_slice_spec_lookup(base, NULL, NULL) == 0) return "cc_slice.cch";
-    if (strncmp(base, "CCVec_", 6) == 0) return "std/vec.cch";
-    if (strncmp(base, "ArrayMap_", 9) == 0) return "std/array_map.cch";
-    if (strncmp(base, "Map_", 4) == 0) return "std/map_impl.cch";
+    suf = cc_ufcs_family_header_suffix(base);
+    if (suf) return suf;
     reg = cc_type_graph_active_registry(cc_type_graph_get_global());
     if (!reg) reg = cc_type_registry_get_global();
     if (!reg) return NULL;

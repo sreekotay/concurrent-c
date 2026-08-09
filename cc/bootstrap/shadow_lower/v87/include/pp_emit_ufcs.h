@@ -1065,16 +1065,12 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
     const ShadowBind* rb;
     char vty[128];
     char hdrm[224];
-    int recv_is_double;
     if (!recv || !meth_name || !dst || !cap) return 0;
     recv = shadow_ufcs_skip_cast(recv, recv_buf, sizeof(recv_buf));
     while (*recv == ' ' || *recv == '\t') recv++;
     a[0] = 0;
     if (args) snprintf(a, sizeof(a), "%s", args);
     while (a[0] == ' ' || a[0] == '\t') memmove(a, a + 1, strlen(a));
-    recv_is_double =
-        strstr(recv, "double") || strstr(recv, "halve") ||
-        strstr(recv, "fabs") || (strchr(recv, '.') && !strchr(recv, '('));
     rb = shadow_bind_for_recv(recv);
     shadow_bind_base_ty(rb, vty, sizeof(vty));
     /* @restricted: allow-list filter; resolve remaining methods as Base*. */
@@ -1434,27 +1430,10 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
             snprintf(dst, cap, "cc_channel_cancel(%s)", recv);
         else
             return 0;
-    } else if (!is_arrow && strcmp(meth_name, "twice") == 0) {
-        /* Typed recv (Foo.twice) beats scalar cc_int_twice. */
-        if (vty[0] && vty[0] >= 'A' && vty[0] <= 'Z' &&
-            strcmp(vty, "CCSlice") != 0) {
-            char tryc[160];
-            snprintf(tryc, sizeof(tryc), "%s_twice", vty);
-            if (shadow_ufn_exists(tryc))
-                snprintf(dst, cap, "%s(&%s)", tryc, recv);
-            else if (!shadow_ufcs_emit_bare(recv, meth_name, a, 0, vty, 0, dst,
-                                           cap))
-                snprintf(dst, cap,
-                         recv_is_double ? "cc_double_twice(%s)"
-                                        : "cc_int_twice(%s)",
-                         recv);
-        } else {
-            snprintf(dst, cap,
-                     recv_is_double ? "cc_double_twice(%s)" : "cc_int_twice(%s)",
-                     recv);
-        }
-    } else if (!is_arrow && strcmp(meth_name, "halve") == 0) {
-        snprintf(dst, cap, "cc_double_halve(%s)", recv);
+    /* twice/halve: beachhead scalar family (cc_<ty>_<meth> when declared).
+     * fabs/strlen: shadow ufn table does not yet see math.h/string.h
+     * macros/builtins — invent libc names until bare-system registration
+     * catches up (tests/ufcs_bare_system_fn_smoke). */
     } else if (!is_arrow && strcmp(meth_name, "fabs") == 0) {
         snprintf(dst, cap, "fabs(%s)", recv);
     } else if (!is_arrow && strcmp(meth_name, "strlen") == 0) {
@@ -1612,16 +1591,12 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
     } else if (is_arrow && strcmp(meth_name, "cap") == 0 &&
                (strcmp(vty, "CCString") == 0 || shadow_bind_ty_has(rb, "CCString"))) {
         snprintf(dst, cap, "cc_string_cap(%s)", recv);
-    } else if (!is_arrow && strcmp(meth_name, "median") == 0) {
-        if (vty[0] && strncmp(vty, "CCVec_", 6) == 0)
-            snprintf(dst, cap, "%s_median(&%s)", vty, recv);
-        else
-            snprintf(dst, cap, "CCVec_double_median(&%s)", recv);
-    } else if (!is_arrow && strcmp(meth_name, "push") == 0) {
-        if (vty[0] && strncmp(vty, "CCVec_", 6) == 0)
-            snprintf(dst, cap, "%s_push(&%s, %s)", vty, recv, a);
-        else
-            snprintf(dst, cap, "CCVec_double_push(&%s, %s)", recv, a);
+    } else if (!is_arrow && strcmp(meth_name, "median") == 0 &&
+               vty[0] && strncmp(vty, "CCVec_", 6) == 0) {
+        snprintf(dst, cap, "%s_median(&%s)", vty, recv);
+    } else if (!is_arrow && strcmp(meth_name, "push") == 0 &&
+               vty[0] && strncmp(vty, "CCVec_", 6) == 0) {
+        snprintf(dst, cap, "%s_push(&%s, %s)", vty, recv, a);
     } else if (!is_arrow && strcmp(meth_name, "mean") == 0 &&
                vty[0] && strncmp(vty, "CCVec_", 6) == 0) {
         snprintf(dst, cap, "%s_mean(&%s)", vty, recv);
@@ -1875,8 +1850,6 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
             return shadow_ufcs_emit_slice_meth(vty, "at", recv, a, dst, cap);
         if (vty[0] && strncmp(vty, "Pair_", 5) == 0)
             snprintf(dst, cap, "%s_at(&%s, %s)", vty, recv, a);
-        else if (g_shadow_nginst > 0 && shadow_bind_ty_has(rb, "Pair"))
-            snprintf(dst, cap, "Pair_int_int_at(&%s, %s)", recv, a);
         else if (SHADOW_UFCS_PTR_RECV())
             snprintf(dst, cap, "cc_slice_at(%s, %s)", recv, a);
         else
@@ -2411,17 +2384,8 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
                     snprintf(dst, cap, "%s(&%s)", cc_meth, recv);
                 }
             } else {
-                snprintf(tryc, sizeof(tryc), "store_%s", meth_name);
-                if (a[0]) {
-                    if (ptr_recv)
-                        snprintf(dst, cap, "%s(%s, %s)", tryc, recv, a);
-                    else
-                        snprintf(dst, cap, "%s(&%s, %s)", tryc, recv, a);
-                } else if (ptr_recv) {
-                    snprintf(dst, cap, "%s(%s)", tryc, recv);
-                } else {
-                    snprintf(dst, cap, "%s(&%s)", tryc, recv);
-                }
+                /* No Capitals/CC* invent match — fail loud (never store_*). */
+                return 0;
             }
         } else if (strcmp(meth_name, "init") == 0 ||
                    strcmp(meth_name, "put") == 0 ||
@@ -2615,7 +2579,8 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
             return 0;
     } else if (strcmp(meth_name, "free") == 0) {
         /* Nursery*→free; ArenaPool.free(ptr); Arena.free()→destroy;
-         * chan → cc_channel_free; Store→store_free. Unknown arrow → fail loud.
+         * chan → cc_channel_free; typed Store → store_free (snake).
+         * Unknown / name-heuristic recv → fail loud (no store_* invent).
          * Note: check CCArenaPool before CCArena (exact ty_is). */
         if (shadow_ufcs_ty_is(vty, rb, "CCNursery")) {
             snprintf(dst, cap, "cc_nursery_free(%s)", recv);
@@ -2643,17 +2608,13 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
                 snprintf(dst, cap, "cc_exclusive_mutex_free(%s)", recv);
             else
                 snprintf(dst, cap, "cc_exclusive_mutex_free(&%s)", recv);
-        } else if (shadow_ufcs_ty_is(vty, rb, "Store") ||
-                   (!is_arrow && (strstr(recv, "store") != NULL))) {
-            /* Recipe Store beachhead; arrow requires typed Store. */
+        } else if (shadow_ufcs_ty_is(vty, rb, "Store")) {
             if (SHADOW_UFCS_PTR_RECV())
                 snprintf(dst, cap, "store_free(%s)", recv);
             else
                 snprintf(dst, cap, "store_free(&%s)", recv);
-        } else if (is_arrow) {
-            return 0; /* never invent store_free / exclusive for unknown * */
         } else {
-            snprintf(dst, cap, "store_free(&%s)", recv);
+            return 0;
         }
     } else if (!is_arrow && strcmp(meth_name, "head") == 0) {
         /* Prefer typed mangled callee when the receiver type is known
@@ -2713,12 +2674,9 @@ static int shadow_ufcs_lower_parts(const char* recv, const char* meth_name,
             snprintf(dst, cap, "%s)(&%s)", gen, recv);
         }
     } else if (!is_arrow && strcmp(meth_name, "span") == 0 &&
-               (!vty[0] || strncmp(vty, "Pair_", 5) == 0)) {
-        /* Pair beachhead only — typed ArrayMap_/TU extensions fall through. */
-        if (vty[0] && strncmp(vty, "Pair_", 5) == 0)
-            snprintf(dst, cap, "%s_span(&%s)", vty, recv);
-        else
-            snprintf(dst, cap, "Pair_int_double_span(&%s)", recv);
+               vty[0] && strncmp(vty, "Pair_", 5) == 0) {
+        /* Typed Pair_* only — no default Pair_int_double_span invent. */
+        snprintf(dst, cap, "%s_span(&%s)", vty, recv);
     } else if (!is_arrow && strcmp(meth_name, "hdr") == 0) {
         /* Header ladder: CCSlice_hdr / cc_slice_hdr — no type-name hardcode. */
         if (shadow_ufcs_hdr_member(vty, rb, meth_name, hdrm, sizeof(hdrm)))

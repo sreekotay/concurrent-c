@@ -1987,11 +1987,27 @@ static void shadow_collect_binds_node(AstNode* st) {
             return;
         }
     } else if (st->kind == AST_VAR_UNWRAP) {
+        /* Field layout (parse_unwrap): bang* keep lhs type in e; qmark moves
+         * type to d (or qmark_bind:Type) and parks the fallback in e;
+         * bang_chain:Type parks the chain in e. Binding st->e as the type for
+         * ?> made `recovered.twice()` see type "0" and miss scalar UFCS. */
+        const char* mode = st->c;
+        const char* qty = NULL;
         shadow_register_from_text(st->b);
-        if (st->e[0]) {
+        if (strcmp(mode, "qmark") == 0) {
+            qty = st->d[0] ? st->d : "int";
+            if (st->e[0]) shadow_register_from_text(st->e);
+        } else if (strncmp(mode, "qmark_bind:", 11) == 0) {
+            qty = mode[11] ? mode + 11 : "int";
+            if (st->e[0]) shadow_register_from_text(st->e);
+        } else if (strncmp(mode, "bang_chain:", 11) == 0 && mode[11]) {
+            qty = mode + 11;
+            if (st->e[0]) shadow_register_from_text(st->e);
+        } else if (st->e[0]) {
             shadow_register_from_text(st->e);
-            shadow_bind_name(st->a, st->e, 0);
+            qty = st->e;
         }
+        if (qty && qty[0]) shadow_bind_name(st->a, qty, 0);
     } else if (st->kind == AST_STMT_UNWRAP) {
         /* `py_expose::[T](…) !>;` — factory instance must be produced. */
         shadow_register_from_text(st->a);

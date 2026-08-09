@@ -1,9 +1,6 @@
-promoted_utc: 2026-08-09T17:37:56Z
-git_head: ba1514d1
---- from SNAPSHOT.txt ---
 source: cc/shadow/shadow_lower.ccs
 emitter: native:/Users/skotay/Documents/code/concurrent-c/out/cc/bin/shadow_lower
-created_utc: 2026-08-09T17:37:51Z
-git_head: ba1514d1
+created_utc: 2026-08-09T17:45:57Z
+git_head: 9d73fa86
 emit_bytes: 112926
 header_count: 26

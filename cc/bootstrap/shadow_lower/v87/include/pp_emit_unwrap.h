@@ -263,6 +263,7 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
         if (shadow_rewrite_variant_qmark(qbuf, sizeof(qbuf))) {
             if (ctx && ctx->rname && ctx->rname[0])
                 shadow_rewrite_result_ctors(qbuf, sizeof(qbuf), ctx->rname);
+            shadow_bind_name(st->a, qty, 0);
             return cemit_fmt(out, "%s%s %s = %s;\n", indent, qty, st->a, qbuf);
         }
     }
@@ -690,6 +691,7 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
         char i1[80];
         const char* qty = st->d[0] ? st->d : "int";
         shadow_indent_nest(i1, sizeof(i1), indent, 1);
+        shadow_bind_name(st->a, qty, 0);
         return cemit_fmt(out,
             "%s%s %s;\n"
             "%s{\n"
@@ -706,6 +708,7 @@ static int shadow_emit_var_unwrap(AstNode* st, CEmit* out, ShadowCtx* ctx,
                                                                : "int";
         shadow_indent_nest(i1, sizeof(i1), indent, 1);
         shadow_indent_nest(i2, sizeof(i2), indent, 2);
+        shadow_bind_name(st->a, qty, 0);
         if (!cemit_fmt(out,
                 "%s%s %s;\n"
                 "%s{\n"

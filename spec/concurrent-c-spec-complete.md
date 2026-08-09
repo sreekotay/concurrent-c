@@ -683,7 +683,7 @@ usually runs.
 ```c
 void ok_pattern() {
     CCArena a = cc_arena_heap(kilobytes(64));
-    char[:] s = arena_alloc(char, &a, 100);
+    char[:] s = a.alloc_slice_bytes(100);
     
     ThreadGroup g = thread_group();
     g.spawn(() => {
@@ -696,7 +696,7 @@ void bad_pattern() {
     ThreadGroup g = thread_group();
     {
         CCArena a = cc_arena_heap(kilobytes(64));
-        char[:] s = arena_alloc(char, &a, 100);
+        char[:] s = a.alloc_slice_bytes(100);
         g.spawn(() => {
             use(s);  // ERROR: arena may be freed before thread runs
         });
@@ -706,7 +706,7 @@ void bad_pattern() {
 
 void bad_reset_while_borrow() {
     CCArena a = cc_arena_heap(kilobytes(64));
-    char[:] s = arena_alloc(char, &a, 100);
+    char[:] s = a.alloc_slice_bytes(100);
     use(s);
     cc_arena_reset(&a);  // ERROR: borrow of a still in scope
 }
@@ -714,7 +714,7 @@ void bad_reset_while_borrow() {
 void ok_reset_after_borrow_scope() {
     CCArena a = cc_arena_heap(kilobytes(64));
     {
-        char[:] s = arena_alloc(char, &a, 100);
+        char[:] s = a.alloc_slice_bytes(100);
         use(s);
     }
     cc_arena_reset(&a);  // OK
@@ -1425,7 +1425,7 @@ Subslicing a unique slice produces a **borrowed view**. At runtime, borrows are 
 - Borrows are invalidated when the owner is:
   - Moved (`move(x)`, `send_take(*x)`)
   - Destroyed (scope exit)
-  - Reset (for arena-backed owners, `arena_reset`)
+  - Reset (for arena-backed owners, `cc_arena_reset`)
 - Using an invalidated borrow is a compile-time error (when detectable) or undefined behavior (when not statically detectable, debug builds trap)
 
 ```c
@@ -1669,199 +1669,275 @@ help: release @scoped value before suspension
 
 This section defines the allocation model and lifetime boundaries:
 
-- **Arena API** — creation, allocation, lifecycle
+- **§5.0 API** through **Usage** — constructors, alloc paths, overflow, concurrency
 - **§5.1 `@defer`** — scoped cleanup
 - **§5.2 Scoped arena lifetimes** — ordinary lexical scopes with `@destroy`
 
-`spec/draft_alloc_strategy.md` specifies the implemented heap-overflow,
-per-allocation release, reallocation, and checkpoint-gating contract.
+Arenas own memory; slices are views into arena-owned storage. An arena is a
+**lifetime annotation**: size the root for that lifetime's live set. Heap
+overflow and mid-lifetime `cc_arena_release` are escape hatches, not the
+steady-state path. Prefer a separate arena when lifetimes diverge rather than
+long-lived release churn.
+
+When the slab/`block_max` budget cannot satisfy an allocation and heap overflow
+is disabled (or fails), allocation returns `NULL`. Exhaustion is never
+indistinguishable from success.
 
 ---
 
-Arenas own memory; slices are views into arena-owned storage.
+### 5.0 API
 
 ```c
-// Creation
-CCArena cc_arena_heap(size_t bytes);          // heap-backed first slab; default block_max = 4, then overflow
-int cc_arena_buffer(CCArena* a, void* buf, size_t cap);  // caller-provided first slab; default block_max = 1
-
-// Value-returning constructor with explicit growth policy. Use CC_ARENA_FIXED
-// for a strict cap (no heap overflow), CC_ARENA_GROWABLE for a caller-owned
-// root with unbounded heap-slab overflow, or a literal N > 1 to bound total
-// blocks. cc_arena_fixed_buffer(buf, cap) is the 2-arg shorthand for
-// CC_ARENA_FIXED and is the target of the `CCArena a = @create(buf, cap)`
-// sugar.
+// Constructors
+CCArena cc_arena_heap(size_t bytes);     // heap root; block_max = 4; overflow on
+CCArena cc_arena_create(size_t bytes);   // alias of cc_arena_heap
+CCArena cc_arena_malloc(size_t bytes);   // durable: block_max = 1; overflow on; no extents
+int cc_arena_buffer(CCArena* a, void* buf, size_t cap);  // user root; block_max = 1; overflow off
 CCArena cc_arena_create_buffer(void* buf, size_t cap, unsigned block_max);
-CCArena cc_arena_fixed_buffer(void* buf, size_t cap);
-#define CC_ARENA_FIXED     1u
-#define CC_ARENA_GROWABLE  0u
-
-// Stack scratch + arena in one declaration (storage is name##_cc_stack_buf[nbytes])
-#define CC_ARENA_STACK(name, nbytes)
+CCArena cc_arena_fixed_buffer(void* buf, size_t cap);    // create_buffer(..., CC_ARENA_FIXED)
+#define cc_arena_stack(name, nbytes)     // stack root; block_max = 4; overflow on
+#define CC_ARENA_STACK(name, nbytes)     // alias of cc_arena_stack
+#define CC_ARENA_FIXED     1u            // root only
+#define CC_ARENA_GROWABLE  0u            // unbounded extents (expert)
+#ifndef CC_ARENA_DEFAULT_BLOCK_MAX
+#define CC_ARENA_DEFAULT_BLOCK_MAX 4u
+#endif
+bool cc_arena_set_heap_overflow(CCArena* a, bool enabled);
 
 // Lifecycle
-void cc_arena_free(CCArena* a);                   // free heap overflow slabs; clear handle
-void cc_arena_reset(CCArena* a);                  // unwind to original user block; bump provenance
-void cc_arena_destroy(CCArena* a);                // alias for cc_arena_free
+void cc_arena_free(CCArena* a);          // drain ovf; free heap extents/root; clear handle
+void cc_arena_reset(CCArena* a);         // drain ovf; unwind extents; restore original root
+void cc_arena_destroy(CCArena* a);       // alias for cc_arena_free
+CCArena cc_arena_detach(CCArena* a);     // move ownership out; leave a empty
 
-// Checkpoints (cross-block aware)
+// Checkpoints (cross-block; disabled after release/overflow — see below)
 typedef struct CCArenaCheckpoint CCArenaCheckpoint;
 CCArenaCheckpoint cc_arena_checkpoint(CCArena* a);
 void cc_arena_restore(CCArenaCheckpoint checkpoint);
 
-// Allocation (grows when block_max allows; see Growable arenas)
+// Shared alloc (thread-safe tip CAS + meta_lock on grow/ovf/chain)
 void* cc_arena_alloc(CCArena* a, size_t nbytes, size_t align);
-void* cc_arena_alloc_local(CCArena* a, size_t nbytes, size_t align);       // current slab only, non-atomic
-void* cc_arena_alloc_local_grow(CCArena* a, size_t nbytes, size_t align);   // local tip, unlocked grow, then ovf
+void* cc_arena_realloc(CCArena* old_a, CCArena* new_a, void* p,
+                       size_t old_n, size_t new_n, size_t align);
+bool cc_arena_release(CCArena* a, void* ptr);
+
+// Local alloc (exclusive owner only — UB if shared)
+void* cc_arena_alloc_local(CCArena* a, size_t nbytes, size_t align);       // current slab; NULL if full
+void* cc_arena_alloc_local_grow(CCArena* a, size_t nbytes, size_t align);  // local tip, unlocked grow, then ovf
 void* cc_arena_realloc_local(CCArena* a, void* p, size_t old_n, size_t new_n, size_t align);       // tip fit only
-void* cc_arena_realloc_local_grow(CCArena* a, void* p, size_t old_n, size_t new_n, size_t align);  // local tip then local grow/copy
-#define arena_alloc(T, arena, count)  // tracked, count elements
-#define arena_alloc1(T, arena)        // tracked, 1 element
-// Macros: cc_arena_alloc_T_* (shared default), cc_arena_alloc_T_*_local, cc_arena_alloc_T_*_local_grow
+void* cc_arena_realloc_local_grow(CCArena* a, void* p, size_t old_n, size_t new_n, size_t align);  // tip, else local grow/copy
 
-int cc_arena_would_fit(const CCArena* a, size_t nbytes, size_t align);  // current slab only (no grow)
+#define cc_arena_alloc_T(T, arena)                 // shared default; UFCS: a.allocT()
+#define cc_arena_alloc_T_count(T, arena, count)    // UFCS: a.allocT(n)
+#define cc_arena_alloc_T_local(T, arena)
+#define cc_arena_alloc_T_count_local(T, arena, count)
+#define cc_arena_alloc_T_local_grow(T, arena)
+#define cc_arena_alloc_T_count_local_grow(T, arena, count)
 
-**Fixed-size Pool API (normative):**
-A `CCArenaPool` provides O(1) `alloc` and `free` for uniform objects by managing a freelist on top of an arena.
+// Tracked slices (empty slice on failure; len==0 is also empty)
+CCSlice cc_arena_alloc_slice_bytes(CCArena* a, size_t len);  // UFCS: a.alloc_slice_bytes(n)
+CCSlice cc_arena_alloc_slice(CCArena* a, size_t elem_size, size_t count, size_t align);
+CCSlice cc_arena_slice(const CCArena* a, void* ptr, size_t len);  // UFCS: a.slice(ptr, len)
+
+int cc_arena_would_fit(const CCArena* a, size_t nbytes, size_t align);  // current slab only
+size_t kilobytes(size_t n);
+size_t megabytes(size_t n);
+```
+
+**Pool (normative):** `CCArenaPool` is an O(1) freelist of uniform objects over an
+arena. Pool bump fills use shared `cc_arena_alloc`.
+
 ```c
 typedef struct CCArenaPool CCArenaPool;
 void cc_arena_pool_init(CCArenaPool* p, CCArena* a, size_t sz);
-int cc_arena_pool(CCArenaPool* p, size_t sz);      // creates and owns its own arena
-void* cc_arena_pool_alloc(CCArenaPool* p);         // UFCS: p.alloc()
+int cc_arena_pool(CCArenaPool* p, size_t sz);       // owns its own arena
+void* cc_arena_pool_alloc(CCArenaPool* p);          // UFCS: p.alloc()
 void cc_arena_pool_free(CCArenaPool* p, void* ptr); // UFCS: p.free(ptr)
-CCArena cc_arena_pool_detach(CCArenaPool* p);      // UFCS: p.detach_arena()
-void cc_arena_pool_destroy(CCArenaPool* p);        // UFCS: p.destroy()
+CCArena cc_arena_pool_detach(CCArenaPool* p);       // UFCS: p.detach_arena()
+void cc_arena_pool_destroy(CCArenaPool* p);         // UFCS: p.destroy()
+#define cc_arena_pool_stack(name, elem_size, nbytes)
+#define CC_ARENA_POOL_STACK(name, elem_size, nbytes)  // alias
 ```
 
-The pool is reclaimed when the underlying arena is reset or freed. If the pool owns its arena (created via `cc_arena_pool`), `cc_arena_pool_destroy` will free the arena.
+The pool is reclaimed when the underlying arena is reset or freed. If the pool
+owns its arena (`cc_arena_pool`), `cc_arena_pool_destroy` frees that arena.
+`cc_arena_pool_stack` / `CC_ARENA_POOL_STACK` expands to `cc_arena_stack` plus
+`cc_arena_pool_init`.
 
-**Stack-backed Pool (normative):**
-`CC_ARENA_POOL_STACK(name, elem_size, nbytes)` declares a stack-backed arena and a pool initialized from it. It is equivalent to:
+---
+
+### Model
+
+**Root sizing.** Constructor `bytes` is the first slab capacity. Size it for the
+typical live set of that arena's lifetime so traffic stays in slabs.
+`cc_arena_heap` / `cc_arena_stack` share one engine: root exactly `N`,
+`block_max = CC_ARENA_DEFAULT_BLOCK_MAX` (4), heap overflow on after the slab
+budget. `cc_arena_malloc` is a durable fixed root (`block_max = 1`, overflow on,
+no extent growth) for stores that free entries individually — not for scratch
+alloc storms. `cc_arena_buffer` / `cc_arena_fixed_buffer` take a caller-owned
+root with overflow off by default; enable overflow or raise `block_max`
+explicitly. `cc_arena_create_buffer` sets an explicit `block_max`.
+`cc_arena_create` aliases `cc_arena_heap`.
+
+**`block_max`.** Affects future growth only.
+
+- `0` (`CC_ARENA_GROWABLE`): unbounded extent chain (expert).
+- `1` (`CC_ARENA_FIXED`): no extent growth. Default for `cc_arena_buffer`.
+  `cc_arena_malloc` uses this with overflow on.
+- `N > 1`: at most `N` slabs total (root is `block_idx == 0`). Default heap/stack
+  budget is 4. Beyond the budget, allocation uses heap overflow when enabled;
+  otherwise returns `NULL`.
+
+When the active slab is full and growth is allowed, a new slab is installed of
+size at least **max**(1.5× previous capacity, space for the pending allocation,
+4096). The prior slab is pushed onto the extent chain; the root handle always
+holds the active slab.
+
+**Ownership.**
+
+- Heap-rooted (`cc_arena_heap` / `cc_arena_malloc`): arena owns the root buffer;
+  `cc_arena_free` frees it with heap extents and overflow.
+- User/stack root (`cc_arena_buffer`, `cc_arena_stack`): arena never frees the
+  initial buffer. `cc_arena_free` frees heap extents and overflow only, then
+  clears the handle (`base == NULL`). Re-init with `cc_arena_buffer` before reuse.
+- Freeing never calls `free` on stack or static storage.
 
 ```c
-CC_ARENA_STACK(name_arena, nbytes);
-CCArenaPool name;
-cc_arena_pool_init(&name, &name_arena, elem_size);
+CCArena a = cc_arena_heap(kilobytes(64)) @destroy;
+int* xs = cc_arena_alloc_T_count(int, &a, 100);
+
+cc_arena_stack(scratch, 4096);
+void* p = scratch.alloc(n, align);
+scratch.reset();  // drain ovf, restore stack root
 ```
 
-// Growth policy (field on CCArena; affects future growth only)
-// a->block_max = 0;  // unbounded growth
-// a->block_max = 1;  // fixed, no growth
-// a->block_max = N;  // at most N blocks total
+---
 
-// Transfer (moves ownership of all blocks)
-CCArena cc_arena_detach(CCArena* a);              // move ownership out
+### Allocation paths
 
-// Size helpers
-size_t kilobytes(size_t n);            // n * 1024
-size_t megabytes(size_t n);            // n * 1024 * 1024
+**Shared** (`cc_arena_alloc`, `cc_arena_realloc`, typed/slice helpers, vec/string/
+containers, pool bump): tip bump is lock-free CAS on `offset`. Slab grow, overflow
+list/chunk mutation, extent-chain walks, and live-count credit after a tip race
+take the per-arena `meta_lock`. Stdlib defaults stay on this path.
 
-```
+**Local** (`*_local*`, `*_local_grow`): plain loads/stores on the active slab.
+Require exclusive ownership by one thread/fiber for the duration of those calls;
+sharing is undefined behavior. `cc_arena_alloc_local` / `cc_arena_realloc_local`
+touch the current slab only (`NULL` when full / not a tip fit).
+`cc_arena_alloc_local_grow` tries local tip, then unlocked slab grow, then
+overflow — it does **not** bounce through `cc_arena_alloc`.
+`cc_arena_realloc_local_grow` tries local tip realloc, else local grow + copy +
+release. Opt into local paths only where exclusive ownership is assured.
 
-**Arena ownership model:**
+**Tip realloc.** When `ptr + old_size` is the active tip and the new size fits
+the active slab (or overflow chunk tip), realloc grows/shrinks in place. Otherwise
+allocate at the new tip, copy the shared prefix, and `cc_arena_release` the old
+pointer (or, for per-object overflow in the same arena, `realloc` the malloc
+block). Cross-arena realloc allocates in `new_a`, copies, releases through `old_a`.
 
-Arenas track their ownership per slab:
-- **Heap-backed root** (created with `cc_arena_heap`) owns its initial buffer; `cc_arena_free` frees the active heap block and all heap overflow slabs.
-- **User-backed initial buffer** (`cc_arena_buffer`, `CC_ARENA_STACK`, etc.) is never freed by the arena. `cc_arena_free` frees only **heap** extent buffers (overflow from growth), then clears the arena handle (`base` becomes NULL). Call `cc_arena_buffer` again before reuse after `free`.
-- Extents in the growth chain record heap vs user ownership; freeing never calls `free` on stack or static storage.
+**`cc_arena_would_fit`:** reports whether the **current** slab can satisfy the
+request without growing.
 
-This allows uniform cleanup for heap-first arenas:
+---
+
+### Overflow and release
+
+Heap overflow is the fallback after the slab/`block_max` budget (or when
+`block_max == 1` so no extents exist). Toggle with `cc_arena_set_heap_overflow`
+(fails to disable after overflow has been used). Overflow pointers stay
+arena-owned; `cc_arena_reset` / `cc_arena_free` drain them. Using a pre-reset
+overflow pointer is undefined behavior, same as a pre-reset slab pointer.
+
+- **Growable / scratch** (`block_max != 1`): chunked overflow — bump inside
+  64KiB (or larger) chunks on `ovf_chunks`. `cc_arena_release` punches a hole;
+  chunks free on reset/free.
+- **`cc_arena_malloc` / `block_max == 1`:** per-object overflow — each object is
+  a separate malloc, linked on a doubly-linked `ovf_head` list.
+  `cc_arena_release` unlinks and frees immediately.
+
+First non-last-live slab release, or any heap-overflow alloc, marks the arena
+non-rewindable (`CC_ARENA_FLAG_NON_REWINDABLE`). Releasing the last live alloc on
+the root slab rewinds the tip to zero and clears that flag.
+
+**Rule:** `cc_arena_reset` frees outstanding overflow, unwinds extents, restores
+the original root (`block_idx = 0`), clears used-overflow / non-rewindable flags,
+and advances provenance.
+
+**Rule:** `cc_arena_free` steals and frees overflow, frees heap-owned extent and
+root buffers, then clears the handle.
+
+---
+
+### Checkpoints
+
+Checkpoints are cross-block: they capture `block_idx`, offset, and provenance,
+then advance provenance for subsequent allocations. Restore unwinds newer extents
+and restores offset/provenance; post-checkpoint allocations become stale; prior
+ones remain valid. Checkpoints do not change ownership rules.
+
+While the arena is non-rewindable (mid-lifetime release or heap overflow),
+`cc_arena_checkpoint` returns a null handle (`checkpoint.arena == NULL`) and
+emits a one-time diagnostic; `cc_arena_restore` of a null handle or against a
+non-rewindable arena is a no-op. `cc_arena_reset` restores rewindability for the
+new epoch.
 
 ```c
-// Works for both heap and user-backed arenas
-CCArena a = cc_arena_heap(kilobytes(64));  // or: cc_arena_buffer(&a, buf, sz)
-// ... use arena ...
-cc_arena_free(&a);  // frees heap-backed root and overflow; user root buffer untouched
+CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+CCArenaCheckpoint cp = a.checkpoint();
+char* tmp = cc_arena_alloc_T_count(char, &a, 1024);
+cc_arena_restore(cp);  // reclaim post-checkpoint bytes
 ```
 
-**Blessed constructors:** heap-rooted `CCArena h = cc_arena_heap(N) @destroy;` and stack-rooted declaration macro `cc_arena_stack(s, N);` (alias `CC_ARENA_STACK`) for request/window scratch; durable fixed-root `CCArena m = cc_arena_malloc(N) @destroy;` when entries are freed individually. Heap/stack share the bump/extent/overflow engine (root exactly `N`, `block_max = 4`, then overflow); size `N` for typical request live set so traffic stays in slabs. `cc_arena_create` is an alias of `cc_arena_heap`. Constructor choice and root sizing are specified in `spec/draft_alloc_strategy.md`.
+---
 
-**Stack-first scratch (normative):** `cc_arena_stack(name, nbytes)` declares `uint8_t name##_cc_stack_buf[nbytes]` and a `CCArena name` initialized from that buffer with `block_max = CC_ARENA_DEFAULT_BLOCK_MAX` and heap overflow enabled. Hot allocations use the stack slab; further growth matches heap arenas (up to four slabs, then malloc overflow). Use `cc_arena_reset` to free tier-3 overflow, unwind extents, and point `name.base` back at the stack buffer; use `cc_arena_free` when discarding the handle (then re-init if needed).
+### Concurrency
 
-**Growable arenas (normative):**
+- Shared alloc: tip CAS is lock-free; `meta_lock` serializes grow, overflow
+  lists/chunks, chain walks, and live credit. `cc_arena_release`, overflow
+  realloc, `cc_arena_reset`, and `cc_arena_free` take the same lock.
+- Local paths require single-owner exclusive use — undefined behavior if shared.
+- Reset/free still require no concurrent users and no live derived pointers
+  (non-goal: no automatic generation / refcount). Arenas are not refcounted.
 
-Arenas grow when `block_max` allows it. `cc_arena_heap` / `cc_arena_stack` default to **`block_max = 4`** with heap overflow enabled: up to four slabs, then malloc overflow. `cc_arena_buffer` defaults to **fixed** (`block_max = 1`, overflow off). When allocation exhausts the current block and growth is allowed, a new block is allocated; its size is at least **max**(1.5× the previous block’s capacity, space required for the **pending** allocation, 4096 bytes). The full previous block is pushed into a linked chain of extents. The root `CCArena` struct always holds the *active* block.
+**Rule:** Arena-allocated slices may be sent on channels or captured in task
+closures when §2.2 lifetime rules hold. Capturing or sending a non-unique
+arena-backed view pins the provenance epoch until the join scope ends;
+epoch-ending ops while a pin is live are ill-formed when statically visible.
 
-- `block_max = 0`: Unbounded extent growth (expert; set explicitly).
-- `block_max = 1`: Fixed root only (default for `cc_arena_buffer`; `cc_arena_malloc` uses this with overflow on).
-- `block_max = N` (N > 1): At most N slabs (initial block counts as 0). Beyond the budget, allocation uses heap overflow when enabled, otherwise returns NULL.
-- Default for blessed heap/stack: `CC_ARENA_DEFAULT_BLOCK_MAX` (4).
-
-```c
-// Growable arena: will automatically allocate new blocks as needed
-CCArena a = cc_arena_heap(kilobytes(4));
-for (int i = 0; i < 10000; i++) {
-    arena_alloc(int, &a, 100);  // seamlessly grows across blocks
-}
-cc_arena_free(&a);  // frees all blocks
-
-// Heap-backed arena with explicit budget
-CCArena b = cc_arena_heap(kilobytes(16));
-b.block_max = 4;  // at most 4 blocks total
-// ... after 4 blocks are exhausted, arena_alloc returns NULL
-
-// Stack-first growable scratch (overflows to heap when needed)
-CC_ARENA_STACK(scratch, 4096);
-void *p = cc_arena_alloc(&scratch, n, align);
-// ... cc_arena_reset(&scratch) to reuse stack slab, or cc_arena_free(&scratch) when done
-
-// Stack-backed fixed arena (no heap overflow)
-uint8_t buf[4096];
-CCArena c;
-cc_arena_buffer(&c, buf, sizeof(buf));  // block_max = 1, no growth
-
-// Caller-provided buffer that may spill to heap
-CCArena d;
-cc_arena_buffer(&d, buf, sizeof(buf));
-d.block_max = 0;  // unbounded growth beyond the initial user buffer
-```
-
-**Rule:** `cc_arena_reset` frees outstanding heap-overflow allocations (tier 3), unwinds all grown extents, frees their buffers and extent structs, and restores the root arena to its original block. After reset, the arena is back to its initial capacity with `block_idx = 0`.
-
-**Rule:** `cc_arena_checkpoint` / `cc_arena_restore` are cross-block aware. A checkpoint captures `block_idx` along with the allocation offset. Restoring a checkpoint taken in an earlier block unwinds the growth chain to that block, freeing all intervening blocks.
-
-**Rule:** `cc_arena_free` walks the extent chain and frees **heap-owned** buffers only, then frees the active root buffer if it is heap-owned. User/stack/static initial buffers are never freed.
-
-**Rule:** Changing `block_max` affects only future growth attempts. It does not rewrite existing extents or change ownership of the current block.
-
-**Rule:** `cc_arena_alloc` is safe to share across threads when every concurrent user goes through it (or equivalent synchronization): the tip bump uses atomic compare-and-swap on the offset; slab growth, heap-overflow list mutation, extent-chain walks, and live-count credit after a tip race use a per-arena meta spinlock. `cc_arena_release` / `cc_arena_realloc` (overflow path) / `cc_arena_reset` / `cc_arena_free` take the same lock. Callers must still not reset or free an arena while other threads may allocate from it or hold live pointers into it.
-
-**Rule:** `cc_arena_alloc_local`, `cc_arena_alloc_local_grow`, `cc_arena_realloc_local`, and `cc_arena_realloc_local_grow` use a non-atomic fast path on the current slab; they MUST only be used when **one** thread or fiber exclusively holds the arena during those calls. `cc_arena_realloc_local` succeeds only for tip grow/shrink (or tip free to zero); otherwise it returns NULL. The “grow” half of `*_local_grow` extends slabs without the shared tip-CAS / meta_lock path, then may spill to heap overflow. `cc_arena_would_fit` reports whether the **current** slab can satisfy an allocation without growing (atomic load of offset).
-
-**Rule:** Arena-allocated slices can be sent through channels or captured in thread closures when lifetime rules (§2.2) are satisfied.
-
-**Rule (arena lifetime obligation):** `arena_reset` and `arena_free` must not be called while any slice derived from that arena may still be used on any thread. When the conflict is statically visible (live lexical borrow, or nursery spawn capture of an arena borrow), the compiler rejects `arena_reset` / `arena_restore`. When not statically detectable, violating this rule is undefined behavior in release builds; debug builds may trap via epoch helpers such as `cc_slice_is_from_arena_epoch`.
-
-**Arena checkpoints (normative):**
-
-- An arena checkpoint captures the current allocation state of an arena and allows later restoration.
-- Restoring a checkpoint releases all allocations performed after the checkpoint.
-- Checkpoints MUST NOT invalidate allocations made prior to the checkpoint.
-- Arena checkpoints do not alter arena ownership or lifetime rules.
-- Taking a checkpoint starts a fresh arena provenance epoch for subsequent allocations.
-- Restoring a checkpoint restores the checkpoint's provenance epoch so post-checkpoint allocations become stale while prior allocations remain valid.
+**Rule (arena lifetime obligation):** `cc_arena_reset` / `cc_arena_free` /
+`cc_arena_restore` must not run while any derived slice may still be used.
+Statically visible conflicts (live lexical borrow, nursery capture) are
+compile errors. Otherwise, violation is undefined behavior in release builds;
+debug builds may trap via epoch helpers such as `cc_slice_is_from_arena_epoch`.
 
 ```c
 CCArena a = cc_arena_heap(megabytes(1));
-char[:] s = arena_alloc(char, &a, 100);
+char[:] s = a.alloc_slice_bytes(100);
 CCNursery* n = cc_nursery_create(NULL) !> @destroy;
 
 n->spawn(() => {
-    use(s);  // OK: a still alive
+    use(s);  // OK only while a outlives the join
 });
 
-cc_arena_free(&a);  // BUG: spawned task may still be using s
+a.free();  // BUG if the task may still use s
 ```
 
-**Design Rationale:**
+---
 
-**Thread-safe allocation:** Shared arenas combine a lock-free tip CAS with a meta spinlock around growth, overflow ownership, and chain repairs. Uncontended tip allocation stays cheap; grow/overflow serialize. Single-owner code should use `*_local*` and avoid the meta path. The benefit of shareable request arenas outweighs the meta-lock cost on the slow path.
+### Usage
 
-**Manual lifetime management:** The caller, not the runtime, is responsible for coordinating `arena_free`/`arena_reset` with thread lifecycle. Arena lifetime for borrows is **epoch provenance** (§2.2 arena epoch pin on capture): capturing or sending a non-unique arena-backed view pins the epoch until the join scope ends; epoch-ending ops while a pin is live are ill-formed when statically visible. Arenas are not refcounted. If a future refcounted arena type exists, it is a distinct type with its own rules. Callers retain explicit control: a thread can hold slices from a long-lived arena while other threads allocate and reset scratch arenas independently.
+- Size the root for the lifetime; treat overflow/release as escape, not policy.
+- Split divergent lifetimes across arenas instead of long-lived release churn.
+- Request/window scratch: `cc_arena_heap` / `cc_arena_stack` with an appropriately
+  sized root. Durable entry store with individual free: `cc_arena_malloc`.
+- Shared path by default (stdlib, any shared arena). Exclusive request/fiber
+  arenas may use `*_local_grow` for tip + grow + overflow without tip CAS.
+- Fixed user buffer with a hard cap: `cc_arena_buffer` / `cc_arena_fixed_buffer`
+  (overflow off). Expert unbounded extents: `block_max = 0` or
+  `cc_arena_create_buffer(..., CC_ARENA_GROWABLE)`.
 
-**Non-goal:** Arenas do **not** provide automatic deallocation or generational lifetimes. Users must ensure all threads have finished using an arena before resetting or freeing it. Violations are not caught automatically in release builds.
-
-**Note:** For single-owner hot paths, `cc_arena_alloc_local` / `cc_arena_alloc_local_grow` and `cc_arena_realloc_local` / `cc_arena_realloc_local_grow` reduce overhead vs the atomic allocator; they are the supported alternative to a separate `Bump` type for the common per-fiber arena case. Stdlib defaults (`cc_arena_alloc`, `cc_arena_alloc_T`, slice helpers) stay on the shared path — opt into `*_local*` only where exclusive ownership is assured.
+**Non-goal:** Arenas do not provide automatic deallocation or generational
+lifetimes. Callers coordinate reset/free with thread and borrow lifetime.
 
 ---
 
@@ -1907,20 +1983,20 @@ Result*!>(IoError) compress_block(Block* blk) {
     CCArena res_arena = cc_arena_heap(blk->data.len + 4096);
     @defer(err) cc_arena_free(&res_arena);  // cleanup on error only
     
-    Result* res = arena_alloc(Result, &res_arena, 1);
+    Result* res = res_arena.allocT();  // cc_arena_alloc_T(Result, &res_arena)
     if (!res) return cc_err(io_error(CC_IO_OUT_OF_MEMORY));
     
     // ... fill in res, do allocations ...
     
     // Transfer ownership: detach leaves res_arena empty, so cleanup is no-op
-    res->arena = arena_detach(&res_arena);
+    res->arena = res_arena.detach();  // cc_arena_detach(&res_arena)
     return cc_ok(res);
 }
 ```
 
-**Arena ownership transfer with `arena_detach()`:**
+**Arena ownership transfer with `cc_arena_detach`:**
 
-`arena_detach(Arena* a)` transfers the arena's memory to a new owner, leaving the source arena empty. This enables clean ownership transfer out of scoped blocks:
+`cc_arena_detach(CCArena* a)` (UFCS: `a.detach()`) transfers the arena's memory to a new owner, leaving the source arena empty. This enables clean ownership transfer out of scoped blocks:
 
 ```c
 CCArena cc_arena_detach(CCArena* a);  // returns arena contents, leaves a empty
@@ -2000,7 +2076,8 @@ void!>(IoError) process(char[:] path, CCArena* out) {
     
     if (should_keep(data)) {
         // Transfer to output arena
-        char[:] copy = arena_alloc<char>(out, data.len);
+        char[:] copy = out->alloc_slice_bytes(data.len);
+        if (!copy.ptr) return cc_err(io_error(CC_IO_OUT_OF_MEMORY));
         memcpy(copy.ptr, data.ptr, data.len);
         // Still want cleanup to run - don't cancel
     }
@@ -2037,8 +2114,8 @@ exit, including on `return` or result propagation.
 CCArena scratch = cc_arena_heap(kilobytes(256)) @destroy;
 
 for (int i = 0; i < 10; i++) {
-    CCArenaCheckpoint cp = cc_arena_checkpoint(&scratch);
-    char[:] tmp = arena_alloc(char, &scratch, 1024);
+    CCArenaCheckpoint cp = scratch.checkpoint();
+    char[:] tmp = scratch.alloc_slice_bytes(1024);
     process(tmp);
     cc_arena_restore(cp);  // memory reclaimed; post-checkpoint slices invalidated
 }
@@ -3021,7 +3098,7 @@ CCNursery* n = cc_nursery_create(NULL) !> @destroy;
 n->spawn(() => {
     CCArena arena;
     arena_pool.recv(&arena);  // Borrow
-    void* p = cc_arena_alloc(&arena, 100);
+    void* p = cc_arena_alloc(&arena, 100, 1);
     arena_pool.send(arena);   // Return (auto-reset)
 });
 ```
@@ -5061,16 +5138,16 @@ This same contract applies to standard-library families such as channels, files,
 
 ### 9.1 Strings
 
-**Type:** `String` — Arena-backed growable string (Vec)
+**Type:** `String` — small growable string builder (`CCString`)
 
 ```c
-// C ABI (prefixed): typedef Vec_char CCString;
-// Language surface: String
+// C ABI: CCString (SSO inline or arena-backed heap header)
+// Language surface alias: String → CCString; Arena → CCArena
 ```
 
-`String` is a small, moveable handle to an arena-backed buffer. Copying a `String` aliases the same storage. To obtain an independent copy, use `as_slice().clone(a)`. String contents live until the arena is reset/freed.
+`String` is a small, moveable handle. Short values stay inline; larger values live in an arena-owned buffer. Copying a `String` aliases the same storage. To obtain an independent copy, use `as_slice().clone(a)` / `cc_string_from_slice`. Heap contents live until released or their arena is reset/freed.
 
-`String.as_slice()` is the canonical sentinel string view: it returns `char[:0]`, not plain `char[:]`.
+`String.as_slice()` returns a length-keyed `char[:]` / `CCSlice` view (not necessarily NUL-terminated). Call `s.cstr(&arena)` / `cc_string_cstr` when a `const char*` is required.
 
 **Template literal dedent (normative).** Every backtick template —
 `@string`, `@emit`, wherever a template literal appears — dedents against
@@ -5103,8 +5180,9 @@ spaces) is preserved.
 #### 9.1.1 Core API
 
 ```c
-// Direct library-call constructors and C ABI
-String   string_new(Arena* a);
+// C ABI / library constructors (language aliases String/Arena accepted)
+String   cc_string_new(void);                     // empty inline; no arena yet
+String   cc_string_with_capacity(Arena* a, size_t cap);
 String   cc_string_from(expr, Arena* a);          // expression-generic helper
 String   cc_string_from_slice(Arena* a, char[:] initial);
 char[:0] @slice("...");                           // build-time canonical slice
@@ -5113,29 +5191,35 @@ String   @string(policy, `...`, Arena* a);        // templated builder
 String   @string(`...`, @scratch);                // temp stack arena (§9.1.4)
 String   @string(`...`, @scratch(N));             // sized temp stack arena (§9.1.4)
 char[:]  @string(`...`);                          // arena-less bounded template (§9.1.2)
-String* cc_string_push(String* s, char[:] data);
-String* cc_string_push_char(String* s, char c);
-String* cc_string_push_int(String* s, i64 value);
-String* cc_string_push_uint(String* s, u64 value);
-String* cc_string_push_float(String* s, f64 value);
-String* cc_string_clear(String* s);
-char[:0] cc_string_as_slice(String* s);
 
-// UFCS (primary for users)
-String* s.append(char[:] data);        // alias for push
-String* s.push(char[:] data);          // appends data
-String* s.push_char(char c);
-String* s.push_int(i64 value);
-String* s.push_uint(u64 value);
-String* s.push_float(f64 value);
+String* cc_string_push(String* s, value, Arena* a);          // _Generic dispatch
+String* cc_string_push_slice(String* s, char[:] data, Arena* a);
+String* cc_string_push_char(String* s, char c, Arena* a);
+String* cc_string_push_int(String* s, int64_t value, Arena* a);
+String* cc_string_push_uint(String* s, uint64_t value, Arena* a);
+String* cc_string_push_float(String* s, double value, Arena* a);
+String* cc_string_clear(String* s);
+char[:]  cc_string_as_slice(const String* s);     // length view
+const char* cc_string_cstr(String* s, Arena* a);  // ensures NUL; NULL on failure
+bool     cc_string_failed(const String* s);       // poisoned after growth failure
+
+// UFCS (primary for users; arena last where growth may allocate)
+String* s.append(value, Arena* a);     // alias for push
+String* s.push(value, Arena* a);
+String* s.push_char(char c, Arena* a);
+String* s.push_int(int64_t value, Arena* a);
+String* s.push_uint(uint64_t value, Arena* a);
+String* s.push_float(double value, Arena* a);
 String* s.clear();
-char[:0] s.as_slice();
+char[:] s.as_slice();
+const char* s.cstr(Arena* a);
 size_t  s.len();
 size_t  s.cap();
-String  <primitive>.to_str(Arena* a);           // e.g. 42.to_str(&arena)
+bool    s.failed();
+String  <primitive>.to_str(Arena* a);  // e.g. 42.to_str(&arena)
 ```
 
-**Slice lifetime:** The sentinel slice returned by `as_slice()` remains valid until the next mutating call on the same `String` (e.g., `append()`, `push()`, `clear()`). For stable references, use `.clone(a)`.
+**Slice lifetime:** The slice returned by `as_slice()` remains valid until the next mutating call on the same `String` (e.g., `push`, `clear`) or until its arena storage is released/reset. For stable references, clone into another arena.
 
 **String construction model:**
 
@@ -5153,11 +5237,12 @@ Example:
 
 ```c
 CCArena arena = cc_arena_heap(megabytes(1));
-String s = string_new(&arena);
-s.append("count=")
- .push_char('x')
- .push_int(42);
-char[:0] view = s.as_slice();
+String s = cc_string_new();
+s.push("count=", &arena)
+ .push_char('x', &arena)
+ .push_int(42, &arena);
+char[:] view = s.as_slice();
+if (s.failed()) { /* growth/OOM — do not treat partial text as success */ }
 
 String msg = @string(42, &arena);
 String html = @string(html_policy, `<h1>${title}</h1>`, &arena);
@@ -5252,15 +5337,14 @@ Same-scope use (`CCString s = @string(..., @scratch); println(s);`) is fine. Cal
 
 `@string(...)` templated construction follows the same contract: if the destination arena cannot hold the output, the result is a failed `String` — never partial bytes.
 
-#### 9.1.5 Formatting (Global)
+#### 9.1.5 Formatting
+
+Formatted text uses `@string` templates and `cc_string_from` / push helpers
+(stdlib Strings). There is no separate printf-style `format` entry point.
 
 ```c
-// Build formatted strings (use with Arena)
-str format(Arena* a, str fmt, ...);      // varargs
-str format(Arena* a, fmt_args args);     // structured
-
-// Example
-str msg = format(&arena, "Hello {}! Score: {}", name, score);
+CCString msg = @string(`Hello ${name}! Score: ${score}`, &arena);
+if (cc_string_failed(&msg)) { /* arena could not hold the output */ }
 ```
 
 ---
@@ -6101,7 +6185,7 @@ Standard collection types are defined in the **Standard Library Specification** 
 - `**Map::[K,V]`** — arena-backed inline open-addressing map (`<std/map.cch>`)
 - `**ArrayMap::[K,V]`** — arena-backed index + dense rows (`<std/array_map.cch>`)
 
-These types are generic, use UFCS methods, and require an `Arena*` at
+These types are generic, use UFCS methods, and require a `CCArena*` at
 construction. See the stdlib spec for full API reference, rules, and examples.
 
 **Quick reference:**
@@ -7147,12 +7231,14 @@ The arena implementation uses a "swapping chain" pattern. The root `CCArena` str
 struct CCArena {
     uint8_t* base;       // current block's buffer
     size_t   capacity;   // current block's capacity
-    size_t   offset;     // atomic: bytes used in current block
-    uint64_t provenance; // monotonic arena id
-    uint32_t _flags;     // CC_ARENA_FLAG_HEAP_OWNED, CC_ARENA_FLAG_IS_EXTENT
+    /* atomic */ size_t offset;       // tip in current block
+    /* atomic */ size_t live_allocs;  // for release / tip rewind
+    uint64_t provenance; // monotonic arena id / epoch
+    uint32_t _flags;     // HEAP_OWNED, IS_EXTENT, ALLOW/USED_HEAP_OVERFLOW, NON_REWINDABLE
     uint16_t block_idx;  // current block generation (0 = initial)
     uint16_t block_max;  // budget: 0 = unbounded, 1 = fixed, N = max
     CCArena* prev;       // previous full block (NULL if none)
+    /* ovf_head / ovf_chunks / overflow_bytes / meta_lock — see cc_arena.cch */
 };
 ```
 
@@ -7160,28 +7246,27 @@ struct CCArena {
 
 ```
 On alloc failure in current block:
-  1. Check budget: if block_idx + 1 >= block_max (and block_max > 0), return NULL
-  2. Allocate extent struct (malloc), copy root state into it
-  3. Allocate new buffer (1.5x capacity, min 4096)
-  4. Push: extent->prev = root->prev; root->prev = extent
-  5. Update root: base = new_buf, capacity = new_cap, offset = 0, block_idx++
-  6. Retry allocation in the new block
+  1. If block_max != 1 and block_idx + 1 < block_max (or block_max == 0):
+       allocate extent struct + new buffer (max(1.5× cap, need, 4096)),
+       push prior slab onto prev, install new root tip, retry
+  2. Else if heap overflow is enabled: allocate via overflow path
+  3. Else return NULL
 ```
 
-**Reset:** Walk `prev` chain to tail (original block), free all intermediate buffers and extent structs, restore root to original state, set offset = 0.
+**Reset:** Drain overflow, walk `prev` chain to the original root, free intermediate buffers and extent structs, restore root state, set offset = 0, advance provenance.
 
-**Checkpoint/Restore:** Checkpoint captures `{arena, offset, block_idx, provenance}` and immediately starts a fresh arena provenance epoch for subsequent allocations. Restore checks if `checkpoint.block_idx < arena->block_idx`; if so, it unwinds the chain by freeing the current block and all extents newer than the checkpoint, restoring the root to the target block, then restores the checkpoint's provenance epoch.
+**Checkpoint/Restore:** Checkpoint captures `{arena, offset, block_idx, provenance}` and immediately starts a fresh arena provenance epoch for subsequent allocations. Restore checks if `checkpoint.block_idx < arena->block_idx`; if so, it unwinds the chain by freeing the current block and all extents newer than the checkpoint, restoring the root to the target block, then restores the checkpoint's provenance epoch. While non-rewindable, `cc_arena_checkpoint` returns a null handle.
 
 **Per-request pattern:**
 
 ```c
 while (true) {
     Request req = accept_connection();
-    Arena req_arena = arena_with_capacity(megabytes(1));
+    CCArena req_arena = cc_arena_heap(megabytes(1));
     
     handle_request(&req, &req_arena);
     
-    arena_reset(&req_arena);  // O(1) if no growth; frees extents if grown
+    cc_arena_reset(&req_arena);  // drain ovf; unwind extents; restore root
 }
 ```
 
@@ -7360,10 +7445,10 @@ Surface `tx.send(value)`, `rx.recv(&out)`, `tx.close()`, and `cc_channel_pair(&t
 **Arena allocation alignment:**
 
 ```c
-void* arena_alloc_aligned(Arena* a, size_t nbytes, size_t align);
+void* cc_arena_alloc(CCArena* a, size_t nbytes, size_t align);
 ```
 
-Default: `max(alignof(T), 16)`. Larger alignments on explicit request.
+`align` is a power of two (`>= 1`). Typed helpers use `_Alignof(T)`.
 
 ### D.4 Binary Compatibility
 
@@ -7810,7 +7895,7 @@ runs according to its `@defer` / `@destroy` control-flow placement. There is no
   ```c
    on_frame_drop: {
        if (frame->fd != INVALID_FD) close(frame->fd);
-       arena_reset(frame->arena);
+       cc_arena_reset(frame->arena);
    }
   ```
 4. **Explicit cancellation checks:** Visible `if (token->cancelled)` in source.
