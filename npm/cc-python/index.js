@@ -351,7 +351,9 @@ class ProcBridge {
       this._cbs.set(id, v);
       return { $f: id };
     }
-    const kind = TA_KIND.get(v.constructor);
+    // Buffers are Uint8Array subclasses with their own constructor —
+    // they cross as u8, same as on the cc-node wire.
+    const kind = Buffer.isBuffer(v) ? 'u8' : TA_KIND.get(v.constructor);
     if (kind) {
       const buf = Buffer.from(v.buffer, v.byteOffset, v.byteLength);
       if (v.byteLength > SHM_SPILL) {
@@ -459,7 +461,9 @@ class ProcBridge {
   get closed() {
     return this._closed;
   }
-  get python() {
+  // Named to avoid colliding with the module-level python() introspection
+  // (which describes the IN-PROCESS runtime, a different thing).
+  get pythonExe() {
     return this._pythonExe;
   }
   destroy() {

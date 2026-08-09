@@ -9,7 +9,7 @@
  * are machine-comparable; epsilon cross-checks keep the numbers honest. */
 'use strict';
 
-const ccpy = require(process.cwd() + '/npm/cc-python');
+const ccpy = require(__dirname + '/..'); // the package (works in-repo and installed)
 
 function time(label, iters, fn) {
   fn(); // warm

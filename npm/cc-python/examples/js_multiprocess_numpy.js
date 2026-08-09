@@ -9,7 +9,7 @@
  * RESULT lines are machine-comparable. */
 'use strict';
 
-const ccpy = require(process.cwd() + '/npm/cc-python');
+const ccpy = require(__dirname + '/..'); // the package (works in-repo and installed)
 
 const ROUNDS = 6;
 const N = 1 << 19;
