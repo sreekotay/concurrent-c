@@ -1712,6 +1712,8 @@ void cc_arena_restore(CCArenaCheckpoint checkpoint);
 void* cc_arena_alloc(CCArena* a, size_t nbytes, size_t align);
 void* cc_arena_alloc_local(CCArena* a, size_t nbytes, size_t align);       // current slab only, non-atomic
 void* cc_arena_alloc_local_grow(CCArena* a, size_t nbytes, size_t align);   // local then cc_arena_alloc if full
+void* cc_arena_realloc_local(CCArena* a, void* p, size_t old_n, size_t new_n, size_t align);       // tip fit only
+void* cc_arena_realloc_local_grow(CCArena* a, void* p, size_t old_n, size_t new_n, size_t align);  // local then realloc
 #define arena_alloc(T, arena, count)  // tracked, count elements
 #define arena_alloc1(T, arena)        // tracked, 1 element
 // Macros: cc_arena_alloc_T_*, cc_arena_alloc_T_*_local, cc_arena_alloc_T_*_local_grow
@@ -1821,9 +1823,9 @@ d.block_max = 0;  // unbounded growth beyond the initial user buffer
 
 **Rule:** Changing `block_max` affects only future growth attempts. It does not rewrite existing extents or change ownership of the current block.
 
-**Rule:** `cc_arena_alloc` uses atomic compare-and-swap on the bump offset and is safe to share across threads when every allocation goes through it (or equivalent synchronization).
+**Rule:** `cc_arena_alloc` is safe to share across threads when every concurrent user goes through it (or equivalent synchronization): the tip bump uses atomic compare-and-swap on the offset; slab growth, heap-overflow list mutation, extent-chain walks, and live-count credit after a tip race use a per-arena meta spinlock. `cc_arena_release` / `cc_arena_realloc` (overflow path) / `cc_arena_reset` / `cc_arena_free` take the same lock. Callers must still not reset or free an arena while other threads may allocate from it or hold live pointers into it.
 
-**Rule:** `cc_arena_alloc_local` and `cc_arena_alloc_local_grow` use a non-atomic fast path on the current slab; they MUST only be used when **one** thread or fiber exclusively holds the arena during those calls. The “grow” half of `cc_arena_alloc_local_grow` delegates to `cc_arena_alloc`. `cc_arena_would_fit` reports whether the **current** slab can satisfy an allocation without growing (atomic load of offset).
+**Rule:** `cc_arena_alloc_local`, `cc_arena_alloc_local_grow`, `cc_arena_realloc_local`, and `cc_arena_realloc_local_grow` use a non-atomic fast path on the current slab; they MUST only be used when **one** thread or fiber exclusively holds the arena during those calls. `cc_arena_realloc_local` succeeds only for tip grow/shrink (or tip free to zero); otherwise it returns NULL. The “grow” half of `*_local_grow` extends slabs without the shared tip-CAS / meta_lock path, then may spill to heap overflow. `cc_arena_would_fit` reports whether the **current** slab can satisfy an allocation without growing (atomic load of offset).
 
 **Rule:** Arena-allocated slices can be sent through channels or captured in thread closures when lifetime rules (§2.2) are satisfied.
 
@@ -1852,13 +1854,13 @@ cc_arena_free(&a);  // BUG: spawned task may still be using s
 
 **Design Rationale:**
 
-**Thread-safe allocation:** Arenas use atomic operations (lock-free compare-and-swap or spin-locks) to make allocation thread-safe. A synchronized bump allocator adds ~10-20ns overhead per allocation vs unsynchronized, but is still ~4x faster than `malloc`. The benefit of "all arena slices are safely shareable across threads" outweighs this minor cost.
+**Thread-safe allocation:** Shared arenas combine a lock-free tip CAS with a meta spinlock around growth, overflow ownership, and chain repairs. Uncontended tip allocation stays cheap; grow/overflow serialize. Single-owner code should use `*_local*` and avoid the meta path. The benefit of shareable request arenas outweighs the meta-lock cost on the slow path.
 
 **Manual lifetime management:** The caller, not the runtime, is responsible for coordinating `arena_free`/`arena_reset` with thread lifecycle. Arena lifetime for borrows is **epoch provenance** (§2.2 arena epoch pin on capture): capturing or sending a non-unique arena-backed view pins the epoch until the join scope ends; epoch-ending ops while a pin is live are ill-formed when statically visible. Arenas are not refcounted. If a future refcounted arena type exists, it is a distinct type with its own rules. Callers retain explicit control: a thread can hold slices from a long-lived arena while other threads allocate and reset scratch arenas independently.
 
 **Non-goal:** Arenas do **not** provide automatic deallocation or generational lifetimes. Users must ensure all threads have finished using an arena before resetting or freeing it. Violations are not caught automatically in release builds.
 
-**Note:** For single-owner hot paths, `cc_arena_alloc_local` / `cc_arena_alloc_local_grow` reduce overhead vs the atomic allocator; they are the supported alternative to a separate `Bump` type for the common per-fiber arena case.
+**Note:** For single-owner hot paths, `cc_arena_alloc_local` / `cc_arena_alloc_local_grow` and `cc_arena_realloc_local` / `cc_arena_realloc_local_grow` reduce overhead vs the atomic allocator; they are the supported alternative to a separate `Bump` type for the common per-fiber arena case.
 
 ---
 

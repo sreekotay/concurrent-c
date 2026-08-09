@@ -22,9 +22,10 @@ Stress tests that push the compiler and runtime with demanding patterns.
 | `arena_concurrent` | 10 tasks allocating from shared arena | Arena thread safety |
 | `arena_memory_storm` | Tip, stranding, budget→ovf, reset ping-pong, mixed align, churn, stack spill, concurrent nursery arenas | RSS / waste / reset reclaim |
 | `arena_lifetime_chaos` | Mixed lifetimes, scramble-release, tip-vs-churn, shared fixed concurrent; checksums + RSS peak/residual (link `mem_sample.o`) | Lifetime / reclaim / false-pass |
-| `arena_mixed_lifetime_bench` | Idiomatic mixed-lifetime RESULT peer (arena+release) | Cross-lang strategy compare |
+| `arena_mixed_lifetime_bench` | Mixed-lifetime RESULT peer: one arena + release (escape) | Cross-lang strategy compare |
+| `arena_mixed_lifetime_split_bench` | Same free set via scratch+keep arenas (lifetime annotation) | Intended arena pattern |
 | `c/` `go/` `zig/mixed_lifetime_bench.*` | malloc / GC peers (same workload, idiomatic reclaim) | Cross-lang baseline |
-| `compare_mixed_lifetime.sh` | Shuffled multi-trial idiomatic mixed-lifetime compare | Strategy tradeoff map |
+| `compare_mixed_lifetime.sh` | Shuffled multi-trial mixed-lifetime compare (incl. cc_split) | Strategy tradeoff map |
 | `arena_memory_bench` | Heavy RESULT peer (tip/bulk/ovf/reset/churn) | Arena happy path vs escape |
 | `c/` `go/` `zig/arena_memory_bench.*` | C / Go / Zig bump peers (same protocol) | Cross-lang baseline |
 | `c/malloc_memory_bench.c` | Raw malloc/realloc baseline (same size streams) | Is plain malloc faster? |
@@ -48,7 +49,8 @@ Stress tests that push the compiler and runtime with demanding patterns.
 # Run all stress tests
 make stress-check
 
-# Cross-lang arena memory compare (shuffled multi-trial; includes malloc baseline)
+# Cross-lang arena *speed* compare (shuffled multi-trial; includes malloc baseline)
+# Happy-path bulk is sized to fit slabs — judge tip/bulk/reset ms, not reclaim thesis.
 ./stress/compare_arena_memory.sh
 # ARENA_MEM_QUICK=1 ./stress/compare_arena_memory.sh          # lighter smoke
 # ARENA_MEM_TRIALS=5 ARENA_MEM_SEED=42 ./stress/compare_arena_memory.sh
@@ -64,14 +66,16 @@ make stress-check
 # Opposite case: cc_arena_malloc used for tons of scratch allocs
 ./stress/compare_arena_malloc_cost.sh
 
-# Idiomatic mixed-lifetime compare (arena+release vs malloc vs GC)
+# Mixed-lifetime compare (arena_release escape vs arena_split annotation vs malloc/GC)
 ./stress/compare_mixed_lifetime.sh
 # MIX_LIFE_QUICK=1 ./stress/compare_mixed_lifetime.sh
 #
-# Memory: judge reclaim by arena gross/ovf; RSS peak is color. On Linux,
-# RESULT lines also carry VmHWM + cgroup memory.peak (best in a container).
-# macOS end-RSS often lags free — not leak proof.
-# Shared helper: stress/mem_sample.h + mem_sample.c (host .o linked into CC bins).
+# Equal root budget: MIX_LIFE_TOTAL_ROOT (default 32MiB) → release uses all of it;
+# split uses TOTAL/2 per arena (override MIX_LIFE_SCRATCH_ROOT / MIX_LIFE_KEEP_ROOT).
+# Timing is the cross-lang column. peak_gross is CC accounting (split = scratch+keep).
+# rss_peak_d averages only cc/c mem_sample; Go Sys / Zig -1 are omitted (not RSS).
+# macOS end-RSS often lags free — not leak proof. On Linux, RESULT also has VmHWM
+# + cgroup memory.peak. Helper: stress/mem_sample.h + mem_sample.c.
 
 # Run with sanitizers (TSan/ASan)
 ./scripts/stress_sanitize.sh tsan

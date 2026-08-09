@@ -1,0 +1,98 @@
+/*
+ * Shared growable arena: many OS threads allocate until slabs grow + overflow.
+ * Catches races on extent publish / ovf list / live_allocs credit.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_arena.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+#include <string.h>
+#include <pthread.h>
+
+#define NTHREADS 8
+#define ALLOCS_EACH 4000
+#define ROOT 4096
+
+static CCArena g_arena;
+static cc_atomic_int g_ok;
+static cc_atomic_int g_fail;
+static cc_atomic_int g_bytes;
+
+static void *worker(void *arg) {
+    int id = (int)(intptr_t)arg;
+    int i;
+    for (i = 0; i < ALLOCS_EACH; i++) {
+        size_t n = 24 + (size_t)((id * 17 + i * 31) % 200);
+        unsigned char *p = (unsigned char *)cc_arena_alloc(&g_arena, n, 8);
+        if (!p) {
+            cc_atomic_fetch_add(&g_fail, 1);
+            continue;
+        }
+        memset(p, (unsigned char)(id ^ i), n);
+        cc_atomic_fetch_add(&g_ok, 1);
+        cc_atomic_fetch_add(&g_bytes, (int)n);
+    }
+    return NULL;
+}
+
+int main(void) {
+    pthread_t th[NTHREADS];
+    int t;
+    int ok;
+    int fail;
+    size_t gross;
+    size_t ovf;
+
+    g_arena = cc_arena_heap(ROOT);
+    if (!g_arena.base) {
+        printf("FAIL: heap\n");
+        return 1;
+    }
+    /* Force early growth then overflow under contention. */
+    g_arena.block_max = 4;
+
+    cc_atomic_store(&g_ok, 0);
+    cc_atomic_store(&g_fail, 0);
+    cc_atomic_store(&g_bytes, 0);
+
+    for (t = 0; t < NTHREADS; t++) {
+        if (pthread_create(&th[t], NULL, worker, (void *)(intptr_t)t) != 0) {
+            printf("FAIL: pthread_create\n");
+            return 1;
+        }
+    }
+    for (t = 0; t < NTHREADS; t++) pthread_join(th[t], NULL);
+
+    ok = cc_atomic_load(&g_ok);
+    fail = cc_atomic_load(&g_fail);
+    gross = cc_arena_committed_gross_bytes(&g_arena);
+    ovf = cc_arena_overflow_raw_bytes(&g_arena);
+    {
+        unsigned blocks = (unsigned)g_arena.block_idx;
+
+        if (ok + fail != NTHREADS * ALLOCS_EACH) {
+            printf("FAIL: count ok=%d fail=%d\n", ok, fail);
+            return 1;
+        }
+        if (ok < NTHREADS * ALLOCS_EACH / 2) {
+            printf("FAIL: too many alloc failures ok=%d\n", ok);
+            return 1;
+        }
+        if (blocks < 1 && ovf == 0) {
+            printf("FAIL: expected growth or overflow (block_idx=%u ovf=%zu)\n",
+                   blocks, ovf);
+            return 1;
+        }
+
+        cc_arena_reset(&g_arena);
+        if (g_arena.prev || g_arena.ovf_head || cc_arena_overflow_raw_bytes(&g_arena)) {
+            printf("FAIL: reset left chain/ovf\n");
+            return 1;
+        }
+        cc_arena_free(&g_arena);
+
+        printf("arena_concurrent_grow_smoke OK ok=%d fail=%d bytes=%d gross=%zu ovf=%zu blocks=%u\n",
+               ok, fail, cc_atomic_load(&g_bytes), gross, ovf, blocks);
+    }
+    return 0;
+}

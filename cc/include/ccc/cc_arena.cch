@@ -1,8 +1,8 @@
 /*
  * Thread-safe bump allocator for per-request arenas.
  *
- * API is intentionally minimal and C11-only. The implementation lives in
- * cc/runtime/arena.c.
+ * Shared path (`cc_arena_alloc`): tip CAS + meta_lock on grow / ovf / chain.
+ * Single-owner path (`*_local*`): plain loads/stores — do not share.
  */
 #ifndef CC_ARENA_H
 #define CC_ARENA_H
@@ -43,6 +43,7 @@ typedef struct CCArenaCheckpoint CCArenaCheckpoint;
 #define CC_ARENA_POOL_FLAG_OWNED  0x1  // Pool owns its arena (should free it)
 
 typedef struct CCArenaOvfHeader CCArenaOvfHeader;
+typedef struct CCArenaOvfChunk CCArenaOvfChunk;
 
 struct CCArena {
     uint8_t *base;
@@ -54,8 +55,13 @@ struct CCArena {
     uint16_t block_idx;       // current block index (0 = initial)
     uint16_t block_max;       // budget: 0 = unbounded, 1 = fixed, N = max blocks
     struct CCArena* prev;     // points to the previous full block (NULL if none)
-    CCArenaOvfHeader *ovf_head; // intrusive list of live heap-overflow allocs (tier 3)
+    CCArenaOvfHeader *ovf_head; /* per-object overflow (durable / cc_arena_malloc) */
+    CCArenaOvfChunk *ovf_chunks; /* bump-chunk overflow (scratch heap after budget) */
     cc_atomic_size overflow_bytes; // aggregate malloc-backed overflow bytes still outstanding
+    /* Serializes grow, ovf list, extent-chain walks, and live_allocs crediting
+     * when the owning slab may have been pushed to prev. Tip bump CAS stays
+     * lock-free; shared arenas must use cc_arena_alloc (not *_local*). */
+    cc_atomic_uint meta_lock;
 };
 
 struct CCArenaCheckpoint {
@@ -106,6 +112,27 @@ static inline size_t cc__align_up(size_t value, size_t align) {
     return (value + (a - 1)) & ~(a - 1);
 }
 
+static inline void cc__arena_cpu_relax(void) {
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+    __asm__ __volatile__("pause");
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    __asm__ __volatile__("yield");
+#endif
+}
+
+/* Root-arena meta lock: grow / ovf / chain mutation. Uncontended CAS. */
+static inline void cc__arena_meta_lock(CCArena *arena) {
+    unsigned expected = 0;
+    while (!CC_ATOMIC_CAS(&arena->meta_lock, &expected, 1u)) {
+        expected = 0;
+        cc__arena_cpu_relax();
+    }
+}
+
+static inline void cc__arena_meta_unlock(CCArena *arena) {
+    CC_ATOMIC_STORE(&arena->meta_lock, 0u);
+}
+
 static inline int cc__arena_ptr_in_block(const CCArena* block, const void* ptr) {
     const uint8_t* p = (const uint8_t*)ptr;
     return block && block->base && p >= block->base && p < (block->base + block->capacity);
@@ -141,19 +168,34 @@ static inline size_t cc__arena_malloc_usable_bytes(void* ptr) {
 }
 
 /* Heap-overflow ownership is stamped in a header immediately before the
- * payload returned to the caller (same layout idea as CCContainersAllocHeader).
- * Release/realloc check magic + arena — O(1), no process-wide table/lock.
- * Live overflow nodes are also linked from arena->ovf_head so reset/free can
- * reclaim tier 3. Double-release clears magic to DEAD. */
+ * payload. Two tier-3 modes:
+ *   - Per-object (cc_arena_malloc / block_max==1): malloc each object, DLL on
+ *     ovf_head, release frees immediately.
+ *   - Chunk bump (growable heap/stack after slab budget): bump inside 64KiB
+ *     (or larger) chunks on ovf_chunks; release punches a hole; reset/free
+ *     frees a few chunks instead of one free per object.
+ * malloc base for per-object is (uint8_t*)h - raw_delta. Double-release → DEAD. */
 struct CCArenaOvfHeader {
-    uint64_t magic;
+    uint32_t magic;
+    uint32_t raw_delta; /* per-object: bytes back to malloc base; chunk: 0 */
     CCArena *arena;
-    void *raw;
-    CCArenaOvfHeader *next;
+    CCArenaOvfHeader *next; /* per-object DLL; chunk-obj: (CCArenaOvfHeader*)chunk */
+    CCArenaOvfHeader *prev;
 };
 
-#define CC_ARENA_OVF_MAGIC      UINT64_C(0xCCA0EAF00DCAFE01)
-#define CC_ARENA_OVF_MAGIC_DEAD UINT64_C(0xCCA0DEADCCA0DEAD)
+struct CCArenaOvfChunk {
+    CCArenaOvfChunk *next;
+    size_t capacity; /* bytes in data[] */
+    size_t offset;   /* bump tip into data[] */
+    /* uint8_t data[capacity] follows */
+};
+
+#define CC_ARENA_OVF_MAGIC       UINT32_C(0xCCA0EAF1) /* per-object malloc */
+#define CC_ARENA_OVF_MAGIC_CHUNK UINT32_C(0xCCA0C4C4) /* object inside ovf chunk */
+#define CC_ARENA_OVF_MAGIC_DEAD  UINT32_C(0xCCA0DEAD)
+#ifndef CC_ARENA_OVF_CHUNK_SIZE
+#define CC_ARENA_OVF_CHUNK_SIZE (64u * 1024u)
+#endif
 
 static inline size_t cc__arena_ovf_align(size_t align) {
     size_t a = align ? align : sizeof(void *);
@@ -176,91 +218,211 @@ static inline CCArenaOvfHeader *cc__arena_ovf_header(void *payload) {
     return (CCArenaOvfHeader *)((uint8_t *)payload - sizeof(CCArenaOvfHeader));
 }
 
+static inline void *cc__arena_ovf_raw(CCArenaOvfHeader *h) {
+    if (!h) return NULL;
+    return (void *)((uint8_t *)h - (size_t)h->raw_delta);
+}
+
+static inline uint8_t *cc__arena_ovf_chunk_data(CCArenaOvfChunk *c) {
+    return (uint8_t *)(c + 1);
+}
+
 static inline bool cc__arena_ovf_check(CCArena *arena, void *payload) {
     CCArenaOvfHeader *h;
     if (!arena || !payload) return false;
     h = cc__arena_ovf_header(payload);
-    if (h->magic != CC_ARENA_OVF_MAGIC || h->arena != arena || !h->raw) return false;
-    if ((uint8_t *)h < (uint8_t *)h->raw) return false;
-    return true;
+    if (h->arena != arena) return false;
+    if (h->magic == CC_ARENA_OVF_MAGIC_CHUNK) {
+        CCArenaOvfChunk *chunk = (CCArenaOvfChunk *)(void *)h->next;
+        uint8_t *data;
+        if (!chunk) return false;
+        data = cc__arena_ovf_chunk_data(chunk);
+        return (uint8_t *)h >= data && (uint8_t *)payload <= data + chunk->capacity;
+    }
+    if (h->magic == CC_ARENA_OVF_MAGIC) {
+        void *raw = cc__arena_ovf_raw(h);
+        if (!raw || (uint8_t *)h < (uint8_t *)raw) return false;
+        if ((size_t)((uint8_t *)h - (uint8_t *)raw) != (size_t)h->raw_delta) return false;
+        return true;
+    }
+    return false;
 }
 
-static inline void cc__arena_ovf_push(CCArena *arena, CCArenaOvfHeader *h) {
+/* Caller must hold meta_lock. */
+static inline void cc__arena_ovf_push_locked(CCArena *arena, CCArenaOvfHeader *h) {
+    h->prev = NULL;
     h->next = arena->ovf_head;
+    if (arena->ovf_head) arena->ovf_head->prev = h;
     arena->ovf_head = h;
 }
 
-static inline void cc__arena_ovf_unlink(CCArena *arena, CCArenaOvfHeader *h) {
-    CCArenaOvfHeader **pp;
+/* Caller must hold meta_lock. */
+static inline void cc__arena_ovf_unlink_locked(CCArena *arena, CCArenaOvfHeader *h) {
     if (!arena || !h) return;
-    pp = &arena->ovf_head;
-    while (*pp) {
-        if (*pp == h) {
-            *pp = h->next;
-            h->next = NULL;
-            return;
-        }
-        pp = &(*pp)->next;
-    }
-}
-
-/* Validate, unlink, and invalidate. On success, *raw_out is the malloc block. */
-static inline bool cc__arena_ovf_take(CCArena *arena, void *payload, void **raw_out) {
-    CCArenaOvfHeader *h;
-    void *raw;
-    if (!cc__arena_ovf_check(arena, payload)) return false;
-    h = cc__arena_ovf_header(payload);
-    raw = h->raw;
-    cc__arena_ovf_unlink(arena, h);
-    h->magic = CC_ARENA_OVF_MAGIC_DEAD;
-    h->arena = NULL;
-    h->raw = NULL;
+    if (h->prev) h->prev->next = h->next;
+    else if (arena->ovf_head == h) arena->ovf_head = h->next;
+    if (h->next) h->next->prev = h->prev;
+    h->prev = NULL;
     h->next = NULL;
-    if (raw_out) *raw_out = raw;
-    return true;
 }
 
-/* Free every live overflow allocation (tier 3). Used by reset and free. */
-static inline void cc__arena_ovf_drain(CCArena *arena) {
-    CCArenaOvfHeader *h;
-    if (!arena) return;
-    h = arena->ovf_head;
-    arena->ovf_head = NULL;
-    while (h) {
-        CCArenaOvfHeader *next = h->next;
-        void *raw = h->raw;
-        h->magic = CC_ARENA_OVF_MAGIC_DEAD;
-        h->arena = NULL;
-        h->raw = NULL;
-        h->next = NULL;
-        if (raw) free(raw);
-        h = next;
+/* Steal overflow lists under lock; caller frees after unlock. */
+static inline void cc__arena_ovf_steal_locked(CCArena *arena,
+                                             CCArenaOvfHeader **heads_out,
+                                             CCArenaOvfChunk **chunks_out) {
+    if (heads_out) {
+        *heads_out = arena->ovf_head;
+        arena->ovf_head = NULL;
+    }
+    if (chunks_out) {
+        *chunks_out = arena->ovf_chunks;
+        arena->ovf_chunks = NULL;
     }
     CC_ATOMIC_STORE(&arena->overflow_bytes, 0);
 }
 
-static inline void* cc__arena_alloc_heap_overflow(CCArena* arena, size_t size, size_t align) {
+static inline void cc__arena_ovf_free_stolen(CCArenaOvfHeader *heads,
+                                            CCArenaOvfChunk *chunks) {
+    while (heads) {
+        CCArenaOvfHeader *next = heads->next;
+        void *raw = cc__arena_ovf_raw(heads);
+        heads->magic = CC_ARENA_OVF_MAGIC_DEAD;
+        heads->arena = NULL;
+        heads->raw_delta = 0;
+        heads->next = NULL;
+        heads->prev = NULL;
+        if (raw) free(raw);
+        heads = next;
+    }
+    while (chunks) {
+        CCArenaOvfChunk *next = chunks->next;
+        free(chunks);
+        chunks = next;
+    }
+}
+
+/* Validate, unlink, and invalidate a *per-object* overflow alloc. */
+static inline bool cc__arena_ovf_take(CCArena *arena, void *payload, void **raw_out) {
+    CCArenaOvfHeader *h;
+    void *raw;
+    if (!arena || !payload) return false;
+    cc__arena_meta_lock(arena);
+    h = cc__arena_ovf_header(payload);
+    if (h->magic != CC_ARENA_OVF_MAGIC || h->arena != arena ||
+        !cc__arena_ovf_check(arena, payload)) {
+        cc__arena_meta_unlock(arena);
+        return false;
+    }
+    raw = cc__arena_ovf_raw(h);
+    cc__arena_ovf_unlink_locked(arena, h);
+    h->magic = CC_ARENA_OVF_MAGIC_DEAD;
+    h->arena = NULL;
+    h->raw_delta = 0;
+    h->next = NULL;
+    h->prev = NULL;
+    cc__arena_meta_unlock(arena);
+    if (raw_out) *raw_out = raw;
+    return true;
+}
+
+/* Per-object overflow — used by cc_arena_malloc (block_max == 1). */
+static inline void *cc__arena_alloc_ovf_object(CCArena *arena, size_t size, size_t align) {
     void *raw;
     void *payload;
     CCArenaOvfHeader *h;
-    size_t a;
-    size_t total;
-    if (!arena || !(arena->_flags & CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW) || size == 0)
-        return NULL;
-    a = cc__arena_ovf_align(align);
-    total = cc__arena_ovf_total(size, a);
+    size_t a = cc__arena_ovf_align(align);
+    size_t total = cc__arena_ovf_total(size, a);
+    size_t delta;
     raw = malloc(total);
     if (!raw) return NULL;
     payload = cc__arena_ovf_payload_from_raw(raw, a);
     h = cc__arena_ovf_header(payload);
+    if ((uint8_t *)h < (uint8_t *)raw) {
+        free(raw);
+        return NULL;
+    }
+    delta = (size_t)((uint8_t *)h - (uint8_t *)raw);
+    if (delta > UINT32_MAX) {
+        free(raw);
+        return NULL;
+    }
     h->magic = CC_ARENA_OVF_MAGIC;
+    h->raw_delta = (uint32_t)delta;
     h->arena = arena;
-    h->raw = raw;
     h->next = NULL;
-    cc__arena_ovf_push(arena, h);
-    CC_ATOMIC_FETCH_ADD(&arena->overflow_bytes, cc__arena_malloc_usable_bytes(raw));
+    h->prev = NULL;
+    cc__arena_meta_lock(arena);
+    cc__arena_ovf_push_locked(arena, h);
+    /* Account requested size (not malloc_usable_size) — our tax, not size-class noise. */
+    CC_ATOMIC_FETCH_ADD(&arena->overflow_bytes, total);
     arena->_flags |= CC_ARENA_FLAG_USED_HEAP_OVERFLOW | CC_ARENA_FLAG_NON_REWINDABLE;
+    cc__arena_meta_unlock(arena);
     return payload;
+}
+
+/* Chunk-bump overflow — growable scratch after slab budget. */
+static inline void *cc__arena_alloc_ovf_chunked(CCArena *arena, size_t size, size_t align) {
+    size_t a = cc__arena_ovf_align(align);
+    size_t need = sizeof(CCArenaOvfHeader) + (a - 1) + size;
+    CCArenaOvfChunk *chunk;
+    uint8_t *data;
+    uintptr_t start;
+    uintptr_t aligned;
+    void *payload;
+    CCArenaOvfHeader *h;
+    size_t new_off;
+
+    if (need < size) return NULL; /* overflow */
+    cc__arena_meta_lock(arena);
+    chunk = arena->ovf_chunks;
+    if (!chunk || chunk->offset + need > chunk->capacity) {
+        size_t cap = CC_ARENA_OVF_CHUNK_SIZE;
+        CCArenaOvfChunk *fresh;
+        if (cap < need) cap = need;
+        fresh = (CCArenaOvfChunk *)malloc(sizeof(CCArenaOvfChunk) + cap);
+        if (!fresh) {
+            cc__arena_meta_unlock(arena);
+            return NULL;
+        }
+        fresh->next = arena->ovf_chunks;
+        fresh->capacity = cap;
+        fresh->offset = 0;
+        arena->ovf_chunks = fresh;
+        CC_ATOMIC_FETCH_ADD(&arena->overflow_bytes, sizeof(CCArenaOvfChunk) + cap);
+        chunk = fresh;
+    }
+    data = cc__arena_ovf_chunk_data(chunk);
+    start = (uintptr_t)(data + chunk->offset) + sizeof(CCArenaOvfHeader);
+    aligned = (start + a - 1) & ~(uintptr_t)(a - 1);
+    payload = (void *)aligned;
+    h = cc__arena_ovf_header(payload);
+    if ((uint8_t *)h < data + chunk->offset) {
+        cc__arena_meta_unlock(arena);
+        return NULL;
+    }
+    new_off = (size_t)((uint8_t *)payload + size - data);
+    if (new_off > chunk->capacity) {
+        cc__arena_meta_unlock(arena);
+        return NULL;
+    }
+    chunk->offset = new_off;
+    h->magic = CC_ARENA_OVF_MAGIC_CHUNK;
+    h->raw_delta = 0;
+    h->arena = arena;
+    h->next = (CCArenaOvfHeader *)(void *)chunk;
+    h->prev = NULL;
+    arena->_flags |= CC_ARENA_FLAG_USED_HEAP_OVERFLOW | CC_ARENA_FLAG_NON_REWINDABLE;
+    cc__arena_meta_unlock(arena);
+    return payload;
+}
+
+static inline void *cc__arena_alloc_heap_overflow(CCArena *arena, size_t size, size_t align) {
+    if (!arena || !(arena->_flags & CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW) || size == 0)
+        return NULL;
+    /* Durable fixed arenas keep per-object free. Scratch/growable use chunks. */
+    if (arena->block_max == 1)
+        return cc__arena_alloc_ovf_object(arena, size, align);
+    return cc__arena_alloc_ovf_chunked(arena, size, align);
 }
 
 // Initialize an arena from caller-provided backing storage.
@@ -282,15 +444,18 @@ static inline int cc_arena_buffer(CCArena *arena, void *buffer, size_t capacity)
     arena->block_max = 1;  // fixed by default
     arena->prev = NULL;
     arena->ovf_head = NULL;
+    arena->ovf_chunks = NULL;
     CC_ATOMIC_STORE(&arena->overflow_bytes, 0);
+    CC_ATOMIC_STORE(&arena->meta_lock, 0u);
     return 0;
 }
 
 // Thread-local (non-atomic) fast path for arenas owned by exactly one fiber/thread.
-// Uses plain reads/writes on the offset field — safe only when no other thread
-// touches this arena concurrently. ~2-3x faster than cc_arena_alloc for per-fiber arenas.
-// Current slab only: if this block is full, returns NULL even when block_max allows growth.
-// For the same fast path then heap spill, use cc_arena_alloc_local_grow.
+// Uses plain reads/writes on offset and live_allocs — safe only when no other
+// thread touches this arena concurrently. ~2-3x faster than cc_arena_alloc for
+// per-fiber arenas. Current slab only: if this block is full, returns NULL even
+// when block_max allows growth. For local then grow/spill, use
+// cc_arena_alloc_local_grow / cc_arena_realloc_local_grow.
 static inline void *cc_arena_alloc_local(CCArena *arena, size_t size, size_t align) {
     if (!arena || !arena->base || size == 0) return NULL;
     size_t off = *(size_t *)&arena->offset;  // non-atomic read (single-owner fast path)
@@ -300,63 +465,94 @@ static inline void *cc_arena_alloc_local(CCArena *arena, size_t size, size_t ali
     }
     *(size_t *)&arena->offset = aligned + size;  // non-atomic write
     void* payload = arena->base + aligned;
-    CC_ATOMIC_FETCH_ADD(&arena->live_allocs, 1);
+    {
+        size_t live = *(size_t *)&arena->live_allocs;
+        *(size_t *)&arena->live_allocs = live + 1;
+    }
     return payload;
 }
 
-// Internal: attempt allocation in the current block (fast path).
-// Returns NULL if the current block is exhausted.
-static inline void *cc__arena_alloc_fast(CCArena *arena, size_t size, size_t align) {
-    size_t aligned_offset = 0;
-    size_t new_offset = 0;
-    size_t expected = CC_ATOMIC_LOAD(&arena->offset);
+/* Tip CAS on the current slab. Captures `base` before CAS so a concurrent grow
+ * cannot make us return new_base + old_offset. On success *base_out is the slab
+ * that owns the payload (root or soon-to-be extent). */
+static inline void *cc__arena_alloc_fast(CCArena *arena, size_t size, size_t align,
+                                        uint8_t **base_out) {
     for (;;) {
-        aligned_offset = cc__align_up(expected, align);
-        if (aligned_offset > arena->capacity || aligned_offset + size > arena->capacity) {
-            return NULL;  // exhausted
+        uint8_t *base = arena->base;
+        size_t capacity = arena->capacity;
+        size_t expected = CC_ATOMIC_LOAD(&arena->offset);
+        size_t aligned_offset = cc__align_up(expected, align);
+        size_t new_offset;
+        if (!base || aligned_offset > capacity || aligned_offset + size > capacity) {
+            return NULL;
         }
         new_offset = aligned_offset + size;
-        size_t desired = new_offset;
-        if (CC_ATOMIC_CAS(&arena->offset, &expected, desired)) {
-            break;
+        if (CC_ATOMIC_CAS(&arena->offset, &expected, new_offset)) {
+            if (base_out) *base_out = base;
+            return base + aligned_offset;
         }
-        // CAS failed; expected updated with current value, retry.
     }
-    return arena->base + aligned_offset;
 }
 
-// Internal: grow the arena by pushing the current block into an extent
-// and allocating a new buffer at least max(1.5× old, min_cap, 4096).
-// min_cap must fit one allocation of (size, align) in a fresh block (offset 0).
-static inline int cc__arena_grow(CCArena *arena, size_t size, size_t align) {
-    // Check budget
+/* Credit live_allocs on the slab that owns `base`. Must not race grow's snap:
+ * taken under meta_lock. */
+static inline void cc__arena_note_live_locked(CCArena *arena, uint8_t *base, void *ptr) {
+    CCArena *block = NULL;
+    if (arena->base == base) {
+        block = arena;
+    } else {
+        for (CCArena *cur = arena->prev; cur; cur = cur->prev) {
+            if (cur->base == base) {
+                block = cur;
+                break;
+            }
+        }
+    }
+    if (!block) block = cc__arena_find_block(arena, ptr);
+    if (block) CC_ATOMIC_FETCH_ADD(&block->live_allocs, 1);
+}
+
+static inline void cc__arena_note_live(CCArena *arena, uint8_t *base, void *ptr) {
+    cc__arena_meta_lock(arena);
+    cc__arena_note_live_locked(arena, base, ptr);
+    cc__arena_meta_unlock(arena);
+}
+
+/* Push current slab to prev; install a new root at least max(1.5× old, min_cap, 4096).
+ * Caller must hold meta_lock, or be the exclusive owner (local_* path). */
+static inline int cc__arena_grow_locked(CCArena *arena, size_t size, size_t align) {
+    CCArena *extent;
+    uint8_t *new_buf;
+    size_t aligned;
+    size_t min_cap;
+    size_t old_cap;
+    size_t bumped;
+    size_t new_cap;
+
     if (arena->block_max > 0 && arena->block_idx + 1 >= arena->block_max) {
-        return -1;  // budget exhausted
+        return -1;
     }
 
-    size_t aligned = cc__align_up(0, align);
+    aligned = cc__align_up(0, align);
     if (size > SIZE_MAX - aligned) return -1;
-    size_t min_cap = aligned + size;
+    min_cap = aligned + size;
 
-    size_t old_cap = arena->capacity;
-    size_t bumped = old_cap + old_cap / 2;
+    old_cap = arena->capacity;
+    bumped = old_cap + old_cap / 2;
     if (bumped < old_cap) bumped = SIZE_MAX;
-    size_t new_cap = bumped;
+    new_cap = bumped;
     if (new_cap < min_cap) new_cap = min_cap;
     if (new_cap < 4096) new_cap = 4096;
 
-    // Allocate extent struct to hold the current block's state
-    CCArena *extent = (CCArena *)malloc(sizeof(CCArena));
+    extent = (CCArena *)malloc(sizeof(CCArena));
     if (!extent) return -1;
 
-    // Allocate new buffer for the root
-    uint8_t *new_buf = (uint8_t *)malloc(new_cap);
+    new_buf = (uint8_t *)malloc(new_cap);
     if (!new_buf) {
         free(extent);
         return -1;
     }
 
-    // Push current state into extent
     extent->base = arena->base;
     extent->capacity = arena->capacity;
     CC_ATOMIC_STORE(&extent->offset, CC_ATOMIC_LOAD(&arena->offset));
@@ -367,20 +563,19 @@ static inline int cc__arena_grow(CCArena *arena, size_t size, size_t align) {
     extent->block_max = arena->block_max;
     extent->prev = arena->prev;
     extent->ovf_head = NULL;
+    extent->ovf_chunks = NULL;
     CC_ATOMIC_STORE(&extent->overflow_bytes, 0);
+    CC_ATOMIC_STORE(&extent->meta_lock, 0u);
 
-    /* cc_arena_release finds the owning slab via cc__arena_find_block (pointer
-     * range over root + prev chain), so payloads in this extent decrement
-     * extent->live_allocs — no per-allocation side metadata. */
-
-    // Update root with new buffer
+    /* Publish extent before swapping root base so note_live/find_block can
+     * locate payloads that raced the tip CAS onto this slab. */
     arena->prev = extent;
     arena->base = new_buf;
     arena->capacity = new_cap;
     CC_ATOMIC_STORE(&arena->offset, 0);
     CC_ATOMIC_STORE(&arena->live_allocs, 0);
     arena->block_idx++;
-    arena->_flags |= CC_ARENA_FLAG_HEAP_OWNED;  // new buffer is always heap-owned
+    arena->_flags |= CC_ARENA_FLAG_HEAP_OWNED;
 
     return 0;
 }
@@ -388,24 +583,42 @@ static inline int cc__arena_grow(CCArena *arena, size_t size, size_t align) {
 // Allocate `size` bytes aligned to `align` (power-of-two, >=1).
 // Returns NULL on exhaustion (fixed arena) or OOM (growable arena).
 // Growable arenas (block_max != 1) automatically allocate new blocks on exhaustion.
+// Thread-safe for shared arenas (tip CAS + meta_lock on grow/ovf/live credit).
 static inline void *cc_arena_alloc(CCArena *arena, size_t size, size_t align) {
+    uint8_t *base = NULL;
+    void *ptr;
     if (!arena || !arena->base || size == 0) {
         return NULL;
     }
 
-    void *ptr = cc__arena_alloc_fast(arena, size, align);
+    ptr = cc__arena_alloc_fast(arena, size, align, &base);
     if (ptr) {
-        CC_ATOMIC_FETCH_ADD(&arena->live_allocs, 1);
+        cc__arena_note_live(arena, base, ptr);
         return ptr;
     }
 
     if (arena->block_max != 1) {
-        while (cc__arena_grow(arena, size, align) == 0) {
-            ptr = cc__arena_alloc_fast(arena, size, align);
+        for (;;) {
+            cc__arena_meta_lock(arena);
+            base = NULL;
+            ptr = cc__arena_alloc_fast(arena, size, align, &base);
             if (ptr) {
-                CC_ATOMIC_FETCH_ADD(&arena->live_allocs, 1);
+                cc__arena_note_live_locked(arena, base, ptr);
+                cc__arena_meta_unlock(arena);
                 return ptr;
             }
+            if (cc__arena_grow_locked(arena, size, align) != 0) {
+                cc__arena_meta_unlock(arena);
+                break;
+            }
+            base = NULL;
+            ptr = cc__arena_alloc_fast(arena, size, align, &base);
+            if (ptr) {
+                cc__arena_note_live_locked(arena, base, ptr);
+                cc__arena_meta_unlock(arena);
+                return ptr;
+            }
+            cc__arena_meta_unlock(arena);
         }
     }
 
@@ -416,15 +629,71 @@ static inline void *cc_arena_alloc(CCArena *arena, size_t size, size_t align) {
     return cc__arena_alloc_heap_overflow(arena, size, align);
 }
 
-// Same ownership rules as cc_arena_alloc_local: one exclusive thread/fiber only.
-// Tries cc_arena_alloc_local first; on exhaustion, calls cc_arena_alloc (atomics + grow).
+/* Exclusive-owner grow path: plain bump, unlocked slab grow, then chunk/object
+ * overflow. Does not bounce through cc_arena_alloc (no tip CAS / meta_lock on
+ * the happy grow path). */
 static inline void *cc_arena_alloc_local_grow(CCArena *arena, size_t size, size_t align) {
     void *p = cc_arena_alloc_local(arena, size, align);
     if (p) return p;
-    return cc_arena_alloc(arena, size, align);
+    if (!arena || !arena->base || size == 0) return NULL;
+    if (arena->block_max != 1) {
+        while (cc__arena_grow_locked(arena, size, align) == 0) {
+            p = cc_arena_alloc_local(arena, size, align);
+            if (p) return p;
+        }
+    }
+    return cc__arena_alloc_heap_overflow(arena, size, align);
 }
 
 static inline bool cc_arena_release(CCArena* arena, void* ptr);
+
+/* Single-owner tip realloc: plain offset bump when ptr is the active-slab tip
+ * and the new size fits. No find_block walk, no CAS. Returns NULL when the
+ * request is not a tip fit (caller uses cc_arena_realloc_local_grow or the
+ * concurrent cc_arena_realloc). Same exclusive-owner rule as alloc_local. */
+static inline void *cc_arena_realloc_local(CCArena *arena,
+                                          void *ptr,
+                                          size_t old_size,
+                                          size_t new_size,
+                                          size_t align) {
+    if (!ptr) return cc_arena_alloc_local(arena, new_size, align);
+    if (!arena || !arena->base) return NULL;
+    if (new_size == 0) {
+        uint8_t *base = arena->base;
+        uint8_t *byte_ptr = (uint8_t *)ptr;
+        size_t current_off = *(size_t *)&arena->offset;
+        if (byte_ptr >= base && byte_ptr < base + arena->capacity) {
+            size_t ptr_off = (size_t)(byte_ptr - base);
+            if (ptr_off + old_size == current_off) {
+                *(size_t *)&arena->offset = ptr_off;
+                {
+                    size_t live = *(size_t *)&arena->live_allocs;
+                    if (live > 0) *(size_t *)&arena->live_allocs = live - 1;
+                }
+                return NULL;
+            }
+        }
+        (void)cc_arena_release(arena, ptr);
+        return NULL;
+    }
+    {
+        uint8_t *base = arena->base;
+        uint8_t *byte_ptr = (uint8_t *)ptr;
+        if (byte_ptr >= base && byte_ptr < base + arena->capacity) {
+            size_t ptr_off = (size_t)(byte_ptr - base);
+            size_t current_off = *(size_t *)&arena->offset;
+            if (ptr_off + old_size == current_off) {
+                size_t new_off = ptr_off + new_size;
+                if (new_size <= old_size || new_off <= arena->capacity) {
+                    *(size_t *)&arena->offset = new_off;
+                    return ptr;
+                }
+            }
+        }
+    }
+    (void)align; /* tip fit does not re-align; spill path honors align */
+    return NULL;
+}
 
 // Reallocate a pointer previously returned by cc_arena_alloc.
 // Slab-backed pointers allocate/copy/release. Heap-overflow pointers use realloc
@@ -484,61 +753,114 @@ static inline void *cc_arena_realloc(CCArena *old_arena,
 
     if (old_arena->_flags & CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW) {
         CCArenaOvfHeader *h;
-        void *old_raw;
-        size_t old_off;
-        size_t a;
-        size_t total;
-        size_t old_bytes;
-        size_t new_bytes;
-        size_t cur;
-        size_t copy_bytes;
-        void *new_raw;
-        void *new_payload;
-        size_t new_off;
+        cc__arena_meta_lock(old_arena);
         if (!cc__arena_ovf_check(old_arena, ptr)) {
+            cc__arena_meta_unlock(old_arena);
             cc__arena_report_release_error(
                 "overflow realloc: pointer is not owned by this arena", ptr);
             return NULL;
         }
         h = cc__arena_ovf_header(ptr);
-        old_raw = h->raw;
-        old_off = (size_t)((uint8_t *)ptr - (uint8_t *)old_raw);
-        a = cc__arena_ovf_align(align);
-        total = cc__arena_ovf_total(new_size, a);
-        old_bytes = cc__arena_malloc_usable_bytes(old_raw);
-        /* Unlink before realloc — the header address may move. */
-        cc__arena_ovf_unlink(old_arena, h);
-        new_raw = realloc(old_raw, total);
-        if (!new_raw) {
-            /* Put the old node back; block is still live. */
+        if (h->magic == CC_ARENA_OVF_MAGIC_CHUNK) {
+            CCArenaOvfChunk *chunk = (CCArenaOvfChunk *)(void *)h->next;
+            uint8_t *data = cc__arena_ovf_chunk_data(chunk);
+            uint8_t *byte_ptr = (uint8_t *)ptr;
+            if (byte_ptr + old_size == data + chunk->offset) {
+                size_t new_off = (size_t)(byte_ptr + new_size - data);
+                if (new_size <= old_size || new_off <= chunk->capacity) {
+                    chunk->offset = new_off;
+                    cc__arena_meta_unlock(old_arena);
+                    return ptr;
+                }
+            }
+            cc__arena_meta_unlock(old_arena);
+            {
+                void *out = cc_arena_alloc(new_arena, new_size, align);
+                if (!out) return NULL;
+                memcpy(out, ptr, old_size < new_size ? old_size : new_size);
+                (void)cc_arena_release(old_arena, ptr);
+                return out;
+            }
+        }
+        {
+            void *old_raw = cc__arena_ovf_raw(h);
+            size_t old_off = (size_t)((uint8_t *)ptr - (uint8_t *)old_raw);
+            size_t a = cc__arena_ovf_align(align);
+            size_t total = cc__arena_ovf_total(new_size, a);
+            size_t old_bytes = cc__arena_ovf_total(old_size, a);
+            size_t new_bytes;
+            size_t cur;
+            size_t copy_bytes;
+            void *new_raw;
+            void *new_payload;
+            size_t new_off;
+            cc__arena_ovf_unlink_locked(old_arena, h);
+            cc__arena_meta_unlock(old_arena);
+            new_raw = realloc(old_raw, total);
+            if (!new_raw) {
+                h->next = NULL;
+                h->prev = NULL;
+                cc__arena_meta_lock(old_arena);
+                cc__arena_ovf_push_locked(old_arena, h);
+                cc__arena_meta_unlock(old_arena);
+                return NULL;
+            }
+            new_payload = cc__arena_ovf_payload_from_raw(new_raw, a);
+            new_off = (size_t)((uint8_t *)new_payload - (uint8_t *)new_raw);
+            copy_bytes = old_size < new_size ? old_size : new_size;
+            if (new_off != old_off && copy_bytes > 0) {
+                memmove(new_payload, (uint8_t *)new_raw + old_off, copy_bytes);
+            }
+            h = cc__arena_ovf_header(new_payload);
+            if ((uint8_t *)h < (uint8_t *)new_raw ||
+                (size_t)((uint8_t *)h - (uint8_t *)new_raw) > UINT32_MAX) {
+                free(new_raw);
+                return NULL;
+            }
+            h->magic = CC_ARENA_OVF_MAGIC;
+            h->raw_delta = (uint32_t)((uint8_t *)h - (uint8_t *)new_raw);
+            h->arena = old_arena;
             h->next = NULL;
-            cc__arena_ovf_push(old_arena, h);
-            return NULL;
+            h->prev = NULL;
+            cc__arena_meta_lock(old_arena);
+            cc__arena_ovf_push_locked(old_arena, h);
+            new_bytes = total;
+            cur = CC_ATOMIC_LOAD(&old_arena->overflow_bytes);
+            if (old_bytes > 0 && cur >= old_bytes) {
+                CC_ATOMIC_FETCH_SUB(&old_arena->overflow_bytes, old_bytes);
+            }
+            CC_ATOMIC_FETCH_ADD(&old_arena->overflow_bytes, new_bytes);
+            old_arena->_flags |= CC_ARENA_FLAG_USED_HEAP_OVERFLOW | CC_ARENA_FLAG_NON_REWINDABLE;
+            cc__arena_meta_unlock(old_arena);
+            return new_payload;
         }
-        new_payload = cc__arena_ovf_payload_from_raw(new_raw, a);
-        new_off = (size_t)((uint8_t *)new_payload - (uint8_t *)new_raw);
-        copy_bytes = old_size < new_size ? old_size : new_size;
-        if (new_off != old_off && copy_bytes > 0) {
-            memmove(new_payload, (uint8_t *)new_raw + old_off, copy_bytes);
-        }
-        h = cc__arena_ovf_header(new_payload);
-        h->magic = CC_ARENA_OVF_MAGIC;
-        h->arena = old_arena;
-        h->raw = new_raw;
-        h->next = NULL;
-        cc__arena_ovf_push(old_arena, h);
-        new_bytes = cc__arena_malloc_usable_bytes(new_raw);
-        cur = CC_ATOMIC_LOAD(&old_arena->overflow_bytes);
-        if (old_bytes > 0 && cur >= old_bytes) {
-            CC_ATOMIC_FETCH_SUB(&old_arena->overflow_bytes, old_bytes);
-        }
-        CC_ATOMIC_FETCH_ADD(&old_arena->overflow_bytes, new_bytes);
-        old_arena->_flags |= CC_ARENA_FLAG_USED_HEAP_OVERFLOW | CC_ARENA_FLAG_NON_REWINDABLE;
-        return new_payload;
     }
 
     cc__arena_report_release_error("pointer is not owned by this arena", ptr);
     return NULL;
+}
+
+/* Local tip path first; on miss / exhaustion, concurrent cc_arena_realloc
+ * (grow, copy, ovf). Exclusive owner only for the local attempt. */
+static inline void *cc_arena_realloc_local_grow(CCArena *arena,
+                                               void *ptr,
+                                               size_t old_size,
+                                               size_t new_size,
+                                               size_t align) {
+    void *out;
+    size_t copy_bytes;
+    if (!ptr) return cc_arena_alloc_local_grow(arena, new_size, align);
+    {
+        void *p = cc_arena_realloc_local(arena, ptr, old_size, new_size, align);
+        if (p || new_size == 0) return p;
+    }
+    /* Not a tip fit (buried or needs a new slab): stay on the local tier. */
+    out = cc_arena_alloc_local_grow(arena, new_size, align);
+    if (!out) return NULL;
+    copy_bytes = old_size < new_size ? old_size : new_size;
+    if (copy_bytes) memcpy(out, ptr, copy_bytes);
+    (void)cc_arena_release(arena, ptr);
+    return out;
 }
 
 #define cc_arena_alloc_T(T, arena) \
@@ -948,13 +1270,16 @@ static inline CCArena cc_arena_fixed_buffer(void *buffer, size_t capacity) {
     cc_arena_pool_stack(name, elem_size, nbytes)
 
 static inline bool cc_arena_release(CCArena* arena, void* ptr) {
+    CCArena* block;
     if (!arena || !ptr) return false;
 
-    CCArena* block = cc__arena_find_block(arena, ptr);
+    cc__arena_meta_lock(arena);
+    block = cc__arena_find_block(arena, ptr);
     if (block) {
         size_t prev_live = CC_ATOMIC_FETCH_SUB(&block->live_allocs, 1);
         if (prev_live == 0) {
             CC_ATOMIC_FETCH_ADD(&block->live_allocs, 1);
+            cc__arena_meta_unlock(arena);
             cc__arena_report_release_error("double release or live_allocs mismatch", ptr);
             return false;
         }
@@ -967,28 +1292,56 @@ static inline bool cc_arena_release(CCArena* arena, void* ptr) {
         } else {
             arena->_flags |= CC_ARENA_FLAG_NON_REWINDABLE;
         }
+        cc__arena_meta_unlock(arena);
         return true;
     }
 
     if (arena->_flags & CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW) {
-        void *raw = NULL;
-        size_t bytes;
-        size_t cur;
-        if (!cc__arena_ovf_take(arena, ptr, &raw)) {
+        CCArenaOvfHeader *h;
+        if (!cc__arena_ovf_check(arena, ptr)) {
+            cc__arena_meta_unlock(arena);
             cc__arena_report_release_error(
                 "overflow release: pointer is not owned by this arena", ptr);
             return false;
         }
-        bytes = cc__arena_malloc_usable_bytes(raw);
-        cur = CC_ATOMIC_LOAD(&arena->overflow_bytes);
-        if (bytes > 0 && cur >= bytes) {
-            CC_ATOMIC_FETCH_SUB(&arena->overflow_bytes, bytes);
+        h = cc__arena_ovf_header(ptr);
+        if (h->magic == CC_ARENA_OVF_MAGIC_CHUNK) {
+            /* Chunk bump: hole until reset/free (same as slab mid-life release). */
+            h->magic = CC_ARENA_OVF_MAGIC_DEAD;
+            h->arena = NULL;
+            h->next = NULL;
+            h->prev = NULL;
+            arena->_flags |= CC_ARENA_FLAG_NON_REWINDABLE;
+            cc__arena_meta_unlock(arena);
+            return true;
         }
-        free(raw);
-        arena->_flags |= CC_ARENA_FLAG_NON_REWINDABLE;
-        return true;
+        {
+            void *raw = cc__arena_ovf_raw(h);
+            size_t bytes;
+            size_t cur;
+            cc__arena_ovf_unlink_locked(arena, h);
+            h->magic = CC_ARENA_OVF_MAGIC_DEAD;
+            h->arena = NULL;
+            h->raw_delta = 0;
+            h->next = NULL;
+            h->prev = NULL;
+            if (!arena->ovf_head && !arena->ovf_chunks) {
+                CC_ATOMIC_STORE(&arena->overflow_bytes, 0);
+            } else {
+                bytes = cc__arena_malloc_usable_bytes(raw);
+                cur = CC_ATOMIC_LOAD(&arena->overflow_bytes);
+                if (bytes > 0 && cur >= bytes) {
+                    CC_ATOMIC_FETCH_SUB(&arena->overflow_bytes, bytes);
+                }
+            }
+            arena->_flags |= CC_ARENA_FLAG_NON_REWINDABLE;
+            cc__arena_meta_unlock(arena);
+            free(raw);
+            return true;
+        }
     }
 
+    cc__arena_meta_unlock(arena);
     cc__arena_report_release_error("pointer is not owned by this arena", ptr);
     return false;
 }
@@ -997,24 +1350,20 @@ static inline bool cc_arena_release(CCArena* arena, void* ptr) {
  * and a heap-owned root, then clears the handle. Call cc_arena_buffer again
  * before reuse. Individual cc_arena_release remains for mid-lifetime reclaim. */
 static inline void cc_arena_free(CCArena* a) {
+    CCArena *cur;
+    uint8_t* base;
+    unsigned int flags;
+    CCArenaOvfHeader *ovf_heads = NULL;
+    CCArenaOvfChunk *ovf_chunks = NULL;
     if (!a) return;
 
-    cc__arena_ovf_drain(a);
+    cc__arena_meta_lock(a);
+    cc__arena_ovf_steal_locked(a, &ovf_heads, &ovf_chunks);
 
-    CCArena *cur = a->prev;
-    while (cur) {
-        CCArena *next = cur->prev;
-        if (cur->base && (cur->_flags & CC_ARENA_FLAG_HEAP_OWNED)) {
-            free(cur->base);
-        }
-        free(cur);
-        cur = next;
-    }
+    cur = a->prev;
     a->prev = NULL;
-
-    // Clear the root before freeing its buffer in case the arena object lives inside it.
-    uint8_t* base = a->base;
-    unsigned int flags = a->_flags;
+    base = a->base;
+    flags = a->_flags;
     a->base = NULL;
     a->capacity = 0;
     a->offset = 0;
@@ -1023,7 +1372,21 @@ static inline void cc_arena_free(CCArena* a) {
     a->block_idx = 0;
     a->block_max = 0;
     a->ovf_head = NULL;
+    a->ovf_chunks = NULL;
     CC_ATOMIC_STORE(&a->overflow_bytes, 0);
+    cc__arena_meta_unlock(a);
+    CC_ATOMIC_STORE(&a->meta_lock, 0u);
+
+    cc__arena_ovf_free_stolen(ovf_heads, ovf_chunks);
+
+    while (cur) {
+        CCArena *next = cur->prev;
+        if (cur->base && (cur->_flags & CC_ARENA_FLAG_HEAP_OWNED)) {
+            free(cur->base);
+        }
+        free(cur);
+        cur = next;
+    }
 
     if (base && (flags & CC_ARENA_FLAG_HEAP_OWNED)) {
         free(base);
@@ -1047,6 +1410,7 @@ static inline void cc_heap_arena_free(CCArena* a) {
 static inline CCArena cc_arena_detach(CCArena* a) {
     CCArena taken = {0};
     if (a && a->base) {
+        cc__arena_meta_lock(a);
         taken = *a;
         a->base = NULL;
         a->capacity = 0;
@@ -1057,7 +1421,11 @@ static inline CCArena cc_arena_detach(CCArena* a) {
         a->block_max = 0;
         a->prev = NULL;
         a->ovf_head = NULL;
+        a->ovf_chunks = NULL;
         CC_ATOMIC_STORE(&a->overflow_bytes, 0);
+        cc__arena_meta_unlock(a);
+        CC_ATOMIC_STORE(&a->meta_lock, 0u);
+        CC_ATOMIC_STORE(&taken.meta_lock, 0u);
     }
     return taken;
 }
@@ -1067,39 +1435,32 @@ static inline CCArena cc_arena_detach(CCArena* a) {
  * overflow. Does not free the arena struct or a caller/stack root buffer.
  * Provenance bumps so pre-reset slices are stale. */
 static inline void cc_arena_reset(CCArena *arena) {
+    CCArena *to_free = NULL;
+    CCArena *tail = NULL;
+    uint8_t *free_root = NULL;
+    CCArenaOvfHeader *ovf_heads = NULL;
+    CCArenaOvfChunk *ovf_chunks = NULL;
     if (!arena) return;
 
-    cc__arena_ovf_drain(arena);
+    cc__arena_meta_lock(arena);
+    cc__arena_ovf_steal_locked(arena, &ovf_heads, &ovf_chunks);
 
     // If we have grown extents, unwind the chain back to the original block.
     if (arena->prev) {
-        // Walk to the tail of the chain (the original block).
-        CCArena *tail = arena->prev;
+        tail = arena->prev;
         while (tail->prev) tail = tail->prev;
 
-        // Free the current root's buffer (it was heap-allocated during growth)
         if (arena->_flags & CC_ARENA_FLAG_HEAP_OWNED && arena->base) {
-            free(arena->base);
+            free_root = arena->base;
         }
 
-        // Restore root to original block state
         arena->base = tail->base;
         arena->capacity = tail->capacity;
         arena->_flags = (arena->_flags & ~CC_ARENA_FLAG_HEAP_OWNED)
                        | (tail->_flags & CC_ARENA_FLAG_HEAP_OWNED);
         CC_ATOMIC_STORE(&arena->live_allocs, 0);
 
-        // Free all extent structs and their buffers (except tail's buffer, which is now root's)
-        CCArena *cur = arena->prev;
-        while (cur) {
-            CCArena *next = cur->prev;
-            if (cur != tail && cur->base && (cur->_flags & CC_ARENA_FLAG_HEAP_OWNED)) {
-                free(cur->base);
-            }
-            free(cur);
-            cur = next;
-        }
-
+        to_free = arena->prev;
         arena->prev = NULL;
         arena->block_idx = 0;
     }
@@ -1107,25 +1468,53 @@ static inline void cc_arena_reset(CCArena *arena) {
     CC_ATOMIC_STORE(&arena->offset, 0);
     CC_ATOMIC_STORE(&arena->live_allocs, 0);
     arena->ovf_head = NULL;
+    arena->ovf_chunks = NULL;
     CC_ATOMIC_STORE(&arena->overflow_bytes, 0);
-    // Bump provenance so new allocations get a fresh id (helps detect stale use).
     arena->provenance = CC_ATOMIC_FETCH_ADD(&cc_arena_prov_counter, 1);
     arena->_flags &= ~(CC_ARENA_FLAG_USED_HEAP_OVERFLOW | CC_ARENA_FLAG_NON_REWINDABLE);
+    cc__arena_meta_unlock(arena);
+
+    cc__arena_ovf_free_stolen(ovf_heads, ovf_chunks);
+
+    if (free_root) free(free_root);
+    while (to_free) {
+        CCArena *next = to_free->prev;
+        if (to_free != tail && to_free->base &&
+            (to_free->_flags & CC_ARENA_FLAG_HEAP_OWNED)) {
+            free(to_free->base);
+        }
+        free(to_free);
+        to_free = next;
+    }
+}
+
+static inline void cc__arena_warn_checkpoint_disabled_once(void) {
+    static cc_atomic_uint once = 0;
+    unsigned expected = 0;
+    if (!CC_ATOMIC_CAS(&once, &expected, 1u)) return;
+    fprintf(stderr,
+            "cc_arena_checkpoint: arena is in release/overflow mode; "
+            "checkpoints disabled (restore would no-op)\n");
 }
 
 // Capture current arena allocation state (including block index for cross-block restore).
 static inline CCArenaCheckpoint cc_arena_checkpoint(CCArena* arena) {
     CCArenaCheckpoint cp;
     cp.arena = NULL;
-    cp.offset = arena ? CC_ATOMIC_LOAD(&arena->offset) : 0;
-    cp.block_idx = arena ? arena->block_idx : 0;
-    cp.provenance = arena ? arena->provenance : 0;
-    if (arena && !(arena->_flags & CC_ARENA_FLAG_NON_REWINDABLE)) {
+    cp.offset = 0;
+    cp.block_idx = 0;
+    cp.provenance = 0;
+    if (!arena) return cp;
+    cc__arena_meta_lock(arena);
+    cp.offset = CC_ATOMIC_LOAD(&arena->offset);
+    cp.block_idx = arena->block_idx;
+    cp.provenance = arena->provenance;
+    if (!(arena->_flags & CC_ARENA_FLAG_NON_REWINDABLE)) {
         cp.arena = arena;
-        // Start a fresh provenance epoch so allocations after the checkpoint can
-        // be distinguished from allocations that survive a later restore.
         arena->provenance = CC_ATOMIC_FETCH_ADD(&cc_arena_prov_counter, 1);
     }
+    cc__arena_meta_unlock(arena);
+    if (!cp.arena) cc__arena_warn_checkpoint_disabled_once();
     return cp;
 }
 
@@ -1137,53 +1526,66 @@ static inline CCArenaCheckpoint cc_arena_checkpoint(CCArena* arena) {
 // after the checkpoint become stale while earlier allocations remain valid.
 static inline void cc_arena_restore(CCArenaCheckpoint checkpoint) {
     CCArena* arena = checkpoint.arena;
-    if (!arena || (arena->_flags & CC_ARENA_FLAG_NON_REWINDABLE)) return;
+    uint8_t *free_root = NULL;
+    CCArena *free_chain = NULL;
+    CCArena *free_target = NULL;
+    size_t off;
+    if (!arena) return;
 
-    // If we need to unwind growth
+    cc__arena_meta_lock(arena);
+    if (arena->_flags & CC_ARENA_FLAG_NON_REWINDABLE) {
+        cc__arena_meta_unlock(arena);
+        return;
+    }
+
     if (checkpoint.block_idx < arena->block_idx) {
-        // Walk the prev chain to find the extent matching checkpoint.block_idx.
-        // Along the way, collect extents to free.
-        // The chain is: root(newest) -> prev -> prev -> ... -> NULL(oldest, idx=0)
-        // We need to restore the extent with block_idx == checkpoint.block_idx.
-
-        // Free the current root buffer (it's newer than checkpoint)
+        CCArena *cur;
+        CCArena *target = NULL;
         if (arena->_flags & CC_ARENA_FLAG_HEAP_OWNED && arena->base) {
-            free(arena->base);
+            free_root = arena->base;
         }
 
-        // Walk the chain, freeing extents until we find our target
-        CCArena *cur = arena->prev;
-        CCArena *target = NULL;
+        cur = arena->prev;
         while (cur) {
             if (cur->block_idx == checkpoint.block_idx) {
                 target = cur;
                 break;
             }
-            // This extent is newer than checkpoint, free it
-            CCArena *next = cur->prev;
-            if (cur->base && (cur->_flags & CC_ARENA_FLAG_HEAP_OWNED)) {
-                free(cur->base);
+            {
+                CCArena *next = cur->prev;
+                cur->prev = free_chain;
+                free_chain = cur;
+                cur = next;
             }
-            free(cur);
-            cur = next;
         }
 
         if (target) {
-            // Restore root from target extent
             arena->base = target->base;
             arena->capacity = target->capacity;
             arena->block_idx = target->block_idx;
             arena->_flags = (arena->_flags & ~CC_ARENA_FLAG_HEAP_OWNED)
                            | (target->_flags & CC_ARENA_FLAG_HEAP_OWNED);
             arena->prev = target->prev;
-            free(target);  // free the extent struct (not its buffer, which is now root's)
+            free_target = target;
         }
     }
 
-    size_t off = checkpoint.offset;
+    off = checkpoint.offset;
     if (off > arena->capacity) off = arena->capacity;
     CC_ATOMIC_STORE(&arena->offset, off);
     arena->provenance = checkpoint.provenance;
+    cc__arena_meta_unlock(arena);
+
+    if (free_root) free(free_root);
+    while (free_chain) {
+        CCArena *next = free_chain->prev;
+        if (free_chain->base && (free_chain->_flags & CC_ARENA_FLAG_HEAP_OWNED)) {
+            free(free_chain->base);
+        }
+        free(free_chain);
+        free_chain = next;
+    }
+    if (free_target) free(free_target);
 }
 
 /* Pointer-taking UFCS wrapper: `cp.restore()` lowers to
@@ -1531,40 +1933,23 @@ static inline void* cc_arena_pool_iter_next(CCArenaPoolIter* it) {
 }
 #endif
 
-/* TODO (arena model hardening — none urgent, all one-liners or docs):
+/* TODO (arena model hardening — none urgent):
  *
  * 1. detach() of a stack-rooted arena is a latent use-after-return: `taken.base`
- *    points into the caller's frame, and provenance epochs can't catch frame
- *    death. Add a debug check — warn (or fail) when detaching an arena whose
- *    root slab is not CC_ARENA_FLAG_HEAP_OWNED. Rule of thumb to document:
- *    "detach requires a heap-rooted arena."
+ *    points into the caller's frame. Debug-check / document: detach requires
+ *    a heap-rooted arena (CC_ARENA_FLAG_HEAP_OWNED root).
  *
- * 2. The rewind-vs-release mode flip is half-loud. cc_arena_release() reports
- *    double-release / foreign pointers; last-live root release rewinds and
- *    clears NON_REWINDABLE (back in epoch mode). A non-last release (or heap-
- *    overflow alloc) still sets NON_REWINDABLE, after which checkpoint()
- *    silently returns a null checkpoint and restore() silently no-ops — the
- *    symptom is creeping RSS, not a message. Emit a debug fprintf-once at the
- *    first nulled checkpoint ("arena is release-mode; checkpoints disabled").
+ * 2. Document the modal lifecycle: epoch/rewind (checkpoint/restore/reset) vs
+ *    count/release (cc_arena_release; last-live root release returns to epoch).
+ *    Flip is first non-last release or heap-overflow alloc. checkpoint() now
+ *    fprintf-once when disabled; restore() of a null handle still no-ops.
  *
- * 3. Document the modal lifecycle explicitly: an arena is EITHER epoch/rewind
- *    (checkpoint/restore/reset) OR count/release (cc_arena_release; last-live
- *    root release returns to epoch mode) — flipped by first non-last release
- *    or heap-overflow alloc.
+ * 3. Typed alloc macros (`cc_arena_alloc_T`) still default to the concurrent
+ *    CAS path. Prefer `*_local` / `*_local_grow` at fiber-owned call sites;
+ *    global default flip needs a shared-arena audit (stdlib pass).
  *
- * 4. cc_arena_alloc_local still does an atomic FETCH_ADD on live_allocs — the
- *    single-owner tier pays half the sync tax it exists to avoid. Consider a
- *    non-atomic count in the local tier, and revisit which tier the typed
- *    alloc macros (and therefore the examples) should default to: fiber-owned
- *    request arenas are the dominant pattern, but they default to the CAS path.
- *
- * 5. Overflow accounting uses malloc_usable_size / malloc_size and silently
- *    reports 0 on non-Linux/macOS platforms; overflow allocs also flip
- *    NON_REWINDABLE (see 2/3). Reset/free drain ovf_head (tier 3).
- *
- * 6. Pool freelist packs pointers into 48 bits (CC__POOL_PTR_MASK); add an
- *    init-time check that pool addresses fit the mask (LA57 / tagged-pointer
- *    insurance).
+ * 4. Pool freelist packs pointers into 48 bits (CC__POOL_PTR_MASK); add an
+ *    init-time check that pool addresses fit the mask (LA57 insurance).
  */
 
 #endif // CC_ARENA_H

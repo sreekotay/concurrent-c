@@ -1,8 +1,15 @@
 /*
- * Idiomatic mixed-lifetime peer for stress/compare_mixed_lifetime.sh
+ * Mixed lifetimes the arena way — separate arenas as lifetime annotations.
  *
- * Strategy: cc_arena_heap + mid-lifetime cc_arena_release + survivor realloc
- * + final reset/free. Same size stream / free set as C/Go/Zig malloc peers.
+ * Same which-objects-live as arena_mixed_lifetime_bench (same seed / free set):
+ *   ephemeral slots → scratch arena
+ *   survivors       → keep arena
+ *
+ * Mid-life reclaim is scratch.reset()/free (bulk), not per-object release.
+ * Grow survivors on keep, then keep.reset()/free.
+ *
+ * Contrast: arena_mixed_lifetime_bench packs both lifetimes in one arena and
+ * uses cc_arena_release (escape hatch). This peer is the intended pattern.
  */
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_arena.cch>
@@ -37,18 +44,25 @@ static uint32_t lcg(uint32_t *s) {
 
 int main(void) {
     size_t n = env_zu("MIX_LIFE_N", 200000);
-    /* Equal-budget with split peer: default = MIX_LIFE_TOTAL_ROOT (32MiB). */
+    /* Equal-budget default: total root bytes split across scratch+keep.
+     * Harness sets MIX_LIFE_TOTAL_ROOT; each half is one lifetime annotation. */
     size_t total_root = env_zu("MIX_LIFE_TOTAL_ROOT", 32u * 1024u * 1024u);
-    size_t root = env_zu("MIX_LIFE_ROOT", total_root);
+    size_t half = total_root / 2;
+    if (half == 0) half = 16u * 1024u * 1024u;
+    size_t scratch_root = env_zu("MIX_LIFE_SCRATCH_ROOT", half);
+    size_t keep_root = env_zu("MIX_LIFE_KEEP_ROOT", half);
     uint32_t seed = (uint32_t)env_zu("MIX_LIFE_SEED", 0xC0FFEEu);
     unsigned char **ptrs;
     uint32_t *sizes;
     uint8_t *alive;
+    uint8_t *ephemeral; /* 1 = allocated in scratch (dies mid-run) */
     size_t *order;
     size_t i;
     size_t freed = 0;
     size_t live = 0;
     size_t peak_live = 0;
+    size_t n_eph = 0;
+    size_t n_keep = 0;
     double t0;
     double alloc_ms = 0;
     double midfree_ms = 0;
@@ -60,20 +74,32 @@ int main(void) {
     size_t best_peak = 0;
     size_t rss1 = 0;
     size_t cgroup_peak = 0;
-    size_t peak_gross = 0;
-    size_t peak_ovf = 0;
     volatile size_t sink = 0;
     uint32_t rng = seed;
     StressMemSample m0;
     StressMemSample m1;
+    size_t scratch_gross = 0;
+    size_t keep_gross = 0;
 
     ptrs = (unsigned char **)calloc(n, sizeof(*ptrs));
     sizes = (uint32_t *)calloc(n, sizeof(*sizes));
     alive = (uint8_t *)calloc(n, 1);
+    ephemeral = (uint8_t *)calloc(n, 1);
     order = (size_t *)malloc(n * sizeof(size_t));
-    if (!ptrs || !sizes || !alive || !order) return 1;
+    if (!ptrs || !sizes || !alive || !ephemeral || !order) return 1;
 
-    printf("mixed_lifetime(cc arena+release): n=%zu root=%zu seed=%u\n", n, root, seed);
+    /* Same scramble as arena_release peer: first n/2 in shuffle are ephemeral. */
+    for (i = 0; i < n; i++) order[i] = i;
+    for (i = n; i > 1; i--) {
+        size_t j = (size_t)(lcg(&rng) % i);
+        size_t tmp = order[i - 1];
+        order[i - 1] = order[j];
+        order[j] = tmp;
+    }
+    for (i = 0; i < n / 2; i++) ephemeral[order[i]] = 1;
+
+    printf("mixed_lifetime(cc arena_split): n=%zu scratch_root=%zu keep_root=%zu seed=%u\n",
+           n, scratch_root, keep_root, seed);
 
     m0 = stress_mem_sample();
     rss0 = m0.ok ? m0.current : 0;
@@ -81,50 +107,50 @@ int main(void) {
     t0 = now_ms();
 
     {
-        CCArena a = cc_arena_heap(root);
+        CCArena scratch = cc_arena_heap(scratch_root);
+        CCArena keep = cc_arena_heap(keep_root);
         double t;
+
+        if (!scratch.base || !keep.base) {
+            cc_arena_free(&scratch);
+            cc_arena_free(&keep);
+            return 2;
+        }
 
         t = now_ms();
         for (i = 0; i < n; i++) {
             size_t sz = item_size(i);
-            ptrs[i] = (unsigned char *)cc_arena_alloc(&a, sz, 8);
+            CCArena *dest = ephemeral[i] ? &scratch : &keep;
+            ptrs[i] = (unsigned char *)cc_arena_alloc(dest, sz, 8);
             if (!ptrs[i]) {
-                cc_arena_free(&a);
-                return 2;
+                cc_arena_free(&scratch);
+                cc_arena_free(&keep);
+                return 3;
             }
             ptrs[i][0] = (unsigned char)i;
             sink ^= ptrs[i][0];
             sizes[i] = (uint32_t)sz;
             alive[i] = 1;
             live++;
+            if (ephemeral[i]) n_eph++;
+            else n_keep++;
         }
         alloc_ms = now_ms() - t;
         peak_live = live;
-        peak_gross = cc_arena_committed_gross_bytes(&a);
-        peak_ovf = cc_arena_overflow_raw_bytes(&a);
+        scratch_gross = cc_arena_committed_gross_bytes(&scratch);
+        keep_gross = cc_arena_committed_gross_bytes(&keep);
         {
             StressMemSample m = stress_mem_sample();
             if (m.ok && m.current > sampled_peak) sampled_peak = m.current;
         }
 
-        for (i = 0; i < n; i++) order[i] = i;
-        for (i = n; i > 1; i--) {
-            size_t j = (size_t)(lcg(&rng) % i);
-            size_t tmp = order[i - 1];
-            order[i - 1] = order[j];
-            order[j] = tmp;
-        }
-
+        /* Mid-life: drop the entire ephemeral lifetime — one reset, not N/2 releases. */
         t = now_ms();
-        for (i = 0; i < n / 2; i++) {
-            size_t idx = order[i];
-            if (!alive[idx]) continue;
-            if (!cc_arena_release(&a, ptrs[idx])) {
-                cc_arena_free(&a);
-                return 3;
-            }
-            alive[idx] = 0;
-            ptrs[idx] = NULL;
+        cc_arena_reset(&scratch);
+        for (i = 0; i < n; i++) {
+            if (!ephemeral[i] || !alive[i]) continue;
+            alive[i] = 0;
+            ptrs[i] = NULL;
             live--;
             freed++;
         }
@@ -136,9 +162,10 @@ int main(void) {
             void *np;
             if (!alive[i]) continue;
             want = (size_t)sizes[i] + 48 + (i % 64);
-            np = cc_arena_realloc(&a, &a, ptrs[i], sizes[i], want, 8);
+            np = cc_arena_realloc(&keep, &keep, ptrs[i], sizes[i], want, 8);
             if (!np) {
-                cc_arena_free(&a);
+                cc_arena_free(&scratch);
+                cc_arena_free(&keep);
                 return 4;
             }
             ptrs[i] = (unsigned char *)np;
@@ -148,19 +175,14 @@ int main(void) {
         }
         grow_ms = now_ms() - t;
         {
-            size_t g = cc_arena_committed_gross_bytes(&a);
-            size_t o = cc_arena_overflow_raw_bytes(&a);
-            if (g > peak_gross) peak_gross = g;
-            if (o > peak_ovf) peak_ovf = o;
-        }
-        {
             StressMemSample m = stress_mem_sample();
             if (m.ok && m.current > sampled_peak) sampled_peak = m.current;
         }
 
         t = now_ms();
-        cc_arena_reset(&a);
-        cc_arena_free(&a);
+        cc_arena_reset(&keep);
+        cc_arena_free(&scratch);
+        cc_arena_free(&keep);
         reclaim_ms = now_ms() - t;
         live = 0;
     }
@@ -171,11 +193,13 @@ int main(void) {
     best_peak = stress_mem_best_peak(&m1, sampled_peak);
     cgroup_peak = m1.cgroup_ok ? m1.cgroup_peak : 0;
 
-    printf("RESULT lang=cc strategy=arena_release n=%zu freed=%zu peak_live=%zu "
-           "root=%zu peak_gross=%zu peak_ovf=%zu "
+    printf("RESULT lang=cc strategy=arena_split n=%zu freed=%zu peak_live=%zu "
+           "total_root=%zu scratch_root=%zu keep_root=%zu "
+           "eph=%zu keep=%zu scratch_gross=%zu keep_gross=%zu "
            "alloc_ms=%.3f midfree_ms=%.3f grow_ms=%.3f reclaim_ms=%.3f total_ms=%.3f "
            "rss_peak_delta=%zd rss_end_delta=%zd hwm=%zu cgroup_peak=%zu sink=%zu\n",
-           n, freed, peak_live, root, peak_gross, peak_ovf,
+           n, freed, peak_live, total_root, scratch_root, keep_root,
+           n_eph, n_keep, scratch_gross, keep_gross,
            alloc_ms, midfree_ms, grow_ms, reclaim_ms, total_ms,
            (ssize_t)best_peak - (ssize_t)rss0, (ssize_t)rss1 - (ssize_t)rss0,
            m1.hwm_ok ? m1.hwm : 0, cgroup_peak, (size_t)sink);
@@ -183,6 +207,7 @@ int main(void) {
     free(ptrs);
     free(sizes);
     free(alive);
+    free(ephemeral);
     free(order);
     return 0;
 }
