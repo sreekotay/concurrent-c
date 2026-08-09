@@ -1,5 +1,7 @@
 ### Concurrent-C (CC) — prototype compiler + runtime
 
+**Version:** 0.3.0 (`ccc --version`)
+
 Concurrent‑C extends **Tiny C Compiler (TCC)** with small, upstream-friendly hooks (guarded behind `CONFIG_CC_EXT`).
 
 **License:** Dual-licensed under [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your option.

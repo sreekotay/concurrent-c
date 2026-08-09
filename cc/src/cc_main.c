@@ -759,7 +759,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --out-stem NAME     Override the basename/stem used for generated files\n");
     fprintf(stderr, "  --no-cache          Disable incremental cache (also: CC_NO_CACHE=1)\n");
     fprintf(stderr, "  --frontend=native|legacy  Front end (default native; also: CC_FRONTEND)\n");
-    fprintf(stderr, "  --version, --v, -V  Print version (native 0.2.x; legacy 0.1.x)\n");
+    fprintf(stderr, "  --version, --v, -V  Print version (native 0.3.x; legacy 0.1.x)\n");
     fprintf(stderr, "  --timeout SECONDS   Kill run/test step after timeout\n");
     fprintf(stderr, "  --verbose           Print invoked commands\n");
     fprintf(stderr, "One-liners:\n");
@@ -2731,9 +2731,9 @@ static void cc__print_comptime_state(const CCBuildOptions* opt, const char* buil
  * -1 = unset (env/default), 0 = legacy, 1 = native. */
 static int g_frontend_native = -1;
 
-/* Legacy front stays on 0.1.x; native (default) is 0.2.x. */
+/* Legacy front stays on 0.1.x; native (default) is 0.3.x. */
 #define CCC_VERSION_LEGACY "0.1.0-dev"
-#define CCC_VERSION_NATIVE "0.2.6"
+#define CCC_VERSION_NATIVE "0.3.0"
 
 static int cc__set_frontend_name(const char* v) {
     if (!v || !v[0]) return -1;

@@ -1,5 +1,0 @@
-source: cc/shadow/shadow_lower.ccs
-created_utc: 2026-08-04T19:18:18Z
-git_head: 36d26c95
-emit_bytes: 73146
-header_count: 25
