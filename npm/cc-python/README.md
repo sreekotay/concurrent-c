@@ -115,9 +115,19 @@ on N cores, a child crash is a rejected promise (the parent survives),
 and per-domain python/venv selection is honest:
 
 ```js
-const py = ccpy.create({ isolated: true, python: '/home/app/.venv' });
+const py = ccpy.create({ isolated: true });  // ambient python, own process
 const np = py.import('numpy');          // zero round trips — chains are lazy
 const s  = await np.sum(buf);           // cross-process is natively async
+```
+
+Each child resolves its Python by the same ambient order as everything
+else (`VIRTUAL_ENV`, then `./.venv`, then `python3`) — and because each
+domain is its own process, the choice can also be **per-domain**, which
+the in-process tier cannot offer:
+
+```js
+const a = ccpy.create({ isolated: true, python: '/home/app/.venv' });
+const b = ccpy.create({ isolated: true, python: '/usr/bin/python3.11' });
 ```
 
 Measured ([`examples/js_multiprocess_numpy.js`](examples/js_multiprocess_numpy.js),
