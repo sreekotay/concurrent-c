@@ -81,12 +81,14 @@ That is what makes `s.clone_into(&a)` and `clone_into(s, &a)` the same shape.
 
 Generics: `Name::[args]`. Fallible chain: unwrap (`!>` / `?>`), then the next method sees the value.
 
-**Print** (include `<ccc/script/stdio.cch>`): naked `println` / `eprintln` at statement start, flipped on the data, or `io.println` when you have an `io` handle. Templates need an arena — prefer `@scratch` for throwaways.
+**Print** (include `<ccc/script/stdio.cch>`): prefer **`io.println`** when a `CCStdio` handle is in scope. Naked `println` / data-first `.println()` remain valid. Templates need an arena — prefer `@scratch` for throwaways.
 
 ```c
-println("hi") !>;
-println(@string(`n=${n}`, @scratch)) !>;
-@string(`n=${n}`, @scratch).println() !>;
+CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+CCStdio io = cc_stdio_create(&a);
+io.println("hi") !>;
+io.println(@string(`n=${n}`, @scratch)) !>;
+/* also fine: println("hi") !>;  /  @string(`…`, @scratch).println() !>; */
 ```
 
 ---

@@ -51,14 +51,23 @@ Create `hello.ccs`:
 
 ```c
 #include <ccc/cc_runtime.cch>
-#include <stdio.h>
+#include <ccc/script/stdio.cch>
 
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
 
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    CCStdio io = cc_stdio_create(&a);
+
     CCNursery* n = cc_nursery_create(NULL) !> @destroy;
-    n->spawn(() => printf("Hello from task A!\n"));
-    n->spawn(() => printf("Hello from task B!\n"));
+    n->spawn(() => [io] {
+        @errhandler(CCError e) cc_error_exit(e);
+        io.println("Hello from task A!") !>;
+    });
+    n->spawn(() => [io] {
+        @errhandler(CCError e) cc_error_exit(e);
+        io.println("Hello from task B!") !>;
+    });
     return 0;
 }
 ```
@@ -81,8 +90,9 @@ What that program uses:
 | `@errhandler(…)` | Scope policy for fallible unwraps that use bare `!>;` |
 | `T!>(E)` / `!>` | Fallible value; `!>` unwraps or runs error code |
 | `!> @destroy` | Unwrap, then schedule cleanup — **`@destroy` is `@defer` sugar attached to the binding** (same LIFO ledger; only runs if the unwrap succeeded) |
+| `CCArena` / `CCStdio` | Scratch for script I/O; prefer **`io.println(…)`** when a handle is in scope (naked `println` / data-first `.println()` still work) |
 | `CCNursery*` | Structured-concurrency scope: teardown waits for spawned tasks |
-| `n->spawn(() => …)` | UFCS call to spawn a closure (not “call result of `…()`”) |
+| `n->spawn(() => [io] { … })` | UFCS spawn of a closure; capture `io` by value into the task |
 
 So `CCNursery* n = cc_nursery_create(NULL) !> @destroy;` is the short form of
 “unwrap, bind `n`, `@defer` the nursery’s destroy on scope exit.” Teardown runs

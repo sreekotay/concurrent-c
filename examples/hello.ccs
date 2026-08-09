@@ -5,8 +5,9 @@
  * @errhandler, then use bare !>; at each fallible call — re-bind
  * inside each task (task bodies cannot share main's frame).
  *
- * Task C shows compose-then-default: !>(e) { local; @err(e); }.
- * Report via cc_error_exit / cc_error_log, not eprintln !>; inside
+ * Prefer io.println when a CCStdio handle is in scope (capture it into
+ * tasks). Task C shows compose-then-default: !>(e) { local; @err(e); }.
+ * Report via cc_error_exit / cc_error_log, not println !>; inside
  * the same-E handler.
  *
  * Next: recipe_result_error_handling.ccs.
@@ -18,26 +19,30 @@
 int main(void) {
     @errhandler(CCError e) cc_error_exit(e);
 
-    CCNursery* n = cc_nursery_create(NULL) !> @destroy {
-        println("All tasks completed.") !>;
-    };
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    CCStdio io = cc_stdio_create(&a);
 
-    n->spawn(() => {
-        @errhandler(CCError e) cc_error_exit(e);
-        usleep(100000);
-        println("Hello from task A! (last)") !>;
-    });
-    n->spawn(() => {
-        @errhandler(CCError e) cc_error_exit(e);
-        println("Hello from task B!") !>;
-    });
-    n->spawn(() => {
-        @errhandler(CCError e) cc_error_exit(e);
-        println("Hello from task C!") !>(e) {
-            println("Task C failed!") !>;
-            @err(e); //forward to installed error handler
-        }; //local handling first, then default
-    });
+    {
+        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
 
-    return 0;   // ← nursery teardown happens here
+        n->spawn(() => [io] {
+            @errhandler(CCError e) cc_error_exit(e);
+            usleep(100000);
+            io.println("Hello from task A! (last)") !>;
+        });
+        n->spawn(() => [io] {
+            @errhandler(CCError e) cc_error_exit(e);
+            io.println("Hello from task B!") !>;
+        });
+        n->spawn(() => [io] {
+            @errhandler(CCError e) cc_error_exit(e);
+            io.println("Hello from task C!") !>(e) {
+                io.println("Task C failed!") !>;
+                @err(e); //forward to installed error handler
+            }; //local handling first, then default
+        });
+    }   // ← nursery teardown waits here
+
+    io.println("All tasks completed.") !>;
+    return 0;
 }

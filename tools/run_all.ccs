@@ -66,8 +66,9 @@ static const RunPolicy RUN_POLICIES[] = {
     { "deadlock_detect_demo", 124, 0, NULL },
     { "complex_deadlock", 124, 0, NULL },
 
-    /* Shared-object recipe: `ccc build` → *.abi3.so; not a `ccc run` binary. */
+    /* Shared-object recipes: `ccc build` → *.abi3.so / *.node; not `ccc run`. */
     { "recipe_py_module", -1, 0, NULL },
+    { "recipe_js_module", -1, 0, NULL },
 
     /* Slower under the full "all" aggregate load. */
     { "join_init_race", 0, 20, NULL },
