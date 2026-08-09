@@ -1,0 +1,17 @@
+sync_attr true
+await_scalar true
+pipelined true
+python_error_rejects true
+destroy_resolves true
+after_close_rejects true
+double_destroy_resolves true
+loop_stays_live true
+parallel_domains true
+fifo_in_domain true
+both_closed true
+inflight_lease_pinned true
+inflight_completes true
+queued_reject true
+drain_resolves true
+gc_drain_survives true
+async suite done

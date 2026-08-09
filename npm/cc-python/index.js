@@ -60,6 +60,10 @@ function wrap(bridge, handle) {
       return materialize(bridge, native.getattr(bridge._dom, handle, prop));
     },
     apply(t, thisArg, args) {
+      if (bridge._async) {
+        return native.invoke_async(bridge._dom, handle, args.map(unwrapArg))
+          .then((r) => materialize(bridge, r));
+      }
       return materialize(bridge,
                          native.invoke(bridge._dom, handle,
                                        args.map(unwrapArg)));
@@ -68,8 +72,13 @@ function wrap(bridge, handle) {
 }
 
 class Bridge {
-  constructor() {
-    this._dom = native.create();
+  // mode 'async': calls return Promises and run on the domain's executor
+  // thread (one lane per domain, FIFO; concurrent domains parallelize).
+  // Attribute access stays synchronous — lookups are dict probes; note
+  // that one may wait on the in-flight call's per-interpreter GIL.
+  constructor(opts) {
+    this._async = !!(opts && (opts.mode === 'async' || opts.async));
+    this._dom = native.create(this._async ? 1 : 0);
     this._strHandle = null;
   }
   _str() {
@@ -93,16 +102,21 @@ class Bridge {
   }
   destroy() {
     this._strHandle = null;
+    if (this._async) return native.close_async(this._dom);
     native.close(this._dom);
+    return undefined;
   }
   close() {
-    this.destroy();
+    return this.destroy();
   }
   [Symbol.dispose]() {
     this.destroy();
   }
+  [Symbol.asyncDispose]() {
+    return Promise.resolve(this.destroy());
+  }
 }
 
 module.exports = {
-  create() { return new Bridge(); },
+  create(opts) { return new Bridge(opts); },
 };

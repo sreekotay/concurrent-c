@@ -27,6 +27,32 @@ py.destroy();   // one sweep: every handle, the arena, the interpreter ref
 - `py.stats()` is the live-handle count; `py.release(proxy)` drops one
   early and returns the remainder.
 
+## Async mode
+
+```js
+const py = require('cc-python').create({ mode: 'async' });
+const np = py.import('numpy');
+
+const norm = await np.linalg.norm(new Float64Array(1_000_000));
+
+await py.destroy();   // revoke, drain, then the same one-sweep teardown
+```
+
+An async domain is also an **execution lane**: every call runs on the
+domain's own thread, FIFO, and returns a Promise — the Node event loop
+stays live while Python works, and `Promise.all` across *domains* is
+real parallelism (each concurrent domain holds its own per-interpreter
+GIL).  Python exceptions arrive as rejections with the same messages
+the sync bridge throws.  Attribute access stays synchronous (lookups
+are dict probes; one may briefly wait on the in-flight call's GIL).
+
+Lifetimes extend, not bend: a job owns its Python references and pins
+its typed-array buffers from submit to completion, so `release()` or
+GC mid-flight cannot dangle it.  `destroy()` returns a Promise —
+revocation is immediate (queued calls reject with `bridge is closed`),
+the in-flight call finishes, and the sweep runs after the last result
+is delivered.  An idle async domain never keeps the process alive.
+
 ## Numbers
 
 JavaScript has one number type; integral values cross as Python `int`,
