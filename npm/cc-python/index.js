@@ -16,15 +16,20 @@ const path = require('path');
 const fs = require('fs');
 
 function locateAddon() {
+  const plat = process.platform + '-' + process.arch;
   const candidates = [];
   if (process.env.CC_PYTHON_ADDON) candidates.push(process.env.CC_PYTHON_ADDON);
+  // Published layout: a prebuilt per platform, or the artifact install.js
+  // compiled from the vendored sources.
+  candidates.push(path.join(__dirname, 'bin', 'cc_python-' + plat + '.node'));
   candidates.push(path.join(__dirname, 'bin', 'cc_python.node'));
+  // Repo layout: `ccc build npm/cc-python/src/cc_python.ccs` lands here.
   candidates.push(path.join(__dirname, '..', '..', 'bin', 'cc_python.node'));
   for (const c of candidates) if (fs.existsSync(c)) return c;
   throw new Error(
-    'cc-python: cc_python.node not found (build it with ' +
-    '`ccc build npm/cc-python/src/cc_python.ccs`, or set CC_PYTHON_ADDON); ' +
-    'looked at: ' + candidates.join(', '));
+    'cc-python: no addon for ' + plat + ' (reinstall to run the source ' +
+    'build, build it with `ccc build npm/cc-python/src/cc_python.ccs`, or ' +
+    'set CC_PYTHON_ADDON); looked at: ' + candidates.join(', '));
 }
 
 const native = require(locateAddon());
