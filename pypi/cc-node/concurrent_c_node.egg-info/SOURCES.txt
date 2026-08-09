@@ -1,8 +1,0 @@
-README.md
-pyproject.toml
-cc_node/__init__.py
-cc_node/broker.cjs
-concurrent_c_node.egg-info/PKG-INFO
-concurrent_c_node.egg-info/SOURCES.txt
-concurrent_c_node.egg-info/dependency_links.txt
-concurrent_c_node.egg-info/top_level.txt
