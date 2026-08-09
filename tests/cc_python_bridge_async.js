@@ -66,9 +66,15 @@ const ccpy = require(process.cwd() + '/npm/cc-python');
     setTimeout(() => { ticked = true; }, 100);
     await sa(0.3);
     out('loop_stays_live', ticked);
+    // Relative, not absolute: an absolute wall bound flakes when the
+    // suite loads all cores — serial and parallel inflate together.
+    const t0 = Date.now();
+    await sa(0.3);
+    await sb(0.3);
+    const serial = Date.now() - t0;
     const t1 = Date.now();
     await Promise.all([sa(0.3), sb(0.3)]);
-    out('parallel_domains', Date.now() - t1 < 480);
+    out('parallel_domains', Date.now() - t1 < serial * 0.8);
     const order = [];
     await Promise.all([
       sa(0.05).then(() => order.push(1)),
