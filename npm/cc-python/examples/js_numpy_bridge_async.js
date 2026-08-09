@@ -1,7 +1,7 @@
 /* The magic demo, async form: plain node + require('cc-python') +
  * numpy through py.task — what the lane BUYS, measured.
  *
- *   node perf/js_numpy_bridge_async.js
+ *   node npm/cc-python/examples/js_numpy_bridge_async.js
  *
  * The sync bridge wins per-call latency (see js_numpy_bridge.js); the
  * lane buys the event loop back.  Rungs: awaited and pipelined lane

@@ -1,6 +1,6 @@
 /* Two interpreters, one buffer: JS is the neutral ground.
  *
- *   node perf/js_two_interp.js
+ *   node npm/cc-python/examples/js_two_interp.js
  *
  * Domains reject each other's handles (isolation is real), so data
  * moves between interpreters BY LIVING IN JS: one Float64Array leases

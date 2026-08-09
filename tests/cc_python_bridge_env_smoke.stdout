@@ -1,0 +1,10 @@
+unloaded_reports_unloaded true
+use_python_executable true
+use_python_venv_adopts true
+use_python_libpath true
+second_runtime_refused true
+ambient_virtual_env true
+ambient_dot_venv true
+broken_target_is_loud true
+broken_ambient_is_loud true
+env suite done

@@ -1,7 +1,7 @@
 /* The magic demo, pure: plain node + require('cc-python') + numpy.
  * No bespoke module, no build step — the generic bridge, timed.
  *
- *   node perf/js_numpy_bridge.js
+ *   node npm/cc-python/examples/js_numpy_bridge.js
  *
  * Rungs: bulk dot/sum/std on 1M doubles (zero-copy leases) against the
  * same work in a plain JS loop; hot 16-element dot for per-call

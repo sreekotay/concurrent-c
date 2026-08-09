@@ -18,10 +18,12 @@
 #include <dlfcn.h>
 #include <limits.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include <ccc/cc_arena.cch>
 #include <ccc/cc_compat.cch>
@@ -252,6 +254,10 @@ typedef struct CC__PySyms {
     void *(*InterpreterStateGet)(void);
     void *(*EvalSaveThread)(void);
     void (*EvalRestoreThread)(void *);
+    /* Optional: runtime selection (venv adoption + introspection). */
+    void (*SetProgramName)(const wchar_t *);
+    wchar_t *(*DecodeLocale)(const char *, size_t *);
+    const char *(*GetVersion)(void);
 } CC__PySyms;
 
 /* `PyInterpreterConfig` (PEP 684).  Eight ints, and the layout is stable
@@ -274,6 +280,14 @@ static char cc__py_errbuf[512];
  * from `CCPy.arena` / `CCPyObj.home->arena`. NULL keeps the static buffer
  * (bootstrap / load failures before a handle exists). Calling thread only. */
 static CCArena *cc__py_err_arena;
+
+/* Runtime selection (cc_py_use / VIRTUAL_ENV / ./.venv): resolved before
+ * the first load, consumed by cc__py_load and the pre-init program-name
+ * hook.  One runtime per process — first load wins; a later conflicting
+ * choice is an articulate error, never a quiet second interpreter. */
+static char cc__py_sel_lib[4096];   /* libpython to dlopen */
+static char cc__py_sel_prog[4096];  /* Py_SetProgramName target (venv adopt) */
+static char cc__py_sel_how[64];     /* provenance, for errors + introspection */
 
 /* A `PyThreadState` belongs to ONE OS thread: CPython keeps the current one
  * in thread-local storage and derives per-thread bookkeeping from it, so
@@ -439,6 +453,149 @@ static int cc__py_sym(void *lib, const char *name, void *slot) {
     return 0;
 }
 
+/* Ask an interpreter where ITS runtime lives: one spawn, at selection
+ * time only.  sysconfig is authoritative where directory guessing is
+ * folklore — INSTSONAME names the exact shared object, and a static
+ * build announces itself (libpythonX.Y.a) instead of resolving to the
+ * wrong runtime. */
+static int cc__py_spawn_resolve(const char *exe, char *lib_out, size_t cap) {
+    char cmd[4608];
+    char libdir[2048];
+    char soname[512];
+    FILE *p;
+    if (strchr(exe, '\'')) {
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: interpreter path contains a quote: %s", exe);
+        return -1;
+    }
+    snprintf(cmd, sizeof(cmd),
+             "'%s' -c \"import sysconfig\n"
+             "print(sysconfig.get_config_var('LIBDIR') or '')\n"
+             "print(sysconfig.get_config_var('INSTSONAME') or "
+             "sysconfig.get_config_var('LDLIBRARY') or '')\" 2>/dev/null",
+             exe);
+    p = popen(cmd, "r");
+    libdir[0] = soname[0] = 0;
+    if (p) {
+        if (fgets(libdir, sizeof(libdir), p)) libdir[strcspn(libdir, "\n")] = 0;
+        if (fgets(soname, sizeof(soname), p)) soname[strcspn(soname, "\n")] = 0;
+        if (pclose(p) != 0) libdir[0] = 0;
+    }
+    if (!libdir[0] || !soname[0]) {
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: cannot interrogate '%s' (not a working python?)",
+                 exe);
+        return -1;
+    }
+    {
+        size_t sl = strlen(soname);
+        if (sl > 2 && strcmp(soname + sl - 2, ".a") == 0) {
+            snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                     "python: '%s' was built with a static libpython (%s) — "
+                     "embedding needs a shared runtime (--enable-shared)",
+                     exe, soname);
+            return -1;
+        }
+    }
+    snprintf(lib_out, cap, "%s/%s", libdir, soname);
+    {
+        struct stat st;
+        if (stat(lib_out, &st) != 0) {
+            snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                     "python: '%s' names its runtime as %s, which does not "
+                     "exist", exe, lib_out);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/* Resolve a selection spec — a venv directory (pyvenv.cfg inside), an
+ * interpreter executable, or a libpython path — into sel_lib/sel_prog.
+ * Does not load anything. */
+static int cc__py_sel_resolve(const char *spec, const char *how,
+                              char *lib_out, size_t lib_cap,
+                              char *prog_out, size_t prog_cap) {
+    struct stat st;
+    prog_out[0] = 0;
+    if (!spec || !spec[0] || stat(spec, &st) != 0) {
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: %s does not exist: %s", how,
+                 spec && spec[0] ? spec : "(empty)");
+        return -1;
+    }
+    if (S_ISDIR(st.st_mode)) {
+        char cfg[4096];
+        char exe[4096];
+        snprintf(cfg, sizeof(cfg), "%s/pyvenv.cfg", spec);
+        if (stat(cfg, &st) != 0) {
+            snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                     "python: %s is not a venv (no pyvenv.cfg): %s", how,
+                     spec);
+            return -1;
+        }
+        snprintf(exe, sizeof(exe), "%s/bin/python", spec);
+        if (stat(exe, &st) != 0)
+            snprintf(exe, sizeof(exe), "%s/bin/python3", spec);
+        if (stat(exe, &st) != 0) {
+            snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                     "python: %s venv has no bin/python: %s", how, spec);
+            return -1;
+        }
+        if (cc__py_spawn_resolve(exe, lib_out, lib_cap) != 0) return -1;
+        snprintf(prog_out, prog_cap, "%s", exe);
+        return 0;
+    }
+    {
+        size_t n = strlen(spec);
+        int looks_lib = strstr(spec, "libpython") != NULL ||
+                        (n > 3 && strcmp(spec + n - 3, ".so") == 0) ||
+                        strstr(spec, ".so.") != NULL ||
+                        (n > 6 && strcmp(spec + n - 6, ".dylib") == 0);
+        if (looks_lib) {
+            snprintf(lib_out, lib_cap, "%s", spec);
+            return 0;
+        }
+    }
+    /* An interpreter executable: adopt its prefix (venv or not) so the
+     * loaded runtime sees THAT python's world, not the discovery walk's. */
+    if (cc__py_spawn_resolve(spec, lib_out, lib_cap) != 0) return -1;
+    snprintf(prog_out, prog_cap, "%s", spec);
+    return 0;
+}
+
+static int cc__py_load(void);
+
+/* Choose the runtime, from code — beats every environment form.  Before
+ * the first load: resolves and stores.  After: a matching choice is a
+ * no-op, a different one is an error naming what already loaded (one
+ * runtime per process until process-isolated domains). */
+static inline int cc_py_use(const char *spec) {
+    char lib[4096];
+    char prog[4096];
+    cc__py_errbuf[0] = 0;
+    if (cc__py_sel_resolve(spec, "cc_py_use target", lib, sizeof(lib), prog,
+                           sizeof(prog)) != 0)
+        return -1;
+    if (cc__py.lib) {
+        if (strcmp(lib, cc__py_sel_lib) == 0 &&
+            strcmp(prog, cc__py_sel_prog) == 0)
+            return 0; /* same choice, settled */
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: the runtime is already loaded (%s%s%s) — one "
+                 "runtime per process; per-domain runtimes arrive with "
+                 "process-isolated domains",
+                 cc__py_sel_lib[0] ? cc__py_sel_lib : "via discovery",
+                 cc__py_sel_how[0] ? ", chosen by " : "",
+                 cc__py_sel_how);
+        return -1;
+    }
+    snprintf(cc__py_sel_lib, sizeof(cc__py_sel_lib), "%s", lib);
+    snprintf(cc__py_sel_prog, sizeof(cc__py_sel_prog), "%s", prog);
+    snprintf(cc__py_sel_how, sizeof(cc__py_sel_how), "cc_py_use");
+    return 0;
+}
+
 static int cc__py_load(void) {
     /* Bare sonames first (Linux ldconfig / macOS dyld path); then common
      * Homebrew framework installs. Override with CC_LIBPYTHON=/path. */
@@ -471,6 +628,21 @@ static int cc__py_load(void) {
         }
     }
     if (cc__py.lib) goto have_lib;
+    /* Selection order: code (cc_py_use, resolved already) > CC_LIBPYTHON >
+     * ambient VIRTUAL_ENV > ambient ./.venv > the discovery walk.  Every
+     * explicit or ambient form fails HARD on a broken target: falling
+     * through would run the caller's code against the wrong environment
+     * while looking like success. */
+    if (cc__py_sel_lib[0]) {
+        cc__py.lib = dlopen(cc__py_sel_lib, RTLD_NOW | RTLD_GLOBAL);
+        if (!cc__py.lib) {
+            snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                     "python: dlopen failed for the %s runtime %s: %s",
+                     cc__py_sel_how, cc__py_sel_lib, dlerror());
+            return -1;
+        }
+        goto have_lib;
+    }
     override = getenv("CC_LIBPYTHON");
     if (override && override[0]) {
         cc__py.lib = dlopen(override, RTLD_NOW | RTLD_GLOBAL);
@@ -478,6 +650,39 @@ static int cc__py_load(void) {
             snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
                      "python: CC_LIBPYTHON dlopen failed: %s", dlerror());
             return -1;
+        }
+        snprintf(cc__py_sel_lib, sizeof(cc__py_sel_lib), "%s", override);
+        snprintf(cc__py_sel_how, sizeof(cc__py_sel_how), "CC_LIBPYTHON");
+        goto have_lib;
+    }
+    {
+        const char *venv = getenv("VIRTUAL_ENV");
+        const char *how = "VIRTUAL_ENV";
+        char dotvenv[4096];
+        if (!venv || !venv[0]) {
+            struct stat st;
+            snprintf(dotvenv, sizeof(dotvenv), ".venv/pyvenv.cfg");
+            if (stat(dotvenv, &st) == 0) {
+                snprintf(dotvenv, sizeof(dotvenv), ".venv");
+                venv = dotvenv;
+                how = "./.venv";
+            }
+        }
+        if (venv && venv[0]) {
+            if (cc__py_sel_resolve(venv, how, cc__py_sel_lib,
+                                   sizeof(cc__py_sel_lib), cc__py_sel_prog,
+                                   sizeof(cc__py_sel_prog)) != 0)
+                return -1; /* a present venv that fails to resolve is an
+                            * error, not a fall-through */
+            snprintf(cc__py_sel_how, sizeof(cc__py_sel_how), "%s", how);
+            cc__py.lib = dlopen(cc__py_sel_lib, RTLD_NOW | RTLD_GLOBAL);
+            if (!cc__py.lib) {
+                snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                         "python: dlopen failed for the %s runtime %s: %s",
+                         how, cc__py_sel_lib, dlerror());
+                return -1;
+            }
+            goto have_lib;
         }
     }
     for (i = 0; !cc__py.lib && sonames[i]; i++) {
@@ -566,8 +771,32 @@ have_lib:
     CC__PY_SYM_OPT(InterpreterStateGet, "PyInterpreterState_Get")
     CC__PY_SYM_OPT(EvalSaveThread, "PyEval_SaveThread")
     CC__PY_SYM_OPT(EvalRestoreThread, "PyEval_RestoreThread")
+    CC__PY_SYM_OPT(SetProgramName, "Py_SetProgramName")
+    CC__PY_SYM_OPT(DecodeLocale, "Py_DecodeLocale")
+    CC__PY_SYM_OPT(GetVersion, "Py_GetVersion")
 #undef CC__PY_SYM_OPT
     return 0;
+}
+
+/* One line of provenance for tooling: "3.12.3|/lib/libpython3.12.so|how"
+ * (fields empty until known).  The version is Py_GetVersion's first
+ * token once the runtime is up. */
+static inline void cc_py_runtime_desc(char *buf, size_t cap) {
+    char ver[64];
+    ver[0] = 0;
+    if (cc__py.lib && cc__py.GetVersion) {
+        const char *v = cc__py.GetVersion();
+        size_t i = 0;
+        while (v && v[i] && v[i] != ' ' && i < sizeof(ver) - 1) {
+            ver[i] = v[i];
+            i++;
+        }
+        ver[i] = 0;
+    }
+    snprintf(buf, cap, "%s|%s|%s", ver,
+             cc__py.lib && !cc__py_sel_lib[0] ? "(discovered or in-process)"
+                                              : cc__py_sel_lib,
+             cc__py_sel_how);
 }
 
 /* Whether a Python runtime can be loaded at all — the boolean form of the
@@ -1771,7 +2000,36 @@ static inline CCResult_CCPy_CCPyError cc_py_new(CCArena *arena) {
     }
     if (cc__py_load() != 0)
         return cc_err_CCResult_CCPy_CCPyError(cc__py_err("cc_py_new"));
-    if (!cc__py.IsInitialized()) cc__py.InitializeEx(0);
+    if (!cc__py.IsInitialized()) {
+        /* Venv/interpreter adoption: hand CPython the selected python's
+         * path BEFORE init and its own machinery finds pyvenv.cfg, the
+         * right prefix, the right site-packages — no path surgery.  The
+         * wchar copy must outlive the interpreter (per the API), so it
+         * is deliberately never freed. */
+        if (cc__py_sel_prog[0]) {
+            if (!cc__py.SetProgramName || !cc__py.DecodeLocale) {
+                snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                         "python: this runtime cannot adopt %s (needs "
+                         "Py_SetProgramName + Py_DecodeLocale)",
+                         cc__py_sel_prog);
+                return cc_err_CCResult_CCPy_CCPyError(cc__py_err("cc_py_new"));
+            }
+            {
+                static wchar_t *cc__py_progw;
+                if (!cc__py_progw)
+                    cc__py_progw = cc__py.DecodeLocale(cc__py_sel_prog, NULL);
+                if (!cc__py_progw) {
+                    snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                             "python: cannot decode program path %s",
+                             cc__py_sel_prog);
+                    return cc_err_CCResult_CCPy_CCPyError(
+                        cc__py_err("cc_py_new"));
+                }
+                cc__py.SetProgramName(cc__py_progw);
+            }
+        }
+        cc__py.InitializeEx(0);
+    }
 
     if (!cc__py_main_taken) {
         cc__py_main_taken = 1;

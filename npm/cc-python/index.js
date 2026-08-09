@@ -17,14 +17,17 @@ const fs = require('fs');
 
 function locateAddon() {
   const plat = process.platform + '-' + process.arch;
+  const repoAddon = path.join(__dirname, '..', '..', 'bin', 'cc_python.node');
+  const inRepo = fs.existsSync(path.join(__dirname, '..', '..', 'cc', 'bin'));
   const candidates = [];
   if (process.env.CC_PYTHON_ADDON) candidates.push(process.env.CC_PYTHON_ADDON);
-  // Published layout: a prebuilt per platform, or the artifact install.js
-  // compiled from the vendored sources.
+  // In the repo, the freshly built artifact beats any stale package
+  // prebuilt left by prepare-publish; installed packages never have the
+  // repo marker and use their own bin/.
+  if (inRepo) candidates.push(repoAddon);
   candidates.push(path.join(__dirname, 'bin', 'cc_python-' + plat + '.node'));
   candidates.push(path.join(__dirname, 'bin', 'cc_python.node'));
-  // Repo layout: `ccc build npm/cc-python/src/cc_python.ccs` lands here.
-  candidates.push(path.join(__dirname, '..', '..', 'bin', 'cc_python.node'));
+  if (!inRepo) candidates.push(repoAddon);
   for (const c of candidates) if (fs.existsSync(c)) return c;
   throw new Error(
     'cc-python: no addon for ' + plat + ' (reinstall to run the source ' +
@@ -142,4 +145,23 @@ class Bridge {
 
 module.exports = {
   create() { return new Bridge(); },
+
+  // Choose the process Python from code — a venv dir, an interpreter
+  // executable, or a libpython path.  Valid until the first create()
+  // loads a runtime; after that a matching choice is a no-op and a
+  // different one throws (one runtime per process — per-domain runtimes
+  // arrive with process-isolated domains).  Beats CC_LIBPYTHON and the
+  // ambient VIRTUAL_ENV / ./.venv forms.
+  usePython(spec) {
+    if (typeof spec !== 'string' || !spec)
+      throw new TypeError('cc-python: usePython wants a path (venv dir, ' +
+                          'python executable, or libpython)');
+    native.use_python(path.resolve(spec));
+  },
+
+  // { loaded, version, lib, how } — how the runtime was (or will be) chosen.
+  python() {
+    const [version, lib, how] = String(native.runtime_desc()).split('|');
+    return { loaded: !!version, version, lib, how };
+  },
 };

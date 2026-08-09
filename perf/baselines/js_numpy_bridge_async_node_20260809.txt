@@ -1,4 +1,4 @@
-# node perf/js_numpy_bridge_async.js — lane rungs, liveness, balanced overlap (best-of-3)
+# node npm/cc-python/examples/js_numpy_bridge_async.js — lane rungs, liveness, balanced overlap (best-of-3)
 # 2026-08-09 x86_64, node v22.22.2, python3.13, nproc=4 (noisy shared box)
 RESULT lane_dot_1m_awaited ms 10.826 ns/call 216524
 RESULT lane_dot_1m_pipelined ms 4.514 ns/call 180576
@@ -9,7 +9,7 @@ RESULT overlapped_js_and_numpy_ms 2.05
 RESULT overlap_gain x 1.83
 RESULT live_handles n 5
 
-# node perf/js_two_interp.js — two domains, one buffer, JS as neutral ground
+# node npm/cc-python/examples/js_two_interp.js — two domains, one buffer, JS as neutral ground
 RESULT b_numpy_refused true
 RESULT same_bytes_both_interps true
 RESULT scalar_hop_a_js_b true

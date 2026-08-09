@@ -1610,6 +1610,22 @@ The probe is the loader — same search order, same `CC_LIBPYTHON` override —
 so it cannot disagree with the constructor. After a true probe, `!>` on
 `cc_py_new` means what it says: a real initialization failure.
 
+The runtime is selected most-specific first: a process that already is
+Python keeps its own symbols unconditionally; `cc_py_use(spec)` chooses
+from code — a venv directory, an interpreter executable, or a libpython
+path, with interpreters interrogated through their own `sysconfig` (one
+spawn at selection time; a static libpython names itself in the error);
+then `CC_LIBPYTHON`; then the ambient environment — `VIRTUAL_ENV`, and a
+`./.venv` in the working directory; then the discovery walk.  A selected
+venv or interpreter is ADOPTED: its path is handed to the runtime before
+initialization, so prefix, site-packages, and `sysconfig` are the
+selected python's own — no path surgery.  Every explicit or ambient
+selection that is present but broken is an error at load, never a
+fall-through to a different runtime.  One runtime per process: after the
+first load a matching re-selection is a no-op and a different one
+answers articulately; per-domain runtimes arrive with process-isolated
+domains.  `cc_py_runtime_desc` reports version, path, and provenance.
+
 Spawning subprocesses while a `CCPy` is live is safe; `fork` without `exec`
 is not supported.
 
