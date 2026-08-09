@@ -17,7 +17,9 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
 # Examples expected to fail compilation right now (tracked breakage).
-XFAIL="recipe_long_lived_store.ccs"   # 'missing ok type before !>' regression
+# Empty = none. An XPASS (listed here but compiles) fails the run so the
+# list cannot rot silently.
+XFAIL=""
 
 step()  { printf '\n== %s\n' "$*"; }
 ok()    { printf '  OK   %s\n' "$*"; }
@@ -59,9 +61,12 @@ for f in examples/*.ccs; do
     printf '  SKIP %s (no curl/curl.h)\n' "$f"
     continue
   fi
-  if ./cc/bin/ccc --emit-c-only "$f" -o /dev/null >/dev/null 2>&1; then
+  # Do not pass `-o /dev/null`: native front treats a non-.c -o as a link
+  # output, so --emit-c-only still host-links. Module recipes (no main)
+  # then fail with a missing-_main link error even though emit succeeded.
+  if ./cc/bin/ccc --emit-c-only "$f" >/dev/null 2>&1; then
     case " $XFAIL " in
-      *" $base "*) printf '  XPASS %s (remove from XFAIL)\n' "$f" ;;
+      *" $base "*) printf '  XPASS %s (remove from XFAIL)\n' "$f"; failures=$((failures+1)) ;;
       *) ok "$f" ;;
     esac
   else

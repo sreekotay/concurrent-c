@@ -485,10 +485,16 @@ $(OBJDIR)/runtime/arena_state.o: $(OUT_RUNTIME)/.seed.stamp
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -MMD -MP -MF $(@:.o=.d) -c $(OUT_RUNTIME)/arena_state.c -o $@
 
+# Stage-1 objs compile against the crude seed (not the lowered stamp —
+# the stamp recipe runs `$(MAKE) lower_headers_stage1`, and a stamp dep
+# here recurses forever on a cold -j build). Several of these TUs
+# `#include <ccc/*.h>` (executor, preprocess, emit_plan, …); without the
+# seed prereq a cold `make -j` races seed_headers and fails with
+# `ccc/cc_arena.h: No such file` (macOS CI).
+$(LOWER_HEADERS1_OBJS): $(OUT_RUNTIME)/.seed.stamp
+
 # Host ccc objects that `#include <ccc/*.h>` need the stamp first.
-# Stage-1 lower_headers objs must NOT: the stamp recipe runs
-# `$(MAKE) lower_headers_stage1`, and those objs share paths with $(OBJS).
-# A stamp dep here recurses forever on a cold -j build (ILP32 VM).
+# Stage-1 lower_headers objs must NOT (see seed dep above).
 $(filter-out $(LOWER_HEADERS1_OBJS),$(OBJS)): $(LOWER_HEADERS_STAMP)
 
 $(OBJDIR)/%.o: %.c | $(TCC_PATCH_STAMP)
