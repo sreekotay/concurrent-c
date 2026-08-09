@@ -462,23 +462,37 @@ static int cc__py_spawn_resolve(const char *exe, char *lib_out, size_t cap) {
     char cmd[4608];
     char libdir[2048];
     char soname[512];
+    char fwprefix[2048];
+    char ver[32];
     FILE *p;
     if (strchr(exe, '\'')) {
         snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
                  "python: interpreter path contains a quote: %.360s", exe);
         return -1;
     }
+    /* Four lines: LIBDIR, INSTSONAME/LDLIBRARY, PYTHONFRAMEWORKPREFIX,
+     * X.Y.  macOS framework builds put a relative framework path in
+     * LDLIBRARY (Python.framework/Versions/X.Y/Python) that is NOT
+     * relative to LIBDIR — joining those two yields a missing path.
+     * PYTHONFRAMEWORKPREFIX + soname and LIBDIR/libpythonX.Y.dylib are
+     * the real locations; try every candidate and take the first that
+     * exists so Linux (LIBDIR/soname) and Homebrew both resolve. */
     snprintf(cmd, sizeof(cmd),
-             "'%s' -c \"import sysconfig\n"
+             "'%s' -c \"import sysconfig,sys\n"
              "print(sysconfig.get_config_var('LIBDIR') or '')\n"
              "print(sysconfig.get_config_var('INSTSONAME') or "
-             "sysconfig.get_config_var('LDLIBRARY') or '')\" 2>/dev/null",
+             "sysconfig.get_config_var('LDLIBRARY') or '')\n"
+             "print(sysconfig.get_config_var('PYTHONFRAMEWORKPREFIX') or '')\n"
+             "print('%%d.%%d' %% sys.version_info[:2])\" 2>/dev/null",
              exe);
     p = popen(cmd, "r");
-    libdir[0] = soname[0] = 0;
+    libdir[0] = soname[0] = fwprefix[0] = ver[0] = 0;
     if (p) {
         if (fgets(libdir, sizeof(libdir), p)) libdir[strcspn(libdir, "\n")] = 0;
         if (fgets(soname, sizeof(soname), p)) soname[strcspn(soname, "\n")] = 0;
+        if (fgets(fwprefix, sizeof(fwprefix), p))
+            fwprefix[strcspn(fwprefix, "\n")] = 0;
+        if (fgets(ver, sizeof(ver), p)) ver[strcspn(ver, "\n")] = 0;
         if (pclose(p) != 0) libdir[0] = 0;
     }
     if (!libdir[0] || !soname[0]) {
@@ -498,17 +512,36 @@ static int cc__py_spawn_resolve(const char *exe, char *lib_out, size_t cap) {
             return -1;
         }
     }
-    snprintf(lib_out, cap, "%s/%s", libdir, soname);
     {
+        char cands[5][4096];
+        int nc = 0, i;
         struct stat st;
-        if (stat(lib_out, &st) != 0) {
-            snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
-                     "python: '%.200s' names its runtime as %.240s, which "
-                     "does not exist", exe, lib_out);
-            return -1;
+        /* Prefer a path that still says "libpython" — macOS frameworks
+         * also expose .../Versions/X.Y/Python, which dlopens fine but is
+         * a worse answer for usePython(libpath) round-trips. */
+        if (soname[0] == '/')
+            snprintf(cands[nc++], sizeof(cands[0]), "%s", soname);
+        if (ver[0]) {
+            snprintf(cands[nc++], sizeof(cands[0]),
+                     "%s/libpython%s.dylib", libdir, ver);
+            snprintf(cands[nc++], sizeof(cands[0]), "%s/libpython%s.so",
+                     libdir, ver);
         }
+        snprintf(cands[nc++], sizeof(cands[0]), "%s/%s", libdir, soname);
+        if (fwprefix[0])
+            snprintf(cands[nc++], sizeof(cands[0]), "%s/%s", fwprefix, soname);
+        for (i = 0; i < nc; i++) {
+            if (stat(cands[i], &st) == 0) {
+                snprintf(lib_out, cap, "%s", cands[i]);
+                return 0;
+            }
+        }
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: '%.200s' names its runtime as %.240s, which "
+                 "does not exist",
+                 exe, cands[0]);
+        return -1;
     }
-    return 0;
 }
 
 /* Resolve a selection spec — a venv directory (pyvenv.cfg inside), an
@@ -601,14 +634,16 @@ static int cc__py_load(void) {
     /* Bare sonames first (Linux ldconfig / macOS dyld path); then common
      * Homebrew framework installs. Override with CC_LIBPYTHON=/path. */
     static const char *sonames[] = {
-        "libpython3.13.dylib", "libpython3.12.dylib",
+        "libpython3.14.dylib", "libpython3.13.dylib", "libpython3.12.dylib",
         "libpython3.11.dylib", "libpython3.10.dylib",
-        "libpython3.13.so.1.0", "libpython3.12.so.1.0",
+        "libpython3.14.so.1.0", "libpython3.13.so.1.0", "libpython3.12.so.1.0",
         "libpython3.11.so.1.0", "libpython3.10.so.1.0",
         "libpython3.so",
+        "/opt/homebrew/opt/python@3.14/Frameworks/Python.framework/Versions/3.14/Python",
         "/opt/homebrew/opt/python@3.13/Frameworks/Python.framework/Versions/3.13/Python",
         "/opt/homebrew/opt/python@3.12/Frameworks/Python.framework/Versions/3.12/Python",
         "/opt/homebrew/opt/python@3.11/Frameworks/Python.framework/Versions/3.11/Python",
+        "/usr/local/opt/python@3.14/Frameworks/Python.framework/Versions/3.14/Python",
         "/usr/local/opt/python@3.13/Frameworks/Python.framework/Versions/3.13/Python",
         "/usr/local/opt/python@3.12/Frameworks/Python.framework/Versions/3.12/Python",
         NULL,
