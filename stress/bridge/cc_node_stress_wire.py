@@ -784,9 +784,9 @@ def retained_callback_storm() -> None:
 def rss_soak() -> None:
     """Long create/churn/destroy loop; RSS must not climb without bound."""
     print("=== rss_soak ===")
-    # Quick: short; full: medium; soak: multi-second.
+    # Quick: short; full: medium; soak: multi-second (override via SOAK_SECONDS).
     if SOAK:
-        seconds, ops_per = 8.0, 40
+        seconds, ops_per = float(os.environ.get("SOAK_SECONDS", "8")), 40
         limit_mb = 512
     elif FULL:
         seconds, ops_per = 3.0, 25
@@ -824,6 +824,165 @@ def rss_soak() -> None:
     ok("rss_soak_rss", delta < limit_mb * MB)
 
 
+def handle_leak_soak() -> None:
+    """Long-lived domain: mint/drop handles; ledger + RSS must re-settle."""
+    print("=== handle_leak_soak ===")
+    if SOAK:
+        seconds = float(os.environ.get("SOAK_SECONDS", "10"))
+        burst = 80
+        limit_mb = 384
+    elif FULL:
+        seconds, burst, limit_mb = 4.0, 50, 256
+    else:
+        seconds, burst, limit_mb = 1.2, 30, 192
+    js = cc_node.create()
+    base = js.stats()
+    r0 = rss_bytes()
+    t0 = time.perf_counter()
+    bursts = 0
+    acc = 0
+    peak_stats = base
+    while time.perf_counter() - t0 < seconds:
+        keep = []
+        for i in range(burst):
+            f = js.eval("(x) => x + %d" % (i % 9))
+            acc += f(i)
+            if i % 3 == 0:
+                keep.append(f)
+            # else: drop — deferred release must drain
+        peak_stats = max(peak_stats, js.stats())
+        del keep
+        gc.collect()
+        bursts += 1
+    gc.collect()
+    time.sleep(0.05)
+    gc.collect()
+    after = js.stats()
+    # Explicit release of anything still held, then destroy.
+    js.destroy()
+    r1 = rss_bytes()
+    delta = max(0, r1 - r0)
+    result("handle_leak_soak_ms %.1f", (time.perf_counter() - t0) * 1000)
+    result("handle_leak_soak_bursts %d", bursts)
+    result("handle_leak_soak_peak_stats %s", peak_stats)
+    result("handle_leak_soak_after_stats %s", after)
+    result("handle_leak_soak_delta_mb %.1f", delta / MB)
+    ok("handle_leak_soak_bursts", bursts >= (8 if SOAK else (3 if FULL else 1)))
+    ok("handle_leak_soak_acc", acc > 0)
+    # After GC, live handles should be near the kept-per-burst residue,
+    # not grow without bound across bursts (peak >> after is the signal).
+    ok("handle_leak_soak_ledger", peak_stats > after and after < burst)
+    ok("handle_leak_soak_rss", delta < limit_mb * MB)
+
+
+def everything_concurrent() -> None:
+    """Mixed kitchen sink: several storm shapes on separate domains at once."""
+    print("=== everything_concurrent ===")
+    n_dom = 4 if FULL else 3
+    t0 = time.perf_counter()
+    errs = []
+    boxes = [{"acc": 0, "ok": False} for _ in range(n_dom)]
+
+    def worker(i):
+        try:
+            js = cc_node.create()
+            if i % 4 == 0:
+                f = js.eval("(x) => x * 2")
+                s = sum(f(k) for k in range(40 if FULL else 20))
+                boxes[i]["acc"] = s
+                boxes[i]["ok"] = s == sum(k * 2 for k in range(40 if FULL else 20))
+            elif i % 4 == 1:
+                boom = js.eval(
+                    "(cb, n) => { let s = 0; for (let j = 0; j < n; j++) "
+                    "s += cb((x) => x + j)(1); return s; }"
+                )
+                s = boom(lambda g: g, 30 if FULL else 12)
+                boxes[i]["acc"] = s
+                boxes[i]["ok"] = s == sum(1 + j for j in range(30 if FULL else 12))
+            elif i % 4 == 2:
+                af = js.eval(
+                    "async (n) => { let s = 0; for (let j = 0; j < n; j++) "
+                    "s += await Promise.resolve(j); return s; }"
+                )
+                s = af(25 if FULL else 10)
+                boxes[i]["acc"] = s
+                boxes[i]["ok"] = s == sum(range(25 if FULL else 10))
+            else:
+                ln = js.eval("(a) => a.length")
+                buf = array.array("d", [1.0] * ((1 << 16) // 8 + 8))
+                s = ln(buf)
+                boxes[i]["acc"] = s
+                boxes[i]["ok"] = s == len(buf)
+            js.destroy()
+        except Exception as e:
+            errs.append(e)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n_dom)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(timeout=60)
+    hung = any(th.is_alive() for th in threads)
+    result("everything_concurrent_ms %.1f", (time.perf_counter() - t0) * 1000)
+    result("everything_concurrent_n %d", n_dom)
+    ok("everything_concurrent_no_hang", not hung)
+    ok("everything_concurrent_no_err", not errs)
+    ok("everything_concurrent_ok", all(b["ok"] for b in boxes))
+
+
+def abort_inject() -> None:
+    """SIGABRT the Node child mid-flight; host rejects, no hang, no zombies."""
+    print("=== abort_inject ===")
+    import signal as _signal
+    rounds = 16 if SOAK else (10 if FULL else 6)
+    t0 = time.perf_counter()
+    rejected = 0
+    late = 0
+    for i in range(rounds):
+        js = cc_node.create()
+        pid = js.eval("() => process.pid")()
+        if i % 2 == 0:
+            # Abort during a plain call (timer fires abort from inside Node).
+            boom = js.eval(
+                "() => { setTimeout(() => process.abort(), 5); "
+                "return new Promise(() => {}); }"
+            )
+            try:
+                boom()
+            except Exception as e:
+                if "exit" in str(e).lower() or "closed" in str(e).lower():
+                    rejected += 1
+        else:
+            # Abort while broker waits on cbr.
+            caller = js.eval("(f) => f(1)")
+
+            def boom(_x):
+                os.kill(int(pid), _signal.SIGABRT)
+                return 1
+
+            try:
+                caller(boom)
+            except Exception as e:
+                if "exit" in str(e).lower() or "closed" in str(e).lower():
+                    rejected += 1
+        if js.closed:
+            late += 1
+        else:
+            try:
+                js.eval("1")
+            except Exception as e:
+                if "closed" in str(e).lower() or "exit" in str(e).lower():
+                    late += 1
+            try:
+                js.destroy()
+            except Exception:
+                pass
+    result("abort_inject_ms %.1f", (time.perf_counter() - t0) * 1000)
+    result("abort_inject_rounds %d", rounds)
+    ok("abort_inject_rejected", rejected == rounds)
+    ok("abort_inject_late", late == rounds)
+
+
 def main() -> int:
     print("cc_node_stress_wire scale=%s" % SCALE)
     multi_child_fanout()
@@ -846,7 +1005,11 @@ def main() -> int:
     teardown_derby()
     eval_storm()
     cross_domain_barrage()
+    everything_concurrent()
     rss_soak()
+    handle_leak_soak()
+    # Abort last: process.abort / SIGABRT is intentionally noisy.
+    abort_inject()
     print("=== summary ===")
     result("stress_fails %d", fails)
     ok("stress_clean", fails == 0)

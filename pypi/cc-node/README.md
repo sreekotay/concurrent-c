@@ -6,6 +6,10 @@ Part of [Concurrent-C](https://github.com/sreekotay/concurrent-c) — a
 strict C11-superset preprocessor: `.ccs` lowers to plain C and compiles
 with your host C compiler.  (This bridge itself is pure Python.)
 
+Map of the three boundaries (CC hosts Python, native modules, this
+package bridge):
+[JS / Python interop](https://github.com/sreekotay/concurrent-c/blob/main/docs/js-py-modules.md).
+
 ```python
 import cc_node
 
@@ -146,10 +150,12 @@ A worked tour (builtin Node modules, chains, callbacks, thenables,
 buffers — no npm install needed):
 `python -m cc_node.examples.use_node`.
 
-Adversarial multi-child storm (fanout, callback blizzard, shm hail,
-teardown derby): [`stress/bridge/`](https://github.com/sreekotay/concurrent-c/tree/main/stress/bridge)
-— `./stress/bridge/run.sh` (`CHAOS_SCALE=full` for bigger N; latency demos
-stay in `cc_node/examples/`).
+Adversarial multi-child storm (fanout, abort inject, mixed concurrent,
+handle-leak / RSS soaks): [`stress/bridge/`](https://github.com/sreekotay/concurrent-c/tree/main/stress/bridge)
+— `./stress/bridge/run.sh` (`CHAOS_SCALE=full` / `soak` for bigger N).
+Mode catalog + status:
+[`bridge_stress.md`](https://github.com/sreekotay/concurrent-c/blob/main/stress/bridge/bridge_stress.md)
+(latency demos stay in `cc_node/examples/`).
 
 And when the hot path is YOUR code rather than an npm package, skip the
 wire entirely: a page of Concurrent-C (or C) exports as a native module

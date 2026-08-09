@@ -6,6 +6,9 @@ Built with [Concurrent-C](https://github.com/sreekotay/concurrent-c) — a
 strict C11-superset preprocessor: `.ccs` lowers to plain C and compiles
 with your host C compiler.
 
+Map of the three boundaries (CC hosts Python, native modules, this
+package bridge): [JS / Python interop](../../docs/js-py-modules.md).
+
 ```js
 const py = require('concurrent-c-python').create();
 const np = py.import('numpy');
@@ -322,6 +325,8 @@ Numbers swing ±40% run-to-run on a small shared VM; the example files
 print machine-comparable `RESULT` lines, so re-measuring on your box is
 one command.
 
-Adversarial kitchen-sink (crash isolation, shm hail, teardown races,
-callback blizzard): [`stress/bridge/`](../../stress/bridge/) —
-`./stress/bridge/run.sh` (latency demos stay in `examples/`).
+Adversarial kitchen-sink (crash isolation, abort inject, mixed concurrent,
+handle-leak / RSS soaks): [`stress/bridge/`](../../stress/bridge/) —
+`./stress/bridge/run.sh`. Mode catalog + status:
+[`stress/bridge/bridge_stress.md`](../../stress/bridge/bridge_stress.md)
+(latency demos stay in `examples/`).

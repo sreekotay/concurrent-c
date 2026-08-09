@@ -820,7 +820,9 @@ async function destroyDuringThenable() {
 /* ---- 19. RSS soak (create/churn/destroy) -------------------------------- */
 async function rssSoak() {
   console.log('=== rss_soak ===');
-  const seconds = SOAK ? 8 : (FULL ? 3 : 1);
+  const seconds = SOAK
+    ? Number(process.env.SOAK_SECONDS || 8)
+    : (FULL ? 3 : 1);
   const ops = SOAK ? 30 : (FULL ? 20 : 12);
   const limitMb = SOAK ? 512 : (FULL ? 384 : 256);
   const r0 = rss();
@@ -855,7 +857,9 @@ async function rssSoak() {
 /* ---- 20. Isolated RSS soak (process children) --------------------------- */
 async function rssSoakIsolated() {
   console.log('=== rss_soak_isolated ===');
-  const seconds = SOAK ? 6 : (FULL ? 2.5 : 0.8);
+  const seconds = SOAK
+    ? Number(process.env.SOAK_SECONDS || 6)
+    : (FULL ? 2.5 : 0.8);
   const limitMb = SOAK ? 768 : (FULL ? 512 : 384);
   const r0 = rss();
   const t0 = hr();
@@ -917,6 +921,180 @@ async function leaseBlender() {
   ok('lease_blender_rss', rss() - r0 < 128 * MB);
 }
 
+/* ---- 22. Handle-leak soak (long-lived domain + ledger settle) ----------- */
+async function handleLeakSoak() {
+  console.log('=== handle_leak_soak ===');
+  const seconds = SOAK
+    ? Number(process.env.SOAK_SECONDS || 10)
+    : (FULL ? 4 : 1.2);
+  const burst = SOAK ? 60 : (FULL ? 40 : 24);
+  const limitMb = SOAK ? 384 : (FULL ? 256 : 192);
+  const py = ccpy.create();
+  const math = py.import('math');
+  const base = py.stats();
+  const r0 = rss();
+  const t0 = hr();
+  let bursts = 0;
+  let acc = 0;
+  let peak = base;
+  const deadline = Date.now() + seconds * 1000;
+  while (Date.now() < deadline) {
+    const keep = [];
+    for (let i = 0; i < burst; i++) {
+      /* Attr + call mint transient handles; keep a third live per burst. */
+      const v = math.floor(i + 0.2);
+      acc += v;
+      if (i % 3 === 0) keep.push(math.sqrt);
+    }
+    peak = Math.max(peak, py.stats());
+    keep.length = 0;
+    if (global.gc) global.gc();
+    bursts++;
+  }
+  if (global.gc) { global.gc(); await sleep(30); global.gc(); }
+  const after = py.stats();
+  py.destroy();
+  const delta = Math.max(0, rss() - r0);
+  result('handle_leak_soak_ms %s', nsToMs(hr() - t0).toFixed(1));
+  result('handle_leak_soak_bursts %d', bursts);
+  result('handle_leak_soak_peak %d', peak);
+  result('handle_leak_soak_after %d', after);
+  result('handle_leak_soak_delta_mb %s', (delta / MB).toFixed(1));
+  ok('handle_leak_soak_bursts', bursts >= (SOAK ? 8 : (FULL ? 3 : 1)));
+  ok('handle_leak_soak_acc', acc > 0);
+  ok('handle_leak_soak_ledger', peak > after && after < burst);
+  ok('handle_leak_soak_rss', delta < limitMb * MB);
+}
+
+/* ---- 23. Everything concurrent (mixed shapes, many domains) ------------- */
+async function everythingConcurrent(numpyOk) {
+  console.log('=== everything_concurrent ===');
+  const nDom = FULL ? 5 : 4;
+  const t0 = hr();
+  const jobs = [];
+  for (let i = 0; i < nDom; i++) {
+    jobs.push((async (kind) => {
+      try {
+        if (kind % 4 === 0) {
+          const py = ccpy.create();
+          try {
+            const math = py.import('math');
+            const n = FULL ? 40 : 20;
+            let s = 0;
+            for (let k = 0; k < n; k++) s += math.floor(k + 0.1);
+            return s === Array.from({ length: n }, (_, k) => k)
+              .reduce((a, b) => a + b, 0);
+          } finally {
+            await py.destroy();
+          }
+        }
+        if (kind % 4 === 1) {
+          const py = ccpy.create();
+          try {
+            const b = py.import('builtins');
+            const json = py.import('json');
+            const n = FULL ? 48 : 24;
+            const lst = json.loads(
+              '[' + Array.from({ length: n }, (_, j) => j).join(',') + ']');
+            const mapped = b.list(b.map((x) => x * 3 + 1, lst));
+            const want = '[' + Array.from({ length: n }, (_, j) => j * 3 + 1)
+              .join(', ') + ']';
+            return String(mapped) === want;
+          } finally {
+            await py.destroy();
+          }
+        }
+        if (kind % 4 === 2) {
+          const py = ccpy.create({ isolated: true });
+          try {
+            const b = py.import('builtins');
+            const f = await b.eval('lambda x: x * 2');
+            const n = FULL ? 20 : 10;
+            let s = 0;
+            for (let k = 0; k < n; k++) s += await f(k);
+            return s === Array.from({ length: n }, (_, k) => k * 2)
+              .reduce((a, b) => a + b, 0);
+          } finally {
+            try { await py.destroy(); } catch (_) {}
+          }
+        }
+        if (numpyOk) {
+          const py = ccpy.create({ isolated: true });
+          try {
+            const np = py.import('numpy');
+            const a = new Float64Array(1 << 14);
+            a.fill(1.5);
+            const v = await np.sum(a);
+            return Math.abs(v - a.length * 1.5) < 1e-6;
+          } finally {
+            try { await py.destroy(); } catch (_) {}
+          }
+        }
+        const py = ccpy.create({ isolated: true });
+        try {
+          const b = py.import('builtins');
+          const ln = await b.eval('lambda a: len(a)');
+          const buf = new Float64Array((1 << 16) / 8 + 8);
+          const n = await ln(buf);
+          return n === buf.length;
+        } finally {
+          try { await py.destroy(); } catch (_) {}
+        }
+      } catch (e) {
+        console.log('everything_concurrent_err kind=%d %s', kind,
+          e && e.message ? e.message : e);
+        return false;
+      }
+    })(i));
+  }
+  const settled = await Promise.all(jobs);
+  result('everything_concurrent_ms %s', nsToMs(hr() - t0).toFixed(1));
+  result('everything_concurrent_n %d', nDom);
+  ok('everything_concurrent_ok', settled.every(Boolean));
+}
+
+/* ---- 24. Native abort inject (isolated children) ------------------------ */
+async function abortInject() {
+  console.log('=== abort_inject ===');
+  const rounds = SOAK ? 16 : (FULL ? 10 : 6);
+  const t0 = hr();
+  let rejected = 0;
+  let late = 0;
+  for (let i = 0; i < rounds; i++) {
+    const py = ccpy.create({ isolated: true });
+    const b = py.import('builtins');
+    try {
+      if (i % 2 === 0) {
+        const boom = await b.eval(
+          'lambda: (__import__("time").sleep(0.005), '
+          + '__import__("os").abort())');
+        await boom();
+      } else {
+        const pidFn = await b.eval('lambda: __import__("os").getpid()');
+        const pid = await pidFn();
+        const caller = await b.eval('lambda f: f(1)');
+        await caller(() => {
+          try { process.kill(pid, 'SIGABRT'); } catch (_) {}
+          return 1;
+        });
+      }
+    } catch (e) {
+      if (/closed|exited|abort/.test(String(e && e.message || e))) rejected++;
+    }
+    try {
+      const probe = await b.eval('lambda: 1');
+      await probe();
+    } catch (e) {
+      if (/closed|exited/.test(String(e && e.message || e))) late++;
+    }
+    try { await py.destroy(); } catch (_) {}
+  }
+  result('abort_inject_ms %s', nsToMs(hr() - t0).toFixed(1));
+  result('abort_inject_rounds %d', rounds);
+  ok('abort_inject_rejected', rejected === rounds);
+  ok('abort_inject_late', late === rounds);
+}
+
 (async () => {
   console.log('js_bridge_chaos scale=%s pid=%d', SCALE, process.pid);
   const numpyOk = await hasNumpyIsolated();
@@ -940,9 +1118,14 @@ async function leaseBlender() {
   await releaseDuringSuspend();
   await destroyDuringThenable();
   await mixedHammer(numpyOk);
+  await everythingConcurrent(numpyOk);
   await leaseBlender();
   await rssSoak();
   await rssSoakIsolated();
+  await handleLeakSoak();
+  /* Abort last: SIGABRT / os.abort is intentionally noisy (core dumps,
+   * broker BrokenPipe). Keep it out of the middle of the suite. */
+  await abortInject();
 
   console.log('=== summary ===');
   result('chaos_fails %d', fails);
