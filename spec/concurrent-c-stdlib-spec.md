@@ -2471,9 +2471,12 @@ callbacks by strict alternation (the child blocks on its reply line; the
 parent may await freely before answering).  Cross-process is natively
 async — attribute chains extend lazily with zero round trips and resolve
 in one; a call is a Promise — and the limits are stated where they live:
-bulk arrays copy across the wire until the shared-memory lease tier, and
-a coroutine result runs to completion in the child (parallelism is
-domains, each a whole process).  numpy loads in every isolated domain —
+bulk buffers spill through shared memory (tmpfs where available; one
+memcpy per side, files consumed-and-unlinked by the receiver and swept
+by the sender when a child dies first; a materialization door brings
+buffer-shaped values back the same way), true pinned zero-copy leases
+remain future work, and a coroutine result runs to completion in the
+child (parallelism is domains, each a whole process).  numpy loads in every isolated domain —
 the subinterpreter refusal does not apply — N domains are N GILs in N
 processes, a child crash rejects the domain's promises while the parent
 survives, and per-domain interpreter/venv selection is honest here

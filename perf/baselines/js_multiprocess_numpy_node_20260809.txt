@@ -5,3 +5,7 @@ RESULT wire_rtt_us 134
 RESULT domains_1 ms 345 speedup x 1.00
 RESULT domains_2 ms 162 speedup x 2.13
 RESULT domains_4 ms 87 speedup x 3.97
+# with the shm spill (one memcpy per side; base64 wire was 153ms):
+RESULT bulk_8mb_arg_ms 7.6
+# (scaling above from the quiet-box run; a loaded run showed 1.42/2.76 —
+# 4-vCPU shared-box variance is real)

@@ -24,11 +24,27 @@
 import base64
 import json
 import math
+import os
 import sys
 
 _handles = {}
 _next = [1]
 _out = sys.stdout
+# Big buffers spill through shared memory (tmpfs on Linux) instead of
+# base64: one memcpy per side, no inflation, no JSON bloat.  The dir
+# comes from the parent; files are consumed-and-unlinked per message.
+_shm_dir = os.environ.get('CC_PY_SHM_DIR') or (
+    '/dev/shm' if os.path.isdir('/dev/shm') else None)
+_shm_seq = [0]
+_SPILL = 1 << 16
+
+
+def _shm_write(raw):
+    _shm_seq[0] += 1
+    path = os.path.join(_shm_dir, 'ccpy-%d-%d' % (os.getpid(), _shm_seq[0]))
+    with open(path, 'wb') as f:
+        f.write(raw)
+    return path
 
 
 def _put(v):
@@ -83,6 +99,22 @@ def _decode(v):
             a = array.array(_TA[v['$ta']][0])
             a.frombytes(raw)
             return a
+        if '$shm' in v:
+            path = v['$shm']
+            try:
+                np = _np()
+                if np is not None:
+                    return np.fromfile(path, dtype=_TA[v['t']][1])
+                import array
+                a = array.array(_TA[v['t']][0])
+                with open(path, 'rb') as f:
+                    a.frombytes(f.read())
+                return a
+            finally:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
         return {k: _decode(x) for k, x in v.items()}
     if isinstance(v, list):
         return [_decode(x) for x in v]
@@ -169,6 +201,34 @@ def _dispatch(req):
         f = _walk(req)
         args = [_decode(a) for a in req.get('args', [])]
         return _encode(_run(f(*args)))
+    if op == 'ta':
+        # Materialize a buffer-shaped value back to the parent: small
+        # inline, big through the shm spill.
+        v = _walk(req)
+        np = _np()
+        if np is not None and isinstance(v, np.ndarray):
+            v = np.ascontiguousarray(v)
+            key = _TA_BY_DTYPE.get(str(v.dtype))
+            if key is None:
+                return {'e': 'cc-python broker: unsupported dtype ' +
+                             str(v.dtype)}
+            raw = v.tobytes()
+        else:
+            import array
+            if not isinstance(v, array.array):
+                return {'e': 'cc-python broker: not a buffer-shaped value'}
+            key = None
+            for k, (tc, _) in _TA.items():
+                if tc == v.typecode:
+                    key = k
+                    break
+            if key is None:
+                return {'e': 'cc-python broker: unsupported typecode ' +
+                             v.typecode}
+            raw = v.tobytes()
+        if _shm_dir and len(raw) > _SPILL:
+            return {'shm': _shm_write(raw), 't': key}
+        return {'ta': key, 'b64': base64.b64encode(raw).decode('ascii')}
     if op == 'str':
         return {'v': str(_walk(req))}
     if op == 'release':

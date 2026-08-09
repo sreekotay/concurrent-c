@@ -42,6 +42,18 @@ async function makeDomain() {
     console.log('RESULT wire_rtt_us %d', Math.round(ns / iters / 1000));
   }
 
+  // Bulk crossing: an 8MB Float64Array argument, through the shm spill
+  // (one memcpy per side; the base64 wire measured 153ms for this).
+  {
+    const np1 = one.py.import('numpy');
+    const big = new Float64Array(1 << 20).map((_, i) => i % 97);
+    await np1.sum(big);
+    const t1 = process.hrtime.bigint();
+    for (let i = 0; i < 10; i++) await np1.sum(big);
+    const ms = Number(process.hrtime.bigint() - t1) / 10 / 1e6;
+    console.log('RESULT bulk_8mb_arg_ms %s', ms.toFixed(1));
+  }
+
   // Scaling: the SAME total work split across 1, 2, 4 domains.
   const domains = [one];
   while (domains.length < 4) domains.push(await makeDomain());

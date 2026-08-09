@@ -162,6 +162,16 @@ const TA_CTOR = {
   i32: Int32Array, i64: BigInt64Array, u8: Uint8Array,
 };
 
+// Big buffers spill through shared memory (tmpfs where available):
+// one memcpy per side instead of base64's inflate-encode-parse-decode.
+// Files are consumed-and-unlinked by the receiver; the sender also
+// sweeps its own after the request settles, so a crashed child cannot
+// strand them.
+const SHM_SPILL = 1 << 16;
+const SHM_DIR = fs.existsSync('/dev/shm') ? '/dev/shm'
+                                          : require('os').tmpdir();
+let shmSeq = 0;
+
 function resolvePythonExe(spec) {
   const asVenv = (dir) => {
     for (const b of ['python', 'python3']) {
@@ -212,6 +222,12 @@ function rwrap(bridge, h, chain) {
         return () => bridge._req({ op: 'str', h, path: chain })
           .then((r) => r.v);
       }
+      if (prop === 'toTypedArray') {
+        // Materialize a buffer-shaped value: small inline, big through
+        // the shm spill — one memcpy per side either way.
+        return () => bridge._req({ op: 'ta', h, path: chain })
+          .then((r) => bridge._materialize(r));
+      }
       if (prop === Symbol.toPrimitive || prop === 'toString')
         return () => '[cc-python remote ' + h +
                      (chain.length ? '.' + chain.join('.') : '') + ']';
@@ -236,8 +252,10 @@ class ProcBridge {
     this._nextCb = 1;
     this._closed = false;
     this._closeWaiters = [];
+    this._shmOut = [];
     this._child = spawn(exe, [path.join(__dirname, 'broker.py')], {
       stdio: ['pipe', 'pipe', 'inherit'],
+      env: Object.assign({}, process.env, { CC_PY_SHM_DIR: SHM_DIR }),
     });
     this._child.on('error', (e) => this._die('cannot spawn ' + exe +
                                              ': ' + e.message));
@@ -284,12 +302,20 @@ class ProcBridge {
     if (this._closed)
       return Promise.reject(new Error('cc-python: bridge is closed'));
     return new Promise((resolve, reject) => {
+      const sweep = () => {
+        // The child unlinks spill files as it decodes them; this sweep
+        // only matters when it died first (ENOENT is the normal case).
+        for (const p of this._shmOut.splice(0)) {
+          try { fs.unlinkSync(p); } catch (e) { /* consumed */ }
+        }
+      };
       this._pending.push({
         settle: (r) => {
+          sweep();
           if (r && r.e !== undefined) reject(new Error(r.e));
           else resolve(r);
         },
-        reject,
+        reject: (e) => { sweep(); reject(e); },
       });
       this._send(obj);
     });
@@ -327,9 +353,15 @@ class ProcBridge {
     }
     const kind = TA_KIND.get(v.constructor);
     if (kind) {
-      return { $ta: kind,
-               b64: Buffer.from(v.buffer, v.byteOffset, v.byteLength)
-                 .toString('base64') };
+      const buf = Buffer.from(v.buffer, v.byteOffset, v.byteLength);
+      if (v.byteLength > SHM_SPILL) {
+        const p = path.join(SHM_DIR,
+                            'ccpy-' + process.pid + '-' + (++shmSeq));
+        fs.writeFileSync(p, buf);
+        this._shmOut.push(p);
+        return { $shm: p, t: kind };
+      }
+      return { $ta: kind, b64: buf.toString('base64') };
     }
     if (Array.isArray(v)) return v.map((x) => this._encode(x));
     if (t === 'object' && (v.constructor === Object || !v.constructor)) {
@@ -368,6 +400,13 @@ class ProcBridge {
 
   _materialize(r) {
     if (r.h !== undefined) return rwrap(this, r.h, []);
+    if (r.shm !== undefined) {
+      const buf = fs.readFileSync(r.shm);
+      try { fs.unlinkSync(r.shm); } catch (e) { /* consumed */ }
+      const C = TA_CTOR[r.t];
+      return new C(buf.buffer, buf.byteOffset,
+                   buf.byteLength / C.BYTES_PER_ELEMENT);
+    }
     if (r.ta !== undefined) return this._decode(r);
     return this._decode(r.v);
   }
@@ -460,6 +499,11 @@ function rlazy(bridge, pending, chain) {
       if (prop === 'str') {
         return () => pending.then((r) =>
           bridge._req({ op: 'str', h: r.h, path: chain }).then((x) => x.v));
+      }
+      if (prop === 'toTypedArray') {
+        return () => pending.then((r) =>
+          bridge._req({ op: 'ta', h: r.h, path: chain })
+            .then((x) => bridge._materialize(x)));
       }
       if (prop === Symbol.toPrimitive || prop === 'toString')
         return () => '[cc-python remote .' + chain.join('.') + ']';

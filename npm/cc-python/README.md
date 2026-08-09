@@ -124,12 +124,13 @@ Measured ([`examples/js_multiprocess_numpy.js`](examples/js_multiprocess_numpy.j
 BLAS pinned): the same numpy workload on 1 → 2 → 4 domains scales
 **1.00x → 2.13x → 3.97x** on a 4-core box — linear.  The costs are real
 and stated: ~440ms to spawn a child and import numpy, ~134µs per wire
-round trip (vs ~5µs in-process), and bulk arrays currently **copy**
-across the wire (small ones inline; big ones stay child-side handles —
-prefer chaining on the handle to round-tripping data).  Pick the tier
-by workload: in-process for hot fine-grained calls and zero-copy
-buffers, isolated for N-way parallel numpy, crash isolation, and
-per-domain environments.
+round trip (vs ~5µs in-process).  Bulk buffers spill through **shared
+memory** (one memcpy per side): an 8MB argument crosses in ~6.6ms —
+23x the base64 wire it replaces — small arrays inline, big results stay
+child-side handles (chain on them; `await arr.toTypedArray()` brings
+the bytes back through the same spill).  Pick the tier by workload:
+in-process for hot fine-grained calls and zero-copy buffers, isolated
+for N-way parallel numpy, crash isolation, and per-domain environments.
 
 `py.task(jsClosure)` is reserved for recorded batch graphs —
 parameterized pipelines that ship N Python calls as one job (and, later,

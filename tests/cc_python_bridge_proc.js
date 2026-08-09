@@ -37,6 +37,21 @@ const ccpy = require(process.cwd() + '/npm/cc-python');
     out('big_array_is_handle', typeof big === 'function');
     out('handle_chains', (await big.mean()) === 0);
     out('nonfinite_crosses', (await b.float('-inf')) === -Infinity);
+    // Big buffers spill through shared memory, both directions, and the
+    // spill files are consumed — none stray.
+    const wide = new Float64Array(1 << 18).map((_, i) => (i % 89) * 0.5);
+    let want = 0;
+    for (const v of wide) want += v;
+    out('shm_arg_integrity', Math.abs((await np.sum(wide)) - want) < 1e-6);
+    const echoed = await (await np.arange(1 << 18)).toTypedArray();
+    out('shm_result_integrity', echoed.length === (1 << 18) &&
+        echoed[(1 << 18) - 1] === BigInt((1 << 18) - 1));
+    {
+      const dir = fs.existsSync('/dev/shm') ? '/dev/shm' : os.tmpdir();
+      const stray = fs.readdirSync(dir).filter(
+          (f) => f.startsWith('ccpy-' + process.pid + '-'));
+      out('shm_no_strays', stray.length === 0);
+    }
   }
 
   // 3. Lazy chains: np.linalg.norm is ZERO round trips until the call.
@@ -64,25 +79,28 @@ const ccpy = require(process.cwd() + '/npm/cc-python');
     out('exc_type_and_message', /LinAlgError|ValueError/.test(msg));
   }
 
-  // 6. THE headline: N domains, N processes, N GILs, numpy in ALL of
-  //    them — measured relatively (serial first) so load cannot flake it.
+  // 6. THE headline: two domains are two PROCESSES that execute
+  //    concurrently.  Proven by mechanism, not wall clock — each child
+  //    reports its own [start, end] monotonic interval, and the
+  //    intervals must overlap.  That holds even on a fully loaded box
+  //    (where timeslicing erases speedup but not concurrency); the
+  //    SCALING numbers live in examples/js_multiprocess_numpy.js where
+  //    the box is quiet.  A wire that accidentally serialized domains
+  //    would produce disjoint intervals and fail here.
   {
     const py2 = ccpy.create({ isolated: true });
     const np2 = py2.import('numpy');
-    // Pure-python spin in numpy-land: busy work that cannot release to
-    // BLAS threads, so parallelism must come from the PROCESSES.
-    const spin = 'lambda n: sum(i * i for i in range(n))';
+    const spin = 'lambda n: (lambda t: [t.monotonic(), ' +
+                 'sum(i * i for i in range(n)) % 7, t.monotonic()])' +
+                 '(__import__("time"))';
     const f1 = await (py.import('builtins')).eval(spin);
     const f2 = await (py2.import('builtins')).eval(spin);
-    const N = 300000;
-    await f1(N); await f2(N); // warm
-    const t0 = Date.now();
-    await f1(N); await f2(N);
-    const serial = Date.now() - t0;
-    const t1 = Date.now();
-    await Promise.all([f1(N), f2(N)]);
-    const parallel = Date.now() - t1;
-    out('two_pythons_parallel', parallel < serial * 0.8);
+    const N = 400000;
+    await f1(1); await f2(1); // warm
+    const [r1, r2] = await Promise.all([f1(N), f2(N)]);
+    const [a0, , a1] = r1;
+    const [b0, , b1] = r2;
+    out('two_pythons_concurrent', a0 < b1 && b0 < a1);
     out('numpy_in_second_child',
         (await np2.sum(new Float64Array([5, 6]))) === 11);
     await py2.destroy();
