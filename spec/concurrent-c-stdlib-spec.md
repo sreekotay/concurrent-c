@@ -41,6 +41,22 @@ Unless a section states otherwise, a slice returned from an operation that
 accepts a `CCArena *` remains valid until that arena releases or reuses its
 storage.
 
+## Arenas
+
+Arena allocation lives in `<ccc/cc_arena.cch>` (included via the runtime /
+prelude path). Prefer three constructors:
+
+- `cc_arena_heap(N)` — heap-rooted request/window scratch
+- `cc_arena_stack(name, N)` — same growth policy; root on the caller's stack
+- `cc_arena_malloc(N)` — fixed root plus per-object overflow for durable stores
+
+Heap and stack default to root capacity `N`, `block_max = 4`, then malloc
+overflow. Size `N` for typical request live traffic so allocations stay in
+slabs; a tiny root still works but spills. Do not use `cc_arena_malloc` for
+large scratch storms — that path is fixed-root overflow, not extent growth.
+Normative growth, overflow, and release rules are in
+`spec/concurrent-c-spec-complete.md` §5 and `spec/draft_alloc_strategy.md`.
+
 ## Generic factories and UFCS
 
 The generic collection factories are:

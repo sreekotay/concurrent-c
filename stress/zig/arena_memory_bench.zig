@@ -14,13 +14,17 @@ fn nowMs() f64 {
 }
 
 fn printf(comptime fmt: []const u8, args: anytype) void {
-    var buf: [512]u8 = undefined;
+    var buf: [768]u8 = undefined;
     const s = std.fmt.bufPrint(&buf, fmt, args) catch return;
     _ = c.write(1, s.ptr, s.len);
 }
 
 fn alignUp(v: usize, a: usize) usize {
     return (v + a - 1) & ~(a - 1);
+}
+
+fn bulkSize(i: usize) usize {
+    return 16 + (i * 17) % 240;
 }
 
 const Slab = struct {
@@ -149,63 +153,87 @@ const Bump = struct {
 pub fn main() !void {
     const gpa = std.heap.c_allocator;
 
-    const tip_iters = envZU("ARENA_MEM_TIP_ITERS", 20000);
-    const tip_root = envZU("ARENA_MEM_TIP_ROOT", 4 * 1024 * 1024);
-    const storm_n = envZU("ARENA_MEM_STORM", 50000);
-    const storm_root = envZU("ARENA_MEM_ROOT_STORM", 4096);
-    const churn_n = envZU("ARENA_MEM_CHURN", 200);
-    const churn_each = envZU("ARENA_MEM_CHURN_EACH", 64);
+    const tip_rounds = envZU("ARENA_MEM_TIP_ROUNDS", 400);
+    const tip_steps = envZU("ARENA_MEM_TIP_STEPS", 5000);
+    const tip_root = envZU("ARENA_MEM_TIP_ROOT", 8 * 1024 * 1024);
+    const bulk_n = envZU("ARENA_MEM_BULK", 2000000);
+    const bulk_root = envZU("ARENA_MEM_BULK_ROOT", 64 * 1024 * 1024);
+    const ovf_n = envZU("ARENA_MEM_OVF", 200000);
+    const ovf_root = envZU("ARENA_MEM_OVF_ROOT", 4096);
+    const churn_n = envZU("ARENA_MEM_CHURN", 1000);
+    const churn_each = envZU("ARENA_MEM_CHURN_EACH", 128);
     const block_max: i32 = @intCast(envZU("ARENA_MEM_BLOCK_MAX", 4));
 
-    printf("arena_memory_bench(zig): block_max={d} tip_iters={d} storm={d}\n", .{ block_max, tip_iters, storm_n });
+    printf("arena_memory_bench(zig): tip={d}x{d} bulk={d} ovf={d} block_max={d}\n", .{ tip_rounds, tip_steps, bulk_n, ovf_n, block_max });
 
-    var tip: Bump = undefined;
-    try tip.init(gpa, tip_root, block_max);
+    var sink: usize = 0;
     var moves: u64 = 0;
-    var p: ?[]u8 = null;
-    var sz: usize = 0;
-    const t0 = nowMs();
-    var i: usize = 0;
-    while (i < tip_iters) : (i += 1) {
-        const want = sz + 32 + (i % 17);
-        p = try tip.realloc(p, sz, want, 8, &moves);
-        sz = want;
+    var a: Bump = undefined;
+    try a.init(gpa, tip_root, block_max);
+    var t0 = nowMs();
+    var r: usize = 0;
+    while (r < tip_rounds) : (r += 1) {
+        var p: ?[]u8 = null;
+        var sz: usize = 0;
+        var i: usize = 0;
+        while (i < tip_steps) : (i += 1) {
+            const want = sz + 16 + (i % 17);
+            p = try a.realloc(p, sz, want, 8, &moves);
+            p.?[sz] = @truncate(i);
+            sz = want;
+        }
+        sink ^= p.?[0] +% sz;
+        a.reset();
     }
+    a.deinit();
     const tip_ms = nowMs() - t0;
-    tip.deinit();
 
-    var storm: Bump = undefined;
-    try storm.init(gpa, storm_root, block_max);
-    const t1 = nowMs();
-    i = 0;
-    while (i < storm_n) : (i += 1) {
-        const n = 24 + (i * 17) % 512;
-        const q = try storm.alloc(n, 8);
+    // bulk_ms / ovf_ms = allocate + reclaim (full ownership).
+    try a.init(gpa, bulk_root, block_max);
+    t0 = nowMs();
+    var i: usize = 0;
+    while (i < bulk_n) : (i += 1) {
+        const q = try a.alloc(bulkSize(i), 8);
         q[0] = @truncate(i);
+        sink ^= q[0];
     }
-    const storm_ms = nowMs() - t1;
-    const storm_gross = storm.gross();
-    const storm_ovf = storm.ovf_bytes;
-    storm.reset();
-    const reset_gross = storm.gross();
-    storm.deinit();
+    const bulk_gross = a.gross();
+    const bulk_ovf = a.ovf_bytes;
+    const t_reset = nowMs();
+    a.reset();
+    const reset_ms = nowMs() - t_reset;
+    a.deinit();
+    const bulk_ms = nowMs() - t0;
 
-    const t2 = nowMs();
+    try a.init(gpa, ovf_root, block_max);
+    t0 = nowMs();
+    i = 0;
+    while (i < ovf_n) : (i += 1) {
+        const n = 24 + (i * 17) % 512;
+        const q = try a.alloc(n, 8);
+        q[0] = @truncate(i);
+        sink ^= q[0];
+    }
+    const ovf_gross = a.gross();
+    const ovf_bytes = a.ovf_bytes;
+    a.deinit(); // reclaim extents + overflow inside ovf_ms
+    const ovf_ms = nowMs() - t0;
+
+    t0 = nowMs();
     i = 0;
     while (i < churn_n) : (i += 1) {
         var ch: Bump = undefined;
-        try ch.init(gpa, 8 * 1024, block_max);
+        try ch.init(gpa, 16 * 1024, block_max);
         var j: usize = 0;
         while (j < churn_each) : (j += 1) {
-            const n = 16 + (j * 31) % 256;
-            _ = try ch.alloc(n, 8);
+            _ = try ch.alloc(16 + (j * 31) % 256, 8);
         }
         ch.deinit();
     }
-    const churn_ms = nowMs() - t2;
+    const churn_ms = nowMs() - t0;
 
     printf(
-        "RESULT lang=zig tip_ms={d:.3} tip_moves={d} storm_ms={d:.3} storm_gross={d} storm_ovf={d} reset_gross={d} churn_ms={d:.3} rss_delta=-1\n",
-        .{ tip_ms, moves, storm_ms, storm_gross, storm_ovf, reset_gross, churn_ms },
+        "RESULT lang=zig tip_ms={d:.3} tip_moves={d} bulk_ms={d:.3} bulk_gross={d} bulk_ovf={d} ovf_ms={d:.3} ovf_gross={d} ovf_bytes={d} reset_ms={d:.3} churn_ms={d:.3} sink={d}\n",
+        .{ tip_ms, moves, bulk_ms, bulk_gross, bulk_ovf, ovf_ms, ovf_gross, ovf_bytes, reset_ms, churn_ms, sink },
     );
 }

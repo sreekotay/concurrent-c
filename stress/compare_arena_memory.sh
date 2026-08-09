@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# compare_arena_memory.sh — fair bump-arena protocol across CC / C / Go / Zig.
+# compare_arena_memory.sh — heavy bump-arena protocol across CC / C / Go / Zig
+# plus a raw malloc baseline.
 #
 # Builds peers, shuffles run order each trial (startup / cache coldness),
 # averages RESULT lines.
 #
 # Env knobs (forwarded to all peers):
-#   ARENA_MEM_TIP_ITERS ARENA_MEM_TIP_ROOT ARENA_MEM_STORM ARENA_MEM_ROOT_STORM
+#   ARENA_MEM_TIP_ROUNDS ARENA_MEM_TIP_STEPS ARENA_MEM_TIP_ROOT
+#   ARENA_MEM_BULK ARENA_MEM_BULK_ROOT
+#   ARENA_MEM_OVF ARENA_MEM_OVF_ROOT
 #   ARENA_MEM_CHURN ARENA_MEM_CHURN_EACH ARENA_MEM_BLOCK_MAX
-#   ARENA_MEM_TRIALS (default 5)  ARENA_MEM_SEED (default from date+$$)
+#   ARENA_MEM_TRIALS (default 3)  ARENA_MEM_SEED
+#   ARENA_MEM_QUICK=1 → lighter knobs for smoke
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -25,30 +29,51 @@ if [ -z "$CCC" ]; then
   fi
 fi
 
-TRIALS="${ARENA_MEM_TRIALS:-5}"
+TRIALS="${ARENA_MEM_TRIALS:-3}"
 SEED="${ARENA_MEM_SEED:-$(date +%s)-$$}"
 
 mkdir -p "$OUT"
-export ARENA_MEM_TIP_ITERS="${ARENA_MEM_TIP_ITERS:-20000}"
-export ARENA_MEM_TIP_ROOT="${ARENA_MEM_TIP_ROOT:-$((4 * 1024 * 1024))}"
-export ARENA_MEM_STORM="${ARENA_MEM_STORM:-50000}"
-export ARENA_MEM_ROOT_STORM="${ARENA_MEM_ROOT_STORM:-4096}"
-export ARENA_MEM_CHURN="${ARENA_MEM_CHURN:-200}"
-export ARENA_MEM_CHURN_EACH="${ARENA_MEM_CHURN_EACH:-64}"
+
+if [ "${ARENA_MEM_QUICK:-0}" = "1" ]; then
+  export ARENA_MEM_TIP_ROUNDS="${ARENA_MEM_TIP_ROUNDS:-40}"
+  export ARENA_MEM_TIP_STEPS="${ARENA_MEM_TIP_STEPS:-500}"
+  export ARENA_MEM_BULK="${ARENA_MEM_BULK:-200000}"
+  export ARENA_MEM_OVF="${ARENA_MEM_OVF:-20000}"
+  export ARENA_MEM_CHURN="${ARENA_MEM_CHURN:-100}"
+else
+  export ARENA_MEM_TIP_ROUNDS="${ARENA_MEM_TIP_ROUNDS:-400}"
+  export ARENA_MEM_TIP_STEPS="${ARENA_MEM_TIP_STEPS:-5000}"
+  export ARENA_MEM_BULK="${ARENA_MEM_BULK:-2000000}"
+  export ARENA_MEM_OVF="${ARENA_MEM_OVF:-200000}"
+  export ARENA_MEM_CHURN="${ARENA_MEM_CHURN:-1000}"
+fi
+export ARENA_MEM_TIP_ROOT="${ARENA_MEM_TIP_ROOT:-$((8 * 1024 * 1024))}"
+export ARENA_MEM_BULK_ROOT="${ARENA_MEM_BULK_ROOT:-$((64 * 1024 * 1024))}"
+export ARENA_MEM_OVF_ROOT="${ARENA_MEM_OVF_ROOT:-4096}"
+export ARENA_MEM_CHURN_EACH="${ARENA_MEM_CHURN_EACH:-128}"
 export ARENA_MEM_BLOCK_MAX="${ARENA_MEM_BLOCK_MAX:-4}"
 
 echo "================================================================="
-echo "ARENA MEMORY — fair bump protocol (CC / C / Go / Zig)"
+echo "ARENA MEMORY — heavy protocol (CC / C / Go / Zig / malloc)"
 echo "================================================================="
 echo "trials=$TRIALS seed=$SEED"
-echo "tip_iters=$ARENA_MEM_TIP_ITERS storm=$ARENA_MEM_STORM block_max=$ARENA_MEM_BLOCK_MAX"
+echo "tip=${ARENA_MEM_TIP_ROUNDS}x${ARENA_MEM_TIP_STEPS} bulk=$ARENA_MEM_BULK ovf=$ARENA_MEM_OVF"
+echo "bulk_root=$ARENA_MEM_BULK_ROOT block_max=$ARENA_MEM_BLOCK_MAX"
 echo "ccc=$CCC"
 echo "================================================================="
+echo ""
+echo "How to read (times are full ownership = alloc + reclaim):"
+echo "  tip       — tip-grow rounds including reset/free between rounds."
+echo "  bulk      — large-root keep-alive allocs + reset (or malloc free-all)."
+echo "  reset_ms  — reclaim portion of bulk only (breakdown)."
+echo "  ovf       — tiny-root spill path + free/drain of overflow."
+echo "  churn     — create/fill/destroy arenas (or malloc/free pairs)."
 echo ""
 
 echo "Building..."
 "$CCC" build --release "$SCRIPT_DIR/arena_memory_bench.ccs" -o "$OUT/arena_memory_bench_cc" >/dev/null
 cc -O2 -std=c11 "$SCRIPT_DIR/c/arena_memory_bench.c" -o "$OUT/arena_memory_bench_c"
+cc -O2 -std=c11 "$SCRIPT_DIR/c/malloc_memory_bench.c" -o "$OUT/arena_memory_bench_malloc"
 if command -v go >/dev/null 2>&1; then
   go build -o "$OUT/arena_memory_bench_go" "$SCRIPT_DIR/go/arena_memory_bench.go"
 else
@@ -63,20 +88,18 @@ fi
 echo "Done."
 echo ""
 
-# Collect available runners as "name|path"
 RUNNERS=()
 RUNNERS+=("cc|$OUT/arena_memory_bench_cc")
 RUNNERS+=("c|$OUT/arena_memory_bench_c")
+RUNNERS+=("malloc|$OUT/arena_memory_bench_malloc")
 [ -x "$OUT/arena_memory_bench_go" ] && RUNNERS+=("go|$OUT/arena_memory_bench_go")
 [ -x "$OUT/arena_memory_bench_zig" ] && RUNNERS+=("zig|$OUT/arena_memory_bench_zig")
 
-# Fisher–Yates shuffle using $SEED + trial index (portable awk/od).
 shuffle_runners() {
   local trial=$1
   local n=${#RUNNERS[@]}
   local i j tmp
   local -a arr=("${RUNNERS[@]}")
-  # Derive a deterministic stream of ints from seed+trial
   local stream
   stream=$(printf '%s' "${SEED}-t${trial}" | cksum | awk '{print $1}')
   for ((i = n - 1; i > 0; i--)); do
@@ -101,7 +124,6 @@ for ((t = 1; t <= TRIALS; t++)); do
     bin="${entry#*|}"
     order_names+=("$name")
     echo "  run $name"
-    # Small pause so successive bins don't share warm caches identically.
     sleep 0.05
     if ! out=$("$bin" 2>&1); then
       echo "$out"
@@ -123,10 +145,10 @@ done
 echo "================================================================="
 echo "AVERAGES (n=$TRIALS, order randomized per trial)"
 echo "================================================================="
-printf "%-6s %10s %10s %10s %12s %12s %10s\n" \
-  "lang" "tip_ms" "tip_moves" "storm_ms" "storm_gross" "storm_ovf" "churn_ms"
-printf "%-6s %10s %10s %10s %12s %12s %10s\n" \
-  "----" "------" "---------" "--------" "-----------" "---------" "--------"
+printf "%-8s %9s %9s %10s %10s %9s %9s %9s\n" \
+  "lang" "tip_ms" "tip_mv" "bulk_ms" "bulk_ovf" "ovf_ms" "reset_ms" "churn_ms"
+printf "%-8s %9s %9s %10s %10s %9s %9s %9s\n" \
+  "--------" "-------" "-------" "--------" "--------" "-------" "--------" "--------"
 
 awk '
 /^trial=/ {
@@ -134,29 +156,31 @@ awk '
     if ($i ~ /^lang=/) { split($i, a, "="); lang = a[2] }
     if ($i ~ /^tip_ms=/) { split($i, a, "="); tip = a[2]+0 }
     if ($i ~ /^tip_moves=/) { split($i, a, "="); moves = a[2]+0 }
-    if ($i ~ /^storm_ms=/) { split($i, a, "="); storm = a[2]+0 }
-    if ($i ~ /^storm_gross=/) { split($i, a, "="); gross = a[2]+0 }
-    if ($i ~ /^storm_ovf=/) { split($i, a, "="); ovf = a[2]+0 }
+    if ($i ~ /^bulk_ms=/) { split($i, a, "="); bulk = a[2]+0 }
+    if ($i ~ /^bulk_ovf=/) { split($i, a, "="); bovf = a[2]+0 }
+    if ($i ~ /^ovf_ms=/) { split($i, a, "="); ovf = a[2]+0 }
+    if ($i ~ /^reset_ms=/) { split($i, a, "="); reset = a[2]+0 }
     if ($i ~ /^churn_ms=/) { split($i, a, "="); churn = a[2]+0 }
   }
-  n[lang]++; tip_s[lang]+=tip; moves_s[lang]+=moves; storm_s[lang]+=storm
-  gross_s[lang]+=gross; ovf_s[lang]+=ovf; churn_s[lang]+=churn
+  n[lang]++; tip_s[lang]+=tip; moves_s[lang]+=moves; bulk_s[lang]+=bulk
+  bovf_s[lang]+=bovf; ovf_s[lang]+=ovf; reset_s[lang]+=reset; churn_s[lang]+=churn
 }
 END {
-  order[1]="cc"; order[2]="c"; order[3]="go"; order[4]="zig"
-  for (k = 1; k <= 4; k++) {
+  order[1]="cc"; order[2]="c"; order[3]="zig"; order[4]="go"; order[5]="malloc"
+  for (k = 1; k <= 5; k++) {
     lang = order[k]
     if (!(lang in n)) next
     nn = n[lang]
-    printf "%-6s %10.3f %10.1f %10.3f %12.0f %12.0f %10.3f\n", \
-      lang, tip_s[lang]/nn, moves_s[lang]/nn, storm_s[lang]/nn, \
-      gross_s[lang]/nn, ovf_s[lang]/nn, churn_s[lang]/nn
+    printf "%-8s %9.2f %9.0f %10.2f %10.0f %9.2f %9.2f %9.2f\n", \
+      lang, tip_s[lang]/nn, moves_s[lang]/nn, bulk_s[lang]/nn, \
+      bovf_s[lang]/nn, ovf_s[lang]/nn, reset_s[lang]/nn, churn_s[lang]/nn
   }
 }
 ' "$RESULTS_RAW"
 
 echo ""
 echo "raw: $RESULTS_RAW"
-echo "Note: tip_moves should be ~0 for in-place tip growth on a large root."
-echo "storm_gross/ovf are protocol accounting (not OS RSS)."
+echo "tip_moves~0 means in-place tip growth; malloc tip_moves counts realloc moves."
+echo "bulk_ovf~0 means the happy path stayed in slabs (compare bulk_ms to malloc)."
+echo "QUICK smoke: ARENA_MEM_QUICK=1 ./stress/compare_arena_memory.sh"
 echo "================================================================="

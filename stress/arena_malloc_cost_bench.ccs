@@ -1,0 +1,154 @@
+/*
+ * Opposite case: cc_arena_malloc (fixed root + per-alloc overflow) under a
+ * heavy keep-alive alloc load, vs cc_arena_heap (budget→overflow) and a raw
+ * malloc/free-all baseline.
+ *
+ * This is the durable-map constructor used as if it were request scratch.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_arena.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <time.h>
+
+static size_t env_zu(const char *k, size_t d) {
+    const char *v = getenv(k);
+    if (!v || !*v) return d;
+    return (size_t)strtoull(v, NULL, 10);
+}
+
+static double now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1e3 + (double)ts.tv_nsec * 1e-6;
+}
+
+static size_t bulk_size(size_t i) {
+    return 16 + (i * 17) % 240;
+}
+
+typedef enum {
+    MODE_HEAP = 0,
+    MODE_MALLOC_ARENA = 1,
+    MODE_RAW = 2
+} Mode;
+
+static const char *mode_name(Mode m) {
+    if (m == MODE_HEAP) return "heap";
+    if (m == MODE_MALLOC_ARENA) return "arena_malloc";
+    return "raw_malloc";
+}
+
+static int run_arena(Mode mode, size_t root, size_t n, volatile size_t *sink) {
+    CCArena a;
+    size_t i;
+    size_t live = 0;
+    size_t gross = 0;
+    size_t ovf = 0;
+    double t0, alloc_ms, reset_ms, total_ms;
+    double t_reset;
+
+    if (mode == MODE_HEAP)
+        a = cc_arena_heap(root);
+    else
+        a = cc_arena_malloc(root);
+
+    if (!a.base) {
+        printf("FAIL: %s init\n", mode_name(mode));
+        return 1;
+    }
+    if (mode == MODE_MALLOC_ARENA && a.block_max != 1) {
+        printf("FAIL: cc_arena_malloc block_max=%u want 1\n", a.block_max);
+        cc_arena_free(&a);
+        return 1;
+    }
+
+    t0 = now_ms();
+    for (i = 0; i < n; i++) {
+        size_t sz = bulk_size(i);
+        unsigned char *p = (unsigned char *)cc_arena_alloc(&a, sz, 8);
+        if (!p) {
+            printf("FAIL: %s alloc i=%zu\n", mode_name(mode), i);
+            cc_arena_free(&a);
+            return 1;
+        }
+        p[0] = (unsigned char)i;
+        *sink ^= p[0];
+        live += sz;
+    }
+    gross = cc_arena_committed_gross_bytes(&a);
+    ovf = cc_arena_overflow_raw_bytes(&a);
+    t_reset = now_ms();
+    cc_arena_reset(&a);
+    reset_ms = now_ms() - t_reset;
+    cc_arena_free(&a);
+    total_ms = now_ms() - t0;
+    alloc_ms = total_ms - reset_ms;
+
+    printf("RESULT mode=%s root=%zu n=%zu live=%zu gross=%zu ovf=%zu "
+           "alloc_ms=%.3f reset_ms=%.3f total_ms=%.3f block_max=%u\n",
+           mode_name(mode), root, n, live, gross, ovf,
+           alloc_ms, reset_ms, total_ms,
+           mode == MODE_HEAP ? CC_ARENA_DEFAULT_BLOCK_MAX : 1u);
+    return 0;
+}
+
+static int run_raw(size_t n, volatile size_t *sink) {
+    unsigned char **ptrs;
+    size_t i;
+    size_t live = 0;
+    double t0, alloc_ms, reset_ms, total_ms;
+    double t_free;
+
+    ptrs = (unsigned char **)malloc(n * sizeof(*ptrs));
+    if (!ptrs) return 1;
+
+    t0 = now_ms();
+    for (i = 0; i < n; i++) {
+        size_t sz = bulk_size(i);
+        ptrs[i] = (unsigned char *)malloc(sz);
+        if (!ptrs[i]) {
+            while (i) free(ptrs[--i]);
+            free(ptrs);
+            return 1;
+        }
+        ptrs[i][0] = (unsigned char)i;
+        *sink ^= ptrs[i][0];
+        live += sz;
+    }
+    t_free = now_ms();
+    for (i = 0; i < n; i++) free(ptrs[i]);
+    reset_ms = now_ms() - t_free;
+    total_ms = now_ms() - t0;
+    alloc_ms = total_ms - reset_ms;
+    free(ptrs);
+
+    printf("RESULT mode=raw_malloc root=0 n=%zu live=%zu gross=%zu ovf=0 "
+           "alloc_ms=%.3f reset_ms=%.3f total_ms=%.3f block_max=0\n",
+           n, live, live, alloc_ms, reset_ms, total_ms);
+    return 0;
+}
+
+int main(void) {
+    size_t n = env_zu("ARENA_MALLOC_COST_N", 800000);
+    size_t root = env_zu("ARENA_MALLOC_COST_ROOT", 64u * 1024u); /* tiny root → force spill */
+    size_t fat_root = env_zu("ARENA_MALLOC_COST_FAT_ROOT", 16u * 1024u * 1024u);
+    volatile size_t sink = 0;
+
+    printf("arena_malloc_cost: n=%zu tiny_root=%zu fat_root=%zu\n", n, root, fat_root);
+    printf("  (cc_arena_malloc = fixed root + per-object overflow; no extent growth)\n");
+
+    /* Opposite cases: durable ctor used as scratch. */
+    if (run_arena(MODE_MALLOC_ARENA, root, n, &sink)) return 1;
+    if (run_arena(MODE_MALLOC_ARENA, fat_root, n, &sink)) return 2;
+    /* Default heap: tiny root still spills; fat root is request-scratch. */
+    if (run_arena(MODE_HEAP, root, n, &sink)) return 3;
+    if (run_arena(MODE_HEAP, fat_root, n, &sink)) return 4;
+    /* Raw malloc keep-alive + free-all. */
+    if (run_raw(n, &sink)) return 5;
+
+    printf("arena_malloc_cost: PASS sink=%zu\n", (size_t)sink);
+    return 0;
+}

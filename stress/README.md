@@ -21,8 +21,9 @@ Stress tests that push the compiler and runtime with demanding patterns.
 | `unbuffered_rendezvous` | 50 producer/consumer pairs (sync) | Unbuffered channel rendezvous |
 | `arena_concurrent` | 10 tasks allocating from shared arena | Arena thread safety |
 | `arena_memory_storm` | Tip, stranding, budget→ovf, reset ping-pong, mixed align, churn, stack spill, concurrent nursery arenas | RSS / waste / reset reclaim |
-| `arena_memory_bench` | Fair RESULT peer for cross-lang compare (env knobs) | Tip / storm / churn timings |
+| `arena_memory_bench` | Heavy RESULT peer (tip/bulk/ovf/reset/churn) | Arena happy path vs escape |
 | `c/` `go/` `zig/arena_memory_bench.*` | C / Go / Zig bump peers (same protocol) | Cross-lang baseline |
+| `c/malloc_memory_bench.c` | Raw malloc/realloc baseline (same size streams) | Is plain malloc faster? |
 | `compare_arena_memory.sh` | Build all, shuffle order per trial, average RESULT | Startup-fair compare |
 | `join_handoff_storm` | Deep join chains on one worker | Join handshake ordering |
 | `park_unpark_storm` | Single-worker unbuffered receive storm | Park/unpark correctness |
@@ -43,9 +44,21 @@ Stress tests that push the compiler and runtime with demanding patterns.
 # Run all stress tests
 make stress-check
 
-# Cross-lang arena memory compare (shuffled multi-trial)
+# Cross-lang arena memory compare (shuffled multi-trial; includes malloc baseline)
 ./stress/compare_arena_memory.sh
-# ARENA_MEM_TRIALS=7 ARENA_MEM_SEED=42 ./stress/compare_arena_memory.sh
+# ARENA_MEM_QUICK=1 ./stress/compare_arena_memory.sh          # lighter smoke
+# ARENA_MEM_TRIALS=5 ARENA_MEM_SEED=42 ./stress/compare_arena_memory.sh
+
+# Tier policy sweep (small root): block_max=1 vs 2/4/8 vs unbounded(0)
+./stress/compare_arena_tiers.sh
+# ARENA_MEM_QUICK=1 ARENA_TIER_POLICIES="1 4 8 0" ./stress/compare_arena_tiers.sh
+
+# Root × N heatmap (where bulk_ovf dies — justify default block_max)
+./stress/compare_arena_heatmap.sh
+# ARENA_MEM_QUICK=1 ./stress/compare_arena_heatmap.sh
+
+# Opposite case: cc_arena_malloc used for tons of scratch allocs
+./stress/compare_arena_malloc_cost.sh
 
 # Run with sanitizers (TSan/ASan)
 ./scripts/stress_sanitize.sh tsan

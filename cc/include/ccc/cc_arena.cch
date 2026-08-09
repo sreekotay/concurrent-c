@@ -839,14 +839,23 @@ static inline size_t kilobytes(size_t n) { return n * 1024; }
 static inline size_t megabytes(size_t n) { return n * 1024 * 1024; }
 static inline size_t gigabytes(size_t n) { return n * 1024 * 1024 * 1024; }
 
-/* Blessed constructors (teach these two):
+/* Three constructors:
  *
- *   CCArena h = cc_arena_heap(N) @destroy;   // heap-rooted request/window
- *   cc_arena_stack(s, N);                    // stack-rooted scratch (decl macro)
+ *   CCArena h = cc_arena_heap(N) @destroy;   // request/window scratch (default)
+ *   cc_arena_stack(s, N);                    // same policy; root on the stack
+ *   CCArena m = cc_arena_malloc(N) @destroy; // durable: fixed root + per-object ovf
  *
- * Same bump/extent/overflow engine; difference is only where the root slab lives.
- * Default: root exactly N, up to CC_ARENA_DEFAULT_BLOCK_MAX slabs, then malloc
- * overflow. Expert: cc_arena_malloc (fixed+ovf), create_buffer, block_max=0. */
+ * heap/stack: root exactly N, up to CC_ARENA_DEFAULT_BLOCK_MAX (4) slabs (1.5×
+ * growth), then tier-3 malloc overflow. Size N for typical request live set —
+ * with N≈16MiB, four slabs cover ~100MiB-class live; a tiny N still works but
+ * spills to overflow (slower alloc + drain). Overflow stays arena-owned and is
+ * freed on reset/free.
+ *
+ * cc_arena_malloc: block_max=1, no extent growth — do not use for "tons of
+ * scratch allocs" (that is malloc-with-tax). Prefer heap/stack for scratch;
+ * use malloc ctor when entries are freed individually from a fixed root.
+ *
+ * Expert: create_buffer, block_max=0 (unbounded extents). */
 
 /* Default slab budget for heap/stack: root + 3 grows, then tier-3 overflow. */
 #ifndef CC_ARENA_DEFAULT_BLOCK_MAX

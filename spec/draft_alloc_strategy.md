@@ -16,11 +16,32 @@ runtime behavior required by the main specification.
 containers. Existing constructors and container APIs continue to take
 `CCArena*`; allocation does not require a separate general allocator object.
 
-Heap-created arenas grow by default. Caller-backed arenas use an explicit block
-policy:
+## Constructors and root sizing
+
+Teach three constructors:
 
 ```c
-CCArena heap = cc_arena_heap(4096);
+CCArena h = cc_arena_heap(N) @destroy;   /* request/window scratch */
+cc_arena_stack(s, N);                    /* same policy; root on the stack */
+CCArena m = cc_arena_malloc(N) @destroy; /* durable: fixed root + overflow */
+```
+
+`cc_arena_heap` / `cc_arena_stack` use root capacity exactly `N`,
+`block_max = CC_ARENA_DEFAULT_BLOCK_MAX` (4), and heap overflow on: up to four
+slabs with 1.5× growth, then tier-3 malloc overflow. Size `N` for the typical
+request live set (about 16MiB root covers roughly 100MiB-class live under the
+default budget). A tiny root still allocates, but most traffic becomes overflow
+(higher alloc cost and reset drain). Overflow allocations remain arena-owned and
+are freed by `cc_arena_reset` / `cc_arena_free`.
+
+`cc_arena_malloc` is fixed-root (`block_max = 1`) with overflow on and no extent
+growth. Prefer it when live entries are released individually from a durable
+store. Do not use it as general scratch for large keep-alive alloc storms —
+prefer `cc_arena_heap` / `cc_arena_stack` with an appropriately sized root.
+
+Caller-backed expert forms use an explicit block policy:
+
+```c
 CCArena fixed = cc_arena_create_buffer(buf, sizeof buf, CC_ARENA_FIXED);
 CCArena growable =
     cc_arena_create_buffer(buf, sizeof buf, CC_ARENA_GROWABLE);
@@ -29,8 +50,7 @@ CCArena growable =
 `CC_ARENA_FIXED` limits allocation to the root block.
 `CC_ARENA_GROWABLE` permits an unbounded chain of heap-owned extents. A value
 greater than one bounds the total slab count; when heap overflow is enabled,
-allocation spills to malloc after that budget. `cc_arena_heap` /
-`cc_arena_stack` default to `CC_ARENA_DEFAULT_BLOCK_MAX` (4) with overflow on.
+allocation spills to malloc after that budget.
 
 When the current block cannot satisfy an allocation and both ordinary growth
 and heap overflow are unavailable, allocation returns `NULL`. In particular,

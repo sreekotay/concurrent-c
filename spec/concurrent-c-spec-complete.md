@@ -1771,7 +1771,7 @@ CCArena a = cc_arena_heap(kilobytes(64));  // or: cc_arena_buffer(&a, buf, sz)
 cc_arena_free(&a);  // frees heap-backed root and overflow; user root buffer untouched
 ```
 
-**Blessed constructors:** heap-rooted `CCArena h = cc_arena_heap(N) @destroy;` and stack-rooted declaration macro `cc_arena_stack(s, N);` (alias `CC_ARENA_STACK`). Same bump/extent/overflow engine; only the root slab’s storage differs. `cc_arena_create` is an alias of `cc_arena_heap`. Expert forms (`cc_arena_malloc`, `cc_arena_create_buffer`, `block_max`) are documented in `spec/draft_alloc_strategy.md`.
+**Blessed constructors:** heap-rooted `CCArena h = cc_arena_heap(N) @destroy;` and stack-rooted declaration macro `cc_arena_stack(s, N);` (alias `CC_ARENA_STACK`) for request/window scratch; durable fixed-root `CCArena m = cc_arena_malloc(N) @destroy;` when entries are freed individually. Heap/stack share the bump/extent/overflow engine (root exactly `N`, `block_max = 4`, then overflow); size `N` for typical request live set so traffic stays in slabs. `cc_arena_create` is an alias of `cc_arena_heap`. Constructor choice and root sizing are specified in `spec/draft_alloc_strategy.md`.
 
 **Stack-first scratch (normative):** `cc_arena_stack(name, nbytes)` declares `uint8_t name##_cc_stack_buf[nbytes]` and a `CCArena name` initialized from that buffer with `block_max = CC_ARENA_DEFAULT_BLOCK_MAX` and heap overflow enabled. Hot allocations use the stack slab; further growth matches heap arenas (up to four slabs, then malloc overflow). Use `cc_arena_reset` to free tier-3 overflow, unwind extents, and point `name.base` back at the stack buffer; use `cc_arena_free` when discarding the handle (then re-init if needed).
 
