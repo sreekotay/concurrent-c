@@ -1,0 +1,21 @@
+churn_stats_flat true
+churn_rss_flat true
+gc_churn_stats true
+domain_churn_compute true
+domain_churn_rss true
+storm_use_after_close true
+storm_survived_gc true
+graph_pins_domain true
+graph_alive_works true
+graph_release_collects true
+lease_sum true
+lease_rss_flat true
+released_as_receiver true
+released_as_argument true
+released_again true
+cross_domain_arg true
+interleaved_survivors true
+interleaved_closed true
+chain_result true
+chain_stats_bounded true
+mem suite done

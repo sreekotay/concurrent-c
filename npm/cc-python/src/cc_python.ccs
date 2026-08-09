@@ -136,6 +136,11 @@ static CcPyObjBox *ccpy__objbox(CcPyDom *d, CCJsExt obj) {
 
 static int ccpy__result_to_js(CcPyDom *d, void *env, CCPyObj r, void **out);
 
+/* Error text for the argument-conversion path.  File scope: the
+ * trampoline marshals it to a JS exception after the method returns, so
+ * a stack buffer would be read after its frame died. */
+static CC_JS_THREAD_LOCAL char ccpy__errbuf[160];
+
 /* The module: stateless — every operation names its domain. */
 typedef struct CcPython {
     int ok;
@@ -427,7 +432,6 @@ static CCJsVal !>(CCError) CcPython_invoke(CcPython *self, CCJs *js,
     CCPyArg argv[CC__PY_MAX_CALL_ARGS];
     uint32_t argc = 0, i;
     _Bool isarr = 0;
-    char errbuf[160];
     CC__JsMark mark;
     (void)self;
     if (!d) return cc_err(CC_ERR_INVALID_ARG, "cc-python: bridge is closed");
@@ -446,10 +450,10 @@ static CCJsVal !>(CCError) CcPython_invoke(CcPython *self, CCJs *js,
     for (i = 0; i < argc; i++) {
         void *el = NULL;
         if (cc__js.GetElement(js->env, args.v, i, &el) != 0 ||
-            ccpy__arg_from_js(d, js->env, el, &argv[i], errbuf,
-                              sizeof(errbuf)) != 0) {
+            ccpy__arg_from_js(d, js->env, el, &argv[i], ccpy__errbuf,
+                              sizeof(ccpy__errbuf)) != 0) {
             cc__js_release(mark);
-            return cc_err(CC_ERR_INVALID_ARG, errbuf);
+            return cc_err(CC_ERR_INVALID_ARG, ccpy__errbuf);
         }
     }
     {
