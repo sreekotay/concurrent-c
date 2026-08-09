@@ -2,6 +2,10 @@
 
 Python from Node. Any module, zero copies, host-controlled lifetime.
 
+Built with [Concurrent-C](https://github.com/sreekotay/concurrent-c) — a
+strict C11-superset preprocessor: `.ccs` lowers to plain C and compiles
+with your host C compiler.
+
 ```js
 const py = require('cc-python').create();
 const np = py.import('numpy');

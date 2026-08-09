@@ -2,6 +2,10 @@
 
 JavaScript — and every npm package — from Python.
 
+Part of [Concurrent-C](https://github.com/sreekotay/concurrent-c) — a
+strict C11-superset preprocessor: `.ccs` lowers to plain C and compiles
+with your host C compiler.  (This bridge itself is pure Python.)
+
 ```python
 import cc_node
 

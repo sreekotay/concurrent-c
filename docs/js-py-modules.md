@@ -1,7 +1,9 @@
 # Native modules for Node **and** Python, from one file
 
-Write a page of Concurrent-C, get a native module for either ecosystem
-— or both from the same file:
+[Concurrent-C](https://github.com/sreekotay/concurrent-c) is a strict
+C11-superset preprocessor: `.ccs` lowers to plain C and compiles with
+your host C compiler.  Write a page of it, get a native module for
+either ecosystem — or both from the same file:
 
 ```c
 #include <ccc/script/py.cch>
