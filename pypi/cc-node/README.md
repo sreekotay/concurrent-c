@@ -34,12 +34,19 @@ next to your Python program; `require` resolves from your cwd.
 - **Callbacks**: a Python callable crosses as a JS function.  JS
   calling conventions apply (`Array.map` calls with value, index,
   array — take `*rest`).  Exceptions map both ways, messages intact.
+- **Typed buffers cross as typed arrays**: `bytes`, `array.array`, and
+  1-D numpy arrays become `Float64Array`/`Int32Array`/`Uint8Array`/…
+  and come back as numpy arrays (or `array.array` without numpy).
+  Small buffers inline; big ones spill through **shared memory** — one
+  memcpy per side.  Measured: an 8MB `array('d')` argument crosses in
+  **14ms vs 645ms** as a JSON list — 46x — and spill files are consumed
+  by the receiver and swept by the sender, so nothing strays.
 - **The domain rules hold**: handles never cross bridges; `stats()` is
   the handle ledger and `release()` drops one early; `destroy()` is
   idempotent, every door answers `bridge is closed` after, and the
   child dies with the bridge (and on host exit, via stdin EOF).
 
-The wire is strict request/response JSON over stdio — simple and
-correct first.  The shared-memory lease tier (zero-copy buffers, the
-same transport the process-isolated cc-python domains will use) layers
-on without changing this surface.
+The wire is strict request/response JSON over stdio with the
+shared-memory spill for bulk data — the same discipline the isolated
+cc-python domains speak, mirrored.  True pinned zero-copy leases
+remain future work.

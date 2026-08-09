@@ -88,4 +88,25 @@ with cc_node.create() as scoped:
     out("with_scope", scoped.require("os").platform() == sys.platform.replace("linux2", "linux"))
 out("with_closes", scoped.closed)
 
+# 10. Typed buffers cross as typed arrays — small inline, big through
+#     the shared-memory spill — both directions, and no files stray.
+import array
+import os
+with cc_node.create() as js2:
+    f = js2.eval("(a) => a.reduce((s, x) => s + x, 0)")
+    small = array.array("d", [1.5, 2.5, 3.0])
+    out("buffer_small_inline", abs(f(small) - 7.0) < 1e-9)
+    big = array.array("d", [float(i % 89) for i in range(1 << 18)])  # 2MB
+    out("buffer_big_shm", abs(f(big) - sum(big)) < 1e-6)
+    back = js2.eval("(n) => new Float64Array(n).fill(0.5)")(1 << 18)
+    out("buffer_back_shm", len(back) == (1 << 18) and float(back[0]) == 0.5)
+    bys = js2.eval("() => new Uint8Array([104, 105])")()
+    out("buffer_u8", list(bys) == [104, 105])
+    if os.path.isdir("/dev/shm"):
+        stray = [x for x in os.listdir("/dev/shm")
+                 if x.startswith("ccnode-%d-" % os.getpid())]
+        out("buffer_no_strays", len(stray) == 0)
+    else:
+        out("buffer_no_strays", True)
+
 print("cc-node suite done")

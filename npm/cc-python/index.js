@@ -520,6 +520,8 @@ function rlazy(bridge, pending, chain) {
 }
 
 module.exports = {
+  version: require('./package.json').version,
+
   create(opts) {
     if (opts && opts.isolated) return new ProcBridge(opts);
     if (opts && opts.python)

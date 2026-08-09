@@ -1,11 +1,10 @@
 # OPENBLAS_NUM_THREADS=1 node npm/cc-python/examples/js_multiprocess_numpy.js
-# 2026-08-09 x86_64 4-vCPU, node v22.22.2, python3.11, numpy in every child
-RESULT spawn_plus_numpy_ms 442
-RESULT wire_rtt_us 134
-RESULT domains_1 ms 345 speedup x 1.00
-RESULT domains_2 ms 162 speedup x 2.13
-RESULT domains_4 ms 87 speedup x 3.97
-# with the shm spill (one memcpy per side; base64 wire was 153ms):
-RESULT bulk_8mb_arg_ms 7.6
-# (scaling above from the quiet-box run; a loaded run showed 1.42/2.76 —
-# 4-vCPU shared-box variance is real)
+# 2026-08-09 x86_64 4-vCPU shared VM, node v22.22.2, python3.11, numpy in every child
+# (4-domain scaling ranges 2.0x-3.97x across runs — steal-time bounded;
+#  3.97x at the box's quietest.  base64 wire before the shm spill: 153ms/8MB)
+RESULT spawn_plus_numpy_ms 94
+RESULT wire_rtt_us 123
+RESULT bulk_8mb_arg_ms 6.6
+RESULT domains_1 ms 260 speedup x 1.00
+RESULT domains_2 ms 167 speedup x 1.56
+RESULT domains_4 ms 101 speedup x 2.57

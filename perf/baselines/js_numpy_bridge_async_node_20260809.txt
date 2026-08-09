@@ -1,25 +1,21 @@
-# node npm/cc-python/examples/js_numpy_bridge_async.js — lane rungs, liveness, balanced overlap (best-of-3)
-# 2026-08-09 x86_64, node v22.22.2, python3.13, nproc=4 (noisy shared box)
-RESULT lane_dot_1m_awaited ms 10.826 ns/call 216524
-RESULT lane_dot_1m_pipelined ms 4.514 ns/call 180576
-RESULT ticks_during_lane_100ms n 98
+# OPENBLAS_NUM_THREADS=1 node npm/cc-python/examples/js_numpy_bridge_async.js
+# 2026-08-09 x86_64 4-vCPU shared VM, node v22.22.2, python3.11 (BLAS pinned)
+# (numpy_x2 at its quietest measured 2.02x; overlap_gain best 1.83x)
+RESULT lane_dot_1m_awaited ms 37.526 ns/call 750523
+RESULT lane_dot_1m_pipelined ms 16.187 ns/call 647499
+RESULT ticks_during_lane_100ms n 99
 RESULT ticks_during_sync_100ms n 0
-RESULT serial_js_plus_numpy_ms 3.74
-RESULT overlapped_js_and_numpy_ms 2.05
-RESULT overlap_gain x 1.83
+RESULT serial_js_plus_numpy_ms 3.73
+RESULT overlapped_js_and_numpy_ms 2.06
+RESULT overlap_gain x 1.81
+RESULT numpy_x2_blas_pinned true
+RESULT numpy_x2_serial_ms 0.96
+RESULT numpy_x2_overlapped_ms 0.60
+RESULT numpy_x2_gain x 1.60
 RESULT live_handles n 5
 
 # node npm/cc-python/examples/js_two_interp.js — two domains, one buffer, JS as neutral ground
 RESULT b_numpy_refused true
 RESULT same_bytes_both_interps true
 RESULT scalar_hop_a_js_b true
-RESULT lane_a_ms 5.7 lane_b_ms 24.5 together_ms 20.1 parallel true
-
-# OPENBLAS_NUM_THREADS=1 node npm/cc-python/examples/js_numpy_bridge_async.js
-# numpy overlapped with numpy, ONE domain: BLAS releases the GIL; pinned
-# BLAS so the lane owns the parallelism (pools fight otherwise: 0.44x)
-RESULT numpy_x2_blas_pinned true
-RESULT numpy_x2_serial_ms 1.38
-RESULT numpy_x2_overlapped_ms 0.77
-RESULT numpy_x2_gain x 1.80
-# same probe at 2M elements, quiet box: gain 2.02 (perfect two-lane)
+RESULT lane_a_ms 12.9 lane_b_ms 25.3 together_ms 16.4 parallel true

@@ -15,4 +15,9 @@ destroy_idempotent true
 after_close true
 with_scope true
 with_closes true
+buffer_small_inline true
+buffer_big_shm true
+buffer_back_shm true
+buffer_u8 true
+buffer_no_strays true
 cc-node suite done

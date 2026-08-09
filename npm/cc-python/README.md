@@ -9,7 +9,7 @@ const np = py.import('numpy');
 const a = new Float64Array(1_000_000).map((_, i) => i % 97);
 const b = new Float64Array(1_000_000).map((_, i) => i % 89);
 
-np.dot(a, b);   // 1M-element dot product: ~8x FASTER than the same
+np.dot(a, b);   // 1M-element dot product: 5-8x FASTER than the same
                 // loop in JS — the arrays cross as zero-copy leases,
                 // numpy's BLAS does the math, a JS number comes back
 
@@ -131,10 +131,11 @@ const b = ccpy.create({ isolated: true, python: '/usr/bin/python3.11' });
 ```
 
 Measured ([`examples/js_multiprocess_numpy.js`](examples/js_multiprocess_numpy.js),
-BLAS pinned): the same numpy workload on 1 → 2 → 4 domains scales
-**1.00x → 2.13x → 3.97x** on a 4-core box — linear.  The costs are real
-and stated: ~440ms to spawn a child and import numpy, ~134µs per wire
-round trip (vs ~5µs in-process).  Bulk buffers spill through **shared
+BLAS pinned): the same numpy workload on 4 domains runs **2-4x faster**
+than on one (3.97x — linear — at our shared 4-vCPU box's quietest;
+steal time bounds the rest).  The costs are real and stated: ~100-440ms
+to spawn a child and import numpy (warm/cold), ~125µs per wire round
+trip (vs ~5µs in-process).  Bulk buffers spill through **shared
 memory** (one memcpy per side): an 8MB argument crosses in ~6.6ms —
 23x the base64 wire it replaces — small arrays inline, big results stay
 child-side handles (chain on them; `await arr.toTypedArray()` brings
@@ -275,9 +276,10 @@ From [`examples/js_numpy_bridge.js`](examples/js_numpy_bridge.js) — plain
 
 | what | result |
 |---|---|
-| 1M-element `np.dot` through the bridge | **158µs/call — 8.45x the JS loop** (1.33ms) |
-| 1M-element `np.sum` / `np.std` | 334µs / 1.8ms per call |
-| 16-element dot (the crossing itself) | 5.1µs sync, 17µs pipelined through the lane |
+| 1M-element `np.dot` through the bridge | **239µs/call — 5.7x the JS loop** (1.36ms); best recorded 158µs / 8.45x |
+| 1M-element `np.sum` / `np.std` | 364µs / 2.0ms per call |
+| 16-element dot (the crossing itself) | 5.3µs sync, 11µs pipelined through the lane |
+| 1M dot through the lane | 232µs/call — the off-thread call costs what the sync one does |
 | bridge size | **~100KB `.node`, libc-only** |
 
 From [`examples/js_numpy_bridge_async.js`](examples/js_numpy_bridge_async.js)
@@ -285,14 +287,14 @@ From [`examples/js_numpy_bridge_async.js`](examples/js_numpy_bridge_async.js)
 
 | what | result |
 |---|---|
-| 1ms ticks during 100ms of bulk numpy | **98 through the lane, 0 sync** — the loop stays alive |
-| JS compute overlapped with numpy (balanced work) | **1.83x** — wall clock ≈ max, not sum |
-| 1M dot awaited / pipelined | 217µs / 181µs per call |
+| 1ms ticks during 100ms of bulk numpy | **99 through the lane, 0 sync** — the loop stays alive |
+| JS compute overlapped with numpy (balanced work) | **1.81x** — wall clock ≈ max, not sum |
+| numpy ∥ numpy, one interpreter (BLAS pinned) | 1.60x this run, 2.02x at the box's quietest |
 
 And [`examples/js_two_interp.js`](examples/js_two_interp.js): two
 isolated domains lease **the same `Float64Array`** zero-copy — JS is the
-neutral ground — and their lanes run under two GILs: 5.7ms + 24.5ms of
-work completes together in 20.1ms.
+neutral ground — and their lanes run under two GILs: 12.9ms + 25.3ms of
+work completes together in 16.4ms.
 
 Numbers swing ±40% run-to-run on a small shared VM; the example files
 print machine-comparable `RESULT` lines, so re-measuring on your box is
