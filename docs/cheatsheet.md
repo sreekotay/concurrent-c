@@ -24,41 +24,6 @@ Outputs: `./out` (generated C) and `./bin` (binaries), relative to cwd.
 
 ---
 
-## UFCS
-
-One rule: `recv.method(args)` calls the function the **receiver’s type** names.
-**Usual path — no registration:** declaring the function installs the method
-(contrast bodyless `@destroy`, which needs a registered destroy hook). Prefer
-UFCS over the free-function spelling of the same API.
-
-```c
-n->spawn(() => { … });      // cc_nursery_spawn(n, …)
-tx.send(i) !>;
-io.println("hi") !>;
-v.push(10);                 // CCVec_int_push(&v, 10)
-u.mean(6.0);                // mean(u, 6.0) — bare-name tier
-get(21)!>.twice();          // unwrap, then method on the value
-
-static double CCVec_double_median(CCVec_double* v) { … }
-v.median();                 // declare = install
-```
-
-**Optional registration** (stdlib / your families): `.ufcs` on `cc_type_register`
-supplies a custom lowerer (`cc_<type>_method`, nursery/channel hooks, …):
-
-```c
-@comptime {
-    (void)cc_type_register("MyHandle*", (CCTypeHooks){
-        .ufcs = my_handle_ufcs_lower_c,
-    });
-}
-```
-
-Receiver first; arena last when needed. Recipe:
-[recipe_ufcs_forms.ccs](../examples/recipe_ufcs_forms.ccs).
-
----
-
 ## Cleanup: `@defer` / `@destroy` / registration
 
 `@destroy` is **`@defer` sugar on a declaration** — same LIFO ledger. With `!>`,
@@ -114,6 +79,41 @@ CCNursery* n = cc_nursery_create(NULL) !> @destroy;
 ```
 
 Tasks do not inherit `@errhandler` — re-bind inside each spawn body.
+
+---
+
+## UFCS
+
+One rule: `recv.method(args)` calls the function the **receiver’s type** names.
+**Usual path — no registration:** declaring the function installs the method
+(contrast bodyless `@destroy`, which needs a registered destroy hook). Prefer
+UFCS over the free-function spelling of the same API.
+
+```c
+n->spawn(() => { … });      // cc_nursery_spawn(n, …)
+tx.send(i) !>;
+io.println("hi") !>;
+v.push(10);                 // CCVec_int_push(&v, 10)
+u.mean(6.0);                // mean(u, 6.0) — bare-name tier
+get(21)!>.twice();          // unwrap, then method on the value
+
+static double CCVec_double_median(CCVec_double* v) { … }
+v.median();                 // declare = install
+```
+
+**Optional registration** (stdlib / your families): `.ufcs` on `cc_type_register`
+supplies a custom lowerer (`cc_<type>_method`, nursery/channel hooks, …):
+
+```c
+@comptime {
+    (void)cc_type_register("MyHandle*", (CCTypeHooks){
+        .ufcs = my_handle_ufcs_lower_c,
+    });
+}
+```
+
+Receiver first; arena last when needed. Recipe:
+[recipe_ufcs_forms.ccs](../examples/recipe_ufcs_forms.ccs).
 
 ---
 

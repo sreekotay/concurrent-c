@@ -135,9 +135,8 @@ All tasks completed.
 
 ## Language surface (day one)
 
-Concurrent-C keeps C’s model and adds a small surface. Two ideas show up in
-almost every example — **UFCS** and **destroy registration** — so treat them as
-day-one, not advanced.
+Concurrent-C keeps C’s model and adds a small surface. Cleanup, results, then
+UFCS show up in almost every example — treat them as day-one, not advanced.
 
 | Idea | Spellings |
 |------|-----------|
@@ -146,6 +145,54 @@ day-one, not advanced.
 | Methods (UFCS) | `recv.method(args)` — ordinary functions; prefer this form |
 | Arenas / slices | bump allocator as a **lifetime**; `T[:]` views carry provenance (below) |
 | Closures | `() => …`, `() => [x] { … }`, `() => [&x] { … }` — tasks re-bind `@errhandler` |
+
+### Destroy registration — what bodyless `@destroy` calls
+
+`@destroy` is `@defer` on a declaration. A **block** is an explicit defer body
+(always fine). **Bodyless** `@destroy` looks up a destroy (or pre-destroy) hook
+registered for that type — if none is known, compile error.
+
+Stdlib owners ship registered (`CCNursery*` waits then frees, `CCArena` frees
+slabs + overflow, channels, `CCPy`, …). For your own types, register at
+`@comptime`:
+
+```c
+static void my_res_close(MyRes* r) { /* … */ }
+
+@comptime {
+    (void)cc_type_register("MyRes", (CCTypeHooks){
+        .destroy = cc_type_destroy_call("my_res_close"),
+    });
+}
+
+MyRes r = my_res_open() !> @destroy;   // → defer my_res_close
+```
+
+Hook order when both exist: registered pre-destroy → call-site `@destroy { … }`
+body → registered destroy (nursery: wait → your body → free). Details:
+[Language Concepts §1](language-concepts.md#1-cleanup-binds-to-a-place).
+
+### Results — `T!>(E)`
+
+Fallible work returns `T!>(E)`. Two operators; everything else is a modifier:
+
+| | Error becomes |
+|--|--|
+| `?>` | a **value** — `x ?> default` / `x ?>(e) …` |
+| `!>` | **code** that must leave — `x !> { … }` / `x !>;` |
+
+```c
+@errhandler(CCError e) cc_error_exit(e);   // policy for bare !>;
+
+int a = read() ?> 30;
+int b = read() !>;                         // → @errhandler
+int c = read() !>(e) { /* local */ @err(e); };
+CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+```
+
+Tasks do not inherit `@errhandler` — re-bind inside each spawn. More:
+[recipe_result_error_handling.ccs](../examples/recipe_result_error_handling.ccs) ·
+[Language Concepts §2](language-concepts.md#2-errors-become-a-value-or-code).
 
 ### UFCS — methods are ordinary functions
 
@@ -182,35 +229,9 @@ own a family:
 ```
 
 Receiver first (arena last when needed). Fallible chain: unwrap (`!>` / `?>`),
-then the next method sees the value. Full matrix:
+then the next method sees the value (`get(21)!>.twice()`). Full matrix:
 [recipe_ufcs_forms.ccs](../examples/recipe_ufcs_forms.ccs) ·
 [Language Concepts §3](language-concepts.md#3-methods-are-ordinary-functions).
-
-### Destroy registration — what bodyless `@destroy` calls
-
-`@destroy` is `@defer` on a declaration. A **block** is an explicit defer body
-(always fine). **Bodyless** `@destroy` looks up a destroy (or pre-destroy) hook
-registered for that type — if none is known, compile error.
-
-Stdlib owners ship registered (`CCNursery*` waits then frees, `CCArena` frees
-slabs + overflow, channels, `CCPy`, …). For your own types, register at
-`@comptime`:
-
-```c
-static void my_res_close(MyRes* r) { /* … */ }
-
-@comptime {
-    (void)cc_type_register("MyRes", (CCTypeHooks){
-        .destroy = cc_type_destroy_call("my_res_close"),
-    });
-}
-
-MyRes r = my_res_open() !> @destroy;   // → defer my_res_close
-```
-
-Hook order when both exist: registered pre-destroy → call-site `@destroy { … }`
-body → registered destroy (nursery: wait → your body → free). Details:
-[Language Concepts §1](language-concepts.md#1-cleanup-binds-to-a-place).
 
 Quick reference: [Cheatsheet](cheatsheet.md). Spec: [language spec](../spec/concurrent-c-spec-complete.md).
 
