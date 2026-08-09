@@ -2,6 +2,7 @@
  * CCEmitPlan — unified splice anchors (track A2).
  */
 #include "emit_plan.h"
+#include "factory_abi.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -657,29 +658,16 @@ const char* cc_emit_plan_lookup_generic_factory_handler(const char* name) {
     return r ? r->handler_name : NULL;
 }
 
-/* ABI mirrors cc_slice.cch / cc_arena.cch for dylib factory calls.
- * Must stay layout-identical to CCSlice ({ptr,len,id} — 24 bytes on
- * 64-bit). A stale trailing `alen` here made type_args.items[i] for i>=1
- * read the previous slot's padding as the next slice's ptr. */
-typedef struct CCFactorySlice {
-    void*    ptr;
-    size_t   len;
-    uint64_t id;
-} CCFactorySlice;
-
-typedef struct {
-    CCFactorySlice* items;
-    size_t          len;
-} CCFactorySliceArray;
-
+/* The slice ABI mirror lives in factory_abi.h (shared with the loader,
+ * which verifies it against the comptime side's sizeof(CCSlice) probe
+ * before any factory runs).  It must stay layout-identical to CCSlice
+ * ({ptr,len,id}): the stale trailing `alen` made type_args.items[i]
+ * for i>=1 read the previous slot's padding as the next slice's ptr. */
 static CCFactorySlice cc__factory_slice_cstr(const char* s) {
     CCFactorySlice sl = {0};
     if (s) { sl.ptr = (void*)s; sl.len = strlen(s); }
     return sl;
 }
-
-typedef CCFactorySlice (*CCGenericFactoryFn)(CCFactorySlice, CCFactorySlice,
-                                               CCFactorySliceArray, void*);
 
 /* Run one factory fn into its own scratch arena and append the returned
  * fragment to def_out at *io_total (newline-separated).  `require_nonempty`

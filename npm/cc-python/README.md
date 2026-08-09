@@ -1,14 +1,33 @@
 # cc-python
 
-Python from Node over the Concurrent-C bridge.
+Python from Node. Any module, zero copies, host-controlled lifetime.
+
+Built with [Concurrent-C](https://github.com/sreekotay/concurrent-c) — a
+strict C11-superset preprocessor: `.ccs` lowers to plain C and compiles
+with your host C compiler.
 
 ```js
-const py = require('cc-python').create();   // an Isolation Domain
+const py = require('cc-python').create();
 const np = py.import('numpy');
 
-const norm = np.linalg.norm(new Float64Array([3, 4]));   // 5 — zero copy
+const a = new Float64Array(1_000_000).map((_, i) => i % 97);
+const b = new Float64Array(1_000_000).map((_, i) => i % 89);
 
-py.destroy();   // one sweep: every handle, the arena, the interpreter ref
+np.dot(a, b);   // 1M-element dot product: 5-8x FASTER than the same
+                // loop in JS — the arrays cross as zero-copy leases,
+                // numpy's BLAS does the math, a JS number comes back
+
+py.destroy();   // one sweep: every handle, the arena, the interpreter
+```
+
+The entire native bridge is a **~100KB `.node` file** with exactly one
+linked dependency: libc.  No node-gyp, no Python headers at build time
+(libpython is `dlopen`'d when you `create()`), no version matrix —
+N-API's stable ABI means one binary per platform serves every node.
+
+```
+npm install cc-python     # prebuilt where shipped; otherwise compiles
+                          # from vendored C with nothing but `cc`
 ```
 
 - **Attribute chains are Python** — `np.linalg.norm` walks getattr;
@@ -60,6 +79,73 @@ its typed-array buffers from submit to completion, so `release()` or
 GC mid-flight cannot dangle it.  `destroy()` rejects queued calls
 immediately, lets the in-flight call finish, and sweeps after the last
 result is delivered.  An idle lane never keeps the process alive.
+
+### Parallel numpy, today
+
+Three real parallelism tiers, all measured
+([`examples/js_numpy_bridge_async.js`](examples/js_numpy_bridge_async.js),
+[`examples/js_two_interp.js`](examples/js_two_interp.js)):
+
+**numpy ∥ your JavaScript** — the lane runs numpy while the main thread
+computes: balanced work lands at **1.8x**, wall clock ≈ max instead of
+sum.
+
+**numpy ∥ numpy, one interpreter** — BLAS releases the GIL, so a sync
+call on main overlaps a task call on the lane.  numpy's own BLAS thread
+pool competes with this (each call already fans out), so the pattern
+wants pinned BLAS — then the lane owns the parallelism:
+
+```sh
+OPENBLAS_NUM_THREADS=1 node app.js
+```
+```js
+const dot = np.dot, dotT = py.task(np.dot);
+const p = dotT(a, b);   // numpy on the lane...
+dot(c, d);              // ...numpy on main, same interpreter
+await p;                // measured: 2.02x — perfect two-lane scaling
+```
+
+**numpy ∥ sibling interpreters** — every in-process `create()` after
+the first is an isolated subinterpreter with its **own GIL**: real
+multi-core Python, sharing buffers zero-copy through JS as neutral
+ground (one `Float64Array` leased into both).  Measured: 5.7ms + 24.5ms
+of work in two domains completes together in 20.1ms.  The honest limit:
+**numpy itself refuses subinterpreters** (the CPython C-extension
+rule — articulate, not a crash), which is what the fourth tier is for.
+
+**N × numpy: isolated domains** — `create({ isolated: true })` spawns a
+FULL CPython child per domain: numpy in every one, N domains are N GILs
+on N cores, a child crash is a rejected promise (the parent survives),
+and per-domain python/venv selection is honest:
+
+```js
+const py = ccpy.create({ isolated: true });  // ambient python, own process
+const np = py.import('numpy');          // zero round trips — chains are lazy
+const s  = await np.sum(buf);           // cross-process is natively async
+```
+
+Each child resolves its Python by the same ambient order as everything
+else (`VIRTUAL_ENV`, then `./.venv`, then `python3`) — and because each
+domain is its own process, the choice can also be **per-domain**, which
+the in-process tier cannot offer:
+
+```js
+const a = ccpy.create({ isolated: true, python: '/home/app/.venv' });
+const b = ccpy.create({ isolated: true, python: '/usr/bin/python3.11' });
+```
+
+Measured ([`examples/js_multiprocess_numpy.js`](examples/js_multiprocess_numpy.js),
+BLAS pinned): the same numpy workload on 4 domains runs **2-4x faster**
+than on one (3.97x — linear — at our shared 4-vCPU box's quietest;
+steal time bounds the rest).  The costs are real and stated: ~100-440ms
+to spawn a child and import numpy (warm/cold), ~125µs per wire round
+trip (vs ~5µs in-process).  Bulk buffers spill through **shared
+memory** (one memcpy per side): an 8MB argument crosses in ~6.6ms —
+23x the base64 wire it replaces — small arrays inline, big results stay
+child-side handles (chain on them; `await arr.toTypedArray()` brings
+the bytes back through the same spill).  Pick the tier by workload:
+in-process for hot fine-grained calls and zero-copy buffers, isolated
+for N-way parallel numpy, crash isolation, and per-domain environments.
 
 `py.task(jsClosure)` is reserved for recorded batch graphs —
 parameterized pipelines that ship N Python calls as one job (and, later,
@@ -142,6 +228,39 @@ JavaScript has one number type; integral values cross as Python `int`,
 fractional as `float` (Python APIs that want a float accept an int — the
 reverse is not true).  Python ints beyond 2^53 come back as `BigInt`.
 
+## Choosing the Python
+
+The runtime loads lazily at the first `create()`, chosen most-specific
+first — and every explicit or ambient choice that is broken fails
+loudly, never falling through to the wrong Python:
+
+```js
+const ccpy = require('cc-python');
+
+ccpy.usePython('/home/app/.venv');          // a venv directory
+ccpy.usePython('/usr/bin/python3.11');      // an interpreter executable
+ccpy.usePython('/usr/lib/libpython3.12.so');// a runtime, directly
+
+const py = ccpy.create();                   // loads the choice
+ccpy.python();  // { loaded, version, lib, how } — the introspection door
+```
+
+1. `usePython(...)` from code (interpreters are interrogated via their
+   own `sysconfig` — one spawn at selection time; venvs are adopted the
+   way `bin/python` itself would be, so `sys.prefix` and site-packages
+   are the venv's).
+2. `CC_LIBPYTHON=/path` in the environment.
+3. **Ambient `VIRTUAL_ENV`** — run node inside an activated venv and
+   that venv is simply used.
+4. **Ambient `./.venv`** — a project-local venv (the uv / poetry
+   convention) is picked up from the working directory, the same way
+   the sibling `cc-node` bridge resolves `node_modules`.
+5. Discovery (soname walk, 3.13 → 3.10).
+
+One runtime per process: after the first load, a matching `usePython`
+is a no-op and a different one throws, naming what already loaded.
+Per-domain runtimes arrive with process-isolated domains.
+
 ## Building
 
 The addon is ordinary Concurrent-C:
@@ -151,5 +270,41 @@ ccc build npm/cc-python/src/cc_python.ccs   # → bin/cc_python.node
 ```
 
 `index.js` finds it at `npm/cc-python/bin/` or the repo `bin/`, or wherever
-`CC_PYTHON_ADDON` points.  One stable-ABI binary per platform; the Python
-runtime resolves lazily at `create()` (`CC_LIBPYTHON` overrides the probe).
+`CC_PYTHON_ADDON` points.  One stable-ABI binary per platform.
+
+And when the hot path is YOUR code rather than a Python package, skip
+the bridge entirely: a page of Concurrent-C (or C) exports as a native
+module for Node and Python both — 40-90ns calls, 26KB artifacts.  See
+[Native modules for Node and Python](../../docs/js-py-modules.md).
+
+## Measured
+
+From [`examples/js_numpy_bridge.js`](examples/js_numpy_bridge.js) — plain
+`node`, `require('cc-python')`, numpy 2.5.1 on a 4-vCPU x86-64 box
+(baselines checked into the repo under `perf/baselines/`):
+
+| what | result |
+|---|---|
+| 1M-element `np.dot` through the bridge | **239µs/call — 5.7x the JS loop** (1.36ms); best recorded 158µs / 8.45x |
+| 1M-element `np.sum` / `np.std` | 364µs / 2.0ms per call |
+| 16-element dot (the crossing itself) | 5.3µs sync, 11µs pipelined through the lane |
+| 1M dot through the lane | 232µs/call — the off-thread call costs what the sync one does |
+| bridge size | **~100KB `.node`, libc-only** |
+
+From [`examples/js_numpy_bridge_async.js`](examples/js_numpy_bridge_async.js)
+— what the lane buys:
+
+| what | result |
+|---|---|
+| 1ms ticks during 100ms of bulk numpy | **99 through the lane, 0 sync** — the loop stays alive |
+| JS compute overlapped with numpy (balanced work) | **1.81x** — wall clock ≈ max, not sum |
+| numpy ∥ numpy, one interpreter (BLAS pinned) | 1.60x this run, 2.02x at the box's quietest |
+
+And [`examples/js_two_interp.js`](examples/js_two_interp.js): two
+isolated domains lease **the same `Float64Array`** zero-copy — JS is the
+neutral ground — and their lanes run under two GILs: 12.9ms + 25.3ms of
+work completes together in 16.4ms.
+
+Numbers swing ±40% run-to-run on a small shared VM; the example files
+print machine-comparable `RESULT` lines, so re-measuring on your box is
+one command.

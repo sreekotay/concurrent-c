@@ -505,6 +505,10 @@ static int get_run_timeout_for_test(const char* stem, int default_timeout_sec) {
     if (strcmp(stem, "cc_python_bridge_cb_smoke") == 0) return 120;
     if (strcmp(stem, "cc_python_bridge_await_smoke") == 0) return 120;
     if (strcmp(stem, "cc_python_bridge_aio_smoke") == 0) return 120;
+    /* Creates venvs and boots several child interpreters. */
+    if (strcmp(stem, "cc_python_bridge_env_smoke") == 0) return 120;
+    /* Spawns python children per domain (numpy import each) + a venv. */
+    if (strcmp(stem, "cc_python_bridge_proc_smoke") == 0) return 120;
     /* Spawns node children per domain; ~20ms deliberate async waits. */
     if (strcmp(stem, "cc_node_bridge_smoke") == 0) return 60;
     if (strcmp(stem, "py_module_kwargs_smoke") == 0) return 30;

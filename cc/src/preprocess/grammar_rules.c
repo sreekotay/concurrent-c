@@ -4350,7 +4350,15 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                 (void)cc_variant_schema_pending_add(name, nreg, arms, voids);
             }
         }
-        eb_emit(&e, cc_gr_fill_head_text(e.scratch, name));
+        {
+            /* Leaf fills force-inline; a fill with items/list terms emits
+             * nested `T__fill` calls and may recurse — see the head text. */
+            int fill_leaf = 1;
+            for (int ti = 0; ti < ss->nterms && fill_leaf; ti++)
+                if (ss->terms[ti].kind == SK_BIND_ITEMS ||
+                    ss->terms[ti].kind == SK_NARROW_LIST) fill_leaf = 0;
+            eb_emit(&e, cc_gr_fill_head_text(e.scratch, name, fill_leaf));
+        }
         /* zero the struct only when some bind is conditional (inside a
          * fields dispatch): a body whose binds are all unconditional terms
          * assigns every member on the success path — missing-member zeroing

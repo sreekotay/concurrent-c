@@ -96,10 +96,44 @@ function isPlain(v, depth) {
   return false;
 }
 
+/* Typed buffers cross as tagged bytes: small inline as base64, big
+ * through the shared-memory spill (one memcpy per side; the receiver
+ * consumes-and-unlinks).  Same discipline as cc-python's wire. */
+const TA_KIND = new Map([
+  [Float64Array, 'f64'], [Float32Array, 'f32'],
+  [Int32Array, 'i32'], [BigInt64Array, 'i64'], [Uint8Array, 'u8'],
+]);
+const TA_CTOR = {
+  f64: Float64Array, f32: Float32Array,
+  i32: Int32Array, i64: BigInt64Array, u8: Uint8Array,
+};
+const SHM_SPILL = 1 << 16;
+const SHM_DIR = process.env.CC_NODE_SHM_DIR ||
+                (fs.existsSync('/dev/shm') ? '/dev/shm'
+                                           : require('os').tmpdir());
+let shmSeq = 0;
+
+function encodeBuffer(kind, buf) {
+  if (buf.byteLength > SHM_SPILL) {
+    const p = require('path').join(
+        SHM_DIR, 'ccnode-' + process.pid + '-' + (++shmSeq));
+    fs.writeFileSync(p, buf);
+    return { shm: p, t: kind };
+  }
+  return { ta: kind, b64: buf.toString('base64') };
+}
+
 function encodeResult(v) {
   if (v === undefined) return { u: 1 };
   if (typeof v === 'number' && !Number.isFinite(v))
     return { nf: Number.isNaN(v) ? 'nan' : v > 0 ? 'inf' : '-inf' };
+  if (v !== null && typeof v === 'object') {
+    const kind = TA_KIND.get(v.constructor);
+    if (kind)
+      return encodeBuffer(kind,
+                          Buffer.from(v.buffer, v.byteOffset, v.byteLength));
+    if (Buffer.isBuffer(v)) return encodeBuffer('u8', v);
+  }
   if (v === null || isPlain(v, 0)) return { v };
   return { h: put(v) };
 }
@@ -128,6 +162,18 @@ function decodeVal(a) {
     if (a.$f !== undefined) return makeCallback(a.$f);
     if (a.$nf !== undefined)
       return a.$nf === 'nan' ? NaN : a.$nf === 'inf' ? Infinity : -Infinity;
+    if (a.$ta !== undefined || a.$shm !== undefined) {
+      let buf;
+      if (a.$shm !== undefined) {
+        buf = fs.readFileSync(a.$shm);
+        try { fs.unlinkSync(a.$shm); } catch (e) { /* consumed */ }
+      } else {
+        buf = Buffer.from(a.b64, 'base64');
+      }
+      const C = TA_CTOR[a.t !== undefined ? a.t : a.$ta];
+      return new C(buf.buffer, buf.byteOffset,
+                   buf.byteLength / C.BYTES_PER_ELEMENT);
+    }
     if (Array.isArray(a)) return a.map(decodeVal);
     const o = {};
     for (const k of Object.keys(a)) o[k] = decodeVal(a[k]);

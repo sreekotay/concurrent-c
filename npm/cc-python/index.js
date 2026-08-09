@@ -14,17 +14,27 @@
 
 const path = require('path');
 const fs = require('fs');
+const { spawn } = require('child_process');
+const readline = require('readline');
 
 function locateAddon() {
+  const plat = process.platform + '-' + process.arch;
+  const repoAddon = path.join(__dirname, '..', '..', 'bin', 'cc_python.node');
+  const inRepo = fs.existsSync(path.join(__dirname, '..', '..', 'cc', 'bin'));
   const candidates = [];
   if (process.env.CC_PYTHON_ADDON) candidates.push(process.env.CC_PYTHON_ADDON);
+  // In the repo, the freshly built artifact beats any stale package
+  // prebuilt left by prepare-publish; installed packages never have the
+  // repo marker and use their own bin/.
+  if (inRepo) candidates.push(repoAddon);
+  candidates.push(path.join(__dirname, 'bin', 'cc_python-' + plat + '.node'));
   candidates.push(path.join(__dirname, 'bin', 'cc_python.node'));
-  candidates.push(path.join(__dirname, '..', '..', 'bin', 'cc_python.node'));
+  if (!inRepo) candidates.push(repoAddon);
   for (const c of candidates) if (fs.existsSync(c)) return c;
   throw new Error(
-    'cc-python: cc_python.node not found (build it with ' +
-    '`ccc build npm/cc-python/src/cc_python.ccs`, or set CC_PYTHON_ADDON); ' +
-    'looked at: ' + candidates.join(', '));
+    'cc-python: no addon for ' + plat + ' (reinstall to run the source ' +
+    'build, build it with `ccc build npm/cc-python/src/cc_python.ccs`, or ' +
+    'set CC_PYTHON_ADDON); looked at: ' + candidates.join(', '));
 }
 
 const native = require(locateAddon());
@@ -135,6 +145,408 @@ class Bridge {
   }
 }
 
+/* ---- isolated domains: a FULL CPython per child process ------------- */
+
+// Cross-process is natively async (that was the point of building the
+// async surface first): attribute chains extend LAZILY with no round
+// trips, a call is a Promise, `await proxy` materializes an attribute
+// value, and revocation is a rejected promise — a child crash included.
+
+const RHANDLE = Symbol('cc-python-remote');
+const TA_KIND = new Map([
+  [Float64Array, 'f64'], [Float32Array, 'f32'],
+  [Int32Array, 'i32'], [BigInt64Array, 'i64'], [Uint8Array, 'u8'],
+]);
+const TA_CTOR = {
+  f64: Float64Array, f32: Float32Array,
+  i32: Int32Array, i64: BigInt64Array, u8: Uint8Array,
+};
+
+// Big buffers spill through shared memory (tmpfs where available):
+// one memcpy per side instead of base64's inflate-encode-parse-decode.
+// Files are consumed-and-unlinked by the receiver; the sender also
+// sweeps its own after the request settles, so a crashed child cannot
+// strand them.
+const SHM_SPILL = 1 << 16;
+const SHM_DIR = fs.existsSync('/dev/shm') ? '/dev/shm'
+                                          : require('os').tmpdir();
+let shmSeq = 0;
+
+function resolvePythonExe(spec) {
+  const asVenv = (dir) => {
+    for (const b of ['python', 'python3']) {
+      const p = path.join(dir, 'bin', b);
+      if (fs.existsSync(p)) return p;
+    }
+    return null;
+  };
+  if (spec) {
+    const abs = path.resolve(spec);
+    if (fs.existsSync(path.join(abs, 'pyvenv.cfg'))) {
+      const exe = asVenv(abs);
+      if (exe) return exe;
+      throw new Error('cc-python: venv has no bin/python: ' + abs);
+    }
+    if (fs.existsSync(abs)) return abs;
+    throw new Error('cc-python: python does not exist: ' + abs);
+  }
+  // Ambient, mirroring the in-process order: VIRTUAL_ENV, ./.venv, PATH.
+  if (process.env.VIRTUAL_ENV) {
+    const exe = asVenv(process.env.VIRTUAL_ENV);
+    if (exe) return exe;
+    throw new Error('cc-python: VIRTUAL_ENV has no bin/python: ' +
+                    process.env.VIRTUAL_ENV);
+  }
+  if (fs.existsSync(path.join('.venv', 'pyvenv.cfg'))) {
+    const exe = asVenv(path.resolve('.venv'));
+    if (exe) return exe;
+    throw new Error('cc-python: ./.venv has no bin/python');
+  }
+  return 'python3';
+}
+
+function rwrap(bridge, h, chain) {
+  const target = function () {};
+  target[RHANDLE] = { h, chain };
+  return new Proxy(target, {
+    get(t, prop) {
+      if (prop === RHANDLE) return t[RHANDLE];
+      if (prop === 'then') {
+        // `await proxy` materializes the attribute value.
+        if (chain.length === 0) return undefined; // module roots stay put
+        return (resolve, reject) =>
+          bridge._req({ op: 'getp', h, path: chain })
+            .then((r) => resolve(bridge._materialize(r)), reject);
+      }
+      if (prop === 'str') {
+        return () => bridge._req({ op: 'str', h, path: chain })
+          .then((r) => r.v);
+      }
+      if (prop === 'toTypedArray') {
+        // Materialize a buffer-shaped value: small inline, big through
+        // the shm spill — one memcpy per side either way.
+        return () => bridge._req({ op: 'ta', h, path: chain })
+          .then((r) => bridge._materialize(r));
+      }
+      if (prop === Symbol.toPrimitive || prop === 'toString')
+        return () => '[cc-python remote ' + h +
+                     (chain.length ? '.' + chain.join('.') : '') + ']';
+      if (typeof prop !== 'string') return undefined;
+      return rwrap(bridge, h, chain.concat(prop)); // no round trip
+    },
+    apply(t, thisArg, args) {
+      return bridge
+        ._req({ op: 'callp', h, path: chain,
+                args: args.map((a) => bridge._encode(a)) })
+        .then((r) => bridge._materialize(r));
+    },
+  });
+}
+
+class ProcBridge {
+  constructor(opts) {
+    const exe = resolvePythonExe(opts && opts.python);
+    this._pythonExe = exe;
+    this._pending = [];
+    this._cbs = new Map();
+    this._nextCb = 1;
+    this._closed = false;
+    this._closeWaiters = [];
+    this._shmOut = [];
+    this._child = spawn(exe, [path.join(__dirname, 'broker.py')], {
+      stdio: ['pipe', 'pipe', 'inherit'],
+      env: Object.assign({}, process.env, { CC_PY_SHM_DIR: SHM_DIR }),
+    });
+    this._child.on('error', (e) => this._die('cannot spawn ' + exe +
+                                             ': ' + e.message));
+    this._child.on('exit', () => this._die('bridge is closed (the ' +
+                                           'python child exited)'));
+    const rl = readline.createInterface({ input: this._child.stdout });
+    rl.on('line', (line) => this._online(line));
+  }
+
+  _die(why) {
+    if (this._closed) return;
+    this._closed = true;
+    const pending = this._pending.splice(0);
+    for (const p of pending) p.reject(new Error('cc-python: ' + why));
+    for (const w of this._closeWaiters.splice(0)) w();
+    this._cbs.clear();
+  }
+
+  _online(line) {
+    let obj;
+    try { obj = JSON.parse(line); } catch (e) { return; }
+    if (obj && obj.cb) {
+      // A callback request from the child, arriving mid-call: run the JS
+      // function (awaiting whatever it awaits) and reply on its line.
+      const fn = this._cbs.get(obj.cbid);
+      Promise.resolve()
+        .then(() => {
+          if (!fn) throw new Error('unknown callback ' + obj.cbid);
+          return fn(...(obj.args || []).map((a) => this._decode(a)));
+        })
+        .then((r) => this._send({ cbr: this._encode(r) }),
+              (e) => this._send({ e: String(e && e.message || e) }));
+      return;
+    }
+    const p = this._pending.shift();
+    if (p) p.settle(obj);
+  }
+
+  _send(obj) {
+    this._child.stdin.write(JSON.stringify(obj) + '\n');
+  }
+
+  _req(obj) {
+    if (this._closed)
+      return Promise.reject(new Error('cc-python: bridge is closed'));
+    return new Promise((resolve, reject) => {
+      const sweep = () => {
+        // The child unlinks spill files as it decodes them; this sweep
+        // only matters when it died first (ENOENT is the normal case).
+        for (const p of this._shmOut.splice(0)) {
+          try { fs.unlinkSync(p); } catch (e) { /* consumed */ }
+        }
+      };
+      this._pending.push({
+        settle: (r) => {
+          sweep();
+          if (r && r.e !== undefined) reject(new Error(r.e));
+          else resolve(r);
+        },
+        reject: (e) => { sweep(); reject(e); },
+      });
+      this._send(obj);
+    });
+  }
+
+  _encode(v) {
+    if (v === null || v === undefined) return null;
+    const t = typeof v;
+    if (t === 'number') {
+      if (Number.isFinite(v)) return v;
+      return { $nf: v === Infinity ? 'inf' : v === -Infinity ? '-inf'
+                                           : 'nan' };
+    }
+    if (t === 'string' || t === 'boolean') return v;
+    if (t === 'bigint') {
+      if (v >= -(2n ** 53n) && v <= 2n ** 53n) return Number(v);
+      throw new Error('cc-python: bigint beyond 2^53 cannot cross the ' +
+                      'wire yet');
+    }
+    if (t === 'function') {
+      if (v[RHANDLE]) {
+        const r = v[RHANDLE];
+        if (r.chain.length)
+          throw new Error('cc-python: pass the awaited value, not an ' +
+                          'attribute path');
+        if (r.h === null)
+          throw new Error('cc-python: this module has not landed yet — ' +
+                          'await any use of it before passing it as an ' +
+                          'argument');
+        return { $h: r.h };
+      }
+      const id = this._nextCb++;
+      this._cbs.set(id, v);
+      return { $f: id };
+    }
+    const kind = TA_KIND.get(v.constructor);
+    if (kind) {
+      const buf = Buffer.from(v.buffer, v.byteOffset, v.byteLength);
+      if (v.byteLength > SHM_SPILL) {
+        const p = path.join(SHM_DIR,
+                            'ccpy-' + process.pid + '-' + (++shmSeq));
+        fs.writeFileSync(p, buf);
+        this._shmOut.push(p);
+        return { $shm: p, t: kind };
+      }
+      return { $ta: kind, b64: buf.toString('base64') };
+    }
+    if (Array.isArray(v)) return v.map((x) => this._encode(x));
+    if (t === 'object' && (v.constructor === Object || !v.constructor)) {
+      const o = {};
+      for (const k of Object.keys(v)) {
+        if (k.startsWith('$'))
+          throw new Error('cc-python: object keys starting with $ are ' +
+                          'reserved on the wire');
+        o[k] = this._encode(v[k]);
+      }
+      return o;
+    }
+    throw new Error('cc-python: unsupported argument for an isolated ' +
+                    'domain (numbers, strings, booleans, typed arrays, ' +
+                    'plain objects/arrays, functions, or this domain\'s ' +
+                    'handles)');
+  }
+
+  _decode(v) {
+    if (v === null || typeof v !== 'object') return v;
+    if (v.$nf !== undefined)
+      return v.$nf === 'inf' ? Infinity : v.$nf === '-inf' ? -Infinity
+                                                           : NaN;
+    if (v.$ta !== undefined || v.ta !== undefined) {
+      const kind = v.$ta !== undefined ? v.$ta : v.ta;
+      const buf = Buffer.from(v.b64, 'base64');
+      const C = TA_CTOR[kind];
+      return new C(buf.buffer, buf.byteOffset,
+                   buf.byteLength / C.BYTES_PER_ELEMENT);
+    }
+    if (Array.isArray(v)) return v.map((x) => this._decode(x));
+    const o = {};
+    for (const k of Object.keys(v)) o[k] = this._decode(v[k]);
+    return o;
+  }
+
+  _materialize(r) {
+    if (r.h !== undefined) return rwrap(this, r.h, []);
+    if (r.shm !== undefined) {
+      const buf = fs.readFileSync(r.shm);
+      try { fs.unlinkSync(r.shm); } catch (e) { /* consumed */ }
+      const C = TA_CTOR[r.t];
+      return new C(buf.buffer, buf.byteOffset,
+                   buf.byteLength / C.BYTES_PER_ELEMENT);
+    }
+    if (r.ta !== undefined) return this._decode(r);
+    return this._decode(r.v);
+  }
+
+  // The surface, mirrored: import returns a proxy with NO round trip
+  // (the request pipelines under the first use), calls are Promises.
+  import(name) {
+    const p = this._req({ op: 'import', name });
+    // The import's handle arrives with the first operation that needs
+    // it; a failed import surfaces there.  We pre-resolve eagerly so
+    // chains stay synchronous:
+    const bridge = this;
+    const target = function () {};
+    target[RHANDLE] = { h: null, chain: [], pending: p };
+    p.then((r) => { target[RHANDLE].h = r.h; }, () => {});
+    return new Proxy(target, {
+      get(t, prop) {
+        if (prop === RHANDLE) return t[RHANDLE];
+        if (prop === 'then') return undefined;
+        if (prop === 'str')
+          return () => p.then((r) =>
+            bridge._req({ op: 'str', h: r.h, path: [] }).then((x) => x.v));
+        if (typeof prop !== 'string') return undefined;
+        return rlazy(bridge, p, [prop]);
+      },
+      apply() {
+        throw new Error('cc-python: a module is not callable');
+      },
+    });
+  }
+  task(fn) {
+    // API uniformity with in-process domains: every isolated call is
+    // already a task-shaped Promise.
+    return (...args) => Promise.resolve(fn(...args));
+  }
+  release(proxy) {
+    const r = proxy && proxy[RHANDLE];
+    if (!r) return Promise.reject(new Error('cc-python: not a handle'));
+    if (r.chain && r.chain.length)
+      return Promise.reject(new Error(
+        'cc-python: attribute paths are not held handles — await the ' +
+        'value, then release what it returns'));
+    const bridge = this;
+    const settle = (h) => bridge._req({ op: 'release', h }).then((x) => x.v);
+    return r.pending ? r.pending.then((x) => settle(x.h)) : settle(r.h);
+  }
+  stats() {
+    return this._req({ op: 'stats' }).then((r) => r.v);
+  }
+  get closed() {
+    return this._closed;
+  }
+  get python() {
+    return this._pythonExe;
+  }
+  destroy() {
+    if (this._closed) return Promise.resolve();
+    const done = new Promise((resolve) => {
+      this._closeWaiters.push(resolve);
+      this._child.on('exit', () => resolve());
+    });
+    this._req({ op: 'close' }).catch(() => {});
+    try { this._child.stdin.end(); } catch (e) { /* already gone */ }
+    const child = this._child;
+    const t = setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) {} },
+                         2000);
+    t.unref();
+    return done.then(() => { clearTimeout(t); this._die('bridge is closed'); });
+  }
+  close() { return this.destroy(); }
+  [Symbol.dispose]() { this.destroy(); }
+  [Symbol.asyncDispose]() { return this.destroy(); }
+}
+
+// A chain rooted on a not-yet-resolved import: still zero round trips
+// to extend, one to use.
+function rlazy(bridge, pending, chain) {
+  const target = function () {};
+  target[RHANDLE] = { h: null, chain, pending };
+  return new Proxy(target, {
+    get(t, prop) {
+      if (prop === RHANDLE) return t[RHANDLE];
+      if (prop === 'then') {
+        return (resolve, reject) =>
+          pending.then((r) =>
+            bridge._req({ op: 'getp', h: r.h, path: chain })
+              .then((x) => resolve(bridge._materialize(x)), reject),
+            reject);
+      }
+      if (prop === 'str') {
+        return () => pending.then((r) =>
+          bridge._req({ op: 'str', h: r.h, path: chain }).then((x) => x.v));
+      }
+      if (prop === 'toTypedArray') {
+        return () => pending.then((r) =>
+          bridge._req({ op: 'ta', h: r.h, path: chain })
+            .then((x) => bridge._materialize(x)));
+      }
+      if (prop === Symbol.toPrimitive || prop === 'toString')
+        return () => '[cc-python remote .' + chain.join('.') + ']';
+      if (typeof prop !== 'string') return undefined;
+      return rlazy(bridge, pending, chain.concat(prop));
+    },
+    apply(t, thisArg, args) {
+      return pending.then((r) =>
+        bridge._req({ op: 'callp', h: r.h, path: chain,
+                      args: args.map((a) => bridge._encode(a)) })
+          .then((x) => bridge._materialize(x)));
+    },
+  });
+}
+
 module.exports = {
-  create() { return new Bridge(); },
+  version: require('./package.json').version,
+
+  create(opts) {
+    if (opts && opts.isolated) return new ProcBridge(opts);
+    if (opts && opts.python)
+      throw new Error(
+        'cc-python: the in-process runtime is process-wide — choose it ' +
+        'with usePython(...); per-domain python needs { isolated: true }');
+    return new Bridge();
+  },
+
+  // Choose the process Python from code — a venv dir, an interpreter
+  // executable, or a libpython path.  Valid until the first create()
+  // loads a runtime; after that a matching choice is a no-op and a
+  // different one throws (one runtime per process — per-domain runtimes
+  // arrive with process-isolated domains).  Beats CC_LIBPYTHON and the
+  // ambient VIRTUAL_ENV / ./.venv forms.
+  usePython(spec) {
+    if (typeof spec !== 'string' || !spec)
+      throw new TypeError('cc-python: usePython wants a path (venv dir, ' +
+                          'python executable, or libpython)');
+    native.use_python(path.resolve(spec));
+  },
+
+  // { loaded, version, lib, how } — how the runtime was (or will be) chosen.
+  python() {
+    const [version, lib, how] = String(native.runtime_desc()).split('|');
+    return { loaded: !!version, version, lib, how };
+  },
 };

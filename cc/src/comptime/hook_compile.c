@@ -1,4 +1,5 @@
 #include "hook_compile.h"
+#include "preprocess/factory_abi.h"
 #include "preprocess/template_scan.h"
 
 #include "build/host_cc_profile.h"
@@ -907,6 +908,11 @@ static int cc__build_compile_and_load(const char* input_path,
         }
         cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, isolated_body);
         cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "\n");
+        /* The ABI handshake: this TU sees the REAL CCSlice (from the
+         * prelude); the loader compares its size against the driver's
+         * CCFactorySlice mirror before any factory runs, so a layout
+         * drift is a loud load error, never a silent empty emit. */
+        cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, CC_FACTORY_ABI_PROBE_DEF);
     } else if (needs_cc_preprocess && !source_is_header) {
         /* For .ccs batches: CC_PARSER_MODE keeps generic fallback result
            typedefs in scope so the TCC stub-AST parser can survive rare
@@ -969,6 +975,22 @@ static int cc__build_compile_and_load(const char* input_path,
                 if (!out_fn_ptrs[i]) { ok = 0; break; }
             }
             if (ok) {
+                /* ABI handshake — a mismatch is a hard stop, not a
+                 * host-cc retry: the host compile sees the same headers
+                 * and would garble the same way. */
+                size_t (*probe)(void) = (size_t (*)(void))(uintptr_t)
+                    cc_comptime_exec_lookup_symbol(state, CC_FACTORY_ABI_PROBE_SYM);
+                if (probe && probe() != sizeof(CCFactorySlice)) {
+                    snprintf(err_buf, sizeof(err_buf),
+                             "factory slice ABI mismatch: comptime CCSlice is "
+                             "%zu bytes, the driver's CCFactorySlice mirror is "
+                             "%zu — cc_slice.cch and cc/src/preprocess/"
+                             "factory_abi.h have drifted",
+                             probe(), sizeof(CCFactorySlice));
+                    cc_comptime_exec_release(state);
+                    for (size_t i = 0; i < n_specs; ++i) out_fn_ptrs[i] = NULL;
+                    goto done;
+                }
                 module->tcc_state = state;
                 *out_module = module;
                 module = NULL;
@@ -1060,6 +1082,22 @@ static int cc__build_compile_and_load(const char* input_path,
         if (!out_fn_ptrs[i]) {
             snprintf(err_buf, sizeof(err_buf), "dlsym failed for '%s': %s",
                      specs[i].entry_name, dlerror() ? dlerror() : "missing symbol");
+            goto done;
+        }
+    }
+    {
+        /* Same ABI handshake as the in-process path (probe only exists in
+         * isolated factory TUs; its absence means nothing to check). */
+        size_t (*probe)(void) = (size_t (*)(void))(uintptr_t)
+            dlsym(module->dl_handle, CC_FACTORY_ABI_PROBE_SYM);
+        if (probe && probe() != sizeof(CCFactorySlice)) {
+            snprintf(err_buf, sizeof(err_buf),
+                     "factory slice ABI mismatch: comptime CCSlice is %zu "
+                     "bytes, the driver's CCFactorySlice mirror is %zu — "
+                     "cc_slice.cch and cc/src/preprocess/factory_abi.h have "
+                     "drifted",
+                     probe(), sizeof(CCFactorySlice));
+            for (size_t i = 0; i < n_specs; ++i) out_fn_ptrs[i] = NULL;
             goto done;
         }
     }

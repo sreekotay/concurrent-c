@@ -1,0 +1,22 @@
+numpy_in_child true
+small_array_inlines true
+big_array_is_handle true
+handle_chains true
+nonfinite_crosses true
+shm_arg_integrity true
+shm_result_integrity true
+shm_no_strays true
+lazy_chain_call true
+async_callback_over_wire true
+exc_type_and_message true
+two_pythons_concurrent true
+numpy_in_second_child true
+per_domain_venv true
+crash_rejects_inflight true
+crash_rejects_later true
+crash_marks_closed true
+parent_survives true
+release_drops true
+destroy_lands true
+after_close_rejects true
+proc suite done

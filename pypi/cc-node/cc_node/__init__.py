@@ -18,13 +18,51 @@ Handles never cross domains; every door after destroy() answers
 articulately; destroy is idempotent and `with cc_node.create() as js:`
 scopes it.
 """
+import array
 import atexit
+import base64
 import json
 import math
 import os
 import subprocess
 
-__all__ = ["create", "JsError", "JsHandle"]
+__all__ = ["create", "JsError", "JsHandle", "__version__"]
+__version__ = "0.2.0"
+
+# Typed buffers cross as typed arrays; big ones spill through shared
+# memory (tmpfs where available) — one memcpy per side, receiver
+# consumes-and-unlinks, sender sweeps after the reply.
+_TA_TYPECODE = {"f64": "d", "f32": "f", "i32": "i", "i64": "q", "u8": "B"}
+_TA_DTYPE = {"f64": "float64", "f32": "float32", "i32": "int32",
+             "i64": "int64", "u8": "uint8"}
+_TA_BY_TYPECODE = {tc: k for k, tc in _TA_TYPECODE.items()}
+_TA_BY_DTYPE = {dt: k for k, dt in _TA_DTYPE.items()}
+_SHM_SPILL = 1 << 16
+_shm_seq = [0]
+
+
+def _numpy():
+    try:
+        import numpy
+        return numpy
+    except Exception:
+        return None
+
+
+def _shm_dir():
+    d = os.environ.get("CC_NODE_SHM_DIR")
+    if d:
+        return d
+    return "/dev/shm" if os.path.isdir("/dev/shm") else None
+
+
+def _shm_write(raw):
+    _shm_seq[0] += 1
+    path = os.path.join(_shm_dir(), "ccnode-%d-%d" % (os.getpid(),
+                                                      _shm_seq[0]))
+    with open(path, "wb") as f:
+        f.write(raw)
+    return path
 
 
 class JsError(RuntimeError):
@@ -98,6 +136,7 @@ class Bridge:
         self._nid = 1
         self._cbs = {}
         self._ncb = 1
+        self._shm_out = []
         _live.append(self)
 
     # ---- wire ----
@@ -119,20 +158,30 @@ class Bridge:
         except (BrokenPipeError, ValueError):
             self.closed = True
             raise JsError("cc-node: the node child exited") from None
-        while True:
-            line = self._p.stdout.readline()
-            if not line:
-                self.closed = True
-                raise JsError("cc-node: the node child exited")
-            msg = json.loads(line)
-            if "cb" in msg:
-                self._serve_callback(msg)
-                continue
-            if msg.get("id") == rid:
-                if "e" in msg:
-                    raise JsError(msg["e"])
-                return self._decode_result(msg)
-            raise JsError("cc-node: protocol violation (unexpected reply)")
+        try:
+            while True:
+                line = self._p.stdout.readline()
+                if not line:
+                    self.closed = True
+                    raise JsError("cc-node: the node child exited")
+                msg = json.loads(line)
+                if "cb" in msg:
+                    self._serve_callback(msg)
+                    continue
+                if msg.get("id") == rid:
+                    if "e" in msg:
+                        raise JsError(msg["e"])
+                    return self._decode_result(msg)
+                raise JsError("cc-node: protocol violation (unexpected reply)")
+        finally:
+            # The child unlinks spill files as it decodes; this sweep only
+            # matters when it died first (ENOENT is the normal case).
+            for path in self._shm_out:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+            del self._shm_out[:]
 
     def _serve_callback(self, msg):
         fn = self._cbs.get(msg["cb"])
@@ -176,7 +225,57 @@ class Bridge:
                                   "reserved on the wire")
                 out[k] = self._encode(v)
             return out
+        enc = self._encode_buffer(a)
+        if enc is not None:
+            return enc
         raise JsError("cc-node: unsupported argument type: %r" % type(a))
+
+    def _encode_buffer(self, a):
+        # Typed buffers cross as typed arrays: bytes/array.array/1-D
+        # numpy — small inline as base64, big through the shared-memory
+        # spill (one memcpy per side; the receiver consumes-and-unlinks).
+        raw = None
+        kind = None
+        if isinstance(a, (bytes, bytearray, memoryview)):
+            raw, kind = bytes(a), "u8"
+        elif isinstance(a, array.array):
+            kind = _TA_BY_TYPECODE.get(a.typecode)
+            if kind is not None:
+                raw = a.tobytes()
+        else:
+            np = _numpy()
+            if np is not None and isinstance(a, np.ndarray) and a.ndim == 1:
+                kind = _TA_BY_DTYPE.get(str(a.dtype))
+                if kind is not None:
+                    raw = np.ascontiguousarray(a).tobytes()
+        if raw is None or kind is None:
+            return None
+        if len(raw) > _SHM_SPILL and _shm_dir():
+            path = _shm_write(raw)
+            self._shm_out.append(path)
+            return {"$shm": path, "t": kind}
+        return {"$ta": kind, "b64": base64.b64encode(raw).decode("ascii")}
+
+    def _decode_buffer(self, msg):
+        if "shm" in msg:
+            path = msg["shm"]
+            try:
+                with open(path, "rb") as f:
+                    raw = f.read()
+            finally:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+        else:
+            raw = base64.b64decode(msg["b64"])
+        kind = msg.get("t") or msg.get("ta")
+        np = _numpy()
+        if np is not None:
+            return np.frombuffer(raw, dtype=_TA_DTYPE[kind]).copy()
+        a = array.array(_TA_TYPECODE[kind])
+        a.frombytes(raw)
+        return a
 
     def _decode_result(self, msg):
         if "u" in msg:
@@ -186,6 +285,8 @@ class Bridge:
         if "nf" in msg:
             return {"nan": math.nan, "inf": math.inf,
                     "-inf": -math.inf}[msg["nf"]]
+        if "ta" in msg or "shm" in msg:
+            return self._decode_buffer(msg)
         return msg.get("v")
 
     # ---- surface ----

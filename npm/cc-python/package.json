@@ -1,8 +1,37 @@
 {
   "name": "cc-python",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "Python from Node over the Concurrent-C bridge: import any Python module, call it with zero-copy typed arrays, host-controlled lifetime.",
   "main": "index.js",
   "license": "MIT",
-  "keywords": ["python", "interop", "napi", "concurrent-c"]
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sreekotay/concurrent-c.git",
+    "directory": "npm/cc-python"
+  },
+  "keywords": [
+    "python",
+    "interop",
+    "napi",
+    "concurrent-c"
+  ],
+  "os": [
+    "linux",
+    "darwin"
+  ],
+  "engines": {
+    "node": ">=12"
+  },
+  "files": [
+    "index.js",
+    "install.js",
+    "broker.py",
+    "README.md",
+    "examples/",
+    "bin/",
+    "vendor/"
+  ],
+  "scripts": {
+    "install": "node install.js"
+  }
 }

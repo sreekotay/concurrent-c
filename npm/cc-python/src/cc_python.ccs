@@ -1944,11 +1944,20 @@ static CCJsVal !>(CCError) CcPython_create(CcPython *self, CCJs *js) {
     {
         CCResult_CCPy_CCPyError r = cc_py_new(&d->arena);
         if (!r.ok) {
-            CCArena tmp = d->arena;
-            cc_arena_destroy(&tmp);
-            return cc_err(CC_ERR_IO, "cc-python: no Python runtime "
-                                     "(is libpython installed, or set "
-                                     "CC_LIBPYTHON?)");
+            /* The load layer's message names the actual refusal (a broken
+             * VIRTUAL_ENV, a static libpython, a bad usePython target) —
+             * never mask it behind the generic hint. */
+            static char why[560];
+            snprintf(why, sizeof(why), "%s",
+                     r.u.error.base.message && r.u.error.base.message[0]
+                         ? r.u.error.base.message
+                         : "cc-python: no Python runtime (is libpython "
+                           "installed, or set CC_LIBPYTHON?)");
+            {
+                CCArena tmp = d->arena;
+                cc_arena_destroy(&tmp);
+            }
+            return cc_err(CC_ERR_IO, why);
         }
         d->py = r.u.value;
     }
@@ -2618,6 +2627,38 @@ static CCJsVal !>(CCError) CcPython_close_async(CcPython *self, CCJs *js,
         CCJsVal jv = { 0 };
         jv.env = js->env;
         jv.v = promise;
+        return cc_ok(jv);
+    }
+}
+
+/* Choose the process Python from code, before the first domain loads a
+ * runtime: a venv directory, an interpreter executable, or a libpython
+ * path.  After a runtime is loaded a matching choice is a no-op and a
+ * different one answers articulately — one runtime per process until
+ * process-isolated domains. */
+static long long !>(CCError) CcPython_use_python(CcPython *self,
+                                                 const char *spec) {
+    (void)self;
+    if (cc_py_use(spec) != 0)
+        return cc_err(CC_ERR_INVALID_ARG,
+                      cc__py_errbuf[0] ? cc__py_errbuf
+                                       : "cc-python: cannot use that Python");
+    return cc_ok((long long)1);
+}
+
+/* "version|libpath|how" — the introspection door for the runtime choice
+ * (fields empty until known). */
+static CCJsVal !>(CCError) CcPython_runtime_desc(CcPython *self, CCJs *js) {
+    char buf[4400];
+    void *out = NULL;
+    (void)self;
+    cc_py_runtime_desc(buf, sizeof(buf));
+    if (cc__js.CreateStringUtf8(js->env, buf, strlen(buf), &out) != 0)
+        return cc_err(CC_ERR_IO, "cc-python: cannot build the description");
+    {
+        CCJsVal jv = { 0 };
+        jv.env = js->env;
+        jv.v = out;
         return cc_ok(jv);
     }
 }

@@ -4,12 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cc-node"
-version = "0.1.0"
+version = "0.2.0"
 description = "JavaScript and npm packages from Python over the Concurrent-C bridge: one spawned Node child per domain, host-controlled lifetime."
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
 keywords = ["javascript", "node", "npm", "interop", "concurrent-c"]
+
+[project.urls]
+Repository = "https://github.com/sreekotay/concurrent-c"
+Documentation = "https://github.com/sreekotay/concurrent-c/blob/main/pypi/cc-node/README.md"
 
 [tool.setuptools]
 packages = ["cc_node"]

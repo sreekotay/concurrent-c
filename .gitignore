@@ -35,3 +35,12 @@ tools/toolbox.shcc
 # Accidental root lowered-C probes (c2.ccs → c2.c)
 /c[0-9].c
 /c[0-9][0-9].c
+
+# cc-python package products (prepare-publish.sh regenerates)
+npm/cc-python/bin/
+npm/cc-python/vendor/
+
+# python package build products
+pypi/cc-node/build/
+pypi/cc-node/cc_node.egg-info/
+__pycache__/
