@@ -12,7 +12,7 @@
 # the installed layout (prefix/bin/ccc -> prefix/include, prefix/lib/ccc/runtime).
 
 class Ccc < Formula
-  desc "Concurrent-C compiler: C extension with async/await and structured concurrency"
+  desc "Concurrent-C: C11-superset language (lowers to C, host-cc backend) with structured concurrency"
   homepage "https://github.com/sreekotay/concurrent-c"
   license "MIT"
   head "https://github.com/sreekotay/concurrent-c.git", branch: "main"
