@@ -2565,14 +2565,29 @@ static int emit_desugared_call(char* out,
         if (n == CC_UFCS_EMIT_FIELD_WINS) return CC_UFCS_EMIT_FIELD_WINS;
         /* n == CC_UFCS_EMIT_UNRESOLVED or snprintf error: fall through. */
     }
-    if ((strcmp(recv, "std_out") == 0 || strcmp(recv, "cc_std_out") == 0 ||
-         strcmp(recv, "std_err") == 0 || strcmp(recv, "cc_std_err") == 0) &&
-        strcmp(method, "write") == 0) {
-        const char* callee = (strcmp(recv, "std_out") == 0 || strcmp(recv, "cc_std_out") == 0)
-                                 ? "cc_std_out_write_auto"
-                                 : "cc_std_err_write_auto";
-        if (!has_args || !args_rewritten) return snprintf(out, cap, "%s(", callee);
-        return snprintf(out, cap, "%s(%s)", callee, args_rewritten);
+    /* Ambient namespace receivers (mirror shadow g_shadow_ufcs_ambient). */
+    {
+        static const struct {
+            const char* recv;
+            const char* meth;
+            const char* callee;
+        } ambient[] = {
+            { "cc_std_out", "write", "cc_std_out_write_auto" },
+            { "std_out", "write", "cc_std_out_write_auto" },
+            { "cc_std_err", "write", "cc_std_err_write_auto" },
+            { "std_err", "write", "cc_std_err_write_auto" },
+            { NULL, NULL, NULL },
+        };
+        size_t ai;
+        for (ai = 0; ambient[ai].recv; ai++) {
+            if (strcmp(recv, ambient[ai].recv) != 0 ||
+                strcmp(method, ambient[ai].meth) != 0)
+                continue;
+            if (!has_args || !args_rewritten)
+                return snprintf(out, cap, "%s(", ambient[ai].callee);
+            return snprintf(out, cap, "%s(%s)", ambient[ai].callee,
+                            args_rewritten);
+        }
     }
     if (strcmp(method, "to_str") == 0) {
         const char* callee = cc__builtin_to_str_callee(ctx.recv_type_name);
