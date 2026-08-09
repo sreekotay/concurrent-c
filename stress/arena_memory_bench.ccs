@@ -1,0 +1,136 @@
+/*
+ * Concurrent-C peer for stress/compare_arena_memory.sh
+ *
+ * Fair protocol (same env knobs / RESULT line as C/Go/Zig):
+ *   tip growth, slab-budget storm + reset, arena churn.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_arena.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <sys/types.h>
+#include <time.h>
+
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#elif defined(__linux__)
+#include <unistd.h>
+#endif
+
+static size_t env_zu(const char *k, size_t d) {
+    const char *v = getenv(k);
+    if (!v || !*v) return d;
+    return (size_t)strtoull(v, NULL, 10);
+}
+
+static double now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1e3 + (double)ts.tv_nsec * 1e-6;
+}
+
+static size_t sample_rss(void) {
+#if defined(__APPLE__)
+    task_vm_info_data_t info;
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) == KERN_SUCCESS)
+        return (size_t)info.phys_footprint;
+#elif defined(__linux__)
+    FILE *f = fopen("/proc/self/status", "r");
+    char line[256];
+    if (!f) return 0;
+    while (fgets(line, sizeof(line), f)) {
+        unsigned long kb = 0;
+        if (sscanf(line, "VmRSS: %lu", &kb) == 1) {
+            fclose(f);
+            return (size_t)kb * 1024;
+        }
+    }
+    fclose(f);
+#endif
+    return 0;
+}
+
+int main(void) {
+    size_t tip_iters = env_zu("ARENA_MEM_TIP_ITERS", 20000);
+    size_t tip_root = env_zu("ARENA_MEM_TIP_ROOT", 4u * 1024u * 1024u);
+    size_t storm_n = env_zu("ARENA_MEM_STORM", 50000);
+    size_t storm_root = env_zu("ARENA_MEM_ROOT_STORM", 4096);
+    size_t churn_n = env_zu("ARENA_MEM_CHURN", 200);
+    size_t churn_each = env_zu("ARENA_MEM_CHURN_EACH", 64);
+    size_t i;
+    size_t j;
+    size_t moves = 0;
+    size_t sz = 0;
+    unsigned char *p = NULL;
+    double tip_ms = 0;
+    double storm_ms = 0;
+    double churn_ms = 0;
+    size_t storm_gross = 0;
+    size_t storm_ovf = 0;
+    size_t reset_gross = 0;
+    size_t rss0 = 0;
+    size_t rss1 = 0;
+    double t0 = 0;
+
+    printf("arena_memory_bench(cc): block_max=%u tip_iters=%zu storm=%zu\n",
+           CC_ARENA_DEFAULT_BLOCK_MAX, tip_iters, storm_n);
+
+    {
+        CCArena tip = cc_arena_heap(tip_root) @destroy;
+        t0 = now_ms();
+        for (i = 0; i < tip_iters; i++) {
+            size_t want = sz + 32 + (i % 17);
+            void *np = cc_arena_realloc(&tip, &tip, p, sz, want, 8);
+            if (!np) return 2;
+            if (p && np != p) moves++;
+            p = (unsigned char *)np;
+            sz = want;
+        }
+        tip_ms = now_ms() - t0;
+    }
+
+    rss0 = sample_rss();
+    {
+        CCArena storm = cc_arena_heap(storm_root);
+        t0 = now_ms();
+        for (i = 0; i < storm_n; i++) {
+            size_t n = 24 + (i * 17) % 512;
+            void *q = cc_arena_alloc(&storm, n, 8);
+            if (!q) {
+                cc_arena_free(&storm);
+                return 4;
+            }
+            memset(q, (int)(i & 0xff), n < 16 ? n : 16);
+        }
+        storm_ms = now_ms() - t0;
+        storm_gross = cc_arena_committed_gross_bytes(&storm);
+        storm_ovf = cc_arena_overflow_raw_bytes(&storm);
+        cc_arena_reset(&storm);
+        reset_gross = cc_arena_committed_gross_bytes(&storm);
+        cc_arena_free(&storm);
+    }
+    rss1 = sample_rss();
+
+    t0 = now_ms();
+    for (i = 0; i < churn_n; i++) {
+        CCArena c = cc_arena_heap(8 * 1024);
+        for (j = 0; j < churn_each; j++) {
+            size_t n = 16 + (j * 31) % 256;
+            if (!cc_arena_alloc(&c, n, 8)) {
+                cc_arena_free(&c);
+                return 6;
+            }
+        }
+        cc_arena_free(&c);
+    }
+    churn_ms = now_ms() - t0;
+
+    printf("RESULT lang=cc tip_ms=%.3f tip_moves=%zu storm_ms=%.3f storm_gross=%zu "
+           "storm_ovf=%zu reset_gross=%zu churn_ms=%.3f rss_delta=%zd\n",
+           tip_ms, moves, storm_ms, storm_gross, storm_ovf, reset_gross, churn_ms,
+           (ssize_t)rss1 - (ssize_t)rss0);
+    return 0;
+}

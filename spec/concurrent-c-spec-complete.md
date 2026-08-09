@@ -1681,7 +1681,7 @@ Arenas own memory; slices are views into arena-owned storage.
 
 ```c
 // Creation
-CCArena cc_arena_heap(size_t bytes);          // heap-backed first slab; default block_max = 0
+CCArena cc_arena_heap(size_t bytes);          // heap-backed first slab; default block_max = 4, then overflow
 int cc_arena_buffer(CCArena* a, void* buf, size_t cap);  // caller-provided first slab; default block_max = 1
 
 // Value-returning constructor with explicit growth policy. Use CC_ARENA_FIXED
@@ -1771,15 +1771,18 @@ CCArena a = cc_arena_heap(kilobytes(64));  // or: cc_arena_buffer(&a, buf, sz)
 cc_arena_free(&a);  // frees heap-backed root and overflow; user root buffer untouched
 ```
 
-**Stack-first scratch (normative):** `CC_ARENA_STACK(name, nbytes)` declares `uint8_t name##_cc_stack_buf[nbytes]` and a `CCArena name` initialized from that buffer. It is equivalent to `cc_arena_buffer(&name, name##_cc_stack_buf, sizeof(name##_cc_stack_buf)); name.block_max = 0;`. Hot allocations use the stack slab; overflow uses the same growth rules as heap arenas. Use `cc_arena_reset` to reclaim overflow and point `name.base` back at the stack buffer for repeated scopes; use `cc_arena_free` when discarding the handle (then re-init if needed).
+**Blessed constructors:** heap-rooted `CCArena h = cc_arena_heap(N) @destroy;` and stack-rooted declaration macro `cc_arena_stack(s, N);` (alias `CC_ARENA_STACK`). Same bump/extent/overflow engine; only the root slab’s storage differs. `cc_arena_create` is an alias of `cc_arena_heap`. Expert forms (`cc_arena_malloc`, `cc_arena_create_buffer`, `block_max`) are documented in `spec/draft_alloc_strategy.md`.
+
+**Stack-first scratch (normative):** `cc_arena_stack(name, nbytes)` declares `uint8_t name##_cc_stack_buf[nbytes]` and a `CCArena name` initialized from that buffer with `block_max = CC_ARENA_DEFAULT_BLOCK_MAX` and heap overflow enabled. Hot allocations use the stack slab; further growth matches heap arenas (up to four slabs, then malloc overflow). Use `cc_arena_reset` to free tier-3 overflow, unwind extents, and point `name.base` back at the stack buffer; use `cc_arena_free` when discarding the handle (then re-init if needed).
 
 **Growable arenas (normative):**
 
-Arenas grow when `block_max` allows it. `cc_arena_heap` defaults to **growable** (`block_max = 0`, unbounded). `cc_arena_buffer` defaults to **fixed** (`block_max = 1`, no growth). When allocation exhausts the current block and growth is allowed, a new block is allocated; its size is at least **max**(1.5× the previous block’s capacity, space required for the **pending** allocation, 4096 bytes). The full previous block is pushed into a linked chain of extents. The root `CCArena` struct always holds the *active* block.
+Arenas grow when `block_max` allows it. `cc_arena_heap` / `cc_arena_stack` default to **`block_max = 4`** with heap overflow enabled: up to four slabs, then malloc overflow. `cc_arena_buffer` defaults to **fixed** (`block_max = 1`, overflow off). When allocation exhausts the current block and growth is allowed, a new block is allocated; its size is at least **max**(1.5× the previous block’s capacity, space required for the **pending** allocation, 4096 bytes). The full previous block is pushed into a linked chain of extents. The root `CCArena` struct always holds the *active* block.
 
-- `block_max = 0`: Unbounded growth (default for `cc_arena_heap`; `CC_ARENA_STACK` sets this after buffer initialization).
-- `block_max = 1`: Fixed, no growth allowed (default for `cc_arena_buffer`).
-- `block_max = N` (N > 1): At most N blocks total (initial user or heap block counts as block 0). Growth beyond the budget returns NULL.
+- `block_max = 0`: Unbounded extent growth (expert; set explicitly).
+- `block_max = 1`: Fixed root only (default for `cc_arena_buffer`; `cc_arena_malloc` uses this with overflow on).
+- `block_max = N` (N > 1): At most N slabs (initial block counts as 0). Beyond the budget, allocation uses heap overflow when enabled, otherwise returns NULL.
+- Default for blessed heap/stack: `CC_ARENA_DEFAULT_BLOCK_MAX` (4).
 
 ```c
 // Growable arena: will automatically allocate new blocks as needed
@@ -1810,7 +1813,7 @@ cc_arena_buffer(&d, buf, sizeof(buf));
 d.block_max = 0;  // unbounded growth beyond the initial user buffer
 ```
 
-**Rule:** `cc_arena_reset` unwinds all grown extents, frees their buffers and extent structs, and restores the root arena to its original block. After reset, the arena is back to its initial capacity with `block_idx = 0`.
+**Rule:** `cc_arena_reset` frees outstanding heap-overflow allocations (tier 3), unwinds all grown extents, frees their buffers and extent structs, and restores the root arena to its original block. After reset, the arena is back to its initial capacity with `block_idx = 0`.
 
 **Rule:** `cc_arena_checkpoint` / `cc_arena_restore` are cross-block aware. A checkpoint captures `block_idx` along with the allocation offset. Restoring a checkpoint taken in an earlier block unwinds the growth chain to that block, freeing all intervening blocks.
 

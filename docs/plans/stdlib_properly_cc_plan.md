@@ -125,10 +125,10 @@ Blessed arena:
 
 | Intent | Spelling |
 |--------|----------|
-| Heap scratch | `CCArena a = @create(kilobytes(4)) @destroy;` or `cc_arena_heap(...)` (alias) |
-| Fixed buffer | `CCArena a = @create(buf, sizeof(buf)) @destroy;` |
-| Explicit policy | `cc_arena_create_buffer(buf, cap, policy)` |
-| Don’t teach | third name `cc_arena_create` as distinct concept |
+| Heap-rooted | `CCArena a = cc_arena_heap(kilobytes(4)) @destroy;` (root=N, `block_max=4`, then overflow) |
+| Stack-rooted | `cc_arena_stack(a, N);` — same defaults; declaration macro (stack root) |
+| Explicit policy | `cc_arena_create_buffer(buf, cap, policy)` (expert) |
+| Don’t teach | `cc_arena_create` / `cc_arena_malloc` as separate *kinds* |
 
 Blessed includes:
 

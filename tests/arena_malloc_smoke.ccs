@@ -16,6 +16,7 @@ int main(void) {
 
     cc_arena_stack(scratch, 32);
     assert(scratch.base);
-    assert(scratch.block_max == 0);
+    assert(scratch.block_max == CC_ARENA_DEFAULT_BLOCK_MAX);
+    assert(scratch._flags & CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW);
     return 0;
 }

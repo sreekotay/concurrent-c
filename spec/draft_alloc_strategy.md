@@ -28,12 +28,13 @@ CCArena growable =
 
 `CC_ARENA_FIXED` limits allocation to the root block.
 `CC_ARENA_GROWABLE` permits an unbounded chain of heap-owned extents. A value
-greater than one bounds the total block count.
+greater than one bounds the total slab count; when heap overflow is enabled,
+allocation spills to malloc after that budget. `cc_arena_heap` /
+`cc_arena_stack` default to `CC_ARENA_DEFAULT_BLOCK_MAX` (4) with overflow on.
 
 When the current block cannot satisfy an allocation and both ordinary growth
-and explicit heap overflow are unavailable, allocation returns `NULL`. In
-particular, exhaustion of a fixed arena with heap overflow disabled returns
-`NULL`.
+and heap overflow are unavailable, allocation returns `NULL`. In particular,
+exhaustion of a fixed arena with heap overflow disabled returns `NULL`.
 
 ## Heap overflow
 
@@ -50,9 +51,11 @@ budget and overflow is enabled, the allocation uses `malloc` and is accounted
 in the arena's outstanding overflow bytes.
 
 Overflow allocation makes the current arena epoch non-rewindable. Overflow
-pointers remain individually releasable and reallocatable through the arena.
-`cc_arena_reset` and `cc_arena_free` do not release outstanding overflow
-pointers; the caller releases them before reset or teardown.
+pointers remain individually releasable and reallocatable through the arena
+via `cc_arena_release` / `cc_arena_realloc`. `cc_arena_reset` and
+`cc_arena_free` / `cc_arena_destroy` also free every outstanding overflow
+allocation (tier 3). Using a pre-reset overflow pointer afterward is undefined
+behavior, same as using a pre-reset slab pointer.
 
 ## Individual release
 
@@ -83,10 +86,13 @@ Any successful individual release makes the current arena epoch
 non-rewindable. Whole-arena `cc_arena_reset`, `cc_arena_free`, and
 `cc_arena_destroy` remain distinct lifecycle operations.
 
-`cc_arena_realloc` preserves the shared prefix of the old and new sizes. Slab
-allocations allocate, copy, and release. An overflow allocation may use
-`realloc`. A cross-arena reallocation allocates from the destination arena,
-copies, then releases through the source arena.
+`cc_arena_realloc` preserves the shared prefix of the old and new sizes. When
+a slab allocation sits at the active bump tip (`ptr + old_size` equals the
+current offset) and the new size still fits the active block, realloc extends
+or shrinks the tip in place with no copy. Otherwise slab realloc allocates,
+copies, and releases. An overflow allocation may use `realloc`. A cross-arena
+reallocation allocates from the destination arena, copies, then releases
+through the source arena.
 
 ## Checkpoint and restore
 
@@ -107,9 +113,10 @@ After heap overflow or individual release makes an epoch non-rewindable,
 `cc_arena_checkpoint` returns a null checkpoint with
 `checkpoint.arena == NULL`. Restoring a null checkpoint is a no-op. Restoring
 any checkpoint while its arena is non-rewindable is also a no-op.
-`cc_arena_reset` clears the non-rewindable and used-overflow flags, returns to
-the original block, resets allocation counts and offset, advances provenance,
-and enables checkpointing for the new epoch.
+`cc_arena_reset` frees outstanding overflow (tier 3), clears the
+non-rewindable and used-overflow flags, returns to the original block, resets
+allocation counts and offset, advances provenance, and enables checkpointing
+for the new epoch.
 
 ## Arena-backed containers
 

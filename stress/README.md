@@ -20,6 +20,10 @@ Stress tests that push the compiler and runtime with demanding patterns.
 | `closure_capture_storm` | 100 closures capturing different vars | Closure allocation, capture semantics |
 | `unbuffered_rendezvous` | 50 producer/consumer pairs (sync) | Unbuffered channel rendezvous |
 | `arena_concurrent` | 10 tasks allocating from shared arena | Arena thread safety |
+| `arena_memory_storm` | Tip, stranding, budget→ovf, reset ping-pong, mixed align, churn, stack spill, concurrent nursery arenas | RSS / waste / reset reclaim |
+| `arena_memory_bench` | Fair RESULT peer for cross-lang compare (env knobs) | Tip / storm / churn timings |
+| `c/` `go/` `zig/arena_memory_bench.*` | C / Go / Zig bump peers (same protocol) | Cross-lang baseline |
+| `compare_arena_memory.sh` | Build all, shuffle order per trial, average RESULT | Startup-fair compare |
 | `join_handoff_storm` | Deep join chains on one worker | Join handshake ordering |
 | `park_unpark_storm` | Single-worker unbuffered receive storm | Park/unpark correctness |
 | `inbox_cross_worker_storm` | Nested spawns across workers | Inbox routing + stealing |
@@ -38,6 +42,10 @@ Stress tests that push the compiler and runtime with demanding patterns.
 
 # Run all stress tests
 make stress-check
+
+# Cross-lang arena memory compare (shuffled multi-trial)
+./stress/compare_arena_memory.sh
+# ARENA_MEM_TRIALS=7 ARENA_MEM_SEED=42 ./stress/compare_arena_memory.sh
 
 # Run with sanitizers (TSan/ASan)
 ./scripts/stress_sanitize.sh tsan

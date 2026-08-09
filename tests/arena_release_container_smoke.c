@@ -74,14 +74,14 @@ static void test_vec_release_on_growth(ArenaFactory make_arena) {
     assert(v.data != NULL);
     assert(cc_atomic_load(&arena.live_allocs) == 1);
 
-    void *initial_data = v.data;
     assert(IntVec_push(&v, 10) == 0);
     assert(IntVec_push(&v, 20) == 0);
     assert(IntVec_push(&v, 30) == 0); /* forces growth */
 
     assert(v.data != NULL);
-    assert(v.data != initial_data);
     assert(IntVec_len(&v) == 3);
+    /* Tip-in-place realloc may keep the same pointer; either way only one
+     * live slab allocation remains after growth. */
     assert(cc_atomic_load(&arena.live_allocs) == 1);
 
     cc_arena_free(&arena);
@@ -93,13 +93,12 @@ static void test_string_release_on_growth(ArenaFactory make_arena) {
     CCString s = cc_string_new();
     assert(cc_atomic_load(&arena.live_allocs) == 0);
 
-    void *initial_data = cc_string_data(&s);
     assert(cc_string_push(&s, "ab", &arena) != NULL);
     assert(cc_string_push(&s, "cdefghijklmnop", &arena) != NULL); /* forces growth */
 
     assert(cc_string_data(&s) != NULL);
-    assert(cc_string_data(&s) != initial_data);
     assert(strcmp(cc_string_cstr(&s, &arena), "abcdefghijklmnop") == 0);
+    /* Tip-in-place realloc may keep the same pointer; live count stays 1. */
     assert(cc_atomic_load(&arena.live_allocs) == 1);
 
     cc_arena_free(&arena);

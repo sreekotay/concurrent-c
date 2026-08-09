@@ -8,18 +8,25 @@ int main(void) {
     {
         CCArena a = cc_arena_heap(64);
         if (!a.base) { printf("FAIL: heap alloc\n"); return 1; }
-        if (a.block_max != 0) { printf("FAIL: expected unbounded\n"); return 1; }
+        if (a.block_max != CC_ARENA_DEFAULT_BLOCK_MAX) {
+            printf("FAIL: expected default block_max=%u\n", CC_ARENA_DEFAULT_BLOCK_MAX);
+            return 1;
+        }
         if (a.block_idx != 0) { printf("FAIL: expected block_idx=0\n"); return 1; }
 
-        // Allocate enough to force several growths
+        // Allocate enough to force several growths / overflow past the budget
         for (int i = 0; i < 100; i++) {
             int *p = cc_arena_alloc_T_count(int, &a, 10);  // 40 bytes per alloc
             if (!p) { printf("FAIL: growth alloc at i=%d\n", i); return 1; }
             for (int j = 0; j < 10; j++) p[j] = i * 10 + j;
         }
 
-        if (a.block_idx == 0) { printf("FAIL: expected growth (block_idx > 0)\n"); return 1; }
-        printf("  growth: block_idx=%d OK\n", a.block_idx);
+        if (a.block_idx == 0 && !(a._flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW)) {
+            printf("FAIL: expected growth or overflow\n");
+            return 1;
+        }
+        printf("  growth: block_idx=%d overflow=%d OK\n", a.block_idx,
+               (a._flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW) ? 1 : 0);
         cc_arena_free(&a);
     }
 
@@ -75,14 +82,16 @@ int main(void) {
         cc_arena_free(&a);
     }
 
-    // --- Test 4: Budget exhaustion ---
+    // --- Test 4: Budget fail-closed when overflow is disabled ---
     {
         CCArena a = cc_arena_heap(64);
-        a.block_max = 3;  // at most 3 blocks
+        a.block_max = 3;
+        if (!cc_arena_set_heap_overflow(&a, false)) {
+            printf("FAIL: disable overflow\n");
+            return 4;
+        }
         if (!a.base) return 4;
-        if (a.block_max != 3) { printf("FAIL: expected block_max=3\n"); return 4; }
 
-        // Keep allocating until budget is exhausted
         int alloc_count = 0;
         while (alloc_count < 10000) {
             int *p = cc_arena_alloc_T_count(int, &a, 10);
@@ -92,8 +101,37 @@ int main(void) {
 
         if (alloc_count >= 10000) { printf("FAIL: budget not enforced\n"); return 4; }
         if (a.block_idx + 1 < a.block_max) { printf("FAIL: budget not reached\n"); return 4; }
+        if (a._flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW) {
+            printf("FAIL: overflow should stay off\n");
+            return 4;
+        }
         printf("  budget: exhausted after %d allocs, block_idx=%d/%d OK\n",
                alloc_count, a.block_idx, a.block_max);
+        cc_arena_free(&a);
+    }
+
+    // --- Test 4b: default budget then malloc overflow ---
+    {
+        CCArena a = cc_arena_heap(64);
+        int saw_ovf = 0;
+        int i;
+        if (!a.base || a.block_max != CC_ARENA_DEFAULT_BLOCK_MAX) return 41;
+        for (i = 0; i < 500; i++) {
+            if (!cc_arena_alloc_T_count(int, &a, 10)) {
+                printf("FAIL: default path should overflow not NULL\n");
+                return 41;
+            }
+            if (a._flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW) saw_ovf = 1;
+        }
+        if (!saw_ovf) {
+            printf("FAIL: expected tier-3 overflow after slab budget\n");
+            return 41;
+        }
+        if (a.block_idx + 1 > CC_ARENA_DEFAULT_BLOCK_MAX) {
+            printf("FAIL: grew past default budget (%u)\n", a.block_idx);
+            return 41;
+        }
+        printf("  default budget→overflow: block_idx=%d OK\n", a.block_idx);
         cc_arena_free(&a);
     }
 

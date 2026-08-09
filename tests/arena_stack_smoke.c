@@ -11,8 +11,12 @@ int main(void) {
             printf("FAIL: cc_arena_stack init\n");
             return 1;
         }
-        if (a.block_max != 0) {
-            printf("FAIL: unbounded block_max\n");
+        if (a.block_max != CC_ARENA_DEFAULT_BLOCK_MAX) {
+            printf("FAIL: expected default block_max=%u\n", CC_ARENA_DEFAULT_BLOCK_MAX);
+            return 1;
+        }
+        if (!(a._flags & CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW)) {
+            printf("FAIL: stack should allow overflow by default\n");
             return 1;
         }
         if (a._flags & CC_ARENA_FLAG_HEAP_OWNED) {
@@ -50,10 +54,14 @@ int main(void) {
         printf("  cc_arena_stack: stack slab, heap overflow, reset, free OK\n");
     }
 
-    // --- cc_arena_stack + block_max=1: stack-only, no overflow) ---
+    // --- cc_arena_stack + block_max=1, overflow off: stack-only ---
     {
         cc_arena_stack(fix, 96);
         fix.block_max = 1;
+        if (!cc_arena_set_heap_overflow(&fix, false)) {
+            printf("FAIL: disable fixed-stack overflow\n");
+            return 2;
+        }
         if (!fix.base || fix.block_max != 1) {
             printf("FAIL: stack fixed init\n");
             return 2;
@@ -69,10 +77,14 @@ int main(void) {
         printf("  cc_arena_stack + block_max=1 OK\n");
     }
 
-    // --- cc_arena_stack + block_max=2: 2 slabs then allocation fails ---
+    // --- cc_arena_stack + block_max=2, overflow off: 2 slabs then NULL ---
     {
         cc_arena_stack(b, 96);
         b.block_max = 2;
+        if (!cc_arena_set_heap_overflow(&b, false)) {
+            printf("FAIL: disable stack overflow\n");
+            return 3;
+        }
         if (!b.base || b.block_max != 2) {
             printf("FAIL: stack two-block init\n");
             return 3;

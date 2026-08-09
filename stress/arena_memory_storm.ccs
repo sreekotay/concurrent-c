@@ -1,0 +1,413 @@
+/*
+ * Arena memory storm — RSS / waste / tip-realloc / slab-budget→overflow /
+ * tip-stranding / reset ping-pong / mixed align / concurrent nursery arenas.
+ *
+ * Reports committed vs live payload, tip-growth waste, overflow share, and
+ * reset reclaim. Fails if waste or residual RSS after reset is pathological.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_arena.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+#include <string.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <time.h>
+
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#elif defined(__linux__)
+#include <unistd.h>
+#endif
+
+#define ROOT_BYTES           (64 * 1024)
+#define TIP_ITERS            20000
+#define STORM_ALLOCS         50000
+#define CHURN_ARENAS         200
+#define CHURN_ALLOCS_EACH    64
+#define PINGPONG_ROUNDS      40
+#define PINGPONG_ALLOCS      8000
+#define CONC_WORKERS         12
+#define CONC_ALLOCS_EACH     4000
+#define MAX_WASTE_PCT        85
+#define MAX_RESIDUAL_GROSS   (256 * 1024)
+
+typedef struct {
+    size_t rss_bytes;
+    int ok;
+} MemSample;
+
+static MemSample sample_rss(void) {
+    MemSample s = {0, 0};
+#if defined(__APPLE__)
+    task_vm_info_data_t info;
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) == KERN_SUCCESS) {
+        s.rss_bytes = (size_t)info.phys_footprint;
+        s.ok = 1;
+    }
+#elif defined(__linux__)
+    FILE *f = fopen("/proc/self/status", "r");
+    char line[256];
+    if (!f) return s;
+    while (fgets(line, sizeof(line), f)) {
+        unsigned long kb = 0;
+        if (sscanf(line, "VmRSS: %lu", &kb) == 1) {
+            s.rss_bytes = (size_t)kb * 1024;
+            s.ok = 1;
+            break;
+        }
+    }
+    fclose(f);
+#endif
+    return s;
+}
+
+static double now_sec(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
+static int fail(const char *msg) {
+    printf("FAIL: %s\n", msg);
+    return 1;
+}
+
+/* Sequential tip realloc on a large root — should stay in-place (no moves). */
+static int bench_tip_growth(void) {
+    CCArena a = cc_arena_heap(megabytes(4)) @destroy;
+    unsigned char *p = NULL;
+    size_t sz = 0;
+    size_t i;
+    size_t moves = 0;
+    double t0, t1;
+    size_t live, gross;
+    int waste_pct;
+
+    t0 = now_sec();
+    for (i = 0; i < TIP_ITERS; i++) {
+        size_t want = sz + 32 + (i % 17);
+        void *np = cc_arena_realloc(&a, &a, p, sz, want, 8);
+        if (!np) return fail("tip realloc OOM");
+        if (p && np != p) moves++;
+        p = (unsigned char *)np;
+        if (sz == 0) memset(p, 0xcd, want);
+        else p[sz] = (unsigned char)i;
+        sz = want;
+    }
+    t1 = now_sec();
+
+    live = sz;
+    gross = cc_arena_committed_gross_bytes(&a);
+    waste_pct = gross ? (int)((100 * (gross - live)) / gross) : 0;
+    printf("  tip_realloc: iters=%d moves=%zu live=%zu gross=%zu waste=%d%% %.3fs\n",
+           TIP_ITERS, moves, live, gross, waste_pct, t1 - t0);
+    if (moves != 0)
+        return fail("tip realloc left the bump tip (expected zero moves on large root)");
+    if (waste_pct > MAX_WASTE_PCT)
+        return fail("tip path waste too high");
+    return 0;
+}
+
+/*
+ * Deliberately bury the tip: grow A, then alloc pad (A no longer tip), then
+ * grow A again — must move. Proves tip-fast-path is tip-only, not magical.
+ */
+static int bench_tip_stranding(void) {
+    CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+    unsigned char *alive = NULL;
+    size_t alive_sz = 0;
+    size_t moves = 0;
+    size_t i;
+
+    alive = (unsigned char *)cc_arena_realloc(&a, &a, NULL, 0, 256, 8);
+    if (!alive) return fail("stranding seed");
+    alive_sz = 256;
+    memset(alive, 0xa5, alive_sz);
+
+    for (i = 0; i < 200; i++) {
+        void *pad = cc_arena_alloc(&a, 64 + (i % 48), 8);
+        void *np;
+        if (!pad) return fail("stranding pad");
+        np = cc_arena_realloc(&a, &a, alive, alive_sz, alive_sz + 48, 8);
+        if (!np) return fail("stranding grow");
+        if (np != alive) moves++;
+        alive = (unsigned char *)np;
+        alive_sz += 48;
+        alive[alive_sz - 1] = (unsigned char)i;
+    }
+    printf("  tip_stranding: buried grows moves=%zu (expect >0)\n", moves);
+    if (moves == 0)
+        return fail("expected moves when tip is buried by pad allocs");
+    return 0;
+}
+
+/* Hammer past the 4-slab budget into overflow; measure mix + reset reclaim. */
+static int bench_budget_overflow_reset(void) {
+    CCArena a = cc_arena_heap(4 * 1024); /* small root → hit budget fast */
+    size_t live = 0;
+    size_t i;
+    size_t ovf_bytes;
+    size_t gross_before;
+    size_t gross_after;
+    MemSample rss0, rss1, rss2;
+    double t0, t1;
+
+    if (a.block_max != CC_ARENA_DEFAULT_BLOCK_MAX)
+        return fail("default block_max != 4");
+
+    rss0 = sample_rss();
+    t0 = now_sec();
+    for (i = 0; i < STORM_ALLOCS; i++) {
+        size_t n = 24 + (i * 17) % 512;
+        void *p = cc_arena_alloc(&a, n, 8);
+        if (!p) return fail("storm alloc");
+        memset(p, (int)(i & 0xff), n < 16 ? n : 16);
+        live += n;
+    }
+    t1 = now_sec();
+    rss1 = sample_rss();
+
+    if (!(a._flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW))
+        return fail("expected overflow after slab budget");
+    if (a.block_idx + 1 > CC_ARENA_DEFAULT_BLOCK_MAX)
+        return fail("grew past default block_max");
+
+    ovf_bytes = cc_arena_overflow_raw_bytes(&a);
+    gross_before = cc_arena_committed_gross_bytes(&a);
+    printf("  storm: allocs=%d live~=%zu slabs=%u ovf=%zu gross=%zu rss_delta=%zd %.3fs\n",
+           STORM_ALLOCS, live, a.block_idx + 1, ovf_bytes, gross_before,
+           (rss0.ok && rss1.ok) ? (ssize_t)rss1.rss_bytes - (ssize_t)rss0.rss_bytes : (ssize_t)-1,
+           t1 - t0);
+
+    cc_arena_reset(&a);
+    gross_after = cc_arena_committed_gross_bytes(&a);
+    rss2 = sample_rss();
+    printf("  reset: gross %zu → %zu ovf=%zu rss=%zu\n",
+           gross_before, gross_after, cc_arena_overflow_raw_bytes(&a),
+           rss2.ok ? rss2.rss_bytes : 0);
+
+    if (a.ovf_head != NULL || cc_arena_overflow_raw_bytes(&a) != 0)
+        return fail("reset did not drain overflow");
+    if (a.block_idx != 0 || a.prev != NULL)
+        return fail("reset did not unwind slabs");
+    if (gross_after > ROOT_BYTES + 64 * 1024 && gross_after > MAX_RESIDUAL_GROSS)
+        return fail("gross still huge after reset");
+
+    cc_arena_free(&a);
+    return 0;
+}
+
+/* Fill → overflow → reset, many times; residual must stay bounded. */
+static int bench_reset_pingpong(void) {
+    CCArena a = cc_arena_heap(8 * 1024);
+    size_t r, i;
+    size_t peak_gross = 0;
+    size_t peak_ovf = 0;
+    double t0 = now_sec();
+
+    for (r = 0; r < PINGPONG_ROUNDS; r++) {
+        size_t g, o;
+        for (i = 0; i < PINGPONG_ALLOCS; i++) {
+            size_t n = 32 + ((i * 41 + r * 7) % 768);
+            void *p = cc_arena_alloc(&a, n, 16);
+            if (!p) {
+                cc_arena_free(&a);
+                return fail("pingpong alloc");
+            }
+            ((unsigned char *)p)[0] = (unsigned char)(r ^ i);
+        }
+        g = cc_arena_committed_gross_bytes(&a);
+        o = cc_arena_overflow_raw_bytes(&a);
+        if (g > peak_gross) peak_gross = g;
+        if (o > peak_ovf) peak_ovf = o;
+        cc_arena_reset(&a);
+        if (a.ovf_head != NULL || cc_arena_overflow_raw_bytes(&a) != 0) {
+            cc_arena_free(&a);
+            return fail("pingpong reset left overflow");
+        }
+        if (a.block_idx != 0 || a.prev != NULL) {
+            cc_arena_free(&a);
+            return fail("pingpong reset left extents");
+        }
+    }
+    printf("  reset_pingpong: rounds=%d peak_gross=%zu peak_ovf=%zu residual=%zu %.3fs\n",
+           PINGPONG_ROUNDS, peak_gross, peak_ovf, cc_arena_committed_gross_bytes(&a),
+           now_sec() - t0);
+    if (cc_arena_committed_gross_bytes(&a) > 64 * 1024) {
+        cc_arena_free(&a);
+        return fail("pingpong residual root ballooned");
+    }
+    cc_arena_free(&a);
+    return 0;
+}
+
+/* Mix alignments + power-of-two sizes to thrash padding / ovf paths. */
+static int bench_mixed_align_storm(void) {
+    static const size_t aligns[] = {1, 2, 4, 8, 16, 32, 64};
+    CCArena a = cc_arena_heap(16 * 1024);
+    size_t i;
+    size_t live = 0;
+    double t0 = now_sec();
+
+    for (i = 0; i < 30000; i++) {
+        size_t aln = aligns[i % 7];
+        size_t n = (size_t)1 << (3 + (i % 10)); /* 8 .. 4KiB */
+        n += (i * 13) % aln; /* occasionally odd vs align */
+        if (n < 8) n = 8;
+        void *p = cc_arena_alloc(&a, n, aln);
+        if (!p) {
+            cc_arena_free(&a);
+            return fail("mixed align alloc");
+        }
+        if (((uintptr_t)p % aln) != 0) {
+            cc_arena_free(&a);
+            return fail("alignment broken");
+        }
+        ((unsigned char *)p)[0] = (unsigned char)i;
+        live += n;
+    }
+    printf("  mixed_align: live~=%zu slabs=%u ovf=%zu gross=%zu %.3fs\n",
+           live, a.block_idx + 1, cc_arena_overflow_raw_bytes(&a),
+           cc_arena_committed_gross_bytes(&a), now_sec() - t0);
+    cc_arena_free(&a);
+    return 0;
+}
+
+/* Many short-lived arenas: create / fill / destroy churn. */
+static int bench_arena_churn(void) {
+    size_t i, j;
+    double t0, t1;
+    MemSample rss0 = sample_rss();
+    MemSample rss1;
+    size_t peak_gross = 0;
+
+    t0 = now_sec();
+    for (i = 0; i < CHURN_ARENAS; i++) {
+        CCArena a = cc_arena_heap(8 * 1024);
+        for (j = 0; j < CHURN_ALLOCS_EACH; j++) {
+            size_t n = 16 + (j * 31) % 256;
+            void *p = cc_arena_alloc(&a, n, 8);
+            if (!p) {
+                cc_arena_free(&a);
+                return fail("churn alloc");
+            }
+            ((unsigned char *)p)[0] = (unsigned char)j;
+        }
+        {
+            size_t g = cc_arena_committed_gross_bytes(&a);
+            if (g > peak_gross) peak_gross = g;
+        }
+        cc_arena_free(&a);
+    }
+    t1 = now_sec();
+    rss1 = sample_rss();
+    printf("  churn: arenas=%d peak_gross=%zu rss_delta=%zd %.3fs\n",
+           CHURN_ARENAS, peak_gross,
+           (rss0.ok && rss1.ok) ? (ssize_t)rss1.rss_bytes - (ssize_t)rss0.rss_bytes : (ssize_t)-1,
+           t1 - t0);
+    return 0;
+}
+
+/* Stack scratch: fill past stack slab into heap extents / overflow. */
+static int bench_stack_spill(void) {
+    cc_arena_stack(s, 2048);
+    size_t i;
+    size_t live = 0;
+    for (i = 0; i < 4000; i++) {
+        size_t n = 64 + (i % 128);
+        void *p = cc_arena_alloc(&s, n, 8);
+        if (!p) {
+            cc_arena_free(&s);
+            return fail("stack spill alloc");
+        }
+        live += n;
+    }
+    printf("  stack_spill: live~=%zu slabs=%u ovf=%zu gross=%zu\n",
+           live, s.block_idx + 1, cc_arena_overflow_raw_bytes(&s),
+           cc_arena_committed_gross_bytes(&s));
+    if (s.block_idx == 0 && !(s._flags & CC_ARENA_FLAG_USED_HEAP_OVERFLOW)) {
+        cc_arena_free(&s);
+        return fail("stack should have grown or overflowed");
+    }
+    cc_arena_reset(&s);
+    if (s.base != s_cc_stack_buf) {
+        cc_arena_free(&s);
+        return fail("stack reset did not restore stack buf");
+    }
+    cc_arena_free(&s);
+    return 0;
+}
+
+cc_atomic_int g_conc_ok = 0;
+cc_atomic_int g_conc_fail = 0;
+cc_atomic_size g_conc_bytes = 0;
+
+/* Per-task heap arenas under a nursery — no shared-arena CAS; stress create/free. */
+static int bench_concurrent_nursery_arenas(void) {
+    double t0 = now_sec();
+    cc_atomic_store(&g_conc_ok, 0);
+    cc_atomic_store(&g_conc_fail, 0);
+    cc_atomic_store(&g_conc_bytes, 0);
+
+    {
+        CCNursery *n = @create(NULL) @destroy;
+        if (!n) return fail("nursery create");
+        int w;
+        for (w = 0; w < CONC_WORKERS; w++) {
+            int wid = w;
+            n->spawn(() => {
+                CCArena a = cc_arena_heap(4 * 1024);
+                size_t i;
+                for (i = 0; i < CONC_ALLOCS_EACH; i++) {
+                    size_t nsz = 16 + ((size_t)wid * 19 + i * 23) % 384;
+                    void *p = cc_arena_alloc(&a, nsz, 8);
+                    if (!p) {
+                        cc_atomic_fetch_add(&g_conc_fail, 1);
+                        break;
+                    }
+                    ((unsigned char *)p)[0] = (unsigned char)(wid ^ (int)i);
+                    cc_atomic_fetch_add(&g_conc_ok, 1);
+                    cc_atomic_fetch_add(&g_conc_bytes, nsz);
+                }
+                cc_arena_free(&a);
+            });
+        }
+    }
+
+    {
+        int ok = cc_atomic_load(&g_conc_ok);
+        int failed = cc_atomic_load(&g_conc_fail);
+        size_t bytes = cc_atomic_load(&g_conc_bytes);
+        printf("  conc_nursery_arenas: workers=%d ok=%d fail=%d bytes=%zu %.3fs\n",
+               CONC_WORKERS, ok, failed, bytes, now_sec() - t0);
+        if (failed != 0 || ok != CONC_WORKERS * CONC_ALLOCS_EACH)
+            return fail("concurrent nursery arena allocs incomplete");
+    }
+    return 0;
+}
+
+int main(void) {
+    MemSample rss_start = sample_rss();
+    printf("arena_memory_storm: start rss=%zu default_block_max=%u\n",
+           rss_start.ok ? rss_start.rss_bytes : 0, CC_ARENA_DEFAULT_BLOCK_MAX);
+
+    if (bench_tip_growth()) return 1;
+    if (bench_tip_stranding()) return 2;
+    if (bench_budget_overflow_reset()) return 3;
+    if (bench_reset_pingpong()) return 4;
+    if (bench_mixed_align_storm()) return 5;
+    if (bench_arena_churn()) return 6;
+    if (bench_stack_spill()) return 7;
+    if (bench_concurrent_nursery_arenas()) return 8;
+
+    {
+        MemSample rss_end = sample_rss();
+        printf("arena_memory_storm: PASS end_rss=%zu\n",
+               rss_end.ok ? rss_end.rss_bytes : 0);
+    }
+    return 0;
+}
