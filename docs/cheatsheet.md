@@ -31,7 +31,9 @@ cleanup schedules only if unwrap succeeds.
 
 | Form | Meaning |
 |------|---------|
-| `@defer stmt;` | Statement: run on scope exit |
+| `@defer stmt;` | Always run on scope exit (LIFO) |
+| `@defer(ok) stmt;` | Only on success exit (`return cc_ok(…)` / normal return) |
+| `@defer(err) stmt;` | Only on error exit (`return cc_err(…)`) |
 | `T x = … @destroy { … };` | Explicit defer body on the binding (no registry needed) |
 | `T x = … @destroy;` | Bodyless → type’s **registered** destroy / pre-destroy |
 
@@ -51,12 +53,17 @@ Order when both exist: registered pre-destroy → `@destroy { body }` → regist
 destroy. Nursery = wait → body → free.
 
 ```c
-FILE* f = fopen("data.txt", "r");
-@defer fclose(f);
+FILE* f = fopen(path, "w");
+if (!f) return cc_err(CC_ERR_IO, "fopen failed");
+@defer fclose(f);                 // always
+@defer(ok)  commit(path);         // success path only
+@defer(err) rollback(path);       // error return only
 
 CCNursery* n = cc_nursery_create(NULL) !> @destroy;
 CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
 ```
+
+Recipe: [recipe_defer_cleanup.ccs](../examples/recipe_defer_cleanup.ccs).
 
 ---
 
