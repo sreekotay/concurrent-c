@@ -1,0 +1,39 @@
+/* Stage-1 promise suspension: a lane-side callback may return a Promise
+ * — the request suspends (GIL released) until it settles, the executor
+ * services its own queue meanwhile (a promise may depend on a task of
+ * the SAME domain), rejections become Python exceptions with the
+ * reason's text (catchable in Python), suspensions nest LIFO, sync
+ * calls still refuse thenables naming py.task, and revocation lands
+ * cleanly mid-suspension.  Rungs live in cc_python_bridge_await.js; the
+ * addon is npm/cc-python/src/cc_python.ccs (own artifact name — sibling
+ * bridge smokes relink their own). */
+CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+
+{
+    CCCommand which = cc_command(&a, @slice("sh"));
+    which.arg("-c");
+    which.arg("command -v node >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1");
+    int rc = which.status() !>;
+    if (rc != 0) { "SKIP (need node + python3)".println() !>; return 0; }
+}
+
+{
+    CCCommand build = cc_command(&a, @slice("./cc/bin/ccc"));
+    build.arg("build");
+    build.arg("npm/cc-python/src/cc_python.ccs");
+    build.arg("-o");
+    build.arg("bin/cc_python_await.node");
+    build.inherit_stdio();
+    int rc = build.status() !>;
+    if (rc != 0) { "build failed".println() !>; return 1; }
+}
+
+{
+    CCCommand run = cc_command(&a, @slice("sh"));
+    run.arg("-c");
+    run.arg("CC_PYTHON_ADDON=$PWD/bin/cc_python_await.node node tests/cc_python_bridge_await.js");
+    run.inherit_stdio();
+    int rc = run.status() !>;
+    if (rc != 0) { "await suite failed".println() !>; return 1; }
+}
+return 0;

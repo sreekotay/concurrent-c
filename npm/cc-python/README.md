@@ -80,15 +80,30 @@ the loop stays free to serve the callback.  Arguments materialize by
 the usual rule (scalars as scalars, held objects as proxies); returns
 cross back the same way.  A JS throw becomes a Python exception with
 your message, catchable in Python or surfacing as the call's error.
-Callbacks are **synchronous in v1**: returning a Promise is refused
-articulately (awaiting your own domain from inside a callback is the
-one true deadlock, so the shape is unrepresentable); *submitting* tasks
-fire-and-forget and making nested sync bridge calls both compose.
+
+A lane-side callback may be **async**: return a Promise and the Python
+call *suspends* — GIL released — until it settles.  From Python the
+callable is still plainly synchronous: `cb(x)` returns the settled
+value, or raises with the rejection's text.  While a callback is
+suspended, the executor services its own queue, so the promise may even
+depend on a task of the *same* domain:
+
+```js
+await py.task(helper)(async (x) => {
+  const row = await fetchThing(x);       // the loop is live meanwhile
+  return await py.task(np.mean)(row);    // same domain — runs nested
+}, seed);
+```
+
+Suspensions nest LIFO and unwind as promises settle.  A *sync* bridge
+call still refuses a thenable return articulately — main cannot block
+on its own event loop — and the message points at `py.task`.
 Lifetime is one rule: a registered callback pins the domain until
 `destroy()` — the sweep releases the function references, and a
 callable that outlives its bridge raises `bridge is closed` in Python.
-A callback may even destroy its own bridge mid-call: the in-flight call
-finishes, then the drain runs.
+A callback may even destroy its own bridge mid-call (or mid-suspension):
+the in-flight call finishes when its promise settles, then the drain
+runs.
 
 ## Numbers
 

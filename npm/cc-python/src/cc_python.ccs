@@ -96,7 +96,14 @@ struct CcJsCbBox {
 
 /* One lane-side callback invocation, stack-allocated in the trampoline:
  * the executor releases the GIL, posts this through the tsfn, and waits;
- * the main thread runs the JS function and fills the tagged result. */
+ * the main thread runs the JS function and fills the tagged result.  A
+ * callback that returns a thenable SUSPENDS the request instead: main
+ * attaches native .then handlers (their data pointer is this record —
+ * safe because the executor's frame outlives the wait by construction)
+ * and the settle fills the result later.  While suspended, the executor
+ * services its own queue — see ccpy__cb_call_lane — so a promise whose
+ * settlement needs another task on the SAME domain completes instead of
+ * deadlocking.  Suspensions nest strictly LIFO (the stack below). */
 struct CcJsCbReq {
     int what; /* 1 */
     CcJsCbBox *box;
@@ -112,6 +119,7 @@ struct CcJsCbReq {
     size_t rlen;
     void *robj; /* owned PyObject, IncRef'd on main under the GIL */
     pthread_cond_t cv; /* signaled under d->mu */
+    CcJsCbReq *up; /* next-outer suspended request (waiter stack) */
 };
 
 struct CcPyDom {
@@ -153,6 +161,9 @@ struct CcPyDom {
     CcPyJob sentinel; /* posted once by the exiting executor */
     /* JS-callback bridging */
     CcJsCbBox *cb_head;
+    CcJsCbReq *cb_waiter; /* innermost suspended lane callback (under mu):
+                           * submit and close signal its cv so a suspended
+                           * executor notices new work and revocation */
     void *main_env; /* the creating thread's env: case-1 calls, ref cleanup */
     pthread_t main_tid;
 };
@@ -296,6 +307,7 @@ static int ccpy__ext_make(CcPyDom *d, void *env, CcPyObjBox *b, void **out) {
 }
 
 static int ccpy__result_to_js(CcPyDom *d, void *env, CCPyObj r, void **out);
+static void ccpy__exec_run(CcPyDom *d, CcPyJob *j);
 
 /* ---- JS callbacks crossing into Python ------------------------------ */
 
@@ -400,9 +412,13 @@ static int ccpy__cb_ret_tag(CcPyDom *d, void *env, void *ret, int *rkind,
     case CC__JS_T_OBJECT: {
         _Bool has = 0;
         if (cc__js.HasNamedProperty(env, ret, "then", &has) == 0 && has) {
+            /* The lane path intercepts thenables before this probe (the
+             * request suspends); reaching it means a SYNC bridge call —
+             * main cannot block on its own event loop. */
             snprintf(errmsg, errcap,
-                     "cc-python: callbacks are synchronous in v1 — return a "
-                     "value, not a Promise");
+                     "cc-python: a synchronous bridge call cannot wait on a "
+                     "Promise — call through py.task(fn) and the callback "
+                     "may return one");
             return -1;
         }
         break;
@@ -477,7 +493,18 @@ static void *ccpy__cb_call_main(CcPyDom *d, CcJsCbBox *box, void *args,
 
 /* Case 2: callback fires on the lane.  Release the GIL — that is what
  * lets concurrent sync bridge work proceed and the loop stay free to
- * service us — post through the tsfn, wait, reacquire, convert. */
+ * service us — post through the tsfn, wait, reacquire, convert.
+ *
+ * The wait doubles as a nested executor: while this frame is suspended
+ * (a thenable return keeps `done` unset until the promise settles), the
+ * queue keeps moving ON THIS THREAD — same discipline as ccpy__exec_main,
+ * beneath the suspended Python frame.  That is what lets a callback's
+ * promise depend on a task of its own domain: the job it awaits runs
+ * here, its completion settles the promise on main, main signals us.
+ * Under `stopping`, queued jobs settle as rejections, exactly as the
+ * outer loop would; the suspended frame itself finishes when its promise
+ * settles.  The GIL is NOT held anywhere in the wait — nested runs
+ * attach and leave around themselves. */
 static void *ccpy__cb_call_lane(CcPyDom *d, CcJsCbBox *box, void *args,
                                 int n) {
     CcJsCbReq req;
@@ -495,7 +522,34 @@ static void *ccpy__cb_call_lane(CcPyDom *d, CcJsCbBox *box, void *args,
     cc_py_thread_leave();
     cc__js.CallTsfn(d->tsfn, &req, 1);
     pthread_mutex_lock(&d->mu);
-    while (!req.done) pthread_cond_wait(&req.cv, &d->mu);
+    req.up = d->cb_waiter;
+    d->cb_waiter = &req;
+    while (!req.done) {
+        if (d->qhead) {
+            CcPyJob *nj = d->qhead;
+            d->qhead = nj->next;
+            if (!d->qhead) d->qtail = NULL;
+            nj->next = NULL;
+            if (d->stopping) {
+                nj->rejected = 1;
+                d->pending_done++;
+                pthread_mutex_unlock(&d->mu);
+                cc__js.CallTsfn(d->tsfn, nj, 1);
+            } else {
+                pthread_mutex_unlock(&d->mu);
+                ccpy__exec_run(d, nj);
+                cc_py_thread_leave();
+                pthread_mutex_lock(&d->mu);
+                d->pending_done++;
+                pthread_mutex_unlock(&d->mu);
+                cc__js.CallTsfn(d->tsfn, nj, 1);
+            }
+            pthread_mutex_lock(&d->mu);
+            continue;
+        }
+        pthread_cond_wait(&req.cv, &d->mu);
+    }
+    d->cb_waiter = req.up;
     pthread_mutex_unlock(&d->mu);
     pthread_cond_destroy(&req.cv);
     cc__py_attach(&d->py);
@@ -524,6 +578,115 @@ static void *ccpy__cb_trampoline(void *self, void *args) {
         return ccpy__cb_call_lane(d, box, args, (int)n);
     return cc__py_raise("cc-python: callbacks must run on the bridge's "
                         "threads");
+}
+
+/* Settle handlers for a suspended request.  Main thread; the data
+ * pointer is the executor-side stack record, alive until `done`.  A
+ * well-behaved promise settles once; a hostile thenable that calls both
+ * handlers hits the `done` guard (main is the only writer). */
+static void ccpy__cb_settle(CcPyDom *d, CcJsCbReq *req) {
+    pthread_mutex_lock(&d->mu);
+    req->done = 1;
+    pthread_cond_signal(&req->cv);
+    pthread_mutex_unlock(&d->mu);
+}
+
+static void *ccpy__cb_then_ok(void *env, void *info) {
+    void *argv[1];
+    size_t argc = 1;
+    void *data = NULL;
+    CcJsCbReq *req;
+    CcPyDom *d;
+    argv[0] = NULL;
+    if (cc__js.GetCbInfo(env, info, &argc, argv, NULL, &data) != 0 || !data)
+        return NULL;
+    req = (CcJsCbReq *)data;
+    if (req->done) return NULL;
+    d = req->box->dom;
+    if (ccpy__cb_ret_tag(d, env, argc ? argv[0] : NULL, &req->rkind, &req->rf,
+                         &req->ri, &req->rstr, &req->rlen, &req->robj,
+                         req->errmsg, sizeof(req->errmsg)) != 0)
+        req->failed = 1;
+    ccpy__cb_settle(d, req);
+    return NULL;
+}
+
+static void *ccpy__cb_then_err(void *env, void *info) {
+    void *argv[1];
+    size_t argc = 1;
+    void *data = NULL;
+    CcJsCbReq *req;
+    void *str = NULL;
+    size_t got = 0;
+    argv[0] = NULL;
+    if (cc__js.GetCbInfo(env, info, &argc, argv, NULL, &data) != 0 || !data)
+        return NULL;
+    req = (CcJsCbReq *)data;
+    if (req->done) return NULL;
+    snprintf(req->errmsg, sizeof(req->errmsg), "callback promise rejected");
+    if (argc && argv[0] &&
+        cc__js.CoerceToString(env, argv[0], &str) == 0 && str)
+        (void)cc__js.GetValueStringUtf8(env, str, req->errmsg,
+                                        sizeof(req->errmsg), &got);
+    req->failed = 1;
+    ccpy__cb_settle(req->box->dom, req);
+    return NULL;
+}
+
+/* Suspend a request on the thenable the callback returned: attach the
+ * settle handlers and leave `done` unset — the executor keeps servicing
+ * its queue meanwhile.  The thenable is normalized through the REAL
+ * Promise.resolve first: the handlers' data pointer is the executor's
+ * stack record, so they must fire at most once and never after resume —
+ * real promises guarantee exactly that, where a hand-rolled thenable
+ * could double-settle or settle late.  On failure the caller fails the
+ * request with req->errmsg. */
+static int ccpy__cb_suspend(void *env, void *ret, CcJsCbReq *req) {
+    void *thenfn = NULL;
+    void *onok = NULL;
+    void *onerr = NULL;
+    void *handlers[2];
+    void *res = NULL;
+    if (!cc__js.CreateFunction || !cc__js.GetCbInfo) {
+        snprintf(req->errmsg, sizeof(req->errmsg),
+                 "cc-python: this Node runtime cannot suspend callbacks "
+                 "(needs napi_create_function)");
+        return -1;
+    }
+    {
+        void *global = NULL;
+        void *promise_ctor = NULL;
+        void *resolvefn = NULL;
+        void *normalized = NULL;
+        if (cc__js.GetGlobal && cc__js.GetGlobal(env, &global) == 0 && global &&
+            cc__js.GetNamedProperty(env, global, "Promise", &promise_ctor) == 0 &&
+            promise_ctor &&
+            cc__js.GetNamedProperty(env, promise_ctor, "resolve",
+                                    &resolvefn) == 0 && resolvefn &&
+            cc__js.CallFunction(env, promise_ctor, resolvefn, 1, &ret,
+                                &normalized) == 0 && normalized)
+            ret = normalized;
+        else if (cc__js.GetAndClearLastException) {
+            void *ignored = NULL;
+            (void)cc__js.GetAndClearLastException(env, &ignored);
+        }
+    }
+    if (cc__js.GetNamedProperty(env, ret, "then", &thenfn) != 0 || !thenfn ||
+        cc__js.CreateFunction(env, "ccPyOnOk", 8, (void *)ccpy__cb_then_ok,
+                              req, &onok) != 0 ||
+        cc__js.CreateFunction(env, "ccPyOnErr", 9, (void *)ccpy__cb_then_err,
+                              req, &onerr) != 0) {
+        snprintf(req->errmsg, sizeof(req->errmsg),
+                 "cc-python: cannot attach to the callback's Promise");
+        return -1;
+    }
+    handlers[0] = onok;
+    handlers[1] = onerr;
+    if (cc__js.CallFunction(env, ret, thenfn, 2, handlers, &res) != 0) {
+        ccpy__js_exc_text(env, req->errmsg, sizeof(req->errmsg));
+        return -1;
+    }
+    return 0;
 }
 
 /* Main-thread service for a lane-side callback request. */
@@ -571,6 +734,20 @@ static void ccpy__cb_service(void *env, CcJsCbReq *req) {
                                 &ret) != 0) {
             ccpy__js_exc_text(env, req->errmsg, sizeof(req->errmsg));
             failed = 1;
+        }
+    }
+    /* A thenable return suspends the request instead of settling it: the
+     * .then handlers fill the tags when the promise settles, and until
+     * then the executor services its own queue (see ccpy__cb_call_lane). */
+    if (!failed && ret) {
+        int t = 0;
+        cc__js.Typeof(env, ret, &t);
+        if (t == CC__JS_T_OBJECT) {
+            _Bool has = 0;
+            if (cc__js.HasNamedProperty(env, ret, "then", &has) == 0 && has) {
+                if (ccpy__cb_suspend(env, ret, req) == 0) return;
+                failed = 1;
+            }
         }
     }
     if (!failed &&
@@ -899,6 +1076,9 @@ static void ccpy__lane_close(CcPyDom *d, void *env, void *deferred) {
         d->tsfn_reffed = 1;
     }
     pthread_cond_signal(&d->cv);
+    /* A suspended lane callback drains queued jobs from its own wait —
+     * it must see `stopping` to reject them. */
+    if (d->cb_waiter) pthread_cond_signal(&d->cb_waiter->cv);
     pthread_mutex_unlock(&d->mu);
 }
 
@@ -1547,6 +1727,10 @@ static CCJsVal !>(CCError) CcPython_invoke_async(CcPython *self, CCJs *js,
             d->tsfn_reffed = 1;
         }
         pthread_cond_signal(&d->cv);
+        /* A suspended lane callback services the queue from its own wait
+         * — wake the innermost waiter too, or a job submitted DURING the
+         * suspension (the deadlock-dissolving case) sits unnoticed. */
+        if (d->cb_waiter) pthread_cond_signal(&d->cb_waiter->cv);
         pthread_mutex_unlock(&d->mu);
         {
             CCJsVal jv = { 0 };

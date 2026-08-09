@@ -1,0 +1,15 @@
+awaited_callback true
+string_resolution true
+bool_resolution true
+undefined_resolution true
+nested_own_domain true
+nested_two_deep true
+rejection_to_python true
+python_catches_rejection true
+pipelined_suspensions true
+sync_refusal_names_task true
+suspended_job_completes true
+late_task_refused true
+destroy_lands true
+main_closed true
+await suite done

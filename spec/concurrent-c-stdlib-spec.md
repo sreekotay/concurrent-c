@@ -2377,10 +2377,21 @@ main thread; a lane call's callback releases the GIL, posts through the
 threadsafe function, and waits while the main thread runs the function
 — which is what keeps concurrent sync work and the event loop live
 mid-callback.  Values cross by the standard rules in both directions;
-a JS throw becomes a Python exception carrying its message.  Callbacks
-are synchronous: a Promise return is refused articulately, because a
-callback awaiting its own domain is the one irreducible deadlock —
-submitting fire-and-forget tasks and nested sync calls both compose.
+a JS throw becomes a Python exception carrying its message.
+
+A lane call's callback may return a thenable: the request suspends —
+GIL still released — until the promise settles, and the Python call
+site receives the settled value or raises with the rejection's text; to
+Python the callable stays plainly synchronous.  While a request is
+suspended the executor thread services its own queue, so a promise may
+depend on tasks of the same domain — the awaited job runs nested
+beneath the suspended frame, its completion settles the promise on the
+main thread, and the settle resumes the executor.  Suspensions nest
+LIFO; queued work under a suspended revocation drains as rejections;
+and the suspended call itself completes when its promise settles, after
+which the drain proceeds.  A sync call's callback still refuses a
+thenable — the main thread cannot block on its own event loop — with a
+message naming the task form.
 One lifetime rule: a registered callback pins its domain until
 revocation (the sweep releases the function references on the main
 thread), an orphaned callable raises `bridge is closed` in Python, and

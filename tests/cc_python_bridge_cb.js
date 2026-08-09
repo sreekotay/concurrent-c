@@ -41,11 +41,13 @@ const ccpy = require(process.cwd() + '/npm/cc-python');
     out('throw_surfaces_lane', lane);
   }
 
-  // 3. A Promise return is refused articulately (callbacks are sync in v1).
+  // 3. A Promise return into a SYNC bridge call is refused articulately
+  //    (main cannot block on its own loop); the message names py.task,
+  //    where a Promise return suspends instead (the await suite).
   {
     let refused = false;
     try { builtins.list(builtins.map(async (x) => x, lst)); }
-    catch (e) { refused = /synchronous in v1/.test(e.message); }
+    catch (e) { refused = /py\.task/.test(e.message); }
     out('promise_return_refused', refused);
   }
 
