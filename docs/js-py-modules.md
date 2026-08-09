@@ -5,8 +5,9 @@
 - **Python from Node** — npm [`concurrent-c-python`](https://www.npmjs.com/package/concurrent-c-python) · in-tree [`npm/cc-python`](../npm/cc-python)
 - **JavaScript from Python** — pip [`concurrent-c-node`](https://pypi.org/project/concurrent-c-node/) · in-tree [`pypi/cc-node`](../pypi/cc-node)
 
-Publish both (clean pack, then upload): `./scripts/publish_bridges.sh --publish`
-(pack only: omit `--publish`).
+Publish both (bump patch versions, pack, upload):
+`./scripts/publish_bridges.sh --publish` (pack only: omit `--publish`;
+`--minor` / `--major` / `--no-bump` optional).
 
 [Concurrent-C](https://github.com/sreekotay/concurrent-c) is a strict
 C11-superset preprocessor: `.ccs` lowers to plain C and compiles with

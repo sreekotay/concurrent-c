@@ -16,6 +16,9 @@
  *   exception_hail   — throw/recover storms; messages intact across wire
  *   nested_callable  — Python returns callables JS keeps invoking
  *   big_payload_hail — deep / wide JSON-ish trees both directions
+ *   isolated_handle_boomerang — isolated wire: JS cb returns nested callables
+ *   isolated_pipeline_cbs     — Promise.all + nested cbs on one child
+ *   keep_past_return — callee stashes memoryview; articulate under load
  *   mixed_hammer     — sync queue-jumps a busy lane while ticks must live
  *   lease_blender    — subarray / GC / zero-copy churn under load
  */
@@ -406,7 +409,139 @@ async function bigPayloadHail() {
   ok('big_payload_hail_list', lenOk);
 }
 
-/* ---- 9. Mixed sync + lane hammer ---------------------------------------- */
+/* ---- 9. Isolated handle boomerang --------------------------------------- */
+async function isolatedHandleBoomerang() {
+  console.log('=== isolated_handle_boomerang ===');
+  const py = ccpy.create({ isolated: true });
+  const b = py.import('builtins');
+  const apply = await b.eval('lambda f, x: f(x)');
+  const N = FULL ? 200 : 80;
+  const t0 = hr();
+  let okN = 0;
+  for (let i = 0; i < N; i++) {
+    const f = await apply((n) => (x) => x + n, i % 17);
+    if ((await f(100)) === 100 + (i % 17)) okN++;
+    if (i % 9 === 0 && global.gc) global.gc();
+  }
+  // Multi-arg pick: return one of two nested callables.
+  const pick = await b.eval('lambda f: f((lambda x: x + 1), (lambda x: x + 2))(10)');
+  const picked = await pick((a, b) => b);
+  await py.destroy();
+  result('isolated_handle_boomerang_ms %s', nsToMs(hr() - t0).toFixed(1));
+  result('isolated_handle_boomerang_n %d', N);
+  ok('isolated_handle_boomerang_n', okN === N);
+  ok('isolated_handle_boomerang_pick', picked === 12);
+}
+
+/* ---- 10. Isolated pipelined cbs ----------------------------------------- */
+async function isolatedPipelineCbs() {
+  console.log('=== isolated_pipeline_cbs ===');
+  const py = ccpy.create({ isolated: true });
+  const b = py.import('builtins');
+  const apply = await b.eval('lambda f, x: f(x)');
+  const N = FULL ? 80 : 40;
+  const t0 = hr();
+  // Many in-flight calls; each JS cb returns a nested callable.
+  const jobs = [];
+  for (let i = 0; i < N; i++) {
+    jobs.push((async () => {
+      const f = await apply((n) => (x) => x + n, i);
+      return await f(100);
+    })());
+  }
+  const vals = await Promise.all(jobs);
+  // Async cbs + pipeline (parent awaits before cbr; broker parks ops).
+  const jobs2 = [];
+  for (let i = 0; i < N; i++) {
+    jobs2.push((async () => {
+      const f = await apply(async (n) => {
+        await sleep(1);
+        return (x) => x + n;
+      }, i);
+      return await f(50);
+    })());
+  }
+  const vals2 = await Promise.all(jobs2);
+  // Throw from pipelined cb must not desync the FIFO.
+  let throws = 0;
+  const jobs3 = [];
+  for (let i = 0; i < N; i++) {
+    jobs3.push(apply((x) => {
+      if (x % 2 === 0) throw new Error('pipe-hail-' + x);
+      return x * 3;
+    }, i).then(
+      (v) => v,
+      (e) => { if (/pipe-hail-/.test(e.message)) { throws++; return null; } throw e; }
+    ));
+  }
+  const vals3 = await Promise.all(jobs3);
+  await py.destroy();
+  result('isolated_pipeline_cbs_ms %s', nsToMs(hr() - t0).toFixed(1));
+  result('isolated_pipeline_cbs_n %d', N);
+  ok('isolated_pipeline_cbs_handles',
+     vals.every((v, i) => v === 100 + i));
+  ok('isolated_pipeline_cbs_async',
+     vals2.every((v, i) => v === 50 + i));
+  ok('isolated_pipeline_cbs_throws', throws === Math.ceil(N / 2));
+  ok('isolated_pipeline_cbs_odds',
+     vals3.every((v, i) => (i % 2 === 0 ? v === null : v === i * 3)));
+}
+
+/* ---- 11. Keep-past-return lease ----------------------------------------- */
+async function keepPastReturn() {
+  console.log('=== keep_past_return ===');
+  const py = ccpy.create();
+  const b = py.import('builtins');
+  const g = b.dict();
+  b.exec(
+    'G=[]\n'
+    + 'def keep(mv):\n'
+    + '  G.append(mv)\n'
+    + '  return len(mv)\n'
+    + 'def sum_ok(mv):\n'
+    + '  return float(sum(mv))\n',
+    g
+  );
+  const keep = b.eval('keep', g);
+  const sumOk = b.eval('sum_ok', g);
+  const N = FULL ? 60 : 25;
+  const t0 = hr();
+  let caught = 0;
+  let good = 0;
+  for (let i = 0; i < N; i++) {
+    const buf = new Float64Array(64 + (i % 8));
+    buf.fill(2);
+    try {
+      keep(buf);
+    } catch (e) {
+      if (/retained by the callee|borrow ends/.test(e.message)) caught++;
+      else throw e;
+    }
+    // Interleave with a legal lease use — domain must stay healthy.
+    if (sumOk(buf) === buf.length * 2) good++;
+  }
+  // Lane path: same articulate error off-thread.
+  const keepT = py.task(keep);
+  let laneCaught = 0;
+  for (let i = 0; i < (FULL ? 20 : 8); i++) {
+    const buf = new Float64Array(32);
+    buf.fill(1);
+    try {
+      await keepT(buf);
+    } catch (e) {
+      if (/retained by the callee|borrow ends/.test(e.message)) laneCaught++;
+      else throw e;
+    }
+  }
+  py.destroy();
+  result('keep_past_return_ms %s', nsToMs(hr() - t0).toFixed(1));
+  result('keep_past_return_n %d', N);
+  ok('keep_past_return_caught', caught === N);
+  ok('keep_past_return_good', good === N);
+  ok('keep_past_return_lane', laneCaught === (FULL ? 20 : 8));
+}
+
+/* ---- 12. Mixed sync + lane hammer --------------------------------------- */
 async function mixedHammer(numpyOk) {
   console.log('=== mixed_hammer ===');
   const py = ccpy.create();
@@ -452,7 +587,7 @@ async function mixedHammer(numpyOk) {
   ok('mixed_hammer_loop_alive', ticks >= 5);
 }
 
-/* ---- 10. Lease blender -------------------------------------------------- */
+/* ---- 13. Lease blender -------------------------------------------------- */
 async function leaseBlender() {
   console.log('=== lease_blender ===');
   const py = ccpy.create();
@@ -502,6 +637,9 @@ async function leaseBlender() {
   await exceptionHail();
   await nestedCallable();
   await bigPayloadHail();
+  await isolatedHandleBoomerang();
+  await isolatedPipelineCbs();
+  await keepPastReturn();
   await mixedHammer(numpyOk);
   await leaseBlender();
 

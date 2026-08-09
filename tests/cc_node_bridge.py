@@ -45,6 +45,16 @@ nest = js.eval("(cb) => cb((x) => x + 1)")
 out("callback_return_handle", nest(lambda g: g)(40) == 41)
 nest2 = js.eval("(cb) => cb((x) => cb((y) => x + y)(3))(10)")
 out("callback_return_handle_nested", nest2(lambda f: f) == 13)
+# Thenable reject stays articulate; destroy-from-callback must not hang.
+rej = js.eval("() => Promise.reject(new Error('nope-rej'))")
+try:
+    rej()
+    out("thenable_reject", False)
+except cc_node.JsError as e:
+    out("thenable_reject", "nope-rej" in str(e))
+js2 = cc_node.create()
+caller = js2.eval("(f) => f()")
+out("destroy_from_callback", caller(lambda: (js2.destroy(), 7)[1]) == 7 and js2.closed)
 thrower = js.eval("(f) => { try { f(); return 'no'; } catch (e) { return 'js saw: ' + e.message; } }")
 def boom():
     raise ValueError("from python")

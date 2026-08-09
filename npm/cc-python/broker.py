@@ -18,9 +18,11 @@
 # in this child, else array.array); everything else is a handle.  A JS
 # function argument arrives as {"$f":id}: calling it sends
 # {"cb":true,"cbid":id,"args":[...]} and BLOCKS on the reply line
-# {"cbr":...} — nested callbacks compose by strict alternation, and the
-# parent may take arbitrarily long (awaiting its own promises) before
-# replying.  EOF on stdin is revocation: drop everything, exit.
+# {"cbr":...} (or {"e":...}).  The parent may take arbitrarily long
+# (awaiting its own promises) before replying, and may have already
+# pipelined later ops onto stdin — those are parked until the cbr
+# lands, then drained in order.  EOF on stdin is revocation: drop
+# everything, exit.
 import base64
 import json
 import math
@@ -30,6 +32,8 @@ import sys
 _handles = {}
 _next = [1]
 _out = sys.stdout
+# Ops that arrived on stdin while a callback was blocked on its cbr.
+_parked = []
 # Big buffers spill through shared memory (tmpfs on Linux) instead of
 # base64: one memcpy per side, no inflation, no JSON bloat.  The dir
 # comes from the parent; files are consumed-and-unlinked per message.
@@ -79,13 +83,18 @@ def _decode(v):
             def cb(*args):
                 _send({'cb': True, 'cbid': fid,
                        'args': [_encode_val(a) for a in args]})
-                line = sys.stdin.readline()
-                if not line:
-                    raise RuntimeError('bridge is closed')
-                r = json.loads(line)
-                if 'e' in r:
-                    raise RuntimeError(r['e'])
-                return _decode(r.get('cbr'))
+                # Strict cbr wait — but Promise.all on the parent can
+                # pipeline later ops ahead of the reply.  Park those.
+                while True:
+                    line = sys.stdin.readline()
+                    if not line:
+                        raise RuntimeError('bridge is closed')
+                    r = json.loads(line)
+                    if 'cbr' in r or ('e' in r and 'op' not in r):
+                        if 'e' in r:
+                            raise RuntimeError(r['e'])
+                        return _decode(r.get('cbr'))
+                    _parked.append(r)
             return cb
         if '$nf' in v:
             return {'inf': math.inf, '-inf': -math.inf}.get(v['$nf'],
@@ -139,6 +148,12 @@ def _plain(v, depth=0):
 
 
 def _encode_val(v):
+    """Wire-encode a value nested inside a cb/cbr payload.
+
+    Unlike `_encode` (top-level reply shape), this returns the naked
+    JSON value or a tagged form — callables and other live objects
+    cross as {"$h": id}, never as a raw Python object (json.dumps
+    would raise)."""
     if isinstance(v, float) and not math.isfinite(v):
         return {'$nf': 'inf' if v == math.inf
                 else '-inf' if v == -math.inf else 'nan'}
@@ -146,7 +161,11 @@ def _encode_val(v):
         return [_encode_val(x) for x in v]
     if isinstance(v, dict):
         return {k: _encode_val(x) for k, x in v.items()}
-    return v
+    if v is None or isinstance(v, (bool, int, str)):
+        return v
+    if isinstance(v, float):
+        return v
+    return {'$h': _put(v)}
 
 
 def _encode(v):
@@ -241,16 +260,26 @@ def _dispatch(req):
     return {'e': 'cc-python broker: unknown op ' + repr(op)}
 
 
-def main():
+def _next_req():
+    if _parked:
+        return _parked.pop(0)
     for line in sys.stdin:
         line = line.strip()
         if not line:
             continue
         try:
-            req = json.loads(line)
+            return json.loads(line)
         except Exception as e:
             _send({'e': 'cc-python broker: bad request: %s' % e})
             continue
+    return None
+
+
+def main():
+    while True:
+        req = _next_req()
+        if req is None:
+            break
         try:
             resp = _dispatch(req)
         except Exception as e:

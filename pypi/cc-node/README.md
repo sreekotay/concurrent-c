@@ -114,7 +114,7 @@ From the Concurrent-C repo root (packs this wheel and the npm sibling):
 
 ```
 ./scripts/publish_bridges.sh              # → out/pypi/concurrent_c_node-* (+ npm tgz)
-./scripts/publish_bridges.sh --publish    # pack, then twine upload + npm publish
+./scripts/publish_bridges.sh --publish    # bump patch, pack, twine + npm publish
 ```
 
 ## Measured

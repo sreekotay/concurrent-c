@@ -69,6 +69,17 @@ const ccpy = require(process.cwd() + '/npm/cc-python');
       return x * 10;
     }, [1, 2, 3]));
     out('async_callback_over_wire', JSON.stringify(mapped) === '[10,20,30]');
+    // Return a Python handle from a JS callback; pipeline Promise.all
+    // while nested cbs fire (broker parks later ops across the cbr wait).
+    const apply = await b.eval('lambda f, x: f(x)');
+    const pick = await b.eval(
+      'lambda f: f((lambda x: x + 1), (lambda x: x + 2))(10)');
+    out('callback_return_py_handle', (await pick((a, b) => b)) === 12);
+    const piped = await Promise.all([0, 1, 2, 3].map(async (i) => {
+      const f = await apply((n) => (x) => x + n, i);
+      return await f(10);
+    }));
+    out('pipelined_nested_cbs', JSON.stringify(piped) === '[10,11,12,13]');
   }
 
   // 5. Exceptions keep "Type: message".

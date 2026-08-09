@@ -6,11 +6,10 @@
 
 Latency demos stay under pypi/cc-node/cc_node/examples/.  This file is stress only.
 
-Modes: multi-child fanout, callback blizzard, handle boomerang (return
-JS handles from Python callbacks under GC), exception hail, thenable
-storm, ledger churn, deep nest, concurrent shm hail, destroy derby,
-eval storm, cross-domain barrage.  RESULT lines + OK booleans; non-zero
-exit on any FAIL.
+Modes: multi-child fanout, callback blizzard, handle boomerang,
+exception hail, thenable storm (+ reject), destroy-from-callback,
+ledger churn, shm hail, teardown derby, eval storm, cross-domain
+barrage.  RESULT lines + OK booleans; non-zero exit on any FAIL.
 """
 from __future__ import annotations
 
@@ -329,6 +328,80 @@ def thenable_storm() -> None:
     ok("thenable_storm_sum2", s3 == sum(i + 1 for i in range(n)))
 
 
+def thenable_reject_storm() -> None:
+    """Promise.reject / async throw interleaved with handle-return cbs."""
+    print("=== thenable_reject_storm ===")
+    js = cc_node.create()
+    n = 200 if FULL else 80
+    mix = js.eval(
+        "async (cb, n) => { let ok = 0, bad = 0; "
+        "for (let i = 0; i < n; i++) { try { "
+        "if (i % 2 === 0) await Promise.reject(new Error('rej-' + i)); "
+        "else { const f = await Promise.resolve(cb((x) => x + i)); "
+        "ok += f(1); } "
+        "} catch (e) { "
+        "if (String(e.message).indexOf('rej-') >= 0) bad++; else throw e; } "
+        "} return [ok, bad]; }"
+    )
+    async_throw = js.eval(
+        "async (n) => { let hits = 0; for (let i = 0; i < n; i++) { "
+        "try { await (async () => { throw new Error('athrow-' + i); })(); } "
+        "catch (e) { if (String(e.message).indexOf('athrow-') >= 0) hits++; "
+        "else throw e; } } return hits; }"
+    )
+    t0 = time.perf_counter()
+    ok_sum, bad = mix(lambda g: g, n)
+    hits = async_throw(n)
+    # After rejects, a plain success must still demux cleanly.
+    alive = js.eval("(x) => x + 1")(41)
+    js.destroy()
+    want_ok = sum(1 + i for i in range(n) if i % 2 == 1)
+    want_bad = (n + 1) // 2
+    result("thenable_reject_storm_ms %.1f", (time.perf_counter() - t0) * 1000)
+    ok("thenable_reject_storm_ok", ok_sum == want_ok)
+    ok("thenable_reject_storm_bad", bad == want_bad)
+    ok("thenable_reject_storm_athrow", hits == n)
+    ok("thenable_reject_storm_alive", alive == 42)
+
+
+def destroy_from_callback() -> None:
+    """destroy() inside a JS→Python callback must not hang the wire."""
+    print("=== destroy_from_callback ===")
+    rounds = 40 if FULL else 16
+    t0 = time.perf_counter()
+    got = 0
+    closed = 0
+    late = 0
+    for _ in range(rounds):
+        js = cc_node.create()
+        caller = js.eval(
+            "(f) => { try { return f(); } catch (e) { "
+            "return 'err:' + e.message; } }"
+        )
+
+        def boom():
+            js.destroy()
+            return 42
+
+        v = caller(boom)
+        if v == 42 or (isinstance(v, str) and v.startswith("err:")):
+            got += 1
+        if js.closed:
+            closed += 1
+        try:
+            js.eval("1+1")
+        except Exception as e:
+            if "closed" in str(e).lower() or "exit" in str(e).lower():
+                late += 1
+        # Idempotent
+        js.destroy()
+    result("destroy_from_callback_ms %.1f", (time.perf_counter() - t0) * 1000)
+    result("destroy_from_callback_rounds %d", rounds)
+    ok("destroy_from_callback_got", got == rounds)
+    ok("destroy_from_callback_closed", closed == rounds)
+    ok("destroy_from_callback_late", late == rounds)
+
+
 def ledger_churn() -> None:
     """Flood the handle table; deferred GC release must not desync the wire."""
     print("=== ledger_churn ===")
@@ -409,6 +482,8 @@ def main() -> int:
     handle_boomerang()
     exception_hail()
     thenable_storm()
+    thenable_reject_storm()
+    destroy_from_callback()
     ledger_churn()
     shm_hail()
     teardown_derby()

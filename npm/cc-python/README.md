@@ -271,7 +271,7 @@ From the repo root, clean-pack (and optionally upload npm + the pip sibling):
 
 ```
 ./scripts/publish_bridges.sh              # → out/concurrent-c-python-*.tgz (+ pip wheel)
-./scripts/publish_bridges.sh --publish    # pack, then npm publish + twine upload
+./scripts/publish_bridges.sh --publish    # bump patch, pack, npm publish + twine
 ```
 
 The addon itself is ordinary Concurrent-C:

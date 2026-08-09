@@ -384,6 +384,7 @@ class ProcBridge {
 
   _decode(v) {
     if (v === null || typeof v !== 'object') return v;
+    if (v.$h !== undefined) return rwrap(this, v.$h, []);
     if (v.$nf !== undefined)
       return v.$nf === 'inf' ? Infinity : v.$nf === '-inf' ? -Infinity
                                                            : NaN;

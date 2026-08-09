@@ -142,6 +142,8 @@ class Bridge:
         self._depth = 0
         self._parked = {}
         self._pending_release = []
+        self._close_pending = False
+        self._destroy_done = False
         _live.append(self)
 
     # ---- wire ----
@@ -220,7 +222,10 @@ class Bridge:
             self._depth -= 1
             if self._depth == 0:
                 self._flush_shm()
-                self._flush_releases()
+                if self._close_pending:
+                    self._finish_destroy()
+                else:
+                    self._flush_releases()
 
     def _serve_callback(self, msg):
         fn = self._cbs.get(msg["cb"])
@@ -348,13 +353,32 @@ class Bridge:
         return self._req("stats")
 
     def destroy(self):
-        if self.closed:
+        """Idempotent teardown.  Nested destroy (e.g. from a Python
+        callback while the broker waits on cbr) defers the farewell
+        close until the in-flight wire op unwinds — nesting close into
+        the cbr slot hangs the child."""
+        if self._destroy_done:
             return
-        try:
-            self._req("close")
-        except JsError:
-            pass
+        if self._depth > 0:
+            self.closed = True
+            self._close_pending = True
+            return
+        self._finish_destroy()
+
+    def _finish_destroy(self):
+        if self._destroy_done:
+            return
+        self._destroy_done = True
+        self._close_pending = False
         self.closed = True
+        try:
+            if self._p.poll() is None and self._p.stdin \
+                    and not self._p.stdin.closed:
+                rid = self._nid
+                self._nid += 1
+                self._send({"id": rid, "op": "close"})
+        except Exception:
+            pass
         try:
             self._p.stdin.close()
         except Exception:
@@ -362,7 +386,10 @@ class Bridge:
         try:
             self._p.wait(timeout=5)
         except Exception:
-            self._p.kill()
+            try:
+                self._p.kill()
+            except Exception:
+                pass
         if self in _live:
             _live.remove(self)
 

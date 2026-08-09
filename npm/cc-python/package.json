@@ -1,6 +1,6 @@
 {
   "name": "concurrent-c-python",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Python from Node over the Concurrent-C bridge: import any Python module, call it with zero-copy typed arrays, host-controlled lifetime.",
   "main": "index.js",
   "license": "MIT",
