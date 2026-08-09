@@ -142,9 +142,10 @@ static Rng rng_for_worker(int worker_id) {
 
 static void worker_zipf(int worker_id, int iters, int spins, int keys) {
     Rng rng = rng_for_worker(worker_id);
+    CCExclusive* excl = g_excl; /* local: UFCS on global incomplete ptr misses */
     for (int i = 0; i < iters; i++) {
         int k = zipf_pick(g_zipf_cum, keys, &rng);
-        CCExclusiveGuard g = g_excl->acquire((uint64_t)k);
+        CCExclusiveGuard g = excl->acquire((uint64_t)k);
         row_bump(&g_rows[k], spins);
         g.release();
     }
@@ -180,7 +181,8 @@ static double run_zipf(int workers, int iters, int spins, int keys) {
 
 static double run_serial_fastpath(int64_t iters) {
     g_rows[0].value = 0;
-    CCExclusiveMutex m = g_excl->mutex(1000);
+    CCExclusive* excl = g_excl;
+    CCExclusiveMutex m = excl->mutex(1000);
     double t0 = time_now_ms();
     for (int64_t i = 0; i < iters; i++) {
         CCExclusiveGuard g = m.acquire();
@@ -264,7 +266,7 @@ int main(void) {
            "serial_fastpath_median_ms=%.3f serial_fastpath_ops_s=%.0f\n",
            z_med, z_ops, f_med, f_ops);
 
-    g_excl->destroy();
+    /* @defer cc_exclusive_destroy above */
     g_excl = NULL;
     return 0;
 }

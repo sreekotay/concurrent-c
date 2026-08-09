@@ -18,26 +18,22 @@ cc_atomic_int g_checksum_sent = 0;
 cc_atomic_int g_checksum_received = 0;
 
 @async int recv_task(int[~ <] rx) {
+    @errhandler(CCIoError e) { (void)e; return -1; }
     int val = 0;
     for (int i = 0; i < MSGS_PER_PAIR; i++) {
-        intptr_t rc = await rx.recv(&val);
-        if (rc == 0) {
-            cc_atomic_fetch_add(&g_total_received, 1);
-            cc_atomic_fetch_add(&g_checksum_received, val);
-        } else {
-            return -1;
-        }
+        bool got = @await rx.recv(&val) !>;
+        if (!got) return -1;
+        cc_atomic_fetch_add(&g_total_received, 1);
+        cc_atomic_fetch_add(&g_checksum_received, val);
     }
     return 0;
 }
 
 @async int send_task(int[~ >] tx, int sender_id) {
+    @errhandler(CCIoError e) { (void)e; return -1; }
     for (int i = 0; i < MSGS_PER_PAIR; i++) {
         int val = sender_id * 1000 + i;
-        intptr_t rc = await tx.send(val);
-        if (rc != 0) {
-            return -1;
-        }
+        @await tx.send(val) !>;
         cc_atomic_fetch_add(&g_total_sent, 1);
         cc_atomic_fetch_add(&g_checksum_sent, val);
     }

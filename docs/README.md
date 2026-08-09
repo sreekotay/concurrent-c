@@ -2,12 +2,13 @@
 
 ## Getting Started
 
-- **[Getting Started](getting-started.md)** — Install, first program, arenas/lifetimes, concurrency, learning path
+- **[Getting Started](getting-started.md)** — Install, first program, arenas/lifetimes, concurrency, [`.shcc` scripts](getting-started.md#shcc-scripts), learning path
 - **[When to run what](build-when.md)** — Install vs checkout vs stdlib vs lowerer vs ship vs cold smoke
 - **[Language Concepts](language-concepts.md)** — Defer, results, UFCS, arenas/provenance, closures
 - **[Cheatsheet](cheatsheet.md)** — Quick reference for common patterns
 - **[Debugging](debugging.md)** — VS Code / Cursor debugging setup
 - **[ILP32 Docker smoke](ilp32-docker.md)** — Linux i386 / ARM32 runtime smokes via Docker
+- **[Script library (`.shcc`)](../spec/concurrent-c-spec-complete.md#95-script-library-shcc--cccscript)** — Shebang tools, synthetic `main`, `@task` dispatch
 
 ## Reference
 

@@ -38,47 +38,58 @@ typedef struct {
 
 /* expected_exit: -1 skip; otherwise required exit code.
  * timeout_sec: 0 keep category default; else override.
- * extra_args: NULL-terminated argv after `--`, or NULL. */
+ * extra_args: NULL-terminated argv after `--`, or NULL.
+ * ccc_args: NULL-terminated extra `ccc run` flags before the path, or NULL. */
 typedef struct {
     const char* needle;
     int expected_exit;
     int timeout_sec;
     const char* const* extra_args;
+    const char* const* ccc_args;
 } RunPolicy;
 
 static const char* LOG_DIR = "tmp/run_all_logs";
 static const char* TRACE_PATH = "tmp/run_all_logs/run_trace.log";
+static const char* MEM_SAMPLE_O = "stress/out/mem_sample.o";
 
 static FILE* g_trace = NULL;
 
 static const char* TCP_ECHO_ARGS[] = { "--test", NULL };
+static const char* MEM_SAMPLE_CCC_ARGS[] = { "--ld-flags", "stress/out/mem_sample.o", NULL };
 
 /* First match wins. Keep comments next to the rows that need them. */
 static const RunPolicy RUN_POLICIES[] = {
     /* Servers / long-lived listeners — not self-contained under the runner. */
-    { "ping_server", -1, 0, NULL },
+    { "ping_server", -1, 0, NULL, NULL },
 
     /* MACHINE-CRASHER under aggregate load: multi-million spawn/join pressure
      * has paniced macOS Mach VM / pthread limits. See git history on this row. */
-    { "perf_spawn_ladder", -1, 0, NULL },
+    { "perf_spawn_ladder", -1, 0, NULL, NULL },
 
     /* Deadlock demos abort with exit 124 by design (sched_v2). */
-    { "deadlock_detect_demo", 124, 0, NULL },
-    { "complex_deadlock", 124, 0, NULL },
+    { "deadlock_detect_demo", 124, 0, NULL, NULL },
+    { "complex_deadlock", 124, 0, NULL, NULL },
 
-    /* Shared-object recipes: `ccc build` → *.abi3.so / *.node; not `ccc run`. */
-    { "recipe_py_module", -1, 0, NULL },
-    { "recipe_js_module", -1, 0, NULL },
+    /* Shared-object recipes / Node addons: `ccc build` → *.abi3.so / *.node. */
+    { "recipe_py_module", -1, 0, NULL, NULL },
+    { "recipe_js_module", -1, 0, NULL, NULL },
+    { "js_baseline", -1, 0, NULL, NULL },
+    { "js_numpy", -1, 0, NULL, NULL },
+
+    /* Host-C mem_sample.o (platform #if) — link via --ld-flags. */
+    { "arena_mixed_lifetime_split_bench", 0, 0, NULL, MEM_SAMPLE_CCC_ARGS },
+    { "arena_mixed_lifetime_bench", 0, 0, NULL, MEM_SAMPLE_CCC_ARGS },
+    { "arena_lifetime_chaos", 0, 0, NULL, MEM_SAMPLE_CCC_ARGS },
 
     /* Slower under the full "all" aggregate load. */
-    { "join_init_race", 0, 20, NULL },
-    { "block_combinators_stress", 0, 20, NULL },
-    { "cancellation_race_storm", 0, 30, NULL },
+    { "join_init_race", 0, 20, NULL, NULL },
+    { "block_combinators_stress", 0, 20, NULL, NULL },
+    { "cancellation_race_storm", 0, 30, NULL, NULL },
     /* mem_stress ~21s standalone; under full --perf load it can exceed 40s. */
-    { "mem_stress", 0, 90, NULL },
+    { "mem_stress", 0, 90, NULL, NULL },
 
     /* Self-testable recipe: opt into deterministic --test mode. */
-    { "recipe_tcp_echo", 0, 0, TCP_ECHO_ARGS },
+    { "recipe_tcp_echo", 0, 0, TCP_ECHO_ARGS, NULL },
 };
 
 static long long epoch_ms(void) {
@@ -115,6 +126,32 @@ static void ensure_log_dir(CCArena* arena) {
     cmd.arg("-p");
     cmd.arg(LOG_DIR);
     (void)cmd.status();
+}
+
+/* Host-compile stress/mem_sample.c — #if stays out of shadow_lower. */
+static int ensure_mem_sample_o(CCArena* arena) {
+    CCCommand mkdir = cc_command(arena, "mkdir");
+    mkdir.arg("-p");
+    mkdir.arg("stress/out");
+    (void)mkdir.status();
+
+    CCCommand cc = cc_command(arena, "cc");
+    cc.arg("-O2");
+    cc.arg("-std=c11");
+    cc.arg("-c");
+    cc.arg("stress/mem_sample.c");
+    cc.arg("-o");
+    cc.arg(MEM_SAMPLE_O);
+    CCResult_int_CCIoError st = cc.status();
+    if (cc_is_err(st)) {
+        fprintf(stderr, "run_all: cannot spawn cc for %s\n", MEM_SAMPLE_O);
+        return 0;
+    }
+    if (cc_unwrap(st) != 0) {
+        fprintf(stderr, "run_all: failed to build %s\n", MEM_SAMPLE_O);
+        return 0;
+    }
+    return 1;
 }
 
 static const char* log_path_for(CCArena* arena, const char* path, const char* suffix) {
@@ -220,6 +257,7 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
         int expected_exit = pol ? pol->expected_exit : 0;
         int timeout_for_file = (pol && pol->timeout_sec > 0) ? pol->timeout_sec : timeout_sec;
         const char* const* extra = (pol && pol->extra_args) ? pol->extra_args : NULL;
+        const char* const* ccc_args = (pol && pol->ccc_args) ? pol->ccc_args : NULL;
 
         if (expected_exit == -1) {
             printf("  [%zu/%zu] %s ... SKIP (policy)\n", i + 1, n, path);
@@ -239,6 +277,9 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
         cmd.arg_if(release, "--release");
         cmd.arg_if(timeout_for_file > 0, "--timeout");
         cmd.arg_i32_if(timeout_for_file > 0, timeout_for_file);
+        if (ccc_args) {
+            for (size_t k = 0; ccc_args[k] != NULL; k++) cmd.arg(ccc_args[k]);
+        }
         cmd.arg(path);
         if (extra) {
             cmd.arg("--");
@@ -341,6 +382,7 @@ int main(int argc, char** argv) {
         run_files(&arena, "examples/*.ccs", "Examples", &stats, 0, do_stream, false);
     }
     if (do_stress) {
+        if (!ensure_mem_sample_o(&arena)) return 1;
         run_files(&arena, "stress/*.ccs", "Stress Tests", &stats, STRESS_TIMEOUT_SEC, do_stream,
                   false);
     }

@@ -18,18 +18,20 @@
 #include <stdio.h>
 
 @async int producer(CCChanTx tx) {
+    @errhandler(CCIoError e) { (void)e; return -1; }
     printf("Producer: about to send...\n");
     int val = 42;
-    intptr_t rc = await tx.send(val);
-    printf("Producer: sent! rc=%ld\n", (long)rc);
+    @await tx.send(val) !>;
+    printf("Producer: sent!\n");
     return 1;
 }
 
 @async int consumer(CCChanRx rx) {
+    @errhandler(CCIoError e) { (void)e; return -1; }
     printf("Consumer: about to recv...\n");
     int v = 0;
-    intptr_t rc = await rx.recv(&v);
-    printf("Consumer: received %d, rc=%ld\n", v, (long)rc);
+    @await rx.recv(&v) !>;
+    printf("Consumer: received %d\n", v);
     return v;
 }
 

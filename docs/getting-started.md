@@ -1,9 +1,10 @@
 # Getting Started with Concurrent-C
 
-Concurrent-C is a **strict C11-superset**: you write `.ccs`, the `ccc` driver
-lowers it to plain C (with `#line` sourcemaps), and your **host C compiler**
-builds the binary. Structured concurrency, results, UFCS, slices/arenas, and a
-header-first runtime ship with the language.
+Concurrent-C is a **strict C11-superset**: you write `.ccs` (or `.cch`
+headers, or `.shcc` scripts — [below](#shcc-scripts)), the `ccc` driver lowers
+it to plain C (with `#line` sourcemaps), and your **host C compiler** builds the
+binary. Structured concurrency, results, UFCS, slices/arenas, and a header-first
+runtime ship with the language.
 
 You do **not** need to build the compiler from a checkout to use the language.
 Install `ccc`, run a program, then follow the examples learning path.
@@ -280,6 +281,39 @@ timeouts / worker pool → arenas / defer. Then networking
 Larger measured programs (pigz, Redis subset, CPython extension patterns) live
 under [`real_projects/`](../real_projects/); benches under [`perf/`](../perf/).
 
+## `.shcc` scripts
+
+`.shcc` is the **script** form of Concurrent-C — same language as `.ccs`, but
+meant for short tools (read bytes, `@grammar` / SERDES, `@string`, spawn
+processes, print reports). The extension is deliberately outside the
+`.ccs` / `.cch` source–header pair.
+
+What the driver does for a `.shcc` unit:
+
+- Strips a leading `#!` shebang when present
+- Force-includes `<ccc/script/prelude.cch>`
+- If there is no top-level `main`, wraps top-level statements in a synthetic
+  `main` with a default `@errhandler(CCError)`
+- May inject ambient `a` / `io` / `in` / `args` into that wrap when you use those names
+- Treats a bare `ccc path/to/tool.shcc …` as **run** (shebang-friendly)
+
+```bash
+ccc examples/py/pydemo.shcc          # implicit run
+ccc run tools/cc_perf_check.shcc -- --help
+./tools/perf.shcc @                  # list @task entries
+```
+
+Shebang from a repo checkout (cwd = repo root):
+
+```text
+#!/usr/bin/env -S ./cc/bin/ccc
+```
+
+Try [examples/py/pydemo.shcc](../examples/py/pydemo.shcc) (Python from a script)
+or [tools/cc_perf_check.shcc](../tools/cc_perf_check.shcc). Full rules:
+[Language spec §9.5 — Script Library](../spec/concurrent-c-spec-complete.md#95-script-library-shcc--cccscript);
+one-liners: [draft_script_oneliners.md](../spec/draft_script_oneliners.md).
+
 ## Python and JavaScript
 
 Three related doors:
@@ -291,11 +325,13 @@ Three related doors:
 | Call JS / npm from Python | pip [`concurrent-c-node`](https://pypi.org/project/concurrent-c-node/) |
 
 Embed Python from a CC `main`: `examples/recipe_py_interop.ccs`.
+Script form of the same door: [examples/py/pydemo.shcc](../examples/py/pydemo.shcc).
 
 ## Next
 
 - [Language Concepts](language-concepts.md)
 - [Cheatsheet](cheatsheet.md)
+- [`.shcc` scripts](#shcc-scripts) · [spec §9.5](../spec/concurrent-c-spec-complete.md#95-script-library-shcc--cccscript)
 - [examples/](../examples/)
 - [Debugging](debugging.md)
 - [Docs index](README.md)
