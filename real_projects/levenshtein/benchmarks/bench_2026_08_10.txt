@@ -1,0 +1,12 @@
+# real_projects/levenshtein/bench.py snapshot (ccc build --no-cache -O)
+# date: 2026-08-10
+# host: Darwin arm64
+# upstream: Levenshtein 0.27.4 (rapidfuzz-backed)
+# note: CCPyStr.codepoints + pad=1 default; dist_fx2..fx8 + lcs_fx2..fx8
+#
+distance/words(3-12)         cclev       94 ns  upstream      359 ns  cclev/upstream  0.26x  (cclev faster)
+distance/long(200)           cclev     1733 ns  upstream     2294 ns  cclev/upstream  0.76x  (cclev faster)
+ratio/words(3-12)            cclev      106 ns  upstream      196 ns  cclev/upstream  0.54x  (cclev faster)
+ratio/long(200)              cclev      560 ns  upstream      654 ns  cclev/upstream  0.86x  (cclev faster)
+jaro_winkler/words(3-12)     cclev      108 ns  upstream      217 ns  cclev/upstream  0.50x  (cclev faster)
+hamming/words equal-len      cclev       49 ns  upstream       84 ns  cclev/upstream  0.59x  (cclev faster)

@@ -67,7 +67,7 @@ Two behaviors only empirical probing settled: transposition counts halve
 with *integer* division (an odd mismatch count rounds down), and
 jaro_winkler applies its prefix bonus only above the classic 0.7 boost
 threshold. Neither is in upstream's docstrings; parity.py's random sweep
-(5060 checks, ASCII through astral) found both. This is what "judged by the
+(6061 checks, ASCII through astral) found both. This is what "judged by the
 real package" buys.
 
 ## What worked without friction

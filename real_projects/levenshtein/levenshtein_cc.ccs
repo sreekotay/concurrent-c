@@ -1,6 +1,6 @@
 /* python-Levenshtein's core, as a CC extension module.
  *
- *     ccc build real_projects/levenshtein/levenshtein_cc.ccs
+ *     ccc build -O real_projects/levenshtein/levenshtein_cc.ccs
  *     PYTHONPATH=bin python3 -c "import cclev; print(cclev.distance('kitten','sitting'))"
  *
  * The specimen bar (real_projects/README.md): same answers as the real

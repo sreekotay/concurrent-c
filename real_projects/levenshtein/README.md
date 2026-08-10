@@ -44,30 +44,32 @@ lowered output (`--emit-c-only`).
 ## Referees
 
 ```bash
-pip install Levenshtein
-PYTHONPATH=bin python3 real_projects/levenshtein/parity.py   # 5060 checks, ASCII → astral
+pip install 'Levenshtein==0.27.*'
+PYTHONPATH=bin python3 real_projects/levenshtein/parity.py   # 6061 checks, ASCII → astral
 PYTHONPATH=bin python3 real_projects/levenshtein/bench.py
 ```
 
 Parity is the bar: every function against the pip-installed upstream on
-fixed edge cases plus 1200 random pairs over widening alphabets and
-lengths to 250 — both sides of the scalar/bit dispatch threshold and the
-64-codepoint block boundary. `tests/py_levenshtein_smoke.shcc` builds and
-imports the module in the main suite without needing pip.
+fixed edge cases plus random pairs (1212 pairs × 5 functions + pad check)
+over widening alphabets and lengths to 250 — both sides of the scalar/bit
+dispatch threshold and the 64-codepoint block boundary.
+`tests/py_levenshtein_smoke.shcc` builds and imports the DP-only smoke
+module in the main suite without needing pip.
 
 ## Cost, honestly (release build, one machine)
 
-Snapshot from `ccc build -O` + `bench.py` on Darwin arm64 (raw output under
-`benchmarks/`). Ratios below 1 mean cclev is faster.
+Snapshot from `ccc build --no-cache -O` + `bench.py` on Darwin arm64
+against Levenshtein 0.27.4 (raw output under `benchmarks/`). Ratios below
+1 mean cclev is faster.
 
 | workload | cclev | upstream | cclev/upstream |
 |---|---|---|---|
-| distance, words 3–12 | 90 ns | 166 ns | 0.55× — cclev faster |
-| distance, 200 chars | 1.6 µs | 2.2 µs | 0.71× — cclev faster |
-| ratio, words 3–12 | 103 ns | 199 ns | 0.52× — cclev faster |
-| ratio, 200 chars | 532 ns | 634 ns | 0.84× — cclev faster |
-| jaro_winkler, words 3–12 | 117 ns | 213 ns | 0.55× — cclev faster |
-| hamming, equal-len words | 47 ns | 82 ns | 0.57× — cclev faster |
+| distance, words 3–12 | 94 ns | 359 ns | 0.26× — cclev faster |
+| distance, 200 chars | 1.7 µs | 2.3 µs | 0.76× — cclev faster |
+| ratio, words 3–12 | 106 ns | 196 ns | 0.54× — cclev faster |
+| ratio, 200 chars | 560 ns | 654 ns | 0.86× — cclev faster |
+| jaro_winkler, words 3–12 | 108 ns | 217 ns | 0.50× — cclev faster |
+| hamming, equal-len words | 49 ns | 84 ns | 0.59× — cclev faster |
 
 Short strings: cclev wins — the abi3 crossing is cheaper than upstream's
 binding layer. Long rows sit at or ahead of rapidfuzz after the bit-parallel

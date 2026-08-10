@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "concurrent-c-node"
-version = "0.11.0"
+version = "0.12.0"
 description = "JavaScript and npm packages from Python over the Concurrent-C bridge: one spawned Node child per domain, host-controlled lifetime."
 readme = "README.md"
 requires-python = ">=3.8"
