@@ -4,6 +4,15 @@ neg_inproc_foreign_arg true
 neg_inproc_use_after_release true
 neg_inproc_release_again true
 neg_inproc_keep_past_return true
+neg_inproc_proxy_keys true
+neg_inproc_proxy_json true
+neg_inproc_proxy_alive true
+neg_inproc_scalar_nan true
+neg_inproc_scalar_inf true
+neg_inproc_scalar_ninf true
+neg_inproc_scalar_neg0 true
+neg_inproc_system_exit true
+neg_inproc_after_system_exit true
 neg_inproc_after_close true
 neg_inproc_destroy_idempotent true
 neg_iso_dollar_key true

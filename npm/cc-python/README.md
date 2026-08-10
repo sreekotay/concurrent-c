@@ -154,6 +154,15 @@ the bytes back through the same spill).  Pick the tier by workload:
 in-process for hot fine-grained calls and zero-copy buffers, isolated
 for N-way parallel numpy, crash isolation, and per-domain environments.
 
+Teardown on an isolated domain is **cooperative**: `destroy()` sends
+`close`, drains in-flight wire work, then waits (SIGKILL only if the
+child ignores close). An in-flight call may still fulfill with a
+correct value; after destroy every door answers `bridge is closed`.
+Hard death of the child (`SIGKILL`, `os.abort`, `_exit`) is different —
+in-flight ops must reject, and SHM spill files must not leak. The
+stress catalog separates those contracts
+([`stress/bridge/bridge_stress.md`](../../stress/bridge/bridge_stress.md)).
+
 `py.task(jsClosure)` is reserved for recorded batch graphs —
 parameterized pipelines that ship N Python calls as one job (and, later,
 across a process boundary) — and says so articulately until it exists.
@@ -186,8 +195,9 @@ Exceptions keep `Type: message` in both directions and across any
 number of crossings: a coroutine's `ValueError: bad input` is the JS
 rejection's message; a JS rejection raises `RuntimeError` at the
 Python `await` (catchable there), and uncaught it crosses back with its
-text intact.  `destroy()` cancels pending tasks — their promises answer
-`bridge is closed` — then drains and sweeps as always.
+text intact.  `destroy()` revokes the domain — queued work rejects with
+`bridge is closed`, then the lane drains and sweeps. In-flight work
+already running may still settle; afterwards every door is closed.
 
 ## Callbacks: JS functions as Python callables
 
@@ -325,8 +335,9 @@ Numbers swing ±40% run-to-run on a small shared VM; the example files
 print machine-comparable `RESULT` lines, so re-measuring on your box is
 one command.
 
-Adversarial kitchen-sink (crash isolation, abort inject, mixed concurrent,
-handle-leak / RSS soaks): [`stress/bridge/`](../../stress/bridge/) —
-`./stress/bridge/run.sh`. Mode catalog + status:
+Adversarial kitchen-sink (escaped closures, lease detach, cooperative
+subset-destroy, SIGKILL mid-spill, abort inject, mixed soaks):
+[`stress/bridge/`](../../stress/bridge/) — `./stress/bridge/run.sh`.
+Mode catalog + destroy contracts:
 [`stress/bridge/bridge_stress.md`](../../stress/bridge/bridge_stress.md)
 (latency demos stay in `examples/`).

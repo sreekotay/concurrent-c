@@ -244,5 +244,56 @@ const ccpy = require(process.cwd() + '/npm/cc-python');
     py.destroy();
   }
 
+  // 11. Escaped proxy via JS closure: destroy domain, GC, invoke later.
+  {
+    let escaped;
+    {
+      const py = ccpy.create();
+      const fn = py.import('math').floor;
+      escaped = (x) => fn(x);
+      await py.destroy();
+    }
+    await gcNow();
+    let closed = false;
+    try { escaped(3.7); } catch (e) { closed = /closed/.test(e.message); }
+    out('escaped_closure_closed', closed);
+  }
+
+  // 12. Lease + ArrayBuffer.transfer while a lane call holds the buffer.
+  {
+    const py = ccpy.create();
+    const math = py.import('math');
+    const buf = new Float64Array(1 << 18);
+    buf.fill(2);
+    const want = buf.length * 2;
+    const p = py.task(math.fsum)(buf);
+    await sleep(0);
+    let detachHow = 'none';
+    try {
+      if (typeof buf.buffer.transfer === 'function') {
+        buf.buffer.transfer();
+        detachHow = 'transfer';
+      } else {
+        structuredClone(buf, { transfer: [buf.buffer] });
+        detachHow = 'structuredClone';
+      }
+    } catch (_) {
+      detachHow = 'blocked';
+    }
+    let accounted = false;
+    try {
+      const s = await p;
+      accounted = s === want || detachHow === 'blocked';
+    } catch (e) {
+      accounted = /closed|detach|buffer|ArrayBuffer|memoryview|lease/i
+        .test(e.message);
+    }
+    out('lease_detach_mid_lane', accounted);
+    const probe = new Float64Array(32);
+    probe.fill(1);
+    out('lease_detach_alive', math.fsum(probe) === 32);
+    await py.destroy();
+  }
+
   console.log('mem suite done');
 })();

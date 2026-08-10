@@ -22,4 +22,7 @@ interleaved_survivors true
 interleaved_closed true
 chain_result true
 chain_stats_bounded true
+escaped_closure_closed true
+lease_detach_mid_lane true
+lease_detach_alive true
 mem suite done

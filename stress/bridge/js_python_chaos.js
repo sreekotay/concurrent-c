@@ -1053,7 +1053,260 @@ async function everythingConcurrent(numpyOk) {
   ok('everything_concurrent_ok', settled.every(Boolean));
 }
 
-/* ---- 24. Native abort inject (isolated children) ------------------------ */
+/* ---- 24. Escaped proxy via JS closure after destroy --------------------- */
+async function escapedClosure() {
+  console.log('=== escaped_closure ===');
+  const t0 = hr();
+  let closed = 0;
+  let isoClosed = 0;
+  // In-process: capture callable, destroy, GC, invoke later.
+  {
+    let escaped;
+    {
+      const py = ccpy.create();
+      const fn = py.import('math').floor;
+      escaped = (x) => fn(x);
+      await py.destroy();
+    }
+    if (global.gc) { global.gc(); await sleep(20); global.gc(); }
+    try { escaped(3.7); }
+    catch (e) { if (/closed/.test(e.message)) closed++; }
+  }
+  // Isolated: same shape across the wire.
+  {
+    let escaped;
+    {
+      const py = ccpy.create({ isolated: true });
+      const b = py.import('builtins');
+      const fn = await b.eval('lambda x: x + 1');
+      escaped = async (x) => fn(x);
+      await py.destroy();
+    }
+    if (global.gc) { global.gc(); await sleep(20); global.gc(); }
+    try { await escaped(1); }
+    catch (e) { if (/closed|exited/.test(e.message)) isoClosed++; }
+  }
+  result('escaped_closure_ms %s', nsToMs(hr() - t0).toFixed(1));
+  ok('escaped_closure_inproc', closed === 1);
+  ok('escaped_closure_isolated', isoClosed === 1);
+}
+
+/* ---- 25. Lease + ArrayBuffer.transfer mid-lane -------------------------- */
+async function leaseDetach() {
+  console.log('=== lease_detach ===');
+  const py = ccpy.create();
+  const math = py.import('math');
+  const n = FULL ? (1 << 20) : (1 << 18);
+  const rounds = FULL ? 8 : 4;
+  const t0 = hr();
+  let okN = 0;
+  for (let r = 0; r < rounds; r++) {
+    const buf = new Float64Array(n);
+    buf.fill(2);
+    const want = n * 2;
+    const p = py.task(math.fsum)(buf);
+    await sleep(0); // let the lane start
+    let detachHow = 'none';
+    try {
+      if (typeof buf.buffer.transfer === 'function') {
+        buf.buffer.transfer();
+        detachHow = 'transfer';
+      } else {
+        structuredClone(buf, { transfer: [buf.buffer] });
+        detachHow = 'structuredClone';
+      }
+    } catch (e) {
+      detachHow = 'blocked';
+    }
+    try {
+      const s = await p;
+      // Pin held (correct sum) or host blocked detach — both fine.
+      if (s === want || detachHow === 'blocked') okN++;
+    } catch (e) {
+      // Articulate failure after detach is also fine — not crash/hang.
+      if (/closed|detach|buffer|ArrayBuffer|memoryview|lease/i.test(e.message))
+        okN++;
+      else throw e;
+    }
+  }
+  // Domain still healthy for a later lease.
+  const probe = new Float64Array(64);
+  probe.fill(1);
+  const alive = math.fsum(probe) === 64;
+  await py.destroy();
+  result('lease_detach_ms %s', nsToMs(hr() - t0).toFixed(1));
+  result('lease_detach_rounds %d', rounds);
+  ok('lease_detach_accounted', okN === rounds);
+  ok('lease_detach_alive', alive);
+}
+
+/* ---- 26. Sync call while lane holds a large leased buffer --------------- */
+async function syncVsLaneLease() {
+  console.log('=== sync_vs_lane_lease ===');
+  const py = ccpy.create();
+  const math = py.import('math');
+  const elems = FULL ? (1 << 22) : (1 << 20); // 32MB / 8MB
+  const buf = new Float64Array(elems);
+  buf.fill(1.25);
+  const t0 = hr();
+  const laneP = py.task(math.fsum)(buf);
+  // Queue-jump sync work while the lease is live on the lane.
+  let syncOk = true;
+  for (let i = 0; i < 200; i++) {
+    const v = math.sqrt(i + 1);
+    if (typeof v !== 'number' || Math.abs(v - Math.sqrt(i + 1)) > 1e-9) {
+      syncOk = false;
+      break;
+    }
+  }
+  const laneVal = await laneP;
+  const laneOk = laneVal === elems * 1.25;
+  // Lease must still be usable after lane settle.
+  const after = math.fsum(buf.subarray(0, 1024));
+  await py.destroy();
+  result('sync_vs_lane_lease_ms %s', nsToMs(hr() - t0).toFixed(1));
+  result('sync_vs_lane_lease_elems %d', elems);
+  ok('sync_vs_lane_lease_sync', syncOk);
+  ok('sync_vs_lane_lease_lane', laneOk);
+  ok('sync_vs_lane_lease_after', after === 1024 * 1.25);
+}
+
+/* ---- 27. Promise.all across isolated domains; destroy a subset ---------- */
+async function promiseAllDestroy() {
+  console.log('=== promise_all_destroy ===');
+  /* Cooperative destroy drains (close + wait); in-flight work may still
+   * fulfill. Hard-cancel is kill_mid_spill / abort_inject. Here we pin
+   * composition: every promise settles, survivors are correct, destroyed
+   * domains end closed, no stray SHM, no hang. */
+  const N = FULL ? 10 : 6;
+  const delay = FULL ? 0.12 : 0.06;
+  const t0 = hr();
+  const domains = [];
+  for (let i = 0; i < N; i++) {
+    const py = ccpy.create({ isolated: true });
+    const b = py.import('builtins');
+    const work = await b.eval(
+      'lambda n: (__import__("time").sleep(n), int(n * 1000))[1]');
+    domains.push({ py, work });
+  }
+  const jobs = domains.map((d) => d.work(delay));
+  await sleep(10);
+  const doomed = [];
+  for (let i = 1; i < N; i += 2) doomed.push(i);
+  await Promise.all(doomed.map(async (i) => {
+    try { await domains[i].py.destroy(); } catch (_) {}
+  }));
+  const settled = await Promise.allSettled(jobs);
+  let fulfilled = 0, rejected = 0, valuesOk = 0;
+  const want = Math.round(delay * 1000);
+  for (let i = 0; i < N; i++) {
+    const s = settled[i];
+    if (s.status === 'fulfilled') {
+      fulfilled++;
+      if (s.value === want) valuesOk++;
+    } else if (/closed|exited/.test(String(s.reason && s.reason.message))) {
+      rejected++;
+    }
+  }
+  let doomedClosed = 0;
+  for (const i of doomed) if (domains[i].py.closed) doomedClosed++;
+  // Survivors that were not destroy()'d must still be usable, then close.
+  let survivorsOk = 0;
+  for (let i = 0; i < N; i += 2) {
+    try {
+      const b = domains[i].py.import('builtins');
+      const one = await b.eval('lambda: 1');
+      if ((await one()) === 1) survivorsOk++;
+      await domains[i].py.destroy();
+    } catch (_) {}
+  }
+  const strays = straySpills();
+  result('promise_all_destroy_ms %s', nsToMs(hr() - t0).toFixed(1));
+  result('promise_all_destroy_fulfilled %d', fulfilled);
+  result('promise_all_destroy_rejected %d', rejected);
+  ok('promise_all_destroy_accounted', fulfilled + rejected === N);
+  ok('promise_all_destroy_values', valuesOk === fulfilled);
+  ok('promise_all_destroy_doomed_closed', doomedClosed === doomed.length);
+  ok('promise_all_destroy_survivors', survivorsOk === Math.ceil(N / 2));
+  ok('promise_all_destroy_no_strays', strays.length === 0);
+}
+
+/* ---- 28. SIGKILL mid-spill — SHM files must be reaped ------------------- */
+async function killMidSpill() {
+  console.log('=== kill_mid_spill ===');
+  const rounds = SOAK ? 12 : (FULL ? 8 : 4);
+  const t0 = hr();
+  let rejected = 0;
+  let clean = 0;
+  for (let r = 0; r < rounds; r++) {
+    const before = straySpills().length;
+    const py = ccpy.create({ isolated: true });
+    const b = py.import('builtins');
+    const pidFn = await b.eval('lambda: __import__("os").getpid()');
+    const pid = await pidFn();
+    // Sleep inside child so the spill is in flight when we SIGKILL.
+    const slow = await b.eval(
+      'lambda a: (__import__("time").sleep(0.15), len(a))[1]');
+    const buf = new Float64Array((1 << 16) / 8 + 4096);
+    buf.fill(1);
+    const p = slow(buf);
+    await sleep(20);
+    try { process.kill(pid, 'SIGKILL'); } catch (_) {}
+    try {
+      await p;
+    } catch (e) {
+      if (/closed|exited/.test(e.message)) rejected++;
+    }
+    try { await py.destroy(); } catch (_) {}
+    await sleep(30);
+    if (straySpills().length <= before) clean++;
+  }
+  result('kill_mid_spill_ms %s', nsToMs(hr() - t0).toFixed(1));
+  result('kill_mid_spill_rounds %d', rounds);
+  ok('kill_mid_spill_rejected', rejected === rounds);
+  ok('kill_mid_spill_no_strays', clean === rounds);
+}
+
+/* ---- 29. Mixed sync + lane + isolated soak ------------------------------ */
+async function mixedLoadSoak(numpyOk) {
+  console.log('=== mixed_load_soak ===');
+  const seconds = SOAK
+    ? Number(process.env.SOAK_SECONDS || 15)
+    : (FULL ? 2.5 : 0.9);
+  const limitMb = SOAK ? 768 : (FULL ? 512 : 384);
+  const r0 = rss();
+  const t0 = hr();
+  const py = ccpy.create();
+  const math = py.import('math');
+  const lane = py.task(math.fsum);
+  const iso = ccpy.create({ isolated: true });
+  const b = iso.import('builtins');
+  const add = await b.eval('lambda x: x + 1');
+  let syncN = 0, laneN = 0, isoN = 0;
+  const deadline = Date.now() + seconds * 1000;
+  while (Date.now() < deadline) {
+    syncN += math.floor(1.2);
+    const buf = new Float64Array(256);
+    buf.fill(0.5);
+    laneN += await lane(buf);
+    isoN += await add(1);
+    if ((syncN + laneN) % 40 === 0 && global.gc) global.gc();
+  }
+  await py.destroy();
+  await iso.destroy();
+  if (global.gc) { global.gc(); await sleep(20); }
+  const delta = Math.max(0, rss() - r0);
+  result('mixed_load_soak_ms %s', nsToMs(hr() - t0).toFixed(1));
+  result('mixed_load_soak_sync %d', syncN);
+  result('mixed_load_soak_lane %s', laneN);
+  result('mixed_load_soak_iso %d', isoN);
+  result('mixed_load_soak_delta_mb %s', (delta / MB).toFixed(1));
+  ok('mixed_load_soak_progress', syncN > 0 && laneN > 0 && isoN > 0);
+  ok('mixed_load_soak_rss', delta < limitMb * MB);
+  void numpyOk;
+}
+
+/* ---- 30. Native abort inject (isolated children) ------------------------ */
 async function abortInject() {
   console.log('=== abort_inject ===');
   const rounds = SOAK ? 16 : (FULL ? 10 : 6);
@@ -1119,12 +1372,17 @@ async function abortInject() {
   await destroyDuringThenable();
   await mixedHammer(numpyOk);
   await everythingConcurrent(numpyOk);
+  await escapedClosure();
+  await leaseDetach();
+  await syncVsLaneLease();
+  await promiseAllDestroy();
   await leaseBlender();
   await rssSoak();
   await rssSoakIsolated();
   await handleLeakSoak();
-  /* Abort last: SIGABRT / os.abort is intentionally noisy (core dumps,
-   * broker BrokenPipe). Keep it out of the middle of the suite. */
+  await mixedLoadSoak(numpyOk);
+  /* Unclean death last: SIGKILL mid-spill, then abort (noisy). */
+  await killMidSpill();
   await abortInject();
 
   console.log('=== summary ===');

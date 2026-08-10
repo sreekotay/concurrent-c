@@ -50,6 +50,11 @@ Import stays `import cc_node`. Examples ship in the wheel. The mirror of
   the handle ledger and `release()` drops one early; `destroy()` is
   idempotent, every door answers `bridge is closed` after, and the
   child dies with the bridge (and on host exit, via stdin EOF).
+  Teardown is **cooperative** (farewell `close` + drain, then wait /
+  kill-fallback): in-flight calls may still return a correct value.
+  Hard child death (`SIGKILL`, `process.abort`) is a different contract —
+  in-flight ops must reject. See
+  [`bridge_stress.md`](https://github.com/sreekotay/concurrent-c/blob/main/stress/bridge/bridge_stress.md).
 
 ## Async is free
 
@@ -150,10 +155,11 @@ A worked tour (builtin Node modules, chains, callbacks, thenables,
 buffers — no npm install needed):
 `python -m cc_node.examples.use_node`.
 
-Adversarial multi-child storm (fanout, abort inject, mixed concurrent,
-handle-leak / RSS soaks): [`stress/bridge/`](https://github.com/sreekotay/concurrent-c/tree/main/stress/bridge)
+Adversarial multi-child storm (escaped closures, cooperative
+fanout-destroy, abort inject, handle-leak / RSS soaks):
+[`stress/bridge/`](https://github.com/sreekotay/concurrent-c/tree/main/stress/bridge)
 — `./stress/bridge/run.sh` (`CHAOS_SCALE=full` / `soak` for bigger N).
-Mode catalog + status:
+Mode catalog + destroy contracts:
 [`bridge_stress.md`](https://github.com/sreekotay/concurrent-c/blob/main/stress/bridge/bridge_stress.md)
 (latency demos stay in `cc_node/examples/`).
 

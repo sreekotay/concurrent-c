@@ -60,13 +60,19 @@ cleanly when numpy is absent. Not part of `tools/run_all.ccs --stress`.
 | `asyncio_lane_storm` | green | Asyncio lane concurrency |
 | `release_during_suspend` | green | Release / GC during suspension |
 | `destroy_during_thenable` | green, smoke | Destroy while a slow thenable is in flight |
-| `abort_inject` | green | `os.abort` / `SIGABRT` on isolated children (stricter than `_exit`) |
 | `mixed_hammer` | green, numpy | Two domains + event-loop ticks under load |
 | `everything_concurrent` | green | Mixed shapes on many domains at once (`Promise.all`) |
+| `escaped_closure` | green, smoke | JS closure captures proxy; destroy + GC; later invoke → closed |
+| `lease_detach` | green, smoke | `ArrayBuffer.transfer` while lane holds a leased buffer |
+| `sync_vs_lane_lease` | green | Sync `math.sqrt` while lane `fsum` holds a large lease |
+| `promise_all_destroy` | green | `Promise.all` across N isolated domains; destroy a subset mid-flight (cooperative — see design notes) |
 | `lease_blender` | green | Buffer leases + drop mid-flight |
 | `rss_soak` | green, soak | Create/churn/destroy RSS bound (in-process) |
 | `rss_soak_isolated` | green, soak | Same for process children |
 | `handle_leak_soak` | green, soak | Long-lived domain; `stats()` + RSS must re-settle |
+| `mixed_load_soak` | green, soak | Sync + lane + isolated churn; RSS bound (`SOAK_SECONDS`) |
+| `kill_mid_spill` | green | `SIGKILL` child mid-SHM spill; no stray spill files |
+| `abort_inject` | green | `os.abort` / `SIGABRT` on isolated children (stricter than `_exit`) |
 
 ## `cc_node_stress_wire.py` (Python → Node)
 
@@ -85,7 +91,6 @@ cleanly when numpy is absent. Not part of `tools/run_all.ccs --stress`.
 | `ledger_churn` | green | `stats()` / release ledger |
 | `callback_buffer_path` | green | Buffers through callbacks |
 | `child_crash_storm` | green | `process.exit` / `SIGKILL` mid-call / mid-`cbr` |
-| `abort_inject` | green | `process.abort` / `SIGABRT` (stricter than exit/kill) |
 | `thenable_typed_array` | green, smoke | Thenables resolving to TypedArrays |
 | `import_module_storm` | green, smoke | `import_module` churn |
 | `cross_domain_barrage` | green | Foreign-handle / multi-domain discipline |
@@ -94,29 +99,67 @@ cleanly when numpy is absent. Not part of `tools/run_all.ccs --stress`.
 | `big_payload_hail` | green | Large payloads |
 | `retained_callback_storm` | green | Callbacks retained across calls |
 | `everything_concurrent` | green | Mixed shapes on **separate** bridges (one bridge per thread) |
+| `escaped_closure` | green | Capture JS callable; destroy; invoke later → closed |
+| `fanout_destroy` | green | Many children in flight; destroy a subset mid-flight (cooperative — see design notes) |
 | `rss_soak` | green, soak | Create/churn/destroy RSS bound |
 | `handle_leak_soak` | green, soak | Long-lived domain; ledger + RSS re-settle |
+| `abort_inject` | green | `process.abort` / `SIGABRT` (stricter than exit/kill) |
 
 ## Negative / correctness smokes (not volume)
 
 | Pack | Status |
 |------|--------|
-| `tests/cc_python_bridge_*.js` (+ `_neg`) | CI smokes — wire pins, destroy-from-cb, keep-past-return, reserved `$` keys, foreign handles, … |
+| `tests/cc_python_bridge_mem.js` | Escaped closure, lease detach mid-lane, keep-past-return, … |
+| `tests/cc_python_bridge_neg.js` | Foreign handles, proxy traps, NaN/Inf, SystemExit, … |
+| `tests/cc_python_bridge_*.js` | Wire pins, destroy-from-cb, keep-past-return, … |
 | `tests/cc_node_bridge.py` (+ `_neg`) | Same for the Python host |
 
 ## Design notes
+
+### Cooperative `destroy()` vs hard-cancel
+
+Process-bridge `destroy()` / `close()` is **cooperative**: send farewell
+`close`, drain in-flight wire work, then wait (with a kill fallback if
+the child ignores close). In-flight calls may still **fulfill** with a
+correct value; they are not required to reject. Modes that destroy a
+subset mid-flight (`promise_all_destroy`, `fanout_destroy`,
+`destroy_during_thenable`) therefore assert composition, not cancel:
+
+- every promise / worker **settles** (no hang)
+- fulfilled values are **correct**
+- destroyed domains end **`closed`**
+- surviving domains stay **usable**, then close cleanly
+- no stray SHM spill files
+
+**Hard-cancel** is a different contract — child dies without drain
+(`SIGKILL`, `os.abort` / `process.abort`, `_exit`). Those modes
+(`kill_mid_spill`, `abort_inject`, `child_crash_storm`, `crash_storm`)
+require in-flight ops to **reject** with closed/exited and must not
+leak spills or leave zombies. Do not stretch sleeps to force cooperative
+destroy into looking like hard-cancel; that is tuning a race, not
+testing the API.
+
+### Other
 
 - **Soaks** are wall-clock loops, not fixed op counts. Use `CHAOS_SCALE=soak`
   and optionally `SOAK_SECONDS` for overnight-ish local runs; quick CI stays short.
 - **Everything concurrent** interleaves several storm shapes. On cc-node the
   wire is single-threaded per bridge — workers each own a domain. On
   cc-python, multi-domain `Promise.all` is the natural fan-in.
-- **Abort inject** is stricter than `_exit` / `process.exit`: native abort
-  can dump core and must still reject in-flight ops with no hang / no
-  zombie children. Expect noisy abort traps, macOS crash reports, and
-  occasional broker `BrokenPipeError` on stderr — that is the point.
-  Both drivers run this mode **last** so the noise does not bury later
-  RESULTS.
+- **Unclean death** modes run last so Abort traps / broker
+  `BrokenPipeError` noise does not bury later RESULTS.
+- **Lease detach**: `ArrayBuffer.transfer` while a lane call holds the
+  buffer must not crash or silently corrupt — correct sum (pin held) or
+  an articulate error both pass.
+- **Escaped closures**: a JS closure that captures a proxy must answer
+  `bridge is closed` after destroy + GC — never use-after-free.
+
+## Deferred (not in suite yet)
+
+- Property-based random sequences + seeded replay
+- ASan/TSan CI job for the `.node` addon
+- Worker-thread policy (“one domain graph per thread”) + violation test
+- Multi-GB OOM / cgroup pressure modes (manual / soak-only machines)
 
 ## Related
 

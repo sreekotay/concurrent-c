@@ -12,6 +12,10 @@ One boundary, two doors (same headers, same marshalling):
 - **Python from Node** — npm [`concurrent-c-python`](https://www.npmjs.com/package/concurrent-c-python) · in-tree [`npm/cc-python`](../npm/cc-python)
 - **JavaScript from Python** — pip [`concurrent-c-node`](https://pypi.org/project/concurrent-c-node/) · in-tree [`pypi/cc-node`](../pypi/cc-node)
 
+`destroy()` on these bridges is cooperative (close + drain); hard child
+death (`SIGKILL` / abort) is a separate reject contract. Stress catalog:
+[`stress/bridge/bridge_stress.md`](../stress/bridge/bridge_stress.md).
+
 Publish both (bump patch versions, pack, upload):
 `./scripts/publish_bridges.sh --publish` (pack only: omit `--publish`;
 `--minor` / `--major` / `--no-bump` optional).

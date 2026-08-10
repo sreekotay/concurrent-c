@@ -930,6 +930,90 @@ def everything_concurrent() -> None:
     ok("everything_concurrent_ok", all(b["ok"] for b in boxes))
 
 
+def escaped_closure() -> None:
+    """Capture a JS callable, destroy the domain, invoke later → closed."""
+    print("=== escaped_closure ===")
+    t0 = time.perf_counter()
+    closed = 0
+    escaped = None
+    js = cc_node.create()
+    fn = js.eval("(x) => x + 1")
+    escaped = fn
+    js.destroy()
+    gc.collect()
+    try:
+        escaped(1)
+    except Exception as e:
+        if "closed" in str(e).lower() or "exit" in str(e).lower():
+            closed = 1
+    result("escaped_closure_ms %.1f", (time.perf_counter() - t0) * 1000)
+    ok("escaped_closure_closed", closed == 1)
+
+
+def fanout_destroy() -> None:
+    """Many children in flight; destroy a subset mid-flight.
+
+    Cooperative destroy may let in-flight work fulfill (drain). Pin
+    composition: no hang, every worker settles, doomed domains closed,
+    survivors still usable. Hard-cancel is abort_inject / child_crash.
+    """
+    print("=== fanout_destroy ===")
+    n = 8 if FULL else 6
+    t0 = time.perf_counter()
+    domains = [cc_node.create() for _ in range(n)]
+    delay_ms = 80 if FULL else 50
+    sleeper = [
+        d.eval(
+            "(n) => new Promise((r) => setTimeout(() => r(n), n))"
+        )
+        for d in domains
+    ]
+    boxes = [{"v": None, "err": None} for _ in range(n)]
+
+    def worker(i):
+        try:
+            boxes[i]["v"] = sleeper[i](delay_ms)
+        except Exception as e:
+            boxes[i]["err"] = e
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for th in threads:
+        th.start()
+    time.sleep(0.01)
+    doomed = list(range(1, n, 2))
+    for i in doomed:
+        try:
+            domains[i].destroy()
+        except Exception:
+            pass
+    for th in threads:
+        th.join(timeout=30)
+    hung = any(th.is_alive() for th in threads)
+    fulfilled = sum(1 for b in boxes if b["v"] == delay_ms)
+    rejected = sum(
+        1
+        for b in boxes
+        if b["err"] is not None
+        and ("closed" in str(b["err"]).lower() or "exit" in str(b["err"]).lower())
+    )
+    doomed_closed = sum(1 for i in doomed if domains[i].closed)
+    survivors_ok = 0
+    for i in range(0, n, 2):
+        try:
+            if domains[i].eval("1+1") == 2:
+                survivors_ok += 1
+            domains[i].destroy()
+        except Exception:
+            pass
+    result("fanout_destroy_ms %.1f", (time.perf_counter() - t0) * 1000)
+    result("fanout_destroy_fulfilled %d", fulfilled)
+    result("fanout_destroy_rejected %d", rejected)
+    ok("fanout_destroy_no_hang", not hung)
+    ok("fanout_destroy_accounted", fulfilled + rejected == n)
+    ok("fanout_destroy_doomed_closed", doomed_closed == len(doomed))
+    ok("fanout_destroy_survivors", survivors_ok == (n + 1) // 2)
+
+
 def abort_inject() -> None:
     """SIGABRT the Node child mid-flight; host rejects, no hang, no zombies."""
     print("=== abort_inject ===")
@@ -1006,6 +1090,8 @@ def main() -> int:
     eval_storm()
     cross_domain_barrage()
     everything_concurrent()
+    escaped_closure()
+    fanout_destroy()
     rss_soak()
     handle_leak_soak()
     # Abort last: process.abort / SIGABRT is intentionally noisy.

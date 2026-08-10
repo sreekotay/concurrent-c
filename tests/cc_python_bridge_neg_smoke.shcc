@@ -1,8 +1,8 @@
 /* Articulate-error pack for concurrent-c-python (in-process + isolated):
  * reserved keys, unsupported types, foreign args, use-after-release,
- * keep-past-return, bigint wire limit, lazy-import fail, pass-unresolved
- * module root, after-close.  No numpy.  Rungs in
- * tests/cc_python_bridge_neg.js. */
+ * keep-past-return, proxy traps, scalar edges, SystemExit, bigint wire
+ * limit, lazy-import fail, pass-unresolved module root, after-close.
+ * No numpy.  Rungs in tests/cc_python_bridge_neg.js. */
 CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 
 {

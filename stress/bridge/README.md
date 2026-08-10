@@ -3,7 +3,11 @@
 Adversarial storms for the **process bridges** — not the CC embed /
 native-module latency benches.
 
-**Catalog (modes, status, soak notes):** [`bridge_stress.md`](bridge_stress.md)
+**Catalog (modes, status, contracts):** [`bridge_stress.md`](bridge_stress.md)
+
+`destroy()` on these bridges is **cooperative** (close + drain): in-flight
+work may still fulfill. Hard-cancel (`SIGKILL` / abort) is a separate
+set of modes that must reject. Details in the catalog design notes.
 
 | Leave alone | Lives here |
 |-------------|------------|
@@ -14,7 +18,8 @@ native-module latency benches.
 | — | [`cc_node_stress_wire.py`](cc_node_stress_wire.py) — kitchen sink + soaks |
 
 CI correctness smokes stay under `tests/cc_python_bridge_*.js` /
-`tests/cc_node_bridge.py` — those pin booleans; these push volume and races.
+`tests/cc_node_bridge.py` — those pin booleans (escaped closure, lease
+detach, SystemExit, …); these push volume and races.
 
 ## Run
 

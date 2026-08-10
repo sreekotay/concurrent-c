@@ -52,6 +52,35 @@ async function raisesAsync(fn, re) {
         raisesSync(() => b.eval('keep', g)(new Float64Array(8)),
                    /retained by the callee|borrow ends/));
 
+    // Proxy traps: stringify must fail articulately; domain stays usable.
+    out('neg_inproc_proxy_keys', Array.isArray(Object.keys(math.sqrt)));
+    out('neg_inproc_proxy_json',
+        raisesSync(() => JSON.stringify(math.sqrt),
+                   /toJSON|no attribute|AttributeError|unsupported/));
+    out('neg_inproc_proxy_alive', math.floor(3.2) === 3);
+
+    // Scalar edges through a Python identity.
+    {
+      const builtins = py.import('builtins');
+      const g = builtins.dict();
+      const id = builtins.eval('lambda x: x', g);
+      out('neg_inproc_scalar_nan', Number.isNaN(id(NaN)));
+      out('neg_inproc_scalar_inf', id(Infinity) === Infinity);
+      out('neg_inproc_scalar_ninf', id(-Infinity) === -Infinity);
+      // -0 may collapse to +0 across the bridge; must not throw.
+      out('neg_inproc_scalar_neg0', id(-0) === 0);
+    }
+
+    // sys.exit must become an articulate error — not take down Node.
+    {
+      const builtins = py.import('builtins');
+      const g = builtins.dict();
+      const boom = builtins.eval('lambda: (__import__("sys").exit(3))', g);
+      out('neg_inproc_system_exit',
+          raisesSync(() => boom(), /invoke:\s*3|SystemExit|exit/));
+      out('neg_inproc_after_system_exit', math.floor(1.8) === 1);
+    }
+
     py.destroy();
     out('neg_inproc_after_close',
         raisesSync(() => math.floor(1.2), /closed/));

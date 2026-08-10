@@ -3,7 +3,8 @@
  * after close, the proxy graph pinning its domain, repeated zero-copy
  * leases, released-handle abuse at every door, cross-domain rejection
  * on the argument path, twenty interleaved domains with out-of-order
- * teardown, and deep-chain intermediates.  The rungs live in
+ * teardown, deep-chain intermediates, escaped closure after destroy,
+ * and lease detach mid-lane.  The rungs live in
  * cc_python_bridge_mem.js (run under --expose-gc); the addon is
  * npm/cc-python/src/cc_python.ccs. */
 CCArena a = cc_arena_heap(megabytes(1)) @destroy;
