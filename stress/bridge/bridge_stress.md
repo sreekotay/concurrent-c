@@ -72,6 +72,8 @@ cleanly when numpy is absent. Not part of `tools/run_all.ccs --stress`.
 | `handle_leak_soak` | green, soak | Long-lived domain; `stats()` + RSS must re-settle |
 | `mixed_load_soak` | green, soak | Sync + lane + isolated churn; RSS bound (`SOAK_SECONDS`) |
 | `kill_mid_spill` | green | `SIGKILL` child mid-SHM spill; no stray spill files |
+| `shared_buf_kill_sibling` | green | Same JS `Float64Array` → two isolated spills; kill A mid-flight; B completes; no strays |
+| `kill_respawn_loop` | green | Kill-to-cancel + mint replacement (correctness / RSS); latency in `js_isolated_cancel_churn.js` |
 | `abort_inject` | green | `os.abort` / `SIGABRT` on isolated children (stricter than `_exit`) |
 
 ## `cc_node_stress_wire.py` (Python → Node)
@@ -133,11 +135,20 @@ subset mid-flight (`promise_all_destroy`, `fanout_destroy`,
 
 **Hard-cancel** is a different contract — child dies without drain
 (`SIGKILL`, `os.abort` / `process.abort`, `_exit`). Those modes
-(`kill_mid_spill`, `abort_inject`, `child_crash_storm`, `crash_storm`)
-require in-flight ops to **reject** with closed/exited and must not
-leak spills or leave zombies. Do not stretch sleeps to force cooperative
-destroy into looking like hard-cancel; that is tuning a race, not
-testing the API.
+(`kill_mid_spill`, `shared_buf_kill_sibling`, `kill_respawn_loop`,
+`abort_inject`, `child_crash_storm`, `crash_storm`) require in-flight
+ops to **reject** with closed/exited and must not leak spills or leave
+zombies. Do not stretch sleeps to force cooperative destroy into looking
+like hard-cancel; that is tuning a race, not testing the API.
+
+**CPU-bound cancel** has no clean form (cannot unwind BLAS). The suite
+encodes Unix reality: cooperative fulfill *or* kill the worker. Latency
+of kill+respawn is a perf question —
+[`npm/cc-python/examples/js_isolated_cancel_churn.js`](../../npm/cc-python/examples/js_isolated_cancel_churn.js).
+
+**Same JS buffer, two isolated domains:** each call stages its **own**
+spill file (not one shared mapping). `shared_buf_kill_sibling` kills A
+mid-spill while B reads a sibling spill from the same `Float64Array`.
 
 ### Other
 

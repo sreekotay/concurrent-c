@@ -52,8 +52,9 @@ Import stays `import cc_node`. Examples ship in the wheel. The mirror of
   child dies with the bridge (and on host exit, via stdin EOF).
   Teardown is **cooperative** (farewell `close` + drain, then wait /
   kill-fallback): in-flight calls may still return a correct value.
-  Hard child death (`SIGKILL`, `process.abort`) is a different contract —
-  in-flight ops must reject. See
+  There is no clean cancel of CPU-bound JS work — wait, or kill the
+  child (`SIGKILL` / `process.abort`) and create a new domain. Hard death
+  must reject in-flight ops. See
   [`bridge_stress.md`](https://github.com/sreekotay/concurrent-c/blob/main/stress/bridge/bridge_stress.md).
 
 ## Async is free

@@ -1267,6 +1267,97 @@ async function killMidSpill() {
   ok('kill_mid_spill_no_strays', clean === rounds);
 }
 
+/* ---- 28b. Same JS buffer → two isolated spills; kill one mid-flight ----- */
+async function sharedBufKillSibling() {
+  console.log('=== shared_buf_kill_sibling ===');
+  /* Not one shared mapping — each encode stages its own spill file from
+   * the same Float64Array. Kill A mid-spill; B must still finish; no
+   * stray files. Reassures the "sibling reader" case for the real wire. */
+  const rounds = SOAK ? 10 : (FULL ? 6 : 3);
+  const t0 = hr();
+  let aRejected = 0, bOk = 0, clean = 0;
+  const n = (1 << 16) / 8 + 4096;
+  for (let r = 0; r < rounds; r++) {
+    const before = straySpills().length;
+    const buf = new Float64Array(n);
+    buf.fill(1);
+    const A = ccpy.create({ isolated: true });
+    const B = ccpy.create({ isolated: true });
+    const bA = A.import('builtins');
+    const bB = B.import('builtins');
+    const pidFn = await bA.eval('lambda: __import__("os").getpid()');
+    const pidA = await pidFn();
+    const slowA = await bA.eval(
+      'lambda a: (__import__("time").sleep(0.15), len(a))[1]');
+    const slowB = await bB.eval(
+      'lambda a: (__import__("time").sleep(0.12), len(a))[1]');
+    const pA = slowA(buf);
+    const pB = slowB(buf);
+    await sleep(25);
+    try { process.kill(pidA, 'SIGKILL'); } catch (_) {}
+    try { await pA; } catch (e) {
+      if (/closed|exited/.test(e.message)) aRejected++;
+    }
+    try {
+      if ((await pB) === n) bOk++;
+    } catch (_) { /* B must not die with A */ }
+    try { await A.destroy(); } catch (_) {}
+    try { await B.destroy(); } catch (_) {}
+    await sleep(30);
+    if (straySpills().length <= before) clean++;
+  }
+  result('shared_buf_kill_sibling_ms %s', nsToMs(hr() - t0).toFixed(1));
+  result('shared_buf_kill_sibling_rounds %d', rounds);
+  ok('shared_buf_kill_sibling_a_rejected', aRejected === rounds);
+  ok('shared_buf_kill_sibling_b_ok', bOk === rounds);
+  ok('shared_buf_kill_sibling_no_strays', clean === rounds);
+}
+
+/* ---- 28c. Kill-to-cancel + respawn loop (correctness, not latency) ------ */
+async function killRespawnLoop() {
+  console.log('=== kill_respawn_loop ===');
+  /* Cancel of CPU-bound work has no clean form — kill the worker, mint
+   * another. Assert N cycles settle, no hang, no stray SHM, RSS bounded.
+   * Latency of that pattern: npm/cc-python/examples/js_isolated_cancel_churn.js */
+  const cycles = SOAK ? 24 : (FULL ? 12 : 6);
+  const r0 = rss();
+  const t0 = hr();
+  let rejected = 0, replaced = 0;
+  for (let c = 0; c < cycles; c++) {
+    const before = straySpills().length;
+    const py = ccpy.create({ isolated: true });
+    const b = py.import('builtins');
+    const pidFn = await b.eval('lambda: __import__("os").getpid()');
+    const pid = await pidFn();
+    const slow = await b.eval(
+      'lambda: (__import__("time").sleep(0.2), 1)[1]');
+    const p = slow();
+    await sleep(15);
+    try { process.kill(pid, 'SIGKILL'); } catch (_) {}
+    try { await p; } catch (e) {
+      if (/closed|exited/.test(e.message)) rejected++;
+    }
+    try { await py.destroy(); } catch (_) {}
+    const py2 = ccpy.create({ isolated: true });
+    const b2 = py2.import('builtins');
+    const one = await b2.eval('lambda: 1');
+    if ((await one()) === 1) replaced++;
+    await py2.destroy();
+    if (straySpills().length > before) {
+      ok('kill_respawn_loop_no_strays', false);
+      return;
+    }
+  }
+  const delta = Math.max(0, rss() - r0);
+  result('kill_respawn_loop_ms %s', nsToMs(hr() - t0).toFixed(1));
+  result('kill_respawn_loop_cycles %d', cycles);
+  result('kill_respawn_loop_delta_mb %s', (delta / MB).toFixed(1));
+  ok('kill_respawn_loop_rejected', rejected === cycles);
+  ok('kill_respawn_loop_replaced', replaced === cycles);
+  ok('kill_respawn_loop_no_strays', true);
+  ok('kill_respawn_loop_rss', delta < (SOAK ? 512 : 256) * MB);
+}
+
 /* ---- 29. Mixed sync + lane + isolated soak ------------------------------ */
 async function mixedLoadSoak(numpyOk) {
   console.log('=== mixed_load_soak ===');
@@ -1381,8 +1472,10 @@ async function abortInject() {
   await rssSoakIsolated();
   await handleLeakSoak();
   await mixedLoadSoak(numpyOk);
-  /* Unclean death last: SIGKILL mid-spill, then abort (noisy). */
+  /* Unclean death last: SIGKILL mid-spill / sibling / respawn, then abort. */
   await killMidSpill();
+  await sharedBufKillSibling();
+  await killRespawnLoop();
   await abortInject();
 
   console.log('=== summary ===');

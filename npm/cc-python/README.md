@@ -159,10 +159,15 @@ Teardown on an isolated domain is **cooperative**: `destroy()` sends
 `close`, drains in-flight wire work, then waits (SIGKILL only if the
 child ignores close). An in-flight call may still fulfill with a
 correct value; after destroy every door answers `bridge is closed`.
-Hard death of the child (`SIGKILL`, `os.abort`, `_exit`) is different —
-in-flight ops must reject, and SHM spill files must not leak. The
-stress catalog separates those contracts
-([`stress/bridge/bridge_stress.md`](https://github.com/sreekotay/concurrent-c/blob/main/stress/bridge/bridge_stress.md)).
+
+There is **no clean cancel of CPU-bound native work** (BLAS, long C):
+Python/`py.task` cannot unwind a running `np.dot`. Choices are wait
+(cooperative `destroy` — in-flight may fulfill) or **kill the worker**
+(`SIGKILL` / abort / `_exit`) and mint a new domain. Kill rejects
+in-flight ops and must not leak SHM spill files. Correctness of that
+path: [`stress/bridge/bridge_stress.md`](https://github.com/sreekotay/concurrent-c/blob/main/stress/bridge/bridge_stress.md).
+Cost of kill+respawn:
+[`examples/js_isolated_cancel_churn.js`](examples/js_isolated_cancel_churn.js).
 
 `py.task(jsClosure)` is reserved for recorded batch graphs —
 parameterized pipelines that ship N Python calls as one job (and, later,

@@ -7,7 +7,11 @@ native-module latency benches.
 
 `destroy()` on these bridges is **cooperative** (close + drain): in-flight
 work may still fulfill. Hard-cancel (`SIGKILL` / abort) is a separate
-set of modes that must reject. Details in the catalog design notes.
+set of modes that must reject — including same-buffer dual-spill sibling
+kill and kill+respawn loops. CPU-bound cancel has no clean form; latency
+of kill+respawn is
+[`npm/cc-python/examples/js_isolated_cancel_churn.js`](../../npm/cc-python/examples/js_isolated_cancel_churn.js).
+Details in the catalog design notes.
 
 | Leave alone | Lives here |
 |-------------|------------|
