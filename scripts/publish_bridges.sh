@@ -10,8 +10,8 @@
 #   ./scripts/publish_bridges.sh --publish --pypi-twine   # local twine instead
 #   ./scripts/publish_bridges.sh --publish --no-bump
 #
-# After --publish (OIDC path), commit+push the bumped version files, then:
-#   gh workflow run publish-cc-node.yml
+# After npm succeeds (OIDC path), --publish commits those version files,
+# pushes, and runs publish-cc-node.yml (needs gh on PATH).
 #
 # Pre-upload consumer gate (fresh Linux install, no repo on the path):
 #   ./scripts/smoke_bridge_packs.sh              # pack + Docker smoke
