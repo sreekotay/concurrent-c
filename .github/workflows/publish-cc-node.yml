@@ -16,7 +16,9 @@
 name: publish-cc-node
 
 on:
-  workflow_dispatch:
+  # `{}` required — bare `workflow_dispatch:` is null and GitHub won't
+  # register the trigger (API 422 on gh workflow run).
+  workflow_dispatch: {}
   push:
     tags:
       - 'cc-node-v*'
