@@ -7,11 +7,13 @@
  * dead branches reference undefined symbols, proving the predicate is folded at
  * compile time and the untaken arm is pruned before compilation.
  *
- * Layout assumptions hold on the LP64 targets this repo builds on. */
+ * Branches cover both LP64 (long 8) and ILP32 (long 4). */
 int main(void) {
     int acc = 0;
 
     @comptime if (type_of(long).size >= 8) {
+        acc += 1;
+    } else @comptime if (type_of(long).size == 4) {
         acc += 1;
     } else {
         acc += never1;
@@ -31,8 +33,10 @@ int main(void) {
         acc += never3;
     }
 
-    /* a bare host-C constant expression in the predicate */
+    /* bare host-C constant expression — true on LP64, false on ILP32 */
     @comptime if (sizeof(int) < sizeof(long)) {
+        acc += 1000;
+    } else @comptime if (sizeof(int) == sizeof(long)) {
         acc += 1000;
     } else {
         acc += never4;

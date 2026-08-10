@@ -555,6 +555,4 @@ static void Lev_destroy(Lev *self) {
     if (self->a.base) cc_arena_destroy(&self->a);
 }
 
-void *PyInit_cclev(void) {
-    return py_module::[Lev]("cclev", NULL);
-}
+@comptime cc_py_export("cclev", "Lev", NULL);

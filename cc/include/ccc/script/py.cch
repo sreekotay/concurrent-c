@@ -992,6 +992,18 @@ static size_t cc__py_elem_size(CCPyElemKind k) {
     }
 }
 
+/* Typed element buffers must honor natural alignment.  `alloc_slice_bytes`
+ * uses align 1; on ARM32 a later `*(double*)` / STRD at a 2-byte address
+ * is SIGBUS (QEMU and many native cores). */
+static size_t cc__py_elem_align(CCPyElemKind k) {
+    switch (k) {
+    case CC__PY_EL_F64: return _Alignof(double);
+    case CC__PY_EL_I64: return _Alignof(int64_t);
+    case CC__PY_EL_INT: return _Alignof(int);
+    default: return _Alignof(CCSlice);
+    }
+}
+
 /* Convert one element into `dst`. Returns 0 on success. */
 static int cc__py_elem_store(void *item, CCPyElemKind kind, void *dst,
                              CCArena *arena) {
@@ -1098,14 +1110,13 @@ static inline int cc__py_obj_buffer_fill(CCPyObj *obj, CCArena *arena,
         return 0;
     }
     count = (size_t)view.len / esz;
-    dst = cc_arena_alloc_slice_bytes(arena, (size_t)view.len);
+    dst = cc_arena_alloc_slice(arena, esz, count, cc__py_elem_align(kind));
     if (!dst.ptr && view.len > 0) {
         cc__py.ReleaseBuffer(&view);
         return -1;
     }
     if (view.len > 0) memcpy(dst.ptr, view.buf, (size_t)view.len);
     cc__py.ReleaseBuffer(&view);
-    dst.len = count; /* element count, matching the sequence path */
     *out = dst;
     return 1;
 }
@@ -1137,7 +1148,7 @@ static inline CCSlice !>(CCPyError) cc__py_obj_as_list_raw(CCPyObj *obj,
     }
     n = cc__py.SequenceSize(obj->o);
     if (n < 0) return cc_err(cc__py_err("as_list"));
-    out = cc_arena_alloc_slice_bytes(arena, (size_t)n * esz);
+    out = cc_arena_alloc_slice(arena, esz, (size_t)n, cc__py_elem_align(kind));
     if (!out.ptr && n > 0) {
         snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
                  "python: as_list: arena exhausted");
@@ -1156,7 +1167,6 @@ static inline CCSlice !>(CCPyError) cc__py_obj_as_list_raw(CCPyObj *obj,
             return cc_err(cc__py_err("as_list"));
         }
     }
-    out.len = (size_t)n; /* element count, not bytes */
     return cc_ok(out);
 }
 
@@ -2753,7 +2763,7 @@ static inline CCSlice !>(CCPyError) cc__py_obj_map_raw(
             return cc_err(cc__py_err("map"));
         }
     }
-    out = cc_arena_alloc_slice_bytes(arena, nrows * esz);
+    out = cc_arena_alloc_slice(arena, esz, nrows, cc__py_elem_align(outkind));
     if (!out.ptr && nrows > 0) {
         snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
                  "python: map: arena exhausted (%zu rows)", nrows);

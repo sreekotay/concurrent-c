@@ -1736,6 +1736,19 @@ static void ccpy__reject(void *env, void *deferred, const char *msg) {
     cc__js.RejectDeferred(env, deferred, e);
 }
 
+/* Process-wide: async lane drains (close_async / GC / sync close after a
+ * lane) overlap with create() is refuse-not-block — close completes on the
+ * JS thread via TSFN, so a sync wait in create would deadlock. */
+static int ccpy__async_closes_inflight = 0;
+
+static void ccpy__async_close_begin(void) {
+    __sync_add_and_fetch(&ccpy__async_closes_inflight, 1);
+}
+
+static void ccpy__async_close_end(void) {
+    __sync_sub_and_fetch(&ccpy__async_closes_inflight, 1);
+}
+
 /* Main-thread completion for every posted job, FIFO — the sentinel is
  * therefore last, after all results are delivered, which is what makes
  * it safe for the sentinel to end the interpreter. */
@@ -1759,6 +1772,7 @@ static void ccpy__async_complete(void *env, void *jscb, void *ctx, void *data) {
         }
         cc__js.ReleaseTsfn(d->tsfn, 0);
         d->tsfn = NULL;
+        ccpy__async_close_end();
         ccpy__dom_unref(d); /* the lane's hold on the arena */
         return;
     }
@@ -1862,6 +1876,7 @@ static void ccpy__lane_close(CcPyDom *d, void *env, void *deferred) {
         return;
     }
     d->stopping = 1;
+    ccpy__async_close_begin();
     d->close_deferred = deferred;
     if (!d->tsfn_reffed) {
         cc__js.RefTsfn(env, d->tsfn); /* keep the loop alive to the sweep */
@@ -1928,8 +1943,15 @@ typedef struct CcPython {
 
 static CCJsVal !>(CCError) CcPython_create(CcPython *self, CCJs *js) {
     CCArena ar = cc_arena_heap(megabytes(4));
-    CcPyDom *d = (CcPyDom *)cc_arena_alloc(&ar, sizeof(*d), 16);
+    CcPyDom *d;
     (void)self;
+    /* Refuse while any lane drain is unfinished — do not sync-wait (close
+     * settles on this thread via TSFN).  Callers must await destroy(). */
+    if (__sync_add_and_fetch(&ccpy__async_closes_inflight, 0) > 0)
+        return cc_err(CC_ERR_IO,
+                      "cc-python: a domain destroy is still in progress; "
+                      "await the outstanding destroy() before create()");
+    d = (CcPyDom *)cc_arena_alloc(&ar, sizeof(*d), 16);
     if (!d) {
         cc_arena_destroy(&ar);
         return cc_err(CC_ERR_IO, "cc-python: out of memory");

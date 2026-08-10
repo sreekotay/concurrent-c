@@ -18,6 +18,7 @@ Details in the catalog design notes.
 | `perf/py_baseline.ccs`, `perf/js_baseline.*`, `perf/js_numpy.*` | — |
 | `npm/cc-python/examples/js_*.js` (RESULT latency demos) | — |
 | `pypi/cc-node/cc_node/examples/{bench_wire,use_node}.py` | — |
+| — | [`js_python_fuzz.js`](js_python_fuzz.js) — seeded random walk (`FUZZ_SEED`) |
 | — | [`js_python_chaos.js`](js_python_chaos.js) — kitchen sink + soaks |
 | — | [`cc_node_stress_wire.py`](cc_node_stress_wire.py) — kitchen sink + soaks |
 
@@ -34,14 +35,23 @@ CHAOS_SCALE=soak ./stress/bridge/run.sh        # full sizes + multi-second soaks
 SOAK_SECONDS=30 CHAOS_SCALE=soak ./stress/bridge/run.sh
 
 # individually
+FUZZ_SEED=42 node --expose-gc stress/bridge/js_python_fuzz.js
 OPENBLAS_NUM_THREADS=1 node --expose-gc stress/bridge/js_python_chaos.js
 PYTHONPATH=pypi/cc-node python3 stress/bridge/cc_node_stress_wire.py
+./scripts/sanitize_bridge.sh fuzz    # Docker ASan: mem + fuzz walk
 ```
 
 `CHAOS_SCALE`: `quick` < `full` < `soak` (`soak` implies full mode sizes).
+`FUZZ_SEED` / `FUZZ_OPS` replay the seeded walk (RESULT lines include the seed).
+Fuzz monitoring: stderr `[+Ns] alive …` every `FUZZ_HEARTBEAT_SECS` (default 5),
+`PROGRESS` every `FUZZ_PROGRESS_OPS`, hard exit 124 at `FUZZ_TIMEOUT`
+(default 60s quick).
 
 Needs `node` + `python3`. Isolated numpy modes skip cleanly when numpy is
 absent. Not part of `tools/run_all.ccs --stress` (host-driven, not `.ccs`).
 
 Receipts: redirect a clean run into `perf/baselines/` when you want a dated
 snapshot (see [`perf/baselines/README.md`](../../perf/baselines/README.md)).
+
+Sanitizers / Docker ASan / seeded fuzz / wire libFuzzer:
+[`docs/sanitizers.md`](../../docs/sanitizers.md).

@@ -20,12 +20,29 @@ Requires Docker with `linux/386` (QEMU on Apple Silicon is fine; slower).
 ```
 
 `smoke_i386.sh` mounts the repo at `/src` **read-only** and syncs it into an
-anonymous writable `/work` volume before building. Host `cc/`, `out/`, and
-`third_party/tcc` build products are not modified.
+anonymous writable `/work` volume before building. Host trees are not modified.
+
+**Arch boundary (how products stay separated):**
+
+- `/work` is the ILP32 sandbox; host Darwin/arm64 objects never share that tree.
+- Entrypoint rsync uses `--delete` so a named volume cannot keep stale
+  `tests/` (or other sources) removed on the host. Excluded paths stay on
+  dest: `/out/`, `/bin/`, `cc/bin/.ccc-bin`, `tools/cc_test` (legacy in-tree
+  harness), TinyCC artifacts (`config.mak`, `*.a`/`*.o`, `tcc`), and the
+  ARM32 smoke progress files. Omitting the excludes lets a volume pick up
+  Darwin `libtcc1.a` (breaks ARM comptime `__aeabi_*`) or a Mach-O
+  `tools/cc_test` (`Exec format error` mid-suite).
+- Inside a tree, `ccc` further shards host objects under
+  `out/.cc-build/host/<fingerprint>/`.
+- Prefer the harness at `out/tools/cc_test` (`scripts/test.sh` builds it there)
+  so it lives with the rest of `out/` and is naturally excluded from sync.
 
 ILP32 builds define `_FILE_OFFSET_BITS=64` so `readdir` works on Docker volumes
 and other filesystems with 64-bit inodes (plain 32-bit `readdir` returns
-`EOVERFLOW` there).
+`EOVERFLOW` there). The toolchain export covers compiling `ccc` itself; `ccc`
+also injects `-D_FILE_OFFSET_BITS=64` into Linux ILP32 host compiles of user
+programs (and `cc_test` passes the same flag) so runtime `cc_glob` / dir walks
+see matches instead of empty results.
 
 Manual equivalent:
 

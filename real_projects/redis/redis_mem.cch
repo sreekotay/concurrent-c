@@ -4,6 +4,12 @@
 #ifndef REDIS_IDIOMATIC_MEM_CCH
 #define REDIS_IDIOMATIC_MEM_CCH
 
+#include <sys/resource.h>
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/task_info.h>
+#endif
+
 static size_t redis_map_live_payload_bytes(RedisDbMap map) {
     return map ? map.live_bytes() : 0;
 }

@@ -3051,6 +3051,33 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
     if (cc__append_build_cc_defines(cc_flags_buf, sizeof(cc_flags_buf), &cflen,
                                     opt, bindings, binding_count) != 0)
         return -1;
+#if defined(__linux__)
+    /* ILP32 readdir needs 64-bit off_t on Docker volumes (EOVERFLOW otherwise). */
+    {
+        int want_fob64 = (sizeof(void*) == 4);
+        size_t bi;
+        if (!want_fob64) {
+            for (bi = 0; bi < binding_count; ++bi) {
+                if (bindings[bi].name &&
+                    strcmp(bindings[bi].name, "TARGET_PTR_WIDTH") == 0 &&
+                    bindings[bi].value == 32) {
+                    want_fob64 = 1;
+                    break;
+                }
+            }
+        }
+        if (want_fob64 &&
+            (!opt->cc_flags || !strstr(opt->cc_flags, "_FILE_OFFSET_BITS"))) {
+            int n = snprintf(cc_flags_buf + cflen, sizeof(cc_flags_buf) - cflen,
+                             "%s-D_FILE_OFFSET_BITS=64", cflen ? " " : "");
+            if (n < 0 || (size_t)n >= sizeof(cc_flags_buf) - cflen) {
+                fprintf(stderr, "cc: _FILE_OFFSET_BITS flag too long\n");
+                return -1;
+            }
+            cflen += (size_t)n;
+        }
+    }
+#endif
     if (opt->target_flag && opt->target_flag[0]) {
         int n = snprintf(cc_flags_buf + cflen, sizeof(cc_flags_buf) - cflen,
                          "%s--target %s", cflen ? " " : "", opt->target_flag);

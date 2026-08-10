@@ -524,7 +524,8 @@ static int get_run_timeout_for_test(const char* stem, int default_timeout_sec) {
     /* Spawns node children per domain; ~20ms deliberate async waits. */
     if (strcmp(stem, "cc_node_bridge_smoke") == 0) return 60;
     if (strcmp(stem, "py_module_kwargs_smoke") == 0) return 30;
-    if (strcmp(stem, "py_levenshtein_smoke") == 0) return 30;
+    /* Inner `ccc build` of DP-only levenshtein_cc_smoke.ccs. */
+    if (strcmp(stem, "py_levenshtein_smoke") == 0) return 60;
     return default_timeout_sec;
 }
 
@@ -763,7 +764,13 @@ static int run_one_test(const char* stem,
     const char* cache_flag = use_cache ? "" : "--no-cache ";
     /* Append after ccc's default -O2 so the host sees `-O2 -O0` and last wins.
      * Space form required: `--cc-flags=-O0` is parsed as an input path. */
+    /* ILP32: host bins need 64-bit off_t for readdir on Docker volumes. */
+#if defined(__linux__) && defined(__SIZEOF_POINTER__) && (__SIZEOF_POINTER__ == 4)
+    const char* o0_flag = opt_o0 ? "--cc-flags -O0 -D_FILE_OFFSET_BITS=64 "
+                                 : "--cc-flags -D_FILE_OFFSET_BITS=64 ";
+#else
     const char* o0_flag = opt_o0 ? "--cc-flags -O0 " : "";
+#endif
     const char* front_flag = "";
     {
         const char* fe = getenv("CC_TEST_FRONTEND");

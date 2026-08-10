@@ -24,6 +24,11 @@
 #if defined(__APPLE__)
 #include <AvailabilityMacros.h>
 #endif
+/* glibc declares addchdir_np only under _GNU_SOURCE; unity TUs often omit it. */
+#if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 29))
+int posix_spawn_file_actions_addchdir_np(posix_spawn_file_actions_t *__restrict,
+                                         const char *__restrict);
+#endif
 extern char **environ;  /* For posix_spawn with inherited environment */
 #endif
 
@@ -199,6 +204,15 @@ CCResult_CCProcess_CCIoError cc_process_spawn(const CCProcessConfig* config) {
         return cc_err_CCResult_CCProcess_CCIoError(cc_io_from_errno(EINVAL));
     }
 
+    /* Path with a slash: fail before spawn if the file is missing.
+     * Darwin's posix_spawnp returns ENOENT; Linux (and qemu-user) often
+     * returns 0 and the child exits 127 — which surfaces as Ok(127) from
+     * status() and skips !>/@errhandler. PATH lookups (no slash) unchanged. */
+    if (strchr(config->program, '/') != NULL &&
+        access(config->program, F_OK) != 0) {
+        return cc_err_CCResult_CCProcess_CCIoError(cc_io_from_errno(errno));
+    }
+
     int stdin_pipe[2] = {-1, -1};
     int stdout_pipe[2] = {-1, -1};
     int stderr_pipe[2] = {-1, -1};
@@ -270,10 +284,9 @@ CCResult_CCProcess_CCIoError cc_process_spawn(const CCProcessConfig* config) {
         posix_spawn_file_actions_addclose(&file_actions, stderr_pipe[1]);
     }
 
-    /* Change directory if specified */
+    /* Change directory if specified.
+     * macOS < 26 / glibc 2.29+: addchdir_np; macOS 26+: standardized addchdir. */
     if (config->cwd) {
-        /* posix_spawn doesn't support chdir directly, so we use chdir file action
-         * Note: posix_spawn_file_actions_addchdir_np is non-portable (macOS/glibc 2.29+) */
 #if defined(__APPLE__)
 #if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
         posix_spawn_file_actions_addchdir(&file_actions, config->cwd);
@@ -283,9 +296,8 @@ CCResult_CCProcess_CCIoError cc_process_spawn(const CCProcessConfig* config) {
 #elif defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 29))
         posix_spawn_file_actions_addchdir_np(&file_actions, config->cwd);
 #else
-        /* Fallback: can't change directory with posix_spawn on older systems.
-         * Would need to fall back to fork+exec or use a wrapper script. */
-        (void)config->cwd;  /* Ignore cwd on older systems */
+        /* Older non-glibc: no portable cwd action — ignore. */
+        (void)config->cwd;
 #endif
     }
 

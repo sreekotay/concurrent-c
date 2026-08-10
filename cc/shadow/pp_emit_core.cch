@@ -1476,6 +1476,12 @@ typedef struct {
 static ShadowNicheInfo g_shadow_niches[32];
 static int g_shadow_nniches;
 
+/* Host pointer width — packing must match the ABI that compiles emit.c
+ * (ILP32 niches are 4 bytes; LP64 are 8). */
+static unsigned shadow_ptr_bytes(void) {
+    return (unsigned)sizeof(void*);
+}
+
 static unsigned shadow_variant_type_size(const char* ty) {
     int i;
     if (strcmp(ty, "CCString") == 0) return 16;
@@ -1483,12 +1489,23 @@ static unsigned shadow_variant_type_size(const char* ty) {
     if (strcmp(ty, "int") == 0) return 4;
     if (strcmp(ty, "Payload") == 0) return 8;
     if (strcmp(ty, "Handle") == 0) return 16;
-    if (shadow_type_is_pointer(ty)) return 8;
+    if (shadow_type_is_pointer(ty)) return shadow_ptr_bytes();
     for (i = 0; i < g_shadow_nniches; i++) {
         if (strcmp(g_shadow_niches[i].ty, ty) == 0 && g_shadow_niches[i].size)
             return g_shadow_niches[i].size;
     }
     return 0;
+}
+
+static unsigned shadow_variant_type_align(const char* ty) {
+    unsigned sz;
+    if (!ty || !ty[0]) return 1;
+    if (shadow_type_is_pointer(ty)) return shadow_ptr_bytes();
+    sz = shadow_variant_type_size(ty);
+    if (!sz) return 1;
+    /* Natural align for the known scalars / CCString SSO block. */
+    if (sz >= 8) return 8;
+    return sz;
 }
 
 static int shadow_variant_type_niche(const char* ty, unsigned* off, unsigned* width,
@@ -1499,7 +1516,7 @@ static int shadow_variant_type_niche(const char* ty, unsigned* off, unsigned* wi
         *off = 12; *width = 4; *sentinel = 0xFFFFFFFFULL; return 1;
     }
     if (shadow_type_is_pointer(ty)) {
-        *off = 0; *width = 8; *sentinel = 0; return 1;
+        *off = 0; *width = shadow_ptr_bytes(); *sentinel = 0; return 1;
     }
     for (i = 0; i < g_shadow_nniches; i++) {
         if (strcmp(g_shadow_niches[i].ty, ty) == 0) {
@@ -1514,13 +1531,16 @@ static int shadow_variant_type_niche(const char* ty, unsigned* off, unsigned* wi
 
 static void shadow_variant_compute_packed(ShadowVariant* v) {
     int a, d, o;
-    unsigned max_size = 8, max_align = 8;
+    unsigned max_size = 0, max_align = 1;
     if (!v || !v->is_packed) return;
     v->donor_arm = -1;
     for (a = 0; a < v->narm; a++) {
         unsigned sz = shadow_variant_type_size(v->tys[a]);
+        unsigned al = shadow_variant_type_align(v->tys[a]);
         if (sz > max_size) max_size = sz;
+        if (al > max_align) max_align = al;
     }
+    if (max_size == 0) max_size = 1;
     if (v->narm == 2) {
         for (d = 0; d < 2; d++) {
             unsigned off, width;

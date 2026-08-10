@@ -24,3 +24,15 @@ Keeping that split clear preserves headroom: the idiomatic file teaches the skel
 Normative definitions of the primitives and lowering live in `spec/concurrent-c-spec-complete.md`.
 
 **Related:** `studies/cve_locality/` reconstructs historical CVEs under idiomatic CC to test locality, SERDES, and `@variant` — hits and misses both welcome.
+
+## Sanitizers / fuzz
+
+```bash
+./scripts/real_projects_sanitize.sh asan
+./scripts/real_projects_sanitize.sh tsan
+./scripts/real_projects_sanitize.sh fuzz
+```
+
+Covers the main specimens (`pigz_idiomatic`, `pigz_cc` build, `redis_idiomatic` +
+smoke, `levenshtein`). Receipts and bridge/wire fuzz live in
+[`docs/sanitizers.md`](../docs/sanitizers.md).

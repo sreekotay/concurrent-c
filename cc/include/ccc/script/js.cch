@@ -1780,7 +1780,10 @@ static CCSlice !>(CCJsError) cc__js_val_map_raw(CCJsVal *fobj,
             return cc_err(cc__js_err(env, "map"));
         }
     }
-    out = cc_arena_alloc_slice_bytes(arena, nrows * (size_t)esz);
+    /* Natural element align — not alloc_slice_bytes (align 1). ARM32 STRD
+     * / double stores SIGBUS on 2-byte addresses after prior byte allocs. */
+    out = cc_arena_alloc_slice(arena, (size_t)esz, nrows,
+                               esz > 0 ? (size_t)esz : 1);
     if (!out.ptr && nrows > 0) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                  "js: map: arena exhausted (%zu rows)", nrows);

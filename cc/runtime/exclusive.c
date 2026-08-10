@@ -211,12 +211,18 @@ static __thread cc__excl_evt_ring_t* tls_cc_excl_ring;
 static inline uint64_t cc__excl_now(void) {
 #if defined(__TINYC__)
     return cc_cpu_counter_port();
-#elif defined(__aarch64__)
+#elif defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+    return (uint64_t)__builtin_ia32_rdtsc();
+#elif defined(__aarch64__) || defined(__arm64__)
     uint64_t v;
     __asm__ __volatile__("mrs %0, cntvct_el0" : "=r"(v));
     return v;
 #else
-    return __builtin_ia32_rdtsc();
+    /* ARM32 / other ILP32: no cycle counter in userspace; ns clock is fine
+     * for the debug event ring (ordering + coarse deltas only). */
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 #endif
 }
 

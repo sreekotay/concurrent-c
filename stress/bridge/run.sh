@@ -4,6 +4,7 @@
 #   ./stress/bridge/run.sh                      # quick
 #   CHAOS_SCALE=full ./stress/bridge/run.sh     # bigger N
 #   CHAOS_SCALE=soak ./stress/bridge/run.sh     # + multi-second RSS soaks
+#   FUZZ_SEED=42 ./stress/bridge/run.sh         # replay seeded walk
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
@@ -21,6 +22,19 @@ need() {
 
 rc=0
 if need node && need python3; then
+  echo "--- js_python_fuzz ---"
+  # Host monitor: heartbeats even if node hangs before first print (dlopen).
+  FUZZ_WALL="${FUZZ_TIMEOUT:-60}"
+  OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}" \
+    CHAOS_SCALE="$SCALE" \
+    FUZZ_SEED="${FUZZ_SEED-}" \
+    FUZZ_OPS="${FUZZ_OPS-}" \
+    FUZZ_TIMEOUT="$FUZZ_WALL" \
+    FUZZ_HEARTBEAT_SECS="${FUZZ_HEARTBEAT_SECS:-5}" \
+    "$ROOT/scripts/run_monitored.sh" "$FUZZ_WALL" "${FUZZ_HEARTBEAT_SECS:-5}" -- \
+      node --expose-gc "$ROOT/stress/bridge/js_python_fuzz.js" || rc=1
+  echo "[stress/bridge] fuzz end $(date -u +%H:%M:%SZ) rc_so_far=$rc"
+
   echo "--- js_python_chaos ---"
   OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}" \
     CHAOS_SCALE="$SCALE" \

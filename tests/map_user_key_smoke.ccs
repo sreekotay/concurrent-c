@@ -7,7 +7,9 @@
 #include <stdio.h>
 typedef struct GridPos { int x, y; } GridPos;
 static size_t cc_map_key_hash_GridPos(GridPos k) {
-    return ((size_t)(uint32_t)k.x << 32) | (uint32_t)k.y;
+    /* Pack via uint64_t — size_t<<32 warns/overflows on ILP32. */
+    uint64_t h = ((uint64_t)(uint32_t)k.x << 32) | (uint32_t)k.y;
+    return (size_t)(h ^ (h >> 32));
 }
 static int cc_map_key_eq_GridPos(GridPos a1, GridPos b1) {
     return a1.x == b1.x && a1.y == b1.y;

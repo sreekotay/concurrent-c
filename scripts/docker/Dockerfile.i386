@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libzopfli-dev \
     make \
     pkg-config \
+    libpython3-dev \
     python3 \
     rsync \
     zlib1g-dev \

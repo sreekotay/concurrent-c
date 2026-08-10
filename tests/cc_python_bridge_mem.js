@@ -174,7 +174,25 @@ const ccpy = require(process.cwd() + '/npm/cc-python');
       laneCaught = /retained by the callee|borrow ends/.test(e.message);
     }
     out('keep_past_return_lane', laneCaught);
-    py.destroy();
+    await py.destroy();
+  }
+
+  // 6c. Create while a lane drain is in flight must refuse loudly — not
+  //     SEGV.  destroy() was kicked without await; create answers; then
+  //     the outstanding destroy settles and a later create works.
+  {
+    const py = ccpy.create();
+    const math = py.import('math');
+    await py.task(math.floor)(1.2);
+    const draining = py.destroy();
+    let refused = false;
+    try { ccpy.create(); }
+    catch (e) { refused = /destroy is still in progress|await the outstanding destroy/.test(e.message); }
+    out('create_during_destroy', refused);
+    await draining;
+    const ok = ccpy.create();
+    out('create_after_destroy_ok', ok.import('math').floor(2.8) === 2);
+    await ok.destroy();
   }
 
   // 7. Released-handle abuse: as receiver, as argument, and re-released
@@ -191,12 +209,28 @@ const ccpy = require(process.cwd() + '/npm/cc-python');
     out('released_as_receiver', asRecv);
     out('released_as_argument', asArg);
     out('released_again', again);
-    py.destroy();
+    await py.destroy();
+  }
+
+  // 8–9 need a second in-process interpreter (CPython 3.12+).  On 3.11
+  // create() refuses articulately — skip rather than fail the suite.
+  let multiInterp = false;
+  {
+    const probe = ccpy.create();
+    try {
+      const b = ccpy.create();
+      multiInterp = true;
+      await b.destroy();
+    } catch (e) {
+      if (!/second interpreter|Py_NewInterpreterFromConfig/.test(e.message))
+        throw e;
+    }
+    await probe.destroy();
   }
 
   // 8. Cross-domain argument: domain B rejects a handle minted by A at
   //    the argument door, not just the receiver door.
-  {
+  if (multiInterp) {
     const A = ccpy.create();
     const B = ccpy.create();
     const bm = B.import('math');
@@ -207,19 +241,21 @@ const ccpy = require(process.cwd() + '/npm/cc-python');
       rejected = /another bridge/.test(e.message);
     }
     out('cross_domain_arg', rejected);
-    A.destroy();
-    B.destroy();
+    await A.destroy();
+    await B.destroy();
+  } else {
+    console.log('cross_domain_arg skipped (needs Py_NewInterpreterFromConfig / CPython 3.12+)');
   }
 
   // 9. Twenty interleaved domains; destroying half must not disturb the
   //    other half.
-  {
+  if (multiInterp) {
     const doms = [];
     for (let i = 0; i < 20; i++) {
       const py = ccpy.create();
       doms.push([py, py.import('math')]);
     }
-    for (let i = 0; i < 20; i += 2) doms[i][0].destroy();
+    for (let i = 0; i < 20; i += 2) await doms[i][0].destroy();
     let survivors = true;
     for (let i = 1; i < 20; i += 2)
       survivors = survivors && doms[i][1].floor(i + 0.5) === i;
@@ -227,7 +263,10 @@ const ccpy = require(process.cwd() + '/npm/cc-python');
     for (let i = 0; i < 20; i += 2) closed = closed && doms[i][0].closed;
     out('interleaved_survivors', survivors);
     out('interleaved_closed', closed);
-    for (let i = 1; i < 20; i += 2) doms[i][0].destroy();
+    for (let i = 1; i < 20; i += 2) await doms[i][0].destroy();
+  } else {
+    console.log('interleaved_survivors skipped (needs Py_NewInterpreterFromConfig / CPython 3.12+)');
+    console.log('interleaved_closed skipped (needs Py_NewInterpreterFromConfig / CPython 3.12+)');
   }
 
   // 10. Deep-chain intermediates: every step of os.path.join mints a

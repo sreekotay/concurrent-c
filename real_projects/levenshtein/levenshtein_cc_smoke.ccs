@@ -1,0 +1,155 @@
+/* Smoke-sized cclev module: same public API as levenshtein_cc.ccs, DP only
+ * (no bit-parallel kernels).  Used by tests/py_levenshtein_smoke.shcc so
+ * ILP32/QEMU does not cold-compile the full specimen.
+ *
+ * Full parity/bench still builds levenshtein_cc.ccs. */
+#include <ccc/script/py.cch>
+#include <ccc/std/slice.cch>
+#include <stdint.h>
+#include <string.h>
+
+typedef struct Lev {
+    CCArena a;
+} Lev;
+
+static int lev__ensure_arena(Lev *self) {
+    if (!self->a.base) self->a = cc_arena_heap(kilobytes(64));
+    if (!self->a.base) return -1;
+    cc_arena_reset(&self->a);
+    return 0;
+}
+
+static int lev__prep(Lev *self, CCPyStr s1, CCPyStr s2,
+                     uint32_t **a, size_t *n, uint32_t **b, size_t *m) {
+    CCResult_CCSlice_uint32_t_CCError ra, rb;
+    CCSlice_uint32_t ca, cb;
+    if (lev__ensure_arena(self) != 0) return -1;
+    ra = s1.codepoints(&self->a);
+    if (CCResult_CCSlice_uint32_t_CCError_is_err(ra)) return -1;
+    rb = s2.codepoints(&self->a);
+    if (CCResult_CCSlice_uint32_t_CCError_is_err(rb)) return -1;
+    ca = CCResult_CCSlice_uint32_t_CCError_value(ra);
+    cb = CCResult_CCSlice_uint32_t_CCError_value(rb);
+    *a = (uint32_t *)ca.base.ptr;
+    *n = ca.base.len;
+    *b = (uint32_t *)cb.base.ptr;
+    *m = cb.base.len;
+    return 0;
+}
+
+static long long lev__dp(CCArena *a, const uint32_t *s, size_t n,
+                         const uint32_t *t, size_t m, long long sub) {
+    size_t *prev = cc_arena_alloc_T_count(size_t, a, m + 1);
+    size_t *cur  = cc_arena_alloc_T_count(size_t, a, m + 1);
+    if (!prev || !cur) return -1;
+    for (size_t j = 0; j <= m; j++) prev[j] = j;
+    for (size_t i = 1; i <= n; i++) {
+        cur[0] = i;
+        for (size_t j = 1; j <= m; j++) {
+            size_t del = prev[j] + 1;
+            size_t ins = cur[j - 1] + 1;
+            size_t rep = prev[j - 1] + (s[i - 1] == t[j - 1] ? 0 : (size_t)sub);
+            size_t best = del < ins ? del : ins;
+            cur[j] = rep < best ? rep : best;
+        }
+        { size_t *tmp = prev; prev = cur; cur = tmp; }
+    }
+    return (long long)prev[m];
+}
+
+static long long !>(CCError) Lev_distance(Lev *self, CCPyStr s1, CCPyStr s2) {
+    uint32_t *a, *b; size_t n, m;
+    if (lev__prep(self, s1, s2, &a, &n, &b, &m) != 0)
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "levenshtein: scratch arena exhausted");
+    long long d = lev__dp(&self->a, a, n, b, m, 1);
+    if (d < 0) return cc_err(CC_ERR_OUT_OF_MEMORY, "levenshtein: scratch arena exhausted");
+    return cc_ok(d);
+}
+
+static double !>(CCError) Lev_ratio(Lev *self, CCPyStr s1, CCPyStr s2) {
+    uint32_t *a, *b; size_t n, m;
+    if (lev__prep(self, s1, s2, &a, &n, &b, &m) != 0)
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "levenshtein: scratch arena exhausted");
+    if (n + m == 0) return cc_ok(1.0);
+    long long d = lev__dp(&self->a, a, n, b, m, 2);
+    if (d < 0) return cc_err(CC_ERR_OUT_OF_MEMORY, "levenshtein: scratch arena exhausted");
+    return cc_ok((double)((long long)(n + m) - d) / (double)(n + m));
+}
+
+static long long !>(CCError) Lev_hamming(Lev *self, CCPyStr s1, CCPyStr s2,
+                                         long long pad = 1) {
+    uint32_t *a, *b; size_t n, m;
+    if (lev__prep(self, s1, s2, &a, &n, &b, &m) != 0)
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "levenshtein: scratch arena exhausted");
+    if (!pad && n != m)
+        return cc_err(CC_ERR_INVALID_ARG, "hamming: length mismatch");
+    {
+        size_t lo = n < m ? n : m, hi = n < m ? m : n;
+        long long d = (long long)(hi - lo);
+        for (size_t i = 0; i < lo; i++) d += (a[i] != b[i]);
+        return cc_ok(d);
+    }
+}
+
+static double lev__jaro(const uint32_t *a, size_t n, const uint32_t *b, size_t m,
+                        CCArena *ar) {
+    if (n == 0 && m == 0) return 1.0;
+    if (n == 0 || m == 0) return 0.0;
+    {
+        size_t win = (n > m ? n : m) / 2;
+        unsigned char *bf = (unsigned char *)cc_arena_alloc(ar, m, 1);
+        unsigned char *af = (unsigned char *)cc_arena_alloc(ar, n, 1);
+        size_t match = 0, t = 0, k = 0;
+        if (!bf || !af) return -1.0;
+        win = win > 0 ? win - 1 : 0;
+        memset(bf, 0, m);
+        memset(af, 0, n);
+        for (size_t i = 0; i < n; i++) {
+            size_t from = i > win ? i - win : 0;
+            size_t to = i + win + 1 < m ? i + win + 1 : m;
+            for (size_t j = from; j < to; j++) {
+                if (!bf[j] && a[i] == b[j]) { bf[j] = 1; af[i] = 1; match++; break; }
+            }
+        }
+        if (match == 0) return 0.0;
+        for (size_t i = 0; i < n; i++) {
+            if (!af[i]) continue;
+            while (!bf[k]) k++;
+            if (a[i] != b[k]) t++;
+            k++;
+        }
+        return ((double)match / (double)n +
+                (double)match / (double)m +
+                (double)(match - t / 2) / (double)match) / 3.0;
+    }
+}
+
+static double !>(CCError) Lev_jaro(Lev *self, CCPyStr s1, CCPyStr s2) {
+    uint32_t *a, *b; size_t n, m;
+    if (lev__prep(self, s1, s2, &a, &n, &b, &m) != 0)
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "levenshtein: scratch arena exhausted");
+    double j = lev__jaro(a, n, b, m, &self->a);
+    if (j < 0) return cc_err(CC_ERR_OUT_OF_MEMORY, "levenshtein: scratch arena exhausted");
+    return cc_ok(j);
+}
+
+static double !>(CCError) Lev_jaro_winkler(Lev *self, CCPyStr s1, CCPyStr s2) {
+    uint32_t *a, *b; size_t n, m;
+    if (lev__prep(self, s1, s2, &a, &n, &b, &m) != 0)
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "levenshtein: scratch arena exhausted");
+    {
+        double j = lev__jaro(a, n, b, m, &self->a);
+        size_t l = 0, lim = n < m ? n : m;
+        if (j < 0) return cc_err(CC_ERR_OUT_OF_MEMORY, "levenshtein: scratch arena exhausted");
+        if (j <= 0.7) return cc_ok(j);
+        if (lim > 4) lim = 4;
+        while (l < lim && a[l] == b[l]) l++;
+        return cc_ok(j + (double)l * 0.1 * (1.0 - j));
+    }
+}
+
+static void Lev_destroy(Lev *self) {
+    if (self->a.base) cc_arena_destroy(&self->a);
+}
+
+@comptime cc_py_export("cclev", "Lev", NULL);

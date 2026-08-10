@@ -18,12 +18,14 @@ int main(void) {
     assert(stable_view.len == strlen("stable-promoted-123"));
     assert(memcmp(stable_view.ptr, "stable-promoted-123", stable_view.len) == 0);
 
+    /* SSO fits sizeof(void*) bytes (4 on ILP32, 8 on LP64) — keep payloads
+     * short enough for both. */
     CCString inline_stable = cc_string_new();
-    assert(cc_string_push(&inline_stable, "short", &arena) != NULL);
+    assert(cc_string_push(&inline_stable, "ab", &arena) != NULL);
     CCSlice inline_stable_view = cc_string_as_slice(&inline_stable);
     assert(cc_string_provenance(&inline_stable) == CC_SLICE_ID_UNTRACKED);
     assert(inline_stable_view.id == CC_SLICE_ID_UNTRACKED);
-    assert(memcmp(inline_stable_view.ptr, "short", inline_stable_view.len) == 0);
+    assert(memcmp(inline_stable_view.ptr, "ab", inline_stable_view.len) == 0);
 
     CCArenaCheckpoint cp = cc_arena_checkpoint(&arena);
     assert(cp.provenance == stable_provenance);
@@ -48,10 +50,10 @@ int main(void) {
     inline_stable_view = cc_string_as_slice(&inline_stable);
     assert(cc_string_provenance(&inline_stable) == CC_SLICE_ID_UNTRACKED);
     assert(inline_stable_view.id == CC_SLICE_ID_UNTRACKED);
-    assert(memcmp(inline_stable_view.ptr, "short", inline_stable_view.len) == 0);
+    assert(memcmp(inline_stable_view.ptr, "ab", inline_stable_view.len) == 0);
 
     CCString after_restore_inline = cc_string_new();
-    assert(cc_string_push(&after_restore_inline, "after", &arena) != NULL);
+    assert(cc_string_push(&after_restore_inline, "cd", &arena) != NULL);
     CCSlice after_restore_inline_view = cc_string_as_slice(&after_restore_inline);
     assert(cc_string_provenance(&after_restore_inline) == CC_SLICE_ID_UNTRACKED);
     assert(after_restore_inline_view.id == CC_SLICE_ID_UNTRACKED);

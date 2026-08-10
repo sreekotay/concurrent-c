@@ -22,15 +22,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
-if [ ! -x "./tools/cc_test" ]; then
-  echo "[test] building tools/cc_test"
-  cc -O2 -Wall -Wextra tools/cc_test.c -o tools/cc_test
-fi
-
-# Rebuild cc_test when the source is newer than the binary.
-if [ -f "./tools/cc_test.c" ] && [ "./tools/cc_test.c" -nt "./tools/cc_test" ]; then
-  echo "[test] rebuilding tools/cc_test"
-  cc -O2 -Wall -Wextra tools/cc_test.c -o tools/cc_test
+# Harness binary lives under out/ with other arch-scoped products (ILP32 Docker
+# rsync excludes /out/; a Mach-O at tools/cc_test used to clobber ARM volumes).
+CC_TEST_BIN="${CC_TEST_BIN:-$ROOT_DIR/out/tools/cc_test}"
+mkdir -p "$(dirname "$CC_TEST_BIN")"
+if [ ! -x "$CC_TEST_BIN" ] || { [ -f "./tools/cc_test.c" ] && [ "./tools/cc_test.c" -nt "$CC_TEST_BIN" ]; }; then
+  echo "[test] building $CC_TEST_BIN"
+  cc -O2 -Wall -Wextra -D_FILE_OFFSET_BITS=64 tools/cc_test.c -o "$CC_TEST_BIN"
 fi
 
 # Default: quick. Full is opt-in. Front default: native (ccc default).
@@ -243,7 +241,7 @@ run_harness() {
   export CC_TEST_FRONTEND="$local_front"
   export CC_FRONTEND="$local_front"
   # shellcheck disable=SC2086
-  ./tools/cc_test $extra "$@"
+  "$CC_TEST_BIN" $extra "$@"
 }
 
 if [ "$compare_front" = 1 ]; then
@@ -280,7 +278,7 @@ export CC_FRONTEND="$front"
 
 set +e
 # shellcheck disable=SC2086
-./tools/cc_test $extra "$@"
+"$CC_TEST_BIN" $extra "$@"
 rc=$?
 set -e
 ver="$(CC_FRONTEND="$front" ./cc/bin/ccc --v 2>/dev/null | head -1)"

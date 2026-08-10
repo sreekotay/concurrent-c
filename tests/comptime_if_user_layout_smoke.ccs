@@ -9,11 +9,11 @@
  * untaken branch references an undefined symbol, proving the predicate is
  * decided and the dead arm pruned before host compilation.
  *
- * Layout assumptions hold on the LP64 targets this repo builds on. */
+ * `struct Tagged` size differs by ABI (3×long → 24 on LP64, 12 on ILP32). */
 
 typedef struct { int a; int b; } TwoInts;        /* size 8,  align 4 */
 typedef struct { char c; double d; } Padded;     /* size 16, align 8 */
-struct Tagged { long x; long y; long z; };        /* size 24, align 8 */
+struct Tagged { long x; long y; long z; };
 
 int main(void) {
     int acc = 0;
@@ -31,6 +31,8 @@ int main(void) {
     }
 
     @comptime if (sizeof(struct Tagged) == 24) {
+        acc += 100;
+    } else @comptime if (sizeof(struct Tagged) == 12) {
         acc += 100;
     } else {
         acc += never3;

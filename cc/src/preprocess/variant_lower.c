@@ -1011,8 +1011,11 @@ static void cc__va_type_key(const char* type, char* key, size_t keysz, int* out_
     if (out_ptr) *out_ptr = ptr;
 }
 
-/* Primitive size/align table (LP64).  Returns 1 and fills *sz/*al on a hit. */
+/* Primitive size/align table for the host ABI the compiler is running on.
+ * Pointer-width integers track sizeof(void*) so ILP32 packing proofs stay
+ * lossless (spec §11); fixed-width and C floating types are absolute. */
 static int cc__va_prim_size(const char* key, unsigned* sz, unsigned* al) {
+    const unsigned psz = (unsigned)sizeof(void*);
     struct { const char* name; unsigned size; } tab[] = {
         { "char", 1 }, { "signed char", 1 }, { "unsigned char", 1 },
         { "int8_t", 1 }, { "uint8_t", 1 }, { "_Bool", 1 }, { "bool", 1 },
@@ -1020,11 +1023,11 @@ static int cc__va_prim_size(const char* key, unsigned* sz, unsigned* al) {
         { "int16_t", 2 }, { "uint16_t", 2 },
         { "int", 4 }, { "signed", 4 }, { "signed int", 4 }, { "unsigned", 4 },
         { "unsigned int", 4 }, { "int32_t", 4 }, { "uint32_t", 4 }, { "float", 4 },
-        { "long", 8 }, { "unsigned long", 8 }, { "long int", 8 },
+        { "long", psz }, { "unsigned long", psz }, { "long int", psz },
         { "long long", 8 }, { "unsigned long long", 8 }, { "long long int", 8 },
         { "int64_t", 8 }, { "uint64_t", 8 }, { "double", 8 },
-        { "size_t", 8 }, { "ssize_t", 8 }, { "ptrdiff_t", 8 },
-        { "intptr_t", 8 }, { "uintptr_t", 8 },
+        { "size_t", psz }, { "ssize_t", psz }, { "ptrdiff_t", psz },
+        { "intptr_t", psz }, { "uintptr_t", psz },
     };
     for (size_t i = 0; i < sizeof(tab) / sizeof(tab[0]); i++) {
         if (strcmp(tab[i].name, key) == 0) {
@@ -1048,12 +1051,13 @@ static int cc__va_arm_layout(CCSymbolTable* sym, CCVaArm* arm) {
     if (ptr > 0) {
         /* Inferred niche: a raw pointer arm donates the null pattern
          * (offset 0, width = pointer size, sentinel 0). */
-        arm->size = 8;
-        arm->align = 8;
+        const unsigned psz = (unsigned)sizeof(void*);
+        arm->size = psz;
+        arm->align = psz;
         arm->sized = 1;
         arm->has_niche = 1;
         arm->niche_off = 0;
-        arm->niche_width = 8;
+        arm->niche_width = psz;
         arm->niche_sentinel = 0;
         return 1;
     }

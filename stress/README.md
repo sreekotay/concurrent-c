@@ -96,9 +96,10 @@ make stress-check
 # macOS end-RSS often lags free — not leak proof. On Linux, RESULT also has VmHWM
 # + cgroup memory.peak. Helper: stress/mem_sample.h + mem_sample.c.
 
-# Run with sanitizers (TSan/ASan)
+# Run with sanitizers (TSan/ASan) — see docs/sanitizers.md
 ./scripts/stress_sanitize.sh tsan
 ./scripts/stress_sanitize.sh asan
+./scripts/sanitize_bridge.sh          # concurrent-c-python addon (Docker)
 
 # Manual loop (if needed)
 for f in stress/*.ccs; do
@@ -148,3 +149,8 @@ Good stress tests should:
 3. Exercise specific runtime components
 4. Complete in reasonable time (<30s)
 5. Be deterministic (same result each run)
+
+## Related
+
+- [`docs/sanitizers.md`](../docs/sanitizers.md) — ASan/TSan receipts, bridge Docker recipe, fuzz plan
+- [`bridge/`](bridge/) — Node↔Python package-bridge storms

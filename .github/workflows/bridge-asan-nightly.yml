@@ -1,0 +1,112 @@
+# Nightly / on-demand: bridge ASan + wire libFuzzer + real_projects sanitize.
+name: bridge-asan-nightly
+
+on:
+  schedule:
+    # 06:15 UTC — after typical US evening local work
+    - cron: '15 6 * * *'
+  workflow_dispatch:
+    inputs:
+      fuzz_ops:
+        description: 'FUZZ_OPS for js_python_fuzz.js'
+        required: false
+        default: '500'
+      fuzz_seconds:
+        description: 'libFuzzer wall seconds for wire codec'
+        required: false
+        default: '60'
+      run_chaos:
+        description: 'Also run kitchen-sink chaos under ASan (slow)'
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  group: bridge-asan-nightly
+  cancel-in-progress: true
+
+jobs:
+  sanitize-fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Docker ASan — mem + seeded fuzz
+        env:
+          SANITIZE_BRIDGE_TIMEOUT: '300'
+          HEARTBEAT_SECS: '20'
+          FUZZ_SEED: '1'
+          FUZZ_OPS: ${{ github.event.inputs.fuzz_ops || '500' }}
+          FUZZ_TIMEOUT: '120'
+        run: ./scripts/sanitize_bridge.sh fuzz
+
+      - name: Upload sanitize logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitize-bridge-fuzz-logs
+          path: |
+            /tmp/sanitize_bridge_*.log
+          if-no-files-found: ignore
+
+  wire-libfuzzer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+
+      - name: libFuzzer wire codec
+        env:
+          FUZZ_SECONDS: ${{ github.event.inputs.fuzz_seconds || '60' }}
+        run: ./scripts/fuzz_wire_codec.sh
+
+      - name: Upload wire fuzz artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wire-codec-fuzz-artifacts
+          path: out/fuzz/wire_codec/
+          if-no-files-found: ignore
+
+  sanitize-chaos:
+    # Nightly + optional dispatch. Neg is skipped inside chaos mode on 3.11 images.
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_chaos) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Docker ASan — mem + fuzz + kitchen-sink chaos
+        env:
+          SANITIZE_BRIDGE_TIMEOUT: '600'
+          HEARTBEAT_SECS: '20'
+          FUZZ_SEED: '1'
+          FUZZ_OPS: '200'
+          FUZZ_TIMEOUT: '120'
+        run: ./scripts/sanitize_bridge.sh chaos
+
+  real-projects:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang zlib1g-dev libzopfli-dev python3 python3-dev
+
+      - name: Build ccc
+        run: make cc -j"$(nproc)"
+
+      - name: real_projects ASan + light fuzz
+        env:
+          REAL_FUZZ_N: '40'
+          REAL_SANITIZE_TIMEOUT: '120'
+        run: |
+          ./scripts/real_projects_sanitize.sh asan
+          ./scripts/real_projects_sanitize.sh fuzz

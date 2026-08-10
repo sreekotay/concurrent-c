@@ -37,9 +37,14 @@ static void Acc_clear(Acc *self)                    { self->total = 0; }
 }
 
 int main(void) {
-    /* The emitted constants prove each parameter's type round-tripped as a
-     * usable type spelling, not just as text. */
-    printf("get=%d span=%d,%d,%d clear=%d\n",
-           ACC_get_0, ACC_span_0, ACC_span_1, ACC_span_2, ACC_clear_0);
+    /* Emitted constants must match target ABI (ptr width differs LP64/ILP32). */
+    if (ACC_get_0 != (int)sizeof(Acc*) || ACC_span_0 != (int)sizeof(Acc*) ||
+        ACC_span_1 != (int)sizeof(int) || ACC_span_2 != (int)sizeof(double) ||
+        ACC_clear_0 != (int)sizeof(Acc*)) {
+        printf("bad get=%d span=%d,%d,%d clear=%d\n",
+               ACC_get_0, ACC_span_0, ACC_span_1, ACC_span_2, ACC_clear_0);
+        return 1;
+    }
+    printf("ok\n");
     return 0;
 }

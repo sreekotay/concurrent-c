@@ -19,6 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     file \
     git \
+    libpython3-dev \
     libzopfli-dev \
     make \
     pkg-config \

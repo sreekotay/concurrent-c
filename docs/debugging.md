@@ -57,6 +57,11 @@ Use the provided scripts for regular race detection:
 - Quick TSan run: `./scripts/test_tsan.sh`
 - Full TSan run: `./scripts/test_tsan.sh --all`
 - Stress tests under TSan: `./scripts/stress_sanitize.sh tsan`
+- Stress tests under ASan: `./scripts/stress_sanitize.sh asan`
+- Bridge addon ASan (Linux/Docker): `./scripts/sanitize_bridge.sh`
+
+Dated receipts, macOS SIP limits, and a fuzzing plan:
+[`sanitizers.md`](sanitizers.md).
 
 Notes:
 - On macOS, TSan requires `clang`.

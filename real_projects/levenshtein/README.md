@@ -10,6 +10,10 @@ ccc build -O real_projects/levenshtein/levenshtein_cc.ccs   # → bin/cclev.abi3
 PYTHONPATH=bin python3 -c "import cclev; print(cclev.distance('kitten','sitting'))"
 ```
 
+Harness smoke (`tests/py_levenshtein_smoke.shcc`) builds
+`levenshtein_cc_smoke.ccs` — same exports, DP only — so ILP32/QEMU does not
+cold-compile the bit-parallel specimen.
+
 ## Exports
 
 `distance`, `ratio`, `hamming`, `jaro`, `jaro_winkler` — all over

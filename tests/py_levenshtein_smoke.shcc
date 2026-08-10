@@ -1,8 +1,7 @@
-/* The levenshtein specimen builds and imports: distance/ratio/hamming/
- * jaro/jaro_winkler on fixed pairs, codepoints not bytes — e-acute and
- * an astral-plane char are one edit each (spelled as escapes). Full
- * parity against the pip package lives in real_projects/levenshtein/
- * parity.py; this smoke needs only python3. */
+/* Builds the DP-only smoke module (levenshtein_cc_smoke.ccs), not the full
+ * bit-parallel specimen — keeps ILP32/QEMU under a sane wall clock.  Checks
+ * distance/ratio/hamming/jaro/jaro_winkler on fixed pairs (codepoints, not
+ * bytes).  Full parity stays in real_projects/levenshtein/parity.py. */
 CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 
 {
@@ -16,7 +15,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 {
     CCCommand build = cc_command(&a, @slice("./cc/bin/ccc"));
     build.arg("build");
-    build.arg("real_projects/levenshtein/levenshtein_cc.ccs");
+    build.arg("real_projects/levenshtein/levenshtein_cc_smoke.ccs");
     build.inherit_stdio();
     int rc = build.status() !>;
     if (rc != 0) { "build failed".println() !>; return 1; }

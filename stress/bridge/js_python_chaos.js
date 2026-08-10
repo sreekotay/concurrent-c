@@ -211,7 +211,9 @@ async function teardownDerby() {
       if (s.status === 'rejected' && /closed/.test(String(s.reason && s.reason.message)))
         destroyDuring++;
     }
-    try { py.destroy(); doubleDestroy++; } catch (_) {}
+    // Drain before the next create — overlapping lane destroy + create is refuse.
+    try { await killer; } catch (_) {}
+    try { await py.destroy(); doubleDestroy++; } catch (_) {}
     let late = false;
     try { math.floor(1.2); } catch (e) { late = /closed/.test(e.message); }
     if (late) afterClosed++;
@@ -241,7 +243,7 @@ async function callbackBlizzard() {
     const mapped = b.list(b.map((x) => x * 3 + 1, lst));
     if (String(mapped) !== '[' + Array.from({ length: 64 }, (_, j) => j * 3 + 1).join(', ') + ']') {
       ok('callback_blizzard_sync', false);
-      py.destroy();
+      await py.destroy();
       return;
     }
   }
@@ -261,7 +263,7 @@ async function callbackBlizzard() {
   const partial = py.import('functools').partial((x) => x * 11, 3);
   let retained = 0;
   for (let i = 0; i < 500; i++) if (partial() === 33) retained++;
-  py.destroy();
+  await py.destroy();
   result('callback_blizzard_ms %s', nsToMs(hr() - t0).toFixed(1));
   result('callback_blizzard_sync_maps %d', N);
   result('callback_blizzard_throws %d', throws);
@@ -315,7 +317,7 @@ async function exceptionHail() {
     'lambda: (_ for _ in ()).throw(ValueError("from-py"))', g);
   let pyMsg = false;
   try { boom(); } catch (e) { pyMsg = /from-py/.test(e.message); }
-  py.destroy();
+  await py.destroy();
   const wantHits = Math.floor((N + 2) / 3);
   const wantSum = Array.from({ length: N }, (_, i) => i)
     .filter((i) => i % 3 !== 0)
@@ -354,7 +356,7 @@ async function nestedCallable() {
     b.eval('lambda a, b: a - b', g), 50);
   let retained = 0;
   for (let i = 0; i < 200; i++) if (partial(8) === 42) retained++;
-  py.destroy();
+  await py.destroy();
   result('nested_callable_ms %s', nsToMs(hr() - t0).toFixed(1));
   result('nested_callable_n %d', N);
   ok('nested_callable_factory', okN === N);
@@ -390,7 +392,7 @@ async function bigPayloadHail() {
   const lst = rng(n);
   const asStr = String(lst);
   const lenOk = asStr.startsWith('[0, 1, 2') && asStr.endsWith((n - 1) + ']');
-  py.destroy();
+  await py.destroy();
   result('big_payload_hail_ms %s', nsToMs(hr() - t0).toFixed(1));
   result('big_payload_hail_rounds %d', rounds);
   ok('big_payload_hail_json', roundOk === rounds * 2);
@@ -521,7 +523,7 @@ async function keepPastReturn() {
       else throw e;
     }
   }
-  py.destroy();
+  await py.destroy();
   result('keep_past_return_ms %s', nsToMs(hr() - t0).toFixed(1));
   result('keep_past_return_n %d', N);
   ok('keep_past_return_caught', caught === N);
@@ -577,7 +579,7 @@ async function callbackBufferPath() {
     const big = new Float64Array((1 << 16) / 8 + 8);
     big.fill(1);
     const s = math.fsum(big);
-    py.destroy();
+    await py.destroy();
     ok('callback_buffer_path_inproc_map', okMap);
     ok('callback_buffer_path_inproc_spill', s === big.length);
   }
@@ -694,7 +696,7 @@ async function asyncioLaneStorm() {
   await sleep(20);
   await py2.destroy();
   destroyReject = (await got) === 'rej';
-  py.destroy();
+  await py.destroy();
   result('asyncio_lane_storm_ms %s', nsToMs(hr() - t0).toFixed(1));
   ok('asyncio_lane_storm_work', tags.length === N && String(tags[0]) === 't0');
   ok('asyncio_lane_storm_fetch', fetchOk === N);
@@ -733,7 +735,7 @@ async function releaseDuringSuspend() {
   await sleep(15);
   clearInterval(tick);
   const alive = math.floor(3.7) === 3;
-  py.destroy();
+  await py.destroy();
   result('release_during_suspend_ms %s', nsToMs(hr() - t0).toFixed(1));
   result('release_during_suspend_ticks %d', ticks);
   ok('release_during_suspend_result', String(r) === 'bob:7.0' || String(r) === 'bob:7');
@@ -770,7 +772,7 @@ async function mixedHammer(numpyOk) {
     if (math.floor(i + 0.2) !== i) {
       clearInterval(tick);
       ok('mixed_hammer_sync', false);
-      py.destroy();
+      await py.destroy();
       return;
     }
   }
@@ -778,7 +780,7 @@ async function mixedHammer(numpyOk) {
   await sleep(25);
   clearInterval(tick);
   const laneOk = settled.every((v) => typeof v === 'number' && Number.isFinite(v));
-  py.destroy();
+  await py.destroy();
   result('mixed_hammer_ms %s', nsToMs(hr() - t0).toFixed(1));
   result('mixed_hammer_ticks %d', ticks);
   result('mixed_hammer_lane_jobs %d', settled.length);
@@ -837,7 +839,7 @@ async function rssSoak() {
       acc += math.floor(i + 0.2);
       if (i % 5 === 0) void math.sqrt;
     }
-    py.destroy();
+    await py.destroy();
     cycles++;
     if (cycles % 4 === 0 && global.gc) global.gc();
   }
@@ -914,7 +916,7 @@ async function leaseBlender() {
     if (global.gc) { global.gc(); await sleep(5); }
     ok('lease_blender_post_drop_sum', s === (1 << 18) * 2);
   }
-  py.destroy();
+  await py.destroy();
   result('lease_blender_ms %s', nsToMs(hr() - t0).toFixed(1));
   result('lease_blender_rss_delta_mb %s', ((rss() - r0) / MB).toFixed(1));
   ok('lease_blender_sums', sumOk);
@@ -953,7 +955,7 @@ async function handleLeakSoak() {
   }
   if (global.gc) { global.gc(); await sleep(30); global.gc(); }
   const after = py.stats();
-  py.destroy();
+  await py.destroy();
   const delta = Math.max(0, rss() - r0);
   result('handle_leak_soak_ms %s', nsToMs(hr() - t0).toFixed(1));
   result('handle_leak_soak_bursts %d', bursts);

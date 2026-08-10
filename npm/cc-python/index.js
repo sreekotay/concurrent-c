@@ -3,7 +3,7 @@
  *     const py = require('concurrent-c-python').create();  // Isolation Domain
  *     const np = py.import('numpy');
  *     const s  = np.linalg.norm(new Float64Array([3, 4]));   // 5
- *     py.destroy();   // one sweep — every handle, arena, interpreter ref
+ *     await py.destroy();   // one sweep — await before the next create()
  *
  * Proxies wrap opaque handles: attribute access is getattr, a call is
  * invoke, scalars come back as JS scalars and everything else as another

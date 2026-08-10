@@ -8,6 +8,7 @@
 - **[Language Concepts](language-concepts.md)** — Defer, results, UFCS, arenas (lifetime vs alloc policy) / provenance, closures
 - **[Cheatsheet](cheatsheet.md)** — Quick reference for common patterns
 - **[Debugging](debugging.md)** — VS Code / Cursor debugging setup
+- **[Sanitizers / fuzzing](sanitizers.md)** — ASan/TSan receipts, bridge Docker recipe, fuzz plan
 - **[ILP32 Docker smoke](ilp32-docker.md)** — Linux i386 / ARM32 runtime smokes via Docker
 - **[Script library (`.shcc`)](../spec/concurrent-c-spec-complete.md#95-script-library-shcc--cccscript)** — Shebang tools, synthetic `main`, `@task` dispatch
 

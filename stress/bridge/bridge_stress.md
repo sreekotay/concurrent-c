@@ -7,26 +7,32 @@ CI correctness smokes stay under `tests/cc_*_bridge*`.
 
 | Driver | Host | Target |
 |--------|------|--------|
+| [`js_python_fuzz.js`](js_python_fuzz.js) | Node | seeded in-process walk (`FUZZ_SEED`) |
 | [`js_python_chaos.js`](js_python_chaos.js) | Node | `concurrent-c-python` (in-process + isolated) |
 | [`cc_node_stress_wire.py`](cc_node_stress_wire.py) | Python | `concurrent-c-node` (Node children) |
-| [`run.sh`](run.sh) | both | runs both drivers |
+| [`run.sh`](run.sh) | both | fuzz + both kitchen sinks |
 
 ## Run
 
 ```bash
-./stress/bridge/run.sh                         # CHAOS_SCALE=quick
+./stress/bridge/run.sh                         # CHAOS_SCALE=quick (+ seeded fuzz)
 CHAOS_SCALE=full ./stress/bridge/run.sh
 CHAOS_SCALE=soak ./stress/bridge/run.sh        # full sizes + longer soaks
 SOAK_SECONDS=30 CHAOS_SCALE=soak ./stress/bridge/run.sh
+FUZZ_SEED=42 FUZZ_OPS=200 ./stress/bridge/run.sh   # replay fuzz walk
 
+OPENBLAS_NUM_THREADS=1 node --expose-gc stress/bridge/js_python_fuzz.js
 OPENBLAS_NUM_THREADS=1 node --expose-gc stress/bridge/js_python_chaos.js
 PYTHONPATH=pypi/cc-node python3 stress/bridge/cc_node_stress_wire.py
+./scripts/sanitize_bridge.sh fuzz              # Docker ASan: mem + fuzz
 ```
 
 `CHAOS_SCALE`: `quick` < `full` < `soak` (`soak` implies full mode sizes).
 `SOAK_SECONDS` overrides wall time for RSS / handle-leak soaks when
-`CHAOS_SCALE=soak`. Needs `node` + `python3`. Isolated numpy modes skip
-cleanly when numpy is absent. Not part of `tools/run_all.ccs --stress`.
+`CHAOS_SCALE=soak`. `FUZZ_SEED` / `FUZZ_OPS` control the seeded walk
+(`js_python_fuzz.js`); every RESULT line includes the seed. Needs `node` +
+`python3`. Isolated numpy modes skip cleanly when numpy is absent. Not
+part of `tools/run_all.ccs --stress`.
 
 ## Status legend
 
@@ -38,6 +44,15 @@ cleanly when numpy is absent. Not part of `tools/run_all.ccs --stress`.
 | **smoke** | Also pinned by a `tests/` smoke (boolean, not volume) |
 
 ---
+
+## `js_python_fuzz.js` (seeded walk)
+
+| Mode | Status | What it hammers |
+|------|--------|-----------------|
+| `fuzz_walk` | green | Random create/import/call/task/lease/keep-past/release/destroy/GC; `destroy_kick` expects create-during-destroy refuse or clean create; **RESULT lines carry `fuzz_seed=`** |
+
+Replay: `FUZZ_SEED=<n> FUZZ_OPS=<m> node --expose-gc stress/bridge/js_python_fuzz.js`.
+Default ops: quick 200 / full 800 / soak 2000 (`FUZZ_OPS` overrides).
 
 ## `js_python_chaos.js` (Node → Python)
 
@@ -165,15 +180,20 @@ mid-spill while B reads a sibling spill from the same `Float64Array`.
 - **Escaped closures**: a JS closure that captures a proxy must answer
   `bridge is closed` after destroy + GC — never use-after-free.
 
+## Wire libFuzzer
+
+[`fuzz/`](fuzz/) — standalone C codec for `$shm` / `$ta` / `$h` / `$nf`
+(no Node). `./scripts/fuzz_wire_codec.sh`. Nightly:
+`bridge-asan-nightly.yml`.
+
 ## Deferred (not in suite yet)
 
-- Property-based random sequences + seeded replay
-- ASan/TSan CI job for the `.node` addon
 - Worker-thread policy (“one domain graph per thread”) + violation test
 - Multi-GB OOM / cgroup pressure modes (manual / soak-only machines)
 
 ## Related
 
+- Sanitizers / ASan / fuzz: [`docs/sanitizers.md`](../../docs/sanitizers.md)
 - Package READMEs: [`npm/cc-python/README.md`](../../npm/cc-python/README.md),
   [`pypi/cc-node/README.md`](../../pypi/cc-node/README.md)
 - Interop map: [`perf/README.md`](../../perf/README.md) (JS / Python Interop)
