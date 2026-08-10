@@ -2627,7 +2627,7 @@ typedef struct {
     char callee[96];
     char wrap[64];
     int dest_aware;      /* .ufcs_dynamic2 */
-    int returns_result;  /* plain callee declares a CCResult_ return */
+    int returns_result;  /* plain callee declares CCResult_ / T !>(E) return */
 } ShadowDynSink;
 static ShadowDynSink g_shadow_dsinks[16];
 static int g_shadow_ndsinks;
@@ -3884,10 +3884,11 @@ static void shadow_niche_register(const char* ty, unsigned size, unsigned align,
     g_shadow_nniches++;
 }
 
-/* Does `text` declare `name` with a CCResult_ return?  Decl-shaped probe:
+/* Does `text` declare `name` with a Result return?  Decl-shaped probe:
  * an occurrence of `name(` whose declaration head (this line, or this
- * line plus the previous for a wrapped head) spells `CCResult_` with no
- * `=` after it — an assignment from the callee is a use, not a decl. */
+ * line plus the previous for a wrapped head) spells `CCResult_` or
+ * `T !>(E)` with no `=` after it — an assignment from the callee is a
+ * use, not a decl. */
 static int shadow_text_fn_returns_result(const char* text, const char* name) {
     const char* p = text;
     size_t nl;
@@ -3921,6 +3922,9 @@ static int shadow_text_fn_returns_result(const char* text, const char* name) {
             memcpy(head, w, hn);
             head[hn] = 0;
             rr = strstr(head, "CCResult_");
+            if (rr && !strchr(rr, '=')) return 1;
+            /* .cch surface: `CCPyObj !>(CCPyError) cc_py_obj_callm(` */
+            rr = strstr(head, "!>(");
             if (rr && !strchr(rr, '=')) return 1;
         }
         p += nl;

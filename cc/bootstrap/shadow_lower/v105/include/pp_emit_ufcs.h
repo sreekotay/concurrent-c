@@ -910,17 +910,15 @@ typedef struct {
     const char* destroy_fn;  /* .destroy() unary, or NULL */
 } ShadowUfcsLife;
 
+/* ABI leftovers only: by-value Chan free, Nursery free≡destroy, Arena
+ * .free≡destroy. Exclusive and Store invent via ufn/hdr. */
 static const ShadowUfcsLife g_shadow_ufcs_life[] = {
-    { "CCNursery",        "cc_nursery_free",         "cc_nursery_free" },
-    { "CCChan",           "cc_channel_free",         NULL },
-    { "CCChanTx",         "cc_channel_free",         NULL },
-    { "CCChanRx",         "cc_channel_free",         NULL },
-    { "CCArena",          "cc_arena_destroy",        "cc_arena_destroy" }, /* .free aliases destroy */
-    { "CCArenaPool",      NULL,                     "cc_arena_pool_destroy" },
-    { "CCExclusiveMutex", "cc_exclusive_mutex_free", NULL },
-    { "CCExclusiveGuard", NULL,                     "cc_exclusive_guard_destroy" },
-    { "CCExclusive",      NULL,                     "cc_exclusive_destroy" },
-    { "Store",            "store_free",              NULL },
+    { "CCNursery",   "cc_nursery_free",  "cc_nursery_free" },
+    { "CCChan",      "cc_channel_free",  NULL },
+    { "CCChanTx",    "cc_channel_free",  NULL },
+    { "CCChanRx",    "cc_channel_free",  NULL },
+    { "CCArena",     "cc_arena_destroy", "cc_arena_destroy" }, /* .free≡destroy */
+    { "CCArenaPool", NULL,               "cc_arena_pool_destroy" },
     { NULL, NULL, NULL },
 };
 
@@ -940,6 +938,60 @@ static int shadow_ufcs_emit_unary_life(const char* fn, const char* recv,
     if (!fn || !fn[0] || !recv) return 0;
     return shadow_ufcs_fmt_call(dst, cap, fn, is_arrow_or_ptr ? "" : "&", recv,
                                NULL);
+}
+
+/* Capitals Tag → snake_tag (Store → store). */
+static void shadow_ufcs_capitals_snake(const char* tag, char* out, size_t cap) {
+    size_t si = 0, ti = 0;
+    if (!out || !cap) return;
+    out[0] = 0;
+    if (!tag || !tag[0]) return;
+    for (; tag[ti] && si + 2 < cap; ti++) {
+        char c = tag[ti];
+        if (c >= 'A' && c <= 'Z') {
+            if (si > 0) out[si++] = '_';
+            out[si++] = (char)(c - 'A' + 'a');
+        } else if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_')
+            out[si++] = c;
+    }
+    out[si] = 0;
+}
+
+/* Proven life invent: cc_<snake>_<meth> or Capitals snake_<meth> / Tag_meth. */
+static int shadow_ufcs_emit_life_invent(const char* vty, const ShadowBind* rb,
+                                       const char* meth, const char* recv,
+                                       int is_arrow_or_ptr, char* dst,
+                                       size_t cap) {
+    char vbase[96];
+    char snake[160];
+    char composed[160];
+    if (!meth || !meth[0] || !recv || !dst || !cap) return 0;
+    vbase[0] = 0;
+    shadow_ufcs_vty_base(vty, vbase, sizeof(vbase));
+    if (!vbase[0] && rb) shadow_bind_base_ty(rb, vbase, sizeof(vbase));
+    if (!vbase[0]) return 0;
+    if (strncmp(vbase, "CC", 2) == 0 && vbase[2] >= 'A' && vbase[2] <= 'Z') {
+        shadow_ufcs_cc_snake(vbase, snake, sizeof(snake));
+        if (!snake[0]) return 0;
+        snprintf(composed, sizeof(composed), "%s_%s", snake, meth);
+        if (shadow_ufn_exists(composed) || shadow_hdr_fn_exists(composed))
+            return shadow_ufcs_emit_unary_life(composed, recv, is_arrow_or_ptr,
+                                              dst, cap);
+        return 0;
+    }
+    if (vbase[0] >= 'A' && vbase[0] <= 'Z') {
+        snprintf(composed, sizeof(composed), "%s_%s", vbase, meth);
+        if (shadow_ufn_exists(composed))
+            return shadow_ufcs_emit_unary_life(composed, recv, is_arrow_or_ptr,
+                                              dst, cap);
+        shadow_ufcs_capitals_snake(vbase, snake, sizeof(snake));
+        if (!snake[0]) return 0;
+        snprintf(composed, sizeof(composed), "%s_%s", snake, meth);
+        if (shadow_ufn_exists(composed) || shadow_hdr_fn_exists(composed))
+            return shadow_ufcs_emit_unary_life(composed, recv, is_arrow_or_ptr,
+                                              dst, cap);
+    }
+    return 0;
 }
 
 /* .free() — typed only. Args form is CCArenaPool-only; else unary from table /
@@ -967,7 +1019,8 @@ static int shadow_ufcs_emit_free(const char* vty, const ShadowBind* rb,
         return shadow_ufcs_emit_unary_life(life->free_fn, recv, is_arrow_or_ptr,
                                           dst, cap);
     }
-    return 0;
+    return shadow_ufcs_emit_life_invent(vty, rb, "free", recv, is_arrow_or_ptr,
+                                       dst, cap);
 }
 
 /* .destroy() — table, then CCVec_/Map_/ArrayMap_ mangled, then Capitals
@@ -1010,7 +1063,8 @@ static int shadow_ufcs_emit_destroy(const char* vty, const ShadowBind* rb,
             return shadow_ufcs_emit_unary_life(dhook, recv, is_arrow_or_ptr, dst,
                                               cap);
     }
-    return 0;
+    return shadow_ufcs_emit_life_invent(vty, rb, "destroy", recv,
+                                       is_arrow_or_ptr, dst, cap);
 }
 
 /* Arena / pool / checkpoint methods — typed only, no recv-name heuristics.
@@ -1153,30 +1207,15 @@ static int shadow_ufcs_emit_release(const char* vty, const ShadowBind* rb,
     return 0;
 }
 
-/* Ambient namespace receivers (no typed value): std_out.write(x) →
- * cc_std_out_write_auto(x). Exact recv spelling only — not a typed family. */
-typedef struct {
-    const char* recv;
-    const char* meth;
-    const char* callee; /* args-only; drops ambient recv */
-} ShadowUfcsAmbient;
-
-static const ShadowUfcsAmbient g_shadow_ufcs_ambient[] = {
-    { "cc_std_out", "write", "cc_std_out_write_auto" },
-    { "std_out",    "write", "cc_std_out_write_auto" },
-    { "cc_std_err", "write", "cc_std_err_write_auto" },
-    { "std_err",    "write", "cc_std_err_write_auto" },
-    { NULL, NULL, NULL },
-};
-
+/* Ambient namespace receivers — shared <ccc/cc_ufcs_families.h> table. */
 static int shadow_ufcs_emit_ambient(const char* meth, const char* recv,
                                    const char* args, char* dst, size_t cap) {
     size_t i;
     if (!meth || !recv || !dst || !cap) return 0;
     if (!args) args = "";
     if (!args[0]) return 0;
-    for (i = 0; g_shadow_ufcs_ambient[i].recv; i++) {
-        const ShadowUfcsAmbient* row = &g_shadow_ufcs_ambient[i];
+    for (i = 0; cc_ufcs_ambient_rows[i].recv; i++) {
+        const CcUfcsAmbientRow* row = &cc_ufcs_ambient_rows[i];
         if (strcmp(recv, row->recv) != 0 || strcmp(meth, row->meth) != 0)
             continue;
         snprintf(dst, cap, "%s(%s)", row->callee, args);

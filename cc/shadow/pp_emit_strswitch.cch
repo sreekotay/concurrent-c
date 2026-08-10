@@ -297,7 +297,11 @@ static int shadow_strsw_rewrite_body(char* body, size_t cap, char keys[][SHADOW_
     size_t i = 0;
     size_t o = 0;
     int in_dq = 0, in_sq = 0, in_bt = 0;
-    if (!body || !keys || !key_lens || nkeys <= 0) return 0;
+    if (!body) return 0;
+    /* Empty string-switch (default-only / grammar Type__fk with no fields):
+     * nothing to rewrite. */
+    if (nkeys == 0) return 1;
+    if (!keys || !key_lens) return 0;
     tmp[0] = 0;
     while (body[i] && o + 1 < sizeof(tmp)) {
         char c = body[i];
@@ -561,18 +565,14 @@ static int shadow_strsw_try(AstNode* st, CEmit* out, ShadowCtx* ctx,
                                err[0] ? err : "string switch: invalid case");
         return -1;
     }
-    if (nkeys == 0) return 0;
-    if (has_nonstring) {
-        shadow_variant_err_loc(
-            ctx, st, out, "switch", 0,
-            "string switch: cannot mix string and non-string case labels");
-        return -1;
-    }
-    /* Subject type: known non-slice is a hard error. */
+    /* Subject type: known non-slice is a hard error when string cases exist;
+     * known slice with zero string cases (default-only / empty grammar __fk)
+     * must still lower — host C cannot `switch (CCSlice)`. */
+    tyk = 0;
     if (shadow_strsw_subj_ident(expr, subj, sizeof(subj))) {
         const ShadowBind* b = shadow_bind_lookup(subj);
         tyk = b ? shadow_strsw_ty_kind(b->ty) : 0;
-        if (tyk < 0) {
+        if (tyk < 0 && nkeys > 0) {
             snprintf(err, sizeof(err),
                      "string switch: subject '%s' has type '%s' (need "
                      "CCSlice)",
@@ -580,6 +580,25 @@ static int shadow_strsw_try(AstNode* st, CEmit* out, ShadowCtx* ctx,
             shadow_variant_err_loc(ctx, st, out, subj, 0, err);
             return -1;
         }
+    }
+    if (nkeys == 0) {
+        /* Ordinary int/enum switch (possibly default-only): leave alone. */
+        if (has_nonstring || tyk <= 0) return 0;
+        if (!shadow_strsw_rewrite_body(body, body_cap, keys, key_lens, 0)) {
+            shadow_variant_err_loc(ctx, st, out, "switch", 0,
+                                   "string switch: failed to rewrite case labels");
+            return -1;
+        }
+        if (!shadow_strsw_emit_head(out, ctx, st, indent, expr, keys, key_lens, 0,
+                                   0, 0, NULL))
+            return -1;
+        return 1;
+    }
+    if (has_nonstring) {
+        shadow_variant_err_loc(
+            ctx, st, out, "switch", 0,
+            "string switch: cannot mix string and non-string case labels");
+        return -1;
     }
     for (i = 0; i < nkeys; i++) key_ptrs[i] = keys[i];
     if (!shadow_strsw_mph(key_ptrs, key_lens, nkeys, &table_size, &seed, slots,

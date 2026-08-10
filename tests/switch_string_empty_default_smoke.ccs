@@ -1,0 +1,19 @@
+/* Default-only string switch on a CCSlice subject (empty grammar Type__fk
+ * shape): must lower to an integer discriminant — host C rejects
+ * `switch (CCSlice)`. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int empty_fk(CCSlice k) {
+    switch (k) {
+    default:
+        return -1;
+    }
+}
+
+int main(void) {
+    if (empty_fk(CC_SLICE_LIT("x")) != -1) return 1;
+    if (empty_fk(cc_slice_empty()) != -1) return 2;
+    printf("ok\n");
+    return 0;
+}
