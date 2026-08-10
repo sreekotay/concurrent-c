@@ -50,12 +50,9 @@ Usage (from repo root):
   ./scripts/publish_bridges.sh --publish --no-bump
 
 Needs: ./cc/bin/ccc, node, a C compiler, python3.
-Auth: npm login. PyPI default is CI OIDC (publish-cc-node.yml):
-  after npm succeeds, commit+push version bumps, then:
-    gh workflow run publish-cc-node.yml
+Auth: npm login; gh (for PyPI OIDC). After npm succeeds, --publish
+  commits the two version files, pushes, and runs publish-cc-node.yml.
   --pypi-twine / PYPI_VIA=twine: local twine + ~/.pypirc instead.
-On --publish, versions in npm/cc-python/package.json and
-pypi/cc-node/pyproject.toml are bumped.
 EOF
       exit 0
       ;;
@@ -202,7 +199,22 @@ NPM_VER="$(node -p "require('./npm/cc-python/package.json').version")"
 PY_VER="$("$PY" -c 'import re,pathlib; t=pathlib.Path("pypi/cc-node/pyproject.toml").read_text(); print(re.search(r"(?m)^version\s*=\s*\"([^\"]+)\"", t).group(1))')"
 
 if [[ "$PYPI_VIA" == ci ]]; then
-  echo "== PyPI via CI OIDC (skipped local twine)"
+  echo "== PyPI via CI OIDC"
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "need gh on PATH to dispatch publish-cc-node.yml" >&2
+    exit 1
+  fi
+  # Version bumps must be on the default branch for OIDC; commit only those
+  # two files so a dirty tree does not sweep unrelated edits into the release.
+  git add npm/cc-python/package.json pypi/cc-node/pyproject.toml
+  if ! git diff --cached --quiet; then
+    git commit -m "Release bridges ${NPM_VER} / ${PY_VER}"
+  else
+    echo "   version files already committed"
+  fi
+  git push origin HEAD
+  gh workflow run publish-cc-node.yml --ref "$(git rev-parse --abbrev-ref HEAD)"
+  echo "   dispatched publish-cc-node.yml — watch: gh run watch"
 else
   echo "== twine upload out/pypi/concurrent_c_node-*"
   "$PY" -m twine upload --skip-existing out/pypi/concurrent_c_node-*
@@ -211,18 +223,8 @@ fi
 echo
 echo "npm live:"
 echo "  https://www.npmjs.com/package/concurrent-c-python/v/${NPM_VER}"
+echo "PyPI:"
+echo "  https://pypi.org/project/concurrent-c-node/${PY_VER}/"
 if [[ "$PYPI_VIA" == ci ]]; then
-  echo
-  echo "PyPI next (OIDC) — commit the bumps, push, then dispatch:"
-  echo "  git add npm/cc-python/package.json pypi/cc-node/pyproject.toml"
-  echo "  git commit -m \"Release bridges ${NPM_VER} / ${PY_VER}\""
-  echo "  git push origin HEAD"
-  echo "  gh workflow run publish-cc-node.yml"
-  echo "  # alt: git tag cc-node-v${PY_VER} && git push origin cc-node-v${PY_VER}"
-else
-  echo "PyPI live:"
-  echo "  https://pypi.org/project/concurrent-c-node/${PY_VER}/"
-  echo
-  echo "commit the bumped version files when ready:"
-  echo "  git add npm/cc-python/package.json pypi/cc-node/pyproject.toml && git commit -m \"Release bridges ${NPM_VER} / ${PY_VER}\""
+  echo "  (OIDC workflow running — may take ~1 min)"
 fi
