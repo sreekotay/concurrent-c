@@ -1634,7 +1634,12 @@ after the first is an isolated subinterpreter with its own GIL), so
 `false` already gives N parallel domains.  `true` opens a python child
 per handle on the broker.py wire: values are remote handles (or
 materialized scalars), never `PyObject*`, and the flag never silently
-aliases `false`.
+aliases `false`.  `cc_py_proc_available()` is the boolean probe for that
+transport (python3 on PATH, same posture as `cc_py_available()` for
+libpython).  The process-isolated MVP carries import, attribute get,
+scalar method calls, and typed extraction; typed-array spill, kwargs,
+`exec`/`eval` source, and child-to-host callbacks on that wire refuse by
+name at the asking call.
 
 The runtime is selected most-specific first: a process that already is
 Python keeps its own symbols unconditionally; `cc_py_use(spec)` chooses
@@ -1680,15 +1685,18 @@ calls the VALUE itself — the hot path for a held callable
 (`CCPyObj dot = np.get("dot")` once, invoke per call): no attribute
 lookup rides on the call. It shadows a Python attribute literally named
 `invoke`; an object that really has one is reached through `.get`. Arguments marshal by
-type: `int` / `int64_t` → Python `int`, `double` → `float`, `bool` →
+type: `int` / `int64_t` → Python `int`, `unsigned` /
+`unsigned long long` → Python `int` (inbound uses
+`PyLong_AsUnsignedLongLong` — negatives and out-of-range values are
+`OverflowError`, never a silent wrap), `double` → `float`, `bool` →
 `bool`, `CCSlice` / `char[:0]` → `str`, a typed slice (`double[:]` is
 `CCSlice_double`, …) → `list` of its scalar element type, `CCPyObj` →
-itself (same home required, §7). No other type marshals; there is no
-deep conversion. Typed-slice dispatch is `_Generic` over the scalar
-instance structs, so any expression of an instance type marshals as a
-list; a slice erased to plain `CCSlice` (via `bytes()` or `.base`)
-marshals as `str`. Non-scalar instances have no marshal arm and fail
-at compile time.
+itself (same home required; a foreign-home object argument is refused by
+name at the call). No other type marshals; there is no deep conversion.
+Typed-slice dispatch is `_Generic` over the scalar instance structs, so
+any expression of an instance type marshals as a list; a slice erased to
+plain `CCSlice` (via `bytes()` or `.base`) marshals as `str`. Non-scalar
+instances have no marshal arm and fail at compile time.
 
 Marshalling a typed slice builds one Python object per element, so the cost is
 per element and the layout is rebuilt on the far side even when both sides
@@ -1728,8 +1736,10 @@ borrow. Any other argument passes through unchanged and marshals normally.
 `obj.as_list::[T](&arena)` converts a Python sequence to a typed run of
 `T` — numbers to CC scalars, strings to arena-backed slices — and
 `obj.as_map::[K, V](&arena, m)` fills a Map and yields the pair count. The
-type argument names the element type(s); an element that will not convert
-is a `CCPyError` naming the index.
+type argument names the element type(s); an element that will not convert,
+or a number outside `T`'s range (including narrowing `int` /
+`int64_t` destinations), is a `CCPyError` naming the index — never a
+silent truncate.
 
 A contiguous buffer exporter (a numpy array, `array.array`, `bytes`) whose
 element format and size match `T` is read with one `memcpy` into the arena
@@ -1801,10 +1811,12 @@ the diagnostic names the destination and enumerates the installed
 variants.
 
 Extraction semantics are the library's: `double`/`float` accept any
-Python number (`float` narrows); integer destinations extract Python
-ints exactly and truncate Python floats toward zero (C cast and Python
-`int()` agree); a result outside the destination's range is a
-`CCPyError`, not a truncation.
+Python number (`float` narrows); signed integer destinations extract
+Python ints exactly and truncate Python floats toward zero (C cast and
+Python `int()` agree); unsigned destinations use
+`PyLong_AsUnsignedLongLong` (negatives and out-of-range values fail);
+a result outside the destination's range is a `CCPyError`, not a
+truncation.
 
 Explicit extraction remains for held objects:
 `.as_i64() !>`, `.as_f64() !>`, `.as_slice() !>` (`str`/`bytes` copied into
@@ -2174,13 +2186,16 @@ its marshaling, the loader, and the outbound direction inside an
 exported call (a `CCJs *` parameter is the host, wired by the trampoline
 and invisible to JS; `global`/`eval`/`exec`; the `CCJsVal` sink with
 destination-typed variants; `.get`/`.as_*`/`.hold`; `f.map::[T]` row
-batching).  Domains are implemented: `cc_js_new(isolated, &arena)`
-yields one handle over two transports — hosted libnode in-process, or
-a node child per handle on the `concurrent-c-node` wire — with
-`cc_js_host_new`/`run` as the raw loop-thread door beneath the hosted
-tier.  Engine choice (the QuickJS backend), `js_expose`,
-`as_list`/`as_map`, hosted await, and typed arrays / callbacks on the
-wire are not.
+batching; unsigned inbound via `napi_get_value_bigint_uint64`;
+`js_pos` for keyword-bag escape).  Domains are implemented:
+`cc_js_new(isolated, &arena)` yields one handle over two transports —
+hosted libnode in-process, or a node child per handle on the
+`concurrent-c-node` wire — with `cc_js_host_new`/`run` as the raw
+loop-thread door beneath the hosted tier.  Isolated wire typed arrays
+(inline `$ta`/`b64`) and sync JS→CC callbacks (`js_dom_fn`) are on that
+wire; SHM spill, async/pipelined callbacks, and destroy-from-callback
+refuse by name.  Engine choice (the QuickJS backend), `js_expose`, and
+`as_list`/`as_map` on the domain surface are not.
 
 ### Model
 
@@ -2279,6 +2294,10 @@ sits the raw door — `CCJsHost host = cc_js_host_new(&arena) !>
 thread with a live `CCJs`, where the whole guest surface holds with no
 per-op posting; the bootstrap installs `globalThis.__ccRequire`, a
 require anchored at the process working directory, in both forms.
+`host.run` is not reentrant: a nested `run` from inside the closure
+refuses by name.  The hosted shim/probe cache fingerprints source
+together with arch/OS/toolchain and `node.h` / libnode identity, so a
+stale binary never silently serves a different host.
 
 **Isolated** (`true`) spawns a full `node` child per handle speaking
 the `concurrent-c-node` line-JSON wire (the same broker source,
@@ -2295,12 +2314,16 @@ value; everything else is a domain-owned handle whose method calls go
 get-then-call, with the bound-method handle released after the call;
 non-finite floats cross tagged, never nulled.  `require` resolves
 against the process working directory, so `npm install` next to the
-program is the whole setup.  One divergence, loud: the isolated child
-awaits a thenable result before replying, while the hosted tier cannot
-block its own loop and refuses a Promise-valued result by name (hosted
-await is future work).  Typed-array payloads and child-to-host
-callbacks are not yet on the wire, and each refuses by name at the
-call that asks.
+program is the whole setup.  Thenables diverge by transport, loudly:
+the isolated child awaits a thenable result before replying; the hosted
+tier cannot block its own loop, so a Promise/thenable result
+materializes as a `CCJsDomVal` handle (`CC__JS_DOM_K_HANDLE`) rather
+than awaiting — composition continues with `.then` on the handle.
+Typed-array arguments and results on the isolated wire travel as
+inline `$ta` / base64 (`CC__JS_DOM_K_TA`); SHM spill on the CC parent
+refuses by name.  Sync child→host callbacks cross as `$f` /
+`js_dom_fn(fn, ctx)` (reply on the same turn); async, pipelined, and
+destroy-from-callback shapes refuse by name at the asking call.
 
 `js_module::[T]` creates a Node-API module from a CC type — which is what
 a napi addon entry point must return:
@@ -2668,11 +2691,15 @@ is a double, so a CC integer whose magnitude is at most 2^53 marshals as
 `number` and a larger one marshals as `BigInt`; inbound, an integer
 destination accepts `number` and `BigInt` alike, range-checked against
 the destination — a value that does not fit is an error naming the
-argument, never a truncation.
+argument, never a truncation.  Unsigned destinations (`unsigned long
+long` and kin) read BigInt through `napi_get_value_bigint_uint64`, so
+values in `[2^63, 2^64)` cross without signed reinterpretation.
 
 `js_kw(name, value)` makes an argument bind by name: all named arguments
 of a call fold into one trailing plain object, JavaScript's own
-convention. `js_buf(x)` hands a typed slice over as an external
+convention.  `js_pos(value)` opts a trailing plain object out of that
+bag heuristic (branded so a positional options object is not swallowed).
+`js_buf(x)` hands a typed slice over as an external
 `ArrayBuffer` on the CC buffer, copying nothing. The borrow ends with the
 call: the buffer is detached when the call returns, so every retained
 reference — including a `TypedArray` built on it — is zero-length
@@ -2809,7 +2836,10 @@ same computation run in-process.
 
 - Full Node-API compatibility for arbitrary foreign addons (event loop,
   async work, `napi_define_class`, wrap/unwrap, threadsafe functions)
-- Promise and async integration (environment calls stay blocking-shaped)
+- Hosted loop-blocking await of thenables (hosted returns a handle;
+  isolated awaits on the wire)
+- SHM typed-array spill on the CC parent; async / pipelined /
+  destroy-from-callback wire shapes
 - The Node standard library under a QuickJS host
 - Using one handle from more than one OS thread concurrently
 - A class surface (real JS instances of a CC type) — a separate verb,

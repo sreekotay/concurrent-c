@@ -58,6 +58,12 @@ ccc examples/py/pydemo.shcc
 ```
 
 Probe with `cc_py_available()` when you want a clean skip without libpython.
+`cc_py_new(true, &a)` opens a **process-isolated** child (probe:
+`cc_py_proc_available()`); objects stay remote handles / scalars — never
+shared `PyObject*`.  Same-process homes refuse foreign-home object args by
+name; `obj.clone_into(&other)` pickle-copies between inproc interpreters
+(process-isolated targets refuse).  Unsigned inbound and `as_list` /
+narrow integer destinations refuse out-of-range values rather than wrap.
 Costs for this door: [`perf/py_baseline.ccs`](../perf/py_baseline.ccs) ·
 [`perf/baselines/py_baseline_20260809.txt`](../perf/baselines/py_baseline_20260809.txt).
 
@@ -83,15 +89,20 @@ Homebrew ships `node.h` but not libnode, so hosted returns
 `libnode not found` — use isolated there);
 **isolated** (`true`) spawns a `node` child per handle on the
 `concurrent-c-node` wire (~100-170µs/hop; N domains, separate heaps, crash
-isolation; needs only `node` on PATH).  Same ops, same materialization
-rules either way; `require` resolves against the working directory in
-both, so `npm install` next to your program is the whole setup.
+isolation; needs only `node` on PATH).  `require` resolves against the
+working directory in both.  Thenables: isolated awaits on the wire;
+hosted returns a handle (no loop-block await).  Isolated also carries
+inline typed arrays (`$ta`/`b64`) and sync JS→CC callbacks
+(`js_dom_fn`); SHM spill and async callback shapes refuse by name.
 
 The wire lives on dedicated fds with id-paired replies — stdio stays
 the user's, so `console.log` in evaluated code reaches the real stdout
 and can never collide with (or forge) a protocol reply.  Isolated is
 crash isolation, not a security sandbox: the child inherits your
 environment and privileges — do not run untrusted code through it.
+Catalog of CC-parent smokes + volume stress:
+[`stress/bridge/bridge_stress.md`](../stress/bridge/bridge_stress.md)
+(§ CC embed interop waves).
 
 ```sh
 ccc examples/js/jsdemo.shcc               # hosted when libnode exists, else isolated
