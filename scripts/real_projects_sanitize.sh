@@ -62,6 +62,8 @@ if [[ "$DOCKER" -eq 1 ]]; then
       rsync -a --delete \
         --exclude out/ --exclude bin/ --exclude .git/ \
         --exclude third_party/tcc/*.o --exclude "**/node_modules/" \
+        --exclude npm/cc-python/vendor/ \
+        --exclude npm/cc-python/bin/ \
         /src/ /work/
       jobs=$(nproc)
       ./scripts/apply_tcc_patches.sh >/dev/null 2>&1 || true

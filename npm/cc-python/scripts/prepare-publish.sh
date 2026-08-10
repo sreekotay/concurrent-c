@@ -53,8 +53,12 @@ const py = require(process.cwd() + "/npm/cc-python").create();
 if (py.import("math").sqrt(16) !== 4) throw new Error("probe: call failed");
 if (py.import("string").capwords("hello world") !== "Hello World")
   throw new Error("probe: marshal failed");
+/* CPython used to say "math domain error"; 3.12+ says
+ * "expected a nonnegative input, got …".  Either proves the exception crossed. */
 let threw = false;
-try { py.import("math").sqrt(-1); } catch (e) { threw = /domain/.test(e.message); }
+try { py.import("math").sqrt(-1); } catch (e) {
+  threw = /domain|nonnegative/i.test(e.message);
+}
 if (!threw) throw new Error("probe: python error did not cross");
 py.destroy();
 let closed = false;

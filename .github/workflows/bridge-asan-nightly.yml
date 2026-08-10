@@ -103,10 +103,11 @@ jobs:
       - name: Build ccc
         run: make cc -j"$(nproc)"
 
-      - name: real_projects ASan + light fuzz
+      - name: real_projects ASan + TSan + light fuzz
         env:
           REAL_FUZZ_N: '40'
           REAL_SANITIZE_TIMEOUT: '120'
         run: |
           ./scripts/real_projects_sanitize.sh asan
+          ./scripts/real_projects_sanitize.sh tsan
           ./scripts/real_projects_sanitize.sh fuzz
