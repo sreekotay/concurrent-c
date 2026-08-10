@@ -35,6 +35,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        # Same selective fetch as smoke: tcc only (see scripts/smoke.sh).
 
       - uses: actions/setup-node@v4
         with:
@@ -42,6 +43,13 @@ jobs:
 
       - name: Install deps
         run: sudo apt-get update && sudo apt-get install -y zlib1g-dev libcurl4-openssl-dev python3-dev python3-numpy
+
+      - name: Fetch TinyCC submodule
+        run: |
+          git submodule update --init third_party/tcc
+          if [ ! -f third_party/tcc/configure ]; then
+            git submodule update --checkout --force third_party/tcc
+          fi
 
       - name: Build toolchain
         run: make -C cc

@@ -144,7 +144,7 @@ void* cc_closure2_call(CCClosure2 c, intptr_t arg0, intptr_t arg1);
 int cc_nursery_spawn_closure1(CCNursery* n, CCClosure1 c, intptr_t arg0);
 int cc_nursery_spawn_closure2(CCNursery* n, CCClosure2 c, intptr_t arg0, intptr_t arg1);
 
-static inline CCClosure0 cc_closure0_make(void* (*fn)(void*), void* env, void (*drop)(void*)) CC_TSAN_NOSAN_FN {
+static inline CC_TSAN_NOSAN_FN CCClosure0 cc_closure0_make(void* (*fn)(void*), void* env, void (*drop)(void*)) {
 #if defined(CC_PARSER_MODE)
     (void)fn; (void)env; (void)drop;
     return 0;
@@ -159,7 +159,7 @@ static inline CCClosure0 cc_closure0_make(void* (*fn)(void*), void* env, void (*
 #endif
 }
 
-static inline CCClosure1 cc_closure1_make(void* (*fn)(void*, intptr_t), void* env, void (*drop)(void*)) CC_TSAN_NOSAN_FN {
+static inline CC_TSAN_NOSAN_FN CCClosure1 cc_closure1_make(void* (*fn)(void*, intptr_t), void* env, void (*drop)(void*)) {
 #if defined(CC_PARSER_MODE)
     (void)fn; (void)env; (void)drop;
     return 0;
@@ -174,7 +174,7 @@ static inline CCClosure1 cc_closure1_make(void* (*fn)(void*, intptr_t), void* en
 #endif
 }
 
-static inline CCClosure2 cc_closure2_make(void* (*fn)(void*, intptr_t, intptr_t), void* env, void (*drop)(void*)) CC_TSAN_NOSAN_FN {
+static inline CC_TSAN_NOSAN_FN CCClosure2 cc_closure2_make(void* (*fn)(void*, intptr_t, intptr_t), void* env, void (*drop)(void*)) {
 #if defined(CC_PARSER_MODE)
     (void)fn; (void)env; (void)drop;
     return 0;
@@ -189,7 +189,7 @@ static inline CCClosure2 cc_closure2_make(void* (*fn)(void*, intptr_t, intptr_t)
 #endif
 }
 
-static inline CCAsyncClosure0 cc_async_closure0_make(void (*start)(void*, void*), void* env, void (*drop)(void*)) CC_TSAN_NOSAN_FN {
+static inline CC_TSAN_NOSAN_FN CCAsyncClosure0 cc_async_closure0_make(void (*start)(void*, void*), void* env, void (*drop)(void*)) {
 #if defined(CC_PARSER_MODE)
     (void)start; (void)env; (void)drop;
     return 0;

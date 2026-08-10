@@ -66,6 +66,7 @@ if [[ "$DOCKER" -eq 1 ]]; then
         --exclude npm/cc-python/bin/ \
         /src/ /work/
       jobs=$(nproc)
+      export CC=clang CXX=clang++
       ./scripts/apply_tcc_patches.sh >/dev/null 2>&1 || true
       (cd third_party/tcc && ./configure --config-cc_ext >/dev/null && make -j"$jobs" libtcc.a tcc libtcc1.a)
       # stage1 link races under high -j; build toolchain serially then fan out
@@ -86,6 +87,17 @@ done
 CCC="${CCC:-./cc/bin/ccc}"
 [ -x "$CCC" ] || CCC="./out/cc/bin/ccc"
 [ -x "$CCC" ] || { echo "real_projects_sanitize: need ccc (make cc)" >&2; exit 1; }
+
+# Sanitizer builds need clang (GCC rejects some no_sanitize attribute placements
+# and TSan quality matches the existing test_tsan.sh / stress_sanitize lanes).
+case "$MODE" in
+  asan|tsan|fuzz|all)
+    if command -v clang >/dev/null 2>&1; then
+      export CC="${CC:-clang}"
+      export CXX="${CXX:-clang++}"
+    fi
+    ;;
+esac
 
 OUT="${OUT:-$ROOT/out/real_sanitize}"
 mkdir -p "$OUT"
