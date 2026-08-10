@@ -128,10 +128,57 @@ extern cc_atomic_int g_pipeline_error;
  * Helper Functions
  * ============================================================================ */
 
+/* Little-/big-endian wire stores and loads (gzip/zip LE, zlib Adler BE). */
+static inline void put2le(unsigned char* p, unsigned v) {
+    p[0] = (unsigned char)(v & 0xff);
+    p[1] = (unsigned char)((v >> 8) & 0xff);
+}
+
+static inline void put2be(unsigned char* p, unsigned v) {
+    p[0] = (unsigned char)((v >> 8) & 0xff);
+    p[1] = (unsigned char)(v & 0xff);
+}
+
+static inline void put4le(unsigned char* p, unsigned long v) {
+    p[0] = (unsigned char)(v & 0xff);
+    p[1] = (unsigned char)((v >> 8) & 0xff);
+    p[2] = (unsigned char)((v >> 16) & 0xff);
+    p[3] = (unsigned char)((v >> 24) & 0xff);
+}
+
+static inline void put4be(unsigned char* p, unsigned long v) {
+    p[0] = (unsigned char)((v >> 24) & 0xff);
+    p[1] = (unsigned char)((v >> 16) & 0xff);
+    p[2] = (unsigned char)((v >> 8) & 0xff);
+    p[3] = (unsigned char)(v & 0xff);
+}
+
+static inline unsigned get2le(const unsigned char* p) {
+    return (unsigned)p[0] | ((unsigned)p[1] << 8);
+}
+
+static inline unsigned get2be(const unsigned char* p) {
+    return ((unsigned)p[0] << 8) | (unsigned)p[1];
+}
+
+static inline unsigned long get4le(const unsigned char* p) {
+    return (unsigned long)p[0]
+         | ((unsigned long)p[1] << 8)
+         | ((unsigned long)p[2] << 16)
+         | ((unsigned long)p[3] << 24);
+}
+
+static inline unsigned long get4be(const unsigned char* p) {
+    return ((unsigned long)p[0] << 24)
+         | ((unsigned long)p[1] << 16)
+         | ((unsigned long)p[2] << 8)
+         | (unsigned long)p[3];
+}
+
 /* Signal handling */
 static inline void cut_short(int sig) {
     (void)sig;
-    cc_atomic_store(&g_pipeline_error, 1);
+    g_pipeline_error.store(1);
 }
 
 /* Metadata preservation (matches pigz.c:3857) */

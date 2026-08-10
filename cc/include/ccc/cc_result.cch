@@ -97,6 +97,14 @@ static inline void cc_error_log(CCError e) {
     if (fprintf(stderr, "fatal: %s\n", cc_error_str(e)) < 0) abort();
 }
 
+/* Log then return 1 — soft terminate for int-returning frames:
+ *   @errhandler(CCError e) { return cc_err_log(e); }
+ */
+static inline int cc_err_log(CCError e) {
+    cc_error_log(e);
+    return 1;
+}
+
 /* Log then exit(1). The standard named `@errhandler` terminate policy:
  *   @errhandler(CCError e) cc_error_exit(e);
  * Recognized as diverging for expression-position `!>;`. */

@@ -1,19 +1,15 @@
 /*
- * pigz_idiomatic.ccs -- Parallel gzip compression in IDIOMATIC Concurrent-C
+ * pigz_idiomatic.ccs — Parallel gzip compression in idiomatic Concurrent-C.
  *
- * Demonstrates the ordered channel plus send_task pattern with a plain pointer
- * payload on the wire (CompressedResult*), not a nested Result wrapper on the
- * element type. The producer submits each block with send_task, capturing the
- * Block* for the worker. recv on the ordered receive side awaits tasks in FIFO
- * order and yields the next CompressedResult* (or NULL if the compression task failed).
+ * Ordered channel + send_task (same shape as recipe_ordered_parallel.ccs):
+ *   producer: for each block → results_tx.send_task(() => compress)
+ *   consumer: recv on ordered rx → writes .gz bytes in submit order
  *
- * Compression failures are signaled by returning NULL from the task; the
- * consumer treats that as a pipeline error and closes the receive side with a
- * structured error so peers stop cleanly.
  */
 
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_atomic.cch>
+#include <ccc/script/stdio.cch>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -45,11 +41,11 @@ cc_atomic_i64 g_bytes_out = 0;
 cc_atomic_int g_blocks_done = 0;
 cc_atomic_int g_pipeline_error = 0;
 
-/* Returns NULL on allocation or zlib failure. */
+/* NULL = allocation or zlib failure (fills the ordered slot; not a channel err). */
 static CompressedResult* compress_block(Block* blk, int level) {
     size_t arena_size = blk->data.len + (blk->data.len >> 3) + 8192;
 
-    CCArena res_arena_storage = @create(arena_size) @destroy;
+    CCArena res_arena_storage = cc_arena_heap(arena_size) @destroy;
     if (!res_arena_storage.base) return NULL;
     CCArena* res_arena = &res_arena_storage;
     CompressedResult* res = cc_arena_alloc_T(CompressedResult, res_arena);
@@ -95,140 +91,143 @@ static CompressedResult* compress_block(Block* blk, int level) {
     out_buf[pos++] = (in_len >> 24) & 0xff;
 
     res->data = res_arena->slice(out_buf, pos);
-    cc_atomic_fetch_add(&g_bytes_in, blk->data.len);
-    cc_atomic_fetch_add(&g_bytes_out, pos);
-    cc_atomic_fetch_add(&g_blocks_done, 1);
+    g_bytes_in.fetch_add((int64_t)blk->data.len);
+    g_bytes_out.fetch_add((int64_t)pos);
+    g_blocks_done.fetch_add(1);
 
     res->arena = res_arena->detach();
     return res;
 }
 
 static bool write_all_or_fail(CCFile* f, CCSlice data, const char* what) {
-    CCResult_size_t_CCIoError wr = cc_file_write(f, data);
-    if (cc_is_err(wr)) {
-        CCIoError err = cc_unwrap_err_as(wr, CCIoError);
-        fprintf(stderr, "%s failed kind=%d os=%d\n", what, err.base.kind, err.os_code);
-        cc_atomic_store(&g_pipeline_error, 1);
+    /* Soft-catch IoError so eprintln !>; can use a CCError handler (not re-enter). */
+    @errhandler(CCError e) {
+        cc_error_log(e);
+        g_pipeline_error.store(1);
         return false;
     }
-    size_t n = cc_unwrap_as(wr, size_t);
+    size_t n = f->write(data) !>(e) {
+        eprintln(@string(`${what} failed kind=${e.base.kind} os=${e.os_code}`,
+                         @scratch)) !>;
+        g_pipeline_error.store(1);
+        return false;
+    };
     if (n != data.len) {
-        fprintf(stderr, "%s short write %zu/%zu\n", what, n, data.len);
-        cc_atomic_store(&g_pipeline_error, 1);
+        eprintln(@string(`${what} short write ${n}/${data.len}`, @scratch)) !>;
+        g_pipeline_error.store(1);
         return false;
     }
     return true;
 }
 
 int compress_file(const char* in_path, const char* out_path) {
-    cc_atomic_store(&g_pipeline_error, 0);
+    @errhandler(CCError e) { return cc_err_log(e); }
+
+    g_pipeline_error.store(0);
 
     char[:0] in_s = cc_slice_cstr(in_path);
     char[:0] out_s = cc_slice_cstr(out_path);
 
     CCFile in_file;
     if (in_file.open(in_s, "rb") != 0) {
-        fprintf(stderr, "Failed to open input: %s\n", in_path);
+        eprintln(@string(`Failed to open input: ${in_path}`, @scratch)) !>;
         return 1;
     }
     @defer in_file.close();
 
     CCFile out_file;
     if (out_file.open(out_s, "wb") != 0) {
-        fprintf(stderr, "Failed to open output: %s\n", out_path);
+        eprintln(@string(`Failed to open output: ${out_path}`, @scratch)) !>;
         return 1;
     }
     @defer out_file.close();
 
-    /* Ordered channel of CompressedResult* (NULL from a task means compress failed). */
+    /* Ordered channel of CompressedResult* (NULL in a slot = compress failed). */
     CompressedResult*[~CHAN_CAP >] results_tx;
     CompressedResult*[~CHAN_CAP ordered <] results_rx;
-    CCChan* ch = cc_channel_pair(&results_tx, &results_rx);
-    @defer ch.free();
+    CCChan* ch = cc_channel_pair(&results_tx, &results_rx) !> @destroy;
 
     CCFile* in_ptr = &in_file;
     CCFile* out_ptr = &out_file;
 
-    /* Keep the consumer outside the producer scope so results_tx closes when the
-     * producer task exits, not later during nursery teardown. */
-    CCNursery* consumer = @create(NULL, () => [out_ptr, results_rx] {
-        CompressedResult* item = NULL;
-        long expect_seq = 0;
-        while (cc_io_avail(results_rx.recv(&item))) {
-            if (!item) {
-                fprintf(stderr, "compress task failed (OOM or zlib error)\n");
-                cc_atomic_store(&g_pipeline_error, 1);
-                cc_channel_close(results_rx, cc_io_error(CC_IO_OTHER));
-                break;
-            }
-            if (item->seq != expect_seq) {
-                fprintf(stderr, "ORDER: expected=%ld got=%ld\n", expect_seq, item->seq);
-                cc_atomic_store(&g_pipeline_error, 1);
-            }
-            expect_seq++;
-            if (!write_all_or_fail(out_ptr, item->data, "compressed output")) {
+    {
+        CCNursery* consumer = cc_nursery_create(NULL) !> @destroy;
+
+        consumer->spawn(() => [out_ptr, results_rx] {
+            @errhandler(CCError e) cc_error_exit(e);
+            CompressedResult* item = NULL;
+            long expect_seq = 0;
+            while (cc_io_avail(results_rx.recv(&item))) {
+                if (!item) {
+                    eprintln(@string(`compress task failed (OOM or zlib error)`,
+                                     @scratch)) !>;
+                    g_pipeline_error.store(1);
+                    results_rx.close();
+                    break;
+                }
+                if (item->seq != expect_seq) {
+                    eprintln(@string(`ORDER: expected=${expect_seq} got=${item->seq}`,
+                                     @scratch)) !>;
+                    g_pipeline_error.store(1);
+                }
+                expect_seq++;
+                if (!write_all_or_fail(out_ptr, item->data, "compressed output")) {
+                    item->arena.free();
+                    break;
+                }
                 item->arena.free();
-                break;
             }
-            item->arena.free();
-        }
-    }) @destroy;
-    if (!consumer) {
-        fprintf(stderr, "Failed to create consumer nursery\n");
-        return 1;
-    }
+        });
 
-    CCNursery* producer = @create(consumer) @destroy {
-        results_tx.close();
-    };
-    if (!producer) {
-        results_tx.close();
-        fprintf(stderr, "Failed to create producer nursery\n");
-        return 1;
-    }
-    producer->spawn(() => [in_ptr, results_tx] {
-        long seq = 0;
-        while (true) {
-            if (cc_atomic_load(&g_pipeline_error)) break;
+        /* Inner producer: close_on auto-closes results_tx when the producer
+         * nursery ends, so the consumer sees EOF after draining. */
+        {
+            CCNursery* producer = cc_nursery_create(consumer) !> @destroy;
+            (void)producer->close_on(results_tx);
 
-            CCArena blk_arena = @create(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD) @destroy;
-            CCSlice data;
-            bool !>(CCIoError) read_res = in_ptr->read(&blk_arena, BLOCK_SIZE, &data);
+            producer->spawn(() => [in_ptr, results_tx] {
+                long seq = 0;
+                while (true) {
+                    if (g_pipeline_error.load()) break;
 
-            if (read_res.is_err() || !cc_io_avail(read_res)) {
-                break;
-            }
+                    CCArena blk_arena =
+                        cc_arena_heap(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD) @destroy;
+                    CCSlice data;
+                    bool !>(CCIoError) read_res =
+                        in_ptr->read(&blk_arena, BLOCK_SIZE, &data);
 
-            Block* cap = NULL;
-            cap = cc_arena_alloc_T(Block, &blk_arena);
-            if (!cap) {
-                break;
-            }
+                    if (read_res.is_err() || !cc_io_avail(read_res)) break;
 
-            cap->seq = seq++;
-            cap->data = data;
-            cap->is_last = (data.len < BLOCK_SIZE);
-            cap->arena = blk_arena.detach();
+                    Block* cap = cc_arena_alloc_T(Block, &blk_arena);
+                    if (!cap) break;
 
-            bool is_last = cap->is_last;
-            results_tx.send_task(() => [cap] {
-                CompressedResult* out = compress_block(cap, 6);
-                cap->arena.free();
-                return out;
+                    cap->seq = seq++;
+                    cap->data = data;
+                    cap->is_last = (data.len < BLOCK_SIZE);
+                    cap->arena = blk_arena.detach();
+
+                    bool is_last = cap->is_last;
+                    results_tx.send_task(() => [cap] {
+                        CompressedResult* out = compress_block(cap, 6);
+                        cap->arena.free();
+                        return out;
+                    });
+
+                    if (is_last) break;
+                }
             });
-
-            if (is_last) break;
         }
-    });
+    }
 
     (void)out_file.sync();
-    if (cc_atomic_load(&g_pipeline_error)) return 1;
-    return 0;
+    return g_pipeline_error.load() ? 1 : 0;
 }
 
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[]) {
+    @errhandler(CCError e) { return cc_err_log(e); }
+
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <file>\n", argv[0]);
+        eprintln(@string(`Usage: ${argv[0]} <file>`, @scratch)) !>;
         return 1;
     }
 
@@ -236,13 +235,13 @@ int main(int argc, char *argv[]) {
     snprintf(out_name, sizeof(out_name), "%s.gz", argv[1]);
 
     int ret = compress_file(argv[1], out_name);
-
     if (ret == 0) {
-        printf("Compressed %s -> %s\n", argv[1], out_name);
-        printf("Stats: %lld bytes in, %lld bytes out, %d blocks\n",
-               (long long)cc_atomic_load(&g_bytes_in),
-               (long long)cc_atomic_load(&g_bytes_out),
-               cc_atomic_load(&g_blocks_done));
+        long long bin = (long long)g_bytes_in.load();
+        long long bout = (long long)g_bytes_out.load();
+        int blocks = g_blocks_done.load();
+        println(@string(`Compressed ${argv[1]} -> ${out_name}`, @scratch)) !>;
+        println(@string(`Stats: ${bin} bytes in, ${bout} bytes out, ${blocks} blocks`,
+                        @scratch)) !>;
     }
 
     return ret;

@@ -68,6 +68,11 @@ static inline void cc_error_log(CCError e) {
     if (fprintf(stderr, "fatal: %s\n", cc_error_str(e)) < 0) abort();
 }
 
+static inline int cc_err_log(CCError e) {
+    cc_error_log(e);
+    return 1;
+}
+
 static inline void cc_error_exit(CCError e) {
     cc_error_log(e);
     exit(1);
