@@ -111,10 +111,20 @@ site-packages. `npm install lodash` in the project directory is the fix;
 or `create(node=…)` / `CC_NODE_BIN` when the wrong Node is on `PATH`.
 Missing-module errors name that cwd rule.
 
-**Empty `{}` is a live handle.** `js.eval('({})')` stays a handle so
-later property use matches Node. Non-empty plain objects still cross as
-Python `dict`s. Same-domain handles chain (`h.update(…).digest(…)`);
-foreign-domain handles do not.
+### Empty `{}` stays a handle
+
+An empty object has to stay on the Node side — a materialized Python
+`{}`/`dict` would lose later property use that matches Node. So
+`js.eval('({})')` returns a live handle:
+
+```python
+o = js.eval('({})')                    # JsHandle, not {}
+js.eval('(o) => { o.x = 1; return o.x }')(o)   # 1
+js.eval('({a: 1})')                    # {'a': 1} — data return
+```
+
+Non-empty plain objects still cross as Python `dict`s. Same-domain
+handles chain (`h.update(…).digest(…)`); foreign-domain handles do not.
 
 **Thenables settle in the child.** Promise-based npm APIs need no
 `async`/`await` on the Python side — the call blocks until settle (or

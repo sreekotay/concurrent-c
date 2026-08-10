@@ -78,10 +78,21 @@ await builtins.exec(code, g);
 Use `const g = await builtins.dict()`. Passing an unawaited result errors
 with `got a Promise — await isolated call results…`.
 
-**Empty `dict()` stays a live handle (exec namespaces).** Awaiting
-`builtins.dict()` keeps a Python mapping proxy so `.get` / `exec`
-mutation work. Non-empty plain dicts of scalars still cross as JS
-objects. Same-domain handles chain
+### Empty `dict()` stays a handle
+
+An empty mapping used as an `exec` namespace has to stay on the Python
+side — a materialized JS `{}` has no `.get` and cannot accumulate
+bindings. So `await builtins.dict()` returns a live proxy:
+
+```js
+const g = await builtins.dict();
+await builtins.exec(`def f(x): return x + 1`, g);
+const f = await g.get('f');
+await f(41);   // 42
+```
+
+Non-empty plain dicts of scalars still cross as JS objects (data
+returns). Same-domain handles chain
 (`const fft = await np.fft.fft(buf); await np.abs(fft)`); foreign-domain
 handles and attribute paths that were never awaited do not.
 
