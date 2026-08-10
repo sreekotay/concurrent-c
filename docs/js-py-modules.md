@@ -1,10 +1,10 @@
-# JS / Python interop — host **or** export
+# JS / Python interop — host or export
 
-One boundary, two doors (same headers, same marshalling):
+Same headers and marshalling; two ownership models:
 
-| Door | Who owns `main` | What you get |
+| | Who owns `main` | What you get |
 |------|-----------------|--------------|
-| **Hosting** | Concurrent-C | `cc_py_new` / (JS) host an engine; call foreign packages with UFCS + `!>` |
+| **Hosting** | Concurrent-C | `cc_py_new` / JS host; call foreign packages with UFCS + `!>` |
 | **Module export** | Node or CPython | one `.ccs` → `.node` and/or `.abi3.so`; they `require` / `import` your type |
 
 **Process bridges** (any foreign package, heavier):
@@ -12,9 +12,9 @@ One boundary, two doors (same headers, same marshalling):
 - **Python from Node** — npm [`concurrent-c-python`](https://www.npmjs.com/package/concurrent-c-python) · in-tree [`npm/cc-python`](../npm/cc-python)
 - **JavaScript from Python** — pip [`concurrent-c-node`](https://pypi.org/project/concurrent-c-node/) · in-tree [`pypi/cc-node`](../pypi/cc-node)
 
-`destroy()` on these bridges is cooperative (close + drain); hard child
-death (`SIGKILL` / abort) is a separate reject contract. Stress catalog
-(package peers **and** CC embed Waves A–C):
+`destroy()` is cooperative (close + drain); hard child death (`SIGKILL` /
+abort) is a separate reject contract. Stress catalog (package peers and
+CC embed Waves A–C):
 [`stress/bridge/bridge_stress.md`](../stress/bridge/bridge_stress.md)
 (`./stress/bridge/run.sh`, including [`cc_embed_stress.ccs`](../stress/bridge/cc_embed_stress.ccs)).
 
@@ -33,8 +33,8 @@ Open an interpreter, import a package, call it. Failures are Results;
 attributes are methods; typed destinations extract scalars without an
 extra binding.
 
-**Python** — script form [`examples/py/pydemo.shcc`](../examples/py/pydemo.shcc)
-(fuller tour: [`examples/recipe_py_interop.ccs`](../examples/recipe_py_interop.ccs)):
+**Python** — [`examples/py/pydemo.shcc`](../examples/py/pydemo.shcc)
+(fuller: [`examples/recipe_py_interop.ccs`](../examples/recipe_py_interop.ccs)):
 
 ```c
 #!/usr/bin/env -S ./cc/bin/ccc
@@ -61,16 +61,16 @@ ccc examples/py/pydemo.shcc
 Probe with `cc_py_available()` when you want a clean skip without libpython.
 `cc_py_new(true, &a)` opens a **process-isolated** child (probe:
 `cc_py_proc_available()`); objects stay remote handles / scalars — never
-shared `PyObject*`.  Same-process homes refuse foreign-home object args by
+shared `PyObject*`. Same-process homes refuse foreign-home object args by
 name; `obj.clone_into(&other)` pickle-copies between inproc interpreters
-(process-isolated targets refuse).  Unsigned inbound and `as_list` /
+(process-isolated targets refuse). Unsigned inbound and `as_list` /
 narrow integer destinations refuse out-of-range values rather than wrap.
-Costs for this door: [`perf/py_baseline.ccs`](../perf/py_baseline.ccs) ·
+Costs: [`perf/py_baseline.ccs`](../perf/py_baseline.ccs) ·
 [`perf/baselines/py_baseline_20260809.txt`](../perf/baselines/py_baseline_20260809.txt).
 
-**JavaScript** — same UFCS call surface, same lifetime rule, one
-constructor with the transport as the flag, mirroring
-`concurrent-c-python`'s `create()` / `create({isolated: true})`:
+**JavaScript** — same UFCS surface and lifetime rule; transport is the
+flag, mirroring `concurrent-c-python`'s `create()` /
+`create({isolated: true})`:
 
 ```c
 CCJsDom js = cc_js_new(false, &a) !> @destroy;   /* in-process node   */
@@ -82,47 +82,42 @@ CCSlice plat = os.platform()!>.as_slice(&a) !>;
 long long cpus = os.availableParallelism() !>;
 ```
 
-The flag at the call site is the boundary, because the crossing
-profiles differ: **hosted** (`false`) embeds a full Node — V8, libuv,
-npm modules — in your process (sub-µs ops; one per process, V8's rule;
-needs libnode-dev, first use compiles a small cached shim; macOS
-Homebrew ships `node.h` but not libnode, so hosted returns
-`libnode not found` — use isolated there);
-**isolated** (`true`) spawns a `node` child per handle on the
-`concurrent-c-node` wire (~100-170µs/hop; N domains, separate heaps, crash
-isolation; needs only `node` on PATH).  `require` resolves against the
-working directory in both.  Thenables: isolated awaits on the wire;
-hosted returns a handle (no loop-block await).  Isolated also carries
-inline typed arrays (`$ta`/`b64`) and sync JS→CC callbacks
-(`js_dom_fn`); SHM spill and async callback shapes refuse by name.
+**Hosted** (`false`) embeds Node in-process — sub-µs ops; one per
+process (V8's rule); needs libnode-dev; first use compiles a small
+cached shim. macOS Homebrew ships `node.h` but not libnode, so hosted
+returns `libnode not found` — use isolated there.
 
-The wire lives on dedicated fds with id-paired replies — stdio stays
-the user's, so `console.log` in evaluated code reaches the real stdout
-and can never collide with (or forge) a protocol reply.  Isolated is
-crash isolation, not a security sandbox: the child inherits your
-environment and privileges — do not run untrusted code through it.
-Catalog of CC-parent smokes + volume stress:
+**Isolated** (`true`) spawns a `node` child on the `concurrent-c-node`
+wire (~100–170µs/hop; N domains, separate heaps, crash isolation; needs
+`node` on PATH). `require` resolves against the working directory in
+both. Thenables: isolated awaits on the wire; hosted returns a handle
+(no loop-block await). Isolated also carries inline typed arrays
+(`$ta`/`b64`) and sync JS→CC callbacks (`js_dom_fn`); SHM spill and async
+callback shapes refuse by name.
+
+Wire: dedicated fds, id-paired replies — stdio stays yours. Crash
+isolation, not a sandbox: the child inherits your environment — don't
+run untrusted code. Stress:
 [`stress/bridge/bridge_stress.md`](../stress/bridge/bridge_stress.md)
 (§ CC embed interop waves).
 
 ```sh
 ccc examples/js/jsdemo.shcc               # hosted when libnode exists, else isolated
 ccc run examples/recipe_js_isolated.ccs   # N domains + crash isolation, measured
-ccc run examples/recipe_js_host.ccs       # the raw loop-thread door (zero-overhead tier)
+ccc run examples/recipe_js_host.ccs       # raw loop-thread door (zero-overhead tier)
 ```
 
 Sources: [`examples/js/jsdemo.shcc`](../examples/js/jsdemo.shcc) ·
 [`examples/recipe_js_host.ccs`](../examples/recipe_js_host.ccs) ·
-guest mode: [`examples/js/jsdemo_mod.ccs`](../examples/js/jsdemo_mod.ccs).  First use
-compiles a small embedder shim against the node development headers
-(Debian/Ubuntu: `apt install libnode-dev`) and caches it under
-`~/.cache/concurrent-c/js-host`.  From Python, any-npm-package goes
-through the process bridge [`concurrent-c-node`](../pypi/cc-node).
+guest: [`examples/js/jsdemo_mod.ccs`](../examples/js/jsdemo_mod.ccs).
+Shim cache: `~/.cache/concurrent-c/js-host` (Debian/Ubuntu:
+`apt install libnode-dev`). From Python, any npm package goes through
+[`concurrent-c-node`](../pypi/cc-node).
 
 ## Module export — Node / Python own main
 
-Write a page of Concurrent-C, get native modules for either ecosystem —
-or both from the same file, several classes at a time:
+One `.ccs` → native modules for either ecosystem (or both), several
+classes at a time:
 
 ```c
 #include <ccc/script/py.cch>
@@ -148,92 +143,80 @@ static const Stats sseed = { 0 };
 @comptime cc_js_export("counters", "Stats",   &sseed);
 ```
 
-Build (one line):
-
 ```sh
 ccc build counters.ccs   # → bin/counters.node + bin/counters.abi3.so (same bytes)
 ```
 
-Use in JavaScript — one `require`, each class namespaced under its
-snake-case name (a single-export module stays flat):
+JavaScript — one `require`; classes under snake-case names (single-export
+stays flat):
 
 ```js
 const m = require('./bin/counters.node');
 
 m.counter.bump(4);          // 4
-m.counter.bump({ by: 2 });  // 6 — a trailing object binds arguments by name
+m.counter.bump({ by: 2 });  // 6 — trailing object binds by name
 m.stats.add(3); m.stats.add(5);
 m.stats.mean();             // 4
 ```
 
-Use in Python — same shape, `import` the module, classes namespaced
-inside (a single-class module stays flat there too):
+Python — same shape:
 
 ```python
 import counters           # bin/ on PYTHONPATH
 
 counters.counter.bump(4)      # 4
-counters.counter.bump(by=2)   # 6 — real keyword arguments
+counters.counter.bump(by=2)   # 6 — real keywords
 counters.stats.add(3); counters.stats.add(5)
 counters.stats.mean()         # 4.0
 ```
 
-No flag says "module": the TU exports types and defines no `main`, so
-the build links a shared object.  The module name is the directive's
-first argument, always explicit — never a file name or declaration
-order.  A TU may publish SEVERAL modules (different first arguments):
-all of them live in one build, and the loaded name selects the module
-— the `PyInit_<name>` entry symbol on the Python side, the required
-basename on the JS side.  Each registration copies the seed into a
-fresh instance, so two modules sharing a class never share state.
-What you get, measured (4-vCPU x86-64, node 22 / python 3.11):
+No "module" flag: the TU exports types and has no `main`, so the build
+links a shared object. The module name is the directive's first
+argument — always explicit. A TU may publish several modules (different
+first arguments) in one build; the loaded name selects
+(`PyInit_<name>` / required basename). Each registration copies the seed
+into a fresh instance, so shared classes never share state.
+
+Measured (4-vCPU x86-64, node 22 / python 3.11):
 
 | | |
 |---|---|
-| call from Node | **40ns** (~130x the generic `concurrent-c-python` bridge's 5.3µs crossing) |
+| call from Node | **40ns** (~130× the generic `concurrent-c-python` bridge's 5.3µs crossing) |
 | call from Python | **68ns** |
 | 16-element `Float64Array` → zero-copy slice → sum | **94ns** |
 | 1M-element slice sum | 1.3ms (memory-bound C loop) |
 | artifact | **26KB `.node`** / 35KB `.abi3.so`, libc-only, dead-stripped, one exported symbol |
 
 One `.node` loads in any Node-API host (Node, Electron, Bun, Deno);
-the `.abi3.so` is a stable-ABI CPython extension (3.x, no per-version
-builds).  A dual-target TU builds ONE object under two names
-(hardlinked — the bytes are identical, each embedding resolves its
-runtime lazily); `--module=py` / `--module=js` narrows to one.
+`.abi3.so` is stable-ABI CPython (3.x, no per-version builds). Dual-target
+builds one object under two names (hardlinked); `--module=py` /
+`--module=js` narrows to one.
 
-## The rules (there is one)
+## Rules
 
-**The module IS the type.**  Every visible function whose first
-parameter is `T` or `T*` becomes a module function; the module's state
-is one `T`, seeded by the pointer you export.  Everything else follows
-from C:
+**The module is the type.** Every visible function whose first parameter
+is `T` or `T*` becomes a module function; state is one `T`, seeded by
+the exported pointer. The rest follows from C:
 
-- `long long by = 1` — a default argument.  JS may also pass a trailing
-  plain object binding by name (`c.bump({by: 2})`); Python gets real
-  keywords (`counter.bump(by=2)`).
+- `long long by = 1` — default argument. JS may pass a trailing plain
+  object by name (`c.bump({by: 2})`); Python gets keywords
+  (`counter.bump(by=2)`).
 - `Counter__clamp` (double underscore) reflects as `_clamp` — internal.
-  Wrap-and-export is the rename story; the wrapper is one line.
-- A fallible method (`!>(CCError)`) crosses as the exception the error
-  KIND maps to — `CC_ERR_INVALID_ARG` is a `TypeError` in JS and a
-  `ValueError` in Python — message intact, `code` carrying the kind.
+  Rename via a one-line wrap-and-export.
+- Fallible methods (`!>(CCError)`) cross as the mapped exception —
+  `CC_ERR_INVALID_ARG` → `TypeError` (JS) / `ValueError` (Python);
+  message intact, `code` carries the kind.
 
-**Instances and threads** (the contract, so you don't have to guess):
-the state is one `T` **per realm**, not per process — every Node
-`worker_thread` that requires the module gets a fresh `T` (freed with
-its environment), and every Python subinterpreter gets its own module
-instance.  Within a realm you are never entered concurrently: a Node
-environment runs JS on one thread, and the Python trampolines hold the
-GIL for the whole call, so calls on one `T` serialize — each call is
-atomic with respect to the others.  What remains yours: C globals you
-share across realms, and threads you start inside a call that touch
-`T` (or a `double[:]` borrow — the lease is exactly the call) after
-the call returns.  Free-threaded (no-GIL) CPython is out of scope.
-Multiple independent instances inside one realm is not a module-export
-story today — your `T` holds them (handle-passing), the same way a C
-library would.
+**Instances and threads:** one `T` **per realm**, not per process — each
+Node `worker_thread` and each Python subinterpreter gets its own
+instance. Within a realm, calls serialize (Node is single-threaded; Python
+trampolines hold the GIL for the call). You still own: C globals across
+realms, and threads you start inside a call that touch `T` (or a
+`double[:]` borrow — lease is exactly the call) after return.
+Free-threaded CPython is out of scope. Multiple instances in one realm:
+hold them in your `T` (handle-passing), as a C library would.
 
-## Buffers are zero-copy borrows
+## Buffers
 
 ```c
 static double Sig_sum(Sig *self, double[:] xs) {          // Float64Array
@@ -248,26 +231,23 @@ static double[:] Sig_row(Sig *self);                      // returns materialize
                                                           // as a fresh one
 ```
 
-A matching `Float64Array` (or numpy array / buffer on the Python side)
-borrows zero-copy for the call; a plain `Array` or mismatched dtype
-converts per element.  That 94ns sum above is this path.
+Matching `Float64Array` (or numpy / buffer) borrows zero-copy for the
+call; plain `Array` or mismatched dtype converts per element. The 94ns
+sum above is this path.
 
 ## Calling back out
 
-A method may take `CCJsVal` / `CCPyObj` — a live host value — and call
-through it with the same UFCS surface the embedding headers give
-everywhere else (`obj.step(21) !>`).  Errors cross back with their
-messages.  See `tests/js_module_double_result_mod.ccs` for the full
-gamut: slices, kwargs, errors, outbound objects, BigInt-range ints.
+Methods may take `CCJsVal` / `CCPyObj` and call through with the same
+UFCS surface (`obj.step(21) !>`). Errors cross with messages. Full
+surface: `tests/js_module_double_result_mod.ccs` (slices, kwargs, errors,
+outbound objects, BigInt-range ints).
 
-## Plain C rides along
+## Plain C
 
-Concurrent-C is a C superset compiled by your host C compiler: any C
-function in the TU is available to your methods, any C library links
-with `@link("m")`-style directives, and existing `.c`/`.h` code can sit
-next to the exported type unchanged.  If you can call it from C, you
-can export it to Python and Node — the reflection only looks at the
-`T`-first functions.
+Any C in the TU is available to methods; libraries link with
+`@link("m")`-style directives; existing `.c`/`.h` can sit next to the
+exported type. Reflection only looks at `T`-first functions — if you can
+call it from C, you can export it.
 
 ## Which tool, when
 
@@ -275,30 +255,29 @@ can export it to Python and Node — the reflection only looks at the
 |---|---|---|
 | call *Python packages* from CC | **hosting** — [`pydemo.shcc`](../examples/py/pydemo.shcc) / [`recipe_py_interop.ccs`](../examples/recipe_py_interop.ccs) | see `py_baseline` |
 | call *into JS* from CC (guest) | [`jsdemo.shcc`](../examples/js/jsdemo.shcc) (Node owns env; same UFCS) | napi trampoline |
-| *your* C/CC compute in JS or Python | **module export** (below) | 40-94ns |
+| *your* C/CC compute in JS or Python | **module export** | 40–94ns |
 | any *Python package* from Node, in-process | `npm i concurrent-c-python` | ~5µs sync, zero-copy buffers |
 | N×numpy, crash isolation, per-domain venvs | `concurrent-c-python` isolated domains | ~100µs RTT, shm bulk |
-| any *npm package* from Python | `pip install concurrent-c-node` | ~300µs RTT, shm bulk |
+| any *npm package* from Python | `pip install concurrent-c-node` | ~105µs RTT, shm bulk |
 
-**Hosting / call-out demos:** [`examples/py/pydemo.shcc`](../examples/py/pydemo.shcc)
-(Python, CC owns main), [`examples/js/jsdemo.shcc`](../examples/js/jsdemo.shcc)
-(JS guest, Node owns main), [`examples/recipe_py_interop.ccs`](../examples/recipe_py_interop.ccs).
+**Hosting demos:** [`examples/py/pydemo.shcc`](../examples/py/pydemo.shcc),
+[`examples/js/jsdemo.shcc`](../examples/js/jsdemo.shcc),
+[`examples/recipe_py_interop.ccs`](../examples/recipe_py_interop.ccs).
 
 **Module export:** [`examples/recipe_js_module.ccs`](../examples/recipe_js_module.ccs),
 [`examples/recipe_py_module.ccs`](../examples/recipe_py_module.ccs),
-[`tests/dual_module_export_mod.ccs`](../tests/dual_module_export_mod.ccs)
-(dual-target), [`tests/js_module_double_result_mod.ccs`](../tests/js_module_double_result_mod.ccs)
-(the gamut).
+[`tests/dual_module_export_mod.ccs`](../tests/dual_module_export_mod.ccs),
+[`tests/js_module_double_result_mod.ccs`](../tests/js_module_double_result_mod.ccs).
 
-## Every crossing, measured
+## Measured
 
-One coherent day on a 4-vCPU x86-64 shared VM (node 22, python 3.11,
-numpy 2.5; this box swings ±40% run to run — dated baselines with the
-exact RESULT lines live under [`perf/baselines/`](../perf/baselines/),
-catalogued in [`perf/baselines/README.md`](../perf/baselines/README.md):
+One day on a 4-vCPU x86-64 shared VM (node 22, python 3.11, numpy 2.5;
+±40% run to run). Dated `RESULT` lines under
+[`perf/baselines/`](../perf/baselines/), catalogued in
+[`perf/baselines/README.md`](../perf/baselines/README.md):
 [`js_py_modules_20260809.txt`](../perf/baselines/js_py_modules_20260809.txt),
 [`js_baseline_node_20260809.txt`](../perf/baselines/js_baseline_node_20260809.txt),
-[`py_baseline_20260809.txt`](../perf/baselines/py_baseline_20260809.txt)).
+[`py_baseline_20260809.txt`](../perf/baselines/py_baseline_20260809.txt).
 
 **Hosting** (CC owns main — Python packages in-process):
 
@@ -306,7 +285,7 @@ catalogued in [`perf/baselines/README.md`](../perf/baselines/README.md):
 |---|---|
 | see [`py_baseline_20260809.txt`](../perf/baselines/py_baseline_20260809.txt) | embed / call / buffer paths |
 
-**Native modules** (export — your code, in-process, reflected):
+**Native modules** (export — your code, in-process):
 
 | crossing | cost |
 |---|---|
@@ -321,26 +300,36 @@ catalogued in [`perf/baselines/README.md`](../perf/baselines/README.md):
 | crossing | cost |
 |---|---|
 | sync call, 16-elem dot (the crossing itself) | 5.3µs |
-| 1M-elem `np.dot`, zero-copy lease | 239µs — 5.7x the JS loop (best recorded 158µs / 8.45x) |
-| lane (task) call, 1M dot | 232µs — off-thread for free |
+| 1M-elem `np.dot`, zero-copy lease | 239µs — 5.7× the JS loop (best recorded 158µs / 8.45×) |
+| lane (task) call, 1M dot | 232µs — off-thread |
 | lane pipelined, 16-elem | 11µs |
 | event-loop liveness during bulk numpy | 99 ticks/100ms via lane, 0 sync |
-| JS ∥ numpy overlap (balanced) | 1.81x |
-| numpy ∥ numpy, one interpreter, BLAS pinned | 1.60-2.02x |
+| JS ∥ numpy overlap (balanced) | 1.81× |
+| numpy ∥ numpy, one interpreter, BLAS pinned | 1.60–2.02× |
 
 **`concurrent-c-python`, isolated domains** (full CPython per child):
 
 | crossing | cost |
 |---|---|
-| spawn + import numpy | ~100-440ms (warm/cold) |
+| spawn + import numpy | ~100–440ms (warm/cold) |
 | wire round trip | ~100µs |
-| 8MB argument, shm spill | 6.4ms (base64 wire before it: 153ms — 24x) |
-| 4 domains, same numpy workload | 2-4x vs one (3.97x at the box's quietest) |
+| 8MB argument, shm spill | 6.4ms (base64 wire before it: 153ms — 24×) |
+| 4 domains, same numpy workload | 2–4× vs one (3.97× at the box's quietest) |
 
-Head-to-head in-process vs isolated vs JS (dot / matmul / SVD) on one
-box: [`npm/cc-python/benchmarks/modes_bench.js`](../npm/cc-python/benchmarks/modes_bench.js)
-· receipt
+Head-to-head in-process vs isolated vs JS (dot / matmul / SVD):
+[`npm/cc-python/benchmarks/modes_bench.js`](../npm/cc-python/benchmarks/modes_bench.js)
+·
 [`perf/baselines/cc_python_modes_bench_20260810.txt`](../perf/baselines/cc_python_modes_bench_20260810.txt).
+
+| workload | in-process | isolated | JS |
+|---|---|---|---|
+| `sqrt` ×1 | ~3µs | ~21µs | — |
+| `np.dot` 1M | 0.28ms | 10ms | 0.72ms |
+| matmul 128 | 0.04ms | 0.41ms | 3.3ms |
+| matmul 256 | 0.13ms | 0.99ms | 17.5ms |
+| SVD 256 | 3.1ms | 3.4ms | — |
+| 3 isolated domains | — | 2.8× seq | — |
+
 BLAS-1 (`np.dot`) often loses to tight JS over the isolated wire; BLAS-3
 matmul crosses over (~n≥128 vs naive JS here); SVD@256 is nearly tied
 with in-process because the kernel dominates.
@@ -352,8 +341,7 @@ with in-process because the kernel dominates.
 | spawn a node child | 28ms |
 | wire round trip | 105µs |
 | Python-callback round trip (JS → Python → JS) | 153µs |
-| 8MB `array('d')` argument, shm spill | 9.5ms (as a JSON list: 499ms — 52x) |
+| 8MB `array('d')` argument, shm spill | 9.5ms (as a JSON list: 499ms — 52×) |
 
-The gradient is the point: **ns** when the code is yours (a module),
-**µs** in-process when the package is Python's, **~100µs + shm** when
-you want processes between you — and every tier states its costs.
+Costs by tier: **ns** for your own module, **µs** in-process for a Python
+package, **~100µs + shm** when you want processes between you.

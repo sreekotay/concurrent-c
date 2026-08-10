@@ -1,6 +1,7 @@
 # concurrent-c-python
 
 Python from Node. Any module, zero copies, host-controlled lifetime.
+Native types, exceptions, callbacks, and async all cross the boundary.
 
 Built with [Concurrent-C](https://github.com/sreekotay/concurrent-c) — a
 strict C11-superset preprocessor: `.ccs` lowers to plain C and compiles
@@ -11,8 +12,8 @@ package bridge):
 [JS / Python interop](https://github.com/sreekotay/concurrent-c/blob/main/docs/js-py-modules.md).
 
 ```js
-const py = require('concurrent-c-python').create();         // in-process (default)
-// const py = require('concurrent-c-python').create({ isolated: true }); // child process
+const py = require('concurrent-c-python').create();  // in-process
+// const py = require('concurrent-c-python').create({ isolated: true });
 const np = py.import('numpy');
 
 const a = new Float64Array(1_000_000).map((_, i) => i % 97);
@@ -25,33 +26,32 @@ np.dot(a, b);   // 1M-element dot product: 5-8x FASTER than the same
 py.destroy();   // one sweep: every handle, the arena, the interpreter
 ```
 
-Tour both modes (sync in-process + awaited isolated, including
-`await builtins.dict()` exec namespaces):
-[`examples/modes_tour.js`](examples/modes_tour.js).
-Machine-local mode costs (`RESULT` lines) — in-process vs isolated vs JS
-for `np.dot` / matmul, SVD inproc vs iso, plus multi-domain overlap:
-[`benchmarks/modes_bench.js`](benchmarks/modes_bench.js)
-(`VIRTUAL_ENV=…` so in-process can see numpy).
+Modes tour: [`examples/modes_tour.js`](examples/modes_tour.js).  
+Costs (`RESULT` lines): [`benchmarks/modes_bench.js`](benchmarks/modes_bench.js)
+(`VIRTUAL_ENV=…` if in-process needs numpy).
 
-## In-process (default) vs isolated (separate process)
+```
+npm install concurrent-c-python
+```
 
-`create()` embeds **libpython in this Node process**.
-`create({ isolated: true })` spawns a **separate CPython child** — same
-call surface, different crossing cost and failure domain:
+Prebuilt where shipped; otherwise compiles vendored C at install (`cc`).
+~100KB `.node`, libc only, N-API stable ABI.
 
-| | `create()` — in-process | `create({ isolated: true })` — separate process |
+## In-process vs isolated
+
+| | `create()` | `create({ isolated: true })` |
 |---|---|---|
-| Where Python runs | same OS process as Node | own CPython child |
-| Hot call | ~µs crossing; zero-copy BLAS (1M `np.dot` ≪ JS) | ~20–100µs wire RTT; args copy/shm |
-| Buffers | zero-copy leases | shm spill (large args) |
-| Parallelism | lane / sibling subinterpreters (3.12+); still one process | **N children = N GILs on N cores** |
-| Crash | native crash can take Node with it | child dies → rejected promise; parent lives |
-| Per-domain python/venv | process-wide `usePython(...)` | yes — each child picks its own |
+| Where | libpython in this process | child CPython |
+| Hot path | ~µs; zero-copy buffers | ~20–100µs RTT; copy/shm |
+| Parallelism | lane / subinterpreters (3.12+) | N children, N GILs |
+| Crash | can take Node with it | child dies; parent lives |
+| Python / venv | process-wide `usePython(...)` | per domain (`python:`) |
 
-Pick **in-process** when the linked Python has the packages you need
-(zero-copy wins on BLAS-3). Pick **isolated** for ambient/`pip` packages,
-crash isolation, and multi-core fan-out. Dot alone is a bad yardstick —
-matmul/SVD show when the kernel beats the wire (see Measured).
+Use in-process when that runtime has your packages (BLAS-3 likes
+zero-copy). Use isolated for ambient/`pip` packages, crash isolation, or
+multi-core fan-out. Prefer matmul/SVD over `np.dot` when comparing modes
+— see Measured.
+
 Receipts:
 [`js_numpy_bridge_node_20260810.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/js_numpy_bridge_node_20260810.txt)
 ·
@@ -61,208 +61,119 @@ Receipts:
 
 ## Common issues
 
-**`No module named 'numpy'` in-process.** `create()` loads a **libpython**
-(often a minimal embed or a venv without scientific stacks). System
-`pip install numpy` does not reach that runtime. Fixes: point at a venv
-that has the package (`usePython('/path/to/venv')` before `create()`), or
-use ambient/`python3` packages via
-`create({ isolated: true })` (optionally `python: venvPath` per domain).
-Import errors name the missing module and suggest those doors.
+**`No module named 'numpy'` in-process.** `create()` loads a linked
+libpython — often a minimal embed or a venv without scientific stacks.
+System `pip install numpy` does not reach that runtime. Fix:
+`usePython('/path/to/venv')` before `create()`, or
+`create({ isolated: true })` (optional `python: venvPath` per domain).
+Import errors name the missing module and point at those doors.
 
-**Isolated calls are Promises — await them.**
-`const g = builtins.dict(); await builtins.exec(code, g)` passes a
-Promise and fails encode. Prefer `const g = await builtins.dict()`.
-Passing an unawaited result now errors with `got a Promise — await…`.
+**Isolated calls are Promises — await them.** This fails encode:
 
-**Empty `dict()` is a live handle (exec namespaces).** Awaiting
-`builtins.dict()` keeps a Python mapping proxy so `.get` / `exec` mutation
-work. Non-empty plain dicts of scalars still cross as JS objects (data
-returns). Same-domain handles **do** chain
+```js
+const g = builtins.dict();           // Promise, not a dict
+await builtins.exec(code, g);
+```
+
+Use `const g = await builtins.dict()`. Passing an unawaited result errors
+with `got a Promise — await isolated call results…`.
+
+**Empty `dict()` stays a live handle (exec namespaces).** Awaiting
+`builtins.dict()` keeps a Python mapping proxy so `.get` / `exec`
+mutation work. Non-empty plain dicts of scalars still cross as JS
+objects. Same-domain handles chain
 (`const fft = await np.fft.fft(buf); await np.abs(fft)`); foreign-domain
 handles and attribute paths that were never awaited do not.
 
-**When each path wins.** In-process numpy (zero-copy) beats a JS loop
-early — even modest matmul. Isolated pays wire/copy on every call: BLAS-1
-(`np.dot`) often loses to tight JS until the work is huge; BLAS-3 matmul
-crosses over around **n≈128** vs naive JS on this box, and SVD@256 is
-nearly tied with in-process because the kernel dominates. Prefer JS for
-tiny loops; in-process for hot numerical work when packages are available;
-isolated for packages/crash-isolation/N-way fan-out. Re-measure:
-`VIRTUAL_ENV=… node npm/cc-python/benchmarks/modes_bench.js`.
+**Mode choice.** Tiny JS loops beat a wire hop. In-process numpy
+(zero-copy) wins early on matmul. Isolated pays wire/copy every call:
+`np.dot` often loses to tight JS; matmul crosses over around n≈128 vs
+naive JS here; SVD@256 is close to in-process (kernel dominates).
+Re-run: `VIRTUAL_ENV=… node benchmarks/modes_bench.js`.
 
-**Crash vs cancel.** Isolated `destroy()` is cooperative; CPU-bound
-native work (BLAS) is not preemptible — wait or kill the child and mint
-a new domain (see stress catalog linked below).
+**Cancel.** Isolated `destroy()` is cooperative. CPU-bound BLAS is not
+preemptible — wait, or kill the child and create a new domain
+([`bridge_stress.md`](https://github.com/sreekotay/concurrent-c/blob/main/stress/bridge/bridge_stress.md)).
 
-The entire native bridge is a **~100KB `.node` file** with exactly one
-linked dependency: libc.  No node-gyp, no Python headers at build time
-(libpython is `dlopen`'d when you `create()`), no version matrix —
-N-API's stable ABI means one binary per platform serves every node.
+## Surface
 
-```
-npm install concurrent-c-python   # prebuilt where shipped; otherwise
-                                  # compiles from vendored C with `cc`
-```
+- Attribute chains are Python (`np.linalg.norm`). Scalars materialize;
+  everything else stays a proxy. `String(proxy)` → `str()`.
+- `Float64Array` args are zero-copy memoryviews for the call (kept past
+  return is an error, not corruption).
+- The domain owns every handle. `destroy()` / `using` / GC of the graph
+  sweeps once; afterwards: `bridge is closed`. Handles do not cross
+  domains. `stats()` / `release(proxy)` for the ledger.
 
-- **Attribute chains are Python** — `np.linalg.norm` walks getattr;
-  calls walk `PyObject_Vectorcall`.  Scalar results (and scalar
-  attributes like `math.pi`) materialize as JS numbers/strings/booleans;
-  everything else stays a live proxy.  `String(proxy)` is Python `str()`.
-- **Typed arrays cross as leases** — a `Float64Array` argument is a
-  zero-copy memoryview pinned for the call; a callee that keeps it past
-  return is caught, not corrupted.
-- **The bridge is the owner** — every reference minted through it is
-  registered with it.  `destroy()` (or `using py = ...`, or GC of the
-  whole graph) runs one atomic sweep; afterwards every outstanding
-  handle answers `bridge is closed`, and double destroy is a no-op.
-  Handles never cross bridges: a second `create()` is a fully isolated
-  domain that rejects the first one's objects.
-- `py.stats()` is the live-handle count; `py.release(proxy)` drops one
-  early and returns the remainder.
-
-## Async: `py.task`
-
-Async-ness enters through exactly one primitive:
+## `py.task`
 
 ```js
-const py = require('concurrent-c-python').create();  // no modes
-const np = py.import('numpy');
-
-const norm = py.task(np.linalg.norm);           // bind to the lane once
-await norm(new Float64Array(1_000_000));        // hot loop, off-thread
-await py.task(math.sqrt)(16);                   // one-shot, same primitive
-
-await py.destroy();   // always a Promise: revoke, drain, one sweep
+const norm = py.task(np.linalg.norm);
+await norm(new Float64Array(1_000_000));
+await py.destroy();
 ```
 
-Everything else stays synchronous — `math.pi`, exploratory chains,
-cheap calls — and a call site tells you the truth: a task call is a
-Promise, everything else blocks.  Every domain has a latent **execution
-lane** (one thread, started on first task call): task calls run there
-FIFO — Python is serial under its per-interpreter GIL, so a lane loses
-nothing within a domain — the Node event loop stays live while Python
-works, and `Promise.all` across *domains* is real parallelism.  Python
-exceptions arrive as rejections with the sync bridge's messages, and
-handles pass freely between sync and task calls — flavor was never a
-property of the handle.  A sync call on a busy domain waits for the
-in-flight task's GIL, then jumps the queue: that is the meaning of
-choosing sync at a call site.
+Task calls are Promises on a per-domain lane (FIFO, GIL). Everything
+else stays sync. The event loop stays live while the lane runs; sync
+calls on a busy domain wait for the GIL then run. Handles work the same
+on both paths. Queued work rejects on `destroy()`; the in-flight call
+may still finish, then the sweep runs.
 
-Lifetimes extend, not bend: a job owns its Python references and pins
-its typed-array buffers from submit to completion, so `release()` or
-GC mid-flight cannot dangle it.  `destroy()` rejects queued calls
-immediately, lets the in-flight call finish, and sweeps after the last
-result is delivered.  An idle lane never keeps the process alive.
+### Parallelism
 
-### Parallel numpy, today
+Measured in
+[`examples/js_numpy_bridge_async.js`](examples/js_numpy_bridge_async.js),
+[`examples/js_two_interp.js`](examples/js_two_interp.js),
+[`examples/js_multiprocess_numpy.js`](examples/js_multiprocess_numpy.js).
 
-Three real parallelism tiers, all measured
-([`examples/js_numpy_bridge_async.js`](examples/js_numpy_bridge_async.js),
-[`examples/js_two_interp.js`](examples/js_two_interp.js)):
-
-**numpy ∥ your JavaScript** — the lane runs numpy while the main thread
-computes: balanced work lands at **1.8x**, wall clock ≈ max instead of
-sum.
-
-**numpy ∥ numpy, one interpreter** — BLAS releases the GIL, so a sync
-call on main overlaps a task call on the lane.  numpy's own BLAS thread
-pool competes with this (each call already fans out), so the pattern
-wants pinned BLAS — then the lane owns the parallelism:
+1. **Lane ∥ JS** — numpy on the lane, JS on main; wall ≈ max (~1.5–1.8×).
+2. **Lane ∥ sync, one interpreter** — BLAS releases the GIL. Pin BLAS
+   threads or they compete:
 
 ```sh
 OPENBLAS_NUM_THREADS=1 node app.js
 ```
-```js
-const dot = np.dot, dotT = py.task(np.dot);
-const p = dotT(a, b);   // numpy on the lane...
-dot(c, d);              // ...numpy on main, same interpreter
-await p;                // measured: 2.02x — perfect two-lane scaling
-```
-
-**numpy ∥ sibling interpreters** — every in-process `create()` after
-the first is an isolated subinterpreter with its **own GIL**: real
-multi-core Python, sharing buffers zero-copy through JS as neutral
-ground (one `Float64Array` leased into both).  Measured: 5.7ms + 24.5ms
-of work in two domains completes together in 20.1ms.  Two honest
-limits: this tier needs **CPython 3.12+** (`Py_NewInterpreterFromConfig`
-is the only door to a per-interpreter GIL — on 3.10/3.11 the first
-domain works and a second refuses by name), and **numpy itself refuses
-subinterpreters** (the CPython C-extension rule — articulate, not a
-crash), which is what the fourth tier is for.
-
-**N × numpy: isolated domains (separate process)** —
-`create({ isolated: true })` spawns a FULL CPython child per domain
-(not an in-process subinterpreter): numpy in every one, **N domains
-are N GILs on N cores — full multi-core speedup**, a child crash is a
-rejected promise (the parent survives), and per-domain python/venv
-selection is honest:
 
 ```js
-const py = ccpy.create({ isolated: true });  // ambient python, own process
-const np = py.import('numpy');          // zero round trips — chains are lazy
-const s  = await np.sum(buf);           // cross-process is natively async
+const p = py.task(np.dot)(a, b);
+np.dot(c, d);
+await p;
 ```
 
-Every door on an isolated domain is async — `stats()`, `release()`,
-and `str()` return Promises too, and buffer-shaped values come back
-via `await arr.toTypedArray()`.  Each child resolves its Python by the
-same ambient order as everything else (`VIRTUAL_ENV`, then `./.venv`,
-then `python3`; `iso.pythonExe` reports the choice) — and because each
-domain is its own process, the choice can also be **per-domain**, which
-the in-process tier cannot offer:
+3. **Sibling in-process domains** — CPython 3.12+ only (per-interpreter
+   GIL). Numpy’s C extension refuses subinterpreters; use (4) for that.
+4. **Isolated domains** — full child per `create({ isolated: true })`.
+   All doors async; large results via `await arr.toTypedArray()`.
+   Per-domain `python:` / `VIRTUAL_ENV` / `./.venv` / `python3`.
 
 ```js
-const a = ccpy.create({ isolated: true, python: '/home/app/.venv' });
-const b = ccpy.create({ isolated: true, python: '/usr/bin/python3.11' });
+const py = ccpy.create({ isolated: true });
+const np = py.import('numpy');
+const s = await np.sum(buf);
 ```
 
-Measured ([`examples/js_multiprocess_numpy.js`](examples/js_multiprocess_numpy.js),
-[`js_multiprocess_numpy_node_20260810.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/js_multiprocess_numpy_node_20260810.txt),
-BLAS pinned): spawn+import numpy **~109ms** (warm), wire RTT **~98µs**,
-8MB shm arg **~6.4ms**; the same numpy workload on 4 domains runs
-**2-4x faster** than on one (2.22x this capture; up to ~4x when the box
-is quiet).  Small arrays inline; big results stay child-side handles
-(`await arr.toTypedArray()` brings bytes back through the same spill).
+Warm spawn+import ~109ms, wire ~98µs, 8MB shm arg ~6.4ms; 4 domains
+~2–4× one domain when the box is quiet.
 
-Teardown on an isolated domain is **cooperative**: `destroy()` sends
-`close`, drains in-flight wire work, then waits (SIGKILL only if the
-child ignores close). An in-flight call may still fulfill with a
-correct value; after destroy every door answers `bridge is closed`.
+`destroy()` closes cooperatively (SIGKILL only if the child ignores
+close). No clean cancel of in-flight BLAS — wait or kill
+([`js_isolated_cancel_churn.js`](examples/js_isolated_cancel_churn.js)).
 
-There is **no clean cancel of CPU-bound native work** (BLAS, long C):
-Python/`py.task` cannot unwind a running `np.dot`. Choices are wait
-(cooperative `destroy` — in-flight may fulfill) or **kill the worker**
-(`SIGKILL` / abort / `_exit`) and mint a new domain. Kill rejects
-in-flight ops and must not leak SHM spill files. Correctness of that
-path: [`stress/bridge/bridge_stress.md`](https://github.com/sreekotay/concurrent-c/blob/main/stress/bridge/bridge_stress.md).
-Cost of kill+respawn:
-[`examples/js_isolated_cancel_churn.js`](examples/js_isolated_cancel_churn.js).
-
-Keyword arguments cross the wire explicitly marked and **last** —
-`kwargs({...})` is the marker; a trailing plain object stays a
-positional dict, never silently reinterpreted:
+Isolated kwargs are explicit and last:
 
 ```js
 const { kwargs } = require('concurrent-c-python');
-const fmt = await b.eval('lambda a, *, sep="-": f"{a}{sep}end"');
-await fmt(1, kwargs({ sep: '+' }));   // '1+end'
+await fmt(1, kwargs({ sep: '+' }));
 ```
 
-(In-process calls are positional today and refuse the marker by name —
-bind keywords in Python, e.g. `functools.partial`.)
+In-process is positional for now (use `functools.partial` in Python).
 
-`py.task(jsClosure)` is reserved for recorded batch graphs —
-parameterized pipelines that ship N Python calls as one job (and, later,
-across a process boundary) — and says so articulately until it exists.
+## `async def`
 
-## async def: the asyncio lane
-
-A task call that returns a **coroutine** becomes an asyncio task on the
-lane's own event loop — engaged lazily by the first one, so the plain
-FIFO path (and its latency) is untouched until you use `async def`:
+A task that returns a coroutine runs on the lane’s asyncio loop (lazy
+on first use):
 
 ```js
-const ns = b.dict();
 b.exec(`
 import asyncio
 async def crawl(fetch, urls):
@@ -271,238 +182,117 @@ async def crawl(fetch, urls):
 await py.task(ns.get('crawl'))(jsFetch, 'a,b,c');
 ```
 
-Tasks interleave — two staggered sleeps run in max, not sum, and
-completion follows readiness, not submission order.  Inside a task, an
-awaited JS callback returns an **awaitable**: `await cb(x)` suspends
-only that task while the loop keeps running its siblings, and the
-callback's promise may itself lean on tasks of the same domain.  Sync
-callables keep every earlier shape, loop mode or not: *sync nests one
-deep, async composes freely.*
+JS callbacks from the lane may be async; sync bridge calls still refuse
+a thenable return (use `py.task`). Exceptions keep `Type: message`
+across the boundary.
 
-Exceptions keep `Type: message` in both directions and across any
-number of crossings: a coroutine's `ValueError: bad input` is the JS
-rejection's message; a JS rejection raises `RuntimeError` at the
-Python `await` (catchable there), and uncaught it crosses back with its
-text intact.  `destroy()` revokes the domain — queued work rejects with
-`bridge is closed`, then the lane drains and sweeps. In-flight work
-already running may still settle; afterwards every door is closed.
+## Callbacks
 
-## Callbacks: JS functions as Python callables
-
-A JS function passed as an *argument* crosses as a Python callable:
-
-```js
-builtins.list(builtins.map((x) => x * 2, pyList));        // sync: reenters
-await py.task(builtins.list)(builtins.map(jsFn, pyList)); // lane: hops home
-```
-
-On the lane, the executor releases the GIL and waits while the main
-thread runs your function — so concurrent sync bridge work proceeds and
-the loop stays free to serve the callback.  Arguments materialize by
-the usual rule (scalars as scalars, held objects as proxies); returns
-cross back the same way.  A JS throw becomes a Python exception with
-your message, catchable in Python or surfacing as the call's error.
-
-A lane-side callback may be **async**: return a Promise and the Python
-call *suspends* — GIL released — until it settles.  From Python the
-callable is still plainly synchronous: `cb(x)` returns the settled
-value, or raises with the rejection's text.  While a callback is
-suspended, the executor services its own queue, so the promise may even
-depend on a task of the *same* domain:
+A JS function argument becomes a Python callable. On the lane, the
+executor releases the GIL while main runs your function. Async
+callbacks suspend until the Promise settles:
 
 ```js
 await py.task(helper)(async (x) => {
-  const row = await fetchThing(x);       // the loop is live meanwhile
-  return await py.task(np.mean)(row);    // same domain — runs nested
+  const row = await fetchThing(x);
+  return await py.task(np.mean)(row);
 }, seed);
 ```
 
-Suspensions nest LIFO and unwind as promises settle.  A *sync* bridge
-call still refuses a thenable return articulately — main cannot block
-on its own event loop — and the message points at `py.task`.
-Lifetime is one rule: a registered callback pins the domain until
-`destroy()` — the sweep releases the function references, and a
-callable that outlives its bridge raises `bridge is closed` in Python.
-A callback may even destroy its own bridge mid-call (or mid-suspension):
-the in-flight call finishes when its promise settles, then the drain
-runs.
+## Numbers and proxies
 
-## Numbers
+JS numbers → Python `int` or `float`; ints past 2^53 come back as
+`BigInt`. Proxies are function-targets (`typeof === 'function'`). Bridge
+doors (`then`, `toString` / `str`, `toTypedArray`) can shadow Python
+names — use `builtins.getattr` when you need the real attribute. Not
+iterables unless you materialize a list or typed array first.
 
-JavaScript has one number type; integral values cross as Python `int`,
-fractional as `float` (Python APIs that want a float accept an int — the
-reverse is not true).  Python ints beyond 2^53 come back as `BigInt`.
+## Trust
 
-## Proxies, stated plainly
-
-A held Python object is a JS Proxy over a *function* target (so calls
-trap), which has honest consequences worth knowing before handing one
-to generic JS code:
-
-- `typeof proxy === 'function'` even when the Python object is not
-  callable.
-- `then` is special: hidden in-process, "materialize the attribute" on
-  isolated proxies — a Python object's genuine `.then` attribute needs
-  `builtins.getattr(obj, 'then')`, not property access.
-- `toString`/`toJS` (in-process) and `str`/`toTypedArray` (isolated)
-  are bridge doors and shadow same-named Python attributes — reach the
-  Python ones through `builtins.getattr` too.
-- Symbol-keyed properties answer `undefined`: a proxy is not a JS
-  iterable, and Python iterables do not grow `Symbol.iterator` —
-  materialize to a list or typed array first.
-
-None of this bites ordinary attribute-and-call use; it bites libraries
-that introspect objects generically (duck-typed thenable checks,
-spread/iteration, `typeof` dispatch).
-
-## Trust and compatibility
-
-- A **sync in-process call runs Python on the Node thread**: a long
-  call blocks the event loop, and a native-extension crash is a Node
-  process crash.  That is the price of ~5µs calls — `py.task` moves
-  work off-thread, isolated domains move it out of the process.
-- **In-process sibling domains need CPython 3.12+** (per-interpreter
-  GILs).  On 3.10/3.11 the first domain works; a second refuses by
-  name.  Isolated domains parallelize on any supported Python.
-- `{ isolated: true }` is **crash isolation, not a security sandbox**:
-  the child inherits your environment and runs with your OS
-  privileges.  Do not run untrusted Python through it.
-- Bulk-buffer spill files live in a **private 0700 per-bridge
-  directory** (0600, exclusive-create), removed with the bridge.
-- `using py = ...` disposes **without awaiting** (a sync dispose
-  cannot await): teardown may still be draining when the scope exits.
-  When completion matters, `await using py = ...` or
-  `await py.destroy()` are the truthful forms.
-- Linux and macOS.  A platform without a shipped prebuilt compiles the
-  vendored C at install time and needs a C compiler.
+- Sync in-process work runs on the Node thread; a bad native extension
+  can kill the process. Prefer `py.task` or isolated for long/risky work.
+- In-process siblings need CPython 3.12+. Isolated works on supported
+  Pythons.
+- Isolated is crash isolation, not a sandbox — don’t run untrusted code.
+- Spill files: private 0700 dir per bridge, removed on destroy.
+- Prefer `await py.destroy()` / `await using` when teardown must finish.
 
 ## Choosing the Python
 
-The runtime loads lazily at the first `create()`, chosen most-specific
-first — and every explicit or ambient choice that is broken fails
-loudly, never falling through to the wrong Python:
+Loaded at first `create()`, most-specific first; a broken choice fails
+loudly:
 
 ```js
-const ccpy = require('concurrent-c-python');
-
-ccpy.usePython('/home/app/.venv');          // a venv directory
-ccpy.usePython('/usr/bin/python3.11');      // an interpreter executable
-ccpy.usePython('/usr/lib/libpython3.12.so');// a runtime, directly
-
-const py = ccpy.create();                   // loads the choice
-ccpy.python();  // { loaded, version, lib, how } — the introspection door
+ccpy.usePython('/home/app/.venv');
+ccpy.usePython('/usr/bin/python3.11');
+const py = ccpy.create();
+ccpy.python();  // { loaded, version, lib, how }
 ```
 
-1. `usePython(...)` from code (interpreters are interrogated via their
-   own `sysconfig` — one spawn at selection time; venvs are adopted the
-   way `bin/python` itself would be, so `sys.prefix` and site-packages
-   are the venv's).
-2. `CC_LIBPYTHON=/path` in the environment.
-3. **Ambient `VIRTUAL_ENV`** — run node inside an activated venv and
-   that venv is simply used.
-4. **Ambient `./.venv`** — a project-local venv (the uv / poetry
-   convention) is picked up from the working directory, the same way
-   the sibling `concurrent-c-node` bridge resolves `node_modules`.
-5. Discovery (soname walk, 3.13 → 3.10).
+Order: `usePython` → `CC_LIBPYTHON` → `VIRTUAL_ENV` → `./.venv` →
+soname discovery. One in-process runtime per process; isolated domains
+pick their own.
 
-One runtime per process: after the first load, a matching `usePython`
-is a no-op and a different one throws, naming what already loaded.
-Per-domain runtimes arrive with process-isolated domains.
-
-## Building / publishing
-
-From the repo root, clean-pack (and optionally upload npm + the pip sibling):
+## Build / publish
 
 ```
-./scripts/publish_bridges.sh              # → out/concurrent-c-python-*.tgz (+ pip wheel)
-./scripts/publish_bridges.sh --publish    # bump patch, pack, npm publish + twine
-```
-
-The addon itself is ordinary Concurrent-C:
-
-```
+./scripts/publish_bridges.sh
+./scripts/publish_bridges.sh --publish
 ccc build npm/cc-python/src/cc_python.ccs   # → bin/cc_python.node
 ```
 
-`index.js` finds it at `npm/cc-python/bin/` or the repo `bin/`, or wherever
-`CC_PYTHON_ADDON` points.  One stable-ABI binary per platform.
-
-And when the hot path is YOUR code rather than a Python package, skip
-the bridge entirely: a page of Concurrent-C (or C) exports as a native
-module for Node and Python both — 40-90ns calls, 26KB artifacts.  See
-[Native modules for Node and Python](https://github.com/sreekotay/concurrent-c/blob/main/docs/js-py-modules.md).
+`CC_PYTHON_ADDON` overrides addon path. For your own hot path in C/CC,
+export a native module instead (40–90ns) — see
+[JS / Python interop](https://github.com/sreekotay/concurrent-c/blob/main/docs/js-py-modules.md).
 
 ## Measured
 
-Two surfaces, two folders of receipts — **in-process default** vs
-**`{ isolated: true }` separate process** — on a 4-vCPU x86-64 box,
-numpy 2.5.1 (catalog:
-[`perf/baselines/README.md`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/README.md)):
+Catalog: [`perf/baselines/README.md`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/README.md).
 
 ### In-process — `create()`
 
-From [`examples/js_numpy_bridge.js`](examples/js_numpy_bridge.js)
-([`js_numpy_bridge_node_20260810.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/js_numpy_bridge_node_20260810.txt)):
+[`js_numpy_bridge.js`](examples/js_numpy_bridge.js) ·
+[`js_numpy_bridge_node_20260810.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/js_numpy_bridge_node_20260810.txt):
 
 | what | result |
 |---|---|
-| 1M-element `np.dot` through the bridge | **192µs/call — 6.43x the JS loop** (1.24ms) |
-| 1M-element `np.sum` / `np.std` | 420µs / 2.0ms per call |
-| 16-element dot (the crossing itself) | **4.4µs** sync; **11µs** pipelined through the lane |
-| 1M dot through the lane | 259µs/call — the off-thread call costs what the sync one does |
-| bridge size | **~100KB `.node`, libc-only** |
+| 1M `np.dot` | 192µs (~6.4× JS loop) |
+| 1M `np.sum` / `np.std` | 420µs / 2.0ms |
+| 16-elem dot (crossing) | 4.4µs sync; 11µs lane |
+| 1M dot on lane | 259µs |
 
-From [`examples/js_numpy_bridge_async.js`](examples/js_numpy_bridge_async.js)
-([`js_numpy_bridge_async_node_20260810.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/js_numpy_bridge_async_node_20260810.txt))
-— what the lane buys while staying in-process:
+Lane overlap ([`js_numpy_bridge_async.js`](examples/js_numpy_bridge_async.js)):
+99× 1ms ticks during 100ms numpy; JS∥numpy ~1.5×; numpy∥numpy ~1.6×
+with BLAS pinned.
 
-| what | result |
-|---|---|
-| 1ms ticks during 100ms of bulk numpy | **99 through the lane, 0 sync** — the loop stays alive |
-| JS compute overlapped with numpy | **1.47x** this capture (wall ≈ max, not sum) |
-| numpy ∥ numpy, one interpreter (BLAS pinned) | **1.64x** this capture |
+### Isolated — `create({ isolated: true })`
 
-And [`examples/js_two_interp.js`](examples/js_two_interp.js): two
-in-process sibling domains lease **the same `Float64Array`** zero-copy
-— JS is the neutral ground — and their lanes run under two GILs
-(CPython 3.12+).
-
-### Isolated — `create({ isolated: true })` (separate process)
-
-From [`examples/js_multiprocess_numpy.js`](examples/js_multiprocess_numpy.js)
-([`js_multiprocess_numpy_node_20260810.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/js_multiprocess_numpy_node_20260810.txt)):
+[`js_multiprocess_numpy.js`](examples/js_multiprocess_numpy.js) ·
+[`js_multiprocess_numpy_node_20260810.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/js_multiprocess_numpy_node_20260810.txt):
 
 | what | result |
 |---|---|
-| spawn + import numpy (warm) | **109ms** |
-| wire round trip | **98µs** (~20× an in-process crossing) |
-| 8MB argument, shm spill | **6.4ms** |
-| same numpy workload, 4 domains vs 1 | **2.22x** this capture — **up to ~4x / linear in cores** when quiet |
+| spawn + import numpy (warm) | 109ms |
+| wire RTT | 98µs |
+| 8MB shm arg | 6.4ms |
+| 4 domains vs 1 | ~2.2× (up to ~4× quiet) |
 
-### In-process vs isolated vs JS — same box
+### Same box — in-process / isolated / JS
 
-From [`benchmarks/modes_bench.js`](benchmarks/modes_bench.js)
-([`cc_python_modes_bench_20260810.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/cc_python_modes_bench_20260810.txt);
-matmul/SVD return a scalar checksum so isolated is not charged for an
-n² result matrix):
+[`modes_bench.js`](benchmarks/modes_bench.js) ·
+[`cc_python_modes_bench_20260810.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/cc_python_modes_bench_20260810.txt)
+(checksum returns for matmul/SVD):
 
-| workload | in-process | isolated | JS (naive) |
+| workload | in-process | isolated | JS |
 |---|---|---|---|
-| `math.sqrt` ×1 | ~3µs | ~21µs | — |
-| `np.dot` 1M | **0.28ms** | 10ms | 0.72ms |
-| matmul 128×128 | **0.04ms** | 0.41ms | 3.3ms |
-| matmul 256×256 | **0.13ms** | 0.99ms | 17.5ms |
-| SVD 256×256 | **3.1ms** | 3.4ms | — |
-| 3 isolated domains, CPU work | — | **2.8×** vs sequential | — |
+| `sqrt` ×1 | ~3µs | ~21µs | — |
+| `np.dot` 1M | 0.28ms | 10ms | 0.72ms |
+| matmul 128 | 0.04ms | 0.41ms | 3.3ms |
+| matmul 256 | 0.13ms | 0.99ms | 17.5ms |
+| SVD 256 | 3.1ms | 3.4ms | — |
+| 3 isolated domains | — | 2.8× seq | — |
 
-In-process wins whenever numpy is loaded into that runtime. Isolated
-beats naive JS once the kernel is heavy enough (matmul ≥128 here) and
-nearly matches in-process on SVD@256. Numbers swing by host; re-run the
-bench for your box.
+Host load moves absolutes; re-run the bench locally.
 
-Adversarial kitchen-sink (escaped closures, lease detach, cooperative
-subset-destroy, SIGKILL mid-spill, abort inject, mixed soaks):
-[`stress/bridge/`](https://github.com/sreekotay/concurrent-c/tree/main/stress/bridge) — `./stress/bridge/run.sh`.
-Mode catalog + destroy contracts:
-[`stress/bridge/bridge_stress.md`](https://github.com/sreekotay/concurrent-c/blob/main/stress/bridge/bridge_stress.md)
-(latency demos stay in `examples/`).
+Stress: [`stress/bridge/`](https://github.com/sreekotay/concurrent-c/tree/main/stress/bridge)
+(`./stress/bridge/run.sh`).
