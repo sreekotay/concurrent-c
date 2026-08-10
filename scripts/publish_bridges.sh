@@ -9,6 +9,10 @@
 #   ./scripts/publish_bridges.sh --publish --minor
 #   ./scripts/publish_bridges.sh --publish --no-bump   # pack/upload current versions
 #
+# Pre-upload consumer gate (fresh Linux install, no repo on the path):
+#   ./scripts/smoke_bridge_packs.sh              # pack + Docker smoke
+#   ./scripts/smoke_bridge_packs.sh --no-pack --host
+#
 # Needs: ./cc/bin/ccc, node, a C compiler, python3 + build (+ twine to publish).
 # Auth: npm login / ~/.npmrc; PyPI via ~/.pypirc.
 set -euo pipefail
@@ -153,8 +157,10 @@ ls -1 out/pypi/concurrent_c_node-*
 
 if [[ "$PUBLISH" -eq 0 ]]; then
   echo
-  echo "packed only (versions untouched). deploy with:"
-  echo "  ./scripts/publish_bridges.sh --publish"
+  echo "packed only (versions untouched). before upload, consumer-smoke the packs:"
+  echo "  ./scripts/smoke_bridge_packs.sh --no-pack --host"
+  echo "then deploy with:"
+  echo "  ./scripts/publish_bridges.sh --publish --no-bump"
   exit 0
 fi
 
