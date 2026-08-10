@@ -472,6 +472,8 @@ def main():
         "out", "redis_idiomatic"))
     ap.add_argument("--no-spawn", action="store_true",
                     help="target an already-running server instead of spawning one")
+    ap.add_argument("--server-stderr", default=os.environ.get("REDIS_SMOKE_SERVER_STDERR"),
+                    help="capture server stderr to this path (also REDIS_SMOKE_SERVER_STDERR)")
     args = ap.parse_args()
 
     if args.port == 0:
@@ -483,14 +485,20 @@ def main():
         print("[smoke] using free port %d" % args.port)
 
     proc = None
+    server_errf = None
     if not args.no_spawn:
         server = os.path.abspath(args.server)
         if not os.access(server, os.X_OK):
             print("server binary not found/executable: %s" % server, file=sys.stderr)
             return 2
+        if args.server_stderr:
+            server_errf = open(args.server_stderr, "w")
+            err_dest = server_errf
+        else:
+            err_dest = subprocess.DEVNULL
         proc = subprocess.Popen([server, str(args.port)],
                                 stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL)
+                                stderr=err_dest)
     try:
         wait_port(args.port)
         test_basics(args.port)
@@ -505,6 +513,8 @@ def main():
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
+        if server_errf is not None:
+            server_errf.close()
     print("SMOKE OK")
     return 0
 

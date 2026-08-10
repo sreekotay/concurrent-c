@@ -31,8 +31,10 @@ Normative definitions of the primitives and lowering live in `spec/concurrent-c-
 ./scripts/real_projects_sanitize.sh asan
 ./scripts/real_projects_sanitize.sh tsan
 ./scripts/real_projects_sanitize.sh fuzz
+./scripts/real_projects_sanitize.sh all
 ```
 
 Covers the main specimens (`pigz_idiomatic`, `pigz_cc` build, `redis_idiomatic` +
-smoke, `levenshtein`). Receipts and bridge/wire fuzz live in
+smoke, `levenshtein`). Darwin auto-uses Docker for runtime (host ASan/TSan +
+fibers hang). Latest ASan + TSan receipts:
 [`docs/sanitizers.md`](../docs/sanitizers.md).

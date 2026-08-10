@@ -11,6 +11,7 @@
 #include <errno.h>
 #include <poll.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -129,11 +130,16 @@ static int cc__net_prepare_fiber_fd(int fd, uint8_t* flags) {
 }
 
 static int cc__net_trace_read_enabled(void) {
-    static int mode = -1;
-    if (mode >= 0) return mode;
+    static _Atomic int cached = -1;
+    int value = atomic_load_explicit(&cached, memory_order_relaxed);
+    if (value >= 0) return value;
     const char* env = getenv("CC_NET_TRACE_READ");
-    mode = (env && env[0] && !(env[0] == '0' && env[1] == '\0')) ? 1 : 0;
-    return mode;
+    int enabled = (env && env[0] && !(env[0] == '0' && env[1] == '\0')) ? 1 : 0;
+    int expected = -1;
+    (void)atomic_compare_exchange_strong_explicit(&cached, &expected, enabled,
+                                                  memory_order_relaxed,
+                                                  memory_order_relaxed);
+    return atomic_load_explicit(&cached, memory_order_relaxed);
 }
 
 static void cc__net_trace_read(const char* action, int fd, ssize_t n, int err) {

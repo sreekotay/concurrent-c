@@ -59,12 +59,33 @@ if [[ "$DOCKER" -eq 1 ]]; then
       apt-get update -qq
       apt-get install -y -qq build-essential clang python3 python3-dev \
         zlib1g-dev libzopfli-dev pkg-config rsync ca-certificates >/dev/null
-      rsync -a --delete \
-        --exclude out/ --exclude bin/ --exclude .git/ \
-        --exclude third_party/tcc/*.o --exclude "**/node_modules/" \
-        --exclude npm/cc-python/vendor/ \
-        --exclude npm/cc-python/bin/ \
-        /src/ /work/
+      # rsync 24 = vanished source file (host TCC rebuild mid-copy); retry once.
+      rsync_src() {
+        rsync -a --delete \
+          --exclude out/ --exclude bin/ --exclude .git/ \
+          --exclude 'third_party/tcc/*.o' --exclude 'third_party/tcc/*.tmp' \
+          --exclude 'third_party/tcc/*.o.tmp' \
+          --exclude "**/node_modules/" \
+          --exclude npm/cc-python/vendor/ \
+          --exclude npm/cc-python/bin/ \
+          /src/ /work/ || {
+            rc=$?
+            [ "$rc" -eq 24 ] || return "$rc"
+            rsync -a --delete \
+              --exclude out/ --exclude bin/ --exclude .git/ \
+              --exclude 'third_party/tcc/*.o' --exclude 'third_party/tcc/*.tmp' \
+              --exclude 'third_party/tcc/*.o.tmp' \
+              --exclude "**/node_modules/" \
+              --exclude npm/cc-python/vendor/ \
+              --exclude npm/cc-python/bin/ \
+              /src/ /work/ || {
+                rc=$?
+                [ "$rc" -eq 24 ] && return 0
+                return "$rc"
+              }
+          }
+      }
+      rsync_src
       jobs=$(nproc)
       export CC=clang CXX=clang++
       ./scripts/apply_tcc_patches.sh >/dev/null 2>&1 || true
@@ -72,8 +93,12 @@ if [[ "$DOCKER" -eq 1 ]]; then
       # stage1 link races under high -j; build toolchain serially then fan out
       make -C cc -j1
       mkdir -p /out
+      set +e
       OUT=/out ./scripts/real_projects_sanitize.sh "$MODE" --host
+      rc=$?
+      set -e
       cp -a out/real_sanitize/. /out/ 2>/dev/null || true
+      exit "$rc"
     '
 fi
 
@@ -225,19 +250,33 @@ build_run_redis() {
   export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0:halt_on_error=1}"
   export TSAN_OPTIONS="${TSAN_OPTIONS:-halt_on_error=1}"
   local out errf="$OUT/redis_smoke_${san}.err"
-  # Smoke swallows server stderr; capture it ourselves for ASan/TSan reports.
-  if ! out="$(run_timeout python3 real_projects/redis/redis_smoke.py \
+  local srv_errf="$OUT/redis_server_${san}.err"
+  rm -f "$srv_errf"
+  # Client traceback → errf; server ASan/TSan → srv_errf.
+  if ! out="$(REDIS_SMOKE_SERVER_STDERR="$srv_errf" \
+        run_timeout python3 real_projects/redis/redis_smoke.py \
         --server "$bin" --port 0 2>"$errf")"; then
     echo "$out" | tail -30
     [ -s "$errf" ] && { echo "--- redis_smoke stderr ---"; tail -40 "$errf"; }
+    [ -s "$srv_errf" ] && { echo "--- redis server stderr ---"; tail -60 "$srv_errf"; }
     fail "redis_smoke"
     return
   fi
   case "$out" in
-    *"SMOKE OK"*) ok "redis_idiomatic" ;;
+    *"SMOKE OK"*)
+      # halt_on_error can miss races during post-smoke teardown; still fail.
+      if [ -s "$srv_errf" ] && grep -qiE 'ThreadSanitizer|AddressSanitizer|data race|heap-use-after-free' "$srv_errf"; then
+        echo "--- redis server stderr (sanitizer) ---"
+        tail -60 "$srv_errf"
+        fail "redis_smoke sanitizer report after SMOKE OK"
+      else
+        ok "redis_idiomatic"
+      fi
+      ;;
     *)
       echo "$out" | tail -30
       [ -s "$errf" ] && { echo "--- redis_smoke stderr ---"; tail -40 "$errf"; }
+      [ -s "$srv_errf" ] && { echo "--- redis server stderr ---"; tail -60 "$srv_errf"; }
       fail "redis_smoke no SMOKE OK"
       ;;
   esac

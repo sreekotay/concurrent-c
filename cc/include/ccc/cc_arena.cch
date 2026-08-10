@@ -418,10 +418,16 @@ static inline void *cc__arena_alloc_ovf_chunked(CCArena *arena, size_t size, siz
 }
 
 static inline void *cc__arena_alloc_heap_overflow(CCArena *arena, size_t size, size_t align) {
-    if (!arena || !(arena->_flags & CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW) || size == 0)
-        return NULL;
+    if (!arena || size == 0) return NULL;
+    /* Concurrent overflow allocs RMW _flags under meta_lock; sample ALLOW and
+     * block_max under the same lock so TSan does not see a plain load race. */
+    cc__arena_meta_lock(arena);
+    int allow = (arena->_flags & CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW) != 0;
+    int single_block = (arena->block_max == 1);
+    cc__arena_meta_unlock(arena);
+    if (!allow) return NULL;
     /* Durable fixed arenas keep per-object free. Scratch/growable use chunks. */
-    if (arena->block_max == 1)
+    if (single_block)
         return cc__arena_alloc_ovf_object(arena, size, align);
     return cc__arena_alloc_ovf_chunked(arena, size, align);
 }

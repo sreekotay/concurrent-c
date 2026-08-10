@@ -58,6 +58,7 @@ Use the provided scripts for regular race detection:
 - Full TSan run: `./scripts/test_tsan.sh --all`
 - Stress tests under TSan: `./scripts/stress_sanitize.sh tsan`
 - Stress tests under ASan: `./scripts/stress_sanitize.sh asan`
+- real_projects ASan/TSan/fuzz: `./scripts/real_projects_sanitize.sh asan|tsan|fuzz`
 - Bridge addon ASan (Linux/Docker): `./scripts/sanitize_bridge.sh`
 
 Dated receipts, macOS SIP limits, and a fuzzing plan:

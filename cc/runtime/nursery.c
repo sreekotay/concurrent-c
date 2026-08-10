@@ -154,7 +154,7 @@ struct CCNursery {
     cc_nursery_child* tasks; /* Tasks spawned in this nursery */
     size_t count;
     size_t cap;
-    int cancelled;
+    _Atomic int cancelled;  /* release-store on cancel; acquire-load in is_cancelled */
     struct timespec deadline;
     CCChan** closing;
     size_t closing_count;
@@ -245,7 +245,7 @@ CCNursery* cc_nursery_create(CCNursery* parent) {
     /* Snapshot parent cancellation/deadline state at creation time.  No live
        parent pointer is retained, which keeps ownership ordering simple. */
     if (cc_nursery_is_cancelled(parent)) {
-        n->cancelled = 1;
+        atomic_store_explicit(&n->cancelled, 1, memory_order_release);
     }
     {
         struct timespec inherited_deadline;
@@ -269,7 +269,7 @@ void* cc_nursery_closure_env_alloc(CCNursery* n, size_t size, size_t align) {
 void cc_nursery_cancel(CCNursery* n) {
     if (!n) return;
     pthread_mutex_lock(&n->mu);
-    n->cancelled = 1;
+    atomic_store_explicit(&n->cancelled, 1, memory_order_release);
     /* Snapshot tasks while holding lock */
     size_t task_count = n->count;
     cc_nursery_child* tasks_snapshot = NULL;
@@ -399,14 +399,14 @@ const struct timespec* cc_nursery_deadline(const CCNursery* n, struct timespec* 
 CCDeadline cc_nursery_as_deadline(const CCNursery* n) {
     CCDeadline d = cc_deadline_none();
     if (!n) { d.cancelled = 1; return d; }
-    d.cancelled = n->cancelled;
+    d.cancelled = atomic_load_explicit(&n->cancelled, memory_order_acquire);
     d.deadline = n->deadline;
     return d;
 }
 
 bool cc_nursery_is_cancelled(const CCNursery* n) {
     if (!n) return true;
-    if (n->cancelled) return true;
+    if (atomic_load_explicit(&n->cancelled, memory_order_acquire)) return true;
     if (n->deadline.tv_sec == 0) return false;
     struct timespec now;
     clock_gettime(CLOCK_REALTIME, &now);
@@ -448,10 +448,9 @@ static int cc_nursery_grow(CCNursery* n) {
 }
 
 static int cc_nursery_append_child(CCNursery* n, cc_nursery_child child) {
-    if (n->count < n->cap) {
-        n->tasks[n->count++] = child;
-        return 0;
-    }
+    /* Always under n->mu: redis (and any nested spawn into the same nursery)
+     * appends from concurrent fibers; the old unlocked "count < cap" fast
+     * path raced on tasks[count++]. */
     pthread_mutex_lock(&n->mu);
     if (n->count == n->cap) {
         int grow_err = cc_nursery_grow(n);

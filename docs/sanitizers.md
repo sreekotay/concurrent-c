@@ -113,6 +113,20 @@ Tests covered: `tsan_closure_*`, fiber/nursery join races, work-stealing /
 park / inbox storms; stress set `spawn_storm` … `deadline_race` (see
 `scripts/stress_sanitize.sh` / `scripts/test_tsan.sh`).
 
+### real_projects — green (Linux / Docker)
+
+Darwin auto-routes through Docker (`ASan`/`TSan` + fibers hang on host).
+Harness forces `CC=clang`. Levenshtein **import** under TSan is skipped
+(dlopen into stock CPython lacks the TSan runtime); build still required.
+
+| Command | Result |
+|---------|--------|
+| `./scripts/real_projects_sanitize.sh asan` | **OK** — pigz_idiomatic run, pigz_cc build, redis smoke, levenshtein import |
+| `./scripts/real_projects_sanitize.sh tsan` | **OK** — same mains; levenshtein import **SKIP** (dlopen); server stderr scanned for late TSan reports |
+| `./scripts/real_projects_sanitize.sh fuzz` | **OK** — light ASan pigz input fuzz |
+
+Nightly: [`.github/workflows/bridge-asan-nightly.yml`](../.github/workflows/bridge-asan-nightly.yml) runs `asan` + `tsan` + `fuzz`.
+
 ### Bridge addon ASan
 
 | Step | Result |
@@ -126,10 +140,9 @@ park / inbox storms; stress set `spawn_storm` … `deadline_race` (see
 | Linux Docker `cc_python_bridge_neg.js` | Incomplete on image CPython **3.11** (second in-process interpreter needs 3.12+); not an ASan finding |
 | Linux Docker `js_python_chaos.js` (quick) | Kitchen sink awaits post-lane `destroy()`; `sanitize_bridge.sh chaos` = mem+fuzz+chaos (neg skipped on 3.11) |
 | Wire-codec libFuzzer | `./scripts/fuzz_wire_codec.sh` — chunked arena (no realloc-under-pointers); prior crash seed repro OK |
-| real_projects ASan/TSan/fuzz | `./scripts/real_projects_sanitize.sh` — pigz / redis / levenshtein mains |
-| Nightly CI | [`.github/workflows/bridge-asan-nightly.yml`](../.github/workflows/bridge-asan-nightly.yml) — bridge fuzz + wire libFuzzer + chaos + real_projects |
+| Nightly CI | [`.github/workflows/bridge-asan-nightly.yml`](../.github/workflows/bridge-asan-nightly.yml) — bridge fuzz + wire libFuzzer + chaos + real_projects asan/tsan/fuzz |
 
-**Status:** mem SEGV fixed; seeded fuzz + wire libFuzzer + nightly workflow in tree. Bookworm’s CPython 3.11 skips multi-interp mem rungs / omits neg under `chaos` mode.
+**Status:** mem SEGV fixed; real_projects ASan + TSan green under Docker; seeded fuzz + wire libFuzzer + nightly workflow in tree. Bookworm’s CPython 3.11 skips multi-interp mem rungs / omits neg under `chaos` mode.
 
 ---
 

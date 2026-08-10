@@ -186,8 +186,8 @@ struct fiber_v2 {
      * A V2 fiber with suppress_depth>0 OR external_wait_depth>0 is exempt
      * from deadlock detection. */
     void*      park_obj;
-    uint32_t   deadlock_suppress_depth;
-    uint32_t   external_wait_depth;
+    _Atomic uint32_t deadlock_suppress_depth;
+    _Atomic uint32_t external_wait_depth;
 
     /* Deadline-aware park.  When a caller parks with an absolute deadline
      * (e.g. @with_deadline wrapping a cc_chan_send that finds the channel
@@ -199,9 +199,10 @@ struct fiber_v2 {
      * returns ETIMEDOUT to @with_deadline.  Resolution is bounded by
      * V2_SYSMON_INTERVAL_MS (20 ms today), which is fine for correctness
      * — tests only care about observing ETIMEDOUT at all, not about
-     * tight latency.  has_park_deadline is atomic so sysmon can read
-     * without taking the fiber's stack ownership. */
-    struct timespec park_deadline;
+     * tight latency.  Deadline fields are atomic so sysmon can sample
+     * them without all_fibers_mu or owning the fiber stack. */
+    _Atomic int64_t park_deadline_sec;
+    _Atomic int64_t park_deadline_nsec;
     _Atomic int     has_park_deadline;
 
     wake_primitive done_wake;
@@ -857,9 +858,9 @@ static void sched_v2_diag_scan_fibers(uint64_t state_counts[FIBER_V2_STATE_COUNT
             state_counts[state]++;
             if (state == FIBER_V2_PARKED) {
                 const char* r = f->park_reason;
-                if (f->external_wait_depth > 0) {
+                if (atomic_load_explicit(&f->external_wait_depth, memory_order_acquire) > 0) {
                     (*parked_external_wait)++;
-                } else if (f->deadlock_suppress_depth > 0) {
+                } else if (atomic_load_explicit(&f->deadlock_suppress_depth, memory_order_acquire) > 0) {
                     (*parked_deadlock_suppressed)++;
                 } else {
                     (*parked_internal)++;
@@ -986,8 +987,8 @@ static fiber_v2* fiber_v2_alloc(void) {
             f->yield_kind = V2_YIELD_PARK;
             f->park_reason = NULL;
             f->park_obj = NULL;
-            f->deadlock_suppress_depth = 0;
-            f->external_wait_depth = 0;
+            atomic_store_explicit(&f->deadlock_suppress_depth, 0u, memory_order_relaxed);
+            atomic_store_explicit(&f->external_wait_depth, 0u, memory_order_relaxed);
             f->diag_user_name = NULL;
             f->diag_file = NULL;
             f->diag_line = 0;
@@ -1030,8 +1031,8 @@ static void fiber_v2_free(fiber_v2* f) {
      * detector never observes stale park_obj/suppress/external-wait state
      * on a pooled fiber. */
     f->park_obj = NULL;
-    f->deadlock_suppress_depth = 0;
-    f->external_wait_depth = 0;
+    atomic_store_explicit(&f->deadlock_suppress_depth, 0u, memory_order_relaxed);
+    atomic_store_explicit(&f->external_wait_depth, 0u, memory_order_relaxed);
     /* Same reason: clear R1 async backtrace metadata so a pooled fiber
      * doesn't surface the previous task's name to `cc_rt_diag_current_async_info`. */
     f->diag_user_name = NULL;
@@ -1675,27 +1676,26 @@ static _Atomic size_t g_v2_park_deadlines = 0;
 
 /* Deadline-aware park primitives.
  *
- * Publishing order matters: the caller sets the deadline BEFORE calling
- * sched_v2_park(), so that if the commit-to-PARKED transition races with
- * a sysmon tick, sysmon already sees has_park_deadline=1 and can decide
- * to signal us.  We publish with release so the sysmon-side acquire load
- * of the state word (pairs with park commit) observes the deadline too.
+ * Publish order: store sec/nsec, then release-exchange has_park_deadline=1.
+ * Sysmon acquire-loads the flag, then loads sec/nsec — that pairs with the
+ * release so the deadline sample is ordered without taking all_fibers_mu on
+ * the park hot path (a global mutex here would serialize every deadline park
+ * against sysmon's fiber-list walks).
  *
- * We use atomic_exchange on has_park_deadline to maintain the global
- * counter symmetrically with clear: a repeat set (same fiber, second
- * park while the first is in flight — shouldn't happen, but safe) does
- * not double-increment, and clear on a fiber that never set (e.g.
- * park_if that short-circuited) does not decrement. */
+ * atomic_exchange on has_park_deadline keeps the global counter symmetric:
+ * a repeat set does not double-increment; clear on a never-set fiber does
+ * not decrement. */
 void sched_v2_fiber_set_park_deadline(fiber_v2* f, const struct timespec* d) {
     if (!f || !d) return;
-    f->park_deadline = *d;
+    atomic_store_explicit(&f->park_deadline_sec, (int64_t)d->tv_sec, memory_order_relaxed);
+    atomic_store_explicit(&f->park_deadline_nsec, (int64_t)d->tv_nsec, memory_order_relaxed);
     int was = atomic_exchange_explicit(&f->has_park_deadline, 1, memory_order_release);
     if (!was) atomic_fetch_add_explicit(&g_v2_park_deadlines, 1, memory_order_relaxed);
 }
 
 void sched_v2_fiber_clear_park_deadline(fiber_v2* f) {
     if (!f) return;
-    int was = atomic_exchange_explicit(&f->has_park_deadline, 0, memory_order_relaxed);
+    int was = atomic_exchange_explicit(&f->has_park_deadline, 0, memory_order_release);
     if (was) atomic_fetch_sub_explicit(&g_v2_park_deadlines, 1, memory_order_relaxed);
 }
 
@@ -1720,9 +1720,15 @@ static void sched_v2_wake_expired_parkers(void) {
         int base = fiber_v2_state_base(
             atomic_load_explicit(&f->state, memory_order_acquire));
         if (base != FIBER_V2_PARKED) continue;
-        if (now.tv_sec < f->park_deadline.tv_sec ||
-            (now.tv_sec == f->park_deadline.tv_sec &&
-             now.tv_nsec < f->park_deadline.tv_nsec)) {
+        /* Sample after the acquire on has_park_deadline so a first publish
+         * is ordered. A concurrent rewrite while has==1 can tear sec/nsec;
+         * at worst that delays or advances one sysmon tick — the fiber's
+         * post-park clock check is authoritative. */
+        int64_t sec = atomic_load_explicit(&f->park_deadline_sec, memory_order_relaxed);
+        int64_t nsec = atomic_load_explicit(&f->park_deadline_nsec, memory_order_relaxed);
+        if (!atomic_load_explicit(&f->has_park_deadline, memory_order_acquire)) continue;
+        if ((int64_t)now.tv_sec < sec ||
+            ((int64_t)now.tv_sec == sec && (int64_t)now.tv_nsec < nsec)) {
             continue;
         }
         /* Expired.  Signal via the normal unpark path; the fiber will
@@ -1738,27 +1744,31 @@ static void sched_v2_wake_expired_parkers(void) {
 
 void sched_v2_fiber_inc_deadlock_suppress(fiber_v2* f) {
     if (!f) return;
-    if (f->deadlock_suppress_depth < UINT32_MAX) f->deadlock_suppress_depth++;
+    if (atomic_load_explicit(&f->deadlock_suppress_depth, memory_order_relaxed) < UINT32_MAX)
+        atomic_fetch_add_explicit(&f->deadlock_suppress_depth, 1u, memory_order_acq_rel);
 }
 
 void sched_v2_fiber_dec_deadlock_suppress(fiber_v2* f) {
     if (!f) return;
-    if (f->deadlock_suppress_depth > 0) f->deadlock_suppress_depth--;
+    if (atomic_load_explicit(&f->deadlock_suppress_depth, memory_order_relaxed) > 0)
+        atomic_fetch_sub_explicit(&f->deadlock_suppress_depth, 1u, memory_order_acq_rel);
 }
 
 int sched_v2_fiber_deadlock_suppressed(fiber_v2* f) {
     if (!f) return 0;
-    return f->deadlock_suppress_depth > 0;
+    return atomic_load_explicit(&f->deadlock_suppress_depth, memory_order_acquire) > 0;
 }
 
 void sched_v2_fiber_inc_external_wait(fiber_v2* f) {
     if (!f) return;
-    if (f->external_wait_depth < UINT32_MAX) f->external_wait_depth++;
+    if (atomic_load_explicit(&f->external_wait_depth, memory_order_relaxed) < UINT32_MAX)
+        atomic_fetch_add_explicit(&f->external_wait_depth, 1u, memory_order_acq_rel);
 }
 
 void sched_v2_fiber_dec_external_wait(fiber_v2* f) {
     if (!f) return;
-    if (f->external_wait_depth > 0) f->external_wait_depth--;
+    if (atomic_load_explicit(&f->external_wait_depth, memory_order_relaxed) > 0)
+        atomic_fetch_sub_explicit(&f->external_wait_depth, 1u, memory_order_acq_rel);
 }
 
 /* R1 — record/read user-facing async task naming on a fiber.
@@ -1789,7 +1799,7 @@ int sched_v2_fiber_get_diag_name(fiber_v2* f, const char** out_name,
 
 int sched_v2_fiber_external_wait_active(fiber_v2* f) {
     if (!f) return 0;
-    return f->external_wait_depth > 0;
+    return atomic_load_explicit(&f->external_wait_depth, memory_order_acquire) > 0;
 }
 
 /* ============================================================================
@@ -2866,8 +2876,8 @@ static void sched_v2_classify_parked_fibers(size_t* internal_parked,
         int base = fiber_v2_state_base(
             atomic_load_explicit(&f->state, memory_order_acquire));
         if (base != FIBER_V2_PARKED) continue;
-        if (f->external_wait_depth > 0) { (*external_parked)++; continue; }
-        if (f->deadlock_suppress_depth > 0) { (*suppressed_parked)++; continue; }
+        if (atomic_load_explicit(&f->external_wait_depth, memory_order_acquire) > 0) { (*external_parked)++; continue; }
+        if (atomic_load_explicit(&f->deadlock_suppress_depth, memory_order_acquire) > 0) { (*suppressed_parked)++; continue; }
         (*internal_parked)++;
         if (!sched_v2_fiber_is_open_chan_recv_wait(f)) *saw_only_open_recv = 0;
     }
@@ -2892,8 +2902,8 @@ static void sched_v2_dump_parked_fibers_for_verdict(void) {
         int is_parked = (base == FIBER_V2_PARKED);
         if (is_parked) parked_total++;
         int skipped = 0;
-        if (is_parked && (f->external_wait_depth > 0 ||
-                          f->deadlock_suppress_depth > 0)) {
+        if (is_parked && (atomic_load_explicit(&f->external_wait_depth, memory_order_acquire) > 0 ||
+                          atomic_load_explicit(&f->deadlock_suppress_depth, memory_order_acquire) > 0)) {
             skipped = 1;
             skipped_total++;
         } else if (is_parked) {
@@ -2908,8 +2918,8 @@ static void sched_v2_dump_parked_fibers_for_verdict(void) {
                     (void*)f, fiber_v2_state_name(base),
                     f->park_reason ? f->park_reason : "-",
                     f->park_obj, f->last_thread_id,
-                    (unsigned)f->external_wait_depth,
-                    (unsigned)f->deadlock_suppress_depth);
+                    (unsigned)atomic_load_explicit(&f->external_wait_depth, memory_order_acquire),
+                    (unsigned)atomic_load_explicit(&f->deadlock_suppress_depth, memory_order_acquire));
             if (is_parked && !skipped && f->park_obj && f->park_reason &&
                 strncmp(f->park_reason, "chan_", 5) == 0) {
                 cc__chan_debug_dump_state(f->park_obj, "    chan state: ");

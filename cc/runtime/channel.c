@@ -31,7 +31,16 @@
 #endif
 
 #if CC_HAVE_LIBLFDS
-/* liblfds lock-free data structures */
+/* liblfds lock-free data structures.
+ * Headers use MSVC #pragma warning / prefast — silence unknown-pragma noise
+ * on Clang/GCC (behavior unchanged; those pragmas are no-ops here anyway). */
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunknown-pragmas"
+#elif defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunknown-pragmas"
+#endif
 #if defined(__APPLE__) && defined(__MACH__)
 #define LFDS711_PAL_OPERATING_SYSTEM
 #define LFDS711_PAL_OS_STRING "Darwin"
@@ -46,6 +55,11 @@
 #include "../../third_party/liblfds/liblfds7.1.1/liblfds711/src/lfds711_queue_bounded_manyproducer_manyconsumer/lfds711_queue_bounded_manyproducer_manyconsumer_cleanup.c"
 #include "../../third_party/liblfds/liblfds7.1.1/liblfds711/src/lfds711_queue_bounded_manyproducer_manyconsumer/lfds711_queue_bounded_manyproducer_manyconsumer_enqueue.c"
 #include "../../third_party/liblfds/liblfds7.1.1/liblfds711/src/lfds711_queue_bounded_manyproducer_manyconsumer/lfds711_queue_bounded_manyproducer_manyconsumer_dequeue.c"
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#elif defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 #endif /* CC_HAVE_LIBLFDS */
 #include <ccc/cc_sched.cch>
 #include <ccc/cc_nursery.cch>
@@ -632,8 +646,8 @@ struct CCChan {
     size_t tail;               /* Only used for unbuffered (cap==0) and mutex fallback */
     void *buf;                 /* Data buffer: ring buffer for mutex path, slot array for lock-free */
     size_t elem_size;
-    int closed;
-    int fast_path_ok;          /* Brand: 1 = minimal fast path eligible (lockfree, small elem, not owned) */
+    _Atomic int closed;  /* release-store on close; acquire-load on lock-free paths */
+    _Atomic int fast_path_ok;  /* Brand: cleared with release on close; acquire-load on minimal path */
     int tx_error_code;         /* Error code when tx closed with error (downstream propagation) */
     int rx_error_closed;       /* Flag: rx side was error-closed */
     int rx_error_code;         /* Error code from rx side (upstream propagation to senders) */
@@ -717,8 +731,24 @@ struct CCChan {
 
 };
 
+/* Lock-free send/recv observe close without holding ch->mu. Writers publish
+ * with release; readers use acquire so drain/EPIPE decisions sync with close. */
+static inline int cc__chan_closed(const CCChan* ch) {
+    return atomic_load_explicit(&ch->closed, memory_order_acquire);
+}
+static inline void cc__chan_mark_closed(CCChan* ch) {
+    atomic_store_explicit(&ch->closed, 1, memory_order_release);
+}
+static inline int cc__chan_fast_path_ok(const CCChan* ch) {
+    return atomic_load_explicit(&ch->fast_path_ok, memory_order_acquire);
+}
+static inline void cc__chan_set_fast_path_ok(CCChan* ch, int v) {
+    atomic_store_explicit(&ch->fast_path_ok, v, memory_order_release);
+}
+
+
 static inline uint32_t cc__chan_wake_sched_attrib(CCChan* ch) {
-    if (ch && ch->fast_path_ok) {
+    if (ch && cc__chan_fast_path_ok(ch)) {
         return CC_FIBER_UNPARK_ATTR_CONTENTION_LOCAL;
     }
     return CC_FIBER_UNPARK_ATTR_NONE;
@@ -745,7 +775,7 @@ static void cc__chan_trace_flow_slow(CCChan* ch,
             ch->count,
             lf_count,
             inflight,
-            ch->closed,
+            cc__chan_closed(ch),
             has_recv_waiters,
             has_send_waiters);
 }
@@ -838,7 +868,7 @@ int cc__chan_debug_is_open(void* ch_obj) {
     CCChan* ch = (CCChan*)ch_obj;
     if (!ch) return 0;
     cc_chan_lock(ch);
-    int is_open = !ch->closed;
+    int is_open = !cc__chan_closed(ch);
     pthread_mutex_unlock(&ch->mu);
     return is_open;
 }
@@ -867,7 +897,7 @@ static inline void cc__chan_trace_req_wake(CCChan* ch,
             ch->cap,
             ch->count,
             lf_count,
-            ch->closed,
+            cc__chan_closed(ch),
             has_recv_waiters,
             (void*)ch->recv_waiters_head);
 }
@@ -896,7 +926,7 @@ static inline void cc__chan_trace_req_recv(CCChan* ch,
             ch->cap,
             ch->count,
             lf_count,
-            ch->closed,
+            cc__chan_closed(ch),
             has_recv_waiters,
             (void*)ch->recv_waiters_head);
 }
@@ -920,7 +950,7 @@ static inline void cc__chan_trace_close(CCChan* ch,
             node ? (uint64_t)node->wait_ticket : 0,
             cc__chan_notify_name(notify),
             notify,
-            ch ? ch->closed : 0,
+            ch ? cc__chan_closed(ch) : 0,
             ch ? ch->rx_error_closed : 0,
             ch ? ch->cap : 0,
             ch ? ch->count : 0,
@@ -948,7 +978,7 @@ void cc__chan_debug_dump_state(void* ch_obj, const char* prefix) {
             ch->count,
             lf_count,
             inflight,
-            ch->closed,
+            cc__chan_closed(ch),
             ch->rx_error_closed,
             ch->rv_has_value,
             ch->rv_recv_waiters,
@@ -1249,8 +1279,8 @@ int cc__chan_publish_recv_wait_select(CCChan* ch,
     cc__fiber* fiber = cc__fiber_in_context() ? cc__fiber_current() : NULL;
     cc_chan_lock(ch);
 
-    if (ch->closed) {
-        int closed = ch->closed;
+    if (cc__chan_closed(ch)) {
+        int closed = cc__chan_closed(ch);
         pthread_mutex_unlock(&ch->mu);
         return closed ? CC__CHAN_WAIT_CLOSE : CC__CHAN_WAIT_PUBLISHED;
     }
@@ -1979,6 +2009,7 @@ CCResult_CCChanWaitOrSocketKind_CCIoError cc_chan_wait_recv_or_socket(CCChan* ch
  * trace_tag is a short string like "close" / "close_err" / "rx_close_err" /
  * "close_with" - emitted as "<tag>_begin" / "<tag>_after_wake" around the
  * wake, preserving the pre-factoring diagnostic breadcrumbs. */
+
 static void cc__chan_close_common(CCChan* ch,
                                   bool close_tx,
                                   bool close_rx,
@@ -1988,11 +2019,11 @@ static void cc__chan_close_common(CCChan* ch,
                                   const char* trace_begin,
                                   const char* trace_end) {
     if (!ch) return;
-    ch->fast_path_ok = 0;  /* Disable minimal fast path before taking lock */
+    cc__chan_set_fast_path_ok(ch, 0);  /* Disable minimal fast path before taking lock */
     cc_chan_lock(ch);
     /* LP (§10 Close LP): OPEN -> CLOSED under channel mutex. */
     if (close_tx) {
-        ch->closed = 1;
+        cc__chan_mark_closed(ch);
         if (tx_errno) ch->tx_error_code = tx_errno;
         if (io_err) {
             ch->tx_io_error = *io_err;
@@ -2168,7 +2199,8 @@ static int cc_chan_ensure_buf(CCChan* ch, size_t elem_size) {
          * lockfree, buffered, not owned/ordered/sync.
          * Small elements (<=ptr) always qualify; large elements qualify when
          * backed by the internal ring queue which supports by-value copies. */
-        ch->fast_path_ok = (cc__chan_minimal_path_enabled() &&
+        cc__chan_set_fast_path_ok(ch,
+                            cc__chan_minimal_path_enabled() &&
                             ch->use_lockfree && ch->cap > 0 && ch->buf &&
                             (elem_size <= sizeof(void*) || ch->use_ring_queue) &&
                             !ch->is_owned && !ch->is_ordered && !ch->is_sync);
@@ -2198,7 +2230,7 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
     if (ch->cap == 0) {
         if (fiber) {
             /* Fiber-aware blocking: park the fiber instead of condvar wait */
-            while (!ch->closed && !ch->rx_error_closed && (ch->rv_has_value || (ch->rv_recv_waiters == 0 && !ch->recv_waiters_head))) {
+            while (!cc__chan_closed(ch) && !ch->rx_error_closed && (ch->rv_has_value || (ch->rv_recv_waiters == 0 && !ch->recv_waiters_head))) {
                 cc__fiber_wait_node node = {0};
                 node.fiber = fiber;
                 atomic_store(&node.notified, 0);
@@ -2227,13 +2259,13 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
             }
         } else {
             /* Traditional condvar blocking */
-            while (!ch->closed && !ch->rx_error_closed && (ch->rv_has_value || ch->rv_recv_waiters == 0) && err == 0) {
+            while (!cc__chan_closed(ch) && !ch->rx_error_closed && (ch->rv_has_value || ch->rv_recv_waiters == 0) && err == 0) {
                 if (deadline) {
                     err = pthread_cond_timedwait(&ch->not_full, &ch->mu, deadline);
                     if (err == ETIMEDOUT) {
                         /* Close/error wins over timeout once observed. */
                         if (ch->rx_error_closed) return ch->rx_error_code;
-                        if (ch->closed) return cc__chan_send_close_errno(ch);
+                        if (cc__chan_closed(ch)) return cc__chan_send_close_errno(ch);
                         return ETIMEDOUT;
                     }
                 } else {
@@ -2243,13 +2275,13 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
         }
         
         if (ch->rx_error_closed) return ch->rx_error_code;
-        return ch->closed ? cc__chan_send_close_errno(ch) : 0;
+        return cc__chan_closed(ch) ? cc__chan_send_close_errno(ch) : 0;
     }
 
     /* Buffered channel */
     if (fiber) {
         /* Fiber-aware blocking */
-        while (!ch->closed && !ch->rx_error_closed && ch->count == ch->cap) {
+        while (!cc__chan_closed(ch) && !ch->rx_error_closed && ch->count == ch->cap) {
             /* Check if current nursery is cancelled - unblock so the fiber can exit */
             CCNursery* cur_nursery = cc__runtime_current_nursery();
             if (cur_nursery && cc_nursery_is_cancelled(cur_nursery)) {
@@ -2264,7 +2296,7 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
             /* Re-check closed after unlock: if close raced between the
              * while-loop condition and add_send_waiter, wake_all_waiters
              * already ran and won't find us.  Bail out to avoid stranding. */
-            if (ch->closed || ch->rx_error_closed) {
+            if (cc__chan_closed(ch) || ch->rx_error_closed) {
                 cc_chan_lock(ch);
                 cc__chan_remove_send_waiter(ch, &node);
                 pthread_mutex_unlock(&ch->mu);
@@ -2292,13 +2324,13 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
         }
     } else {
         /* Traditional condvar blocking */
-        while (!ch->closed && !ch->rx_error_closed && ch->count == ch->cap && err == 0) {
+        while (!cc__chan_closed(ch) && !ch->rx_error_closed && ch->count == ch->cap && err == 0) {
             if (deadline) {
                 err = pthread_cond_timedwait(&ch->not_full, &ch->mu, deadline);
                 if (err == ETIMEDOUT) {
                     /* Close/error wins over timeout once observed. */
                     if (ch->rx_error_closed) return ch->rx_error_code;
-                    if (ch->closed) return cc__chan_send_close_errno(ch);
+                    if (cc__chan_closed(ch)) return cc__chan_send_close_errno(ch);
                     return ETIMEDOUT;
                 }
             } else {
@@ -2308,7 +2340,7 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
     }
     
     if (ch->rx_error_closed) return ch->rx_error_code;
-    if (ch->closed) {
+    if (cc__chan_closed(ch)) {
         return cc__chan_send_close_errno(ch);
     }
     return 0;
@@ -2333,7 +2365,7 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
         
         if (fiber) {
             /* Fiber-aware blocking */
-            while (!ch->closed && !ch->rv_has_value) {
+            while (!cc__chan_closed(ch) && !ch->rv_has_value) {
                 cc__fiber_wait_node node = {0};
                 node.fiber = fiber;
                 atomic_store(&node.notified, 0);
@@ -2363,13 +2395,13 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
             }
         } else {
             /* Spinlock-condvar blocking (spin then sleep) */
-            while (!ch->closed && !ch->rv_has_value && err == 0) {
+            while (!cc__chan_closed(ch) && !ch->rv_has_value && err == 0) {
                 if (deadline) {
                     err = pthread_cond_timedwait(&ch->not_empty, &ch->mu, deadline);
                     if (err == ETIMEDOUT) {
                         if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
                         /* Close/error wins over timeout once observed. */
-                        if (ch->closed) return ch->tx_error_code ? ch->tx_error_code : EPIPE;
+                        if (cc__chan_closed(ch)) return ch->tx_error_code ? ch->tx_error_code : EPIPE;
                         return ETIMEDOUT;
                     }
                 } else {
@@ -2381,7 +2413,7 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
         /* NOTE: Don't decrement rv_recv_waiters here! The caller will call dequeue,
          * which wakes senders. Senders need to see rv_recv_waiters > 0 to proceed.
          * The caller must decrement rv_recv_waiters AFTER dequeue. */
-        if (ch->closed && !ch->rv_has_value) {
+        if (cc__chan_closed(ch) && !ch->rv_has_value) {
             if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
             return ch->tx_error_code ? ch->tx_error_code : EPIPE;
         }
@@ -2392,7 +2424,7 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
        is a common deadlock foot-gun (recv-until-close inside the nursery). */
     {
         CCNursery* cur_nursery = cc__runtime_current_nursery();
-        if (!deadline && !ch->closed && ch->count == 0 &&
+        if (!deadline && !cc__chan_closed(ch) && ch->count == 0 &&
             ch->autoclose_owner && cur_nursery &&
             ch->autoclose_owner == cur_nursery &&
             cc__chan_nursery_closing_guard_enabled()) {
@@ -2411,10 +2443,10 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
     
     if (fiber) {
         /* Fiber-aware blocking */
-        while (!ch->closed && ch->count == 0) {
+        while (!cc__chan_closed(ch) && ch->count == 0) {
             /* Re-check deadlock guard inside loop (same as initial guard above) */
             CCNursery* cur_nursery = cc__runtime_current_nursery();
-            if (!deadline && !ch->closed && ch->count == 0 &&
+            if (!deadline && !cc__chan_closed(ch) && ch->count == 0 &&
                 ch->autoclose_owner && cur_nursery &&
                 ch->autoclose_owner == cur_nursery &&
                 cc__chan_nursery_closing_guard_enabled()) {
@@ -2437,7 +2469,7 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
             /* Re-check closed after unlock: if close raced between the
              * while-loop condition and add_recv_waiter, wake_all_waiters
              * already ran and won't find us.  Bail out to avoid stranding. */
-            if (ch->closed) {
+            if (cc__chan_closed(ch)) {
                 cc_chan_lock(ch);
                 cc__chan_remove_recv_waiter(ch, &node);
                 pthread_mutex_unlock(&ch->mu);
@@ -2470,12 +2502,12 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
         }
     } else {
         /* Spinlock-condvar blocking (spin then sleep) */
-        while (!ch->closed && ch->count == 0 && err == 0) {
+        while (!cc__chan_closed(ch) && ch->count == 0 && err == 0) {
             if (deadline) {
                 err = pthread_cond_timedwait(&ch->not_empty, &ch->mu, deadline);
                 if (err == ETIMEDOUT) {
                     /* Close wins over timeout once observed. */
-                    if (ch->closed && ch->count == 0) return ch->tx_error_code ? ch->tx_error_code : EPIPE;
+                    if (cc__chan_closed(ch) && ch->count == 0) return ch->tx_error_code ? ch->tx_error_code : EPIPE;
                     return ETIMEDOUT;
                 }
             } else {
@@ -2484,7 +2516,7 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
         }
     }
     
-    if (ch->closed && ch->count == 0) return ch->tx_error_code ? ch->tx_error_code : EPIPE;
+    if (cc__chan_closed(ch) && ch->count == 0) return ch->tx_error_code ? ch->tx_error_code : EPIPE;
     return 0;
 }
 
@@ -3032,7 +3064,7 @@ static inline int cc__chan_dequeue_lockfree_minimal(CCChan* ch, void* out_value,
 
 static inline int cc__chan_enqueue_mutex_minimal(CCChan* ch, const void* value) {
     cc_chan_lock(ch);
-    if (ch->closed) {
+    if (cc__chan_closed(ch)) {
         int rc = cc__chan_send_close_errno(ch);
         pthread_mutex_unlock(&ch->mu);
         return rc;
@@ -3461,7 +3493,7 @@ static inline int cc__chan_try_direct_handoff_recv_waiter_buffered(CCChan* ch, c
     if (!ch) return 0;
 
     cc_chan_lock(ch);
-    if (ch->closed) {
+    if (cc__chan_closed(ch)) {
         pthread_mutex_unlock(&ch->mu);
         return -EPIPE;
     }
@@ -3513,7 +3545,7 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
     cc__fiber* fiber = cc__fiber_in_context() ? cc__fiber_current() : NULL;
     int err = 0;
 
-    while (!ch->closed && !ch->rx_error_closed) {
+    while (!cc__chan_closed(ch) && !ch->rx_error_closed) {
         /* If a receiver is waiting, handoff directly */
         cc__fiber_wait_node* rnode = ch->recv_waiters_head ? cc__chan_pop_recv_waiter(ch) : NULL;
         if (rnode) {
@@ -3531,7 +3563,7 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
         cc__chan_add_send_waiter(ch, &node);
         cc__chan_signal_activity(ch);
 
-        while (!ch->closed && !ch->rx_error_closed && !atomic_load_explicit(&node.notified, memory_order_acquire) && err == 0) {
+        while (!cc__chan_closed(ch) && !ch->rx_error_closed && !atomic_load_explicit(&node.notified, memory_order_acquire) && err == 0) {
             /* NOTE: No nursery cancellation check here. Once we've committed
              * to the send (added ourselves to the wait list), we must complete
              * the rendezvous or exit via channel close. Bailing mid-operation
@@ -3606,7 +3638,7 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
             pthread_mutex_unlock(&ch->mu);
             return rc;
         }
-        if (ch->closed) {
+        if (cc__chan_closed(ch)) {
             /* node already removed above */
             int rc2 = cc__chan_send_close_errno(ch);
             pthread_mutex_unlock(&ch->mu);
@@ -3640,7 +3672,7 @@ static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct tim
     cc__fiber* fiber = cc__fiber_in_context() ? cc__fiber_current() : NULL;
     int err = 0;
 
-    while (!ch->closed) {
+    while (!cc__chan_closed(ch)) {
         /* If a sender is waiting, handoff directly */
         cc__fiber_wait_node* snode = ch->send_waiters_head ? cc__chan_pop_send_waiter(ch) : NULL;
         if (snode) {
@@ -3659,7 +3691,7 @@ static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct tim
         cc__chan_add_recv_waiter(ch, &node);
         cc__chan_signal_activity(ch);
 
-        while (!ch->closed && !atomic_load_explicit(&node.notified, memory_order_acquire) && err == 0) {
+        while (!cc__chan_closed(ch) && !atomic_load_explicit(&node.notified, memory_order_acquire) && err == 0) {
             /* NOTE: No nursery cancellation check here. Once we've committed
              * to the recv (added ourselves to the wait list), we must complete
              * the rendezvous or exit via channel close. Bailing mid-operation
@@ -3719,7 +3751,7 @@ static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct tim
             if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
         }
 
-        if (ch->closed) {
+        if (cc__chan_closed(ch)) {
             /* node already removed above */
             int rc = ch->tx_error_code ? ch->tx_error_code : EPIPE;
             pthread_mutex_unlock(&ch->mu);
@@ -3753,7 +3785,7 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
     /* Minimal fast path: branded channel, just enqueue and return.
      * Skips guards, debug, timing, signal_activity.
      * Uses the post-enqueue wake path to notify parked receivers. */
-    if (ch->fast_path_ok && value_size == ch->elem_size) {
+    if (cc__chan_fast_path_ok(ch) && value_size == ch->elem_size) {
         if (cc__chan_mutex_minimal_enabled()) {
             int rc = cc__chan_enqueue_mutex_minimal(ch, value);
             if (rc == 0) return 0;
@@ -3788,7 +3820,7 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
     if (ch->use_lockfree && ch->cap > 0 && ch->elem_size == value_size && ch->buf &&
         (ch->use_ring_queue || ch->elem_size <= sizeof(void*))) {
         /* Check closed flag (relaxed read is fine, we'll verify under lock if needed) */
-        if (ch->closed) return cc__chan_send_close_errno(ch);
+        if (cc__chan_closed(ch)) return cc__chan_send_close_errno(ch);
         /* Check rx error closed (upstream error propagation) */
         if (ch->rx_error_closed) return ch->rx_error_code;
         
@@ -3800,7 +3832,7 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
         if (atomic_load_explicit(&ch->has_recv_waiters, memory_order_acquire)) {
             cc__chan_trace_req_wake(ch, "send_direct_handoff_check", value, NULL);
             cc_chan_lock(ch);
-            if (ch->closed) {
+            if (cc__chan_closed(ch)) {
                 int rc2 = cc__chan_send_close_errno(ch);
                 pthread_mutex_unlock(&ch->mu);
                 return rc2;
@@ -3838,14 +3870,14 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
     }
     
     /* Unbuffered channels: check closed before mutex path */
-    if (ch->cap == 0 && ch->closed) return cc__chan_send_close_errno(ch);
+    if (ch->cap == 0 && cc__chan_closed(ch)) return cc__chan_send_close_errno(ch);
     if (ch->cap == 0 && ch->rx_error_closed) return ch->rx_error_code;
     
     /* Standard mutex path (unbuffered, initial setup, or lock-free full) */
     cc_chan_lock(ch);
     int err = cc_chan_ensure_buf(ch, value_size);
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
-    if (ch->closed) {
+    if (cc__chan_closed(ch)) {
         int rc2 = cc__chan_send_close_errno(ch);
         pthread_mutex_unlock(&ch->mu);
         return rc2;
@@ -3881,7 +3913,7 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
         
         cc__fiber* fiber = cc__fiber_in_context() ? cc__fiber_current() : NULL;
         
-        while (!ch->closed) {
+        while (!cc__chan_closed(ch)) {
             /* Try lock-free enqueue */
             /* Increment inflight BEFORE unlocking to prevent drain race.
              * If we unlock first, drain might see inflight=0 and queue empty,
@@ -4004,7 +4036,7 @@ static int cc__chan_try_send_into_impl(CCChan* ch, CCClosure2 builder, size_t va
         (ch->use_ring_queue || ch->elem_size <= sizeof(void*))) {
         if (atomic_load_explicit(&ch->has_recv_waiters, memory_order_acquire)) {
             cc_chan_lock(ch);
-            if (ch->closed) {
+            if (cc__chan_closed(ch)) {
                 int rc2 = cc__chan_send_close_errno(ch);
                 pthread_mutex_unlock(&ch->mu);
                 return rc2;
@@ -4041,7 +4073,7 @@ static int cc__chan_try_send_into_impl(CCChan* ch, CCClosure2 builder, size_t va
         }
 
         chan_inflight_inc(ch);
-        if (ch->closed) {
+        if (cc__chan_closed(ch)) {
             chan_inflight_dec(ch);
             return cc__chan_send_close_errno(ch);
         }
@@ -4059,13 +4091,13 @@ static int cc__chan_try_send_into_impl(CCChan* ch, CCClosure2 builder, size_t va
         return rc;
     }
 
-    if (ch->cap == 0 && ch->closed) return cc__chan_send_close_errno(ch);
+    if (ch->cap == 0 && cc__chan_closed(ch)) return cc__chan_send_close_errno(ch);
     if (ch->rx_error_closed) return ch->rx_error_code;
 
     cc_chan_lock(ch);
     int err = cc_chan_ensure_buf(ch, value_size);
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
-    if (ch->closed) {
+    if (cc__chan_closed(ch)) {
         int rc2 = cc__chan_send_close_errno(ch);
         pthread_mutex_unlock(&ch->mu);
         return rc2;
@@ -4213,7 +4245,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
     /* Minimal fast path: branded channel, just dequeue and return.
      * Skips guards, debug, timing, signal_activity.
      * Checks send_waiters_head to wake parked senders (pipeline correctness). */
-    if (ch->fast_path_ok && value_size == ch->elem_size) {
+    if (cc__chan_fast_path_ok(ch) && value_size == ch->elem_size) {
         if (cc__chan_mutex_minimal_enabled()) {
             if (cc__chan_dequeue_mutex_minimal(ch, out_value) == 0) {
                 return 0;
@@ -4264,7 +4296,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
             cc__chan_signal_activity(ch);
             return 0;
         }
-        if (ch->closed) {
+        if (cc__chan_closed(ch)) {
             return cc__chan_try_drain_lockfree_on_close(ch, out_value, NULL);
         }
         /* Fall through to blocking path */
@@ -4303,7 +4335,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
        is a common deadlock foot-gun (recv-until-close inside the nursery). */
     {
         CCNursery* cur_nursery = cc__runtime_current_nursery();
-        if (!ch->closed && ch->autoclose_owner && cur_nursery &&
+        if (!cc__chan_closed(ch) && ch->autoclose_owner && cur_nursery &&
             ch->autoclose_owner == cur_nursery &&
             cc__chan_nursery_closing_guard_enabled()) {
         {
@@ -4330,7 +4362,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
         }
         cc_chan_lock(ch);
 
-        if (ch->closed) break;
+        if (cc__chan_closed(ch)) break;
         
         /* Check if current nursery is cancelled - unblock so the fiber can exit */
         {
@@ -4346,7 +4378,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
          * empty and the producer may be done -- detect the foot-gun. */
         {
             CCNursery* cur_nursery = cc__runtime_current_nursery();
-            if (!ch->closed && ch->autoclose_owner && cur_nursery &&
+            if (!cc__chan_closed(ch) && ch->autoclose_owner && cur_nursery &&
                 ch->autoclose_owner == cur_nursery &&
                 cc__chan_nursery_closing_guard_enabled()) {
             {
@@ -4428,9 +4460,9 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                     pthread_mutex_unlock(&ch->mu);
                     return 0;
                 }
-                if (pre_deq_notified != 0 || ch->closed) {
+                if (pre_deq_notified != 0 || cc__chan_closed(ch)) {
                     /* SIGNAL/CLOSE — remove node and retry from loop top */
-                    cc__chan_trace_req_recv(ch, "pre_deq_remove_retry", &node, pre_deq_notified, ch->closed ? EPIPE : 0);
+                    cc__chan_trace_req_recv(ch, "pre_deq_remove_retry", &node, pre_deq_notified, cc__chan_closed(ch) ? EPIPE : 0);
                     cc__chan_remove_recv_waiter(ch, &node);
                     /* mutex held — top of while(1) unlocks */
                     continue;
@@ -4465,7 +4497,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                  * stress/pipeline_repeat loses 5-6 tail items per ~300
                  * iterations when close racesthe receiver re-register
                  * window. */
-                if (ch->closed) {
+                if (cc__chan_closed(ch)) {
                     pthread_mutex_unlock(&ch->mu);
                     return cc__chan_try_drain_lockfree_on_close(ch, out_value, NULL);
                 }
@@ -4582,7 +4614,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                 pthread_mutex_unlock(&ch->mu);
                 return 0;
             }
-            if (notified == CC_CHAN_NOTIFY_CLOSE || ch->closed) {
+            if (notified == CC_CHAN_NOTIFY_CLOSE || cc__chan_closed(ch)) {
                 /* Channel closed while we were waiting - drain in-flight sends before returning EPIPE. */
                 cc__chan_remove_recv_waiter(ch, &node);
                 pthread_mutex_unlock(&ch->mu);
@@ -4605,7 +4637,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
             }
         } else {
             cc__chan_thread_recv_waiter_inc(ch);
-            if (ch->closed) {
+            if (cc__chan_closed(ch)) {
                 cc__chan_thread_recv_waiter_dec(ch);
                 break;
             }
@@ -4634,7 +4666,7 @@ int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size) {
         (ch->use_ring_queue || ch->elem_size <= sizeof(void*))) {
         /* Manually manage inflight to cover the gap between checking closed and enqueueing */
         chan_inflight_inc(ch);
-        if (ch->closed) {
+        if (cc__chan_closed(ch)) {
             chan_inflight_dec(ch);
             return cc__chan_send_close_errno(ch);
         }
@@ -4663,14 +4695,14 @@ int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size) {
     }
     
     /* Unbuffered channels: check closed before mutex path */
-    if (ch->cap == 0 && ch->closed) return cc__chan_send_close_errno(ch);
+    if (ch->cap == 0 && cc__chan_closed(ch)) return cc__chan_send_close_errno(ch);
     if (ch->rx_error_closed) return ch->rx_error_code;
     
     /* Standard mutex path */
     cc_chan_lock(ch);
     int err = cc_chan_ensure_buf(ch, value_size);
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
-    if (ch->closed) {
+    if (cc__chan_closed(ch)) {
         int rc2 = cc__chan_send_close_errno(ch);
         pthread_mutex_unlock(&ch->mu);
         return rc2;
@@ -4682,7 +4714,7 @@ int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size) {
         if (!rnode) {
             pthread_mutex_unlock(&ch->mu);
             if (ch->rx_error_closed) return ch->rx_error_code;
-            return ch->closed ? cc__chan_send_close_errno(ch) : EAGAIN;
+            return cc__chan_closed(ch) ? cc__chan_send_close_errno(ch) : EAGAIN;
         }
         channel_store_slot(rnode->data, value, ch->elem_size);
         atomic_store_explicit(&rnode->notified, CC_CHAN_NOTIFY_DATA, memory_order_release);
@@ -4756,7 +4788,7 @@ int cc_chan_try_recv(CCChan* ch, void* out_value, size_t value_size) {
             }
             return 0;
         }
-        if (ch->closed) {
+        if (cc__chan_closed(ch)) {
             /* Route every closed-recv observation through the canonical
              * resolver.  try_only=1 preserves try_recv's non-blocking
              * contract: EAGAIN when an item may still be in transit. */
@@ -4773,7 +4805,7 @@ int cc_chan_try_recv(CCChan* ch, void* out_value, size_t value_size) {
         cc__fiber_wait_node* snode = cc__chan_pop_send_waiter(ch);
         if (!snode) {
             pthread_mutex_unlock(&ch->mu);
-            return ch->closed ? (ch->tx_error_code ? ch->tx_error_code : EPIPE) : EAGAIN;
+            return cc__chan_closed(ch) ? (ch->tx_error_code ? ch->tx_error_code : EPIPE) : EAGAIN;
         }
         channel_load_slot(snode->data, out_value, ch->elem_size);
         atomic_store_explicit(&snode->notified, CC_CHAN_NOTIFY_DATA, memory_order_release);
@@ -4802,10 +4834,10 @@ int cc_chan_try_recv(CCChan* ch, void* out_value, size_t value_size) {
             cc__chan_post_dequeue_notify(ch, /*mu_held=*/0);
             return 0;
         }
-        return ch->closed ? cc__chan_send_close_errno(ch) : EAGAIN;
+        return cc__chan_closed(ch) ? cc__chan_send_close_errno(ch) : EAGAIN;
     }
     
-    if (ch->count == 0) { pthread_mutex_unlock(&ch->mu); return ch->closed ? cc__chan_send_close_errno(ch) : EAGAIN; }
+    if (ch->count == 0) { pthread_mutex_unlock(&ch->mu); return cc__chan_closed(ch) ? cc__chan_send_close_errno(ch) : EAGAIN; }
     cc_chan_dequeue(ch, out_value);
     cc__chan_post_dequeue_notify(ch, /*mu_held=*/1);
     return 0;
@@ -4820,7 +4852,7 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
         (ch->use_ring_queue || ch->elem_size <= sizeof(void*))) {
         /* Manually manage inflight to cover the gap between checking closed and enqueueing */
         chan_inflight_inc(ch);
-        if (ch->closed) {
+        if (cc__chan_closed(ch)) {
             chan_inflight_dec(ch);
             return cc__chan_send_close_errno(ch);
         }
@@ -4845,7 +4877,7 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
     cc_chan_lock(ch);
     int err = cc_chan_ensure_buf(ch, value_size);
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
-    if (ch->closed) {
+    if (cc__chan_closed(ch)) {
         int rc2 = cc__chan_send_close_errno(ch);
         pthread_mutex_unlock(&ch->mu);
         return rc2;
@@ -4863,7 +4895,7 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
     if (ch->use_lockfree) {
         int in_fiber = cc__fiber_in_context();
         cc__fiber* fiber_ts = in_fiber ? cc__fiber_current() : NULL;
-        while (!ch->closed) {
+        while (!cc__chan_closed(ch)) {
             /* Try lock-free enqueue */
             chan_inflight_inc(ch);
             pthread_mutex_unlock(&ch->mu);
@@ -4885,7 +4917,7 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
             if (fiber_ts) {
                 /* Register as send waiter, then use robust Dekker protocol */
                 cc_chan_lock(ch);
-                if (ch->closed) break;
+                if (cc__chan_closed(ch)) break;
                 cc__fiber_wait_node node = {0};
                 node.fiber = fiber_ts;
                 atomic_store(&node.notified, 0);
@@ -4969,7 +5001,7 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
             }
             /* Non-fiber: condvar timed wait */
             cc_chan_lock(ch);
-            if (ch->closed) break;
+            if (cc__chan_closed(ch)) break;
             struct timespec poll_deadline;
             clock_gettime(CLOCK_REALTIME, &poll_deadline);
             poll_deadline.tv_nsec += 10000000; /* 10ms */
@@ -5020,7 +5052,7 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
             return 0;
         }
         /* Check if closed and drain any in-flight sends */
-        if (ch->closed) {
+        if (cc__chan_closed(ch)) {
             return cc__chan_try_drain_lockfree_on_close(ch, out_value, abs_deadline);
         }
         /* Lock-free failed, fall through to timed wait with polling */
@@ -5040,7 +5072,7 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
     if (ch->use_lockfree) {
         int in_fiber_r = cc__fiber_in_context();
         cc__fiber* fiber_tr = in_fiber_r ? cc__fiber_current() : NULL;
-        while (!ch->closed) {
+        while (!cc__chan_closed(ch)) {
             pthread_mutex_unlock(&ch->mu);
             int rc = cc_chan_try_dequeue_lockfree(ch, out_value);
             if (rc == 0) {
@@ -5059,7 +5091,7 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
             if (fiber_tr) {
                 /* Register as recv waiter, then use robust Dekker protocol */
                 cc_chan_lock(ch);
-                if (ch->closed) break;
+                if (cc__chan_closed(ch)) break;
                 cc__fiber_wait_node node = {0};
                 node.fiber = fiber_tr;
                 atomic_store(&node.notified, 0);
@@ -5134,7 +5166,7 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
             }
             /* Non-fiber: condvar timed wait */
             cc_chan_lock(ch);
-            if (ch->closed) break;
+            if (cc__chan_closed(ch)) break;
             struct timespec poll_deadline;
             clock_gettime(CLOCK_REALTIME, &poll_deadline);
             poll_deadline.tv_nsec += 10000000; /* 10ms */
@@ -5148,7 +5180,7 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
                 wait_deadline = &poll_deadline;
             }
             cc__chan_thread_recv_waiter_inc(ch);
-            if (ch->closed) {
+            if (cc__chan_closed(ch)) {
                 cc__chan_thread_recv_waiter_dec(ch);
                 break;
             }
@@ -5164,7 +5196,7 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
                     clock_gettime(CLOCK_REALTIME, &now);
                     if (now.tv_sec > abs_deadline->tv_sec ||
                         (now.tv_sec == abs_deadline->tv_sec && now.tv_nsec >= abs_deadline->tv_nsec)) {
-                            if (ch->closed) {
+                            if (cc__chan_closed(ch)) {
                                 pthread_mutex_unlock(&ch->mu);
                                 return cc__chan_try_drain_lockfree_on_close(ch, out_value, abs_deadline);
                             }
@@ -5175,7 +5207,7 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
             }
         }
         pthread_mutex_unlock(&ch->mu);
-        if (ch->closed) {
+        if (cc__chan_closed(ch)) {
             return cc__chan_try_drain_lockfree_on_close(ch, out_value, abs_deadline);
         }
         return ETIMEDOUT;
@@ -5884,12 +5916,12 @@ static int cc__chan_task_wait(void* frame) {
     const struct timespec* p = f->deadline ? cc_deadline_as_timespec(f->deadline, &ts) : NULL;
     int err = 0;
     if (f->is_send) {
-        while (!ch->closed && ch->count == ch->cap && err == 0) {
+        while (!cc__chan_closed(ch) && ch->count == ch->cap && err == 0) {
             err = p ? pthread_cond_timedwait(&ch->not_full, &ch->mu, p)
                     : pthread_cond_wait(&ch->not_full, &ch->mu);
         }
     } else {
-        while (!ch->closed && ch->count == 0 && err == 0) {
+        while (!cc__chan_closed(ch) && ch->count == 0 && err == 0) {
             err = p ? pthread_cond_timedwait(&ch->not_empty, &ch->mu, p)
                     : pthread_cond_wait(&ch->not_empty, &ch->mu);
         }

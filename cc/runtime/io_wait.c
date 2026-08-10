@@ -182,49 +182,72 @@ static void cc__io_wait_stats_dec_current_waiters(void) {
     atomic_fetch_sub_explicit(&g_cc_io_wait_stats.current_waiters, 1, memory_order_relaxed);
 }
 
+static int cc__io_wait_env_flag(const char* name, int default_on_missing) {
+    const char* env = getenv(name);
+    if (!env || !env[0]) return default_on_missing;
+    return !(env[0] == '0' && env[1] == '\0') ? 1 : 0;
+}
+
 static int cc__io_wait_force_direct(void) {
-    static int mode = -1;
-    if (mode >= 0) return mode;
-    const char* env = getenv("CC_IO_WAIT_DIRECT");
-    mode = (env && env[0] && !(env[0] == '0' && env[1] == '\0')) ? 1 : 0;
-    return mode;
+    static _Atomic int cached = -1;
+    int value = atomic_load_explicit(&cached, memory_order_relaxed);
+    if (value >= 0) return value;
+    int enabled = cc__io_wait_env_flag("CC_IO_WAIT_DIRECT", 0);
+    int expected = -1;
+    (void)atomic_compare_exchange_strong_explicit(&cached, &expected, enabled,
+                                                  memory_order_relaxed,
+                                                  memory_order_relaxed);
+    return atomic_load_explicit(&cached, memory_order_relaxed);
 }
 
 static int cc__io_wait_trace_enabled(void) {
-    static int mode = -1;
-    if (mode >= 0) return mode;
-    const char* env = getenv("CC_IO_WAIT_TRACE");
-    mode = (env && env[0] && !(env[0] == '0' && env[1] == '\0')) ? 1 : 0;
-    return mode;
+    static _Atomic int cached = -1;
+    int value = atomic_load_explicit(&cached, memory_order_relaxed);
+    if (value >= 0) return value;
+    int enabled = cc__io_wait_env_flag("CC_IO_WAIT_TRACE", 0);
+    int expected = -1;
+    (void)atomic_compare_exchange_strong_explicit(&cached, &expected, enabled,
+                                                  memory_order_relaxed,
+                                                  memory_order_relaxed);
+    return atomic_load_explicit(&cached, memory_order_relaxed);
 }
 
 static int cc__io_wait_notify_on_remove(void) {
-    static int mode = -1;
-    if (mode >= 0) return mode;
-    const char* env = getenv("CC_IO_WAIT_NOTIFY_ON_REMOVE");
-    mode = (env && env[0] && !(env[0] == '0' && env[1] == '\0')) ? 1 : 0;
-    return mode;
+    static _Atomic int cached = -1;
+    int value = atomic_load_explicit(&cached, memory_order_relaxed);
+    if (value >= 0) return value;
+    int enabled = cc__io_wait_env_flag("CC_IO_WAIT_NOTIFY_ON_REMOVE", 0);
+    int expected = -1;
+    (void)atomic_compare_exchange_strong_explicit(&cached, &expected, enabled,
+                                                  memory_order_relaxed,
+                                                  memory_order_relaxed);
+    return atomic_load_explicit(&cached, memory_order_relaxed);
 }
 
 static int cc__io_wait_poll_timeout_ms(void) {
-    static int mode = -2;
-    if (mode != -2) return mode;
+    static _Atomic int cached = -2;
+    int value = atomic_load_explicit(&cached, memory_order_relaxed);
+    if (value != -2) return value;
     const char* env = getenv("CC_IO_WAIT_POLL_TIMEOUT_MS");
-    if (!env || !env[0]) {
-        mode = -1;
-        return mode;
-    }
-    mode = atoi(env);
-    return mode;
+    int next = (!env || !env[0]) ? -1 : atoi(env);
+    int expected = -2;
+    (void)atomic_compare_exchange_strong_explicit(&cached, &expected, next,
+                                                  memory_order_relaxed,
+                                                  memory_order_relaxed);
+    return atomic_load_explicit(&cached, memory_order_relaxed);
 }
 
 static int cc__io_wait_use_kqueue(void) {
 #if CC_IO_WAIT_HAS_KQUEUE
-    static int mode = -1;
-    if (mode >= 0) return mode;
-    const char* env = getenv("CC_IO_WAIT_KQUEUE");
-    mode = (!env || !env[0] || !(env[0] == '0' && env[1] == '\0')) ? 1 : 0;
-    return mode;
+    static _Atomic int cached = -1;
+    int value = atomic_load_explicit(&cached, memory_order_relaxed);
+    if (value >= 0) return value;
+    int enabled = cc__io_wait_env_flag("CC_IO_WAIT_KQUEUE", 1);
+    int expected = -1;
+    (void)atomic_compare_exchange_strong_explicit(&cached, &expected, enabled,
+                                                  memory_order_relaxed,
+                                                  memory_order_relaxed);
+    return atomic_load_explicit(&cached, memory_order_relaxed);
 #else
     return 0;
 #endif
