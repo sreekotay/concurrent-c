@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Gate: .cch Result types/ctors use T !>(E) + cc_ok/cc_err, not hand-written
-# CCResult_* / cc_ok_CCResult_* outside SPEC registrations and cc_result.cch.
-# @emit(`...`) payloads are host C and may keep mangled ABI names.
+# CCResult_* / cc_ok_CCResult_* / CCRes* outside SPEC registrations and
+# cc_result.cch. @emit(`...`) payloads are host C and may keep mangled ABI
+# names and the CCRes* token-paste macros.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -15,7 +16,11 @@ ROOT = Path('.')
 SPEC_OR_GUARD = re.compile(
     r'^\s*(CC_DECL_RESULT_SPEC(?:_VOID)?\(|#ifndef CCResult_|#define CCResult_)'
 )
-HIT = re.compile(r'\b(?:CCResult_\w+|cc_ok_CCResult_\w+|cc_err_CCResult_\w+)\b')
+# CCRes / CCResPtr / CCRes_ok / CCRes_err: emit-only bridge (defined in cc_result).
+HIT = re.compile(
+    r'\b(?:CCResult_\w+|cc_ok_CCResult_\w+|cc_err_CCResult_\w+|'
+    r'CCRes(?:Ptr)?(?:_ok|_err)?)\b'
+)
 
 def emit_spans(text: str):
     spans = []
@@ -45,18 +50,47 @@ for path in sorted((ROOT / 'cc/include/ccc').rglob('*.cch')):
     text = path.read_text()
     spans = emit_spans(text)
     pos = 0
+    in_block = False
     for lineno, line in enumerate(text.splitlines(keepends=True), 1):
         start = pos
         pos += len(line)
         if SPEC_OR_GUARD.search(line):
             continue
-        for m in HIT.finditer(line):
-            if in_spans(start + m.start(), spans):
+        # Strip // and /* */ (including multi-line) before matching.
+        code_chars = []
+        i = 0
+        n = len(line)
+        while i < n:
+            if in_block:
+                if line[i:i + 2] == '*/':
+                    in_block = False
+                    i += 2
+                else:
+                    i += 1
                 continue
-            bad.append(f'{path}:{lineno}: {m.group(0)}')
+            if line[i:i + 2] == '//':
+                break
+            if line[i:i + 2] == '/*':
+                in_block = True
+                i += 2
+                continue
+            code_chars.append(line[i])
+            i += 1
+        code = ''.join(code_chars)
+        for m in HIT.finditer(code):
+            tok = m.group(0)
+            skip = False
+            for rm in re.finditer(re.escape(tok), line):
+                if in_spans(start + rm.start(), spans):
+                    skip = True
+                    break
+            if skip:
+                continue
+            bad.append(f'{path}:{lineno}: {tok}')
 
 if bad:
-    print('check_result_cch_style: hand-written CCResult_* outside SPEC/emit:', file=sys.stderr)
+    print('check_result_cch_style: hand-written Result ABI outside SPEC/emit:',
+          file=sys.stderr)
     for b in bad:
         print(f'  {b}', file=sys.stderr)
     sys.exit(1)
