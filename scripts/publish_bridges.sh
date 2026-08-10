@@ -5,16 +5,20 @@
 #
 # Usage (from repo root):
 #   ./scripts/publish_bridges.sh                 # clean + pack only (no version bump)
-#   ./scripts/publish_bridges.sh --publish       # bump patch, pack, npm + twine
 #   ./scripts/publish_bridges.sh --publish --minor
-#   ./scripts/publish_bridges.sh --publish --no-bump   # pack/upload current versions
+#       bump, pack, npm publish; PyPI via CI OIDC (default)
+#   ./scripts/publish_bridges.sh --publish --pypi-twine   # local twine instead
+#   ./scripts/publish_bridges.sh --publish --no-bump
+#
+# After --publish (OIDC path), commit+push the bumped version files, then:
+#   gh workflow run publish-cc-node.yml
 #
 # Pre-upload consumer gate (fresh Linux install, no repo on the path):
 #   ./scripts/smoke_bridge_packs.sh              # pack + Docker smoke
 #   ./scripts/smoke_bridge_packs.sh --no-pack --host
 #
-# Needs: ./cc/bin/ccc, node, a C compiler, python3 + build (+ twine to publish).
-# Auth: npm login / ~/.npmrc; PyPI via ~/.pypirc.
+# Needs: ./cc/bin/ccc, node, a C compiler, python3 + build (+ twine if --pypi-twine).
+# Auth: npm login / ~/.npmrc; PyPI OIDC via publish-cc-node.yml (or ~/.pypirc).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -22,6 +26,8 @@ cd "$ROOT"
 
 PUBLISH=0
 BUMP=patch          # patch | minor | major | none
+# Default: PyPI Trusted Publishing from CI. Override with --pypi-twine or PYPI_VIA=.
+PYPI_VIA="${PYPI_VIA:-ci}"
 for arg in "$@"; do
   case "$arg" in
     --publish) PUBLISH=1 ;;
@@ -29,6 +35,8 @@ for arg in "$@"; do
     --minor) BUMP=minor ;;
     --major) BUMP=major ;;
     --no-bump) BUMP=none ;;
+    --pypi-ci) PYPI_VIA=ci ;;
+    --pypi-twine) PYPI_VIA=twine ;;
     -h|--help)
       cat <<'EOF'
 Clean-pack (and optionally publish) the Node↔Python bridge packages:
@@ -36,27 +44,35 @@ Clean-pack (and optionally publish) the Node↔Python bridge packages:
   pip  concurrent-c-node    → out/pypi/concurrent_c_node-*
 
 Usage (from repo root):
-  ./scripts/publish_bridges.sh                 # clean + pack only
-  ./scripts/publish_bridges.sh --publish       # bump patch versions, pack, upload
-  ./scripts/publish_bridges.sh --publish --minor
-  ./scripts/publish_bridges.sh --publish --major
+  ./scripts/publish_bridges.sh                      # clean + pack only
+  ./scripts/publish_bridges.sh --publish --minor    # bump, pack, npm; PyPI via CI
+  ./scripts/publish_bridges.sh --publish --pypi-twine   # also twine upload locally
   ./scripts/publish_bridges.sh --publish --no-bump
 
 Needs: ./cc/bin/ccc, node, a C compiler, python3.
-  Missing build/twine → auto-bootstraps $TMPDIR/cc-publish-venv.
-Auth: npm login; PyPI via ~/.pypirc.
+Auth: npm login. PyPI default is CI OIDC (publish-cc-node.yml):
+  after npm succeeds, commit+push version bumps, then:
+    gh workflow run publish-cc-node.yml
+  --pypi-twine / PYPI_VIA=twine: local twine + ~/.pypirc instead.
 On --publish, versions in npm/cc-python/package.json and
-pypi/cc-node/pyproject.toml are bumped (commit those after a successful upload).
+pypi/cc-node/pyproject.toml are bumped.
 EOF
       exit 0
       ;;
     *)
-      echo "unknown arg: $arg (try --publish / --patch / --minor / --major / --no-bump)" >&2
+      echo "unknown arg: $arg (try --publish / --minor / --pypi-ci / --pypi-twine)" >&2
       exit 2
       ;;
   esac
 done
 
+case "$PYPI_VIA" in
+  twine|ci) ;;
+  *)
+    echo "PYPI_VIA must be twine or ci (got $PYPI_VIA)" >&2
+    exit 2
+    ;;
+esac
 if [[ ! -x ./cc/bin/ccc ]]; then
   echo "missing ./cc/bin/ccc — build the toolchain first (make cc)" >&2
   exit 1
@@ -64,22 +80,32 @@ fi
 command -v node >/dev/null || { echo "need node on PATH" >&2; exit 1; }
 command -v python3 >/dev/null || { echo "need python3 on PATH" >&2; exit 1; }
 
-# Prefer a throwaway venv when system python lacks build/twine.
+# Prefer a throwaway venv when system python lacks build/(twine if local upload).
 PY=python3
+NEED_TWINE=0
+if [[ "$PUBLISH" -eq 1 && "$PYPI_VIA" == twine ]]; then NEED_TWINE=1; fi
 if ! "$PY" -c 'import build' 2>/dev/null ||
-   { [[ "$PUBLISH" -eq 1 ]] && ! "$PY" -c 'import twine' 2>/dev/null; }; then
+   { [[ "$NEED_TWINE" -eq 1 ]] && ! "$PY" -c 'import twine' 2>/dev/null; }; then
   VENV="${TMPDIR:-/tmp}/cc-publish-venv"
   if [[ ! -x "$VENV/bin/python" ]]; then
-    echo "== bootstrap $VENV (build + twine)"
+    echo "== bootstrap $VENV (build${NEED_TWINE:+ + twine})"
     python3 -m venv "$VENV"
-    "$VENV/bin/pip" -q install -U pip build twine
+    if [[ "$NEED_TWINE" -eq 1 ]]; then
+      "$VENV/bin/pip" -q install -U pip build twine
+    else
+      "$VENV/bin/pip" -q install -U pip build
+    fi
   else
-    "$VENV/bin/pip" -q install -U build twine >/dev/null
+    if [[ "$NEED_TWINE" -eq 1 ]]; then
+      "$VENV/bin/pip" -q install -U build twine >/dev/null
+    else
+      "$VENV/bin/pip" -q install -U build >/dev/null
+    fi
   fi
   PY="$VENV/bin/python"
 fi
 "$PY" -c 'import build' || { echo "need Python build module" >&2; exit 1; }
-if [[ "$PUBLISH" -eq 1 ]]; then
+if [[ "$NEED_TWINE" -eq 1 ]]; then
   "$PY" -c 'import twine' || { echo "need Python twine module" >&2; exit 1; }
 fi
 
@@ -172,16 +198,31 @@ if ! npm publish "$NPM_TGZ" --access public; then
   exit 1
 fi
 
-echo "== twine upload out/pypi/concurrent_c_node-*"
-"$PY" -m twine upload --skip-existing out/pypi/concurrent_c_node-*
-
 NPM_VER="$(node -p "require('./npm/cc-python/package.json').version")"
 PY_VER="$("$PY" -c 'import re,pathlib; t=pathlib.Path("pypi/cc-node/pyproject.toml").read_text(); print(re.search(r"(?m)^version\s*=\s*\"([^\"]+)\"", t).group(1))')"
 
+if [[ "$PYPI_VIA" == ci ]]; then
+  echo "== PyPI via CI OIDC (skipped local twine)"
+else
+  echo "== twine upload out/pypi/concurrent_c_node-*"
+  "$PY" -m twine upload --skip-existing out/pypi/concurrent_c_node-*
+fi
+
 echo
-echo "live:"
+echo "npm live:"
 echo "  https://www.npmjs.com/package/concurrent-c-python/v/${NPM_VER}"
-echo "  https://pypi.org/project/concurrent-c-node/${PY_VER}/"
-echo
-echo "commit the bumped version files when ready:"
-echo "  git add npm/cc-python/package.json pypi/cc-node/pyproject.toml && git commit -m \"Release bridges ${NPM_VER} / ${PY_VER}\""
+if [[ "$PYPI_VIA" == ci ]]; then
+  echo
+  echo "PyPI next (OIDC) — commit the bumps, push, then dispatch:"
+  echo "  git add npm/cc-python/package.json pypi/cc-node/pyproject.toml"
+  echo "  git commit -m \"Release bridges ${NPM_VER} / ${PY_VER}\""
+  echo "  git push origin HEAD"
+  echo "  gh workflow run publish-cc-node.yml"
+  echo "  # alt: git tag cc-node-v${PY_VER} && git push origin cc-node-v${PY_VER}"
+else
+  echo "PyPI live:"
+  echo "  https://pypi.org/project/concurrent-c-node/${PY_VER}/"
+  echo
+  echo "commit the bumped version files when ready:"
+  echo "  git add npm/cc-python/package.json pypi/cc-node/pyproject.toml && git commit -m \"Release bridges ${NPM_VER} / ${PY_VER}\""
+fi

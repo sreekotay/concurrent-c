@@ -1,0 +1,96 @@
+# Publish pypi/cc-node (concurrent-c-node) via PyPI Trusted Publishing (OIDC).
+#
+# One-time on https://pypi.org/manage/project/concurrent-c-node/settings/publishing/:
+#   Owner:      sreekotay
+#   Repository: concurrent-c
+#   Workflow:   publish-cc-node.yml
+#   Environment: pypi
+#
+# Also create a GitHub Environment named `pypi` (Settings → Environments)
+# and optionally require reviewers before deploy.
+#
+# Usage:
+#   # after bumping version in pypi/cc-node/pyproject.toml and pushing
+#   gh workflow run publish-cc-node.yml
+#   # or tag: git tag cc-node-v0.15.0 && git push --tags
+name: publish-cc-node
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'cc-node-v*'
+
+concurrency:
+  group: publish-cc-node
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install build tooling
+        run: python -m pip install -U pip build
+
+      - name: Wire smoke (process bridge; no native addon)
+        run: |
+          python3 tests/bridge_wire.py
+          PYTHONPATH=pypi/cc-node python3 -c '
+import cc_node
+js = cc_node.create()
+assert js.eval("1+1") == 2
+js.destroy()
+print("cc_node import/eval ok")
+'
+
+      - name: Build sdist + wheel
+        run: |
+          rm -rf out/pypi pypi/cc-node/dist pypi/cc-node/build pypi/cc-node/*.egg-info
+          mkdir -p out/pypi
+          python -m build --outdir out/pypi pypi/cc-node
+          ls -la out/pypi/concurrent_c_node-*
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: cc-node-dists
+          path: out/pypi/concurrent_c_node-*
+          if-no-files-found: error
+
+  pypi-publish:
+    name: Upload to PyPI (OIDC)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/p/concurrent-c-node
+    permissions:
+      id-token: write   # mandatory for Trusted Publishing
+      contents: read
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: cc-node-dists
+          path: dist/
+
+      - name: Publish package distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          skip-existing: true
