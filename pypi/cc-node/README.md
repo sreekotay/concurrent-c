@@ -176,7 +176,9 @@ JS Promise you must await.
 **Wire cost vs tiny work.** Round trip is ~100µs class; a one-line JS
 helper on three numbers loses to pure Python. Prefer Python (or a native
 CC module) for small/hot work; use the bridge when Node/npm owns the
-kernel (crypto, parsers, large buffers via shm).
+kernel (crypto, parsers, large buffers via shm). Multi-core: fan across
+`create()` handles from threads —
+`python -m cc_node.benchmarks.multi_domain` (~2.8× on 3 domains here).
 
 **Crash isolation, not a sandbox.** The child inherits your environment
 and privileges — do not evaluate untrusted JavaScript. `destroy()` is
@@ -204,11 +206,30 @@ speaks, from CC.
 
 ## Publishing
 
-From the Concurrent-C repo root (packs this wheel and the npm sibling):
+**Preferred — PyPI Trusted Publishing (OIDC) from CI** (no API token):
+
+1. One-time on
+   [Publishing settings](https://pypi.org/manage/project/concurrent-c-node/settings/publishing/):
+   - Owner `sreekotay`, repository `concurrent-c`
+   - Workflow name `publish-cc-node.yml`
+   - Environment name `pypi`
+2. Create a GitHub Environment named `pypi` (optional reviewers encouraged).
+3. Bump `version` in `pyproject.toml`, commit + push, then:
 
 ```
-./scripts/publish_bridges.sh              # → out/pypi/concurrent_c_node-* (+ npm tgz)
-./scripts/publish_bridges.sh --publish    # bump patch, pack, twine + npm publish
+gh workflow run publish-cc-node.yml
+# or: git tag cc-node-vX.Y.Z && git push --tags
+```
+
+Local pack / npm sibling (PyPI defaults to CI OIDC after npm):
+
+```
+./scripts/publish_bridges.sh --publish --minor
+# npm is live; then commit+push bumps and:
+gh workflow run publish-cc-node.yml
+
+# local twine fallback:
+./scripts/publish_bridges.sh --publish --minor --pypi-twine
 ```
 
 A worked tour (builtin Node modules, chains, callbacks, thenables,

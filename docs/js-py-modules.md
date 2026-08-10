@@ -18,9 +18,10 @@ death (`SIGKILL` / abort) is a separate reject contract. Stress catalog
 [`stress/bridge/bridge_stress.md`](../stress/bridge/bridge_stress.md)
 (`./stress/bridge/run.sh`, including [`cc_embed_stress.ccs`](../stress/bridge/cc_embed_stress.ccs)).
 
-Publish both (bump patch versions, pack, upload):
-`./scripts/publish_bridges.sh --publish` (pack only: omit `--publish`;
-`--minor` / `--major` / `--no-bump` optional).
+Publish: `./scripts/publish_bridges.sh --publish --minor` bumps, packs,
+and npm-publishes; PyPI goes through CI OIDC (`gh workflow run
+publish-cc-node.yml` after committing the bumps). Use `--pypi-twine` for
+local twine. See [`pypi/cc-node/README.md`](../pypi/cc-node/README.md).
 
 [Concurrent-C](https://github.com/sreekotay/concurrent-c) is a strict
 C11-superset preprocessor: `.ccs` lowers to plain C and compiles with
@@ -335,6 +336,14 @@ catalogued in [`perf/baselines/README.md`](../perf/baselines/README.md):
 | wire round trip | ~100µs |
 | 8MB argument, shm spill | 6.4ms (base64 wire before it: 153ms — 24x) |
 | 4 domains, same numpy workload | 2-4x vs one (3.97x at the box's quietest) |
+
+Head-to-head in-process vs isolated vs JS (dot / matmul / SVD) on one
+box: [`npm/cc-python/benchmarks/modes_bench.js`](../npm/cc-python/benchmarks/modes_bench.js)
+· receipt
+[`perf/baselines/cc_python_modes_bench_20260810.txt`](../perf/baselines/cc_python_modes_bench_20260810.txt).
+BLAS-1 (`np.dot`) often loses to tight JS over the isolated wire; BLAS-3
+matmul crosses over (~n≥128 vs naive JS here); SVD@256 is nearly tied
+with in-process because the kernel dominates.
 
 **`concurrent-c-node`** (any npm package from Python):
 

@@ -42,22 +42,22 @@ call surface, different crossing cost and failure domain:
 | | `create()` — in-process | `create({ isolated: true })` — separate process |
 |---|---|---|
 | Where Python runs | same OS process as Node | own CPython child |
-| Hot call | ~5µs crossing; 1M `np.dot` **~192µs** (6.4x a JS loop) | ~100µs wire RTT; bulk via shm |
-| Buffers | zero-copy leases | shm spill (8MB arg **~6.4ms**) |
-| Parallelism | lane / sibling subinterpreters (3.12+); still one process | **N children = N GILs on N cores — full multi-core speedup** |
+| Hot call | ~µs crossing; zero-copy BLAS (1M `np.dot` ≪ JS) | ~20–100µs wire RTT; args copy/shm |
+| Buffers | zero-copy leases | shm spill (large args) |
+| Parallelism | lane / sibling subinterpreters (3.12+); still one process | **N children = N GILs on N cores** |
 | Crash | native crash can take Node with it | child dies → rejected promise; parent lives |
 | Per-domain python/venv | process-wide `usePython(...)` | yes — each child picks its own |
 
-Isolated is how you get **real core scaling with numpy** (and any other
-C-extension that refuses in-process subinterpreters): each domain is a
-full CPython, so N domains use N cores.  Pick **in-process** for hot
-fine-grained calls and zero-copy buffers; pick **isolated** for that
-multi-core speedup, crash isolation, and per-domain environments.
-Measured receipts:
+Pick **in-process** when the linked Python has the packages you need
+(zero-copy wins on BLAS-3). Pick **isolated** for ambient/`pip` packages,
+crash isolation, and multi-core fan-out. Dot alone is a bad yardstick —
+matmul/SVD show when the kernel beats the wire (see Measured).
+Receipts:
 [`js_numpy_bridge_node_20260810.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/js_numpy_bridge_node_20260810.txt)
-(in-process) ·
+·
 [`js_multiprocess_numpy_node_20260810.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/js_multiprocess_numpy_node_20260810.txt)
-(isolated).
+·
+[`cc_python_modes_bench_20260810.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/cc_python_modes_bench_20260810.txt).
 
 ## Common issues
 
@@ -81,10 +81,14 @@ returns). Same-domain handles **do** chain
 (`const fft = await np.fft.fft(buf); await np.abs(fft)`); foreign-domain
 handles and attribute paths that were never awaited do not.
 
-**Small arrays and wire cost.** Isolated RTT is ~100µs class; tiny
-`np.sum([1,2,3])` loses to a JS loop. Prefer JS (or in-process) for
-small/hot scalar work; use numpy when the kernel dominates the crossing
-(large vectors, FFT, BLAS).
+**When each path wins.** In-process numpy (zero-copy) beats a JS loop
+early — even modest matmul. Isolated pays wire/copy on every call: BLAS-1
+(`np.dot`) often loses to tight JS until the work is huge; BLAS-3 matmul
+crosses over around **n≈128** vs naive JS on this box, and SVD@256 is
+nearly tied with in-process because the kernel dominates. Prefer JS for
+tiny loops; in-process for hot numerical work when packages are available;
+isolated for packages/crash-isolation/N-way fan-out. Re-measure:
+`VIRTUAL_ENV=… node npm/cc-python/benchmarks/modes_bench.js`.
 
 **Crash vs cancel.** Isolated `destroy()` is cooperative; CPU-bound
 native work (BLAS) is not preemptible — wait or kill the child and mint
@@ -475,9 +479,26 @@ From [`examples/js_multiprocess_numpy.js`](examples/js_multiprocess_numpy.js)
 | 8MB argument, shm spill | **6.4ms** |
 | same numpy workload, 4 domains vs 1 | **2.22x** this capture — **up to ~4x / linear in cores** when quiet |
 
-Numbers swing ±40% run-to-run on a small shared VM; the example files
-print machine-comparable `RESULT` lines, so re-measuring on your box is
-one command.
+### In-process vs isolated vs JS — same box
+
+From [`benchmarks/modes_bench.js`](benchmarks/modes_bench.js)
+([`cc_python_modes_bench_20260810.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/cc_python_modes_bench_20260810.txt);
+matmul/SVD return a scalar checksum so isolated is not charged for an
+n² result matrix):
+
+| workload | in-process | isolated | JS (naive) |
+|---|---|---|---|
+| `math.sqrt` ×1 | ~3µs | ~21µs | — |
+| `np.dot` 1M | **0.28ms** | 10ms | 0.72ms |
+| matmul 128×128 | **0.04ms** | 0.41ms | 3.3ms |
+| matmul 256×256 | **0.13ms** | 0.99ms | 17.5ms |
+| SVD 256×256 | **3.1ms** | 3.4ms | — |
+| 3 isolated domains, CPU work | — | **2.8×** vs sequential | — |
+
+In-process wins whenever numpy is loaded into that runtime. Isolated
+beats naive JS once the kernel is heavy enough (matmul ≥128 here) and
+nearly matches in-process on SVD@256. Numbers swing by host; re-run the
+bench for your box.
 
 Adversarial kitchen-sink (escaped closures, lease detach, cooperative
 subset-destroy, SIGKILL mid-spill, abort inject, mixed soaks):

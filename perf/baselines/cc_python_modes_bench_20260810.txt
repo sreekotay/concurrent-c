@@ -1,0 +1,21 @@
+# npm/cc-python/benchmarks/modes_bench.js snapshot
+# date: 2026-08-10
+# host: Darwin arm64
+# inproc: VIRTUAL_ENV with numpy; isolated: ambient python3 + numpy
+# note: matmul/svd return scalar checksums (not n² result matrices)
+#
+RESULT inproc_numpy yes
+RESULT inproc_sqrt_us 2.68
+RESULT iso_sqrt_us 21.47
+RESULT dot_n 10000 inproc_ms 0.022 iso_ms 0.517 js_ms 0.065 winner inproc
+RESULT dot_n 100000 inproc_ms 0.017 iso_ms 3.027 js_ms 0.532 winner inproc
+RESULT dot_n 1000000 inproc_ms 0.278 iso_ms 10.267 js_ms 0.724 winner inproc
+RESULT matmul_n 32 inproc_ms 0.025 iso_ms 0.201 js_ms 0.181 winner inproc
+RESULT matmul_n 64 inproc_ms 0.013 iso_ms 0.749 js_ms 0.329 winner inproc
+RESULT matmul_n 128 inproc_ms 0.040 iso_ms 0.410 js_ms 3.335 winner inproc
+RESULT matmul_n 256 inproc_ms 0.130 iso_ms 0.989 js_ms 17.532 winner inproc
+RESULT matmul_n 512 inproc_ms 0.933 iso_ms 3.450 js_ms NA winner inproc
+RESULT svd_n 64 inproc_ms 0.151 iso_ms 0.479 winner inproc
+RESULT svd_n 128 inproc_ms 0.626 iso_ms 0.850 winner inproc
+RESULT svd_n 256 inproc_ms 3.066 iso_ms 3.410 winner inproc
+RESULT iso_domains 3 seq_ms 954.0 par_ms 339.0 speedup 2.81
