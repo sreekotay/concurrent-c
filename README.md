@@ -168,14 +168,13 @@ Or: `make test TCC_EXT=1 TCC_INC=third_party/tcc TCC_LIB=../third_party/tcc/libt
 
 Test conventions: `tests/README.md`. Build driver / cache / outputs: [build spec](spec/concurrent-c-build.md). Channel close + deadlock patterns: `examples/recipe_channel_pipeline.ccs`, [getting started](docs/getting-started.md).
 
-**Linux ARM32 (last verified 2026-07-25).** Via Docker/`linux/arm/v7`
-(gnueabihf / armhf, QEMU on Apple Silicon): cold TinyCC + `ccc` rebuild,
-`./scripts/smoke_arm32.sh` curated ILP32 runtime suite green (hello, channels,
-fibers, park/wake, nursery — `ELF 32-bit ARM, EABI5`), plus JSON grammar
-smokes (`cc_test --filter json`) green on the same target. Pigz round-trip
-compare also ran that evening (`./scripts/pigz_arm32.sh`). How to re-run:
-[docs/ilp32-docker.md](docs/ilp32-docker.md). The full `./scripts/test.sh`
-harness has not been recorded on ARM32 since that date.
+**Linux ARM32 (last verified 2026-08-10).** Via Docker/`linux/arm/v7`
+(gnueabihf / armhf, QEMU on Apple Silicon): full `cc_test` smoke harness green
+— **787 / 787** (`armv7l`, `shadow_lower` last-good `v108`, including
+`@variant(packed)` inferred pointer niches at `sizeof(void*)`). Curated
+`./scripts/smoke_arm32.sh` ILP32 runtime suite (hello, channels, fibers,
+park/wake, nursery — `ELF 32-bit ARM, EABI5`) remains the quick cold-tree
+check. How to re-run: [docs/ilp32-docker.md](docs/ilp32-docker.md).
 
 ### Updating TCC
 
