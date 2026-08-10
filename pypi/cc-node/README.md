@@ -51,6 +51,7 @@ event-loop or GIL between them.
 pip install concurrent-c-node   # needs node on PATH (or point at one)
 python -m cc_node.examples.use_node
 python -m cc_node.examples.bench_wire
+python -m cc_node.benchmarks.multi_domain   # N children, thread-fanned
 ```
 
 ## Measured (separate-process wire)
@@ -212,7 +213,9 @@ From the Concurrent-C repo root (packs this wheel and the npm sibling):
 
 A worked tour (builtin Node modules, chains, callbacks, thenables,
 buffers — no npm install needed):
-`python -m cc_node.examples.use_node`.
+`python -m cc_node.examples.use_node`. Wire RTT / shm:
+`python -m cc_node.examples.bench_wire`. Multi-core domains (threads):
+`python -m cc_node.benchmarks.multi_domain`.
 
 Adversarial multi-child storm (escaped closures, cooperative
 fanout-destroy, abort inject, handle-leak / RSS soaks):

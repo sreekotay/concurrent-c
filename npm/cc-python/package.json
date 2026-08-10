@@ -28,6 +28,7 @@
     "broker.py",
     "README.md",
     "examples/",
+    "benchmarks/",
     "bin/",
     "vendor/"
   ],

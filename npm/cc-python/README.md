@@ -25,6 +25,12 @@ np.dot(a, b);   // 1M-element dot product: 5-8x FASTER than the same
 py.destroy();   // one sweep: every handle, the arena, the interpreter
 ```
 
+Tour both modes (sync in-process + awaited isolated, including
+`await builtins.dict()` exec namespaces):
+[`examples/modes_tour.js`](examples/modes_tour.js).
+Machine-local mode costs (`RESULT` lines):
+[`benchmarks/modes_bench.js`](benchmarks/modes_bench.js).
+
 ## In-process (default) vs isolated (separate process)
 
 `create()` embeds **libpython in this Node process**.
