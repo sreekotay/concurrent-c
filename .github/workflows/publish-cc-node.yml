@@ -51,13 +51,8 @@ jobs:
       - name: Wire smoke (process bridge; no native addon)
         run: |
           python3 tests/bridge_wire.py
-          PYTHONPATH=pypi/cc-node python3 -c '
-import cc_node
-js = cc_node.create()
-assert js.eval("1+1") == 2
-js.destroy()
-print("cc_node import/eval ok")
-'
+          PYTHONPATH=pypi/cc-node python3 -c \
+            "import cc_node; js=cc_node.create(); assert js.eval('1+1')==2; js.destroy(); print('cc_node import/eval ok')"
 
       - name: Build sdist + wheel
         run: |
