@@ -69,7 +69,7 @@ Three boundaries, three places — don't mix them:
 
 | Layer | API | Latency benches (stay put) | Adversarial storms | Receipts |
 |-------|-----|----------------------------|--------------------|----------|
-| **CC embeds Python** | `CCPy` / `cc_py_new` | [`py_baseline.ccs`](py_baseline.ccs), [`py_matplotlib_workload.ccs`](py_matplotlib_workload.ccs) | *(future: `stress/` pure `ccc run`)* | [`baselines/py_baseline_20260809.txt`](baselines/py_baseline_20260809.txt) |
+| **CC embeds JS/Python** | `CCJsDom` / `CCPy` (`js.cch` / `py.cch`) | [`py_baseline.ccs`](py_baseline.ccs), [`py_matplotlib_workload.ccs`](py_matplotlib_workload.ccs) | [`cc_embed_stress.ccs`](../stress/bridge/cc_embed_stress.ccs) (Waves A–C; via [`run.sh`](../stress/bridge/run.sh)) | [`baselines/py_baseline_20260809.txt`](baselines/py_baseline_20260809.txt) |
 | **Native modules** (JS/Python import CC) | `js_module::[T]` / `py_module::[T]` | [`js_baseline.ccs`](js_baseline.ccs)+[`.js`](js_baseline.js), [`js_numpy.ccs`](js_numpy.ccs)+[`.js`](js_numpy.js) | host driver after `ccc build` | [`js_baseline_node_20260809.txt`](baselines/js_baseline_node_20260809.txt), [`js_numpy_node_20260808.txt`](baselines/js_numpy_node_20260808.txt), [`js_py_modules_20260809.txt`](baselines/js_py_modules_20260809.txt) |
 | **Package bridges** (Node↔Python process) | `concurrent-c-python` / `concurrent-c-node` | [`npm/cc-python/examples/`](../npm/cc-python/examples/), [`pypi/cc-node/…/examples/`](../pypi/cc-node/cc_node/examples/) | **[`stress/bridge/`](../stress/bridge/)** ([catalog](../stress/bridge/bridge_stress.md)) | [`baselines/`](baselines/) (bridge + multiprocess rows) |
 
@@ -79,10 +79,11 @@ Three boundaries, three places — don't mix them:
 ./cc/bin/ccc build --release perf/js_baseline.ccs && node perf/js_baseline.js
 node npm/cc-python/examples/js_numpy_bridge.js
 
-# Package-bridge storms (consolidated; host-driven — not in run_all)
+# Package-bridge + CC embed storms (host-driven — not in run_all)
 ./stress/bridge/run.sh
 CHAOS_SCALE=full ./stress/bridge/run.sh
 CHAOS_SCALE=soak ./stress/bridge/run.sh   # see stress/bridge/bridge_stress.md
+CHAOS_SCALE=quick ./out/cc/bin/ccc run stress/bridge/cc_embed_stress.ccs
 ```
 
 `run_all --perf` skips `js_baseline` / `js_numpy` (need `ccc build` + `node`).

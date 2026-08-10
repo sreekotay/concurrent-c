@@ -13,8 +13,10 @@ One boundary, two doors (same headers, same marshalling):
 - **JavaScript from Python** — pip [`concurrent-c-node`](https://pypi.org/project/concurrent-c-node/) · in-tree [`pypi/cc-node`](../pypi/cc-node)
 
 `destroy()` on these bridges is cooperative (close + drain); hard child
-death (`SIGKILL` / abort) is a separate reject contract. Stress catalog:
-[`stress/bridge/bridge_stress.md`](../stress/bridge/bridge_stress.md).
+death (`SIGKILL` / abort) is a separate reject contract. Stress catalog
+(package peers **and** CC embed Waves A–C):
+[`stress/bridge/bridge_stress.md`](../stress/bridge/bridge_stress.md)
+(`./stress/bridge/run.sh`, including [`cc_embed_stress.ccs`](../stress/bridge/cc_embed_stress.ccs)).
 
 Publish both (bump patch versions, pack, upload):
 `./scripts/publish_bridges.sh --publish` (pack only: omit `--publish`;
