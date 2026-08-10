@@ -44,3 +44,7 @@ npm/cc-python/vendor/
 pypi/cc-node/build/
 pypi/cc-node/*.egg-info/
 __pycache__/
+
+# Python virtual environments
+venv/
+.venv/
