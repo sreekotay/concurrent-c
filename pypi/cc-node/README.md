@@ -88,10 +88,12 @@ Examples ship in the wheel. Same domain model and materialization
 rules as the npm sibling, pointed the other way:
 
 - **Values**: plain data (finite numbers, strings, booleans, `None`,
-  lists/dicts of the same) crosses by value; everything else is a live
-  handle owned by the domain — attribute access is property lookup
-  (methods arrive bound), calls are calls, `str()` is `String()`.
-  Non-finite floats cross tagged, never silently nulled.
+  lists and non-empty dicts/objects of the same) crosses by value; an
+  empty `{}` stays a live handle (so bags you mint in JS keep property
+  access). Everything else is a live handle owned by the domain —
+  attribute access is property lookup (methods arrive bound), calls are
+  calls, `str()` is `String()`. Non-finite floats cross tagged, never
+  silently nulled.
 - **The domain rules hold**: handles never cross bridges; `stats()` is
   the handle ledger and `release()` drops one early; `destroy()` is
   idempotent, every door answers `bridge is closed` after, and the
@@ -149,6 +151,35 @@ Small buffers inline; big ones spill through shared memory — one
 memcpy per side, the receiver consumes the spill file, and the sender
 sweeps it if the child died first.  Nothing strays, and nothing is
 silently truncated: an unsupported type is an articulate error.
+
+## Common issues
+
+**`Cannot find module '…'`.** `require` / `import` resolve from the
+**Python process cwd** (`node_modules` next to your program), not from
+the site-packages install of this wheel. `npm install lodash` in the
+project directory is the fix; or pass `create(node='/path/to/node')` /
+`CC_NODE_BIN` when the wrong Node is on `PATH`. Missing-module errors
+name that cwd rule.
+
+**Empty `{}` is a live handle.** `js.eval('({})')` stays a `JsHandle`
+so later property use matches Node. Non-empty plain objects still cross
+as Python `dict`s (data returns). Same-domain handles chain
+(`h.update(…).digest(…)`); foreign-domain handles do not.
+
+**Thenables are awaited in the child.** Promise-based npm APIs need no
+`async`/`await` on the Python side — the call blocks until settle (or
+raises `JsError` on reject). That is the opposite of
+`concurrent-c-python`'s isolated surface, where every call is already a
+JS Promise you must await.
+
+**Wire cost vs tiny work.** Round trip is ~100µs class; a one-line JS
+helper on three numbers loses to pure Python. Prefer Python (or a native
+CC module) for small/hot work; use the bridge when Node/npm owns the
+kernel (crypto, parsers, large buffers via shm).
+
+**Crash isolation, not a sandbox.** The child inherits your environment
+and privileges — do not evaluate untrusted JavaScript. `destroy()` is
+cooperative; CPU-bound JS is not preemptible (wait or kill + new domain).
 
 ## Choosing the node
 

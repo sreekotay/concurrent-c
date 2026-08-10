@@ -19,6 +19,9 @@ neg_iso_dollar_key true
 neg_iso_bigint true
 neg_iso_lazy_import_fail true
 neg_iso_pass_unresolved true
+neg_iso_promise_arg true
+neg_iso_empty_dict_handle true
+neg_iso_exec_namespace true
 neg_iso_foreign_arg true
 neg_iso_after_close true
 neg_iso_sibling_alive true

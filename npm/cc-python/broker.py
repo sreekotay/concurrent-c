@@ -17,17 +17,19 @@
 #   -> {"op":"stats"}                      <- {"v":n}
 #   -> {"op":"close"}                      <- {"v":true}, then exit
 #
-# Values: finite numbers / str / bool / None / lists / dicts cross by
-# value; non-finite floats tag as {"nf":"inf"|"-inf"|"nan"}; typed
-# buffers as {"ta":kind,"b64":...} (numpy arrays when numpy is loadable
-# in this child, else array.array); everything else is a handle.  A JS
-# function argument arrives as {"$f":id}: calling it sends
-# {"cb":true,"cbid":id,"args":[...]} and BLOCKS on the reply line
-# {"cbr":...} (or {"e":...}).  The parent may take arbitrarily long
-# (awaiting its own promises) before replying, and may have already
-# pipelined later ops onto the wire — those are parked until the cbr
-# lands, then drained in order.  EOF on the request fd is revocation:
-# drop everything, exit.
+# Values: finite numbers / str / bool / None / lists / non-empty plain
+# dicts cross by value; an empty dict stays a handle (so
+# `await builtins.dict()` remains a live mapping for exec/namespaces —
+# materializing it to JS `{}` made `.get` disappear).  Non-finite floats
+# tag as {"nf":"inf"|"-inf"|"nan"}; typed buffers as {"ta":kind,"b64":...}
+# (numpy arrays when numpy is loadable in this child, else array.array);
+# everything else is a handle.  A JS function argument arrives as
+# {"$f":id}: calling it sends {"cb":true,"cbid":id,"args":[...]} and
+# BLOCKS on the reply line {"cbr":...} (or {"e":...}).  The parent may
+# take arbitrarily long (awaiting its own promises) before replying, and
+# may have already pipelined later ops onto the wire — those are parked
+# until the cbr lands, then drained in order.  EOF on the request fd is
+# revocation: drop everything, exit.
 import base64
 import json
 import math
@@ -221,6 +223,12 @@ def _encode(v):
             return {'ta': key,
                     'b64': base64.b64encode(v.tobytes()).decode('ascii')}
         return {'h': _put(v)}
+    # Empty dict is "plain" but must stay a handle: callers use
+    # builtins.dict() as an exec/eval namespace and need .get / mutation
+    # on the same object.  Non-empty plain dicts of scalars still cross
+    # by value (data returns).
+    if isinstance(v, dict) and len(v) == 0:
+        return {'h': _put(v)}
     if _plain(v):
         return {'v': _encode_val(v)}
     return {'h': _put(v)}
@@ -253,7 +261,18 @@ def _dispatch(req):
     op = req['op']
     if op == 'import':
         import importlib
-        return _encode(importlib.import_module(req['name']))
+        try:
+            return _encode(importlib.import_module(req['name']))
+        except ModuleNotFoundError as e:
+            name = req.get('name', '?')
+            return {
+                'e': (
+                    'ModuleNotFoundError: No module named %r — install into '
+                    'this child python (%s), or pass create({ isolated: true, '
+                    'python: venvPath })'
+                    % (name, sys.executable)
+                )
+            }
     if op == 'getp':
         return _encode(_walk(req))
     if op == 'callp':

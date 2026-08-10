@@ -9,10 +9,11 @@
 The mirror of the cc-python bridge, same rules pointed the other way:
 attribute access is property lookup (methods arrive bound), a call is a
 call, plain data (finite numbers, strings, booleans, None, lists and
-dicts of the same) crosses by value and everything else stays a live
-handle owned by the domain.  A thenable result is awaited in the child
-before the reply, so async package APIs work with nothing extra.  A
-Python callable passed as an argument becomes a JS function; its
+non-empty dicts of the same) crosses by value; an empty dict/object
+stays a live handle (bags keep property access).  Everything else stays
+a live handle owned by the domain.  A thenable result is awaited in the
+child before the reply, so async package APIs work with nothing extra.
+A Python callable passed as an argument becomes a JS function; its
 exceptions cross back as JS errors and vice versa, messages intact.
 Handles never cross domains; every door after destroy() answers
 articulately; destroy is idempotent and `with cc_node.create() as js:`
@@ -29,7 +30,7 @@ import subprocess
 import tempfile
 
 __all__ = ["create", "JsError", "JsHandle", "__version__"]
-__version__ = "0.4.0"
+__version__ = "0.12.1"
 
 # Typed buffers cross as typed arrays; big ones spill through shared
 # memory (tmpfs where available) — one memcpy per side, receiver
@@ -304,7 +305,12 @@ class Bridge:
         enc = self._encode_buffer(a)
         if enc is not None:
             return enc
-        raise JsError("cc-node: unsupported argument type: %r" % type(a))
+        raise JsError(
+            "cc-node: unsupported argument type: %r "
+            "(numbers, str, bool, None, list/tuple, dict with str keys, "
+            "bytes/array.array/1-D numpy, callables, or this domain's "
+            "JsHandle — same-domain handles chain)"
+            % (type(a),))
 
     def _encode_buffer(self, a):
         # Typed buffers cross as typed arrays: bytes/array.array/1-D

@@ -5,6 +5,9 @@ neg_foreign_arg true
 neg_use_after_release true
 neg_call_noncallable true
 neg_missing_package true
+neg_empty_object_handle true
+neg_empty_factory_handle true
+neg_nonempty_object_value true
 neg_after_close_eval true
 neg_after_close_stats true
 neg_destroy_idempotent true

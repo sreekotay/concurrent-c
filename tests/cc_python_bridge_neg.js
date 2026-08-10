@@ -108,6 +108,19 @@ async function raisesAsync(fn, re) {
     out('neg_iso_pass_unresolved',
         await raisesAsync(() => id(pending), /has not landed yet|await any use/));
 
+    // Unawaited call result is a Promise — say so, not "unsupported".
+    out('neg_iso_promise_arg',
+        await raisesAsync(() => id(b.dict()), /got a Promise|await isolated/));
+
+    // Empty dict stays a live handle (exec namespace), not JS {}.
+    {
+      const ns = await b.dict();
+      out('neg_iso_empty_dict_handle', typeof ns === 'function');
+      await b.exec('def add1(x):\n  return x + 1\n', ns);
+      const add1 = await ns.get('add1');
+      out('neg_iso_exec_namespace', (await add1(40)) === 41);
+    }
+
     // Foreign handle as call argument — must not silently re-home.
     const other = ccpy.create({ isolated: true });
     const foreign = await (other.import('builtins')).eval('lambda x: x + 1');

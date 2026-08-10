@@ -16,6 +16,8 @@ destroy_during_thenable true
 py_exc_to_js true
 py_exc_roundtrip true
 missing_package true
+empty_object_handle true
+nonempty_object_value true
 stats_ledger true
 cross_domain true
 destroy_idempotent true

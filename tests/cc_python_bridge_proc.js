@@ -40,6 +40,12 @@ const ccpy = require(process.cwd() + '/npm/cc-python');
     }));
     out('pipelined_nested_cbs', JSON.stringify(piped) === '[10,11,12,13]');
     out('nonfinite_crosses', (await b.float('-inf')) === -Infinity);
+    // Empty dict stays a handle so exec namespaces work (no numpy).
+    {
+      const ns = await b.dict();
+      await b.exec('def twice(a):\n  return a * 2\n', ns);
+      out('empty_dict_exec_ns', (await (await ns.get('twice'))(21)) === 42);
+    }
     // destroy() inside a JS callback must not hang the cbr wait.
     {
       const pyD = ccpy.create({ isolated: true });
@@ -120,6 +126,14 @@ const ccpy = require(process.cwd() + '/npm/cc-python');
     out('lazy_chain_call', (await norm(new Float64Array([3, 4]))) === 5);
   }
 
+  // 4b. Same-domain handle chaining: fft result → abs argument.
+  {
+    const x = new Float64Array([1, 2, 3, 4]);
+    const fft = await np.fft.fft(x);
+    const mag = await np.abs(fft);
+    out('handle_arg_chain', mag.constructor === Float64Array && mag.length === 4);
+  }
+
   // 5. Exceptions keep "Type: message".
   {
     let msg = '';
@@ -161,7 +175,9 @@ const ccpy = require(process.cwd() + '/npm/cc-python');
     execSync(`python3 -m venv --without-pip '${venv}'`);
     const pv = ccpy.create({ isolated: true, python: venv });
     const sys = pv.import('sys');
-    out('per_domain_venv', String(await sys.prefix) === venv);
+    // macOS often reports /private/var/... while mkdtemp used /var/...
+    out('per_domain_venv',
+        fs.realpathSync(String(await sys.prefix)) === fs.realpathSync(venv));
     await pv.destroy();
   }
 

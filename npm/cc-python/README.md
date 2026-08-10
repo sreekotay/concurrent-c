@@ -51,6 +51,37 @@ Measured receipts:
 [`js_multiprocess_numpy_node_20260810.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/js_multiprocess_numpy_node_20260810.txt)
 (isolated).
 
+## Common issues
+
+**`No module named 'numpy'` in-process.** `create()` loads a **libpython**
+(often a minimal embed or a venv without scientific stacks). System
+`pip install numpy` does not reach that runtime. Fixes: point at a venv
+that has the package (`usePython('/path/to/venv')` before `create()`), or
+use ambient/`python3` packages via
+`create({ isolated: true })` (optionally `python: venvPath` per domain).
+Import errors name the missing module and suggest those doors.
+
+**Isolated calls are Promises — await them.**
+`const g = builtins.dict(); await builtins.exec(code, g)` passes a
+Promise and fails encode. Prefer `const g = await builtins.dict()`.
+Passing an unawaited result now errors with `got a Promise — await…`.
+
+**Empty `dict()` is a live handle (exec namespaces).** Awaiting
+`builtins.dict()` keeps a Python mapping proxy so `.get` / `exec` mutation
+work. Non-empty plain dicts of scalars still cross as JS objects (data
+returns). Same-domain handles **do** chain
+(`const fft = await np.fft.fft(buf); await np.abs(fft)`); foreign-domain
+handles and attribute paths that were never awaited do not.
+
+**Small arrays and wire cost.** Isolated RTT is ~100µs class; tiny
+`np.sum([1,2,3])` loses to a JS loop. Prefer JS (or in-process) for
+small/hot scalar work; use numpy when the kernel dominates the crossing
+(large vectors, FFT, BLAS).
+
+**Crash vs cancel.** Isolated `destroy()` is cooperative; CPU-bound
+native work (BLAS) is not preemptible — wait or kill the child and mint
+a new domain (see stress catalog linked below).
+
 The entire native bridge is a **~100KB `.node` file** with exactly one
 linked dependency: libc.  No node-gyp, no Python headers at build time
 (libpython is `dlopen`'d when you `create()`), no version matrix —

@@ -2,6 +2,7 @@ async_callback_over_wire true
 callback_return_py_handle true
 pipelined_nested_cbs true
 nonfinite_crosses true
+empty_dict_exec_ns true
 isolated_destroy_from_cb true
 destroy_during_thenable true
 numpy_in_child true
@@ -12,6 +13,7 @@ shm_arg_integrity true
 shm_result_integrity true
 shm_no_strays true
 lazy_chain_call true
+handle_arg_chain true
 exc_type_and_message true
 two_pythons_concurrent true
 numpy_in_second_child true

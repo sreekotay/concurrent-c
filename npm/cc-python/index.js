@@ -52,6 +52,23 @@ function unwrapArg(a) {
   return (a !== null && a !== undefined && a[HANDLE]) ? a[HANDLE] : a;
 }
 
+function rethrowImportHint(err, isolated) {
+  const msg = String(err && err.message || err);
+  if (!/No module named|ModuleNotFoundError/i.test(msg)) throw err;
+  // Broker already attaches the isolated hint; do not double-append.
+  if (isolated && /child python|venvPath/i.test(msg)) throw err;
+  if (!isolated && /isolated: true|usePython/i.test(msg)) throw err;
+  const hint = isolated
+    ? ' — install into this child python, or pass create({ isolated: true, ' +
+      'python: venvPath })'
+    : ' — in-process libpython may not see system site-packages; try ' +
+      'create({ isolated: true }) for ambient python3, or ' +
+      'usePython("/path/to/venv") before create()';
+  const e = new Error(msg.replace(/\s*$/, '') + hint);
+  if (err && err.stack) e.stack = err.stack;
+  throw e;
+}
+
 // Scalars arrive as JS scalars; a held reference arrives as an External
 // (typeof 'object') and gets a proxy of its own — the same
 // materialization rule at every boundary crossing.
@@ -124,7 +141,11 @@ class Bridge {
     return this._strHandle;
   }
   import(name) {
-    return wrap(this, native.pyimport(this._dom, name));
+    try {
+      return wrap(this, native.pyimport(this._dom, name));
+    } catch (e) {
+      rethrowImportHint(e, false);
+    }
   }
   release(proxy) {
     return native.release(this._dom, unwrapArg(proxy));
@@ -377,8 +398,10 @@ class ProcBridge {
       this._pending.set(obj.id, {
         settle: (r) => {
           sweep();
-          if (r && r.e !== undefined) reject(new Error(r.e));
-          else resolve(r);
+          if (r && r.e !== undefined) {
+            try { rethrowImportHint(new Error(r.e), true); }
+            catch (e) { reject(e); }
+          } else resolve(r);
         },
         reject: (e) => { sweep(); reject(e); },
       });
@@ -460,6 +483,14 @@ class ProcBridge {
       return { $ta: kind, b64: buf.toString('base64') };
     }
     if (Array.isArray(v)) return v.map((x) => this._encode(x));
+    // Unawaited isolated call results are Promises — say so before the
+    // generic "unsupported" line (the usual dict()/exec footgun).
+    if (t === 'object' && v !== null && typeof v.then === 'function' &&
+        !v[RHANDLE]) {
+      throw new Error(
+          'concurrent-c-python: got a Promise — await isolated call results ' +
+          'before passing them as arguments (e.g. await builtins.dict())');
+    }
     if (t === 'object' && (v.constructor === Object || !v.constructor)) {
       const o = {};
       for (const k of Object.keys(v)) {
@@ -470,10 +501,12 @@ class ProcBridge {
       }
       return o;
     }
-    throw new Error('concurrent-c-python: unsupported argument for an isolated ' +
-                    'domain (numbers, strings, booleans, typed arrays, ' +
-                    'plain objects/arrays, functions, or this domain\'s ' +
-                    'handles)');
+    throw new Error(
+        'concurrent-c-python: unsupported argument for an isolated domain ' +
+        '(numbers, strings, booleans, typed arrays, plain objects/arrays, ' +
+        'functions, or this domain\'s handles — same-domain handles chain; ' +
+        'await call results, and keep exec namespaces as live handles via ' +
+        'await builtins.dict())');
   }
 
   _decode(v) {

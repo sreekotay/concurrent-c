@@ -59,7 +59,16 @@ out("neg_call_noncallable", raises(lambda: date(), "not callable"))
 # Missing package (already in main suite; pin here as the neg pack's door).
 out("neg_missing_package",
     raises(lambda: js.require("definitely_not_a_package_neg_xyz"),
-           "Cannot find"))
+           "Cannot find", "node_modules"))
+
+# Empty {} stays a live handle (not a Python dict) — bag / namespace door.
+empty = js.eval("({})")
+out("neg_empty_object_handle", isinstance(empty, cc_node.JsHandle))
+bag = js.eval("() => ({})")()
+out("neg_empty_factory_handle", isinstance(bag, cc_node.JsHandle))
+# Non-empty plain objects still cross by value (data returns).
+out("neg_nonempty_object_value",
+    js.eval("({a: 1})") == {"a": 1})
 
 # After destroy, every door answers closed; bridge stays closed.
 js.destroy()

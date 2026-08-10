@@ -100,7 +100,12 @@ try:
     js.require("definitely_not_a_package_xyz")
     out("missing_package", False)
 except cc_node.JsError as e:
-    out("missing_package", "Cannot find" in str(e))
+    out("missing_package",
+        "Cannot find" in str(e) and "node_modules" in str(e))
+# Empty {} stays a handle; non-empty plain objects stay values.
+out("empty_object_handle", isinstance(js.eval("({})"), cc_node.JsHandle))
+out("nonempty_object_value",
+    js.eval("({a: 1, b: 2})") == {"a": 1, "b": 2})
 
 # 6. The ledger: stats counts handles; release drops them.
 before = js.stats()

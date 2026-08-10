@@ -9,13 +9,15 @@
  * numbering) says which via CC_WIRE_IN / CC_WIRE_OUT.  Handles are
  * integers into one table; results follow the bridge materialization
  * rule — plain data (finite numbers, strings, booleans, null, arrays
- * and plain objects of the same) crosses as a value, everything else
- * stays a handle.  A thenable result is awaited before the reply, so
- * async package APIs need nothing special from the Python side.  A
- * Python callable crosses as {$f: id}; invoking it sends a nested `cb`
- * request and BLOCKS on a synchronous read for the answer — legal
- * because the protocol is strictly alternating, so nothing else can be
- * in flight.  EOF on the request fd is the host vanishing: exit.
+ * and non-empty plain objects of the same) crosses as a value; an
+ * empty plain object stays a handle (so `eval('({})')` remains a live
+ * JS object — materializing it to Python `{}` dropped property access).
+ * A thenable result is awaited before the reply, so async package APIs
+ * need nothing special from the Python side.  A Python callable crosses
+ * as {$f: id}; invoking it sends a nested `cb` request and BLOCKS on a
+ * synchronous read for the answer — legal because the protocol is
+ * strictly alternating, so nothing else can be in flight.  EOF on the
+ * request fd is the host vanishing: exit.
  *
  * cc/include/ccc/script/js.cch embeds this file verbatim (the CC
  * isolated tier speaks the same wire); js_iso_smoke pins the two
@@ -151,6 +153,14 @@ function encodeResult(v) {
       return encodeBuffer(kind,
                           Buffer.from(v.buffer, v.byteOffset, v.byteLength));
     if (Buffer.isBuffer(v)) return encodeBuffer('u8', v);
+    // Empty plain {} / Object.create(null) stay handles — callers mint
+    // bags for later property use.  Non-empty plain objects still cross
+    // by value (data returns).
+    const proto = Object.getPrototypeOf(v);
+    if (!Array.isArray(v) &&
+        (proto === Object.prototype || proto === null) &&
+        Object.keys(v).length === 0)
+      return { h: put(v) };
   }
   if (v === null || isPlain(v, 0)) return { v };
   return { h: put(v) };
@@ -215,8 +225,34 @@ async function main() {
     try {
       let r;
       switch (req.op) {
-        case 'require': r = requireCwd(req.name); break;
-        case 'import': r = await import(req.name); break;
+        case 'require':
+          try {
+            r = requireCwd(req.name);
+          } catch (e) {
+            if (e && e.code === 'MODULE_NOT_FOUND') {
+              throw new Error(
+                  String(e.message) +
+                  ' — npm install into this working directory\'s ' +
+                  'node_modules (require resolves from cwd), or pass ' +
+                  'create(node=...) for a different Node');
+            }
+            throw e;
+          }
+          break;
+        case 'import':
+          try {
+            r = await import(req.name);
+          } catch (e) {
+            const msg = String(e && e.message !== undefined ? e.message : e);
+            if (/Cannot find module|ERR_MODULE_NOT_FOUND/i.test(msg)) {
+              throw new Error(
+                  msg +
+                  ' — install the package for this Node (cwd node_modules ' +
+                  'or a path import), or pass create(node=...)');
+            }
+            throw e;
+          }
+          break;
         case 'eval': r = (0, eval)(req.src); break;
         case 'get': {
           const o = getH(req.h);
