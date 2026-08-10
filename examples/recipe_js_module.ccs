@@ -50,4 +50,4 @@ static long long !>(CCError) Counter_bump_checked(Counter *self, long long by) {
  * each type under its snake-case name. */
 static const Counter seed = { .n = 100 };
 
-@comptime cc_js_export("Counter", &seed);
+@comptime cc_js_export("counter", "Counter", &seed);

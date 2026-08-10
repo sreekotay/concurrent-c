@@ -1942,7 +1942,7 @@ static CCJsVal !>(CCError) CcPython_create(CcPython *self, CCJs *js) {
     pthread_cond_init(&d->cv, NULL);
     d->arena = ar;
     {
-        CCResult_CCPy_CCPyError r = cc_py_new(&d->arena);
+        CCResult_CCPy_CCPyError r = cc_py_new(false, &d->arena);
         if (!r.ok) {
             /* The load layer's message names the actual refusal (a broken
              * VIRTUAL_ENV, a static libpython, a bad usePython target) —
@@ -2665,4 +2665,4 @@ static CCJsVal !>(CCError) CcPython_runtime_desc(CcPython *self, CCJs *js) {
 
 static const CcPython seed = { .ok = 1 };
 
-@comptime cc_js_export("CcPython", &seed);
+@comptime cc_js_export("cc_python", "CcPython", &seed);

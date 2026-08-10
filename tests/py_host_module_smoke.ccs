@@ -32,7 +32,7 @@ int main(void) {
     if (!a.valid()) return 1;
 
     if (!cc_py_available()) { puts("py_host_module_smoke: SKIP (no libpython)"); return 0; }
-    CCPy py = cc_py_new(&a) !>;
+    CCPy py = cc_py_new(false, &a) !>;
 
     /* Python calls CC, through the normal import machinery. */
     py.exec(@slice("import cc.host\n"

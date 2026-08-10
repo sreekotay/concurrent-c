@@ -20,14 +20,23 @@ int main(void) {
     if (!a.valid()) return 1;
 
     if (!cc_py_available()) { puts("py_isolated_interp_smoke: SKIP (no libpython)"); return 0; }
-    CCPy first = cc_py_new(&a) !>;
+    CCPy first = cc_py_new(false, &a) !>;
     if (first.isolated != 0) return 2; /* the process interpreter is shared */
     first.exec(@slice("marker = 'first'\n")) !>;
+
+    /* The reserved transport flag refuses by name — never a silent
+     * alias of the in-process form. */
+    {
+        CCResult_CCPy_CCPyError iso = cc_py_new(true, &a);
+        if (!iso.is_err() ||
+            strstr(iso.u.error.base.message, "not yet implemented") == NULL)
+            return 6;
+    }
 
     /* Not an availability question: libpython is loaded, and this asks
      * whether the runtime can make an ISOLATED interpreter — a per-call
      * failure the probe cannot see, so the Result stays long-form. */
-    CCResult_CCPy_CCPyError r2 = cc_py_new(&a);
+    CCResult_CCPy_CCPyError r2 = cc_py_new(false, &a);
     if (r2.is_err()) {
         puts("ok");
         return 0;

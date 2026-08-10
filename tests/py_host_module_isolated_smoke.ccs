@@ -16,11 +16,11 @@ int main(void) {
     if (!a.valid()) return 1;
 
     if (!cc_py_available()) { puts("py_host_module_isolated_smoke: SKIP (no libpython)"); return 0; }
-    CCPy p1 = cc_py_new(&a) !>;
+    CCPy p1 = cc_py_new(false, &a) !>;
 
     /* Not availability — whether THIS runtime can make a second, isolated
      * interpreter. The probe cannot answer that; the Result stays. */
-    CCResult_CCPy_CCPyError r2 = cc_py_new(&a);
+    CCResult_CCPy_CCPyError r2 = cc_py_new(false, &a);
     if (r2.is_err()) {
         puts("ok");   /* no isolated interpreter on this runtime */
         return 0;

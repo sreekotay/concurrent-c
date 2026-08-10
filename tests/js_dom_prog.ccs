@@ -1,0 +1,119 @@
+/* Isolated JS domains: a full node child per handle over the line-JSON
+ * wire (the same broker as concurrent-c-node).  Rungs prove the spawn
+ * handshake, scalar eval, per-domain state (two domains do not share),
+ * require + wire method calls through the dynamic sink, materialized
+ * strings, handle release + the stats ledger, wire errors as Results,
+ * crash isolation (one child dying closes ITS domain; the sibling and
+ * the process live on), articulate doors after close, and a refused
+ * spawn naming the missing executable. */
+#include <ccc/std/prelude.cch>
+#include <ccc/script/js.cch>
+
+int main(void) {
+    CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+
+    if (!cc_js_dom_available(true)) {
+        printf("SKIP (no node on PATH)\n");
+        return 0;
+    }
+
+    CCResult_CCJsDom_CCJsError mk = cc_js_new(true, &a);
+    if (!mk.ok) {
+        printf("new failed: %s\n", mk.u.error.base.message);
+        return 1;
+    }
+    CCJsDom iso = mk.u.value;
+    printf("new %s\n", iso.fd >= 0 ? "true" : "false");
+
+    CCResult_int64_t_CCJsError e42 = cc_js_dom_eval_i64(&iso, "6*7");
+    printf("eval_i64 %s\n", e42.ok && e42.u.value == 42 ? "true" : "false");
+
+    CCResult_void_CCJsError st = cc_js_dom_exec(&iso, "globalThis.x = 41");
+    CCResult_int64_t_CCJsError sx = cc_js_dom_eval_i64(&iso, "x + 1");
+    printf("state_persists %s\n",
+           st.ok && sx.ok && sx.u.value == 42 ? "true" : "false");
+
+    /* A second domain is a second node: state does not cross. */
+    CCResult_CCJsDom_CCJsError mk2 = cc_js_new(true, &a);
+    if (!mk2.ok) { printf("second new failed\n"); return 1; }
+    CCJsDom iso2 = mk2.u.value;
+    CCResult_int64_t_CCJsError other =
+        cc_js_dom_eval_i64(&iso2, "typeof globalThis.x === 'undefined' ? 1 : 0");
+    printf("domains_isolated %s\n",
+           other.ok && other.u.value == 1 ? "true" : "false");
+
+    /* require + the sink: os.platform() is get+call+release on the wire. */
+    CCResult_CCJsDomVal_CCJsError osr = cc_js_dom_require(&iso, "os");
+    if (!osr.ok) { printf("require failed\n"); return 1; }
+    CCJsDomVal os = osr.u.value;
+    printf("require_handle %s\n",
+           os.kind == CC__JS_DOM_K_HANDLE ? "true" : "false");
+    CCResult_CCJsDomVal_CCJsError plat = cc_js_dom_val_callm(&os, "platform", 0);
+    int plat_ok = 0;
+    if (plat.ok) {
+        CCResult_CCSlice_CCJsError ps = cc_js_dom_val_as_slice(&plat.u.value, &a);
+        plat_ok = ps.ok && ps.u.value.len >= 3;
+    }
+    printf("wire_method_call %s\n", plat_ok ? "true" : "false");
+
+    /* Arguments marshal by static type; the result extracts typed. */
+    CCResult_CCJsDomVal_CCJsError pathr = cc_js_dom_require(&iso, "path");
+    int join_ok = 0;
+    if (pathr.ok) {
+        CCJsDomVal path = pathr.u.value;
+        CCResult_CCJsDomVal_CCJsError j = cc_js_dom_val_callm(
+            &path, "join", 2, CC_JS_DOM_ARG("a"), CC_JS_DOM_ARG("b"));
+        if (j.ok) {
+            CCResult_CCSlice_CCJsError js = cc_js_dom_val_as_slice(&j.u.value, &a);
+            join_ok = js.ok && js.u.value.len == 3;
+        }
+        cc_js_dom_val_release(&path);
+    }
+    printf("args_marshal %s\n", join_ok ? "true" : "false");
+
+    /* Release shows in the child's ledger. */
+    CCResult_int64_t_CCJsError before = cc_js_dom_stats(&iso);
+    cc_js_dom_val_release(&os);
+    CCResult_int64_t_CCJsError after = cc_js_dom_stats(&iso);
+    printf("release_ledger %s\n",
+           before.ok && after.ok && after.u.value < before.u.value
+               ? "true" : "false");
+
+    /* A JS failure is a Result carrying the child's message. */
+    CCResult_int64_t_CCJsError bad = cc_js_dom_eval_i64(&iso2, "nope.nope");
+    printf("error_is_result %s\n",
+           !bad.ok && strstr(bad.u.error.base.message, "nope") ? "true"
+                                                               : "false");
+
+    /* Crash isolation: kill iso2's child mid-call; iso is untouched. */
+    CCResult_void_CCJsError boom = cc_js_dom_exec(&iso2, "process.exit(7)");
+    printf("crash_is_error %s\n",
+           !boom.ok && strstr(boom.u.error.base.message, "crashed") ? "true"
+                                                                    : "false");
+    CCResult_int64_t_CCJsError after_crash =
+        cc_js_dom_eval_i64(&iso2, "1");
+    printf("crashed_domain_closed %s\n", !after_crash.ok ? "true" : "false");
+    CCResult_int64_t_CCJsError sibling = cc_js_dom_eval_i64(&iso, "x + 1");
+    printf("sibling_survives %s\n",
+           sibling.ok && sibling.u.value == 42 ? "true" : "false");
+
+    /* Close is idempotent, and the doors after it say why they refuse. */
+    cc_js_dom_close(&iso);
+    cc_js_dom_close(&iso);
+    CCResult_int64_t_CCJsError closed = cc_js_dom_eval_i64(&iso, "1");
+    printf("closed_door_refuses %s\n",
+           !closed.ok && strstr(closed.u.error.base.message, "closed")
+               ? "true" : "false");
+    cc_js_dom_close(&iso2);
+
+    /* A spawn that cannot exec names the executable it tried. */
+    CCResult_CCJsDom_CCJsError bad_exe =
+        cc_js_new_exe(true, "definitely-not-a-node", &a);
+    printf("missing_exe_articulate %s\n",
+           !bad_exe.ok &&
+                   strstr(bad_exe.u.error.base.message, "definitely-not-a-node")
+               ? "true" : "false");
+
+    printf("clean_exit true\n");
+    return 0;
+}

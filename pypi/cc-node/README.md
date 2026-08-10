@@ -118,8 +118,8 @@ Run Python in your project, get your project's packages: `npm install`
 next to your program is the whole setup.
 
 (Writing Concurrent-C itself rather than Python?  There is a zero-IPC
-tier: `cc_js_host_new(&a)` boots libnode *inside* your CC program — see
-[`examples/recipe_js_host.ccs`](https://github.com/sreekotay/concurrent-c/blob/main/examples/recipe_js_host.ccs).)
+tier: `cc_js_new(false, &a)` boots libnode *inside* your CC program — see
+[`examples/js/jsdemo.shcc`](https://github.com/sreekotay/concurrent-c/blob/main/examples/js/jsdemo.shcc).)
 
 ## Publishing
 

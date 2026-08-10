@@ -1,0 +1,3 @@
+main_mutated true
+worker_sees_seed true
+worker_own_state true

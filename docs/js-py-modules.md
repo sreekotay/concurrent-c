@@ -37,7 +37,7 @@ extra binding.
 #!/usr/bin/env -S ./cc/bin/ccc
 #include <ccc/script/py.cch>
 
-CCPy py = cc_py_new(&a) !> @destroy;
+CCPy py = cc_py_new(false, &a) !> @destroy;
 
 CCPyObj math = py.import("math") !> @destroy;
 double v = math.sqrt(2.0) !>;
@@ -59,29 +59,34 @@ Probe with `cc_py_available()` when you want a clean skip without libpython.
 Costs for this door: [`perf/py_baseline.ccs`](../perf/py_baseline.ccs) ·
 [`perf/baselines/py_baseline_20260809.txt`](../perf/baselines/py_baseline_20260809.txt).
 
-**JavaScript** — same UFCS call surface, same lifetime rule, and CC can
-own the environment: `cc_js_host_new(&a) !> @destroy` boots a full Node
-(V8, libuv, npm modules) *inside* the process, and the handle owns it.
-A Node-API environment belongs to its event-loop thread, so the door is
-`host.run(fn, ctx)` — the closure runs on that thread with a live
-`CCJs`, where the guest surface holds unchanged, and
-`globalThis.__ccRequire` reaches anything `npm install` put in the
-working directory:
+**JavaScript** — same UFCS call surface, same lifetime rule, one
+constructor with the transport as the flag, mirroring
+`concurrent-c-python`'s `create()` / `create({isolated: true})`:
 
 ```c
-static void main_js(CCJs *js, void *ctx) {
-    double v = js->global()!>.get("Math")!>.sqrt(2.0) !>;
-    CCSlice s =
-        js->global()!>.__ccRequire("os")!>.platform()!>.as_slice(js->arena) !>;
-}
+CCJsDom js = cc_js_new(false, &a) !> @destroy;   /* in-process node   */
+CCJsDom js = cc_js_new(true,  &a) !> @destroy;   /* node child        */
 
-CCJsHost host = cc_js_host_new(&a) !> @destroy;
-host.run(main_js, NULL) !>;
+double v = js.eval("Math.sqrt(2)")!>.as_f64() !>;
+CCJsDomVal os = js.require("os") !> @destroy;
+CCSlice plat = os.platform()!>.as_slice(&a) !>;
+long long cpus = os.availableParallelism() !>;
 ```
 
+The flag at the call site is the boundary, because the crossing
+profiles differ: **hosted** (`false`) embeds a full Node — V8, libuv,
+npm modules — in your process (sub-µs ops; one per process, V8's rule;
+needs libnode-dev, first use compiles a small cached shim);
+**isolated** (`true`) spawns a `node` child per handle on the
+`concurrent-c-node` wire (~170µs/hop; N domains, separate heaps, crash
+isolation; needs only `node` on PATH).  Same ops, same materialization
+rules either way; `require` resolves against the working directory in
+both, so `npm install` next to your program is the whole setup.
+
 ```sh
-ccc examples/js/jsdemo.shcc           # pydemo's twin, hosted; needs libnode-dev
-ccc run examples/recipe_js_host.ccs   # fuller tour: state across runs, ~200ms warm open
+ccc examples/js/jsdemo.shcc               # pydemo's twin, hosted
+ccc run examples/recipe_js_isolated.ccs   # N domains + crash isolation, measured
+ccc run examples/recipe_js_host.ccs       # the raw loop-thread door (zero-overhead tier)
 ```
 
 Sources: [`examples/js/jsdemo.shcc`](../examples/js/jsdemo.shcc) ·
@@ -94,52 +99,71 @@ through the process bridge [`concurrent-c-node`](../pypi/cc-node).
 
 ## Module export — Node / Python own main
 
-Write a page of Concurrent-C, get a native module for either ecosystem —
-or both from the same file:
+Write a page of Concurrent-C, get native modules for either ecosystem —
+or both from the same file, several classes at a time:
 
 ```c
 #include <ccc/script/py.cch>
 #include <ccc/script/js.cch>
 
 typedef struct Counter { long long n; } Counter;
-
 static long long Counter_bump(Counter *self, long long by = 1) {
-    self->n += by;
-    return self->n;
+    return self->n += by;
 }
 
-static const Counter seed = { .n = 0 };
+typedef struct Stats { double sum; long long n; } Stats;
+static void Stats_add(Stats *self, double x) { self->sum += x; self->n++; }
+static double Stats_mean(Stats *self) {
+    return self->n ? self->sum / (double)self->n : 0;
+}
 
-@comptime cc_py_export("Counter", &seed);   // → bin/counter.abi3.so
-@comptime cc_js_export("Counter", &seed);   // → bin/counter.node
+static const Counter cseed = { .n = 0 };
+static const Stats sseed = { 0 };
+
+@comptime cc_py_export("counters", "Counter", &cseed);
+@comptime cc_py_export("counters", "Stats",   &sseed);
+@comptime cc_js_export("counters", "Counter", &cseed);
+@comptime cc_js_export("counters", "Stats",   &sseed);
 ```
 
 Build (one line):
 
 ```sh
-ccc build counter.ccs        # → bin/counter.node + bin/counter.abi3.so
+ccc build counters.ccs   # → bin/counters.node + bin/counters.abi3.so (same bytes)
 ```
 
-Use in JavaScript:
+Use in JavaScript — one `require`, each class namespaced under its
+snake-case name (a single-export module stays flat):
 
 ```js
-const counter = require('./bin/counter.node');
+const m = require('./bin/counters.node');
 
-counter.bump(4);          // 4
-counter.bump({ by: 2 });  // 6 — a trailing object binds arguments by name
+m.counter.bump(4);          // 4
+m.counter.bump({ by: 2 });  // 6 — a trailing object binds arguments by name
+m.stats.add(3); m.stats.add(5);
+m.stats.mean();             // 4
 ```
 
-Use in Python:
+Use in Python — same shape, `import` the module, classes namespaced
+inside (a single-class module stays flat there too):
 
 ```python
-import counter            # bin/ on PYTHONPATH
+import counters           # bin/ on PYTHONPATH
 
-counter.bump(4)           # 4
-counter.bump(by=2)        # 6 — real keyword arguments
+counters.counter.bump(4)      # 4
+counters.counter.bump(by=2)   # 6 — real keyword arguments
+counters.stats.add(3); counters.stats.add(5)
+counters.stats.mean()         # 4.0
 ```
 
-No flag says "module": the TU exports a type and defines no `main`, so
-the build links a shared object, and the export names the artifact.
+No flag says "module": the TU exports types and defines no `main`, so
+the build links a shared object.  The module name is the directive's
+first argument, always explicit — never a file name or declaration
+order.  A TU may publish SEVERAL modules (different first arguments):
+all of them live in one build, and the loaded name selects the module
+— the `PyInit_<name>` entry symbol on the Python side, the required
+basename on the JS side.  Each registration copies the seed into a
+fresh instance, so two modules sharing a class never share state.
 What you get, measured (4-vCPU x86-64, node 22 / python 3.11):
 
 | | |
@@ -171,6 +195,21 @@ from C:
 - A fallible method (`!>(CCError)`) crosses as the exception the error
   KIND maps to — `CC_ERR_INVALID_ARG` is a `TypeError` in JS and a
   `ValueError` in Python — message intact, `code` carrying the kind.
+
+**Instances and threads** (the contract, so you don't have to guess):
+the state is one `T` **per realm**, not per process — every Node
+`worker_thread` that requires the module gets a fresh `T` (freed with
+its environment), and every Python subinterpreter gets its own module
+instance.  Within a realm you are never entered concurrently: a Node
+environment runs JS on one thread, and the Python trampolines hold the
+GIL for the whole call, so calls on one `T` serialize — each call is
+atomic with respect to the others.  What remains yours: C globals you
+share across realms, and threads you start inside a call that touch
+`T` (or a `double[:]` borrow — the lease is exactly the call) after
+the call returns.  Free-threaded (no-GIL) CPython is out of scope.
+Multiple independent instances inside one realm is not a module-export
+story today — your `T` holds them (handle-passing), the same way a C
+library would.
 
 ## Buffers are zero-copy borrows
 

@@ -1,0 +1,82 @@
+/* Multiclass × multi-module × dual-target, one TU.  Proves the whole
+ * contract: JS namespaces the "counters" group under one require while
+ * "solo_stats" (one class) stays flat; Python mirrors both shapes
+ * (import counters → counters.counter / counters.stats; import
+ * solo_stats → flat); the loaded name selects the module and a wrong
+ * name refuses listing what the artifact holds; symbol-selected names
+ * hardlink while basename-selected extras are real copies (dlopen
+ * dedupes by inode); groups never share instances. */
+CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+
+{
+    CCCommand which = cc_command(&a, @slice("sh"));
+    which.arg("-c");
+    which.arg("command -v node >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1");
+    int rc = which.status() !>;
+    if (rc != 0) { "SKIP (need node + python3)".println() !>; return 0; }
+}
+
+{
+    CCCommand build = cc_command(&a, @slice("./cc/bin/ccc"));
+    build.arg("build");
+    build.arg("tests/dual_multi_export_mod.ccs");
+    build.inherit_stdio();
+    int rc = build.status() !>;
+    if (rc != 0) { "build failed".println() !>; return 1; }
+}
+
+{
+    CCCommand run = cc_command(&a, @slice("sh"));
+    run.arg("-c");
+    CCString js = @string(`node -e "
+const m = require(process.cwd() + '/bin/counters.node');
+console.log('namespaces', Object.keys(m).sort().join(','));
+console.log('bump_seeded', m.counter.bump(4));
+console.log('bump_default', m.counter.bump());
+m.stats.add(3); m.stats.add(5);
+console.log('mean', m.stats.mean());
+const solo = require(process.cwd() + '/bin/solo_stats.node');
+console.log('solo_flat', typeof solo.mean === 'function');
+solo.add(10);
+console.log('solo_independent', solo.mean() === 10 && m.stats.mean() === 4);
+"`, &a);
+    run.arg(js.cstr(&a));
+    run.inherit_stdio();
+    int rc = run.status() !>;
+    if (rc != 0) { "node run failed".println() !>; return 1; }
+}
+
+{
+    CCCommand run = cc_command(&a, @slice("sh"));
+    run.arg("-c");
+    run.arg("cd bin && python3 -c \""
+            "import counters, solo_stats, os\n"
+            "print('py_bump_seeded', counters.counter.bump(4))\n"
+            "counters.stats.add(3); counters.stats.add(5)\n"
+            "print('py_mean', counters.stats.mean())\n"
+            "solo_stats.add(10)\n"
+            "print('py_solo_independent', solo_stats.mean() == 10 and counters.stats.mean() == 4)\n"
+            "print('hardlinked', os.stat('counters.abi3.so').st_ino == os.stat('counters.node').st_ino "
+            "== os.stat('solo_stats.abi3.so').st_ino)\n"
+            "print('solo_node_distinct', os.stat('solo_stats.node').st_ino != os.stat('counters.node').st_ino)\n"
+            "\"");
+    run.inherit_stdio();
+    int rc = run.status() !>;
+    if (rc != 0) { "python run failed".println() !>; return 1; }
+}
+
+{
+    /* A name that is none of the artifact's modules refuses, naming
+     * what it holds — never a guessed registration. */
+    CCCommand run = cc_command(&a, @slice("sh"));
+    run.arg("-c");
+    run.arg("cp bin/counters.node bin/impostor.node && "
+            "node -e \"try { require(process.cwd() + '/bin/impostor.node'); "
+            "console.log('wrong_name_refused', false); } catch (e) { "
+            "console.log('wrong_name_refused', /holds 2 modules/.test(e.message)); }\"; "
+            "rm -f bin/impostor.node");
+    run.inherit_stdio();
+    int rc = run.status() !>;
+    if (rc != 0) { "impostor run failed".println() !>; return 1; }
+}
+return 0;

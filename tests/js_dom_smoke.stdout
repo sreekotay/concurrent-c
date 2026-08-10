@@ -1,0 +1,16 @@
+new true
+eval_i64 true
+state_persists true
+domains_isolated true
+require_handle true
+wire_method_call true
+args_marshal true
+release_ledger true
+error_is_result true
+crash_is_error true
+crashed_domain_closed true
+sibling_survives true
+closed_door_refuses true
+missing_exe_articulate true
+clean_exit true
+broker_parity true

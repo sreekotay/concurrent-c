@@ -3,7 +3,7 @@
  * the handle's scratch arena. */
 #include <ccc/script/py.cch>
 
-CCPy py = cc_py_new(&a) !> @destroy;
+CCPy py = cc_py_new(false, &a) !> @destroy;
 CCPyObj b = py.import("builtins") !> @destroy;
 
 int64_t n = b.int("notanum") !>(e) {

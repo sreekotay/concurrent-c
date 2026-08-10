@@ -15,5 +15,5 @@ static long long DualGauge_bump(DualGauge *self, long long by = 1) {
 
 static const DualGauge seed = { .n = 7 };
 
-@comptime cc_py_export("DualGauge", &seed);
-@comptime cc_js_export("DualGauge", &seed);
+@comptime cc_py_export("dual_gauge", "DualGauge", &seed);
+@comptime cc_js_export("dual_gauge", "DualGauge", &seed);

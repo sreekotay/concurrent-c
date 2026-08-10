@@ -1,0 +1,35 @@
+/* The unified domain's hosted transport: builds and runs
+ * tests/js_dom_hosted_prog.ccs — cc_js_new(&a, false) embedding libnode
+ * behind the same ops the isolated tier serves.  Skips where the node
+ * dev headers, a C++ compiler, or libnode are absent. */
+CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+
+{
+    CCCommand which = cc_command(&a, @slice("sh"));
+    which.arg("-c");
+    which.arg("{ test -e /usr/include/node/node.h"
+              " || test -e /usr/local/include/node/node.h"
+              " || test -n \"$CC_NODE_INCLUDE\"; }"
+              " && command -v c++ >/dev/null 2>&1"
+              " && { ldconfig -p 2>/dev/null | grep -q libnode"
+              " || test -n \"$CC_LIBNODE\"; }");
+    int rc = which.status() !>;
+    if (rc != 0) { "SKIP (need libnode-dev + c++)".println() !>; return 0; }
+}
+
+{
+    CCCommand build = cc_command(&a, @slice("./cc/bin/ccc"));
+    build.arg("build");
+    build.arg("tests/js_dom_hosted_prog.ccs");
+    build.inherit_stdio();
+    int rc = build.status() !>;
+    if (rc != 0) { "build failed".println() !>; return 1; }
+}
+
+{
+    CCCommand run = cc_command(&a, @slice("./bin/js_dom_hosted_prog"));
+    run.inherit_stdio();
+    int rc = run.status() !>;
+    if (rc != 0) { "hosted dom run failed".println() !>; return 1; }
+}
+return 0;

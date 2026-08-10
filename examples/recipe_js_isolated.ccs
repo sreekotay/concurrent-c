@@ -1,0 +1,71 @@
+/*
+ * Recipe: isolated JS domains — N nodes from one CC program
+ *
+ *     ccc run examples/recipe_js_isolated.ccs      # needs node on PATH
+ *
+ * The third JS tier, behind an explicit boundary because the crossing
+ * profile is different: hosted libnode (recipe_js_host.ccs) is
+ * in-process and once-per-process; an ISOLATED domain is a spawned
+ * `node` child on a line-JSON wire — wire latency per hop, but as many
+ * domains as you like, each with its own heap, its own event loop, and
+ * crash isolation.  Same broker, same rules as the Python package
+ * `concurrent-c-node`.
+ *
+ * Which node runs is ambient-first: cc_js_new_exe(true, exe, &a) > CC_NODE_BIN
+ * > `node` on PATH; which packages it sees is the working directory's
+ * node_modules — `npm install` next to your program is the whole setup.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/script/js.cch>
+#include <time.h>
+
+static double now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1e3 + (double)ts.tv_nsec / 1e6;
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
+
+    CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+
+    if (!cc_js_dom_available(true)) {
+        puts("SKIP (no node on PATH)");
+        return 0;
+    }
+
+    /* Two domains are two nodes: separate heaps, separate state. */
+    CCJsDom A = cc_js_new(true, &a) !> @destroy;
+    CCJsDom B = cc_js_new(true, &a) !> @destroy;
+    A.exec("globalThis.who = 'A'") !>;
+    B.exec("globalThis.who = 'B'") !>;
+    CCSlice wa = A.eval("who")!>.as_slice(&a) !>;
+    CCSlice wb = B.eval("who")!>.as_slice(&a) !>;
+    printf("domain A says %.*s, domain B says %.*s\n",
+           (int)wa.len, (const char *)wa.ptr, (int)wb.len,
+           (const char *)wb.ptr);
+
+    /* Real modules through the sink: get+call over the wire. */
+    CCJsDomVal os = A.require("os") !> @destroy;
+    CCSlice plat = os.platform()!>.as_slice(&a) !>;
+    long long cpus = os.availableParallelism() !>;
+    printf("os.platform() = %.*s, %lld cpus\n", (int)plat.len,
+           (const char *)plat.ptr, cpus);
+
+    /* The crossing profile, measured — this is why the tier is a
+     * separate, explicit door. */
+    {
+        enum { N = 2000 };
+        double t0 = now_ms();
+        for (int i = 0; i < N; i++) (void)A.eval_i64("1");
+        double per = (now_ms() - t0) * 1000.0 / N;
+        printf("wire round-trip: %.0f us/hop (in-process hosted tier: sub-us)\n",
+               per);
+    }
+
+    return 0;
+}

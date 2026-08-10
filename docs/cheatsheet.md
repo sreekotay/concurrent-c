@@ -333,8 +333,8 @@ ccc build --build-file path/build.cc
 **One file → native modules** (no `main` + export): [js-py-modules.md](js-py-modules.md).
 
 ```c
-@comptime cc_py_export("Counter", &seed);   // → .abi3.so
-@comptime cc_js_export("Counter", &seed);   // → .node
+@comptime cc_py_export("counter", "Counter", &seed);   // → counter.abi3.so
+@comptime cc_js_export("counter", "Counter", &seed);   // → counter.node
 ```
 
 ```bash

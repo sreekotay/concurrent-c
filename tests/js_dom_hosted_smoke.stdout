@@ -1,0 +1,15 @@
+new true
+eval_num true
+eval_str true
+state_persists true
+require_handle true
+method_call true
+args_marshal true
+handle_roundtrip true
+release_ledger true
+promise_refused true
+error_is_result true
+second_hosted_refused true
+exe_on_hosted_refused true
+closed_door_refuses true
+clean_exit true

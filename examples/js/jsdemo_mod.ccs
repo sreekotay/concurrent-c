@@ -41,4 +41,4 @@ static long long !>(CCError) JsDemo_pid(JsDemo *self, CCJs *js) {
 
 static const JsDemo seed = { .dummy = 0 };
 
-@comptime cc_js_export("JsDemo", &seed);
+@comptime cc_js_export("js_demo", "JsDemo", &seed);

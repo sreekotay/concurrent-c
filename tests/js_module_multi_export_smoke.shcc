@@ -1,8 +1,7 @@
 /* Aggregated export directives: two `@comptime cc_js_export(...)` sites
  * in one TU become one registration, each type namespaced under its
- * snake-case name, the artifact named by the first export
- * (PairCounter → bin/pair_counter.node).  The module is
- * js_module_multi_export_mod.ccs. */
+ * snake-case name, the artifact named by the MODULE — the directive's explicit
+ * first argument ("pair") — never by a class or a file name. */
 CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 
 {
@@ -26,7 +25,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
     CCCommand run = cc_command(&a, @slice("sh"));
     run.arg("-c");
     CCString js = @string(`node -e "
-const m = require(process.cwd() + '/bin/pair_counter.node');
+const m = require(process.cwd() + '/bin/pair.node');
 console.log('namespaces', Object.keys(m).sort().join(','));
 console.log('bump', m.pair_counter.bump(4));
 console.log('bump_default', m.pair_counter.bump());

@@ -30,13 +30,16 @@
 #define CC_SCRIPT_JS_H
 
 #include <dlfcn.h>
+#include <errno.h>
 #include <limits.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <ccc/cc_arena.cch>
@@ -69,9 +72,15 @@ CC_MODULE_ENTRY("napi_register_module_v1", ".node", "js_module")
 #define CC_MODULE_EXPORT(...)
 #endif
 CC_MODULE_EXPORT(cc_js_export,
-    "void *napi_register_module_v1(CCJsEnv cc__env, CCJsExports cc__exports) {\n"
+    "$groups{static void *cc__js_grp_$module(void *cc__env, void *cc__exports) {\n"
     "$each{    js_module::[$T](cc__env, cc__js_exports_ns(cc__env, cc__exports, \"$name\", $count), $seed);\n}"
     "    return cc__exports;\n"
+    "}\n}"
+    "void *napi_register_module_v1(CCJsEnv cc__env, CCJsExports cc__exports) {\n"
+    "    static const CC__JsGroupEnt cc__g[] = {\n"
+    "$groups{        { \"$module\", cc__js_grp_$module },\n}"
+    "    };\n"
+    "    return cc__js_register_groups(cc__env, cc__exports, cc__g, (int)(sizeof(cc__g)/sizeof(cc__g[0])));\n"
     "}\n")
 
 /* The entry-point contract, typed: Node-API spells both as napi's own
@@ -466,6 +475,73 @@ static inline void *cc__js_scratch(size_t n) {
 static void *cc__js_fail(void *env, const char *msg) {
     if (cc__js.ThrowError) cc__js.ThrowError(env, NULL, msg);
     return NULL;
+}
+
+/* ---- module groups ----
+ *
+ * A TU may publish SEVERAL modules (cc_js_export's first argument); all
+ * of them live in one shared object, hardlinked under each module's
+ * name.  Node-API has one entry symbol, so the name the artifact was
+ * LOADED under selects the group — the same principle that lets the
+ * Python side select by PyInit_<name>.  dladdr answers "which filename
+ * was I dlopened as"; it is resolved dynamically (its own header guard
+ * fights portability more than the symbol does).  One group needs no
+ * lookup; an unmatched name refuses listing what the artifact holds. */
+typedef struct CC__JsGroupEnt {
+    const char *name;
+    void *(*fn)(void *env, void *exports);
+} CC__JsGroupEnt;
+
+typedef struct CC__JsDlInfo {
+    const char *fname;
+    void *fbase;
+    const char *sname;
+    void *saddr;
+} CC__JsDlInfo;
+
+static void *cc__js_register_groups(void *env, void *exports,
+                                    const CC__JsGroupEnt *g, int n) {
+    int (*dladdr_f)(const void *, CC__JsDlInfo *) = NULL;
+    CC__JsDlInfo di;
+    const char *base = NULL;
+    char stem[128];
+    int i;
+    if (n <= 0) return exports;
+    /* First code in the entry: the table loads here so the refusal path
+     * below can THROW — a group fn would load it, but only after this
+     * dispatch has already decided. */
+    if (cc__js_load() != 0) return NULL;
+    if (n == 1) return g[0].fn(env, exports);
+    {
+        void *self = dlopen(NULL, RTLD_NOW | RTLD_GLOBAL);
+        if (self) {
+            *(void **)&dladdr_f = dlsym(self, "dladdr");
+            dlclose(self);
+        }
+    }
+    memset(&di, 0, sizeof(di));
+    if (dladdr_f &&
+        dladdr_f((const void *)(uintptr_t)g[0].fn, &di) != 0 && di.fname) {
+        const char *slash = strrchr(di.fname, '/');
+        base = slash ? slash + 1 : di.fname;
+    }
+    if (base) {
+        char *dot;
+        snprintf(stem, sizeof(stem), "%.120s", base);
+        dot = strchr(stem, '.');
+        if (dot) *dot = 0;
+        for (i = 0; i < n; i++)
+            if (strcmp(g[i].name, stem) == 0) return g[i].fn(env, exports);
+    }
+    {
+        char msg[300];
+        snprintf(msg, sizeof(msg),
+                 "cc: this artifact holds %d modules (%.60s, %.60s%s) and "
+                 "was loaded as '%.80s' — load it under a module's own name",
+                 n, g[0].name, g[1].name, n > 2 ? ", …" : "",
+                 base ? base : "<unknown>");
+        return cc__js_fail(env, msg);
+    }
 }
 
 /* Aggregated registration (see CC_MODULE_EXPORT above): with one
@@ -3309,6 +3385,1946 @@ static inline void cc_js_host_close(CCJsHost *host) {
     cc__js_host_torn = 1;
 }
 
+/* ---- domains: one handle, two transports ----
+ *
+ *     CCJsDom js = cc_js_new(false, &a) !> @destroy;  // in-process node
+ *     CCJsDom js = cc_js_new(true, &a)  !> @destroy;  // node child
+ *     CCJsDomVal os = js.require("os") !> @destroy;
+ *     CCSlice plat = os.platform()!>.as_slice(&a) !>;
+ *
+ * Same ops either way — require/eval/exec, vals, chains, the dynamic
+ * sink — and the flag at the call site is the boundary, because the
+ * crossing profiles differ.  HOSTED (false) embeds libnode: sub-µs
+ * ops posted onto the loop thread, one per process (V8's rule).
+ * ISOLATED (true) spawns a `node` child speaking line-JSON over a
+ * socketpair — wire latency per hop, but N domains per process,
+ * per-domain node binaries, and crash isolation (a child dying fails
+ * ITS calls; the process and every other domain survive).
+ *
+ * The materialization rules are the wire's rules, both transports:
+ * plain scalars (finite numbers, strings, booleans, null) cross by
+ * value, everything else is a domain-owned handle, attribute access is
+ * property lookup, non-finite floats cross tagged.  One divergence,
+ * loud: the child awaits thenables before replying; the hosted tier
+ * cannot block its own loop and refuses a Promise result by name.
+ *
+ * The isolated child runs the embedded broker (the same source as
+ * pypi/cc-node/cc_node/broker.cjs — a parity rung keeps the two
+ * identical), written once to the cache directory.  Which node runs is
+ * ambient-first: `cc_js_new_exe(true, exe, &a)` > `CC_NODE_BIN` >
+ * `node` on PATH — and which packages it sees is the working
+ * directory's node_modules, exactly as node itself resolves there.
+ *
+ * Not yet on the wire, each refusing by name at the call: typed-array
+ * arguments/results, and JS→CC callbacks. */
+
+static const char cc__js_dom_broker_text[] =
+    "#!/usr/bin/env node\n"
+    "/* cc-node broker: the Node end of Python's JS bridge.\n"
+    " *\n"
+    " * Line-delimited JSON over stdio, strict request/response.  Handles are\n"
+    " * integers into one table; results follow the bridge materialization\n"
+    " * rule — plain data (finite numbers, strings, booleans, null, arrays\n"
+    " * and plain objects of the same) crosses as a value, everything else\n"
+    " * stays a handle.  A thenable result is awaited before the reply, so\n"
+    " * async package APIs need nothing special from the Python side.  A\n"
+    " * Python callable crosses as {$f: id}; invoking it sends a nested `cb`\n"
+    " * request and BLOCKS on a synchronous read for the answer — legal\n"
+    " * because the protocol is strictly alternating, so nothing else can be\n"
+    " * in flight.  stdin EOF is the host vanishing: exit.\n"
+    " *\n"
+    " * cc/include/ccc/script/js.cch embeds this file verbatim (the CC\n"
+    " * isolated tier speaks the same wire); js_iso_smoke pins the two\n"
+    " * byte-identical, so an edit here must land there too. */\n"
+    "'use strict';\n"
+    "\n"
+    "const fs = require('fs');\n"
+    "const { createRequire } = require('module');\n"
+    "\n"
+    "/* Resolve packages from the HOST's cwd — `npm install lodash` next to\n"
+    " * your Python program is the point. */\n"
+    "const requireCwd = createRequire(process.cwd() + '/');\n"
+    "\n"
+    "/* ---- one buffered reader over fd 0, sync and async ---- */\n"
+    "const rbuf = { data: Buffer.alloc(0) };\n"
+    "\n"
+    "function takeLine() {\n"
+    "  const i = rbuf.data.indexOf(10);\n"
+    "  if (i < 0) return null;\n"
+    "  const line = rbuf.data.subarray(0, i).toString('utf8');\n"
+    "  rbuf.data = rbuf.data.subarray(i + 1);\n"
+    "  return line;\n"
+    "}\n"
+    "\n"
+    "function readLineSync() {\n"
+    "  for (;;) {\n"
+    "    const l = takeLine();\n"
+    "    if (l !== null) return l;\n"
+    "    const chunk = Buffer.alloc(65536);\n"
+    "    let n = 0;\n"
+    "    try {\n"
+    "      n = fs.readSync(0, chunk, 0, chunk.length, null);\n"
+    "    } catch (e) {\n"
+    "      if (e.code === 'EAGAIN') continue;\n"
+    "      if (e.code === 'EOF') return null;\n"
+    "      throw e;\n"
+    "    }\n"
+    "    if (n === 0) return null;\n"
+    "    rbuf.data = Buffer.concat([rbuf.data, chunk.subarray(0, n)]);\n"
+    "  }\n"
+    "}\n"
+    "\n"
+    "function readLineAsync() {\n"
+    "  const l = takeLine();\n"
+    "  if (l !== null) return Promise.resolve(l);\n"
+    "  return new Promise((resolve, reject) => {\n"
+    "    const chunk = Buffer.alloc(65536);\n"
+    "    fs.read(0, chunk, 0, chunk.length, null, (err, n) => {\n"
+    "      if (err) return err.code === 'EOF' ? resolve(null) : reject(err);\n"
+    "      if (n === 0) return resolve(null);\n"
+    "      rbuf.data = Buffer.concat([rbuf.data, chunk.subarray(0, n)]);\n"
+    "      resolve(readLineAsync());\n"
+    "    });\n"
+    "  });\n"
+    "}\n"
+    "\n"
+    "function send(obj) {\n"
+    "  fs.writeSync(1, JSON.stringify(obj) + '\\n');\n"
+    "}\n"
+    "\n"
+    "/* ---- handles + materialization ---- */\n"
+    "const handles = new Map();\n"
+    "let nextH = 1;\n"
+    "const put = (v) => {\n"
+    "  const id = nextH++;\n"
+    "  handles.set(id, v);\n"
+    "  return id;\n"
+    "};\n"
+    "const getH = (id) => {\n"
+    "  if (!handles.has(id)) throw new Error('cc-node: unknown or released handle');\n"
+    "  return handles.get(id);\n"
+    "};\n"
+    "\n"
+    "/* Plain data crosses by value; non-finite numbers are NOT plain (JSON\n"
+    " * would silently null them — they go as tagged scalars or handles). */\n"
+    "function isPlain(v, depth) {\n"
+    "  if (depth > 16) return false;\n"
+    "  if (v === null) return true;\n"
+    "  const t = typeof v;\n"
+    "  if (t === 'number') return Number.isFinite(v);\n"
+    "  if (t === 'string' || t === 'boolean') return true;\n"
+    "  if (t !== 'object') return false;\n"
+    "  const proto = Object.getPrototypeOf(v);\n"
+    "  if (Array.isArray(v)) return v.every((x) => isPlain(x, depth + 1));\n"
+    "  if (proto === Object.prototype || proto === null)\n"
+    "    return Object.values(v).every((x) => isPlain(x, depth + 1));\n"
+    "  return false;\n"
+    "}\n"
+    "\n"
+    "/* Typed buffers cross as tagged bytes: small inline as base64, big\n"
+    " * through the shared-memory spill (one memcpy per side; the receiver\n"
+    " * consumes-and-unlinks).  Same discipline as cc-python's wire. */\n"
+    "const TA_KIND = new Map([\n"
+    "  [Float64Array, 'f64'], [Float32Array, 'f32'],\n"
+    "  [Int32Array, 'i32'], [BigInt64Array, 'i64'], [Uint8Array, 'u8'],\n"
+    "]);\n"
+    "const TA_CTOR = {\n"
+    "  f64: Float64Array, f32: Float32Array,\n"
+    "  i32: Int32Array, i64: BigInt64Array, u8: Uint8Array,\n"
+    "};\n"
+    "const SHM_SPILL = 1 << 16;\n"
+    "const SHM_DIR = process.env.CC_NODE_SHM_DIR ||\n"
+    "                (fs.existsSync('/dev/shm') ? '/dev/shm'\n"
+    "                                           : require('os').tmpdir());\n"
+    "let shmSeq = 0;\n"
+    "\n"
+    "function encodeBuffer(kind, buf) {\n"
+    "  if (buf.byteLength > SHM_SPILL) {\n"
+    "    const p = require('path').join(\n"
+    "        SHM_DIR, 'ccnode-' + process.pid + '-' + (++shmSeq));\n"
+    "    fs.writeFileSync(p, buf);\n"
+    "    return { shm: p, t: kind };\n"
+    "  }\n"
+    "  return { ta: kind, b64: buf.toString('base64') };\n"
+    "}\n"
+    "\n"
+    "function encodeResult(v) {\n"
+    "  if (v === undefined) return { u: 1 };\n"
+    "  if (typeof v === 'number' && !Number.isFinite(v))\n"
+    "    return { nf: Number.isNaN(v) ? 'nan' : v > 0 ? 'inf' : '-inf' };\n"
+    "  if (v !== null && typeof v === 'object') {\n"
+    "    const kind = TA_KIND.get(v.constructor);\n"
+    "    if (kind)\n"
+    "      return encodeBuffer(kind,\n"
+    "                          Buffer.from(v.buffer, v.byteOffset, v.byteLength));\n"
+    "    if (Buffer.isBuffer(v)) return encodeBuffer('u8', v);\n"
+    "  }\n"
+    "  if (v === null || isPlain(v, 0)) return { v };\n"
+    "  return { h: put(v) };\n"
+    "}\n"
+    "\n"
+    "/* ---- Python callables ---- */\n"
+    "let nextCbId = 1;\n"
+    "\n"
+    "function makeCallback(fid) {\n"
+    "  const f = (...args) => {\n"
+    "    const cbid = nextCbId++;\n"
+    "    send({ cb: fid, cbid, args: args.map(encodeResult) });\n"
+    "    const line = readLineSync();\n"
+    "    if (line === null) throw new Error('cc-node: host went away');\n"
+    "    const m = JSON.parse(line);\n"
+    "    if (m.cbr !== cbid)\n"
+    "      throw new Error('cc-node: protocol violation during callback');\n"
+    "    if (m.e !== undefined) throw new Error(m.e);\n"
+    "    return decodeVal(m.v);\n"
+    "  };\n"
+    "  return f;\n"
+    "}\n"
+    "\n"
+    "function decodeVal(a) {\n"
+    "  if (a && typeof a === 'object') {\n"
+    "    if (a.$h !== undefined) return getH(a.$h);\n"
+    "    if (a.$f !== undefined) return makeCallback(a.$f);\n"
+    "    if (a.$nf !== undefined)\n"
+    "      return a.$nf === 'nan' ? NaN : a.$nf === 'inf' ? Infinity : -Infinity;\n"
+    "    if (a.$ta !== undefined || a.$shm !== undefined) {\n"
+    "      let buf;\n"
+    "      if (a.$shm !== undefined) {\n"
+    "        buf = fs.readFileSync(a.$shm);\n"
+    "        try { fs.unlinkSync(a.$shm); } catch (e) { /* consumed */ }\n"
+    "      } else {\n"
+    "        buf = Buffer.from(a.b64, 'base64');\n"
+    "      }\n"
+    "      const C = TA_CTOR[a.t !== undefined ? a.t : a.$ta];\n"
+    "      return new C(buf.buffer, buf.byteOffset,\n"
+    "                   buf.byteLength / C.BYTES_PER_ELEMENT);\n"
+    "    }\n"
+    "    if (Array.isArray(a)) return a.map(decodeVal);\n"
+    "    const o = {};\n"
+    "    for (const k of Object.keys(a)) o[k] = decodeVal(a[k]);\n"
+    "    return o;\n"
+    "  }\n"
+    "  return a;\n"
+    "}\n"
+    "\n"
+    "/* ---- dispatch ---- */\n"
+    "async function main() {\n"
+    "  for (;;) {\n"
+    "    const line = await readLineAsync();\n"
+    "    if (line === null) process.exit(0);\n"
+    "    let req;\n"
+    "    try {\n"
+    "      req = JSON.parse(line);\n"
+    "    } catch {\n"
+    "      continue;\n"
+    "    }\n"
+    "    const id = req.id;\n"
+    "    try {\n"
+    "      let r;\n"
+    "      switch (req.op) {\n"
+    "        case 'require': r = requireCwd(req.name); break;\n"
+    "        case 'import': r = await import(req.name); break;\n"
+    "        case 'eval': r = (0, eval)(req.src); break;\n"
+    "        case 'get': {\n"
+    "          const o = getH(req.h);\n"
+    "          const v = o[req.name];\n"
+    "          r = typeof v === 'function' ? v.bind(o) : v;\n"
+    "          break;\n"
+    "        }\n"
+    "        case 'call': {\n"
+    "          const f = getH(req.h);\n"
+    "          if (typeof f !== 'function')\n"
+    "            throw new Error('cc-node: handle is not callable');\n"
+    "          r = f(...(req.args || []).map(decodeVal));\n"
+    "          break;\n"
+    "        }\n"
+    "        case 'str': r = String(getH(req.h)); break;\n"
+    "        case 'release': handles.delete(req.h); r = handles.size; break;\n"
+    "        case 'stats': r = handles.size; break;\n"
+    "        case 'close': send({ id, v: true }); process.exit(0); break;\n"
+    "        default: throw new Error('cc-node: unknown op ' + req.op);\n"
+    "      }\n"
+    "      if (r && typeof r.then === 'function') r = await r; /* async is free */\n"
+    "      send({ id, ...encodeResult(r) });\n"
+    "    } catch (e) {\n"
+    "      send({ id, e: String(e && e.message !== undefined ? e.message : e) });\n"
+    "    }\n"
+    "  }\n"
+    "}\n"
+    "\n"
+    "main();\n"
+;
+
+#define CC__JS_DOM_HOSTED   0
+#define CC__JS_DOM_ISOLATED 1
+
+typedef struct CCJsDom {
+    int tier;        /* CC__JS_DOM_HOSTED or CC__JS_DOM_ISOLATED */
+    int fd;          /* isolated: socketpair to the child; -1 when closed */
+    long long pid;   /* isolated: the node child */
+    int crashed;     /* isolated: EOF mid-conversation, the child died */
+    CCArena *arena;  /* error text + materialized values */
+    long long next_id;
+    /* isolated: line reassembly; rb_off is the span already handed out,
+     * reclaimed at the next read */
+    char *rb;
+    size_t rb_len, rb_cap, rb_off;
+    /* hosted: the embedded node this dom owns, plus its ref ledger */
+    CCJsHost host;
+    long long live_refs;
+} CCJsDom;
+
+
+/* A wire value: a domain-owned remote handle (kind 0), or a plain value
+ * already materialized on this side — so chains and typed extraction
+ * read the same as the in-process tiers. */
+#define CC__JS_DOM_K_HANDLE 0
+#define CC__JS_DOM_K_NUM    1
+#define CC__JS_DOM_K_STR    2
+#define CC__JS_DOM_K_BOOL   3
+#define CC__JS_DOM_K_NULL   4
+#define CC__JS_DOM_K_RAW    5 /* plain array/object: raw JSON text */
+
+typedef struct CCJsDomVal {
+    CCJsDom *dom;
+    int kind;
+    long long h;        /* kind 0, isolated: the child's handle id */
+    void *ref;          /* kind 0, hosted: a napi_ref owning the value */
+    double num;         /* kind 1 */
+    long long inum;     /* kind 1 when num_is_int */
+    int num_is_int;
+    int b;              /* kind 3 */
+    CCSlice text;       /* kind 2: the string; kind 5: raw JSON */
+} CCJsDomVal;
+
+#ifndef CCResult_CCJsDom_CCJsError_DEFINED
+#define CCResult_CCJsDom_CCJsError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCJsDom_CCJsError, CCJsDom, CCJsError)
+#endif
+#ifndef CCResult_CCJsDomVal_CCJsError_DEFINED
+#define CCResult_CCJsDomVal_CCJsError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCJsDomVal_CCJsError, CCJsDomVal, CCJsError)
+#endif
+
+/* ---- growable request buffer + JSON emission ---- */
+
+typedef struct CC__JsIsoBuf {
+    char *p;
+    size_t len, cap;
+    int oom;
+} CC__JsIsoBuf;
+
+static void cc__js_dom_bput(CC__JsIsoBuf *b, const char *s, size_t n) {
+    if (b->oom) return;
+    if (b->len + n + 1 > b->cap) {
+        size_t nc = b->cap ? b->cap * 2 : 256;
+        char *np;
+        while (nc < b->len + n + 1) nc *= 2;
+        np = (char *)realloc(b->p, nc);
+        if (!np) { b->oom = 1; return; }
+        b->p = np;
+        b->cap = nc;
+    }
+    memcpy(b->p + b->len, s, n);
+    b->len += n;
+    b->p[b->len] = 0;
+}
+
+static void cc__js_dom_bputs(CC__JsIsoBuf *b, const char *s) {
+    cc__js_dom_bput(b, s, strlen(s));
+}
+
+static void cc__js_dom_bnum_ll(CC__JsIsoBuf *b, long long v) {
+    char t[32];
+    snprintf(t, sizeof(t), "%lld", v);
+    cc__js_dom_bputs(b, t);
+}
+
+static void cc__js_dom_bnum_f(CC__JsIsoBuf *b, double v) {
+    char t[40];
+    /* Non-finite is NOT JSON: the wire tags it, mirroring the broker. */
+    if (v != v) { cc__js_dom_bputs(b, "{\"$nf\":\"nan\"}"); return; }
+    if (v > 1.7976931348623157e308) {
+        cc__js_dom_bputs(b, "{\"$nf\":\"inf\"}");
+        return;
+    }
+    if (v < -1.7976931348623157e308) {
+        cc__js_dom_bputs(b, "{\"$nf\":\"-inf\"}");
+        return;
+    }
+    snprintf(t, sizeof(t), "%.17g", v);
+    cc__js_dom_bputs(b, t);
+}
+
+static void cc__js_dom_bjson_str(CC__JsIsoBuf *b, const char *s, size_t n) {
+    size_t i;
+    cc__js_dom_bput(b, "\"", 1);
+    for (i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == '"' || c == '\\') {
+            char e[2] = {'\\', (char)c};
+            cc__js_dom_bput(b, e, 2);
+        } else if (c == '\n') cc__js_dom_bput(b, "\\n", 2);
+        else if (c == '\r') cc__js_dom_bput(b, "\\r", 2);
+        else if (c == '\t') cc__js_dom_bput(b, "\\t", 2);
+        else if (c < 0x20) {
+            char e[8];
+            snprintf(e, sizeof(e), "\\u%04x", (unsigned)c);
+            cc__js_dom_bputs(b, e);
+        } else {
+            cc__js_dom_bput(b, (const char *)&s[i], 1);
+        }
+    }
+    cc__js_dom_bput(b, "\"", 1);
+}
+
+/* ---- reply parsing (the broker's own JSON.stringify output) ---- */
+
+typedef struct CC__JsIsoResp {
+    long long id;
+    int has_id;
+    int has_e;
+    CCSlice e;
+    int has_cb;      /* child invoked a host callback: not on this wire */
+    int kind;        /* -1 absent, else CC__JS_DOM_K_* */
+    int undefined;   /* {u:1} */
+    int has_h;
+    long long h;
+    int has_ta;      /* typed-array/shm payload: not yet on this wire */
+    double num;
+    long long inum;
+    int num_is_int;
+    int b;
+    CCSlice text;
+} CC__JsIsoResp;
+
+static const char *cc__js_dom_ws(const char *p, const char *end) {
+    while (p < end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r'))
+        p++;
+    return p;
+}
+
+/* p at the opening quote; returns just past the closing quote. */
+static const char *cc__js_dom_scan_str(const char *p, const char *end) {
+    if (p >= end || *p != '"') return NULL;
+    p++;
+    while (p < end) {
+        if (*p == '\\') {
+            p += 2;
+            continue;
+        }
+        if (*p == '"') return p + 1;
+        p++;
+    }
+    return NULL;
+}
+
+/* Balanced scan of one JSON value. */
+static const char *cc__js_dom_scan_val(const char *p, const char *end) {
+    p = cc__js_dom_ws(p, end);
+    if (p >= end) return NULL;
+    if (*p == '"') return cc__js_dom_scan_str(p, end);
+    if (*p == '{' || *p == '[') {
+        char open = *p, close = open == '{' ? '}' : ']';
+        int depth = 0;
+        while (p < end) {
+            if (*p == '"') {
+                p = cc__js_dom_scan_str(p, end);
+                if (!p) return NULL;
+                continue;
+            }
+            if (*p == open) depth++;
+            else if (*p == close) {
+                depth--;
+                if (depth == 0) return p + 1;
+            }
+            p++;
+        }
+        return NULL;
+    }
+    /* number / true / false / null */
+    while (p < end && *p != ',' && *p != '}' && *p != ']' && *p != ' ' &&
+           *p != '\t' && *p != '\n' && *p != '\r')
+        p++;
+    return p;
+}
+
+static CCSlice cc__js_dom_copy(CCArena *a, const char *p, size_t n) {
+    CCSlice s;
+    char *dst;
+    s.ptr = NULL;
+    s.len = 0;
+    if (!a) return s;
+    dst = (char *)cc_arena_alloc(a, n + 1, 1);
+    if (!dst) return s;
+    memcpy(dst, p, n);
+    dst[n] = 0;
+    s.ptr = dst;
+    s.len = n;
+    return s;
+}
+
+/* Decode a scanned JSON string (quotes included) into the arena. */
+static int cc__js_dom_unescape(CCArena *a, const char *p, const char *end,
+                               CCSlice *out) {
+    char *dst;
+    size_t n = 0;
+    const char *q;
+    if (!a || p >= end || *p != '"') return -1;
+    /* Decoded text never exceeds the escaped span. */
+    dst = (char *)cc_arena_alloc(a, (size_t)(end - p) + 1, 1);
+    if (!dst) return -1;
+    q = p + 1;
+    while (q < end && *q != '"') {
+        if (*q != '\\') {
+            dst[n++] = *q++;
+            continue;
+        }
+        q++;
+        if (q >= end) return -1;
+        switch (*q) {
+        case '"': dst[n++] = '"'; q++; break;
+        case '\\': dst[n++] = '\\'; q++; break;
+        case '/': dst[n++] = '/'; q++; break;
+        case 'b': dst[n++] = '\b'; q++; break;
+        case 'f': dst[n++] = '\f'; q++; break;
+        case 'n': dst[n++] = '\n'; q++; break;
+        case 'r': dst[n++] = '\r'; q++; break;
+        case 't': dst[n++] = '\t'; q++; break;
+        case 'u': {
+            unsigned cp = 0;
+            int i;
+            q++;
+            if (end - q < 4) return -1;
+            for (i = 0; i < 4; i++) {
+                char c = q[i];
+                cp <<= 4;
+                if (c >= '0' && c <= '9') cp |= (unsigned)(c - '0');
+                else if (c >= 'a' && c <= 'f') cp |= (unsigned)(c - 'a' + 10);
+                else if (c >= 'A' && c <= 'F') cp |= (unsigned)(c - 'A' + 10);
+                else return -1;
+            }
+            q += 4;
+            if (cp >= 0xD800 && cp <= 0xDBFF && end - q >= 6 && q[0] == '\\' &&
+                q[1] == 'u') {
+                unsigned lo = 0;
+                for (i = 0; i < 4; i++) {
+                    char c = q[2 + i];
+                    lo <<= 4;
+                    if (c >= '0' && c <= '9') lo |= (unsigned)(c - '0');
+                    else if (c >= 'a' && c <= 'f')
+                        lo |= (unsigned)(c - 'a' + 10);
+                    else if (c >= 'A' && c <= 'F')
+                        lo |= (unsigned)(c - 'A' + 10);
+                    else return -1;
+                }
+                if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                    cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                    q += 6;
+                }
+            }
+            if (cp < 0x80) dst[n++] = (char)cp;
+            else if (cp < 0x800) {
+                dst[n++] = (char)(0xC0 | (cp >> 6));
+                dst[n++] = (char)(0x80 | (cp & 0x3F));
+            } else if (cp < 0x10000) {
+                dst[n++] = (char)(0xE0 | (cp >> 12));
+                dst[n++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                dst[n++] = (char)(0x80 | (cp & 0x3F));
+            } else {
+                dst[n++] = (char)(0xF0 | (cp >> 18));
+                dst[n++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+                dst[n++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                dst[n++] = (char)(0x80 | (cp & 0x3F));
+            }
+            break;
+        }
+        default: return -1;
+        }
+    }
+    if (q >= end) return -1;
+    dst[n] = 0;
+    out->ptr = dst;
+    out->len = n;
+    return 0;
+}
+
+/* Classify one JSON value span into the resp's value slots. */
+static int cc__js_dom_classify(CCArena *a, const char *p, const char *end,
+                               CC__JsIsoResp *r) {
+    p = cc__js_dom_ws(p, end);
+    if (p >= end) return -1;
+    if (*p == '"') {
+        r->kind = CC__JS_DOM_K_STR;
+        return cc__js_dom_unescape(a, p, end, &r->text);
+    }
+    if (*p == 't' || *p == 'f') {
+        r->kind = CC__JS_DOM_K_BOOL;
+        r->b = *p == 't';
+        return 0;
+    }
+    if (*p == 'n') {
+        r->kind = CC__JS_DOM_K_NULL;
+        return 0;
+    }
+    if (*p == '{' || *p == '[') {
+        r->kind = CC__JS_DOM_K_RAW;
+        r->text = cc__js_dom_copy(a, p, (size_t)(end - p));
+        return r->text.ptr ? 0 : -1;
+    }
+    {
+        char t[64];
+        char *tail = NULL;
+        size_t n = (size_t)(end - p);
+        long long iv;
+        if (n >= sizeof(t)) return -1;
+        memcpy(t, p, n);
+        t[n] = 0;
+        r->kind = CC__JS_DOM_K_NUM;
+        errno = 0;
+        iv = strtoll(t, &tail, 10);
+        if (tail && *tail == 0 && errno == 0) {
+            r->num_is_int = 1;
+            r->inum = iv;
+            r->num = (double)iv;
+            return 0;
+        }
+        r->num = strtod(t, &tail);
+        return tail && *tail == 0 ? 0 : -1;
+    }
+}
+
+static int cc__js_dom_parse(CCArena *a, const char *line, size_t len,
+                            CC__JsIsoResp *r) {
+    const char *p = line, *end = line + len;
+    memset(r, 0, sizeof(*r));
+    r->kind = -1;
+    p = cc__js_dom_ws(p, end);
+    if (p >= end || *p != '{') return -1;
+    p++;
+    for (;;) {
+        const char *ks, *ke, *vs, *ve;
+        p = cc__js_dom_ws(p, end);
+        if (p < end && *p == '}') return 0;
+        if (p >= end || *p != '"') return -1;
+        ks = p + 1;
+        p = cc__js_dom_scan_str(p, end);
+        if (!p) return -1;
+        ke = p - 1;
+        p = cc__js_dom_ws(p, end);
+        if (p >= end || *p != ':') return -1;
+        vs = p + 1;
+        ve = cc__js_dom_scan_val(vs, end);
+        if (!ve) return -1;
+        {
+            size_t kn = (size_t)(ke - ks);
+            const char *v = cc__js_dom_ws(vs, end);
+            if (kn == 2 && memcmp(ks, "id", 2) == 0) {
+                char t[32];
+                size_t n = (size_t)(ve - v);
+                if (n >= sizeof(t)) return -1;
+                memcpy(t, v, n);
+                t[n] = 0;
+                r->id = strtoll(t, NULL, 10);
+                r->has_id = 1;
+            } else if (kn == 1 && ks[0] == 'e') {
+                r->has_e = 1;
+                if (cc__js_dom_unescape(a, v, ve, &r->e) != 0) return -1;
+            } else if (kn == 1 && ks[0] == 'v') {
+                if (cc__js_dom_classify(a, v, ve, r) != 0) return -1;
+            } else if (kn == 1 && ks[0] == 'h') {
+                char t[32];
+                size_t n = (size_t)(ve - v);
+                if (n >= sizeof(t)) return -1;
+                memcpy(t, v, n);
+                t[n] = 0;
+                r->h = strtoll(t, NULL, 10);
+                r->has_h = 1;
+            } else if (kn == 1 && ks[0] == 'u') {
+                r->undefined = 1;
+            } else if (kn == 2 && memcmp(ks, "nf", 2) == 0) {
+                r->kind = CC__JS_DOM_K_NUM;
+                r->num = *v == '"' && v[1] == 'n' ? (0.0 / 0.0)
+                       : *v == '"' && v[1] == 'i' ? (1.0 / 0.0)
+                                                  : (-1.0 / 0.0);
+            } else if (kn == 2 && memcmp(ks, "cb", 2) == 0) {
+                r->has_cb = 1;
+            } else if ((kn == 2 && memcmp(ks, "ta", 2) == 0) ||
+                       (kn == 3 && memcmp(ks, "shm", 3) == 0)) {
+                r->has_ta = 1;
+            }
+            /* b64/t ride along with ta/shm; anything else is future
+             * wire surface — skipped, never misread. */
+        }
+        p = cc__js_dom_ws(ve, end);
+        if (p < end && *p == ',') {
+            p++;
+            continue;
+        }
+        if (p < end && *p == '}') return 0;
+        return -1;
+    }
+}
+
+/* ---- transport ---- */
+
+static int cc__js_dom_send_all(CCJsDom *d, const char *buf, size_t len) {
+#if defined(MSG_NOSIGNAL)
+    const int flags = MSG_NOSIGNAL;
+#else
+    const int flags = 0;
+#endif
+    while (len > 0) {
+        ssize_t n = send(d->fd, buf, len, flags);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        buf += n;
+        len -= (size_t)n;
+    }
+    return 0;
+}
+
+/* Blocking read of one newline-terminated reply; 0 with *out set, -1 on
+ * EOF/error (the child died).  The returned span stays valid until the
+ * NEXT read: consumption is deferred (rb_off), never a shift under the
+ * caller's feet. */
+static int cc__js_dom_read_line(CCJsDom *d, const char **out,
+                                size_t *out_len) {
+    if (d->rb_off) {
+        memmove(d->rb, d->rb + d->rb_off, d->rb_len - d->rb_off);
+        d->rb_len -= d->rb_off;
+        d->rb_off = 0;
+    }
+    for (;;) {
+        char *nl = d->rb_len ? (char *)memchr(d->rb, '\n', d->rb_len) : NULL;
+        ssize_t n;
+        if (nl) {
+            size_t line_len = (size_t)(nl - d->rb);
+            *out = d->rb;
+            *out_len = line_len;
+            *nl = 0;
+            d->rb_off = line_len + 1;
+            return 0;
+        }
+        if (d->rb_len + 65536 + 1 > d->rb_cap) {
+            size_t nc = d->rb_cap ? d->rb_cap * 2 : 131072;
+            char *np;
+            while (nc < d->rb_len + 65536 + 1) nc *= 2;
+            np = (char *)realloc(d->rb, nc);
+            if (!np) return -1;
+            d->rb = np;
+            d->rb_cap = nc;
+        }
+        n = recv(d->fd, d->rb + d->rb_len, 65536, 0);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (n == 0) return -1; /* EOF: the child exited */
+        d->rb_len += (size_t)n;
+    }
+}
+
+static void cc__js_dom_reap(CCJsDom *d) {
+    if (d->pid > 0) {
+        int st;
+        (void)waitpid((pid_t)d->pid, &st, 0);
+        d->pid = 0;
+    }
+}
+
+static void cc__js_dom_drop(CCJsDom *d) {
+    if (d->fd >= 0) {
+        close(d->fd);
+        d->fd = -1;
+    }
+    free(d->rb);
+    d->rb = NULL;
+    d->rb_len = d->rb_cap = d->rb_off = 0;
+}
+
+/* One request/response round.  On failure cc__js_errbuf names the op
+ * and the cause; a dead child marks the domain crashed (its calls fail
+ * from then on; other domains and the process are untouched). */
+static int cc__js_dom_req(CCJsDom *d, CC__JsIsoBuf *req, const char *op,
+                          long long id, CC__JsIsoResp *resp) {
+    const char *line;
+    size_t line_len;
+    cc__js_dom_bput(req, "\n", 1);
+    if (req->oom) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: %.40s: out of memory building the request", op);
+        return -1;
+    }
+    if (cc__js_dom_send_all(d, req->p, req->len) != 0 ||
+        cc__js_dom_read_line(d, &line, &line_len) != 0) {
+        d->crashed = 1;
+        cc__js_dom_drop(d);
+        cc__js_dom_reap(d);
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: %.40s: isolated domain crashed (the node child "
+                 "exited); the domain is closed, other domains are "
+                 "unaffected", op);
+        return -1;
+    }
+    if (cc__js_dom_parse(d->arena, line, line_len, resp) != 0) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: %.40s: protocol error (unparseable reply)", op);
+        return -1;
+    }
+    if (resp->has_cb) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: %.40s: the child invoked a host callback; JS→CC "
+                 "callbacks are not yet on this wire", op);
+        return -1;
+    }
+    if (!resp->has_id || resp->id != id) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: %.40s: protocol error (reply id mismatch)", op);
+        return -1;
+    }
+    if (resp->has_e) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf), "js: %.40s: %.400s",
+                 op, (const char *)resp->e.ptr);
+        return -1;
+    }
+    if (resp->has_ta) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: %.40s: the result is a typed buffer; typed arrays "
+                 "are not yet on this wire", op);
+        return -1;
+    }
+    return 0;
+}
+
+static int cc__js_dom_alive(CCJsDom *d, const char *op) {
+    if (d && d->fd >= 0) return 1;
+    snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+             d && d->crashed
+                 ? "js: %.40s: this isolated domain crashed and is closed"
+                 : "js: %.40s: isolated domain is closed",
+             op);
+    return 0;
+}
+
+/* ---- results → values ---- */
+
+static CCResult_CCJsDomVal_CCJsError cc__js_dom_errv(const char *op) {
+    CCResult_CCJsDomVal_CCJsError e;
+    memset(&e, 0, sizeof(e));
+    e.ok = false;
+    e.u.error = cc__js_err(NULL, op);
+    return e;
+}
+
+static CCResult_CCJsDom_CCJsError cc__js_dom_errd(const char *op) {
+    CCResult_CCJsDom_CCJsError e;
+    memset(&e, 0, sizeof(e));
+    e.ok = false;
+    e.u.error = cc__js_err(NULL, op);
+    return e;
+}
+
+static CCJsDomVal cc__js_dom_val_from(CCJsDom *d,
+                                      const CC__JsIsoResp *r) {
+    CCJsDomVal v;
+    memset(&v, 0, sizeof(v));
+    v.dom = d;
+    if (r->has_h) {
+        v.kind = CC__JS_DOM_K_HANDLE;
+        v.h = r->h;
+    } else if (r->undefined) {
+        v.kind = CC__JS_DOM_K_NULL;
+    } else if (r->kind >= 0) {
+        v.kind = r->kind;
+        v.num = r->num;
+        v.inum = r->inum;
+        v.num_is_int = r->num_is_int;
+        v.b = r->b;
+        v.text = r->text;
+    } else {
+        v.kind = CC__JS_DOM_K_NULL;
+    }
+    return v;
+}
+
+/* ---- hosted transport: the same ops, posted onto the loop thread ----
+ *
+ * A hosted dom serves require/eval/get/call/str/release by posting one
+ * closure per op through the host's run door, where the guest-mode napi
+ * surface is valid.  Handles are napi_refs; scalars materialize on the
+ * way back, exactly as the wire does — one mental model, two transports.
+ * One honest divergence, loud not silent: the wire awaits thenables in
+ * the child, but the hosted tier cannot block its own loop, so a
+ * Promise-valued result errors by name (hosted await is future work). */
+
+typedef struct CC__JsDomHop {
+    CCJsDom *d;
+    int op; /* 0 eval, 1 require, 2 get, 3 call, 4 str, 5 release */
+    const char *text; /* eval source / require name / property name */
+    void *ref;        /* receiver or callee napi_ref */
+    int argc;
+    const CCJsArg *argv;
+    const char *label;
+    int ok;
+    CCJsDomVal out;
+} CC__JsDomHop;
+
+/* Loop-thread error text: harvest the pending exception into errbuf so
+ * the calling thread can box it (its arena is thread-local and not
+ * visible here). */
+static void cc__js_dom_h_exc(void *env, const char *label) {
+    _Bool pending = 0;
+    void *exc = NULL, *s = NULL;
+    char msg[300];
+    size_t got = 0;
+    msg[0] = 0;
+    if (env && cc__js.IsExceptionPending(env, &pending) == 0 && pending &&
+        cc__js.GetAndClearLastException(env, &exc) == 0 && exc &&
+        cc__js.CoerceToString(env, exc, &s) == 0 && s)
+        (void)cc__js.GetValueStringUtf8(env, s, msg, sizeof(msg), &got);
+    if (msg[0])
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf), "js: %.60s: %.299s",
+                 label, msg);
+    else
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: %.60s: JavaScript call failed", label);
+}
+
+/* Materialize one napi value into a dom val (loop thread). */
+static int cc__js_dom_h_mat(CCJsDom *d, void *env, void *v, CCJsDomVal *out) {
+    int t = CC__JS_T_UNDEFINED;
+    memset(out, 0, sizeof(*out));
+    out->dom = d;
+    out->kind = CC__JS_DOM_K_NULL;
+    if (!v) return 0;
+    if (cc__js.Typeof(env, v, &t) != 0) return 0;
+    switch (t) {
+    case CC__JS_T_UNDEFINED:
+    case CC__JS_T_NULL:
+        return 0;
+    case CC__JS_T_NUMBER: {
+        double dv = 0;
+        long long ll;
+        if (cc__js.GetValueDouble(env, v, &dv) != 0) return 0;
+        out->kind = CC__JS_DOM_K_NUM;
+        out->num = dv;
+        ll = (long long)dv;
+        if ((double)ll == dv && dv >= -9007199254740992.0 &&
+            dv <= 9007199254740992.0) {
+            out->num_is_int = 1;
+            out->inum = ll;
+        }
+        return 0;
+    }
+    case CC__JS_T_BOOLEAN: {
+        _Bool bv = 0;
+        if (cc__js.GetValueBool(env, v, &bv) != 0) return 0;
+        out->kind = CC__JS_DOM_K_BOOL;
+        out->b = bv ? 1 : 0;
+        return 0;
+    }
+    case CC__JS_T_STRING: {
+        size_t len = 0, got = 0;
+        char *dst;
+        if (cc__js.GetValueStringUtf8(env, v, NULL, 0, &len) != 0) return -1;
+        dst = d->arena ? (char *)cc_arena_alloc(d->arena, len + 1, 1) : NULL;
+        if (!dst) return -1;
+        if (cc__js.GetValueStringUtf8(env, v, dst, len + 1, &got) != 0)
+            return -1;
+        out->kind = CC__JS_DOM_K_STR;
+        out->text.ptr = dst;
+        out->text.len = got;
+        return 0;
+    }
+    default: {
+        /* A thenable cannot be awaited here — the loop is busy running
+         * this very call.  Refuse by name; the wire tier awaits. */
+        if (t == CC__JS_T_OBJECT) {
+            void *then = NULL;
+            int tt = 0;
+            if (cc__js.GetNamedProperty(env, v, "then", &then) == 0 && then &&
+                cc__js.Typeof(env, then, &tt) == 0 &&
+                tt == CC__JS_T_FUNCTION) {
+                snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                         "js: result is a Promise; the hosted tier does not "
+                         "await (use cc_js_new(&a, true) — the isolated "
+                         "tier awaits in the child)");
+                return -1;
+            }
+        }
+        {
+            void *ref = NULL;
+            if (cc__js.CreateReference(env, v, 1, &ref) != 0 || !ref)
+                return -1;
+            out->kind = CC__JS_DOM_K_HANDLE;
+            out->ref = ref;
+            d->live_refs++;
+            return 0;
+        }
+    }
+    }
+}
+
+static void cc__js_dom_h_fn(CCJs *js, void *ctxp) {
+    CC__JsDomHop *hp = (CC__JsDomHop *)ctxp;
+    CCJsDom *d = hp->d;
+    void *env = js->env;
+    hp->ok = 0;
+    switch (hp->op) {
+    case 0: { /* eval */
+        CCSlice src;
+        CCResult_CCJsVal_CCJsError r;
+        src.ptr = (void *)(uintptr_t)hp->text;
+        src.len = hp->text ? strlen(hp->text) : 0;
+        r = cc__js_eval(js, src);
+        if (!r.ok) return; /* errbuf set by cc__js_eval/cc__js_err */
+        if (cc__js_dom_h_mat(d, env, r.u.value.v, &hp->out) != 0) return;
+        hp->ok = 1;
+        return;
+    }
+    case 1: { /* require via the bootstrap's cwd-anchored door */
+        void *g = NULL, *fn = NULL, *arg = NULL, *r = NULL;
+        int t = 0;
+        if (cc__js.GetGlobal(env, &g) != 0 ||
+            cc__js.GetNamedProperty(env, g, "__ccRequire", &fn) != 0 ||
+            !fn || cc__js.Typeof(env, fn, &t) != 0 ||
+            t != CC__JS_T_FUNCTION) {
+            snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                     "js: require: no __ccRequire in this environment");
+            return;
+        }
+        if (cc__js.CreateStringUtf8(env, hp->text ? hp->text : "",
+                                    hp->text ? strlen(hp->text) : 0,
+                                    &arg) != 0 ||
+            cc__js.CallFunction(env, g, fn, 1, &arg, &r) != 0) {
+            cc__js_dom_h_exc(env, "require");
+            return;
+        }
+        if (cc__js_dom_h_mat(d, env, r, &hp->out) != 0) return;
+        hp->ok = 1;
+        return;
+    }
+    case 2: { /* get; a function property binds to its receiver */
+        void *recv = NULL, *pv = NULL;
+        int t = 0;
+        if (cc__js.GetReferenceValue(env, hp->ref, &recv) != 0 || !recv ||
+            cc__js.GetNamedProperty(env, recv, hp->text, &pv) != 0) {
+            cc__js_dom_h_exc(env, hp->label);
+            return;
+        }
+        if (pv && cc__js.Typeof(env, pv, &t) == 0 && t == CC__JS_T_FUNCTION) {
+            void *bindfn = NULL, *bound = NULL;
+            if (cc__js.GetNamedProperty(env, pv, "bind", &bindfn) == 0 &&
+                bindfn &&
+                cc__js.CallFunction(env, pv, bindfn, 1, &recv, &bound) == 0 &&
+                bound)
+                pv = bound;
+        }
+        if (cc__js_dom_h_mat(d, env, pv, &hp->out) != 0) return;
+        hp->ok = 1;
+        return;
+    }
+    case 3: { /* call a bound function ref with lifted args */
+        void *fn = NULL, *und = NULL, *bag = NULL, *r = NULL;
+        void *av[CC__JS_MAX_CALL_ARGS];
+        int i, npos = 0, nkw = 0;
+        if (cc__js.GetReferenceValue(env, hp->ref, &fn) != 0 || !fn) {
+            cc__js_dom_h_exc(env, hp->label);
+            return;
+        }
+        for (i = 0; i < hp->argc; i++)
+            if (hp->argv[i].kwname) nkw++;
+        if (nkw > 0 && cc__js.CreateObject(env, &bag) != 0) return;
+        for (i = 0; i < hp->argc; i++) {
+            const CCJsArg *a = &hp->argv[i];
+            void *v;
+            if (a->kind == 7) {
+                /* A dom val handle: hosted refs deref here; a foreign
+                 * domain's value cannot cross. */
+                if ((const void *)a->p != (const void *)d) {
+                    snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                             "js: %.60s: argument %d belongs to a different "
+                             "domain",
+                             hp->label, i + 1);
+                    return;
+                }
+                if (cc__js.GetReferenceValue(
+                        env, (void *)(uintptr_t)a->n, &v) != 0 ||
+                    !v) {
+                    cc__js_dom_h_exc(env, hp->label);
+                    return;
+                }
+            } else if (a->kind == 8) {
+                if (cc__js.GetUndefined(env, &v) != 0) return;
+            } else if (a->kind == 9) {
+                snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                         "js: %.60s: argument %d is wire JSON; it does not "
+                         "cross into a hosted domain",
+                         hp->label, i + 1);
+                return;
+            } else {
+                v = cc__js_arg_value(env, a);
+                if (!v) {
+                    snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                             "js: %.60s: argument %d does not marshal",
+                             hp->label, i + 1);
+                    return;
+                }
+            }
+            if (a->kwname) {
+                if (cc__js.SetNamedProperty(env, bag, a->kwname, v) != 0)
+                    return;
+            } else {
+                av[npos++] = v;
+            }
+        }
+        if (bag) av[npos++] = bag;
+        if (cc__js.GetUndefined(env, &und) != 0 ||
+            cc__js.CallFunction(env, und, fn, (size_t)npos, av, &r) != 0) {
+            cc__js_dom_h_exc(env, hp->label);
+            return;
+        }
+        if (cc__js_dom_h_mat(d, env, r, &hp->out) != 0) return;
+        hp->ok = 1;
+        return;
+    }
+    case 4: { /* str: String(v) */
+        void *v = NULL, *s = NULL;
+        CCJsDomVal sv;
+        if (cc__js.GetReferenceValue(env, hp->ref, &v) != 0 || !v ||
+            cc__js.CoerceToString(env, v, &s) != 0) {
+            cc__js_dom_h_exc(env, hp->label);
+            return;
+        }
+        if (cc__js_dom_h_mat(d, env, s, &sv) != 0) return;
+        hp->out = sv;
+        hp->ok = 1;
+        return;
+    }
+    case 5: { /* release */
+        (void)cc__js.DeleteReference(env, hp->ref);
+        if (d->live_refs > 0) d->live_refs--;
+        hp->ok = 1;
+        return;
+    }
+    default:
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: %.60s: unknown hosted op", hp->label);
+        return;
+    }
+}
+
+/* Post one op; 0 with hp->out filled, -1 with errbuf set. */
+static int cc__js_dom_h_op(CCJsDom *d, CC__JsDomHop *hp, const char *label) {
+    CCResult_void_CCJsError r;
+    hp->d = d;
+    hp->label = label;
+    hp->ok = 0;
+    memset(&hp->out, 0, sizeof(hp->out));
+    hp->out.dom = d;
+    if (!d->host.open) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: %.60s: hosted domain is closed", label);
+        return -1;
+    }
+    r = cc_js_host_run(&d->host, cc__js_dom_h_fn, hp);
+    if (!r.ok) return -1;
+    if (!hp->ok) return -1; /* errbuf written on the loop thread */
+    return 0;
+}
+
+/* Idempotent; a plain (non-handle) value releases as a no-op, and a
+ * value whose domain is gone has nothing left to release. */
+static inline void cc_js_dom_val_release(CCJsDomVal *v) {
+    if (!v) return;
+    if (v->kind == CC__JS_DOM_K_HANDLE && v->dom &&
+        v->dom->tier == CC__JS_DOM_HOSTED) {
+        if (v->ref && v->dom->host.open) {
+            CC__JsDomHop hop;
+            memset(&hop, 0, sizeof(hop));
+            hop.op = 5;
+            hop.ref = v->ref;
+            (void)cc__js_dom_h_op(v->dom, &hop, "release");
+        }
+        v->dom = NULL;
+        v->kind = CC__JS_DOM_K_NULL;
+        v->ref = NULL;
+        return;
+    }
+    if (v->kind == CC__JS_DOM_K_HANDLE && v->dom && v->dom->fd >= 0) {
+        CC__JsIsoBuf req = {0};
+        CC__JsIsoResp resp;
+        long long id = v->dom->next_id++;
+        cc__js_dom_bputs(&req, "{\"id\":");
+        cc__js_dom_bnum_ll(&req, id);
+        cc__js_dom_bputs(&req, ",\"op\":\"release\",\"h\":");
+        cc__js_dom_bnum_ll(&req, v->h);
+        cc__js_dom_bputs(&req, "}");
+        (void)cc__js_dom_req(v->dom, &req, "release", id, &resp);
+        free(req.p);
+    }
+    v->dom = NULL;
+    v->kind = CC__JS_DOM_K_NULL;
+    v->h = 0;
+}
+
+
+/* ---- the domain ---- */
+
+static inline CCResult_CCJsDom_CCJsError cc_js_dom_new_exe(CCArena *arena, const char *node_exe) {
+    char broker[448], dir[384];
+    int sv[2] = {-1, -1};
+    long long pid;
+    CCJsDom d;
+    const char *exe = node_exe;
+    cc__js_errbuf[0] = 0;
+    cc__js_err_arena = arena;
+    if (!exe || !exe[0]) exe = getenv("CC_NODE_BIN");
+    if (!exe || !exe[0]) exe = "node";
+    {
+        const char *ovr = getenv("CC_JS_BROKER");
+        if (ovr && ovr[0]) {
+            snprintf(broker, sizeof(broker), "%.440s", ovr);
+        } else {
+            unsigned long tag = cc__js_host_hash(cc__js_dom_broker_text);
+            if (cc__js_host_cache_dir(dir, sizeof(dir)) != 0) {
+                snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                         "js: isolated: cache dir %.360s is not writable",
+                         dir);
+                return cc__js_dom_errd("isolated_new");
+            }
+            snprintf(broker, sizeof(broker), "%.360s/cc_js_broker_%08lx.cjs",
+                     dir, tag);
+            if (cc__js_host_write(broker, cc__js_dom_broker_text) != 0) {
+                snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                         "js: isolated: cannot write broker %.400s", broker);
+                return cc__js_dom_errd("isolated_new");
+            }
+        }
+    }
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: isolated: socketpair failed");
+        return cc__js_dom_errd("isolated_new");
+    }
+#if defined(SO_NOSIGPIPE)
+    {
+        int one = 1;
+        (void)setsockopt(sv[0], SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+    }
+#endif
+    pid = (long long)fork();
+    if (pid < 0) {
+        close(sv[0]);
+        close(sv[1]);
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: isolated: fork failed");
+        return cc__js_dom_errd("isolated_new");
+    }
+    if (pid == 0) {
+        char *argv2[3];
+        close(sv[0]);
+        if (dup2(sv[1], 0) < 0 || dup2(sv[1], 1) < 0) _exit(127);
+        close(sv[1]);
+        argv2[0] = (char *)(uintptr_t)exe;
+        argv2[1] = broker;
+        argv2[2] = NULL;
+        execvp(exe, argv2);
+        _exit(127);
+    }
+    close(sv[1]);
+    memset(&d, 0, sizeof(d));
+    d.tier = CC__JS_DOM_ISOLATED;
+    d.fd = sv[0];
+    d.pid = pid;
+    d.arena = arena;
+    d.next_id = 1;
+    {
+        /* Handshake: a stats round proves the broker is up; instant EOF
+         * is "node did not start" and says which executable. */
+        CC__JsIsoBuf req = {0};
+        CC__JsIsoResp resp;
+        long long id = d.next_id++;
+        int rc;
+        cc__js_dom_bputs(&req, "{\"id\":");
+        cc__js_dom_bnum_ll(&req, id);
+        cc__js_dom_bputs(&req, ",\"op\":\"stats\"}");
+        rc = cc__js_dom_req(&d, &req, "isolated_new", id, &resp);
+        free(req.p);
+        if (rc != 0) {
+            cc__js_dom_drop(&d);
+            cc__js_dom_reap(&d);
+            snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                     "js: isolated: cannot start '%.200s' (is node "
+                     "installed? set CC_NODE_BIN or pass an executable to "
+                     "cc_js_new_exe)",
+                     exe);
+            return cc__js_dom_errd("isolated_new");
+        }
+    }
+    return cc_ok_CCResult_CCJsDom_CCJsError(d);
+}
+
+static inline CCResult_CCJsDom_CCJsError cc_js_dom_new(CCArena *arena) {
+    return cc_js_dom_new_exe(arena, NULL);
+}
+
+/* ---- the front door: one constructor, transport as the flag ----
+ *
+ *     CCJsDom js = cc_js_new(false, &a) !> @destroy;  // in-process node
+ *     CCJsDom js = cc_js_new(true, &a)  !> @destroy;  // node child
+ *
+ * Same handle, same ops (require/eval/exec, vals, chains, the sink);
+ * only the transport differs, and the flag at the call site is the
+ * boundary: hosted is in-process (sub-µs ops, one per process — V8's
+ * rule, enforced by the host constructor), isolated is a spawned child
+ * (wire latency, N domains, crash isolation).  `cc_js_new_exe(true, exe, &a)` names
+ * a node executable for an isolated domain; the hosted tier embeds
+ * libnode, so an executable there is refused rather than ignored. */
+static inline CCResult_CCJsDom_CCJsError cc_js_new_exe(_Bool isolated, const char *node_exe, CCArena *arena) {
+    CCJsDom d;
+    CCResult_CCJsHost_CCJsError h;
+    CCResult_CCJsDom_CCJsError e;
+    if (isolated) return cc_js_dom_new_exe(arena, node_exe);
+    cc__js_errbuf[0] = 0;
+    cc__js_err_arena = arena;
+    if (node_exe && node_exe[0]) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: new: a node executable selects the child of an "
+                 "ISOLATED domain (cc_js_new_exe(true, exe, &a)); the "
+                 "hosted tier embeds libnode");
+        return cc__js_dom_errd("new");
+    }
+    h = cc_js_host_new(arena);
+    if (!h.ok) {
+        memset(&e, 0, sizeof(e));
+        e.ok = false;
+        e.u.error = h.u.error;
+        return e;
+    }
+    memset(&d, 0, sizeof(d));
+    d.tier = CC__JS_DOM_HOSTED;
+    d.fd = -1;
+    d.arena = arena;
+    d.next_id = 1;
+    d.host = h.u.value;
+    return cc_ok_CCResult_CCJsDom_CCJsError(d);
+}
+
+static inline CCResult_CCJsDom_CCJsError cc_js_new(_Bool isolated, CCArena *arena) {
+    return cc_js_new_exe(isolated, NULL, arena);
+}
+
+/* The boolean form of "can cc_js_new(isolated, …) succeed here" — a
+ * preflight mirroring cc_py_available(), for the clean-skip pattern.
+ * ISOLATED probes for a node executable (CC_NODE_BIN or PATH).  HOSTED
+ * answers yes for a live host or a warm shim cache, else probes the
+ * first-use toolchain (node headers + a C++ compiler + libnode), and
+ * no inside a guest Node-API host or after a close — the same doors
+ * the constructor enforces, answered without side effects. */
+static inline bool cc_js_dom_available(_Bool isolated) {
+    if (isolated) {
+        const char *exe = getenv("CC_NODE_BIN");
+        if (exe && exe[0]) return true;
+        return system("command -v node >/dev/null 2>&1") == 0;
+    }
+    if (cc__js_hostd) return true;
+    if (cc__js_host_torn) return false;
+    {
+        void *self = dlopen(NULL, RTLD_NOW | RTLD_GLOBAL);
+        int guest = self && dlsym(self, "napi_create_function") != NULL;
+        if (self) dlclose(self);
+        if (guest) return false;
+    }
+    {
+        /* A warm cache needs no toolchain — only the runtime library. */
+        char dir[384], probe[448];
+        struct stat st;
+        unsigned long tag = cc__js_host_hash(cc__js_host_shim_text) ^
+                            (cc__js_host_hash(cc__js_host_probe_text) << 1);
+        const char *base = getenv("CC_JS_HOST_CACHE");
+        const char *home;
+        if (base && base[0]) snprintf(dir, sizeof(dir), "%.360s", base);
+        else if ((home = getenv("HOME")) && home[0])
+            snprintf(dir, sizeof(dir), "%.320s/.cache/concurrent-c/js-host",
+                     home);
+        else snprintf(dir, sizeof(dir), "/tmp/cc-js-host");
+        snprintf(probe, sizeof(probe), "%.360s/cc_js_host_%08lx.so", dir, tag);
+        if (stat(probe, &st) != 0) {
+            const char *cxx = getenv("CXX");
+            if (!cc__js_host_inc()) return false;
+            if ((!cxx || !cxx[0]) &&
+                system("command -v c++ >/dev/null 2>&1") != 0)
+                return false;
+        }
+    }
+    if (getenv("CC_LIBNODE")) return true;
+    return system("ldconfig -p 2>/dev/null | grep -q libnode "
+                  ">/dev/null 2>&1") == 0;
+}
+
+/* The @destroy hook; idempotent.  Polite close first (the broker exits
+ * on the op), EOF as the fallback (it exits on that too). */
+static inline void cc_js_dom_close(CCJsDom *d) {
+    if (d && d->tier == CC__JS_DOM_HOSTED) {
+        cc_js_host_close(&d->host);
+        return;
+    }
+    if (!d || d->fd < 0) {
+        if (d) cc__js_dom_reap(d);
+        return;
+    }
+    {
+        CC__JsIsoBuf req = {0};
+        long long id = d->next_id++;
+        cc__js_dom_bputs(&req, "{\"id\":");
+        cc__js_dom_bnum_ll(&req, id);
+        cc__js_dom_bputs(&req, ",\"op\":\"close\"}\n");
+        if (!req.oom) (void)cc__js_dom_send_all(d, req.p, req.len);
+        free(req.p);
+    }
+    {
+        /* Drain to EOF so the child's close reply lands before the
+         * socket goes away — dropping first would EPIPE its write. */
+        const char *line;
+        size_t n;
+        while (cc__js_dom_read_line(d, &line, &n) == 0) {}
+    }
+    cc__js_dom_drop(d);
+    cc__js_dom_reap(d);
+}
+
+/* ---- domain ops ---- */
+
+static CCResult_CCJsDomVal_CCJsError
+cc__js_dom_op1(CCJsDom *d, const char *op, const char *field,
+               const char *arg, size_t argn, const char *label) {
+    CC__JsIsoBuf req = {0};
+    CC__JsIsoResp resp;
+    long long id;
+    int rc;
+    cc__js_errbuf[0] = 0;
+    cc__js_err_arena = d ? d->arena : NULL;
+    if (!cc__js_dom_alive(d, label)) return cc__js_dom_errv(label);
+    id = d->next_id++;
+    cc__js_dom_bputs(&req, "{\"id\":");
+    cc__js_dom_bnum_ll(&req, id);
+    cc__js_dom_bputs(&req, ",\"op\":\"");
+    cc__js_dom_bputs(&req, op);
+    cc__js_dom_bputs(&req, "\",\"");
+    cc__js_dom_bputs(&req, field);
+    cc__js_dom_bputs(&req, "\":");
+    cc__js_dom_bjson_str(&req, arg, argn);
+    cc__js_dom_bputs(&req, "}");
+    rc = cc__js_dom_req(d, &req, label, id, &resp);
+    free(req.p);
+    if (rc != 0) return cc__js_dom_errv(label);
+    return cc_ok_CCResult_CCJsDomVal_CCJsError(cc__js_dom_val_from(d, &resp));
+}
+
+static inline CCResult_CCJsDomVal_CCJsError cc_js_dom_require(CCJsDom *d, const char *name) {
+    if (d && d->tier == CC__JS_DOM_HOSTED) {
+        CC__JsDomHop hop;
+        cc__js_errbuf[0] = 0;
+        cc__js_err_arena = d->arena;
+        memset(&hop, 0, sizeof(hop));
+        hop.op = 1;
+        hop.text = name ? name : "";
+        if (cc__js_dom_h_op(d, &hop, "require") != 0)
+            return cc__js_dom_errv("require");
+        return cc_ok_CCResult_CCJsDomVal_CCJsError(hop.out);
+    }
+    return cc__js_dom_op1(d, "require", "name", name ? name : "",
+                          name ? strlen(name) : 0, "require");
+}
+
+static inline CCResult_CCJsDomVal_CCJsError cc_js_dom_eval(CCJsDom *d, const char *src) {
+    if (d && d->tier == CC__JS_DOM_HOSTED) {
+        CC__JsDomHop hop;
+        cc__js_errbuf[0] = 0;
+        cc__js_err_arena = d->arena;
+        memset(&hop, 0, sizeof(hop));
+        hop.op = 0;
+        hop.text = src ? src : "";
+        if (cc__js_dom_h_op(d, &hop, "eval") != 0)
+            return cc__js_dom_errv("eval");
+        return cc_ok_CCResult_CCJsDomVal_CCJsError(hop.out);
+    }
+    return cc__js_dom_op1(d, "eval", "src", src ? src : "",
+                          src ? strlen(src) : 0, "eval");
+}
+
+static inline CCResult_void_CCJsError cc_js_dom_exec(CCJsDom *d,
+                                                          const char *src) {
+    CCResult_CCJsDomVal_CCJsError r = cc_js_dom_eval(d, src);
+    CCResult_void_CCJsError out;
+    if (!r.ok) {
+        memset(&out, 0, sizeof(out));
+        out.ok = false;
+        out.u.error = r.u.error;
+        return out;
+    }
+    /* A handle result nobody will see must not leak in the child. */
+    if (r.u.value.kind == CC__JS_DOM_K_HANDLE) {
+        CCJsDomVal v = r.u.value;
+        cc_js_dom_val_release(&v);
+    }
+    return cc_ok_CCResult_void_CCJsError();
+}
+
+static inline CCResult_double_CCJsError cc_js_dom_eval_f64(CCJsDom *d, const char *src) {
+    CCResult_CCJsDomVal_CCJsError r = cc_js_dom_eval(d, src);
+    if (!r.ok) return cc_err_CCResult_double_CCJsError(r.u.error);
+    if (r.u.value.kind != CC__JS_DOM_K_NUM) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: eval: result is not a number");
+        return cc_err_CCResult_double_CCJsError(cc__js_err(NULL, "eval"));
+    }
+    return cc_ok_CCResult_double_CCJsError(r.u.value.num);
+}
+
+static inline CCResult_int64_t_CCJsError cc_js_dom_eval_i64(CCJsDom *d, const char *src) {
+    CCResult_CCJsDomVal_CCJsError r = cc_js_dom_eval(d, src);
+    if (!r.ok) return cc_err_CCResult_int64_t_CCJsError(r.u.error);
+    if (r.u.value.kind != CC__JS_DOM_K_NUM || !r.u.value.num_is_int) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: eval: result is not an integer");
+        return cc_err_CCResult_int64_t_CCJsError(cc__js_err(NULL, "eval"));
+    }
+    return cc_ok_CCResult_int64_t_CCJsError((int64_t)r.u.value.inum);
+}
+
+static inline CCResult_int64_t_CCJsError cc_js_dom_stats(CCJsDom *d) {
+    CC__JsIsoBuf req = {0};
+    CC__JsIsoResp resp;
+    long long id;
+    int rc;
+    cc__js_errbuf[0] = 0;
+    cc__js_err_arena = d ? d->arena : NULL;
+    if (d && d->tier == CC__JS_DOM_HOSTED) {
+        if (!d->host.open) {
+            snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                     "js: stats: hosted domain is closed");
+            return cc_err_CCResult_int64_t_CCJsError(
+                cc__js_err(NULL, "stats"));
+        }
+        return cc_ok_CCResult_int64_t_CCJsError((int64_t)d->live_refs);
+    }
+    if (!cc__js_dom_alive(d, "stats"))
+        return cc_err_CCResult_int64_t_CCJsError(cc__js_err(NULL, "stats"));
+    id = d->next_id++;
+    cc__js_dom_bputs(&req, "{\"id\":");
+    cc__js_dom_bnum_ll(&req, id);
+    cc__js_dom_bputs(&req, ",\"op\":\"stats\"}");
+    rc = cc__js_dom_req(d, &req, "stats", id, &resp);
+    free(req.p);
+    if (rc != 0)
+        return cc_err_CCResult_int64_t_CCJsError(cc__js_err(NULL, "stats"));
+    return cc_ok_CCResult_int64_t_CCJsError(
+        (int64_t)(resp.num_is_int ? resp.inum : (long long)resp.num));
+}
+
+/* ---- values ---- */
+
+static inline CCResult_CCJsDomVal_CCJsError cc_js_dom_val_get(CCJsDomVal *v, const char *name) {
+    CC__JsIsoBuf req = {0};
+    CC__JsIsoResp resp;
+    long long id;
+    int rc;
+    cc__js_errbuf[0] = 0;
+    cc__js_err_arena = v && v->dom ? v->dom->arena : NULL;
+    if (!v || v->kind != CC__JS_DOM_K_HANDLE) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: get: value is not a remote handle (it crossed by "
+                 "value)");
+        return cc__js_dom_errv("get");
+    }
+    if (v->dom && v->dom->tier == CC__JS_DOM_HOSTED) {
+        CC__JsDomHop hop;
+        memset(&hop, 0, sizeof(hop));
+        hop.op = 2;
+        hop.text = name ? name : "";
+        hop.ref = v->ref;
+        if (cc__js_dom_h_op(v->dom, &hop, "get") != 0)
+            return cc__js_dom_errv("get");
+        return cc_ok_CCResult_CCJsDomVal_CCJsError(hop.out);
+    }
+    if (!cc__js_dom_alive(v->dom, "get")) return cc__js_dom_errv("get");
+    id = v->dom->next_id++;
+    cc__js_dom_bputs(&req, "{\"id\":");
+    cc__js_dom_bnum_ll(&req, id);
+    cc__js_dom_bputs(&req, ",\"op\":\"get\",\"h\":");
+    cc__js_dom_bnum_ll(&req, v->h);
+    cc__js_dom_bputs(&req, ",\"name\":");
+    cc__js_dom_bjson_str(&req, name ? name : "", name ? strlen(name) : 0);
+    cc__js_dom_bputs(&req, "}");
+    rc = cc__js_dom_req(v->dom, &req, "get", id, &resp);
+    free(req.p);
+    if (rc != 0) return cc__js_dom_errv("get");
+    return cc_ok_CCResult_CCJsDomVal_CCJsError(
+        cc__js_dom_val_from(v->dom, &resp));
+}
+
+static inline CCResult_CCSlice_CCJsError cc_js_dom_val_as_slice(CCJsDomVal *v, CCArena *arena) {
+    cc__js_errbuf[0] = 0;
+    cc__js_err_arena = arena ? arena : (v && v->dom ? v->dom->arena : NULL);
+    if (!v) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf), "js: as_slice: no value");
+        return cc_err_CCResult_CCSlice_CCJsError(cc__js_err(NULL, "as_slice"));
+    }
+    if (v->kind == CC__JS_DOM_K_STR || v->kind == CC__JS_DOM_K_RAW)
+        return cc_ok_CCResult_CCSlice_CCJsError(v->text);
+    if (v->kind == CC__JS_DOM_K_HANDLE && v->dom &&
+        v->dom->tier == CC__JS_DOM_HOSTED) {
+        /* Materialize String(v) on the loop thread. */
+        CC__JsDomHop hop;
+        memset(&hop, 0, sizeof(hop));
+        hop.op = 4;
+        hop.ref = v->ref;
+        if (cc__js_dom_h_op(v->dom, &hop, "as_slice") != 0)
+            return cc_err_CCResult_CCSlice_CCJsError(
+                cc__js_err(NULL, "as_slice"));
+        return cc_ok_CCResult_CCSlice_CCJsError(hop.out.text);
+    }
+    if (v->kind == CC__JS_DOM_K_HANDLE) {
+        /* Materialize String(v) over the wire. */
+        CC__JsIsoBuf req = {0};
+        CC__JsIsoResp resp;
+        long long id;
+        int rc;
+        if (!cc__js_dom_alive(v->dom, "as_slice"))
+            return cc_err_CCResult_CCSlice_CCJsError(
+                cc__js_err(NULL, "as_slice"));
+        id = v->dom->next_id++;
+        cc__js_dom_bputs(&req, "{\"id\":");
+        cc__js_dom_bnum_ll(&req, id);
+        cc__js_dom_bputs(&req, ",\"op\":\"str\",\"h\":");
+        cc__js_dom_bnum_ll(&req, v->h);
+        cc__js_dom_bputs(&req, "}");
+        rc = cc__js_dom_req(v->dom, &req, "as_slice", id, &resp);
+        free(req.p);
+        if (rc != 0)
+            return cc_err_CCResult_CCSlice_CCJsError(
+                cc__js_err(NULL, "as_slice"));
+        return cc_ok_CCResult_CCSlice_CCJsError(resp.text);
+    }
+    snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+             "js: as_slice: value is not a string (use as_f64/as_i64)");
+    return cc_err_CCResult_CCSlice_CCJsError(cc__js_err(NULL, "as_slice"));
+}
+
+static inline CCResult_double_CCJsError cc_js_dom_val_as_f64(CCJsDomVal *v) {
+    cc__js_errbuf[0] = 0;
+    cc__js_err_arena = v && v->dom ? v->dom->arena : NULL;
+    if (v && v->kind == CC__JS_DOM_K_NUM)
+        return cc_ok_CCResult_double_CCJsError(v->num);
+    if (v && v->kind == CC__JS_DOM_K_BOOL)
+        return cc_ok_CCResult_double_CCJsError(v->b ? 1 : 0);
+    snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+             "js: as_f64: value is not a number");
+    return cc_err_CCResult_double_CCJsError(cc__js_err(NULL, "as_f64"));
+}
+
+static inline CCResult_int64_t_CCJsError cc_js_dom_val_as_i64(CCJsDomVal *v) {
+    cc__js_errbuf[0] = 0;
+    cc__js_err_arena = v && v->dom ? v->dom->arena : NULL;
+    if (v && v->kind == CC__JS_DOM_K_NUM && v->num_is_int)
+        return cc_ok_CCResult_int64_t_CCJsError((int64_t)v->inum);
+    if (v && v->kind == CC__JS_DOM_K_BOOL)
+        return cc_ok_CCResult_int64_t_CCJsError(v->b ? 1 : 0);
+    snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+             "js: as_i64: value is not an integer");
+    return cc_err_CCResult_int64_t_CCJsError(cc__js_err(NULL, "as_i64"));
+}
+
+/* ---- the CCJsDomVal dynamic sink: method calls over the wire ----
+ *
+ * `os.platform()` is get("platform") — the broker binds functions — then
+ * call, then release of the bound-method handle.  Two-and-a-half hops
+ * per call: the isolated tier's cost profile, in the open. */
+
+static int cc__js_dom_arg_json(CC__JsIsoBuf *b, CCJsDom *d,
+                               const CCJsArg *a, const char *method, int i) {
+    switch (a->kind) {
+    case 0: cc__js_dom_bnum_ll(b, a->i); return 0;
+    case 1: cc__js_dom_bnum_f(b, a->f); return 0;
+    case 2:
+    case 3:
+        cc__js_dom_bjson_str(b, a->p ? (const char *)a->p : "", a->n);
+        return 0;
+    case 5: cc__js_dom_bputs(b, a->i ? "true" : "false"); return 0;
+    case 6:
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: %.60s: argument %d is a typed slice; typed arrays "
+                 "are not yet on this wire",
+                 method, i + 1);
+        return -1;
+    case 7: {
+        const CCJsDom *vd = (const CCJsDom *)a->p;
+        if (vd != d) {
+            snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                     "js: %.60s: argument %d belongs to a different "
+                     "isolated domain",
+                     method, i + 1);
+            return -1;
+        }
+        cc__js_dom_bputs(b, "{\"$h\":");
+        cc__js_dom_bnum_ll(b, a->i);
+        cc__js_dom_bputs(b, "}");
+        return 0;
+    }
+    case 8: cc__js_dom_bputs(b, "null"); return 0;
+    case 9:
+        cc__js_dom_bput(b, (const char *)a->p, a->n);
+        return 0;
+    default:
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: %.60s: argument %d does not marshal on this wire",
+                 method, i + 1);
+        return -1;
+    }
+}
+
+static CCResult_CCJsDomVal_CCJsError
+cc__js_dom_callm_n(CCJsDomVal *obj, const char *method, int argc,
+                   const CCJsArg *argv) {
+    CCResult_CCJsDomVal_CCJsError got;
+    CCJsDomVal fnv;
+    CC__JsIsoBuf req = {0};
+    CC__JsIsoResp resp;
+    long long id;
+    int i, rc, nkw = 0, npos = 0;
+    cc__js_errbuf[0] = 0;
+    cc__js_err_arena = obj && obj->dom ? obj->dom->arena : NULL;
+    if (!obj || argc < 0 || argc > CC__JS_MAX_CALL_ARGS) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: %.60s: bad receiver or too many arguments",
+                 method ? method : "?");
+        return cc__js_dom_errv(method ? method : "?");
+    }
+    if (obj->kind != CC__JS_DOM_K_HANDLE) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: %.60s: receiver crossed by value (a plain value has "
+                 "no remote methods)",
+                 method);
+        return cc__js_dom_errv(method);
+    }
+    got = cc_js_dom_val_get(obj, method);
+    if (!got.ok) return got;
+    fnv = got.u.value;
+    if (fnv.kind != CC__JS_DOM_K_HANDLE) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: %.60s: property is not callable (it crossed as "
+                 "data; read it with .get)",
+                 method);
+        return cc__js_dom_errv(method);
+    }
+    if (obj->dom && obj->dom->tier == CC__JS_DOM_HOSTED) {
+        CC__JsDomHop hop;
+        int hrc;
+        memset(&hop, 0, sizeof(hop));
+        hop.op = 3;
+        hop.ref = fnv.ref;
+        hop.argc = argc;
+        hop.argv = argv;
+        hrc = cc__js_dom_h_op(obj->dom, &hop, method);
+        cc_js_dom_val_release(&fnv);
+        if (hrc != 0) return cc__js_dom_errv(method);
+        return cc_ok_CCResult_CCJsDomVal_CCJsError(hop.out);
+    }
+    if (!cc__js_dom_alive(obj->dom, method)) return cc__js_dom_errv(method);
+    for (i = 0; i < argc; i++)
+        if (argv[i].kwname) nkw++;
+    id = obj->dom->next_id++;
+    cc__js_dom_bputs(&req, "{\"id\":");
+    cc__js_dom_bnum_ll(&req, id);
+    cc__js_dom_bputs(&req, ",\"op\":\"call\",\"h\":");
+    cc__js_dom_bnum_ll(&req, fnv.h);
+    cc__js_dom_bputs(&req, ",\"args\":[");
+    for (i = 0; i < argc; i++) {
+        if (argv[i].kwname) continue;
+        if (npos++) cc__js_dom_bputs(&req, ",");
+        if (cc__js_dom_arg_json(&req, obj->dom, &argv[i], method, i) != 0) {
+            free(req.p);
+            cc_js_dom_val_release(&fnv);
+            return cc__js_dom_errv(method);
+        }
+    }
+    if (nkw > 0) {
+        /* Named arguments fold into one trailing plain object —
+         * JavaScript's own keyword convention, same as guest mode. */
+        int nk = 0;
+        if (npos++) cc__js_dom_bputs(&req, ",");
+        cc__js_dom_bputs(&req, "{");
+        for (i = 0; i < argc; i++) {
+            if (!argv[i].kwname) continue;
+            if (nk++) cc__js_dom_bputs(&req, ",");
+            cc__js_dom_bjson_str(&req, argv[i].kwname,
+                                 strlen(argv[i].kwname));
+            cc__js_dom_bputs(&req, ":");
+            if (cc__js_dom_arg_json(&req, obj->dom, &argv[i], method, i) !=
+                0) {
+                free(req.p);
+                cc_js_dom_val_release(&fnv);
+                return cc__js_dom_errv(method);
+            }
+        }
+        cc__js_dom_bputs(&req, "}");
+    }
+    cc__js_dom_bputs(&req, "]}");
+    rc = cc__js_dom_req(obj->dom, &req, method, id, &resp);
+    free(req.p);
+    /* The bound-method handle served one call; failure here only means
+     * the domain died, which the next op reports. */
+    cc_js_dom_val_release(&fnv);
+    if (rc != 0) return cc__js_dom_errv(method);
+    return cc_ok_CCResult_CCJsDomVal_CCJsError(
+        cc__js_dom_val_from(obj->dom, &resp));
+}
+
+static inline CCResult_CCJsDomVal_CCJsError
+cc__js_dom_callm_v(CCJsDomVal *obj, const char *method, int argc,
+                   va_list ap) {
+    CCJsArg tmp[CC__JS_MAX_CALL_ARGS];
+    int i;
+    if (argc < 0) argc = 0;
+    if (argc > CC__JS_MAX_CALL_ARGS) argc = CC__JS_MAX_CALL_ARGS + 1;
+    for (i = 0; i < argc && i < CC__JS_MAX_CALL_ARGS; i++)
+        tmp[i] = va_arg(ap, CCJsArg);
+    return cc__js_dom_callm_n(obj, method, argc, tmp);
+}
+
+static inline CCResult_CCJsDomVal_CCJsError cc_js_dom_val_callm(CCJsDomVal *obj, const char *method, int argc, ...) {
+    CCResult_CCJsDomVal_CCJsError r;
+    va_list ap;
+    va_start(ap, argc);
+    r = cc__js_dom_callm_v(obj, method, argc, ap);
+    va_end(ap);
+    return r;
+}
+
+/* Destination-typed variants, the emitter's names at `T v = obj.m(…)`.
+ * Spelled out rather than macro-minted: UFCS compose-and-verify checks
+ * a composed callee's name textually. */
+static inline CCResult_double_CCJsError cc_js_dom_val_callm_double(
+        CCJsDomVal *obj, const char *method, int argc, ...) {
+    CCResult_CCJsDomVal_CCJsError r;
+    va_list ap;
+    va_start(ap, argc);
+    r = cc__js_dom_callm_v(obj, method, argc, ap);
+    va_end(ap);
+    if (!r.ok) return cc_err_CCResult_double_CCJsError(r.u.error);
+    return cc_js_dom_val_as_f64(&r.u.value);
+}
+
+static inline CCResult_int64_t_CCJsError cc_js_dom_val_callm_int64_t(
+        CCJsDomVal *obj, const char *method, int argc, ...) {
+    CCResult_CCJsDomVal_CCJsError r;
+    va_list ap;
+    va_start(ap, argc);
+    r = cc__js_dom_callm_v(obj, method, argc, ap);
+    va_end(ap);
+    if (!r.ok) return cc_err_CCResult_int64_t_CCJsError(r.u.error);
+    return cc_js_dom_val_as_i64(&r.u.value);
+}
+
+static inline CCResult_long_long_CCJsError cc_js_dom_val_callm_long_long(
+        CCJsDomVal *obj, const char *method, int argc, ...) {
+    CCResult_CCJsDomVal_CCJsError r;
+    CCResult_int64_t_CCJsError v;
+    va_list ap;
+    va_start(ap, argc);
+    r = cc__js_dom_callm_v(obj, method, argc, ap);
+    va_end(ap);
+    if (!r.ok) return cc_err_CCResult_long_long_CCJsError(r.u.error);
+    v = cc_js_dom_val_as_i64(&r.u.value);
+    if (!v.ok) return cc_err_CCResult_long_long_CCJsError(v.u.error);
+    return cc_ok_CCResult_long_long_CCJsError((long long)v.u.value);
+}
+
+static inline CCResult_int_CCJsError cc_js_dom_val_callm_int(
+        CCJsDomVal *obj, const char *method, int argc, ...) {
+    CCResult_CCJsDomVal_CCJsError r;
+    CCResult_int64_t_CCJsError v;
+    va_list ap;
+    va_start(ap, argc);
+    r = cc__js_dom_callm_v(obj, method, argc, ap);
+    va_end(ap);
+    if (!r.ok) return cc_err_CCResult_int_CCJsError(r.u.error);
+    v = cc_js_dom_val_as_i64(&r.u.value);
+    if (!v.ok) return cc_err_CCResult_int_CCJsError(v.u.error);
+    return cc_ok_CCResult_int_CCJsError((int)v.u.value);
+}
+
+static inline CCResult_float_CCJsError cc_js_dom_val_callm_float(
+        CCJsDomVal *obj, const char *method, int argc, ...) {
+    CCResult_CCJsDomVal_CCJsError r;
+    CCResult_double_CCJsError v;
+    va_list ap;
+    va_start(ap, argc);
+    r = cc__js_dom_callm_v(obj, method, argc, ap);
+    va_end(ap);
+    if (!r.ok) return cc_err_CCResult_float_CCJsError(r.u.error);
+    v = cc_js_dom_val_as_f64(&r.u.value);
+    if (!v.ok) return cc_err_CCResult_float_CCJsError(v.u.error);
+    return cc_ok_CCResult_float_CCJsError((float)v.u.value);
+}
+
+/* Argument lift for the iso sink: the CC_JS_ARG scalar arms, plus a
+ * CCJsDomVal crossing back into its own domain.  (A guest CCJsVal has
+ * no arm on purpose — an in-process napi value cannot cross a process
+ * wire, and the missing _Generic association names the type at the
+ * call site.) */
+static inline CCJsArg cc__js_dom_arg_val(CCJsDomVal v) {
+    CCJsArg a = {0};
+    switch (v.kind) {
+    case CC__JS_DOM_K_HANDLE:
+        a.kind = 7;
+        a.p = (const void *)v.dom;
+        a.i = v.h; /* isolated: the child's handle id */
+        a.n = (size_t)(uintptr_t)v.ref; /* hosted: the napi_ref */
+        return a;
+    case CC__JS_DOM_K_NUM:
+        if (v.num_is_int) return cc__js_arg_i(v.inum);
+        return cc__js_arg_f(v.num);
+    case CC__JS_DOM_K_STR:
+        a.kind = 3;
+        a.p = v.text.ptr;
+        a.n = v.text.len;
+        return a;
+    case CC__JS_DOM_K_BOOL: return cc__js_arg_bool(v.b);
+    case CC__JS_DOM_K_RAW:
+        a.kind = 9;
+        a.p = v.text.ptr;
+        a.n = v.text.len;
+        return a;
+    default:
+        a.kind = 8;
+        return a;
+    }
+}
+
+#define CC_JS_DOM_ARG(x)                                    \
+    _Generic((x),                                           \
+        double: cc__js_arg_f,                               \
+        float: cc__js_arg_f,                                \
+        int: cc__js_arg_i,                                  \
+        long: cc__js_arg_i,                                 \
+        long long: cc__js_arg_i,                            \
+        unsigned int: cc__js_arg_i,                         \
+        unsigned long: cc__js_arg_i,                        \
+        unsigned long long: cc__js_arg_i,                   \
+        char *: cc__js_arg_cstr,                            \
+        const char *: cc__js_arg_cstr,                      \
+        CCSlice: cc__js_arg_slice,                          \
+        CCJsDomVal: cc__js_dom_arg_val,                     \
+        CCJsArg: cc__js_arg_pass,                           \
+        _Bool: cc__js_arg_bool)(x)
+
+
 #ifdef CC_COMPTIME_SCAN
 @comptime {
     (void)cc_type_register("CCJs", (CCTypeHooks){
@@ -3321,6 +5337,13 @@ static inline void cc_js_host_close(CCJsHost *host) {
     });
     (void)cc_type_register("CCJsHost", (CCTypeHooks){
         .destroy = cc_type_destroy_call("cc_js_host_close"),
+    });
+    (void)cc_type_register("CCJsDom", (CCTypeHooks){
+        .destroy = cc_type_destroy_call("cc_js_dom_close"),
+    });
+    (void)cc_type_register("CCJsDomVal", (CCTypeHooks){
+        .destroy = cc_type_destroy_call("cc_js_dom_val_release"),
+        .ufcs_dynamic2 = cc_type_dynamic_call("cc_js_dom_val_callm", "CC_JS_DOM_ARG"),
     });
 }
 #endif

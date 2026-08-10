@@ -1126,6 +1126,13 @@ typedef struct {
     char tag[32];
     char entry[96]; /* CC_MODULE_ENTRY prefix (PyInit_ / napi_…) */
     int wildcard;   /* entry was declared with a trailing * */
+    /* Wildcard targets mint one entry symbol PER export site, and each
+     * needs its own importable file name (import counter; import stats)
+     * — the names past the first land here and hardlink to the primary
+     * artifact.  Aggregating targets (napi) namespace inside one file
+     * and keep nextra 0. */
+    char extra[6][128];
+    int nextra;
 } CCExtModTarget;
 
 static void cc__tag_from_directive(const char* dir, char* out, size_t cap) {
@@ -1156,9 +1163,12 @@ static int cc__detect_ext_module(const char* in_path, CCExtModTarget* tg,
     CCModuleEntryDecl decls[8];
     int found[8] = { 0 };
     char names[8][128];
+    char site_names[8][7][128];
+    int site_counts[8] = { 0 };
     int nd, has_main = 0;
     if (!in_path || !tg || tcap <= 0) return 0;
     memset(names, 0, sizeof(names));
+    memset(site_names, 0, sizeof(site_names));
     buf = cc__read_file_all(in_path, &len);
     if (!buf) return 0;
     nd = cc__module_entry_collect(buf, in_path, decls,
@@ -1166,16 +1176,21 @@ static int cc__detect_ext_module(const char* in_path, CCExtModTarget* tg,
     if (nd == 0) { free(buf); return 0; }
     /* `@comptime <directive>(...)` sites: an export directive guarantees
      * an emitted entry, so it is entry evidence AND the name source (the
-     * first site's type, camel lowered to snake, or its override). */
+     * first site's type, camel lowered to snake, or its override).
+     * Every site's name is kept: a wildcard entry mints one symbol per
+     * site, and each needs its own artifact name. */
     {
         int e;
         for (e = 0; e < nd; e++) {
-            char nm[128];
+            int ns;
             if (!decls[e].export_dir[0]) continue;
-            if (cc_module_export_tu_artifact(buf, len, decls[e].export_dir, nm,
-                                             sizeof(nm)) > 0) {
+            ns = cc_module_export_tu_artifact_all(buf, len,
+                                                  decls[e].export_dir,
+                                                  site_names[e], 7);
+            if (ns > 0) {
                 found[e] = 1;
-                snprintf(names[e], sizeof(names[e]), "%s", nm);
+                site_counts[e] = ns;
+                snprintf(names[e], sizeof(names[e]), "%s", site_names[e][0]);
             }
         }
     }
@@ -1299,7 +1314,11 @@ static int cc__detect_ext_module(const char* in_path, CCExtModTarget* tg,
     {
         int e, nt = 0;
         for (e = 0; e < nd && nt < tcap; e++) {
+            int s;
             if (!found[e]) continue;
+            /* names[] holds distinct MODULE names now (the directive's
+             * first argument, always explicit): the first group names
+             * the linked artifact, the rest hardlink it. */
             snprintf(tg[nt].name, sizeof(tg[nt].name), "%s", names[e]);
             snprintf(tg[nt].suffix, sizeof(tg[nt].suffix), "%s",
                      decls[e].suffix);
@@ -1308,17 +1327,37 @@ static int cc__detect_ext_module(const char* in_path, CCExtModTarget* tg,
             snprintf(tg[nt].entry, sizeof(tg[nt].entry), "%s",
                      decls[e].entry);
             tg[nt].wildcard = decls[e].wildcard;
+            tg[nt].nextra = 0;
+            /* Every group past the first is an extra artifact name —
+             * wildcard targets select the module by entry symbol,
+             * aggregating targets by the loaded basename. */
+            for (s = 1; s < site_counts[e] &&
+                        tg[nt].nextra < (int)(sizeof(tg[nt].extra) /
+                                              sizeof(tg[nt].extra[0]));
+                 s++) {
+                snprintf(tg[nt].extra[tg[nt].nextra],
+                         sizeof(tg[nt].extra[0]), "%s", site_names[e][s]);
+                tg[nt].nextra++;
+            }
             nt++;
         }
         return nt;
     }
 }
 
+/* Plain byte copy under a new name (distinct inode on purpose). */
+static int cc__copy_bytes(const char* src, const char* dst);
+
 /* Hardlink dst to src (same bytes under a second name); copy when the
  * filesystem refuses links. */
 static int cc__link_or_copy(const char* src, const char* dst) {
     unlink(dst);
     if (link(src, dst) == 0) return 0;
+    return cc__copy_bytes(src, dst);
+}
+
+static int cc__copy_bytes(const char* src, const char* dst) {
+    unlink(dst);
     {
         FILE* in = fopen(src, "rb");
         FILE* out = in ? fopen(dst, "wb") : NULL;
@@ -5467,7 +5506,7 @@ static int run_build_mode(int argc, char** argv) {
             ver_body[0] = 0;
             for (te = 0; te < extmod_nt; te++) {
                 char line[160];
-                int n;
+                int n, x;
                 if (!extmod_tg[te].entry[0]) continue;
                 if (extmod_tg[te].wildcard && extmod_tg[te].name[0])
                     n = snprintf(line, sizeof(line), "_%s%s\n",
@@ -5484,13 +5523,27 @@ static int run_build_mode(int argc, char** argv) {
                 memcpy(ver_body + vb, line, (size_t)n);
                 vb += (size_t)n;
                 ver_body[vb] = 0;
+                /* A multiclass wildcard target mints one entry symbol per
+                 * export — list every one, or the strip removes it.
+                 * Aggregating targets share ONE entry across groups. */
+                for (x = 0; extmod_tg[te].wildcard &&
+                            x < extmod_tg[te].nextra; x++) {
+                    n = snprintf(line, sizeof(line), "_%s%s\n",
+                                 extmod_tg[te].entry, extmod_tg[te].extra[x]);
+                    if (n < 0 || (size_t)n >= sizeof(line) ||
+                        vb + (size_t)n >= sizeof(ver_body))
+                        break;
+                    memcpy(ver_body + vb, line, (size_t)n);
+                    vb += (size_t)n;
+                    ver_body[vb] = 0;
+                }
             }
 #else
             static const char* ver_flag = " -Wl,--version-script=";
             vb = (size_t)snprintf(ver_body, sizeof(ver_body), "{ global:");
             for (te = 0; te < extmod_nt && vb + 2 < sizeof(ver_body); te++) {
                 char sym[160];
-                int n;
+                int n, x;
                 if (!extmod_tg[te].entry[0]) continue;
                 if (extmod_tg[te].wildcard && extmod_tg[te].name[0])
                     n = snprintf(sym, sizeof(sym), " %s%s;",
@@ -5506,6 +5559,20 @@ static int run_build_mode(int argc, char** argv) {
                     break;
                 memcpy(ver_body + vb, sym, (size_t)n);
                 vb += (size_t)n;
+                /* A multiclass wildcard target mints one entry symbol per
+                 * export — every one is a dead-strip root, or the strip
+                 * removes it and the import fails naming the symbol.
+                 * Aggregating targets share ONE entry across groups. */
+                for (x = 0; extmod_tg[te].wildcard &&
+                            x < extmod_tg[te].nextra; x++) {
+                    n = snprintf(sym, sizeof(sym), " %s%s;",
+                                 extmod_tg[te].entry, extmod_tg[te].extra[x]);
+                    if (n < 0 || (size_t)n >= sizeof(sym) ||
+                        vb + (size_t)n >= sizeof(ver_body))
+                        break;
+                    memcpy(ver_body + vb, sym, (size_t)n);
+                    vb += (size_t)n;
+                }
             }
             {
                 const char* tail = " local: *; };\n";
@@ -5660,27 +5727,59 @@ static int run_build_mode(int argc, char** argv) {
     }
     if (compile_err != 0) return compile_err;
 
-    /* Dual-target module: every declared entry is compiled into the one
-     * shared object, so secondary targets are the same file under their
-     * own names — hardlinks (copy when the filesystem refuses).  `-o`
-     * names exactly one artifact and skips siblings; --module narrows. */
-    if (mode == CC_MODE_LINK && !user_out && extmod_nt > 1) {
+    /* Dual-target / multiclass module: every declared entry is compiled
+     * into the one shared object, so secondary targets — and, on a
+     * wildcard target, every export past the first — are the same file
+     * under their own names: hardlinks (copy when the filesystem
+     * refuses).  `import counter; import stats` both resolve because
+     * stats.abi3.so exists and its PyInit_stats is inside.  `-o` names
+     * exactly one artifact and skips siblings; --module narrows. */
+    if (mode == CC_MODE_LINK && !user_out && extmod_nt > 0) {
         int e;
-        for (e = 1; e < extmod_nt; e++) {
+        for (e = 0; e < extmod_nt; e++) {
             char sib[PATH_MAX];
             char sstem[128];
-            if (extmod_tg[e].name[0])
-                snprintf(sstem, sizeof(sstem), "%s", extmod_tg[e].name);
-            else
-                cc__stem_from_path(in_path_abs, sstem, sizeof(sstem));
-            if (derive_path_from_stem(sstem, g_bin_root, extmod_tg[e].suffix,
-                                      sib, sizeof(sib)) != 0 ||
-                cc__link_or_copy(bin_path, sib) != 0) {
-                fprintf(stderr, "cc: dual-target: cannot produce %s%s\n",
-                        sstem, extmod_tg[e].suffix);
-                return 1;
+            int x;
+            if (e > 0) {
+                if (extmod_tg[e].name[0])
+                    snprintf(sstem, sizeof(sstem), "%s", extmod_tg[e].name);
+                else
+                    cc__stem_from_path(in_path_abs, sstem, sizeof(sstem));
+                if (derive_path_from_stem(sstem, g_bin_root,
+                                          extmod_tg[e].suffix, sib,
+                                          sizeof(sib)) != 0 ||
+                    cc__link_or_copy(bin_path, sib) != 0) {
+                    fprintf(stderr, "cc: dual-target: cannot produce %s%s\n",
+                            sstem, extmod_tg[e].suffix);
+                    return 1;
+                }
+                if (verbose) fprintf(stderr, "cc: dual-target: %s\n", sib);
             }
-            if (verbose) fprintf(stderr, "cc: dual-target: %s\n", sib);
+            for (x = 0; x < extmod_tg[e].nextra; x++) {
+                /* Wildcard extras hardlink (the entry SYMBOL selects the
+                 * module, path-blind).  Aggregating extras must be real
+                 * copies: dlopen dedupes by inode, so a second hardlink
+                 * loaded in the same process would re-run the one entry
+                 * with dladdr still reporting the FIRST path — and the
+                 * wrong group would register. */
+                int rc2;
+                if (derive_path_from_stem(extmod_tg[e].extra[x], g_bin_root,
+                                          extmod_tg[e].suffix, sib,
+                                          sizeof(sib)) != 0)
+                    rc2 = -1;
+                else if (extmod_tg[e].wildcard)
+                    rc2 = cc__link_or_copy(bin_path, sib);
+                else
+                    rc2 = cc__copy_bytes(bin_path, sib);
+                if (rc2 != 0) {
+                    fprintf(stderr,
+                            "cc: multiclass: cannot produce %s%s\n",
+                            extmod_tg[e].extra[x], extmod_tg[e].suffix);
+                    return 1;
+                }
+                if (verbose)
+                    fprintf(stderr, "cc: multiclass: %s\n", sib);
+            }
         }
     }
 

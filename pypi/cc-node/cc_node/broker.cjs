@@ -10,7 +10,11 @@
  * Python callable crosses as {$f: id}; invoking it sends a nested `cb`
  * request and BLOCKS on a synchronous read for the answer — legal
  * because the protocol is strictly alternating, so nothing else can be
- * in flight.  stdin EOF is the host vanishing: exit. */
+ * in flight.  stdin EOF is the host vanishing: exit.
+ *
+ * cc/include/ccc/script/js.cch embeds this file verbatim (the CC
+ * isolated tier speaks the same wire); js_iso_smoke pins the two
+ * byte-identical, so an edit here must land there too. */
 'use strict';
 
 const fs = require('fs');

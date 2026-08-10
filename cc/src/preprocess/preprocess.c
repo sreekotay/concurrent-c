@@ -17716,20 +17716,23 @@ char* cc_rewrite_static_map_calls_text(const char* src, size_t n, const char* in
  *     CC_MODULE_EXPORT(cc_py_export,
  *         "$each{void *PyInit_$name(void) { ... }\n}")
  *
- * and `@comptime <directive>("Type", seed[, "name"]);` sites in a TU
- * expand from that template.  The compiler implements one template
- * language — `$T` (the exported type), `$name` (its snake-case name, or
- * the string override), `$seed` (the seed expression, `NULL` when
- * omitted), `$count` (how many sites the TU has), and exactly one
- * `$each{...}` region — and the stdlib spells what an entry stanza looks
- * like.  A template that is nothing but its `$each` region expands every
- * site in place (independent stanzas, one per type); a template with
- * text around the region aggregates: every site feeds the one region and
- * the single stanza lands at the LAST site, where every seed static is
- * already in scope, earlier sites vanishing.  The spliced text is the
- * same registration a hand-written module spells — the explicit stanza
- * stays legal, and everything downstream (parse, factories, codegen)
- * cannot tell the two apart. */
+ * and `@comptime <directive>("module", "Type", seed[, "member"]);`
+ * sites in a TU expand from that template — the module name always
+ * explicit, sites sharing one module aggregating into it.  The
+ * compiler implements one template language — `$module` (the group's
+ * published name), `$T` (the exported type), `$name` (its snake-case
+ * member name, or the string override), `$seed` (the seed expression),
+ * `$count` (sites in the group) — with two region forms.  A grouped
+ * template spells `$groups{...}` regions (several allowed), each
+ * expanded once per distinct module with an optional inner `$each{...}`
+ * expanded per site in that group; the whole expansion is one aggregate
+ * stanza at the TU's LAST site, where every seed static is in scope.
+ * The legacy forms remain for other embeddings: a template that is
+ * nothing but one `$each` region expands every site in place, and text
+ * around one `$each` aggregates all sites into a single stanza.  The
+ * spliced text is the same registration a hand-written module spells —
+ * the explicit stanza stays legal, and everything downstream (parse,
+ * factories, codegen) cannot tell the two apart. */
 
 static char* cc__mex_read_file(const char* path) {
     FILE* f = fopen(path, "rb");
@@ -17949,8 +17952,9 @@ static void cc__mex_snake(const char* t, char* out, size_t cap) {
 typedef struct {
     size_t start; /* at the '@' */
     size_t end;   /* one past the ';' */
+    char module[96]; /* the published module this site joins */
     char type_name[96];
-    char name[96];
+    char name[96]; /* member name: snake of the type, or the override */
     char seed[256];
 } CCMexSite;
 
@@ -18010,36 +18014,65 @@ static int cc__mex_scan_sites(const char* src, size_t n, const char* directive,
         memset(st, 0, sizeof *st);
         st->start = i;
         st->end = semi + 1;
+        /* Always explicit: ("module", "Type", seed[, "member_name"]).
+         * The module names the published artifact; sites sharing one
+         * module aggregate into it.  No short form — the published name
+         * never falls out of a file name or a declaration order. */
+        if (nargs < 3 || nargs > 4) {
+            if (!quiet)
+                fprintf(stderr,
+                        "%s: error: %s takes (\"module\", \"Type\", seed[, "
+                        "\"member_name\"]) — the module name is always "
+                        "explicit\n",
+                        in, directive);
+            *out_err = 1;
+            return ns;
+        }
         {
-            const char* a0;
-            size_t a0l;
-            if (nargs < 1 || nargs > 3) {
-                if (!quiet)
-                    fprintf(stderr, "%s: error: %s takes (\"Type\"[, seed[, "
-                                    "\"name\"]])\n",
-                            in, directive);
-                *out_err = 1;
-                return ns;
-            }
-            a0 = src + starts[0];
-            a0l = ends[0] - starts[0];
+            const char* a0 = src + starts[0];
+            size_t a0l = ends[0] - starts[0];
+            size_t p, q;
+            int ok;
             cc__sm_trim(&a0, &a0l);
-            if (a0l == 0) {
+            p = (size_t)(a0 - src);
+            if (a0l == 0 || a0[0] != '"' ||
+                !cc_parse_c_string_literal(src, n, &p, st->module,
+                                           sizeof(st->module))) {
                 if (!quiet)
-                    fprintf(stderr, "%s: error: %s: needs the exported type — "
-                                    "%s(\"Type\", &seed)\n",
+                    fprintf(stderr,
+                            "%s: error: %s: the module name must be a string "
+                            "literal — %s(\"mymodule\", \"Type\", &seed)\n",
                             in, directive, directive);
                 *out_err = 1;
                 return ns;
             }
-            if (a0[0] == '"') {
-                size_t p = (size_t)(a0 - src);
+            ok = st->module[0] != 0 &&
+                 !(st->module[0] >= '0' && st->module[0] <= '9');
+            for (q = 0; ok && st->module[q]; q++)
+                if (!cc_is_ident_char(st->module[q])) ok = 0;
+            if (!ok) {
+                if (!quiet)
+                    fprintf(stderr,
+                            "%s: error: %s: module name '%s' must be a C "
+                            "identifier (it names entry symbols and "
+                            "artifacts)\n",
+                            in, directive, st->module);
+                *out_err = 1;
+                return ns;
+            }
+        }
+        {
+            const char* a1 = src + starts[1];
+            size_t a1l = ends[1] - starts[1];
+            cc__sm_trim(&a1, &a1l);
+            if (a1l > 0 && a1[0] == '"') {
+                size_t p = (size_t)(a1 - src);
                 if (!cc_parse_c_string_literal(src, n, &p, st->type_name,
                                                sizeof(st->type_name)))
                     st->type_name[0] = 0;
-            } else if (a0l < sizeof(st->type_name)) {
-                memcpy(st->type_name, a0, a0l);
-                st->type_name[a0l] = 0;
+            } else if (a1l > 0 && a1l < sizeof(st->type_name)) {
+                memcpy(st->type_name, a1, a1l);
+                st->type_name[a1l] = 0;
             }
             {
                 size_t q;
@@ -18049,19 +18082,19 @@ static int cc__mex_scan_sites(const char* src, size_t n, const char* directive,
                     if (!cc_is_ident_char(st->type_name[q])) ok = 0;
                 if (!ok) {
                     if (!quiet)
-                        fprintf(stderr, "%s: error: %s: '%.*s' is not a type "
-                                        "name\n",
-                                in, directive, (int)a0l, a0);
+                        fprintf(stderr,
+                                "%s: error: %s: '%.*s' is not a type name\n",
+                                in, directive, (int)a1l, a1);
                     *out_err = 1;
                     return ns;
                 }
             }
         }
-        if (nargs >= 2) {
-            const char* a1 = src + starts[1];
-            size_t a1l = ends[1] - starts[1];
-            cc__sm_trim(&a1, &a1l);
-            if (a1l == 0 || a1l >= sizeof(st->seed)) {
+        {
+            const char* a2 = src + starts[2];
+            size_t a2l = ends[2] - starts[2];
+            cc__sm_trim(&a2, &a2l);
+            if (a2l == 0 || a2l >= sizeof(st->seed)) {
                 if (!quiet)
                     fprintf(stderr, "%s: error: %s: seed expression missing or "
                                     "too long\n",
@@ -18069,23 +18102,22 @@ static int cc__mex_scan_sites(const char* src, size_t n, const char* directive,
                 *out_err = 1;
                 return ns;
             }
-            memcpy(st->seed, a1, a1l);
-            st->seed[a1l] = 0;
-        } else {
-            snprintf(st->seed, sizeof(st->seed), "NULL");
+            memcpy(st->seed, a2, a2l);
+            st->seed[a2l] = 0;
         }
-        if (nargs >= 3) {
-            const char* a2 = src + starts[2];
-            size_t a2l = ends[2] - starts[2];
+        if (nargs >= 4) {
+            const char* a3 = src + starts[3];
+            size_t a3l = ends[3] - starts[3];
             size_t p;
-            cc__sm_trim(&a2, &a2l);
-            p = (size_t)(a2 - src);
-            if (a2l == 0 || a2[0] != '"' ||
+            cc__sm_trim(&a3, &a3l);
+            p = (size_t)(a3 - src);
+            if (a3l == 0 || a3[0] != '"' ||
                 !cc_parse_c_string_literal(src, n, &p, st->name,
                                            sizeof(st->name))) {
                 if (!quiet)
-                    fprintf(stderr, "%s: error: %s: the module-name override "
-                                    "must be a string literal\n",
+                    fprintf(stderr,
+                            "%s: error: %s: the member-name override must be "
+                            "a string literal\n",
                             in, directive);
                 *out_err = 1;
                 return ns;
@@ -18134,6 +18166,13 @@ static int cc__mex_expand(CCSmBuf* out, const char* body, size_t bl,
     size_t i = 0;
     while (i < bl) {
         if (body[i] == '$') {
+            if (i + 7 <= bl && memcmp(body + i, "$module", 7) == 0 &&
+                (i + 7 == bl || !cc_is_ident_char(body[i + 7]))) {
+                if (!cc__sm_append(out, st->module, strlen(st->module)))
+                    return 0;
+                i += 7;
+                continue;
+            }
             if (i + 5 <= bl && memcmp(body + i, "$name", 5) == 0 &&
                 (i + 5 == bl || !cc_is_ident_char(body[i + 5]))) {
                 if (!cc__sm_append(out, st->name, strlen(st->name))) return 0;
@@ -18168,6 +18207,93 @@ static int cc__mex_expand(CCSmBuf* out, const char* body, size_t bl,
     return 1;
 }
 
+/* One $groups{...} region expanded per distinct module: group text
+ * (with $module / $count) wraps an optional $each expanded per site in
+ * the group.  Groups keep first-appearance order; sites keep TU order
+ * within a group. */
+static int cc__mex_expand_groups_region(CCSmBuf* out, const char* body,
+                                        size_t bl, const CCMexSite* sites,
+                                        int ns, const char (*mods)[96],
+                                        int nmod) {
+    char* rb = (char*)malloc(bl + 1);
+    const char *head, *ebody, *tail;
+    size_t hl, ebl, tl;
+    int has_each, m;
+    if (!rb) return 0;
+    memcpy(rb, body, bl);
+    rb[bl] = 0;
+    has_each = cc__mex_tpl_split(rb, &head, &hl, &ebody, &ebl, &tail, &tl);
+    for (m = 0; m < nmod; m++) {
+        const CCMexSite* first = NULL;
+        int gcount = 0, si;
+        for (si = 0; si < ns; si++) {
+            if (strcmp(sites[si].module, mods[m]) != 0) continue;
+            if (!first) first = &sites[si];
+            gcount++;
+        }
+        if (!first) continue;
+        if (has_each) {
+            if (!cc__mex_expand(out, head, hl, first, gcount)) goto fail;
+            for (si = 0; si < ns; si++) {
+                if (strcmp(sites[si].module, mods[m]) != 0) continue;
+                if (!cc__mex_expand(out, ebody, ebl, &sites[si], gcount))
+                    goto fail;
+            }
+            if (!cc__mex_expand(out, tail, tl, first, gcount)) goto fail;
+        } else {
+            if (!cc__mex_expand(out, rb, bl, first, gcount)) goto fail;
+        }
+    }
+    free(rb);
+    return 1;
+fail:
+    free(rb);
+    return 0;
+}
+
+/* Grouped template: literal segments interleaved with $groups{...}
+ * regions (several allowed), the whole expansion one aggregate stanza.
+ * Returns 0 on malformed region braces. */
+static int cc__mex_expand_grouped(CCSmBuf* out, const char* tpl,
+                                  const CCMexSite* sites, int ns) {
+    char mods[16][96];
+    int nmod = 0, si;
+    const char* p = tpl;
+    for (si = 0; si < ns; si++) {
+        int m, seen = 0;
+        for (m = 0; m < nmod; m++)
+            if (strcmp(mods[m], sites[si].module) == 0) { seen = 1; break; }
+        if (!seen && nmod < 16) {
+            snprintf(mods[nmod], sizeof(mods[0]), "%s", sites[si].module);
+            nmod++;
+        }
+    }
+    while (*p) {
+        const char* g = strstr(p, "$groups{");
+        const char* b;
+        const char* q;
+        size_t depth = 1;
+        if (!g) return cc__sm_append(out, p, strlen(p));
+        if (!cc__sm_append(out, p, (size_t)(g - p))) return 0;
+        b = g + 8;
+        q = b;
+        while (*q) {
+            if (*q == '{') depth++;
+            else if (*q == '}') {
+                depth--;
+                if (!depth) break;
+            }
+            q++;
+        }
+        if (depth) return 0;
+        if (!cc__mex_expand_groups_region(out, b, (size_t)(q - b), sites, ns,
+                                          mods, nmod))
+            return 0;
+        p = q + 1;
+    }
+    return 1;
+}
+
 /* Detection pre-scan for the driver: does the TU spell this directive,
  * and what artifact does the first site name?  Quiet — a malformed site
  * reads as "not a module" here and errors articulately at compile. */
@@ -18182,8 +18308,33 @@ int cc_module_export_tu_artifact(const char* src, size_t n,
                             (int)(sizeof(sites) / sizeof(sites[0])), NULL, 1,
                             &err);
     if (err || ns <= 0) return 0;
-    snprintf(name_out, cap, "%s", sites[0].name);
+    snprintf(name_out, cap, "%s", sites[0].module);
     return ns;
+}
+
+/* Every distinct MODULE name, in first-appearance order — each group is
+ * one published artifact (PyInit_counters and counters.node both come
+ * from the group name, and a second group is a second name). */
+int cc_module_export_tu_artifact_all(const char* src, size_t n,
+                                     const char* directive,
+                                     char names[][128], int max) {
+    CCMexSite sites[16];
+    int err = 0, ns, i, out = 0;
+    if (!src || !directive || !directive[0] || !names || max <= 0) return 0;
+    if (!strstr(src, directive)) return 0;
+    ns = cc__mex_scan_sites(src, n, directive, sites,
+                            (int)(sizeof(sites) / sizeof(sites[0])), NULL, 1,
+                            &err);
+    if (err || ns <= 0) return 0;
+    for (i = 0; i < ns && out < max; i++) {
+        int m, seen = 0;
+        for (m = 0; m < out; m++)
+            if (strcmp(names[m], sites[i].module) == 0) { seen = 1; break; }
+        if (seen) continue;
+        snprintf(names[out], 128, "%s", sites[i].module);
+        out++;
+    }
+    return out;
 }
 
 char* cc_rewrite_module_export_directives_text(const char* src, size_t n,
@@ -18229,6 +18380,33 @@ char* cc_rewrite_module_export_directives_text(const char* src, size_t n,
                                 input_path, 0, &err);
         if (err) { failed = 1; break; }
         if (ns <= 0) continue;
+        if (nr + ns > (int)(sizeof(repls) / sizeof(repls[0]))) { failed = 1; break; }
+        if (strstr(tpls[ti].tpl, "$groups{")) {
+            /* Grouped template: one aggregate stanza at the LAST site,
+             * each $groups region expanded per distinct module. */
+            CCSmBuf eb = { 0 };
+            if (!cc__mex_expand_grouped(&eb, tpls[ti].tpl, sites, ns)) {
+                fprintf(stderr,
+                        "%s: error: %s: malformed $groups{...} region in the "
+                        "CC_MODULE_EXPORT template\n",
+                        input_path ? input_path : "<input>",
+                        tpls[ti].directive);
+                free(eb.p);
+                failed = 1;
+                break;
+            }
+            for (si = 0; si < ns - 1; si++) {
+                repls[nr].start = sites[si].start;
+                repls[nr].end = sites[si].end;
+                repls[nr].text = (char*)calloc(1, 1);
+                nr++;
+            }
+            repls[nr].start = sites[ns - 1].start;
+            repls[nr].end = sites[ns - 1].end;
+            repls[nr].text = eb.p ? eb.p : (char*)calloc(1, 1);
+            nr++;
+            continue;
+        }
         if (!cc__mex_tpl_split(tpls[ti].tpl, &head, &hl, &body, &bl, &tail,
                                &tl)) {
             fprintf(stderr, "%s: error: %s: CC_MODULE_EXPORT template needs "

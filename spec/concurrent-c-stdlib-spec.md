@@ -1598,7 +1598,7 @@ an explicit, costed operation (§7).
 ```c
 #include <ccc/script/py.cch>
 
-CCPy py = cc_py_new(&a) !> @destroy;
+CCPy py = cc_py_new(false, &a) !> @destroy;
 CCPyObj np = py.import("numpy") !> @destroy;
 CCPyObj arr = np.call("arange", 10) !> @destroy;
 double s = arr.call("sum").as_f64() !>;
@@ -1620,12 +1620,21 @@ that degrade rather than fail when Python is absent:
 
 ```c
 if (!cc_py_available()) { puts("SKIP (no libpython)"); return 0; }
-CCPy py = cc_py_new(&arena) !>;
+CCPy py = cc_py_new(false, &arena) !>;
 ```
 
 The probe is the loader — same search order, same `CC_LIBPYTHON` override —
 so it cannot disagree with the constructor. After a true probe, `!>` on
 `cc_py_new` means what it says: a real initialization failure.
+
+The constructor shape is the family's — `cc_py_new(isolated, &arena)`,
+transport first, arena last, mirroring `cc_js_new`.  `false` opens an
+in-process interpreter; Python multiplies in-process (every handle
+after the first is an isolated subinterpreter with its own GIL), so
+`false` already gives N parallel domains.  `true` — a python child per
+handle on the broker.py wire — is not implemented and refuses by name;
+the flag reserves the symmetric shape, never a silent alias of
+`false`.
 
 The runtime is selected most-specific first: a process that already is
 Python keeps its own symbols unconditionally; `cc_py_use(spec)` chooses
@@ -1799,11 +1808,11 @@ ints exactly and truncate Python floats toward zero (C cast and Python
 
 Explicit extraction remains for held objects:
 `.as_i64() !>`, `.as_f64() !>`, `.as_slice() !>` (`str`/`bytes` copied into
-the home handle's scratch arena from `cc_py_new(&arena)`). Override the
+the home handle's scratch arena from `cc_py_new(false, &arena)`). Override the
 destination with `.as_slice_into(&dst) !>`. The result slice is minted with
 that arena's provenance epoch. Anything else stays a `CCPyObj`.
 
-`cc_py_new(&arena)` stores `arena` on the handle. Error text and default
+`cc_py_new(false, &arena)` stores `arena` on the handle. Error text and default
 `.as_slice()` allocate from it. Every `CCPyObj` carries `home` pointing at
 that handle so obj methods can reach the scratch arena.
 
@@ -1852,8 +1861,8 @@ creates an isolated interpreter with its own GIL, so two handles run Python
 in parallel:
 
 ```c
-CCPy a = cc_py_new(&arena) !> @destroy;
-CCPy b = cc_py_new(&arena) !> @destroy;   /* isolated: its own GIL */
+CCPy a = cc_py_new(false, &arena) !> @destroy;
+CCPy b = cc_py_new(false, &arena) !> @destroy;   /* isolated: its own GIL */
 ```
 
 There is no pool type. A set of interpreters is an ordinary array of `CCPy`,
@@ -1984,7 +1993,7 @@ CPython extension entry point must do:
 typedef struct Counter { long long n; } Counter;
 static long long Counter_bump(Counter *self, long long by) { return self->n += by; }
 
-@comptime cc_py_export("Counter");
+@comptime cc_py_export("counter", "Counter", &seed);
 ```
 
 ```python
@@ -2161,9 +2170,13 @@ its marshaling, the loader, and the outbound direction inside an
 exported call (a `CCJs *` parameter is the host, wired by the trampoline
 and invisible to JS; `global`/`eval`/`exec`; the `CCJsVal` sink with
 destination-typed variants; `.get`/`.as_*`/`.hold`; `f.map::[T]` row
-batching).  Hosting libnode (`cc_js_host_new`, `run`, `@destroy`) is
-implemented.  Engine choice (`cc_js_new` probe order, the QuickJS
-backend), `js_expose`, and `as_list`/`as_map` are not.
+batching).  Domains are implemented: `cc_js_new(isolated, &arena)`
+yields one handle over two transports — hosted libnode in-process, or
+a node child per handle on the `concurrent-c-node` wire — with
+`cc_js_host_new`/`run` as the raw loop-thread door beneath the hosted
+tier.  Engine choice (the QuickJS backend), `js_expose`,
+`as_list`/`as_map`, hosted await, and typed arrays / callbacks on the
+wire are not.
 
 ### Model
 
@@ -2234,38 +2247,56 @@ way benchmark baselines do. The spec does not enumerate symbols; the
 table in `js.cch` is the one source of truth for what the surface asks
 of a runtime.
 
-### Hosting libnode: CC creates the environment
+### Domains: one handle, two transports
 
-`CCJsHost host = cc_js_host_new(&arena) !> @destroy` boots a full Node —
-V8, libuv, the Node standard library — inside the process, on a
-dedicated thread that owns the environment and its event loop; the
-handle's lifetime is the runtime's, released by `@destroy` (or
-`cc_js_host_close`).  The embedder surface is C++ and cannot be
+`CCJsDom js = cc_js_new(isolated, &arena) !> @destroy` yields a domain
+— a JavaScript runtime this program owns — behind one surface:
+`require`/`eval`/`exec` on the handle, `CCJsDomVal` values whose
+attribute access is property lookup and whose method calls dispatch
+through the dynamic sink, typed extraction (`as_f64`, `as_i64`,
+`as_slice`), `release`, a `stats` ledger, and idempotent close.  The
+flag is the transport, and it is spelled at the call site because the
+crossing profiles differ.
+
+**Hosted** (`false`) embeds a full Node — V8, libuv, the Node standard
+library — inside the process on a dedicated thread that owns the
+environment and its event loop; every domain op posts one closure onto
+that thread and waits.  The embedder surface is C++ and cannot be
 resolved with `dlsym`, so first use compiles a small shim (source
 embedded in `js.cch`) against the node development headers and links
 `libnode`; the artifacts cache under `~/.cache/concurrent-c/js-host`,
-keyed by source hash, so a recompile happens when the shim changes and
-never per run.  Discovery overrides: `CC_NODE_INCLUDE` (header
-directory), `CC_LIBNODE` (library), `CC_JS_HOST_CACHE` (cache
-directory).  A micro probe addon, required during bootstrap, hands its
-`napi_env` back to the shim — embedders cannot mint one directly.
+keyed by source hash.  Discovery overrides: `CC_NODE_INCLUDE`,
+`CC_LIBNODE`, `CC_JS_HOST_CACHE`.  Node initializes once per process,
+and the constructor answers rather than degrades: a second live hosted
+domain, a hosted domain after close, and a hosted domain inside an
+existing Node-API host are each refused by name.  Beneath this tier
+sits the raw door — `CCJsHost host = cc_js_host_new(&arena) !>
+@destroy`, `host.run(fn, ctx)` — which runs a CC closure on the loop
+thread with a live `CCJs`, where the whole guest surface holds with no
+per-op posting; the bootstrap installs `globalThis.__ccRequire`, a
+require anchored at the process working directory, in both forms.
 
-A napi environment belongs to its loop thread, so the door is
-`host.run(fn, ctx)`: the closure runs on that thread with a live
-`CCJs`, where the whole guest surface — `eval`, `exec`, `global`,
-`CCJsVal` chains — holds.  Calls are post-and-wait and do not nest; a
-closure already on the loop thread uses the surface directly.  The
-bootstrap installs `globalThis.__ccRequire`, a require anchored at the
-process working directory, so evaluated source reaches installed
-node_modules.
+**Isolated** (`true`) spawns a full `node` child per handle speaking
+the `concurrent-c-node` line-JSON wire (the same broker source,
+embedded and kept byte-identical by test) over a socketpair — wire
+latency per hop, buying N domains per process, per-domain node
+executables (`cc_js_new_exe(true, exe, &arena)` > `CC_NODE_BIN` >
+`node` on PATH), separate heaps and event loops, and crash isolation:
+a child dying fails its own domain's calls, articulately, and nothing
+else.
 
-Node initializes once per process, and the constructor answers rather
-than degrades: `cc_js_host_new` is refused while a handle is live
-(share it), after a close (nothing reopens), and inside an existing
-Node-API host (guest mode) — two engines in one process is never what
-anyone means.
-
-### Binding CC into JS: `js_module::[T]`
+The materialization rules are the wire's rules on both transports:
+plain scalars (finite numbers, strings, booleans, null) cross by
+value; everything else is a domain-owned handle whose method calls go
+get-then-call, with the bound-method handle released after the call;
+non-finite floats cross tagged, never nulled.  `require` resolves
+against the process working directory, so `npm install` next to the
+program is the whole setup.  One divergence, loud: the isolated child
+awaits a thenable result before replying, while the hosted tier cannot
+block its own loop and refuses a Promise-valued result by name (hosted
+await is future work).  Typed-array payloads and child-to-host
+callbacks are not yet on the wire, and each refuses by name at the
+call that asks.
 
 `js_module::[T]` creates a Node-API module from a CC type — which is what
 a napi addon entry point must return:
@@ -2277,7 +2308,7 @@ a napi addon entry point must return:
 typedef struct Counter { long long n; } Counter;
 static long long Counter_bump(Counter *self, long long by = 1) { return self->n += by; }
 
-@comptime cc_js_export("Counter");
+@comptime cc_js_export("counter", "Counter", &seed);
 ```
 
 ```js
@@ -2329,19 +2360,36 @@ region aggregates every site into a single stanza at the last
 (the Node-API shape).  What an embedding's registration looks like is
 stdlib prose, not compiler code.
 
-A TU may export to several embeddings at once — both directives (or
-both explicit stanzas) in one file:
+A TU may export several types, to several embeddings at once — any mix
+of directives (or explicit stanzas) in one file:
 
 ```c
-@comptime cc_py_export("Counter", &seed);
-@comptime cc_js_export("Counter", &seed);
+@comptime cc_py_export("counters", "Counter", &cseed);
+@comptime cc_py_export("counters", "Stats", &sseed);
+@comptime cc_js_export("counters", "Counter", &cseed);
+@comptime cc_js_export("counters", "Stats", &sseed);
 ```
 
-One build produces one shared object under every declared name
-(`counter.abi3.so` and `counter.node`, hardlinked): every entry is
-always compiled in and each embedding resolves its runtime lazily at
-first use, so the bytes are identical and an unused entry costs
-nothing in any host.  `--module=<tag>` narrows the build to one
+Each ecosystem receives the same shape from the same bytes: a module
+with several classes namespaces each under its snake-case name —
+`m.counter.bump(4)` / `counters.counter.bump(4)` — and a single-class
+module stays flat on both sides.  Every `PyInit_<module>` is a
+dead-strip root.
+
+The module name is the directive's first argument — always explicit,
+`@comptime cc_js_export("module", "Type", seed[, "member"])` — and a
+TU may publish several modules by naming several.  Each group is one
+published artifact per embedding; the loaded name selects the module:
+the `PyInit_<module>` entry symbol on the Python side, the required
+basename on the JS side (an unmatched basename refuses, listing what
+the artifact holds).  Symbol-selected names hardlink the one object;
+basename-selected extras are real copies, because `dlopen` dedupes by
+inode and a hardlink loaded second would answer with the first name.
+One build produces one object under every group's names
+(`counters.abi3.so` and `counters.node`, hardlinked):
+every entry is always compiled in and each embedding resolves its
+runtime lazily at first use, so the bytes are identical and an unused
+entry costs nothing in any host.  `--module=<tag>` narrows the build to one
 embedding's artifact — the tag comes from the export directive's
 spelling (`cc_py_export` → `py`) — and an unknown tag reports the
 targets the TU spells.  `-o` names exactly one artifact.  A TU that

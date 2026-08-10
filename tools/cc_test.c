@@ -496,8 +496,17 @@ static int get_run_timeout_for_test(const char* stem, int default_timeout_sec) {
     /* Inner `ccc build` of the hosting TU, plus a first-use C++ compile
      * of the embedded libnode shim on a cold cache. */
     if (strcmp(stem, "js_host_smoke") == 0) return 60;
+    /* Inner `ccc build`, then four node children spawn and one is
+     * crashed on purpose. */
+    if (strcmp(stem, "js_dom_smoke") == 0) return 60;
+    /* Inner `ccc build` plus a first-use shim compile on a cold cache. */
+    if (strcmp(stem, "js_dom_hosted_smoke") == 0) return 60;
     /* Three inner `ccc build`s (dual + two narrowing runs) + both hosts. */
     if (strcmp(stem, "dual_module_export_smoke") == 0) return 60;
+    /* One dual multiclass `ccc build`, then a node run and a python run. */
+    if (strcmp(stem, "dual_multi_export_smoke") == 0) return 60;
+    /* Builds the counter addon, then spawns a worker realm. */
+    if (strcmp(stem, "js_module_realm_smoke") == 0) return 60;
     /* Inner `ccc build` of the js.cch+py.cch bridge TU, then a node run. */
     if (strcmp(stem, "cc_python_bridge_smoke") == 0) return 60;
     /* Same build plus ~30k bridge crossings and GC rounds under load. */

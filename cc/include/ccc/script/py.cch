@@ -2,7 +2,7 @@
  * Python interop: interpreter arenas (see "Python interop" in
  * spec/concurrent-c-stdlib-spec.md), light v1.
  *
- *   CCPy py = cc_py_new(&a) !> @destroy;
+ *   CCPy py = cc_py_new(false, &a) !> @destroy;
  *   CCPyObj m = py.import("math") !> @destroy;
  *   CCPyObj r = m.call_f("sqrt", 2.0) !> @destroy;
  *   double v = r.as_f64() !>;
@@ -45,7 +45,7 @@ CC_MODULE_ENTRY("PyInit_*", ".abi3.so")
 /* Export sugar, declared beside the entry it guarantees.  A TU spells
  * one directive per exported type:
  *
- *     @comptime cc_py_export("Counter", &seed);
+ *     @comptime cc_py_export("counter", "Counter", &seed);
  *
  * and the compiler's template pass expands each IN PLACE to exactly the
  * init a hand-written module spells (independent stanzas — CPython
@@ -59,7 +59,14 @@ CC_MODULE_ENTRY("PyInit_*", ".abi3.so")
 #define CC_MODULE_EXPORT(...)
 #endif
 CC_MODULE_EXPORT(cc_py_export,
-    "$each{void *PyInit_$name(void) { return py_module::[$T](\"$name\", $seed); }\n}")
+    "$groups{void *PyInit_$module(void) {\n"
+    "    void *m__ = cc__py_group_begin(\"$module\", $count);\n"
+    "$each{    {\n"
+    "        void *cc__child_$name = py_module::[$T](\"$name\", $seed);\n"
+    "        m__ = cc__py_group_add(m__, \"$name\", cc__child_$name);\n"
+    "    }\n}"
+    "    return m__;\n"
+    "}\n}")
 
 #define CC__PY_NAME_CACHE 32
 
@@ -240,6 +247,8 @@ typedef struct CC__PySyms {
      * pointer, which fails in a way that looks like "unsupported". */
     CC__PyStatus (*NewInterpreterFromConfig)(void **, const void *);
     void *(*ModuleDefInit)(void *);
+    void *(*ModuleFromDefAndSpec2)(void *, void *, int);
+    int (*ModuleExecDef)(void *, void *);
     void (*EndInterpreter)(void *);
     void *(*ThreadStateSwap)(void *);
     void *(*ThreadStateGet)(void);
@@ -799,6 +808,8 @@ have_lib:
     CC__PY_SYM_OPT(MemoryViewFromBuffer, "PyMemoryView_FromBuffer")
     CC__PY_SYM_OPT(NewInterpreterFromConfig, "Py_NewInterpreterFromConfig")
     CC__PY_SYM_OPT(ModuleDefInit, "PyModuleDef_Init")
+    CC__PY_SYM_OPT(ModuleFromDefAndSpec2, "PyModule_FromDefAndSpec2")
+    CC__PY_SYM_OPT(ModuleExecDef, "PyModule_ExecDef")
     CC__PY_SYM_OPT(EndInterpreter, "Py_EndInterpreter")
     CC__PY_SYM_OPT(ThreadStateSwap, "PyThreadState_Swap")
     CC__PY_SYM_OPT(ThreadStateGet, "PyThreadState_Get")
@@ -846,7 +857,7 @@ static inline void cc_py_runtime_desc(char *buf, size_t cap) {
  * says:
  *
  *     if (!cc_py_available()) { puts("SKIP (no libpython)"); return 0; }
- *     CCPy py = cc_py_new(&a) !>;
+ *     CCPy py = cc_py_new(false, &a) !>;
  *
  * This IS the loader (same soname list, same CC_LIBPYTHON override), so
  * the probe and the constructor cannot disagree. */
@@ -1898,6 +1909,87 @@ static CC__PyModuleDef *cc__py_def_new(const char *qualname, const char *doc,
     return d;
 }
 
+/* Multiclass grouping for `PyInit_$module`: one exported class stays
+ * FLAT (the module IS the type — today's shape); several nest each
+ * class as a child-module attribute — `import counters;
+ * counters.counter.bump(4)` — mirroring the JS namespaces.  A NULL
+ * anywhere propagates with the Python error already set, so the import
+ * machinery reports the real failure; the FLAT sentinel is distinct
+ * from failure so a broken parent can never silently flatten. */
+#define CC__PY_GROUP_FLAT ((void *)(uintptr_t)1)
+
+static inline void *cc__py_group_begin(const char *name, int count) {
+    /* First code to run in PyInit_<module>: the table loads here (the
+     * factory would load it, but the parent module is built first). */
+    if (cc__py_load() != 0) return NULL;
+    if (count <= 1) return CC__PY_GROUP_FLAT;
+    {
+        CC__PyModuleDef *def =
+            cc__py_def_new(name, "cc multiclass module", 0, NULL);
+        return def ? cc__py.ModuleCreate2(def, CC__PY_API_VERSION) : NULL;
+    }
+}
+
+/* A multi-phase factory returns the module DEF for the import
+ * machinery to execute; a grouped child must be a REALIZED module, so
+ * the def is executed here through a hand-built ModuleSpec — the same
+ * per-module state allocation and seeding the machinery would do. */
+static inline void *cc__py_group_realize(void *maybe_def, const char *name) {
+    void *machinery, *speccls, *nameo, *none, *b, *spec = NULL, *m;
+    if (!cc__py.ModuleDefInit) return maybe_def; /* single-phase module */
+    if (!maybe_def) return NULL;
+    if (!cc__py.ModuleFromDefAndSpec2 || !cc__py.ModuleExecDef)
+        return cc__py_raise("cc: multiclass python modules need "
+                            "PyModule_FromDefAndSpec2");
+    b = cc__py.ImportModule("builtins");
+    none = b ? cc__py.GetAttrString(b, "None") : NULL;
+    if (b) cc__py.DecRef(b);
+    machinery = cc__py.ImportModule("importlib.machinery");
+    speccls = machinery ? cc__py.GetAttrString(machinery, "ModuleSpec") : NULL;
+    if (machinery) cc__py.DecRef(machinery);
+    nameo = cc__py.UnicodeFromString(name);
+    if (speccls && nameo && none) {
+        void *targs = cc__py.TupleNew(2);
+        if (targs) {
+            cc__py.IncRef(nameo);
+            cc__py.IncRef(none);
+            if (cc__py.TupleSetItem(targs, 0, nameo) == 0 &&
+                cc__py.TupleSetItem(targs, 1, none) == 0)
+                spec = cc__py.CallObject(speccls, targs);
+            cc__py.DecRef(targs);
+        }
+    }
+    if (speccls) cc__py.DecRef(speccls);
+    if (nameo) cc__py.DecRef(nameo);
+    if (none) cc__py.DecRef(none);
+    if (!spec) return NULL;
+    m = cc__py.ModuleFromDefAndSpec2(maybe_def, spec, CC__PY_API_VERSION);
+    cc__py.DecRef(spec);
+    if (!m) return NULL;
+    if (cc__py.ModuleExecDef(m, maybe_def) != 0) {
+        cc__py.DecRef(m);
+        return NULL;
+    }
+    return m;
+}
+
+static inline void *cc__py_group_add(void *m, const char *name, void *child) {
+    if (!m) return NULL; /* failed begin/earlier add; error already set */
+    if (m == CC__PY_GROUP_FLAT) return child; /* the def; machinery executes */
+    child = cc__py_group_realize(child, name);
+    if (!child) {
+        cc__py.DecRef(m);
+        return NULL;
+    }
+    if (cc__py.ObjectSetAttrString(m, name, child) != 0) {
+        cc__py.DecRef(child);
+        cc__py.DecRef(m);
+        return NULL;
+    }
+    cc__py.DecRef(child); /* the parent holds it now */
+    return m;
+}
+
 /* Make `cc` a package in THIS interpreter, or find the one already there.
  * Returns a BORROWED reference, NULL on failure. */
 static void *cc__py_ensure_cc_package(void) {
@@ -2015,20 +2107,38 @@ static int cc__py_install_namespace(CCArena *host_arena) {
  * interpreter, which not every runtime can provide. */
 static int cc__py_main_taken;
 
-/* `cc_py_new` yields an interpreter.  `arena` is the handle scratch: error
- * messages and default `.as_slice()` backing; explicit `.as_slice_into(&dst)`
- * can override the destination.
+/* `cc_py_new(isolated, &arena)` yields an interpreter — the same
+ * constructor shape as `cc_js_new`: the transport is the flag, arena
+ * last.  `arena` is the handle scratch: error messages and default
+ * `.as_slice()` backing; explicit `.as_slice_into(&dst)` can override
+ * the destination.
  *
- * The first call in a process takes the interpreter `Py_Initialize` creates.
- * Every later call creates an isolated one with its OWN GIL, so two handles
- * run Python in parallel — and fails cleanly where the runtime cannot, rather
- * than quietly aliasing the first (which would serialize on one GIL and share
- * module state with no signal).  To share an interpreter, pass the handle. */
-static inline CCPy !>(CCPyError) cc_py_new(CCArena *arena) {
+ * `false` (in-process): the first call in a process takes the
+ * interpreter `Py_Initialize` creates.  Every later call creates an
+ * isolated one with its OWN GIL, so two handles run Python in parallel
+ * — and fails cleanly where the runtime cannot, rather than quietly
+ * aliasing the first (which would serialize on one GIL and share
+ * module state with no signal).  To share an interpreter, pass the
+ * handle.  Python multiplies in-process where V8 cannot, so `false`
+ * already gives N parallel domains.
+ *
+ * `true` (a python child per handle, the broker.py wire) is not yet
+ * implemented from CC and refuses by name — the flag reserves the
+ * symmetric shape, never a silent alias of `false`. */
+static inline CCPy !>(CCPyError) cc_py_new(_Bool isolated, CCArena *arena) {
     CCPy py;
     memset(&py, 0, sizeof(py));
     cc__py_errbuf[0] = '\0';
     cc__py_bind_err_arena(arena);
+    if (isolated) {
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: isolated python domains (a python child per "
+                 "handle) are not yet implemented from CC — the wire "
+                 "exists as npm/cc-python's broker.py; cc_py_new(false, "
+                 "&arena) opens in-process interpreters, which already "
+                 "parallelize under per-interpreter GILs");
+        return cc_err_CCResult_CCPy_CCPyError(cc__py_err("cc_py_new"));
+    }
     if (!arena) {
         snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
                  "python: cc_py_new requires arena");

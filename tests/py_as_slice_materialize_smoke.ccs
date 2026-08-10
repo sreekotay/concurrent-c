@@ -16,7 +16,7 @@ int main(void) {
     if (!a.valid() || !other.valid()) return 1;
 
     if (!cc_py_available()) { puts("py_as_slice_materialize_smoke: SKIP (no libpython)"); return 0; }
-    CCPy py = cc_py_new(&a) !>;
+    CCPy py = cc_py_new(false, &a) !>;
     if (py.arena != &a) return 2;
 
     CCPyObj sys = py.import("sys") !> @destroy;

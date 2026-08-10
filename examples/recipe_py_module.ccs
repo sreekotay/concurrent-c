@@ -45,4 +45,4 @@ static long long !>(CCError) Counter_bump_checked(Counter *self, long long by) {
  * <ccc/script/py.cch> for the exact stanza this expands to). */
 static const Counter seed = { .n = 100 };
 
-@comptime cc_py_export("Counter", &seed);
+@comptime cc_py_export("counter", "Counter", &seed);

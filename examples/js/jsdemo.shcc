@@ -3,59 +3,39 @@
  * JS twin of examples/py/pydemo.shcc — same shape, same ownership: CC
  * owns main and hosts the runtime in-process.
  *
- *   pydemo:  cc_py_new(&a)       →  libpython in-process
- *   jsdemo:  cc_js_host_new(&a)  →  libnode in-process (V8, libuv, npm)
+ *   pydemo:  cc_py_new(false, &a)        →  libpython in-process
+ *   jsdemo:  cc_js_new(false, &a)  →  libnode in-process (V8, libuv, npm)
  *
- * One difference is load-bearing: a Node-API environment belongs to its
- * event-loop thread, so the calls live in a closure posted through
- * `host.run(fn, ctx)` — and inside it the surface is pydemo's:
- * attribute chains, `!>`, typed destinations.  `__ccRequire` reaches
- * the Node stdlib and anything `npm install` put in the working
- * directory.
- *
- * (The other ownership — node owns main and imports a CC-built .node —
- * is examples/recipe_js_module.ccs, with jsdemo_mod.ccs as the
- * companion module here.  The fuller hosting tour, state across runs
- * included, is examples/recipe_js_host.ccs.)
+ * One constructor, transport as the flag: `false` embeds a full Node in
+ * this process (needs libnode-dev; one per process — V8's rule);
+ * `true` spawns a node child per handle instead — N isolated domains,
+ * crash isolation, wire cost (examples/recipe_js_isolated.ccs).  The
+ * surface is the same either way: require/eval/exec, attribute chains,
+ * `!>`, typed destinations.
  *
  *     ccc examples/js/jsdemo.shcc        # needs libnode-dev
  */
 #include <ccc/script/js.cch>
 
-static void demo(CCJs *js, void *ctx) {
-    (void)ctx;
-    @errhandler(CCError e) {
-        fprintf(stderr, "js: %s\n", e.message);
-        return;
-    }
-
-    CCJsVal Math = js->global()!>.get("Math") !>;
-    double v = Math.sqrt(2.0) !>;
-    println(@string(`Math.sqrt(2.0) = ${v}`, js->arena)) !>;
-
-    double pv = Math.pow(2.0, 10) !>;
-    println(@string(`Math.pow(2,10) = ${pv}`, js->arena)) !>;
-
-    CCSlice plat =
-        js->global()!>.__ccRequire("os")!>.platform()!>.as_slice(js->arena) !>;
-    println(@string(`os.platform()  = ${plat}`, js->arena)) !>;
-
-    CCJsVal proc = js->global()!>.get("process") !>;
-    CCSlice ver = proc.get("version")!>.as_slice(js->arena) !>;
-    println(@string(`node.version   = ${ver}`, js->arena)) !>;
-}
-
-/* Degrade cleanly where the node dev headers or libnode are absent. */
-if (system("{ test -e /usr/include/node/node.h"
-           " || test -e /usr/local/include/node/node.h"
-           " || test -n \"$CC_NODE_INCLUDE\"; }"
-           " && command -v c++ >/dev/null 2>&1"
-           " && { ldconfig -p 2>/dev/null | grep -q libnode"
-           " || test -n \"$CC_LIBNODE\"; }") != 0) {
+/* The probe, mirroring cc_py_available(): clean skip, no side effects. */
+if (!cc_js_dom_available(false)) {
     "SKIP (need libnode-dev + c++)".println() !>;
     return 0;
 }
 
-CCJsHost host = cc_js_host_new(&a) !> @destroy;
-host.run(demo, NULL) !>;
+CCJsDom js = cc_js_new(false, &a) !> @destroy;
+
+double v = js.eval("Math.sqrt(2)")!>.as_f64() !>;
+println(@string(`Math.sqrt(2.0) = ${v}`, &a)) !>;
+
+long long pv = js.eval("Math.pow(2,10)")!>.as_i64() !>;
+println(@string(`Math.pow(2,10) = ${pv}`, &a)) !>;
+
+CCJsDomVal os = js.require("os") !> @destroy;
+CCSlice plat = os.platform()!>.as_slice(&a) !>;
+println(@string(`os.platform()  = ${plat}`, &a)) !>;
+
+CCSlice ver = js.eval("process.version")!>.as_slice(&a) !>;
+println(@string(`node.version   = ${ver}`, &a)) !>;
+
 return 0;

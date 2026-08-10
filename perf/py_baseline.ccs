@@ -124,7 +124,7 @@ int main(int argc, char **argv) {
     if (g_samples > 64) g_samples = 64;
 
     if (!cc_py_available()) { puts("SKIP (no libpython)"); return 0; }
-    CCPy py = cc_py_new(&a) !>;
+    CCPy py = cc_py_new(false, &a) !>;
 
     Math seed = { .calls = 0 };
     py.expose::[Math]("m", &seed) !>;

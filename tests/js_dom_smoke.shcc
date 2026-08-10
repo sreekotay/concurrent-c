@@ -1,0 +1,48 @@
+/* Isolated JS domains from CC: builds tests/js_dom_prog.ccs — a full
+ * node child per cc_js_new(true, &a) handle, the same line-JSON broker
+ * as concurrent-c-node — and runs it.  Also pins the embedded broker
+ * against pypi/cc-node/cc_node/broker.cjs: the two are the SAME wire,
+ * and drift between them would be a silent fork of the protocol. */
+CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+
+{
+    CCCommand which = cc_command(&a, @slice("sh"));
+    which.arg("-c");
+    which.arg("command -v node >/dev/null 2>&1");
+    int rc = which.status() !>;
+    if (rc != 0) { "SKIP (no node)".println() !>; return 0; }
+}
+
+{
+    CCCommand build = cc_command(&a, @slice("./cc/bin/ccc"));
+    build.arg("build");
+    build.arg("tests/js_dom_prog.ccs");
+    build.inherit_stdio();
+    int rc = build.status() !>;
+    if (rc != 0) { "build failed".println() !>; return 1; }
+}
+
+{
+    /* A fresh cache dir for this run: the one broker file in it IS the
+     * embedded copy the current binary writes — no mtime archaeology. */
+    CCCommand run = cc_command(&a, @slice("sh"));
+    run.arg("-c");
+    run.arg("rm -rf tmp/js_dom_cache && "
+            "CC_JS_HOST_CACHE=tmp/js_dom_cache ./bin/js_dom_prog");
+    run.inherit_stdio();
+    int rc = run.status() !>;
+    if (rc != 0) { "iso run failed".println() !>; return 1; }
+}
+
+{
+    /* Broker parity: the embedded copy must be byte-identical to the
+     * package's broker.cjs — drift would silently fork the wire. */
+    CCCommand par = cc_command(&a, @slice("sh"));
+    par.arg("-c");
+    par.arg("f=$(ls tmp/js_dom_cache/cc_js_broker_*.cjs 2>/dev/null | head -1); "
+            "test -n \"$f\" && cmp -s \"$f\" pypi/cc-node/cc_node/broker.cjs");
+    int rc = par.status() !>;
+    if (rc != 0) { "broker drift (embedded != pypi/cc-node)".println() !>; return 1; }
+    "broker_parity true".println() !>;
+}
+return 0;

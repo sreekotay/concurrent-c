@@ -1,0 +1,12 @@
+namespaces counter,stats
+bump_seeded 104
+bump_default 105
+mean 4
+solo_flat true
+solo_independent true
+py_bump_seeded 104
+py_mean 4.0
+py_solo_independent True
+hardlinked True
+solo_node_distinct True
+wrong_name_refused true

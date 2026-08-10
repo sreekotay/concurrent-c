@@ -316,6 +316,7 @@ char* cc_rewrite_module_export_directives_text(const char* src, size_t n, const 
  * has (0 also on malformed — the compile pass re-scans loudly); the first
  * site's module name lands in name_out. */
 int cc_module_export_tu_artifact(const char* src, size_t n, const char* directive, char* name_out, size_t cap);
+int cc_module_export_tu_artifact_all(const char* src, size_t n, const char* directive, char names[][128], int max);
 
 /* Resolve + read a `<ccc/…>` header against the input's repo root, the
  * compiler's install tree, and CC_INCLUDE_PATH.  Caller frees. */

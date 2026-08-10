@@ -1,0 +1,124 @@
+/* The hosted transport behind the unified domain: cc_js_new(false, &a)
+ * embeds libnode and serves the SAME ops the isolated tier serves —
+ * require/eval/exec, vals, the dynamic sink — by posting each op onto
+ * the loop thread.  Rungs prove scalar and string materialization,
+ * state, wire-parity method calls and argument marshaling, the ref
+ * ledger, the articulate Promise refusal (the one documented tier
+ * divergence), the once-per-process refusals, and clean teardown. */
+#include <ccc/std/prelude.cch>
+#include <ccc/script/js.cch>
+
+int main(void) {
+    CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+
+    if (!cc_js_dom_available(false)) {
+        printf("SKIP (need libnode-dev + c++)\n");
+        return 0;
+    }
+
+    CCResult_CCJsDom_CCJsError mk = cc_js_new(false, &a);
+    if (!mk.ok) {
+        printf("new failed: %s\n", mk.u.error.base.message);
+        return 1;
+    }
+    CCJsDom js = mk.u.value;
+    printf("new %s\n", js.tier == 0 && js.host.open ? "true" : "false");
+
+    CCResult_CCJsDomVal_CCJsError e42 = cc_js_dom_eval(&js, "6*7");
+    printf("eval_num %s\n",
+           e42.ok && e42.u.value.num_is_int && e42.u.value.inum == 42
+               ? "true" : "false");
+
+    CCResult_CCJsDomVal_CCJsError es = cc_js_dom_eval(&js, "'hi'");
+    printf("eval_str %s\n",
+           es.ok && es.u.value.text.len == 2 &&
+                   memcmp(es.u.value.text.ptr, "hi", 2) == 0
+               ? "true" : "false");
+
+    CCResult_void_CCJsError st = cc_js_dom_exec(&js, "globalThis.x = 41");
+    CCResult_CCJsDomVal_CCJsError sx = cc_js_dom_eval(&js, "x + 1");
+    printf("state_persists %s\n",
+           st.ok && sx.ok && sx.u.value.inum == 42 ? "true" : "false");
+
+    /* require + the sink: same get+call shape as the wire, in-process. */
+    CCResult_CCJsDomVal_CCJsError osr = cc_js_dom_require(&js, "os");
+    if (!osr.ok) { printf("require failed\n"); return 1; }
+    CCJsDomVal os = osr.u.value;
+    printf("require_handle %s\n", os.kind == CC__JS_DOM_K_HANDLE
+                                      ? "true" : "false");
+    CCResult_CCJsDomVal_CCJsError plat = cc_js_dom_val_callm(&os, "platform", 0);
+    int plat_ok = 0;
+    if (plat.ok) {
+        CCResult_CCSlice_CCJsError ps = cc_js_dom_val_as_slice(&plat.u.value, &a);
+        plat_ok = ps.ok && ps.u.value.len >= 3;
+    }
+    printf("method_call %s\n", plat_ok ? "true" : "false");
+
+    CCResult_CCJsDomVal_CCJsError pathr = cc_js_dom_require(&js, "path");
+    int join_ok = 0;
+    if (pathr.ok) {
+        CCJsDomVal path = pathr.u.value;
+        CCResult_CCJsDomVal_CCJsError j = cc_js_dom_val_callm(
+            &path, "join", 2, CC_JS_DOM_ARG("a"), CC_JS_DOM_ARG("b"));
+        if (j.ok) {
+            CCResult_CCSlice_CCJsError jsl = cc_js_dom_val_as_slice(&j.u.value, &a);
+            join_ok = jsl.ok && jsl.u.value.len == 3;
+        }
+        cc_js_dom_val_release(&path);
+    }
+    printf("args_marshal %s\n", join_ok ? "true" : "false");
+
+    /* A dom-val argument derefs back to its live object. */
+    CCResult_CCJsDomVal_CCJsError arr = cc_js_dom_eval(&js, "[3,1,2]");
+    int val_arg_ok = 0;
+    if (arr.ok && arr.u.value.kind == CC__JS_DOM_K_HANDLE) {
+        CCJsDomVal av = arr.u.value;
+        CCResult_CCJsDomVal_CCJsError json = cc_js_dom_require(&js, "path");
+        (void)json;
+        CCResult_CCJsDomVal_CCJsError sorted =
+            cc_js_dom_val_callm(&av, "sort", 0);
+        if (sorted.ok) {
+            CCResult_CCSlice_CCJsError ss =
+                cc_js_dom_val_as_slice(&sorted.u.value, &a);
+            val_arg_ok = ss.ok && ss.u.value.len == 5; /* "1,2,3" */
+        }
+        cc_js_dom_val_release(&av);
+    }
+    printf("handle_roundtrip %s\n", val_arg_ok ? "true" : "false");
+
+    /* The ledger: refs held minus refs released. */
+    CCResult_int64_t_CCJsError before = cc_js_dom_stats(&js);
+    cc_js_dom_val_release(&os);
+    CCResult_int64_t_CCJsError after = cc_js_dom_stats(&js);
+    printf("release_ledger %s\n",
+           before.ok && after.ok && after.u.value < before.u.value
+               ? "true" : "false");
+
+    /* The one tier divergence, loud: the wire awaits, hosted refuses. */
+    CCResult_CCJsDomVal_CCJsError pr =
+        cc_js_dom_eval(&js, "Promise.resolve(1)");
+    printf("promise_refused %s\n",
+           !pr.ok && strstr(pr.u.error.base.message, "Promise") ? "true"
+                                                                : "false");
+
+    /* A JS failure is a Result carrying the exception's message. */
+    CCResult_CCJsDomVal_CCJsError bad = cc_js_dom_eval(&js, "nope.nope");
+    printf("error_is_result %s\n",
+           !bad.ok && strstr(bad.u.error.base.message, "nope") ? "true"
+                                                               : "false");
+
+    /* Hosted embeds once per process; the exe knob belongs to isolated. */
+    CCResult_CCJsDom_CCJsError second = cc_js_new(false, &a);
+    printf("second_hosted_refused %s\n", !second.ok ? "true" : "false");
+    CCResult_CCJsDom_CCJsError exe = cc_js_new_exe(false, "/usr/bin/node", &a);
+    printf("exe_on_hosted_refused %s\n",
+           !exe.ok && strstr(exe.u.error.base.message, "ISOLATED") ? "true"
+                                                                   : "false");
+
+    cc_js_dom_close(&js);
+    CCResult_CCJsDomVal_CCJsError closed = cc_js_dom_eval(&js, "1");
+    printf("closed_door_refuses %s\n", !closed.ok ? "true" : "false");
+
+    printf("clean_exit true\n");
+    return 0;
+}

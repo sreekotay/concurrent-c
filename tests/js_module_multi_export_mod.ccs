@@ -22,5 +22,5 @@ static double PairHalver_half(PairHalver *self, double x) {
 static const PairCounter cseed = { .n = 100 };
 static const PairHalver hseed = { .bias = 0.25 };
 
-@comptime cc_js_export("PairCounter", &cseed);
-@comptime cc_js_export("PairHalver", &hseed);
+@comptime cc_js_export("pair", "PairCounter", &cseed);
+@comptime cc_js_export("pair", "PairHalver", &hseed);

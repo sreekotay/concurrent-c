@@ -14,7 +14,7 @@ int main(void) {
     @errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); return 1; }
     CCArena a = cc_arena_heap(megabytes(1)) @destroy;
     if (!cc_py_available()) { puts("SKIP (no libpython)"); return 0; }
-    CCPy py = cc_py_new(&a) !>;
+    CCPy py = cc_py_new(false, &a) !>;
 
     /* The view is element-typed (`d` here): `sum(mv)` sums doubles,
      * `len(mv)` counts elements, `.nbytes` restates the raw size. */

@@ -37,7 +37,7 @@ int main(int argc, char **argv) {
     if (n < 2) n = 2;
 
     if (!cc_py_available()) { puts("SKIP (no libpython)"); return 0; }
-    CCPy py = cc_py_new(&a) !>;
+    CCPy py = cc_py_new(false, &a) !>;
 
     CCResult_void_CCPyError probe = cc_py_exec(&py, @string(`
         import matplotlib

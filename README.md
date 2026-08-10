@@ -45,7 +45,7 @@ Fuller example (error policy + compose): [examples/hello.ccs](examples/hello.ccs
 
 ### Python & JavaScript interop
 
-- [JS / Python interop](docs/js-py-modules.md) — host Python ([`pydemo.shcc`](examples/py/pydemo.shcc)) or a full in-process Node ([`recipe_js_host.ccs`](examples/recipe_js_host.ccs)) from CC, or export one file → `.node` + `.abi3.so` (40-90ns); plus the process bridges below
+- [JS / Python interop](docs/js-py-modules.md) — host Python ([`pydemo.shcc`](examples/py/pydemo.shcc)) or JavaScript (`cc_js_new(isolated, &a)`: in-process libnode or N node children, [`jsdemo.shcc`](examples/js/jsdemo.shcc)) from CC, or export one file → `.node` + `.abi3.so` (40-90ns); plus the process bridges below
 - [`npm/cc-python`](npm/cc-python) (`concurrent-c-python`) — Python from Node: any module, zero-copy typed arrays, async lanes, N×numpy isolated domains
 - [`pypi/cc-node`](pypi/cc-node) (`concurrent-c-node`) — JavaScript and npm packages from Python, same domain model mirrored
 

@@ -1,0 +1,31 @@
+/* Multiclass, multi-module, dual-target: two types published as one
+ * module ("counters") for BOTH ecosystems, and one of them ALSO
+ * published alone as a second module ("solo_stats") from the same TU.
+ * Every artifact is the same bytes; the loaded name selects the module
+ * (entry symbol on the Python side, basename on the JS side), and each
+ * registration seeds a fresh instance — counters.stats and solo_stats
+ * never share state.  Paired smoke: dual_multi_export_smoke.shcc. */
+#include <ccc/script/py.cch>
+#include <ccc/script/js.cch>
+
+typedef struct Counter { long long n; } Counter;
+static long long Counter_bump(Counter *self, long long by = 1) {
+    self->n += by;
+    return self->n;
+}
+
+typedef struct Stats { double sum; long long n; } Stats;
+static void Stats_add(Stats *self, double x) { self->sum += x; self->n++; }
+static double Stats_mean(Stats *self) {
+    return self->n ? self->sum / (double)self->n : 0;
+}
+
+static const Counter cseed = { .n = 100 };
+static const Stats sseed = { .sum = 0, .n = 0 };
+
+@comptime cc_py_export("counters", "Counter", &cseed);
+@comptime cc_py_export("counters", "Stats", &sseed);
+@comptime cc_js_export("counters", "Counter", &cseed);
+@comptime cc_js_export("counters", "Stats", &sseed);
+@comptime cc_py_export("solo_stats", "Stats", &sseed);
+@comptime cc_js_export("solo_stats", "Stats", &sseed);

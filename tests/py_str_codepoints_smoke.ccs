@@ -17,7 +17,7 @@ int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
     if (!arena.valid()) return 1;
 
-    CCPy py = cc_py_new(&arena) !> @destroy;
+    CCPy py = cc_py_new(false, &arena) !> @destroy;
     CCPyObj s = py.eval(@slice("'héllo'")) !> @destroy;
     CCPyStr view;
     assert(cc__py_in_pystr(&view, s.o, "s") == 0);
