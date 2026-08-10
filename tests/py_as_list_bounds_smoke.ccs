@@ -1,0 +1,49 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/script/py.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* as_list::[int] / map element conversion must range-check like CC_PY_IN —
+ * a Python int that does not fit int is an error, never a silent narrow. */
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
+
+    CCArena a = cc_arena_heap(kilobytes(64)) @destroy;
+    if (!cc_py_available()) {
+        puts("py_as_list_bounds_smoke: SKIP (no libpython)");
+        return 0;
+    }
+    CCPy py = cc_py_new(false, &a) !>;
+
+    /* In-range int list still works. */
+    CCPyObj small = py.eval(@slice("[1, 2, 3]")) !> @destroy;
+    CCSlice ok = small.as_list::[int](&a) !>;
+    if (ok.len != 3) return 2;
+    int *iv = (int *)ok.ptr;
+    if (iv[0] != 1 || iv[2] != 3) return 3;
+
+    /* 2^40 fits int64_t but not int — must refuse. */
+    CCPyObj big = py.eval(@slice("[2**40]")) !> @destroy;
+    CCResult_CCSlice_CCPyError bad = cc_py_obj_as_list(int, &big, &a);
+    if (!bad.is_err()) {
+        fprintf(stderr, "expected as_list::[int] overflow refuse\n");
+        return 4;
+    }
+    if (strstr(bad.u.error.base.message, "does not convert") == NULL &&
+        strstr(bad.u.error.base.message, "as_list") == NULL) {
+        fprintf(stderr, "unexpected message: %s\n", bad.u.error.base.message);
+        return 5;
+    }
+
+    /* Same value as int64_t is fine. */
+    CCSlice wide = big.as_list::[int64_t](&a) !>;
+    if (wide.len != 1) return 6;
+    int64_t *lv = (int64_t *)wide.ptr;
+    if (lv[0] != (1LL << 40)) return 7;
+
+    puts("ok");
+    return 0;
+}

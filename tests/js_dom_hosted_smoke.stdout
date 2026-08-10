@@ -7,7 +7,7 @@ method_call true
 args_marshal true
 handle_roundtrip true
 release_ledger true
-promise_refused true
+promise_as_handle true
 error_is_result true
 second_hosted_refused true
 exe_on_hosted_refused true

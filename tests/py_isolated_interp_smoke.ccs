@@ -24,13 +24,14 @@ int main(void) {
     if (first.isolated != 0) return 2; /* the process interpreter is shared */
     first.exec(@slice("marker = 'first'\n")) !>;
 
-    /* The reserved transport flag refuses by name — never a silent
-     * alias of the in-process form. */
-    {
+    /* Process-isolated domains are a separate transport: a python child
+     * per handle.  Probe availability without requiring libpython. */
+    if (cc_py_proc_available()) {
         CCResult_CCPy_CCPyError iso = cc_py_new(true, &a);
-        if (!iso.is_err() ||
-            strstr(iso.u.error.base.message, "not yet implemented") == NULL)
-            return 6;
+        if (!iso.ok) return 6;
+        if (iso.u.value.tier != CC__PY_TIER_PROC) return 6;
+        if (iso.u.value.fd < 0) return 6;
+        cc_py_close(&iso.u.value);
     }
 
     /* Not an availability question: libpython is loaded, and this asks

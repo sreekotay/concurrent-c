@@ -1,0 +1,89 @@
+/* Process-isolated Python: a full CPython child per cc_py_new(true, &a)
+ * handle on the broker.py wire.  Scalars cross by value; modules stay
+ * remote handles.  Two domains do not share state. */
+#include <ccc/std/prelude.cch>
+#include <ccc/script/py.cch>
+#include <math.h>
+#include <stdio.h>
+#include <string.h>
+
+int main(void) {
+    CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+
+    if (!cc_py_proc_available()) {
+        printf("SKIP (no python3)\n");
+        return 0;
+    }
+
+    CCResult_CCPy_CCPyError mk = cc_py_new(true, &a);
+    if (!mk.ok) {
+        printf("new failed: %s\n", mk.u.error.base.message);
+        return 1;
+    }
+    CCPy py = mk.u.value;
+    printf("new %s\n",
+           py.tier == CC__PY_TIER_PROC && py.fd >= 0 ? "true" : "false");
+
+    CCResult_CCPyObj_CCPyError mr = py.import("math");
+    if (!mr.ok) {
+        printf("import failed: %s\n", mr.u.error.base.message);
+        return 1;
+    }
+    CCPyObj m = mr.u.value;
+    if (m.kind != CC__PY_K_HANDLE) {
+        printf("import_handle false\n");
+        return 1;
+    }
+
+    CCResult_CCPyObj_CCPyError rr = m.call_f("sqrt", 2.0);
+    if (!rr.ok) {
+        printf("sqrt failed: %s\n", rr.u.error.base.message);
+        return 1;
+    }
+    CCPyObj ro = rr.u.value;
+    CCResult_double_CCPyError rv = ro.as_f64();
+    double r = rv.ok ? rv.u.value : 0.0;
+    cc_py_obj_release(&ro);
+    printf("sqrt %s\n",
+           rv.ok && fabs(r - 1.4142135623730951) < 1e-9 ? "true" : "false");
+
+    /* A second domain is a second python: state does not cross. */
+    CCResult_CCPy_CCPyError mk2 = cc_py_new(true, &a);
+    if (!mk2.ok) {
+        printf("second new failed: %s\n", mk2.u.error.base.message);
+        return 1;
+    }
+    CCPy py2 = mk2.u.value;
+    CCResult_CCPyObj_CCPyError m2r = py2.import("math");
+    int domains_ok = 0;
+    if (m2r.ok) {
+        CCPyObj m2 = m2r.u.value;
+        /* Distinct children → distinct handle namespaces; both can sqrt. */
+        CCResult_CCPyObj_CCPyError s2 = m2.call_f("sqrt", 4.0);
+        if (s2.ok) {
+            CCResult_double_CCPyError d2 = s2.u.value.as_f64();
+            domains_ok = d2.ok && fabs(d2.u.value - 2.0) < 1e-9 &&
+                         py.pid != py2.pid;
+            cc_py_obj_release(&s2.u.value);
+        }
+        cc_py_obj_release(&m2);
+    }
+    printf("domains_isolated %s\n", domains_ok ? "true" : "false");
+
+    /* Typed slices refuse by name on the isolated wire. */
+    {
+        double xs[:] = {1.0, 2.0, 3.0};
+        CCResult_CCPyObj_CCPyError bad =
+            cc_py_obj_callm(&m, "fsum", 1, CC_PY_ARG(xs));
+        printf("typed_slice_refused %s\n",
+               !bad.ok && strstr(bad.u.error.base.message, "typed slices")
+                   ? "true"
+                   : "false");
+    }
+
+    cc_py_obj_release(&m);
+    cc_py_close(&py2);
+    cc_py_close(&py);
+    printf("clean_exit true\n");
+    return 0;
+}

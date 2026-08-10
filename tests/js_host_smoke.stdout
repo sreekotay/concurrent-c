@@ -5,6 +5,9 @@ require_door true
 state_set true
 state_persists true
 error_is_result true
+reentry_refused true
+js_pos_wrap true
+js_pos_bare true
 run_after_close_refused true
 new_after_close_refused true
 clean_exit true

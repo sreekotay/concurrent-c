@@ -1085,6 +1085,12 @@ static AstNode* shadow_eh_for_call(ShadowCtx* ctx, const char* call) {
                  strncmp(fname, "cc_char_", 8) == 0 ||
                  strncmp(fname, "cc_const_char_", 14) == 0)
             err = "CCError";
+        /* Script parents: .cch protos are often not AST_RESULT_FN-registered
+         * into the rfn table; UFCS still lowers to these free names. */
+        else if (strncmp(fname, "cc_js_", 6) == 0)
+            err = "CCJsError";
+        else if (strncmp(fname, "cc_py_", 6) == 0)
+            err = "CCPyError";
     }
     if (err && err[0]) {
         for (i = ctx->nehs - 1; i >= 0; i--) {
@@ -6395,7 +6401,8 @@ static int shadow_as_path_to(const char* outer, const char* face, char* path,
 static int shadow_rname_err_face(const char* rname, char* out, size_t cap) {
     int i;
     size_t n;
-    static const char* faces[] = {"CCIoError", "CCError", "CCNetError", NULL};
+    static const char* faces[] = {"CCIoError", "CCError", "CCNetError",
+                                  "CCJsError", "CCPyError", NULL};
     if (!rname || !rname[0] || !out || !cap) return 0;
     out[0] = 0;
     for (i = 0; i < g_shadow_nrfns; i++) {

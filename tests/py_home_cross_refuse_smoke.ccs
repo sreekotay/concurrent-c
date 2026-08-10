@@ -1,0 +1,55 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/script/py.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* Cross-interpreter object arguments must refuse by name.  CCPyObj carries
+ * a home; the call path used to strip it and hand a foreign PyObject* into
+ * the receiver's interpreter — exactly what per-interpreter isolation
+ * prohibits. */
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
+
+    CCArena a = cc_arena_heap(kilobytes(64)) @destroy;
+    if (!a.valid()) return 1;
+    if (!cc_py_available()) {
+        puts("py_home_cross_refuse_smoke: SKIP (no libpython)");
+        return 0;
+    }
+
+    CCPy first = cc_py_new(false, &a) !>;
+    CCResult_CCPy_CCPyError r2 = cc_py_new(false, &a);
+    if (r2.is_err()) {
+        /* Runtime cannot make a second interpreter — nothing to cross. */
+        puts("ok");
+        return 0;
+    }
+    CCPy second = CCResult_CCPy_CCPyError_value(r2);
+
+    first.exec(@slice("def id(x): return x\n")) !>;
+    CCPyObj mainmod = first.import("__main__") !> @destroy;
+    CCPyObj f = mainmod.get("id") !> @destroy;
+    CCPyObj alien = second.import("sys") !> @destroy;
+
+    CCResult_CCPyObj_CCPyError bad = f.invoke(alien);
+    if (!bad.is_err() ||
+        strstr(bad.u.error.base.message, "different interpreter") == NULL) {
+        fprintf(stderr, "expected home refuse, got err=%d msg=%s\n",
+                bad.is_err() ? 1 : 0,
+                bad.is_err() ? bad.u.error.base.message : "(ok)");
+        return 2;
+    }
+
+    /* Same-home still works. */
+    CCPyObj local = first.import("sys") !> @destroy;
+    CCPyObj okv = f.invoke(local) !> @destroy;
+    (void)okv;
+
+    cc_py_close(&second);
+    cc_py_close(&first);
+    puts("ok");
+    return 0;
+}

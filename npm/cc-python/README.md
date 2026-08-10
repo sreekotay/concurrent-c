@@ -11,7 +11,8 @@ package bridge):
 [JS / Python interop](https://github.com/sreekotay/concurrent-c/blob/main/docs/js-py-modules.md).
 
 ```js
-const py = require('concurrent-c-python').create();
+const py = require('concurrent-c-python').create();         // in-process (default)
+// const py = require('concurrent-c-python').create({ isolated: true }); // child process
 const np = py.import('numpy');
 
 const a = new Float64Array(1_000_000).map((_, i) => i % 97);
@@ -23,6 +24,32 @@ np.dot(a, b);   // 1M-element dot product: 5-8x FASTER than the same
 
 py.destroy();   // one sweep: every handle, the arena, the interpreter
 ```
+
+## In-process (default) vs isolated (separate process)
+
+`create()` embeds **libpython in this Node process**.
+`create({ isolated: true })` spawns a **separate CPython child** — same
+call surface, different crossing cost and failure domain:
+
+| | `create()` — in-process | `create({ isolated: true })` — separate process |
+|---|---|---|
+| Where Python runs | same OS process as Node | own CPython child |
+| Hot call | ~5µs crossing; 1M `np.dot` **~192µs** (6.4x a JS loop) | ~100µs wire RTT; bulk via shm |
+| Buffers | zero-copy leases | shm spill (8MB arg **~6.4ms**) |
+| Parallelism | lane / sibling subinterpreters (3.12+); still one process | **N children = N GILs on N cores — full multi-core speedup** |
+| Crash | native crash can take Node with it | child dies → rejected promise; parent lives |
+| Per-domain python/venv | process-wide `usePython(...)` | yes — each child picks its own |
+
+Isolated is how you get **real core scaling with numpy** (and any other
+C-extension that refuses in-process subinterpreters): each domain is a
+full CPython, so N domains use N cores.  Pick **in-process** for hot
+fine-grained calls and zero-copy buffers; pick **isolated** for that
+multi-core speedup, crash isolation, and per-domain environments.
+Measured receipts:
+[`js_numpy_bridge_node_20260810.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/js_numpy_bridge_node_20260810.txt)
+(in-process) ·
+[`js_multiprocess_numpy_node_20260810.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/js_multiprocess_numpy_node_20260810.txt)
+(isolated).
 
 The entire native bridge is a **~100KB `.node` file** with exactly one
 linked dependency: libc.  No node-gyp, no Python headers at build time
@@ -120,10 +147,12 @@ domain works and a second refuses by name), and **numpy itself refuses
 subinterpreters** (the CPython C-extension rule — articulate, not a
 crash), which is what the fourth tier is for.
 
-**N × numpy: isolated domains** — `create({ isolated: true })` spawns a
-FULL CPython child per domain: numpy in every one, N domains are N GILs
-on N cores, a child crash is a rejected promise (the parent survives),
-and per-domain python/venv selection is honest:
+**N × numpy: isolated domains (separate process)** —
+`create({ isolated: true })` spawns a FULL CPython child per domain
+(not an in-process subinterpreter): numpy in every one, **N domains
+are N GILs on N cores — full multi-core speedup**, a child crash is a
+rejected promise (the parent survives), and per-domain python/venv
+selection is honest:
 
 ```js
 const py = ccpy.create({ isolated: true });  // ambient python, own process
@@ -145,18 +174,12 @@ const b = ccpy.create({ isolated: true, python: '/usr/bin/python3.11' });
 ```
 
 Measured ([`examples/js_multiprocess_numpy.js`](examples/js_multiprocess_numpy.js),
-[`js_multiprocess_numpy_node_20260809.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/js_multiprocess_numpy_node_20260809.txt),
-BLAS pinned): the same numpy workload on 4 domains runs **2-4x faster**
-than on one (3.97x — linear — at our shared 4-vCPU box's quietest;
-steal time bounds the rest).  The costs are real and stated: ~100-440ms
-to spawn a child and import numpy (warm/cold), ~100µs per wire round
-trip (vs ~5µs in-process).  Bulk buffers spill through **shared
-memory** (one memcpy per side): an 8MB argument crosses in ~6.4ms —
-23x the base64 wire it replaces — small arrays inline, big results stay
-child-side handles (chain on them; `await arr.toTypedArray()` brings
-the bytes back through the same spill).  Pick the tier by workload:
-in-process for hot fine-grained calls and zero-copy buffers, isolated
-for N-way parallel numpy, crash isolation, and per-domain environments.
+[`js_multiprocess_numpy_node_20260810.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/js_multiprocess_numpy_node_20260810.txt),
+BLAS pinned): spawn+import numpy **~109ms** (warm), wire RTT **~98µs**,
+8MB shm arg **~6.4ms**; the same numpy workload on 4 domains runs
+**2-4x faster** than on one (2.22x this capture; up to ~4x when the box
+is quiet).  Small arrays inline; big results stay child-side handles
+(`await arr.toTypedArray()` brings bytes back through the same spill).
 
 Teardown on an isolated domain is **cooperative**: `destroy()` sends
 `close`, drains in-flight wire work, then waits (SIGKILL only if the
@@ -368,33 +391,50 @@ module for Node and Python both — 40-90ns calls, 26KB artifacts.  See
 
 ## Measured
 
-From [`examples/js_numpy_bridge.js`](examples/js_numpy_bridge.js) — plain
-`node`, `require('concurrent-c-python')`, numpy 2.5.1 on a 4-vCPU x86-64 box
-([`perf/baselines/js_numpy_bridge_node_20260809.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/js_numpy_bridge_node_20260809.txt);
-catalog: [`perf/baselines/README.md`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/README.md)):
+Two surfaces, two folders of receipts — **in-process default** vs
+**`{ isolated: true }` separate process** — on a 4-vCPU x86-64 box,
+numpy 2.5.1 (catalog:
+[`perf/baselines/README.md`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/README.md)):
+
+### In-process — `create()`
+
+From [`examples/js_numpy_bridge.js`](examples/js_numpy_bridge.js)
+([`js_numpy_bridge_node_20260810.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/js_numpy_bridge_node_20260810.txt)):
 
 | what | result |
 |---|---|
-| 1M-element `np.dot` through the bridge | **239µs/call — 5.7x the JS loop** (1.36ms); best recorded 158µs / 8.45x |
-| 1M-element `np.sum` / `np.std` | 364µs / 2.0ms per call |
-| 16-element dot (the crossing itself) | 5.3µs sync, 11µs pipelined through the lane |
-| 1M dot through the lane | 232µs/call — the off-thread call costs what the sync one does |
+| 1M-element `np.dot` through the bridge | **192µs/call — 6.43x the JS loop** (1.24ms) |
+| 1M-element `np.sum` / `np.std` | 420µs / 2.0ms per call |
+| 16-element dot (the crossing itself) | **4.4µs** sync; **11µs** pipelined through the lane |
+| 1M dot through the lane | 259µs/call — the off-thread call costs what the sync one does |
 | bridge size | **~100KB `.node`, libc-only** |
 
 From [`examples/js_numpy_bridge_async.js`](examples/js_numpy_bridge_async.js)
-([`js_numpy_bridge_async_node_20260809.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/js_numpy_bridge_async_node_20260809.txt))
-— what the lane buys:
+([`js_numpy_bridge_async_node_20260810.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/js_numpy_bridge_async_node_20260810.txt))
+— what the lane buys while staying in-process:
 
 | what | result |
 |---|---|
 | 1ms ticks during 100ms of bulk numpy | **99 through the lane, 0 sync** — the loop stays alive |
-| JS compute overlapped with numpy (balanced work) | **1.81x** — wall clock ≈ max, not sum |
-| numpy ∥ numpy, one interpreter (BLAS pinned) | 1.60x this run, 2.02x at the box's quietest |
+| JS compute overlapped with numpy | **1.47x** this capture (wall ≈ max, not sum) |
+| numpy ∥ numpy, one interpreter (BLAS pinned) | **1.64x** this capture |
 
 And [`examples/js_two_interp.js`](examples/js_two_interp.js): two
-isolated domains lease **the same `Float64Array`** zero-copy — JS is the
-neutral ground — and their lanes run under two GILs: 12.9ms + 25.3ms of
-work completes together in 16.4ms.
+in-process sibling domains lease **the same `Float64Array`** zero-copy
+— JS is the neutral ground — and their lanes run under two GILs
+(CPython 3.12+).
+
+### Isolated — `create({ isolated: true })` (separate process)
+
+From [`examples/js_multiprocess_numpy.js`](examples/js_multiprocess_numpy.js)
+([`js_multiprocess_numpy_node_20260810.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/js_multiprocess_numpy_node_20260810.txt)):
+
+| what | result |
+|---|---|
+| spawn + import numpy (warm) | **109ms** |
+| wire round trip | **98µs** (~20× an in-process crossing) |
+| 8MB argument, shm spill | **6.4ms** |
+| same numpy workload, 4 domains vs 1 | **2.22x** this capture — **up to ~4x / linear in cores** when quiet |
 
 Numbers swing ±40% run-to-run on a small shared VM; the example files
 print machine-comparable `RESULT` lines, so re-measuring on your box is

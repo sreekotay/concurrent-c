@@ -107,8 +107,10 @@ typedef struct {
     _Atomic uint64_t block_calls_total;
     _Atomic uint64_t block_spawn_calls;
     _Atomic uint64_t block_fiber_calls;
+    _Atomic uint64_t block_poll_calls;
     _Atomic uint64_t block_spawn_wait_ns;
     _Atomic uint64_t block_fiber_wait_ns;
+    _Atomic uint64_t block_poll_wait_ns;
     _Atomic uint64_t fiber_join_calls;
     _Atomic uint64_t fiber_join_wait_ns;
     _Atomic uint64_t fiber_result_tls_copies;
@@ -157,11 +159,15 @@ static void cc_task_wait_stats_dump(void) {
     uint64_t total = atomic_load_explicit(&g_cc_task_wait_stats.block_calls_total, memory_order_relaxed);
     uint64_t spawn_calls = atomic_load_explicit(&g_cc_task_wait_stats.block_spawn_calls, memory_order_relaxed);
     uint64_t fiber_calls = atomic_load_explicit(&g_cc_task_wait_stats.block_fiber_calls, memory_order_relaxed);
+    uint64_t poll_calls = atomic_load_explicit(&g_cc_task_wait_stats.block_poll_calls, memory_order_relaxed);
     uint64_t spawn_wait_ns = atomic_load_explicit(&g_cc_task_wait_stats.block_spawn_wait_ns, memory_order_relaxed);
     uint64_t fiber_wait_ns = atomic_load_explicit(&g_cc_task_wait_stats.block_fiber_wait_ns, memory_order_relaxed);
+    uint64_t poll_wait_ns = atomic_load_explicit(&g_cc_task_wait_stats.block_poll_wait_ns, memory_order_relaxed);
     uint64_t fiber_join_calls = atomic_load_explicit(&g_cc_task_wait_stats.fiber_join_calls, memory_order_relaxed);
     uint64_t fiber_join_wait_ns = atomic_load_explicit(&g_cc_task_wait_stats.fiber_join_wait_ns, memory_order_relaxed);
     uint64_t tls_copies = atomic_load_explicit(&g_cc_task_wait_stats.fiber_result_tls_copies, memory_order_relaxed);
+    uint64_t classified = spawn_calls + fiber_calls + poll_calls;
+    uint64_t other = (total > classified) ? (total - classified) : 0;
     uint64_t unpark_calls = 0;
     uint64_t unpark_enqueues = 0;
     uint64_t join_park_joins = 0;
@@ -173,19 +179,26 @@ static void cc_task_wait_stats_dump(void) {
     cc__fiber_join_help_stats(&help_attempts, &help_hits);
 
     fprintf(stderr, "\n=== CC_TASK_WAIT_STATS ===\n");
-    fprintf(stderr, "block_on calls: total=%llu spawn=%llu fiber=%llu\n",
+    fprintf(stderr, "block_on calls: total=%llu spawn=%llu fiber_v2=%llu poll=%llu other=%llu\n",
             (unsigned long long)total,
             (unsigned long long)spawn_calls,
-            (unsigned long long)fiber_calls);
+            (unsigned long long)fiber_calls,
+            (unsigned long long)poll_calls,
+            (unsigned long long)other);
     if (spawn_calls) {
         fprintf(stderr, "spawn join wait: total=%.3f ms avg=%.3f us\n",
                 (double)spawn_wait_ns / 1000000.0,
                 (double)spawn_wait_ns / (double)spawn_calls / 1000.0);
     }
     if (fiber_calls) {
-        fprintf(stderr, "fiber block wait: total=%.3f ms avg=%.3f us\n",
+        fprintf(stderr, "fiber_v2 join wait (ordered send_task await): total=%.3f ms avg=%.3f us\n",
                 (double)fiber_wait_ns / 1000000.0,
                 (double)fiber_wait_ns / (double)fiber_calls / 1000.0);
+    }
+    if (poll_calls) {
+        fprintf(stderr, "poll wait: total=%.3f ms avg=%.3f us\n",
+                (double)poll_wait_ns / 1000000.0,
+                (double)poll_wait_ns / (double)poll_calls / 1000.0);
     }
     if (fiber_join_calls) {
         fprintf(stderr, "fiber join wait: total=%.3f ms avg=%.3f us\n",
@@ -649,38 +662,63 @@ intptr_t cc_block_on_intptr(CCTask t) {
     
     if (t.kind == CC_TASK_KIND_FIBER_V2) {
         CCTaskFiberV2Internal* fv = TASK_FIBER_V2(&t);
+        uint64_t wait_start_ns = 0;
+        if (wait_stats) {
+            /* Ordered send_task → recv awaits land here (cc_fiber_spawn_closure0). */
+            atomic_fetch_add_explicit(&g_cc_task_wait_stats.block_fiber_calls, 1, memory_order_relaxed);
+            wait_start_ns = cc__mono_ns();
+        }
         if (fv->fiber) {
             void* result = NULL;
             sched_v2_join(fv->fiber, &result);
             r = cc__task_take_v2_result(fv->fiber, result);
             sched_v2_fiber_release(fv->fiber);
         }
+        if (wait_stats) {
+            uint64_t wait_ns = cc__mono_ns() - wait_start_ns;
+            atomic_fetch_add_explicit(&g_cc_task_wait_stats.block_fiber_wait_ns, wait_ns, memory_order_relaxed);
+            atomic_fetch_add_explicit(&g_cc_task_wait_stats.fiber_join_calls, 1, memory_order_relaxed);
+            atomic_fetch_add_explicit(&g_cc_task_wait_stats.fiber_join_wait_ns, wait_ns, memory_order_relaxed);
+        }
         cc__deadlock_thread_unblock();
         return r;
     }
     
-    for (;;) {
-        CCFutureStatus st = cc_task_poll(&t, &r, &err);
-        if (st == CC_FUTURE_PENDING) {
-            if (t.kind == CC_TASK_KIND_FUTURE) {
-                /* For "future" tasks, block directly on the done channel once and then return the result.
-                   This avoids spin-polling and avoids needing to preserve the completion for poll(). */
-                CCTaskFutureInternal* fut = TASK_FUTURE(&t);
-                err = cc_async_wait(&fut->fut.handle);
-                if (err == 0 && fut->fut.result) r = *(const intptr_t*)fut->fut.result;
-                break;
-            } else if (t.kind == CC_TASK_KIND_POLL) {
-                CCTaskPollInternal* p = TASK_POLL(&t);
-                if (p->wait) {
-                    /* Task has a wait function - use it to block efficiently */
-                    (void)p->wait(p->frame);
-                }
-            }
-            /* For POLL tasks without wait: tight loop. These are pure state machines
-               making progress on every poll (no external blocking). No yield needed. */
-            continue;
+    {
+        uint64_t wait_start_ns = 0;
+        int counted_poll = 0;
+        if (wait_stats && t.kind == CC_TASK_KIND_POLL) {
+            atomic_fetch_add_explicit(&g_cc_task_wait_stats.block_poll_calls, 1, memory_order_relaxed);
+            wait_start_ns = cc__mono_ns();
+            counted_poll = 1;
         }
-        break;
+        for (;;) {
+            CCFutureStatus st = cc_task_poll(&t, &r, &err);
+            if (st == CC_FUTURE_PENDING) {
+                if (t.kind == CC_TASK_KIND_FUTURE) {
+                    /* For "future" tasks, block directly on the done channel once and then return the result.
+                       This avoids spin-polling and avoids needing to preserve the completion for poll(). */
+                    CCTaskFutureInternal* fut = TASK_FUTURE(&t);
+                    err = cc_async_wait(&fut->fut.handle);
+                    if (err == 0 && fut->fut.result) r = *(const intptr_t*)fut->fut.result;
+                    break;
+                } else if (t.kind == CC_TASK_KIND_POLL) {
+                    CCTaskPollInternal* p = TASK_POLL(&t);
+                    if (p->wait) {
+                        /* Task has a wait function - use it to block efficiently */
+                        (void)p->wait(p->frame);
+                    }
+                }
+                /* For POLL tasks without wait: tight loop. These are pure state machines
+                   making progress on every poll (no external blocking). No yield needed. */
+                continue;
+            }
+            break;
+        }
+        if (wait_stats && counted_poll) {
+            uint64_t wait_ns = cc__mono_ns() - wait_start_ns;
+            atomic_fetch_add_explicit(&g_cc_task_wait_stats.block_poll_wait_ns, wait_ns, memory_order_relaxed);
+        }
     }
     cc__deadlock_thread_unblock();
     cc_task_free(&t);

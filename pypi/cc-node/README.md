@@ -13,7 +13,7 @@ package bridge):
 ```python
 import cc_node
 
-js = cc_node.create()                # an Isolation Domain: one node child
+js = cc_node.create()                # always a SEPARATE node process
 _ = js.require('lodash')             # resolved from YOUR cwd's node_modules
 _.chunk([1, 2, 3, 4, 5], 2)          # [[1, 2], [3, 4], [5]]
 _.sortBy([{'n': 3}, {'n': 1}], 'n')  # dicts cross as objects, and back
@@ -24,12 +24,28 @@ semver.satisfies('1.2.3', '^1.0.0')  # True
 js.destroy()                         # or: with cc_node.create() as js: ...
 ```
 
-The bridge is **pure Python, stdlib only** — no compiled code, no
-dependencies, nothing to build.  The domain **is** a spawned `node`
-child (~28ms to first call), so you get real Node: full stdlib, native
-addons, whatever npm installs.  Promise-based APIs look synchronous
-from Python, and bulk data crosses through **shared memory** — an 8MB
-array in **9.5ms** where the same values as a JSON list take 499ms.
+## Separate process by design
+
+Unlike [`concurrent-c-python`](https://github.com/sreekotay/concurrent-c/tree/main/npm/cc-python)
+(whose **default** embeds libpython in the Node process, with
+`{ isolated: true }` as the child-process opt-in), **every**
+`cc_node.create()` is already the isolated tier: one spawned `node`
+child per domain.  There is no in-process Node embed from Python —
+you get real Node (full stdlib, native addons, whatever `npm install`
+put next to your program), crash isolation, and a wire you can measure.
+
+N domains are N OS processes: **full multi-core speedup** — fan work
+across `create()` handles and they run on separate cores, no shared
+event-loop or GIL between them.
+
+| | this package — separate `node` process | Concurrent-C hosted (not this wheel) |
+|---|---|---|
+| API | `cc_node.create()` from Python | `cc_js_new(false, &a)` in a `.ccs` program |
+| Where JS runs | own `node` child | libnode in the CC process |
+| Hot call | **~105µs** wire RTT | sub-µs (needs `libnode-dev`) |
+| Bulk buffers | shm spill — 8MB in **9.5ms** (52× a JSON list) | in-process |
+| Parallelism | **N children = N cores — full multi-core speedup** | one process (V8's rule) |
+| Crash | child dies → error; Python parent lives | shared fate with the host |
 
 ```
 pip install concurrent-c-node   # needs node on PATH (or point at one)
@@ -37,9 +53,39 @@ python -m cc_node.examples.use_node
 python -m cc_node.examples.bench_wire
 ```
 
-Import stays `import cc_node`. Examples ship in the wheel. The mirror of
-[`concurrent-c-python`](https://github.com/sreekotay/concurrent-c/tree/main/npm/cc-python)
-— same domain model, same materialization rules, pointed the other way:
+## Measured (separate-process wire)
+
+From `python -m cc_node.examples.bench_wire` (sources under
+[`cc_node/examples/`](https://github.com/sreekotay/concurrent-c/blob/main/pypi/cc-node/cc_node/examples/))
+on a 4-vCPU x86-64 box, node 22 / python 3.11
+([`perf/baselines/cc_node_bridge_py_20260810.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/cc_node_bridge_py_20260810.txt);
+catalog: [`perf/baselines/README.md`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/README.md)):
+
+| what | result |
+|---|---|
+| spawn a domain (node child, first eval) | **28ms** |
+| wire round trip (smallest call) | **105µs** |
+| Python-callback round trip (JS → Python → JS) | **153µs** |
+| 8MB `array('d')` argument, shm spill | **9.5ms** |
+| the same 8MB as a JSON list | 499ms — the spill is **52x** |
+
+The wire is strict request/response JSON on dedicated fds — replies
+pair by request id, and stdio stays yours, so `console.log` in
+evaluated JS reaches the real stdout and can never collide with a
+protocol reply — with the shared-memory spill for bulk data (private
+0700 per-bridge directory, 0600 exclusive-create files, removed with
+the bridge).  The same discipline concurrent-c-python's
+`{ isolated: true }` domains speak, mirrored.
+
+One boundary, stated plainly: the domain is **crash isolation, not a
+security sandbox** — the node child inherits your environment and runs
+with your OS privileges, so do not run untrusted JavaScript through
+it.
+
+The bridge is **pure Python, stdlib only** — no compiled code, no
+dependencies, nothing to build.  Import stays `import cc_node`.
+Examples ship in the wheel. Same domain model and materialization
+rules as the npm sibling, pointed the other way:
 
 - **Values**: plain data (finite numbers, strings, booleans, `None`,
   lists/dicts of the same) crosses by value; everything else is a live
@@ -118,9 +164,11 @@ And *which packages* it sees is the working directory's
 Run Python in your project, get your project's packages: `npm install`
 next to your program is the whole setup.
 
-(Writing Concurrent-C itself rather than Python?  There is a zero-IPC
-tier: `cc_js_new(false, &a)` boots libnode *inside* your CC program — see
-[`examples/js/jsdemo.shcc`](https://github.com/sreekotay/concurrent-c/blob/main/examples/js/jsdemo.shcc).)
+Writing Concurrent-C itself rather than Python?  The zero-IPC hosted
+tier is `cc_js_new(false, &a)` (needs libnode) —
+[`examples/js/jsdemo.shcc`](https://github.com/sreekotay/concurrent-c/blob/main/examples/js/jsdemo.shcc);
+`cc_js_new(true, &a)` is the same separate-process wire this package
+speaks, from CC.
 
 ## Publishing
 
@@ -130,36 +178,6 @@ From the Concurrent-C repo root (packs this wheel and the npm sibling):
 ./scripts/publish_bridges.sh              # → out/pypi/concurrent_c_node-* (+ npm tgz)
 ./scripts/publish_bridges.sh --publish    # bump patch, pack, twine + npm publish
 ```
-
-## Measured
-
-From `python -m cc_node.examples.bench_wire` (sources under
-[`cc_node/examples/`](https://github.com/sreekotay/concurrent-c/blob/main/pypi/cc-node/cc_node/examples/))
-on a 4-vCPU x86-64 box, node 22 / python 3.11
-([`perf/baselines/cc_node_bridge_py_20260810.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/cc_node_bridge_py_20260810.txt);
-catalog: [`perf/baselines/README.md`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/README.md)):
-
-| what | result |
-|---|---|
-| spawn a domain (node child, first eval) | 28ms |
-| wire round trip (smallest call) | 105µs |
-| Python-callback round trip (JS → Python → JS) | 153µs |
-| 8MB `array('d')` argument, shm spill | **9.5ms** |
-| the same 8MB as a JSON list | 499ms — the spill is **52x** |
-
-The wire is strict request/response JSON on dedicated fds — replies
-pair by request id, and stdio stays yours, so `console.log` in
-evaluated JS reaches the real stdout and can never collide with a
-protocol reply — with the shared-memory spill for bulk data (private
-0700 per-bridge directory, 0600 exclusive-create files, removed with
-the bridge).  The same discipline concurrent-c-python's isolated
-domains speak, mirrored.  True pinned zero-copy leases remain future
-work.
-
-One boundary, stated plainly: the domain is **crash isolation, not a
-security sandbox** — the node child inherits your environment and runs
-with your OS privileges, so do not run untrusted JavaScript through
-it.
 
 A worked tour (builtin Node modules, chains, callbacks, thenables,
 buffers — no npm install needed):

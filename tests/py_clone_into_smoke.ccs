@@ -1,0 +1,89 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/script/py.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* obj.clone_into(&other): pickle round-trip between same-process inproc
+ * interpreters. Source is untouched (deep via pickle); process-isolated
+ * and raw PyObject* sharing stay refused. */
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
+
+    CCArena a = cc_arena_heap(kilobytes(256)) @destroy;
+    if (!a.valid()) return 1;
+    if (!cc_py_available()) {
+        puts("py_clone_into_smoke: SKIP (no libpython)");
+        return 0;
+    }
+
+    CCPy first = cc_py_new(false, &a) !>;
+    CCResult_CCPy_CCPyError r2 = cc_py_new(false, &a);
+    if (r2.is_err()) {
+        /* Runtime cannot make a second interpreter — nothing to clone into. */
+        puts("ok");
+        return 0;
+    }
+    CCPy second = CCResult_CCPy_CCPyError_value(r2);
+
+    first.exec(@slice("src = [1, 2, 3]\n")) !>;
+    CCPyObj main1 = first.import("__main__") !> @destroy;
+    CCPyObj src = main1.get("src") !> @destroy;
+
+    CCPyObj there = src.clone_into(&second) !> @destroy;
+    if (there.home != &second) {
+        fprintf(stderr, "clone home mismatch\n");
+        return 2;
+    }
+
+    /* Mutate the clone; source list length must stay 3. */
+    CCPyObj appended = there.call_i("append", 99) !> @destroy;
+    (void)appended;
+
+    int64_t n_src = src.call0("__len__")!>.as_i64()!>;
+    int64_t n_there = there.call0("__len__")!>.as_i64()!>;
+    if (n_src != 3 || n_there != 4) {
+        fprintf(stderr, "deep clone failed: src_len=%lld there_len=%lld\n",
+                (long long)n_src, (long long)n_there);
+        return 3;
+    }
+
+    /* Cross-home invoke still refused (home check). */
+    first.exec(@slice("def id(x): return x\n")) !>;
+    CCPyObj f = main1.get("id") !> @destroy;
+    CCResult_CCPyObj_CCPyError bad = f.invoke(there);
+    if (!bad.is_err() ||
+        strstr(bad.u.error.base.message, "different interpreter") == NULL) {
+        fprintf(stderr, "expected home refuse, got err=%d msg=%s\n",
+                bad.is_err() ? 1 : 0,
+                bad.is_err() ? bad.u.error.base.message : "(ok)");
+        return 4;
+    }
+
+    /* Process-isolated target refuses by name. */
+    if (cc_py_proc_available()) {
+        CCResult_CCPy_CCPyError rp = cc_py_new(true, &a);
+        if (rp.ok) {
+            CCPy proc = rp.u.value;
+            CCResult_CCPyObj_CCPyError refused = src.clone_into(&proc);
+            if (!refused.is_err() ||
+                strstr(refused.u.error.base.message, "process-isolated") ==
+                    NULL) {
+                fprintf(stderr, "expected proc refuse, got err=%d msg=%s\n",
+                        refused.is_err() ? 1 : 0,
+                        refused.is_err() ? refused.u.error.base.message
+                                         : "(ok)");
+                cc_py_close(&proc);
+                return 5;
+            }
+            cc_py_close(&proc);
+        }
+    }
+
+    cc_py_close(&second);
+    cc_py_close(&first);
+    puts("ok");
+    return 0;
+}

@@ -31,6 +31,45 @@ static void rung_state(CCJs *js, void *ctx) {
            !e.ok && e.u.error.name.len > 0 ? "true" : "false");
 }
 
+/* Nested host.run from the loop thread would deadlock waiting for a drain
+ * that cannot run — refuse by name instead. */
+static void rung_reenter(CCJs *js, void *ctx) {
+    (void)js;
+    CCJsHost *host = (CCJsHost *)ctx;
+    CCResult_void_CCJsError nested = cc_js_host_run(host, rung_state, NULL);
+    printf("reentry_refused %s\n",
+           !nested.ok &&
+                   strstr(nested.u.error.base.message, "not reentrant") != NULL
+               ? "true"
+               : "false");
+}
+
+/* js_pos brands a value with __cc_js_pos__ so guest bind will not peel it
+ * as a keyword bag; plain lift leaves the object unmarked. */
+static void rung_js_pos(CCJs *js, void *ctx) {
+    (void)ctx;
+    CCResult_CCJsVal_CCJsError boxr = cc__js_eval(
+        js,
+        cc__js_src_cstr(
+            "({check: (o) => Object.prototype.hasOwnProperty.call(o, "
+            "'__cc_js_pos__') ? 1 : 0})"));
+    CCResult_CCJsVal_CCJsError objr =
+        cc__js_eval(js, cc__js_src_cstr("({a: 1})"));
+    int wrap_ok = 0, bare_ok = 0;
+    if (boxr.ok && objr.ok) {
+        CCJsVal box = boxr.u.value;
+        CCJsVal obj = objr.u.value;
+        CCResult_int64_t_CCJsError w =
+            cc_js_val_callm_int64_t(&box, "check", 1, js_pos(obj));
+        CCResult_int64_t_CCJsError b =
+            cc_js_val_callm_int64_t(&box, "check", 1, CC_JS_ARG(obj));
+        wrap_ok = w.ok && w.u.value == 1;
+        bare_ok = b.ok && b.u.value == 0;
+    }
+    printf("js_pos_wrap %s\n", wrap_ok ? "true" : "false");
+    printf("js_pos_bare %s\n", bare_ok ? "true" : "false");
+}
+
 int main(void) {
     CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 
@@ -65,6 +104,10 @@ int main(void) {
     if (!r1.ok) { printf("run1 failed\n"); return 1; }
     CCResult_void_CCJsError r2 = cc_js_host_run(&host, rung_state, NULL);
     if (!r2.ok) { printf("run2 failed\n"); return 1; }
+    CCResult_void_CCJsError r3 = cc_js_host_run(&host, rung_reenter, &host);
+    if (!r3.ok) { printf("run3 failed\n"); return 1; }
+    CCResult_void_CCJsError r4 = cc_js_host_run(&host, rung_js_pos, NULL);
+    if (!r4.ok) { printf("run4 failed\n"); return 1; }
 
     cc_js_host_close(&host);
     CCResult_void_CCJsError after = cc_js_host_run(&host, rung_state, NULL);

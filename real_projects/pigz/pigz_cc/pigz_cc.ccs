@@ -25,6 +25,38 @@ cc_atomic_int g_blocks_done = 0;
 /* Global error flag - when set, all tasks should exit ASAP */
 cc_atomic_int g_pipeline_error = 0;
 
+/* Arena-pool borrow wait (reader blocked waiting for a free input arena).
+ * Dump with CC_PIGZ_POOL_STATS=1. */
+cc_atomic_i64 g_pool_borrow_calls = 0;
+cc_atomic_i64 g_pool_borrow_wait_ns = 0;
+
+static inline uint64_t pigz_mono_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static inline void pigz_pool_stats_reset(void) {
+    g_pool_borrow_calls.store(0);
+    g_pool_borrow_wait_ns.store(0);
+}
+
+static inline void pigz_pool_stats_dump_if_enabled(void) {
+    const char* en = getenv("CC_PIGZ_POOL_STATS");
+    if (!en || en[0] == '\0' || en[0] == '0') return;
+    long long calls = (long long)g_pool_borrow_calls.load();
+    long long wait_ns = (long long)g_pool_borrow_wait_ns.load();
+    if (calls <= 0) {
+        fprintf(stderr, "[pigz_cc pool] borrow_calls=0\n");
+        return;
+    }
+    fprintf(stderr,
+            "[pigz_cc pool] borrow_calls=%lld wait_total=%.3f ms avg=%.3f us\n",
+            calls,
+            (double)wait_ns / 1000000.0,
+            (double)wait_ns / (double)calls / 1000.0);
+}
+
 /* Helpers for repeated fail-closed I/O and ownership patterns. */
 static inline void report_io_error(const char* what, CCIoError err) {
     @errhandler(CCError e) { cc_error_log(e); return; }
@@ -717,6 +749,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
 
     // Reset error flag
     g_pipeline_error.store(0);
+    pigz_pool_stats_reset();
 
     // Initialize CRC combination globals (matches pigz.c:3400-3410)
     size_t block_size = g.block;
@@ -1027,8 +1060,11 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
             
             // Borrow arena from pool
             CCArena* blk_arena = NULL;
+            uint64_t borrow_t0 = pigz_mono_ns();
             CCResult_bool_CCIoError borrow_res =
                 cc_chan_result_from_errno(cc_channel_recv(arena_pool, &blk_arena, sizeof(blk_arena)));
+            g_pool_borrow_wait_ns.fetch_add((int64_t)(pigz_mono_ns() - borrow_t0));
+            g_pool_borrow_calls.fetch_add(1);
             if (borrow_res.is_err()) {
                 report_io_error("failed to borrow input arena", cc_unwrap_err_as(borrow_res, CCIoError));
                 mark_pipeline_error();
@@ -1161,21 +1197,22 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
     }
 
     if (!sync_file_or_fail(&out_file, "failed to sync compressed output")) {
+        pigz_pool_stats_dump_if_enabled();
         return 1;
     }
     
     // Deep sync if requested (matches pigz.c:3500)
     if (g.sync) {
         if (!sync_file_or_fail(&out_file, "failed to deep sync compressed output")) {
+            pigz_pool_stats_dump_if_enabled();
             return 1;
         }
     }
     
     // Check if pipeline encountered an error
-    if (g_pipeline_error.load()) {
-        return 1;
-    }
-    return 0;
+    int failed = g_pipeline_error.load() ? 1 : 0;
+    pigz_pool_stats_dump_if_enabled();
+    return failed;
 }
 
 /* Process a single path (file or directory) recursively (matches pigz.c:4600-4620) */

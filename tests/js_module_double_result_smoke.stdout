@@ -2,6 +2,9 @@ scale 50
 label counter
 big bigint 1152921504606846976
 bigint_arg 101
+u64_hi 9223372036854775813
+u64_max 18446744073709551615
+u64_neg: RangeError
 arity: bump() takes 1 positional argument but 2 were given
 unexpected: bump() got an unexpected argument 'wrong'
 badtype: argument `by` expects an integer
@@ -15,6 +18,10 @@ row Float64Array 1.5,2.5,3
 roundtrip 7
 badelem: argument `xs` expects an Array or TypedArray
 apply 42
+kw_bag 103
+pos_plain 7
+pos_kw 10
+pos_escape 7
 eval42 42
 eval_chain 36
 eval_i64 42

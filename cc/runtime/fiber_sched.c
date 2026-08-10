@@ -68,16 +68,15 @@ void cc__chan_debug_dump_state(void* ch_obj, const char* prefix);
 int cc__chan_debug_req_wake_match(void* ch_obj);
 int cc__chan_debug_is_open(void* ch_obj);
 
-/* High-frequency replacement probe counters are useful for deep diagnosis but
-* expensive/noisy in hot loops. Keep them compile-time gated for quick A/B runs.
-* 0 = off (default), 1 = on. */
+/* High-frequency replacement probe counters were never productized
+ * (CC_WORKER_GAP_STATS docs removed). Keep the compile gate for any future
+ * local A/B instrumentation; default off. */
 #ifndef CC_V3_HEAVY_REPL_PROBE_COUNTERS
 #define CC_V3_HEAVY_REPL_PROBE_COUNTERS 0
 #endif
 
 #if CC_V3_HEAVY_REPL_PROBE_COUNTERS
-    atomic_fetch_add_explicit(&(g_cc_worker_gap_stats.field), (value), memory_order_relaxed)
-#else
+/* Intentionally empty: add local counters here for one-off experiments. */
 #endif
 
 /* ============================================================================

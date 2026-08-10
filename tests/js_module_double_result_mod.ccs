@@ -24,6 +24,13 @@ static const char *GamutCounter_label(GamutCounter *self) {
 static long long GamutCounter_big(GamutCounter *self) {
     return 1LL << 60;
 }
+/* Unsigned 64 inbound must use napi_get_value_bigint_uint64 so values in
+ * [2^63, 2^64-1] round-trip (the signed BigInt extract refuses them). */
+static unsigned long long GamutCounter_echo_u64(GamutCounter *self,
+                                               unsigned long long v) {
+    (void)self;
+    return v;
+}
 static long long GamutCounter__clamp(GamutCounter *self, long long v) {
     return v > 1000 ? 1000 : v;
 }
@@ -59,6 +66,18 @@ static long long !>(CCError) GamutCounter_apply(GamutCounter *self, CCJsVal obj)
     @errhandler(CCError e) { return cc_err(e); }
     long long v = obj.step(21) !>;
     return cc_ok(v);
+}
+/* Keyword-bag escape: a trailing plain object stays positional when it is
+ * not a kwargs bag (keys outside the formals), and `js_pos` / the
+ * `__cc_js_pos__` brand forces positional even when keys look like
+ * kwargs.  Optional `n` keeps the bind path (argc != want) in play. */
+static long long !>(CCError) GamutCounter_peek_opts(GamutCounter *self,
+                                                    CCJsVal opts,
+                                                    long long n = 0) {
+    @errhandler(CCError e) { return cc_err(e); }
+    (void)self;
+    long long x = opts.get("x")!>.as_i64()!>;
+    return cc_ok(x + n);
 }
 /* The environment of the call in flight: source text as bootstrap glue. */
 static long long !>(CCError) GamutCounter_eval42(GamutCounter *self, CCJs *js) {

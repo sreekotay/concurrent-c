@@ -1,0 +1,68 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/script/py.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* Unsigned long long inbound must use PyLong_AsUnsignedLongLong so values
+ * in (LLONG_MAX, ULLONG_MAX] round-trip.  The prior AsLongLong path refused
+ * that half of the advertised arm. */
+typedef struct U64Echo { int unused; } U64Echo;
+
+static unsigned long long U64Echo_echo(U64Echo *self, unsigned long long v) {
+    (void)self;
+    return v;
+}
+
+static int expect_py_error(CCPy *py, CCSlice src, const char *cls) {
+    CCPyObj o = py->eval(src) !>(e) {
+        if (cls && (e.type_name.len != strlen(cls) ||
+                    memcmp(e.type_name.ptr, cls, e.type_name.len) != 0)) {
+            fprintf(stderr, "expected %s, got %.*s\n", cls,
+                    (int)e.type_name.len, (const char *)e.type_name.ptr);
+            return -1;
+        }
+        return 0;
+    };
+    cc_py_obj_release(&o);
+    return -1;
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
+
+    CCArena a = cc_arena_heap(kilobytes(64)) @destroy;
+    if (!cc_py_available()) {
+        puts("py_ull_inbound_smoke: SKIP (no libpython)");
+        return 0;
+    }
+    CCPy py = cc_py_new(false, &a) !>;
+    U64Echo seed = {0};
+    py_expose::[U64Echo](&py, "u64echo", &seed) !>;
+
+    /* 2^63 + 5 is outside signed long long, inside unsigned long long. */
+    py.exec(@slice(
+        "import cc.u64echo as u\n"
+        "v = 2**63 + 5\n"
+        "got = u.echo(v)\n"
+        "ok = (got == v)\n")) !>;
+    CCPyObj m = py.import("__main__") !> @destroy;
+    CCSlice ok = m.get("ok")!>.as_slice()!>;
+    if (ok.len != 4 || memcmp(ok.ptr, "True", 4) != 0) return 2;
+
+    /* Full unsigned range: ULLONG_MAX. */
+    py.exec(@slice(
+        "got_max = u.echo((1 << 64) - 1)\n"
+        "ok_max = (got_max == (1 << 64) - 1)\n")) !>;
+    CCSlice okm = m.get("ok_max")!>.as_slice()!>;
+    if (okm.len != 4 || memcmp(okm.ptr, "True", 4) != 0) return 3;
+
+    /* Negative is OverflowError, not a wrap. */
+    if (expect_py_error(&py, @slice("u.echo(-1)"), "OverflowError") != 0)
+        return 4;
+
+    puts("ok");
+    return 0;
+}

@@ -1,0 +1,51 @@
+/* Isolated JS domains: typed arrays on the wire as inline base64
+ * ({$ta,b64} args; {ta,b64} results).  SHM spill stays refused. */
+#include <ccc/std/prelude.cch>
+#include <ccc/script/js.cch>
+#include <math.h>
+#include <stdio.h>
+
+int main(void) {
+    @errhandler(CCJsError e) {
+        fprintf(stderr, "fatal: %s\n", e.base.message);
+        return 1;
+    }
+
+    CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+
+    if (!cc_js_dom_available(true)) {
+        printf("SKIP (no node on PATH)\n");
+        return 0;
+    }
+
+    CCJsDom js = cc_js_new(true, &a) !> @destroy;
+
+    /* Result path: eval returns a Float64Array → K_TA with decoded bytes. */
+    CCJsDomVal ta = js.eval("new Float64Array([1.5, 2.5, 3])") !>;
+    int ta_result = 0;
+    {
+        CCJsDomTaInfo info = ta.ta_info() !>;
+        double sum = 0;
+        size_t i;
+        if (ta.kind == CC__JS_DOM_K_TA &&
+            info.kind == CC__JS_DOM_TA_F64 && info.nelem == 3 &&
+            info.esz == 8 && info.bytes.len == 24) {
+            const double *p = (const double *)info.bytes.ptr;
+            for (i = 0; i < info.nelem; i++) sum += p[i];
+            ta_result = fabs(sum - 7.0) < 1e-12;
+        }
+    }
+    printf("ta_result %s\n", ta_result ? "true" : "false");
+
+    /* Arg path: pass double[:] into a JS function over the wire. */
+    js.exec("globalThis.sum = (a) => a.reduce((s, x) => s + x, 0)") !>;
+    double buf[3] = {1.5, 2.5, 3.0};
+    CCSlice_double xs = CCSlice_double_from_buffer(buf, 3);
+    CCJsDomVal g = js.eval("globalThis") !> @destroy;
+    double got = g.sum(xs) !>;
+    int ta_arg = fabs(got - 7.0) < 1e-12;
+    printf("ta_arg %s\n", ta_arg ? "true" : "false");
+
+    printf("clean_exit true\n");
+    return (ta_result && ta_arg) ? 0 : 1;
+}

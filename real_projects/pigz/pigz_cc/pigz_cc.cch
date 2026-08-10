@@ -28,6 +28,7 @@
 #include <signal.h>
 #include <errno.h>
 #include <dirent.h>
+#include <time.h>
 
 // Compression libraries
 #include <zlib.h>

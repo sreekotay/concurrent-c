@@ -501,6 +501,8 @@ static int get_run_timeout_for_test(const char* stem, int default_timeout_sec) {
     if (strcmp(stem, "js_dom_smoke") == 0) return 60;
     /* Inner `ccc build` plus a first-use shim compile on a cold cache. */
     if (strcmp(stem, "js_dom_hosted_smoke") == 0) return 60;
+    if (strcmp(stem, "js_dom_ta_smoke") == 0) return 60;
+    if (strcmp(stem, "js_dom_cb_smoke") == 0) return 60;
     /* Three inner `ccc build`s (dual + two narrowing runs) + both hosts. */
     if (strcmp(stem, "dual_module_export_smoke") == 0) return 60;
     /* One dual multiclass `ccc build`, then a node run and a python run. */
@@ -527,6 +529,12 @@ static int get_run_timeout_for_test(const char* stem, int default_timeout_sec) {
     if (strcmp(stem, "bridge_wire_smoke") == 0) return 60;
     if (strcmp(stem, "py_module_kwargs_smoke") == 0) return 30;
     /* Inner `ccc build` of DP-only levenshtein_cc_smoke.ccs. */
+    if (strcmp(stem, "py_proc_isolate_smoke") == 0) return 60;
+    if (strcmp(stem, "py_clone_into_smoke") == 0) return 30;
+    if (strcmp(stem, "py_home_cross_refuse_smoke") == 0) return 30;
+    if (strcmp(stem, "py_ull_inbound_smoke") == 0) return 30;
+    if (strcmp(stem, "py_as_list_bounds_smoke") == 0) return 30;
+    if (strcmp(stem, "py_name_cache_reuse_smoke") == 0) return 30;
     if (strcmp(stem, "py_levenshtein_smoke") == 0) return 60;
     return default_timeout_sec;
 }

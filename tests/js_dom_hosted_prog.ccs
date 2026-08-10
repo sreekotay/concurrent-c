@@ -3,8 +3,9 @@
  * require/eval/exec, vals, the dynamic sink — by posting each op onto
  * the loop thread.  Rungs prove scalar and string materialization,
  * state, wire-parity method calls and argument marshaling, the ref
- * ledger, the articulate Promise refusal (the one documented tier
- * divergence), the once-per-process refusals, and clean teardown. */
+ * ledger, Promise-as-handle (hosted returns the thenable; isolated
+ * awaits on the wire), the once-per-process refusals, and clean
+ * teardown. */
 #include <ccc/std/prelude.cch>
 #include <ccc/script/js.cch>
 
@@ -94,12 +95,19 @@ int main(void) {
            before.ok && after.ok && after.u.value < before.u.value
                ? "true" : "false");
 
-    /* The one tier divergence, loud: the wire awaits, hosted refuses. */
+    /* Hosted returns a thenable as a handle — use .then on the loop
+     * thread; isolated would have awaited before replying. */
     CCResult_CCJsDomVal_CCJsError pr =
         cc_js_dom_eval(&js, "Promise.resolve(1)");
-    printf("promise_refused %s\n",
-           !pr.ok && strstr(pr.u.error.base.message, "Promise") ? "true"
-                                                                : "false");
+    int promise_ok = 0;
+    if (pr.ok && pr.u.value.kind == CC__JS_DOM_K_HANDLE) {
+        CCResult_CCJsDomVal_CCJsError th =
+            cc_js_dom_val_get(&pr.u.value, "then");
+        promise_ok = th.ok && th.u.value.kind == CC__JS_DOM_K_HANDLE;
+        if (th.ok) cc_js_dom_val_release(&th.u.value);
+        cc_js_dom_val_release(&pr.u.value);
+    }
+    printf("promise_as_handle %s\n", promise_ok ? "true" : "false");
 
     /* A JS failure is a Result carrying the exception's message. */
     CCResult_CCJsDomVal_CCJsError bad = cc_js_dom_eval(&js, "nope.nope");

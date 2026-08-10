@@ -81,23 +81,38 @@ To validate a suppression is safe:
 
 Example: `tests/tsan_closure_make_stress.c` validates that `cc_closure*_make` suppressions are safe (these functions only write to thread-local stack structs).
 
-## Scheduler synchronization invariants (fiber scheduler)
+## Scheduler synchronization invariants (V2 fiber scheduler)
 
-Key invariants in `cc/runtime/fiber_sched.c` that should not be violated:
+Normative state machine: `spec/concurrent-c-scheduler.md`. Shipped path:
+`cc/runtime/sched_v2.c` (shimmed by `fiber_sched.c` / `fiber_sched_boundary.c`).
 
-- `cc__fiber_unpark()` is non-blocking and handles `PARKED -> ASSIGNED` (CAS).
-  If the fiber is `OWNED` or `ASSIGNED`, it sets `pending_unpark = 1`.
-- `cc__fiber_park_if(flag, expected, reason)` only parks if `*flag == expected` and `pending_unpark == 0`.
-  Uses yield-before-commit: the fiber yields, then the worker publishes `PARKED` on the trampoline stack.
-- `join_waiter_fiber` provides a single-fiber waiter fast path; thread waiters use `join_mu`/`join_cv`.
-- Wake counters are debug-only telemetry (if enabled) and are not used for correctness.
-- Enqueue paths must transition to `ASSIGNED` exactly once (CAS from expected state); stale queue entries are dropped.
-- Fiber state transitions: `IDLE -> ASSIGNED -> OWNED -> PARKED -> ASSIGNED -> OWNED -> DONE`.
-- `pending_unpark` is a per-park-attempt latch, not a persistent flag. It must be cleared
-  (`cc__fiber_clear_pending_unpark()`) before entering a new wait context (e.g., select park loop)
-  to avoid consuming a stale signal from an unrelated prior operation.
+Base states (atomic word): `IDLE`, `QUEUED`, `RUNNING`, `PARKED`, `DEAD`, plus
+flag `SIGNAL_PENDING` (OR-ed into the same word).
 
-If you add new scheduler behaviors, update these invariants and extend the stress tests.
+Key invariants:
+
+- A signal against `PARKED` CASes to `QUEUED` and pushes the ready queue.
+- A signal against `RUNNING` / `QUEUED` sets `SIGNAL_PENDING`; park commit
+  requeues instead of parking when the bit is set (no lost wakeup).
+- At most one worker executes a given fiber's coroutine at a time.
+- A fiber is on the ready queue at most once.
+- Join: at most one fiber-context waiter (`join_waiter_fiber`); thread waiters
+  use the wake primitive. Prefer fiber-aware join from fiber context so the
+  OS worker stays free.
+- Sysmon: eviction, deadline wakes, deadlock detection, deferred pool growth.
+
+If you add new scheduler behaviors, update the spec and extend the stress
+tests (`stress/`, `tests/deadlock_*`, `tests/v2_*`).
+
+### Wait / throughput diagnostics
+
+| Variable | Effect |
+|----------|--------|
+| `CC_V2_STATS=1` | Dump coro pool, join, wake, grow, spin counters at exit |
+| `CC_TASK_WAIT_STATS=1` + `CC_TASK_WAIT_STATS_DUMP=1` | Attribute `cc_block_on_intptr` waits: spawn / fiber_v2 (ordered `send_task` await) / poll |
+| `CC_PIGZ_POOL_STATS=1` | pigz_cc only: input-arena pool borrow wait |
+
+See `docs/scheduler-ops-runbook.md` for pigz A/B recipes.
 
 ## Channel/select debugging (lock-free + cc_chan_match_select)
 
@@ -126,6 +141,8 @@ These are the flags the runtime actually reads (see `getenv` calls in
 | `CC_CHAN_TRACE_OBJ=<ptr>` | Filter the traces above to a single channel object address |
 | `CC_NURSERY_CLOSING_RUNTIME_GUARD=1` | Recv that waits on a channel whose `close_on` owner is the current nursery fails with `EDEADLK` instead of deadlocking |
 | `CC_WORKERS=n` | Set worker thread count |
+| `CC_V2_STATS=1` | Dump V2 scheduler counters at exit |
+| `CC_TASK_WAIT_STATS=1` + `CC_TASK_WAIT_STATS_DUMP=1` | Attribute `block_on` waits (spawn / fiber_v2 / poll) |
 
 ### Repro commands (common failures)
 - Select deadlock:  

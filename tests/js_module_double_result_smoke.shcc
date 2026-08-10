@@ -1,8 +1,10 @@
 /* The wider marshal gamut through one staged addon: a double method and a
  * `double !>(CCError)` method (the predeclared-Result collision the
  * Python twin pins), a string return, BigInt out at 2^60 and a BigInt
- * argument, arity and unexpected-keyword and wrong-type reports, and both
- * fallible shapes.  The module is js_module_double_result_mod.src. */
+ * argument, arity and unexpected-keyword and wrong-type reports, both
+ * fallible shapes, and the keyword-bag / js_pos escape for a trailing
+ * CCJsVal.  The module is js_module_double_result_mod.ccs; the node
+ * driver is js_module_double_result_run.js. */
 CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 
 {
@@ -25,43 +27,8 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 }
 
 {
-    CCCommand run = cc_command(&a, @slice("sh"));
-    run.arg("-c");
-    CCString js = @string(`node -e "
-const c = require(process.cwd() + '/bin/gamut_counter.node');
-console.log('scale', c.scale(0.5));
-console.log('label', c.label());
-const b = c.big();
-console.log('big', typeof b, b.toString());
-console.log('bigint_arg', c.bump(1n));
-try { c.bump(1, 2); } catch (e) { console.log('arity:', e.message); }
-try { c.bump({wrong: 1}); } catch (e) { console.log('unexpected:', e.message); }
-try { c.bump('x'); } catch (e) { console.log('badtype:', e.message); }
-console.log('half', c.half(5));
-try { c.half(-1); } catch (e) { console.log('half_raised:', e.constructor.name, e.code + ':', e.message); }
-console.log('sum_array', c.sum([1, 2, 3.5]));
-console.log('sum_typed', c.sum(new Float64Array([1, 2, 3.5])));
-console.log('sum_f32', c.sum(new Float32Array([1, 2, 3.5])));
-const buf = new Float64Array(3);
-c.fill(buf, 9);
-console.log('filled', buf[0], buf[1], buf[2]);
-const row = c.row();
-console.log('row', row.constructor.name, Array.from(row).join(','));
-console.log('roundtrip', c.sum(c.row()));
-try { c.sum(['x']); } catch (e) { console.log('badelem:', e.message); }
-console.log('apply', c.apply({step: (x) => x * 2}));
-console.log('eval42', c.eval42());
-console.log('eval_chain', c.eval_chain());
-console.log('eval_i64', c.eval_typed());
-console.log('gparse', c.gparse());
-console.log('chain_floor', c.chain_floor());
-console.log('chain_pi', c.chain_pi());
-console.log('chain_pid_ok', c.chain_pid() === process.pid);
-console.log('rowmap', c.rowmap((x, k) => x * k + 0.25,
-                               new Float64Array([1.5, 2.5, 3.5]),
-                               new BigInt64Array([2n, 3n, 4n])));
-"`, &a);
-    run.arg(js.cstr(&a));
+    CCCommand run = cc_command(&a, @slice("node"));
+    run.arg("tests/js_module_double_result_run.js");
     run.inherit_stdio();
     int rc = run.status() !>;
     if (rc != 0) { "import failed".println() !>; return 1; }

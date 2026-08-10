@@ -1,0 +1,275 @@
+/* CC embed interop stress — Waves A/B/C surfaces in js.cch / py.cch.
+ *
+ * Package-bridge chaos (js_python_chaos / cc_node_stress_wire) hammers the
+ * npm/pypi parents.  This driver hammers the CC parents that speak the
+ * same wires: isolated JS domains, process-isolated Python, and the
+ * in-process Python home / marshal fixes from Waves A–C.
+ *
+ * Scale: CHAOS_SCALE=quick|full|soak (default quick).  Skips cleanly when
+ * node / libpython / libnode / second subinterpreter are absent.
+ *
+ * Catalog: stress/bridge/bridge_stress.md § "CC embed interop waves".
+ *
+ * Concurrent-C surface (!> / @destroy) stays in main — static helpers may
+ * only use lowered C (soft-parse refuses CC tokens in static fn bodies).
+ * Stacked @errhandler(CCJsError) + @errhandler(CCPyError) in one scope is
+ * intentional (pins UFCS Form-P typed dispatch). */
+#include <ccc/std/prelude.cch>
+#include <ccc/script/js.cch>
+#include <ccc/script/py.cch>
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static int scale_n(int quick, int full, int soak) {
+    const char *s = getenv("CHAOS_SCALE");
+    if (s && strcmp(s, "soak") == 0) return soak;
+    if (s && strcmp(s, "full") == 0) return full;
+    return quick;
+}
+
+static void result_ok(const char *name, int pass) {
+    printf("RESULT ok_%s %s\n", name, pass ? "true" : "false");
+}
+
+static int add1(void *ctx, const CCJsDomVal *args, int argc,
+                CCJsDomVal *out) {
+    long long x;
+    (void)ctx;
+    if (argc < 1 || args[0].kind != CC__JS_DOM_K_NUM) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf), "add1: want number");
+        return -1;
+    }
+    x = args[0].num_is_int ? args[0].inum : (long long)args[0].num;
+    memset(out, 0, sizeof(*out));
+    out->dom = args[0].dom;
+    out->kind = CC__JS_DOM_K_NUM;
+    out->num_is_int = 1;
+    out->inum = x + 1;
+    out->num = (double)out->inum;
+    return 0;
+}
+
+typedef struct U64Echo { int unused; } U64Echo;
+static unsigned long long U64Echo_echo(U64Echo *self, unsigned long long v) {
+    (void)self;
+    return v;
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
+    @errhandler(CCJsError e) {
+        fprintf(stderr, "fatal: %s\n", e.base.message);
+        return 1;
+    }
+    @errhandler(CCPyError e) {
+        fprintf(stderr, "fatal: %s\n", e.base.message);
+        return 1;
+    }
+
+    const char *scale = getenv("CHAOS_SCALE");
+    printf("=== cc_embed_stress scale=%s ===\n",
+           scale && scale[0] ? scale : "quick");
+
+    int all = 1;
+    int i, ok;
+    int N;
+
+    /* ---- Wave C1: JS typed-array hail ---- */
+    N = scale_n(50, 400, 2000);
+    ok = 1;
+    if (!cc_js_dom_available(true)) {
+        printf("RESULT skip_js_ta_hail true\n");
+    } else {
+        CCArena a = cc_arena_heap(megabytes(4)) @destroy;
+        CCJsDom js = cc_js_new(true, &a) !> @destroy;
+        js.exec("globalThis.sum = (a) => a.reduce((s, x) => s + x, 0)") !>;
+        CCJsDomVal g = js.eval("globalThis") !> @destroy;
+        double buf[8];
+        for (i = 0; i < 8; i++) buf[i] = (double)(i + 1);
+        CCSlice_double xs = CCSlice_double_from_buffer(buf, 8);
+        for (i = 0; i < N && ok; i++) {
+            double got = g.sum(xs) !>;
+            if (fabs(got - 36.0) > 1e-9) ok = 0;
+            CCJsDomVal ta = js.eval("new Float64Array([1,2,3,4])") !>;
+            CCJsDomTaInfo info = ta.ta_info() !>;
+            if (info.kind != CC__JS_DOM_TA_F64 || info.nelem != 4) ok = 0;
+            cc_js_dom_val_release(&ta);
+        }
+        result_ok("js_ta_hail", ok);
+        printf("RESULT js_ta_hail_n %d\n", N);
+        all = ok && all;
+    }
+
+    /* ---- Wave C2: JS→CC callback blizzard ---- */
+    N = scale_n(50, 400, 2000);
+    ok = 1;
+    if (!cc_js_dom_available(true)) {
+        printf("RESULT skip_js_cb_blizzard true\n");
+    } else {
+        CCArena a = cc_arena_heap(megabytes(2)) @destroy;
+        CCJsDom js = cc_js_new(true, &a) !> @destroy;
+        js.exec("globalThis.apply = (f, x) => f(x)") !>;
+        CCJsDomVal g = js.eval("globalThis") !> @destroy;
+        for (i = 0; i < N && ok; i++) {
+            long long got = g.apply(js_dom_fn(add1, NULL), (long long)i) !>;
+            if (got != (long long)i + 1) ok = 0;
+        }
+        result_ok("js_cb_blizzard", ok);
+        printf("RESULT js_cb_blizzard_n %d\n", N);
+        all = ok && all;
+    }
+
+    /* ---- Wave B: hosted Promise-as-handle ---- */
+    N = scale_n(20, 100, 400);
+    ok = 1;
+    if (!cc_js_dom_available(false)) {
+        printf("RESULT skip_js_hosted_promise true\n");
+    } else {
+        CCArena a = cc_arena_heap(megabytes(2)) @destroy;
+        CCResult_CCJsDom_CCJsError mk = cc_js_new(false, &a);
+        if (!mk.ok) {
+            printf("RESULT skip_js_hosted_promise true\n");
+        } else {
+            CCJsDom js = mk.u.value;
+            for (i = 0; i < N && ok; i++) {
+                CCResult_CCJsDomVal_CCJsError r =
+                    cc_js_dom_eval(&js, "Promise.resolve(41)");
+                if (!r.ok || r.u.value.kind != CC__JS_DOM_K_HANDLE) {
+                    ok = 0;
+                    if (!r.ok)
+                        fprintf(stderr, "promise: %s\n",
+                                r.u.error.base.message);
+                } else {
+                    CCJsDomVal p = r.u.value;
+                    (void)p;
+                    cc_js_dom_val_release(&p);
+                }
+            }
+            cc_js_dom_close(&js);
+            result_ok("js_hosted_promise", ok);
+            printf("RESULT js_hosted_promise_n %d\n", N);
+            all = ok && all;
+        }
+    }
+
+    /* ---- Wave C3: process-isolated Python fanout ---- */
+    N = scale_n(4, 16, 32);
+    ok = 1;
+    if (!cc_py_proc_available()) {
+        printf("RESULT skip_py_proc_fanout true\n");
+    } else {
+        CCArena a = cc_arena_heap(megabytes(4)) @destroy;
+        for (i = 0; i < N && ok; i++) {
+            CCResult_CCPy_CCPyError mk = cc_py_new(true, &a);
+            if (!mk.ok) {
+                ok = 0;
+                break;
+            }
+            CCPy py = mk.u.value;
+            CCResult_CCPyObj_CCPyError mr = py.import("math");
+            if (!mr.ok) {
+                ok = 0;
+                cc_py_close(&py);
+                break;
+            }
+            CCPyObj m = mr.u.value;
+            CCResult_CCPyObj_CCPyError rr = m.call_f("sqrt", 9.0);
+            if (!rr.ok) {
+                ok = 0;
+            } else {
+                CCResult_double_CCPyError d = rr.u.value.as_f64();
+                if (!d.ok || fabs(d.u.value - 3.0) > 1e-9) ok = 0;
+                cc_py_obj_release(&rr.u.value);
+            }
+            cc_py_obj_release(&m);
+            cc_py_close(&py);
+        }
+        result_ok("py_proc_fanout", ok);
+        printf("RESULT py_proc_fanout_n %d\n", N);
+        all = ok && all;
+    }
+
+    /* ---- Wave C4 + A: clone_into hail + home refuse ---- */
+    N = scale_n(30, 200, 800);
+    ok = 1;
+    if (!cc_py_available()) {
+        printf("RESULT skip_py_clone_hail true\n");
+    } else {
+        CCArena a = cc_arena_heap(megabytes(2)) @destroy;
+        CCPy first = cc_py_new(false, &a) !>;
+        CCResult_CCPy_CCPyError r2 = cc_py_new(false, &a);
+        if (r2.is_err()) {
+            printf("RESULT skip_py_clone_hail true\n");
+            cc_py_close(&first);
+        } else {
+            CCPy second = CCResult_CCPy_CCPyError_value(r2);
+            first.exec(@slice(
+                "src = [1, 2, 3]\n"
+                "def id(x): return x\n")) !>;
+            CCPyObj main1 = first.import("__main__") !> @destroy;
+            CCPyObj src = main1.get("src") !> @destroy;
+            CCPyObj f = main1.get("id") !> @destroy;
+            for (i = 0; i < N && ok; i++) {
+                CCPyObj there = src.clone_into(&second) !>;
+                if (there.home != &second) ok = 0;
+                int64_t n = there.call0("__len__")!>.as_i64()!>;
+                if (n != 3) ok = 0;
+                CCResult_CCPyObj_CCPyError bad = f.invoke(there);
+                if (!bad.is_err() ||
+                    strstr(bad.u.error.base.message,
+                           "different interpreter") == NULL)
+                    ok = 0;
+                cc_py_obj_release(&there);
+            }
+            cc_py_close(&second);
+            cc_py_close(&first);
+            result_ok("py_clone_hail", ok);
+            printf("RESULT py_clone_hail_n %d\n", N);
+            all = ok && all;
+        }
+    }
+
+    /* ---- Wave A: ull inbound + as_list bounds ---- */
+    ok = 1;
+    if (!cc_py_available()) {
+        printf("RESULT skip_py_ull_bounds true\n");
+    } else {
+        CCArena a = cc_arena_heap(kilobytes(256)) @destroy;
+        CCPy py = cc_py_new(false, &a) !>;
+        U64Echo seed = {0};
+        py_expose::[U64Echo](&py, "u64echo", &seed) !>;
+        py.exec(@slice(
+            "import cc.u64echo as u\n"
+            "v = 2**63 + 5\n"
+            "ok = (u.echo(v) == v) and "
+            "(u.echo((1 << 64) - 1) == (1 << 64) - 1)\n"
+            "neg = False\n"
+            "try:\n"
+            "    u.echo(-1)\n"
+            "except OverflowError:\n"
+            "    neg = True\n")) !>;
+        CCPyObj m = py.import("__main__") !> @destroy;
+        CCSlice oks = m.get("ok")!>.as_slice()!>;
+        CCSlice negs = m.get("neg")!>.as_slice()!>;
+        if (oks.len != 4 || memcmp(oks.ptr, "True", 4) != 0) ok = 0;
+        if (negs.len != 4 || memcmp(negs.ptr, "True", 4) != 0) ok = 0;
+
+        CCPyObj big = py.eval(@slice("[2**40]")) !> @destroy;
+        CCResult_CCSlice_CCPyError bad = cc_py_obj_as_list(int, &big, &a);
+        if (!bad.is_err()) ok = 0;
+        CCSlice wide = big.as_list::[int64_t](&a) !>;
+        if (wide.len != 1 || ((int64_t *)wide.ptr)[0] != (1LL << 40)) ok = 0;
+
+        cc_py_close(&py);
+        result_ok("py_ull_bounds", ok);
+        all = ok && all;
+    }
+
+    printf("RESULT clean_exit %s\n", all ? "true" : "false");
+    return all ? 0 : 1;
+}

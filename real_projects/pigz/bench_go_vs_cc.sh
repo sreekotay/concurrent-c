@@ -53,12 +53,13 @@ if [ ! -f "$INPUT_FILE" ]; then
 fi
 
 # --- benchmark definitions: name, cmd, flags ---
-# CC (Pthread) is index 2 — ratio summary below uses it as baseline.
+# CC (Pthread) is the ratio baseline (find by name below).
+# "CC (Full -i)" is Full with --independent: no dict chaining, fair vs Idiomatic.
 # Always pass -k for pigz-compatible CLIs so a run cannot unlink the corpus
 # (that is what aborted the interleaved loop under set -e).
-BENCH_NAMES=("CC (Idiomatic)" "CC (Full)" "CC (Pthread)" "Go (CGO+zlib)")
-BENCH_CMDS=("$OUT_DIR/pigz_idiomatic" "$OUT_DIR/pigz_cc" "$OUT_DIR/pigz_pthread" "$OUT_DIR/pigz_go")
-BENCH_FLAGS=("" "-k -f" "" "")
+BENCH_NAMES=("CC (Idiomatic)" "CC (Full)" "CC (Full -i)" "CC (Pthread)" "Go (CGO+zlib)")
+BENCH_CMDS=("$OUT_DIR/pigz_idiomatic" "$OUT_DIR/pigz_cc" "$OUT_DIR/pigz_cc" "$OUT_DIR/pigz_pthread" "$OUT_DIR/pigz_go")
+BENCH_FLAGS=("" "-k -f" "-k -f -i" "" "")
 if [ "$ZIG_AVAILABLE" -eq 1 ]; then
     BENCH_NAMES+=("Zig")
     BENCH_CMDS+=("$ZIG_BIN")
@@ -184,7 +185,15 @@ echo "==========================================================================
 echo ""
 
 # Ratio vs CC (Pthread) as baseline
-pt_best="${BEST_TIMES[2]}"
+PT_IDX=-1
+for ((b=0; b<N; b++)); do
+    if [ "${BENCH_NAMES[$b]}" = "CC (Pthread)" ]; then PT_IDX=$b; break; fi
+done
+if [ "$PT_IDX" -lt 0 ]; then
+    echo "Ratios: CC (Pthread) row missing" >&2
+    exit 1
+fi
+pt_best="${BEST_TIMES[$PT_IDX]}"
 echo "Ratios vs CC (Pthread):"
 for ((b=0; b<N; b++)); do
     ratio=$(python3 -c "print(f'{${BEST_TIMES[$b]} / $pt_best:.3f}x')")

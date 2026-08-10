@@ -7,15 +7,22 @@
  *   CCPyObj r = m.call_f("sqrt", 2.0) !> @destroy;
  *   double v = r.as_f64() !>;
  *
+ * `cc_py_new(true, &a)` opens a process-isolated domain: a python child
+ * on the broker.py wire (remote handles / materialized scalars).
+ *
  * libpython is dlopen'd at cc_py; absence is a CCPyError, not a link
  * dependency. Stable-ABI symbols only; no '#' argument formats (their
  * length ABI shifted across versions). Single interpreter, calling
- * thread only; pools and moves are draft-only.
+ * thread only. `obj.clone_into(&other)` moves by pickle between
+ * same-process inproc homes; process-isolated and PyObject* sharing
+ * are refused.
  */
 #ifndef CC_SCRIPT_PY_H
 #define CC_SCRIPT_PY_H
 
 #include <dlfcn.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdarg.h>
 #include <stddef.h>
@@ -23,7 +30,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include <ccc/cc_arena.cch>
 #include <ccc/cc_compat.cch>
@@ -73,18 +83,32 @@ CC_MODULE_EXPORT(cc_py_export,
 typedef struct CCPy {
     int ready;
     CCArena *arena; /* error text + default extract backing */
-    /* The interpreter this handle names.  `tstate` is the thread state
-     * created with the interpreter; `interp` identifies the interpreter
-     * itself, which is what a per-thread attach needs.  `owns_interp` is
-     * 0 for the process interpreter (never finalized) and 1 for one this
-     * handle created. */
+    /* Transport: INPROC (libpython in this process) or PROC (python
+     * child on the broker.py wire).  Never aliased — `cc_py_new(true)`
+     * is always PROC. */
+    int tier; /* CC__PY_TIER_INPROC or CC__PY_TIER_PROC */
+    /* The interpreter this handle names (INPROC).  `tstate` is the thread
+     * state created with the interpreter; `interp` identifies the
+     * interpreter itself, which is what a per-thread attach needs.
+     * `owns_interp` is 0 for the process interpreter (never finalized)
+     * and 1 for one this handle created. */
     void *tstate;
     void *interp;
     int owns_interp;
-    int isolated; /* 1 when this interpreter holds its own GIL */
-    /* Method names already interned for THIS interpreter, keyed by the
-     * caller's string pointer — call sites pass literals, so the pointer is a
-     * stable identity and no strcmp is needed on the hit path.
+    int isolated; /* INPROC: 1 when this interpreter holds its own GIL */
+    /* PROC: socketpair to the child, pid, crash flag, request ids, and
+     * a line-reassembly buffer — the same shape as CCJsDom isolated. */
+    int fd;
+    long long pid;
+    int crashed;
+    long long next_id;
+    char *rb;
+    size_t rb_len, rb_cap, rb_off;
+    /* Method names already interned for THIS interpreter.  Lookup prefers
+     * pointer identity (UFCS literals), then strcmp so a reused buffer that
+     * once held a different name cannot hit the wrong interned object.
+     * Keys are the UTF-8 of the held interned Unicode (stable for the
+     * handle's life), not the caller's possibly-reused pointer.
      *
      * Per handle rather than global: an interned string belongs to the
      * interpreter that made it, and a global table would hand one
@@ -98,9 +122,28 @@ typedef struct CCPy {
 } CCPy;
 
 typedef struct CCPyObj {
-    void *o;     /* PyObject*, owned reference; NULL after release */
-    CCPy *home;  /* interpreter handle that produced this reference */
+    CCPy *home;  /* interpreter / domain that produced this value */
+    int kind;    /* CC__PY_K_LOCAL / HANDLE / NUM / STR / BOOL / NULL / RAW */
+    void *o;     /* kind LOCAL: PyObject*, owned reference; NULL after release */
+    long long h; /* kind HANDLE: remote id on the child's table */
+    double num;  /* kind NUM */
+    long long inum;
+    int num_is_int;
+    int b;       /* kind BOOL */
+    CCSlice text; /* kind STR / RAW */
 } CCPyObj;
+
+/* Transport + value kinds for dual-tier Python (in-process vs child). */
+#define CC__PY_TIER_INPROC 0
+#define CC__PY_TIER_PROC   1
+
+#define CC__PY_K_LOCAL  0 /* PyObject* in o */
+#define CC__PY_K_HANDLE 1 /* remote handle id in h */
+#define CC__PY_K_NUM    2
+#define CC__PY_K_STR    3
+#define CC__PY_K_BOOL   4
+#define CC__PY_K_NULL   5
+#define CC__PY_K_RAW    6 /* plain list/dict / ta — refuse scalar extract */
 
 /* Python failure with a CCError face: default @errhandler(CCError)
  * prints the exception text; exact @errhandler(CCPyError) claims it. */
@@ -184,6 +227,7 @@ typedef struct CC__PySyms {
     uint32_t *(*UnicodeAsUCS4)(void *, uint32_t *, intptr_t, int);
     double (*FloatAsDouble)(void *);
     long long (*LongAsLongLong)(void *);
+    unsigned long long (*LongAsUnsignedLongLong)(void *);
     void *(*FloatFromDouble)(double);
     void *(*LongFromLongLong)(long long);
     void *(*LongFromUnsignedLongLong)(unsigned long long);
@@ -283,10 +327,22 @@ typedef struct CC__PyInterpConfig {
 } CC__PyInterpConfig;
 #define CC__PY_OWN_GIL 2
 
+/* Parser-mode tcc rejects `_Thread_local`; it only needs these to parse, and
+ * the real compile of the emitted C gets the qualifier. */
+#if defined(CC_PARSER_MODE)
+#define CC_THREAD_LOCAL
+#else
+#define CC_THREAD_LOCAL _Thread_local
+#endif
+
+/* Process-global symbol table, published only when fully filled.
+ * Load state: 0 idle, 1 busy, 2 ready. */
 static CC__PySyms cc__py;
-static char cc__py_errbuf[512];
+static cc_atomic_int cc__py_load_state;
+/* Per-thread: error paths from concurrent workers must not contend. */
+static CC_THREAD_LOCAL char cc__py_errbuf[512];
 /* Scratch arena for the next `cc__py_err` copy. Set at each public entry
- * from `CCPy.arena` / `CCPyObj.home->arena`. NULL keeps the static buffer
+ * from `CCPy.arena` / `CCPyObj.home->arena`. NULL keeps the TLS errbuf
  * (bootstrap / load failures before a handle exists). Calling thread only. */
 static CCArena *cc__py_err_arena;
 
@@ -308,13 +364,6 @@ static char cc__py_sel_how[64];     /* provenance, for errors + introspection */
  *
  * A fiber that parks can resume on a different OS thread, so the lookup runs
  * at every public entry rather than once per handle. */
-/* Parser-mode tcc rejects `_Thread_local`; it only needs these to parse, and
- * the real compile of the emitted C gets the qualifier. */
-#if defined(CC_PARSER_MODE)
-#define CC_THREAD_LOCAL
-#else
-#define CC_THREAD_LOCAL _Thread_local
-#endif
 
 typedef struct CC__PyTls {
     void *interp;
@@ -642,7 +691,10 @@ static inline int cc_py_use(const char *spec) {
     return 0;
 }
 
-static int cc__py_load(void) {
+/* Resolve the table into `tmp`; never touch the published `cc__py`
+ * until every required slot is filled — a half-loaded table must not
+ * look like success to a racer or a later caller. */
+static int cc__py_load_fill(CC__PySyms *tmp) {
     /* Bare sonames first (Linux ldconfig / macOS dyld path); then common
      * Homebrew framework installs. Override with CC_LIBPYTHON=/path. */
     static const char *sonames[] = {
@@ -662,7 +714,7 @@ static int cc__py_load(void) {
     };
     const char *override;
     int i;
-    if (cc__py.lib) return 0;
+    memset(tmp, 0, sizeof(*tmp));
     /* Self-probe first: when this code runs INSIDE a Python process — an
      * extension module the interpreter imported, or a binary that linked
      * libpython — the symbols are already here, and loading any other
@@ -671,19 +723,19 @@ static int cc__py_load(void) {
     {
         void *self = dlopen(NULL, RTLD_NOW | RTLD_GLOBAL);
         if (self) {
-            if (dlsym(self, "Py_IsInitialized")) cc__py.lib = self;
+            if (dlsym(self, "Py_IsInitialized")) tmp->lib = self;
             else dlclose(self);
         }
     }
-    if (cc__py.lib) goto have_lib;
+    if (tmp->lib) goto have_lib;
     /* Selection order: code (cc_py_use, resolved already) > CC_LIBPYTHON >
      * ambient VIRTUAL_ENV > ambient ./.venv > the discovery walk.  Every
      * explicit or ambient form fails HARD on a broken target: falling
      * through would run the caller's code against the wrong environment
      * while looking like success. */
     if (cc__py_sel_lib[0]) {
-        cc__py.lib = dlopen(cc__py_sel_lib, RTLD_NOW | RTLD_GLOBAL);
-        if (!cc__py.lib) {
+        tmp->lib = dlopen(cc__py_sel_lib, RTLD_NOW | RTLD_GLOBAL);
+        if (!tmp->lib) {
             snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
                      "python: dlopen failed for the %.32s runtime %.300s: "
                      "%.100s",
@@ -694,8 +746,8 @@ static int cc__py_load(void) {
     }
     override = getenv("CC_LIBPYTHON");
     if (override && override[0]) {
-        cc__py.lib = dlopen(override, RTLD_NOW | RTLD_GLOBAL);
-        if (!cc__py.lib) {
+        tmp->lib = dlopen(override, RTLD_NOW | RTLD_GLOBAL);
+        if (!tmp->lib) {
             snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
                      "python: CC_LIBPYTHON dlopen failed: %s", dlerror());
             return -1;
@@ -724,8 +776,8 @@ static int cc__py_load(void) {
                 return -1; /* a present venv that fails to resolve is an
                             * error, not a fall-through */
             snprintf(cc__py_sel_how, sizeof(cc__py_sel_how), "%s", how);
-            cc__py.lib = dlopen(cc__py_sel_lib, RTLD_NOW | RTLD_GLOBAL);
-            if (!cc__py.lib) {
+            tmp->lib = dlopen(cc__py_sel_lib, RTLD_NOW | RTLD_GLOBAL);
+            if (!tmp->lib) {
                 snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
                          "python: dlopen failed for the %.32s runtime %.300s: "
                          "%.100s",
@@ -735,10 +787,10 @@ static int cc__py_load(void) {
             goto have_lib;
         }
     }
-    for (i = 0; !cc__py.lib && sonames[i]; i++) {
-        cc__py.lib = dlopen(sonames[i], RTLD_NOW | RTLD_GLOBAL);
+    for (i = 0; !tmp->lib && sonames[i]; i++) {
+        tmp->lib = dlopen(sonames[i], RTLD_NOW | RTLD_GLOBAL);
     }
-    if (!cc__py.lib) {
+    if (!tmp->lib) {
         snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
                  "python: no libpython3 found (tried 3.10-3.13; set "
                  "CC_LIBPYTHON, or probe cc_py_available() to degrade)");
@@ -746,7 +798,7 @@ static int cc__py_load(void) {
     }
 have_lib:
 #define CC__PY_SYM(field, name) \
-    if (cc__py_sym(cc__py.lib, name, &cc__py.field) != 0) return -1;
+    if (cc__py_sym(tmp->lib, name, &tmp->field) != 0) return -1;
     CC__PY_SYM(IsInitialized, "Py_IsInitialized")
     CC__PY_SYM(InitializeEx, "Py_InitializeEx")
     CC__PY_SYM(FinalizeEx, "Py_FinalizeEx")
@@ -759,6 +811,7 @@ have_lib:
     CC__PY_SYM(UnicodeAsUCS4, "PyUnicode_AsUCS4")
     CC__PY_SYM(FloatAsDouble, "PyFloat_AsDouble")
     CC__PY_SYM(LongAsLongLong, "PyLong_AsLongLong")
+    CC__PY_SYM(LongAsUnsignedLongLong, "PyLong_AsUnsignedLongLong")
     CC__PY_SYM(FloatFromDouble, "PyFloat_FromDouble")
     CC__PY_SYM(LongFromLongLong, "PyLong_FromLongLong")
     CC__PY_SYM(LongFromUnsignedLongLong, "PyLong_FromUnsignedLongLong")
@@ -804,7 +857,7 @@ have_lib:
      * error at the second `cc_py_new`, not a load failure here. The
      * thread-state calls are stable ABI but only needed alongside it. */
 #define CC__PY_SYM_OPT(field, name) \
-    cc__py.field = (void *)0; *(void **)&cc__py.field = dlsym(cc__py.lib, name);
+    tmp->field = (void *)0; *(void **)&tmp->field = dlsym(tmp->lib, name);
     CC__PY_SYM_OPT(MemoryViewFromBuffer, "PyMemoryView_FromBuffer")
     CC__PY_SYM_OPT(NewInterpreterFromConfig, "Py_NewInterpreterFromConfig")
     CC__PY_SYM_OPT(ModuleDefInit, "PyModuleDef_Init")
@@ -828,6 +881,28 @@ have_lib:
     CC__PY_SYM_OPT(GetVersion, "Py_GetVersion")
 #undef CC__PY_SYM_OPT
     return 0;
+}
+
+static int cc__py_load(void) {
+    for (;;) {
+        int st = cc_atomic_load(&cc__py_load_state);
+        int expected;
+        if (st == 2) return 0;
+        if (st == 1) continue; /* another thread is filling; table not ready */
+        expected = 0;
+        if (!cc_atomic_cas(&cc__py_load_state, &expected, 1)) continue;
+        break;
+    }
+    {
+        CC__PySyms tmp;
+        if (cc__py_load_fill(&tmp) != 0) {
+            cc_atomic_store(&cc__py_load_state, 0);
+            return -1;
+        }
+        cc__py = tmp;
+        cc_atomic_store(&cc__py_load_state, 2);
+        return 0;
+    }
 }
 
 /* One line of provenance for tooling: "3.12.3|/lib/libpython3.12.so|how"
@@ -1018,8 +1093,15 @@ static int cc__py_elem_store(void *item, CCPyElemKind kind, void *dst,
     case CC__PY_EL_INT: {
         long long v = cc__py.LongAsLongLong(item);
         if (v == -1 && cc__py.ErrOccurred()) return -1;
-        if (kind == CC__PY_EL_I64) *(int64_t *)dst = (int64_t)v;
-        else *(int *)dst = (int)v;
+        if (kind == CC__PY_EL_I64) {
+            if (v < (long long)INT64_MIN || v > (long long)INT64_MAX)
+                return -1;
+            *(int64_t *)dst = (int64_t)v;
+            return 0;
+        }
+        /* Same range rule as CC_PY_IN(int, …): refuse, never narrow. */
+        if (v < (long long)INT_MIN || v > (long long)INT_MAX) return -1;
+        *(int *)dst = (int)v;
         return 0;
     }
     default: {
@@ -1380,10 +1462,27 @@ static int cc__py_in_ll_raw(void *o, const char *what, long long *out) {
 }
 
 static int cc__py_in_ull_raw(void *o, const char *what, unsigned long long *out) {
-    long long v;
-    if (cc__py_in_ll_raw(o, what, &v) != 0) return -1;
-    if (v < 0) return cc__py_in_fail("OverflowError", what, "a non-negative integer");
-    *out = (unsigned long long)v;
+    unsigned long long v;
+    if (!o) return cc__py_in_fail("TypeError", what, "an integer");
+    /* Unsigned converter — not AsLongLong — so values in
+     * (LLONG_MAX, ULLONG_MAX] round-trip into unsigned long long. */
+    v = cc__py.LongAsUnsignedLongLong(o);
+    if (v == (unsigned long long)-1 && cc__py.ErrOccurred()) {
+        long long s;
+        cc__py.ErrClear();
+        /* Classify: negative → OverflowError; non-int / too large → match
+         * the signed path's TypeError-vs-Overflow posture. */
+        s = cc__py.LongAsLongLong(o);
+        if (s == -1 && cc__py.ErrOccurred()) {
+            cc__py.ErrClear();
+            return cc__py_in_fail("TypeError", what, "an integer");
+        }
+        if (s < 0)
+            return cc__py_in_fail("OverflowError", what,
+                                  "a non-negative integer");
+        return cc__py_in_fail("OverflowError", what, "an integer in range");
+    }
+    *out = v;
     return 0;
 }
 
@@ -2110,6 +2209,1263 @@ static int cc__py_install_namespace(CCArena *host_arena) {
                                   (intptr_t)sizeof(CCHostState), &seed);
 }
 
+/* Parity: identical to npm/cc-python/broker.py — do not edit by hand;
+ * refresh from that file. Used when CC_PY_BROKER is unset and the
+ * tree-relative path is not found (cache-write like JS's broker). */
+static const char cc__py_proc_broker_text[] =
+    "# cc-python isolated-domain broker: a FULL CPython per domain, speaking\n"
+    "# line-JSON on dedicated wire fds (3 in / 4 out; stdio stays the\n"
+    "# user's) — the same wire discipline as cc-node's broker.cjs, mirrored.\n"
+    "# Dependency-free (stdlib only); numpy is the USER's, imported on\n"
+    "# request like any module.\n"
+    "#\n"
+    "# Protocol (one JSON object per line; every request carries \"id\":n and\n"
+    "# the reply echoes it — the parent pairs replies by id, never by order,\n"
+    "# so a stray line on the channel can only be ignored, not misassigned):\n"
+    "#   -> {\"op\":\"import\",\"name\":m}            <- {\"h\":id} | {\"v\":plain} | {\"e\":msg}\n"
+    "#   -> {\"op\":\"get\",\"h\":id,\"name\":a}        <- value/handle/error\n"
+    "#   -> {\"op\":\"call\",\"h\":id,\"args\":[...]}   <- value/handle/error\n"
+    "#      (\"callp\" adds \"path\":[...] and optional \"kw\":{name:enc,...} —\n"
+    "#       keyword arguments, f(*args, **kw))\n"
+    "#   -> {\"op\":\"str\",\"h\":id}                 <- {\"v\":\"...\"}\n"
+    "#   -> {\"op\":\"release\",\"h\":id}             <- {\"v\":n}   (remaining live)\n"
+    "#   -> {\"op\":\"stats\"}                      <- {\"v\":n}\n"
+    "#   -> {\"op\":\"close\"}                      <- {\"v\":true}, then exit\n"
+    "#\n"
+    "# Values: finite numbers / str / bool / None / lists / dicts cross by\n"
+    "# value; non-finite floats tag as {\"nf\":\"inf\"|\"-inf\"|\"nan\"}; typed\n"
+    "# buffers as {\"ta\":kind,\"b64\":...} (numpy arrays when numpy is loadable\n"
+    "# in this child, else array.array); everything else is a handle.  A JS\n"
+    "# function argument arrives as {\"$f\":id}: calling it sends\n"
+    "# {\"cb\":true,\"cbid\":id,\"args\":[...]} and BLOCKS on the reply line\n"
+    "# {\"cbr\":...} (or {\"e\":...}).  The parent may take arbitrarily long\n"
+    "# (awaiting its own promises) before replying, and may have already\n"
+    "# pipelined later ops onto the wire — those are parked until the cbr\n"
+    "# lands, then drained in order.  EOF on the request fd is revocation:\n"
+    "# drop everything, exit.\n"
+    "import base64\n"
+    "import json\n"
+    "import math\n"
+    "import os\n"
+    "import sys\n"
+    "\n"
+    "_handles = {}\n"
+    "_next = [1]\n"
+    "# The wire lives on dedicated fds so user code owns stdin/stdout —\n"
+    "# print() reaches the real stdout and can never collide with a protocol\n"
+    "# reply.  Requests arrive on fd 3, replies leave on fd 4 (overridable\n"
+    "# for a parent that cannot pin fd numbers).\n"
+    "_in = os.fdopen(int(os.environ.get('CC_WIRE_IN', '3')), 'r',\n"
+    "                encoding='utf-8')\n"
+    "_out = os.fdopen(int(os.environ.get('CC_WIRE_OUT', '4')), 'w',\n"
+    "                 encoding='utf-8')\n"
+    "# Ops that arrived on stdin while a callback was blocked on its cbr.\n"
+    "_parked = []\n"
+    "# Big buffers spill through shared memory (tmpfs on Linux) instead of\n"
+    "# base64: one memcpy per side, no inflation, no JSON bloat.  The dir\n"
+    "# comes from the parent (its private 0700 bridge dir); files are 0600,\n"
+    "# exclusive-create, consumed-and-unlinked per message.\n"
+    "_shm_dir = os.environ.get('CC_PY_SHM_DIR') or (\n"
+    "    '/dev/shm' if os.path.isdir('/dev/shm') else None)\n"
+    "_shm_seq = [0]\n"
+    "_SPILL = 1 << 16\n"
+    "\n"
+    "\n"
+    "def _shm_write(raw):\n"
+    "    _shm_seq[0] += 1\n"
+    "    path = os.path.join(_shm_dir, 'ccpy-c%d-%d' % (os.getpid(), _shm_seq[0]))\n"
+    "    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)\n"
+    "    with os.fdopen(fd, 'wb') as f:\n"
+    "        f.write(raw)\n"
+    "    return path\n"
+    "\n"
+    "\n"
+    "def _put(v):\n"
+    "    h = _next[0]\n"
+    "    _next[0] += 1\n"
+    "    _handles[h] = v\n"
+    "    return h\n"
+    "\n"
+    "\n"
+    "def _np():\n"
+    "    try:\n"
+    "        import numpy\n"
+    "        return numpy\n"
+    "    except Exception:\n"
+    "        return None\n"
+    "\n"
+    "\n"
+    "_TA = {\n"
+    "    'f64': ('d', 'float64'), 'f32': ('f', 'float32'),\n"
+    "    'i32': ('i', 'int32'), 'i64': ('q', 'int64'),\n"
+    "    'u8': ('B', 'uint8'),\n"
+    "}\n"
+    "_TA_BY_DTYPE = {dt: k for k, (_, dt) in _TA.items()}\n"
+    "\n"
+    "\n"
+    "def _decode(v):\n"
+    "    if isinstance(v, dict):\n"
+    "        if '$h' in v:\n"
+    "            return _handles[v['$h']]\n"
+    "        if '$f' in v:\n"
+    "            fid = v['$f']\n"
+    "            def cb(*args):\n"
+    "                _send({'cb': True, 'cbid': fid,\n"
+    "                       'args': [_encode_val(a) for a in args]})\n"
+    "                # Strict cbr wait — but Promise.all on the parent can\n"
+    "                # pipeline later ops ahead of the reply.  Park those.\n"
+    "                while True:\n"
+    "                    line = _in.readline()\n"
+    "                    if not line:\n"
+    "                        raise RuntimeError('bridge is closed')\n"
+    "                    r = json.loads(line)\n"
+    "                    if 'cbr' in r or ('e' in r and 'op' not in r):\n"
+    "                        if 'e' in r:\n"
+    "                            raise RuntimeError(r['e'])\n"
+    "                        return _decode(r.get('cbr'))\n"
+    "                    _parked.append(r)\n"
+    "            return cb\n"
+    "        if '$nf' in v:\n"
+    "            return {'inf': math.inf, '-inf': -math.inf}.get(v['$nf'],\n"
+    "                                                            math.nan)\n"
+    "        if '$ta' in v:\n"
+    "            raw = base64.b64decode(v['b64'])\n"
+    "            np = _np()\n"
+    "            if np is not None:\n"
+    "                return np.frombuffer(raw, dtype=_TA[v['$ta']][1]).copy()\n"
+    "            import array\n"
+    "            a = array.array(_TA[v['$ta']][0])\n"
+    "            a.frombytes(raw)\n"
+    "            return a\n"
+    "        if '$shm' in v:\n"
+    "            path = v['$shm']\n"
+    "            try:\n"
+    "                np = _np()\n"
+    "                if np is not None:\n"
+    "                    return np.fromfile(path, dtype=_TA[v['t']][1])\n"
+    "                import array\n"
+    "                a = array.array(_TA[v['t']][0])\n"
+    "                with open(path, 'rb') as f:\n"
+    "                    a.frombytes(f.read())\n"
+    "                return a\n"
+    "            finally:\n"
+    "                try:\n"
+    "                    os.unlink(path)\n"
+    "                except OSError:\n"
+    "                    pass\n"
+    "        return {k: _decode(x) for k, x in v.items()}\n"
+    "    if isinstance(v, list):\n"
+    "        return [_decode(x) for x in v]\n"
+    "    return v\n"
+    "\n"
+    "\n"
+    "def _plain(v, depth=0):\n"
+    "    if depth > 16:\n"
+    "        return False\n"
+    "    if v is None or isinstance(v, (bool, str)):\n"
+    "        return True\n"
+    "    if isinstance(v, float):\n"
+    "        return True  # non-finite handled at encode\n"
+    "    if isinstance(v, int):\n"
+    "        return -(2**53) < v < 2**53\n"
+    "    if isinstance(v, (list, tuple)):\n"
+    "        return all(_plain(x, depth + 1) for x in v)\n"
+    "    if isinstance(v, dict):\n"
+    "        return all(isinstance(k, str) and not k.startswith('$') and\n"
+    "                   _plain(x, depth + 1) for k, x in v.items())\n"
+    "    return False\n"
+    "\n"
+    "\n"
+    "def _encode_val(v):\n"
+    "    \"\"\"Wire-encode a value nested inside a cb/cbr payload.\n"
+    "\n"
+    "    Unlike `_encode` (top-level reply shape), this returns the naked\n"
+    "    JSON value or a tagged form — callables and other live objects\n"
+    "    cross as {\"$h\": id}, never as a raw Python object (json.dumps\n"
+    "    would raise).  1-D buffers cross as {\"$ta\":...}/{\"$shm\":...}\n"
+    "    so JS callbacks see typed arrays, not opaque handles.\"\"\"\n"
+    "    if isinstance(v, float) and not math.isfinite(v):\n"
+    "        return {'$nf': 'inf' if v == math.inf\n"
+    "                else '-inf' if v == -math.inf else 'nan'}\n"
+    "    if isinstance(v, (list, tuple)):\n"
+    "        return [_encode_val(x) for x in v]\n"
+    "    if isinstance(v, dict):\n"
+    "        return {k: _encode_val(x) for k, x in v.items()}\n"
+    "    if v is None or isinstance(v, (bool, int, str)):\n"
+    "        return v\n"
+    "    if isinstance(v, float):\n"
+    "        return v\n"
+    "    np = _np()\n"
+    "    if np is not None and isinstance(v, np.ndarray) and v.ndim == 1:\n"
+    "        key = _TA_BY_DTYPE.get(str(v.dtype))\n"
+    "        if key is not None:\n"
+    "            raw = np.ascontiguousarray(v).tobytes()\n"
+    "            if len(raw) > _SPILL and _shm_dir:\n"
+    "                return {'$shm': _shm_write(raw), 't': key}\n"
+    "            return {'$ta': key,\n"
+    "                    'b64': base64.b64encode(raw).decode('ascii')}\n"
+    "    try:\n"
+    "        import array as _array\n"
+    "        if isinstance(v, _array.array):\n"
+    "            key = None\n"
+    "            for k, (tc, _) in _TA.items():\n"
+    "                if tc == v.typecode:\n"
+    "                    key = k\n"
+    "                    break\n"
+    "            if key is not None:\n"
+    "                raw = v.tobytes()\n"
+    "                if len(raw) > _SPILL and _shm_dir:\n"
+    "                    return {'$shm': _shm_write(raw), 't': key}\n"
+    "                return {'$ta': key,\n"
+    "                        'b64': base64.b64encode(raw).decode('ascii')}\n"
+    "    except Exception:\n"
+    "        pass\n"
+    "    return {'$h': _put(v)}\n"
+    "\n"
+    "\n"
+    "def _encode(v):\n"
+    "    np = _np()\n"
+    "    if np is not None and isinstance(v, np.generic):\n"
+    "        v = v.item()  # numpy scalar -> python scalar\n"
+    "    if np is not None and isinstance(v, np.ndarray):\n"
+    "        key = _TA_BY_DTYPE.get(str(v.dtype))\n"
+    "        # Inline small arrays; large ones stay handles (the shm lease\n"
+    "        # tier lifts this — for now crossing bulk data costs a copy and\n"
+    "        # says so in the docs).\n"
+    "        if key is not None and v.nbytes <= 1 << 16 and v.ndim == 1:\n"
+    "            return {'ta': key,\n"
+    "                    'b64': base64.b64encode(v.tobytes()).decode('ascii')}\n"
+    "        return {'h': _put(v)}\n"
+    "    if _plain(v):\n"
+    "        return {'v': _encode_val(v)}\n"
+    "    return {'h': _put(v)}\n"
+    "\n"
+    "\n"
+    "def _send(obj):\n"
+    "    _out.write(json.dumps(obj))\n"
+    "    _out.write('\\n')\n"
+    "    _out.flush()\n"
+    "\n"
+    "\n"
+    "def _run(v):\n"
+    "    # A coroutine result runs to completion here — the child is serial\n"
+    "    # per request; PARALLELISM is domains, each a whole process.\n"
+    "    import inspect\n"
+    "    if inspect.iscoroutine(v):\n"
+    "        import asyncio\n"
+    "        return asyncio.run(v)\n"
+    "    return v\n"
+    "\n"
+    "\n"
+    "def _walk(req):\n"
+    "    v = _handles[req['h']]\n"
+    "    for name in req.get('path', []):\n"
+    "        v = getattr(v, name)\n"
+    "    return v\n"
+    "\n"
+    "\n"
+    "def _dispatch(req):\n"
+    "    op = req['op']\n"
+    "    if op == 'import':\n"
+    "        import importlib\n"
+    "        return _encode(importlib.import_module(req['name']))\n"
+    "    if op == 'getp':\n"
+    "        return _encode(_walk(req))\n"
+    "    if op == 'callp':\n"
+    "        f = _walk(req)\n"
+    "        args = [_decode(a) for a in req.get('args', [])]\n"
+    "        kw = {k: _decode(v) for k, v in (req.get('kw') or {}).items()}\n"
+    "        return _encode(_run(f(*args, **kw)))\n"
+    "    if op == 'ta':\n"
+    "        # Materialize a buffer-shaped value back to the parent: small\n"
+    "        # inline, big through the shm spill.\n"
+    "        v = _walk(req)\n"
+    "        np = _np()\n"
+    "        if np is not None and isinstance(v, np.ndarray):\n"
+    "            v = np.ascontiguousarray(v)\n"
+    "            key = _TA_BY_DTYPE.get(str(v.dtype))\n"
+    "            if key is None:\n"
+    "                return {'e': 'cc-python broker: unsupported dtype ' +\n"
+    "                             str(v.dtype)}\n"
+    "            raw = v.tobytes()\n"
+    "        else:\n"
+    "            import array\n"
+    "            if not isinstance(v, array.array):\n"
+    "                return {'e': 'cc-python broker: not a buffer-shaped value'}\n"
+    "            key = None\n"
+    "            for k, (tc, _) in _TA.items():\n"
+    "                if tc == v.typecode:\n"
+    "                    key = k\n"
+    "                    break\n"
+    "            if key is None:\n"
+    "                return {'e': 'cc-python broker: unsupported typecode ' +\n"
+    "                             v.typecode}\n"
+    "            raw = v.tobytes()\n"
+    "        if _shm_dir and len(raw) > _SPILL:\n"
+    "            return {'shm': _shm_write(raw), 't': key}\n"
+    "        return {'ta': key, 'b64': base64.b64encode(raw).decode('ascii')}\n"
+    "    if op == 'str':\n"
+    "        return {'v': str(_walk(req))}\n"
+    "    if op == 'release':\n"
+    "        _handles.pop(req['h'], None)\n"
+    "        return {'v': len(_handles)}\n"
+    "    if op == 'stats':\n"
+    "        return {'v': len(_handles)}\n"
+    "    if op == 'close':\n"
+    "        return {'v': True}\n"
+    "    return {'e': 'cc-python broker: unknown op ' + repr(op)}\n"
+    "\n"
+    "\n"
+    "def _next_req():\n"
+    "    if _parked:\n"
+    "        return _parked.pop(0)\n"
+    "    for line in _in:\n"
+    "        line = line.strip()\n"
+    "        if not line:\n"
+    "            continue\n"
+    "        try:\n"
+    "            return json.loads(line)\n"
+    "        except Exception as e:\n"
+    "            _send({'e': 'cc-python broker: bad request: %s' % e})\n"
+    "            continue\n"
+    "    return None\n"
+    "\n"
+    "\n"
+    "def main():\n"
+    "    while True:\n"
+    "        req = _next_req()\n"
+    "        if req is None:\n"
+    "            break\n"
+    "        try:\n"
+    "            resp = _dispatch(req)\n"
+    "        except Exception as e:\n"
+    "            resp = {'e': '%s: %s' % (type(e).__name__, e)}\n"
+    "        # Replies pair by request id — the parent discards any line\n"
+    "        # without the id it is waiting on (this channel is shared with\n"
+    "        # whatever user code prints).\n"
+    "        if isinstance(req, dict) and 'id' in req:\n"
+    "            resp['id'] = req['id']\n"
+    "        _send(resp)\n"
+    "        if isinstance(req, dict) and req.get('op') == 'close':\n"
+    "            break\n"
+    "\n"
+    "\n"
+    "if __name__ == '__main__':\n"
+    "    main()\n"
+;
+/* ---- process-isolated domains (cc_py_new(true)) --------------------
+ *
+ * A python child per handle on the npm/cc-python broker.py wire — the
+ * same spawn/read/write discipline as CCJsDom's isolated tier.  Values
+ * are remote handles (or materialized scalars), never PyObject*.  The
+ * in-process path (tier INPROC) is unchanged. */
+
+
+
+typedef struct CC__PyIsoBuf {
+    char *p;
+    size_t len, cap;
+    int oom;
+} CC__PyIsoBuf;
+
+typedef struct CC__PyIsoResp {
+    long long id;
+    int kind; /* CC__PY_K_* or -1 */
+    long long h;
+    double num;
+    long long inum;
+    int num_is_int;
+    int b;
+    CCSlice text;
+    CCSlice e; /* error message */
+    int has_e;
+    int has_v;
+    int has_h;
+} CC__PyIsoResp;
+
+static void cc__py_iso_bput(CC__PyIsoBuf *b, const char *s, size_t n) {
+    if (b->oom) return;
+    if (b->len + n + 1 > b->cap) {
+        size_t nc = b->cap ? b->cap * 2 : 256;
+        char *np;
+        while (nc < b->len + n + 1) nc *= 2;
+        np = (char *)realloc(b->p, nc);
+        if (!np) { b->oom = 1; return; }
+        b->p = np;
+        b->cap = nc;
+    }
+    memcpy(b->p + b->len, s, n);
+    b->len += n;
+    b->p[b->len] = 0;
+}
+
+static void cc__py_iso_bputs(CC__PyIsoBuf *b, const char *s) {
+    if (s) cc__py_iso_bput(b, s, strlen(s));
+}
+
+static void cc__py_iso_bnum_ll(CC__PyIsoBuf *b, long long v) {
+    char t[32];
+    snprintf(t, sizeof(t), "%lld", v);
+    cc__py_iso_bputs(b, t);
+}
+
+static void cc__py_iso_bnum_f(CC__PyIsoBuf *b, double v) {
+    char t[64];
+    if (v != v) { cc__py_iso_bputs(b, "{\"$nf\":\"nan\"}"); return; }
+    if (v > 0 && v > 1e300 && v == v * 0.5) {
+        cc__py_iso_bputs(b, "{\"$nf\":\"inf\"}");
+        return;
+    }
+    if (v < 0 && v < -1e300 && v == v * 0.5) {
+        cc__py_iso_bputs(b, "{\"$nf\":\"-inf\"}");
+        return;
+    }
+    snprintf(t, sizeof(t), "%.17g", v);
+    cc__py_iso_bputs(b, t);
+}
+
+static void cc__py_iso_bjson_str(CC__PyIsoBuf *b, const char *s, size_t n) {
+    size_t i;
+    cc__py_iso_bput(b, "\"", 1);
+    for (i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == '"' || c == '\\') {
+            char e[3] = {'\\', (char)c, 0};
+            cc__py_iso_bput(b, e, 2);
+        } else if (c == '\n') cc__py_iso_bput(b, "\\n", 2);
+        else if (c == '\r') cc__py_iso_bput(b, "\\r", 2);
+        else if (c == '\t') cc__py_iso_bput(b, "\\t", 2);
+        else if (c < 0x20) {
+            char e[8];
+            snprintf(e, sizeof(e), "\\u%04x", c);
+            cc__py_iso_bputs(b, e);
+        } else
+            cc__py_iso_bput(b, (const char *)&s[i], 1);
+    }
+    cc__py_iso_bput(b, "\"", 1);
+}
+
+static unsigned long cc__py_iso_hash(const char *s) {
+    unsigned long h = 5381;
+    if (!s) return h;
+    while (*s) h = h * 33 + (unsigned char)*s++;
+    return h;
+}
+
+static int cc__py_iso_mkdirs(const char *path) {
+    char buf[384];
+    size_t i;
+    snprintf(buf, sizeof(buf), "%.376s", path);
+    for (i = 1; buf[i]; i++) {
+        if (buf[i] != '/') continue;
+        buf[i] = 0;
+        (void)mkdir(buf, 0755);
+        buf[i] = '/';
+    }
+    return mkdir(path, 0755) == 0 || errno == EEXIST ? 0 : -1;
+}
+
+static int cc__py_iso_cache_dir(char *out, size_t cap) {
+    const char *base = getenv("CC_PY_BROKER_CACHE");
+    const char *home;
+    if (base && base[0]) snprintf(out, cap, "%.360s", base);
+    else if ((home = getenv("HOME")) && home[0])
+        snprintf(out, cap, "%.320s/.cache/concurrent-c/py-broker", home);
+    else snprintf(out, cap, "/tmp/cc-py-broker");
+    return cc__py_iso_mkdirs(out);
+}
+
+static int cc__py_iso_write(const char *path, const char *text) {
+    char tmp[448];
+    FILE *f;
+    struct stat st;
+    if (stat(path, &st) == 0) return 0;
+    snprintf(tmp, sizeof(tmp), "%.420s.tmp%ld", path, (long)getpid());
+    f = fopen(tmp, "w");
+    if (!f) return -1;
+    fputs(text, f);
+    if (fclose(f) != 0) { remove(tmp); return -1; }
+    if (rename(tmp, path) != 0) { remove(tmp); return -1; }
+    return 0;
+}
+
+static int cc__py_iso_locate_broker(char *out, size_t cap) {
+    const char *ovr = getenv("CC_PY_BROKER");
+    struct stat st;
+    static const char *cands[] = {
+        "npm/cc-python/broker.py",
+        "./npm/cc-python/broker.py",
+        NULL
+    };
+    int i;
+    if (ovr && ovr[0]) {
+        snprintf(out, cap, "%.440s", ovr);
+        return 0;
+    }
+    for (i = 0; cands[i]; i++) {
+        if (stat(cands[i], &st) == 0 && S_ISREG(st.st_mode)) {
+            snprintf(out, cap, "%.440s", cands[i]);
+            return 0;
+        }
+    }
+    {
+        char dir[384];
+        unsigned long tag;
+        if (cc__py_iso_cache_dir(dir, sizeof(dir)) != 0) return -1;
+        tag = cc__py_iso_hash(cc__py_proc_broker_text);
+        snprintf(out, cap, "%.360s/cc_py_broker_%08lx.py", dir, tag);
+        if (cc__py_iso_write(out, cc__py_proc_broker_text) != 0) return -1;
+        return 0;
+    }
+}
+
+static const char *cc__py_iso_ws(const char *p, const char *end) {
+    while (p < end && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n'))
+        p++;
+    return p;
+}
+
+static const char *cc__py_iso_scan_str(const char *p, const char *end) {
+    if (p >= end || *p != '"') return NULL;
+    p++;
+    while (p < end) {
+        if (*p == '\\') { p += 2; continue; }
+        if (*p == '"') return p + 1;
+        p++;
+    }
+    return NULL;
+}
+
+static const char *cc__py_iso_scan_val(const char *p, const char *end) {
+    int depth;
+    p = cc__py_iso_ws(p, end);
+    if (p >= end) return NULL;
+    if (*p == '"') return cc__py_iso_scan_str(p, end);
+    if (*p == '{' || *p == '[') {
+        depth = 0;
+        while (p < end) {
+            if (*p == '"') {
+                p = cc__py_iso_scan_str(p, end);
+                if (!p) return NULL;
+                continue;
+            }
+            if (*p == '{' || *p == '[') depth++;
+            else if (*p == '}' || *p == ']') {
+                depth--;
+                p++;
+                if (depth == 0) return p;
+                continue;
+            }
+            p++;
+        }
+        return NULL;
+    }
+    while (p < end && *p != ',' && *p != '}' && *p != ']' &&
+           *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r')
+        p++;
+    return p;
+}
+
+static CCSlice cc__py_iso_copy(CCArena *a, const char *p, size_t n) {
+    CCSlice s;
+    char *dst;
+    memset(&s, 0, sizeof(s));
+    if (!a) return s;
+    dst = (char *)cc_arena_alloc(a, n + 1, 1);
+    if (!dst) return s;
+    if (n) memcpy(dst, p, n);
+    dst[n] = 0;
+    s.ptr = dst;
+    s.len = n;
+    return s;
+}
+
+static int cc__py_iso_unescape(CCArena *a, const char *p, const char *end,
+                               CCSlice *out) {
+    const char *s, *e;
+    size_t n, i, o;
+    char *dst;
+    if (p >= end || *p != '"') return -1;
+    s = p + 1;
+    e = cc__py_iso_scan_str(p, end);
+    if (!e) return -1;
+    e--; /* points at closing quote */
+    n = (size_t)(e - s);
+    dst = (char *)cc_arena_alloc(a, n + 1, 1);
+    if (!dst) return -1;
+    for (i = 0, o = 0; i < n; i++) {
+        if (s[i] == '\\' && i + 1 < n) {
+            char c = s[++i];
+            if (c == 'n') dst[o++] = '\n';
+            else if (c == 'r') dst[o++] = '\r';
+            else if (c == 't') dst[o++] = '\t';
+            else if (c == 'u' && i + 4 < n) {
+                unsigned v = 0;
+                int k;
+                for (k = 1; k <= 4; k++) {
+                    char h = s[i + k];
+                    v <<= 4;
+                    if (h >= '0' && h <= '9') v |= (unsigned)(h - '0');
+                    else if (h >= 'a' && h <= 'f') v |= (unsigned)(h - 'a' + 10);
+                    else if (h >= 'A' && h <= 'F') v |= (unsigned)(h - 'A' + 10);
+                    else return -1;
+                }
+                i += 4;
+                if (v < 128) dst[o++] = (char)v;
+                else dst[o++] = '?';
+            } else dst[o++] = c;
+        } else dst[o++] = s[i];
+    }
+    dst[o] = 0;
+    out->ptr = dst;
+    out->len = o;
+    return 0;
+}
+
+static int cc__py_iso_classify(CCArena *a, const char *p, const char *end,
+                              CC__PyIsoResp *r) {
+    p = cc__py_iso_ws(p, end);
+    if (p >= end) return -1;
+    if (*p == '"') {
+        r->kind = CC__PY_K_STR;
+        return cc__py_iso_unescape(a, p, end, &r->text);
+    }
+    if (*p == 't' || *p == 'f') {
+        r->kind = CC__PY_K_BOOL;
+        r->b = *p == 't';
+        return 0;
+    }
+    if (*p == 'n') {
+        r->kind = CC__PY_K_NULL;
+        return 0;
+    }
+    if (*p == '{' || *p == '[') {
+        /* Nested tagged forms inside v, or plain containers. */
+        const char *s = cc__py_iso_ws(p, end);
+        if (s + 6 < end && memcmp(s, "{\"$nf\"", 6) == 0) {
+            r->kind = CC__PY_K_NUM;
+            if (strstr(s, "\"nan\"")) r->num = 0.0 / 0.0;
+            else if (strstr(s, "\"-inf\"")) r->num = -1.0 / 0.0;
+            else r->num = 1.0 / 0.0;
+            return 0;
+        }
+        if (s + 5 < end && (memcmp(s, "{\"$h\"", 5) == 0 ||
+                            memcmp(s, "{\"$ta\"", 6) == 0 ||
+                            memcmp(s, "{\"$shm\"", 7) == 0 ||
+                            memcmp(s, "{\"$f\"", 5) == 0)) {
+            /* Nested handle/ta/callback inside a value — treat as raw;
+             * top-level replies use "h"/"ta", not these. */
+            r->kind = CC__PY_K_RAW;
+            r->text = cc__py_iso_copy(a, p, (size_t)(end - p));
+            return r->text.ptr ? 0 : -1;
+        }
+        r->kind = CC__PY_K_RAW;
+        r->text = cc__py_iso_copy(a, p, (size_t)(end - p));
+        return r->text.ptr ? 0 : -1;
+    }
+    {
+        char t[64];
+        char *tail = NULL;
+        size_t n = (size_t)(end - p);
+        long long iv;
+        if (n >= sizeof(t)) return -1;
+        memcpy(t, p, n);
+        t[n] = 0;
+        r->kind = CC__PY_K_NUM;
+        errno = 0;
+        iv = strtoll(t, &tail, 10);
+        if (tail && *tail == 0 && errno == 0) {
+            r->num_is_int = 1;
+            r->inum = iv;
+            r->num = (double)iv;
+            return 0;
+        }
+        r->num = strtod(t, &tail);
+        return tail && *tail == 0 ? 0 : -1;
+    }
+}
+
+static int cc__py_iso_parse(CCArena *a, const char *line, size_t len,
+                            CC__PyIsoResp *r) {
+    const char *p = line, *end = line + len;
+    memset(r, 0, sizeof(*r));
+    r->kind = -1;
+    p = cc__py_iso_ws(p, end);
+    if (p >= end || *p != '{') return -1;
+    p++;
+    for (;;) {
+        const char *ks, *ke, *vs, *ve;
+        p = cc__py_iso_ws(p, end);
+        if (p < end && *p == '}') return 0;
+        if (p >= end || *p != '"') return -1;
+        ks = p + 1;
+        p = cc__py_iso_scan_str(p, end);
+        if (!p) return -1;
+        ke = p - 1;
+        p = cc__py_iso_ws(p, end);
+        if (p >= end || *p != ':') return -1;
+        vs = p + 1;
+        ve = cc__py_iso_scan_val(vs, end);
+        if (!ve) return -1;
+        {
+            size_t kn = (size_t)(ke - ks);
+            const char *v = cc__py_iso_ws(vs, end);
+            if (kn == 2 && memcmp(ks, "id", 2) == 0) {
+                char t[32];
+                size_t n = (size_t)(ve - v);
+                if (n >= sizeof(t)) return -1;
+                memcpy(t, v, n);
+                t[n] = 0;
+                r->id = strtoll(t, NULL, 10);
+            } else if (kn == 1 && ks[0] == 'e') {
+                r->has_e = 1;
+                if (cc__py_iso_unescape(a, v, ve, &r->e) != 0) return -1;
+            } else if (kn == 1 && ks[0] == 'h') {
+                char t[32];
+                size_t n = (size_t)(ve - v);
+                if (n >= sizeof(t)) return -1;
+                memcpy(t, v, n);
+                t[n] = 0;
+                r->has_h = 1;
+                r->h = strtoll(t, NULL, 10);
+                r->kind = CC__PY_K_HANDLE;
+            } else if (kn == 1 && ks[0] == 'v') {
+                r->has_v = 1;
+                if (cc__py_iso_classify(a, v, ve, r) != 0) return -1;
+            } else if (kn == 2 && memcmp(ks, "ta", 2) == 0) {
+                /* Typed arrays: MVP refuses materialization. */
+                r->kind = CC__PY_K_RAW;
+                r->text = cc__py_iso_copy(a, line, len);
+            } else if (kn == 3 && memcmp(ks, "shm", 3) == 0) {
+                r->kind = CC__PY_K_RAW;
+                r->text = cc__py_iso_copy(a, line, len);
+            }
+        }
+        p = cc__py_iso_ws(ve, end);
+        if (p < end && *p == ',') { p++; continue; }
+        if (p < end && *p == '}') return 0;
+        return -1;
+    }
+}
+
+static int cc__py_iso_send_all(CCPy *d, const char *buf, size_t len) {
+#if defined(MSG_NOSIGNAL)
+    const int flags = MSG_NOSIGNAL;
+#else
+    const int flags = 0;
+#endif
+    while (len > 0) {
+        ssize_t n = send(d->fd, buf, len, flags);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        buf += n;
+        len -= (size_t)n;
+    }
+    return 0;
+}
+
+static int cc__py_iso_read_line(CCPy *d, const char **out, size_t *out_len) {
+    if (d->rb_off) {
+        memmove(d->rb, d->rb + d->rb_off, d->rb_len - d->rb_off);
+        d->rb_len -= d->rb_off;
+        d->rb_off = 0;
+    }
+    for (;;) {
+        char *nl = d->rb_len ? (char *)memchr(d->rb, '\n', d->rb_len) : NULL;
+        ssize_t n;
+        if (nl) {
+            size_t line_len = (size_t)(nl - d->rb);
+            *out = d->rb;
+            *out_len = line_len;
+            *nl = 0;
+            d->rb_off = line_len + 1;
+            return 0;
+        }
+        if (d->rb_len + 65536 + 1 > d->rb_cap) {
+            size_t nc = d->rb_cap ? d->rb_cap * 2 : 131072;
+            char *np;
+            while (nc < d->rb_len + 65536 + 1) nc *= 2;
+            np = (char *)realloc(d->rb, nc);
+            if (!np) return -1;
+            d->rb = np;
+            d->rb_cap = nc;
+        }
+        n = recv(d->fd, d->rb + d->rb_len, 65536, 0);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (n == 0) return -1;
+        d->rb_len += (size_t)n;
+    }
+}
+
+static void cc__py_iso_reap(CCPy *d) {
+    if (d->pid > 0) {
+        int st;
+        (void)waitpid((pid_t)d->pid, &st, 0);
+        d->pid = 0;
+    }
+}
+
+static void cc__py_iso_drop(CCPy *d) {
+    if (d->fd >= 0) {
+        close(d->fd);
+        d->fd = -1;
+    }
+    free(d->rb);
+    d->rb = NULL;
+    d->rb_len = d->rb_cap = d->rb_off = 0;
+}
+
+static int cc__py_iso_alive(CCPy *d, const char *op) {
+    if (!d || !d->ready || d->tier != CC__PY_TIER_PROC) {
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: %s: domain is closed", op ? op : "op");
+        return 0;
+    }
+    if (d->crashed || d->fd < 0) {
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: %s: isolated domain crashed (the python child "
+                 "exited)",
+                 op ? op : "op");
+        return 0;
+    }
+    return 1;
+}
+
+static int cc__py_iso_req(CCPy *d, CC__PyIsoBuf *req, const char *op,
+                          long long id, CC__PyIsoResp *resp) {
+    const char *line = NULL;
+    size_t line_len = 0;
+    cc__py_iso_bput(req, "\n", 1);
+    if (req->oom) {
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: %s: out of memory building request", op);
+        return -1;
+    }
+    if (cc__py_iso_send_all(d, req->p, req->len) != 0) {
+        d->crashed = 1;
+        cc__py_iso_drop(d);
+        cc__py_iso_reap(d);
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: %s: isolated domain crashed (write failed)", op);
+        return -1;
+    }
+    for (;;) {
+        if (cc__py_iso_read_line(d, &line, &line_len) != 0) {
+            d->crashed = 1;
+            cc__py_iso_drop(d);
+            cc__py_iso_reap(d);
+            snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                     "python: %s: isolated domain crashed (the python "
+                     "child exited)",
+                     op);
+            return -1;
+        }
+        if (cc__py_iso_parse(d->arena, line, line_len, resp) != 0) {
+            snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                     "python: %s: protocol violation (unparseable reply)",
+                     op);
+            return -1;
+        }
+        if (resp->id != id) continue; /* stray line — ignore */
+        if (resp->has_e) {
+            snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                     "python: %s: %.*s", op,
+                     (int)resp->e.len, (const char *)resp->e.ptr);
+            return -1;
+        }
+        return 0;
+    }
+}
+
+static CCPyObj cc__py_iso_val_from(CCPy *d, const CC__PyIsoResp *r) {
+    CCPyObj v;
+    memset(&v, 0, sizeof(v));
+    v.home = d;
+    if (r->has_h || r->kind == CC__PY_K_HANDLE) {
+        v.kind = CC__PY_K_HANDLE;
+        v.h = r->h;
+        return v;
+    }
+    if (r->kind == CC__PY_K_NUM) {
+        v.kind = CC__PY_K_NUM;
+        v.num = r->num;
+        v.inum = r->inum;
+        v.num_is_int = r->num_is_int;
+        return v;
+    }
+    if (r->kind == CC__PY_K_STR) {
+        v.kind = CC__PY_K_STR;
+        v.text = r->text;
+        return v;
+    }
+    if (r->kind == CC__PY_K_BOOL) {
+        v.kind = CC__PY_K_BOOL;
+        v.b = r->b;
+        return v;
+    }
+    if (r->kind == CC__PY_K_NULL) {
+        v.kind = CC__PY_K_NULL;
+        return v;
+    }
+    /* RAW / ta: keep as raw text so as_* can refuse by name. */
+    v.kind = CC__PY_K_RAW;
+    v.text = r->text;
+    return v;
+}
+
+/* Resolve python executable for the child. */
+static const char *cc__py_iso_exe(const char *override_exe) {
+    const char *exe = override_exe;
+    if (exe && exe[0]) return exe;
+    exe = getenv("CC_PYTHON_BIN");
+    if (exe && exe[0]) return exe;
+    if (cc__py_sel_prog[0]) return cc__py_sel_prog;
+    {
+        const char *ve = getenv("VIRTUAL_ENV");
+        static char vbuf[512];
+        struct stat st;
+        if (ve && ve[0]) {
+            snprintf(vbuf, sizeof(vbuf), "%.480s/bin/python3", ve);
+            if (stat(vbuf, &st) == 0) return vbuf;
+            snprintf(vbuf, sizeof(vbuf), "%.480s/bin/python", ve);
+            if (stat(vbuf, &st) == 0) return vbuf;
+        }
+    }
+    return "python3";
+}
+
+static inline bool cc_py_proc_available(void) {
+    const char *exe = getenv("CC_PYTHON_BIN");
+    if (exe && exe[0]) return true;
+    if (cc__py_sel_prog[0]) return true;
+    return system("command -v python3 >/dev/null 2>&1") == 0;
+}
+
+static inline CCResult_CCPy_CCPyError
+cc__py_proc_new_exe(CCArena *arena, const char *python_exe) {
+    char broker[448];
+    int sv[2] = {-1, -1};
+    long long pid;
+    CCPy py;
+    const char *exe = cc__py_iso_exe(python_exe);
+    cc__py_errbuf[0] = 0;
+    cc__py_bind_err_arena(arena);
+    if (!arena) {
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: cc_py_new requires arena");
+        return cc_err_CCResult_CCPy_CCPyError(cc__py_err("cc_py_new"));
+    }
+    if (cc__py_iso_locate_broker(broker, sizeof(broker)) != 0) {
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: isolated: cannot locate broker.py (set "
+                 "CC_PY_BROKER or run from the concurrent-c tree)");
+        return cc_err_CCResult_CCPy_CCPyError(cc__py_err("cc_py_new"));
+    }
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: isolated: socketpair failed");
+        return cc_err_CCResult_CCPy_CCPyError(cc__py_err("cc_py_new"));
+    }
+#if defined(SO_NOSIGPIPE)
+    {
+        int one = 1;
+        (void)setsockopt(sv[0], SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+    }
+#endif
+    pid = (long long)fork();
+    if (pid < 0) {
+        close(sv[0]);
+        close(sv[1]);
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: isolated: fork failed");
+        return cc_err_CCResult_CCPy_CCPyError(cc__py_err("cc_py_new"));
+    }
+    if (pid == 0) {
+        char *argv2[3];
+        int t;
+        close(sv[0]);
+        t = fcntl(sv[1], F_DUPFD, 5);
+        if (t < 0) _exit(127);
+        if (dup2(t, 3) < 0 || dup2(t, 4) < 0) _exit(127);
+        close(t);
+        if (sv[1] > 4) close(sv[1]);
+        argv2[0] = (char *)(uintptr_t)exe;
+        argv2[1] = broker;
+        argv2[2] = NULL;
+        execvp(exe, argv2);
+        _exit(127);
+    }
+    close(sv[1]);
+    memset(&py, 0, sizeof(py));
+    py.ready = 1;
+    py.arena = arena;
+    py.tier = CC__PY_TIER_PROC;
+    py.fd = sv[0];
+    py.pid = pid;
+    py.next_id = 1;
+    {
+        CC__PyIsoBuf req = {0};
+        CC__PyIsoResp resp;
+        long long id = py.next_id++;
+        int rc;
+        cc__py_iso_bputs(&req, "{\"id\":");
+        cc__py_iso_bnum_ll(&req, id);
+        cc__py_iso_bputs(&req, ",\"op\":\"stats\"}");
+        rc = cc__py_iso_req(&py, &req, "isolated_new", id, &resp);
+        free(req.p);
+        if (rc != 0) {
+            cc__py_iso_drop(&py);
+            cc__py_iso_reap(&py);
+            snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                     "python: isolated: cannot start '%.200s' (is "
+                     "python3 installed? set CC_PYTHON_BIN or "
+                     "CC_PY_BROKER)",
+                     exe);
+            return cc_err_CCResult_CCPy_CCPyError(cc__py_err("cc_py_new"));
+        }
+    }
+    return cc_ok_CCResult_CCPy_CCPyError(py);
+}
+
+static void cc__py_iso_close(CCPy *py) {
+    if (!py || py->tier != CC__PY_TIER_PROC) return;
+    if (py->fd < 0) {
+        cc__py_iso_reap(py);
+        py->ready = 0;
+        return;
+    }
+    {
+        CC__PyIsoBuf req = {0};
+        long long id = py->next_id++;
+        cc__py_iso_bputs(&req, "{\"id\":");
+        cc__py_iso_bnum_ll(&req, id);
+        cc__py_iso_bputs(&req, ",\"op\":\"close\"}\n");
+        if (!req.oom) (void)cc__py_iso_send_all(py, req.p, req.len);
+        free(req.p);
+    }
+    {
+        const char *line;
+        size_t n;
+        while (cc__py_iso_read_line(py, &line, &n) == 0) {}
+    }
+    cc__py_iso_drop(py);
+    cc__py_iso_reap(py);
+    py->ready = 0;
+    py->arena = NULL;
+    py->crashed = 0;
+}
+
+static CCResult_CCPyObj_CCPyError
+cc__py_iso_import(CCPy *py, const char *module) {
+    CC__PyIsoBuf req = {0};
+    CC__PyIsoResp resp;
+    long long id;
+    int rc;
+    CCResult_CCPyObj_CCPyError out;
+    cc__py_bind_err_py(py);
+    if (!cc__py_iso_alive(py, "import"))
+        return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err("import"));
+    id = py->next_id++;
+    cc__py_iso_bputs(&req, "{\"id\":");
+    cc__py_iso_bnum_ll(&req, id);
+    cc__py_iso_bputs(&req, ",\"op\":\"import\",\"name\":");
+    cc__py_iso_bjson_str(&req, module, module ? strlen(module) : 0);
+    cc__py_iso_bputs(&req, "}");
+    rc = cc__py_iso_req(py, &req, "import", id, &resp);
+    free(req.p);
+    if (rc != 0)
+        return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err("import"));
+    memset(&out, 0, sizeof(out));
+    out.ok = true;
+    out.u.value = cc__py_iso_val_from(py, &resp);
+    return out;
+}
+
+static CCResult_CCPyObj_CCPyError
+cc__py_iso_get(CCPyObj *obj, const char *name) {
+    CC__PyIsoBuf req = {0};
+    CC__PyIsoResp resp;
+    long long id;
+    int rc;
+    CCResult_CCPyObj_CCPyError out;
+    CCPy *py = obj ? obj->home : NULL;
+    cc__py_bind_err_obj(obj);
+    if (!obj || obj->kind != CC__PY_K_HANDLE || !py)
+        return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err(name));
+    if (!cc__py_iso_alive(py, name ? name : "get"))
+        return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err(name));
+    id = py->next_id++;
+    cc__py_iso_bputs(&req, "{\"id\":");
+    cc__py_iso_bnum_ll(&req, id);
+    cc__py_iso_bputs(&req, ",\"op\":\"getp\",\"h\":");
+    cc__py_iso_bnum_ll(&req, obj->h);
+    cc__py_iso_bputs(&req, ",\"path\":[");
+    cc__py_iso_bjson_str(&req, name, name ? strlen(name) : 0);
+    cc__py_iso_bputs(&req, "]}");
+    rc = cc__py_iso_req(py, &req, name ? name : "get", id, &resp);
+    free(req.p);
+    if (rc != 0)
+        return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err(name));
+    memset(&out, 0, sizeof(out));
+    out.ok = true;
+    out.u.value = cc__py_iso_val_from(py, &resp);
+    return out;
+}
+
+
+static CCResult_CCPyObj_CCPyError
+cc__py_iso_call_path(CCPyObj *obj, const char *method, const char *args_json) {
+    CC__PyIsoBuf req = {0};
+    CC__PyIsoResp resp;
+    long long id;
+    int rc, is_invoke;
+    CCResult_CCPyObj_CCPyError out;
+    CCPy *py = obj ? obj->home : NULL;
+    cc__py_bind_err_obj(obj);
+    if (!obj || !py || obj->kind != CC__PY_K_HANDLE)
+        return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err(method));
+    if (!cc__py_iso_alive(py, method ? method : "call"))
+        return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err(method));
+    is_invoke = method && strcmp(method, "invoke") == 0;
+    id = py->next_id++;
+    cc__py_iso_bputs(&req, "{\"id\":");
+    cc__py_iso_bnum_ll(&req, id);
+    cc__py_iso_bputs(&req, ",\"op\":\"callp\",\"h\":");
+    cc__py_iso_bnum_ll(&req, obj->h);
+    cc__py_iso_bputs(&req, ",\"path\":[");
+    if (!is_invoke)
+        cc__py_iso_bjson_str(&req, method, method ? strlen(method) : 0);
+    cc__py_iso_bputs(&req, "],\"args\":");
+    cc__py_iso_bputs(&req, args_json ? args_json : "[]");
+    cc__py_iso_bputs(&req, "}");
+    rc = cc__py_iso_req(py, &req, method ? method : "call", id, &resp);
+    free(req.p);
+    if (rc != 0)
+        return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err(method));
+    memset(&out, 0, sizeof(out));
+    out.ok = true;
+    out.u.value = cc__py_iso_val_from(py, &resp);
+    return out;
+}
+
+static CCResult_CCPyObj_CCPyError
+cc__py_iso_call0(CCPyObj *obj, const char *m) {
+    return cc__py_iso_call_path(obj, m, "[]");
+}
+
+static CCResult_CCPyObj_CCPyError
+cc__py_iso_call_f(CCPyObj *obj, const char *m, double v) {
+    CC__PyIsoBuf b = {0};
+    CCResult_CCPyObj_CCPyError r;
+    cc__py_iso_bputs(&b, "[");
+    cc__py_iso_bnum_f(&b, v);
+    cc__py_iso_bputs(&b, "]");
+    if (b.oom) {
+        free(b.p);
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: %s: out of memory", m ? m : "call");
+        return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err(m));
+    }
+    r = cc__py_iso_call_path(obj, m, b.p);
+    free(b.p);
+    return r;
+}
+
+static CCResult_CCPyObj_CCPyError
+cc__py_iso_call_i(CCPyObj *obj, const char *m, long long v) {
+    CC__PyIsoBuf b = {0};
+    CCResult_CCPyObj_CCPyError r;
+    cc__py_iso_bputs(&b, "[");
+    cc__py_iso_bnum_ll(&b, v);
+    cc__py_iso_bputs(&b, "]");
+    if (b.oom) {
+        free(b.p);
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: %s: out of memory", m ? m : "call");
+        return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err(m));
+    }
+    r = cc__py_iso_call_path(obj, m, b.p);
+    free(b.p);
+    return r;
+}
+
+static CCResult_CCPyObj_CCPyError
+cc__py_iso_call_s(CCPyObj *obj, const char *m, CCSlice s) {
+    CC__PyIsoBuf b = {0};
+    CCResult_CCPyObj_CCPyError r;
+    cc__py_iso_bputs(&b, "[");
+    cc__py_iso_bjson_str(&b, (const char *)s.ptr, s.len);
+    cc__py_iso_bputs(&b, "]");
+    if (b.oom) {
+        free(b.p);
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: %s: out of memory", m ? m : "call");
+        return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err(m));
+    }
+    r = cc__py_iso_call_path(obj, m, b.p);
+    free(b.p);
+    return r;
+}
+
+static void cc__py_iso_release(CCPyObj *obj) {
+    CCPy *py;
+    if (!obj) return;
+    py = obj->home;
+    if (obj->kind == CC__PY_K_HANDLE && py && py->ready &&
+        py->tier == CC__PY_TIER_PROC && !py->crashed && py->fd >= 0) {
+        CC__PyIsoBuf req = {0};
+        CC__PyIsoResp resp;
+        long long id = py->next_id++;
+        cc__py_iso_bputs(&req, "{\"id\":");
+        cc__py_iso_bnum_ll(&req, id);
+        cc__py_iso_bputs(&req, ",\"op\":\"release\",\"h\":");
+        cc__py_iso_bnum_ll(&req, obj->h);
+        cc__py_iso_bputs(&req, "}");
+        (void)cc__py_iso_req(py, &req, "release", id, &resp);
+        free(req.p);
+    }
+    obj->kind = CC__PY_K_LOCAL;
+    obj->h = 0;
+    obj->o = NULL;
+    obj->home = NULL;
+    obj->text.ptr = NULL;
+    obj->text.len = 0;
+}
+
+static CCResult_CCPyObj_CCPyError
+cc__py_iso_str(CCPyObj *obj) {
+    CC__PyIsoBuf req = {0};
+    CC__PyIsoResp resp;
+    long long id;
+    int rc;
+    CCResult_CCPyObj_CCPyError out;
+    CCPy *py = obj ? obj->home : NULL;
+    cc__py_bind_err_obj(obj);
+    if (!obj || obj->kind != CC__PY_K_HANDLE || !py)
+        return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err("as_slice"));
+    if (!cc__py_iso_alive(py, "as_slice"))
+        return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err("as_slice"));
+    id = py->next_id++;
+    cc__py_iso_bputs(&req, "{\"id\":");
+    cc__py_iso_bnum_ll(&req, id);
+    cc__py_iso_bputs(&req, ",\"op\":\"str\",\"h\":");
+    cc__py_iso_bnum_ll(&req, obj->h);
+    cc__py_iso_bputs(&req, ",\"path\":[]}");
+    rc = cc__py_iso_req(py, &req, "as_slice", id, &resp);
+    free(req.p);
+    if (rc != 0)
+        return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err("as_slice"));
+    memset(&out, 0, sizeof(out));
+    out.ok = true;
+    out.u.value = cc__py_iso_val_from(py, &resp);
+    return out;
+}
+
 /* ---- lifecycle ---- */
 
 /* Has this process handed out the interpreter that `Py_Initialize` makes?
@@ -2123,32 +3479,22 @@ static int cc__py_main_taken;
  * `.as_slice()` backing; explicit `.as_slice_into(&dst)` can override
  * the destination.
  *
- * `false` (in-process): the first call in a process takes the
- * interpreter `Py_Initialize` creates.  Every later call creates an
- * isolated one with its OWN GIL, so two handles run Python in parallel
- * — and fails cleanly where the runtime cannot, rather than quietly
- * aliasing the first (which would serialize on one GIL and share
- * module state with no signal).  To share an interpreter, pass the
- * handle.  Python multiplies in-process where V8 cannot, so `false`
- * already gives N parallel domains.
+ * `false` (in-process): the first call takes the `Py_Initialize` main
+ * interpreter; every later call creates a 3.12+ own-GIL subinterpreter
+ * (and fails cleanly where the runtime cannot, rather than quietly
+ * aliasing the first).  To share an interpreter, pass the handle.
+ * Python multiplies in-process where V8 cannot, so `false` already
+ * gives N parallel domains.
  *
- * `true` (a python child per handle, the broker.py wire) is not yet
- * implemented from CC and refuses by name — the flag reserves the
- * symmetric shape, never a silent alias of `false`. */
+ * `true` (process-isolated): a python child per handle on the
+ * broker.py wire (remote handles, never PyObject*).  Never a silent
+ * alias of `false`. */
 static inline CCPy !>(CCPyError) cc_py_new(_Bool isolated, CCArena *arena) {
     CCPy py;
     memset(&py, 0, sizeof(py));
     cc__py_errbuf[0] = '\0';
     cc__py_bind_err_arena(arena);
-    if (isolated) {
-        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
-                 "python: isolated python domains (a python child per "
-                 "handle) are not yet implemented from CC — the wire "
-                 "exists as npm/cc-python's broker.py; cc_py_new(false, "
-                 "&arena) opens in-process interpreters, which already "
-                 "parallelize under per-interpreter GILs");
-        return cc_err_CCResult_CCPy_CCPyError(cc__py_err("cc_py_new"));
-    }
+    if (isolated) return cc__py_proc_new_exe(arena, NULL);
     if (!arena) {
         snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
                  "python: cc_py_new requires arena");
@@ -2191,6 +3537,8 @@ static inline CCPy !>(CCPyError) cc_py_new(_Bool isolated, CCArena *arena) {
         cc__py_main_taken = 1;
         py.ready = 1;
         py.arena = arena;
+        py.tier = CC__PY_TIER_INPROC;
+        py.fd = -1;
         py.owns_interp = 0;
         py.isolated = 0;
         if (cc__py_main_tstate) {
@@ -2254,6 +3602,8 @@ static inline CCPy !>(CCPyError) cc_py_new(_Bool isolated, CCArena *arena) {
         }
         py.ready = 1;
         py.arena = arena;
+        py.tier = CC__PY_TIER_INPROC;
+        py.fd = -1;
         py.tstate = tstate;
         py.owns_interp = 1;
         py.isolated = 1;
@@ -2275,6 +3625,10 @@ static inline CCPy !>(CCPyError) cc_py_new(_Bool isolated, CCArena *arena) {
  * unreliable, and process exit reclaims it. Idempotent. */
 static inline void cc_py_close(CCPy *py) {
     if (!py) return;
+    if (py->tier == CC__PY_TIER_PROC) {
+        cc__py_iso_close(py);
+        return;
+    }
     if (py->owns_interp && py->tstate && cc__py.EndInterpreter &&
         cc__py.ThreadStateSwap) {
         /* End it from inside: swap in, end, then leave no thread current. */
@@ -2320,10 +3674,16 @@ static inline void cc_py_close(CCPy *py) {
     py->interp = NULL;
     py->owns_interp = 0;
     py->isolated = 0;
+    py->tier = CC__PY_TIER_INPROC;
+    py->fd = -1;
 }
 
 static inline void cc_py_obj_release(CCPyObj *obj) {
     if (!obj) return;
+    if (obj->home && obj->home->tier == CC__PY_TIER_PROC) {
+        cc__py_iso_release(obj);
+        return;
+    }
     /* A reference that outlives its home releases as a no-op: the
      * interpreter that owned it has already reclaimed everything, and
      * touching the refcount now would be a use-after-free.  A live home
@@ -2334,6 +3694,7 @@ static inline void cc_py_obj_release(CCPyObj *obj) {
     }
     obj->o = NULL;
     obj->home = NULL;
+    obj->kind = CC__PY_K_LOCAL;
 }
 
 /* ---- import / attributes / calls ---- */
@@ -2344,6 +3705,7 @@ static inline CCPyObj !>(CCPyError) cc__py_obj_or_err(CCPy *home,
     CCPyObj obj;
     memset(&obj, 0, sizeof(obj));
     if (!o) return cc_err(cc__py_err(ctx));
+    obj.kind = CC__PY_K_LOCAL;
     obj.o = o;
     obj.home = home;
     return cc_ok(obj);
@@ -2387,6 +3749,12 @@ static inline void !>(CCPyError) cc_py_exec(CCPy *py, CCSlice code) {
     cc__py_bind_err_py(py);
     if (!py || !py->ready)
         return cc_err(cc__py_err("exec"));
+    if (py->tier == CC__PY_TIER_PROC) {
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: exec: not yet supported on process-isolated "
+                 "domains");
+        return cc_err(cc__py_err("exec"));
+    }
     src = cc__py_cstr(py, code);
     if (!src) {
         snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
@@ -2430,6 +3798,12 @@ static inline CCPyObj !>(CCPyError) cc__py_eval(CCPy *py, CCSlice expr) {
     cc__py_bind_err_py(py);
     if (!py || !py->ready)
         return cc_err(cc__py_err("eval"));
+    if (py->tier == CC__PY_TIER_PROC) {
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: eval: not yet supported on process-isolated "
+                 "domains");
+        return cc_err(cc__py_err("eval"));
+    }
     src = cc__py_cstr(py, expr);
     if (!src) {
         snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
@@ -2446,18 +3820,27 @@ static inline CCPyObj !>(CCPyError) cc__py_eval(CCPy *py, CCSlice expr) {
 }
 
 
+static CCResult_CCPyObj_CCPyError
+cc__py_iso_call_o(CCPyObj *obj, const char *m, CCPyObj *arg);
+
 static inline CCPyObj !>(CCPyError) cc_py_import(CCPy *py,
                                                       const char *module) {
     cc__py_bind_err_py(py);
     if (!py || !py->ready)
         return cc_err(cc__py_err("import"));
+    if (py->tier == CC__PY_TIER_PROC)
+        return cc__py_iso_import(py, module);
     return cc__py_obj_or_err(py, cc__py.ImportModule(module), module);
 }
 
 static inline CCPyObj !>(CCPyError) cc_py_obj_get(CCPyObj *obj,
                                                        const char *name) {
     cc__py_bind_err_obj(obj);
-    if (!obj || !obj->o)
+    if (!obj)
+        return cc_err(cc__py_err(name));
+    if (obj->home && obj->home->tier == CC__PY_TIER_PROC)
+        return cc__py_iso_get(obj, name);
+    if (!obj->o)
         return cc_err(cc__py_err(name));
     return cc__py_obj_or_err(obj->home, cc__py.GetAttrString(obj->o, name),
                              name);
@@ -2466,7 +3849,11 @@ static inline CCPyObj !>(CCPyError) cc_py_obj_get(CCPyObj *obj,
 static inline CCPyObj !>(CCPyError) cc_py_obj_call0(CCPyObj *obj,
                                                          const char *m) {
     cc__py_bind_err_obj(obj);
-    if (!obj || !obj->o)
+    if (!obj)
+        return cc_err(cc__py_err(m));
+    if (obj->home && obj->home->tier == CC__PY_TIER_PROC)
+        return cc__py_iso_call0(obj, m);
+    if (!obj->o)
         return cc_err(cc__py_err(m));
     return cc__py_obj_or_err(obj->home, cc__py.CallMethod(obj->o, m, NULL), m);
 }
@@ -2475,7 +3862,11 @@ static inline CCPyObj !>(CCPyError) cc_py_obj_call_f(CCPyObj *obj,
                                                           const char *m,
                                                           double v) {
     cc__py_bind_err_obj(obj);
-    if (!obj || !obj->o)
+    if (!obj)
+        return cc_err(cc__py_err(m));
+    if (obj->home && obj->home->tier == CC__PY_TIER_PROC)
+        return cc__py_iso_call_f(obj, m, v);
+    if (!obj->o)
         return cc_err(cc__py_err(m));
     return cc__py_obj_or_err(obj->home, cc__py.CallMethod(obj->o, m, "d", v),
                              m);
@@ -2485,7 +3876,11 @@ static inline CCPyObj !>(CCPyError) cc_py_obj_call_i(CCPyObj *obj,
                                                           const char *m,
                                                           long long v) {
     cc__py_bind_err_obj(obj);
-    if (!obj || !obj->o)
+    if (!obj)
+        return cc_err(cc__py_err(m));
+    if (obj->home && obj->home->tier == CC__PY_TIER_PROC)
+        return cc__py_iso_call_i(obj, m, v);
+    if (!obj->o)
         return cc_err(cc__py_err(m));
     return cc__py_obj_or_err(obj->home, cc__py.CallMethod(obj->o, m, "L", v),
                              m);
@@ -2497,7 +3892,11 @@ static inline CCPyObj !>(CCPyError) cc_py_obj_call_s(CCPyObj *obj,
     void *u;
     void *r;
     cc__py_bind_err_obj(obj);
-    if (!obj || !obj->o)
+    if (!obj)
+        return cc_err(cc__py_err(m));
+    if (obj->home && obj->home->tier == CC__PY_TIER_PROC)
+        return cc__py_iso_call_s(obj, m, s);
+    if (!obj->o)
         return cc_err(cc__py_err(m));
     u = cc__py.UnicodeFromStringAndSize((const char *)s.ptr, (intptr_t)s.len);
     if (!u) return cc_err(cc__py_err(m));
@@ -2510,10 +3909,130 @@ static inline CCPyObj !>(CCPyError) cc_py_obj_call_o(CCPyObj *obj,
                                                           const char *m,
                                                           CCPyObj *arg) {
     cc__py_bind_err_obj(obj);
-    if (!obj || !obj->o || !arg || !arg->o)
+    if (!obj || !arg)
         return cc_err(cc__py_err(m));
+    if (obj->home && obj->home->tier == CC__PY_TIER_PROC)
+        return cc__py_iso_call_o(obj, m, arg);
+    if (!obj->o || !arg->o)
+        return cc_err(cc__py_err(m));
+    if (arg->home != obj->home) {
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: %s: object argument from a different interpreter "
+                 "(same home required)",
+                 m ? m : "call");
+        return cc_err(cc__py_err(m));
+    }
     return cc__py_obj_or_err(obj->home,
                              cc__py.CallMethod(obj->o, m, "O", arg->o), m);
+}
+
+/* `obj.clone_into(&target)` — rebuild `obj` in another same-process
+ * inproc interpreter.  Same home: a new owned local ref (IncRef). Cross
+ * home: pickle.dumps under the source attach, then pickle.loads under
+ * the target attach; the pickle bytes cross as a C buffer / memoryview,
+ * never as a shared PyObject*.  Process-isolated domains refuse. */
+static inline CCPyObj !>(CCPyError) cc_py_obj_clone_into(CCPyObj *obj,
+                                                              CCPy *target) {
+    void *pickle = NULL;
+    void *dumped = NULL;
+    void *mv = NULL;
+    void *loaded = NULL;
+    CC__PyBuffer view;
+    char *buf = NULL;
+    size_t n = 0;
+    CCArena *scratch = NULL;
+    char empty;
+
+    cc__py_bind_err_obj(obj);
+    if (!obj || !obj->home || !obj->home->ready) {
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: clone_into: source object is null or not ready");
+        return cc_err(cc__py_err("clone_into"));
+    }
+    if (!target || !target->ready) {
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: clone_into: target interpreter is null or not ready");
+        return cc_err(cc__py_err("clone_into"));
+    }
+    if (obj->home->tier != CC__PY_TIER_INPROC ||
+        target->tier != CC__PY_TIER_INPROC) {
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: clone_into: process-isolated domains refuse "
+                 "clone_into (same-process inproc only)");
+        return cc_err(cc__py_err("clone_into"));
+    }
+    if (obj->kind != CC__PY_K_LOCAL || !obj->o) {
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: clone_into: source is not a local PyObject");
+        return cc_err(cc__py_err("clone_into"));
+    }
+
+    /* Same home: another owned reference to the same object. */
+    if (obj->home == target) {
+        cc__py.IncRef(obj->o);
+        return cc__py_obj_or_err(target, obj->o, "clone_into");
+    }
+
+    /* Serialize in the home interpreter — attach already held. */
+    pickle = cc__py.ImportModule("pickle");
+    if (!pickle) return cc_err(cc__py_err("clone_into"));
+    dumped = cc__py.CallMethod(pickle, "dumps", "O", obj->o);
+    cc__py.DecRef(pickle);
+    pickle = NULL;
+    if (!dumped) return cc_err(cc__py_err("clone_into"));
+
+    memset(&view, 0, sizeof(view));
+    if (!cc__py.GetBuffer ||
+        cc__py.GetBuffer(dumped, &view, CC__PYBUF_CONTIG_FMT) != 0) {
+        if (cc__py.ErrClear) cc__py.ErrClear();
+        cc__py.DecRef(dumped);
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: clone_into: pickle.dumps did not yield a "
+                 "contiguous buffer");
+        return cc_err(cc__py_err("clone_into"));
+    }
+    if (view.len < 0) {
+        cc__py.ReleaseBuffer(&view);
+        cc__py.DecRef(dumped);
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: clone_into: negative pickle buffer length");
+        return cc_err(cc__py_err("clone_into"));
+    }
+    n = (size_t)view.len;
+    scratch = target->arena ? target->arena : obj->home->arena;
+    if (n > 0) {
+        if (scratch)
+            buf = (char *)cc_arena_alloc(scratch, n, 1);
+        if (!buf) {
+            cc__py.ReleaseBuffer(&view);
+            cc__py.DecRef(dumped);
+            snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                     "python: clone_into: arena exhausted copying pickle "
+                     "bytes");
+            return cc_err(cc__py_err("clone_into"));
+        }
+        memcpy(buf, view.buf, n);
+    }
+    cc__py.ReleaseBuffer(&view);
+    cc__py.DecRef(dumped);
+    dumped = NULL;
+
+    /* Rebuild in the target — bytes cross only as a C buffer. */
+    cc__py_bind_err_py(target);
+    pickle = cc__py.ImportModule("pickle");
+    if (!pickle) return cc_err(cc__py_err("clone_into"));
+    empty = 0;
+    mv = cc__py.MemoryViewFromMemory(buf ? buf : &empty, (intptr_t)n,
+                                     0x100 /* PyBUF_READ */);
+    if (!mv) {
+        cc__py.DecRef(pickle);
+        return cc_err(cc__py_err("clone_into"));
+    }
+    loaded = cc__py.CallMethod(pickle, "loads", "O", mv);
+    cc__py.DecRef(mv);
+    cc__py.DecRef(pickle);
+    if (!loaded) return cc_err(cc__py_err("clone_into"));
+    return cc__py_obj_or_err(target, loaded, "clone_into");
 }
 
 /* ---- dynamic sink: obj.anything(args) ---- */
@@ -2529,6 +4048,9 @@ typedef struct CCPyArg {
     double f;
     const void *p;
     size_t n;
+    CCPy *home; /* kind 4: argument's home; must match the receiver */
+    long long h; /* kind 4: remote handle id when okind is HANDLE */
+    int okind;   /* kind 4: the CCPyObj.kind being passed */
 } CCPyArg;
 
 /* Bound on one call's arguments, positional plus keyword. */
@@ -2561,16 +4083,169 @@ static inline CCPyArg cc__py_arg_slice(CCSlice s) {
 }
 static inline CCPyArg cc__py_arg_obj(CCPyObj o) {
     CCPyArg a = {0};
+    /* Materialized scalars re-lift to their scalar arg kinds so a
+     * call result can be passed straight back on the wire. */
+    if (o.kind == CC__PY_K_NUM) {
+        if (o.num_is_int) return cc__py_arg_i(o.inum);
+        return cc__py_arg_f(o.num);
+    }
+    if (o.kind == CC__PY_K_STR) return cc__py_arg_slice(o.text);
+    if (o.kind == CC__PY_K_BOOL) {
+        a.kind = 5;
+        a.i = o.b ? 1 : 0;
+        return a;
+    }
     a.kind = 4;
     a.p = o.o;
+    a.home = o.home;
+    a.h = o.h;
+    a.okind = o.kind;
     return a;
 }
+
+
 static inline CCPyArg cc__py_arg_bool(int v) {
     CCPyArg a = {0};
     a.kind = 5;
     a.i = v ? 1 : 0;
     return a;
 }
+
+static int cc__py_iso_arg_json(CC__PyIsoBuf *b, CCPy *home, const CCPyArg *a,
+                               const char *method) {
+    switch (a->kind) {
+    case 0: cc__py_iso_bnum_ll(b, a->i); return 0;
+    case 1: cc__py_iso_bnum_f(b, a->f); return 0;
+    case 2:
+    case 3:
+        cc__py_iso_bjson_str(b, (const char *)a->p, a->n);
+        return 0;
+    case 5:
+        cc__py_iso_bputs(b, a->i ? "true" : "false");
+        return 0;
+    case 4:
+        if (!a->home || a->home != home) {
+            snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                     "python: %s: object argument from a different "
+                     "interpreter (same home required)",
+                     method ? method : "call");
+            return -1;
+        }
+        if (a->p) {
+            snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                     "python: %s: cannot pass an in-process PyObject* "
+                     "across the isolated wire",
+                     method ? method : "call");
+            return -1;
+        }
+        if (a->okind == CC__PY_K_NULL) {
+            cc__py_iso_bputs(b, "null");
+            return 0;
+        }
+        if (a->okind != CC__PY_K_HANDLE) {
+            snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                     "python: %s: isolated argument must be a scalar or "
+                     "a remote handle",
+                     method ? method : "call");
+            return -1;
+        }
+        cc__py_iso_bputs(b, "{\"$h\":");
+        cc__py_iso_bnum_ll(b, a->h);
+        cc__py_iso_bputs(b, "}");
+        return 0;
+    case 6:
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: %s: typed slices are not yet supported on "
+                 "process-isolated domains",
+                 method ? method : "call");
+        return -1;
+    case 7:
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: %s: buffer borrows (py_buf) are not yet "
+                 "supported on process-isolated domains",
+                 method ? method : "call");
+        return -1;
+    default:
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: %s: unsupported argument kind on the "
+                 "isolated wire",
+                 method ? method : "call");
+        return -1;
+    }
+}
+
+static CCResult_CCPyObj_CCPyError
+cc__py_iso_callm_n(CCPyObj *obj, const char *method, int argc,
+                   const CCPyArg *argv) {
+    CC__PyIsoBuf req = {0};
+    CC__PyIsoResp resp;
+    long long id;
+    int rc, i, nkw = 0;
+    CCResult_CCPyObj_CCPyError out;
+    CCPy *py = obj ? obj->home : NULL;
+    int is_invoke;
+    cc__py_bind_err_obj(obj);
+    if (!obj || !py)
+        return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err(method));
+    if (obj->kind != CC__PY_K_HANDLE) {
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: %s: not a remote handle",
+                 method ? method : "call");
+        return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err(method));
+    }
+    if (!cc__py_iso_alive(py, method ? method : "call"))
+        return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err(method));
+    if (argc > CC__PY_MAX_CALL_ARGS) {
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: %s: too many arguments (max %d)", method,
+                 CC__PY_MAX_CALL_ARGS);
+        return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err(method));
+    }
+    for (i = 0; i < argc; i++)
+        if (argv[i].kwname) nkw++;
+    if (nkw > 0) {
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: %s: keyword arguments are not yet supported "
+                 "on process-isolated domains",
+                 method ? method : "call");
+        return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err(method));
+    }
+    is_invoke = method && strcmp(method, "invoke") == 0;
+    id = py->next_id++;
+    cc__py_iso_bputs(&req, "{\"id\":");
+    cc__py_iso_bnum_ll(&req, id);
+    cc__py_iso_bputs(&req, ",\"op\":\"callp\",\"h\":");
+    cc__py_iso_bnum_ll(&req, obj->h);
+    cc__py_iso_bputs(&req, ",\"path\":[");
+    if (!is_invoke)
+        cc__py_iso_bjson_str(&req, method, method ? strlen(method) : 0);
+    cc__py_iso_bputs(&req, "],\"args\":[");
+    for (i = 0; i < argc; i++) {
+        if (i) cc__py_iso_bputs(&req, ",");
+        if (cc__py_iso_arg_json(&req, py, &argv[i], method) != 0) {
+            free(req.p);
+            return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err(method));
+        }
+    }
+    cc__py_iso_bputs(&req, "]}");
+    rc = cc__py_iso_req(py, &req, method ? method : "call", id, &resp);
+    free(req.p);
+    if (rc != 0)
+        return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err(method));
+    memset(&out, 0, sizeof(out));
+    out.ok = true;
+    out.u.value = cc__py_iso_val_from(py, &resp);
+    return out;
+}
+
+static CCResult_CCPyObj_CCPyError
+cc__py_iso_call_o(CCPyObj *obj, const char *m, CCPyObj *arg) {
+    CCPyArg a;
+    if (!arg) return cc_err_CCResult_CCPyObj_CCPyError(cc__py_err(m));
+    a = cc__py_arg_obj(*arg);
+    return cc__py_iso_callm_n(obj, m, 1, &a);
+}
+
 
 /* Typed slices (`double[:]` -> CCSlice_double): marshal as a Python
  * list of the element type. len = element count; the CC_PY_ARG
@@ -2938,15 +4613,28 @@ CCSlice !>(CCPyError) cc_py_obj_map(void *never_defined, ...);
 static inline void *cc__py_name_obj(CCPy *home, const char *method) {
     int i;
     void *n;
+    const char *stable;
+    intptr_t nlen = 0;
     if (!home || !method || !cc__py.UnicodeInternFromString) return NULL;
-    for (i = 0; i < home->name_count; i++)
-        if (home->names[i].key == method) return home->names[i].name;
+    for (i = 0; i < home->name_count; i++) {
+        if (home->names[i].key == method ||
+            strcmp(home->names[i].key, method) == 0)
+            return home->names[i].name;
+    }
     if (home->name_count >= CC__PY_NAME_CACHE) return NULL;
     n = cc__py.UnicodeInternFromString(method);
     if (!n) { cc__py.ErrClear(); return NULL; }
+    /* Key the cache by the interned object's UTF-8: stable for as long as
+     * we hold `n`, unlike a caller's reused buffer. */
+    stable = cc__py.AsUTF8AndSize(n, &nlen);
+    if (!stable) {
+        cc__py.DecRef(n);
+        cc__py.ErrClear();
+        return NULL;
+    }
     /* Held for the life of the handle: the table is bounded, and the object
      * must outlive every call that looks it up. */
-    home->names[home->name_count].key = method;
+    home->names[home->name_count].key = stable;
     home->names[home->name_count].name = n;
     home->name_count++;
     return n;
@@ -3009,7 +4697,11 @@ static inline CCPyObj !>(CCPyError) cc__py_obj_callm_n(CCPyObj *obj,
     char vfmt[CC__PY_MAX_CALL_ARGS][2];
     int i, nkw = 0, npos = 0, pi = 0, use_vec = 0, nviews = 0;
     cc__py_bind_err_obj(obj);
-    if (!obj || !obj->o || argc < 0)
+    if (!obj || argc < 0)
+        return cc_err(cc__py_err(method));
+    if (obj->home && obj->home->tier == CC__PY_TIER_PROC)
+        return cc__py_iso_callm_n(obj, method, argc, argv);
+    if (!obj->o)
         return cc_err(cc__py_err(method));
     if (method && strcmp(method, "invoke") == 0) {
         /* `f.invoke(args…)` calls the VALUE itself — the hot path for a
@@ -3069,6 +4761,16 @@ static inline CCPyObj !>(CCPyError) cc__py_obj_callm_n(CCPyObj *obj,
                                                 (intptr_t)a.n);
             break;
         case 4:
+            /* Home is load-bearing: a PyObject* from interpreter A must
+             * not be incref'd into a call on interpreter B. */
+            if (a.p && (!a.home || a.home != obj->home)) {
+                snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                         "python: %s: object argument from a different "
+                         "interpreter (same home required)",
+                         method ? method : "call");
+                v = NULL;
+                break;
+            }
             v = (void *)a.p;
             if (v) cc__py.IncRef(v); /* tuple will steal one */
             break;
@@ -3342,7 +5044,16 @@ static inline CCPyObj !>(CCPyError) cc_py_list_f64(CCPy *py, CCSlice xs) {
 static inline double !>(CCPyError) cc_py_obj_as_f64(CCPyObj *obj) {
     double v;
     cc__py_bind_err_obj(obj);
-    if (!obj || !obj->o)
+    if (!obj)
+        return cc_err(cc__py_err("as_f64"));
+    if (obj->home && obj->home->tier == CC__PY_TIER_PROC) {
+        if (obj->kind == CC__PY_K_NUM) return cc_ok(obj->num);
+        if (obj->kind == CC__PY_K_BOOL) return cc_ok(obj->b ? 1.0 : 0.0);
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: as_f64: isolated value is not a number");
+        return cc_err(cc__py_err("as_f64"));
+    }
+    if (!obj->o)
         return cc_err(cc__py_err("as_f64"));
     v = cc__py.FloatAsDouble(obj->o);
     if (v == -1.0 && cc__py.ErrOccurred())
@@ -3353,7 +5064,25 @@ static inline double !>(CCPyError) cc_py_obj_as_f64(CCPyObj *obj) {
 static inline int64_t !>(CCPyError) cc_py_obj_as_i64(CCPyObj *obj) {
     long long v;
     cc__py_bind_err_obj(obj);
-    if (!obj || !obj->o)
+    if (!obj)
+        return cc_err(cc__py_err("as_i64"));
+    if (obj->home && obj->home->tier == CC__PY_TIER_PROC) {
+        if (obj->kind == CC__PY_K_NUM) {
+            if (obj->num_is_int) return cc_ok((int64_t)obj->inum);
+            if (obj->num >= -9223372036854775808.0 &&
+                obj->num < 9223372036854775808.0)
+                return cc_ok((int64_t)obj->num);
+            snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                     "python: as_i64: result out of range for integer "
+                     "destination");
+            return cc_err(cc__py_err("as_i64"));
+        }
+        if (obj->kind == CC__PY_K_BOOL) return cc_ok((int64_t)(obj->b ? 1 : 0));
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: as_i64: isolated value is not an integer");
+        return cc_err(cc__py_err("as_i64"));
+    }
+    if (!obj->o)
         return cc_err(cc__py_err("as_i64"));
     v = cc__py.LongAsLongLong(obj->o);
     if (v == -1 && cc__py.ErrOccurred())
@@ -3654,7 +5383,83 @@ static inline CCSlice !>(CCPyError) cc_py_obj_as_slice_into(CCPyObj *obj,
     intptr_t n = 0;
     CCSlice out;
     cc__py_bind_err_obj(obj);
-    if (!obj || !obj->o || !arena)
+    if (!obj || !arena)
+        return cc_err(cc__py_err("as_slice"));
+    if (obj->home && obj->home->tier == CC__PY_TIER_PROC) {
+        CCSlice src;
+        if (obj->kind == CC__PY_K_STR) {
+            src = obj->text;
+        } else if (obj->kind == CC__PY_K_HANDLE) {
+            CCResult_CCPyObj_CCPyError sr = cc__py_iso_str(obj);
+            if (!sr.ok) return cc_err(sr.u.error);
+            if (sr.u.value.kind != CC__PY_K_STR) {
+                snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                         "python: as_slice: isolated str did not return a "
+                         "string");
+                return cc_err(cc__py_err("as_slice"));
+            }
+            src = sr.u.value.text;
+        } else if (obj->kind == CC__PY_K_NUM) {
+            char buf[64];
+            int nbuf;
+            if (obj->num_is_int)
+                nbuf = snprintf(buf, sizeof(buf), "%lld", obj->inum);
+            else
+                nbuf = snprintf(buf, sizeof(buf), "%.17g", obj->num);
+            if (nbuf < 0) return cc_err(cc__py_err("as_slice"));
+            out = cc_arena_alloc_slice_bytes(arena, (size_t)nbuf + 1);
+            if (!out.ptr) {
+                snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                         "python: as_slice: arena exhausted");
+                return cc_err(cc__py_err("as_slice"));
+            }
+            memcpy(out.ptr, buf, (size_t)nbuf);
+            ((char *)out.ptr)[nbuf] = '\0';
+            out.len = (size_t)nbuf;
+            return cc_ok(out);
+        } else if (obj->kind == CC__PY_K_BOOL) {
+            const char *bs = obj->b ? "True" : "False";
+            size_t bl = obj->b ? 4 : 5;
+            out = cc_arena_alloc_slice_bytes(arena, bl + 1);
+            if (!out.ptr) {
+                snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                         "python: as_slice: arena exhausted");
+                return cc_err(cc__py_err("as_slice"));
+            }
+            memcpy(out.ptr, bs, bl);
+            ((char *)out.ptr)[bl] = '\0';
+            out.len = bl;
+            return cc_ok(out);
+        } else if (obj->kind == CC__PY_K_NULL) {
+            out = cc_arena_alloc_slice_bytes(arena, 5);
+            if (!out.ptr) {
+                snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                         "python: as_slice: arena exhausted");
+                return cc_err(cc__py_err("as_slice"));
+            }
+            memcpy(out.ptr, "None", 4);
+            ((char *)out.ptr)[4] = '\0';
+            out.len = 4;
+            return cc_ok(out);
+        } else {
+            snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                     "python: as_slice: isolated value is not a scalar "
+                     "(typed buffers and containers are not yet supported "
+                     "on process-isolated domains)");
+            return cc_err(cc__py_err("as_slice"));
+        }
+        out = cc_arena_alloc_slice_bytes(arena, src.len + 1);
+        if (!out.ptr) {
+            snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                     "python: as_slice: arena exhausted");
+            return cc_err(cc__py_err("as_slice"));
+        }
+        if (src.len && src.ptr) memcpy(out.ptr, src.ptr, src.len);
+        ((char *)out.ptr)[src.len] = '\0';
+        out.len = src.len;
+        return cc_ok(out);
+    }
+    if (!obj->o)
         return cc_err(cc__py_err("as_slice"));
     s = cc__py.Str(obj->o);
     if (!s) return cc_err(cc__py_err("as_slice"));
@@ -4188,9 +5993,11 @@ CC_DECL_RESULT_SPEC(${box}, ${rt}, ${er})
                  * machinery creates the module and runs the exec slot — per
                  * import, so importlib.reload re-seeds the state and a
                  * legacy sub-interpreter gets its own instance.  The def
-                 * carries no multiple-interpreters slot: isolated
-                 * (per-interpreter GIL) interpreters stay refused until the
-                 * binding's process-global error scratch is honest there. */
+                 * carries no multiple-interpreters slot: the TLS errbuf is
+                 * no longer the blocker, but other process-global binding
+                 * state (err arena, load/selection, static module defs)
+                 * still means we do not claim own-GIL subinterpreter
+                 * compatibility for exported .abi3.so modules. */
                 if (!def.m_name) {
                     def.ob_head[0] = (void *)(intptr_t)1;
                     def.m_name = nm;

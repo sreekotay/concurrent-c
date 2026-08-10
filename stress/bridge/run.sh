@@ -45,8 +45,18 @@ if need node && need python3; then
     PYTHONPATH="$ROOT/pypi/cc-node${PYTHONPATH:+:$PYTHONPATH}" \
     python3 "$ROOT/stress/bridge/cc_node_stress_wire.py" || rc=1
 else
-  echo "SKIP stress/bridge (need node + python3)"
-  exit 0
+  echo "SKIP package-bridge sinks (need node + python3)"
+fi
+
+# CC embed parents (js.cch / py.cch Waves A–C). Needs a built ccc; skips
+# individual modes when node / libpython / libnode / subinterp are absent.
+if [[ -x "$ROOT/out/cc/bin/ccc" || -x "$ROOT/cc/bin/ccc" ]]; then
+  CCC="$ROOT/out/cc/bin/ccc"
+  [[ -x "$CCC" ]] || CCC="$ROOT/cc/bin/ccc"
+  echo "--- cc_embed_stress ---"
+  CHAOS_SCALE="$SCALE" "$CCC" run "$ROOT/stress/bridge/cc_embed_stress.ccs" || rc=1
+else
+  echo "SKIP cc_embed_stress (need out/cc/bin/ccc or cc/bin/ccc)"
 fi
 
 exit "$rc"

@@ -52,9 +52,13 @@ Scheduler (see also the config table in the scheduler spec):
 
 Optional diagnostics (when present in the linked runtime):
 
-- `CC_WORKER_GAP_STATS`, `CC_WORKER_GAP_STATS_DUMP`, `CC_WORKER_GAP_STATS_LIVE`
-- `CC_TASK_WAIT_STATS`, `CC_TASK_WAIT_STATS_DUMP`
+- `CC_V2_STATS=1` — dump sched_v2 counters at exit (coro pool, join, wake, grow, spin)
+- `CC_TASK_WAIT_STATS=1` / `CC_TASK_WAIT_STATS_DUMP=1` — `cc_block_on_intptr` wait
+  attribution: spawn / fiber_v2 (ordered `send_task` await) / poll, with total ms
 - `CC_DEBUG_WAKE`, `CC_DEBUG_DEADLOCK_RUNTIME`, `CC_DEBUG_SYSMON`
+
+`CC_WORKER_GAP_STATS*` was removed — it was documented but never shipped a dump
+path; use `CC_V2_STATS` + `CC_TASK_WAIT_STATS` instead.
 
 Additional live implementation knobs are non-normative and may change:
 
@@ -179,20 +183,29 @@ inside the test child for a deterministic latch.
 
 ```sh
 cp real_projects/pigz/testdata/text_200mb.bin /tmp/pigz_idio.bin
-CC_WORKER_GAP_STATS=1 CC_WORKER_GAP_STATS_DUMP=1 \
+CC_V2_STATS=1 \
 CC_TASK_WAIT_STATS=1 CC_TASK_WAIT_STATS_DUMP=1 \
 ./real_projects/pigz/out/pigz_idiomatic /tmp/pigz_idio.bin \
   >/tmp/pigz_idio.out 2>/tmp/pigz_idio.err
 
-cp real_projects/pigz/testdata/text_200mb.bin /tmp/pigz_thr.bin
-CC_WORKER_GAP_STATS=1 CC_WORKER_GAP_STATS_DUMP=1 \
-CC_TASK_WAIT_STATS=1 CC_TASK_WAIT_STATS_DUMP=1 \
-./real_projects/pigz/out/pigz_pthread /tmp/pigz_thr.bin \
-  >/tmp/pigz_thr.out 2>/tmp/pigz_thr.err
+# Full with dict chaining (default) vs independent (-i, fair vs idiomatic):
+cp real_projects/pigz/testdata/text_200mb.bin /tmp/pigz_full.bin
+CC_V2_STATS=1 CC_TASK_WAIT_STATS=1 CC_TASK_WAIT_STATS_DUMP=1 \
+CC_PIGZ_POOL_STATS=1 \
+./real_projects/pigz/out/pigz_cc -k -f /tmp/pigz_full.bin \
+  >/tmp/pigz_full.out 2>/tmp/pigz_full.err
+
+cp real_projects/pigz/testdata/text_200mb.bin /tmp/pigz_full_i.bin
+CC_V2_STATS=1 CC_TASK_WAIT_STATS=1 CC_TASK_WAIT_STATS_DUMP=1 \
+CC_PIGZ_POOL_STATS=1 \
+./real_projects/pigz/out/pigz_cc -k -f -i /tmp/pigz_full_i.bin \
+  >/tmp/pigz_full_i.out 2>/tmp/pigz_full_i.err
 ```
 
-Useful counter groups when available: sleep/wait volume, global pop attempts,
-wake-source split, non-worker spawn publish path.
+Useful counter groups: `fiber_v2 join wait` (ordered-channel await of compress
+tasks), `CC_V2_STATS` parks/wake/grow, and `[pigz_cc pool]` borrow wait (reader
+blocked on the input-arena pool). Dict chaining (`pigz_cc` without `-i`) adds
+CPU work; compare `-i` before attributing a wall-time gap to the scheduler.
 
 ### Pass vs timeout capture
 

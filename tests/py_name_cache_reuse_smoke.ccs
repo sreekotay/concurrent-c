@@ -1,0 +1,57 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/script/py.cch>
+#include <stdio.h>
+#include <string.h>
+
+/* Method-name cache must key by content, not only pointer identity.
+ * A reused buffer that once held "upper" and now holds "lower" must not
+ * hit the interned name from the first call. */
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
+
+    CCArena a = cc_arena_heap(kilobytes(64)) @destroy;
+    if (!a.valid()) return 1;
+    if (!cc_py_available()) {
+        puts("py_name_cache_reuse_smoke: SKIP (no libpython)");
+        return 0;
+    }
+
+    CCPy py = cc_py_new(false, &a) !>;
+    CCPyObj s = py.eval(@slice("'AbCd'")) !> @destroy;
+
+    char meth[16];
+    memcpy(meth, "upper", 6);
+    CCPyObj up = cc_py_obj_callm(&s, meth, 0) !> @destroy;
+    CCSlice ups = up.as_slice() !>;
+    if (ups.len != 4 || memcmp(ups.ptr, "ABCD", 4) != 0) {
+        fprintf(stderr, "upper: got %.*s\n", (int)ups.len, (const char *)ups.ptr);
+        return 2;
+    }
+
+    memcpy(meth, "lower", 6);
+    CCPyObj lo = cc_py_obj_callm(&s, meth, 0) !> @destroy;
+    CCSlice los = lo.as_slice() !>;
+    if (los.len != 4 || memcmp(los.ptr, "abcd", 4) != 0) {
+        fprintf(stderr, "lower: got %.*s (stale cache?)\n",
+                (int)los.len, (const char *)los.ptr);
+        return 3;
+    }
+
+    /* Same content via a different pointer still hits the cache correctly. */
+    char meth2[16];
+    memcpy(meth2, "upper", 6);
+    CCPyObj up2 = cc_py_obj_callm(&s, meth2, 0) !> @destroy;
+    CCSlice ups2 = up2.as_slice() !>;
+    if (ups2.len != 4 || memcmp(ups2.ptr, "ABCD", 4) != 0) {
+        fprintf(stderr, "upper again: got %.*s\n",
+                (int)ups2.len, (const char *)ups2.ptr);
+        return 4;
+    }
+
+    cc_py_close(&py);
+    puts("ok");
+    return 0;
+}

@@ -1,0 +1,72 @@
+/* Isolated JS domains: JS→CC sync callbacks on the wire ({$f} / cb / cbr). */
+#include <ccc/std/prelude.cch>
+#include <ccc/script/js.cch>
+#include <stdio.h>
+#include <string.h>
+
+static int add40(void *ctx, const CCJsDomVal *args, int argc,
+                 CCJsDomVal *out) {
+    long long x;
+    (void)ctx;
+    if (argc < 1 || args[0].kind != CC__JS_DOM_K_NUM) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "add40: expected a number");
+        return -1;
+    }
+    x = args[0].num_is_int ? args[0].inum : (long long)args[0].num;
+    memset(out, 0, sizeof(*out));
+    out->dom = args[0].dom;
+    out->kind = CC__JS_DOM_K_NUM;
+    out->num_is_int = 1;
+    out->inum = x + 40;
+    out->num = (double)out->inum;
+    return 0;
+}
+
+static int boom(void *ctx, const CCJsDomVal *args, int argc,
+                CCJsDomVal *out) {
+    (void)ctx;
+    (void)args;
+    (void)argc;
+    (void)out;
+    snprintf(cc__js_errbuf, sizeof(cc__js_errbuf), "from cc");
+    return -1;
+}
+
+int main(void) {
+    @errhandler(CCJsError e) {
+        fprintf(stderr, "fatal: %s\n", e.base.message);
+        return 1;
+    }
+
+    CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+
+    if (!cc_js_dom_available(true)) {
+        printf("SKIP (no node on PATH)\n");
+        return 0;
+    }
+
+    CCJsDom js = cc_js_new(true, &a) !> @destroy;
+
+    /* apply(f, x) => f(x) + 1; host fn returns arg+40 → 42. */
+    js.exec("globalThis.apply = (f, x) => f(x) + 1") !>;
+    CCJsDomVal g = js.eval("globalThis") !> @destroy;
+    long long got = g.apply(js_dom_fn(add40, NULL), 1LL) !>;
+    printf("apply_cb %s\n", got == 42 ? "true" : "false");
+
+    /* Host fn failure → JS throw → Result error with the message. */
+    js.exec("globalThis.call = (f) => f()") !>;
+    {
+        CCResult_CCJsDomVal_CCJsError r =
+            cc_js_dom_val_callm(&g, "call", 1,
+                                CC_JS_DOM_ARG(js_dom_fn(boom, NULL)));
+        int ok = !r.ok && r.u.error.base.message &&
+                 strstr(r.u.error.base.message, "from cc") != NULL;
+        printf("cb_error %s\n", ok ? "true" : "false");
+        if (!ok && !r.ok)
+            fprintf(stderr, "cb_error message: %s\n", r.u.error.base.message);
+    }
+
+    printf("clean_exit true\n");
+    return 0;
+}

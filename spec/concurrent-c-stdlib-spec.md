@@ -1631,10 +1631,10 @@ The constructor shape is the family's — `cc_py_new(isolated, &arena)`,
 transport first, arena last, mirroring `cc_js_new`.  `false` opens an
 in-process interpreter; Python multiplies in-process (every handle
 after the first is an isolated subinterpreter with its own GIL), so
-`false` already gives N parallel domains.  `true` — a python child per
-handle on the broker.py wire — is not implemented and refuses by name;
-the flag reserves the symmetric shape, never a silent alias of
-`false`.
+`false` already gives N parallel domains.  `true` opens a python child
+per handle on the broker.py wire: values are remote handles (or
+materialized scalars), never `PyObject*`, and the flag never silently
+aliases `false`.
 
 The runtime is selected most-specific first: a process that already is
 Python keeps its own symbols unconditionally; `cc_py_use(spec)` chooses
@@ -2112,7 +2112,7 @@ keeps means one built module serves every supported Python 3.x: one
 
 ### Moves
 
-Status: draft — not implemented.
+Status: draft — implemented for same-process inproc homes.
 
 Anchored lifetime implies explicit transfer, arena-style:
 
@@ -2121,10 +2121,14 @@ CCPyObj there = obj.clone_into(&other) !>;
 ```
 
 `clone_into` serializes in the home interpreter and rebuilds in the
-target (pickle round-trip); objects exposing the buffer protocol take a
-byte-copy fast path. The source reference is untouched; drop it separately
-when the move is a handoff. Scalars need no transfer: extract to a CC
-value, pass the value.
+target (pickle round-trip). Same home yields a new owned local reference
+(`IncRef`) of the same object. Different inproc interpreters copy pickle
+bytes through a C buffer and rebuild under the target attach — nothing
+crosses homes by sharing a `PyObject*`. Process-isolated domains
+(`cc_py_new(true, …)`) refuse by name. Objects exposing the buffer
+protocol may take a byte-copy fast path; the pickle path is the MVP.
+The source reference is untouched; drop it separately when the move is a
+handoff. Scalars need no transfer: extract to a CC value, pass the value.
 
 An object that does not serialize fails with `CCPyError` at the call —
 crossing is loud, never partial.

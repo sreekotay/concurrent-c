@@ -3660,10 +3660,9 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                     return 0;
                 if (!cemit_fmt(out, "%sif (!__r0.ok) {\n", i1)) return 0;
                 if (!shadow_resync_line(out, ctx, i2)) return 0;
-                if (!shadow_emit_err_at_bind_tmp(out, ctx, i2, "e", st->b,
-                                                 "__r0"))
+                if (!shadow_emit_bang_eh_for_call(out, ctx, lowered, i2, st->b,
+                                                  "__r0"))
                     return 0;
-                if (!shadow_emit_handler(out, ctx, "e", i2)) return 0;
                 if (!cemit_fmt(out, "%s}\n", i1)) return 0;
                 /* The producer names the hop family (same rule as the
                  * declaration-chain path): cc_js_dom* → CCJsDomVal,
@@ -3712,10 +3711,9 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                                        i1, lowered, rtmp, lowered, i1, rtmp))
                             return 0;
                         if (!shadow_resync_line(out, ctx, i2)) return 0;
-                        if (!shadow_emit_err_at_bind_tmp(out, ctx, i2, "e",
-                                                         st->b, rtmp))
+                        if (!shadow_emit_bang_eh_for_call(out, ctx, lowered, i2,
+                                                          st->b, rtmp))
                             return 0;
-                        if (!shadow_emit_handler(out, ctx, "e", i2)) return 0;
                         if (!cemit_fmt(out, "%s}\n", i1)) return 0;
                         hop++;
                         p = bang + 2;
@@ -3795,10 +3793,9 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                                    i1, lowered, rtmp, lowered, i1, rtmp))
                         return 0;
                     if (!shadow_resync_line(out, ctx, i2)) return 0;
-                    if (!shadow_emit_err_at_bind_tmp(out, ctx, i2, "e", st->b,
-                                                     rtmp))
+                    if (!shadow_emit_bang_eh_for_call(out, ctx, lowered, i2,
+                                                      st->b, rtmp))
                         return 0;
-                    if (!shadow_emit_handler(out, ctx, "e", i2)) return 0;
                     if (!cemit_fmt(out, "%s}\n%s}\n", i1, indent)) return 0;
                     return 1;
                 }

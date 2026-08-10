@@ -1,7 +1,8 @@
-# Package-bridge stress (Node ↔ Python)
+# Package-bridge + CC embed stress
 
-Adversarial storms for the **process bridges** — not the CC embed /
-native-module latency benches.
+Adversarial storms for the **Node ↔ Python process bridges** and the
+**CC embed parents** (`js.cch` / `py.cch`, Waves A–C). Latency benches stay
+under `perf/` and the package `examples/` trees.
 
 **Catalog (modes, status, contracts):** [`bridge_stress.md`](bridge_stress.md)
 
@@ -21,10 +22,12 @@ Details in the catalog design notes.
 | — | [`js_python_fuzz.js`](js_python_fuzz.js) — seeded random walk (`FUZZ_SEED`) |
 | — | [`js_python_chaos.js`](js_python_chaos.js) — kitchen sink + soaks |
 | — | [`cc_node_stress_wire.py`](cc_node_stress_wire.py) — kitchen sink + soaks |
+| — | [`cc_embed_stress.ccs`](cc_embed_stress.ccs) — CC `js.cch`/`py.cch` Waves A–C volume |
 
 CI correctness smokes stay under `tests/cc_python_bridge_*.js` /
-`tests/cc_node_bridge.py` — those pin booleans (escaped closure, lease
-detach, SystemExit, …); these push volume and races.
+`tests/cc_node_bridge.py` and the Wave A/B/C smokes catalogued in
+[`bridge_stress.md`](bridge_stress.md) — those pin booleans; these push
+volume and races.
 
 ## Run
 
@@ -38,6 +41,7 @@ SOAK_SECONDS=30 CHAOS_SCALE=soak ./stress/bridge/run.sh
 FUZZ_SEED=42 node --expose-gc stress/bridge/js_python_fuzz.js
 OPENBLAS_NUM_THREADS=1 node --expose-gc stress/bridge/js_python_chaos.js
 PYTHONPATH=pypi/cc-node python3 stress/bridge/cc_node_stress_wire.py
+CHAOS_SCALE=quick ./out/cc/bin/ccc run stress/bridge/cc_embed_stress.ccs
 ./scripts/sanitize_bridge.sh fuzz    # Docker ASan: mem + fuzz walk
 ```
 

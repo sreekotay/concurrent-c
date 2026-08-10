@@ -1,0 +1,5 @@
+new true
+sqrt true
+domains_isolated true
+typed_slice_refused true
+clean_exit true
