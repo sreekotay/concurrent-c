@@ -182,10 +182,18 @@ the same protocol shapes — the mapping is intentional (do not fork brokers).
 |------|--------|-----------------|
 | `js_ta_hail` | green, smoke | N× typed-array arg + result over `cc_js_new(true)` |
 | `js_cb_blizzard` | green, smoke | N× `js_dom_fn` sync callbacks |
+| `js_ta_cb_compose` | green | same domain, each iter: TA sum **and** sync cb (not independent) |
+| `js_domain_destroy_survivors` | green | N domains; close odds; survivors still correct; doomed refuse closed |
 | `js_hosted_promise` | green, smoke | N× hosted `Promise.resolve` as handle (SKIP without libnode) |
 | `py_proc_fanout` | green, smoke | N× `cc_py_new(true)` import/call/close |
 | `py_clone_hail` | green, smoke | N× `clone_into` + home-refuse each iter (SKIP without subinterp) |
 | `py_ull_bounds` | green, smoke | ull round-trip + `as_list::[int]` overflow refuse |
+
+Acceptance for the two composition modes is the peer suite's bar: **correct
+values** (not merely “no hang”), survivors usable after subset close, closed
+domains refuse by name. Cooperative `cc_js_dom_close` may leave in-flight
+work fulfilled — this is not hard-cancel (`shared_buf_kill_sibling` stays
+on the package parent until CC SHM exists).
 
 The driver stacks `@errhandler(CCError)`, `@errhandler(CCJsError)`, and
 `@errhandler(CCPyError)` in one scope so Form-P UFCS `!>` dispatch stays

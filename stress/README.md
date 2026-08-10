@@ -57,7 +57,7 @@ CHAOS_SCALE=quick ./out/cc/bin/ccc run stress/bridge/cc_embed_stress.ccs
 |------|-----------------|
 | `bridge/js_python_chaos.js` | crash isolation, domain fanout, shm hail, teardown derby, callback blizzard, mixed sync/lane, lease churn |
 | `bridge/cc_node_stress_wire.py` | multi-child fanout, callback blizzard, shm hail, teardown derby, eval storm |
-| `bridge/cc_embed_stress.ccs` | CC embed Waves A–C: JS TA/cb hail, hosted Promise handles, `cc_py_new(true)` fanout, `clone_into`, ull/bounds |
+| `bridge/cc_embed_stress.ccs` | CC embed Waves A–C + composition: TA∥cb, destroy-survivors, Promise handles, proc fanout, `clone_into`, ull/bounds |
 | `bridge/bridge_stress.md` | full catalog (package modes + Wave A/B/C smoke map) |
 
 ## Running

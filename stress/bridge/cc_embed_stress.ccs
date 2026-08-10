@@ -124,6 +124,141 @@ int main(void) {
         all = ok && all;
     }
 
+    /* ---- Composition: TA + sync callback on one domain (same turn) ---- */
+    N = scale_n(40, 200, 800);
+    ok = 1;
+    if (!cc_js_dom_available(true)) {
+        printf("RESULT skip_js_ta_cb_compose true\n");
+    } else {
+        CCArena a = cc_arena_heap(megabytes(4)) @destroy;
+        CCJsDom js = cc_js_new(true, &a) !> @destroy;
+        js.exec("globalThis.sum = (a) => a.reduce((s, x) => s + x, 0); "
+                "globalThis.apply = (f, x) => f(x)") !>;
+        CCJsDomVal g = js.eval("globalThis") !> @destroy;
+        double buf[4] = {1.0, 2.0, 3.0, 4.0};
+        CCSlice_double xs = CCSlice_double_from_buffer(buf, 4);
+        for (i = 0; i < N && ok; i++) {
+            double sum = g.sum(xs) !>;
+            if (fabs(sum - 10.0) > 1e-9) ok = 0;
+            long long got =
+                g.apply(js_dom_fn(add1, NULL), (long long)i) !>;
+            if (got != (long long)i + 1) ok = 0;
+        }
+        result_ok("js_ta_cb_compose", ok);
+        printf("RESULT js_ta_cb_compose_n %d\n", N);
+        all = ok && all;
+    }
+
+    /* ---- Composition: destroy subset; survivors stay correct ---- */
+    /* Cooperative close (not SIGKILL). Assert: survivors still do
+     * correct TA+cb work; closed domains refuse by name; every domain
+     * ends closed. Peer analogue: promise_all_destroy. */
+    {
+        enum { MAX_D = 8 };
+        int ND = scale_n(4, 6, 8);
+        if (ND > MAX_D) ND = MAX_D;
+        ok = 1;
+        if (!cc_js_dom_available(true)) {
+            printf("RESULT skip_js_domain_destroy_survivors true\n");
+        } else {
+            CCArena a = cc_arena_heap(megabytes(8)) @destroy;
+            CCJsDom domains[MAX_D];
+            int open[MAX_D];
+            int survivors_ok = 0, doomed_closed = 0;
+            double buf[4] = {1.0, 2.0, 3.0, 4.0};
+            CCSlice_double xs = CCSlice_double_from_buffer(buf, 4);
+            for (i = 0; i < ND; i++) {
+                CCResult_CCJsDom_CCJsError mk = cc_js_new(true, &a);
+                if (!mk.ok) {
+                    ok = 0;
+                    ND = i;
+                    break;
+                }
+                domains[i] = mk.u.value;
+                open[i] = 1;
+                {
+                    CCResult_void_CCJsError er = cc_js_dom_exec(
+                        &domains[i],
+                        "globalThis.sum = (a) => "
+                        "a.reduce((s, x) => s + x, 0);"
+                        "globalThis.apply = (f, x) => f(x);");
+                    if (!er.ok) {
+                        ok = 0;
+                        cc_js_dom_close(&domains[i]);
+                        open[i] = 0;
+                    }
+                }
+            }
+            /* Warm every domain once (values must be correct). */
+            for (i = 0; i < ND && ok; i++) {
+                CCResult_CCJsDomVal_CCJsError gr =
+                    cc_js_dom_eval(&domains[i], "globalThis");
+                if (!gr.ok) {
+                    ok = 0;
+                    break;
+                }
+                CCJsDomVal g = gr.u.value;
+                CCResult_double_CCJsError sr =
+                    cc_js_dom_val_callm_double(&g, "sum", 1,
+                                               CC_JS_DOM_ARG(xs));
+                if (!sr.ok || fabs(sr.u.value - 10.0) > 1e-9) ok = 0;
+                cc_js_dom_val_release(&g);
+            }
+            /* Destroy odd indices. */
+            for (i = 1; i < ND; i += 2) {
+                cc_js_dom_close(&domains[i]);
+                open[i] = 0;
+            }
+            /* Survivors (even) must still work, then close. */
+            for (i = 0; i < ND; i += 2) {
+                if (!open[i]) continue;
+                CCResult_CCJsDomVal_CCJsError gr =
+                    cc_js_dom_eval(&domains[i], "globalThis");
+                if (!gr.ok) {
+                    ok = 0;
+                    continue;
+                }
+                CCJsDomVal g = gr.u.value;
+                CCResult_double_CCJsError sr =
+                    cc_js_dom_val_callm_double(&g, "sum", 1,
+                                               CC_JS_DOM_ARG(xs));
+                CCResult_CCJsDomVal_CCJsError ar = cc_js_dom_val_callm(
+                    &g, "apply", 2,
+                    CC_JS_DOM_ARG(js_dom_fn(add1, NULL)),
+                    CC_JS_DOM_ARG(7LL));
+                int good = sr.ok && fabs(sr.u.value - 10.0) < 1e-9 &&
+                           ar.ok && ar.u.value.kind == CC__JS_DOM_K_NUM &&
+                           ar.u.value.inum == 8;
+                if (good) survivors_ok++;
+                else ok = 0;
+                if (ar.ok) cc_js_dom_val_release(&ar.u.value);
+                cc_js_dom_val_release(&g);
+                cc_js_dom_close(&domains[i]);
+                open[i] = 0;
+            }
+            /* Doomed: further use refuses closed/exited. */
+            for (i = 1; i < ND; i += 2) {
+                CCResult_CCJsDomVal_CCJsError bad =
+                    cc_js_dom_eval(&domains[i], "1+1");
+                if (!bad.ok && bad.u.error.base.message &&
+                    (strstr(bad.u.error.base.message, "closed") != NULL ||
+                     strstr(bad.u.error.base.message, "exited") != NULL))
+                    doomed_closed++;
+                else
+                    ok = 0;
+            }
+            if (survivors_ok != (ND + 1) / 2) ok = 0;
+            if (doomed_closed != ND / 2) ok = 0;
+            result_ok("js_domain_destroy_survivors", ok);
+            printf("RESULT js_domain_destroy_survivors_n %d\n", ND);
+            printf("RESULT js_domain_destroy_survivors_ok %d\n",
+                   survivors_ok);
+            printf("RESULT js_domain_destroy_doomed_closed %d\n",
+                   doomed_closed);
+            all = ok && all;
+        }
+    }
+
     /* ---- Wave B: hosted Promise-as-handle ---- */
     N = scale_n(20, 100, 400);
     ok = 1;
