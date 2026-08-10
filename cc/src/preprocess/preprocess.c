@@ -11468,15 +11468,9 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
                                 cc_sb_append_cstr(&out, &out_len, &out_cap, ".");
                                 cc_sb_append_cstr(&out, &out_len, &out_cap, path);
                             } else {
-                                cc_sb_append_cstr(&out, &out_len, &out_cap,
-                                    "({ __typeof__(");
+                                /* Pass through when no unique @as path (see
+                                 * pass_type_syntax.c — no hardcoded CCIoError). */
                                 cc_sb_append(&out, &out_len, &out_cap, src + a0, a1 - a0);
-                                cc_sb_append_cstr(&out, &out_len, &out_cap, ") __cc_ep = (");
-                                cc_sb_append(&out, &out_len, &out_cap, src + a0, a1 - a0);
-                                cc_sb_append_cstr(&out, &out_len, &out_cap,
-                                    "); _Generic(__cc_ep, CCError: __cc_ep, "
-                                    "CCIoError: (*(CCError*)(void*)&__cc_ep), "
-                                    "default: __cc_ep); })");
                             }
                         } else {
                             cc_sb_append(&out, &out_len, &out_cap, src + args_start, j - args_start);

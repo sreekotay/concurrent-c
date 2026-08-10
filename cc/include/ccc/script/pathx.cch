@@ -54,13 +54,12 @@ static inline CCSlice cc__script_dup_cstr(CCArena *arena, const char *s) {
  * Resolve the Concurrent-C repo root (walk cwd, then dirname(argv0)).
  * Arena is last. Returned path is NUL-terminated CCSlice.
  */
-static inline CCResult_CCSlice_CCError cc_script_repo_root(CCSlice argv0,
+static inline CCSlice !>(CCError) cc_script_repo_root(CCSlice argv0,
                                                           CCArena *arena) {
     char start[PATH_MAX];
     char cur[PATH_MAX];
     if (!arena) {
-        return cc_err_CCResult_CCSlice_CCError(
-            CC_ERROR(CC_ERR_INVALID_ARG, "cc_script_repo_root: no arena"));
+        return cc_err(CC_ERR_INVALID_ARG, "cc_script_repo_root: no arena");
     }
     start[0] = '\0';
     if (getcwd(start, sizeof(start)) == NULL) start[0] = '\0';
@@ -77,8 +76,7 @@ static inline CCResult_CCSlice_CCError cc_script_repo_root(CCSlice argv0,
         }
     }
     if (!start[0]) {
-        return cc_err_CCResult_CCSlice_CCError(
-            CC_ERROR(CC_ERR_NOT_FOUND, "cc_script_repo_root: no start path"));
+        return cc_err(CC_ERR_NOT_FOUND, "cc_script_repo_root: no start path");
     }
     strncpy(cur, start, sizeof(cur) - 1);
     cur[sizeof(cur) - 1] = '\0';
@@ -86,17 +84,15 @@ static inline CCResult_CCSlice_CCError cc_script_repo_root(CCSlice argv0,
         if (cc__script_is_repo_root(cc_slice_cstr(cur))) {
             CCSlice out = cc__script_dup_cstr(arena, cur);
             if (!out.ptr) {
-                return cc_err_CCResult_CCSlice_CCError(
-                    CC_ERROR(CC_ERR_OUT_OF_MEMORY, "cc_script_repo_root: alloc"));
+                return cc_err(CC_ERR_OUT_OF_MEMORY, "cc_script_repo_root: alloc");
             }
-            return cc_ok_CCResult_CCSlice_CCError(out);
+            return cc_ok(out);
         }
         char *slash = strrchr(cur, '/');
         if (!slash || slash == cur) break;
         *slash = '\0';
     }
-    return cc_err_CCResult_CCSlice_CCError(
-        CC_ERROR(CC_ERR_NOT_FOUND, "cc_script_repo_root: not found"));
+    return cc_err(CC_ERR_NOT_FOUND, "cc_script_repo_root: not found");
 }
 
 /* Join path segments; arena last. Result is NUL-terminated CCSlice. */

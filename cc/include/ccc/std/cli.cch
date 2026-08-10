@@ -200,7 +200,7 @@ static inline bool cc__cli_take_next_value(int argc, char **argv, int *index,
 }
 
 static inline bool cc__cli_parse_i64(CCSlice value, int64_t *out) {
-    CCResult_int64_t_CC_I64ParseError parsed = cc_slice_parse_i64(value, 10);
+    int64_t !>(CC_I64ParseError) parsed = cc_slice_parse_i64(value, 10);
     if (cc_is_err(parsed)) return false;
     if (out) *out = cc_unwrap(parsed);
     return true;
@@ -610,7 +610,7 @@ static inline bool cc__cli_help_requested(const CCCliField *fields,
  *   Ok(false) — help requested; usage already printed; caller returns 0
  *   Err       — bad argv; usage already printed; caller returns non-zero
  */
-static inline CCResult_bool_CCError
+static inline bool !>(CCError)
 cc_cli_prepare_fields(const CCCliField *fields,
                       size_t nfields,
                       int argc,
@@ -621,23 +621,21 @@ cc_cli_prepare_fields(const CCCliField *fields,
     CCCliFillResult r;
     FILE *u = usage_out ? usage_out : stderr;
     if (!fields || !out) {
-        return cc_err_CCResult_bool_CCError(
-            CC_ERROR(CC_ERR_INVALID_ARG, "cc_cli_prepare: bad args"));
+        return cc_err(CC_ERR_INVALID_ARG, "cc_cli_prepare: bad args");
     }
     cc_cli_apply_defaults(fields, nfields, out);
     r = cc_cli_fill(fields, nfields, argc, argv, arena, out);
     if (!r.ok) {
         cc_cli_print_fields(u, cc_cli_prog_basename(argv ? argv[0] : NULL),
                             fields, nfields);
-        return cc_err_CCResult_bool_CCError(
-            CC_ERROR(CC_ERR_INVALID_ARG, "invalid command line"));
+        return cc_err(CC_ERR_INVALID_ARG, "invalid command line");
     }
     if (cc__cli_help_requested(fields, nfields, out)) {
         cc_cli_print_fields(u, cc_cli_prog_basename(argv ? argv[0] : NULL),
                             fields, nfields);
-        return cc_ok_CCResult_bool_CCError(false);
+        return cc_ok(false);
     }
-    return cc_ok_CCResult_bool_CCError(true);
+    return cc_ok(true);
 }
 
 #endif /* CC_STD_CLI_H */

@@ -53,7 +53,7 @@ CC_DECL_RESULT_SPEC(CCResult_CCDirEntry_CCIoError, CCDirEntry, CCIoError)
 #define CCResult_CCSliceArray_CCIoError_DEFINED 1
 CC_DECL_RESULT_SPEC(CCResult_CCSliceArray_CCIoError, CCSliceArray, CCIoError)
 #endif
-/* CCResult_bool_CCIoError is declared in cc_io_error.cch (unified I/O result type) */
+/* bool !>(CCIoError) is declared in cc_io_error.cch (unified I/O result type) */
 
 /* ============================================================================
  * Directory Iteration
@@ -64,14 +64,14 @@ CC_DECL_RESULT_SPEC(CCResult_CCSliceArray_CCIoError, CCSliceArray, CCIoError)
  * Returns iterator that must be closed with cc_dir_close().
  * Path can be relative or absolute.
  */
-CCResult_CCDirIterptr_CCIoError cc_dir_open(CCArena* arena, CCSlice path);
+CCDirIter* !>(CCIoError) cc_dir_open(CCArena* arena, CCSlice path);
 
 /*
  * Read next directory entry.
  * Returns entry with name allocated in arena.
  * Returns error with CC_IO_EOF when no more entries.
  */
-CCResult_CCDirEntry_CCIoError cc_dir_next(CCDirIter* iter, CCArena* arena);
+CCDirEntry !>(CCIoError) cc_dir_next(CCDirIter* iter, CCArena* arena);
 
 /*
  * Close directory iterator.
@@ -101,25 +101,25 @@ bool cc_path_is_file(CCSlice path);
  * Create directory. Does not create parents.
  * Returns 0 on success, IoError on failure.
  */
-CCResult_bool_CCIoError cc_dir_create(CCSlice path);
+bool !>(CCIoError) cc_dir_create(CCSlice path);
 
 /*
  * Create directory and all parents.
  * Returns 0 on success, IoError on failure.
  */
-CCResult_bool_CCIoError cc_dir_create_all(CCSlice path);
+bool !>(CCIoError) cc_dir_create_all(CCSlice path);
 
 /*
  * Remove empty directory.
  * Returns 0 on success, IoError on failure.
  */
-CCResult_bool_CCIoError cc_dir_remove(CCSlice path);
+bool !>(CCIoError) cc_dir_remove(CCSlice path);
 
 /*
  * Remove file.
  * Returns 0 on success, IoError on failure.
  */
-CCResult_bool_CCIoError cc_file_remove(CCSlice path);
+bool !>(CCIoError) cc_file_remove(CCSlice path);
 
 /*
  * Get current working directory.
@@ -130,7 +130,7 @@ CCSlice cc_dir_cwd(CCArena* arena);
 /*
  * Change current working directory.
  */
-CCResult_bool_CCIoError cc_dir_chdir(CCSlice path);
+bool !>(CCIoError) cc_dir_chdir(CCSlice path);
 
 /* ============================================================================
  * Glob Pattern Matching
@@ -141,7 +141,7 @@ CCResult_bool_CCIoError cc_dir_chdir(CCSlice path);
  * On success: arena-backed CCSliceArray of NUL-terminated path borrows
  * (char[:0] / CCSlice); empty array means no matches.
  * On failure: CCIoError (bad args, I/O, or OOM) — not an empty array. */
-CCResult_CCSliceArray_CCIoError cc_glob(CCSlice pattern, CCArena* arena);
+CCSliceArray !>(CCIoError) cc_glob(CCSlice pattern, CCArena* arena);
 
 /*
  * Check if filename matches glob pattern (no directory traversal).

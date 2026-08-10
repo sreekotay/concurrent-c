@@ -1160,23 +1160,13 @@ char* cc__rewrite_inferred_result_constructors(const char* src, size_t n) {
                                 cc__sb_append_cstr_local(&out, &out_len, &out_cap, ".");
                                 cc__sb_append_cstr_local(&out, &out_len, &out_cap, path);
                             } else {
-                                /* Unbound / expr: _Generic offset-0 (CCIoError +
-                                 * face). Same model as native shadow emit. */
-                                cc__sb_append_cstr_local(
-                                    &out, &out_len, &out_cap,
-                                    "({ __typeof__(");
+                                /* Already CCError, unbound, or expr with no
+                                 * unique @as path: pass through. Do not hardcode
+                                 * a CCIoError _Generic arm — headers that never
+                                 * include cc_io_error would fail to host-compile
+                                 * (shadow only emits _Generic when nas > 0). */
                                 cc__sb_append_local(&out, &out_len, &out_cap, src + a0,
                                                     a1 - a0);
-                                cc__sb_append_cstr_local(
-                                    &out, &out_len, &out_cap,
-                                    ") __cc_ep = (");
-                                cc__sb_append_local(&out, &out_len, &out_cap, src + a0,
-                                                    a1 - a0);
-                                cc__sb_append_cstr_local(
-                                    &out, &out_len, &out_cap,
-                                    "); _Generic(__cc_ep, CCError: __cc_ep, "
-                                    "CCIoError: (*(CCError*)(void*)&__cc_ep), "
-                                    "default: __cc_ep); })");
                             }
                         } else {
                             cc__sb_append_local(&out, &out_len, &out_cap,

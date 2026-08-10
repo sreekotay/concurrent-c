@@ -37,12 +37,12 @@ void cc_nursery_cancel(CCNursery* n);
  *   n->cancel_on_signals(SIGINT, SIGTERM) !>;   // cancel-only
  *   n->cancel_on_shutdown() !>;
  * Dynamic lists: on_signals_n / cancel_on_signals_n. */
-CCResult_void_CCError cc_nursery_on_signals_n(CCNursery* n, const int* signos,
+void !>(CCError) cc_nursery_on_signals_n(CCNursery* n, const int* signos,
                                                size_t count, CCClosure1 handler);
 
-CCResult_void_CCError cc_nursery_on_shutdown(CCNursery* n, CCClosure1 handler);
+void !>(CCError) cc_nursery_on_shutdown(CCNursery* n, CCClosure1 handler);
 
-CCResult_void_CCError cc_nursery_cancel_on_signals_n(CCNursery* n,
+void !>(CCError) cc_nursery_cancel_on_signals_n(CCNursery* n,
                                                      const int* signos,
                                                      size_t count);
 
@@ -51,7 +51,7 @@ CCResult_void_CCError cc_nursery_cancel_on_signals_n(CCNursery* n,
         (n), (const int[]){__VA_ARGS__},                                           \
         sizeof((const int[]){__VA_ARGS__}) / sizeof(int))
 
-static inline CCResult_void_CCError cc_nursery_cancel_on_shutdown(CCNursery* n) {
+static inline void !>(CCError) cc_nursery_cancel_on_shutdown(CCNursery* n) {
     return cc_nursery_cancel_on_signals(n, SIGINT, SIGTERM);
 }
 

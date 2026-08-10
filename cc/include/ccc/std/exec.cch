@@ -83,16 +83,16 @@ static inline CCCommand *cc_command_arg_i32_if(CCCommand *cmd, bool cond, int va
 
 const char **cc_command_argv(CCCommand *cmd);
 CCProcessConfig cc_command_process_config(CCCommand *cmd);
-CCResult_CCProcess_CCIoError cc_command_spawn(CCCommand *cmd);
-CCResult_CCProcessOutput_CCIoError cc_command_run(CCCommand *cmd, CCArena *arena);
-CCResult_CCProcessOutput_CCIoError cc_command_output(CCCommand *cmd, CCArena *arena);
-CCResult_CCProcessOutput_CCIoError cc_command_output_with_input(CCCommand *cmd, CCArena *arena, CCSlice input);
-CCResult_int_CCIoError cc_command_status(CCCommand *cmd);
+CCProcess !>(CCIoError) cc_command_spawn(CCCommand *cmd);
+CCProcessOutput !>(CCIoError) cc_command_run(CCCommand *cmd, CCArena *arena);
+CCProcessOutput !>(CCIoError) cc_command_output(CCCommand *cmd, CCArena *arena);
+CCProcessOutput !>(CCIoError) cc_command_output_with_input(CCCommand *cmd, CCArena *arena, CCSlice input);
+int !>(CCIoError) cc_command_status(CCCommand *cmd);
 
 /* Script/oracle default: merge stderr into stdout, then capture.
  * Prefer this over stderr_to_stdout() + output() for inspect-the-text runs.
  * Exit status stays on the returned CCProcessOutput (not folded into Err). */
-static inline CCResult_CCProcessOutput_CCIoError
+static inline CCProcessOutput !>(CCIoError)
 cc_command_capture(CCCommand *cmd, CCArena *arena) {
     (void)cc_command_stderr_to_stdout(cmd);
     return cc_command_output(cmd, arena);

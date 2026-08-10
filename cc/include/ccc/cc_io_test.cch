@@ -1,8 +1,6 @@
 /*
- * Test header for CCRes macro usage in .cch files.
- * Uses CCRes(T, E) which expands to:
- *   - __CCResultGeneric in parser mode
- *   - CCResult_T_E in real compilation
+ * Test header for Result return sugar in .cch files.
+ * Prefer T !>(E) + cc_ok/cc_err; CCRes(T, E) remains a macro alias.
  */
 #ifndef CC_IO_TEST_H
 #define CC_IO_TEST_H
@@ -10,17 +8,15 @@
 #include <ccc/cc_io_error.cch>
 #include <ccc/cc_result.cch>
 
-/* Test function using CCRes(T, E) macro */
-static inline CCRes(bool, CCIoError) cc_io_test_func(void) {
-    return CCRes_ok(bool, CCIoError, true);
+static inline bool !>(CCIoError) cc_io_test_func(void) {
+    return cc_ok(true);
 }
 
-/* Test with CCRes(int, CCError) */
-static inline CCRes(int, CCError) cc_io_test_int(int x) {
+static inline int !>(CCError) cc_io_test_int(int x) {
     if (x < 0) {
-        return CCRes_err(int, CCError, CC_ERROR(CC_ERR_INVALID_ARG, "negative"));
+        return cc_err(CC_ERR_INVALID_ARG, "negative");
     }
-    return CCRes_ok(int, CCError, x * 2);
+    return cc_ok(x * 2);
 }
 
 #endif /* CC_IO_TEST_H */

@@ -16,79 +16,75 @@
 #include <ccc/std/io.cch>
 
 /* Read entire file at path into arena. Arena is last. */
-static inline CCResult_CCSlice_CCError cc_file_read_path(CCSlice path, CCArena *arena) {
+static inline CCSlice !>(CCError) cc_file_read_path(CCSlice path, CCArena *arena) {
     CCFile file;
-    CCResult_CCSlice_CCIoError r;
+    CCSlice !>(CCIoError) r;
     if (!path.ptr || !arena) {
-        return cc_err_CCResult_CCSlice_CCError(
-            CC_ERROR(CC_ERR_INVALID_ARG, "cc_file_read_path: bad args"));
+        return cc_err(CC_ERR_INVALID_ARG, "cc_file_read_path: bad args");
     }
     if (cc_file_open(&file, path, "rb") != 0) {
-        return cc_err_CCResult_CCSlice_CCError(
+        return cc_err(
             CC_ERROR(CC_ERR_IO, cc_io_error_str(cc_io_from_errno(errno))));
     }
     r = cc_file_read_all(&file, arena);
     cc_file_close(&file);
     if (cc_is_err(r)) {
-        return cc_err_CCResult_CCSlice_CCError(
+        return cc_err(
             CC_ERROR(CC_ERR_IO, cc_io_error_str(cc_error(r))));
     }
-    return cc_ok_CCResult_CCSlice_CCError(cc_value(r));
+    return cc_ok(cc_value(r));
 }
 
-static inline CCResult_size_t_CCError cc_file_write_path(CCSlice path, CCSlice data) {
+static inline size_t !>(CCError) cc_file_write_path(CCSlice path, CCSlice data) {
     CCFile file;
-    CCResult_size_t_CCIoError r;
+    size_t !>(CCIoError) r;
     if (!path.ptr) {
-        return cc_err_CCResult_size_t_CCError(
-            CC_ERROR(CC_ERR_INVALID_ARG, "cc_file_write_path: bad path"));
+        return cc_err(CC_ERR_INVALID_ARG, "cc_file_write_path: bad path");
     }
     if (cc_file_open(&file, path, "wb") != 0) {
-        return cc_err_CCResult_size_t_CCError(
+        return cc_err(
             CC_ERROR(CC_ERR_IO, cc_io_error_str(cc_io_from_errno(errno))));
     }
     r = cc_file_write(&file, data);
     cc_file_close(&file);
     if (cc_is_err(r)) {
-        return cc_err_CCResult_size_t_CCError(
+        return cc_err(
             CC_ERROR(CC_ERR_IO, cc_io_error_str(cc_error(r))));
     }
-    return cc_ok_CCResult_size_t_CCError(cc_value(r));
+    return cc_ok(cc_value(r));
 }
 
-static inline CCResult_bool_CCError cc_file_copy(CCSlice src, CCSlice dst, CCArena *arena) {
-    CCResult_CCSlice_CCError rr;
-    CCResult_size_t_CCError wr;
+static inline bool !>(CCError) cc_file_copy(CCSlice src, CCSlice dst, CCArena *arena) {
+    CCSlice !>(CCError) rr;
+    size_t !>(CCError) wr;
     if (!arena || !src.ptr || !dst.ptr) {
-        return cc_err_CCResult_bool_CCError(
-            CC_ERROR(CC_ERR_INVALID_ARG, "cc_file_copy: bad args"));
+        return cc_err(CC_ERR_INVALID_ARG, "cc_file_copy: bad args");
     }
     rr = cc_file_read_path(src, arena);
     if (cc_is_err(rr)) {
-        return cc_err_CCResult_bool_CCError(cc_error(rr));
+        return cc_err(cc_error(rr));
     }
     wr = cc_file_write_path(dst, cc_value(rr));
     if (cc_is_err(wr)) {
-        return cc_err_CCResult_bool_CCError(cc_error(wr));
+        return cc_err(cc_error(wr));
     }
-    return cc_ok_CCResult_bool_CCError(true);
+    return cc_ok(true);
 }
 
-static inline CCResult_size_t_CCError cc_script_print_file(CCSlice path, CCArena *arena) {
-    CCResult_CCSlice_CCError rr;
-    CCResult_size_t_CCIoError wr;
+static inline size_t !>(CCError) cc_script_print_file(CCSlice path, CCArena *arena) {
+    CCSlice !>(CCError) rr;
+    size_t !>(CCIoError) wr;
     if (!arena || !path.ptr) {
-        return cc_err_CCResult_size_t_CCError(
-            CC_ERROR(CC_ERR_INVALID_ARG, "cc_script_print_file: bad args"));
+        return cc_err(CC_ERR_INVALID_ARG, "cc_script_print_file: bad args");
     }
     rr = cc_file_read_path(path, arena);
-    if (cc_is_err(rr)) return cc_err_CCResult_size_t_CCError(cc_error(rr));
+    if (cc_is_err(rr)) return cc_err(cc_error(rr));
     wr = cc_std_out_write(cc_value(rr));
     if (cc_is_err(wr)) {
-        return cc_err_CCResult_size_t_CCError(
+        return cc_err(
             CC_ERROR(CC_ERR_IO, cc_io_error_str(cc_error(wr))));
     }
-    return cc_ok_CCResult_size_t_CCError(cc_value(wr));
+    return cc_ok(cc_value(wr));
 }
 
 #endif /* CC_SCRIPT_FILE_H */

@@ -128,10 +128,10 @@ static inline CCIoError cc_net_to_io_error(CCNetError err) {
 
 /* Connect to addr ("host:port" or "ip:port").
  * On error the returned socket has fd == -1. */
-CCResult_CCSocket_CCNetError cc_tcp_connect(const char* addr, size_t addr_len);
+CCSocket !>(CCNetError) cc_tcp_connect(const char* addr, size_t addr_len);
 
 /* Async variant (requires runtime integration) */
-/* @async CCResult_CCSocket_CCNetError cc_tcp_connect_async(const char* addr, size_t addr_len); */
+/* @async CCSocket !>(CCNetError) cc_tcp_connect_async(const char* addr, size_t addr_len); */
 
 /* ============================================================================
  * TCP Server
@@ -140,14 +140,14 @@ CCResult_CCSocket_CCNetError cc_tcp_connect(const char* addr, size_t addr_len);
 /* Listen on addr ("0.0.0.0:8080", "[::]:8080").
  * `addr` is a NUL-terminated borrow (char[:0] / CCSlice), same shape as
  * cc_file_open's path. On error the returned listener has fd == -1. */
-CCResult_CCListener_CCNetError cc_tcp_listen(CCSlice addr);
+CCListener !>(CCNetError) cc_tcp_listen(CCSlice addr);
 
 /* Accept connection (blocking / fiber-parked).
  * On error the returned socket has fd == -1. */
-CCResult_CCSocket_CCNetError cc_listener_accept(CCListener* ln);
+CCSocket !>(CCNetError) cc_listener_accept(CCListener* ln);
 
 /* Async accept */
-/* @async CCResult_CCSocket_CCNetError cc_listener_accept_async(CCListener* ln); */
+/* @async CCSocket !>(CCNetError) cc_listener_accept_async(CCListener* ln); */
 
 /* Accept until `n` is cancelled (or accept fails).
  * Each connection is handed to `on_conn` as `CCSocket*` (arg0) for the
@@ -178,40 +178,40 @@ void cc_listener_close(CCListener* ln);
  * ============================================================================ */
 
 /* Read up to max_bytes into arena; payload in *out. */
-CCResult_bool_CCIoError cc_socket_read(CCSocket* sock, CCArena* arena, size_t max_bytes, CCSlice* out);
+bool !>(CCIoError) cc_socket_read(CCSocket* sock, CCArena* arena, size_t max_bytes, CCSlice* out);
 
 /* Read up to max_bytes into caller buffer; byte count in *out. */
-CCResult_bool_CCIoError cc_socket_read_into(CCSocket* sock, char* buf, size_t max_bytes, size_t* out);
-CCResult_bool_CCIoError cc_socket_read_into_deadline(CCSocket* sock,
+bool !>(CCIoError) cc_socket_read_into(CCSocket* sock, char* buf, size_t max_bytes, size_t* out);
+bool !>(CCIoError) cc_socket_read_into_deadline(CCSocket* sock,
                                                     char* buf,
                                                     size_t max_bytes,
                                                     size_t* out,
                                                     const CCDeadline* deadline);
 
 /* Duplex-compatible alias of read_into (BufReader::[CCSocket] fill). */
-static inline CCResult_bool_CCIoError cc_socket_read_buf_into(CCSocket* sock, char* buf,
+static inline bool !>(CCIoError) cc_socket_read_buf_into(CCSocket* sock, char* buf,
                                                              size_t max_bytes, size_t* out) {
     return cc_socket_read_into(sock, buf, max_bytes, out);
 }
 
 /* Non-blocking read into caller buffer (three-way; see above). */
-CCResult_bool_CCIoError cc_socket_try_read_into(CCSocket* sock,
+bool !>(CCIoError) cc_socket_try_read_into(CCSocket* sock,
                                                char* buf,
                                                size_t max_bytes,
                                                size_t* out);
 
 /* Async read */
-/* @async CCResult_bool_CCIoError cc_socket_read_async(...); */
+/* @async bool !>(CCIoError) cc_socket_read_async(...); */
 
 /* Write data. Returns bytes written (may be short); no EOF story. */
-CCResult_size_t_CCIoError cc_socket_write(CCSocket* sock, const char* data, size_t len);
-CCResult_size_t_CCIoError cc_socket_write_deadline(CCSocket* sock,
+size_t !>(CCIoError) cc_socket_write(CCSocket* sock, const char* data, size_t len);
+size_t !>(CCIoError) cc_socket_write_deadline(CCSocket* sock,
                                                   const char* data,
                                                   size_t len,
                                                   const CCDeadline* deadline);
 
 /* Async write */
-/* @async CCResult_size_t_CCIoError cc_socket_write_async(...); */
+/* @async size_t !>(CCIoError) cc_socket_write_async(...); */
 
 /* Shutdown modes */
 typedef enum CCShutdownMode {
@@ -239,9 +239,9 @@ void cc_socket_create_signal(CCSocket* sock, CCSocketSignal* out_sig);
 void cc_socket_signal_init(CCSocketSignal* sig, CCSocket* sock);
 void cc_socket_signal_free(CCSocketSignal* sig);
 void cc_socket_signal_signal(CCSocketSignal* sig);
-CCResult_bool_CCIoError cc_socket_signal_wait(CCSocketSignal* sig);
+bool !>(CCIoError) cc_socket_signal_wait(CCSocketSignal* sig);
 uint64_t cc_socket_signal_snapshot(CCSocketSignal* sig);
-CCResult_bool_CCIoError cc_socket_signal_wait_since(CCSocketSignal* sig, uint64_t seen_epoch);
+bool !>(CCIoError) cc_socket_signal_wait_since(CCSocketSignal* sig, uint64_t seen_epoch);
 
 /* ============================================================================
  * UDP

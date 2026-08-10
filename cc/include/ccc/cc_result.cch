@@ -1,27 +1,20 @@
 /*
- * Generic Result helpers for generated C.
+ * Result types and helpers.
  *
- * TYPE MACROS (defined at the bottom of this header):
- *   CCRes(T, E)        - CCResult_T_E
- *   CCResPtr(T, E)     - CCResult_Tptr_E
+ * .cch source (Concurrent-C):
+ *   Types:     T !>(E)          — e.g. bool !>(CCError), CCSlice !>(CCIoError)
+ *   Returns:   cc_ok(v) / cc_err(e) or cc_err(kind, msg)  — inferred from return type
+ *   Consume:   prefer unwrap — expr !> / expr !>(e) { … }; also .value() after a check
+ *   Checks:    cc_is_ok / cc_is_err / .ok are fine; peels (.u.value) OK after a check
  *
- * IDIOMATIC USAGE:
- *   CCRes(CCSlice, CCIoError) res = cc_file_read(...);
- *   if (cc_is_err(res)) {
- *       CCIoError err = cc_unwrap_err(res);
- *       handle_error(err);
- *       return;
- *   }
- *   CCSlice data = cc_unwrap(res);
+ * Do not hand-write mangled spellings in .cch outside CC_DECL_RESULT_SPEC:
+ *   CCResult_T_E, cc_ok_CCResult_T_E, CCResult_T_E_is_ok, …
+ * Exception: @emit(`...`) payloads that become host C without a Result rewrite.
  *
- * HELPERS:
- *   cc_is_ok(res)      - true if success
- *   cc_is_err(res)     - true if error
- *   cc_unwrap(res)     - get value (aborts if error)
- *   cc_unwrap_err(res) - get error (aborts if ok)
+ * Lowered .h / emit may show CCResult_* / cc_is_ok / .ok — readability wins.
+ * Style gate: scripts/check_result_cch_style.sh
  *
- * AVOID: Direct field access like res.u.value or res.u.error
- *
+ * CC_DECL_RESULT_SPEC(CCResult_T_E, T, E) registers the mangled ABI typedef.
  * Layout: struct { bool ok; union { T value; E error; } u; }
  */
 #ifndef CC_RESULT_H

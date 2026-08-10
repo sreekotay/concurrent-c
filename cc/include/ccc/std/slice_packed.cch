@@ -183,45 +183,39 @@ static inline int CCSlicePacked_is_durable(const CCSlicePacked *r) {
 /* Copy `src` into a durable handle.  len <= INLINE_MAX stays inline (no arena).
  * Larger payloads allocate [u32 len][bytes] in `arena` (SDS-style).
  * Slice-first for UFCS: `src.to_packed(arena)`. */
-static inline CCResult_CCSlicePacked_CCError cc_slice_to_packed(CCSlice *src, CCArena *arena) {
+static inline CCSlicePacked !>(CCError) cc_slice_to_packed(CCSlice *src, CCArena *arena) {
     CCSlice s;
     CCSlicePacked r;
     char *block;
     char *data;
     size_t need;
     if (!src) {
-        return cc_err_CCResult_CCSlicePacked_CCError(
-            CC_ERROR(CC_ERR_INVALID_ARG, "CCSlicePacked to_packed without slice"));
+        return cc_err(CC_ERR_INVALID_ARG, "CCSlicePacked to_packed without slice");
     }
     s = *src;
     if (s.len > (size_t)UINT32_MAX) {
-        return cc_err_CCResult_CCSlicePacked_CCError(
-            CC_ERROR(CC_ERR_INVALID_ARG, "CCSlicePacked length exceeds u32"));
+        return cc_err(CC_ERR_INVALID_ARG, "CCSlicePacked length exceeds u32");
     }
     if (s.len == 0) {
-        return cc_ok_CCResult_CCSlicePacked_CCError(cc_slice_packed_empty());
+        return cc_ok(cc_slice_packed_empty());
     }
     if (s.len <= (size_t)CC_SLICE_PACKED_INLINE_MAX) {
         if (!s.ptr) {
-            return cc_err_CCResult_CCSlicePacked_CCError(
-                CC_ERROR(CC_ERR_INVALID_ARG, "CCSlicePacked inline without ptr"));
+            return cc_err(CC_ERR_INVALID_ARG, "CCSlicePacked inline without ptr");
         }
-        return cc_ok_CCResult_CCSlicePacked_CCError(
+        return cc_ok(
             cc__slice_packed_pack_inline((const char *)s.ptr, (uint32_t)s.len));
     }
     if (!arena) {
-        return cc_err_CCResult_CCSlicePacked_CCError(
-            CC_ERROR(CC_ERR_INVALID_ARG, "CCSlicePacked heap form needs arena"));
+        return cc_err(CC_ERR_INVALID_ARG, "CCSlicePacked heap form needs arena");
     }
     if (!s.ptr) {
-        return cc_err_CCResult_CCSlicePacked_CCError(
-            CC_ERROR(CC_ERR_INVALID_ARG, "CCSlicePacked heap without ptr"));
+        return cc_err(CC_ERR_INVALID_ARG, "CCSlicePacked heap without ptr");
     }
     need = sizeof(uint32_t) + s.len;
     block = (char *)cc_arena_alloc(arena, need, sizeof(uint32_t));
     if (!block) {
-        return cc_err_CCResult_CCSlicePacked_CCError(
-            CC_ERROR(CC_ERR_OUT_OF_MEMORY, "CCSlicePacked arena alloc failed"));
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "CCSlicePacked arena alloc failed");
     }
     {
         uint32_t n = (uint32_t)s.len;
@@ -231,14 +225,13 @@ static inline CCResult_CCSlicePacked_CCError cc_slice_to_packed(CCSlice *src, CC
     memcpy(data, s.ptr, s.len);
     /* Heap tag requires (w & 3) == 0; 4-byte header keeps data 4-aligned. */
     if (((uintptr_t)data & 3u) != 0) {
-        return cc_err_CCResult_CCSlicePacked_CCError(
-            CC_ERROR(CC_ERR_INVALID_ARG, "CCSlicePacked heap data misaligned"));
+        return cc_err(CC_ERR_INVALID_ARG, "CCSlicePacked heap data misaligned");
     }
     r = cc__slice_packed_from_heap_data(data);
-    return cc_ok_CCResult_CCSlicePacked_CCError(r);
+    return cc_ok(r);
 }
 
-static inline CCResult_CCSlicePacked_CCError CCSlice_to_packed(CCSlice *src, CCArena *arena) {
+static inline CCSlicePacked !>(CCError) CCSlice_to_packed(CCSlice *src, CCArena *arena) {
     return cc_slice_to_packed(src, arena);
 }
 

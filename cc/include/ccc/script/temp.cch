@@ -48,7 +48,7 @@ static inline void cc_temp_file_destroy(CCTempFile *tmp) {
     cc_file_close(&tmp->file);
 }
 
-static inline CCResult_CCTempFile_CCError cc_temp_file(CCArena *arena) {
+static inline CCTempFile !>(CCError) cc_temp_file(CCArena *arena) {
     char tmpl[] = "/tmp/cc_script.XXXXXX";
     int fd;
     size_t n;
@@ -56,28 +56,24 @@ static inline CCResult_CCTempFile_CCError cc_temp_file(CCArena *arena) {
     CCTempFile tmp;
     FILE *fp;
     if (!arena) {
-        return cc_err_CCResult_CCTempFile_CCError(
-            CC_ERROR(CC_ERR_INVALID_ARG, "cc_temp_file: no arena"));
+        return cc_err(CC_ERR_INVALID_ARG, "cc_temp_file: no arena");
     }
     fd = mkstemp(tmpl);
     if (fd < 0) {
-        return cc_err_CCResult_CCTempFile_CCError(
-            CC_ERROR(CC_ERR_IO, "cc_temp_file: mkstemp failed"));
+        return cc_err(CC_ERR_IO, "cc_temp_file: mkstemp failed");
     }
     fp = fdopen(fd, "w+");
     if (!fp) {
         close(fd);
         unlink(tmpl);
-        return cc_err_CCResult_CCTempFile_CCError(
-            CC_ERROR(CC_ERR_IO, "cc_temp_file: fdopen failed"));
+        return cc_err(CC_ERR_IO, "cc_temp_file: fdopen failed");
     }
     n = strlen(tmpl);
     path = cc_arena_alloc_slice_bytes(arena, n + 1);
     if (!path.ptr) {
         fclose(fp);
         unlink(tmpl);
-        return cc_err_CCResult_CCTempFile_CCError(
-            CC_ERROR(CC_ERR_OUT_OF_MEMORY, "cc_temp_file: alloc"));
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "cc_temp_file: alloc");
     }
     memcpy(path.ptr, tmpl, n + 1);
     path.len = n;
@@ -85,7 +81,7 @@ static inline CCResult_CCTempFile_CCError cc_temp_file(CCArena *arena) {
     tmp.file.handle = fp;
     tmp.path = path;
     tmp.owns = 1;
-    return cc_ok_CCResult_CCTempFile_CCError(tmp);
+    return cc_ok(tmp);
 }
 
 #ifdef CC_COMPTIME_SCAN

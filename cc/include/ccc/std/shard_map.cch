@@ -119,7 +119,7 @@ static inline bool cc_shard_put(CCShard* m, CCSlice key, CCSlice val) {
     size_t h;
     CCString* cur;
     CCString owned;
-    CCResult_CCSlicePacked_CCError packed;
+    CCSlicePacked !>(CCError) packed;
     CCSlicePacked durable;
     if (!m || !m->data) return false;
     pk = cc_slice_packed_borrow_slice(&view, key);

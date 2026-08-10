@@ -11,11 +11,11 @@
 #define CC_STD_BUFIO_H
 
 /* Loud fallback when Src is not in the fill _Generic list. */
-static inline CCResult_bool_CCIoError cc__bufio_unsupported_read(void *src, char *buf,
+static inline bool !>(CCIoError) cc__bufio_unsupported_read(void *src, char *buf,
                                                                  size_t max, size_t *out) {
     (void)src; (void)buf; (void)max;
     if (out) *out = 0;
-    return CCRes_err(bool, CCIoError, cc_io_error_os(CC_IO_INVALID_ARGUMENT, EINVAL));
+    return cc_err(cc_io_error_os(CC_IO_INVALID_ARGUMENT, EINVAL));
 }
 
 #ifdef CC_COMPTIME_SCAN

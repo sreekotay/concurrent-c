@@ -1541,7 +1541,7 @@ static void *cc__js_arg_value(void *env, const CCJsArg *a) {
 /* The call core: get the property, call it with the receiver as `this`.
  * Arguments arrive as an array of lifted CCJsArg (the UFCS lowering's
  * form); the variadic entries below adapt onto it. */
-static CCResult_CCJsVal_CCJsError cc__js_val_callm_n(CCJsVal *obj,
+static CCJsVal !>(CCJsError) cc__js_val_callm_n(CCJsVal *obj,
                                                      const char *method,
                                                      int argc,
                                                      const CCJsArg *argv) {
@@ -1557,26 +1557,26 @@ static CCResult_CCJsVal_CCJsError cc__js_val_callm_n(CCJsVal *obj,
     if (!obj || !obj->env || argc < 0 || argc > CC__JS_MAX_CALL_ARGS) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                  "js: %s: bad receiver or too many arguments", method);
-        return cc_err_CCResult_CCJsVal_CCJsError(cc__js_err(NULL, method));
+        return cc_err(cc__js_err(NULL, method));
     }
     env = obj->env;
     recv = cc__js_val_cur(obj);
     if (!recv || cc__js.GetNamedProperty(env, recv, method, &fn) != 0 || !fn)
-        return cc_err_CCResult_CCJsVal_CCJsError(cc__js_err(env, method));
+        return cc_err(cc__js_err(env, method));
     for (i = 0; i < argc; i++)
         if (argv[i].kwname) nkw++;
     if (nkw > 0 && cc__js.CreateObject(env, &bag) != 0)
-        return cc_err_CCResult_CCJsVal_CCJsError(cc__js_err(env, method));
+        return cc_err(cc__js_err(env, method));
     for (i = 0; i < argc; i++) {
         void *v = cc__js_arg_value(env, &argv[i]);
         if (!v) {
             snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                      "js: %s: argument %d does not marshal", method, i + 1);
-            return cc_err_CCResult_CCJsVal_CCJsError(cc__js_err(env, method));
+            return cc_err(cc__js_err(env, method));
         }
         if (argv[i].kwname) {
             if (cc__js.SetNamedProperty(env, bag, argv[i].kwname, v) != 0)
-                return cc_err_CCResult_CCJsVal_CCJsError(
+                return cc_err(
                     cc__js_err(env, method));
         } else {
             av[npos++] = v;
@@ -1584,14 +1584,14 @@ static CCResult_CCJsVal_CCJsError cc__js_val_callm_n(CCJsVal *obj,
     }
     if (bag) av[npos++] = bag;
     if (cc__js.CallFunction(env, recv, fn, (size_t)npos, av, &r) != 0)
-        return cc_err_CCResult_CCJsVal_CCJsError(cc__js_err(env, method));
+        return cc_err(cc__js_err(env, method));
     memset(&out, 0, sizeof(out));
     out.env = env;
     out.v = r;
-    return cc_ok_CCResult_CCJsVal_CCJsError(out);
+    return cc_ok(out);
 }
 
-static inline CCResult_CCJsVal_CCJsError cc__js_val_callm_v(CCJsVal *obj,
+static inline CCJsVal !>(CCJsError) cc__js_val_callm_v(CCJsVal *obj,
                                                             const char *method,
                                                             int argc,
                                                             va_list ap) {
@@ -1604,10 +1604,10 @@ static inline CCResult_CCJsVal_CCJsError cc__js_val_callm_v(CCJsVal *obj,
     return cc__js_val_callm_n(obj, method, argc, tmp);
 }
 
-static inline CCResult_CCJsVal_CCJsError cc_js_val_callm(CCJsVal *obj,
+static inline CCJsVal !>(CCJsError) cc_js_val_callm(CCJsVal *obj,
                                                          const char *method,
                                                          int argc, ...) {
-    CCResult_CCJsVal_CCJsError r;
+    CCJsVal !>(CCJsError) r;
     va_list ap;
     va_start(ap, argc);
     r = cc__js_val_callm_v(obj, method, argc, ap);
@@ -1668,7 +1668,7 @@ static inline int cc__js_elem_store(void *env, void *res, int esz, int isf,
     }
 }
 
-static CCResult_CCSlice_CCJsError cc__js_val_map_raw(CCJsVal *fobj,
+static CCSlice !>(CCJsError) cc__js_val_map_raw(CCJsVal *fobj,
                                                      CCArena *arena, int esz,
                                                      int isf, int argc,
                                                      const CCJsArg *argv) {
@@ -1682,17 +1682,17 @@ static CCResult_CCSlice_CCJsError cc__js_val_map_raw(CCJsVal *fobj,
     if (!fobj || !fobj->env || !arena || argc < 1 || argc > 8) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                  "js: map: needs a callable, an arena, and 1..8 columns");
-        return cc_err_CCResult_CCSlice_CCJsError(cc__js_err(NULL, "map"));
+        return cc_err(cc__js_err(NULL, "map"));
     }
     env = fobj->env;
     fn = cc__js_val_cur(fobj);
     if (!fn || cc__js.GetUndefined(env, &recv) != 0)
-        return cc_err_CCResult_CCSlice_CCJsError(cc__js_err(env, "map"));
+        return cc_err(cc__js_err(env, "map"));
     for (c = 0; c < argc; c++) {
         if (argv[c].kind != 6 || (!argv[c].p && argv[c].n)) {
             snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                      "js: map: column %d is not a typed slice", c);
-            return cc_err_CCResult_CCSlice_CCJsError(cc__js_err(env, "map"));
+            return cc_err(cc__js_err(env, "map"));
         }
     }
     nrows = argv[0].n;
@@ -1701,14 +1701,14 @@ static CCResult_CCSlice_CCJsError cc__js_val_map_raw(CCJsVal *fobj,
             snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                      "js: map: column %d length %zu, column 0 length %zu",
                      c, argv[c].n, nrows);
-            return cc_err_CCResult_CCSlice_CCJsError(cc__js_err(env, "map"));
+            return cc_err(cc__js_err(env, "map"));
         }
     }
     out = cc_arena_alloc_slice_bytes(arena, nrows * (size_t)esz);
     if (!out.ptr && nrows > 0) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                  "js: map: arena exhausted (%zu rows)", nrows);
-        return cc_err_CCResult_CCSlice_CCJsError(cc__js_err(env, "map"));
+        return cc_err(cc__js_err(env, "map"));
     }
     for (r = 0; r < nrows; r++) {
         void *scope = NULL;
@@ -1716,22 +1716,22 @@ static CCResult_CCSlice_CCJsError cc__js_val_map_raw(CCJsVal *fobj,
         void *res = NULL;
         int rc;
         if (cc__js.OpenHandleScope(env, &scope) != 0)
-            return cc_err_CCResult_CCSlice_CCJsError(cc__js_err(env, "map"));
+            return cc_err(cc__js_err(env, "map"));
         for (c = 0; c < argc; c++) {
             av[c] = cc__js_box_elem(env, &argv[c], r);
             if (!av[c]) {
                 cc__js.CloseHandleScope(env, scope);
                 snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                          "js: map: row %zu: argument does not box", r);
-                return cc_err_CCResult_CCSlice_CCJsError(
+                return cc_err(
                     cc__js_err(env, "map"));
             }
         }
         if (cc__js.CallFunction(env, recv, fn, (size_t)argc, av, &res) != 0) {
             char rctx[32];
-            CCResult_CCSlice_CCJsError e;
+            CCSlice !>(CCJsError) e;
             snprintf(rctx, sizeof(rctx), "map row %zu", r);
-            e = cc_err_CCResult_CCSlice_CCJsError(cc__js_err(env, rctx));
+            e = cc_err(cc__js_err(env, rctx));
             cc__js.CloseHandleScope(env, scope);
             return e;
         }
@@ -1741,11 +1741,11 @@ static CCResult_CCSlice_CCJsError cc__js_val_map_raw(CCJsVal *fobj,
         if (rc != 0) {
             snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                      "js: map: row %zu: result does not convert", r);
-            return cc_err_CCResult_CCSlice_CCJsError(cc__js_err(env, "map"));
+            return cc_err(cc__js_err(env, "map"));
         }
     }
     out.len = nrows;
-    return cc_ok_CCResult_CCSlice_CCJsError(out);
+    return cc_ok(out);
 }
 
 /* Destination-typed rows: `double[:] ys = f.map(&a, cols…) !>` binds the
@@ -1774,64 +1774,64 @@ CC_DECL_RESULT_SPEC(CCResult_CCSlice_long_long_CCJsError, CCSlice_long_long, CCJ
 CC_DECL_RESULT_SPEC(CCResult_CCSlice_int_CCJsError, CCSlice_int, CCJsError)
 #endif
 
-static inline CCResult_CCSlice_double_CCJsError cc__js_val_map_CCSlice_double(
+static inline CCSlice_double !>(CCJsError) cc__js_val_map_CCSlice_double(
         CCJsVal *fobj, CCArena *arena, int esz, int isf, int argc,
         const CCJsArg *argv) {
-    CCResult_CCSlice_CCJsError r =
+    CCSlice !>(CCJsError) r =
         cc__js_val_map_raw(fobj, arena, esz, isf, argc, argv);
     CCSlice_double out;
     if (!r.ok)
-        return cc_err_CCResult_CCSlice_double_CCJsError(r.u.error);
+        return cc_err(r.u.error);
     out.base = r.u.value;
-    return cc_ok_CCResult_CCSlice_double_CCJsError(out);
+    return cc_ok(out);
 }
 
-static inline CCResult_CCSlice_float_CCJsError cc__js_val_map_CCSlice_float(
+static inline CCSlice_float !>(CCJsError) cc__js_val_map_CCSlice_float(
         CCJsVal *fobj, CCArena *arena, int esz, int isf, int argc,
         const CCJsArg *argv) {
-    CCResult_CCSlice_CCJsError r =
+    CCSlice !>(CCJsError) r =
         cc__js_val_map_raw(fobj, arena, esz, isf, argc, argv);
     CCSlice_float out;
     if (!r.ok)
-        return cc_err_CCResult_CCSlice_float_CCJsError(r.u.error);
+        return cc_err(r.u.error);
     out.base = r.u.value;
-    return cc_ok_CCResult_CCSlice_float_CCJsError(out);
+    return cc_ok(out);
 }
 
-static inline CCResult_CCSlice_int64_t_CCJsError cc__js_val_map_CCSlice_int64_t(
+static inline CCSlice_int64_t !>(CCJsError) cc__js_val_map_CCSlice_int64_t(
         CCJsVal *fobj, CCArena *arena, int esz, int isf, int argc,
         const CCJsArg *argv) {
-    CCResult_CCSlice_CCJsError r =
+    CCSlice !>(CCJsError) r =
         cc__js_val_map_raw(fobj, arena, esz, isf, argc, argv);
     CCSlice_int64_t out;
     if (!r.ok)
-        return cc_err_CCResult_CCSlice_int64_t_CCJsError(r.u.error);
+        return cc_err(r.u.error);
     out.base = r.u.value;
-    return cc_ok_CCResult_CCSlice_int64_t_CCJsError(out);
+    return cc_ok(out);
 }
 
-static inline CCResult_CCSlice_long_long_CCJsError cc__js_val_map_CCSlice_long_long(
+static inline CCSlice_long_long !>(CCJsError) cc__js_val_map_CCSlice_long_long(
         CCJsVal *fobj, CCArena *arena, int esz, int isf, int argc,
         const CCJsArg *argv) {
-    CCResult_CCSlice_CCJsError r =
+    CCSlice !>(CCJsError) r =
         cc__js_val_map_raw(fobj, arena, esz, isf, argc, argv);
     CCSlice_long_long out;
     if (!r.ok)
-        return cc_err_CCResult_CCSlice_long_long_CCJsError(r.u.error);
+        return cc_err(r.u.error);
     out.base = r.u.value;
-    return cc_ok_CCResult_CCSlice_long_long_CCJsError(out);
+    return cc_ok(out);
 }
 
-static inline CCResult_CCSlice_int_CCJsError cc__js_val_map_CCSlice_int(
+static inline CCSlice_int !>(CCJsError) cc__js_val_map_CCSlice_int(
         CCJsVal *fobj, CCArena *arena, int esz, int isf, int argc,
         const CCJsArg *argv) {
-    CCResult_CCSlice_CCJsError r =
+    CCSlice !>(CCJsError) r =
         cc__js_val_map_raw(fobj, arena, esz, isf, argc, argv);
     CCSlice_int out;
     if (!r.ok)
-        return cc_err_CCResult_CCSlice_int_CCJsError(r.u.error);
+        return cc_err(r.u.error);
     out.base = r.u.value;
-    return cc_ok_CCResult_CCSlice_int_CCJsError(out);
+    return cc_ok(out);
 }
 
 /* Column lift: CC_JS_ARG applied to each vararg, counted — explicit per
@@ -1862,162 +1862,162 @@ static inline CCResult_CCSlice_int_CCJsError cc__js_val_map_CCSlice_int(
 /* Declared before it is defined as a macro, so the Result registry can
  * type a `cc_js_val_map(...) !>` call site (same trick as the Python
  * twin); the symbol is never defined — the macro intercepts every call. */
-CCResult_CCSlice_CCJsError cc_js_val_map(void *never_defined, ...);
+CCSlice !>(CCJsError) cc_js_val_map(void *never_defined, ...);
 #define cc_js_val_map(T, obj, arena, ...)     cc__js_val_map_raw((obj), (arena), (int)sizeof(T),         _Generic((T)0, float: 1, double: 1, default: 0),         CC__JS_NARG(__VA_ARGS__),         (const CCJsArg[]){             CC__JS_MAPCAT(CC__JS_MAPA, CC__JS_NARG(__VA_ARGS__))(__VA_ARGS__) })
 
 /* Destination-typed variants: `.ufcs_dynamic2` resolution composes
  * `cc_js_val_callm_<mangled dest>` at `T v = obj.method(args…)` sites.
  * Each runs the shared core, extracts the destination through the quiet
  * cores, and needs no release — the intermediate is call-scoped. */
-static inline CCResult_double_CCJsError cc_js_val_callm_double(
+static inline double !>(CCJsError) cc_js_val_callm_double(
         CCJsVal *obj, const char *method, int argc, ...) {
-    CCResult_CCJsVal_CCJsError r;
+    CCJsVal !>(CCJsError) r;
     double v = 0;
     va_list ap;
     va_start(ap, argc);
     r = cc__js_val_callm_v(obj, method, argc, ap);
     va_end(ap);
-    if (!r.ok) return cc_err_CCResult_double_CCJsError(r.u.error);
+    if (!r.ok) return cc_err(r.u.error);
     if (cc__js_inq_double(&v, r.u.value.env, r.u.value.v) != 0) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                  "js: %s: result is not a number", method);
-        return cc_err_CCResult_double_CCJsError(
+        return cc_err(
             cc__js_err(r.u.value.env, method));
     }
-    return cc_ok_CCResult_double_CCJsError(v);
+    return cc_ok(v);
 }
 
 /* Spelled out rather than macro-minted: UFCS compose-and-verify checks a
  * composed callee's name TEXTUALLY, so a token-pasted definition is
  * invisible to it and the site would fall back to the plain sink. */
-static inline CCResult_int64_t_CCJsError cc_js_val_callm_int64_t(
+static inline int64_t !>(CCJsError) cc_js_val_callm_int64_t(
         CCJsVal *obj, const char *method, int argc, ...) {
-    CCResult_CCJsVal_CCJsError r;
+    CCJsVal !>(CCJsError) r;
     long long v = 0;
     int rc;
     va_list ap;
     va_start(ap, argc);
     r = cc__js_val_callm_v(obj, method, argc, ap);
     va_end(ap);
-    if (!r.ok) return cc_err_CCResult_int64_t_CCJsError(r.u.error);
+    if (!r.ok) return cc_err(r.u.error);
     rc = cc__js_inq_ll(r.u.value.env, r.u.value.v, &v);
     if (rc != 0) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                  rc == -2 ? "js: %s: result out of range"
                           : "js: %s: result is not an integer",
                  method);
-        return cc_err_CCResult_int64_t_CCJsError(
+        return cc_err(
             cc__js_err(r.u.value.env, method));
     }
-    return cc_ok_CCResult_int64_t_CCJsError((int64_t)v);
+    return cc_ok((int64_t)v);
 }
 
-static inline CCResult_long_long_CCJsError cc_js_val_callm_long_long(
+static inline long long !>(CCJsError) cc_js_val_callm_long_long(
         CCJsVal *obj, const char *method, int argc, ...) {
-    CCResult_CCJsVal_CCJsError r;
+    CCJsVal !>(CCJsError) r;
     long long v = 0;
     int rc;
     va_list ap;
     va_start(ap, argc);
     r = cc__js_val_callm_v(obj, method, argc, ap);
     va_end(ap);
-    if (!r.ok) return cc_err_CCResult_long_long_CCJsError(r.u.error);
+    if (!r.ok) return cc_err(r.u.error);
     rc = cc__js_inq_ll(r.u.value.env, r.u.value.v, &v);
     if (rc != 0) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                  rc == -2 ? "js: %s: result out of range"
                           : "js: %s: result is not an integer",
                  method);
-        return cc_err_CCResult_long_long_CCJsError(
+        return cc_err(
             cc__js_err(r.u.value.env, method));
     }
-    return cc_ok_CCResult_long_long_CCJsError((long long)v);
+    return cc_ok((long long)v);
 }
 
-static inline CCResult_int_CCJsError cc_js_val_callm_int(
+static inline int !>(CCJsError) cc_js_val_callm_int(
         CCJsVal *obj, const char *method, int argc, ...) {
-    CCResult_CCJsVal_CCJsError r;
+    CCJsVal !>(CCJsError) r;
     long long v = 0;
     int rc;
     va_list ap;
     va_start(ap, argc);
     r = cc__js_val_callm_v(obj, method, argc, ap);
     va_end(ap);
-    if (!r.ok) return cc_err_CCResult_int_CCJsError(r.u.error);
+    if (!r.ok) return cc_err(r.u.error);
     rc = cc__js_inq_ll(r.u.value.env, r.u.value.v, &v);
     if (rc != 0 || v < INT_MIN || v > INT_MAX) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                  "js: %s: result out of range for int destination", method);
-        return cc_err_CCResult_int_CCJsError(cc__js_err(r.u.value.env, method));
+        return cc_err(cc__js_err(r.u.value.env, method));
     }
-    return cc_ok_CCResult_int_CCJsError((int)v);
+    return cc_ok((int)v);
 }
 
-static inline CCResult_float_CCJsError cc_js_val_callm_float(
+static inline float !>(CCJsError) cc_js_val_callm_float(
         CCJsVal *obj, const char *method, int argc, ...) {
-    CCResult_CCJsVal_CCJsError r;
+    CCJsVal !>(CCJsError) r;
     double v = 0;
     va_list ap;
     va_start(ap, argc);
     r = cc__js_val_callm_v(obj, method, argc, ap);
     va_end(ap);
-    if (!r.ok) return cc_err_CCResult_float_CCJsError(r.u.error);
+    if (!r.ok) return cc_err(r.u.error);
     if (cc__js_inq_double(&v, r.u.value.env, r.u.value.v) != 0) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                  "js: %s: result is not a number", method);
-        return cc_err_CCResult_float_CCJsError(
+        return cc_err(
             cc__js_err(r.u.value.env, method));
     }
-    return cc_ok_CCResult_float_CCJsError((float)v);
+    return cc_ok((float)v);
 }
 
 /* ---- value operations (UFCS: `v.get(...)`, `v.as_f64()`, …) ---- */
 
-static inline CCResult_CCJsVal_CCJsError cc_js_val_get(CCJsVal *obj,
+static inline CCJsVal !>(CCJsError) cc_js_val_get(CCJsVal *obj,
                                                        const char *name) {
     void *p = NULL;
     void *cur;
     CCJsVal out;
     cc__js_errbuf[0] = 0;
     if (!obj || !obj->env)
-        return cc_err_CCResult_CCJsVal_CCJsError(cc__js_err(NULL, name));
+        return cc_err(cc__js_err(NULL, name));
     cur = cc__js_val_cur(obj);
     if (!cur || cc__js.GetNamedProperty(obj->env, cur, name, &p) != 0)
-        return cc_err_CCResult_CCJsVal_CCJsError(cc__js_err(obj->env, name));
+        return cc_err(cc__js_err(obj->env, name));
     memset(&out, 0, sizeof(out));
     out.env = obj->env;
     out.v = p;
-    return cc_ok_CCResult_CCJsVal_CCJsError(out);
+    return cc_ok(out);
 }
 
-static inline CCResult_double_CCJsError cc_js_val_as_f64(CCJsVal *obj) {
+static inline double !>(CCJsError) cc_js_val_as_f64(CCJsVal *obj) {
     double v = 0;
     cc__js_errbuf[0] = 0;
     if (!obj || !obj->env ||
         cc__js_inq_double(&v, obj->env, cc__js_val_cur(obj)) != 0) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                  "js: as_f64: not a number");
-        return cc_err_CCResult_double_CCJsError(
+        return cc_err(
             cc__js_err(obj ? obj->env : NULL, "as_f64"));
     }
-    return cc_ok_CCResult_double_CCJsError(v);
+    return cc_ok(v);
 }
 
-static inline CCResult_int64_t_CCJsError cc_js_val_as_i64(CCJsVal *obj) {
+static inline int64_t !>(CCJsError) cc_js_val_as_i64(CCJsVal *obj) {
     long long v = 0;
     cc__js_errbuf[0] = 0;
     if (!obj || !obj->env ||
         cc__js_inq_ll(obj->env, cc__js_val_cur(obj), &v) != 0) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                  "js: as_i64: not an integer");
-        return cc_err_CCResult_int64_t_CCJsError(
+        return cc_err(
             cc__js_err(obj ? obj->env : NULL, "as_i64"));
     }
-    return cc_ok_CCResult_int64_t_CCJsError((int64_t)v);
+    return cc_ok((int64_t)v);
 }
 
 /* String(value), copied into `arena`, NUL-terminated. */
-static inline CCResult_CCSlice_CCJsError cc_js_val_as_slice_into(
+static inline CCSlice !>(CCJsError) cc_js_val_as_slice_into(
         CCJsVal *obj, CCArena *arena) {
     void *s = NULL;
     size_t len = 0, got = 0;
@@ -2026,29 +2026,29 @@ static inline CCResult_CCSlice_CCJsError cc_js_val_as_slice_into(
     if (!obj || !obj->env || !arena) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                  "js: as_slice needs a value and an arena");
-        return cc_err_CCResult_CCSlice_CCJsError(
+        return cc_err(
             cc__js_err(obj ? obj->env : NULL, "as_slice"));
     }
     if (cc__js.CoerceToString(obj->env, cc__js_val_cur(obj), &s) != 0 ||
         cc__js.GetValueStringUtf8(obj->env, s, NULL, 0, &len) != 0)
-        return cc_err_CCResult_CCSlice_CCJsError(
+        return cc_err(
             cc__js_err(obj->env, "as_slice"));
     out = cc_arena_alloc_slice_bytes(arena, len + 1);
     if (!out.ptr) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                  "js: as_slice: arena exhausted");
-        return cc_err_CCResult_CCSlice_CCJsError(
+        return cc_err(
             cc__js_err(obj->env, "as_slice"));
     }
     if (cc__js.GetValueStringUtf8(obj->env, s, (char *)out.ptr, len + 1,
                                   &got) != 0)
-        return cc_err_CCResult_CCSlice_CCJsError(
+        return cc_err(
             cc__js_err(obj->env, "as_slice"));
     out.len = got;
-    return cc_ok_CCResult_CCSlice_CCJsError(out);
+    return cc_ok(out);
 }
 
-static inline CCResult_CCSlice_CCJsError cc_js_val_as_slice(CCJsVal *obj,
+static inline CCSlice !>(CCJsError) cc_js_val_as_slice(CCJsVal *obj,
                                                             CCArena *arena) {
     return cc_js_val_as_slice_into(obj, arena);
 }
@@ -2057,21 +2057,21 @@ static inline CCResult_CCSlice_CCJsError cc_js_val_as_slice(CCJsVal *obj,
  * calls into the same environment.  The held value releases with
  * `@destroy` (or by hand); using it after its environment tears down is
  * outside the contract. */
-static inline CCResult_CCJsVal_CCJsError cc_js_val_hold(CCJsVal *obj) {
+static inline CCJsVal !>(CCJsError) cc_js_val_hold(CCJsVal *obj) {
     void *ref = NULL;
     CCJsVal out;
     cc__js_errbuf[0] = 0;
     if (!obj || !obj->env || !cc__js_val_cur(obj)) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf), "js: hold: no value");
-        return cc_err_CCResult_CCJsVal_CCJsError(
+        return cc_err(
             cc__js_err(obj ? obj->env : NULL, "hold"));
     }
     if (cc__js.CreateReference(obj->env, cc__js_val_cur(obj), 1, &ref) != 0)
-        return cc_err_CCResult_CCJsVal_CCJsError(cc__js_err(obj->env, "hold"));
+        return cc_err(cc__js_err(obj->env, "hold"));
     memset(&out, 0, sizeof(out));
     out.env = obj->env;
     out.ref = ref;
-    return cc_ok_CCResult_CCJsVal_CCJsError(out);
+    return cc_ok(out);
 }
 
 /* Idempotent; a borrow (no ref) releases as a no-op. */
@@ -2094,18 +2094,18 @@ static inline void cc_js_close(CCJs *js) {
     js->env = NULL;
 }
 
-static inline CCResult_CCJsVal_CCJsError cc_js_global(CCJs *js) {
+static inline CCJsVal !>(CCJsError) cc_js_global(CCJs *js) {
     void *g = NULL;
     CCJsVal out;
     cc__js_errbuf[0] = 0;
     cc__js_err_arena = js ? js->arena : NULL;
     if (!js || !js->ready || cc__js.GetGlobal(js->env, &g) != 0)
-        return cc_err_CCResult_CCJsVal_CCJsError(
+        return cc_err(
             cc__js_err(js ? js->env : NULL, "global"));
     memset(&out, 0, sizeof(out));
     out.env = js->env;
     out.v = g;
-    return cc_ok_CCResult_CCJsVal_CCJsError(out);
+    return cc_ok(out);
 }
 
 /* Running source text — bootstrap glue, not a call path.  Both run in the
@@ -2117,21 +2117,21 @@ static inline CCResult_CCJsVal_CCJsError cc_js_global(CCJs *js) {
  * `long long v = js->eval(src) !>` extracts directly, the same rule the
  * CCJsVal sink gives `g.parseInt("42")`.  This is the implementation the
  * sink and the typed wrappers share. */
-static inline CCResult_CCJsVal_CCJsError cc__js_eval(CCJs *js, CCSlice src) {
+static inline CCJsVal !>(CCJsError) cc__js_eval(CCJs *js, CCSlice src) {
     void *script = NULL, *r = NULL;
     CCJsVal out;
     cc__js_errbuf[0] = 0;
     cc__js_err_arena = js ? js->arena : NULL;
     if (!js || !js->ready)
-        return cc_err_CCResult_CCJsVal_CCJsError(cc__js_err(NULL, "eval"));
+        return cc_err(cc__js_err(NULL, "eval"));
     if (cc__js.CreateStringUtf8(js->env, src.ptr ? (const char *)src.ptr : "",
                                 src.len, &script) != 0 ||
         cc__js.RunScript(js->env, script, &r) != 0)
-        return cc_err_CCResult_CCJsVal_CCJsError(cc__js_err(js->env, "eval"));
+        return cc_err(cc__js_err(js->env, "eval"));
     memset(&out, 0, sizeof(out));
     out.env = js->env;
     out.v = r;
-    return cc_ok_CCResult_CCJsVal_CCJsError(out);
+    return cc_ok(out);
 }
 
 /* Typed eval — the common "evaluate to a scalar" forms, without the
@@ -2139,44 +2139,44 @@ static inline CCResult_CCJsVal_CCJsError cc__js_eval(CCJs *js, CCSlice src) {
  * one Result.  (A destination-typed `eval` itself — `long long v =
  * js->eval(src) !>` — needs destination-aware resolution of REAL
  * callees, which only dynamic-sink members have today.) */
-static inline CCResult_int64_t_CCJsError cc_js_eval_i64(CCJs *js,
+static inline int64_t !>(CCJsError) cc_js_eval_i64(CCJs *js,
                                                         CCSlice src) {
-    CCResult_CCJsVal_CCJsError r = cc__js_eval(js, src);
+    CCJsVal !>(CCJsError) r = cc__js_eval(js, src);
     long long v = 0;
-    if (!r.ok) return cc_err_CCResult_int64_t_CCJsError(r.u.error);
+    if (!r.ok) return cc_err(r.u.error);
     if (cc__js_inq_ll(r.u.value.env, r.u.value.v, &v) != 0) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                  "js: eval: result is not an integer");
-        return cc_err_CCResult_int64_t_CCJsError(
+        return cc_err(
             cc__js_err(r.u.value.env, "eval"));
     }
-    return cc_ok_CCResult_int64_t_CCJsError((int64_t)v);
+    return cc_ok((int64_t)v);
 }
 
-static inline CCResult_double_CCJsError cc_js_eval_f64(CCJs *js,
+static inline double !>(CCJsError) cc_js_eval_f64(CCJs *js,
                                                        CCSlice src) {
-    CCResult_CCJsVal_CCJsError r = cc__js_eval(js, src);
+    CCJsVal !>(CCJsError) r = cc__js_eval(js, src);
     double v = 0;
-    if (!r.ok) return cc_err_CCResult_double_CCJsError(r.u.error);
+    if (!r.ok) return cc_err(r.u.error);
     if (cc__js_inq_double(&v, r.u.value.env, r.u.value.v) != 0) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                  "js: eval: result is not a number");
-        return cc_err_CCResult_double_CCJsError(
+        return cc_err(
             cc__js_err(r.u.value.env, "eval"));
     }
-    return cc_ok_CCResult_double_CCJsError(v);
+    return cc_ok(v);
 }
 
-static inline CCResult_void_CCJsError cc_js_exec(CCJs *js, CCSlice src) {
-    CCResult_CCJsVal_CCJsError r = cc__js_eval(js, src);
+static inline void !>(CCJsError) cc_js_exec(CCJs *js, CCSlice src) {
+    CCJsVal !>(CCJsError) r = cc__js_eval(js, src);
     if (!r.ok) {
-        CCResult_void_CCJsError e;
+        void !>(CCJsError) e;
         memset(&e, 0, sizeof(e));
         e.ok = false;
         e.u.error = r.u.error;
         return e;
     }
-    return cc_ok_CCResult_void_CCJsError();
+    return cc_ok();
 }
 
 /* Source text accepts a bare string literal: the macro lifts `char *`
@@ -2205,7 +2205,7 @@ static inline CCSlice cc__js_src_cstr(const char *s) {
  * Real members (`exec`, `global`, `eval_i64`, …) win resolution as
  * always; the sink carries the dynamic ones — today that is `eval`.  An
  * unknown member is a loud error naming it, not a silent lookup. */
-static CCResult_CCJsVal_CCJsError cc__js_host_callm_n(CCJs *js,
+static CCJsVal !>(CCJsError) cc__js_host_callm_n(CCJs *js,
                                                       const char *method,
                                                       int argc,
                                                       const CCJsArg *argv) {
@@ -2214,7 +2214,7 @@ static CCResult_CCJsVal_CCJsError cc__js_host_callm_n(CCJs *js,
     if (!js || !js->ready) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                  "js: %s: handle not ready", method ? method : "?");
-        return cc_err_CCResult_CCJsVal_CCJsError(cc__js_err(NULL, method));
+        return cc_err(cc__js_err(NULL, method));
     }
     /* The handle's member set is small and closed, and sink resolution
      * outruns the header-blind snake compose — so every member dispatches
@@ -2234,10 +2234,10 @@ static CCResult_CCJsVal_CCJsError cc__js_host_callm_n(CCJs *js,
              "js: CCJs has no method '%s' (members: eval(src), eval_i64, "
              "eval_f64, exec, global)",
              method ? method : "?");
-    return cc_err_CCResult_CCJsVal_CCJsError(cc__js_err(NULL, method));
+    return cc_err(cc__js_err(NULL, method));
 }
 
-static inline CCResult_CCJsVal_CCJsError cc_js_callm(CCJs *js,
+static inline CCJsVal !>(CCJsError) cc_js_callm(CCJs *js,
                                                      const char *method,
                                                      int argc, ...) {
     CCJsArg tmp[CC__JS_MAX_CALL_ARGS];
@@ -2251,12 +2251,12 @@ static inline CCResult_CCJsVal_CCJsError cc_js_callm(CCJs *js,
     return cc__js_host_callm_n(js, method, argc, tmp);
 }
 
-static inline CCResult_double_CCJsError cc_js_callm_double(
+static inline double !>(CCJsError) cc_js_callm_double(
         CCJs *js, const char *method, int argc, ...) {
     CCJsArg tmp[CC__JS_MAX_CALL_ARGS];
     int i;
     double v = 0;
-    CCResult_CCJsVal_CCJsError r;
+    CCJsVal !>(CCJsError) r;
     va_list ap;
     if (argc < 0) argc = 0;
     if (argc > CC__JS_MAX_CALL_ARGS) argc = CC__JS_MAX_CALL_ARGS;
@@ -2264,22 +2264,22 @@ static inline CCResult_double_CCJsError cc_js_callm_double(
     for (i = 0; i < argc; i++) tmp[i] = va_arg(ap, CCJsArg);
     va_end(ap);
     r = cc__js_host_callm_n(js, method, argc, tmp);
-    if (!r.ok) return cc_err_CCResult_double_CCJsError(r.u.error);
+    if (!r.ok) return cc_err(r.u.error);
     if (cc__js_inq_double(&v, r.u.value.env, r.u.value.v) != 0) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                  "js: %s: result is not a number", method);
-        return cc_err_CCResult_double_CCJsError(
+        return cc_err(
             cc__js_err(r.u.value.env, method));
     }
-    return cc_ok_CCResult_double_CCJsError(v);
+    return cc_ok(v);
 }
 
-static inline CCResult_float_CCJsError cc_js_callm_float(
+static inline float !>(CCJsError) cc_js_callm_float(
         CCJs *js, const char *method, int argc, ...) {
     CCJsArg tmp[CC__JS_MAX_CALL_ARGS];
     int i;
     double v = 0;
-    CCResult_CCJsVal_CCJsError r;
+    CCJsVal !>(CCJsError) r;
     va_list ap;
     if (argc < 0) argc = 0;
     if (argc > CC__JS_MAX_CALL_ARGS) argc = CC__JS_MAX_CALL_ARGS;
@@ -2287,22 +2287,22 @@ static inline CCResult_float_CCJsError cc_js_callm_float(
     for (i = 0; i < argc; i++) tmp[i] = va_arg(ap, CCJsArg);
     va_end(ap);
     r = cc__js_host_callm_n(js, method, argc, tmp);
-    if (!r.ok) return cc_err_CCResult_float_CCJsError(r.u.error);
+    if (!r.ok) return cc_err(r.u.error);
     if (cc__js_inq_double(&v, r.u.value.env, r.u.value.v) != 0) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                  "js: %s: result is not a number", method);
-        return cc_err_CCResult_float_CCJsError(
+        return cc_err(
             cc__js_err(r.u.value.env, method));
     }
-    return cc_ok_CCResult_float_CCJsError((float)v);
+    return cc_ok((float)v);
 }
 
-static inline CCResult_int64_t_CCJsError cc_js_callm_int64_t(
+static inline int64_t !>(CCJsError) cc_js_callm_int64_t(
         CCJs *js, const char *method, int argc, ...) {
     CCJsArg tmp[CC__JS_MAX_CALL_ARGS];
     int i, rc;
     long long v = 0;
-    CCResult_CCJsVal_CCJsError r;
+    CCJsVal !>(CCJsError) r;
     va_list ap;
     if (argc < 0) argc = 0;
     if (argc > CC__JS_MAX_CALL_ARGS) argc = CC__JS_MAX_CALL_ARGS;
@@ -2310,25 +2310,25 @@ static inline CCResult_int64_t_CCJsError cc_js_callm_int64_t(
     for (i = 0; i < argc; i++) tmp[i] = va_arg(ap, CCJsArg);
     va_end(ap);
     r = cc__js_host_callm_n(js, method, argc, tmp);
-    if (!r.ok) return cc_err_CCResult_int64_t_CCJsError(r.u.error);
+    if (!r.ok) return cc_err(r.u.error);
     rc = cc__js_inq_ll(r.u.value.env, r.u.value.v, &v);
     if (rc != 0) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                  rc == -2 ? "js: %s: result out of range"
                           : "js: %s: result is not an integer",
                  method);
-        return cc_err_CCResult_int64_t_CCJsError(
+        return cc_err(
             cc__js_err(r.u.value.env, method));
     }
-    return cc_ok_CCResult_int64_t_CCJsError((int64_t)v);
+    return cc_ok((int64_t)v);
 }
 
-static inline CCResult_long_long_CCJsError cc_js_callm_long_long(
+static inline long long !>(CCJsError) cc_js_callm_long_long(
         CCJs *js, const char *method, int argc, ...) {
     CCJsArg tmp[CC__JS_MAX_CALL_ARGS];
     int i, rc;
     long long v = 0;
-    CCResult_CCJsVal_CCJsError r;
+    CCJsVal !>(CCJsError) r;
     va_list ap;
     if (argc < 0) argc = 0;
     if (argc > CC__JS_MAX_CALL_ARGS) argc = CC__JS_MAX_CALL_ARGS;
@@ -2336,25 +2336,25 @@ static inline CCResult_long_long_CCJsError cc_js_callm_long_long(
     for (i = 0; i < argc; i++) tmp[i] = va_arg(ap, CCJsArg);
     va_end(ap);
     r = cc__js_host_callm_n(js, method, argc, tmp);
-    if (!r.ok) return cc_err_CCResult_long_long_CCJsError(r.u.error);
+    if (!r.ok) return cc_err(r.u.error);
     rc = cc__js_inq_ll(r.u.value.env, r.u.value.v, &v);
     if (rc != 0) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                  rc == -2 ? "js: %s: result out of range"
                           : "js: %s: result is not an integer",
                  method);
-        return cc_err_CCResult_long_long_CCJsError(
+        return cc_err(
             cc__js_err(r.u.value.env, method));
     }
-    return cc_ok_CCResult_long_long_CCJsError((long long)v);
+    return cc_ok((long long)v);
 }
 
-static inline CCResult_int_CCJsError cc_js_callm_int(
+static inline int !>(CCJsError) cc_js_callm_int(
         CCJs *js, const char *method, int argc, ...) {
     CCJsArg tmp[CC__JS_MAX_CALL_ARGS];
     int i, rc;
     long long v = 0;
-    CCResult_CCJsVal_CCJsError r;
+    CCJsVal !>(CCJsError) r;
     va_list ap;
     if (argc < 0) argc = 0;
     if (argc > CC__JS_MAX_CALL_ARGS) argc = CC__JS_MAX_CALL_ARGS;
@@ -2362,15 +2362,15 @@ static inline CCResult_int_CCJsError cc_js_callm_int(
     for (i = 0; i < argc; i++) tmp[i] = va_arg(ap, CCJsArg);
     va_end(ap);
     r = cc__js_host_callm_n(js, method, argc, tmp);
-    if (!r.ok) return cc_err_CCResult_int_CCJsError(r.u.error);
+    if (!r.ok) return cc_err(r.u.error);
     rc = cc__js_inq_ll(r.u.value.env, r.u.value.v, &v);
     if (rc != 0 || v < INT_MIN || v > INT_MAX) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                  "js: %s: result out of range for int destination", method);
-        return cc_err_CCResult_int_CCJsError(
+        return cc_err(
             cc__js_err(r.u.value.env, method));
     }
-    return cc_ok_CCResult_int_CCJsError((int)v);
+    return cc_ok((int)v);
 }
 
 /* A CCJsVal return hands back the value it names (held values deref). */
@@ -3172,23 +3172,23 @@ typedef struct CCJsHost {
 CC_DECL_RESULT_SPEC(CCResult_CCJsHost_CCJsError, CCJsHost, CCJsError)
 #endif
 
-static CCResult_void_CCJsError cc__js_host_err(void) {
-    CCResult_void_CCJsError e;
+static void !>(CCJsError) cc__js_host_err(void) {
+    void !>(CCJsError) e;
     memset(&e, 0, sizeof(e));
     e.ok = false;
     e.u.error = cc__js_err(NULL, "host");
     return e;
 }
 
-static CCResult_CCJsHost_CCJsError cc__js_host_errh(void) {
-    CCResult_CCJsHost_CCJsError e;
+static CCJsHost !>(CCJsError) cc__js_host_errh(void) {
+    CCJsHost !>(CCJsError) e;
     memset(&e, 0, sizeof(e));
     e.ok = false;
     e.u.error = cc__js_err(NULL, "host");
     return e;
 }
 
-static inline CCResult_CCJsHost_CCJsError cc_js_host_new(CCArena *arena) {
+static inline CCJsHost !>(CCJsError) cc_js_host_new(CCArena *arena) {
     char shim_so[448], probe_node[448], why[380];
     void *h;
     CCJsHost out;
@@ -3253,7 +3253,7 @@ static inline CCResult_CCJsHost_CCJsError cc_js_host_new(CCArena *arena) {
     memset(&out, 0, sizeof(out));
     out.open = 1;
     out.arena = arena;
-    return cc_ok_CCResult_CCJsHost_CCJsError(out);
+    return cc_ok(out);
 }
 
 typedef struct CC__JsHostThunk {
@@ -3271,7 +3271,7 @@ static void cc__js_host_tramp(void *env, void *data) {
     t->fn(&js, t->ctx);
 }
 
-static inline CCResult_void_CCJsError
+static inline void !>(CCJsError)
 cc_js_host_run(CCJsHost *host, void (*fn)(CCJs *js, void *ctx), void *ctx) {
     CC__JsHostThunk t;
     cc__js_errbuf[0] = 0;
@@ -3294,7 +3294,7 @@ cc_js_host_run(CCJsHost *host, void (*fn)(CCJs *js, void *ctx), void *ctx) {
                  "js: run: host is stopping");
         return cc__js_host_err();
     }
-    return cc_ok_CCResult_void_CCJsError();
+    return cc_ok();
 }
 
 /* The @destroy hook; idempotent.  Values held from the torn-down

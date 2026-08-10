@@ -11,7 +11,7 @@
  *   cc_select_add_readable(&sel, &client,
  *                          () => [&env] { ... handler body ... });
  *   while (keep_going) {
- *       CCResult_bool_CCIoError r = cc_select_wait(&sel);
+ *       bool !>(CCIoError) r = cc_select_wait(&sel);
  *       if (!r.ok) break;
  *       keep_going = r.u.value;
  *   }
@@ -143,7 +143,7 @@ static inline int cc__select_add_close_rx(CCSelect* sel, CCChanRx rx, CCIoError*
  *   - Ok(false) if handler returned zero
  *   - Err(e)    on runtime-level failure (no handler invoked)
  * Re-entrant: may be called many times on the same sel. */
-CCResult_bool_CCIoError cc_select_wait(CCSelect* sel);
+bool !>(CCIoError) cc_select_wait(CCSelect* sel);
 
 #ifdef CC_COMPTIME_SCAN
 @comptime {

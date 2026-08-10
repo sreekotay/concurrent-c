@@ -17,27 +17,25 @@
  * Run program with one argument; fail if exit status != 0.
  * Empty `arg` omits the argument. Arena is last.
  */
-static inline CCResult_int_CCError cc_sh_run(CCSlice program,
+static inline int !>(CCError) cc_sh_run(CCSlice program,
                                             CCSlice arg,
                                             CCArena *arena) {
     CCCommand cmd;
-    CCResult_int_CCIoError st;
+    int !>(CCIoError) st;
     if (!program.ptr || !arena) {
-        return cc_err_CCResult_int_CCError(
-            CC_ERROR(CC_ERR_INVALID_ARG, "cc_sh_run: bad args"));
+        return cc_err(CC_ERR_INVALID_ARG, "cc_sh_run: bad args");
     }
     cmd = cc_command(arena, program);
     if (arg.ptr && arg.len) (void)cc_command_arg_slice(&cmd, arg);
     st = cc_command_status(&cmd);
     if (cc_is_err(st)) {
-        return cc_err_CCResult_int_CCError(
+        return cc_err(
             CC_ERROR(CC_ERR_IO, cc_io_error_str(cc_error(st))));
     }
     if (cc_value(st) != 0) {
-        return cc_err_CCResult_int_CCError(
-            CC_ERROR(CC_ERR_IO, "cc_sh_run: non-zero exit"));
+        return cc_err(CC_ERR_IO, "cc_sh_run: non-zero exit");
     }
-    return cc_ok_CCResult_int_CCError(cc_value(st));
+    return cc_ok(cc_value(st));
 }
 
 static inline void cc__script_forward_args(CCCommand *cmd, int argc, char **argv) {
@@ -49,7 +47,7 @@ static inline void cc__script_forward_args(CCCommand *cmd, int argc, char **argv
 }
 
 static inline int cc__script_status_or_fail(CCCommand *cmd, const char *label) {
-    CCResult_int_CCIoError st;
+    int !>(CCIoError) st;
     if (!cmd || !label) return 1;
     st = cc_command_status(cmd);
     if (cc_is_err(st)) {
@@ -66,7 +64,7 @@ static inline int cc__script_status_or_fail(CCCommand *cmd, const char *label) {
  */
 static inline int cc_script_task_exe(int argc, char **argv, const char *rel_exe) {
     CCArena a;
-    CCResult_CCSlice_CCError root_r;
+    CCSlice !>(CCError) root_r;
     CCSlice root, exe;
     CCCommand cmd;
     int rc;
@@ -122,7 +120,7 @@ static inline CCSlice cc__script_shcc_stem(const char *rel_tool, CCArena *arena)
 }
 static inline int cc_script_task_shcc(int argc, char **argv, const char *rel_tool) {
     CCArena a;
-    CCResult_CCSlice_CCError root_r;
+    CCSlice !>(CCError) root_r;
     CCSlice root, ccc, stem, bin, bin_rel;
     CCCommand build, run;
     int rc;

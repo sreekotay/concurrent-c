@@ -73,7 +73,7 @@ CC_DECL_RESULT_SPEC(CCResult_int_CCIoError, int, CCIoError)
  *   CCProcessConfig cfg = {.program = "ls", .args = args, .pipe_stdout = true};
  *   CCProcess proc = cc_process_spawn(&cfg) !>(e) return cc_err(e);
  */
-CCResult_CCProcess_CCIoError cc_process_spawn(const CCProcessConfig* config);
+CCProcess !>(CCIoError) cc_process_spawn(const CCProcessConfig* config);
 
 /*
  * Spawn a simple command (no pipes, inherit environment).
@@ -82,7 +82,7 @@ CCResult_CCProcess_CCIoError cc_process_spawn(const CCProcessConfig* config);
  * Example:
  *   CCProcess proc = cc_process_spawn_simple("ls", (const char*[]){"ls", "-la", NULL}) !>(e) return cc_err(e);
  */
-CCResult_CCProcess_CCIoError cc_process_spawn_simple(const char* program, const char** args);
+CCProcess !>(CCIoError) cc_process_spawn_simple(const char* program, const char** args);
 
 /*
  * Spawn a shell command (via /bin/sh -c on POSIX, cmd /c on Windows).
@@ -91,7 +91,7 @@ CCResult_CCProcess_CCIoError cc_process_spawn_simple(const char* program, const 
  * Example:
  *   CCProcess proc = cc_process_spawn_shell("ls -la | grep foo") !>(e) return cc_err(e);
  */
-CCResult_CCProcess_CCIoError cc_process_spawn_shell(const char* command);
+CCProcess !>(CCIoError) cc_process_spawn_shell(const char* command);
 
 /* ============================================================================
  * Process Management
@@ -101,31 +101,31 @@ CCResult_CCProcess_CCIoError cc_process_spawn_shell(const char* command);
  * Wait for process to exit (blocking).
  * Returns exit status.
  */
-CCResult_CCProcessStatus_CCIoError cc_process_wait(CCProcess* proc);
+CCProcessStatus !>(CCIoError) cc_process_wait(CCProcess* proc);
 
 /*
  * Check if process has exited (non-blocking).
  * Returns status if exited, or error with CC_IO_BUSY if still running.
  */
-CCResult_CCProcessStatus_CCIoError cc_process_try_wait(CCProcess* proc);
+CCProcessStatus !>(CCIoError) cc_process_try_wait(CCProcess* proc);
 
 /*
  * Wait for process to exit with a timeout in milliseconds.
  * Returns CC_IO_OTHER with ETIMEDOUT when the deadline passes.
  */
-CCResult_CCProcessStatus_CCIoError cc_process_wait_timeout_ms(CCProcess* proc, int64_t timeout_ms);
+CCProcessStatus !>(CCIoError) cc_process_wait_timeout_ms(CCProcess* proc, int64_t timeout_ms);
 
 /*
  * Wait for process to exit with a timeout in seconds.
  * Returns CC_IO_OTHER with ETIMEDOUT when the deadline passes.
  */
-CCResult_CCProcessStatus_CCIoError cc_process_wait_timeout(CCProcess* proc, int timeout_sec);
+CCProcessStatus !>(CCIoError) cc_process_wait_timeout(CCProcess* proc, int timeout_sec);
 
 /*
  * Send signal to process (POSIX: signal number, Windows: TerminateProcess for SIGKILL/SIGTERM).
  * Common signals: SIGTERM (15), SIGKILL (9), SIGINT (2)
  */
-CCResult_bool_CCIoError cc_process_kill(CCProcess* proc, int signal);
+bool !>(CCIoError) cc_process_kill(CCProcess* proc, int signal);
 
 /*
  * Get process ID.
@@ -147,21 +147,21 @@ static inline int cc_process_id(const CCProcess* proc) {
  * Write to process stdin.
  * Requires pipe_stdin = true in config.
  */
-CCResult_size_t_CCIoError cc_process_write(CCProcess* proc, CCSlice data);
+size_t !>(CCIoError) cc_process_write(CCProcess* proc, CCSlice data);
 
 /*
  * Read from process stdout.
  * Requires pipe_stdout = true in config.
  * Allocates result in arena.
  */
-CCResult_CCSlice_CCIoError cc_process_read(CCProcess* proc, CCArena* arena, size_t max_bytes);
+CCSlice !>(CCIoError) cc_process_read(CCProcess* proc, CCArena* arena, size_t max_bytes);
 
 /*
  * Read from process stderr.
  * Requires pipe_stderr = true in config.
  * Allocates result in arena.
  */
-CCResult_CCSlice_CCIoError cc_process_read_stderr(CCProcess* proc, CCArena* arena, size_t max_bytes);
+CCSlice !>(CCIoError) cc_process_read_stderr(CCProcess* proc, CCArena* arena, size_t max_bytes);
 
 /*
  * Close stdin pipe (signals EOF to child).
@@ -172,13 +172,13 @@ void cc_process_close_stdin(CCProcess* proc);
  * Read all stdout until EOF.
  * Allocates result in arena.
  */
-CCResult_CCSlice_CCIoError cc_process_read_all(CCProcess* proc, CCArena* arena);
+CCSlice !>(CCIoError) cc_process_read_all(CCProcess* proc, CCArena* arena);
 
 /*
  * Read all stderr until EOF.
  * Allocates result in arena.
  */
-CCResult_CCSlice_CCIoError cc_process_read_all_stderr(CCProcess* proc, CCArena* arena);
+CCSlice !>(CCIoError) cc_process_read_all_stderr(CCProcess* proc, CCArena* arena);
 
 /* ============================================================================
  * Convenience: Run and Capture
@@ -234,13 +234,13 @@ CC_DECL_RESULT_SPEC(CCResult_CCProcessOutput_CCIoError, CCProcessOutput, CCIoErr
  * Run a process using an explicit spawn configuration and capture any piped
  * stdout/stderr streams into the provided arena.
  */
-CCResult_CCProcessOutput_CCIoError cc_process_run_config(CCArena* arena, const CCProcessConfig* config);
+CCProcessOutput !>(CCIoError) cc_process_run_config(CCArena* arena, const CCProcessConfig* config);
 
 /*
  * Like cc_process_run_config(), but also writes the provided stdin input and
  * closes the child's stdin before waiting for exit.
  */
-CCResult_CCProcessOutput_CCIoError cc_process_run_with_input(CCArena* arena,
+CCProcessOutput !>(CCIoError) cc_process_run_with_input(CCArena* arena,
                                                              const CCProcessConfig* config,
                                                              CCSlice input);
 
@@ -253,7 +253,7 @@ CCResult_CCProcessOutput_CCIoError cc_process_run_with_input(CCArena* arena,
  *   printf("stdout: %.*s\n", (int)out.stdout_data.len, out.stdout_data.ptr);
  *   printf("exit: %d\n", out.status.exit_code);
  */
-CCResult_CCProcessOutput_CCIoError cc_process_run(CCArena* arena, const char* program, const char** args);
+CCProcessOutput !>(CCIoError) cc_process_run(CCArena* arena, const char* program, const char** args);
 
 /*
  * Run shell command and capture output.
@@ -261,7 +261,7 @@ CCResult_CCProcessOutput_CCIoError cc_process_run(CCArena* arena, const char* pr
  * Example:
  *   CCProcessOutput out = cc_process_run_shell(arena, "ls -la | wc -l") !>(e) return cc_err(e);
  */
-CCResult_CCProcessOutput_CCIoError cc_process_run_shell(CCArena* arena, const char* command);
+CCProcessOutput !>(CCIoError) cc_process_run_shell(CCArena* arena, const char* command);
 
 /* ============================================================================
  * Environment
@@ -277,11 +277,11 @@ CCSlice cc_env_get(CCArena* arena, const char* name);
 /*
  * Set environment variable for current process.
  */
-CCResult_bool_CCIoError cc_env_set(const char* name, const char* value);
+bool !>(CCIoError) cc_env_set(const char* name, const char* value);
 
 /*
  * Unset environment variable for current process.
  */
-CCResult_bool_CCIoError cc_env_unset(const char* name);
+bool !>(CCIoError) cc_env_unset(const char* name);
 
 #endif /* CC_STD_PROCESS_H */
