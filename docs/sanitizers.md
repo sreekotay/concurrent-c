@@ -91,6 +91,8 @@ docker run --rm -v "$PWD":/src:ro -w /src node:20-bookworm bash -lc '
 
 Prefer a **fresh** `ccc build` of `cc_python.ccs` on Linux when available;
 the vendored C in `npm/cc-python/vendor/` may lag `cc/shadow` HEAD.
+`scripts/sanitize_bridge.sh` emits that vendor tree on the host when missing
+(CI checkouts never ship it; the Docker mount is read-only).
 
 TSan on the addon is lower priority than ASan (lease / teardown UAF);
 Node + libpython under TSan is noisy. Prefer ASan first.

@@ -29,6 +29,39 @@ fi
 
 host_ts() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
 echo "[$(host_ts)] sanitize_bridge: mode=$MODE image=$IMAGE timeout=${SUITE_TIMEOUT}s heartbeat=${HEARTBEAT_SECS}s"
+
+# Vendor C is regenerate-only (prepare-publish / local). CI checkouts lack it,
+# and the container mounts the repo RO — emit on the host before docker.
+ensure_vendor() {
+  local need=0
+  if [ ! -f npm/cc-python/vendor/cc_python.c ]; then need=1; fi
+  if [ ! -d npm/cc-python/vendor/include ]; then need=1; fi
+  if [ ! -d npm/cc-python/vendor/runtime ]; then need=1; fi
+  if [ "$need" -eq 0 ]; then
+    echo "[$(host_ts)] vendor tree present — skip emit"
+    return 0
+  fi
+  echo "[$(host_ts)] preparing npm/cc-python/vendor (emit + includes)…"
+  if [ ! -f third_party/tcc/configure ]; then
+    git submodule update --init third_party/tcc
+    if [ ! -f third_party/tcc/configure ]; then
+      git submodule update --checkout --force third_party/tcc
+    fi
+  fi
+  if [ ! -x ./cc/bin/ccc ] && [ ! -x ./cc/bin/.ccc-bin ]; then
+    make -C cc -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+  fi
+  mkdir -p npm/cc-python/vendor
+  ./cc/bin/ccc build --emit-c-only npm/cc-python/src/cc_python.ccs \
+    -o npm/cc-python/vendor/cc_python.c
+  rm -rf npm/cc-python/vendor/include npm/cc-python/vendor/runtime
+  cp -rL out/include npm/cc-python/vendor/include
+  cp -rL out/runtime npm/cc-python/vendor/runtime
+  cp -rL cc/include/ccc/vendor npm/cc-python/vendor/include/ccc/vendor
+  echo "[$(host_ts)] vendor ready"
+}
+ensure_vendor
+
 echo "[$(host_ts)] starting docker (first image pull can take a minute)…"
 
 INNER=$(mktemp)
