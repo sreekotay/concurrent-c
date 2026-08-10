@@ -50,9 +50,17 @@ cc "$TMP/tu.o" "$TMP/rt.o" -shared -o "$TMP/probe.node" -lpthread -lm -ldl \
    $LINK_EXTRA
 CC_PYTHON_ADDON="$TMP/probe.node" node -e '
 const py = require(process.cwd() + "/npm/cc-python").create();
-if (py.import("math").sqrt(16) !== 4) throw new Error("probe failed");
+if (py.import("math").sqrt(16) !== 4) throw new Error("probe: call failed");
+if (py.import("string").capwords("hello world") !== "Hello World")
+  throw new Error("probe: marshal failed");
+let threw = false;
+try { py.import("math").sqrt(-1); } catch (e) { threw = /domain/.test(e.message); }
+if (!threw) throw new Error("probe: python error did not cross");
 py.destroy();
-console.log("   fallback addon works");'
+let closed = false;
+try { py.import("math"); } catch (e) { closed = /closed/.test(e.message); }
+if (!closed) throw new Error("probe: destroyed bridge still answers");
+console.log("   fallback addon works (call, marshal, errors, lifetime)");'
 rm -rf "$TMP"
 
 echo "== pack"

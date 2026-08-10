@@ -80,10 +80,16 @@ needs libnode-dev, first use compiles a small cached shim; macOS
 Homebrew ships `node.h` but not libnode, so hosted returns
 `libnode not found` — use isolated there);
 **isolated** (`true`) spawns a `node` child per handle on the
-`concurrent-c-node` wire (~170µs/hop; N domains, separate heaps, crash
+`concurrent-c-node` wire (~100-170µs/hop; N domains, separate heaps, crash
 isolation; needs only `node` on PATH).  Same ops, same materialization
 rules either way; `require` resolves against the working directory in
 both, so `npm install` next to your program is the whole setup.
+
+The wire lives on dedicated fds with id-paired replies — stdio stays
+the user's, so `console.log` in evaluated code reaches the real stdout
+and can never collide with (or forge) a protocol reply.  Isolated is
+crash isolation, not a security sandbox: the child inherits your
+environment and privileges — do not run untrusted code through it.
 
 ```sh
 ccc examples/js/jsdemo.shcc               # hosted when libnode exists, else isolated
@@ -257,7 +263,7 @@ can export it to Python and Node — the reflection only looks at the
 | call *into JS* from CC (guest) | [`jsdemo.shcc`](../examples/js/jsdemo.shcc) (Node owns env; same UFCS) | napi trampoline |
 | *your* C/CC compute in JS or Python | **module export** (below) | 40-94ns |
 | any *Python package* from Node, in-process | `npm i concurrent-c-python` | ~5µs sync, zero-copy buffers |
-| N×numpy, crash isolation, per-domain venvs | `concurrent-c-python` isolated domains | ~125µs RTT, shm bulk |
+| N×numpy, crash isolation, per-domain venvs | `concurrent-c-python` isolated domains | ~100µs RTT, shm bulk |
 | any *npm package* from Python | `pip install concurrent-c-node` | ~300µs RTT, shm bulk |
 
 **Hosting / call-out demos:** [`examples/py/pydemo.shcc`](../examples/py/pydemo.shcc)
@@ -313,8 +319,8 @@ catalogued in [`perf/baselines/README.md`](../perf/baselines/README.md):
 | crossing | cost |
 |---|---|
 | spawn + import numpy | ~100-440ms (warm/cold) |
-| wire round trip | ~125µs |
-| 8MB argument, shm spill | 6.6ms (base64 wire before it: 153ms — 23x) |
+| wire round trip | ~100µs |
+| 8MB argument, shm spill | 6.4ms (base64 wire before it: 153ms — 24x) |
 | 4 domains, same numpy workload | 2-4x vs one (3.97x at the box's quietest) |
 
 **`concurrent-c-node`** (any npm package from Python):
@@ -322,9 +328,9 @@ catalogued in [`perf/baselines/README.md`](../perf/baselines/README.md):
 | crossing | cost |
 |---|---|
 | spawn a node child | 28ms |
-| wire round trip | 116µs |
-| Python-callback round trip (JS → Python → JS) | 238µs |
-| 8MB `array('d')` argument, shm spill | 9.2ms (as a JSON list: 583ms — 63x) |
+| wire round trip | 105µs |
+| Python-callback round trip (JS → Python → JS) | 153µs |
+| 8MB `array('d')` argument, shm spill | 9.5ms (as a JSON list: 499ms — 52x) |
 
 The gradient is the point: **ns** when the code is yours (a module),
 **µs** in-process when the package is Python's, **~100µs + shm** when

@@ -29,7 +29,7 @@ dependencies, nothing to build.  The domain **is** a spawned `node`
 child (~28ms to first call), so you get real Node: full stdlib, native
 addons, whatever npm installs.  Promise-based APIs look synchronous
 from Python, and bulk data crosses through **shared memory** — an 8MB
-array in **9ms** where the same values as a JSON list take 583ms.
+array in **9.5ms** where the same values as a JSON list take 499ms.
 
 ```
 pip install concurrent-c-node   # needs node on PATH (or point at one)
@@ -49,7 +49,7 @@ Import stays `import cc_node`. Examples ship in the wheel. The mirror of
 - **The domain rules hold**: handles never cross bridges; `stats()` is
   the handle ledger and `release()` drops one early; `destroy()` is
   idempotent, every door answers `bridge is closed` after, and the
-  child dies with the bridge (and on host exit, via stdin EOF).
+  child dies with the bridge (and on host exit, via wire-fd EOF).
   Teardown is **cooperative** (farewell `close` + drain, then wait /
   kill-fallback): in-flight calls may still return a correct value.
   There is no clean cancel of CPU-bound JS work — wait, or kill the
@@ -136,21 +136,30 @@ From the Concurrent-C repo root (packs this wheel and the npm sibling):
 From `python -m cc_node.examples.bench_wire` (sources under
 [`cc_node/examples/`](https://github.com/sreekotay/concurrent-c/blob/main/pypi/cc-node/cc_node/examples/))
 on a 4-vCPU x86-64 box, node 22 / python 3.11
-([`perf/baselines/cc_node_bridge_py_20260809.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/cc_node_bridge_py_20260809.txt);
+([`perf/baselines/cc_node_bridge_py_20260810.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/cc_node_bridge_py_20260810.txt);
 catalog: [`perf/baselines/README.md`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/README.md)):
 
 | what | result |
 |---|---|
 | spawn a domain (node child, first eval) | 28ms |
-| wire round trip (smallest call) | 116µs |
-| Python-callback round trip (JS → Python → JS) | 238µs |
-| 8MB `array('d')` argument, shm spill | **9.2ms** |
-| the same 8MB as a JSON list | 583ms — the spill is **63x** |
+| wire round trip (smallest call) | 105µs |
+| Python-callback round trip (JS → Python → JS) | 153µs |
+| 8MB `array('d')` argument, shm spill | **9.5ms** |
+| the same 8MB as a JSON list | 499ms — the spill is **52x** |
 
-The wire is strict request/response JSON over stdio with the
-shared-memory spill for bulk data — the same discipline concurrent-c-python's
-isolated domains speak, mirrored.  True pinned zero-copy leases remain
-future work.
+The wire is strict request/response JSON on dedicated fds — replies
+pair by request id, and stdio stays yours, so `console.log` in
+evaluated JS reaches the real stdout and can never collide with a
+protocol reply — with the shared-memory spill for bulk data (private
+0700 per-bridge directory, 0600 exclusive-create files, removed with
+the bridge).  The same discipline concurrent-c-python's isolated
+domains speak, mirrored.  True pinned zero-copy leases remain future
+work.
+
+One boundary, stated plainly: the domain is **crash isolation, not a
+security sandbox** — the node child inherits your environment and runs
+with your OS privileges, so do not run untrusted JavaScript through
+it.
 
 A worked tour (builtin Node modules, chains, callbacks, thenables,
 buffers — no npm install needed):

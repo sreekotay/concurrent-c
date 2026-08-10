@@ -1,0 +1,17 @@
+# npm/cc-python/examples/js_numpy_bridge.js snapshot
+# date: 2026-08-10T03:16:35Z
+# host: Linux 6.18.5-fc-v20 x86_64
+# cc:   6326b21
+#
+numpy 2.5.1
+RESULT bridge_dot_1m ms 9.623 ns/call 192450
+RESULT js_loop_dot_1m ms 61.886 ns/call 1237726
+RESULT speedup_vs_js_loop x 6.43
+RESULT bridge_sum_1m ms 21.019 ns/call 420371
+RESULT bridge_std_1m ms 40.220 ns/call 2010983
+RESULT bridge_dot_16 ms 87.677 ns/call 4384
+RESULT lane_dot_16_await_each ms 115.685 ns/call 57842
+RESULT lane_dot_16_pipelined ms 22.557 ns/call 11278
+RESULT lane_dot_1m ms 12.938 ns/call 258753
+RESULT live_handles n 4
+done

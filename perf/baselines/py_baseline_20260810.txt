@@ -1,0 +1,68 @@
+# perf/py_baseline.ccs snapshot
+# date: 2026-08-10T03:15:10Z
+# host: Linux 6.18.5-fc-v20 x86_64
+# cc:   6326b21
+# note: host visibly slower than the 20260809 capture — the pure-
+#       Python/JS control loops moved ~2-3x with everything else
+#       (shared 4-vCPU box; judge by ratios, per the catalog).
+#
+py_baseline iters=300000 n=1000000 samples=7 python=3.13.12 numpy 2.5.1
+
+scalar (one add / one mul-add per call):
+  c_native            0.13 ms        0.4 ns/call
+RESULT scalar c_native ns_per_call 0.4
+  py_inline          21.24 ms       70.8 ns/call
+RESULT scalar py_inline ns_per_call 70.8
+  py_call            27.52 ms       91.7 ns/call
+RESULT scalar py_call ns_per_call 91.7
+  py_to_cc           28.15 ms       93.8 ns/call
+RESULT scalar py_to_cc ns_per_call 93.8
+  py_to_cc_attr      29.74 ms       99.1 ns/call
+RESULT scalar py_to_cc_attr ns_per_call 99.1
+  cc_to_py_0          2.88 ms       96.0 ns/call
+RESULT scalar cc_to_py_0 ns_per_call 96.0
+  cc_to_py_1          4.11 ms      137.0 ns/call
+RESULT scalar cc_to_py_1 ns_per_call 137.0
+  cc_to_py_3          7.47 ms      249.0 ns/call
+RESULT scalar cc_to_py_3 ns_per_call 249.0
+  py_to_py            3.54 ms      117.9 ns/call
+RESULT scalar py_to_py ns_per_call 117.9
+
+rows (30000 rows of (f64, i64, f64)):
+  row_per_call        7.06 ms      235.4 ns/row
+RESULT vector row_per_call ns_per_row 235.4
+  row_map             3.91 ms      130.5 ns/row
+RESULT vector row_map ns_per_row 130.5
+  row_py              2.64 ms       87.9 ns/row
+RESULT vector row_py ns_per_row 87.9
+  batching: map vs per-call 1.80x, map vs native rows 0.67x
+RESULT ratio map_vs_per_call x 1.80
+RESULT ratio map_vs_row_py x 0.67
+
+bulk (1000000 doubles):
+  cc_sum              0.74 ms
+RESULT bulk cc_sum ms 0.74
+  numpy_sum           0.37 ms
+RESULT bulk numpy_sum ms 0.37
+  py_sum              4.09 ms
+RESULT bulk py_sum ms 4.09
+  send_list          74.41 ms
+RESULT bulk send_list ms 74.41
+  send_buf            0.39 ms
+RESULT bulk send_buf ms 0.39
+  recv_buf            0.63 ms
+RESULT bulk recv_buf ms 0.63
+  recv_list           8.87 ms
+RESULT bulk recv_list ms 8.87
+
+ratios (native control = 1.0):
+  py_to_cc  / py_call     1.02x   crossing into CC vs a Python call
+  py_to_cc_attr/py_to_cc  1.06x   the per-call attribute lookup
+  cc_to_py_3 / py_to_py   2.11x   crossing out of CC vs a Python call
+  py_inline / c_native   162.5x   the two floors
+  send_list / send_buf     189x   what py_buf removes (outbound)
+  recv_list / recv_buf      14x   what the buffer probe removes (inbound)
+RESULT ratio py_to_cc_vs_py_call x 1.02
+RESULT ratio cc_to_py_vs_py_to_py x 2.11
+
+agree=249750000.0 sink=1282077615000

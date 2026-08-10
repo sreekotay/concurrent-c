@@ -58,6 +58,7 @@ Default ops: quick 200 / full 800 / soak 2000 (`FUZZ_OPS` overrides).
 
 | Mode | Status | What it hammers |
 |------|--------|-----------------|
+| `wire_integrity` | green, smoke | User `print()` shaped like a bridge reply (with and without a forged id) cannot steal a response or shift pairing |
 | `crash_storm` | green, numpy | Isolated children `_exit` mid-flight; survivors + parent stay healthy |
 | `domain_fanout` | green | Many isolated domains answering at once |
 | `shm_hail` | green, numpy | Concurrent large TypedArray / spill traffic |

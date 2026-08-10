@@ -1,0 +1,12 @@
+# npm/cc-python/examples/js_multiprocess_numpy.js snapshot
+# date: 2026-08-10T03:15:04Z
+# host: Linux 6.18.5-fc-v20 x86_64
+# cc:   6326b21
+#
+RESULT spawn_plus_numpy_ms 109
+RESULT wire_rtt_us 98
+RESULT bulk_8mb_arg_ms 6.4
+RESULT domains_1 ms 233 speedup x 1.00
+RESULT domains_2 ms 149 speedup x 1.56
+RESULT domains_4 ms 105 speedup x 2.22
+done

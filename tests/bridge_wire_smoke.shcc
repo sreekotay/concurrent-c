@@ -1,0 +1,33 @@
+/* The isolated wires live on dedicated fds (3 requests / 4 replies;
+ * stdio stays the user's) and pair replies to requests by id — user
+ * code printing a line that parses as JSON (even one shaped exactly
+ * like a bridge reply) cannot steal an in-flight response or shift
+ * later replies onto the wrong promises, and ordinary prints reach
+ * the real stdout.  Rungs live in tests/bridge_wire.js
+ * (npm/cc-python) and tests/bridge_wire.py (pypi/cc-node). */
+CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+
+{
+    CCCommand which = cc_command(&a, @slice("sh"));
+    which.arg("-c");
+    which.arg("command -v node >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1");
+    int rc = which.status() !>;
+    if (rc != 0) { "SKIP (need node + python3)".println() !>; return 0; }
+}
+
+{
+    CCCommand run = cc_command(&a, @slice("node"));
+    run.arg("tests/bridge_wire.js");
+    run.inherit_stdio();
+    int rc = run.status() !>;
+    if (rc != 0) { "bridge wire js suite failed".println() !>; return 1; }
+}
+
+{
+    CCCommand run = cc_command(&a, @slice("python3"));
+    run.arg("tests/bridge_wire.py");
+    run.inherit_stdio();
+    int rc = run.status() !>;
+    if (rc != 0) { "bridge wire py suite failed".println() !>; return 1; }
+}
+return 0;

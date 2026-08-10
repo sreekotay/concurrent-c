@@ -1,12 +1,17 @@
 # cc-python isolated-domain broker: a FULL CPython per domain, speaking
-# line-JSON on stdio — the same wire discipline as cc-node's broker.cjs,
-# mirrored.  Dependency-free (stdlib only); numpy is the USER's, imported
-# on request like any module.
+# line-JSON on dedicated wire fds (3 in / 4 out; stdio stays the
+# user's) — the same wire discipline as cc-node's broker.cjs, mirrored.
+# Dependency-free (stdlib only); numpy is the USER's, imported on
+# request like any module.
 #
-# Protocol (one JSON object per line, strict request/response):
+# Protocol (one JSON object per line; every request carries "id":n and
+# the reply echoes it — the parent pairs replies by id, never by order,
+# so a stray line on the channel can only be ignored, not misassigned):
 #   -> {"op":"import","name":m}            <- {"h":id} | {"v":plain} | {"e":msg}
 #   -> {"op":"get","h":id,"name":a}        <- value/handle/error
 #   -> {"op":"call","h":id,"args":[...]}   <- value/handle/error
+#      ("callp" adds "path":[...] and optional "kw":{name:enc,...} —
+#       keyword arguments, f(*args, **kw))
 #   -> {"op":"str","h":id}                 <- {"v":"..."}
 #   -> {"op":"release","h":id}             <- {"v":n}   (remaining live)
 #   -> {"op":"stats"}                      <- {"v":n}
@@ -20,9 +25,9 @@
 # {"cb":true,"cbid":id,"args":[...]} and BLOCKS on the reply line
 # {"cbr":...} (or {"e":...}).  The parent may take arbitrarily long
 # (awaiting its own promises) before replying, and may have already
-# pipelined later ops onto stdin — those are parked until the cbr
-# lands, then drained in order.  EOF on stdin is revocation: drop
-# everything, exit.
+# pipelined later ops onto the wire — those are parked until the cbr
+# lands, then drained in order.  EOF on the request fd is revocation:
+# drop everything, exit.
 import base64
 import json
 import math
@@ -31,12 +36,20 @@ import sys
 
 _handles = {}
 _next = [1]
-_out = sys.stdout
+# The wire lives on dedicated fds so user code owns stdin/stdout —
+# print() reaches the real stdout and can never collide with a protocol
+# reply.  Requests arrive on fd 3, replies leave on fd 4 (overridable
+# for a parent that cannot pin fd numbers).
+_in = os.fdopen(int(os.environ.get('CC_WIRE_IN', '3')), 'r',
+                encoding='utf-8')
+_out = os.fdopen(int(os.environ.get('CC_WIRE_OUT', '4')), 'w',
+                 encoding='utf-8')
 # Ops that arrived on stdin while a callback was blocked on its cbr.
 _parked = []
 # Big buffers spill through shared memory (tmpfs on Linux) instead of
 # base64: one memcpy per side, no inflation, no JSON bloat.  The dir
-# comes from the parent; files are consumed-and-unlinked per message.
+# comes from the parent (its private 0700 bridge dir); files are 0600,
+# exclusive-create, consumed-and-unlinked per message.
 _shm_dir = os.environ.get('CC_PY_SHM_DIR') or (
     '/dev/shm' if os.path.isdir('/dev/shm') else None)
 _shm_seq = [0]
@@ -45,8 +58,9 @@ _SPILL = 1 << 16
 
 def _shm_write(raw):
     _shm_seq[0] += 1
-    path = os.path.join(_shm_dir, 'ccpy-%d-%d' % (os.getpid(), _shm_seq[0]))
-    with open(path, 'wb') as f:
+    path = os.path.join(_shm_dir, 'ccpy-c%d-%d' % (os.getpid(), _shm_seq[0]))
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, 'wb') as f:
         f.write(raw)
     return path
 
@@ -86,7 +100,7 @@ def _decode(v):
                 # Strict cbr wait — but Promise.all on the parent can
                 # pipeline later ops ahead of the reply.  Park those.
                 while True:
-                    line = sys.stdin.readline()
+                    line = _in.readline()
                     if not line:
                         raise RuntimeError('bridge is closed')
                     r = json.loads(line)
@@ -245,7 +259,8 @@ def _dispatch(req):
     if op == 'callp':
         f = _walk(req)
         args = [_decode(a) for a in req.get('args', [])]
-        return _encode(_run(f(*args)))
+        kw = {k: _decode(v) for k, v in (req.get('kw') or {}).items()}
+        return _encode(_run(f(*args, **kw)))
     if op == 'ta':
         # Materialize a buffer-shaped value back to the parent: small
         # inline, big through the shm spill.
@@ -289,7 +304,7 @@ def _dispatch(req):
 def _next_req():
     if _parked:
         return _parked.pop(0)
-    for line in sys.stdin:
+    for line in _in:
         line = line.strip()
         if not line:
             continue
@@ -310,8 +325,13 @@ def main():
             resp = _dispatch(req)
         except Exception as e:
             resp = {'e': '%s: %s' % (type(e).__name__, e)}
+        # Replies pair by request id — the parent discards any line
+        # without the id it is waiting on (this channel is shared with
+        # whatever user code prints).
+        if isinstance(req, dict) and 'id' in req:
+            resp['id'] = req['id']
         _send(resp)
-        if req.get('op') == 'close':
+        if isinstance(req, dict) and req.get('op') == 'close':
             break
 
 

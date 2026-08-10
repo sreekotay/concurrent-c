@@ -36,9 +36,22 @@ function spillDir() {
   return fs.existsSync('/dev/shm') ? '/dev/shm' : os.tmpdir();
 }
 function straySpills() {
+  // Spills live in private per-bridge dirs (removed with the bridge);
+  // strays are files inside a surviving dir, or the dir of a bridge
+  // that is already gone would itself linger.
   const dir = spillDir();
   try {
-    return fs.readdirSync(dir).filter((f) => f.startsWith('ccpy-' + process.pid + '-'));
+    const mine = fs.readdirSync(dir)
+      .filter((f) => f.startsWith('ccpy-' + process.pid + '-'));
+    const strays = [];
+    for (const d of mine) {
+      const p = path.join(dir, d);
+      try {
+        if (fs.statSync(p).isDirectory()) strays.push(...fs.readdirSync(p).map((f) => d + '/' + f));
+        else strays.push(d);
+      } catch (_) { /* raced its removal */ }
+    }
+    return strays;
   } catch (_) {
     return [];
   }
@@ -65,6 +78,31 @@ async function makeIsolatedWorker() {
       '(__import__("numpy"))');
   const boom = await b.eval('lambda: (__import__("os")._exit(7))');
   return { py, work, boom };
+}
+
+/* ---- 0. Wire integrity: user stdout cannot forge protocol replies ------- */
+async function wireIntegrity() {
+  console.log('=== wire_integrity ===');
+  const py = ccpy.create({ isolated: true });
+  const b = py.import('builtins');
+  // Python code whose stdout output has exactly the shape of a bridge
+  // reply.  Replies pair by request id, so an id-less line is ignored —
+  // never consumed as a response, never shifting later replies onto the
+  // wrong promises.
+  const forge = await b.eval(
+    'lambda: (print(\'{"v":999}\', flush=True), 41)[1]');
+  const v1 = await forge();
+  // A forged line with an already-settled id is equally not consumable.
+  const forge2 = await b.eval(
+    'lambda: (print(\'{"v":888,"id":1}\', flush=True), 42)[1]');
+  const v2 = await forge2();
+  // Pipelined calls after the noise still pair correctly.
+  const sq = await b.eval('lambda x: x * x');
+  const after = await Promise.all([sq(2), sq(3), sq(4)]);
+  await py.destroy();
+  ok('wire_integrity_plain', v1 === 41);
+  ok('wire_integrity_forged_id', v2 === 42);
+  ok('wire_integrity_order', after.join(',') === '4,9,16');
 }
 
 /* ---- 1. Crash isolation storm ------------------------------------------- */
@@ -1446,6 +1484,7 @@ async function abortInject() {
   const numpyOk = await hasNumpyIsolated();
   console.log('numpy_isolated %s', numpyOk ? 'yes' : 'no');
 
+  await wireIntegrity();
   await crashStorm(numpyOk);
   await domainFanout(numpyOk);
   await shmHail(numpyOk);

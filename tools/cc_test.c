@@ -523,6 +523,8 @@ static int get_run_timeout_for_test(const char* stem, int default_timeout_sec) {
     if (strcmp(stem, "cc_python_bridge_proc_smoke") == 0) return 120;
     /* Spawns node children per domain; ~20ms deliberate async waits. */
     if (strcmp(stem, "cc_node_bridge_smoke") == 0) return 60;
+    /* Spawns a python child; forged-reply and pairing rungs. */
+    if (strcmp(stem, "bridge_wire_smoke") == 0) return 60;
     if (strcmp(stem, "py_module_kwargs_smoke") == 0) return 30;
     /* Inner `ccc build` of DP-only levenshtein_cc_smoke.ccs. */
     if (strcmp(stem, "py_levenshtein_smoke") == 0) return 60;

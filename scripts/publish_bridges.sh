@@ -130,6 +130,11 @@ elif [[ "$PUBLISH" -eq 1 ]]; then
   echo "== versions unchanged (--no-bump)"
 fi
 
+echo "== bridge suites gate the pack (stress quick tier + pinned rungs)"
+node tests/bridge_wire.js
+python3 tests/bridge_wire.py
+./stress/bridge/run.sh
+
 echo "== clean prior bridge pack products"
 rm -f out/concurrent-c-python-*.tgz out/cc-python-*.tgz
 rm -rf out/pypi

@@ -1,0 +1,24 @@
+{"v":999}
+py_forge_ignored true
+{"v":888,"id":1}
+py_forged_id_ignored true
+py_pairing_order true
+py_error_paired true
+py-print-visible
+py_print_visible true
+py_kwargs_call true
+py_kwargs_default true
+py_kwargs_typeerror_crosses true
+py_kwargs_must_be_last true
+py_shm_private_dir true
+py_shm_roundtrip true
+py_shm_dir_swept true
+{"v":777,"id":1}
+js_forge_ignored true
+js-print-visible
+js_print_visible true
+js_pairing_order true
+js_error_paired true
+js_shm_private_dir true
+js_shm_roundtrip true
+js_shm_dir_swept true

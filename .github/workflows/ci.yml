@@ -26,3 +26,32 @@ jobs:
 
       - name: Smoke test (build toolchain, compile + run examples)
         run: ./scripts/smoke.sh
+
+  # The bridge suites are the material that actually exercises the
+  # interop wires (forged replies, crash storms, shm spills, callback
+  # nesting) — gate on them, not just the toolchain smoke.
+  bridges:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y zlib1g-dev libcurl4-openssl-dev python3-dev python3-numpy
+
+      - name: Build toolchain
+        run: make -C cc
+
+      - name: Bridge smokes (pinned wire/package rungs)
+        run: |
+          cc -O2 -Wall -Wextra tools/cc_test.c -o tools/cc_test
+          ./tools/cc_test --filter bridge_wire
+          ./tools/cc_test --filter cc_node_bridge
+          ./tools/cc_test --filter cc_python_bridge
+
+      - name: Bridge stress (quick tier)
+        run: ./stress/bridge/run.sh

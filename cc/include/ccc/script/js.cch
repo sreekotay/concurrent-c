@@ -31,6 +31,7 @@
 
 #include <dlfcn.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -3463,7 +3464,12 @@ static const char cc__js_dom_broker_text[] =
     "#!/usr/bin/env node\n"
     "/* cc-node broker: the Node end of Python's JS bridge.\n"
     " *\n"
-    " * Line-delimited JSON over stdio, strict request/response.  Handles are\n"
+    " * Line-delimited JSON on DEDICATED wire fds, strict request/response —\n"
+    " * stdin/stdout/stderr stay the user's, so console.log in evaluated\n"
+    " * code reaches the real stdout and can never collide with a protocol\n"
+    " * reply.  Requests arrive on fd 3, replies leave on fd 4; a parent\n"
+    " * that cannot pin fd numbers (python's pass_fds keeps the parent's\n"
+    " * numbering) says which via CC_WIRE_IN / CC_WIRE_OUT.  Handles are\n"
     " * integers into one table; results follow the bridge materialization\n"
     " * rule — plain data (finite numbers, strings, booleans, null, arrays\n"
     " * and plain objects of the same) crosses as a value, everything else\n"
@@ -3472,7 +3478,7 @@ static const char cc__js_dom_broker_text[] =
     " * Python callable crosses as {$f: id}; invoking it sends a nested `cb`\n"
     " * request and BLOCKS on a synchronous read for the answer — legal\n"
     " * because the protocol is strictly alternating, so nothing else can be\n"
-    " * in flight.  stdin EOF is the host vanishing: exit.\n"
+    " * in flight.  EOF on the request fd is the host vanishing: exit.\n"
     " *\n"
     " * cc/include/ccc/script/js.cch embeds this file verbatim (the CC\n"
     " * isolated tier speaks the same wire); js_iso_smoke pins the two\n"
@@ -3482,11 +3488,14 @@ static const char cc__js_dom_broker_text[] =
     "const fs = require('fs');\n"
     "const { createRequire } = require('module');\n"
     "\n"
+    "const IN_FD = Number(process.env.CC_WIRE_IN || 3);\n"
+    "const OUT_FD = Number(process.env.CC_WIRE_OUT || 4);\n"
+    "\n"
     "/* Resolve packages from the HOST's cwd — `npm install lodash` next to\n"
     " * your Python program is the point. */\n"
     "const requireCwd = createRequire(process.cwd() + '/');\n"
     "\n"
-    "/* ---- one buffered reader over fd 0, sync and async ---- */\n"
+    "/* ---- one buffered reader over the request fd, sync and async ---- */\n"
     "const rbuf = { data: Buffer.alloc(0) };\n"
     "\n"
     "function takeLine() {\n"
@@ -3504,7 +3513,7 @@ static const char cc__js_dom_broker_text[] =
     "    const chunk = Buffer.alloc(65536);\n"
     "    let n = 0;\n"
     "    try {\n"
-    "      n = fs.readSync(0, chunk, 0, chunk.length, null);\n"
+    "      n = fs.readSync(IN_FD, chunk, 0, chunk.length, null);\n"
     "    } catch (e) {\n"
     "      if (e.code === 'EAGAIN') continue;\n"
     "      if (e.code === 'EOF') return null;\n"
@@ -3520,8 +3529,8 @@ static const char cc__js_dom_broker_text[] =
     "  if (l !== null) return Promise.resolve(l);\n"
     "  return new Promise((resolve, reject) => {\n"
     "    const chunk = Buffer.alloc(65536);\n"
-    "    fs.read(0, chunk, 0, chunk.length, null, (err, n) => {\n"
-    "      if (err) return err.code === 'EOF' ? resolve(null) : reject(err);\n"
+    "    fs.read(IN_FD, chunk, 0, chunk.length, null, (err, n) => {\n"
+    "      if (err) return err.code === 'EOF' \? resolve(null) : reject(err);\n"
     "      if (n === 0) return resolve(null);\n"
     "      rbuf.data = Buffer.concat([rbuf.data, chunk.subarray(0, n)]);\n"
     "      resolve(readLineAsync());\n"
@@ -3530,7 +3539,12 @@ static const char cc__js_dom_broker_text[] =
     "}\n"
     "\n"
     "function send(obj) {\n"
-    "  fs.writeSync(1, JSON.stringify(obj) + '\\n');\n"
+    "  try {\n"
+    "    fs.writeSync(OUT_FD, JSON.stringify(obj) + '\\n');\n"
+    "  } catch (e) {\n"
+    "    if (e.code === 'EPIPE') process.exit(0); /* host went away */\n"
+    "    throw e;\n"
+    "  }\n"
     "}\n"
     "\n"
     "/* ---- handles + materialization ---- */\n"
@@ -3564,7 +3578,8 @@ static const char cc__js_dom_broker_text[] =
     "\n"
     "/* Typed buffers cross as tagged bytes: small inline as base64, big\n"
     " * through the shared-memory spill (one memcpy per side; the receiver\n"
-    " * consumes-and-unlinks).  Same discipline as cc-python's wire. */\n"
+    " * consumes-and-unlinks; files are 0600, exclusive-create, inside the\n"
+    " * host's private bridge dir).  Same discipline as cc-python's wire. */\n"
     "const TA_KIND = new Map([\n"
     "  [Float64Array, 'f64'], [Float32Array, 'f32'],\n"
     "  [Int32Array, 'i32'], [BigInt64Array, 'i64'], [Uint8Array, 'u8'],\n"
@@ -3575,15 +3590,15 @@ static const char cc__js_dom_broker_text[] =
     "};\n"
     "const SHM_SPILL = 1 << 16;\n"
     "const SHM_DIR = process.env.CC_NODE_SHM_DIR ||\n"
-    "                (fs.existsSync('/dev/shm') ? '/dev/shm'\n"
+    "                (fs.existsSync('/dev/shm') \? '/dev/shm'\n"
     "                                           : require('os').tmpdir());\n"
     "let shmSeq = 0;\n"
     "\n"
     "function encodeBuffer(kind, buf) {\n"
     "  if (buf.byteLength > SHM_SPILL) {\n"
     "    const p = require('path').join(\n"
-    "        SHM_DIR, 'ccnode-' + process.pid + '-' + (++shmSeq));\n"
-    "    fs.writeFileSync(p, buf);\n"
+    "        SHM_DIR, 'ccnode-c' + process.pid + '-' + (++shmSeq));\n"
+    "    fs.writeFileSync(p, buf, { flag: 'wx', mode: 0o600 });\n"
     "    return { shm: p, t: kind };\n"
     "  }\n"
     "  return { ta: kind, b64: buf.toString('base64') };\n"
@@ -3592,7 +3607,7 @@ static const char cc__js_dom_broker_text[] =
     "function encodeResult(v) {\n"
     "  if (v === undefined) return { u: 1 };\n"
     "  if (typeof v === 'number' && !Number.isFinite(v))\n"
-    "    return { nf: Number.isNaN(v) ? 'nan' : v > 0 ? 'inf' : '-inf' };\n"
+    "    return { nf: Number.isNaN(v) \? 'nan' : v > 0 \? 'inf' : '-inf' };\n"
     "  if (v !== null && typeof v === 'object') {\n"
     "    const kind = TA_KIND.get(v.constructor);\n"
     "    if (kind)\n"
@@ -3627,7 +3642,7 @@ static const char cc__js_dom_broker_text[] =
     "    if (a.$h !== undefined) return getH(a.$h);\n"
     "    if (a.$f !== undefined) return makeCallback(a.$f);\n"
     "    if (a.$nf !== undefined)\n"
-    "      return a.$nf === 'nan' ? NaN : a.$nf === 'inf' ? Infinity : -Infinity;\n"
+    "      return a.$nf === 'nan' \? NaN : a.$nf === 'inf' \? Infinity : -Infinity;\n"
     "    if (a.$ta !== undefined || a.$shm !== undefined) {\n"
     "      let buf;\n"
     "      if (a.$shm !== undefined) {\n"
@@ -3636,7 +3651,7 @@ static const char cc__js_dom_broker_text[] =
     "      } else {\n"
     "        buf = Buffer.from(a.b64, 'base64');\n"
     "      }\n"
-    "      const C = TA_CTOR[a.t !== undefined ? a.t : a.$ta];\n"
+    "      const C = TA_CTOR[a.t !== undefined \? a.t : a.$ta];\n"
     "      return new C(buf.buffer, buf.byteOffset,\n"
     "                   buf.byteLength / C.BYTES_PER_ELEMENT);\n"
     "    }\n"
@@ -3669,7 +3684,7 @@ static const char cc__js_dom_broker_text[] =
     "        case 'get': {\n"
     "          const o = getH(req.h);\n"
     "          const v = o[req.name];\n"
-    "          r = typeof v === 'function' ? v.bind(o) : v;\n"
+    "          r = typeof v === 'function' \? v.bind(o) : v;\n"
     "          break;\n"
     "        }\n"
     "        case 'call': {\n"
@@ -3688,7 +3703,7 @@ static const char cc__js_dom_broker_text[] =
     "      if (r && typeof r.then === 'function') r = await r; /* async is free */\n"
     "      send({ id, ...encodeResult(r) });\n"
     "    } catch (e) {\n"
-    "      send({ id, e: String(e && e.message !== undefined ? e.message : e) });\n"
+    "      send({ id, e: String(e && e.message !== undefined \? e.message : e) });\n"
     "    }\n"
     "  }\n"
     "}\n"
@@ -4666,10 +4681,19 @@ static inline CCResult_CCJsDom_CCJsError cc_js_dom_new_exe(CCArena *arena, const
         return cc__js_dom_errd("isolated_new");
     }
     if (pid == 0) {
+        /* The wire lives on fds 3 (requests in) / 4 (replies out) — one
+         * socket, both directions.  stdio is inherited, so console.log
+         * in evaluated JS reaches the real stdout and can never collide
+         * with a protocol reply.  Route through a spare fd first: sv[1]
+         * may itself be 3 or 4. */
         char *argv2[3];
+        int t;
         close(sv[0]);
-        if (dup2(sv[1], 0) < 0 || dup2(sv[1], 1) < 0) _exit(127);
-        close(sv[1]);
+        t = fcntl(sv[1], F_DUPFD, 5);
+        if (t < 0) _exit(127);
+        if (dup2(t, 3) < 0 || dup2(t, 4) < 0) _exit(127);
+        close(t);
+        if (sv[1] > 4) close(sv[1]);
         argv2[0] = (char *)(uintptr_t)exe;
         argv2[1] = broker;
         argv2[2] = NULL;

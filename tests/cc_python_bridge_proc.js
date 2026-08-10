@@ -97,9 +97,19 @@ const ccpy = require(process.cwd() + '/npm/cc-python');
     out('shm_result_integrity', echoed.length === (1 << 18) &&
         echoed[(1 << 18) - 1] === BigInt((1 << 18) - 1));
     {
+      // Spills live in private per-bridge dirs (gone with the bridge);
+      // strays are leftover FILES inside a live bridge's dir, or flat
+      // files under the old naming.
       const dir = fs.existsSync('/dev/shm') ? '/dev/shm' : os.tmpdir();
-      const stray = fs.readdirSync(dir).filter(
-          (f) => f.startsWith('ccpy-' + process.pid + '-'));
+      const stray = [];
+      for (const d of fs.readdirSync(dir)) {
+        if (!d.startsWith('ccpy-' + process.pid + '-')) continue;
+        const p = path.join(dir, d);
+        try {
+          if (fs.statSync(p).isDirectory()) stray.push(...fs.readdirSync(p));
+          else stray.push(d);
+        } catch (e) { /* raced its removal */ }
+      }
       out('shm_no_strays', stray.length === 0);
     }
   }

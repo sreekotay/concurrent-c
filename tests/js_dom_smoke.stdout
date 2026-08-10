@@ -6,6 +6,8 @@ require_handle true
 wire_method_call true
 args_marshal true
 release_ledger true
+{"v":555,"id":1}
+stdout_is_users true
 error_is_result true
 crash_is_error true
 crashed_domain_closed true

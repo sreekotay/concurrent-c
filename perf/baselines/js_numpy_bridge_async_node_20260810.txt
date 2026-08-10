@@ -1,0 +1,19 @@
+# npm/cc-python/examples/js_numpy_bridge_async.js snapshot
+# date: 2026-08-10T03:15:03Z
+# host: Linux 6.18.5-fc-v20 x86_64
+# cc:   6326b21
+#
+numpy 2.5.1
+RESULT lane_dot_1m_awaited ms 40.093 ns/call 801857
+RESULT lane_dot_1m_pipelined ms 16.274 ns/call 650946
+RESULT ticks_during_lane_100ms n 99
+RESULT ticks_during_sync_100ms n 0
+RESULT serial_js_plus_numpy_ms 2.93
+RESULT overlapped_js_and_numpy_ms 1.99
+RESULT overlap_gain x 1.47
+RESULT numpy_x2_blas_pinned true
+RESULT numpy_x2_serial_ms 1.12
+RESULT numpy_x2_overlapped_ms 0.68
+RESULT numpy_x2_gain x 1.64
+RESULT live_handles n 5
+done

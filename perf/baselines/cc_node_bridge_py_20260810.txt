@@ -1,0 +1,11 @@
+# python -m cc_node.examples.bench_wire snapshot
+# date: 2026-08-10T03:15:07Z
+# host: Linux 6.18.5-fc-v20 x86_64
+# cc:   6326b21
+#
+RESULT spawn_ms 28
+RESULT rtt_us 105
+RESULT callback_roundtrip_us 153
+RESULT bulk_8mb_shm_ms 9.5
+RESULT bulk_8mb_json_list_ms 499
+done

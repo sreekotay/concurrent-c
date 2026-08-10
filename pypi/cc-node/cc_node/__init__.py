@@ -24,7 +24,9 @@ import base64
 import json
 import math
 import os
+import shutil
 import subprocess
+import tempfile
 
 __all__ = ["create", "JsError", "JsHandle", "__version__"]
 __version__ = "0.4.0"
@@ -49,20 +51,11 @@ def _numpy():
         return None
 
 
-def _shm_dir():
+def _shm_base():
     d = os.environ.get("CC_NODE_SHM_DIR")
     if d:
         return d
-    return "/dev/shm" if os.path.isdir("/dev/shm") else None
-
-
-def _shm_write(raw):
-    _shm_seq[0] += 1
-    path = os.path.join(_shm_dir(), "ccnode-%d-%d" % (os.getpid(),
-                                                      _shm_seq[0]))
-    with open(path, "wb") as f:
-        f.write(raw)
-    return path
+    return "/dev/shm" if os.path.isdir("/dev/shm") else tempfile.gettempdir()
 
 
 class JsError(RuntimeError):
@@ -123,17 +116,39 @@ class Bridge:
         broker = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               "broker.cjs")
         node = node or os.environ.get("CC_NODE_BIN", "node")
+        # Spills live in a private 0700 per-bridge directory (predictable
+        # names in a shared /dev/shm invite pre-creation races and
+        # umask-dependent exposure); the child writes its spills there
+        # too, and the directory goes with the bridge.
+        self._shm_dir = tempfile.mkdtemp(
+            prefix="ccnode-%d-" % os.getpid(), dir=_shm_base())
+        # The wire lives on dedicated fds; stdio is inherited, so
+        # console.log in evaluated JS reaches the real stdout and can
+        # never collide with a protocol reply.  pass_fds keeps our fd
+        # numbers in the child, so the broker learns them from the env.
+        req_r, req_w = os.pipe()
+        resp_r, resp_w = os.pipe()
+        env = dict(os.environ,
+                   CC_WIRE_IN=str(req_r), CC_WIRE_OUT=str(resp_w),
+                   CC_NODE_SHM_DIR=self._shm_dir)
         try:
             self._p = subprocess.Popen(
                 [node, broker],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
+                pass_fds=(req_r, resp_w),
+                env=env,
                 cwd=os.getcwd(),
             )
         except FileNotFoundError:
+            for fd in (req_r, req_w, resp_r, resp_w):
+                os.close(fd)
+            shutil.rmtree(self._shm_dir, ignore_errors=True)
             raise JsError(
                 "cc-node: no node executable (install Node, or set "
                 "CC_NODE_BIN)") from None
+        os.close(req_r)
+        os.close(resp_w)
+        self._wire_w = os.fdopen(req_w, "wb")
+        self._wire_r = os.fdopen(resp_r, "rb")
         self.closed = False
         self._nid = 1
         self._cbs = {}
@@ -150,8 +165,14 @@ class Bridge:
 
     def _send(self, obj):
         line = json.dumps(obj, allow_nan=False) + "\n"
-        self._p.stdin.write(line.encode("utf-8"))
-        self._p.stdin.flush()
+        try:
+            self._wire_w.write(line.encode("utf-8"))
+            self._wire_w.flush()
+        except (BrokenPipeError, ValueError, OSError):
+            # The child died under this write (e.g. killed from inside a
+            # callback).  Every door answers the same way after death.
+            self.closed = True
+            raise JsError("cc-node: the node child exited") from None
 
     def _queue_release(self, hid):
         self._pending_release.append(hid)
@@ -165,6 +186,14 @@ class Bridge:
                 self._req("release", h=hid)
             except Exception:
                 pass
+
+    def _shm_write(self, raw):
+        _shm_seq[0] += 1
+        path = os.path.join(self._shm_dir, "s%d" % _shm_seq[0])
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(raw)
+        return path
 
     def _flush_shm(self):
         # The child unlinks spill files as it decodes; this sweep only
@@ -186,7 +215,7 @@ class Bridge:
         if parked is not None:
             return self._take_reply(parked)
         while True:
-            line = self._p.stdout.readline()
+            line = self._wire_r.readline()
             if not line:
                 self.closed = True
                 raise JsError("cc-node: the node child exited")
@@ -235,7 +264,10 @@ class Bridge:
             args = [self._decode_result(a) for a in msg["args"]]
             self._send({"cbr": msg["cbid"], "v": self._encode(fn(*args))})
         except Exception as e:  # crosses back as a JS error, message intact
-            self._send({"cbr": msg["cbid"], "e": str(e)})
+            try:
+                self._send({"cbr": msg["cbid"], "e": str(e)})
+            except Exception:
+                pass  # child gone; the in-flight op surfaces EOF next read
 
     # ---- values ----
 
@@ -294,8 +326,8 @@ class Bridge:
                     raw = np.ascontiguousarray(a).tobytes()
         if raw is None or kind is None:
             return None
-        if len(raw) > _SHM_SPILL and _shm_dir():
-            path = _shm_write(raw)
+        if len(raw) > _SHM_SPILL:
+            path = self._shm_write(raw)
             self._shm_out.append(path)
             return {"$shm": path, "t": kind}
         return {"$ta": kind, "b64": base64.b64encode(raw).decode("ascii")}
@@ -372,15 +404,22 @@ class Bridge:
         self._close_pending = False
         self.closed = True
         try:
-            if self._p.poll() is None and self._p.stdin \
-                    and not self._p.stdin.closed:
+            if self._p.poll() is None and not self._wire_w.closed:
                 rid = self._nid
                 self._nid += 1
                 self._send({"id": rid, "op": "close"})
         except Exception:
             pass
         try:
-            self._p.stdin.close()
+            self._wire_w.close()
+        except Exception:
+            pass
+        # Drain to EOF so the broker's farewell reply has somewhere to
+        # land — closing the reply fd under its write is an EPIPE crash
+        # in the child.
+        try:
+            while self._wire_r.readline():
+                pass
         except Exception:
             pass
         try:
@@ -390,6 +429,11 @@ class Bridge:
                 self._p.kill()
             except Exception:
                 pass
+        try:
+            self._wire_r.close()
+        except Exception:
+            pass
+        shutil.rmtree(self._shm_dir, ignore_errors=True)
         if self in _live:
             _live.remove(self)
 

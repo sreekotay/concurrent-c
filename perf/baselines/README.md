@@ -9,18 +9,18 @@ Compiler suite metrics live separately in
 [`../compiler_baseline.txt`](../compiler_baseline.txt) (see
 [`../README.md`](../README.md#compiler-perf-baseline)).
 
-## Latest snapshots (2026-08-09)
+## Latest snapshots (2026-08-10; js_py_modules: 2026-08-09)
 
 | Surface | Latest | How to refresh |
 |---------|--------|----------------|
-| CC embeds Python | [`py_baseline_20260809.txt`](py_baseline_20260809.txt) | `./cc/bin/ccc run perf/py_baseline.ccs` (see below) |
-| Node → CC module | [`js_baseline_node_20260809.txt`](js_baseline_node_20260809.txt) | `ccc build perf/js_baseline.ccs && node perf/js_baseline.js` |
+| CC embeds Python | [`py_baseline_20260810.txt`](py_baseline_20260810.txt) | `./cc/bin/ccc run perf/py_baseline.ccs` (see below) |
+| Node → CC module | [`js_baseline_node_20260810.txt`](js_baseline_node_20260810.txt) | `ccc build perf/js_baseline.ccs && node perf/js_baseline.js` |
 | Native modules (Node + Python hot path) | [`js_py_modules_20260809.txt`](js_py_modules_20260809.txt) | see [`docs/js-py-modules.md`](../../docs/js-py-modules.md) |
-| Node → numpy via `concurrent-c-python` | [`js_numpy_bridge_node_20260809.txt`](js_numpy_bridge_node_20260809.txt) | `node npm/cc-python/examples/js_numpy_bridge.js` |
-| Same, async lane | [`js_numpy_bridge_async_node_20260809.txt`](js_numpy_bridge_async_node_20260809.txt) | `node npm/cc-python/examples/js_numpy_bridge_async.js` |
-| Isolated domains × numpy | [`js_multiprocess_numpy_node_20260809.txt`](js_multiprocess_numpy_node_20260809.txt) | `node npm/cc-python/examples/js_multiprocess_numpy.js` |
+| Node → numpy via `concurrent-c-python` | [`js_numpy_bridge_node_20260810.txt`](js_numpy_bridge_node_20260810.txt) | `node npm/cc-python/examples/js_numpy_bridge.js` |
+| Same, async lane | [`js_numpy_bridge_async_node_20260810.txt`](js_numpy_bridge_async_node_20260810.txt) | `node npm/cc-python/examples/js_numpy_bridge_async.js` |
+| Isolated domains × numpy | [`js_multiprocess_numpy_node_20260810.txt`](js_multiprocess_numpy_node_20260810.txt) | `node npm/cc-python/examples/js_multiprocess_numpy.js` |
 | Isolated kill+respawn (cancel-via-kill) | *(capture locally)* | `node npm/cc-python/examples/js_isolated_cancel_churn.js` |
-| Python → Node wire (`concurrent-c-node`) | [`cc_node_bridge_py_20260809.txt`](cc_node_bridge_py_20260809.txt) | `python -m cc_node.examples.bench_wire` |
+| Python → Node wire (`concurrent-c-node`) | [`cc_node_bridge_py_20260810.txt`](cc_node_bridge_py_20260810.txt) | `python -m cc_node.examples.bench_wire` |
 | Node → CC → numpy compose | [`js_numpy_node_20260808.txt`](js_numpy_node_20260808.txt) | `ccc build perf/js_numpy.ccs && node perf/js_numpy.js` |
 
 ### Adversarial storms ([`stress/bridge/`](../../stress/bridge/) — not examples)

@@ -79,6 +79,25 @@ int main(void) {
            before.ok && after.ok && after.u.value < before.u.value
                ? "true" : "false");
 
+    /* The wire lives on dedicated fds: a synchronous write to fd 1 —
+     * even one shaped exactly like a bridge reply — lands on the real
+     * stdout (pinned below) and cannot steal the in-flight response. */
+    int forged_ok = 0;
+    {
+        CCResult_CCJsDomVal_CCJsError fsr = cc_js_dom_require(&iso, "fs");
+        if (fsr.ok) {
+            CCJsDomVal fsm = fsr.u.value;
+            CCResult_CCJsDomVal_CCJsError w = cc_js_dom_val_callm(
+                &fsm, "writeSync", 2, CC_JS_DOM_ARG((int64_t)1),
+                CC_JS_DOM_ARG("{\"v\":555,\"id\":1}\n"));
+            forged_ok = w.ok; /* returned bytes written, not 555 */
+            if (w.ok) forged_ok = w.u.value.kind == CC__JS_DOM_K_NUM &&
+                                  w.u.value.num > 0;
+            cc_js_dom_val_release(&fsm);
+        }
+    }
+    printf("stdout_is_users %s\n", forged_ok ? "true" : "false");
+
     /* A JS failure is a Result carrying the child's message. */
     CCResult_int64_t_CCJsError bad = cc_js_dom_eval_i64(&iso2, "nope.nope");
     printf("error_is_result %s\n",

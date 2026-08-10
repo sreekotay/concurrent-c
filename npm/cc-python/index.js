@@ -40,8 +40,15 @@ function locateAddon() {
 const native = require(locateAddon());
 
 const HANDLE = Symbol('cc-python-handle');
+const KWARGS = Symbol('cc-python-kwargs');
 
 function unwrapArg(a) {
+  if (a !== null && a !== undefined && a[KWARGS] !== undefined) {
+    throw new Error(
+        'concurrent-c-python: kwargs(...) crosses only the isolated wire ' +
+        'today — in-process calls are positional (bind keywords in Python, ' +
+        'e.g. functools.partial)');
+  }
   return (a !== null && a !== undefined && a[HANDLE]) ? a[HANDLE] : a;
 }
 
@@ -164,12 +171,15 @@ const TA_CTOR = {
 
 // Big buffers spill through shared memory (tmpfs where available):
 // one memcpy per side instead of base64's inflate-encode-parse-decode.
-// Files are consumed-and-unlinked by the receiver; the sender also
-// sweeps its own after the request settles, so a crashed child cannot
-// strand them.
+// Each bridge gets a PRIVATE 0700 directory (predictable names in a
+// shared /dev/shm invite pre-creation races and umask-dependent
+// exposure); files are 0600 and exclusive-create.  The receiver
+// consumes-and-unlinks; the sender sweeps its own after the request
+// settles, and the whole directory goes with the bridge.
 const SHM_SPILL = 1 << 16;
-const SHM_DIR = fs.existsSync('/dev/shm') ? '/dev/shm'
-                                          : require('os').tmpdir();
+const SHM_BASE = process.env.CC_PY_SHM_DIR ||
+                 (fs.existsSync('/dev/shm') ? '/dev/shm'
+                                            : require('os').tmpdir());
 let shmSeq = 0;
 
 function resolvePythonExe(spec) {
@@ -236,8 +246,8 @@ function rwrap(bridge, h, chain) {
     },
     apply(t, thisArg, args) {
       return bridge
-        ._req({ op: 'callp', h, path: chain,
-                args: args.map((a) => bridge._encode(a)) })
+        ._req(Object.assign({ op: 'callp', h, path: chain },
+                            bridge._callPayload(args)))
         .then((r) => bridge._materialize(r));
     },
   });
@@ -247,7 +257,8 @@ class ProcBridge {
   constructor(opts) {
     const exe = resolvePythonExe(opts && opts.python);
     this._pythonExe = exe;
-    this._pending = [];
+    this._pending = new Map(); // request id -> {settle, reject}
+    this._nextReq = 1;
     this._cbs = new Map();
     this._nextCb = 1;
     this._closed = false;
@@ -258,15 +269,20 @@ class ProcBridge {
     this._destroyPromise = null;
     this._shmOut = [];
     this._trackShm = true;
+    this._shmDir = fs.mkdtempSync(
+        path.join(SHM_BASE, 'ccpy-' + process.pid + '-'));
+    // The wire lives on fds 3 (requests) / 4 (replies); stdio is
+    // inherited, so user print() reaches the real stdout and can never
+    // collide with a protocol reply.
     this._child = spawn(exe, [path.join(__dirname, 'broker.py')], {
-      stdio: ['pipe', 'pipe', 'inherit'],
-      env: Object.assign({}, process.env, { CC_PY_SHM_DIR: SHM_DIR }),
+      stdio: ['inherit', 'inherit', 'inherit', 'pipe', 'pipe'],
+      env: Object.assign({}, process.env, { CC_PY_SHM_DIR: this._shmDir }),
     });
     this._child.on('error', (e) => this._die('cannot spawn ' + exe +
                                              ': ' + e.message));
     this._child.on('exit', () => this._die('bridge is closed (the ' +
                                            'python child exited)'));
-    const rl = readline.createInterface({ input: this._child.stdout });
+    const rl = readline.createInterface({ input: this._child.stdio[4] });
     rl.on('line', (line) => this._online(line));
   }
 
@@ -275,15 +291,23 @@ class ProcBridge {
     this._dead = true;
     this._closed = true;
     this._closePending = false;
-    const pending = this._pending.splice(0);
+    const pending = [...this._pending.values()];
+    this._pending.clear();
     for (const p of pending) p.reject(new Error('concurrent-c-python: ' + why));
     for (const w of this._closeWaiters.splice(0)) w();
     this._cbs.clear();
+    // The child is gone; anything unconsumed in the private spill dir
+    // is garbage.
+    try { fs.rmSync(this._shmDir, { recursive: true, force: true }); }
+    catch (e) { /* already swept */ }
   }
 
   _online(line) {
+    // The reply fd is the broker's alone — nothing else can write here,
+    // so an unparseable line is a wire bug, not user output.
     let obj;
-    try { obj = JSON.parse(line); } catch (e) { return; }
+    try { obj = JSON.parse(line); }
+    catch (e) { return this._die('protocol violation (unparseable reply)'); }
     if (obj && obj.cb) {
       // A callback request from the child, arriving mid-call: run the JS
       // function (awaiting whatever it awaits) and reply on its line.
@@ -312,17 +336,25 @@ class ProcBridge {
         });
       return;
     }
-    const p = this._pending.shift();
-    if (p) p.settle(obj);
+    // Replies pair by request id.  An unpaired line is a wire bug —
+    // except during teardown, when the id-less farewell echo is fine.
+    const p = obj && obj.id !== undefined ? this._pending.get(obj.id)
+                                          : undefined;
+    if (!p) {
+      if (this._closed || this._dead) return;
+      return this._die('protocol violation (unpaired reply)');
+    }
+    this._pending.delete(obj.id);
+    p.settle(obj);
   }
 
   _send(obj) {
     // Allow cbr after destroy-from-callback (closePending); block else.
     if (this._dead || (this._closed && !this._closePending)) return;
-    const stdin = this._child && this._child.stdin;
-    if (!stdin || stdin.destroyed || stdin.writableEnded) return;
+    const wire = this._child && this._child.stdio[3];
+    if (!wire || wire.destroyed || wire.writableEnded) return;
     try {
-      stdin.write(JSON.stringify(obj) + '\n');
+      wire.write(JSON.stringify(obj) + '\n');
     } catch (e) { /* torn down mid-flight */ }
   }
 
@@ -341,7 +373,8 @@ class ProcBridge {
           try { fs.unlinkSync(p); } catch (e) { /* consumed */ }
         }
       };
-      this._pending.push({
+      obj.id = this._nextReq++;
+      this._pending.set(obj.id, {
         settle: (r) => {
           sweep();
           if (r && r.e !== undefined) reject(new Error(r.e));
@@ -353,8 +386,36 @@ class ProcBridge {
     });
   }
 
+  // Split a JS argument list into wire args + keyword args.  kwargs(...)
+  // is explicit and last — a trailing plain object stays a positional
+  // dict, never silently reinterpreted.
+  _callPayload(args) {
+    const n = args.length;
+    let kw = null;
+    for (let i = 0; i < n; i++) {
+      const a = args[i];
+      if (a === null || a === undefined || a[KWARGS] === undefined) continue;
+      if (i !== n - 1) {
+        throw new Error(
+            'concurrent-c-python: kwargs(...) must be the last argument');
+      }
+      kw = {};
+      for (const k of Object.keys(a[KWARGS])) {
+        kw[k] = this._encode(a[KWARGS][k]);
+      }
+    }
+    const pos = (kw ? args.slice(0, -1) : args)
+      .map((a) => this._encode(a));
+    return kw ? { args: pos, kw } : { args: pos };
+  }
+
   _encode(v) {
     if (v === null || v === undefined) return null;
+    if (v[KWARGS] !== undefined) {
+      throw new Error(
+          'concurrent-c-python: kwargs(...) is a call-site marker, not a ' +
+          'value — it cannot nest inside another argument');
+    }
     const t = typeof v;
     if (t === 'number') {
       if (Number.isFinite(v)) return v;
@@ -391,9 +452,8 @@ class ProcBridge {
     if (kind) {
       const buf = Buffer.from(v.buffer, v.byteOffset, v.byteLength);
       if (v.byteLength > SHM_SPILL) {
-        const p = path.join(SHM_DIR,
-                            'ccpy-' + process.pid + '-' + (++shmSeq));
-        fs.writeFileSync(p, buf);
+        const p = path.join(this._shmDir, 's' + (++shmSeq));
+        fs.writeFileSync(p, buf, { flag: 'wx', mode: 0o600 });
         if (this._trackShm) this._shmOut.push(p);
         return { $shm: p, t: kind };
       }
@@ -530,11 +590,11 @@ class ProcBridge {
     this._closePending = false;
     this._closed = true;
     try {
-      const stdin = this._child.stdin;
-      if (stdin && !stdin.destroyed && !stdin.writableEnded) {
-        try { stdin.write(JSON.stringify({ op: 'close' }) + '\n'); }
+      const wire = this._child.stdio[3];
+      if (wire && !wire.destroyed && !wire.writableEnded) {
+        try { wire.write(JSON.stringify({ op: 'close' }) + '\n'); }
         catch (e) { /* ignore */ }
-        try { stdin.end(); } catch (e) { /* ignore */ }
+        try { wire.end(); } catch (e) { /* ignore */ }
       }
     } catch (e) { /* ignore */ }
     const child = this._child;
@@ -584,9 +644,10 @@ function rlazy(bridge, pending, chain) {
       return rlazy(bridge, pending, chain.concat(prop));
     },
     apply(t, thisArg, args) {
+      const payload = bridge._callPayload(args); // validate before the hop
       return pending.then((r) =>
-        bridge._req({ op: 'callp', h: r.h, path: chain,
-                      args: args.map((a) => bridge._encode(a)) })
+        bridge._req(Object.assign({ op: 'callp', h: r.h, path: chain },
+                                  payload))
           .then((x) => bridge._materialize(x)));
     },
   });
@@ -594,6 +655,19 @@ function rlazy(bridge, pending, chain) {
 
 module.exports = {
   version: require('./package.json').version,
+
+  // Keyword arguments for a Python call, explicitly marked and last:
+  //   fmt(1, kwargs({ sep: '+' }))     →  fmt(1, sep='+')
+  // A trailing plain object stays a positional dict — only this marker
+  // means keywords.  Isolated wire only (in-process refuses by name).
+  kwargs(obj) {
+    if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) {
+      throw new TypeError(
+          'concurrent-c-python: kwargs wants a plain object of keyword ' +
+          'arguments');
+    }
+    return { [KWARGS]: obj };
+  },
 
   create(opts) {
     if (opts && opts.isolated) return new ProcBridge(opts);

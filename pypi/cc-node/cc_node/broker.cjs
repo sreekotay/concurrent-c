@@ -1,7 +1,12 @@
 #!/usr/bin/env node
 /* cc-node broker: the Node end of Python's JS bridge.
  *
- * Line-delimited JSON over stdio, strict request/response.  Handles are
+ * Line-delimited JSON on DEDICATED wire fds, strict request/response —
+ * stdin/stdout/stderr stay the user's, so console.log in evaluated
+ * code reaches the real stdout and can never collide with a protocol
+ * reply.  Requests arrive on fd 3, replies leave on fd 4; a parent
+ * that cannot pin fd numbers (python's pass_fds keeps the parent's
+ * numbering) says which via CC_WIRE_IN / CC_WIRE_OUT.  Handles are
  * integers into one table; results follow the bridge materialization
  * rule — plain data (finite numbers, strings, booleans, null, arrays
  * and plain objects of the same) crosses as a value, everything else
@@ -10,7 +15,7 @@
  * Python callable crosses as {$f: id}; invoking it sends a nested `cb`
  * request and BLOCKS on a synchronous read for the answer — legal
  * because the protocol is strictly alternating, so nothing else can be
- * in flight.  stdin EOF is the host vanishing: exit.
+ * in flight.  EOF on the request fd is the host vanishing: exit.
  *
  * cc/include/ccc/script/js.cch embeds this file verbatim (the CC
  * isolated tier speaks the same wire); js_iso_smoke pins the two
@@ -20,11 +25,14 @@
 const fs = require('fs');
 const { createRequire } = require('module');
 
+const IN_FD = Number(process.env.CC_WIRE_IN || 3);
+const OUT_FD = Number(process.env.CC_WIRE_OUT || 4);
+
 /* Resolve packages from the HOST's cwd — `npm install lodash` next to
  * your Python program is the point. */
 const requireCwd = createRequire(process.cwd() + '/');
 
-/* ---- one buffered reader over fd 0, sync and async ---- */
+/* ---- one buffered reader over the request fd, sync and async ---- */
 const rbuf = { data: Buffer.alloc(0) };
 
 function takeLine() {
@@ -42,7 +50,7 @@ function readLineSync() {
     const chunk = Buffer.alloc(65536);
     let n = 0;
     try {
-      n = fs.readSync(0, chunk, 0, chunk.length, null);
+      n = fs.readSync(IN_FD, chunk, 0, chunk.length, null);
     } catch (e) {
       if (e.code === 'EAGAIN') continue;
       if (e.code === 'EOF') return null;
@@ -58,7 +66,7 @@ function readLineAsync() {
   if (l !== null) return Promise.resolve(l);
   return new Promise((resolve, reject) => {
     const chunk = Buffer.alloc(65536);
-    fs.read(0, chunk, 0, chunk.length, null, (err, n) => {
+    fs.read(IN_FD, chunk, 0, chunk.length, null, (err, n) => {
       if (err) return err.code === 'EOF' ? resolve(null) : reject(err);
       if (n === 0) return resolve(null);
       rbuf.data = Buffer.concat([rbuf.data, chunk.subarray(0, n)]);
@@ -68,7 +76,12 @@ function readLineAsync() {
 }
 
 function send(obj) {
-  fs.writeSync(1, JSON.stringify(obj) + '\n');
+  try {
+    fs.writeSync(OUT_FD, JSON.stringify(obj) + '\n');
+  } catch (e) {
+    if (e.code === 'EPIPE') process.exit(0); /* host went away */
+    throw e;
+  }
 }
 
 /* ---- handles + materialization ---- */
@@ -102,7 +115,8 @@ function isPlain(v, depth) {
 
 /* Typed buffers cross as tagged bytes: small inline as base64, big
  * through the shared-memory spill (one memcpy per side; the receiver
- * consumes-and-unlinks).  Same discipline as cc-python's wire. */
+ * consumes-and-unlinks; files are 0600, exclusive-create, inside the
+ * host's private bridge dir).  Same discipline as cc-python's wire. */
 const TA_KIND = new Map([
   [Float64Array, 'f64'], [Float32Array, 'f32'],
   [Int32Array, 'i32'], [BigInt64Array, 'i64'], [Uint8Array, 'u8'],
@@ -120,8 +134,8 @@ let shmSeq = 0;
 function encodeBuffer(kind, buf) {
   if (buf.byteLength > SHM_SPILL) {
     const p = require('path').join(
-        SHM_DIR, 'ccnode-' + process.pid + '-' + (++shmSeq));
-    fs.writeFileSync(p, buf);
+        SHM_DIR, 'ccnode-c' + process.pid + '-' + (++shmSeq));
+    fs.writeFileSync(p, buf, { flag: 'wx', mode: 0o600 });
     return { shm: p, t: kind };
   }
   return { ta: kind, b64: buf.toString('base64') };

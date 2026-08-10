@@ -113,9 +113,12 @@ await p;                // measured: 2.02x — perfect two-lane scaling
 the first is an isolated subinterpreter with its **own GIL**: real
 multi-core Python, sharing buffers zero-copy through JS as neutral
 ground (one `Float64Array` leased into both).  Measured: 5.7ms + 24.5ms
-of work in two domains completes together in 20.1ms.  The honest limit:
-**numpy itself refuses subinterpreters** (the CPython C-extension
-rule — articulate, not a crash), which is what the fourth tier is for.
+of work in two domains completes together in 20.1ms.  Two honest
+limits: this tier needs **CPython 3.12+** (`Py_NewInterpreterFromConfig`
+is the only door to a per-interpreter GIL — on 3.10/3.11 the first
+domain works and a second refuses by name), and **numpy itself refuses
+subinterpreters** (the CPython C-extension rule — articulate, not a
+crash), which is what the fourth tier is for.
 
 **N × numpy: isolated domains** — `create({ isolated: true })` spawns a
 FULL CPython child per domain: numpy in every one, N domains are N GILs
@@ -146,9 +149,9 @@ Measured ([`examples/js_multiprocess_numpy.js`](examples/js_multiprocess_numpy.j
 BLAS pinned): the same numpy workload on 4 domains runs **2-4x faster**
 than on one (3.97x — linear — at our shared 4-vCPU box's quietest;
 steal time bounds the rest).  The costs are real and stated: ~100-440ms
-to spawn a child and import numpy (warm/cold), ~125µs per wire round
+to spawn a child and import numpy (warm/cold), ~100µs per wire round
 trip (vs ~5µs in-process).  Bulk buffers spill through **shared
-memory** (one memcpy per side): an 8MB argument crosses in ~6.6ms —
+memory** (one memcpy per side): an 8MB argument crosses in ~6.4ms —
 23x the base64 wire it replaces — small arrays inline, big results stay
 child-side handles (chain on them; `await arr.toTypedArray()` brings
 the bytes back through the same spill).  Pick the tier by workload:
@@ -168,6 +171,19 @@ in-flight ops and must not leak SHM spill files. Correctness of that
 path: [`stress/bridge/bridge_stress.md`](https://github.com/sreekotay/concurrent-c/blob/main/stress/bridge/bridge_stress.md).
 Cost of kill+respawn:
 [`examples/js_isolated_cancel_churn.js`](examples/js_isolated_cancel_churn.js).
+
+Keyword arguments cross the wire explicitly marked and **last** —
+`kwargs({...})` is the marker; a trailing plain object stays a
+positional dict, never silently reinterpreted:
+
+```js
+const { kwargs } = require('concurrent-c-python');
+const fmt = await b.eval('lambda a, *, sep="-": f"{a}{sep}end"');
+await fmt(1, kwargs({ sep: '+' }));   // '1+end'
+```
+
+(In-process calls are positional today and refuse the marker by name —
+bind keywords in Python, e.g. `functools.partial`.)
 
 `py.task(jsClosure)` is reserved for recorded batch graphs —
 parameterized pipelines that ship N Python calls as one job (and, later,
@@ -250,6 +266,49 @@ runs.
 JavaScript has one number type; integral values cross as Python `int`,
 fractional as `float` (Python APIs that want a float accept an int — the
 reverse is not true).  Python ints beyond 2^53 come back as `BigInt`.
+
+## Proxies, stated plainly
+
+A held Python object is a JS Proxy over a *function* target (so calls
+trap), which has honest consequences worth knowing before handing one
+to generic JS code:
+
+- `typeof proxy === 'function'` even when the Python object is not
+  callable.
+- `then` is special: hidden in-process, "materialize the attribute" on
+  isolated proxies — a Python object's genuine `.then` attribute needs
+  `builtins.getattr(obj, 'then')`, not property access.
+- `toString`/`toJS` (in-process) and `str`/`toTypedArray` (isolated)
+  are bridge doors and shadow same-named Python attributes — reach the
+  Python ones through `builtins.getattr` too.
+- Symbol-keyed properties answer `undefined`: a proxy is not a JS
+  iterable, and Python iterables do not grow `Symbol.iterator` —
+  materialize to a list or typed array first.
+
+None of this bites ordinary attribute-and-call use; it bites libraries
+that introspect objects generically (duck-typed thenable checks,
+spread/iteration, `typeof` dispatch).
+
+## Trust and compatibility
+
+- A **sync in-process call runs Python on the Node thread**: a long
+  call blocks the event loop, and a native-extension crash is a Node
+  process crash.  That is the price of ~5µs calls — `py.task` moves
+  work off-thread, isolated domains move it out of the process.
+- **In-process sibling domains need CPython 3.12+** (per-interpreter
+  GILs).  On 3.10/3.11 the first domain works; a second refuses by
+  name.  Isolated domains parallelize on any supported Python.
+- `{ isolated: true }` is **crash isolation, not a security sandbox**:
+  the child inherits your environment and runs with your OS
+  privileges.  Do not run untrusted Python through it.
+- Bulk-buffer spill files live in a **private 0700 per-bridge
+  directory** (0600, exclusive-create), removed with the bridge.
+- `using py = ...` disposes **without awaiting** (a sync dispose
+  cannot await): teardown may still be draining when the scope exits.
+  When completion matters, `await using py = ...` or
+  `await py.destroy()` are the truthful forms.
+- Linux and macOS.  A platform without a shipped prebuilt compiles the
+  vendored C at install time and needs a C compiler.
 
 ## Choosing the Python
 

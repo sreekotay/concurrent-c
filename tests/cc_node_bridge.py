@@ -147,9 +147,16 @@ with cc_node.create() as js2:
     out("buffer_back_shm", len(back) == (1 << 18) and float(back[0]) == 0.5)
     bys = js2.eval("() => new Uint8Array([104, 105])")()
     out("buffer_u8", list(bys) == [104, 105])
+    # Spills live in a private per-bridge dir now; strays are leftover
+    # FILES inside our bridge dirs (the dirs themselves live until
+    # destroy) or flat files under the old naming.
     if os.path.isdir("/dev/shm"):
-        stray = [x for x in os.listdir("/dev/shm")
-                 if x.startswith("ccnode-%d-" % os.getpid())]
+        stray = []
+        for d in os.listdir("/dev/shm"):
+            if not d.startswith("ccnode-%d-" % os.getpid()):
+                continue
+            p = os.path.join("/dev/shm", d)
+            stray += os.listdir(p) if os.path.isdir(p) else [d]
         out("buffer_no_strays", len(stray) == 0)
     else:
         out("buffer_no_strays", True)
