@@ -3,7 +3,7 @@
  *
  * lower_headers links the full preprocess pipeline, and the pipeline links
  * the grammar engines (grammar_rules.c) — but the engines' emitter text is
- * itself CC (src/preprocess/emit/*.cch) that lower_headers must lower first.
+ * itself CC (src/preprocess/emit/ star-dot-cch) that lower_headers must lower first.
  * This stub breaks that cycle: a stage-1 lower_headers links THIS file in
  * place of grammar_rules.c, lowers the engine sources, and then the real
  * compiler builds against the generated header.
