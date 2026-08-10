@@ -7,7 +7,8 @@ strict C11-superset preprocessor: `.ccs` lowers to plain C and compiles
 with your host C compiler.
 
 Map of the three boundaries (CC hosts Python, native modules, this
-package bridge): [JS / Python interop](../../docs/js-py-modules.md).
+package bridge):
+[JS / Python interop](https://github.com/sreekotay/concurrent-c/blob/main/docs/js-py-modules.md).
 
 ```js
 const py = require('concurrent-c-python').create();
@@ -141,7 +142,7 @@ const b = ccpy.create({ isolated: true, python: '/usr/bin/python3.11' });
 ```
 
 Measured ([`examples/js_multiprocess_numpy.js`](examples/js_multiprocess_numpy.js),
-[`js_multiprocess_numpy_node_20260809.txt`](../../perf/baselines/js_multiprocess_numpy_node_20260809.txt),
+[`js_multiprocess_numpy_node_20260809.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/js_multiprocess_numpy_node_20260809.txt),
 BLAS pinned): the same numpy workload on 4 domains runs **2-4x faster**
 than on one (3.97x — linear — at our shared 4-vCPU box's quietest;
 steal time bounds the rest).  The costs are real and stated: ~100-440ms
@@ -161,7 +162,7 @@ correct value; after destroy every door answers `bridge is closed`.
 Hard death of the child (`SIGKILL`, `os.abort`, `_exit`) is different —
 in-flight ops must reject, and SHM spill files must not leak. The
 stress catalog separates those contracts
-([`stress/bridge/bridge_stress.md`](../../stress/bridge/bridge_stress.md)).
+([`stress/bridge/bridge_stress.md`](https://github.com/sreekotay/concurrent-c/blob/main/stress/bridge/bridge_stress.md)).
 
 `py.task(jsClosure)` is reserved for recorded batch graphs —
 parameterized pipelines that ship N Python calls as one job (and, later,
@@ -299,14 +300,14 @@ ccc build npm/cc-python/src/cc_python.ccs   # → bin/cc_python.node
 And when the hot path is YOUR code rather than a Python package, skip
 the bridge entirely: a page of Concurrent-C (or C) exports as a native
 module for Node and Python both — 40-90ns calls, 26KB artifacts.  See
-[Native modules for Node and Python](../../docs/js-py-modules.md).
+[Native modules for Node and Python](https://github.com/sreekotay/concurrent-c/blob/main/docs/js-py-modules.md).
 
 ## Measured
 
 From [`examples/js_numpy_bridge.js`](examples/js_numpy_bridge.js) — plain
 `node`, `require('concurrent-c-python')`, numpy 2.5.1 on a 4-vCPU x86-64 box
-([`perf/baselines/js_numpy_bridge_node_20260809.txt`](../../perf/baselines/js_numpy_bridge_node_20260809.txt);
-catalog: [`perf/baselines/README.md`](../../perf/baselines/README.md)):
+([`perf/baselines/js_numpy_bridge_node_20260809.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/js_numpy_bridge_node_20260809.txt);
+catalog: [`perf/baselines/README.md`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/README.md)):
 
 | what | result |
 |---|---|
@@ -317,7 +318,7 @@ catalog: [`perf/baselines/README.md`](../../perf/baselines/README.md)):
 | bridge size | **~100KB `.node`, libc-only** |
 
 From [`examples/js_numpy_bridge_async.js`](examples/js_numpy_bridge_async.js)
-([`js_numpy_bridge_async_node_20260809.txt`](../../perf/baselines/js_numpy_bridge_async_node_20260809.txt))
+([`js_numpy_bridge_async_node_20260809.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/js_numpy_bridge_async_node_20260809.txt))
 — what the lane buys:
 
 | what | result |
@@ -337,7 +338,7 @@ one command.
 
 Adversarial kitchen-sink (escaped closures, lease detach, cooperative
 subset-destroy, SIGKILL mid-spill, abort inject, mixed soaks):
-[`stress/bridge/`](../../stress/bridge/) — `./stress/bridge/run.sh`.
+[`stress/bridge/`](https://github.com/sreekotay/concurrent-c/tree/main/stress/bridge) — `./stress/bridge/run.sh`.
 Mode catalog + destroy contracts:
-[`stress/bridge/bridge_stress.md`](../../stress/bridge/bridge_stress.md)
+[`stress/bridge/bridge_stress.md`](https://github.com/sreekotay/concurrent-c/blob/main/stress/bridge/bridge_stress.md)
 (latency demos stay in `examples/`).

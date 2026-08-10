@@ -1,29 +1,37 @@
 #!/usr/bin/env -S ./cc/bin/ccc
 /*
- * JS twin of examples/py/pydemo.shcc — same shape, same ownership: CC
- * owns main and hosts the runtime in-process.
+ * JS twin of examples/py/pydemo.shcc — same surface, same ownership: CC
+ * owns main and drives a Node domain.
  *
- *   pydemo:  cc_py_new(false, &a)        →  libpython in-process
- *   jsdemo:  cc_js_new(false, &a)  →  libnode in-process (V8, libuv, npm)
+ *   pydemo:  cc_py_new(false, &a)   →  libpython in-process
+ *   jsdemo:  cc_js_new(iso, &a)     →  libnode in-process, or node child
  *
  * One constructor, transport as the flag: `false` embeds a full Node in
  * this process (needs libnode-dev; one per process — V8's rule);
- * `true` spawns a node child per handle instead — N isolated domains,
- * crash isolation, wire cost (examples/recipe_js_isolated.ccs).  The
- * surface is the same either way: require/eval/exec, attribute chains,
- * `!>`, typed destinations.
+ * `true` spawns a node child per handle — N isolated domains, crash
+ * isolation, wire cost (examples/recipe_js_isolated.ccs).  The surface
+ * is the same either way: require/eval/exec, attribute chains, `!>`,
+ * typed destinations.
  *
- *     ccc examples/js/jsdemo.shcc        # needs libnode-dev
+ * macOS note: Homebrew's `node` formula installs headers
+ * (/opt/homebrew/include/node) but not an embeddable libnode — hosted
+ * (`false`) returns "libnode not found".  Isolated (`true`) only needs
+ * `node` on PATH, so this demo prefers hosted when available and falls
+ * back to isolated otherwise.
+ *
+ *     ccc examples/js/jsdemo.shcc
  */
 #include <ccc/script/js.cch>
 
-/* The probe, mirroring cc_py_available(): clean skip, no side effects. */
-if (!cc_js_dom_available(false)) {
-    "SKIP (need libnode-dev + c++)".println() !>;
+_Bool iso = !cc_js_dom_available(false);
+if (!cc_js_dom_available(iso)) {
+    "SKIP (need libnode-dev + c++, or node on PATH)".println() !>;
     return 0;
 }
+if (iso)
+    "jsdemo: isolated (hosted unavailable — libnode not found)".println() !>;
 
-CCJsDom js = cc_js_new(false, &a) !> @destroy;
+CCJsDom js = cc_js_new(iso, &a) !> @destroy;
 
 double v = js.eval("Math.sqrt(2)")!>.as_f64() !>;
 println(@string(`Math.sqrt(2.0) = ${v}`, &a)) !>;

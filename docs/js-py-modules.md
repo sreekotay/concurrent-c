@@ -76,7 +76,9 @@ long long cpus = os.availableParallelism() !>;
 The flag at the call site is the boundary, because the crossing
 profiles differ: **hosted** (`false`) embeds a full Node — V8, libuv,
 npm modules — in your process (sub-µs ops; one per process, V8's rule;
-needs libnode-dev, first use compiles a small cached shim);
+needs libnode-dev, first use compiles a small cached shim; macOS
+Homebrew ships `node.h` but not libnode, so hosted returns
+`libnode not found` — use isolated there);
 **isolated** (`true`) spawns a `node` child per handle on the
 `concurrent-c-node` wire (~170µs/hop; N domains, separate heaps, crash
 isolation; needs only `node` on PATH).  Same ops, same materialization
@@ -84,7 +86,7 @@ rules either way; `require` resolves against the working directory in
 both, so `npm install` next to your program is the whole setup.
 
 ```sh
-ccc examples/js/jsdemo.shcc               # pydemo's twin, hosted
+ccc examples/js/jsdemo.shcc               # hosted when libnode exists, else isolated
 ccc run examples/recipe_js_isolated.ccs   # N domains + crash isolation, measured
 ccc run examples/recipe_js_host.ccs       # the raw loop-thread door (zero-overhead tier)
 ```

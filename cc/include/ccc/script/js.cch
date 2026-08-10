@@ -2844,8 +2844,11 @@ CC_DECL_RESULT_SPEC(${box}, ${rt}, ${er})
  * The embedder API is C++ (mangled, version-fluid — not dlsym-able), so
  * first use compiles a small shim, embedded below, against the node
  * development headers and links libnode (Debian/Ubuntu:
- * `apt install libnode-dev`; discovery overrides: CC_NODE_INCLUDE for the
- * header directory, CC_LIBNODE for the library).  A micro probe addon,
+ * `apt install libnode-dev`; macOS Homebrew has `node.h` but not
+ * libnode — `cc_js_new(false, …)` returns "libnode not found", use
+ * `cc_js_new(true, …)` / a child node instead; discovery overrides:
+ * CC_NODE_INCLUDE for the header directory, CC_LIBNODE for the library).
+ * A micro probe addon,
  * required during bootstrap, hands its napi_env back to the shim —
  * embedders cannot mint one directly.  Both artifacts cache under
  * ~/.cache/concurrent-c/js-host (CC_JS_HOST_CACHE overrides), keyed by a
@@ -3147,6 +3150,34 @@ static const char *cc__js_host_inc(void) {
     return NULL;
 }
 
+/* Embeddable libnode — not the `node` binary.  Homebrew's node formula
+ * ships headers under include/node but no libnode.dylib; Debian/Ubuntu
+ * `libnode-dev` installs the shared library.  Without this, a header-only
+ * probe would march into a C++ compile and bury "not found" in v8 noise. */
+static int cc__js_host_have_libnode(void) {
+    const char *o = getenv("CC_LIBNODE");
+    struct stat st;
+    static const char *cands[] = {
+        "/usr/lib/libnode.so",
+        "/usr/local/lib/libnode.so",
+        "/usr/lib/aarch64-linux-gnu/libnode.so",
+        "/usr/lib/x86_64-linux-gnu/libnode.so",
+        "/usr/lib/libnode.dylib",
+        "/usr/local/lib/libnode.dylib",
+        "/opt/homebrew/lib/libnode.dylib",
+        0};
+    int i;
+    if (o && o[0]) {
+        /* `-l…` / full link line: trust the caller.  A path must exist. */
+        if (o[0] == '-') return 1;
+        return stat(o, &st) == 0;
+    }
+    for (i = 0; cands[i]; i++)
+        if (stat(cands[i], &st) == 0) return 1;
+    return system("ldconfig -p 2>/dev/null | grep -q libnode "
+                  ">/dev/null 2>&1") == 0;
+}
+
 static int cc__js_host_compile(const char *src, const char *out,
                                const char *inc, const char *libnode,
                                const char *log, const char *what) {
@@ -3183,6 +3214,13 @@ static int cc__js_host_build(char *shim_so, size_t so_cap, char *probe_node,
     if (cc__js_host_cache_dir(dir, sizeof(dir)) != 0) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                  "js: host cache dir %.360s is not writable", dir);
+        return -1;
+    }
+    if (!cc__js_host_have_libnode()) {
+        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
+                 "js: libnode not found (Homebrew node ships headers but not "
+                 "an embeddable libnode; Debian/Ubuntu: apt install "
+                 "libnode-dev; or set CC_LIBNODE to the library / -l flags)");
         return -1;
     }
     snprintf(shim_so, so_cap, "%.360s/cc_js_host_%08lx.so", dir, tag);
@@ -4761,9 +4799,7 @@ static inline bool cc_js_dom_available(_Bool isolated) {
                 return false;
         }
     }
-    if (getenv("CC_LIBNODE")) return true;
-    return system("ldconfig -p 2>/dev/null | grep -q libnode "
-                  ">/dev/null 2>&1") == 0;
+    return cc__js_host_have_libnode();
 }
 
 /* The @destroy hook; idempotent.  Polite close first (the broker exits
