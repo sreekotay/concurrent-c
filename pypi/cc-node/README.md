@@ -60,23 +60,23 @@ python -m cc_node.benchmarks.multi_domain
 | same 8MB as JSON list | 499ms (~52×) |
 
 Wire: line-JSON on dedicated fds (stdio stays yours). Bulk spill: private
-0700 dir, 0600 files, removed with the bridge. Crash isolation, not a
-sandbox — don’t eval untrusted JS.
+0700 dir, 0600 files, removed with the bridge.
 
 ## Surface
 
 - Plain data (numbers, str, bool, `None`, lists, non-empty dicts) by
-  value. Empty `{}` stays a live handle. Else: domain-owned handle
-  (attrs, calls, `str()` → `String()`). Non-finite floats are tagged.
-- Handles stay in one domain. `stats()` / `release()` / idempotent
-  `destroy()`; after close: `bridge is closed`. Teardown is cooperative;
-  CPU-bound JS isn’t cancelable — wait or kill
+  value; else a domain-owned handle (attrs, calls, `str()` →
+  `String()`). Non-finite floats are tagged.
+- Handles are per-domain. `stats()` / `release()` / idempotent
+  `destroy()`; afterwards: `bridge is closed`.
+- Crash isolation, not a sandbox. `destroy()` is cooperative; an
+  in-flight CPU-bound call finishes or you kill the child
   ([`bridge_stress.md`](https://github.com/sreekotay/concurrent-c/blob/main/stress/bridge/bridge_stress.md)).
 
 ### Promises
 
 Awaited in the child before the reply — no `async`/`await` on the
-Python side:
+Python side (opposite of `concurrent-c-python` isolated):
 
 ```python
 fetchish = js.eval('async (x) => { return { doubled: x * 2 } }')
@@ -109,12 +109,11 @@ total(array.array('d', range(1_000_000)))
 process cwd (`node_modules` next to your program), not from this wheel’s
 site-packages. `npm install lodash` in the project directory is the fix;
 or `create(node=…)` / `CC_NODE_BIN` when the wrong Node is on `PATH`.
-Missing-module errors name that cwd rule.
 
 ### Empty `{}` stays a handle
 
 An empty object has to stay on the Node side — a materialized Python
-`{}`/`dict` would lose later property use that matches Node. So
+`dict` would lose later property use that matches Node. So
 `js.eval('({})')` returns a live handle:
 
 ```python
@@ -124,22 +123,13 @@ js.eval('({a: 1})')                    # {'a': 1} — data return
 ```
 
 Non-empty plain objects still cross as Python `dict`s. Same-domain
-handles chain (`h.update(…).digest(…)`); foreign-domain handles do not.
-
-**Thenables settle in the child.** Promise-based npm APIs need no
-`async`/`await` on the Python side — the call blocks until settle (or
-raises on reject). Opposite of `concurrent-c-python` isolated, where
-every call is already a JS Promise you must await.
+handles chain (`h.update(…).digest(…)`).
 
 **Wire cost vs tiny work.** Round trip is ~100µs; a one-line JS helper
 on three numbers loses to pure Python. Prefer Python (or a native CC
 module) for small/hot work; use the bridge when Node/npm owns the kernel.
 Multi-core: `python -m cc_node.benchmarks.multi_domain` (~2.8× on 3
 domains here).
-
-**Crash isolation, not a sandbox.** The child inherits your environment
-— don’t eval untrusted JS. `destroy()` is cooperative; CPU-bound JS is
-not preemptible (wait or kill + new domain).
 
 ## Choosing node
 
@@ -177,5 +167,5 @@ gh workflow run publish-cc-node.yml
 
 Examples: `use_node`, `bench_wire`, `benchmarks.multi_domain`.  
 Stress: [`stress/bridge/`](https://github.com/sreekotay/concurrent-c/tree/main/stress/bridge).  
-Own hot path in C/CC → native module (40–90ns) instead of the wire —
+Own hot path in C/CC → native module (40–90ns) —
 [JS / Python interop](https://github.com/sreekotay/concurrent-c/blob/main/docs/js-py-modules.md).
