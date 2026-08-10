@@ -1,0 +1,21 @@
+#ifndef EMIT_RESULT_SUGAR_FACTORY_CCH
+#define EMIT_RESULT_SUGAR_FACTORY_CCH
+
+/* Multi-fn factory whose @emit payload uses T !>(E) + cc_ok/cc_err.
+ * Host materialization must rewrite each fn against its own rname — a single
+ * shared rname would cross-wire bool vs int Result ctors. */
+CC_GENERIC_FACTORY(EmitResSugar, 1) {
+    return @emit(`
+typedef struct { ${arg(0)} v; } ${mangled};
+static inline bool !>(CCError) ${mangled}_as_bool(const ${mangled} *b) {
+    if (!b) return cc_err(CC_ERR_INVALID_ARG, "null");
+    return cc_ok(b->v != (${arg(0)})0);
+}
+static inline int !>(CCError) ${mangled}_as_int(const ${mangled} *b) {
+    if (!b) return cc_err(CC_ERR_INVALID_ARG, "null");
+    return cc_ok((int)b->v);
+}
+`, arena);
+}
+
+#endif

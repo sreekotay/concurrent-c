@@ -37,6 +37,11 @@ char* cc__rewrite_result_field_sugar_text(const CCVisitorCtx* ctx, const char* s
  * Returns newly allocated string, or NULL if no rewrites. */
 char* cc__rewrite_inferred_result_constructors(const char* src, size_t n);
 
+/* Lower Result sugar in a fully-assembled host-C emit fragment (factory def or
+ * anchored @emit text): T !>(E) then per-fn cc_ok/cc_err. Does not leave new
+ * rows in cc__cg_result_specs. Returns malloc'd text, or NULL if unchanged. */
+char* cc_emit_rewrite_result_sugar(const char* src, size_t n);
+
 /* Result type registry - used by codegen to emit CC_DECL_RESULT_SPEC declarations */
 extern CCResultSpecTable cc__cg_result_specs;
 

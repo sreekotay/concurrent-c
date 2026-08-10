@@ -165,6 +165,7 @@ int cc_emit_plan_compile_generic_factories(const char* src, size_t len,
 /* Compile a registered factory dylib on first use (errors attributed at call site). */
 int cc_emit_plan_ensure_generic_factory(const char* generic_name, const char* input_path,
                                         char* err_buf, size_t err_sz);
+/* Invokes base+extensions, then lowers Result sugar on the assembled def. */
 int cc_emit_plan_invoke_generic_factory(const char* name, const char* mangled,
                                         const char type_args[8][128], int nargs,
                                         char* def_out, size_t def_cap);

@@ -226,6 +226,34 @@ void cc__cg_reset_type_registries(void) {
     cc_result_spec_table_reset(&cc__cg_result_specs);
 }
 
+char* cc_emit_rewrite_result_sugar(const char* src, size_t n) {
+    size_t saved;
+    char* typed;
+    char* ctors;
+    size_t typed_len;
+    if (!src || n == 0) return NULL;
+    /* Type rewrite registers specs into cc__cg_result_specs; emit fragments must
+     * not pollute the TU table (factories emit their own CC_DECL_RESULT_SPEC). */
+    saved = cc__cg_result_specs.count;
+    typed = cc__rewrite_result_types_text(NULL, src, n);
+    if (!typed) {
+        cc__cg_result_specs.count = saved;
+        return NULL;
+    }
+    typed_len = strlen(typed);
+    ctors = cc__rewrite_inferred_result_constructors(typed, typed_len);
+    cc__cg_result_specs.count = saved;
+    if (ctors) {
+        free(typed);
+        return ctors;
+    }
+    if (typed_len == n && memcmp(typed, src, n) == 0) {
+        free(typed);
+        return NULL;
+    }
+    return typed;
+}
+
 /* Collection of result type pairs for CC_DECL_RESULT_SPEC emission (extern in header).
  * Dynamic array: starts NULL, grows via realloc on demand. */
 CCResultSpecTable cc__cg_result_specs = {0};

@@ -3791,21 +3791,19 @@ CC_DECL_RESULT_SPEC(${box}, ${rt}, ${er})
          *     py.expose::[A]("a", &a) !> .expose::[B]("b", &b) !>;
          * A registrar that returned void would end the chain at the first
          * link and force a statement per module. */
-        /* Emit payload is host C (no Result sugar rewrite): keep mangled ABI. */
-        static CCResult_CCPyptr_CCError ${mangled}(CCPy *py, const char *name,
-                                                   const ${arg(0)} *seed) {
+        /* Host materialization lowers Result sugar (T !>(E) + cc_ok/cc_err). */
+        static CCPy* !>(CCError) ${mangled}(CCPy *py, const char *name,
+                                            const ${arg(0)} *seed) {
             /* Registration fails host-side — no interpreter, no module — so it
              * reports a plain CCError rather than a Python exception nobody
              * raised. */
             if (!py || !py->ready)
-                return cc_err_CCResult_CCPyptr_CCError(
-                    CC_ERROR(CC_ERR_INVALID_ARG, "py_expose: interpreter not ready"));
+                return cc_err(CC_ERR_INVALID_ARG, "py_expose: interpreter not ready");
             cc__py_bind_err_py(py);
             if (cc__py_register_module(name, cc__py_tbl_${mangled},
                                        (intptr_t)sizeof(${arg(0)}), seed) != 0)
-                return cc_err_CCResult_CCPyptr_CCError(
-                    CC_ERROR(CC_ERR_INTERNAL, "py_expose: module registration failed"));
-            return cc_ok_CCResult_CCPyptr_CCError(py);
+                return cc_err(CC_ERR_INTERNAL, "py_expose: module registration failed");
+            return cc_ok(py);
         }`, arena), arena);
     return cc_string_as_slice(&s);
 }

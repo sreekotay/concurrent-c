@@ -22,6 +22,7 @@
 #include "util/path.h"
 #include "util/text.h"
 #include "util/text_scan.h"
+#include "visitor/pass_type_syntax.h"
 
 static int cc__diag_line_for_pos(size_t pos);
 
@@ -745,6 +746,24 @@ int cc_emit_plan_invoke_generic_factory(const char* name, const char* mangled,
         }
     }
     cc_emit_plan_host_ctx_end();
+    /* Assembled factory text is host C; lower Result sugar here (not at
+     * @emit literal-piece time — ${} can split mid-signature). */
+    if (total > 0) {
+        char* rw = cc_emit_rewrite_result_sugar(def_out, total);
+        if (rw) {
+            size_t n = strlen(rw);
+            if (n + 1 > def_cap) {
+                fprintf(stderr,
+                        "error: result-sugar rewrite of generic factory '%s' "
+                        "exceeds %zu byte limit\n",
+                        name, def_cap);
+                free(rw);
+                return 0;
+            }
+            memcpy(def_out, rw, n + 1);
+            free(rw);
+        }
+    }
     return 1;
 }
 
@@ -1149,6 +1168,15 @@ void cc_emit_plan_host_ctx_end(void) {
     cc__host_site_pos = 0;
 }
 
+static char* cc__frag_text_result_sugar(char* text) {
+    char* rw;
+    if (!text || !text[0]) return text;
+    rw = cc_emit_rewrite_result_sugar(text, strlen(text));
+    if (!rw) return text;
+    free(text);
+    return rw;
+}
+
 static void cc__host_emit_raw_impl(int anchor, const char* ptr, size_t len,
                                    const char* origin_file, int origin_line) {
     if (!ptr || len == 0) return;
@@ -1166,7 +1194,9 @@ static void cc__host_emit_raw_impl(int anchor, const char* ptr, size_t len,
             if (nv) {
                 memcpy(nv + old_len, ptr, len);
                 nv[old_len + len] = '\0';
-                last->text = nv;
+                /* Rewrite the coalesced blob so multi-fn rname tracking sees
+                 * the full fragment (idempotent on already-mangled text). */
+                last->text = cc__frag_text_result_sugar(nv);
                 return;
             }
         }
@@ -1176,6 +1206,7 @@ static void cc__host_emit_raw_impl(int anchor, const char* ptr, size_t len,
     if (!dup) return;
     memcpy(dup, ptr, len);
     dup[len] = '\0';
+    dup = cc__frag_text_result_sugar(dup);
     CCEmitComptimeFragment* f = &cc__comptime_frags[cc__comptime_frag_count++];
     f->anchor = (CCEmitAnchor)anchor;
     f->site_pos = cc__host_site_pos;

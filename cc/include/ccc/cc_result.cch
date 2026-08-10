@@ -9,7 +9,9 @@
  *
  * Do not hand-write mangled spellings in .cch outside CC_DECL_RESULT_SPEC:
  *   CCResult_T_E, cc_ok_CCResult_T_E, CCResult_T_E_is_ok, …
- * Exception: @emit(`...`) payloads that become host C without a Result rewrite.
+ * @emit(`...`) factory/raw payloads may use T !>(E) + cc_ok/cc_err; the host
+ * lowers them at materialization (cc_emit_rewrite_result_sugar). CCRes_* remains
+ * an explicit-T,E escape hatch inside emit only.
  *
  * Lowered .h / emit may show CCResult_* / cc_is_ok / .ok — readability wins.
  * Style gate: scripts/check_result_cch_style.sh

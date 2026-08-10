@@ -1,0 +1,46 @@
+/* Multi-fn @emit Result sugar: factory payloads use T !>(E) + cc_ok/cc_err;
+ * host lowers at materialization with per-function rname tracking. */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include "emit_result_sugar_factory.cch"
+#include <stdio.h>
+
+int main(void) {
+    EmitResSugar::[int] box;
+    box.v = 7;
+
+    {
+        bool !>(CCError) br = box.as_bool();
+        if (cc_is_err(br)) {
+            fprintf(stderr, "emit_result_sugar: as_bool err\n");
+            return 1;
+        }
+        if (!cc_value(br)) {
+            fprintf(stderr, "emit_result_sugar: as_bool false\n");
+            return 2;
+        }
+    }
+    {
+        int !>(CCError) ir = box.as_int();
+        if (cc_is_err(ir)) {
+            fprintf(stderr, "emit_result_sugar: as_int err\n");
+            return 3;
+        }
+        if (cc_value(ir) != 7) {
+            fprintf(stderr, "emit_result_sugar: as_int value=%d\n", cc_value(ir));
+            return 4;
+        }
+    }
+    {
+        EmitResSugar::[int] empty;
+        empty.v = 0;
+        bool !>(CCError) br = empty.as_bool();
+        if (cc_is_err(br) || cc_value(br)) {
+            fprintf(stderr, "emit_result_sugar: zero should be ok(false)\n");
+            return 5;
+        }
+    }
+
+    printf("emit_result_sugar_factory_smoke: PASS\n");
+    return 0;
+}
