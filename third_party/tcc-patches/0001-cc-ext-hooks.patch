@@ -998,7 +998,7 @@ index 171e3622..00bd204b 100644
  #ifdef MEM_DEBUG
      tcc_memcheck(-1);
 diff --git a/tcc.h b/tcc.h
-index e7a2f1e2..674c30b1 100644
+index e7a2f1e2..b8a60742 100644
 --- a/tcc.h
 +++ b/tcc.h
 @@ -452,6 +452,104 @@ typedef struct TokenSym {
@@ -1275,6 +1275,24 @@ index e7a2f1e2..674c30b1 100644
  ST_DATA CValue tokc;
  ST_DATA const int *macro_ptr;
  ST_DATA int parse_flags;
+@@ -1872,7 +2104,7 @@ dwarf_read_uleb128(unsigned char **ln, unsigned char *end)
+ {
+     unsigned char *cp = *ln;
+     uint64_t retval = 0;
+-    int i;
++    unsigned i;
+     for (i = 0; i < DWARF_MAX_128; i++) {
+ 	uint64_t byte = dwarf_read_1(cp, end);
+         retval |= (byte & 0x7f) << (i * 7);
+@@ -1887,7 +2119,7 @@ dwarf_read_sleb128(unsigned char **ln, unsigned char *end)
+ {
+     unsigned char *cp = *ln;
+     int64_t retval = 0;
+-    int i;
++    unsigned i;
+     for (i = 0; i < DWARF_MAX_128; i++) {
+ 	uint64_t byte = dwarf_read_1(cp, end);
+         retval |= (byte & 0x7f) << (i * 7);
 diff --git a/tccgen.c b/tccgen.c
 index 50802edf..e046ceef 100644
 --- a/tccgen.c
