@@ -54,12 +54,18 @@ jobs:
       - name: Build toolchain
         run: make -C cc
 
+      # bridge_wire / cc_python_* / stress load the in-repo addon via
+      # npm/cc-python (bin/cc_python.node). Toolchain make does not build it.
+      - name: Build cc-python addon
+        run: ./cc/bin/ccc build npm/cc-python/src/cc_python.ccs -o bin/cc_python.node
+
       - name: Bridge smokes (pinned wire/package rungs)
         run: |
-          cc -O2 -Wall -Wextra tools/cc_test.c -o tools/cc_test
-          ./tools/cc_test --filter bridge_wire
-          ./tools/cc_test --filter cc_node_bridge
-          ./tools/cc_test --filter cc_python_bridge
+          mkdir -p out/tools
+          cc -O2 -Wall -Wextra -D_FILE_OFFSET_BITS=64 tools/cc_test.c -o out/tools/cc_test
+          ./out/tools/cc_test --filter bridge_wire
+          ./out/tools/cc_test --filter cc_node_bridge
+          ./out/tools/cc_test --filter cc_python_bridge
 
       - name: Bridge stress (quick tier)
         run: ./stress/bridge/run.sh
