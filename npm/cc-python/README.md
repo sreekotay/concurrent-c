@@ -28,8 +28,10 @@ py.destroy();   // one sweep: every handle, the arena, the interpreter
 Tour both modes (sync in-process + awaited isolated, including
 `await builtins.dict()` exec namespaces):
 [`examples/modes_tour.js`](examples/modes_tour.js).
-Machine-local mode costs (`RESULT` lines):
-[`benchmarks/modes_bench.js`](benchmarks/modes_bench.js).
+Machine-local mode costs (`RESULT` lines) — in-process vs isolated vs JS
+for `np.dot`, plus multi-domain overlap:
+[`benchmarks/modes_bench.js`](benchmarks/modes_bench.js)
+(`VIRTUAL_ENV=…` so in-process can see numpy).
 
 ## In-process (default) vs isolated (separate process)
 

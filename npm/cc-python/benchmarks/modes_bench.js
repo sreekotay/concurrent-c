@@ -4,11 +4,15 @@
  *
  *   node npm/cc-python/benchmarks/modes_bench.js
  *
- * In-process uses direct sync calls (not py.task). Isolated awaits.
- * Needs numpy visible to ambient python3 for the isolated rows.
+ * Dot rows time in-process (sync), isolated (await), and a pure JS loop.
+ * Point in-process at a numpy-capable runtime first, e.g.:
+ *   VIRTUAL_ENV=/path/to/venv node …/modes_bench.js
+ *   # or CC_PYTHON_VENV=/path/to/venv
  */
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
 const ccpy = require('..');
 
 function jsDot(a, b) {
@@ -27,9 +31,56 @@ function fill(n) {
   return [a, b];
 }
 
+function pickVenv() {
+  const cand = [
+    process.env.CC_PYTHON_VENV,
+    process.env.VIRTUAL_ENV,
+    path.resolve('.venv'),
+  ].filter(Boolean);
+  for (const d of cand) {
+    if (fs.existsSync(path.join(d, 'pyvenv.cfg'))) return d;
+  }
+  return null;
+}
+
 (async () => {
-  // --- sync in-process: 1k cheap math calls -----------------------------
-  {
+  // usePython must land before the first in-process create().
+  const venv = pickVenv();
+  if (venv) {
+    ccpy.usePython(venv);
+    console.log('RESULT inproc_python', venv);
+  } else {
+    console.log('RESULT inproc_python', 'ambient');
+  }
+
+  let inprocNp = null;
+  let inprocPy = null;
+  try {
+    inprocPy = ccpy.create();
+    inprocNp = inprocPy.import('numpy');
+    // touch once so a missing module fails here
+    inprocNp.dot(new Float64Array([1, 2]), new Float64Array([3, 4]));
+    console.log('RESULT inproc_numpy', 'yes');
+  } catch (e) {
+    console.log('RESULT inproc_numpy', 'no',
+                String(e.message || e).split('\n')[0].slice(0, 80));
+    if (inprocPy) {
+      try { await inprocPy.destroy(); } catch (_) { /* ignore */ }
+    }
+    inprocPy = null;
+    inprocNp = null;
+  }
+
+  // --- cheap math: in-process sync vs isolated await --------------------
+  if (inprocPy) {
+    const math = inprocPy.import('math');
+    math.sqrt(1);
+    const t0 = performance.now();
+    for (let i = 0; i < 1000; i++) math.sqrt(i + 1);
+    const ms = performance.now() - t0;
+    console.log('RESULT inproc_sqrt_1000_ms', ms.toFixed(2));
+    console.log('RESULT inproc_sqrt_us', ((ms / 1000) * 1000).toFixed(2));
+  } else {
     const py = ccpy.create();
     const math = py.import('math');
     math.sqrt(1);
@@ -41,7 +92,6 @@ function fill(n) {
     await py.destroy();
   }
 
-  // --- isolated: same 1k cheap calls (wire dominates) -------------------
   {
     const py = ccpy.create({ isolated: true });
     const math = py.import('math');
@@ -54,27 +104,49 @@ function fill(n) {
     await py.destroy();
   }
 
-  // --- isolated numpy dot vs JS, several sizes --------------------------
+  // --- np.dot: in-process vs isolated vs JS -----------------------------
   {
-    const py = ccpy.create({ isolated: true });
-    const np = py.import('numpy');
+    const iso = ccpy.create({ isolated: true });
+    const isoNp = iso.import('numpy');
     for (const n of [1e3, 1e4, 1e5, 1e6]) {
       const [a, b] = fill(n);
-      await np.dot(a, b);
       jsDot(a, b);
-      const t0 = performance.now();
-      await np.dot(a, b);
-      const npMs = performance.now() - t0;
+      await isoNp.dot(a, b);
+      if (inprocNp) inprocNp.dot(a, b);
+
+      let inMs = null;
+      if (inprocNp) {
+        const t0 = performance.now();
+        inprocNp.dot(a, b);
+        inMs = performance.now() - t0;
+      }
+
       const t1 = performance.now();
+      await isoNp.dot(a, b);
+      const isoMs = performance.now() - t1;
+
+      const t2 = performance.now();
       jsDot(a, b);
-      const jsMs = performance.now() - t1;
-      console.log('RESULT iso_dot_n', n,
-                  'numpy_ms', npMs.toFixed(3),
-                  'js_ms', jsMs.toFixed(3),
-                  'winner', npMs < jsMs ? 'numpy' : 'js');
+      const jsMs = performance.now() - t2;
+
+      const times = { js: jsMs, iso: isoMs };
+      if (inMs !== null) times.inproc = inMs;
+      let winner = 'js';
+      let best = jsMs;
+      if (inMs !== null && inMs < best) { best = inMs; winner = 'inproc'; }
+      if (isoMs < best) { best = isoMs; winner = 'iso'; }
+
+      console.log(
+        'RESULT dot_n', n,
+        'inproc_ms', inMs === null ? 'NA' : inMs.toFixed(3),
+        'iso_ms', isoMs.toFixed(3),
+        'js_ms', jsMs.toFixed(3),
+        'winner', winner);
     }
-    await py.destroy();
+    await iso.destroy();
   }
+
+  if (inprocPy) await inprocPy.destroy();
 
   // --- N isolated domains: overlap via Promise.all ----------------------
   {
