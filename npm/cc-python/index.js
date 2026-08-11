@@ -303,8 +303,21 @@ class ProcBridge {
                                              ': ' + e.message));
     this._child.on('exit', () => this._die('bridge is closed (the ' +
                                            'python child exited)'));
+    // Abrupt peer death (SIGABRT / hard kill) surfaces as stream 'error'
+    // (often ECONNRESET on Linux) before a clean EOF.  Without listeners
+    // Node throws and takes the host down; route into idempotent _die.
+    const wireDie = (side) => (e) => {
+      const code = e && e.code ? e.code : 'error';
+      this._die('bridge is closed (the python child exited; wire ' +
+                side + ' ' + code + ')');
+    };
+    if (this._child.stdio[3])
+      this._child.stdio[3].on('error', wireDie('req'));
+    if (this._child.stdio[4])
+      this._child.stdio[4].on('error', wireDie('rep'));
     const rl = readline.createInterface({ input: this._child.stdio[4] });
     rl.on('line', (line) => this._online(line));
+    rl.on('error', wireDie('rep'));
   }
 
   _die(why) {

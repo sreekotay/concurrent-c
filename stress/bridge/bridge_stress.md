@@ -94,7 +94,7 @@ Default ops: quick 200 / full 800 / soak 2000 (`FUZZ_OPS` overrides).
 | `kill_mid_spill` | green | `SIGKILL` child mid-SHM spill; no stray spill files |
 | `shared_buf_kill_sibling` | green | Same JS `Float64Array` → two isolated spills; kill A mid-flight; B completes; no strays |
 | `kill_respawn_loop` | green | Kill-to-cancel + mint replacement (correctness / RSS); latency in `js_isolated_cancel_churn.js` |
-| `abort_inject` | green | `os.abort` / `SIGABRT` on isolated children (stricter than `_exit`) |
+| `abort_inject` | green | `os.abort` / `SIGABRT` on isolated children (stricter than `_exit`); Linux wire `ECONNRESET` must hit `_die`, not crash the host |
 
 ## `cc_node_stress_wire.py` (Python → Node)
 
