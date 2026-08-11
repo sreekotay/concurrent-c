@@ -416,7 +416,25 @@ case "$MODE" in
 esac
 # No -t: keeps progress lines line-buffered in CI/logs.
 
-docker run "${DOCKER_FLAGS[@]}" "$IMAGE" \
+# Retry docker pull once on transient registry timeouts (CI flakiness).
+docker_run() {
+  local tries=0
+  while true; do
+    tries=$((tries + 1))
+    if docker run "$@"; then
+      return 0
+    fi
+    local st=$?
+    # 125 = docker daemon/client error (incl. pull timeout)
+    if [ "$st" -ne 125 ] || [ "$tries" -ge 3 ]; then
+      return "$st"
+    fi
+    echo "[$(host_ts)] docker run failed (exit 125) — retry $tries/3 after backoff…"
+    sleep $((tries * 5))
+  done
+}
+
+docker_run "${DOCKER_FLAGS[@]}" "$IMAGE" \
   bash /sanitize_bridge_inner.sh "$MODE" "$HEARTBEAT_SECS" "$SUITE_TIMEOUT"
 st=$?
 echo "[$(host_ts)] sanitize_bridge: docker exit=$st"
