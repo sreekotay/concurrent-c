@@ -49,9 +49,10 @@ All extensions are guarded by `#ifdef CONFIG_CC_EXT`.
 ## Upstream Compatibility
 
 - Submodule source: `https://github.com/sreekotay/tinycc.git`
-- Pinned CC branch: `mob`
-- Upstream baseline for patch regen: `origin/upstream-mob`
+- Superproject pin: pristine `origin/upstream-mob` (no CC commits in the gitlink)
+- Patch regen baseline: `origin/upstream-mob`
 - Extensions are isolated behind `CONFIG_CC_EXT`
 - Goal: keep changes minimal and easy to rebase
-- Push target for CC TCC changes: `origin/mob`
-- Note: `third_party/tcc` is often checked out in detached-HEAD state because the parent repo pins a specific submodule commit. When that happens, push with `git push origin HEAD:mob` or first create a local branch that tracks `origin/mob`.
+- CC hook edits ride `0001-cc-ext-hooks.patch` in this repo (`make tcc-patch-regen`);
+  the applied working tree is intentionally dirty (`.gitmodules` `ignore = dirty`)
+- Optional: experimental / upstream-bound work may live on fork `mob`; do not pin it

@@ -1,7 +1,7 @@
 [submodule "third_party/tcc"]
 	path = third_party/tcc
 	url = https://github.com/sreekotay/tinycc.git
-	branch = mob
+	branch = upstream-mob
 	ignore = dirty
 [submodule "third_party/liblfds"]
 	path = third_party/liblfds

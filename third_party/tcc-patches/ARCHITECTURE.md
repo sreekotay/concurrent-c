@@ -7,16 +7,21 @@ Concurrent-C extends TCC with a small `CONFIG_CC_EXT` surface used by libtcc
 
 ## Key Principle
 
-**TCC modifications live in a fetchable forked submodule history, and the patch file snapshots that delta against a mirrored upstream base.**
+**The submodule pin is a pristine upstream mirror. The CC delta lives only in
+this repo's patch file.**
 
 ```
-third_party/tcc/           ← Git submodule pinned to sreekotay/tinycc
-    │                        (`mob` carries the CC hook commits)
+third_party/tcc/           ← Git submodule pinned to origin/upstream-mob
+    │                        (clean TinyCC; no CC commits in the pin)
     │
-    ▼
-third_party/tcc-patches/   ← Patch snapshot vs upstream-mob
-    └── 0001-cc-ext-hooks.patch
+    ▼  make tcc-patch-apply  (working tree becomes dirty; ignore=dirty)
+third_party/tcc-patches/
+    └── 0001-cc-ext-hooks.patch   ← single upstream-mirror → tree diff
 ```
+
+No tinycc-fork pushes are required for day-to-day CC hook work. Optional fork
+`mob` history may still carry experimental or upstream-bound commits; the
+superproject does not pin them.
 
 ## Files Modified by Patches
 
@@ -32,12 +37,14 @@ product lowering no longer needed them in libtcc.
 ## Workflow
 
 ```bash
-git submodule update --init --recursive
-make tcc-patch-apply
+git submodule update --init --recursive   # pristine upstream-mob pin
+make tcc-patch-apply                      # dirty working tree
 # edit third_party/tcc/ …
-make tcc-patch-regen
-# commit patch (+ optional submodule mob push) in the parent repo
+make tcc-patch-regen                      # rewrite 0001-cc-ext-hooks.patch
+# commit the patch (+ submodule pin if upgraded) in the parent repo
 ```
+
+Upstream upgrades: bump the pin → apply → adjust → regen → `make tcc-update-check`.
 
 ## Build
 

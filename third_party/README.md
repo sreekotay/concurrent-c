@@ -60,18 +60,20 @@ submodule commit exists on your machine, gets recorded in `origin/main`, but was
 never pushed to the submodule remote. Fresh clones then fail during
 `git submodule update --init`.
 
-For `third_party/tcc`, `.gitmodules` tracks the `mob` branch of
-`https://github.com/sreekotay/tinycc.git`. If the check reports that the local
-TCC commit exists but is not reachable, publish it before pushing the
-superproject:
+For `third_party/tcc`, `.gitmodules` tracks `upstream-mob` on
+`https://github.com/sreekotay/tinycc.git` — a pristine TinyCC mirror. CC hooks
+live in `tcc-patches/` and are applied into the working tree
+(`ignore = dirty`). The gitlink must be a commit already on that remote (usually
+`origin/upstream-mob`); if check-submodules fails, fix the pin rather than
+pushing a private fork tip:
 
 ```bash
-git -C third_party/tcc push origin HEAD:mob
+git -C third_party/tcc fetch origin upstream-mob
+git -C third_party/tcc checkout -f origin/upstream-mob
+# from the superproject:
+git add third_party/tcc
 make check-submodules
 ```
-
-If the submodule pointer is wrong instead, move `third_party/tcc` back to a
-reachable commit, then `git add third_party/tcc` in the superproject.
 
 ## BearSSL
 
