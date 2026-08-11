@@ -98,7 +98,15 @@ async function raisesAsync(fn, re) {
     out('neg_inproc_proxy_keys', Array.isArray(Object.keys(math.sqrt)));
     out('neg_inproc_proxy_json',
         raisesSync(() => JSON.stringify(math.sqrt),
-                   /toJSON|no attribute|AttributeError|unsupported/));
+                   /proxy is not JSON|toJS|util\.inspect/));
+    out('neg_inproc_tojs',
+        typeof math.sqrt.toJS() === 'string' &&
+        /built-in|function|sqrt/i.test(math.sqrt.toJS()));
+    {
+      const util = require('util');
+      out('neg_inproc_inspect',
+          /built-in|function|sqrt/i.test(util.inspect(math.sqrt)));
+    }
     out('neg_inproc_proxy_alive', math.floor(3.2) === 3);
 
     // Scalar edges through a Python identity.

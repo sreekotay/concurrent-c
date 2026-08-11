@@ -140,6 +140,11 @@ function wrap(bridge, handle) {
    * Bumped on any release() so a cached proxy cannot outlive its box. */
   const attrCache = new Map();
   let cacheGen = bridge._attrCacheGen || 0;
+  const inspectCustom = Symbol.for('nodejs.util.inspect.custom');
+  /* util.inspect reads the symbol off the target (not only the get trap)
+   * for callable proxies — install both. */
+  target[inspectCustom] = () => pyCall(() =>
+    materialize(bridge, native.invoke(bridge._dom, bridge._str(), [handle])));
 
   function pyGetAttr(prop) {
     return pyCall(() => materialize(
@@ -180,8 +185,17 @@ function wrap(bridge, handle) {
     get(t, prop) {
       if (prop === HANDLE) return handle;
       if (prop === 'then') return undefined; // not a thenable
+      /* JSON.stringify looks up toJSON — refuse with a bridge message
+       * (not a Python AttributeError). No auto-toJSON that stringifies. */
+      if (prop === 'toJSON') {
+        return () => {
+          throw new Error(
+              'concurrent-c-python: proxy is not JSON; use String(p), ' +
+              'p.toJS(), or util.inspect(p)');
+        };
+      }
       if (prop === Symbol.toPrimitive || prop === 'toString' ||
-          prop === 'toJS') {
+          prop === 'toJS' || prop === inspectCustom) {
         return () => pyInvoke(bridge._str(), [handle]);
       }
       if (prop === 'toTypedArray') {
@@ -449,6 +463,10 @@ const isoFinalizers = (typeof FinalizationRegistry !== 'undefined')
 function rwrap(bridge, h, chain) {
   const target = function () {};
   target[RHANDLE] = { h, chain, bridge };
+  const inspectCustom = Symbol.for('nodejs.util.inspect.custom');
+  target[inspectCustom] = () =>
+    '[cc-python remote ' + h +
+    (chain.length ? '.' + chain.join('.') : '') + ']';
   const callp = (path, args) => bridge
     ._req(Object.assign({ op: 'callp', h, path },
                         bridge._callPayload(args || [])))
@@ -475,9 +493,20 @@ function rwrap(bridge, h, chain) {
           .then((r) => bridge._materialize(r),
                 (e) => { throw attachPyType(e); });
       }
+      if (prop === 'toJSON') {
+        return () => {
+          throw new Error(
+              'concurrent-c-python: proxy is not JSON; await String / ' +
+              'toJS / util.inspect on isolated handles');
+        };
+      }
       if (prop === Symbol.toPrimitive || prop === 'toString')
         return () => '[cc-python remote ' + h +
                      (chain.length ? '.' + chain.join('.') : '') + ']';
+      if (prop === 'toJS' || prop === inspectCustom) {
+        return () => bridge._req({ op: 'str', h, path: chain })
+          .then((r) => r.v, (e) => { throw attachPyType(e); });
+      }
       if (prop === Symbol.asyncIterator) {
         return async function () {
           const it = await callp(chain.concat('__iter__'), []);
@@ -933,6 +962,9 @@ class ProcBridge {
 function rlazy(bridge, pending, chain) {
   const target = function () {};
   target[RHANDLE] = { h: null, chain, pending, bridge };
+  const inspectCustom = Symbol.for('nodejs.util.inspect.custom');
+  target[inspectCustom] = () =>
+    '[cc-python remote .' + chain.join('.') + ']';
   return new Proxy(target, {
     get(t, prop) {
       if (prop === RHANDLE) return t[RHANDLE];
@@ -952,8 +984,19 @@ function rlazy(bridge, pending, chain) {
           bridge._req({ op: 'ta', h: r.h, path: chain })
             .then((x) => bridge._materialize(x)));
       }
+      if (prop === 'toJSON') {
+        return () => {
+          throw new Error(
+              'concurrent-c-python: proxy is not JSON; await String / ' +
+              'toJS / util.inspect on isolated handles');
+        };
+      }
       if (prop === Symbol.toPrimitive || prop === 'toString')
         return () => '[cc-python remote .' + chain.join('.') + ']';
+      if (prop === 'toJS' || prop === inspectCustom) {
+        return () => pending.then((r) =>
+          bridge._req({ op: 'str', h: r.h, path: chain }).then((x) => x.v));
+      }
       if (prop === Symbol.asyncIterator) {
         return async function () {
           const it = await pending.then((r) =>

@@ -129,8 +129,10 @@ handles chain (`const fft = await np.fft.fft(buf); await np.abs(fft)`).
   to `0`). Lone UTF-16 surrogates in strings are refused. Proxies are
   function-targets and iterable (`for…of` / `Symbol.iterator` →
   `__next__`). Exceptions with empty `str(exc)` still name the type.
-  Bridge doors (`then`, `toString` / `toTypedArray`) can shadow Python
-  names — use `builtins.getattr`.
+  Bridge doors (`then`, `toString` / `toJS` / `toTypedArray`) can shadow
+  Python names — use `builtins.getattr`. `JSON.stringify(proxy)` refuses
+  with a bridge message (no auto-`toJSON`); log with `String(p)`,
+  `p.toJS()`, or `util.inspect(p)`.
 - Isolated is crash isolation, not a sandbox. Spill files: private 0700
   dir per bridge, removed on destroy.
 
