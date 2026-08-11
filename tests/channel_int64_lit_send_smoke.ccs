@@ -1,0 +1,20 @@
+/* Integer literal send into an 8-byte element channel must coerce — not
+ * size the send temp from typeof(7) (int) and die at runtime. */
+#include <ccc/cc_runtime.cch>
+#include <stdint.h>
+
+int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
+    int64_t[~4 >] tx;
+    int64_t[~4 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
+    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+    (void)n->close_on(tx);
+    n->spawn(() => [tx] {
+        @errhandler(CCError e) cc_error_exit(e);
+        tx.send(7) !>;
+    });
+    int64_t v;
+    rx.recv(&v) !>;
+    return v == 7 ? 0 : 1;
+}

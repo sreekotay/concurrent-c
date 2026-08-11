@@ -1,0 +1,21 @@
+/* typedef long long Alias — and use the alias as a channel element type. */
+#include <ccc/cc_runtime.cch>
+
+typedef long long i64;
+
+int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
+    i64[~4 >] tx;
+    i64[~4 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
+    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+    (void)n->close_on(tx);
+    n->spawn(() => [tx] {
+        @errhandler(CCError e) cc_error_exit(e);
+        i64 eleven = 11;
+        tx.send(eleven) !>;
+    });
+    i64 v;
+    rx.recv(&v) !>;
+    return v == 11 ? 0 : 1;
+}

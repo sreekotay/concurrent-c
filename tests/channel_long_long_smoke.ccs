@@ -1,0 +1,19 @@
+/* Multi-token channel element types (`long long[~N >]`) must lower — not
+ * pass through to the host as raw sugar. */
+#include <ccc/cc_runtime.cch>
+
+int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
+    long long[~4 >] tx;
+    long long[~4 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
+    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+    (void)n->close_on(tx);
+    n->spawn(() => [tx] {
+        @errhandler(CCError e) cc_error_exit(e);
+        tx.send(7) !>;
+    });
+    long long v;
+    rx.recv(&v) !>;
+    return v == 7 ? 0 : 1;
+}

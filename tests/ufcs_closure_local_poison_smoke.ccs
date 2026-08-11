@@ -1,0 +1,21 @@
+/* Closure-body locals must not poison outer same-named UFCS receivers.
+ * Expect Acc_tag → 101, not Bcc_tag → 201. */
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+
+typedef struct Acc { int x; } Acc;
+typedef struct Bcc { int x; } Bcc;
+static int Acc_tag(Acc* self) { return 100 + self->x; }
+static int Bcc_tag(Bcc* self) { return 200 + self->x; }
+
+int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
+    Acc acc = { .x = 1 };
+    int r = acc.tag();
+    {
+        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+        n->spawn(() => { Bcc acc = { .x = 1 }; (void)acc; });
+    }
+    printf("r=%d\n", r);
+    return r == 101 ? 0 : 1;
+}
