@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# ASan-load the concurrent-c-python addon inside Linux Docker and run
-# bridge smokes. macOS SIP cannot DYLD_INSERT ASan into stock Node —
+# Sanitizer-load the concurrent-c-python addon inside Linux Docker and run
+# bridge smokes. macOS SIP cannot DYLD_INSERT ASan/TSan into stock Node —
 # this is the supported runtime path. See docs/sanitizers.md.
 #
-#   ./scripts/sanitize_bridge.sh           # mem + neg
+#   ./scripts/sanitize_bridge.sh           # mem + neg (ASan)
 #   ./scripts/sanitize_bridge.sh fuzz      # mem + seeded walk (FUZZ_SEED / FUZZ_OPS)
 #   ./scripts/sanitize_bridge.sh chaos     # + CHAOS_SCALE=quick
 #   ./scripts/sanitize_bridge.sh mem       # mem only
+#   ./scripts/sanitize_bridge.sh tsan      # mem under TSan (Node-noise suppressions)
+#   ./scripts/sanitize_bridge.sh tsan-fuzz # mem + seeded fuzz under TSan
 #   ./scripts/sanitize_bridge.sh bisect    # ordered mem-rung prefixes (ASan SEGV hunt)
 #
 # Progress: every step prints [+elapsed UTC]; long node runs emit a
@@ -85,6 +87,7 @@ ok()   { ts; echo "OK  $*"; }
 fail() { ts; echo "FAIL $*" >&2; }
 
 # Run a suite with heartbeat + hard timeout. Heartbeats show last log line.
+# Always LD_PRELOAD the sanitizer runtime for the suite command only.
 run_suite() {
   local name="$1"; shift
   local log="/tmp/sanitize_bridge_${name}.log"
@@ -111,12 +114,13 @@ run_suite() {
   # for heartbeats. Heartbeat lines go to stderr so they don't enter $log.
   set +e
   if command -v timeout >/dev/null 2>&1; then
-    timeout --signal=KILL "$SUITE_TIMEOUT" "$@" \
+    timeout --signal=KILL "$SUITE_TIMEOUT" \
+      env LD_PRELOAD="$SAN_LD_PRELOAD" "$@" \
       > >(tee -a "$log" | sed -u 's/^/    | /') \
       2> >(tee -a "$log" | sed -u 's/^/    ! /' >&2)
     local st=$?
   else
-    "$@" \
+    env LD_PRELOAD="$SAN_LD_PRELOAD" "$@" \
       > >(tee -a "$log" | sed -u 's/^/    | /') \
       2> >(tee -a "$log" | sed -u 's/^/    ! /' >&2)
     local st=$?
@@ -156,39 +160,118 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
   clang python3 python3-dev libpython3-dev >/tmp/apt-install.log 2>&1
 ok "packages installed"
 
-step "locate ASan runtime"
-ASAN_SO=$(find /usr/lib/llvm-*/lib/clang/*/lib/linux \
-  -name 'libclang_rt.asan-*.so' 2>/dev/null | head -1)
-test -n "$ASAN_SO" && test -f "$ASAN_SO"
-ok "ASAN_SO=$ASAN_SO"
+# Bookworm ships both i386 and x86_64 runtimes; `find | head` picks i386
+# first on amd64 and LD_PRELOAD silently fails (wrong ELF class).
+host_arch=$(uname -m)
+case "$host_arch" in
+  x86_64|amd64) san_arch=x86_64 ;;
+  aarch64|arm64) san_arch=aarch64 ;;
+  i386|i686) san_arch=i386 ;;
+  *) san_arch="$host_arch" ;;
+esac
 
-FLAGS='-fsanitize=address -shared-libasan -fno-omit-frame-pointer -g -O1 -fPIC'
-step "compile vendor/cc_python.c"
+SAN_KIND=asan
+case "$MODE" in
+  tsan|tsan-fuzz) SAN_KIND=tsan ;;
+esac
+
+step "locate ${SAN_KIND} runtime (arch=$san_arch)"
+SAN_SO=$(find /usr/lib/llvm-*/lib/clang/*/lib/linux \
+  -name "libclang_rt.${SAN_KIND}-${san_arch}.so" 2>/dev/null | head -1)
+test -n "$SAN_SO" && test -f "$SAN_SO"
+ok "SAN_SO=$SAN_SO"
+SAN_LIBDIR=$(dirname "$SAN_SO")
+export LD_LIBRARY_PATH="${SAN_LIBDIR}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+if [ "$SAN_KIND" = tsan ]; then
+  FLAGS='-fsanitize=thread -fno-omit-frame-pointer -g -O1 -fPIC'
+  LINK_SAN='-fsanitize=thread'
+  ADDON_OUT=/tmp/cc_python_tsan.node
+  # Node / libuv / V8 / CPython races are out of scope; keep our addon+runtime.
+  SUPP=/tmp/cc_python_tsan.supp
+  cat >"$SUPP" <<'SUPP'
+# Stock Node / V8 / libuv / CPython races are out of scope for the addon gate.
+# Keep reports whose stacks stay in our .node / runtime.
+race:^node::
+race:^v8::
+race:^uv_
+race:napi_
+called_from_lib:libpython3*
+called_from_lib:libnode*
+SUPP
+  export TSAN_OPTIONS="${TSAN_OPTIONS:-halt_on_error=1:abort_on_error=1:report_thread_leaks=0:suppressions=$SUPP}"
+else
+  FLAGS='-fsanitize=address -shared-libasan -fno-omit-frame-pointer -g -O1 -fPIC'
+  LINK_SAN='-fsanitize=address -shared-libasan'
+  ADDON_OUT=/tmp/cc_python_asan.node
+  # Fiber stack switches break ASan fake-stack / SUAR bookkeeping.
+  export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0:halt_on_error=0:abort_on_error=0:detect_stack_use_after_return=0}"
+fi
+
+step "compile vendor/cc_python.c ($SAN_KIND)"
+# shellcheck disable=SC2086
 clang $FLAGS -Inpm/cc-python/vendor/include \
   -c npm/cc-python/vendor/cc_python.c -o /tmp/tu.o
 ok "tu.o"
 
-step "compile vendor/runtime/concurrent_c.c"
+step "compile vendor/runtime/concurrent_c.c ($SAN_KIND)"
+# shellcheck disable=SC2086
 clang $FLAGS -DCC_ENABLE_ASYNC -Inpm/cc-python/vendor/include \
   -c npm/cc-python/vendor/runtime/concurrent_c.c -o /tmp/rt.o
 ok "rt.o"
 
-step "link cc_python_asan.node"
-clang -fsanitize=address -shared-libasan -shared \
-  -o /tmp/cc_python_asan.node /tmp/tu.o /tmp/rt.o -lpthread -lm -ldl
-ok "addon bytes=$(wc -c </tmp/cc_python_asan.node)"
+step "link $(basename "$ADDON_OUT")"
+# shellcheck disable=SC2086
+clang $LINK_SAN -shared \
+  -o "$ADDON_OUT" /tmp/tu.o /tmp/rt.o -lpthread -lm -ldl
+ok "addon bytes=$(wc -c <"$ADDON_OUT")"
 
-export LD_PRELOAD="$ASAN_SO"
-export CC_PYTHON_ADDON=/tmp/cc_python_asan.node
-export ASAN_OPTIONS=detect_leaks=0:halt_on_error=0:abort_on_error=0
+export CC_PYTHON_ADDON="$ADDON_OUT"
 export OPENBLAS_NUM_THREADS=1
+# Do not export LD_PRELOAD globally — TSan aborts foreign tools (ls/timeout).
+# Suites wrap node with env LD_PRELOAD=…
+export SAN_LD_PRELOAD="$SAN_SO"
 CC_LIBPYTHON=$(ls /usr/lib/*/libpython3.*.so | head -1)
 export CC_LIBPYTHON
-ok "CC_LIBPYTHON=$CC_LIBPYTHON"
+ok "CC_LIBPYTHON=$CC_LIBPYTHON SAN_KIND=$SAN_KIND LD_PRELOAD_FOR_NODE=$SAN_LD_PRELOAD"
+
 
 rc=0
 run_one() {
   if ! run_suite "$@"; then rc=1; fi
+}
+
+# TSan main must be instrumented — stock Node + LD_PRELOAD=libtsan SEGV at
+# __cxa_atexit. Prove the addon links/loads under a TSan host instead.
+run_tsan_dlopen_gate() {
+  step "TSan dlopen gate (instrumented host + addon .node)"
+  cat >/tmp/cc_python_tsan_host.c <<'HOST'
+#include <dlfcn.h>
+#include <stdio.h>
+int main(void) {
+  void *h = dlopen("/tmp/cc_python_tsan.node", RTLD_NOW);
+  if (!h) {
+    fprintf(stderr, "dlopen failed: %s\n", dlerror());
+    return 1;
+  }
+  printf("tsan_dlopen_ok\n");
+  dlclose(h);
+  return 0;
+}
+HOST
+  # shellcheck disable=SC2086
+  clang -fsanitize=thread -fno-omit-frame-pointer -g -O1 \
+    /tmp/cc_python_tsan_host.c -o /tmp/cc_python_tsan_host -ldl
+  set +e
+  /tmp/cc_python_tsan_host
+  local st=$?
+  set -e
+  if [ "$st" -ne 0 ]; then
+    fail "tsan dlopen gate exit=$st"
+    return "$st"
+  fi
+  ok "tsan dlopen gate"
+  return 0
 }
 
 case "$MODE" in
@@ -204,6 +287,30 @@ case "$MODE" in
       FUZZ_SEED="${FUZZ_SEED:-1}" FUZZ_OPS="${FUZZ_OPS:-200}" \
       node --expose-gc stress/bridge/js_python_fuzz.js
     ;;
+  tsan)
+    # Stock Node SEGV under LD_PRELOAD=libtsan (interceptor vs non-TSan
+    # main). Default gate: TSan-instrumented host dlopens the .node.
+    # Full mem/fuzz: set NODE_TSAN_BIN to a ThreadSanitizer-built node.
+    run_tsan_dlopen_gate || rc=1
+    if [ -n "${NODE_TSAN_BIN:-}" ] && [ -x "${NODE_TSAN_BIN}" ]; then
+      step "NODE_TSAN_BIN=$NODE_TSAN_BIN — running mem under TSan Node"
+      run_one mem env LD_PRELOAD= "$NODE_TSAN_BIN" --expose-gc tests/cc_python_bridge_mem.js
+    else
+      ts; echo "SKIP node mem under TSan (stock Node cannot LD_PRELOAD libtsan; set NODE_TSAN_BIN)"
+    fi
+    ;;
+  tsan-fuzz)
+    run_tsan_dlopen_gate || rc=1
+    if [ -n "${NODE_TSAN_BIN:-}" ] && [ -x "${NODE_TSAN_BIN}" ]; then
+      step "NODE_TSAN_BIN=$NODE_TSAN_BIN — running mem+fuzz under TSan Node"
+      run_one mem env LD_PRELOAD= "$NODE_TSAN_BIN" --expose-gc tests/cc_python_bridge_mem.js
+      run_one fuzz env LD_PRELOAD= CHAOS_SCALE=quick OPENBLAS_NUM_THREADS=1 \
+        FUZZ_SEED="${FUZZ_SEED:-1}" FUZZ_OPS="${FUZZ_OPS:-200}" \
+        "$NODE_TSAN_BIN" --expose-gc stress/bridge/js_python_fuzz.js
+    else
+      ts; echo "SKIP node fuzz under TSan (stock Node cannot LD_PRELOAD libtsan; set NODE_TSAN_BIN)"
+    fi
+    ;;
   chaos)
     # neg omitted here: bookworm image is CPython 3.11 (no second in-process
     # interpreter). Run `sanitize_bridge.sh neg` on 3.12+ separately.
@@ -215,6 +322,10 @@ case "$MODE" in
       node --expose-gc stress/bridge/js_python_chaos.js
     ;;
   bisect)
+    if [ "$SAN_KIND" != asan ]; then
+      fail "bisect mode requires ASan (got SAN_KIND=$SAN_KIND)"
+      exit 2
+    fi
     # Ordered prefixes of scripts/asan_mem_bisect.js (same ASan preload).
     # Prints BISECT_PREFIX_OK / BISECT_PREFIX_FAIL so the host can see the
     # first failing cumulative rung without re-pulling apt each try.
@@ -225,13 +336,13 @@ case "$MODE" in
       set +e
       if command -v timeout >/dev/null 2>&1; then
         timeout --signal=KILL "$SUITE_TIMEOUT" \
-          env BISECT_FROM=1 BISECT_TO="$n" \
+          env LD_PRELOAD="$SAN_LD_PRELOAD" BISECT_FROM=1 BISECT_TO="$n" \
           node --expose-gc scripts/asan_mem_bisect.js \
           > >(tee /tmp/bisect_${n}.log | sed -u 's/^/    | /') \
           2> >(tee -a /tmp/bisect_${n}.log | sed -u 's/^/    ! /' >&2)
         st=$?
       else
-        env BISECT_FROM=1 BISECT_TO="$n" \
+        env LD_PRELOAD="$SAN_LD_PRELOAD" BISECT_FROM=1 BISECT_TO="$n" \
           node --expose-gc scripts/asan_mem_bisect.js \
           > >(tee /tmp/bisect_${n}.log | sed -u 's/^/    | /') \
           2> >(tee -a /tmp/bisect_${n}.log | sed -u 's/^/    ! /' >&2)
@@ -247,7 +358,7 @@ case "$MODE" in
         # Isolate: rung N alone, then (N-1)+N if N>1
         step "isolate rung $n alone"
         set +e
-        env BISECT_FROM="$n" BISECT_TO="$n" \
+        env LD_PRELOAD="$SAN_LD_PRELOAD" BISECT_FROM="$n" BISECT_TO="$n" \
           node --expose-gc scripts/asan_mem_bisect.js \
           > >(sed -u 's/^/    | /') 2> >(sed -u 's/^/    ! /' >&2)
         alone=$?
@@ -257,7 +368,7 @@ case "$MODE" in
           prev=$((n - 1))
           step "isolate rungs $prev..$n"
           set +e
-          env BISECT_FROM="$prev" BISECT_TO="$n" \
+          env LD_PRELOAD="$SAN_LD_PRELOAD" BISECT_FROM="$prev" BISECT_TO="$n" \
             node --expose-gc scripts/asan_mem_bisect.js \
             > >(sed -u 's/^/    | /') 2> >(sed -u 's/^/    ! /' >&2)
           pair=$?
@@ -295,7 +406,14 @@ DOCKER_FLAGS=(--rm
   -e "FUZZ_TIMEOUT=${FUZZ_TIMEOUT:-60}"
   -e "FUZZ_HEARTBEAT_SECS=${FUZZ_HEARTBEAT_SECS:-5}"
   -e "FUZZ_PROGRESS_OPS=${FUZZ_PROGRESS_OPS:-25}"
-  -e "FUZZ_OP_TIMEOUT_MS=${FUZZ_OP_TIMEOUT_MS:-10000}")
+  -e "FUZZ_OP_TIMEOUT_MS=${FUZZ_OP_TIMEOUT_MS:-10000}"
+  -e "NODE_TSAN_BIN=${NODE_TSAN_BIN:-}")
+# TSan needs ADDR_NO_RANDOMIZE (personality); default Docker seccomp blocks it.
+case "$MODE" in
+  tsan|tsan-fuzz)
+    DOCKER_FLAGS+=(--security-opt seccomp=unconfined)
+    ;;
+esac
 # No -t: keeps progress lines line-buffered in CI/logs.
 
 docker run "${DOCKER_FLAGS[@]}" "$IMAGE" \

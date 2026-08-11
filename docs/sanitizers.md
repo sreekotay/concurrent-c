@@ -51,7 +51,10 @@ CC=clang ./cc/bin/ccc build -g npm/cc-python/src/cc_python.ccs \
 
 ```bash
 ./scripts/sanitize_bridge.sh          # mem + neg under ASan in Docker
+./scripts/sanitize_bridge.sh fuzz     # mem + seeded walk
 ./scripts/sanitize_bridge.sh chaos    # also CHAOS_SCALE=quick
+./scripts/sanitize_bridge.sh tsan     # mem under TSan
+./scripts/sanitize_bridge.sh tsan-fuzz
 ./scripts/sanitize_bridge.sh mem      # mem only
 
 # Progress / hang detection (defaults shown):
@@ -94,8 +97,26 @@ the vendored C in `npm/cc-python/vendor/` may lag `cc/shadow` HEAD.
 `scripts/sanitize_bridge.sh` emits that vendor tree on the host when missing
 (CI checkouts never ship it; the Docker mount is read-only).
 
-TSan on the addon is lower priority than ASan (lease / teardown UAF);
-Node + libpython under TSan is noisy. Prefer ASan first.
+TSan on the addon (Linux / Docker):
+
+```bash
+./scripts/sanitize_bridge.sh tsan       # TSan link + dlopen gate
+./scripts/sanitize_bridge.sh tsan-fuzz  # same (+ mem/fuzz if NODE_TSAN_BIN set)
+```
+
+Stock Node **cannot** `LD_PRELOAD` `libtsan` (SEGV in `__cxa_atexit` —
+the main executable must itself be TSan-instrumented). The default gate
+builds the `.node` with `-fsanitize=thread` and dlopens it from a small
+TSan host (`seccomp=unconfined` so TSan can `personality(ADDR_NO_RANDOMIZE)`).
+
+Full mem/fuzz under TSan needs a ThreadSanitizer-built Node:
+
+```bash
+NODE_TSAN_BIN=/path/to/tsan-node ./scripts/sanitize_bridge.sh tsan-fuzz
+```
+
+Prefer ASan first for lease / teardown UAF; TSan is the cross-thread
+companion once a TSan Node is available.
 
 ---
 

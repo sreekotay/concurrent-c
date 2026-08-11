@@ -199,7 +199,7 @@ build_run_pigz_idiomatic() {
   fi
   printf 'hello real_projects sanitize\n' >"$OUT/pigz_in.txt"
   rm -f "$OUT/pigz_in.txt.gz"
-  export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0:halt_on_error=1}"
+  export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0:halt_on_error=1:detect_stack_use_after_return=0}"
   export TSAN_OPTIONS="${TSAN_OPTIONS:-halt_on_error=1}"
   if ! run_timeout "$bin" "$OUT/pigz_in.txt"; then
     fail "pigz_idiomatic run"
@@ -247,8 +247,15 @@ build_run_redis() {
     ok "redis_idiomatic build"
     return
   fi
-  export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0:halt_on_error=1}"
+  export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0:halt_on_error=1:detect_stack_use_after_return=0}"
   export TSAN_OPTIONS="${TSAN_OPTIONS:-halt_on_error=1}"
+  # Keep sanitize redis on a single shard/worker so fiber ASan bookkeeping
+  # stays within one thread's switch stack (multi-shard CI flakes on
+  # asan_thread.cpp fake-stack CHECK).
+  if [[ "$san" == asan ]]; then
+    export CC_REDIS_SHARDS="${CC_REDIS_SHARDS:-1}"
+    export CC_WORKERS="${CC_WORKERS:-1}"
+  fi
   local out errf="$OUT/redis_smoke_${san}.err"
   local srv_errf="$OUT/redis_server_${san}.err"
   rm -f "$srv_errf"
@@ -312,7 +319,7 @@ build_run_levenshtein() {
     ok "levenshtein build"
     return
   fi
-  export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0:halt_on_error=1}"
+  export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0:halt_on_error=1:detect_stack_use_after_return=0}"
   if PYTHONPATH=bin run_timeout python3 -c \
       "import cclev; assert cclev.distance('kitten','sitting') == 3"; then
     ok "levenshtein import"
@@ -345,7 +352,7 @@ run_fuzz() {
     fail "fuzz needs pigz_idiomatic_asan"
   else
     local i crashes=0
-    export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0:halt_on_error=1}"
+    export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0:halt_on_error=1:detect_stack_use_after_return=0}"
     for i in $(seq 1 "$FUZZ_N"); do
       local f="$OUT/fuzz_in_$i.bin"
       local n=$(( (i * 97 + 13) % 8192 ))
