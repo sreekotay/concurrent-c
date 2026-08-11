@@ -207,8 +207,10 @@ past the frame; arena slices pin the arena until join.
 
 ## Arenas name a lifetime
 
-**An arena names a lifetime. Its allocation strategy is an implementation
-policy for storage belonging to that lifetime.**
+**An arena is a lifetime annotation, not an allocator strategy.** Heap vs
+stack root, slabs, and overflow are how storage for that lifetime is
+obtained — always named explicitly (`CCArena a = …`); there is no ambient
+or hidden arena.
 
 Size the root for the typical live set of that lifetime. Default heap/stack
 policy: bump in root → up to 4 slabs (~1.5×) → **heap overflow** (`malloc`,
