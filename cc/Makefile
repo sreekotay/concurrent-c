@@ -100,7 +100,24 @@ endif
 
 # Compile runtime as a single translation unit for easy linking. concurrent_c.c pulls in channel/nursery/scheduler/fiber_sched/fiber/io/string/exec and async shards when CC_ENABLE_ASYNC.
 # Note: src/tools/ is excluded - those are standalone utilities with their own main()
-SRCS := $(filter-out runtime/io_async.c runtime/channel.c runtime/nursery.c runtime/scheduler.c runtime/fiber_sched.c runtime/fiber.c runtime/async_chan.c runtime/async_runtime.c runtime/async_backend_poll.c runtime/exec.c src/tools/% src/preprocess/grammar_stub.c,$(wildcard src/*.c src/*/*.c)) runtime/concurrent_c.c
+# Legacy multipass front (driver / visitor walk / TCC parse) is not linked into ccc;
+# keep only the comptime/lower_headers visitor+parser slices listed below.
+VISITOR_KEEP_SRCS := \
+	src/visitor/pass_type_syntax.c \
+	src/visitor/pass_channel_syntax.c \
+	src/visitor/errhandler_lookup.c \
+	src/visitor/pass_err_syntax.c \
+	src/visitor/pass_result_unwrap.c \
+	src/visitor/pass_unwrap_destroy.c \
+	src/visitor/visitor_fileutil.c
+PARSER_KEEP_SRCS := src/parser/symsig.c
+LEGACY_FRONT_SRCS := $(wildcard src/visitor/*.c) $(wildcard src/parser/*.c) \
+	src/driver.c \
+	src/preprocess/cc_l2_rewriter.c \
+	src/preprocess/cc_closure_markers.c \
+	src/preprocess/source_pipeline.c
+SRCS := $(filter-out runtime/io_async.c runtime/channel.c runtime/nursery.c runtime/scheduler.c runtime/fiber_sched.c runtime/fiber.c runtime/async_chan.c runtime/async_runtime.c runtime/async_backend_poll.c runtime/exec.c src/tools/% src/preprocess/grammar_stub.c $(LEGACY_FRONT_SRCS),$(wildcard src/*.c src/*/*.c)) \
+	$(VISITOR_KEEP_SRCS) $(PARSER_KEEP_SRCS) runtime/concurrent_c.c
 # Keep our local bridge even when TCC_EXT=1; it adapts libtcc hooks into CC's AST handle.
 ifeq ($(CC_IS_TCC),1)
   OBJDIR ?= ../out/cc-tcc/obj
@@ -308,8 +325,6 @@ $(OBJDIR)/src/preprocess/grammar_rules.o: CFLAGS += -I$(ENGINE_GEN_DIR)
 # ("ccc/cc_arena.h: No such file") and incremental trees build by ordering
 # luck only.  Still acyclic: stage-1 → stamp → grammar_rules.o → full tool.
 $(OBJDIR)/src/preprocess/grammar_rules.o: $(LOWER_HEADERS_STAMP)
-# ufcs.c includes lowered <ccc/*.h> (bare @as stays in .cch only).
-$(OBJDIR)/src/visitor/ufcs.o: $(LOWER_HEADERS_STAMP)
 
 .PHONY: test-build-stub
 test-build-stub: $(WRAPPER)
@@ -391,14 +406,22 @@ $(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_CCS_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_COM
 	@test -n "$(SHADOW_LOWER_SEED_BIN)" -a -x "$(SHADOW_LOWER_SEED_BIN)" || \
 		(echo "SHADOW_LOWER_SOURCE=ccs needs an existing shadow_lower; run: make SHADOW_LOWER_SOURCE=bootstrap"; exit 1)
 	# Host-cc of emit.c prefers out/include/cc/shadow/*.h over .cch. Sync
-	# cache/build helpers + lit-coerce face so .cch edits are not shadowed by
-	# a stale last-good copy (scripts/patch_ufcs_slice_lit_face.py).
+	# face headers from .cch so edits are not shadowed by a stale last-good
+	# copy (same for shadow_build + lit-coerce patch).
 	@mkdir -p ../out/include/cc/shadow
 	@# Preserve mtimes when content is unchanged (avoids dirtying dependents).
 	@if [ ! -f ../out/include/cc/shadow/shadow_build.h ] || \
 	    ! cmp -s $(SHADOW_BUILD_CCH) ../out/include/cc/shadow/shadow_build.h; then \
 		cp -f $(SHADOW_BUILD_CCH) ../out/include/cc/shadow/shadow_build.h; \
 	fi
+	@for f in ../cc/shadow/pp_*.cch ../cc/shadow/shadow_*.cch; do \
+		[ -f "$$f" ] || continue; \
+		b=$$(basename "$$f" .cch).h; \
+		dest=../out/include/cc/shadow/$$b; \
+		if [ ! -f "$$dest" ] || ! cmp -s "$$f" "$$dest"; then \
+			cp -f "$$f" "$$dest"; \
+		fi; \
+	done
 	@if [ -f ../out/include/cc/shadow/pp_emit_ufcs.h ]; then \
 		python3 ../scripts/patch_ufcs_slice_lit_face.py; \
 	fi

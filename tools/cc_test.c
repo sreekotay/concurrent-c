@@ -766,10 +766,10 @@ static int run_one_test(const char* stem,
     }
 
     /* 1) Build via ccc build (this is the build system under test).
-     * Front: CC_TEST_FRONTEND / CC_FRONTEND = native|legacy (ccc default: native).
-     * Emit cache is keyed by source bytes + toolchain bytes; warm hits replay
-     * lowering diagnostics from emit.c.diag. Erroring emits are not cached.
-     * Do not force --no-cache for diag/fail tests — that papers over cache bugs. */
+     * ccc is native-only (shadow_lower). Emit cache is keyed by source bytes +
+     * toolchain bytes; warm hits replay lowering diagnostics from emit.c.diag.
+     * Erroring emits are not cached. Do not force --no-cache for diag/fail
+     * tests — that papers over cache bugs. */
     char build_cmd[3072];
     const char* cache_flag = use_cache ? "" : "--no-cache ";
     /* Append after ccc's default -O2 so the host sees `-O2 -O0` and last wins.
@@ -781,24 +781,17 @@ static int run_one_test(const char* stem,
 #else
     const char* o0_flag = opt_o0 ? "--cc-flags -O0 " : "";
 #endif
-    const char* front_flag = "";
-    {
-        const char* fe = getenv("CC_TEST_FRONTEND");
-        if (!fe || !fe[0]) fe = getenv("CC_FRONTEND");
-        if (fe && strcmp(fe, "native") == 0) front_flag = "--frontend=native ";
-        else if (fe && strcmp(fe, "legacy") == 0) front_flag = "--frontend=legacy ";
-    }
     if (ldflags_clean[0]) {
         snprintf(build_cmd, sizeof(build_cmd),
-                 "./cc/bin/ccc build %s%s%s--out-dir %s --bin-dir %s --link %s -o %s --ld-flags \"%s\"",
-                 cache_flag, front_flag, o0_flag,
+                 "./cc/bin/ccc build %s%s--out-dir %s --bin-dir %s --link %s -o %s --ld-flags \"%s\"",
+                 cache_flag, o0_flag,
                  (out_dir && out_dir[0]) ? out_dir : "out",
                  (bin_dir && bin_dir[0]) ? bin_dir : "bin",
                  input_path, bin_out, ldflags_clean);
     } else {
         snprintf(build_cmd, sizeof(build_cmd),
-                 "./cc/bin/ccc build %s%s%s--out-dir %s --bin-dir %s --link %s -o %s",
-                 cache_flag, front_flag, o0_flag,
+                 "./cc/bin/ccc build %s%s--out-dir %s --bin-dir %s --link %s -o %s",
+                 cache_flag, o0_flag,
                  (out_dir && out_dir[0]) ? out_dir : "out",
                  (bin_dir && bin_dir[0]) ? bin_dir : "bin",
                  input_path, bin_out);
@@ -1022,7 +1015,6 @@ static void usage(const char* prog) {
     fprintf(stderr, "  --full   include stress/lostwake/race tests (also CC_TEST_FULL=1)\n");
     fprintf(stderr, "  --O0     host-compile test bins with -O0 (faster cold builds; also CC_TEST_O0=1)\n");
     fprintf(stderr, "  c_pp_*   shadow_lower smokes skipped unless CC_TEST_SHADOW=1 or --filter c_pp_\n");
-    fprintf(stderr, "  Front:   CC_TEST_FRONTEND=native|legacy (or CC_FRONTEND) → ccc --frontend=\n");
 }
 
 int main(int argc, char** argv) {

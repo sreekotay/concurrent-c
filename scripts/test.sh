@@ -14,10 +14,8 @@ set -euo pipefail
 #   --quick            explicit default (no-op unless paired with conflicting FULL)
 #   --O0 / -O0         host-compile harness bins with -O0 (faster cold builds)
 #   CC_TEST_O0=1       same as --O0
-#   --native           pin harness to native (ccc default; explicit)
-#   --legacy           pin harness to legacy front (CC_TEST_FRONTEND=legacy)
-#   --compare-front    run the harness twice (legacy then native) and print wall times
-#   CC_TEST_FRONTEND=native|legacy   same as --native / --legacy
+#   --native           no-op (ccc is native-only)
+#   --legacy / --compare-front  removed (exit 2)
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
@@ -34,8 +32,6 @@ fi
 # Default: quick. Full is opt-in. Front default: native (ccc default).
 quick=1
 full=0
-front=native
-compare_front=0
 opt_o0=0
 case "${CC_TEST_FULL:-0}" in
   1|yes|true|TRUE|Yes) full=1 ;;
@@ -47,8 +43,11 @@ case "${CC_TEST_O0:-0}" in
   1|yes|true|TRUE|Yes) opt_o0=1 ;;
 esac
 case "${CC_TEST_FRONTEND:-}" in
-  native) front=native ;;
-  legacy) front=legacy ;;
+  ''|native) ;;
+  *)
+    echo "[test] CC_TEST_FRONTEND=${CC_TEST_FRONTEND}: ccc is native-only" >&2
+    exit 2
+    ;;
 esac
 # Strip front flags before handing argv to cc_test; keep --quick/--full/--O0.
 args=()
@@ -57,9 +56,11 @@ for a in "$@"; do
     --quick) quick=1; full=0; args+=("$a") ;;
     --full)  full=1; args+=("$a") ;;
     --O0|-O0) opt_o0=1; args+=("--O0") ;;
-    --native) front=native ;;
-    --legacy) front=legacy ;;
-    --compare-front) compare_front=1 ;;
+    --native) ;; # no-op
+    --legacy|--compare-front)
+      echo "[test] $a removed: ccc is native-only (shadow_lower)" >&2
+      exit 2
+      ;;
     *) args+=("$a") ;;
   esac
 done
@@ -127,10 +128,8 @@ fi
 # wrapper remaining while the real binary is gone.
 need_cc=0
 if [ ! -x "./cc/bin/.ccc-bin" ]; then need_cc=1; fi
-if [ "$front" = "native" ] || [ "$compare_front" = 1 ]; then
-  if [ ! -x "./out/cc/bin/shadow_lower" ] && [ ! -x "./cc/bin/shadow_lower" ]; then
-    need_cc=1
-  fi
+if [ ! -x "./out/cc/bin/shadow_lower" ] && [ ! -x "./cc/bin/shadow_lower" ]; then
+  need_cc=1
 fi
 if [ "$need_cc" = 0 ] && [ -x "./cc/bin/ccc" ]; then
   if ! ./cc/bin/ccc __eval-const --selftest >/dev/null 2>&1; then
@@ -142,11 +141,9 @@ if [ "$need_cc" = 1 ]; then
   make -C cc all
 fi
 
-if [ "$front" = "native" ] || [ "$compare_front" = 1 ]; then
-  if [ ! -x "./out/cc/bin/shadow_lower" ] && [ ! -x "./cc/bin/shadow_lower" ]; then
-    echo "[test] FAIL: native front needs shadow_lower (make -C cc failed?)"
-    exit 1
-  fi
+if [ ! -x "./out/cc/bin/shadow_lower" ] && [ ! -x "./cc/bin/shadow_lower" ]; then
+  echo "[test] FAIL: needs shadow_lower (make -C cc failed?)"
+  exit 1
 fi
 
 # D3.0: exercise the in-process constexpr seam (cc_tcc_eval_const_expr) — a
@@ -161,18 +158,6 @@ if [ -x "./cc/bin/ccc" ]; then
   if ! sh scripts/test_cli.sh; then
     echo "[test] CLI selftest FAILED"
     exit 1
-  fi
-  # Legacy-only seams (reparse dumps / @noblock lying-decl warnings). Skip
-  # on the default native gate; run under --legacy or CC_TEST_FRONTEND=legacy.
-  if [ "$front" = "legacy" ]; then
-    if ! sh scripts/test_reparse_sanitize.sh; then
-      echo "[test] reparse sanitize selftest FAILED"
-      exit 1
-    fi
-    if ! sh scripts/test_autoblock_noblock_warn.sh; then
-      echo "[test] autoblock noblock warning selftest FAILED"
-      exit 1
-    fi
   fi
   # Full SERDES goldens/recipes: scripts/test_shadow.sh (not this gate).
 
@@ -220,67 +205,30 @@ if [ -x "./cc/bin/ccc" ]; then
       echo "[test] redis functional smoke FAILED"
       exit 1
     fi
-    if [ "$front" = "native" ]; then
-      if ! sh scripts/test_shadow_real_projects.sh; then
-        echo "[test] native real-projects smoke FAILED"
-        exit 1
-      fi
+    if ! sh scripts/test_shadow_real_projects.sh; then
+      echo "[test] native real-projects smoke FAILED"
+      exit 1
     fi
   else
     echo "[test] quick: skipped async_line_map / diag_cache / variant_shape / tcc_patch / redis_functional / native_real"
   fi
 fi
 
-now_s() {
-  python3 -c 'import time; print(f"{time.perf_counter():.3f}")'
-}
-
-run_harness() {
-  local_front="$1"
-  shift
-  export CC_TEST_FRONTEND="$local_front"
-  export CC_FRONTEND="$local_front"
-  # shellcheck disable=SC2086
-  "$CC_TEST_BIN" $extra "$@"
-}
-
-if [ "$compare_front" = 1 ]; then
-  echo "[test] compare-front: legacy then native (same harness args)"
-  t0="$(now_s)"
-  set +e
-  # shellcheck disable=SC2086
-  run_harness legacy "$@"
-  rc_leg=$?
-  set -e
-  t1="$(now_s)"
-  set +e
-  # shellcheck disable=SC2086
-  run_harness native "$@"
-  rc_nat=$?
-  set -e
-  t2="$(now_s)"
-  leg_s="$(python3 -c "print(f'{float('$t1')-float('$t0'):.1f}')")"
-  nat_s="$(python3 -c "print(f'{float('$t2')-float('$t1'):.1f}')")"
-  ratio="$(python3 -c "a=float('$nat_s'); b=float('$leg_s'); print(f'{a/b:.2f}x' if b>0 else 'n/a')")"
-  echo ""
-  echo "[test] compare-front summary"
-  echo "  legacy: ${leg_s}s  rc=$rc_leg  ($(CC_FRONTEND=legacy ./cc/bin/ccc --v 2>/dev/null | head -1))"
-  echo "  native: ${nat_s}s  rc=$rc_nat  (${ratio} of legacy wall time)  ($(CC_FRONTEND=native ./cc/bin/ccc --v 2>/dev/null | head -1))"
-  if [ "$rc_leg" -ne 0 ] || [ "$rc_nat" -ne 0 ]; then
-    exit 1
-  fi
-  exit 0
-fi
-
-echo "[test] frontend=$front (CC_TEST_FRONTEND / ccc --frontend)"
-export CC_TEST_FRONTEND="$front"
-export CC_FRONTEND="$front"
+unset CC_TEST_FRONTEND
+# Reject stale env that would make ccc exit 2 mid-harness.
+case "${CC_FRONTEND:-}" in
+  ''|native) ;;
+  *)
+    echo "[test] CC_FRONTEND=${CC_FRONTEND}: ccc is native-only" >&2
+    exit 2
+    ;;
+esac
 
 set +e
 # shellcheck disable=SC2086
 "$CC_TEST_BIN" $extra "$@"
 rc=$?
 set -e
-ver="$(CC_FRONTEND="$front" ./cc/bin/ccc --v 2>/dev/null | head -1)"
-echo "[test] ccc: ${ver:-unknown} (frontend=$front)"
+ver="$(./cc/bin/ccc --v 2>/dev/null | head -1)"
+echo "[test] ccc: ${ver:-unknown} (native)"
 exit "$rc"

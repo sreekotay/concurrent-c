@@ -1,19 +1,17 @@
 # CC Compiler Source
 
-**Default product front** is native (`shadow_lower`), not the visitor tree
-here. Sources: `cc/shadow/`. Driver dispatch: `cc_main.c`
-(`--frontend=native|legacy`).
+**Product front** is native (`shadow_lower`). Sources: `cc/shadow/`.
+Driver: `cc_main.c` (native-only; `--frontend=legacy` is a hard error).
 
-Subdirectories used by the **legacy** multipass front (`--frontend=legacy`):
+Subdirectories:
 
-- `lexer/` — CC token/lex overlay that hooks into TCC
-- `parser/` — CC grammar overlay
-- `ast/` — CC-specific node metadata (side-tables)
-- `visitor/` — text-rewrite + stub-AST visitor passes (legacy only)
-- `preprocess/` — P-passes / L2 rewriter shared with some native comptime seams
+- `parser/` — `symsig` (signature queries for comptime / lower_headers)
+- `ast/` — CC-specific node metadata used by remaining sugar helpers
+- `visitor/` — text sugar used by `lower_headers` / comptime (`pass_*_syntax`,
+  unwrap/destroy, errhandler lookup) — not a product front
+- `preprocess/` — comptime seam, emit plan, variant/type registry
 - `comptime/` — comptime evaluator + monomorph instantiation cache
-- `codegen/` — C emission helpers used by the legacy path
-- `diag/` — diagnostics; many `CC_DEBUG_*` vars apply to the legacy reparse path
+- `diag/` — diagnostics
+- `util/` — shared helpers
 
-Shared with both fronts: `cc_main.c` (driver), `util/`, parts of `comptime/`
-and `preprocess/` (e.g. `libshadow_comptime.a` for `@comptime` on native).
+`cc_main.c` dispatches `.ccs` / `.shcc` to `shadow_lower`.

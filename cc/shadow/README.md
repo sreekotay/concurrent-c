@@ -17,7 +17,7 @@ active hardening (not changing that spine):
    sysroot/no-runtime/dry-run; driver handles `build.cc` / `-D` / dumps /
    `--compile` (host `-D` forward).
 
-Default `ccc` is native. Opt out with `--frontend=legacy` only for archaeology.
+Default `ccc` is native-only (`shadow_lower`). `--frontend=legacy` is removed.
 
 `shadow_lower` is the product tool: emit text, host-cc build with emit/obj
 cache under `out/.cc-build/native/`, or `--exe` (libtcc from the emit buffer).
@@ -229,7 +229,7 @@ into the TCC-heavy driver until the transform boundary is boring.
 ## Working rules
 
 - Goldens on every emit/parse change; host `cc -c` on mini products
-- Default `ccc` is native; opt out with `--frontend=legacy` / `CC_FRONTEND=legacy`
+- Default `ccc` is native-only (`shadow_lower`); `--frontend=legacy` is removed
 - Grow **emit/lower** whitelist, not a general C parser
 - Nested stmt lists stay on `AstNode.body[]` (do not append into
   `kids_storage` while a parent list is still open)

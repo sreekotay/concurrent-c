@@ -5,9 +5,8 @@
 **Audience:** anyone changing how `.ccs` / `.cch` become C, or proposing a
 redesign of that path.
 
-The older multipass text-rewrite / TCC stub-AST front is opt-out
-(`--frontend=legacy`). Its ADR is
-[`LEGACY_ARCHITECTURE.md`](LEGACY_ARCHITECTURE.md).
+The multipass text-rewrite / TCC stub-AST front has been removed; `ccc` is
+native-only (`shadow_lower`).
 
 Operational detail, file layout, gaps, and promote workflow live in
 [`cc/shadow/README.md`](../../cc/shadow/README.md). Bootstrap snapshots:
@@ -52,7 +51,6 @@ by policy; that is not a second lowering IR.
 | What each source file owns | [cc/shadow/README.md](../../cc/shadow/README.md) Layout |
 | Bootstrap / promote | [bootstrap README](../bootstrap/shadow_lower/README.md) |
 | What's still missing | shadow_lower README **Next gaps** |
-| Legacy multipass why/shape | [`LEGACY_ARCHITECTURE.md`](LEGACY_ARCHITECTURE.md) |
 | `@grammar` / wire SERDES | [`spec/cc_serdes.md`](../../spec/cc_serdes.md) |
 
 ---
@@ -231,13 +229,12 @@ native with no snapshot.
 comptime / `--exe` / driver parse hooks — not the everyday lower→run path.
 **Rejected:** Making libtcc the succession metric for "native is done."
 
-### ADR-S6: Legacy front is opt-out, not a parallel product story
+### ADR-S6: Native-only product front
 
-**Decision:** Default `ccc` is **native** (`shadow_lower`).
-`--frontend=legacy` remains for archaeology only (reparse dumps, visitor-only
-warnings). Snapshot / `shadow_lower.sh` use the native binary — no legacy
-chicken-egg emit path.
-**Rejected:** Dual-default confusion; silent fallback between fronts.
+**Decision:** `ccc` is **native-only** (`shadow_lower`). The multipass
+visitor / TCC stub-AST front is removed; `--frontend=legacy` /
+`CC_FRONTEND=legacy` are hard errors.
+**Rejected:** Dual-front; silent fallback between fronts.
 
 ---
 

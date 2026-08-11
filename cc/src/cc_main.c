@@ -17,13 +17,21 @@
 #include "build/build.h"
 #include "build/host_cc_profile.h"
 #include <ccc/cc_build_helpers.h>
-#include "driver.h"
+#include "comptime/symbols.h"
 #include "diag/diag.h"
 #include "visitor/pass_common.h"
 #include "preprocess/preprocess.h"
 #include "preprocess/script_entry.h"
 #include "preprocess/script_oneliner.h"
 #include "comptime/const_eval.h"
+
+/* The legacy multipass front (driver.c / driver.h) has been removed; ccc is
+ * native-only (shadow_lower). This typedef used to live in driver.h and only
+ * carries build.cc-preloaded comptime consts through the driver. */
+typedef struct {
+    const CCConstBinding* consts;
+    size_t const_count;
+} CCCompileConfig;
 
 // Forward decls for helpers used by multiple modes.
 static int file_exists(const char* path);
@@ -758,8 +766,8 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --bin-dir DIR       Output dir for linked executables (default: <repo>/bin)\n");
     fprintf(stderr, "  --out-stem NAME     Override the basename/stem used for generated files\n");
     fprintf(stderr, "  --no-cache          Disable incremental cache (also: CC_NO_CACHE=1)\n");
-    fprintf(stderr, "  --frontend=native|legacy  Front end (default native; also: CC_FRONTEND)\n");
-    fprintf(stderr, "  --version, --v, -V  Print version (native 0.3.x; legacy 0.1.x)\n");
+    fprintf(stderr, "  --frontend=native   Front end (native only; also: CC_FRONTEND=native)\n");
+    fprintf(stderr, "  --version, --v, -V  Print version\n");
     fprintf(stderr, "  --timeout SECONDS   Kill run/test step after timeout\n");
     fprintf(stderr, "  --verbose           Print invoked commands\n");
     fprintf(stderr, "One-liners:\n");
@@ -1661,6 +1669,9 @@ static void cc__replay_diag_sidecar(const char* c_out_path) {
     fclose(f);
 }
 
+static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path);
+
+/* Emit .ccs/.shcc via native shadow_lower (legacy multipass driver removed). */
 static int cc__compile_with_env(const CCBuildOptions* opt, const char* in_path, const char* out_path, const CCCompileConfig* cfg) {
     cc__apply_user_include_env(opt ? opt->cc_flags : NULL);
     if (g_emit_c_inspect) {
@@ -1715,7 +1726,53 @@ static int cc__compile_with_env(const CCBuildOptions* opt, const char* in_path, 
             }
         }
 
-        int rc = cc_compile_with_config(in_path, out_path, cfg);
+        int rc = -1;
+        if (!in_path ||
+            !(cc__ends_with(in_path, ".ccs") || cc__ends_with(in_path, ".shcc"))) {
+            fprintf(stderr,
+                    "cc: internal error: CC lowering only accepts .ccs/.shcc "
+                    "(got %s); the legacy multipass front has been removed\n",
+                    in_path ? in_path : "(null)");
+        } else {
+            CCBuildOptions local_opt;
+            char flags_buf[2048];
+            flags_buf[0] = '\0';
+            if (opt) {
+                local_opt = *opt;
+            } else {
+                memset(&local_opt, 0, sizeof(local_opt));
+                local_opt.mode = CC_MODE_EMIT_C;
+                local_opt.out_dir = g_out_root;
+                local_opt.bin_dir = g_bin_root;
+                /* Multi-file / target paths preload consts into cfg; fold as -D. */
+                if (cfg && cfg->consts && cfg->const_count > 0) {
+                    size_t flen = 0;
+                    for (size_t i = 0; i < cfg->const_count; ++i) {
+                        int n;
+                        if (!cfg->consts[i].name || !cfg->consts[i].name[0]) continue;
+                        if (cfg->consts[i].value == 1) {
+                            n = snprintf(flags_buf + flen, sizeof(flags_buf) - flen,
+                                         "%s-D%s", flen ? " " : "", cfg->consts[i].name);
+                        } else {
+                            n = snprintf(flags_buf + flen, sizeof(flags_buf) - flen,
+                                         "%s-D%s=%lld", flen ? " " : "",
+                                         cfg->consts[i].name,
+                                         cfg->consts[i].value);
+                        }
+                        if (n < 0 || (size_t)n >= sizeof(flags_buf) - flen) {
+                            fprintf(stderr, "cc: cfg -D flags too long for native emit\n");
+                            flags_buf[0] = '\0';
+                            break;
+                        }
+                        flen += (size_t)n;
+                    }
+                    if (flags_buf[0]) local_opt.cc_flags = flags_buf;
+                }
+            }
+            local_opt.in_path = in_path;
+            local_opt.c_out_path = out_path;
+            rc = cc__run_shadow_lower(&local_opt, out_path);
+        }
 
         long cap_len = 0;
         if (saved_err >= 0) {
@@ -2766,43 +2823,45 @@ static int cc__load_const_bindings(const CCBuildOptions* opt, CCConstBinding* bi
 static void cc__print_comptime_targets(const char* build_path);
 static void cc__print_comptime_state(const CCBuildOptions* opt, const char* build_path, const CCConstBinding* bindings, size_t count);
 
-/* Native (shadow_lower) is the default front. Opt out: --frontend=legacy.
- * -1 = unset (env/default), 0 = legacy, 1 = native. */
-static int g_frontend_native = -1;
-
-/* Legacy front stays on 0.1.x; native (default) is 0.3.x. */
-#define CCC_VERSION_LEGACY "0.1.0-dev"
+/* ccc is native-only (shadow_lower). The legacy multipass front is removed;
+ * `--frontend=legacy` / `CC_FRONTEND=legacy` are hard errors. */
 #define CCC_VERSION_NATIVE "0.3.2"
 
 static int cc__set_frontend_name(const char* v) {
     if (!v || !v[0]) return -1;
-    if (strcmp(v, "native") == 0) {
-        g_frontend_native = 1;
-        return 0;
-    }
+    if (strcmp(v, "native") == 0) return 0;
     if (strcmp(v, "legacy") == 0) {
-        g_frontend_native = 0;
-        return 0;
+        fprintf(stderr,
+                "cc: --frontend=legacy has been removed; the legacy multipass "
+                "front no longer exists. ccc is native-only (omit --frontend "
+                "or pass --frontend=native).\n");
+        exit(2);
     }
-    fprintf(stderr, "cc: --frontend must be native or legacy (got %s)\n", v);
+    fprintf(stderr, "cc: --frontend must be native (got %s); the legacy front "
+                    "has been removed\n", v);
     return -1;
 }
 
+/* Native front is the only front. Retained so call sites read clearly; a
+ * `CC_FRONTEND=legacy` in the environment is a hard error, not a silent
+ * fallback. */
 static int cc__want_native_front(void) {
-    if (g_frontend_native == 1) return 1;
-    if (g_frontend_native == 0) return 0;
-    {
-        const char* e = getenv("CC_FRONTEND");
-        if (!e || !e[0]) return 1; /* default: native */
-        if (strcmp(e, "legacy") == 0) return 0;
-        if (strcmp(e, "native") == 0) return 1;
-        fprintf(stderr, "cc: CC_FRONTEND must be native or legacy (got %s)\n", e);
+    const char* e = getenv("CC_FRONTEND");
+    if (e && e[0] && strcmp(e, "native") != 0) {
+        if (strcmp(e, "legacy") == 0) {
+            fprintf(stderr,
+                    "cc: CC_FRONTEND=legacy has been removed; the legacy "
+                    "multipass front no longer exists. ccc is native-only.\n");
+        } else {
+            fprintf(stderr, "cc: CC_FRONTEND must be native (got %s)\n", e);
+        }
         exit(2);
     }
+    return 1;
 }
 
 static const char* cc__version_string(void) {
-    return cc__want_native_front() ? CCC_VERSION_NATIVE : CCC_VERSION_LEGACY;
+    return CCC_VERSION_NATIVE;
 }
 
 static void cc__print_version(void) {
@@ -2814,14 +2873,16 @@ static int cc__arg_is_version(const char* a) {
                  strcmp(a, "-V") == 0);
 }
 
-/* Light scan so `ccc --frontend=legacy --version` reports 0.1.x.
+/* Scan so `ccc --frontend=legacy --version` hard-errors before printing.
+ * Also rejects `CC_FRONTEND=legacy` in the environment (same hard error).
  * Returns -1 on unknown frontend name (already diagnosed). */
 static int cc__scan_frontend_flags(int argc, char** argv) {
     int i;
+    (void)cc__want_native_front(); /* env hard-error */
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--frontend") == 0) {
             if (i + 1 >= argc) {
-                fprintf(stderr, "cc: --frontend requires native|legacy\n");
+                fprintf(stderr, "cc: --frontend requires native\n");
                 return -1;
             }
             i++;
@@ -3233,7 +3294,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             return 0;
         }
         fprintf(stderr,
-                "cc: --frontend=native supports --link, --emit-c-only, and "
+                "cc: native front supports --link, --emit-c-only, and "
                 "--compile (unknown mode)\n");
         return -1;
     }
@@ -4302,7 +4363,7 @@ static int run_build_mode(int argc, char** argv) {
         if (strcmp(argv[i], "--no-cache") == 0) { no_cache = 1; continue; }
         if (strcmp(argv[i], "--frontend") == 0) {
             if (i + 1 >= argc) {
-                fprintf(stderr, "cc: --frontend requires native|legacy\n");
+                fprintf(stderr, "cc: --frontend requires native\n");
                 goto parse_fail;
             }
             ++i;
@@ -6562,7 +6623,7 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--no-cache") == 0) { no_cache = 1; continue; }
         if (strcmp(argv[i], "--frontend") == 0) {
             if (i + 1 >= argc) {
-                fprintf(stderr, "cc: --frontend requires native|legacy\n");
+                fprintf(stderr, "cc: --frontend requires native\n");
                 usage(argv[0]);
                 return 1;
             }

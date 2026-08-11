@@ -1,9 +1,9 @@
 # CC_DEBUG_* environment variables (I6)
 
-> **Mostly legacy front.** These variables instrument the multipass
-> text-rewrite / reparse path (`--frontend=legacy`). Default native
-> (`shadow_lower`) does not use the Phase-N reparse loop; use
+> **Historical.** These variables instrumented the removed multipass
+> text-rewrite / reparse path. `ccc` is native (`shadow_lower`); use
 > `ccc --emit-c-inspect` / `out/.cc-build/native/` for that front.
+> Remaining preprocess/comptime seams may still honor a subset.
 
 All debug output uses the prefix `[cc:<phase>]`.
 
@@ -24,13 +24,3 @@ All debug output uses the prefix `[cc:<phase>]`.
 
 CLI: `--show-lowered=<phase>` dumps the post-phase buffer to stderr (I7).
 `--emit-c-inspect[=PATH]` writes the merged translation unit for inspection.
-
-## Retired
-
-| Variable | Status |
-|----------|--------|
-| `CC_BATCH_PHASE3=1` | Removed 2026-05-28. Two-stage batched Phase 3 is now the only path; UFCS in stage 1, closure_calls + autoblock + await_normalize in stage 2. See [PIPELINE.md](../visitor/PIPELINE.md). |
-| `CC_PRE_EXPAND` | Inert (collapsed 2026-05-29). CPP pre-expand is now the only initial-parse path; the opt-out has no effect. |
-| `CC_PRE_EXPAND_REPARSE` | Removed 2026-05-26. Was an opt-in CPP-expand of the final reparse buffer; broke AST/visitor coordinate alignment. |
-
-See [COMPILER_CLEANUP_STATUS.md](../../docs/COMPILER_CLEANUP_STATUS.md).
