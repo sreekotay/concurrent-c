@@ -1,5 +1,10 @@
 churn_stats_flat true
 churn_rss_flat true
+float_return_handles_flat true
+float_return_rss_bounded true
+float_return_rss_plateau true
+float_sqrt_handles_flat true
+float_sqrt_rss_bounded true
 gc_churn_stats true
 domain_churn_compute true
 domain_churn_rss true

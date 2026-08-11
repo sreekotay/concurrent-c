@@ -1099,6 +1099,18 @@ static void ccpy__job_tag(CcPyDom *d, CcPyJob *j, CCPyObj val) {
         }
         if (cc__py.ErrClear) cc__py.ErrClear();
     }
+    /* Exact float before i64 — as_i64 on a float used to raise TypeError
+     * and arena-copy the diagnostic even when the caller discarded it. */
+    if (cc__py_is_exact_float(val.o)) {
+        CCResult_double_CCPyError fv = cc_py_obj_as_f64(&val);
+        if (fv.ok) {
+            j->rkind = 0;
+            j->rf = fv.u.value;
+            cc_py_obj_release(&val);
+            return;
+        }
+        if (cc__py.ErrClear) cc__py.ErrClear();
+    }
     {
         CCResult_int64_t_CCPyError iv = cc_py_obj_as_i64(&val);
         if (iv.ok) {
@@ -3211,6 +3223,18 @@ static int ccpy__tojs_scalar(CcPyDom *d, void *env, void *o, void **out) {
         if (s) return cc__js.CreateStringUtf8(env, s, (size_t)n, out);
         if (cc__py.ErrClear) cc__py.ErrClear();
     }
+    /* Exact float before i64 — avoids a discarded TypeError probe that
+     * previously grew the domain arena on every float scalar. */
+    if (cc__py_is_exact_float(o)) {
+        CCPyObj tmp;
+        CCResult_double_CCPyError fv;
+        tmp.o = o;
+        tmp.home = &d->py;
+        fv = cc_py_obj_as_f64(&tmp);
+        if (fv.ok) return cc__js.CreateDouble(env, fv.u.value, out);
+        if (cc__py.ErrClear) cc__py.ErrClear();
+        return 1;
+    }
     {
         CCPyObj tmp;
         CCResult_int64_t_CCPyError iv;
@@ -3535,6 +3559,17 @@ static int ccpy__result_to_js(CcPyDom *d, void *env, CCPyObj r, void **out) {
         const char *s = cc__py.AsUTF8AndSize(o, &n);
         if (s) {
             int rc = cc__js.CreateStringUtf8(env, s, (size_t)n, out);
+            cc_py_obj_release(&r);
+            return rc;
+        }
+        if (cc__py.ErrClear) cc__py.ErrClear();
+    }
+    /* Exact float before i64 — avoids a discarded TypeError probe that
+     * previously grew the domain arena on every float scalar. */
+    if (cc__py_is_exact_float(o)) {
+        CCResult_double_CCPyError fv = cc_py_obj_as_f64(&r);
+        if (fv.ok) {
+            int rc = cc__js.CreateDouble(env, fv.u.value, out);
             cc_py_obj_release(&r);
             return rc;
         }

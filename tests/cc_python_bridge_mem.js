@@ -32,6 +32,49 @@ const ccpy = require(process.cwd() + '/npm/cc-python');
     py.destroy();
   }
 
+  // 1b. Float scalar materialize must not leave durable probe diagnostics
+  //     in the domain arena.  Previously as_i64→TypeError→cc__py_err
+  //     arena-copied ~100 B per successful float return.  Acceptance:
+  //     1e6 float returns, handle ledger delta 0, RSS plateaus.
+  {
+    const py = ccpy.create();
+    const b = py.import('builtins');
+    b.exec('def rf(x):\n  return x + 0.5\n');
+    const rf = b.eval('rf');
+    const math = py.import('math');
+    /* Warm paths; pin the few long-lived proxies we keep. */
+    for (let i = 0; i < 1000; i++) {
+      rf(i);
+      math.sqrt(i + 1);
+    }
+    await gcNow();
+    const h0 = py.stats();
+    const samples = [];
+    samples.push(rss());
+    const N = 1000000;
+    const step = 250000;
+    for (let i = 0; i < N; i++) {
+      rf(i);
+      if ((i + 1) % step === 0) samples.push(rss());
+    }
+    const h1 = py.stats();
+    out('float_return_handles_flat', h1 === h0);
+    const grow = samples[samples.length - 1] - samples[0];
+    /* Absolute bound (was ~100 MB / 1e6 before the fix). */
+    out('float_return_rss_bounded', grow < 32 * MB);
+    /* Plateau: second half must not keep climbing like the old leak. */
+    const mid = samples[Math.floor(samples.length / 2)];
+    const end = samples[samples.length - 1];
+    out('float_return_rss_plateau', end - mid < 16 * MB);
+
+    const h2 = py.stats();
+    const rSqrt0 = rss();
+    for (let i = 0; i < N; i++) math.sqrt(i + 1);
+    out('float_sqrt_handles_flat', py.stats() === h2);
+    out('float_sqrt_rss_bounded', rss() - rSqrt0 < 32 * MB);
+    py.destroy();
+  }
+
   // 2. GC-only churn: mint thousands of proxies, drop them, and let the
   //    finalizers do the releasing.
   {

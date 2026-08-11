@@ -6367,6 +6367,57 @@ static inline CCPyObj !>(CCPyError) cc_py_list_f64(CCPy *py, CCSlice xs) {
     return cc__py_obj_or_err(py, list, "list_f64");
 }
 
+/* Scalar conversion failure: short message in the thread errbuf only.
+ * Do not copy into `cc__py_err_arena` — bridges probe as_i64 then as_f64
+ * (and discard the first error), and durable arena copies there become a
+ * domain-lifetime leak on every successful float return. Real invoke /
+ * attribute failures still use `cc__py_err` (arena + traceback). */
+static CCPyError cc__py_err_convert(const char *ctx) {
+    CCPyError e;
+    memset(&e, 0, sizeof(e));
+    if (cc__py.lib && cc__py.ErrOccurred && cc__py.ErrOccurred()) {
+        void *t = NULL, *v = NULL, *tb = NULL;
+        cc__py.ErrFetch(&t, &v, &tb);
+        if (cc__py.ErrNormalize) cc__py.ErrNormalize(&t, &v, &tb);
+        {
+            void *s = v ? cc__py.Str(v) : NULL;
+            const char *msg = NULL;
+            intptr_t n = 0;
+            const char *tn = NULL;
+            intptr_t tnl = 0;
+            void *nm = NULL;
+            if (s) msg = cc__py.AsUTF8AndSize(s, &n);
+            if (t) {
+                nm = cc__py.GetAttrString(t, "__name__");
+                if (nm) tn = cc__py.AsUTF8AndSize(nm, &tnl);
+            }
+            if (tn && tnl > 0 && msg && n > 0)
+                snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                         "python: %s: %.*s: %.*s", ctx, (int)tnl, tn,
+                         (int)n, msg);
+            else if (tn && tnl > 0)
+                snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                         "python: %s: %.*s", ctx, (int)tnl, tn);
+            else
+                snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                         "python: %s: %s", ctx, msg ? msg : "unknown error");
+            if (nm) cc__py.DecRef(nm);
+            if (s) cc__py.DecRef(s);
+        }
+        if (t) cc__py.DecRef(t);
+        if (v) cc__py.DecRef(v);
+        if (tb) cc__py.DecRef(tb);
+        cc__py.ErrClear();
+        e.base = CC_ERROR(CC_ERR_USER, cc__py_errbuf);
+        return e;
+    }
+    if (!cc__py_errbuf[0])
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: %s failed", ctx);
+    e.base = CC_ERROR(CC_ERR_USER, cc__py_errbuf);
+    return e;
+}
+
 static inline double !>(CCPyError) cc_py_obj_as_f64(CCPyObj *obj) {
     double v;
     cc__py_bind_err_obj(obj);
@@ -6385,7 +6436,7 @@ static inline double !>(CCPyError) cc_py_obj_as_f64(CCPyObj *obj) {
         return cc_err(cc__py_err("as_f64"));
     v = cc__py.FloatAsDouble(obj->o);
     if (v == -1.0 && cc__py.ErrOccurred())
-        return cc_err(cc__py_err("as_f64"));
+        return cc_err(cc__py_err_convert("as_f64"));
     return cc_ok(v);
 }
 
@@ -6414,9 +6465,22 @@ static inline int64_t !>(CCPyError) cc_py_obj_as_i64(CCPyObj *obj) {
     }
     if (!obj->o)
         return cc_err(cc__py_err("as_i64"));
+    /* Exact float: never an integer. Reject without LongAsLongLong —
+     * that raises TypeError and, via cc__py_err, used to arena-copy the
+     * diagnostic on every speculative probe from result materialize. */
+    if (cc__py_is_exact_float(obj->o)) {
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: as_i64: a float is not an integer");
+        {
+            CCPyError e;
+            memset(&e, 0, sizeof(e));
+            e.base = CC_ERROR(CC_ERR_USER, cc__py_errbuf);
+            return cc_err(e);
+        }
+    }
     v = cc__py.LongAsLongLong(obj->o);
     if (v == -1 && cc__py.ErrOccurred())
-        return cc_err(cc__py_err("as_i64"));
+        return cc_err(cc__py_err_convert("as_i64"));
     return cc_ok((int64_t)v);
 }
 
@@ -6426,20 +6490,35 @@ static inline int64_t !>(CCPyError) cc_py_obj_as_i64(CCPyObj *obj) {
  * CCPyError. */
 static inline int64_t !>(CCPyError) cc__py_obj_take_i64(
         CCPyObj *o, const char *method) {
-    int64_t !>(CCPyError) v = cc_py_obj_as_i64(o);
-    if (!v.ok) {
+    /* Prefer the float path for exact floats — skip the failing i64 probe. */
+    if (o && o->o && cc__py_is_exact_float(o->o)) {
         double !>(CCPyError) d = cc_py_obj_as_f64(o);
-        if (d.ok) {
-            if (d.u.value >= -9223372036854775808.0 &&
-                d.u.value < 9223372036854775808.0)
-                return cc_ok((int64_t)d.u.value);
-            snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
-                     "python: %s: result out of range for integer destination",
-                     method);
-            return cc_err(cc__py_err(method));
-        }
+        if (!d.ok) return cc_err(d.u.error);
+        if (d.u.value >= -9223372036854775808.0 &&
+            d.u.value < 9223372036854775808.0)
+            return cc_ok((int64_t)d.u.value);
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: %s: result out of range for integer destination",
+                 method);
+        return cc_err(cc__py_err(method));
     }
-    return v;
+    {
+        int64_t !>(CCPyError) v = cc_py_obj_as_i64(o);
+        if (!v.ok) {
+            double !>(CCPyError) d = cc_py_obj_as_f64(o);
+            if (d.ok) {
+                if (d.u.value >= -9223372036854775808.0 &&
+                    d.u.value < 9223372036854775808.0)
+                    return cc_ok((int64_t)d.u.value);
+                snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                         "python: %s: result out of range for integer "
+                         "destination",
+                         method);
+                return cc_err(cc__py_err(method));
+            }
+        }
+        return v;
+    }
 }
 
 /* Destination-typed call variants: `.ufcs_dynamic2` resolution composes
