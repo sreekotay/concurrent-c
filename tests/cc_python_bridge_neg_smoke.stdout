@@ -30,6 +30,8 @@ neg_inproc_tojs_one_materializer true
 neg_inproc_tojs_bigint_throw true
 neg_inproc_tojs_set_path true
 neg_inproc_tojs_cycle true
+neg_inproc_js_cycle_arg true
+neg_inproc_err_flatten true
 neg_inproc_keys_win true
 neg_inproc_gopd_accessor true
 neg_inproc_scalar_nan true

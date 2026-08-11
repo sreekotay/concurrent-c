@@ -107,12 +107,14 @@ without a release.
 After `destroy()` / child exit, `import` and calls reject with
 `bridge is closed` — they do not mint a proxy that fails only later.
 
-### Stdout / `print`
+### Stdout / `print` / environ
 
-In-process, Python’s `print` / `sys.stdout` are the same fds as Node —
-fine for debugging, easy to corrupt a parent that parses its own
-stdout. Redirect in Python (`contextlib.redirect_stdout`), or use
-`create({ isolated: true })` when you need a clean child pipe.
+In-process, Python shares Node’s process: `print` / `sys.stdout` are the
+same fds, and `os.environ["X"] = ...` is live `process.env.X` (locale and
+other process-global state too). Fine for trusted code; easy to corrupt
+proxy/TLS/DNS knobs or a parent that parses stdout. Redirect in Python
+(`contextlib.redirect_stdout`), or use `create({ isolated: true })` when
+you need a trust boundary — **in-process Python is your process**.
 
 **Isolated calls are Promises — await them.** This fails encode:
 
@@ -257,8 +259,11 @@ means keywords.
 
 ## `async def` and callbacks
 
-A task that returns a coroutine runs on the lane’s asyncio loop (lazy
-on first use):
+**Do not `await` an in-process coroutine proxy.** That would look like
+transparent async, but the same thenable-hijack defense that refuses
+unawaited Promises on the sync path is what would make it work — so a
+bare coroutine stays an unscheduled handle. Schedule with `py.task`
+(lane asyncio) or `asyncio.run` on the Python side:
 
 ```js
 b.exec(`

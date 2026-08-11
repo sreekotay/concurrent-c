@@ -413,16 +413,45 @@ static CcPyMethodDefMirror ccpy__cb_def = {
     "JavaScript function held by a cc-python bridge",
 };
 
-/* Pending-exception text, coerced to a string; clears the exception. */
+/* Pending-exception text, coerced to a string; clears the exception.
+ * Prefer `.message` over CoerceToString — the latter yields
+ * "Error: leaf" / "RangeError: …", which then re-wraps as
+ * RuntimeError: Error: … on every Py↔JS hop and telescopes. */
+static void ccpy__flatten_cross_err(char *buf, size_t cap) {
+    for (;;) {
+        size_t n = strlen(buf);
+        const char *p = buf;
+        size_t strip = 0;
+        (void)cap;
+        if (n >= 14 && strncmp(p, "RuntimeError: ", 14) == 0) strip = 14;
+        else if (n >= 16 && strncmp(p, "python: invoke: ", 16) == 0)
+            strip = 16;
+        else if (n >= 7 && strncmp(p, "Error: ", 7) == 0) strip = 7;
+        else break;
+        memmove(buf, buf + strip, n - strip + 1);
+    }
+}
+
 static void ccpy__js_exc_text(void *env, char *buf, size_t cap) {
     void *exc = NULL;
     void *str = NULL;
+    void *msg = NULL;
     size_t got = 0;
+    int mt = 0;
     snprintf(buf, cap, "callback threw");
     if (cc__js.GetAndClearLastException(env, &exc) != 0 || !exc) return;
+    if (cc__js.GetNamedProperty &&
+        cc__js.GetNamedProperty(env, exc, "message", &msg) == 0 && msg &&
+        cc__js.Typeof(env, msg, &mt) == 0 && mt == CC__JS_T_STRING &&
+        cc__js.GetValueStringUtf8(env, msg, buf, cap, &got) == 0 && got > 0) {
+        ccpy__flatten_cross_err(buf, cap);
+        return;
+    }
     if (cc__js.CoerceToString(env, exc, &str) != 0 || !str) return;
     if (cc__js.GetValueStringUtf8(env, str, buf, cap, &got) != 0)
         snprintf(buf, cap, "callback threw");
+    else
+        ccpy__flatten_cross_err(buf, cap);
 }
 
 static void *ccpy__bigint_to_py(CcPyDom *d, void *env, void *v, int async,
@@ -828,17 +857,30 @@ static void *ccpy__cb_then_err(void *env, void *info) {
     void *data = NULL;
     CcJsCbReq *req;
     void *str = NULL;
+    void *msg = NULL;
     size_t got = 0;
+    int mt = 0;
     argv[0] = NULL;
     if (cc__js.GetCbInfo(env, info, &argc, argv, NULL, &data) != 0 || !data)
         return NULL;
     req = (CcJsCbReq *)data;
     if (req->done) return NULL;
     snprintf(req->errmsg, sizeof(req->errmsg), "callback promise rejected");
-    if (argc && argv[0] &&
-        cc__js.CoerceToString(env, argv[0], &str) == 0 && str)
-        (void)cc__js.GetValueStringUtf8(env, str, req->errmsg,
-                                        sizeof(req->errmsg), &got);
+    if (argc && argv[0]) {
+        if (cc__js.GetNamedProperty &&
+            cc__js.GetNamedProperty(env, argv[0], "message", &msg) == 0 &&
+            msg &&
+            cc__js.Typeof(env, msg, &mt) == 0 && mt == CC__JS_T_STRING &&
+            cc__js.GetValueStringUtf8(env, msg, req->errmsg,
+                                      sizeof(req->errmsg), &got) == 0 &&
+            got > 0) {
+            /* kept .message */
+        } else if (cc__js.CoerceToString(env, argv[0], &str) == 0 && str) {
+            (void)cc__js.GetValueStringUtf8(env, str, req->errmsg,
+                                            sizeof(req->errmsg), &got);
+        }
+        ccpy__flatten_cross_err(req->errmsg, sizeof(req->errmsg));
+    }
     req->failed = 1;
     ccpy__cb_conclude(req->box->dom, req);
     return NULL;
@@ -1276,6 +1318,13 @@ static void ccpy__exc_text(CcPyDom *d, void *exc, char *buf, size_t cap) {
         snprintf(buf, cap, "%.*s: %.*s", (int)tl, tn, (int)ml, ms);
     else if (tn) snprintf(buf, cap, "%.*s", (int)tl, tn);
     else snprintf(buf, cap, "python task failed");
+    ccpy__flatten_cross_err(buf, cap);
+    /* If flattening ate a duplicated Type: prefix, restore one type label. */
+    if (tn && tl > 0 && strncmp(buf, tn, (size_t)tl) != 0) {
+        char rest[240];
+        snprintf(rest, sizeof(rest), "%s", buf);
+        snprintf(buf, cap, "%.*s: %s", (int)tl, tn, rest);
+    }
     if (msg) cc__py.DecRef(msg);
     if (nm) cc__py.DecRef(nm);
     if (cls) cc__py.DecRef(cls);

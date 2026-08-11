@@ -169,6 +169,34 @@ async function raisesAsync(fn, re) {
       out('neg_inproc_tojs_cycle',
           raisesSync(() => cyc.toJS(), /cycle detected/));
 
+      // JS circular args must refuse before blowing the call stack.
+      {
+        const o = {};
+        o.self = o;
+        out('neg_inproc_js_cycle_arg',
+            raisesSync(() => builtins.type(o), /circular reference/));
+      }
+
+      // Multi-hop callback errors must not telescope
+      // RuntimeError: Error: python: invoke: RuntimeError: …
+      {
+        builtins.exec('def boom(f):\n  return f()\n', g);
+        const boom = builtins.eval('boom', g);
+        let n = 0;
+        function bad() {
+          n++;
+          if (n < 5) return boom(bad);
+          throw new Error('leaf');
+        }
+        let msg = '';
+        try { boom(bad); } catch (e) { msg = String(e.message); }
+        out('neg_inproc_err_flatten',
+            /leaf/.test(msg) &&
+            (msg.match(/RuntimeError/g) || []).length <= 1 &&
+            (msg.match(/python:\s*invoke:/g) || []).length <= 1 &&
+            !/RuntimeError:\s*Error:\s*python:/.test(msg));
+      }
+
       const keyed = builtins.eval('{"keys": 1, "get": 2}', g);
       out('neg_inproc_keys_win',
           keyed.keys === 1 && keyed.get === 2);

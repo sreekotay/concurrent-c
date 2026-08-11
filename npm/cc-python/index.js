@@ -114,25 +114,40 @@ function wrapHostCallback(bridge, fn) {
   return wrapped;
 }
 /* Plain arrays/objects cross as list/dict; Set/Map/Date/class instances
- * refuse (no silent empty-dict / wrong-shape conversion). */
-function assertBridgeValue(a) {
+ * refuse (no silent empty-dict / wrong-shape conversion).  Cycle + depth
+ * guards must run in JS — a circular object otherwise blows the raw call
+ * stack before the native nesting check can fire. */
+function assertBridgeValue(a, stack) {
   if (a === null || a === undefined) return;
   const t = typeof a;
   if (t !== 'object') return;
   if (a[HANDLE]) return;
   if (ArrayBuffer.isView(a)) return;
-  if (Array.isArray(a)) {
-    for (let i = 0; i < a.length; i++) assertBridgeValue(a[i]);
-    return;
+  if (!stack) stack = [];
+  if (stack.length > 32)
+    throw new Error('cc-python: argument nesting exceeds 32 levels');
+  for (let i = 0; i < stack.length; i++) {
+    if (stack[i] === a)
+      throw new Error(
+          'cc-python: unsupported argument (circular reference)');
   }
-  const proto = Object.getPrototypeOf(a);
-  if (proto !== Object.prototype && proto !== null) {
-    throw new Error(
-        'cc-python: unsupported argument (pass numbers, BigInt, strings, ' +
-        'booleans, null/undefined, plain arrays/objects, typed arrays, ' +
-        'or bridge handles)');
+  stack.push(a);
+  try {
+    if (Array.isArray(a)) {
+      for (let i = 0; i < a.length; i++) assertBridgeValue(a[i], stack);
+      return;
+    }
+    const proto = Object.getPrototypeOf(a);
+    if (proto !== Object.prototype && proto !== null) {
+      throw new Error(
+          'cc-python: unsupported argument (pass numbers, BigInt, strings, ' +
+          'booleans, null/undefined, plain arrays/objects, typed arrays, ' +
+          'or bridge handles)');
+    }
+    for (const k of Object.keys(a)) assertBridgeValue(a[k], stack);
+  } finally {
+    stack.pop();
   }
-  for (const k of Object.keys(a)) assertBridgeValue(a[k]);
 }
 
 function prepareArg(bridge, a) {
@@ -159,10 +174,27 @@ function rethrowImportHint(err, isolated) {
   throw attachPyType(e);
 }
 
+function flattenCrossErrMessage(msg) {
+  let s = String(msg || '');
+  for (;;) {
+    const m = /^(?:RuntimeError:\s*|Error:\s*|python:\s*invoke:\s*)+/i
+        .exec(s);
+    if (!m) break;
+    s = s.slice(m[0].length);
+  }
+  return s;
+}
+
 /* Surface Python exception class on the Error: `.pyType` and, when the
  * napi `code` was still a CC_ERR_* badge, replace it with the class name. */
 function attachPyType(err) {
   if (!err || typeof err !== 'object') return err;
+  if (err.message) {
+    const flat = flattenCrossErrMessage(err.message);
+    if (flat && flat !== err.message) {
+      try { err.message = flat; } catch (e) { /* ignore */ }
+    }
+  }
   if (err.pyType) return err;
   let ty = null;
   if (typeof err.code === 'string' && err.code && !/^CC_ERR_/.test(err.code) &&
@@ -172,6 +204,10 @@ function attachPyType(err) {
     const m = /python:\s*[^:]+:\s*([A-Za-z_][A-Za-z0-9_]*)\b/
         .exec(String(err.message || ''));
     if (m) ty = m[1];
+  }
+  if (!ty) {
+    const m = /^([A-Za-z_][A-Za-z0-9_]*)\b/.exec(String(err.message || ''));
+    if (m && /Error$|Exception$|Exit$/.test(m[1])) ty = m[1];
   }
   if (!ty) return err;
   try { err.pyType = ty; } catch (e) { /* ignore */ }
