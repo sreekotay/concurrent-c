@@ -1,72 +1,87 @@
-/* Isolated JS domains: JS→CC sync callbacks on the wire ({$f} / cb / cbr). */
+/* js_fn: CC host callables into JS (hosted napi mint + isolated wire). */
 #include <ccc/std/prelude.cch>
 #include <ccc/script/js.cch>
 #include <stdio.h>
 #include <string.h>
 
-static int add40(void *ctx, const CCJsDomVal *args, int argc,
-                 CCJsDomVal *out) {
-    long long x;
-    (void)ctx;
-    if (argc < 1 || args[0].kind != CC__JS_DOM_K_NUM) {
-        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
-                 "add40: expected a number");
-        return -1;
-    }
-    x = args[0].num_is_int ? args[0].inum : (long long)args[0].num;
-    memset(out, 0, sizeof(*out));
-    out->dom = args[0].dom;
-    out->kind = CC__JS_DOM_K_NUM;
-    out->num_is_int = 1;
-    out->inum = x + 40;
-    out->num = (double)out->inum;
-    return 0;
+static CCJsDomVal !>(CCJsError) add40(long long add, const CCJsDomVal *args,
+                                      int argc) {
+    @errhandler(CCJsError e) { return cc_err(e); }
+    if (argc < 1)
+        return cc_err(cc_js_host_error("add40: expected a number"));
+    long long x = cc_js_dom_val_as_i64((CCJsDomVal *)&args[0]) !>;
+    return cc_ok(cc_js_i64(args[0].dom, x + add));
 }
 
-static int boom(void *ctx, const CCJsDomVal *args, int argc,
-                CCJsDomVal *out) {
-    (void)ctx;
+static CCJsDomVal !>(CCJsError) boom(CCJsDomHostUserdata userdata,
+                                     const CCJsDomVal *args, int argc) {
+    (void)userdata;
     (void)args;
     (void)argc;
-    (void)out;
-    snprintf(cc__js_errbuf, sizeof(cc__js_errbuf), "from cc");
-    return -1;
+    return cc_err(cc_js_host_error("from cc"));
 }
 
-int main(void) {
+static int run_domain(CCJsDom *js, const char *tag) {
     @errhandler(CCJsError e) {
-        fprintf(stderr, "fatal: %s\n", e.base.message);
+        fprintf(stderr, "%s: %s\n", tag,
+                e.base.message ? e.base.message : "?");
         return 1;
     }
 
-    CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+    /* apply(f, x) => f(x) + 1; host fn returns arg+40 → 42. */
+    js->exec("globalThis.apply = (f, x) => f(x) + 1") !>;
+    CCJsDomVal g = js->eval("globalThis") !> @destroy;
+    long long got = g.apply(js_fn(add40, 40), 1LL) !>;
+    printf("%s_apply %s\n", tag, got == 42 ? "true" : "false");
+    if (got != 42) return 1;
 
-    if (!cc_js_dom_available(true)) {
-        printf("SKIP (no node on PATH)\n");
+    /* Host fn failure → JS throw → Result error with the message. */
+    js->exec("globalThis.call = (f) => f()") !>;
+    CCJsDomVal bad = g.call(js_fn(boom, NULL)) !>(e) {
+        int ok = e.base.message && strstr(e.base.message, "from cc") != NULL;
+        printf("%s_error %s\n", tag, ok ? "true" : "false");
+        if (!ok)
+            fprintf(stderr, "message: %s\n",
+                    e.base.message ? e.base.message : "(null)");
+        return ok ? 0 : 1;
+    } @destroy;
+    (void)bad;
+    printf("%s_error false\n", tag);
+    return 1;
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
+    CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+    int rc = 0;
+    int any = 0;
+
+    if (cc_js_dom_available(false)) {
+        CCJsDom js = cc_js_new(false, &a) !> @destroy;
+        rc |= run_domain(&js, "hosted");
+        any = 1;
+    } else {
+        printf("hosted_apply SKIP\n");
+        printf("hosted_error SKIP\n");
+    }
+
+    if (cc_js_dom_available(true)) {
+        CCJsDom js = cc_js_new(true, &a) !> @destroy;
+        rc |= run_domain(&js, "iso");
+        any = 1;
+    } else {
+        printf("iso_apply SKIP\n");
+        printf("iso_error SKIP\n");
+    }
+
+    if (!any) {
+        printf("SKIP (no libnode and no node on PATH)\n");
         return 0;
     }
 
-    CCJsDom js = cc_js_new(true, &a) !> @destroy;
-
-    /* apply(f, x) => f(x) + 1; host fn returns arg+40 → 42. */
-    js.exec("globalThis.apply = (f, x) => f(x) + 1") !>;
-    CCJsDomVal g = js.eval("globalThis") !> @destroy;
-    long long got = g.apply(js_dom_fn(add40, NULL), 1LL) !>;
-    printf("apply_cb %s\n", got == 42 ? "true" : "false");
-
-    /* Host fn failure → JS throw → Result error with the message. */
-    js.exec("globalThis.call = (f) => f()") !>;
-    {
-        CCResult_CCJsDomVal_CCJsError r =
-            cc_js_dom_val_callm(&g, "call", 1,
-                                CC_JS_DOM_ARG(js_dom_fn(boom, NULL)));
-        int ok = !r.ok && r.u.error.base.message &&
-                 strstr(r.u.error.base.message, "from cc") != NULL;
-        printf("cb_error %s\n", ok ? "true" : "false");
-        if (!ok && !r.ok)
-            fprintf(stderr, "cb_error message: %s\n", r.u.error.base.message);
-    }
-
     printf("clean_exit true\n");
-    return 0;
+    return rc;
 }

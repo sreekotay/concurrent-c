@@ -119,6 +119,13 @@ typedef struct CCPy {
     /* sys.getrefcount, resolved once — the py_buf retained-export check
      * runs per view, and importing sys per call was most of its cost. */
     void *sys_getrefcount;
+    /* Host callables passed into Python (`py_fn`): isolated wire table +
+     * inproc mint boxes that outlive a single call when Python retains them. */
+    struct { void *fn; void *userdata; long long userdata_i64; int is_i64; } *cbs;
+    size_t cbs_cap;
+    long long next_cb;
+    int cb_depth;
+    struct CC__PyFnBox *fn_boxes;
 } CCPy;
 
 typedef struct CCPyObj {
@@ -132,6 +139,18 @@ typedef struct CCPyObj {
     int b;       /* kind BOOL */
     CCSlice text; /* kind STR / RAW */
 } CCPyObj;
+
+/* `py_fn` typedefs follow CCResult_CCPyObj_CCPyError. */
+static long long cc__py_fn_add(CCPy *d, void *fn, void *userdata,
+                               long long userdata_i64, int is_i64);
+static void cc__py_fn_kill_boxes(CCPy *d);
+static void *cc__py_fn_mint(CCPy *d, void *fn, void *userdata,
+                            long long userdata_i64, int is_i64,
+                            char *errbuf, size_t errcap);
+
+#ifndef CC__PY_MAX_CALL_ARGS
+#define CC__PY_MAX_CALL_ARGS 64
+#endif
 
 /* Transport + value kinds for dual-tier Python (in-process vs child). */
 #define CC__PY_TIER_INPROC 0
@@ -170,6 +189,92 @@ CC_DECL_RESULT_SPEC(CCResult_CCPyptr_CCError, CCPy*, CCError)
 #define CCResult_CCPyObj_CCPyError_DEFINED 1
 CC_DECL_RESULT_SPEC(CCResult_CCPyObj_CCPyError, CCPyObj, CCPyError)
 #endif
+
+/* Sync Python→CC callable (`py_fn`).  Return `CCPyObj !>(CCPyError)`: Ok
+ * value crosses back to Python; Err becomes a Python exception.  Works on
+ * both in-process (minted CFunction) and process-isolated (`{$f}` wire).
+ * `py_fn(fn, userdata)` picks the host ABI from userdata's type: integer
+ * scalars are passed by value (`CCPyHostFnI64`); pointers use
+ * `CCPyHostFn`.  `CCPyHostUserdata` is `void *` under a typedef so host
+ * bodies can use the `T !>(E)` return spelling (a leading `void *`
+ * parameter is parsed as a `(void)` prototype). */
+typedef void *CCPyHostUserdata;
+typedef CCResult_CCPyObj_CCPyError (*CCPyHostFn)(CCPyHostUserdata userdata,
+                                                 const CCPyObj *args,
+                                                 int argc);
+typedef CCResult_CCPyObj_CCPyError (*CCPyHostFnI64)(long long userdata,
+                                                    const CCPyObj *args,
+                                                    int argc);
+
+typedef struct CCPyFn {
+    void *fn;               /* CCPyHostFn or CCPyHostFnI64 */
+    void *userdata;         /* pointer form */
+    long long userdata_i64; /* by-value integer form */
+    int is_i64;
+} CCPyFn;
+
+#define py_fn(FN, USERDATA)                                                   \
+    _Generic((USERDATA),                                                      \
+        int: ((CCPyFn){(void *)(CCPyHostFnI64)(FN), NULL,                     \
+                       (long long)(USERDATA), 1}),                            \
+        long: ((CCPyFn){(void *)(CCPyHostFnI64)(FN), NULL,                    \
+                        (long long)(USERDATA), 1}),                           \
+        long long: ((CCPyFn){(void *)(CCPyHostFnI64)(FN), NULL,               \
+                             (long long)(USERDATA), 1}),                      \
+        unsigned int: ((CCPyFn){(void *)(CCPyHostFnI64)(FN), NULL,            \
+                                (long long)(USERDATA), 1}),                   \
+        unsigned long: ((CCPyFn){(void *)(CCPyHostFnI64)(FN), NULL,           \
+                                 (long long)(USERDATA), 1}),                  \
+        unsigned long long: ((CCPyFn){(void *)(CCPyHostFnI64)(FN), NULL,      \
+                                      (long long)(USERDATA), 1}),             \
+        default: ((CCPyFn){(void *)(CCPyHostFn)(FN),                          \
+                           (void *)(uintptr_t)(USERDATA), 0, 0}))
+
+/* Host-side failure without touching cc__py_errbuf. */
+static inline CCPyError cc_py_host_error(const char *msg) {
+    CCPyError e;
+    memset(&e, 0, sizeof(e));
+    e.base = CC_ERROR(CC_ERR_INTERNAL, msg ? msg : "python: py_fn: callback failed");
+    return e;
+}
+
+/* Ok mints for host-fn returns (and anywhere a materialized scalar is enough). */
+static inline CCPyObj cc_py_i64(CCPy *home, long long v) {
+    CCPyObj out;
+    memset(&out, 0, sizeof(out));
+    out.home = home;
+    out.kind = CC__PY_K_NUM;
+    out.num_is_int = 1;
+    out.inum = v;
+    out.num = (double)v;
+    return out;
+}
+static inline CCPyObj cc_py_f64(CCPy *home, double v) {
+    CCPyObj out;
+    memset(&out, 0, sizeof(out));
+    out.home = home;
+    out.kind = CC__PY_K_NUM;
+    out.num_is_int = 0;
+    out.num = v;
+    out.inum = (long long)v;
+    return out;
+}
+static inline CCPyObj cc_py_bool(CCPy *home, int b) {
+    CCPyObj out;
+    memset(&out, 0, sizeof(out));
+    out.home = home;
+    out.kind = CC__PY_K_BOOL;
+    out.b = b ? 1 : 0;
+    return out;
+}
+static inline CCPyObj cc_py_none(CCPy *home) {
+    CCPyObj out;
+    memset(&out, 0, sizeof(out));
+    out.home = home;
+    out.kind = CC__PY_K_NULL;
+    return out;
+}
+
 #ifndef CCResult_double_CCPyError_DEFINED
 #define CCResult_double_CCPyError_DEFINED 1
 CC_DECL_RESULT_SPEC(CCResult_double_CCPyError, double, CCPyError)
@@ -2581,6 +2686,9 @@ typedef struct CC__PyIsoResp {
     int has_e;
     int has_v;
     int has_h;
+    int has_cb; /* nested host-callback request from the child */
+    long long cb_fid;
+    CCSlice cb_args; /* raw JSON array text of encoded args */
 } CC__PyIsoResp;
 
 static void cc__py_iso_bput(CC__PyIsoBuf *b, const char *s, size_t n) {
@@ -2939,6 +3047,19 @@ static int cc__py_iso_parse(CCArena *a, const char *line, size_t len,
             } else if (kn == 3 && memcmp(ks, "shm", 3) == 0) {
                 r->kind = CC__PY_K_RAW;
                 r->text = cc__py_iso_copy(a, line, len);
+            } else if (kn == 2 && memcmp(ks, "cb", 2) == 0) {
+                /* {"cb": true, "cbid": fid, "args": [...]} — nested host fn. */
+                r->has_cb = 1;
+            } else if (kn == 4 && memcmp(ks, "cbid", 4) == 0) {
+                char t[32];
+                size_t n = (size_t)(ve - v);
+                if (n >= sizeof(t)) return -1;
+                memcpy(t, v, n);
+                t[n] = 0;
+                r->cb_fid = strtoll(t, NULL, 10);
+            } else if (kn == 4 && memcmp(ks, "args", 4) == 0) {
+                r->cb_args = cc__py_iso_copy(a, v, (size_t)(ve - v));
+                if (!r->cb_args.ptr) return -1;
             }
         }
         p = cc__py_iso_ws(ve, end);
@@ -3036,6 +3157,227 @@ static int cc__py_iso_alive(CCPy *d, const char *op) {
     return 1;
 }
 
+
+/* Encode a host-callback return for the Python broker cbr line.  Scalars
+ * and remote handles only — nested containers refuse by name. */
+static int cc__py_iso_encode_cbr_val(CC__PyIsoBuf *b, CCPy *d,
+                                     const CCPyObj *v) {
+    if (!v || v->kind == CC__PY_K_NULL) {
+        cc__py_iso_bputs(b, "null");
+        return 0;
+    }
+    if (v->kind == CC__PY_K_BOOL) {
+        cc__py_iso_bputs(b, v->b ? "true" : "false");
+        return 0;
+    }
+    if (v->kind == CC__PY_K_NUM) {
+        if (v->num_is_int) cc__py_iso_bnum_ll(b, v->inum);
+        else cc__py_iso_bnum_f(b, v->num);
+        return 0;
+    }
+    if (v->kind == CC__PY_K_STR) {
+        cc__py_iso_bjson_str(b, (const char *)v->text.ptr, v->text.len);
+        return 0;
+    }
+    if (v->kind == CC__PY_K_HANDLE) {
+        if (!v->home || v->home != d) {
+            snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                     "python: py_fn: handle from a different domain");
+            return -1;
+        }
+        cc__py_iso_bputs(b, "{\"$h\":");
+        cc__py_iso_bnum_ll(b, v->h);
+        cc__py_iso_bputs(b, "}");
+        return 0;
+    }
+    snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+             "python: py_fn: unsupported callback return on the isolated "
+             "wire");
+    return -1;
+}
+
+static int cc__py_iso_send_cbr(CCPy *d, const CCPyObj *v, const char *err) {
+    CC__PyIsoBuf b = {0};
+    int rc;
+    if (err) {
+        cc__py_iso_bputs(&b, "{\"e\":");
+        cc__py_iso_bjson_str(&b, err, strlen(err));
+        cc__py_iso_bputs(&b, "}\n");
+    } else {
+        cc__py_iso_bputs(&b, "{\"cbr\":");
+        if (cc__py_iso_encode_cbr_val(&b, d, v) != 0) {
+            free(b.p);
+            return -1;
+        }
+        cc__py_iso_bputs(&b, "}\n");
+    }
+    if (b.oom) {
+        free(b.p);
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: py_fn: out of memory answering callback");
+        return -1;
+    }
+    rc = cc__py_iso_send_all(d, b.p, b.len);
+    free(b.p);
+    return rc;
+}
+
+/* Decode one JSON value from [start,end) into a CCPyObj (scalars / $h). */
+static int cc__py_iso_decode_cb_arg(CCPy *d, CCArena *a, const char *p,
+                                    const char *end, CCPyObj *out) {
+    CC__PyIsoResp tmp;
+    memset(out, 0, sizeof(*out));
+    out->home = d;
+    p = cc__py_iso_ws(p, end);
+    if (p >= end) return -1;
+    if (p + 5 <= end && memcmp(p, "{\"$h\"", 5) == 0) {
+        const char *c = strchr(p, ':');
+        if (!c) return -1;
+        out->kind = CC__PY_K_HANDLE;
+        out->h = strtoll(c + 1, NULL, 10);
+        return 0;
+    }
+    memset(&tmp, 0, sizeof(tmp));
+    if (cc__py_iso_classify(a, p, end, &tmp) != 0) return -1;
+    if (tmp.kind == CC__PY_K_NUM) {
+        out->kind = CC__PY_K_NUM;
+        out->num = tmp.num;
+        out->inum = tmp.inum;
+        out->num_is_int = tmp.num_is_int;
+        return 0;
+    }
+    if (tmp.kind == CC__PY_K_STR) {
+        out->kind = CC__PY_K_STR;
+        out->text = tmp.text;
+        return 0;
+    }
+    if (tmp.kind == CC__PY_K_BOOL) {
+        out->kind = CC__PY_K_BOOL;
+        out->b = tmp.b;
+        return 0;
+    }
+    if (tmp.kind == CC__PY_K_NULL) {
+        out->kind = CC__PY_K_NULL;
+        return 0;
+    }
+    snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+             "python: py_fn: unsupported callback argument on the "
+             "isolated wire");
+    return -1;
+}
+
+static int cc__py_iso_parse_cb_args(CCPy *d, CCSlice raw, CCPyObj *args,
+                                    int *argc) {
+    const char *p, *end;
+    int n = 0;
+    *argc = 0;
+    if (!raw.ptr) return 0;
+    p = (const char *)raw.ptr;
+    end = p + raw.len;
+    p = cc__py_iso_ws(p, end);
+    if (p >= end || *p != '[') return -1;
+    p++;
+    for (;;) {
+        const char *vs, *ve;
+        p = cc__py_iso_ws(p, end);
+        if (p < end && *p == ']') { *argc = n; return 0; }
+        if (n >= CC__PY_MAX_CALL_ARGS) {
+            snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                     "python: py_fn: too many callback arguments");
+            return -1;
+        }
+        vs = p;
+        ve = cc__py_iso_scan_val(vs, end);
+        if (!ve) return -1;
+        if (cc__py_iso_decode_cb_arg(d, d->arena, vs, ve, &args[n]) != 0)
+            return -1;
+        n++;
+        p = cc__py_iso_ws(ve, end);
+        if (p < end && *p == ',') { p++; continue; }
+        if (p < end && *p == ']') { *argc = n; return 0; }
+        return -1;
+    }
+}
+
+static int cc__py_iso_serve_cb(CCPy *d, const CC__PyIsoResp *cbmsg,
+                               const char *op) {
+    CCPyObj args[CC__PY_MAX_CALL_ARGS];
+    CCResult_CCPyObj_CCPyError rr;
+    CCPyObj out;
+    long long fid = cbmsg->cb_fid;
+    int argc = 0;
+    void *fn = NULL;
+    void *userdata = NULL;
+    long long userdata_i64 = 0;
+    int is_i64 = 0;
+    memset(args, 0, sizeof(args));
+    memset(&rr, 0, sizeof(rr));
+    if (cc__py_iso_parse_cb_args(d, cbmsg->cb_args, args, &argc) != 0) {
+        if (cc__py_iso_send_cbr(d, NULL, cc__py_errbuf) != 0) {
+            d->crashed = 1;
+            cc__py_iso_drop(d);
+            cc__py_iso_reap(d);
+            snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                     "python: %.40s: isolated domain crashed while answering "
+                     "a callback", op ? op : "call");
+            return -1;
+        }
+        return 0;
+    }
+    if (fid >= 0 && (size_t)fid < d->cbs_cap && d->cbs && d->cbs[fid].fn) {
+        fn = d->cbs[fid].fn;
+        userdata = d->cbs[fid].userdata;
+        userdata_i64 = d->cbs[fid].userdata_i64;
+        is_i64 = d->cbs[fid].is_i64;
+    }
+    if (!fn) {
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: py_fn: unknown callback");
+        if (cc__py_iso_send_cbr(d, NULL, cc__py_errbuf) != 0) {
+            d->crashed = 1;
+            cc__py_iso_drop(d);
+            cc__py_iso_reap(d);
+            snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                     "python: %.40s: isolated domain crashed while answering "
+                     "a callback", op ? op : "call");
+            return -1;
+        }
+        return 0;
+    }
+    d->cb_depth++;
+    if (is_i64)
+        rr = ((CCPyHostFnI64)fn)(userdata_i64, args, argc);
+    else
+        rr = ((CCPyHostFn)fn)(userdata, args, argc);
+    d->cb_depth--;
+    if (!rr.ok) {
+        const char *e = rr.u.error.base.message
+                            ? rr.u.error.base.message
+                            : "python: py_fn: callback failed";
+        if (cc__py_iso_send_cbr(d, NULL, e) != 0) {
+            d->crashed = 1;
+            cc__py_iso_drop(d);
+            cc__py_iso_reap(d);
+            snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                     "python: %.40s: isolated domain crashed while answering "
+                     "a callback", op ? op : "call");
+            return -1;
+        }
+        return 0;
+    }
+    out = rr.u.value;
+    if (cc__py_iso_send_cbr(d, &out, NULL) != 0) {
+        d->crashed = 1;
+        cc__py_iso_drop(d);
+        cc__py_iso_reap(d);
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: %.40s: isolated domain crashed while answering "
+                 "a callback", op ? op : "call");
+        return -1;
+    }
+    return 0;
+}
+
 static int cc__py_iso_req(CCPy *d, CC__PyIsoBuf *req, const char *op,
                           long long id, CC__PyIsoResp *resp) {
     const char *line = NULL;
@@ -3070,6 +3412,10 @@ static int cc__py_iso_req(CCPy *d, CC__PyIsoBuf *req, const char *op,
                      "python: %s: protocol violation (unparseable reply)",
                      op);
             return -1;
+        }
+        if (resp->has_cb) {
+            if (cc__py_iso_serve_cb(d, resp, op) != 0) return -1;
+            continue;
         }
         if (resp->id != id) continue; /* stray line — ignore */
         if (resp->has_e) {
@@ -3234,6 +3580,7 @@ cc__py_proc_new_exe(CCArena *arena, const char *python_exe) {
 
 static void cc__py_iso_close(CCPy *py) {
     if (!py || py->tier != CC__PY_TIER_PROC) return;
+    cc__py_fn_kill_boxes(py);
     if (py->fd < 0) {
         cc__py_iso_reap(py);
         py->ready = 0;
@@ -3668,6 +4015,7 @@ static inline void cc_py_close(CCPy *py) {
         py->interp == cc__py_main_interp)
         cc__py_main_taken = 0;
     py->sys_getrefcount = NULL;
+    cc__py_fn_kill_boxes(py);
     py->ready = 0;
     py->arena = NULL;
     py->tstate = NULL;
@@ -4042,7 +4390,9 @@ static inline CCPyObj !>(CCPyError) cc_py_obj_clone_into(CCPyObj *obj,
  * Python value. */
 typedef struct CCPyArg {
     int kind; /* 0=i64 1=f64 2=cstr 3=slice 4=obj 5=bool 6=typed slice
-               * 7=buffer borrow (memoryview over CC memory, no copy) */
+               * 7=buffer borrow (memoryview over CC memory, no copy)
+               * 8=host fn (py_fn; p=fn, okind=0 → n=userdata
+               *   pointer, okind=1 → i=userdata i64 by value) */
     const char *kwname; /* non-NULL: pass by keyword, not position */
     long long i; /* kind 6: elem descriptor esz | is_float<<8 | is_signed<<9 */
     double f;
@@ -4054,7 +4404,9 @@ typedef struct CCPyArg {
 } CCPyArg;
 
 /* Bound on one call's arguments, positional plus keyword. */
+#ifndef CC__PY_MAX_CALL_ARGS
 #define CC__PY_MAX_CALL_ARGS 64
+#endif
 
 static inline CCPyArg cc__py_arg_i(long long v) {
     CCPyArg a = {0};
@@ -4165,6 +4517,27 @@ static int cc__py_iso_arg_json(CC__PyIsoBuf *b, CCPy *home, const CCPyArg *a,
                  "supported on process-isolated domains",
                  method ? method : "call");
         return -1;
+    case 8: {
+        long long fid;
+        if (!a->p) {
+            snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                     "python: %s: null py_fn", method ? method : "call");
+            return -1;
+        }
+        fid = cc__py_fn_add(home, (void *)a->p,
+                            a->okind ? NULL : (void *)(uintptr_t)a->n,
+                            a->okind ? a->i : 0, a->okind ? 1 : 0);
+        if (fid < 0) {
+            snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                     "python: %s: out of memory registering py_fn",
+                     method ? method : "call");
+            return -1;
+        }
+        cc__py_iso_bputs(b, "{\"$f\":");
+        cc__py_iso_bnum_ll(b, fid);
+        cc__py_iso_bputs(b, "}");
+        return 0;
+    }
     default:
         snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
                  "python: %s: unsupported argument kind on the "
@@ -4277,6 +4650,279 @@ CC__PY_TSLICE_ARM(CCSlice_float, float)
 CC__PY_TSLICE_ARM(CCSlice_double, double)
 #undef CC__PY_TSLICE_ARM
 
+/* ---- py_fn: CC host callables into Python ---------------------------- */
+
+typedef struct CC__PyFnBox {
+    CCPy *home;
+    void *fn;
+    void *userdata;
+    long long userdata_i64;
+    int is_i64;
+    int dead;
+    struct CC__PyFnBox *next;
+} CC__PyFnBox;
+
+static long long cc__py_fn_add(CCPy *d, void *fn, void *userdata,
+                               long long userdata_i64, int is_i64) {
+    long long fid;
+    if (!d || !fn) return -1;
+    fid = d->next_cb++;
+    if ((size_t)fid >= d->cbs_cap) {
+        size_t nc = d->cbs_cap ? d->cbs_cap * 2 : 8;
+        void *np;
+        while (nc <= (size_t)fid) nc *= 2;
+        np = realloc(d->cbs, nc * sizeof(d->cbs[0]));
+        if (!np) return -1;
+        memset((char *)np + d->cbs_cap * sizeof(d->cbs[0]), 0,
+               (nc - d->cbs_cap) * sizeof(d->cbs[0]));
+        d->cbs = np;
+        d->cbs_cap = nc;
+    }
+    d->cbs[fid].fn = fn;
+    d->cbs[fid].userdata = userdata;
+    d->cbs[fid].userdata_i64 = userdata_i64;
+    d->cbs[fid].is_i64 = is_i64;
+    return fid;
+}
+
+static void cc__py_fn_kill_boxes(CCPy *d) {
+    CC__PyFnBox *b, *n;
+    if (!d) return;
+    for (b = d->fn_boxes; b; b = n) {
+        b->dead = 1;
+        n = b->next;
+        free(b);
+    }
+    d->fn_boxes = NULL;
+    free(d->cbs);
+    d->cbs = NULL;
+    d->cbs_cap = 0;
+    d->next_cb = 0;
+}
+
+static int cc__py_fn_from_pyobj(CCPy *home, void *o, CCPyObj *out) {
+    void *t = NULL, *f = NULL, *n = NULL;
+    const char *s;
+    intptr_t slen = 0;
+    long long iv;
+    double dv;
+    memset(out, 0, sizeof(*out));
+    out->home = home;
+    if (!o) {
+        out->kind = CC__PY_K_NULL;
+        return 0;
+    }
+    t = cc__py.BoolFromLong(1);
+    f = cc__py.BoolFromLong(0);
+    if (o == t || o == f) {
+        out->kind = CC__PY_K_BOOL;
+        out->b = (o == t);
+        if (t) cc__py.DecRef(t);
+        if (f) cc__py.DecRef(f);
+        return 0;
+    }
+    if (t) cc__py.DecRef(t);
+    if (f) cc__py.DecRef(f);
+    n = cc__py_none();
+    if (n) {
+        int is_none = (o == n);
+        cc__py.DecRef(n);
+        if (is_none) {
+            out->kind = CC__PY_K_NULL;
+            return 0;
+        }
+    }
+    if (cc__py.ErrClear) cc__py.ErrClear();
+    iv = cc__py.LongAsLongLong(o);
+    if (!cc__py.ErrOccurred || !cc__py.ErrOccurred()) {
+        out->kind = CC__PY_K_NUM;
+        out->num_is_int = 1;
+        out->inum = iv;
+        out->num = (double)iv;
+        return 0;
+    }
+    if (cc__py.ErrClear) cc__py.ErrClear();
+    dv = cc__py.FloatAsDouble(o);
+    if (!cc__py.ErrOccurred || !cc__py.ErrOccurred()) {
+        out->kind = CC__PY_K_NUM;
+        out->num = dv;
+        out->inum = (long long)dv;
+        out->num_is_int = 0;
+        return 0;
+    }
+    if (cc__py.ErrClear) cc__py.ErrClear();
+    s = cc__py.AsUTF8AndSize(o, &slen);
+    if (s && (!cc__py.ErrOccurred || !cc__py.ErrOccurred())) {
+        char *copy = NULL;
+        out->kind = CC__PY_K_STR;
+        if (home && home->arena && slen >= 0) {
+            copy = (char *)cc_arena_alloc(home->arena, (size_t)slen + 1, 1);
+            if (copy) {
+                memcpy(copy, s, (size_t)slen);
+                copy[slen] = 0;
+                out->text.ptr = copy;
+                out->text.len = (size_t)slen;
+                return 0;
+            }
+        }
+        out->text.ptr = (void *)s;
+        out->text.len = (size_t)(slen > 0 ? slen : 0);
+        return 0;
+    }
+    if (cc__py.ErrClear) cc__py.ErrClear();
+    out->kind = CC__PY_K_LOCAL;
+    out->o = o;
+    cc__py.IncRef(o);
+    return 0;
+}
+
+static void *cc__py_fn_to_pyobj(CCPy *home, const CCPyObj *v) {
+    if (!v) return cc__py_none();
+    switch (v->kind) {
+    case CC__PY_K_NULL: return cc__py_none();
+    case CC__PY_K_BOOL: return cc__py.BoolFromLong(v->b ? 1 : 0);
+    case CC__PY_K_NUM:
+        if (v->num_is_int) return cc__py.LongFromLongLong(v->inum);
+        return cc__py.FloatFromDouble(v->num);
+    case CC__PY_K_STR:
+        return cc__py.UnicodeFromStringAndSize(
+            v->text.ptr ? (const char *)v->text.ptr : "",
+            (intptr_t)v->text.len);
+    case CC__PY_K_LOCAL:
+        if (v->o) {
+            cc__py.IncRef(v->o);
+            return v->o;
+        }
+        return cc__py_none();
+    case CC__PY_K_HANDLE:
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: py_fn: cannot return a remote handle from an "
+                 "in-process host callback");
+        return NULL;
+    default:
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: py_fn: unsupported host-callback return kind");
+        return NULL;
+    }
+}
+
+static void *cc__py_fn_tramp(void *self, void *args) {
+    CC__PyFnBox *box =
+        cc__py.CapsuleGetPointer
+            ? (CC__PyFnBox *)cc__py.CapsuleGetPointer(self, "cc-py.fn")
+            : NULL;
+    CCPyObj argv[CC__PY_MAX_CALL_ARGS];
+    CCResult_CCPyObj_CCPyError rr;
+    CCPyObj out;
+    intptr_t n;
+    int i;
+    void *ret;
+    if (!box || !box->fn)
+        return cc__py_raise("python: py_fn: corrupt callback capsule");
+    if (box->dead || !box->home || !box->home->ready)
+        return cc__py_raise("python: py_fn: domain is closed");
+    n = args && cc__py.TupleSize ? cc__py.TupleSize(args) : 0;
+    if (n < 0) n = 0;
+    if (n > CC__PY_MAX_CALL_ARGS)
+        return cc__py_raise("python: py_fn: too many callback arguments");
+    memset(argv, 0, sizeof(argv));
+    memset(&rr, 0, sizeof(rr));
+    for (i = 0; i < (int)n; i++) {
+        void *item = cc__py.TupleGetItem(args, (intptr_t)i);
+        if (cc__py_fn_from_pyobj(box->home, item, &argv[i]) != 0) {
+            while (i-- > 0)
+                if (argv[i].kind == CC__PY_K_LOCAL && argv[i].o)
+                    cc__py.DecRef(argv[i].o);
+            return cc__py_raise(cc__py_errbuf[0] ? cc__py_errbuf
+                                                : "python: py_fn: bad arg");
+        }
+    }
+    box->home->cb_depth++;
+    if (box->is_i64)
+        rr = ((CCPyHostFnI64)box->fn)(box->userdata_i64, argv, (int)n);
+    else
+        rr = ((CCPyHostFn)box->fn)(box->userdata, argv, (int)n);
+    box->home->cb_depth--;
+    for (i = 0; i < (int)n; i++)
+        if (argv[i].kind == CC__PY_K_LOCAL && argv[i].o)
+            cc__py.DecRef(argv[i].o);
+    if (!rr.ok) {
+        const char *e = rr.u.error.base.message
+                            ? rr.u.error.base.message
+                            : "python: py_fn: callback failed";
+        return cc__py_raise(e);
+    }
+    out = rr.u.value;
+    ret = cc__py_fn_to_pyobj(box->home, &out);
+    if (out.kind == CC__PY_K_LOCAL && out.o) cc__py.DecRef(out.o);
+    if (!ret) {
+        if (cc__py.ErrClear) cc__py.ErrClear();
+        return cc__py_raise(cc__py_errbuf[0] ? cc__py_errbuf
+                                            : "python: py_fn: bad return");
+    }
+    return ret;
+}
+
+static CC__PyMethodDef cc__py_fn_def = {
+    "__cc_py_fn__", (void *)cc__py_fn_tramp, CC__PY_METH_VARARGS, NULL
+};
+
+static void *cc__py_fn_mint(CCPy *d, void *fn, void *userdata,
+                            long long userdata_i64, int is_i64,
+                            char *errbuf, size_t errcap) {
+    CC__PyFnBox *box;
+    void *capsule;
+    void *callable;
+    if (!d || !fn) {
+        snprintf(errbuf, errcap, "python: py_fn: null host function");
+        return NULL;
+    }
+    if (!cc__py.CFunctionNewEx || !cc__py.CapsuleNew ||
+        !cc__py.CapsuleGetPointer) {
+        snprintf(errbuf, errcap,
+                 "python: py_fn: this Python runtime cannot mint callables "
+                 "(needs PyCFunction_NewEx)");
+        return NULL;
+    }
+    box = (CC__PyFnBox *)calloc(1, sizeof(*box));
+    if (!box) {
+        snprintf(errbuf, errcap, "python: py_fn: out of memory");
+        return NULL;
+    }
+    box->home = d;
+    box->fn = fn;
+    box->userdata = userdata;
+    box->userdata_i64 = userdata_i64;
+    box->is_i64 = is_i64;
+    box->next = d->fn_boxes;
+    d->fn_boxes = box;
+    capsule = cc__py.CapsuleNew(box, "cc-py.fn", NULL);
+    callable = capsule ? cc__py.CFunctionNewEx(&cc__py_fn_def, capsule, NULL)
+                       : NULL;
+    if (capsule) cc__py.DecRef(capsule);
+    if (!callable) {
+        if (cc__py.ErrClear) cc__py.ErrClear();
+        snprintf(errbuf, errcap, "python: py_fn: cannot mint the callable");
+        return NULL;
+    }
+    return callable;
+}
+
+static inline CCPyArg cc__py_arg_fn(CCPyFn f) {
+    CCPyArg a = {0};
+    a.kind = 8;
+    a.p = f.fn;
+    if (f.is_i64) {
+        a.okind = 1; /* tag: fn is CCPyHostFnI64; i holds userdata by value */
+        a.i = f.userdata_i64;
+    } else {
+        a.okind = 0;
+        a.n = (size_t)(uintptr_t)f.userdata;
+    }
+    return a;
+}
+
+
 #define CC_PY_ARG(x)                                        \
     _Generic((x),                                           \
         double: cc__py_arg_f,                               \
@@ -4300,6 +4946,7 @@ CC__PY_TSLICE_ARM(CCSlice_double, double)
         CCSlice_float: cc__py_arg_ts_CCSlice_float,         \
         CCSlice_double: cc__py_arg_ts_CCSlice_double,       \
         CCPyObj: cc__py_arg_obj,                            \
+        CCPyFn: cc__py_arg_fn,                              \
         CCPyArg: cc__py_arg_pass,                           \
         _Bool: cc__py_arg_bool)(x)
 
@@ -4775,6 +5422,13 @@ static inline CCPyObj !>(CCPyError) cc__py_obj_callm_n(CCPyObj *obj,
             if (v) cc__py.IncRef(v); /* tuple will steal one */
             break;
         case 5: v = cc__py.BoolFromLong((long)a.i); break;
+        case 8: {
+            v = cc__py_fn_mint(obj->home, (void *)a.p,
+                               a.okind ? NULL : (void *)(uintptr_t)a.n,
+                               a.okind ? a.i : 0, a.okind ? 1 : 0,
+                               cc__py_errbuf, sizeof(cc__py_errbuf));
+            break;
+        }
         case 6: {
             /* Typed slice -> Python list of scalars. */
             size_t cnt = a.n;
@@ -5046,9 +5700,11 @@ static inline double !>(CCPyError) cc_py_obj_as_f64(CCPyObj *obj) {
     cc__py_bind_err_obj(obj);
     if (!obj)
         return cc_err(cc__py_err("as_f64"));
+    /* Materialized scalars (isolated wire, py_fn args) carry kind/num
+     * without a live PyObject*. */
+    if (obj->kind == CC__PY_K_NUM) return cc_ok(obj->num);
+    if (obj->kind == CC__PY_K_BOOL) return cc_ok(obj->b ? 1.0 : 0.0);
     if (obj->home && obj->home->tier == CC__PY_TIER_PROC) {
-        if (obj->kind == CC__PY_K_NUM) return cc_ok(obj->num);
-        if (obj->kind == CC__PY_K_BOOL) return cc_ok(obj->b ? 1.0 : 0.0);
         snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
                  "python: as_f64: isolated value is not a number");
         return cc_err(cc__py_err("as_f64"));
@@ -5066,18 +5722,20 @@ static inline int64_t !>(CCPyError) cc_py_obj_as_i64(CCPyObj *obj) {
     cc__py_bind_err_obj(obj);
     if (!obj)
         return cc_err(cc__py_err("as_i64"));
+    /* Materialized scalars (isolated wire, py_fn args) carry kind/num
+     * without a live PyObject*. */
+    if (obj->kind == CC__PY_K_NUM) {
+        if (obj->num_is_int) return cc_ok((int64_t)obj->inum);
+        if (obj->num >= -9223372036854775808.0 &&
+            obj->num < 9223372036854775808.0)
+            return cc_ok((int64_t)obj->num);
+        snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                 "python: as_i64: result out of range for integer "
+                 "destination");
+        return cc_err(cc__py_err("as_i64"));
+    }
+    if (obj->kind == CC__PY_K_BOOL) return cc_ok((int64_t)(obj->b ? 1 : 0));
     if (obj->home && obj->home->tier == CC__PY_TIER_PROC) {
-        if (obj->kind == CC__PY_K_NUM) {
-            if (obj->num_is_int) return cc_ok((int64_t)obj->inum);
-            if (obj->num >= -9223372036854775808.0 &&
-                obj->num < 9223372036854775808.0)
-                return cc_ok((int64_t)obj->num);
-            snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
-                     "python: as_i64: result out of range for integer "
-                     "destination");
-            return cc_err(cc__py_err("as_i64"));
-        }
-        if (obj->kind == CC__PY_K_BOOL) return cc_ok((int64_t)(obj->b ? 1 : 0));
         snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
                  "python: as_i64: isolated value is not an integer");
         return cc_err(cc__py_err("as_i64"));

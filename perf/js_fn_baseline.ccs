@@ -1,0 +1,167 @@
+/*
+ * JS→CC via `js_fn` on the isolated wire, priced against a native
+ * JS function of the same shape (one add).
+ *
+ *   ./cc/bin/ccc run perf/js_fn_baseline.ccs -- [iters] [samples]
+ *
+ * iters     callback invocations per timed sample  (default 2000)
+ * samples   timed samples per mode                 (default 7; median)
+ *
+ * Modes (ns/call):
+ *
+ *   c_native     CC calling CC
+ *   js_call      JS `apply(f, n)` with f a JS function
+ *   js_fn    same loop, f = js_fn(add_k, 7)
+ *
+ * Snapshot:
+ *
+ *   ./cc/bin/ccc run perf/js_fn_baseline.ccs \
+ *     > perf/baselines/js_fn_baseline_$(date +%Y%m%d).txt
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/script/js.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+static CCJsDomVal !>(CCJsError) add_k(long long k, const CCJsDomVal *args,
+                                      int argc) {
+    @errhandler(CCJsError e) { return cc_err(e); }
+    if (argc < 1)
+        return cc_err(cc_js_host_error("add_k: need one arg"));
+    long long x = cc_js_dom_val_as_i64((CCJsDomVal *)&args[0]) !>;
+    return cc_ok(cc_js_i64(args[0].dom, x + k));
+}
+
+static long long add_k_c(long long k, long long n) {
+    long long r = 0, i;
+    for (i = 0; i < n; i++) r += i + k;
+    return r;
+}
+
+static double now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+}
+
+static int cmp_double(const void *p, const void *q) {
+    double a = *(const double *)p, b = *(const double *)q;
+    return (a > b) - (a < b);
+}
+
+static double median(double *v, int n) {
+    qsort(v, (size_t)n, sizeof(*v), cmp_double);
+    return (n & 1) ? v[n / 2] : 0.5 * (v[n / 2 - 1] + v[n / 2]);
+}
+
+static double g_ms[64];
+static int g_samples = 7;
+
+static double report_ns(const char *mode, long long per) {
+    double m = median(g_ms, g_samples);
+    double ns = m * 1e6 / (double)per;
+    printf("  %-14s %9.2f ms  %9.1f ns/call\n", mode, m, ns);
+    printf("RESULT scalar %s ns_per_call %.1f\n", mode, ns);
+    return ns;
+}
+
+static long long want_sum(long long k, long long n) {
+    return n * (n - 1) / 2 + n * k;
+}
+
+int main(int argc, char **argv) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
+    @errhandler(CCJsError e) {
+        fprintf(stderr, "js: %s\n", e.base.message ? e.base.message : "?");
+        return 1;
+    }
+    CCArena a = cc_arena_heap(megabytes(8)) @destroy;
+    long long iters = argc > 1 ? atoll(argv[1]) : 2000LL;
+    long long want = 0;
+    long long got = 0;
+    int s = 0;
+    double ns_js = 0, ns_fn = 0;
+
+    g_samples = argc > 2 ? atoi(argv[2]) : 7;
+    if (g_samples < 1) g_samples = 1;
+    if (g_samples > 64) g_samples = 64;
+    if (iters < 1) iters = 1;
+
+    if (!cc_js_dom_available(true)) {
+        puts("SKIP (no node on PATH)");
+        return 0;
+    }
+
+    printf("js_fn_baseline iters=%lld samples=%d\n", iters, g_samples);
+    printf("\nscalar (ns/call)\n");
+
+    want = want_sum(7, iters);
+    for (s = 0; s < g_samples; s++) {
+        double t0 = now_ms();
+        long long r = add_k_c(7, iters);
+        g_ms[s] = now_ms() - t0;
+        if (r != want) {
+            fprintf(stderr, "MISMATCH c_native: want=%lld got=%lld\n", want, r);
+            return 1;
+        }
+    }
+    report_ns("c_native", iters);
+
+    {
+        CCJsDom js = cc_js_new(true, &a) !> @destroy;
+        CCJsFn f_cc = js_fn(add_k, 7);
+
+        js.exec(
+            "globalThis.apply_n = (f, n) => {\n"
+            "  let r = 0;\n"
+            "  for (let i = 0; i < n; i++) r += f(i);\n"
+            "  return r;\n"
+            "};\n"
+            "globalThis.add7_js = (i) => i + 7;\n") !>;
+        CCJsDomVal g = js.eval("globalThis") !> @destroy;
+        CCJsDomVal f_js = g.get("add7_js") !> @destroy;
+
+        {
+            long long d = g.apply_n(f_js, 200LL) !>;
+            (void)d;
+            d = g.apply_n(f_cc, 200LL) !>;
+            (void)d;
+        }
+
+        for (s = 0; s < g_samples; s++) {
+            double t0 = now_ms();
+            long long r = g.apply_n(f_js, iters) !>;
+            g_ms[s] = now_ms() - t0;
+            got = r;
+        }
+        if (got != want) {
+            fprintf(stderr, "MISMATCH js_call: want=%lld got=%lld\n", want, got);
+            return 1;
+        }
+        ns_js = report_ns("js_call", iters);
+
+        for (s = 0; s < g_samples; s++) {
+            double t0 = now_ms();
+            long long r = g.apply_n(f_cc, iters) !>;
+            g_ms[s] = now_ms() - t0;
+            got = r;
+        }
+        if (got != want) {
+            fprintf(stderr, "MISMATCH js_fn: want=%lld got=%lld\n",
+                    want, got);
+            return 1;
+        }
+        ns_fn = report_ns("js_fn", iters);
+        printf("  %-14s ratio js_fn/js_call %.2fx\n", "js_fn",
+               ns_js > 0 ? ns_fn / ns_js : 0.0);
+        printf("RESULT ratio js_fn_over_js_call %.2f\n",
+               ns_js > 0 ? ns_fn / ns_js : 0.0);
+    }
+
+    return 0;
+}

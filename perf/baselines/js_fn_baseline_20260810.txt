@@ -1,0 +1,16 @@
+# perf/js_fn_baseline.ccs snapshot
+# date: 2026-08-11T02:01:59Z
+# host: Darwin 25.6.0 arm64
+# cc:   039b557c
+#
+js_fn_baseline iters=2000 samples=7
+
+scalar (ns/call)
+  c_native            0.00 ms        0.0 ns/call
+RESULT scalar c_native ns_per_call 0.0
+  js_call             0.16 ms       82.0 ns/call
+RESULT scalar js_call ns_per_call 82.0
+  js_fn          17.66 ms     8828.0 ns/call
+RESULT scalar js_fn ns_per_call 8828.0
+  js_fn      ratio js_fn/js_call 107.66x
+RESULT ratio js_fn_over_js_call 107.66

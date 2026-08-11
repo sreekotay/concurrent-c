@@ -70,6 +70,33 @@ narrow integer destinations refuse out-of-range values rather than wrap.
 Costs: [`perf/py_baseline.ccs`](../perf/py_baseline.ccs) ·
 [`perf/baselines/py_baseline_20260809.txt`](../perf/baselines/py_baseline_20260809.txt).
 
+Sync CC→Python callbacks — hand a CC function to Python as a callable
+(`py_fn(fn, userdata)`). Integer userdata is by value; pointers use the
+pointer host ABI. The host fn returns `CCPyObj !>(CCPyError)` — Ok via
+`cc_py_i64` / friends, Err via `cc_py_host_error`. Works in-process
+(minted `PyCFunction`) and process-isolated (`{$f}` wire).
+
+```c
+static CCPyObj !>(CCPyError) score(long long bias, const CCPyObj *args,
+                                   int argc) {
+    @errhandler(CCPyError e) { return cc_err(e); }
+    if (argc < 1) return cc_err(cc_py_host_error("score: need one arg"));
+    long long x = cc_py_obj_as_i64((CCPyObj *)&args[0]) !>;
+    return cc_ok(cc_py_i64(args[0].home, x + bias));
+}
+
+py.exec(@slice(
+    "def map_score(f, xs):\n"
+    "    return [f(x) for x in xs]\n")) !>;
+CCPyObj g = py.import("__main__") !> @destroy;
+long long xs[:] = {1, 2, 3};
+CCPyObj ys = g.map_score(py_fn(score, 40), xs) !> @destroy;
+```
+
+Smoke: [`tests/py_fn_smoke.ccs`](../tests/py_fn_smoke.ccs). Costs:
+[`perf/py_fn_baseline.ccs`](../perf/py_fn_baseline.ccs) ·
+[`perf/baselines/py_fn_baseline_20260810.txt`](../perf/baselines/py_fn_baseline_20260810.txt).
+
 **JavaScript** — same UFCS surface and lifetime rule; transport is the
 flag, mirroring `concurrent-c-python`'s `create()` /
 `create({isolated: true})`:
@@ -93,9 +120,40 @@ returns `libnode not found` — use isolated there.
 wire (~100–170µs/hop; N domains, separate heaps, crash isolation; needs
 `node` on PATH). `require` resolves against the working directory in
 both. Thenables: isolated awaits on the wire; hosted returns a handle
-(no loop-block await). Isolated also carries inline typed arrays
-(`$ta`/`b64`) and sync JS→CC callbacks (`js_dom_fn`); SHM spill and async
-callback shapes refuse by name.
+(no loop-block await). Isolated typed arrays travel as inline `$ta`/`b64`.
+
+Sync JS→CC callbacks — `js_fn(fn, userdata)` (hosted napi mint +
+isolated `{$f}` wire; integers by value, pointers via
+`CCJsDomHostUserdata`). Host fns return `CCJsDomVal !>(CCJsError)` — Ok
+via `cc_js_i64` / friends, Err via `cc_js_host_error`.
+
+```c
+static CCJsDomVal !>(CCJsError) score(long long bias, const CCJsDomVal *args,
+                                      int argc) {
+    @errhandler(CCJsError e) { return cc_err(e); }
+    if (argc < 1) return cc_err(cc_js_host_error("score: need one arg"));
+    long long x = cc_js_dom_val_as_i64((CCJsDomVal *)&args[0]) !>;
+    return cc_ok(cc_js_i64(args[0].dom, x + bias));
+}
+
+js.exec("globalThis.mapScore = (f, xs) => xs.map(f)") !>;
+CCJsDomVal g = js.eval("globalThis") !> @destroy;
+long long xs[:] = {1, 2, 3};
+CCJsDomVal ys = g.mapScore(js_fn(score, 40), xs) !> @destroy;
+```
+
+Smoke: [`tests/js_dom_cb_smoke.ccs`](../tests/js_dom_cb_smoke.ccs). Costs:
+[`perf/js_fn_baseline.ccs`](../perf/js_fn_baseline.ccs) ·
+[`perf/baselines/js_fn_baseline_20260810.txt`](../perf/baselines/js_fn_baseline_20260810.txt).
+
+**Host callbacks — limits** (refuse by name / Result / throw):
+
+- Sync only — host ABI is `T !>(E)`, not a Promise.
+- JS isolated typed arrays: inline ≤64KiB; larger SHM spill refuses.
+- Python isolated: typed-array spill, kwargs, and `exec`/`eval` source refuse.
+- Returning a host fn from a callback refuses.
+- Hosted JS needs libnode; Dom ops nested inside a hosted trampoline
+  refuse (`not reentrant` — use materialized args + Ok mints).
 
 Wire: dedicated fds, id-paired replies — stdio stays yours. Crash
 isolation, not a sandbox: the child inherits your environment — don't
@@ -286,6 +344,10 @@ One day on a 4-vCPU x86-64 shared VM (node 22, python 3.11, numpy 2.5;
 | crossing | cost |
 |---|---|
 | see [`py_baseline_20260809.txt`](../perf/baselines/py_baseline_20260809.txt) | embed / call / buffer paths |
+| Python→CC `py_fn` (in-process) | **~95ns** (~3× a Python function call) — [`py_fn_baseline_20260810.txt`](../perf/baselines/py_fn_baseline_20260810.txt) |
+| Python→CC `py_fn` (isolated wire) | **~20µs**/call (CC→`operator.call`→host fn) |
+| JS→CC `js_fn` (hosted napi mint) | same shape as in-process `py_fn` (mint + trampoline; measure with libnode) |
+| JS→CC `js_fn` (isolated wire) | **~8µs**/call (~120× a JS function on the same wire) — [`js_fn_baseline_20260810.txt`](../perf/baselines/js_fn_baseline_20260810.txt) |
 
 **Native modules** (export — your code, in-process):
 

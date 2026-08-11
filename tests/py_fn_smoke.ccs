@@ -1,0 +1,78 @@
+/* py_fn: CC host callables into Python (inproc mint + isolated wire). */
+#include <ccc/std/prelude.cch>
+#include <ccc/script/py.cch>
+#include <stdio.h>
+#include <string.h>
+
+static CCPyObj !>(CCPyError) add40(long long add, const CCPyObj *args,
+                                   int argc) {
+    @errhandler(CCPyError e) { return cc_err(e); }
+    if (argc < 1)
+        return cc_err(cc_py_host_error("add40: expected a number"));
+    long long x = cc_py_obj_as_i64((CCPyObj *)&args[0]) !>;
+    return cc_ok(cc_py_i64(args[0].home, x + add));
+}
+
+static CCPyObj !>(CCPyError) boom(CCPyHostUserdata userdata,
+                                  const CCPyObj *args, int argc) {
+    (void)userdata;
+    (void)args;
+    (void)argc;
+    return cc_err(cc_py_host_error("from cc"));
+}
+
+static int run_domain(CCPy *py, const char *tag) {
+    @errhandler(CCPyError e) {
+        fprintf(stderr, "%s: %s\n", tag,
+                e.base.message ? e.base.message : "?");
+        return 1;
+    }
+    CCPyObj op = py->import("operator") !> @destroy;
+
+    /* operator.call(f, x) => f(x); host adds 40 → 42. */
+    long long got = op.call(py_fn(add40, 40), 2LL)!>.as_i64()!>;
+    printf("%s_apply %s\n", tag, got == 42 ? "true" : "false");
+    if (got != 42) return 1;
+
+    CCPyObj bad = op.call(py_fn(boom, NULL)) !>(e) {
+        int ok = e.base.message && strstr(e.base.message, "from cc") != NULL;
+        printf("%s_error %s\n", tag, ok ? "true" : "false");
+        if (!ok)
+            fprintf(stderr, "message: %s\n",
+                    e.base.message ? e.base.message : "(null)");
+        return ok ? 0 : 1;
+    } @destroy;
+    (void)bad;
+    printf("%s_error false\n", tag);
+    return 1;
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
+    CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+    int rc = 0;
+
+    if (!cc_py_available()) {
+        printf("SKIP (no libpython)\n");
+        return 0;
+    }
+
+    {
+        CCPy py = cc_py_new(false, &a) !> @destroy;
+        rc |= run_domain(&py, "inproc");
+    }
+
+    if (cc_py_proc_available()) {
+        CCPy py = cc_py_new(true, &a) !> @destroy;
+        rc |= run_domain(&py, "iso");
+    } else {
+        printf("iso_apply SKIP\n");
+        printf("iso_error SKIP\n");
+    }
+
+    printf("clean_exit true\n");
+    return rc;
+}

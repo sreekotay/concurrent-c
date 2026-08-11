@@ -1,3 +1,4 @@
-apply_cb true
-cb_error true
+# Hosted (libnode) and/or isolated (node on PATH). Either tier prints *_apply / *_error.
+_apply true
+_error true
 clean_exit true

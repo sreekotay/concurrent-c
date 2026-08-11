@@ -1,0 +1,20 @@
+# perf/py_fn_baseline.ccs snapshot
+# date: 2026-08-11T01:57:12Z
+# host: Darwin 25.6.0 arm64
+# cc:   039b557c
+#
+py_fn_baseline iters=200000 samples=7
+
+scalar (ns/call)
+  c_native            0.00 ms        0.0 ns/call
+RESULT scalar c_native ns_per_call 0.0
+  py_call             5.88 ms       29.4 ns/call
+RESULT scalar py_call ns_per_call 29.4
+  py_fn_inproc       19.03 ms       95.1 ns/call
+RESULT scalar py_fn_inproc ns_per_call 95.1
+  py_fn_inproc   ratio py_fn_inproc/py_call 3.24x
+RESULT ratio py_fn_inproc_over_py_call 3.24
+
+isolated CC→operator.call→py_fn (iters=2000)
+  py_fn_iso          38.99 ms    19496.0 ns/call
+RESULT scalar py_fn_iso ns_per_call 19496.0

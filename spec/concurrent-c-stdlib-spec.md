@@ -1637,9 +1637,16 @@ materialized scalars), never `PyObject*`, and the flag never silently
 aliases `false`.  `cc_py_proc_available()` is the boolean probe for that
 transport (python3 on PATH, same posture as `cc_py_available()` for
 libpython).  The process-isolated MVP carries import, attribute get,
-scalar method calls, and typed extraction; typed-array spill, kwargs,
-`exec`/`eval` source, and child-to-host callbacks on that wire refuse by
-name at the asking call.
+scalar method calls, typed extraction, and sync child-to-host
+callbacks (`py_fn`); typed-array spill, kwargs, and `exec`/`eval` source
+on that wire refuse by name at the asking call.  `py_fn(fn, userdata)`
+selects the host ABI from userdata's type: integer scalars pass by value,
+pointers use a `void *` userdata slot.  A host callable returns
+`CCPyObj !>(CCPyError)`: the Ok value crosses back to Python and an Err
+becomes a Python exception.  In-process domains mint the same callables as
+`PyCFunction` objects (capsule-backed); process-isolated domains encode
+them as `{$f:fid}` on the broker wire and serve nested `cb`/`cbr` turns
+until the outer reply.
 
 The runtime is selected most-specific first: a process that already is
 Python keeps its own symbols unconditionally; `cc_py_use(spec)` chooses
@@ -2171,8 +2178,6 @@ Python.
 ### Out of scope
 
 - Deep container conversion (dict/list ↔ CC collections)
-- Python callbacks into arbitrary CC closures (an exposed type's methods are
-  the supported direction)
 - Compiling an exposed module to a standalone importable artifact
 - Free-threaded (no-GIL) CPython builds
 - `fork` without `exec` while an interpreter is live
@@ -2192,9 +2197,10 @@ batching; unsigned inbound via `napi_get_value_bigint_uint64`;
 hosted libnode in-process, or a node child per handle on the
 `concurrent-c-node` wire — with `cc_js_host_new`/`run` as the raw
 loop-thread door beneath the hosted tier.  Isolated wire typed arrays
-(inline `$ta`/`b64`) and sync JS→CC callbacks (`js_dom_fn`) are on that
-wire; SHM spill, async/pipelined callbacks, and destroy-from-callback
-refuse by name.  Engine choice (the QuickJS backend), `js_expose`, and
+(inline `$ta`/`b64`) and sync JS→CC callbacks (`js_fn`) are on that
+wire; the hosted tier mints the same `js_fn` callables as napi
+functions. SHM spill, async/pipelined callbacks, and
+destroy-from-callback refuse by name.  Engine choice (the QuickJS backend), `js_expose`, and
 `as_list`/`as_map` on the domain surface are not.
 
 ### Model
@@ -2321,9 +2327,13 @@ materializes as a `CCJsDomVal` handle (`CC__JS_DOM_K_HANDLE`) rather
 than awaiting — composition continues with `.then` on the handle.
 Typed-array arguments and results on the isolated wire travel as
 inline `$ta` / base64 (`CC__JS_DOM_K_TA`); SHM spill on the CC parent
-refuses by name.  Sync child→host callbacks cross as `$f` /
-`js_dom_fn(fn, ctx)` (reply on the same turn); async, pipelined, and
-destroy-from-callback shapes refuse by name at the asking call.
+refuses by name.  Sync JS→CC callbacks use `js_fn(fn, userdata)`: integer userdata
+passes by value, pointers use a `void *` slot, and the host callable
+returns `CCJsDomVal !>(CCJsError)` (Err becomes a throw).  Isolated
+domains encode them as `$f` / nested `cb`/`cbr` on the same turn;
+hosted domains mint a napi function (capsule-equivalent box pinned
+until domain close).  Async, pipelined, and destroy-from-callback
+shapes refuse by name at the asking call.
 
 `js_module::[T]` creates a Node-API module from a CC type — which is what
 a napi addon entry point must return:
@@ -2839,7 +2849,7 @@ same computation run in-process.
 - Hosted loop-blocking await of thenables (hosted returns a handle;
   isolated awaits on the wire)
 - SHM typed-array spill on the CC parent; async / pipelined /
-  destroy-from-callback wire shapes
+  destroy-from-callback callback shapes
 - The Node standard library under a QuickJS host
 - Using one handle from more than one OS thread concurrently
 - A class surface (real JS instances of a CC type) — a separate verb,

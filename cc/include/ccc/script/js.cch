@@ -1655,7 +1655,8 @@ static inline void *cc__js_val_cur(const CCJsVal *v) {
 typedef struct CCJsArg {
     int kind; /* 0=i64 1=f64 2=cstr 3=slice 4=val 5=bool 6=typed slice
                * 7=dom handle 8=null 9=raw JSON (domain arms)
-               * 10=host fn (isolated {$f:fid}; p=fn, n=ctx) */
+               * 10=host fn (isolated {$f:fid}; p=fn, flags&FN_I64 →
+               *    i=userdata i64, else n=userdata pointer) */
     unsigned char flags; /* CC__JS_ARG_F_POS: js_pos — force positional */
     const char *kwname;
     long long i; /* kind 6: esz | is_float<<8 | is_signed<<9 */
@@ -1666,6 +1667,7 @@ typedef struct CCJsArg {
 
 #define CC__JS_MAX_CALL_ARGS 32
 #define CC__JS_ARG_F_POS 1u
+#define CC__JS_ARG_F_FN_I64 2u
 
 static inline CCJsArg cc__js_arg_i(long long v) {
     CCJsArg a = {0};
@@ -3745,9 +3747,9 @@ static inline void cc_js_host_close(CCJsHost *host) {
  * `.then` on the loop thread — do not nest-await inside `host.run`).
  * Typed-array arguments/results cross as inline base64 on the wire
  * (capped at SHM_SPILL); shm spill still refuses by name.  A CC host
- * function crosses as {$f:fid}; the child invoking it sends a nested
- * `cb` and the parent answers with `cbr` on the same fd (sync only).
- * Hosted uses the napi path for typed arrays; host fns are isolated-only.
+ * function (`js_fn`) crosses as {$f:fid} on the isolated wire (nested
+ * `cb`/`cbr`, sync only) and as a minted napi function on the hosted
+ * tier.  Hosted uses the napi path for typed arrays.
  *
  * The isolated child runs the embedded broker (the same source as
  * pypi/cc-node/cc_node/broker.cjs — a parity rung keeps the two
@@ -4049,19 +4051,13 @@ static const char cc__js_dom_broker_text[] =
 /* Forward: host callbacks take decoded wire values. */
 typedef struct CCJsDomVal CCJsDomVal;
 
-/* Sync JS→CC callable on the isolated wire.  Return 0 and fill
- * *out_result, or -1 with cc__js_errbuf set (crosses as a JS throw). */
-typedef int (*CCJsDomHostFn)(void *ctx, const CCJsDomVal *args, int argc,
-                             CCJsDomVal *out_result);
-
-typedef struct CCJsDomFn {
-    CCJsDomHostFn fn;
-    void *ctx;
-} CCJsDomFn;
-
+/* Sync JS→CC callable (`js_fn`). Typedefs for the Result-returning host
+ * ABI follow CCResult_CCJsDomVal_CCJsError. */
 typedef struct CC__JsDomCb {
-    CCJsDomHostFn fn;
-    void *ctx;
+    void *fn;               /* CCJsDomHostFn or CCJsDomHostFnI64 */
+    void *userdata;         /* pointer form */
+    long long userdata_i64; /* by-value integer form */
+    int is_i64;
 } CC__JsDomCb;
 
 typedef struct CCJsDom {
@@ -4081,6 +4077,9 @@ typedef struct CCJsDom {
     /* hosted: the embedded node this dom owns, plus its ref ledger */
     CCJsHost host;
     long long live_refs;
+    /* hosted js_fn: mint boxes that outlive a single call when JS retains
+     * the callable (same posture as CCPy.fn_boxes). */
+    struct CC__JsDomFnBox *fn_boxes;
 } CCJsDom;
 
 
@@ -4132,6 +4131,90 @@ CC_DECL_RESULT_SPEC(CCResult_CCJsDom_CCJsError, CCJsDom, CCJsError)
 #define CCResult_CCJsDomVal_CCJsError_DEFINED 1
 CC_DECL_RESULT_SPEC(CCResult_CCJsDomVal_CCJsError, CCJsDomVal, CCJsError)
 #endif
+
+/* Sync JS→CC callable (`js_fn`).  Return `CCJsDomVal !>(CCJsError)`:
+ * Ok crosses back to JS; Err becomes a throw.  Hosted mints a napi
+ * function; isolated encodes `{$f}` / cb/cbr on the wire.
+ * `js_fn(fn, userdata)` picks the host ABI from userdata's type:
+ * integers by value, pointers via `CCJsDomHostUserdata` (a `void *`
+ * typedef so `T !>(E)` host bodies can take it as the first parameter). */
+typedef void *CCJsDomHostUserdata;
+typedef CCResult_CCJsDomVal_CCJsError (*CCJsDomHostFn)(
+    CCJsDomHostUserdata userdata, const CCJsDomVal *args, int argc);
+typedef CCResult_CCJsDomVal_CCJsError (*CCJsDomHostFnI64)(
+    long long userdata, const CCJsDomVal *args, int argc);
+
+typedef struct CCJsFn {
+    void *fn;               /* CCJsDomHostFn or CCJsDomHostFnI64 */
+    void *userdata;
+    long long userdata_i64;
+    int is_i64;
+} CCJsFn;
+typedef CCJsFn CCJsDomFn; /* compat */
+
+#define js_dom_fn js_fn /* compat */
+#define js_fn(FN, USERDATA)                                               \
+    _Generic((USERDATA),                                                      \
+        int: ((CCJsFn){(void *)(CCJsDomHostFnI64)(FN), NULL,               \
+                          (long long)(USERDATA), 1}),                         \
+        long: ((CCJsFn){(void *)(CCJsDomHostFnI64)(FN), NULL,              \
+                           (long long)(USERDATA), 1}),                        \
+        long long: ((CCJsFn){(void *)(CCJsDomHostFnI64)(FN), NULL,         \
+                                (long long)(USERDATA), 1}),                   \
+        unsigned int: ((CCJsFn){(void *)(CCJsDomHostFnI64)(FN), NULL,      \
+                                   (long long)(USERDATA), 1}),                \
+        unsigned long: ((CCJsFn){(void *)(CCJsDomHostFnI64)(FN), NULL,     \
+                                    (long long)(USERDATA), 1}),               \
+        unsigned long long: ((CCJsFn){(void *)(CCJsDomHostFnI64)(FN), NULL,\
+                                         (long long)(USERDATA), 1}),          \
+        default: ((CCJsFn){(void *)(CCJsDomHostFn)(FN),                    \
+                              (void *)(uintptr_t)(USERDATA), 0, 0}))
+
+static inline CCJsError cc_js_host_error(const char *msg) {
+    CCJsError e;
+    memset(&e, 0, sizeof(e));
+    e.base = CC_ERROR(CC_ERR_INTERNAL,
+                      msg ? msg : "js: callback failed");
+    return e;
+}
+
+/* Ok mints for host-fn returns (materialized scalars on the wire). */
+static inline CCJsDomVal cc_js_i64(CCJsDom *dom, long long v) {
+    CCJsDomVal out;
+    memset(&out, 0, sizeof(out));
+    out.dom = dom;
+    out.kind = CC__JS_DOM_K_NUM;
+    out.num_is_int = 1;
+    out.inum = v;
+    out.num = (double)v;
+    return out;
+}
+static inline CCJsDomVal cc_js_f64(CCJsDom *dom, double v) {
+    CCJsDomVal out;
+    memset(&out, 0, sizeof(out));
+    out.dom = dom;
+    out.kind = CC__JS_DOM_K_NUM;
+    out.num_is_int = 0;
+    out.num = v;
+    out.inum = (long long)v;
+    return out;
+}
+static inline CCJsDomVal cc_js_bool(CCJsDom *dom, int b) {
+    CCJsDomVal out;
+    memset(&out, 0, sizeof(out));
+    out.dom = dom;
+    out.kind = CC__JS_DOM_K_BOOL;
+    out.b = b ? 1 : 0;
+    return out;
+}
+static inline CCJsDomVal cc_js_null(CCJsDom *dom) {
+    CCJsDomVal out;
+    memset(&out, 0, sizeof(out));
+    out.dom = dom;
+    out.kind = CC__JS_DOM_K_NULL;
+    return out;
+}
+
 #ifndef CCResult_CCJsDomTaInfo_CCJsError_DEFINED
 #define CCResult_CCJsDomTaInfo_CCJsError_DEFINED 1
 CC_DECL_RESULT_SPEC(CCResult_CCJsDomTaInfo_CCJsError, CCJsDomTaInfo, CCJsError)
@@ -4815,7 +4898,8 @@ static int cc__js_dom_mat_ta(CCJsDom *d, const char *op, CC__JsIsoResp *resp) {
     return 0;
 }
 
-static long long cc__js_dom_cb_add(CCJsDom *d, CCJsDomHostFn fn, void *ctx) {
+static long long cc__js_dom_cb_add(CCJsDom *d, void *fn, void *userdata,
+                                    long long userdata_i64, int is_i64) {
     long long fid;
     size_t need;
     if (!d || !fn) return -1;
@@ -4833,7 +4917,9 @@ static long long cc__js_dom_cb_add(CCJsDom *d, CCJsDomHostFn fn, void *ctx) {
         d->cbs_cap = nc;
     }
     d->cbs[fid].fn = fn;
-    d->cbs[fid].ctx = ctx;
+    d->cbs[fid].userdata = userdata;
+    d->cbs[fid].userdata_i64 = userdata_i64;
+    d->cbs[fid].is_i64 = is_i64;
     return fid;
 }
 
@@ -4969,13 +5055,17 @@ static int cc__js_dom_send_cbr(CCJsDom *d, long long cbid,
 static int cc__js_dom_serve_cb(CCJsDom *d, const CC__JsIsoResp *cbmsg,
                                const char *op) {
     CCJsDomVal args[CC__JS_MAX_CALL_ARGS];
+    CCResult_CCJsDomVal_CCJsError rr;
     CCJsDomVal out;
     long long fid = cbmsg->cb_fid;
     long long cbid = cbmsg->cbid;
     int argc = 0;
-    CCJsDomHostFn fn = NULL;
-    void *ctx = NULL;
-    int frc;
+    void *fn = NULL;
+    void *userdata = NULL;
+    long long userdata_i64 = 0;
+    int is_i64 = 0;
+
+    memset(&rr, 0, sizeof(rr));
 
     if (cc__js_dom_parse_cb_args(d, cbmsg->cb_args, args, &argc) != 0) {
         if (cc__js_dom_send_cbr(d, cbid, NULL, cc__js_errbuf) != 0) {
@@ -4992,11 +5082,10 @@ static int cc__js_dom_serve_cb(CCJsDom *d, const CC__JsIsoResp *cbmsg,
     }
     if (fid >= 0 && (size_t)fid < d->cbs_cap && d->cbs && d->cbs[fid].fn) {
         fn = d->cbs[fid].fn;
-        ctx = d->cbs[fid].ctx;
+        userdata = d->cbs[fid].userdata;
+        userdata_i64 = d->cbs[fid].userdata_i64;
+        is_i64 = d->cbs[fid].is_i64;
     }
-    memset(&out, 0, sizeof(out));
-    out.kind = CC__JS_DOM_K_NULL;
-    out.dom = d;
     if (!fn) {
         snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                  "js: unknown callback");
@@ -5012,11 +5101,14 @@ static int cc__js_dom_serve_cb(CCJsDom *d, const CC__JsIsoResp *cbmsg,
         }
         return 0;
     }
-    cc__js_errbuf[0] = 0;
-    frc = fn(ctx, args, argc, &out);
-    if (frc != 0) {
-        const char *e = cc__js_errbuf[0] ? cc__js_errbuf
-                                         : "js: callback failed";
+    if (is_i64)
+        rr = ((CCJsDomHostFnI64)fn)(userdata_i64, args, argc);
+    else
+        rr = ((CCJsDomHostFn)fn)(userdata, args, argc);
+    if (!rr.ok) {
+        const char *e = rr.u.error.base.message
+                            ? rr.u.error.base.message
+                            : "js: callback failed";
         if (cc__js_dom_send_cbr(d, cbid, NULL, e) != 0) {
             d->crashed = 1;
             cc__js_dom_drop(d);
@@ -5029,6 +5121,7 @@ static int cc__js_dom_serve_cb(CCJsDom *d, const CC__JsIsoResp *cbmsg,
         }
         return 0;
     }
+    out = rr.u.value;
     if (cc__js_dom_send_cbr(d, cbid, &out, NULL) != 0) {
         d->crashed = 1;
         cc__js_dom_drop(d);
@@ -5200,6 +5293,165 @@ static void cc__js_dom_h_exc(void *env, const char *label) {
                  "js: %.60s: JavaScript call failed", label);
 }
 
+/* ---- hosted js_fn: napi mint (mirror of inproc py_fn) ---------------- */
+
+static int cc__js_dom_h_mat(CCJsDom *d, void *env, void *v, CCJsDomVal *out);
+
+typedef struct CC__JsDomFnBox {
+    CCJsDom *home;
+    void *fn;               /* CCJsDomHostFn or CCJsDomHostFnI64 */
+    void *userdata;
+    long long userdata_i64;
+    int is_i64;
+    int dead;
+    struct CC__JsDomFnBox *next;
+} CC__JsDomFnBox;
+
+static void cc__js_dom_fn_mark_dead(CCJsDom *d) {
+    CC__JsDomFnBox *b;
+    if (!d) return;
+    for (b = d->fn_boxes; b; b = b->next) b->dead = 1;
+}
+
+static void cc__js_dom_fn_free_boxes(CCJsDom *d) {
+    CC__JsDomFnBox *b, *n;
+    if (!d) return;
+    for (b = d->fn_boxes; b; b = n) {
+        n = b->next;
+        free(b);
+    }
+    d->fn_boxes = NULL;
+}
+
+/* Drop a trampoline-materialized arg/return on the loop thread (no hop). */
+static void cc__js_dom_fn_drop_local(void *env, CCJsDomVal *v) {
+    if (!v || v->kind != CC__JS_DOM_K_HANDLE || !v->ref) return;
+    if (env && cc__js.DeleteReference) (void)cc__js.DeleteReference(env, v->ref);
+    if (v->dom && v->dom->live_refs > 0) v->dom->live_refs--;
+    v->ref = NULL;
+    v->kind = CC__JS_DOM_K_NULL;
+}
+
+static void *cc__js_dom_fn_to_napi(void *env, const CCJsDomVal *v) {
+    if (!v) return cc__js_undefined(env);
+    switch (v->kind) {
+    case CC__JS_DOM_K_NULL:
+        return cc__js_undefined(env);
+    case CC__JS_DOM_K_BOOL:
+        return cc__js_out_bool(env, v->b ? 1 : 0);
+    case CC__JS_DOM_K_NUM:
+        if (v->num_is_int) return cc__js_out_ll(env, v->inum);
+        return cc__js_out_dbl(env, v->num);
+    case CC__JS_DOM_K_STR:
+        return cc__js_out_slice(env, v->text);
+    case CC__JS_DOM_K_HANDLE: {
+        void *nv = NULL;
+        if (!v->ref ||
+            cc__js.GetReferenceValue(env, v->ref, &nv) != 0 || !nv)
+            return cc__js_fail(env, "js: js_fn: stale handle return");
+        return nv;
+    }
+    case CC__JS_DOM_K_TA:
+        return cc__js_fail(env,
+                           "js: js_fn: typed-array returns from a hosted "
+                           "host callback are not supported");
+    case CC__JS_DOM_K_RAW:
+        return cc__js_fail(env,
+                           "js: js_fn: raw JSON returns from a hosted "
+                           "host callback are not supported");
+    default:
+        return cc__js_fail(env, "js: js_fn: unsupported host-callback return");
+    }
+}
+
+static void *cc__js_dom_fn_tramp(void *env, void *info) {
+    CC__JsDomFnBox *box = NULL;
+    void *argv_nv[CC__JS_MAX_CALL_ARGS];
+    CCJsDomVal argv[CC__JS_MAX_CALL_ARGS];
+    CCResult_CCJsDomVal_CCJsError rr;
+    CCJsDomVal out;
+    size_t argc = CC__JS_MAX_CALL_ARGS;
+    void *data = NULL;
+    void *ret;
+    int i;
+    if (!cc__js.GetCbInfo ||
+        cc__js.GetCbInfo(env, info, &argc, argv_nv, NULL, &data) != 0)
+        return cc__js_fail(env, "js: js_fn: callback info unavailable");
+    box = (CC__JsDomFnBox *)data;
+    if (!box || !box->fn)
+        return cc__js_fail(env, "js: js_fn: corrupt callback");
+    if (box->dead || !box->home || !box->home->host.open)
+        return cc__js_fail(env, "js: js_fn: domain is closed");
+    if (argc > (size_t)CC__JS_MAX_CALL_ARGS)
+        return cc__js_fail(env, "js: js_fn: too many callback arguments");
+    memset(argv, 0, sizeof(argv));
+    memset(&rr, 0, sizeof(rr));
+    for (i = 0; i < (int)argc; i++) {
+        if (cc__js_dom_h_mat(box->home, env, argv_nv[i], &argv[i]) != 0) {
+            while (i-- > 0) cc__js_dom_fn_drop_local(env, &argv[i]);
+            return cc__js_fail(env, "js: js_fn: bad argument");
+        }
+    }
+    if (box->is_i64)
+        rr = ((CCJsDomHostFnI64)box->fn)(box->userdata_i64, argv, (int)argc);
+    else
+        rr = ((CCJsDomHostFn)box->fn)(box->userdata, argv, (int)argc);
+    for (i = 0; i < (int)argc; i++) cc__js_dom_fn_drop_local(env, &argv[i]);
+    if (!rr.ok) {
+        const char *e = rr.u.error.base.message
+                            ? rr.u.error.base.message
+                            : "js: js_fn: callback failed";
+        return cc__js_throw_cc_error(env, rr.u.error.base.kind, e);
+    }
+    out = rr.u.value;
+    ret = cc__js_dom_fn_to_napi(env, &out);
+    /* Transfer: JS keeps the returned handle-scope value; drop our ref. */
+    cc__js_dom_fn_drop_local(env, &out);
+    return ret;
+}
+
+/* Mint a napi function on the loop thread.  Returns the napi_value, or
+ * NULL with errbuf set (no exception — caller is the hosted hop). */
+static void *cc__js_dom_fn_mint(CCJsDom *d, void *env, void *fn,
+                                void *userdata, long long userdata_i64,
+                                int is_i64, char *errbuf, size_t errcap) {
+    CC__JsDomFnBox *box;
+    void *callable = NULL;
+    if (!d || !fn) {
+        snprintf(errbuf, errcap, "js: js_fn: null host function");
+        return NULL;
+    }
+    if (!cc__js.CreateFunction) {
+        snprintf(errbuf, errcap,
+                 "js: js_fn: this host cannot mint callables "
+                 "(needs napi_create_function)");
+        return NULL;
+    }
+    box = (CC__JsDomFnBox *)calloc(1, sizeof(*box));
+    if (!box) {
+        snprintf(errbuf, errcap, "js: js_fn: out of memory");
+        return NULL;
+    }
+    box->home = d;
+    box->fn = fn;
+    box->userdata = userdata;
+    box->userdata_i64 = userdata_i64;
+    box->is_i64 = is_i64;
+    box->next = d->fn_boxes;
+    d->fn_boxes = box;
+    if (cc__js.CreateFunction(env, "cc_js_fn", CC__JS_AUTO_LENGTH,
+                              (void *)cc__js_dom_fn_tramp, box,
+                              &callable) != 0 ||
+        !callable) {
+        /* Unlink the box — JS never saw the function. */
+        d->fn_boxes = box->next;
+        free(box);
+        snprintf(errbuf, errcap, "js: js_fn: cannot mint the callable");
+        return NULL;
+    }
+    return callable;
+}
+
 /* Materialize one napi value into a dom val (loop thread). */
 static int cc__js_dom_h_mat(CCJsDom *d, void *env, void *v, CCJsDomVal *out) {
     int t = CC__JS_T_UNDEFINED;
@@ -5361,11 +5613,13 @@ static void cc__js_dom_h_fn(CCJs *js, void *ctxp) {
                          hp->label, i + 1);
                 return;
             } else if (a->kind == 10) {
-                snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
-                         "js: %.60s: argument %d is a host function; JS→CC "
-                         "callbacks are only on the isolated wire",
-                         hp->label, i + 1);
-                return;
+                int is_i64 = (a->flags & CC__JS_ARG_F_FN_I64) != 0;
+                v = cc__js_dom_fn_mint(
+                    d, env, (void *)a->p,
+                    is_i64 ? NULL : (void *)(uintptr_t)a->n,
+                    is_i64 ? a->i : 0, is_i64, cc__js_errbuf,
+                    sizeof(cc__js_errbuf));
+                if (!v) return;
             } else {
                 v = cc__js_arg_value(env, a);
                 if (!v) {
@@ -5679,7 +5933,11 @@ static inline bool cc_js_dom_available(_Bool isolated) {
  * on the op), EOF as the fallback (it exits on that too). */
 static inline void cc_js_dom_close(CCJsDom *d) {
     if (d && d->tier == CC__JS_DOM_HOSTED) {
+        /* Mark dead before tearing down the env so a retained JS
+         * callable cannot re-enter a live box during stop. */
+        cc__js_dom_fn_mark_dead(d);
         cc_js_host_close(&d->host);
+        cc__js_dom_fn_free_boxes(d);
         return;
     }
     if (!d || d->fd < 0) {
@@ -6059,17 +6317,18 @@ static int cc__js_dom_arg_json(CC__JsIsoBuf *b, CCJsDom *d,
         cc__js_dom_bput(b, (const char *)a->p, a->n);
         return 0;
     case 10: {
-        CCJsDomHostFn fn = (CCJsDomHostFn)(uintptr_t)a->p;
-        void *ctx = (void *)(uintptr_t)a->n;
         long long fid;
+        int is_i64 = (a->flags & CC__JS_ARG_F_FN_I64) != 0;
         if (!d || d->tier != CC__JS_DOM_ISOLATED) {
             snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
-                     "js: %.60s: argument %d is a host function; JS→CC "
-                     "callbacks are only on the isolated wire",
+                     "js: %.60s: argument %d is a host function; the JSON "
+                     "wire encoder is isolated-only (hosted mints via napi)",
                      method, i + 1);
             return -1;
         }
-        fid = cc__js_dom_cb_add(d, fn, ctx);
+        fid = cc__js_dom_cb_add(d, (void *)a->p,
+                                is_i64 ? NULL : (void *)(uintptr_t)a->n,
+                                is_i64 ? a->i : 0, is_i64);
         if (fid < 0) {
             snprintf(cc__js_errbuf, sizeof(cc__js_errbuf),
                      "js: %.60s: argument %d: out of memory registering "
@@ -6275,21 +6534,23 @@ static inline CCResult_float_CCJsError cc_js_dom_val_callm_float(
     return cc_ok_CCResult_float_CCJsError((float)v.u.value);
 }
 
-/* Argument lift for the iso sink: the CC_JS_ARG scalar arms, plus a
- * CCJsDomVal crossing back into its own domain, plus a host fn that
- * crosses as {$f:fid}.  (A guest CCJsVal has no arm on purpose — an
- * in-process napi value cannot cross a process wire, and the missing
- * _Generic association names the type at the call site.) */
-static inline CCJsArg cc__js_dom_arg_fn(CCJsDomFn f) {
+/* Argument lift: scalars, a CCJsDomVal crossing back into its own
+ * domain, plus a host fn (`js_fn`) — isolated encodes {$f:fid}; hosted
+ * mints a napi function in the call hop.  (A guest CCJsVal has no arm
+ * on purpose — an in-process napi value cannot cross a process wire,
+ * and the missing _Generic association names the type at the call site.) */
+static inline CCJsArg cc__js_dom_arg_fn(CCJsFn f) {
     CCJsArg a = {0};
     a.kind = 10;
     a.p = (const void *)(uintptr_t)f.fn;
-    a.n = (size_t)(uintptr_t)f.ctx;
+    if (f.is_i64) {
+        a.flags = CC__JS_ARG_F_FN_I64;
+        a.i = f.userdata_i64;
+    } else {
+        a.n = (size_t)(uintptr_t)f.userdata;
+    }
     return a;
 }
-
-#define js_dom_fn(FN, CTX) \
-    ((CCJsDomFn){(CCJsDomHostFn)(FN), (void *)(uintptr_t)(CTX)})
 
 static inline CCJsArg cc__js_dom_arg_val(CCJsDomVal v) {
     CCJsArg a = {0};
@@ -6356,7 +6617,7 @@ static inline CCJsArg cc__js_dom_arg_val(CCJsDomVal v) {
         CCSlice_float: cc__js_arg_ts_CCSlice_float,         \
         CCSlice_double: cc__js_arg_ts_CCSlice_double,       \
         CCJsDomVal: cc__js_dom_arg_val,                     \
-        CCJsDomFn: cc__js_dom_arg_fn,                       \
+        CCJsFn: cc__js_dom_arg_fn,                       \
         CCJsArg: cc__js_arg_pass,                           \
         _Bool: cc__js_arg_bool)(x)
 

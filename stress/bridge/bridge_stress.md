@@ -172,7 +172,7 @@ the same protocol shapes — the mapping is intentional (do not fork brokers).
 | Phase | Surface | Smoke | Stress / peer coverage |
 |-------|---------|-------|------------------------|
 | **C1** | JS isolated TA inline (`$ta`/`b64`); shm refuse | `js_dom_ta_smoke` | `cc_embed_stress` `js_ta_hail`; peer `shm_hail` / `callback_buffer_path` / `thenable_typed_array` |
-| **C2** | JS→CC sync callbacks (`js_dom_fn` → `$f` / `cb`/`cbr`) | `js_dom_cb_smoke` | `cc_embed_stress` `js_cb_blizzard`; peer `callback_blizzard` / `isolated_pipeline_cbs` / `destroy_from_callback` |
+| **C2** | JS→CC sync callbacks (`js_fn` → hosted napi mint + isolated `$f` / `cb`/`cbr`) | `js_dom_cb_smoke` | `cc_embed_stress` `js_cb_blizzard` / `js_cb_hosted`; peer `callback_blizzard` / `isolated_pipeline_cbs` / `destroy_from_callback` |
 | **C3** | `cc_py_new(true)` process child (remote handles, scalars) | `py_proc_isolate_smoke` | `cc_embed_stress` `py_proc_fanout`; peer `domain_fanout` / `crash_storm` (JS→Py child) |
 | **C4** | `CCPyObj.clone_into` inproc pickle | `py_clone_into_smoke` | `cc_embed_stress` `py_clone_hail` |
 
@@ -181,7 +181,8 @@ the same protocol shapes — the mapping is intentional (do not fork brokers).
 | Mode | Status | What it hammers |
 |------|--------|-----------------|
 | `js_ta_hail` | green, smoke | N× typed-array arg + result over `cc_js_new(true)` |
-| `js_cb_blizzard` | green, smoke | N× `js_dom_fn` sync callbacks |
+| `js_cb_blizzard` | green, smoke | N× `js_fn` sync callbacks (isolated) |
+| `js_cb_hosted` | green, smoke | N× `js_fn` napi mint (SKIP without libnode) |
 | `js_ta_cb_compose` | green | same domain, each iter: TA sum **and** sync cb (not independent) |
 | `js_domain_destroy_survivors` | green | N domains; close odds; survivors still correct; doomed refuse closed |
 | `js_hosted_promise` | green, smoke | N× hosted `Promise.resolve` as handle (SKIP without libnode) |

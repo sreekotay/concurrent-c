@@ -33,22 +33,13 @@ static void result_ok(const char *name, int pass) {
     printf("RESULT ok_%s %s\n", name, pass ? "true" : "false");
 }
 
-static int add1(void *ctx, const CCJsDomVal *args, int argc,
-                CCJsDomVal *out) {
-    long long x;
-    (void)ctx;
-    if (argc < 1 || args[0].kind != CC__JS_DOM_K_NUM) {
-        snprintf(cc__js_errbuf, sizeof(cc__js_errbuf), "add1: want number");
-        return -1;
-    }
-    x = args[0].num_is_int ? args[0].inum : (long long)args[0].num;
-    memset(out, 0, sizeof(*out));
-    out->dom = args[0].dom;
-    out->kind = CC__JS_DOM_K_NUM;
-    out->num_is_int = 1;
-    out->inum = x + 1;
-    out->num = (double)out->inum;
-    return 0;
+static CCJsDomVal !>(CCJsError) add1(long long add, const CCJsDomVal *args,
+                                     int argc) {
+    @errhandler(CCJsError e) { return cc_err(e); }
+    if (argc < 1)
+        return cc_err(cc_js_host_error("add1: want number"));
+    long long x = cc_js_dom_val_as_i64((CCJsDomVal *)&args[0]) !>;
+    return cc_ok(cc_js_i64(args[0].dom, x + add));
 }
 
 typedef struct U64Echo { int unused; } U64Echo;
@@ -105,7 +96,7 @@ int main(void) {
         all = ok && all;
     }
 
-    /* ---- Wave C2: JS→CC callback blizzard ---- */
+    /* ---- Wave C2: JS→CC callback blizzard (isolated wire) ---- */
     N = scale_n(50, 400, 2000);
     ok = 1;
     if (!cc_js_dom_available(true)) {
@@ -116,12 +107,40 @@ int main(void) {
         js.exec("globalThis.apply = (f, x) => f(x)") !>;
         CCJsDomVal g = js.eval("globalThis") !> @destroy;
         for (i = 0; i < N && ok; i++) {
-            long long got = g.apply(js_dom_fn(add1, NULL), (long long)i) !>;
+            long long got = g.apply(js_fn(add1, 1), (long long)i) !>;
             if (got != (long long)i + 1) ok = 0;
         }
         result_ok("js_cb_blizzard", ok);
         printf("RESULT js_cb_blizzard_n %d\n", N);
         all = ok && all;
+    }
+
+    /* ---- Wave C2b: hosted js_fn napi mint ---- */
+    N = scale_n(50, 400, 2000);
+    ok = 1;
+    if (!cc_js_dom_available(false)) {
+        printf("RESULT skip_js_cb_hosted true\n");
+    } else {
+        CCArena a = cc_arena_heap(megabytes(2)) @destroy;
+        CCResult_CCJsDom_CCJsError mk = cc_js_new(false, &a);
+        if (!mk.ok) {
+            printf("RESULT skip_js_cb_hosted true\n");
+        } else {
+            CCJsDom js = mk.u.value;
+            {
+                js.exec("globalThis.apply = (f, x) => f(x)") !>;
+                CCJsDomVal g = js.eval("globalThis") !> @destroy;
+                for (i = 0; i < N && ok; i++) {
+                    long long got =
+                        g.apply(js_fn(add1, 1), (long long)i) !>;
+                    if (got != (long long)i + 1) ok = 0;
+                }
+            }
+            cc_js_dom_close(&js);
+            result_ok("js_cb_hosted", ok);
+            printf("RESULT js_cb_hosted_n %d\n", N);
+            all = ok && all;
+        }
     }
 
     /* ---- Composition: TA + sync callback on one domain (same turn) ---- */
@@ -141,7 +160,7 @@ int main(void) {
             double sum = g.sum(xs) !>;
             if (fabs(sum - 10.0) > 1e-9) ok = 0;
             long long got =
-                g.apply(js_dom_fn(add1, NULL), (long long)i) !>;
+                g.apply(js_fn(add1, 1), (long long)i) !>;
             if (got != (long long)i + 1) ok = 0;
         }
         result_ok("js_ta_cb_compose", ok);
@@ -224,7 +243,7 @@ int main(void) {
                                                CC_JS_DOM_ARG(xs));
                 CCResult_CCJsDomVal_CCJsError ar = cc_js_dom_val_callm(
                     &g, "apply", 2,
-                    CC_JS_DOM_ARG(js_dom_fn(add1, NULL)),
+                    CC_JS_DOM_ARG(js_fn(add1, 1)),
                     CC_JS_DOM_ARG(7LL));
                 int good = sr.ok && fabs(sr.u.value - 10.0) < 1e-9 &&
                            ar.ok && ar.u.value.kind == CC__JS_DOM_K_NUM &&

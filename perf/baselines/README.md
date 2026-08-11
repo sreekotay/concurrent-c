@@ -14,6 +14,8 @@ Compiler suite metrics live separately in
 | Surface | Latest | How to refresh |
 |---------|--------|----------------|
 | CC embeds Python | [`py_baseline_20260810.txt`](py_baseline_20260810.txt) | `./cc/bin/ccc run perf/py_baseline.ccs` (see below) |
+| CC→Python `py_fn` callbacks | [`py_fn_baseline_20260810.txt`](py_fn_baseline_20260810.txt) | `./cc/bin/ccc run perf/py_fn_baseline.ccs` |
+| JS→CC `js_fn` callbacks | [`js_fn_baseline_20260810.txt`](js_fn_baseline_20260810.txt) | `./cc/bin/ccc run perf/js_fn_baseline.ccs` |
 | Node → CC module | [`js_baseline_node_20260810.txt`](js_baseline_node_20260810.txt) | `ccc build perf/js_baseline.ccs && node perf/js_baseline.js` |
 | Native modules (Node + Python hot path) | [`js_py_modules_20260809.txt`](js_py_modules_20260809.txt) | see [`docs/js-py-modules.md`](../../docs/js-py-modules.md) |
 | Node → numpy via `concurrent-c-python` | [`js_numpy_bridge_node_20260810.txt`](js_numpy_bridge_node_20260810.txt) | `node npm/cc-python/examples/js_numpy_bridge.js` |
@@ -51,6 +53,30 @@ Older dated files in this directory are history — keep them.
        echo "# cc:   $(git rev-parse --short HEAD)"; \
        echo "#"; cat /tmp/pb.txt; } \
        > perf/baselines/py_baseline_$(date +%Y%m%d).txt
+```
+
+**Python `py_fn` callbacks** (`perf/py_fn_baseline.ccs`):
+
+```bash
+./cc/bin/ccc run perf/py_fn_baseline.ccs > /tmp/pfn.txt \
+  && { echo "# perf/py_fn_baseline.ccs snapshot"; \
+       echo "# date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
+       echo "# host: $(uname -srm)"; \
+       echo "# cc:   $(git rev-parse --short HEAD)"; \
+       echo "#"; cat /tmp/pfn.txt; } \
+       > perf/baselines/py_fn_baseline_$(date +%Y%m%d).txt
+```
+
+**JS `js_fn` callbacks** (`perf/js_fn_baseline.ccs`):
+
+```bash
+./cc/bin/ccc run perf/js_fn_baseline.ccs > /tmp/jfn.txt \
+  && { echo "# perf/js_fn_baseline.ccs snapshot"; \
+       echo "# date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
+       echo "# host: $(uname -srm)"; \
+       echo "# cc:   $(git rev-parse --short HEAD)"; \
+       echo "#"; cat /tmp/jfn.txt; } \
+       > perf/baselines/js_fn_baseline_$(date +%Y%m%d).txt
 ```
 
 **Node → CC module** (`perf/js_baseline.ccs` + driver):
