@@ -140,6 +140,7 @@ struct CcPyDom {
     CCArena arena;
     CCPy py;
     void *none; /* owned builtins.None, for result probing */
+    void *ns;   /* owned __main__.__dict__ — bare eval/exec globals */
     CcPyObjBox *head;
     CcPyObjBox *free_boxes;
     long long live;
@@ -273,6 +274,10 @@ static void ccpy__dom_sweep(CcPyDom *d) {
     if (d->none) {
         cc__py.DecRef(d->none);
         d->none = NULL;
+    }
+    if (d->ns) {
+        cc__py.DecRef(d->ns);
+        d->ns = NULL;
     }
     cc_py_close(&d->py);
     /* Closing an isolated interpreter leaves the PROCESS interpreter's
@@ -1116,6 +1121,55 @@ static int ccpy__is_coro(void *o) {
     }
     cc__py.DecRef(a);
     return 1;
+}
+
+/* Persistent `__main__.__dict__` for this domain. Bare builtins.eval /
+ * builtins.exec have no Python frame in-process, so CPython cannot
+ * default globals — inject this namespace (matches isolated broker). */
+static void *ccpy__domain_ns(CcPyDom *d) {
+    void *m;
+    if (d->ns) return d->ns;
+    if (!cc__py.ImportModule || !cc__py.GetAttrString) return NULL;
+    m = cc__py.ImportModule("__main__");
+    if (!m) {
+        if (cc__py.ErrClear) cc__py.ErrClear();
+        return NULL;
+    }
+    d->ns = cc__py.GetAttrString(m, "__dict__");
+    cc__py.DecRef(m);
+    if (!d->ns && cc__py.ErrClear) cc__py.ErrClear();
+    return d->ns;
+}
+
+/* True for builtins.eval / builtins.exec (by __name__ + __module__). */
+static int ccpy__is_builtin_eval_or_exec(void *fn) {
+    void *name, *mod;
+    const char *ns = NULL, *ms = NULL;
+    intptr_t nn = 0, mn = 0;
+    int ok = 0;
+    if (!fn || !cc__py.GetAttrString || !cc__py.AsUTF8AndSize) return 0;
+    name = cc__py.GetAttrString(fn, "__name__");
+    if (!name) {
+        if (cc__py.ErrClear) cc__py.ErrClear();
+        return 0;
+    }
+    ns = cc__py.AsUTF8AndSize(name, &nn);
+    if (!ns || !((nn == 4 && memcmp(ns, "eval", 4) == 0) ||
+                 (nn == 4 && memcmp(ns, "exec", 4) == 0))) {
+        cc__py.DecRef(name);
+        return 0;
+    }
+    mod = cc__py.GetAttrString(fn, "__module__");
+    if (!mod) {
+        if (cc__py.ErrClear) cc__py.ErrClear();
+        cc__py.DecRef(name);
+        return 0;
+    }
+    ms = cc__py.AsUTF8AndSize(mod, &mn);
+    ok = (ms && mn == 8 && memcmp(ms, "builtins", 8) == 0);
+    cc__py.DecRef(mod);
+    cc__py.DecRef(name);
+    return ok;
 }
 
 static int ccpy__aio_schedule(CcPyDom *d, CcPyJob *j, CCPyObj coro);
@@ -2693,6 +2747,25 @@ static CCJsVal !>(CCError) CcPython_invoke(CcPython *self, CCJs *js,
             return cc_err(CC_ERR_INVALID_ARG, ccpy__errbuf);
         }
     }
+    /* Bare eval/exec: supply the domain's __main__ dict as globals. */
+    if (argc == 1 && ccpy__is_builtin_eval_or_exec(fb->obj.o)) {
+        void *ns = ccpy__domain_ns(d);
+        CCPyObj nso;
+        if (!ns) {
+            for (i = 0; i < argc; i++)
+                if (owned[i]) cc__py.DecRef(owned[i]);
+            if (d->async_mode) cc_py_thread_leave();
+            cc__js_release(mark);
+            return cc_err(CC_ERR_IO,
+                          "cc-python: cannot resolve __main__ for bare "
+                          "eval/exec");
+        }
+        nso.o = ns;
+        nso.home = &d->py;
+        argv[1] = cc__py_arg_obj(nso);
+        owned[1] = NULL;
+        argc = 2;
+    }
     {
         CCPyObj *f = &fb->obj;
         CCResult_CCPyObj_CCPyError r =
@@ -2898,6 +2971,22 @@ static CCJsVal !>(CCError) CcPython_invoke_async(CcPython *self, CCJs *js,
         }
     }
     j->argc = (int)argc;
+    if (argc == 1 && ccpy__is_builtin_eval_or_exec(fb->obj.o)) {
+        void *ns = ccpy__domain_ns(d);
+        CCPyObj nso;
+        if (!ns) {
+            ccpy__job_abort(d, js->env, j, (int)argc);
+            cc_py_thread_leave();
+            return cc_err(CC_ERR_IO,
+                          "cc-python: cannot resolve __main__ for bare "
+                          "eval/exec");
+        }
+        cc__py.IncRef(ns); /* job owns a ref (kind-4 sweep DecRefs) */
+        nso.o = ns;
+        nso.home = &d->py;
+        j->args[1] = cc__py_arg_obj(nso);
+        j->argc = 2;
+    }
     cc__py.IncRef(fb->obj.o);
     j->fn = fb->obj.o;
     cc_py_thread_leave();
@@ -2905,7 +2994,7 @@ static CCJsVal !>(CCError) CcPython_invoke_async(CcPython *self, CCJs *js,
         void *promise = NULL;
         if (cc__js.CreatePromise(js->env, &j->deferred, &promise) != 0) {
             cc__py_attach(&d->py);
-            ccpy__job_abort(d, js->env, j, (int)argc);
+            ccpy__job_abort(d, js->env, j, j->argc);
             cc_py_thread_leave();
             return cc_err(CC_ERR_IO, "cc-python: promise allocation failed");
         }

@@ -52,6 +52,11 @@ async function raisesAsync(fn, re) {
         raisesSync(() => b.eval('keep', g)(new Float64Array(8)),
                    /retained by the callee|borrow ends/));
 
+    // Bare eval/exec use the domain's __main__ (no frame to default from).
+    out('neg_inproc_bare_eval', b.eval('lambda x: x+1')(41) === 42);
+    b.exec('ccpy_bare_x = 7');
+    out('neg_inproc_bare_exec', b.eval('ccpy_bare_x') === 7);
+
     // Proxy traps: stringify must fail articulately; domain stays usable.
     out('neg_inproc_proxy_keys', Array.isArray(Object.keys(math.sqrt)));
     out('neg_inproc_proxy_json',

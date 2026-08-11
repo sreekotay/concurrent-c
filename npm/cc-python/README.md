@@ -106,7 +106,10 @@ handles chain (`const fft = await np.fft.fft(buf); await np.abs(fft)`).
 ## Surface
 
 - Attribute chains are Python (`np.linalg.norm`). Scalars materialize;
-  everything else stays a proxy. `String(proxy)` → `str()`.
+  everything else stays a proxy. `String(proxy)` → `str()`. Bare
+  `builtins.eval` / `exec` (no globals dict) use the domain's
+  `__main__` namespace — same as isolated.
+
 - Typed-array args (`Float64`/`Float32`/`Int32`/`BigInt64`/`Uint8Array`
   and Node `Buffer`) are zero-copy memoryviews for the call — writable
   (writes land in the caller's array); kept past return is an error, not

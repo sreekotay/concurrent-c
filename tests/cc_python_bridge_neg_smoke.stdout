@@ -4,6 +4,8 @@ neg_inproc_foreign_arg true
 neg_inproc_use_after_release true
 neg_inproc_release_again true
 neg_inproc_keep_past_return true
+neg_inproc_bare_eval true
+neg_inproc_bare_exec true
 neg_inproc_proxy_keys true
 neg_inproc_proxy_json true
 neg_inproc_proxy_alive true
