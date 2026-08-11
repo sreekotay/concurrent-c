@@ -1648,24 +1648,42 @@ static inline void *cc__py_obj_type(void *o) {
 }
 
 static inline int cc__py_is_exact_int(void *o) {
-    if (cc__py.LongCheck) return cc__py.LongCheck(o);
+    /* Prefer cached builtins.int (CheckExact).  PyLong_Check via dlsym is
+     * often missing (macro) and, when present, accepts bool. */
     if (cc__py_cls_int) return cc__py_obj_type(o) == cc__py_cls_int;
+    if (cc__py.LongCheck) return cc__py.LongCheck(o);
     cc__py_cache_num_classes();
     return cc__py_cls_int && cc__py_obj_type(o) == cc__py_cls_int;
 }
 
 static inline int cc__py_is_exact_float(void *o) {
-    if (cc__py.FloatCheckExact) return cc__py.FloatCheckExact(o);
     if (cc__py_cls_float) return cc__py_obj_type(o) == cc__py_cls_float;
+    if (cc__py.FloatCheckExact) return cc__py.FloatCheckExact(o);
     cc__py_cache_num_classes();
     return cc__py_cls_float && cc__py_obj_type(o) == cc__py_cls_float;
 }
 
-/* Compact int dig (3.12+): no AsLongLong, no error-indicator TLS. */
+/* CPython 3.12+ compact long — same dig nanobind uses via
+ * PyUnstable_Long_IsCompact/CompactValue when linked to the full API.
+ * Layout: PyObject_HEAD + lv_tag + digit[0].  Non-compact / pre-3.12
+ * falls through to AsLongLong. */
+typedef struct {
+    uintptr_t rc;
+    void *ty;
+    uintptr_t lv_tag;
+    uint32_t digit0;
+} CC__PyLongObj;
+
+#define CC__PY_LONG_SIGN_MASK 3u
+#define CC__PY_LONG_COMPACT_LIM (2u << 3) /* _PyLong_NON_SIZE_BITS == 3 */
+
 static inline int cc__py_compact_ll(void *o, long long *out) {
-    if (!cc__py.LongIsCompact || !cc__py.LongCompactValue) return 0;
-    if (!cc__py.LongIsCompact(o)) return 0;
-    *out = (long long)cc__py.LongCompactValue(o);
+    CC__PyLongObj *l = (CC__PyLongObj *)o;
+    uintptr_t tag = l->lv_tag;
+    intptr_t sign;
+    if (tag >= (uintptr_t)CC__PY_LONG_COMPACT_LIM) return 0;
+    sign = (intptr_t)1 - (intptr_t)(tag & CC__PY_LONG_SIGN_MASK);
+    *out = (long long)(sign * (intptr_t)l->digit0);
     return 1;
 }
 
@@ -1674,7 +1692,7 @@ static inline int cc__py_exact_float_val(void *o, double *out) {
     return 0;
 }
 
-static int cc__py_in_ll_raw(void *o, const char *what, long long *out) {
+static inline int cc__py_in_ll_raw(void *o, const char *what, long long *out) {
     long long (*as_ll)(void *) = cc__py.LongAsLongLong;
     void *(*err_occ)(void) = cc__py.ErrOccurred;
     void (*err_clr)(void) = cc__py.ErrClear;
@@ -1696,7 +1714,7 @@ static int cc__py_in_ll_raw(void *o, const char *what, long long *out) {
     return 0;
 }
 
-static int cc__py_in_ull_raw(void *o, const char *what, unsigned long long *out) {
+static inline int cc__py_in_ull_raw(void *o, const char *what, unsigned long long *out) {
     unsigned long long (*as_ull)(void *) = cc__py.LongAsUnsignedLongLong;
     long long (*as_ll)(void *) = cc__py.LongAsLongLong;
     void *(*err_occ)(void) = cc__py.ErrOccurred;
@@ -1766,7 +1784,7 @@ CC__PY_IN_UNSIGNED(ullong, unsigned long long, ULLONG_MAX)
 
 /* A Python int converts to float exactly as `float(x)` does, so an integer
  * argument to a `double` parameter is accepted. */
-static int cc__py_in_double(double *dst, void *o, const char *what) {
+static inline int cc__py_in_double(double *dst, void *o, const char *what) {
     double (*as_f)(void *) = cc__py.FloatAsDouble;
     long long (*as_ll)(void *) = cc__py.LongAsLongLong;
     void *(*err_occ)(void) = cc__py.ErrOccurred;
@@ -2633,15 +2651,14 @@ static int cc__py_bind_mod_methods(void *mod, void *state,
 
 /* ---- arity-specialized enter (shared state+bind; loads stay specialized) ----
  *
- * Polymorphic tag-load regresses ~10 ns/call.  enter_N only shares
- * module_state + optional scratch + bind_fast; stubs keep monomorphic
- * CC_PY_IN.  Flat params (no CC__PyDisp in generated text) so fragment
- * validation does not need that type in its prelude. */
+ * enter_N inlines into each stub (state + bind only); loads stay
+ * monomorphic CC_PY_IN.  Flat params (no CC__PyDisp in generated text) so
+ * fragment validation does not need that type in its prelude. */
 
 #define CC__PY_DISP_MAX 8
 
 #define CC__PY_DEF_ENTER(N)                                                    \
-    static __attribute__((noinline)) int cc__py_enter_##N(                     \
+    static inline int cc__py_enter_##N(                                        \
         void *mod, void *const *args, intptr_t nargs, void *kwnames,           \
         const char *fname, const char *const *names,                           \
         const unsigned char *optional, int needs_ts, void **out_self,          \
