@@ -23,11 +23,11 @@ third_party/tcc-patches/   ← Patch snapshot vs upstream-mob
 | File | Purpose |
 |------|---------|
 | `Makefile` | `-DCONFIG_CC_EXT` when `CONFIG_cc_ext=yes` |
-| `tcc.h` | UFCS scratch fields, `TOK_CC_ARROW` |
-| `tccgen.c` | UFCS host-parse tolerance |
-| `tccpp.c` | `=>` arrow lexing |
+| `tcc.h` | `CC_TCC_EXT_AVAILABLE`; dwarf `unsigned i` |
+| `tccpp.c` | `#line` negative-delta fix |
 
-Stub-AST recording and `TCCExtParser` were removed with the legacy front.
+Stub-AST, ExtParser, UFCS tolerance, and `=>` lexing were removed once
+product lowering no longer needed them in libtcc.
 
 ## Workflow
 

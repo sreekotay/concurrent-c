@@ -24,15 +24,17 @@ make tcc-patch-regen
 
 ## Patch File
 
-**0001-cc-ext-hooks.patch** — CC extensions to TCC (shrunk after legacy-front removal):
+**0001-cc-ext-hooks.patch** — minimal `CONFIG_CC_EXT` surface for libtcc
+(comptime / `cpp_expand` / `--exe`). Product syntax lowering is native
+`shadow_lower`; lowered C is ordinary C.
 
-- `CONFIG_CC_EXT` build flag wiring
-- UFCS host-parse tolerance (still present; product UFCS is `shadow_lower`)
-- `=>` lexing (`TOK_CC_ARROW`)
+- `CONFIG_CC_EXT` build flag wiring + `CC_TCC_EXT_AVAILABLE`
+- `pp_line` negative-delta fix (preserve user `#line` resumes)
+- dwarf `unsigned i` locals (quiet `-Wsign-compare`)
 
-Retired (no longer in the patch): stub-AST recording (`cc_ast_record*`),
-`cc_tcc_parse*_to_ast`, and `TCCExtParser` hooks — those existed for the
-deleted multipass `--frontend=legacy` visitor.
+Retired (do not reintroduce): stub-AST recording, parse-to-ast,
+`TCCExtParser`, UFCS host-parse tolerance, `TOK_CC_ARROW` (`=>`),
+`CC_REC_*`, column/`cc_tok_off` tracking.
 
 All extensions are guarded by `#ifdef CONFIG_CC_EXT`.
 
@@ -41,9 +43,8 @@ All extensions are guarded by `#ifdef CONFIG_CC_EXT`.
 | File | Changes |
 |------|---------|
 | `Makefile` | Adds `-DCONFIG_CC_EXT` when `CONFIG_cc_ext=yes` |
-| `tcc.h` | UFCS scratch fields on `TCCState`, `TOK_CC_ARROW` |
-| `tccgen.c` | UFCS rewrite / tolerance under `CONFIG_CC_EXT` |
-| `tccpp.c` | `=>` arrow token lexing |
+| `tcc.h` | `CC_TCC_EXT_AVAILABLE`; dwarf loop index type |
+| `tccpp.c` | `#line` negative-delta swallow fix |
 
 ## Upstream Compatibility
 

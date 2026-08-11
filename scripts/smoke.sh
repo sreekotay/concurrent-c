@@ -35,7 +35,7 @@ fi
 step "TinyCC (patched, --config-cc_ext)"
 # Fresh submodule checkouts are pristine; hooks ride the patch files.
 ./scripts/apply_tcc_patches.sh
-# Sentinel: CONFIG_CC_EXT is on (stub-AST recording retired; UFCS/arrow remain).
+# Sentinel: CONFIG_CC_EXT is on (minimal surface; UFCS/=> retired from TCC).
 if ! grep -q 'CONFIG_cc_ext=yes' third_party/tcc/config.mak 2>/dev/null; then
   (cd third_party/tcc && ./configure --config-cc_ext && make libtcc.a tcc libtcc1.a -j"$(nproc 2>/dev/null || echo 4)")
 elif ! [ -f third_party/tcc/libtcc.a ]; then

@@ -13,8 +13,9 @@ All extensions are guarded by `#ifdef CONFIG_CC_EXT`.
 | Piece | Role |
 |-------|------|
 | `CONFIG_CC_EXT` / `--config-cc_ext` | Build flag wiring in TCC `Makefile` |
-| UFCS host-parse tolerance in `tccgen.c` | Still active under `CONFIG_CC_EXT` (PR2 candidate to delete once proven unused on lowered C) |
-| `TOK_CC_ARROW` (`=>`) in `tccpp.c` / `tcc.h` | Lexed for accidental sugar; product closures are lowered before libtcc |
+| `CC_TCC_EXT_AVAILABLE` | Sentinel macro for Concurrent-C compile paths |
+| `pp_line` negative-delta fix | Preserve user `#line` resumes after synthetic injections |
+| dwarf `unsigned i` locals | Quiet `-Wsign-compare` on two readers |
 
 ## Retired (do not reintroduce)
 
@@ -22,14 +23,13 @@ All extensions are guarded by `#ifdef CONFIG_CC_EXT`.
 |-------|----------|
 | `cc_ast_record*` / `CCASTStub*` / `cc_ast_record.h` | Stub-AST side table for the deleted visitor front |
 | `cc_tcc_parse*_to_ast` / `cc_tcc_free_ast` | Parse-to-stub-AST API; zero product callers |
-| `TCCExtParser` / `tcc_set_ext_parser` | External parser hooks (`cc_ext_parser.c` deleted) |
-| `cc_tcc_set_symsig_sink` / `cc_parser_mode` | Parser-mode-only exports |
-
-`CC_REC_*` macros remain as unconditional no-ops so any leftover call sites
-compile without linking recording symbols.
+| `TCCExtParser` / `tcc_set_ext_parser` | External parser hooks |
+| UFCS host-parse tolerance / `cc_ufcs_*` TCCState | Product UFCS is `shadow_lower`; lowered C is ordinary C |
+| `TOK_CC_ARROW` (`=>`) | Closures lower before libtcc |
+| `CC_REC_*` recording macros | Recording APIs retired |
+| Column / `cc_tok_off` tracking | Existed for stub-AST provenance |
 
 ## Sentinel
 
 Patched builds must have `CONFIG_cc_ext=yes` in `third_party/tcc/config.mak`
-and produce `libtcc.a`. Do **not** `nm | grep cc_ast_record` — that symbol is
-intentionally gone.
+and produce `libtcc.a`.

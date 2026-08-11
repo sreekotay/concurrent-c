@@ -12,129 +12,22 @@ index d21f1cad..cfff431b 100644
  VPATH = $(TOPSRC)
  -LTCC = $(TOP)/$(LIBTCC)
  
-diff --git a/libtcc.c b/libtcc.c
-index 171e3622..1913e4d3 100644
---- a/libtcc.c
-+++ b/libtcc.c
-@@ -738,6 +738,7 @@ ST_FUNC void tcc_open_bf(TCCState *s1, const char *filename, int initlen)
-     bf->buf_ptr = bf->buffer;
-     bf->buf_end = bf->buffer + initlen;
-     bf->buf_end[0] = CH_EOB; /* put eob symbol */
-+    bf->cc_line_start = bf->buffer;
-     pstrcpy(bf->filename, sizeof(bf->filename), filename);
- #ifdef _WIN32
-     normalize_slashes(bf->filename);
-@@ -959,6 +960,14 @@ LIBTCCAPI void tcc_delete(TCCState *s1)
- #endif
-     /* free loaded dlls array */
-     dynarray_reset(&s1->loaded_dlls, &s1->nb_loaded_dlls);
-+#ifdef CONFIG_CC_EXT
-+    if (s1->cc_typedef_map) {
-+        for (int i = 0; i < s1->cc_typedef_map_count; i++) {
-+            tcc_free(s1->cc_typedef_map[i].name);
-+        }
-+        tcc_free(s1->cc_typedef_map);
-+    }
-+#endif
-     tcc_free(s1);
- #ifdef MEM_DEBUG
-     tcc_memcheck(-1);
 diff --git a/tcc.h b/tcc.h
-index e7a2f1e2..c828a5d2 100644
+index e7a2f1e2..77881772 100644
 --- a/tcc.h
 +++ b/tcc.h
-@@ -452,6 +452,12 @@ typedef struct TokenSym {
+@@ -452,6 +452,10 @@ typedef struct TokenSym {
      char str[1];
  } TokenSym;
  
 +#ifdef CONFIG_CC_EXT
 +#define CC_TCC_EXT_AVAILABLE 1
-+/* Stub-AST / ExtParser retired with the legacy multipass front. Remaining
-+ * CONFIG_CC_EXT surface is UFCS host tolerance + TOK_CC_ARROW (PR2 to drop). */
 +#endif
 +
  #ifdef TCC_TARGET_PE
  typedef unsigned short nwchar_t;
  #else
-@@ -642,6 +648,9 @@ typedef struct BufferedFile {
-     int fd;
-     struct BufferedFile *prev;
-     int line_num;    /* current line number - here to simplify code */
-+    /* CC extension: best-effort column tracking within the current line.
-+       Points at the start of the current line within the active buffer. */
-+    uint8_t *cc_line_start;
-     int line_ref;    /* tcc -E: last printed line */
-     int ifndef_macro;  /* #ifndef macro / #endif search */
-     int ifndef_macro_saved; /* saved ifndef_macro */
-@@ -871,6 +880,33 @@ struct TCCState {
- 
-     int ifdef_stack[IFDEF_STACK_SIZE];
-     int *ifdef_stack_ptr;
-+#ifdef CONFIG_CC_EXT
-+    unsigned int cc_pending_fn_attrs;
-+    int cc_last_member_tok;
-+    int cc_last_member_flags;
-+    int cc_last_member_line;
-+    int cc_last_member_col;
-+    long cc_last_member_off;
-+    char cc_last_recv_type[128];
-+    int cc_last_rparen_line;
-+    int cc_last_rparen_col;
-+    struct {
-+        Sym *ref;
-+        char *name;
-+    } *cc_typedef_map;
-+    int cc_typedef_map_count;
-+    int cc_typedef_map_cap;
-+#define CC_UFCS_SEQ_MAX 128
-+    int cc_ufcs_seq_line;
-+    unsigned int cc_ufcs_seq_fhash;
-+    int cc_ufcs_seq_n;
-+    struct { int tok; int col; int occ; } cc_ufcs_seq[CC_UFCS_SEQ_MAX];
-+    int cc_ufcs_active;
-+    int cc_ufcs_result_pending;
-+    int cc_in_closure_body;
-+    int cc_paren_start_line;
-+    int cc_paren_start_col;
-+#endif
- 
-     /* included files enclosed with #ifndef MACRO */
-     int cached_includes_hash[CACHED_INCLUDES_HASH_SIZE];
-@@ -1151,6 +1187,7 @@ struct filespec {
- #define TOK_TWODOTS 0xa2 /* C++ token ? */
- #define TOK_TWOSHARPS 0xa3 /* ## preprocessing token */
- #define TOK_PLCHLDR 0xa4 /* placeholder token as defined in C99 */
-+#define TOK_CC_ARROW 0xa5 /* => (CC closure arrow) */
- #define TOK_PPJOIN  (TOK_TWOSHARPS | SYM_FIELD) /* A '##' in a macro to mean pasting */
- #define TOK_SOTYPE  0xa7 /* alias of '(' for parsing sizeof (type) */
- 
-@@ -1226,6 +1263,15 @@ PUB_FUNC void *tcc_mallocz(unsigned long size);
- PUB_FUNC void *tcc_realloc(void *ptr, unsigned long size);
- PUB_FUNC char *tcc_strdup(const char *str);
- 
-+/* Stub-AST / ExtParser / recording APIs retired. */
-+#define CC_REC_START(kind)       ((void)0)
-+#define CC_REC_END()             ((void)0)
-+#define CC_REC_CALL(flags)       ((void)0)
-+#define CC_REC_ASSIGN(op)        ((void)0)
-+#define CC_REC_RETURN()          ((void)0)
-+#define CC_REC_BINARY(op)        ((void)0)
-+#define CC_REC_UNARY(op, post)   ((void)0)
-+
- #ifdef MEM_DEBUG
- #define tcc_free(ptr)           tcc_free_debug(ptr)
- #define tcc_malloc(size)        tcc_malloc_debug(size, __FILE__, __LINE__)
-@@ -1334,6 +1380,9 @@ ST_FUNC int normalized_PATHCMP(const char *f1, const char *f2);
- 
- ST_DATA struct BufferedFile *file;
- ST_DATA int tok;
-+/* CC extension: best-effort 1-based starting column of the current token. */
-+ST_DATA int tok_col;
-+ST_DATA long cc_tok_off;   /* CC ext: token-start byte offset in top-level buffer, -1 unknown */
- ST_DATA CValue tokc;
- ST_DATA const int *macro_ptr;
- ST_DATA int parse_flags;
-@@ -1872,7 +1921,7 @@ dwarf_read_uleb128(unsigned char **ln, unsigned char *end)
+@@ -1872,7 +1876,7 @@ dwarf_read_uleb128(unsigned char **ln, unsigned char *end)
  {
      unsigned char *cp = *ln;
      uint64_t retval = 0;
@@ -143,7 +36,7 @@ index e7a2f1e2..c828a5d2 100644
      for (i = 0; i < DWARF_MAX_128; i++) {
  	uint64_t byte = dwarf_read_1(cp, end);
          retval |= (byte & 0x7f) << (i * 7);
-@@ -1887,7 +1936,7 @@ dwarf_read_sleb128(unsigned char **ln, unsigned char *end)
+@@ -1887,7 +1891,7 @@ dwarf_read_sleb128(unsigned char **ln, unsigned char *end)
  {
      unsigned char *cp = *ln;
      int64_t retval = 0;
@@ -153,114 +46,18 @@ index e7a2f1e2..c828a5d2 100644
  	uint64_t byte = dwarf_read_1(cp, end);
          retval |= (byte & 0x7f) << (i * 7);
 diff --git a/tccpp.c b/tccpp.c
-index e19e8504..9ad89a93 100644
+index e19e8504..a51233ec 100644
 --- a/tccpp.c
 +++ b/tccpp.c
-@@ -32,6 +32,8 @@ ST_DATA int parse_flags;
- 
- ST_DATA struct BufferedFile *file;
- ST_DATA int tok;
-+ST_DATA int tok_col;
-+ST_DATA long cc_tok_off;
- ST_DATA CValue tokc;
- ST_DATA const int *macro_ptr;
- ST_DATA CString tokcstr; /* current parsed string, if any */
-@@ -92,6 +94,7 @@ static const unsigned char tok_two_chars[] =
-     '^','=', TOK_A_XOR,
-     '|','=', TOK_A_OR,
-     '-','>', TOK_ARROW,
-+    '=','>', TOK_CC_ARROW,
-     '.','.', TOK_TWODOTS,
-     '#','#', TOK_TWOSHARPS,
-     0
-@@ -590,6 +593,8 @@ ST_FUNC const char *get_tok_str(int v, CValue *cv)
-         goto addv;
-     case TOK_DOTS:
-         return strcpy(p, "...");
-+    case TOK_CC_ARROW:
-+        return strcpy(p, "=>");
-     case TOK_A_SHL:
-         return strcpy(p, "<<=");
-     case TOK_A_SAR:
-@@ -2592,6 +2597,18 @@ static void next_nomacro(void)
- 
-     p = file->buf_ptr;
-  redo_no_start:
-+    /* CC extension: best-effort token column tracking (1-based). */
-+    if (file && file->cc_line_start && p >= file->cc_line_start)
-+        tok_col = (int)(p - file->cc_line_start) + 1;
-+    else
-+        tok_col = 1;
-+    /* CC extension: byte offset of the token start within the top-level
-+     * in-memory parse buffer (-1 inside nested include streams, where
-+     * buf_ptr is a window, not a global offset). */
-+    if (file && !file->prev && p >= file->buffer)
-+        cc_tok_off = (long)(p - file->buffer);
-+    else
-+        cc_tok_off = -1;
-     c = *p;
-     switch(c) {
-     case ' ':
-@@ -2656,6 +2673,8 @@ static void next_nomacro(void)
-     case '\n':
-         file->line_num++;
-         p++;
-+        if (file)
-+            file->cc_line_start = p;
- maybe_newline:
-         tok_flags |= TOK_FLAG_BOL;
-         if (0 == (parse_flags & PARSE_FLAG_LINEFEED))
-@@ -2923,8 +2942,20 @@ maybe_newline:
-         }
-         break;
- 
-+    case '=':
-+        PEEKC(c, p);
-+        if (c == '>') {
-+            p++;
-+            tok = TOK_CC_ARROW;
-+        } else if (c == '=') {
-+            p++;
-+            tok = TOK_EQ;
-+        } else {
-+            tok = '=';
-+        }
-+        break;
-+
-     PARSE2('!', '!', '=', TOK_NE)
--    PARSE2('=', '=', '=', TOK_EQ)
-     PARSE2('*', '*', '=', TOK_A_MUL)
-     PARSE2('%', '%', '=', TOK_A_MOD)
-     PARSE2('^', '^', '=', TOK_A_XOR)
-@@ -3516,6 +3547,10 @@ ST_FUNC void next(void)
-     int t;
-     while (macro_ptr) {
- redo:
-+        /* CC extension: replayed tokens (macro expansion / unget) have no
-+         * position in the top-level buffer; a stale offset here would point
-+         * at the invocation site's tail, not the construct. */
-+        cc_tok_off = -1;
-         t = *macro_ptr;
-         if (TOK_HAS_VALUE(t)) {
-             tok_get(&tok, &macro_ptr, &tokc);
-@@ -3846,7 +3881,19 @@ static void pp_line(TCCState *s1, BufferedFile *f, int level)
+@@ -3846,7 +3846,10 @@ static void pp_line(TCCState *s1, BufferedFile *f, int level)
  
      if (s1->Pflag == LINE_MACRO_OUTPUT_FORMAT_NONE) {
          ;
 -    } else if (level == 0 && f->line_ref && d < 8) {
 +    } else if (level == 0 && f->line_ref && d >= 0 && d < 8) {
-+	/* CC patch: the upstream condition was `d < 8` which fires for
-+	 * negative deltas too (e.g. user code that emits `#line N
-+	 * "file"` with N pointing back to a small line number after a
-+	 * large synthetic injection — Concurrent-C does this routinely
-+	 * to resume the user's source after prepending generated
-+	 * declarations). The inner `while (d > 0)` loop is a no-op for
-+	 * d < 0, so the directive was silently dropped from the
-+	 * preprocessed output, leaving TCC's parser with stale line
-+	 * tracking and emitting diagnostics with wrong line numbers
-+	 * (see tests/m0_5_diag_origin_line_fail.ccs). Restricting the
-+	 * swallow to non-negative deltas falls through to the regular
-+	 * `#line` emission for the resume case. */
++	/* CC patch: upstream `d < 8` also matched negative deltas, which
++	 * silently dropped user #line resumes after large synthetic
++	 * injections (Concurrent-C diagnostics). Restrict to d >= 0. */
  	while (d > 0)
  	    fputs("\n", s1->ppfp), --d;
      } else if (s1->Pflag == LINE_MACRO_OUTPUT_FORMAT_STD) {
