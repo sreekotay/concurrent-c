@@ -1155,16 +1155,23 @@ static CCPyError cc__py_err(const char *ctx) {
                  ctx);
     }
     msg_src = cc__py_errbuf;
-    if (cc__py_err_arena) {
-        size_t n = strlen(msg_src);
-        char *dst = (char *)cc_arena_alloc(cc__py_err_arena, n + 1, 1);
-        if (dst) {
-            memcpy(dst, msg_src, n + 1);
-            e.base = CC_ERROR(CC_ERR_INTERNAL, dst);
-            return e;
+    /* Real Python exceptions are user-face (CC_ERR_USER), not INTERNAL —
+     * KeyError is not "our bug." Binding/setup failures stay INTERNAL. */
+    {
+        CCErrorKind kind =
+            (e.type_name.ptr && e.type_name.len > 0) ? CC_ERR_USER
+                                                    : CC_ERR_INTERNAL;
+        if (cc__py_err_arena) {
+            size_t n = strlen(msg_src);
+            char *dst = (char *)cc_arena_alloc(cc__py_err_arena, n + 1, 1);
+            if (dst) {
+                memcpy(dst, msg_src, n + 1);
+                e.base = CC_ERROR(kind, dst);
+                return e;
+            }
         }
+        e.base = CC_ERROR(kind, msg_src);
     }
-    e.base = CC_ERROR(CC_ERR_INTERNAL, msg_src);
     return e;
 }
 

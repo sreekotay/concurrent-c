@@ -377,6 +377,8 @@ static int ccpy__ext_make(CcPyDom *d, void *env, CcPyObjBox *b, void **out) {
 }
 
 static int ccpy__result_to_js(CcPyDom *d, void *env, CCPyObj r, void **out);
+static int ccpy__arg_from_js(CcPyDom *d, void *env, void *v, CCPyArg *out,
+                             void **owned_out, char *errbuf, size_t errcap);
 static void ccpy__exec_run(CcPyDom *d, CcPyJob *j);
 static int ccpy__aio_in_task(CcPyDom *d);
 static void *ccpy__cb_call_aio(CcPyDom *d, CcJsCbBox *box, void *args, int n);
@@ -1933,9 +1935,21 @@ static void *ccpy__exec_main(void *arg) {
 }
 
 static void ccpy__reject(void *env, void *deferred, const char *msg) {
-    void *m = NULL, *e = NULL;
-    cc__js.CreateStringUtf8(env, msg, strlen(msg), &m);
-    if (!m || cc__js.CreateError(env, NULL, m, &e) != 0 || !e) e = m;
+    void *m = NULL, *e = NULL, *c = NULL, *pt = NULL;
+    char pyty[64];
+    const char *code = NULL;
+    if (msg && cc__js_py_type_from_msg(msg, pyty, sizeof(pyty)))
+        code = pyty;
+    cc__js.CreateStringUtf8(env, msg ? msg : "python error",
+                            strlen(msg ? msg : "python error"), &m);
+    if (code)
+        cc__js.CreateStringUtf8(env, code, strlen(code), &c);
+    if (!m || cc__js.CreateError(env, c, m, &e) != 0 || !e) e = m;
+    if (e && code && c) {
+        (void)cc__js.SetNamedProperty(env, e, "code", c);
+        if (cc__js.CreateStringUtf8(env, code, strlen(code), &pt) == 0 && pt)
+            (void)cc__js.SetNamedProperty(env, e, "pyType", pt);
+    }
     cc__js.RejectDeferred(env, deferred, e);
 }
 
@@ -2349,6 +2363,83 @@ static CCJsVal !>(CCError) CcPython_getattr(CcPython *self, CCJs *js,
             }
         }
     }
+}
+
+/* JS value → owned PyObject* for setattr (GIL held). */
+static void *ccpy__arg_to_owned_py(const CCPyArg *a, char *errbuf,
+                                  size_t errcap) {
+    if (!a) return NULL;
+    if (a->kind == 0) return cc__py.LongFromLongLong(a->i);
+    if (a->kind == 1) return cc__py.FloatFromDouble(a->f);
+    if (a->kind == 2 || a->kind == 3)
+        return cc__py.UnicodeFromStringAndSize
+                   ? cc__py.UnicodeFromStringAndSize(
+                         (const char *)a->p, (intptr_t)a->n)
+                   : NULL;
+    if (a->kind == 4) {
+        if (!a->p) {
+            snprintf(errbuf, errcap, "cc-python: null object attribute value");
+            return NULL;
+        }
+        cc__py.IncRef((void *)a->p);
+        return (void *)a->p;
+    }
+    if (a->kind == 5) return cc__py.BoolFromLong(a->i ? 1 : 0);
+    snprintf(errbuf, errcap,
+             "cc-python: cannot assign that value as an attribute "
+             "(use numbers, strings, booleans, or bridge handles)");
+    return NULL;
+}
+
+/* `obj.prop = value` → setattr. Mapping key assignment uses __setitem__
+ * from the JS Proxy when setattr refuses. */
+static long long !>(CCError) CcPython_setattr(CcPython *self, CCJs *js,
+                                              CCJsExt dom, CCJsExt obj,
+                                              const char *name, CCJsVal val) {
+    CcPyDom *d = ccpy__dom(dom);
+    CcPyObjBox *b;
+    CCPyArg a;
+    void *owned = NULL;
+    void *pyv;
+    int rc;
+    (void)self;
+    if (!d) return cc_err(CC_ERR_INVALID_ARG, "cc-python: bridge is closed");
+    if (!name || !name[0])
+        return cc_err(CC_ERR_INVALID_ARG, "cc-python: empty attribute name");
+    b = ccpy__objbox(d, obj);
+    if (!b)
+        return cc_err(CC_ERR_INVALID_ARG,
+                      "cc-python: handle is released or belongs to another "
+                      "bridge");
+    cc__py_attach(&d->py);
+    if (ccpy__arg_from_js(d, js->env, val.v, &a, &owned, ccpy__errbuf,
+                          sizeof(ccpy__errbuf)) != 0) {
+        if (d->async_mode) cc_py_thread_leave();
+        return cc_err(CC_ERR_INVALID_ARG, ccpy__errbuf);
+    }
+    pyv = ccpy__arg_to_owned_py(&a, ccpy__errbuf, sizeof(ccpy__errbuf));
+    if (owned) cc__py.DecRef(owned);
+    if (!pyv) {
+        CCPyError pe;
+        if (ccpy__errbuf[0]) {
+            if (d->async_mode) cc_py_thread_leave();
+            return cc_err(CC_ERR_INVALID_ARG, ccpy__errbuf);
+        }
+        pe = cc__py_err("setattr");
+        if (d->async_mode) cc_py_thread_leave();
+        return cc_err_CCResult_long_long_CCError(pe.base);
+    }
+    rc = cc__py.ObjectSetAttrString
+             ? cc__py.ObjectSetAttrString(b->obj.o, name, pyv)
+             : -1;
+    cc__py.DecRef(pyv);
+    if (rc != 0) {
+        CCPyError pe = cc__py_err("setattr");
+        if (d->async_mode) cc_py_thread_leave();
+        return cc_err_CCResult_long_long_CCError(pe.base);
+    }
+    if (d->async_mode) cc_py_thread_leave();
+    return cc_ok((long long)1);
 }
 
 /* Early release of one handle; answers the domain's remaining live

@@ -76,7 +76,7 @@ function prepareArg(bridge, a) {
 
 function rethrowImportHint(err, isolated) {
   const msg = String(err && err.message || err);
-  if (!/No module named|ModuleNotFoundError/i.test(msg)) throw err;
+  if (!/No module named|ModuleNotFoundError/i.test(msg)) throw attachPyType(err);
   // Broker already attaches the isolated hint; do not double-append.
   if (isolated && /child python|venvPath/i.test(msg)) throw err;
   if (!isolated && /isolated: true|usePython/i.test(msg)) throw err;
@@ -88,7 +88,33 @@ function rethrowImportHint(err, isolated) {
       'usePython("/path/to/venv") before create()';
   const e = new Error(msg.replace(/\s*$/, '') + hint);
   if (err && err.stack) e.stack = err.stack;
-  throw e;
+  throw attachPyType(e);
+}
+
+/* Surface Python exception class on the Error: `.pyType` and, when the
+ * napi `code` was still a CC_ERR_* badge, replace it with the class name. */
+function attachPyType(err) {
+  if (!err || typeof err !== 'object') return err;
+  if (err.pyType) return err;
+  let ty = null;
+  if (typeof err.code === 'string' && err.code && !/^CC_ERR_/.test(err.code) &&
+      err.code !== 'PythonError')
+    ty = err.code;
+  if (!ty) {
+    const m = /python:\s*[^:]+:\s*([A-Za-z_][A-Za-z0-9_]*)\b/
+        .exec(String(err.message || ''));
+    if (m) ty = m[1];
+  }
+  if (!ty) return err;
+  try { err.pyType = ty; } catch (e) { /* ignore */ }
+  if (typeof err.code === 'string' && /^CC_ERR_/.test(err.code)) {
+    try { err.code = ty; } catch (e) { /* ignore */ }
+  }
+  return err;
+}
+function pyCall(fn) {
+  try { return fn(); }
+  catch (e) { throw attachPyType(e); }
 }
 
 // Scalars arrive as JS scalars; a held reference arrives as an External
@@ -114,30 +140,65 @@ function wrap(bridge, handle) {
    * Bumped on any release() so a cached proxy cannot outlive its box. */
   const attrCache = new Map();
   let cacheGen = bridge._attrCacheGen || 0;
+
+  function pyGetAttr(prop) {
+    return pyCall(() => materialize(
+        bridge, native.getattr(bridge._dom, handle, prop)));
+  }
+  function pyInvoke(fnHandle, args) {
+    return pyCall(() => materialize(
+        bridge, native.invoke(bridge._dom, fnHandle, args)));
+  }
+  /* Mapping membership / keys — prefer __contains__ / keys() so Object.keys
+   * and `in` match iteration, not the empty function target. */
+  function pyContains(prop) {
+    try {
+      const c = pyGetAttr('__contains__');
+      return !!pyInvoke(unwrapArg(c), [prop]);
+    } catch (e) {
+      try { pyGetAttr(prop); return true; }
+      catch (e2) { return false; }
+    }
+  }
+  function pyOwnKeys() {
+    try {
+      const keysFn = pyGetAttr('keys');
+      const view = pyInvoke(unwrapArg(keysFn), []);
+      const out = [];
+      for (const k of view) {
+        if (typeof k === 'string') out.push(k);
+        else if (typeof k === 'number' || typeof k === 'bigint')
+          out.push(String(k));
+      }
+      return out;
+    } catch (e) {
+      return [];
+    }
+  }
+
   return new Proxy(target, {
     get(t, prop) {
       if (prop === HANDLE) return handle;
       if (prop === 'then') return undefined; // not a thenable
       if (prop === Symbol.toPrimitive || prop === 'toString' ||
           prop === 'toJS') {
-        return () => native.invoke(bridge._dom, bridge._str(), [handle]);
+        return () => pyInvoke(bridge._str(), [handle]);
       }
       if (prop === 'toTypedArray') {
-        return () => native.to_typed_array(bridge._dom, handle);
+        return () => pyCall(
+            () => native.to_typed_array(bridge._dom, handle));
       }
       if (prop === Symbol.iterator) {
         return function () {
-          const it = materialize(
-              bridge,
-              native.invoke(bridge._dom,
-                            native.getattr(bridge._dom, handle, '__iter__'),
-                            []));
+          const it = pyInvoke(
+              unwrapArg(pyGetAttr('__iter__')), []);
           return {
             next() {
               try {
                 /* CPython 3: tp_iternext is `__next__`, not `next`. */
                 return { value: it.__next__(), done: false };
               } catch (e) {
+                attachPyType(e);
                 if (/StopIteration/i.test(String(e && e.message)))
                   return { value: undefined, done: true };
                 throw e;
@@ -153,18 +214,83 @@ function wrap(bridge, handle) {
         cacheGen = bridge._attrCacheGen || 0;
       }
       if (attrCache.has(prop)) return attrCache.get(prop);
-      const v = materialize(bridge,
-                            native.getattr(bridge._dom, handle, prop));
+      let v;
+      try {
+        v = pyGetAttr(prop);
+      } catch (e) {
+        /* Dict keys are not attributes — fall through to __getitem__. */
+        try {
+          const gi = pyGetAttr('__getitem__');
+          v = pyInvoke(unwrapArg(gi), [prop]);
+        } catch (e2) {
+          throw attachPyType(e);
+        }
+      }
       /* Proxies are function-targets → typeof 'function', not 'object'. */
       if (v != null && v[HANDLE] &&
           (typeof v === 'object' || typeof v === 'function'))
         attrCache.set(prop, v);
       return v;
     },
+    has(t, prop) {
+      if (prop === HANDLE) return true;
+      if (typeof prop !== 'string') return false;
+      return pyContains(prop);
+    },
+    ownKeys(t) {
+      /* Function targets require length/name/prototype in ownKeys. */
+      const base = Reflect.ownKeys(t);
+      const keys = pyOwnKeys();
+      for (let i = 0; i < keys.length; i++) {
+        if (base.indexOf(keys[i]) < 0) base.push(keys[i]);
+      }
+      return base;
+    },
+    getOwnPropertyDescriptor(t, prop) {
+      if (prop === 'length' || prop === 'name' || prop === 'prototype')
+        return Reflect.getOwnPropertyDescriptor(t, prop);
+      if (typeof prop !== 'string')
+        return Reflect.getOwnPropertyDescriptor(t, prop);
+      if (!pyContains(prop)) return undefined;
+      /* Include a real value so `{...proxy}` / assign see contents. */
+      let v;
+      try {
+        v = pyGetAttr(prop);
+      } catch (e) {
+        try {
+          v = pyInvoke(unwrapArg(pyGetAttr('__getitem__')), [prop]);
+        } catch (e2) {
+          return undefined;
+        }
+      }
+      return {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value: v,
+      };
+    },
+    set(t, prop, value) {
+      if (typeof prop !== 'string') return false;
+      try {
+        pyCall(() => native.setattr(
+            bridge._dom, handle, prop, prepareArg(bridge, value)));
+        attrCache.delete(prop);
+        return true;
+      } catch (e) {
+        /* Mappings: d.k = v → __setitem__ when setattr refuses. */
+        try {
+          const si = pyGetAttr('__setitem__');
+          pyInvoke(unwrapArg(si), [prop, prepareArg(bridge, value)]);
+          attrCache.delete(prop);
+          return true;
+        } catch (e2) {
+          throw attachPyType(e);
+        }
+      }
+    },
     apply(t, thisArg, args) {
-      return materialize(bridge,
-                         native.invoke(bridge._dom, handle,
-                                       args.map((a) => prepareArg(bridge, a))));
+      return pyInvoke(handle, args.map((a) => prepareArg(bridge, a)));
     },
   });
 }
@@ -235,8 +361,11 @@ class Bridge {
   close() {
     return this.destroy();
   }
+  /* Sync `using` requires dispose to finish revocation before the next
+   * statement — fire-and-forget destroy() left the domain usable. */
   [Symbol.dispose]() {
-    this.destroy();
+    this._strHandle = null;
+    native.close(this._dom);
   }
   [Symbol.asyncDispose]() {
     return this.destroy();
@@ -320,6 +449,10 @@ const isoFinalizers = (typeof FinalizationRegistry !== 'undefined')
 function rwrap(bridge, h, chain) {
   const target = function () {};
   target[RHANDLE] = { h, chain, bridge };
+  const callp = (path, args) => bridge
+    ._req(Object.assign({ op: 'callp', h, path },
+                        bridge._callPayload(args || [])))
+    .then((r) => bridge._materialize(r), (e) => { throw attachPyType(e); });
   const proxy = new Proxy(target, {
     get(t, prop) {
       if (prop === RHANDLE) return t[RHANDLE];
@@ -328,33 +461,33 @@ function rwrap(bridge, h, chain) {
         if (chain.length === 0) return undefined; // module roots stay put
         return (resolve, reject) =>
           bridge._req({ op: 'getp', h, path: chain })
-            .then((r) => resolve(bridge._materialize(r)), reject);
+            .then((r) => resolve(bridge._materialize(r)),
+                  (e) => reject(attachPyType(e)));
       }
       if (prop === 'str') {
         return () => bridge._req({ op: 'str', h, path: chain })
-          .then((r) => r.v);
+          .then((r) => r.v, (e) => { throw attachPyType(e); });
       }
       if (prop === 'toTypedArray') {
         // Materialize a buffer-shaped value: small inline, big through
         // the shm spill — one memcpy per side either way.
         return () => bridge._req({ op: 'ta', h, path: chain })
-          .then((r) => bridge._materialize(r));
+          .then((r) => bridge._materialize(r),
+                (e) => { throw attachPyType(e); });
       }
       if (prop === Symbol.toPrimitive || prop === 'toString')
         return () => '[cc-python remote ' + h +
                      (chain.length ? '.' + chain.join('.') : '') + ']';
       if (prop === Symbol.asyncIterator) {
         return async function () {
-          const it = await bridge
-            ._req({ op: 'callp', h, path: chain.concat('__iter__'),
-                    args: [] })
-            .then((r) => bridge._materialize(r));
+          const it = await callp(chain.concat('__iter__'), []);
           return {
             async next() {
               try {
                 const value = await it.__next__();
                 return { value, done: false };
               } catch (e) {
+                attachPyType(e);
                 if (/StopIteration/i.test(String(e && e.message)))
                   return { value: undefined, done: true };
                 throw e;
@@ -367,11 +500,21 @@ function rwrap(bridge, h, chain) {
       if (typeof prop !== 'string') return undefined;
       return rwrap(bridge, h, chain.concat(prop)); // no round trip
     },
+    set(t, prop, value) {
+      if (typeof prop !== 'string') return false;
+      /* Isolated set is async on the wire; return true and surface failure
+       * as an unhandled rejection if the setattr/setitem fails. */
+      const path = chain.concat('__setattr__');
+      callp(path, [prop, value]).catch((e) => {
+        /* Fallback: mapping key assignment. */
+        callp(chain.concat('__setitem__'), [prop, value]).catch((e2) => {
+          setImmediate(() => { throw attachPyType(e); });
+        });
+      });
+      return true;
+    },
     apply(t, thisArg, args) {
-      return bridge
-        ._req(Object.assign({ op: 'callp', h, path: chain },
-                            bridge._callPayload(args)))
-        .then((r) => bridge._materialize(r));
+      return callp(chain, args);
     },
   });
   /* Only root handles (no lazy chain) — releasing a path is meaningless. */
@@ -765,7 +908,23 @@ class ProcBridge {
     }
   }
   close() { return this.destroy(); }
-  [Symbol.dispose]() { this.destroy(); }
+  /* Sync using: mark closed and tear down immediately (SIGKILL backup). */
+  [Symbol.dispose]() {
+    if (this._dead) return;
+    this._closed = true;
+    try {
+      const child = this._child;
+      if (child && !child.killed) child.kill('SIGKILL');
+    } catch (e) { /* ignore */ }
+    this._tearDownChild();
+    this._dead = true;
+    for (const w of this._closeWaiters.splice(0)) w();
+    for (const [, p] of this._pending) {
+      try { p.reject(new Error('concurrent-c-python: bridge is closed')); }
+      catch (e) { /* ignore */ }
+    }
+    this._pending.clear();
+  }
   [Symbol.asyncDispose]() { return this.destroy(); }
 }
 

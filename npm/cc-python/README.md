@@ -106,9 +106,13 @@ handles chain (`const fft = await np.fft.fft(buf); await np.abs(fft)`).
 ## Surface
 
 - Attribute chains are Python (`np.linalg.norm`). Scalars materialize;
-  everything else stays a proxy. `String(proxy)` → `str()`. Bare
-  `builtins.eval` / `exec` (no globals dict) use the domain's
-  `__main__` namespace — same as isolated.
+  everything else stays a proxy. `String(proxy)` → `str()`. Assignment
+  is `setattr` (mappings fall back to `__setitem__`). `Object.keys` /
+  `in` use mapping keys / `__contains__`. Bare `builtins.eval` /
+  `exec` (no globals dict) use the domain's `__main__` namespace —
+  same as isolated. `using py = create()` sync-disposes the domain.
+  Python exceptions expose `.pyType` (and `.code`) as the class name
+  (e.g. `KeyError`), not `CC_ERR_INTERNAL`.
 
 - Typed-array args (`Float64`/`Float32`/`Int32`/`BigInt64`/`Uint8Array`
   and Node `Buffer`) are zero-copy memoryviews for the call — writable

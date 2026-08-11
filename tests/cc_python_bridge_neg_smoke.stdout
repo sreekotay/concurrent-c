@@ -6,6 +6,11 @@ neg_inproc_release_again true
 neg_inproc_keep_past_return true
 neg_inproc_bare_eval true
 neg_inproc_bare_exec true
+neg_inproc_dict_keys true
+neg_inproc_dict_in true
+neg_inproc_setattr true
+neg_inproc_dispose true
+neg_inproc_pytype true
 neg_inproc_proxy_keys true
 neg_inproc_proxy_json true
 neg_inproc_proxy_alive true

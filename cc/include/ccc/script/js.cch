@@ -616,13 +616,47 @@ static const char *cc__js_err_code(int kind) {
     case CC_ERR_UNDERFLOW:      return "CC_ERR_UNDERFLOW";
     case CC_ERR_NULL:           return "CC_ERR_NULL";
     case CC_ERR_INTERNAL:       return "CC_ERR_INTERNAL";
+    case CC_ERR_USER:           return "PythonError";
     default:                    return "CC_ERR";
     }
+}
+
+/* `python: <ctx>: <TypeName>` or `python: <ctx>: <TypeName>: <detail>` → TypeName */
+static int cc__js_py_type_from_msg(const char *msg, char *out, size_t cap) {
+    const char *p, *start, *end;
+    size_t n;
+    if (!msg || !out || cap < 2) return 0;
+    p = strstr(msg, "python:");
+    if (!p) return 0;
+    p += 7;
+    while (*p == ' ') p++;
+    while (*p && *p != ':') p++;
+    if (*p != ':') return 0;
+    p++;
+    while (*p == ' ') p++;
+    start = p;
+    if (!((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') || *p == '_'))
+        return 0;
+    while ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+           (*p >= '0' && *p <= '9') || *p == '_')
+        p++;
+    end = p;
+    if (*end != '\0' && *end != ':' && *end != ' ' && *end != '\n') return 0;
+    n = (size_t)(end - start);
+    if (n == 0 || n + 1 > cap) return 0;
+    memcpy(out, start, n);
+    out[n] = 0;
+    return 1;
 }
 
 static void *cc__js_throw_cc_error(void *env, int kind, const char *msg) {
     const char *code = cc__js_err_code(kind);
     const char *m = msg ? msg : "cc error";
+    char pyty[64];
+    /* User-face Python exceptions: Error.code is the exception class
+     * (KeyError), not CC_ERR_INTERNAL. */
+    if (kind == CC_ERR_USER && cc__js_py_type_from_msg(m, pyty, sizeof(pyty)))
+        code = pyty;
     switch (kind) {
     case CC_ERR_INVALID_ARG: cc__js.ThrowTypeError(env, code, m); break;
     case CC_ERR_OVERFLOW:    cc__js.ThrowRangeError(env, code, m); break;

@@ -57,6 +57,43 @@ async function raisesAsync(fn, re) {
     b.exec('ccpy_bare_x = 7');
     out('neg_inproc_bare_exec', b.eval('ccpy_bare_x') === 7);
 
+    // Dict reflection: keys/in match iteration (not the empty function target).
+    {
+      const d = b.dict();
+      d.a = 1;
+      d.bb = 2;
+      const keys = Object.keys(d).sort();
+      out('neg_inproc_dict_keys',
+          keys.length === 2 && keys[0] === 'a' && keys[1] === 'bb');
+      out('neg_inproc_dict_in', 'a' in d && !('zz' in d) && d.a === 1);
+    }
+
+    // setattr reaches Python (SimpleNamespace).
+    {
+      const ns = py.import('types').SimpleNamespace();
+      ns.zz = 41;
+      out('neg_inproc_setattr', ns.zz === 41);
+    }
+
+    // Symbol.dispose sync-closes (using-safe).
+    {
+      const d = ccpy.create();
+      const m = d.import('math');
+      d[Symbol.dispose]();
+      out('neg_inproc_dispose',
+          d.closed &&
+          raisesSync(() => m.sqrt(9), /closed/));
+    }
+
+    // Python exceptions: .pyType / .code are the class, not CC_ERR_INTERNAL.
+    {
+      let e = null;
+      try { b.eval('lambda: (_ for _ in ()).throw(KeyError())')(); }
+      catch (err) { e = err; }
+      out('neg_inproc_pytype',
+          !!e && e.pyType === 'KeyError' && e.code === 'KeyError');
+    }
+
     // Proxy traps: stringify must fail articulately; domain stays usable.
     out('neg_inproc_proxy_keys', Array.isArray(Object.keys(math.sqrt)));
     out('neg_inproc_proxy_json',
