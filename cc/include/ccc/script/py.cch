@@ -5627,9 +5627,15 @@ static inline CCPyArg cc__py_arg_pass(CCPyArg a) { return a; }
  * has a contiguous run to borrow, so any other argument is left exactly
  * as it was and marshals normally — passing `py_buf` something that is
  * not a buffer changes nothing rather than silently producing an empty
- * view. */
+ * view.
+ *
+ * Empty slices (n==0) often arrive with a NULL data pointer from
+ * napi/V8.  Still retarget to kind 7: falling through to kind-6 element
+ * marshalling would mint an empty Python list, so the Python type would
+ * flip at n=0 (memoryview vs list) — a classic production footgun. */
 static inline CCPyArg cc__py_arg_buffer(CCPyArg a) {
-    if (a.kind != 6 || !a.p) return a;
+    if (a.kind != 6) return a;
+    if (!a.p && a.n != 0) return a;
     a.n = a.n * (size_t)(a.i & 0xff);
     a.kind = 7;
     return a;
@@ -6157,8 +6163,13 @@ static inline CCPyObj !>(CCPyError) cc__py_obj_callm_n(CCPyObj *obj,
                         : esz == 2 ? (iss ? "h" : "H")
                         : esz == 4 ? (iss ? "i" : "I")
                                    : (iss ? "q" : "Q");
+                /* Empty borrows often have a NULL data pointer; CPython
+                 * still wants a non-NULL buf for len==0. */
+                static char cc__py_empty_borrow_byte;
+                void *buf = (void *)(uintptr_t)a.p;
+                if (!buf && a.n == 0) buf = &cc__py_empty_borrow_byte;
                 v = NULL;
-                if (a.p && cc__py.MemoryViewFromBuffer &&
+                if (buf && cc__py.MemoryViewFromBuffer &&
                     nviews < CC__PY_MAX_CALL_ARGS) {
                     /* One shot: the filled Py_buffer carries the element
                      * format, no cast call rides on the argument. */
@@ -6167,7 +6178,7 @@ static inline CCPyObj !>(CCPyError) cc__py_obj_callm_n(CCPyObj *obj,
                     vfmt[nviews][0] = fmt[0];
                     vfmt[nviews][1] = 0;
                     vshape[nviews] = (intptr_t)(a.n / (size_t)(esz ? esz : 1));
-                    pb->buf = (void *)(uintptr_t)a.p;
+                    pb->buf = buf;
                     pb->len = (intptr_t)a.n;
                     pb->itemsize = esz ? esz : 1;
                     pb->readonly = 0;
@@ -6177,8 +6188,8 @@ static inline CCPyObj !>(CCPyError) cc__py_obj_callm_n(CCPyObj *obj,
                     v = cc__py.MemoryViewFromBuffer(pb);
                     if (!v && cc__py.ErrClear) cc__py.ErrClear();
                 }
-                if (!v && a.p && cc__py.MemoryViewFromMemory) {
-                    v = cc__py.MemoryViewFromMemory((char *)(uintptr_t)a.p,
+                if (!v && buf && cc__py.MemoryViewFromMemory) {
+                    v = cc__py.MemoryViewFromMemory((char *)buf,
                                                     (intptr_t)a.n,
                                                     0x200 /* PyBUF_WRITE */);
                     if (v) {

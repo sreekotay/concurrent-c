@@ -47,10 +47,12 @@ Prebuilt where shipped; otherwise compiles vendored C at install (`cc`).
 | Crash | can take Node with it | child dies; parent lives |
 | Python / venv | process-wide `usePython(...)` | per domain (`python:`) |
 
-Use in-process when that runtime has your packages (BLAS-3 likes
-zero-copy). Use isolated for ambient/`pip` packages, crash isolation, or
-multi-core fan-out. Don’t judge modes on `np.dot` alone — see Measured
-(matmul/SVD).
+Use in-process when that runtime has your packages and you want the
+BLAS-3 / matmul prize (zero-copy typed arrays). Prefer
+`create({ isolated: true })` for long-running services, ambient/`pip`
+packages, crash isolation, or multi-core fan-out — and **pin the npm
+version** in prototypes. Don’t judge modes on `np.dot` alone — see
+Measured (matmul/SVD).
 
 Receipts:
 [`js_numpy_bridge_node_20260810.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/js_numpy_bridge_node_20260810.txt)
@@ -78,6 +80,30 @@ const py = ccpy.create({
 ```
 
 See [Choosing the Python](#choosing-the-python).
+
+### Handles and GC
+
+Proxies are collected by `FinalizationRegistry`, which only runs after
+**event-loop turns**. A fully-synchronous loop that mints handles can
+look like a leak (`stats()` in the thousands, RSS climbing) until you
+`await` / `setImmediate` / return to the loop — then the ledger drains.
+
+In hot sync loops, call `py.release(h)` (or scope with `using py =
+create()` / `destroy()`) instead of relying on GC. `stats()` reports
+live handles; the bridge warns once if the count climbs past 5 000
+without a release.
+
+### Dead domains
+
+After `destroy()` / child exit, `import` and calls reject with
+`bridge is closed` — they do not mint a proxy that fails only later.
+
+### Stdout / `print`
+
+In-process, Python’s `print` / `sys.stdout` are the same fds as Node —
+fine for debugging, easy to corrupt a parent that parses its own
+stdout. Redirect in Python (`contextlib.redirect_stdout`), or use
+`create({ isolated: true })` when you need a clean child pipe.
 
 **Isolated calls are Promises — await them.** This fails encode:
 
@@ -119,14 +145,24 @@ handles chain (`const fft = await np.fft.fft(buf); await np.abs(fft)`).
   not `CC_ERR_INTERNAL`.
 
 - Typed-array args (`Float64`/`Float32`/`Int32`/`BigInt64`/`Uint8Array`
-  and Node `Buffer`) are zero-copy memoryviews for the call — writable
-  (writes land in the caller's array); kept past return is an error, not
-  corruption. Bulk results: `proxy.toTypedArray()` (in-process and
-  isolated) copies a 1-D numeric buffer out as a real TypedArray.
+  and Node `Buffer`) are zero-copy **memoryviews** for the call — same
+  Python type at `n=0` and `n>0` (never a list). Writable (writes land
+  in the caller's array); kept past return is an error, not corruption.
+  They are not numpy ndarrays — wrap with `np.asarray(mv)` when you need
+  one. Bulk results: `proxy.toTypedArray()` (in-process and isolated)
+  copies a 1-D numeric buffer out as a real TypedArray.
+  Plain JS **arrays** and **objects** cross as Python `list` / `dict`
+  (nested scalars, handles, null/undefined→`None`). Typed arrays stay
+  top-level only (the zero-copy lease). Keys starting with `$` are
+  reserved.
 - Handles are per-domain (`stats()` / `release(proxy)`). `destroy()` /
   `using` / GC sweeps once; afterwards: `bridge is closed`. Unknown
   attribute access on a handle throws (not silent `undefined`) — host
-  callbacks receive the same Proxies as call results.
+  callbacks receive the same Proxies as call results. Proxies use a
+  function target (`typeof === 'function'`), so **`if (proxy)` is always
+  true** — check `len` / compare to `None` / `.toJS()` for emptiness.
+  **`===` is not Python identity**: each crossing mints a new proxy for
+  the same underlying object; use a Python `is` helper if you need that.
 - JS numbers → `int` or `float`; Python `int` past 2^53 comes back as
   exact `BigInt` (full range — never a lossy double). `BigInt` args
   round-trip to Python `int`. Signed `-0` stays a float (not collapsed
@@ -197,14 +233,18 @@ Warm spawn+import ~109ms, wire ~98µs, 8MB shm arg ~6.4ms; 4 domains
 [`js_two_interp.js`](examples/js_two_interp.js),
 [`js_multiprocess_numpy.js`](examples/js_multiprocess_numpy.js).
 
-Isolated kwargs are explicit and last:
+Isolated and in-process kwargs are explicit and last — there is no
+`key=` sugar on the JS call site:
 
 ```js
 const { kwargs } = require('concurrent-c-python');
-await fmt(1, kwargs({ sep: '+' }));
+fmt(1, kwargs({ sep: '+' }));           // in-process
+await fmt(1, kwargs({ sep: '+' }));     // isolated
+builtins.sorted(xs, kwargs({ key: neg }));  // not sorted(xs, {key: neg})
 ```
 
-In-process is positional for now (use `functools.partial` in Python).
+A trailing plain object is still a positional dict — only `kwargs(...)`
+means keywords.
 
 ## `async def` and callbacks
 

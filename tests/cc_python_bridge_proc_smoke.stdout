@@ -25,4 +25,5 @@ parent_survives true
 release_drops true
 destroy_lands true
 after_close_rejects true
+import_after_close true
 proc suite done

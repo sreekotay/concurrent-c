@@ -16,6 +16,12 @@ neg_inproc_proxy_json true
 neg_inproc_tojs true
 neg_inproc_inspect true
 neg_inproc_proxy_alive true
+neg_inproc_list_arg true
+neg_inproc_dict_arg true
+neg_inproc_undefined_none true
+neg_inproc_kwargs true
+neg_inproc_positional_dict true
+neg_inproc_import_after_close true
 neg_inproc_tojs_nan_null true
 neg_inproc_tojs_none_null true
 neg_inproc_tojs_int_keys true
@@ -35,6 +41,8 @@ neg_inproc_bigint_roundtrip true
 neg_inproc_bigint_huge true
 neg_inproc_u8_sum true
 neg_inproc_buffer_sum true
+neg_inproc_empty_f64_memoryview true
+neg_inproc_empty_u8_memoryview true
 neg_inproc_lone_surrogate true
 neg_inproc_cb_missing_attr true
 neg_inproc_to_typed_array true

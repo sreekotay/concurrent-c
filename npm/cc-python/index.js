@@ -43,13 +43,58 @@ const HANDLE = Symbol('cc-python-handle');
 const KWARGS = Symbol('cc-python-kwargs');
 
 function unwrapArg(a) {
-  if (a !== null && a !== undefined && a[KWARGS] !== undefined) {
-    throw new Error(
-        'concurrent-c-python: kwargs(...) crosses only the isolated wire ' +
-        'today — in-process calls are positional (bind keywords in Python, ' +
-        'e.g. functools.partial)');
-  }
   return (a !== null && a !== undefined && a[HANDLE]) ? a[HANDLE] : a;
+}
+
+/* Split positionals from a trailing kwargs(...) marker.  A trailing plain
+ * object stays positional (Python dict) — only the marker means keywords.
+ * Shared by in-process and isolated call sites. */
+function splitCallArgs(args) {
+  const list = args ? Array.prototype.slice.call(args) : [];
+  for (let i = 0; i < list.length; i++) {
+    const a = list[i];
+    if (a !== null && a !== undefined && a[KWARGS] !== undefined) {
+      if (i !== list.length - 1)
+        throw new Error(
+            'concurrent-c-python: kwargs(...) must be the last argument');
+      return { pos: list.slice(0, -1), kw: a[KWARGS] };
+    }
+  }
+  return { pos: list, kw: null };
+}
+
+function prepareCallArgs(bridge, rawArgs) {
+  const split = splitCallArgs(rawArgs);
+  return {
+    pos: split.pos.map((a) => prepareArg(bridge, a)),
+    kw: split.kw
+      ? Object.fromEntries(
+            Object.keys(split.kw).map((k) => [k, prepareArg(bridge, split.kw[k])]))
+      : null,
+  };
+}
+
+function inprocInvoke(bridge, fnHandle, rawArgs) {
+  const { pos, kw } = prepareCallArgs(bridge, rawArgs);
+  if (kw)
+    return native.invoke_kw(bridge._dom, fnHandle, pos, kw);
+  return native.invoke(bridge._dom, fnHandle, pos);
+}
+
+function maybeWarnHandles(bridge) {
+  bridge._mintCount = (bridge._mintCount || 0) + 1;
+  if ((bridge._mintCount & 0xff) !== 0 || bridge._handleWarn) return;
+  try {
+    const n = native.stats(bridge._dom);
+    if (n >= 5000) {
+      bridge._handleWarn = true;
+      console.warn(
+          'concurrent-c-python: ' + n +
+          ' live handles — FinalizationRegistry only runs after event-loop ' +
+          'turns. In tight sync loops call py.release(h) or use `using` / ' +
+          'destroy(); see README "Handles and GC".');
+    }
+  } catch (e) { /* closed */ }
 }
 
 /* Host JS functions passed into Python receive bare napi Externals for
@@ -68,7 +113,30 @@ function wrapHostCallback(bridge, fn) {
   fn[HOST_CB] = wrapped;
   return wrapped;
 }
+/* Plain arrays/objects cross as list/dict; Set/Map/Date/class instances
+ * refuse (no silent empty-dict / wrong-shape conversion). */
+function assertBridgeValue(a) {
+  if (a === null || a === undefined) return;
+  const t = typeof a;
+  if (t !== 'object') return;
+  if (a[HANDLE]) return;
+  if (ArrayBuffer.isView(a)) return;
+  if (Array.isArray(a)) {
+    for (let i = 0; i < a.length; i++) assertBridgeValue(a[i]);
+    return;
+  }
+  const proto = Object.getPrototypeOf(a);
+  if (proto !== Object.prototype && proto !== null) {
+    throw new Error(
+        'cc-python: unsupported argument (pass numbers, BigInt, strings, ' +
+        'booleans, null/undefined, plain arrays/objects, typed arrays, ' +
+        'or bridge handles)');
+  }
+  for (const k of Object.keys(a)) assertBridgeValue(a[k]);
+}
+
 function prepareArg(bridge, a) {
+  assertBridgeValue(a);
   if (typeof a === 'function' && !(HANDLE in a))
     return wrapHostCallback(bridge, a);
   return unwrapArg(a);
@@ -130,6 +198,7 @@ function materialize(bridge, r) {
 }
 
 function wrap(bridge, handle) {
+  maybeWarnHandles(bridge);
   // A function target so `apply` traps; the closure over `bridge` is the
   // strong reference that keeps the domain collectable only when every
   // proxy from it is unreachable too.
@@ -156,7 +225,7 @@ function wrap(bridge, handle) {
   }
   function pyInvoke(fnHandle, args) {
     return pyCall(() => materialize(
-        bridge, native.invoke(bridge._dom, fnHandle, args)));
+        bridge, inprocInvoke(bridge, fnHandle, args)));
   }
   function pyGetItem(prop) {
     return pyInvoke(unwrapArg(pyGetAttr('__getitem__')), [prop]);
@@ -319,7 +388,7 @@ function wrap(bridge, handle) {
       }
     },
     apply(t, thisArg, args) {
-      return pyInvoke(handle, args.map((a) => prepareArg(bridge, a)));
+      return pyInvoke(handle, args);
     },
   });
 }
@@ -349,9 +418,11 @@ class Bridge {
     const bridge = this;
     return (...args) => {
       try {
-        return native.invoke_async(bridge._dom, h,
-                                   args.map((a) => prepareArg(bridge, a)))
-          .then((r) => materialize(bridge, r));
+        const { pos, kw } = prepareCallArgs(bridge, args);
+        const p = kw
+          ? native.invoke_async_kw(bridge._dom, h, pos, kw)
+          : native.invoke_async(bridge._dom, h, pos);
+        return p.then((r) => materialize(bridge, r));
       } catch (e) {
         return Promise.reject(e); // a closed bridge rejects, never throws
       }
@@ -365,6 +436,8 @@ class Bridge {
     return this._strHandle;
   }
   import(name) {
+    if (native.closed(this._dom))
+      throw new Error('concurrent-c-python: bridge is closed');
     try {
       return wrap(this, native.pyimport(this._dom, name));
     } catch (e) {
@@ -862,6 +935,8 @@ class ProcBridge {
   // The surface, mirrored: import returns a proxy with NO round trip
   // (the request pipelines under the first use), calls are Promises.
   import(name) {
+    if (this._dead || this._closed)
+      throw new Error('concurrent-c-python: bridge is closed');
     const p = this._req({ op: 'import', name });
     // The import's handle arrives with the first operation that needs
     // it; a failed import surfaces there.  We pre-resolve eagerly so
@@ -1052,7 +1127,7 @@ module.exports = {
   // Keyword arguments for a Python call, explicitly marked and last:
   //   fmt(1, kwargs({ sep: '+' }))     →  fmt(1, sep='+')
   // A trailing plain object stays a positional dict — only this marker
-  // means keywords.  Isolated wire only (in-process refuses by name).
+  // means keywords.  Works in-process and on the isolated wire.
   kwargs(obj) {
     if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) {
       throw new TypeError(

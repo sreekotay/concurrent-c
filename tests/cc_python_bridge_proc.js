@@ -209,6 +209,11 @@ const ccpy = require(process.cwd() + '/npm/cc-python');
   let closedMsg = '';
   try { await np.sum(new Float64Array([1])); } catch (e) { closedMsg = e.message; }
   out('after_close_rejects', /closed/.test(closedMsg));
+  {
+    let importMsg = '';
+    try { py.import('math'); } catch (e) { importMsg = e.message; }
+    out('import_after_close', /closed/.test(importMsg));
+  }
 
   console.log('proc suite done');
 })().catch((e) => { console.error('PROC SUITE ERROR:', e.message); process.exit(1); });

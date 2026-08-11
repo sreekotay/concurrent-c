@@ -108,6 +108,35 @@ async function raisesAsync(fn, re) {
     }
     out('neg_inproc_proxy_alive', math.floor(3.2) === 3);
 
+    // In-process lists / dicts / None / kwargs (ergonomic maturity).
+    {
+      const { kwargs } = ccpy;
+      const builtins = py.import('builtins');
+      out('neg_inproc_list_arg',
+          builtins.list([1, 2, 3]).toJS().join(',') === '1,2,3');
+      out('neg_inproc_dict_arg',
+          builtins.dict({ a: 1, b: 2 }).toJS().a === 1 &&
+          builtins.dict({ a: 1, b: 2 }).toJS().b === 2);
+      out('neg_inproc_undefined_none',
+          builtins.list([undefined, null]).toJS()[0] === null &&
+          builtins.list([undefined, null]).toJS()[1] === null);
+      const fmt = builtins.eval(
+          "lambda a, sep=' ': sep.join(str(x) for x in a)");
+      out('neg_inproc_kwargs',
+          fmt([1, 2], kwargs({ sep: '+' })) === '1+2');
+      out('neg_inproc_positional_dict',
+          builtins.type(builtins.dict({ x: 1 })).__name__ === 'dict' ||
+          builtins.dict({ x: 1 }).toJS().x === 1);
+    }
+
+    // Dead-domain import rejects (no silent proxy).
+    {
+      const d = ccpy.create();
+      d.destroy();
+      out('neg_inproc_import_after_close',
+          raisesSync(() => d.import('math'), /closed/));
+    }
+
     // Strict toJS/toJSON: one materializer, path-bearing refuse, host JSON.
     {
       const builtins = py.import('builtins');
@@ -176,6 +205,18 @@ async function raisesAsync(fn, re) {
           mv_sum(new Uint8Array([1, 2, 3, 4])) === 10);
       out('neg_inproc_buffer_sum',
           mv_sum(Buffer.from([9, 1])) === 10);
+      // Empty typed arrays must stay memoryview — not flip to list at n=0.
+      {
+        const ty = builtins.type;
+        const ln = builtins.len;
+        out('neg_inproc_empty_f64_memoryview',
+            ty(new Float64Array(0)).__name__ === 'memoryview' &&
+            ty(new Float64Array(1)).__name__ === 'memoryview' &&
+            ln(new Float64Array(0)) === 0);
+        out('neg_inproc_empty_u8_memoryview',
+            ty(new Uint8Array(0)).__name__ === 'memoryview' &&
+            ln(new Uint8Array(0)) === 0);
+      }
 
       // Lone surrogates must refuse — not become U+FFFD.
       out('neg_inproc_lone_surrogate',

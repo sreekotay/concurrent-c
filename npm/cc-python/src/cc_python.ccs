@@ -379,6 +379,12 @@ static int ccpy__ext_make(CcPyDom *d, void *env, CcPyObjBox *b, void **out) {
 static int ccpy__result_to_js(CcPyDom *d, void *env, CCPyObj r, void **out);
 static int ccpy__arg_from_js(CcPyDom *d, void *env, void *v, CCPyArg *out,
                              void **owned_out, char *errbuf, size_t errcap);
+static int ccpy__arg_pack_async(CcPyDom *d, void *env, void *v, CcPyJob *j,
+                                CCPyArg *out, char *errbuf, size_t errcap);
+static int ccpy__pack_kwargs(CcPyDom *d, void *env, void *kw,
+                             CCPyArg *argv, void **owned, uint32_t *argc,
+                             uint32_t argcap, CcPyJob *j, char *errbuf,
+                             size_t errcap);
 static void ccpy__exec_run(CcPyDom *d, CcPyJob *j);
 static int ccpy__aio_in_task(CcPyDom *d);
 static void *ccpy__cb_call_aio(CcPyDom *d, CcJsCbBox *box, void *args, int n);
@@ -2628,11 +2634,251 @@ static int ccpy__string_arg(CcPyDom *d, void *env, void *v, CCPyArg *out,
     }
 }
 
-/* JS argument array → CCPyArg row.  Numbers with integral values cross
- * as Python int (JavaScript has one number type, and Python APIs that
- * want a float accept an int — the reverse is not true); typed arrays
- * cross as zero-copy memoryview leases; externals pass the held
- * reference through. */
+/* JS value → owned PyObject* for nested list/dict cells (GIL held).
+ * Top-level typed-array leases stay on the CCPyArg path (zero-copy);
+ * nested typed arrays are refused — pass them as top-level args. */
+#define CCPY__ARG_DEPTH_MAX 32
+
+static void *ccpy__js_to_py(CcPyDom *d, void *env, void *v, CcPyJob *j,
+                            char *errbuf, size_t errcap, int depth) {
+    int t = 0;
+    if (depth > CCPY__ARG_DEPTH_MAX) {
+        snprintf(errbuf, errcap,
+                 "cc-python: argument nesting exceeds %d levels",
+                 CCPY__ARG_DEPTH_MAX);
+        return NULL;
+    }
+    if (cc__js.Typeof(env, v, &t) != 0) {
+        snprintf(errbuf, errcap, "cc-python: cannot read an argument");
+        return NULL;
+    }
+    if (t == CC__JS_T_UNDEFINED || t == CC__JS_T_NULL) {
+        if (!d->none) {
+            snprintf(errbuf, errcap, "cc-python: None unavailable");
+            return NULL;
+        }
+        cc__py.IncRef(d->none);
+        return d->none;
+    }
+    if (t == CC__JS_T_FUNCTION) {
+        return ccpy__cb_wrap(d, env, v, errbuf, errcap);
+    }
+    if (t == CC__JS_T_NUMBER) {
+        double dd = 0;
+        cc__js.GetValueDouble(env, v, &dd);
+        if (dd == 0.0 && signbit(dd))
+            return cc__py.FloatFromDouble(dd);
+        if (dd == (double)(long long)dd &&
+            dd >= -9007199254740992.0 && dd <= 9007199254740992.0)
+            return cc__py.LongFromLongLong((long long)dd);
+        return cc__py.FloatFromDouble(dd);
+    }
+    if (t == CC__JS_T_BIGINT)
+        return ccpy__bigint_to_py(d, env, v, j ? 1 : 0, errbuf, errcap);
+    if (t == CC__JS_T_BOOLEAN) {
+        _Bool bv = 0;
+        cc__js.GetValueBool(env, v, &bv);
+        return cc__py.BoolFromLong(bv ? 1 : 0);
+    }
+    if (t == CC__JS_T_STRING) {
+        size_t len = 0, got = 0;
+        char *buf;
+        void *py;
+        if (cc__js.GetValueStringUtf8(env, v, NULL, 0, &len) != 0) {
+            snprintf(errbuf, errcap, "cc-python: cannot read a string argument");
+            return NULL;
+        }
+        if (j) {
+            buf = (char *)cc_arena_alloc(&d->arena, len + 1, 1);
+            if (!buf) {
+                snprintf(errbuf, errcap, "cc-python: out of memory");
+                return NULL;
+            }
+        } else {
+            buf = (char *)malloc(len + 1);
+            if (!buf) {
+                snprintf(errbuf, errcap, "cc-python: out of memory");
+                return NULL;
+            }
+        }
+        if (cc__js.GetValueStringUtf8(env, v, buf, len + 1, &got) != 0) {
+            if (!j) free(buf);
+            snprintf(errbuf, errcap, "cc-python: cannot read a string argument");
+            return NULL;
+        }
+        py = cc__py.UnicodeFromStringAndSize(buf, (intptr_t)got);
+        if (!j) free(buf);
+        if (!py) {
+            snprintf(errbuf, errcap, "cc-python: cannot mint a Python str");
+            return NULL;
+        }
+        return py;
+    }
+    if (t == CC__JS_T_EXTERNAL) {
+        void *p = NULL;
+        CcPyObjBox *b;
+        cc__js.GetValueExternal(env, v, &p);
+        b = (CcPyObjBox *)p;
+        if (!b || b->dom != d || b->released) {
+            snprintf(errbuf, errcap,
+                     "cc-python: an argument handle is released or belongs "
+                     "to another bridge");
+            return NULL;
+        }
+        cc__py.IncRef(b->obj.o);
+        return b->obj.o;
+    }
+    {
+        _Bool ta = 0;
+        if (cc__js.IsTypedarray(env, v, &ta) == 0 && ta) {
+            snprintf(errbuf, errcap,
+                     "cc-python: typed arrays must be top-level call "
+                     "arguments (zero-copy lease) — not nested in a "
+                     "list/dict");
+            return NULL;
+        }
+    }
+    {
+        _Bool isarr = 0;
+        if (cc__js.IsArray(env, v, &isarr) == 0 && isarr) {
+            uint32_t n = 0, i;
+            void *list;
+            if (cc__js.GetArrayLength(env, v, &n) != 0) {
+                snprintf(errbuf, errcap, "cc-python: cannot read array length");
+                return NULL;
+            }
+            if (!cc__py.ListNew || !cc__py.ListSetItem) {
+                snprintf(errbuf, errcap, "cc-python: list APIs unavailable");
+                return NULL;
+            }
+            list = cc__py.ListNew((intptr_t)n);
+            if (!list) {
+                snprintf(errbuf, errcap, "cc-python: cannot mint a Python list");
+                return NULL;
+            }
+            for (i = 0; i < n; i++) {
+                void *el = NULL, *py;
+                if (cc__js.GetElement(env, v, i, &el) != 0) {
+                    cc__py.DecRef(list);
+                    snprintf(errbuf, errcap,
+                             "cc-python: cannot read array element %u", i);
+                    return NULL;
+                }
+                py = ccpy__js_to_py(d, env, el, j, errbuf, errcap, depth + 1);
+                if (!py) {
+                    cc__py.DecRef(list);
+                    return NULL;
+                }
+                if (cc__py.ListSetItem(list, (intptr_t)i, py) != 0) {
+                    cc__py.DecRef(py);
+                    cc__py.DecRef(list);
+                    if (cc__py.ErrClear) cc__py.ErrClear();
+                    snprintf(errbuf, errcap,
+                             "cc-python: cannot set list element %u", i);
+                    return NULL;
+                }
+            }
+            return list;
+        }
+    }
+    if (t == CC__JS_T_OBJECT) {
+        void *names = NULL, *dict, *ctor = NULL;
+        uint32_t n = 0, i;
+        int ct = 0;
+        /* Refuse Set/Map/Date/class instances. Object.create(null) and
+         * plain {} (constructor Object) are the only dict shapes. */
+        if (cc__js.GetNamedProperty(env, v, "constructor", &ctor) == 0 &&
+            ctor &&
+            cc__js.Typeof(env, ctor, &ct) == 0 &&
+            ct == CC__JS_T_FUNCTION) {
+            void *nm = NULL;
+            char cname[64];
+            size_t got = 0;
+            if (cc__js.GetNamedProperty(env, ctor, "name", &nm) == 0 && nm &&
+                cc__js.GetValueStringUtf8
+                    (env, nm, cname, sizeof(cname), &got) == 0 &&
+                got > 0 && strcmp(cname, "Object") != 0) {
+                snprintf(errbuf, errcap,
+                         "cc-python: unsupported argument (pass numbers, "
+                         "BigInt, strings, booleans, null/undefined, plain "
+                         "arrays/objects, typed arrays, or bridge handles)");
+                return NULL;
+            }
+        }
+        if (!cc__py.DictNew || !cc__py.DictSetItemString) {
+            snprintf(errbuf, errcap, "cc-python: dict APIs unavailable");
+            return NULL;
+        }
+        if (cc__js.GetPropertyNames(env, v, &names) != 0 || !names) {
+            snprintf(errbuf, errcap, "cc-python: cannot enumerate object keys");
+            return NULL;
+        }
+        if (cc__js.GetArrayLength(env, names, &n) != 0) {
+            snprintf(errbuf, errcap, "cc-python: cannot read object key count");
+            return NULL;
+        }
+        dict = cc__py.DictNew();
+        if (!dict) {
+            snprintf(errbuf, errcap, "cc-python: cannot mint a Python dict");
+            return NULL;
+        }
+        for (i = 0; i < n; i++) {
+            void *k = NULL, *val = NULL, *py;
+            char kn[256];
+            size_t got = 0;
+            if (cc__js.GetElement(env, names, i, &k) != 0 || !k) {
+                cc__py.DecRef(dict);
+                snprintf(errbuf, errcap, "cc-python: cannot read object key");
+                return NULL;
+            }
+            if (cc__js.GetValueStringUtf8(env, k, kn, sizeof(kn), &got) != 0) {
+                cc__py.DecRef(dict);
+                snprintf(errbuf, errcap,
+                         "cc-python: object keys must be strings "
+                         "(and fit in %zu bytes)",
+                         sizeof(kn) - 1);
+                return NULL;
+            }
+            if (kn[0] == '$') {
+                cc__py.DecRef(dict);
+                snprintf(errbuf, errcap,
+                         "cc-python: unsupported argument (object keys "
+                         "starting with $ are reserved)");
+                return NULL;
+            }
+            if (cc__js.GetNamedProperty(env, v, kn, &val) != 0 || !val) {
+                cc__py.DecRef(dict);
+                snprintf(errbuf, errcap,
+                         "cc-python: cannot read object property '%s'", kn);
+                return NULL;
+            }
+            py = ccpy__js_to_py(d, env, val, j, errbuf, errcap, depth + 1);
+            if (!py) {
+                cc__py.DecRef(dict);
+                return NULL;
+            }
+            if (cc__py.DictSetItemString(dict, kn, py) != 0) {
+                cc__py.DecRef(py);
+                cc__py.DecRef(dict);
+                if (cc__py.ErrClear) cc__py.ErrClear();
+                snprintf(errbuf, errcap,
+                         "cc-python: cannot set dict key '%s'", kn);
+                return NULL;
+            }
+            cc__py.DecRef(py); /* DictSetItemString does not steal */
+        }
+        return dict;
+    }
+    snprintf(errbuf, errcap,
+             "cc-python: unsupported argument (pass numbers, BigInt, strings, "
+             "booleans, null/undefined, plain arrays/objects, typed arrays, "
+             "or bridge handles)");
+    return NULL;
+}
+
+/* JS argument → CCPyArg.  Numbers with integral values cross as Python
+ * int; typed arrays as zero-copy memoryview leases; plain arrays/objects
+ * as list/dict; null/undefined as None; externals pass the held ref. */
 static int ccpy__arg_from_js(CcPyDom *d, void *env, void *v, CCPyArg *out,
                              void **owned_out, char *errbuf, size_t errcap) {
     int t = 0;
@@ -2642,8 +2888,6 @@ static int ccpy__arg_from_js(CcPyDom *d, void *env, void *v, CCPyArg *out,
         return -1;
     }
     if (t == CC__JS_T_FUNCTION) {
-        /* A JS function crosses as a minted Python callable (caller holds
-         * the GIL); the caller owns the fresh reference. */
         CCPyObj tmp;
         void *callable = ccpy__cb_wrap(d, env, v, errbuf, errcap);
         if (!callable) return -1;
@@ -2719,9 +2963,20 @@ static int ccpy__arg_from_js(CcPyDom *d, void *env, void *v, CCPyArg *out,
             return 0;
         }
     }
+    if (t == CC__JS_T_UNDEFINED || t == CC__JS_T_NULL || t == CC__JS_T_OBJECT) {
+        CCPyObj tmp;
+        void *py = ccpy__js_to_py(d, env, v, NULL, errbuf, errcap, 0);
+        if (!py) return -1;
+        tmp.o = py;
+        tmp.home = &d->py;
+        *out = cc__py_arg_obj(tmp);
+        if (owned_out) *owned_out = py;
+        return 0;
+    }
     snprintf(errbuf, errcap,
              "cc-python: unsupported argument (pass numbers, BigInt, strings, "
-             "booleans, typed arrays, or bridge handles)");
+             "booleans, null/undefined, plain arrays/objects, typed arrays, "
+             "or bridge handles)");
     return -1;
 }
 
@@ -3313,6 +3568,83 @@ static CCJsVal !>(CCError) CcPython_invoke(CcPython *self, CCJs *js,
     }
 }
 
+/* Like invoke, with an explicit kwargs object (plain JS object → keywords).
+ * Positionals stay in `args`; `kwargs(...)` is peeled in JS before this. */
+static CCJsVal !>(CCError) CcPython_invoke_kw(CcPython *self, CCJs *js,
+                                              CCJsExt dom, CCJsExt fn,
+                                              CCJsVal args, CCJsVal kw) {
+    CcPyDom *d = ccpy__dom(dom);
+    CcPyObjBox *fb;
+    CCPyArg argv[CC__PY_MAX_CALL_ARGS];
+    void *owned[CC__PY_MAX_CALL_ARGS];
+    uint32_t argc = 0, i;
+    _Bool isarr = 0;
+    CC__JsMark mark;
+    (void)self;
+    if (!d) return cc_err(CC_ERR_INVALID_ARG, "cc-python: bridge is closed");
+    fb = ccpy__objbox(d, fn);
+    if (!fb)
+        return cc_err(CC_ERR_INVALID_ARG,
+                      "cc-python: handle is released or belongs to another "
+                      "bridge");
+    if (cc__js.IsArray(js->env, args.v, &isarr) != 0 || !isarr)
+        return cc_err(CC_ERR_INVALID_ARG,
+                      "cc-python: invoke wants an argument ARRAY");
+    if (cc__js.GetArrayLength(js->env, args.v, &argc) != 0 ||
+        argc > CC__PY_MAX_CALL_ARGS)
+        return cc_err(CC_ERR_INVALID_ARG, "cc-python: too many arguments");
+    mark = cc__js_mark();
+    cc__py_attach(&d->py);
+    for (i = 0; i < argc; i++) {
+        void *el = NULL;
+        if (cc__js.GetElement(js->env, args.v, i, &el) != 0 ||
+            ccpy__arg_from_js(d, js->env, el, &argv[i], &owned[i],
+                              ccpy__errbuf, sizeof(ccpy__errbuf)) != 0) {
+            uint32_t k;
+            for (k = 0; k < i; k++)
+                if (owned[k]) cc__py.DecRef(owned[k]);
+            if (d->async_mode) cc_py_thread_leave();
+            cc__js_release(mark);
+            return cc_err(CC_ERR_INVALID_ARG, ccpy__errbuf);
+        }
+    }
+    if (ccpy__pack_kwargs(d, js->env, kw.v, argv, owned, &argc,
+                          CC__PY_MAX_CALL_ARGS, NULL, ccpy__errbuf,
+                          sizeof(ccpy__errbuf)) != 0) {
+        for (i = 0; i < argc; i++)
+            if (owned[i]) cc__py.DecRef(owned[i]);
+        if (d->async_mode) cc_py_thread_leave();
+        cc__js_release(mark);
+        return cc_err(CC_ERR_INVALID_ARG, ccpy__errbuf);
+    }
+    {
+        CCPyObj *f = &fb->obj;
+        CCResult_CCPyObj_CCPyError r =
+            cc__py_obj_callm_n(f, "invoke", (int)argc, argv);
+        for (i = 0; i < argc; i++)
+            if (owned[i]) cc__py.DecRef(owned[i]);
+        cc__js_release(mark);
+        if (!r.ok) {
+            if (d->async_mode) cc_py_thread_leave();
+            return cc_err_CCResult_CCJsVal_CCError(r.u.error.base);
+        }
+        {
+            void *out = NULL;
+            int mrc = ccpy__result_to_js(d, js->env, r.u.value, &out);
+            if (d->async_mode) cc_py_thread_leave();
+            if (mrc != 0)
+                return cc_err(CC_ERR_IO, "cc-python: cannot materialize the "
+                                         "result");
+            {
+                CCJsVal jv = { 0 };
+                jv.env = js->env;
+                jv.v = out;
+                return cc_ok(jv);
+            }
+        }
+    }
+}
+
 /* Pack one JS argument for an async job: same probes as the sync path,
  * but string copies land in the job arena (the call outlives this
  * frame), typed arrays gain a napi_ref pinning the buffer to the job,
@@ -3326,8 +3658,6 @@ static int ccpy__arg_pack_async(CcPyDom *d, void *env, void *v, CcPyJob *j,
         return -1;
     }
     if (t == CC__JS_T_FUNCTION) {
-        /* A JS function crosses as a minted Python callable; the JOB owns
-         * the fresh reference (its kind-4 sweep releases it). */
         CCPyObj tmp;
         void *callable = ccpy__cb_wrap(d, env, v, errbuf, errcap);
         if (!callable) return -1;
@@ -3376,7 +3706,7 @@ static int ccpy__arg_pack_async(CcPyDom *d, void *env, void *v, CcPyJob *j,
                      "to another bridge");
             return -1;
         }
-        cc__py.IncRef(b->obj.o); /* the job's own reference */
+        cc__py.IncRef(b->obj.o);
         *out = cc__py_arg_obj(b->obj);
         return 0;
     }
@@ -3397,8 +3727,6 @@ static int ccpy__arg_pack_async(CcPyDom *d, void *env, void *v, CcPyJob *j,
             }
             if (ccpy__ta_desc(tt, &esz, &isf, &iss, errbuf, errcap) != 0)
                 return -1;
-            /* Pin the buffer to the job: the lease spans submit to
-             * completion, not this stack frame. */
             if (cc__js.CreateReference(env, v, 1, &ref) != 0) {
                 snprintf(errbuf, errcap, "cc-python: cannot pin a typed array");
                 return -1;
@@ -3411,10 +3739,106 @@ static int ccpy__arg_pack_async(CcPyDom *d, void *env, void *v, CcPyJob *j,
             return 0;
         }
     }
+    if (t == CC__JS_T_UNDEFINED || t == CC__JS_T_NULL || t == CC__JS_T_OBJECT) {
+        CCPyObj tmp;
+        void *py = ccpy__js_to_py(d, env, v, j, errbuf, errcap, 0);
+        if (!py) return -1;
+        tmp.o = py;
+        tmp.home = &d->py;
+        *out = cc__py_arg_obj(tmp);
+        return 0;
+    }
     snprintf(errbuf, errcap,
              "cc-python: unsupported argument (pass numbers, BigInt, strings, "
-             "booleans, typed arrays, or bridge handles)");
+             "booleans, null/undefined, plain arrays/objects, typed arrays, "
+             "or bridge handles)");
     return -1;
+}
+
+/* Attach keyword args from a plain JS object onto argv[argc..].
+ * kwname strings are arena-allocated on the domain (live for the call /
+ * async job). */
+static int ccpy__pack_kwargs(CcPyDom *d, void *env, void *kw,
+                             CCPyArg *argv, void **owned, uint32_t *argc,
+                             uint32_t argcap, CcPyJob *j, char *errbuf,
+                             size_t errcap) {
+    void *names = NULL;
+    uint32_t n = 0, i;
+    int t = 0;
+    if (!kw) return 0;
+    if (cc__js.Typeof(env, kw, &t) != 0) {
+        snprintf(errbuf, errcap, "cc-python: kwargs wants a plain object");
+        return -1;
+    }
+    if (t == CC__JS_T_UNDEFINED || t == CC__JS_T_NULL) return 0;
+    if (t != CC__JS_T_OBJECT) {
+        snprintf(errbuf, errcap, "cc-python: kwargs wants a plain object");
+        return -1;
+    }
+    {
+        _Bool isarr = 0;
+        if (cc__js.IsArray(env, kw, &isarr) == 0 && isarr) {
+            snprintf(errbuf, errcap, "cc-python: kwargs wants a plain object");
+            return -1;
+        }
+    }
+    if (cc__js.GetPropertyNames(env, kw, &names) != 0 || !names) {
+        snprintf(errbuf, errcap, "cc-python: cannot enumerate kwargs");
+        return -1;
+    }
+    if (cc__js.GetArrayLength(env, names, &n) != 0) {
+        snprintf(errbuf, errcap, "cc-python: cannot read kwargs length");
+        return -1;
+    }
+    if (*argc + n > argcap) {
+        snprintf(errbuf, errcap, "cc-python: too many arguments");
+        return -1;
+    }
+    for (i = 0; i < n; i++) {
+        void *k = NULL, *val = NULL;
+        char kn[256];
+        char *nm;
+        size_t got = 0;
+        uint32_t slot = *argc;
+        if (cc__js.GetElement(env, names, i, &k) != 0 || !k ||
+            cc__js.GetValueStringUtf8(env, k, kn, sizeof(kn), &got) != 0) {
+            snprintf(errbuf, errcap, "cc-python: kwargs keys must be strings");
+            return -1;
+        }
+        if (kn[0] == '$') {
+            snprintf(errbuf, errcap,
+                     "cc-python: kwargs keys starting with $ are reserved");
+            return -1;
+        }
+        if (got >= 128) {
+            snprintf(errbuf, errcap, "cc-python: kwargs key too long");
+            return -1;
+        }
+        if (cc__js.GetNamedProperty(env, kw, kn, &val) != 0 || !val) {
+            snprintf(errbuf, errcap, "cc-python: cannot read kwargs '%s'", kn);
+            return -1;
+        }
+        if (j) {
+            if (ccpy__arg_pack_async(d, env, val, j, &argv[slot], errbuf,
+                                     errcap) != 0)
+                return -1;
+            if (owned) owned[slot] = NULL;
+        } else {
+            if (ccpy__arg_from_js(d, env, val, &argv[slot],
+                                  owned ? &owned[slot] : NULL, errbuf,
+                                  errcap) != 0)
+                return -1;
+        }
+        nm = (char *)cc_arena_alloc(&d->arena, got + 1, 1);
+        if (!nm) {
+            snprintf(errbuf, errcap, "cc-python: out of memory");
+            return -1;
+        }
+        memcpy(nm, kn, got + 1);
+        argv[slot] = cc__py_arg_named(nm, argv[slot]);
+        (*argc)++;
+    }
+    return 0;
 }
 
 /* Unwind a partially packed job (caller holds the GIL): drop the job's
@@ -3488,6 +3912,144 @@ static CCJsVal !>(CCError) CcPython_invoke_async(CcPython *self, CCJs *js,
             cc_py_thread_leave();
             return cc_err(CC_ERR_INVALID_ARG, ccpy__errbuf);
         }
+    }
+    j->argc = (int)argc;
+    if (argc == 1 && ccpy__is_builtin_eval_or_exec(fb->obj.o)) {
+        void *ns = ccpy__domain_ns(d);
+        CCPyObj nso;
+        if (!ns) {
+            ccpy__job_abort(d, js->env, j, (int)argc);
+            cc_py_thread_leave();
+            return cc_err(CC_ERR_IO,
+                          "cc-python: cannot resolve __main__ for bare "
+                          "eval/exec");
+        }
+        cc__py.IncRef(ns); /* job owns a ref (kind-4 sweep DecRefs) */
+        nso.o = ns;
+        nso.home = &d->py;
+        j->args[1] = cc__py_arg_obj(nso);
+        j->argc = 2;
+    }
+    cc__py.IncRef(fb->obj.o);
+    j->fn = fb->obj.o;
+    cc_py_thread_leave();
+    {
+        void *promise = NULL;
+        if (cc__js.CreatePromise(js->env, &j->deferred, &promise) != 0) {
+            cc__py_attach(&d->py);
+            ccpy__job_abort(d, js->env, j, j->argc);
+            cc_py_thread_leave();
+            return cc_err(CC_ERR_IO, "cc-python: promise allocation failed");
+        }
+        pthread_mutex_lock(&d->mu);
+        if (d->qtail) d->qtail->next = j;
+        else d->qhead = j;
+        d->qtail = j;
+        d->ext_outstanding++; /* the job holds the arena to completion */
+        if (!d->tsfn_reffed) {
+            cc__js.RefTsfn(js->env, d->tsfn);
+            d->tsfn_reffed = 1;
+        }
+        pthread_cond_signal(&d->cv);
+        /* A suspended lane callback services the queue from its own wait
+         * — wake the innermost waiter too, or a job submitted DURING the
+         * suspension (the deadlock-dissolving case) sits unnoticed. */
+        if (d->cb_waiter) pthread_cond_signal(&d->cb_waiter->cv);
+        {
+            int loop_mode = d->loop_mode;
+            pthread_mutex_unlock(&d->mu);
+            if (loop_mode) {
+                /* the executor lives inside run_forever now — wake it
+                 * through the loop, not the condvar */
+                cc__py_attach(&d->py);
+                {
+                    CCPyObj lo;
+                    CCPyObj pv;
+                    CCPyArg a;
+                    lo.o = d->loop;
+                    lo.home = &d->py;
+                    pv.o = d->pump;
+                    pv.home = &d->py;
+                    a = cc__py_arg_obj(pv);
+                    {
+                        CCResult_CCPyObj_CCPyError r = cc__py_obj_callm_n(
+                            &lo, "call_soon_threadsafe", 1, &a);
+                        if (r.ok) cc_py_obj_release(&r.u.value);
+                        else if (cc__py.ErrClear) cc__py.ErrClear();
+                    }
+                }
+                cc_py_thread_leave();
+            }
+        }
+        {
+            CCJsVal jv = { 0 };
+            jv.env = js->env;
+            jv.v = promise;
+            return cc_ok(jv);
+        }
+    }
+}
+
+static CCJsVal !>(CCError) CcPython_invoke_async_kw(CcPython *self, CCJs *js,
+                                                    CCJsExt dom, CCJsExt fn,
+                                                    CCJsVal args, CCJsVal kw) {
+    CcPyDom *d = ccpy__dom(dom);
+    CcPyObjBox *fb;
+    CcPyJob *j;
+    uint32_t argc = 0, i;
+    _Bool isarr = 0;
+    (void)self;
+    if (!d) return cc_err(CC_ERR_INVALID_ARG, "cc-python: bridge is closed");
+    if (!d->async_mode) {
+        /* The lane is latent: first task call starts it.  Main may hold
+         * this interpreter's GIL from sync work — the lane needs it. */
+        if (ccpy__lane_start(d, js->env) != 0)
+            return cc_err(CC_ERR_IO, "cc-python: async needs Node-API "
+                                     "promises + threadsafe functions");
+        cc_py_thread_leave();
+    }
+    fb = ccpy__objbox(d, fn);
+    if (!fb)
+        return cc_err(CC_ERR_INVALID_ARG,
+                      "cc-python: handle is released or belongs to another "
+                      "bridge");
+    if (cc__js.IsArray(js->env, args.v, &isarr) != 0 || !isarr)
+        return cc_err(CC_ERR_INVALID_ARG,
+                      "cc-python: invoke wants an argument ARRAY");
+    if (cc__js.GetArrayLength(js->env, args.v, &argc) != 0 ||
+        argc > CCPY__JOB_MAX_ARGS)
+        return cc_err(CC_ERR_INVALID_ARG, "cc-python: too many arguments");
+    pthread_mutex_lock(&d->mu);
+    j = d->job_free;
+    if (j) d->job_free = j->next;
+    pthread_mutex_unlock(&d->mu);
+    if (!j) {
+        pthread_mutex_lock(&d->mu); /* the loop thread allocates here too */
+        j = (CcPyJob *)cc_arena_alloc(&d->arena, sizeof(*j), 16);
+        pthread_mutex_unlock(&d->mu);
+    }
+    if (!j) return cc_err(CC_ERR_IO, "cc-python: out of memory");
+    memset(j, 0, sizeof(*j));
+    j->dom = d;
+    /* Refcounts (handle args, the callable) need the GIL; the executor
+     * yields it between jobs. */
+    cc__py_attach(&d->py);
+    for (i = 0; i < argc; i++) {
+        void *el = NULL;
+        if (cc__js.GetElement(js->env, args.v, i, &el) != 0 ||
+            ccpy__arg_pack_async(d, js->env, el, j, &j->args[i], ccpy__errbuf,
+                                 sizeof(ccpy__errbuf)) != 0) {
+            ccpy__job_abort(d, js->env, j, (int)i);
+            cc_py_thread_leave();
+            return cc_err(CC_ERR_INVALID_ARG, ccpy__errbuf);
+        }
+    }
+    if (ccpy__pack_kwargs(d, js->env, kw.v, j->args, NULL, &argc,
+                          CCPY__JOB_MAX_ARGS, j, ccpy__errbuf,
+                          sizeof(ccpy__errbuf)) != 0) {
+        ccpy__job_abort(d, js->env, j, (int)argc);
+        cc_py_thread_leave();
+        return cc_err(CC_ERR_INVALID_ARG, ccpy__errbuf);
     }
     j->argc = (int)argc;
     if (argc == 1 && ccpy__is_builtin_eval_or_exec(fb->obj.o)) {
