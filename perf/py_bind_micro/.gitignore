@@ -1,0 +1,13 @@
+.venv/
+generated/
+build/
+out/
+*.abi3.so
+*.so
+*.dylib
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.o
+*.a

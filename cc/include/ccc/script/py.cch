@@ -410,6 +410,11 @@ typedef struct CC__PySyms {
     void *(*CFunctionNewEx)(void *def, void *self, void *module);
     void *(*CapsuleNew)(void *ptr, const char *name, void *dtor);
     void *(*CapsuleGetPointer)(void *capsule, const char *name);
+    /* Optional exact-type probes for marshal fast paths (macros in
+     * full-API builds; function forms when limited-API / exported). */
+    int (*LongCheck)(void *);
+    int (*FloatCheckExact)(void *);
+    int (*ObjectIsInstance)(void *obj, void *cls);
     void *(*InterpreterStateGet)(void);
     void *(*EvalSaveThread)(void);
     void (*EvalRestoreThread)(void *);
@@ -980,6 +985,9 @@ have_lib:
     CC__PY_SYM_OPT(CFunctionNewEx, "PyCFunction_NewEx")
     CC__PY_SYM_OPT(CapsuleNew, "PyCapsule_New")
     CC__PY_SYM_OPT(CapsuleGetPointer, "PyCapsule_GetPointer")
+    CC__PY_SYM_OPT(LongCheck, "PyLong_Check")
+    CC__PY_SYM_OPT(FloatCheckExact, "PyFloat_CheckExact")
+    CC__PY_SYM_OPT(ObjectIsInstance, "PyObject_IsInstance")
     CC__PY_SYM_OPT(InterpreterStateGet, "PyInterpreterState_Get")
     CC__PY_SYM_OPT(EvalSaveThread, "PyEval_SaveThread")
     CC__PY_SYM_OPT(EvalRestoreThread, "PyEval_RestoreThread")
@@ -1582,12 +1590,60 @@ static int cc__py_in_fail(const char *cls, const char *what, const char *want) {
     return -1;
 }
 
+/* Cached builtins.int / builtins.float type objects.  PyLong_Check is often
+ * a macro (not dlsym-able); comparing Py_TYPE(o) to these is. */
+static void *cc__py_cls_int;
+static void *cc__py_cls_float;
+
+static void cc__py_cache_num_classes(void) {
+    void *b;
+    if (cc__py_cls_int && cc__py_cls_float) return;
+    if (!cc__py.ImportModule || !cc__py.GetAttrString) return;
+    b = cc__py.ImportModule("builtins");
+    if (!b) return;
+    if (!cc__py_cls_int)
+        cc__py_cls_int = cc__py.GetAttrString(b, "int");
+    if (!cc__py_cls_float)
+        cc__py_cls_float = cc__py.GetAttrString(b, "float");
+    cc__py.DecRef(b);
+}
+
+/* CPython 3.10–3.14: after the refcnt/immortal word comes ob_type. */
+typedef struct { uintptr_t rc; void *ty; } CC__PyObjHead;
+
+static inline void *cc__py_obj_type(void *o) {
+    return o ? ((CC__PyObjHead *)o)->ty : NULL;
+}
+
+static inline int cc__py_is_exact_int(void *o) {
+    if (cc__py.LongCheck) return cc__py.LongCheck(o);
+    if (cc__py_cls_int) return cc__py_obj_type(o) == cc__py_cls_int;
+    cc__py_cache_num_classes();
+    return cc__py_cls_int && cc__py_obj_type(o) == cc__py_cls_int;
+}
+
+static inline int cc__py_is_exact_float(void *o) {
+    if (cc__py.FloatCheckExact) return cc__py.FloatCheckExact(o);
+    if (cc__py_cls_float) return cc__py_obj_type(o) == cc__py_cls_float;
+    cc__py_cache_num_classes();
+    return cc__py_cls_float && cc__py_obj_type(o) == cc__py_cls_float;
+}
+
 static int cc__py_in_ll_raw(void *o, const char *what, long long *out) {
+    long long (*as_ll)(void *) = cc__py.LongAsLongLong;
+    void *(*err_occ)(void) = cc__py.ErrOccurred;
+    void (*err_clr)(void) = cc__py.ErrClear;
     long long v;
     if (!o) return cc__py_in_fail("TypeError", what, "an integer");
-    v = cc__py.LongAsLongLong(o);
-    if (v == -1 && cc__py.ErrOccurred()) {
-        cc__py.ErrClear();
+    /* Exact int: AsLongLong cannot fail for values that fit in long long
+     * from a PyLong of typical bench size — skip ErrOccurred. */
+    if (cc__py_is_exact_int(o)) {
+        *out = as_ll(o);
+        return 0;
+    }
+    v = as_ll(o);
+    if (v == -1 && err_occ && err_occ()) {
+        if (err_clr) err_clr();
         return cc__py_in_fail("TypeError", what, "an integer");
     }
     *out = v;
@@ -1595,19 +1651,31 @@ static int cc__py_in_ll_raw(void *o, const char *what, long long *out) {
 }
 
 static int cc__py_in_ull_raw(void *o, const char *what, unsigned long long *out) {
+    unsigned long long (*as_ull)(void *) = cc__py.LongAsUnsignedLongLong;
+    long long (*as_ll)(void *) = cc__py.LongAsLongLong;
+    void *(*err_occ)(void) = cc__py.ErrOccurred;
+    void (*err_clr)(void) = cc__py.ErrClear;
     unsigned long long v;
     if (!o) return cc__py_in_fail("TypeError", what, "an integer");
+    if (cc__py_is_exact_int(o)) {
+        long long s = as_ll(o);
+        if (s < 0)
+            return cc__py_in_fail("OverflowError", what,
+                                  "a non-negative integer");
+        *out = (unsigned long long)s;
+        return 0;
+    }
     /* Unsigned converter — not AsLongLong — so values in
      * (LLONG_MAX, ULLONG_MAX] round-trip into unsigned long long. */
-    v = cc__py.LongAsUnsignedLongLong(o);
-    if (v == (unsigned long long)-1 && cc__py.ErrOccurred()) {
+    v = as_ull(o);
+    if (v == (unsigned long long)-1 && err_occ && err_occ()) {
         long long s;
-        cc__py.ErrClear();
+        if (err_clr) err_clr();
         /* Classify: negative → OverflowError; non-int / too large → match
          * the signed path's TypeError-vs-Overflow posture. */
-        s = cc__py.LongAsLongLong(o);
-        if (s == -1 && cc__py.ErrOccurred()) {
-            cc__py.ErrClear();
+        s = as_ll(o);
+        if (s == -1 && err_occ && err_occ()) {
+            if (err_clr) err_clr();
             return cc__py_in_fail("TypeError", what, "an integer");
         }
         if (s < 0)
@@ -1654,11 +1722,25 @@ CC__PY_IN_UNSIGNED(ullong, unsigned long long, ULLONG_MAX)
 /* A Python int converts to float exactly as `float(x)` does, so an integer
  * argument to a `double` parameter is accepted. */
 static int cc__py_in_double(double *dst, void *o, const char *what) {
+    double (*as_f)(void *) = cc__py.FloatAsDouble;
+    long long (*as_ll)(void *) = cc__py.LongAsLongLong;
+    void *(*err_occ)(void) = cc__py.ErrOccurred;
+    void (*err_clr)(void) = cc__py.ErrClear;
     double v;
     if (!o) return cc__py_in_fail("TypeError", what, "a number");
-    v = cc__py.FloatAsDouble(o);
-    if (v == -1.0 && cc__py.ErrOccurred()) {
-        cc__py.ErrClear();
+    /* Exact float: one AsDouble, no error check on the common path. */
+    if (cc__py_is_exact_float(o)) {
+        *dst = as_f(o);
+        return 0;
+    }
+    /* Exact int → float(x), matching prior acceptance of Python ints. */
+    if (cc__py_is_exact_int(o)) {
+        *dst = (double)as_ll(o);
+        return 0;
+    }
+    v = as_f(o);
+    if (v == -1.0 && err_occ && err_occ()) {
+        if (err_clr) err_clr();
         return cc__py_in_fail("TypeError", what, "a number");
     }
     *dst = v;
@@ -1779,23 +1861,80 @@ static int cc__py_in_cstr(const char **dst, void *o, const char *what) {
  * per element into call scratch.  Returns materialize a fresh typed
  * memoryview over an owned copy (list fallback when the capsule/buffer
  * APIs are absent). */
+/* Call-scratch for typed-slice convert: size-class CCArenaPool (same
+ * shape as closure envs).  The pool freelist is the recycle path —
+ * begin() pushes live slots back instead of free(), so a warm path
+ * never hits malloc.  Oversized buffers still malloc/free. */
 #define CC__PY_TS_SCRATCH_SLOTS 16
-static CC_THREAD_LOCAL void *cc__py_ts_bufs[CC__PY_TS_SCRATCH_SLOTS];
+enum { CC__PY_TS_NCLASS = 6 };
+static const size_t cc__py_ts_class_size[CC__PY_TS_NCLASS] = {
+    64, 256, 1024, 4096, 16384, 65536
+};
+
+typedef struct {
+    void *p;
+    int cls; /* index into class table, or -1 for malloc overflow */
+} CC__PyTsSlot;
+
+typedef struct {
+    CCArenaPool pool[CC__PY_TS_NCLASS];
+    int ready;
+} CC__PyTsPools;
+
+static CC_THREAD_LOCAL CC__PyTsPools cc__py_ts_pools;
+static CC_THREAD_LOCAL CC__PyTsSlot cc__py_ts_bufs[CC__PY_TS_SCRATCH_SLOTS];
 static CC_THREAD_LOCAL int cc__py_ts_nbufs;
+
+static int cc__py_ts_class_for(size_t n) {
+    int i;
+    for (i = 0; i < CC__PY_TS_NCLASS; i++) {
+        if (n <= cc__py_ts_class_size[i]) return i;
+    }
+    return -1;
+}
+
+static int cc__py_ts_pools_ensure(void) {
+    int i;
+    if (cc__py_ts_pools.ready) return 1;
+    for (i = 0; i < CC__PY_TS_NCLASS; i++) {
+        if (cc_arena_pool(&cc__py_ts_pools.pool[i],
+                          cc__py_ts_class_size[i]) != 0) {
+            while (i-- > 0) cc_arena_pool_destroy(&cc__py_ts_pools.pool[i]);
+            return 0;
+        }
+    }
+    cc__py_ts_pools.ready = 1;
+    return 1;
+}
 
 static void cc__py_ts_scratch_begin(void) {
     int i;
-    for (i = 0; i < cc__py_ts_nbufs; i++) free(cc__py_ts_bufs[i]);
+    for (i = 0; i < cc__py_ts_nbufs; i++) {
+        CC__PyTsSlot s = cc__py_ts_bufs[i];
+        if (s.cls < 0) free(s.p);
+        else cc_arena_pool_free(&cc__py_ts_pools.pool[s.cls], s.p);
+    }
     cc__py_ts_nbufs = 0;
 }
 
 static void *cc__py_ts_scratch(size_t n) {
     void *p;
+    int cls;
     if (n == 0) n = 1;
     if (cc__py_ts_nbufs >= CC__PY_TS_SCRATCH_SLOTS) return NULL;
-    p = malloc(n);
+    cls = cc__py_ts_class_for(n);
+    if (cls < 0) {
+        p = malloc(n);
+    } else if (!cc__py_ts_pools_ensure()) {
+        p = malloc(n);
+        cls = -1;
+    } else {
+        p = cc_arena_pool_alloc(&cc__py_ts_pools.pool[cls]);
+    }
     if (!p) return NULL;
-    cc__py_ts_bufs[cc__py_ts_nbufs++] = p;
+    cc__py_ts_bufs[cc__py_ts_nbufs].p = p;
+    cc__py_ts_bufs[cc__py_ts_nbufs].cls = cls;
+    cc__py_ts_nbufs++;
     return p;
 }
 
@@ -2237,6 +2376,11 @@ static int cc__py_bind_fast(void *const *args, intptr_t nargs, void *kwnames,
     int j;
     if (want < 0) want = 0;
     if (nargs < 0) nargs = 0;
+    /* Hot path: all positionals, no keywords — copy and return. */
+    if (!kwnames && nargs == (intptr_t)want) {
+        for (j = 0; j < want; j++) out[j] = (void *)args[j];
+        return 0;
+    }
     if (kwnames && cc__py.TupleSize) {
         nkw = cc__py.TupleSize(kwnames);
         if (nkw < 0) {
@@ -2375,6 +2519,100 @@ static long long cc_host_bump(CCHostState *self, long long by) {
 }
 static void cc_host_reset(CCHostState *self) { self->counter = 0; }
 
+/* Module methods are reminted so `self` is a capsule holding the state
+ * pointer — no TLS and no PyModule_GetState on the hot path. */
+#define CC__PY_MODSTATE_CAP "cc-py.modstate"
+
+static void *cc__py_capsule_ty; /* type of capsules we mint; for fast self */
+
+static inline void *cc__py_callable_state(void *self) {
+    if (!self) return NULL;
+    /* Hot: reminted method — self is our capsule; pointer at HEAD+1 word. */
+    if (cc__py_capsule_ty && cc__py_obj_type(self) == cc__py_capsule_ty)
+        return ((void **)self)[2];
+    if (cc__py.CapsuleGetPointer) {
+        void *st = cc__py.CapsuleGetPointer(self, CC__PY_MODSTATE_CAP);
+        if (st) {
+            if (!cc__py_capsule_ty)
+                cc__py_capsule_ty = cc__py_obj_type(self);
+            return st;
+        }
+        if (cc__py.ErrOccurred) cc__py.ErrClear();
+    }
+    return cc__py.ModuleGetState ? cc__py.ModuleGetState(self) : NULL;
+}
+
+/* Replace each m_methods entry with a CFunction whose m_self is a capsule
+ * around `state`.  Overwrites the auto-bound attrs; 0 ok, -1 soft-fail
+ * (caller keeps module-as-self trampolines). */
+static int cc__py_bind_mod_methods(void *mod, void *state,
+                                   CC__PyMethodDef *methods) {
+    CC__PyMethodDef *m;
+    if (!mod || !state || !methods) return -1;
+    if (!cc__py.CFunctionNewEx || !cc__py.CapsuleNew ||
+        !cc__py.ObjectSetAttrString)
+        return -1;
+    for (m = methods; m->ml_name; m++) {
+        void *cap = cc__py.CapsuleNew(state, CC__PY_MODSTATE_CAP, NULL);
+        void *fn;
+        if (cap && !cc__py_capsule_ty)
+            cc__py_capsule_ty = cc__py_obj_type(cap);
+        fn = cap ? cc__py.CFunctionNewEx(m, cap, mod) : NULL;
+        if (cap) cc__py.DecRef(cap);
+        if (!fn) {
+            if (cc__py.ErrClear) cc__py.ErrClear();
+            return -1;
+        }
+        if (cc__py.ObjectSetAttrString(mod, m->ml_name, fn) != 0) {
+            cc__py.DecRef(fn);
+            if (cc__py.ErrClear) cc__py.ErrClear();
+            return -1;
+        }
+        cc__py.DecRef(fn);
+    }
+    return 0;
+}
+
+/* ---- arity-specialized enter (shared state+bind; loads stay specialized) ----
+ *
+ * Polymorphic tag-load regresses ~10 ns/call.  enter_N only shares
+ * module_state + optional scratch + bind_fast; stubs keep monomorphic
+ * CC_PY_IN.  Flat params (no CC__PyDisp in generated text) so fragment
+ * validation does not need that type in its prelude. */
+
+#define CC__PY_DISP_MAX 8
+
+#define CC__PY_DEF_ENTER(N)                                                    \
+    static __attribute__((noinline)) int cc__py_enter_##N(                     \
+        void *mod, void *const *args, intptr_t nargs, void *kwnames,           \
+        const char *fname, const char *const *names,                           \
+        const unsigned char *optional, int needs_ts, void **out_self,          \
+        void **bound) {                                                        \
+        void *st = cc__py_callable_state(mod);                                   \
+        if (!st) {                                                             \
+            cc__py_raise("cc: module state unavailable");                      \
+            return -1;                                                         \
+        }                                                                      \
+        if (needs_ts) cc__py_ts_scratch_begin();                               \
+        if (cc__py_bind_fast(args, nargs, kwnames, N, names, optional, bound,  \
+                             fname) != 0)                                      \
+            return -1;                                                         \
+        *out_self = st;                                                        \
+        return 0;                                                              \
+    }
+
+CC__PY_DEF_ENTER(0)
+CC__PY_DEF_ENTER(1)
+CC__PY_DEF_ENTER(2)
+CC__PY_DEF_ENTER(3)
+CC__PY_DEF_ENTER(4)
+CC__PY_DEF_ENTER(5)
+CC__PY_DEF_ENTER(6)
+CC__PY_DEF_ENTER(7)
+CC__PY_DEF_ENTER(8)
+#undef CC__PY_DEF_ENTER
+
+
 /* One trampoline per method.  These are hand-written on purpose: `cc.host` is
  * a built-in module, and its method table lives in this header, so generated
  * definitions would have to be spliced ahead of the header's own text — which
@@ -2389,7 +2627,7 @@ static void *cc__py_tramp_add(void *mod__, void *const *args__, intptr_t nargs__
                               void *kwnames__) {
     static const char *const names__[] = { "a", "b" };
     void *bound__[2];
-    CCHostState *self = (CCHostState *)cc__py.ModuleGetState(mod__);
+    CCHostState *self = (CCHostState *)cc__py_callable_state(mod__);
     long long a, b;
     if (!self) return cc__py_raise("cc.host: module state unavailable");
     if (!self->arena) return cc__py_raise("cc.host: requires a CC host");
@@ -2408,7 +2646,7 @@ static void *cc__py_tramp_bump(void *mod__, void *const *args__, intptr_t nargs_
                                void *kwnames__) {
     static const char *const names__[] = { "by" };
     void *bound__[1];
-    CCHostState *self = (CCHostState *)cc__py.ModuleGetState(mod__);
+    CCHostState *self = (CCHostState *)cc__py_callable_state(mod__);
     long long by;
     if (!self) return cc__py_raise("cc.host: module state unavailable");
     if (!self->arena) return cc__py_raise("cc.host: requires a CC host");
@@ -2424,7 +2662,7 @@ static void *cc__py_tramp_bump(void *mod__, void *const *args__, intptr_t nargs_
 
 static void *cc__py_tramp_reset(void *mod__, void *const *args__, intptr_t nargs__,
                                 void *kwnames__) {
-    CCHostState *self = (CCHostState *)cc__py.ModuleGetState(mod__);
+    CCHostState *self = (CCHostState *)cc__py_callable_state(mod__);
     (void)args__;
     if (!self) return cc__py_raise("cc.host: module state unavailable");
     if (!self->arena) return cc__py_raise("cc.host: requires a CC host");
@@ -2635,6 +2873,11 @@ static int cc__py_register_module(const char *name, CC__PyMethodDef *methods,
         void *st = cc__py.ModuleGetState(sub);
         if (!st) goto done;
         memcpy(st, proto, (size_t)state_size);
+        /* Remint methods so trampoline `self` is a state capsule. */
+        (void)cc__py_bind_mod_methods(sub, st, methods);
+    } else if (state_size > 0) {
+        void *st = cc__py.ModuleGetState(sub);
+        if (st) (void)cc__py_bind_mod_methods(sub, st, methods);
     }
     key = cc__py.UnicodeFromString(qual);
     if (!key || cc__py.DictSetItem(mods, key, sub) != 0) goto done;
@@ -6539,7 +6782,7 @@ CC_GENERIC_FACTORY(py_expose, 1) {
     }
     for (int i = 0; i < n; i++) {
         char nm[128], mb[128], pr[256], ar[256], rt[128], er[128], box[256];
-        char argc[16];
+        char pr_abi[256];
         int pn;
         cc_reflect_method_name(T, i, nm, sizeof(nm));
         cc_reflect_method_member(T, i, mb, sizeof(mb));
@@ -6564,142 +6807,14 @@ CC_GENERIC_FACTORY(py_expose, 1) {
                           "spelled in a form reflection cannot model");
             return cc_slice_empty();
         }
-        {
-            char pr_abi[256];
-            if (cc_reflect_params_c_abi(pr, pr_abi, sizeof(pr_abi)) < 0) {
-                cc_emit_error("py_expose::[T]: cannot strip parameter defaults "
-                              "for a C forward declaration");
-                return cc_slice_empty();
-            }
-            snprintf(argc, sizeof(argc), "%d", pn - 1);
-            /* Index 0 is the receiver, so it binds the module state — under the
-             * parameter's OWN name, because the call forwards by the reflected
-             * argument list and that list spells the receiver the way the method
-             * declared it. */
-            /* A fallible method's box may be minted after this fragment splices,
-             * so declare it here under its own guard: whichever declaration lands
-             * first wins and the other is skipped. */
-            if (er[0]) {
-                cc_string_push_slice(&s, @emit(`
-#ifndef ${box}_DEFINED
-#define ${box}_DEFINED 1
-CC_DECL_RESULT_SPEC(${box}, ${rt}, ${er})
-#endif
-`, arena), arena);
-            }
-            {
-                char p0t[192], p0n[128];
-                int p0ptr;
-                cc_reflect_param_type(pr, 0, p0t, sizeof(p0t));
-                cc_reflect_param_name(pr, 0, p0n, sizeof(p0n));
-                p0ptr = p0t[0] && p0t[strlen(p0t) - 1] == '*';
-                cc_string_push_slice(&s, @emit(`
-            static ${er[0] ? box : rt} ${nm}${pr_abi};
-            static void *cc__py_x_${nm}(void *mod__, void *const *args__,
-                                        intptr_t nargs__, void *kwnames__) {
-                ${arg(0)} *cc__st__ = (${arg(0)} *)cc__py.ModuleGetState(mod__);
-                if (!cc__st__) return cc__py_raise("cc: module state unavailable");
-                ${p0t} ${p0n} = ${p0ptr ? "cc__st__" : "*cc__st__"};
-                cc__py_ts_scratch_begin();`, arena), arena);
-            }
-            if (pn == 1) {
-                cc_string_push_slice(&s, @emit(`
-                if (cc__py_bind_fast(args__, nargs__, kwnames__, 0, NULL, NULL, NULL,
-                                     "${mb}") != 0) return NULL;`, arena), arena);
-            } else {
-                char names_lit[1024];
-                char opt_lit[512];
-                size_t noff = 0, ooff = 0;
-                int seen_default = 0;
-                names_lit[0] = 0;
-                opt_lit[0] = 0;
-                for (int k = 1; k < pn; k++) {
-                    char pnm[128], def[128];
-                    int dlen;
-                    cc_reflect_param_name(pr, k, pnm, sizeof(pnm));
-                    dlen = cc_reflect_param_default(pr, k, def, sizeof(def));
-                    if (dlen < 0) {
-                        cc_emit_error("py_expose::[T]: malformed parameter default");
-                        return cc_slice_empty();
-                    }
-                    if (dlen > 0) seen_default = 1;
-                    else if (seen_default) {
-                        cc_emit_error("py_expose::[T]: a required parameter follows "
-                                      "one with a default — spell defaults on every "
-                                      "trailing parameter");
-                        return cc_slice_empty();
-                    }
-                    if (k > 1) {
-                        if (noff + 2 >= sizeof(names_lit)) break;
-                        names_lit[noff++] = ',';
-                        names_lit[noff++] = ' ';
-                        names_lit[noff] = 0;
-                        if (ooff + 2 >= sizeof(opt_lit)) break;
-                        opt_lit[ooff++] = ',';
-                        opt_lit[ooff++] = ' ';
-                        opt_lit[ooff] = 0;
-                    }
-                    {
-                        int wr = snprintf(names_lit + noff, sizeof(names_lit) - noff,
-                                          "\"%s\"", pnm);
-                        if (wr < 0 || (size_t)wr >= sizeof(names_lit) - noff) break;
-                        noff += (size_t)wr;
-                        wr = snprintf(opt_lit + ooff, sizeof(opt_lit) - ooff,
-                                      "%u", dlen > 0 ? 1u : 0u);
-                        if (wr < 0 || (size_t)wr >= sizeof(opt_lit) - ooff) break;
-                        ooff += (size_t)wr;
-                    }
-                }
-                cc_string_push_slice(&s, @emit(`
-                static const char *const names__[] = { ${names_lit} };
-                static const unsigned char optional__[] = { ${opt_lit} };
-                void *bound__[${argc}];
-                if (cc__py_bind_fast(args__, nargs__, kwnames__, ${argc}, names__,
-                                     optional__, bound__, "${mb}") != 0) return NULL;`, arena), arena);
-                {
-                    char pty[192], pnm[128], idx[16], def[128];
-                    for (int k = 1; k < pn; k++) {
-                        int dlen;
-                        cc_reflect_param_type(pr, k, pty, sizeof(pty));
-                        cc_reflect_param_name(pr, k, pnm, sizeof(pnm));
-                        dlen = cc_reflect_param_default(pr, k, def, sizeof(def));
-                        snprintf(idx, sizeof(idx), "%d", k - 1);
-                        if (dlen > 0) {
-                            cc_string_push_slice(&s, @emit(`
-                ${pty} ${pnm};
-                if (!bound__[${idx}]) ${pnm} = ${def};
-                else if (CC_PY_IN(${pnm}, bound__[${idx}]) != 0) return NULL;`, arena), arena);
-                        } else {
-                            cc_string_push_slice(&s, @emit(`
-                ${pty} ${pnm};
-                if (CC_PY_IN(${pnm}, bound__[${idx}]) != 0) return NULL;`, arena), arena);
-                        }
-                    }
-                }
-            }
+        if (cc_reflect_params_c_abi(pr, pr_abi, sizeof(pr_abi)) < 0) {
+            cc_emit_error("py_expose::[T]: cannot strip parameter defaults "
+                          "for a C forward declaration");
+            return cc_slice_empty();
         }
-        /* A CC error becomes a Python exception at the boundary: a Result is
-         * not something a Python caller can act on. */
-        if (er[0]) {
-            cc_string_push_slice(&s, @emit(`
-                { ${box} r__ = ${nm}${ar};
-                  if (!cc_is_ok(r__))
-                      return cc__py_raise_cc_error((int)cc_error(r__).kind,
-                                                   cc_error(r__).message);`, arena), arena);
-            if (rt[0] == 'v' && rt[1] == 'o')
-                cc_string_push_slice(&s, @emit(`
-                  return cc__py_none(); } }`, arena), arena);
-            else
-                cc_string_push_slice(&s, @emit(`
-                  { ${rt} v__ = cc_value(r__); return CC_PY_OUT(v__); } } }`, arena), arena);
-        } else if (rt[0] == 'v' && rt[1] == 'o') {
-            cc_string_push_slice(&s, @emit(`
-                ${nm}${ar};
-                return cc__py_none(); }`, arena), arena);
-        } else {
-            cc_string_push_slice(&s, @emit(`
-                { ${rt} v__ = ${nm}${ar}; return CC_PY_OUT(v__); } }`, arena), arena);
-        }
+        if (cc__py_emit_method_tramp(&s, arena, T, nm, mb, pr, pr_abi, ar, rt, er,
+                                     box, "x") != 0)
+            return cc_slice_empty();
     }
     cc_string_push_slice(&s, @emit(`
         static CC__PyMethodDef cc__py_tbl_${mangled}[] = {`, arena), arena);
@@ -6778,7 +6893,7 @@ CC_GENERIC_FACTORY(py_module, 1) {
     }
     for (int i = 0; i < n; i++) {
         char nm[128], mb[128], pr[256], ar[256], rt[128], er[128], box[256];
-        char argc[16];
+        char pr_abi[256];
         int pn;
         cc_reflect_method_name(T, i, nm, sizeof(nm));
         cc_reflect_method_member(T, i, mb, sizeof(mb));
@@ -6803,133 +6918,14 @@ CC_GENERIC_FACTORY(py_module, 1) {
                           "spelled in a form reflection cannot model");
             return cc_slice_empty();
         }
-        {
-            char pr_abi[256];
-            if (cc_reflect_params_c_abi(pr, pr_abi, sizeof(pr_abi)) < 0) {
-                cc_emit_error("py_module::[T]: cannot strip parameter defaults "
-                              "for a C forward declaration");
-                return cc_slice_empty();
-            }
-            snprintf(argc, sizeof(argc), "%d", pn - 1);
-            if (er[0]) {
-                cc_string_push_slice(&s, @emit(`
-#ifndef ${box}_DEFINED
-#define ${box}_DEFINED 1
-CC_DECL_RESULT_SPEC(${box}, ${rt}, ${er})
-#endif
-`, arena), arena);
-            }
-            {
-                char p0t[192], p0n[128];
-                int p0ptr;
-                cc_reflect_param_type(pr, 0, p0t, sizeof(p0t));
-                cc_reflect_param_name(pr, 0, p0n, sizeof(p0n));
-                p0ptr = p0t[0] && p0t[strlen(p0t) - 1] == '*';
-                cc_string_push_slice(&s, @emit(`
-            static ${er[0] ? box : rt} ${nm}${pr_abi};
-            static void *cc__py_m_${nm}(void *mod__, void *const *args__,
-                                        intptr_t nargs__, void *kwnames__) {
-                ${arg(0)} *cc__st__ = (${arg(0)} *)cc__py.ModuleGetState(mod__);
-                if (!cc__st__) return cc__py_raise("cc: module state unavailable");
-                ${p0t} ${p0n} = ${p0ptr ? "cc__st__" : "*cc__st__"};
-                cc__py_ts_scratch_begin();`, arena), arena);
-            }
-            if (pn == 1) {
-                cc_string_push_slice(&s, @emit(`
-                if (cc__py_bind_fast(args__, nargs__, kwnames__, 0, NULL, NULL, NULL,
-                                     "${mb}") != 0) return NULL;`, arena), arena);
-            } else {
-                char names_lit[1024];
-                char opt_lit[512];
-                size_t noff = 0, ooff = 0;
-                int seen_default = 0;
-                names_lit[0] = 0;
-                opt_lit[0] = 0;
-                for (int k = 1; k < pn; k++) {
-                    char pnm[128], def[128];
-                    int dlen;
-                    cc_reflect_param_name(pr, k, pnm, sizeof(pnm));
-                    dlen = cc_reflect_param_default(pr, k, def, sizeof(def));
-                    if (dlen < 0) {
-                        cc_emit_error("py_module::[T]: malformed parameter default");
-                        return cc_slice_empty();
-                    }
-                    if (dlen > 0) seen_default = 1;
-                    else if (seen_default) {
-                        cc_emit_error("py_module::[T]: a required parameter follows "
-                                      "one with a default — spell defaults on every "
-                                      "trailing parameter");
-                        return cc_slice_empty();
-                    }
-                    if (k > 1) {
-                        if (noff + 2 >= sizeof(names_lit)) break;
-                        names_lit[noff++] = ',';
-                        names_lit[noff++] = ' ';
-                        names_lit[noff] = 0;
-                        if (ooff + 2 >= sizeof(opt_lit)) break;
-                        opt_lit[ooff++] = ',';
-                        opt_lit[ooff++] = ' ';
-                        opt_lit[ooff] = 0;
-                    }
-                    {
-                        int wr = snprintf(names_lit + noff, sizeof(names_lit) - noff,
-                                          "\"%s\"", pnm);
-                        if (wr < 0 || (size_t)wr >= sizeof(names_lit) - noff) break;
-                        noff += (size_t)wr;
-                        wr = snprintf(opt_lit + ooff, sizeof(opt_lit) - ooff,
-                                      "%u", dlen > 0 ? 1u : 0u);
-                        if (wr < 0 || (size_t)wr >= sizeof(opt_lit) - ooff) break;
-                        ooff += (size_t)wr;
-                    }
-                }
-                cc_string_push_slice(&s, @emit(`
-                static const char *const names__[] = { ${names_lit} };
-                static const unsigned char optional__[] = { ${opt_lit} };
-                void *bound__[${argc}];
-                if (cc__py_bind_fast(args__, nargs__, kwnames__, ${argc}, names__,
-                                     optional__, bound__, "${mb}") != 0) return NULL;`, arena), arena);
-                {
-                    char pty[192], pnm[128], idx[16], def[128];
-                    for (int k = 1; k < pn; k++) {
-                        int dlen;
-                        cc_reflect_param_type(pr, k, pty, sizeof(pty));
-                        cc_reflect_param_name(pr, k, pnm, sizeof(pnm));
-                        dlen = cc_reflect_param_default(pr, k, def, sizeof(def));
-                        snprintf(idx, sizeof(idx), "%d", k - 1);
-                        if (dlen > 0) {
-                            cc_string_push_slice(&s, @emit(`
-                ${pty} ${pnm};
-                if (!bound__[${idx}]) ${pnm} = ${def};
-                else if (CC_PY_IN(${pnm}, bound__[${idx}]) != 0) return NULL;`, arena), arena);
-                        } else {
-                            cc_string_push_slice(&s, @emit(`
-                ${pty} ${pnm};
-                if (CC_PY_IN(${pnm}, bound__[${idx}]) != 0) return NULL;`, arena), arena);
-                        }
-                    }
-                }
-            }
+        if (cc_reflect_params_c_abi(pr, pr_abi, sizeof(pr_abi)) < 0) {
+            cc_emit_error("py_module::[T]: cannot strip parameter defaults "
+                          "for a C forward declaration");
+            return cc_slice_empty();
         }
-        if (er[0]) {
-            cc_string_push_slice(&s, @emit(`
-                { ${box} r__ = ${nm}${ar};
-                  if (!cc_is_ok(r__))
-                      return cc__py_raise_cc_error((int)cc_error(r__).kind,
-                                                   cc_error(r__).message);`, arena), arena);
-            if (rt[0] == 'v' && rt[1] == 'o')
-                cc_string_push_slice(&s, @emit(`
-                  return cc__py_none(); } }`, arena), arena);
-            else
-                cc_string_push_slice(&s, @emit(`
-                  { ${rt} v__ = cc_value(r__); return CC_PY_OUT(v__); } } }`, arena), arena);
-        } else if (rt[0] == 'v' && rt[1] == 'o') {
-            cc_string_push_slice(&s, @emit(`
-                ${nm}${ar};
-                return cc__py_none(); }`, arena), arena);
-        } else {
-            cc_string_push_slice(&s, @emit(`
-                { ${rt} v__ = ${nm}${ar}; return CC_PY_OUT(v__); } }`, arena), arena);
-        }
+        if (cc__py_emit_method_tramp(&s, arena, T, nm, mb, pr, pr_abi, ar, rt, er,
+                                     box, "m") != 0)
+            return cc_slice_empty();
     }
     char destroy_sym[128];
     destroy_sym[0] = 0;
@@ -6961,6 +6957,7 @@ CC_DECL_RESULT_SPEC(${box}, ${rt}, ${er})
             if (!st) return -1;
             if (cc__py_seed_${mangled}) memcpy(st, cc__py_seed_${mangled}, sizeof(*st));
             else memset(st, 0, sizeof(*st));
+            (void)cc__py_bind_mod_methods(m__, st, cc__py_tbl_${mangled});
             return 0;
         }`, arena), arena);
     if (destroy_sym[0]) {

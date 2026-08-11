@@ -1,0 +1,37 @@
+wrote /Users/skotay/Documents/code/concurrent-c/perf/py_bind_micro/generated/func_cc.ccs (20 methods)
+wrote /Users/skotay/Documents/code/concurrent-c/perf/py_bind_micro/generated/func_nanobind.cpp
+building py_module (ccc --release --no-cache)…
+building nanobind (cmake Release)…
+# perf/py_bind_micro — nanobind-style func suite (release only)
+# host: darwin arm64
+# python: 3.14.6 (/opt/homebrew/opt/python@3.14/bin/python3.14)
+# venv_python: /Users/skotay/Documents/code/concurrent-c/perf/py_bind_micro/.venv/bin/python
+# ccc: /Users/skotay/Documents/code/concurrent-c/cc/bin/ccc
+# nanobind: 2.14.0
+# methods: 20
+# samples: 3  iters: 5000000
+# types: int32_t uint32_t int64_t uint64_t float double
+# note: uint16_t from nanobind's suite replaced by double (CC_PY_IN)
+#
+compile_cc_s_samples 0.414 0.267 0.266
+compile_nanobind_s_samples 1.900 1.774 1.918
+RESULT func compile_s cc 0.267
+RESULT func compile_s nanobind 1.900
+RESULT func compile_ratio_cc_over_nb 0.140
+RESULT func size_bytes cc 67792
+RESULT func size_bytes nanobind 108928
+RESULT func size_ratio_cc_over_nb 0.622
+runtime_cc_s_samples 0.212 0.210 0.211
+runtime_nanobind_s_samples 0.173 0.173 0.174
+runtime_python_s_samples 0.492 0.491 0.502
+RESULT func runtime_s cc 0.211
+RESULT func runtime_s nanobind 0.173
+RESULT func runtime_s python 0.492
+RESULT func runtime_ns_per_call cc 42.1
+RESULT func runtime_ns_per_call nanobind 34.7
+RESULT func runtime_ns_per_call python 98.3
+RESULT func runtime_ratio_cc_over_nb 1.216
+RESULT func runtime_ratio_cc_over_python 0.428
+RESULT func runtime_ratio_nb_over_python 0.352
+#
+# summary: compile cc=0.27s nb=1.90s (0.14x); size cc=67792 nb=108928 (0.62x); runtime cc=42.1ns nb=34.7ns py=98.3ns (cc/nb=1.22x)

@@ -906,6 +906,9 @@ static int cc__build_compile_and_load(const char* input_path,
             }
             free(slim);
         }
+        /* py_module / py_expose trampoline emit helpers (arity enter). */
+        cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap,
+                              "#include <ccc/cc_py_export_emit.h>\n");
         cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, isolated_body);
         cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "\n");
         /* The ABI handshake: this TU sees the REAL CCSlice (from the
