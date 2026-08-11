@@ -1,0 +1,21 @@
+/* typedef signed char Alias — multi-token signed prefix (residue 2b). */
+#include <ccc/cc_runtime.cch>
+
+typedef signed char i8;
+
+int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
+    i8[~4 >] tx;
+    i8[~4 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
+    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+    (void)n->close_on(tx);
+    n->spawn(() => [tx] {
+        @errhandler(CCError e) cc_error_exit(e);
+        i8 v = 7;
+        tx.send(v) !>;
+    });
+    i8 got;
+    rx.recv(&got) !>;
+    return got == 7 ? 0 : 1;
+}

@@ -1,0 +1,21 @@
+/* typedef long long myint — alias must resolve for channel-send proof (2c). */
+#include <ccc/cc_runtime.cch>
+
+typedef long long myint;
+
+int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
+    myint[~4 >] tx;
+    myint[~4 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx) !> @destroy;
+    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+    (void)n->close_on(tx);
+    n->spawn(() => [tx] {
+        @errhandler(CCError e) cc_error_exit(e);
+        myint v = 11;
+        tx.send(v) !>;
+    });
+    myint got;
+    rx.recv(&got) !>;
+    return got == 11 ? 0 : 1;
+}
