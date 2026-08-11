@@ -188,3 +188,63 @@ int cc_path_find_repo_root(const char* path, char* out, size_t out_cap) {
     return cc__find_repo_root_from(path, out, out_cap);
 }
 
+int cc_path_resolve_system_cch(const char* rel, char* out, size_t out_cap) {
+    char cand[PATH_MAX];
+    char repo_root[PATH_MAX];
+    const char* env_inc;
+    const char* cc_home;
+    if (!rel || !rel[0] || !out || out_cap == 0) return 0;
+    out[0] = 0;
+
+    /* 1. CC_INCLUDE_PATH — ccc sets this to the real stdlib root for both
+     *    checkout (`…/cc/include`) and prefix installs (`…/include`).
+     *    Hardcoding `$repo/cc/include` alone left installed toolchains
+     *    unable to harvest CC_GENERIC_FACTORY from js.cch/py.cch whenever
+     *    the source file did not sit under a checkout (no CC_REPO_ROOT). */
+    env_inc = getenv("CC_INCLUDE_PATH");
+    if (env_inc && env_inc[0]) {
+        char* paths = strdup(env_inc);
+        char* p = paths;
+        while (p && *p) {
+            char* sep = strchr(p, ':');
+            if (sep) *sep = '\0';
+            if (*p &&
+                (size_t)snprintf(cand, sizeof(cand), "%s/%s", p, rel) <
+                    sizeof(cand) &&
+                cc__file_exists(cand)) {
+                strncpy(out, cand, out_cap - 1);
+                out[out_cap - 1] = 0;
+                free(paths);
+                return 1;
+            }
+            p = sep ? sep + 1 : NULL;
+        }
+        free(paths);
+    }
+
+    /* 2. Checkout layout via repo-root discovery. */
+    repo_root[0] = 0;
+    if (cc__find_repo_root_from(NULL, repo_root, sizeof(repo_root)) &&
+        repo_root[0] &&
+        (size_t)snprintf(cand, sizeof(cand), "%s/cc/include/%s", repo_root,
+                         rel) < sizeof(cand) &&
+        cc__file_exists(cand)) {
+        strncpy(out, cand, out_cap - 1);
+        out[out_cap - 1] = 0;
+        return 1;
+    }
+
+    /* 3. CC_HOME install tree. */
+    cc_home = getenv("CC_HOME");
+    if (cc_home && cc_home[0] &&
+        (size_t)snprintf(cand, sizeof(cand), "%s/include/%s", cc_home, rel) <
+            sizeof(cand) &&
+        cc__file_exists(cand)) {
+        strncpy(out, cand, out_cap - 1);
+        out[out_cap - 1] = 0;
+        return 1;
+    }
+
+    return 0;
+}
+

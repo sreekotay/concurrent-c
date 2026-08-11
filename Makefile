@@ -123,6 +123,18 @@ install-check:
 	echo "install-check: compiling against $(DESTDIR)$(PREFIX) in $$work"; \
 	( cd "$$work" && "$$ccc_bin" run install_check.ccs ) || { \
 		echo "install-check: FAILED — the installed prefix cannot compile a program"; exit 1; }; \
+	printf '%s\n' \
+	  '#include <ccc/std/prelude.cch>' \
+	  '#include <ccc/script/js.cch>' \
+	  '' \
+	  'typedef struct ICCounter { int n; } ICCounter;' \
+	  'int ICCounter_inc(ICCounter* self) { return ++self->n; }' \
+	  'static ICCounter ic_seed = {0};' \
+	  '@comptime cc_js_export("ic_counter", "ICCounter", &ic_seed);' \
+	  > "$$work/ic_mod.ccs"; \
+	echo "install-check: module-export (out-of-tree source) against $(DESTDIR)$(PREFIX)"; \
+	( cd "$$work" && "$$ccc_bin" build ic_mod.ccs ) || { \
+		echo "install-check: FAILED — js_module factory not available out-of-tree"; exit 1; }; \
 	echo "install-check: ok"
 
 uninstall:

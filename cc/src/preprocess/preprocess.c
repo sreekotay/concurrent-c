@@ -12908,12 +12908,8 @@ static void cc__register_included_cch_tree(const char* source_path);
  * is available when the TU already uses lowered `.h` includes (no `.cch→.h`
  * rewrite side-effect). */
 static void cc__register_cch_trees_from_angle_includes(const char* src, size_t n) {
-    char repo_root[PATH_MAX];
     size_t i = 0;
     if (!src || n == 0) return;
-    repo_root[0] = '\0';
-    if (!cc_path_find_repo_root(NULL, repo_root, sizeof(repo_root)) || !repo_root[0])
-        return;
     while (i < n) {
         size_t line_end = i, p, close, path_s, path_e, rel_len;
         char rel[PATH_MAX], abs_src[PATH_MAX];
@@ -12946,9 +12942,8 @@ static void cc__register_cch_trees_from_angle_includes(const char* src, size_t n
                                     memcpy(rel + rel_len - 2, ".cch", 4);
                                     rel[rel_len + 2] = '\0';
                                 }
-                                snprintf(abs_src, sizeof(abs_src),
-                                         "%s/cc/include/%s", repo_root, rel);
-                                if (access(abs_src, R_OK) == 0)
+                                if (cc_path_resolve_system_cch(rel, abs_src,
+                                                               sizeof(abs_src)))
                                     cc__register_included_cch_tree(abs_src);
                             }
                         }
@@ -13068,9 +13063,7 @@ static void cc__family_members_reset(void) {
 static int cc__family_header_open(const char* header_suffix,
                                   char** out_buf, size_t* out_len) {
     size_t h, pl, sl;
-    char repo_root[PATH_MAX];
     char cand[PATH_MAX];
-    const char* env_inc;
     if (!header_suffix || !header_suffix[0] || !out_buf || !out_len) return -1;
     *out_buf = NULL;
     *out_len = 0;
@@ -13094,30 +13087,13 @@ static int cc__family_header_open(const char* header_suffix,
             continue;
         if (cc__read_file_text(cand, out_buf, out_len) == 0 && *out_buf) return 0;
     }
-    repo_root[0] = '\0';
-    if (cc_path_find_repo_root(NULL, repo_root, sizeof(repo_root)) && repo_root[0]) {
-        if ((size_t)snprintf(cand, sizeof(cand), "%s/cc/include/ccc/%s",
-                             repo_root, header_suffix) < sizeof(cand) &&
+    {
+        char rel[PATH_MAX];
+        if ((size_t)snprintf(rel, sizeof(rel), "ccc/%s", header_suffix) <
+                sizeof(rel) &&
+            cc_path_resolve_system_cch(rel, cand, sizeof(cand)) &&
             cc__read_file_text(cand, out_buf, out_len) == 0 && *out_buf)
             return 0;
-    }
-    env_inc = getenv("CC_INCLUDE_PATH");
-    if (env_inc && env_inc[0]) {
-        char* paths = strdup(env_inc);
-        char* p = paths;
-        while (p && *p) {
-            char* sep = strchr(p, ':');
-            if (sep) *sep = '\0';
-            if (*p &&
-                (size_t)snprintf(cand, sizeof(cand), "%s/ccc/%s", p,
-                                 header_suffix) < sizeof(cand) &&
-                cc__read_file_text(cand, out_buf, out_len) == 0 && *out_buf) {
-                free(paths);
-                return 0;
-            }
-            p = sep ? sep + 1 : NULL;
-        }
-        free(paths);
     }
     return -1;
 }
@@ -14060,7 +14036,6 @@ int cc_included_cch_fn_first_param(const char* name, char* out, size_t out_sz) {
 static void cc__register_included_cch_tree(const char* source_path) {
     char abs_src[PATH_MAX];
     char source_dir[PATH_MAX];
-    char repo_root[PATH_MAX];
     char* src = NULL;
     size_t n = 0, i = 0;
     int added;
@@ -14068,8 +14043,6 @@ static void cc__register_included_cch_tree(const char* source_path) {
     added = cc__register_included_cch_source(abs_src);
     if (added <= 0) return;
     if (cc__dirname_local(abs_src, source_dir, sizeof(source_dir)) != 0) return;
-    repo_root[0] = '\0';
-    (void)cc_path_find_repo_root(abs_src, repo_root, sizeof(repo_root));
     if (cc__read_file_text(abs_src, &src, &n) != 0) return;
 
     /* Register Result-returning callees declared in this header so
@@ -14104,8 +14077,9 @@ static void cc__register_included_cch_tree(const char* source_path) {
                             rel[rel_len] = '\0';
                             if (open == '"') {
                                 snprintf(child, sizeof(child), "%s/%s", source_dir, rel);
-                            } else if (repo_root[0]) {
-                                snprintf(child, sizeof(child), "%s/cc/include/%s", repo_root, rel);
+                            } else if (cc_path_resolve_system_cch(rel, child,
+                                                                  sizeof(child))) {
+                                /* child filled */
                             } else {
                                 child[0] = '\0';
                             }
@@ -15274,10 +15248,7 @@ char* cc_rewrite_system_cch_includes_to_lowered_headers(const char* src, size_t 
     size_t out_len = 0, out_cap = 0;
     size_t i = 0;
     int changed = 0;
-    char repo_root[PATH_MAX];
     if (!src) return NULL;
-    repo_root[0] = '\0';
-    (void)cc_path_find_repo_root(NULL, repo_root, sizeof(repo_root));
     while (i < n) {
         size_t line_end = i;
         while (line_end < n && src[line_end] != '\n') line_end++;
@@ -15298,16 +15269,20 @@ char* cc_rewrite_system_cch_includes_to_lowered_headers(const char* src, size_t 
                             close >= p + 5 &&
                             strncmp(src + close - 4, ".cch", 4) == 0) {
                             size_t path_end = close - 4;
-                            if (repo_root[0]) {
-                                char rel[PATH_MAX], abs_src[PATH_MAX];
-                                size_t rel_len = close - (p + 1);
-                                if (rel_len < sizeof(rel)) {
-                                    memcpy(rel, src + p + 1, rel_len);
-                                    rel[rel_len] = '\0';
-                                    snprintf(abs_src, sizeof(abs_src), "%s/cc/include/%s",
-                                             repo_root, rel);
+                            char rel[PATH_MAX], abs_src[PATH_MAX];
+                            size_t rel_len = close - (p + 1);
+                            if (rel_len < sizeof(rel)) {
+                                memcpy(rel, src + p + 1, rel_len);
+                                rel[rel_len] = '\0';
+                                /* Register the raw `.cch` so factories /
+                                 * @comptime harvest still see js_module /
+                                 * py_module after the include is rewritten
+                                 * to the blanked `.h`.  Resolve via
+                                 * CC_INCLUDE_PATH so prefix installs work
+                                 * for sources outside any checkout. */
+                                if (cc_path_resolve_system_cch(rel, abs_src,
+                                                               sizeof(abs_src)))
                                     cc__register_included_cch_tree(abs_src);
-                                }
                             }
                             cc_sb_append(&out, &out_len, &out_cap, src + i, path_end - i);
                             cc_sb_append_cstr(&out, &out_len, &out_cap, ".h");
