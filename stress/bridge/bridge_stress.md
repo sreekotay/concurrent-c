@@ -124,7 +124,7 @@ Default ops: quick 200 / full 800 / soak 2000 (`FUZZ_OPS` overrides).
 | `escaped_closure` | green | Capture JS callable; destroy; invoke later → closed |
 | `fanout_destroy` | green | Many children in flight; destroy a subset mid-flight (cooperative — see design notes) |
 | `rss_soak` | green, soak | Create/churn/destroy RSS bound |
-| `handle_leak_soak` | green, soak | Long-lived domain; ledger + RSS re-settle |
+| `handle_leak_soak` | green, soak | Long-lived domain; ledger stays O(attrs) under getattr cache + RSS bound |
 | `abort_inject` | green | `process.abort` / `SIGABRT` (stricter than exit/kill) |
 
 ## Negative / correctness smokes (not volume)
