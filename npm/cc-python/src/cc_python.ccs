@@ -205,6 +205,8 @@ struct CcPyDom {
  * thread; zero is still only reachable on the main thread (the lane's
  * own hold outlives the loop thread and releases at the sentinel), so
  * the destroy below never races the executor. */
+static void ccpy__release_inproc_owner(void);
+
 static void ccpy__dom_unref(CcPyDom *d) {
     long long left;
     pthread_mutex_lock(&d->mu);
@@ -215,6 +217,7 @@ static void ccpy__dom_unref(CcPyDom *d) {
         CCArena tmp = d->arena;
         cc_arena_destroy(&tmp); /* d is inside it — gone now */
     }
+    ccpy__release_inproc_owner();
 }
 
 static void ccpy__dom_hold(CcPyDom *d) {
@@ -1964,6 +1967,46 @@ static void ccpy__reject(void *env, void *deferred, const char *msg) {
  * JS thread via TSFN, so a sync wait in create would deadlock. */
 static int ccpy__async_closes_inflight = 0;
 
+/* In-process libpython is process-global.  Concurrent create() from
+ * Node worker_threads races `_PyImport_Init` and aborts the process;
+ * a late create() on a second thread after main already owns it yields
+ * opaque extension ImportErrors.  One OS thread may own in-process
+ * domains; others must use create({ isolated: true }). */
+static pthread_mutex_t ccpy__inproc_owner_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_t ccpy__inproc_owner_tid;
+static int ccpy__inproc_owner_set = 0;
+static int ccpy__inproc_live = 0;
+
+static int ccpy__claim_inproc_owner(char *err, size_t errcap) {
+    pthread_t self = pthread_self();
+    pthread_mutex_lock(&ccpy__inproc_owner_mu);
+    if (!ccpy__inproc_owner_set) {
+        ccpy__inproc_owner_tid = self;
+        ccpy__inproc_owner_set = 1;
+        ccpy__inproc_live = 1;
+        pthread_mutex_unlock(&ccpy__inproc_owner_mu);
+        return 0;
+    }
+    if (pthread_equal(ccpy__inproc_owner_tid, self)) {
+        ccpy__inproc_live++;
+        pthread_mutex_unlock(&ccpy__inproc_owner_mu);
+        return 0;
+    }
+    pthread_mutex_unlock(&ccpy__inproc_owner_mu);
+    snprintf(err, errcap,
+             "cc-python: in-process bridge already owned by another thread; "
+             "use create({ isolated: true }) — one Node thread may own "
+             "in-process libpython; worker threads need isolated domains");
+    return -1;
+}
+
+static void ccpy__release_inproc_owner(void) {
+    pthread_mutex_lock(&ccpy__inproc_owner_mu);
+    if (ccpy__inproc_live > 0) ccpy__inproc_live--;
+    if (ccpy__inproc_live == 0) ccpy__inproc_owner_set = 0;
+    pthread_mutex_unlock(&ccpy__inproc_owner_mu);
+}
+
 static void ccpy__async_close_begin(void) {
     __sync_add_and_fetch(&ccpy__async_closes_inflight, 1);
 }
@@ -2171,6 +2214,7 @@ typedef struct CcPython {
 static CCJsVal !>(CCError) CcPython_create(CcPython *self, CCJs *js) {
     CCArena ar = cc_arena_heap(megabytes(4));
     CcPyDom *d;
+    static char owner_err[256];
     (void)self;
     /* Refuse while any lane drain is unfinished — do not sync-wait (close
      * settles on this thread via TSFN).  Callers must await destroy(). */
@@ -2178,9 +2222,14 @@ static CCJsVal !>(CCError) CcPython_create(CcPython *self, CCJs *js) {
         return cc_err(CC_ERR_IO,
                       "cc-python: a domain destroy is still in progress; "
                       "await the outstanding destroy() before create()");
+    /* Claim before cc_py_new: concurrent create() from worker_threads
+     * otherwise races CPython process-global init and aborts Node. */
+    if (ccpy__claim_inproc_owner(owner_err, sizeof(owner_err)) != 0)
+        return cc_err(CC_ERR_INVALID_ARG, owner_err);
     d = (CcPyDom *)cc_arena_alloc(&ar, sizeof(*d), 16);
     if (!d) {
         cc_arena_destroy(&ar);
+        ccpy__release_inproc_owner();
         return cc_err(CC_ERR_IO, "cc-python: out of memory");
     }
     memset(d, 0, sizeof(*d));
@@ -2206,6 +2255,7 @@ static CCJsVal !>(CCError) CcPython_create(CcPython *self, CCJs *js) {
                 CCArena tmp = d->arena;
                 cc_arena_destroy(&tmp);
             }
+            ccpy__release_inproc_owner();
             return cc_err(CC_ERR_IO, why);
         }
         d->py = r.u.value;
@@ -2226,6 +2276,7 @@ static CCJsVal !>(CCError) CcPython_create(CcPython *self, CCJs *js) {
             ccpy__dom_sweep(d);
             tmp = d->arena;
             cc_arena_destroy(&tmp);
+            ccpy__release_inproc_owner();
             return cc_err(CC_ERR_IO, "cc-python: external allocation failed");
         }
         ccpy__dom_hold(d);

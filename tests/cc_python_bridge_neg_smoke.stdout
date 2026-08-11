@@ -54,6 +54,7 @@ neg_inproc_system_exit true
 neg_inproc_after_system_exit true
 neg_inproc_after_close true
 neg_inproc_destroy_idempotent true
+neg_inproc_worker_create_refuses true
 neg_iso_dollar_key true
 neg_iso_bigint_roundtrip true
 neg_iso_u64_bigint true

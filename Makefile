@@ -182,7 +182,7 @@ tools:
 	@cc -O2 -Wall -Wextra tools/cc_test.c -o tools/cc_test
 
 # Prefer using ccc itself for tests (the runner drives ./cc/bin/ccc).
-test: cc tools out-of-tree-smoke runtime-variant-smoke
+test: cc tools out-of-tree-smoke out-of-tree-module-smoke runtime-variant-smoke
 	@./tools/cc_test
 
 # Smoke: verify `ccc` can compile a source file that lives outside the repo
@@ -192,6 +192,11 @@ test: cc tools out-of-tree-smoke runtime-variant-smoke
 # because the function isn't registered as pointer-returning.
 out-of-tree-smoke: cc
 	@./tools/out_of_tree_smoke.shcc
+
+# Smoke: js_module / cc_js_export must work for a .ccs outside the checkout
+# (stdlib CC_GENERIC_FACTORY harvest via CC_INCLUDE_PATH).
+out-of-tree-module-smoke: cc
+	@./tools/out_of_tree_module_smoke.shcc
 
 # Smoke: the runtime object a build links matches the flags it was asked for.
 # Regression guard for cc__prebuilt_runtime_applies and the per-variant runtime

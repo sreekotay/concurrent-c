@@ -54,6 +54,15 @@ packages, crash isolation, or multi-core fan-out — and **pin the npm
 version** in prototypes. Don’t judge modes on `np.dot` alone — see
 Measured (matmul/SVD).
 
+**Worker threads.** In-process libpython is owned by **at most one Node
+thread** (the first `create()` wins). Further `create()` calls on that
+same thread are fine; a `create()` from another `worker_threads` Worker
+refuses with `in-process bridge already owned by another thread; use
+create({ isolated: true })`. Concurrent in-process `create()` from
+several workers used to abort the process (`_PyImport_Init`); isolated
+domains are fully worker-safe. Proxies are not structured-cloneable
+(`DataCloneError`) — do not share handles across threads.
+
 Receipts:
 [`js_numpy_bridge_node_20260810.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/js_numpy_bridge_node_20260810.txt)
 ·

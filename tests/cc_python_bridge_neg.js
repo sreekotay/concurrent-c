@@ -297,6 +297,38 @@ async function raisesAsync(fn, re) {
     out('neg_inproc_after_close',
         raisesSync(() => math.floor(1.2), /closed/));
     out('neg_inproc_destroy_idempotent', py.closed);
+
+    // Worker threads: in-process is owned by one OS thread. Concurrent
+    // create() otherwise aborts Node (_PyImport_Init); late create() on
+    // another thread must refuse articulately — not a third-party ImportError.
+    {
+      const { Worker, isMainThread } = require('worker_threads');
+      if (!isMainThread) throw new Error('neg suite expects main thread');
+      const main = ccpy.create();
+      const workerSrc = `
+        const { parentPort } = require('worker_threads');
+        const ccpy = require(${JSON.stringify(process.cwd() + '/npm/cc-python')});
+        try {
+          ccpy.create();
+          parentPort.postMessage({ ok: false, msg: 'no-throw' });
+        } catch (e) {
+          parentPort.postMessage({
+            ok: /owned by another thread|isolated:\\s*true/i.test(String(e && e.message)),
+            msg: String(e && e.message),
+          });
+        }
+      `;
+      const msg = await new Promise((resolve, reject) => {
+        const w = new Worker(workerSrc, { eval: true });
+        w.on('message', resolve);
+        w.on('error', reject);
+        w.on('exit', (code) => {
+          if (code !== 0) reject(new Error('worker exit ' + code));
+        });
+      });
+      out('neg_inproc_worker_create_refuses', !!msg.ok);
+      main.destroy();
+    }
   }
 
   // ---- isolated ---------------------------------------------------------

@@ -1,0 +1,9 @@
+/* Minimal module-export fixture for tools/out_of_tree_module_smoke.shcc.
+ * Copied outside the repo and built with ccc — must mint ic_counter.node. */
+#include <ccc/std/prelude.cch>
+#include <ccc/script/js.cch>
+
+typedef struct ICCounter { int n; } ICCounter;
+int ICCounter_inc(ICCounter* self) { return ++self->n; }
+static ICCounter ic_seed = {0};
+@comptime cc_js_export("ic_counter", "ICCounter", &ic_seed);
