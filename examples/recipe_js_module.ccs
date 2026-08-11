@@ -17,7 +17,7 @@
  * as the JS error class its KIND maps to (CC_ERR_INVALID_ARG below
  * becomes TypeError), the `code` property carrying the kind's name,
  * message intact.  An underscore member — `Counter__clamp` reflects as
- * `_clamp` — stays internal: wrap-and-export is the rename story, and the
+ * `_clamp` — is not exported: wrap-and-export is the rename story, and the
  * wrapper is one line. */
 #include <ccc/script/js.cch>
 

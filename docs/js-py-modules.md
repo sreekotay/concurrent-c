@@ -261,8 +261,10 @@ the exported pointer. The rest follows from C:
 - `long long by = 1` — default argument. JS may pass a trailing plain
   object by name (`c.bump({by: 2})`); Python gets keywords
   (`counter.bump(by=2)`).
-- `Counter__clamp` (double underscore) reflects as `_clamp` — internal.
-  Rename via a one-line wrap-and-export.
+- `Counter__clamp` (double underscore after the type) reflects as
+  `_clamp` and is **not exported** — leading `_` is privacy at the
+  boundary. Wrap-and-export if you want a public name
+  (`Counter_clamp` → one line that calls `Counter__clamp`).
 - Fallible methods (`!>(CCError)`) cross as the mapped exception —
   `CC_ERR_INVALID_ARG` → `TypeError` (JS) / `ValueError` (Python);
   message intact, `code` carries the kind.
@@ -279,21 +281,25 @@ hold them in your `T` (handle-passing), as a C library would.
 ## Buffers
 
 ```c
-static double Sig_sum(Sig *self, double[:] xs) {          // Float64Array
-    double acc = 0;                                       // borrows in place
-    for (size_t i = 0; i < xs.base.len; i++)
+static double Sig_sum(Sig *self, double[:] xs) {          // Float64Array /
+    double acc = 0;                                       // numpy float64 /
+    for (size_t i = 0; i < xs.base.len; i++)              // array.array('d')
         acc += ((double *)xs.base.ptr)[i];
     return acc;
 }
 static void Sig_fill(Sig *self, double[:] xs, double v);  // writes land in
-                                                          // the caller's array
-static double[:] Sig_row(Sig *self);                      // returns materialize
-                                                          // as a fresh one
+                                                          // the caller's buffer
+static double[:] Sig_row(Sig *self);                      // fresh TypedArray
+                                                          // / typed memoryview
 ```
 
-Matching `Float64Array` (or numpy / buffer) borrows zero-copy for the
-call; plain `Array` or mismatched dtype converts per element. The 94ns
-sum above is this path.
+Matching `Float64Array` (JS) or a contiguous buffer exporter of the right
+element type (Python: numpy `float64`, `array.array('d')`, memoryview)
+borrows zero-copy for the call; plain `Array` / `list` or a mismatched
+dtype converts per element. Returns materialize a fresh buffer on each
+side (TypedArray / typed memoryview). The 94ns sum above is the JS
+borrow path; Python is the same shape (stdlib `array.array` in
+`tests/py_module_double_result_mod.ccs`).
 
 ## Calling back out
 

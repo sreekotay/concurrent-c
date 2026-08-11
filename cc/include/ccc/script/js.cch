@@ -204,6 +204,7 @@ CC_DECL_RESULT_SPEC(CCResult_CCSlice_CCJsError, CCSlice, CCJsError)
 typedef struct CC__JsSyms {
     void *lib;
     int (*GetUndefined)(void *env, void **out);
+    int (*GetNull)(void *env, void **out);
     int (*GetBoolean)(void *env, int value, void **out);
     int (*Typeof)(void *env, void *value, int *out);
     int (*CreateDouble)(void *env, double value, void **out);
@@ -227,6 +228,8 @@ typedef struct CC__JsSyms {
     int (*GetPropertyNames)(void *env, void *obj, void **out);
     int (*GetArrayLength)(void *env, void *arr, uint32_t *out);
     int (*GetElement)(void *env, void *arr, uint32_t i, void **out);
+    int (*CreateArray)(void *env, size_t length, void **out);
+    int (*SetElement)(void *env, void *arr, uint32_t i, void *val);
     int (*AddEnvCleanupHook)(void *env, void (*fn)(void *), void *arg);
     int (*IsArray)(void *env, void *value, _Bool *out);
     int (*IsTypedarray)(void *env, void *value, _Bool *out);
@@ -359,6 +362,7 @@ have_lib:;
 #define CC__JS_SYM(field, name) \
     if (cc__js_sym(tmp->lib, name, &tmp->field) != 0) return -1;
     CC__JS_SYM(GetUndefined, "napi_get_undefined")
+    CC__JS_SYM(GetNull, "napi_get_null")
     CC__JS_SYM(GetBoolean, "napi_get_boolean")
     CC__JS_SYM(Typeof, "napi_typeof")
     CC__JS_SYM(CreateDouble, "napi_create_double")
@@ -378,6 +382,8 @@ have_lib:;
     CC__JS_SYM(GetPropertyNames, "napi_get_property_names")
     CC__JS_SYM(GetArrayLength, "napi_get_array_length")
     CC__JS_SYM(GetElement, "napi_get_element")
+    CC__JS_SYM(CreateArray, "napi_create_array_with_length")
+    CC__JS_SYM(SetElement, "napi_set_element")
     CC__JS_SYM(AddEnvCleanupHook, "napi_add_env_cleanup_hook")
     CC__JS_SYM(IsArray, "napi_is_array")
     CC__JS_SYM(IsTypedarray, "napi_is_typedarray")
@@ -2768,7 +2774,8 @@ typedef struct CC__JsMethod {
  * `T` or `T*` becomes a module function, and the receiver is the module's
  * state, reached through the function's data slot — the same reading of
  * "first parameter is the receiver" the language dispatches on.  An
- * underscore member (`T__helper` reflects as `_helper`) stays internal.
+ * underscore member (`T__helper` reflects as `_helper`) is not exported —
+ * leading `_` is privacy at the boundary; wrap-and-export for a public name.
  *
  *     void *napi_register_module_v1(void *env, void *exports) {
  *         return js_module::[Counter](env, exports, &seed);

@@ -94,20 +94,62 @@ async function raisesAsync(fn, re) {
           !!e && e.pyType === 'KeyError' && e.code === 'KeyError');
     }
 
-    // Proxy traps: stringify must fail articulately; domain stays usable.
+    // Proxy traps: reflection cheap; unrepresentable toJSON refuses by path.
     out('neg_inproc_proxy_keys', Array.isArray(Object.keys(math.sqrt)));
     out('neg_inproc_proxy_json',
         raisesSync(() => JSON.stringify(math.sqrt),
-                   /proxy is not JSON|toJS|util\.inspect/));
+                   /cannot materialize/));
     out('neg_inproc_tojs',
-        typeof math.sqrt.toJS() === 'string' &&
-        /built-in|function|sqrt/i.test(math.sqrt.toJS()));
+        raisesSync(() => math.sqrt.toJS(), /cannot materialize/));
     {
       const util = require('util');
       out('neg_inproc_inspect',
           /built-in|function|sqrt/i.test(util.inspect(math.sqrt)));
     }
     out('neg_inproc_proxy_alive', math.floor(3.2) === 3);
+
+    // Strict toJS/toJSON: one materializer, path-bearing refuse, host JSON.
+    {
+      const builtins = py.import('builtins');
+      const g = builtins.dict();
+      const d = builtins.eval(
+          '{"a": float("nan"), "n": None, "k": {1: "x"}, "t": (1, 2)}', g);
+      const js = d.toJS();
+      out('neg_inproc_tojs_nan_null',
+          Number.isNaN(js.a) && JSON.stringify(js) ===
+          JSON.stringify({ a: null, n: null, k: { '1': 'x' }, t: [1, 2] }));
+      out('neg_inproc_tojs_none_null', js.n === null);
+      out('neg_inproc_tojs_int_keys', js.k && js.k['1'] === 'x');
+      out('neg_inproc_tojs_tuple',
+          Array.isArray(js.t) && js.t[0] === 1 && js.t[1] === 2);
+      out('neg_inproc_tojs_one_materializer',
+          JSON.stringify(d) === JSON.stringify(d.toJS()));
+
+      const big = builtins.eval('{"x": 2 ** 100}', g);
+      out('neg_inproc_tojs_bigint_throw',
+          raisesSync(() => JSON.stringify(big.toJS()),
+                     /BigInt|serialize/i));
+
+      const withSet = builtins.eval('{"tags": {1, 2, 3}}', g);
+      out('neg_inproc_tojs_set_path',
+          raisesSync(() => withSet.toJS(),
+                     /cannot materialize set at \$\.tags/));
+
+      builtins.exec('cyc={}; cyc["self"]=cyc', g);
+      const cyc = builtins.eval('cyc', g);
+      out('neg_inproc_tojs_cycle',
+          raisesSync(() => cyc.toJS(), /cycle detected/));
+
+      const keyed = builtins.eval('{"keys": 1, "get": 2}', g);
+      out('neg_inproc_keys_win',
+          keyed.keys === 1 && keyed.get === 2);
+      {
+        const desc = Object.getOwnPropertyDescriptor(keyed, 'keys');
+        out('neg_inproc_gopd_accessor',
+            !!desc && typeof desc.get === 'function' &&
+            !Object.prototype.hasOwnProperty.call(desc, 'value'));
+      }
+    }
 
     // Scalar edges through a Python identity.
     {
@@ -230,6 +272,21 @@ async function raisesAsync(fn, re) {
       const u64 = await (b.eval('(1 << 64) - 1'));
       out('neg_iso_u64_bigint',
           typeof u64 === 'bigint' && u64 === (1n << 64n) - 1n);
+    }
+    {
+      /* Non-plain values stay handles (set inside) so toJS is available. */
+      const d = await b.eval('{"tags": {1, 2}, "x": float("nan")}');
+      out('neg_iso_tojs_set_path',
+          await raisesAsync(() => d.toJS(),
+                            /cannot materialize set at \$\.tags/));
+      /* Nested int-key dict keeps a handle; plain scalar dicts cross by value. */
+      const ok = await b.eval('{"a": 1, "b": [2, 3], "c": {4: 5}}');
+      const js = await ok.toJS();
+      const js2 = await ok.toJSON();
+      out('neg_iso_tojs_ok',
+          js.a === 1 && Array.isArray(js.b) && js.b[1] === 3 &&
+          js.c && js.c['4'] === 5 &&
+          JSON.stringify(js) === JSON.stringify(js2));
     }
     // Lazy import fail surfaces on first use.
     const missing = py.import('definitely_not_a_pkg_neg_xyz');

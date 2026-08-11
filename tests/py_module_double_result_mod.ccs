@@ -18,6 +18,27 @@ static double !>(CCError) Halver_half(Halver *self, double v) {
     return cc_ok(v / 2.0);
 }
 
+/* Matching array.array('d') / numpy float64 / memoryview borrows zero-copy;
+ * a list converts per element. Writes land in the caller's buffer. */
+static double Halver_sum(Halver *self, double[:] xs) {
+    double acc = 0;
+    (void)self;
+    for (size_t i = 0; i < xs.base.len; i++) acc += ((double *)xs.base.ptr)[i];
+    return acc;
+}
+
+static void Halver_fill(Halver *self, double[:] xs, double v) {
+    (void)self;
+    for (size_t i = 0; i < xs.base.len; i++) ((double *)xs.base.ptr)[i] = v;
+}
+
+/* Materialize as a fresh typed memoryview (owned copy). */
+static double[:] Halver_row(Halver *self) {
+    static double v[3] = { 1.5, 2.5, 3.0 };
+    (void)self;
+    return CCSlice_double_from_buffer(v, 3);
+}
+
 void *PyInit_halver(void) {
     return py_module::[Halver]("halver", NULL);
 }

@@ -16,6 +16,16 @@ neg_inproc_proxy_json true
 neg_inproc_tojs true
 neg_inproc_inspect true
 neg_inproc_proxy_alive true
+neg_inproc_tojs_nan_null true
+neg_inproc_tojs_none_null true
+neg_inproc_tojs_int_keys true
+neg_inproc_tojs_tuple true
+neg_inproc_tojs_one_materializer true
+neg_inproc_tojs_bigint_throw true
+neg_inproc_tojs_set_path true
+neg_inproc_tojs_cycle true
+neg_inproc_keys_win true
+neg_inproc_gopd_accessor true
 neg_inproc_scalar_nan true
 neg_inproc_scalar_inf true
 neg_inproc_scalar_ninf true
@@ -39,6 +49,8 @@ neg_inproc_destroy_idempotent true
 neg_iso_dollar_key true
 neg_iso_bigint_roundtrip true
 neg_iso_u64_bigint true
+neg_iso_tojs_set_path true
+neg_iso_tojs_ok true
 neg_iso_lazy_import_fail true
 neg_iso_pass_unresolved true
 neg_iso_promise_arg true

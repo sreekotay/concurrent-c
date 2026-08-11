@@ -1,13 +1,6 @@
-/* A module method returning `double !>(CCError)` must build.
- *
- * `CCResult_double_CCError` is stdlib-predeclared (string.cch/slice.cch own
- * its definition), so the emit plan skips its struct decl — but the
- * parser-helper prototypes still name the type.  Unless a forward tag
- * precedes them, a TU that includes neither owning header hands TCC an
- * undeclared parameter type and dies with "',' expected (got 'r')" at the
- * prototype.  The module (py_module_double_result_mod.src) pairs a
- * long-long method (user-emitted spec) with a double method (predeclared
- * spec) — the exact collision — then both marshal through Python. */
+/* A module method returning `double !>(CCError)` must build, and the
+ * double[:] buffer surface (param borrow + return materialize) must work
+ * for the Python target — same contract as the JS twin. */
 CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 
 {
@@ -33,6 +26,7 @@ CCArena a = cc_arena_heap(megabytes(1)) @destroy;
     CCCommand run = cc_command(&a, @slice("sh"));
     run.arg("-c");
     CCString py = @string(`PYTHONPATH=bin python3 -c "
+import array
 import halver
 print('twice', halver.twice(21))
 print('half', halver.half(5.0))
@@ -40,6 +34,18 @@ try:
     halver.half(-1.0)
 except ValueError as e:
     print('raised:', e)
+xs = array.array('d', [1, 2, 3.5])
+print('sum_array', halver.sum(xs))
+print('sum_list', halver.sum([1, 2, 3.5]))
+halver.fill(xs, 9.0)
+print('filled', xs[0], xs[1], xs[2])
+row = halver.row()
+print('row', type(row).__name__, list(row))
+print('roundtrip', halver.sum(row))
+try:
+    halver.sum(['x'])
+except TypeError as e:
+    print('badelem:', e)
 "`, &a);
     run.arg(py.cstr(&a));
     run.inherit_stdio();

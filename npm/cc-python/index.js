@@ -140,9 +140,13 @@ function wrap(bridge, handle) {
    * Bumped on any release() so a cached proxy cannot outlive its box. */
   const attrCache = new Map();
   let cacheGen = bridge._attrCacheGen || 0;
+  /* ownKeys snapshot for the current reflection walk (GOPD answers from
+   * this without re-fetching; cleared on set / next ownKeys). */
+  let keysSnap = null;
+  let mappingFlag = undefined; /* undefined | true | false */
   const inspectCustom = Symbol.for('nodejs.util.inspect.custom');
   /* util.inspect reads the symbol off the target (not only the get trap)
-   * for callable proxies — install both. */
+   * for callable proxies — install both. Display = str(), not toJS. */
   target[inspectCustom] = () => pyCall(() =>
     materialize(bridge, native.invoke(bridge._dom, bridge._str(), [handle])));
 
@@ -154,18 +158,32 @@ function wrap(bridge, handle) {
     return pyCall(() => materialize(
         bridge, native.invoke(bridge._dom, fnHandle, args)));
   }
-  /* Mapping membership / keys — prefer __contains__ / keys() so Object.keys
-   * and `in` match iteration, not the empty function target. */
-  function pyContains(prop) {
+  function pyGetItem(prop) {
+    return pyInvoke(unwrapArg(pyGetAttr('__getitem__')), [prop]);
+  }
+  function isMapping() {
+    if (mappingFlag !== undefined) return mappingFlag;
     try {
-      const c = pyGetAttr('__contains__');
-      return !!pyInvoke(unwrapArg(c), [prop]);
+      pyGetAttr('keys');
+      pyGetAttr('__getitem__');
+      mappingFlag = true;
     } catch (e) {
-      try { pyGetAttr(prop); return true; }
-      catch (e2) { return false; }
+      mappingFlag = false;
+    }
+    return mappingFlag;
+  }
+  /* Mapping membership — __contains__; do not fall back to getattr (that
+   * would make methods look like keys). */
+  function pyContains(prop) {
+    if (!isMapping()) return false;
+    try {
+      return !!pyInvoke(unwrapArg(pyGetAttr('__contains__')), [prop]);
+    } catch (e) {
+      return false;
     }
   }
   function pyOwnKeys() {
+    if (!isMapping()) return [];
     try {
       const keysFn = pyGetAttr('keys');
       const view = pyInvoke(unwrapArg(keysFn), []);
@@ -180,22 +198,26 @@ function wrap(bridge, handle) {
       return [];
     }
   }
+  function readProp(prop) {
+    /* Keys win on mappings: {'get': 1} → 1, not the bound method.
+     * Methods: builtins.getattr (documented escape hatch). */
+    if (isMapping() && pyContains(prop)) return pyGetItem(prop);
+    return pyGetAttr(prop);
+  }
+  function materializeStrict() {
+    return pyCall(() => native.to_js(bridge._dom, handle));
+  }
 
   return new Proxy(target, {
     get(t, prop) {
       if (prop === HANDLE) return handle;
       if (prop === 'then') return undefined; // not a thenable
-      /* JSON.stringify looks up toJSON — refuse with a bridge message
-       * (not a Python AttributeError). No auto-toJSON that stringifies. */
-      if (prop === 'toJSON') {
-        return () => {
-          throw new Error(
-              'concurrent-c-python: proxy is not JSON; use String(p), ' +
-              'p.toJS(), or util.inspect(p)');
-        };
+      /* One materializer: toJSON === toJS (strict JSON-safe deep copy). */
+      if (prop === 'toJS' || prop === 'toJSON') {
+        return materializeStrict;
       }
       if (prop === Symbol.toPrimitive || prop === 'toString' ||
-          prop === 'toJS' || prop === inspectCustom) {
+          prop === inspectCustom) {
         return () => pyInvoke(bridge._str(), [handle]);
       }
       if (prop === 'toTypedArray') {
@@ -228,18 +250,7 @@ function wrap(bridge, handle) {
         cacheGen = bridge._attrCacheGen || 0;
       }
       if (attrCache.has(prop)) return attrCache.get(prop);
-      let v;
-      try {
-        v = pyGetAttr(prop);
-      } catch (e) {
-        /* Dict keys are not attributes — fall through to __getitem__. */
-        try {
-          const gi = pyGetAttr('__getitem__');
-          v = pyInvoke(unwrapArg(gi), [prop]);
-        } catch (e2) {
-          throw attachPyType(e);
-        }
-      }
+      const v = readProp(prop);
       /* Proxies are function-targets → typeof 'function', not 'object'. */
       if (v != null && v[HANDLE] &&
           (typeof v === 'object' || typeof v === 'function'))
@@ -254,38 +265,42 @@ function wrap(bridge, handle) {
     ownKeys(t) {
       /* Function targets require length/name/prototype in ownKeys. */
       const base = Reflect.ownKeys(t);
-      const keys = pyOwnKeys();
-      for (let i = 0; i < keys.length; i++) {
-        if (base.indexOf(keys[i]) < 0) base.push(keys[i]);
+      keysSnap = pyOwnKeys();
+      for (let i = 0; i < keysSnap.length; i++) {
+        if (base.indexOf(keysSnap[i]) < 0) base.push(keysSnap[i]);
       }
       return base;
     },
     getOwnPropertyDescriptor(t, prop) {
-      if (prop === 'length' || prop === 'name' || prop === 'prototype')
+      if (prop === 'length' || prop === 'name' || prop === 'prototype' ||
+          prop === inspectCustom)
         return Reflect.getOwnPropertyDescriptor(t, prop);
       if (typeof prop !== 'string')
         return Reflect.getOwnPropertyDescriptor(t, prop);
-      if (!pyContains(prop)) return undefined;
-      /* Include a real value so `{...proxy}` / assign see contents. */
-      let v;
-      try {
-        v = pyGetAttr(prop);
-      } catch (e) {
-        try {
-          v = pyInvoke(unwrapArg(pyGetAttr('__getitem__')), [prop]);
-        } catch (e2) {
-          return undefined;
-        }
-      }
+      const keys = keysSnap || pyOwnKeys();
+      if (keys.indexOf(prop) < 0 && !pyContains(prop)) return undefined;
+      /* Accessor: values come from [[Get]] (spread/assign); no eager
+       * materialize on Object.keys. */
       return {
         configurable: true,
         enumerable: true,
-        writable: true,
-        value: v,
+        get() { return readProp(prop); },
+        set(v) {
+          keysSnap = null;
+          attrCache.delete(prop);
+          try {
+            pyCall(() => native.setattr(
+                bridge._dom, handle, prop, prepareArg(bridge, v)));
+          } catch (e) {
+            const si = pyGetAttr('__setitem__');
+            pyInvoke(unwrapArg(si), [prop, prepareArg(bridge, v)]);
+          }
+        },
       };
     },
     set(t, prop, value) {
       if (typeof prop !== 'string') return false;
+      keysSnap = null;
       try {
         pyCall(() => native.setattr(
             bridge._dom, handle, prop, prepareArg(bridge, value)));
@@ -493,17 +508,17 @@ function rwrap(bridge, h, chain) {
           .then((r) => bridge._materialize(r),
                 (e) => { throw attachPyType(e); });
       }
-      if (prop === 'toJSON') {
-        return () => {
-          throw new Error(
-              'concurrent-c-python: proxy is not JSON; await String / ' +
-              'toJS / util.inspect on isolated handles');
-        };
-      }
       if (prop === Symbol.toPrimitive || prop === 'toString')
         return () => '[cc-python remote ' + h +
                      (chain.length ? '.' + chain.join('.') : '') + ']';
-      if (prop === 'toJS' || prop === inspectCustom) {
+      if (prop === 'toJS' || prop === 'toJSON') {
+        return () => bridge._req({ op: 'tojs', h, path: chain })
+          .then((r) => {
+            if (r && r.v !== undefined) return bridge._decode(r.v);
+            return bridge._materialize(r);
+          }, (e) => { throw attachPyType(e); });
+      }
+      if (prop === inspectCustom) {
         return () => bridge._req({ op: 'str', h, path: chain })
           .then((r) => r.v, (e) => { throw attachPyType(e); });
       }
@@ -984,16 +999,16 @@ function rlazy(bridge, pending, chain) {
           bridge._req({ op: 'ta', h: r.h, path: chain })
             .then((x) => bridge._materialize(x)));
       }
-      if (prop === 'toJSON') {
-        return () => {
-          throw new Error(
-              'concurrent-c-python: proxy is not JSON; await String / ' +
-              'toJS / util.inspect on isolated handles');
-        };
-      }
       if (prop === Symbol.toPrimitive || prop === 'toString')
         return () => '[cc-python remote .' + chain.join('.') + ']';
-      if (prop === 'toJS' || prop === inspectCustom) {
+      if (prop === 'toJS' || prop === 'toJSON') {
+        return () => pending.then((r) =>
+          bridge._req({ op: 'tojs', h: r.h, path: chain }).then((x) => {
+            if (x && x.v !== undefined) return bridge._decode(x.v);
+            return bridge._materialize(x);
+          }));
+      }
+      if (prop === inspectCustom) {
         return () => pending.then((r) =>
           bridge._req({ op: 'str', h: r.h, path: chain }).then((x) => x.v));
       }

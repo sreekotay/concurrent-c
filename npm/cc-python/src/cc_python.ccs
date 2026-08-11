@@ -2725,6 +2725,434 @@ static int ccpy__arg_from_js(CcPyDom *d, void *env, void *v, CCPyArg *out,
     return -1;
 }
 
+/* ---- strict toJS: one-crossing deep materialize -------------------- */
+
+#define CCPY__TOJS_MAX_DEPTH 64
+#define CCPY__TOJS_PATH_CAP  384
+
+typedef struct {
+    char path[CCPY__TOJS_PATH_CAP];
+    size_t plen;
+    void *stack[CCPY__TOJS_MAX_DEPTH];
+    int depth;
+} CcpyToJsCtx;
+
+static void ccpy__tojs_path_set_root(CcpyToJsCtx *c) {
+    c->path[0] = '$';
+    c->path[1] = 0;
+    c->plen = 1;
+    c->depth = 0;
+}
+
+static size_t ccpy__tojs_path_mark(CcpyToJsCtx *c) { return c->plen; }
+
+static void ccpy__tojs_path_reset(CcpyToJsCtx *c, size_t mark) {
+    c->plen = mark;
+    c->path[mark] = 0;
+}
+
+static void ccpy__tojs_path_push_key(CcpyToJsCtx *c, const char *k, size_t kn) {
+    size_t i, need;
+    int bracket = 0;
+    if (!k) return;
+    for (i = 0; i < kn; i++) {
+        char ch = k[i];
+        if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+              (ch >= '0' && ch <= '9') || ch == '_' || ch == '$')) {
+            bracket = 1;
+            break;
+        }
+        if (i == 0 && (ch >= '0' && ch <= '9')) bracket = 1;
+    }
+    if (!bracket) {
+        need = c->plen + 1 + kn + 1;
+        if (need > CCPY__TOJS_PATH_CAP) return;
+        c->path[c->plen++] = '.';
+        memcpy(c->path + c->plen, k, kn);
+        c->plen += kn;
+        c->path[c->plen] = 0;
+        return;
+    }
+    need = c->plen + 2 + kn + 2;
+    if (need > CCPY__TOJS_PATH_CAP) return;
+    c->path[c->plen++] = '[';
+    c->path[c->plen++] = '"';
+    memcpy(c->path + c->plen, k, kn);
+    c->plen += kn;
+    c->path[c->plen++] = '"';
+    c->path[c->plen++] = ']';
+    c->path[c->plen] = 0;
+}
+
+static void ccpy__tojs_path_push_idx(CcpyToJsCtx *c, long long idx) {
+    char tmp[32];
+    int n = snprintf(tmp, sizeof(tmp), "[%lld]", idx);
+    if (n <= 0 || c->plen + (size_t)n + 1 > CCPY__TOJS_PATH_CAP) return;
+    memcpy(c->path + c->plen, tmp, (size_t)n);
+    c->plen += (size_t)n;
+    c->path[c->plen] = 0;
+}
+
+static int ccpy__tojs_type_name(void *o, char *buf, size_t cap) {
+    void *cls, *nm;
+    const char *s;
+    intptr_t n = 0;
+    if (!o || !buf || cap < 2) return -1;
+    buf[0] = 0;
+    cls = cc__py.GetAttrString(o, "__class__");
+    if (!cls) {
+        if (cc__py.ErrClear) cc__py.ErrClear();
+        return -1;
+    }
+    nm = cc__py.GetAttrString(cls, "__name__");
+    cc__py.DecRef(cls);
+    if (!nm) {
+        if (cc__py.ErrClear) cc__py.ErrClear();
+        return -1;
+    }
+    s = cc__py.AsUTF8AndSize(nm, &n);
+    if (!s || n <= 0) {
+        cc__py.DecRef(nm);
+        if (cc__py.ErrClear) cc__py.ErrClear();
+        return -1;
+    }
+    if ((size_t)n + 1 > cap) n = (intptr_t)cap - 1;
+    memcpy(buf, s, (size_t)n);
+    buf[n] = 0;
+    cc__py.DecRef(nm);
+    return 0;
+}
+
+static int ccpy__tojs_refuse(CcpyToJsCtx *c, const char *tn, const char *hint) {
+    if (hint && hint[0])
+        snprintf(ccpy__errbuf, sizeof(ccpy__errbuf),
+                 "cc-python: toJS: cannot materialize %s at %s — %s",
+                 tn && tn[0] ? tn : "object", c->path, hint);
+    else
+        snprintf(ccpy__errbuf, sizeof(ccpy__errbuf),
+                 "cc-python: toJS: cannot materialize %s at %s",
+                 tn && tn[0] ? tn : "object", c->path);
+    return -1;
+}
+
+/* Borrowed o → JS scalar, or 1 if not a scalar (no error). -1 on OOM. */
+static int ccpy__tojs_scalar(CcPyDom *d, void *env, void *o, void **out) {
+    {
+        void *t = cc__py.BoolFromLong(1);
+        void *f = cc__py.BoolFromLong(0);
+        int is_t = (o == t), is_f = (o == f);
+        if (t) cc__py.DecRef(t);
+        if (f) cc__py.DecRef(f);
+        if (is_t || is_f) return cc__js.GetBoolean(env, is_t, out);
+    }
+    /* None → JSON null (stringify-safe); not undefined. */
+    if (d->none && o == d->none) {
+        if (!cc__js.GetNull) return -1;
+        return cc__js.GetNull(env, out);
+    }
+    {
+        intptr_t n = 0;
+        const char *s = cc__py.AsUTF8AndSize(o, &n);
+        if (s) return cc__js.CreateStringUtf8(env, s, (size_t)n, out);
+        if (cc__py.ErrClear) cc__py.ErrClear();
+    }
+    {
+        CCPyObj tmp;
+        CCResult_int64_t_CCPyError iv;
+        tmp.o = o;
+        tmp.home = &d->py;
+        iv = cc_py_obj_as_i64(&tmp);
+        if (iv.ok) {
+            void *v = cc__js_out_ll(env, (long long)iv.u.value);
+            if (!v) return -1;
+            *out = v;
+            return 0;
+        }
+        if (cc__py.ErrClear) cc__py.ErrClear();
+    }
+    if (ccpy__is_py_int(o)) {
+        void *v = NULL;
+        if (ccpy__py_int_to_js(env, o, &v) != 0 || !v) return -1;
+        *out = v;
+        return 0;
+    }
+    {
+        CCPyObj tmp;
+        CCResult_double_CCPyError fv;
+        tmp.o = o;
+        tmp.home = &d->py;
+        fv = cc_py_obj_as_f64(&tmp);
+        if (fv.ok) return cc__js.CreateDouble(env, fv.u.value, out);
+        if (cc__py.ErrClear) cc__py.ErrClear();
+    }
+    return 1; /* not a scalar */
+}
+
+static int ccpy__deep_to_js(CcPyDom *d, void *env, void *o, CcpyToJsCtx *c,
+                            void **out);
+
+static int ccpy__tojs_mapping(CcPyDom *d, void *env, void *o, CcpyToJsCtx *c,
+                              void **out) {
+    void *items = NULL;
+    intptr_t n, i;
+    void *obj = NULL;
+    char tn[64];
+    /* Strict: only dict — not UserDict / OrderedDict / other mappings. */
+    if (ccpy__tojs_type_name(o, tn, sizeof(tn)) != 0) tn[0] = 0;
+    if (strcmp(tn, "dict") != 0) return 1;
+    if (!cc__py.MappingItems || !cc__js.CreateObject ||
+        !cc__js.SetNamedProperty)
+        return ccpy__tojs_refuse(c, "dict", "runtime lacks mapping APIs");
+    items = cc__py.MappingItems(o);
+    if (!items) {
+        if (cc__py.ErrClear) cc__py.ErrClear();
+        return 1; /* not a mapping */
+    }
+    n = cc__py.SequenceSize ? cc__py.SequenceSize(items) : -1;
+    if (n < 0) {
+        cc__py.DecRef(items);
+        if (cc__py.ErrClear) cc__py.ErrClear();
+        return 1;
+    }
+    if (cc__js.CreateObject(env, &obj) != 0 || !obj) {
+        cc__py.DecRef(items);
+        snprintf(ccpy__errbuf, sizeof(ccpy__errbuf),
+                 "cc-python: toJS: cannot create object at %s", c->path);
+        return -1;
+    }
+    for (i = 0; i < n; i++) {
+        void *pair;
+        void *kobj;
+        void *vobj;
+        void *jv;
+        char kbuf[256];
+        const char *ks;
+        intptr_t kn;
+        size_t mark;
+        pair = cc__py.SequenceGetItem(items, i);
+        kobj = NULL;
+        vobj = NULL;
+        jv = NULL;
+        ks = NULL;
+        kn = 0;
+        if (!pair) {
+            if (cc__py.ErrClear) cc__py.ErrClear();
+            cc__py.DecRef(items);
+            return ccpy__tojs_refuse(c, "dict", "broken items()");
+        }
+        kobj = cc__py.SequenceGetItem(pair, 0);
+        vobj = cc__py.SequenceGetItem(pair, 1);
+        cc__py.DecRef(pair);
+        if (!kobj || !vobj) {
+            if (kobj) cc__py.DecRef(kobj);
+            if (vobj) cc__py.DecRef(vobj);
+            cc__py.DecRef(items);
+            return ccpy__tojs_refuse(c, "dict", "broken items() pair");
+        }
+        /* bool is an int subclass — refuse (no silent True→"1"). */
+        {
+            void *t = cc__py.BoolFromLong(1);
+            void *f = cc__py.BoolFromLong(0);
+            int is_bool = (kobj == t || kobj == f);
+            if (t) cc__py.DecRef(t);
+            if (f) cc__py.DecRef(f);
+            if (is_bool) {
+                cc__py.DecRef(kobj);
+                cc__py.DecRef(vobj);
+                cc__py.DecRef(items);
+                return ccpy__tojs_refuse(c, "bool",
+                                        "dict keys must be str or int");
+            }
+        }
+        ks = cc__py.AsUTF8AndSize(kobj, &kn);
+        if (!ks) {
+            if (cc__py.ErrClear) cc__py.ErrClear();
+            /* Int keys → decimal string (JS object key). */
+            {
+                CCPyObj tmp;
+                CCResult_int64_t_CCPyError iv;
+                tmp.o = kobj;
+                tmp.home = &d->py;
+                iv = cc_py_obj_as_i64(&tmp);
+                if (iv.ok) {
+                    kn = (intptr_t)snprintf(kbuf, sizeof(kbuf), "%lld",
+                                            (long long)iv.u.value);
+                    ks = kbuf;
+                } else if (ccpy__is_py_int(kobj)) {
+                    /* Big int key — still stringify via Python str. */
+                    void *s = cc__py.Str ? cc__py.Str(kobj) : NULL;
+                    if (s) {
+                        ks = cc__py.AsUTF8AndSize(s, &kn);
+                        if (ks && kn > 0 && (size_t)kn < sizeof(kbuf)) {
+                            memcpy(kbuf, ks, (size_t)kn);
+                            kbuf[kn] = 0;
+                            ks = kbuf;
+                        } else
+                            ks = NULL;
+                        cc__py.DecRef(s);
+                    }
+                    if (cc__py.ErrClear) cc__py.ErrClear();
+                } else if (cc__py.ErrClear)
+                    cc__py.ErrClear();
+            }
+        } else if (kn > 0 && (size_t)kn < sizeof(kbuf)) {
+            memcpy(kbuf, ks, (size_t)kn);
+            kbuf[kn] = 0;
+            ks = kbuf;
+        }
+        if (!ks) {
+            char tn[64];
+            ccpy__tojs_type_name(kobj, tn, sizeof(tn));
+            cc__py.DecRef(kobj);
+            cc__py.DecRef(vobj);
+            cc__py.DecRef(items);
+            return ccpy__tojs_refuse(c, tn[0] ? tn : "key",
+                                    "dict keys must be str or int");
+        }
+        mark = ccpy__tojs_path_mark(c);
+        ccpy__tojs_path_push_key(c, ks, (size_t)kn);
+        if (ccpy__deep_to_js(d, env, vobj, c, &jv) != 0) {
+            cc__py.DecRef(kobj);
+            cc__py.DecRef(vobj);
+            cc__py.DecRef(items);
+            return -1;
+        }
+        ccpy__tojs_path_reset(c, mark);
+        if (cc__js.SetNamedProperty(env, obj, ks, jv) != 0) {
+            cc__py.DecRef(kobj);
+            cc__py.DecRef(vobj);
+            cc__py.DecRef(items);
+            snprintf(ccpy__errbuf, sizeof(ccpy__errbuf),
+                     "cc-python: toJS: cannot set key at %s", c->path);
+            return -1;
+        }
+        cc__py.DecRef(kobj);
+        cc__py.DecRef(vobj);
+    }
+    cc__py.DecRef(items);
+    *out = obj;
+    return 0;
+}
+
+static int ccpy__tojs_sequence(CcPyDom *d, void *env, void *o, CcpyToJsCtx *c,
+                               void **out) {
+    char tn[64];
+    intptr_t n, i;
+    void *arr = NULL;
+    if (ccpy__tojs_type_name(o, tn, sizeof(tn)) != 0) tn[0] = 0;
+    if (strcmp(tn, "list") != 0 && strcmp(tn, "tuple") != 0) return 1;
+    if (!cc__py.SequenceSize || !cc__py.SequenceGetItem || !cc__js.CreateArray ||
+        !cc__js.SetElement)
+        return ccpy__tojs_refuse(c, tn, "runtime lacks sequence APIs");
+    n = cc__py.SequenceSize(o);
+    if (n < 0) {
+        if (cc__py.ErrClear) cc__py.ErrClear();
+        return 1;
+    }
+    if (cc__js.CreateArray(env, (size_t)n, &arr) != 0 || !arr) {
+        snprintf(ccpy__errbuf, sizeof(ccpy__errbuf),
+                 "cc-python: toJS: cannot create array at %s", c->path);
+        return -1;
+    }
+    for (i = 0; i < n; i++) {
+        void *item = cc__py.SequenceGetItem(o, i);
+        void *jv = NULL;
+        size_t mark;
+        if (!item) {
+            if (cc__py.ErrClear) cc__py.ErrClear();
+            return ccpy__tojs_refuse(c, tn, "broken sequence item");
+        }
+        mark = ccpy__tojs_path_mark(c);
+        ccpy__tojs_path_push_idx(c, (long long)i);
+        if (ccpy__deep_to_js(d, env, item, c, &jv) != 0) {
+            cc__py.DecRef(item);
+            return -1;
+        }
+        ccpy__tojs_path_reset(c, mark);
+        if (cc__js.SetElement(env, arr, (uint32_t)i, jv) != 0) {
+            cc__py.DecRef(item);
+            snprintf(ccpy__errbuf, sizeof(ccpy__errbuf),
+                     "cc-python: toJS: cannot set element at %s", c->path);
+            return -1;
+        }
+        cc__py.DecRef(item);
+    }
+    *out = arr;
+    return 0;
+}
+
+static int ccpy__deep_to_js(CcPyDom *d, void *env, void *o, CcpyToJsCtx *c,
+                            void **out) {
+    int rc, i;
+    char tn[64];
+    if (!o) return ccpy__tojs_refuse(c, "NoneType", NULL);
+    for (i = 0; i < c->depth; i++) {
+        if (c->stack[i] == o)
+            return ccpy__tojs_refuse(c, "object",
+                                    "cycle detected (circular reference)");
+    }
+    /* Containers before scalars: a mapping/sequence must not be misread
+     * as a scalar (as_i64/as_f64 on some types can spuriously succeed). */
+    if (c->depth >= CCPY__TOJS_MAX_DEPTH)
+        return ccpy__tojs_refuse(c, "object", "nesting too deep");
+    c->stack[c->depth++] = o;
+    rc = ccpy__tojs_mapping(d, env, o, c, out);
+    if (rc <= 0) {
+        c->depth--;
+        return rc;
+    }
+    rc = ccpy__tojs_sequence(d, env, o, c, out);
+    if (rc <= 0) {
+        c->depth--;
+        return rc;
+    }
+    c->depth--;
+    rc = ccpy__tojs_scalar(d, env, o, out);
+    if (rc <= 0) return rc;
+    ccpy__tojs_type_name(o, tn, sizeof(tn));
+    if (strcmp(tn, "set") == 0 || strcmp(tn, "frozenset") == 0)
+        return ccpy__tojs_refuse(c, tn, "convert with list(...)");
+    if (strcmp(tn, "bytes") == 0 || strcmp(tn, "bytearray") == 0 ||
+        strcmp(tn, "memoryview") == 0)
+        return ccpy__tojs_refuse(c, tn,
+                                "use toTypedArray() or list(...) for bytes");
+    return ccpy__tojs_refuse(c, tn[0] ? tn : "object",
+                            "not a JSON-safe scalar, dict, list, or tuple");
+}
+
+static CCJsVal !>(CCError) CcPython_to_js(CcPython *self, CCJs *js, CCJsExt dom,
+                                          CCJsExt obj) {
+    CcPyDom *d = ccpy__dom(dom);
+    CcPyObjBox *b;
+    CcpyToJsCtx ctx;
+    void *out = NULL;
+    int rc;
+    (void)self;
+    if (!d) return cc_err(CC_ERR_INVALID_ARG, "cc-python: bridge is closed");
+    b = ccpy__objbox(d, obj);
+    if (!b)
+        return cc_err(CC_ERR_INVALID_ARG,
+                      "cc-python: handle is released or belongs to another "
+                      "bridge");
+    ccpy__tojs_path_set_root(&ctx);
+    ccpy__errbuf[0] = 0;
+    cc__py_attach(&d->py);
+    rc = ccpy__deep_to_js(d, js->env, b->obj.o, &ctx, &out);
+    /* Sync domains also drop the GIL between ops — holding it across
+     * napi/GC re-entry made deep materialize return a stale scalar. */
+    cc_py_thread_leave();
+    if (rc != 0 || !out)
+        return cc_err(CC_ERR_INVALID_ARG,
+                      ccpy__errbuf[0] ? ccpy__errbuf
+                                      : "cc-python: toJS failed");
+    {
+        CCJsVal jv = { 0 };
+        jv.env = js->env;
+        jv.v = out;
+        return cc_ok(jv);
+    }
+}
+
 /* Python result → JS value.  Scalars materialize (bool, str, int —
  * exact BigInt past 2^53, including the full u64 range and beyond —
  * float, None → undefined); anything else stays a held reference,

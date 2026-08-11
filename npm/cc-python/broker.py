@@ -13,6 +13,7 @@
 #      ("callp" adds "path":[...] and optional "kw":{name:enc,...} —
 #       keyword arguments, f(*args, **kw))
 #   -> {"op":"str","h":id}                 <- {"v":"..."}
+#   -> {"op":"tojs","h":id,"path":[...]}   <- {"v":strict-plain} | {"e":msg}
 #   -> {"op":"release","h":id}             <- {"v":n}   (remaining live)
 #   -> {"op":"stats"}                      <- {"v":n}
 #   -> {"op":"close"}                      <- {"v":true}, then exit
@@ -245,6 +246,69 @@ def _encode(v):
     return {'h': _put(v)}
 
 
+def _tojs_strict(v, path='$', stack=None):
+    """Strict JSON-safe materialize for toJS/toJSON — refuse with path."""
+    if stack is None:
+        stack = []
+    oid = id(v)
+    if oid in stack:
+        raise TypeError(
+            'cc-python: toJS: cannot materialize object at %s — '
+            'cycle detected (circular reference)' % path)
+    if isinstance(v, bool) or v is None or isinstance(v, str):
+        return v
+    if isinstance(v, int):
+        if -(2 ** 53) < v < 2 ** 53:
+            return v
+        return {'$bi': str(v)}
+    if isinstance(v, float):
+        if v == 0.0 and math.copysign(1.0, v) < 0:
+            return {'$nf': '-0'}
+        if not math.isfinite(v):
+            return {'$nf': 'inf' if v == math.inf
+                    else '-inf' if v == -math.inf else 'nan'}
+        return v
+    if isinstance(v, dict):
+        stack.append(oid)
+        try:
+            out = {}
+            for k, x in v.items():
+                if isinstance(k, str):
+                    ks = k
+                elif isinstance(k, int) and not isinstance(k, bool):
+                    ks = str(k)
+                else:
+                    raise TypeError(
+                        'cc-python: toJS: cannot materialize %s at %s — '
+                        'dict keys must be str or int'
+                        % (type(k).__name__, path))
+                child = path + ('.' + ks if ks.isidentifier()
+                                else '["%s"]' % ks)
+                out[ks] = _tojs_strict(x, child, stack)
+            return out
+        finally:
+            stack.pop()
+    if isinstance(v, (list, tuple)):
+        stack.append(oid)
+        try:
+            return [_tojs_strict(x, '%s[%d]' % (path, i), stack)
+                    for i, x in enumerate(v)]
+        finally:
+            stack.pop()
+    tn = type(v).__name__
+    if tn in ('set', 'frozenset'):
+        raise TypeError(
+            'cc-python: toJS: cannot materialize %s at %s — '
+            'convert with list(...)' % (tn, path))
+    if tn in ('bytes', 'bytearray', 'memoryview'):
+        raise TypeError(
+            'cc-python: toJS: cannot materialize %s at %s — '
+            'use toTypedArray() or list(...) for bytes' % (tn, path))
+    raise TypeError(
+        'cc-python: toJS: cannot materialize %s at %s — '
+        'not a JSON-safe scalar, dict, list, or tuple' % (tn, path))
+
+
 def _send(obj):
     _out.write(json.dumps(obj))
     _out.write('\n')
@@ -321,6 +385,11 @@ def _dispatch(req):
         return {'ta': key, 'b64': base64.b64encode(raw).decode('ascii')}
     if op == 'str':
         return {'v': str(_walk(req))}
+    if op == 'tojs':
+        try:
+            return {'v': _tojs_strict(_walk(req))}
+        except TypeError as e:
+            return {'e': str(e)}
     if op == 'release':
         _handles.pop(req['h'], None)
         return {'v': len(_handles)}

@@ -1771,6 +1771,284 @@ static int cc__py_in_cstr(const char **dst, void *o, const char *what) {
     return 0;
 }
 
+/* ---- typed slices (double[:] / float[:] / int[:] …) for module export ----
+ *
+ * Mirror of js.cch's CC__JS_TS_ARM: a contiguous buffer exporter whose
+ * element format matches (numpy ndarray, array.array, memoryview) borrows
+ * zero-copy and writable for the call; a list or mismatched dtype converts
+ * per element into call scratch.  Returns materialize a fresh typed
+ * memoryview over an owned copy (list fallback when the capsule/buffer
+ * APIs are absent). */
+#define CC__PY_TS_SCRATCH_SLOTS 16
+static CC_THREAD_LOCAL void *cc__py_ts_bufs[CC__PY_TS_SCRATCH_SLOTS];
+static CC_THREAD_LOCAL int cc__py_ts_nbufs;
+
+static void cc__py_ts_scratch_begin(void) {
+    int i;
+    for (i = 0; i < cc__py_ts_nbufs; i++) free(cc__py_ts_bufs[i]);
+    cc__py_ts_nbufs = 0;
+}
+
+static void *cc__py_ts_scratch(size_t n) {
+    void *p;
+    if (n == 0) n = 1;
+    if (cc__py_ts_nbufs >= CC__PY_TS_SCRATCH_SLOTS) return NULL;
+    p = malloc(n);
+    if (!p) return NULL;
+    cc__py_ts_bufs[cc__py_ts_nbufs++] = p;
+    return p;
+}
+
+static int cc__py_ts_format_ok(const char *fmt, int esz, int isf, int iss) {
+    char c;
+    if (!fmt || !fmt[0]) return 0;
+    {
+        const char *p = fmt;
+        if (*p == '@' || *p == '=') p++;
+        else if (*p == '<' || *p == '>' || *p == '!') return 0;
+        if (!p[0] || p[1]) return 0;
+        c = p[0];
+    }
+    if (isf) return (esz == 8 && c == 'd') || (esz == 4 && c == 'f');
+    if (iss) {
+        return (esz == 8 && (c == 'q' || c == 'l' || c == 'n')) ||
+               (esz == 4 && (c == 'i' || c == 'l')) ||
+               (esz == 2 && c == 'h') || (esz == 1 && c == 'b');
+    }
+    return (esz == 8 && (c == 'Q' || c == 'L')) ||
+           (esz == 4 && (c == 'I' || c == 'L')) ||
+           (esz == 2 && c == 'H') || (esz == 1 && c == 'B');
+}
+
+static int cc__py_ts_store_elem(void *item, void *dst, int esz, int isf,
+                                int iss) {
+    if (isf) {
+        double d = cc__py.FloatAsDouble(item);
+        if (d == -1.0 && cc__py.ErrOccurred()) return -1;
+        if (esz == 4) *(float *)dst = (float)d;
+        else *(double *)dst = d;
+        return 0;
+    }
+    if (iss) {
+        long long v = cc__py.LongAsLongLong(item);
+        if (v == -1 && cc__py.ErrOccurred()) return -1;
+        if (esz == 8) *(long long *)dst = v;
+        else if (esz == 4) {
+            if (v < (long long)INT_MIN || v > (long long)INT_MAX) return -2;
+            *(int *)dst = (int)v;
+        } else if (esz == 2) {
+            if (v < -32768 || v > 32767) return -2;
+            *(short *)dst = (short)v;
+        } else {
+            if (v < -128 || v > 127) return -2;
+            *(signed char *)dst = (signed char)v;
+        }
+        return 0;
+    }
+    {
+        unsigned long long v = cc__py.LongAsUnsignedLongLong(item);
+        if (v == (unsigned long long)-1 && cc__py.ErrOccurred()) return -1;
+        if (esz == 8) *(unsigned long long *)dst = v;
+        else if (esz == 4) {
+            if (v > UINT_MAX) return -2;
+            *(unsigned int *)dst = (unsigned int)v;
+        } else if (esz == 2) {
+            if (v > 65535u) return -2;
+            *(unsigned short *)dst = (unsigned short)v;
+        } else {
+            if (v > 255u) return -2;
+            *(unsigned char *)dst = (unsigned char)v;
+        }
+        return 0;
+    }
+}
+
+/* Borrow matching buffer, else convert sequence into call scratch. */
+static int cc__py_inq_tslice(void *o, CCSlice *out, int esz, int isf, int iss) {
+    CC__PyBuffer view;
+    intptr_t n, i;
+    unsigned char *buf;
+    if (!o || !out || esz <= 0) return -1;
+    if (cc__py.GetBuffer && cc__py.ReleaseBuffer) {
+        memset(&view, 0, sizeof(view));
+        if (cc__py.GetBuffer(o, &view, CC__PYBUF_CONTIG_FMT) == 0) {
+            if (view.ndim == 1 && view.itemsize == (intptr_t)esz &&
+                cc__py_ts_format_ok(view.format, esz, isf, iss) &&
+                view.len >= 0 && view.itemsize &&
+                (view.len % view.itemsize) == 0) {
+                size_t count = (size_t)view.len / (size_t)esz;
+                *out = cc_slice_from_buffer(view.buf, count);
+                cc__py.ReleaseBuffer(&view);
+                return 0; /* writable borrow while `o` stays alive */
+            }
+            cc__py.ReleaseBuffer(&view);
+        } else if (cc__py.ErrClear) {
+            cc__py.ErrClear();
+        }
+    }
+    if (!cc__py.SequenceSize || !cc__py.SequenceGetItem) return -1;
+    n = cc__py.SequenceSize(o);
+    if (n < 0) {
+        if (cc__py.ErrClear) cc__py.ErrClear();
+        return -1;
+    }
+    if ((size_t)n > (size_t)-1 / (size_t)esz) return -1;
+    buf = (unsigned char *)cc__py_ts_scratch((size_t)n * (size_t)esz);
+    if (!buf) return -1;
+    for (i = 0; i < n; i++) {
+        void *item = cc__py.SequenceGetItem(o, i);
+        int rc;
+        if (!item) {
+            if (cc__py.ErrClear) cc__py.ErrClear();
+            return -1;
+        }
+        rc = cc__py_ts_store_elem(item, buf + (size_t)i * (size_t)esz, esz, isf,
+                                  iss);
+        cc__py.DecRef(item);
+        if (rc != 0) {
+            if (cc__py.ErrClear) cc__py.ErrClear();
+            return rc;
+        }
+    }
+    *out = cc_slice_from_buffer(buf, (size_t)n);
+    return 0;
+}
+
+typedef struct CC__PyTsliceOwned {
+    intptr_t shape;
+    char fmt[2];
+    /* element bytes follow */
+} CC__PyTsliceOwned;
+
+static void cc__py_tslice_cap_dtor(void *capsule) {
+    void *p = cc__py.CapsuleGetPointer
+                  ? cc__py.CapsuleGetPointer(capsule, "cc.tslice")
+                  : NULL;
+    free(p);
+}
+
+static void *cc__py_out_tslice_list(CCSlice s, int esz, int isf, int iss) {
+    void *list;
+    size_t i;
+    const unsigned char *base = (const unsigned char *)s.ptr;
+    list = cc__py.ListNew((intptr_t)s.len);
+    if (!list) return NULL;
+    for (i = 0; i < s.len; i++) {
+        const void *e = base ? base + i * (size_t)esz : NULL;
+        void *ev = NULL;
+        if (!e) {
+            cc__py.DecRef(list);
+            return NULL;
+        }
+        if (isf) {
+            ev = cc__py.FloatFromDouble(esz == 4 ? (double)*(const float *)e
+                                                 : *(const double *)e);
+        } else if (iss) {
+            long long x = esz == 1   ? (long long)*(const signed char *)e
+                          : esz == 2 ? (long long)*(const short *)e
+                          : esz == 4 ? (long long)*(const int *)e
+                                     : *(const long long *)e;
+            ev = cc__py.LongFromLongLong(x);
+        } else {
+            unsigned long long x =
+                esz == 1   ? (unsigned long long)*(const unsigned char *)e
+                : esz == 2 ? (unsigned long long)*(const unsigned short *)e
+                : esz == 4 ? (unsigned long long)*(const unsigned int *)e
+                           : *(const unsigned long long *)e;
+            ev = cc__py.LongFromUnsignedLongLong(x);
+        }
+        if (!ev || cc__py.ListSetItem(list, (intptr_t)i, ev) != 0) {
+            cc__py.DecRef(list);
+            return NULL;
+        }
+    }
+    return list;
+}
+
+/* Fresh typed memoryview over an owned copy — numpy.asarray wraps it. */
+static void *cc__py_out_tslice(CCSlice s, int esz, int isf, int iss) {
+    size_t bytes = s.len * (size_t)esz;
+    CC__PyTsliceOwned *own = NULL;
+    void *cap = NULL;
+    void *mv = NULL;
+    CC__PyBuffer pb;
+    char fmtc;
+    if (esz <= 0) return NULL;
+    fmtc = isf ? (esz == 4 ? 'f' : 'd')
+               : esz == 1 ? (iss ? 'b' : 'B')
+               : esz == 2 ? (iss ? 'h' : 'H')
+               : esz == 4 ? (iss ? 'i' : 'I')
+                          : (iss ? 'q' : 'Q');
+    if (cc__py.MemoryViewFromBuffer && cc__py.CapsuleNew &&
+        cc__py.CapsuleGetPointer) {
+        own = (CC__PyTsliceOwned *)malloc(sizeof(*own) + bytes);
+        if (!own && bytes) return NULL;
+        if (!own) {
+            /* empty: still need a header for shape/format */
+            own = (CC__PyTsliceOwned *)malloc(sizeof(*own));
+            if (!own) return NULL;
+        }
+        own->shape = (intptr_t)s.len;
+        own->fmt[0] = fmtc;
+        own->fmt[1] = 0;
+        if (bytes && s.ptr) memcpy(own + 1, s.ptr, bytes);
+        else if (bytes) memset(own + 1, 0, bytes);
+        cap = cc__py.CapsuleNew(own, "cc.tslice",
+                                (void *)cc__py_tslice_cap_dtor);
+        if (!cap) {
+            free(own);
+            return NULL;
+        }
+        memset(&pb, 0, sizeof(pb));
+        pb.buf = bytes ? (void *)(own + 1) : (void *)own;
+        pb.obj = cap;
+        pb.len = (intptr_t)bytes;
+        pb.itemsize = esz;
+        pb.readonly = 0;
+        pb.ndim = 1;
+        pb.format = own->fmt;
+        pb.shape = &own->shape;
+        mv = cc__py.MemoryViewFromBuffer(&pb);
+        if (!mv) {
+            cc__py.DecRef(cap);
+            if (cc__py.ErrClear) cc__py.ErrClear();
+            return cc__py_out_tslice_list(s, esz, isf, iss);
+        }
+        return mv;
+    }
+    return cc__py_out_tslice_list(s, esz, isf, iss);
+}
+
+#define CC__PY_TS_ARM(NAME, T)                                                 \
+    static int cc__py_in_ts_##NAME(NAME *dst, void *o, const char *what) {     \
+        int rc = cc__py_inq_tslice(o, &dst->base, (int)sizeof(T),              \
+                                   _Generic((T)0, float: 1, double: 1,          \
+                                            default: 0),                        \
+                                   (((T)-1) < ((T)1) ? 1 : 0));                 \
+        if (rc == 0) return 0;                                                 \
+        return cc__py_in_fail("TypeError", what,                               \
+                              rc == -2 ? "sequence elements in range"          \
+                                       : "a 1-D buffer or sequence of "        \
+                                         "matching elements");                 \
+    }                                                                          \
+    static void *cc__py_out_ts_##NAME(NAME v) {                                \
+        return cc__py_out_tslice(v.base, (int)sizeof(T),                       \
+                                 _Generic((T)0, float: 1, double: 1,            \
+                                          default: 0),                         \
+                                 (((T)-1) < ((T)1) ? 1 : 0));                  \
+    }
+
+CC__PY_TS_ARM(CCSlice_short, short)
+CC__PY_TS_ARM(CCSlice_int, int)
+CC__PY_TS_ARM(CCSlice_long, long)
+CC__PY_TS_ARM(CCSlice_long_long, long long)
+CC__PY_TS_ARM(CCSlice_int16_t, int16_t)
+CC__PY_TS_ARM(CCSlice_int32_t, int32_t)
+CC__PY_TS_ARM(CCSlice_int64_t, int64_t)
+CC__PY_TS_ARM(CCSlice_float, float)
+CC__PY_TS_ARM(CCSlice_double, double)
+#undef CC__PY_TS_ARM
+
 /* A `_Generic` selection is an integer constant expression, so "does this type
  * convert" is decidable in a constant context — which is where the diagnostic
  * belongs.  A bare `default:` arm is not enough: passing an incompatible
@@ -1790,6 +2068,15 @@ static int cc__py_in_cstr(const char **dst, void *o, const char *what) {
         float *: 1,                                         \
         _Bool *: 1,                                         \
         CCSlice *: 1,                                       \
+        CCSlice_short *: 1,                                 \
+        CCSlice_int *: 1,                                   \
+        CCSlice_long *: 1,                                  \
+        CCSlice_long_long *: 1,                             \
+        CCSlice_int16_t *: 1,                               \
+        CCSlice_int32_t *: 1,                               \
+        CCSlice_int64_t *: 1,                               \
+        CCSlice_float *: 1,                                 \
+        CCSlice_double *: 1,                                \
         CCPyStr *: 1,                                       \
         const char **: 1,                                   \
         char **: 1,                                         \
@@ -1817,6 +2104,15 @@ extern int cc__py_in_unsupported(
         float *: cc__py_in_float,                           \
         _Bool *: cc__py_in_bool,                            \
         CCSlice *: cc__py_in_slice,                         \
+        CCSlice_short *: cc__py_in_ts_CCSlice_short,        \
+        CCSlice_int *: cc__py_in_ts_CCSlice_int,            \
+        CCSlice_long *: cc__py_in_ts_CCSlice_long,          \
+        CCSlice_long_long *: cc__py_in_ts_CCSlice_long_long,\
+        CCSlice_int16_t *: cc__py_in_ts_CCSlice_int16_t,    \
+        CCSlice_int32_t *: cc__py_in_ts_CCSlice_int32_t,    \
+        CCSlice_int64_t *: cc__py_in_ts_CCSlice_int64_t,    \
+        CCSlice_float *: cc__py_in_ts_CCSlice_float,        \
+        CCSlice_double *: cc__py_in_ts_CCSlice_double,      \
         CCPyStr *: cc__py_in_pystr,                         \
         const char **: cc__py_in_cstr,                      \
         char **: cc__py_in_cstr,                            \
@@ -1849,6 +2145,15 @@ static void *cc__py_out_cstr(const char *s) {
         float: 1,                                           \
         _Bool: 1,                                           \
         CCSlice: 1,                                         \
+        CCSlice_short: 1,                                   \
+        CCSlice_int: 1,                                     \
+        CCSlice_long: 1,                                    \
+        CCSlice_long_long: 1,                               \
+        CCSlice_int16_t: 1,                                 \
+        CCSlice_int32_t: 1,                                 \
+        CCSlice_int64_t: 1,                                 \
+        CCSlice_float: 1,                                   \
+        CCSlice_double: 1,                                  \
         const char *: 1,                                    \
         char *: 1,                                          \
         default: 0)
@@ -1871,6 +2176,15 @@ extern void *cc__py_out_unsupported(
         float: cc__py_out_dbl,                              \
         _Bool: cc__py_out_bool,                             \
         CCSlice: cc__py_out_slice,                          \
+        CCSlice_short: cc__py_out_ts_CCSlice_short,         \
+        CCSlice_int: cc__py_out_ts_CCSlice_int,             \
+        CCSlice_long: cc__py_out_ts_CCSlice_long,           \
+        CCSlice_long_long: cc__py_out_ts_CCSlice_long_long, \
+        CCSlice_int16_t: cc__py_out_ts_CCSlice_int16_t,     \
+        CCSlice_int32_t: cc__py_out_ts_CCSlice_int32_t,     \
+        CCSlice_int64_t: cc__py_out_ts_CCSlice_int64_t,     \
+        CCSlice_float: cc__py_out_ts_CCSlice_float,         \
+        CCSlice_double: cc__py_out_ts_CCSlice_double,       \
         const char *: cc__py_out_cstr,                      \
         char *: cc__py_out_cstr,                            \
         default: cc__py_out_unsupported)(v))
@@ -6285,7 +6599,8 @@ CC_DECL_RESULT_SPEC(${box}, ${rt}, ${er})
                                         intptr_t nargs__, void *kwnames__) {
                 ${arg(0)} *cc__st__ = (${arg(0)} *)cc__py.ModuleGetState(mod__);
                 if (!cc__st__) return cc__py_raise("cc: module state unavailable");
-                ${p0t} ${p0n} = ${p0ptr ? "cc__st__" : "*cc__st__"};`, arena), arena);
+                ${p0t} ${p0n} = ${p0ptr ? "cc__st__" : "*cc__st__"};
+                cc__py_ts_scratch_begin();`, arena), arena);
             }
             if (pn == 1) {
                 cc_string_push_slice(&s, @emit(`
@@ -6516,7 +6831,8 @@ CC_DECL_RESULT_SPEC(${box}, ${rt}, ${er})
                                         intptr_t nargs__, void *kwnames__) {
                 ${arg(0)} *cc__st__ = (${arg(0)} *)cc__py.ModuleGetState(mod__);
                 if (!cc__st__) return cc__py_raise("cc: module state unavailable");
-                ${p0t} ${p0n} = ${p0ptr ? "cc__st__" : "*cc__st__"};`, arena), arena);
+                ${p0t} ${p0n} = ${p0ptr ? "cc__st__" : "*cc__st__"};
+                cc__py_ts_scratch_begin();`, arena), arena);
             }
             if (pn == 1) {
                 cc_string_push_slice(&s, @emit(`

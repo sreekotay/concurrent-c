@@ -1,3 +1,9 @@
 twice 42
 half 2.5
 raised: half takes a non-negative value
+sum_array 6.5
+sum_list 6.5
+filled 9.0 9.0 9.0
+row memoryview [1.5, 2.5, 3.0]
+roundtrip 7.0
+badelem: argument `xs` expects a 1-D buffer or sequence of matching elements

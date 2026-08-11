@@ -15,7 +15,7 @@
  * means the seed below.  A fallible method's error crosses the boundary
  * as the Python exception its KIND maps to (CC_ERR_INVALID_ARG below
  * becomes ValueError), message intact.  An underscore member —
- * `Counter__clamp` reflects as `_clamp` — stays internal: wrap-and-
+ * `Counter__clamp` reflects as `_clamp` — is not exported: wrap-and-
  * export is the rename story, and the wrapper is one line. */
 #include <ccc/script/py.cch>
 

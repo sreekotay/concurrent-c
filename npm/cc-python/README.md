@@ -106,13 +106,17 @@ handles chain (`const fft = await np.fft.fft(buf); await np.abs(fft)`).
 ## Surface
 
 - Attribute chains are Python (`np.linalg.norm`). Scalars materialize;
-  everything else stays a proxy. `String(proxy)` → `str()`. Assignment
-  is `setattr` (mappings fall back to `__setitem__`). `Object.keys` /
-  `in` use mapping keys / `__contains__`. Bare `builtins.eval` /
-  `exec` (no globals dict) use the domain's `__main__` namespace —
-  same as isolated. `using py = create()` sync-disposes the domain.
-  Python exceptions expose `.pyType` (and `.code`) as the class name
-  (e.g. `KeyError`), not `CC_ERR_INTERNAL`.
+  everything else stays a proxy. `String(proxy)` / `util.inspect` →
+  `str()`. Assignment is `setattr` (mappings fall back to
+  `__setitem__`). On mappings, **keys win** over methods: `d.get` is
+  the value for key `"get"` when present — use `builtins.getattr` for
+  the method. `Object.keys` / `in` use mapping keys / `__contains__`;
+  `getOwnPropertyDescriptor` returns accessors (cheap reflection;
+  values pay on `[[Get]]`). Bare `builtins.eval` / `exec` (no globals
+  dict) use the domain's `__main__` namespace — same as isolated.
+  `using py = create()` sync-disposes the domain. Python exceptions
+  expose `.pyType` (and `.code`) as the class name (e.g. `KeyError`),
+  not `CC_ERR_INTERNAL`.
 
 - Typed-array args (`Float64`/`Float32`/`Int32`/`BigInt64`/`Uint8Array`
   and Node `Buffer`) are zero-copy memoryviews for the call — writable
@@ -129,10 +133,22 @@ handles chain (`const fft = await np.fft.fft(buf); await np.abs(fft)`).
   to `0`). Lone UTF-16 surrogates in strings are refused. Proxies are
   function-targets and iterable (`for…of` / `Symbol.iterator` →
   `__next__`). Exceptions with empty `str(exc)` still name the type.
-  Bridge doors (`then`, `toString` / `toJS` / `toTypedArray`) can shadow
-  Python names — use `builtins.getattr`. `JSON.stringify(proxy)` refuses
-  with a bridge message (no auto-`toJSON`); log with `String(p)`,
-  `p.toJS()`, or `util.inspect(p)`.
+  Bridge doors (`then`, `toString` / `toJS` / `toJSON` / `toTypedArray`)
+  can shadow Python names — use `builtins.getattr`.
+- **`toJS` / `toJSON` (one materializer).** Both run the same strict
+  one-crossing deep copy: JSON-safe scalars, `dict` / `list` / `tuple`
+  only. Int dict keys become string keys; cycles and unrepresentables
+  (`set`, `bytes`, callables, …) refuse with type + path
+  (`cannot materialize set at $.tags — convert with list(...)`) — never
+  `str()`-coerce.   In-process, `JSON.stringify(p)` and `JSON.stringify(p.toJS())`
+  agree (same sync function). Isolated `toJS`/`toJSON` are async —
+  `await p.toJS()` then stringify (bare `JSON.stringify(p)` will not
+  await). Cost: reflection (`Object.keys`) stays cheap; materialize
+  pays once. After materialize, host JSON rules apply: **`NaN` /
+  `±Infinity` stringify to `null`** (ECMA-262 — same as a plain
+  `{x: NaN}` in JS; scipy results often hit this). Exact `BigInt`
+  fields throw the native `TypeError` from `JSON.stringify` (no bridge
+  special-case).
 - Isolated is crash isolation, not a sandbox. Spill files: private 0700
   dir per bridge, removed on destroy.
 
