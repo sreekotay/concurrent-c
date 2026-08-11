@@ -9,7 +9,7 @@ Compiler suite metrics live separately in
 [`../compiler_baseline.txt`](../compiler_baseline.txt) (see
 [`../README.md`](../README.md#compiler-perf-baseline)).
 
-## Latest snapshots (2026-08-10; js_py_modules: 2026-08-09)
+## Latest snapshots (2026-08-11; most others: 2026-08-10; js_py_modules: 2026-08-09)
 
 | Surface | Latest | How to refresh |
 |---------|--------|----------------|
@@ -17,6 +17,7 @@ Compiler suite metrics live separately in
 | CC→Python `py_fn` callbacks | [`py_fn_baseline_20260810.txt`](py_fn_baseline_20260810.txt) | `./cc/bin/ccc run perf/py_fn_baseline.ccs` |
 | JS→CC `js_fn` callbacks | [`js_fn_baseline_20260810.txt`](js_fn_baseline_20260810.txt) | `./cc/bin/ccc run perf/js_fn_baseline.ccs` |
 | Node → CC module | [`js_baseline_node_20260810.txt`](js_baseline_node_20260810.txt) | `ccc build perf/js_baseline.ccs && node perf/js_baseline.js` |
+| `py_module` vs nanobind (func suite) | [`py_bind_micro_20260811.txt`](py_bind_micro_20260811.txt) | `python3 perf/py_bind_micro/run.py` (see [`../py_bind_micro/README.md`](../py_bind_micro/README.md)) |
 | Native modules (Node + Python hot path) | [`js_py_modules_20260809.txt`](js_py_modules_20260809.txt) | see [`docs/js-py-modules.md`](../../docs/js-py-modules.md) |
 | Node → numpy via `concurrent-c-python` | [`js_numpy_bridge_node_20260810.txt`](js_numpy_bridge_node_20260810.txt) | `node npm/cc-python/examples/js_numpy_bridge.js` |
 | Same, async lane | [`js_numpy_bridge_async_node_20260810.txt`](js_numpy_bridge_async_node_20260810.txt) | `node npm/cc-python/examples/js_numpy_bridge_async.js` |
@@ -84,6 +85,18 @@ Older dated files in this directory are history — keep them.
 ```bash
 ./cc/bin/ccc build perf/js_baseline.ccs
 node perf/js_baseline.js > perf/baselines/js_baseline_node_$(date +%Y%m%d).txt
+```
+
+**`py_module` vs nanobind** (`perf/py_bind_micro/`):
+
+```bash
+{ echo "# perf/py_bind_micro snapshot"; \
+  echo "# date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
+  echo "# host: $(uname -srm)"; \
+  echo "# cc:   $(git rev-parse --short HEAD)"; \
+  echo "#"; \
+  python3 perf/py_bind_micro/run.py; \
+} > perf/baselines/py_bind_micro_$(date +%Y%m%d).txt
 ```
 
 ## Reading them

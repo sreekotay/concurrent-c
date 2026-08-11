@@ -37,3 +37,17 @@ Needs `ccc` (repo `cc/bin/ccc`), `cmake`, and a writable tree. The harness creat
 - `RESULT func size_bytes {cc,nanobind}` — stripped artifact
 - `RESULT func runtime_ns_per_call {cc,nanobind,python}` — median ns/call
 - `*_ratio_cc_over_nb` — stable comparison; absolute ns moves with host load
+
+## Latest snapshot
+
+[`perf/baselines/py_bind_micro_20260811.txt`](../baselines/py_bind_micro_20260811.txt)
+(Darwin arm64, Python 3.14.6, nanobind 2.14.0, `ccc` @ `408e64ab`; 720 methods, median of 5 builds + 5×10M-call runs):
+
+| | Concurrent-C | nanobind | ratio (cc/nb) |
+|---|---:|---:|---:|
+| compile | 2.08 s | 4.73 s | 0.44× |
+| stripped size | 416 KB | 424 KB | 0.98× |
+| ns/call | 37.7 | 35.6 | 1.06× |
+| ns/call (pure Python control) | 101.6 | | |
+
+Judge by ratio drift across dated files; absolute ns/call moves with host load.

@@ -343,7 +343,8 @@ One day on a 4-vCPU x86-64 shared VM (node 22, python 3.11, numpy 2.5;
 [`perf/baselines/README.md`](../perf/baselines/README.md):
 [`js_py_modules_20260809.txt`](../perf/baselines/js_py_modules_20260809.txt),
 [`js_baseline_node_20260809.txt`](../perf/baselines/js_baseline_node_20260809.txt),
-[`py_baseline_20260809.txt`](../perf/baselines/py_baseline_20260809.txt).
+[`py_baseline_20260809.txt`](../perf/baselines/py_baseline_20260809.txt),
+[`py_bind_micro_20260811.txt`](../perf/baselines/py_bind_micro_20260811.txt).
 
 **Hosting** (CC owns main — Python packages in-process):
 
@@ -360,7 +361,8 @@ One day on a 4-vCPU x86-64 shared VM (node 22, python 3.11, numpy 2.5;
 | crossing | cost |
 |---|---|
 | Node → CC call | **40ns** |
-| Python → CC call | **68ns** |
+| Python → CC call | **68ns** ([`js_py_modules_20260809.txt`](../perf/baselines/js_py_modules_20260809.txt)) |
+| Python → CC `py_module` vs nanobind (720-method func suite) | **37.7ns** vs **35.6ns** (1.06×); compile 0.44×; size 0.98× — [`py_bind_micro_20260811.txt`](../perf/baselines/py_bind_micro_20260811.txt) |
 | Node → CC, 16-elem `Float64Array` zero-copy borrow + sum | 94ns |
 | Node → CC, 1M-elem slice sum | 1.3ms (memory-bound) |
 | artifact | 26KB `.node` / 35KB `.abi3.so` |
