@@ -1448,7 +1448,8 @@ static void thread_v2_run_fiber(int tid, fiber_v2* f) {
     }
 
     int raw_state = atomic_load_explicit(&f->state, memory_order_acquire);
-    if (f->yield_kind == V2_YIELD_YIELD || fiber_v2_state_has_signal_pending(raw_state)) {
+    int yk = f->yield_kind;
+    if (yk == V2_YIELD_YIELD || fiber_v2_state_has_signal_pending(raw_state)) {
         /* Exchange, not store: consuming SIGNAL_PENDING must stay inside
          * the state word's RMW release chain (see sched_v2_signal), so the
          * pickup that follows this requeue acquires the signaler's prior
@@ -1456,7 +1457,9 @@ static void thread_v2_run_fiber(int tid, fiber_v2* f) {
         (void)atomic_exchange_explicit(&f->state, FIBER_V2_QUEUED,
                                        memory_order_acq_rel);
         sched_v2_enqueue_runnable(f);
-        if (f->yield_kind == V2_YIELD_YIELD) {
+        /* Snapshot yk before enqueue: another worker may pick the fiber
+         * up and rewrite yield_kind before we classify the requeue. */
+        if (yk == V2_YIELD_YIELD) {
             V2_STAT_INC(g_v2_run_yield_requeue);
         } else {
             V2_STAT_INC(g_v2_run_pending_requeue);
