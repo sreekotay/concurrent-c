@@ -51,7 +51,7 @@ else
 endif
 # UFCS requires the patched TCC extension (AST hooks). Enforce TCC_EXT=1.
 ifneq ($(TCC_EXT),1)
-  $(error TCC_EXT must be 1 (patched TCC extension required for UFCS); set TCC_EXT=1 and ensure TCC_INC/TCC_LIB point to the patched tcc)
+  $(error TCC_EXT must be 1 (patched TCC required for comptime / libtcc); set TCC_EXT=1 and ensure TCC_INC/TCC_LIB point to the patched tcc)
 endif
 
 # TCC extension (set TCC_EXT=1 and point TCC_INC/TCC_LIB at patched tcc)
@@ -238,8 +238,7 @@ TCC_PATCH_STAMP := $(TCC_INC)/.cc_patches_applied
 # newer than every prereq and the rule stays quiescent.
 $(TCC_PATCH_STAMP): $(wildcard ../third_party/tcc-patches/000*.patch) \
                     $(wildcard $(TCC_INC)/tcc.h $(TCC_INC)/tccgen.c \
-                               $(TCC_INC)/tccpp.c $(TCC_INC)/libtcc.c \
-                               $(TCC_INC)/cc_ast_record.h)
+                               $(TCC_INC)/tccpp.c $(TCC_INC)/libtcc.c)
 	@cd .. && bash scripts/apply_tcc_patches.sh
 	@cd $(TCC_INC) && ([ -f config.mak ] || ./configure) && \
 	  (grep -q CONFIG_cc_ext config.mak || echo 'CONFIG_cc_ext=yes' >> config.mak)

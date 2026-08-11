@@ -258,11 +258,8 @@ check_prefix_writable "$PREFIX"
 echo "Initializing required submodules..."
 ./scripts/fetch_submodules.sh
 
-if [ -f third_party/tcc/cc_ast_record.h ]; then
-  echo "TCC patches already applied."
-else
-  ./scripts/apply_tcc_patches.sh
-fi
+# Idempotent: reverse-checks and no-ops when current, else reset+apply.
+./scripts/apply_tcc_patches.sh
 
 echo "Configuring TinyCC..."
 (

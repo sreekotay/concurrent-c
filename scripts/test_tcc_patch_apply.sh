@@ -73,7 +73,7 @@ else
   # Shallow-history fallback: synthesize the same dirty-and-not-current shape.
   bash "$APPLY" >/dev/null
   echo "/* stale perturbation */" >> "$TCC_DIR/tccpp.c"
-  echo "stale" > "$TCC_DIR/cc_ast_record.h.orig"
+  echo "stale" > "$TCC_DIR/tcc.h.orig"
   echo "[tcc-patch-apply] stale state: synthetic (no older patch in history)"
 fi
 

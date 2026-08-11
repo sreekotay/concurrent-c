@@ -35,15 +35,17 @@ fi
 step "TinyCC (patched, --config-cc_ext)"
 # Fresh submodule checkouts are pristine; hooks ride the patch files.
 ./scripts/apply_tcc_patches.sh
-# NB: grep -q would exit early and SIGPIPE nm, which pipefail turns into
-# a failure — use full-consuming grep >/dev/null instead.
-if ! nm third_party/tcc/libtcc.a 2>/dev/null | grep cc_ast_record >/dev/null; then
+# Sentinel: CONFIG_CC_EXT is on (stub-AST recording retired; UFCS/arrow remain).
+if ! grep -q 'CONFIG_cc_ext=yes' third_party/tcc/config.mak 2>/dev/null; then
   (cd third_party/tcc && ./configure --config-cc_ext && make libtcc.a tcc libtcc1.a -j"$(nproc 2>/dev/null || echo 4)")
+elif ! [ -f third_party/tcc/libtcc.a ]; then
+  (cd third_party/tcc && make libtcc.a tcc libtcc1.a -j"$(nproc 2>/dev/null || echo 4)")
 else
-  # libtcc.a has hooks; make sure the runtime-support lib exists too.
   (cd third_party/tcc && make tcc libtcc1.a -j"$(nproc 2>/dev/null || echo 4)")
 fi
-nm third_party/tcc/libtcc.a | grep cc_ast_record >/dev/null || { echo "libtcc.a missing CC hooks (cc_ast_record_*)"; exit 1; }
+grep -q 'CONFIG_cc_ext=yes' third_party/tcc/config.mak \
+  || { echo "tcc config.mak missing CONFIG_cc_ext=yes"; exit 1; }
+test -f third_party/tcc/libtcc.a || { echo "libtcc.a missing after patched build"; exit 1; }
 
 step "ccc compiler"
 make -C cc BUILD="${BUILD:-debug}" TCC_EXT=1 TCC_INC=../third_party/tcc TCC_LIB=../third_party/tcc/libtcc.a -j"$(nproc 2>/dev/null || echo 4)"

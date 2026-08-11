@@ -37,13 +37,12 @@ if [ -z "$BASE_REF" ]; then
   exit 1
 fi
 
-# NEW files the hooks introduce (e.g. cc_ast_record.h) are UNTRACKED in the
-# pristine-pinned submodule, and `git diff BASE` silently drops untracked
-# paths.  This exact failure shipped once: a regen quietly lost the
-# cc_ast_record.h new-file hunk while tccgen.c kept its #include, so local
-# trees built (file on disk) but FRESH CLONES could not.  Intent-to-add all
-# non-ignored untracked files (minus the apply stamp) so the diff carries
-# their new-file hunks; restore the index afterwards.
+# NEW files the hooks introduce are UNTRACKED in the pristine-pinned
+# submodule, and `git diff BASE` silently drops untracked paths.  That
+# failure shipped once (a new-file hunk vanished while callers kept the
+# #include).  Intent-to-add all non-ignored untracked files (minus the
+# apply stamp) so the diff carries their new-file hunks; restore the
+# index afterwards.
 UNTRACKED="$(git ls-files --others --exclude-standard | grep -v '^\.cc_patches_applied$' || true)"
 restore_index() {
   if [ -n "$UNTRACKED" ]; then

@@ -45,8 +45,10 @@ rm -rf out/cc out/cc-tcc out/bin 2>/dev/null || true
 printf '== TinyCC (patched, --config-cc_ext)\n'
 ./scripts/apply_tcc_patches.sh
 (cd third_party/tcc && ./configure --config-cc_ext && make libtcc.a tcc libtcc1.a -j"$JOBS")
-nm third_party/tcc/libtcc.a | grep cc_ast_record >/dev/null \
-  || die "libtcc.a missing CC hooks (cc_ast_record_*)"
+nm third_party/tcc/libtcc.a >/dev/null \
+  || die "libtcc.a missing after patched build"
+grep -q 'CONFIG_cc_ext=yes' third_party/tcc/config.mak \
+  || die "tcc config.mak missing CONFIG_cc_ext=yes"
 
 if [ "$host_is_tcc" = 1 ]; then
   HOST_CC="$(pwd)/third_party/tcc/tcc"

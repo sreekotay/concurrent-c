@@ -24,15 +24,15 @@ make tcc-patch-regen
 
 ## Patch File
 
-**0001-cc-ext-hooks.patch** - All CC extensions to TCC in a single patch:
+**0001-cc-ext-hooks.patch** — CC extensions to TCC (shrunk after legacy-front removal):
 
-- AST stub recording system (used by the legacy `--frontend=legacy` visitor;
-  default native front does not consume these stub nodes for lowering)
-- External parser hooks (`ext_parser`) for CC syntax
-- UFCS (Uniform Function Call Syntax) support
-- Statement extensions: `@defer`, `spawn`, and parser-level rejection of retired `@arena` / `@nursery`
-- Expression extensions: `await`, closures (`=>` syntax)
-- New tokens: `TOK_CC_ARROW` for `=>`
+- `CONFIG_CC_EXT` build flag wiring
+- UFCS host-parse tolerance (still present; product UFCS is `shadow_lower`)
+- `=>` lexing (`TOK_CC_ARROW`)
+
+Retired (no longer in the patch): stub-AST recording (`cc_ast_record*`),
+`cc_tcc_parse*_to_ast`, and `TCCExtParser` hooks — those existed for the
+deleted multipass `--frontend=legacy` visitor.
 
 All extensions are guarded by `#ifdef CONFIG_CC_EXT`.
 
@@ -41,10 +41,8 @@ All extensions are guarded by `#ifdef CONFIG_CC_EXT`.
 | File | Changes |
 |------|---------|
 | `Makefile` | Adds `-DCONFIG_CC_EXT` when `CONFIG_cc_ext=yes` |
-| `tcc.h` | AST node types, TCCState extensions, new tokens |
-| `cc_ast_record.h` | AST recording helpers and node metadata capture |
-| `libtcc.c` | `cc_tcc_parse_to_ast()` API, include path setup |
-| `tccgen.c` | Statement/expression parsing extensions, better error messages |
+| `tcc.h` | UFCS scratch fields on `TCCState`, `TOK_CC_ARROW` |
+| `tccgen.c` | UFCS rewrite / tolerance under `CONFIG_CC_EXT` |
 | `tccpp.c` | `=>` arrow token lexing |
 
 ## Upstream Compatibility

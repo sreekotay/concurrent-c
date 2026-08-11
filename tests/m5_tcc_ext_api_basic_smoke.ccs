@@ -1,19 +1,5 @@
-/* M5 smoke: TCC ext-API boundary (`third_party/tcc-patches/tcc_ext_api.h`).
- *
- * The hermetic ext API is used by every parse and reparse — this file
- * is intentionally minimal but exercises the parser-hook handshake:
- *
- *   - `cc_tcc_bridge_parse_string_to_ast` (initial parse via ext API)
- *   - `cc_macro_recognizer` hook registration in
- *     `cc/src/parser/cc_macro_recognizer.c` (no-op stubs today, but
- *     they must not corrupt the libtcc state when registered)
- *   - the diag-bridge stub in `tcc_ext_api.c` (any error/warning
- *     callback registered through the API must round-trip a
- *     `(file, line, col)` tuple cleanly)
- *
- * A regression in any of those boundaries typically crashes the
- * compiler outright rather than producing a wrong answer; this test
- * is the canary that fires first. */
+/* Basic compile smoke through libtcc / CONFIG_CC_EXT (historically M5).
+ * Keeps a minimal TU that must lower + host-compile after TCC patch shrink. */
 #include <ccc/cc_runtime.cch>
 #include <stdio.h>
 
