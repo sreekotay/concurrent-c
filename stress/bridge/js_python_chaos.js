@@ -1002,7 +1002,9 @@ async function handleLeakSoak() {
   result('handle_leak_soak_delta_mb %s', (delta / MB).toFixed(1));
   ok('handle_leak_soak_bursts', bursts >= (SOAK ? 8 : (FULL ? 3 : 1)));
   ok('handle_leak_soak_acc', acc > 0);
-  ok('handle_leak_soak_ledger', peak > after && after < burst);
+  /* Attr cache pins O(unique attrs on live parents), not O(getattr calls).
+   * Ledger must stay well below burst size across the soak (no unbounded growth). */
+  ok('handle_leak_soak_ledger', after < burst && peak < burst && after <= peak);
   ok('handle_leak_soak_rss', delta < limitMb * MB);
 }
 

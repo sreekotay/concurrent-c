@@ -89,7 +89,7 @@ Default ops: quick 200 / full 800 / soak 2000 (`FUZZ_OPS` overrides).
 | `lease_blender` | green | Buffer leases + drop mid-flight |
 | `rss_soak` | green, soak | Create/churn/destroy RSS bound (in-process) |
 | `rss_soak_isolated` | green, soak | Same for process children |
-| `handle_leak_soak` | green, soak | Long-lived domain; `stats()` + RSS must re-settle |
+| `handle_leak_soak` | green, soak | Long-lived domain; ledger stays O(attrs) under getattr cache + RSS bound |
 | `mixed_load_soak` | green, soak | Sync + lane + isolated churn; RSS bound (`SOAK_SECONDS`) |
 | `kill_mid_spill` | green | `SIGKILL` child mid-SHM spill; no stray spill files |
 | `shared_buf_kill_sibling` | green | Same JS `Float64Array` → two isolated spills; kill A mid-flight; B completes; no strays |
