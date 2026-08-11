@@ -61,11 +61,23 @@ Receipts:
 
 ## Common issues
 
-**`No module named 'numpy'` in-process.** `create()` loads a linked
-libpython — often a minimal embed or a venv without scientific stacks.
-System `pip install numpy` does not reach that runtime. Fix:
-`usePython('/path/to/venv')` before `create()`, or
-`create({ isolated: true })` (optional `python: venvPath` per domain).
+**`No module named 'numpy'` with `create()`.** In-process loads a linked
+libpython (often a bare embed). Your shell’s `pip install` does not
+change that. Point the bridge at a Python that already has the package:
+
+```js
+// in-process: pick the runtime once, before first create()
+ccpy.usePython('/path/to/venv');          // or a python3 binary
+const py = ccpy.create();
+
+// or: child process — uses PATH / that venv’s site-packages
+const py = ccpy.create({
+  isolated: true,
+  python: '/path/to/venv',                // optional; per domain
+});
+```
+
+See [Choosing the Python](#choosing-the-python).
 
 **Isolated calls are Promises — await them.** This fails encode:
 
@@ -77,11 +89,9 @@ await builtins.exec(code, g);
 Use `const g = await builtins.dict()`. Passing an unawaited result errors
 with `got a Promise — await isolated call results…`.
 
-### Empty `dict()` stays a handle
-
-An empty mapping used as an `exec` namespace has to stay on the Python
-side — a materialized JS `{}` has no `.get` and cannot accumulate
-bindings. So `await builtins.dict()` returns a live proxy:
+**Empty `dict()` stays a handle.** An `exec` namespace must stay on the
+Python side — a JS `{}` has no `.get` and cannot accumulate bindings.
+`await builtins.dict()` returns a live proxy:
 
 ```js
 const g = await builtins.dict();
