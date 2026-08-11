@@ -218,6 +218,8 @@ typedef struct CC__JsSyms {
                      void **this_arg, void **data);
     int (*GetValueDouble)(void *env, void *value, double *out);
     int (*GetValueBool)(void *env, void *value, _Bool *out);
+    int (*GetValueInt32)(void *env, void *value, int32_t *out);
+    int (*GetValueInt64)(void *env, void *value, int64_t *out);
     int (*GetValueStringUtf8)(void *env, void *value, char *buf, size_t cap,
                               size_t *out);
     int (*GetValueStringUtf16)(void *env, void *value, uint16_t *buf,
@@ -420,6 +422,8 @@ have_lib:;
     CC__JS_SYM_OPT(UnrefTsfn, "napi_unref_threadsafe_function")
     CC__JS_SYM_OPT(GetValueBigintI64, "napi_get_value_bigint_int64")
     CC__JS_SYM_OPT(GetValueBigintU64, "napi_get_value_bigint_uint64")
+    CC__JS_SYM_OPT(GetValueInt32, "napi_get_value_int32")
+    CC__JS_SYM_OPT(GetValueInt64, "napi_get_value_int64")
 #undef CC__JS_SYM_OPT
     return 0;
 }
@@ -719,6 +723,21 @@ static int cc__js_in_fail(void *env, int range, const char *what,
 static int cc__js_inq_ll(void *env, void *o, long long *out) {
     double d = 0;
     if (!o) return -1;
+    /* Prefer exact integer extracts when the host has them — avoids the
+     * double round-trip for int-typed parameters. */
+    if (cc__js.GetValueInt64) {
+        int64_t v64 = 0;
+        if (cc__js.GetValueInt64(env, o, &v64) == 0) {
+            *out = (long long)v64;
+            return 0;
+        }
+    } else if (cc__js.GetValueInt32) {
+        int32_t v32 = 0;
+        if (cc__js.GetValueInt32(env, o, &v32) == 0) {
+            *out = (long long)v32;
+            return 0;
+        }
+    }
     if (cc__js.GetValueDouble(env, o, &d) == 0) {
         if (d != d) /* NaN */
             return -1;
@@ -747,6 +766,14 @@ static int cc__js_inq_ll(void *env, void *o, long long *out) {
 static int cc__js_inq_ull(void *env, void *o, unsigned long long *out) {
     double d = 0;
     if (!o) return -1;
+    if (cc__js.GetValueInt64) {
+        int64_t v64 = 0;
+        if (cc__js.GetValueInt64(env, o, &v64) == 0) {
+            if (v64 < 0) return -2;
+            *out = (unsigned long long)v64;
+            return 0;
+        }
+    }
     if (cc__js.GetValueDouble(env, o, &d) == 0) {
         if (d != d || d < 0.0 || d >= 18446744073709551616.0)
             return d != d ? -1 : -2;

@@ -414,6 +414,9 @@ typedef struct CC__PySyms {
      * full-API builds; function forms when limited-API / exported). */
     int (*LongCheck)(void *);
     int (*FloatCheckExact)(void *);
+    /* 3.12+ compact-int digs — avoid PyLong_As* on the common small-int path. */
+    int (*LongIsCompact)(const void *);
+    intptr_t (*LongCompactValue)(const void *);
     int (*ObjectIsInstance)(void *obj, void *cls);
     void *(*InterpreterStateGet)(void);
     void *(*EvalSaveThread)(void);
@@ -987,6 +990,8 @@ have_lib:
     CC__PY_SYM_OPT(CapsuleGetPointer, "PyCapsule_GetPointer")
     CC__PY_SYM_OPT(LongCheck, "PyLong_Check")
     CC__PY_SYM_OPT(FloatCheckExact, "PyFloat_CheckExact")
+    CC__PY_SYM_OPT(LongIsCompact, "PyUnstable_Long_IsCompact")
+    CC__PY_SYM_OPT(LongCompactValue, "PyUnstable_Long_CompactValue")
     CC__PY_SYM_OPT(ObjectIsInstance, "PyObject_IsInstance")
     CC__PY_SYM_OPT(InterpreterStateGet, "PyInterpreterState_Get")
     CC__PY_SYM_OPT(EvalSaveThread, "PyEval_SaveThread")
@@ -1523,16 +1528,45 @@ typedef struct CC__PyModuleDef {
 typedef struct CC__PyModuleDef_Slot { int slot; void *value; } CC__PyModuleDef_Slot;
 #define CC__PY_MOD_EXEC 2
 
-/* Raise `msg` as an instance of the named builtin exception class and return
- * NULL, the C-API convention a trampoline uses to report failure.  The class
- * is looked up by name because exception types are data symbols, which the
- * stable-ABI dlsym table does not carry. */
-static void *cc__py_raise_as(const char *cls, const char *msg) {
+/* Cached builtin exception types — raise must not ImportModule on every miss.
+ * Looked up by name because exception types are data symbols the stable-ABI
+ * dlsym table does not carry. */
+static void *cc__py_exc_typeerror;
+static void *cc__py_exc_overflow;
+static void *cc__py_exc_runtime;
+
+static void *cc__py_exc_lookup(const char *cls) {
     void *builtins = cc__py.ImportModule("builtins");
     void *exc = builtins ? cc__py.GetAttrString(builtins, cls) : NULL;
-    if (exc) cc__py.ErrSetString(exc, msg);
-    if (exc) cc__py.DecRef(exc);
     if (builtins) cc__py.DecRef(builtins);
+    return exc; /* new ref, or NULL */
+}
+
+/* Raise `msg` as an instance of the named builtin exception class and return
+ * NULL, the C-API convention a trampoline uses to report failure. */
+static void *cc__py_raise_as(const char *cls, const char *msg) {
+    void *exc = NULL;
+    int cached = 0;
+    if (cls[0] == 'T' && strcmp(cls, "TypeError") == 0) {
+        if (!cc__py_exc_typeerror)
+            cc__py_exc_typeerror = cc__py_exc_lookup(cls);
+        exc = cc__py_exc_typeerror;
+        cached = 1;
+    } else if (cls[0] == 'O' && strcmp(cls, "OverflowError") == 0) {
+        if (!cc__py_exc_overflow)
+            cc__py_exc_overflow = cc__py_exc_lookup(cls);
+        exc = cc__py_exc_overflow;
+        cached = 1;
+    } else if (cls[0] == 'R' && strcmp(cls, "RuntimeError") == 0) {
+        if (!cc__py_exc_runtime)
+            cc__py_exc_runtime = cc__py_exc_lookup(cls);
+        exc = cc__py_exc_runtime;
+        cached = 1;
+    } else {
+        exc = cc__py_exc_lookup(cls);
+    }
+    if (exc) cc__py.ErrSetString(exc, msg);
+    if (exc && !cached) cc__py.DecRef(exc);
     return NULL;
 }
 
@@ -1556,12 +1590,7 @@ static void *cc__py_raise_cc_error(int kind, const char *msg) {
 /* Raise `msg` as a Python exception and return NULL, the C-API convention a
  * trampoline uses to report failure. */
 static void *cc__py_raise(const char *msg) {
-    void *builtins = cc__py.ImportModule("builtins");
-    void *exc = builtins ? cc__py.GetAttrString(builtins, "RuntimeError") : NULL;
-    if (exc) cc__py.ErrSetString(exc, msg);
-    if (exc) cc__py.DecRef(exc);
-    if (builtins) cc__py.DecRef(builtins);
-    return NULL;
+    return cc__py_raise_as("RuntimeError", msg ? msg : "cc error");
 }
 
 /* ============================================================
@@ -1583,7 +1612,8 @@ static void *cc__py_raise(const char *msg) {
 /* Every `in` helper returns 0 on success, or -1 with a Python exception set.
  * `what` names the parameter so the raised message points at the argument the
  * caller got wrong rather than at the callee. */
-static int cc__py_in_fail(const char *cls, const char *what, const char *want) {
+static int __attribute__((noinline)) cc__py_in_fail(const char *cls, const char *what,
+                                                     const char *want) {
     char buf[192];
     snprintf(buf, sizeof(buf), "argument `%s` expects %s", what, want);
     cc__py_raise_as(cls, buf);
@@ -1610,6 +1640,8 @@ static void cc__py_cache_num_classes(void) {
 
 /* CPython 3.10–3.14: after the refcnt/immortal word comes ob_type. */
 typedef struct { uintptr_t rc; void *ty; } CC__PyObjHead;
+/* Exact float: PyObject_HEAD + ob_fval. Stable across limited/full API. */
+typedef struct { uintptr_t rc; void *ty; double fval; } CC__PyFloatObj;
 
 static inline void *cc__py_obj_type(void *o) {
     return o ? ((CC__PyObjHead *)o)->ty : NULL;
@@ -1629,15 +1661,29 @@ static inline int cc__py_is_exact_float(void *o) {
     return cc__py_cls_float && cc__py_obj_type(o) == cc__py_cls_float;
 }
 
+/* Compact int dig (3.12+): no AsLongLong, no error-indicator TLS. */
+static inline int cc__py_compact_ll(void *o, long long *out) {
+    if (!cc__py.LongIsCompact || !cc__py.LongCompactValue) return 0;
+    if (!cc__py.LongIsCompact(o)) return 0;
+    *out = (long long)cc__py.LongCompactValue(o);
+    return 1;
+}
+
+static inline int cc__py_exact_float_val(void *o, double *out) {
+    *out = ((CC__PyFloatObj *)o)->fval;
+    return 0;
+}
+
 static int cc__py_in_ll_raw(void *o, const char *what, long long *out) {
     long long (*as_ll)(void *) = cc__py.LongAsLongLong;
     void *(*err_occ)(void) = cc__py.ErrOccurred;
     void (*err_clr)(void) = cc__py.ErrClear;
     long long v;
     if (!o) return cc__py_in_fail("TypeError", what, "an integer");
-    /* Exact int: AsLongLong cannot fail for values that fit in long long
-     * from a PyLong of typical bench size — skip ErrOccurred. */
+    /* Exact int: compact dig first; else AsLongLong without ErrOccurred
+     * (small/typical values cannot fail that converter). */
     if (cc__py_is_exact_int(o)) {
+        if (cc__py_compact_ll(o, out)) return 0;
         *out = as_ll(o);
         return 0;
     }
@@ -1656,14 +1702,19 @@ static int cc__py_in_ull_raw(void *o, const char *what, unsigned long long *out)
     void *(*err_occ)(void) = cc__py.ErrOccurred;
     void (*err_clr)(void) = cc__py.ErrClear;
     unsigned long long v;
+    long long s;
     if (!o) return cc__py_in_fail("TypeError", what, "an integer");
-    /* Always AsUnsignedLongLong — never AsLongLong.  Exact-int values in
-     * (LLONG_MAX, ULLONG_MAX] are the whole point of this arm; a signed
-     * shortcut OverflowError's them and leaves a pending exception that
-     * ImportModule inside in_fail cannot clear past. */
+    if (cc__py_is_exact_int(o) && cc__py_compact_ll(o, &s)) {
+        if (s < 0)
+            return cc__py_in_fail("OverflowError", what,
+                                  "a non-negative integer");
+        *out = (unsigned long long)s;
+        return 0;
+    }
+    /* Unsigned converter — not AsLongLong — so values in
+     * (LLONG_MAX, ULLONG_MAX] round-trip into unsigned long long. */
     v = as_ull(o);
     if (v == (unsigned long long)-1 && err_occ && err_occ()) {
-        long long s;
         if (err_clr) err_clr();
         /* Classify: negative → OverflowError; non-int / too large → match
          * the signed path's TypeError-vs-Overflow posture. */
@@ -1721,14 +1772,19 @@ static int cc__py_in_double(double *dst, void *o, const char *what) {
     void *(*err_occ)(void) = cc__py.ErrOccurred;
     void (*err_clr)(void) = cc__py.ErrClear;
     double v;
+    long long iv;
     if (!o) return cc__py_in_fail("TypeError", what, "a number");
-    /* Exact float: one AsDouble, no error check on the common path. */
+    /* Exact float: dig ob_fval — no FloatAsDouble, no error TLS. */
     if (cc__py_is_exact_float(o)) {
-        *dst = as_f(o);
+        (void)cc__py_exact_float_val(o, dst);
         return 0;
     }
     /* Exact int → float(x), matching prior acceptance of Python ints. */
     if (cc__py_is_exact_int(o)) {
+        if (cc__py_compact_ll(o, &iv)) {
+            *dst = (double)iv;
+            return 0;
+        }
         *dst = (double)as_ll(o);
         return 0;
     }
@@ -2546,6 +2602,14 @@ static int cc__py_bind_mod_methods(void *mod, void *state,
     if (!cc__py.CFunctionNewEx || !cc__py.CapsuleNew ||
         !cc__py.ObjectSetAttrString)
         return -1;
+    /* Warm type/exception caches once so the first call is not a cold miss. */
+    cc__py_cache_num_classes();
+    if (!cc__py_exc_typeerror)
+        cc__py_exc_typeerror = cc__py_exc_lookup("TypeError");
+    if (!cc__py_exc_overflow)
+        cc__py_exc_overflow = cc__py_exc_lookup("OverflowError");
+    if (!cc__py_exc_runtime)
+        cc__py_exc_runtime = cc__py_exc_lookup("RuntimeError");
     for (m = methods; m->ml_name; m++) {
         void *cap = cc__py.CapsuleNew(state, CC__PY_MODSTATE_CAP, NULL);
         void *fn;
