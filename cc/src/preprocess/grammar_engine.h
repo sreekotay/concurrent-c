@@ -44,6 +44,7 @@ void cc__grammar_registry_reset(void);
  * Type_method hook (cc_ufcs_grammar_type_method_native, ufcs.c) so
  * `r.next(&out)` / `nd.first()` lower without user-written registrations. */
 int cc_grammar_pending_ufcs_type_count(void);
+int cc_grammar_ufcs_table_overflow(void);
 const char* cc_grammar_pending_ufcs_type(int i);
 
 /* Schema bind fields for UFCS path walks (`c.framed.args[i].data.slice()`).

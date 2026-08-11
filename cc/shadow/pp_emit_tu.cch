@@ -1241,9 +1241,17 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             char args[8][64];
             char args128[8][128];
             int nargs = 0;
-            /* py_module::[T] and friends exceed 8 KiB once methods + glue land. */
-            char body[65536];
+            /* Arena-backed def text — py_module::[T] with hundreds of methods
+             * outgrows any fixed stack buffer. */
+            CCArena def_ar = cc_arena_heap(64 * 1024);
+            char* body = NULL;
             int fi;
+            if (!def_ar.base) {
+                fprintf(stderr,
+                        "error: generic factory def arena create failed\n");
+                out->err = 1;
+                return 0;
+            }
             for (fi = 0; fi < g_shadow_ngfac; fi++) {
                 if (strcmp(g_shadow_gfac[fi].family, inst->family) == 0) {
                     tpl = g_shadow_gfac[fi].tpl;
@@ -1298,7 +1306,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                     int frag_line = 0;
                     CCGenProduceStatus st = cc_emit_plan_produce_generic_def(
                         inst->family, inst->mangled, args128, nargs, rsrc,
-                        rlen, path, body, sizeof(body), err, sizeof(err));
+                        rlen, path, &def_ar, &body, err, sizeof(err));
                     if (st != CC_GEN_PRODUCE_OK) {
                         const char* path_base = path;
                         const char* slash = path_base ? strrchr(path_base, '/')
@@ -1325,8 +1333,10 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                         if (err[0]) fprintf(stderr, "  %s\n", err);
                         shadow_gfac_note_handler(inst->family, path);
                         out->err = 1;
+                        cc_arena_free(&def_ar);
                         return 0;
                     }
+                    if (!body) body = "";
                     if (cc_emit_plan_take_exec_error()) {
                         fprintf(stderr,
                                 "%s:%d:%d: error: type: compiled generic "
@@ -1334,6 +1344,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                                 path[0] ? path : "<input>", use_line, use_col,
                                 inst->family, inst->mangled);
                         out->err = 1;
+                        cc_arena_free(&def_ar);
                         return 0;
                     }
                     if (cc_comptime_validate_c_fragment(body, &frag_line, err,
@@ -1385,6 +1396,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                             }
                         }
                         out->err = 1;
+                        cc_arena_free(&def_ar);
                         return 0;
                     }
                 } else if (tpl) {
@@ -1394,6 +1406,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                     const char* slash;
                     int oob_arg = -1;
                     int irc;
+                    size_t tpl_cap = 256 * 1024;
                     if (fi < g_shadow_ngfac && !g_shadow_gfac[fi].has_base) {
                         const char* tests = path ? strstr(path, "tests/") : NULL;
                         const char* pb = tests ? tests : path;
@@ -1409,10 +1422,21 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                                 use_col, inst->family, inst->family,
                                 inst->family);
                         out->err = 1;
+                        cc_arena_free(&def_ar);
                         return 0;
                     }
+                    body = (char*)cc_arena_alloc(&def_ar, tpl_cap, 1);
+                    if (!body) {
+                        fprintf(stderr,
+                                "error: generic tpl buffer arena OOM for %s\n",
+                                inst->mangled);
+                        out->err = 1;
+                        cc_arena_free(&def_ar);
+                        return 0;
+                    }
+                    body[0] = 0;
                     irc = shadow_inst_generic_tpl(tpl, inst->mangled, args,
-                                                  nargs, body, sizeof(body),
+                                                  nargs, body, tpl_cap,
                                                   &oob_arg);
                     if (irc < 0) {
                         const char* tests = path ? strstr(path, "tests/") : NULL;
@@ -1426,6 +1450,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                                 inst->family, oob_arg, nargs,
                                 nargs == 1 ? "" : "s");
                         out->err = 1;
+                        cc_arena_free(&def_ar);
                         return 0;
                     }
                     if (irc == 0) {
@@ -1433,6 +1458,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                                 "error: generic instantiate failed for %s\n",
                                 inst->mangled);
                         out->err = 1;
+                        cc_arena_free(&def_ar);
                         return 0;
                     }
                     if (cc_comptime_validate_c_fragment(body, &frag_line, verr,
@@ -1470,16 +1496,27 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                                     g_shadow_gfac[fi].origin_line);
                         }
                         out->err = 1;
+                        cc_arena_free(&def_ar);
                         return 0;
                     }
                 } else {
+                    cc_arena_free(&def_ar);
                     continue;
                 }
-                if (!cemit_fmt(out, "/* generic %s */\n", inst->mangled))
+                if (!cemit_fmt(out, "/* generic %s */\n", inst->mangled)) {
+                    cc_arena_free(&def_ar);
                     return 0;
-                if (!cemit_str(out, body)) return 0;
-                if (!cemit_str(out, "\n\n")) return 0;
+                }
+                if (!cemit_str(out, body)) {
+                    cc_arena_free(&def_ar);
+                    return 0;
+                }
+                if (!cemit_str(out, "\n\n")) {
+                    cc_arena_free(&def_ar);
+                    return 0;
+                }
             }
+            cc_arena_free(&def_ar);
         }
     }
 
@@ -2158,7 +2195,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             if (bind_ok) {
                 for (int s = 0; s < nsspawns; s++)
                     shadow_cap_collect_closure_locals(sspawns[s]);
-                if (g_shadow_cap_overflow) {
+                if (g_shadow_cap_overflow || g_shadow_table_overflow) {
                     out->err = 1;
                     bind_ok = 0;
                 }
@@ -2330,7 +2367,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             if (bind_ok) {
                 for (int s = 0; s < nspawns; s++)
                     shadow_cap_collect_closure_locals(spawns[s]);
-                if (g_shadow_cap_overflow) {
+                if (g_shadow_cap_overflow || g_shadow_table_overflow) {
                     out->err = 1;
                     bind_ok = 0;
                 }
@@ -2641,6 +2678,14 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
         if (out->err) return 0;
     }
     if (g_shadow_ufcs_miss) return 0;
+    if (g_shadow_table_overflow) {
+        out->err = 1;
+        return 0;
+    }
+    if (g_shadow_cap_overflow) {
+        out->err = 1;
+        return 0;
+    }
     if (g_shadow_restrict_diag) return 0;
     if (g_shadow_string_stack_diag) return 0;
     if (!out->err && out->buf && out->len) {

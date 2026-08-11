@@ -44,6 +44,7 @@ void cc__grammar_registry_reset(void) {}
 void cc__grammar_note_ufcs_type(const char* type_name) { (void)type_name; }
 
 int cc_grammar_pending_ufcs_type_count(void) { return 0; }
+int cc_grammar_ufcs_table_overflow(void) { return 0; }
 
 const char* cc_grammar_pending_ufcs_type(int i) { (void)i; return ""; }
 

@@ -11,6 +11,12 @@
 #include <limits.h>
 
 #include <ccc/cc_arena.h>
+/* Host tools (lower_headers_stage1) do not link runtime/string.c — that TU is
+ * unity-included in concurrent_c.o for shadow_lower / ccc.  Take the same
+ * static-inline CCString bodies the comptime executor uses. */
+#define CC_COMPTIME 1
+#include <ccc/std/string.h>
+#undef CC_COMPTIME
 
 #include "comptime/executor.h"
 #include "comptime/hook_compile.h"
@@ -671,21 +677,25 @@ static CCFactorySlice cc__factory_slice_cstr(const char* s) {
 }
 
 /* Run one factory fn into its own scratch arena and append the returned
- * fragment to def_out at *io_total (newline-separated).  `require_nonempty`
- * distinguishes the base (must define the type) from extensions (an empty
- * return opts out — conditional specialization).  Returns 0 on hard failure
- * (required-but-empty, or buffer overflow); 1 otherwise. */
+ * fragment to `def` via CCString (newline-separated).  `require_nonempty`
+ * distinguishes the base (must define the type) from extensions (empty opts
+ * out). */
 static int cc__invoke_one_factory(const void* fn, const char* name, const char* mangled,
-                                  CCFactorySliceArray args, char* def_out, size_t def_cap,
-                                  size_t* io_total, int require_nonempty, const char* who) {
+                                  CCFactorySliceArray args, CCString* def, CCArena* out_ar,
+                                  int require_nonempty, const char* who) {
     CCGenericFactoryFn call = (CCGenericFactoryFn)(uintptr_t)fn;
     CCFactorySlice result;
-    if (!fn) return 0;
-    /* The factory builds its @emit output into this scratch arena (stack-first,
-       heap-spill); the returned slice points into it and is copied into def_out
-       before we free it.  The factory's `arena` param is load-bearing. */
+    if (!fn || !def || !out_ar) return 0;
+    /* Heap-rooted scratch: large modules (py_module with hundreds of methods)
+     * exceed a fixed stack root; overflow slabs grow as needed. */
     {
-        cc_arena_stack(factory_arena, CC_EMIT_TPL_BUF_SIZE);
+        CCArena factory_arena = cc_arena_heap(CC_EMIT_TPL_BUF_SIZE);
+        if (!factory_arena.base) {
+            fprintf(stderr,
+                    "error: compiled generic factory '%s' scratch arena OOM\n",
+                    who);
+            return 0;
+        }
         result = call(cc__factory_slice_cstr(name),
                       cc__factory_slice_cstr(mangled),
                       args,
@@ -694,19 +704,28 @@ static int cc__invoke_one_factory(const void* fn, const char* name, const char* 
             cc_arena_free(&factory_arena);
             return require_nonempty ? 0 : 1;
         }
-        {
-            size_t sep = (*io_total > 0) ? 1 : 0;
-            if (*io_total + sep + result.len >= def_cap) {
-                fprintf(stderr,
-                        "error: compiled generic factory '%s' output exceeds %zu byte limit\n",
-                        who, def_cap);
-                cc_arena_free(&factory_arena);
-                return 0;
-            }
-            if (sep) def_out[(*io_total)++] = '\n';
-            memcpy(def_out + *io_total, result.ptr, result.len);
-            *io_total += result.len;
-            def_out[*io_total] = '\0';
+        if (result.len > (size_t)UINT32_MAX) {
+            fprintf(stderr,
+                    "error: compiled generic factory '%s' fragment too large\n",
+                    who);
+            cc_arena_free(&factory_arena);
+            return 0;
+        }
+        if (cc_string_len(def) > 0 &&
+            !cc_string_push_buffer(def, "\n", 1u, out_ar)) {
+            fprintf(stderr,
+                    "error: compiled generic factory '%s' output string OOM\n",
+                    who);
+            cc_arena_free(&factory_arena);
+            return 0;
+        }
+        if (!cc_string_push_buffer(def, (const char*)result.ptr,
+                                   (uint32_t)result.len, out_ar)) {
+            fprintf(stderr,
+                    "error: compiled generic factory '%s' output string OOM\n",
+                    who);
+            cc_arena_free(&factory_arena);
+            return 0;
         }
         cc_arena_free(&factory_arena);
     }
@@ -715,68 +734,85 @@ static int cc__invoke_one_factory(const void* fn, const char* name, const char* 
 
 int cc_emit_plan_invoke_generic_factory(const char* name, const char* mangled,
                                         const char type_args[8][128], int nargs,
-                                        char* def_out, size_t def_cap) {
+                                        CCArena* out_ar, char** out_def) {
     CCGenericReg* r = cc__generic_find(name, CC_GENERIC_COMPILED);
     CCFactorySliceArray args = {0};
     CCFactorySlice arg_slices[8];
-    size_t total = 0;
-    if (!r || !mangled || !def_out || def_cap == 0 || nargs <= 0 || nargs > 8) return 0;
+    CCString def = cc_string_new();
+    const char* cstr;
+    if (!r || !mangled || !out_ar || !out_def || nargs <= 0 || nargs > 8) return 0;
     if (!r->handler_name || !r->fn_ptr) return 0;  /* base required and compiled */
+    *out_def = NULL;
     for (int i = 0; i < nargs; i++)
         arg_slices[i] = cc__factory_slice_cstr(type_args[i]);
     args.items = arg_slices;
     args.len = (size_t)nargs;
-    def_out[0] = '\0';
     /* A factory that raises cc_emit_error should name ITS line, not line 1:
        the body runs compiled and detached, so the host position has to be
        supplied here from what registration recorded. */
     cc_emit_plan_host_ctx_begin(r->site_pos);
     /* Base first (defines the type / `${mangled}`), then extensions in
        registration order — so extensions can reference the base's symbols. */
-    if (!cc__invoke_one_factory(r->fn_ptr, name, mangled, args,
-                                def_out, def_cap, &total, 1, name)) {
+    if (!cc__invoke_one_factory(r->fn_ptr, name, mangled, args, &def, out_ar, 1,
+                                name)) {
         cc_emit_plan_host_ctx_end();
         return 0;
     }
     for (size_t e = 0; e < r->ext_count; e++) {
-        if (!cc__invoke_one_factory(r->ext_fns[e], name, mangled, args,
-                                    def_out, def_cap, &total, 0, r->ext_handlers[e])) {
+        if (!cc__invoke_one_factory(r->ext_fns[e], name, mangled, args, &def,
+                                    out_ar, 0, r->ext_handlers[e])) {
             cc_emit_plan_host_ctx_end();
             return 0;
         }
     }
     cc_emit_plan_host_ctx_end();
+    if (cc_string_failed(&def)) return 0;
     /* Assembled factory text is host C; lower Result sugar here (not at
      * @emit literal-piece time — ${} can split mid-signature). */
-    if (total > 0) {
-        char* rw = cc_emit_rewrite_result_sugar(def_out, total);
+    cstr = cc_string_cstr(&def, out_ar);
+    if (!cstr) {
+        /* Empty is only reachable if base returned empty — already failed. */
+        char* empty = (char*)cc_arena_alloc(out_ar, 1, 1);
+        if (!empty) return 0;
+        empty[0] = '\0';
+        *out_def = empty;
+        return 1;
+    }
+    {
+        size_t total = cc_string_len(&def);
+        char* rw = cc_emit_rewrite_result_sugar(cstr, total);
         if (rw) {
             size_t n = strlen(rw);
-            if (n + 1 > def_cap) {
+            char* nb = (char*)cc_arena_alloc(out_ar, n + 1, 1);
+            if (!nb) {
                 fprintf(stderr,
                         "error: result-sugar rewrite of generic factory '%s' "
-                        "exceeds %zu byte limit\n",
-                        name, def_cap);
+                        "arena OOM\n",
+                        name);
                 free(rw);
                 return 0;
             }
-            memcpy(def_out, rw, n + 1);
+            memcpy(nb, rw, n + 1);
             free(rw);
+            *out_def = nb;
+            return 1;
         }
     }
+    *out_def = (char*)cstr;
     return 1;
 }
 
 CCGenProduceStatus cc_emit_plan_produce_generic_def(
     const char* gname, const char* mangled, const char orig_args[8][128], int nargs,
     const char* reflect_src, size_t reflect_len, const char* input_path,
-    char* def_out, size_t def_cap, char* err, size_t err_cap) {
+    CCArena* out_ar, char** out_def, char* err, size_t err_cap) {
     if (err && err_cap) err[0] = '\0';
+    if (out_def) *out_def = NULL;
     cc_emit_plan_set_reflect_source(reflect_src, reflect_len);
     if (cc_emit_plan_ensure_generic_factory(gname, input_path, err, err_cap) != 0)
         return CC_GEN_PRODUCE_ENSURE_FAILED;
     if (!cc_emit_plan_invoke_generic_factory(gname, mangled, orig_args, nargs,
-                                             def_out, def_cap))
+                                             out_ar, out_def))
         return CC_GEN_PRODUCE_INVOKE_FAILED;
     return CC_GEN_PRODUCE_OK;
 }
@@ -1264,6 +1300,97 @@ const void* cc_emit_plan_host_type_of(const char* name) {
 static const char* cc__reflect_src = NULL;
 static size_t cc__reflect_src_len = 0;
 
+/* Method reflection index: scan the TU once per type, then answer
+ * cc_reflect_method_* from the retained rows.  Re-running cc__ct_load_methods
+ * per name/params/ret/err call is O(N²) for factories that walk every method
+ * (py_module / js_module).  Open method families still require a source scan
+ * to discover decls — that scan is the miss path, not every lookup. */
+typedef struct CCCtMethodRegEntry {
+    char* type_name;
+    CCCtField* ms;
+    size_t nm;
+} CCCtMethodRegEntry;
+
+static CCCtMethodRegEntry* cc__method_reg = NULL;
+static size_t cc__method_reg_n = 0;
+static size_t cc__method_reg_cap = 0;
+static const char* cc__method_reg_src = NULL;
+static size_t cc__method_reg_src_len = 0;
+
+static void cc__rm_cache_clear(void) {
+    size_t i;
+    for (i = 0; i < cc__method_reg_n; i++) {
+        free(cc__method_reg[i].type_name);
+        cc_ct_free_fields(cc__method_reg[i].ms, cc__method_reg[i].nm);
+    }
+    free(cc__method_reg);
+    cc__method_reg = NULL;
+    cc__method_reg_n = 0;
+    cc__method_reg_cap = 0;
+    cc__method_reg_src = NULL;
+    cc__method_reg_src_len = 0;
+}
+
+static CCCtMethodRegEntry* cc__rm_find(const char* type_name) {
+    size_t i;
+    if (!type_name) return NULL;
+    for (i = 0; i < cc__method_reg_n; i++) {
+        if (cc__method_reg[i].type_name &&
+            strcmp(cc__method_reg[i].type_name, type_name) == 0)
+            return &cc__method_reg[i];
+    }
+    return NULL;
+}
+
+/* Load-or-hit: one source scan per type for the current reflect buffer. */
+static int cc__rm_methods(const char* type_name, CCCtField** out, size_t* out_n) {
+    CCCtMethodRegEntry* e;
+    CCCtField* ms = NULL;
+    size_t nm = 0;
+    if (out) *out = NULL;
+    if (out_n) *out_n = 0;
+    if (!type_name || !type_name[0] || !out || !out_n) return 0;
+    if (cc__method_reg_src != cc__reflect_src ||
+        cc__method_reg_src_len != cc__reflect_src_len) {
+        cc__rm_cache_clear();
+        cc__method_reg_src = cc__reflect_src;
+        cc__method_reg_src_len = cc__reflect_src_len;
+    }
+    e = cc__rm_find(type_name);
+    if (e) {
+        *out = e->ms;
+        *out_n = e->nm;
+        return 1;
+    }
+    if (!cc_ct_reflect_type_methods(cc__reflect_src, cc__reflect_src_len,
+                                    type_name, &ms, &nm))
+        return 0;
+    if (cc__method_reg_n >= cc__method_reg_cap) {
+        size_t ncap = cc__method_reg_cap ? cc__method_reg_cap * 2 : 8;
+        CCCtMethodRegEntry* nb = (CCCtMethodRegEntry*)realloc(
+            cc__method_reg, ncap * sizeof(*nb));
+        if (!nb) {
+            cc_ct_free_fields(ms, nm);
+            return 0;
+        }
+        cc__method_reg = nb;
+        cc__method_reg_cap = ncap;
+    }
+    e = &cc__method_reg[cc__method_reg_n++];
+    memset(e, 0, sizeof(*e));
+    e->type_name = strdup(type_name);
+    e->ms = ms;
+    e->nm = nm;
+    if (!e->type_name) {
+        cc_ct_free_fields(ms, nm);
+        cc__method_reg_n--;
+        return 0;
+    }
+    *out = e->ms;
+    *out_n = e->nm;
+    return 1;
+}
+
 /* In-memory field graph from lower-then-TCC type pass (emit `__cc_rf_*`). */
 typedef struct CCCtFieldRegEntry {
     char* type_name;
@@ -1427,6 +1554,7 @@ int cc_ct_field_reg_put(const char* type_name, const char* const* names,
 }
 
 void cc_emit_plan_set_reflect_source(const char* src, size_t len) {
+    cc__rm_cache_clear();
     cc__reflect_src = src;
     cc__reflect_src_len = len;
 }
@@ -1557,10 +1685,7 @@ int cc_reflect_field_is_as(const char* type_name, int idx) {
 int cc_reflect_method_count(const char* type_name) {
     CCCtField* ms = NULL;
     size_t nm = 0;
-    if (!cc_ct_reflect_type_methods(cc__reflect_src, cc__reflect_src_len,
-                                    type_name, &ms, &nm))
-        return -1;
-    cc_ct_free_fields(ms, nm);
+    if (!cc__rm_methods(type_name, &ms, &nm)) return -1;
     return (int)nm;
 }
 
@@ -1598,9 +1723,7 @@ static int cc__reflect_method_member(const char* type_name, int idx, int want,
     size_t nm = 0;
     int rc = -1;
     if (buf && buf_sz > 0) buf[0] = '\0';
-    if (!cc_ct_reflect_type_methods(cc__reflect_src, cc__reflect_src_len,
-                                    type_name, &ms, &nm))
-        return -1;
+    if (!cc__rm_methods(type_name, &ms, &nm)) return -1;
     if (idx >= 0 && (size_t)idx < nm) {
         const CCCtField* m = &ms[idx];
         const char* bang = m->type ? strstr(m->type, "!>") : NULL;
@@ -1652,7 +1775,6 @@ static int cc__reflect_method_member(const char* type_name, int idx, int want,
         default: break;
         }
     }
-    cc_ct_free_fields(ms, nm);
     return rc;
 }
 

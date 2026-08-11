@@ -13,6 +13,8 @@
 #include <stddef.h>
 #include <stdio.h>
 
+#include <ccc/cc_arena.h>
+
 #include "preprocess/type_graph.h"
 #include "preprocess/type_registry.h"
 #include "result_spec.h"
@@ -165,19 +167,21 @@ int cc_emit_plan_compile_generic_factories(const char* src, size_t len,
 /* Compile a registered factory dylib on first use (errors attributed at call site). */
 int cc_emit_plan_ensure_generic_factory(const char* generic_name, const char* input_path,
                                         char* err_buf, size_t err_sz);
-/* Invokes base+extensions, then lowers Result sugar on the assembled def. */
+/* Invokes base+extensions into `out_ar`, then lowers Result sugar.
+ * On success `*out_def` is a NUL-terminated C fragment owned by `out_ar`. */
 int cc_emit_plan_invoke_generic_factory(const char* name, const char* mangled,
                                         const char type_args[8][128], int nargs,
-                                        char* def_out, size_t def_cap);
+                                        CCArena* out_ar, char** out_def);
 
 /* Use-site production: ensure the registered factory dylib is compiled, then
  * invoke it to produce the C definition text for `mangled`.  On failure the
  * status names the failing stage and `err` holds the dynamic detail (e.g. the
- * factory compile error); the caller owns the use-site-attributed diagnostic. */
+ * factory compile error); the caller owns the use-site-attributed diagnostic.
+ * `*out_def` is arena-owned on success. */
 typedef enum CCGenProduceStatus {
     CC_GEN_PRODUCE_OK              = 0,
     CC_GEN_PRODUCE_ENSURE_FAILED   = 1, /* compiled factory failed to compile (err set) */
-    CC_GEN_PRODUCE_INVOKE_FAILED   = 2, /* compiled factory returned empty / overflowed  */
+    CC_GEN_PRODUCE_INVOKE_FAILED   = 2, /* compiled factory returned empty / OOM */
 } CCGenProduceStatus;
 
 /* Take-and-clear: did a comptime body raise cc_emit_error? */
@@ -186,7 +190,7 @@ int cc_emit_plan_take_exec_error(void);
 CCGenProduceStatus cc_emit_plan_produce_generic_def(
     const char* gname, const char* mangled, const char orig_args[8][128], int nargs,
     const char* reflect_src, size_t reflect_len, const char* input_path,
-    char* def_out, size_t def_cap, char* err, size_t err_cap);
+    CCArena* out_ar, char** out_def, char* err, size_t err_cap);
 /* Emit `def_text` as an AFTER_PRELUDE fragment unless `mangled` was already
  * emitted this TU.  Returns 1 if newly added, 0 if a duplicate/full/failed. */
 int cc_emit_plan_generic_def_emit_once(const char* mangled, const char* def_text);

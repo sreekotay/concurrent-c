@@ -13,6 +13,22 @@ const char* cc_emit_plan_comptime_fragment_text(size_t frag_index);
 int cc_ct_field_reg_put(const char* type_name, const char* const* names,
                         const char* const* types, const int* is_as, int n);
 
+/* Fixed emit/parse registries: refuse silent drop (same class as cap_binds). */
+static int g_shadow_table_overflow;
+static void shadow_table_full(const char* table, int cap, const char* item) {
+    if (g_shadow_table_overflow) return;
+    if (item && item[0])
+        fprintf(stderr,
+                "error: shadow %s table full (%d); refusing silent drop of '%s'\n",
+                table, cap, item);
+    else
+        fprintf(stderr,
+                "error: shadow %s table full (%d); refusing silent drop\n",
+                table, cap);
+    g_shadow_table_overflow = 1;
+}
+static void shadow_table_overflow_reset(void) { g_shadow_table_overflow = 0; }
+
 /* ---- closed parse keywords (comptime perfect hash) ---------------------- */
 
 typedef enum {
@@ -1308,15 +1324,19 @@ typedef struct {
     char name[64];
     char ret[64];
 } ShadowAsyncFn;
-static ShadowAsyncFn g_shadow_async_fns[64];
+enum { SHADOW_ASYNC_FN_CAP = 256 };
+static ShadowAsyncFn g_shadow_async_fns[SHADOW_ASYNC_FN_CAP];
 static int g_shadow_nasync_fns;
 
 static void shadow_async_fn_reset(void) { g_shadow_nasync_fns = 0; }
 
 static void shadow_async_fn_register(const char* name, const char* ret) {
     int i;
-    if (!name || !name[0] || !ret || !ret[0] || g_shadow_nasync_fns >= 64)
+    if (!name || !name[0] || !ret || !ret[0]) return;
+    if (g_shadow_nasync_fns >= SHADOW_ASYNC_FN_CAP) {
+        shadow_table_full("async_fns", SHADOW_ASYNC_FN_CAP, name);
         return;
+    }
     for (i = 0; i < g_shadow_nasync_fns; i++) {
         if (strcmp(g_shadow_async_fns[i].name, name) == 0) {
             snprintf(g_shadow_async_fns[i].ret, sizeof(g_shadow_async_fns[i].ret),

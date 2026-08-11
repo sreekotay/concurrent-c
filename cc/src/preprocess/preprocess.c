@@ -8103,11 +8103,19 @@ static int cc__emit_generic_instance(const char* gname,
 
     /* invoke compiled factory once per mangled name. */
     {
-        char def[CC_GENERIC_DEF_MAX];
+        CCArena def_ar = cc_arena_heap(64 * 1024);
+        char* def = NULL;
         char rel[1024];
         int use_line = 1, use_col = 1;
         for (size_t k = 0; k < use_pos && k < n; k++) {
             if (src[k] == '\n') { use_line++; use_col = 1; } else { use_col++; }
+        }
+        if (!def_ar.base) {
+            cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                            use_line, use_col, "type",
+                            "compiled generic factory '%s' def arena OOM",
+                            gname);
+            return -1;
         }
         {
             char ferr[512];
@@ -8119,7 +8127,7 @@ static int cc__emit_generic_instance(const char* gname,
             size_t rlen = g_reflect_snapshot ? g_reflect_snapshot_len : n;
             CCGenProduceStatus ps = cc_emit_plan_produce_generic_def(
                 gname, mangled, orig_args, nargs,
-                rsrc, rlen, input_path, def, sizeof(def), ferr, sizeof(ferr));
+                rsrc, rlen, input_path, &def_ar, &def, ferr, sizeof(ferr));
             if (ps == CC_GEN_PRODUCE_ENSURE_FAILED) {
                 cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
                                 use_line, use_col, "type",
@@ -8139,6 +8147,7 @@ static int cc__emit_generic_instance(const char* gname,
                                 handler, hf, hline);
                     }
                 }
+                cc_arena_free(&def_ar);
                 return -1;
             }
             if (ps == CC_GEN_PRODUCE_INVOKE_FAILED) {
@@ -8146,11 +8155,13 @@ static int cc__emit_generic_instance(const char* gname,
                                 use_line, use_col, "type",
                                 "compiled generic factory '%s' failed for '%s' with %d type "
                                 "argument%s (empty fragment: arity-guard rejection, @emit "
-                                "buffer overflow, or runtime error)",
+                                "arena OOM, or runtime error)",
                                 gname, mangled, nargs, nargs == 1 ? "" : "s");
+                cc_arena_free(&def_ar);
                 return -1;
             }
         }
+        if (!def) def = "";
         /* A factory that raised cc_emit_error reported its own constraint
          * violation; fail here (attributed to the use site) even when the
          * fragment it still returned happens to parse as C. */
@@ -8159,6 +8170,7 @@ static int cc__emit_generic_instance(const char* gname,
                             use_line, use_col, "type",
                             "compiled generic factory '%s' reported an error for '%s'",
                             gname, mangled);
+            cc_arena_free(&def_ar);
             return -1;
         }
         /* Validate the generated definition at the emit site so a malformed
@@ -8168,7 +8180,10 @@ static int cc__emit_generic_instance(const char* gname,
             char verr[512];
             int frag_line = 0;
             if (cc_comptime_validate_c_fragment(def, &frag_line, verr, sizeof(verr)) != 0) {
-                if (!cc_emit_plan_generic_invalid_report_once(mangled)) return -1;
+                if (!cc_emit_plan_generic_invalid_report_once(mangled)) {
+                    cc_arena_free(&def_ar);
+                    return -1;
+                }
                 cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
                                 use_line, use_col, "type",
                                 "compiled generic factory '%s' produced invalid C for '%s': %s",
@@ -8259,6 +8274,7 @@ static int cc__emit_generic_instance(const char* gname,
                                 handler, hf, hline);
                     }
                 }
+                cc_arena_free(&def_ar);
                 return -1;
             }
         }
@@ -8271,6 +8287,7 @@ static int cc__emit_generic_instance(const char* gname,
          * Result in place, which fails as a type error nowhere near the
          * cause. */
         cc_result_fn_registry_scan_source(def, strlen(def));
+        cc_arena_free(&def_ar);
     }
     return 0;
 }

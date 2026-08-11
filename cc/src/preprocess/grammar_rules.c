@@ -2614,7 +2614,9 @@ static char cc__schema_reg[32][S_NAME]; static int cc__schema_nreg;
 
 /* generated types needing instance-UFCS dispatch (Readers, Nodes); the
  * codegen phase registers each with the native Type_method hook */
-static char cc__ufcs_types[64][80]; static int cc__ufcs_ntypes;
+enum { CC__UFCS_TYPE_CAP = 256, CC__UFCS_FIELD_CAP = 512 };
+static char cc__ufcs_types[CC__UFCS_TYPE_CAP][80]; static int cc__ufcs_ntypes;
+static int cc__ufcs_table_overflow;
 
 /* Schema bind fields → shadow UFCS field table (product + union-arm binds
  * flattened onto the outer type so `.framed.args` walks before variant
@@ -2624,13 +2626,29 @@ typedef struct {
     char field[S_NAME];
     char fty[80];
 } CCGrammarUfcsField;
-static CCGrammarUfcsField cc__ufcs_fields[192];
+static CCGrammarUfcsField cc__ufcs_fields[CC__UFCS_FIELD_CAP];
 static int cc__ufcs_nfields;
+
+static void cc__ufcs_table_full(const char* table, int cap, const char* item) {
+    if (cc__ufcs_table_overflow) return;
+    if (item && item[0])
+        fprintf(stderr,
+                "error: grammar %s table full (%d); refusing silent drop of '%s'\n",
+                table, cap, item);
+    else
+        fprintf(stderr,
+                "error: grammar %s table full (%d); refusing silent drop\n",
+                table, cap);
+    cc__ufcs_table_overflow = 1;
+}
 
 void cc__grammar_note_ufcs_type(const char* type_name) {
     for (int i = 0; i < cc__ufcs_ntypes; i++)
         if (strcmp(cc__ufcs_types[i], type_name) == 0) return;
-    if (cc__ufcs_ntypes >= (int)(sizeof(cc__ufcs_types) / sizeof(cc__ufcs_types[0]))) return;
+    if (cc__ufcs_ntypes >= CC__UFCS_TYPE_CAP) {
+        cc__ufcs_table_full("ufcs_types", CC__UFCS_TYPE_CAP, type_name);
+        return;
+    }
     snprintf(cc__ufcs_types[cc__ufcs_ntypes++], sizeof(cc__ufcs_types[0]), "%s", type_name);
 }
 
@@ -2648,9 +2666,10 @@ static void cc__grammar_note_ufcs_field(const char* type_name, const char* field
             return;
         }
     }
-    if (cc__ufcs_nfields >=
-        (int)(sizeof(cc__ufcs_fields) / sizeof(cc__ufcs_fields[0])))
+    if (cc__ufcs_nfields >= CC__UFCS_FIELD_CAP) {
+        cc__ufcs_table_full("ufcs_fields", CC__UFCS_FIELD_CAP, field);
         return;
+    }
     snprintf(cc__ufcs_fields[cc__ufcs_nfields].type,
              sizeof(cc__ufcs_fields[0].type), "%s", type_name);
     snprintf(cc__ufcs_fields[cc__ufcs_nfields].field,
@@ -2681,6 +2700,7 @@ static void cc__grammar_note_bind_field(const char* type_name, const STerm* t) {
 }
 
 int cc_grammar_pending_ufcs_type_count(void) { return cc__ufcs_ntypes; }
+int cc_grammar_ufcs_table_overflow(void) { return cc__ufcs_table_overflow; }
 const char* cc_grammar_pending_ufcs_type(int i) {
     return (i >= 0 && i < cc__ufcs_ntypes) ? cc__ufcs_types[i] : NULL;
 }
