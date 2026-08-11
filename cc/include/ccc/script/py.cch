@@ -1657,16 +1657,10 @@ static int cc__py_in_ull_raw(void *o, const char *what, unsigned long long *out)
     void (*err_clr)(void) = cc__py.ErrClear;
     unsigned long long v;
     if (!o) return cc__py_in_fail("TypeError", what, "an integer");
-    if (cc__py_is_exact_int(o)) {
-        long long s = as_ll(o);
-        if (s < 0)
-            return cc__py_in_fail("OverflowError", what,
-                                  "a non-negative integer");
-        *out = (unsigned long long)s;
-        return 0;
-    }
-    /* Unsigned converter — not AsLongLong — so values in
-     * (LLONG_MAX, ULLONG_MAX] round-trip into unsigned long long. */
+    /* Always AsUnsignedLongLong — never AsLongLong.  Exact-int values in
+     * (LLONG_MAX, ULLONG_MAX] are the whole point of this arm; a signed
+     * shortcut OverflowError's them and leaves a pending exception that
+     * ImportModule inside in_fail cannot clear past. */
     v = as_ull(o);
     if (v == (unsigned long long)-1 && err_occ && err_occ()) {
         long long s;

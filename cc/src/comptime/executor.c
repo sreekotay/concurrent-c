@@ -464,11 +464,16 @@ static char* cc__exec_build_tu(const char* body, size_t body_len,
     static const char entry[] = "\nvoid __cc_ct_entry(void) {\n";
     static const char tail[] = "\n}\n";
     static const char exec_def[] = "#define CC_COMPTIME_EXEC 1\n";
+    /* py_expose / py_module factory bodies call cc__py_emit_method_tramp —
+     * same include the isolated-factory hook TU already pulls in. */
+    static const char py_emit_inc[] = "#include <ccc/cc_py_export_emit.h>\n";
     const char* fndefs = cc_comptime_fn_registry_defs();
     char* slim = cc_ct_field_reg_slim_prelude();
     size_t slim_len = slim ? strlen(slim) : 0;
     size_t fndef_len = fndefs ? strlen(fndefs) : 0;
-    size_t ed = cc__exec_fndefs_need_exec_define(fndefs) ? sizeof(exec_def) - 1 : 0;
+    int need_exec = cc__exec_fndefs_need_exec_define(fndefs);
+    size_t ed = need_exec ? sizeof(exec_def) - 1 : 0;
+    size_t pyi = need_exec ? sizeof(py_emit_inc) - 1 : 0;
     size_t pre = sizeof(CC__EXEC_PRELUDE) - 1;
     size_t ent = sizeof(entry) - 1;
     size_t tl = sizeof(tail) - 1;
@@ -480,8 +485,8 @@ static char* cc__exec_build_tu(const char* body, size_t body_len,
         int n = snprintf(line_dir, sizeof(line_dir), "#line %d \"%s\"\n", line, file);
         if (n > 0 && (size_t)n < sizeof(line_dir)) ld = (size_t)n;
     }
-    char* s = (char*)malloc(ed + pre + slim_len + fndef_len + ent + ld + body_len +
-                            tl + 1);
+    char* s = (char*)malloc(ed + pre + pyi + slim_len + fndef_len + ent + ld +
+                            body_len + tl + 1);
     if (!s) {
         free(slim);
         return NULL;
@@ -489,6 +494,7 @@ static char* cc__exec_build_tu(const char* body, size_t body_len,
     size_t o = 0;
     if (ed) { memcpy(s + o, exec_def, ed); o += ed; }
     memcpy(s + o, CC__EXEC_PRELUDE, pre); o += pre;
+    if (pyi) { memcpy(s + o, py_emit_inc, pyi); o += pyi; }
     if (slim_len) { memcpy(s + o, slim, slim_len); o += slim_len; }
     if (fndef_len) { memcpy(s + o, fndefs, fndef_len); o += fndef_len; }
     memcpy(s + o, entry, ent); o += ent;
@@ -505,16 +511,19 @@ static char* cc__exec_build_eval_tu(const char* expr) {
                               "  __cc_ce_result = (long long)(";
     static const char tail[] = ");\n}\n";
     static const char exec_def[] = "#define CC_COMPTIME_EXEC 1\n";
+    static const char py_emit_inc[] = "#include <ccc/cc_py_export_emit.h>\n";
     const char* fndefs = cc_comptime_fn_registry_defs();
     char* slim = cc_ct_field_reg_slim_prelude();
     size_t slim_len = slim ? strlen(slim) : 0;
     size_t fndef_len = fndefs ? strlen(fndefs) : 0;
-    size_t ed = cc__exec_fndefs_need_exec_define(fndefs) ? sizeof(exec_def) - 1 : 0;
+    int need_exec = cc__exec_fndefs_need_exec_define(fndefs);
+    size_t ed = need_exec ? sizeof(exec_def) - 1 : 0;
+    size_t pyi = need_exec ? sizeof(py_emit_inc) - 1 : 0;
     size_t ex = expr ? strlen(expr) : 0;
     size_t pre = sizeof(CC__EXEC_PRELUDE) - 1;
     size_t hl = sizeof(hdr) - 1;
     size_t tl = sizeof(tail) - 1;
-    char* s = (char*)malloc(ed + pre + slim_len + fndef_len + hl + ex + tl + 1);
+    char* s = (char*)malloc(ed + pre + pyi + slim_len + fndef_len + hl + ex + tl + 1);
     if (!s) {
         free(slim);
         return NULL;
@@ -522,6 +531,7 @@ static char* cc__exec_build_eval_tu(const char* expr) {
     size_t o = 0;
     if (ed) { memcpy(s + o, exec_def, ed); o += ed; }
     memcpy(s + o, CC__EXEC_PRELUDE, pre); o += pre;
+    if (pyi) { memcpy(s + o, py_emit_inc, pyi); o += pyi; }
     if (slim_len) { memcpy(s + o, slim, slim_len); o += slim_len; }
     if (fndef_len) { memcpy(s + o, fndefs, fndef_len); o += fndef_len; }
     memcpy(s + o, hdr, hl); o += hl;
