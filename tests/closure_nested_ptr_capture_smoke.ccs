@@ -1,0 +1,31 @@
+/* Nested closure must keep pointer capture types (not int fallback). */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct CapBlk {
+    int seq;
+    CCArena arena;
+} CapBlk;
+
+static int g_got;
+
+int main(void) {
+    @errhandler(CCError e) { return 1; }
+    g_got = -1;
+    {
+        CCNursery* outer = cc_nursery_create(NULL) !> @destroy;
+        outer->spawn(() => [outer] {
+            CCArena a = cc_arena_heap(4096) @destroy;
+            CapBlk* cap = cc_arena_alloc_T(CapBlk, &a);
+            if (!cap) return;
+            cap->seq = 42;
+            cap->arena = a.detach();
+            outer->spawn(() => [cap] {
+                g_got = cap->seq;
+                cap->arena.free();
+            });
+        });
+    }
+    printf("got=%d\n", g_got);
+    return g_got == 42 ? 0 : 1;
+}
