@@ -148,7 +148,7 @@ Harness forces `CC=clang`. Levenshtein **import** under TSan is skipped
 | `./scripts/real_projects_sanitize.sh tsan` | **OK** — same mains; levenshtein import **SKIP** (dlopen); server stderr scanned for late TSan reports |
 | `./scripts/real_projects_sanitize.sh fuzz` | **OK** — light ASan pigz input fuzz |
 
-Nightly: [`.github/workflows/bridge-asan-nightly.yml`](../.github/workflows/bridge-asan-nightly.yml) runs `asan` + `tsan` + `fuzz`.
+Nightly: [`.github/workflows/bridge-asan-nightly.yml`](../.github/workflows/bridge-asan-nightly.yml) runs bridge ASan fuzz, TSan dlopen gate, wire libFuzzer, chaos, and real_projects asan/tsan/fuzz. Redis smoke under ASan is skipped (fiber fake-stack CHECK on GHA clang); TSan still runs that smoke.
 
 ### Bridge addon ASan
 
