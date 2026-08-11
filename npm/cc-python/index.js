@@ -52,6 +52,28 @@ function unwrapArg(a) {
   return (a !== null && a !== undefined && a[HANDLE]) ? a[HANDLE] : a;
 }
 
+/* Host JS functions passed into Python receive bare napi Externals for
+ * non-scalar args.  Without a Proxy those are inert (`x[0]` → undefined)
+ * and a scipy objective can "converge" on a constant.  Wrap once so every
+ * callback arg materializes the same way call results do — missing attrs
+ * then throw via getattr, matching String(proxy). */
+const HOST_CB = Symbol('cc-python-host-cb');
+function wrapHostCallback(bridge, fn) {
+  if (typeof fn !== 'function' || fn[HANDLE]) return fn;
+  if (fn[HOST_CB]) return fn[HOST_CB]; /* cached wrap, or self if already wrap */
+  const wrapped = function (...args) {
+    return fn.apply(this, args.map((x) => materialize(bridge, x)));
+  };
+  wrapped[HOST_CB] = wrapped;
+  fn[HOST_CB] = wrapped;
+  return wrapped;
+}
+function prepareArg(bridge, a) {
+  if (typeof a === 'function' && !(HANDLE in a))
+    return wrapHostCallback(bridge, a);
+  return unwrapArg(a);
+}
+
 function rethrowImportHint(err, isolated) {
   const msg = String(err && err.message || err);
   if (!/No module named|ModuleNotFoundError/i.test(msg)) throw err;
@@ -71,9 +93,14 @@ function rethrowImportHint(err, isolated) {
 
 // Scalars arrive as JS scalars; a held reference arrives as an External
 // (typeof 'object') and gets a proxy of its own — the same
-// materialization rule at every boundary crossing.
+// materialization rule at every boundary crossing.  TypedArrays/Buffers
+// from callback buffer-copy must NOT be wrapped (they are real JS values).
 function materialize(bridge, r) {
-  return (r !== null && typeof r === 'object') ? wrap(bridge, r) : r;
+  if (r === null || typeof r !== 'object') return r;
+  if (r[HANDLE]) return r;
+  if (ArrayBuffer.isView(r) || Array.isArray(r)) return r;
+  if (typeof Buffer !== 'undefined' && Buffer.isBuffer(r)) return r;
+  return wrap(bridge, r);
 }
 
 function wrap(bridge, handle) {
@@ -82,6 +109,11 @@ function wrap(bridge, handle) {
   // proxy from it is unreachable too.
   const target = function () {};
   target[HANDLE] = handle;
+  /* Cache getattr results so `mod.fn(x)` in a hot loop does not mint a
+   * fresh method handle per call (reclaimed only under GC pressure).
+   * Bumped on any release() so a cached proxy cannot outlive its box. */
+  const attrCache = new Map();
+  let cacheGen = bridge._attrCacheGen || 0;
   return new Proxy(target, {
     get(t, prop) {
       if (prop === HANDLE) return handle;
@@ -90,13 +122,49 @@ function wrap(bridge, handle) {
           prop === 'toJS') {
         return () => native.invoke(bridge._dom, bridge._str(), [handle]);
       }
+      if (prop === 'toTypedArray') {
+        return () => native.to_typed_array(bridge._dom, handle);
+      }
+      if (prop === Symbol.iterator) {
+        return function () {
+          const it = materialize(
+              bridge,
+              native.invoke(bridge._dom,
+                            native.getattr(bridge._dom, handle, '__iter__'),
+                            []));
+          return {
+            next() {
+              try {
+                /* CPython 3: tp_iternext is `__next__`, not `next`. */
+                return { value: it.__next__(), done: false };
+              } catch (e) {
+                if (/StopIteration/i.test(String(e && e.message)))
+                  return { value: undefined, done: true };
+                throw e;
+              }
+            },
+            [Symbol.iterator]() { return this; },
+          };
+        };
+      }
       if (typeof prop !== 'string') return undefined;
-      return materialize(bridge, native.getattr(bridge._dom, handle, prop));
+      if ((bridge._attrCacheGen || 0) !== cacheGen) {
+        attrCache.clear();
+        cacheGen = bridge._attrCacheGen || 0;
+      }
+      if (attrCache.has(prop)) return attrCache.get(prop);
+      const v = materialize(bridge,
+                            native.getattr(bridge._dom, handle, prop));
+      /* Proxies are function-targets → typeof 'function', not 'object'. */
+      if (v != null && v[HANDLE] &&
+          (typeof v === 'object' || typeof v === 'function'))
+        attrCache.set(prop, v);
+      return v;
     },
     apply(t, thisArg, args) {
       return materialize(bridge,
                          native.invoke(bridge._dom, handle,
-                                       args.map(unwrapArg)));
+                                       args.map((a) => prepareArg(bridge, a))));
     },
   });
 }
@@ -126,7 +194,8 @@ class Bridge {
     const bridge = this;
     return (...args) => {
       try {
-        return native.invoke_async(bridge._dom, h, args.map(unwrapArg))
+        return native.invoke_async(bridge._dom, h,
+                                   args.map((a) => prepareArg(bridge, a)))
           .then((r) => materialize(bridge, r));
       } catch (e) {
         return Promise.reject(e); // a closed bridge rejects, never throws
@@ -148,6 +217,7 @@ class Bridge {
     }
   }
   release(proxy) {
+    this._attrCacheGen = (this._attrCacheGen || 0) + 1;
     return native.release(this._dom, unwrapArg(proxy));
   }
   stats() {
@@ -236,10 +306,21 @@ function resolvePythonExe(spec) {
   return 'python3';
 }
 
+/* Isolated dropped proxies never auto-released — register so GC can
+ * release child handles (best-effort; explicit release() remains sharp). */
+const isoFinalizers = (typeof FinalizationRegistry !== 'undefined')
+  ? new FinalizationRegistry((entry) => {
+      try {
+        if (entry.bridge && !entry.bridge._closed && entry.h != null)
+          entry.bridge._req({ op: 'release', h: entry.h }).catch(() => {});
+      } catch (e) { /* bridge already gone */ }
+    })
+  : null;
+
 function rwrap(bridge, h, chain) {
   const target = function () {};
   target[RHANDLE] = { h, chain, bridge };
-  return new Proxy(target, {
+  const proxy = new Proxy(target, {
     get(t, prop) {
       if (prop === RHANDLE) return t[RHANDLE];
       if (prop === 'then') {
@@ -262,6 +343,27 @@ function rwrap(bridge, h, chain) {
       if (prop === Symbol.toPrimitive || prop === 'toString')
         return () => '[cc-python remote ' + h +
                      (chain.length ? '.' + chain.join('.') : '') + ']';
+      if (prop === Symbol.asyncIterator) {
+        return async function () {
+          const it = await bridge
+            ._req({ op: 'callp', h, path: chain.concat('__iter__'),
+                    args: [] })
+            .then((r) => bridge._materialize(r));
+          return {
+            async next() {
+              try {
+                const value = await it.__next__();
+                return { value, done: false };
+              } catch (e) {
+                if (/StopIteration/i.test(String(e && e.message)))
+                  return { value: undefined, done: true };
+                throw e;
+              }
+            },
+            [Symbol.asyncIterator]() { return this; },
+          };
+        };
+      }
       if (typeof prop !== 'string') return undefined;
       return rwrap(bridge, h, chain.concat(prop)); // no round trip
     },
@@ -272,6 +374,10 @@ function rwrap(bridge, h, chain) {
         .then((r) => bridge._materialize(r));
     },
   });
+  /* Only root handles (no lazy chain) — releasing a path is meaningless. */
+  if (isoFinalizers && chain.length === 0 && h != null)
+    isoFinalizers.register(proxy, { bridge, h });
+  return proxy;
 }
 
 class ProcBridge {
@@ -454,6 +560,7 @@ class ProcBridge {
     }
     const t = typeof v;
     if (t === 'number') {
+      if (Object.is(v, -0)) return { $nf: '-0' };
       if (Number.isFinite(v)) return v;
       return { $nf: v === Infinity ? 'inf' : v === -Infinity ? '-inf'
                                            : 'nan' };
@@ -461,8 +568,7 @@ class ProcBridge {
     if (t === 'string' || t === 'boolean') return v;
     if (t === 'bigint') {
       if (v >= -(2n ** 53n) && v <= 2n ** 53n) return Number(v);
-      throw new Error('concurrent-c-python: bigint beyond 2^53 cannot cross the ' +
-                      'wire yet');
+      return { $bi: v.toString() };
     }
     if (t === 'function') {
       if (v[RHANDLE]) {
@@ -525,9 +631,12 @@ class ProcBridge {
   _decode(v) {
     if (v === null || typeof v !== 'object') return v;
     if (v.$h !== undefined) return rwrap(this, v.$h, []);
-    if (v.$nf !== undefined)
+    if (v.$nf !== undefined) {
+      if (v.$nf === '-0') return -0;
       return v.$nf === 'inf' ? Infinity : v.$nf === '-inf' ? -Infinity
                                                            : NaN;
+    }
+    if (v.$bi !== undefined) return BigInt(v.$bi);
     if (v.$shm !== undefined || v.shm !== undefined) {
       const path = v.$shm !== undefined ? v.$shm : v.shm;
       const kind = v.t || v.$t;
@@ -686,6 +795,27 @@ function rlazy(bridge, pending, chain) {
       }
       if (prop === Symbol.toPrimitive || prop === 'toString')
         return () => '[cc-python remote .' + chain.join('.') + ']';
+      if (prop === Symbol.asyncIterator) {
+        return async function () {
+          const it = await pending.then((r) =>
+            bridge._req({ op: 'callp', h: r.h,
+                          path: chain.concat('__iter__'), args: [] })
+              .then((x) => bridge._materialize(x)));
+          return {
+            async next() {
+              try {
+                const value = await it.__next__();
+                return { value, done: false };
+              } catch (e) {
+                if (/StopIteration/i.test(String(e && e.message)))
+                  return { value: undefined, done: true };
+                throw e;
+              }
+            },
+            [Symbol.asyncIterator]() { return this; },
+          };
+        };
+      }
       if (typeof prop !== 'string') return undefined;
       return rlazy(bridge, pending, chain.concat(prop));
     },

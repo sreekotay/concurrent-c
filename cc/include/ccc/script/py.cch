@@ -336,6 +336,7 @@ typedef struct CC__PySyms {
     void *(*FloatFromDouble)(double);
     void *(*LongFromLongLong)(long long);
     void *(*LongFromUnsignedLongLong)(unsigned long long);
+    void *(*LongFromString)(const char *, char **, int);
     void *(*UnicodeFromStringAndSize)(const char *, intptr_t);
     void *(*ListNew)(intptr_t);
     int (*ListSetItem)(void *, intptr_t, void *);
@@ -920,6 +921,7 @@ have_lib:
     CC__PY_SYM(FloatFromDouble, "PyFloat_FromDouble")
     CC__PY_SYM(LongFromLongLong, "PyLong_FromLongLong")
     CC__PY_SYM(LongFromUnsignedLongLong, "PyLong_FromUnsignedLongLong")
+    CC__PY_SYM(LongFromString, "PyLong_FromString")
     CC__PY_SYM(UnicodeFromStringAndSize, "PyUnicode_FromStringAndSize")
     CC__PY_SYM(ListNew, "PyList_New")
     CC__PY_SYM(ListSetItem, "PyList_SetItem")
@@ -1110,12 +1112,31 @@ static CCPyError cc__py_err(const char *ctx) {
         cc__py.ErrFetch(&t, &v, &tb);
         if (cc__py.ErrNormalize) cc__py.ErrNormalize(&t, &v, &tb);
         {
-            void *s = v ? cc__py.Str(v) : (t ? cc__py.Str(t) : NULL);
+            void *s = v ? cc__py.Str(v) : NULL;
             const char *msg = NULL;
             intptr_t n = 0;
+            const char *tn = NULL;
+            intptr_t tnl = 0;
+            void *nm = NULL;
             if (s) msg = cc__py.AsUTF8AndSize(s, &n);
-            snprintf(cc__py_errbuf, sizeof(cc__py_errbuf), "python: %s: %s",
-                     ctx, msg ? msg : "unknown error");
+            /* Fold the type into the message: bridges that surface only
+             * `.base.message` (and empty `str(exc)` like `KeyError()`)
+             * must still name the exception class. */
+            if (t) {
+                nm = cc__py.GetAttrString(t, "__name__");
+                if (nm) tn = cc__py.AsUTF8AndSize(nm, &tnl);
+            }
+            if (tn && tnl > 0 && msg && n > 0)
+                snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                         "python: %s: %.*s: %.*s", ctx, (int)tnl, tn,
+                         (int)n, msg);
+            else if (tn && tnl > 0)
+                snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                         "python: %s: %.*s", ctx, (int)tnl, tn);
+            else
+                snprintf(cc__py_errbuf, sizeof(cc__py_errbuf),
+                         "python: %s: %s", ctx, msg ? msg : "unknown error");
+            if (nm) cc__py.DecRef(nm);
             if (s) cc__py.DecRef(s);
         }
         /* The exception class name, so a handler can tell KeyError from
@@ -4989,9 +5010,8 @@ static inline CCPyArg cc__py_arg_buffer(CCPyArg a) {
  * Python side (`np.array(mv)`) to keep it. The view is read-only, so a
  * callee cannot write back through it.
  *
- * The element type is not carried: a memoryview of bytes says nothing about
- * what they mean, so the callee names the dtype. That is the trade for not
- * copying. */
+ * The view is writable for the call (in-process sync); keep-past-return
+ * still fails the retention check. */
 #define py_buf(x) cc__py_arg_buffer(CC_PY_ARG(x))
 
 /* ---- vectorized call: one crossing for N calls ----
@@ -5485,7 +5505,9 @@ static inline CCPyObj !>(CCPyError) cc__py_obj_callm_n(CCPyObj *obj,
              * A callee that kept a buffer export (numpy.frombuffer, a nested
              * memoryview) fails the call at the boundary; one that kept the
              * view itself gets ValueError on a later touch — never a read
-             * through freed CC memory.  Read-only either way. */
+             * through freed CC memory.  Writable: in-process is sync and
+             * single-threaded, so writes land in the caller's TypedArray
+             * for the call (same idiom as CC module-export slice borrow). */
             {
                 int esz = (int)(a.i & 0xff);
                 int isf = (int)((a.i >> 8) & 1);
@@ -5509,7 +5531,7 @@ static inline CCPyObj !>(CCPyError) cc__py_obj_callm_n(CCPyObj *obj,
                     pb->buf = (void *)(uintptr_t)a.p;
                     pb->len = (intptr_t)a.n;
                     pb->itemsize = esz ? esz : 1;
-                    pb->readonly = 1;
+                    pb->readonly = 0;
                     pb->ndim = 1;
                     pb->format = vfmt[nviews];
                     pb->shape = &vshape[nviews];
@@ -5519,7 +5541,7 @@ static inline CCPyObj !>(CCPyError) cc__py_obj_callm_n(CCPyObj *obj,
                 if (!v && a.p && cc__py.MemoryViewFromMemory) {
                     v = cc__py.MemoryViewFromMemory((char *)(uintptr_t)a.p,
                                                     (intptr_t)a.n,
-                                                    0x100 /* PyBUF_READ */);
+                                                    0x200 /* PyBUF_WRITE */);
                     if (v) {
                         void *cast = cc__py.CallMethod
                                          ? cc__py.CallMethod(v, "cast", "s", fmt)

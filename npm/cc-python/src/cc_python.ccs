@@ -25,6 +25,7 @@
  * cross as leases: a typed array argument is a zero-copy memoryview
  * pinned for the call, and the py_buf retention check catches a callee
  * that keeps it. */
+#include <math.h>
 #include <pthread.h>
 
 #include <ccc/script/js.cch>
@@ -73,7 +74,8 @@ struct CcPyJob {
     void *buf_refs[CCPY__JOB_MAX_ARGS];
     int nbuf;
     /* result, filled by the executor */
-    int rkind; /* 0 f64, 1 i64, 2 bool, 3 str, 4 none, 5 obj, 6 error, 7 drain */
+    int rkind; /* 0 f64, 1 i64, 2 bool, 3 str, 4 none, 5 obj, 6 error,
+                * 7 drain, 8 BigInt decimal digits in rstr */
     double rf;
     long long ri;
     const char *rstr; /* exec-arena copy (length rlen) */
@@ -407,6 +409,11 @@ static void ccpy__js_exc_text(void *env, char *buf, size_t cap) {
         snprintf(buf, cap, "callback threw");
 }
 
+static void *ccpy__bigint_to_py(CcPyDom *d, void *env, void *v, int async,
+                                char *errbuf, size_t errcap);
+static int ccpy__result_to_js(CcPyDom *d, void *env, CCPyObj r, void **out);
+static int ccpy__cb_arg_to_js(CcPyDom *d, void *env, CCPyObj r, void **out);
+
 /* JS return value -> tagged result (shared by both call paths).  Fills
  * req-style fields via out-pointers; GIL-needing pieces (the handle
  * IncRef) attach around themselves.  Returns 0, or -1 with errmsg. */
@@ -428,8 +435,13 @@ static int ccpy__cb_ret_tag(CcPyDom *d, void *env, void *ret, int *rkind,
     case CC__JS_T_NUMBER: {
         double dd = 0;
         cc__js.GetValueDouble(env, ret, &dd);
-        if (dd == (double)(long long)dd && dd >= -9007199254740992.0 &&
-            dd <= 9007199254740992.0) {
+        /* Keep IEEE -0 as float — int collapse drops the sign. */
+        if (dd == 0.0 && signbit(dd)) {
+            *rkind = 0;
+            *rf = dd;
+        } else if (dd == (double)(long long)dd &&
+                   dd >= -9007199254740992.0 &&
+                   dd <= 9007199254740992.0) {
             *rkind = 1;
             *ri = (long long)dd;
         } else {
@@ -448,6 +460,13 @@ static int ccpy__cb_ret_tag(CcPyDom *d, void *env, void *ret, int *rkind,
     case CC__JS_T_STRING: {
         size_t len = 0, got = 0;
         char *copy;
+        int lone = cc__js_string_lone_surrogate(env, ret);
+        if (lone < 0) break;
+        if (lone > 0) {
+            snprintf(errmsg, errcap,
+                     "cc-python: string contains a lone UTF-16 surrogate");
+            return -1;
+        }
         if (cc__js.GetValueStringUtf8(env, ret, NULL, 0, &len) != 0) break;
         copy = (char *)cc_arena_alloc(&d->job_arena, len + 1, 16);
         if (!copy) break;
@@ -456,6 +475,13 @@ static int ccpy__cb_ret_tag(CcPyDom *d, void *env, void *ret, int *rkind,
         *rkind = 3;
         *rstr = copy;
         *rlen = got;
+        return 0;
+    }
+    case CC__JS_T_BIGINT: {
+        void *py = ccpy__bigint_to_py(d, env, ret, 1, errmsg, errcap);
+        if (!py) return -1;
+        *robj = py;
+        *rkind = 5;
         return 0;
     }
     case CC__JS_T_EXTERNAL: {
@@ -493,7 +519,7 @@ static int ccpy__cb_ret_tag(CcPyDom *d, void *env, void *ret, int *rkind,
         break;
     }
     snprintf(errmsg, errcap, "cc-python: unsupported callback return (use "
-                             "scalars, strings, or bridge handles)");
+                             "scalars, BigInt, strings, or bridge handles)");
     return -1;
 }
 
@@ -515,6 +541,86 @@ static void *ccpy__cb_tag_to_py(CcPyDom *d, int rkind, double rf, long long ri,
     default: break;
     }
     return cc__py_raise("cc-python: corrupt callback result");
+}
+
+/* 1-D contiguous numeric buffer → fresh JS TypedArray (copy).  Used by
+ * toTypedArray and by callback arg marshalling so a call-scoped py_buf
+ * lease is never IncRef'd into a handle (that trips the retention check).
+ * Returns 1 with *out set, 0 if not a supported buffer, -1 on alloc fail. */
+static int ccpy__buf_to_ta(void *env, void *o, void **out) {
+    CC__PyBuffer view;
+    int tt = -1, esz = 0;
+    size_t nelem;
+    char c;
+    if (!o || !out || !cc__py.GetBuffer || !cc__py.ReleaseBuffer) return 0;
+    memset(&view, 0, sizeof(view));
+    if (cc__py.GetBuffer(o, &view, CC__PYBUF_CONTIG_FMT) != 0) {
+        if (cc__py.ErrClear) cc__py.ErrClear();
+        return 0;
+    }
+    if (view.ndim != 1 || view.len < 0 || view.itemsize <= 0 ||
+        (view.len % view.itemsize) != 0) {
+        cc__py.ReleaseBuffer(&view);
+        return 0;
+    }
+    if (!view.format || !view.format[0]) c = 'B';
+    else {
+        const char *p = view.format;
+        if (*p == '@' || *p == '=') p++;
+        else if (*p == '<' || *p == '>' || *p == '!') {
+            cc__py.ReleaseBuffer(&view);
+            return 0;
+        }
+        if (!p[0] || p[1]) {
+            cc__py.ReleaseBuffer(&view);
+            return 0;
+        }
+        c = p[0];
+    }
+    switch (c) {
+    case 'd': tt = CC__JS_TA_FLOAT64; esz = 8; break;
+    case 'f': tt = CC__JS_TA_FLOAT32; esz = 4; break;
+    case 'i': tt = CC__JS_TA_INT32; esz = 4; break;
+    case 'q': tt = CC__JS_TA_BIGINT64; esz = 8; break;
+    case 'B': tt = CC__JS_TA_UINT8; esz = 1; break;
+    case 'b': tt = CC__JS_TA_INT8; esz = 1; break;
+    default:
+        cc__py.ReleaseBuffer(&view);
+        return 0;
+    }
+    if (view.itemsize != esz) {
+        cc__py.ReleaseBuffer(&view);
+        return 0;
+    }
+    nelem = (size_t)view.len / (size_t)esz;
+    {
+        void *ab = NULL, *ta = NULL, *data = NULL;
+        if (cc__js.CreateArraybuffer(env, (size_t)view.len, &data, &ab) != 0) {
+            cc__py.ReleaseBuffer(&view);
+            return -1;
+        }
+        if (view.len > 0 && view.buf) memcpy(data, view.buf, (size_t)view.len);
+        cc__py.ReleaseBuffer(&view);
+        if (cc__js.CreateTypedarray(env, tt, nelem, ab, 0, &ta) != 0)
+            return -1;
+        *out = ta;
+        return 1;
+    }
+}
+
+/* Callback args prefer a TypedArray copy of buffer exporters so leases
+ * are not retained; otherwise the usual scalar/handle materialization. */
+static int ccpy__cb_arg_to_js(CcPyDom *d, void *env, CCPyObj r, void **out) {
+    int rc = ccpy__buf_to_ta(env, r.o, out);
+    if (rc == 1) {
+        cc_py_obj_release(&r);
+        return 0;
+    }
+    if (rc < 0) {
+        cc_py_obj_release(&r);
+        return -1;
+    }
+    return ccpy__result_to_js(d, env, r, out);
 }
 
 /* Case 1: callback fires on the main thread inside a sync call — plain
@@ -540,7 +646,7 @@ static void *ccpy__cb_call_main(CcPyDom *d, CcJsCbBox *box, void *args,
         cc__py.IncRef(o);
         r.o = o;
         r.home = &d->py;
-        if (ccpy__result_to_js(d, env, r, &jsargs[i]) != 0)
+        if (ccpy__cb_arg_to_js(d, env, r, &jsargs[i]) != 0)
             return cc__py_raise("cc-python: cannot marshal a callback "
                                 "argument");
     }
@@ -802,7 +908,7 @@ static void ccpy__cb_service(void *env, CcJsCbReq *req) {
             r.o = req->argv[i];
             r.home = &d->py;
             req->argv[i] = NULL;
-            if (ccpy__result_to_js(d, env, r, &jsargs[i]) != 0) {
+            if (ccpy__cb_arg_to_js(d, env, r, &jsargs[i]) != 0) {
                 snprintf(req->errmsg, sizeof(req->errmsg),
                          "cc-python: cannot marshal a callback argument");
                 failed = 1;
@@ -893,6 +999,8 @@ static void *ccpy__cb_wrap(CcPyDom *d, void *env, void *fnval, char *errbuf,
 
 /* ---- the async lane ------------------------------------------------- */
 
+static int ccpy__is_py_int(void *o);
+
 /* Tag one owned Python value into a job's result slots — shared by the
  * direct call path and the asyncio task-done path. */
 static void ccpy__job_tag(CcPyDom *d, CcPyJob *j, CCPyObj val) {
@@ -942,6 +1050,47 @@ static void ccpy__job_tag(CcPyDom *d, CcPyJob *j, CCPyObj val) {
             return;
         }
         if (cc__py.ErrClear) cc__py.ErrClear();
+    }
+    /* Exact BigInt path for ints beyond signed i64 (no float collapse). */
+    if (ccpy__is_py_int(val.o)) {
+        void *sobj = cc__py.Str(val.o);
+        intptr_t n = 0;
+        const char *digits;
+        char *copy;
+        if (!sobj) {
+            if (cc__py.ErrClear) cc__py.ErrClear();
+            j->rkind = 6;
+            snprintf(j->errmsg, sizeof(j->errmsg),
+                     "cc-python: cannot materialize a large integer");
+            cc_py_obj_release(&val);
+            return;
+        }
+        digits = cc__py.AsUTF8AndSize(sobj, &n);
+        if (!digits) {
+            cc__py.DecRef(sobj);
+            if (cc__py.ErrClear) cc__py.ErrClear();
+            j->rkind = 6;
+            snprintf(j->errmsg, sizeof(j->errmsg),
+                     "cc-python: cannot materialize a large integer");
+            cc_py_obj_release(&val);
+            return;
+        }
+        copy = (char *)cc_arena_alloc(&d->exec_arena, (size_t)n + 1, 16);
+        if (!copy) {
+            cc__py.DecRef(sobj);
+            j->rkind = 6;
+            snprintf(j->errmsg, sizeof(j->errmsg), "cc-python: out of memory");
+            cc_py_obj_release(&val);
+            return;
+        }
+        memcpy(copy, digits, (size_t)n);
+        copy[n] = 0;
+        cc__py.DecRef(sobj);
+        j->rkind = 8;
+        j->rstr = copy;
+        j->rlen = (size_t)n;
+        cc_py_obj_release(&val);
+        return;
     }
     {
         CCResult_double_CCPyError fv = cc_py_obj_as_f64(&val);
@@ -1800,6 +1949,10 @@ static void ccpy__async_complete(void *env, void *jscb, void *ctx, void *data) {
             if (b && !ok) ccpy__box_undo(d, b);
             break;
         }
+        case 8:
+            v = cc__js_out_bigint_dec(env, j->rstr, j->rlen);
+            ok = v != NULL;
+            break;
         default: break;
         }
         if (ok) cc__js.ResolveDeferred(env, j->deferred, v);
@@ -2075,6 +2228,39 @@ static CCJsVal !>(CCError) CcPython_pyimport(CcPython *self, CCJs *js,
  * attribute (math.pi) IS the scalar; anything else stays a held handle
  * (np.linalg) for the Proxy to keep chaining.  One rule at every
  * boundary crossing. */
+/* Bulk output door: 1-D numeric buffer → TypedArray copy (mirrors
+ * isolated `toTypedArray`).  Not a handle — the bytes leave the domain. */
+static CCJsVal !>(CCError) CcPython_to_typed_array(CcPython *self, CCJs *js,
+                                                   CCJsExt dom, CCJsExt obj) {
+    CcPyDom *d = ccpy__dom(dom);
+    CcPyObjBox *b;
+    void *out = NULL;
+    int rc;
+    (void)self;
+    if (!d) return cc_err(CC_ERR_INVALID_ARG, "cc-python: bridge is closed");
+    b = ccpy__objbox(d, obj);
+    if (!b)
+        return cc_err(CC_ERR_INVALID_ARG,
+                      "cc-python: handle is released or belongs to another "
+                      "bridge");
+    cc__py_attach(&d->py);
+    rc = ccpy__buf_to_ta(js->env, b->obj.o, &out);
+    if (d->async_mode) cc_py_thread_leave();
+    if (rc == 0)
+        return cc_err(CC_ERR_INVALID_ARG,
+                      "cc-python: not a 1-D numeric buffer "
+                      "(ndarray / array.array / memoryview of "
+                      "f64/f32/i32/i64/u8)");
+    if (rc < 0 || !out)
+        return cc_err(CC_ERR_IO, "cc-python: cannot materialize typed array");
+    {
+        CCJsVal jv = { 0 };
+        jv.env = js->env;
+        jv.v = out;
+        return cc_ok(jv);
+    }
+}
+
 static CCJsVal !>(CCError) CcPython_getattr(CcPython *self, CCJs *js,
                                             CCJsExt dom, CCJsExt obj,
                                             const char *name) {
@@ -2137,6 +2323,166 @@ static long long !>(CCError) CcPython_release(CcPython *self, CCJsExt dom,
     return cc_ok(d->live);
 }
 
+/* Typed-array element kinds accepted as zero-copy memoryviews. */
+static int ccpy__ta_desc(int tt, int *esz, int *isf, int *iss,
+                         char *errbuf, size_t errcap) {
+    *esz = 0;
+    *isf = 0;
+    *iss = 1;
+    switch (tt) {
+    case CC__JS_TA_FLOAT64: *esz = 8; *isf = 1; return 0;
+    case CC__JS_TA_FLOAT32: *esz = 4; *isf = 1; return 0;
+    case CC__JS_TA_INT32:   *esz = 4; return 0;
+    case CC__JS_TA_BIGINT64: *esz = 8; return 0;
+    case CC__JS_TA_UINT8:
+    case CC__JS_TA_UINT8_CLAMPED:
+        *esz = 1;
+        *iss = 0;
+        return 0;
+    default:
+        snprintf(errbuf, errcap,
+                 "cc-python: unsupported typed-array element type "
+                 "(Float64/Float32/Int32/BigInt64/Uint8Array or Buffer)");
+        return -1;
+    }
+}
+
+/* bit_length is int-only among the numeric builtins — floats fail. */
+static int ccpy__is_py_int(void *o) {
+    void *a;
+    if (!o || !cc__py.GetAttrString) return 0;
+    a = cc__py.GetAttrString(o, "bit_length");
+    if (!a) {
+        if (cc__py.ErrClear) cc__py.ErrClear();
+        return 0;
+    }
+    cc__py.DecRef(a);
+    return 1;
+}
+
+/* Exact JS BigInt ← Python int (i64 / u64 / decimal digits). Never a
+ * lossy double: a Python int that cannot mint BigInt fails the call. */
+static int ccpy__py_int_to_js(void *env, void *o, void **out) {
+    unsigned long long uv;
+    void *sobj;
+    intptr_t n = 0;
+    const char *digits;
+    if (!o || !out) return -1;
+    uv = cc__py.LongAsUnsignedLongLong(o);
+    if (!(uv == (unsigned long long)-1 && cc__py.ErrOccurred())) {
+        if (uv <= (unsigned long long)CC__JS_MAX_SAFE_LL) {
+            return cc__js.CreateDouble(env, (double)uv, out);
+        }
+        if (cc__js.CreateBigintU64 &&
+            cc__js.CreateBigintU64(env, (uint64_t)uv, out) == 0)
+            return 0;
+        /* Fall through to decimal BigInt when uint64 mint is absent. */
+    }
+    if (cc__py.ErrClear) cc__py.ErrClear();
+    sobj = cc__py.Str(o);
+    if (!sobj) return -1;
+    digits = cc__py.AsUTF8AndSize(sobj, &n);
+    if (!digits) {
+        cc__py.DecRef(sobj);
+        if (cc__py.ErrClear) cc__py.ErrClear();
+        return -1;
+    }
+    *out = cc__js_out_bigint_dec(env, digits, (size_t)n);
+    cc__py.DecRef(sobj);
+    return *out ? 0 : -1;
+}
+
+/* JS BigInt → owned PyLong (caller DecRefs).  Digits land in job_arena
+ * (async) or call scratch (sync — caller must hold a js mark). */
+static void *ccpy__bigint_to_py(CcPyDom *d, void *env, void *v, int async,
+                                char *errbuf, size_t errcap) {
+    _Bool lossless = 0;
+    int64_t iv = 0;
+    uint64_t uv = 0;
+    void *s = NULL;
+    size_t len = 0, got = 0;
+    char *buf;
+    void *py;
+    if (cc__js.GetValueBigintI64 &&
+        cc__js.GetValueBigintI64(env, v, &iv, &lossless) == 0 && lossless)
+        return cc__py.LongFromLongLong((long long)iv);
+    if (cc__js.GetValueBigintU64 &&
+        cc__js.GetValueBigintU64(env, v, &uv, &lossless) == 0 && lossless)
+        return cc__py.LongFromUnsignedLongLong((unsigned long long)uv);
+    if (cc__js.CoerceToString(env, v, &s) != 0 || !s ||
+        cc__js.GetValueStringUtf8(env, s, NULL, 0, &len) != 0) {
+        snprintf(errbuf, errcap, "cc-python: cannot read a BigInt argument");
+        return NULL;
+    }
+    buf = async ? (char *)cc_arena_alloc(&d->job_arena, len + 1, 16)
+                : (char *)cc__js_scratch(len + 1);
+    if (!buf) {
+        snprintf(errbuf, errcap, "cc-python: out of memory");
+        return NULL;
+    }
+    if (cc__js.GetValueStringUtf8(env, s, buf, len + 1, &got) != 0) {
+        snprintf(errbuf, errcap, "cc-python: cannot read a BigInt argument");
+        return NULL;
+    }
+    py = cc__py.LongFromString(buf, NULL, 10);
+    if (!py) {
+        if (cc__py.ErrClear) cc__py.ErrClear();
+        snprintf(errbuf, errcap, "cc-python: cannot materialize a BigInt");
+        return NULL;
+    }
+    return py;
+}
+
+static int ccpy__string_arg(CcPyDom *d, void *env, void *v, CCPyArg *out,
+                            int async_copy, char *errbuf, size_t errcap) {
+    int lone = cc__js_string_lone_surrogate(env, v);
+    if (lone < 0) {
+        snprintf(errbuf, errcap, "cc-python: cannot read a string argument");
+        return -1;
+    }
+    if (lone > 0) {
+        snprintf(errbuf, errcap,
+                 "cc-python: string contains a lone UTF-16 surrogate");
+        return -1;
+    }
+    if (!async_copy) {
+        CCSlice s;
+        if (cc__js_inq_slice(&s, env, v) != 0) {
+            /* inq_slice may have thrown; clear so the bridge owns the error */
+            _Bool pend = 0;
+            void *exc = NULL;
+            if (cc__js.IsExceptionPending(env, &pend) == 0 && pend)
+                (void)cc__js.GetAndClearLastException(env, &exc);
+            snprintf(errbuf, errcap, "cc-python: cannot read a string argument");
+            return -1;
+        }
+        *out = cc__py_arg_slice(s);
+        return 0;
+    }
+    {
+        size_t len = 0, got = 0;
+        char *copy;
+        if (cc__js.GetValueStringUtf8(env, v, NULL, 0, &len) != 0) {
+            snprintf(errbuf, errcap, "cc-python: cannot read a string argument");
+            return -1;
+        }
+        copy = (char *)cc_arena_alloc(&d->job_arena, len + 1, 16);
+        if (!copy) {
+            snprintf(errbuf, errcap, "cc-python: out of memory");
+            return -1;
+        }
+        if (cc__js.GetValueStringUtf8(env, v, copy, len + 1, &got) != 0) {
+            snprintf(errbuf, errcap, "cc-python: cannot read a string argument");
+            return -1;
+        }
+        {
+            CCSlice sl = { copy, got };
+            *out = cc__py_arg_slice(sl);
+        }
+        return 0;
+    }
+}
+
 /* JS argument array → CCPyArg row.  Numbers with integral values cross
  * as Python int (JavaScript has one number type, and Python APIs that
  * want a float accept an int — the reverse is not true); typed arrays
@@ -2165,11 +2511,23 @@ static int ccpy__arg_from_js(CcPyDom *d, void *env, void *v, CCPyArg *out,
     if (t == CC__JS_T_NUMBER) {
         double dd = 0;
         cc__js.GetValueDouble(env, v, &dd);
-        if (dd == (double)(long long)dd && dd >= -9007199254740992.0 &&
-            dd <= 9007199254740992.0)
+        if (dd == 0.0 && signbit(dd))
+            *out = cc__py_arg_f(dd);
+        else if (dd == (double)(long long)dd &&
+                 dd >= -9007199254740992.0 && dd <= 9007199254740992.0)
             *out = cc__py_arg_i((long long)dd);
         else
             *out = cc__py_arg_f(dd);
+        return 0;
+    }
+    if (t == CC__JS_T_BIGINT) {
+        CCPyObj tmp;
+        void *py = ccpy__bigint_to_py(d, env, v, 0, errbuf, errcap);
+        if (!py) return -1;
+        tmp.o = py;
+        tmp.home = &d->py;
+        *out = cc__py_arg_obj(tmp);
+        if (owned_out) *owned_out = py;
         return 0;
     }
     if (t == CC__JS_T_BOOLEAN) {
@@ -2178,15 +2536,8 @@ static int ccpy__arg_from_js(CcPyDom *d, void *env, void *v, CCPyArg *out,
         *out = cc__py_arg_bool(bv ? 1 : 0);
         return 0;
     }
-    if (t == CC__JS_T_STRING) {
-        CCSlice s;
-        if (cc__js_inq_slice(&s, env, v) != 0) {
-            snprintf(errbuf, errcap, "cc-python: cannot read a string argument");
-            return -1;
-        }
-        *out = cc__py_arg_slice(s);
-        return 0;
-    }
+    if (t == CC__JS_T_STRING)
+        return ccpy__string_arg(d, env, v, out, 0, errbuf, errcap);
     if (t == CC__JS_T_EXTERNAL) {
         void *p = NULL;
         CcPyObjBox *b;
@@ -2214,16 +2565,8 @@ static int ccpy__arg_from_js(CcPyDom *d, void *env, void *v, CCPyArg *out,
                 snprintf(errbuf, errcap, "cc-python: cannot read a typed array");
                 return -1;
             }
-            switch (tt) {
-            case CC__JS_TA_FLOAT64: esz = 8; isf = 1; break;
-            case CC__JS_TA_FLOAT32: esz = 4; isf = 1; break;
-            case CC__JS_TA_INT32:   esz = 4; break;
-            case CC__JS_TA_BIGINT64: esz = 8; break;
-            default:
-                snprintf(errbuf, errcap,
-                         "cc-python: unsupported typed-array element type");
+            if (ccpy__ta_desc(tt, &esz, &isf, &iss, errbuf, errcap) != 0)
                 return -1;
-            }
             {
                 CCSlice s = { (char *)data, len };
                 *out = cc__py_arg_buffer(cc__py_arg_tslice(s, esz, isf, iss));
@@ -2232,15 +2575,15 @@ static int ccpy__arg_from_js(CcPyDom *d, void *env, void *v, CCPyArg *out,
         }
     }
     snprintf(errbuf, errcap,
-             "cc-python: unsupported argument (pass numbers, strings, "
+             "cc-python: unsupported argument (pass numbers, BigInt, strings, "
              "booleans, typed arrays, or bridge handles)");
     return -1;
 }
 
 /* Python result → JS value.  Scalars materialize (bool, str, int —
- * BigInt past 2^53 — float, None → undefined); anything else stays a
- * held reference, registered with the domain and returned as a handle
- * for the Proxy to wrap. */
+ * exact BigInt past 2^53, including the full u64 range and beyond —
+ * float, None → undefined); anything else stays a held reference,
+ * registered with the domain and returned as a handle for the Proxy. */
 static int ccpy__result_to_js(CcPyDom *d, void *env, CCPyObj r, void **out) {
     void *o = r.o;
     /* bool first — Python bool is a subtype of int. */
@@ -2279,6 +2622,17 @@ static int ccpy__result_to_js(CcPyDom *d, void *env, CCPyObj r, void **out) {
             return 0;
         }
         if (cc__py.ErrClear) cc__py.ErrClear();
+    }
+    /* Ints beyond signed i64: exact BigInt — never PyFloat_AsDouble. */
+    if (ccpy__is_py_int(o)) {
+        void *v = NULL;
+        if (ccpy__py_int_to_js(env, o, &v) != 0 || !v) {
+            cc_py_obj_release(&r);
+            return -1;
+        }
+        cc_py_obj_release(&r);
+        *out = v;
+        return 0;
     }
     {
         CCResult_double_CCPyError fv = cc_py_obj_as_f64(&r);
@@ -2393,11 +2747,22 @@ static int ccpy__arg_pack_async(CcPyDom *d, void *env, void *v, CcPyJob *j,
     if (t == CC__JS_T_NUMBER) {
         double dd = 0;
         cc__js.GetValueDouble(env, v, &dd);
-        if (dd == (double)(long long)dd && dd >= -9007199254740992.0 &&
-            dd <= 9007199254740992.0)
+        if (dd == 0.0 && signbit(dd))
+            *out = cc__py_arg_f(dd);
+        else if (dd == (double)(long long)dd &&
+                 dd >= -9007199254740992.0 && dd <= 9007199254740992.0)
             *out = cc__py_arg_i((long long)dd);
         else
             *out = cc__py_arg_f(dd);
+        return 0;
+    }
+    if (t == CC__JS_T_BIGINT) {
+        CCPyObj tmp;
+        void *py = ccpy__bigint_to_py(d, env, v, 1, errbuf, errcap);
+        if (!py) return -1;
+        tmp.o = py;
+        tmp.home = &d->py;
+        *out = cc__py_arg_obj(tmp);
         return 0;
     }
     if (t == CC__JS_T_BOOLEAN) {
@@ -2406,28 +2771,8 @@ static int ccpy__arg_pack_async(CcPyDom *d, void *env, void *v, CcPyJob *j,
         *out = cc__py_arg_bool(bv ? 1 : 0);
         return 0;
     }
-    if (t == CC__JS_T_STRING) {
-        size_t len = 0, got = 0;
-        char *copy;
-        if (cc__js.GetValueStringUtf8(env, v, NULL, 0, &len) != 0) {
-            snprintf(errbuf, errcap, "cc-python: cannot read a string argument");
-            return -1;
-        }
-        copy = (char *)cc_arena_alloc(&d->job_arena, len + 1, 16);
-        if (!copy) {
-            snprintf(errbuf, errcap, "cc-python: out of memory");
-            return -1;
-        }
-        if (cc__js.GetValueStringUtf8(env, v, copy, len + 1, &got) != 0) {
-            snprintf(errbuf, errcap, "cc-python: cannot read a string argument");
-            return -1;
-        }
-        {
-            CCSlice sl = { copy, got };
-            *out = cc__py_arg_slice(sl);
-        }
-        return 0;
-    }
+    if (t == CC__JS_T_STRING)
+        return ccpy__string_arg(d, env, v, out, 1, errbuf, errcap);
     if (t == CC__JS_T_EXTERNAL) {
         void *p = NULL;
         CcPyObjBox *b;
@@ -2458,16 +2803,8 @@ static int ccpy__arg_pack_async(CcPyDom *d, void *env, void *v, CcPyJob *j,
                 snprintf(errbuf, errcap, "cc-python: cannot read a typed array");
                 return -1;
             }
-            switch (tt) {
-            case CC__JS_TA_FLOAT64: esz = 8; isf = 1; break;
-            case CC__JS_TA_FLOAT32: esz = 4; isf = 1; break;
-            case CC__JS_TA_INT32:   esz = 4; break;
-            case CC__JS_TA_BIGINT64: esz = 8; break;
-            default:
-                snprintf(errbuf, errcap,
-                         "cc-python: unsupported typed-array element type");
+            if (ccpy__ta_desc(tt, &esz, &isf, &iss, errbuf, errcap) != 0)
                 return -1;
-            }
             /* Pin the buffer to the job: the lease spans submit to
              * completion, not this stack frame. */
             if (cc__js.CreateReference(env, v, 1, &ref) != 0) {
@@ -2483,7 +2820,7 @@ static int ccpy__arg_pack_async(CcPyDom *d, void *env, void *v, CcPyJob *j,
         }
     }
     snprintf(errbuf, errcap,
-             "cc-python: unsupported argument (pass numbers, strings, "
+             "cc-python: unsupported argument (pass numbers, BigInt, strings, "
              "booleans, typed arrays, or bridge handles)");
     return -1;
 }

@@ -300,7 +300,7 @@ sum above is this path.
 Methods may take `CCJsVal` / `CCPyObj` and call through with the same
 UFCS surface (`obj.step(21) !>`). Errors cross with messages. Full
 surface: `tests/js_module_double_result_mod.ccs` (slices, kwargs, errors,
-outbound objects, BigInt-range ints).
+outbound objects, exact BigInt for Python ints past 2^53).
 
 ## Plain C
 
@@ -360,6 +360,10 @@ One day on a 4-vCPU x86-64 shared VM (node 22, python 3.11, numpy 2.5;
 | artifact | 26KB `.node` / 35KB `.abi3.so` |
 
 **`concurrent-c-python`, in-process** (any Python package from Node, zero-copy):
+
+Typed-array args are writable leases for the call; `proxy.toTypedArray()`
+copies 1-D numeric results out. Host callbacks receive Proxies (missing
+attrs throw) and buffer args as real TypedArrays (lease→callback copies).
 
 | crossing | cost |
 |---|---|

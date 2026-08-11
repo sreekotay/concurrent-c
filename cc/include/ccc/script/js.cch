@@ -219,6 +219,8 @@ typedef struct CC__JsSyms {
     int (*GetValueBool)(void *env, void *value, _Bool *out);
     int (*GetValueStringUtf8)(void *env, void *value, char *buf, size_t cap,
                               size_t *out);
+    int (*GetValueStringUtf16)(void *env, void *value, uint16_t *buf,
+                               size_t cap, size_t *out);
     int (*ThrowError)(void *env, const char *code, const char *msg);
     int (*ThrowTypeError)(void *env, const char *code, const char *msg);
     int (*ThrowRangeError)(void *env, const char *code, const char *msg);
@@ -369,6 +371,7 @@ have_lib:;
     CC__JS_SYM(GetValueDouble, "napi_get_value_double")
     CC__JS_SYM(GetValueBool, "napi_get_value_bool")
     CC__JS_SYM(GetValueStringUtf8, "napi_get_value_string_utf8")
+    CC__JS_SYM(GetValueStringUtf16, "napi_get_value_string_utf16")
     CC__JS_SYM(ThrowError, "napi_throw_error")
     CC__JS_SYM(ThrowTypeError, "napi_throw_type_error")
     CC__JS_SYM(ThrowRangeError, "napi_throw_range_error")
@@ -794,6 +797,34 @@ static int cc__js_inq_bool(_Bool *dst, void *env, void *o) {
     return 0;
 }
 
+/* Lone UTF-16 surrogates are refused: UTF-8 extract would replace them
+ * with U+FFFD and look like success.  0 = clean, 1 = lone surrogate,
+ * -1 = cannot read. */
+static int cc__js_string_lone_surrogate(void *env, void *o) {
+    size_t n16 = 0, got = 0, i;
+    uint16_t *u;
+    if (!o || cc__js.GetValueStringUtf16(env, o, NULL, 0, &n16) != 0)
+        return -1;
+    if (n16 == 0) return 0;
+    u = (uint16_t *)cc__js_scratch((n16 + 1) * sizeof(uint16_t));
+    if (!u) return -1;
+    if (cc__js.GetValueStringUtf16(env, o, u, n16 + 1, &got) != 0) return -1;
+    for (i = 0; i < got; i++) {
+        uint16_t c = u[i];
+        if (c >= 0xD800u && c <= 0xDBFFu) {
+            if (i + 1 >= got) return 1;
+            {
+                uint16_t d = u[i + 1];
+                if (d < 0xDC00u || d > 0xDFFFu) return 1;
+            }
+            i++;
+        } else if (c >= 0xDC00u && c <= 0xDFFFu) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* A `string` argument copies into call scratch — Node-API exposes no
  * borrowed UTF-8 — and the copy lives until the trampoline restores its
  * mark, i.e. the whole call.  A callee keeping the bytes past its return
@@ -801,13 +832,38 @@ static int cc__js_inq_bool(_Bool *dst, void *env, void *o) {
 static int cc__js_inq_slice(CCSlice *dst, void *env, void *o) {
     size_t len = 0, got = 0;
     char *buf;
-    if (!o || cc__js.GetValueStringUtf8(env, o, NULL, 0, &len) != 0)
+    int lone;
+    if (!o) return -1;
+    lone = cc__js_string_lone_surrogate(env, o);
+    if (lone < 0) return -1;
+    if (lone > 0) {
+        cc__js.ThrowTypeError(env, NULL,
+                              "string contains a lone UTF-16 surrogate");
+        return -1;
+    }
+    if (cc__js.GetValueStringUtf8(env, o, NULL, 0, &len) != 0)
         return -1;
     buf = (char *)cc__js_scratch(len + 1);
     if (!buf) return -1;
     if (cc__js.GetValueStringUtf8(env, o, buf, len + 1, &got) != 0) return -1;
     *dst = cc_slice_from_buffer(buf, got);
     return 0;
+}
+
+/* Exact BigInt from a decimal digit string (sign + digits).  Used when a
+ * Python int does not fit signed/unsigned i64 — never a lossy double. */
+static void *cc__js_out_bigint_dec(void *env, const char *digits, size_t len) {
+    void *global = NULL, *ctor = NULL, *s = NULL, *r = NULL;
+    void *argv[1];
+    if (!digits) return NULL;
+    if (len == 0) len = strlen(digits);
+    if (cc__js.GetGlobal(env, &global) != 0 || !global) return NULL;
+    if (cc__js.GetNamedProperty(env, global, "BigInt", &ctor) != 0 || !ctor)
+        return NULL;
+    if (cc__js.CreateStringUtf8(env, digits, len, &s) != 0 || !s) return NULL;
+    argv[0] = s;
+    if (cc__js.CallFunction(env, global, ctor, 1, argv, &r) != 0) return NULL;
+    return r;
 }
 
 static int cc__js_inq_cstr(const char **dst, void *env, void *o) {
@@ -3867,13 +3923,31 @@ static const char cc__js_dom_broker_text[] =
     "  if (v === null) return true;\n"
     "  const t = typeof v;\n"
     "  if (t === 'number') return Number.isFinite(v);\n"
-    "  if (t === 'string' || t === 'boolean') return true;\n"
+    "  if (t === 'string' || t === 'boolean' || t === 'bigint') return true;\n"
     "  if (t !== 'object') return false;\n"
     "  const proto = Object.getPrototypeOf(v);\n"
     "  if (Array.isArray(v)) return v.every((x) => isPlain(x, depth + 1));\n"
     "  if (proto === Object.prototype || proto === null)\n"
     "    return Object.values(v).every((x) => isPlain(x, depth + 1));\n"
     "  return false;\n"
+    "}\n"
+    "\n"
+    "/* Tag BigInts beyond 2^53 as {$bi: digits} so JSON never lossy-doubles. */\n"
+    "function encodeVal(v) {\n"
+    "  if (typeof v === 'bigint') {\n"
+    "    if (v >= -(2n ** 53n) && v <= (2n ** 53n)) return Number(v);\n"
+    "    return { $bi: v.toString() };\n"
+    "  }\n"
+    "  if (Array.isArray(v)) return v.map(encodeVal);\n"
+    "  if (v && typeof v === 'object') {\n"
+    "    const proto = Object.getPrototypeOf(v);\n"
+    "    if (proto === Object.prototype || proto === null) {\n"
+    "      const o = {};\n"
+    "      for (const k of Object.keys(v)) o[k] = encodeVal(v[k]);\n"
+    "      return o;\n"
+    "    }\n"
+    "  }\n"
+    "  return v;\n"
     "}\n"
     "\n"
     "/* Typed buffers cross as tagged bytes: small inline as base64, big\n"
@@ -3908,6 +3982,10 @@ static const char cc__js_dom_broker_text[] =
     "  if (v === undefined) return { u: 1 };\n"
     "  if (typeof v === 'number' && !Number.isFinite(v))\n"
     "    return { nf: Number.isNaN(v) ? 'nan' : v > 0 ? 'inf' : '-inf' };\n"
+    "  if (typeof v === 'bigint') {\n"
+    "    if (v >= -(2n ** 53n) && v <= (2n ** 53n)) return { v: Number(v) };\n"
+    "    return { bi: v.toString() };\n"
+    "  }\n"
     "  if (v !== null && typeof v === 'object') {\n"
     "    const kind = TA_KIND.get(v.constructor);\n"
     "    if (kind)\n"
@@ -3923,7 +4001,7 @@ static const char cc__js_dom_broker_text[] =
     "        Object.keys(v).length === 0)\n"
     "      return { h: put(v) };\n"
     "  }\n"
-    "  if (v === null || isPlain(v, 0)) return { v };\n"
+    "  if (v === null || isPlain(v, 0)) return { v: encodeVal(v) };\n"
     "  return { h: put(v) };\n"
     "}\n"
     "\n"
@@ -3951,6 +4029,7 @@ static const char cc__js_dom_broker_text[] =
     "    if (a.$f !== undefined) return makeCallback(a.$f);\n"
     "    if (a.$nf !== undefined)\n"
     "      return a.$nf === 'nan' ? NaN : a.$nf === 'inf' ? Infinity : -Infinity;\n"
+    "    if (a.$bi !== undefined) return BigInt(a.$bi);\n"
     "    if (a.$ta !== undefined || a.$shm !== undefined) {\n"
     "      let buf;\n"
     "      if (a.$shm !== undefined) {\n"
@@ -4043,7 +4122,7 @@ static const char cc__js_dom_broker_text[] =
     "}\n"
     "\n"
     "main();\n"
-;
+    ;
 
 #define CC__JS_DOM_HOSTED   0
 #define CC__JS_DOM_ISOLATED 1

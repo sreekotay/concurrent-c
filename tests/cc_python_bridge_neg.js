@@ -67,8 +67,87 @@ async function raisesAsync(fn, re) {
       out('neg_inproc_scalar_nan', Number.isNaN(id(NaN)));
       out('neg_inproc_scalar_inf', id(Infinity) === Infinity);
       out('neg_inproc_scalar_ninf', id(-Infinity) === -Infinity);
-      // -0 may collapse to +0 across the bridge; must not throw.
-      out('neg_inproc_scalar_neg0', id(-0) === 0);
+      // Signed -0 must round-trip (not collapse via int-valued double).
+      out('neg_inproc_scalar_neg0', Object.is(id(-0), -0));
+
+      // Exact BigInt: beyond signed i64 (u64 max) and round-trip.
+      const u64max = builtins.eval('lambda: (1 << 64) - 1', g)();
+      out('neg_inproc_u64_bigint',
+          typeof u64max === 'bigint' && u64max === (1n << 64n) - 1n);
+      out('neg_inproc_bigint_roundtrip', id(u64max) === u64max);
+      const huge = 10n ** 40n;
+      out('neg_inproc_bigint_huge', id(huge) === huge);
+
+      // Uint8Array / Buffer zero-copy memoryviews.
+      const mv_sum = builtins.eval('lambda mv: sum(mv)', g);
+      out('neg_inproc_u8_sum',
+          mv_sum(new Uint8Array([1, 2, 3, 4])) === 10);
+      out('neg_inproc_buffer_sum',
+          mv_sum(Buffer.from([9, 1])) === 10);
+
+      // Lone surrogates must refuse — not become U+FFFD.
+      out('neg_inproc_lone_surrogate',
+          raisesSync(() => id('\uD800'), /lone UTF-16 surrogate/));
+
+      // R2: callback args are Proxies — missing attr throws, not undefined.
+      {
+        const call = builtins.eval('lambda f, x: f(x)', g);
+        const lst = builtins.eval('[1, 2, 3]', g);
+        let saw;
+        try {
+          call((x) => x.no_such_attr_zzz, lst);
+          saw = 'no-throw';
+        } catch (e) {
+          saw = /no_such_attr_zzz|AttributeError|no attribute/i.test(e.message)
+              ? 'threw' : ('other:' + e.message);
+        }
+        out('neg_inproc_cb_missing_attr', saw === 'threw');
+      }
+
+      // R1: toTypedArray door on in-process handles.
+      {
+        const arr = builtins.eval(
+            'lambda: __import__("array").array("d", [1.5, 2.5])', g)();
+        const ta = arr.toTypedArray();
+        out('neg_inproc_to_typed_array',
+            ta instanceof Float64Array && ta.length === 2 && ta[0] === 1.5);
+      }
+
+      // R3: leased buffer may cross into a JS callback (copied, not retained).
+      {
+        const call = builtins.eval('lambda f, mv: f(mv)', g);
+        const got = call((x) => {
+          if (!(x instanceof Float64Array)) return -1;
+          return x[0] + x[1];
+        }, new Float64Array([3, 4]));
+        out('neg_inproc_lease_to_cb', got === 7);
+      }
+
+      // Symbol.iterator — for..of over a Python list.
+      {
+        const lst = builtins.eval('[10, 20, 30]', g);
+        const got = [];
+        for (const x of lst) got.push(x);
+        out('neg_inproc_for_of',
+            got.length === 3 && got[0] === 10 && got[2] === 30);
+      }
+
+      // Empty str(exc) still names the type (KeyError()).
+      {
+        builtins.exec('def _boom_ke():\n  raise KeyError()\n', g);
+        const boom = builtins.eval('_boom_ke', g);
+        out('neg_inproc_empty_exc_type',
+            raisesSync(() => boom(), /KeyError/));
+      }
+
+      // Attr cache: repeated mod.fn does not grow the handle ledger.
+      {
+        const math = py.import('math');
+        void math.floor; // warm
+        const base = py.stats();
+        for (let i = 0; i < 200; i++) math.floor(1.2);
+        out('neg_inproc_attr_cache', py.stats() <= base + 2);
+      }
     }
 
     // sys.exit must become an articulate error — not take down Node.
@@ -95,9 +174,13 @@ async function raisesAsync(fn, re) {
 
     out('neg_iso_dollar_key',
         await raisesAsync(() => id({ $x: 1 }), /reserved/));
-    out('neg_iso_bigint',
-        await raisesAsync(() => id(10n ** 20n), /bigint beyond 2\^53/));
-
+    {
+      const huge = 10n ** 40n;
+      out('neg_iso_bigint_roundtrip', (await id(huge)) === huge);
+      const u64 = await (b.eval('(1 << 64) - 1'));
+      out('neg_iso_u64_bigint',
+          typeof u64 === 'bigint' && u64 === (1n << 64n) - 1n);
+    }
     // Lazy import fail surfaces on first use.
     const missing = py.import('definitely_not_a_pkg_neg_xyz');
     out('neg_iso_lazy_import_fail',

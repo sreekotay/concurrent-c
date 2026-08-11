@@ -113,8 +113,12 @@ def _decode(v):
                     _parked.append(r)
             return cb
         if '$nf' in v:
+            if v['$nf'] == '-0':
+                return -0.0
             return {'inf': math.inf, '-inf': -math.inf}.get(v['$nf'],
                                                             math.nan)
+        if '$bi' in v:
+            return int(v['$bi'])
         if '$ta' in v:
             raw = base64.b64decode(v['b64'])
             np = _np()
@@ -154,7 +158,7 @@ def _plain(v, depth=0):
     if isinstance(v, float):
         return True  # non-finite handled at encode
     if isinstance(v, int):
-        return -(2**53) < v < 2**53
+        return True  # beyond 2^53 tags as {$bi: digits}; never a JSON number
     if isinstance(v, (list, tuple)):
         return all(_plain(x, depth + 1) for x in v)
     if isinstance(v, dict):
@@ -171,15 +175,22 @@ def _encode_val(v):
     cross as {"$h": id}, never as a raw Python object (json.dumps
     would raise).  1-D buffers cross as {"$ta":...}/{"$shm":...}
     so JS callbacks see typed arrays, not opaque handles."""
-    if isinstance(v, float) and not math.isfinite(v):
-        return {'$nf': 'inf' if v == math.inf
-                else '-inf' if v == -math.inf else 'nan'}
+    if isinstance(v, float):
+        if math.copysign(1.0, v) < 0 and v == 0.0:
+            return {'$nf': '-0'}
+        if not math.isfinite(v):
+            return {'$nf': 'inf' if v == math.inf
+                    else '-inf' if v == -math.inf else 'nan'}
     if isinstance(v, (list, tuple)):
         return [_encode_val(x) for x in v]
     if isinstance(v, dict):
         return {k: _encode_val(x) for k, x in v.items()}
-    if v is None or isinstance(v, (bool, int, str)):
+    if v is None or isinstance(v, bool) or isinstance(v, str):
         return v
+    if isinstance(v, int):
+        if -(2**53) < v < 2**53:
+            return v
+        return {'$bi': str(v)}
     if isinstance(v, float):
         return v
     np = _np()

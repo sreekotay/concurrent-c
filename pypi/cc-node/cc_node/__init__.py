@@ -282,8 +282,13 @@ class Bridge:
             self._ncb += 1
             self._cbs[fid] = a
             return {"$f": fid}
-        if a is None or isinstance(a, (bool, int, str)):
+        if a is None or isinstance(a, bool) or isinstance(a, str):
             return a
+        if isinstance(a, int):
+            # Exact across JSON: beyond 2^53 tags as {$bi: digits}.
+            if -(2 ** 53) < a < 2 ** 53:
+                return a
+            return {"$bi": str(a)}
         if isinstance(a, float):
             if math.isnan(a):
                 return {"$nf": "nan"}
@@ -359,6 +364,22 @@ class Bridge:
         a.frombytes(raw)
         return a
 
+    def _decode_val(self, a):
+        """Walk nested wire values (arrays/objects) so {$bi} becomes int."""
+        if isinstance(a, dict):
+            if "$bi" in a:
+                return int(a["$bi"])
+            if "$nf" in a:
+                return {"nan": math.nan, "inf": math.inf,
+                        "-inf": -math.inf}.get(a["$nf"], math.nan)
+            if "$h" in a or "$f" in a or "$ta" in a or "$shm" in a:
+                # Top-level shapes only — nested live handles stay opaque.
+                return a
+            return {k: self._decode_val(v) for k, v in a.items()}
+        if isinstance(a, list):
+            return [self._decode_val(x) for x in a]
+        return a
+
     def _decode_result(self, msg):
         if "u" in msg:
             return None
@@ -367,9 +388,13 @@ class Bridge:
         if "nf" in msg:
             return {"nan": math.nan, "inf": math.inf,
                     "-inf": -math.inf}[msg["nf"]]
+        if "bi" in msg:
+            return int(msg["bi"])
         if "ta" in msg or "shm" in msg:
             return self._decode_buffer(msg)
-        return msg.get("v")
+        if "v" in msg:
+            return self._decode_val(msg["v"])
+        return None
 
     # ---- surface ----
 

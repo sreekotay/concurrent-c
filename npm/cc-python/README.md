@@ -107,13 +107,23 @@ handles chain (`const fft = await np.fft.fft(buf); await np.abs(fft)`).
 
 - Attribute chains are Python (`np.linalg.norm`). Scalars materialize;
   everything else stays a proxy. `String(proxy)` → `str()`.
-- `Float64Array` args are zero-copy memoryviews for the call (kept past
-  return is an error, not corruption).
+- Typed-array args (`Float64`/`Float32`/`Int32`/`BigInt64`/`Uint8Array`
+  and Node `Buffer`) are zero-copy memoryviews for the call — writable
+  (writes land in the caller's array); kept past return is an error, not
+  corruption. Bulk results: `proxy.toTypedArray()` (in-process and
+  isolated) copies a 1-D numeric buffer out as a real TypedArray.
 - Handles are per-domain (`stats()` / `release(proxy)`). `destroy()` /
-  `using` / GC sweeps once; afterwards: `bridge is closed`.
-- JS numbers → `int` or `float`; ints past 2^53 come back as `BigInt`.
-  Proxies are function-targets. Bridge doors (`then`, `toString` /
-  `toTypedArray`) can shadow Python names — use `builtins.getattr`.
+  `using` / GC sweeps once; afterwards: `bridge is closed`. Unknown
+  attribute access on a handle throws (not silent `undefined`) — host
+  callbacks receive the same Proxies as call results.
+- JS numbers → `int` or `float`; Python `int` past 2^53 comes back as
+  exact `BigInt` (full range — never a lossy double). `BigInt` args
+  round-trip to Python `int`. Signed `-0` stays a float (not collapsed
+  to `0`). Lone UTF-16 surrogates in strings are refused. Proxies are
+  function-targets and iterable (`for…of` / `Symbol.iterator` →
+  `__next__`). Exceptions with empty `str(exc)` still name the type.
+  Bridge doors (`then`, `toString` / `toTypedArray`) can shadow Python
+  names — use `builtins.getattr`.
 - Isolated is crash isolation, not a sandbox. Spill files: private 0700
   dir per bridge, removed on destroy.
 

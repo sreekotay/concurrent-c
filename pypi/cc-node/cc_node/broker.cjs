@@ -106,13 +106,31 @@ function isPlain(v, depth) {
   if (v === null) return true;
   const t = typeof v;
   if (t === 'number') return Number.isFinite(v);
-  if (t === 'string' || t === 'boolean') return true;
+  if (t === 'string' || t === 'boolean' || t === 'bigint') return true;
   if (t !== 'object') return false;
   const proto = Object.getPrototypeOf(v);
   if (Array.isArray(v)) return v.every((x) => isPlain(x, depth + 1));
   if (proto === Object.prototype || proto === null)
     return Object.values(v).every((x) => isPlain(x, depth + 1));
   return false;
+}
+
+/* Tag BigInts beyond 2^53 as {$bi: digits} so JSON never lossy-doubles. */
+function encodeVal(v) {
+  if (typeof v === 'bigint') {
+    if (v >= -(2n ** 53n) && v <= (2n ** 53n)) return Number(v);
+    return { $bi: v.toString() };
+  }
+  if (Array.isArray(v)) return v.map(encodeVal);
+  if (v && typeof v === 'object') {
+    const proto = Object.getPrototypeOf(v);
+    if (proto === Object.prototype || proto === null) {
+      const o = {};
+      for (const k of Object.keys(v)) o[k] = encodeVal(v[k]);
+      return o;
+    }
+  }
+  return v;
 }
 
 /* Typed buffers cross as tagged bytes: small inline as base64, big
@@ -147,6 +165,10 @@ function encodeResult(v) {
   if (v === undefined) return { u: 1 };
   if (typeof v === 'number' && !Number.isFinite(v))
     return { nf: Number.isNaN(v) ? 'nan' : v > 0 ? 'inf' : '-inf' };
+  if (typeof v === 'bigint') {
+    if (v >= -(2n ** 53n) && v <= (2n ** 53n)) return { v: Number(v) };
+    return { bi: v.toString() };
+  }
   if (v !== null && typeof v === 'object') {
     const kind = TA_KIND.get(v.constructor);
     if (kind)
@@ -162,7 +184,7 @@ function encodeResult(v) {
         Object.keys(v).length === 0)
       return { h: put(v) };
   }
-  if (v === null || isPlain(v, 0)) return { v };
+  if (v === null || isPlain(v, 0)) return { v: encodeVal(v) };
   return { h: put(v) };
 }
 
@@ -190,6 +212,7 @@ function decodeVal(a) {
     if (a.$f !== undefined) return makeCallback(a.$f);
     if (a.$nf !== undefined)
       return a.$nf === 'nan' ? NaN : a.$nf === 'inf' ? Infinity : -Infinity;
+    if (a.$bi !== undefined) return BigInt(a.$bi);
     if (a.$ta !== undefined || a.$shm !== undefined) {
       let buf;
       if (a.$shm !== undefined) {
