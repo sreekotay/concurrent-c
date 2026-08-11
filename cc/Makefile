@@ -272,12 +272,14 @@ $(OUT_RUNTIME)/.seed.stamp: $(LOWER_HEADERS_INPUTS) $(wildcard runtime/*.c runti
 		"$(abspath runtime)" "$(abspath $(OUT_RUNTIME))"
 	@touch $@
 
+# Stage-1 is a normal prereq (not a recipe-time recursive make). The old
+# `if [ ! -x ]; then $(MAKE) …` raced cold `make -j`: parent linking
+# stage-1 for engine headers while the stamp recipe also linked it →
+# ETXTBSY ("Text file busy") on the first exec. Stage-1 objs depend on
+# the seed stamp only, so this edge stays acyclic.
 $(LOWER_HEADERS_STAMP): $(LOWER_HEADERS_INPUTS) $(wildcard runtime/*.c runtime/*.h) \
-		$(OUT_RUNTIME)/.seed.stamp
+		$(OUT_RUNTIME)/.seed.stamp $(LOWER_HEADERS1_BINARY)
 	@mkdir -p $(OUT_INCLUDE) $(OUT_RUNTIME)
-	@if [ ! -x "$(LOWER_HEADERS1_BINARY)" ]; then \
-		$(MAKE) $(LOWER_HEADERS1_BINARY); \
-	fi
 	@$(LOWER_HEADERS1_BINARY) include $(OUT_INCLUDE) --rewrite-includes runtime $(OUT_RUNTIME)
 	@touch $@
 
@@ -509,11 +511,10 @@ $(OBJDIR)/runtime/arena_state.o: $(OUT_RUNTIME)/.seed.stamp
 	$(CC) $(CFLAGS) -MMD -MP -MF $(@:.o=.d) -c $(OUT_RUNTIME)/arena_state.c -o $@
 
 # Stage-1 objs compile against the crude seed (not the lowered stamp —
-# the stamp recipe runs `$(MAKE) lower_headers_stage1`, and a stamp dep
-# here recurses forever on a cold -j build). Several of these TUs
-# `#include <ccc/*.h>` (executor, preprocess, emit_plan, …); without the
-# seed prereq a cold `make -j` races seed_headers and fails with
-# `ccc/cc_arena.h: No such file` (macOS CI).
+# a stamp dep here would cycle: stamp → stage-1 binary → these objs).
+# Several of these TUs `#include <ccc/*.h>` (executor, preprocess,
+# emit_plan, …); without the seed prereq a cold `make -j` races
+# seed_headers and fails with `ccc/cc_arena.h: No such file` (macOS CI).
 $(LOWER_HEADERS1_OBJS): $(OUT_RUNTIME)/.seed.stamp
 
 # Host ccc objects that `#include <ccc/*.h>` need the stamp first.
