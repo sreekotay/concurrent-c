@@ -19,9 +19,11 @@ CC embed Waves A–C):
 (`./stress/bridge/run.sh`, including [`cc_embed_stress.ccs`](../stress/bridge/cc_embed_stress.ccs)).
 
 Publish: `./scripts/publish_bridges.sh --publish --minor` bumps, packs,
-and npm-publishes; PyPI goes through CI OIDC (`gh workflow run
-publish-cc-node.yml` after committing the bumps). Use `--pypi-twine` for
-local twine. See [`pypi/cc-node/README.md`](../pypi/cc-node/README.md).
+commits, and dispatches CI OIDC for both registries
+(`publish-cc-python.yml` + `publish-cc-node.yml`). Fallbacks:
+`--npm-local`, `--pypi-twine`. See
+[`npm/cc-python/README.md`](../npm/cc-python/README.md) and
+[`pypi/cc-node/README.md`](../pypi/cc-node/README.md).
 
 [Concurrent-C](https://github.com/sreekotay/concurrent-c) is a strict
 C11-superset preprocessor: `.ccs` lowers to plain C and compiles with

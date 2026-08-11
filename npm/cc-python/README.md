@@ -205,10 +205,19 @@ pick their own.
 
 ## Build / publish
 
+**npm Trusted Publishing (OIDC)** — provenance on every release, no publish token:
+
+1. Package [Access](https://www.npmjs.com/package/concurrent-c-python/access) →
+   Trusted Publisher → GitHub Actions: owner `sreekotay`, repo `concurrent-c`,
+   workflow `publish-cc-python.yml`, environment `npm`, allow `npm publish`
+2. GitHub Environment `npm`
+3. After the first green OIDC publish: Publishing access → require 2FA and
+   **disallow tokens**; revoke automation tokens
+
 ```
 ./scripts/publish_bridges.sh
-./scripts/publish_bridges.sh --publish
-ccc build npm/cc-python/src/cc_python.ccs   # → bin/cc_python.node
+./scripts/publish_bridges.sh --publish --minor   # packs locally; npm+PyPI via CI
+ccc build npm/cc-python/src/cc_python.ccs        # → bin/cc_python.node
 ```
 
 `CC_PYTHON_ADDON` overrides addon path. Own hot path in C/CC → native

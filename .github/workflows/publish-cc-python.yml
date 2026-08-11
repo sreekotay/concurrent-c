@@ -1,0 +1,85 @@
+# Publish npm/cc-python (concurrent-c-python) via npm Trusted Publishing (OIDC).
+# Provenance attestations are generated automatically on trusted publish.
+#
+# One-time on https://www.npmjs.com/package/concurrent-c-python/access:
+#   Trusted Publisher → GitHub Actions
+#   Organization or user: sreekotay
+#   Repository:           concurrent-c
+#   Workflow filename:    publish-cc-python.yml
+#   Environment name:     npm
+#   Allowed actions:      npm publish
+#
+# Also create a GitHub Environment named `npm` (Settings → Environments).
+# After the first OIDC publish succeeds: package Settings → Publishing access
+# → require 2FA and disallow tokens; revoke any automation tokens.
+#
+# Usage:
+#   gh workflow run publish-cc-python.yml
+#   # or tag: git tag cc-python-v0.18.0 && git push origin cc-python-v0.18.0
+name: publish-cc-python
+
+on:
+  workflow_dispatch: {}
+  push:
+    tags:
+      - 'cc-python-v*'
+
+concurrency:
+  group: publish-cc-python
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/concurrent-c-python
+    permissions:
+      id-token: write   # mandatory for Trusted Publishing + provenance
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # No registry-url / NODE_AUTH_TOKEN — OIDC is the only publish cred.
+          node-version: '22'
+
+      - name: npm CLI for trusted publishing (≥11.5.1)
+        run: npm install -g npm@latest
+
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y zlib1g-dev libcurl4-openssl-dev python3-dev
+
+      - name: Fetch TinyCC submodule
+        run: |
+          git submodule update --init third_party/tcc
+          if [ ! -f third_party/tcc/configure ]; then
+            git submodule update --checkout --force third_party/tcc
+          fi
+
+      - name: Build toolchain
+        run: make -C cc -j"$(nproc)"
+
+      - name: Wire smoke
+        run: |
+          ./cc/bin/ccc build npm/cc-python/src/cc_python.ccs -o bin/cc_python.node
+          node tests/bridge_wire.js
+
+      - name: Prepare + pack
+        run: |
+          rm -f out/concurrent-c-python-*.tgz
+          rm -rf npm/cc-python/bin npm/cc-python/vendor
+          ./npm/cc-python/scripts/prepare-publish.sh
+          ls -la out/concurrent-c-python-*.tgz
+
+      - name: Publish to npm (OIDC)
+        run: |
+          # Do not set NODE_AUTH_TOKEN — OIDC is the credential; provenance is automatic.
+          TGZ="$(ls -1t out/concurrent-c-python-*.tgz | head -1)"
+          TGZ="$(cd "$(dirname "$TGZ")" && pwd)/$(basename "$TGZ")"
+          npm publish "$TGZ" --access public

@@ -157,12 +157,11 @@ From Concurrent-C (not Python): `cc_js_new(false, &a)` hosted
 gh workflow run publish-cc-node.yml
 ```
 
-Local / npm sibling:
+Both bridges (npm OIDC + PyPI OIDC):
 
 ```
 ./scripts/publish_bridges.sh --publish --minor
-gh workflow run publish-cc-node.yml
-# twine fallback: … --pypi-twine
+# fallbacks: --npm-local / --pypi-twine
 ```
 
 Examples: `use_node`, `bench_wire`, `benchmarks.multi_domain`.  
