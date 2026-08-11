@@ -156,6 +156,8 @@ jobs:
           # Fiber switch stacks: disable SUAR; redis uses 1 shard under ASan.
           ASAN_OPTIONS: detect_leaks=0:halt_on_error=1:detect_stack_use_after_return=0
         run: |
-          ./scripts/real_projects_sanitize.sh asan
-          ./scripts/real_projects_sanitize.sh tsan
-          ./scripts/real_projects_sanitize.sh fuzz
+          rc=0
+          ./scripts/real_projects_sanitize.sh asan || rc=1
+          ./scripts/real_projects_sanitize.sh tsan || rc=1
+          ./scripts/real_projects_sanitize.sh fuzz || rc=1
+          exit "$rc"

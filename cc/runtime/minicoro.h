@@ -628,11 +628,6 @@ static MCO_FORCE_INLINE void _mco_prepare_jumpout(mco_coro* co) {
   co->asan_prev_stack = NULL;
   if(prev_co) {
     __sanitizer_start_switch_fiber(&prev_co->asan_prev_stack, bottom_old, size_old);
-  } else if (bottom_old != NULL && size_old != 0) {
-    /* Returning to the OS thread stack (no parent coroutine). ASan still
-     * needs start_switch_fiber to reattach the original stack; pass NULL
-     * fake_stack_save because the thread stack has no fiber fake-stack. */
-    __sanitizer_start_switch_fiber(NULL, bottom_old, size_old);
   }
 #endif
 #ifdef _MCO_USE_TSAN
