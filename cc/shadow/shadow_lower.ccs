@@ -264,6 +264,7 @@ int main(int argc, char** argv) {
     const char* in_path = NULL;
     const char* out_path = NULL;
     const char* exe_path = NULL;
+    const char* as_kind = NULL;
     int no_cache = 0;
     memset(&g_shadow_host_opts, 0, sizeof(g_shadow_host_opts));
     for (int i = 1; i < argc; i++) {
@@ -293,6 +294,11 @@ int main(int argc, char** argv) {
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             usage(argv[0]);
             return 0;
+        } else if (strncmp(argv[i], "--as=", 5) == 0) {
+            as_kind = argv[i] + 5;
+        } else if (strcmp(argv[i], "--as") == 0) {
+            if (i + 1 >= argc) { usage(argv[0]); return 2; }
+            as_kind = argv[++i];
         } else if (argv[i][0] == '-') {
             fprintf(stderr,
                     "error: unknown flag %s (shadow_lower options contract: "
@@ -314,9 +320,21 @@ int main(int argc, char** argv) {
     int write_text = out_path && shadow_out_is_text(out_path);
     int stdout_text = !out_path && !exe_path;
 
-    ShadowEmitKind kind = ends_with(in_path, ".cch") ? SHADOW_EMIT_H : SHADOW_EMIT_C;
+    ShadowEmitKind kind = SHADOW_EMIT_C;
+    if (as_kind) {
+        if (strcmp(as_kind, "cch") == 0) kind = SHADOW_EMIT_H;
+        else if (strcmp(as_kind, "ccs") == 0 || strcmp(as_kind, "shcc") == 0)
+            kind = SHADOW_EMIT_C;
+        else {
+            fprintf(stderr, "error: --as must be ccs, cch, or shcc (got %s)\n",
+                    as_kind);
+            return 2;
+        }
+    } else if (ends_with(in_path, ".cch")) {
+        kind = SHADOW_EMIT_H;
+    }
     if (kind == SHADOW_EMIT_H && build_bin) {
-        fprintf(stderr, "error: -o binary requires a .ccs input (got .cch)\n");
+        fprintf(stderr, "error: -o binary requires a source unit (got header)\n");
         return 2;
     }
 

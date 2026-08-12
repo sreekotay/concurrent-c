@@ -42,12 +42,12 @@ Produces: `cc/bin/ccc`, `out/cc/bin/shadow_lower`, lowered `out/include/`.
 Only when a lowerer face change should stick in committed `last-good` (cold clones):
 
 ```bash
-./scripts/iterate_shadow_lower.sh --ship --smoke   # ccs → snapshot → promote → host-cc from new vN
-git add cc/bootstrap/shadow_lower/last-good cc/bootstrap/shadow_lower/vN
+./scripts/iterate_shadow_lower.sh --ship --smoke   # ccs → snapshot → promote → host-cc from new pin
+git add cc/bootstrap/shadow_lower/last-good cc/bootstrap/shadow_lower/MAJOR.MINOR.PATCH-N
 # then verify cold (below) before push
 ```
 
-Do **not** hand-edit `vN/` or `out/include/cc/shadow/`. Details: [bootstrap README](../cc/bootstrap/shadow_lower/README.md).
+Do **not** hand-edit `MAJOR.MINOR.PATCH-N/` or `out/include/cc/shadow/`. Details: [bootstrap README](../cc/bootstrap/shadow_lower/README.md).
 
 ## Verify cold / second platform
 

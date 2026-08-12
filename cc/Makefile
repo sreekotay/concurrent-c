@@ -169,6 +169,7 @@ LOWER_HEADERS_SRCS := src/tools/lower_headers.c \
 	src/ir/verifier.c \
 	src/preprocess/preprocess.c \
 	src/preprocess/script_entry.c \
+	src/preprocess/unit_header.c \
 	src/preprocess/script_oneliner.c \
 	src/preprocess/template_scan.c \
 	src/preprocess/comptime_prepare.c \
@@ -389,6 +390,16 @@ $(SHADOW_COMPTIME_LIB): $(SHADOW_COMPTIME_OBJ) $(SHADOW_COMPTIME_ENGINE_OBJS)
 BOOTSTRAP_ROOT := bootstrap/shadow_lower
 BOOTSTRAP_VER := $(shell cat $(BOOTSTRAP_ROOT)/last-good 2>/dev/null)
 BOOTSTRAP_DIR := $(BOOTSTRAP_ROOT)/$(BOOTSTRAP_VER)
+CCC_VERSION_BASE ?= 0.3.2
+# last-good is MAJOR.MINOR.PATCH-SEED (e.g. 0.3.2-121)
+CCC_BOOTSTRAP_SEED := $(lastword $(subst -, ,$(BOOTSTRAP_VER)))
+ifeq ($(CCC_BOOTSTRAP_SEED),)
+  CCC_BOOTSTRAP_SEED := 0
+endif
+UNIT_HEADER_CFLAGS := -DCCC_VERSION_BASE=\"$(CCC_VERSION_BASE)\" -DCCC_BOOTSTRAP_SEED=$(CCC_BOOTSTRAP_SEED)
+$(OBJDIR)/src/preprocess/unit_header.o: CFLAGS += $(UNIT_HEADER_CFLAGS)
+$(OBJDIR)/src/cc_main.o: CFLAGS += $(UNIT_HEADER_CFLAGS)
+$(OBJDIR)/src/preprocess/unit_header.o $(OBJDIR)/src/cc_main.o: $(BOOTSTRAP_ROOT)/last-good
 SHADOW_LOWER_SOURCE ?= bootstrap
 # Prefer a previously built native binary when re-lowering from .ccs.
 SHADOW_LOWER_SEED_BIN := $(firstword \
@@ -483,11 +494,27 @@ $(SHADOW_LOWER_WRAPPER): $(SHADOW_LOWER_BOOT_DEPS) $(SHADOW_TCC_OBJ) $(SHADOW_CO
 	@echo "built $@ from bootstrap $(BOOTSTRAP_VER)"
 endif
 
-.PHONY: shadow_lower-from-bootstrap shadow_lower-from-ccs
+.PHONY: shadow_lower-from-bootstrap shadow_lower-from-ccs shadow_lower-pin
 shadow_lower-from-bootstrap:
 	$(MAKE) SHADOW_LOWER_SOURCE=bootstrap $(SHADOW_LOWER_WRAPPER)
 shadow_lower-from-ccs:
 	$(MAKE) SHADOW_LOWER_SOURCE=ccs $(SHADOW_LOWER_WRAPPER)
+
+# Host-cc a historical bootstrap seed into PIN_OUT (version pins).
+#   make -C cc shadow_lower-pin PIN_VER=0.3.2-110 PIN_OUT=../out/.cc-build/lowerers/0.3.2-110/shadow_lower
+shadow_lower-pin:
+	@test -n "$(PIN_VER)" || (echo "shadow_lower-pin: set PIN_VER=MAJOR.MINOR.PATCH-SEED"; exit 1)
+	@test -n "$(PIN_OUT)" || (echo "shadow_lower-pin: set PIN_OUT=path"; exit 1)
+	@test -f $(BOOTSTRAP_ROOT)/$(PIN_VER)/shadow_lower.c || \
+		(echo "shadow_lower-pin: missing seed $(BOOTSTRAP_ROOT)/$(PIN_VER)/shadow_lower.c"; exit 1)
+	@mkdir -p $(dir $(PIN_OUT))
+	$(CC) $(CFLAGS) -o $(PIN_OUT) $(BOOTSTRAP_ROOT)/$(PIN_VER)/shadow_lower.c \
+		-I$(BOOTSTRAP_ROOT)/$(PIN_VER)/include -Iinclude -I../out/include \
+		-I../cc/shadow -I$(TCC_INC) -DSHADOW_HAVE_LIBTCC=1 \
+		$(abspath $(SHADOW_TCC_OBJ)) \
+		$(abspath $(OBJDIR)/runtime/concurrent_c.o) \
+		$(abspath $(SHADOW_COMPTIME_LIB)) \
+		$(LDFLAGS) $(LDLIBS)
 
 # Dev fallback wrapper (ccc run) — not installed as the primary CLI.
 $(SHADOW_LOWER_SCRIPT).sh: $(SHADOW_LOWER_TEMPLATE)

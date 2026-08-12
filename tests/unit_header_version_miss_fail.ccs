@@ -1,0 +1,2 @@
+#!ccc ccs version=0.0.0-99999
+int main(void) { return 0; }

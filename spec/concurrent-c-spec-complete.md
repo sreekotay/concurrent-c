@@ -15,6 +15,7 @@ This specification defines:
 - Observable runtime contract
 - Lowering to C
 - Script entry (`.shcc`) and the script library partner to the stdlib (§9.5)
+- Translation-unit headers (`#!ccc ccs|cch`, OS shebang for scripts) (§1.7)
 
 The lowering is part of this specification, not an implementation detail. Two conforming implementations must produce lowerings with identical observable behavior. Implementations may emit or inspect the lowered form via `--emit-c-only` (writes lowered C to `out/<stem>.c`) or `--emit-c-inspect` (writes the merged translation unit).
 
@@ -183,6 +184,34 @@ values into generated C. It does not execute as part of the output program.
 ```
 
 Normative rules in §14.
+
+### 1.7 Translation-unit header
+
+A Concurrent-C unit names its kind on line 1. The header is not program text:
+the implementation strips it before lowering and replaces it with the generated
+C or H banner. Kind is not an extension property; a path suffix is only a
+fallback when the header is absent.
+
+| Kind | Line 1 |
+| ---- | ------ |
+| source (`ccs`) | `#!ccc ccs [version=MAJOR[.MINOR[.PATCH[-SEED]]]]` |
+| header (`cch`) | `#!ccc cch [version=…]` |
+| script (`shcc`) | `#!/usr/bin/env -S ./cc/bin/ccc [--as=shcc] [version=…]` |
+
+The script form is an OS shebang so the kernel can exec the file. `--as=shcc`
+is optional: a `ccc` interpreter shebang without `--as` is script kind.
+`#!ccc shcc` is ill-formed — scripts must be OS-executable.
+
+`version=MAJOR[.MINOR[.PATCH[-SEED]]]` pins the lowerer to a bootstrap
+folder whose name the pin prefixes (for example `0.3.2` matches
+`0.3.2-121`; `0.3.2-12` does not). The running toolchain lowers an unpinned
+unit, and also a pin that prefixes the running version. Otherwise the
+newest matching seed's prelowered `shadow_lower.c` is host-cc'd. A pin
+with no matching seed is an error.
+
+`--as=ccs|cch|shcc` and `version=` / `--ccc-version=` on the `ccc` command
+line must agree with the file header when both are present. A header that
+disagrees with a `.ccs` / `.cch` / `.shcc` suffix is ill-formed.
 
 ---
 
@@ -5497,10 +5526,12 @@ defined in `concurrent-c-stdlib-spec.md` and §9.
 #### 9.5.1 Language and file extension
 
 A `.shcc` translation unit is the same language as `.ccs`. The `.shcc`
-extension is distinct from the `.ccs` / `.cch` source and header pair. The driver
-applies an entry rewrite before the ordinary Concurrent-C pipeline:
+extension is distinct from the `.ccs` / `.cch` source and header pair. Kind
+comes from the unit header (§1.7); a `.shcc` suffix is the fallback when the
+header is absent. The driver applies an entry rewrite before the ordinary
+Concurrent-C pipeline:
 
-1. Strip a leading `#!` shebang line when present.
+1. Strip a leading `#!` shebang line when present (`#!/usr/bin/env -S ./cc/bin/ccc [--as=shcc] [version=…]`).
 2. Force-include `<ccc/script/prelude.cch>` at translation-unit scope.
 3. When the unit has no top-level `main`, partition the body and inject a
    synthetic `int main(int argc, char **argv)`:
@@ -5553,10 +5584,12 @@ Recommended shebang (run from the repo root; `./cc/bin/ccc` is resolved
 relative to the process cwd, not the script path):
 
 ```text
-#!/usr/bin/env -S ./cc/bin/ccc
+#!/usr/bin/env -S ./cc/bin/ccc --as=shcc
 ```
 
-`.ccs` inputs are unchanged: they do not auto-run from a bare positional path.
+`--as=shcc` is optional. A `ccc` interpreter shebang without `--as` is still
+script kind. `.ccs` inputs are unchanged: they do not auto-run from a bare
+positional path.
 
 #### 9.5.2a `@task` entry dispatch
 
@@ -5722,7 +5755,7 @@ orchestration:
 Example (stdin transform):
 
 ```c
-#!/usr/bin/env -S ./cc/bin/ccc
+#!/usr/bin/env -S ./cc/bin/ccc --as=shcc
 
 CCArena a = @create(megabytes(1)) @destroy;
 CCStdio io = @create(&a) @destroy;

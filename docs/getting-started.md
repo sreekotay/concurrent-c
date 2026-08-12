@@ -69,6 +69,7 @@ run from (`--out-dir` / `--bin-dir`); never into `$PREFIX`.
 Create `hello.ccs`:
 
 ```c
+#!ccc ccs
 #include <ccc/cc_runtime.cch>
 #include <ccc/script/stdio.cch>
 

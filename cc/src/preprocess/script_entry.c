@@ -6,12 +6,16 @@
 #include <string.h>
 
 #include "script_oneliner.h"
+#include "unit_header.h"
 #include "util/text.h"
 
 int cc_path_is_shcc(const char* path) {
+    CCUnitHeader h;
     if (!path) return 0;
-    size_t n = strlen(path);
-    return n >= 5 && strcmp(path + n - 5, ".shcc") == 0;
+    if (cc_unit_header_from_file(path, &h) == 0 && !h.ill_formed &&
+        h.kind == CC_UNIT_KIND_SHCC)
+        return 1;
+    return cc_unit_kind_from_ext(path) == CC_UNIT_KIND_SHCC;
 }
 
 /* True when a top-level `main` function definition is present. */
@@ -1254,7 +1258,7 @@ char* cc_script_rewrite_source(const char* path,
                                const char* src,
                                size_t len,
                                size_t* out_len) {
-    if (!cc_path_is_shcc(path) || !src) return NULL;
+    if (!src) return NULL;
 
     size_t body_off = cc__script_skip_shebang(src, len);
     const char* body = src + body_off;

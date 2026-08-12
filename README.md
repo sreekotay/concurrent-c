@@ -171,10 +171,10 @@ Test conventions: `tests/README.md`. Build driver / cache / outputs: [build spec
 
 **Linux ILP32 (last verified 2026-08-12).** Docker cold smokes on i386 and
 `linux/arm/v7` (gnueabihf / armhf, QEMU on Apple Silicon), `shadow_lower`
-last-good **v121**: curated suite green for host+backend **gcc** and
+last-good **0.3.2-121**: curated suite green for host+backend **gcc** and
 **TinyCC** (`./scripts/smoke_i386.sh`, `./scripts/smoke_arm32.sh`, and the
 same with `CCC_HOST_CC=tcc`). Earlier full `cc_test` on ARM32: **787 / 787**
-(`v108`). Config and receipt: [docs/ilp32-docker.md](docs/ilp32-docker.md).
+(`0.3.2-108`). Config and receipt: [docs/ilp32-docker.md](docs/ilp32-docker.md).
 
 ### Updating TCC
 

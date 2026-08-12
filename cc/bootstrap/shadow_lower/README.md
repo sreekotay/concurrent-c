@@ -8,15 +8,15 @@ re-lowering that `.ccs`.
 | Path | Role | Git |
 |------|------|-----|
 | `latest/` | Scratch emit from the current tree | Ignored |
-| `vN/` | Promoted snapshot | Committed when you choose |
-| `last-good` | Pointer to the active `vN` | Committed |
+| `MAJOR.MINOR.PATCH-N/` | Promoted snapshot (e.g. `0.3.2-121`) | Committed when you choose |
+| `last-good` | Pointer to the active pin folder | Committed |
 
-Keep `last-good` plus one or two prior `vN` for rollback. Older seeds are
+Keep `last-good` plus one or two prior pins for rollback. Older seeds are
 safe to delete once cold smoke is green — they are not needed to build.
 
 **Source of truth is only `cc/shadow/*.ccs` / `*.cch`.** Every lowerer
 behavior fix (parse, emit, UFCS, closures, …) is edited there first. Snapshot
-`vN/` trees and `out/include/cc/shadow/*.h` are regenerate-only products —
+pin trees and `out/include/cc/shadow/*.h` are regenerate-only products —
 never the place you land a fix.
 
 ### Never (common failure modes)
@@ -24,8 +24,8 @@ never the place you land a fix.
 | Don't | Why | Do instead |
 |-------|-----|------------|
 | Edit `out/include/cc/shadow/*.h` to fix a bug | Bootstrap `make -C cc` recopies `last-good` over those headers; the bug returns and the `.cch` never changed | Edit `cc/shadow/*.cch`, then ccs rebuild → snapshot → promote |
-| Hand-edit `vN/include/*.h` or `vN/shadow_lower.c` | Committed seeds are regenerate-only; in-place patches skip promote and diverge from `.cch` | Edit `cc/shadow/*.cch`, then snapshot → promote |
-| Patch `last-good`'s tree to "land" a fix | Leaves `last-good` pointing at a mutated seed; next cold clone rebuild is wrong | Promote a new `vN` and flip `last-good` |
+| Hand-edit a pin's `include/*.h` or `shadow_lower.c` | Committed seeds are regenerate-only; in-place patches skip promote and diverge from `.cch` | Edit `cc/shadow/*.cch`, then snapshot → promote |
+| Patch `last-good`'s tree to "land" a fix | Leaves `last-good` pointing at a mutated seed; next cold clone rebuild is wrong | Promote a new pin and flip `last-good` |
 | `cp` raw `cc/shadow/*.cch` → `out/include/cc/shadow/*.h` | Relative includes and snapshot path-rewriting disagree; looks synced, tree is broken | Rebuild via `SHADOW_LOWER_SOURCE=ccs`, then snapshot |
 | Assume default `make -C cc` picked up `.cch` edits | Default builds from `last-good` (`SHADOW_LOWER_SOURCE=bootstrap`) | `SHADOW_LOWER_SOURCE=ccs` while iterating; promote when the face should stick |
 | Lower a single face `.cch` with `shadow_lower …/pp_emit_ufcs.cch -o …` | Those files are include fragments, not standalone TUs; the lowerer can hang | Change the `.cch`, rebuild the whole lowerer, snapshot |
@@ -50,11 +50,11 @@ This directory is only about freezing `shadow_lower` seeds:
 |------|---------|--------|
 | Edit | `cc/shadow/*.cch` | Source of truth |
 | Rebuild lowerer | `./scripts/iterate_shadow_lower.sh` | Seed re-lowers from sources |
-| Ship seed | `./scripts/iterate_shadow_lower.sh --ship [--smoke]` | Snapshot → new `vN` → flip `last-good` → host-cc |
-| Commit | `git add …/last-good …/vN` | Human-gated |
+| Ship seed | `./scripts/iterate_shadow_lower.sh --ship [--smoke]` | Snapshot → new pin → flip `last-good` → host-cc |
+| Commit | `git add …/last-good …/MAJOR.MINOR.PATCH-N` | Human-gated |
 | Cold check | `./scripts/smoke_bootstrap_fresh.sh` then `./scripts/smoke_i386.sh` | Before push |
 
-A fix is not in the committed seed until promote has created the new `vN`
+A fix is not in the committed seed until promote has created the new pin
 and `last-good` points at it.
 
 ## Default self-build
@@ -77,9 +77,9 @@ make -C cc shadow_lower-from-ccs
 ./scripts/snapshot_shadow_lower.sh
 ./scripts/snapshot_shadow_lower.sh --smoke
 
-# Promote latest/ → vN and point last-good at it (then commit)
-./scripts/promote_shadow_bootstrap.sh          # next vN
-./scripts/promote_shadow_bootstrap.sh 3        # explicit v3
+# Promote latest/ → MAJOR.MINOR.PATCH-N and point last-good at it (then commit)
+./scripts/promote_shadow_bootstrap.sh          # next N under CCC_VERSION_BASE
+./scripts/promote_shadow_bootstrap.sh 3        # explicit 0.3.2-3
 ```
 
 **Before pushing a new `last-good`, run cold checks** (see
@@ -100,7 +100,7 @@ promote breaks that, fix the seed/Makefile before landing `last-good`.
 
 `snapshot_shadow_lower.sh` rewrites both absolute quoted includes and
 repo-relative angle includes (`<cc/shadow/foo.h>` → `"foo.h"`) so the
-committed `vN/include/` tree is self-contained. Do not promote a `latest/`
+committed pin `include/` tree is self-contained. Do not promote a `latest/`
 that still contains `<cc/shadow/...>`.
 
 Serdes can parse/emit `shadow_lower.ccs` (umbrella `.cch` passthrough + growable

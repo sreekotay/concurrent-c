@@ -9,7 +9,7 @@
 #   ./scripts/iterate_shadow_lower.sh --ship           # ccs → snapshot → promote
 #   ./scripts/iterate_shadow_lower.sh --ship --smoke   # + host-cc hello smoke
 #
-# Does not commit. After --ship: git add last-good + the new vN/; then cold-check.
+# Does not commit. After --ship: git add last-good + the new MAJOR.MINOR.PATCH-N/; then cold-check.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -26,7 +26,7 @@ for arg in "$@"; do
 usage: ./scripts/iterate_shadow_lower.sh [--ship] [--smoke]
 
   (default)  make -C cc SHADOW_LOWER_SOURCE=ccs …/shadow_lower
-  --ship     then snapshot + promote (new vN, flip last-good)
+  --ship     then snapshot + promote (new MAJOR.MINOR.PATCH-N, flip last-good)
   --smoke    with --ship: snapshot --smoke (host-cc + hello emit)
 
   Stdlib edits → make -C cc lower-headers (not this script).

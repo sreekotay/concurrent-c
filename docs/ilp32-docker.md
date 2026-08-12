@@ -29,7 +29,7 @@ CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh
 ## Latest receipt — 2026-08-12
 
 **Host:** macOS (Darwin 25), arm64, Docker Desktop, QEMU user-mode  
-**Seed:** `shadow_lower` last-good **v121**  
+**Seed:** `shadow_lower` last-good **0.3.2-121**  
 **Suite:** hello, channel pipeline, fiber spawn, chan task, park/wake, nursery — expect `ELF 32-bit`
 
 | Command | Host CC | Backend | Result |

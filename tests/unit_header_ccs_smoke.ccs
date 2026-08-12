@@ -1,0 +1,3 @@
+#!ccc ccs
+#include <ccc/cc_runtime.cch>
+int main(void) { return 0; }

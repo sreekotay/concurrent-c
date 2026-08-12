@@ -1,4 +1,4 @@
-#!/usr/bin/env -S ./cc/bin/ccc
+#!/usr/bin/env -S ./cc/bin/ccc --as=shcc
 /*
  * Make-facing task runner for everyday repo chores.
  *

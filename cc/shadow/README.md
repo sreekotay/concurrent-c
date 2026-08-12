@@ -31,7 +31,7 @@ for edit → `SHADOW_LOWER_SOURCE=ccs` → snapshot → promote. Default
 `out/include/cc/shadow/*.h` from the seed; patching those headers (or
 copying raw `.cch` onto them) is not a fix. A `.cch` change is not in the
 default binary until you rebuild from ccs and, for cold clones, promote a
-new `vN`.
+new pin.
 
 ## Spine
 
@@ -309,8 +309,8 @@ Prioritized by fail mass × language value on native-quick:
      `AST_PRINTLN_TPL` only so far).
    - Standalone re-lower of `pp_emit_ufcs.cch` hangs — iterate via
      `out/include` face patch (local build aid) or umbrella until fixed;
-     then snapshot/promote a **new** `vN` so it sticks in `last-good`.
-     Never hand-patch an existing bootstrap `vN/` instead of promoting.
+     then snapshot/promote a **new** pin so it sticks in `last-good`.
+     Never hand-patch an existing bootstrap seed instead of promoting.
    - `@as` forwarding; remaining UFCS leftover peel kill.
 
 ## Explicit tool

@@ -8,6 +8,7 @@
 #include "preprocess/comptime_prepare.h"
 #include "preprocess/emit_plan.h"
 #include "preprocess/preprocess.h"
+#include "preprocess/unit_header.h"
 #include "util/path.h"
 #include "util/text.h"
 #include "util/text_scan.h"
@@ -48,6 +49,14 @@ static char* shadow_ct_read_file(const char* path, size_t* out_n) {
         if (!buf) return NULL;
     }
     buf[n] = 0;
+    {
+        size_t skip = cc_unit_header_skip(buf, n);
+        if (skip > 0 && skip <= n) {
+            size_t blank = skip;
+            if (blank > 0 && buf[blank - 1] == '\n') blank--;
+            memset(buf, ' ', blank);
+        }
+    }
     if (out_n) *out_n = n;
     return buf;
 }

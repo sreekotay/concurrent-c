@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Promote cc/bootstrap/shadow_lower/latest/ → vN/ and point last-good at it.
-# Does not commit — print the paths to add.
+# Promote cc/bootstrap/shadow_lower/latest/ → MAJOR.MINOR.PATCH-N/ and
+# point last-good at it. Does not commit — print the paths to add.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -20,6 +20,11 @@ if grep -R -n -E '#include[[:space:]]*<(cc/shadow|examples/serdes/c)/' "$LATEST"
   exit 1
 fi
 
+VERSION_BASE="$(sed -n 's/^CCC_VERSION_BASE ?= //p' "$ROOT/cc/Makefile" | head -1 | tr -d '[:space:]')"
+if [[ -z "$VERSION_BASE" ]]; then
+  VERSION_BASE="0.3.2"
+fi
+
 if [[ $# -gt 1 ]]; then
   echo "usage: $0 [N]" >&2
   exit 2
@@ -33,10 +38,9 @@ if [[ $# -eq 1 ]]; then
   N="$1"
 else
   max=0
-  for d in "$BOOT"/v[0-9]*; do
+  for d in "$BOOT"/[0-9]*.[0-9]*.[0-9]*-[0-9]*; do
     [[ -d "$d" ]] || continue
-    base="$(basename "$d")"
-    n="${base#v}"
+    n="${d##*-}"
     if [[ "$n" =~ ^[0-9]+$ ]] && (( n > max )); then
       max=$n
     fi
@@ -44,7 +48,7 @@ else
   N=$((max + 1))
 fi
 
-DEST="$BOOT/v$N"
+DEST="$BOOT/${VERSION_BASE}-$N"
 if [[ -e "$DEST" ]]; then
   echo "error: $DEST already exists (pick another N or remove it)" >&2
   exit 1
@@ -55,7 +59,7 @@ mkdir -p "$DEST/include"
 cp -f "$LATEST/shadow_lower.c" "$DEST/shadow_lower.c"
 cp -f "$LATEST"/include/*.h "$DEST/include/"
 [[ -f "$LATEST/SNAPSHOT.txt" ]] && cp -f "$LATEST/SNAPSHOT.txt" "$DEST/SNAPSHOT.txt"
-printf 'v%d\n' "$N" > "$LAST_GOOD"
+printf '%s-%d\n' "$VERSION_BASE" "$N" > "$LAST_GOOD"
 
 {
   echo "promoted_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -66,7 +70,7 @@ printf 'v%d\n' "$N" > "$LAST_GOOD"
   fi
 } > "$DEST/PROMOTE.txt"
 
-echo "[promote] last-good → v$N"
+echo "[promote] last-good → ${VERSION_BASE}-$N"
 echo "[promote] commit when ready:"
 echo "  git add $BOOT/last-good $DEST"
 echo "  git status -- $BOOT"

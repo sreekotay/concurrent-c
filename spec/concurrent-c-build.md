@@ -6,10 +6,15 @@ This specification defines the implemented `ccc` driver contract for C emission,
 
 The driver accepts:
 
-- `ccc [options] <input.ccs> [output]`
-- `ccc run <input.ccs> [-- <args...>]`
-- `ccc build [step] [options] [<input.ccs> ...]`
+- `ccc [options] <input> [output]`
+- `ccc run <input> [-- <args...>]`
+- `ccc build [step] [options] [<input> ...]`
 - `ccc clean [--out-dir DIR] [--bin-dir DIR] [--all]`
+
+Unit kind is the first-line header (`#!ccc ccs|cch`, or a `ccc` OS shebang for
+scripts; see the complete spec §1.7). A `.ccs` / `.cch` / `.shcc` suffix is the
+fallback when the header is absent. `version=MAJOR[.MINOR[.PATCH[-SEED]]]` (or
+`--ccc-version=`) pins the lowerer to a bootstrap folder the pin prefixes.
 
 The default pipeline emits C, compiles an object, and links an executable. `run` performs that pipeline and executes the result.
 

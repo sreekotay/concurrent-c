@@ -3,11 +3,11 @@
 
 #include <stddef.h>
 
-/* 1 if path ends with .shcc */
+/* 1 if path is a script unit: first-line shebang kind shcc, else .shcc suffix. */
 int cc_path_is_shcc(const char* path);
 
 /*
- * Rewrite a .shcc source buffer:
+ * Rewrite a script-unit source buffer:
  *   - strip shebang
  *   - force-include <ccc/script/prelude.cch>
  *   - if no top-level main: split the body so TU-scope items stay outside
@@ -23,8 +23,8 @@ int cc_path_is_shcc(const char* path);
  *   - explicit main + top-level statements → #error (and stderr diag)
  *
  * Returns malloc'd rewritten text and sets *out_len.
- * Returns NULL (and leaves *out_len unchanged) when path is not .shcc
- * or on allocation failure — caller keeps the original buffer.
+ * Returns NULL (and leaves *out_len unchanged) on allocation failure —
+ * caller keeps the original buffer. Caller decides the unit is a script.
  */
 char* cc_script_rewrite_source(const char* path,
                                const char* src,

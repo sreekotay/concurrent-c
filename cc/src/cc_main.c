@@ -23,6 +23,7 @@
 #include "preprocess/preprocess.h"
 #include "preprocess/script_entry.h"
 #include "preprocess/script_oneliner.h"
+#include "preprocess/unit_header.h"
 #include "comptime/const_eval.h"
 
 /* The legacy multipass front (driver.c / driver.h) has been removed; ccc is
@@ -42,6 +43,8 @@ static int run_build_mode(int argc, char** argv);
 static char* cc__read_all_file(const char* path, size_t* out_len);
 static int cc__write_file_bytes(const char* path, const char* data, size_t len);
 static int cc__mkdir_p(const char* path);
+static int cc__take_unit_flag(int argc, char** argv, int* i,
+                              CCUnitKind* as_kind, char* pin, size_t pin_cap);
 
 // `--emit-c-inspect[=PATH]`: dump the merged translation unit for inspection.
 // On a clean build it is the full pre-parse merged TU; on a build that fails in
@@ -725,16 +728,16 @@ static void cc_init_paths(const char* argv0) {
 
 static void usage(const char *prog) {
     fprintf(stderr, "Usage:\n");
-    fprintf(stderr, "  %s [options] <input.ccs|.shcc> [output]\n", prog);
-    fprintf(stderr, "  %s <input.shcc> [args...]                  (auto-run; shebang-friendly)\n", prog);
-    fprintf(stderr, "  %s -e PROGRAM [script-args...]             (unnamed .shcc one-liner)\n", prog);
+    fprintf(stderr, "  %s [options] <input> [output]\n", prog);
+    fprintf(stderr, "  %s <script> [args...]                      (auto-run; shebang-friendly)\n", prog);
+    fprintf(stderr, "  %s -e PROGRAM [script-args...]             (unnamed script one-liner)\n", prog);
     fprintf(stderr, "  %s -E EXPR [script-args...]                (print @string(`${EXPR}`))\n", prog);
     fprintf(stderr, "  %s -e - [script-args...]                   (program text from stdin)\n", prog);
     fprintf(stderr, "  %s @name [args...]                         (run toolbox @task)\n", prog);
     fprintf(stderr, "  %s @                                       (list toolbox tasks)\n", prog);
-    fprintf(stderr, "  %s run <input.ccs|.shcc> [-- <args...>]      (shorthand for build run)\n", prog);
-    fprintf(stderr, "  %s build [options] <input.ccs|.shcc> <output>\n", prog);
-    fprintf(stderr, "  %s build run [options] <input.ccs|.shcc> [-o out/<stem>] [-- <args...>]\n", prog);
+    fprintf(stderr, "  %s run <input> [-- <args...>]              (shorthand for build run)\n", prog);
+    fprintf(stderr, "  %s build [options] <input> <output>\n", prog);
+    fprintf(stderr, "  %s build run [options] <input> [-o out/<stem>] [-- <args...>]\n", prog);
     fprintf(stderr, "  %s clean [--out-dir DIR] [--bin-dir DIR] [--all]\n", prog);
     fprintf(stderr, "Modes:\n");
     fprintf(stderr, "  --emit-c-only       Stop after emitting C (output defaults to out/<stem>.c)\n");
@@ -767,7 +770,10 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --out-stem NAME     Override the basename/stem used for generated files\n");
     fprintf(stderr, "  --no-cache          Disable incremental cache (also: CC_NO_CACHE=1)\n");
     fprintf(stderr, "  --frontend=native   Front end (native only; also: CC_FRONTEND=native)\n");
-    fprintf(stderr, "  --version, --v, -V  Print version\n");
+    fprintf(stderr, "  --version, --v, -V  Print version (MAJOR.MINOR.PATCH-SEED)\n");
+    fprintf(stderr, "  --as=ccs|cch|shcc   Unit kind (else first-line header, else suffix)\n");
+    fprintf(stderr, "  version=X           Pin lowerer to X (prefix of MAJOR.MINOR.PATCH-SEED)\n");
+    fprintf(stderr, "  --ccc-version=X     Same as version=X\n");
     fprintf(stderr, "  --timeout SECONDS   Kill run/test step after timeout\n");
     fprintf(stderr, "  --verbose           Print invoked commands\n");
     fprintf(stderr, "One-liners:\n");
@@ -815,8 +821,8 @@ static int cc__clean_artifacts(int all) {
 
 static void usage_build(const char* prog) {
     fprintf(stderr, "Usage:\n");
-    fprintf(stderr, "  %s build [step] [options] <input.ccs|.shcc> [output]\n", prog);
-    fprintf(stderr, "  %s build run [options] <input.ccs|.shcc> [-o bin/<stem>] [-- <args...>]\n", prog);
+    fprintf(stderr, "  %s build [step] [options] <input> [output]\n", prog);
+    fprintf(stderr, "  %s build run [options] <input> [-o bin/<stem>] [-- <args...>]\n", prog);
     fprintf(stderr, "\n");
     fprintf(stderr, "Steps:\n");
     fprintf(stderr, "  (default)   Build (emit C, compile, link)\n");
@@ -955,8 +961,17 @@ static int derive_path_from_stem(const char* stem, const char* dir_root, const c
 static int derive_default_output(const char* in_path, char* out_buf, size_t out_buf_size) {
     if (!in_path) return -1;
     char stem[128];
+    CCUnitHeader h;
+    CCUnitKind k = cc_unit_kind_from_ext(in_path);
+    const char* suf = ".c";
+    memset(&h, 0, sizeof(h));
+    if (cc_unit_header_from_file(in_path, &h) == 0 && !h.ill_formed &&
+        h.kind == CC_UNIT_KIND_CCH)
+        suf = ".h";
+    else if (k == CC_UNIT_KIND_CCH)
+        suf = ".h";
     cc__stem_from_path(in_path, stem, sizeof(stem));
-    return derive_path_from_stem(stem, g_out_root, ".c", out_buf, out_buf_size);
+    return derive_path_from_stem(stem, g_out_root, suf, out_buf, out_buf_size);
 }
 
 static int derive_default_obj(const char* in_path, char* out_buf, size_t out_buf_size) {
@@ -1579,6 +1594,8 @@ typedef struct {
     char** cli_names;
     long long* cli_values;
     size_t cli_count;
+    CCUnitKind unit_kind;          /* UNKNOWN: resolve from header / suffix */
+    const char* ccc_version_pin;   /* NULL/empty: running toolchain */
 } CCBuildOptions;
 
 /* Extract -I paths from cc_flags and set CC_USER_INCLUDE_PATH (colon-separated).
@@ -1727,13 +1744,23 @@ static int cc__compile_with_env(const CCBuildOptions* opt, const char* in_path, 
         }
 
         int rc = -1;
-        if (!in_path ||
-            !(cc__ends_with(in_path, ".ccs") || cc__ends_with(in_path, ".shcc"))) {
-            fprintf(stderr,
-                    "cc: internal error: CC lowering only accepts .ccs/.shcc "
-                    "(got %s); the legacy multipass front has been removed\n",
-                    in_path ? in_path : "(null)");
-        } else {
+        {
+            CCUnitKind uk = CC_UNIT_KIND_UNKNOWN;
+            char pin[64];
+            char uerr[256];
+            pin[0] = '\0';
+            if (cc_unit_resolve(in_path,
+                                opt ? opt->unit_kind : CC_UNIT_KIND_UNKNOWN,
+                                opt ? opt->ccc_version_pin : NULL, &uk, pin,
+                                uerr, sizeof(uerr)) != 0) {
+                fprintf(stderr, "%s\n", uerr);
+            } else if (uk != CC_UNIT_KIND_CCS && uk != CC_UNIT_KIND_SHCC &&
+                       uk != CC_UNIT_KIND_CCH) {
+                fprintf(stderr,
+                        "cc: %s: not a Concurrent-C unit (need #!ccc ccs|cch, "
+                        "a ccc shebang, or a .ccs/.cch/.shcc suffix)\n",
+                        in_path ? in_path : "(null)");
+            } else {
             CCBuildOptions local_opt;
             char flags_buf[2048];
             flags_buf[0] = '\0';
@@ -1772,6 +1799,7 @@ static int cc__compile_with_env(const CCBuildOptions* opt, const char* in_path, 
             local_opt.in_path = in_path;
             local_opt.c_out_path = out_path;
             rc = cc__run_shadow_lower(&local_opt, out_path);
+            }
         }
 
         long cap_len = 0;
@@ -2825,7 +2853,6 @@ static void cc__print_comptime_state(const CCBuildOptions* opt, const char* buil
 
 /* ccc is native-only (shadow_lower). The legacy multipass front is removed;
  * `--frontend=legacy` / `CC_FRONTEND=legacy` are hard errors. */
-#define CCC_VERSION_NATIVE "0.3.2"
 
 static int cc__set_frontend_name(const char* v) {
     if (!v || !v[0]) return -1;
@@ -2861,7 +2888,9 @@ static int cc__want_native_front(void) {
 }
 
 static const char* cc__version_string(void) {
-    return CCC_VERSION_NATIVE;
+    static char buf[64];
+    cc_ccc_version_current(buf, sizeof(buf));
+    return buf;
 }
 
 static void cc__print_version(void) {
@@ -2894,15 +2923,6 @@ static int cc__scan_frontend_flags(int argc, char** argv) {
         }
     }
     return 0;
-}
-
-static int cc__ends_with_ci(const char* s, const char* suf) {
-    size_t n, m;
-    if (!s || !suf) return 0;
-    n = strlen(s);
-    m = strlen(suf);
-    if (n < m) return 0;
-    return strcmp(s + n - m, suf) == 0;
 }
 
 /* Resolve native shadow_lower beside ccc (not the ccc-run wrapper). */
@@ -3035,6 +3055,205 @@ static int cc__materialize_shcc_for_native(const char* shcc_path, char* out_ccs,
     return 0;
 }
 
+/* Strip a recognized #!ccc / OS-shebang unit header so last-good shadow_lower
+ * (extension-based) never sees the magic line. Stamp #line so diagnostics
+ * still name the original file. */
+static int cc__materialize_strip_header(const char* in_path, CCUnitKind kind,
+                                        char* out_path, size_t cap) {
+    char* raw = NULL;
+    size_t raw_len = 0;
+    size_t skip = 0;
+    uint64_t h;
+    char dir[PATH_MAX];
+    char path[PATH_MAX];
+    char tmp[PATH_MAX];
+    char line_dir[PATH_MAX + 64];
+    const char* ext = (kind == CC_UNIT_KIND_CCH) ? "cch" : "ccs";
+    int nline;
+    if (!in_path || !out_path || !cap) return -1;
+    out_path[0] = '\0';
+    raw = cc__read_all_file(in_path, &raw_len);
+    if (!raw) {
+        fprintf(stderr, "cc: cannot read %s\n", in_path);
+        return -1;
+    }
+    skip = cc_unit_header_skip(raw, raw_len);
+    if (skip == 0) {
+        free(raw);
+        if (strlen(in_path) + 1 > cap) {
+            fprintf(stderr, "cc: input path too long\n");
+            return -1;
+        }
+        snprintf(out_path, cap, "%s", in_path);
+        return 0;
+    }
+    nline = snprintf(line_dir, sizeof(line_dir), "#line 2 \"%s\"\n", in_path);
+    if (nline < 0 || (size_t)nline >= sizeof(line_dir)) {
+        free(raw);
+        fprintf(stderr, "cc: #line path too long for %s\n", in_path);
+        return -1;
+    }
+    h = 1469598103934665603ULL;
+    h = cc__fnv1a64_str(h, in_path);
+    h = cc__fnv1a64_update(h, line_dir, (size_t)nline);
+    h = cc__fnv1a64_update(h, raw + skip, raw_len - skip);
+    snprintf(dir, sizeof(dir), "%s/unit_native", g_cache_root);
+    if (cc__mkdir_p(dir) != 0) {
+        free(raw);
+        return -1;
+    }
+    snprintf(path, sizeof(path), "%s/%016llx.%d.%s", dir, (unsigned long long)h,
+             (int)getpid(), ext);
+    if (!file_exists(path)) {
+        FILE* f;
+        snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+        f = fopen(tmp, "wb");
+        if (!f) {
+            free(raw);
+            return -1;
+        }
+        if (fwrite(line_dir, 1, (size_t)nline, f) != (size_t)nline ||
+            (raw_len > skip &&
+             fwrite(raw + skip, 1, raw_len - skip, f) != raw_len - skip)) {
+            fclose(f);
+            unlink(tmp);
+            free(raw);
+            return -1;
+        }
+        fclose(f);
+        if (rename(tmp, path) != 0) {
+            unlink(tmp);
+            if (!file_exists(path)) {
+                free(raw);
+                return -1;
+            }
+        }
+    }
+    free(raw);
+    if (strlen(path) + 1 > cap) {
+        fprintf(stderr, "cc: unit wrap path too long\n");
+        return -1;
+    }
+    snprintf(out_path, cap, "%s", path);
+    return 0;
+}
+
+/* Resolve pin to a bootstrap folder name. A prefix that matches the running
+ * toolchain uses that pin; otherwise the newest matching seed folder. */
+static int cc__bootstrap_pin_folder(const char* pin, char* folder, size_t cap) {
+    char current[64];
+    char best[64];
+    char dirpath[PATH_MAX];
+    char seed_c[PATH_MAX];
+    DIR* d;
+    struct dirent* de;
+    struct stat st;
+    int have_best = 0;
+
+    if (!pin || !pin[0] || !folder || !cap) return -1;
+    cc_ccc_version_current(current, sizeof(current));
+    if (cc_ccc_version_matches(pin, current)) {
+        if (strlen(current) + 1 > cap) return -1;
+        snprintf(folder, cap, "%s", current);
+        return 0;
+    }
+    if (!g_repo_root[0]) return -1;
+    snprintf(dirpath, sizeof(dirpath), "%s/cc/bootstrap/shadow_lower",
+             g_repo_root);
+    d = opendir(dirpath);
+    if (!d) return -1;
+    best[0] = '\0';
+    while ((de = readdir(d)) != NULL) {
+        if (de->d_name[0] == '.') continue;
+        if (!cc_ccc_version_matches(pin, de->d_name)) continue;
+        snprintf(seed_c, sizeof(seed_c), "%s/%s/shadow_lower.c", dirpath,
+                 de->d_name);
+        if (stat(seed_c, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        if (!have_best || cc_ccc_version_cmp(de->d_name, best) > 0) {
+            snprintf(best, sizeof(best), "%s", de->d_name);
+            have_best = 1;
+        }
+    }
+    closedir(d);
+    if (!have_best) return -1;
+    if (strlen(best) + 1 > cap) return -1;
+    snprintf(folder, cap, "%s", best);
+    return 0;
+}
+
+/* Host-cc a bootstrap seed's prelowered shadow_lower.c when the pin does not
+ * match the running toolchain. Cache under out/.cc-build/lowerers/<folder>/. */
+static int cc__ensure_pinned_shadow_lower(const char* pin, char* dst, size_t cap) {
+    char current[64];
+    char folder[64];
+    char seed_c[PATH_MAX];
+    char out_bin[PATH_MAX];
+    char cmd[PATH_MAX * 3];
+    struct stat st_src, st_bin;
+    int have_src, have_bin;
+
+    if (!pin || !pin[0]) return cc__find_shadow_lower(dst, cap);
+    if (cc_ccc_version_parse(pin, NULL, NULL, NULL, NULL) != 0) {
+        fprintf(stderr, "cc: invalid version pin %s\n", pin);
+        return -1;
+    }
+    if (cc__bootstrap_pin_folder(pin, folder, sizeof(folder)) != 0) {
+        fprintf(stderr, "cc: version pin %s: missing bootstrap seed %s\n",
+                pin, pin);
+        return -1;
+    }
+    cc_ccc_version_current(current, sizeof(current));
+    if (cc_ccc_version_equal(folder, current))
+        return cc__find_shadow_lower(dst, cap);
+
+    if (!g_repo_root[0]) {
+        fprintf(stderr, "cc: version pin %s: cannot locate bootstrap seeds\n", pin);
+        return -1;
+    }
+    snprintf(seed_c, sizeof(seed_c),
+             "%s/cc/bootstrap/shadow_lower/%s/shadow_lower.c", g_repo_root,
+             folder);
+    if (access(seed_c, R_OK) != 0) {
+        fprintf(stderr,
+                "cc: version pin %s: missing bootstrap seed %s (%s)\n",
+                pin, folder, seed_c);
+        return -1;
+    }
+    snprintf(out_bin, sizeof(out_bin), "%s/lowerers/%s/shadow_lower",
+             g_cache_root, folder);
+    have_src = stat(seed_c, &st_src) == 0;
+    have_bin = stat(out_bin, &st_bin) == 0 && access(out_bin, X_OK) == 0;
+    if (have_src && have_bin && st_bin.st_mtime >= st_src.st_mtime) {
+        if (strlen(out_bin) + 1 > cap) return -1;
+        snprintf(dst, cap, "%s", out_bin);
+        return 0;
+    }
+    {
+        int n = snprintf(cmd, sizeof(cmd),
+                         "make -C \"%s/cc\" shadow_lower-pin PIN_VER=%s "
+                         "PIN_OUT=\"%s\"",
+                         g_repo_root, folder, out_bin);
+        if (n < 0 || (size_t)n >= sizeof(cmd)) {
+            fprintf(stderr, "cc: version pin %s: make command too long\n", pin);
+            return -1;
+        }
+    }
+    if (system(cmd) != 0) {
+        fprintf(stderr,
+                "cc: version pin %s: failed to host-cc bootstrap seed %s\n",
+                pin, folder);
+        return -1;
+    }
+    if (access(out_bin, X_OK) != 0) {
+        fprintf(stderr, "cc: version pin %s: missing pinned lowerer %s\n",
+                pin, out_bin);
+        return -1;
+    }
+    if (strlen(out_bin) + 1 > cap) return -1;
+    snprintf(dst, cap, "%s", out_bin);
+    return 0;
+}
+
 /* Delegate .ccs/.shcc build/emit to native shadow_lower (owns cache + host-cc/link).
  * Driver loads build.cc / CLI -D, handles dumps/dry-run, and forwards host
  * flags. Options contract: forward, handle here, or hard error — never drop.
@@ -3045,6 +3264,7 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
     char cc_flags_arg[2200];
     char ld_flags_arg[2048];
     char shcc_wrap[PATH_MAX];
+    char unit_wrap[PATH_MAX];
     CCBuildOptions opt_local;
     char* argv[28];
     int argc = 0;
@@ -3053,15 +3273,42 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
     size_t cflen = 0;
     CCConstBinding bindings[128];
     size_t binding_count = 0;
+    CCUnitKind kind = CC_UNIT_KIND_UNKNOWN;
+    char pin[64];
+    char resolve_err[256];
     if (!opt || !opt->in_path || !out_path) return -1;
 
-    if (cc_path_is_shcc(opt->in_path)) {
+    pin[0] = '\0';
+    if (cc_unit_resolve(opt->in_path, opt->unit_kind, opt->ccc_version_pin,
+                        &kind, pin, resolve_err, sizeof(resolve_err)) != 0) {
+        fprintf(stderr, "%s\n", resolve_err);
+        return -1;
+    }
+    if (kind == CC_UNIT_KIND_CCH &&
+        (opt->mode == CC_MODE_LINK || opt->mode == CC_MODE_COMPILE)) {
+        fprintf(stderr,
+                "cc: %s is a header unit (cch); use --emit-c-only to lower "
+                "to .h (cannot compile/link a header)\n",
+                opt->in_path);
+        return -1;
+    }
+
+    if (kind == CC_UNIT_KIND_SHCC) {
         if (cc__materialize_shcc_for_native(opt->in_path, shcc_wrap,
                                             sizeof(shcc_wrap)) != 0)
             return -1;
         opt_local = *opt;
         opt_local.in_path = shcc_wrap;
         opt = &opt_local;
+    } else if (kind == CC_UNIT_KIND_CCS || kind == CC_UNIT_KIND_CCH) {
+        if (cc__materialize_strip_header(opt->in_path, kind, unit_wrap,
+                                         sizeof(unit_wrap)) != 0)
+            return -1;
+        if (strcmp(unit_wrap, opt->in_path) != 0) {
+            opt_local = *opt;
+            opt_local.in_path = unit_wrap;
+            opt = &opt_local;
+        }
     }
 
     if (cc__load_const_bindings(opt, bindings, &binding_count) != 0) return -1;
@@ -3072,10 +3319,13 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
     }
     if (opt->dry_run) return 0;
 
-    if (cc__find_shadow_lower(shadow, sizeof(shadow)) != 0) {
-        fprintf(stderr,
-                "cc: native front requires shadow_lower "
-                "(checkout: make -C cc; install: $PREFIX/bin/shadow_lower)\n");
+    if (cc__ensure_pinned_shadow_lower(pin[0] ? pin : opt->ccc_version_pin,
+                                      shadow, sizeof(shadow)) != 0) {
+        if (!pin[0] && !(opt->ccc_version_pin && opt->ccc_version_pin[0])) {
+            fprintf(stderr,
+                    "cc: native front requires shadow_lower "
+                    "(checkout: make -C cc; install: $PREFIX/bin/shadow_lower)\n");
+        }
         return -1;
     }
     /* Installed / non-prebuilt layouts: build or locate concurrent_c.o and
@@ -3229,13 +3479,22 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         fprintf(stderr, "cc: missing input or c_out_path\n");
         return -1;
     }
-    /* Native front: delegate .ccs/.shcc link/emit to shadow_lower.
-     * .shcc is script-rewritten to a temp .ccs inside cc__run_shadow_lower.
+    /* Native front: delegate CC units to shadow_lower.
+     * Scripts are rewritten to a temp .ccs inside cc__run_shadow_lower.
      * --compile = emit C via shadow_lower, then host cc -c (driver-side).
      * Py modules keep the caller's -fPIC/-shared flags; shadow_lower forwards. */
-    if (cc__want_native_front() &&
-        (cc__ends_with_ci(opt->in_path, ".ccs") ||
-         cc__ends_with_ci(opt->in_path, ".shcc"))) {
+    if (cc__want_native_front()) {
+        CCUnitKind uk = CC_UNIT_KIND_UNKNOWN;
+        char pin[64];
+        char uerr[256];
+        pin[0] = '\0';
+        if (cc_unit_resolve(opt->in_path, opt->unit_kind, opt->ccc_version_pin,
+                            &uk, pin, uerr, sizeof(uerr)) != 0) {
+            fprintf(stderr, "%s\n", uerr);
+            return -1;
+        }
+        if (uk == CC_UNIT_KIND_CCS || uk == CC_UNIT_KIND_SHCC ||
+            uk == CC_UNIT_KIND_CCH) {
         if (opt->mode == CC_MODE_LINK && opt->bin_out_path) {
             if (summary_out) {
                 memset(summary_out, 0, sizeof(*summary_out));
@@ -3297,6 +3556,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
                 "cc: native front supports --link, --emit-c-only, and "
                 "--compile (unknown mode)\n");
         return -1;
+        }
     }
     if (summary_out) {
         memset(summary_out, 0, sizeof(*summary_out));
@@ -4297,6 +4557,9 @@ static int run_build_mode(int argc, char** argv) {
     int summary = 0;
     CCMode mode = CC_MODE_LINK;
     int no_cache = 0;
+    CCUnitKind unit_kind = CC_UNIT_KIND_UNKNOWN;
+    char version_pin[64];
+    version_pin[0] = '\0';
 
     enum {
         CC_BUILD_STEP_DEFAULT = 0,
@@ -4342,6 +4605,12 @@ static int run_build_mode(int argc, char** argv) {
             run_argc = argc - (i + 1);
             run_argv = &argv[i + 1];
             break;
+        }
+        {
+            int tf = cc__take_unit_flag(argc, argv, &i, &unit_kind, version_pin,
+                                        sizeof(version_pin));
+            if (tf < 0) goto parse_fail;
+            if (tf > 0) continue;
         }
         // Allow placing the step name after options (e.g. `cc build --no-cache run ...`).
         if (argv[i] && argv[i][0] && argv[i][0] != '-' && step == CC_BUILD_STEP_DEFAULT && pos_count == 0) {
@@ -5029,6 +5298,8 @@ static int run_build_mode(int argc, char** argv) {
                 .cli_names = cli_names,
                 .cli_values = cli_values,
                 .cli_count = cli_count,
+                .unit_kind = unit_kind,
+                .ccc_version_pin = version_pin[0] ? version_pin : NULL,
                 .mode = mode,
             };
             int berr = cc__load_const_bindings(&base_opt, bindings, &binding_count);
@@ -5275,6 +5546,8 @@ static int run_build_mode(int argc, char** argv) {
             .cli_names = cli_names,
             .cli_values = cli_values,
             .cli_count = cli_count,
+            .unit_kind = unit_kind,
+            .ccc_version_pin = version_pin[0] ? version_pin : NULL,
         };
         int berr = cc__load_const_bindings(&base_opt, bindings, &binding_count);
         if (berr != 0) goto parse_fail;
@@ -5806,6 +6079,8 @@ static int run_build_mode(int argc, char** argv) {
         .cli_names = cli_names,
         .cli_values = cli_values,
         .cli_count = cli_count,
+        .unit_kind = unit_kind,
+        .ccc_version_pin = version_pin[0] ? version_pin : NULL,
     };
     CCBuildSummary sum;
     int compile_err = compile_with_build(&opt, &sum);
@@ -5948,9 +6223,53 @@ static int cc__flag_takes_value(const char* a) {
         "--cc-bin", "--cc-flags", "--ld-flags", "--target", "--module",
         "--sysroot", "--obj-out", "--graph-out", "--timeout", "--format",
         "-e", "-E", "--save", "--save-to", "--doc",
+        "--as", "--ccc-version",
     };
     for (size_t i = 0; i < sizeof(v) / sizeof(v[0]); ++i) {
         if (strcmp(a, v[i]) == 0) return 1;
+    }
+    return 0;
+}
+
+/* Consume --as / version= / --ccc-version. Returns 1 if consumed, 0 if not,
+ * -1 on error (already diagnosed). May advance *i for a following value. */
+static int cc__take_unit_flag(int argc, char** argv, int* i,
+                              CCUnitKind* as_kind, char* pin, size_t pin_cap) {
+    const char* a;
+    const char* val;
+    char err[192];
+    if (!argv || !i || *i < 0 || *i >= argc) return 0;
+    a = argv[*i];
+    if (cc_unit_cli_is_as(a)) {
+        if (strncmp(a, "--as=", 5) == 0) val = a + 5;
+        else {
+            if (*i + 1 >= argc) {
+                fprintf(stderr, "cc: --as requires ccs, cch, or shcc\n");
+                return -1;
+            }
+            val = argv[++(*i)];
+        }
+        if (cc_unit_cli_parse_as_value(val, as_kind, err, sizeof(err)) != 0) {
+            fprintf(stderr, "%s\n", err);
+            return -1;
+        }
+        return 1;
+    }
+    if (cc_unit_cli_is_version(a)) {
+        if (strncmp(a, "version=", 8) == 0) val = a + 8;
+        else if (strncmp(a, "--ccc-version=", 14) == 0) val = a + 14;
+        else {
+            if (*i + 1 >= argc) {
+                fprintf(stderr, "cc: --ccc-version requires MAJOR[.MINOR[.PATCH[-SEED]]]\n");
+                return -1;
+            }
+            val = argv[++(*i)];
+        }
+        if (cc_unit_cli_parse_version_value(val, pin, pin_cap, err, sizeof(err)) != 0) {
+            fprintf(stderr, "%s\n", err);
+            return -1;
+        }
+        return 1;
     }
     return 0;
 }
@@ -6284,6 +6603,25 @@ int main(int argc, char **argv) {
     if (argc >= 2 && strcmp(argv[1], "__eval-const") == 0) {
         return cc__selftest_const_eval(argc, argv);
     }
+    if (argc >= 2 && strcmp(argv[1], "__unit-header-parse") == 0) {
+        CCUnitHeader h;
+        const char* line;
+        if (argc < 3) {
+            fprintf(stderr, "cc: __unit-header-parse requires a line\n");
+            return 2;
+        }
+        line = argv[2];
+        memset(&h, 0, sizeof(h));
+        if (cc_unit_header_parse_line(line, strlen(line), &h) != 0) return 2;
+        if (h.ill_formed) {
+            printf("ill_formed %s\n", h.err);
+            return 1;
+        }
+        printf("kind=%s os_shebang=%d version=%s\n",
+               cc_unit_kind_name(h.kind), h.is_os_shebang,
+               h.version[0] ? h.version : "-");
+        return 0;
+    }
     if (argc >= 2 && strcmp(argv[1], "clean") == 0) {
         int all = 0;
         const char* out_dir = NULL;
@@ -6318,9 +6656,9 @@ int main(int argc, char **argv) {
      * made the root build.cc match itself twice).  Flags and their values
      * are skipped; the scan stops at the first real positional or "--".
      *
-     * Shebang / direct invoke: a first positional ending in `.shcc`
-     * implies `run`.  Args after the script path are program args
-     * (inserted after `--`), so
+     * Shebang / direct invoke: a first positional that is a script unit
+     * (OS ccc shebang, --as=shcc, or a `.shcc` suffix) implies `run`.
+     * Args after the script path are program args (inserted after `--`), so
      *   #!/usr/bin/env -S ./cc/bin/ccc
      *   ./tools/foo.shcc --flag
      * becomes `ccc build run ./tools/foo.shcc -- --flag`.
@@ -6340,11 +6678,19 @@ int main(int argc, char **argv) {
         const char* save_to = NULL;
         const char* save_doc = NULL;
         CCScriptOnelinerOpts ol_opts;
+        CCUnitKind pre_as = CC_UNIT_KIND_UNKNOWN;
+        char pre_pin[64];
+        pre_pin[0] = '\0';
 
         /* Collect one-liner mode flags anywhere (before or after PROGRAM). */
         for (int i = 1; i < argc; ++i) {
             const char* a = argv[i];
+            int tf;
             if (strcmp(a, "--") == 0) break;
+            tf = cc__take_unit_flag(argc, argv, &i, &pre_as, pre_pin,
+                                    sizeof(pre_pin));
+            if (tf < 0) return 1;
+            if (tf > 0) continue;
             if (strcmp(a, "-e") == 0 || strcmp(a, "-E") == 0) {
                 if (i + 1 >= argc) {
                     fprintf(stderr, "ccc: %s requires PROGRAM or -\n", a);
@@ -6392,8 +6738,19 @@ int main(int argc, char **argv) {
             /* First positional after flags (and after -e PROGRAM if any). */
             if (e_idx < 0) {
                 if (strcmp(a, "build") == 0 || strcmp(a, "run") == 0) sub_idx = i;
-                else if (cc__ends_with(a, ".shcc")) script_idx = i;
                 else if (a[0] == '@') toolbox_idx = i;
+                else {
+                    CCUnitKind k = CC_UNIT_KIND_UNKNOWN;
+                    char pin[64];
+                    char uerr[256];
+                    pin[0] = '\0';
+                    if (pre_as == CC_UNIT_KIND_SHCC) script_idx = i;
+                    else if (cc_unit_resolve(a, pre_as, pre_pin, &k, pin, uerr,
+                                             sizeof(uerr)) == 0 &&
+                             k == CC_UNIT_KIND_SHCC)
+                        script_idx = i;
+                    else if (cc__ends_with(a, ".shcc")) script_idx = i;
+                }
                 break;
             }
             /* Script args follow -e PROGRAM; stop positional classify. */
@@ -6565,14 +6922,23 @@ int main(int argc, char **argv) {
     int no_cache = 0;
     int dump_comptime = 0;
     CCMode mode = CC_MODE_LINK;
+    CCUnitKind unit_kind = CC_UNIT_KIND_UNKNOWN;
+    char version_pin[64];
     char out_stem_buf[128];
     enum { max_cli_main = 64 };
     char* cli_names_main[max_cli_main];
     long long cli_values_main[max_cli_main];
     size_t cli_count_main = 0;
     out_stem_buf[0] = '\0';
+    version_pin[0] = '\0';
 
     for (int i = 1; i < argc; ++i) {
+        {
+            int tf = cc__take_unit_flag(argc, argv, &i, &unit_kind, version_pin,
+                                        sizeof(version_pin));
+            if (tf < 0) return 1;
+            if (tf > 0) continue;
+        }
         if (strcmp(argv[i], "--emit-c-only") == 0) { mode = CC_MODE_EMIT_C; continue; }
         if (strcmp(argv[i], "--emit-c-inspect") == 0) { g_emit_c_inspect = 1; continue; }
         if (strncmp(argv[i], "--emit-c-inspect=", 17) == 0) { g_emit_c_inspect = 1; g_emit_c_inspect_path = argv[i] + 17; continue; }
@@ -6784,6 +7150,8 @@ int main(int argc, char **argv) {
             .cli_names = cli_names_main,
             .cli_values = cli_values_main,
             .cli_count = cli_count_main,
+            .unit_kind = unit_kind,
+            .ccc_version_pin = version_pin[0] ? version_pin : NULL,
         };
         int berr = cc__load_const_bindings(&base_opt, bindings, &binding_count);
         if (berr != 0) {
@@ -6981,6 +7349,8 @@ int main(int argc, char **argv) {
         .cli_names = cli_names_main,
         .cli_values = cli_values_main,
         .cli_count = cli_count_main,
+        .unit_kind = unit_kind,
+        .ccc_version_pin = version_pin[0] ? version_pin : NULL,
     };
     CCBuildSummary sum;
     int err = compile_with_build(&opt, &sum);
