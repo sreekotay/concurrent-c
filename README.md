@@ -1,6 +1,6 @@
 ### Concurrent-C (CC) — a strict C11-superset language + toolchain
 
-**Version:** 0.3.2 (`ccc --version`)
+**Version:** 0.3.2-122 (`ccc --version`)
 
 Concurrent‑C is a **strict C11-superset preprocessor**: `.ccs` lowers to
 plain C and compiles with your **host C compiler**. Structured concurrency,
@@ -21,6 +21,7 @@ Toolchain:
 ```
 
 ```c
+#!ccc ccs
 #include <ccc/cc_runtime.cch>
 #include <stdio.h>
 
@@ -38,6 +39,7 @@ Fuller example (error policy + compose): [examples/hello.ccs](examples/hello.ccs
 ### Docs
 
 - [Getting Started](docs/getting-started.md) — install, first program, concurrency
+- [Backwards compatibility](docs/backwards_compatibility.md) — unit headers, version pins, bootstrap seeds
 - [Language Concepts](docs/language-concepts.md) — defer, results, UFCS, slices/arenas (arena = lifetime; alloc = policy), closures
 - [Cheatsheet](docs/cheatsheet.md)
 - [Sanitizers / fuzzing](docs/sanitizers.md) — ASan/TSan receipts (runtime, real_projects, bridge)

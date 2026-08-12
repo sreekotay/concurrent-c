@@ -47,7 +47,7 @@ git add cc/bootstrap/shadow_lower/last-good cc/bootstrap/shadow_lower/MAJOR.MINO
 # then verify cold (below) before push
 ```
 
-Do **not** hand-edit `MAJOR.MINOR.PATCH-N/` or `out/include/cc/shadow/`. Details: [bootstrap README](../cc/bootstrap/shadow_lower/README.md).
+Do **not** hand-edit `MAJOR.MINOR.PATCH-N/` or `out/include/cc/shadow/`. Details: [bootstrap README](../cc/bootstrap/shadow_lower/README.md). Why pins exist and how they match: [backwards compatibility](backwards_compatibility.md).
 
 ## Verify cold / second platform
 

@@ -8,7 +8,7 @@ re-lowering that `.ccs`.
 | Path | Role | Git |
 |------|------|-----|
 | `latest/` | Scratch emit from the current tree | Ignored |
-| `MAJOR.MINOR.PATCH-N/` | Promoted snapshot (e.g. `0.3.2-121`) | Committed when you choose |
+| `MAJOR.MINOR.PATCH-N/` | Promoted snapshot (e.g. `0.3.2-122`) | Committed when you choose |
 | `last-good` | Pointer to the active pin folder | Committed |
 
 Keep `last-good` plus one or two prior pins for rollback. Older seeds are
@@ -37,7 +37,8 @@ source tree.
 ## Iterate → ship
 
 Repo-wide “when to run what” (stdlib vs lowerer vs cold smoke):
-[docs/build-when.md](../../../docs/build-when.md).
+[docs/build-when.md](../../../docs/build-when.md). Version pins and why seeds
+are kept: [backwards compatibility](../../../docs/backwards_compatibility.md).
 
 This directory is only about freezing `shadow_lower` seeds:
 

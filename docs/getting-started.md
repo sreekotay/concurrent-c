@@ -9,6 +9,11 @@ lifetime), and a header-first runtime ship with the language.
 You do **not** need to build the compiler from a checkout to use the language.
 Install `ccc`, run a program, then follow the examples learning path.
 
+Line 1 of a unit names its kind (`#!ccc ccs`, `#!ccc cch`, or an OS shebang for
+scripts). A `.ccs` / `.cch` / `.shcc` suffix is the fallback when that header
+is absent. Optional `version=0.3.2` pins the lowerer; see
+[backwards compatibility](backwards_compatibility.md).
+
 ## Install
 
 Needs a C compiler (`cc` / `clang`) on `PATH`. Homebrew also needs `make`.
@@ -395,8 +400,12 @@ ccc run tools/cc_perf_check.shcc -- --help
 Shebang from a repo checkout (cwd = repo root):
 
 ```text
-#!/usr/bin/env -S ./cc/bin/ccc
+#!/usr/bin/env -S ./cc/bin/ccc [--as=shcc] [version=0.3.2]
 ```
+
+`--as=shcc` is optional on a `ccc` interpreter shebang. `#!ccc shcc` is
+ill-formed — scripts must be OS-executable. Pins:
+[backwards compatibility](backwards_compatibility.md).
 
 Try [examples/py/pydemo.shcc](../examples/py/pydemo.shcc),
 [examples/js/jsdemo.shcc](../examples/js/jsdemo.shcc), or
@@ -421,6 +430,7 @@ Script form of the same door: [examples/py/pydemo.shcc](../examples/py/pydemo.sh
 
 - [Language Concepts](language-concepts.md)
 - [Cheatsheet](cheatsheet.md)
+- [Backwards compatibility](backwards_compatibility.md) — unit headers and version pins
 - [`.shcc` scripts](#shcc-scripts) · [spec §9.5](../spec/concurrent-c-spec-complete.md#95-script-library-shcc--cccscript)
 - [examples/](../examples/)
 - [Debugging](debugging.md)

@@ -16,9 +16,14 @@ ccc build run file.ccs -- --arg     # args to the binary
 ccc path/to/tool.shcc [args…]       # .shcc → implicit run (shebang-friendly)
 ccc --emit-c-only file.ccs          # emit C only → out/file.c
 ccc build -O file.ccs               # release (-O2 -DNDEBUG)
-ccc build -g file.ccs               # debug (-O0 -g)
-                                    # default: -O2, asserts kept
+ccc build -g file.ccs               # debug (-O0 -g); default is -O2, asserts kept
+ccc version=0.3.2 run file.ccs      # pin lowerer (prefix of ccc --version)
+ccc --as=ccs file                   # kind when there is no suffix / header
 ```
+
+First line of a unit: `#!ccc ccs [version=…]` (headers `cch`; scripts use an
+OS shebang). Suffix is the fallback. Details:
+[backwards compatibility](backwards_compatibility.md).
 
 Outputs: `./out` (generated C) and `./bin` (binaries), relative to cwd.
 
