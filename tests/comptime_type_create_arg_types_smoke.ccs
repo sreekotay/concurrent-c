@@ -29,11 +29,10 @@ static CCSlice create_toy_create(CCSlice type_name, CCSliceArray argv, CCSliceAr
     return cc_slice_empty();
 }
 
-@comptime {
-    (void)cc_type_register("CreateToy", (CCTypeHooks){
-        .create = cc_type_create_hook(create_toy_create),
-    });
-}
+@typehooks on CreateToy {
+    .create = cc_type_create_hook(create_toy_create),
+};
+
 
 int main(void) {
     CreateToy from_int = @create(4) @detach;

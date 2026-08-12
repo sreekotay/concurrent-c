@@ -153,17 +153,14 @@ UFCS show up in almost every example — treat them as day-one, not advanced.
 registered for that type — if none is known, compile error.
 
 Stdlib owners ship registered (`CCNursery*` waits then frees, `CCArena` frees
-slabs + overflow, channels, `CCPy`, …). For your own types, register at
-`@comptime`:
+slabs + overflow, channels, `CCPy`, …). For your own types:
 
 ```c
 static void my_res_close(MyRes* r) { /* … */ }
 
-@comptime {
-    (void)cc_type_register("MyRes", (CCTypeHooks){
-        .destroy = cc_type_destroy_call("my_res_close"),
-    });
-}
+@typehooks on MyRes {
+    .destroy = cc_type_destroy_call("my_res_close"),
+};
 
 MyRes r = my_res_open() !> @destroy;   // → defer my_res_close
 ```
@@ -198,7 +195,7 @@ Tasks do not inherit `@errhandler` — re-bind inside each spawn. More:
 
 `recv.method(args)` calls the function the **receiver’s type** names. For the
 usual path, **declaring that function *is* installing the method** — no trait
-and no `cc_type_register` step (unlike bodyless `@destroy`). Method and free
+and no `@typehooks` step (unlike bodyless `@destroy`). Method and free
 forms are the same API; Concurrent-C examples prefer the method form:
 
 ```c
@@ -221,11 +218,9 @@ nursery/channel hooks, …). Stdlib types do this; you usually don’t until you
 own a family:
 
 ```c
-@comptime {
-    (void)cc_type_register("MyHandle*", (CCTypeHooks){
-        .ufcs = my_handle_ufcs_lower_c,   /* → cc_my_handle_<method>(…) */
-    });
-}
+@typehooks on MyHandle* {
+    .ufcs = my_handle_ufcs_lower_c,   /* → cc_my_handle_<method>(…) */
+};
 ```
 
 Receiver first (arena last when needed). Fallible chain: unwrap (`!>` / `?>`),

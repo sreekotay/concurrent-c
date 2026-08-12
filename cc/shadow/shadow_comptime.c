@@ -290,6 +290,14 @@ static char* shadow_ct_stage1_src(const char* input_path, size_t* out_n) {
         n = strlen(buf);
     }
 
+    /* `@typehooks on T {…}` → `@comptime { cc_type_register(...) }` before blank. */
+    r = cc_rewrite_typehooks_to_register(buf, n);
+    if (r) {
+        free(buf);
+        buf = r;
+        n = strlen(buf);
+    }
+
     {
         char* blanked = shadow_ct_blank_comptime(buf, n);
         free(buf);
@@ -327,6 +335,14 @@ static char* shadow_ct_load_with_harvest(const char* input_path, size_t* out_n) 
     shadow_ct_append_harvest(&buf, &n, cc_harvest_local_header_factories());
     shadow_ct_append_harvest(&buf, &n, cc_harvest_header_comptime_functions());
     shadow_ct_append_harvest(&buf, &n, cc_harvest_local_header_comptime_blocks());
+    {
+        char* th = cc_rewrite_typehooks_to_register(buf, n);
+        if (th) {
+            free(buf);
+            buf = th;
+            n = strlen(buf);
+        }
+    }
     if (out_n) *out_n = n;
     return buf;
 }

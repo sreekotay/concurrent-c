@@ -104,16 +104,13 @@ _Static_assert(CC_STRING_INLINE_CAP != CC_STRING_CAP_NICHE,
                "the inline cap must never collide with the niche sentinel");
 #endif
 
-#ifdef CC_COMPTIME_SCAN
+
 /* Register the cap-field niche so a @variant(packed) arm of type CCString
  * donates it to carry the discriminant.  See spec §11. */
-@comptime {
-    (void)cc_type_register("CCString", (CCTypeHooks){
-        .niche = cc_type_niche(/*size*/16, /*align*/8, /*offset*/12,
-                               /*width*/4, /*sentinel*/0xFFFFFFFF),
-    });
-}
-#endif
+@typehooks on CCString {
+    .niche = cc_type_niche(/*size*/16, /*align*/8, /*offset*/12,
+    /*width*/4, /*sentinel*/0xFFFFFFFF),
+};
 
 // ------------------------- Parse error enums ------------------------------
 typedef enum {

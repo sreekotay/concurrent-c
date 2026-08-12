@@ -1374,6 +1374,637 @@ static inline char* cc_rewrite_as_attr_to_comment(const char* src, size_t n) {
     return out;
 }
 
+/* Erase `@typeview` / `@restricted` define blocks from lowered `.h` text.
+ * Faces and allow-lists are Concurrent-C AST facts (like `@as`); host C must
+ * not see them. Skips comments and string/char literals. Forms:
+ *   @typeview on Base { … };
+ *   @typeview Mode on Base { … };
+ *   typedef @typeview Mode on Base { … } Alias;
+ * For the typedef form, emits `typedef Base_Restrict_Mode Alias` (optional `*`).
+ * Sugar `@typeview(Mode) Base` is rewritten to `Base_Restrict_Mode`.
+ * Returns malloc'd buffer or NULL when unchanged / OOM. */
+static inline char* cc_strip_typeview_blocks(const char* src, size_t n) {
+    size_t i = 0;
+    size_t out_cap;
+    size_t w = 0;
+    char* out;
+    int changed = 0;
+    if (!src || n == 0) return NULL;
+    out_cap = n + 8;
+    out = (char*)malloc(out_cap + 1);
+    if (!out) return NULL;
+    while (i < n) {
+        if (src[i] == '"' || src[i] == '\'') {
+            char q = src[i++];
+            if (w + 1 > out_cap) {
+                size_t nc = out_cap * 2 + 64;
+                char* nb = (char*)realloc(out, nc + 1);
+                if (!nb) { free(out); return NULL; }
+                out = nb; out_cap = nc;
+            }
+            out[w++] = q;
+            while (i < n) {
+                if (w + 2 > out_cap) {
+                    size_t nc = out_cap * 2 + 64;
+                    char* nb = (char*)realloc(out, nc + 1);
+                    if (!nb) { free(out); return NULL; }
+                    out = nb; out_cap = nc;
+                }
+                out[w++] = src[i];
+                if (src[i] == '\\' && i + 1 < n) {
+                    out[w++] = src[i + 1];
+                    i += 2;
+                    continue;
+                }
+                if (src[i] == q) { i++; break; }
+                i++;
+            }
+            continue;
+        }
+        if (i + 1 < n && src[i] == '/' && src[i + 1] == '/') {
+            while (i < n && src[i] != '\n') {
+                if (w + 1 > out_cap) {
+                    size_t nc = out_cap * 2 + 64;
+                    char* nb = (char*)realloc(out, nc + 1);
+                    if (!nb) { free(out); return NULL; }
+                    out = nb; out_cap = nc;
+                }
+                out[w++] = src[i++];
+            }
+            continue;
+        }
+        if (i + 1 < n && src[i] == '/' && src[i + 1] == '*') {
+            while (i + 1 < n && !(src[i] == '*' && src[i + 1] == '/')) {
+                if (w + 1 > out_cap) {
+                    size_t nc = out_cap * 2 + 64;
+                    char* nb = (char*)realloc(out, nc + 1);
+                    if (!nb) { free(out); return NULL; }
+                    out = nb; out_cap = nc;
+                }
+                out[w++] = src[i++];
+            }
+            if (i + 1 < n) {
+                if (w + 2 > out_cap) {
+                    size_t nc = out_cap * 2 + 64;
+                    char* nb = (char*)realloc(out, nc + 1);
+                    if (!nb) { free(out); return NULL; }
+                    out = nb; out_cap = nc;
+                }
+                out[w++] = src[i++];
+                out[w++] = src[i++];
+            }
+            continue;
+        }
+        /* Sugar: @typeview(Mode) Base  /  @restricted(Mode) Base */
+        if (src[i] == '@' &&
+            ((i + 9 <= n && memcmp(src + i, "@typeview", 9) == 0 &&
+              (i + 9 == n || !cc_is_ident_char(src[i + 9]))) ||
+             (i + 11 <= n && memcmp(src + i, "@restricted", 11) == 0 &&
+              (i + 11 == n || !cc_is_ident_char(src[i + 11]))))) {
+            size_t kw = (src[i + 1] == 't') ? 9 : 11;
+            size_t p = i + kw;
+            size_t mode_l, mode_r, base_l, base_r;
+            while (p < n && (src[p] == ' ' || src[p] == '\t' || src[p] == '\n' ||
+                             src[p] == '\r'))
+                p++;
+            if (p < n && src[p] == '(') {
+                p++;
+                while (p < n && (src[p] == ' ' || src[p] == '\t')) p++;
+                mode_l = p;
+                while (p < n && cc_is_ident_char(src[p])) p++;
+                mode_r = p;
+                while (p < n && (src[p] == ' ' || src[p] == '\t')) p++;
+                if (p < n && src[p] == ')' && mode_r > mode_l) {
+                    p++;
+                    while (p < n && (src[p] == ' ' || src[p] == '\t' ||
+                                     src[p] == '\n' || src[p] == '\r'))
+                        p++;
+                    base_l = p;
+                    while (p < n && cc_is_ident_char(src[p])) p++;
+                    base_r = p;
+                    if (base_r > base_l) {
+                        size_t need = (base_r - base_l) + 10 + (mode_r - mode_l) + 8;
+                        if (w + need > out_cap) {
+                            size_t nc = out_cap * 2 + need + 64;
+                            char* nb = (char*)realloc(out, nc + 1);
+                            if (!nb) { free(out); return NULL; }
+                            out = nb; out_cap = nc;
+                        }
+                        memcpy(out + w, src + base_l, base_r - base_l);
+                        w += base_r - base_l;
+                        memcpy(out + w, "_Restrict_", 10);
+                        w += 10;
+                        memcpy(out + w, src + mode_l, mode_r - mode_l);
+                        w += mode_r - mode_l;
+                        i = p;
+                        changed = 1;
+                        continue;
+                    }
+                }
+            }
+            /* Define / typedef form: @kw [Mode] on Base { … } [;] [Alias] */
+            {
+                size_t scan = p;
+                size_t mode_l2 = 0, mode_r2 = 0, base_l2 = 0, base_r2 = 0;
+                size_t brace_l = 0, brace_r = 0;
+                int depth = 0;
+                int ls = 0, lc = 0, st = 0, ch = 0;
+                size_t typedef_at = 0;
+                /* Detect `typedef` immediately before `@`. */
+                {
+                    size_t b = i;
+                    while (b > 0 && (src[b - 1] == ' ' || src[b - 1] == '\t' ||
+                                     src[b - 1] == '\n' || src[b - 1] == '\r'))
+                        b--;
+                    if (b >= 7 && memcmp(src + b - 7, "typedef", 7) == 0 &&
+                        (b == 7 || !cc_is_ident_char(src[b - 8]))) {
+                        typedef_at = b - 7;
+                        while (w > 0 && (out[w - 1] == ' ' || out[w - 1] == '\t' ||
+                                         out[w - 1] == '\n' || out[w - 1] == '\r'))
+                            w--;
+                        if (w >= 7 && memcmp(out + w - 7, "typedef", 7) == 0)
+                            w -= 7;
+                        while (w > 0 && (out[w - 1] == ' ' || out[w - 1] == '\t'))
+                            w--;
+                    }
+                }
+                /* Unnamed: `on Base` — named: `Mode on Base`. */
+                if (scan + 2 < n && src[scan] == 'o' && src[scan + 1] == 'n' &&
+                    !cc_is_ident_char(src[scan + 2])) {
+                    scan += 2;
+                } else if (scan < n && cc_is_ident_char(src[scan])) {
+                    mode_l2 = scan;
+                    while (scan < n && cc_is_ident_char(src[scan])) scan++;
+                    mode_r2 = scan;
+                    while (scan < n && (src[scan] == ' ' || src[scan] == '\t' ||
+                                        src[scan] == '\n' || src[scan] == '\r'))
+                        scan++;
+                    if (!(scan + 2 < n && src[scan] == 'o' && src[scan + 1] == 'n' &&
+                          !cc_is_ident_char(src[scan + 2]))) {
+                        /* not a define form */
+                        mode_l2 = mode_r2 = 0;
+                        scan = p;
+                    } else {
+                        scan += 2;
+                    }
+                }
+                while (scan < n && (src[scan] == ' ' || src[scan] == '\t' ||
+                                    src[scan] == '\n' || src[scan] == '\r'))
+                    scan++;
+                base_l2 = scan;
+                while (scan < n && cc_is_ident_char(src[scan])) scan++;
+                /* Trailing glob `*` on subject (`CCSlice_*`). */
+                if (scan < n && src[scan] == '*') scan++;
+                base_r2 = scan;
+                while (scan < n && (src[scan] == ' ' || src[scan] == '\t' ||
+                                    src[scan] == '\n' || src[scan] == '\r'))
+                    scan++;
+                if (scan < n && src[scan] == '{' && base_r2 > base_l2) {
+                    brace_l = scan;
+                    for (; scan < n; scan++) {
+                        char d = src[scan];
+                        char d2 = (scan + 1 < n) ? src[scan + 1] : 0;
+                        if (lc) { if (d == '\n') lc = 0; continue; }
+                        if (ls) {
+                            if (d == '*' && d2 == '/') { ls = 0; scan++; }
+                            continue;
+                        }
+                        if (st) {
+                            if (d == '\\' && d2) { scan++; continue; }
+                            if (d == '"') st = 0;
+                            continue;
+                        }
+                        if (ch) {
+                            if (d == '\\' && d2) { scan++; continue; }
+                            if (d == '\'') ch = 0;
+                            continue;
+                        }
+                        if (d == '/' && d2 == '/') { lc = 1; scan++; continue; }
+                        if (d == '/' && d2 == '*') { ls = 1; scan++; continue; }
+                        if (d == '"') { st = 1; continue; }
+                        if (d == '\'') { ch = 1; continue; }
+                        if (d == '{') {
+                            depth++;
+                            continue;
+                        }
+                        if (d == '}') {
+                            if (depth == 0) break;
+                            depth--;
+                            if (depth == 0) {
+                                brace_r = scan;
+                                break;
+                            }
+                        }
+                    }
+                    if (brace_r > brace_l) {
+                        size_t end = brace_r + 1;
+                        while (end < n && (src[end] == ' ' || src[end] == '\t' ||
+                                           src[end] == '\n' || src[end] == '\r'))
+                            end++;
+                        /* typedef @typeview Mode on Base {…} Alias; */
+                        if (typedef_at && mode_r2 > mode_l2) {
+                            size_t al = end, ar;
+                            int stars = 0;
+                            while (al < n && (src[al] == ' ' || src[al] == '\t' ||
+                                              src[al] == '\n' || src[al] == '\r' ||
+                                              src[al] == '*')) {
+                                if (src[al] == '*') stars = 1;
+                                al++;
+                            }
+                            ar = al;
+                            while (ar < n && cc_is_ident_char(src[ar])) ar++;
+                            if (ar > al) {
+                                size_t need = 16 + (base_r2 - base_l2) + 10 +
+                                              (mode_r2 - mode_l2) + (ar - al) + 4;
+                                if (w + need > out_cap) {
+                                    size_t nc = out_cap * 2 + need + 64;
+                                    char* nb = (char*)realloc(out, nc + 1);
+                                    if (!nb) { free(out); return NULL; }
+                                    out = nb; out_cap = nc;
+                                }
+                                memcpy(out + w, "typedef ", 8);
+                                w += 8;
+                                memcpy(out + w, src + base_l2, base_r2 - base_l2);
+                                w += base_r2 - base_l2;
+                                memcpy(out + w, "_Restrict_", 10);
+                                w += 10;
+                                memcpy(out + w, src + mode_l2, mode_r2 - mode_l2);
+                                w += mode_r2 - mode_l2;
+                                if (stars) out[w++] = '*';
+                                out[w++] = ' ';
+                                memcpy(out + w, src + al, ar - al);
+                                w += ar - al;
+                                end = ar;
+                                while (end < n &&
+                                       (src[end] == ' ' || src[end] == '\t'))
+                                    end++;
+                                if (end < n && src[end] == ';') {
+                                    out[w++] = ';';
+                                    end++;
+                                }
+                                i = end;
+                                changed = 1;
+                                continue;
+                            }
+                        }
+                        if (end < n && src[end] == ';') end++;
+                        /* Plain define: erase entirely. */
+                        i = end;
+                        changed = 1;
+                        continue;
+                    }
+                }
+            }
+            /* Fall through: copy `@` and continue (malformed stays visible). */
+        }
+        if (w + 1 > out_cap) {
+            size_t nc = out_cap * 2 + 64;
+            char* nb = (char*)realloc(out, nc + 1);
+            if (!nb) { free(out); return NULL; }
+            out = nb; out_cap = nc;
+        }
+        out[w++] = src[i++];
+    }
+    out[w] = '\0';
+    if (!changed) { free(out); return NULL; }
+    return out;
+}
+
+/* `@typehooks on Subject[*]? { .field = expr, … };` →
+ * `@comptime { (void)cc_type_register("Subject*", (CCTypeHooks){ … }); }`
+ * Body is a strict C designated-initializer (one RHS expression per arm).
+ * Returns malloc'd buffer, or NULL when unchanged / OOM. */
+static inline char* cc_rewrite_typehooks_to_register(const char* src, size_t n) {
+    size_t i = 0;
+    size_t out_cap;
+    size_t w = 0;
+    char* out;
+    int changed = 0;
+    if (!src || n == 0) return NULL;
+    out_cap = n + 128;
+    out = (char*)malloc(out_cap + 1);
+    if (!out) return NULL;
+    while (i < n) {
+        if (src[i] == '"' || src[i] == '\'') {
+            char q = src[i++];
+            if (w + 1 > out_cap) {
+                size_t nc = out_cap * 2 + 64;
+                char* nb = (char*)realloc(out, nc + 1);
+                if (!nb) { free(out); return NULL; }
+                out = nb; out_cap = nc;
+            }
+            out[w++] = q;
+            while (i < n) {
+                if (w + 2 > out_cap) {
+                    size_t nc = out_cap * 2 + 64;
+                    char* nb = (char*)realloc(out, nc + 1);
+                    if (!nb) { free(out); return NULL; }
+                    out = nb; out_cap = nc;
+                }
+                out[w++] = src[i];
+                if (src[i] == '\\' && i + 1 < n) {
+                    out[w++] = src[i + 1];
+                    i += 2;
+                    continue;
+                }
+                if (src[i] == q) { i++; break; }
+                i++;
+            }
+            continue;
+        }
+        if (i + 1 < n && src[i] == '/' && src[i + 1] == '/') {
+            while (i < n && src[i] != '\n') {
+                if (w + 1 > out_cap) {
+                    size_t nc = out_cap * 2 + 64;
+                    char* nb = (char*)realloc(out, nc + 1);
+                    if (!nb) { free(out); return NULL; }
+                    out = nb; out_cap = nc;
+                }
+                out[w++] = src[i++];
+            }
+            continue;
+        }
+        if (i + 1 < n && src[i] == '/' && src[i + 1] == '*') {
+            while (i + 1 < n && !(src[i] == '*' && src[i + 1] == '/')) {
+                if (w + 1 > out_cap) {
+                    size_t nc = out_cap * 2 + 64;
+                    char* nb = (char*)realloc(out, nc + 1);
+                    if (!nb) { free(out); return NULL; }
+                    out = nb; out_cap = nc;
+                }
+                out[w++] = src[i++];
+            }
+            if (i + 1 < n) {
+                if (w + 2 > out_cap) {
+                    size_t nc = out_cap * 2 + 64;
+                    char* nb = (char*)realloc(out, nc + 1);
+                    if (!nb) { free(out); return NULL; }
+                    out = nb; out_cap = nc;
+                }
+                out[w++] = src[i++];
+                out[w++] = src[i++];
+            }
+            continue;
+        }
+        if (src[i] == '@' && i + 10 <= n && memcmp(src + i, "@typehooks", 10) == 0 &&
+            (i + 10 == n || !cc_is_ident_char(src[i + 10]))) {
+            size_t p = i + 10;
+            size_t sub_l, sub_r, brace_l = 0, brace_r = 0;
+            int depth = 0;
+            int ls = 0, lc = 0, st = 0, ch = 0;
+            while (p < n && (src[p] == ' ' || src[p] == '\t' || src[p] == '\n' ||
+                             src[p] == '\r'))
+                p++;
+            if (!(p + 2 < n && src[p] == 'o' && src[p + 1] == 'n' &&
+                  !cc_is_ident_char(src[p + 2]))) {
+                /* not `on` — copy '@' and continue */
+                if (w + 1 > out_cap) {
+                    size_t nc = out_cap * 2 + 64;
+                    char* nb = (char*)realloc(out, nc + 1);
+                    if (!nb) { free(out); return NULL; }
+                    out = nb; out_cap = nc;
+                }
+                out[w++] = src[i++];
+                continue;
+            }
+            p += 2;
+            while (p < n && (src[p] == ' ' || src[p] == '\t' || src[p] == '\n' ||
+                             src[p] == '\r'))
+                p++;
+            sub_l = p;
+            while (p < n && cc_is_ident_char(src[p])) p++;
+            /* Optional trailing `*` (glob or pointer subject). */
+            if (p < n && src[p] == '*') p++;
+            sub_r = p;
+            while (p < n && (src[p] == ' ' || src[p] == '\t' || src[p] == '\n' ||
+                             src[p] == '\r'))
+                p++;
+            if (p >= n || src[p] != '{' || sub_r <= sub_l) {
+                if (w + 1 > out_cap) {
+                    size_t nc = out_cap * 2 + 64;
+                    char* nb = (char*)realloc(out, nc + 1);
+                    if (!nb) { free(out); return NULL; }
+                    out = nb; out_cap = nc;
+                }
+                out[w++] = src[i++];
+                continue;
+            }
+            brace_l = p;
+            for (; p < n; p++) {
+                char d = src[p];
+                char d2 = (p + 1 < n) ? src[p + 1] : 0;
+                if (lc) { if (d == '\n') lc = 0; continue; }
+                if (ls) {
+                    if (d == '*' && d2 == '/') { ls = 0; p++; }
+                    continue;
+                }
+                if (st) {
+                    if (d == '\\' && d2) { p++; continue; }
+                    if (d == '"') st = 0;
+                    continue;
+                }
+                if (ch) {
+                    if (d == '\\' && d2) { p++; continue; }
+                    if (d == '\'') ch = 0;
+                    continue;
+                }
+                if (d == '/' && d2 == '/') { lc = 1; p++; continue; }
+                if (d == '/' && d2 == '*') { ls = 1; p++; continue; }
+                if (d == '"') { st = 1; continue; }
+                if (d == '\'') { ch = 1; continue; }
+                if (d == '{') { depth++; continue; }
+                if (d == '}') {
+                    if (depth == 0) break;
+                    depth--;
+                    if (depth == 0) {
+                        brace_r = p;
+                        break;
+                    }
+                }
+            }
+            if (brace_r > brace_l) {
+                size_t end = brace_r + 1;
+                size_t body_l = brace_l + 1;
+                size_t body_n = brace_r - body_l;
+                size_t sub_n = sub_r - sub_l;
+                size_t need;
+                while (end < n && (src[end] == ' ' || src[end] == '\t' ||
+                                   src[end] == '\n' || src[end] == '\r'))
+                    end++;
+                if (end < n && src[end] == ';') end++;
+                /* @comptime { (void)cc_type_register("SUB", (CCTypeHooks){ BODY }); } */
+                need = 64 + sub_n + body_n + 48;
+                if (w + need > out_cap) {
+                    size_t nc = out_cap * 2 + need + 64;
+                    char* nb = (char*)realloc(out, nc + 1);
+                    if (!nb) { free(out); return NULL; }
+                    out = nb; out_cap = nc;
+                }
+                memcpy(out + w, "@comptime { (void)cc_type_register(\"", 36);
+                w += 36;
+                memcpy(out + w, src + sub_l, sub_n);
+                w += sub_n;
+                memcpy(out + w, "\", (CCTypeHooks){", 17);
+                w += 17;
+                memcpy(out + w, src + body_l, body_n);
+                w += body_n;
+                memcpy(out + w, "}); }", 5);
+                w += 5;
+                i = end;
+                changed = 1;
+                continue;
+            }
+        }
+        if (w + 1 > out_cap) {
+            size_t nc = out_cap * 2 + 64;
+            char* nb = (char*)realloc(out, nc + 1);
+            if (!nb) { free(out); return NULL; }
+            out = nb; out_cap = nc;
+        }
+        out[w++] = src[i++];
+    }
+    out[w] = '\0';
+    if (!changed) { free(out); return NULL; }
+    return out;
+}
+
+/* Erase `@typehooks on Subject { … };` from lowered `.h` text (Concurrent-C
+ * registration fact — host C must not see it). */
+static inline char* cc_strip_typehooks_blocks(const char* src, size_t n) {
+    size_t i = 0;
+    size_t out_cap;
+    size_t w = 0;
+    char* out;
+    int changed = 0;
+    if (!src || n == 0) return NULL;
+    out_cap = n + 8;
+    out = (char*)malloc(out_cap + 1);
+    if (!out) return NULL;
+    while (i < n) {
+        if (src[i] == '"' || src[i] == '\'') {
+            char q = src[i++];
+            if (w + 1 > out_cap) {
+                size_t nc = out_cap * 2 + 64;
+                char* nb = (char*)realloc(out, nc + 1);
+                if (!nb) { free(out); return NULL; }
+                out = nb; out_cap = nc;
+            }
+            out[w++] = q;
+            while (i < n) {
+                if (w + 2 > out_cap) {
+                    size_t nc = out_cap * 2 + 64;
+                    char* nb = (char*)realloc(out, nc + 1);
+                    if (!nb) { free(out); return NULL; }
+                    out = nb; out_cap = nc;
+                }
+                out[w++] = src[i];
+                if (src[i] == '\\' && i + 1 < n) {
+                    out[w++] = src[i + 1];
+                    i += 2;
+                    continue;
+                }
+                if (src[i] == q) { i++; break; }
+                i++;
+            }
+            continue;
+        }
+        if (i + 1 < n && src[i] == '/' && src[i + 1] == '/') {
+            while (i < n && src[i] != '\n') {
+                if (w + 1 > out_cap) {
+                    size_t nc = out_cap * 2 + 64;
+                    char* nb = (char*)realloc(out, nc + 1);
+                    if (!nb) { free(out); return NULL; }
+                    out = nb; out_cap = nc;
+                }
+                out[w++] = src[i++];
+            }
+            continue;
+        }
+        if (i + 1 < n && src[i] == '/' && src[i + 1] == '*') {
+            while (i + 1 < n && !(src[i] == '*' && src[i + 1] == '/')) {
+                if (w + 1 > out_cap) {
+                    size_t nc = out_cap * 2 + 64;
+                    char* nb = (char*)realloc(out, nc + 1);
+                    if (!nb) { free(out); return NULL; }
+                    out = nb; out_cap = nc;
+                }
+                out[w++] = src[i++];
+            }
+            if (i + 1 < n) {
+                if (w + 2 > out_cap) {
+                    size_t nc = out_cap * 2 + 64;
+                    char* nb = (char*)realloc(out, nc + 1);
+                    if (!nb) { free(out); return NULL; }
+                    out = nb; out_cap = nc;
+                }
+                out[w++] = src[i++];
+                out[w++] = src[i++];
+            }
+            continue;
+        }
+        if (src[i] == '@' && i + 10 <= n && memcmp(src + i, "@typehooks", 10) == 0 &&
+            (i + 10 == n || !cc_is_ident_char(src[i + 10]))) {
+            size_t p = i + 10;
+            int depth = 0;
+            int ls = 0, lc = 0, st = 0, ch = 0;
+            int erased = 0;
+            while (p < n && src[p] != '{') p++;
+            if (p < n && src[p] == '{') {
+                for (; p < n; p++) {
+                    char d = src[p];
+                    char d2 = (p + 1 < n) ? src[p + 1] : 0;
+                    if (lc) { if (d == '\n') lc = 0; continue; }
+                    if (ls) {
+                        if (d == '*' && d2 == '/') { ls = 0; p++; }
+                        continue;
+                    }
+                    if (st) {
+                        if (d == '\\' && d2) { p++; continue; }
+                        if (d == '"') st = 0;
+                        continue;
+                    }
+                    if (ch) {
+                        if (d == '\\' && d2) { p++; continue; }
+                        if (d == '\'') ch = 0;
+                        continue;
+                    }
+                    if (d == '/' && d2 == '/') { lc = 1; p++; continue; }
+                    if (d == '/' && d2 == '*') { ls = 1; p++; continue; }
+                    if (d == '"') { st = 1; continue; }
+                    if (d == '\'') { ch = 1; continue; }
+                    if (d == '{') { depth++; continue; }
+                    if (d == '}') {
+                        if (depth == 0) break;
+                        depth--;
+                        if (depth == 0) {
+                            p++;
+                            while (p < n && (src[p] == ' ' || src[p] == '\t' ||
+                                             src[p] == '\n' || src[p] == '\r'))
+                                p++;
+                            if (p < n && src[p] == ';') p++;
+                            i = p;
+                            changed = 1;
+                            erased = 1;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (erased) continue;
+        }
+        if (w + 1 > out_cap) {
+            size_t nc = out_cap * 2 + 64;
+            char* nb = (char*)realloc(out, nc + 1);
+            if (!nb) { free(out); return NULL; }
+            out = nb; out_cap = nc;
+        }
+        out[w++] = src[i++];
+    }
+    out[w] = '\0';
+    if (!changed) { free(out); return NULL; }
+    return out;
+}
+
 /* Parse `Type name [@as|/@as/] [= init]` in [stmt, stmt_end).
  * When out_is_as is non-NULL, set to 1 if a trailing `@as` follows the name. */
 static inline void cc_parse_decl_name_and_type_ex(const char* stmt,

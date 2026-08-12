@@ -1,8 +1,9 @@
 /*
- * I/O error type: CCError general face (@as) + os_code payload.
+ * I/O error type: CCError general face (`@typeview … { as: base; }`) +
+ * os_code payload.
  *
  * CCIoError is usable as CCError through `base` — same preference order as
- * UFCS / @errhandler / cc_err (exact E, else unique @as path to face F).
+ * UFCS / @errhandler / cc_err (exact E, else unique as-face path to F).
  */
 #ifndef CC_IO_ERROR_H
 #define CC_IO_ERROR_H
@@ -23,13 +24,17 @@
 #define CC_IO_OTHER              CC_ERR_IO
 
 typedef struct {
-    CCError base @as;
+    CCError base;
     int32_t os_code; /* errno or platform code; 0 when not applicable. */
 } CCIoError;
 
+@typeview on CCIoError {
+    as: base;
+};
+
 static inline CCIoError cc_io_error_os(CCErrorKind kind, int os_code) {
     CCIoError e;
-    /* Face must carry a printable message: @as projection to CCError drops
+    /* Face must carry a printable message: as-face projection to CCError drops
      * os_code, and the script default handler prints the face alone. */
     e.base = CC_ERROR(kind, cc_error_kind_str(kind));
     e.os_code = (int32_t)os_code;

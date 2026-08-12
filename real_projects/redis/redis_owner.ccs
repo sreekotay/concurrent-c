@@ -145,11 +145,10 @@ static void redis_conn_release_slot(RedisConn* conn, RedisRequest* req);
 static char[:] !>(CCError) reply_arena_alloc_slice(CCArena* reply_arena, size_t n);
 
 /* After drain-to-zero (see RedisConn lifetime), free the conn. */
-@comptime {
-    (void)cc_type_register("RedisConn*", (CCTypeHooks){
-        .destroy = cc_type_destroy_call("redis_conn_destroy"),
-    });
-}
+@typehooks on RedisConn* {
+    .destroy = cc_type_destroy_call("redis_conn_destroy"),
+};
+
 
 static void redis_diag_fprintln(CCString* line, CCArena* scratch) {
     const char* p = cc_string_cstr(line, scratch);

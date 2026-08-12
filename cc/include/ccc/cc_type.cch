@@ -381,12 +381,10 @@ static inline int cc_type_register(const char* type_name, CCTypeHooks hooks) {
     return 0;
 }
 
-/* `cc_type_define` is the forward-looking spelling of `cc_type_register`
- * (see COMPTIME_INSTANTIATION_SEAM.md §3.3).  Today it is a thin alias: the
- * compiler's `@comptime` scanner (cc/src/comptime/symbols.c) recognizes both
- * spellings identically, parsing the same `CCTypeHooks` object literal.  The
- * richer `CCTypeProtocol` (layout/info slot) is a later milestone; until then
- * `cc_type_register` remains a supported legacy alias of `cc_type_define`. */
+/* Preferred Concurrent-C surface is `@typehooks on T { … };` (rewrites to
+ * `cc_type_register`). `cc_type_define` is a thin alias of `cc_type_register`;
+ * the compiler's `@comptime` scanner (cc/src/comptime/symbols.c) recognizes
+ * both spellings identically. See docs/deprecated.md. */
 static inline int cc_type_define(const char* mangled_name, CCTypeHooks proto) {
     return cc_type_register(mangled_name, proto);
 }

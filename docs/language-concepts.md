@@ -62,7 +62,7 @@ int c = read() !>(e) { /* local */ @err(e); };
 
 `recv.method(args)` calls the function the receiver's type names.
 **Declaring that function is installing the method** — no trait, no header edit,
-and (for this ordinary path) no `cc_type_register` step. Method and free forms
+and (for this ordinary path) no `@typehooks` step. Method and free forms
 are the same API (`v.push(10)` ↔ `CCVec_int_push(&v, 10)`); Concurrent-C examples
 prefer the method form. Stdlib families may also register a `.ufcs` lowerer for
 naming/rewrite policy; that is optional library machinery, not required to add

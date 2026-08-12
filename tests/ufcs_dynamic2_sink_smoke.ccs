@@ -79,13 +79,11 @@ static int test_sink2_real(TestSink2 *t) {
     return 7;
 }
 
-#ifdef CC_COMPTIME_SCAN
-@comptime {
-    (void)cc_type_register("TestSink2", (CCTypeHooks){
-        .ufcs_dynamic2 = cc_type_dynamic_call("ts2_call", "TS2_ARG"),
-    });
-}
-#endif
+
+@typehooks on TestSink2 {
+    .ufcs_dynamic2 = cc_type_dynamic_call("ts2_call", "TS2_ARG"),
+};
+
 
 int main(void) {
     TestSink2 w = {0};

@@ -17,7 +17,7 @@
  * statement.  That caused the type span reported to the symbol-table
  * lookup (and to the "unknown registered destructor" diagnostic) to
  * engulf the whole `@errhandler(...) { ... } MyThing*` prelude, so no
- * `@comptime cc_type_register("MyThing*", ...)` entry matched and the
+ * `@typehooks on MyThing* { … }` entry matched and the
  * compile aborted with:
  *
  *     error: @destroy: bodyless `@destroy;` requires a registered
@@ -34,7 +34,7 @@
  * This test keeps the scanner honest by combining:
  *   - a preceding `@errhandler(CCError e) { ... }` on its own lines;
  *   - a `MyThing* t = ... !> @destroy;` bodyless suffix with a type
- *     registered via `@comptime cc_type_register`;
+ *     registered via `@typehooks`;
  *   - a second scope that uses the chained
  *     `foo() !>(e) { body } @destroy { body };` shape to prove the
  *     continuation case still resolves.
@@ -67,12 +67,11 @@ static void widget_destroy(Widget* w) {
     free(w);
 }
 
-@comptime {
-    (void)cc_type_register("Widget*", (CCTypeHooks){
-        .create = cc_type_create_call("widget_create"),
-        .destroy = cc_type_destroy_call("widget_destroy"),
-    });
-}
+@typehooks on Widget* {
+    .create = cc_type_create_call("widget_create"),
+    .destroy = cc_type_destroy_call("widget_destroy"),
+};
+
 
 /* Shape under test:
  *   1. Multi-line `@errhandler(CCError e) { ... }`.

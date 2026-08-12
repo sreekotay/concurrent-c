@@ -3,10 +3,10 @@
  *
  *   CCTempFile tmp = cc_temp_file(&a) !> @destroy;
  *
- * CCTempFile is-a CCFile via `file @as`. Registered destroy is the delta
- * (`cc_temp_file_unlink`); `cc_temp_file_destroy` is the hand-written full
- * chain for raw C callers. Bodyless `@destroy` / `.destroy()` expand to
- * unlink then `cc_file_close(&tmp.file)`.
+ * CCTempFile is-a CCFile via `@typeview … { as: file; }`. Destroy delta via
+ * `@typehooks … { .destroy = … }` (`cc_temp_file_unlink`); `cc_temp_file_destroy`
+ * is the hand-written full chain for raw C callers. Bodyless `@destroy` /
+ * `.destroy()` expand to unlink then `cc_file_close(&tmp.file)`.
  */
 #ifndef CC_SCRIPT_TEMP_H
 #define CC_SCRIPT_TEMP_H
@@ -23,10 +23,18 @@
 #include <ccc/std/io.cch>
 
 typedef struct CCTempFile {
-    CCFile file @as;
+    CCFile file;
     CCSlice path;  /* NUL-terminated temp path */
     int owns;
 } CCTempFile;
+
+@typeview on CCTempFile {
+    as: file;
+};
+
+@typehooks on CCTempFile {
+    .destroy = cc_type_destroy_call("cc_temp_file_unlink"),
+};
 
 #ifndef CCResult_CCTempFile_CCError_DEFINED
 #define CCResult_CCTempFile_CCError_DEFINED 1
@@ -83,13 +91,5 @@ static inline CCTempFile !>(CCError) cc_temp_file(CCArena *arena) {
     tmp.owns = 1;
     return cc_ok(tmp);
 }
-
-#ifdef CC_COMPTIME_SCAN
-@comptime {
-    (void)cc_type_register("CCTempFile", (CCTypeHooks){
-        .destroy = cc_type_destroy_call("cc_temp_file_unlink"),
-    });
-}
-#endif
 
 #endif /* CC_SCRIPT_TEMP_H */

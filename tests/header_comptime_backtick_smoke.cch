@@ -14,6 +14,10 @@ static void apos_thing_close(AposThing *t) { t->v = 0; }
     (void)note;
 }
 
+/* Legacy register form kept on purpose: this header is included as raw `.cch`
+ * (not via lower-headers), so file-scope `@typehooks` would reach shadow
+ * unrewritten. The second `@comptime` also guards that apostrophe prose did
+ * not stop the stripper from finding later blocks. See docs/deprecated.md. */
 @comptime {
     (void)cc_type_register("AposThing", (CCTypeHooks){
         .destroy = cc_type_destroy_call("apos_thing_close"),

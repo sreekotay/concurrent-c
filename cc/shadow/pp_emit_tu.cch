@@ -478,6 +478,10 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
      * Builtins first (slice family); TU decls may redeclare if compatible. */
     shadow_restrict_register_builtins();
     shadow_restrict_register_from_items(items, n);
+    /* Glob typeview as: faces → exact embeds once fields / slice instances known. */
+    shadow_as_materialize_all_globs();
+    /* typeview `as:` faces may have been added after the header @as scan. */
+    shadow_as_resolve_transitive();
 
     /* Collect Result Ok/Err pairs first — drives specs and __cc_uw_* arms. */
     ShadowCtx line_ctx = { .cache = cache };

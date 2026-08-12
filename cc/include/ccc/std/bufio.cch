@@ -4,8 +4,7 @@
  * Fill dispatches with _Generic on Src* to the duplex caller-buffer read
  * (EOF model B). Extend the association list when adding a new duplex type.
  *
- * Factory bodies below (under CC_COMPTIME_SCAN) are for legacy harvest — keep
- * in sync with bufio_factory.cch (native quote-splice).
+ * Factory bodies are harvested from this `.cch` (blanked from the lowered `.h`).
  */
 #ifndef CC_STD_BUFIO_H
 #define CC_STD_BUFIO_H
@@ -17,9 +16,6 @@ static inline bool !>(CCIoError) cc__bufio_unsupported_read(void *src, char *buf
     if (out) *out = 0;
     return cc_err(cc_io_error_os(CC_IO_INVALID_ARGUMENT, EINVAL));
 }
-
-#ifdef CC_COMPTIME_SCAN
-#include <ccc/cc_instantiate.cch>
 
 CC_GENERIC_FACTORY(BufReader, 1) {
     return @emit(`
@@ -128,6 +124,5 @@ static inline CCSlice !>(CCIoError) ${mangled}_read_line_dup(${mangled} *r, CCAr
 }
 `, arena);
 }
-#endif /* CC_COMPTIME_SCAN */
 
 #endif /* CC_STD_BUFIO_H */

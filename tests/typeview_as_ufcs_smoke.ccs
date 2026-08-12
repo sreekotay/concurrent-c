@@ -1,0 +1,34 @@
+/* @typeview on T { as: field; } ≡ field @as — UFCS retry via embed. */
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct {
+    CCFile file;
+    int tag;
+} TvFileWrap;
+
+@typeview on TvFileWrap {
+    as: file;
+};
+
+int main(void) {
+    TvFileWrap w = {0};
+    w.tag = 7;
+    assert(w.open(CC_SLICE_LIT("tmp/typeview_as_ufcs_smoke.txt"), "w") == 0);
+
+    CCSlice msg = CC_SLICE_LIT("hello-tv\n");
+    CCRes(size_t, CCIoError) wr = w.write(msg);
+    assert(cc_is_ok(wr));
+    assert(cc_value(wr) == msg.len);
+
+    CCRes(size_t, CCIoError) wr2 = w.file.write(CC_SLICE_LIT("more\n"));
+    assert(cc_is_ok(wr2));
+    assert(cc_value(wr2) == 5);
+
+    w.close();
+    remove("tmp/typeview_as_ufcs_smoke.txt");
+    printf("ok\n");
+    return 0;
+}

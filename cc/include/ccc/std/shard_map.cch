@@ -170,11 +170,15 @@ static inline bool cc_shard_delete(CCShard* m, CCSlice key) {
 /* ---- Sharded map (cells + domain @as) ---- */
 
 typedef struct CCShardMap {
-    /* Hold API: maps.hold_one / hold_sorted / hold_all (UFCS via @as). */
-    CCShardDomain domain @as;
+    /* Hold API: maps.hold_one / hold_sorted / hold_all (UFCS via as-face). */
+    CCShardDomain domain;
     CCShard* shards;
     CCArena root; /* storage for shards[] */
 } CCShardMap;
+
+@typeview on CCShardMap {
+    as: domain;
+};
 
 static inline size_t cc_shard_map_count(const CCShardMap* m) {
     if (!m) return 0;

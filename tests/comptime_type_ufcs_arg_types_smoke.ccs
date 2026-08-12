@@ -33,11 +33,10 @@ static CCSlice arg_toy_ufcs(CCSlice recv_type, CCSlice method, CCSlice mode, CCS
     return cc_slice_empty();
 }
 
-@comptime {
-    (void)cc_type_register("ArgToy", (CCTypeHooks){
-        .ufcs = arg_toy_ufcs,
-    });
-}
+@typehooks on ArgToy {
+    .ufcs = arg_toy_ufcs,
+};
+
 
 int main(void) {
     ArgToy toy = { 1 };

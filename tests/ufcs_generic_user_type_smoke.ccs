@@ -4,7 +4,7 @@
 //   `conn->retain()`  becomes  redis_conn_retain(conn)
 //   `conn->drop()`    becomes  redis_conn_drop(conn)
 //   `v.reset()`       becomes  my_widget_reset(&v)
-// Registered globally via cc_type_register("*", ...) in cc_arena.cch.
+// Registered globally via `@typehooks on *` in cc_arena.cch.
 #include <ccc/std/prelude.cch>
 #include <assert.h>
 

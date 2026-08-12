@@ -35,13 +35,11 @@ static int poke(WrapT *t1) {
     return -1;
 }
 
-#ifdef CC_COMPTIME_SCAN
-@comptime {
-    (void)cc_type_register("WrapT", (CCTypeHooks){
-        .ufcs_dynamic = cc_type_dynamic_call("wrap_sink", "W_ARG"),
-    });
-}
-#endif
+
+@typehooks on WrapT {
+    .ufcs_dynamic = cc_type_dynamic_call("wrap_sink", "W_ARG"),
+};
+
 
 int main(void) {
     WrapT w = {{1}, 0};

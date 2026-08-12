@@ -530,6 +530,30 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
         cur_len = strlen(buf_as);
     }
 
+    /* Pass 0b3: erase `@typeview` / `@restricted` blocks (and rewrite
+     * `@typeview(Mode) Base` sugar) — same Concurrent-C-only facts. */
+    {
+        char* buf_tv = cc_strip_typeview_blocks(cur, cur_len);
+        if (buf_tv) {
+            if (buf_as && cur == buf_as) free(buf_as);
+            buf_as = buf_tv; /* reuse free slot at end */
+            cur = buf_tv;
+            cur_len = strlen(buf_tv);
+        }
+    }
+
+    /* Pass 0b4: erase `@typehooks on T { … };` (→ register at Concurrent-C
+     * scan time; host `.h` must stay plain C). */
+    {
+        char* buf_th = cc_strip_typehooks_blocks(cur, cur_len);
+        if (buf_th) {
+            if (buf_as && cur == buf_as) free(buf_as);
+            buf_as = buf_th;
+            cur = buf_th;
+            cur_len = strlen(buf_th);
+        }
+    }
+
     /* Pass 0c: Share header-safe type-syntax lowering with preprocess.c so
        constructs like `char[:]` and generic container types lower the same
        way they do in the main compiler pipeline. */

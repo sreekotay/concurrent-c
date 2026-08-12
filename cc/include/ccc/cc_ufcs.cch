@@ -57,7 +57,7 @@ static inline CCSlice cc_ufcs_emit_value_cstr(CCArena *arena, const char *callee
 /* The generic UFCS name composers live in cc_arena.cch — their bodies need
  * `cc_arena_alloc`, and cc_ufcs.cch is the one that includes that header, so
  * putting the helpers there avoids a circular include.  The global
- * `cc_type_register("*", ...)` entry wires in the snake_case default; slice
+ * `@typehooks on * { … }` entry wires in the snake_case default; slice
  * marker types register a narrower composer that routes back to `cc_slice_*`. */
 
 static inline CCUfcsRegistration cc_ufcs_register(const char *pattern, CCUfcsRewriteFn rewrite) {
@@ -73,15 +73,15 @@ static inline CCSlice cc_ufcs_apply(CCUfcsRegistration reg, CCSlice recv_type, C
 }
 
 /* Default UFCS dispatch is wired up globally in cc_arena.cch via
- * `cc_type_register(...)` entries:
+ * `@typehooks` entries:
  *
- *     cc_type_register("*",              { .ufcs = cc_ufcs_generic_cc_prefix_lower_c });
- *     cc_type_register("CCSliceUnique*", { .ufcs = cc_ufcs_generic_cc_slice_family_c });
- *     cc_type_register("CCSliceShared*", { .ufcs = cc_ufcs_generic_cc_slice_family_c });
+ *     @typehooks on * { .ufcs = cc_ufcs_generic_cc_prefix_lower_c };
+ *     @typehooks on CCSliceUnique* { .ufcs = cc_ufcs_generic_cc_slice_family_c };
+ *     @typehooks on CCSliceShared* { .ufcs = cc_ufcs_generic_cc_slice_family_c };
  *
  * Every CamelCase receiver whose C API follows the `<snake_type>_<method>`
  * convention gets UFCS dispatch for free — headers no longer need a
- * per-type `@comptime cc_type_register(...)` opt-in.  Two shapes are
+ * per-type `@typehooks` opt-in.  Two shapes are
  * recognized by the generic composer:
  *
  *   - Stdlib `CCFoo` / `CCFoo*` receivers (CCArena, CCArenaCheckpoint,

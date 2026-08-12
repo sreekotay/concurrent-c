@@ -28,11 +28,11 @@ static void payload_destroy(Payload* x) {
     }
 }
 
-@comptime {
-    (void)cc_type_register("Payload", (CCTypeHooks){
-        .destroy = cc_type_destroy_call("payload_destroy"),
-    });
-}
+@typehooks on Payload {
+    .destroy = cc_type_destroy_call("payload_destroy"),
+
+};
+
 
 @variant Cell {
     txt: Payload;

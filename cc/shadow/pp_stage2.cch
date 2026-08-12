@@ -151,7 +151,9 @@ static int pp_define_has_cc_token(const char* line) {
             strncmp(p, "@comptime", 9) == 0 || strncmp(p, "@string", 7) == 0 ||
             strncmp(p, "@scratch", 8) == 0 || strncmp(p, "@emit", 5) == 0 ||
             strncmp(p, "@with_deadline", 14) == 0 ||
-            strncmp(p, "@restricted", 11) == 0)
+            strncmp(p, "@restricted", 11) == 0 ||
+            strncmp(p, "@typeview", 9) == 0 ||
+            strncmp(p, "@typehooks", 10) == 0)
             return 1;
         p++;
     }

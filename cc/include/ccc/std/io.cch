@@ -423,12 +423,10 @@ static inline size_t !>(CCIoError) cc_buf_writer_write(CCBufWriter *w, CCSlice d
 
 /* cc_file_close is idempotent (nulls handle; no-op when already closed),
  * as a registered destroy hook must be. */
-#ifdef CC_COMPTIME_SCAN
-@comptime {
-    (void)cc_type_register("CCFile", (CCTypeHooks){
-        .destroy = cc_type_destroy_call("cc_file_close"),
-    });
-}
-#endif
+
+@typehooks on CCFile {
+    .destroy = cc_type_destroy_call("cc_file_close"),
+};
+
 
 #endif // CC_STD_IO_H

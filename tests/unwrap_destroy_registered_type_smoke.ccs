@@ -1,5 +1,5 @@
 /* Regression test: bodyless `!> @destroy;` resolves destroy hooks from
- * `@comptime cc_type_register(...)` for user types.
+ * `@typehooks on …` for user types.
  *
  * Previously, cc__rewrite_unwrap_destroy_suffix only honored a hardcoded
  * trio (CCNursery*, CCArena, CCChan*) and would reject the bodyless form
@@ -43,12 +43,11 @@ static void my_thing_destroy(MyThing* t) {
     free(t);
 }
 
-@comptime {
-    (void)cc_type_register("MyThing*", (CCTypeHooks){
-        .create = cc_type_create_call("my_thing_create"),
-        .destroy = cc_type_destroy_call("my_thing_destroy"),
-    });
-}
+@typehooks on MyThing* {
+    .create = cc_type_create_call("my_thing_create"),
+    .destroy = cc_type_destroy_call("my_thing_destroy"),
+};
+
 
 /* Bodyless `!> @destroy;` via the unwrap-destroy suffix pass.  Relies on
  * the registered destroy callee from the comptime block above. */

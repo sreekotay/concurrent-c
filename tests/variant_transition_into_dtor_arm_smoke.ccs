@@ -11,9 +11,10 @@ typedef struct Handle { int id; } Handle;
 static void handle_free(Handle* h) { (void)h; g_frees++; }
 static Handle handle_make(int id) { return (Handle){ .id = id }; }
 
-@comptime {
-    (void)cc_type_register("Handle", (CCTypeHooks){ .destroy = cc_type_destroy_call("handle_free") });
-}
+@typehooks on Handle {
+    .destroy = cc_type_destroy_call("handle_free") 
+};
+
 
 @variant Box { h: Handle; n: int64_t; };
 

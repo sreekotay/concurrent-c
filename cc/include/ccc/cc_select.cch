@@ -145,13 +145,11 @@ static inline int cc__select_add_close_rx(CCSelect* sel, CCChanRx rx, CCIoError*
  * Re-entrant: may be called many times on the same sel. */
 bool !>(CCIoError) cc_select_wait(CCSelect* sel);
 
-#ifdef CC_COMPTIME_SCAN
-@comptime {
-    (void)cc_type_register("CCSelect", (CCTypeHooks){
-        .create = cc_type_create_call("cc_select_create"),
-        .destroy = cc_type_destroy_call("cc_select_dispose"),
-    });
-}
-#endif
+
+@typehooks on CCSelect {
+    .create = cc_type_create_call("cc_select_create"),
+    .destroy = cc_type_destroy_call("cc_select_dispose"),
+};
+
 
 #endif /* CC_SELECT_H */

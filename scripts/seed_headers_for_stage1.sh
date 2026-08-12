@@ -4,7 +4,8 @@
 # exists yet (true fresh clone / smoke_bootstrap_fresh).
 #
 # Not a substitute for real lowering: stage-1 must re-run over this seed.
-# Only strips `@as` / legacy `/*@as*/` and rewrites `.cch` includes to `.h`.
+# Only strips `@as` / legacy `/*@as*/`, `@typeview` / `@restricted` /
+# `@typehooks` blocks, and rewrites `.cch` includes to `.h`.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -24,9 +25,110 @@ out_inc = pathlib.Path(sys.argv[2])
 in_rt = pathlib.Path(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else None
 out_rt = pathlib.Path(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4] else None
 
+def strip_typeview_blocks(text: str) -> str:
+    """Erase @typeview / @restricted / @typehooks define blocks (brace-matched)."""
+    out = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] in "\"'":
+            q = text[i]
+            out.append(q)
+            i += 1
+            while i < n:
+                out.append(text[i])
+                if text[i] == "\\" and i + 1 < n:
+                    out.append(text[i + 1])
+                    i += 2
+                    continue
+                if text[i] == q:
+                    i += 1
+                    break
+                i += 1
+            continue
+        if text.startswith("//", i):
+            while i < n and text[i] != "\n":
+                out.append(text[i])
+                i += 1
+            continue
+        if text.startswith("/*", i):
+            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                out.append(text[i])
+                i += 1
+            if i + 1 < n:
+                out.append(text[i])
+                out.append(text[i + 1])
+                i += 2
+            continue
+        kw = None
+        if text.startswith("@typeview", i) and (
+            i + 9 == n or not (text[i + 9].isalnum() or text[i + 9] == "_")
+        ):
+            kw = 9
+        elif text.startswith("@restricted", i) and (
+            i + 11 == n or not (text[i + 11].isalnum() or text[i + 11] == "_")
+        ):
+            kw = 11
+        elif text.startswith("@typehooks", i) and (
+            i + 10 == n or not (text[i + 10].isalnum() or text[i + 10] == "_")
+        ):
+            kw = 10
+        if kw is not None:
+            # Drop a leading `typedef` that only exists for the define form.
+            j = len(out)
+            while j > 0 and out[j - 1] in " \t\n\r":
+                j -= 1
+            if j >= 7 and "".join(out[j - 7 : j]) == "typedef":
+                j -= 7
+                while j > 0 and out[j - 1] in " \t":
+                    j -= 1
+                del out[j:]
+            p = i + kw
+            # Sugar @typeview(Mode) Base — erase keyword+parens only.
+            while p < n and text[p] in " \t\n\r":
+                p += 1
+            if p < n and text[p] == "(":
+                depth = 0
+                while p < n:
+                    if text[p] == "(":
+                        depth += 1
+                    elif text[p] == ")":
+                        depth -= 1
+                        p += 1
+                        break
+                    p += 1
+                i = p
+                continue
+            # Define form: … on Base[*] { … } ;
+            while p < n and text[p] != "{":
+                p += 1
+            if p >= n:
+                i += kw
+                continue
+            depth = 0
+            while p < n:
+                if text[p] == "{":
+                    depth += 1
+                elif text[p] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        p += 1
+                        break
+                p += 1
+            while p < n and text[p] in " \t\n\r":
+                p += 1
+            if p < n and text[p] == ";":
+                p += 1
+            i = p
+            continue
+        out.append(text[i])
+        i += 1
+    return "".join(out)
+
 def seed_text(text: str) -> str:
     text = text.replace("/*@as*/", "")
     text = re.sub(r"@as\b", "", text)
+    text = strip_typeview_blocks(text)
     text = text.replace(".cch>", ".h>").replace('.cch"', '.h"')
     return text
 

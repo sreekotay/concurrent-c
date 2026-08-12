@@ -267,9 +267,9 @@ ops** like `cc_slice_concat2`. Two details made it work cleanly:
 - `cc_arena.cch` declares `extern cc_arena_prov_counter` (defined in the
   *compiled* runtime). The comptime TU is standalone and never links the
   runtime, so the prelude **defines a per-TU instance** (`= 0`); provenance ids
-  only need uniqueness within one comptime run. The header's
-  `#ifdef CC_COMPTIME_SCAN` blocks (`@comptime`/`@create` registration text) are
-  excluded because the executor does not define that macro.
+  only need uniqueness within one comptime run. Registration text that used to
+  live under `#ifdef CC_COMPTIME_SCAN` is now file-scope `@typehooks` / factory
+  harvest (stripped from host `.h`).
 
 Proof: `tests/comptime_arena_smoke` (arena create + `cc_slice_concat2` + free,
 all at compile time).

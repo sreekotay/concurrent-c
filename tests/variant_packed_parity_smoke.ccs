@@ -36,12 +36,11 @@ static void handle_destroy(Handle* h) {
     h->p = NULL;
 }
 
-@comptime {
-    (void)cc_type_register("Handle", (CCTypeHooks){
-        .destroy = cc_type_destroy_call("handle_destroy"),
-        .niche = cc_type_niche(16, 8, 12, 4, 0xFFFFFFFF),
-    });
-}
+@typehooks on Handle {
+    .destroy = cc_type_destroy_call("handle_destroy"),
+    .niche = cc_type_niche(16, 8, 12, 4, 0xFFFFFFFF),
+};
+
 
 @variant(packed) PCell { h: Handle; num: int64_t; };
 @variant        UCell { h: Handle; num: int64_t; };

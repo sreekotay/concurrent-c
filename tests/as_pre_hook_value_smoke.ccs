@@ -27,12 +27,11 @@ static Holder holder_make(void) {
     return h;
 }
 
-@comptime {
-    (void)cc_type_register("Holder", (CCTypeHooks){
-        .create = cc_type_create_call("holder_make"),
-        .destroy = cc_type_destroy_hooks("holder_pre", "holder_post"),
-    });
-}
+@typehooks on Holder {
+    .create = cc_type_create_call("holder_make"),
+    .destroy = cc_type_destroy_hooks("holder_pre", "holder_post"),
+};
+
 
 int main(void) {
     @errhandler(CCError e) {

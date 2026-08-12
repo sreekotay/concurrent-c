@@ -15,6 +15,9 @@ static CCSlice header_registered_arena_ufcs(CCSlice recv_type, CCSlice method, C
     return cc_slice_empty();
 }
 
+/* Legacy register form: this shared header is `#include`d as raw `.cch` (not
+ * lower-header'd), so file-scope `@typehooks` would reach shadow unrewritten.
+ * See docs/deprecated.md. */
 @comptime {
     (void)cc_type_register("CCArena", (CCTypeHooks){
         .create = cc_type_create_overloads("cc_arena_create", "cc_arena_fixed_buffer"),

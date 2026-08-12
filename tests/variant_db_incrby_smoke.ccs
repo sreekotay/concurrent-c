@@ -32,11 +32,10 @@ static void text_destroy(Text* t) {
     }
 }
 
-@comptime {
-    (void)cc_type_register("Text", (CCTypeHooks){
-        .destroy = cc_type_destroy_call("text_destroy"),
-    });
-}
+@typehooks on Text {
+    .destroy = cc_type_destroy_call("text_destroy"),
+};
+
 
 @variant RedisValue {
     str: Text;

@@ -1,0 +1,47 @@
+/* @typeview on Fam_* { as: core; } — family glob subject → is-a faces. */
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct {
+    CCFile core;
+    int tag;
+} Fam_alpha;
+
+typedef struct {
+    CCFile core;
+    int tag;
+} Fam_beta;
+
+@typeview on Fam_* {
+    as: core;
+};
+
+static size_t erased_take(CCSlice s) { return s.len; }
+
+int main(void) {
+    Fam_alpha a = {0};
+    Fam_beta b = {0};
+    a.tag = 1;
+    b.tag = 2;
+
+    assert(a.open(CC_SLICE_LIT("tmp/typeview_glob_as_a.txt"), "w") == 0);
+    assert(cc_is_ok(a.write(CC_SLICE_LIT("A\n"))));
+    a.close();
+
+    assert(b.open(CC_SLICE_LIT("tmp/typeview_glob_as_b.txt"), "w") == 0);
+    assert(cc_is_ok(b.write(CC_SLICE_LIT("B\n"))));
+    b.close();
+
+    remove("tmp/typeview_glob_as_a.txt");
+    remove("tmp/typeview_glob_as_b.txt");
+
+    /* Prelude typed slices use the same glob face on CCSlice_*. */
+    double xs[:] = {1.0, 2.0, 3.0};
+    assert(xs.len() == 3);
+    assert(erased_take(xs) == 3 * sizeof(double));
+
+    printf("ok\n");
+    return 0;
+}

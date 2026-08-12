@@ -921,7 +921,7 @@ static inline CCSlice cc_slice_concat2(CCSlice left, CCSlice right, CCArena *are
  *      RedisConn* conn;       conn->retain()  -> redis_conn_retain(conn)
  *      MyType v;              v.foo()         -> my_type_foo(&v)
  *
- * Registered globally via `cc_type_register("*", ...)` at the bottom of
+ * Registered globally via `@typehooks on * { … }` at the bottom of
  * this file, so every CamelCase type that follows the snake-case naming
  * convention gets UFCS dispatch for free — no per-type opt-in, no need
  * to rename existing C functions to match a PascalCase UFCS mangling.
@@ -1048,7 +1048,7 @@ static inline CCSlice cc_ufcs_generic_cc_prefix_lower_c(CCSlice recv_type,
        `cc_<snake_type>_<method>` convention.  The compiler's channel
        dispatch path handles these — returning the sentinel here lets
        that path run even though this generic hook is registered globally
-       via `cc_type_register("*", ...)`.
+       via `@typehooks on *`.
 
        CCChanTx / CCChanRx (bare + typed family `CCChanTx_int`, etc.)
        already have dedicated hooks registered in cc_channel.cch;
@@ -1732,22 +1732,20 @@ static inline void cc_slice_debug_assert_arena_epoch(CCSlice slice, const CCAren
  * (see end of this file).  Only the lifecycle hooks (`.create` /
  * `.destroy`) need a type-specific entry. */
 
-#ifdef CC_COMPTIME_SCAN
-@comptime {
-    (void)cc_type_register("CCArena", (CCTypeHooks){
-        /* 1-arg sugar `@create(bytes)` -> heap-growable arena.
-         * 2-arg sugar `@create(buf, cap)` -> fixed root (no growth), matching
-         * pre-existing scratch-buffer semantics. For a caller-rooted arena
-         * with heap overflow, use the explicit 3-arg cc_arena_create_buffer
-         * directly with CC_ARENA_GROWABLE. */
-        .create = cc_type_create_overloads("cc_arena_create", "cc_arena_fixed_buffer"),
-        .destroy = cc_type_destroy_call("cc_arena_destroy"),
-    });
-    (void)cc_type_register("CCArenaCheckpoint", (CCTypeHooks){
-        .destroy = cc_type_destroy_call("cc_arena_checkpoint_destroy"),
-    });
-}
-#endif
+
+@typehooks on CCArena {
+    /* 1-arg sugar `@create(bytes)` -> heap-growable arena.
+     * 2-arg sugar `@create(buf, cap)` -> fixed root (no growth), matching
+     * pre-existing scratch-buffer semantics. For a caller-rooted arena
+     * with heap overflow, use the explicit 3-arg cc_arena_create_buffer
+     * directly with CC_ARENA_GROWABLE. */
+    .create = cc_type_create_overloads("cc_arena_create", "cc_arena_fixed_buffer"),
+    .destroy = cc_type_destroy_call("cc_arena_destroy"),
+};
+@typehooks on CCArenaCheckpoint {
+    .destroy = cc_type_destroy_call("cc_arena_checkpoint_destroy"),
+};
+
 /* Non-atomic versions for per-fiber/per-thread exclusive arenas.
    Use when no other thread will touch the arena concurrently. */
 #define cc_arena_alloc_T_count_local(T, arena, count) \
@@ -1924,25 +1922,22 @@ static inline void* cc_arena_pool_iter_next(CCArenaPoolIter* it) {
  * renamed methods) can still register their own specific pattern with a
  * bespoke rewrite to win over the generic default.  Per-type `.ufcs = ...`
  * opt-ins in the std headers are no longer needed and have been removed. */
-#ifdef CC_COMPTIME_SCAN
-@comptime {
-    (void)cc_type_register("*", (CCTypeHooks){
-        .ufcs = cc_ufcs_generic_cc_prefix_lower_c,
-    });
-    (void)cc_type_register("CCSliceUnique*", (CCTypeHooks){
-        .ufcs = cc_ufcs_generic_cc_slice_family_c,
-    });
-    (void)cc_type_register("CCSliceShared*", (CCTypeHooks){
-        .ufcs = cc_ufcs_generic_cc_slice_family_c,
-    });
-    /* Bodyless `!> @destroy` / `s.destroy()` for adopted unique slices.
-     * cc_slice_destroy no-ops when the alloc_id is not in the adopt registry. */
-    (void)cc_type_register("CCSliceUnique", (CCTypeHooks){
-        .destroy = cc_type_destroy_call("cc_slice_destroy"),
-        .ufcs = cc_ufcs_generic_cc_slice_family_c,
-    });
-}
-#endif
+
+@typehooks on * {
+    .ufcs = cc_ufcs_generic_cc_prefix_lower_c,
+};
+@typehooks on CCSliceUnique* {
+    .ufcs = cc_ufcs_generic_cc_slice_family_c,
+};
+@typehooks on CCSliceShared* {
+    .ufcs = cc_ufcs_generic_cc_slice_family_c,
+};
+/* Bodyless `!> @destroy` / `s.destroy()` for adopted unique slices.
+ * cc_slice_destroy no-ops when the alloc_id is not in the adopt registry. */
+@typehooks on CCSliceUnique {
+    .destroy = cc_type_destroy_call("cc_slice_destroy"),
+    .ufcs = cc_ufcs_generic_cc_slice_family_c,
+};
 
 /* TODO (arena model hardening — none urgent):
  *

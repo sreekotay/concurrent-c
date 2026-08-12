@@ -127,13 +127,17 @@ typedef struct CCJsVal {
 /* JavaScript failure with a CCError face: default @errhandler(CCError)
  * prints it; exact @errhandler(CCJsError) claims it. */
 typedef struct CCJsError {
-    CCError base @as;
+    CCError base;
     /* `error.name` (`TypeError`, `RangeError`, …) and `error.stack`, both
      * anchored in the handle's scratch arena.  Empty when the failure came
      * from the binding rather than from JavaScript. */
     CCSlice name;
     CCSlice stack;
 } CCJsError;
+
+@typeview on CCJsError {
+    as: base;
+};
 
 #ifndef CCResult_CCJs_CCJsError_DEFINED
 #define CCResult_CCJs_CCJsError_DEFINED 1
@@ -6769,27 +6773,25 @@ static inline CCJsArg cc__js_dom_arg_val(CCJsDomVal v) {
         _Bool: cc__js_arg_bool)(x)
 
 
-#ifdef CC_COMPTIME_SCAN
-@comptime {
-    (void)cc_type_register("CCJs", (CCTypeHooks){
-        .destroy = cc_type_destroy_call("cc_js_close"),
-        .ufcs_dynamic2 = cc_type_dynamic_call("cc_js_callm", "CC_JS_ARG"),
-    });
-    (void)cc_type_register("CCJsVal", (CCTypeHooks){
-        .destroy = cc_type_destroy_call("cc_js_val_release"),
-        .ufcs_dynamic2 = cc_type_dynamic_call("cc_js_val_callm", "CC_JS_ARG"),
-    });
-    (void)cc_type_register("CCJsHost", (CCTypeHooks){
-        .destroy = cc_type_destroy_call("cc_js_host_close"),
-    });
-    (void)cc_type_register("CCJsDom", (CCTypeHooks){
-        .destroy = cc_type_destroy_call("cc_js_dom_close"),
-    });
-    (void)cc_type_register("CCJsDomVal", (CCTypeHooks){
-        .destroy = cc_type_destroy_call("cc_js_dom_val_release"),
-        .ufcs_dynamic2 = cc_type_dynamic_call("cc_js_dom_val_callm", "CC_JS_DOM_ARG"),
-    });
-}
-#endif
+
+@typehooks on CCJs {
+    .destroy = cc_type_destroy_call("cc_js_close"),
+    .ufcs_dynamic2 = cc_type_dynamic_call("cc_js_callm", "CC_JS_ARG"),
+};
+@typehooks on CCJsVal {
+    .destroy = cc_type_destroy_call("cc_js_val_release"),
+    .ufcs_dynamic2 = cc_type_dynamic_call("cc_js_val_callm", "CC_JS_ARG"),
+};
+@typehooks on CCJsHost {
+    .destroy = cc_type_destroy_call("cc_js_host_close"),
+};
+@typehooks on CCJsDom {
+    .destroy = cc_type_destroy_call("cc_js_dom_close"),
+};
+@typehooks on CCJsDomVal {
+    .destroy = cc_type_destroy_call("cc_js_dom_val_release"),
+    .ufcs_dynamic2 = cc_type_dynamic_call("cc_js_dom_val_callm", "CC_JS_DOM_ARG"),
+};
+
 
 #endif /* CC_SCRIPT_JS_H */

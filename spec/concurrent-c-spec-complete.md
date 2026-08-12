@@ -4997,7 +4997,7 @@ For named types that use ordinary fallback UFCS, method syntax lowers to the rec
 - Pointer-style APIs receive the address of a value receiver and the pointer itself for a pointer receiver.
 - By-value APIs receive the receiver value directly.
 
-For types or families that register custom UFCS lowering with the type-registration machinery, `x.method(args)` lowers according to the registered handler instead. Standard-library families may be implemented either by ordinary `cc_type_register(...)` calls in `@comptime` code or by equivalent built-in family contracts; the resulting receiver-type-driven lowering is the normative behavior.
+For types or families that register custom UFCS lowering with the type-registration machinery, `x.method(args)` lowers according to the registered handler instead. Standard-library families may be implemented either by `@typehooks on …` (or the equivalent `cc_type_register(...)` marker form) in Concurrent-C source or by equivalent built-in family contracts; the resulting receiver-type-driven lowering is the normative behavior.
 
 This enables two usage styles:
 
@@ -5060,13 +5060,21 @@ int cc_type_register(const char* type_name, CCTypeHooks hooks);
 
 **Registration rules (normative):**
 
-- Registrations appear in ordinary `@comptime { ... }` code.
+- Preferred surface is `@typehooks on Subject { … };` with a strict C
+  designated-initializer body. The compiler rewrites it to the marker form
+  `(void)cc_type_register("Subject", (CCTypeHooks){ … })` inside `@comptime`
+  before discovery (see `spec/draft_typehooks.md`).
+- Registrations also appear as ordinary `@comptime` calls to
+  `cc_type_register(...)` or `cc_type_define(...)` (same shape; both spellings
+  are recognized).
 - Registration discovery runs over the preprocessed translation unit, including
   included `.cch` headers, before type-owned lowering uses the registry.
-  `cc_type_register(...)` is a compile-time marker API and returns `0`; see
-  §14.5 for pipeline ordering.
-- `type_name` must be a string literal naming either an exact concrete type such as `"CCArena"` or a trailing-wildcard family such as `"CCChanTx_*"` or `"CCChanRx_*"`.
-- The second argument must be a hooks object literal, typically `(CCTypeHooks){ ... }`.
+  `cc_type_register(...)` / `cc_type_define(...)` are compile-time marker APIs
+  and return `0`; see §14.5 for pipeline ordering.
+- `Subject` / `type_name` names either an exact concrete type such as `CCArena`
+  or a trailing-wildcard family such as `CCChanTx_*` or `CCChanRx_*`.
+- The hooks body / second argument must be a hooks object literal, typically
+  `(CCTypeHooks){ ... }` on the marker form.
 - Registrations are library-owned. The compiler selects a UFCS lowering rule from the resolved receiver type, not from the method name alone.
 - Handlers may be named functions or non-capturing lambdas.
 - `.create` is the type-owned construction hook. The compiler selects the overload from the declared type plus the `@create(...)` argument list.
@@ -5106,32 +5114,30 @@ int cc_type_register(const char* type_name, CCTypeHooks hooks);
 **Preferred registration style:**
 
 ```c
-@comptime {
-    (void)cc_type_register("CCFile", (CCTypeHooks){
-        .ufcs = (recv_type, method, mode, argv, arg_types, arena) => {
-            (void)recv_type;
-            (void)mode;
-            (void)argv;
-            (void)arg_types;
-            return cc_slice_concat2(
-                cc_slice_from_buffer("cc_file_", sizeof("cc_file_") - 1),
-                method, arena);
-        },
-    });
+@typehooks on CCFile {
+    .ufcs = (recv_type, method, mode, argv, arg_types, arena) => {
+        (void)recv_type;
+        (void)mode;
+        (void)argv;
+        (void)arg_types;
+        return cc_slice_concat2(
+            cc_slice_from_buffer("cc_file_", sizeof("cc_file_") - 1),
+            method, arena);
+    },
+};
 
-    (void)cc_type_register("CCChanTx_*", (CCTypeHooks){
-        .ufcs = cc_channel_tx_lower_c,
-    });
+@typehooks on CCChanTx_* {
+    .ufcs = cc_channel_tx_lower_c,
+};
 
-    (void)cc_type_register("CCChanRx_*", (CCTypeHooks){
-        .ufcs = cc_channel_rx_lower_c,
-    });
-}
+@typehooks on CCChanRx_* {
+    .ufcs = cc_channel_rx_lower_c,
+};
 ```
 
 UFCS registration and typed lifecycle hooks (`create`, `destroy`) use the same type-owned registration machinery.
 
-`cc_ufcs_register(...)` is the direct UFCS-only helper. `cc_type_register(...)` is the general registration form and may define UFCS together with lifecycle hooks.
+`cc_ufcs_register(...)` is the direct UFCS-only helper. `@typehooks` is the general registration surface and may define UFCS together with lifecycle hooks. The marker APIs `cc_type_register` / `cc_type_define` are the dual form (see `docs/deprecated.md`).
 
 This same contract applies to standard-library families such as channels, files, strings, arenas, vectors, maps, and results. Family-specific naming and lowering remain library policy rather than compiler policy; shared erased-core machinery is permitted so long as the family contract is preserved.
 
@@ -5832,7 +5838,7 @@ This section documents syntactic sugar and conventions:
 
 **Methods / UFCS:**
 
-`x.method(args)` uses UFCS lowering. Dispatch is selected from the resolved receiver type, and libraries define custom lowering through type-owned registration, normally `cc_type_register(...)`. Depending on the API, the lowered call may pass the receiver by value or by pointer; that is family policy rather than surface syntax.
+`x.method(args)` uses UFCS lowering. Dispatch is selected from the resolved receiver type, and libraries define custom lowering through type-owned registration, normally `@typehooks on …`. Depending on the API, the lowered call may pass the receiver by value or by pointer; that is family policy rather than surface syntax.
 
 ```c
 tx.send(v);        // lowers to send(tx, v)
@@ -6432,7 +6438,7 @@ A `@comptime { ... }` block runs during compilation and may be used to initializ
 
 **Registration and lowering note (normative):**
 
-- `@comptime` blocks are also the place where libraries publish compile-time registrations such as `cc_type_register(...)`.
+- `@comptime` blocks are also the place where libraries publish compile-time registrations such as the rewritten form of `@typehooks` / `cc_type_register(...)`.
 - Registrations must work from ordinary source files and ordinary included headers. User code must not need special registration-only macros or source guards.
 - The implementation preprocesses and canonicalizes the full translation unit,
   including included `.cch` headers, before executing compile-time registration

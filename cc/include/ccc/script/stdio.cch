@@ -553,13 +553,11 @@ static inline size_t !>(CCError) cc__fprintln_string_ptr(int fd, const CCString 
     const CCString *: cc__fprintln_string_ptr \
 )(fd, x)
 
-#ifdef CC_COMPTIME_SCAN
-@comptime {
-    (void)cc_type_register("CCStdio", (CCTypeHooks){
-        .create = cc_type_create_call("cc_stdio_create"),
-        .destroy = cc_type_destroy_call("cc_stdio_destroy"),
-    });
-}
-#endif
+
+@typehooks on CCStdio {
+    .create = cc_type_create_call("cc_stdio_create"),
+    .destroy = cc_type_destroy_call("cc_stdio_destroy"),
+};
+
 
 #endif /* CC_SCRIPT_STDIO_H */

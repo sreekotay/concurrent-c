@@ -1,0 +1,41 @@
+/* @typehooks on T { .create = …, .destroy = …, } — strict C designated-init
+ * body (preferred type-hooks surface). */
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdio.h>
+
+typedef struct {
+    int n;
+    int alive;
+} HooksDemo;
+
+static int g_destroyed = 0;
+
+static HooksDemo hooks_demo_create(int n) {
+    HooksDemo h;
+    h.n = n;
+    h.alive = 1;
+    return h;
+}
+
+static void hooks_demo_destroy(HooksDemo* h) {
+    if (!h || !h->alive) return;
+    h->alive = 0;
+    g_destroyed += 1;
+}
+
+@typehooks on HooksDemo {
+    .create = cc_type_create_call("hooks_demo_create"),
+    .destroy = cc_type_destroy_call("hooks_demo_destroy"),
+};
+
+int main(void) {
+    {
+        HooksDemo h = @create(7) @destroy;
+        assert(h.n == 7);
+        assert(h.alive == 1);
+    }
+    assert(g_destroyed == 1);
+    printf("ok\n");
+    return 0;
+}

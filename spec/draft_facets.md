@@ -1,30 +1,39 @@
-# Restricted access (`@restricted`)
+# Type views (`@typeview`)
 
-Status: draft — implemented in shadow_lower (tests/restricted_*).
+Status: draft — implemented in shadow_lower (`tests/restricted_*`,
+`tests/typeview_as_ufcs_smoke.ccs`). `@restricted` is a deprecated alias of
+`@typeview`.
 
 ## 1. Notion
 
-A restriction is named, allow-listed access to the same object. It generalizes
-`const`: the pointer identity is unchanged; the set of available fields and
-UFCS methods shrinks; narrowing (full → restricted) is always implicit with
-no cast; widening (restricted → full) never occurs. Zero runtime cost — a
-type-system view, not a second object. Restrictions are erased in lowering;
+A type view is named or unnamed access policy on the same object. It
+generalizes `const`: the pointer identity is unchanged; the set of available
+fields and UFCS methods may shrink; narrowing (full → view) is always
+implicit with no cast; widening (view → full) never occurs. Zero runtime
+cost — a type-system view, not a second object. Views are erased in lowering;
 they do not exist at run time.
 
+The same form also declares **is-a faces** (`as:`): field names that the
+outer type forwards through for UFCS retry, destroy chaining, arg coerce,
+and `@errhandler` projection (formerly field `@as`; see `draft_as.md`).
+
 Channel split handles (`T[~ >]` / `T[~ <]`) are a built-in form of restricted
-access. `@restricted` is the user-definable form for ordinary struct types.
+access. `@typeview` is the user-definable form for ordinary struct types.
 
 ## 2. Surface
 
-An **unnamed** restriction applies the allow-list to the type itself (no
-parallel view name). Ordinary use sites see only the listed names. In a
-function whose first parameter is that type / pointer, the body is unrestricted
-(trusted method bodies). Aggregate / designated initialization may name any
-field of the type being constructed (const-shaped: construction is open, later
-use is not):
+Preferred spelling is `@typeview`. `@restricted` is accepted identically.
+
+An **unnamed** view applies to the type itself (no parallel view name).
+Ordinary use sites see only allow-listed names when `r:`/`w:`/`rw:` are
+present. An `as:`-only unnamed view registers faces without locking the
+allow-list. In a function whose first parameter is that type / pointer, the
+body is unrestricted (trusted method bodies). Aggregate / designated
+initialization may name any field of the type being constructed
+(const-shaped: construction is open, later use is not):
 
 ```c
-@restricted on Box {
+@typeview on Box {
     r: len, bump;
 };
 
@@ -37,6 +46,20 @@ Box b = { .secret = 7, .len = 0 }; /* init OK */
 /* b.secret; */                   /* ill-formed at ordinary use */
 ```
 
+Is-a faces on the type (replaces `Type field @as;`):
+
+```c
+typedef struct CCTempFile {
+    CCFile file;
+    CCSlice path;
+    int owns;
+} CCTempFile;
+
+@typeview on CCTempFile {
+    as: file;
+};
+```
+
 A named mode on a completed struct type lists names under use-kind groups:
 
 ```c
@@ -46,31 +69,38 @@ typedef struct Conn {
     CCString out;
 } Conn;
 
-@restricted Encode on Conn {
+@typeview Encode on Conn {
     r: write, lit, simple, err, ok, pong, null, integer, bulk, array_*;
 }
 
-@restricted View on Slice {
+@typeview View on Slice {
     r: *;
 }
 
-@restricted Buf on Conn {
+@typeview Buf on Conn {
     r: write, flush;
     rw: out;
 }
 ```
 
 - `Encode` is the mode name. `Conn` is the base type.
-- Groups are `r:`, `w:`, and `rw:`, each a comma-separated list of patterns
-  ended by `;` or `}`. Absent groups are empty.
-- Each pattern names a field of `Base` or a UFCS method on `Base*`, or a
-  trailing-`*` glob (same rule as `cc_type_register` type patterns: literal
-  prefix, optional final `*`; `Foo_*` also matches bare `Foo`). Unknown
-  non-glob names are ill-formed at the mode declaration.
+- Groups are `r:`, `w:`, `rw:`, and `as:`, each a comma-separated list of
+  patterns ended by `;` or `}`. Absent groups are empty.
+- Each `r:`/`w:`/`rw:` pattern names a field of `Base` or a UFCS method on
+  `Base*`, or a trailing-`*` glob (same rule as `@typehooks` / type-registration
+  patterns). Unknown non-glob names are ill-formed at the mode declaration.
 - **`r:`** — may use the name without storing through it: field load or
   UFCS call (`s->len`, `c->write(...)`).
 - **`w:`** — may store through a field (`c->out = …`, `+=`, `++`, …).
 - **`rw:`** — both use and store.
+- **`as:`** — field names of `Base` that are is-a faces (value embeds only;
+  at most one path per target type). Not an allow-list group.
+- The subject `Base` may be a trailing-`*` type-family glob (`CCSlice_*`),
+  same match/score rule as allow-list patterns and `@typehooks`.
+  Narrowest matching view wins; equal-score conflicts are ill-formed. Named
+  modes (`@typeview Mode on Pat*`) are ill-formed — globs are unnamed only.
+  Face fields must exist on each concrete match; types that match the glob
+  but lack the field are skipped.
 - Method names belong under `r:` (or `rw:`); a method under `w:` alone cannot
   be called (there is no store form for methods).
 - Prefer methods over fields. A method whose first parameter is `Base*` sees
@@ -88,11 +118,12 @@ Parameter and local sugar names the mode on the base type:
 
 ```c
 static bool !>(CCError) exec_keys(DB* db, Cmd* c,
-                                  @restricted(Encode) Conn* conn);
+                                  @typeview(Encode) Conn* conn);
 ```
 
-`@restricted(Encode) Conn` and the mangled type for that mode (§3) denote the
-same type. Writing the mangled name is equivalent sugar-free spelling.
+`@typeview(Encode) Conn` / `@restricted(Encode) Conn` and the mangled type
+for that mode (§3) denote the same type. Writing the mangled name is
+equivalent sugar-free spelling.
 
 A typedef may alias the restricted type. Aliases are transparent for member
 checks and UFCS (same allow-list as the mangled view):

@@ -172,20 +172,18 @@ static inline CCSlice cc_nursery_lower_c(CCSlice recv_type,
     return cc_slice_concat2(cc_slice_from_static((void*)"cc_nursery_", sizeof("cc_nursery_") - 1), method, arena);
 }
 
-#ifdef CC_COMPTIME_SCAN
-@comptime {
-    (void)cc_type_register("CCNursery*", (CCTypeHooks){
-        .create = cc_type_create_overloads("cc_nursery_create", "cc_nursery_spawn_child_closure0"),
-        .destroy = cc_type_destroy_hooks("cc_nursery_wait", "cc_nursery_free"),
-        .ufcs = cc_nursery_lower_c,
-    });
-    (void)cc_type_register("CCNursery", (CCTypeHooks){
-        .create = cc_type_create_overloads("cc_nursery_create", "cc_nursery_spawn_child_closure0"),
-        .destroy = cc_type_destroy_hooks("cc_nursery_wait", "cc_nursery_free"),
-        .ufcs = cc_nursery_lower_c,
-    });
-}
-#endif
+
+@typehooks on CCNursery* {
+    .create = cc_type_create_overloads("cc_nursery_create", "cc_nursery_spawn_child_closure0"),
+    .destroy = cc_type_destroy_hooks("cc_nursery_wait", "cc_nursery_free"),
+    .ufcs = cc_nursery_lower_c,
+};
+@typehooks on CCNursery {
+    .create = cc_type_create_overloads("cc_nursery_create", "cc_nursery_spawn_child_closure0"),
+    .destroy = cc_type_destroy_hooks("cc_nursery_wait", "cc_nursery_free"),
+    .ufcs = cc_nursery_lower_c,
+};
+
 
 #endif // CC_NURSERY_H
 

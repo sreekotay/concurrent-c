@@ -20,7 +20,7 @@ import pathlib, re, sys
 sh_path, pr_path, tmp = map(pathlib.Path, sys.argv[1:4])
 
 def strip_comptime_ifdef(text: str) -> str:
-    """Drop #ifdef CC_COMPTIME_SCAN…#endif (prod blanks body; shadow omits)."""
+    """Historical: drop #ifdef CC_COMPTIME_SCAN…#endif (none left in nursery)."""
     out = []
     i = 0
     lines = text.splitlines()

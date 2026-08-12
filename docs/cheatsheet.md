@@ -41,11 +41,9 @@ Bodyless `@destroy` with no registered hook is a **compile error**. Stdlib types
 ship hooks (`CCNursery*`, `CCArena`, channels, …). Register your own:
 
 ```c
-@comptime {
-    (void)cc_type_register("MyRes", (CCTypeHooks){
-        .destroy = cc_type_destroy_call("my_res_close"),
-    });
-}
+@typehooks on MyRes {
+    .destroy = cc_type_destroy_call("my_res_close"),
+};
 MyRes r = my_res_open() !> @destroy;
 ```
 
@@ -108,19 +106,19 @@ static double CCVec_double_median(CCVec_double* v) { … }
 v.median();                 // declare = install
 ```
 
-**Optional registration** (stdlib / your families): `.ufcs` on `cc_type_register`
-supplies a custom lowerer (`cc_<type>_method`, nursery/channel hooks, …):
+**Optional registration** (stdlib / your families):
+`@typehooks on T { .ufcs = …, }` (strict C designated-init body). Legacy
+`cc_type_register` / `cc_type_define`: [deprecated.md](deprecated.md).
 
 ```c
-@comptime {
-    (void)cc_type_register("MyHandle*", (CCTypeHooks){
-        .ufcs = my_handle_ufcs_lower_c,
-    });
-}
+@typehooks on MyHandle* {
+    .ufcs = my_handle_ufcs_lower_c,
+};
 ```
 
 Receiver first; arena last when needed. Recipe:
 [recipe_ufcs_forms.ccs](../examples/recipe_ufcs_forms.ccs).
+See `spec/draft_typehooks.md`.
 
 ---
 

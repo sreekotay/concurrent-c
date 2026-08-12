@@ -3,6 +3,7 @@
 #pragma once
 
 #include <ccc/cc_ufcs_families.h>
+#include "util/text.h"
 
 /* Compiled-factory produce (libshadow_comptime / emit_plan). */
 #ifndef CC_GEN_PRODUCE_OK
@@ -2657,6 +2658,16 @@ enum { SHADOW_AS_CAP = 128 };
 static ShadowAsEmbed g_shadow_as[SHADOW_AS_CAP];
 static int g_shadow_nas;
 
+/* `@typeview on Pat* { as: field; }` — materialize exact embeds per match. */
+typedef struct {
+    char pat[64];
+    char field[64];
+    int hits; /* concrete types that resolved this face */
+} ShadowAsGlob;
+enum { SHADOW_AS_GLOB_CAP = 64 };
+static ShadowAsGlob g_shadow_as_globs[SHADOW_AS_GLOB_CAP];
+static int g_shadow_nas_globs;
+
 /* Registered destroy delta from cc_type_register / destroy_call|hooks. */
 typedef struct {
     char ty[64];
@@ -2702,15 +2713,18 @@ typedef struct {
     int argi;
 } ShadowFnParam;
 
-/* @restricted Mode on Base — allow-list view types (draft_facets.md).
- * Groups: r: (use/call), w: (store), rw: (both). Patterns: exact or trailing-*
- * globs (same rule as cc_type_register / UFCS type patterns). */
+/* @restricted / @typeview Mode on Base — allow-list view types
+ * (draft_facets.md) plus optional `as:` faces (draft_as.md).
+ * Groups: r: (use/call), w: (store), rw: (both), as: (is-a embeds).
+ * Patterns: exact or trailing-* globs (same rule as cc_type_register).
+ * `as:` names are field names of Base — not allow-list entries. */
 enum {
     SHADOW_RESTRICT_CAP = 32,
     SHADOW_RESTRICT_ALLOW_CAP = 48,
     SHADOW_RESTRICT_R = 1,
     SHADOW_RESTRICT_W = 2,
-    SHADOW_RESTRICT_RW = 3
+    SHADOW_RESTRICT_RW = 3,
+    SHADOW_RESTRICT_AS = 4
 };
 typedef struct {
     char pat[64];
@@ -2768,15 +2782,43 @@ static const char* shadow_restrict_family_root(const char* leaf) {
     return leaf;
 }
 
+static int shadow_restrict_pattern_matches(const char* pattern, const char* name);
+static size_t shadow_restrict_pattern_score(const char* pattern);
+
 static ShadowRestrict* shadow_restrict_find_for_ty(const char* leaf) {
     ShadowRestrict* r;
     const char* root;
+    int i;
+    int best = -1;
+    ShadowRestrict* best_r = NULL;
     if (!leaf || !leaf[0]) return NULL;
     r = shadow_restrict_find_mangled(leaf);
     if (r) return r;
     root = shadow_restrict_family_root(leaf);
-    if (root && strcmp(root, leaf) != 0) return shadow_restrict_find_mangled(root);
-    return NULL;
+    if (root && strcmp(root, leaf) != 0) {
+        r = shadow_restrict_find_mangled(root);
+        if (r) return r;
+    }
+    /* Glob subjects: narrowest matching `on Pat*` allow-list wins. */
+    for (i = 0; i < g_shadow_nrestricts; i++) {
+        int score;
+        ShadowRestrict* cand = &g_shadow_restricts[i];
+        if (!strchr(cand->base, '*')) continue;
+        if (!shadow_restrict_pattern_matches(cand->base, leaf)) continue;
+        score = (int)shadow_restrict_pattern_score(cand->base);
+        if (score > best) {
+            best = score;
+            best_r = cand;
+        } else if (score == best && best_r && cand != best_r) {
+            fprintf(stderr,
+                    "error: type '%s' matched by equal-score @typeview "
+                    "subjects '%s' and '%s'\n",
+                    leaf, best_r->base, cand->base);
+            g_shadow_restrict_diag = 1;
+            return NULL;
+        }
+    }
+    return best_r;
 }
 
 /* UFCS type-register glob: trailing `*`; `Foo_*` also matches bare `Foo`. */
@@ -2917,6 +2959,11 @@ static int shadow_restrict_parse_kind_label(const char** pp, int* out_kind) {
     p = *pp;
     while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == ';')
         p++;
+    if (p[0] == 'a' && p[1] == 's' && p[2] == ':') {
+        *out_kind = SHADOW_RESTRICT_AS;
+        *pp = p + 3;
+        return 1;
+    }
     if ((p[0] == 'r' || p[0] == 'w') && p[1] == ':') {
         *out_kind = (p[0] == 'r') ? SHADOW_RESTRICT_R : SHADOW_RESTRICT_W;
         *pp = p + 2;
@@ -2930,14 +2977,31 @@ static int shadow_restrict_parse_kind_label(const char** pp, int* out_kind) {
     return 0;
 }
 
+static int shadow_field_ty_of(const char* outer, const char* field, char* dst,
+                              size_t cap);
+static void shadow_ty_base_stars(const char* ty, char* base, size_t bcap,
+                                 int* stars);
+static void shadow_as_register(const char* outer, const char* field,
+                               const char* target);
+static void shadow_as_resolve_transitive(void);
+static void shadow_as_glob_register(const char* pat, const char* field);
+static void shadow_as_materialize_globs_for(const char* outer);
+static void shadow_as_materialize_all_globs(void);
+static int shadow_ty_is_glob(const char* s) {
+    return s && strchr(s, '*') != NULL;
+}
+
 static int shadow_restrict_parse_body(const char* body, ShadowRestrictEnt* out,
                                      int cap, int* nout, const char* mode,
-                                     const char* base) {
+                                     const char* base, char as_fields[][64],
+                                     int as_cap, int* nas) {
     const char* p = body ? body : "";
     int kind = SHADOW_RESTRICT_R;
     int n = 0;
+    int na = 0;
     if (!out || !nout || !cap) return 0;
     *nout = 0;
+    if (nas) *nas = 0;
     while (*p == ' ' || *p == '\t' || *p == '{' || *p == '\n' || *p == '\r') p++;
     while (*p && *p != '}') {
         int k;
@@ -2952,10 +3016,41 @@ static int shadow_restrict_parse_body(const char* body, ShadowRestrictEnt* out,
             continue;
         }
         if (!shadow_restrict_parse_pat(&p, pat, sizeof(pat))) break;
+        /* `as:` faces — field names of Base; not allow-list patterns. */
+        if (kind == SHADOW_RESTRICT_AS) {
+            if (!as_fields || !nas || as_cap <= 0) {
+                fprintf(stderr,
+                        "error: @typeview %s on %s: as: faces not supported "
+                        "here\n",
+                        mode ? mode : "?", base ? base : "?");
+                g_shadow_restrict_diag = 1;
+                return 0;
+            }
+            for (i = 0; i < na; i++) {
+                if (strcmp(as_fields[i], pat) == 0) {
+                    fprintf(stderr,
+                            "error: @typeview %s on %s: duplicate as: field "
+                            "'%s'\n",
+                            mode ? mode : "?", base ? base : "?", pat);
+                    g_shadow_restrict_diag = 1;
+                    return 0;
+                }
+            }
+            if (na >= as_cap) {
+                fprintf(stderr,
+                        "error: @typeview %s on %s: as: list too long (>%d)\n",
+                        mode ? mode : "?", base ? base : "?", as_cap);
+                g_shadow_restrict_diag = 1;
+                return 0;
+            }
+            snprintf(as_fields[na], 64, "%s", pat);
+            na++;
+            continue;
+        }
         for (i = 0; i < n; i++) {
             if (strcmp(out[i].pat, pat) == 0) {
                 fprintf(stderr,
-                        "error: @restricted %s on %s: duplicate allow-list "
+                        "error: @typeview %s on %s: duplicate allow-list "
                         "pattern '%s'\n",
                         mode ? mode : "?", base ? base : "?", pat);
                 g_shadow_restrict_diag = 1;
@@ -2964,7 +3059,7 @@ static int shadow_restrict_parse_body(const char* body, ShadowRestrictEnt* out,
         }
         if (n >= cap) {
             fprintf(stderr,
-                    "error: @restricted %s on %s: allow-list too long (>%d)\n",
+                    "error: @typeview %s on %s: allow-list too long (>%d)\n",
                     mode ? mode : "?", base ? base : "?", cap);
             g_shadow_restrict_diag = 1;
             return 0;
@@ -2974,6 +3069,7 @@ static int shadow_restrict_parse_body(const char* body, ShadowRestrictEnt* out,
         n++;
     }
     *nout = n;
+    if (nas) *nas = na;
     return 1;
 }
 
@@ -2982,7 +3078,9 @@ static int shadow_restrict_register(const char* base, const char* mode,
     ShadowRestrict* r;
     char mangled[128];
     ShadowRestrictEnt seen[SHADOW_RESTRICT_ALLOW_CAP];
+    char as_fields[SHADOW_RESTRICT_ALLOW_CAP][64];
     int nseen = 0;
+    int nas = 0;
     int i;
     const char* mlabel;
     if (!base || !base[0]) return 0;
@@ -2993,14 +3091,71 @@ static int shadow_restrict_register(const char* base, const char* mode,
         snprintf(mangled, sizeof(mangled), "%s_Restrict_%s", base, mode);
     else
         snprintf(mangled, sizeof(mangled), "%s", base);
-    if (!shadow_restrict_parse_body(body, seen, SHADOW_RESTRICT_ALLOW_CAP, &nseen,
-                                    mlabel, base))
+    if (!shadow_restrict_parse_body(body, seen, SHADOW_RESTRICT_ALLOW_CAP,
+                                    &nseen, mlabel, base, as_fields,
+                                    SHADOW_RESTRICT_ALLOW_CAP, &nas))
         return 0;
+    /* `as:` → same embed table as field `@as` (unique target type per path).
+     * Glob subjects (`CCSlice_*`) store templates; materialize when fields exist. */
+    for (i = 0; i < nas; i++) {
+        char fty[96];
+        char target[64];
+        int stars = 0;
+        if (shadow_ty_is_glob(base)) {
+            if (mode[0]) {
+                fprintf(stderr,
+                        "error: @typeview %s on %s: named mode cannot use a "
+                        "glob subject\n",
+                        mlabel, base);
+                g_shadow_restrict_diag = 1;
+                return 0;
+            }
+            shadow_as_glob_register(base, as_fields[i]);
+            continue;
+        }
+        if (!shadow_field_ty_of(base, as_fields[i], fty, sizeof(fty))) {
+            fprintf(stderr,
+                    "error: @typeview %s on %s: as: unknown field '%s'\n",
+                    mlabel, base, as_fields[i]);
+            g_shadow_restrict_diag = 1;
+            return 0;
+        }
+        shadow_ty_base_stars(fty, target, sizeof(target), &stars);
+        if (!target[0]) {
+            fprintf(stderr,
+                    "error: @typeview %s on %s: as: field '%s' has no type\n",
+                    mlabel, base, as_fields[i]);
+            g_shadow_restrict_diag = 1;
+            return 0;
+        }
+        if (stars != 0) {
+            fprintf(stderr,
+                    "error: @typeview %s on %s: as: field '%s' must be a "
+                    "value embed, not a pointer\n",
+                    mlabel, base, as_fields[i]);
+            g_shadow_restrict_diag = 1;
+            return 0;
+        }
+        shadow_as_register(base, as_fields[i], target);
+    }
+    /* as:-only body: faces without locking the base allow-list. */
+    if (nseen == 0) {
+        if (shadow_ty_is_glob(base)) shadow_as_materialize_all_globs();
+        return 1;
+    }
+    if (shadow_ty_is_glob(base) && mode[0]) {
+        fprintf(stderr,
+                "error: @typeview %s on %s: named mode cannot use a glob "
+                "subject\n",
+                mlabel, base);
+        g_shadow_restrict_diag = 1;
+        return 0;
+    }
     r = shadow_restrict_find_mangled(mangled);
     if (r) {
         if (nseen != r->nallow) {
             fprintf(stderr,
-                    "error: @restricted %s on %s: incompatible redeclaration "
+                    "error: @typeview %s on %s: incompatible redeclaration "
                     "(allow-list differs)\n",
                     mlabel, base);
             g_shadow_restrict_diag = 1;
@@ -3018,7 +3173,7 @@ static int shadow_restrict_register(const char* base, const char* mode,
             }
             if (!ok) {
                 fprintf(stderr,
-                        "error: @restricted %s on %s: incompatible "
+                        "error: @typeview %s on %s: incompatible "
                         "redeclaration (allow-list differs)\n",
                         mlabel, base);
                 g_shadow_restrict_diag = 1;
@@ -3028,7 +3183,7 @@ static int shadow_restrict_register(const char* base, const char* mode,
         return 1;
     }
     if (g_shadow_nrestricts >= SHADOW_RESTRICT_CAP) {
-        fprintf(stderr, "error: too many @restricted modes (>%d)\n",
+        fprintf(stderr, "error: too many @typeview modes (>%d)\n",
                 SHADOW_RESTRICT_CAP);
         g_shadow_restrict_diag = 1;
         return 0;
@@ -3293,6 +3448,9 @@ static void shadow_restrict_check_call_widen(const char* fn, const char* args) {
  * Loads + UFCS open; field stores denied; first-arg bodies trusted. */
 static void shadow_restrict_register_builtins(void) {
     (void)shadow_restrict_register("CCSlice", "", "{ r: *; }");
+    /* Typed-slice family face — also declared in cc_slice.cch as
+     * `@typeview on CCSlice_* { as: base; }` (stripped from host `.h`). */
+    shadow_as_glob_register("CCSlice_*", "base");
 }
 
 static void shadow_restrict_register_from_items(AstNode** items, int n) {
@@ -3914,6 +4072,7 @@ static void shadow_chan_reset(void) {
     shadow_ufn_register("fabs", "double");
     shadow_ufn_register("strlen", "const char*");
     g_shadow_nas = 0;
+    g_shadow_nas_globs = 0;
     g_shadow_ndhooks = 0;
     g_shadow_nchooks = 0;
     g_shadow_nniches = 0;
@@ -4141,17 +4300,31 @@ static int shadow_hdr_fn_exists(const char* name) {
     return cc_included_cch_contains_fn(name);
 }
 
-/* Scan header text for `Type field @as;` and cc_type_register destroy hooks. */
+/* Scan header text for `Type field @as;` / `@typeview on T { as:… }`,
+ * and cc_type_register destroy hooks. */
 static void shadow_as_scan_header_text(const char* text) {
     const char* p;
+    char* rewritten = NULL;
     char outer[96];
     int in_typedef_struct = 0;
     /* Pending @as inside anonymous `typedef struct { … } Alias;` */
     char pend_field[8][64];
     char pend_target[8][64];
     int npend = 0;
+    /* All value fields of the current / recent structs — for typeview as:. */
+    char fld_outer[64][64];
+    char fld_name[64][64];
+    char fld_ty[64][64];
+    int nfld = 0;
+    /* `@typeview on Base { … }` body capture (may span lines). */
+    char tv_base[96];
+    int tv_depth = 0;
     if (!text) return;
+    /* Prefer register form so create/destroy/ufcs_dynamic harvest is shared. */
+    rewritten = cc_rewrite_typehooks_to_register(text, strlen(text));
+    if (rewritten) text = rewritten;
     outer[0] = 0;
+    tv_base[0] = 0;
     p = text;
     while (*p) {
         const char* nl = strchr(p, '\n');
@@ -4199,12 +4372,57 @@ static void shadow_as_scan_header_text(const char* text) {
                 while (shadow_is_ident_char(a[n]) && n + 1 < sizeof(alias)) n++;
                 memcpy(alias, a, n);
                 alias[n] = 0;
-                if (alias[0]) snprintf(outer, sizeof(outer), "%s", alias);
+                if (alias[0]) {
+                    /* Retarget pending fields recorded under empty outer. */
+                    int fi;
+                    for (fi = 0; fi < nfld; fi++) {
+                        if (!fld_outer[fi][0])
+                            snprintf(fld_outer[fi], sizeof(fld_outer[0]), "%s",
+                                     alias);
+                    }
+                    snprintf(outer, sizeof(outer), "%s", alias);
+                }
             }
             for (pi = 0; pi < npend && outer[0]; pi++)
                 shadow_as_register(outer, pend_field[pi], pend_target[pi]);
             npend = 0;
             in_typedef_struct = 0;
+        }
+        /* Record ordinary value fields for later typeview as: lookup. */
+        if (in_typedef_struct) {
+            const char* t0 = line;
+            char fty[64];
+            char fname[64];
+            size_t ti = 0, fi = 0;
+            const char* mid;
+            while (*t0 == ' ' || *t0 == '\t') t0++;
+            if (strncmp(t0, "const ", 6) == 0) {
+                t0 += 6;
+                while (*t0 == ' ' || *t0 == '\t') t0++;
+            }
+            while (shadow_is_ident_char(t0[ti]) && ti + 1 < sizeof(fty)) {
+                fty[ti] = t0[ti];
+                ti++;
+            }
+            fty[ti] = 0;
+            mid = t0 + ti;
+            while (*mid == ' ' || *mid == '\t') mid++;
+            if (fty[0] && *mid != '*' && *mid != '(') {
+                while (shadow_is_ident_char(mid[fi]) && fi + 1 < sizeof(fname)) {
+                    fname[fi] = mid[fi];
+                    fi++;
+                }
+                fname[fi] = 0;
+                if (fname[0] && strcmp(fname, fty) != 0 && nfld < 64) {
+                    snprintf(fld_outer[nfld], sizeof(fld_outer[0]), "%s",
+                             outer);
+                    snprintf(fld_name[nfld], sizeof(fld_name[0]), "%s", fname);
+                    snprintf(fld_ty[nfld], sizeof(fld_ty[0]), "%s", fty);
+                    nfld++;
+                    if (outer[0])
+                        shadow_field_register_ex(outer, fname, fty);
+                }
+            }
         }
         /* Type field @as; — also host-C comment-form slash-star @as star-slash. */
         as = strstr(line, "/*@as*/");
@@ -4254,6 +4472,98 @@ static void shadow_as_scan_header_text(const char* text) {
                         snprintf(pend_target[npend], sizeof(pend_target[0]),
                                  "%s", target);
                         npend++;
+                    }
+                }
+            }
+        }
+        /* `@typeview on Base` / `@restricted on Base` — collect as: faces. */
+        {
+            const char* tv = strstr(line, "@typeview");
+            const char* rs = strstr(line, "@restricted");
+            const char* kw = tv ? tv : rs;
+            if (kw && strstr(kw, " on ")) {
+                const char* on = strstr(kw, " on ");
+                const char* b;
+                size_t bn = 0;
+                on += 4;
+                while (*on == ' ' || *on == '\t') on++;
+                b = on;
+                while (shadow_is_ident_char(b[bn]) && bn + 1 < sizeof(tv_base))
+                    bn++;
+                /* Trailing glob `*` (`CCSlice_*`). */
+                if (b[bn] == '*' && bn + 1 < sizeof(tv_base)) bn++;
+                if (bn > 0) {
+                    memcpy(tv_base, b, bn);
+                    tv_base[bn] = 0;
+                    tv_depth = 0;
+                    if (strchr(line, '{')) tv_depth = 1;
+                }
+            }
+        }
+        if (tv_base[0] && tv_depth > 0) {
+            const char* q = line;
+            while ((q = strstr(q, "as:")) != NULL) {
+                q += 3;
+                while (*q) {
+                    char fname[64];
+                    size_t fi = 0;
+                    int i;
+                    while (*q == ' ' || *q == '\t' || *q == ',') q++;
+                    if (!*q || *q == ';' || *q == '}' || *q == '\n') break;
+                    if (*q == 'r' && q[1] == ':') break;
+                    if (*q == 'w' && q[1] == ':') break;
+                    if (*q == 'r' && q[1] == 'w' && q[2] == ':') break;
+                    while (shadow_is_ident_char(q[fi]) && fi + 1 < sizeof(fname)) {
+                        fname[fi] = q[fi];
+                        fi++;
+                    }
+                    if (!fi) break;
+                    fname[fi] = 0;
+                    q += fi;
+                    if (shadow_ty_is_glob(tv_base))
+                        shadow_as_glob_register(tv_base, fname);
+                    for (i = 0; i < nfld; i++) {
+                        int match = 0;
+                        if (shadow_ty_is_glob(tv_base))
+                            match = shadow_restrict_pattern_matches(
+                                        tv_base, fld_outer[i]) &&
+                                    strcmp(fld_name[i], fname) == 0;
+                        else
+                            match = strcmp(fld_outer[i], tv_base) == 0 &&
+                                    strcmp(fld_name[i], fname) == 0;
+                        if (match) {
+                            shadow_as_register(fld_outer[i], fname, fld_ty[i]);
+                            if (shadow_ty_is_glob(tv_base)) {
+                                int gi;
+                                for (gi = 0; gi < g_shadow_nas_globs; gi++) {
+                                    if (strcmp(g_shadow_as_globs[gi].pat,
+                                               tv_base) == 0 &&
+                                        strcmp(g_shadow_as_globs[gi].field,
+                                               fname) == 0)
+                                        g_shadow_as_globs[gi].hits++;
+                                }
+                            }
+                        }
+                    }
+                    while (*q == ' ' || *q == '\t') q++;
+                    if (*q == ',') {
+                        q++;
+                        continue;
+                    }
+                    break;
+                }
+            }
+            {
+                const char* c;
+                for (c = line; *c; c++) {
+                    if (*c == '{') tv_depth++;
+                    else if (*c == '}') {
+                        tv_depth--;
+                        if (tv_depth <= 0) {
+                            tv_base[0] = 0;
+                            tv_depth = 0;
+                            break;
+                        }
                     }
                 }
             }
@@ -4389,6 +4699,7 @@ static void shadow_as_scan_header_text(const char* text) {
         if (!nl) break;
         p = nl + 1;
     }
+    free(rewritten);
 }
 
 /* Follow one level of #include <ccc/…> / "…" inside scanned text. */
@@ -4581,6 +4892,8 @@ enum { SHADOW_SLICE_HAVE_CAP = 64 };
 static char g_shadow_slice_have[SHADOW_SLICE_HAVE_CAP][64];
 static int g_shadow_nslice_have;
 
+static void shadow_slice_mangle_elem(const char* elem, char* dst, size_t cap);
+
 static void shadow_slice_have(const char* elem) {
     int i;
     if (!elem || !elem[0]) return;
@@ -4594,6 +4907,16 @@ static void shadow_slice_have(const char* elem) {
     snprintf(g_shadow_slice_have[g_shadow_nslice_have],
              sizeof(g_shadow_slice_have[0]), "%s", elem);
     g_shadow_nslice_have++;
+    {
+        char mangled[64];
+        char ty[96];
+        shadow_slice_mangle_elem(elem, mangled, sizeof(mangled));
+        if (mangled[0]) {
+            snprintf(ty, sizeof(ty), "CCSlice_%s", mangled);
+            shadow_field_register_ex(ty, "base", "CCSlice");
+            shadow_as_materialize_globs_for(ty);
+        }
+    }
 }
 
 static int shadow_slice_already(const char* elem) {
@@ -4638,6 +4961,12 @@ static void shadow_slice_need(const char* elem) {
     snprintf(g_shadow_slices[g_shadow_nslices], sizeof(g_shadow_slices[0]), "%s",
              mangled);
     g_shadow_nslices++;
+    {
+        char ty[96];
+        snprintf(ty, sizeof(ty), "CCSlice_%s", mangled);
+        shadow_field_register_ex(ty, "base", "CCSlice");
+        shadow_as_materialize_globs_for(ty);
+    }
 }
 
 /* Note CC_DECL_SLICE(T) / CC_DECL_SLICE_SPEC(CCSlice_T, T) from RAW_LINE. */
@@ -5054,8 +5383,16 @@ static void shadow_as_register(const char* outer, const char* field,
     }
     for (i = 0; i < g_shadow_nas; i++) {
         if (strcmp(g_shadow_as[i].outer, outer) == 0 &&
-            strcmp(g_shadow_as[i].target, target) == 0)
+            strcmp(g_shadow_as[i].target, target) == 0) {
+            if (strcmp(g_shadow_as[i].field, field) != 0) {
+                fprintf(stderr,
+                        "error: @as / typeview as: conflicting faces on '%s' "
+                        "to '%s' ('%s' vs '%s')\n",
+                        outer, target, g_shadow_as[i].field, field);
+                g_shadow_restrict_diag = 1;
+            }
             return;
+        }
     }
     snprintf(g_shadow_as[g_shadow_nas].outer, sizeof(g_shadow_as[0].outer), "%s",
              outer);
@@ -5066,10 +5403,92 @@ static void shadow_as_register(const char* outer, const char* field,
     g_shadow_nas++;
 }
 
+static void shadow_as_glob_register(const char* pat, const char* field) {
+    int i;
+    if (!pat || !pat[0] || !field || !field[0]) return;
+    for (i = 0; i < g_shadow_nas_globs; i++) {
+        if (strcmp(g_shadow_as_globs[i].pat, pat) == 0 &&
+            strcmp(g_shadow_as_globs[i].field, field) == 0)
+            return;
+    }
+    if (g_shadow_nas_globs >= SHADOW_AS_GLOB_CAP) {
+        shadow_table_full("as_globs", SHADOW_AS_GLOB_CAP, pat);
+        return;
+    }
+    snprintf(g_shadow_as_globs[g_shadow_nas_globs].pat,
+             sizeof(g_shadow_as_globs[0].pat), "%s", pat);
+    snprintf(g_shadow_as_globs[g_shadow_nas_globs].field,
+             sizeof(g_shadow_as_globs[0].field), "%s", field);
+    g_shadow_as_globs[g_shadow_nas_globs].hits = 0;
+    g_shadow_nas_globs++;
+}
+
+static void shadow_as_materialize_globs_for(const char* outer) {
+    int gi, i, nidx = 0;
+    int best = -1;
+    int idxs[SHADOW_AS_GLOB_CAP];
+    if (!outer || !outer[0] || g_shadow_nas_globs <= 0) return;
+    for (gi = 0; gi < g_shadow_nas_globs; gi++) {
+        int score;
+        if (!shadow_restrict_pattern_matches(g_shadow_as_globs[gi].pat, outer))
+            continue;
+        score = (int)shadow_restrict_pattern_score(g_shadow_as_globs[gi].pat);
+        if (score > best) {
+            best = score;
+            nidx = 0;
+            idxs[nidx++] = gi;
+        } else if (score == best && nidx < SHADOW_AS_GLOB_CAP) {
+            idxs[nidx++] = gi;
+        }
+    }
+    for (i = 0; i < nidx; i++) {
+        char fty[96];
+        char target[64];
+        int stars = 0;
+        ShadowAsGlob* g = &g_shadow_as_globs[idxs[i]];
+        if (!shadow_field_ty_of(outer, g->field, fty, sizeof(fty))) continue;
+        shadow_ty_base_stars(fty, target, sizeof(target), &stars);
+        if (!target[0] || stars != 0) continue;
+        shadow_as_register(outer, g->field, target);
+        g->hits++;
+    }
+}
+
+static void shadow_as_materialize_all_globs(void) {
+    int i;
+    char seen[192][64];
+    int nseen = 0;
+    if (g_shadow_nas_globs <= 0) return;
+    for (i = 0; i < g_shadow_nfields; i++) {
+        int j, dup = 0;
+        const char* ty = g_shadow_fields[i].ty;
+        if (!ty[0]) continue;
+        for (j = 0; j < nseen; j++) {
+            if (strcmp(seen[j], ty) == 0) {
+                dup = 1;
+                break;
+            }
+        }
+        if (dup) continue;
+        if (nseen < 192) {
+            snprintf(seen[nseen], sizeof(seen[0]), "%s", ty);
+            nseen++;
+        }
+        shadow_as_materialize_globs_for(ty);
+    }
+    for (i = 0; i < g_shadow_nslices; i++) {
+        char ty[96];
+        snprintf(ty, sizeof(ty), "CCSlice_%s", g_shadow_slices[i]);
+        shadow_field_register_ex(ty, "base", "CCSlice");
+        shadow_as_materialize_globs_for(ty);
+    }
+}
+
 static const ShadowAsEmbed* shadow_as_lookup(const char* outer,
                                              const char* target) {
     int i;
     if (!outer || !target) return NULL;
+    shadow_as_materialize_globs_for(outer);
     for (i = 0; i < g_shadow_nas; i++) {
         if (strcmp(g_shadow_as[i].outer, outer) == 0 &&
             strcmp(g_shadow_as[i].target, target) == 0)
@@ -6580,6 +6999,7 @@ static int shadow_as_path_to(const char* outer, const char* face, char* path,
     if (!outer || !face || !path || !cap) return 0;
     path[0] = 0;
     if (strcmp(outer, face) == 0) return 1; /* exact — empty path */
+    shadow_as_materialize_globs_for(outer);
     for (i = 0; i < g_shadow_nas; i++) {
         if (strcmp(g_shadow_as[i].outer, outer) != 0) continue;
         if (strcmp(g_shadow_as[i].target, face) != 0) continue;

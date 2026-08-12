@@ -383,8 +383,8 @@ static void tape_cache_free(TapeCache* c) {
     c->n = 0;
 }
 
-/* `@restricted(Mode) Base` → single IDENT `Base_Restrict_Mode` (type sugar).
- * Leaves `@restricted Mode on Base {…}` alone (no '(' after the keyword). */
+/* `@restricted(Mode) Base` / `@typeview(Mode) Base` → IDENT
+ * `Base_Restrict_Mode`. Leaves `@typeview Mode on Base {…}` alone. */
 static int shadow_rewrite_restricted_type_sugar(Token* toks, int* pn) {
     int i = 0;
     int n;
@@ -401,9 +401,10 @@ static int shadow_rewrite_restricted_type_sugar(Token* toks, int* pn) {
         size_t blen;
         int j;
         if (!(tok_eq(at, TK_PUNCT, "@") && kw.kind == TK_IDENT &&
-              tok_eq(kw, TK_IDENT, "restricted") && tok_eq(lp, TK_PUNCT, "(") &&
-              mode.kind == TK_IDENT && tok_eq(rp, TK_PUNCT, ")") &&
-              base.kind == TK_IDENT)) {
+              (tok_eq(kw, TK_IDENT, "restricted") ||
+               tok_eq(kw, TK_IDENT, "typeview")) &&
+              tok_eq(lp, TK_PUNCT, "(") && mode.kind == TK_IDENT &&
+              tok_eq(rp, TK_PUNCT, ")") && base.kind == TK_IDENT)) {
             i++;
             continue;
         }

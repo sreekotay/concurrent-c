@@ -34,22 +34,21 @@ static CCSlice named_toy_ufcs_rewrite(CCSlice recv_type, CCSlice method, CCSlice
         method, arena);
 }
 
-@comptime {
-    (void)cc_type_register("NamedToy", (CCTypeHooks){
-        .ufcs = named_toy_ufcs_rewrite,
-    });
-    (void)cc_type_register("LambdaToy", (CCTypeHooks){
+@typehooks on NamedToy {
+    .ufcs = named_toy_ufcs_rewrite,
+};
+    @typehooks on LambdaToy {
         .ufcs = (recv_type, method, mode, argv, arg_types, arena) => {
-            (void)recv_type;
-            (void)mode;
-            (void)argv;
-            (void)arg_types;
-            return cc_slice_concat2(
-                cc_slice_from_buffer("lambda_toy_", sizeof("lambda_toy_") - 1),
-                method, arena);
+        (void)recv_type;
+        (void)mode;
+        (void)argv;
+        (void)arg_types;
+        return cc_slice_concat2(
+        cc_slice_from_buffer("lambda_toy_", sizeof("lambda_toy_") - 1),
+        method, arena);
         },
-    });
-}
+    };
+
 
 int main(void) {
     {

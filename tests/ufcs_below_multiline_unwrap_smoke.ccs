@@ -25,11 +25,10 @@
 
 typedef struct Gadget { int n; } Gadget;
 
-@comptime {
-    (void)cc_type_register("Gadget*", (CCTypeHooks){
-        .destroy = cc_type_destroy_call("gadget_free"),
-    });
-}
+@typehooks on Gadget* {
+    .destroy = cc_type_destroy_call("gadget_free"),
+};
+
 
 static void gadget_free(Gadget* g) { free(g); }
 static void gadget_bump(Gadget* g) { g->n++; }

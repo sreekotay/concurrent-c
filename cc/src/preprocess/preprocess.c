@@ -15453,7 +15453,7 @@ static uint64_t cc__incexp_disk_key(const char* input_path, const char* repo_roo
         h = cc__incexp_fnv64(repo_root, strlen(repo_root), h);
     }
     /* Flag bits that change expand command / grammar splice behavior. */
-    h = cc__incexp_fnv64("|v=2|CC_COMPTIME_SCAN", 20, h);
+    h = cc__incexp_fnv64("|v=3|incexp", 12, h);
     return h;
 }
 
@@ -15710,12 +15710,12 @@ char* cc_preprocess_include_expanded(const char* input_path) {
         }
         if (repo_root[0] || cc_path_find_repo_root(input_path, repo_root, sizeof(repo_root))) {
             snprintf(cmd, sizeof(cmd),
-                     "cc -E -D__CC__=1 -DCC_COMPTIME_SCAN=1 -x c%s%s%s -I\"%s/cc/include\" -I\"%s/out/include\" \"%s\" 2>/dev/null",
+                     "cc -E -D__CC__=1 -x c%s%s%s -I\"%s/cc/include\" -I\"%s/out/include\" \"%s\" 2>/dev/null",
                      inc_dir[0] ? " -iquote\"" : "", inc_dir[0] ? inc_dir : "", inc_dir[0] ? "\"" : "",
                      repo_root, repo_root, expand_path);
         } else {
             snprintf(cmd, sizeof(cmd),
-                     "cc -E -D__CC__=1 -DCC_COMPTIME_SCAN=1 -x c%s%s%s \"%s\" 2>/dev/null",
+                     "cc -E -D__CC__=1 -x c%s%s%s \"%s\" 2>/dev/null",
                      inc_dir[0] ? " -iquote\"" : "", inc_dir[0] ? inc_dir : "", inc_dir[0] ? "\"" : "",
                      expand_path);
         }
@@ -19989,6 +19989,11 @@ static int cc__apply_phase1_canonical_passes(CCPassChain* chain,
     /* Container surface aliases first: `Vec::[T]` / `vec_new::[T]` become
      * their CC-prefixed instance-layer spellings before any recognizer. */
     CC__CANON_STEP("cc__rewrite_container_surface_aliases"); if (cc_pass_chain_apply(chain, cc__rewrite_container_surface_aliases(chain->src, chain->len)) < 0) return -1;
+    /* `@typehooks on T { .create = …, }` → `@comptime { cc_type_register(...) }`
+     * so existing hook collectors see the legacy form. */
+    CC__CANON_STEP("cc_rewrite_typehooks_to_register");
+    if (cc_pass_chain_apply(chain, cc_rewrite_typehooks_to_register(chain->src, chain->len)) < 0)
+        return -1;
     /* @grammar declarations lower FIRST: the generated types (schemas,
      * Readers, tape Nodes) must be REAL in the canonical stream — the type
      * registry and comptime collectors are seeded from it, and UFCS receiver

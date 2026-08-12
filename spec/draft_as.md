@@ -1,42 +1,44 @@
-# `@as` fields
+# Is-a faces (`as:` / `@as`)
 
-Status: draft — implemented for UFCS-miss retry (including transitive `@as`
-walk), destroy chaining, arg-position autocast, and `@errhandler` fallback
-(exact Result `E`, else unique `@as` path to the handler parameter type;
-see `tests/as_field_ufcs_smoke.ccs`, `tests/as_field_destroy_smoke.ccs`,
-`tests/as_arg_coerce_smoke.ccs`, `tests/as_arg_coerce_plain_smoke.ccs`,
-`tests/as_ufcs_miss_fail.ccs`, `tests/as_transitive_smoke.ccs`,
-`tests/as_cycle_fail.ccs`, `tests/as_ptr_as_fail.ccs`,
-`tests/as_anon_fail.ccs`, `tests/as_pre_hook_value_smoke.ccs`,
-`tests/as_nontypedef_struct_smoke.ccs`, `tests/errhandler_as_fallback_smoke.ccs`,
-`tests/errhandler_as_face_message_smoke.ccs`,
-`tests/script_errhandler_as_default_smoke.shcc`,
-`tests/errhandler_as_ambiguous_fail.ccs`,
-`tests/errhandler_type_match_smoke.ccs`).
+Status: draft — preferred surface is `@typeview on T { as: field; }`
+(`draft_facets.md`). Field `Type name @as;` remains accepted as deprecated
+sugar. Implemented for UFCS-miss retry (including transitive walk), destroy
+chaining, arg-position autocast, and `@errhandler` fallback (exact Result
+`E`, else unique face path to the handler parameter type; see
+`tests/typeview_as_ufcs_smoke.ccs`, `tests/as_field_ufcs_smoke.ccs`,
+`tests/as_field_destroy_smoke.ccs`, and related `as_*` / `errhandler_as_*`
+smokes).
 
 ## 1. Surface
 
-`Type name @as;` marks a named struct field as the is-a embed for `Type`:
-the outer type is usable as `Type` through that member.
+Preferred:
 
 ```c
 typedef struct CCTempFile {
-    CCFile file @as;
+    CCFile file;
     CCSlice path;
     int owns;
 } CCTempFile;
+
+@typeview on CCTempFile {
+    as: file;
+};
 ```
 
-- The name is required; an anonymous `@as` field is ill-formed. The lowered
+Deprecated equivalent: `CCFile file @as;` on the field.
+
+- The field name is required; an anonymous face is ill-formed. The lowered
   C member is exactly the source name — no synthetic names.
-- The field must be a value embed (`Type name @as;`). A pointer field
-  (`Type *name @as;`) is ill-formed at the struct declaration.
+- The field must be a value embed. A pointer field is ill-formed.
 - Layout is ordinary field layout: `sizeof(Type)` at the declaration site
   with `Type`'s alignment. No field flattening.
-- At most one `@as` path to any given type from a struct (direct or
-  transitive); a second path is ill-formed at the struct declaration.
-  Distinct types may each have one `@as` field.
-- `@as` grants no access the field name does not already have; it only
+- At most one face path to any given type from a struct (direct or
+  transitive); a second path is ill-formed. Distinct embed types may each
+  have one face (`as: file, domain;` when types differ).
+- A type-family glob subject (`@typeview on CCSlice_* { as: base; }`)
+  applies the same face to every matching concrete type (narrowest match
+  wins). See `draft_facets.md`.
+- A face grants no access the field name does not already have; it only
   makes the compiler take that path implicitly. Explicit `x.name` and
   `&x.name` remain ordinary member access everywhere.
 - Assignment through the field (`x.name = other;`) keeps plain-field
@@ -46,7 +48,7 @@ typedef struct CCTempFile {
 ## 2. UFCS retry and conversion
 
 Method resolution on a receiver of type `Outer` that finds no match retries
-each `@as` field in declaration order, resolving the method against the
+each face field in declaration order, resolving the method against the
 field's type with receiver `&recv.name`:
 
 ```c

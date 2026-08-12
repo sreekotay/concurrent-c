@@ -167,13 +167,17 @@ static void *cc__py_fn_mint(CCPy *d, void *fn, void *userdata,
 /* Python failure with a CCError face: default @errhandler(CCError)
  * prints the exception text; exact @errhandler(CCPyError) claims it. */
 typedef struct CCPyError {
-    CCError base @as;
+    CCError base;
     /* Exception class name (`ValueError`, `KeyError`, …) and the formatted
      * traceback, both anchored in the handle's scratch arena. Empty when the
      * failure came from the binding rather than from Python. */
     CCSlice type_name;
     CCSlice traceback;
 } CCPyError;
+
+@typeview on CCPyError {
+    as: base;
+};
 
 #ifndef CCResult_CCPy_CCPyError_DEFINED
 #define CCResult_CCPy_CCPyError_DEFINED 1
@@ -7200,17 +7204,15 @@ CC_GENERIC_FACTORY(py_module, 1) {
     return cc_string_as_slice(&s);
 }
 
-#ifdef CC_COMPTIME_SCAN
-@comptime {
-    (void)cc_type_register("CCPy", (CCTypeHooks){
-        .destroy = cc_type_destroy_call("cc_py_close"),
-        .ufcs_dynamic2 = cc_type_dynamic_call("cc_py_callm", "CC_PY_ARG"),
-    });
-    (void)cc_type_register("CCPyObj", (CCTypeHooks){
-        .destroy = cc_type_destroy_call("cc_py_obj_release"),
-        .ufcs_dynamic2 = cc_type_dynamic_call("cc_py_obj_callm", "CC_PY_ARG"),
-    });
-}
-#endif
+
+@typehooks on CCPy {
+    .destroy = cc_type_destroy_call("cc_py_close"),
+    .ufcs_dynamic2 = cc_type_dynamic_call("cc_py_callm", "CC_PY_ARG"),
+};
+@typehooks on CCPyObj {
+    .destroy = cc_type_destroy_call("cc_py_obj_release"),
+    .ufcs_dynamic2 = cc_type_dynamic_call("cc_py_obj_callm", "CC_PY_ARG"),
+};
+
 
 #endif /* CC_SCRIPT_PY_H */

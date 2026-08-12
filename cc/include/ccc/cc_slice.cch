@@ -76,15 +76,16 @@ typedef CCSlice CCSliceShared;
  * as CC_DECL_RESULT_SPEC. `T[:]` with a non-char element type lowers to
  * `CCSlice_<mangled T>`, a distinct struct embedding the erased core:
  *
- *   typedef struct CCSlice_double { CCSlice base @as; } CCSlice_double;
+ *   typedef struct CCSlice_double { CCSlice base; } CCSlice_double;
  *
  * The instance name carries the element type at compile time; `.base`
- * is the visible erasure spelling; `@as` supplies method retry into the
- * byte helpers and arg-position autocast. Element-wise methods and the
- * scaled `bytes()` view come from this template with sizeof(T) in
- * hand. `len` on a typed slice counts ELEMENTS; `bytes()` converts
- * to an honestly byte-measured CCSlice. char slices stay bare CCSlice
- * (bytes are their elements).
+ * is the visible erasure spelling; one family face
+ * `@typeview on CCSlice_* { as: base; }` (after the scalar instances)
+ * supplies method retry into the byte helpers and arg-position autocast.
+ * Element-wise methods and the scaled `bytes()` view come from this
+ * template with sizeof(T) in hand. `len` on a typed slice counts ELEMENTS;
+ * `bytes()` converts to an honestly byte-measured CCSlice. char slices
+ * stay bare CCSlice (bytes are their elements).
  *
  * Common scalar instances are pre-declared below. Any other element
  * type auto-instantiates at first `T[:]` use — the compiler splices the
@@ -95,10 +96,11 @@ typedef CCSlice CCSliceShared;
  *   CC_DECL_SLICE_SPEC(CCSlice_long_long, long long)  explicit instance name
  *
  * Members are `NAME##_<member>` — the same instance-prefix convention
- * as Vec and Map families. */
+ * as Vec and Map families. Header lowering strips `@typeview` from `.h`
+ * (faces remain Concurrent-C / shadow facts). */
 #define CC_DECL_SLICE_SPEC(NAME, T)                                            \
     typedef struct NAME {                                                      \
-        CCSlice base @as;                                                      \
+        CCSlice base;                                                          \
     } NAME;                                                                    \
     static inline NAME NAME##_from_buffer(T *p, size_t count) {                \
         NAME s;                                                                \
@@ -241,6 +243,11 @@ CC_DECL_SLICE(uint32_t)
 CC_DECL_SLICE(uint64_t)
 CC_DECL_SLICE(float)
 CC_DECL_SLICE(double)
+
+/* Family is-a face: every `CCSlice_*` instance embeds `CCSlice base`. */
+@typeview on CCSlice_* {
+    as: base;
+};
 
 static inline CCSlice cc_slice_from_parts(void *ptr, size_t len, uint64_t id) {
     CCSlice s = {ptr, len, id};

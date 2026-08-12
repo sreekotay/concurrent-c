@@ -29,14 +29,13 @@ static void cc_as_outer_delta(AsOuter *o) {
     o->outer_tag = 0;
 }
 
-@comptime {
-    (void)cc_type_register("AsMid", (CCTypeHooks){
-        .destroy = cc_type_destroy_call("cc_as_mid_delta"),
-    });
-    (void)cc_type_register("AsOuter", (CCTypeHooks){
+@typehooks on AsMid {
+    .destroy = cc_type_destroy_call("cc_as_mid_delta"),
+};
+    @typehooks on AsOuter {
         .destroy = cc_type_destroy_call("cc_as_outer_delta"),
-    });
-}
+    };
+
 
 static CCFile *g_got;
 

@@ -156,6 +156,7 @@ if [[ "$SMOKE" -eq 1 ]]; then
     -I"$ROOT/cc/include" \
     -I"$ROOT/out/include" \
     -I"$ROOT/cc/shadow" \
+    -I"$ROOT/cc/src" \
     -I"$ROOT/third_party/tcc" \
     -DSHADOW_HAVE_LIBTCC=1 \
     "$OBJ/shadow_tcc_compile.o" \

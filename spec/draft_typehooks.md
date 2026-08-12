@@ -1,0 +1,38 @@
+# Type hooks (`@typehooks`)
+
+Status: draft — preferred surface for type-owned create / destroy / UFCS
+registration. The underlying marker API is `cc_type_register` (see
+`docs/deprecated.md`).
+
+## 1. Surface
+
+```c
+@typehooks on HooksDemo {
+    .create = cc_type_create_call("hooks_demo_create"),
+    .destroy = cc_type_destroy_call("hooks_demo_destroy"),
+};
+```
+
+- Body punctuation is a **strict C designated initializer**: leading `.`,
+  one RHS expression per arm, commas between arms, trailing comma allowed.
+- Multi-overload create uses `cc_type_create_overloads(...)` (or the other
+  existing helpers) — not a comma-list of bare callees on `.create`.
+- Recognized arms match `CCTypeHooks`: `.create`, `.destroy`, `.ufcs`,
+  `.ufcs_dynamic`, `.ufcs_dynamic2`, and other fields the register path
+  already accepts (e.g. `.niche`).
+- Subject may be an exact type (`CCArena`), a pointer key (`MyHandle*`), or
+  a trailing-`*` family glob (`CCChanTx_*`), same match/score rule as
+  `@typeview` globs.
+- Header lowering strips `@typehooks` from host `.h` text. Discovery scans
+  `.cch` / TU Concurrent-C source. The form rewrites to
+  `@comptime { (void)cc_type_register("Subject", (CCTypeHooks){ … }); }`
+  before the marker tables are filled.
+
+## 2. Relation to `@typeview`
+
+`@typeview` declares faces and allow-lists (`as:`, `r:` / `w:` / `rw:`).
+`@typehooks` declares lifecycle and UFCS policy. Same `on Subject` shape;
+different bodies — do not merge them.
+
+See `tests/typehooks_create_destroy_smoke.ccs` and type-owned registration
+in `spec/concurrent-c-spec-complete.md`.
