@@ -5921,7 +5921,7 @@ CCSlice !>(CCPyError) cc_py_obj_map(void *never_defined, ...);
 
 
 /* `obj.method(args…)` sink core: builds an argument tuple and calls the
- * attribute. `cc_py_obj_callm` (the `.ufcs_dynamic2` registration) and
+ * attribute. `cc_py_obj_callm` (the `.ufcs_sink` registration) and
  * the destination-typed variants below share this body. */
 /* The interned name object for `method` in `home`'s interpreter, or NULL when
  * it cannot be cached (no handle, table full, interning unavailable) — the
@@ -6525,7 +6525,7 @@ static inline int64_t !>(CCPyError) cc__py_obj_take_i64(
     }
 }
 
-/* Destination-typed call variants: `.ufcs_dynamic2` resolution composes
+/* Destination-typed call variants: `.ufcs_sink` resolution composes
  * `cc_py_obj_callm_<mangled dest>` at `T v = obj.method(args…)` sites and
  * uses the variant when one is declared here. Each runs the shared call
  * core, extracts the destination type, and releases the intermediate
@@ -6625,7 +6625,7 @@ static inline long long !>(CCPyError) cc_py_obj_callm_long_long(
 
 /* ---- the CCPy dynamic sink ----
  *
- * `.ufcs_dynamic2` for the interpreter handle itself, so the declared
+ * `.ufcs_sink` for the interpreter handle itself, so the declared
  * destination joins resolution for the members that produce values from
  * source text.  Real members (`exec`, `import`, `close`, …) are
  * header-visible and win resolution as always; the sink carries the
@@ -6669,7 +6669,7 @@ static inline CCPyObj !>(CCPyError) cc_py_callm(CCPy *py,
     return cc__py_host_callm_n(py, method, argc, tmp);
 }
 
-/* Destination-typed variants: `.ufcs_dynamic2` resolution composes
+/* Destination-typed variants: `.ufcs_sink` resolution composes
  * `cc_py_callm_<mangled dest>` at `T v = py.eval(...)` sites.  Each runs
  * the sink core, extracts the destination type, and releases the
  * intermediate object — it never reaches user space, so no @destroy. */
@@ -7207,11 +7207,11 @@ CC_GENERIC_FACTORY(py_module, 1) {
 
 @typehooks on CCPy {
     .destroy = cc_type_destroy_call("cc_py_close"),
-    .ufcs_dynamic2 = cc_type_dynamic_call("cc_py_callm", "CC_PY_ARG"),
+    .ufcs_sink = cc_type_dynamic_call("cc_py_callm", "CC_PY_ARG"),
 };
 @typehooks on CCPyObj {
     .destroy = cc_type_destroy_call("cc_py_obj_release"),
-    .ufcs_dynamic2 = cc_type_dynamic_call("cc_py_obj_callm", "CC_PY_ARG"),
+    .ufcs_sink = cc_type_dynamic_call("cc_py_obj_callm", "CC_PY_ARG"),
 };
 
 

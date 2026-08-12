@@ -1,4 +1,4 @@
-/* Dynamic UFCS sink (.ufcs_dynamic): unresolved methods on a registered
+/* Dynamic UFCS sink (.ufcs_sink): unresolved methods on a registered
  * type lower to `sink(&recv, "method", N, WRAP(a), ...)`; real methods
  * (visible callees) keep conventional dispatch and win over the sink.
  * Args whose declared type is a typed slice instance (`double[:]`)
@@ -90,7 +90,7 @@ static int test_sink_real(TestSink *t) {
 
 
 @typehooks on TestSink {
-    .ufcs_dynamic = cc_type_dynamic_call("test_sink_dyn", "TS_ARG"),
+    .ufcs_sink = cc_type_dynamic_call("test_sink_dyn", "TS_ARG"),
 };
 
 

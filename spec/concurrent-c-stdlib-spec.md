@@ -1790,7 +1790,7 @@ embedded NUL; pass a slice to carry arbitrary bytes.
 formatted Python traceback, present when the failure crossed Python
 frames), both anchored in the handle's scratch arena.
 
-`CCPyObj`'s dynamic sink is destination-aware (`.ufcs_dynamic2`):
+`CCPyObj`'s dynamic sink is destination-aware (`.ufcs_sink`):
 wherever a typed destination is visible — a declaration
 `T name = obj.method(args…)`, an assignment to a resolvable lvalue, or
 a cast `(T)obj.method(args…)` directly wrapping the call — the

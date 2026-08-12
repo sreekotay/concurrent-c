@@ -5497,7 +5497,7 @@ static int cc__ufcs_dest_span_type(const char* s, size_t ty_a, size_t ty_b,
     return 1;
 }
 
-/* Destination at a dynamic-sink call site, so a `.ufcs_dynamic2` sink
+/* Destination at a dynamic-sink call site, so a `.ufcs_sink`
  * can compose `<callee>_<mangled T>` — the destination is one more
  * input to UFCS resolution wherever a typed destination is visible.
  * Three shapes:
@@ -6220,7 +6220,7 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                     (recv_is_ptr || cc__ufcs_recv_expr_is_addressable(recv_expr))) {
                     char sink_dest_callee[512];
                     size_t sink_emit_from = recv_start;
-                    /* `.ufcs_dynamic2`: the destination participates in
+                    /* `.ufcs_sink`: the destination participates in
                      * resolution. At `T name = recv.method(...)` — or an
                      * assignment to a resolvable lvalue — compose
                      * `<sink>_<mangled T>` and use it when that function
