@@ -37,7 +37,7 @@ static int poke(WrapT *t1) {
 
 
 @typehooks on WrapT {
-    .ufcs_dynamic = cc_type_dynamic_call("wrap_sink", "W_ARG"),
+    .ufcs_sink = cc_type_dynamic_call("wrap_sink", "W_ARG"),
 };
 
 

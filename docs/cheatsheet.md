@@ -121,6 +121,9 @@ v.median();                 // declare = install
 };
 ```
 
+Last-resort unresolved methods: `.ufcs_sink = cc_type_dynamic_call("callee", "WRAP")`.
+Destination-aware: a typed dest composes `<callee>_<mangled dest>` when declared.
+
 Receiver first; arena last when needed. Recipe:
 [recipe_ufcs_forms.ccs](../examples/recipe_ufcs_forms.ccs).
 See `spec/draft_typehooks.md`.

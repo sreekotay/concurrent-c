@@ -2277,7 +2277,7 @@ static inline CCSlice_int !>(CCJsError) cc__js_val_map_CCSlice_int(
 CCSlice !>(CCJsError) cc_js_val_map(void *never_defined, ...);
 #define cc_js_val_map(T, obj, arena, ...)     cc__js_val_map_raw((obj), (arena), (int)sizeof(T),         _Generic((T)0, float: 1, double: 1, default: 0),         CC__JS_NARG(__VA_ARGS__),         (const CCJsArg[]){             CC__JS_MAPCAT(CC__JS_MAPA, CC__JS_NARG(__VA_ARGS__))(__VA_ARGS__) })
 
-/* Destination-typed variants: `.ufcs_dynamic2` resolution composes
+/* Destination-typed variants: `.ufcs_sink` resolution composes
  * `cc_js_val_callm_<mangled dest>` at `T v = obj.method(args…)` sites.
  * Each runs the shared core, extracts the destination through the quiet
  * cores, and needs no release — the intermediate is call-scoped. */
@@ -2612,7 +2612,7 @@ static inline CCSlice cc__js_src_cstr(const char *s) {
 
 /* ---- the CCJs dynamic sink ----
  *
- * `.ufcs_dynamic2` for the handle itself, so the declared destination
+ * `.ufcs_sink` for the handle itself, so the declared destination
  * joins resolution for the members that produce values from source text.
  * Real members (`exec`, `global`, `eval_i64`, …) win resolution as
  * always; the sink carries the dynamic ones — today that is `eval`.  An
@@ -6776,11 +6776,11 @@ static inline CCJsArg cc__js_dom_arg_val(CCJsDomVal v) {
 
 @typehooks on CCJs {
     .destroy = cc_type_destroy_call("cc_js_close"),
-    .ufcs_dynamic2 = cc_type_dynamic_call("cc_js_callm", "CC_JS_ARG"),
+    .ufcs_sink = cc_type_dynamic_call("cc_js_callm", "CC_JS_ARG"),
 };
 @typehooks on CCJsVal {
     .destroy = cc_type_destroy_call("cc_js_val_release"),
-    .ufcs_dynamic2 = cc_type_dynamic_call("cc_js_val_callm", "CC_JS_ARG"),
+    .ufcs_sink = cc_type_dynamic_call("cc_js_val_callm", "CC_JS_ARG"),
 };
 @typehooks on CCJsHost {
     .destroy = cc_type_destroy_call("cc_js_host_close"),
@@ -6790,7 +6790,7 @@ static inline CCJsArg cc__js_dom_arg_val(CCJsDomVal v) {
 };
 @typehooks on CCJsDomVal {
     .destroy = cc_type_destroy_call("cc_js_dom_val_release"),
-    .ufcs_dynamic2 = cc_type_dynamic_call("cc_js_dom_val_callm", "CC_JS_DOM_ARG"),
+    .ufcs_sink = cc_type_dynamic_call("cc_js_dom_val_callm", "CC_JS_DOM_ARG"),
 };
 
 

@@ -62,21 +62,16 @@ int cc_type_registry_as_field_at(CCTypeRegistry* reg,
 /* Nonzero if struct_name has any @as field. */
 int cc_type_registry_has_as_field(CCTypeRegistry* reg, const char* struct_name);
 
-/* Dynamic UFCS sink (.ufcs_dynamic registrations): mark / query types whose
- * unresolved methods lower through a registered sink callee. Session-global
- * (survives registry rebuilds across pipeline stages). */
+/* Dynamic UFCS sink (`.ufcs_sink`): unresolved methods lower through a
+ * registered sink callee. Destination-aware: wherever a typed destination
+ * is visible the callee composes as <callee>_<mangled dest> when declared.
+ * Session-global (survives registry rebuilds across pipeline stages). */
 int cc_type_registry_set_dynamic_sink(CCTypeRegistry* reg, const char* type_name,
                                       const char* callee, const char* wrap);
 int cc_type_registry_get_dynamic_sink(CCTypeRegistry* reg, const char* type_name,
                                       const char** out_callee,
                                       const char** out_wrap);
 int cc_type_registry_has_dynamic_sink(CCTypeRegistry* reg, const char* type_name);
-/* .ufcs_dynamic2: destination-aware sink — wherever a typed destination
- * is visible (`T name = recv.method(…)`, an assignment to a resolvable
- * lvalue, or a cast `(T)recv.method(…)`) the callee composes as
- * <callee>_<mangled dest> when declared. */
-int cc_type_registry_set_dynamic_sink2(CCTypeRegistry* reg, const char* type_name,
-                                       const char* callee, const char* wrap);
 int cc_type_registry_dynamic_sink_dest_aware(CCTypeRegistry* reg,
                                              const char* type_name);
 /* Typed slice instances (CC_DECL_SLICE_SPEC family). The rewriter

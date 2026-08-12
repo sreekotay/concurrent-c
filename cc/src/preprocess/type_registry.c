@@ -73,7 +73,7 @@ struct CCTypeRegistry {
     size_t chan_count;
     size_t chan_capacity;
 
-    /* Types with a registered dynamic UFCS sink (.ufcs_dynamic) */
+    /* Types with a registered dynamic UFCS sink (.ufcs_sink) */
     char** dyn_types;
     size_t dyn_count;
     size_t dyn_capacity;
@@ -176,7 +176,7 @@ typedef struct {
     char* type_name;
     char* callee;
     char* wrap;
-    int dest_aware; /* .ufcs_dynamic2: sink callee composes with dest type */
+    int dest_aware; /* always 1: sink callee composes with dest type */
 } CCDynSinkEntry;
 static _Thread_local CCDynSinkEntry* g_dyn_sinks = NULL;
 static _Thread_local size_t g_dyn_count = 0;
@@ -190,7 +190,10 @@ int cc_type_registry_set_dynamic_sink(CCTypeRegistry* reg, const char* type_name
     cc__strip_type_spelling(type_name, stripped, sizeof(stripped));
     if (!stripped[0]) return -1;
     for (size_t i = 0; i < g_dyn_count; ++i) {
-        if (strcmp(g_dyn_sinks[i].type_name, stripped) == 0) return 0;
+        if (strcmp(g_dyn_sinks[i].type_name, stripped) == 0) {
+            g_dyn_sinks[i].dest_aware = 1;
+            return 0;
+        }
     }
     if (g_dyn_count == g_dyn_capacity) {
         size_t ncap = g_dyn_capacity ? g_dyn_capacity * 2 : 8;
@@ -203,7 +206,7 @@ int cc_type_registry_set_dynamic_sink(CCTypeRegistry* reg, const char* type_name
     g_dyn_sinks[g_dyn_count].type_name = strdup(stripped);
     g_dyn_sinks[g_dyn_count].callee = strdup(callee);
     g_dyn_sinks[g_dyn_count].wrap = strdup(wrap);
-    g_dyn_sinks[g_dyn_count].dest_aware = 0;
+    g_dyn_sinks[g_dyn_count].dest_aware = 1;
     if (!g_dyn_sinks[g_dyn_count].type_name || !g_dyn_sinks[g_dyn_count].callee ||
         !g_dyn_sinks[g_dyn_count].wrap)
         return -1;
@@ -230,21 +233,6 @@ int cc_type_registry_get_dynamic_sink(CCTypeRegistry* reg, const char* type_name
 
 int cc_type_registry_has_dynamic_sink(CCTypeRegistry* reg, const char* type_name) {
     return cc_type_registry_get_dynamic_sink(reg, type_name, NULL, NULL) == 0;
-}
-
-int cc_type_registry_set_dynamic_sink2(CCTypeRegistry* reg, const char* type_name,
-                                       const char* callee, const char* wrap) {
-    char stripped[256];
-    int rc = cc_type_registry_set_dynamic_sink(reg, type_name, callee, wrap);
-    if (rc != 0) return rc;
-    cc__strip_type_spelling(type_name, stripped, sizeof(stripped));
-    for (size_t i = 0; i < g_dyn_count; ++i) {
-        if (strcmp(g_dyn_sinks[i].type_name, stripped) == 0) {
-            g_dyn_sinks[i].dest_aware = 1;
-            return 0;
-        }
-    }
-    return 0;
 }
 
 int cc_type_registry_dynamic_sink_dest_aware(CCTypeRegistry* reg,
@@ -1320,15 +1308,17 @@ static int cc__as_diagnose_anon_fields(const char* file,
     return errs;
 }
 
-/* Early text scan for `.ufcs_dynamic` registrations so the pre-splice
- * text-UFCS pass can defer sink receivers before the comptime scan runs.
- * A false positive (registration text inside a comment) only defers that
- * type's lowering to the AST pass — fail-closed. */
+/* Early text scan for `.ufcs_sink` (and the old `.ufcs_dynamic` /
+ * `.ufcs_dynamic2` spellings) so the pre-splice text-UFCS pass can defer
+ * sink receivers before the comptime scan runs. A false positive
+ * (registration text inside a comment) only defers that type's lowering
+ * to the AST pass — fail-closed. */
 static void cc__scan_dynamic_sink_registrations(CCTypeRegistry* reg,
                                                 const char* src, size_t n) {
     size_t i = 0;
     static const char kw[] = "cc_type_register";
-    static const char field[] = ".ufcs_dynamic";
+    static const char field_sink[] = ".ufcs_sink";
+    static const char field_dyn[] = ".ufcs_dynamic";
     if (!reg || !src) return;
     while (i + sizeof(kw) - 1 < n) {
         const char* hit = (const char*)memmem(src + i, n - i, kw, sizeof(kw) - 1);
@@ -1370,10 +1360,11 @@ static void cc__scan_dynamic_sink_registrations(CCTypeRegistry* reg,
             }
             {
                 const char* fhit = (const char*)memmem(src + body_a, p - body_a,
-                                                       field, sizeof(field) - 1);
+                                                       field_sink, sizeof(field_sink) - 1);
+                if (!fhit)
+                    fhit = (const char*)memmem(src + body_a, p - body_a,
+                                               field_dyn, sizeof(field_dyn) - 1);
                 if (fhit) {
-                    int f_dest = (fhit + sizeof(field) - 1 < src + p &&
-                                  fhit[sizeof(field) - 1] == '2');
                     /* Extract cc_type_dynamic_call("callee", "wrap"). */
                     static const char call[] = "cc_type_dynamic_call";
                     const char* chit = (const char*)memmem(
@@ -1402,14 +1393,9 @@ static void cc__scan_dynamic_sink_registrations(CCTypeRegistry* reg,
                             q++;
                         }
                     }
-                    if (callee[0] && wrapm[0]) {
-                        if (f_dest)
-                            (void)cc_type_registry_set_dynamic_sink2(reg, type_name,
-                                                                     callee, wrapm);
-                        else
-                            (void)cc_type_registry_set_dynamic_sink(reg, type_name,
-                                                                    callee, wrapm);
-                    }
+                    if (callee[0] && wrapm[0])
+                        (void)cc_type_registry_set_dynamic_sink(reg, type_name,
+                                                                callee, wrapm);
                 }
             }
         }

@@ -5079,9 +5079,15 @@ typedef struct {
 } CCTypeDestroyHook;
 
 typedef struct {
+    const char* callee;
+    const char* arg_wrap;
+} CCTypeDynamicHook;
+
+typedef struct {
     CCTypeCreateHook create;
     CCTypeDestroyHook destroy;
     CCTypeUfcsHandler ufcs;
+    CCTypeDynamicHook ufcs_sink;
 } CCTypeHooks;
 
 int cc_type_register(const char* type_name, CCTypeHooks hooks);
@@ -5110,8 +5116,9 @@ int cc_type_register(const char* type_name, CCTypeHooks hooks);
 - `.destroy` may register a pre-destroy hook, a destroy hook, or both. `pre_callee` runs before `callee`.
 - The `.ufcs` hook is responsible only for choosing the lowered callee family. It does not execute the call.
 - Returning the empty slice means "no custom rewrite; fall back to ordinary receiver-type UFCS".
+- `.ufcs_sink` is the last-resort unresolved-method hook. Unresolved methods lower to `callee(&recv, "method", N, arg_wrap(a1), …)`. The sink is destination-aware: wherever a typed destination is visible the callee composes as `<callee>_<mangled dest>` when that function is declared (compose-then-verify; plain callee otherwise). `.ufcs_dynamic` and `.ufcs_dynamic2` are accepted spellings of `.ufcs_sink`.
 - `.create` may be registered either as fixed callee strings (`cc_type_create_call(...)`, `cc_type_create_overloads(...)`) or as a callable hook via `cc_type_create_hook(...)`.
-- Recognized hook fields are `.create`, `.destroy`, and `.ufcs`.
+- Recognized hook fields are `.create`, `.destroy`, `.ufcs`, and `.ufcs_sink`.
 
 **UFCS handler contract (normative):**
 

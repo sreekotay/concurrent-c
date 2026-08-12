@@ -1,4 +1,4 @@
-/* Destination-aware dynamic UFCS sink (.ufcs_dynamic2): at
+/* Destination-aware dynamic UFCS sink (.ufcs_sink): at
  * `T name = recv.method(args)` the declared destination joins
  * resolution — the call lowers through `<sink>_<mangled T>` when that
  * variant is declared, and through the plain sink otherwise. No sigil
@@ -81,7 +81,7 @@ static int test_sink2_real(TestSink2 *t) {
 
 
 @typehooks on TestSink2 {
-    .ufcs_dynamic2 = cc_type_dynamic_call("ts2_call", "TS2_ARG"),
+    .ufcs_sink = cc_type_dynamic_call("ts2_call", "TS2_ARG"),
 };
 
 

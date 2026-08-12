@@ -42,3 +42,10 @@ in a Concurrent-C TU rewrites to `cc_type_register` before discovery.
   `tests/comptime_header_type_regs_shared.cch` (raw local `.cch` includes that
   are not lower-header’d — file-scope `@typehooks` would reach shadow
   unrewritten; stdlib headers are fine because they lower to stripped `.h`).
+
+## UFCS sink field: `.ufcs_dynamic` / `.ufcs_dynamic2`
+
+**Prefer:** `.ufcs_sink`
+
+`.ufcs_dynamic` and `.ufcs_dynamic2` are accepted spellings of the same
+destination-aware last-resort sink. New registrations use `.ufcs_sink`.
