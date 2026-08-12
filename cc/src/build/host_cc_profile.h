@@ -10,7 +10,7 @@
 
 #include <stddef.h>
 
-#define CC_HOST_PROFILE_SCHEMA 2
+#define CC_HOST_PROFILE_SCHEMA 3
 
 /* The C version CC requires of a host toolchain — the probe rejects a host
  * that cannot compile C11 `max_align_t` — and therefore the version every
@@ -22,6 +22,14 @@
  * discards the message, and `cc_atomic.h` takes its non-atomic CAS fallback.
  * One constant so the requirement and the sessions cannot drift apart. */
 #define CC_HOST_C_STD_OPTION "-std=c11"
+
+/* TCC's ARM target_machine_defs predefine bare `arm` / `arm_elf` (see
+ * third_party/tcc/arm-gen.c). Those collide with ordinary C identifiers used
+ * throughout the compiler (match arms, etc.). Always -U them for host TCC and
+ * in-process libtcc; harmless on non-ARM where the macros are absent.
+ * Prefer `__arm__` for architecture tests. */
+#define CC_TCC_ARCH_ID_UNDEF " -Uarm -Uarm_elf"
+#define CC_TCC_HOST_OPTIONS CC_HOST_C_STD_OPTION CC_TCC_ARCH_ID_UNDEF
 
 typedef struct CCHostCcProfile {
     char cc_path[1024];

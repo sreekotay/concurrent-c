@@ -86,7 +86,7 @@ int cc_tcc_eval_const_expr(const char* prelude, const char* expr, int64_t* out) 
     TCCState* s = tcc_new();
     if (!s) return 0;
     tcc_set_error_func(s, NULL, cc__ce_err_silent);
-    tcc_set_options(s, CC_HOST_C_STD_OPTION);
+    tcc_set_options(s, CC_TCC_HOST_OPTIONS);
 
     /* Point TCC at its runtime support lib before choosing the output type so
      * relocation can find libtcc1.a. */

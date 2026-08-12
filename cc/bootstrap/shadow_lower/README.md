@@ -89,7 +89,9 @@ make -C cc shadow_lower-from-ccs
 ```bash
 ./scripts/smoke_bootstrap_fresh.sh   # wiped out/ on this host
 ./scripts/smoke_i386.sh              # Linux ILP32 Docker (RO mount)
+./scripts/smoke_arm32.sh             # linux/arm/v7
 # optional: CCC_HOST_CC=tcc ./scripts/smoke_i386.sh
+#           CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh
 ```
 
 Cold `make -C cc -jN` must succeed without a warm `out/` (seed stamp is

@@ -10,6 +10,35 @@ changing the cold build graph — not on every stdlib edit. See
 
 Darwin 32-bit targets are not supported.
 
+## Config
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `CCC_HOST_CC` | `cc` | Host C compiler used to **build** `ccc` (and TinyCC first). Set to `tcc` for a TinyCC self-build of `ccc`. |
+| `CCC_BACKEND_CC` | (matches host) | Host C compiler for `ccc build` / `ccc run` in the curated suite. When `CCC_HOST_CC=tcc` and this is unset, the suite uses the in-tree `third_party/tcc/tcc`. Set to `cc` or `tcc` to force. |
+| `BUILD` | `debug` | `debug` or `release` |
+| `CCC_ILP32_JOBS` | `nproc` | Parallel make jobs inside the sandbox |
+
+```bash
+./scripts/smoke_i386.sh                         # host+backend = system cc (gcc)
+CCC_HOST_CC=tcc ./scripts/smoke_i386.sh         # host+backend = TinyCC
+./scripts/smoke_arm32.sh                        # same matrix on ARM32
+CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh
+```
+
+## Latest receipt — 2026-08-12
+
+**Host:** macOS (Darwin 25), arm64, Docker Desktop, QEMU user-mode  
+**Seed:** `shadow_lower` last-good **v121**  
+**Suite:** hello, channel pipeline, fiber spawn, chan task, park/wake, nursery — expect `ELF 32-bit`
+
+| Command | Host CC | Backend | Result |
+|---------|---------|---------|--------|
+| `./scripts/smoke_i386.sh` | gcc (`cc`) | gcc | **0 failures** |
+| `CCC_HOST_CC=tcc ./scripts/smoke_i386.sh` | TinyCC | TinyCC | **0 failures** |
+| `./scripts/smoke_arm32.sh` | gcc (`cc`) | gcc | **0 failures** |
+| `CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh` | TinyCC | TinyCC | **0 failures** |
+
 ## i386 (supported)
 
 Requires Docker with `linux/386` (QEMU on Apple Silicon is fine; slower).
@@ -17,6 +46,7 @@ Requires Docker with `linux/386` (QEMU on Apple Silicon is fine; slower).
 ```bash
 # One shot (builds image, runs harness)
 ./scripts/smoke_i386.sh
+CCC_HOST_CC=tcc ./scripts/smoke_i386.sh   # self-build ccc + suite backend=tcc
 ```
 
 `smoke_i386.sh` mounts the repo at `/src` **read-only** and syncs it into an
@@ -79,6 +109,7 @@ RO `/src` + `/work` entrypoint pattern:
 
 ```bash
 ./scripts/smoke_arm32.sh
+CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh   # self-build ccc + suite backend=tcc
 ```
 
 - Dockerfile: `scripts/docker/Dockerfile.arm32` (`arm32v7/debian:bookworm`)
@@ -98,5 +129,6 @@ docker build --platform linux/arm/v7 -f scripts/docker/Dockerfile.arm32 -t ccc-a
 docker run --rm --platform linux/arm/v7 \
   -v "$PWD":/src:ro -v /work \
   -e CCC_ILP32_ARCH=arm \
+  -e CCC_HOST_CC=cc \
   ccc-arm32 /src/scripts/docker/ilp32_entrypoint.sh
 ```

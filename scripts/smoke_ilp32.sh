@@ -10,6 +10,9 @@
 #   CCC_ILP32_ARCH   i386 | arm
 #   CCC_HOST_CC      Host C compiler for building ccc (default: cc).
 #                    `tcc` self-builds ccc with TinyCC.
+#   CCC_BACKEND_CC   Host C compiler for `ccc build` / `ccc run` (default:
+#                    matches CCC_HOST_CC when that is `tcc`, else system `cc`).
+#                    Set to `tcc` to force the in-tree TinyCC backend.
 #   BUILD            debug|release (default: debug)
 #   CCC_ILP32_JOBS   parallel make jobs (default: nproc or 4)
 #
@@ -30,6 +33,22 @@ fail()  { printf '  FAIL %s\n' "$*"; }
 die() {
   printf 'smoke_ilp32: %s\n' "$*" >&2
   exit 1
+}
+
+# Resolve suite/link backend. `tcc` always means the just-built in-tree binary.
+resolve_backend_cc() {
+  local want="${1:-}"
+  case "$(basename "$want")" in
+    tcc)
+      printf '%s\n' "$ROOT_DIR/third_party/tcc/tcc"
+      ;;
+    "")
+      printf '%s\n' "cc"
+      ;;
+    *)
+      printf '%s\n' "$want"
+      ;;
+  esac
 }
 
 case "$ARCH" in
@@ -61,6 +80,24 @@ step "ILP32 host ($ARCH, $machine)"
 # Cold make from wiped out/ — catches bootstrap ODR (GNU ld) and bad
 # snapshot includes. Same path as: rm -rf out && make && ccc hello.
 ./scripts/build_ilp32_toolchain.sh
+
+# Match suite backend to host-CC when self-building with TinyCC, unless the
+# caller overrides via CCC_BACKEND_CC (or an already-exported CC).
+backend_want="${CCC_BACKEND_CC:-}"
+if [ -z "$backend_want" ]; then
+  case "$(basename "${CCC_HOST_CC:-cc}")" in
+    tcc) backend_want=tcc ;;
+  esac
+fi
+if [ -n "$backend_want" ]; then
+  export CC="$(resolve_backend_cc "$backend_want")"
+elif [ -z "${CC:-}" ]; then
+  export CC=cc
+fi
+[ -x "$CC" ] || command -v "$CC" >/dev/null 2>&1 \
+  || die "backend CC not executable: $CC"
+step "ccc host backend CC=$CC"
+ok "backend $(basename "$CC")"
 
 failures=0
 

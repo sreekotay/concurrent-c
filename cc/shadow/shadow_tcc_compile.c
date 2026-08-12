@@ -104,7 +104,8 @@ int shadow_tcc_compile_exe(const char* c_src, const char* out_exe,
     }
 
     tcc_add_library_path(s, runtime_lib_dir);
-    tcc_set_options(s, "-std=c11");
+    /* -Uarm/-Uarm_elf: TCC ARM target macros vs ordinary identifiers. */
+    tcc_set_options(s, "-std=c11 -Uarm -Uarm_elf");
 
     if (tcc_set_output_type(s, TCC_OUTPUT_EXE) < 0) {
         fprintf(stderr, "shadow_tcc: set_output_type EXE failed\n");

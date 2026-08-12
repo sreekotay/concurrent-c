@@ -304,6 +304,9 @@ static int cc__hp_probe(const char* cc_bin,
             need_B = 1;
         }
     }
+    /* TCC ARM target macros `arm` / `arm_elf` vs ordinary identifiers. */
+    if (out->is_tcc)
+        strncat(flags, CC_TCC_ARCH_ID_UNDEF, sizeof(flags) - strlen(flags) - 1);
 
     /* Re-validate with discovered flags. */
     if (cc__hp_try_compile(cc_bin, flags, src_basic, obj) != 0) {

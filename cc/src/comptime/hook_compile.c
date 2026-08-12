@@ -605,6 +605,8 @@ static int cc__build_compile_argv(CCArgvBuilder* argv,
         } else if (cc__hc_is_tcc(cc_bin)) {
             /* Legacy fallback if profile probe fails. */
             if (cc__argv_push(argv, CC_HOST_C_STD_OPTION) != 0) return -1;
+            if (cc__argv_push(argv, "-Uarm") != 0) return -1;
+            if (cc__argv_push(argv, "-Uarm_elf") != 0) return -1;
             if (cc__hc_tcc_lib_dir(cc_bin, repo_root, tcc_dir, sizeof(tcc_dir))) {
                 snprintf(tmp, sizeof(tmp), "-B%s", tcc_dir);
                 if (cc__argv_push(argv, tmp) != 0) return -1;

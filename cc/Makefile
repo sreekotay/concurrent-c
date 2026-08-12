@@ -89,6 +89,8 @@ ifeq ($(CC_IS_TCC),1)
   CFLAGS += -std=c11 -D_Thread_local= -D__thread=
   # liblfds has no TCC port (needs GCC __atomic_* / OS PAL).
   CFLAGS += -DCC_NO_LIBLFDS
+  # TCC ARM predefines bare `arm` / `arm_elf` (arm-gen.c); collide with ids.
+  CFLAGS += -Uarm -Uarm_elf
   ifneq ($(TCC_INC_ABS),)
     CFLAGS += -B$(TCC_INC_ABS)
   else

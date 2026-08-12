@@ -885,7 +885,7 @@ static TCCState* cc__exec_new_state(CCExecErrSink* sink, char* err_buf, size_t e
     }
     tcc_set_error_func(s, sink, cc__exec_err_capture);
     /* Parse at the version the real compile will use; see the constant. */
-    tcc_set_options(s, CC_HOST_C_STD_OPTION);
+    tcc_set_options(s, CC_TCC_HOST_OPTIONS);
     {
         char dirbuf[1024];
         const char* libdir = cc__exec_lib_dir(dirbuf, sizeof(dirbuf));

@@ -57,9 +57,11 @@ Run these when you changed the **build graph**, **bootstrap seed**, or before pu
 |------|---------|------|
 | Wipe local `out/` and rebuild from `last-good` | `./scripts/smoke_bootstrap_fresh.sh` | after seed promote, or “does cold make still work?” |
 | Clean Linux i386 (Docker) | `./scripts/smoke_i386.sh` | before pushing a new `last-good`; catches GNU ld / Darwin-only seeds |
-| Same, host-cc = TinyCC | `CCC_HOST_CC=tcc ./scripts/smoke_i386.sh` | Linux only |
+| Same, host+backend = TinyCC | `CCC_HOST_CC=tcc ./scripts/smoke_i386.sh` | Linux / Docker ILP32 |
+| Clean Linux ARM32 (Docker) | `./scripts/smoke_arm32.sh` | same gate on `linux/arm/v7` (gnueabihf) |
+| Same, host+backend = TinyCC | `CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh` | Linux / Docker ILP32 |
 
-`smoke_i386.sh` mounts the repo **read-only** and builds in `/work` — it does not replace your host `out/`.
+`smoke_i386.sh` / `smoke_arm32.sh` mount the repo **read-only** and build in `/work` — they do not replace your host `out/`. Env and latest receipt: [ilp32-docker.md](ilp32-docker.md).
 
 ## Quick “which binary?”
 

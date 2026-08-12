@@ -226,7 +226,7 @@ static void cc__append_host_cc_flags(char* cmd, size_t cmd_cap, const char* cc_b
         char dir[PATH_MAX];
         const char* libdir;
         if (!cc__is_tcc(cc_bin)) return;
-        strncat(cmd, " " CC_HOST_C_STD_OPTION, cmd_cap - strlen(cmd) - 1);
+        strncat(cmd, " " CC_TCC_HOST_OPTIONS, cmd_cap - strlen(cmd) - 1);
         libdir = cc__tcc_lib_dir(cc_bin, dir, sizeof(dir));
         if (libdir) {
             char flag[PATH_MAX + 4];

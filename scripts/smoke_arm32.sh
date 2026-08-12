@@ -3,6 +3,7 @@
 #
 # From a macOS/Linux host with Docker:
 #   ./scripts/smoke_arm32.sh
+#   CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh   # self-build ccc with TinyCC
 #
 # Mounts the repo read-only and builds in an anonymous /work volume so host
 # cc/out/tcc artifacts are not replaced with arm32 objects.
@@ -44,4 +45,6 @@ exec docker run --rm --platform "$PLATFORM" \
   -e CCC_ILP32_SRC=/src \
   -e CCC_ILP32_WORK=/work \
   -e BUILD="${BUILD:-debug}" \
+  -e CCC_HOST_CC="${CCC_HOST_CC:-cc}" \
+  -e CCC_BACKEND_CC="${CCC_BACKEND_CC:-}" \
   "$IMAGE" /src/scripts/docker/ilp32_entrypoint.sh
