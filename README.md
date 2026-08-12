@@ -39,12 +39,14 @@ Fuller example (error policy + compose): [examples/hello.ccs](examples/hello.ccs
 ### Docs
 
 - [Getting Started](docs/getting-started.md) — install, first program, concurrency
-- [Backwards compatibility](docs/backwards_compatibility.md) — unit headers, version pins, bootstrap seeds
 - [Language Concepts](docs/language-concepts.md) — defer, results, UFCS, slices/arenas (arena = lifetime; alloc = policy), closures
 - [Cheatsheet](docs/cheatsheet.md)
+- [Language spec](spec/concurrent-c-spec-complete.md)
+- [Stdlib](spec/concurrent-c-stdlib-spec.md)
 - [Sanitizers / fuzzing](docs/sanitizers.md) — ASan/TSan receipts (runtime, real_projects, bridge)
 - [Performance](perf/) — benches, [interop baselines](perf/baselines/), [compiler baseline](perf/compiler_baseline.txt), Neckbeard gauntlets
-- [Docs index](docs/README.md) · [Language spec](spec/concurrent-c-spec-complete.md) · [Stdlib](spec/concurrent-c-stdlib-spec.md)
+- [Backwards compatibility](docs/backwards_compatibility.md) — unit headers, version pins, bootstrap seeds
+- [Docs index](docs/README.md) 
 
 ### Python & JavaScript interop
 
