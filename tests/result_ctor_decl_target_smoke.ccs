@@ -58,10 +58,10 @@ static int !>(CCError) mixed_ctor_targets(void) {
     if (!ok_local.value()) return cc_err(CC_ERR_INVALID_ARG, "ok_local value");
 
     /* (a) decl initializer via the cc_err(KIND, MSG) shorthand */
-    CCResult_bool_CCError err_local = cc_err(CC_ERR_TIMEOUT, "expected timeout");
-    if (err_local.is_ok()) return cc_err(CC_ERR_INVALID_ARG, "err_local is_ok");
-    if (err_local.error().kind != CC_ERR_TIMEOUT)
-        return cc_err(CC_ERR_INVALID_ARG, "err_local kind");
+    CCResult_bool_CCError err_res = cc_err(CC_ERR_TIMEOUT, "expected timeout");
+    if (err_res.is_ok()) return cc_err(CC_ERR_INVALID_ARG, "err_res is_ok");
+    if (err_res.error().kind != CC_ERR_TIMEOUT)
+        return cc_err(CC_ERR_INVALID_ARG, "err_res kind");
 
     /* (b) reassignment of the locals through the short forms */
     ok_local = cc_err(CC_ERR_NOT_FOUND, "reassigned to err");
@@ -69,9 +69,9 @@ static int !>(CCError) mixed_ctor_targets(void) {
     if (ok_local.error().kind != CC_ERR_NOT_FOUND)
         return cc_err(CC_ERR_INVALID_ARG, "reassign err kind");
 
-    err_local = cc_ok(false);
-    if (err_local.is_err()) return cc_err(CC_ERR_INVALID_ARG, "reassign ok is_err");
-    if (err_local.value()) return cc_err(CC_ERR_INVALID_ARG, "reassign ok value");
+    err_res = cc_ok(false);
+    if (err_res.is_err()) return cc_err(CC_ERR_INVALID_ARG, "reassign ok is_err");
+    if (err_res.value()) return cc_err(CC_ERR_INVALID_ARG, "reassign ok value");
 
     /* (c) return short form keeps the function's own result type */
     return cc_ok(41);

@@ -8,7 +8,7 @@ re-lowering that `.ccs`.
 | Path | Role | Git |
 |------|------|-----|
 | `latest/` | Scratch emit from the current tree | Ignored |
-| `MAJOR.MINOR.PATCH-N/` | Promoted snapshot (e.g. `0.3.2-122`) | Committed when you choose |
+| `MAJOR.MINOR.PATCH-N/` | Promoted snapshot (e.g. `0.3.2-123`) | Committed when you choose |
 | `last-good` | Pointer to the active pin folder | Committed |
 
 Keep `last-good` plus one or two prior pins for rollback. Older seeds are
