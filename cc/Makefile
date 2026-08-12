@@ -514,7 +514,9 @@ $(OBJDIR)/runtime/arena_state.o: $(OUT_RUNTIME)/.seed.stamp
 # Several of these TUs `#include <ccc/*.h>` (executor, preprocess,
 # emit_plan, …); without the seed prereq a cold `make -j` races
 # seed_headers and fails with `ccc/cc_arena.h: No such file` (macOS CI).
-$(LOWER_HEADERS1_OBJS): $(OUT_RUNTIME)/.seed.stamp
+# shadow_comptime.o and the full lower_headers objs (e.g. grammar_cli.o)
+# hit the same include; they are not in LOWER_HEADERS1_OBJS.
+$(LOWER_HEADERS1_OBJS) $(LOWER_HEADERS_OBJS) $(SHADOW_COMPTIME_OBJ): $(OUT_RUNTIME)/.seed.stamp
 
 # Host ccc objects that `#include <ccc/*.h>` need the stamp first.
 # Stage-1 lower_headers objs must NOT (see seed dep above).
