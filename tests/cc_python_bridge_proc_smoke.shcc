@@ -1,11 +1,11 @@
 /* Isolated domains: a full CPython child per domain over the mirrored
  * cc-node wire — numpy in every domain (no subinterpreter refusal),
- * two pythons computing in parallel (relative timing), lazy zero-trip
- * attribute chains, async JS callbacks over the wire, per-domain venv
- * selection, crash isolation (child _exit rejects promises, parent
- * survives), handle hygiene, and articulate revocation.  Rungs live in
- * cc_python_bridge_proc.js; the child side is npm/cc-python/broker.py
- * (stdlib-only).  No addon build — this tier is pure wire. */
+ * two pythons computing in parallel via py.task (relative timing),
+ * default calls sync like in-process, async JS callbacks through
+ * py.task, per-domain venv selection, crash isolation (child _exit
+ * rejects in-flight task() calls, parent survives), handle hygiene,
+ * and articulate revocation.  Rungs live in cc_python_bridge_proc.js;
+ * the child side is npm/cc-python/broker.py (stdlib-only). */
 CCArena a = cc_arena_heap(megabytes(1)) @destroy;
 
 {

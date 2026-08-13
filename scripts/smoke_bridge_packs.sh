@@ -96,8 +96,8 @@ host_smoke() {
   const py = ccpy.create();
   if (py.import("math").sqrt(16) !== 4) throw new Error("inproc call");
   const iso = ccpy.create({ isolated: true });
-  const math = await iso.import("math");
-  if ((await math.sqrt(9)) !== 3) throw new Error("isolated call");
+  const math = iso.import("math");
+  if (math.sqrt(9) !== 3) throw new Error("isolated call");
   await iso.destroy();
   py.destroy();
   console.log("host npm concurrent-c-python OK");
@@ -162,8 +162,8 @@ node --expose-gc - <<'JS'
   }
   if (!threw) throw new Error("python error did not cross");
   const iso = ccpy.create({ isolated: true });
-  const imath = await iso.import("math");
-  if ((await imath.sqrt(9)) !== 3) throw new Error("isolated");
+  const imath = iso.import("math");
+  if (imath.sqrt(9) !== 3) throw new Error("isolated");
   await iso.destroy();
   py.destroy();
   let closed = false;

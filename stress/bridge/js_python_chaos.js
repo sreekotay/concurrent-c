@@ -73,11 +73,11 @@ async function hasNumpyIsolated() {
 async function makeIsolatedWorker() {
   const py = ccpy.create({ isolated: true });
   const b = py.import('builtins');
-  const work = await b.eval(
+  const work = b.eval(
       'lambda n: (lambda np: float(np.dot(np.random.rand(n), np.random.rand(n))))' +
       '(__import__("numpy"))');
-  const boom = await b.eval('lambda: (__import__("os")._exit(7))');
-  return { py, work, boom };
+  const boom = b.eval('lambda: (__import__("os")._exit(7))');
+  return { py, work: py.task(work), boom: py.task(boom) };
 }
 
 /* ---- 0. Wire integrity: user stdout cannot forge protocol replies ------- */
@@ -98,7 +98,7 @@ async function wireIntegrity() {
   const v2 = await forge2();
   // Pipelined calls after the noise still pair correctly.
   const sq = await b.eval('lambda x: x * x');
-  const after = await Promise.all([sq(2), sq(3), sq(4)]);
+  const after = await Promise.all([py.task(sq)(2), py.task(sq)(3), py.task(sq)(4)]);
   await py.destroy();
   ok('wire_integrity_plain', v1 === 41);
   ok('wire_integrity_forged_id', v2 === 42);
@@ -167,8 +167,8 @@ async function domainFanout(numpyOk) {
     else {
       const py = ccpy.create({ isolated: true });
       const b = py.import('builtins');
-      const work = await b.eval('lambda x: x * x + 1');
-      domains.push({ py, work });
+      const work = b.eval('lambda x: x * x + 1');
+      domains.push({ py, work: py.task(work) });
     }
   }
   // Fan-in: every domain answers at once.
@@ -206,7 +206,8 @@ async function shmHail(numpyOk) {
   }
   const t0 = hr();
   for (let r = 0; r < ROUNDS; r++) {
-    const sums = await Promise.all(domains.map((d, i) => d.np.sum(bufs[i])));
+    const sums = await Promise.all(domains.map((d, i) =>
+      d.py.task(d.np.sum)(bufs[i])));
     for (let i = 0; i < DOMS; i++) {
       let want = 0;
       for (const v of bufs[i]) want += v;
@@ -218,7 +219,7 @@ async function shmHail(numpyOk) {
     }
   }
   // Pull a big result back through shm too.
-  const echoed = await (await domains[0].np.arange(ELEMS)).toTypedArray();
+  const echoed = domains[0].np.arange(ELEMS).toTypedArray();
   ok('shm_hail_result', echoed.length === ELEMS);
   await Promise.all(domains.map((d) => d.py.destroy()));
   const strays = straySpills();
@@ -482,7 +483,7 @@ async function isolatedPipelineCbs() {
   const jobs2 = [];
   for (let i = 0; i < N; i++) {
     jobs2.push((async () => {
-      const f = await apply(async (n) => {
+      const f = await py.task(apply)(async (n) => {
         await sleep(1);
         return (x) => x + n;
       }, i);
@@ -494,7 +495,7 @@ async function isolatedPipelineCbs() {
   let throws = 0;
   const jobs3 = [];
   for (let i = 0; i < N; i++) {
-    jobs3.push(apply((x) => {
+    jobs3.push(py.task(apply)((x) => {
       if (x % 2 === 0) throw new Error('pipe-hail-' + x);
       return x * 3;
     }, i).then(
@@ -668,7 +669,7 @@ async function parkingShm() {
   for (let i = 0; i < N; i++) {
     const buf = new Float64Array(ELEMS);
     buf.fill(2);
-    jobs.push(apply(async (a) => {
+    jobs.push(py.task(apply)(async (a) => {
       await sleep(1);
       return a;
     }, buf));
@@ -839,7 +840,7 @@ async function destroyDuringThenable() {
     const b = py.import('builtins');
     const sleeper = await b.eval(
       'lambda n: (__import__("time").sleep(n), 99)[1]');
-    const p = sleeper(delay / 1000);
+    const p = py.task(sleeper)(delay / 1000);
     await sleep(15);
     await py.destroy();
     try {
@@ -1231,7 +1232,7 @@ async function promiseAllDestroy() {
       'lambda n: (__import__("time").sleep(n), int(n * 1000))[1]');
     domains.push({ py, work });
   }
-  const jobs = domains.map((d) => d.work(delay));
+  const jobs = domains.map((d) => d.py.task(d.work)(delay));
   await sleep(10);
   const doomed = [];
   for (let i = 1; i < N; i += 2) doomed.push(i);
@@ -1291,7 +1292,7 @@ async function killMidSpill() {
       'lambda a: (__import__("time").sleep(0.15), len(a))[1]');
     const buf = new Float64Array((1 << 16) / 8 + 4096);
     buf.fill(1);
-    const p = slow(buf);
+    const p = py.task(slow)(buf);
     await sleep(20);
     try { process.kill(pid, 'SIGKILL'); } catch (_) {}
     try {
@@ -1333,8 +1334,8 @@ async function sharedBufKillSibling() {
       'lambda a: (__import__("time").sleep(0.15), len(a))[1]');
     const slowB = await bB.eval(
       'lambda a: (__import__("time").sleep(0.12), len(a))[1]');
-    const pA = slowA(buf);
-    const pB = slowB(buf);
+    const pA = A.task(slowA)(buf);
+    const pB = B.task(slowB)(buf);
     await sleep(25);
     try { process.kill(pidA, 'SIGKILL'); } catch (_) {}
     try { await pA; } catch (e) {
@@ -1373,7 +1374,7 @@ async function killRespawnLoop() {
     const pid = await pidFn();
     const slow = await b.eval(
       'lambda: (__import__("time").sleep(0.2), 1)[1]');
-    const p = slow();
+    const p = py.task(slow)();
     await sleep(15);
     try { process.kill(pid, 'SIGKILL'); } catch (_) {}
     try { await p; } catch (e) {

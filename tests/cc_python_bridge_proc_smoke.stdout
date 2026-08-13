@@ -6,7 +6,7 @@ empty_dict_exec_ns true
 isolated_destroy_from_cb true
 destroy_during_thenable true
 numpy_in_child true
-small_array_inlines true
+small_array_is_handle true
 big_array_is_handle true
 handle_chains true
 shm_arg_integrity true

@@ -62,8 +62,7 @@ neg_iso_bigint_roundtrip true
 neg_iso_u64_bigint true
 neg_iso_tojs_set_path true
 neg_iso_tojs_ok true
-neg_iso_lazy_import_fail true
-neg_iso_pass_unresolved true
+neg_iso_import_fail true
 neg_iso_promise_arg true
 neg_iso_empty_dict_handle true
 neg_iso_exec_namespace true

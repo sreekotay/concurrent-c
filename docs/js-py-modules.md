@@ -383,7 +383,9 @@ attrs throw) and buffer args as real TypedArrays (lease→callback copies).
 | JS ∥ numpy overlap (balanced) | 1.81× |
 | numpy ∥ numpy, one interpreter, BLAS pinned | 1.60–2.02× |
 
-**`concurrent-c-python`, isolated domains** (full CPython per child):
+**`concurrent-c-python`, isolated domains** (full CPython per child).
+Default calls block the JS thread (same convention as in-process);
+`py.task` overlaps children and keeps the event loop live.
 
 | crossing | cost |
 |---|---|

@@ -18,10 +18,10 @@ async function makeDomain() {
   const py = ccpy.create({ isolated: true });
   const b = py.import('builtins');
   // One callable, held in the child: rounds of sort+dot on its own data.
-  const work = await b.eval(
+  const work = b.eval(
       'lambda r, n: (lambda np: [float(np.dot(np.sort(np.random.rand(n)), ' +
       'np.random.rand(n))) for _ in range(r)][-1])(__import__("numpy"))');
-  return { py, work };
+  return { py, work: py.task(work) };
 }
 
 (async () => {
@@ -33,11 +33,11 @@ async function makeDomain() {
   // Wire round trip: the smallest possible call, timed.
   {
     const b = one.py.import('builtins');
-    const idf = await b.eval('lambda x: x');
-    await idf(1);
+    const idf = b.eval('lambda x: x');
+    idf(1);
     const iters = 200;
     const t1 = process.hrtime.bigint();
-    for (let i = 0; i < iters; i++) await idf(i);
+    for (let i = 0; i < iters; i++) idf(i);
     const ns = Number(process.hrtime.bigint() - t1);
     console.log('RESULT wire_rtt_us %d', Math.round(ns / iters / 1000));
   }
@@ -47,9 +47,9 @@ async function makeDomain() {
   {
     const np1 = one.py.import('numpy');
     const big = new Float64Array(1 << 20).map((_, i) => i % 97);
-    await np1.sum(big);
+    np1.sum(big);
     const t1 = process.hrtime.bigint();
-    for (let i = 0; i < 10; i++) await np1.sum(big);
+    for (let i = 0; i < 10; i++) np1.sum(big);
     const ms = Number(process.hrtime.bigint() - t1) / 10 / 1e6;
     console.log('RESULT bulk_8mb_arg_ms %s', ms.toFixed(1));
   }

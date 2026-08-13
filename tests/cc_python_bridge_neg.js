@@ -363,70 +363,64 @@ async function raisesAsync(fn, re) {
   {
     const py = ccpy.create({ isolated: true });
     const b = py.import('builtins');
-    const id = await b.eval('lambda x: x');
+    const id = b.eval('lambda x: x');
 
     out('neg_iso_dollar_key',
-        await raisesAsync(() => id({ $x: 1 }), /reserved/));
+        raisesSync(() => id({ $x: 1 }), /reserved/));
     {
       const huge = 10n ** 40n;
-      out('neg_iso_bigint_roundtrip', (await id(huge)) === huge);
-      const u64 = await (b.eval('(1 << 64) - 1'));
+      out('neg_iso_bigint_roundtrip', id(huge) === huge);
+      const u64 = b.eval('(1 << 64) - 1');
       out('neg_iso_u64_bigint',
           typeof u64 === 'bigint' && u64 === (1n << 64n) - 1n);
     }
     {
       /* Non-plain values stay handles (set inside) so toJS is available. */
-      const d = await b.eval('{"tags": {1, 2}, "x": float("nan")}');
+      const d = b.eval('{"tags": {1, 2}, "x": float("nan")}');
       out('neg_iso_tojs_set_path',
-          await raisesAsync(() => d.toJS(),
+          raisesSync(() => d.toJS(),
                             /cannot materialize set at \$\.tags/));
-      /* Nested int-key dict keeps a handle; plain scalar dicts cross by value. */
-      const ok = await b.eval('{"a": 1, "b": [2, 3], "c": {4: 5}}');
-      const js = await ok.toJS();
-      const js2 = await ok.toJSON();
+      const ok = b.eval('{"a": 1, "b": [2, 3], "c": {4: 5}}');
+      const js = ok.toJS();
+      const js2 = ok.toJSON();
       out('neg_iso_tojs_ok',
           js.a === 1 && Array.isArray(js.b) && js.b[1] === 3 &&
           js.c && js.c['4'] === 5 &&
           JSON.stringify(js) === JSON.stringify(js2));
     }
-    // Lazy import fail surfaces on first use.
-    const missing = py.import('definitely_not_a_pkg_neg_xyz');
-    out('neg_iso_lazy_import_fail',
-        await raisesAsync(() => missing.foo(), /ModuleNotFoundError|No module/));
+    // Missing import fails at import (same as in-process).
+    out('neg_iso_import_fail',
+        raisesSync(() => py.import('definitely_not_a_pkg_neg_xyz'),
+                   /ModuleNotFoundError|No module/));
 
-    // Pass unresolved module root as an argument.
-    const pending = py.import('math');
-    out('neg_iso_pass_unresolved',
-        await raisesAsync(() => id(pending), /has not landed yet|await any use/));
-
-    // Unawaited call result is a Promise — say so, not "unsupported".
+    // Unawaited task result is a Promise — say so, not "unsupported".
     out('neg_iso_promise_arg',
-        await raisesAsync(() => id(b.dict()), /got a Promise|await isolated/));
+        raisesSync(() => id(py.task(b.dict)()), /got a Promise|py\.task/));
 
     // Empty dict stays a live handle (exec namespace), not JS {}.
     {
-      const ns = await b.dict();
+      const ns = b.dict();
       out('neg_iso_empty_dict_handle', typeof ns === 'function');
-      await b.exec('def add1(x):\n  return x + 1\n', ns);
-      const add1 = await ns.get('add1');
-      out('neg_iso_exec_namespace', (await add1(40)) === 41);
+      b.exec('def add1(x):\n  return x + 1\n', ns);
+      const add1 = ns.get('add1');
+      out('neg_iso_exec_namespace', add1(40) === 41);
     }
 
     // Foreign handle as call argument — must not silently re-home.
     const other = ccpy.create({ isolated: true });
-    const foreign = await (other.import('builtins')).eval('lambda x: x + 1');
+    const foreign = (other.import('builtins')).eval('lambda x: x + 1');
     out('neg_iso_foreign_arg',
-        await raisesAsync(() => id(foreign), /another bridge/));
+        raisesSync(() => id(foreign), /another bridge/));
     await other.destroy();
 
     // Sibling domain still works after abuse.
     await py.destroy();
     out('neg_iso_after_close',
-        await raisesAsync(() => id(1), /closed/));
+        raisesSync(() => id(1), /closed/));
 
     const ok = ccpy.create({ isolated: true });
-    const sum = await (ok.import('builtins')).eval('lambda a, b: a + b');
-    out('neg_iso_sibling_alive', (await sum(2, 3)) === 5);
+    const sum = (ok.import('builtins')).eval('lambda a, b: a + b');
+    out('neg_iso_sibling_alive', sum(2, 3) === 5);
     await ok.destroy();
   }
 

@@ -15,7 +15,6 @@
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
-const readline = require('readline');
 
 function locateAddon() {
   const plat = process.platform + '-' + process.arch;
@@ -512,10 +511,10 @@ class Bridge {
 
 /* ---- isolated domains: a FULL CPython per child process ------------- */
 
-// Cross-process is natively async (that was the point of building the
-// async surface first): attribute chains extend LAZILY with no round
-// trips, a call is a Promise, `await proxy` materializes an attribute
-// value, and revocation is a rejected promise — a child crash included.
+// Same calling convention as in-process: a default call blocks this
+// thread until the child answers; py.task(fn) is the Promise door.
+// Isolated is crash isolation and a different Python, not a different
+// await discipline. A child crash still rejects in-flight task() calls.
 
 const RHANDLE = Symbol('cc-python-remote');
 const TA_KIND = new Map([
@@ -588,57 +587,63 @@ function rwrap(bridge, h, chain) {
   const target = function () {};
   target[RHANDLE] = { h, chain, bridge };
   const inspectCustom = Symbol.for('nodejs.util.inspect.custom');
-  target[inspectCustom] = () =>
-    '[cc-python remote ' + h +
-    (chain.length ? '.' + chain.join('.') : '') + ']';
-  const callp = (path, args) => bridge
-    ._req(Object.assign({ op: 'callp', h, path },
-                        bridge._callPayload(args || [])))
-    .then((r) => bridge._materialize(r), (e) => { throw attachPyType(e); });
+  const attrCache = new Map();
+  let cacheGen = bridge._attrCacheGen || 0;
+
+  function materializeReply(r) {
+    try { return bridge._materialize(r); }
+    catch (e) { throw attachPyType(e); }
+  }
+  function callp(path, args) {
+    try {
+      return materializeReply(bridge._reqSync(Object.assign(
+          { op: 'callp', h, path }, bridge._callPayload(args || []))));
+    } catch (e) { throw attachPyType(e); }
+  }
+  function getp(path) {
+    try {
+      return materializeReply(bridge._reqSync({ op: 'getp', h, path }));
+    } catch (e) { throw attachPyType(e); }
+  }
+  const strOf = () => {
+    try {
+      return bridge._reqSync({ op: 'str', h, path: chain }).v;
+    } catch (e) { throw attachPyType(e); }
+  };
+  target[inspectCustom] = strOf;
+
   const proxy = new Proxy(target, {
     get(t, prop) {
       if (prop === RHANDLE) return t[RHANDLE];
-      if (prop === 'then') {
-        // `await proxy` materializes the attribute value.
-        if (chain.length === 0) return undefined; // module roots stay put
-        return (resolve, reject) =>
-          bridge._req({ op: 'getp', h, path: chain })
-            .then((r) => resolve(bridge._materialize(r)),
-                  (e) => reject(attachPyType(e)));
-      }
-      if (prop === 'str') {
-        return () => bridge._req({ op: 'str', h, path: chain })
-          .then((r) => r.v, (e) => { throw attachPyType(e); });
-      }
+      if (prop === 'then') return undefined;
+      if (prop === 'str') return strOf;
       if (prop === 'toTypedArray') {
-        // Materialize a buffer-shaped value: small inline, big through
-        // the shm spill — one memcpy per side either way.
-        return () => bridge._req({ op: 'ta', h, path: chain })
-          .then((r) => bridge._materialize(r),
-                (e) => { throw attachPyType(e); });
+        return () => {
+          try {
+            return materializeReply(
+                bridge._reqSync({ op: 'ta', h, path: chain }));
+          } catch (e) { throw attachPyType(e); }
+        };
       }
-      if (prop === Symbol.toPrimitive || prop === 'toString')
-        return () => '[cc-python remote ' + h +
-                     (chain.length ? '.' + chain.join('.') : '') + ']';
+      if (prop === Symbol.toPrimitive || prop === 'toString' ||
+          prop === inspectCustom)
+        return strOf;
       if (prop === 'toJS' || prop === 'toJSON') {
-        return () => bridge._req({ op: 'tojs', h, path: chain })
-          .then((r) => {
+        return () => {
+          try {
+            const r = bridge._reqSync({ op: 'tojs', h, path: chain });
             if (r && r.v !== undefined) return bridge._decode(r.v);
             return bridge._materialize(r);
-          }, (e) => { throw attachPyType(e); });
+          } catch (e) { throw attachPyType(e); }
+        };
       }
-      if (prop === inspectCustom) {
-        return () => bridge._req({ op: 'str', h, path: chain })
-          .then((r) => r.v, (e) => { throw attachPyType(e); });
-      }
-      if (prop === Symbol.asyncIterator) {
-        return async function () {
-          const it = await callp(chain.concat('__iter__'), []);
+      if (prop === Symbol.iterator) {
+        return function () {
+          const it = callp(chain.concat('__iter__'), []);
           return {
-            async next() {
+            next() {
               try {
-                const value = await it.__next__();
-                return { value, done: false };
+                return { value: it.__next__(), done: false };
               } catch (e) {
                 attachPyType(e);
                 if (/StopIteration/i.test(String(e && e.message)))
@@ -646,25 +651,37 @@ function rwrap(bridge, h, chain) {
                 throw e;
               }
             },
-            [Symbol.asyncIterator]() { return this; },
+            [Symbol.iterator]() { return this; },
           };
         };
       }
       if (typeof prop !== 'string') return undefined;
-      return rwrap(bridge, h, chain.concat(prop)); // no round trip
+      if ((bridge._attrCacheGen || 0) !== cacheGen) {
+        attrCache.clear();
+        cacheGen = bridge._attrCacheGen || 0;
+      }
+      if (attrCache.has(prop)) return attrCache.get(prop);
+      const v = getp(chain.concat(prop));
+      if (v != null && v[RHANDLE] &&
+          (typeof v === 'object' || typeof v === 'function'))
+        attrCache.set(prop, v);
+      return v;
     },
     set(t, prop, value) {
       if (typeof prop !== 'string') return false;
-      /* Isolated set is async on the wire; return true and surface failure
-       * as an unhandled rejection if the setattr/setitem fails. */
-      const path = chain.concat('__setattr__');
-      callp(path, [prop, value]).catch((e) => {
-        /* Fallback: mapping key assignment. */
-        callp(chain.concat('__setitem__'), [prop, value]).catch((e2) => {
-          setImmediate(() => { throw attachPyType(e); });
-        });
-      });
-      return true;
+      try {
+        callp(chain.concat('__setattr__'), [prop, value]);
+        attrCache.delete(prop);
+        return true;
+      } catch (e) {
+        try {
+          callp(chain.concat('__setitem__'), [prop, value]);
+          attrCache.delete(prop);
+          return true;
+        } catch (e2) {
+          throw attachPyType(e);
+        }
+      }
     },
     apply(t, thisArg, args) {
       return callp(chain, args);
@@ -694,6 +711,8 @@ class ProcBridge {
     this._trackShm = true;
     this._shmDir = fs.mkdtempSync(
         path.join(SHM_BASE, 'ccpy-' + process.pid + '-'));
+    this._syncDepth = 0;
+    this._repBuf = Buffer.alloc(0);
     // The wire lives on fds 3 (requests) / 4 (replies); stdio is
     // inherited, so user print() reaches the real stdout and can never
     // collide with a protocol reply.
@@ -717,9 +736,11 @@ class ProcBridge {
       this._child.stdio[3].on('error', wireDie('req'));
     if (this._child.stdio[4])
       this._child.stdio[4].on('error', wireDie('rep'));
-    const rl = readline.createInterface({ input: this._child.stdio[4] });
-    rl.on('line', (line) => this._online(line));
-    rl.on('error', wireDie('rep'));
+    const rep = this._child.stdio[4];
+    this._repFd = (rep && rep._handle && typeof rep._handle.fd === 'number')
+      ? rep._handle.fd : -1;
+    rep.on('data', (chunk) => this._pushChunk(chunk));
+    rep.on('error', wireDie('rep'));
   }
 
   _die(why) {
@@ -738,6 +759,49 @@ class ProcBridge {
     catch (e) { /* already swept */ }
   }
 
+  _pushChunk(chunk) {
+    this._repBuf = Buffer.concat([this._repBuf, Buffer.from(chunk)]);
+    for (;;) {
+      const nl = this._repBuf.indexOf(10);
+      if (nl < 0) break;
+      const line = this._repBuf.subarray(0, nl).toString('utf8');
+      this._repBuf = Buffer.from(this._repBuf.subarray(nl + 1));
+      this._online(line);
+    }
+  }
+
+  _pumpSyncUntil(pred) {
+    const stream = this._child && this._child.stdio[4];
+    if (!stream)
+      throw new Error('concurrent-c-python: bridge is closed');
+    this._syncDepth++;
+    if (this._syncDepth === 1 && typeof stream.pause === 'function')
+      stream.pause();
+    try {
+      while (!pred()) {
+        let buf;
+        while (typeof stream.read === 'function' &&
+               (buf = stream.read()) !== null)
+          this._pushChunk(buf);
+        if (pred()) break;
+        if (this._dead) break;
+        const fd = this._repFd;
+        if (typeof fd !== 'number' || fd < 0)
+          throw new Error('concurrent-c-python: isolated reply fd is missing');
+        try {
+          this._pushChunk(native.read_pipe_sync(fd));
+        } catch (e) {
+          this._die('bridge is closed (the python child exited)');
+          break;
+        }
+      }
+    } finally {
+      this._syncDepth--;
+      if (this._syncDepth === 0 && typeof stream.resume === 'function')
+        stream.resume();
+    }
+  }
+
   _online(line) {
     // The reply fd is the broker's alone — nothing else can write here,
     // so an unparseable line is a wire bug, not user output.
@@ -745,26 +809,46 @@ class ProcBridge {
     try { obj = JSON.parse(line); }
     catch (e) { return this._die('protocol violation (unparseable reply)'); }
     if (obj && obj.cb) {
-      // A callback request from the child, arriving mid-call: run the JS
-      // function (awaiting whatever it awaits) and reply on its line.
-      // destroy() from inside the cb defers stdin teardown until cbr
-      // is sent — otherwise the broker hangs on its sync read.
+      // A callback request from the child, arriving mid-call. Sync
+      // default calls run the JS function on this thread (thenables
+      // refuse — use py.task). task() keeps the Promise path so async
+      // callbacks can await. destroy() from inside the cb defers stdin
+      // teardown until cbr is sent — otherwise the broker hangs on its
+      // sync read.
       const fn = this._cbs.get(obj.cbid);
+      const run = () => {
+        if (!fn) throw new Error('unknown callback ' + obj.cbid);
+        return fn(...(obj.args || []).map((a) => this._decode(a)));
+      };
+      const sendCbr = (r) => {
+        const prev = this._trackShm;
+        this._trackShm = false;
+        try { this._send({ cbr: this._encode(r) }); }
+        finally { this._trackShm = prev; }
+      };
+      const sendErr = (e) => this._send({ e: String(e && e.message || e) });
       this._cbInflight++;
+      if (this._syncDepth > 0) {
+        try {
+          const ret = run();
+          if (ret && typeof ret.then === 'function') {
+            throw new Error(
+              'concurrent-c-python: a synchronous bridge call cannot wait on a ' +
+              'Promise — call through py.task(fn) and the callback may return one');
+          }
+          sendCbr(ret);
+        } catch (e) {
+          sendErr(e);
+        } finally {
+          this._cbInflight--;
+          if (this._closePending && this._cbInflight === 0)
+            this._tearDownChild();
+        }
+        return;
+      }
       Promise.resolve()
-        .then(() => {
-          if (!fn) throw new Error('unknown callback ' + obj.cbid);
-          return fn(...(obj.args || []).map((a) => this._decode(a)));
-        })
-        .then((r) => {
-          // Child consumes cbr spills; do not stage them on _shmOut or a
-          // sibling _req settle may unlink before the broker reads.
-          const prev = this._trackShm;
-          this._trackShm = false;
-          try { this._send({ cbr: this._encode(r) }); }
-          finally { this._trackShm = prev; }
-        },
-              (e) => this._send({ e: String(e && e.message || e) }))
+        .then(run)
+        .then(sendCbr, sendErr)
         .finally(() => {
           this._cbInflight--;
           if (this._closePending && this._cbInflight === 0)
@@ -824,6 +908,36 @@ class ProcBridge {
     });
   }
 
+  _reqSync(obj) {
+    if (this._closed)
+      throw new Error('concurrent-c-python: bridge is closed');
+    const owned = this._shmOut.splice(0);
+    const sweep = () => {
+      for (const p of owned) {
+        try { fs.unlinkSync(p); } catch (e) { /* consumed */ }
+      }
+    };
+    let done = false, result, error;
+    obj.id = this._nextReq++;
+    this._pending.set(obj.id, {
+      settle: (r) => {
+        sweep();
+        done = true;
+        if (r && r.e !== undefined) {
+          try { rethrowImportHint(new Error(r.e), true); }
+          catch (e) { error = e; }
+        } else result = r;
+      },
+      reject: (e) => { sweep(); done = true; error = e; },
+    });
+    this._send(obj);
+    this._pumpSyncUntil(() => done || this._dead);
+    if (error) throw error;
+    if (!done)
+      throw new Error('concurrent-c-python: bridge is closed');
+    return result;
+  }
+
   // Split a JS argument list into wire args + keyword args.  kwargs(...)
   // is explicit and last — a trailing plain object stays a positional
   // dict, never silently reinterpreted.
@@ -872,12 +986,10 @@ class ProcBridge {
         if (r.bridge && r.bridge !== this)
           throw new Error('concurrent-c-python: handle belongs to another bridge');
         if (r.chain.length)
-          throw new Error('concurrent-c-python: pass the awaited value, not an ' +
-                          'attribute path');
+          throw new Error('concurrent-c-python: pass the handle, not an ' +
+                          'unresolved attribute path');
         if (r.h === null)
-          throw new Error('concurrent-c-python: this module has not landed yet — ' +
-                          'await any use of it before passing it as an ' +
-                          'argument');
+          throw new Error('concurrent-c-python: this module has not landed yet');
         return { $h: r.h };
       }
       const id = this._nextCb++;
@@ -898,13 +1010,13 @@ class ProcBridge {
       return { $ta: kind, b64: buf.toString('base64') };
     }
     if (Array.isArray(v)) return v.map((x) => this._encode(x));
-    // Unawaited isolated call results are Promises — say so before the
+    // Unawaited py.task() results are Promises — say so before the
     // generic "unsupported" line (the usual dict()/exec footgun).
     if (t === 'object' && v !== null && typeof v.then === 'function' &&
         !v[RHANDLE]) {
       throw new Error(
-          'concurrent-c-python: got a Promise — await isolated call results ' +
-          'before passing them as arguments (e.g. await builtins.dict())');
+          'concurrent-c-python: got a Promise — await py.task(...) results ' +
+          'before passing them as arguments');
     }
     if (t === 'object' && (v.constructor === Object || !v.constructor)) {
       const o = {};
@@ -919,9 +1031,7 @@ class ProcBridge {
     throw new Error(
         'concurrent-c-python: unsupported argument for an isolated domain ' +
         '(numbers, strings, booleans, typed arrays, plain objects/arrays, ' +
-        'functions, or this domain\'s handles — same-domain handles chain; ' +
-        'await call results, and keep exec namespaces as live handles via ' +
-        'await builtins.dict())');
+        'functions, or this domain\'s handles — same-domain handles chain)');
   }
 
   _decode(v) {
@@ -968,52 +1078,51 @@ class ProcBridge {
     return this._decode(r.v);
   }
 
-  // The surface, mirrored: import returns a proxy with NO round trip
-  // (the request pipelines under the first use), calls are Promises.
+  // import waits for the child (same as in-process). Attribute hops
+  // are eager getattr so np.linalg.norm is a real handle, not a path.
   import(name) {
     if (this._dead || this._closed)
       throw new Error('concurrent-c-python: bridge is closed');
-    const p = this._req({ op: 'import', name });
-    // The import's handle arrives with the first operation that needs
-    // it; a failed import surfaces there.  We pre-resolve eagerly so
-    // chains stay synchronous:
-    const bridge = this;
-    const target = function () {};
-    target[RHANDLE] = { h: null, chain: [], pending: p, bridge };
-    p.then((r) => { target[RHANDLE].h = r.h; }, () => {});
-    return new Proxy(target, {
-      get(t, prop) {
-        if (prop === RHANDLE) return t[RHANDLE];
-        if (prop === 'then') return undefined;
-        if (prop === 'str')
-          return () => p.then((r) =>
-            bridge._req({ op: 'str', h: r.h, path: [] }).then((x) => x.v));
-        if (typeof prop !== 'string') return undefined;
-        return rlazy(bridge, p, [prop]);
-      },
-      apply() {
-        throw new Error('concurrent-c-python: a module is not callable');
-      },
-    });
+    try {
+      const r = this._reqSync({ op: 'import', name });
+      return rwrap(this, r.h, []);
+    } catch (e) {
+      rethrowImportHint(e, true);
+    }
   }
   task(fn) {
-    // API uniformity with in-process domains: every isolated call is
-    // already a task-shaped Promise.
-    return (...args) => Promise.resolve(fn(...args));
+    const r = fn && fn[RHANDLE];
+    if (!r) {
+      throw new Error('concurrent-c-python: task wants a bridge callable');
+    }
+    const bridge = this;
+    return (...args) => {
+      try {
+        const payload = bridge._callPayload(args);
+        const call = (h) => bridge._req(Object.assign(
+            { op: 'callp', h, path: r.chain || [] }, payload))
+          .then((x) => bridge._materialize(x),
+                (e) => { throw attachPyType(e); });
+        if (r.h == null)
+          return Promise.reject(new Error(
+            'concurrent-c-python: this module has not landed yet'));
+        return call(r.h);
+      } catch (e) {
+        return Promise.reject(e);
+      }
+    };
   }
   release(proxy) {
     const r = proxy && proxy[RHANDLE];
-    if (!r) return Promise.reject(new Error('concurrent-c-python: not a handle'));
+    if (!r) throw new Error('concurrent-c-python: not a handle');
     if (r.chain && r.chain.length)
-      return Promise.reject(new Error(
-        'concurrent-c-python: attribute paths are not held handles — await the ' +
-        'value, then release what it returns'));
-    const bridge = this;
-    const settle = (h) => bridge._req({ op: 'release', h }).then((x) => x.v);
-    return r.pending ? r.pending.then((x) => settle(x.h)) : settle(r.h);
+      throw new Error(
+        'concurrent-c-python: attribute paths are not held handles');
+    this._attrCacheGen = (this._attrCacheGen || 0) + 1;
+    return this._reqSync({ op: 'release', h: r.h }).v;
   }
   stats() {
-    return this._req({ op: 'stats' }).then((r) => r.v);
+    return this._reqSync({ op: 'stats' }).v;
   }
   get closed() {
     return this._closed;
@@ -1081,80 +1190,6 @@ class ProcBridge {
     this._pending.clear();
   }
   [Symbol.asyncDispose]() { return this.destroy(); }
-}
-
-// A chain rooted on a not-yet-resolved import: still zero round trips
-// to extend, one to use.
-function rlazy(bridge, pending, chain) {
-  const target = function () {};
-  target[RHANDLE] = { h: null, chain, pending, bridge };
-  const inspectCustom = Symbol.for('nodejs.util.inspect.custom');
-  target[inspectCustom] = () =>
-    '[cc-python remote .' + chain.join('.') + ']';
-  return new Proxy(target, {
-    get(t, prop) {
-      if (prop === RHANDLE) return t[RHANDLE];
-      if (prop === 'then') {
-        return (resolve, reject) =>
-          pending.then((r) =>
-            bridge._req({ op: 'getp', h: r.h, path: chain })
-              .then((x) => resolve(bridge._materialize(x)), reject),
-            reject);
-      }
-      if (prop === 'str') {
-        return () => pending.then((r) =>
-          bridge._req({ op: 'str', h: r.h, path: chain }).then((x) => x.v));
-      }
-      if (prop === 'toTypedArray') {
-        return () => pending.then((r) =>
-          bridge._req({ op: 'ta', h: r.h, path: chain })
-            .then((x) => bridge._materialize(x)));
-      }
-      if (prop === Symbol.toPrimitive || prop === 'toString')
-        return () => '[cc-python remote .' + chain.join('.') + ']';
-      if (prop === 'toJS' || prop === 'toJSON') {
-        return () => pending.then((r) =>
-          bridge._req({ op: 'tojs', h: r.h, path: chain }).then((x) => {
-            if (x && x.v !== undefined) return bridge._decode(x.v);
-            return bridge._materialize(x);
-          }));
-      }
-      if (prop === inspectCustom) {
-        return () => pending.then((r) =>
-          bridge._req({ op: 'str', h: r.h, path: chain }).then((x) => x.v));
-      }
-      if (prop === Symbol.asyncIterator) {
-        return async function () {
-          const it = await pending.then((r) =>
-            bridge._req({ op: 'callp', h: r.h,
-                          path: chain.concat('__iter__'), args: [] })
-              .then((x) => bridge._materialize(x)));
-          return {
-            async next() {
-              try {
-                const value = await it.__next__();
-                return { value, done: false };
-              } catch (e) {
-                if (/StopIteration/i.test(String(e && e.message)))
-                  return { value: undefined, done: true };
-                throw e;
-              }
-            },
-            [Symbol.asyncIterator]() { return this; },
-          };
-        };
-      }
-      if (typeof prop !== 'string') return undefined;
-      return rlazy(bridge, pending, chain.concat(prop));
-    },
-    apply(t, thisArg, args) {
-      const payload = bridge._callPayload(args); // validate before the hop
-      return pending.then((r) =>
-        bridge._req(Object.assign({ op: 'callp', h: r.h, path: chain },
-                                  payload))
-          .then((x) => bridge._materialize(x)));
-    },
-  });
 }
 
 module.exports = {

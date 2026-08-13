@@ -26,6 +26,22 @@ np.dot(a, b);   // 1M-element dot product: 5-8x FASTER than the same
 py.destroy();   // one sweep: every handle, the arena, the interpreter
 ```
 
+**Mental model.** A domain owns the interpreter and every handle.
+Proxies are borrows from that domain. `destroy()` / `using` / GC of the
+last proxy → one sweep. Default call blocks this thread until Python
+answers. `py.task` is the Promise door. `{ isolated: true }` is crash
+isolation and a different Python — not a different calling convention.
+Scalars and `None` materialize; everything else is a proxy until
+`toJS()` / `toTypedArray()` / `String()`.
+
+**Cheat sheet**
+
+- Default call blocks. `py.task` is the only Promise.
+- `{ isolated: true }` is not a different `await` story.
+- Trailing `{…}` is a positional dict; `kwargs({…})` means keywords.
+- `===` is not Python `is`. `if (proxy)` is always true (`typeof` is `'function'`).
+- Overlap isolated domains with `Promise.all([a.task(f)(), b.task(g)()])`.
+
 Modes tour: [`examples/modes_tour.js`](examples/modes_tour.js).  
 Costs (`RESULT` lines): [`benchmarks/modes_bench.js`](benchmarks/modes_bench.js)
 (`VIRTUAL_ENV=…` if in-process needs numpy).
@@ -42,6 +58,7 @@ Prebuilt where shipped; otherwise compiles vendored C at install (`cc`).
 | | `create()` | `create({ isolated: true })` |
 |---|---|---|
 | Where | libpython in this process | child CPython |
+| Calls | sync; `py.task` → Promise | same |
 | Hot path | ~µs; zero-copy buffers | ~20–100µs RTT; copy/shm |
 | Parallelism | lane / subinterpreters (3.12+) | N children, N GILs |
 | Crash | can take Node with it | child dies; parent lives |
@@ -116,29 +133,16 @@ proxy/TLS/DNS knobs or a parent that parses stdout. Redirect in Python
 (`contextlib.redirect_stdout`), or use `create({ isolated: true })` when
 you need a trust boundary — **in-process Python is your process**.
 
-**Isolated calls are Promises — await them.** This fails encode:
-
-```js
-const g = builtins.dict();           // Promise, not a dict
-await builtins.exec(code, g);
-```
-
-Use `const g = await builtins.dict()`. Passing an unawaited result errors
-with `got a Promise — await isolated call results…`.
-
 **Empty `dict()` stays a handle.** An `exec` namespace must stay on the
 Python side — a JS `{}` has no `.get` and cannot accumulate bindings.
-`await builtins.dict()` returns a live proxy:
 
 ```js
-const g = await builtins.dict();
-await builtins.exec(`def f(x): return x + 1`, g);
-const f = await g.get('f');
-await f(41);   // 42
+const g = builtins.dict();
+builtins.exec(`def f(x): return x + 1`, g);
+g.get('f')(41);   // 42
 ```
 
-Non-empty plain dicts of scalars still cross as JS objects. Same-domain
-handles chain (`const fft = await np.fft.fft(buf); await np.abs(fft)`).
+Same-domain handles chain (`const fft = np.fft.fft(buf); np.abs(fft)`).
 
 ## Surface
 
@@ -187,13 +191,11 @@ handles chain (`const fft = await np.fft.fft(buf); await np.abs(fft)`).
   only. Int dict keys become string keys; cycles and unrepresentables
   (`set`, `bytes`, callables, …) refuse with type + path
   (`cannot materialize set at $.tags — convert with list(...)`) — never
-  `str()`-coerce.   In-process, `JSON.stringify(p)` and `JSON.stringify(p.toJS())`
-  agree (same sync function). Isolated `toJS`/`toJSON` are async —
-  `await p.toJS()` then stringify (bare `JSON.stringify(p)` will not
-  await). Cost: reflection (`Object.keys`) stays cheap; materialize
-  pays once. After materialize, host JSON rules apply: **`NaN` /
-  `±Infinity` stringify to `null`** (ECMA-262 — same as a plain
-  `{x: NaN}` in JS; scipy results often hit this). Exact `BigInt`
+  `str()`-coerce. `JSON.stringify(p)` and `JSON.stringify(p.toJS())`
+  agree (same sync function) in both modes. Cost: reflection (`Object.keys`)
+  stays cheap; materialize pays once. After materialize, host JSON rules
+  apply: **`NaN` / `±Infinity` stringify to `null`** (ECMA-262 — same as a
+  plain `{x: NaN}` in JS; scipy results often hit this). Exact `BigInt`
   fields throw the native `TypeError` from `JSON.stringify` (no bridge
   special-case).
 - Isolated is crash isolation, not a sandbox. Spill files: private 0700
@@ -229,13 +231,14 @@ await p;
 3. **Sibling in-process domains** — CPython 3.12+ only. Numpy’s C
    extension refuses subinterpreters; use (4) for that.
 4. **Isolated domains** — full child per `create({ isolated: true })`.
-   All doors async; large results via `await arr.toTypedArray()`.
-   Per-domain `python:` / `VIRTUAL_ENV` / `./.venv` / `python3`.
+   Default calls still block; overlap N children with `py.task`.
+   Large results via `arr.toTypedArray()`. Per-domain `python:` /
+   `VIRTUAL_ENV` / `./.venv` / `python3`.
 
 ```js
 const py = ccpy.create({ isolated: true });
 const np = py.import('numpy');
-const s = await np.sum(buf);
+const s = np.sum(buf);
 ```
 
 Warm spawn+import ~109ms, wire ~98µs, 8MB shm arg ~6.4ms; 4 domains
@@ -249,8 +252,7 @@ Isolated and in-process kwargs are explicit and last — there is no
 
 ```js
 const { kwargs } = require('concurrent-c-python');
-fmt(1, kwargs({ sep: '+' }));           // in-process
-await fmt(1, kwargs({ sep: '+' }));     // isolated
+fmt(1, kwargs({ sep: '+' }));           // in-process and isolated
 builtins.sorted(xs, kwargs({ key: neg }));  // not sorted(xs, {key: neg})
 ```
 

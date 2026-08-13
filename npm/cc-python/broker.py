@@ -18,19 +18,20 @@
 #   -> {"op":"stats"}                      <- {"v":n}
 #   -> {"op":"close"}                      <- {"v":true}, then exit
 #
-# Values: finite numbers / str / bool / None / lists / non-empty plain
-# dicts cross by value; an empty dict stays a handle (so
-# `await builtins.dict()` remains a live mapping for exec/namespaces —
-# materializing it to JS `{}` made `.get` disappear).  Non-finite floats
-# tag as {"nf":"inf"|"-inf"|"nan"}; typed buffers as {"ta":kind,"b64":...}
+# Values: scalars (finite numbers / str / bool / None) cross by value;
+# an empty dict stays a handle (so `builtins.dict()` remains a live
+# mapping for exec/namespaces — materializing it to JS `{}` made `.get`
+# disappear). Lists, dicts, and arrays stay handles until toJS /
+# toTypedArray. Non-finite floats tag as {"nf":"inf"|"-inf"|"nan"};
+# typed buffers as {"ta":kind,"b64":...} on the callback/arg path
 # (numpy arrays when numpy is loadable in this child, else array.array);
 # everything else is a handle.  A JS function argument arrives as
 # {"$f":id}: calling it sends {"cb":true,"cbid":id,"args":[...]} and
 # BLOCKS on the reply line {"cbr":...} (or {"e":...}).  The parent may
-# take arbitrarily long (awaiting its own promises) before replying, and
-# may have already pipelined later ops onto the wire — those are parked
-# until the cbr lands, then drained in order.  EOF on the request fd is
-# revocation: drop everything, exit.
+# take arbitrarily long (a sync wait, or awaiting a task callback)
+# before replying, and may have already pipelined later task() ops onto
+# the wire — those are parked until the cbr lands, then drained in order.
+# EOF on the request fd is revocation: drop everything, exit.
 import base64
 import json
 import math
@@ -151,23 +152,6 @@ def _decode(v):
     return v
 
 
-def _plain(v, depth=0):
-    if depth > 16:
-        return False
-    if v is None or isinstance(v, (bool, str)):
-        return True
-    if isinstance(v, float):
-        return True  # non-finite handled at encode
-    if isinstance(v, int):
-        return True  # beyond 2^53 tags as {$bi: digits}; never a JSON number
-    if isinstance(v, (list, tuple)):
-        return all(_plain(x, depth + 1) for x in v)
-    if isinstance(v, dict):
-        return all(isinstance(k, str) and not k.startswith('$') and
-                   _plain(x, depth + 1) for k, x in v.items())
-    return False
-
-
 def _encode_val(v):
     """Wire-encode a value nested inside a cb/cbr payload.
 
@@ -227,21 +211,13 @@ def _encode(v):
     if np is not None and isinstance(v, np.generic):
         v = v.item()  # numpy scalar -> python scalar
     if np is not None and isinstance(v, np.ndarray):
-        key = _TA_BY_DTYPE.get(str(v.dtype))
-        # Inline small arrays; large ones stay handles (the shm lease
-        # tier lifts this — for now crossing bulk data costs a copy and
-        # says so in the docs).
-        if key is not None and v.nbytes <= 1 << 16 and v.ndim == 1:
-            return {'ta': key,
-                    'b64': base64.b64encode(v.tobytes()).decode('ascii')}
         return {'h': _put(v)}
-    # Empty dict is "plain" but must stay a handle: callers use
-    # builtins.dict() as an exec/eval namespace and need .get / mutation
-    # on the same object.  Non-empty plain dicts of scalars still cross
-    # by value (data returns).
+    # Scalars and None materialize. Everything else stays a proxy until
+    # toJS / toTypedArray — same rule as in-process. Empty dict is a
+    # handle so exec/eval namespaces keep .get / mutation.
     if isinstance(v, dict) and len(v) == 0:
         return {'h': _put(v)}
-    if _plain(v):
+    if v is None or isinstance(v, (bool, str, int, float)):
         return {'v': _encode_val(v)}
     return {'h': _put(v)}
 

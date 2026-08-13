@@ -20,35 +20,35 @@ const myShmDirs = () => fs.readdirSync(shmBase)
 (async () => {
   const py = ccpy.create({ isolated: true });
   const b = py.import('builtins');
-  const forge = await b.eval(
+  const forge = b.eval(
     'lambda: (print(\'{"v":999}\', flush=True), 41)[1]');
-  out('py_forge_ignored', (await forge()) === 41);
-  const forge2 = await b.eval(
+  out('py_forge_ignored', forge() === 41);
+  const forge2 = b.eval(
     'lambda: (print(\'{"v":888,"id":1}\', flush=True), 42)[1]');
-  out('py_forged_id_ignored', (await forge2()) === 42);
-  const sq = await b.eval('lambda x: x * x');
-  const trio = await Promise.all([sq(2), sq(3), sq(4)]);
+  out('py_forged_id_ignored', forge2() === 42);
+  const sq = b.eval('lambda x: x * x');
+  const trio = await Promise.all([py.task(sq)(2), py.task(sq)(3), py.task(sq)(4)]);
   out('py_pairing_order', trio.join(',') === '4,9,16');
   let errOk = false;
-  try { await b.eval('1/0'); }
+  try { b.eval('1/0'); }
   catch (e) { errOk = /ZeroDivision/.test(e.message); }
   out('py_error_paired', errOk);
-  const shout = await b.eval(
+  const shout = b.eval(
     'lambda: (print("py-print-visible", flush=True), 7)[1]');
-  out('py_print_visible', (await shout()) === 7);
+  out('py_print_visible', shout() === 7);
 
   // kwargs cross the wire explicitly marked and last; keyword-only
   // signatures work, misuse is loud at the call site.
-  const fmt = await b.eval('lambda a, *, sep="-": f"{a}{sep}end"');
+  const fmt = b.eval('lambda a, *, sep="-": f"{a}{sep}end"');
   out('py_kwargs_call',
-      (await fmt(1, ccpy.kwargs({ sep: '+' }))) === '1+end');
-  out('py_kwargs_default', (await fmt(2)) === '2-end');
+      fmt(1, ccpy.kwargs({ sep: '+' })) === '1+end');
+  out('py_kwargs_default', fmt(2) === '2-end');
   let kwPos = false;
-  try { await fmt(1, 2); }
+  try { fmt(1, 2); }
   catch (e) { kwPos = /positional/.test(e.message); }
   out('py_kwargs_typeerror_crosses', kwPos);
   let kwPlace = false;
-  try { await fmt(ccpy.kwargs({ sep: '+' }), 1); }
+  try { fmt(ccpy.kwargs({ sep: '+' }), 1); }
   catch (e) { kwPlace = /last argument/.test(e.message); }
   out('py_kwargs_must_be_last', kwPlace);
   await py.destroy();
@@ -56,9 +56,9 @@ const myShmDirs = () => fs.readdirSync(shmBase)
   // Spill hardening: each bridge owns a private 0700 dir; a >64KB
   // buffer round-trips through it, and the dir goes with the bridge.
   const py2 = ccpy.create({ isolated: true });
-  const echo = await py2.import('builtins').eval('lambda a: a');
+  const echo = py2.import('builtins').eval('lambda a: a');
   const big = new Float64Array(1 << 15).fill(0.5);
-  const back = await (await echo(big)).toTypedArray();
+  const back = echo(big).toTypedArray();
   const dirs = myShmDirs();
   const mode = dirs.length === 1
     ? (fs.statSync(path.join(shmBase, dirs[0])).mode & 0o777) : -1;

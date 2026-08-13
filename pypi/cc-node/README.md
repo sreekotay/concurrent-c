@@ -76,7 +76,8 @@ Wire: line-JSON on dedicated fds (stdio stays yours). Bulk spill: private
 ### Promises
 
 Awaited in the child before the reply — no `async`/`await` on the
-Python side (opposite of `concurrent-c-python` isolated):
+Python side. Same honesty as `concurrent-c-python`: a call blocks until
+the other runtime answers.
 
 ```python
 fetchish = js.eval('async (x) => { return { doubled: x * 2 } }')

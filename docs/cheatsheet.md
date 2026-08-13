@@ -444,8 +444,11 @@ ccc build counter.ccs
 PYTHONPATH=bin python3 -c "import counter; counter.bump(4)"
 ```
 
-Bridges: npm [`concurrent-c-python`](https://www.npmjs.com/package/concurrent-c-python),
-pip [`concurrent-c-node`](https://pypi.org/project/concurrent-c-node/).
+Bridges: npm [`concurrent-c-python`](https://www.npmjs.com/package/concurrent-c-python)
+(Python from Node — default call blocks; `py.task` for a Promise; `{ isolated: true }`
+is a child interpreter, not a different calling convention),
+pip [`concurrent-c-node`](https://pypi.org/project/concurrent-c-node/)
+(JS from Python — always a `node` child; thenables awaited in the child).
 
 ---
 

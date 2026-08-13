@@ -23,7 +23,7 @@ const nsToUs = (n) => Number(n) / 1e3;
   {
     const warm = ccpy.create({ isolated: true });
     const b = warm.import('builtins');
-    await (await b.eval('lambda: 1'))();
+    b.eval('lambda: 1')();
     await warm.destroy();
   }
 
@@ -32,13 +32,13 @@ const nsToUs = (n) => Number(n) / 1e3;
     const tSpawn = hr();
     const py = ccpy.create({ isolated: true });
     const b = py.import('builtins');
-    const pidFn = await b.eval('lambda: __import__("os").getpid()');
-    const pid = await pidFn();
-    const slow = await b.eval(
+    const pidFn = b.eval('lambda: __import__("os").getpid()');
+    const pid = pidFn();
+    const slow = b.eval(
       'lambda: (__import__("time").sleep(0.25), 1)[1]');
     spawnUs += nsToUs(hr() - tSpawn);
 
-    const p = slow();
+    const p = py.task(slow)();
     await sleep(20);
     const tKill = hr();
     try { process.kill(pid, 'SIGKILL'); } catch (_) {}
@@ -48,8 +48,8 @@ const nsToUs = (n) => Number(n) / 1e3;
 
     const tRe = hr();
     const py2 = ccpy.create({ isolated: true });
-    const one = await (py2.import('builtins')).eval('lambda: 1');
-    if ((await one()) !== 1) throw new Error('respawn probe failed');
+    const one = py2.import('builtins').eval('lambda: 1');
+    if (one() !== 1) throw new Error('respawn probe failed');
     await py2.destroy();
     respawnUs += nsToUs(hr() - tRe);
   }

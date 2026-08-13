@@ -94,18 +94,9 @@ def svd_s0(a, n):
     return float(np.linalg.svd(A, compute_uv=False)[0])
 `;
 
-async function loadHelpers(py, isolated) {
+function loadHelpers(py) {
   const b = py.import('builtins');
-  let g;
-  if (isolated) {
-    g = await b.dict();
-    await b.exec(HELPERS, g);
-    return {
-      matmul_sum: await g.get('matmul_sum'),
-      svd_s0: await g.get('svd_s0'),
-    };
-  }
-  g = b.dict();
+  const g = b.dict();
   b.exec(HELPERS, g);
   return {
     matmul_sum: g.get('matmul_sum'),
@@ -129,7 +120,7 @@ async function loadHelpers(py, isolated) {
     inprocPy = ccpy.create();
     inprocNp = inprocPy.import('numpy');
     inprocNp.dot(new Float64Array([1, 2]), new Float64Array([3, 4]));
-    inHelpers = await loadHelpers(inprocPy, false);
+    inHelpers = loadHelpers(inprocPy);
     console.log('RESULT inproc_numpy', 'yes');
   } catch (e) {
     console.log('RESULT inproc_numpy', 'no',
@@ -157,9 +148,9 @@ async function loadHelpers(py, isolated) {
   {
     const py = ccpy.create({ isolated: true });
     const math = py.import('math');
-    await math.sqrt(1);
+    math.sqrt(1);
     const t0 = performance.now();
-    for (let i = 0; i < 1000; i++) await math.sqrt(i + 1);
+    for (let i = 0; i < 1000; i++) math.sqrt(i + 1);
     const ms = performance.now() - t0;
     console.log('RESULT iso_sqrt_us', ((ms / 1000) * 1000).toFixed(2));
     await py.destroy();
@@ -167,13 +158,13 @@ async function loadHelpers(py, isolated) {
 
   const iso = ccpy.create({ isolated: true });
   const isoNp = iso.import('numpy');
-  const isoHelpers = await loadHelpers(iso, true);
+  const isoHelpers = loadHelpers(iso);
 
   // --- BLAS-1: dot ------------------------------------------------------
   for (const n of [1e4, 1e5, 1e6]) {
     const [a, b] = fillVec(n);
     if (inprocNp) inprocNp.dot(a, b);
-    await isoNp.dot(a, b);
+    isoNp.dot(a, b);
     jsDot(a, b);
 
     let inMs = null;
@@ -183,7 +174,7 @@ async function loadHelpers(py, isolated) {
       inMs = performance.now() - t0;
     }
     const t1 = performance.now();
-    await isoNp.dot(a, b);
+    isoNp.dot(a, b);
     const isoMs = performance.now() - t1;
     const t2 = performance.now();
     jsDot(a, b);
@@ -201,7 +192,7 @@ async function loadHelpers(py, isolated) {
   for (const n of [32, 64, 128, 256, 512]) {
     const [A, B] = fillMat(n);
     if (inHelpers) inHelpers.matmul_sum(A, B, n);
-    await isoHelpers.matmul_sum(A, B, n);
+    isoHelpers.matmul_sum(A, B, n);
     if (n <= 256) jsMatmulSum(A, B, n); // 512³ naive JS is minutes
 
     let inMs = null;
@@ -211,7 +202,7 @@ async function loadHelpers(py, isolated) {
       inMs = performance.now() - t0;
     }
     const t1 = performance.now();
-    await isoHelpers.matmul_sum(A, B, n);
+    isoHelpers.matmul_sum(A, B, n);
     const isoMs = performance.now() - t1;
 
     let jsMs = null;
@@ -233,7 +224,7 @@ async function loadHelpers(py, isolated) {
   for (const n of [64, 128, 256]) {
     const [A] = fillMat(n);
     if (inHelpers) inHelpers.svd_s0(A, n);
-    await isoHelpers.svd_s0(A, n);
+    isoHelpers.svd_s0(A, n);
 
     let inMs = null;
     if (inHelpers) {
@@ -242,7 +233,7 @@ async function loadHelpers(py, isolated) {
       inMs = performance.now() - t0;
     }
     const t1 = performance.now();
-    await isoHelpers.svd_s0(A, n);
+    isoHelpers.svd_s0(A, n);
     const isoMs = performance.now() - t1;
 
     console.log(
@@ -271,10 +262,10 @@ def work(n):
     for (let i = 0; i < N; i++) {
       const py = ccpy.create({ isolated: true });
       const b = py.import('builtins');
-      const g = await b.dict();
-      await b.exec(work, g);
+      const g = b.dict();
+      b.exec(work, g);
       domains.push(py);
-      fns.push(await g.get('work'));
+      fns.push(py.task(g.get('work')));
     }
     for (const f of fns) await f(iters / 10);
     const tSeq0 = performance.now();

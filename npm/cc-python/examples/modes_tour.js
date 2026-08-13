@@ -5,8 +5,9 @@
  *   node npm/cc-python/examples/modes_tour.js
  *
  * In-process: sync, ~µs crossings, packages only if that libpython has them
- * (usePython(venv) / a venv-built runtime). Isolated: child CPython, await
- * every call, ambient/system packages, same-domain handles chain.
+ * (usePython(venv) / a venv-built runtime). Isolated: child CPython, same
+ * calling convention (default call blocks; py.task is the Promise),
+ * ambient/system packages, crash isolation.
  */
 'use strict';
 
@@ -40,34 +41,32 @@ def analyze(xs):
   console.log('task(factorial)(10) =', await slow(10));
   await py.destroy();
 
-  // ---- isolated: await calls; empty dict stays a live handle -----------
-  banner('isolated (async, system/ambient python)');
+  // ---- isolated: same calling convention; empty dict stays a live handle
+  banner('isolated (sync default, system/ambient python)');
   const iso = ccpy.create({ isolated: true });
   const np = iso.import('numpy');
   const b = iso.import('builtins');
 
   const a = new Float64Array([1, 2, 3, 4]);
-  console.log('np.sum =', await np.sum(a));
+  console.log('np.sum =', np.sum(a));
 
-  const fft = await np.fft.fft(a);
-  const mag = await np.abs(fft); // same-domain handle chain
-  console.log('fft→abs length =',
-              typeof mag.length === 'number' ? mag.length
-              : (await mag.toTypedArray()).length);
+  const fft = np.fft.fft(a);
+  const mag = np.abs(fft); // same-domain handle chain
+  console.log('fft→abs length =', mag.toTypedArray().length);
 
-  const g = await b.dict();
-  await b.exec(`
+  const g = b.dict();
+  b.exec(`
 def peak_hz(signal, rate):
     import numpy as np
     m = np.abs(np.fft.fft(signal))
     i = int(np.argmax(m[: len(m) // 2]))
     return float(i * rate / len(signal))
 `, g);
-  const peak = await g.get('peak_hz');
+  const peak = g.get('peak_hz');
   const tone = new Float64Array(4410);
   for (let i = 0; i < tone.length; i++)
     tone[i] = Math.sin(2 * Math.PI * 440 * i / 44100);
-  console.log('peak_hz ≈', (await peak(tone, 44100)).toFixed(1), '(want ~440)');
+  console.log('peak_hz ≈', peak(tone, 44100).toFixed(1), '(want ~440)');
 
   await iso.destroy();
   console.log('\nok');
