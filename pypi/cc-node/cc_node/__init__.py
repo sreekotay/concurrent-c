@@ -18,6 +18,9 @@ exceptions cross back as JS errors and vice versa, messages intact.
 Handles never cross domains; every door after destroy() answers
 articulately; destroy is idempotent and `with cc_node.create() as js:`
 scopes it.
+
+Notebooks (Jupyter / Colab): `%load_ext cc_node` then `%%js` — one
+kernel-scoped domain (`cc_node.kernel()`), same calling convention.
 """
 import array
 import atexit
@@ -25,12 +28,29 @@ import base64
 import json
 import math
 import os
+import re
+import select
 import shutil
 import subprocess
+import sys
 import tempfile
 
-__all__ = ["create", "JsError", "JsHandle", "__version__"]
+__all__ = [
+    "create", "kernel", "reset_kernel", "JsError", "JsHandle",
+    "load_ipython_extension", "unload_ipython_extension", "__version__",
+]
 __version__ = "0.22.0"
+
+_NO_NODE = (
+    "cc-node: no node executable (install Node, or set CC_NODE_BIN). "
+    "Colab/Jupyter: `!apt-get install -y nodejs` then retry, or pass "
+    "create(node=...) / CC_NODE_BIN."
+)
+_BIND_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_BIND_RESERVED = frozenset({
+    "require", "globalThis", "global", "process", "module", "exports",
+    "window", "self",
+})
 
 # Typed buffers cross as typed arrays; big ones spill through shared
 # memory (tmpfs where available) — one memcpy per side, receiver
@@ -97,8 +117,19 @@ class JsHandle:
         return self._d._req("str", h=self._h)
 
     def __repr__(self):
+        # Cheap: a wire str() is a round trip and can hang a display hook.
         return "<JsHandle #%d%s>" % (self._h,
                                      " (closed)" if self._d.closed else "")
+
+    def _repr_html_(self):
+        state = " closed" if self._d.closed else ""
+        return (
+            '<code title="domain-owned JS proxy; str() / attrs cross the wire">'
+            "JsHandle #%d%s</code>" % (self._h, state)
+        )
+
+    def _repr_pretty_(self, p, cycle):
+        p.text(repr(self))
 
     def __del__(self):
         # Never nest a sync wire op from GC into an in-flight _req — that
@@ -117,6 +148,7 @@ class Bridge:
         broker = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               "broker.cjs")
         node = node or os.environ.get("CC_NODE_BIN", "node")
+        self._node_bin = node
         # Spills live in a private 0700 per-bridge directory (predictable
         # names in a shared /dev/shm invite pre-creation races and
         # umask-dependent exposure); the child writes its spills there
@@ -143,13 +175,14 @@ class Bridge:
             for fd in (req_r, req_w, resp_r, resp_w):
                 os.close(fd)
             shutil.rmtree(self._shm_dir, ignore_errors=True)
-            raise JsError(
-                "cc-node: no node executable (install Node, or set "
-                "CC_NODE_BIN)") from None
+            raise JsError(_NO_NODE) from None
         os.close(req_r)
         os.close(resp_w)
         self._wire_w = os.fdopen(req_w, "wb")
-        self._wire_r = os.fdopen(resp_r, "rb")
+        # Raw reply fd + leftover buffer: select then read, so SIGINT can
+        # land without mixing select() with a buffered file object.
+        self._resp_fd = resp_r
+        self._resp_buf = bytearray()
         self.closed = False
         self._nid = 1
         self._cbs = {}
@@ -160,6 +193,8 @@ class Bridge:
         self._pending_release = []
         self._close_pending = False
         self._destroy_done = False
+        self._cell_require_ready = False
+        self._cell_runner = None
         _live.append(self)
 
     # ---- wire ----
@@ -211,12 +246,84 @@ class Bridge:
             raise JsError(msg["e"])
         return self._decode_result(msg)
 
-    def _wait_reply(self, rid):
-        parked = self._parked.pop(rid, None)
-        if parked is not None:
-            return self._take_reply(parked)
+    def _read_chunk(self):
+        fd = self._resp_fd
+        if fd is None:
+            return b""
+        if sys.platform == "win32":
+            try:
+                return os.read(fd, 65536)
+            except OSError:
+                return b""
         while True:
-            line = self._wire_r.readline()
+            try:
+                select.select([fd], [], [])
+            except InterruptedError:
+                continue
+            except OSError:
+                return b""
+            try:
+                return os.read(fd, 65536)
+            except InterruptedError:
+                continue
+            except OSError:
+                return b""
+
+    def _read_line(self):
+        """One wire line (without the LF), or b'' on EOF."""
+        while True:
+            nl = self._resp_buf.find(b"\n")
+            if nl >= 0:
+                line = bytes(self._resp_buf[:nl])
+                del self._resp_buf[:nl + 1]
+                return line
+            chunk = self._read_chunk()
+            if not chunk:
+                return b""
+            self._resp_buf.extend(chunk)
+
+    def _kill_child(self):
+        """Hard death from inside an in-flight wait. Cooperative close
+        cannot interrupt a JS CPU loop; SIGKILL of the child is the
+        second-interrupt door. `_req`'s finally runs `_finish_destroy`."""
+        self.closed = True
+        self._close_pending = True
+        try:
+            if self._p.poll() is None:
+                self._p.kill()
+        except Exception:
+            pass
+
+    def _complete_reply(self, msg, hits):
+        if hits:
+            try:
+                self._take_reply(msg)
+            except JsError:
+                raise
+            raise KeyboardInterrupt(
+                "cc-node: call finished after interrupt; result discarded"
+            ) from None
+        return self._take_reply(msg)
+
+    def _wait_reply(self, rid):
+        hits = 0
+        while True:
+            parked = self._parked.pop(rid, None)
+            if parked is not None:
+                return self._complete_reply(parked, hits)
+            try:
+                line = self._read_line()
+            except KeyboardInterrupt:
+                hits += 1
+                if hits == 1:
+                    sys.stderr.write(
+                        "cc-node: JS still running — interrupt again to "
+                        "destroy this domain\n")
+                    sys.stderr.flush()
+                    continue
+                self._kill_child()
+                raise KeyboardInterrupt(
+                    "cc-node: interrupted; domain destroyed") from None
             if not line:
                 self.closed = True
                 raise JsError("cc-node: the node child exited")
@@ -226,7 +333,7 @@ class Bridge:
                 continue
             mid = msg.get("id")
             if mid == rid:
-                return self._take_reply(msg)
+                return self._complete_reply(msg, hits)
             if mid is not None:
                 # Nested _req (GC release, etc.) can overtake; park by id.
                 self._parked[mid] = msg
@@ -407,6 +514,59 @@ class Bridge:
     def eval(self, src):
         return self._req("eval", src=src)
 
+    def eval_cell(self, src, bindings=None):
+        """Eval JS in this domain. Optional `bindings` are published on
+        `globalThis` for the call (`Object.assign`). Installs cwd
+        `require` once so a notebook cell can `require('path')` like
+        Node. `eval()` itself does not install `require` and does not
+        take bindings — one RTT, unchanged."""
+        if self.closed:
+            raise JsError("cc-node: bridge is closed")
+        self._ensure_cell_require()
+        if not bindings:
+            return self.eval(src)
+        names = {}
+        for k, v in bindings.items():
+            self._check_bind_name(k)
+            names[k] = v
+        runner = self._cell_runner
+        if runner is None:
+            runner = self.eval(
+                "(b, src) => { Object.assign(globalThis, b); "
+                "return (0, eval)(src); }")
+            self._cell_runner = runner
+        return runner(names, src)
+
+    def _ensure_cell_require(self):
+        if self._cell_require_ready or self.closed:
+            return
+        install = self.eval(
+            "(m) => { globalThis.require = "
+            "m.createRequire(process.cwd() + '/'); }")
+        mod = self.require("module")
+        try:
+            install(mod)
+            self._cell_require_ready = True
+        finally:
+            try:
+                self.release(mod)
+            except Exception:
+                pass
+            try:
+                self.release(install)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _check_bind_name(name):
+        if not isinstance(name, str) or not _BIND_NAME.match(name):
+            raise JsError(
+                "cc-node: --bind name %r is not a JS identifier" % (name,))
+        if name in _BIND_RESERVED:
+            raise JsError(
+                "cc-node: --bind name %r is reserved (would shadow a "
+                "Node global)" % (name,))
+
     def release(self, handle):
         if not isinstance(handle, JsHandle) or handle._d is not self:
             raise JsError("cc-node: handle belongs to another bridge")
@@ -449,7 +609,7 @@ class Bridge:
         # land — closing the reply fd under its write is an EPIPE crash
         # in the child.
         try:
-            while self._wire_r.readline():
+            while self._read_line():
                 pass
         except Exception:
             pass
@@ -461,9 +621,12 @@ class Bridge:
             except Exception:
                 pass
         try:
-            self._wire_r.close()
+            if self._resp_fd is not None:
+                os.close(self._resp_fd)
         except Exception:
             pass
+        self._resp_fd = None
+        self._cell_runner = None
         shutil.rmtree(self._shm_dir, ignore_errors=True)
         if self in _live:
             _live.remove(self)
@@ -480,3 +643,48 @@ class Bridge:
 
 def create(node=None):
     return Bridge(node=node)
+
+
+_kernel = None
+
+
+def kernel(node=None):
+    """Process-wide domain for notebooks. Lazy; magics share it.
+    Scripts that want a private child still call `create()`."""
+    global _kernel
+    b = _kernel
+    if b is not None and not b.closed:
+        if node is not None and node != b._node_bin:
+            raise JsError(
+                "cc-node: kernel() already live with a different node; "
+                "reset_kernel() / %js_reset first")
+        return b
+    b = create(node=node)
+    try:
+        b._ensure_cell_require()
+    except Exception:
+        b.destroy()
+        raise
+    _kernel = b
+    return b
+
+
+def reset_kernel():
+    """Destroy the kernel-scoped domain. Next `kernel()` / `%%js` spawns."""
+    global _kernel
+    b = _kernel
+    _kernel = None
+    if b is not None:
+        try:
+            b.destroy()
+        except Exception:
+            pass
+
+
+def load_ipython_extension(ip):
+    from .magics import load_ipython_extension as _load
+    _load(ip)
+
+
+def unload_ipython_extension(ip):
+    reset_kernel()

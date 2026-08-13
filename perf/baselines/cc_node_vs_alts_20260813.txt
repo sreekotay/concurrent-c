@@ -1,0 +1,55 @@
+# python -m cc_node.benchmarks.vs_alts snapshot
+# date: 2026-08-13T21:13:02Z
+# host: Darwin 25.6.0 arm64
+# py:   3.14.6
+# node: v23.11.0
+# cc:   80cbede8
+# alts: pythonmonkey 1.3.2, mini-racer 0.14.1 (venv; not package deps)
+#
+RESULT cc_node.spawn_ms 26
+RESULT cc_node.rtt_us 20
+RESULT cc_node.callback_roundtrip_us 36
+RESULT cc_node.bulk_8mb_shm_ms 6.2
+RESULT cc_node.bulk_8mb_json_list_ms 359
+CAPABILITY cc_node.require_path true
+CAPABILITY cc_node.require_fs true
+CAPABILITY cc_node.thenable true
+CAPABILITY cc_node.python_callback true
+RESULT diy_stdio.spawn_ms 73
+RESULT diy_stdio.rtt_us 39
+SKIP diy_stdio.callback_roundtrip_us no nested callback protocol
+RESULT diy_stdio.bulk_8mb_json_list_ms 197
+SKIP diy_stdio.bulk_8mb_shm_ms JSON-only DIY
+CAPABILITY diy_stdio.require_path true
+CAPABILITY diy_stdio.require_fs true
+CAPABILITY diy_stdio.thenable true
+CAPABILITY diy_stdio.python_callback false  no callback protocol
+RESULT spawn_each.rtt_us 24732
+SKIP spawn_each.spawn_ms folded into rtt (new process/call)
+SKIP spawn_each.callback_roundtrip_us new process/call
+SKIP spawn_each.bulk_8mb_shm_ms not a persistent child
+SKIP spawn_each.bulk_8mb_json_list_ms argv size
+CAPABILITY spawn_each.require_path true
+CAPABILITY spawn_each.require_fs true  real node; new process/call
+CAPABILITY spawn_each.thenable true  real node; new process/call
+CAPABILITY spawn_each.python_callback false  no callback protocol
+RESULT pythonmonkey.spawn_ms 0
+RESULT pythonmonkey.rtt_us <1
+RESULT pythonmonkey.callback_roundtrip_us 1
+CAPABILITY pythonmonkey.python_callback true
+RESULT pythonmonkey.bulk_scan_1m_ms 626.5
+SKIP pythonmonkey.bulk_8mb_shm_ms in-process engine, not a wire
+RESULT pythonmonkey.bulk_8mb_list_ms 630
+CAPABILITY pythonmonkey.require_path false  no node:path (CommonJS of JS files, not Node builtins)
+CAPABILITY pythonmonkey.require_fs false  no node:fs
+CAPABILITY pythonmonkey.thenable false  PythonMonkey cannot find a running Python event-loop to make asynchronous calls.
+RESULT mini_racer.spawn_ms 94
+RESULT mini_racer.rtt_us 114
+SKIP mini_racer.callback_roundtrip_us V8 isolate; no Python callable door in this bench
+RESULT mini_racer.bulk_8mb_json_list_ms 78
+SKIP mini_racer.bulk_8mb_shm_ms no shm
+CAPABILITY mini_racer.require_path false  no require
+CAPABILITY mini_racer.require_fs false  V8 isolate, not Node
+CAPABILITY mini_racer.python_callback false  not measured
+CAPABILITY mini_racer.thenable false  eval returned JSPromiseImpl (isolate; no Node await story)
+done

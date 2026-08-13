@@ -172,7 +172,9 @@ Sources: [`examples/js/jsdemo.shcc`](../examples/js/jsdemo.shcc) ·
 guest: [`examples/js/jsdemo_mod.ccs`](../examples/js/jsdemo_mod.ccs).
 Shim cache: `~/.cache/concurrent-c/js-host` (Debian/Ubuntu:
 `apt install libnode-dev`). From Python, any npm package goes through
-[`concurrent-c-node`](../pypi/cc-node).
+[`concurrent-c-node`](../pypi/cc-node)
+(`%load_ext cc_node` / `%%js` in Jupyter or Colab; one kernel-scoped
+child, same calling convention).
 
 ## Module export — Node / Python own main
 
@@ -325,6 +327,11 @@ call it from C, you can export it.
 | any *Python package* from Node, in-process | `npm i concurrent-c-python` | ~5µs sync, zero-copy buffers |
 | N×numpy, crash isolation, per-domain venvs | `concurrent-c-python` isolated domains | ~100µs RTT, shm bulk |
 | any *npm package* from Python | `pip install concurrent-c-node` | ~105µs RTT, shm bulk |
+
+Same-machine vs DIY `node` / pythonmonkey / mini-racer:
+[`cc_node.benchmarks.vs_alts`](../pypi/cc-node/cc_node/benchmarks/vs_alts.py)
+([`cc_node_vs_alts_20260813.txt`](../perf/baselines/cc_node_vs_alts_20260813.txt)).
+Engines that are not Node can win a scalar call and still fail `require('fs')`.
 
 **Hosting demos:** [`examples/py/pydemo.shcc`](../examples/py/pydemo.shcc),
 [`examples/js/jsdemo.shcc`](../examples/js/jsdemo.shcc),

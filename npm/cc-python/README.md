@@ -92,6 +92,16 @@ Receipts:
 ·
 [`cc_python_modes_bench_20260810.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/cc_python_modes_bench_20260810.txt).
 
+## Jupyter / Colab
+
+Colab and the usual Jupyter kernel are **Python** — that is
+[`concurrent-c-node`](https://pypi.org/project/concurrent-c-node/)
+(`%load_ext cc_node` / `%%js`; magics, interrupt, `--bind` in that
+README). This package is the JS-kernel direction (`tslab`, Deno
+Jupyter): default `create()` blocks this thread until Python answers.
+Use `py.task` (and `{ isolated: true }` when you want a child
+interpreter) if the kernel’s event loop must stay live.
+
 ## Common issues
 
 **`No module named 'numpy'` with `create()`.** In-process loads a linked
@@ -381,4 +391,30 @@ with BLAS pinned.
 | 3 isolated domains | — | 2.8× seq | — |
 
 Host load moves absolutes; re-run the bench locally.
+
+### Vs pymport / node-calls-python / pythonia
+
+Same helpers, idiomatic buffer path per library (cc: `Float64Array` lease;
+the others copy through a Python `list`). Snapshot:
+[`cc_python_peers_20260813.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/cc_python_peers_20260813.txt)
+· harness: [`benchmarks/peers/`](benchmarks/peers/).
+
+| | cc-inproc | cc-iso | pymport | ncp | pythonia | JS loop |
+|---|---|---|---|---|---|---|
+| `sqrt` | 1.4µs | 17µs | 2.0µs | **0.78µs** | 21µs | 0.16µs |
+| `dot` 16 | **2.1µs** | 28µs | 7.0µs | 5.4µs | 43µs | 0.36µs |
+| `dot` 1M | **112µs** | 26ms | 223ms | 214ms | 723ms | 4.1ms |
+| matmul 128 | **21µs** | 0.61ms | 3.4ms | 3.0ms | 9.2ms | 2.5ms |
+| callback | 1.4µs | 42µs | 3.4µs | **0.92µs** | — | 0.12µs |
+| `Float64Array` becomes | memoryview | ndarray | bytearray | bytes | (serialized) | native |
+
+Tiny scalars: ncp's `callSync` beats a Proxy getattr. Buffers: in-process
+is ~2000× pymport/ncp on 1M `dot` (zero-copy vs list); isolated is the
+same spelling, ~8× pythonia.
+
+The other direction (JS / npm from Python):
+[`concurrent-c-node`](https://pypi.org/project/concurrent-c-node/)
+vs DIY node / pythonmonkey / mini-racer. Jupyter/Colab magics live there
+(`%load_ext cc_node` / `%%js`).
+
 Stress: [`stress/bridge/`](https://github.com/sreekotay/concurrent-c/tree/main/stress/bridge).

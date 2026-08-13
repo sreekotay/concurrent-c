@@ -2,6 +2,8 @@
 in for npm ones (same resolution path, no install step in CI).
 Deterministic booleans; the paired smoke pins them."""
 import hashlib
+import os
+import signal
 import sys
 import threading
 import time
@@ -141,7 +143,6 @@ out("with_closes", scoped.closed)
 # 10. Typed buffers cross as typed arrays — small inline, big through
 #     the shared-memory spill — both directions, and no files stray.
 import array
-import os
 with cc_node.create() as js2:
     f = js2.eval("(a) => a.reduce((s, x) => s + x, 0)")
     small = array.array("d", [1.5, 2.5, 3.0])
@@ -165,5 +166,85 @@ with cc_node.create() as js2:
         out("buffer_no_strays", len(stray) == 0)
     else:
         out("buffer_no_strays", True)
+
+# 11. Notebook path: eval() does not install require (no extra RTT);
+#     eval_cell does, once; bindings are Object.assign; repr is cheap.
+with cc_node.create() as js:
+    out("eval_no_require", js.eval("typeof require") == "undefined")
+    out("eval_cell_require", js.eval_cell("typeof require") == "function")
+    out("eval_cell_path",
+        js.eval_cell("require('path').join('a', 'b')") == "a/b")
+    out("eval_cell_bind", js.eval_cell("x * 2", {"x": 21}) == 42)
+    out("eval_cell_persist",
+        js.eval_cell("var __p = 41") is None and js.eval_cell("__p + 1") == 42)
+    try:
+        js.eval_cell("1", {"require": 1})
+        out("eval_cell_bind_reserved", False)
+    except cc_node.JsError as e:
+        out("eval_cell_bind_reserved", "reserved" in str(e))
+    date = js.eval("new Date(0)")
+    out("repr_cheap",
+        "JsHandle #" in repr(date) and "1970" not in repr(date))
+    out("repr_html_cheap",
+        "JsHandle #" in date._repr_html_() and "1970" not in date._repr_html_())
+
+a = cc_node.kernel()
+b = cc_node.kernel()
+out("kernel_same", a is b)
+cc_node.reset_kernel()
+c = cc_node.kernel()
+out("kernel_reset", a.closed and c is not a and not c.closed)
+cc_node.reset_kernel()
+
+# First Ctrl-C does not abandon the in-flight reply (wire would desync).
+# Second door is a hard child kill — cooperative close cannot stop a
+# JS CPU loop.
+if sys.platform == "win32":
+    out("interrupt_first", True)
+    out("interrupt_kill", True)
+else:
+    with cc_node.create() as js:
+        slow = js.eval(
+            "() => new Promise(r => setTimeout(() => r(7), 250))")
+
+        def _sig1():
+            time.sleep(0.05)
+            os.kill(os.getpid(), signal.SIGINT)
+
+        th = threading.Thread(target=_sig1)
+        th.start()
+        raised = False
+        try:
+            slow()
+        except KeyboardInterrupt:
+            raised = True
+        th.join(timeout=2)
+        out("interrupt_first",
+            raised and (not th.is_alive()) and js.eval("1+1") == 2)
+
+    js = cc_node.create()
+    busy = js.eval("() => { for (;;) {} }")
+
+    def _kill():
+        time.sleep(0.08)
+        js._kill_child()
+
+    th = threading.Thread(target=_kill)
+    th.start()
+    killed = False
+    try:
+        busy()
+    except cc_node.JsError as e:
+        msg = str(e).lower()
+        killed = "exit" in msg or "closed" in msg or "destroyed" in msg
+    except KeyboardInterrupt:
+        killed = js.closed
+    th.join(timeout=2)
+    if not js.closed:
+        try:
+            js.destroy()
+        except Exception:
+            pass
+    out("interrupt_kill", killed and js.closed)
 
 print("cc-node suite done")

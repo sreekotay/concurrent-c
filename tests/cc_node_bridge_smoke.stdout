@@ -29,4 +29,16 @@ buffer_big_shm true
 buffer_back_shm true
 buffer_u8 true
 buffer_no_strays true
+eval_no_require true
+eval_cell_require true
+eval_cell_path true
+eval_cell_bind true
+eval_cell_persist true
+eval_cell_bind_reserved true
+repr_cheap true
+repr_html_cheap true
+kernel_same true
+kernel_reset true
+interrupt_first true
+interrupt_kill true
 cc-node suite done

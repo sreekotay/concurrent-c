@@ -1,0 +1,12 @@
+{
+  "name": "cc-python-peer-bench",
+  "private": true,
+  "description": "Competitor installs for peer_bench.js. Not published. pymport is optional: no prebuild for Node 23, and a from-source build needs C++17.",
+  "dependencies": {
+    "node-calls-python": "^1.13.0",
+    "pythonia": "^1.2.6"
+  },
+  "optionalDependencies": {
+    "pymport": "^1.5.1"
+  }
+}

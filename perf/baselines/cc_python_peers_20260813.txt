@@ -1,0 +1,66 @@
+# npm/cc-python/benchmarks/peers/peer_bench.js snapshot
+# date: 2026-08-13T21:18:15.145Z
+# host: darwin arm64
+# node: v23.11.0
+# venv: repo .venv (CPython 3.14.6, numpy 2.5.2)
+# OPENBLAS_NUM_THREADS=1
+# pymport: built from source (CXXFLAGS=-std=c++17; no Node 23 prebuild)
+#
+# Idiomatic buffer path: cc-python Float64Array (memoryview / isolated ndarray);
+# pymport+ncp+pythonia copy via JS Array (TypedArray is bytes/bytearray).
+#
+# cc-python peer bench
+# date 2026-08-13T21:18:15.145Z
+# host darwin arm64 node v23.11.0
+# venv /Users/skotay/Documents/code/concurrent-c/.venv
+# peers cc-inproc,cc-iso,pymport,ncp,pythonia,js
+
+RESULT cc-inproc sqrt 1408
+RESULT cc-inproc kwargs_sorted 5084
+RESULT cc-inproc except 35140
+RESULT cc-inproc callback 1358
+RESULT cc-inproc dot16 2145
+RESULT cc-inproc dot1m 111927
+RESULT cc-inproc matmul128 21217
+RESULT cc-inproc norm16 1980
+RESULT cc-iso sqrt 17311
+RESULT cc-iso kwargs_sorted 25748
+RESULT cc-iso except 29650
+RESULT cc-iso callback 42138
+RESULT cc-iso dot16 28025
+RESULT cc-iso dot1m 26152135
+RESULT cc-iso matmul128 612425
+RESULT cc-iso norm16 17601
+RESULT pymport sqrt 2036
+RESULT pymport kwargs_sorted 5422
+RESULT pymport except 17169
+RESULT pymport callback 3388
+RESULT pymport dot16 6985
+RESULT pymport dot1m 222555203
+RESULT pymport matmul128 3392017
+RESULT pymport norm16 5355
+RESULT ncp sqrt 780
+RESULT ncp kwargs_sorted 3249
+RESULT ncp except 44802
+RESULT ncp callback 915
+RESULT ncp dot16 5440
+RESULT ncp dot1m 214182427
+RESULT ncp matmul128 2963075
+RESULT ncp norm16 3369
+RESULT pythonia sqrt 21380
+RESULT pythonia except 299132
+RESULT pythonia dot16 43017
+RESULT pythonia dot1m 723070380
+RESULT pythonia matmul128 9189417
+RESULT pythonia norm16 38496
+RESULT js sqrt 162
+RESULT js kwargs_sorted 784
+RESULT js except 4374
+RESULT js callback 121
+RESULT js dot16 363
+RESULT js dot1m 4119662
+RESULT js matmul128 2480334
+RESULT js norm16 292
+
+# DX: cc-inproc memoryview+KeyError; cc-iso ndarray:float64+KeyError;
+# pymport bytearray; ncp bytes; pythonia kwargs/callback skipped (for-await / fn wire).

@@ -9,7 +9,14 @@ description = "JavaScript and npm packages from Python over the Concurrent-C bri
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
-keywords = ["javascript", "node", "npm", "interop", "concurrent-c"]
+keywords = ["javascript", "node", "npm", "interop", "concurrent-c", "jupyter"]
+classifiers = [
+    "Framework :: IPython",
+    "Framework :: Jupyter",
+]
+
+[project.optional-dependencies]
+jupyter = ["ipython>=7"]
 
 [project.urls]
 Repository = "https://github.com/sreekotay/concurrent-c"

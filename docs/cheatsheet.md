@@ -448,7 +448,8 @@ Bridges: npm [`concurrent-c-python`](https://www.npmjs.com/package/concurrent-c-
 (Python from Node — default call blocks; `py.task` for a Promise; `{ isolated: true }`
 is a child interpreter, not a different calling convention),
 pip [`concurrent-c-node`](https://pypi.org/project/concurrent-c-node/)
-(JS from Python — always a `node` child; thenables awaited in the child).
+(JS from Python — always a `node` child; thenables awaited in the child;
+Jupyter/Colab: `%load_ext cc_node` then `%%js`).
 
 ---
 
