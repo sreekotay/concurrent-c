@@ -30,7 +30,7 @@ import subprocess
 import tempfile
 
 __all__ = ["create", "JsError", "JsHandle", "__version__"]
-__version__ = "0.13.0"
+__version__ = "0.20.0"
 
 # Typed buffers cross as typed arrays; big ones spill through shared
 # memory (tmpfs where available) — one memcpy per side, receiver

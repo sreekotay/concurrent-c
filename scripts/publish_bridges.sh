@@ -156,6 +156,13 @@ old_py, new_py = m.group(1), bump(m.group(1))
 text = text[: m.start(1)] + new_py + text[m.end(1) :]
 pyproject.write_text(text)
 
+init = pathlib.Path("pypi/cc-node/cc_node/__init__.py")
+init_text = init.read_text()
+init_m = re.search(r'(?m)^__version__\s*=\s*"([^"]+)"\s*$', init_text)
+if not init_m:
+    raise SystemExit("pypi/cc-node/cc_node/__init__.py: no __version__ = \"…\" line")
+init.write_text(init_text[: init_m.start(1)] + new_py + init_text[init_m.end(1) :])
+
 print(f"   concurrent-c-python  {old_npm} → {new_npm}")
 print(f"   concurrent-c-node    {old_py} → {new_py}")
 PY
@@ -230,7 +237,8 @@ fi
 if [[ "$NEED_GH" -eq 1 ]]; then
   # Version bumps must be on the default branch for OIDC; commit only those
   # two files so a dirty tree does not sweep unrelated edits into the release.
-  git add npm/cc-python/package.json pypi/cc-node/pyproject.toml
+  git add npm/cc-python/package.json pypi/cc-node/pyproject.toml \
+      pypi/cc-node/cc_node/__init__.py
   if ! git diff --cached --quiet; then
     git commit -m "Release bridges ${NPM_VER} / ${PY_VER}"
   else
