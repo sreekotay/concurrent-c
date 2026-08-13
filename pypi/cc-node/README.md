@@ -13,15 +13,19 @@ bridge):
 [JS / Python interop](https://github.com/sreekotay/concurrent-c/blob/main/docs/js-py-modules.md).
 
 ```python
-import cc_node
-
-js = cc_node.create()                # always a child `node` process
-_ = js.require('lodash')             # cwd node_modules
+from cc_node import require          # one session child (lazy)
+_ = require('lodash')                # cwd node_modules
 _.chunk([1, 2, 3, 4, 5], 2)          # [[1, 2], [3, 4], [5]]
+```
 
+A private child (`create()`) is still there when you want N Nodes or
+an explicit lifetime — not required for the first call.
+
+```python
+import cc_node
+js = cc_node.create()                # a private Node, not the session
 semver = js.require('semver')
 semver.satisfies('1.2.3', '^1.0.0')  # True
-
 js.destroy()                         # or: with cc_node.create() as js:
 ```
 
@@ -29,12 +33,13 @@ The other direction (Python from Node):
 [`concurrent-c-python`](https://www.npmjs.com/package/concurrent-c-python)
 (in-process by default; vs pymport / ncp / pythonia in that README).
 
-Every `create()` here is a separate Node — real addons, crash isolation,
-measurable wire. N domains = N processes.
+Every `create()` is a separate Node — real addons, crash isolation,
+measurable wire. N domains = N processes. `require()` / `get()` share
+one session for the process (the Jupyter kernel).
 
 | | this package | CC hosted (`cc_js_new(false, …)`) |
 |---|---|---|
-| API | `cc_node.create()` | `.ccs` program |
+| API | `require()` / `create()` | `.ccs` program |
 | Where | child `node` | libnode in-process |
 | Hot call | ~105µs RTT | sub-µs (needs libnode) |
 | Bulk | shm (~9.5ms / 8MB) | in-process |
@@ -45,11 +50,12 @@ measurable wire. N domains = N processes.
 
 - Always a child `node`. A call blocks until JS answers; thenables wait
   in the child. No `{ async: true }`.
+- `from cc_node import require` is the session. `create()` is a private
+  child. `reset()` / `%js_reset` / `%reset` / atexit tear the session down.
 - Scalars / `None` materialize; empty `{}` stays a handle; everything
   else is a `JsHandle` until `str()` / attrs / a call.
-- `import cc_node` then `%%js` or `cc_node.get()` — one session, not a
-  child per cell. `%load_ext` still works (idempotent).
-- `cc_node.require('path')` is `get().require('path')`.
+- Notebook: `import cc_node` registers `%%js` (no `%load_ext`). Same
+  session as `require()`.
 - `eval()` is one RTT, no extra globals. `%%js` / `eval_cell` install
   cwd `require` once.
 - `--bind` is `Object.assign(globalThis, …)` of names you name (wire
@@ -59,35 +65,36 @@ measurable wire. N domains = N processes.
 
 ```
 pip install concurrent-c-node                 # needs node on PATH
-pip install 'concurrent-c-node[jupyter]'      # magics (IPython)
+pip install 'concurrent-c-node[jupyter]'      # IPython (%%js); require() does not need this
 python -m cc_node.examples.use_node
 python -m cc_node.examples.bench_wire
 python -m cc_node.benchmarks.multi_domain
-python -m cc_node.benchmarks.vs_alts          # vs DIY node / pythonmonkey / mini-racer
+python -m cc_node.benchmarks.vs_alts          # vs pythonia / DIY node / pythonmonkey / mini-racer
 ```
 
 ## Jupyter / Colab
 
-Colab and the usual Jupyter kernel are **Python** — this package. Same
-calling convention as a script: a cell blocks until Node answers;
-thenables wait in the child. Magics and `get()` share **one** session
-for the kernel, not a spawn per cell (~28ms). Child `console.log`
-lands in the cell (inherited stdio, line-buffered).
+Same verb as pythonia: `require`. No `%load_ext`, no `create()`, no
+`destroy()` for the happy path. One session child for the kernel;
+`console.log` lands in the cell.
 
 ```python
 %pip install concurrent-c-node
 # if `node` is missing (typical Colab):
 !apt-get install -y nodejs
 
-import cc_node                 # magics register; no %load_ext
-path = cc_node.require('path')
-path.join('a', 'b')            # 'a/b'
+from cc_node import require
+require('lodash').chunk([1, 2, 3, 4, 5], 2)
 ```
+
+`import cc_node` also registers `%%js` (IPython already running; the
+`[jupyter]` extra is only if you want magics without IPython already
+installed).
 
 ```python
 %%js
 console.log('hi')              # shows in the cell
-require('path').join('a', 'b') # last expression comes back as Python
+require('lodash').chunk([1, 2, 3, 4, 5], 2)
 ```
 
 ```python
@@ -99,9 +106,10 @@ xs.map(x => x * 2)             # wire types only; no pickle fallback
 
 | | |
 |---|---|
-| `import cc_node` | registers magics; does **not** spawn until first `%%js` / `get()` / `require()` |
-| `%load_ext cc_node` | same, idempotent |
-| `%js 1+1` / `%%js` | eval on `cc_node.get()`; last expression is the result |
+| `from cc_node import require` | session `require`; spawns on first call |
+| `import cc_node` | registers magics; does **not** spawn until first `require()` / `%%js` |
+| `%load_ext cc_node` | same, idempotent; not required |
+| `%js 1+1` / `%%js` | eval on the same session; last expression is the result |
 | `-b xs` / `--bind xs,n` | publish those Python names on `globalThis` for the cell |
 | `-t chunks` / `--to` | store the result in the notebook namespace |
 | `%js_stats` | handle-table size (spawns if needed) |
@@ -146,25 +154,30 @@ Colab is not that. There, default `create()` blocks the kernel thread —
 Wire: line-JSON on dedicated fds (stdio stays yours). Bulk spill: private
 0700 dir, 0600 files, removed with the bridge.
 
-### Vs pythonmonkey / mini-racer / DIY node
+### Vs pythonia / pythonmonkey / mini-racer / DIY node
 
-Most “JS from Python” libraries are **not Node**. Bulk is a **sum** over
-1M floats (`.length` on an in-process wrapper is free and lies). Snapshot:
+Most “JS from Python” libraries are **not Node**. pythonia (PyPI
+[`javascript`](https://pypi.org/project/javascript/), JSPyBridge) is the
+packaged peer that is: `require()` on import, one child. Bulk is a
+**sum** over 1M floats (`.length` on an in-process wrapper is free and
+lies). Snapshot:
 [`cc_node_vs_alts_20260813.txt`](https://github.com/sreekotay/concurrent-c/blob/main/perf/baselines/cc_node_vs_alts_20260813.txt)
 · harness: [`benchmarks/vs_alts.py`](https://github.com/sreekotay/concurrent-c/blob/main/pypi/cc-node/cc_node/benchmarks/vs_alts.py).
 
-| | cc-node | DIY JSON stdio | `node -e` each | pythonmonkey | mini-racer |
-|---|---|---|---|---|---|
-| identity RTT | **20µs** | 39µs | 25ms | **<1µs** | 114µs |
-| callback | **36µs** | — | — | 1µs | — |
-| 8MB typed / list | **6.2ms shm** / 359ms | — / 197ms | — | — / 630ms proxy | — / 78ms |
-| `require('fs')` | yes | yes | yes | no | no |
-| process | child `node` | child `node` | new process/call | SpiderMonkey in-process | V8 isolate |
+| | cc-node | pythonia | DIY JSON stdio | `node -e` each | pythonmonkey | mini-racer |
+|---|---|---|---|---|---|---|
+| identity RTT | **20µs** | 42µs | 19µs | 23ms | **<1µs** | 104µs |
+| callback | **40µs** | 106µs | — | — | 1µs | — |
+| 8MB typed / list | **7.5ms shm** / 266ms | — / 481ms | — / 155ms | — | — / 609ms | — / 78ms |
+| `require('fs')` | yes | yes | yes | yes | no | no |
+| process | child `node` | child `node` | child `node` | new process/call | SpiderMonkey in-process | V8 isolate |
 
 Tiny scalars: pythonmonkey’s in-process SM beats a child. Real Node
 (`require('fs')`, native addons, callbacks, stdout stays yours): this
-package. Isolated `node -e` per call is ~1000× a persistent child.
-Optional engines SKIP if not importable — not package deps.
+package — ~2× pythonia on identity, shm for bulk, Python callables are
+sync (pythonia’s JS side sees a Promise). Isolated `node -e` per call is
+~1000× a persistent child. Optional engines SKIP if not importable —
+not package deps.
 
 The other direction (Python from Node):
 [`concurrent-c-python`](https://www.npmjs.com/package/concurrent-c-python)
@@ -218,9 +231,11 @@ total(array.array('d', range(1_000_000)))
 ## Common issues
 
 **`Cannot find module`.** `require` / `import` resolve from the Python
-process cwd (`node_modules` next to your program), not from this wheel’s
-site-packages. `npm install lodash` in the project directory is the fix;
-or `create(node=…)` / `CC_NODE_BIN` when the wrong Node is on `PATH`.
+process cwd (`node_modules` next to your notebook or program), not from
+this wheel’s site-packages, and this package does **not** `npm install`
+on a miss (pythonia does). `npm install lodash` in that directory is
+the fix; or `create(node=…)` / `CC_NODE_BIN` when the wrong Node is on
+`PATH`.
 
 ### Empty `{}` stays a handle
 
@@ -278,7 +293,7 @@ Both bridges (npm OIDC + PyPI OIDC):
 
 Examples: `use_node`, `bench_wire`, `benchmarks.multi_domain`,
 `benchmarks.vs_alts`.
-Jupyter: `import cc_node` then `%%js` (or `%load_ext cc_node`).
+Jupyter: `from cc_node import require` (or `import cc_node` then `%%js`).
 Stress: [`stress/bridge/`](https://github.com/sreekotay/concurrent-c/tree/main/stress/bridge).  
 Own hot path in C/CC → native module (40–90ns) —
 [JS / Python interop](https://github.com/sreekotay/concurrent-c/blob/main/docs/js-py-modules.md).

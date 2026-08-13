@@ -173,8 +173,8 @@ guest: [`examples/js/jsdemo_mod.ccs`](../examples/js/jsdemo_mod.ccs).
 Shim cache: `~/.cache/concurrent-c/js-host` (Debian/Ubuntu:
 `apt install libnode-dev`). From Python, any npm package goes through
 [`concurrent-c-node`](../pypi/cc-node)
-(`import cc_node` then `%%js` / `cc_node.get()` in Jupyter or Colab;
-one session child, same calling convention).
+(`from cc_node import require` in Jupyter or Colab; `%%js` on the same
+session; one child, same calling convention).
 
 ## Module export — Node / Python own main
 
@@ -328,7 +328,7 @@ call it from C, you can export it.
 | N×numpy, crash isolation, per-domain venvs | `concurrent-c-python` isolated domains | ~100µs RTT, shm bulk |
 | any *npm package* from Python | `pip install concurrent-c-node` | ~105µs RTT, shm bulk |
 
-Same-machine vs DIY `node` / pythonmonkey / mini-racer:
+Same-machine vs pythonia / DIY `node` / pythonmonkey / mini-racer:
 [`cc_node.benchmarks.vs_alts`](../pypi/cc-node/cc_node/benchmarks/vs_alts.py)
 ([`cc_node_vs_alts_20260813.txt`](../perf/baselines/cc_node_vs_alts_20260813.txt)).
 Engines that are not Node can win a scalar call and still fail `require('fs')`.

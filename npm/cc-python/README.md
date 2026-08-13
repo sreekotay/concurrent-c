@@ -97,16 +97,18 @@ Receipts:
 ## Jupyter / Colab
 
 Colab and the usual Jupyter kernel are **Python** — that is
-[`concurrent-c-node`](https://pypi.org/project/concurrent-c-node/)
-(`import cc_node` then `%%js` / `cc_node.get()`; magics, interrupt,
-`--bind` in that README). This package is the JS-kernel direction
-(`tslab`, Deno Jupyter):
+[`concurrent-c-node`](https://pypi.org/project/concurrent-c-node/):
+
+```python
+from cc_node import require
+require('lodash').chunk([1, 2, 3, 4, 5], 2)
+```
+
+(`%%js` / `--bind` in that README). This package is the JS-kernel
+direction (`tslab`, Deno Jupyter):
 
 ```js
-const py = require('concurrent-c-python').get();  // session; default in-process
-const np = py.import('numpy');
-// same session, no get() at the call site:
-// const np = require('concurrent-c-python').import('numpy');
+const np = require('concurrent-c-python').import('numpy');  // session
 ```
 
 Default `get()` / `create()` blocks this thread until Python answers.
@@ -426,7 +428,7 @@ same spelling, ~8× pythonia.
 
 The other direction (JS / npm from Python):
 [`concurrent-c-node`](https://pypi.org/project/concurrent-c-node/)
-vs DIY node / pythonmonkey / mini-racer. Jupyter/Colab magics live there
-(`import cc_node` then `%%js` / `cc_node.get()`).
+vs pythonia / DIY node / pythonmonkey / mini-racer. Jupyter/Colab:
+`from cc_node import require`.
 
 Stress: [`stress/bridge/`](https://github.com/sreekotay/concurrent-c/tree/main/stress/bridge).

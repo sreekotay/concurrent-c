@@ -6,8 +6,9 @@ Real Node (this package)
     `require('fs')`, native addons, the npm in cwd, crash isolation.
     Honest alternatives: drive a `node` child yourself. Spawn-per-call
     (`node -e`) is what people write first. A persistent JSON-stdio loop
-    is the DIY that actually competes. PyExecJS was that, abandoned.
-    `pythonodejs` claims an embed; treat as optional if importable.
+    is the DIY that actually competes. pythonia (PyPI `javascript`,
+    JSPyBridge) is the packaged peer with the same DX — `require()` on
+    import, one child. PyExecJS was eval-a-string; abandoned.
 
 A JS engine inside CPython (not Node)
     pythonmonkey — SpiderMonkey + CommonJS `require` of *pure JS*.
@@ -218,6 +219,77 @@ def bench_cc_node():
     js.destroy()
 
 
+def bench_pythonia():
+    """JSPyBridge: PyPI `javascript`, npm twin `pythonia`. Real Node child.
+    A Python callable the JS side sees is a Promise (await in the child)."""
+    try:
+        t0 = time.perf_counter()
+        from javascript import eval_js, require
+        eval_js("return 1")
+        _result("pythonia.spawn_ms", round((time.perf_counter() - t0) * 1000))
+    except ImportError:
+        _result("pythonia.rtt_us", "SKIP not installed")
+        _cap("pythonia.require_path", False, "not installed")
+        _cap("pythonia.require_fs", False, "not installed")
+        return
+
+    f = eval_js("return (x) => x")
+    f(1)
+    dt = _time_loop(500, f)
+    _result("pythonia.rtt_us", _us(dt, 500))
+
+    try:
+        g = eval_js(
+            "return async (cb) => { const v = await cb(21); return v * 2 }")
+        if g(lambda x: x + 1) != 44:
+            raise RuntimeError("callback mismatch")
+        dt = _time_loop(200, lambda _i: g(lambda x: x + 1))
+        _result("pythonia.callback_roundtrip_us", _us(dt, 200))
+        _cap("pythonia.python_callback", True,
+             "JS sees a Promise; await in the child")
+    except Exception as e:
+        _result("pythonia.callback_roundtrip_us",
+                "SKIP %s" % type(e).__name__)
+        _cap("pythonia.python_callback", False, str(e)[:80])
+
+    _result("pythonia.bulk_8mb_shm_ms", "SKIP JSON IPC, no shm")
+    try:
+        biglist = _bulk_list()
+        sm = eval_js("return " + SUM_JS)
+        got = sm(biglist)
+        expect = _bulk_sum_expect(biglist)
+        if abs(float(got) - expect) > 1e-3:
+            raise RuntimeError("pythonia bulk sum mismatch")
+        t0 = time.perf_counter()
+        for _ in range(3):
+            sm(biglist)
+        _result("pythonia.bulk_8mb_json_list_ms",
+                round((time.perf_counter() - t0) / 3 * 1000))
+    except Exception as e:
+        _result("pythonia.bulk_8mb_json_list_ms",
+                "SKIP %s" % type(e).__name__)
+
+    _cap("pythonia.require_path",
+         require("path").join("a", "b") == "a/b")
+    fd, tmp = tempfile.mkstemp()
+    try:
+        os.write(fd, b"hi")
+        os.close(fd)
+        got = require("fs").readFileSync(tmp, "utf8")
+        _cap("pythonia.require_fs", got == "hi")
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    try:
+        then = eval_js(
+            "return async (x) => { await Promise.resolve(); return x * 2 }")
+        _cap("pythonia.thenable", then(21) == 42)
+    except Exception as e:
+        _cap("pythonia.thenable", False, str(e)[:80])
+
+
 def bench_diy_stdio():
     t0 = time.perf_counter()
     diy = DiyStdio()
@@ -408,6 +480,7 @@ def main():
         print("SKIP need node on PATH")
         return 1
     bench_cc_node()
+    bench_pythonia()
     bench_diy_stdio()
     bench_spawn_each()
     bench_pythonmonkey()

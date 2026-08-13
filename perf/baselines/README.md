@@ -26,7 +26,7 @@ Compiler suite metrics live separately in
 | vs pymport / ncp / pythonia | [`cc_python_peers_20260813.txt`](cc_python_peers_20260813.txt) | `VIRTUAL_ENV=… node npm/cc-python/benchmarks/peers/peer_bench.js` (see [`../../npm/cc-python/benchmarks/peers/README.md`](../../npm/cc-python/benchmarks/peers/README.md)) |
 | Isolated kill+respawn (cancel-via-kill) | *(capture locally)* | `node npm/cc-python/examples/js_isolated_cancel_churn.js` |
 | Python → Node wire (`concurrent-c-node`) | [`cc_node_bridge_py_20260810.txt`](cc_node_bridge_py_20260810.txt) | `python -m cc_node.examples.bench_wire` |
-| Python → Node vs DIY / engines | [`cc_node_vs_alts_20260813.txt`](cc_node_vs_alts_20260813.txt) | `python -m cc_node.benchmarks.vs_alts` |
+| Python → Node vs pythonia / DIY / engines | [`cc_node_vs_alts_20260813.txt`](cc_node_vs_alts_20260813.txt) | `python -m cc_node.benchmarks.vs_alts` |
 | Python → Node multi-domain | *(capture locally)* | `python -m cc_node.benchmarks.multi_domain` |
 | Node → CC → numpy compose | [`js_numpy_node_20260808.txt`](js_numpy_node_20260808.txt) | `ccc build perf/js_numpy.ccs && node perf/js_numpy.js` |
 

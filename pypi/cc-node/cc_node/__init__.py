@@ -1,9 +1,11 @@
 """cc-node: JavaScript (and every npm package) from Python.
 
-    import cc_node
-    js = cc_node.create()                 # an Isolation Domain: one node child
-    _ = js.require('lodash')              # resolved from YOUR cwd's node_modules
+    from cc_node import require
+    _ = require('lodash')                 # session child; cwd node_modules
     _.chunk([1, 2, 3, 4, 5], 2)           # [[1, 2], [3, 4], [5]]
+
+    import cc_node
+    js = cc_node.create()                 # a private child, not the session
     js.destroy()
 
 The mirror of the cc-python bridge, same rules pointed the other way:
@@ -19,8 +21,8 @@ Handles never cross domains; every door after destroy() answers
 articulately; destroy is idempotent and `with cc_node.create() as js:`
 scopes it.
 
-Notebooks (Jupyter / Colab): `import cc_node` then `%%js` or
-`cc_node.get()` — one session domain, same calling convention.
+Notebooks (Jupyter / Colab): `from cc_node import require` or
+`import cc_node` then `%%js` — one session, same calling convention.
 """
 import array
 import atexit

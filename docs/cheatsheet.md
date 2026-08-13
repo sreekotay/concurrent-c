@@ -449,7 +449,7 @@ Bridges: npm [`concurrent-c-python`](https://www.npmjs.com/package/concurrent-c-
 is a child interpreter, not a different calling convention),
 pip [`concurrent-c-node`](https://pypi.org/project/concurrent-c-node/)
 (JS from Python — always a `node` child; thenables awaited in the child;
-Jupyter/Colab: `import cc_node` then `%%js` / `cc_node.get()`).
+Jupyter/Colab: `from cc_node import require`).
 
 ---
 
