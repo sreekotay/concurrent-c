@@ -23,7 +23,11 @@ function banner(t) {
   const py = ccpy.create();
   const math = py.import('math');
   const builtins = py.import('builtins');
-  console.log('math.sqrt(16) =', math.sqrt(16));
+  console.log('math.sqrt(16) =', math.sqrt(16),
+              'isProxy', ccpy.isProxy(math.sqrt(16)));
+  const empty = builtins.dict();
+  console.log('builtins.dict() isProxy', ccpy.isProxy(empty),
+              'same', py.is(empty, empty));
 
   const ns = builtins.dict();
   builtins.exec(`

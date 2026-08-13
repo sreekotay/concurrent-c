@@ -6,6 +6,11 @@ neg_inproc_release_again true
 neg_inproc_keep_past_return true
 neg_inproc_bare_eval true
 neg_inproc_bare_exec true
+neg_inproc_isproxy_mod true
+neg_inproc_isproxy_scalar true
+neg_inproc_is_same true
+neg_inproc_is_distinct true
+neg_inproc_is_scalar true
 neg_inproc_dict_keys true
 neg_inproc_dict_in true
 neg_inproc_setattr true
@@ -68,6 +73,11 @@ neg_iso_block_during_task true
 neg_iso_block_after_task true
 neg_iso_empty_dict_handle true
 neg_iso_exec_namespace true
+neg_iso_isproxy_mod true
+neg_iso_isproxy_scalar true
+neg_iso_is_same true
+neg_iso_is_distinct true
+neg_iso_is_scalar true
 neg_iso_foreign_arg true
 neg_iso_after_close true
 neg_iso_sibling_alive true

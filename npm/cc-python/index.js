@@ -39,10 +39,27 @@ function locateAddon() {
 const native = require(locateAddon());
 
 const HANDLE = Symbol('cc-python-handle');
+const RHANDLE = Symbol('cc-python-remote');
 const KWARGS = Symbol('cc-python-kwargs');
 
 function unwrapArg(a) {
   return (a !== null && a !== undefined && a[HANDLE]) ? a[HANDLE] : a;
+}
+
+function isProxy(x) {
+  return x != null &&
+    (typeof x === 'function' || typeof x === 'object') &&
+    !!(x[HANDLE] || x[RHANDLE]);
+}
+
+function pythonIs(bridge, a, b) {
+  if (!isProxy(a) || !isProxy(b)) {
+    throw new Error(
+        'concurrent-c-python: is() wants two proxies (scalars already ' +
+        'compared with ===)');
+  }
+  if (!bridge._isOp) bridge._isOp = bridge.import('operator').is_;
+  return !!bridge._isOp(a, b);
 }
 
 /* Split positionals from a trailing kwargs(...) marker.  A trailing plain
@@ -486,6 +503,12 @@ class Bridge {
   stats() {
     return native.stats(this._dom);
   }
+  isProxy(x) {
+    return isProxy(x);
+  }
+  is(a, b) {
+    return pythonIs(this, a, b);
+  }
   get closed() {
     return native.closed(this._dom);
   }
@@ -518,7 +541,6 @@ class Bridge {
 // this domain is refused (the blocking pump owns the pipe). A child
 // crash still rejects in-flight task() calls.
 
-const RHANDLE = Symbol('cc-python-remote');
 const TA_KIND = new Map([
   [Float64Array, 'f64'], [Float32Array, 'f32'],
   [Int32Array, 'i32'], [BigInt64Array, 'i64'], [Uint8Array, 'u8'],
@@ -1136,6 +1158,12 @@ class ProcBridge {
   stats() {
     return this._reqSync({ op: 'stats' }).v;
   }
+  isProxy(x) {
+    return isProxy(x);
+  }
+  is(a, b) {
+    return pythonIs(this, a, b);
+  }
   get closed() {
     return this._closed;
   }
@@ -1206,6 +1234,8 @@ class ProcBridge {
 
 module.exports = {
   version: require('./package.json').version,
+
+  isProxy,
 
   // Keyword arguments for a Python call, explicitly marked and last:
   //   fmt(1, kwargs({ sep: '+' }))     →  fmt(1, sep='+')

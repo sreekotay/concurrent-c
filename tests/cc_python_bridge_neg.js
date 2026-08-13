@@ -57,6 +57,15 @@ async function raisesAsync(fn, re) {
     b.exec('ccpy_bare_x = 7');
     out('neg_inproc_bare_exec', b.eval('ccpy_bare_x') === 7);
 
+    out('neg_inproc_isproxy_mod', ccpy.isProxy(math) && py.isProxy(math));
+    out('neg_inproc_isproxy_scalar',
+        !ccpy.isProxy(math.sqrt(16)) && !ccpy.isProxy(null));
+    out('neg_inproc_is_same',
+        py.is(math, py.import('math')) && py.is(math, math));
+    out('neg_inproc_is_distinct', !py.is(b.list(), b.list()));
+    out('neg_inproc_is_scalar',
+        raisesSync(() => py.is(1, 1), /two proxies/));
+
     // Dict reflection: keys/in match iteration (not the empty function target).
     {
       const d = b.dict();
@@ -424,6 +433,13 @@ async function raisesAsync(fn, re) {
       const add1 = ns.get('add1');
       out('neg_iso_exec_namespace', add1(40) === 41);
     }
+
+    out('neg_iso_isproxy_mod', ccpy.isProxy(b) && py.isProxy(b));
+    out('neg_iso_isproxy_scalar', !ccpy.isProxy(id(1)));
+    out('neg_iso_is_same', py.is(b, py.import('builtins')) && py.is(b, b));
+    out('neg_iso_is_distinct', !py.is(b.list(), b.list()));
+    out('neg_iso_is_scalar',
+        raisesSync(() => py.is(1, 1), /two proxies/));
 
     // Foreign handle as call argument — must not silently re-home.
     const other = ccpy.create({ isolated: true });

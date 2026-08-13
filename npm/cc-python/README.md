@@ -14,14 +14,13 @@ package bridge):
 ```js
 const py = require('concurrent-c-python').create();  // in-process
 // const py = require('concurrent-c-python').create({ isolated: true });
-const np = py.import('numpy');
+const np = py.import('numpy');  // proxy
 
 const a = new Float64Array(1_000_000).map((_, i) => i % 97);
 const b = new Float64Array(1_000_000).map((_, i) => i % 89);
 
-np.dot(a, b);   // 1M-element dot product: 5-8x FASTER than the same
-                // loop in JS — the arrays cross as zero-copy leases,
-                // numpy's BLAS does the math, a JS number comes back
+np.dot(a, b);            // JS number — 5–8× a JS loop; arrays cross as leases
+const xs = np.arange(4); // proxy until xs.toTypedArray() / toJS() / String(xs)
 
 py.destroy();   // one sweep: every handle, the arena, the interpreter
 ```
@@ -38,6 +37,7 @@ Scalars and `None` materialize; everything else is a proxy until
 
 - Default call blocks. `py.task` is the only Promise.
 - `{ isolated: true }` is not a different `await` story.
+- `isProxy(x)` is the predicate. `py.is(a, b)` is Python `is`.
 - Trailing `{…}` is a positional dict; `kwargs({…})` means keywords.
 - `===` is not Python `is`. `if (proxy)` is always true (`typeof` is `'function'`).
 - Overlap isolated domains with `Promise.all([a.task(f)(), b.task(g)()])`.
