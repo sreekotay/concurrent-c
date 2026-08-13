@@ -29,6 +29,109 @@ Outputs: `./out` (generated C) and `./bin` (binaries), relative to cwd.
 
 ---
 
+## Results — declare & consume (`T!>(E)`)
+
+Fallible work returns `T!>(E)`. Produce with `cc_ok` / `cc_err`; consume every
+result with `?>` or `!>`. Recipe:
+[recipe_result_error_handling.ccs](../examples/recipe_result_error_handling.ccs).
+
+### Declare / return
+
+```c
+int !>(CCError) read_config(const char* key) {
+    if (!key || !key[0]) return cc_err(CC_ERR_INVALID_ARG, "empty key");
+    if (strcmp(key, "timeout") == 0) return cc_ok(30);
+    return cc_err(CC_ERR_NOT_FOUND, "key not found");
+}
+```
+
+Inside a function whose return type is `T!>(E)`, `cc_ok(v)` / `cc_err(…)` infer
+`T` and `E`. Forms:
+
+| Form | Meaning |
+|------|---------|
+| `return cc_ok(v);` | success payload `v` |
+| `return cc_ok();` | `void!>(E)` success |
+| `return cc_err(e);` | propagate / wrap error `e` |
+| `return cc_err(CC_ERR_*, "msg");` | build `CCError` when `E` is `CCError` |
+
+Explicit when not in return context: `cc_ok(T, v)`, `cc_ok(T, E, v)`,
+`cc_err(T, e)`, `cc_err(T, E, e)`.
+
+### Consume
+
+Two operators; everything else is a modifier:
+
+| | Error becomes |
+|--|--|
+| `?>` | a **value** — `x ?> default` / `x ?>(e) …` |
+| `!>` | **code** that must leave — `x !> { … }` / `x !>;` |
+
+```c
+@errhandler(CCError e) cc_error_exit(e);   // policy for bare !>;
+
+int a = read_config("timeout") ?> 30;
+int b = read_config("timeout") !>;                    // → @errhandler
+int c = read_config("timeout") !>(e) { /* local */ @err(e); };
+int d = read_config("timeout") !>(e) return cc_err(e); // propagate
+CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+```
+
+Tasks do not inherit `@errhandler` — re-bind inside each spawn body.
+
+### C lowered API
+
+`T!>(E)` is sugar over a tagged union. The lowerer emits a concrete type and
+typed constructors; plain C (and `@emit` / generators) use those, not `!>` / `?>`.
+
+```c
+/* Sugar                         Lowered */
+int !>(CCError)                  CCResult_int_CCError
+void !>(CCError)                 CCResult_void_CCError
+
+return cc_ok(30);                return cc_ok_CCResult_int_CCError(30);
+return cc_err(e);                return cc_err_CCResult_int_CCError(e);
+```
+
+Layout (from `CC_DECL_RESULT_SPEC`):
+
+```c
+typedef struct CCResult_int_CCError {
+    bool ok;
+    union { int value; CCError error; } u;
+} CCResult_int_CCError;
+```
+
+**Prefer accessors** (work in `.ccs`, plain C, macros, generated code):
+
+| API | Meaning |
+|-----|---------|
+| `cc_is_ok(r)` / `cc_is_err(r)` | tag |
+| `cc_value(r)` / `cc_error(r)` | active arm (only after a check) |
+| `r.is_ok()` / `r.value()` | same via UFCS (`.value()` aborts if err) |
+
+```c
+CCResult_int_CCError r = read_config("timeout");  /* or: __typeof__(read_config("")) r = … */
+if (cc_is_ok(r)) use(cc_value(r));
+else handle(cc_error(r));
+/* peel after a check: r.ok / r.u.value / r.u.error — C interop detail */
+```
+
+In headers that name a Result for C callers, declare once with a guard:
+
+```c
+#ifndef CCResult_MyData_MyError_DEFINED
+#define CCResult_MyData_MyError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_MyData_MyError, MyData, MyError)
+#endif
+```
+
+Do not hand-spell `CCResult_*` / `cc_ok_CCResult_*` in ordinary `.ccs` /
+`.cch` bodies — write `T!>(E)` and `cc_ok` / `cc_err`. Reach for the mangled
+names and accessors when operators cannot run (plain C, `@emit`, generators).
+
+---
+
 ## Cleanup: `@defer` / `@destroy` / registration
 
 `@destroy` is **`@defer` sugar on a declaration** — same LIFO ledger. With `!>`,
@@ -67,28 +170,6 @@ CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
 ```
 
 Recipe: [recipe_defer_cleanup.ccs](../examples/recipe_defer_cleanup.ccs).
-
----
-
-## Results (`T!>(E)`)
-
-Two operators; everything else is a modifier:
-
-| | Error becomes |
-|--|--|
-| `?>` | a **value** — `x ?> default` / `x ?>(e) …` |
-| `!>` | **code** that must leave — `x !> { … }` / `x !>;` |
-
-```c
-@errhandler(CCError e) cc_error_exit(e);   // policy for bare !>;
-
-int a = read() ?> 30;
-int b = read() !>;                         // → @errhandler
-int c = read() !>(e) { /* local */ @err(e); };
-CCNursery* n = cc_nursery_create(NULL) !> @destroy;
-```
-
-Tasks do not inherit `@errhandler` — re-bind inside each spawn body.
 
 ---
 
