@@ -185,6 +185,7 @@ MyRes r = my_res_open() !> @destroy;   // → defer my_res_close
 Hook order when both exist: registered pre-destroy → call-site `@destroy { … }`
 body → registered destroy (nursery: wait → your body → free). Details:
 [Language Concepts §1](language-concepts.md#1-cleanup-binds-to-a-place).
+Full walkthrough (hooks + views): [typehooks-typeviews.md](typehooks-typeviews.md).
 
 ### Results — `T!>(E)`
 
@@ -440,6 +441,7 @@ Script form of the same door: [examples/py/pydemo.shcc](../examples/py/pydemo.sh
 ## Next
 
 - [Language Concepts](language-concepts.md)
+- [@typehooks / @typeview](typehooks-typeviews.md) — register destroy/create, faces, allow-lists
 - [Cheatsheet](cheatsheet.md)
 - [Backwards compatibility](backwards_compatibility.md) — unit headers and version pins
 - [`.shcc` scripts](#shcc-scripts) · [spec §9.5](../spec/concurrent-c-spec-complete.md#95-script-library-shcc--cccscript)

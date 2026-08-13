@@ -1,0 +1,60 @@
+/* @typehooks .create / .destroy / .ufcs accept the functions themselves. */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_ufcs.cch>
+#include <stdio.h>
+
+typedef struct {
+    int fd;
+    int alive;
+} Port;
+
+static Port port_open(int fd) {
+    Port p;
+    p.fd = fd;
+    p.alive = 1;
+    return p;
+}
+
+static void port_close(Port* p) {
+    if (!p || !p->alive) return;
+    p->alive = 0;
+}
+
+static int port_put_2(Port* p, char[:] data) {
+    (void)p;
+    return (int)data.len;
+}
+
+static char[:] port_ufcs(char[:] recv_type, char[:] method, char[:] mode,
+                         CCSliceArray argv, CCSliceArray arg_types,
+                         CCArena* arena) {
+    (void)recv_type;
+    (void)mode;
+    (void)argv;
+    (void)arg_types;
+    switch (method) {
+    case "put": return @slice("port_put_2");
+    default:    return @string(`port_${method}`, arena).as_slice();
+    }
+}
+
+@typehooks on Port {
+    .create = port_open,
+    .destroy = port_close,
+    .ufcs = port_ufcs,
+};
+
+static int port_ready(Port* p) {
+    return p != NULL && p->alive;
+}
+
+int main(void) {
+    Port p = @create(3) @destroy;
+    int n = p.put("hello");
+    int ok = p.ready();
+    if (n != 5) return 1;
+    if (!ok) return 2;
+    if (p.fd != 3) return 3;
+    printf("ok\n");
+    return 0;
+}

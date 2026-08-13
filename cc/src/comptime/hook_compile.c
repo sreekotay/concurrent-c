@@ -22,6 +22,7 @@
 #include "header/lower_header.h"
 #include "preprocess/emit_plan.h"
 #include "preprocess/preprocess.h"
+#include "preprocess/strswitch_comptime.h"
 #include "preprocess/type_registry.h"
 #include "util/cache_evict.h"
 #include "util/path.h"
@@ -277,6 +278,14 @@ static int cc__find_repo_root(const char* input_path, char* out, size_t out_sz) 
  * compiler, so callers must not rely on handlers referencing @-decorated
  * top-level constructs.
  */
+/* Top-level `typedef` is re-injected from cc_ct_extract_type_decls_prelude
+ * (the type pass / filter otherwise drops `typedef struct { … } Name;`). */
+static int cc__chunk_starts_with_typedef(const char* src, size_t start, size_t end) {
+    while (start < end && isspace((unsigned char)src[start])) start++;
+    return start + 7 <= end && memcmp(src + start, "typedef", 7) == 0 &&
+           (start + 7 == end || !cc_is_ident_char(src[start + 7]));
+}
+
 static void cc__emit_top_level_filtered(char** out,
                                         size_t* out_len,
                                         size_t* out_cap,
@@ -327,6 +336,7 @@ static void cc__emit_top_level_filtered(char** out,
                         int drop_at = cc__chunk_contains_at(src, start, body_r + 1) &&
                                       !cc__chunk_is_comptime_fn(src, start, body_r + 1);
                         if (!drop_at &&
+                            !cc__chunk_starts_with_typedef(src, start, body_r + 1) &&
                             !cc__chunk_contains_ufcs_shaped_call(src, start, body_r + 1)) {
                         if (cc__chunk_is_comptime_fn(src, start, body_r + 1))
                             cc__emit_chunk_stripped(out, out_len, out_cap, src, start, body_r + 1);
@@ -343,6 +353,7 @@ static void cc__emit_top_level_filtered(char** out,
                         int drop_at = cc__chunk_contains_at(src, start, j + 1) &&
                                       !cc__chunk_is_comptime_fn(src, start, j + 1);
                         if (!drop_at &&
+                            !cc__chunk_starts_with_typedef(src, start, j + 1) &&
                             !cc__chunk_contains_ufcs_shaped_call(src, start, j + 1)) {
                             if (cc__chunk_is_comptime_fn(src, start, j + 1))
                                 cc__emit_chunk_stripped(out, out_len, out_cap, src, start, j + 1);
@@ -810,6 +821,7 @@ static int cc__build_compile_and_load(const char* input_path,
     char err_buf[1024] = {0};
     char* blanked_src = NULL;
     char* pp_src = NULL;
+    char* type_decls = NULL;
     char* tu_src = NULL;
     size_t tu_len = 0, tu_cap = 0;
     char input_dir[1024];
@@ -855,6 +867,9 @@ static int cc__build_compile_and_load(const char* input_path,
         (void)cc_type_registry_scope_push(&reg_scope);
     }
 
+    if (!isolated_body && original_src && original_len)
+        type_decls = cc_ct_extract_type_decls_prelude(original_src, original_len);
+
     blanked_src = isolated_body ? NULL
                                 : cc__blank_comptime_blocks_preserve_layout(original_src, original_len);
     if (!isolated_body && !blanked_src) {
@@ -882,6 +897,18 @@ static int cc__build_compile_and_load(const char* input_path,
             pp_src = cc_preprocess_to_string_ex(blanked_src, strlen(blanked_src), input_path, 1);
         }
         if (!pp_src) { snprintf(err_buf, sizeof(err_buf), "failed to preprocess CC source"); goto done; }
+        {
+            char swerr[320];
+            char* sw = cc_comptime_strswitch_rewrite(pp_src, strlen(pp_src),
+                                                     swerr, sizeof(swerr));
+            if (!sw) {
+                snprintf(err_buf, sizeof(err_buf), "%s",
+                         swerr[0] ? swerr : "string switch rewrite failed");
+                goto done;
+            }
+            free(pp_src);
+            pp_src = sw;
+        }
     }
 
     cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "#ifndef __CC__\n#define __CC__ 1\n#endif\n");
@@ -929,6 +956,12 @@ static int cc__build_compile_and_load(const char* input_path,
            block in the lowered body has a resolvable referent. */
         cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "#ifndef CC_PARSER_MODE\n#define CC_PARSER_MODE 1\n#endif\n");
         cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "#include <ccc/cc_result.h>\n");
+        /* Typedefs are lifted out of the preprocessed body (and dropped by
+         * the top-level filter). Put them back so handlers can name user types. */
+        if (type_decls && type_decls[0]) {
+            cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, type_decls);
+            cc__hc_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "\n");
+        }
     }
     /* For .cch batches (source_is_header): leave CC_PARSER_MODE undefined so
        cc_lower_header_string's non-parser-mode declarations take effect and
@@ -1129,6 +1162,7 @@ done:
     cc__argv_free(&argv);
     free(blanked_src);
     free(pp_src);
+    free(type_decls);
     free(tu_src);
     cc_type_registry_scope_pop(&reg_scope);
     /* Keyed by a toolchain fingerprint + TU hash, so every edit orphans an

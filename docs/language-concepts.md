@@ -66,7 +66,8 @@ and (for this ordinary path) no `@typehooks` step. Method and free forms
 are the same API (`v.push(10)` ↔ `CCVec_int_push(&v, 10)`); Concurrent-C examples
 prefer the method form. Stdlib families may also register a `.ufcs` lowerer for
 naming/rewrite policy; that is optional library machinery, not required to add
-a method — see [getting started](getting-started.md#ufcs--methods-are-ordinary-functions).
+a method — see [getting started](getting-started.md#ufcs--methods-are-ordinary-functions)
+and the [@typehooks / @typeview tutorial](typehooks-typeviews.md).
 
 ```c
 /* extend: one declaration */
@@ -112,7 +113,8 @@ so the compiler can reject views that outlive their storage. `char[:0]` is the
 NUL-terminated refinement — prefer `char[:0] s = "hi";` for string literals.
 
 Ordinary slice sites allow loads and UFCS; field stores (`s.len = …`) are
-denied (`@restricted` on the slice family).
+denied (`@typeview` on the slice family). Tutorial:
+[@typehooks / @typeview](typehooks-typeviews.md).
 
 | Arena | Lifetime + storage policy | Typical use |
 |-------|---------------------------|-------------|

@@ -159,6 +159,11 @@ if [ -x "./cc/bin/ccc" ]; then
     echo "[test] CLI selftest FAILED"
     exit 1
   fi
+  # Tutorial fences: docs/typehooks-typeviews.md is the source of truth.
+  if ! bash scripts/test_doc_fences.sh; then
+    echo "[test] doc fence smoke FAILED"
+    exit 1
+  fi
   # Full SERDES goldens/recipes: scripts/test_shadow.sh (not this gate).
 
   if [ "$quick" = 0 ]; then

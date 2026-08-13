@@ -40,6 +40,7 @@ Fuller example (error policy + compose): [examples/hello.ccs](examples/hello.ccs
 
 - [Getting Started](docs/getting-started.md) — install, first program, concurrency
 - [Language Concepts](docs/language-concepts.md) — defer, results, UFCS, slices/arenas (arena = lifetime; alloc = policy), closures
+- [@typehooks / @typeview](docs/typehooks-typeviews.md) — lifecycle hooks, is-a faces, allow-list views
 - [Cheatsheet](docs/cheatsheet.md)
 - [Language spec](spec/concurrent-c-spec-complete.md)
 - [Stdlib](spec/concurrent-c-stdlib-spec.md)

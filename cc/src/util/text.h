@@ -1670,6 +1670,164 @@ static inline char* cc_strip_typeview_blocks(const char* src, size_t n) {
     return out;
 }
 
+static inline int cc__th_grow(char** out, size_t* cap, size_t w, size_t need) {
+    size_t nc;
+    char* nb;
+    if (w + need <= *cap) return 0;
+    nc = *cap * 2 + need + 64;
+    nb = (char*)realloc(*out, nc + 1);
+    if (!nb) return -1;
+    *out = nb;
+    *cap = nc;
+    return 0;
+}
+
+/* Copy a @typehooks body, wrapping `.create = ident` / `.destroy = ident`
+ * as cc_type_*_call("ident") so the register object type-checks. Calls
+ * (`cc_type_create_call(...)`) and other fields are copied unchanged. */
+static inline int cc__th_copy_hooks_body(const char* src, size_t body_l, size_t body_n,
+                                         char** out, size_t* w, size_t* cap) {
+    size_t i = body_l;
+    size_t end = body_l + body_n;
+    int ls = 0, lc = 0, st = 0, ch = 0;
+    while (i < end) {
+        char d = src[i];
+        char d2 = (i + 1 < end) ? src[i + 1] : 0;
+        if (lc) {
+            if (cc__th_grow(out, cap, *w, 1) != 0) return -1;
+            (*out)[(*w)++] = d;
+            if (d == '\n') lc = 0;
+            i++;
+            continue;
+        }
+        if (ls) {
+            if (cc__th_grow(out, cap, *w, 1) != 0) return -1;
+            (*out)[(*w)++] = d;
+            if (d == '*' && d2 == '/') {
+                if (cc__th_grow(out, cap, *w, 1) != 0) return -1;
+                (*out)[(*w)++] = d2;
+                i += 2;
+                ls = 0;
+                continue;
+            }
+            i++;
+            continue;
+        }
+        if (st) {
+            if (cc__th_grow(out, cap, *w, 1) != 0) return -1;
+            (*out)[(*w)++] = d;
+            if (d == '\\' && d2) {
+                if (cc__th_grow(out, cap, *w, 1) != 0) return -1;
+                (*out)[(*w)++] = d2;
+                i += 2;
+                continue;
+            }
+            if (d == '"') st = 0;
+            i++;
+            continue;
+        }
+        if (ch) {
+            if (cc__th_grow(out, cap, *w, 1) != 0) return -1;
+            (*out)[(*w)++] = d;
+            if (d == '\\' && d2) {
+                if (cc__th_grow(out, cap, *w, 1) != 0) return -1;
+                (*out)[(*w)++] = d2;
+                i += 2;
+                continue;
+            }
+            if (d == '\'') ch = 0;
+            i++;
+            continue;
+        }
+        if (d == '/' && d2 == '/') {
+            lc = 1;
+            if (cc__th_grow(out, cap, *w, 2) != 0) return -1;
+            (*out)[(*w)++] = d;
+            (*out)[(*w)++] = d2;
+            i += 2;
+            continue;
+        }
+        if (d == '/' && d2 == '*') {
+            ls = 1;
+            if (cc__th_grow(out, cap, *w, 2) != 0) return -1;
+            (*out)[(*w)++] = d;
+            (*out)[(*w)++] = d2;
+            i += 2;
+            continue;
+        }
+        if (d == '"') {
+            st = 1;
+            if (cc__th_grow(out, cap, *w, 1) != 0) return -1;
+            (*out)[(*w)++] = d;
+            i++;
+            continue;
+        }
+        if (d == '\'') {
+            ch = 1;
+            if (cc__th_grow(out, cap, *w, 1) != 0) return -1;
+            (*out)[(*w)++] = d;
+            i++;
+            continue;
+        }
+        if (d == '.') {
+            size_t k = i + 1;
+            int which = 0;
+            if (k + 6 <= end && memcmp(src + k, "create", 6) == 0 &&
+                (k + 6 >= end || !cc_is_ident_char(src[k + 6]))) {
+                which = 1;
+                k += 6;
+            } else if (k + 7 <= end && memcmp(src + k, "destroy", 7) == 0 &&
+                       (k + 7 >= end || !cc_is_ident_char(src[k + 7]))) {
+                which = 2;
+                k += 7;
+            }
+            if (which) {
+                size_t eq = k;
+                while (eq < end && (src[eq] == ' ' || src[eq] == '\t' ||
+                                    src[eq] == '\n' || src[eq] == '\r'))
+                    eq++;
+                if (eq < end && src[eq] == '=') {
+                    size_t id = eq + 1;
+                    while (id < end && (src[id] == ' ' || src[id] == '\t' ||
+                                        src[id] == '\n' || src[id] == '\r'))
+                        id++;
+                    if (id < end && cc_is_ident_start(src[id])) {
+                        size_t id_e = id;
+                        size_t look;
+                        while (id_e < end && cc_is_ident_char(src[id_e])) id_e++;
+                        look = id_e;
+                        while (look < end && (src[look] == ' ' || src[look] == '\t' ||
+                                              src[look] == '\n' || src[look] == '\r'))
+                            look++;
+                        if (look >= end || src[look] != '(') {
+                            const char* pref = (which == 1)
+                                ? "cc_type_create_call(\""
+                                : "cc_type_destroy_call(\"";
+                            size_t pref_n = strlen(pref);
+                            size_t need = (id - i) + pref_n + (id_e - id) + 2;
+                            if (cc__th_grow(out, cap, *w, need) != 0) return -1;
+                            memcpy(*out + *w, src + i, id - i);
+                            *w += (id - i);
+                            memcpy(*out + *w, pref, pref_n);
+                            *w += pref_n;
+                            memcpy(*out + *w, src + id, id_e - id);
+                            *w += (id_e - id);
+                            (*out)[(*w)++] = '"';
+                            (*out)[(*w)++] = ')';
+                            i = id_e;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        if (cc__th_grow(out, cap, *w, 1) != 0) return -1;
+        (*out)[(*w)++] = d;
+        i++;
+    }
+    return 0;
+}
+
 /* `@typehooks on Subject[*]? { .field = expr, … };` →
  * `@comptime { (void)cc_type_register("Subject*", (CCTypeHooks){ … }); }`
  * Body is a strict C designated-initializer (one RHS expression per arm).
@@ -1833,7 +1991,7 @@ static inline char* cc_rewrite_typehooks_to_register(const char* src, size_t n) 
                     end++;
                 if (end < n && src[end] == ';') end++;
                 /* @comptime { (void)cc_type_register("SUB", (CCTypeHooks){ BODY }); } */
-                need = 64 + sub_n + body_n + 48;
+                need = 64 + sub_n + body_n + 96;
                 if (w + need > out_cap) {
                     size_t nc = out_cap * 2 + need + 64;
                     char* nb = (char*)realloc(out, nc + 1);
@@ -1846,8 +2004,14 @@ static inline char* cc_rewrite_typehooks_to_register(const char* src, size_t n) 
                 w += sub_n;
                 memcpy(out + w, "\", (CCTypeHooks){", 17);
                 w += 17;
-                memcpy(out + w, src + body_l, body_n);
-                w += body_n;
+                if (cc__th_copy_hooks_body(src, body_l, body_n, &out, &w, &out_cap) != 0) {
+                    free(out);
+                    return NULL;
+                }
+                if (cc__th_grow(&out, &out_cap, w, 5) != 0) {
+                    free(out);
+                    return NULL;
+                }
                 memcpy(out + w, "}); }", 5);
                 w += 5;
                 i = end;

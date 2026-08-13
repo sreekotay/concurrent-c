@@ -915,6 +915,17 @@ static int cc__parse_type_hooks_object(CCSymbolTable* t,
                 p = scan;
                 continue;
             }
+            if (expr_s < expr_e && cc_is_ident_start(src[expr_s])) {
+                size_t id_e = expr_s;
+                while (id_e < expr_e && cc_is_ident_char(src[id_e])) id_e++;
+                if (id_e == expr_e && (id_e - expr_s) < sizeof(create_callee)) {
+                    memcpy(create_callee, src + expr_s, id_e - expr_s);
+                    create_callee[id_e - expr_s] = 0;
+                    if (cc_symbols_add_type_create_call(t, type_name, 1, create_callee) != 0) return -1;
+                    p = scan;
+                    continue;
+                }
+            }
             if (cc__match_kw_reg(src, expr_e, expr_s, "cc_type_create_hook")) {
                 size_t hook_pos = cc__skip_ws_reg(src, expr_e, expr_s + strlen("cc_type_create_hook"));
                 size_t hook_rpar = 0;
@@ -981,9 +992,28 @@ static int cc__parse_type_hooks_object(CCSymbolTable* t,
                 if (cc_symbols_set_type_pre_destroy_call(t, type_name, destroy_pre_callee) != 0) return -1;
                 continue;
             }
-            if (!cc__parse_helper_call_1(src, obj_r, &p, "cc_type_destroy_call", destroy_callee, sizeof(destroy_callee))) return -1;
-            if (cc_symbols_set_type_destroy_call(t, type_name, destroy_callee) != 0) return -1;
-            continue;
+            if (cc__parse_helper_call_1(src, obj_r, &p, "cc_type_destroy_call", destroy_callee, sizeof(destroy_callee))) {
+                if (cc_symbols_set_type_destroy_call(t, type_name, destroy_callee) != 0) return -1;
+                continue;
+            }
+            {
+                size_t id = cc__skip_ws_reg(src, obj_r, p);
+                size_t id_e = id;
+                size_t after;
+                if (id < obj_r && cc_is_ident_start(src[id])) {
+                    while (id_e < obj_r && cc_is_ident_char(src[id_e])) id_e++;
+                    after = cc__skip_ws_reg(src, obj_r, id_e);
+                    if ((after >= obj_r || src[after] == ',' || src[after] == '}') &&
+                        (id_e - id) > 0 && (id_e - id) < sizeof(destroy_callee)) {
+                        memcpy(destroy_callee, src + id, id_e - id);
+                        destroy_callee[id_e - id] = 0;
+                        if (cc_symbols_set_type_destroy_call(t, type_name, destroy_callee) != 0) return -1;
+                        p = after;
+                        continue;
+                    }
+                }
+            }
+            return -1;
         }
         if (cc__match_kw_reg(src, obj_r, p, "niche")) {
             unsigned long long args[5];
