@@ -41,7 +41,7 @@ __all__ = [
     "JsError", "JsHandle",
     "load_ipython_extension", "unload_ipython_extension", "__version__",
 ]
-__version__ = "0.22.1"
+__version__ = "0.23.0"
 
 _NO_NODE = (
     "cc-node: no node executable (install Node, or set CC_NODE_BIN). "
