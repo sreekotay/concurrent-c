@@ -9,10 +9,21 @@ lifetime), and a header-first runtime ship with the language.
 You do **not** need to build the compiler from a checkout to use the language.
 Install `ccc`, run a program, then follow the examples learning path.
 
-Line 1 of a unit names its kind (`#!ccc ccs`, `#!ccc cch`, or an OS shebang for
-scripts). A `.ccs` / `.cch` / `.shcc` suffix is the fallback when that header
-is absent. Optional `version=0.3.2` pins the lowerer; see
-[backwards compatibility](backwards_compatibility.md).
+Every unit starts with a **line-1 header** (kind + optional lowerer pin). Emit
+strips it; it is not program text:
+
+```text
+#!ccc ccs                         # source (.ccs)
+#!ccc cch                         # header (.cch)
+#!ccc ccs version=0.3.2           # pin lowerer (prefix of ccc --version)
+#!/usr/bin/env -S ./cc/bin/ccc version=0.3.2   # script (.shcc); OS shebang
+```
+
+`version=MAJOR[.MINOR[.PATCH[-SEED]]]` keeps that file on a matching bootstrap
+seed when the toolchain moves. Omit the pin only when you intentionally want
+whatever `ccc` is running. A `.ccs` / `.cch` / `.shcc` suffix is the fallback
+when the header is absent — prefer the header so kind and pin travel with the
+file. Details: [backwards compatibility](backwards_compatibility.md).
 
 ## Install
 

@@ -9,6 +9,23 @@ spec: [spec/](../spec/).
 
 ## Build & Run
 
+Every unit starts with a **line-1 header** (kind + optional lowerer pin). Emit
+strips it; it is not program text. Details:
+[backwards compatibility](backwards_compatibility.md).
+
+```text
+#!ccc ccs                         # source (.ccs)
+#!ccc cch                         # header (.cch)
+#!ccc ccs version=0.3.2           # pin lowerer (prefix of ccc --version)
+#!/usr/bin/env -S ./cc/bin/ccc version=0.3.2   # script (.shcc); OS shebang
+```
+
+`version=MAJOR[.MINOR[.PATCH[-SEED]]]` keeps that file on a matching bootstrap
+seed when the toolchain moves. Omit the pin only when you intentionally want
+whatever `ccc` is running. Suffix (`.ccs` / `.cch` / `.shcc`) is the fallback
+when the header is absent — prefer the header so kind and pin travel with the
+file.
+
 ```bash
 ccc run file.ccs                    # build + run
 ccc build run file.ccs              # same, explicit
@@ -17,13 +34,9 @@ ccc path/to/tool.shcc [args…]       # .shcc → implicit run (shebang-friendly
 ccc --emit-c-only file.ccs          # emit C only → out/file.c
 ccc build -O file.ccs               # release (-O2 -DNDEBUG)
 ccc build -g file.ccs               # debug (-O0 -g); default is -O2, asserts kept
-ccc version=0.3.2 run file.ccs      # pin lowerer (prefix of ccc --version)
+ccc version=0.3.2 run file.ccs      # pin lowerer from CLI (same form as header)
 ccc --as=ccs file                   # kind when there is no suffix / header
 ```
-
-First line of a unit: `#!ccc ccs [version=…]` (headers `cch`; scripts use an
-OS shebang). Suffix is the fallback. Details:
-[backwards compatibility](backwards_compatibility.md).
 
 Outputs: `./out` (generated C) and `./bin` (binaries), relative to cwd.
 
