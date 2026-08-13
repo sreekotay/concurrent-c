@@ -2189,8 +2189,8 @@ Python.
 Status: draft — the guest surface is implemented: `js_module::[T]` and
 its marshaling, the loader, and the outbound direction inside an
 exported call (a `CCJs *` parameter is the host, wired by the trampoline
-and invisible to JS; `global`/`eval`/`exec`; the `CCJsVal` sink with
-destination-typed variants; `.get`/`.as_*`/`.hold`; `f.map::[T]` row
+and invisible to JS; `global`/`eval`/`exec`; the `CCJsVal` `.ufcs_sink`
+with destination-typed variants; `.get`/`.as_*`/`.hold`; `f.map::[T]` row
 batching; unsigned inbound via `napi_get_value_bigint_uint64`;
 `js_pos` for keyword-bag escape).  Domains are implemented:
 `cc_js_new(isolated, &arena)` yields one handle over two transports —
@@ -2278,7 +2278,7 @@ of a runtime.
 — a JavaScript runtime this program owns — behind one surface:
 `require`/`eval`/`exec` on the handle, `CCJsDomVal` values whose
 attribute access is property lookup and whose method calls dispatch
-through the dynamic sink, typed extraction (`as_f64`, `as_i64`,
+through `.ufcs_sink`, typed extraction (`as_f64`, `as_i64`,
 `as_slice`), `release`, a `stats` ledger, and idempotent close.  The
 flag is the transport, and it is spelled at the call site because the
 crossing profiles differ.
@@ -2726,9 +2726,18 @@ plain object's own enumerable properties. `f.map::[T](&arena, cols…)`
 calls a callable once per row across column slices in one crossing, as
 for Python.
 
-The dynamic sink is destination-aware, with the same destination-typed
-variants and extraction semantics as `CCPyObj`; explicit extraction
-(`.as_f64()`, `.as_i64()`, `.as_slice()`) remains for held values.
+`CCJsVal`'s dynamic sink is destination-aware (`.ufcs_sink`):
+wherever a typed destination is visible — a declaration
+`T name = obj.method(args…)`, an assignment to a resolvable lvalue, or
+a cast `(T)obj.method(args…)` directly wrapping the call — the
+destination joins UFCS resolution, and the call lowers through the
+library's destination-typed variant (`cc_js_val_callm_double`,
+`_float`, `_int`, `_int64_t`, `_long_long`) when one is declared. The
+variant runs the same call and extracts the destination type — the
+intermediate never reaches user space. Extraction semantics match
+`CCPyObj`. Explicit extraction remains for held values:
+`.as_f64()`, `.as_i64()`, `.as_slice()`.
+
 Inbound strings copy into arena scratch — Node-API exposes no borrowed
 UTF-8 — so a `CCSlice` parameter of an exported method is arena-backed
 rather than a borrow of engine memory.
@@ -2827,7 +2836,10 @@ relinking either.
 value, both in the environment's global scope, so a definition from one
 call is visible to the next. Both are bootstrap glue — defining a helper,
 selecting options — not a call path; everything after definition flows
-through bound calls.
+through bound calls. `eval` resolves through the handle's own
+destination-aware `.ufcs_sink`, so a typed destination extracts directly
+— no intermediate object in user space, the same resolution `CCJsVal`
+calls get.
 
 ### Benchmarks
 

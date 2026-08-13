@@ -5084,10 +5084,20 @@ typedef struct {
 } CCTypeDynamicHook;
 
 typedef struct {
+    int has_niche;
+    unsigned size;
+    unsigned align;
+    unsigned offset;
+    unsigned width;
+    unsigned long long sentinel;
+} CCTypeNicheHook;
+
+typedef struct {
     CCTypeCreateHook create;
     CCTypeDestroyHook destroy;
     CCTypeUfcsHandler ufcs;
     CCTypeDynamicHook ufcs_sink;
+    CCTypeNicheHook niche;
 } CCTypeHooks;
 
 int cc_type_register(const char* type_name, CCTypeHooks hooks);
@@ -5117,8 +5127,9 @@ int cc_type_register(const char* type_name, CCTypeHooks hooks);
 - The `.ufcs` hook is responsible only for choosing the lowered callee family. It does not execute the call.
 - Returning the empty slice means "no custom rewrite; fall back to ordinary receiver-type UFCS".
 - `.ufcs_sink` is the last-resort unresolved-method hook. Unresolved methods lower to `callee(&recv, "method", N, arg_wrap(a1), …)`. The sink is destination-aware: wherever a typed destination is visible the callee composes as `<callee>_<mangled dest>` when that function is declared (compose-then-verify; plain callee otherwise). `.ufcs_dynamic` and `.ufcs_dynamic2` are accepted spellings of `.ufcs_sink`.
+- `.niche` donates a bit pattern a valid instance never exhibits, so a `@variant(packed)` arm of this type can carry the discriminant (`spec/draft_variants.md`, packed layout). `cc_type_niche(size, align, offset, width, sentinel)` is the helper.
 - `.create` may be registered either as fixed callee strings (`cc_type_create_call(...)`, `cc_type_create_overloads(...)`) or as a callable hook via `cc_type_create_hook(...)`.
-- Recognized hook fields are `.create`, `.destroy`, `.ufcs`, and `.ufcs_sink`.
+- Recognized hook fields are `.create`, `.destroy`, `.ufcs`, `.ufcs_sink`, and `.niche`.
 
 **UFCS handler contract (normative):**
 
@@ -5173,7 +5184,7 @@ int cc_type_register(const char* type_name, CCTypeHooks hooks);
 
 UFCS registration and typed lifecycle hooks (`create`, `destroy`) use the same type-owned registration machinery.
 
-`cc_ufcs_register(...)` is the direct UFCS-only helper. `@typehooks` is the general registration surface and may define UFCS together with lifecycle hooks. The marker APIs `cc_type_register` / `cc_type_define` are the dual form (see `docs/deprecated.md`).
+Prefer `@typehooks` for UFCS together with lifecycle hooks. `cc_type_register` / `cc_type_define` and `cc_ufcs_register(...)` remain accepted dual forms (see `docs/deprecated.md`).
 
 This same contract applies to standard-library families such as channels, files, strings, arenas, vectors, maps, and results. Family-specific naming and lowering remain library policy rather than compiler policy; shared erased-core machinery is permitted so long as the family contract is preserved.
 

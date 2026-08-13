@@ -191,7 +191,8 @@ The packed representation uses one sentinel distinction: a bit pattern that a
 donor arm cannot hold distinguishes it from the other arm. Three or more arms
 are a compile-time error because one sentinel cannot encode them. Niches are
 either inferred from pointer null/alignment properties and payload-less arms,
-or declared by a type's registered niche descriptor. Payload bits are not
+or declared on the donor type as `.niche = cc_type_niche(size, align, offset, width, sentinel)`
+(`@typehooks`; see `spec/draft_typehooks.md`). Payload bits are not
 stolen.
 
 Packing is accepted only when every arm size is known and a lossless niche plan

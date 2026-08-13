@@ -43,6 +43,15 @@ in a Concurrent-C TU rewrites to `cc_type_register` before discovery.
   are not lower-header’d — file-scope `@typehooks` would reach shadow
   unrewritten; stdlib headers are fine because they lower to stripped `.h`).
 
+## UFCS-only helper: `cc_ufcs_register`
+
+**Prefer:** `@typehooks on Subject { .ufcs = handler, };`
+
+`cc_ufcs_register(pattern, rewrite)` still builds a `CCUfcsRegistration` and
+the scanner still accepts `@comptime { (void)cc_ufcs_register(...); }`. New
+code puts the rewrite on `.ufcs`. Compatibility smoke:
+`tests/comptime_legacy_ufcs_compat_smoke.ccs`.
+
 ## UFCS sink field: `.ufcs_dynamic` / `.ufcs_dynamic2`
 
 **Prefer:** `.ufcs_sink`

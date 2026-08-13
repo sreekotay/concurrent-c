@@ -60,6 +60,7 @@ static inline CCSlice cc_ufcs_emit_value_cstr(CCArena *arena, const char *callee
  * `@typehooks on * { … }` entry wires in the snake_case default; slice
  * marker types register a narrower composer that routes back to `cc_slice_*`. */
 
+/* Prefer `@typehooks on T { .ufcs = rewrite, };` — see docs/deprecated.md. */
 static inline CCUfcsRegistration cc_ufcs_register(const char *pattern, CCUfcsRewriteFn rewrite) {
     CCUfcsRegistration reg = {0};
     reg.pattern = pattern ? cc_slice_from_static((void *)pattern, strlen(pattern)) : cc_slice_empty();

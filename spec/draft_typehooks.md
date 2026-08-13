@@ -18,9 +18,10 @@ registration. The underlying marker API is `cc_type_register` (see
 - Multi-overload create uses `cc_type_create_overloads(...)` (or the other
   existing helpers) — not a comma-list of bare callees on `.create`.
 - Recognized arms match `CCTypeHooks`: `.create`, `.destroy`, `.ufcs`,
-  `.ufcs_sink`, and other fields the register path already accepts
-  (e.g. `.niche`). `.ufcs_dynamic` and `.ufcs_dynamic2` are accepted
-  spellings of `.ufcs_sink`.
+  `.ufcs_sink`, and `.niche`. `.ufcs_dynamic` and `.ufcs_dynamic2` are
+  accepted spellings of `.ufcs_sink`. `.niche` donates a bit pattern a
+  valid instance never exhibits so a `@variant(packed)` arm can carry
+  the discriminant (`spec/draft_variants.md`, packed layout).
 - Subject may be an exact type (`CCArena`), a pointer key (`MyHandle*`), or
   a trailing-`*` family glob (`CCChanTx_*`), same match/score rule as
   `@typeview` globs.
