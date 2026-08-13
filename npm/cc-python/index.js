@@ -514,7 +514,9 @@ class Bridge {
 // Same calling convention as in-process: a default call blocks this
 // thread until the child answers; py.task(fn) is the Promise door.
 // Isolated is crash isolation and a different Python, not a different
-// await discipline. A child crash still rejects in-flight task() calls.
+// await discipline. Mixing a blocking call with in-flight py.task on
+// this domain is refused (the blocking pump owns the pipe). A child
+// crash still rejects in-flight task() calls.
 
 const RHANDLE = Symbol('cc-python-remote');
 const TA_KIND = new Map([
@@ -712,6 +714,7 @@ class ProcBridge {
     this._shmDir = fs.mkdtempSync(
         path.join(SHM_BASE, 'ccpy-' + process.pid + '-'));
     this._syncDepth = 0;
+    this._taskInflight = 0;
     this._repBuf = Buffer.alloc(0);
     // The wire lives on fds 3 (requests) / 4 (replies); stdio is
     // inherited, so user print() reaches the real stdout and can never
@@ -911,6 +914,14 @@ class ProcBridge {
   _reqSync(obj) {
     if (this._closed)
       throw new Error('concurrent-c-python: bridge is closed');
+    // Blocking pump owns the reply pipe. A sibling py.task callback that
+    // returns a Promise cannot be honored while we are inside it — refuse
+    // here, at the blocking call, not inside that callback.
+    if (this._taskInflight > 0) {
+      throw new Error(
+          'concurrent-c-python: cannot block on this isolated domain while ' +
+          'py.task is in flight — overlap with py.task only');
+    }
     const owned = this._shmOut.splice(0);
     const sweep = () => {
       for (const p of owned) {
@@ -1106,7 +1117,8 @@ class ProcBridge {
         if (r.h == null)
           return Promise.reject(new Error(
             'concurrent-c-python: this module has not landed yet'));
-        return call(r.h);
+        bridge._taskInflight++;
+        return call(r.h).finally(() => { bridge._taskInflight--; });
       } catch (e) {
         return Promise.reject(e);
       }

@@ -64,6 +64,8 @@ neg_iso_tojs_set_path true
 neg_iso_tojs_ok true
 neg_iso_import_fail true
 neg_iso_promise_arg true
+neg_iso_block_during_task true
+neg_iso_block_after_task true
 neg_iso_empty_dict_handle true
 neg_iso_exec_namespace true
 neg_iso_foreign_arg true

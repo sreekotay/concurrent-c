@@ -394,8 +394,27 @@ async function raisesAsync(fn, re) {
                    /ModuleNotFoundError|No module/));
 
     // Unawaited task result is a Promise — say so, not "unsupported".
-    out('neg_iso_promise_arg',
-        raisesSync(() => id(py.task(b.dict)()), /got a Promise|py\.task/));
+    {
+      const pending = py.task(b.dict)();
+      out('neg_iso_promise_arg',
+          raisesSync(() => id(pending), /got a Promise|py\.task/));
+      await pending;
+    }
+
+    // Blocking call while py.task is in flight — fail at the blocking
+    // call, not inside a sibling callback.
+    {
+      const apply = b.eval('lambda f: f()');
+      let unlock;
+      const gate = new Promise((r) => { unlock = r; });
+      const p = py.task(apply)(async () => { await gate; return 7; });
+      out('neg_iso_block_during_task',
+          raisesSync(() => apply(() => 1),
+                     /in flight|overlap with py\.task/));
+      unlock();
+      out('neg_iso_block_after_task',
+          (await p) === 7 && apply(() => 1) === 1);
+    }
 
     // Empty dict stays a live handle (exec namespace), not JS {}.
     {

@@ -467,15 +467,16 @@ async function isolatedPipelineCbs() {
   console.log('=== isolated_pipeline_cbs ===');
   const py = ccpy.create({ isolated: true });
   const b = py.import('builtins');
-  const apply = await b.eval('lambda f, x: f(x)');
+  const apply = b.eval('lambda f, x: f(x)');
   const N = FULL ? 80 : 40;
   const t0 = hr();
-  // Many in-flight calls; each JS cb returns a nested callable.
+  // Overlap stays on py.task — a blocking f(50) while siblings are in
+  // flight owns the pipe and cannot honor async callbacks.
   const jobs = [];
   for (let i = 0; i < N; i++) {
     jobs.push((async () => {
-      const f = await apply((n) => (x) => x + n, i);
-      return await f(100);
+      const f = await py.task(apply)((n) => (x) => x + n, i);
+      return await py.task(f)(100);
     })());
   }
   const vals = await Promise.all(jobs);
@@ -487,7 +488,7 @@ async function isolatedPipelineCbs() {
         await sleep(1);
         return (x) => x + n;
       }, i);
-      return await f(50);
+      return await py.task(f)(50);
     })());
   }
   const vals2 = await Promise.all(jobs2);

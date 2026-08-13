@@ -41,6 +41,7 @@ Scalars and `None` materialize; everything else is a proxy until
 - Trailing `{…}` is a positional dict; `kwargs({…})` means keywords.
 - `===` is not Python `is`. `if (proxy)` is always true (`typeof` is `'function'`).
 - Overlap isolated domains with `Promise.all([a.task(f)(), b.task(g)()])`.
+- Do not mix a blocking call with in-flight `py.task` on the same isolated domain.
 
 Modes tour: [`examples/modes_tour.js`](examples/modes_tour.js).  
 Costs (`RESULT` lines): [`benchmarks/modes_bench.js`](benchmarks/modes_bench.js)
