@@ -42,6 +42,9 @@ mod_require true
 get_same true
 kernel_same true
 get_reset true
+hosted_refuses true
+hosted_get_refuses true
+create_isolated true
 interrupt_first true
 interrupt_kill true
 cc-node suite done

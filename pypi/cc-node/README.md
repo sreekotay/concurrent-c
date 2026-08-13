@@ -23,10 +23,11 @@ an explicit lifetime — not required for the first call.
 
 ```python
 import cc_node
-js = cc_node.create()                # a private Node, not the session
+js = cc_node.create()                # isolated child (default); not the session
 semver = js.require('semver')
 semver.satisfies('1.2.3', '^1.0.0')  # True
 js.destroy()                         # or: with cc_node.create() as js:
+# create(isolated=False) is hosted libnode — this wheel refuses (no fallback)
 ```
 
 The other direction (Python from Node):
@@ -35,11 +36,14 @@ The other direction (Python from Node):
 
 Every `create()` is a separate Node — real addons, crash isolation,
 measurable wire. N domains = N processes. `require()` / `get()` share
-one session for the process (the Jupyter kernel).
+one **isolated** session for the process (the Jupyter kernel).
+`create(isolated=False)` is hosted libnode in this process — the mirror
+of cc-python's in-process door, **opposite default**; this wheel
+refuses (no child fallback). Concurrent-C: `cc_js_new(false, &a)`.
 
 | | this package | CC hosted (`cc_js_new(false, …)`) |
 |---|---|---|
-| API | `require()` / `create()` | `.ccs` program |
+| API | `require()` / `create(isolated=True)` | `.ccs` program |
 | Where | child `node` | libnode in-process |
 | Hot call | ~105µs RTT | sub-µs (needs libnode) |
 | Bulk | shm (~9.5ms / 8MB) | in-process |
@@ -48,8 +52,10 @@ one session for the process (the Jupyter kernel).
 
 **Cheat sheet**
 
-- Always a child `node`. A call blocks until JS answers; thenables wait
-  in the child. No `{ async: true }`.
+- `create()` / `create(isolated=True)` is a child `node`. A call blocks
+  until JS answers; thenables wait in the child. No `{ async: true }`.
+  `create(isolated=False)` is hosted libnode — this wheel refuses
+  (cc-python's default is the other way around).
 - `from cc_node import require` is the session. `create()` is a private
   child. `reset()` / `%js_reset` / `%reset` / atexit tear the session down.
 - Scalars / `None` materialize; empty `{}` stays a handle; everything

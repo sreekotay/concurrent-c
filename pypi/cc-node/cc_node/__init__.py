@@ -5,8 +5,9 @@
     _.chunk([1, 2, 3, 4, 5], 2)           # [[1, 2], [3, 4], [5]]
 
     import cc_node
-    js = cc_node.create()                 # a private child, not the session
+    js = cc_node.create()                 # isolated child (default)
     js.destroy()
+    # create(isolated=False) is hosted libnode — not in this wheel; refuses.
 
 The mirror of the cc-python bridge, same rules pointed the other way:
 attribute access is property lookup (methods arrive bound), a call is a
@@ -49,6 +50,12 @@ _NO_NODE = (
     "cc-node: no node executable (install Node, or set CC_NODE_BIN). "
     "Colab/Jupyter: `!apt-get install -y nodejs` then retry, or pass "
     "create(node=...) / CC_NODE_BIN."
+)
+_HOSTED = (
+    "cc-node: hosted libnode (isolated=False) is not in this wheel; "
+    "create() is the child (isolated=True, the default). "
+    "node= selects that child. Concurrent-C hosts with cc_js_new(false, &a). "
+    "This is the opposite default of concurrent-c-python (in-process first)."
 )
 _BIND_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _BIND_RESERVED = frozenset({
@@ -153,6 +160,7 @@ class Bridge:
                               "broker.cjs")
         node = node or os.environ.get("CC_NODE_BIN", "node")
         self._node_bin = node
+        self.isolated = True
         # Spills live in a private 0700 per-bridge directory (predictable
         # names in a shared /dev/shm invite pre-creation races and
         # umask-dependent exposure); the child writes its spills there
@@ -647,17 +655,24 @@ class Bridge:
         return False
 
 
-def create(node=None):
+def create(node=None, isolated=True):
+    """A domain. Default `isolated=True` is a child `node` (this wheel).
+    `isolated=False` is hosted libnode in-process — refuses here (no
+    fallback). `node=` is isolated-only."""
+    if not isolated:
+        raise JsError(_HOSTED)
     return Bridge(node=node)
 
 
 _session = None
 
 
-def get(node=None):
-    """Session domain: one child for this process (the Jupyter kernel).
-    Lazy. Magics share it. `create()` is still a private child."""
+def get(node=None, isolated=True):
+    """Session domain: one isolated child for this process (the Jupyter
+    kernel). Lazy. Magics share it. `create()` is still a private child."""
     global _session
+    if not isolated:
+        raise JsError(_HOSTED)
     b = _session
     if b is not None and not b.closed:
         if node is not None and node != b._node_bin:
@@ -665,7 +680,7 @@ def get(node=None):
                 "cc-node: get() already live with a different node; "
                 "reset() / %js_reset first")
         return b
-    b = create(node=node)
+    b = create(node=node, isolated=True)
     try:
         b._ensure_cell_require()
     except Exception:
