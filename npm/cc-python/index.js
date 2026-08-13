@@ -3,7 +3,7 @@
  *     const py = require('concurrent-c-python').create();  // Isolation Domain
  *     const np = py.import('numpy');
  *     const s  = np.linalg.norm(new Float64Array([3, 4]));   // 5
- *     await py.destroy();   // one sweep — await before the next create()
+ *     await py.destroy();   // closed immediately; await drains the lane / child
  *
  * Proxies wrap opaque handles: attribute access is getattr, a call is
  * invoke, scalars come back as JS scalars and everything else as another
@@ -513,7 +513,8 @@ class Bridge {
     return native.closed(this._dom);
   }
   // Always a Promise: resolved immediately when no lane ever started,
-  // after the revoke-then-drain when one did.
+  // after the revoke-then-drain when one did. Doors refuse as soon as
+  // destroy() is called (closed / stopping); await is the drain.
   destroy() {
     this._strHandle = null;
     return native.close_async(this._dom);
@@ -521,8 +522,8 @@ class Bridge {
   close() {
     return this.destroy();
   }
-  /* Sync `using` requires dispose to finish revocation before the next
-   * statement — fire-and-forget destroy() left the domain usable. */
+  /* Sync `using` finishes revoke-then-drain before the next statement.
+   * destroy() closes doors immediately; its Promise is the drain. */
   [Symbol.dispose]() {
     this._strHandle = null;
     native.close(this._dom);

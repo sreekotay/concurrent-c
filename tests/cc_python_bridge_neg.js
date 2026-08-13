@@ -330,6 +330,16 @@ async function raisesAsync(fn, re) {
       out('neg_inproc_after_system_exit', math.floor(1.8) === 1);
     }
 
+    {
+      const d = ccpy.create();
+      await d.task(d.import('math').floor)(1.2);
+      const p = d.destroy();
+      out('neg_inproc_closed_immediate', d.closed);
+      out('neg_inproc_call_during_drain',
+          raisesSync(() => d.import('math'), /closed/));
+      await p;
+    }
+
     py.destroy();
     out('neg_inproc_after_close',
         raisesSync(() => math.floor(1.2), /closed/));

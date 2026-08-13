@@ -59,6 +59,8 @@ neg_inproc_empty_exc_type true
 neg_inproc_attr_cache true
 neg_inproc_system_exit true
 neg_inproc_after_system_exit true
+neg_inproc_closed_immediate true
+neg_inproc_call_during_drain true
 neg_inproc_after_close true
 neg_inproc_destroy_idempotent true
 neg_inproc_worker_create_refuses true

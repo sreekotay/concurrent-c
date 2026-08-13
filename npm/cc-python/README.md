@@ -22,13 +22,14 @@ const b = new Float64Array(1_000_000).map((_, i) => i % 89);
 np.dot(a, b);            // JS number — 5–8× a JS loop; arrays cross as leases
 const xs = np.arange(4); // proxy until xs.toTypedArray() / toJS() / String(xs)
 
-py.destroy();   // one sweep: every handle, the arena, the interpreter
+py.destroy();   // closed immediately; await to drain a py.task lane
 ```
 
 **Mental model.** A domain owns the interpreter and every handle.
-Proxies are borrows from that domain. `destroy()` / `using` / GC of the
-last proxy → one sweep. Default call blocks this thread until Python
-answers. `py.task` is the Promise door. `{ isolated: true }` is crash
+Proxies are borrows from that domain. `destroy()` marks the domain
+closed immediately; the Promise is lane drain (in-process) or child
+exit (isolated). `using` is the sync door. Default call blocks this
+thread until Python answers. `py.task` is the Promise door. `{ isolated: true }` is crash
 isolation and a different Python — not a different calling convention.
 Scalars and `None` materialize; everything else is a proxy until
 `toJS()` / `toTypedArray()` / `String()`.
@@ -42,6 +43,9 @@ Scalars and `None` materialize; everything else is a proxy until
 - `===` is not Python `is`. `if (proxy)` is always true (`typeof` is `'function'`).
 - Overlap isolated domains with `Promise.all([a.task(f)(), b.task(g)()])`.
 - Do not mix a blocking call with in-flight `py.task` on the same isolated domain.
+- `destroy()` closes immediately. Await it to drain an in-process lane
+  (required before the next `create()`) or to join an isolated child.
+  `using` is the sync door.
 
 Modes tour: [`examples/modes_tour.js`](examples/modes_tour.js).  
 Costs (`RESULT` lines): [`benchmarks/modes_bench.js`](benchmarks/modes_bench.js)
@@ -122,8 +126,10 @@ without a release.
 
 ### Dead domains
 
-After `destroy()` / child exit, `import` and calls reject with
-`bridge is closed` — they do not mint a proxy that fails only later.
+`destroy()` marks the domain closed immediately — `import` and calls
+reject with `bridge is closed` even before the Promise settles. Await
+the Promise to drain an in-process lane (the next `create()` refuses
+until then) or to join an isolated child.
 
 ### Stdout / `print` / environ
 
@@ -171,8 +177,9 @@ Same-domain handles chain (`const fft = np.fft.fft(buf); np.abs(fft)`).
   (nested scalars, handles, null/undefined→`None`). Typed arrays stay
   top-level only (the zero-copy lease). Keys starting with `$` are
   reserved.
-- Handles are per-domain (`stats()` / `release(proxy)`). `destroy()` /
-  `using` / GC sweeps once; afterwards: `bridge is closed`. Unknown
+- Handles are per-domain (`stats()` / `release(proxy)`). `destroy()`
+  marks closed immediately (doors refuse); the Promise is lane drain /
+  child exit. `using` / GC also sweep; afterwards: `bridge is closed`. Unknown
   attribute access on a handle throws (not silent `undefined`) — host
   callbacks receive the same Proxies as call results. Proxies use a
   function target (`typeof === 'function'`), so **`if (proxy)` is always

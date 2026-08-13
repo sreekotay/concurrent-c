@@ -795,7 +795,7 @@ static void *ccpy__cb_trampoline(void *self, void *args) {
     intptr_t n;
     if (!box) return cc__py_raise("cc-python: corrupt callback capsule");
     d = box->dom;
-    if (box->dead || !d || d->closed)
+    if (box->dead || !d || d->closed || d->stopping)
         return cc__py_raise("cc-python: bridge is closed");
     n = args ? cc__py.TupleSize(args) : 0;
     if (n > CCPY__JOB_MAX_ARGS)
@@ -956,7 +956,7 @@ static void ccpy__cb_service(void *env, CcJsCbReq *req) {
     void *ret = NULL;
     int i;
     int failed = 0;
-    if (box->dead || d->closed) {
+    if (box->dead || d->closed || d->stopping) {
         snprintf(req->errmsg, sizeof(req->errmsg),
                  "cc-python: bridge is closed");
         failed = 1;
@@ -2374,7 +2374,9 @@ static void CcPython_close(CcPython *self, CCJs *js, CCJsExt dom) {
 static _Bool CcPython_closed(CcPython *self, CCJsExt dom) {
     CcPyDom *d = (CcPyDom *)dom.ptr;
     (void)self;
-    return !d || d->closed;
+    /* stopping is revoke-in-progress: doors already refuse via ccpy__dom.
+     * closed must match, or fire-and-forget destroy() looks live. */
+    return !d || d->closed || d->stopping;
 }
 
 /* Live handle count — the lifetime-introspection door: a debug hook can
