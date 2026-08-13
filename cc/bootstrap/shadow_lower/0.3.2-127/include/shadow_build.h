@@ -1093,7 +1093,7 @@ static int shadow_out_is_text(const char* path) {
     if (!path) return 0;
     if (shadow_build_ends_with(path, ".c") ||
         shadow_build_ends_with(path, ".h") ||
-        shadow_build_ends_with(path, ".cch") ||
+        shadow_build_ends_with(path, ".h") ||
         shadow_build_ends_with(path, ".ccs"))
         return 1;
     /* Goldens: `foo.c.golden` / `foo.h.golden` (not `*.golden` alone). */

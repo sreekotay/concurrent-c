@@ -1,0 +1,45 @@
+/* .ufcs composed a name that is not declared — error at the call site. */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_ufcs.cch>
+
+typedef struct {
+    int fd;
+    int alive;
+} Port;
+
+static Port port_open(int fd) {
+    Port p;
+    p.fd = fd;
+    p.alive = 1;
+    return p;
+}
+
+static void port_close(Port* p) {
+    if (!p || !p->alive) return;
+    p->alive = 0;
+}
+
+static char[:] port_ufcs(char[:] recv_type, char[:] method, char[:] mode,
+                         CCSliceArray argv, CCSliceArray arg_types,
+                         CCArena* arena) {
+    (void)recv_type;
+    (void)mode;
+    (void)argv;
+    (void)arg_types;
+    switch (method) {
+    case "put": return @slice("port_put_2");
+    default:    return @string(`port_${method}`, arena).as_slice();
+    }
+}
+
+@typehooks on Port {
+    .create = port_open,
+    .destroy = port_close,
+    .ufcs = port_ufcs,
+};
+
+int main(void) {
+    Port p = @create(3) @destroy;
+    p.gone();
+    return 0;
+}

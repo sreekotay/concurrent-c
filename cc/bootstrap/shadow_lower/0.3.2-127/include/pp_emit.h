@@ -24,7 +24,7 @@
 #define SHADOW_RAW_BODY_REWRITE 0
 #endif
 
-#include "pp_emit_core.cch"
-#include "pp_emit_tpl.cch"
-#include "pp_emit_ufcs.cch"
-#include "pp_emit_stmt.cch"
+#include "pp_emit_core.h"
+#include "pp_emit_tpl.h"
+#include "pp_emit_ufcs.h"
+#include "pp_emit_stmt.h"

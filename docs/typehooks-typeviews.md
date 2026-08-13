@@ -151,6 +151,20 @@ n=5 ok=1 fd=3
 `.ufcs` only chooses the name. It does not run the call. `.ufcs_sink` is
 the last resort when nothing resolved (`obj.greet(...)`).
 
+That power is also the cost. `p.put(...)` never mentions `port_put_2`, so
+go-to-definition and grep on the call site will not find the callee. If
+the composed name does not exist (`p.gone()` → `port_gone`), compile
+fails at that call — same source line, original form — naming the
+missing symbol:
+
+```
+file.ccs:43:5: error: call to undeclared function 'port_gone'
+   43 |     p.gone();
+      |     ^
+```
+
+Grep `port_gone` in your sources to find (or write) the callee.
+
 ---
 
 ## 2. `@typeview` — faces and allow-lists

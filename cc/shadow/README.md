@@ -133,7 +133,8 @@ named temps, blocks instead of mega-line statement expressions. Source
 comments and blank lines are replayed from the tape; inserted lowering
 nests from each statement’s source indent (spaces/tabs). `#line N "path"`
 markers at source boundaries (plus resync before `__FILE__`/`__LINE__`
-err sites) map host diagnostics back to the original `.ccs`/`.cch`. Host
+err sites) map host diagnostics back to the original `.ccs`/`.cch`.
+Caret snippets are restored from that file, not the lowered C. Host
 `cc -c` is asserted on `mini` only.
 
 ## Smokes
