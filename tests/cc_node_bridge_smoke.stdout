@@ -37,8 +37,11 @@ eval_cell_persist true
 eval_cell_bind_reserved true
 repr_cheap true
 repr_html_cheap true
+get_is_kernel true
+mod_require true
+get_same true
 kernel_same true
-kernel_reset true
+get_reset true
 interrupt_first true
 interrupt_kill true
 cc-node suite done

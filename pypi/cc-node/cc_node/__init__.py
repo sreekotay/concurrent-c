@@ -19,8 +19,8 @@ Handles never cross domains; every door after destroy() answers
 articulately; destroy is idempotent and `with cc_node.create() as js:`
 scopes it.
 
-Notebooks (Jupyter / Colab): `%load_ext cc_node` then `%%js` — one
-kernel-scoped domain (`cc_node.kernel()`), same calling convention.
+Notebooks (Jupyter / Colab): `import cc_node` then `%%js` or
+`cc_node.get()` — one session domain, same calling convention.
 """
 import array
 import atexit
@@ -36,7 +36,9 @@ import sys
 import tempfile
 
 __all__ = [
-    "create", "kernel", "reset_kernel", "JsError", "JsHandle",
+    "create", "get", "reset", "kernel", "reset_kernel",
+    "require", "eval", "eval_cell", "import_module", "stats",
+    "JsError", "JsHandle",
     "load_ipython_extension", "unload_ipython_extension", "__version__",
 ]
 __version__ = "0.22.1"
@@ -161,12 +163,14 @@ class Bridge:
         # numbers in the child, so the broker learns them from the env.
         req_r, req_w = os.pipe()
         resp_r, resp_w = os.pipe()
+        preload = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "stdio_line.cjs")
         env = dict(os.environ,
                    CC_WIRE_IN=str(req_r), CC_WIRE_OUT=str(resp_w),
                    CC_NODE_SHM_DIR=self._shm_dir)
         try:
             self._p = subprocess.Popen(
-                [node, broker],
+                [node, "-r", preload, broker],
                 pass_fds=(req_r, resp_w),
                 env=env,
                 cwd=os.getcwd(),
@@ -645,19 +649,19 @@ def create(node=None):
     return Bridge(node=node)
 
 
-_kernel = None
+_session = None
 
 
-def kernel(node=None):
-    """Process-wide domain for notebooks. Lazy; magics share it.
-    Scripts that want a private child still call `create()`."""
-    global _kernel
-    b = _kernel
+def get(node=None):
+    """Session domain: one child for this process (the Jupyter kernel).
+    Lazy. Magics share it. `create()` is still a private child."""
+    global _session
+    b = _session
     if b is not None and not b.closed:
         if node is not None and node != b._node_bin:
             raise JsError(
-                "cc-node: kernel() already live with a different node; "
-                "reset_kernel() / %js_reset first")
+                "cc-node: get() already live with a different node; "
+                "reset() / %js_reset first")
         return b
     b = create(node=node)
     try:
@@ -665,15 +669,15 @@ def kernel(node=None):
     except Exception:
         b.destroy()
         raise
-    _kernel = b
+    _session = b
     return b
 
 
-def reset_kernel():
-    """Destroy the kernel-scoped domain. Next `kernel()` / `%%js` spawns."""
-    global _kernel
-    b = _kernel
-    _kernel = None
+def reset():
+    """Destroy the session domain. Next get() / %%js spawns."""
+    global _session
+    b = _session
+    _session = None
     if b is not None:
         try:
             b.destroy()
@@ -681,10 +685,61 @@ def reset_kernel():
             pass
 
 
+kernel = get
+reset_kernel = reset
+
+
+def require(name):
+    return get().require(name)
+
+
+def eval(src):  # noqa: A001 — session eval, pythonia-shaped
+    return get().eval(src)
+
+
+def eval_cell(src, bindings=None):
+    return get().eval_cell(src, bindings)
+
+
+def import_module(name):
+    return get().import_module(name)
+
+
+def stats():
+    return get().stats()
+
+
 def load_ipython_extension(ip):
     from .magics import load_ipython_extension as _load
     _load(ip)
+    if getattr(ip, "_cc_node_lifecycle", False):
+        return
+    ip._cc_node_lifecycle = True
+    orig = getattr(ip, "reset", None)
+    if orig is not None:
+        def _reset(*args, **kwargs):
+            reset()
+            return orig(*args, **kwargs)
+        ip.reset = _reset
 
 
 def unload_ipython_extension(ip):
-    reset_kernel()
+    reset()
+
+
+def _boot_ipython():
+    # Already in a kernel: IPython is in sys.modules. Do not import it
+    # just because the extra is installed — scripts stay spawn-free.
+    if "IPython" not in sys.modules:
+        return
+    try:
+        from IPython import get_ipython
+    except ImportError:
+        return
+    ip = get_ipython()
+    if ip is None:
+        return
+    load_ipython_extension(ip)
+
+
+_boot_ipython()

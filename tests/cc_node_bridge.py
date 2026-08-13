@@ -188,13 +188,16 @@ with cc_node.create() as js:
     out("repr_html_cheap",
         "JsHandle #" in date._repr_html_() and "1970" not in date._repr_html_())
 
-a = cc_node.kernel()
-b = cc_node.kernel()
-out("kernel_same", a is b)
-cc_node.reset_kernel()
-c = cc_node.kernel()
-out("kernel_reset", a.closed and c is not a and not c.closed)
-cc_node.reset_kernel()
+out("get_is_kernel", cc_node.get is cc_node.kernel)
+out("mod_require", cc_node.require("path").join("a", "b") == "a/b")
+a = cc_node.get()
+b = cc_node.get()
+out("get_same", a is b)
+out("kernel_same", cc_node.kernel() is a)
+cc_node.reset()
+c = cc_node.get()
+out("get_reset", a.closed and c is not a and not c.closed)
+cc_node.reset()
 
 # First Ctrl-C does not abandon the in-flight reply (wire would desync).
 # Second door is a hard child kill — cooperative close cannot stop a

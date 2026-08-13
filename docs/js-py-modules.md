@@ -173,8 +173,8 @@ guest: [`examples/js/jsdemo_mod.ccs`](../examples/js/jsdemo_mod.ccs).
 Shim cache: `~/.cache/concurrent-c/js-host` (Debian/Ubuntu:
 `apt install libnode-dev`). From Python, any npm package goes through
 [`concurrent-c-node`](../pypi/cc-node)
-(`%load_ext cc_node` / `%%js` in Jupyter or Colab; one kernel-scoped
-child, same calling convention).
+(`import cc_node` then `%%js` / `cc_node.get()` in Jupyter or Colab;
+one session child, same calling convention).
 
 ## Module export — Node / Python own main
 

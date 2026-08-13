@@ -37,6 +37,8 @@ Scalars and `None` materialize; everything else is a proxy until
 **Cheat sheet**
 
 - Default call blocks. `py.task` is the only Promise.
+- `get()` is the session domain (lazy). `create()` is still a private
+  domain. `reset()` tears the session down.
 - `{ isolated: true }` is not a different `await` story.
 - `isProxy(x)` is the predicate. `py.is(a, b)` is Python `is`.
 - Trailing `{…}` is a positional dict; `kwargs({…})` means keywords.
@@ -96,11 +98,21 @@ Receipts:
 
 Colab and the usual Jupyter kernel are **Python** — that is
 [`concurrent-c-node`](https://pypi.org/project/concurrent-c-node/)
-(`%load_ext cc_node` / `%%js`; magics, interrupt, `--bind` in that
-README). This package is the JS-kernel direction (`tslab`, Deno
-Jupyter): default `create()` blocks this thread until Python answers.
+(`import cc_node` then `%%js` / `cc_node.get()`; magics, interrupt,
+`--bind` in that README). This package is the JS-kernel direction
+(`tslab`, Deno Jupyter):
+
+```js
+const py = require('concurrent-c-python').get();  // session; default in-process
+const np = py.import('numpy');
+// same session, no get() at the call site:
+// const np = require('concurrent-c-python').import('numpy');
+```
+
+Default `get()` / `create()` blocks this thread until Python answers.
 Use `py.task` (and `{ isolated: true }` when you want a child
-interpreter) if the kernel’s event loop must stay live.
+interpreter) if the kernel’s event loop must stay live. Isolated
+children set `PYTHONUNBUFFERED=1` so `print` lands in the cell.
 
 ## Common issues
 
@@ -415,6 +427,6 @@ same spelling, ~8× pythonia.
 The other direction (JS / npm from Python):
 [`concurrent-c-node`](https://pypi.org/project/concurrent-c-node/)
 vs DIY node / pythonmonkey / mini-racer. Jupyter/Colab magics live there
-(`%load_ext cc_node` / `%%js`).
+(`import cc_node` then `%%js` / `cc_node.get()`).
 
 Stress: [`stress/bridge/`](https://github.com/sreekotay/concurrent-c/tree/main/stress/bridge).

@@ -26,4 +26,10 @@ release_drops true
 destroy_lands true
 after_close_rejects true
 import_after_close true
+get_same true
+get_bare_same true
+get_refuses_other_python true
+get_reset true
+get_after_reset true
+get_import true
 proc suite done

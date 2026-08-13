@@ -47,8 +47,9 @@ measurable wire. N domains = N processes.
   in the child. No `{ async: true }`.
 - Scalars / `None` materialize; empty `{}` stays a handle; everything
   else is a `JsHandle` until `str()` / attrs / a call.
-- `%load_ext cc_node` then `%%js` — one kernel domain
-  (`cc_node.kernel()`), not a child per cell.
+- `import cc_node` then `%%js` or `cc_node.get()` — one session, not a
+  child per cell. `%load_ext` still works (idempotent).
+- `cc_node.require('path')` is `get().require('path')`.
 - `eval()` is one RTT, no extra globals. `%%js` / `eval_cell` install
   cwd `require` once.
 - `--bind` is `Object.assign(globalThis, …)` of names you name (wire
@@ -69,36 +70,45 @@ python -m cc_node.benchmarks.vs_alts          # vs DIY node / pythonmonkey / min
 
 Colab and the usual Jupyter kernel are **Python** — this package. Same
 calling convention as a script: a cell blocks until Node answers;
-thenables wait in the child. Magics share **one** domain for the
-kernel, not a spawn per cell (~28ms).
+thenables wait in the child. Magics and `get()` share **one** session
+for the kernel, not a spawn per cell (~28ms). Child `console.log`
+lands in the cell (inherited stdio, line-buffered).
 
 ```python
 %pip install concurrent-c-node
 # if `node` is missing (typical Colab):
 !apt-get install -y nodejs
-%load_ext cc_node
 
+import cc_node                 # magics register; no %load_ext
+path = cc_node.require('path')
+path.join('a', 'b')            # 'a/b'
+```
+
+```python
 %%js
-const path = require('path')
-path.join('a', 'b')          // last expression comes back as Python
+console.log('hi')              # shows in the cell
+require('path').join('a', 'b') # last expression comes back as Python
 ```
 
 ```python
 xs = [1, 2, 3, 4]
 
 %%js -b xs -t chunks
-xs.map(x => x * 2)           // wire types only; no pickle fallback
+xs.map(x => x * 2)             # wire types only; no pickle fallback
 ```
 
 | | |
 |---|---|
-| `%load_ext cc_node` | register magics; does **not** spawn until first `%%js` |
-| `%js 1+1` / `%%js` | eval on `cc_node.kernel()`; last expression is the result |
+| `import cc_node` | registers magics; does **not** spawn until first `%%js` / `get()` / `require()` |
+| `%load_ext cc_node` | same, idempotent |
+| `%js 1+1` / `%%js` | eval on `cc_node.get()`; last expression is the result |
 | `-b xs` / `--bind xs,n` | publish those Python names on `globalThis` for the cell |
 | `-t chunks` / `--to` | store the result in the notebook namespace |
 | `%js_stats` | handle-table size (spawns if needed) |
-| `%js_reset` | `destroy()` the kernel child; next `%%js` spawns again |
-| `cc_node.kernel()` | the same domain the magics use; `create()` is still a private child |
+| `%js_reset` / `cc_node.reset()` | `destroy()` the session child; `%reset` does this too |
+| `cc_node.get()` | the session the magics use; `create()` is still a private child |
+| `cc_node.kernel()` | alias of `get()` |
+| `cc_node.require('fs')` | `get().require('fs')` |
 | `JsHandle` display | cheap `JsHandle #3` — repr does not cross the wire |
 
 `eval()` is unchanged (one RTT, no extra globals). `%%js` / `eval_cell`
@@ -169,6 +179,7 @@ vs pymport / ncp / pythonia.
   `destroy()`; afterwards: `bridge is closed`.
 - `eval_cell(src, bindings=)` is the notebook door (`%%js`): cwd
   `require` once, optional `globalThis` binds; `eval()` stays one RTT.
+  `get()` / `require()` / `eval()` at module level share that session.
 - Crash isolation, not a sandbox. `destroy()` is cooperative; an
   in-flight CPU-bound call finishes or you kill the child
   ([`bridge_stress.md`](https://github.com/sreekotay/concurrent-c/blob/main/stress/bridge/bridge_stress.md)).
@@ -267,7 +278,7 @@ Both bridges (npm OIDC + PyPI OIDC):
 
 Examples: `use_node`, `bench_wire`, `benchmarks.multi_domain`,
 `benchmarks.vs_alts`.
-Jupyter: `%load_ext cc_node`.
+Jupyter: `import cc_node` then `%%js` (or `%load_ext cc_node`).
 Stress: [`stress/bridge/`](https://github.com/sreekotay/concurrent-c/tree/main/stress/bridge).  
 Own hot path in C/CC → native module (40–90ns) —
 [JS / Python interop](https://github.com/sreekotay/concurrent-c/blob/main/docs/js-py-modules.md).

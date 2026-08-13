@@ -1,9 +1,9 @@
 /* concurrent-c-python: Python from Node over the Concurrent-C bridge.
  *
- *     const py = require('concurrent-c-python').create();  // Isolation Domain
+ *     const py = require('concurrent-c-python').get();  // session domain
  *     const np = py.import('numpy');
  *     const s  = np.linalg.norm(new Float64Array([3, 4]));   // 5
- *     await py.destroy();   // closed immediately; await drains the lane / child
+ *     require('concurrent-c-python').reset();  // or py.destroy(); create() is private
  *
  * Proxies wrap opaque handles: attribute access is getattr, a call is
  * invoke, scalars come back as JS scalars and everything else as another
@@ -741,10 +741,14 @@ class ProcBridge {
     this._repBuf = Buffer.alloc(0);
     // The wire lives on fds 3 (requests) / 4 (replies); stdio is
     // inherited, so user print() reaches the real stdout and can never
-    // collide with a protocol reply.
+    // collide with a protocol reply. PYTHONUNBUFFERED so a pipe
+    // (Jupyter, nohup) does not block-buffer print until exit.
     this._child = spawn(exe, [path.join(__dirname, 'broker.py')], {
       stdio: ['inherit', 'inherit', 'inherit', 'pipe', 'pipe'],
-      env: Object.assign({}, process.env, { CC_PY_SHM_DIR: this._shmDir }),
+      env: Object.assign({}, process.env, {
+        CC_PY_SHM_DIR: this._shmDir,
+        PYTHONUNBUFFERED: '1',
+      }),
     });
     this._child.on('error', (e) => this._die('cannot spawn ' + exe +
                                              ': ' + e.message));
@@ -1233,6 +1237,64 @@ class ProcBridge {
   [Symbol.asyncDispose]() { return this.destroy(); }
 }
 
+function createDomain(opts) {
+  if (opts && opts.isolated) return new ProcBridge(opts);
+  if (opts && opts.python)
+    throw new Error(
+      'concurrent-c-python: the in-process runtime is process-wide — choose it ' +
+      'with usePython(...); per-domain python needs { isolated: true }');
+  return new Bridge();
+}
+
+function optsKey(opts) {
+  return {
+    isolated: !!(opts && opts.isolated),
+    python: (opts && opts.python) ? String(opts.python) : '',
+  };
+}
+
+let _session = null;
+let _sessionKey = null;
+let _exitHooked = false;
+
+function sessionGet(opts) {
+  if (_session && !_session.closed) {
+    if (opts != null &&
+        (optsKey(opts).isolated !== _sessionKey.isolated ||
+         optsKey(opts).python !== _sessionKey.python)) {
+      throw new Error(
+        'concurrent-c-python: get() already live with different opts; ' +
+        'reset() first');
+    }
+    return _session;
+  }
+  const py = createDomain(opts);
+  _session = py;
+  _sessionKey = optsKey(opts);
+  if (!_exitHooked) {
+    _exitHooked = true;
+    process.on('exit', () => {
+      if (!_session) return;
+      try {
+        if (typeof _session[Symbol.dispose] === 'function')
+          _session[Symbol.dispose]();
+      } catch (e) { /* ignore */ }
+    });
+  }
+  return py;
+}
+
+function sessionReset() {
+  const py = _session;
+  _session = null;
+  _sessionKey = null;
+  if (!py) return;
+  try {
+    if (typeof py[Symbol.dispose] === 'function') py[Symbol.dispose]();
+    else py.destroy();
+  } catch (e) { /* ignore */ }
+}
+
 module.exports = {
   version: require('./package.json').version,
 
@@ -1252,12 +1314,21 @@ module.exports = {
   },
 
   create(opts) {
-    if (opts && opts.isolated) return new ProcBridge(opts);
-    if (opts && opts.python)
-      throw new Error(
-        'concurrent-c-python: the in-process runtime is process-wide — choose it ' +
-        'with usePython(...); per-domain python needs { isolated: true }');
-    return new Bridge();
+    return createDomain(opts);
+  },
+
+  // Session domain: one create() for this process (a JS kernel, a
+  // script). Lazy. create() is still a private domain. A later get()
+  // with a different isolated/python refuses; bare get() returns the
+  // live session.
+  get(opts) {
+    return sessionGet(opts);
+  },
+  reset() {
+    sessionReset();
+  },
+  import(name) {
+    return sessionGet().import(name);
   },
 
   // Choose the process Python from code — a venv dir, an interpreter

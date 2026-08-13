@@ -26,6 +26,6 @@ Documentation = "https://github.com/sreekotay/concurrent-c/blob/main/pypi/cc-nod
 packages = ["cc_node", "cc_node.examples", "cc_node.benchmarks"]
 
 [tool.setuptools.package-data]
-cc_node = ["broker.cjs"]
+cc_node = ["broker.cjs", "stdio_line.cjs"]
 "cc_node.examples" = ["*.py"]
 "cc_node.benchmarks" = ["*.py"]

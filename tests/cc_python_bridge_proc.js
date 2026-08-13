@@ -213,5 +213,24 @@ const ccpy = require(process.cwd() + '/npm/cc-python');
     out('import_after_close', /closed/.test(importMsg));
   }
 
+  // Session get(): one child; bare get() returns it; a different
+  // python= refuses; reset() tears it down.
+  {
+    const a = ccpy.get({ isolated: true });
+    const b = ccpy.get({ isolated: true });
+    out('get_same', a === b);
+    out('get_bare_same', ccpy.get() === a);
+    let refused = false;
+    try { ccpy.get({ isolated: true, python: '/no/such/python' }); }
+    catch (e) { refused = /already live/.test(e.message); }
+    out('get_refuses_other_python', refused);
+    ccpy.reset();
+    out('get_reset', a.closed);
+    const c = ccpy.get({ isolated: true });
+    out('get_after_reset', c !== a && !c.closed);
+    out('get_import', c.import('math').sqrt(9) === 3);
+    ccpy.reset();
+  }
+
   console.log('proc suite done');
 })().catch((e) => { console.error('PROC SUITE ERROR:', e.message); process.exit(1); });

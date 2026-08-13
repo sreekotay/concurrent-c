@@ -2,7 +2,7 @@
 from IPython.core.magic import Magics, line_cell_magic, line_magic, magics_class
 from IPython.core.magic_arguments import argument, magic_arguments, parse_argstring
 
-from . import JsError, kernel, reset_kernel
+from . import JsError, get, reset
 
 
 def _bind_map(names, ns):
@@ -30,7 +30,7 @@ class CcNodeMagics(Magics):
     @argument("code", nargs="*", help="JS source (line magic)")
     @line_cell_magic
     def js(self, line, cell=None):
-        """Eval JavaScript on the kernel-scoped domain.
+        """Eval JavaScript on the session domain (`cc_node.get()`).
 
         Line:  %js 1 + 1
         Cell:  %%js   then a body; last expression is the result.
@@ -45,20 +45,20 @@ class CcNodeMagics(Magics):
             raise JsError("cc-node: empty %js / %%js")
         ns = self.shell.user_ns
         bindings = _bind_map(args.bind, ns)
-        result = kernel().eval_cell(src, bindings or None)
+        result = get().eval_cell(src, bindings or None)
         if args.to:
             ns[args.to] = result
         return result
 
     @line_magic
     def js_reset(self, line):
-        """Destroy the kernel-scoped Node child. Next %%js spawns again."""
-        reset_kernel()
+        """Destroy the session Node child. Next %%js / get() spawns again."""
+        reset()
 
     @line_magic
     def js_stats(self, line):
-        """Handle-table size of the kernel domain (spawns if needed)."""
-        return kernel().stats()
+        """Handle-table size of the session domain (spawns if needed)."""
+        return get().stats()
 
 
 def load_ipython_extension(ip):
