@@ -2,7 +2,7 @@
   "name": "concurrent-c-syntax",
   "displayName": "Concurrent-C Syntax",
   "description": "Syntax highlighting for Concurrent-C (*.ccs, *.cch, *.shcc), a C-preprocessor-based language.",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "publisher": "local",
   "license": "MIT",
   "engines": {

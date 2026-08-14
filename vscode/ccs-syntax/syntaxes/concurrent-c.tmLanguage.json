@@ -6,21 +6,9 @@
     { "include": "#comments" },
     { "include": "#preprocessor" },
     { "include": "#ccs_grammar" },
+    { "include": "#emit_calls" },
     { "include": "#template_strings" },
-    { "include": "#strings" },
-    { "include": "#cc_literals" },
-    { "include": "#numbers" },
-    { "include": "#ccs_at_keywords" },
-    { "include": "#ccs_spawn" },
-    { "include": "#ccs_ufcs" },
-    { "include": "#cc_operators" },
-    { "include": "#cc_keywords" },
-    { "include": "#cc_type_sugar" },
-    { "include": "#cc_channel_type" },
-    { "include": "#keywords" },
-    { "include": "#types" },
-    { "include": "#constants" },
-    { "include": "#function_calls" }
+    { "include": "#code" }
   ],
   "repository": {
     "comments": {
@@ -87,6 +75,127 @@
         }
       ]
     },
+    "emit_calls": {
+      "patterns": [
+        {
+          "name": "meta.emit.concurrent-c",
+          "begin": "\\B@(emit)\\s*(\\()",
+          "beginCaptures": {
+            "1": { "name": "keyword.control.concurrent-c" },
+            "2": { "name": "punctuation.section.parens.begin.concurrent-c" }
+          },
+          "end": "\\)",
+          "endCaptures": {
+            "0": { "name": "punctuation.section.parens.end.concurrent-c" }
+          },
+          "applyEndPatternLast": true,
+          "patterns": [
+            { "include": "#emit_args" }
+          ]
+        }
+      ]
+    },
+    "emit_args": {
+      "patterns": [
+        {
+          "begin": "\\(",
+          "end": "\\)",
+          "applyEndPatternLast": true,
+          "patterns": [
+            { "include": "#emit_args" }
+          ]
+        },
+        { "include": "#comments" },
+        { "include": "#emit_template" },
+        { "include": "#code" }
+      ]
+    },
+    "emit_template": {
+      "patterns": [
+        {
+          "name": "meta.embedded.emit.concurrent-c",
+          "begin": "`",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.string.begin.concurrent-c" }
+          },
+          "end": "`",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.string.end.concurrent-c" }
+          },
+          "contentName": "meta.embedded.emit.body.concurrent-c",
+          "patterns": [
+            { "name": "constant.character.escape.concurrent-c", "match": "\\\\[`$\\\\nrt\"']" },
+            { "include": "#template_interpolations" },
+            { "include": "#emit_comments" },
+            { "include": "#emit_strings" },
+            { "include": "#preprocessor" },
+            { "include": "#ccs_grammar" },
+            { "include": "#emit_calls" },
+            { "include": "#code" }
+          ]
+        }
+      ]
+    },
+    "emit_comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.c",
+          "begin": "//",
+          "end": "$",
+          "patterns": [
+            { "include": "#template_interpolations" }
+          ]
+        },
+        {
+          "name": "comment.block.c",
+          "begin": "/\\*",
+          "end": "\\*/",
+          "patterns": [
+            { "include": "#template_interpolations" }
+          ]
+        }
+      ]
+    },
+    "emit_strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.c",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            { "name": "constant.character.escape.c", "match": "\\\\(x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}|[0-7]{1,3}|.)" },
+            { "include": "#template_interpolations" }
+          ]
+        },
+        {
+          "name": "string.quoted.single.c",
+          "begin": "'",
+          "end": "'",
+          "patterns": [
+            { "name": "constant.character.escape.c", "match": "\\\\(x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}|[0-7]{1,3}|.)" },
+            { "include": "#template_interpolations" }
+          ]
+        }
+      ]
+    },
+    "code": {
+      "patterns": [
+        { "include": "#strings" },
+        { "include": "#cc_literals" },
+        { "include": "#numbers" },
+        { "include": "#ccs_at_keywords" },
+        { "include": "#ccs_spawn" },
+        { "include": "#ccs_ufcs" },
+        { "include": "#cc_operators" },
+        { "include": "#cc_keywords" },
+        { "include": "#cc_type_sugar" },
+        { "include": "#cc_channel_type" },
+        { "include": "#keywords" },
+        { "include": "#types" },
+        { "include": "#constants" },
+        { "include": "#function_calls" }
+      ]
+    },
     "template_strings": {
       "patterns": [
         {
@@ -142,21 +251,10 @@
           "endCaptures": {
             "0": { "name": "punctuation.section.embedded.end.concurrent-c" }
           },
+          "applyEndPatternLast": true,
+          "contentName": "source.concurrent-c.interpolation",
           "patterns": [
-            { "include": "#comments" },
-            { "include": "#template_strings" },
-            { "include": "#strings" },
-            { "include": "#numbers" },
-            { "include": "#cc_literals" },
-            { "include": "#ccs_ufcs" },
-            { "include": "#ccs_at_keywords" },
-            { "include": "#cc_keywords" },
-            { "include": "#cc_type_sugar" },
-            { "include": "#cc_channel_type" },
-            { "include": "#keywords" },
-            { "include": "#types" },
-            { "include": "#constants" },
-            { "include": "#function_calls" }
+            { "include": "#interpolation_contents" }
           ]
         },
         {
@@ -170,23 +268,34 @@
           "endCaptures": {
             "0": { "name": "punctuation.section.embedded.end.concurrent-c" }
           },
+          "applyEndPatternLast": true,
+          "contentName": "source.concurrent-c.interpolation",
           "patterns": [
-            { "include": "#comments" },
-            { "include": "#template_strings" },
-            { "include": "#strings" },
-            { "include": "#numbers" },
-            { "include": "#cc_literals" },
-            { "include": "#ccs_ufcs" },
-            { "include": "#ccs_at_keywords" },
-            { "include": "#cc_keywords" },
-            { "include": "#cc_type_sugar" },
-            { "include": "#cc_channel_type" },
-            { "include": "#keywords" },
-            { "include": "#types" },
-            { "include": "#constants" },
-            { "include": "#function_calls" }
+            { "include": "#interpolation_contents" }
           ]
         }
+      ]
+    },
+    "interpolation_contents": {
+      "patterns": [
+        {
+          "begin": "\\{",
+          "beginCaptures": {
+            "0": { "name": "punctuation.section.block.begin.concurrent-c" }
+          },
+          "end": "\\}",
+          "endCaptures": {
+            "0": { "name": "punctuation.section.block.end.concurrent-c" }
+          },
+          "applyEndPatternLast": true,
+          "patterns": [
+            { "include": "#interpolation_contents" }
+          ]
+        },
+        { "include": "#comments" },
+        { "include": "#template_strings" },
+        { "include": "#emit_calls" },
+        { "include": "#code" }
       ]
     },
     "strings": {

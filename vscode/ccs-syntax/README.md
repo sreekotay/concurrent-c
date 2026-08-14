@@ -12,7 +12,8 @@ Concurrent-C is largely C + preprocessor, with a few extra active surface-syntax
 - `@defer` / `@defer(err|ok)` / `@cancel`
 - `@async` / `@await` / `@blocking` / `@nonblocking`
 - `@errhandler` / `@err` / result unwrap (`!>`, `?>`)
-- `@string` / `@emit` backtick templates (`${…}`, `$~tag{…}`, `${{…}}` verbatim)
+- `@string` backtick templates (`${…}`, `$~tag{…}`, `${{…}}` verbatim) — string coloring
+- `@emit` backtick bodies — Concurrent-C/C highlighting with `${…}` interpolations
 - `@grammar(engine) Name {~~~~ … ~~~~}` fences (`rules` / `schema` / `cli`)
 - `@variant` / `@variant(packed)`
 - UFCS-style task operations like `n->spawn(...)` / `n->wait()`
@@ -42,7 +43,7 @@ cd /path/to/concurrent-c
 
 3. Open a `.ccs`, `.cch`, or `.shcc` file; the language mode should be **Concurrent-C**.
 
-A good smoke fixture for templates + `@grammar` is `tools/cc_perf_check.shcc`.
+A good smoke fixture for templates + `@grammar` is `tools/cc_perf_check.shcc`. For `@emit` C-body highlighting, open `real_projects/levenshtein/levenshtein_cc.ccs`.
 
 ## Develop / tweak the grammar
 
