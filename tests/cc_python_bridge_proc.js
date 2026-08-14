@@ -23,7 +23,7 @@ const ccpy = require(process.cwd() + '/npm/cc-python');
   //    direct `node …_proc.js` without numpy still covers them.
   {
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-    const mapped = (await py.task(b.list)(b.map(async (x) => {
+    const mapped = (await py.task(b.list)(await py.task(b.map)(async (x) => {
       await sleep(5);
       return x * 10;
     }, [1, 2, 3]))).toJS();
@@ -36,7 +36,7 @@ const ccpy = require(process.cwd() + '/npm/cc-python');
     out('callback_return_py_handle', pick((a, b) => b) === 12);
     const piped = await Promise.all([0, 1, 2, 3].map(async (i) => {
       const f = await py.task(apply)((n) => (x) => x + n, i);
-      return f(10);
+      return await py.task(f)(10);
     }));
     out('pipelined_nested_cbs', JSON.stringify(piped) === '[10,11,12,13]');
     out('nonfinite_crosses', b.float('-inf') === -Infinity);

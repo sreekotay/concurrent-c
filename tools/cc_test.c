@@ -65,12 +65,26 @@ static int write_file_from_buf(const char* path, const unsigned char* buf, size_
 
 static int read_entire_file_alloc(const char* path, unsigned char** out_buf, size_t* out_len);
 
+static void dump_failure_stream(const char* label, const unsigned char* buf, size_t len) {
+    const unsigned char* p = buf;
+    size_t n = len;
+    if (!buf || !len) return;
+    fprintf(stderr, "----- %s -----\n", label);
+    if (n > 8192) {
+        p += n - 8192;
+        n = 8192;
+        fputs("... (truncated)\n", stderr);
+    }
+    fwrite(p, 1, n, stderr);
+    if (n && p[n - 1] != '\n') fputc('\n', stderr);
+}
+
 static void log_failure_files(const char* stem,
                               const char* out_path,
                               const char* err_path,
                               const char* build_err_path) {
     if (!stem || !stem[0]) return;
-    if (ensure_dir_p("tmp/cc_test_logs") != 0) return;
+    (void)ensure_dir_p("tmp/cc_test_logs");
 
     char dest[512];
     unsigned char* buf = NULL;
@@ -79,18 +93,21 @@ static void log_failure_files(const char* stem,
     if (out_path && read_entire_file_alloc(out_path, &buf, &len) == 0 && buf) {
         snprintf(dest, sizeof(dest), "tmp/cc_test_logs/%s.stdout.txt", stem);
         (void)write_file_from_buf(dest, buf, len);
+        dump_failure_stream("stdout", buf, len);
     }
     free(buf); buf = NULL; len = 0;
 
     if (err_path && read_entire_file_alloc(err_path, &buf, &len) == 0 && buf) {
         snprintf(dest, sizeof(dest), "tmp/cc_test_logs/%s.stderr.txt", stem);
         (void)write_file_from_buf(dest, buf, len);
+        dump_failure_stream("stderr", buf, len);
     }
     free(buf); buf = NULL; len = 0;
 
     if (build_err_path && read_entire_file_alloc(build_err_path, &buf, &len) == 0 && buf) {
         snprintf(dest, sizeof(dest), "tmp/cc_test_logs/%s.build.stderr.txt", stem);
         (void)write_file_from_buf(dest, buf, len);
+        dump_failure_stream("build.stderr", buf, len);
     }
     free(buf);
 }
