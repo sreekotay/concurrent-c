@@ -41,6 +41,10 @@ static int cc__sb_put(char** d, size_t* dl, size_t* dc, const char* s, size_t n)
 
 #ifdef CC_TCC_EXT_AVAILABLE
 #include <tcc.h>
+#include "../tcc_ext_abi.h"
+#if !defined(CC_TCC_EXT_ABI) || (CC_TCC_EXT_ABI != CC_TCC_EXT_ABI_EXPECTED)
+#error "stale TinyCC patch (CC_TCC_EXT_ABI); ./scripts/apply_tcc_patches.sh and rebuild libtcc.a"
+#endif
 #ifdef malloc
 #undef malloc
 #endif

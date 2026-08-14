@@ -2,7 +2,10 @@
 
 In-tree tests need patched TinyCC (`./scripts/check_patched_tcc.sh`);
 an installed `ccc` is not enough. `./scripts/test.sh` and `make test` refuse
-an unpatched checkout instead of emitting ~50 compile_err mismatches.
+an unpatched or stale checkout (patch ABI, `libtcc.a` older than the patch
+files, comptime `@emit`/`#line` contract) instead of emitting ~50
+compile_err mismatches. `./scripts/test.sh` rebuilds `ccc` when `cc/src`
+or the TCC patches are newer than the binaries.
 
 The repo provides a minimal test runner: `./tools/cc_test`.
 

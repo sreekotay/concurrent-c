@@ -1,0 +1,16 @@
+#!ccc ccs
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+
+/* libtcc #line-resume contract: anchored backtick @emit lowers to
+ * cc_emit_tpl_splice_at in a TU that starts with a large prelude, then
+ * #line back to this file. Unpatched / stale libtcc drops that resume and
+ * relocates the call as an undefined extern. */
+
+@comptime {
+    @emit(CC_EMIT_AFTER_PRELUDE, `enum { TCC_EXT_EMIT_CONTRACT = 1 };`);
+}
+
+int main(void) {
+    return TCC_EXT_EMIT_CONTRACT == 1 ? 0 : 1;
+}

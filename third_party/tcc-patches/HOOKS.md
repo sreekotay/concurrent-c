@@ -14,6 +14,7 @@ All extensions are guarded by `#ifdef CONFIG_CC_EXT`.
 |-------|------|
 | `CONFIG_CC_EXT` / `--config-cc_ext` | Build flag wiring in TCC `Makefile` |
 | `CC_TCC_EXT_AVAILABLE` | Sentinel macro for Concurrent-C compile paths |
+| `CC_TCC_EXT_ABI` | Patch generation; must match `cc/src/tcc_ext_abi.h` |
 | `pp_line` negative-delta fix | Preserve user `#line` resumes after synthetic injections |
 | dwarf `unsigned i` locals | Quiet `-Wsign-compare` on two readers |
 

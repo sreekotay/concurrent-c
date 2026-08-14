@@ -37,6 +37,12 @@ Produces: `cc/bin/ccc`, `out/cc/bin/shadow_lower`, lowered `out/include/`.
 
 `iterate_shadow_lower.sh` rebuilds **`shadow_lower` only** (the native front). `ccc` already invokes that binary.
 
+`./scripts/test.sh` / `make test` refuse a missing, unpatched, or stale TinyCC
+(`CC_TCC_EXT_ABI`, `libtcc.a` vs patch files, comptime `@emit`/`#line`
+contract). After `git pull`, `test.sh` rebuilds `ccc` if `cc/src` or the
+patches are newer than the binaries — you do not have to remember `make cc`
+for the suite, but you still do for ad-hoc `./cc/bin/ccc` use.
+
 ## Ship a new `shadow_lower` bootstrap seed
 
 Only when a lowerer face change should stick in committed `last-good` (cold clones):

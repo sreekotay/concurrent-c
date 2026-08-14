@@ -123,9 +123,8 @@ else
   echo "[test] full mode (jobs=$jobs${opt_o0:+, -O0})"
 fi
 
-# Rebuild the compiler when missing or broken (e.g. after `make -C cc clean`
-# wiped .ccc-bin / out/include). Avoids a false "const-eval FAILED" from the
-# wrapper remaining while the real binary is gone.
+# Rebuild the compiler when missing, broken, or stale vs this checkout
+# (git pull of cc/src or tcc-patches while yesterday's ccc still runs).
 need_cc=0
 if [ ! -x "./cc/bin/.ccc-bin" ]; then need_cc=1; fi
 if [ ! -x "./out/cc/bin/shadow_lower" ] && [ ! -x "./cc/bin/shadow_lower" ]; then
@@ -133,6 +132,21 @@ if [ ! -x "./out/cc/bin/shadow_lower" ] && [ ! -x "./cc/bin/shadow_lower" ]; the
 fi
 if [ "$need_cc" = 0 ] && [ -x "./cc/bin/ccc" ]; then
   if ! ./cc/bin/ccc __eval-const --selftest >/dev/null 2>&1; then
+    need_cc=1
+  fi
+fi
+if [ "$need_cc" = 0 ] && [ -e "./cc/bin/.ccc-bin" ]; then
+  if find cc/src cc/Makefile third_party/tcc-patches -type f \
+       \( -name '*.c' -o -name '*.h' -o -name 'Makefile' -o -name '*.patch' \) \
+       -newer ./cc/bin/.ccc-bin 2>/dev/null | head -1 | grep -q .; then
+    echo "[test] compiler sources newer than cc/bin/.ccc-bin; rebuilding"
+    need_cc=1
+  fi
+fi
+if [ "$need_cc" = 0 ] && [ -f "./third_party/tcc/libtcc.a" ]; then
+  if find third_party/tcc-patches -type f -name '*.patch' \
+       -newer ./third_party/tcc/libtcc.a 2>/dev/null | head -1 | grep -q .; then
+    echo "[test] tcc patches newer than libtcc.a; rebuilding"
     need_cc=1
   fi
 fi

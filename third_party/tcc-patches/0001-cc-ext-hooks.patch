@@ -16,12 +16,13 @@ diff --git a/tcc.h b/tcc.h
 index e7a2f1e2..77881772 100644
 --- a/tcc.h
 +++ b/tcc.h
-@@ -452,6 +452,10 @@ typedef struct TokenSym {
+@@ -452,6 +452,11 @@ typedef struct TokenSym {
      char str[1];
  } TokenSym;
  
 +#ifdef CONFIG_CC_EXT
 +#define CC_TCC_EXT_AVAILABLE 1
++#define CC_TCC_EXT_ABI 1
 +#endif
 +
  #ifdef TCC_TARGET_PE

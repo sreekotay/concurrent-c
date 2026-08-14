@@ -28,7 +28,7 @@ make tcc-patch-regen
 (comptime / `cpp_expand` / `--exe`). Product syntax lowering is native
 `shadow_lower`; lowered C is ordinary C.
 
-- `CONFIG_CC_EXT` build flag wiring + `CC_TCC_EXT_AVAILABLE`
+- `CONFIG_CC_EXT` build flag wiring + `CC_TCC_EXT_AVAILABLE` + `CC_TCC_EXT_ABI`
 - `pp_line` negative-delta fix (preserve user `#line` resumes)
 - dwarf `unsigned i` locals (quiet `-Wsign-compare`)
 
@@ -43,7 +43,7 @@ All extensions are guarded by `#ifdef CONFIG_CC_EXT`.
 | File | Changes |
 |------|---------|
 | `Makefile` | Adds `-DCONFIG_CC_EXT` when `CONFIG_cc_ext=yes` |
-| `tcc.h` | `CC_TCC_EXT_AVAILABLE`; dwarf loop index type |
+| `tcc.h` | `CC_TCC_EXT_AVAILABLE`; `CC_TCC_EXT_ABI`; dwarf loop index type |
 | `tccpp.c` | `#line` negative-delta swallow fix |
 
 ## Upstream Compatibility
