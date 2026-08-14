@@ -9,21 +9,21 @@ Recipes: [examples/README.md](../examples/README.md#learning-path-recommended-or
 
 [recipe_defer_cleanup.ccs](../examples/recipe_defer_cleanup.ccs) · [recipe_unwrap_destroy_forms.ccs](../examples/recipe_unwrap_destroy_forms.ccs) · Spec §5.1 / §4.2.2 / §2.2
 
-`@destroy` is **`@defer` sugar on a declaration**: same scope-exit LIFO ledger,
-attached to the binding instead of written as a following statement. Bodyless
-`@destroy` runs the type’s registered destroy; a block is an explicit defer body.
-With `!>`, cleanup is scheduled only if the unwrap succeeds (no binding → no defer).
+`@destroy` attaches cleanup to **successful declaration construction** — `@defer`
+sugar on the binding (same scope-exit LIFO ledger). Bodyless `@destroy` runs the
+type’s registered destroy; a block is an explicit defer body. After `!>`,
+construction succeeded only if the unwrap did (no binding → no destroy).
 
 | Bind | Meaning |
 |------|---------|
 | `@defer` | A **statement**: run this when the **scope** exits (LIFO) |
-| `@destroy` | Same defer, written on the **declaration** (RAII spelling) |
+| `@destroy` | Same defer, on **successful declaration construction** |
 
 ```c
 FILE* f = fopen(path, "r");
 @defer fclose(f);
 
-/* sugar for: unwrap, bind n, then @defer the nursery destroy */
+/* !> unwraps (or routes E); @destroy runs if construction succeeded */
 CCNursery* n = cc_nursery_create(NULL) !> @destroy;
 ```
 
@@ -33,21 +33,25 @@ cancelled-resume, never-entered `env_drop`) are defined by the spec emit.
 
 ---
 
-## 2. Errors become a value or code
+## 2. Errors map to a value or to control flow
 
 [recipe_result_error_handling.ccs](../examples/recipe_result_error_handling.ccs) · [recipe_unwrap_destroy_forms.ccs](../examples/recipe_unwrap_destroy_forms.ccs) · [hello.ccs](../examples/hello.ccs)
 
-Fallible work returns `T!>(E)`. Consume every result.
+Fallible work returns `T!>(E)`. Consume every result. Two operators; three modifiers:
 
-| Operator | Error becomes |
-|----------|---------------|
-| `?>` | A **value** — `x ?> default` |
-| `!>` | **Code** that must leave — `x !> { … }` |
+| | Maps |
+|--|--|
+| `?>` | `E → T` — stay a value (`x ?> default`) |
+| `!>` | `E →` control flow — leave (`x !> { … }` / `x !>;`) |
 
-Modifiers on those two: `(e)` binds the error; `!>;` runs the scope's `@errhandler`; `@destroy` attaches cleanup after a successful unwrap.
+| Modifier | Does |
+|----------|------|
+| `(e)` | Exposes `E` (`x !>(e) { … }` / `x ?>(e) …`) |
+| bare `!>` | Routes `E` to the scope's `@errhandler` (`x !>;`) |
+| `@destroy` | Cleanup on **successful declaration construction** |
 
 ```c
-@errhandler(CCError e) cc_error_exit(e);
+@errhandler(CCError e) cc_error_exit(e);   // bare !> routes here
 
 int a = read() ?> 30;
 int b = read() !>;

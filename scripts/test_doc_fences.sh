@@ -8,6 +8,10 @@
 #   expected line
 #   -->
 #
+#   <!-- compile-err
+#   substring that must appear in stderr
+#   -->
+#
 # The markdown is the source of truth — do not copy examples into tests/.
 # Usage: scripts/test_doc_fences.sh [doc.md ...]
 set -eu
@@ -27,7 +31,7 @@ else
 fi
 
 # Pin so deleting a tutorial fence is a loud miss, not a quieter suite.
-TYPEHOOKS_TUTORIAL_FENCES=7
+TYPEHOOKS_TUTORIAL_FENCES=9
 
 python3 - "$CCC" "$TYPEHOOKS_TUTORIAL_FENCES" "${DOCS[@]}" <<'PY'
 import pathlib, re, subprocess, sys, tempfile, os
@@ -37,7 +41,7 @@ expected_tutorial = int(sys.argv[2])
 docs = sys.argv[3:]
 
 fence_re = re.compile(
-    r"```(?:c|ccs)\n(.*?)```(?:\n<!-- smoke-stdout\n(.*?)-->)?",
+    r"```(?:c|ccs)\n(.*?)```(?:\n<!-- (smoke-stdout|compile-err)\n(.*?)-->)?",
     re.S,
 )
 
@@ -48,9 +52,10 @@ for doc in docs:
     text = pathlib.Path(doc).read_text()
     blocks = fence_re.findall(text)
     runnable = []
-    for body, stdout_pin in blocks:
+    for body, pin_kind, pin_text in blocks:
         if body.startswith("#!ccc ccs"):
-            runnable.append((body, stdout_pin.rstrip("\n") if stdout_pin else None))
+            pin = pin_text.rstrip("\n") if pin_text else None
+            runnable.append((body, pin_kind or None, pin))
     if doc.endswith("typehooks-typeviews.md"):
         tutorial_n = len(runnable)
         if tutorial_n != expected_tutorial:
@@ -65,7 +70,7 @@ for doc in docs:
         fail = 1
         continue
     print(f"[test_doc_fences] {doc}: {len(runnable)} fences")
-    for i, (body, pin) in enumerate(runnable, 1):
+    for i, (body, pin_kind, pin) in enumerate(runnable, 1):
         with tempfile.NamedTemporaryFile(
             "w", suffix=".ccs", prefix=f"doc_fence_ex{i:02d}_", delete=False
         ) as f:
@@ -79,12 +84,35 @@ for doc in docs:
             )
         finally:
             os.unlink(path)
+        err = (r.stderr or "") + (r.stdout or "")
+        if pin_kind == "compile-err":
+            if r.returncode == 0:
+                print(
+                    f"[test_doc_fences]   ex{i:02d} FAIL expected compile error",
+                    file=sys.stderr,
+                )
+                fail = 1
+                continue
+            missing = [
+                line for line in (pin or "").splitlines()
+                if line.strip() and line not in err
+            ]
+            if missing:
+                print(
+                    f"[test_doc_fences]   ex{i:02d} FAIL compile-err missing\n"
+                    + "\n".join(f"    {m!r}" for m in missing),
+                    file=sys.stderr,
+                )
+                print(err[-1200:], file=sys.stderr)
+                fail = 1
+                continue
+            print(f"[test_doc_fences]   ex{i:02d} OK (compile-err)")
+            continue
         got = (r.stdout or "").rstrip("\n")
         if r.returncode != 0:
-            err = (r.stderr or r.stdout or "").strip()
             print(f"[test_doc_fences]   ex{i:02d} FAIL rc={r.returncode}", file=sys.stderr)
-            if err:
-                print(err[-1200:], file=sys.stderr)
+            if err.strip():
+                print(err.strip()[-1200:], file=sys.stderr)
             fail = 1
             continue
         if pin is not None and got != pin:

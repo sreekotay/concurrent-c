@@ -14,7 +14,8 @@ You do **not** need `@typehooks` to add a method. Declaring
 lifecycle and for library-owned naming families.
 
 Subject may be an exact type (`Box`), a pointer key (`MyRes*`), or a
-trailing-`*` family (`Fam_*`). Same match rule on both forms.
+trailing-`*` family (`Fam_*`). Same match rule on both forms:
+**narrowest pattern wins**; two equal-score matches are ill-formed.
 
 ---
 
@@ -70,13 +71,18 @@ Rules that matter in practice:
   the left plus the argument list.
 - If the type registers destroy, `@create(...)` must be followed by
   `@destroy` or `@detach`. Omitting both is an error.
-- `@destroy` attaches to the **declaration**, not only to `@create`.
-  `Port p = {0} @destroy;` and `Port p = port_open(3) @destroy;` run
-  the destroy function at scope exit the same way.
+- `@destroy` attaches cleanup to **successful declaration construction**,
+  not only to `@create`. `Port p = {0} @destroy;` and
+  `Port p = port_open(3) @destroy;` run the destroy function at scope
+  exit the same way. After `!>`, construction succeeded only if the
+  unwrap did.
 - `@destroy;` runs the destroy function. `@destroy { … }` runs
-  **pre-destroy → your block → destroy**.
+  **pre-destroy → your block → destroy hook → `as:` embeds**. See §3.
 
 Pointer and family subjects use the same body (`MyRes*`, `CCChanTx_*`).
+A trailing-`*` subject is one registration for every match. `.ufcs`
+still sees the concrete `recv_type`, so the hook can compose a per-type
+name. An exact `@typehooks on Fam_alpha` beats `@typehooks on Fam_*`.
 
 ### UFCS — the compiler asks you for a callee
 
@@ -212,8 +218,41 @@ If two faces both have the method, the call is ill-formed — write
 `t.file.write(...)`. An `as:`-only unnamed view does **not** lock the
 allow-list — other fields (`t.tag`) stay ordinary.
 
+If no face has the method either, the error is at that call — original
+form — and names the face that was tried:
+
+```c
+#!ccc ccs
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct {
+    CCFile file;
+    int tag;
+} Temp;
+
+@typeview on Temp {
+    as: file;
+};
+
+int main(void) {
+    Temp t = {0};
+    t.tag = 1;
+    t.gone();
+    return 0;
+}
+```
+<!-- compile-err
+@as retry also failed
+@as field: CCFile file
+no UFCS method 'gone' for receiver type 'Temp'
+-->
+
 A trailing-`*` subject installs the same face on every match that has the
-field; types that match the glob but lack the field are skipped:
+field; types that match the glob but lack the field are skipped.
+Narrowest view wins, same score rule as `@typehooks`. Named modes on a
+glob (`@typeview Encode on Fam_*`) are ill-formed — globs are unnamed
+only:
 
 ```c
 #!ccc ccs
@@ -263,8 +302,45 @@ Groups are comma-separated patterns ended by `;`:
 | `as:` | Faces (not an allow-list) |
 
 Methods belong under `r:` (or `rw:`). A method listed only under `w:` cannot
-be called. Unknown non-glob names are ill-formed at the declaration.
-Construction stays open: designated init may name any field.
+be called. `r:` / `w:` / `rw:` patterns match **field and method names
+alike**, and may be trailing-`*` name globs (`out_*`, `get_*`) — membership
+on this type, not a type-family subject. That is why a declaration-time
+existence check cannot decide: `get_*` may match a method written later in
+the file. A glob that matches nothing is a silent no-op at the declaration;
+an exact name that does not exist is the same. Either way the miss shows up
+at a use the list does not cover. `as:` stays exact field names — no name
+glob. Construction stays open: designated init may name any field.
+
+```c
+#!ccc ccs
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct {
+    int secret;
+    int out_len;
+    int get_hits;
+} Bag;
+
+@typeview on Bag {
+    r: out_*, get_*;
+};
+
+static int bag_get_n(Bag* b) {   /* get_* → b.get_n() */
+    return b->out_len;
+}
+
+int main(void) {
+    Bag b = { .secret = 1, .out_len = 3, .get_hits = 0 };
+    int n = b.get_n();
+    printf("n=%d len=%d hits=%d\n", n, b.out_len, b.get_hits);
+    /* b.secret; */                 /* ill-formed: not in out_* / get_* */
+    return 0;
+}
+```
+<!-- smoke-stdout
+n=3 len=3 hits=0
+-->
 
 **Unnamed** — the allow-list *is* the ordinary surface of the type. No
 parallel view name. A function whose **first** parameter is that type (or
@@ -353,9 +429,6 @@ int main(void) {
 ok
 -->
 
-Named modes on a glob subject (`@typeview Encode on Pat*`) are ill-formed —
-globs are unnamed only.
-
 ---
 
 ## 3. Put them side by side, not in one block
@@ -387,7 +460,7 @@ static void temp_file_unlink(TempFile* t) {
 };
 
 int main(void) {
-    TempFile t = {0} @destroy;
+    TempFile t = {0} @destroy { t.close(); };  /* close, then unlink, then idempotent embed teardown */
     t.path = @slice("/tmp/tv_together.txt");
     t.open(t.path, "w");
     t.write("hi\n");
@@ -399,9 +472,19 @@ int main(void) {
 ok
 -->
 
-`as:` forwards `open` / `write` / `close` through `.file`, and `@destroy`
-still closes that embed. `@typehooks` is the extra step: unlink `path` so
-the temp file is gone when the scope ends.
+`as:` forwards `open` / `write` / `close` through `.file`. Cleanup is
+**pre-destroy → `@destroy { }` body → outer destroy hook → `as:` embeds**
+last-declared to first. Bodyless `@destroy` therefore unlinks while the
+file may still be open — fine on POSIX, often not on Windows. The
+portable spelling is the one above: `t.close()` in the body, then
+`temp_file_unlink`, then `cc_file_close` on the embed. The second close
+is a no-op — registered destroy hooks are idempotent (`cc_file_close`
+nulls the handle and returns when already closed).
+
+A family that needs both is the same split: `@typeview on Fam_* { as:
+core; }` plus `@typehooks on Fam_* { .destroy = … }`. The glob is shared;
+the bodies stay separate. An exact type still beats the family on each
+form independently.
 
 ---
 
@@ -409,6 +492,8 @@ the temp file is gone when the scope ends.
 
 - Adding `box_bump(Box*)`? Declare the function. Stop.
 - Bodyless `@destroy` on your type? `@typehooks` + `.destroy`.
+- Close-before-unlink (or any “parts first”)? `@destroy { t.close(); }` —
+  the body runs before the outer hook and embed teardown.
 - `@create(...)` for that type? Same block, `.create`.
 - Wrapper should reuse an embed’s methods? `@typeview` + `as: field`.
 - Caller should not see `flush` / `sock`? Named `@typeview Mode on T` and
@@ -426,8 +511,9 @@ the temp file is gone when the scope ends.
 - Spec: [type hooks](../spec/draft_typehooks.md),
   [type views](../spec/draft_facets.md),
   [type-owned registration](../spec/concurrent-c-spec-complete.md)
-- Tests: `scripts/test_doc_fences.sh` compiles every `#!ccc ccs` fence in
-  this file. Also `tests/typehooks_fn_idents_smoke.ccs`,
+- Tests: `scripts/test_doc_fences.sh` runs every `#!ccc ccs` fence in
+  this file (`compile-err` pins the `t.gone()` miss). Also
+  `tests/typehooks_fn_idents_smoke.ccs`,
   `tests/typehooks_create_destroy_smoke.ccs`,
   `tests/typeview_as_ufcs_smoke.ccs`,
   `tests/typeview_glob_as_smoke.ccs`

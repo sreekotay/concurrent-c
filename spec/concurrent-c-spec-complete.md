@@ -45,7 +45,7 @@ These are normative. Where a construct could be defined more than one way, the r
    emission, and dispatch seams. Libraries own concrete type-family emission,
    linkage, erasure, specialization, and UFCS policy.
 4. **No silent drop.** Every fallible result must be used. The safe forms (`?>`, `!>`) force handling at compile time; the explicit/lowered form traps loudly at runtime. Absence (nullable) may opt into the same unwrap protocol but is not forced into it.
-5. **Local resolution.** Cleanup (`@destroy`/`@defer`), error handlers (inline or function-level only), and dispatch (receiver type) resolve to a site visible at the use — never a dynamic search. Behaviors therefore compose by stacking, not by interaction.
+5. **Local resolution.** Cleanup (`@destroy`/`@defer`), error handlers (inline or block-scoped, declaration-point), and dispatch (receiver type) resolve to a site visible at the use — never a dynamic search. Behaviors therefore compose by stacking, not by interaction.
 6. **Binding is semantic.** *Where* a construct attaches (declaration vs. statement) determines its static guarantees, even when the runtime lowering is identical. `@destroy` is RAII because it binds to the declaration; `@defer` is a statement.
 7. **Cleanup ledgers.** A cleanup ledger has two discharge authorities: the entered frame (always), and external closure `env_drop` (never-entered only).
 
@@ -141,7 +141,7 @@ function with `@await f(...)` at the top level or `cc_block_on(f(...))`.
 **Sigil policy:** every CC-introduced keyword carries a leading `@`
 (`@async`, `@await`, `@defer`, `@cancel`, `@errhandler`,
 `@destroy`, `@with_deadline`, `@comptime`, `@blocking`,
-`@nonblocking`, `@for`). Bare forms are
+`@nonblocking`, `@for`, `@typehooks`, `@typeview`). Bare forms are
 reserved for plain C identifiers — `match`, `await`, `async`, `defer`,
 etc. are legal variable / field / function names and never keywords
 without the `@`. This eliminates identifier-collision and
@@ -258,6 +258,8 @@ bugs.
 | `@nonblocking` | Mark a non-blocking execution-mode contract (function, block, or site) | `@nonblocking f();` — see §8.2      |
 | `@noblock`     | Compatibility spelling for `@nonblocking`                              | `@noblock f();` — see §8.2          |
 | `@latency_sensitive` | Disable dispatch coalescing for this `@async` fn                  | `@async @latency_sensitive void h() {}`|
+| `@typehooks`   | Lifecycle / UFCS policy on a type                                       | `@typehooks on T { .destroy = …, };`   |
+| `@typeview`    | Faces (`as:`) and allow-lists on a type                                 | `@typeview on T { as: file; };`        |
 | `@scoped`      | Type tied to a lexical scope (cannot escape)                            | `@scoped type Guard::[T];`             |
 | `@slice`       | Build-time canonical sentinel slice                                     | `char[:0] m = @slice("recv");`         |
 | `@string`      | Templated string: arena `String`, or arena-less bounded `char[:]` (§9.1.2) | `CCString s = @string("hi", &arena);`  |
@@ -454,16 +456,16 @@ int ! IoError read_int (char [ : ] data) {
 
 **Slice declarations:** type position and declarator position are equivalent — `char[:] s` ≡ `char s[:]`, in locals, parameters, and struct fields alike.
 
-**Typed slice instances:** a non-char element type instantiates the slice generic: `double[:]` is `CCSlice_double`, a distinct struct declared by the `CC_DECL_SLICE_SPEC(Name, T)` template — `CCSlice base @as;` plus element-wise methods with `sizeof(T)` in hand, named `Name_<member>` (the same instance-prefix convention as Vec and Map families). `len()`/`at(i)`/`sub(a,b)` count and index elements (`sub` returns the same instance type); `bytes()` returns an honestly byte-measured `CCSlice` (`len` scales by `sizeof(T)`). Scalar instances are pre-declared in `cc_slice.cch`; any other element type auto-instantiates at first use — the compiler splices the declaration after the element's definition, exactly as it splices Vec/Map monomorphs. A hand-written declaration (`CC_DECL_SLICE(T)` for a single-token element, `CC_DECL_SLICE_SPEC(Name, T)` otherwise) is honored and suppresses the splice, for plain-C consumers and headers. Instance types are distinct in `_Generic`, so type-directed dispatch (e.g. dynamic-sink marshaling) sees the element type in any expression position.
+**Typed slice instances:** a non-char element type instantiates the slice generic: `double[:]` is `CCSlice_double`, a distinct struct declared by the `CC_DECL_SLICE_SPEC(Name, T)` template — a `CCSlice base` field with `@typeview on Name { as: base; }` plus element-wise methods with `sizeof(T)` in hand, named `Name_<member>` (the same instance-prefix convention as Vec and Map families). `len()`/`at(i)`/`sub(a,b)` count and index elements (`sub` returns the same instance type); `bytes()` returns an honestly byte-measured `CCSlice` (`len` scales by `sizeof(T)`). Scalar instances are pre-declared in `cc_slice.cch`; any other element type auto-instantiates at first use — the compiler splices the declaration after the element's definition, exactly as it splices Vec/Map monomorphs. A hand-written declaration (`CC_DECL_SLICE(T)` for a single-token element, `CC_DECL_SLICE_SPEC(Name, T)` otherwise) is honored and suppresses the splice, for plain-C consumers and headers. Instance types are distinct in `_Generic`, so type-directed dispatch (e.g. dynamic-sink marshaling) sees the element type in any expression position.
 
-Erasure is a spelling: `xs.base` reads the raw element-counted core; passing an instance by value where `CCSlice` is expected autocasts through `bytes()` (scaled). Byte-oriented `CCSlice` methods remain reachable on instances through the `@as` retry; element-wise shadows win by name when declared. Two initializer forms lower specially:
+Erasure is a spelling: `xs.base` reads the raw element-counted core; passing an instance by value where `CCSlice` is expected autocasts through `bytes()` (scaled). Byte-oriented `CCSlice` methods remain reachable on instances through the typeview `as:` face retry; element-wise shadows win by name when declared. Two initializer forms lower specially:
 
 - `char[:0] s = "lit";` / `char[:] s = "lit";` / `CCSlice s = "lit";` (and Unique/Shared) — a string literal initializing a by-value slice lowers to `CC_SLICE_LIT(lit)`: a canonical static view; `len` excludes the terminating NUL. Prefer the sentinel spelling `char[:0]` when the bytes are known NUL-terminated.
 - `T xs[:] = {a, b, c};` — the elements materialize in a hidden block-scope backing array; the slice is an untracked view with `len` = element count. The view shares the enclosing block's lifetime, like the C array it replaces.
 
 `{0}` and designated initializers (`{ .ptr = p, .len = n }`) remain ordinary C struct initialization of the slice header, not element lists.
 
-Ordinary sites on the slice family deny field stores (`s.len = …`); loads and UFCS remain open. See `draft_facets.md` (§7b) for the unnamed `@restricted on CCSlice { r: *; }` facet.
+Ordinary sites on the slice family deny field stores (`s.len = …`); loads and UFCS remain open. See `draft_facets.md` for the unnamed `@typeview on CCSlice { r: *; }` facet.
 
 ---
 
@@ -645,8 +647,7 @@ n->spawn(() => {
 | `CCTaskIntptr`             | Yes                            | Explicit poll/drop ownership                |
 | Channels                 | Yes                            | Thread-safe handles                         |
 | Registered scope-bound synchronization handle | **No**             | Scope-bound                                 |
-| `ThreadGroup`            | **No**                         | Must be used in creating thread             |
-| `Scope`                  | **No**                         | Stack-bound capability                      |
+| `CCNursery*`             | Yes                            | Handle; children must not outlive it        |
 | Raw pointers             | Yes                            | But safety is caller's responsibility       |
 
 
@@ -681,7 +682,7 @@ The default idiom is reserve-then-write (`send_into` / `try_send_into`, same fam
 | `@own x` | Owned value or owned pointer; destroyed on never-entered drop (below) |
 
 `@own` on a pointer requires a destroyable pointee (registered destroy hook for
-the pointee type). `@own` is not `@as`: owning a field does not make the outer
+the pointee type). `@own` is not a typeview `as:` face: owning a field does not make the outer
 type an is-a embed of that field’s type.
 
 **Rule (dropped without call):** When a single-shot closure is destroyed without
@@ -713,24 +714,22 @@ usually runs.
 void ok_pattern() {
     CCArena a = cc_arena_heap(kilobytes(64));
     char[:] s = a.alloc_slice_bytes(100);
-    
-    ThreadGroup g = thread_group();
-    g.spawn(() => {
-        use(s);  // OK: g.join() happens before arena freed
+
+    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+    n->spawn(() => {
+        use(s);  // OK: nursery @destroy joins before arena freed
     });
-    g.join();
-}  // arena freed here, after thread joined
+}  // arena freed here, after children joined
 
 void bad_pattern() {
-    ThreadGroup g = thread_group();
+    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
     {
         CCArena a = cc_arena_heap(kilobytes(64));
         char[:] s = a.alloc_slice_bytes(100);
-        g.spawn(() => {
-            use(s);  // ERROR: arena may be freed before thread runs
+        n->spawn(() => {
+            use(s);  // ERROR: arena may be freed before the task runs
         });
     }  // arena freed here
-    g.join();  // thread may access freed memory
 }
 
 void bad_reset_while_borrow() {
@@ -761,7 +760,8 @@ carries a leading `@` sigil at the lexer level. The set includes
 (non-exhaustive): `@async`, `@await`, `@blocking`, `@noblock`,
 `@match` (reserved and rejected), `@defer`, `@defer(err)`, `@defer(ok)`, `@cancel`,
 `@errhandler`, `@err`, `@destroy`, `@with_deadline`, `@comptime`,
-`@for`, `@latency_sensitive`, `@scoped`, `@slice`, `@string`.
+`@for`, `@latency_sensitive`, `@scoped`, `@slice`, `@string`,
+`@typehooks`, `@typeview`.
 The bare
 identifiers `async`, `await`, `blocking`, `noblock`, `match`, `defer`,
 `nursery`, `spawn`, `lock`, `comptime`, `cancel`, etc. are **not**
@@ -1063,9 +1063,9 @@ CCRes(MyData, MyError) my_function(int arg);
   - At **statement position** the body may fall through. Forms: `CALL !>;`, `CALL !> STMT;`, `CALL !> { BODY };`, `CALL !>(e) STMT;`, `CALL !>(e) { BODY };`.
   - At **expression position** the body must *visibly diverge*. Forms: `CALL !>(e) DIVERGENT_STMT;`, `CALL !>(e) { …; DIVERGENT_STMT };`, `CALL !> DIVERGENT_STMT;`, `CALL !> { …; DIVERGENT_STMT };`, and the bare `CALL !>;` which synthesizes a binder and inlines the matching `@errhandler` body for Result `E` (which must itself diverge). A non-divergent body at expression position is diagnosed with `expression-position '!>' body must diverge (return/break/continue/goto/@err/exit/abort/etc.)`. A bare `CALL !>;` at expression position with no matching `@errhandler` for `E` is ill-formed.
 3. Error values are accessible only via an explicit `(ident)` binder on `?>` or `!>`. Neither operator creates an implicit `e` / `err` binding. The bare expression-position `!>;` form synthesizes a fresh internal binder that threads the error value through the inlined handler body.
-4. `CALL !>;` at statement position runs the nearest in-scope `@errhandler` whose parameter type exactly matches the call's Result error type `E` (else, when `E` has a unique `@as` path to a handler parameter type `F`, that handler — see `@as` fields draft §5), or the success path if the call succeeded. No match is ill-formed. If that matching handler's body textually contains the call (same-`E` re-entry), the program is ill-formed — report via a helper such as `cc_error_log` / `cc_error_exit`, or an inline `!> { abort(); }`, not bare `!>;` inside the same-`E` handler.
+4. `CALL !>;` at statement position runs a matching in-scope `@errhandler`, or the success path if the call succeeded. Candidates are `@errhandler` declarations in the current function whose declaration point is textually before the unwrap (block-nested, not hoisted); there is no cross-function search — that locality is why same-`E` re-entry is a compile error. From the unwrap outward, the first handler whose parameter type is exactly the call's Result error type `E` wins; if none, the first whose parameter `F` is reachable from `E` by a unique `@typeview` `as:` path wins (hop count is not a rank; two such face-matching handlers in the same block are ill-formed). No match is ill-formed. If that matching handler's body textually contains the call (same-`E` re-entry), the program is ill-formed — report via a helper such as `cc_error_log` / `cc_error_exit`, or an inline `!> { abort(); }`, not bare `!>;` inside the same-`E` handler.
 5. `@err(IDENT);` inside a `!>` body forwards the bound error to the matching `@errhandler` for that unwrap's `E`. It is a **structured control-flow transfer** (not a returning call): any statement textually following it in the same block is unreachable and is a compile error.
-6. `@errhandler(E e) STMT;` or `@errhandler(E e) { ... }` registers a block-local handler for Result error type `E`. The statement form is a thin forward (typically `cc_error_exit(e);`); the block form holds multiple statements. `CALL !>;` is the hoist of `CALL !>(e) STMT` when `STMT` is that handler body. When reached via `CALL !>;` at statement position, the handler body runs and control returns to the statement after the call — the handler may end in any statement. When reached via an `@err(e);` forward, via a bare expression-position `!>;`, or via an expression-position `!>` whose body inlines the handler, control never returns, so the handler body **must visibly diverge**. A `return` (or other soft-return) from the handler body discharges the enclosing function’s `@defer` / `@destroy` ledger via the same epilogue as any other return in that function (§5.1). Concretely: if any `@err(e);` targets a handler, or any expression-position `!>;` inlines a handler, that handler's body must end in one of:
+6. `@errhandler(E e) STMT;` or `@errhandler(E e) { ... }` registers a block-local handler for Result error type `E`. A handler is in scope for a use only after its declaration point (same candidate set as invariant 4). The statement form is a thin forward (typically `cc_error_exit(e);`); the block form holds multiple statements. `CALL !>;` is the hoist of `CALL !>(e) STMT` when `STMT` is that handler body. When reached via `CALL !>;` at statement position, the handler body runs and control returns to the statement after the call — the handler may end in any statement. When reached via an `@err(e);` forward, via a bare expression-position `!>;`, or via an expression-position `!>` whose body inlines the handler, control never returns, so the handler body **must visibly diverge**. A `return` (or other soft-return) from the handler body discharges the enclosing function’s `@defer` / `@destroy` ledger via the same epilogue as any other return in that function (§5.1). Concretely: if any `@err(e);` targets a handler, or any expression-position `!>;` inlines a handler, that handler's body must end in one of:
   - `return EXPR;` / `return;`
     - `break;` / `continue;`
     - `goto LABEL;`
@@ -1109,13 +1109,13 @@ err_handler   ::= '@errhandler' '(' type ident ')' '{' stmt* '}'
 **Semantics (normative, by form).**
 
 - `EXPR ?> DEFAULT_EXPR` — Evaluate `EXPR` (a `T!>(E)` result) exactly once. If success, the expression's value is the unwrapped `T`. Otherwise the expression's value is `DEFAULT_EXPR`. `EXPR ?>(e) DEFAULT_EXPR` binds the error to `e`, scoped to `DEFAULT_EXPR`. `DEFAULT_EXPR` is always a pure C expression producing `T`.
-- `CALL !>;` *(statement)* — Evaluate `CALL` exactly once. On success, the success payload is discarded. On error, the nearest in-scope `@errhandler` whose parameter type exactly matches the call's Result error type `E` runs (else unique `@as` path to a handler face `F`, binder projected to that member); control then falls through to the following statement. If no such handler is in scope, the program is ill-formed. If the call occurs inside that matching handler's body (same-`E` re-entry), the program is ill-formed.
+- `CALL !>;` *(statement)* — Evaluate `CALL` exactly once. On success, the success payload is discarded. On error, dispatch uses the two-pass rule of invariant 4 (exact `E`, else unique `@typeview` `as:` path to a handler face `F`; binder projected along that path); control then falls through to the following statement. If no such handler is in scope, the program is ill-formed. If the call occurs inside that matching handler's body (same-`E` re-entry), the program is ill-formed.
 - `CALL !> BODY` *(statement)* — Same, with `BODY` in place of the default handler. `BODY` may fall through. `@err(e);` inside `BODY` is ill-formed without a binder.
 - `CALL !>(e) BODY` *(statement)* — Same, with the error bound to `e` for the scope of `BODY`. `@err(e);` inside `BODY` forwards to the matching `@errhandler` for `E` (see invariant 5).
 - `CALL !>;` *(expression)* — Evaluate `CALL` exactly once. On success, the surrounding expression's value is the unwrapped `T`. On error, a synthesized binder captures the error and the matching `@errhandler` body for `E` is inlined in place of `BODY`; the handler must diverge, so control never returns past the `!>;`. If no matching handler is in scope, the program is ill-formed. If the call occurs inside that matching handler's body (same-`E` re-entry), the program is ill-formed.
 - `CALL !> DIVERGENT_STMT;` and `CALL !> { …; DIVERGENT_STMT }` *(expression)* — Evaluate `CALL` exactly once. On success, the surrounding expression's value is the unwrapped `T`. On error, `DIVERGENT_STMT` (or the block) runs; because it cannot fall through, the surrounding expression has no observable value on that path. `!>(e) …` binds the error to `e` across the body.
-- `@err(X);` — Inside a `!> (X) BODY` or `!> (X) { BODY }` (statement or expression position). Transfers control to the nearest in-scope `@errhandler` whose parameter type exactly matches the unwrap's Result error type `E` (else unique `@as` path to a handler face, with the binder projected), with the error value forwarded. Does not return.
-- `@errhandler(E e) STMT;` / `@errhandler(E e) { BODY }` — Registers a block-local handler for Result error type `E`. `CALL !>;` at statement position, `@err(e);` forwards, and `CALL !>;` at expression position dispatch to the nearest in-scope handler whose parameter type exactly matches the unwrap's `E`. If none matches exactly, the nearest in-scope handler whose parameter type is reachable from `E` by a unique `@as` embed path is selected and the binder is that path's member by value (same preference order as UFCS). When the unwrap's error type cannot be resolved as a Result `E` (pointer-returning calls and other untyped LHS forms), dispatch matches `@errhandler(CCError …)` — the same ambient error type those binders use. Subject to the divergence rule of invariant 6. Stdlib helpers: `cc_error_log(e)` (report, returns) and `cc_error_exit(e)` (report then `exit(1)`).
+- `@err(X);` — Inside a `!> (X) BODY` or `!> (X) { BODY }` (statement or expression position). Transfers control to the matching `@errhandler` for the unwrap's Result error type `E` (two-pass rule of invariant 4; binder projected along the chosen path), with the error value forwarded. Does not return.
+- `@errhandler(E e) STMT;` / `@errhandler(E e) { BODY }` — Registers a block-local handler for Result error type `E`. `CALL !>;` at statement position, `@err(e);` forwards, and `CALL !>;` at expression position dispatch with the two-pass rule of invariant 4. Once `F` is chosen, the binder is projected along that unique path (member selection; `@typeview` `as:` declaration order applies only here, not to handler selection). When the unwrap's error type cannot be resolved as a Result `E` (pointer-returning calls and other untyped LHS forms), dispatch matches `@errhandler(CCError …)` — the same ambient error type those binders use. Subject to the divergence rule of invariant 6. Stdlib helpers: `cc_error_log(e)` (report, returns) and `cc_error_exit(e)` (report then `exit(1)`).
 
 **Form selection (normative).** `!>` has no closing delimiter — a handler body runs to its terminating `;` — so the token after `!>` decides which form was written. The **bare** form (`CALL !>`, dispatching to the in-scope `@errhandler`) applies wherever that token cannot begin a statement:
 
@@ -1269,30 +1269,30 @@ char* t = get_name()     !>(e) {                           // e.kind == CC_ERR_N
 Type modifiers bind with the following precedence (tightest first):
 
 1. `*` (pointer)
-2. `!E` (result)
+2. `!>(E)` (result)
 3. `[n]` `[:]` `[~n]` (array / slice / channel)
 
-**Rationale:** Pointer binds tightest because "result of pointer" (`T*!E` → `(T*)!E`) is far more common than "pointer to result" (`(T!>(E))`*). Functions returning pointer-or-error are ubiquitous in systems code.
+**Rationale:** Pointer binds tightest because "result of pointer" (`T*!>(E)` → `(T*)!>(E)`) is far more common than "pointer to result" (`(T!>(E))*`). Functions returning pointer-or-error are ubiquitous in systems code. `T!E` without `>` is not a result type.
 
 **Examples:**
 
 
-| Syntax        | Parses as         | Meaning                                      |
-| ------------- | ----------------- | -------------------------------------------- |
-| `int`*        | `(int)`*          | pointer to int                               |
-| `int*!E`      | `((int)*)!E`      | result of pointer (success=pointer, error=E) |
-| `int!>(E)`    | `(int)!>(E)`      | result of int or E                           |
-| `int!>(E)[~]` | `((int)!>(E))[~]` | channel of results                           |
-| `int*!E[~]`   | `(((int)*)!E)[~]` | channel of (result of pointer)               |
-| `int[:]*`     | `((int)[:])*`     | pointer to slice                             |
-| `int*[:]`     | `((int)*)[:]`     | slice of pointers                            |
+| Syntax        | Parses as              | Meaning                                      |
+| ------------- | ---------------------- | -------------------------------------------- |
+| `int`*        | `(int)`*               | pointer to int                               |
+| `int*!>(E)`   | `((int)*)!>(E)`        | result of pointer (success=pointer, error=E) |
+| `int!>(E)`    | `(int)!>(E)`           | result of int or E                           |
+| `int!>(E)[~]` | `((int)!>(E))[~]`      | channel of results                           |
+| `int*!>(E)[~]`| `(((int)*)!>(E))[~]`   | channel of (result of pointer)               |
+| `int[:]*`     | `((int)[:])*`          | pointer to slice                             |
+| `int*[:]`     | `((int)*)[:]`          | slice of pointers                            |
 
 
 **Common patterns:**
 
 ```c
 // Function returning pointer or error — the common case
-Node*!>(IoError) find_node(int id);      // (Node*)!IoError
+Node*!>(IoError) find_node(int id);      // (Node*)!>(IoError)
 
 // Function returning a nullable pointer (NULL = not found, no error)
 Node* lookup(int id);                    // plain pointer with NULL sentinel
@@ -2400,11 +2400,12 @@ Channels are categorized by **mode** (async vs sync) and **topology/direction**.
 **Grammar:**
 
 ```
-channel_handle := element_type '[~' capacity? mode? topology? direction ']'
+channel_handle := element_type '[~' capacity? mode? topology? direction bp? ']'
 capacity     := integer_constant_expr
 mode         := 'async' | 'sync'
 topology     := '1:1' | '1:N' | 'N:1' | 'N:N'
 direction    := '>' | '<'   // REQUIRED (combined channels removed)
+bp           := ',' ('Drop' | 'DropNew' | 'DropOld' | 'Drop_New' | 'Drop_Old')
 ```
 
 - `capacity` must be a compile-time integer constant expression (or omitted for unbuffered).
@@ -2412,6 +2413,7 @@ direction    := '>' | '<'   // REQUIRED (combined channels removed)
 - `topology` tokens `1:1`, `1:N`, `N:1`, `N:N` are parsed as single tokens.
 - Whitespace between components is optional: `T[~10 async N:1]` and `T[~10asyncN:1]` are equivalent.
 - When both `topology` and `direction` appear, `topology` comes first: `T[~10 1:N <]`.
+- Backpressure, when present, comes **after** direction: `T[~10 >, DropOld]`. Omitting it is Block. `Drop` and `DropNew` (and `Drop_New`) are the same mode; `DropOld` (and `Drop_Old`) is distinct. There is no `, Block` token. See §8.4.0.
 
 **Topology meanings:**
 
@@ -2632,7 +2634,7 @@ Standard channel semantics apply:
 
 **Rule (slice element ownership):** For slice element types, `send` deep-copies into channel-internal storage. While queued, the channel owns the copy. On successful `recv`, the receiver gets a **unique slice**; the receiver frees it on scope exit (or transfers it via `send_take` / return). If the value is never received (still buffered when channel is freed), the channel frees it.
 
-**Rule (broadcast `1:N`):** `send` never blocks on subscribers; if a subscriber's buffer is full, the oldest value for that subscriber is dropped.
+**Rule (broadcast `1:N`):** Topology does not change backpressure. `1:N` still Blocks when a subscriber buffer is full unless the handle spells `Drop` / `DropNew` / `DropOld` (§8.4.0). Never-block broadcast is `T[~N 1:N >, DropOld]` (drop that subscriber's oldest, enqueue the new value). `Drop` / `DropNew` rejects the new send with `EAGAIN` and leaves the buffer unchanged.
 
 **Rule (broadcast copy semantics):** On a `1:N` channel, `send` performs a deep copy for **each subscriber** at send time. Each subscriber receives an independent unique slice. For slice elements, this means N independent allocations for N subscribers.
 
@@ -3174,15 +3176,17 @@ conn_pool.send(conn);  // Return to pool
 
 ### 7.9 Bidirectional Error Propagation
 
-Channels support bidirectional error propagation for pipeline error handling.
+Channels support bidirectional error propagation for pipeline error handling. Typed `send` / `recv` return `bool !>(CCIoError)`.
 
 **Functions:**
 
 ```c
-// Close with error - recv() returns this error instead of EPIPE
+// Close with error — after drain, recv() returns err(cc_io_from_errno(err))
+// rather than ok(false) (the regular-close drained signal).
 void cc_chan_close_err(CCChan* ch, int err);
 
-// Close rx side with error - send() returns this error
+// Close rx side with error — send() returns err(cc_io_from_errno(err))
+// rather than blocking or returning ok(false).
 void cc_chan_rx_close_err(CCChan* ch, int err);
 ```
 
@@ -3190,16 +3194,16 @@ void cc_chan_rx_close_err(CCChan* ch, int err);
 
 ```c
 // Worker hits error - propagate BOTH directions:
-cc_chan_close_err(results_tx, err);   // → Writer sees error on recv
-cc_chan_rx_close_err(blocks_rx, err); // → Reader sees error on send!
-return;  // Clean exit, no manual drain needed
+cc_chan_close_err(results_tx.raw, err);   // → consumer sees err on recv after drain
+cc_chan_rx_close_err(blocks_rx.raw, err); // → producer sees err on send
+return;
 ```
 
-**Rule (upstream propagation):** When `cc_chan_rx_close_err(ch, err)` is called, subsequent `send()` operations on that channel return `err` instead of blocking or returning `EPIPE`.
+**Rule (upstream propagation):** After `cc_chan_rx_close_err(ch, err)`, subsequent `send()` operations on that channel return `err(cc_io_from_errno(err))` instead of blocking or returning `ok(false)`.
 
-**Rule (downstream propagation):** When `cc_chan_close_err(ch, err)` is called, subsequent `recv()` operations return `err` instead of `EPIPE` after the channel is drained.
+**Rule (downstream propagation):** After `cc_chan_close_err(ch, err)`, subsequent `recv()` operations return `err(cc_io_from_errno(err))` instead of `ok(false)` once the channel is drained.
 
-**Rule (regular close unchanged):** `cc_channel_close(ch)` continues to work as before—recv returns `EPIPE` when closed and drained.
+**Rule (regular close unchanged):** `close()` / `cc_channel_close(ch)` still drain then return `ok(false)` on `recv` (the closed+drained signal). The raw errno layer uses `EPIPE` for that same condition; the typed envelope is `ok(false)`, not `err`.
 
 ---
 
@@ -3210,7 +3214,7 @@ Concurrent-C provides a single, unified concurrency primitive: the **nursery** (
 This section specifies:
 
 - **§8.1 Structured Concurrency with `CCNursery`** — the primary pattern for all concurrent work
-- **§8.2 Blocking and Non-Blocking Call Edges** — how `@blocking` / `@noblock` (function-level and call-site) determine the mode of each call edge from an `@async` body
+- **§8.2 Blocking and Non-Blocking Call Edges** — how `@blocking` / `@nonblocking` (function-level and call-site; `@noblock` is a compatibility spelling) determine the mode of each call edge from an `@async` body
 - **§8.3 Tasks** — `CCTaskIntptr` frame/poll/drop ownership
 - **§8.4 Channels in Async vs Sync** — context-sensitive channel operations
 - **§8.5 Cancellation** — operation-specific cooperative cancellation and deadlines
@@ -3664,51 +3668,35 @@ Channels also support **backpressure modes** to handle overload gracefully in se
 
 #### 8.4.0 Backpressure Modes
 
-When a bounded channel is full, different workloads need different strategies. Backpressure mode is specified at channel declaration.
+When a bounded channel is full, the handle's backpressure mode decides what `send` does. Mode is spelled after direction (§7.1). Topology (`1:N` included) does not pick a mode.
 
-**Backpressure modes:**
+**Modes (runtime `CCChanMode`):**
 
-```c
-enum BackpressureMode {
-    Block,           // Block sender until space available (default)
-    Drop,            // Drop oldest (FIFO) when full
-    Sample(f32 rate) // Keep ~rate fraction, drop rest (deterministic sampling)
-};
-```
+| Spelling | Runtime | When full |
+| -------- | ------- | --------- |
+| *(omitted)* | `CC_CHAN_MODE_BLOCK` | Sender blocks/suspends until space. Default. |
+| `Drop`, `DropNew`, `Drop_New` | `CC_CHAN_MODE_DROP_NEW` | New send is rejected (`err` with `EAGAIN` / `CC_ERR_WOULD_BLOCK`). Buffer unchanged. |
+| `DropOld`, `Drop_Old` | `CC_CHAN_MODE_DROP_OLD` | Oldest queued value is discarded; the new value is enqueued. Send succeeds. |
 
-**Channel syntax with backpressure:**
+**Channel syntax:**
 
 ```c
-T[~N >]                    // Bounded async sender, Block mode (default)
-T[~N <]                    // Bounded async receiver, Block mode (default)
-T[~N >, Block]             // Explicit Block mode (sender handle)
-T[~N <, Block]             // Explicit Block mode (receiver handle)
-T[~N >, Drop]              // Drop mode sender
-T[~N <, Drop]              // Drop mode receiver
-T[~N >, Sample(0.1)]       // Sample mode sender
-T[~N <, Sample(0.1)]       // Sample mode receiver
-T[~N sync >]               // Bounded sync sender, Block mode
-T[~N sync <]               // Bounded sync receiver, Block mode
-T[~N sync >, Drop]         // Bounded sync sender, Drop mode
-T[~N sync <, Drop]         // Bounded sync receiver, Drop mode
+T[~N >]                    // Block (default)
+T[~N <]                    // Block (default)
+T[~N >, Drop]              // DropNew — reject the new send
+T[~N <, DropNew]           // same as Drop
+T[~N >, DropOld]           // drop oldest, enqueue new
+T[~N 1:N >, DropOld]       // broadcast that never blocks: drop that subscriber's oldest
+T[~N sync >]               // Block, sync
+T[~N sync >, Drop]         // DropNew, sync
 ```
-
-**Behavior:** See Appendix C for full backpressure modes comparison.
-
-In brief:
-
-- **Block** (default): Sender blocks/suspends until space; guaranteed delivery.
-- **Drop**: Sender always succeeds; oldest message discarded when full.
-- **Sample(r)**: Sender always succeeds; ~r% of messages kept, rest deterministically dropped.
 
 **Rules:**
 
 - Mode is fixed at declaration; channel type is immutable.
-- `send()` always succeeds in Drop/Sample modes (never blocks).
-- `recv()` never observes partial effects from drops: a drop removes a whole message and nothing else. Delivery order follows the §7.3 rule (`ordered` channels guarantee it; others do not promise it).
-- Sample rate must be in range `[0.0, 1.0]`; behavior at boundaries:
-  - `Sample(0.0)`: drop all messages
-  - `Sample(1.0)`: equivalent to Block mode
+- There is no `, Block` token and no `Sample` mode.
+- `recv()` never observes a partial message: a DropOld discard removes a whole value.
+- Delivery order follows the §7.3 rule (`ordered` channels guarantee it; others do not promise it).
 
 ---
 
@@ -4079,7 +4067,16 @@ nursery is in scope.
 
 #### 8.5.3 Polling-Based Fallback
 
-Nursery state and deadline-scope state use different polling APIs:
+Nursery state and deadline-scope state use different polling APIs. They are not interchangeable.
+
+| API | Source | Typical use |
+| --- | --- | --- |
+| `cc_cancelled()` | current nursery | `while (!cc_cancelled()) { … }` |
+| `cc_nursery_is_cancelled(n)` | named nursery | poll a handle |
+| `cc_is_cancelled()` | current `@with_deadline` scope | zero-argument language macro → `cc_is_cancelled_current()` |
+| `cc_is_cancelled(const CCDeadline*)` | explicit deadline | C function; the `.c` translation unit `#undef`s the macro |
+
+Mixing them is a silent wrong-source poll: `cc_is_cancelled()` does not observe nursery cancel; `cc_cancelled()` does not observe deadline cancel. Prefer the table row that names the source the wait is supposed to see.
 
 ```c
 while (!cc_cancelled()) {
@@ -4092,12 +4089,6 @@ while (!cc_cancelled()) {
     }
 }
 ```
-
-`cc_cancelled()` polls the current nursery's cancellation state;
-`cc_nursery_is_cancelled(n)` polls a named nursery. The zero-argument
-`cc_is_cancelled()` language macro polls the current `@with_deadline` scope.
-The underlying C function `cc_is_cancelled(const CCDeadline*)` polls an
-explicit deadline. These names are not interchangeable.
 
 ---
 
@@ -4114,13 +4105,15 @@ reported result. Channel cancellation is represented by
 
 #### 8.5.5 Deadline-Bounded Multiplexing
 
+`cc_chan_match_select` observes the supplied deadline's **clock** and returns `ETIMEDOUT` on expiry. It does not return `ECANCELED` for `cc_cancel` on that deadline. Poll `cc_is_cancelled()` (or `cc_is_cancelled(&d)`) **before** parking when explicit cancellation must be observed (§8.5.1, §8.5.2).
+
 ```c
 CCDeadline d = cc_deadline_after_ms(5000);
+if (cc_is_cancelled(&d)) return cc_err(WorkerError_Canceled);
 size_t ready = (size_t)-1;
 int rc = cc_chan_match_select(cases, ncases, &ready, &d);
 if (rc == ETIMEDOUT) return cc_err(WorkerError_Timeout);
-if (rc == ECANCELED) return cc_err(WorkerError_Canceled);
-if (rc != 0) return cc_err(WorkerError_Io);
+if (rc != 0) return cc_err(WorkerError_Io);  /* EPIPE / other */
 dispatch_case(ready);
 ```
 
@@ -4220,7 +4213,7 @@ Streaming uses explicit channel parameters:
 ```c
 // Fail-fast: function can fail, channel carries plain values
 @async void!>(IoError) read_lines(char[:] path, char[:][~]* out) {
-    defer out.close();
+    @defer out.close();
     File f = open(path) !>(e) return cc_err(e);
     while (true) {
         char[:] line = f.readline() !>(e) return cc_err(e);
@@ -4231,7 +4224,7 @@ Streaming uses explicit channel parameters:
 
 // Per-item errors: each item can independently fail
 @async void parse_nums(char[:][~]* in, int!>(ParseError)[~]* out) {
-    defer out.close();
+    @defer out.close();
     char[:] line;
     while (cc_io_avail(@await in.recv(&line))) {
         @await out.send(parse_int(line));
@@ -4536,10 +4529,10 @@ Calling a non-`@async` function from within an `@async` function must not block 
 
 To satisfy this rule (see §8.2 / Appendix J.1.1):
 
-- Each such call edge is resolved to mode `@blocking` or `@noblock` by the four-step precedence chain (call site → callee decl → caller ambient → FFI/fallback default).
+- Each such call edge is resolved to mode `@blocking` or `@nonblocking` by the four-step precedence chain (call site → callee decl → caller ambient → FFI/fallback default). `@noblock` is the compatibility spelling of `@nonblocking`.
 - `@blocking` edges construct `cc_run_blocking_task_intptr` tasks and use the
   ordinary child-task poll path.
-- `@noblock` edges compile to a direct C call — the callee is contractually non-blocking (§8.2.7).
+- `@nonblocking` edges compile to a direct C call — the callee is contractually non-blocking (§8.2.7).
 - Adjacent `@blocking` edges MAY be coalesced into a single dispatch (Appendix C.1).
 
 **Coalescing Semantics:** Consecutive non-`@async` calls within the same lexical scope may be dispatched as one blocking unit. If an error occurs (exception, early return, propagated error), remaining calls in the unit are not executed.
@@ -4597,31 +4590,31 @@ The compiler (translator) enforces a lint rule to catch latency violations:
 
 **Rule:** `@latency_sensitive` functions can only call:
 
-- `@noblock` functions (guaranteed non-blocking, inline)
+- `@nonblocking` functions (guaranteed non-blocking, inline)
 - `@async` functions (must be awaited)
 - Any function within `@await` context
 
 **Violations (Compiler Warning/Error):**
 
-Calling a non-`@async`, non-`@noblock` function without `@await` in a `@latency_sensitive` function is a compiler error or warning (depending on lint level).
+Calling a non-`@async`, non-`@nonblocking` function without `@await` in a `@latency_sensitive` function is a compiler error or warning (depending on lint level).
 
 **Example:**
 
 ```c
-@noblock int parse_count(char[:] s);    // OK to call directly
+@nonblocking int parse_count(char[:] s);    // OK to call directly
 
 @async void db_query(int count);        // Must be awaited
 
-void process_logs(int count);           // Must be awaited or marked @noblock
+void process_logs(int count);           // Must be awaited or marked @nonblocking
 
 @async @latency_sensitive void handler(Request req) {
-    int count = parse_count(req.body);  // ✅ OK (@noblock, guaranteed fast)
-    
-    @await db_query(count);              // ✅ OK (awaited)
-    
-    process_logs(count);                // ❌ ERROR: blocking call in @latency_sensitive
-    
-    // Fix: Either @await it or mark it @noblock
+    int count = parse_count(req.body);  // OK (@nonblocking, guaranteed fast)
+
+    @await db_query(count);              // OK (awaited)
+
+    process_logs(count);                // ERROR: blocking call in @latency_sensitive
+
+    // Fix: Either @await it or mark it @nonblocking
 }
 ```
 
@@ -4640,7 +4633,7 @@ Blocking work is executed on a bounded blocking executor.
 
 **Saturation Behavior:**
 
-- When the queue reaches `max_queue` capacity, new operations return `IoError::Busy` immediately without queueing.
+- When the queue reaches `max_queue` capacity, new operations return `err` with `CC_ERR_WOULD_BLOCK` (Busy) immediately without queueing.
 - Work already queued or in-flight continues to completion.
 - The queue is FIFO; starvation is possible under sustained saturation.
 
@@ -4657,17 +4650,17 @@ Operations that may stall indefinitely must be explicitly classified as such.
 **Guarantees:**
 
 - Stalling operations may be offloaded to the blocking executor
-- May fail with `IoError::Busy` if capacity is exhausted
+- May fail with `CC_ERR_WOULD_BLOCK` if capacity is exhausted
 - Have no guarantee of cancellation or bounded latency
 
-#### 8.8.6 @noblock Contract
+#### 8.8.6 `@nonblocking` Contract
 
-A function annotated `@noblock` asserts that it will never block or stall.
+A function annotated `@nonblocking` asserts that it will never block or stall. `@noblock` is a compatibility spelling for the same annotation.
 
 **Rules:**
 
-- `@noblock` functions must not perform I/O, synchronization waits, or call non-`@noblock` functions
-- The compiler must not wrap calls to `@noblock` functions when invoked from `@async`
+- `@nonblocking` functions must not perform I/O, synchronization waits, or call non-`@nonblocking` functions
+- The compiler must not wrap calls to `@nonblocking` functions when invoked from `@async`
 - Violations detected at compile-time are errors
 
 **Runtime Violations:**
@@ -4695,7 +4688,7 @@ This annotation exists to allow high-confidence opt-out from conservative blocki
 
 - All file and stream operations
 - May block indefinitely
-- May fail with `IoError::Busy`
+- May fail with `CC_ERR_WOULD_BLOCK`
 - Subject to executor saturation rules
 
 #### 8.8.8 Cancellation and Progress
@@ -4719,7 +4712,7 @@ When a spawned task stalls on I/O, the nursery continues scheduling other work. 
 #### 8.8.10 Classification principle
 
 Latency control is explicit. Classification distinguishes bounded from
-unbounded waits. `@noblock` is a checked assertion, not suppression of
+unbounded waits. `@nonblocking` is a checked assertion, not suppression of
 blocking checks.
 
 ---
@@ -5015,7 +5008,7 @@ This section defines the core standard library using **UFCS-first design**: meth
 
 **Rule (family member sets, normative):** A generic family instance's method set derives from the family's declaration form: the `##_<member>` tokens of the family macro's body are the members (`Name##_push` declares `push`; `NAME##_sub` declares `sub`). Factory-emitted families derive their member set from the emitted fragment's `<mangled>_<member>` definitions. Dispatch trusts composed spellings exactly for this derived set — members are macro-generated and invisible to textual declaration checks — and an unresolved method on an instance enumerates it. Instances are extensible by declaration: a visible function spelling the composed name (`CCVec_double_median(CCVec_double*, …)`, `CCSlice_double_sum(CCSlice_double*, …)`) makes `v.median(…)` / `s.sum(…)` dispatch to it, with no change to the family header or the compiler.
 
-**Rule (method chains, normative):** A UFCS call whose receiver is itself a call expression is well-formed when the receiver's return type is known — derived from the family declaration form for instance members, read from the visible declaration otherwise. The chain lowers as if the receiver were first bound to a temporary of that type; each subsequent link then resolves against that variable under the ordinary rules (members, extensions, `@as` retry, the strict ladder), so `xs.sub(1, 3).len()`, `ps.at(2).y`, and scalar chains like `d.halve().twice()` mean exactly what their bound-temporary spellings mean. A trailing field access binds to the last link's result. A failing link diagnoses against its own receiver type, enumerating that instance's installed methods.
+**Rule (method chains, normative):** A UFCS call whose receiver is itself a call expression is well-formed when the receiver's return type is known — derived from the family declaration form for instance members, read from the visible declaration otherwise. The chain lowers as if the receiver were first bound to a temporary of that type; each subsequent link then resolves against that variable under the ordinary rules (members, extensions, `@typeview` `as:` face retry, the strict ladder), so `xs.sub(1, 3).len()`, `ps.at(2).y`, and scalar chains like `d.halve().twice()` mean exactly what their bound-temporary spellings mean. A trailing field access binds to the last link's result. A failing link diagnoses against its own receiver type, enumerating that instance's installed methods.
 
 **Rule (fallible chains, normative):** `!>` links hops whose calls return a Result: `py.a()!>.b()!>;` unwraps each hop and dispatches the next method on the unwrapped value, and `py.a()!>(e){ … }.b()` recovers that hop alone with the handler's written control flow. Each linked hop lowers to its own statement binding a temporary of the hop's ok type, so a bare `!>` targets the enclosing `@errhandler` and the final hop keeps the original destination, including destination-typed extraction. Fallible chains live where statements do: at statement position or as the whole right-hand side of a declaration or assignment. `?>` never links; parenthesize a fallback to continue from it.
 
@@ -5185,6 +5178,8 @@ int cc_type_register(const char* type_name, CCTypeHooks hooks);
 UFCS registration and typed lifecycle hooks (`create`, `destroy`) use the same type-owned registration machinery.
 
 Prefer `@typehooks` for UFCS together with lifecycle hooks. `cc_type_register` / `cc_type_define` and `cc_ufcs_register(...)` remain accepted dual forms (see `docs/deprecated.md`).
+
+Is-a faces and allow-lists use `@typeview on Subject { as: field; r: …; }` (see `spec/draft_facets.md`).
 
 This same contract applies to standard-library families such as channels, files, strings, arenas, vectors, maps, and results. Family-specific naming and lowering remain library policy rather than compiler policy; shared erased-core machinery is permitted so long as the family contract is preserved.
 
@@ -5565,7 +5560,7 @@ Concurrent-C pipeline:
    type-matched (§3.1): a user `@errhandler` for a different error type
    (for example `CCIoError`) coexists with the default; a user
    `@errhandler(CCError)` in the same scope overrides the default for
-   `CCError`. `CCIoError` Results reach this handler via `@as` (`base`);
+   `CCError`. `CCIoError` Results reach this handler via `@typeview` `as: base`;
    Io constructors fill the face message so the print is not blank.
 5. Token-gated script predecls `a` / `io` / `in` / `args` (same bindings as
    one-liner mode; see `draft_script_oneliners.md` §1.1) are injected into
@@ -5882,7 +5877,7 @@ This section documents syntactic sugar and conventions:
 - **Closures** — lambda syntax
 - **Type inference** — `auto` keyword
 - **Structs** — struct syntax and initialization
-- **Enums** — sum types with payloads
+- **Enums** — C enums (no payloads)
 - **Generics** — generic types and functions
 
 ---
@@ -5920,14 +5915,14 @@ ArenaHolder* holder_ptr = &holder;
 holder_ptr->arena.free();   // dispatches on holder_ptr->arena
 ```
 
-**Rule (UFCS in defer):** UFCS works uniformly in `defer` statements regardless of whether the receiver is a value or pointer:
+**Rule (UFCS in `@defer`):** UFCS works uniformly in `@defer` statements regardless of whether the receiver is a value or pointer:
 
 ```c
 int[~10 >] tx;
-defer tx.close();        // OK: lowers to close(tx)
+@defer tx.close();        // OK: lowers to close(tx)
 
 int[~10 >]* tx_ptr = get_tx();
-defer tx_ptr->close();   // OK: lowers to close(tx_ptr)
+@defer tx_ptr->close();   // OK: lowers to close(tx_ptr)
 ```
 
 **String-literal `switch` cases:**
@@ -6113,26 +6108,16 @@ use((Point){ .x = 1, .y = 2 });
 
 **Enums:**
 
-Enums are sum types with optional payloads:
+Enums are C enums. They have no payloads and no `is` pattern. Construction and matching are ordinary C (`E_Arm`, `==`, `switch`). Error kinds that carry an OS code use a struct field (shipped: `CCIoError.os_code` on a `CCError` face), not an enum payload.
 
 ```c
-enum IoError {
-    FileNotFound,
-    PermissionDenied,
-    InvalidArgument,
-    Interrupted,
-    OutOfMemory,
-    Other(i32 os_code),
-    Busy,
+enum Color { Color_Red, Color_Green, Color_Blue };
+
+enum Color c = Color_Red;
+if (c == Color_Green) { ... }
+switch (c) {
+case Color_Blue: ...
 }
-
-// Construction
-IoError e = IoError.FileNotFound;
-IoError e2 = IoError.Other(42);
-
-// Matching (if-let style)
-if (e == IoError.FileNotFound) { ... }
-if (e is IoError.Other(code)) { use(code); }
 ```
 
 **Generics:** See §12 for comprehensive generics documentation.
@@ -6147,12 +6132,12 @@ if (e is IoError.Other(code)) { use(code); }
 
 **Built-in non-generic types:**
 
-- `ThreadGroup` — multi-thread coordination
-- `Thread` — OS thread handle
+- `CCNursery` — structured concurrency handle (§8.1)
 - `Arena` — memory arena
-- `Scope` — (internal) structured concurrency handle created implicitly in @async functions
 - `Ordering` — memory ordering enum (`relaxed`, `acquire`, `release`, `acq_rel`, `seq_cst`)
 - `Duration` — time span (secs + nanos)
+- `CCDeadline` — deadline object (§8.5)
+- `CCIoError` / `CCError` — shipped error faces (§3.1, Appendix E)
 
 ---
 
@@ -6755,7 +6740,7 @@ int cc_reflect_field_type(const char* type_name, int idx, char* buf, int buf_sz)
 
 **Rule:** `@comptime for` loop variables (`f.name`, `f.type`, `f.typestr`, `f.index`) and `${...}` slots inside `@emit` share the same field metadata.
 
-**Rule:** `f.is_as` is 1 for a member declared `Base base @as;` and 0 otherwise. Composition is a fact about the declaration, not about the type, so it is reflected per field — which is what lets a walk descend through composition:
+**Rule:** `f.is_as` is 1 for a member listed in a `@typeview` `as:` group and 0 otherwise. Composition is a fact about the declaration, not about the type, so it is reflected per field — which is what lets a walk descend through composition:
 
 ```c
 @comptime for (f in type_of(Wrap).fields) {
@@ -7097,7 +7082,7 @@ The following are detected at runtime in debug builds only:
 | ------------------ | ---------------------------------- | --------------------------- |
 | Stale slice access | Slice `id` not in allocation table | Trap/abort with diagnostic  |
 | Arena overflow     | Allocation exceeds arena capacity  | Trap with allocation size   |
-| Channel overflow   | Buffer full (Busy)                 | Signaled via IoError::Busy  |
+| Channel overflow   | Buffer full (`CC_ERR_WOULD_BLOCK`) | Signaled via `CCIoError`    |
 | Deadlock           | All workers idle + parked fibers, no progress (all builds; §8.7.1) | Diagnostic dump + exit 124 |
 | Stack slice escape | Stack-backed slice escapes frame   | Trap (stack capture safety) |
 | Bounds violation   | Array/slice access out of bounds   | Return None or error        |
@@ -7135,7 +7120,7 @@ This appendix provides guidance for implementers of the CC-to-C translator. All 
 ### C.1 Coalescing Contiguous `@blocking` Edges
 
 **Context:** Edge-mode resolution and the one-state-per-edge C lowering
-of `@blocking` / `@noblock` / `async→async` are specified normatively
+of `@blocking` / `@nonblocking` / `async→async` are specified normatively
 in **§8.2** and **Appendix J.1.1**. This appendix describes an
 optional implementation optimization: coalescing adjacent `@blocking`
 edges into a single thread-pool dispatch.
@@ -7145,7 +7130,7 @@ edges into a single thread-pool dispatch.
 when **all** of the following hold:
 
 1. The edges are not separated by an `@await`, a `async→async`
-   edge, a `@noblock` edge, a suspension-capable statement, a
+   edge, a `@nonblocking` edge, a suspension-capable statement, a
    label, or a scope boundary.
 2. None of the merged calls is marked `@latency_sensitive`
    (see C.2).
@@ -7411,20 +7396,20 @@ This appendix documents stable layout and calling conventions for binary compati
 **Result (`T!>(E)`) layout:**
 
 ```c
-struct Result_T_E {
+struct CCResult_T_E {
     _Bool ok;         // C11 _Bool (1 byte)
     // padding to max(alignof(T), alignof(E))
     union { T value; E error; } u;
 };
-// sizeof(Result_T_E) = max_align + max(sizeof(T), sizeof(E))
+// sizeof(CCResult_T_E) = max_align + max(sizeof(T), sizeof(E))
 ```
 
-**Example (Result::[int, ParseError]):**
+**Example (`CCResult_int_ParseError`):**
 
 If ParseError is 8 bytes:
 
 ```c
-struct Result_int_ParseError {
+struct CCResult_int_ParseError {
     _Bool ok;              // 1 byte
     // 7 bytes padding
     union {
@@ -7521,9 +7506,9 @@ void* cc_arena_alloc(CCArena* a, size_t nbytes, size_t align);
 
 ---
 
-### @noblock Contract
+### `@nonblocking` Contract
 
-A function marked `@noblock` asserts it will never block:
+A function marked `@nonblocking` (compatibility spelling `@noblock`) asserts it will never block:
 
 **Rules:**
 
@@ -7535,7 +7520,7 @@ A function marked `@noblock` asserts it will never block:
 **Example:**
 
 ```c
-@noblock int parse_count(char[:] s) {
+@nonblocking int parse_count(char[:] s) {
     // Safe: only CPU work
     return (int)atoi(s.ptr);  // via FFI
 }
@@ -7543,8 +7528,8 @@ A function marked `@noblock` asserts it will never block:
 @async void db_query(int count);  // Must @await
 
 @async @latency_sensitive void handler(Request req) {
-    int count = parse_count(req.body);  // ✅ OK (@noblock)
-    @await db_query(count);              // ✅ OK (awaited)
+    int count = parse_count(req.body);  // OK (@nonblocking)
+    @await db_query(count);              // OK (awaited)
 }
 ```
 
@@ -7555,7 +7540,7 @@ A function marked `@latency_sensitive` asserts it must not experience unexpected
 **Rules:**
 
 - Compiler must not coalesce stalling calls within function
-- Only @noblock and awaited @async calls allowed
+- Only `@nonblocking` and awaited `@async` calls allowed
 - Each stalling operation dispatches separately
 - Latency is predictable and observable
 
@@ -7574,10 +7559,10 @@ void process_logs(int count);  // Unknown: might block
 **Compiler output:**
 
 ```
-error: non-@noblock, non-@async call in @latency_sensitive function
+error: non-@nonblocking, non-@async call in @latency_sensitive function
   → process_logs(count);
-  
-  Fix: Mark process_logs @noblock, or make it @async and @await it
+
+  Fix: Mark process_logs @nonblocking, or make it @async and @await it
 ```
 
 ---
@@ -7586,45 +7571,30 @@ error: non-@noblock, non-@async call in @latency_sensitive function
 
 ### Error Types
 
+Shipped faces are structs, not payload enums. `CCIoError` is a `CCError` face plus `os_code`:
+
 ```c
-enum IoError {
-    PermissionDenied,
-    FileNotFound,
-    InvalidArgument,
-    Interrupted,
-    OutOfMemory,
-    Busy,              // ← Executor saturation
-    Other(i32 os_code)
-};
+typedef struct {
+    CCError base;
+    int32_t os_code;
+} CCIoError;
 
-enum ParseError {
-    InvalidUtf8,
-    Truncated,
-};
-
-enum BoundsError {
-    OutOfBounds,
-};
+@typeview on CCIoError { as: base; };
 ```
+
+Kind aliases (`CC_IO_FILE_NOT_FOUND`, `CC_IO_BUSY` / `CC_ERR_WOULD_BLOCK`, …) live on `CCErrorKind`. Parse and bounds errors are ordinary C enums or library structs with no payload constructors.
 
 ### Backpressure Modes
 
-**Three modes for different workloads:**
+See §8.4.0. Three live modes:
 
+| Mode | Spelling | Queue full | Sender |
+| ---- | -------- | ---------- | ------ |
+| **Block** (default) | omitted | waits | blocks/suspends |
+| **DropNew** | `Drop`, `DropNew` | unchanged | `err` / `EAGAIN` |
+| **DropOld** | `DropOld` | discards head | succeeds |
 
-| Mode                | Behavior          | Queue Full         | Sender               | Receiver       | Use Case                      |
-| ------------------- | ----------------- | ------------------ | -------------------- | -------------- | ----------------------------- |
-| **Block** (default) | Block until space | Waits              | Suspends/blocks      | All messages   | Default, backpressure desired |
-| **Drop**            | Discard oldest    | Discards head      | Succeeds immediately | Recent msgs    | High-volume, tolerate loss    |
-| **Sample**          | Keep ~rate%       | Deterministic drop | Succeeds immediately | ~rate% of msgs | Sparse traces, fair sampling  |
-
-
-**Used in:**
-
-- Channels: `T[~N >, Drop]` / `T[~N <, Drop]`, `T[~N >, Block]` / `T[~N <, Block]`, `T[~N >, Sample(0.05)]` / `T[~N <, Sample(0.05)]`
-- Logging: `log_drop()`, `log_block()`, `log_sample()`
-
-**Key property:** Sampling is deterministic (reproducible, fair), not random.
+Handles: `T[~N >, Drop]`, `T[~N <, DropOld]`. There is no `Sample` mode and no `, Block` token.
 
 ---
 
@@ -7653,29 +7623,26 @@ enum BoundsError {
 **Properties:**
 
 - `@latency_sensitive` prevents surprise coalescing
-- Compiler enforces only @noblock and awaited @async calls
+- Compiler enforces only `@nonblocking` and awaited `@async` calls
 - Latency is observable (I/O dispatch is separate from CPU)
 
 ### Pattern 2: Backpressure Strategy
 
 ```c
-// Three pipelines, three strategies
+// Two pipelines, two strategies
 
-LogEvent[~10000, Drop] access_logs;      // High-volume, lossy
-LogEvent[~1000, Block] audit_logs;       // Low-volume, critical
-LogEvent[~100000, Sample(0.05)] traces;  // Very high-volume, 5% kept
+LogEvent[~10000 >, DropOld] access_logs;  // High-volume, lossy (drop oldest)
+LogEvent[~1000 >] audit_logs;             // Block (default), critical
 
 // In handler:
-log_drop(access_event);              // Never blocks request
-log_block(audit, ms(100)) !>(e) return cc_err(e);   // Fail if timeout
-log_sample(trace, 0.05);             // Deterministic 5% kept
+access_tx.send(access_event);            // DropOld: never blocks
+audit_tx.send(audit) !>(e) return cc_err(e);
 ```
 
 **Properties:**
 
 - Access logs drop oldest (never blocks)
-- Audit logs block up to timeout (critical)
-- Trace logs sample deterministically (sparse)
+- Audit logs block (critical)
 
 ### Pattern 3: Complete Server
 
@@ -7741,11 +7708,12 @@ This keeps deadlines precise and prevents “everything is always under a deadli
 | Keyword              | Meaning                                    | Usage                       |
 | -------------------- | ------------------------------------------ | --------------------------- |
 | `@async`             | Function may suspend                       | Mark async functions        |
-| `@noblock`           | Never blocks/allocates                     | Mark pure utilities         |
+| `@nonblocking`       | Never blocks/allocates                     | Mark pure utilities         |
+| `@noblock`           | Compatibility spelling for `@nonblocking`  | Same as `@nonblocking`      |
 | `@latency_sensitive` | No coalescing allowed                      | Mark request handlers       |
 | `@scoped`            | Cannot escape scope                        | Mark safe cross-thread refs |
-| `spawn`              | Create task                                | Method on `CCNursery`       |
-| `defer`              | Defer cleanup                              | Guarantee execution         |
+| `spawn`              | UFCS on `CCNursery`                        | `n->spawn(() => { … })`     |
+| `@defer`             | Defer cleanup                              | Guarantee execution         |
 | `@await`              | Suspend on async                           | Call @async functions       |
 | `CCNursery`          | Structured concurrency                     | Scope with tasks            |
 | `@with_deadline`      | Apply timeout                              | Enforce deadline            |
@@ -7760,7 +7728,7 @@ This keeps deadlines precise and prevents “everything is always under a deadli
 | `T[:]`                                        | Slice of T                                            | Pointer + length                |
 | `T[~... >]` / `T[~... <]`                     | `AsyncChanTx::[T]` / `AsyncChanRx::[T]`                   | Async channel handles           |
 | `T[~N ... >]` / `T[~N ... <]`                 | `AsyncChanTx::[T, N]` / `AsyncChanRx::[T, N]`             | Async handles, capacity N       |
-| `T[~N, Mode ... >]` / `T[~N, Mode ... <]`     | `AsyncChanTx::[T, N, Mode]` / `AsyncChanRx::[T, N, Mode]` | Async handles with backpressure |
+| `T[~N >, Drop]` / `T[~N <, DropOld]`          | same handles with backpressure (§8.4.0)               | DropNew / DropOld after direction |
 | `T[~ ... sync ... >]` / `T[~ ... sync ... <]` | `SyncChanTx::[T]` / `SyncChanRx::[T]`                     | Sync channel handles            |
 
 
@@ -7855,7 +7823,7 @@ These shapes are pinned by emitted-C lowering tests.
 
 ---
 
-### J.1.1 Call-Edge Lowering (`@blocking` / `@noblock`)
+### J.1.1 Call-Edge Lowering (`@blocking` / `@nonblocking`)
 
 Call-edge classification follows §8.2. A direct `@nonblocking` edge remains a
 direct C call in the current state and adds no child task. An async child call

@@ -1593,7 +1593,7 @@ an explicit, costed operation (§7).
 | ---- | ---- |
 | `CCPy` | one interpreter handle; `arena` is its scratch |
 | `CCPyObj` | an object reference, anchored to its home `CCPy` |
-| `CCPyError` | Python exception with a `CCError base @as` face (§4) |
+| `CCPyError` | Python exception with a `CCError` face (`@typeview on CCPyError { as: base; }`) |
 
 ```c
 #include <ccc/script/py.cch>
@@ -1852,10 +1852,12 @@ already release.
 
 ```c
 typedef struct {
-    CCError base @as;   /* kind + message: str(exception), arena-copied */
+    CCError base;       /* kind + message: str(exception), arena-copied */
     CCSlice type_name;  /* exception class: `ValueError`, `KeyError`, … */
     CCSlice traceback;  /* formatted traceback; empty if none crossed */
 } CCPyError;
+
+@typeview on CCPyError { as: base; };
 ```
 
 A Python exception surfaces as `CCPyError`: `base.message` is the
@@ -2220,7 +2222,7 @@ implicitly.
 | ---- | ---- |
 | `CCJs` | one environment handle; `arena` is its scratch; `engine` names its backend |
 | `CCJsVal` | a value reference, anchored to its home `CCJs` |
-| `CCJsError` | a JavaScript exception with a `CCError base @as` face (§4) |
+| `CCJsError` | a JavaScript exception with a `CCError` face (`@typeview on CCJsError { as: base; }`) |
 
 ```c
 #include <ccc/script/js.cch>
@@ -2773,10 +2775,12 @@ is a no-op.
 
 ```c
 typedef struct {
-    CCError base @as;   /* kind + message: String(error), arena-copied */
+    CCError base;       /* kind + message: String(error), arena-copied */
     CCSlice name;       /* error class: `TypeError`, `RangeError`, … */
     CCSlice stack;      /* error.stack; empty if none */
 } CCJsError;
+
+@typeview on CCJsError { as: base; };
 ```
 
 A JavaScript exception surfaces as `CCJsError`: `name` is the error's

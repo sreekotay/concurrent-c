@@ -73,18 +73,24 @@ Explicit when not in return context: `cc_ok(T, v)`, `cc_ok(T, E, v)`,
 
 ### Consume
 
-Two operators; everything else is a modifier:
+Two operators; three modifiers:
 
-| | Error becomes |
+| | Maps |
 |--|--|
-| `?>` | a **value** — `x ?> default` / `x ?>(e) …` |
-| `!>` | **code** that must leave — `x !> { … }` / `x !>;` |
+| `?>` | `E → T` — stay a value (`x ?> default`) |
+| `!>` | `E →` control flow — leave (`x !> { … }` / `x !>;`) |
+
+| Modifier | Does |
+|----------|------|
+| `(e)` | Exposes `E` (`x !>(e) { … }` / `x ?>(e) …`) |
+| bare `!>` | Routes `E` to the scope's `@errhandler` (`x !>;`) |
+| `@destroy` | Cleanup on **successful declaration construction** |
 
 ```c
-@errhandler(CCError e) cc_error_exit(e);   // policy for bare !>;
+@errhandler(CCError e) cc_error_exit(e);   // bare !> routes here
 
 int a = read_config("timeout") ?> 30;
-int b = read_config("timeout") !>;                    // → @errhandler
+int b = read_config("timeout") !>;                    // routes E
 int c = read_config("timeout") !>(e) { /* local */ @err(e); };
 int d = read_config("timeout") !>(e) return cc_err(e); // propagate
 CCNursery* n = cc_nursery_create(NULL) !> @destroy;
@@ -147,8 +153,8 @@ names and accessors when operators cannot run (plain C, `@emit`, generators).
 
 ## Cleanup: `@defer` / `@destroy` / registration
 
-`@destroy` is **`@defer` sugar on a declaration** — same LIFO ledger. With `!>`,
-cleanup schedules only if unwrap succeeds.
+`@destroy` attaches cleanup to **successful declaration construction** — `@defer`
+sugar on the binding. After `!>`, that means the unwrap succeeded.
 
 | Form | Meaning |
 |------|---------|

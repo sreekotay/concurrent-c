@@ -123,16 +123,16 @@ What that program uses:
 
 | Piece | Role |
 |-------|------|
-| `@errhandler(…)` | Scope policy for fallible unwraps that use bare `!>;` |
-| `T!>(E)` / `!>` | Fallible value; `!>` unwraps or runs error code |
-| `!> @destroy` | Unwrap, then schedule cleanup — **`@destroy` is `@defer` sugar attached to the binding** (same LIFO ledger; only runs if the unwrap succeeded) |
+| `@errhandler(…)` | Scope policy that **bare `!>`** routes `E` to |
+| `T!>(E)` | Fallible value. `?>` : `E → T`. `!>` : `E →` control flow |
+| `@destroy` | Cleanup on **successful declaration construction** (`!> @destroy` = unwrap succeeded, then defer) |
 | `CCArena` / `CCStdio` | Arena **names** the window’s lifetime; growth/overflow is storage policy — prefer **`io.println(…)`** (see [Arenas](#arenas-name-a-lifetime)) |
 | `CCNursery*` | Structured-concurrency scope: teardown waits for spawned tasks |
 | `n->spawn(() => [io] { … })` | UFCS spawn of a closure; capture `io` by value into the task |
 
-So `CCNursery* n = cc_nursery_create(NULL) !> @destroy;` is the short form of
-“unwrap, bind `n`, `@defer` the nursery’s destroy on scope exit.” Teardown runs
-at the end of `main` here, so both tasks finish before the process exits.
+So `CCNursery* n = cc_nursery_create(NULL) !> @destroy;` is `!>` (unwrap or
+route `E`) then `@destroy` (cleanup on that successful construction). Teardown
+runs at the end of `main` here, so both tasks finish before the process exits.
 
 A fuller hello (stdio helpers, per-task `@errhandler`, local-then-default
 errors) is in the repo: [examples/hello.ccs](../examples/hello.ccs).
@@ -157,17 +157,19 @@ UFCS show up in almost every example — treat them as day-one, not advanced.
 
 | Idea | Spellings |
 |------|-----------|
-| Cleanup | `@defer …` / `@destroy` (defer sugar on a binding; bodyless → registered destroy) |
-| Errors as values | `T!>(E)`, then `?>` or `!>` / `!>;`; `!> @destroy` = unwrap + deferred destroy |
+| Cleanup | `@defer …` / `@destroy` (cleanup on successful declaration construction) |
+| Errors | `T!>(E)`; `?>` : `E → T`; `!>` : `E →` control flow; `(e)` exposes `E`; bare `!>` routes `E` |
 | Methods (UFCS) | `recv.method(args)` — ordinary functions; prefer this form |
 | Arenas / slices | arena **names a lifetime**; alloc strategy is policy for that lifetime’s storage; `T[:]` views carry provenance (below) |
 | Closures | `() => …`, `() => [x] { … }`, `() => [&x] { … }` — tasks re-bind `@errhandler` |
 
 ### Destroy registration — what bodyless `@destroy` calls
 
-`@destroy` is `@defer` on a declaration. A **block** is an explicit defer body
-(always fine). **Bodyless** `@destroy` looks up a destroy (or pre-destroy) hook
-registered for that type — if none is known, compile error.
+`@destroy` attaches cleanup to **successful declaration construction** — `@defer`
+sugar on the binding. After `!>`, that means the unwrap succeeded (no binding →
+no destroy). A **block** is an explicit defer body (always fine). **Bodyless**
+`@destroy` looks up a destroy (or pre-destroy) hook registered for that type —
+if none is known, compile error.
 
 Stdlib owners ship registered (`CCNursery*` waits then frees, `CCArena` frees
 slabs + overflow, channels, `CCPy`, …). For your own types:
@@ -189,25 +191,31 @@ Full walkthrough (hooks + views): [typehooks-typeviews.md](typehooks-typeviews.m
 
 ### Results — `T!>(E)`
 
-Fallible work returns `T!>(E)`. Two operators; everything else is a modifier:
+Fallible work returns `T!>(E)`. Two operators; three modifiers:
 
-| | Error becomes |
+| | Maps |
 |--|--|
-| `?>` | a **value** — `x ?> default` / `x ?>(e) …` |
-| `!>` | **code** that must leave — `x !> { … }` / `x !>;` |
+| `?>` | `E → T` — stay a value (`x ?> default`) |
+| `!>` | `E →` control flow — leave (`x !> { … }` / `x !>;`) |
+
+| Modifier | Does |
+|----------|------|
+| `(e)` | Exposes `E` (`x !>(e) { … }` / `x ?>(e) …`) |
+| bare `!>` | Routes `E` to the scope's `@errhandler` (`x !>;`) |
+| `@destroy` | Cleanup on **successful declaration construction** |
 
 ```c
-@errhandler(CCError e) cc_error_exit(e);   // policy for bare !>;
+@errhandler(CCError e) cc_error_exit(e);   // bare !> routes here
 
 int a = read() ?> 30;
-int b = read() !>;                         // → @errhandler
+int b = read() !>;                         // routes E
 int c = read() !>(e) { /* local */ @err(e); };
 CCNursery* n = cc_nursery_create(NULL) !> @destroy;
 ```
 
 Tasks do not inherit `@errhandler` — re-bind inside each spawn. More:
 [recipe_result_error_handling.ccs](../examples/recipe_result_error_handling.ccs) ·
-[Language Concepts §2](language-concepts.md#2-errors-become-a-value-or-code).
+[Language Concepts §2](language-concepts.md#2-errors-map-to-a-value-or-to-control-flow).
 
 ### UFCS — methods are ordinary functions
 
