@@ -3,6 +3,13 @@
 Call Node (and npm packages) from Python.
 Native types, exceptions, callbacks, and async all cross the boundary.
 
+## Why use this
+
+Call real Node from Python — `require`, native addons, npm — not a JS
+engine in-process. One child, shm for bulk, `from cc_node import require`
+in Jupyter/Colab with no `%load_ext`. pythonia is the packaged peer; this
+is faster on the wire and honest about bulk and callbacks.
+
 Part of [Concurrent-C](https://github.com/sreekotay/concurrent-c) — a
 strict C11-superset preprocessor: `.ccs` lowers to plain C and compiles
 with your host C compiler. (This bridge itself is pure Python stdlib —

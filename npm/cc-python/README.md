@@ -3,6 +3,13 @@
 Python from Node. Any module, zero copies, host-controlled lifetime.
 Native types, exceptions, callbacks, and async all cross the boundary.
 
+## Why use this
+
+Call any PyPI package from Node without copying buffers through a Python
+`list`. In-process typed arrays are memoryview leases. `{ isolated: true }`
+is the same spelling in a child — crash isolation and N cores. Other
+bridges copy.
+
 Built with [Concurrent-C](https://github.com/sreekotay/concurrent-c) — a
 strict C11-superset preprocessor: `.ccs` lowers to plain C and compiles
 with your host C compiler.
