@@ -1199,7 +1199,8 @@ enum { SHADOW_TD_ALIAS_CAP = 64 };
 static char g_shadow_td_alias[SHADOW_TD_ALIAS_CAP][64];
 static char g_shadow_td_base[SHADOW_TD_ALIAS_CAP][96];
 static int g_shadow_ntd;
-/* Non-prelude slice elems needing CC_DECL_SLICE(T) (e.g. Pt). */
+/* Non-prelude slice elems queued for the CCSlice family factory (e.g. Pt).
+ * Hoist + as: materialize still walk this table; emit prefers the factory. */
 enum { SHADOW_SLICE_CAP = 64 };
 static char g_shadow_slices[SHADOW_SLICE_CAP][64];
 static int g_shadow_nslices;
@@ -5386,6 +5387,7 @@ static char g_shadow_slice_have[SHADOW_SLICE_HAVE_CAP][64];
 static int g_shadow_nslice_have;
 
 static void shadow_slice_mangle_elem(const char* elem, char* dst, size_t cap);
+static void shadow_ginst_need(const char* family, const char* compact);
 
 static void shadow_slice_have(const char* elem) {
     int i;
@@ -5437,29 +5439,13 @@ static void shadow_slice_mangle_elem(const char* elem, char* dst, size_t cap) {
 }
 
 static void shadow_slice_need(const char* elem) {
-    int i;
     char mangled[64];
     if (!elem || !elem[0]) return;
-    if (g_shadow_nslices >= SHADOW_SLICE_CAP) {
-        shadow_table_full("slices", SHADOW_SLICE_CAP, elem);
-        return;
-    }
     shadow_slice_mangle_elem(elem, mangled, sizeof(mangled));
     if (!mangled[0] || shadow_slice_already(mangled)) return;
     /* Multi-word elements need CC_DECL_SLICE_SPEC — hand-written or skip. */
     if (strchr(elem, ' ') || strchr(elem, '\t')) return;
-    for (i = 0; i < g_shadow_nslices; i++) {
-        if (strcmp(g_shadow_slices[i], mangled) == 0) return;
-    }
-    snprintf(g_shadow_slices[g_shadow_nslices], sizeof(g_shadow_slices[0]), "%s",
-             mangled);
-    g_shadow_nslices++;
-    {
-        char ty[96];
-        snprintf(ty, sizeof(ty), "CCSlice_%s", mangled);
-        shadow_field_register_ex(ty, "base", "CCSlice");
-        shadow_as_materialize_globs_for(ty);
-    }
+    shadow_ginst_need("CCSlice", mangled);
 }
 
 /* Note CC_DECL_SLICE(T) / CC_DECL_SLICE_SPEC(CCSlice_T, T) from RAW_LINE. */
@@ -7118,10 +7104,94 @@ static void shadow_gfac_add(const char* family, int arity, const char* tpl,
     g_shadow_ngfac++;
 }
 
+/* Textual fallback matching CC_DECL_SLICE_SPEC / the CCSlice factory body.
+ * Used when the harvested factory is not yet registered (self-build). */
+static const char* shadow_ccslice_factory_tpl(void) {
+    return
+        "#ifdef CC_FRAGMENT_VALIDATE\n"
+        "typedef struct ${arg(0)} { char _; } ${arg(0)};\n"
+        "typedef struct { char *ptr; size_t len; uint64_t id; } CCSlice;\n"
+        "static inline CCSlice cc_slice_from_buffer(void *p, size_t n) {\n"
+        "    CCSlice s; s.ptr = (char *)p; s.len = n; s.id = 0; return s;\n"
+        "}\n"
+        "#ifndef CC_SLICE_ID_UNIQUE\n"
+        "#define CC_SLICE_ID_UNIQUE 0ULL\n"
+        "#define CC_SLICE_ID_SUBSLICE 0ULL\n"
+        "#endif\n"
+        "#endif\n"
+        "typedef struct ${mangled} {\n"
+        "    CCSlice base;\n"
+        "} ${mangled};\n"
+        "static inline ${mangled} ${mangled}_from_buffer(${arg(0)} *p, size_t count) {\n"
+        "    ${mangled} s;\n"
+        "    s.base = cc_slice_from_buffer((void *)p, count);\n"
+        "    return s;\n"
+        "}\n"
+        "static inline size_t ${mangled}_len(${mangled} *s) { return s ? s->base.len : 0; }\n"
+        "static inline ${arg(0)} ${mangled}_at(${mangled} *s, size_t i) {\n"
+        "    return ((${arg(0)} *)s->base.ptr)[i];\n"
+        "}\n"
+        "static inline ${mangled} ${mangled}_sub(${mangled} *s, size_t a, size_t b) {\n"
+        "    ${mangled} r;\n"
+        "    size_t n = s ? s->base.len : 0;\n"
+        "    if (a > n) a = n;\n"
+        "    if (b > n) b = n;\n"
+        "    if (b < a) b = a;\n"
+        "    r.base.ptr = s ? s->base.ptr + a * sizeof(${arg(0)}) : 0;\n"
+        "    r.base.len = b - a;\n"
+        "    r.base.id = s ? ((s->base.id & ~CC_SLICE_ID_UNIQUE) |\n"
+        "                     ((a != 0 || b != n ||\n"
+        "                       (s->base.id & CC_SLICE_ID_SUBSLICE))\n"
+        "                          ? CC_SLICE_ID_SUBSLICE\n"
+        "                          : 0))\n"
+        "                  : 0;\n"
+        "    return r;\n"
+        "}\n"
+        "static inline CCSlice ${mangled}_bytes(${mangled} *s) {\n"
+        "    CCSlice r = {0};\n"
+        "    if (!s) return r;\n"
+        "    r = s->base;\n"
+        "    r.len *= sizeof(${arg(0)});\n"
+        "    return r;\n"
+        "}\n";
+}
+
+static int shadow_ginst_has(const char* family, const char* compact) {
+    int i;
+    char mangled[96];
+    if (!family || !compact || !compact[0]) return 0;
+    snprintf(mangled, sizeof(mangled), "%s_%s", family, compact);
+    for (i = 0; i < g_shadow_nginst; i++) {
+        if (strcmp(g_shadow_ginst[i].mangled, mangled) == 0) return 1;
+    }
+    return 0;
+}
+
 static void shadow_ginst_need(const char* family, const char* compact) {
     int i;
     char mangled[96];
     if (!family || !compact || !compact[0]) return;
+    if (strcmp(family, "CCSlice") == 0) {
+        if (shadow_slice_already(compact)) return;
+        if (g_shadow_nslices >= SHADOW_SLICE_CAP) {
+            shadow_table_full("slices", SHADOW_SLICE_CAP, compact);
+            return;
+        }
+        for (i = 0; i < g_shadow_nslices; i++) {
+            if (strcmp(g_shadow_slices[i], compact) == 0) break;
+        }
+        if (i == g_shadow_nslices) {
+            snprintf(g_shadow_slices[g_shadow_nslices],
+                     sizeof(g_shadow_slices[0]), "%s", compact);
+            g_shadow_nslices++;
+        }
+        {
+            char ty[96];
+            snprintf(ty, sizeof(ty), "CCSlice_%s", compact);
+            shadow_field_register_ex(ty, "base", "CCSlice");
+            shadow_as_materialize_globs_for(ty);
+        }
+    }
     if (g_shadow_nginst >= SHADOW_GINST_CAP) {
         shadow_table_full("ginst", SHADOW_GINST_CAP, family);
         return;
@@ -7137,6 +7207,16 @@ static void shadow_ginst_need(const char* family, const char* compact) {
     snprintf(g_shadow_ginst[g_shadow_nginst].compact,
              sizeof(g_shadow_ginst[0].compact), "%s", compact);
     g_shadow_nginst++;
+}
+
+/* Erased CCSlice_* methods share the typed-instance prefix (`CCSlice_len`,
+ * `CCSlice_utf8_codepoints`, …). Identifier scans must not treat those as
+ * family CCSlice / elem. Instantiation is `T[:]` / `CCSlice::[T]` / a
+ * `CCSlice_T` bind type. */
+static void shadow_ginst_need_from_ident(const char* family, const char* compact) {
+    if (family && strcmp(family, "CCSlice") == 0)
+        return;
+    shadow_ginst_need(family, compact);
 }
 
 /* Returns 1 on success, 0 on soft failure, -1 on arg OOB (sets *oob_arg). */

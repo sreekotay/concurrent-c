@@ -5,7 +5,8 @@
 #
 # Not a substitute for real lowering: stage-1 must re-run over this seed.
 # Only strips `@as` / legacy `/*@as*/`, `@typeview` / `@restricted` /
-# `@typehooks` blocks, and rewrites `.cch` includes to `.h`.
+# `@typehooks` blocks, `CC_GENERIC_FACTORY` / `_EXTEND` blocks, and
+# rewrites `.cch` includes to `.h`.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -125,10 +126,101 @@ def strip_typeview_blocks(text: str) -> str:
         i += 1
     return "".join(out)
 
+def strip_generic_factory_blocks(text: str) -> str:
+    """Blank CC_GENERIC_FACTORY / _EXTEND blocks (space, keep newlines)."""
+    out = list(text)
+    i = 0
+    n = len(text)
+    kw = "CC_GENERIC_FACTORY"
+    kw_ext = "CC_GENERIC_FACTORY_EXTEND"
+
+    def ident_bound(pos, ln):
+        if pos > 0 and (text[pos - 1].isalnum() or text[pos - 1] == "_"):
+            return False
+        end = pos + ln
+        if end < n and (text[end].isalnum() or text[end] == "_"):
+            return False
+        return True
+
+    def skip_inert(i):
+        if i < n and text[i] in "\"'":
+            q = text[i]
+            i += 1
+            while i < n:
+                if text[i] == "\\" and i + 1 < n:
+                    i += 2
+                    continue
+                if text[i] == q:
+                    return i + 1
+                i += 1
+            return i
+        if text.startswith("//", i):
+            while i < n and text[i] != "\n":
+                i += 1
+            return i
+        if text.startswith("/*", i):
+            i += 2
+            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                i += 1
+            return i + 2 if i + 1 < n else i
+        return None
+
+    while i < n:
+        nxt = skip_inert(i)
+        if nxt is not None:
+            i = nxt
+            continue
+        mlen = 0
+        if text.startswith(kw_ext, i) and ident_bound(i, len(kw_ext)):
+            mlen = len(kw_ext)
+        elif text.startswith(kw, i) and ident_bound(i, len(kw)):
+            mlen = len(kw)
+        if mlen:
+            p = i + mlen
+            while p < n and text[p].isspace():
+                p += 1
+            if p >= n or text[p] != "(":
+                i += 1
+                continue
+            depth = 0
+            while p < n:
+                if text[p] == "(":
+                    depth += 1
+                elif text[p] == ")":
+                    depth -= 1
+                    p += 1
+                    if depth == 0:
+                        break
+                    continue
+                p += 1
+            while p < n and text[p].isspace():
+                p += 1
+            if p >= n or text[p] != "{":
+                i += 1
+                continue
+            depth = 0
+            while p < n:
+                if text[p] == "{":
+                    depth += 1
+                elif text[p] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        p += 1
+                        break
+                p += 1
+            for k in range(i, p):
+                if out[k] != "\n":
+                    out[k] = " "
+            i = p
+            continue
+        i += 1
+    return "".join(out)
+
 def seed_text(text: str) -> str:
     text = text.replace("/*@as*/", "")
     text = re.sub(r"@as\b", "", text)
     text = strip_typeview_blocks(text)
+    text = strip_generic_factory_blocks(text)
     text = text.replace(".cch>", ".h>").replace('.cch"', '.h"')
     return text
 

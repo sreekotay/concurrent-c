@@ -1,0 +1,28 @@
+/* `CCSlice::[T]` is the same family as `T[:]` — both name CCSlice_T
+ * from CC_GENERIC_FACTORY(CCSlice, 1). char stays bare CCSlice. */
+#include <ccc/cc_runtime.cch>
+#include <assert.h>
+#include <stdio.h>
+
+typedef struct Pt { double x, y; } Pt;
+
+static size_t erased_len(CCSlice s) {
+    return s.len;
+}
+
+int main(void) {
+    Pt ps[:] = {{1, 2}, {3, 4}, {5, 6}};
+    CCSlice::[Pt] qs = ps;
+    assert(qs.len() == 3);
+    {
+        Pt p2 = qs.at(2);
+        assert(p2.x == 5 && p2.y == 6);
+    }
+    {
+        CCSlice bx = qs.bytes();
+        assert(bx.len == 3 * sizeof(Pt));
+    }
+    assert(erased_len(qs) == 3 * sizeof(Pt));
+    printf("ok\n");
+    return 0;
+}

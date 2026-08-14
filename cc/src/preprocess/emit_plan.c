@@ -1217,19 +1217,38 @@ static void cc__host_emit_raw_impl(int anchor, const char* ptr, size_t len,
                                    const char* origin_file, int origin_line) {
     if (!ptr || len == 0) return;
     /* Coalesce consecutive emits at the same anchor/site so multi-call loops
-     * (e.g. CRC table generation) splice as one block, not N inserts at the
-     * same prelude offset.  Only default-origin fragments coalesce; an explicit
-     * provenance (cc_emit_raw_at) keeps each fragment's #line distinct. */
+     * splice as one block.  Splicing N fragments at the same AFTER_PRELUDE
+     * offset prepends, which reverses split constructs (`enum { N }; static
+     * T table[] = {` in one @emit, entries in the next).  Provenanced
+     * @emit used to skip this and keep per-fragment #line wrappers; stamp
+     * inner #line on the appended chunk instead. */
     if (cc__comptime_frag_count > 0) {
         CCEmitComptimeFragment* last = &cc__comptime_frags[cc__comptime_frag_count - 1];
         if (last->text && last->anchor == (CCEmitAnchor)anchor &&
-            last->site_pos == cc__host_site_pos &&
-            last->origin_file == NULL && origin_file == NULL) {
+            last->site_pos == cc__host_site_pos) {
+            char prefix[PATH_MAX + 64];
+            size_t prefix_len = 0;
+            prefix[0] = '\0';
+            if (origin_file && origin_file[0]) {
+                int pn = snprintf(prefix, sizeof(prefix), "#line %d \"%s\"\n",
+                                  origin_line > 0 ? origin_line : 1,
+                                  origin_file);
+                if (pn > 0 && (size_t)pn < sizeof(prefix))
+                    prefix_len = (size_t)pn;
+            }
             size_t old_len = strlen(last->text);
-            char* nv = (char*)realloc(last->text, old_len + len + 1);
+            size_t nl = (old_len > 0 && last->text[old_len - 1] != '\n') ? 1 : 0;
+            char* nv = (char*)realloc(last->text,
+                                      old_len + nl + prefix_len + len + 1);
             if (nv) {
-                memcpy(nv + old_len, ptr, len);
-                nv[old_len + len] = '\0';
+                size_t o = old_len;
+                if (nl) nv[o++] = '\n';
+                if (prefix_len) {
+                    memcpy(nv + o, prefix, prefix_len);
+                    o += prefix_len;
+                }
+                memcpy(nv + o, ptr, len);
+                nv[o + len] = '\0';
                 /* Rewrite the coalesced blob so multi-fn rname tracking sees
                  * the full fragment (idempotent on already-mangled text). */
                 last->text = cc__frag_text_result_sugar(nv);
@@ -2547,7 +2566,6 @@ int cc_emit_plan_splice_comptime_fragments(char** src, size_t* len, const char* 
         size_t frag_i = sched.frag_index[si];
         const CCEmitComptimeFragment* f = &cc__comptime_frags[frag_i];
         const char* origin_file = origin_files[si];
-        char block[CC_EMIT_SPLICE_BLOCK_MAX];
         /* No leading blank before `#line origin` — it would inherit the
          * previous directive and can map past the TU's EOF. */
         size_t pos = sched.pos[si];
@@ -2555,19 +2573,40 @@ int cc_emit_plan_splice_comptime_fragments(char** src, size_t* len, const char* 
             if (cc__emit_splice_at(src, len, pos, "\n", input_path) != 0) return -1;
             pos += 1;
         }
-        int n = snprintf(block, sizeof(block),
+        const char* text = f->text ? f->text : "";
+        const char* extra_nl =
+            (text[0] && text[strlen(text) - 1] == '\n') ? "" : "\n";
+        int n = snprintf(NULL, 0,
                          "#line %d \"%s\"\n%s%s#line %d \"%s\"\n",
                          origin_lines[si], origin_file,
-                         f->text ? f->text : "",
-                         (f->text && f->text[0] && f->text[strlen(f->text) - 1] == '\n') ? "" : "\n",
+                         text, extra_nl,
                          restore_lines[si], restore_files[si]);
-        if (n <= 0 || (size_t)n >= sizeof(block)) {
+        if (n <= 0) {
             fprintf(stderr,
-                    "%s: error: comptime emit splice block exceeds %d bytes\n",
-                    input_path ? input_path : "<input>", CC_EMIT_SPLICE_BLOCK_MAX);
+                    "%s: error: failed to format comptime emit splice block\n",
+                    input_path ? input_path : "<input>");
             return -1;
         }
-        if (cc__emit_splice_at(src, len, pos, block, input_path) != 0) return -1;
+        char stack_block[CC_EMIT_SPLICE_BLOCK_MAX];
+        char* block = stack_block;
+        if ((size_t)n >= sizeof(stack_block)) {
+            block = (char*)malloc((size_t)n + 1);
+            if (!block) {
+                fprintf(stderr,
+                        "%s: error: out of memory formatting comptime splice "
+                        "(%d bytes)\n",
+                        input_path ? input_path : "<input>", n);
+                return -1;
+            }
+        }
+        (void)snprintf(block, (size_t)n + 1,
+                       "#line %d \"%s\"\n%s%s#line %d \"%s\"\n",
+                       origin_lines[si], origin_file,
+                       text, extra_nl,
+                       restore_lines[si], restore_files[si]);
+        int sp = cc__emit_splice_at(src, len, pos, block, input_path);
+        if (block != stack_block) free(block);
+        if (sp != 0) return -1;
     }
     return 0;
 }

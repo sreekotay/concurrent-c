@@ -69,4 +69,4 @@ more complex than the underlying semantics warrant.
   middle `SNAKE` parameter is gone — members are `NAME##_<member>`
   (`CCSlice_double_at`), the same instance-prefix convention as Vec/Map.
   `CC_DECL_SLICE(T)` is the single-token convenience. Concurrent-C source
-  rarely needs either: `T[:]` auto-instantiates.
+  rarely needs either: `T[:]` / `CCSlice::[T]` auto-instantiates.

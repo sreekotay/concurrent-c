@@ -1,6 +1,6 @@
-/* Typed slice instances auto-instantiate: `T[:]` with a struct element
- * splices the CC_DECL_SLICE_SPEC declaration after the element's
- * typedef — no macro line needed. Members are NAME##_<member>
+/* Typed slice instances auto-instantiate: `T[:]` and `CCSlice::[T]`
+ * with a struct element splice the CCSlice family factory after the
+ * element's typedef — no macro line needed. Members are NAME##_<member>
  * (CCSlice_Pt_at), the same instance-prefix convention as Vec/Map.
  * CC_DECL_SLICE(T) is the single-token hand form; a hand-written
  * instance suppresses the auto-splice (no duplicate). */

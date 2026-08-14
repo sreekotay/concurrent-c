@@ -1111,7 +1111,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
         }
     }
     /* Typedefs named as Vec/slice elems or Map K/V bases (Entry, Pt, …)
-     * before CC_VEC / CC_MAP / CC_DECL_SLICE. Skip ones already Result-hoisted. */
+     * before CC_VEC / CC_MAP / CCSlice factory emit. Skip ones already Result-hoisted. */
     {
         int i, vi;
         for (i = 0; i < n; i++) {
@@ -1261,6 +1261,12 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                     tpl = g_shadow_gfac[fi].tpl;
                     break;
                 }
+            }
+            if (!tpl && strcmp(inst->family, "CCSlice") == 0)
+                tpl = shadow_ccslice_factory_tpl();
+            if (g_shadow_slice_stub && strcmp(inst->family, "CCSlice") == 0) {
+                cc_arena_free(&def_ar);
+                continue;
             }
             {
                 const char* p = inst->compact;
@@ -1527,12 +1533,21 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
     /* Map/Vec/slice macros after typedef hoist (element types in scope). */
     if (kind == SHADOW_EMIT_C && cache) {
         if (g_shadow_nslices > 0 && !g_shadow_slice_stub) {
-            if (!cemit_str(out, "#include <ccc/cc_slice.h>\n")) return 0;
-            for (int si = 0; si < g_shadow_nslices; si++) {
-                if (!cemit_fmt(out, "CC_DECL_SLICE(%s)\n", g_shadow_slices[si]))
-                    return 0;
+            int si, any = 0;
+            for (si = 0; si < g_shadow_nslices; si++) {
+                if (!shadow_ginst_has("CCSlice", g_shadow_slices[si])) any = 1;
             }
-            if (!cemit_str(out, "\n")) return 0;
+            if (any) {
+                if (!cemit_str(out, "#include <ccc/cc_slice.h>\n")) return 0;
+                for (si = 0; si < g_shadow_nslices; si++) {
+                    if (shadow_ginst_has("CCSlice", g_shadow_slices[si]))
+                        continue;
+                    if (!cemit_fmt(out, "CC_DECL_SLICE(%s)\n",
+                                   g_shadow_slices[si]))
+                        return 0;
+                }
+                if (!cemit_str(out, "\n")) return 0;
+            }
         }
         if (g_shadow_nvecs > 0) {
             if (!cemit_str(out, "#include <ccc/std/vec.h>\n"

@@ -72,9 +72,9 @@ typedef struct {
 typedef CCSlice CCSliceUnique;
 typedef CCSlice CCSliceShared;
 
-/* Typed slice instances — generic over the element type, the same move
- * as CC_DECL_RESULT_SPEC. `T[:]` with a non-char element type lowers to
- * `CCSlice_<mangled T>`, a distinct struct embedding the erased core:
+/* Typed slice instances — generic over the element type. `T[:]` with a
+ * non-char element type (and `CCSlice::[T]`) names `CCSlice_<mangled T>`,
+ * a distinct struct embedding the erased core:
  *
  *   typedef struct CCSlice_double { CCSlice base; } CCSlice_double;
  *
@@ -82,22 +82,25 @@ typedef CCSlice CCSliceShared;
  * is the visible erasure spelling; one family face
  * `@typeview on CCSlice_* { as: base; }` (after the scalar instances)
  * supplies method retry into the byte helpers and arg-position autocast.
- * Element-wise methods and the scaled `bytes()` view come from this
- * template with sizeof(T) in hand. `len` on a typed slice counts ELEMENTS;
- * `bytes()` converts to an honestly byte-measured CCSlice. char slices
- * stay bare CCSlice (bytes are their elements).
+ * Element-wise methods and the scaled `bytes()` view come from the
+ * `CC_GENERIC_FACTORY(CCSlice, 1)` body below, with sizeof(T) in hand.
+ * `len` on a typed slice counts ELEMENTS; `bytes()` converts to an
+ * honestly byte-measured CCSlice. char slices stay bare CCSlice
+ * (bytes are their elements).
  *
  * Common scalar instances are pre-declared below. Any other element
- * type auto-instantiates at first `T[:]` use — the compiler splices the
- * declaration after the element's definition. Hand instantiation (for
- * plain-C consumers, or multi-token element spellings) is one line:
+ * type auto-instantiates at first `T[:]` / `CCSlice::[T]` use — the
+ * compiler splices the factory body after the element's definition.
+ * Hand instantiation (for plain-C consumers, or multi-token element
+ * spellings) is one line and suppresses the splice:
  *
  *   CC_DECL_SLICE(Point)                            single-token element
  *   CC_DECL_SLICE_SPEC(CCSlice_long_long, long long)  explicit instance name
  *
  * Members are `NAME##_<member>` — the same instance-prefix convention
- * as Vec and Map families. Header lowering strips `@typeview` from `.h`
- * (faces remain Concurrent-C / shadow facts). */
+ * as Vec and Map families. Header lowering strips `@typeview` and
+ * `CC_GENERIC_FACTORY` from `.h` (faces and the factory remain
+ * Concurrent-C / shadow facts). */
 #define CC_DECL_SLICE_SPEC(NAME, T)                                            \
     typedef struct NAME {                                                      \
         CCSlice base;                                                          \
@@ -138,6 +141,59 @@ typedef CCSlice CCSliceShared;
 
 /* Single-token convenience: CC_DECL_SLICE(Point) → CCSlice_Point. */
 #define CC_DECL_SLICE(T) CC_DECL_SLICE_SPEC(CCSlice_##T, T)
+
+/* Factory bodies are harvested from this `.cch` (blanked from the lowered `.h`).
+ * `T[:]` and `CCSlice::[T]` instantiate this family; char stays bare CCSlice.
+ * The body matches `CC_DECL_SLICE_SPEC(${mangled}, ${arg(0)})`. */
+CC_GENERIC_FACTORY(CCSlice, 1) {
+    return @emit(`
+#ifdef CC_FRAGMENT_VALIDATE
+typedef struct ${arg(0)} { char _; } ${arg(0)};
+typedef struct { char *ptr; size_t len; uint64_t id; } CCSlice;
+static inline CCSlice cc_slice_from_buffer(void *p, size_t n) {
+    CCSlice s; s.ptr = (char *)p; s.len = n; s.id = 0; return s;
+}
+#ifndef CC_SLICE_ID_UNIQUE
+#define CC_SLICE_ID_UNIQUE 0ULL
+#define CC_SLICE_ID_SUBSLICE 0ULL
+#endif
+#endif
+typedef struct ${mangled} {
+    CCSlice base;
+} ${mangled};
+static inline ${mangled} ${mangled}_from_buffer(${arg(0)} *p, size_t count) {
+    ${mangled} s;
+    s.base = cc_slice_from_buffer((void *)p, count);
+    return s;
+}
+static inline size_t ${mangled}_len(${mangled} *s) { return s ? s->base.len : 0; }
+static inline ${arg(0)} ${mangled}_at(${mangled} *s, size_t i) {
+    return ((${arg(0)} *)s->base.ptr)[i];
+}
+static inline ${mangled} ${mangled}_sub(${mangled} *s, size_t a, size_t b) {
+    ${mangled} r;
+    size_t n = s ? s->base.len : 0;
+    if (a > n) a = n;
+    if (b > n) b = n;
+    if (b < a) b = a;
+    r.base.ptr = s ? s->base.ptr + a * sizeof(${arg(0)}) : 0;
+    r.base.len = b - a;
+    r.base.id = s ? ((s->base.id & ~CC_SLICE_ID_UNIQUE) |
+                     ((a != 0 || b != n ||
+                       (s->base.id & CC_SLICE_ID_SUBSLICE))
+                          ? CC_SLICE_ID_SUBSLICE
+                          : 0))
+                  : 0;
+    return r;
+}
+static inline CCSlice ${mangled}_bytes(${mangled} *s) {
+    CCSlice r = {0};
+    if (!s) return r;
+    r = s->base;
+    r.len *= sizeof(${arg(0)});
+    return r;
+}`, arena);
+}
 
 /* Scalar instances are declared after cc_slice_from_buffer below. */
 

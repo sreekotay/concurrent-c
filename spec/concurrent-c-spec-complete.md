@@ -457,7 +457,7 @@ int ! IoError read_int (char [ : ] data) {
 
 **Slice declarations:** type position and declarator position are equivalent — `char[:] s` ≡ `char s[:]`, in locals, parameters, and struct fields alike.
 
-**Typed slice instances:** a non-char element type instantiates the slice generic: `double[:]` is `CCSlice_double`, a distinct struct declared by the `CC_DECL_SLICE_SPEC(Name, T)` template — a `CCSlice base` field with `@typeview on Name { as: base; }` plus element-wise methods with `sizeof(T)` in hand, named `Name_<member>` (the same instance-prefix convention as Vec and Map families). `len()`/`at(i)`/`sub(a,b)` count and index elements (`sub` returns the same instance type); `bytes()` returns an honestly byte-measured `CCSlice` (`len` scales by `sizeof(T)`). Scalar instances are pre-declared in `cc_slice.cch`; any other element type auto-instantiates at first use — the compiler splices the declaration after the element's definition, exactly as it splices Vec/Map monomorphs. A hand-written declaration (`CC_DECL_SLICE(T)` for a single-token element, `CC_DECL_SLICE_SPEC(Name, T)` otherwise) is honored and suppresses the splice, for plain-C consumers and headers. Instance types are distinct in `_Generic`, so type-directed dispatch (e.g. dynamic-sink marshaling) sees the element type in any expression position.
+**Typed slice instances:** a non-char element type instantiates the `CCSlice` family factory: `double[:]` and `CCSlice::[double]` both name `CCSlice_double`, a distinct struct with a `CCSlice base` field, `@typeview on CCSlice_* { as: base; }`, and element-wise methods with `sizeof(T)` in hand, named `Name_<member>` (the same instance-prefix convention as Vec and Map families). `char[:]` stays bare `CCSlice`. `len()`/`at(i)`/`sub(a,b)` count and index elements (`sub` returns the same instance type); `bytes()` returns an honestly byte-measured `CCSlice` (`len` scales by `sizeof(T)`). Scalar instances are pre-declared in `cc_slice.cch`; any other element type auto-instantiates at first use — the compiler splices the factory body after the element's definition. A hand-written declaration (`CC_DECL_SLICE(T)` for a single-token element, `CC_DECL_SLICE_SPEC(Name, T)` otherwise) is honored and suppresses the splice, for plain-C consumers and headers. Instance types are distinct in `_Generic`, so type-directed dispatch (e.g. dynamic-sink marshaling) sees the element type in any expression position.
 
 Erasure is a spelling: `xs.base` reads the raw element-counted core; passing an instance by value where `CCSlice` is expected autocasts through `bytes()` (scaled). Byte-oriented `CCSlice` methods remain reachable on instances through the typeview `as:` face retry; element-wise shadows win by name when declared. Two initializer forms lower specially:
 
@@ -6172,6 +6172,10 @@ compiler:
 The base factory must exist and return a non-empty C fragment. Each concrete
 name is emitted once per translation unit. Extensions may return an empty
 fragment.
+
+`T[:]` with a non-char element is sugar for `CCSlice::[T]` and uses the
+`CC_GENERIC_FACTORY(CCSlice, 1)` registered in `cc_slice.cch`. `char[:]`
+stays the erased `CCSlice` type and does not instantiate.
 
 **Rule (free-name member calls, normative).** For every registered family,
 `<snake(Family)>_<member>::[args](call-args)` lowers to

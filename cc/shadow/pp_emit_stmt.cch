@@ -1562,7 +1562,7 @@ static void shadow_register_mangled_ty(const char* ty) {
             }
             compact[n] = 0;
             n = shadow_strip_method_suffix(compact, n);
-            if (compact[0]) shadow_ginst_need(fam, compact);
+            if (compact[0]) shadow_ginst_need_from_ident(fam, compact);
             return;
         }
     }
@@ -1609,7 +1609,7 @@ static void shadow_register_mangled_ty(const char* ty) {
             }
             compact[n] = 0;
             n = shadow_strip_method_suffix(compact, n);
-            if (compact[0]) shadow_ginst_need(fam, compact);
+            if (compact[0]) shadow_ginst_need_from_ident(fam, compact);
         }
     }
 }

@@ -78,12 +78,10 @@ static uint64_t bench_local_ready_queue(void) {
             BenchWireReply reply;
             reply_init_inline(&reply, iter * BENCH_DEPTH + i);
             int submit_rc = 0;
+            int* submit_out = &submit_rc;
             BenchWireReply* slot =
-                (BenchWireReply*)cc_local_ready_queue_submit(&q,
-                                                            &reply,
-                                                            notify_signal,
-                                                            &sig,
-                                                            &submit_rc);
+                (BenchWireReply*)cc_local_ready_queue_submit(
+                    &q, &reply, notify_signal, &sig, submit_out);
             if (submit_rc <= 0 || !slot) bench_abort("local queue submit failed");
             reply_rebase_inline_ptr(slot);
         }
