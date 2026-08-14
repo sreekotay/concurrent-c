@@ -12,6 +12,7 @@ Two file-scope declarations attach policy to a type. They share the
 You do **not** need `@typehooks` to add a method. Declaring
 `static int box_bump(Box* b)` already installs `b.bump()` and `bptr->bump()`. Hooks are for
 lifecycle and for library-owned naming families.
+Methods come from ordinary functions. Naming-policy hooks (including stdlib’s `*`) are how whole families share a convention without the compiler special-casing type names — you can read the hook; it isn’t magic.
 
 Subject may be an exact type (`Box`), a pointer key (`MyRes*`), or a
 trailing-`*` family (`Fam_*`). Same match rule on both forms:
