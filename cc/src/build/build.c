@@ -325,7 +325,7 @@ static int parse_build_targets(const char* path,
         p += nread;
 
         // Count remaining src tokens.
-        const size_t max_src = 64;
+        enum { max_src = 64 };
         const char* srcs[max_src];
         size_t src_count = 0;
         while (*p) {

@@ -1629,8 +1629,8 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
     if (want_build) {
         eb_emit(&e, cc_gr_rules_manifest_parse_text(e.scratch, g->name));
         eb_emit(&e, cc_gr_rules_manifest_collect_text(e.scratch, g->name));
-    if (want_dom)
-        eb_emit(&e, cc_gr_rules_manifest_dom_text(e.scratch, g->name));
+        if (want_dom)
+            eb_emit(&e, cc_gr_rules_manifest_dom_text(e.scratch, g->name));
         eb_emit(&e, cc_gr_rules_manifest_nodes_text(e.scratch, g->name));
     }
     if (!want_match && !want_build)

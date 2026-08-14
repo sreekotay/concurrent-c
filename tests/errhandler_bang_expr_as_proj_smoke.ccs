@@ -1,0 +1,32 @@
+/*
+ * Expression-position `x = call() !>` must re-resolve @as projection per
+ * callee. An earlier CCIoError unwrap must not leave `.base` stuck on a later
+ * CCError Result (that is `struct CCError` — no `.base` member).
+ */
+#include <stdio.h>
+#include <ccc/std/io.h>
+#include <ccc/cc_slice.h>
+
+static int g_hit;
+
+static bool !>(CCIoError) io_ok(void) {
+    return cc_ok(true);
+}
+
+static CCSlice !>(CCError) always_err_slice(void) {
+    return cc_err(CC_ERROR(CC_ERR_PARSE, "nope"));
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        g_hit = 1 + (int)e.kind;
+        printf("g_hit=%d\n", g_hit);
+        return 0;
+    }
+    bool ok = io_ok() !>;
+    CCSlice s;
+    (void)ok;
+    s = always_err_slice() !>;
+    (void)s;
+    return 1;
+}

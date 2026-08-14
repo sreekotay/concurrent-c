@@ -3564,7 +3564,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         summary_out->obj_out_path = opt->obj_out_path;
         summary_out->bin_out_path = opt->bin_out_path;
     }
-    const int max_bindings = 128;
+    enum { max_bindings = 128 };
     CCConstBinding bindings[max_bindings];
     size_t count = 0;
     int load_err = cc__load_const_bindings(opt, bindings, &count);
@@ -4523,7 +4523,7 @@ static int ensure_cc_test_tool(const char* cc_bin, const char* target_part, cons
 
 static int run_build_mode(int argc, char** argv) {
     // cc build [step] [options] <input.ccs> [output] [-- args...]
-    const int max_cli = 32;
+    enum { max_cli = 32 };
     char* cli_names[max_cli];
     long long cli_values[max_cli];
     size_t cli_count = 0;

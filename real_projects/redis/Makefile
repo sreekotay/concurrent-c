@@ -23,7 +23,7 @@ $(REDIS_SRC_DIR)/src/redis-server: | $(OUT_DIR)
 		echo "Missing $(REDIS_SRC_DIR). Run 'make setup' first."; \
 		exit 1; \
 	fi
-	$(MAKE) -C $(REDIS_SRC_DIR) MALLOC=libc
+	$(MAKE) -C $(REDIS_SRC_DIR)/src MALLOC=libc
 
 $(REDIS_SRC_DIR)/src/redis-cli: $(REDIS_SRC_DIR)/src/redis-server
 	@true

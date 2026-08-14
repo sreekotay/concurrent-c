@@ -5,9 +5,11 @@
 //   - Compress each block concurrently (bounded by channel capacity)
 //   - Write compressed blocks in submission order
 //   - Uses system zlib via @cImport (fair benchmark comparison)
+//
+// Targets Zig 0.15 (std.Thread + std.fs). Zig 0.16's std.process.Init /
+// std.Io.Threaded surface is not used.
 
 const std = @import("std");
-const Io = std.Io;
 const c = @cImport({
     @cInclude("zlib.h");
 });
@@ -17,13 +19,10 @@ const CHAN_CAP: usize = 16;
 
 const gzip_header = [_]u8{ 0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0x00, 0x03 };
 
-// Services the contended mutex/condvar paths (futex wait/wake) and file IO.
-var g_io: Io = undefined;
-
-fn printFd(fd: c_int, comptime fmt: []const u8, args: anytype) void {
+fn printFd(fd: i32, comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
     const s = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    _ = std.c.write(fd, s.ptr, s.len);
+    _ = std.posix.write(fd, s) catch {};
 }
 
 const CompressedResult = struct {
@@ -35,20 +34,20 @@ const CompressedResult = struct {
 const Slot = struct {
     result: ?CompressedResult = null,
     ready: bool = false,
-    mu: Io.Mutex = .init,
-    cv: Io.Condition = .init,
+    mu: std.Thread.Mutex = .{},
+    cv: std.Thread.Condition = .{},
 
     fn setDone(self: *Slot) void {
-        self.mu.lockUncancelable(g_io);
-        defer self.mu.unlock(g_io);
+        self.mu.lock();
+        defer self.mu.unlock();
         self.ready = true;
-        self.cv.signal(g_io);
+        self.cv.signal();
     }
 
     fn waitDone(self: *Slot) void {
-        self.mu.lockUncancelable(g_io);
-        defer self.mu.unlock(g_io);
-        while (!self.ready) self.cv.waitUncancelable(g_io, &self.mu);
+        self.mu.lock();
+        defer self.mu.unlock();
+        while (!self.ready) self.cv.wait(&self.mu);
     }
 };
 
@@ -59,41 +58,41 @@ fn BoundedQueue(comptime T: type, comptime cap: usize) type {
         tail: usize = 0,
         len: usize = 0,
         closed: bool = false,
-        mu: Io.Mutex = .init,
-        not_full: Io.Condition = .init,
-        not_empty: Io.Condition = .init,
+        mu: std.Thread.Mutex = .{},
+        not_full: std.Thread.Condition = .{},
+        not_empty: std.Thread.Condition = .{},
 
         const Self = @This();
 
         fn push(self: *Self, item: T) void {
-            self.mu.lockUncancelable(g_io);
-            defer self.mu.unlock(g_io);
-            while (self.len == cap) self.not_full.waitUncancelable(g_io, &self.mu);
+            self.mu.lock();
+            defer self.mu.unlock();
+            while (self.len == cap) self.not_full.wait(&self.mu);
             self.buffer[self.tail] = item;
             self.tail = (self.tail + 1) % cap;
             self.len += 1;
-            self.not_empty.signal(g_io);
+            self.not_empty.signal();
         }
 
         fn pop(self: *Self) ?T {
-            self.mu.lockUncancelable(g_io);
-            defer self.mu.unlock(g_io);
+            self.mu.lock();
+            defer self.mu.unlock();
             while (self.len == 0) {
                 if (self.closed) return null;
-                self.not_empty.waitUncancelable(g_io, &self.mu);
+                self.not_empty.wait(&self.mu);
             }
             const item = self.buffer[self.head];
             self.head = (self.head + 1) % cap;
             self.len -= 1;
-            self.not_full.signal(g_io);
+            self.not_full.signal();
             return item;
         }
 
         fn close(self: *Self) void {
-            self.mu.lockUncancelable(g_io);
-            defer self.mu.unlock(g_io);
+            self.mu.lock();
+            defer self.mu.unlock();
             self.closed = true;
-            self.not_empty.broadcast(g_io);
+            self.not_empty.broadcast();
         }
     };
 }
@@ -159,33 +158,33 @@ fn worker(block_buf: []u8, data_len: usize, slot: *Slot, alloc: std.mem.Allocato
     slot.setDone();
 }
 
-fn consumerThread(queue: *SlotQueue, out_file: Io.File, alloc: std.mem.Allocator) void {
+fn consumerThread(queue: *SlotQueue, out_file: std.fs.File, alloc: std.mem.Allocator) void {
     while (queue.pop()) |slot| {
         slot.waitDone();
         if (slot.result) |result| {
-            out_file.writeStreamingAll(g_io, result.data) catch {};
+            out_file.writeAll(result.data) catch {};
             alloc.free(result.buf);
         }
         alloc.destroy(slot);
     }
 }
 
-// Fill `buf` from `file`, returning the number of bytes read (0 at EOF).
-fn readFull(file: Io.File, buf: []u8) usize {
+fn readFull(file: std.fs.File, buf: []u8) usize {
     var n: usize = 0;
     while (n < buf.len) {
-        const amt = file.readStreaming(g_io, &.{buf[n..]}) catch break;
+        const amt = file.read(buf[n..]) catch break;
+        if (amt == 0) break;
         n += amt;
     }
     return n;
 }
 
 fn compressFile(in_path: []const u8, out_path: []const u8, alloc: std.mem.Allocator) !void {
-    const in_file = try Io.Dir.cwd().openFile(g_io, in_path, .{});
-    defer in_file.close(g_io);
+    const in_file = try std.fs.cwd().openFile(in_path, .{});
+    defer in_file.close();
 
-    const out_file = try Io.Dir.cwd().createFile(g_io, out_path, .{});
-    defer out_file.close(g_io);
+    const out_file = try std.fs.cwd().createFile(out_path, .{});
+    defer out_file.close();
 
     var queue: SlotQueue = .{};
 
@@ -213,20 +212,17 @@ fn compressFile(in_path: []const u8, out_path: []const u8, alloc: std.mem.Alloca
     con.join();
 }
 
-pub fn main(init: std.process.Init.Minimal) !void {
+pub fn main() !void {
     const alloc = std.heap.c_allocator;
+    const args = try std.process.argsAlloc(alloc);
+    defer std.process.argsFree(alloc, args);
 
-    var threaded: Io.Threaded = .init(std.heap.page_allocator, .{});
-    defer threaded.deinit();
-    g_io = threaded.io();
-
-    const argv = init.args.vector;
-    if (argv.len < 2) {
-        printFd(2, "Usage: {s} <file>\n", .{std.mem.span(argv[0])});
+    if (args.len < 2) {
+        printFd(2, "Usage: {s} <file>\n", .{args[0]});
         std.process.exit(1);
     }
 
-    const in_path = std.mem.span(argv[1]);
+    const in_path = args[1];
     const out_path = try std.fmt.allocPrint(alloc, "{s}.gz", .{in_path});
     defer alloc.free(out_path);
 
