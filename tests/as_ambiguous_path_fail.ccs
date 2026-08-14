@@ -1,21 +1,33 @@
-/* Two @as paths to CCFile from one outer type — ill-formed at the struct. */
+/* Two as: paths to CCFile from one outer type — ill-formed at the struct. */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
 typedef struct {
-    CCFile file @as;
+    CCFile file;
     int tag;
 } AsPathMidA;
 
+@typeview on AsPathMidA {
+    as: file;
+};
+
 typedef struct {
-    CCFile file @as;
+    CCFile file;
     int tag;
 } AsPathMidB;
 
+@typeview on AsPathMidB {
+    as: file;
+};
+
 typedef struct {
-    AsPathMidA a @as;
-    AsPathMidB b @as;
+    AsPathMidA a;
+    AsPathMidB b;
 } AsPathDupOuter;
+
+@typeview on AsPathDupOuter {
+    as: a, b;
+};
 
 int main(void) {
     AsPathDupOuter o = {0};

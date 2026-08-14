@@ -132,6 +132,37 @@ int main(void) {
         if (Reply_parse(bomb, n, &arena, &r)) { printf("FAIL: depth bomb accepted\n"); return 1; }
     }
 
+    /* int bind: signed 64-bit range; overflow is PARSE, not wrap */
+    {
+        Reply r;
+        const char* mx = ":9223372036854775807\r\n";
+        if (!Reply_parse(mx, strlen(mx), &arena, &r) || r.kind != Reply_integer) {
+            printf("FAIL: LLONG_MAX\n"); return 1; }
+        if (r.kind == .integer) {
+            if (r.integer.v != 9223372036854775807LL) { printf("FAIL: LLONG_MAX val\n"); return 1; }
+        }
+        const char* mn = ":-9223372036854775808\r\n";
+        if (!Reply_parse(mn, strlen(mn), &arena, &r) || r.kind != Reply_integer) {
+            printf("FAIL: LLONG_MIN\n"); return 1; }
+        if (r.kind == .integer) {
+            if (r.integer.v != (-9223372036854775807LL - 1)) { printf("FAIL: LLONG_MIN val\n"); return 1; }
+        }
+        const char* over = ":9223372036854775808\r\n";
+        if (Reply_parse(over, strlen(over), &arena, &r)) {
+            printf("FAIL: LLONG_MAX+1 accepted\n"); return 1; }
+        const char* under = ":-9223372036854775809\r\n";
+        if (Reply_parse(under, strlen(under), &arena, &r)) {
+            printf("FAIL: LLONG_MIN-1 accepted\n"); return 1; }
+        const char* wrap = ":99999999999999999999\r\n";
+        if (Reply_parse(wrap, strlen(wrap), &arena, &r)) {
+            printf("FAIL: 20-nines wrap\n"); return 1; }
+        const char* bulk = "$99999999999999999999\r\nx";
+        size_t pos = 0;
+        bool !>(CCError) t = Reply_try_read(bulk, strlen(bulk), &pos, &arena, &r);
+        if (!t.is_err() || t.error().kind != CC_ERR_PARSE || pos != 0) {
+            printf("FAIL: overflow bulk not PARSE\n"); return 1; }
+    }
+
     /* DEFAULT arm: framed dispatches on '*', anything else is inline */
     {
         Cmd c;

@@ -10,9 +10,15 @@ Recipes: [examples/README.md](../examples/README.md#learning-path-recommended-or
 [recipe_defer_cleanup.ccs](../examples/recipe_defer_cleanup.ccs) · [recipe_unwrap_destroy_forms.ccs](../examples/recipe_unwrap_destroy_forms.ccs) · Spec §5.1 / §4.2.2 / §2.2
 
 `@destroy` attaches cleanup to **successful declaration construction** — `@defer`
-sugar on the binding (same scope-exit LIFO ledger). Bodyless `@destroy` runs the
-type’s registered destroy; a block is an explicit defer body. After `!>`,
-construction succeeded only if the unwrap did (no binding → no destroy).
+sugar on the binding (same scope-exit LIFO ledger). After `!>`, construction
+succeeded only if the unwrap did (no binding → no destroy).
+
+The destroy chain is: registered pre-destroy → `@destroy { body }` if present
+→ registered destroy → each **value** field whose type has a hook,
+last-declared to first, transitively. Pointer, array, and function-pointer
+fields are omitted. Bodyless `@destroy` and `x.destroy()` emit that list
+(without a call-site body). An empty chain is a compile error; a block body
+alone is enough to make it non-empty.
 
 | Bind | Meaning |
 |------|---------|

@@ -230,7 +230,7 @@ static inline CCSlice __cc_vec_generic_as_slice(__CCVecGeneric *v) {
 
 /* Typed slice view: `as_slice` returns the element's slice instance
  * (element-count len; erased contexts go through the instance's scaled
- * `@as` autocast, which converts to bytes). */
+ * `as:` autocast, which converts to bytes). */
 #define CC_VEC_DECL_ARENA_TSLICE(T, Name, SliceName)                              \
     CC_VEC_DECL_ARENA_CORE(T, Name)                                               \
     static inline SliceName Name##_as_slice(const Name *v) {                      \

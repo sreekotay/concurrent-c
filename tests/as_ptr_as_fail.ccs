@@ -1,11 +1,15 @@
-/* Pointer @as fields are ill-formed (value embeds only). */
+/* Pointer as: fields are ill-formed (value embeds only). */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
 typedef struct {
-    CCFile *fp @as;
+    CCFile *fp;
     int tag;
 } AsPtrWrap;
+
+@typeview on AsPtrWrap {
+    as: fp;
+};
 
 int main(void) {
     AsPtrWrap w = {0};

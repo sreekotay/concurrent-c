@@ -1,9 +1,13 @@
 #include <ccc/std/prelude.cch>
 
 typedef struct {
-    CCFile file @as;
+    CCFile file;
     int tag;
 } AsCommentMiss;
+
+@typeview on AsCommentMiss {
+    as: file;
+};
 
 /* Missing method across a comment gap must still be a UFCS diagnostic —
  * not a host "no member" that hides the pass. */

@@ -1840,12 +1840,12 @@ static void shadow_collect_binds_node(AstNode* st) {
         return;
     }
     /* Register typedef aliases before var binds that use them (incl.
-     * ConnEnc → Conn_Restrict_Encode* so @restricted checks stay transparent). */
+     * ConnEnc → Conn_Restrict_Encode* so @typeview checks stay transparent). */
     if (st->kind == AST_TYPEDEF_INT && st->a[0] && st->b[0]) {
         shadow_register_mangled_ty(st->b);
         shadow_td_alias_register(st->a, st->b);
     }
-    if (st->kind == AST_AT_STMT && strcmp(st->a, "restricted") == 0 &&
+    if (st->kind == AST_AT_STMT && strcmp(st->a, "typeview") == 0 &&
         st->e[0]) {
         const char* hash = strchr(st->e, '#');
         if (hash && hash[1]) {
@@ -2143,7 +2143,7 @@ static int shadow_push_fn_binds(AstNode* fn) {
     shadow_collect_binds_node(fn);
     g_shadow_collect_cap_deep = 0;
     g_shadow_collect_fn_locals = 0;
-    /* Unnamed @restricted: first-param Base/Base* → trusted body. */
+    /* Unnamed @typeview: first-param Base/Base* → trusted body. */
     g_shadow_restrict_trusted_base[0] = 0;
     if (fn) {
         if (fn->kind == AST_STATIC_FN || fn->kind == AST_ASYNC_FN)
@@ -3680,8 +3680,8 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                 if (strcmp(g_shadow_as[ai].outer, vty) != 0) continue;
                 if (strchr(g_shadow_as[ai].field, '.')) continue; /* transitive */
                 if (!as_n)
-                    fprintf(stderr, "@as retry also failed\n");
-                fprintf(stderr, "@as field: %s %s\n", g_shadow_as[ai].target,
+                    fprintf(stderr, "as: retry also failed\n");
+                fprintf(stderr, "as: field: %s %s\n", g_shadow_as[ai].target,
                         g_shadow_as[ai].field);
                 as_n++;
             }
@@ -4348,7 +4348,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             shadow_emit_text_ufcs(lowered, sizeof(lowered), st->c, NULL);
             return cemit_fmt(out, "%s%s;\n", indent, lowered);
         }
-        if (strcmp(st->a, "restricted") == 0 && st->d[0]) {
+        if (strcmp(st->a, "typeview") == 0 && st->d[0]) {
             /* Named: typedef Base Base_Restrict_Mode (+ optional alias).
              * Unnamed: allow-list on Base itself — no parallel typedef. */
             char mangled[160];
@@ -5044,7 +5044,7 @@ static int shadow_emit_one_destroy(AstNode* st, CEmit* out, ShadowCtx* ctx,
         }
         /* Non-bare: user @destroy { … } body already emitted above. */
     } else if (st->kind == AST_VAL_DESTROY) {
-        /* draft_as §3: pre → @destroy { } body → destroy hook → as: embeds. */
+        /* draft_as §3: pre → @destroy { } body → destroy hook → value embeds. */
         int has_body = !bare && (ndbody || nbody);
         if (has_body) {
             const ShadowDestroyHook* dh = shadow_destroy_hooks_for(ty);
@@ -5074,15 +5074,16 @@ static int shadow_emit_one_destroy(AstNode* st, CEmit* out, ShadowCtx* ctx,
             if (!cemit_fmt(out, "%sCCString_destroy(&%s);\n", body_ind, name))
                 ok = 0;
         } else {
-            /* Registered deltas + recursive @as flatten. skip_pre when the
-             * user body already sat between this type's pre and hook. */
+            /* Registered deltas + recursive value-embed flatten. skip_pre
+             * when the user body already sat between this type's pre and
+             * hook. */
             char chain[768];
             size_t bo = 0;
             int emitted;
             char dhook[96];
             chain[0] = 0;
-            emitted = shadow_as_destroy_append(chain, &bo, sizeof(chain), ty,
-                                              name, has_body);
+            emitted = shadow_embed_destroy_append(chain, &bo, sizeof(chain), ty,
+                                                 name, has_body);
             if (!emitted) {
                 snprintf(dhook, sizeof(dhook), "%s_destroy", ty);
                 if (shadow_ufn_exists(dhook)) {

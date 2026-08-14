@@ -1,13 +1,15 @@
 # JSON serdes (engine + golden)
 
-**Production path:** `@grammar(rules)` / `@grammar(schema)` over the shared
+**Example path:** `@grammar(rules)` / `@grammar(schema)` over the shared
 factory in this directory (`json.rules` recognition, `json_dom.rules` DOM
-specialization, `json_codec.cch` for `jstr` / `jstr_enc`). Benches:
-`./bench.sh -g` (engine tiers), `-d` (shaped DOM), `-w` (write).
+specialization, `json_codec.cch` for `jstr` / `jstr_enc`). This is an
+oracle-matched bench, not stdlib JSON and not RFC 8259: the fast string scan
+accepts raw `U+0000`–`U+001F` the way `json.h` does. Benches: `./bench.sh -g`
+(engine tiers), `-d` (shaped DOM), `-w` (write).
 
 **Golden reference:** `json.h` is the hand-lowered C a rules engine would emit
 for a JSON DOM — kept legible so the lowering stays inspectable. It is the
-oracle for borrow/materialize splits, not the product parser.
+oracle for borrow/materialize splits, not a product parser.
 
 ## What it demonstrates
 

@@ -25,7 +25,7 @@ CCArena a = @create(megabytes(2)) @destroy;
 char dst_path[512];
 snprintf(dst_path, sizeof(dst_path), "%s/out_of_tree.ccs", dir);
 
-/* File ops + cmd.output (CCIoError) share one CCError handler via @as. */
+/* File ops + cmd.output (CCIoError) share one CCError handler via as:. */
 @errhandler(CCError e) {
     CCString em = @string(
         `FAIL out-of-tree-smoke: ${cc_io_error_str(cc_io_error(e))} (kind=${(int)e.kind})`, &a);

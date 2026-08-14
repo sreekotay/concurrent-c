@@ -4,7 +4,11 @@
 #include <stdio.h>
 
 typedef struct Core { int v; } Core;
-typedef struct Shell { Core core @as; int tag; } Shell;
+typedef struct Shell { Core core; int tag; } Shell;
+@typeview on Shell {
+    as: core;
+};
+
 
 /* f.is_as predicate *inside* the emit template after for-subst. */
 @comptime for (f in type_of(Shell).fields) {

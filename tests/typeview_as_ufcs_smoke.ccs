@@ -1,4 +1,4 @@
-/* @typeview on T { as: field; } ≡ field @as — UFCS retry via embed. */
+/* @typeview on T { as: field; } ≡ field as: — UFCS retry via embed. */
 #include <ccc/std/prelude.cch>
 #include <assert.h>
 #include <stdio.h>

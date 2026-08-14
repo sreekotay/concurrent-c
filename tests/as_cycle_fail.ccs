@@ -1,11 +1,15 @@
-/* Cyclic @as graph must fail loudly (self-embed value edge). */
+/* Cyclic as: graph must fail loudly (self-embed value edge). */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
 typedef struct Node {
     int tag;
-    struct Node nest @as;
+    struct Node nest;
 } Node;
+
+@typeview on Node {
+    as: nest;
+};
 
 int main(void) {
     Node n = {0};

@@ -24,7 +24,7 @@ Left open on purpose: redis-style pool handles are protocol lifetime, not
 message ownership. Closing it needs an allowlist/brand we are not taking.
 
 **Closed this round:** writable slice `.len`
-([CVE-2015-7547](corpus/CVE-2015-7547/)) — unnamed `@restricted` on the
+([CVE-2015-7547](corpus/CVE-2015-7547/)) — unnamed `@typeview` on the
 slice family denies `.len` / `.ptr` stores at ordinary sites
 (`slice-len-write-ban`). Grow returns a new `char[:]`; the desync
 assignment is ill-formed.

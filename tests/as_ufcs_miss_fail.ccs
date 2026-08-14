@@ -1,11 +1,15 @@
-/* Loud UFCS miss after @as retry — must name the embed, not TCC-gibberish. */
+/* Loud UFCS miss after as: retry — must name the embed, not TCC-gibberish. */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
 typedef struct {
-    CCFile file @as;
+    CCFile file;
     int tag;
 } AsMissWrap;
+
+@typeview on AsMissWrap {
+    as: file;
+};
 
 int main(void) {
     AsMissWrap w = {0};

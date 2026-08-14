@@ -1223,7 +1223,7 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
                         if (as_diag == CC_ERRHANDLER_AS_AMBIG) {
                             snprintf(msg, sizeof(msg),
                                      "ambiguous '@errhandler' for error type '%s': "
-                                     "multiple @as faces match in-scope handlers",
+                                     "multiple as: faces match in-scope handlers",
                                      err_type);
                             cc_pass_error_cat(f, errl, 1, CC_ERR_SYNTAX, "%s", msg);
                             cc_pass_note(f, errl, 1,
@@ -1231,7 +1231,7 @@ static int cc__rewrite_err_core(const CCVisitorCtx* ctx, const char* in_src, siz
                                          err_type);
                         } else if (as_diag == CC_ERRHANDLER_AS_CYCLE) {
                             snprintf(msg, sizeof(msg),
-                                     "cyclic @as path while matching '@errhandler' for error type '%s'",
+                                     "cyclic as: path while matching '@errhandler' for error type '%s'",
                                      err_type);
                             cc_pass_error_cat(f, errl, 1, CC_ERR_SYNTAX, "%s", msg);
                         } else {

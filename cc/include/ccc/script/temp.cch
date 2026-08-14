@@ -3,10 +3,10 @@
  *
  *   CCTempFile tmp = cc_temp_file(&a) !> @destroy;
  *
- * CCTempFile is-a CCFile via `@typeview … { as: file; }`. Destroy delta via
- * `@typehooks … { .destroy = … }` (`cc_temp_file_unlink`); `cc_temp_file_destroy`
- * is the hand-written full chain for raw C callers. Bodyless `@destroy` /
- * `.destroy()` expand to unlink then `cc_file_close(&tmp.file)`.
+ * `@typeview … { as: file; }` forwards CCFile methods. Bodyless `@destroy`
+ * / `.destroy()` run `cc_temp_file_unlink` then `cc_file_close(&tmp.file)`
+ * (`file` is a CCFile value field with a destroy hook).
+ * `cc_temp_file_destroy` is the same chain for raw C callers.
  */
 #ifndef CC_SCRIPT_TEMP_H
 #define CC_SCRIPT_TEMP_H

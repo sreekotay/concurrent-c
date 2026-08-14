@@ -414,9 +414,20 @@ static size_t cc__ud_tighten_type_start(const char* s, size_t type_a, size_t nam
     return k;
 }
 
-/* Append reverse-order @as destroy calls, transitively. Path is built as
+/* Append reverse-order value-embed destroy calls, transitively. Path is
  * `name.field.nested` (value root) or `name->field.nested` (pointer root).
- * Returns 0 ok, -1 OOM/error, -3 @as cycle. */
+ * Pointer / array / fn-ptr fields are skipped. `as:` is not required.
+ * Returns 0 ok, -1 OOM/error, -3 type cycle on the recursion stack. */
+static int cc__ud_field_type_is_value_embed(const char* field_type) {
+    size_t i;
+    if (!field_type || !field_type[0]) return 0;
+    for (i = 0; field_type[i]; i++) {
+        char c = field_type[i];
+        if (c == '*' || c == '[' || c == '(') return 0;
+    }
+    return 1;
+}
+
 static int cc__ud_append_as_destroy_chain_rec(char** out, size_t* ol, size_t* oc,
                                               CCSymbolTable* symbols,
                                               const char* type_key,
@@ -426,7 +437,7 @@ static int cc__ud_append_as_destroy_chain_rec(char** out, size_t* ol, size_t* oc
                                               const char** visited, size_t visited_n,
                                               size_t visited_cap) {
     CCTypeRegistry* reg;
-    size_t nas;
+    size_t nf;
     size_t k;
     size_t vi;
     if (!out || !type_key || !root_name || root_len == 0) return 0;
@@ -437,8 +448,8 @@ static int cc__ud_append_as_destroy_chain_rec(char** out, size_t* ol, size_t* oc
     }
     if (visited_n >= visited_cap) return -1;
     visited[visited_n] = type_key;
-    nas = cc_type_registry_as_field_count(reg, type_key);
-    for (k = nas; k > 0; k--) {
+    nf = cc_type_registry_field_count(reg, type_key);
+    for (k = nf; k > 0; k--) {
         const char* field_name = NULL;
         const char* field_type = NULL;
         const char* pre = NULL;
@@ -447,13 +458,15 @@ static int cc__ud_append_as_destroy_chain_rec(char** out, size_t* ol, size_t* oc
         char next_suffix[256];
         int f_had_ptr = 0;
         int sub;
-        if (cc_type_registry_as_field_at(reg, type_key, k - 1,
-                                         &field_name, &field_type) != 0)
+        if (cc_type_registry_field_at(reg, type_key, k - 1,
+                                      &field_name, &field_type) != 0)
             continue;
         if (!field_name || !field_type) continue;
+        if (!cc__ud_field_type_is_value_embed(field_type)) continue;
         if (cc__ud_normalize_type_name(field_type, 0, strlen(field_type),
                                        fkey, sizeof(fkey), &f_had_ptr) != 0)
             snprintf(fkey, sizeof(fkey), "%s", field_type);
+        if (f_had_ptr) continue;
         if (path_suffix && path_suffix[0])
             snprintf(next_suffix, sizeof(next_suffix), "%s.%s", path_suffix, field_name);
         else
@@ -519,7 +532,7 @@ static int cc__ud_type_has_as_destroy_hooks_rec(const char* type_key,
                                                 size_t visited_n,
                                                 size_t visited_cap) {
     CCTypeRegistry* reg;
-    size_t nas;
+    size_t nf;
     size_t i;
     size_t vi;
     if (!type_key || !g_ud_symbols) return 0;
@@ -530,19 +543,22 @@ static int cc__ud_type_has_as_destroy_hooks_rec(const char* type_key,
     }
     if (visited_n >= visited_cap) return 0;
     visited[visited_n] = type_key;
-    nas = cc_type_registry_as_field_count(reg, type_key);
-    for (i = 0; i < nas; i++) {
+    nf = cc_type_registry_field_count(reg, type_key);
+    for (i = 0; i < nf; i++) {
         const char* field_name = NULL;
         const char* field_type = NULL;
         const char* pre = NULL;
         const char* post = NULL;
         char fkey[256];
-        if (cc_type_registry_as_field_at(reg, type_key, i, &field_name, &field_type) != 0)
+        int f_had_ptr = 0;
+        if (cc_type_registry_field_at(reg, type_key, i, &field_name, &field_type) != 0)
             continue;
         if (!field_type) continue;
+        if (!cc__ud_field_type_is_value_embed(field_type)) continue;
         if (cc__ud_normalize_type_name(field_type, 0, strlen(field_type),
-                                       fkey, sizeof(fkey), NULL) != 0)
+                                       fkey, sizeof(fkey), &f_had_ptr) != 0)
             snprintf(fkey, sizeof(fkey), "%s", field_type);
+        if (f_had_ptr) continue;
         (void)cc_symbols_lookup_type_pre_destroy_call(g_ud_symbols, fkey, &pre);
         (void)cc_symbols_lookup_type_destroy_call(g_ud_symbols, fkey, &post);
         if (!pre && !post) {
@@ -726,7 +742,7 @@ int cc__rewrite_unwrap_destroy_suffix(const char* src,
     *out_buf = NULL;
     *out_len = 0;
 
-    /* Ensure @as fields are visible for destroy chaining (canonicalize-time
+    /* Ensure struct fields are visible for destroy chaining (canonicalize-time
      * rewrite runs before visit_codegen's usual field scan). Include bodies
      * stay as `#include`, so also ingest registered .cch headers. */
     {
@@ -861,7 +877,7 @@ int cc__rewrite_unwrap_destroy_suffix(const char* src,
             }
         }
 
-        /* Bodyless `@destroy;` needs outer hooks and/or @as-field hooks. */
+        /* Bodyless `@destroy;` needs outer hooks and/or value-embed hooks. */
         if (!have_body && !pre_hook && !post_hook && !has_as_hooks &&
             !release_ctx[0]) {
             int line = 1, col = 1;
@@ -968,11 +984,11 @@ int cc__rewrite_unwrap_destroy_suffix(const char* src,
                 const char* f = input_path ? input_path : "<input>";
                 cc__ud_offset_to_line_col(src, i, &line, &col);
                 fprintf(stderr,
-                        "%s:%d:%d: error: @destroy: cyclic @as embed graph involving "
+                        "%s:%d:%d: error: @destroy: cyclic value-embed destroy graph involving "
                         "type `%s`\n",
                         f, line, col, type_key);
                 fprintf(stderr,
-                        "%s:%d:%d: note: each @as edge must form a DAG; break the "
+                        "%s:%d:%d: note: each value embed must form a DAG; break the "
                         "cycle or drop one embed\n",
                         f, line, col);
                 free(out);

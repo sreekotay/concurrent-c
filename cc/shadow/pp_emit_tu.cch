@@ -474,7 +474,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
     }
     /* AST+type: one normalize/bind walk before emit (not per-expr string soup). */
     shadow_collect_binds(items, n);
-    /* @restricted modes before UFCS/field checks (erased typedefs emit later).
+    /* @typeview modes before UFCS/field checks (erased typedefs emit later).
      * Builtins first (slice family); TU decls may redeclare if compatible. */
     shadow_restrict_register_builtins();
     shadow_restrict_register_from_items(items, n);

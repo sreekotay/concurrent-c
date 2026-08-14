@@ -1,9 +1,9 @@
-/* Anonymous @as is ill-formed. */
+/* Field `@as` is removed; use `@typeview on T { as: field; }`. */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
 typedef struct {
-    CCFile @as;
+    CCFile file @as;
     int x;
 } AnonOuter;
 

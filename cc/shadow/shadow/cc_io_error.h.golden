@@ -2,10 +2,11 @@
 #pragma once
 #include <stddef.h>
 /*
- * I/O error type: CCError general face (@as) + os_code payload.
+ * I/O error type: CCError general face (`@typeview … { as: base; }`) +
+ * os_code payload.
  *
  * CCIoError is usable as CCError through `base` — same preference order as
- * UFCS (@errhandler exact E, else unique @as path to handler E).
+ * UFCS / @errhandler / cc_err (exact E, else unique as-face path to F).
  */
 
 #include <stdint.h>
@@ -29,7 +30,7 @@
 #line 25 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_io_error.cch"
 typedef struct {
     #line 27 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_io_error.cch"
-    CCError base /*@as*/;
+    CCError base;
     #line 28 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_io_error.cch"
     int32_t os_code;
 } CCIoError;
@@ -39,7 +40,7 @@ typedef struct {
 static inline CCIoError cc_io_error_os(CCErrorKind kind, int os_code) {
     #line 32 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_io_error.cch"
     CCIoError e;
-    /* Face must carry a printable message: @as projection to CCError drops
+    /* Face must carry a printable message: as-face projection to CCError drops
      * os_code, and the script default handler prints the face alone. */
     #line 35 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_io_error.cch"
     e.base = CC_ERROR(kind, cc_error_kind_str(kind));
@@ -57,7 +58,7 @@ static inline CCIoError __cc_io_error_from_kind(CCErrorKind kind) {
 }
 
 
-/* Copy a generic CCError into the @as face (os_code = 0). */
+/* Copy a generic CCError into the as: face (os_code = 0). */
 #line 45 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_io_error.cch"
 static inline CCIoError __cc_io_error_from_cc_error(CCError e) {
     #line 46 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_io_error.cch"
@@ -71,7 +72,7 @@ static inline CCIoError __cc_io_error_from_cc_error(CCError e) {
 }
 
 
-/* `cc_io_error(x)` — CCErrorKind construct, or CCError → Io (@as face). */
+/* `cc_io_error(x)` — CCErrorKind construct, or CCError → Io (as: face). */
 
 #line 55 "/Users/skotay/Documents/code/concurrent-c/cc/include/ccc/cc_io_error.cch"
 static inline CCIoError cc_io_from_errno(int err) {

@@ -5,9 +5,13 @@
 #include "error_face_frag.cch"
 
 typedef struct {
-    CCError base @as;
+    CCError base;
     int32_t os_code;
 } CCIoError;
+
+@typeview on CCIoError {
+    as: base;
+};
 
 static inline CCIoError cc_io_error_os(CCErrorKind kind, int os_code) {
     CCIoError e;

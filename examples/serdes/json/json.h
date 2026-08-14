@@ -24,7 +24,8 @@
  * Nodes allocate with cc_arena_alloc_local (single-owner request tier); nodes and
  * materialized strings share one arena, reset wholesale between parses.
  *
- * Host-C oracle: include lowered <ccc/*.h> (not raw .cch — those carry @as).
+ * Host-C oracle: include lowered <ccc/*.h> (not raw .cch — those carry
+ * Concurrent-C surface).
  * Link with out/runtime/arena_state.c (defines cc_arena_prov_counter + FFC_IMPL).
  */
 #ifndef CC_JSON_H
@@ -154,9 +155,19 @@ static JsonStatus json__string(JsonParser* p, const char** bytes, uint64_t* len,
               case 'b':dst[o++]='\b';break; case 'f':dst[o++]='\f';break;
               case 'u':{ unsigned cp=0; for(int h=0;h<4;h++){char x=p->src[++k];cp<<=4;
                   cp|=(x>='0'&&x<='9')?x-'0':(x|32)-'a'+10;}
+                  if(cp>=0xD800&&cp<=0xDBFF){
+                      if(k+6>=i||p->src[k+1]!='\\'||p->src[k+2]!='u') return JSON_BAD;
+                      unsigned lo=0; k+=2;
+                      for(int h=0;h<4;h++){char x=p->src[++k];lo<<=4;
+                          lo|=(x>='0'&&x<='9')?x-'0':(x|32)-'a'+10;}
+                      if(lo<0xDC00||lo>0xDFFF) return JSON_BAD;
+                      cp=0x10000+((cp-0xD800)<<10)+(lo-0xDC00);
+                  } else if(cp>=0xDC00&&cp<=0xDFFF) return JSON_BAD;
                   if(cp<0x80)dst[o++]=(char)cp;
                   else if(cp<0x800){dst[o++]=(char)(0xC0|(cp>>6));dst[o++]=(char)(0x80|(cp&0x3F));}
-                  else{dst[o++]=(char)(0xE0|(cp>>12));dst[o++]=(char)(0x80|((cp>>6)&0x3F));dst[o++]=(char)(0x80|(cp&0x3F));}
+                  else if(cp<0x10000){dst[o++]=(char)(0xE0|(cp>>12));dst[o++]=(char)(0x80|((cp>>6)&0x3F));dst[o++]=(char)(0x80|(cp&0x3F));}
+                  else{dst[o++]=(char)(0xF0|(cp>>18));dst[o++]=(char)(0x80|((cp>>12)&0x3F));
+                       dst[o++]=(char)(0x80|((cp>>6)&0x3F));dst[o++]=(char)(0x80|(cp&0x3F));}
                   break; }
               default:dst[o++]=e;break; } }
         *bytes=dst; *len=o; *cow=1;                     /* MATERIALIZE */

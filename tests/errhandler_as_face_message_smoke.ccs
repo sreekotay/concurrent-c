@@ -1,5 +1,5 @@
 /*
- * CCIoError @as CCError: face.message is filled so a CCError-only handler
+ * CCIoError as: CCError: face.message is filled so a CCError-only handler
  * can print without the Io vocabulary (cc_io_error_str).
  */
 #include <ccc/std/io.h>

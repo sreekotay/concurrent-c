@@ -1,18 +1,26 @@
-/* Transitive @as: Mid embeds CCFile; Outer embeds Mid — UFCS, destroy, autocast. */
+/* Transitive as: Mid embeds CCFile; Outer embeds Mid — UFCS, destroy, autocast. */
 #include <ccc/std/prelude.cch>
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
 
 typedef struct {
-    CCFile file @as;
+    CCFile file;
     int mid_tag;
 } AsMid;
 
+@typeview on AsMid {
+    as: file;
+};
+
 typedef struct {
-    AsMid mid @as;
+    AsMid mid;
     int outer_tag;
 } AsOuter;
+
+@typeview on AsOuter {
+    as: mid;
+};
 
 static int g_mid_delta;
 static int g_outer_delta;
@@ -50,7 +58,7 @@ int main(void) {
     o.mid.mid_tag = 2;
     assert(o.open(CC_SLICE_LIT("tmp/as_transitive_smoke.txt"), "w") == 0);
 
-    /* UFCS through two @as hops */
+    /* UFCS through two as: hops */
     CCSlice msg = CC_SLICE_LIT("nested\n");
     CCRes(size_t, CCIoError) wr = o.write(msg);
     assert(cc_is_ok(wr));

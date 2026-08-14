@@ -1,6 +1,6 @@
 /* UFCS method chains: a call-expression receiver normalizes onto a
  * typed temporary in a statement expression, so every rail applies to
- * each link — family members, extensions, the @as retry, the strict
+ * each link — family members, extensions, the as: retry, the strict
  * ladder. Covers: slice method->method (and deeper), method->field,
  * mixed method->method->field, vec as_slice chains, scalar-family
  * chains, and chains in expression position. */

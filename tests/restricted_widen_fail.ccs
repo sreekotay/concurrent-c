@@ -7,13 +7,13 @@ typedef struct Conn {
     int out_len;
 } Conn;
 
-@restricted Encode on Conn {
+@typeview Encode on Conn {
     r: out_len;
 }
 
 static void take_full(Conn* c) { (void)c; }
 
-static void use_enc(@restricted(Encode) Conn* enc) {
+static void use_enc(@typeview(Encode) Conn* enc) {
     take_full(enc); /* ill-formed: widen */
 }
 

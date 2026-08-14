@@ -1374,8 +1374,8 @@ static inline char* cc_rewrite_as_attr_to_comment(const char* src, size_t n) {
     return out;
 }
 
-/* Erase `@typeview` / `@restricted` define blocks from lowered `.h` text.
- * Faces and allow-lists are Concurrent-C AST facts (like `@as`); host C must
+/* Erase `@typeview` define blocks from lowered `.h` text.
+ * Faces and allow-lists are Concurrent-C AST facts (like `as:`); host C must
  * not see them. Skips comments and string/char literals. Forms:
  *   @typeview on Base { … };
  *   @typeview Mode on Base { … };
@@ -1455,13 +1455,11 @@ static inline char* cc_strip_typeview_blocks(const char* src, size_t n) {
             }
             continue;
         }
-        /* Sugar: @typeview(Mode) Base  /  @restricted(Mode) Base */
+        /* Sugar: @typeview(Mode) Base */
         if (src[i] == '@' &&
-            ((i + 9 <= n && memcmp(src + i, "@typeview", 9) == 0 &&
-              (i + 9 == n || !cc_is_ident_char(src[i + 9]))) ||
-             (i + 11 <= n && memcmp(src + i, "@restricted", 11) == 0 &&
-              (i + 11 == n || !cc_is_ident_char(src[i + 11]))))) {
-            size_t kw = (src[i + 1] == 't') ? 9 : 11;
+            i + 9 <= n && memcmp(src + i, "@typeview", 9) == 0 &&
+            (i + 9 == n || !cc_is_ident_char(src[i + 9]))) {
+            size_t kw = 9;
             size_t p = i + kw;
             size_t mode_l, mode_r, base_l, base_r;
             while (p < n && (src[p] == ' ' || src[p] == '\t' || src[p] == '\n' ||
@@ -1668,6 +1666,158 @@ static inline char* cc_strip_typeview_blocks(const char* src, size_t n) {
     out[w] = '\0';
     if (!changed) { free(out); return NULL; }
     return out;
+}
+
+/* Collect field names from `as:` groups in a @typeview body. */
+static inline int cc_typeview_body_as_names(const char* body, size_t n,
+                                            char names[][64], int cap) {
+    size_t i = 0;
+    int in_as = 0;
+    int nn = 0;
+    if (!body || !names || cap <= 0) return 0;
+    while (i < n) {
+        char tok[64];
+        size_t t = 0;
+        while (i < n && (body[i] == ' ' || body[i] == '\t' || body[i] == '\n' ||
+                         body[i] == '\r' || body[i] == '{' || body[i] == '}' ||
+                         body[i] == ';' || body[i] == ','))
+            i++;
+        if (i >= n) break;
+        if (body[i] == ':') {
+            i++;
+            continue;
+        }
+        if (i + 1 < n && body[i] == '/' && body[i + 1] == '/') {
+            while (i < n && body[i] != '\n') i++;
+            continue;
+        }
+        if (i + 1 < n && body[i] == '/' && body[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < n && !(body[i] == '*' && body[i + 1] == '/')) i++;
+            if (i + 1 < n) i += 2;
+            continue;
+        }
+        while (i < n && (cc_is_ident_char(body[i]) || body[i] == '*')) {
+            if (t + 1 < sizeof(tok)) tok[t++] = body[i];
+            i++;
+        }
+        tok[t] = 0;
+        while (i < n && (body[i] == ' ' || body[i] == '\t' || body[i] == '\n' ||
+                         body[i] == '\r'))
+            i++;
+        if (i < n && body[i] == ':') {
+            i++;
+            in_as = (strcmp(tok, "as") == 0);
+            continue;
+        }
+        if (in_as && tok[0] && nn < cap) {
+            snprintf(names[nn], 64, "%s", tok);
+            nn++;
+        }
+    }
+    return nn;
+}
+
+/* Names from `@typeview [Mode] on type_name { as: … }` in src (comments/strings skipped). */
+static inline int cc_typeview_as_names_for_type(const char* src, size_t n,
+                                                const char* type_name,
+                                                char names[][64], int cap) {
+    size_t i = 0;
+    int nn = 0;
+    size_t tlen;
+    if (!src || !type_name || !type_name[0] || !names || cap <= 0) return 0;
+    tlen = strlen(type_name);
+    while (i < n && nn < cap) {
+        size_t p, base_l, base_r, brace;
+        int depth;
+        if (src[i] == '"' || src[i] == '\'') {
+            char q = src[i++];
+            while (i < n) {
+                if (src[i] == '\\' && i + 1 < n) {
+                    i += 2;
+                    continue;
+                }
+                if (src[i] == q) {
+                    i++;
+                    break;
+                }
+                i++;
+            }
+            continue;
+        }
+        if (i + 1 < n && src[i] == '/' && src[i + 1] == '/') {
+            while (i < n && src[i] != '\n') i++;
+            continue;
+        }
+        if (i + 1 < n && src[i] == '/' && src[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < n && !(src[i] == '*' && src[i + 1] == '/')) i++;
+            if (i + 1 < n) i += 2;
+            continue;
+        }
+        if (!(src[i] == '@' && i + 9 <= n && memcmp(src + i, "@typeview", 9) == 0 &&
+              (i + 9 == n || !cc_is_ident_char(src[i + 9])))) {
+            i++;
+            continue;
+        }
+        p = i + 9;
+        while (p < n && (src[p] == ' ' || src[p] == '\t' || src[p] == '\n' ||
+                         src[p] == '\r'))
+            p++;
+        if (p + 2 < n && src[p] == 'o' && src[p + 1] == 'n' &&
+            !cc_is_ident_char(src[p + 2])) {
+            p += 2;
+        } else if (p < n && cc_is_ident_start(src[p])) {
+            while (p < n && cc_is_ident_char(src[p])) p++;
+            while (p < n && (src[p] == ' ' || src[p] == '\t' || src[p] == '\n' ||
+                             src[p] == '\r'))
+                p++;
+            if (!(p + 2 < n && src[p] == 'o' && src[p + 1] == 'n' &&
+                  !cc_is_ident_char(src[p + 2]))) {
+                i++;
+                continue;
+            }
+            p += 2;
+        } else {
+            i++;
+            continue;
+        }
+        while (p < n && (src[p] == ' ' || src[p] == '\t' || src[p] == '\n' ||
+                         src[p] == '\r'))
+            p++;
+        base_l = p;
+        while (p < n && cc_is_ident_char(src[p])) p++;
+        if (p < n && src[p] == '*') p++;
+        base_r = p;
+        if (base_r <= base_l || (base_r - base_l) != tlen ||
+            memcmp(src + base_l, type_name, tlen) != 0) {
+            i = (p > i) ? p : i + 1;
+            continue;
+        }
+        while (p < n && (src[p] == ' ' || src[p] == '\t' || src[p] == '\n' ||
+                         src[p] == '\r'))
+            p++;
+        if (p >= n || src[p] != '{') {
+            i = p > i ? p : i + 1;
+            continue;
+        }
+        brace = p;
+        depth = 0;
+        for (; p < n; p++) {
+            if (src[p] == '{') depth++;
+            else if (src[p] == '}') {
+                depth--;
+                if (depth == 0) {
+                    p++;
+                    break;
+                }
+            }
+        }
+        nn += cc_typeview_body_as_names(src + brace, p - brace, names + nn,
+                                        cap - nn);
+        i = p;
+    }
+    return nn;
 }
 
 static inline int cc__th_grow(char** out, size_t* cap, size_t w, size_t need) {

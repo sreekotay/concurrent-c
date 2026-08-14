@@ -1,4 +1,4 @@
-/* Non-typedef struct with a named @as embed must participate in UFCS retry. */
+/* Non-typedef struct with a named as: embed must participate in UFCS retry. */
 #include <ccc/std/prelude.cch>
 #include <ccc/script/temp.cch>
 #include <assert.h>
@@ -8,7 +8,11 @@
 
 struct AsNtWrap {
     int tag;
-    CCFile file @as;
+    CCFile file;
+};
+
+@typeview on AsNtWrap {
+    as: file;
 };
 
 int main(void) {

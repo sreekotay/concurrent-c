@@ -23,7 +23,8 @@ trailing-`*` family (`Fam_*`). Same match rule on both forms:
 ## 1. `@typehooks` — lifecycle
 
 Write the functions. Then name them on the type. Bodyless `@destroy` and
-`@create(...)` call those functions. No destroy hook → compile error.
+`@create(...)` call those functions. Bodyless `@destroy` needs a non-empty
+destroy chain (a hook on the type, or on a value field’s type).
 Stdlib types already ship one (`CCArena`, `CCFile`, `CCNursery*`, …).
 
 ```c
@@ -74,11 +75,13 @@ Rules that matter in practice:
   `@destroy` or `@detach`. Omitting both is an error.
 - `@destroy` attaches cleanup to **successful declaration construction**,
   not only to `@create`. `Port p = {0} @destroy;` and
-  `Port p = port_open(3) @destroy;` run the destroy function at scope
+  `Port p = port_open(3) @destroy;` run the destroy chain at scope
   exit the same way. After `!>`, construction succeeded only if the
   unwrap did.
-- `@destroy;` runs the destroy function. `@destroy { … }` runs
-  **pre-destroy → your block → destroy hook → `as:` embeds**. See §3.
+- `@destroy;` and `x.destroy()` run the type’s destroy chain: registered
+  pre-destroy → registered destroy → value fields with hooks,
+  last-declared to first. `@destroy { … }` inserts the block between
+  pre-destroy and destroy. See §3.
 
 Pointer and family subjects use the same body (`MyRes*`, `CCChanTx_*`).
 A trailing-`*` subject is one registration for every match. `.ufcs`
@@ -244,8 +247,8 @@ int main(void) {
 }
 ```
 <!-- compile-err
-@as retry also failed
-@as field: CCFile file
+as: retry also failed
+as: field: CCFile file
 no UFCS method 'gone' for receiver type 'Temp'
 -->
 
@@ -474,13 +477,14 @@ ok
 -->
 
 `as:` forwards `open` / `write` / `close` through `.file`. Cleanup is
-**pre-destroy → `@destroy { }` body → outer destroy hook → `as:` embeds**
-last-declared to first. Bodyless `@destroy` therefore unlinks while the
-file may still be open — fine on POSIX, often not on Windows. The
-portable spelling is the one above: `t.close()` in the body, then
-`temp_file_unlink`, then `cc_file_close` on the embed. The second close
-is a no-op — registered destroy hooks are idempotent (`cc_file_close`
-nulls the handle and returns when already closed).
+**pre-destroy → `@destroy { }` body → outer destroy hook → value embeds**
+last-declared to first. `file` is a `CCFile` value field with a destroy
+hook, so `cc_file_close(&t.file)` runs in that last step. Bodyless
+`@destroy` unlinks while the file may still be open — fine on POSIX, often
+not on Windows. The portable spelling is the one above: `t.close()` in the
+body, then `temp_file_unlink`, then `cc_file_close` on the embed. The
+second close is a no-op — registered destroy hooks are idempotent
+(`cc_file_close` nulls the handle and returns when already closed).
 
 A family that needs both is the same split: `@typeview on Fam_* { as:
 core; }` plus `@typehooks on Fam_* { .destroy = … }`. The glob is shared;
@@ -492,7 +496,8 @@ form independently.
 ## 4. Checklist
 
 - Adding `box_bump(Box*)`? Declare the function. Stop.
-- Bodyless `@destroy` on your type? `@typehooks` + `.destroy`.
+- Bodyless `@destroy` on your type? `@typehooks` + `.destroy` (or a value
+  field whose type already has a hook).
 - Close-before-unlink (or any “parts first”)? `@destroy { t.close(); }` —
   the body runs before the outer hook and embed teardown.
 - `@create(...)` for that type? Same block, `.create`.

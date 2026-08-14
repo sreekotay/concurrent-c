@@ -512,7 +512,7 @@ int main(int argc, char** argv) {
     tokbuf = pp.out;
     if (!shadow_rewrite_restricted_type_sugar(tokbuf, &pp.nout)) {
         if (diag_capturing) (void)shadow_diag_cap_end(NULL, NULL);
-        fprintf(stderr, "%s:1:1: error: @restricted type sugar rewrite failed\n",
+        fprintf(stderr, "%s:1:1: error: @typeview type sugar rewrite failed\n",
                 in_path);
         pp_free_macros(&pp);
         free(tokbuf);

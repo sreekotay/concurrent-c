@@ -1,12 +1,16 @@
-/* Two direct @as fields of the same type — ill-formed at the struct. */
+/* Two direct as: fields of the same type — ill-formed at the struct. */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
 typedef struct {
-    CCFile a @as;
-    CCFile b @as;
+    CCFile a;
+    CCFile b;
     int tag;
 } AsDupFile;
+
+@typeview on AsDupFile {
+    as: a, b;
+};
 
 int main(void) {
     AsDupFile w = {0};

@@ -7,11 +7,11 @@ typedef struct Conn {
     int out_len;
 } Conn;
 
-@restricted Encode on Conn {
+@typeview Encode on Conn {
     r: out_len;
 }
 
-typedef @restricted(Encode) Conn* ConnEnc;
+typedef @typeview(Encode) Conn* ConnEnc;
 
 static void use(ConnEnc enc) {
     (void)enc->sock; /* ill-formed */

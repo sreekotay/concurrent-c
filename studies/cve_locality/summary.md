@@ -42,7 +42,7 @@ escapes (raw `free`, hand `memcpy`, `@unsafe`) go in Gap — same pattern as Rus
 | SHAPE-integer-overflow | `checked_*` / debug overflow | **mitigated** (`cc_*_i64_checked`) | — | bare `+` still wraps |
 | CVE-2016-5180 | bounds + checked size | **mitigated** (checked size + `at`/`set`) | — | raw `ptr[i]=` Gap |
 | SHAPE-T9-raw-index-oob | slice index panic / `get_mut` | **mitigated** (`at`/`set` Result, all builds) | — | raw `.ptr[i]=` |
-| CVE-2015-7547 | fat `&mut [u8]`; no writable len | **prevented** (slice-len-write-ban / unnamed `@restricted` on CCSlice) | — | first-arg trusted bodies; `@unsafe` |
+| CVE-2015-7547 | fat `&mut [u8]`; no writable len | **prevented** (slice-len-write-ban / unnamed `@typeview` on CCSlice) | — | first-arg trusted bodies; `@unsafe` |
 | CVE-2017-13245 | borrow vs realloc | **prevented** (epoch pin / reset ban) | — | — |
 | CVE-2014-0160 | bounds / checked slice | **prevented** (serdes `bytes len`) | — | hand `memcpy(wire_len)` |
 | CVE-2008-5038 | no shared mut free | **prevented** (child-free ban + pin) | — | untracked heap dual-free |
@@ -77,7 +77,7 @@ Shipped from this study (no longer backlog): `enforce-arena-provenance`,
 `variant-raw-u-ban`, `atomic-shared-owner` (`CCArc`), `pointer-channel-send-ban`,
 `checked-index-write` (Result `at`/`set`, all builds), default-on strict Result
 unwrap (opt out with `CC_STRICT_RESULT_UNWRAP=0`),
-`slice-len-write-ban` (unnamed `@restricted` on slice family).
+`slice-len-write-ban` (unnamed `@typeview` on slice family).
 
 ## Next on the Rust axis
 

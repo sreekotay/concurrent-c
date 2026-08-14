@@ -8,7 +8,8 @@
 //   - first declared rule is the entry point
 //   - PEG ordered choice; `any` is greedy with an empty-match guard
 //   - faithful JSON numbers (no leading zeros, optional frac/exp)
-//   - strings: escapes incl \uXXXX; raw control bytes < 0x20 are rejected
+//   - strings: escapes incl \uXXXX; raw controls match the json.h oracle
+//     (not rejected by the fast scan)
 #include <ccc/std/prelude.cch>
 
 @grammar(rules) Json {~~~~

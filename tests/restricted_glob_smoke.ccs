@@ -9,7 +9,7 @@ typedef struct Conn {
     int get_hits;
 } Conn;
 
-@restricted Encode on Conn {
+@typeview Encode on Conn {
     r: out_*, get_*, write;
 }
 
@@ -19,7 +19,7 @@ static int conn_write(Conn* c, const char* data) {
     return 1;
 }
 
-static int use_enc(@restricted(Encode) Conn* enc) {
+static int use_enc(@typeview(Encode) Conn* enc) {
     (void)enc->out_len; /* out_* */
     return enc->write("x");
 }

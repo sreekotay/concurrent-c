@@ -1,6 +1,6 @@
 /* A swallowed error looks exactly like success, so no ordinary test can see
  * one. This walks the grid the sigil has to cover — ok type void or valued,
- * error type reaching the handler directly or through `@as`, at statement and
+ * error type reaching the handler directly or through an as: face, at statement and
  * expression position — and asserts each failing call REACHES the handler.
  *
  * Every arm returns a distinct code, so a silent continue is a wrong answer
@@ -9,9 +9,13 @@
 #include <stdio.h>
 
 typedef struct WrapError {
-    CCError base @as;   /* reaches @errhandler(CCError) through the face */
+    CCError base;   /* reaches @errhandler(CCError) through the face */
     int tag;
 } WrapError;
+
+@typeview on WrapError {
+    as: base;
+};
 
 static int !>(CCError) valued_direct(int fail) {
     if (fail) return cc_err(CC_ERR_INVALID_ARG, "valued_direct");

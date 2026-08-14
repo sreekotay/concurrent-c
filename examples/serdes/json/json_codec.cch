@@ -1,10 +1,46 @@
 /* JSON string codecs for @grammar keep/decode(+ /encode).
  * Decode is called only on dirty spans (escape arm already ran) — do not
  * memchr-rescan. Encode is table-driven: memcpy clean runs, branch at escapes.
- * Caller must already have CCArena / CCSlice in scope (prelude or cc_arena). */
+ * Caller must already have CCArena / CCSlice in scope (prelude or cc_arena).
+ *
+ * `\uXXXX` is UTF-16: a high+low surrogate pair is one scalar; a lone
+ * surrogate fails the decode. */
 #pragma once
 
 #include <string.h>
+
+static unsigned jstr__hex4(const char* p) {
+    unsigned cp = 0;
+    for (int h = 0; h < 4; h++) {
+        char x = p[h];
+        cp <<= 4;
+        cp |= (x >= '0' && x <= '9') ? (unsigned)(x - '0')
+                                     : (unsigned)((x | 32) - 'a' + 10);
+    }
+    return cp;
+}
+
+static int jstr__utf8(char* dst, size_t* o, unsigned cp) {
+    if (cp < 0x80) { dst[(*o)++] = (char)cp; return 1; }
+    if (cp < 0x800) {
+        dst[(*o)++] = (char)(0xC0 | (cp >> 6));
+        dst[(*o)++] = (char)(0x80 | (cp & 0x3F));
+        return 1;
+    }
+    if (cp < 0x10000) {
+        if (cp >= 0xD800 && cp <= 0xDFFF) return 0;
+        dst[(*o)++] = (char)(0xE0 | (cp >> 12));
+        dst[(*o)++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        dst[(*o)++] = (char)(0x80 | (cp & 0x3F));
+        return 1;
+    }
+    if (cp > 0x10FFFF) return 0;
+    dst[(*o)++] = (char)(0xF0 | (cp >> 18));
+    dst[(*o)++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+    dst[(*o)++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+    dst[(*o)++] = (char)(0x80 | (cp & 0x3F));
+    return 1;
+}
 
 static int jstr(const char* p, size_t n, CCSlice* out, CCArena* arena) {
     char* dst = (char*)cc_arena_alloc_local(arena, n ? n : 1, 1);
@@ -13,6 +49,7 @@ static int jstr(const char* p, size_t n, CCSlice* out, CCArena* arena) {
     for (size_t k = 0; k < n; k++) {
         char c = p[k];
         if (c != '\\') { dst[o++] = c; continue; }
+        if (k + 1 >= n) return 0;
         char e = p[++k];
         switch (e) {
         case 'n': dst[o++] = '\n'; break; case 't': dst[o++] = '\t'; break;
@@ -20,22 +57,17 @@ static int jstr(const char* p, size_t n, CCSlice* out, CCArena* arena) {
         case '\\': dst[o++] = '\\'; break; case '/': dst[o++] = '/'; break;
         case 'b': dst[o++] = '\b'; break; case 'f': dst[o++] = '\f'; break;
         case 'u': {
-            unsigned cp = 0;
-            for (int h = 0; h < 4; h++) {
-                char x = p[++k];
-                cp <<= 4;
-                cp |= (x >= '0' && x <= '9') ? (unsigned)(x - '0')
-                                             : (unsigned)((x | 32) - 'a' + 10);
+            if (k + 4 >= n) return 0;
+            unsigned cp = jstr__hex4(p + k + 1);
+            k += 4;
+            if (cp >= 0xD800 && cp <= 0xDBFF) {
+                if (k + 6 >= n || p[k + 1] != '\\' || p[k + 2] != 'u') return 0;
+                unsigned lo = jstr__hex4(p + k + 3);
+                if (lo < 0xDC00 || lo > 0xDFFF) return 0;
+                k += 6;
+                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
             }
-            if (cp < 0x80) dst[o++] = (char)cp;
-            else if (cp < 0x800) {
-                dst[o++] = (char)(0xC0 | (cp >> 6));
-                dst[o++] = (char)(0x80 | (cp & 0x3F));
-            } else {
-                dst[o++] = (char)(0xE0 | (cp >> 12));
-                dst[o++] = (char)(0x80 | ((cp >> 6) & 0x3F));
-                dst[o++] = (char)(0x80 | (cp & 0x3F));
-            }
+            if (!jstr__utf8(dst, &o, cp)) return 0;
             break;
         }
         default: dst[o++] = e; break;

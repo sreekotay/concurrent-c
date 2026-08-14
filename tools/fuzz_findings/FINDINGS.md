@@ -336,7 +336,7 @@ spellings to pin the sharing rule, so failing would have contradicted the
 documented behaviour.  The defect was the silence, not the sharing.  The
 warning is pinned by that test's `.build_stderr`.
 
-## Fixed — field reflection reports `@as`, so composition is walkable
+## Fixed — field reflection reports `as:`, so composition is walkable
 
 `f.is_as` is emitted as 0/1, so `@comptime if (f.is_as)` guards a walk over
 composition:
@@ -348,12 +348,12 @@ composition:
     }
 
 Two pieces were missing.  The parse recorded no marker — both spellings reach
-the member scan, since the parse-input rewrite turns `@as` into a block-comment
+the member scan, since the parse-input rewrite turns `as:` into a block-comment
 marker — and the declarator parser then choked on the marker itself, reporting
 `Wrap` as having unsupported field forms.  The marker is an attribute on the
 member, not part of its declarator, so it is stripped after normalization.
 
-Pinned by `tests/comptime_as_composition_smoke.ccs`: only the `@as` member is
+Pinned by `tests/comptime_as_composition_smoke.ccs`: only the `as:` member is
 walked, an ordinary `int` field beside it is skipped, and the projection
 `&w.base` is correct because the user wrote the field.
 

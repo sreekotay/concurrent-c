@@ -11,7 +11,7 @@
  *
  * The error path is the second half: the roster's err arm binds the
  * handler with the CCError base view (header error types lead with
- * `CCError base @as`), so the handler's `e.message` type-checks and the
+ * `CCError base as:`), so the handler's `e.message` type-checks and the
  * raising call lands here with a real message. */
 #define aliased_map cc__py_obj_map_raw
 

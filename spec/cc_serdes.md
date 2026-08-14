@@ -52,6 +52,15 @@ earlier in the translation unit. In a schema, `rules [ include "path" ]`
 creates a private copy, while `use Name` and `use "path" as Name` share a rules
 factory and require qualified references such as `Name.rule`.
 
+A fenced body may contain `depth N`, where `N` is an integer from 1 through
+65535. The default nest limit is 128. The directive is valid only in the
+`@grammar` block itself, not in an included file. A second `depth` in the same
+block is rejected. Crossing the limit is a parse failure: `cc_match` /
+`cc_parse` / `cc_collect` / `cc_dom` return zero, and the schema streaming face
+reports `Err(CC_ERR_PARSE)`. For `@grammar(rules)` the limit counts nested
+generated-rule calls. For `@grammar(schema)` it counts nested `__fill` calls
+(self-typed or mutually recursive items).
+
 A block-level rule may override a rule copied by an include. Two block-level
 rules with the same name are rejected. Among sibling includes, the first
 definition wins. A nested rules file may override only rules introduced by its
@@ -144,6 +153,11 @@ count greater than `N` is a parse failure. The streaming face reports an
 over-cap count as `Err(CC_ERR_PARSE)`, not `Err(CC_ERR_WOULD_BLOCK)`. The
 emitter also publishes `enum { Name_field_cap = N }` so call sites can size
 buffers from the schema instead of restating the literal.
+
+A schema `int` field stores a signed 64-bit integer. A numeric bind whose
+value is outside that range is a parse failure. The streaming face reports it
+as `Err(CC_ERR_PARSE)`, not `Err(CC_ERR_WOULD_BLOCK)`. The generated
+accumulator does not wrap.
 
 `cc_get` reflects a field by name into `CCGramValue`; `cc_field` returns its
 static `CCGramField` descriptor. Schemas with conditional members carry a

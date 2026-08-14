@@ -1,4 +1,4 @@
-/* Value-type pre+post destroy hooks + @as: bang, .destroy(), and @create
+/* Value-type pre+post destroy hooks + as: bang, .destroy(), and @create
  * must all pass &outer and close the embed. */
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_type.cch>
@@ -7,8 +7,12 @@
 
 typedef struct {
     int tag;
-    CCFile file @as;
+    CCFile file;
 } Holder;
+
+@typeview on Holder {
+    as: file;
+};
 
 static int g_pre;
 static int g_post;

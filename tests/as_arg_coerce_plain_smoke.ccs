@@ -1,12 +1,16 @@
-/* Plain-C TU (no UFCS/async): @as arg coerce must still run. */
+/* Plain-C TU (no UFCS/async): as: arg coerce must still run. */
 #include <ccc/std/prelude.cch>
 #include <assert.h>
 #include <stdio.h>
 
 typedef struct {
     int tag;
-    CCFile file @as;
+    CCFile file;
 } AsPlainWrap;
+
+@typeview on AsPlainWrap {
+    as: file;
+};
 
 static CCFile *g_got;
 

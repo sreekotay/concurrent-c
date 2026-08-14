@@ -61,6 +61,13 @@ int cc_type_registry_as_field_at(CCTypeRegistry* reg,
                                  const char** out_field_type);
 /* Nonzero if struct_name has any @as field. */
 int cc_type_registry_has_as_field(CCTypeRegistry* reg, const char* struct_name);
+/* Count / index all fields of struct_name in declaration order (not just as:). */
+size_t cc_type_registry_field_count(CCTypeRegistry* reg, const char* struct_name);
+int cc_type_registry_field_at(CCTypeRegistry* reg,
+                              const char* struct_name,
+                              size_t idx,
+                              const char** out_field_name,
+                              const char** out_field_type);
 
 /* Dynamic UFCS sink (`.ufcs_sink`): unresolved methods lower through a
  * registered sink callee. Destination-aware: wherever a typed destination

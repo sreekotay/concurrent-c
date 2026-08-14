@@ -1,4 +1,4 @@
-/* Transparent typedef alias of @restricted sugar. */
+/* Transparent typedef alias of @typeview sugar. */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 #include <string.h>
@@ -8,11 +8,11 @@ typedef struct Conn {
     int out_len;
 } Conn;
 
-@restricted Encode on Conn {
+@typeview Encode on Conn {
     r: out_len, write;
 }
 
-typedef @restricted(Encode) Conn* ConnEnc;
+typedef @typeview(Encode) Conn* ConnEnc;
 
 static int conn_write(Conn* c, const char* data) {
     (void)c;

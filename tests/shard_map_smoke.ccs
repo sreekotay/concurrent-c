@@ -34,7 +34,7 @@ int main(void) {
         if (!v || !CCSlice_eq_cstr(&s, "1")) return 9;
     }
 
-    /* @as: hold_* on the map. */
+    /* as:: hold_* on the map. */
     hold = maps.hold_one((uint64_t)maps.index(1u));
     if (!hold.held()) return 10;
     hold.release();

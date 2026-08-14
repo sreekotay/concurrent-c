@@ -1313,7 +1313,7 @@ static void cc__pu_errhandler_miss_diag(const char* f, int line,
     if (as_diag == CC_ERRHANDLER_AS_AMBIG) {
         snprintf(msg, sizeof(msg),
                  "ambiguous '@errhandler' for error type '%s': "
-                 "multiple @as faces match in-scope handlers",
+                 "multiple as: faces match in-scope handlers",
                  et);
         cc_pass_error_cat(f, line, 1, CC_ERR_SYNTAX, "%s", msg);
         cc_pass_note(f, line, 1,
@@ -1323,7 +1323,7 @@ static void cc__pu_errhandler_miss_diag(const char* f, int line,
     }
     if (as_diag == CC_ERRHANDLER_AS_CYCLE) {
         snprintf(msg, sizeof(msg),
-                 "cyclic @as path while matching '@errhandler' for error type '%s'",
+                 "cyclic as: path while matching '@errhandler' for error type '%s'",
                  et);
         cc_pass_error_cat(f, line, 1, CC_ERR_SYNTAX, "%s", msg);
         return;

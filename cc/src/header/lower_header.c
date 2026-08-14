@@ -530,7 +530,7 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
         cur_len = strlen(buf_as);
     }
 
-    /* Pass 0b3: erase `@typeview` / `@restricted` blocks (and rewrite
+    /* Pass 0b3: erase `@typeview` blocks (and rewrite
      * `@typeview(Mode) Base` sugar) — same Concurrent-C-only facts. */
     {
         char* buf_tv = cc_strip_typeview_blocks(cur, cur_len);

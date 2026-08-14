@@ -1,5 +1,6 @@
-/* @as destroy chain: bodyless @destroy and .destroy() both run
- * outer delta then CCFile close on the named embed. */
+/* Value-embed destroy chain: bodyless @destroy and .destroy() both run
+ * outer delta then CCFile close on the named embed. `as: file` is for
+ * UFCS (`tmp.write`); destroy would chain `file` without it. */
 #include <ccc/std/prelude.cch>
 #include <ccc/script/temp.cch>
 #include <assert.h>

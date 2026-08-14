@@ -161,10 +161,14 @@ sugar on the binding. After `!>`, that means the unwrap succeeded.
 | `@defer stmt;` | Always run on scope exit (LIFO) |
 | `@defer(ok) stmt;` | Only on success exit (`return cc_ok(…)` / normal return) |
 | `@defer(err) stmt;` | Only on error exit (`return cc_err(…)`) |
-| `T x = … @destroy { … };` | Explicit defer body on the binding (no registry needed) |
-| `T x = … @destroy;` | Bodyless → type’s **registered** destroy / pre-destroy |
+| `T x = … @destroy { … };` | Explicit defer body on the binding, then the type’s destroy chain |
+| `T x = … @destroy;` | Bodyless → the type’s destroy chain |
+| `x.destroy()` | Same call list as bodyless `@destroy` on `x`’s type |
 
-Bodyless `@destroy` with no registered hook is a **compile error**. Stdlib types
+The chain: registered pre-destroy → `@destroy { body }` → registered destroy →
+each **value** field whose type has a hook, last-declared to first
+(transitively). Pointer, array, and function-pointer fields are omitted.
+Bodyless `@destroy` with an empty chain is a **compile error**. Stdlib types
 ship hooks (`CCNursery*`, `CCArena`, channels, …). Register your own:
 
 ```c
@@ -174,8 +178,8 @@ ship hooks (`CCNursery*`, `CCArena`, channels, …). Register your own:
 MyRes r = my_res_open() !> @destroy;
 ```
 
-Order when both exist: registered pre-destroy → `@destroy { body }` → registered
-destroy. Nursery = wait → body → free.
+Nursery = wait → body → free. Nested struct fields with their own hooks run
+after the outer hook.
 
 ```c
 FILE* f = fopen(path, "w");
@@ -196,7 +200,7 @@ Recipe: [recipe_defer_cleanup.ccs](../examples/recipe_defer_cleanup.ccs).
 
 One rule: `recv.method(args)` calls the function the **receiver’s type** names.
 **Usual path — no registration:** declaring the function installs the method
-(contrast bodyless `@destroy`, which needs a registered destroy hook). Prefer
+(contrast bodyless `@destroy`, which needs a non-empty destroy chain). Prefer
 UFCS over the free-function spelling of the same API.
 
 ```c

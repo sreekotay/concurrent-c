@@ -1,4 +1,4 @@
-/* Param sugar @restricted(Encode) Conn* — narrow from Conn*. */
+/* Param sugar @typeview(Encode) Conn* — narrow from Conn*. */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 #include <string.h>
@@ -9,7 +9,7 @@ typedef struct Conn {
     char buf[32];
 } Conn;
 
-@restricted Encode on Conn {
+@typeview Encode on Conn {
     r: out_len, buf, write;
 }
 
@@ -19,7 +19,7 @@ static int conn_write(Conn* c, const char* data) {
     return 1;
 }
 
-static int use_enc(@restricted(Encode) Conn* enc) {
+static int use_enc(@typeview(Encode) Conn* enc) {
     return enc->write("x");
 }
 

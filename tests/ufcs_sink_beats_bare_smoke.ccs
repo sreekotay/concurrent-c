@@ -1,6 +1,6 @@
-/* Precedence: a receiver type with both an @as embed and a registered
+/* Precedence: a receiver type with both an as: embed and a registered
  * dynamic sink routes unresolved methods to the SINK, never to a
- * visible bare function — even after the @as retry misses. A
+ * visible bare function — even after the as: retry misses. A
  * later-declared ambient `poke(WrapT*)` must not capture a method the
  * sink already owns. */
 #include <ccc/cc_runtime.cch>
@@ -12,9 +12,13 @@
 typedef struct Inner { int tag; } Inner;
 
 typedef struct WrapT {
-    Inner base @as;
+    Inner base;
     int sink_hits;
 } WrapT;
+
+@typeview on WrapT {
+    as: base;
+};
 
 typedef struct WArg { int k; } WArg;
 static WArg w_arg(int v) { WArg a; a.k = v; return a; }

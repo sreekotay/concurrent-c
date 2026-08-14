@@ -344,7 +344,7 @@ static int test_safety_oracles(void) {
     if (!expect_safety_fail("safe_chan_send_pointer_field_fail.ccs",
                             "raw pointer field"))
         return 0;
-    if (!expect_safety_fail("safe_as_anon_fail.ccs", "anonymous @as"))
+    if (!expect_safety_fail("safe_as_anon_fail.ccs", "'@as' was removed"))
         return 0;
     if (!expect_safety_fail("safe_type_of_unregistered_fail.ccs",
                             "has no registered cc_type_info"))

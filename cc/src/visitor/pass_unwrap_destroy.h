@@ -19,9 +19,9 @@ void cc_unwrap_destroy_set_symbols(CCSymbolTable* symbols);
  * resolution in preprocess/variant_lower.c). */
 CCSymbolTable* cc_unwrap_destroy_get_symbols(void);
 
-/* Append transitive `@as` destroy hooks for `type_key` into a string buffer
- * (`cc_sb_*` style). Used by `!> @destroy` and `@create…@destroy`.
- * Returns 0 ok, -1 error, -3 cycle. */
+/* Append transitive value-embed destroy hooks for `type_key` into a string
+ * buffer (`cc_sb_*` style). Used by `!> @destroy` and `@create…@destroy`.
+ * `as:` is not required. Returns 0 ok, -1 error, -3 cycle. */
 int cc_as_destroy_chain_append(char** out, size_t* ol, size_t* oc,
                                CCSymbolTable* symbols,
                                const char* type_key,

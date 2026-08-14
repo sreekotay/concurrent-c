@@ -3,7 +3,7 @@
  * `T name[:]` and `T[:] name` are equivalent. char element types stay
  * bare CCSlice (bytes are their elements). Non-char element types
  * instantiate the CC_DECL_SLICE_SPEC generic: `double[:]` is
- * CCSlice_double, a distinct struct embedding `CCSlice base @as` with
+ * CCSlice_double, a distinct struct embedding `CCSlice base as:` with
  * element-wise len/at/sub and a scaled bytes() view. Scalar instances
  * are pre-declared in cc_slice.cch; other element types
  * auto-instantiate at first use. */
@@ -59,7 +59,7 @@ int main(void) {
         assert(bx.len == 5 * sizeof(double));
     }
 
-    /* @as autocast into a by-value CCSlice param erases SCALED. */
+    /* as: autocast into a by-value CCSlice param erases SCALED. */
     assert(erased_len(xs) == 5 * sizeof(double));
 
     /* User-declared instance behaves identically. */
@@ -88,7 +88,7 @@ int main(void) {
     assert(u.len == 1);
 
     /* Byte helpers on char slices unchanged; on typed slices they are
-     * reachable through the @as retry (documented inheritance). */
+     * reachable through the as: retry (documented inheritance). */
     CCSlice sub = s.sub(1, 3);
     assert(sub.len == 2);
     assert(memcmp(sub.ptr, "es", 2) == 0);

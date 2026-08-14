@@ -45,7 +45,7 @@ static inline CCIoError __cc_io_error_from_kind(CCErrorKind kind) {
     return cc_io_error_os(kind, 0);
 }
 
-/* Copy a generic CCError into the @as face (os_code = 0). */
+/* Copy a generic CCError into the as: face (os_code = 0). */
 static inline CCIoError __cc_io_error_from_cc_error(CCError e) {
     CCIoError r;
     r.base = e;
@@ -53,7 +53,7 @@ static inline CCIoError __cc_io_error_from_cc_error(CCError e) {
     return r;
 }
 
-/* `cc_io_error(x)` — CCErrorKind construct, or CCError → Io (@as face). */
+/* `cc_io_error(x)` — CCErrorKind construct, or CCError → Io (as: face). */
 #define cc_io_error(__x__) _Generic((__x__), \
     CCError:                __cc_io_error_from_cc_error, \
     default:                __cc_io_error_from_kind)((__x__))

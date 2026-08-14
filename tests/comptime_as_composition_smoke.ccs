@@ -4,7 +4,11 @@
 typedef struct Base { int v; } Base;
 static int base_get(Base* self) { return self->v; }
 static int base_dbl(Base* self) { return self->v * 2; }
-typedef struct Wrap { Base base @as; int tag; } Wrap;
+typedef struct Wrap { Base base; int tag; } Wrap;
+@typeview on Wrap {
+    as: base;
+};
+
 
 int main(void) {
     Wrap w; w.base.v = 21; w.tag = 1;

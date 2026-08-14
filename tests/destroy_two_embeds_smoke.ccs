@@ -1,0 +1,50 @@
+/* Two same-type value fields both destroy; a pointer field does not. */
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdio.h>
+
+static int g_seq[8];
+static int g_n;
+
+static void seq(int step) {
+    if (g_n < 8) g_seq[g_n++] = step;
+}
+
+typedef struct {
+    int id;
+} Inner;
+
+static void inner_dtor(Inner* i) {
+    if (!i) return;
+    seq(i->id);
+}
+
+typedef struct {
+    Inner first;
+    Inner* skipped;
+    Inner second;
+} Pair;
+
+static Inner g_heap;
+
+@typehooks on Inner {
+    .destroy = inner_dtor,
+};
+
+int main(void) {
+    g_heap.id = 9;
+    {
+        Pair p = {0} @destroy;
+        p.first.id = 1;
+        p.skipped = &g_heap;
+        p.second.id = 2;
+    }
+    /* last-declared to first: second then first; pointer skipped */
+    assert(g_n == 2);
+    assert(g_seq[0] == 2);
+    assert(g_seq[1] == 1);
+    assert(g_heap.id == 9);
+
+    printf("ok\n");
+    return 0;
+}

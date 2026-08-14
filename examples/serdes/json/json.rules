@@ -1,4 +1,4 @@
-; Canonical JSON recognition factory (match layer).
+; Oracle-matched JSON recognition factory (match layer) — not RFC 8259.
 ; Specialize with `include` + rule overrides for keep / collect / encode.
 ; Path is relative to the including source (or nested .rules file).
 top:     value

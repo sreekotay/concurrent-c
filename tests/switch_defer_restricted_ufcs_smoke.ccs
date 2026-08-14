@@ -1,4 +1,4 @@
-/* Result-fn switch with @defer + shard hold + @restricted UFCS.
+/* Result-fn switch with @defer + shard hold + @typeview UFCS.
  *
  * Was: no !> in the body → opaque switch → text UFCS peel stopped at the
  * first unbound/local site → `enc->ok`/`err` diagnosed as empty methods on
@@ -19,7 +19,7 @@ typedef struct Conn {
     char last[32];
 } Conn;
 
-typedef @restricted Enc on Conn {
+typedef @typeview Enc on Conn {
     r: n, err, ok;
 } *ConnEnc;
 

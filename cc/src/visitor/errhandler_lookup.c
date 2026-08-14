@@ -253,7 +253,7 @@ void cc_errhandler_debug_dispatch(const char* err_type, int ambient,
         return;
     }
     if (as_diag == CC_ERRHANDLER_AS_FACE && as_path && as_path[0]) {
-        fprintf(stderr, "errhandler: @as E=%s → handler %s via .%s\n",
+        fprintf(stderr, "errhandler: as: E=%s → handler %s via .%s\n",
                 err_type ? err_type : "?", handler_type, as_path);
         return;
     }

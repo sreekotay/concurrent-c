@@ -142,9 +142,9 @@ where needed). The tape/AST/emit spine does not become a comptime VM.
 `@comptime` blocks; remaining holes are seam completeness, not "add another
 emit peel."
 
-**TCC sees only C.** Attributes (`@as`, …) are AST facts used while lowering;
+**TCC sees only C.** Attributes (`as:`, …) are AST facts used while lowering;
 product and comptime session buffers must not carry them (no comment-encoded
-`@as`). Native `.ccs` path runs a **type pass** first when the harvested TU
+`as:`). Native `.ccs` path runs a **type pass** first when the harvested TU
 contains `@comptime` (blank those sites, whitelist emit → `__cc_rf_T[]` +
 `cc_ct_field_reg_*`); TCC sessions get a **slim prelude** (`__cc_rf_*`
 tables only — not full type-pass TUs or re-injected typedefs). Comptime
@@ -152,7 +152,7 @@ prepare/exec reads `is_as` from that registry via `cc_reflect_field_*`;
 header-only `.fields` / `.methods` use Concurrent-C text plus registered
 included `.cch` (no full-TU CPP reflection view). Then the product lower runs.
 Post-emit `shadow_product_host_c_ok` refuses leftover CC surface (`!>`, `[:]`,
-`::`, `@as`, …), skipping preprocessor lines.
+`::`, `as:`, …), skipping preprocessor lines.
 
 ---
 

@@ -1,9 +1,9 @@
-/* Safety fail: anonymous @as is ill-formed. */
+/* Safety fail: field `@as` is removed. */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
 typedef struct {
-    CCFile @as;
+    CCFile file @as;
     int x;
 } AnonOuter;
 

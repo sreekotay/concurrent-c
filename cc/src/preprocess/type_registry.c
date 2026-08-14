@@ -596,6 +596,36 @@ int cc_type_registry_has_as_field(CCTypeRegistry* reg, const char* struct_name) 
     return cc_type_registry_as_field_count(reg, struct_name) > 0;
 }
 
+size_t cc_type_registry_field_count(CCTypeRegistry* reg, const char* struct_name) {
+    size_t n = 0;
+    if (!reg || !struct_name) return 0;
+    for (size_t i = 0; i < reg->field_count; i++) {
+        if (strcmp(reg->fields[i].struct_name, struct_name) == 0)
+            n++;
+    }
+    return n;
+}
+
+int cc_type_registry_field_at(CCTypeRegistry* reg,
+                              const char* struct_name,
+                              size_t idx,
+                              const char** out_field_name,
+                              const char** out_field_type) {
+    size_t n = 0;
+    if (!reg || !struct_name) return -1;
+    for (size_t i = 0; i < reg->field_count; i++) {
+        if (strcmp(reg->fields[i].struct_name, struct_name) != 0)
+            continue;
+        if (n == idx) {
+            if (out_field_name) *out_field_name = reg->fields[i].field_name;
+            if (out_field_type) *out_field_type = reg->fields[i].field_type;
+            return 0;
+        }
+        n++;
+    }
+    return -1;
+}
+
 static void cc__strip_type_spelling(const char* in, char* out, size_t out_sz) {
     size_t n = 0;
     size_t i = 0;
@@ -848,11 +878,11 @@ static int cc__as_validate_walk(CCTypeRegistry* reg,
     for (si = 0; si < stack_n; si++) {
         if (stack[si] && strcmp(stack[si], type_key) == 0) {
             fprintf(stderr,
-                    "%s:%d:1: error: type: cyclic @as embed graph on '%s' "
+                    "%s:%d:1: error: type: cyclic as: embed graph on '%s' "
                     "(revisits '%s')\n",
                     file ? file : "<input>", line > 0 ? line : 1, root, type_key);
             fprintf(stderr,
-                    "%s:%d:1: note: each @as edge must form a DAG; break the "
+                    "%s:%d:1: note: each as: edge must form a DAG; break the "
                     "cycle or drop one embed\n",
                     file ? file : "<input>", line > 0 ? line : 1);
             (*err_count)++;
@@ -892,13 +922,13 @@ static int cc__as_validate_walk(CCTypeRegistry* reg,
             if (strcmp(seen[k].type, fkey) == 0) {
                 if (strcmp(seen[k].path, path) != 0) {
                     fprintf(stderr,
-                            "%s:%d:1: error: type: ambiguous @as embed of '%s' "
+                            "%s:%d:1: error: type: ambiguous as: embed of '%s' "
                             "on '%s'\n",
                             file ? file : "<input>", line > 0 ? line : 1, fkey,
                             root);
                     fprintf(stderr,
                             "%s:%d:1: note: path '%s' and path '%s' both reach "
-                            "'%s'; keep a single @as path\n",
+                            "'%s'; keep a single as: path\n",
                             file ? file : "<input>", line > 0 ? line : 1,
                             seen[k].path, path, fkey);
                     (*err_count)++;
@@ -909,7 +939,7 @@ static int cc__as_validate_walk(CCTypeRegistry* reg,
         if (k == *seen_n) {
             if (*seen_n >= seen_cap) {
                 fprintf(stderr,
-                        "%s:%d:1: error: type: @as embed graph on '%s' exceeds "
+                        "%s:%d:1: error: type: as: embed graph on '%s' exceeds "
                         "validation capacity (%zu types); simplify the embed DAG\n",
                         file ? file : "<input>", line > 0 ? line : 1, root, seen_cap);
                 (*err_count)++;
@@ -964,15 +994,15 @@ int cc_type_registry_validate_as_graphs(CCTypeRegistry* reg,
         if (!cc__as_field_type_is_pointer(reg->fields[i].field_type)) continue;
         line = cc__line_for_typedef_name(src, n, reg->fields[i].struct_name);
         fprintf(stderr,
-                "%s:%d:1: error: type: @as field '%s' on '%s' must be a value "
+                "%s:%d:1: error: type: as: field '%s' on '%s' must be a value "
                 "embed, not a pointer (got '%s')\n",
                 file ? file : "<input>", line > 0 ? line : 1,
                 reg->fields[i].field_name ? reg->fields[i].field_name : "?",
                 reg->fields[i].struct_name,
                 reg->fields[i].field_type ? reg->fields[i].field_type : "?");
         fprintf(stderr,
-                "%s:%d:1: note: declare 'T %s @as;' (by value); pointer @as is "
-                "not supported\n",
+                "%s:%d:1: note: declare '@typeview on Outer { as: %s; }' "
+                "(by value); pointer as: is not supported\n",
                 file ? file : "<input>", line > 0 ? line : 1,
                 reg->fields[i].field_name ? reg->fields[i].field_name : "field");
         err_count++;
@@ -1209,8 +1239,8 @@ static int cc__as_diagnose_anon_in_body(const char* file,
          * marker is anonymous / ill-formed. */
         if (!(field_name[0] && field_type[0] && field_is_as)) {
             fprintf(stderr,
-                    "%s:%d:1: error: type: anonymous @as field on '%s' is "
-                    "ill-formed; declare 'Type name @as;'\n",
+                    "%s:%d:1: error: type: anonymous as: field on '%s' is "
+                    "ill-formed; declare '@typeview on T { as: field; }'\n",
                     file ? file : "<input>", line > 0 ? line : 1, struct_name);
             errs++;
         }
@@ -1484,6 +1514,32 @@ void cc_type_registry_ingest_struct_fields(CCTypeRegistry* reg,
         if (struct_name[0])
             cc__ingest_struct_body_fields(reg, src, body_l, body_r, struct_name);
         i = body_r + 1;
+    }
+    {
+        size_t fi;
+        for (fi = 0; fi < reg->field_count; fi++) {
+            char names[32][64];
+            int nn, ni, seen = 0;
+            size_t fj;
+            const char* sname = reg->fields[fi].struct_name;
+            if (!sname || !sname[0]) continue;
+            for (fj = 0; fj < fi; fj++) {
+                if (reg->fields[fj].struct_name &&
+                    strcmp(reg->fields[fj].struct_name, sname) == 0) {
+                    seen = 1;
+                    break;
+                }
+            }
+            if (seen) continue;
+            nn = cc_typeview_as_names_for_type(src, n, sname, names, 32);
+            for (ni = 0; ni < nn; ni++) {
+                const char* ty =
+                    cc_type_registry_lookup_field(reg, sname, names[ni]);
+                if (ty)
+                    (void)cc_type_registry_add_field_ex(reg, sname, names[ni],
+                                                        ty, 1);
+            }
+        }
     }
 }
 

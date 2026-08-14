@@ -11520,7 +11520,7 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
                                         free(out);
                                         free(rvars);
                                         fprintf(stderr,
-                                                "error: cc_err: ambiguous @as path "
+                                                "error: cc_err: ambiguous as: path "
                                                 "from '%s' to 'CCError'\n",
                                                 oty);
                                         return NULL;
@@ -17221,6 +17221,23 @@ static int cc__ct_parse_param_list(const char* src, size_t lp, size_t rp,
     *out = fs; *out_n = fn; return 1;
 }
 
+static void cc__ct_apply_typeview_as(const char* src, size_t n, const char* tname,
+                                     CCCtField* fs, size_t nf) {
+    char names[32][64];
+    int nn, i, k;
+    if (!src || !tname || !tname[0] || !fs || nf == 0) return;
+    nn = cc_typeview_as_names_for_type(src, n, tname, names, 32);
+    for (i = 0; i < (int)nf; i++) {
+        if (!fs[i].name) continue;
+        for (k = 0; k < nn; k++) {
+            if (strcmp(fs[i].name, names[k]) == 0) {
+                fs[i].is_as = 1;
+                break;
+            }
+        }
+    }
+}
+
 /* Parse the member declarations in struct body (bo='{', bc='}') into a field
  * list.  Returns 1 on success (caller frees *out via cc__ct_free_fields), 0 if
  * any member uses a form the parser cannot model exactly (so the caller errors
@@ -19360,10 +19377,12 @@ static int cc__try_expand_comptime_for(const char* src, size_t n, const char* in
                         src + ts);
                 return -1;
             }
+            cc__ct_apply_typeview_as(src, n, tname_buf, fields, nf);
         } else if (cc__ct_load_fields_via_reflect(src + ts, te - ts, &fields,
                                                   &nf)) {
             /* Header-only / harvested types: host reflect walks included
              * `.cch` (+ registry for is_as). No full-TU CPP expand. */
+            cc__ct_apply_typeview_as(src, n, tname_buf, fields, nf);
         } else {
             cc__ct_free_fields(fields, nf);
             fprintf(stderr,

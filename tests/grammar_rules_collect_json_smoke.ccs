@@ -71,6 +71,24 @@ int main(void) {
             return 1;
         }
     }
+    /* UTF-16 surrogate pair combines to one scalar; a lone surrogate fails */
+    {
+        Counts c = {0};
+        const char* src = "\"\\uD83D\\uDE00\"";
+        if (!Json_collect(src, strlen(src), &arena, count_cb, &c)) { printf("FAIL: pair parse\n"); return 1; }
+        if (c.materialized != 1) { printf("FAIL: pair not materialized\n"); return 1; }
+        const char want[] = "\xf0\x9f\x98\x80";
+        if (c.last_str.len != sizeof(want) - 1 || memcmp(c.last_str.ptr, want, sizeof(want) - 1) != 0) {
+            printf("FAIL: pair bytes (len=%d)\n", (int)c.last_str.len);
+            return 1;
+        }
+        Counts h = {0};
+        if (Json_collect("\"\\uD83D\"", 8, &arena, count_cb, &h)) {
+            printf("FAIL: lone high accepted\n"); return 1; }
+        Counts l = {0};
+        if (Json_collect("\"\\uDE00\"", 8, &arena, count_cb, &l)) {
+            printf("FAIL: lone low accepted\n"); return 1; }
+    }
     /* corpora: reproduce the golden parser's exact borrow/materialize split */
     {
         Counts t = {0};

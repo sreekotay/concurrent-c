@@ -1,8 +1,7 @@
 # Type views (`@typeview`)
 
 Status: draft — implemented in shadow_lower (`tests/restricted_*`,
-`tests/typeview_as_ufcs_smoke.ccs`). `@restricted` is a deprecated alias of
-`@typeview`.
+`tests/typeview_as_ufcs_smoke.ccs`).
 
 ## 1. Notion
 
@@ -14,15 +13,15 @@ cost — a type-system view, not a second object. Views are erased in lowering;
 they do not exist at run time.
 
 The same form also declares **is-a faces** (`as:`): field names that the
-outer type forwards through for UFCS retry, destroy chaining, arg coerce,
-and `@errhandler` projection (formerly field `@as`; see `draft_as.md`).
+outer type forwards through for UFCS retry, arg coerce, and `@errhandler`
+projection (see `draft_as.md`).
 
 Channel split handles (`T[~ >]` / `T[~ <]`) are a built-in form of restricted
 access. `@typeview` is the user-definable form for ordinary struct types.
 
 ## 2. Surface
 
-Preferred spelling is `@typeview`. `@restricted` is accepted identically.
+Preferred spelling is `@typeview`.
 
 An **unnamed** view applies to the type itself (no parallel view name).
 Ordinary use sites see only allow-listed names when `r:`/`w:`/`rw:` are
@@ -46,7 +45,7 @@ Box b = { .secret = 7, .len = 0 }; /* init OK */
 /* b.secret; */                   /* ill-formed at ordinary use */
 ```
 
-Is-a faces on the type (replaces `Type field @as;`):
+Is-a faces on the type:
 
 ```c
 typedef struct CCTempFile {
@@ -121,7 +120,7 @@ static bool !>(CCError) exec_keys(DB* db, Cmd* c,
                                   @typeview(Encode) Conn* conn);
 ```
 
-`@typeview(Encode) Conn` / `@restricted(Encode) Conn` and the mangled type
+`@typeview(Encode) Conn` / `@typeview(Encode) Conn` and the mangled type
 for that mode (§3) denote the same type. Writing the mangled name is
 equivalent sugar-free spelling.
 
@@ -129,14 +128,14 @@ A typedef may alias the restricted type. Aliases are transparent for member
 checks and UFCS (same allow-list as the mangled view):
 
 ```c
-typedef @restricted(Encode) Conn* ConnEnc;
+typedef @typeview(Encode) Conn* ConnEnc;
 static bool !>(CCError) exec_keys(DB* db, Cmd* c, ConnEnc conn);
 ```
 
 Mode definition and alias may be one declaration (C `typedef struct` shape):
 
 ```c
-typedef @restricted Encode on Conn {
+typedef @typeview Encode on Conn {
     r: write, lit, simple, err, ok, pong, null, integer, bulk, array_*;
 } *ConnEnc;
 ```
@@ -146,7 +145,7 @@ value-type alias of `Conn_Restrict_Encode`.
 
 ## 3. Mangle and type identity
 
-`@restricted Mode on Base` introduces a distinct type whose name is
+`@typeview Mode on Base` introduces a distinct type whose name is
 deterministic from the base and mode:
 
 ```text
@@ -183,7 +182,7 @@ with different use-kinds, the longest literal prefix wins; a tie with
 disagreeing kinds is ill-formed.
 
 On owned types, prefer exact names. On open type-families (slices, and other
-types extended by third-party UFCS / `@as`), globs are the membership
+types extended by third-party UFCS / `as:` faces), globs are the membership
 protocol: the mode owner publishes a pattern contract; extenders join by
 naming into that family. A mode that listed every method would freeze the
 day it shipped. Accidental membership (a mutating method named into a read
@@ -205,7 +204,7 @@ not key the mode on a single monomorph (e.g. only `char[:]`).
 Restriction is one-way, like `const`:
 
 - **Narrow (always, no cast):** `Base*` converts to `Base_Restrict_Mode*`
-  (and to `@restricted(Mode) Base*`) implicitly wherever a pointer is
+  (and to `@typeview(Mode) Base*`) implicitly wherever a pointer is
   passed or used as a UFCS receiver. No cast is required or written.
 - **Widen (never):** `Base_Restrict_Mode*` does not convert to `Base*`.
   There is no cast form that restores full access. Discarding the
@@ -222,9 +221,9 @@ On an expression of type `Base_Restrict_Mode` or `Base_Restrict_Mode*`:
 - Field load requires a matching `r:` or `rw:` pattern.
 - Field store requires a matching `w:` or `rw:` pattern.
 - UFCS call requires a matching `r:` or `rw:` pattern.
-- A miss does not fall through to the base's unlisted methods (no `@as`-style
+- A miss does not fall through to the base's unlisted methods (no `as:`-style
   retry from restriction to full base).
-- `@as` retry on the base, when applicable to a listed method, still applies
+- `as:` retry on the base, when applicable to a listed method, still applies
   for that method's resolution on the base; the restriction only filters which
   names may be attempted.
 
@@ -242,17 +241,16 @@ A restricted pointer still cannot be passed to a `Base*` parameter (§4).
 Callees that need full access take `Base*` and are invoked only from scopes
 that already hold `Base*`.
 
-## 6. Relation to `@as`
+## 6. Relation to `as:` faces
 
-| | `@as` | `@restricted` |
+| | `as:` face | named `@typeview` |
 |---|---|---|
 | Direction | Widen: Outer gains Inner's methods through a field | Narrow: fewer fields and methods on the same object |
-| Attachment | Field on the struct | Named mode on the type |
+| Attachment | Field name listed in `@typeview on Outer { as: … }` | Named mode on the type |
 | Type identity | Outer and Inner remain distinct; path is a subobject | Mangled view type; same object as `Base*` |
 
-`@as` and `@restricted` compose in the obvious way: a restricted receiver may
-use a listed method that `@as`-resolves on the base; restriction never grants
-unlisted names.
+A view receiver may use a listed method that `as:`-resolves on the base;
+restriction never grants unlisted names.
 
 ## 7. Worked example — Conn encode vs ship
 
@@ -263,7 +261,7 @@ typedef struct Conn {
     CCString out;
 } Conn;
 
-@restricted Encode on Conn {
+@typeview Encode on Conn {
     r: write, lit, simple, err, ok, pong, null, integer, bulk, array_*;
 }
 
@@ -274,7 +272,7 @@ static bool !>(CCError) conn_flush(Conn* c);
 /* … other conn_* encode helpers on Conn* … */
 
 static bool !>(CCError) exec_keys(DB* db, Cmd* c,
-                                  @restricted(Encode) Conn* conn) {
+                                  @typeview(Encode) Conn* conn) {
     conn->array_len(c->argc - 1) !>;
     /* conn->flush(); */   /* ill-formed: flush not in Encode */
     /* conn->sock; */      /* ill-formed: sock not in Encode */
@@ -283,7 +281,7 @@ static bool !>(CCError) exec_keys(DB* db, Cmd* c,
 }
 
 static bool !>(CCError) execute(DB* db, Cmd* c,
-                                @restricted(Encode) Conn* conn) {
+                                @typeview(Encode) Conn* conn) {
     /* encode only — ship stays on Conn* in the caller */
     …
 }
@@ -299,7 +297,7 @@ The slice case uses the **unnamed** form: the allow-list is the ordinary
 surface of the type family. No parallel view name.
 
 ```c
-@restricted on CCSlice {
+@typeview on CCSlice {
     r: *;
 };
 ```
@@ -318,7 +316,7 @@ slice contract is “no field writes.”
 - Keyed by `(unnamed-default, slice type-family)`; instantiation does not
   fork the facet (`char[:]` and `int[:]` share it).
 
-Named modes (`@restricted Encode on Conn`) remain for multiple facets on
+Named modes (`@typeview Encode on Conn`) remain for multiple facets on
 one owned type. Unnamed + first-arg exception is the default for open
 families such as slices. Prefer narrow globs on types that mix unrelated
 capabilities (see Conn / Encode in §2); the slice family's `r: *` is the
@@ -338,12 +336,12 @@ default open-observe, no-field-write contract.
 - Any conversion or cast restricted → full `Base*` (widen).
 - Requiring a cast to narrow `Base*` → restricted (narrowing is always
   implicit).
-- `@restricted(Mode)` naming a mode not declared on that base.
+- `@typeview(Mode)` naming a mode not declared on that base.
 
 ## 9. Non-goals
 
 - Region or effect denial (operations forbidden for every object in a scope).
   Per-object specimens such as read-only `len` with open method extension
   are expressed here (`r: len` plus globs), not as effects.
-- Changing `@as` semantics.
+- Changing `as:` face semantics.
 - Extra allocation, reference counting, or dynamic dispatch for restrictions.

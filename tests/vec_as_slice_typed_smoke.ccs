@@ -1,7 +1,7 @@
 /* Typed-vec slice views: `as_slice` on a CCVec whose element has a
  * declared slice instance returns that instance (CCVec_double →
  * CCSlice_double, element-count len), so instance methods and the
- * scaled `@as` erasure compose. Elements without a spec (structs)
+ * scaled `as:` erasure compose. Elements without a spec (structs)
  * keep the erased CCSlice view. */
 #include <ccc/cc_runtime.cch>
 #include <assert.h>
@@ -30,7 +30,7 @@ int main(void) {
     CCSlice erased = s.bytes();
     assert(erased.len == 3 * sizeof(double));
 
-    /* By-value @as autocast to a CCSlice param erases scaled too —
+    /* By-value as: autocast to a CCSlice param erases scaled too —
      * the as_slice use alone names the instance (no double[:] decl
      * appears in this file). */
     assert(take_erased(s) == 3 * sizeof(double));

@@ -105,7 +105,7 @@ Smoke goldens keep a trimmed twin set only:
 `shadow/error_face_frag.cch` — trimmed `CCError` face from `cc_result`
 (`CCErrorKind`, brace init, `static inline const char*`, long `switch` bodies).
 `shadow/io_error_frag.cch` — trimmed `CCIoError` on that face (`#include`
-splice, `@as`, `const char*` helpers, errno `switch`; no `_Generic` /
+splice, `as:` faces, `const char*` helpers, errno `switch`; no `_Generic` /
 `CC_DECL_RESULT_SPEC`).
 
 ```bash
@@ -211,7 +211,7 @@ Production lower of these headers is near-passthrough; shadow keeps the
 same API with `#pragma once` + `#line` instead of the `#ifndef` guard dance.
 
 Larger stdlib headers (`cc_arena`, full `cc_result`, …) still hit coverage /
-cpp walls. Trimmed frags cover enum + `@as` + `switch` + `const T*` returns;
+cpp walls. Trimmed frags cover enum + `as:` faces + `switch` + `const T*` returns;
 grow the whitelist only when the next header is a clean beachhead, not a
 general C parser. Keep pushing this parallel path; do not force a merge
 into the TCC-heavy driver until the transform boundary is boring.
@@ -275,7 +275,7 @@ bytes → stage1 tape (toks + comment spans)
 Prioritized by fail mass × language value on native-quick:
 
 1. **Safety / diag oracles** — move/channel/unwrap/`T[:!]`/`@variant`/anon
-   `@as`/`type_of`/unproven-pointer free refuse when unprovable; remaining:
+   `as:`/`type_of`/unproven-pointer free refuse when unprovable; remaining:
    dominating-check allowlists for safe variant projections + richer points-to
 2. **`@comptime` / `@emit`** — product path runs legacy prepare/exec/splice via
    `shadow_comptime.c` + `libshadow_comptime.a` (not a `pp_emit*` VM). Stage1
@@ -312,7 +312,7 @@ Prioritized by fail mass × language value on native-quick:
      `out/include` face patch (local build aid) or umbrella until fixed;
      then snapshot/promote a **new** pin so it sticks in `last-good`.
      Never hand-patch an existing bootstrap seed instead of promoting.
-   - `@as` forwarding; remaining UFCS leftover peel kill.
+   - `as:` forwarding; remaining UFCS leftover peel kill.
 
 ## Explicit tool
 

@@ -1,4 +1,4 @@
-/* cc_err(e) projects unique @as path when Result face is CCError and
+/* cc_err(e) projects unique as: path when Result face is CCError and
  * e is CCIoError — same rule as !>; / @errhandler binder projection.
  * Bang binder stays CCIoError (os_code visible); projection is at the sink. */
 #include <ccc/std/io.h>

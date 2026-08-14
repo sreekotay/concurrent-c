@@ -6,7 +6,7 @@ typedef struct Box {
     int len;
 } Box;
 
-@restricted on Box {
+@typeview on Box {
     r: len, bump;
 };
 

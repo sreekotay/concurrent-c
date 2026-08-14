@@ -578,35 +578,58 @@ ${fail}: __attribute__((unused));
 `, a);
 }
 
-/* matcher/pad call: G__<class>_<rule>(s, n, &p) or fail */
+/* matcher/pad call: G__<class>_<rule>(s, n, &p[, depth]) or fail.
+ * darg is "" or ", cc_depth" / ", cc_depth + 1". */
 static inline CCString cc_gr_pad_call_text(CCArena* a, const char* g, const char* cls,
-                                           const char* r, const char* fail) {
-    return @string(`    if (!${g}__${cls}_${r}(s, n, &p)) goto ${fail};
+                                           const char* r, const char* fail,
+                                           const char* darg) {
+    return @string(`    if (!${g}__${cls}_${r}(s, n, &p${darg})) goto ${fail};
+`, a);
+}
+
+/* overflow-checked store of an unsigned accumulator into a signed 64-bit field */
+static inline CCString cc_gr_bind_int_store_text(CCArena* a, int k, int neg,
+                                                 const char* pfx, const char* field,
+                                                 const char* fail) {
+    if (neg)
+        return @string(`      if (ng${k}) {
+          if (v${k} > 9223372036854775808ULL) goto ${fail};
+          out->${pfx}${field} = (v${k} == 9223372036854775808ULL)
+              ? (-9223372036854775807LL - 1) : -(long long)v${k};
+      } else {
+          if (v${k} > 9223372036854775807ULL) goto ${fail};
+          out->${pfx}${field} = (long long)v${k};
+      }
+`, a);
+    return @string(`      if (v${k} > 9223372036854775807ULL) goto ${fail};
+      out->${pfx}${field} = (long long)v${k};
 `, a);
 }
 
 /* fused int run: ONE accumulate-while-scan loop, no second conversion
- * pass, no charset loads — the hand-parser inner loop, derived */
+ * pass, no charset loads — the hand-parser inner loop, derived.
+ * A value outside signed 64-bit range is a parse failure (not wrap). */
 static inline CCString cc_gr_bind_int_run_text(CCArena* a, int k, int neg,
                                                const char* pfx, const char* field,
                                                const char* fail) {
     CCString o = cc_string_new();
-    cc_gr__cat(&o, @string(`    { long long v${k} = 0; size_t d${k};
+    cc_gr__cat(&o, @string(`    { unsigned long long v${k} = 0; size_t d${k};
 `, a), a);
     if (neg)
         cc_gr__cat(&o, @string(`      int ng${k} = 0;
       if (p < n && s[p] == '-') { ng${k} = 1; p++; }
 `, a), a);
     cc_gr__cat(&o, @string(`      d${k} = p;
-      for (; p < n && s[p] >= '0' && s[p] <= '9'; p++)
-          v${k} = v${k} * 10 + (s[p] - '0');
+      for (; p < n && s[p] >= '0' && s[p] <= '9'; p++) {
+          unsigned dgt${k} = (unsigned)(s[p] - '0');
+          if (v${k} > 1844674407370955161ULL ||
+              (v${k} == 1844674407370955161ULL && dgt${k} > 5u)) goto ${fail};
+          v${k} = v${k} * 10ull + dgt${k};
+      }
       if (p == d${k}) { if (p >= n) *cc_inc = 1; goto ${fail}; }
 `, a), a);
-    if (neg)
-        cc_gr__cat(&o, @string(`      out->${pfx}${field} = ng${k} ? -v${k} : v${k}; }
-`, a), a);
-    else
-        cc_gr__cat(&o, @string(`      out->${pfx}${field} = v${k}; }
+    cc_gr__cat(&o, cc_gr_bind_int_store_text(a, k, neg, pfx, field, fail), a);
+    cc_gr__cat(&o, @string(`    }
 `, a), a);
     return o;
 }
@@ -629,14 +652,23 @@ static inline CCString cc_gr_bind_span_inline_text(CCArena* a, int k) {
 
 /* int over the captured span: matcher validated the digits already */
 static inline CCString cc_gr_bind_int_span_text(CCArena* a, int k,
-                                                const char* pfx, const char* field) {
-    return @string(`      (void)xd${k};
-      { long long v${k} = 0; size_t q${k} = xa${k}; int ng${k} = 0;
+                                                const char* pfx, const char* field,
+                                                const char* fail) {
+    CCString o = cc_string_new();
+    cc_gr__cat(&o, @string(`      (void)xd${k};
+      { unsigned long long v${k} = 0; size_t q${k} = xa${k}; int ng${k} = 0;
         if (q${k} < xb${k} && s[q${k}] == '-') { ng${k} = 1; q${k}++; }
-        for (; q${k} < xb${k} && s[q${k}] >= '0' && s[q${k}] <= '9'; q${k}++)
-            v${k} = v${k} * 10 + (s[q${k}] - '0');
-        out->${pfx}${field} = ng${k} ? -v${k} : v${k}; } }
-`, a);
+        for (; q${k} < xb${k} && s[q${k}] >= '0' && s[q${k}] <= '9'; q${k}++) {
+            unsigned dgt${k} = (unsigned)(s[q${k}] - '0');
+            if (v${k} > 1844674407370955161ULL ||
+                (v${k} == 1844674407370955161ULL && dgt${k} > 5u)) goto ${fail};
+            v${k} = v${k} * 10ull + dgt${k};
+        }
+`, a), a);
+    cc_gr__cat(&o, cc_gr_bind_int_store_text(a, k, 1, pfx, field, fail), a);
+    cc_gr__cat(&o, @string(`      } }
+`, a), a);
+    return o;
 }
 
 /* float over the captured span: ffc parses JSON doubles */
@@ -896,8 +928,9 @@ static inline CCString cc_gr_fk_fn_close_text(CCArena* a) {
 
 /* the Ld arm: skip through the grammar's value/else rule, or hard-fail */
 static inline CCString cc_gr_pad_call6_text(CCArena* a, const char* g, const char* cls,
-                                            const char* r, const char* fail) {
-    return @string(`      if (!${g}__${cls}_${r}(s, n, &p)) goto ${fail};
+                                            const char* r, const char* fail,
+                                            const char* darg) {
+    return @string(`      if (!${g}__${cls}_${r}(s, n, &p${darg})) goto ${fail};
 `, a);
 }
 
@@ -1014,7 +1047,6 @@ static inline CCString cc_gr_get_hit_close_text(CCArena* a) {
 /* ---- tagged-union first-byte dispatch (`one of`) ---- */
 static inline CCString cc_gr_union_head_text(CCArena* a, const char* fail) {
     return @string(`    if (p >= n) { *cc_inc = 1; goto ${fail}; }
-    if (cc_depth > 128) goto ${fail};
     switch (s[p]) {
 `, a);
 }
@@ -1155,8 +1187,9 @@ static inline CCString cc_gr_matcher_head_text(CCArena* a, const char* attr, con
 
 /* padded-form trampoline: lead pad inline, then the __np body */
 static inline CCString cc_gr_np_call_text(CCArena* a, const char* n, const char* cls,
-                                          const char* r, const char* fail) {
-    return @string(`    if (!${n}__${cls}_${r}__np(s, n, &p)) goto ${fail};
+                                          const char* r, const char* fail,
+                                          const char* darg) {
+    return @string(`    if (!${n}__${cls}_${r}__np(s, n, &p${darg})) goto ${fail};
 `, a);
 }
 
@@ -1168,8 +1201,9 @@ static inline CCString cc_gr_bind_span_inline_close_text(CCArena* a) {
 
 /* pad-rule call carrying the collect context (build mode) */
 static inline CCString cc_gr_pad_call_ctx_text(CCArena* a, const char* n, const char* cls,
-                                               const char* r, const char* fail) {
-    return @string(`    if (!${n}__${cls}_${r}(c, s, n, &p)) goto ${fail};
+                                               const char* r, const char* fail,
+                                               const char* darg) {
+    return @string(`    if (!${n}__${cls}_${r}(c, s, n, &p${darg})) goto ${fail};
 `, a);
 }
 
@@ -1308,7 +1342,8 @@ static inline CCString cc_gr_fill_head_text(CCArena* a, const char* n,
     const char* al = force_inline ? " __attribute__((always_inline))" : "";
     return @string(`static inline${al} int ${n}__fill(const unsigned char* s, size_t n, size_t* io,
         CCArena* arena, ${n}* out, int* cc_inc, int cc_depth) {
-    (void)cc_inc; (void)cc_depth;
+    (void)cc_inc;
+    if (cc_depth > ${n}__nest_max) return 0;
     size_t p = *io;
     (void)arena;
 `, a);
@@ -1461,11 +1496,11 @@ static inline CCString cc_gr_fallible_leaf_text(CCArena* a, const char* n, int r
 /* rule reference call: class r/m (plain) or b (collect ctx), opt. __np */
 static inline CCString cc_gr_ref_call_text(CCArena* a, const char* n, const char* cls,
                                            const char* r, const char* suf, int with_ctx,
-                                           const char* fail) {
+                                           const char* fail, const char* darg) {
     if (with_ctx)
-        return @string(`    if (!${n}__${cls}_${r}${suf}(c, s, n, &p)) goto ${fail};
+        return @string(`    if (!${n}__${cls}_${r}${suf}(c, s, n, &p${darg})) goto ${fail};
 `, a);
-    return @string(`    if (!${n}__${cls}_${r}${suf}(s, n, &p)) goto ${fail};
+    return @string(`    if (!${n}__${cls}_${r}${suf}(s, n, &p${darg})) goto ${fail};
 `, a);
 }
 
@@ -1726,6 +1761,11 @@ static inline __attribute__((unused)) int ${n}_rule_count(void) { return ${nrule
 `, a);
 }
 
+static inline CCString cc_gr_nest_max_text(CCArena* a, const char* n, int maxd) {
+    return @string(`enum { ${n}__nest_max = ${maxd} };
+`, a);
+}
+
 /* codec table: rule id -> codec index (0 = none) */
 static inline CCString cc_gr_codec_of_head_text(CCArena* a, const char* n, int nrules) {
     return @string(`static const short ${n}__codec_of[${nrules}] = {`, a);
@@ -1762,9 +1802,9 @@ static inline CCString cc_gr_rule_proto_text(CCArena* a, const char* al, const c
                                              const char* cls, const char* r, const char* suf,
                                              int with_ctx) {
     if (with_ctx)
-        return @string(`${al}${n}__${cls}_${r}${suf}(${n}__ctx* c, const unsigned char* s, size_t n, size_t* io);
+        return @string(`${al}${n}__${cls}_${r}${suf}(${n}__ctx* c, const unsigned char* s, size_t n, size_t* io, int cc_depth);
 `, a);
-    return @string(`${al}${n}__${cls}_${r}${suf}(const unsigned char* s, size_t n, size_t* io);
+    return @string(`${al}${n}__${cls}_${r}${suf}(const unsigned char* s, size_t n, size_t* io, int cc_depth);
 `, a);
 }
 
@@ -1772,13 +1812,15 @@ static inline CCString cc_gr_rule_head_text(CCArena* a, const char* al, const ch
                                             const char* cls, const char* r, const char* suf,
                                             int with_ctx) {
     if (with_ctx)
-        return @string(`${al}${n}__${cls}_${r}${suf}(${n}__ctx* c, const unsigned char* s, size_t n, size_t* io) {
+        return @string(`${al}${n}__${cls}_${r}${suf}(${n}__ctx* c, const unsigned char* s, size_t n, size_t* io, int cc_depth) {
     size_t p = *io;
     (void)c; (void)s; (void)n;
+    if (cc_depth > ${n}__nest_max) return 0;
 `, a);
-    return @string(`${al}${n}__${cls}_${r}${suf}(const unsigned char* s, size_t n, size_t* io) {
+    return @string(`${al}${n}__${cls}_${r}${suf}(const unsigned char* s, size_t n, size_t* io, int cc_depth) {
     size_t p = *io;
     (void)s; (void)n;
+    if (cc_depth > ${n}__nest_max) return 0;
 `, a);
 }
 
@@ -1818,9 +1860,9 @@ static inline CCString cc_gr_parse_entry_head_text(CCArena* a, const char* n) {
     c0.tape[0].meta = 0x100u | 0xFFu;   /* root list */
     c0.tape[0].u.bytes = s;             /* source anchor */
 #if ${n}__ENTRY_PURE
-    if (!${n}__ENTRY_B((const unsigned char*)s, n, &p) || p != n) return 0;
+    if (!${n}__ENTRY_B((const unsigned char*)s, n, &p, 0) || p != n) return 0;
 #else
-    if (!${n}__ENTRY_B(&c0, (const unsigned char*)s, n, &p) || p != n) return 0;
+    if (!${n}__ENTRY_B(&c0, (const unsigned char*)s, n, &p, 0) || p != n) return 0;
 #endif
     c0.tape[0].meta |= ((unsigned long long)c0.total) << 10;
 `, a);
@@ -2037,9 +2079,9 @@ static inline CCString cc_gr_dom_entry_text(CCArena* a, const char* n) {
     c0.vsp = 0;
     c0.vbase[0] = 0;
 #if ${n}__ENTRY_PURE
-    if (!${n}__ENTRY_B((const unsigned char*)s, n, &p) || p != n) return 0;
+    if (!${n}__ENTRY_B((const unsigned char*)s, n, &p, 0) || p != n) return 0;
 #else
-    if (!${n}__ENTRY_B(&c0, (const unsigned char*)s, n, &p) || p != n) return 0;
+    if (!${n}__ENTRY_B(&c0, (const unsigned char*)s, n, &p, 0) || p != n) return 0;
 #endif
     c0.tape[0].meta |= ((unsigned long long)c0.total) << 10;
     c0.bdepth = 0;
@@ -2056,7 +2098,7 @@ static inline CCString cc_gr_dom_entry_text(CCArena* a, const char* n) {
 static inline CCString cc_gr_match_entry_text(CCArena* a, const char* n) {
     return @string(`static int ${n}_match(const char* s, size_t n) {
     size_t p = 0;
-    if (!${n}__ENTRY_M((const unsigned char*)s, n, &p)) return 0;
+    if (!${n}__ENTRY_M((const unsigned char*)s, n, &p, 0)) return 0;
     return p == n;
 }
 `, a);

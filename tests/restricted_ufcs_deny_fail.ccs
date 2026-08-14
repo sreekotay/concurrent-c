@@ -7,7 +7,7 @@ typedef struct Conn {
     int out_len;
 } Conn;
 
-@restricted Encode on Conn {
+@typeview Encode on Conn {
     r: out_len, write;
 }
 
@@ -22,7 +22,7 @@ static int conn_flush(Conn* c) {
     return 1;
 }
 
-static void use_enc(@restricted(Encode) Conn* enc) {
+static void use_enc(@typeview(Encode) Conn* enc) {
     (void)enc->flush(); /* ill-formed */
 }
 

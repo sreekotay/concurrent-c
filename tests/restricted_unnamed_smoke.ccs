@@ -1,4 +1,4 @@
-/* Unnamed @restricted on Base: init like const; first-arg body trusted. */
+/* Unnamed @typeview on Base: init like const; first-arg body trusted. */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
@@ -7,7 +7,7 @@ typedef struct Box {
     int len;
 } Box;
 
-@restricted on Box {
+@typeview on Box {
     r: len, bump;
 };
 

@@ -1,13 +1,9 @@
-# Is-a faces (`as:` / `@as`)
+# Is-a faces (`as:`)
 
-Status: draft — preferred surface is `@typeview on T { as: field; }`
-(`draft_facets.md`). Field `Type name @as;` remains accepted as deprecated
-sugar. Implemented for UFCS-miss retry (including transitive walk), destroy
-chaining, arg-position autocast, and `@errhandler` fallback (exact Result
-`E`, else unique face path to the handler parameter type; see
-`tests/typeview_as_ufcs_smoke.ccs`, `tests/as_field_ufcs_smoke.ccs`,
-`tests/as_field_destroy_smoke.ccs`, and related `as_*` / `errhandler_as_*`
-smokes).
+Status: draft — surface is `@typeview on T { as: field; }`
+(`draft_facets.md`). UFCS-miss retry (including transitive walk),
+arg-position autocast, and `@errhandler` fallback (exact Result `E`, else
+unique face path to the handler parameter type).
 
 ## 1. Surface
 
@@ -24,8 +20,6 @@ typedef struct CCTempFile {
     as: file;
 };
 ```
-
-Deprecated equivalent: `CCFile file @as;` on the field.
 
 - The field name is required; an anonymous face is ill-formed. The lowered
   C member is exactly the source name — no synthetic names.
@@ -55,24 +49,24 @@ field's type with receiver `&recv.name`:
 tmp.write(buf)      /* lowers to */  cc_file_write(&tmp.file, buf)
 ```
 
-- Exactly one `@as` field resolving the method: that lowering is taken.
+- Exactly one `as:` field resolving the method: that lowering is taken.
 - None: the existing unresolved-method error.
-- More than one (distinct `@as` paths both provide the method): ill-formed,
+- More than one (distinct `as:` paths both provide the method): ill-formed,
   ambiguous.
 
-Retry walks `@as` fields transitively: after probing `Outer`'s direct embeds,
-each embed type's `@as` fields are probed the same way. A cycle in the `@as`
+Retry walks `as:` fields transitively: after probing `Outer`'s direct embeds,
+each embed type's `as:` fields are probed the same way. A cycle in the `as:`
 graph is ill-formed at the struct declaration. Method-name clashes across
-distinct embed types (same method, different `@as` targets) are ill-formed
+distinct embed types (same method, different `as:` targets) are ill-formed
 at the call.
 
 Argument-position conversion applies the same rule to type mismatches: an
 `Outer*` (or `Outer` lvalue's address) passed where `T*` is expected, when
-`Outer` has a unique `@as` path to `T`, lowers to `&x.path` (e.g.
+`Outer` has a unique `as:` path to `T`, lowers to `&x.path` (e.g.
 `&x.mid.file`). The lowering is member selection — emitted C contains no
 cast; the host compiler type-checks the selected member. An explicit C cast
 keeps C's meaning (no adjustment); a cast from `Outer*` to a `T*` whose
-`@as` path is not at offset zero is diagnosed with the member spelling to
+`as:` path is not at offset zero is diagnosed with the member spelling to
 use instead.
 
 By-value conversion of `Outer` to `T` is not performed at ordinary call
@@ -80,36 +74,38 @@ sites. Handler binding (§5) is the exception.
 
 ## 3. Destroy chain
 
-For `Outer x … @destroy;`, cleanup lowers to a flat call list:
+For `Outer x … @destroy;` (and `x.destroy()` on a value `Outer`), cleanup
+walks the declared type and every **value** field whose type has a
+registered destroy or pre-destroy hook, transitively. Pointer, array, and
+function-pointer fields are omitted. An `as:` face is a value embed, so it
+is in this walk.
+
+The lowering is a flat call list:
 
 1. Outer registered pre-destroy (if any)
 2. Call-site `@destroy { D }` body (if any)
 3. Outer registered destroy (if any)
-4. Each `@as` field, last declared to first: that type's registered
-   pre-destroy, then destroy, on `&x.name` (skipped when the type has no
-   hooks), then that type's own `@as` chain recursively (same order)
+4. Each value field, last declared to first: that type's registered
+   pre-destroy, then destroy, on `&x.name` (omitted when the type has no
+   hooks), then that type's own value-field chain (same order)
 
 ```c
-/* CCTempFile tmp = cc_temp_file(&a) !> @destroy;  lowers to */
+/* CCTempFile tmp = cc_temp_file(&a) !> @destroy; */
 __cc_cleanup_1:
     cc_temp_file_unlink(&tmp);
     cc_file_close(&tmp.file);
 ```
 
-Bodyless `@destroy` on an outer type with no registered hook is well-formed
-when at least one `@as` field (transitively) has hooks: the chain is the
-non-empty cleanup.
-
-Step 4 flattens transitively so delta-only hooks remain sound when `@as`
-types nest. A cycle in the `@as` graph is ill-formed.
-
-`recv.destroy()` on a type with `@as` fields expands inline to the same
-call list, including pre-destroy hooks — literal equivalence with bodyless
-`@destroy`. Types without `@as` fields keep the single-callee lowering. No
+Bodyless `@destroy` is well-formed when this list is non-empty: an outer
+hook, or a nested value field that reaches a hook. An empty list is
+ill-formed. Two value fields of the same type are both destroyed.
+`.destroy()` expands to the same list as bodyless `@destroy`. No
 full-chain symbol is synthesized.
 
+A cycle in the value-embed graph is ill-formed.
+
 Calling `.destroy()` on a variable also marked `@destroy` runs the chain
-twice; hook idempotence covers it (below).
+twice; hook idempotence covers it.
 
 ### Hook naming
 
@@ -132,38 +128,38 @@ registered hook follows the same shape (guard field, null after release).
 
 ## 4. Consumers
 
-`CCTempFile` embeds `CCFile file @as` (`fdopen` of the `mkstemp` fd);
+`CCTempFile` embeds `CCFile file as:` (`fdopen` of the `mkstemp` fd);
 `cc_temp_file_unlink` is the registered delta hook (unlink path, clear
 `owns`); `cc_temp_file_destroy` is the hand-written full chain; `CCFile`
 registers `cc_file_close` as its destroy hook. The factory remains
 `cc_temp_file`.
 
-`CCIoError` embeds `CCError base @as` plus `os_code`. Kind and message live
+`CCIoError` embeds `CCError base as:` plus `os_code`. Kind and message live
 in `base`; `os_code` is the I/O-only payload. Kind tags share `CCErrorKind`
 (`CC_IO_*` names alias the corresponding `CC_ERR_*` values). Constructors
 (`cc_io_error_os`, `cc_io_from_errno`) fill `base.message` from the kind
-label so an `@as` projection to `CCError` remains printable without the
+label so an `as:` projection to `CCError` remains printable without the
 Io vocabulary. Display prefers a custom message when set (`cc_error_str` /
 `cc_io_error_str`).
 
-## 5. Handler dispatch through `@as`
+## 5. Handler dispatch through `as:`
 
 `@errhandler` resolution for an unwrap whose error type is `E`:
 
 1. The nearest in-scope `@errhandler(E)` — exact match — wins, regardless
    of whether a face-typed handler is textually nearer.
-2. Otherwise, when `E` has a unique `@as` path to a type `F` with an
+2. Otherwise, when `E` has a unique `as:` path to a type `F` with an
    in-scope `@errhandler(F)`, that handler runs with its parameter bound
    to the `F` subobject (`e.path`) — member selection, no conversion
    function, no mapping table.
-3. Two `@as` paths from `E` reaching distinct handler types in scope:
+3. Two `as:` paths from `E` reaching distinct handler types in scope:
    ill-formed, ambiguous (the same rule as §2). Lookup scans every
    in-scope handler before selecting a face; it must not return the
    innermost face when another distinct face is also reachable.
 4. The reverse direction never matches: an `@errhandler(E)` where `E` has
-   an `@as` field of type `F` does not handle an `F`-typed unwrap.
+   an `as:` field of type `F` does not handle an `F`-typed unwrap.
 
-Handler binding is the one place a by-value `@as` conversion occurs: the
+Handler binding is the one place a by-value `as:` conversion occurs: the
 handler receives a copy of the face subobject and sees only the face's
 vocabulary. Code that needs the derived payload writes the exact-typed
 handler, which wins by rule 1.
@@ -175,7 +171,7 @@ default handler prints `cc_error_str(e)` (kind label when `message` is
 null or empty), not a raw `e.message` that may be unset.
 
 Set `CC_DEBUG_ERRHANDLER_AS` to log each successful dispatch as exact,
-`@as` (with the dotted path), or ambient `CCError` (Result `E` unresolved).
+`as:` (with the dotted path), or ambient `CCError` (Result `E` unresolved).
 
 ## 6. Result constructor projection
 
@@ -184,7 +180,7 @@ When constructing or forwarding into a Result whose error face is `F`
 `T!>(F)` value):
 
 1. If `typeof(e)` is `F`, use `e`.
-2. Else if there is a unique `@as` embed path from `typeof(e)` to `F`,
+2. Else if there is a unique `as:` embed path from `typeof(e)` to `F`,
    project (`e.path`, e.g. `e.base`).
 3. Else the program is ill-formed — no guessing among multiple faces.
 
@@ -200,7 +196,7 @@ enrichment stays explicit (`cc_io_error(e)` and peers).
 - Virtual dispatch
 - Reverse conversion (`T*` → `Outer*`); a later explicit `container_of`
   form may use the same layout facts
-- `@as` on non-struct types
-- Construction chaining (`@create` through `@as` fields)
-- Anonymous `@as` fields; a `@super` spelling
+- `as:` on non-struct types
+- Construction chaining (`@create` through `as:` fields)
+- Anonymous `as:` fields; a `@super` spelling
 - Synthesized full-chain destroy symbols

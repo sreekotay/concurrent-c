@@ -12,8 +12,8 @@
 set -e
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
-# Host C must use lowered headers/runtime — raw .cch carries Concurrent-C surface
-# (@as etc.) that gcc cannot parse. out/include first; cc/include second for
+# Host C must use lowered headers/runtime — raw .cch carries Concurrent-C
+# surface that gcc cannot parse. out/include first; cc/include second for
 # plain vendor headers (ffc.h) that lower-headers does not copy.
 OUT_INC="$repo/out/include"
 INC="$repo/cc/include"

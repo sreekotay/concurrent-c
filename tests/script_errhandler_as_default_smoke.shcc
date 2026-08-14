@@ -1,7 +1,7 @@
 #!/usr/bin/env -S ./cc/bin/ccc
 /*
  * Smoke: bare cmd.status() !>; under the injected default @errhandler(CCError)
- * (statement-position @as projection + printable face message).
+ * (statement-position as: projection + printable face message).
  */
 
 CCCommand ok = cc_command(&a, @slice("/usr/bin/true"));

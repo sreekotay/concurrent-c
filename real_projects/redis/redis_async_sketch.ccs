@@ -8,7 +8,7 @@
  *                   after shard release (never socket I/O under hold).
  *                   Format lines with @string(..., @scratch) then write into out
  *                   — scratch is stack-local; one append into the coalesce buf.
- *   ConnEnc (= @restricted Encode) → execute/exec_* encode-only (no sock/flush);
+ *   ConnEnc (= @typeview Encode) → execute/exec_* encode-only (no sock/flush);
  *                   handle_client keeps Conn* for flush (draft_facets.md)
  *   encode/flush  → bool !>(CCError): Ok = buffered/shipped; Redis -ERR is Ok
  *   CCShardHold   → acquire + @defer hold.release(); then if (!held()) …
@@ -75,7 +75,7 @@ typedef struct Conn {
 } Conn;
 
 /* Encode phase: methods only (no sock/flush; fields stay behind Conn* bodies). */
-typedef @restricted Encode on Conn {
+typedef @typeview Encode on Conn {
     r: write, lit, simple, err, ok, pong, null, integer, bulk, array_*;
 } *ConnEnc;
 

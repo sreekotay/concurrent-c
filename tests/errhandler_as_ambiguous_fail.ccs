@@ -1,5 +1,5 @@
 /*
- * Rule 3: E with @as faces to two distinct in-scope handler types is
+ * Rule 3: E with as: faces to two distinct in-scope handler types is
  * ill-formed (must not silently pick the innermost face).
  */
 #include <ccc/std/prelude.cch>
@@ -14,10 +14,14 @@ typedef struct {
 } FaceB;
 
 typedef struct {
-    FaceA a @as;
-    FaceB b @as;
+    FaceA a;
+    FaceB b;
     int pad;
 } DualFaceErr;
+
+@typeview on DualFaceErr {
+    as: a, b;
+};
 
 #ifndef CCResult_int_DualFaceErr_DEFINED
 #define CCResult_int_DualFaceErr_DEFINED 1

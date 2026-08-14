@@ -10,7 +10,7 @@
  *   reply_arena    → DB scratch for num cells / MGET·KEYS wire blobs
  *   Conn.out       → encode coalesce (8K slab + growable); flush after
  *                    the window (never socket I/O under hold)
- *   RedisConnEnc   → @restricted Encode (no sock/flush)
+ *   RedisConnEnc   → @typeview Encode (no sock/flush)
  *   CCShardHold    → acquire inside execute (same shape as redis.go /
  *                    redis_async_sketch); encode under hold; release before
  *                    the next command / flush
@@ -50,7 +50,7 @@ typedef struct RedisConn {
     CCString out;
 } RedisConn;
 
-typedef @restricted Encode on RedisConn {
+typedef @typeview Encode on RedisConn {
     r: reply_arena, write, lit, simple, err, ok, pong, null, integer, bulk,
        array_len, write_reply;
 } *RedisConnEnc;
@@ -923,7 +923,7 @@ static bool !>(CCIoError) enc_wire_result(RedisConnEnc enc,
     }
 }
 
-/* !> binders on CCIoError results project the @as CCError face into `e`. */
+/* !> binders on CCIoError results project the as: CCError face into `e`. */
 static void redis_client_drop_log(const char* phase, CCError e) {
     fprintf(stderr, "redis_idiomatic: client drop: %s: %s\n", phase,
             cc_error_str(e));
@@ -1009,7 +1009,7 @@ static bool db_setup(RedisDb* db, size_t shard_count, const char* shard_src) {
         }
     }
 
-    /* UFCS Io unwrap binders project @as CCError; free-fn binders keep CCIoError. */
+    /* UFCS Io unwrap binders project as: CCError; free-fn binders keep CCIoError. */
     conn->flush() !>(e) {
         redis_client_drop_log("flush", e);
         return cc_ok(0);

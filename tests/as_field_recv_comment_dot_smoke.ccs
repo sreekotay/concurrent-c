@@ -4,11 +4,15 @@
 #include <string.h>
 
 typedef struct {
-    CCFile file @as;
+    CCFile file;
     int tag;
 } AsCommentWrap;
 
-/* `@as` UFCS retry across a comment before `.`. */
+@typeview on AsCommentWrap {
+    as: file;
+};
+
+/* as: UFCS retry across a comment before `.`. */
 int main(void) {
     AsCommentWrap w = {0};
     w.tag = 3;

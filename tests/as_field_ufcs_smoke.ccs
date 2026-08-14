@@ -1,13 +1,17 @@
-/* Named `@as` UFCS retry: Outer.write → cc_file_write(&outer.file, …). */
+/* Named as: UFCS retry: Outer.write → cc_file_write(&outer.file, …). */
 #include <ccc/std/prelude.cch>
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
 
 typedef struct {
-    CCFile file @as;
+    CCFile file;
     int tag;
 } AsFileWrap;
+
+@typeview on AsFileWrap {
+    as: file;
+};
 
 int main(void) {
     AsFileWrap w = {0};

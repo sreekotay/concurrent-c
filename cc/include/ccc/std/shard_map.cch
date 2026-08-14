@@ -2,7 +2,7 @@
  * CCShardMap — sharded string→string store (cells + exclusive domain).
  *
  * One cell is CCShard (arena-owned map). The map embeds CCShardDomain via
- * @as and also forwards hold_* under the map snake names:
+ * as: and also forwards hold_* under the map snake names:
  *
  *   CCShardMap maps;
  *   maps.init(excl, mask);
@@ -167,7 +167,7 @@ static inline bool cc_shard_delete(CCShard* m, CCSlice key) {
     return true;
 }
 
-/* ---- Sharded map (cells + domain @as) ---- */
+/* ---- Sharded map (cells + domain as:) ---- */
 
 typedef struct CCShardMap {
     /* Hold API: maps.hold_one / hold_sorted / hold_all (UFCS via as-face). */
@@ -255,8 +255,8 @@ static inline size_t cc_shard_map_len(const CCShardMap* m) {
     return total;
 }
 
-/* Hold forwards — same as domain @as UFCS; named so the snake ladder
- * resolves when @as retry is not on the peel path. */
+/* Hold forwards — same as domain as: UFCS; named so the snake ladder
+ * resolves when as: retry is not on the peel path. */
 static inline CCShardHold cc_shard_map_hold_one(CCShardMap* m, uint64_t si) {
     if (!m) {
         CCShardHold h;

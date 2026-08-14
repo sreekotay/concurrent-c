@@ -1,0 +1,97 @@
+// Nest limit: default 128, per-grammar `depth N` override.
+// Schema counts nested __fill; rules counts generated-rule calls.
+#include <ccc/std/prelude.cch>
+
+@grammar(schema) Deep {~~~~
+    depth 256
+    rules [
+        digit:  charset [#'0' - #'9']
+        number: keep [opt #'-' some digit]
+    ]
+    one of [
+        integer [ #':' v: int number "\r\n" ]
+        array   [ #'*' n: int number "\r\n" items: items Deep n ]
+    ]
+~~~~}
+
+@grammar(schema) Shallow {~~~~
+    depth 4
+    rules [
+        digit:  charset [#'0' - #'9']
+        number: keep [opt #'-' some digit]
+    ]
+    one of [
+        integer [ #':' v: int number "\r\n" ]
+        array   [ #'*' n: int number "\r\n" items: items Shallow n ]
+    ]
+~~~~}
+
+@grammar(rules) Json {~~~~
+    include "../examples/serdes/json/json.rules"
+~~~~}
+
+@grammar(rules) JsonShallow {~~~~
+    depth 4
+    include "../examples/serdes/json/json.rules"
+~~~~}
+
+static size_t resp_bomb(char* dst, int frames) {
+    size_t n = 0;
+    for (int i = 0; i < frames; i++) { memcpy(dst + n, "*1\r\n", 4); n += 4; }
+    memcpy(dst + n, ":1\r\n", 4); n += 4;
+    return n;
+}
+
+static size_t json_nest(char* dst, int depth) {
+    size_t n = 0;
+    for (int i = 0; i < depth; i++) dst[n++] = '[';
+    for (int i = 0; i < depth; i++) dst[n++] = ']';
+    return n;
+}
+
+int main(void) {
+    CCArena arena = cc_arena_create(1 << 20);
+    char buf[2048];
+
+    /* default 128 rejects 200-deep RESP; depth 256 accepts it */
+    {
+        size_t n = resp_bomb(buf, 200);
+        Deep d;
+        if (!Deep_parse(buf, n, &arena, &d) || d.kind != Deep_array) {
+            printf("FAIL: depth 256 rejected 200-deep\n"); return 1; }
+    }
+
+    /* depth 4: 2-deep ok, 6-deep fails */
+    {
+        size_t n = resp_bomb(buf, 2);
+        Shallow s;
+        if (!Shallow_parse(buf, n, &arena, &s) || s.kind != Shallow_array) {
+            printf("FAIL: depth 4 rejected 2-deep\n"); return 1; }
+        n = resp_bomb(buf, 6);
+        if (Shallow_parse(buf, n, &arena, &s)) {
+            printf("FAIL: depth 4 accepted 6-deep\n"); return 1; }
+        size_t pos = 0;
+        bool !>(CCError) t = Shallow_try_read(buf, n, &pos, &arena, &s);
+        if (!t.is_err() || t.error().kind != CC_ERR_PARSE) {
+            printf("FAIL: nest overflow not PARSE\n"); return 1; }
+    }
+
+    /* rules: default accepts modest nesting; 200-deep JSON fails */
+    {
+        size_t n = json_nest(buf, 10);
+        if (!Json_match(buf, n)) { printf("FAIL: default rejected 10-deep JSON\n"); return 1; }
+        n = json_nest(buf, 200);
+        if (Json_match(buf, n)) { printf("FAIL: default accepted 200-deep JSON\n"); return 1; }
+    }
+
+    /* rules depth 4: empty array ok; 10-deep fails */
+    {
+        if (!JsonShallow_match("[]", 2)) { printf("FAIL: depth 4 rejected []\n"); return 1; }
+        size_t n = json_nest(buf, 10);
+        if (JsonShallow_match(buf, n)) { printf("FAIL: depth 4 accepted 10-deep JSON\n"); return 1; }
+    }
+
+    cc_arena_free(&arena);
+    printf("grammar nest depth OK\n");
+    return 0;
+}

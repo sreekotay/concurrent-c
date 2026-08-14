@@ -1230,15 +1230,27 @@ Any binder introduced by the host statement (e.g., the LHS of a declaration like
 
 For a registered declared type, lowering resolves lifecycle hooks from the
 translation unit's type registry. A pointer-typed declaration passes the value;
-a value-typed declaration passes its address. If both hooks are registered,
-the order is registered pre-destroy hook, call-site body, registered destroy
-hook. Built-in owner families use the same order: nursery wait, user body,
+a value-typed declaration passes its address. Cleanup is a flat call list:
+
+1. registered pre-destroy (if any)
+2. call-site `@destroy { D }` body (if any)
+3. registered destroy (if any)
+4. each value field of the declared type, last declared to first, whose
+   field type has a registered pre-destroy or destroy hook, or whose own
+   value fields do (transitively): that type's chain on `&name.field`.
+   Pointer, array, and function-pointer fields are omitted.
+
+Built-in owner families use the same outer order: nursery wait, user body,
 nursery free; arena or channel user body, then destroy/free.
 
-Bodyless `@destroy` requires a registered pre-destroy or destroy hook and emits
-only those hooks. If no hook is known, compilation fails at `@destroy`.
-An explicit body remains valid without a registered hook and lowers to the
-declaration-bound deferred body.
+Bodyless `@destroy` is well-formed when that list is non-empty. An empty
+list is a compile error at `@destroy`. An explicit body remains valid
+without a registered hook and lowers to the declaration-bound deferred
+body plus any nested value-field chain.
+
+`recv.destroy()` on a value receiver expands to the same call list as
+bodyless `@destroy` on that type. No full-chain symbol is synthesized.
+Registered destroy hooks are idempotent.
 
 The same declared-type hook lookup applies to a direct initializer such as
 `CCArena a = cc_arena_heap(n) @destroy;`; an unwrap operator is not required
@@ -5152,7 +5164,7 @@ int cc_type_register(const char* type_name, CCTypeHooks hooks);
 - `cc_type_destroy_hooks("pre", "destroy")` registers both destroy phases.
 - If a type registers a destroy callee, then `name = @create(...)` must be followed by explicit ownership syntax: either `@destroy` or `@detach`. Omitting both is a compile-time error.
 - `@detach` does not take a cleanup body.
-- For `name = @create(...) @destroy { body };`, lowering order is: registered `pre_callee`, then call-site `body`, then registered `callee`.
+- For `name = @create(...) @destroy { body };`, lowering order is: registered `pre_callee`, then call-site `body`, then registered `callee`, then the value-field chain (§3.1).
 - `arg_types` for `.create` is inferred from the `@create(...)` argument list. Implementations may leave complex local expressions unknown.
 
 **Preferred registration style:**

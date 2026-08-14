@@ -33,7 +33,7 @@ int main(void) {
         Pt m0 = mid.at(0);
         assert(m0.x == 3);
     }
-    /* bytes() scales by sizeof(Pt); @as autocast erases SCALED. */
+    /* bytes() scales by sizeof(Pt); as: autocast erases SCALED. */
     {
         CCSlice bx = ps.bytes();
         assert(bx.len == 3 * sizeof(Pt));

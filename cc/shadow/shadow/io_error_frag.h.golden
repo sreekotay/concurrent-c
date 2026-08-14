@@ -108,7 +108,7 @@ static inline void cc_error_exit(CCError e) {
 #line 7 "cc/shadow/shadow/io_error_frag.cch"
 typedef struct {
     #line 8 "cc/shadow/shadow/io_error_frag.cch"
-    CCError base /*@as*/;
+    CCError base;
     #line 9 "cc/shadow/shadow/io_error_frag.cch"
     int32_t os_code;
 } CCIoError;

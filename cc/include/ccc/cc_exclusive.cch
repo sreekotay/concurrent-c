@@ -32,7 +32,7 @@
  *   CCShardMask shards = cc_shard_mask_auto(64);
  *   size_t i = shards.index(hash);   // UFCS: cc_shard_mask_index(&shards, hash)
  *
- * Shard hold bundle (guards[] + n). CCShardMap embeds CCShardDomain via @as
+ * Shard hold bundle (guards[] + n). CCShardMap embeds CCShardDomain via as:
  * so `maps.hold_all()` / `hold_one` / `hold_sorted` UFCS to these helpers:
  *
  *   CCShardDomain d = cc_shard_domain(excl, shards);

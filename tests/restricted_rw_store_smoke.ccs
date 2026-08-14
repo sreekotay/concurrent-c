@@ -8,11 +8,11 @@ typedef struct Conn {
     int out_len;
 } Conn;
 
-@restricted Mut on Conn {
+@typeview Mut on Conn {
     rw: out_len;
 }
 
-static void use_mut(@restricted(Mut) Conn* enc) {
+static void use_mut(@typeview(Mut) Conn* enc) {
     int n = enc->out_len;
     enc->out_len = n + 1;
 }

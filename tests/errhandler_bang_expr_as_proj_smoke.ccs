@@ -1,5 +1,5 @@
 /*
- * Expression-position `x = call() !>` must re-resolve @as projection per
+ * Expression-position `x = call() !>` must re-resolve as: projection per
  * callee. An earlier CCIoError unwrap must not leave `.base` stuck on a later
  * CCError Result (that is `struct CCError` — no `.base` member).
  */

@@ -167,9 +167,11 @@ UFCS show up in almost every example — treat them as day-one, not advanced.
 
 `@destroy` attaches cleanup to **successful declaration construction** — `@defer`
 sugar on the binding. After `!>`, that means the unwrap succeeded (no binding →
-no destroy). A **block** is an explicit defer body (always fine). **Bodyless**
-`@destroy` looks up a destroy (or pre-destroy) hook registered for that type —
-if none is known, compile error.
+no destroy). The destroy chain is registered pre-destroy → `@destroy { body }`
+if present → registered destroy → each value field whose type has a hook,
+last-declared to first. Pointer, array, and function-pointer fields are
+omitted. Bodyless `@destroy` and `.destroy()` emit that list without a
+call-site body. An empty chain is a compile error.
 
 Stdlib owners ship registered (`CCNursery*` waits then frees, `CCArena` frees
 slabs + overflow, channels, `CCPy`, …). For your own types:
@@ -184,9 +186,8 @@ static void my_res_close(MyRes* r) { /* … */ }
 MyRes r = my_res_open() !> @destroy;   // → defer my_res_close
 ```
 
-Hook order when both exist: registered pre-destroy → call-site `@destroy { … }`
-body → registered destroy (nursery: wait → your body → free). Details:
-[Language Concepts §1](language-concepts.md#1-cleanup-binds-to-a-place).
+Nursery: wait → your body → free, then any nested value-field hooks.
+Details: [Language Concepts §1](language-concepts.md#1-cleanup-binds-to-a-place).
 Full walkthrough (hooks + views): [typehooks-typeviews.md](typehooks-typeviews.md).
 
 ### Results — `T!>(E)`

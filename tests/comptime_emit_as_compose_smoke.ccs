@@ -6,7 +6,11 @@
 typedef struct Base2 { int v; } Base2;
 static int base2_get(Base2 *self) { return self->v; }
 static int base2_dbl(Base2 *self) { return self->v * 2; }
-typedef struct Wrap2 { Base2 base @as; int tag; } Wrap2;
+typedef struct Wrap2 { Base2 base; int tag; } Wrap2;
+@typeview on Wrap2 {
+    as: base;
+};
+
 
 /* as-composition reflection driving @emit (not just printf unroll). */
 @comptime for (f in type_of(Wrap2).fields) {

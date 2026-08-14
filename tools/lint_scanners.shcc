@@ -110,7 +110,7 @@ static int baseline_get(CCSlice path) {
 
 CCArena a = @create(megabytes(8)) @destroy;
 
-/* File/glob Results are CCIoError; handler matches via @as → CCError. */
+/* File/glob Results are CCIoError; handler matches via as: → CCError. */
 @errhandler(CCError e) {
     CCString em = @string(
         `lint_scanners: ${cc_io_error_str(cc_io_error(e))} (kind=${(int)e.kind})`, &a);

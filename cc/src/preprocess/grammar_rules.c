@@ -126,6 +126,8 @@ typedef struct {
                                                  * dst == NULL -> measure only;
                                                  * dst != NULL -> write at most cap
                                                  * bytes (need > cap = didn't fit) */
+    int nest_max;   /* default 128; `depth N` in the @grammar block */
+    int nest_set;
 } RG;
 
 static int rg_line_at(const RG* g, size_t at) {
@@ -663,6 +665,26 @@ static int rg_parse_text(RG* g, int depth, int base) {
             p = ie;
             continue;
         }
+        if (e - p == 5 && memcmp(g->body + p, "depth", 5) == 0 &&
+            (q >= g->n || g->body[q] != ':')) {
+            if (depth != 0)
+                return rg_fail(g, p, "depth is only valid in the @grammar block");
+            if (g->nest_set)
+                return rg_fail(g, p, "duplicate depth directive");
+            q = rg_ws(g, q);
+            {
+                long v = 0; int nd = 0;
+                while (q < g->n && g->body[q] >= '0' && g->body[q] <= '9') {
+                    v = v * 10 + (g->body[q++] - '0'); nd++;
+                    if (v > 65535) return rg_fail(g, p, "depth too large (max 65535)");
+                }
+                if (!nd || v < 1) return rg_fail(g, p, "expected depth N (1..65535)");
+                g->nest_max = (int)v;
+                g->nest_set = 1;
+            }
+            p = q;
+            continue;
+        }
         if (q >= g->n || g->body[q] != ':') return rg_fail(g, p, "expected ':' after rule name");
         if (e - p >= R_NAME_MAX) return rg_fail(g, p, "rule name too long");
         if (g->nrules >= R_MAX_RULES) return rg_fail(g, p, "too many rules");
@@ -1137,6 +1159,7 @@ typedef struct {
     char** buf; size_t* len; size_t* cap; RFirst* F; RKeeps* K;
     int mode; int dk; int risk; int dom;
     int last_pad; int omit_lead_pad;
+    int nest;   /* 1: generated rule fns take cc_depth (rules engine) */
     /* piece-scratch arena: stack-rooted, heap-overflow (cc_arena_stack at
      * the driver entries). Contents are valid only until the next eb_emit —
      * every text piece is copied into the output buffer and the scratch
@@ -1284,6 +1307,12 @@ static void rg_emit_number_fast(const RG* g, EB* e, int int_nd, const char* fail
     e->last_pad = -1;
 }
 
+/* Extra arg for generated rule calls: rules-engine functions take cc_depth. */
+static const char* eb_darg(const EB* e, int inc) {
+    if (!e->nest) return "";
+    return inc ? ", cc_depth + 1" : ", cc_depth";
+}
+
 /* Emit a pad rule by index (inline when tiny). No-op if already satisfied. */
 static void rg_emit_pad_rule(const RG* g, EB* e, int pad, const char* fail, int* lbl) {
     if (pad < 0 || e->last_pad == pad) return;
@@ -1292,11 +1321,14 @@ static void rg_emit_pad_rule(const RG* g, EB* e, int pad, const char* fail, int*
         rg_emit_node(g, e, body, fail, lbl, pad);
     } else {
         if (!rk_rule(g, e->K, pad))
-            eb_emit(e, cc_gr_pad_call_text(e->scratch, g->name, "r", g->rules[pad].name, fail));
+            eb_emit(e, cc_gr_pad_call_text(e->scratch, g->name, "r", g->rules[pad].name, fail,
+                                             eb_darg(e, 0)));
         else if (e->mode == 1)
-            eb_emit(e, cc_gr_pad_call_ctx_text(e->scratch, g->name, "b", g->rules[pad].name, fail));
+            eb_emit(e, cc_gr_pad_call_ctx_text(e->scratch, g->name, "b", g->rules[pad].name, fail,
+                                                 eb_darg(e, 0)));
         else
-            eb_emit(e, cc_gr_pad_call_text(e->scratch, g->name, "m", g->rules[pad].name, fail));
+            eb_emit(e, cc_gr_pad_call_text(e->scratch, g->name, "m", g->rules[pad].name, fail,
+                                             eb_darg(e, 0)));
     }
     e->last_pad = pad;
 }
@@ -1366,13 +1398,13 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
             const char* suf = use_np ? "__np" : "";
             if (!rk_rule(g, e->K, x->nkids))   /* pure rule: ONE shared ctx-free variant */
                 eb_emit(e, cc_gr_ref_call_text(e->scratch, g->name, "r", g->rules[x->nkids].name,
-                                                 suf, 0, fail));
+                                                 suf, 0, fail, eb_darg(e, 1)));
             else if (e->mode == 1)
                 eb_emit(e, cc_gr_ref_call_text(e->scratch, g->name, "b", g->rules[x->nkids].name,
-                                                 suf, 1, fail));
+                                                 suf, 1, fail, eb_darg(e, 1)));
             else
                 eb_emit(e, cc_gr_ref_call_text(e->scratch, g->name, "m", g->rules[x->nkids].name,
-                                                 suf, 0, fail));
+                                                 suf, 0, fail, eb_darg(e, 1)));
             e->last_pad = tp;
             break;
         }
@@ -1615,7 +1647,7 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
     RFirst* F = (RFirst*)calloc(1, sizeof(RFirst));
     RKeeps* K = (RKeeps*)calloc(1, sizeof(RKeeps));
     cc_arena_stack(sc, 32768);   /* piece scratch: stack root, heap overflow */
-    EB e = { &out, &len, &cap, F, K, 0, -1, 0, 0, -1, -1, &sc };
+    EB e = { &out, &len, &cap, F, K, 0, -1, 0, 0, -1, -1, 1, &sc };
     int lbl = 0;
     if (!F || !K) { free(F); free(K); return NULL; }
     e.dom = want_dom;
@@ -1637,6 +1669,7 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
         eb_emit(&e, cc_gr_rules_manifest_none_text(e.scratch));
     eb_emit(&e, cc_gr_rules_manifest_close_text(e.scratch));
     eb_emit(&e, cc_gr_rules_typedef_text(e.scratch, g->name, g->nrules));
+    eb_emit(&e, cc_gr_nest_max_text(e.scratch, g->name, g->nest_max));
     /* collect context: span log with cursor-coupled rollback (nlog restores
      * alongside p, so failed-branch keeps are never replayed). */
     /* THE TAPE — the one substrate every consumption form projects from.
@@ -1825,10 +1858,12 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
                         }
                         if (pure[r] || !mode)
                             eb_emit(&e, cc_gr_ref_call_text(e.scratch, g->name, pure[r] ? "r" : "m",
-                                                              g->rules[r].name, "__np", 0, fail));
+                                                              g->rules[r].name, "__np", 0, fail,
+                                                              eb_darg(&e, 0)));
                         else
                             eb_emit(&e, cc_gr_ref_call_text(e.scratch, g->name, "b",
-                                                              g->rules[r].name, "__np", 1, fail));
+                                                              g->rules[r].name, "__np", 1, fail,
+                                                              eb_darg(&e, 0)));
                         eb_emit(&e, cc_gr_pp_close_text(e.scratch));
                     } else {
                         rg_emit_node(g, &e, g->rules[r].node, fail, &lbl, r);
@@ -2043,6 +2078,8 @@ typedef struct {
     int bindbit[S_MAX_TERMS];            /* term idx -> presence bit (-1 none) */
     int nbinds;                          /* fields in declaration order */
     int presence;                        /* conditional schema: emit cc__set bitmap */
+    int nest_max;                        /* default 128; `depth N` override */
+    int nest_set;
 } SS;
 
 static int ss_fail(SS* s, size_t at, const char* msg) {
@@ -2548,6 +2585,20 @@ static int ss_parse(SS* s) {
         char kw[S_NAME];
         if (ss_ident(s, kw, sizeof kw)) {
             ss_ws(s);
+            if (!strcmp(kw, "depth") && !(s->p < s->n && s->b[s->p] == ':')) {
+                if (s->nest_set) return ss_fail(s, save, "duplicate depth directive");
+                {
+                    long v = 0; int nd = 0;
+                    while (s->p < s->n && s->b[s->p] >= '0' && s->b[s->p] <= '9') {
+                        v = v * 10 + (s->b[s->p++] - '0'); nd++;
+                        if (v > 65535) return ss_fail(s, save, "depth too large (max 65535)");
+                    }
+                    if (!nd || v < 1) return ss_fail(s, save, "expected depth N (1..65535)");
+                    s->nest_max = (int)v;
+                    s->nest_set = 1;
+                }
+                continue;
+            }
             if (!strcmp(kw, "rules") && s->p < s->n && s->b[s->p] == '[') {
                 if (s->rtext) return ss_fail(s, save, "duplicate rules [...] section");
                 if (s->usename[0]) return ss_fail(s, save, "schema has `use` — inline rules [...] not allowed (v1: one or the other)");
@@ -3046,7 +3097,7 @@ static void rs_emit_matchers(RG* g, EB* e, int* lbl, const unsigned char* mark) 
                     body = g->nodes[body].a;
                 rg_emit_node(g, e, g->kids[g->nodes[body].b], fail, lbl, r);
                 eb_emit(e, cc_gr_np_call_text(e->scratch, g->name, rs_class(g, e->K, r),
-                                                g->rules[r].name, fail));
+                                                g->rules[r].name, fail, eb_darg(e, 0)));
             } else {
                 rg_emit_node(g, e, g->rules[r].node, fail, lbl, r);
             }
@@ -3070,7 +3121,7 @@ static void rs_emit_x(RG* g, EB* e, int* lbl, int r) {
 static void rs_emit_pad(RG* g, EB* e, int prule, const char* fail) {
     if (prule < 0) return;
     eb_emit(e, cc_gr_pad_call_text(e->scratch, g->name, rs_class(g, e->K, prule),
-                                     g->rules[prule].name, fail));
+                                     g->rules[prule].name, fail, eb_darg(e, 0)));
 }
 
 /* fusable int run: `keep [opt(charset=={'-'}) some(charset=contiguous range
@@ -3157,7 +3208,7 @@ static void rs_emit_bind_value(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, c
          * validated the digits; strtoll would copy and re-scan them (and is
          * a strtoll prefix-parse either way: stops at the first non-digit,
          * so `int` over a float span binds its integer part). */
-        eb_emit(e, cc_gr_bind_int_span_text(e->scratch, k, cc__fpfx, t->field));
+        eb_emit(e, cc_gr_bind_int_span_text(e->scratch, k, cc__fpfx, t->field, fail));
         return;
     }
     if (t->kind == SK_BIND_FLOAT) {
@@ -3696,7 +3747,7 @@ static void rs_emit_narrow_members(SS* ss, RG* g, EB* e, int* lbl, const STerm* 
     }
     eb_emit(e, cc_gr_key_default_text(e->scratch, k));
     eb_emit(e, cc_gr_pad_call6_text(e->scratch, g->name, rs_class(g, e->K, w->val_rule),
-                                      g->rules[w->val_rule].name, fail));
+                                      g->rules[w->val_rule].name, fail, eb_darg(e, 0)));
     eb_emit(e, cc_gr_key_loop_end_text(e->scratch, k));
     eb_emit(e, cc_gr_lvec_sep_close_text(e->scratch, w->sep_b));
     rw_emit_pads(g, e, w->tpad, w->ntpad, fail);
@@ -3755,7 +3806,7 @@ static void rs_emit_fields(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, const
     eb_emit(e, cc_gr_key_default_text(e->scratch, k));
     if (ss->rfelse >= 0)
         eb_emit(e, cc_gr_pad_call6_text(e->scratch, g->name, rs_class(g, e->K, ss->rfelse),
-                                          g->rules[ss->rfelse].name, fail));
+                                          g->rules[ss->rfelse].name, fail, eb_darg(e, 0)));
     else
         eb_emit(e, cc_gr_unknown_member_text(e->scratch, fail));
     eb_emit(e, cc_gr_key_loop_end_text(e->scratch, k));
@@ -3830,7 +3881,7 @@ static void rs_emit_term(SS* ss, RG* g, EB* e, int* lbl, int ti, const char* fai
         break;
     case SK_RULE:
         eb_emit(e, cc_gr_pad_call_text(e->scratch, g->name, rs_class(g, e->K, t->rule),
-                                         g->rules[t->rule].name, fail));
+                                         g->rules[t->rule].name, fail, eb_darg(e, 0)));
         break;
     case SK_BIND_SLICE:
     case SK_BIND_INT:
@@ -3955,6 +4006,7 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
     if (!ss) { snprintf(err, err_sz, "@grammar(schema): out of memory"); return NULL; }
     ss->b = body; ss->n = body_len; ss->line0 = line;
     ss->uterm = -1;
+    ss->nest_max = 128;
     memset(ss->vof, -1, sizeof ss->vof);
 
     if (ss_parse(ss)) {
@@ -3990,6 +4042,7 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
         g->body = ss->rtext; g->n = ss->rlen; g->name = name;
     }
     g->file = file; g->line0 = line;
+    g->nest_max = 128;
     if (rg_parse(g) != 0) {
         snprintf(err, err_sz, "@grammar(schema) %s: %s grammar failed to parse: %s",
                  name, reg ? "used" : "inline", g->err);
@@ -4188,7 +4241,7 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
     cc__sname = name;
     cc__fpfx[0] = '\0';
     {
-    EB e = { &out, &len, &cap, F, K, 0, -1, 0, 0, -1, -1, &sc };
+    EB e = { &out, &len, &cap, F, K, 0, -1, 0, 0, -1, -1, 0, &sc };
     int lbl = 0;
     unsigned char local_xdone[R_MAX_RULES];
     unsigned char* xdone = reg ? reg->x_done : local_xdone;
@@ -4201,6 +4254,7 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                             " *   cc_measure(T, &v) / v.measure()                   -> T_measure (exact size; 0 = cannot emit)\n"
                             " *   cc_format(T, &v, arena) / v.to_str(arena)         -> T_to_str\n"
                           : ""));
+    eb_emit(&e, cc_gr_nest_max_text(e.scratch, name, ss->nest_max));
         if (!reg || !reg->matchers_done) {
             /* private grammars emit only what this schema can reach; rules
              * the schema CALLS by name (pads, else, bare terms) are roots
@@ -4559,6 +4613,7 @@ static char* cc__rules_emit(const char* name, const char* body, size_t body_len,
     RG* g = (RG*)calloc(1, sizeof(RG));
     if (!g) { snprintf(err, err_sz, "@grammar(rules): out of memory"); return NULL; }
     g->body = body; g->n = body_len; g->file = file; g->line0 = line; g->name = name;
+    g->nest_max = 128;
 
     char* out = NULL;
     if (rg_parse(g) == 0) {

@@ -1,0 +1,18 @@
+/* `@restricted` is removed; use `@typeview`. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct {
+    int n;
+} Box;
+
+@restricted on Box {
+    r: n;
+};
+
+int main(void) {
+    Box b = {0};
+    (void)b;
+    printf("unreachable\n");
+    return 0;
+}

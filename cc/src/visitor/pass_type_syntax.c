@@ -1175,7 +1175,7 @@ char* cc__rewrite_inferred_result_constructors(const char* src, size_t n) {
                                         free(out);
                                         free(rvars);
                                         fprintf(stderr,
-                                                "error: cc_err: ambiguous @as path "
+                                                "error: cc_err: ambiguous as: path "
                                                 "from '%s' to 'CCError'\n",
                                                 oty);
                                         return NULL;

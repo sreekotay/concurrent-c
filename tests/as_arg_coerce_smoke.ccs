@@ -1,4 +1,4 @@
-/* @as arg-position autocast: Outer* / &Outer where T* expected → &x.name.
+/* as: arg-position autocast: Outer* / &Outer where T* expected → &x.name.
  * `tag` precedes `file` so &wrap != &wrap.file — layout alone cannot pass. */
 #include <ccc/std/prelude.cch>
 #include <assert.h>
@@ -7,8 +7,12 @@
 
 typedef struct {
     int tag;
-    CCFile file @as;
+    CCFile file;
 } AsArgWrap;
+
+@typeview on AsArgWrap {
+    as: file;
+};
 
 static CCFile *g_got;
 
@@ -35,7 +39,7 @@ int main(void) {
     takes_file(&w.file);     /* already member — unchanged */
     assert(g_got == &w.file);
 
-    /* Explicit non-first @as: cast keeps C meaning (wrong address) — warn only.
+    /* Explicit non-first as: face: cast keeps C meaning (wrong address) — warn only.
      * Do not assert on the cast result; just ensure it compiles. */
     takes_file((CCFile *)&w);
 

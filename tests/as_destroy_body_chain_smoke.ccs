@@ -1,4 +1,5 @@
-/* @destroy { body } then outer hook then as: embeds (draft_as §3). */
+/* @destroy { body } then outer hook then value embeds (draft_as §3).
+ * `as:` is present so UFCS still works; destroy does not require it. */
 #include <ccc/std/prelude.cch>
 #include <assert.h>
 #include <stdio.h>
