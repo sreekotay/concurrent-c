@@ -70,6 +70,9 @@ Rules that matter in practice:
   the left plus the argument list.
 - If the type registers destroy, `@create(...)` must be followed by
   `@destroy` or `@detach`. Omitting both is an error.
+- `@destroy` attaches to the **declaration**, not only to `@create`.
+  `Port p = {0} @destroy;` and `Port p = port_open(3) @destroy;` run
+  the destroy function at scope exit the same way.
 - `@destroy;` runs the destroy function. `@destroy { … }` runs
   **pre-destroy → your block → destroy**.
 
@@ -107,7 +110,7 @@ static void port_close(Port* p) {
     p->alive = 0;
 }
 
-static int port_put_2(Port* p, char[:] data) { //alternate implemenation name
+static int port_put_2(Port* p, char[:] data) { /* .put → this name, not port_put */
     (void)p;
     return (int)data.len;
 }
@@ -202,9 +205,12 @@ int main(void) {
 }
 ```
 
-`as:` names **value embeds** only, at most one path per target type. An
-`as:`-only unnamed view does **not** lock the allow-list — other fields
-(`t.tag`) stay ordinary.
+`as:` names **value embeds** only, at most one path per target type.
+Distinct types may each have a face (`as: file, path;`). UFCS that
+misses on the outer type retries each face in **declaration order**.
+If two faces both have the method, the call is ill-formed — write
+`t.file.write(...)`. An `as:`-only unnamed view does **not** lock the
+allow-list — other fields (`t.tag`) stay ordinary.
 
 A trailing-`*` subject installs the same face on every match that has the
 field; types that match the glob but lack the field are skipped:
