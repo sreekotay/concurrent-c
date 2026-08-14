@@ -248,6 +248,44 @@ io.println(@string(`n=${n}`, @scratch)) !>;
 
 ---
 
+## Template strings (`@string`)
+
+Backtick templates interpolate into a `CCString` or a stack `char[:]` borrow.
+There is no printf `format` entry point. Spec:
+[§9.1](../spec/concurrent-c-spec-complete.md#91-strings).
+
+| Form | Yields |
+|------|--------|
+| `@string(expr, a)` | `CCString` from a literal or `expr.to_str(a)` |
+| `` @string(`…`, a) `` | templated `CCString` in arena `a` |
+| `` @string(policy, `…`, a) `` | same; `${…}` / `$~tag{…}` slots go through `policy` |
+| `` @string(`…`, @scratch) `` / `@scratch(N)` | same, shared function scratch (default 1 KiB) |
+| `` @string(`…`) `` | `char[:]` stack borrow — ints / `bool` / `char` only |
+
+```c
+CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+int n = 42;
+CCString msg = @string(`n=${n}; price=$100`, &a);      // owned
+char[:] hdr = @string(`:${n}\r\n`);                    // block-scoped borrow
+println(@string(`len=${msg.len()}`, @scratch)) !>;     // throwaway
+```
+
+| In the template | Meaning |
+|-----------------|--------|
+| `${e}` | interpolate (`to_str` when `e` is not already text) |
+| `$~tag{e}` | tagged slot (arena + policy); policy sees `"tag"` |
+| other `$` | literal (`$100` needs no escape) |
+| `\${` / `\$~` | emit `${` / `$~` |
+| `${{…}}` | verbatim bytes — no escapes, no slots; inner backticks do not close the literal |
+
+Multiline backticks **dedent** to the closing backtick's margin. `@scratch`
+products stay in that function — do not `return`, capture, or send them.
+Arena-less `` @string(`…`) `` is a compile error on slices, `CCString`, floats,
+or pointers (pass an arena). Growth failure poisons the `CCString`; it never
+truncates.
+
+---
+
 ## Structured concurrency
 
 ```c
