@@ -1,0 +1,13 @@
+/* Fail: !>; textually above @errhandler in the same block (declaration-point). */
+static int !> (CCError) always_err_cc(void) {
+    return cc_err(CC_ERR_NOT_FOUND, "cc");
+}
+
+int main(void) {
+    always_err_cc() !>;
+    @errhandler(CCError e) {
+        (void)e;
+        return 1;
+    }
+    return 0;
+}

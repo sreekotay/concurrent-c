@@ -16,8 +16,8 @@ New to Concurrent-C? Work through these in order:
 | # | File | Concept | What you'll learn |
 |---|------|---------|-------------------|
 | 1  | `hello.ccs` | First nursery | `cc_nursery_create`, `n->spawn()`, basic structured concurrency |
-| 2  | `recipe_result_error_handling.ccs` | Results & `@errhandler` | `T!>(E)`, `!>`, `!>;`, `?>`, hoisted error policy |
-| 3  | `recipe_unwrap_destroy_forms.ccs` | Unwrap shape | Same two ops × modifiers × `@destroy` — the whole product |
+| 2  | `recipe_result_error_handling.ccs` | Results & `@errhandler` | `?>` : `E → T`; `!>` : `E →` control flow; `(e)` exposes; bare `!>` routes |
+| 3  | `recipe_unwrap_destroy_forms.ccs` | Unwrap shape | Same two ops × modifiers; `@destroy` on successful construction |
 | 4  | `recipe_ufcs_forms.ccs` | UFCS shape | One dispatch rule × spellings (families, bare-name, fallible chains) |
 | 5  | `recipe_fanout_capture.ccs` | Multiple tasks | Spawning N tasks, fresh per-iteration captures |
 | 6  | `recipe_explicit_capture.ccs` | Capture semantics | Value vs reference capture, mutation rules |
@@ -52,8 +52,8 @@ Minimal concurrent hello world — shows explicit nursery creation and task spaw
 | `recipe_long_lived_store.ccs` | Long-lived store | Explicit provenance movement into an arena-owned store |
 | `recipe_defer_cleanup.ccs` | Cleanup | `@defer` on scope exit |
 | `recipe_timeout.ccs` | Deadline | Cooperative cancellation |
-| `recipe_result_error_handling.ccs` | Results | `T!>(E)`, `@errhandler`, `!>;`, `?>` |
-| `recipe_unwrap_destroy_forms.ccs` | Unwrap matrix | Every `!>` / `?>` / `@destroy` product (composability) |
+| `recipe_result_error_handling.ccs` | Results | `?>` : `E → T`; `!>` : `E →` control flow; `(e)` / bare `!>` |
+| `recipe_unwrap_destroy_forms.ccs` | Unwrap matrix | Two ops × modifiers; `@destroy` on successful construction |
 | `recipe_ufcs_forms.ccs` | UFCS matrix | One rule × spellings, including bare-name and fallible chains |
 | `recipe_ordered_parallel.ccs` | Ordered fan-out | `send_task` + ordered recv, FIFO await |
 

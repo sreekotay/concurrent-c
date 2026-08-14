@@ -1,6 +1,6 @@
 ### Concurrent-C (CC) — a strict C11-superset language + toolchain
 
-**Version:** 0.3.2-124 (`ccc --version`)
+**Version:** 0.3.3-128 (`ccc --version`)
 
 Concurrent‑C is a **strict C11-superset preprocessor**: `.ccs` lowers to
 plain C and compiles with your **host C compiler**. Structured concurrency,

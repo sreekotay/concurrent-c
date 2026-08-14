@@ -795,7 +795,10 @@ static void *ccpy__cb_trampoline(void *self, void *args) {
     intptr_t n;
     if (!box) return cc__py_raise("cc-python: corrupt callback capsule");
     d = box->dom;
-    if (box->dead || !d || d->closed || d->stopping)
+    /* `stopping` is revoke-in-progress: new JS doors refuse via ccpy__dom.
+     * Python→JS hops of the in-flight job still run so list(map) can
+     * finish after a callback calls destroy(). */
+    if (box->dead || !d || d->closed)
         return cc__py_raise("cc-python: bridge is closed");
     n = args ? cc__py.TupleSize(args) : 0;
     if (n > CCPY__JOB_MAX_ARGS)
@@ -956,7 +959,7 @@ static void ccpy__cb_service(void *env, CcJsCbReq *req) {
     void *ret = NULL;
     int i;
     int failed = 0;
-    if (box->dead || d->closed || d->stopping) {
+    if (box->dead || d->closed) {
         snprintf(req->errmsg, sizeof(req->errmsg),
                  "cc-python: bridge is closed");
         failed = 1;

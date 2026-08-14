@@ -6,7 +6,7 @@
 #include <string.h>
 
 #ifndef CCC_VERSION_BASE
-#define CCC_VERSION_BASE "0.3.2"
+#define CCC_VERSION_BASE "0.3.3"
 #endif
 #ifndef CCC_BOOTSTRAP_SEED
 #define CCC_BOOTSTRAP_SEED 0

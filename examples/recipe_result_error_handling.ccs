@@ -1,18 +1,15 @@
 /*
  * Recipe: Result Types and Error Unwrapping
  *
- * Functions that can fail return T!>(E). There are exactly TWO error
- * operators, split by what the error becomes:
+ * Functions that can fail return T!>(E). Two operators; three modifiers:
  *
- *   ?>   the error becomes a VALUE — expr ?> default
- *   !>   the error becomes CODE   — expr !> { ... }   (body must diverge)
+ *   ?>        E → T              stay a value — expr ?> default
+ *   !>        E → control flow   leave        — expr !> { ... }  (body must diverge)
  *
- * Everything else is a modifier on those two:
- *
- *   (e)  binds the error:  expr ?>(e) fallback(e.kind)
+ *   (e)       exposes E:   expr ?>(e) fallback(e.kind)
  *                          expr !>(e) { cc_error_log(e); return 1; }
- *   ;    the code is the handler declared at the top of the scope:
- *        expr !>;          (requires an enclosing @errhandler)
+ *   bare !>   routes E to the scope's @errhandler — expr !>;
+ *   @destroy  cleanup on successful declaration construction
  *
  * Hoist a policy with @errhandler — either a named helper statement
  * (`cc_error_exit(e);`) or a block (`{ cc_error_log(e); return 1; }`)

@@ -1,0 +1,28 @@
+/*
+ * Nested unwrap before an inner @errhandler must use the outer handler
+ * already in scope (emit must not hoist the inner declaration).
+ */
+#include <stdio.h>
+#include <ccc/std/prelude.cch>
+
+static int g_hit;
+
+static int !> (CCError) always_err_cc(void) {
+    return cc_err(CC_ERR_NOT_FOUND, "cc");
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        (void)e;
+        g_hit = 1;
+    }
+    {
+        always_err_cc() !>;
+        @errhandler(CCError e) {
+            (void)e;
+            g_hit = 2;
+        }
+    }
+    printf("g_hit=%d\n", g_hit);
+    return (g_hit == 1) ? 0 : 1;
+}

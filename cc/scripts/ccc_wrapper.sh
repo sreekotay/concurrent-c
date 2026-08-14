@@ -23,7 +23,21 @@
 #   CCC_LOWER_VERBOSE=1      print paths + reason for lowering.
 set -e
 
-SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Follow $0 through symlinks so a PATH shim (~/.local/bin/ccc → this
+# script) still finds .ccc-bin next to the real wrapper, not next to the link.
+SELF=$0
+case "$SELF" in
+    /*) ;;
+    *) SELF="$(pwd)/$SELF" ;;
+esac
+while [ -L "$SELF" ]; do
+    link=$(readlink "$SELF")
+    case "$link" in
+        /*) SELF=$link ;;
+        *) SELF="$(cd "$(dirname "$SELF")" && pwd)/$link" ;;
+    esac
+done
+SELF_DIR="$(cd "$(dirname "$SELF")" && pwd)"
 REAL_BIN="$SELF_DIR/.ccc-bin"
 CC_DIR="$(cd "$SELF_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$CC_DIR/.." && pwd)"

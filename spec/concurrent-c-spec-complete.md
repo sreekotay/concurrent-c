@@ -261,9 +261,10 @@ bugs.
 | `@typehooks`   | Lifecycle / UFCS policy on a type                                       | `@typehooks on T { .destroy = …, };`   |
 | `@typeview`    | Faces (`as:`) and allow-lists on a type                                 | `@typeview on T { as: file; };`        |
 | `@scoped`      | Type tied to a lexical scope (cannot escape)                            | `@scoped type Guard::[T];`             |
+| `@unsafe`      | Closure hatch: skip mutation-of-share checks on that spawn              | `n->spawn(@unsafe () => [&x] { x++; });` |
 | `@slice`       | Build-time canonical sentinel slice                                     | `char[:0] m = @slice("recv");`         |
 | `@string`      | Templated string: arena `String`, or arena-less bounded `char[:]` (§9.1.2) | `CCString s = @string("hi", &arena);`  |
-| `unsafe`       | (Bare) disable safety checks in a block                                 | `unsafe { ptr_cast(); }`               |
+| `unsafe`       | (Bare) waive provenance and sendability in a block                      | `unsafe { ptr_cast(); }`               |
 
 
 ### Declaration and Statement Forms
@@ -760,7 +761,7 @@ carries a leading `@` sigil at the lexer level. The set includes
 (non-exhaustive): `@async`, `@await`, `@blocking`, `@noblock`,
 `@match` (reserved and rejected), `@defer`, `@defer(err)`, `@defer(ok)`, `@cancel`,
 `@errhandler`, `@err`, `@destroy`, `@with_deadline`, `@comptime`,
-`@for`, `@latency_sensitive`, `@scoped`, `@slice`, `@string`,
+`@for`, `@latency_sensitive`, `@scoped`, `@unsafe`, `@slice`, `@string`,
 `@typehooks`, `@typeview`.
 The bare
 identifiers `async`, `await`, `blocking`, `noblock`, `match`, `defer`,
@@ -1516,15 +1517,15 @@ The central rule: **No scope-bound value may be held across a suspension point.*
 
 ### 4.1 Scope-Bound Types (`@scoped`)
 
-A type marked `@scoped` is **tied to a lexical scope** and cannot outlive that scope. Most importantly, a scope-bound value cannot be held across a suspension point (@await, @async call).
+A type marked `@scoped` is **tied to a lexical scope** and cannot outlive that scope. Most importantly, a scope-bound value cannot be held across a suspension point (`@await`, `cc_block_on` / `cc_block_on_intptr`). Constructing a `CCTaskIntptr` from an `@async` call is not a suspension point (§8.3).
 
 Types registered as scope-bound cannot cross the boundaries below.
 
 **Characteristics:**
 
-- Cannot be returned from a function (unless function is `@noawait`)
+- Cannot be returned from a function
 - Cannot be stored in a non-scoped struct field
-- Cannot be passed across `@await` or `@async` function call boundaries
+- Cannot be passed into an `@async` function or held across `@await`
 - Must be released before any suspension point
 - Compiler enforces these restrictions at compile time
 
@@ -1554,14 +1555,16 @@ A **suspension point** is any program point at which execution of the current ta
 
 **Suspension points:**
 
-- `@await` expression (any @await)
-- Call to `@async` function
-- A suspending `send`, `send_take`, or `recv` in an `@async` body
+- `@await` expression (any `@await`)
+- A suspending `send`, `send_take`, or `recv` in an `@async` body (these require `@await`)
 - Call to `cc_block_on` / `cc_block_on_intptr` (explicit blocking)
+
+An `@async` call constructs a `CCTaskIntptr` (§8.3). The parent does not suspend at that construction. Polling the task, `@await` of it, or `cc_block_on_intptr` is what suspends.
 
 **Non-suspension points** (safe to hold scope-bound values):
 
-- Call to sync function (non-`@async`)
+- Call to a sync function
+- An `@async` call used only to construct a `CCTaskIntptr` (no `@await` / poll / `cc_block_on`)
 - Local variable creation / destruction
 - Arithmetic, logic, control flow
 - Non-blocking operations (`try_send`, `try_recv`, `close`)
@@ -1619,7 +1622,7 @@ fn handle(@scoped RequestContext ctx) {
 }
 ```
 
-`@scoped` on a parameter means the value must be released (or the function must be `@noawait`) before any suspension point.
+`@scoped` on a parameter means the value must be released before any suspension point.
 
 **Invalid positions (compile error):**
 
@@ -3660,7 +3663,7 @@ and the C task APIs in `<ccc/cc_sched.cch>` at explicit runtime boundaries.
 
 ### 8.4 Channels: Async vs Sync (Type-Based)
 
-Channels are **explicitly typed as async or sync** at declaration. The type determines whether operations suspend (`@async` channel) or block (sync channel). This eliminates context-dependent behavior and ensures compiler safety.
+Channels are **typed as async or sync** at declaration. Sync handles always block. Async handles suspend cooperatively inside `@async` (those ops are written `@await`) and park a fiber or block a thread when called bare outside `@async` (§7 Operations Comparison, §8.4.2).
 
 Channels also support **backpressure modes** to handle overload gracefully in server workloads.
 
@@ -3910,10 +3913,11 @@ Same error handling semantics; only difference is blocking vs suspending.
 
 | Aspect                   | Async handles (`int[~ ... >]` / `int[~ ... <]`) | Sync handles (`int[~ ... sync ... >]` / `int[~ ... sync ... <]`) |
 | ------------------------ | ----------------------------------------------- | ---------------------------------------------------------------- |
-| **Must @await**           | Yes, always                                     | No, never                                                        |
-| **Blocks OS thread**     | No                                              | Yes                                                              |
-| **Use in `@async` code** | Yes (primary)                                   | No (use async instead)                                           |
-| **Use in sync code**     | No (use task)                                   | Yes (primary)                                                    |
+| **`@await` inside `@async`** | Required on `send` / `recv` / `send_take`    | Never (adding `@await` is a compile error)                       |
+| **`@await` outside `@async`** | Never — bare ops park a fiber or block a thread | Never                                                          |
+| **Blocks OS thread**     | Only when the caller is a plain thread waiting on the op | Yes, when the op waits                                 |
+| **Use in `@async` code** | Yes (primary)                                   | Allowed; the op blocks, with no `@await`                         |
+| **Use in sync / fiber code** | Yes — same surface, no `@await`              | Yes (primary)                                                    |
 | **Multiplex via `cc_chan_match_select`** | Yes                             | Yes (blocks OS thread)                                           |
 | **Cancellation result** | `err(cc_io_from_errno(ECANCELED))` when observed      | `err(cc_io_from_errno(ECANCELED))` when observed                  |
 | **Example use**          | Async streams, work queues in nurseries         | Thread coordination, OS thread pools                             |
@@ -5810,6 +5814,8 @@ Because CC is a C preprocessor, **native C interop is first-class**. The entire 
 - slice provenance
 - sendability enforcement
 
+It does **not** disable escape / borrow checks (stack-slice capture into an escaping closure, scope-bound values). Those stay enforced. Mutation-of-share on a spawned closure is a separate hatch: `@unsafe` on that closure (§6.2), not the `unsafe {}` block.
+
 **Rule:** `unsafe {}` affects only the enclosed block and does not propagate to callees unless they are lexically inside the block.
 
 **Rule:** Runtime debug assertions only apply when the relevant metadata exists (e.g., tracked allocations). Slices created in `unsafe` without provenance metadata will not trigger debug assertions that depend on that metadata.
@@ -6846,8 +6852,9 @@ This appendix provides comprehensive guidance for C interoperability and unsafe 
 `unsafe {}` suspends compile-time safety checks for the enclosed block only. The following checks are disabled:
 
 - **Slice provenance tracking:** Slices created in `unsafe` do not have tracked allocation IDs.
-- **Sendability verification:** Non-sendable types may be captured in closures within `unsafe`.
-- **Borrow checking:** Borrow lifetime rules are not enforced.
+- **Sendability verification:** Non-sendable types may be value-captured in closures within `unsafe`.
+
+Escape / borrow checks remain in force. A stack slice or stack reference that outlives the frame is still a compile error. Mutation of a shared reference capture is waived only by `@unsafe` on that closure (`n->spawn(@unsafe () => [&x] { x++; })`), not by wrapping the spawn in `unsafe {}`.
 
 **Rule (scope):** `unsafe` is lexically scoped. Nested `unsafe` blocks are allowed; rules only apply within the `unsafe` block and do not propagate to function calls unless they are lexically inside the block.
 
@@ -6863,13 +6870,19 @@ unsafe {
     char[:] s = raw_ptr[..100];  // provenance not tracked
 }
 
-// Casting away sendability
+// Casting away sendability (value capture). Escape checks still run.
 struct NonSendable { pthread_t tid; };
 CCNursery* n = cc_nursery_create(NULL) !> @destroy;
 
 unsafe {
     NonSendable ns = get_non_sendable();
-    n->spawn(() => { use(ns); });  // ERROR still: closure escapes
+    n->spawn(() => { use(ns); });  // OK: sendability waived; value copy
+}
+
+int x = 0;
+unsafe {
+    n->spawn(() => [&x] { x++; });  // ERROR: mutation of shared ref
+                                    // (use @unsafe on the closure)
 }
 ```
 

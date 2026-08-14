@@ -1,0 +1,54 @@
+/*
+ * Inner face (2-hop FaceFar) beats outer face (1-hop CCError).
+ * Hop count is not a rank; nearest unique as: path wins.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct {
+    int tag;
+} FaceFar;
+
+typedef struct {
+    FaceFar far;
+} Mid;
+
+@typeview on Mid {
+    as: far;
+};
+
+typedef struct {
+    FaceFar _hoist; /* not an as: face; Result-arm hoist is one field deep */
+    CCError near;
+    Mid mid;
+} Deep;
+
+@typeview on Deep {
+    as: near;
+    as: mid;
+};
+
+static int g_inner;
+static int g_outer;
+
+static int !> (Deep) always_deep(void) {
+    Deep e = {0};
+    e.near = CC_ERROR(CC_ERR_NOT_FOUND, "deep");
+    e.mid.far.tag = 7;
+    return cc_err(e);
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        (void)e;
+        g_outer = 1;
+    }
+    {
+        @errhandler(FaceFar f) {
+            g_inner = 1 + f.tag;
+        }
+        always_deep() !>;
+    }
+    printf("g_inner=%d g_outer=%d\n", g_inner, g_outer);
+    return (g_inner == 8 && g_outer == 0) ? 0 : 1;
+}

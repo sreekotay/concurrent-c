@@ -16,8 +16,8 @@ strips it; it is not program text. Details:
 ```text
 #!ccc ccs                         # source (.ccs)
 #!ccc cch                         # header (.cch)
-#!ccc ccs version=0.3.2           # pin lowerer (prefix of ccc --version)
-#!/usr/bin/env -S ./cc/bin/ccc version=0.3.2   # script (.shcc); OS shebang
+#!ccc ccs version=0.3.3           # pin lowerer (prefix of ccc --version)
+#!/usr/bin/env -S ./cc/bin/ccc version=0.3.3   # script (.shcc); OS shebang
 ```
 
 `version=MAJOR[.MINOR[.PATCH[-SEED]]]` keeps that file on a matching bootstrap
@@ -34,7 +34,7 @@ ccc path/to/tool.shcc [args…]       # .shcc → implicit run (shebang-friendly
 ccc --emit-c-only file.ccs          # emit C only → out/file.c
 ccc build -O file.ccs               # release (-O2 -DNDEBUG)
 ccc build -g file.ccs               # debug (-O0 -g); default is -O2, asserts kept
-ccc version=0.3.2 run file.ccs      # pin lowerer from CLI (same form as header)
+ccc version=0.3.3 run file.ccs      # pin lowerer from CLI (same form as header)
 ccc --as=ccs file                   # kind when there is no suffix / header
 ```
 

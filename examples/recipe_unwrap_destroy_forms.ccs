@@ -6,10 +6,11 @@
  * version); CI also uses this as a regression sentinel.
  *
  * The combinations below are NOT eleven things to learn: they are two
- * operators — ?> (error becomes a value) and !> (error becomes code) —
- * composed with orthogonal modifiers: (e) binds the error, bare `;`
- * targets the enclosing @errhandler, and @destroy attaches lifecycle.
- * This file enumerates the products; the grammar is 2 + 3.
+ * operators — ?> (E → T) and !> (E → control flow) — composed with
+ * orthogonal modifiers: (e) exposes E, bare !> routes E to the
+ * enclosing @errhandler, and @destroy attaches cleanup to successful
+ * declaration construction. This file enumerates the products; the
+ * grammar is 2 + 3.
  *
  * Sections:
  *    1. @errhandler default (top of scope)
