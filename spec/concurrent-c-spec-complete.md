@@ -5414,12 +5414,12 @@ same parameter as `CCSlice`.
 #### 9.2.0 C strings and call-site literals
 
 ```c
-CCSlice char_to_slice(const char *cstr);
-CCSlice const_char_to_slice(const char *cstr); /* alias; UFCS for const char* */
-/* signedness variants: unsigned_char_to_slice, signed_char_to_slice, … */
-CCSlice cc_slice_from_cstr(const char *cstr);  /* alias of char_to_slice */
+CCSlice char_to_slice_n(const char *p, size_t n);
+CCSlice const_char_to_slice_n(const char *p, size_t n);
+/* signedness variants: unsigned_char_to_slice_n, signed_char_to_slice_n, … */
+CCSlice cc_slice_cstr(const char *cstr);
 
-p->to_slice();   /* UFCS: char* → char_to_slice, const char* → const_char_to_slice */
+p->to_slice_n(n);   /* UFCS: char* → char_to_slice_n, const char* → const_char_to_slice_n */
 ```
 
 **Rule (slice string-literal coerce):** A string literal whose destination is
@@ -5427,68 +5427,67 @@ by-value `CCSlice`, `char[:]`, `char[:0]`, `CCSliceShared`, or `CCSliceUnique`
 — as a call argument or as a local/field initializer — lowers to
 `CC_SLICE_LIT(lit)` (sizeof-static; `len` excludes NUL). Pointer parameters
 (`const char *`, `char *`, including file `mode`) and non-literal `char[N]` /
-`char*` variables are not coerced — wrap variables with `p->to_slice()` /
-`char_to_slice(p)` / `cc_slice_cstr(p)`. This is not general `char[N]` UFCS.
+`char*` variables are not coerced — wrap variables with `p->to_slice_n(n)` /
+`char_to_slice_n(p, n)` / `cc_slice_cstr(p)`. This is not general `char[N]` UFCS.
 
 #### 9.2.1 Core Methods
 
 ```c
-// Normative
-size_t len(T[:] s);
-T[:] slice(T[:] s, int start, int end);
-T* ptr(T[:] s);
+size_t len(CCSlice *s);
+CCSlice sub(CCSlice s, size_t start, size_t end);
 
-// Byte-slice checked index (CCSlice / char[:]) — Result in all builds
 char !>(CCError) at(CCSlice *s, size_t index);           /* = get_checked */
 char !>(CCError) get_checked(CCSlice *s, size_t index);
 bool !>(CCError) set(CCSlice *s, size_t index, char c);
 
-// UFCS
-size_t           s.len();
-char !>(CCError) s.at(size_t i);
-char !>(CCError) s.get_checked(size_t i);
-bool !>(CCError) s.set(size_t i, char c);
-T[:]             s.slice(int start, int end);
-T*               s.ptr();
+s.len();
+s.sub(start, end);
+s.at(i);
+s.get_checked(i);
+s.set(i, c);
 ```
+
+`ptr` is a field (`s.ptr`), not a method. Typed `T[:]` instances expose the same
+`len` / `sub` / `at` names on the generated `CCSlice_<T>` family.
 
 #### 9.2.2 Query Methods
 
-```c
-// Normative
-bool is_empty(T[:] s);
-bool contains(T[:] s, T value);
-int find(T[:] s, T value);              // -1 if not found
+Byte-slice (`CCSlice` / `char[:]`) query helpers are the shipped family in
+`<ccc/cc_slice.cch>` / stdlib. There is no generic `T[:].contains` /
+`T[:].find`.
 
-// UFCS
-bool s.is_empty();
-bool s.contains(T value);
-int  s.find(T value);
+```c
+bool is_empty(CCSlice *s);
+bool has(CCSlice *s, CCSlice needle);
+bool has_ci(CCSlice *s, CCSlice needle);
+bool starts_with(CCSlice *s, CCSlice prefix);
+bool ends_with(CCSlice *s, CCSlice suffix);
+bool eq(CCSlice *s, CCSlice other);
+
+s.is_empty();
+s.has(needle);
+s.has_ci(needle);
+s.starts_with(prefix);
+s.ends_with(suffix);
+s.eq(other);
 ```
+
+`has` / `has_ci` are substring presence. Full signatures and index-of helpers
+are in `spec/concurrent-c-stdlib-spec.md`.
 
 #### 9.2.3 Mutation Methods
 
-```c
-// Normative (mutate in place)
-void reverse(T[:] s);
-void sort(T[:] s);                      // uses default <
-void fill(T[:] s, T value);
-void copy(T[:] dest, T[:] src);
-
-// UFCS
-s.reverse();
-s.sort();
-s.fill(T value);
-s.copy(T[:] src);
-```
-
-Example:
+Shipped byte-slice mutation is in-place length and indexed write. There is no
+generic `T[:].reverse` / `sort` / `fill` / `copy`.
 
 ```c
-int[:] nums = ...;
-nums.sort();
-nums.reverse();
-if (nums.contains(42)) { ... }
+bool !>(CCError) truncate(CCSlice *s, size_t n);
+bool !>(CCError) set(CCSlice *s, size_t idx, char c);
+CCSlice sub(CCSlice s, size_t start, size_t end);
+
+s.truncate(n);
+s.set(i, c);
+s.sub(start, end);
 ```
 
 #### 9.2.4 Iteration
@@ -5507,25 +5506,17 @@ for (int i = 0; i < slice.len(); i++) {
 
 ### 9.3 Arrays
 
-Arrays in CC are still `T[N]` (fixed-size, stack or struct-embedded). UFCS methods work on arrays too (they decay to slices):
-
-```c
-int arr[10];
-
-arr.len();           // 10 (slice decay)
-arr.fill(0);         // fill all
-arr.sort();          // sort
-arr.reverse();       // reverse
-
-// View as slice
-int[:] view = arr[..];
-```
-
----
+Arrays in CC are `T[N]` (fixed-size, stack or struct-embedded). They do not
+grow a generic `fill` / `sort` / `reverse` method family. Byte views use
+`char_to_slice_n` / `to_slice_n` over the storage; typed growable sequences
+use `Vec::[T]`.
 
 ### 9.4 Numeric Types with Methods
 
-Primitive numeric types get UFCS methods for common operations:
+Checked `int64_t` arithmetic (`cc_add_i64_checked` / `sub` / `mul`) and scalar
+`_to_str` / `cc_string_from` live in the stdlib (`spec/concurrent-c-stdlib-spec.md`).
+There is no generic numeric method family (`abs` / `min` / `max` on every
+integer type).
 
 ---
 
@@ -5721,7 +5712,7 @@ bare `eprintln(msg) !>;` inside a matching `@errhandler(E)` is ill-formed
 ```c
 /* @grammar(cli) Opts { … } + cc_prepare_args(Opts, argc, argv, &a, &opts, stderr) */
 
-char[:0] root = cc_script_repo_root(argv[0]->to_slice(), &a) !>;
+char[:0] root = cc_script_repo_root(cc_slice_cstr(argv[0]), &a) !>;
 char[:0] baseline = cc_script_path_join(root, "perf/compiler_baseline.txt", &a);
 if (!cc_script_path_exists(baseline)) { /* … */ }
 
@@ -5739,7 +5730,7 @@ return cc_script_task_shcc(argc, argv, "tools/cc_perf_check.shcc");
 
 Path helpers take NUL-terminated borrows (`char[:0]` / `CCSlice` ABI). String
 literals coerce at by-value slice parameters; `char*` / `argv[i]` variables
-use `p->to_slice()` / `char_to_slice(p)`. `cc_script_repo_root` walks from the
+use `cc_slice_cstr(p)` or `p->to_slice_n(n)`. `cc_script_repo_root` walks from the
 current working directory (and, failing that, from `dirname(argv0)`) looking
 for a Concurrent-C repo marker (`cc/src/cc_main.c`,
 `perf/compiler_baseline.txt`, or `.git`). Returned path slices are
@@ -6007,7 +5998,7 @@ Slice string-literal coerce (§9.2.0) wraps a bare literal at a by-value
 `CCSlice` / `char[:]` / `char[:0]` / `CCSliceShared` / `CCSliceUnique`
 parameter or initializer as `CC_SLICE_LIT(lit)`. Prefer `char[:0] s = "hello";`
 for sentinel borrows. Non-literal `char*` / `char[N]` variables still need
-`p->to_slice()` / `char_to_slice(p)` / `cc_slice_cstr(p)`.
+`p->to_slice_n(n)` / `char_to_slice_n(p, n)` / `cc_slice_cstr(p)`.
 
 **Closures:**
 
@@ -7595,7 +7586,7 @@ typedef struct {
 @typeview on CCIoError { as: base; };
 ```
 
-Kind aliases (`CC_IO_FILE_NOT_FOUND`, `CC_IO_BUSY` / `CC_ERR_WOULD_BLOCK`, …) live on `CCErrorKind`. Parse and bounds errors are ordinary C enums or library structs with no payload constructors.
+Kind aliases (`CC_IO_FILE_NOT_FOUND`, `CC_IO_BUSY` / `CC_ERR_WOULD_BLOCK`, …) live on `CCErrorKind`. Parse and bounds errors are ordinary C enums or library structs with no payload constructors. Constructors, `cc_io_from_errno`, `cc_io_avail`, and the `CC_IO_*` table are in `spec/concurrent-c-stdlib-spec.md` (I/O errors).
 
 ### Backpressure Modes
 

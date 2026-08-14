@@ -9,11 +9,15 @@ The standard library provides these headers under `<ccc/std/...>`:
 
 - `prelude.cch`
 - `slice.cch`
+- `slice_packed.cch`
 - `string.cch`
 - `io.cch`
+- `bufio.cch`
 - `vec.cch`
 - `map.cch`, `map_forward.cch`, and `map_impl.cch`
 - `array_map.cch`
+- `shard_map.cch`
+- `static_map.cch`
 - `dir.cch`
 - `process.cch`
 - `exec.cch`
@@ -29,12 +33,18 @@ The standard library provides these headers under `<ccc/std/...>`:
 
 Portable atomics are provided separately by `<ccc/cc_atomic.cch>`, Python
 interop by `<ccc/script/py.cch>`, and JavaScript interop by
-`<ccc/script/js.cch>` (draft — guest surface implemented).
+`<ccc/script/js.cch>` (draft — guest surface implemented). I/O errors live in
+`<ccc/cc_io_error.cch>` (included by `io.cch` and the runtime).
 
-`<ccc/std/prelude.cch>` includes the core runtime headers and the stdlib slice,
-string, I/O, vector, map-forward, array-map, directory, process, command,
-async-I/O, and future headers. Networking, DNS, TLS, HTTP, CLI, task, hash, and
-full map headers are included explicitly when needed.
+`<ccc/std/prelude.cch>` includes runtime headers (`cc_arena`, `cc_arc`,
+`cc_grammar`, `cc_shape`, `cc_type`, `cc_slice`, `cc_result`, `cc_channel`,
+`cc_nursery`, `cc_exec`) and these stdlib headers: `slice`, `string`,
+`slice_packed`, `io` (which includes `bufio` and `async_io`), `vec`,
+`map_forward`, `array_map`, `shard_map`, `dir`, `process`, `exec`, and
+`future`. Include networking, DNS, TLS, HTTP, CLI, task, hash, `static_map`,
+and `map.cch` / `map_impl.cch` explicitly when needed. Channels, nursery,
+arenas, and results are defined in `spec/concurrent-c-spec-complete.md`; this
+document names them only where a stdlib header uses them.
 
 Public C types use the `CC` prefix and public C functions use the `cc_` prefix.
 Unless a section states otherwise, a slice returned from an operation that
@@ -145,31 +155,31 @@ CCSliceHdr cc_slice_hdr(CCSlice *s);
 CCSlice cc_slice_empty(void);
 CCSlice cc_slice_from_buffer(void *ptr, size_t len);
 CCSlice cc_slice_from_static(void *ptr, size_t len);
-CCSlice cc_slice_hdr_slice(CCSliceHdr *sh);
+CCSlice cc_slice_hdr_slice(const CCSliceHdr *sh);
 CCSlice cc_slice_from_parts(void *ptr, size_t len, uint64_t id);
-CCSlice char_to_slice(const char *cstr);
-CCSlice const_char_to_slice(const char *cstr); /* alias; UFCS for const char* */
-CCSlice unsigned_char_to_slice(const unsigned char *cstr);
-CCSlice signed_char_to_slice(const signed char *cstr);
-CCSlice const_unsigned_char_to_slice(const unsigned char *cstr);
-CCSlice const_signed_char_to_slice(const signed char *cstr);
-CCSlice cc_slice_from_cstr(const char *cstr);  /* alias of char_to_slice */
+CCSlice char_to_slice_n(const char *p, size_t n);
+CCSlice const_char_to_slice_n(const char *p, size_t n);
+CCSlice unsigned_char_to_slice_n(const unsigned char *p, size_t n);
+CCSlice signed_char_to_slice_n(const signed char *p, size_t n);
+CCSlice const_unsigned_char_to_slice_n(const unsigned char *p, size_t n);
+CCSlice const_signed_char_to_slice_n(const signed char *p, size_t n);
+CCSlice cc_slice_cstr(const char *cstr);
 CCSliceUnique cc_adopt(void *ptr, size_t nbytes, CCSliceDeleter deleter);
 void cc_slice_destroy(CCSlice *s);
 ```
 
 `cc_slice_from_buffer` and `cc_slice_hdr_slice` produce untracked slices.
-`char_to_slice` / `const_char_to_slice` (and the signedness variants) and
-`cc_slice_from_static` produce canonical static slices. `cc_slice_from_cstr`
-is an alias of `char_to_slice`. In Concurrent-C, `p->to_slice()` is UFCS:
-`char*` → `char_to_slice`, `const char*` → `const_char_to_slice` (generic
-cv-qualifier peel in the UFCS lowerer; signedness variants likewise).
-A string literal whose destination is by-value `CCSlice`, `char[:]`,
+`cc_slice_from_static` produces a canonical static slice. Counted `char*`
+conversion is `char_to_slice_n` (and signedness / cv variants). In
+Concurrent-C, `p->to_slice_n(n)` is UFCS onto that family (`char*` →
+`char_to_slice_n`, `const char*` → `const_char_to_slice_n`).
+`cc_slice_cstr` is the NUL-terminated trust-boundary form (`strlen`); it has
+no UFCS. A string literal whose destination is by-value `CCSlice`, `char[:]`,
 `char[:0]`, `CCSliceShared`, or `CCSliceUnique` — call argument or
 local/field initializer — lowers to `CC_SLICE_LIT(lit)` (sizeof-static;
 `len` excludes NUL). Prefer `char[:0] s = "hi"` for sentinel borrows.
 Pointer parameters and non-literal `char[N]` / `char*` variables are not
-coerced — use `p->to_slice()` / `char_to_slice(p)` / `cc_slice_cstr(p)`.
+coerced — use `p->to_slice_n(n)` / `char_to_slice_n(p, n)` / `cc_slice_cstr(p)`.
 Host-included C headers may spell the same ABI as `CCSlice`; Concurrent-C
 path and CLI string surfaces are `char[:0]` (NUL-terminated borrow).
 Ordinary slice-family sites deny field stores; see `draft_facets.md` §7b.
@@ -199,18 +209,23 @@ bool cc_slice_starts_with(CCSlice *s, CCSlice prefix);
 bool cc_slice_ends_with(CCSlice *s, CCSlice suffix);
 bool cc_slice_eq(CCSlice *s, CCSlice other);
 bool cc_slice_eq_cstr(CCSlice *s, const char *cstr);
+bool cc_slice_has(CCSlice *s, CCSlice needle);
+bool cc_slice_has_ci(CCSlice *s, CCSlice needle);
 ```
 
 An invalid `cc_slice_sub` range returns an empty slice. A subslice clears
 uniqueness, preserves transferability, and marks a view that does not cover the
 full allocation as a subslice. `cc_slice_get` reports absence through its
 `bool` return (non-Result C twin). The index-of helpers report absence through
-`found`.
+`found`. `has` / `has_ci` are substring presence (`index_of`, and ASCII
+case-insensitive). Byte-slice query is this family — there is no generic
+`T[:].contains` / `T[:].find`.
 
 Slice UFCS maps `hdr`, `len`, `trim`, `trim_left`, `trim_right`, `sub`,
-`starts_with`, `ends_with`, `eq`, `eq_cstr`, and `destroy` to the corresponding
-`CCSlice_*` or `cc_slice_*` function. Checked index UFCS (`at`, `get_checked`,
-`set`) is documented under arena-backed slice operations below.
+`starts_with`, `ends_with`, `eq`, `eq_cstr`, `has`, `has_ci`, `truncate`, and
+`destroy` to the corresponding `CCSlice_*` or `cc_slice_*` function. Checked
+index UFCS (`at`, `get_checked`, `set`) is documented under arena-backed slice
+operations below.
 
 ### Arena typed allocation
 
@@ -242,8 +257,9 @@ uint32_t[:] !>(CCError) cc_slice_utf8_codepoints(const CCSlice *s, CCArena *aren
 
 /* Checked index — same Result/error in all builds (no debug/release split). */
 char !>(CCError) cc_slice_get_checked(CCSlice *s, size_t idx);
-char !>(CCError) cc_slice_at(CCSlice *s, size_t idx);          /* alias of get_checked */
+char !>(CCError) cc_slice_at(CCSlice *s, size_t idx);          /* same as get_checked */
 bool !>(CCError) cc_slice_set(CCSlice *s, size_t idx, char c);
+bool !>(CCError) cc_slice_truncate(CCSlice *s, size_t n);
 ```
 
 `materialize_in` is a no-op when the slice is empty, canonical/static, or
@@ -259,9 +275,10 @@ missing arena or a null non-empty pointer returns `CC_ERR_INVALID_ARG`;
 allocation failure returns `CC_ERR_OUT_OF_MEMORY`. UFCS:
 `s.utf8_codepoints(arena)`.
 
-Out-of-bounds or null-pointer index ops return `CC_ERR_INVALID_ARG`. Soft-zero
-`at` is gone. Raw `s.ptr[i]` / `((char*)s.ptr)[i]` remains an untracked Gap
-outside this surface.
+Out-of-bounds or null-pointer index ops return `CC_ERR_INVALID_ARG`.
+`truncate` shrinks `len` in place and returns `CC_ERR_INVALID_ARG` when `n`
+exceeds the current length or `s` is null. Raw `s.ptr[i]` / `((char*)s.ptr)[i]`
+is an untracked Gap outside this surface.
 
 ### Packed slice handles
 
@@ -471,6 +488,59 @@ parse of the same IEEE width (`binary32` for `float`, `binary64` for
 
 Non-finite values format as the lowercase literals `nan`, `inf`, and `-inf`.
 
+## I/O errors
+
+`<ccc/cc_io_error.cch>` (included by `io.cch` and the runtime) defines the
+I/O error face used by files, directories, processes, sockets, and channels:
+
+```c
+typedef struct {
+    CCError base;
+    int32_t os_code; /* errno or platform code; 0 when not applicable */
+} CCIoError;
+
+@typeview on CCIoError { as: base; };
+
+CCIoError cc_io_error_os(CCErrorKind kind, int os_code);
+CCIoError cc_io_error(kind_or_cc_error); /* _Generic: CCErrorKind or CCError */
+CCIoError cc_io_from_errno(int err);
+const char *cc_io_error_str(CCIoError e);
+```
+
+`CCIoError` is a `CCError` through `base`. `@errhandler` and UFCS follow the
+language spec: exact `CCIoError` first, then a unique `@typeview` `as:` path
+to `CCError`. `cc_io_error_str` returns `cc_error_str(e.base)`.
+
+The `CC_IO_*` names are the same `CCErrorKind` values:
+
+| Name | Kind |
+|---|---|
+| `CC_IO_PERMISSION_DENIED` | `CC_ERR_PERMISSION` |
+| `CC_IO_FILE_NOT_FOUND` | `CC_ERR_NOT_FOUND` |
+| `CC_IO_INVALID_ARGUMENT` | `CC_ERR_INVALID_ARG` |
+| `CC_IO_INTERRUPTED` | `CC_ERR_INTERRUPTED` |
+| `CC_IO_OUT_OF_MEMORY` | `CC_ERR_OUT_OF_MEMORY` |
+| `CC_IO_BUSY` | `CC_ERR_WOULD_BLOCK` |
+| `CC_IO_CONNECTION_CLOSED` | `CC_ERR_CLOSED` |
+| `CC_IO_CANCELLED` | `CC_ERR_CANCELLED` |
+| `CC_IO_OTHER` | `CC_ERR_IO` |
+
+Byte-read Results that use EOF model B are `bool !>(CCIoError)`:
+`Ok(true)` wrote payload, `Ok(false)` is clean EOF / peer close, `Err` is
+failure. `CC_DECL_RESULT_SPEC(CCResult_bool_CCIoError, bool, CCIoError)` is
+the C twin.
+
+`cc_io_from_errno` maps POSIX errno onto those kinds and stores the original
+code in `os_code`: `EACCES` → `CC_ERR_PERMISSION`, `ENOENT` →
+`CC_ERR_NOT_FOUND`, `EINVAL` → `CC_ERR_INVALID_ARG`, `EINTR` →
+`CC_ERR_INTERRUPTED`, `ENOMEM` → `CC_ERR_OUT_OF_MEMORY`, `EBUSY` /
+`EAGAIN` / `EWOULDBLOCK` → `CC_ERR_WOULD_BLOCK`, `EPIPE` → `CC_ERR_CLOSED`,
+`ECANCELED` → `CC_ERR_CANCELLED`, otherwise `CC_ERR_IO`.
+
+`<ccc/cc_channel.cch>` (prelude) defines `cc_io_avail(bool !>(CCIoError) res)`:
+true exactly when the result is `Ok(true)`. Drain loops use it so both `Err`
+and clean EOF / `Ok(false)` exit the loop.
+
 ## File and buffered I/O
 
 `<ccc/std/io.cch>` defines `CCFile` and `CCBufWriter`. Buffered reads live in
@@ -513,12 +583,13 @@ CCResult_size_t_CCIoError cc_file_size(CCFile *file);
 literals coerce at the call site; `mode` remains `const char *` and is not
 coerced. `cc_file_open` returns zero on success and `-1` on failure. The
 failure's `errno` remains available separately.
-`cc_file_close` ignores close errors. Value-returning reads return an empty
-slice at EOF. The `_into` read forms return `ok(true)` when they write an
-output value and `ok(false)` at EOF. `cc_file_read_line` includes the newline
-when one is read. `cc_file_write` and `cc_file_write_buf` return the number of
-bytes written. `cc_file_size` returns `Ok(0)` for a non-seekable stream and
-does not change the current position.
+`cc_file_close` ignores close errors. `cc_file_read`, `cc_file_read_line`, and
+`cc_file_read_buf` are arity macros: the value-returning form (no out-parameter)
+returns an empty slice / `0` at EOF; the `_into` form (out-parameter) returns
+`Ok(true)` when it writes an output value and `Ok(false)` at EOF.
+`cc_file_read_line` includes the newline when one is read. `cc_file_write` and
+`cc_file_write_buf` return the number of bytes written. `cc_file_size` returns
+`Ok(0)` for a non-seekable stream and does not change the current position.
 
 `CCFile` UFCS maps file methods to `cc_file_*` and passes `&file`.
 
@@ -568,7 +639,11 @@ CCSlice owned = br.read_line_dup(&arena) !>;
 | `read_line_dup` | arena-owned copy of one `read_line` |
 
 Views from `read_line` / `read_exact` are invalidated by a later compacting
-`fill`. File-only buffered writes remain:
+`fill`. Fill dispatches with `_Generic` on `Src *`: `CCFile *` is always
+associated; `CCSocket *` is associated when `<ccc/std/net.cch>` is included.
+Other duplex sources extend the list with `CC_BUFIO_EXTRA_GENERIC`. An
+unsupported `Src` returns `CC_IO_INVALID_ARGUMENT` (not a silent no-op).
+File-only buffered writes remain:
 
 ```c
 int cc_buf_writer_init(CCBufWriter *writer, CCFile *file, CCArena *arena, size_t cap);
@@ -602,12 +677,21 @@ failure; this code is not an errno value.
 
 ```c
 int cc_file_open_async(CCExec *ex, CCFile *file, char[:0] path, const char *mode, CCAsyncHandle *handle);
+int cc_file_open_async_deadline(CCExec *ex, CCFile *file, char[:0] path, const char *mode, CCAsyncHandle *handle, const CCDeadline *deadline);
 int cc_file_close_async(CCExec *ex, CCFile *file, CCAsyncHandle *handle);
+int cc_file_close_async_deadline(CCExec *ex, CCFile *file, CCAsyncHandle *handle, const CCDeadline *deadline);
 int cc_file_read_all_async(CCExec *ex, CCFile *file, CCArena *arena, CCSlice *out, CCAsyncHandle *handle);
+int cc_file_read_all_async_deadline(CCExec *ex, CCFile *file, CCArena *arena, CCSlice *out, CCAsyncHandle *handle, const CCDeadline *deadline);
 int cc_file_read_async(CCExec *ex, CCFile *file, CCArena *arena, size_t n, CCSlice *out, CCAsyncHandle *handle);
+int cc_file_read_async_deadline(CCExec *ex, CCFile *file, CCArena *arena, size_t n, CCSlice *out, CCAsyncHandle *handle, const CCDeadline *deadline);
 int cc_file_read_line_async(CCExec *ex, CCFile *file, CCArena *arena, CCSlice *out, CCAsyncHandle *handle);
+int cc_file_read_line_async_deadline(CCExec *ex, CCFile *file, CCArena *arena, CCSlice *out, CCAsyncHandle *handle, const CCDeadline *deadline);
 int cc_file_write_async(CCExec *ex, CCFile *file, CCSlice data, size_t *out_written, CCAsyncHandle *handle);
+int cc_file_write_async_deadline(CCExec *ex, CCFile *file, CCSlice data, size_t *out_written, CCAsyncHandle *handle, const CCDeadline *deadline);
 ```
+
+Each `*_async` has a matching `*_async_deadline` that takes a `CCDeadline *`
+as the last argument after the handle.
 
 ### Path helpers
 
@@ -1053,6 +1137,8 @@ CCResult_CCProcessOutput_CCIoError cc_process_run_shell(CCArena *arena, const ch
 The process-output accessors are:
 
 ```c
+CCSlice cc_process_output_stdout(const CCProcessOutput *output);
+CCSlice cc_process_output_stderr(const CCProcessOutput *output);
 const char *cc_process_output_stdout_str(const CCProcessOutput *output);
 size_t cc_process_output_stdout_len(const CCProcessOutput *output);
 const char *cc_process_output_stderr_str(const CCProcessOutput *output);
@@ -1110,6 +1196,7 @@ CCResult_CCProcessOutput_CCIoError cc_command_run(CCCommand *command, CCArena *a
 CCResult_CCProcessOutput_CCIoError cc_command_output(CCCommand *command, CCArena *arena);
 CCResult_CCProcessOutput_CCIoError cc_command_output_with_input(CCCommand *command, CCArena *arena, CCSlice input);
 CCResult_int_CCIoError cc_command_status(CCCommand *command);
+CCResult_CCProcessOutput_CCIoError cc_command_capture(CCCommand *command, CCArena *arena);
 ```
 
 `program`, `cwd`, and `arg_slice` take NUL-terminated path/token borrows
@@ -1118,6 +1205,8 @@ CCResult_int_CCIoError cc_command_status(CCCommand *command);
 `CCCommand` UFCS maps method names to `cc_command_*` and passes the receiver by
 address. `cc_command_status` disables stdout and stderr capture, waits for the
 process, and returns `Ok(status.exit_code)` for any completed process.
+`cc_command_capture` merges stderr into stdout, then captures (`output`); exit
+status stays on the returned `CCProcessOutput`.
 
 ## Futures and tasks
 
@@ -1176,6 +1265,8 @@ int cc_blocking_pool_stats(CCExecStats *out_exec, uint64_t *out_submit_failures)
 ```
 
 `cc_block_on(T, task)` casts the `intptr_t` result to `T`.
+`cc_await(T, task)` is the same macro. `cc_run_blocking_task_intptr` is an
+alias of `cc_run_blocking_task`.
 `cc_block_all` waits for every task. `cc_block_race` reports the first
 completion. `cc_block_any` reports the first successful completion and returns
 `ECANCELED` when every task fails.
@@ -1241,9 +1332,9 @@ typedef struct CCSocket {
 } CCSocket;
 
 typedef union CCSocketSignal {
-    long double __cc_align_ld;
+    _Alignas(8) unsigned char __cc_storage[128];
+    long long __cc_align_ll;
     void *__cc_align_ptr;
-    unsigned char __cc_storage[128];
 } CCSocketSignal;
 
 typedef struct CCListener {
@@ -1278,26 +1369,33 @@ TCP listen, accept, and connect return Result (`T!>(CCNetError)`, lowered as
 CCResult_CCSocket_CCNetError cc_tcp_connect(const char *addr, size_t addr_len);
 CCResult_CCListener_CCNetError cc_tcp_listen(CCSlice addr);
 CCResult_CCSocket_CCNetError cc_listener_accept(CCListener *listener);
+void cc_listener_serve(CCListener *listener, CCNursery *nursery, CCClosure1 on_conn);
 void cc_listener_close(CCListener *listener);
 
 CCIoError cc_net_to_io_error(CCNetError err);
 
 CCResult_bool_CCIoError cc_socket_read(CCSocket *socket, CCArena *arena, size_t max_bytes, CCSlice *out);
 CCResult_bool_CCIoError cc_socket_read_into(CCSocket *socket, char *buf, size_t max_bytes, size_t *out);
+CCResult_bool_CCIoError cc_socket_read_buf_into(CCSocket *socket, char *buf, size_t max_bytes, size_t *out); /* alias of read_into */
 CCResult_bool_CCIoError cc_socket_read_into_deadline(CCSocket *socket, char *buf, size_t max_bytes, size_t *out, const CCDeadline *deadline);
 CCResult_bool_CCIoError cc_socket_try_read_into(CCSocket *socket, char *buf, size_t max_bytes, size_t *out);
 CCResult_size_t_CCIoError cc_socket_write(CCSocket *socket, const char *data, size_t len);
 CCResult_size_t_CCIoError cc_socket_write_deadline(CCSocket *socket, const char *data, size_t len, const CCDeadline *deadline);
 void cc_socket_shutdown(CCSocket *socket, CCShutdownMode mode, CCNetError *out_err);
 void cc_socket_close(CCSocket *socket);
+int cc_socket_set_nodelay(CCSocket *socket, int on);
 CCSlice cc_socket_peer_addr(CCSocket *socket, CCArena *arena, CCNetError *out_err);
 CCSlice cc_socket_local_addr(CCSocket *socket, CCArena *arena, CCNetError *out_err);
 ```
 
 Listen `addr` is a NUL-terminated borrow (`char[:0]` / `CCSlice`), same shape
-as `cc_file_open`'s path. Connect still takes a length-delimited
-`host:port` / IPv4 `address:port` / bracketed IPv6. Idiomatic use is unwrap
-sugar on the greppable `cc_*` names:
+as `cc_file_open`'s path. Connect takes a length-delimited
+`host:port` / IPv4 `address:port` / bracketed IPv6. `cc_listener_serve` accepts
+until the nursery is cancelled (or accept fails) and borrow-invokes `on_conn`
+with `CCSocket *` for the duration of that call — copy or
+`n->spawn(async_fn(...))` before returning; serve owns the closure and drops
+it when the loop ends. `cc_socket_set_nodelay` is TCP_NODELAY (0 on success,
+-1 on failure). Idiomatic use is unwrap sugar on the greppable `cc_*` names:
 
 ```c
 CCListener ln = cc_tcp_listen(addr) !>;
@@ -1329,7 +1427,8 @@ bool got = sock.read_into(buf, cap, &n) !>;
 
 `CCSocket` and `CCListener` UFCS map synchronous method names to
 `cc_socket_*` and `cc_listener_*` (including Result-returning `accept` and
-`read_into`). No networking `_async` C callees are defined by this API.
+`read_into`, plus `serve` and `set_nodelay`). No networking `_async` C callees
+are defined by this API.
 
 Socket readiness signaling uses:
 
@@ -1376,7 +1475,7 @@ CCSlice cc_dns_lookup_family(CCArena *arena, const char *hostname, size_t hostna
 CCSlice cc_dns_reverse(CCArena *arena, const CCIpAddr *addr, CCNetError *out_err);
 ```
 
-The shipped runtime does not define these two extension functions.
+The header declares them; the shipped runtime does not provide definitions.
 
 ## HTTP
 
@@ -1526,7 +1625,7 @@ const CCTlsInfo *cc_tls_info(const CCTlsConn *conn);
 The caller-provided I/O buffer remains valid for the connection lifetime and
 has at least `CC_TLS_IOBUF_SIZE` bytes. `cc_tls_connect_addr` allocates this
 buffer from `conn_arena`. TLS does not define `_async` callees.
-`cc_tls_info` is a stub and always returns null; no session-info
+`cc_tls_info` always returns null; no session-info
 slices are available through it.
 
 Certificate-loading entry points are:
@@ -1537,7 +1636,7 @@ CCTlsPrivateKey *cc_tls_load_private_key(CCArena *arena, const char *path, size_
 CCTlsTrustAnchors *cc_tls_load_trust_anchors(CCArena *arena, const char *path, size_t path_len, CCNetError *out_err);
 ```
 
-These certificate-loading functions are stubs. Each returns null and writes
+Each returns null and writes
 `CC_NET_OTHER` to `out_err`.
 
 ## Portable atomics
@@ -1576,9 +1675,10 @@ int want = 42;
 bool ok = n.cas(&want, 100);  // cc_atomic_cas(&n, &want, 100)
 ```
 
-`CC_ATOMIC_HAVE_REAL_ATOMICS` is `1` when the header selects C11 atomics or
-GCC/Clang atomic builtins. It is `0` for TinyCC and unknown-compiler fallback
-implementations. Operations in a `0` configuration are not thread-safe.
+`CC_ATOMIC_HAVE_REAL_ATOMICS` is `1` when the header selects C11 atomics
+(including vendored TinyCC under `-std=c11`, which `ccc` always passes) or
+GCC/Clang atomic builtins. It is `0` for pre-C11 TinyCC and unknown-compiler
+fallback implementations. Operations in a `0` configuration are not thread-safe.
 
 ## Python interop
 
@@ -1587,7 +1687,7 @@ implementations. Operations in a `0` configuration are not thread-safe.
 An embedded Python interpreter anchors Python objects the way an arena
 anchors allocations: every object has a home interpreter, its lifetime ends
 no later than its home's, and nothing crosses homes implicitly. Crossing is
-an explicit, costed operation (§7).
+an explicit, costed operation (Moves).
 
 | Type | Role |
 | ---- | ---- |
@@ -1611,7 +1711,7 @@ carries a Python dependency by existing. A missing or unloadable library is
 a `CCPyError` at the `cc_py_new` call — the same posture as a missing binary
 in `cc_command`. Bindings target the limited C API (`Py_LIMITED_API` / abi3):
 one binding serves every 3.x, and nothing couples to interpreter internals.
-Interpreter creation (§6) is the single exception, and it is resolved by name
+Interpreter creation (Interpreters) is the single exception, and it is resolved by name
 so its absence is an error at that call rather than a load failure.
 `py.cch` is never in the prelude; scripts include it.
 
@@ -1870,9 +1970,10 @@ claims the same face when a typed handler is preferred.
 
 ### Blocking
 
-Interpreter calls are blocking-shaped: ill-formed in `@noblock` context,
-serialized per interpreter. A single `CCPy` behaves as one implicit
-exclusive; fibers contending it park like any blocking call.
+Interpreter calls are blocking-shaped: ill-formed in `@nonblocking` context
+(`@noblock` is a compatibility spelling), serialized per interpreter. A single
+`CCPy` behaves as one implicit exclusive; fibers contending it park like any
+blocking call.
 
 ### Interpreters
 
@@ -2161,7 +2262,7 @@ pending references; the process interpreter is left alive, since
 re-initializing CPython is unreliable and process exit reclaims it. Declare
 the interpreter before the objects it anchors:
 reverse-declaration destroy order then releases every reference before
-finalization. References that outlive their home release as no-ops (§3).
+finalization. References that outlive their home release as no-ops.
 
 ### Benchmarks
 
@@ -2554,7 +2655,7 @@ Inside a task, an invoked JS callback returns an awaitable future
 rather than blocking — only the awaiting task suspends, the loop keeps
 running its siblings, and the callback's promise may lean on further
 tasks of the same domain, which pump on the same loop.  Sync callables
-keep every earlier shape in loop mode, the blocking suspension
+keep the same shapes in loop mode, the blocking suspension
 included: sync nests one deep, async composes freely.  Exception text
 is `Type: message` in both directions and is preserved across repeated
 boundary crossings — a coroutine's exception is the rejection's
@@ -2790,7 +2891,8 @@ arena. The default `@errhandler(CCError)` prints the face; an exact
 
 ### Threads and blocking
 
-Environment calls are blocking-shaped: ill-formed in `@noblock` context,
+Environment calls are blocking-shaped: ill-formed in `@nonblocking` context
+(`@noblock` is a compatibility spelling),
 serialized per environment. The thread rule is per backend, and it is the
 one place the backends differ on the surface:
 
