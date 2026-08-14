@@ -1,0 +1,13 @@
+/* First ${} is a live comptime value; the second is undeclared.
+ * The error must name the second interpolation, not the first. */
+#include <ccc/std/prelude.cch>
+
+@comptime {
+    int n = 1;
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        enum { A = ${n},
+               B = ${no_such_second} };
+    `);
+}
+
+int main(void) { return 0; }

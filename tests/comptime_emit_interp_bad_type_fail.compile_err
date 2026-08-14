@@ -1,0 +1,3 @@
+comptime_emit_interp_bad_type_fail.ccs:9
+not_a_real_type
+    static ${ty} emit_interp_bad_type_fn(void) {

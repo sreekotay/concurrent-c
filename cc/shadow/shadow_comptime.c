@@ -236,8 +236,8 @@ static char* shadow_ct_blank_comptime(const char* src, size_t n) {
     return out;
 }
 
-/* `@grammar(cli)` is a builtin seam engine (same as rules/schema) — do not
- * mask it; `cc_rewrite_grammar_decls_text` splices the typed opts + helpers. */
+/* `@grammar(cli)` is a comptime engine (`cli` in cli.cch). The seam rewrites
+ * it to `@comptime { cli(...) }`; do not mask the keyword before that pass. */
 
 /* Whitelist stage1 buffer: original spelling (keeps CC_GENERIC_FACTORY and
  * relative .cch includes) with @comptime if/value resolved and @comptime

@@ -1,5 +1,7 @@
 /*
- * @grammar(cli) builtin engine — declare argv options → typed struct + faces.
+ * @grammar(cli) argv product — parse the fenced declaration DSL and emit
+ * typed struct + parse_args / print_usage / prepare. Called from the
+ * harvested comptime `cli` engine, not as a seam builtin.
  *
  * Body lines (comments // ... stripped):
  *   name: flag SPELL... [attrs...]
@@ -607,7 +609,6 @@ static char *cc__cli_grammar_emit(const char *name,
                         "#include <stddef.h>\n"
                         "#include <stdint.h>\n"
                         "#include <string.h>\n"
-                        "#include <ccc/std/cli.cch>\n"
                         "typedef struct %s {\n",
                         g.name, g.name))
         goto oom;
@@ -630,17 +631,16 @@ static char *cc__cli_grammar_emit(const char *name,
                 goto oom;
             break;
         case CK_OPT_STRING:
-            /* char[:0]: NUL-terminated borrow (argv / default lit). Slice
-             * rewrite lowers to CCSlice before host C. */
+            /* Post-lower splice: char[:0] is already CCSlice in host C. */
             if (!cli_buf_printf(&buf,
-                                "    char[:0] %s;\n"
+                                "    CCSlice %s;\n"
                                 "    bool %s_present;\n",
                                 f->name, f->name))
                 goto oom;
             break;
         case CK_MANY_STRING:
             if (!cli_buf_printf(&buf,
-                                "    char[:0] *%s;\n"
+                                "    CCSlice *%s;\n"
                                 "    size_t %s_len;\n",
                                 f->name, f->name))
                 goto oom;

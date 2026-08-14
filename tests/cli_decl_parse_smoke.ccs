@@ -1,0 +1,141 @@
+// Recognition of the `@grammar(cli)` declaration DSL as an ordinary
+// `@grammar(rules)` factory. Argv overlay is not this grammar's job.
+#include <ccc/std/prelude.cch>
+
+@grammar(rules) CliSyntax {~~~~
+include "../cc/include/ccc/std/cli_decl.rules"
+~~~~}
+
+static const char smoke[] =
+    "    help: flag -h, --help desc \"show help\"\n"
+    "    verbose: count -v, --verbose desc \"verbose mode\"\n"
+    "    processes: opt i64 -p, --processes attach as N default 2 desc \"worker count\"\n"
+    "    blocksize: opt i64 -b, --blocksize attach as KB desc \"block size\"\n"
+    "    suffix: opt string -S, --suffix as SUFFIX default \".gz\" desc \"suffix\"\n"
+    "    comment: opt string -C, --comment as TEXT desc \"comment\"\n"
+    "    level: opt i64 --level, -0..-9, -11 alias --fast=1, --best=9 as LEVEL default 6 desc \"compression level\"\n"
+    "    file: rest string desc \"input files\"\n";
+
+static const char pigz[] =
+    "    stdout: flag -c, --stdout, --to-stdout desc \"Write to stdout\"\n"
+    "    decompress: flag -d, --decompress, --uncompress desc \"Decompress\"\n"
+    "    test: flag -t, --test desc \"Test integrity\"\n"
+    "    list: flag -l, --list desc \"List metadata\"\n"
+    "    keep: flag -k, --keep desc \"Keep original file\"\n"
+    "    recursive: flag -r, --recursive desc \"Recursive directory processing\"\n"
+    "    rsyncable: flag -R, --rsyncable desc \"Rsyncable output\"\n"
+    "    force: flag -f, --force desc \"Force overwrite\"\n"
+    "    quiet: flag -q, --quiet, --silent desc \"Quiet mode\"\n"
+    "    verbose: count -v, --verbose desc \"Verbose mode\"\n"
+    "    version: flag -V, --version desc \"Show version\"\n"
+    "    zlib: flag -z, --zlib desc \"Compress to zlib format\"\n"
+    "    zip: flag -K, --zip desc \"Compress to zip format\"\n"
+    "    independent: flag -i, --independent desc \"Independent blocks\"\n"
+    "    synchronous: flag -Y, --synchronous desc \"Synchronous output\"\n"
+    "    huffman: flag -H, --huffman desc \"Huffman-only strategy\"\n"
+    "    rle: flag -U, --rle desc \"RLE strategy\"\n"
+    "    no_name: flag -n, --no-name desc \"Do not store file name\"\n"
+    "    name: flag -N, --name desc \"Store file name\"\n"
+    "    time: flag -M, --time desc \"Store or restore modification time\"\n"
+    "    no_time: flag -T, --no-time desc \"Do not store modification time\"\n"
+    "    help: flag -h, --help desc \"Show this help\"\n"
+    "    level: opt i64 --level, -0..-9, -11 alias --fast=1, --best=9 as LEVEL default 6 desc \"Compression level (0-9, 11)\"\n"
+    "    processes: opt i64 -p, --processes attach as N default 4 desc \"Allow up to N compression workers\"\n"
+    "    blocksize: opt i64 -b, --blocksize attach as KB default 128 desc \"Block size in KB\"\n"
+    "    max_memory: opt i64 --max-memory as MB default 0 desc \"Max memory in MB\"\n"
+    "    suffix: opt string -S, --suffix as SUFFIX default \".gz\" desc \"Suffix instead of .gz\"\n"
+    "    comment: opt string -C, --comment as TEXT desc \"Set comment\"\n"
+    "    alias_name: opt string -A, --alias as TEXT desc \"Set alias\"\n"
+    "    file: rest string desc \"Input files\"\n";
+
+static const char run_all[] =
+    "    help: flag -h, --help desc \"Show this help\"\n"
+    "    examples: flag --examples desc \"Run all example programs\"\n"
+    "    stress: flag --stress desc \"Run all stress tests\"\n"
+    "    perf: flag --perf desc \"Run all performance benchmarks\"\n"
+    "    all: flag --all desc \"Run everything\"\n"
+    "    trace: flag --trace desc \"Hard-flushed trace log at tmp/run_all_logs/run_trace.log\"\n"
+    "    stream: flag --stream desc \"Stream per-test stdout/stderr to the terminal\"\n";
+
+static const char tcp_echo[] =
+    "    test: flag --test desc \"Self-test: spawn a client, do one round-trip, exit.\"\n";
+
+static const char alias_row[] =
+    "    jobs: opt i64 -j, --jobs default 4\n"
+    "    fast: alias --fast -> jobs=1 desc \"preset\"\n";
+
+typedef struct {
+    int n;
+    CCSlice s[40];
+} Keeps;
+
+static int on_keep(void *env, int id, CCSlice v) {
+    Keeps *k = (Keeps *)env;
+    (void)id;
+    if (k->n >= 40) return 0;
+    k->s[k->n++] = v;
+    return 0;
+}
+
+static int slice_is(CCSlice s, const char *w) {
+    size_t l = strlen(w);
+    return s.len == l && memcmp(s.ptr, w, l) == 0;
+}
+
+static int check(const char *tag, const char *src, const char **want, int nwant) {
+    CCArena arena = cc_arena_create(1 << 16);
+    Keeps k = {0};
+    size_t n = strlen(src);
+    int i;
+    if (!CliSyntax.match(src, n)) {
+        printf("FAIL: %s match\n", tag);
+        return 1;
+    }
+    if (!CliSyntax.collect(src, n, &arena, on_keep, &k)) {
+        printf("FAIL: %s collect\n", tag);
+        return 1;
+    }
+    if (k.n != nwant) {
+        printf("FAIL: %s keep count %d != %d\n", tag, k.n, nwant);
+        return 1;
+    }
+    for (i = 0; i < nwant; i++) {
+        if (!slice_is(k.s[i], want[i])) {
+            printf("FAIL: %s field %d want %s\n", tag, i, want[i]);
+            return 1;
+        }
+    }
+    cc_arena_free(&arena);
+    return 0;
+}
+
+int main(void) {
+    static const char *smoke_n[] = {
+        "help", "verbose", "processes", "blocksize", "suffix", "comment",
+        "level", "file"};
+    static const char *pigz_n[] = {
+        "stdout", "decompress", "test", "list", "keep", "recursive",
+        "rsyncable", "force", "quiet", "verbose", "version", "zlib", "zip",
+        "independent", "synchronous", "huffman", "rle", "no_name", "name",
+        "time", "no_time", "help", "level", "processes", "blocksize",
+        "max_memory", "suffix", "comment", "alias_name", "file"};
+    static const char *run_n[] = {
+        "help", "examples", "stress", "perf", "all", "trace", "stream"};
+    static const char *tcp_n[] = {"test"};
+    static const char *alias_n[] = {"jobs", "fast"};
+    if (check("smoke", smoke, smoke_n, 8)) return 1;
+    if (check("pigz", pigz, pigz_n, 30)) return 1;
+    if (check("run_all", run_all, run_n, 7)) return 1;
+    if (check("tcp_echo", tcp_echo, tcp_n, 1)) return 1;
+    if (check("alias_row", alias_row, alias_n, 2)) return 1;
+    if (CliSyntax.match("not a cli body", 14)) {
+        printf("FAIL: junk accepted\n");
+        return 1;
+    }
+    if (CliSyntax.match("", 0)) {
+        printf("FAIL: empty accepted\n");
+        return 1;
+    }
+    printf("cli decl grammar OK\n");
+    return 0;
+}

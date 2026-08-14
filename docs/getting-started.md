@@ -404,7 +404,9 @@ processes, print reports). The extension is deliberately outside the
 What the driver does for a `.shcc` unit:
 
 - Strips a leading `#!` shebang when present
-- Force-includes `<ccc/script/prelude.cch>`
+- Force-includes `<ccc/script/prelude.cch>` (that prelude includes
+  `<ccc/std/cli.cch>`, so `@grammar(cli)` is in scope without a further
+  include; `.ccs` units include `cli.cch` themselves)
 - If there is no top-level `main`, wraps top-level statements in a synthetic
   `main` with a default `@errhandler(CCError)`
 - May inject ambient `a` / `io` / `in` / `args` into that wrap when you use those names

@@ -1321,6 +1321,31 @@ static int cc__rewrite_template_body(char** out,
             cc_sb_append_cstr(out, out_len, out_cap, "); ");
         }
         if (piece.kind == CC_TPL_PIECE_SLOT || piece.kind == CC_TPL_PIECE_TAGGED_SLOT) {
+            /* Stamp the slot so a comptime-TU compile error names the
+             * interpolation, not a line inside the lowered builder. */
+            {
+                const char* lp = NULL;
+                size_t lpl = 0;
+                int sl = cc_user_line_for_offset(src, n, piece.expr_off, 1, &lp,
+                                                 &lpl);
+                if (sl > 0) {
+                    if (lp && lpl > 0) {
+                        char file[PATH_MAX];
+                        char rel[1024];
+                        const char* shown;
+                        size_t fl = lpl < sizeof(file) - 1 ? lpl : sizeof(file) - 1;
+                        memcpy(file, lp, fl);
+                        file[fl] = '\0';
+                        shown = cc_path_rel_to_repo(file, rel, sizeof(rel));
+                        cc__sb_append_fmt_local(out, out_len, out_cap,
+                                                "\n#line %d \"%s\"\n", sl,
+                                                shown ? shown : file);
+                    } else {
+                        cc__sb_append_fmt_local(out, out_len, out_cap,
+                                                "\n#line %d\n", sl);
+                    }
+                }
+            }
             if (policy_name && policy_name[0]) {
                 cc__sb_append_fmt_local(out, out_len, out_cap,
                                         "cc_string_push_policy(&%s, %s, %s, ",
@@ -2245,10 +2270,32 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                     }
                 }
                 if (has_anchor) {
+                    /* Stamp the template body so a host-C error in the
+                     * spliced fragment names this file:line, not the
+                     * @comptime keyword (and not emit.c).  First body
+                     * byte — often the newline after ` — is the #line
+                     * origin; later fragment lines increment from there. */
+                    const char* lp = NULL;
+                    size_t lpl = 0;
+                    int ol = cc_user_line_for_offset(src, n, tick_s + 1, 1, &lp, &lpl);
+                    char file[PATH_MAX];
+                    char rel[1024];
+                    const char* shown;
+                    if (lp && lpl > 0) {
+                        size_t fl = lpl < sizeof(file) - 1 ? lpl : sizeof(file) - 1;
+                        memcpy(file, lp, fl);
+                        file[fl] = '\0';
+                        shown = cc_path_rel_to_repo(file, rel, sizeof(rel));
+                    } else {
+                        shown = cc_path_rel_to_repo(input_path ? input_path : "<input>",
+                                                    rel, sizeof(rel));
+                    }
+                    if (ol <= 0) ol = scan.line;
                     cc__sb_append_fmt_local(&out, &out_len, &out_cap,
-                                            "cc_emit_tpl_splice(%d, cc_string_as_slice(&%s)); "
+                                            "cc_emit_tpl_splice_at(%d, \"%s\", %d, cc_string_as_slice(&%s)); "
                                             "cc_arena_free(%s); 0; })",
-                                            anchor_val, builder_name, arena_name);
+                                            anchor_val, shown ? shown : "<input>", ol,
+                                            builder_name, arena_name);
                 } else {
                     cc__sb_append_fmt_local(&out, &out_len, &out_cap,
                                             "cc__string_persist_slice(%s, &%s); })",

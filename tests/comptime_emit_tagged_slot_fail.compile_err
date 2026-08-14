@@ -1,0 +1,2 @@
+comptime_emit_tagged_slot_fail.ccs
+tagged template slots require @string

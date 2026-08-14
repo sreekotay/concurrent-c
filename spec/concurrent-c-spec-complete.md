@@ -5652,7 +5652,7 @@ headers below. Scripts do not `#include` the prelude; the driver injects it.
 | Header | Role |
 | ------ | ---- |
 | `<ccc/script/stdio.cch>` | `CCStdio` reads; console print (`io.println` / data UFCS / naked aliases) |
-| `<ccc/std/cli.cch>` | `@grammar(cli)` runtime (`cc_parse_args` / `cc_prepare_args` / `cc_print_usage`) |
+| `<ccc/std/cli.cch>` | `@grammar(cli)` comptime engine and argv runtime (`cc_parse_args` / `cc_prepare_args` / `cc_print_usage`). `.shcc` gets this from the script prelude; `.ccs` includes it before `@grammar(cli)`. |
 | `<ccc/script/pathx.cch>` | Repo-root discovery and `char[:0]` path join |
 | `<ccc/script/file.cch>` | Read / write / copy / print by `char[:0]` path |
 | `<ccc/script/sh.cch>` | `cc_sh_run`, `cc_script_task_exe`, `cc_script_task_shcc` |
@@ -5753,12 +5753,11 @@ Prefer Concurrent-C structure for script *content*, and scriptlib for
 orchestration:
 
 - **Parse:** `@grammar(schema|rules)` (and SERDES where appropriate) over
-  file or stdin bytes.
+  file or stdin bytes; `@grammar(cli)` / `cc_prepare_args` over argv.
 - **Format:** `@string(\`…${expr}…\`)` into a `CCString` / slice, then
   `CCStdio` or file write.
-- **Glue:** path join, temp files, `cc_sh_run`, `@grammar(cli)` /
-  `cc_prepare_args` — thin wrappers over `<ccc/std/>` process, dir, and I/O
-  APIs.
+- **Glue:** path join, temp files, `cc_sh_run` — thin wrappers over
+  `<ccc/std/>` process, dir, and I/O APIs.
 
 Example (stdin transform):
 
@@ -6602,6 +6601,8 @@ typedef enum CCEmitAnchor {
 | `@emit(CCEmitAnchor, \`...\`)` | `void` (lowers to splice side effect) | `@comptime {}` blocks and `@comptime for` bodies that emit declarations at a named anchor |
 
 Both forms share the same backtick `${...}` grammar as `@string`. Each `${expr}` slot uses type-driven dispatch (`cc_emit_tpl_append_slot` / C11 `_Generic`); supported types are `CCSlice`, C strings (`char*` / `const char*` / char arrays), integers, and floating-point.
+
+**Rule (anchored `@emit` diagnostics):** A compile error inside `@emit(anchor, \`...\`)` is reported in the source file at the template line that caused it — not a cache path, not `emit.c`, and not the `@comptime` keyword. An undeclared `${expr}` names the interpolation. A host-C error in the generated fragment names the corresponding template line and shows that line.
 
 **Rule:** The return form takes an explicit `arena` argument and **must** supply one; the anchored form takes no arena (it builds into a private stack arena, splices, and frees). Mixing the two — an arena on the anchored form, or a missing arena on the return form — is a compile error.
 

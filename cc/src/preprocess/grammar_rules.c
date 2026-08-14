@@ -4601,8 +4601,7 @@ char* cc_grammar_builtin_emit(const char* engine,
         return cc__rules_emit(name, body, body_len, file, line, src, src_len, err, err_sz);
     if (engine && strcmp(engine, "schema") == 0)
         return cc__schema_emit(name, body, body_len, file, line, src, src_len, err, err_sz);
-    if (engine && strcmp(engine, "cli") == 0)
-        return cc_grammar_cli_emit(name, body, body_len, file, line, src, src_len, err, err_sz);
+    /* `cli` is a comptime engine in <ccc/std/cli.cch>, not a C builtin. */
     /* not a builtin: signal fall-through to the comptime-fn path */
     return NULL;
 }

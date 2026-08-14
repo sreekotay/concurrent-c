@@ -482,6 +482,58 @@ static int shadow_diag_parse_loc(const char* line, char* path, size_t pcap,
     return 1;
 }
 
+/* Host-cc columns are in the generated (often dedented) fragment.  When the
+ * message names 'ident' and that token sits on the original line, point the
+ * caret there instead of at the shifted column.  Walk every '…' pair so a
+ * trailing "did you mean 'other'" does not win.  If the named token was
+ * interpolated away, point at `${` on that line. */
+static int shadow_diag_ident_boundary(const char* s, size_t n, const char* hit) {
+    if (!hit) return 0;
+    if (hit > s && ((hit[-1] >= 'A' && hit[-1] <= 'Z') ||
+                    (hit[-1] >= 'a' && hit[-1] <= 'z') ||
+                    (hit[-1] >= '0' && hit[-1] <= '9') || hit[-1] == '_'))
+        return 0;
+    if (hit[n] && ((hit[n] >= 'A' && hit[n] <= 'Z') ||
+                   (hit[n] >= 'a' && hit[n] <= 'z') ||
+                   (hit[n] >= '0' && hit[n] <= '9') || hit[n] == '_'))
+        return 0;
+    return 1;
+}
+
+static int shadow_diag_quoted_ident_col(const char* err, const char* orig) {
+    const char* p;
+    int saw_quote = 0;
+    if (!err || !orig || !orig[0]) return 0;
+    p = err;
+    while (*p) {
+        const char* s = strchr(p, '\'');
+        const char* e;
+        size_t n;
+        char ident[128];
+        const char* hit;
+        if (!s) break;
+        e = strchr(s + 1, '\'');
+        if (!e) break;
+        n = (size_t)(e - (s + 1));
+        p = e + 1;
+        if (n == 0 || n >= sizeof(ident)) continue;
+        if (!((s[1] >= 'A' && s[1] <= 'Z') || (s[1] >= 'a' && s[1] <= 'z') ||
+              s[1] == '_'))
+            continue;
+        saw_quote = 1;
+        memcpy(ident, s + 1, n);
+        ident[n] = 0;
+        hit = strstr(orig, ident);
+        if (shadow_diag_ident_boundary(orig, n, hit))
+            return (int)(hit - orig) + 1;
+    }
+    if (saw_quote) {
+        const char* slot = strstr(orig, "${");
+        if (slot) return (int)(slot - orig) + 1;
+    }
+    return 0;
+}
+
 static int shadow_diag_is_snippet(const char* line, int want_ln,
                                   const char** after_bar) {
     const char* p = line;
@@ -562,8 +614,9 @@ static void shadow_host_diag_replay(const char* text, size_t len) {
             fprintf(stderr, "%s\n", line);
             if (shadow_diag_parse_loc(line, path, sizeof(path), &ln, &col) &&
                 shadow_orig_src_line(path, ln, orig, sizeof(orig))) {
+                int icol = shadow_diag_quoted_ident_col(line, orig);
                 expect_ln = ln;
-                expect_col = col;
+                expect_col = icol > 0 ? icol : col;
                 have_orig = 1;
             } else {
                 expect_ln = 0;

@@ -1,0 +1,38 @@
+; CLI declaration DSL — the fenced body of `@grammar(cli) Name {~~~~ … ~~~~}`.
+; Recognition only: argv overlay stays in <ccc/std/cli.cch>.
+; Field names are kept so collect yields one span per declared row
+; (inline `alias SPELL=VALUE` attrs are not extra rows).
+top: [some field pad]
+pad: any [ws1 | comment]
+ws1: charset [#' ' #'\t' #'\r' #'\n']
+comment: ["//" any complement charset [#'\n']]
+idstart: charset [#'a' - #'z' #'A' - #'Z' #'_']
+idcont: charset [#'a' - #'z' #'A' - #'Z' #'0' - #'9' #'_' #'-']
+ident: [idstart any idcont]
+digit: charset [#'0' - #'9']
+strlit: [#'"' any complement charset [#'"'] #'"']
+intlit: [opt #'-' some digit]
+spellch: complement charset [#' ' #'\t' #'\n' #'\r' #',' #'>']
+spell: [#'-' some spellch]
+spell_list: any [spell pad opt [#',' pad]]
+eqch: complement charset [#' ' #'\t' #'\n' #'\r' #',' #'=']
+al_tok: [#'-' some eqch #'=' some eqch]
+kind_opt: ["opt" pad ["i64" | "string"]]
+kind_rest: ["rest" pad "string"]
+kind_many: ["many" pad "positional" pad "string"]
+plain_kind: ["flag" | "count" | kind_opt | kind_rest | kind_many]
+maps_val: [ident | some digit]
+arrow_tail: ["->" pad ident pad opt [#'=' pad maps_val]]
+attr_attached: "attached"
+attr_attach: "attach"
+attr_vname: ["value_name" pad ident]
+attr_default: ["default" pad [strlit | intlit]]
+attr_desc: ["desc" pad strlit]
+attr_alias: ["alias" pad al_tok any [pad #',' pad al_tok]]
+attr_space: "space"
+attr_as: ["as" pad ident]
+attr: [pad [attr_attached | attr_attach | attr_vname | attr_default | attr_desc | attr_alias | attr_space | attr_as]]
+attr_list: any attr
+alias_field: ["alias" pad spell_list pad arrow_tail pad attr_list]
+plain_field: [plain_kind pad spell_list pad attr_list]
+field: [pad keep ident pad #':' pad [alias_field | plain_field]]

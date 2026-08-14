@@ -1,0 +1,20 @@
+/* Working ${} slots plus a later host-C error: the diagnostic must
+ * name the bad C line, not a slot line or emit.c. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+@comptime {
+    int n = 3;
+    const char* name = "emit_slot_then_host_fn";
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        static int ${name}(void) {
+            int k = ${n};
+            return no_such_ident;
+        }
+    `);
+}
+
+int main(void) {
+    printf("%d\n", emit_slot_then_host_fn());
+    return 0;
+}

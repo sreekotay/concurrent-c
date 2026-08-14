@@ -1,0 +1,21 @@
+/* @comptime for + ${f.name} paste, then a host-C error in the body.
+ * The diagnostic must name this file and the template line. */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <ccc/cc_type.cch>
+#include <stdio.h>
+
+typedef struct { int only; } ForSlotHost;
+
+@comptime for (f in type_of(ForSlotHost).fields) {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        static int emit_for_slot_${f.name}(void) {
+            return no_such_ident;
+        }
+    `);
+}
+
+int main(void) {
+    printf("%d\n", emit_for_slot_only());
+    return 0;
+}

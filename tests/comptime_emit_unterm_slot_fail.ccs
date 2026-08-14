@@ -1,0 +1,11 @@
+/* An unclosed ${ in an @emit template is a syntax error at the
+ * template, not a silent drop or a cache-path diagnostic. */
+#include <ccc/std/prelude.cch>
+
+@comptime {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        enum { X = ${no_close
+    `);
+}
+
+int main(void) { return 0; }

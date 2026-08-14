@@ -13,7 +13,7 @@ Concurrent-C is largely C + preprocessor, with a few extra active surface-syntax
 - `@async` / `@await` / `@blocking` / `@nonblocking`
 - `@errhandler` / `@err` / result unwrap (`!>`, `?>`)
 - `@string` / `@emit` backtick templates (`${…}`, `$~tag{…}`, `${{…}}` verbatim)
-- `@grammar(rules|schema) Name {~~~~ … ~~~~}` SERDES fences
+- `@grammar(engine) Name {~~~~ … ~~~~}` fences (`rules` / `schema` / `cli`)
 - `@variant` / `@variant(packed)`
 - UFCS-style task operations like `n->spawn(...)` / `n->wait()`
 - UFCS-style `value.method(...)` / `ptr->method(...)` calls

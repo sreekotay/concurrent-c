@@ -3,10 +3,12 @@
  * the @grammar engines emit.
  *
  * `@grammar(rules) Json { ... }` and `@grammar(schema) Tweet { ... }` lower
- * to per-name functions (Json_match, Tweet_parse, TweetReader, ...). Those
- * names are the LOWERING CONTRACT — deterministic and callable — but the
- * language surface is these operations, uniform across every grammar and
- * schema and greppable in one place:
+ * to per-name functions (Json_match, Tweet_parse, TweetReader, ...).
+ * `@grammar(cli) Opts { ... }` (include `<ccc/std/cli.cch>`) emits
+ * Opts_parse_args / Opts_prepare / Opts_print_usage. Those names are the
+ * LOWERING CONTRACT — deterministic and callable — but the language surface
+ * is these operations, uniform across every grammar and schema and greppable
+ * in one place:
  *
  *   cc_match(Json, s, n)                    full-input recognition (rules)
  *   cc_parse(Json, s, n, arena)             rules: tape DOM -> JsonNode*
@@ -63,6 +65,10 @@
  *                                           length switch + memcmp, the same
  *                                           structure the parser uses.
  *   cc_field(Tweet, "id", 2)                -> const CCGramField* (reflection)
+ *   cc_parse_args(Opts, argc, argv, arena, &o)  cli: fill typed options
+ *   cc_print_usage(Opts, argv0, f)          cli: generated usage
+ *   cc_prepare_args(Opts, argc, argv, arena, &o, f)
+ *                                           cli: parse + usage; bool !>(CCError)
  *
  * UFCS forms work too — the lowered names follow receiver conventions:
  *   Tweet.parse(s, n, &arena, &out)   type-scoped -> Tweet_parse(...)

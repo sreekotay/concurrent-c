@@ -1,0 +1,9 @@
+// @grammar(cli) without <ccc/std/cli.cch> must not blank the declaration
+// and succeed. The `cli` engine is harvested from that header.
+#include <ccc/std/prelude.cch>
+
+@grammar(cli) Opts {~~~~
+    help: flag -h, --help
+~~~~}
+
+int main(void) { return 0; }

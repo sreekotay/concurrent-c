@@ -1278,13 +1278,16 @@ visible.
 
 ## Command-line parsing
 
-Declare options with `@grammar(cli)` (see `spec/cc_serdes.md`). The compiler
-emits a typed options struct plus `Name_parse_args` / `Name_prepare` /
-`Name_print_usage`. Call sites use the stable macros `cc_parse_args`,
-`cc_prepare_args`, and `cc_print_usage`. The same faces and
-`<ccc/std/cli.cch>` runtime apply to `.ccs` and `.shcc`:
+Declare options with `@grammar(cli)` after including `<ccc/std/cli.cch>`
+(see `spec/cc_serdes.md`). The fenced body is the `CliSyntax` factory in
+`<ccc/std/cli_decl.rules>`. The `cli` comptime engine emits a typed options
+struct plus `Name_parse_args` / `Name_prepare` / `Name_print_usage`. Call
+sites use the stable macros `cc_parse_args`, `cc_prepare_args`, and
+`cc_print_usage`. The same faces and `<ccc/std/cli.cch>` runtime apply to
+`.ccs` and `.shcc` (the script prelude already includes `cli.cch`):
 
 ```c
+#include <ccc/std/cli.cch>
 @grammar(cli) Opts {~~~~
     help: flag -h, --help desc "Show help"
     jobs: opt i64 -j, --jobs attach as N default 4 desc "Worker count"

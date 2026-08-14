@@ -7,7 +7,9 @@
 `@grammar(schema)` (typed direct-to-struct over a `use`d rules grammar: fields
 bound at event sites via extract-mode keeps, key-length dispatch for unordered
 members, unknown values skipped through the match tier, `items Schema` arena
-arrays). Schema dialect: `use G`; **composition first** — `G.rule [ "k" term
+arrays). `@grammar(cli)` is a comptime engine in `<ccc/std/cli.cch>`; the
+fenced declaration DSL is the `CliSyntax` rules factory
+(`<ccc/std/cli_decl.rules>`). Schema dialect: `use G`; **composition first** — `G.rule [ "k" term
 ... ]` narrows a member-list rule (delimiters, pads, key/kv shape, and the
 unknown-member skip all DERIVED from the rule's decomposed structure) and
 `f: G.rule of S` narrows a list rule to an arena array of schema S; plus
@@ -311,12 +313,12 @@ ordinary UFCS.
 
 The thunderbolt: **`@grammar(engine)` makes the *kind* of a declaration
 user-definable.** `struct`/`enum` are a closed set the compiler owns;
-`@grammar(rules)`, `@grammar(schema)`, `@grammar(ccSerdes)` are all "a fenced
-block processed by engine `X`," where `X` ships in a library. The compiler
-blesses exactly one rewrite and gets an open-ended family of declaration kinds in
-return. This **dissolves the builtin `@grammar` modes** in `cc_serdes.md`
-(`fragments`/`rules`/`schema`) into three stdlib engines sitting in the same
-parens.
+`@grammar(rules)`, `@grammar(schema)`, `@grammar(cli)` are all "a fenced
+block processed by engine `X`." `rules` and `schema` remain compiler
+builtins; `cli` is a `@comptime` function in `<ccc/std/cli.cch>` (fenced
+body: `CliSyntax` in `<ccc/std/cli_decl.rules>`). The compiler blesses
+exactly one rewrite and gets an open-ended family of declaration kinds in
+return.
 
 ---
 

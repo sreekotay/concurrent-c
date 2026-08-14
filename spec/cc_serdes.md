@@ -13,8 +13,16 @@ engine. The host lexer does not tokenize the body. The compiler owns this
 capture-and-route seam; each engine owns its grammar syntax, validation,
 generated types, and generated operations.
 
-The built-in engines are `rules`, `schema`, and `cli` (argv → typed struct;
-not a byte-wire dialect):
+The built-in engines are `rules` and `schema`. Any other engine name is a
+`@comptime` function `void engine(CCSlice name, CCSlice body, const char *file, int line)`.
+The seam synthesizes a comptime call; if that function is not in scope,
+compilation fails.
+
+`@grammar(cli)` is that comptime path (argv → typed struct; not a byte-wire
+dialect). Its fenced body is the `CliSyntax` rules factory in
+`<ccc/std/cli_decl.rules>`. `.ccs` units include `<ccc/std/cli.cch>` before
+the declaration so `cli` is harvested. `.shcc` units receive that header from
+`<ccc/script/prelude.cch>`.
 
 ```c
 @grammar(rules) Json {~~~~
@@ -30,6 +38,7 @@ not a byte-wire dialect):
     data: bytes len "\r\n"
 ~~~~}
 
+#include <ccc/std/cli.cch>
 @grammar(cli) Opts {~~~~
     help: flag -h, --help desc "Show help"
     jobs: opt i64 -j, --jobs attach as N default 4 desc "Workers"
@@ -268,9 +277,13 @@ projection. It builds `CCShapeVal` objects and arrays using the caller's
 ## `@grammar(cli)`
 
 `@grammar(cli)` declares argv options and emits a typed C struct plus
-`Name_parse_args` / `Name_prepare` / `Name_print_usage`. Call sites use
-`cc_parse_args` / `cc_prepare_args` / `cc_print_usage` from
-`<ccc/std/cli.cch>` (same faces for `.ccs` and `.shcc`).
+`Name_parse_args` / `Name_prepare` / `Name_print_usage`. The fenced body is
+the `CliSyntax` rules factory (`<ccc/std/cli_decl.rules>`). Include
+`<ccc/std/cli.cch>` before the declaration in `.ccs` so the `cli` comptime
+engine is harvested; omit it and the unit fails to compile. `.shcc` units
+already have that header from the script prelude. Call sites use
+`cc_parse_args` / `cc_prepare_args` / `cc_print_usage` from that header
+(same faces for `.ccs` and `.shcc`).
 
 Field kinds:
 

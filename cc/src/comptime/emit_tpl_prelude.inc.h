@@ -136,6 +136,9 @@
     "static void cc_emit_tpl_splice(int anchor, CCSlice fragment) {\n" \
     "  if (!fragment.ptr || !fragment.len) return;\n" \
     "  cc_emit_raw(anchor, (const char*)fragment.ptr, fragment.len); }\n" \
+    "static void cc_emit_tpl_splice_at(int anchor, const char* file, int line, CCSlice fragment) {\n" \
+    "  if (!fragment.ptr || !fragment.len) return;\n" \
+    "  cc_emit_raw_at(anchor, file, line, (const char*)fragment.ptr, fragment.len); }\n" \
     "static int cc_emit_cstr(int anchor, const char* cstr) {\n" \
     "  if (!cstr) return 0;\n" \
     "  cc_emit_raw(anchor, cstr, strlen(cstr));\n" \

@@ -1,0 +1,12 @@
+/* $~tag{…} is an @string policy slot.  In @emit it is rejected at the
+ * template, not lowered as a bare ${}. */
+#include <ccc/std/prelude.cch>
+
+@comptime {
+    int n = 1;
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        enum { X = $~meta{n} };
+    `);
+}
+
+int main(void) { return 0; }

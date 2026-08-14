@@ -1,0 +1,3 @@
+comptime_emit_host_c_fail.ccs:9
+no_such_ident
+    return no_such_ident;

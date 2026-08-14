@@ -2102,11 +2102,19 @@ static void cc__exec_visit_block(const char* src, size_t len,
     if (cc__exec_range_contains(body_l, body_r)) return;
 
     CCComptimeExecOpts opts = {0};
-    opts.input_path = input_path;
+    char ofile[PATH_MAX];
+    char rel[1024];
+    int oline = 0;
+    const char* diag_file;
+    /* Honor `#line` in the prepared buffer (unit_native copies start with
+     * `#line 2 "user.ccs"`).  libtcc must name that file, not the cache path. */
+    cc__diag_origin_for_pos((body_l + 1 <= body_r) ? body_l + 1 : body_l,
+                            ofile, sizeof(ofile), &oline);
+    diag_file = ofile[0] ? ofile : (input_path ? input_path : "<input>");
+    diag_file = cc_path_rel_to_repo(diag_file, rel, sizeof(rel));
+    opts.input_path = diag_file;
     opts.site_pos = body_l;
-    /* First body byte — `#line` in the executor TU maps libtcc diagnostics
-     * to this file:line instead of `<string>:N`. */
-    opts.site_line = (body_l + 1 <= body_r) ? cc__diag_line_for_pos(body_l + 1) : 0;
+    opts.site_line = oline > 0 ? oline : 0;
     char err[512];
     if (cc_comptime_exec_block_body(src + body_l + 1, body_r - body_l - 1,
                                     &opts, err, sizeof(err)) != 0) {
@@ -2119,7 +2127,7 @@ static void cc__exec_visit_block(const char* src, size_t len,
             int line = opts.site_line > 0 ? opts.site_line
                                           : cc__diag_line_for_pos(body_l);
             fprintf(stderr, "%s:%d: error: @comptime block execution failed: %s\n",
-                    input_path ? input_path : "<input>", line,
+                    diag_file, line,
                     err[0] ? err : "unknown");
         }
         cc__exec_failed = 1;

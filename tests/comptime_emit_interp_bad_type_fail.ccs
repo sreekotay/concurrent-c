@@ -1,0 +1,18 @@
+/* A ${} that pastes a string into a type position: host-cc must name
+ * this file and the template line, and the expanded type spelling. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+@comptime {
+    const char* ty = "not_a_real_type";
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        static ${ty} emit_interp_bad_type_fn(void) {
+            return 0;
+        }
+    `);
+}
+
+int main(void) {
+    printf("%d\n", emit_interp_bad_type_fn());
+    return 0;
+}

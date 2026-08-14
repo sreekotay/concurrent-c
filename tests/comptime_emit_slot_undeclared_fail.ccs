@@ -1,0 +1,12 @@
+/* A ${} slot in @emit that names an undeclared comptime ident must
+ * diagnose at the interpolation, in this file — not a unit_native cache
+ * path and not a line inside the lowered string-builder. */
+#include <ccc/std/prelude.cch>
+
+@comptime {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        enum { X = ${no_such_slot} };
+    `);
+}
+
+int main(void) { return 0; }

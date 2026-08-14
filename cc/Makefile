@@ -256,7 +256,8 @@ endif
 lower-headers: $(LOWER_HEADERS_STAMP)
 
 # The stamp uses the STAGE-1 tool (grammar stubbed): stdlib headers contain
-# no @grammar, and stage-1 is buildable from raw .cch includes alone — which
+# no @grammar (`cli_decl.rules` is a factory file, not a lowered header), and
+# stage-1 is buildable from raw .cch includes alone — which
 # makes the whole graph acyclic and truly clean-buildable.  (Previously the
 # stamp needed the FULL tool while several of its objects latently needed
 # the stamp's output; clean trees only built by ordering luck.)

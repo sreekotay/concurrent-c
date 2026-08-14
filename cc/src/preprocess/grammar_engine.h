@@ -2,11 +2,10 @@
  * Builtin @grammar engines (native, compiled into ccc).
  *
  * The seam (grammar_seam.c) routes `@grammar(engine) Name {body}` here first.
- * A builtin engine is a pure source-to-source transform: parse the fenced body
- * and return freshly-malloc'd generated C (a `Name` type plus `Name_*`
- * operations) to splice in place of the declaration — no comptime, no libtcc.
- * Unknown engines are not builtins; the seam falls back to the @comptime-fn
- * path for user-defined engines.
+ * A builtin engine (`rules`, `schema`) is a pure source-to-source transform:
+ * parse the fenced body and return freshly-malloc'd generated C to splice in
+ * place of the declaration. `@grammar(cli)` is not a builtin — the seam
+ * synthesizes a comptime call to `cli` in <ccc/std/cli.cch>.
  *
  * Return protocol:
  *   non-NULL            -> generated C (caller frees); splice it.
@@ -28,7 +27,10 @@ char* cc_grammar_builtin_emit(const char* engine,
                               const char* src, size_t src_len,
                               char* err, size_t err_sz);
 
-/* @grammar(cli) emitter (grammar_cli.c). */
+/* `@grammar(cli)` argv product — parse the fenced declaration DSL and emit
+ * the typed struct + parse_args / print_usage / prepare. Invoked from the
+ * harvested comptime `cli` engine in <ccc/std/cli.cch>, not as a seam builtin.
+ */
 char* cc_grammar_cli_emit(const char* name,
                           const char* body, size_t body_len,
                           const char* file, int line,

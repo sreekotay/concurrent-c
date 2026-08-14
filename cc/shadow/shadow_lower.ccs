@@ -346,7 +346,6 @@ int main(int argc, char** argv) {
                                   sizeof(cached_c), NULL)) {
             if (shadow_build_host(in_path, out_path, NULL, 0, argv[0],
                                   no_cache, NULL, 0, NULL, 0) != 0) {
-                fprintf(stderr, "%s:1:1: error: host build failed\n", in_path);
                 return 1;
             }
             return 0;
@@ -620,7 +619,6 @@ int main(int argc, char** argv) {
         } else if (shadow_build_host(in_path, out_path, emit.buf, emit.len,
                                      argv[0], no_cache, dep_paths, ndeps,
                                      diag_buf, diag_len) != 0) {
-            fprintf(stderr, "%s:1:1: error: host build failed\n", in_path);
             rc = 1;
         }
         for (di = 0; di < nowned; di++) free(dep_owned[di]);

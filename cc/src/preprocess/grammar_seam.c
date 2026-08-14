@@ -5,9 +5,13 @@
  * fenced body verbatim (never tokenized), and rewrite the whole declaration into
  * a synthesized @comptime block that calls the named engine:
  *
- *     @comptime { engine(CC_SLICE_LIT("Name"),
+ *     @comptime { cc_emit_raw(0, "", 0); engine(CC_SLICE_LIT("Name"),
  *                        cc_slice_from_buffer((void*)"<escaped bytes>", <len>),
  *                        "<file>", <line>); }
+ *
+ * `cc_emit_raw` is a no-op emit that forces the executor to run the block
+ * even when `engine` is not yet registered (missing include), so the miss is
+ * an undefined-symbol error rather than a silently blanked declaration.
  *
  * Everything downstream is existing machinery: the engine is an ordinary
  * registered @comptime function (executor.c registry), the block runs under the
@@ -302,9 +306,13 @@ char* cc_rewrite_grammar_decls_text(const char* src, size_t n, const char* input
                     /* else: not a builtin — fall through to the comptime path */
                 }
 
-                /* User engine: synthesized @comptime call (one physical line). */
+                /* User engine: synthesized @comptime call (one physical line).
+                 * `cc_emit_raw` is a no-op emit that forces the executor to
+                 * run this block even when `engine` is not yet registered
+                 * (missing include) — so the miss is an undefined-symbol
+                 * error, not a silently blanked declaration. */
                 snprintf(head, sizeof(head),
-                         "@comptime { %s(CC_SLICE_LIT(\"%s\"), "
+                         "@comptime { cc_emit_raw(0, \"\", 0); %s(CC_SLICE_LIT(\"%s\"), "
                          "cc_slice_from_buffer((void*)\"",
                          engine, name);
                 cc_sb_append_cstr(&out, &out_len, &out_cap, head);

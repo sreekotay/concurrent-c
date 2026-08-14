@@ -1,0 +1,17 @@
+/* Generated C from @emit that fails host compile must name this file
+ * and the template line, not emit.c. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+@comptime {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        static int emit_host_c_fn(void) {
+            return no_such_ident;
+        }
+    `);
+}
+
+int main(void) {
+    printf("%d\n", emit_host_c_fn());
+    return 0;
+}

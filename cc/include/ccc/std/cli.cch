@@ -1,7 +1,9 @@
 /*
  * Argv parsing runtime for @grammar(cli) — descriptor table → typed struct.
  * String fields are char[:0] (NUL-terminated borrows of argv / default lits).
- * Declare options with @grammar(cli); call cc_parse_args / cc_print_usage.
+ * Declare options with @grammar(cli) (include this header so the `cli` engine
+ * is harvested); call cc_parse_args / cc_print_usage. The fenced declaration
+ * DSL is the CliSyntax factory in cli_decl.rules.
  */
 #ifndef CC_STD_CLI_H
 #define CC_STD_CLI_H
@@ -636,6 +638,33 @@ cc_cli_prepare_fields(const CCCliField *fields,
         return cc_ok(false);
     }
     return cc_ok(true);
+}
+
+/* `@grammar(cli)` engine: harvested comptime function. The seam synthesizes
+ * `cli(name, body, file, line)` for the non-builtin engine name. Argv overlay
+ * stays in this header; the fenced DSL is the CliSyntax factory
+ * (`cli_decl.rules`) and the argv product is emitted here. */
+@comptime void cli(CCSlice name, CCSlice body, const char* file, int line) {
+    extern char *cc_grammar_cli_emit(const char *n, const char *b, size_t bn,
+                                     const char *f, int ln, const char *src,
+                                     size_t src_len, char *err, size_t err_sz);
+    char namez[128];
+    char err[512];
+    char *gen;
+    size_t nlen = name.len;
+    if (nlen >= sizeof(namez)) nlen = sizeof(namez) - 1;
+    memcpy(namez, name.ptr ? (const char *)name.ptr : "", nlen);
+    namez[nlen] = '\0';
+    err[0] = '\0';
+    gen = cc_grammar_cli_emit(namez, body.ptr ? (const char *)body.ptr : "",
+                              body.len, file ? file : "?", line, "", 0,
+                              err, sizeof(err));
+    if (!gen) {
+        cc_emit_error(err[0] ? err : "@grammar(cli): emit failed");
+        return;
+    }
+    cc_emit_cstr(CC_EMIT_AFTER_PRELUDE, gen);
+    free(gen);
 }
 
 #endif /* CC_STD_CLI_H */

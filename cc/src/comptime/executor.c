@@ -11,6 +11,7 @@
 #include "../comptime/emit_tpl_prelude.inc.h"
 #include "preprocess/emit_limits.h"
 #include "preprocess/emit_plan.h"
+#include "preprocess/grammar_engine.h"
 #include "preprocess/strswitch_comptime.h"
 #include "util/text.h"
 
@@ -968,6 +969,7 @@ static TCCState* cc__exec_new_state(CCExecErrSink* sink, char* err_buf, size_t e
     tcc_add_symbol(s, "cc_reflect_tagged_name", (void*)cc_reflect_tagged_name);
     tcc_add_symbol(s, "cc_emit_raw_at", (void*)cc__host_emit_raw_at);
     tcc_add_symbol(s, "cc_emit_error", (void*)cc_emit_error);
+    tcc_add_symbol(s, "cc_grammar_cli_emit", (void*)cc_grammar_cli_emit);
     tcc_add_symbol(s, "cc_emit_warning", (void*)cc_emit_warning);
     tcc_add_symbol(s, "cc_emit_error_at", (void*)cc_emit_error_at);
     tcc_add_symbol(s, "cc_emit_warning_at", (void*)cc_emit_warning_at);

@@ -48,6 +48,21 @@ int cc_grammar_ufcs_table_overflow(void) { return 0; }
 
 const char* cc_grammar_pending_ufcs_type(int i) { (void)i; return ""; }
 
+char *cc_grammar_cli_emit(const char *name,
+                          const char *body, size_t body_len,
+                          const char *file, int line,
+                          const char *src, size_t src_len,
+                          char *err, size_t err_sz) {
+    (void)body; (void)body_len; (void)src; (void)src_len;
+    if (err && err_sz)
+        snprintf(err, err_sz,
+                 "@grammar(cli) %s (%s:%d): @grammar is unavailable during the "
+                 "stage-1 bootstrap — engine sources under src/preprocess/emit/ "
+                 "must not declare grammars",
+                 name ? name : "?", file ? file : "?", line);
+    return NULL;
+}
+
 int cc_grammar_pending_ufcs_field_count(void) { return 0; }
 
 const char* cc_grammar_pending_ufcs_field_type(int i) {

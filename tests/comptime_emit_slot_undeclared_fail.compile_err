@@ -1,0 +1,2 @@
+comptime_emit_slot_undeclared_fail.ccs:8
+'no_such_slot' undeclared

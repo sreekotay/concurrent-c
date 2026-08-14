@@ -1,0 +1,13 @@
+/* An undeclared ident inside a multi-line ${} must diagnose at the
+ * interpolation, in this file — not a unit_native cache path. */
+#include <ccc/std/prelude.cch>
+
+@comptime {
+    @emit(CC_EMIT_AFTER_PRELUDE, `
+        enum { X = ${
+            no_such_multiline
+        } };
+    `);
+}
+
+int main(void) { return 0; }

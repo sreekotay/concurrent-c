@@ -1,0 +1,2 @@
+comptime_emit_unterm_slot_fail.ccs
+unterminated @emit

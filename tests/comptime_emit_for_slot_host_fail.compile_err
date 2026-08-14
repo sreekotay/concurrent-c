@@ -1,0 +1,3 @@
+comptime_emit_for_slot_host_fail.ccs:13
+no_such_ident
+    return no_such_ident;
