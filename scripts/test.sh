@@ -146,6 +146,9 @@ if [ ! -x "./out/cc/bin/shadow_lower" ] && [ ! -x "./cc/bin/shadow_lower" ]; the
   exit 1
 fi
 
+# Refuse an incomplete checkout before ~1000 tests fail as compile_err noise.
+bash "$ROOT_DIR/scripts/check_patched_tcc.sh"
+
 # D3.0: exercise the in-process constexpr seam (cc_tcc_eval_const_expr) — a
 # compiler-internal that the .ccs/.c harness can't reach directly.
 if [ -x "./cc/bin/ccc" ]; then

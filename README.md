@@ -161,6 +161,9 @@ Self-contained install; headers ship pre-lowered.
 
 ### Examples and tests
 
+Needs the hacking checkout (patched TinyCC), not just an installed `ccc`.
+`./scripts/test.sh` / `make test` refuse an unpatched tree.
+
 ```bash
 ./cc/bin/ccc build --help
 ./cc/bin/ccc run examples/hello.ccs

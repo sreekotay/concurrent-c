@@ -1,5 +1,9 @@
 ### Test runner conventions (`tools/cc_test`)
 
+In-tree tests need patched TinyCC (`./scripts/check_patched_tcc.sh`);
+an installed `ccc` is not enough. `./scripts/test.sh` and `make test` refuse
+an unpatched checkout instead of emitting ~50 compile_err mismatches.
+
 The repo provides a minimal test runner: `./tools/cc_test`.
 
 It discovers `tests/**/*.{c,ccs,shcc}` recursively and runs each as either:

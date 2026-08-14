@@ -183,6 +183,7 @@ tools:
 
 # Prefer using ccc itself for tests (the runner drives ./cc/bin/ccc).
 test: cc tools out-of-tree-smoke out-of-tree-module-smoke runtime-variant-smoke
+	@./scripts/check_patched_tcc.sh
 	@./tools/cc_test
 
 # Smoke: verify `ccc` can compile a source file that lives outside the repo
