@@ -78,7 +78,7 @@ tutorial, idiomatic, and production code — and race their upstreams
   cross-language robustness gauntlets (syscall kidnapping, wake storms,
   fairness, named locks) run head-to-head against pthreads, Go, and Zig,
   each sub-benchmark's verdict printed verbatim:
-  [latest record](perf/benchmarks/neckbeard_2026_07_26.txt).
+  [latest record](perf/benchmarks/neckbeard_2026_08_14.txt).
 - [**CVE locality study**](studies/cve_locality/) — 27 real CVE/shape
   reconstructions under idiomatic CC, pre-registered rules, misses
   counted as backlog: **19 prevented, 6 mitigated, 2 still expressible**

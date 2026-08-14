@@ -104,7 +104,7 @@ peak threads, etc.).
 | 3 | **Channel Isolation** | `compare_contention_stability.sh` | Cross-channel interference when independent pipelines are hammered concurrently. | Low coupling across wake/sleep, scheduler, and allocator paths. |
 | 4 | **Noisy Neighbor** | `compare_preemption.sh` | Scheduler fairness when one heartbeat task competes with CPU hogs that never yield. | Whether latency-sensitive work stays responsive under CPU pressure. |
 | 5 | **Arena Allocation** | `compare_arena.sh` | Pure bump-pointer allocation throughput with private arenas and no shared allocator contention. | Measures the per-fiber arena strategy directly (Go/Zig rows are cross-strategy context). |
-| 6 | **Named Exclusive Lock** | `compare_exclusive_named_lock.sh` | Zipf lock-by-name product throughput (directory+lock+scheduler) and single-caller serial fast-path cost. | Named `CCExclusive` / mutex-by-name vs Go `sync.Map`, Rust `RwLock<HashMap>`, Zig `Io.RwLock`. |
+| 6 | **Named Exclusive Lock** | `compare_exclusive_named_lock.sh` | Zipf lock-by-name product throughput (directory+lock+scheduler) and single-caller serial fast-path cost. | Idiomatic name→mutex directories (`CCExclusive` vs `sync.Map` / `RwLock<HashMap>` / `Io.RwLock`). Product throughput, not a scheduler-only or fairness ranking. |
 
 Related (not one of the six): `contention_workers4_stability.sh` tracks outlier frequency in the 4-worker channel-isolation case.
 
@@ -112,8 +112,10 @@ Related (not one of the six): `contention_workers4_stability.sh` tracks outlier 
 ./perf/run_neckbeard_challenges.sh
 ```
 
-Latest committed record: [`benchmarks/neckbeard_2026_07_26.txt`](benchmarks/neckbeard_2026_07_26.txt)
-(full per-sample logs). Headline tables from that run:
+Latest record: [`benchmarks/neckbeard_2026_08_14.txt`](benchmarks/neckbeard_2026_08_14.txt)
+(manifest + full per-sample logs). That run is **DIRTY** (see the file's git
+block) — a lab notebook, not a clean-commit receipt. `rustc` was not on PATH.
+Headline tables from that run:
 
 ```text
 =================================================================
@@ -126,72 +128,69 @@ Implementation       Heartbeats   Kidnappers Completed
 Pthread (Adler)      29           100 / 100
 Concurrent-C         30           100 / 100
 Go                   28           100 / 100
-Zig                  30           100 / 100
+Zig                  29           100 / 100
 -----------------------------------------------------------------
 
 [2/6] Thundering Herd Challenge...
 -----------------------------------------------------------------
 Implementation               Avg Latency (ms)   Wake primitive
-Pthread (condvar)            0.1096             pthread_cond_signal
-Pthread (pipe herd)          0.9170             pipe write (herd case)
-Concurrent-C                 0.0526             chan wake-one
-Go                           0.8447             chan wake-one
-Zig                          0.8678             std.Thread.Condition.signal
+Pthread (condvar)            0.0176             pthread_cond_signal
+Pthread (pipe herd)          1.7668             pipe write (herd case)
+Concurrent-C                 0.0396             chan wake-one
+Go                           0.0227             chan wake-one
+Zig                          0.0164             pthread_cond_signal (C interop)
 -----------------------------------------------------------------
 
 [3/6] Channel Isolation Challenge...
 min / mean / max
 --------------------------------------------------------------------------
 Implementation       Baseline (ms)          Contention (ms)        Interference %
-Pthread              4.70 / 4.78 / 4.88     38.71 / 44.99 / 50.62  702.26 / 843.10 / 970.64
-Concurrent-C         2.29 / 2.45 / 2.85     4.36 / 4.69 / 5.14     70.60 / 92.29 / 108.77
-Go                   5.42 / 5.53 / 5.67     6.31 / 6.66 / 6.87     16.43 / 20.51 / 24.88
-Zig                  5.79 / 6.43 / 6.82     21.44 / 48.60 / 89.29  227.73 / 659.05 / 1325.87
+Pthread              5.38 / 5.63 / 5.84     34.39 / 84.24 / 117.04 509.39 / 1401.01 / 2076.75
+Concurrent-C         1.99 / 2.21 / 2.41     3.79 / 5.28 / 7.42     67.19 / 139.59 / 222.72
+Go                   3.89 / 4.19 / 4.42     4.74 / 5.04 / 5.32     10.39 / 20.36 / 26.89
+Zig                  9.61 / 10.54 / 11.97   35.00 / 39.38 / 41.87  244.55 / 275.75 / 321.38
 --------------------------------------------------------------------------
 
 [4/6] Noisy Neighbor Challenge...
 -----------------------------------------------------------------
 Implementation         Heartbeats   Peak Threads
-Pthread (1:1)          29           17
+Pthread (1:1)          28           17
 Concurrent-C (4w)      29           18
 Go (4P)                25           6
-Zig (1:1)              29           17
+Zig (1:1)              28           17
 -----------------------------------------------------------------
 
 [5/6] Arena Contention Challenge...
 -----------------------------------------------------------------
 Implementation       Throughput (M/sec)
-Pthread (Arena)      737.46
-Concurrent-C (Arena) 502.01
-Go (stack-promoted)  5759.54
-Zig (c_allocator)    89.25
+Pthread (Arena)      1310.62
+Concurrent-C (Arena) 1367.99
+Go (stack-promoted)  3713.45
+Zig (c_allocator)    198.45
 -----------------------------------------------------------------
 
 [6/6] Named Exclusive Lock Challenge...
 SUMMARY (median lock-ops/s; higher is better)
 =================================================================
 lang           zipf_product_ops/s  serial_fastpath_ops/s
-cc                       40960524              457796853
-go                       23441163              367731556
-rust                      3206081              212394070
-zig                       6970615              437636761
+cc                       26015837              384522950
+go                       15494267              293255132
+zig                       2923854              424065730
 =================================================================
+(no rustc on PATH; Zipf is directory+lock+scheduler product throughput,
+not a scheduler-only or fairness ranking)
 
 ALL CHALLENGES COMPLETED
 =================================================================
 ```
 
-To refresh the committed record (quiet machine, release toolchain present):
+To refresh the record (quiet machine, release toolchain present). The harness
+prints a git/machine/compiler manifest first; a dirty tree is labeled as such
+and is a lab notebook, not a clean-commit receipt.
 
 ```bash
-{
-  echo "=== Neckbeard Challenges (six cross-language) ==="
-  echo "Date: $(date)"
-  echo "Commit: $(git rev-parse --short HEAD)"
-  echo "Command: ./perf/run_neckbeard_challenges.sh"
-  echo ""
-  ./perf/run_neckbeard_challenges.sh
-} > "perf/benchmarks/neckbeard_$(date +%Y_%m_%d).txt"
+./perf/run_neckbeard_challenges.sh --snapshot \
+  "perf/benchmarks/neckbeard_$(date +%Y_%m_%d).txt"
 ```
 
 Then point the "latest record" link above (and in the root README) at the new file.

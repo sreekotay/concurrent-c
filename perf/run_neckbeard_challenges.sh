@@ -16,9 +16,95 @@
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-CCC="$REPO_ROOT/out/cc/bin/ccc"
+CCC="${CCC:-$REPO_ROOT/cc/bin/ccc}"
+export CCC
+
+SNAPSHOT=""
+if [ "${1:-}" = "--snapshot" ]; then
+    SNAPSHOT="${2:?--snapshot requires an output path}"
+    shift 2
+    mkdir -p "$(dirname "$SNAPSHOT")"
+fi
 
 mkdir -p "$SCRIPT_DIR/out"
+
+print_manifest() {
+    echo "=== Neckbeard Challenges (six cross-language) ==="
+    echo "Date: $(date)"
+    echo "Command: ./perf/run_neckbeard_challenges.sh${SNAPSHOT:+ --snapshot $SNAPSHOT}"
+    echo ""
+    echo "--- git ---"
+    echo "HEAD: $(git -C "$REPO_ROOT" rev-parse HEAD)"
+    echo "short: $(git -C "$REPO_ROOT" rev-parse --short HEAD)"
+    # bin/ and out/ are build products; listing them swamps the receipt.
+    local tracked untracked
+    tracked=$(git -C "$REPO_ROOT" diff --name-only HEAD)
+    untracked=$(git -C "$REPO_ROOT" ls-files --others --exclude-standard \
+        | grep -vE '^(bin/|out/)' || true)
+    if [ -z "$tracked" ] && [ -z "$untracked" ]; then
+        echo "tree: clean (tracked + source untracked; bin/out ignored)"
+    else
+        echo "tree: DIRTY (this record is not a clean-commit receipt)"
+        if [ -n "$tracked" ]; then
+            echo "modified/tracked:"
+            echo "$tracked" | sed 's/^/  /'
+        fi
+        if [ -n "$untracked" ]; then
+            echo "untracked (excluding bin/ out/):"
+            echo "$untracked" | sed 's/^/  /'
+        fi
+    fi
+    echo ""
+    echo "--- machine ---"
+    echo "uname: $(uname -a)"
+    if command -v sysctl >/dev/null 2>&1; then
+        local brand ncpu mem
+        brand=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || true)
+        ncpu=$(sysctl -n hw.ncpu 2>/dev/null || true)
+        mem=$(sysctl -n hw.memsize 2>/dev/null || true)
+        [ -n "$brand" ] && echo "cpu: $brand"
+        [ -n "$ncpu" ] && echo "ncpu: $ncpu"
+        [ -n "$mem" ] && echo "memsize: $mem"
+    fi
+    if [ -r /proc/cpuinfo ]; then
+        awk -F: '/^model name/ { gsub(/^ +/, "", $2); print "cpu:", $2; exit }' /proc/cpuinfo
+        echo "ncpu: $(getconf _NPROCESSORS_ONLN 2>/dev/null || echo '?')"
+    fi
+    echo "hostname: $(hostname 2>/dev/null || echo '?')"
+    echo ""
+    echo "--- compilers ---"
+    if [ -x "$CCC" ]; then
+        echo "ccc: $("$CCC" --version 2>/dev/null | head -1)  ($CCC)"
+    else
+        echo "ccc: not found ($CCC)"
+    fi
+    if command -v cc >/dev/null 2>&1; then
+        echo "cc: $(cc --version 2>/dev/null | head -1)"
+    fi
+    if command -v go >/dev/null 2>&1; then
+        echo "go: $(go version 2>/dev/null)"
+    else
+        echo "go: not found"
+    fi
+    if command -v zig >/dev/null 2>&1; then
+        echo "zig: $(zig version 2>/dev/null)"
+    else
+        echo "zig: not found"
+    fi
+    if command -v rustc >/dev/null 2>&1; then
+        echo "rustc: $(rustc --version 2>/dev/null)"
+    else
+        echo "rustc: not found"
+    fi
+    echo ""
+}
+
+if [ -n "$SNAPSHOT" ]; then
+    exec > >(tee "$SNAPSHOT")
+    exec 2>&1
+fi
+
+print_manifest
 
 echo "================================================================="
 echo "CONCURRENT-C: THE NECKBEARD CHALLENGES"

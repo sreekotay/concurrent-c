@@ -3,7 +3,6 @@
 // Measures baseline (1x1) vs contention (NxM) throughput.
 
 const std = @import("std");
-const Io = std.Io;
 
 const DEFAULT_MESSAGES: usize = 1_000_000;
 const DEFAULT_TRIALS: usize = 15;
@@ -12,7 +11,6 @@ const DEFAULT_CONSUMERS: usize = 8;
 const CHAN_CAP: usize = 1024;
 
 var sink: i64 = 0;
-var g_io: Io = undefined;
 
 fn printf(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
@@ -38,46 +36,46 @@ fn BoundedQueue(comptime T: type, comptime cap: usize) type {
         tail: usize = 0,
         len: usize = 0,
         closed: bool = false,
-        mu: Io.Mutex = .init,
-        not_full: Io.Condition = .init,
-        not_empty: Io.Condition = .init,
+        mu: std.Thread.Mutex = .{},
+        not_full: std.Thread.Condition = .{},
+        not_empty: std.Thread.Condition = .{},
 
         const Self = @This();
 
         fn push(self: *Self, item: T) void {
-            self.mu.lockUncancelable(g_io);
-            defer self.mu.unlock(g_io);
-            while (self.len == cap) self.not_full.waitUncancelable(g_io, &self.mu);
+            self.mu.lock();
+            defer self.mu.unlock();
+            while (self.len == cap) self.not_full.wait(&self.mu);
             self.buffer[self.tail] = item;
             self.tail = (self.tail + 1) % cap;
             self.len += 1;
-            self.not_empty.signal(g_io);
+            self.not_empty.signal();
         }
 
         fn pop(self: *Self) ?T {
-            self.mu.lockUncancelable(g_io);
-            defer self.mu.unlock(g_io);
+            self.mu.lock();
+            defer self.mu.unlock();
             while (self.len == 0) {
                 if (self.closed) return null;
-                self.not_empty.waitUncancelable(g_io, &self.mu);
+                self.not_empty.wait(&self.mu);
             }
             const item = self.buffer[self.head];
             self.head = (self.head + 1) % cap;
             self.len -= 1;
-            self.not_full.signal(g_io);
+            self.not_full.signal();
             return item;
         }
 
         fn close(self: *Self) void {
-            self.mu.lockUncancelable(g_io);
-            defer self.mu.unlock(g_io);
+            self.mu.lock();
+            defer self.mu.unlock();
             self.closed = true;
-            self.not_empty.broadcast(g_io);
+            self.not_empty.broadcast();
         }
 
         fn reset(self: *Self) void {
-            self.mu.lockUncancelable(g_io);
-            defer self.mu.unlock(g_io);
+            self.mu.lock();
+            defer self.mu.unlock();
             self.head = 0;
             self.tail = 0;
             self.len = 0;
@@ -169,11 +167,6 @@ fn runSharedCase(alloc: std.mem.Allocator, producers: usize, consumers: usize, m
 
 pub fn main() !void {
     const alloc = std.heap.c_allocator;
-
-    // g_io services only the contended mutex/condvar paths (futex wait/wake).
-    var threaded: Io.Threaded = .init(std.heap.page_allocator, .{});
-    defer threaded.deinit();
-    g_io = threaded.io();
 
     const messages = envIntOrDefault("CC_CONTENTION_ITERATIONS", DEFAULT_MESSAGES);
     const trials = envIntOrDefault("CC_CONTENTION_TRIALS", DEFAULT_TRIALS);

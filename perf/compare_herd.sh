@@ -36,10 +36,14 @@ echo "Done."
 echo ""
 
 # Shared sample-line averager. Tolerates missing files (e.g. zig not installed).
+# Match only "Sample N:" measurement lines — a substring grep of "Sample" also
+# hits Go/Zig headers like "Waiters: 1000 | Samples: 5" and treats the 5 as ms.
 avg_from() {
     [ -f "$1" ] || { echo "-"; return; }
-    grep "Sample" "$1" | sed 's/.*: *//; s/ ms//' | \
-        awk '{sum+=$1} END {if (NR>0) printf "%.4f", sum/NR; else print "-"}'
+    awk '
+        /^Sample [0-9]+:/ { sum += $(NF-1); n++ }
+        END { if (n > 0) printf "%.4f", sum/n; else print "-" }
+    ' "$1"
 }
 
 run_and_tee() {
@@ -91,7 +95,7 @@ printf "%-28s %-18s %s\n" "Pthread (condvar)"     "$PTHREAD_COND_AVG" "pthread_c
 printf "%-28s %-18s %s\n" "Pthread (pipe herd)"   "$PTHREAD_PIPE_AVG" "pipe write (NON-exclusive wait queue -> herd)"
 printf "%-28s %-18s %s\n" "Concurrent-C"          "$CC_AVG"           "chan wake-one (user-space, no syscall)"
 printf "%-28s %-18s %s\n" "Go"                    "$GO_AVG"           "chan wake-one (Go runtime, sudog queue)"
-printf "%-28s %-18s %s\n" "Zig"                   "$ZIG_AVG"          "std.Thread.Condition.signal (pthread_cond equiv.)"
+printf "%-28s %-18s %s\n" "Zig"                   "$ZIG_AVG"          "pthread_cond_signal (C interop, exclusive futex)"
 echo "-----------------------------------------------------------------"
 echo "Tradeoffs:"
 echo "  - condvar, Zig, and CC-chan all wake exactly one waiter; condvar/"

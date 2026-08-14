@@ -4806,7 +4806,7 @@ CCExclusive* excl = cc_exclusive_create(&arena, 0);     // default map (64)
 - `cc_exclusive_create(arena, initial_cap)` rounds `initial_cap` up to the next power of two (minimum 2). `initial_cap == 0` selects the default capacity (64).
 - Returns `NULL` when `arena` is `NULL` or allocation fails.
 
-The discovery map is an open-addressing table keyed by `uint64_t` name. It grows under an internal create mutex when load is high (approximately 75% full): capacity doubles, live entries are rehashed, and the prior table is retired. Retired tables are released with `cc_arena_release` at `cc_exclusive_destroy`, not at grow time, so lock-free lookups never observe a freed table.
+The discovery map is an open-addressing table keyed by `uint64_t` name. It grows under an internal create mutex when load is high (approximately 75% full): capacity doubles, live entries are rehashed, and the prior table is retired. The live map pointer is `_Atomic`: grow release-stores the new table after rehash, and lock-free lookups acquire-load that pointer before probing buckets. Retired tables are released with `cc_arena_release` at `cc_exclusive_destroy`, not at grow time, so lookups never observe a freed table.
 
 #### 8.10.2 Mutex resolve
 

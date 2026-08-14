@@ -18,9 +18,16 @@
 #       CC:   excl->lock(name) (lock-free probe + CAS + fiber park) + nursery
 #       Go:   mutexFor(name) via sync.Map, sync.Mutex + goroutines
 #       Rust: mutex_for(name) via RwLock<HashMap>+Arc, std Mutex + OS threads
-#       Zig:  mutexFor(name) via Io.RwLock+HashMap, Io.Mutex + OS threads
-#   * Zipf intentionally includes each runtime's directory + scheduler
-#     behavior. Serial fast path intentionally excludes both.
+#       Zig:  mutexFor(name) via std.Thread.RwLock+HashMap, std.Thread.Mutex + OS threads
+#   * Zipf is a product of directory + lock + scheduler, not a scheduler
+#     comparison. CC hashes uint64 names into a power-of-two open-addressed
+#     table; Go/Rust/Zig use generic HashMap/sync.Map. Ratios are not
+#     "CC scheduler is Nx Rust/Zig".
+#   * Warmup installs the working set (default 64 names). Timed trials are
+#     steady-state lookup, not lock creation.
+#   * CC unlock barges (wake-one, lock is free for another running fiber
+#     before the waiter is scheduled). Total ops/s is not a fairness result.
+#   * One (workers, keys, zipf_s, cs_work) point is not a curve.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -63,9 +70,12 @@ fi
 HAVE_ZIG=0
 if command -v zig >/dev/null 2>&1; then
   echo "Building Zig..."
-  zig build-exe "$SCRIPT_DIR/zig/exclusive_named_lock.zig" -O ReleaseFast -lc \
-    -femit-bin="$OUT/exclusive_named_lock_zig"
-  HAVE_ZIG=1
+  if zig build-exe "$SCRIPT_DIR/zig/exclusive_named_lock.zig" -O ReleaseFast -lc \
+      -femit-bin="$OUT/exclusive_named_lock_zig"; then
+    HAVE_ZIG=1
+  else
+    echo "Skipping Zig (build failed)"
+  fi
 else
   echo "Skipping Zig (zig not on PATH)"
 fi
@@ -104,3 +114,7 @@ for label in cc go rust zig; do
 done
 echo ""
 echo "Interpret with the fairness contract at the top of this script."
+echo "This is product throughput of each language's idiomatic name→mutex"
+echo "directory + lock + scheduler — not a scheduler-only ranking, not a"
+echo "fairness result (CC barges), and not lock-creation cost (warmup"
+echo "installs the working set). One parameter point, not a curve."

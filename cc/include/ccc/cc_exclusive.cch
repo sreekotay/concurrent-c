@@ -53,6 +53,8 @@
  * the create mutex and releases discovery-map tables; pooled entry storage
  * remains until the arena is freed.  The map starts at 64 slots (or the
  * capacity hint, rounded up to a power of two) and grows under the create lock.
+ * The live map pointer is `_Atomic`; grow release-stores the new table and
+ * lock-free lookups acquire-load it.  Prior tables stay allocated until destroy.
  *
  * Lock word: 0 free, 1 locked, 2 contended (locked, waiters may be queued).
  * Uncontended acquire is an inlined CAS; release is an inlined swap to FREE.

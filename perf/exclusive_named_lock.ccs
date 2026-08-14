@@ -240,7 +240,10 @@ int main(void) {
            (long long)workers * (long long)iters);
     printf("  note=zipf locks BY NAME each iter (directory+lock+scheduler "
            "product, spawn+join, no start-gun); serial_fastpath is one "
-           "resolved mutex, one caller, spins=0, no scheduler\n");
+           "resolved mutex, one caller, spins=0, no scheduler. Timed trials "
+           "are steady-state lookup after warmup installs the name set; "
+           "CC unlock barges; do not read zipf_ops_s as scheduler-only or "
+           "as fairness.\n");
 
     int warm = iters > 1000 ? 1000 : iters;
     (void)run_zipf(workers, warm, spins, keys);

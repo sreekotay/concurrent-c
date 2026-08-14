@@ -3,11 +3,12 @@
 // Same protocol as perf/exclusive_named_lock.ccs,
 // perf/go/exclusive_named_lock.go, and perf/rust/exclusive_named_lock.rs.
 //
-// Idiom (Zig 0.16): std.Io.Mutex per name (futex mutex via Io.Threaded),
-// create-on-first-use via AutoHashMap under Io.RwLock (shared read on the
-// hot path). Zipf locks by name each iteration (directory lookup on the hot
-// path). OS threads (std.Thread.spawn + join). Timing is before spawn
-// through join (no start-gun).
+// Idiom: std.Thread.Mutex per name, create-on-first-use via AutoHashMap
+// under std.Thread.RwLock (shared read on the hot path). Zipf locks by
+// name each iteration (directory lookup on the hot path). OS threads
+// (std.Thread.spawn + join). Timing is before spawn through join (no
+// start-gun). std.Thread rather than std.Io so this builds on Zig 0.15
+// and 0.16 (Io.Threaded is 0.16-only).
 //
 // Build:
 //   zig build-exe exclusive_named_lock.zig -O ReleaseFast -lc \
@@ -15,7 +16,6 @@
 
 const std = @import("std");
 const c = std.c;
-const Io = std.Io;
 
 const DEFAULT_WORKERS: usize = 8;
 const DEFAULT_ITERS: usize = 200_000;
@@ -55,9 +55,8 @@ const Rng = struct {
     }
 };
 
-var dir_rw: Io.RwLock = .init;
-var dir: ?std.AutoHashMap(u64, *Io.Mutex) = null;
-var g_io: Io = undefined;
+var dir_rw: std.Thread.RwLock = .{};
+var dir: ?std.AutoHashMap(u64, *std.Thread.Mutex) = null;
 var rows: [MAX_KEYS]Row = [_]Row{.{}} ** MAX_KEYS;
 var zipf_cum: [MAX_KEYS]f64 = [_]f64{0} ** MAX_KEYS;
 
@@ -73,28 +72,28 @@ fn envF64(name: [*:0]const u8, fallback: f64) f64 {
     return if (n <= 0) fallback else n;
 }
 
-fn ensureDir() *std.AutoHashMap(u64, *Io.Mutex) {
+fn ensureDir() *std.AutoHashMap(u64, *std.Thread.Mutex) {
     if (dir) |*d| return d;
-    dir = std.AutoHashMap(u64, *Io.Mutex).init(std.heap.page_allocator);
+    dir = std.AutoHashMap(u64, *std.Thread.Mutex).init(std.heap.page_allocator);
     return &dir.?;
 }
 
-fn mutexFor(name: u64) !*Io.Mutex {
-    dir_rw.lockSharedUncancelable(g_io);
+fn mutexFor(name: u64) !*std.Thread.Mutex {
+    dir_rw.lockShared();
     if (dir) |*d| {
         if (d.get(name)) |m| {
-            dir_rw.unlockShared(g_io);
+            dir_rw.unlockShared();
             return m;
         }
     }
-    dir_rw.unlockShared(g_io);
+    dir_rw.unlockShared();
 
-    dir_rw.lockUncancelable(g_io);
-    defer dir_rw.unlock(g_io);
+    dir_rw.lock();
+    defer dir_rw.unlock();
     const d = ensureDir();
     if (d.get(name)) |m| return m;
-    const m = try std.heap.page_allocator.create(Io.Mutex);
-    m.* = .init;
+    const m = try std.heap.page_allocator.create(std.Thread.Mutex);
+    m.* = .{};
     try d.put(name, m);
     return m;
 }
@@ -167,9 +166,9 @@ fn zipfWorker(ctx: ZipfCtx) void {
     while (i < ctx.iters) : (i += 1) {
         const name = zipfPick(zipf_cum[0..ctx.keys], ctx.keys, &r);
         const m = mutexFor(name) catch @panic("mutexFor");
-        Io.Threaded.mutexLock(m);
+        m.lock();
         rowBump(&rows[name], ctx.spins);
-        Io.Threaded.mutexUnlock(m);
+        m.unlock();
     }
 }
 
@@ -207,9 +206,9 @@ fn runSerialFastpath(iters: usize) !f64 {
     const t0 = monoNs();
     var i: usize = 0;
     while (i < iters) : (i += 1) {
-        Io.Threaded.mutexLock(m);
+        m.lock();
         rowBump(&rows[0], 0);
-        Io.Threaded.mutexUnlock(m);
+        m.unlock();
     }
     const ms = @as(f64, @floatFromInt(monoNs() - t0)) / 1_000_000.0;
 
@@ -235,11 +234,6 @@ pub fn main() !void {
         std.process.exit(1);
     }
     zipfInit(zipf_cum[0..keys], keys, zipf_s);
-
-    // g_io services only the rwlock's contended path; reads are CAS-only.
-    var threaded: Io.Threaded = .init(std.heap.page_allocator, .{});
-    defer threaded.deinit();
-    g_io = threaded.io();
 
     _ = c.printf("exclusive_named_lock lang=zig\n");
     _ = c.printf(

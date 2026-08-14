@@ -1,0 +1,75 @@
+/*
+ * Concurrent resolve while the discovery map grows. Tiny initial cap so
+ * create_mu grow races lock-free lookups of the published map pointer.
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_exclusive.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define NAMES 1024
+#define WORKERS 16
+
+static CCExclusive* g_excl;
+static int g_hits[NAMES];
+
+static void worker(int id) {
+    int per = NAMES / WORKERS;
+    int lo = id * per;
+    int hi = (id == WORKERS - 1) ? NAMES : lo + per;
+    CCExclusive* excl = g_excl;
+    for (int i = lo; i < hi; i++) {
+        CCExclusiveGuard g = excl->acquire((uint64_t)i);
+        g_hits[i] = 1;
+        g.release();
+    }
+}
+
+int main(void) {
+    CCArena arena = @create(megabytes(2)) @destroy;
+    /* 8 slots → several grows while 16 fibers insert distinct names. */
+    g_excl = cc_exclusive_create(&arena, 8);
+    if (!g_excl) return 1;
+    @defer cc_exclusive_destroy(g_excl);
+    memset(g_hits, 0, sizeof(g_hits));
+
+    {
+        CCNursery* n = cc_nursery_create(NULL)
+            !>(e) { fprintf(stderr, "nursery: %s\n", e.message); abort(); }
+            @destroy;
+        for (int w = 0; w < WORKERS; w++) {
+            int id = w;
+            n->spawn(() => [id] { worker(id); });
+        }
+    }
+
+    int missing = 0;
+    for (int i = 0; i < NAMES; i++) {
+        if (!g_hits[i]) missing++;
+    }
+    if (missing) {
+        fprintf(stderr, "FAIL missing=%d / %d names after concurrent grow\n",
+                missing, NAMES);
+        return 1;
+    }
+
+    /* Re-resolve every name after growth has settled. */
+    CCExclusive* excl = g_excl; /* local: UFCS on global incomplete ptr misses */
+    int64_t sum = 0;
+    for (int i = 0; i < NAMES; i++) {
+        CCExclusiveGuard g = excl->acquire((uint64_t)i);
+        sum += i;
+        g.release();
+    }
+    int64_t expect = (int64_t)(NAMES - 1) * NAMES / 2;
+    if (sum != expect) {
+        fprintf(stderr, "FAIL re-resolve sum=%lld expect=%lld\n",
+                (long long)sum, (long long)expect);
+        return 1;
+    }
+
+    printf("exclusive_map_grow_concurrent_smoke: OK (%d names, %d workers)\n",
+           NAMES, WORKERS);
+    return 0;
+}

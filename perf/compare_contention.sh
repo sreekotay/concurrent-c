@@ -29,9 +29,12 @@ $CCC build --release "$SCRIPT_DIR/channel_contention.ccs" -o "$SCRIPT_DIR/out/ch
 gcc -O2 "$SCRIPT_DIR/pthread_contention_baseline.c" -o "$SCRIPT_DIR/out/pthread_contention_baseline" -lpthread
 HAVE_ZIG=0
 if command -v zig >/dev/null 2>&1; then
-    zig build-exe "$SCRIPT_DIR/zig/channel_contention.zig" -O ReleaseFast -lc \
-        -femit-bin="$SCRIPT_DIR/out/zig_channel_contention" >/dev/null
-    HAVE_ZIG=1
+    if zig build-exe "$SCRIPT_DIR/zig/channel_contention.zig" -O ReleaseFast -lc \
+        -femit-bin="$SCRIPT_DIR/out/zig_channel_contention" >/dev/null; then
+        HAVE_ZIG=1
+    else
+        echo "WARNING: Zig channel_contention failed to build; skipping Zig row."
+    fi
 fi
 echo "Messages: ${CC_CONTENTION_ITERATIONS}"
 echo "Trials: ${CC_CONTENTION_TRIALS}"
