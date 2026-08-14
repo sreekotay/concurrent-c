@@ -15,8 +15,6 @@ CAPABILITY cc_node.require_path true
 CAPABILITY cc_node.require_fs true
 CAPABILITY cc_node.thenable true
 CAPABILITY cc_node.python_callback true
-SKIP cc_hosted.rtt_us cc-node: hosted libnode (isolated=False) is not in this wheel
-CAPABILITY cc_hosted.require_fs false  not in this wheel
 RESULT pythonia.spawn_ms 44
 RESULT pythonia.rtt_us 42
 RESULT pythonia.callback_roundtrip_us 106

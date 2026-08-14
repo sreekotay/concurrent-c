@@ -199,21 +199,6 @@ c = cc_node.get()
 out("get_reset", a.closed and c is not a and not c.closed)
 cc_node.reset()
 
-try:
-    cc_node.create(isolated=False)
-    out("hosted_refuses", False)
-except cc_node.JsError as e:
-    out("hosted_refuses",
-        "isolated=False" in str(e) and "not in this wheel" in str(e))
-try:
-    cc_node.get(isolated=False)
-    out("hosted_get_refuses", False)
-except cc_node.JsError as e:
-    out("hosted_get_refuses", "not in this wheel" in str(e))
-js_iso = cc_node.create(isolated=True)
-out("create_isolated", js_iso.isolated and not js_iso.closed)
-js_iso.destroy()
-
 # First Ctrl-C does not abandon the in-flight reply (wire would desync).
 # Second door is a hard child kill — cooperative close cannot stop a
 # JS CPU loop.

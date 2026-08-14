@@ -219,20 +219,6 @@ def bench_cc_node():
     js.destroy()
 
 
-def bench_cc_hosted():
-    # Mirror of cc-python in-process: isolated=False. This wheel is the
-    # child door — refuse, no fallback, no pretend RTT.
-    try:
-        cc_node.create(isolated=False)
-    except cc_node.JsError as e:
-        msg = str(e)
-        _result("cc_hosted.rtt_us", "SKIP %s" % msg.split(";")[0].strip())
-        _cap("cc_hosted.require_fs", False, "not in this wheel")
-        return
-    _result("cc_hosted.rtt_us", "SKIP hosted create() did not refuse")
-    _cap("cc_hosted.require_fs", False, "unexpected success")
-
-
 def bench_pythonia():
     """JSPyBridge: PyPI `javascript`, npm twin `pythonia`. Real Node child.
     A Python callable the JS side sees is a Promise (await in the child)."""
@@ -494,7 +480,6 @@ def main():
         print("SKIP need node on PATH")
         return 1
     bench_cc_node()
-    bench_cc_hosted()
     bench_pythonia()
     bench_diy_stdio()
     bench_spawn_each()
