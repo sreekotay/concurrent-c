@@ -12,7 +12,7 @@ Normative semantics live in `[spec/concurrent-c-spec-complete.md` §2.2](../../s
 
 | Pass              | Module                                      | Role                                                                                                                                                                                                                                                                                                                                   | Status                |
 | ----------------- | ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
-| Unwrap destroy    | `cc/src/visitor/pass_unwrap_destroy.c`, `.h` | Textual pre-pass. Rewrites the success-destructor suffix `EXPR !> … @destroy { body }` / `EXPR ?> … @destroy { body }` into the original statement followed by a synthesized `@defer { body };`. For built-in owned types (`CCNursery*`, `CCArena`) the body is wrapped with the type's pre-/post-destroy hooks so the nursery/arena lifecycle matches `@create(...) @destroy { ... }`. Runs before `pass_result_unwrap` and `pass_defer_syntax` in both `preprocess.c` and `visit_codegen.c`. | **Active**            |
+| Unwrap destroy    | `cc/src/visitor/pass_unwrap_destroy.c`, `.h` | Textual pre-pass. Rewrites the success-destructor suffix `EXPR !> … @destroy { body }` / `EXPR ?> … @destroy { body }` into the original statement followed by a synthesized `@defer { body };`. For built-in owned types (`CCNursery*`, `CCArena`) the body is wrapped with the type's pre-/post-destroy hooks so the nursery/arena lifecycle matches `name@(args) @destroy { ... }`. Runs before `pass_result_unwrap` and `pass_defer_syntax` in both `preprocess.c` and `visit_codegen.c`. | **Active**            |
 | Result unwrap     | `cc/src/visitor/pass_result_unwrap.c`, `.h` | Primary. Lowers `?>` (default-value operator, expression-only RHS) and `!>` (error-handler operator, expression- and statement-position) to `cc_is_ok` / `cc_is_err` / `cc_value` / `cc_error`. Implements the `@err(e);` forward inside `!>` bodies, the `@errhandler` divergence check, and the slice-7 unhandled-result diagnostic. | **Active**            |
 | Legacy err syntax | `cc/src/visitor/pass_err_syntax.c`, `.h`    | Existing `@err` / `=<!` / `: default` / `@errhandler` handler dispatch pass. Runs after `pass_result_unwrap` so that any `!>` forms lowered into the legacy `@err` shorthand are still processed. Skips `@err(IDENT);` tokens (followed immediately by `;`), which are structured forwards from the new-surface pass.                  | **Live (phases 1-3)** |
 
@@ -70,13 +70,13 @@ char* s = CALL() ?>(e) "fallback" @destroy { log(s); };
 A textual pre-pass that runs *before* `pass_result_unwrap` and `pass_defer_syntax`:
 
 1. Forward-scan for `@destroy` at top level (comment/string-aware).
-2. Confirm the enclosing statement contains `!>` or `?>` at depth 0. If not, the `@destroy` is part of an `@create(...) @destroy` form and is left untouched for `pass_create`.
+2. Confirm the enclosing statement contains `!>` or `?>` at depth 0. If not, the `@destroy` is part of a `name@(args) @destroy` (or legacy `@create(...) @destroy`) form and is left untouched for create lowering.
 3. Back-scan to the start of the enclosing statement. The host statement is emitted verbatim up to the `@destroy` token, then the `@destroy { body }` range is replaced with whitespace (preserving line numbers) and a `;` is appended to close the host statement.
 4. A synthesized `@defer { BODY };` is emitted immediately after. `BODY` is the user's `@destroy` body, with built-in lifecycle hooks injected for owned types.
 
 ### Built-in owned types
 
-If the host statement is a declaration and the declared type matches a known built-in owned type, the synthesized `@defer` body is wrapped with that type's hooks. This keeps the lifecycle identical to the `@create(...) @destroy { ... }` form:
+If the host statement is a declaration and the declared type matches a known built-in owned type, the synthesized `@defer` body is wrapped with that type's hooks. This keeps the lifecycle identical to the `name@(args) @destroy { ... }` form:
 
 | Declared type | Pre-hook (before user body) | Post-hook (after user body) |
 | --- | --- | --- |

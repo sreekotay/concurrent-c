@@ -94,7 +94,13 @@ u.mean(6.0);          // same call
 Parameter order for methods: **receiver first, arena last** (when an arena is needed).
 That is what makes `s.clone_into(&a)` and `clone_into(s, &a)` the same shape.
 
-Generics: `Name::[args]`. Fallible chain: unwrap (`!>` / `?>`), then the next method sees the value.
+Generics: `Name::[args]` instantiates a factory (`CC_GENERIC_FACTORY`).
+`Vec::[T]`, `Map::[K,V]`, `ArrayMap::[K,V]`, and non-char `T[:]` are that
+rule — Vec is the struct (`v.push`), Map/ArrayMap sugar is `Name*`
+(`m->insert`). Recipe:
+[recipe_user_generics.ccs](../examples/recipe_user_generics.ccs).
+
+Fallible chain: unwrap (`!>` / `?>`), then the next method sees the value.
 
 **Print** (include `<ccc/script/stdio.cch>`): prefer **`io.println`** when a `CCStdio` handle is in scope. Naked `println` / data-first `.println()` remain valid. Templates need an arena — prefer `@scratch` for throwaways.
 

@@ -6,5 +6,5 @@ int main(void) {
     ArrayMap::[int, int] m;
     if (!arena.base) return 1;
     m = array_map_new::[int, int](&arena);
-    return (int)m.nosuch();
+    return (int)m->nosuch();
 }

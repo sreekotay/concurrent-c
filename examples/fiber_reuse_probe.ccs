@@ -1,0 +1,55 @@
+/*
+ * Probe: for N=8190 noop fibers, how many coro stacks are fresh vs reused?
+ * Requires CC_V2_STATS=1 (atexit dump).
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define N 8190
+#define WARM 512
+
+static void* noop(void* arg) {
+    (void)arg;
+    return NULL;
+}
+
+static void serial_n(int n) {
+    for (int i = 0; i < n; i++) {
+        CCTask t = cc_fiber_spawn_task(noop, NULL);
+        if (t.kind == CC_TASK_KIND_INVALID) abort();
+        (void)cc_block_on_intptr(t);
+    }
+}
+
+static void batch_n(int n) {
+    CCTask* tasks = (CCTask*)malloc((size_t)n * sizeof(CCTask));
+    if (!tasks) abort();
+    for (int i = 0; i < n; i++) {
+        tasks[i] = cc_fiber_spawn_task(noop, NULL);
+        if (tasks[i].kind == CC_TASK_KIND_INVALID) abort();
+    }
+    for (int i = 0; i < n; i++)
+        (void)cc_block_on_intptr(tasks[i]);
+    free(tasks);
+}
+
+int main(int argc, char** argv) {
+    const char* mode = (argc > 1) ? argv[1] : "batch";
+    int warm = (argc > 2) ? atoi(argv[2]) : 0;
+
+    printf("fiber_reuse_probe: mode=%s N=%d warm=%d\n", mode, N, warm);
+    printf("  (CC_V2_STATS atexit: coro reuse vs fresh)\n");
+
+    if (warm > 0)
+        serial_n(warm);
+
+    if (strcmp(mode, "serial") == 0)
+        serial_n(N);
+    else
+        batch_n(N);
+
+    printf("done\n");
+    return 0;
+}

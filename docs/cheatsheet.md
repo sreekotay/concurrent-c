@@ -234,6 +234,30 @@ Tutorial: [typehooks-typeviews.md](typehooks-typeviews.md). Spec: `spec/draft_ty
 
 ---
 
+## Generics (`Name::[args]`)
+
+`Name::[args]` instantiates a library factory (`CC_GENERIC_FACTORY`). The
+emitted `${mangled}_<member>` functions are the methods. `Vec`, `Map`,
+`ArrayMap`, and non-char `T[:]` are that same rule — not a separate compiler
+container path.
+
+```c
+Vec::[int] v@(&arena) @destroy;          // struct CCVec_int
+v.push(10);                              // dot: Vec is the struct
+vec_new::[int](&arena);                  // same instance
+
+Map::[int, double] m = map_new::[int, double](&arena);
+m->insert(1, 2.5);                       // arrow: Map sugar is Name*
+
+double[:] xs;                            // CCSlice_double (char[:] stays CCSlice)
+```
+
+`.` = value, `->` = pointer. Recipe:
+[recipe_user_generics.ccs](../examples/recipe_user_generics.ccs). Spec
+[§12.1](../spec/concurrent-c-spec-complete.md#121-registered-factories).
+
+---
+
 ## Print
 
 Prefer `io.println` when a `CCStdio` handle is in scope (`<ccc/script/stdio.cch>`):

@@ -4,8 +4,16 @@
 > prepare/exec/splice seams with the legacy front; product holes are tracked
 > in [cc/shadow/README.md](../../cc/shadow/README.md) (Next gaps).
 
-**Status:** proposal (2026-05-29)  
+**Status:** proposal (2026-05-29); product updated as the factory seam landed.  
 **Goal:** Make `@comptime` as complete as the language allows, retire `CC_PARSER_MODE` stubs, and converge built-in generics (Vec/Map/Result), protocol hooks (UFCS/create/destroy), and `cc_type_info` introspection on **one compile-time seam**.
+
+**Current product:** `Vec::[T]`, `Map::[K,V]`, `ArrayMap::[K,V]`, and non-char
+`T[:]` instantiate `CC_GENERIC_FACTORY` in the stdlib headers (concrete names
+`CCVec_<T>`, `Map_<K>_<V>*`, `ArrayMap_<K>_<V>*`, `CCSlice_<T>`). Use-site
+`Name::[args]` still rewrites through `cc_rewrite_generic_containers`;
+emission is the compiled factory (textual fallback for self-build).
+`cc_instantiate_vec` / `_map` remain explicit `@comptime` force-ins.
+Dated sections below are the migration log.
 
 **Non-goal (for this doc):** Implement the full evaluator in one pass. This specifies the architecture and migration so work can land incrementally without another Vec/Map-style detour.
 
@@ -18,14 +26,14 @@ Today the compiler does compile-time work through **three unrelated mechanisms**
 | Mechanism | What it answers | Where it lives |
 |-----------|-----------------|----------------|
 | **Type registry** | Which `CCVec_T` / `Map_K_V` / `CCResult_T_E` monomorphs does this TU need? | `type_registry.c`, preprocess/codegen splice |
-| **`cc_type_register` scan** | How does `@create` / UFCS lower for registered types? | `symbols.c`, `hook_compile.c`, dylibs |
+| **`cc_type_register` scan** | How does `name@(args)` / UFCS lower for registered types? | `symbols.c`, `hook_compile.c`, dylibs |
 | **`cc_type_info`** | What is `T`'s layout for `type_of(T)` / `cc_dyn_vec`? | `cc_type.cch`, runtime registry, codegen emit |
 
 Plus a fourth, accidental layer:
 
 | **`CC_PARSER_MODE`** | What can TCC's stub-AST pass swallow before real lowering? | `map.cch`, `task.cch`, `cc_closure.cch`, TCC `cc_parser_mode` |
 
-The **generics vision** (spec §9, §12, §14) is comptime-shaped: monomorph at compile time, introspect via `type_of(T)`, register protocols in `@comptime`. The **implementation** that works for stdlib containers is macro monomorph + splice ordering — not `@comptime` emission.
+The **generics vision** (spec §9, §12, §14) is comptime-shaped: monomorph at compile time, introspect via `type_of(T)`, register protocols in `@comptime`. Stdlib Vec/Map/ArrayMap/`T[:]` instantiate `CC_GENERIC_FACTORY` on that seam; user `Name::[args]` is the same mechanism.
 
 Users and contributors should see **one model**:
 
@@ -187,7 +195,10 @@ typedef struct CCInstantiateSpec {
 void cc_instantiate(const CCInstantiateSpec* spec);
 ```
 
-**Compiler lowering:** `CCVec::[T]` rewrite calls `cc_instantiate_vec(mangle(T))` inside a synthetic `@comptime` block (or records directly into the graph — user never writes this for builtins).
+**Compiler lowering:** `Vec::[T]` / `Map::[K,V]` / `ArrayMap::[K,V]` / non-char
+`T[:]` queue a `CC_GENERIC_FACTORY` instance and rewrite the use site to the
+concrete C name. `cc_instantiate_vec` / `_map` remain explicit `@comptime`
+force-ins for a monomorph that never appears as `Name::[args]`.
 
 ### 3.2 Comptime emission (new — makes comptime "complete")
 
@@ -604,6 +615,10 @@ instantiate → emit → rewrite machinery is identical regardless of whether th
   rather than the compiler special-casing each one.  Output is byte-identical
   (full suite 489/489).  `Chan` has no decl factory yet (the chan branch in
   `cc_preprocess_emit_splice` emits nothing today).
+  **Later:** Vec/Map (and ArrayMap / `T[:]`) moved off NATIVE_DECL emit onto
+  `CC_GENERIC_FACTORY` in the stdlib headers; see Current product above. The
+  `cc__builtin_vec_decl` / `_map_decl` NATIVE_DECL entries remain as host
+  fallbacks.
 - **Option A (unified generic registry) — LANDED 2026-05-30.**  The three
   historic registries (container-decl factories, declarative generic templates,
   compiled generic factories) are now **one tagged registry** (`cc__generics[]`
@@ -1084,7 +1099,7 @@ intrinsic surface; optionally bank the dead-`__CCOptionalGeneric` removal first.
 ## 9. Invariants (ratchet rules)
 
 1. **One graph per TU** — no new `cc_type_registry_get_global()` callers; thread `CCTypeGraph*`.
-2. **Every monomorph has an emission recipe** — builtins use `cc_gen_*`; users use `@comptime` + `cc_emit_*`.
+2. **Every monomorph has an emission recipe** — stdlib Vec/Map/ArrayMap/CCSlice use `CC_GENERIC_FACTORY`; users use the same.
 3. **UFCS resolves through the graph** — no new string tables beside graph protocols.
 4. **`cc_type_info` pointer identity** — one node per mangled name per binary; comptime `type_of` reads the same node.
 5. **Anchors are explicit** — no top-of-file container blocks; prelude types always precede impl emission.
@@ -1095,7 +1110,7 @@ intrinsic surface; optionally bank the dead-`__CCOptionalGeneric` removal first.
 ## 10. Success criteria
 
 - [x] User can write `@comptime { cc_emit_cstr(CC_EMIT_AFTER_PRELUDE, "..."); }` and see it in the TU at the correct line. (B2)
-- [x] `CCVec::[T]` / `Map::[K,V]` collected as graph requests; emission via plan; explicit `cc_instantiate_*` from `@comptime` honored. (A1/A2/C1)
+- [x] `Vec::[T]` / `Map::[K,V]` / `ArrayMap::[K,V]` / `T[:]` instantiate `CC_GENERIC_FACTORY`; explicit `cc_instantiate_*` from `@comptime` honored.
 - [x] Map `CC_PARSER_MODE` impl branch removed (parser stub now lives in `map_forward.cch`); UFCS map smokes unchanged. (A4)
 - [x] `cc_type_register` documented as legacy alias of `cc_type_define`. (B3 — both spellings scanned identically)
 - [ ] `CC_PARSER_MODE` undefined in normal builds; stub-AST behind `CC_STUB_AST`.
@@ -1115,5 +1130,5 @@ intrinsic surface; optionally bank the dead-`__CCOptionalGeneric` removal first.
 ## 12. Relation to existing docs
 
 - **COMPILER_CLEANUP_STATUS.md** §4d/L3 — Vec ordering fix; Map/Task/Closure stubs; this doc supersedes the removal *order* with the seam model.
-- **COMPTIME_REAL_WORLD_ANALYSIS.md** — built-in data structures stay macro monomorph; comptime invests in introspection + user factories, not reimplementing `CC_VEC_DECL` in Zig style.
+- **COMPTIME_REAL_WORLD_ANALYSIS.md** — earlier split (macro monomorph for builtins vs user factories); Vec/Map/ArrayMap/CCSlice now share `CC_GENERIC_FACTORY` with user families.
 - **spec §9 / §12 / §14** — normative target; this doc is the compiler's consolidation plan.

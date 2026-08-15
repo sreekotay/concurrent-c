@@ -11,7 +11,7 @@
 #endif
 
 static size_t redis_map_live_payload_bytes(RedisDbMap map) {
-    return map ? map.live_bytes() : 0;
+    return map ? map->live_bytes() : 0;
 }
 
 static size_t redis_db_map_live_bytes(const RedisDb* db) {
@@ -31,7 +31,7 @@ static size_t redis_db_map_len(const RedisDb* db) {
     if (!db || !db->shards) return 0;
     for (i = 0; i < db->shard_count; ++i) {
         RedisDbMap m = db->shards[i].entries;
-        if (m) sum += m.len();
+        if (m) sum += m->len();
     }
     return sum;
 }
@@ -42,7 +42,7 @@ static size_t redis_db_map_buckets(const RedisDb* db) {
     if (!db || !db->shards) return 0;
     for (i = 0; i < db->shard_count; ++i) {
         RedisDbMap m = db->shards[i].entries;
-        if (m) sum += m.cap();
+        if (m) sum += m->cap();
     }
     return sum;
 }

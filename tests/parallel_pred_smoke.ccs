@@ -1,0 +1,54 @@
+#include <ccc/std/prelude.cch>
+#include <stdint.h>
+#include <stdio.h>
+
+#define U24_MASK 0xFFFFFFu
+#define DEPTH 6
+#define CUT 3
+
+static uint32_t u24(uint32_t x) {
+    return x & U24_MASK;
+}
+
+static uint32_t sum_seq(uint32_t d, uint32_t i) {
+    if (d >= DEPTH)
+        return i;
+    return u24(sum_seq(d + 1, u24(i * 2)) + sum_seq(d + 1, u24(i * 2 + 1)));
+}
+
+static uint32_t sum_cut(uint32_t d, uint32_t i) {
+    if (d >= DEPTH)
+        return i;
+    uint32_t left = 0;
+    uint32_t right = 0;
+    @parallel (d < CUT) {
+        left  = sum_cut(d + 1, u24(i * 2));
+        right = sum_cut(d + 1, u24(i * 2 + 1));
+    }
+    return u24(left + right);
+}
+
+static int gated(int spawn) {
+    int a = 0;
+    int b = 0;
+    @parallel (spawn) {
+        a = 10;
+        b = 20;
+    }
+    return a + b;
+}
+
+int main(void) {
+    uint32_t want = sum_seq(0, 0);
+    uint32_t got = sum_cut(0, 0);
+    if (got != want) {
+        printf("tree mismatch want=%u got=%u\n", want, got);
+        return 1;
+    }
+    if (gated(1) != 30 || gated(0) != 30) {
+        printf("gate mismatch\n");
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}

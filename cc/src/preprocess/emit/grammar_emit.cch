@@ -1677,6 +1677,18 @@ static inline CCString cc_gr_ok_close_text(CCArena* a, int k) {
 `, a);
 }
 
+/* PEG `not` / `and` (peek): child already ran; restore cursor. `not` fails
+ * if the child matched; `and` fails if the child missed. */
+static inline CCString cc_gr_not_hit_text(CCArena* a, int k, const char* fail) {
+    return @string(`    p = sv${k}; goto ${fail};
+`, a);
+}
+
+static inline CCString cc_gr_and_hit_text(CCArena* a, int k) {
+    return @string(`    p = sv${k}; goto Lok${k};
+`, a);
+}
+
 /* fused string-body scan: SWAR run + escape arm */
 static inline CCString cc_gr_forever_open_text(CCArena* a) {
     return @string(`    for (;;) {

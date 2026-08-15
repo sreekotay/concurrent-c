@@ -11,23 +11,23 @@ int main(void) {
     CCSlice k2 = CC_SLICE_LIT("beta");
     CCSlice k3 = CC_SLICE_LIT("gamma");
 
-    m.insert(k1, 11);
-    m.insert(k2, 22);
-    m.insert(k3, 33);
+    m->insert(k1, 11);
+    m->insert(k2, 22);
+    m->insert(k3, 33);
 
-    int* got = m.get_ptr(k2);
+    int* got = m->get_ptr(k2);
     if (!got || *got != 22) {
         printf("FAIL: get_ptr(beta) expected 22\n");
         return 2;
     }
 
-    int removed = m.remove(k2);
+    int removed = m->remove(k2);
     if (!removed) {
         printf("FAIL: remove(beta) should return true\n");
         return 3;
     }
 
-    int* after = m.get_ptr(k2);
+    int* after = m->get_ptr(k2);
     if (after) {
         printf("FAIL: get_ptr(beta) should be NULL after remove\n");
         return 4;

@@ -1,0 +1,55 @@
+; C23 phase-3 pp-tokenizer factory (ISO, not Concurrent-C).
+; Host must line-splice (`\` + newline) before matching.
+; Whitespace and comments are skipped; kept leaves are pp-tokens.
+; Identifiers are never recolored as typedef-names (syntax layer / host oracle).
+; Digit separators (`1'000`) stay inside the pp-number. Encoding prefixes
+; (`u8`, `u`, `U`, `L`) attach to the following string / character token.
+;
+; Entry: top
+;
+; Comments MUST be first in the skip alt. `/` is also a punct; if `tok`
+; wins the PEG trial, comment bodies are re-lexed as code.
+
+top:     any [comment | ws | tok]
+comment: line_comment | block_comment
+ws:      some charset [#' ' #'\t' #'\r' #'\n']
+
+line_comment:  ["//" any complement charset [#'\n']]
+block_comment: ["/*" any block_char "*/"]
+block_char:    [complement charset [#'*']
+               | [#'*' complement charset [#'/']]]
+
+digit:    charset [#'0' - #'9']
+nondigit: charset [#'a' - #'z' #'A' - #'Z' #'_']
+idcont:   charset [#'a' - #'z' #'A' - #'Z' #'_' #'0' - #'9']
+
+; Greedy pp-number. C23 `'` digit-separator sits between digits / letters.
+; Exponent+sign before nondigit so `e` is not swallowed without its sign.
+pp_number: keep [[digit | [#'.' digit]]
+                 any [[charset [#'e' #'E' #'p' #'P'] charset [#'+' #'-']]
+                     | [#'\'' [digit | nondigit]]
+                     | digit | nondigit | #'.']]
+
+ident: keep [nondigit any idcont]
+
+strchar: complement charset [#'"' #'\\' #'\n']
+chrchar: complement charset [#'\'' #'\\' #'\n']
+esc:     [#'\\' skip]
+strpref: ["u8" | #'u' | #'U' | #'L']
+string:  keep [opt strpref #'"' any [some strchar | esc] #'"']
+charlit: keep [opt strpref #'\'' any [some chrchar | esc] #'\'']
+
+; Maximal munch. Digraphs before the singles they start with.
+punct_multi: [
+      "%:%:" | "..." | "<<=" | ">>=" | "->" | "++" | "--" | "<<" | ">>"
+    | "<=" | ">=" | "==" | "!=" | "&&" | "||" | "*=" | "/=" | "%=" | "+="
+    | "-=" | "&=" | "^=" | "|=" | "##" | "<:" | ":>" | "<%" | "%>" | "%:"
+]
+punct_one: charset [
+    #'#' #'[' #']' #'(' #')' #'{' #'}' #'.' #'&' #'*' #'+' #'-' #'~' #'!'
+    #'/' #'%' #'<' #'>' #'^' #'|' #'?' #':' #';' #'=' #','
+]
+punct: keep [punct_multi | punct_one]
+
+; String / char before ident so `u8"hi"` is one token, not `u8` + `"hi"`.
+tok: string | charlit | pp_number | ident | punct

@@ -1,1 +1,1 @@
-error: async: `@nursery { ... }` is retired; use `CCNursery* n = @create(parent) @destroy` and `n->spawn(...)`
+error: async: `@nursery { ... }` is retired; use `CCNursery* n@(parent) @destroy` and `n->spawn(...)`

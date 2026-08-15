@@ -1,0 +1,23 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+#define N 64
+
+int main(void) {
+    int seq[N];
+    int par[N];
+    int i;
+    for (i = 0; i < N; i++)
+        seq[i] = i * 3 + 1;
+    @parallel for (i in 0..N) {
+        par[i] = i * 3 + 1;
+    }
+    for (i = 0; i < N; i++) {
+        if (par[i] != seq[i]) {
+            printf("mismatch at %d\n", i);
+            return 1;
+        }
+    }
+    printf("ok\n");
+    return 0;
+}

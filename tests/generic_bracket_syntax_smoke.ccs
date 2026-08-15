@@ -16,10 +16,10 @@ int main(void) {
     if (!p || *p != 20) return 3;
 
     Map::[int, int] m = map_new::[int, int](&arena);
-    m.insert(1, 100);
-    m.insert(2, 200);
+    m->insert(1, 100);
+    m->insert(2, 200);
 
-    int* val = m.get_ptr(1);
+    int* val = m->get_ptr(1);
     if (!val || *val != 100) return 4;
 
     printf("generic_bracket_syntax ok\n");

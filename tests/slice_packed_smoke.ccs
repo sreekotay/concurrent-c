@@ -52,13 +52,13 @@ int main(void) {
 
     m = array_map_new::[CCSlicePacked, int](&arena);
     if (!m) return 9;
-    if (m.insert(a, 11) != 0) return 10;
-    if (m.insert(long_p, 22) != 0) return 11;
-    p = m.get_ptr(b);
+    if (m->insert(a, 11) != 0) return 10;
+    if (m->insert(long_p, 22) != 0) return 11;
+    p = m->get_ptr(b);
     if (!p || *p != 11) return 12;
-    p = m.get_ptr(long_p);
+    p = m->get_ptr(long_p);
     if (!p || *p != 22) return 13;
-    if (m.len() != 2) return 14;
+    if (m->len() != 2) return 14;
 
     if (a.len() != 2 || !a.is_inline()) return 15;
     s = a.as_slice();
@@ -69,7 +69,7 @@ int main(void) {
         CCSlicePackedView view;
         CCSlicePacked probe = cc_slice_packed_borrow_slice(
             &view, cc_slice_from_buffer(long_buf, sizeof(long_buf)));
-        p = m.get_ptr(probe);
+        p = m->get_ptr(probe);
         if (!p || *p != 22) return 17;
         if (!cc_slice_packed_is_view(&probe)) return 18;
         if (cc_slice_packed_is_durable(&probe)) return 19;

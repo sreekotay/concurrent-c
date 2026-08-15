@@ -74,7 +74,8 @@ and release rules are in `spec/concurrent-c-spec-complete.md` §5 and
 
 ## Generic factories and UFCS
 
-The generic collection factories are:
+The generic collection factories (`CC_GENERIC_FACTORY` in `vec.cch`,
+`map_forward.cch`, `array_map.cch`; `T[:]` in `cc_slice.cch`) are:
 
 ```c
 Vec::[T] vec_new::[T](CCArena *arena);
@@ -82,6 +83,10 @@ Map::[K, V] map_new::[K, V](CCArena *arena);
 ArrayMap::[K, V] array_map_new::[K, V](CCArena *arena);
 ArrayMap::[K, V] array_map_new_count::[K, V](CCArena *arena, size_t count);
 ```
+
+Construction sugar is the binder: `Vec::[T] v@(&arena) @destroy;` (and the
+Map / ArrayMap equivalents). Those binders select the `.create` hook, which
+is the `_new` factory. The signatures above are the free-name grid.
 
 `Vec::[T]` denotes the generated C family `CCVec_<T-mangling>`; the
 CC-prefixed spellings (`CCVec::[T]`, `cc_vec_new::[T]`) name the same

@@ -6,7 +6,7 @@ Two file-scope declarations attach policy to a type. They share the
 | | `@typehooks` | `@typeview` |
 |--|--|--|
 | Answers | How this type is created, destroyed, and (optionally) how `x.method` lowers | Which names a caller may use, and which embedded fields are “is-a” faces |
-| Typical job | Bodyless `@destroy` / `@create` for *your* type | A wrapper that should act like the field it contains, or a narrower face of one object |
+| Typical job | Bodyless `@destroy` / `name@(args)` for *your* type | A wrapper that should act like the field it contains, or a narrower face of one object |
 | Body | Strict C designated init: `.destroy = …,` | Groups: `as:`, `r:`, `w:`, `rw:` |
 
 You do **not** need `@typehooks` to add a method. Declaring
@@ -23,7 +23,7 @@ trailing-`*` family (`Fam_*`). Same match rule on both forms:
 ## 1. `@typehooks` — lifecycle
 
 Write the functions. Then name them on the type. Bodyless `@destroy` and
-`@create(...)` call those functions. Bodyless `@destroy` needs a non-empty
+`name@(args)` call those functions. Bodyless `@destroy` needs a non-empty
 destroy chain (a hook on the type, or on a value field’s type).
 Stdlib types already ship one (`CCArena`, `CCFile`, `CCNursery*`, …).
 
@@ -55,7 +55,7 @@ static void port_close(Port* p) {
 };
 
 int main(void) {
-    Port p = @create(3) @destroy;   /* port_open(3), then port_close */
+    Port p@(3) @destroy;   /* port_open(3), then port_close */
     printf("fd=%d\n", p.fd);
     return 0;
 }
@@ -69,12 +69,12 @@ Rules that matter in practice:
 - The body is a **C designated initializer**: leading `.`, one RHS per arm,
   commas between arms, trailing comma allowed.
 - `.create` / `.destroy` / `.ufcs` are the functions themselves.
-- `@create(...)` picks the create function from the **declared type** on
+- `name@(args)` picks the create function from the **declared type** on
   the left plus the argument list.
-- If the type registers destroy, `@create(...)` must be followed by
+- `name@(args)` must be followed by
   `@destroy` or `@detach`. Omitting both is an error.
 - `@destroy` attaches cleanup to **successful declaration construction**,
-  not only to `@create`. `Port p = {0} @destroy;` and
+  not only to `name@(args)`. `Port p = {0} @destroy;` and
   `Port p = port_open(3) @destroy;` run the destroy chain at scope
   exit the same way. After `!>`, construction succeeded only if the
   unwrap did.
@@ -150,7 +150,7 @@ static int port_ready(Port* p) {
 }
 
 int main(void) {
-    Port p = @create(3) @destroy;
+    Port p@(3) @destroy;
     int n = p.put("hello");    /* switch → port_put_2 */
     int ok = p.ready();        /* default → port_ready */
     printf("n=%d ok=%d fd=%d\n", n, ok, p.fd);
@@ -500,7 +500,7 @@ form independently.
   field whose type already has a hook).
 - Close-before-unlink (or any “parts first”)? `@destroy { t.close(); }` —
   the body runs before the outer hook and embed teardown.
-- `@create(...)` for that type? Same block, `.create`.
+- `name@(args)` for that type? Same block, `.create`.
 - Wrapper should reuse an embed’s methods? `@typeview` + `as: field`.
 - Caller should not see `flush` / `sock`? Named `@typeview Mode on T` and
   take `@typeview(Mode) T*`.

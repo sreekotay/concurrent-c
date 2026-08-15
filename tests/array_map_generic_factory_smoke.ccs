@@ -1,0 +1,22 @@
+/* `ArrayMap::[K,V]` / `array_map_new::[K,V]` instantiate
+ * CC_GENERIC_FACTORY(ArrayMap, 2). `ArrayMap_len(...)` in expression
+ * text is not an instance request. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int ArrayMap_len(int x) { return x; }
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(4));
+    ArrayMap::[int, int] m;
+    int *vp;
+    if (!arena.base) return 1;
+    if (ArrayMap_len(0) != 0) return 2;
+    m = array_map_new::[int, int](&arena);
+    if (!m) return 3;
+    if (m->insert(1, 10) != 0) return 4;
+    vp = m->get_ptr(1);
+    if (!vp || *vp != 10) return 5;
+    printf("ok\n");
+    return 0;
+}

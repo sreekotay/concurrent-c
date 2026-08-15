@@ -31,7 +31,7 @@ static void hooks_demo_destroy(HooksDemo* h) {
 
 int main(void) {
     {
-        HooksDemo h = @create(7) @destroy;
+        HooksDemo h@(7) @destroy;
         assert(h.n == 7);
         assert(h.alive == 1);
     }

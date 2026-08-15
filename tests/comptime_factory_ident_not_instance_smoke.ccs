@@ -1,0 +1,24 @@
+/* `Family_rest` in expression text is not an instance request.
+ * `Note_len(...)` must not instantiate `Note::[len]` (arg `len` is not a
+ * type). A mangled type in a bind still instantiates. */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+
+CC_GENERIC_FACTORY(Note, 1) {
+    return @emit(`
+        typedef struct { ${arg(0)} v; } ${mangled};
+        static inline ${mangled} ${mangled}_make(${arg(0)} x) {
+            ${mangled} r; r.v = x; return r;
+        }`, arena);
+}
+
+static int Note_len(int x) { return x; }
+
+int main(void) {
+    if (Note_len(0) != 0) return 1;
+    Note_int n = Note_int_make(7);
+    if (n.v != 7) return 2;
+    printf("comptime_factory_ident_not_instance_smoke ok\n");
+    return 0;
+}

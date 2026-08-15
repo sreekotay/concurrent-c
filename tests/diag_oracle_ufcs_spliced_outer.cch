@@ -2,4 +2,4 @@
 typedef ArrayMap::[int, int] DiagUfcsMap;
 #include "diag_oracle_ufcs_spliced_inner.cch"
 static int diag_ufcs_bad(int[~1 <] rx) { int v = 0; rx.missing(&v); return v; }
-static void diag_ufcs_map_destroy(DiagUfcsMap m) { if (m) m.destroy(); }
+static void diag_ufcs_map_destroy(DiagUfcsMap m) { if (m) m->destroy(); }

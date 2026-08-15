@@ -26,6 +26,7 @@
  *     alt:     seq { '|' seq }             ; PEG ordered choice, backtracks pos
  *     seq:     { term }
  *     term:    'some' term | 'any' term | 'opt' term      ; repetition (PEG greedy)
+ *            | 'and' term | 'not' term                    ; PEG peek (restore cursor)
  *            | 'keep' term                                ; log matched span (v2)
  *            | 'collect' term                             ; transparent (entry generated always)
  *            | 'skip'                                     ; consume one byte
@@ -66,10 +67,18 @@
  * Left recursion is not detected in v1 (PEG discipline; it would recurse at
  * runtime). Unknown rule references fail at C-compile time with a clear
  * undefined-function error naming <Name>__r_<rule>.
+ *
+ * IR tables (nodes, kids, rules, charsets, literal pool, codecs) grow from a
+ * cc_arena_stack at the engine entry — there is no hardcoded grammar-size
+ * cap. Identifier spellings stay bounded (R_NAME_MAX). Charset bitmaps stay
+ * 32 bytes (256 bits). FIRST-set switch dispatch is an optimization: many
+ * overlapping alternatives fall back to the PEG trial cascade.
  */
 #include "preprocess/grammar_engine.h"
 #include "preprocess/variant_lower.h"
 #include "util/text.h"
+
+#include <ccc/cc_arena.h>
 
 #include <ctype.h>
 #include <stdarg.h>
@@ -84,26 +93,27 @@ enum {
     RN_KEEP, RN_COLLECT,
     /* Phase 2: on miss, succeed with a captured span leaf (soft-fail / raw). */
     RN_FALLIBLE,
+    /* PEG peek: try child, restore cursor (`and` = &e, `not` = !e). */
+    RN_AND, RN_NOT,
     /* Phase 2: terminal over a pp-token kind name (host classifies at cursor). */
     RN_TOKKIND
 };
 
-enum {
-    R_MAX_NODES = 1024,
-    R_MAX_KIDS  = 2048,
-    R_MAX_RULES = 128,
-    R_MAX_SETS  = 128,
-    R_MAX_POOL  = 16384,
-    R_NAME_MAX  = 64
-};
+enum { R_NAME_MAX = 64 };   /* identifier / codec spelling; not a grammar-size cap */
 
 typedef struct {
     int kind;
-    int a;       /* SOME/ANY/OPT: child. CHARSET: set idx. LIT/REF: pool offset. */
+    int a;       /* SOME/ANY/OPT/AND/NOT: child. CHARSET: set idx. LIT/REF: pool offset. */
     int b;       /* LIT/REF: byte length. SEQ/ALT: kids start. */
     int nkids;   /* SEQ/ALT: child count. */
     size_t at;   /* body offset, for diagnostics */
 } RNode;
+
+typedef struct {
+    char name[R_NAME_MAX];
+    int node;
+    size_t at;
+} RRule;
 
 typedef struct {
     const char* body; size_t n; size_t pos;
@@ -111,16 +121,17 @@ typedef struct {
     const char* name;                     /* declared grammar Name */
     char err[512]; size_t err_at; int failed;
 
-    RNode nodes[R_MAX_NODES]; int nnodes;
+    CCArena* ir;   /* IR + analysis scratch (cc_arena_stack at engine entry) */
+
+    RNode* nodes; int nnodes, cap_nodes;
     int entry_idx, entry_set;   /* first rule declared at include-depth 0 */
-    unsigned char rule_inc[R_MAX_RULES];   /* rule came from an include */
-    int kids[R_MAX_KIDS]; int nkids;
-    unsigned char sets[R_MAX_SETS][32]; int nsets;
-    char pool[R_MAX_POOL]; int npool;
-    struct { char name[R_NAME_MAX]; int node; size_t at; } rules[R_MAX_RULES];
-    int nrules;
-    char codecs[16][R_NAME_MAX]; int ncodecs;   /* keep/decode(fn) codec names */
-    char codenc[16][R_NAME_MAX];                /* optional /encode(fn) inverses
+    unsigned char* rule_inc; int cap_rule_inc;  /* rule came from an include */
+    int* kids; int nkids, cap_kids;
+    unsigned char (*sets)[32]; int nsets, cap_sets;
+    char* pool; int npool, cap_pool;
+    RRule* rules; int nrules, cap_rules;
+    char (*codecs)[R_NAME_MAX]; int ncodecs, cap_codecs;
+    char (*codenc)[R_NAME_MAX]; int cap_codenc;             /* optional /encode(fn) inverses
                                                  * contract: size_t enc(p, n, dst, cap);
                                                  * returns exact encoded size ALWAYS;
                                                  * dst == NULL -> measure only;
@@ -146,8 +157,42 @@ static int rg_fail(RG* g, size_t at, const char* msg) {
     return -1;
 }
 
+static int rg_grow(RG* g, void** p, int* cap, int need, size_t elem, size_t align,
+                   size_t at, const char* oom) {
+    if (need <= *cap) return 0;
+    if (!g->ir) return rg_fail(g, at, "internal: grammar IR has no arena");
+    int ncap = *cap > 0 ? *cap : 8;
+    while (ncap < need) {
+        if (ncap > (1 << 28)) return rg_fail(g, at, oom);
+        ncap *= 2;
+    }
+    size_t oldb = (size_t)(*cap) * elem;
+    size_t newb = (size_t)ncap * elem;
+    void* np = cc_arena_realloc_local_grow(g->ir, *p, oldb, newb, align);
+    if (!np) return rg_fail(g, at, oom);
+    if (newb > oldb) memset((char*)np + oldb, 0, newb - oldb);
+    *p = np;
+    *cap = ncap;
+    return 0;
+}
+
+static void* rg_mem(const RG* g, size_t n, size_t align) {
+    void* p;
+    if (!g->ir || n == 0) return NULL;
+    p = cc_arena_alloc_local_grow(g->ir, n, align);
+    if (p) memset(p, 0, n);
+    return p;
+}
+
+static int* rg_istack(const RG* g, int n) {
+    if (n < 1) n = 1;
+    return (int*)rg_mem(g, (size_t)n * sizeof(int), _Alignof(int));
+}
+
 static int rg_node(RG* g, int kind, size_t at) {
-    if (g->nnodes >= R_MAX_NODES) return rg_fail(g, at, "grammar too large (node limit)");
+    if (rg_grow(g, (void**)&g->nodes, &g->cap_nodes, g->nnodes + 1,
+                sizeof(RNode), _Alignof(RNode), at, "out of memory (grammar nodes)"))
+        return -1;
     RNode* nd = &g->nodes[g->nnodes];
     memset(nd, 0, sizeof(*nd));
     nd->kind = kind; nd->at = at;
@@ -155,7 +200,9 @@ static int rg_node(RG* g, int kind, size_t at) {
 }
 
 static int rg_pool_add(RG* g, const char* bytes, int len, size_t at) {
-    if (g->npool + len + 1 > R_MAX_POOL) return rg_fail(g, at, "grammar too large (literal pool)");
+    if (rg_grow(g, (void**)&g->pool, &g->cap_pool, g->npool + len + 1,
+                1, 1, at, "out of memory (grammar literals)"))
+        return -1;
     int off = g->npool;
     memcpy(g->pool + off, bytes, (size_t)len);
     g->pool[off + len] = '\0';
@@ -239,7 +286,9 @@ static int rg_parse_charset(RG* g, size_t* io, int complement) {
     size_t at = p;
     if (p >= g->n || g->body[p] != '[') return rg_fail(g, p, "expected '[' after charset");
     p = rg_ws(g, p + 1);
-    if (g->nsets >= R_MAX_SETS) return rg_fail(g, p, "too many charsets");
+    if (rg_grow(g, (void**)&g->sets, &g->cap_sets, g->nsets + 1,
+                32, 1, p, "out of memory (grammar charsets)"))
+        return -1;
     unsigned char* set = g->sets[g->nsets];
     memset(set, 0, 32);
     while (p < g->n && g->body[p] != ']') {
@@ -314,6 +363,17 @@ static int rg_parse_term(RG* g, size_t* io, int depth) {
         *io = p;
         return nd;
     }
+    if (rg_kw(g, p, "and", &after) || rg_kw(g, p, "not", &after)) {
+        int kind = g->body[p] == 'a' ? RN_AND : RN_NOT;
+        p = after;
+        int child = rg_parse_term(g, &p, depth);
+        if (child < 0) return -1;
+        int nd = rg_node(g, kind, at);
+        if (nd < 0) return -1;
+        g->nodes[nd].a = child;
+        *io = p;
+        return nd;
+    }
     if (rg_kw(g, p, "some", &after) || rg_kw(g, p, "any", &after) || rg_kw(g, p, "opt", &after)) {
         int kind = g->body[p] == 's' ? RN_SOME : (g->body[p] == 'a' ? RN_ANY : RN_OPT);
         p = after;
@@ -346,8 +406,12 @@ static int rg_parse_term(RG* g, size_t* io, int depth) {
                 for (int i = 0; i < g->ncodecs; i++)
                     if (strcmp(g->codecs[i], cn) == 0) { idx = i; break; }
                 if (idx < 0) {
-                    if (g->ncodecs >= (int)(sizeof(g->codecs) / sizeof(g->codecs[0])))
-                        return rg_fail(g, p, "too many distinct codecs");
+                    if (rg_grow(g, (void**)&g->codecs, &g->cap_codecs, g->ncodecs + 1,
+                                R_NAME_MAX, 1, p, "out of memory (grammar codecs)"))
+                        return -1;
+                    if (rg_grow(g, (void**)&g->codenc, &g->cap_codenc, g->ncodecs + 1,
+                                R_NAME_MAX, 1, p, "out of memory (grammar codecs)"))
+                        return -1;
                     idx = g->ncodecs++;
                     strcpy(g->codecs[idx], cn);
                 }
@@ -483,10 +547,22 @@ static int rg_at_rule_header(const RG* g, size_t p) {
     return q < g->n && g->body[q] == ':';
 }
 
+static int rg_commit_kids(RG* g, int kind, size_t at, const int* local, int nlocal) {
+    if (rg_grow(g, (void**)&g->kids, &g->cap_kids, g->nkids + nlocal,
+                sizeof(int), _Alignof(int), at, "out of memory (grammar kids)"))
+        return -1;
+    int nd = rg_node(g, kind, at);
+    if (nd < 0) return -1;
+    g->nodes[nd].b = g->nkids;
+    g->nodes[nd].nkids = nlocal;
+    for (int i = 0; i < nlocal; i++) g->kids[g->nkids++] = local[i];
+    return nd;
+}
+
 static int rg_parse_seq(RG* g, size_t* io, int depth) {
     size_t p = *io;
     size_t at = rg_ws(g, p);
-    int local[64]; int nlocal = 0;
+    int* local = NULL; int nlocal = 0, cap = 0;
     for (;;) {
         p = rg_ws(g, p);
         if (p >= g->n) break;
@@ -502,45 +578,53 @@ static int rg_parse_seq(RG* g, size_t* io, int depth) {
         }
         int nd = rg_parse_term(g, &p, depth);
         if (nd < 0) return -1;
-        if (nlocal >= (int)(sizeof(local) / sizeof(local[0])))
-            return rg_fail(g, p, "sequence too long");
+        if (nlocal >= cap) {
+            int ncap = cap ? cap * 2 : 8;
+            int* np = (int*)cc_arena_realloc_local_grow(g->ir, local,
+                        (size_t)cap * sizeof(int), (size_t)ncap * sizeof(int),
+                        _Alignof(int));
+            if (!np) return rg_fail(g, p, "out of memory (sequence)");
+            local = np; cap = ncap;
+        }
         local[nlocal++] = nd;
     }
     if (nlocal == 0) return rg_fail(g, at, "empty sequence");
     if (nlocal == 1) { *io = p; return local[0]; }
-    if (g->nkids + nlocal > R_MAX_KIDS) return rg_fail(g, at, "grammar too large (kid limit)");
-    int nd = rg_node(g, RN_SEQ, at);
-    if (nd < 0) return -1;
-    g->nodes[nd].b = g->nkids;
-    g->nodes[nd].nkids = nlocal;
-    for (int i = 0; i < nlocal; i++) g->kids[g->nkids++] = local[i];
-    *io = p;
-    return nd;
+    {
+        int nd = rg_commit_kids(g, RN_SEQ, at, local, nlocal);
+        if (nd < 0) return -1;
+        *io = p;
+        return nd;
+    }
 }
 
 static int rg_parse_alt(RG* g, size_t* io, int depth) {
     size_t p = *io;
     size_t at = rg_ws(g, p);
-    int local[32]; int nlocal = 0;
+    int* local = NULL; int nlocal = 0, cap = 0;
     for (;;) {
         int nd = rg_parse_seq(g, &p, depth);
         if (nd < 0) return -1;
-        if (nlocal >= (int)(sizeof(local) / sizeof(local[0])))
-            return rg_fail(g, p, "too many alternatives");
+        if (nlocal >= cap) {
+            int ncap = cap ? cap * 2 : 8;
+            int* np = (int*)cc_arena_realloc_local_grow(g->ir, local,
+                        (size_t)cap * sizeof(int), (size_t)ncap * sizeof(int),
+                        _Alignof(int));
+            if (!np) return rg_fail(g, p, "out of memory (alternatives)");
+            local = np; cap = ncap;
+        }
         local[nlocal++] = nd;
         p = rg_ws(g, p);
         if (p < g->n && g->body[p] == '|') { p++; continue; }
         break;
     }
     if (nlocal == 1) { *io = p; return local[0]; }
-    if (g->nkids + nlocal > R_MAX_KIDS) return rg_fail(g, at, "grammar too large (kid limit)");
-    int nd = rg_node(g, RN_ALT, at);
-    if (nd < 0) return -1;
-    g->nodes[nd].b = g->nkids;
-    g->nodes[nd].nkids = nlocal;
-    for (int i = 0; i < nlocal; i++) g->kids[g->nkids++] = local[i];
-    *io = p;
-    return nd;
+    {
+        int nd = rg_commit_kids(g, RN_ALT, at, local, nlocal);
+        if (nd < 0) return -1;
+        *io = p;
+        return nd;
+    }
 }
 
 /* include support: bodies of earlier @grammar(rules) blocks in this file,
@@ -556,10 +640,12 @@ static int rg_parse(RG* g) {
      * when an include precedes it. Safe to reorder here: references are still
      * by name; resolution below assigns indices. */
     if (g->entry_set && g->entry_idx != 0) {
-        unsigned char tmp[sizeof(g->rules[0])];
-        memcpy(tmp, &g->rules[0], sizeof(g->rules[0]));
-        memcpy(&g->rules[0], &g->rules[g->entry_idx], sizeof(g->rules[0]));
-        memcpy(&g->rules[g->entry_idx], tmp, sizeof(g->rules[0]));
+        RRule tmp = g->rules[0];
+        g->rules[0] = g->rules[g->entry_idx];
+        g->rules[g->entry_idx] = tmp;
+        unsigned char inc0 = g->rule_inc[0];
+        g->rule_inc[0] = g->rule_inc[g->entry_idx];
+        g->rule_inc[g->entry_idx] = inc0;
     }
     /* Resolve references now so undefined names fail here, not in emitted C. */
     for (int i = 0; i < g->nnodes; i++) {
@@ -687,7 +773,12 @@ static int rg_parse_text(RG* g, int depth, int base) {
         }
         if (q >= g->n || g->body[q] != ':') return rg_fail(g, p, "expected ':' after rule name");
         if (e - p >= R_NAME_MAX) return rg_fail(g, p, "rule name too long");
-        if (g->nrules >= R_MAX_RULES) return rg_fail(g, p, "too many rules");
+        if (rg_grow(g, (void**)&g->rules, &g->cap_rules, g->nrules + 1,
+                    sizeof(RRule), _Alignof(RRule), p, "out of memory (grammar rules)"))
+            return -1;
+        if (rg_grow(g, (void**)&g->rule_inc, &g->cap_rule_inc, g->nrules + 1,
+                    1, 1, p, "out of memory (grammar rules)"))
+            return -1;
         /* Duplicates are SHADOWING when a factory is involved: a rule declared
          * in the block overrides one spliced by an include (that's how a
          * factory is specialized without forking its file), and among includes
@@ -742,10 +833,19 @@ static int rg_parse_text(RG* g, int depth, int base) {
  * branches at most one can match, so choosing by byte is exactly PEG order. */
 
 typedef struct {
-    unsigned char set[R_MAX_RULES][32];
-    unsigned char nullable[R_MAX_RULES];
-    unsigned char state[R_MAX_RULES];   /* 0 unvisited, 1 in progress, 2 done */
+    unsigned char (*set)[32];
+    unsigned char* nullable;
+    unsigned char* state;   /* 0 unvisited, 1 in progress, 2 done */
 } RFirst;
+
+static int rf_prepare(RFirst* F, const RG* g) {
+    memset(F, 0, sizeof(*F));
+    if (g->nrules <= 0) return 0;
+    F->set = (unsigned char (*)[32])rg_mem(g, (size_t)g->nrules * 32, 1);
+    F->nullable = (unsigned char*)rg_mem(g, (size_t)g->nrules, 1);
+    F->state = (unsigned char*)rg_mem(g, (size_t)g->nrules, 1);
+    return !(F->set && F->nullable && F->state);
+}
 
 static void rf_union(unsigned char* dst, const unsigned char* src) {
     for (int i = 0; i < 32; i++) dst[i] |= src[i];
@@ -789,6 +889,12 @@ static void rf_node(const RG* g, RFirst* F, int nd, unsigned char* set, int* nul
     case RN_KEEP: case RN_COLLECT: case RN_FALLIBLE:
         rf_node(g, F, x->a, set, nullable);
         if (x->kind == RN_FALLIBLE) *nullable = 1;
+        break;
+    case RN_NOT:
+        *nullable = 1;   /* peek; SEQ uses the next child's FIRST */
+        break;
+    case RN_AND:
+        rf_node(g, F, x->a, set, nullable);
         break;
     case RN_TOKKIND: rf_all(set); break; /* host classifies; conservative FIRST */
     case RN_OPT: case RN_ANY: {
@@ -878,9 +984,17 @@ static int rf_charset_bytes(const unsigned char* set, int* bytes, int max) {
  * runs, string content) for BOTH the match and collect entries. Conservative
  * on cycles. */
 typedef struct {
-    unsigned char state[R_MAX_RULES];   /* 0 unvisited, 1 in progress, 2 done */
-    unsigned char keeps[R_MAX_RULES];
+    unsigned char* state;   /* 0 unvisited, 1 in progress, 2 done */
+    unsigned char* keeps;
 } RKeeps;
+
+static int rk_prepare(RKeeps* K, const RG* g) {
+    memset(K, 0, sizeof(*K));
+    if (g->nrules <= 0) return 0;
+    K->state = (unsigned char*)rg_mem(g, (size_t)g->nrules, 1);
+    K->keeps = (unsigned char*)rg_mem(g, (size_t)g->nrules, 1);
+    return !(K->state && K->keeps);
+}
 
 static int rk_node(const RG* g, RKeeps* K, int nd);
 
@@ -898,6 +1012,7 @@ static int rk_node(const RG* g, RKeeps* K, int nd) {
     const RNode* x = &g->nodes[nd];
     switch (x->kind) {
     case RN_KEEP: case RN_COLLECT: case RN_FALLIBLE: return 1;
+    case RN_AND: case RN_NOT: return 0;   /* peek; tape suppressed at emit */
     case RN_REF: return rk_rule(g, K, x->nkids);
     case RN_SOME: case RN_ANY: case RN_OPT: return rk_node(g, K, x->a);
     case RN_SEQ: case RN_ALT:
@@ -983,6 +1098,7 @@ static int rg_inline_size(const RG* g, int nd, int depth) {
         return t;
     }
     case RN_SOME: case RN_ANY: case RN_OPT: case RN_FALLIBLE:
+    case RN_AND: case RN_NOT:
         return 1 + rg_inline_size(g, x->a, depth + 1);
     default: return 1;
     }
@@ -1012,6 +1128,7 @@ static int rg_pure_run(const RG* g, int nd, int depth) {
             if (!rg_pure_run(g, g->kids[x->b + i], depth + 1)) return 0;
         return 1;
     case RN_SOME: case RN_ANY: case RN_OPT: case RN_FALLIBLE:
+    case RN_AND: case RN_NOT:
         return rg_pure_run(g, x->a, depth + 1);
     default: return 0;
     }
@@ -1037,9 +1154,17 @@ static int rg_pure_run(const RG* g, int nd, int depth) {
  * No hazard => the cursor is the state, everywhere. (JSON: no hazard — every
  * anchor is followed by required consumption before any kp boundary.) */
 typedef struct {
-    unsigned char open_[R_MAX_RULES];   /* open() per rule, least fixpoint */
-    unsigned char zr_[R_MAX_RULES];     /* zr() per rule, least fixpoint */
+    unsigned char* open_;   /* open() per rule, least fixpoint */
+    unsigned char* zr_;     /* zr() per rule, least fixpoint */
 } RRisk;
+
+static int rr_prepare(RRisk* R, const RG* g) {
+    memset(R, 0, sizeof(*R));
+    if (g->nrules <= 0) return 0;
+    R->open_ = (unsigned char*)rg_mem(g, (size_t)g->nrules, 1);
+    R->zr_ = (unsigned char*)rg_mem(g, (size_t)g->nrules, 1);
+    return !(R->open_ && R->zr_);
+}
 
 static int rn_nullable(const RG* g, RFirst* F, int nd) {
     unsigned char set[32]; int nul = 0;
@@ -1064,6 +1189,7 @@ static int rg_open_node(const RG* g, RFirst* F, RRisk* R, int nd) {
         return 1;
     case RN_REF: return R->open_[x->nkids];
     case RN_SOME: case RN_ANY: case RN_OPT: return rg_open_node(g, F, R, x->a);
+    case RN_AND: case RN_NOT: return 0;   /* peek; no tape push */
     case RN_SEQ:
         for (int i = 0; i < x->nkids; i++) {
             if (!rg_open_node(g, F, R, g->kids[x->b + i])) continue;
@@ -1092,6 +1218,8 @@ static int rg_zr_node(const RG* g, RFirst* F, RKeeps* K, RRisk* R, int nd) {
         /* the construct takes sv at entry: a kp site AT this position */
         if (rk_node(g, K, x->a) || x->kind == RN_FALLIBLE) return 1;
         return rg_zr_node(g, F, K, R, x->a);
+    case RN_AND: case RN_NOT:
+        return rg_zr_node(g, F, K, R, x->a);
     case RN_ALT:
         /* cascades take sv at entry (dispatch ALTs don't, but conservative) */
         if (rk_node(g, K, nd)) return 1;
@@ -1109,8 +1237,9 @@ static int rg_zr_node(const RG* g, RFirst* F, RKeeps* K, RRisk* R, int nd) {
 }
 
 static int rg_grammar_risk(const RG* g, RFirst* F, RKeeps* K) {
-    RRisk* R = (RRisk*)calloc(1, sizeof(RRisk));
-    if (!R) return 1;
+    RRisk Rstor;
+    RRisk* R = &Rstor;
+    if (rr_prepare(R, g)) return 1;
     for (int changed = 1; changed; ) {
         changed = 0;
         for (int r = 0; r < g->nrules; r++) {
@@ -1137,7 +1266,6 @@ static int rg_grammar_risk(const RG* g, RFirst* F, RKeeps* K) {
             }
         }
     }
-    free(R);
     return haz;
 }
 
@@ -1471,7 +1599,10 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
          * sets become switch cases; at most one large-set branch becomes the
          * default arm (its own first test re-verifies membership). */
         {
-            unsigned char bf[32][32]; int bnul[32]; int ok = x->nkids <= 32;
+            unsigned char (*bf)[32] = (unsigned char (*)[32])rg_mem(
+                g, (size_t)x->nkids * 32, 1);
+            int* bnul = (int*)rg_mem(g, (size_t)x->nkids * sizeof(int), _Alignof(int));
+            int ok = bf && bnul;
             for (int i = 0; ok && i < x->nkids; i++) {
                 memset(bf[i], 0, 32); bnul[i] = 0;
                 rf_node(g, e->F, g->kids[x->b + i], bf[i], &bnul[i]);
@@ -1571,6 +1702,28 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         eb_emit(e, cc_gr_ok_close_text(e->scratch, k));
         break;
     }
+    case RN_AND:
+    case RN_NOT: {
+        /* Peek: run the child with tape suppressed, restore the cursor.
+         * `and` succeeds iff the child matched; `not` iff it missed. */
+        int k = (*lbl)++;
+        int saved_mode = e->mode;
+        char br[32];
+        snprintf(br, sizeof(br), "Ln%d", k);
+        e->mode = 0;
+        eb_emit(e, cc_gr_save_text(e->scratch, k, 0));
+        rg_emit_node(g, e, x->a, br, lbl, rid);
+        e->mode = saved_mode;
+        if (x->kind == RN_NOT)
+            eb_emit(e, cc_gr_not_hit_text(e->scratch, k, fail));
+        else
+            eb_emit(e, cc_gr_and_hit_text(e->scratch, k));
+        eb_emit(e, cc_gr_restore_text(e->scratch, br, k, 0, g->name));
+        if (x->kind == RN_AND)
+            eb_emit(e, cc_gr_goto_fail_text(e->scratch, fail));
+        eb_emit(e, cc_gr_ok_close_text(e->scratch, k));
+        break;
+    }
     case RN_TOKKIND: {
         e->last_pad = -1;
         eb_emit(e, cc_gr_m_ppkind_text(e->scratch, g->name, g->pool + x->a, x->b,
@@ -1644,12 +1797,12 @@ static int rw_is_objlist(const RG* g, RFirst* F, RKeeps* K, int rule);
 
 static char* rg_emit(const RG* g, int origin_line, int want_match, int want_build, int want_dom) {
     char* out = NULL; size_t len = 0, cap = 0;
-    RFirst* F = (RFirst*)calloc(1, sizeof(RFirst));
-    RKeeps* K = (RKeeps*)calloc(1, sizeof(RKeeps));
+    RFirst Fstor; RKeeps Kstor;
+    RFirst* F = &Fstor; RKeeps* K = &Kstor;
     cc_arena_stack(sc, 32768);   /* piece scratch: stack root, heap overflow */
     EB e = { &out, &len, &cap, F, K, 0, -1, 0, 0, -1, -1, 1, &sc };
     int lbl = 0;
-    if (!F || !K) { free(F); free(K); return NULL; }
+    if (rf_prepare(F, g) || rk_prepare(K, g)) { cc_arena_free(&sc); return NULL; }
     e.dom = want_dom;
     e.risk = rg_grammar_risk(g, F, K);
 
@@ -1692,7 +1845,8 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
         eb_emit(&e, cc_gr_codec_of_head_text(e.scratch, g->name, g->nrules));
         for (int r = 0; r < g->nrules; r++) {
             int cd = 0;
-            int stack[R_MAX_NODES]; int sp = 0;
+            int* stack = rg_istack(g, g->nnodes + 8); int sp = 0;
+            if (!stack) continue;
             stack[sp++] = g->rules[r].node;
             while (sp > 0) {
                 const RNode* x = &g->nodes[stack[--sp]];
@@ -1700,7 +1854,9 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
                     if (x->b > 0) cd = x->b;
                     stack[sp++] = x->a;
                 } else if (x->kind == RN_COLLECT || x->kind == RN_SOME ||
-                           x->kind == RN_ANY || x->kind == RN_OPT) {
+                           x->kind == RN_ANY || x->kind == RN_OPT ||
+                           x->kind == RN_FALLIBLE || x->kind == RN_AND ||
+                           x->kind == RN_NOT) {
                     stack[sp++] = x->a;
                 } else if (x->kind == RN_SEQ || x->kind == RN_ALT) {
                     for (int i = 0; i < x->nkids; i++) stack[sp++] = g->kids[x->b + i];
@@ -1721,14 +1877,16 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
     /* keep ids: the enclosing rule's index, exported per rule containing keeps */
     for (int r = 0; r < g->nrules; r++) {
         /* reachable-keep scan (iterative stack over the rule's subtree) */
-        int stack[R_MAX_NODES]; int sp = 0, haskeep = 0;
+        int* stack = rg_istack(g, g->nnodes + 8); int sp = 0, haskeep = 0;
+        if (!stack) continue;
         stack[sp++] = g->rules[r].node;
         while (sp > 0) {
             const RNode* x = &g->nodes[stack[--sp]];
             if (x->kind == RN_KEEP || x->kind == RN_COLLECT) { haskeep = 1; break; }
             if (x->kind == RN_SEQ || x->kind == RN_ALT)
                 for (int i = 0; i < x->nkids; i++) stack[sp++] = g->kids[x->b + i];
-            else if (x->kind == RN_SOME || x->kind == RN_ANY || x->kind == RN_OPT)
+            else if (x->kind == RN_SOME || x->kind == RN_ANY || x->kind == RN_OPT ||
+                     x->kind == RN_FALLIBLE || x->kind == RN_AND || x->kind == RN_NOT)
                 stack[sp++] = x->a;
             /* RN_REF: keeps inside other rules belong to those rules' ids */
         }
@@ -1757,8 +1915,11 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
      *             sink, no snapshots) and __b_ (unconditional sink), so no
      *             tier pays for the other's mode. */
     {
-        unsigned char skip[R_MAX_RULES], pure[R_MAX_RULES], mark[R_MAX_RULES];
-        memset(mark, 0, sizeof mark);
+        unsigned char* skip = (unsigned char*)rg_mem(g, (size_t)g->nrules, 1);
+        unsigned char* pure = (unsigned char*)rg_mem(g, (size_t)g->nrules, 1);
+        unsigned char* mark = (unsigned char*)rg_mem(g, (size_t)g->nrules, 1);
+        unsigned char* has_np = (unsigned char*)rg_mem(g, (size_t)g->nrules, 1);
+        if (!skip || !pure || !mark || !has_np) { cc_arena_free(&sc); return NULL; }
         rw_mark_rule(g, 0, mark);   /* only rules reachable-as-functions emit */
         for (int r = 0; r < g->nrules; r++) {
             int body = g->rules[r].node;
@@ -1768,8 +1929,6 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
         }
         /* leading-pad rules get a __np sibling (body without the lead pad) so
          * call sites that just ran the same pad can skip the stacked re-walk */
-        unsigned char has_np[R_MAX_RULES];
-        memset(has_np, 0, sizeof has_np);
         for (int r = 0; r < g->nrules; r++) {
             if (skip[r]) continue;
             if (rg_leading_pad_rule(g, F, K, r) >= 0) has_np[r] = 1;
@@ -1957,7 +2116,6 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
     cc_sb_append(e.buf, e.len, e.cap, "", 1);
     if (out) out[len - 1] = '\0';
     cc_arena_free(&sc);
-    free(F); free(K);
     return out;
 }
 
@@ -1988,6 +2146,10 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
 /* `items Schema` produces an arena array of a previously declared      */
 /* schema. Matchers for a used rules grammar are emitted once per file   */
 /* under the `<Rules>__s` prefix and shared by every schema.             */
+/* Terms, keys, body, and variants grow from the same stack-rooted       */
+/* arena as the used rules IR — schema size is not a fixed cap.          */
+/* Identifier spellings stay bounded (S_NAME). `one of` still shares     */
+/* the @variant arm table (S_VAR_ARMS_MAX).                              */
 /* ==================================================================== */
 
 enum { SK_LIT, SK_RULE, SK_BIND_SLICE, SK_BIND_INT, SK_BIND_FLOAT, SK_BIND_ITEMS, SK_BIND_BYTES, SK_FIELDS,
@@ -2013,7 +2175,9 @@ typedef struct {
     int vpad_a[2]; int nvpad_a;        /* value: pads before its core */
     int vpad_b[2]; int nvpad_b;        /* value: pads after its core */
 } RNarrow;
-enum { S_MAX_TERMS = 96, S_MAX_KEYS = 64, S_NAME = 64, S_MAX_BODY = 32 };
+enum { S_NAME = 64 };   /* identifier / field / key spelling; not a schema-size cap */
+/* `one of` shares the @variant arm table (CC_VA_MAX_ARMS in variant_lower.c). */
+enum { S_VAR_ARMS_MAX = 32 };
 
 /* variant field prefix ("u.<name>." while emitting a union variant's terms;
  * "" otherwise) and the schema name (kind constants) — engine emission is
@@ -2033,7 +2197,7 @@ typedef struct {
     char cfield[S_NAME];                 /* count-driven items / bytes: an earlier
                                             `int` field naming the count/length */
     RNarrow nw;                          /* SK_NARROW_*: derived structure */
-    int kidx[24]; int k_cnt;             /* SK_FIELDS / SK_NARROW_MEMBERS: entries (indices into keys[];
+    int* kidx; int k_cnt, cap_kidx;      /* SK_FIELDS / SK_NARROW_MEMBERS: entries (indices into keys[];
                                             nested fields interleave the pool, so an
                                             explicit list, not a contiguous range) */
 } STerm;
@@ -2041,16 +2205,26 @@ typedef struct {
 typedef struct { char key[S_NAME]; int term; } SKey;
 
 typedef struct {
+    char name[S_NAME];
+    int* t; int nt, cap_t;
+    int db;                 /* prefix mode: first lit byte, or -1 default */
+    int constr;             /* field mode: 0 unused, 1 =EQ, 2 =GE */
+    long long constr_imm;
+} SVar;
+
+typedef struct {
     const char* b; size_t n, p;
     int line0;
     char err[256]; size_t err_at;
 
+    CCArena* ir;   /* schema IR (same stack-rooted arena as the used rules) */
+
     char usename[S_NAME];
     char usepath[256];                   /* use "path" as Name: file-backed factory */
     const char* rtext; size_t rlen;      /* inline rules [ ... ] section (verbatim) */
-    STerm terms[S_MAX_TERMS]; int nterms;
-    SKey keys[S_MAX_KEYS]; int nkeys;
-    int body[S_MAX_BODY]; int nbody;
+    STerm* terms; int nterms, cap_terms;
+    SKey* keys; int nkeys, cap_keys;
+    int* body; int nbody, cap_body;
 
     int fo, fc, fs, fkv;                          /* fields: open/close/sep/kv */
     char fkey[S_NAME], fpad[S_NAME], felse[S_NAME];
@@ -2063,19 +2237,12 @@ typedef struct {
      * leading literal (one optional non-literal DEFAULT arm).
      * Field mode (`by <int-field>`): discriminant is that earlier int bind;
      * each arm carries an EQ/GE constraint (constr/constr_imm). */
-    struct {
-        char name[S_NAME];
-        int t[16]; int nt;
-        int db;                 /* prefix mode: first lit byte, or -1 default */
-        int constr;             /* field mode: 0 unused, 1 =EQ, 2 =GE */
-        long long constr_imm;
-    } uv[24];
-    int nuv;
+    SVar* uv; int nuv, cap_uv;
     int uterm;                           /* the SK_UNION term idx, -1 none */
-    signed char vof[S_MAX_TERMS];        /* term idx -> variant idx (-1 top) */
+    int* vof; int cap_vof;               /* term idx -> variant idx (-1 top) */
     char fpfx[72];                       /* "u.<variant>." while emitting variant terms */
 
-    int bindbit[S_MAX_TERMS];            /* term idx -> presence bit (-1 none) */
+    int* bindbit; int cap_bindbit;       /* term idx -> presence bit (-1 none) */
     int nbinds;                          /* fields in declaration order */
     int presence;                        /* conditional schema: emit cc__set bitmap */
     int nest_max;                        /* default 128; `depth N` override */
@@ -2085,6 +2252,92 @@ typedef struct {
 static int ss_fail(SS* s, size_t at, const char* msg) {
     if (!s->err[0]) { snprintf(s->err, sizeof(s->err), "%s", msg); s->err_at = at; }
     return -1;
+}
+
+static int ss_grow(SS* s, void** p, int* cap, int need, size_t elem, size_t align,
+                   size_t at, const char* oom) {
+    if (need <= *cap) return 0;
+    if (!s->ir) return ss_fail(s, at, "internal: schema IR has no arena");
+    int ncap = *cap > 0 ? *cap : 8;
+    while (ncap < need) {
+        if (ncap > (1 << 28)) return ss_fail(s, at, oom);
+        ncap *= 2;
+    }
+    size_t oldb = (size_t)(*cap) * elem;
+    size_t newb = (size_t)ncap * elem;
+    void* np = cc_arena_realloc_local_grow(s->ir, *p, oldb, newb, align);
+    if (!np) return ss_fail(s, at, oom);
+    if (newb > oldb) memset((char*)np + oldb, 0, newb - oldb);
+    *p = np;
+    *cap = ncap;
+    return 0;
+}
+
+static void* ss_mem(SS* s, size_t n, size_t align) {
+    void* p;
+    if (!s->ir || n == 0) return NULL;
+    p = cc_arena_alloc_local_grow(s->ir, n, align);
+    if (p) memset(p, 0, n);
+    return p;
+}
+
+static int ss_fit_terms(SS* s) {
+    int need = s->nterms + 1;
+    if (ss_grow(s, (void**)&s->terms, &s->cap_terms, need,
+                sizeof(STerm), _Alignof(STerm), s->p, "out of memory (schema terms)"))
+        return -1;
+    if (ss_grow(s, (void**)&s->vof, &s->cap_vof, need,
+                sizeof(int), _Alignof(int), s->p, "out of memory (schema terms)"))
+        return -1;
+    if (ss_grow(s, (void**)&s->bindbit, &s->cap_bindbit, need,
+                sizeof(int), _Alignof(int), s->p, "out of memory (schema terms)"))
+        return -1;
+    return 0;
+}
+
+static int ss_open_term(SS* s) {
+    if (ss_fit_terms(s)) return -1;
+    int i = s->nterms;
+    memset(&s->terms[i], 0, sizeof(STerm));
+    s->terms[i].rule = -1;
+    s->vof[i] = -1;
+    s->bindbit[i] = -1;
+    return i;
+}
+
+static int ss_fit_keys(SS* s) {
+    return ss_grow(s, (void**)&s->keys, &s->cap_keys, s->nkeys + 1,
+                   sizeof(SKey), _Alignof(SKey), s->p, "out of memory (schema keys)");
+}
+
+static int ss_fit_body(SS* s) {
+    return ss_grow(s, (void**)&s->body, &s->cap_body, s->nbody + 1,
+                   sizeof(int), _Alignof(int), s->p, "out of memory (schema body)");
+}
+
+static int ss_fit_uv(SS* s) {
+    return ss_grow(s, (void**)&s->uv, &s->cap_uv, s->nuv + 1,
+                   sizeof(SVar), _Alignof(SVar), s->p, "out of memory (schema variants)");
+}
+
+static int ss_term_add_kidx(SS* s, int self, int ki) {
+    STerm* t = &s->terms[self];
+    if (ss_grow(s, (void**)&t->kidx, &t->cap_kidx, t->k_cnt + 1,
+                sizeof(int), _Alignof(int), s->p, "out of memory (schema field keys)"))
+        return -1;
+    t = &s->terms[self];
+    t->kidx[t->k_cnt++] = ki;
+    return 0;
+}
+
+static int ss_var_add_term(SS* s, int vi, int ti) {
+    SVar* v = &s->uv[vi];
+    if (ss_grow(s, (void**)&v->t, &v->cap_t, v->nt + 1,
+                sizeof(int), _Alignof(int), s->p, "out of memory (schema variant)"))
+        return -1;
+    v = &s->uv[vi];
+    v->t[v->nt++] = ti;
+    return 0;
 }
 
 static int ss_line_at(const SS* s, size_t at) {
@@ -2230,9 +2483,7 @@ static int ss_fields_body(SS* s, int self) {
         int c = ss_peek(s);
         if (c == ']') { s->p++; break; }
         if (c != '"') return ss_fail(s, s->p, "expected \"key\" or ']' in fields [...]");
-        if (s->nkeys >= S_MAX_KEYS) return ss_fail(s, s->p, "too many keys in fields [...]");
-        if (s->terms[self].k_cnt >= (int)(sizeof(s->terms[self].kidx) / sizeof(int)))
-            return ss_fail(s, s->p, "too many entries in one fields [...]");
+        if (ss_fit_keys(s)) return -1;
         unsigned char kb[S_NAME]; int kl = 0;
         if (!ss_string(s, kb, S_NAME - 1, &kl)) return ss_fail(s, s->p, "bad key string");
         int ki = s->nkeys++;
@@ -2240,17 +2491,16 @@ static int ss_fields_body(SS* s, int self) {
         int ti;
         if (ss_term(s, &ti)) return -1;   /* may append nested keys in between */
         s->keys[ki].term = ti;
-        s->terms[self].kidx[s->terms[self].k_cnt++] = ki;
+        if (ss_term_add_kidx(s, self, ki)) return -1;
     }
     return 0;
 }
 
 static int ss_term(SS* s, int* out_term) {
-    if (s->nterms >= S_MAX_TERMS) return ss_fail(s, s->p, "schema too large (term limit)");
+    int slot = ss_open_term(s);
+    if (slot < 0) return -1;
     int c = ss_peek(s);
-    STerm* t = &s->terms[s->nterms];
-    memset(t, 0, sizeof *t);
-    t->rule = -1;
+    STerm* t = &s->terms[slot];
     if (c == '"') {
         int ll = 0;
         if (!ss_string(s, t->lit, (int)sizeof(t->lit), &ll)) return ss_fail(s, s->p, "bad string literal");
@@ -2282,7 +2532,10 @@ static int ss_term(SS* s, int* out_term) {
             for (;;) {
                 ss_ws(s);
                 if (s->p < s->n && s->b[s->p] == ']') { s->p++; break; }
-                if (s->nuv >= 24) return ss_fail(s, s->p, "too many variants");
+                if (s->nuv >= S_VAR_ARMS_MAX)
+                    return ss_fail(s, s->p, "too many variants (max 32, same as @variant)");
+                if (ss_fit_uv(s)) return -1;
+                memset(&s->uv[s->nuv], 0, sizeof(SVar));
                 char vn[S_NAME];
                 if (!ss_ident(s, vn, sizeof vn)) return ss_fail(s, s->p, "expected variant name");
                 snprintf(s->uv[s->nuv].name, S_NAME, "%s", vn);
@@ -2344,11 +2597,10 @@ static int ss_term(SS* s, int* out_term) {
                 for (;;) {
                     ss_ws(s);
                     if (s->p < s->n && s->b[s->p] == ']') { s->p++; break; }
-                    if (s->uv[s->nuv].nt >= 16) return ss_fail(s, s->p, "variant too large");
                     int ti;
                     if (ss_term(s, &ti)) return -1;
-                    s->vof[ti] = (signed char)s->nuv;
-                    s->uv[s->nuv].t[s->uv[s->nuv].nt++] = ti;
+                    s->vof[ti] = s->nuv;
+                    if (ss_var_add_term(s, s->nuv, ti)) return -1;
                 }
                 /* empty product is allowed for unit arms (e.g. nil → only lits) */
                 s->nuv++;
@@ -2361,6 +2613,7 @@ static int ss_term(SS* s, int* out_term) {
                 char bykw[S_NAME];
                 if (ss_ident(s, bykw, sizeof bykw) && strcmp(bykw, "by") == 0) {
                     ss_ws(s);
+                    t = &s->terms[slot];
                     if (!ss_ident(s, t->cfield, sizeof t->cfield))
                         return ss_fail(s, s->p, "expected field name after 'by'");
                 } else {
@@ -2614,7 +2867,7 @@ static int ss_parse(SS* s) {
             }
         }
         s->p = save;
-        if (s->nbody >= S_MAX_BODY) return ss_fail(s, s->p, "schema body too large");
+        if (ss_fit_body(s)) return -1;
         int ti;
         if (ss_term(s, &ti)) return -1;
         s->body[s->nbody++] = ti;
@@ -2632,8 +2885,23 @@ typedef struct {
     char path[512];                  /* nonempty for file-backed factories */
     char* body; size_t blen;
     int matchers_done;
-    unsigned char x_done[R_MAX_RULES];
+    unsigned char* x_done;
+    int x_cap;
 } SRulesReg;
+
+static int sr_xdone_fit(SRulesReg* r, int n) {
+    unsigned char* p;
+    int cap;
+    if (!r || n <= r->x_cap) return 0;
+    cap = r->x_cap ? r->x_cap : 16;
+    while (cap < n) cap *= 2;
+    p = (unsigned char*)realloc(r->x_done, (size_t)cap);
+    if (!p) return -1;
+    memset(p + r->x_cap, 0, (size_t)(cap - r->x_cap));
+    r->x_done = p;
+    r->x_cap = cap;
+    return 0;
+}
 
 /* load `relpath` relative to `base_file`'s directory (absolute passes through) */
 static char* cc__load_rel(const char* base_file, const char* relpath,
@@ -2768,7 +3036,10 @@ const char* cc_grammar_pending_ufcs_field_fty(int i) {
 }
 
 void cc__grammar_registry_reset(void) {
-    for (int i = 0; i < cc__rules_nreg; i++) free(cc__rules_reg[i].body);
+    for (int i = 0; i < cc__rules_nreg; i++) {
+        free(cc__rules_reg[i].body);
+        free(cc__rules_reg[i].x_done);
+    }
     memset(cc__rules_reg, 0, sizeof cc__rules_reg);
     cc__rules_nreg = 0; cc__schema_nreg = 0; cc__ufcs_ntypes = 0;
     cc__ufcs_nfields = 0;
@@ -2783,7 +3054,7 @@ static void cc__register_rules(const char* name, const char* body, size_t blen) 
     snprintf(r->name, sizeof(r->name), "%s", name);
     snprintf(r->pfx, sizeof(r->pfx), "%s__s", name);
     r->body = copy; r->blen = blen; r->matchers_done = 0;
-    memset(r->x_done, 0, sizeof(r->x_done));
+    r->x_done = NULL; r->x_cap = 0;
     cc__rules_nreg++;
 }
 
@@ -2826,7 +3097,7 @@ static SRulesReg* cc__use_rules_file(const char* base_file, const char* relpath,
     snprintf(r->pfx, sizeof(r->pfx), "%s__s%d", alias, cc__rules_nreg - 1);
     snprintf(r->path, sizeof(r->path), "%s", full);
     r->body = body; r->blen = blen; r->matchers_done = 0;
-    memset(r->x_done, 0, sizeof(r->x_done));
+    r->x_done = NULL; r->x_cap = 0;
     return r;
 }
 
@@ -2845,12 +3116,15 @@ static int rs_rule_by_name(const RG* g, const char* name) {
 }
 
 static int rs_rule_codec(const RG* g, int r) {   /* 0 = none, else codec idx */
-    int stack[R_MAX_NODES]; int sp = 0, cd = 0;
+    int* stack = rg_istack(g, g->nnodes + 8); int sp = 0, cd = 0;
+    if (!stack) return 0;
     stack[sp++] = g->rules[r].node;
     while (sp > 0) {
         const RNode* x = &g->nodes[stack[--sp]];
         if (x->kind == RN_KEEP) { if (x->b > 0) cd = x->b; stack[sp++] = x->a; }
-        else if (x->kind == RN_COLLECT || x->kind == RN_SOME || x->kind == RN_ANY || x->kind == RN_OPT)
+        else if (x->kind == RN_COLLECT || x->kind == RN_SOME || x->kind == RN_ANY ||
+                 x->kind == RN_OPT || x->kind == RN_FALLIBLE || x->kind == RN_AND ||
+                 x->kind == RN_NOT)
             stack[sp++] = x->a;
         else if (x->kind == RN_SEQ || x->kind == RN_ALT)
             for (int i = 0; i < x->nkids; i++) stack[sp++] = g->kids[x->b + i];
@@ -2859,12 +3133,15 @@ static int rs_rule_codec(const RG* g, int r) {   /* 0 = none, else codec idx */
 }
 
 static int rs_rule_has_keep(const RG* g, int r) {
-    int stack[R_MAX_NODES]; int sp = 0;
+    int* stack = rg_istack(g, g->nnodes + 8); int sp = 0;
+    if (!stack) return 0;
     stack[sp++] = g->rules[r].node;
     while (sp > 0) {
         const RNode* x = &g->nodes[stack[--sp]];
         if (x->kind == RN_KEEP) return 1;
-        if (x->kind == RN_COLLECT || x->kind == RN_SOME || x->kind == RN_ANY || x->kind == RN_OPT)
+        if (x->kind == RN_COLLECT || x->kind == RN_SOME || x->kind == RN_ANY ||
+            x->kind == RN_OPT || x->kind == RN_FALLIBLE || x->kind == RN_AND ||
+            x->kind == RN_NOT)
             stack[sp++] = x->a;
         else if (x->kind == RN_SEQ || x->kind == RN_ALT)
             for (int i = 0; i < x->nkids; i++) stack[sp++] = g->kids[x->b + i];
@@ -2906,7 +3183,7 @@ static void rw_mark_node(const RG* g, int nd, unsigned char* mark) {
         return;
     }
     case RN_KEEP: case RN_COLLECT: case RN_SOME: case RN_ANY: case RN_OPT:
-    case RN_FALLIBLE:
+    case RN_FALLIBLE: case RN_AND: case RN_NOT:
         rw_mark_node(g, x->a, mark);
         return;
     case RN_SEQ: case RN_ALT:
@@ -3064,8 +3341,8 @@ static void rs_emit_matchers(RG* g, EB* e, int* lbl, const unsigned char* mark) 
             eb_emit(e, cc_gr_cs_row_text(e->scratch, s, g->sets[s]));
         eb_emit(e, cc_gr_ftable_close_text(e->scratch));
     }
-    unsigned char has_np[R_MAX_RULES];
-    memset(has_np, 0, sizeof has_np);
+    unsigned char* has_np = (unsigned char*)rg_mem(g, (size_t)g->nrules, 1);
+    if (!has_np) return;
     for (int r = 0; r < g->nrules; r++) {
         if (mark && !mark[r]) continue;
         if (rg_leading_pad_rule(g, e->F, e->K, r) >= 0) has_np[r] = 1;
@@ -3650,8 +3927,11 @@ static const char* rs_gk(const STerm* t) {
     }
 }
 
-static void rs_emit_get(SS* ss, EB* e, const char* name) {
-    int order[S_MAX_TERMS]; int cnt = 0;
+static int rs_emit_get(SS* ss, EB* e, const char* name) {
+    int* order = (int*)ss_mem(ss, (size_t)(ss->nterms > 0 ? ss->nterms : 1) * sizeof(int),
+                              _Alignof(int));
+    if (!order) return ss_fail(ss, 0, "out of memory (schema field table)");
+    int cnt = 0;
     for (int i = 0; i < ss->nbody; i++) rs_collect_binds(ss, ss->body[i], order, &cnt);
     eb_emit(e, cc_gr_ftable_head_text(e->scratch, name, cnt > 0 ? cnt : 1));
     for (int i = 0; i < cnt; i++) {
@@ -3693,6 +3973,7 @@ static void rs_emit_get(SS* ss, EB* e, const char* name) {
         eb_emit(e, cc_gr_get_hit_close_text(e->scratch));
     }
     eb_emit(e, cc_gr_switch_end_ret0_text(e->scratch));
+    return 0;
 }
 
 static void rs_emit_write(SS* ss, const RG* g, EB* e, int* lbl, const char* name) {
@@ -3726,7 +4007,8 @@ static void rs_emit_narrow_members(SS* ss, RG* g, EB* e, int* lbl, const STerm* 
     eb_emit(e, cc_gr_kv_check_text(e->scratch, w->kv_b, fail));
     eb_emit(e, cc_gr_key_switch_open_text(e->scratch, k));
     {
-        unsigned char done[S_MAX_KEYS] = {0};
+        unsigned char* done = (unsigned char*)ss_mem(ss, (size_t)(t->k_cnt > 0 ? t->k_cnt : 1), 1);
+        if (!done) { ss_fail(ss, 0, "out of memory (schema keys)"); return; }
         for (int i = 0; i < t->k_cnt; i++) {
             if (done[i]) continue;
             const SKey* ki = &ss->keys[t->kidx[i]];
@@ -3786,7 +4068,8 @@ static void rs_emit_fields(SS* ss, RG* g, EB* e, int* lbl, const STerm* t, const
     /* key dispatch: switch on length, memcmp chain within a length class */
     eb_emit(e, cc_gr_key_switch_open_text(e->scratch, k));
     {
-        unsigned char done[S_MAX_KEYS] = {0};
+        unsigned char* done = (unsigned char*)ss_mem(ss, (size_t)(t->k_cnt > 0 ? t->k_cnt : 1), 1);
+        if (!done) { ss_fail(ss, 0, "out of memory (schema keys)"); return; }
         for (int i = 0; i < t->k_cnt; i++) {
             if (done[i]) continue;
             const SKey* ki = &ss->keys[t->kidx[i]];
@@ -3996,18 +4279,25 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                              const char* src, size_t src_len,
                              char* err, size_t err_sz) {
     (void)src; (void)src_len;
-    SS* ss = (SS*)calloc(1, sizeof(SS));
-    RG* g = NULL; RFirst* F = NULL; RKeeps* K = NULL;
+    SS ssstor;
+    SS* ss = &ssstor;
+    RG gstor;
+    RG* g = &gstor;
+    RFirst Fstor; RKeeps Kstor;
+    RFirst* F = &Fstor; RKeeps* K = &Kstor;
     char* out = NULL; size_t len = 0, cap = 0;
-    /* piece scratch: stack root, heap overflow only for oversized pieces.
-     * Declared before any `goto done` so the free at done: is always safe
-     * (cc_arena_free releases overflow extents only; the root is stack). */
+    /* piece scratch + IR: stack root, heap overflow. Declared before any
+     * `goto done` so the free at done: is always safe (cc_arena_free releases
+     * overflow extents only; the root is stack). */
     cc_arena_stack(sc, 32768);
-    if (!ss) { snprintf(err, err_sz, "@grammar(schema): out of memory"); return NULL; }
+    cc_arena_stack(ir, 65536);
+    memset(&ssstor, 0, sizeof ssstor);
+    memset(&gstor, 0, sizeof gstor);
+    ss->ir = &ir;
+    g->ir = &ir;
     ss->b = body; ss->n = body_len; ss->line0 = line;
     ss->uterm = -1;
     ss->nest_max = 128;
-    memset(ss->vof, -1, sizeof ss->vof);
 
     if (ss_parse(ss)) {
         snprintf(err, err_sz, "@grammar(schema) %s: %s (at line %d)",
@@ -4032,10 +4322,6 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
             goto done;
         }
     }
-    g = (RG*)calloc(1, sizeof(RG));
-    F = (RFirst*)calloc(1, sizeof(RFirst));
-    K = (RKeeps*)calloc(1, sizeof(RKeeps));
-    if (!g || !F || !K) { snprintf(err, err_sz, "@grammar(schema): out of memory"); goto done; }
     if (reg) {   /* composed: shared matchers under the <Rules>__s prefix */
         g->body = reg->body; g->n = reg->blen; g->name = reg->pfx;
     } else {     /* self-contained: inline rules, private matchers */
@@ -4046,6 +4332,10 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
     if (rg_parse(g) != 0) {
         snprintf(err, err_sz, "@grammar(schema) %s: %s grammar failed to parse: %s",
                  name, reg ? "used" : "inline", g->err);
+        goto done;
+    }
+    if (rf_prepare(F, g) || rk_prepare(K, g)) {
+        snprintf(err, err_sz, "@grammar(schema) %s: out of memory", name);
         goto done;
     }
     /* resolve rule references */
@@ -4243,9 +4533,10 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
     {
     EB e = { &out, &len, &cap, F, K, 0, -1, 0, 0, -1, -1, 0, &sc };
     int lbl = 0;
-    unsigned char local_xdone[R_MAX_RULES];
+    unsigned char* local_xdone = (unsigned char*)rg_mem(g, (size_t)g->nrules, 1);
+    if (!local_xdone) goto done;
+    if (reg && sr_xdone_fit(reg, g->nrules)) goto done;
     unsigned char* xdone = reg ? reg->x_done : local_xdone;
-    memset(local_xdone, 0, sizeof local_xdone);
     eb_emit(&e, cc_gr_schema_manifest_text(e.scratch, name, line,
                       reg ? "use " : "inline rules", reg ? ss->usename : "",
                       rs_formatable(ss, g)
@@ -4259,8 +4550,8 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
             /* private grammars emit only what this schema can reach; rules
              * the schema CALLS by name (pads, else, bare terms) are roots
              * even when small, extract bodies contribute their inner refs */
-            unsigned char mark[R_MAX_RULES];
-            memset(mark, 0, sizeof mark);
+            unsigned char* mark = (unsigned char*)rg_mem(g, (size_t)g->nrules, 1);
+            if (!mark) goto done;
             if (ss->rfpad >= 0) rw_mark_rule(g, ss->rfpad, mark);
             if (ss->rfelse >= 0) rw_mark_rule(g, ss->rfelse, mark);
             if (ss->ripad >= 0) rw_mark_rule(g, ss->ripad, mark);
@@ -4314,7 +4605,13 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
         }
         /* the struct: fields in declaration order, at their event sites */
         {
-            int order[S_MAX_TERMS]; int cnt = 0;
+            int* order = (int*)ss_mem(ss, (size_t)(ss->nterms > 0 ? ss->nterms : 1) * sizeof(int),
+                                      _Alignof(int));
+            if (!order) {
+                snprintf(err, err_sz, "@grammar(schema) %s: out of memory", name);
+                goto done;
+            }
+            int cnt = 0;
             for (int i = 0; i < ss->nbody; i++) rs_collect_binds(ss, ss->body[i], order, &cnt);
             for (int i = 0; i < ss->nterms; i++) ss->bindbit[i] = -1;
             ss->nbinds = cnt;
@@ -4406,10 +4703,14 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
             /* Register `one of` for the same protected-projection surface as
              * @variant (raw `.u` ban, dominated arm projection, construction). */
             if (ss->uterm >= 0 && ss->nuv > 0) {
-                const char* arms[32];
-                int voids[32];
-                int nreg = ss->nuv < 32 ? ss->nuv : 32;
-                for (int vi = 0; vi < nreg; vi++) {
+                const char** arms = (const char**)ss_mem(
+                    ss, (size_t)ss->nuv * sizeof(char*), _Alignof(char*));
+                int* voids = (int*)ss_mem(ss, (size_t)ss->nuv * sizeof(int), _Alignof(int));
+                if (!arms || !voids) {
+                    snprintf(err, err_sz, "@grammar(schema) %s: out of memory", name);
+                    goto done;
+                }
+                for (int vi = 0; vi < ss->nuv; vi++) {
                     arms[vi] = ss->uv[vi].name;
                     int nmembers = 0;
                     for (int j = 0; j < ss->uv[vi].nt; j++) {
@@ -4421,7 +4722,11 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                     }
                     voids[vi] = (nmembers == 0);
                 }
-                (void)cc_variant_schema_pending_add(name, nreg, arms, voids);
+                if (cc_variant_schema_pending_add(name, ss->nuv, arms, voids) != 0) {
+                    snprintf(err, err_sz, "@grammar(schema) %s: cannot register one of "
+                             "for the variant surface", name);
+                    goto done;
+                }
             }
         }
         {
@@ -4487,7 +4792,10 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                            rs_has_op(src, src_len, "cc_field", name) ||
                            rs_has_dot(src, src_len, name, "get") ||
                            rs_any_method_demand(src, src_len, "get");
-            if (want_get) rs_emit_get(ss, &e, name);
+            if (want_get && rs_emit_get(ss, &e, name)) {
+                snprintf(err, err_sz, "@grammar(schema) %s: %s", name, ss->err);
+                goto done;
+            }
         }
         /* the WRITE projection (schema inverted), on demand like every tier */
         {
@@ -4548,8 +4856,13 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
         snprintf(cc__schema_reg[cc__schema_nreg++], S_NAME, "%s", name);
 
 done:
+    if (out && ss->err[0]) {
+        snprintf(err, err_sz, "@grammar(schema) %s: %s", name, ss->err);
+        free(out);
+        out = NULL;
+    }
     cc_arena_free(&sc);
-    free(ss); free(g); free(F); free(K);
+    cc_arena_free(&ir);
     return out;
 }
 
@@ -4610,8 +4923,11 @@ static char* cc__rules_emit(const char* name, const char* body, size_t body_len,
                             const char* file, int line,
                             const char* src, size_t src_len,
                             char* err, size_t err_sz) {
-    RG* g = (RG*)calloc(1, sizeof(RG));
-    if (!g) { snprintf(err, err_sz, "@grammar(rules): out of memory"); return NULL; }
+    cc_arena_stack(ir, 65536);
+    RG gstor;
+    RG* g = &gstor;
+    memset(&gstor, 0, sizeof gstor);
+    g->ir = &ir;
     g->body = body; g->n = body_len; g->file = file; g->line0 = line; g->name = name;
     g->nest_max = 128;
 
@@ -4640,7 +4956,7 @@ static char* cc__rules_emit(const char* name, const char* body, size_t body_len,
     } else {
         snprintf(err, err_sz, "%s (at line %d)", g->err, rg_line_at(g, g->err_at));
     }
-    free(g);
+    cc_arena_free(&ir);
     return out;
 }
 

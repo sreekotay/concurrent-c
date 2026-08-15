@@ -14,12 +14,12 @@ int main(void) {
     db.entries = array_map_new::[int, Entr](&arena);
     if (!db.entries) return 2;
     e.x = 1;
-    if (db.entries.insert(1, e) != 0) return 3;
+    if (db.entries->insert(1, e) != 0) return 3;
     if (am_lens(&db) != 1) return 4;
     if (am_caps(&db) == 0) return 5;
     if (am_live(db.entries) == 0) return 6;
     printf("ufcs_local_array_map_include_smoke ok\n");
-    db.entries.destroy();
+    db.entries->destroy();
     cc_arena_free(&arena);
     return 0;
 }

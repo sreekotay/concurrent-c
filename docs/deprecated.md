@@ -2,6 +2,21 @@
 
 Surfaces kept for compatibility. Prefer the replacements in new code.
 
+## Construction: `@create(...)`
+
+**Prefer:** `T name@(args) @destroy;` or `T name@(args) @detach;`
+
+The binder `@(...)` selects the declared type's `.create` hook. Ownership
+(`@destroy` / `@detach`) is required on that form.
+
+```c
+CCArena a@(megabytes(1)) @destroy;
+Vec::[char] out@(&a) @destroy;
+```
+
+**Legacy (still accepted):** `T name = @create(args) @destroy;` lowers to
+the same hook. New code uses the binder form.
+
 ## Type registration: `cc_type_register` / `cc_type_define`
 
 **Prefer:** `@typehooks on Subject { .create = …, .destroy = …, .ufcs = …, };`

@@ -150,6 +150,11 @@ void cc_thread_task_free(struct CCSpawnTask* task);
 // Snapshot scheduler stats; returns 0 on success.
 int cc_scheduler_stats(CCSchedulerStats* out);
 
+/* @parallel spawn/join. Spawn refuses (INVALID) when in-flight @parallel
+ * fibers reach 256 * online processors. n->spawn is uncapped. */
+CCTask cc_parallel_spawn(void* (*fn)(void*), void* arg);
+void cc_parallel_join(CCTask t);
+
 // Sleep for at least ms milliseconds (best-effort).
 int cc_sleep_ms(unsigned int ms);
 

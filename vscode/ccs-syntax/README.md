@@ -8,7 +8,7 @@ Syntax highlighting for Concurrent-C source, headers, and scripts:
 
 Concurrent-C is largely C + preprocessor, with a few extra active surface-syntax constructs like:
 
-- `@create(...) @destroy` / `@detach` lifecycle declarations
+- `name@(args) @destroy` / `@detach` lifecycle declarations
 - `@defer` / `@defer(err|ok)` / `@cancel`
 - `@async` / `@await` / `@blocking` / `@nonblocking`
 - `@errhandler` / `@err` / result unwrap (`!>`, `?>`)
@@ -18,7 +18,7 @@ Concurrent-C is largely C + preprocessor, with a few extra active surface-syntax
 - `@variant` / `@variant(packed)`
 - UFCS-style task operations like `n->spawn(...)` / `n->wait()`
 - UFCS-style `value.method(...)` / `ptr->method(...)` calls
-- Type sugar like `T?`, `T!>(E)`, `T[:]`, `T[:!]`, `T[~N …]`
+- Type sugar like `T!>(E)`, `T[:]`, `T[:!]`, `T[~N …]`, `Name::[args]`
 - Duration literals like `10ms`
 
 ## Install (local, no marketplace)

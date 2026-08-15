@@ -7,26 +7,26 @@ int main(void) {
     
     Map::[int, int] m = map_new::[int, int](&arena);
     
-    /* UFCS method calls - m.method(args) -> Map_int_int_method(&m, args) */
-    m.insert(1, 100);
-    m.insert(2, 200);
-    m.insert(3, 300);
+    /* UFCS method calls — Map sugar is Name*, so -> */
+    m->insert(1, 100);
+    m->insert(2, 200);
+    m->insert(3, 300);
     
-    int* val = m.get(2);
+    int* val = m->get(2);
     if (!val || *val != 200) {
         printf("FAIL: get(2) expected 200\n");
         return 1;
     }
 
     /* Test remove */
-    int removed = m.remove(2);
+    int removed = m->remove(2);
     if (!removed) {
         printf("FAIL: remove(2) should return true\n");
         return 1;
     }
 
     /* Verify removed */
-    int* after = m.get(2);
+    int* after = m->get(2);
     if (after) {
         printf("FAIL: get(2) should be NULL after remove\n");
         return 1;

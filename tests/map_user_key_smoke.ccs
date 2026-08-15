@@ -28,13 +28,13 @@ int main(void) {
     if (!arena.base) return 1;
     m = array_map_new::[GridPos, int](&arena);
     if (!m) return 2;
-    if (m.insert(p, 7) != 0) return 3;
-    if (m.insert(q, 9) != 0) return 4;
-    vp = m.get_ptr(p);
+    if (m->insert(p, 7) != 0) return 3;
+    if (m->insert(q, 9) != 0) return 4;
+    vp = m->get_ptr(p);
     if (!vp || *vp != 7) return 5;
-    vp = m.get_ptr(q);
+    vp = m->get_ptr(q);
     if (!vp || *vp != 9) return 6;
-    if (m.span() != 42) return 7;
+    if (m->span() != 42) return 7;
     printf("ok\n");
     return 0;
 }

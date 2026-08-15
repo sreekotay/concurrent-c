@@ -78,7 +78,7 @@ int main(void) {
 
     /* 1. Family members: the declaration form's ##_ tokens ARE the
      *    method set. */
-    Vec::[double] v = vec_new::[double](&arena);
+    Vec::[double] v@(&arena) @destroy;
     v.push(1.0);
     v.push(3.0);
     v.push(8.0);

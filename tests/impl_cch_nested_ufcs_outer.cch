@@ -19,7 +19,7 @@ typedef struct NestedUfcsDb {
 #include "impl_cch_nested_ufcs_inner.cch"
 
 static void nested_ufcs_destroy(NestedUfcsDb* db) {
-    if (db && db->entries) db->entries.destroy();
+    if (db && db->entries) db->entries->destroy();
 }
 
 #endif /* IMPL_CCH_NESTED_UFCS_OUTER_CCH */

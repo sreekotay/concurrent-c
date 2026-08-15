@@ -1,0 +1,7 @@
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    @parallel {
+    }
+    return 0;
+}

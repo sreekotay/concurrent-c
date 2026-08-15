@@ -1,7 +1,7 @@
 # `shadow_lower` sources (native front)
 
 Product sources for the default `ccc` front live here (`cc/shadow/`).
-Wire SERDES demos remain under `examples/serdes/{json,resp}`.
+Wire SERDES demos remain under `examples/serdes/{json,resp,c23}`.
 
 **Status: default `ccc` front**. Metric on `./scripts/test.sh --quick` /
 `./scripts/test.sh --native`. Focused `scripts/test_shadow.sh` is
@@ -254,7 +254,7 @@ bytes → stage1 tape (toks + comment spans)
   parse; emit only prints — no comment recovery after string rewrite.
 - **Zero post-parse mangling on the CC surface.** Structured types +
   `AST_UFCS_*` (table emit via `shadow_ufcs_lower_parts`); Map/Vec/`char[:]`,
-  `@await`/`@create` spelled at parse; channel_pair / return `!>` / cond
+  `@await`/`name@(args)` spelled at parse; channel_pair / return `!>` / cond
   shapes handled at emit sites. No `shadow_lower_expr_beachhead` pipeline.
   Leftover text (mainly `@string` chains) peels left-to-right through
   `shadow_ufcs_peel_left` → `lower_parts` — not a second IR soup.

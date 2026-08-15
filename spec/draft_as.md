@@ -197,6 +197,6 @@ enrichment stays explicit (`cc_io_error(e)` and peers).
 - Reverse conversion (`T*` → `Outer*`); a later explicit `container_of`
   form may use the same layout facts
 - `as:` on non-struct types
-- Construction chaining (`@create` through `as:` fields)
+- Construction chaining (`name@(args)` through `as:` fields)
 - Anonymous `as:` fields; a `@super` spelling
 - Synthesized full-chain destroy symbols

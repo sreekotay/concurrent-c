@@ -19,10 +19,10 @@
  * Sized to match the arena `io` was bound to before, because cc_arena_heap
  * takes a single fixed block: the size is a cap, and read_all/read_line
  * allocate the input into it. */
-#define CC_OL_PREDECL_A "CCArena a = @create(megabytes(1)) @destroy;\n"
+#define CC_OL_PREDECL_A "CCArena a@(megabytes(1)) @destroy;\n"
 #define CC_OL_PREDECL_IO_ARENA \
-    "CCArena __cc_io_arena = @create(megabytes(1)) @destroy;\n"
-#define CC_OL_PREDECL_IO "CCStdio io = @create(&__cc_io_arena) @destroy;\n"
+    "CCArena __cc_io_arena@(megabytes(1)) @destroy;\n"
+#define CC_OL_PREDECL_IO "CCStdio io@(&__cc_io_arena) @destroy;\n"
 #define CC_OL_PREDECL_IN "char[:] in = io.read_all() !>;\n"
 /* Injected as erased CCSlice — same shape legacy lowers `char *[:]` to.
  * Keep the sugar out of the magic text so native shadow does not need it. */

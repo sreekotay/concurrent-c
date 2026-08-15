@@ -941,7 +941,8 @@ enum {
     CC_SURF_AT_SCRATCH         = 1ull << 27,
     CC_SURF_TYPE_OF            = 1ull << 28,
     CC_SURF_AT_AWAIT           = 1ull << 29,
-    CC_SURF_AT_WITH_DEADLINE   = 1ull << 30
+    CC_SURF_AT_WITH_DEADLINE   = 1ull << 30,
+    CC_SURF_AT_PARALLEL        = 1ull << 31
 };
 
 static inline int cc__surf_match_at(const char* src, size_t len, size_t p,
@@ -1028,6 +1029,8 @@ static inline unsigned long long cc_scan_surface_features(const char* src, size_
             else if (cc__surf_match_at(src, len, p, "@await", 6, 1)) bits |= CC_SURF_AT_AWAIT;
             else if (cc__surf_match_at(src, len, p, "@with_deadline", 14, 1))
                 bits |= CC_SURF_AT_WITH_DEADLINE;
+            else if (cc__surf_match_at(src, len, p, "@parallel", 9, 1))
+                bits |= CC_SURF_AT_PARALLEL;
             continue;
         }
         if (c == 'a' && cc__surf_match_at(src, len, p, "await", 5, 1)) {

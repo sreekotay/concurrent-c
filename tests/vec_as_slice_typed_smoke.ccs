@@ -3,7 +3,7 @@
  * CCSlice_double, element-count len), so instance methods and the
  * scaled `as:` erasure compose. Elements without a spec (structs)
  * keep the erased CCSlice view. */
-#include <ccc/cc_runtime.cch>
+#include <ccc/std/prelude.cch>
 #include <assert.h>
 #include <stdio.h>
 

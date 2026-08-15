@@ -9,8 +9,8 @@ int main(void) {
     Map::[int, Vec::[int]] m = map_new::[int, Vec::[int]](&a);
     Vec::[int] inner = vec_new::[int](&a);
     inner.push(9);
-    m.insert(1, inner);
-    Vec::[int] *got = m.get_ptr(1);
+    m->insert(1, inner);
+    Vec::[int] *got = m->get_ptr(1);
     if (!got || got->len() != 1 || *got->get(0) != 9) return 1;
     printf("generic_nested_vec_surface_smoke ok\n");
     return 0;

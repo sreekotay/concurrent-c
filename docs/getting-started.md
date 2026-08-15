@@ -160,6 +160,7 @@ UFCS show up in almost every example — treat them as day-one, not advanced.
 | Cleanup | `@defer …` / `@destroy` (cleanup on successful declaration construction) |
 | Errors | `T!>(E)`; `?>` : `E → T`; `!>` : `E →` control flow; `(e)` exposes `E`; bare `!>` routes `E` |
 | Methods (UFCS) | `recv.method(args)` — ordinary functions; prefer this form |
+| Generics | `Name::[args]` — Vec / Map / ArrayMap / `T[:]` are factory families |
 | Arenas / slices | arena **names a lifetime**; alloc strategy is policy for that lifetime’s storage; `T[:]` views carry provenance (below) |
 | Closures | `() => …`, `() => [x] { … }`, `() => [&x] { … }` — tasks re-bind `@errhandler` |
 
@@ -256,6 +257,26 @@ then the next method sees the value (`get(21)!>.twice()`). Full matrix:
 [Language Concepts §3](language-concepts.md#3-methods-are-ordinary-functions).
 
 Quick reference: [Cheatsheet](cheatsheet.md). Spec: [language spec](../spec/concurrent-c-spec-complete.md).
+
+### Generics — `Name::[args]`
+
+`Name::[args]` names a monomorph of a library factory. The factory’s emitted
+`${mangled}_<member>` functions are the methods — the same dispatch as
+`v.push`. Stdlib `Vec::[T]`, `Map::[K,V]`, `ArrayMap::[K,V]`, and non-char
+`T[:]` use `CC_GENERIC_FACTORY` like a user `Pair::[A,B]`.
+
+```c
+Vec::[int] v@(&arena) @destroy;     // CCVec_int; dot UFCS
+v.push(10);
+Map::[int, double] m = map_new::[int, double](&arena);
+m->insert(1, 2.5);                  // Map is Name*; arrow UFCS
+```
+
+`.` = value receiver, `->` = pointer. Free-name grid:
+`vec_new::[int](&arena)` is the same instance as the binder. Recipe:
+[recipe_user_generics.ccs](../examples/recipe_user_generics.ccs) ·
+[Cheatsheet](cheatsheet.md#generics-nameargs) · spec
+[§12.1](../spec/concurrent-c-spec-complete.md#121-registered-factories).
 
 ## Arenas name a lifetime
 
@@ -387,7 +408,7 @@ Work the recipes in order — they are the intended tutorial:
 
 [examples/README.md — Learning Path](../examples/README.md#learning-path-recommended-order)
 
-In short: `hello` → results / unwrap / UFCS → captures → channels → async →
+In short: `hello` → results / unwrap / UFCS → generics (`recipe_user_generics`) → captures → channels → async →
 timeouts / worker pool → arenas / defer. Then networking
 (`recipe_tcp_echo.ccs`, `recipe_http_get.ccs`) and build-system examples under
 `examples/`.

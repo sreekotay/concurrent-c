@@ -1,0 +1,23 @@
+/* `Vec::[T]` / `vec_new::[T]` instantiate CC_GENERIC_FACTORY(Vec, 1).
+ * Concrete type is CCVec_T. `Vec_len(...)` in expression text is not
+ * an instance request. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int Vec_len(int x) { return x; }
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(4));
+    Vec::[int] v;
+    int *p;
+    if (!arena.base) return 1;
+    if (Vec_len(0) != 0) return 2;
+    v = vec_new::[int](&arena);
+    if (v.push(10) != 0) return 3;
+    if (v.push(20) != 0) return 4;
+    if (v.len() != 2) return 5;
+    p = v.get_ptr(0);
+    if (!p || *p != 10) return 6;
+    printf("ok\n");
+    return 0;
+}

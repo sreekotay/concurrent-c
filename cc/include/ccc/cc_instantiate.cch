@@ -1,9 +1,10 @@
 /*
  * cc_instantiate.cch — comptime instantiation API (track B1).
  *
- * Built-in monomorphs (Vec/Map/Result/Chan) are collected by the compiler
- * from surface syntax (`CCVec::[T]`, `Map::[K,V]`, etc.) into the per-TU
- * type graph; user code normally does not call these directly.
+ * Built-in monomorphs (Vec/Map/ArrayMap/CCSlice/Result/Chan) are collected
+ * from surface syntax (`Vec::[T]`, `Map::[K,V]`, `T[:]`, etc.) into the
+ * per-TU type graph. Vec, Map, ArrayMap, and non-char slices instantiate
+ * `CC_GENERIC_FACTORY`. User code normally does not call these directly.
  *
  * `@comptime` blocks call cc_instantiate / cc_emit_* / cc_generic_* to define
  * user generic factories (spec §12, §14).  The compiler auto-provides real

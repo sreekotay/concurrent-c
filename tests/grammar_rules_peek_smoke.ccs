@@ -1,0 +1,40 @@
+// PEG `and` / `not` peeks, plus an alt list past the old 32-arm cap.
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_grammar.cch>
+#include <stdio.h>
+
+@grammar(rules) Peek {~~~~
+    top:    kw_if | ident
+    idcont: charset [#'a' - #'z']
+    kw_if:  ["if" not idcont]
+    ident:  [some idcont]
+~~~~}
+
+@grammar(rules) Look {~~~~
+    top: [and #'a' #'a']
+~~~~}
+
+@grammar(rules) Many {~~~~
+    top: "a01" | "a02" | "a03" | "a04" | "a05" | "a06" | "a07" | "a08"
+       | "a09" | "a10" | "a11" | "a12" | "a13" | "a14" | "a15" | "a16"
+       | "a17" | "a18" | "a19" | "a20" | "a21" | "a22" | "a23" | "a24"
+       | "a25" | "a26" | "a27" | "a28" | "a29" | "a30" | "a31" | "a32"
+       | "a33" | "a34" | "a35" | "a36" | "a37" | "a38" | "a39" | "a40"
+~~~~}
+
+int main(void) {
+    if (!Peek_match("if", 2)) { printf("FAIL: Peek if\n"); return 1; }
+    if (!Peek_match("ifdef", 5)) { printf("FAIL: Peek ifdef\n"); return 1; }
+    if (!Peek_match("ifx", 3)) { printf("FAIL: Peek ifx ident\n"); return 1; }
+
+    if (!Look_match("a", 1)) { printf("FAIL: Look a\n"); return 1; }
+    if (Look_match("b", 1)) { printf("FAIL: Look b accepted\n"); return 1; }
+
+    if (!Many_match("a01", 3) || !Many_match("a32", 3) || !Many_match("a40", 3)) {
+        printf("FAIL: Many alts\n");
+        return 1;
+    }
+    if (Many_match("a41", 3)) { printf("FAIL: Many a41\n"); return 1; }
+    printf("grammar rules peek/alts: OK\n");
+    return 0;
+}

@@ -11,12 +11,12 @@ int main(void) {
     if (!arena.base) return 1;
     m = array_map_new::[int, int](&arena);
     if (!m) return 2;
-    if (m.insert(42, 420) != 0) return 3;
-    p = m.get_ptr(42);
+    if (m->insert(42, 420) != 0) return 3;
+    p = m->get_ptr(42);
     if (!p || *p != 420) return 4;
-    if (m.len() != 1) return 5;
+    if (m->len() != 1) return 5;
     printf("array_map_sugar_typedef_ufcs_smoke ok\n");
-    m.destroy();
+    m->destroy();
     cc_arena_free(&arena);
     return 0;
 }

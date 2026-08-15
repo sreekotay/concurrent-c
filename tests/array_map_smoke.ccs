@@ -16,28 +16,28 @@ int main(void) {
     if (!arena.base) return 1;
     sized = array_map_new_count::[int, int](&arena, 64);
     if (!sized) return 14;
-    if (sized.cap() < 64) return 15;
-    sized.destroy();
+    if (sized->cap() < 64) return 15;
+    sized->destroy();
 
     m = array_map_new::[int, int](&arena);
     if (!m) return 2;
 
     for (i = 0; i < 100; i++) {
-        if (m.insert((int)i, (int)(i * 10)) != 0) return 3;
+        if (m->insert((int)i, (int)(i * 10)) != 0) return 3;
     }
-    if (m.len() != 100) return 4;
+    if (m->len() != 100) return 4;
 
-    p = m.get_ptr(42);
+    p = m->get_ptr(42);
     if (!p || *p != 420) return 5;
-    if (m.get_ptr(1000) != NULL) return 6;
+    if (m->get_ptr(1000) != NULL) return 6;
 
-    if (!m.del(42)) return 7;
-    if (m.get_ptr(42) != NULL) return 8;
-    if (m.len() != 99) return 9;
+    if (!m->del(42)) return 7;
+    if (m->get_ptr(42) != NULL) return 8;
+    if (m->len() != 99) return 9;
 
-    p = m.get_ptr(99);
+    p = m->get_ptr(99);
     if (!p || *p != 990) return 10;
-    p = m.get_ptr(0);
+    p = m->get_ptr(0);
     if (!p || *p != 0) return 11;
 
     n = 0;
@@ -48,11 +48,11 @@ int main(void) {
     }
     if (n != 99) return 12;
 
-    m.clear();
-    if (m.len() != 0) return 13;
+    m->clear();
+    if (m->len() != 0) return 13;
 
     printf("array_map_smoke ok\n");
-    m.destroy();
+    m->destroy();
     cc_arena_free(&arena);
     return 0;
 }

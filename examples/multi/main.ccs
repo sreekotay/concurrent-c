@@ -4,7 +4,7 @@ int add_ints(int a, int b);
 
 int main(void) {
     int v = add_ints(2, 3);
-    CCArena arena_storage = @create(kilobytes(4)) @destroy;
+    CCArena arena_storage@(kilobytes(4)) @destroy;
     if (!arena_storage.base) return 1;
     CCArena* arena = &arena_storage;
     {

@@ -19,6 +19,7 @@ New to Concurrent-C? Work through these in order:
 | 2  | `recipe_result_error_handling.ccs` | Results & `@errhandler` | `?>` : `E → T`; `!>` : `E →` control flow; `(e)` exposes; bare `!>` routes |
 | 3  | `recipe_unwrap_destroy_forms.ccs` | Unwrap shape | Same two ops × modifiers; `@destroy` on successful construction |
 | 4  | `recipe_ufcs_forms.ccs` | UFCS shape | One dispatch rule × spellings (families, bare-name, fallible chains) |
+| 4a | `recipe_user_generics.ccs` | Generics | `Name::[args]` + `CC_GENERIC_FACTORY` — same rule as Vec/Map |
 | 5  | `recipe_fanout_capture.ccs` | Multiple tasks | Spawning N tasks, fresh per-iteration captures |
 | 6  | `recipe_explicit_capture.ccs` | Capture semantics | Value vs reference capture, mutation rules |
 | 7  | `recipe_channel_pipeline.ccs` | Communication | Channels, owned close, producer/consumer |
@@ -26,6 +27,7 @@ New to Concurrent-C? Work through these in order:
 | 9  | `recipe_timeout.ccs` | Cancellation | deadlines, cooperative exit |
 | 10 | `recipe_worker_pool.ccs` | Real pattern | Putting it together: workers + channels |
 | 11 | `recipe_ordered_parallel.ccs` | Ordered fan-out | `send_task` + ordered recv, FIFO without reorder buffer |
+| 11a | `recipe_parallel.ccs` | `@parallel` | assignment join, `@parallel (pred)`, `@parallel for` |
 | 12 | `recipe_exclusive_named.ccs` | Named exclusivity | `CCExclusive`, resolve-once mutex, short guard CS |
 | 13 | `recipe_arena_scope.ccs` | Memory | Arena names a lifetime; alloc strategy is policy; `@destroy` ends the epoch |
 | 14 | `recipe_long_lived_store.ccs` | Provenance | Anchoring request-lifetime views in a long-lived arena |
@@ -55,7 +57,9 @@ Minimal concurrent hello world — shows explicit nursery creation and task spaw
 | `recipe_result_error_handling.ccs` | Results | `?>` : `E → T`; `!>` : `E →` control flow; `(e)` / bare `!>` |
 | `recipe_unwrap_destroy_forms.ccs` | Unwrap matrix | Two ops × modifiers; `@destroy` on successful construction |
 | `recipe_ufcs_forms.ccs` | UFCS matrix | One rule × spellings, including bare-name and fallible chains |
+| `recipe_user_generics.ccs` | User generics | `CC_GENERIC_FACTORY` — same `Name::[args]` rule as Vec/Map |
 | `recipe_ordered_parallel.ccs` | Ordered fan-out | `send_task` + ordered recv, FIFO await |
+| `recipe_parallel.ccs` | `@parallel` | Value join; `@parallel (pred)` spawn gate; `@parallel for` over `lo..hi` |
 
 ### Python interop (one boundary, two doors)
 

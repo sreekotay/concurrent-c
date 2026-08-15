@@ -1218,7 +1218,7 @@ static inline CCArena cc_arena_malloc(size_t bytes) {
     return a;
 }
 
-/* Alias of cc_arena_heap — prefer cc_arena_heap / @create at new call sites. */
+/* Alias of cc_arena_heap — prefer cc_arena_heap / `name@(bytes)` at new call sites. */
 static inline CCArena cc_arena_create(size_t bytes) {
     return cc_arena_heap(bytes);
 }
@@ -1252,7 +1252,7 @@ static inline CCArena cc_arena_create_buffer(void *buffer, size_t capacity, unsi
     return a;
 }
 
-/* Fixed 2-arg form for `@create(buf, cap)` / legacy sites (root only, no grow). */
+/* Fixed 2-arg form for `name@(buf, cap)` / legacy sites (root only, no grow). */
 static inline CCArena cc_arena_fixed_buffer(void *buffer, size_t capacity) {
     return cc_arena_create_buffer(buffer, capacity, CC_ARENA_FIXED);
 }
@@ -1734,8 +1734,8 @@ static inline void cc_slice_debug_assert_arena_epoch(CCSlice slice, const CCAren
 
 
 @typehooks on CCArena {
-    /* 1-arg sugar `@create(bytes)` -> heap-growable arena.
-     * 2-arg sugar `@create(buf, cap)` -> fixed root (no growth), matching
+    /* 1-arg sugar `name@(bytes)` -> heap-growable arena.
+     * 2-arg sugar `name@(buf, cap)` -> fixed root (no growth), matching
      * pre-existing scratch-buffer semantics. For a caller-rooted arena
      * with heap overflow, use the explicit 3-arg cc_arena_create_buffer
      * directly with CC_ARENA_GROWABLE. */

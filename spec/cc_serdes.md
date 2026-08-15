@@ -74,8 +74,10 @@ first new, non-shadow rule declared at include depth zero in the block. A local
 override of an included rule does not claim the entry. If the block declares no
 new depth-zero rule, the first entry copied from its includes remains the
 default. Rules compose literals, character sets and complements, sequences,
-ordered choice, references, and `some`, `any`, and `opt` repetition.
-Whitespace is consumed only where the grammar declares it.
+ordered choice, references, `some` / `any` / `opt` repetition, and
+`and` / `not` peeks (try the child and restore the cursor). Whitespace
+is consumed only where the grammar declares it. The engine grows its IR
+from a stack-rooted arena; grammar size is not a fixed cap.
 
 `keep` records a matched span, `skip` consumes without output, and `collect`
 forms an interior collection. The generated operations are used as follows:
@@ -104,7 +106,10 @@ over the rule grammar, not separate grammar dialects.
 ## `@grammar(schema)`
 
 `@grammar(schema)` declares a typed wire structure and emits direct-to-struct
-parse and write projections. A product schema lowers named primitive, slice,
+parse and write projections. The schema IR (terms, keys, body, variants)
+grows from the same stack-rooted arena as the used rules grammar; schema
+size is not a fixed cap. Identifier and field spellings stay bounded.
+`one of` still shares the `@variant` arm table (32 arms). A product schema lowers named primitive, slice,
 byte, nested-schema, and repeated-item fields into a generated C struct.
 A `bytes` field is a `CCSliceHdr` (`{ptr,len}` wire borrow). A kept string /
 line field remains a `CCSlice` (provenance and optional codec materialize).

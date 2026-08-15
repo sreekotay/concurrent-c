@@ -27,6 +27,9 @@ Value fields on a pointer outer use dot UFCS on the field
 (`db->maps.count()`, `c->out.clear()`). Prefer that over peeling a local
 `T* field = &p->field` solely to get arrow UFCS.
 
+Map and ArrayMap sugar is `Name*` (arena header); use arrow (`m->insert(k, v)`).
+Vec is the struct itself; use dot (`v.push(x)`).
+
 For value locals, dot UFCS is preferred (`db.maps.count()`, `maps.destroy()`). Prefer that over `cc_shard_map_*` free calls.
 
 Free-function names are for lowered/host C and definitions — not the surface idiom in sketches and examples.

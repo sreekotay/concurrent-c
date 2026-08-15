@@ -34,11 +34,14 @@ base + "_" + mangle(canon(arg0)) + "_" + mangle(canon(arg1)) + …
 | Instantiation            | Canonical name        |
 |--------------------------|-----------------------|
 | `Pair::[int, double]`    | `Pair_int_double`     |
-| `CCVec::[int]`           | `CCVec_int`           |
+| `Vec::[int]` / `CCVec::[int]` | `CCVec_int`      |
 | `Map::[int, double]`     | `Map_int_double`      |
 | `ArrayMap::[int, double]`| `ArrayMap_int_double` |
 | `Box::[char*]`           | `Box_charptr`         |
 | `Span::[char[:]]`        | `Span_slice`          |
+
+The Vec family name is `Vec`; the instance spelling is `CCVec_<T>` (not
+`Vec_<T>`). Map/ArrayMap instances are `Name*` sugar; Vec is the struct.
 
 ## Using it
 

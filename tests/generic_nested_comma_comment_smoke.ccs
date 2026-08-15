@@ -9,8 +9,8 @@ int main(void) {
         map_new::[int, CCVec::[int]](&a);
     CCVec::[int] inner = cc_vec_new::[int](&a);
     inner.push(9);
-    m.insert(1, inner);
-    CCVec::[int] *got = m.get_ptr(1);
+    m->insert(1, inner);
+    CCVec::[int] *got = m->get_ptr(1);
     if (!got || got->len() != 1 || *got->get(0) != 9) return 1;
     printf("generic_nested_comma_comment_smoke ok\n");
     return 0;

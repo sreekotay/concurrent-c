@@ -1,0 +1,168 @@
+/*
+ * Surface @parallel tree vs sequential.
+ *
+ * Same u24 binary reduction as parallel_hello_lowered.ccs and
+ * go/parallel_hello.go. `par` is ungated `@parallel { }` (spawn
+ * until 256*ncpu in-flight). `cut` is `@parallel (d < CC_PAR_CUT)`
+ * — same arms, serial below the cut.
+ *
+ *   CC_PAR_DEPTH    default 20
+ *   CC_PAR_SAMPLES  default 5
+ *   CC_PAR_CUT      default 8
+ *   CC_PAR_BARE     default 1; 0 skips ungated `@parallel { }`
+ *                   (depth 24 is ~16M spawns and gets killed)
+ *
+ * Compare: ./perf/compare_parallel_hello.sh
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <time.h>
+
+#define U24_MASK 0xFFFFFFu
+
+static uint32_t g_depth = 20;
+static uint32_t g_cut = 8;
+static int g_samples = 5;
+
+static inline uint32_t u24(uint32_t x) {
+    return x & U24_MASK;
+}
+
+static double now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+}
+
+static void sort_doubles(double* arr, int n) {
+    int i, j;
+    for (i = 0; i < n - 1; i++) {
+        for (j = i + 1; j < n; j++) {
+            if (arr[j] < arr[i]) {
+                double t = arr[i];
+                arr[i] = arr[j];
+                arr[j] = t;
+            }
+        }
+    }
+}
+
+static uint32_t sum_seq(uint32_t d, uint32_t i) {
+    if (d >= g_depth)
+        return i;
+    return u24(sum_seq(d + 1, u24(i * 2)) + sum_seq(d + 1, u24(i * 2 + 1)));
+}
+
+static uint32_t sum_par(uint32_t d, uint32_t i) {
+    if (d >= g_depth)
+        return i;
+    uint32_t left = 0;
+    uint32_t right = 0;
+    @parallel {
+        left  = sum_par(d + 1, u24(i * 2));
+        right = sum_par(d + 1, u24(i * 2 + 1));
+    }
+    return u24(left + right);
+}
+
+static uint32_t sum_cut(uint32_t d, uint32_t i) {
+    if (d >= g_depth)
+        return i;
+    uint32_t left = 0;
+    uint32_t right = 0;
+    @parallel (d < g_cut) {
+        left  = sum_cut(d + 1, u24(i * 2));
+        right = sum_cut(d + 1, u24(i * 2 + 1));
+    }
+    return u24(left + right);
+}
+
+typedef uint32_t (*sum_fn)(uint32_t, uint32_t);
+
+typedef struct {
+    sum_fn fn;
+    uint32_t result;
+} RootEnv;
+
+static void* root_thunk(void* arg) {
+    RootEnv* e = (RootEnv*)arg;
+    e->result = e->fn(0, 0);
+    return NULL;
+}
+
+static uint32_t run_on_fiber(sum_fn fn) {
+    RootEnv e;
+    e.fn = fn;
+    e.result = 0;
+    CCTask t = cc_fiber_spawn_task(root_thunk, &e);
+    if (t.kind == CC_TASK_KIND_INVALID)
+        abort();
+    (void)cc_block_on_intptr(t);
+    return e.result;
+}
+
+static double time_once(sum_fn fn, uint32_t expect, int on_fiber) {
+    double t0 = now_ms();
+    uint32_t r = on_fiber ? run_on_fiber(fn) : fn(0, 0);
+    double t1 = now_ms();
+    if (r != expect) {
+        fprintf(stderr, "mismatch: got=%u expect=%u\n", r, expect);
+        abort();
+    }
+    return t1 - t0;
+}
+
+static double median_of(sum_fn fn, uint32_t expect, int on_fiber) {
+    double* xs = (double*)malloc((size_t)g_samples * sizeof(double));
+    int i;
+    double med;
+    if (!xs) abort();
+    (void)time_once(fn, expect, on_fiber);
+    (void)time_once(fn, expect, on_fiber);
+    for (i = 0; i < g_samples; i++)
+        xs[i] = time_once(fn, expect, on_fiber);
+    sort_doubles(xs, g_samples);
+    med = xs[g_samples / 2];
+    free(xs);
+    return med;
+}
+
+static uint32_t env_u32(const char* key, uint32_t fallback) {
+    const char* s = getenv(key);
+    if (!s || !s[0]) return fallback;
+    return (uint32_t)atoi(s);
+}
+
+int main(void) {
+    g_depth = env_u32("CC_PAR_DEPTH", 20);
+    g_cut = env_u32("CC_PAR_CUT", 8);
+    g_samples = (int)env_u32("CC_PAR_SAMPLES", 5);
+    if (g_samples < 1) g_samples = 1;
+
+    int bare = (int)env_u32("CC_PAR_BARE", 1);
+    uint32_t expect = sum_seq(0, 0);
+    double seq_ms = median_of(sum_seq, expect, 0);
+    double par_ms = 0.0;
+    double cut_ms = median_of(sum_cut, expect, 1);
+    double vs_par = 0.0;
+    double vs_cut = cut_ms > 0.0 ? seq_ms / cut_ms : 0.0;
+
+    if (bare) {
+        par_ms = median_of(sum_par, expect, 1);
+        vs_par = par_ms > 0.0 ? seq_ms / par_ms : 0.0;
+    }
+
+    printf("parallel_hello (@parallel): depth=%u cut=%u samples=%d (par on fiber)\n",
+           g_depth, g_cut, g_samples);
+    printf("  seq  %u  %.2f ms\n", expect, seq_ms);
+    if (bare)
+        printf("  par  %u  %.2f ms  vs_seq %.2fx  (@parallel { })\n",
+               expect, par_ms, vs_par);
+    else
+        printf("  par  skipped  (CC_PAR_BARE=0; ungated 16M-node spawn OOMs)\n");
+    printf("  cut  %u  %.2f ms  vs_seq %.2fx  (@parallel (d<%u))\n",
+           expect, cut_ms, vs_cut, g_cut);
+    return 0;
+}

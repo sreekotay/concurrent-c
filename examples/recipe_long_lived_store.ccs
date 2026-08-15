@@ -64,7 +64,7 @@ static CCSliceHdr !>(CCError) store_anchor_key(Store* store, char[:] key) {
 static void !>(CCError) store_insert_entry(Store* store, CCSliceHdr key, int value) {
     Map::[CCSliceHdr, int] entries = store ? store->entries : NULL;
     if (!entries) return cc_err(CC_ERR_INVALID_ARG, "insert without entries");
-    int rc = entries.insert(key, value);
+    int rc = entries->insert(key, value);
     if (rc != 0) return cc_err(CC_ERR_OUT_OF_MEMORY, "insert");
     return cc_ok();
 }

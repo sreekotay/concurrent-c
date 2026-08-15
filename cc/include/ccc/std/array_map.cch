@@ -531,4 +531,88 @@ static inline CCArrayMapCore *cc_array_map_core_init_count(CCArena *arena,
 
 #define CC_ARRAY_MAP_DECL_UFCS(Name) typedef char __cc_array_map_decl_ufcs__##Name
 
+/* `ArrayMap::[K,V]` / `array_map_new::[K,V]` / `array_map_new_count::[K,V]`
+ * instantiate this family. The concrete type is `ArrayMap_<K>_<V>*`.
+ * A hand-written `CC_ARRAY_MAP_DECL` that names the same instance
+ * suppresses the splice. Header lowering blanks the factory from `.h`. */
+CC_GENERIC_FACTORY(ArrayMap, 2) {
+    char k[80], v[80], hash[96], eq[96], fwd[256];
+    char newfn[96], newcfn[96], compact[80];
+    size_t kn = arg(0).len < sizeof(k) - 1 ? arg(0).len : sizeof(k) - 1;
+    size_t vn = arg(1).len < sizeof(v) - 1 ? arg(1).len : sizeof(v) - 1;
+    int user_key = 0;
+    memcpy(k, arg(0).ptr, kn);
+    k[kn] = 0;
+    memcpy(v, arg(1).ptr, vn);
+    v[vn] = 0;
+    fwd[0] = 0;
+    compact[0] = 0;
+    if (mangled.len > 9 && memcmp(mangled.ptr, "ArrayMap_", 9) == 0) {
+        size_t cl = mangled.len - 9;
+        if (cl >= sizeof(compact)) cl = sizeof(compact) - 1;
+        memcpy(compact, mangled.ptr + 9, cl);
+        compact[cl] = 0;
+    }
+    snprintf(newfn, sizeof(newfn), "array_map_new_%s", compact);
+    snprintf(newcfn, sizeof(newcfn), "array_map_new_count_%s", compact);
+    if (strcmp(k, "int") == 0) {
+        snprintf(hash, sizeof(hash), "cc_map_hash_i32");
+        snprintf(eq, sizeof(eq), "cc_map_eq_i32");
+    } else if (strcmp(k, "CCSliceHdr") == 0) {
+        snprintf(hash, sizeof(hash), "cc_map_hash_slice_hdr");
+        snprintf(eq, sizeof(eq), "cc_map_eq_slice_hdr");
+    } else if (strcmp(k, "CCSlicePacked") == 0) {
+        snprintf(hash, sizeof(hash), "cc_map_hash_slice_packed");
+        snprintf(eq, sizeof(eq), "cc_map_eq_slice_packed");
+    } else if (strcmp(k, "CCSlice") == 0 || strcmp(k, "charslice") == 0) {
+        snprintf(hash, sizeof(hash), "cc_map_hash_slice");
+        snprintf(eq, sizeof(eq), "cc_map_eq_slice");
+    } else if (strstr(k, "slice") != NULL || strstr(k, "Slice") != NULL) {
+        snprintf(hash, sizeof(hash), "cc_map_hash_slice");
+        snprintf(eq, sizeof(eq), "cc_map_eq_slice");
+    } else if (strstr(k, "64") != NULL) {
+        snprintf(hash, sizeof(hash), "cc_map_hash_u64");
+        snprintf(eq, sizeof(eq), "cc_map_eq_u64");
+    } else {
+        snprintf(hash, sizeof(hash), "cc_map_key_hash_%s", k);
+        snprintf(eq, sizeof(eq), "cc_map_key_eq_%s", k);
+        user_key = 1;
+    }
+    if (user_key)
+        snprintf(fwd, sizeof(fwd),
+                 "static size_t %s(%s);\nstatic int %s(%s, %s);\n",
+                 hash, k, eq, k, k);
+    return @emit(`
+#ifdef CC_FRAGMENT_VALIDATE
+typedef struct ${mangled} { char _; } ${mangled};
+static inline ${mangled}* ${mangled}_init(void *a) { (void)a; return (${mangled}*)0; }
+static inline ${mangled}* ${mangled}_init_count(void *a, size_t n) {
+    (void)a; (void)n; return (${mangled}*)0;
+}
+static inline ${mangled}* ${newfn}(void *a) { (void)a; return (${mangled}*)0; }
+static inline ${mangled}* ${mangled}_new(void *a) { (void)a; return (${mangled}*)0; }
+static inline ${mangled}* ${newcfn}(void *a, size_t n) {
+    (void)a; (void)n; return (${mangled}*)0;
+}
+#else
+${fwd}
+CC_ARRAY_MAP_DECL(${k}, ${v}, ${mangled}, ${hash}, ${eq})
+static inline ${mangled}* ${newfn}(CCArena* __a) {
+    return ${mangled}_init(__a);
+}
+static inline ${mangled}* ${mangled}_new(CCArena* __a) {
+    return ${mangled}_init(__a);
+}
+static inline ${mangled}* ${newcfn}(CCArena* __a, size_t __n) {
+    return ${mangled}_init_count(__a, __n);
+}
+#endif
+`, arena);
+}
+
+@typehooks on ArrayMap_* {
+    .create = cc_type_create_call("_new"),
+    .destroy = cc_type_destroy_call("_destroy"),
+};
+
 #endif /* CC_STD_ARRAY_MAP_H */

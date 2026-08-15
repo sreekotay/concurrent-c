@@ -270,7 +270,7 @@ requires a full C parser before those land, fights C1–C3.
 |------|--------|
 | **native front** | This architecture: tape → whitelist AST → emit (`--frontend=native`) |
 | **`shadow_lower`** | The product lowerer binary / `.ccs` implementing that front |
-| **`spec/cc_serdes.md`** | `@grammar` engines and **wire** serialization — unrelated to this front |
+| **`spec/cc_serdes.md`** | `@grammar` engines and **wire** serialization — unrelated to this front; C23 tok+syn experiment lives under `examples/serdes/c23/` |
 | **`cc/shadow/`** | Source tree for `shadow_lower` (`.ccs` / `.cch`) |
 
 Prefer "**native**" / "`shadow_lower`" for the compiler. **SERDES** means only

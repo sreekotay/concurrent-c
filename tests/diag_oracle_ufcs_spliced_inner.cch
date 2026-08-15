@@ -1,1 +1,1 @@
-static size_t diag_ufcs_nested_len(DiagUfcsMap m) { return m ? m.len() : 0; }
+static size_t diag_ufcs_nested_len(DiagUfcsMap m) { return m ? m->len() : 0; }

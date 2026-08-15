@@ -24,8 +24,8 @@ int main(void) {
     db.entries = array_map_new::[int, int](&a);
     if (!db.entries) return 1;
 
-    if (db.entries.insert(1, 10) != 0) return 2;
-    if (db.entries.insert(2, 20) != 0) return 3;
+    if (db.entries->insert(1, 10) != 0) return 2;
+    if (db.entries->insert(2, 20) != 0) return 3;
 
     if (nested_ufcs_len(db.entries) != 2) return 4;
     /* cap + len + raw len (+1 for nonzero live bytes): cap >= len, raw == len */

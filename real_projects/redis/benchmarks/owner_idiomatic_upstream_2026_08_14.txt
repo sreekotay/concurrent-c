@@ -1,0 +1,72 @@
+tmp: /var/folders/12/04b0tf2d79b7d7wdgzwx12yr0000gn/T/bench_lock_cmp.XXXXXX.vl2uiiag74
+[warmup]
+   owner     set   rps=1724138
+   idiomatic set   rps=2586207
+   upstream  set   rps=2000000
+   idiomatic get   rps=2586207
+   upstream  get   rps=2479339
+   owner     get   rps=1829268
+   idiomatic incr  rps=2752294
+   upstream  incr  rps=2362205
+   owner     incr  rps=1840491
+[round 1/4]
+   owner     set   rps=1818182
+   idiomatic set   rps=2631579
+   upstream  set   rps=1986755
+   owner     get   rps=1973684
+   upstream  get   rps=2479339
+   idiomatic get   rps=2777778
+   upstream  incr  rps=2459016
+   owner     incr  rps=2127660
+   idiomatic incr  rps=2857143
+[round 2/4]
+   idiomatic set   rps=2970297
+   upstream  set   rps=1986755
+   owner     set   rps=2097902
+   idiomatic get   rps=2970297
+   upstream  get   rps=2459016
+   owner     get   rps=2083333
+   upstream  incr  rps=2479339
+   idiomatic incr  rps=3125000
+   owner     incr  rps=2083333
+[round 3/4]
+   idiomatic set   rps=3000000
+   owner     set   rps=2097902
+   upstream  set   rps=1973684
+   idiomatic get   rps=2362205
+   upstream  get   rps=2400000
+   owner     get   rps=2127660
+   upstream  incr  rps=2459016
+   idiomatic incr  rps=3125000
+   owner     incr  rps=2127660
+[round 4/4]
+   idiomatic set   rps=2941177
+   upstream  set   rps=2000000
+   owner     set   rps=2054795
+   owner     get   rps=2083333
+   idiomatic get   rps=2970297
+   upstream  get   rps=2500000
+   idiomatic incr  rps=3092784
+   owner     incr  rps=2097902
+   upstream  incr  rps=2459016
+
+cmd    label          median       mean        min        max
+------------------------------------------------------------
+set    upstream       1.987M     1.987M     1.974M     2.000M
+set    idiomatic      2.956M     2.886M     2.632M     3.000M
+set    owner          2.076M     2.017M     1.818M     2.098M
+       idiomatic/owner = 142.35%   idiomatic/upstream = 148.77%
+
+get    upstream       2.469M     2.460M     2.400M     2.500M
+get    idiomatic      2.874M     2.770M     2.362M     2.970M
+get    owner          2.083M     2.067M     1.974M     2.128M
+       idiomatic/owner = 137.95%   idiomatic/upstream = 116.40%
+
+incr   upstream       2.459M     2.464M     2.459M     2.479M
+incr   idiomatic      3.109M     3.050M     2.857M     3.125M
+incr   owner          2.113M     2.109M     2.083M     2.128M
+       idiomatic/owner = 147.15%   idiomatic/upstream = 126.43%
+
+config: -c 50 -P 16 -n 300000 -r 50000 repeats=4
+bins: idiomatic=/Users/airm5/Documents/code/concurrent-c/real_projects/redis/out/redis_idiomatic
+      owner=/Users/airm5/Documents/code/concurrent-c/real_projects/redis/out/redis_owner

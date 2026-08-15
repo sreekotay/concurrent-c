@@ -1,0 +1,9 @@
+/* Map/ArrayMap sugar is Name* — `.` on the handle is ill-formed. */
+#include <ccc/std/prelude.cch>
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(16));
+    ArrayMap::[int, int] m;
+    if (!arena.base) return 1;
+    m = array_map_new::[int, int](&arena);
+    return (int)m.insert(1, 2);
+}

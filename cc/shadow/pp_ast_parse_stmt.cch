@@ -1564,25 +1564,49 @@ static AstNode* parse_ptr_init(Parser* p) {
     }
 }
 
-/* call(...) !>;  or  call(...) !> { stmts }; */
+/* T name = expr @destroy / T name@(args) @destroy / @detach. */
 static AstNode* parse_val_destroy(Parser* p) {
-    Token ty = p_peek(p);
-    if (ty.kind != TK_IDENT) return NULL;
-    if (p->i + 4 >= p->n) return NULL;
-    int is_ptr = 0;
-    int name_i = p->i + 1;
-    if (tok_eq(p->toks[p->i + 1], TK_PUNCT, "*")) {
-        is_ptr = 1;
-        name_i = p->i + 2;
-        if (name_i + 2 >= p->n) return NULL;
+    Token ty0tok;
+    int ti, ty_end, ni, name_i, nstars, s;
+    int at_create = 0;
+    int lp = -1;
+    int j, depth, saw, is_detach;
+    if (!p || p->i >= p->n) return NULL;
+    ti = p->i;
+    ty0tok = p->toks[ti];
+    if (ty0tok.kind != TK_IDENT && shadow_kw(ty0tok) != SHADOW_KW_BOOL &&
+        shadow_kw(ty0tok) != SHADOW_KW_SIZE_T &&
+        shadow_kw(ty0tok) != SHADOW_KW_INT &&
+        shadow_kw(ty0tok) != SHADOW_KW_CHAR)
+        return NULL;
+    ty_end = peek_generic_type_end(p, ti);
+    if (ty_end < 0) {
+        int iend = peek_c_int_type_end(p, ti);
+        ty_end = (iend > ti) ? iend : ti + 1;
     }
-    if (p->toks[name_i].kind != TK_IDENT) return NULL;
-    if (!tok_eq(p->toks[name_i + 1], TK_PUNCT, "=")) return NULL;
+    ni = ty_end;
+    nstars = 0;
+    while (ni < p->n && tok_eq(p->toks[ni], TK_PUNCT, "*")) {
+        nstars++;
+        ni++;
+    }
+    if (ni >= p->n || p->toks[ni].kind != TK_IDENT) return NULL;
+    name_i = ni;
+    ni++;
+    if (ni >= p->n) return NULL;
+    if (tok_eq(p->toks[ni], TK_PUNCT, "=")) {
+        j = ni + 1;
+    } else if (tok_eq(p->toks[ni], TK_PUNCT, "@") && ni + 1 < p->n &&
+               tok_eq(p->toks[ni + 1], TK_PUNCT, "(")) {
+        at_create = 1;
+        lp = ni + 1;
+        j = ni + 1;
+    } else
+        return NULL;
     /* Must see @destroy / @detach before ';' at depth 0. */
-    int j = name_i + 2;
-    int depth = 0;
-    int saw = 0;
-    int is_detach = 0;
+    depth = 0;
+    saw = 0;
+    is_detach = 0;
     while (j < p->n) {
         Token t = p->toks[j];
         if (tok_eq(t, TK_PUNCT, "(") || tok_eq(t, TK_PUNCT, "{") || tok_eq(t, TK_PUNCT, "["))
@@ -1597,45 +1621,114 @@ static AstNode* parse_val_destroy(Parser* p) {
                 break;
             }
         } else if (depth == 0 && tok_eq(t, TK_PUNCT, ";")) {
+            if (at_create) {
+                parser_fail(p, p->toks[name_i],
+                            "created with '@(...)' requires explicit "
+                            "ownership: use '@destroy' or '@detach'");
+                return NULL;
+            }
             return NULL;
         }
         j++;
     }
-    if (!saw) return NULL;
-
-    p_next(p); /* type */
-    if (is_ptr) p_next(p); /* * */
-    Token name = p_next(p);
-    p_next(p); /* = */
-    int c0 = p->i;
-    char init[256];
-    AstNode* create_cl = NULL;
-    int had_cl = parse_call_arg_closure(p, c0, j, init, sizeof(init), "create",
-                                        &create_cl);
-    if (p->err) return NULL;
-    if (!had_cl) {
-        while (p->i < j) p_next(p);
-        if (!ast_spell_token_range(p, c0, j, init, sizeof(init)) &&
-            !span_text(p, c0, j, init, sizeof(init))) {
-            parser_fail(p, name, "val @destroy/@detach init too long");
+    if (!saw) {
+        if (at_create) {
+            parser_fail(p, p->toks[name_i],
+                        "created with '@(...)' requires explicit "
+                        "ownership: use '@destroy' or '@detach'");
             return NULL;
         }
+        return NULL;
     }
+
     {
-        AstNode* ue = (!had_cl) ? parse_ufcs_expr_range(p, c0, j) : NULL;
+        char tytxt[256];
+        tytxt[0] = 0;
+        if (ty_end > ti + 1) {
+            if (!ast_spell_type_tokens(p, ti, ty_end, tytxt, sizeof(tytxt)) &&
+                !ast_spell_token_range(p, ti, ty_end, tytxt, sizeof(tytxt)))
+                return NULL;
+            shadow_seed_spelled_type_name(p, tytxt);
+        } else
+            slice_to(tytxt, sizeof(tytxt), ty0tok.spell);
+        {
+            size_t tn = strlen(tytxt);
+            while (tn && (tytxt[tn - 1] == ' ' || tytxt[tn - 1] == '\t'))
+                tytxt[--tn] = 0;
+            while (tn && tytxt[tn - 1] == '*') {
+                nstars++;
+                tytxt[--tn] = 0;
+                while (tn && (tytxt[tn - 1] == ' ' || tytxt[tn - 1] == '\t'))
+                    tytxt[--tn] = 0;
+            }
+        }
+        while (p->i < name_i) p_next(p);
+        {
+            Token name = p_next(p);
+            char init[256];
+            char tmp[256];
+            AstNode* create_cl = NULL;
+            int had_cl = 0;
+            int c0;
+            init[0] = 0;
+            tmp[0] = 0;
+            if (at_create) {
+                p_next(p); /* @ */
+                p_next(p); /* ( */
+                c0 = lp;
+                had_cl = parse_call_arg_closure(p, c0, j, tmp, sizeof(tmp),
+                                                "create", &create_cl);
+                if (p->err) return NULL;
+                if (had_cl) {
+                    if (tmp[0] == '(')
+                        snprintf(init, sizeof(init), "__cc_at_create%s", tmp);
+                    else if (tmp[0])
+                        snprintf(init, sizeof(init), "__cc_at_create(%s", tmp);
+                    else
+                        snprintf(init, sizeof(init), "__cc_at_create(");
+                } else {
+                    if (!ast_spell_token_range(p, c0, j, tmp, sizeof(tmp)) &&
+                        !span_text(p, c0, j, tmp, sizeof(tmp))) {
+                        parser_fail(p, name, "val @destroy/@detach init too long");
+                        return NULL;
+                    }
+                    snprintf(init, sizeof(init), "__cc_at_create%s", tmp);
+                    while (p->i < j) p_next(p);
+                }
+            } else {
+                p_next(p); /* = */
+                c0 = p->i;
+                had_cl = parse_call_arg_closure(p, c0, j, init, sizeof(init),
+                                                "create", &create_cl);
+                if (p->err) return NULL;
+                if (!had_cl) {
+                    while (p->i < j) p_next(p);
+                    if (!ast_spell_token_range(p, c0, j, init, sizeof(init)) &&
+                        !span_text(p, c0, j, init, sizeof(init))) {
+                        parser_fail(p, name,
+                                    "val @destroy/@detach init too long");
+                        return NULL;
+                    }
+                }
+            }
+            {
+        AstNode* ue = (!had_cl) ? parse_ufcs_expr_range(p, at_create ? lp : c0, j) : NULL;
         p_next(p); /* @ */
         p_next(p); /* destroy|detach */
         AstNode* n = ast_new(p, AST_VAL_DESTROY);
         if (!n) return NULL;
-        slice_to(n->a, sizeof(n->a), ty.spell);
+        snprintf(n->a, sizeof(n->a), "%s", tytxt);
         slice_to(n->b, sizeof(n->b), name.spell);
         snprintf(n->c, sizeof(n->c), "%s", init);
-        if (is_ptr) snprintf(n->d, sizeof(n->d), "*");
+        n->d[0] = 0;
+        for (s = 0; s < nstars && s + 1 < (int)sizeof(n->d); s++)
+            n->d[s] = '*';
+        if (s < (int)sizeof(n->d)) n->d[s] = 0;
         if (ue) (void)ast_attach_ufcs_kid(p, n, ue);
         /* Closure on dbody (like UFCS) — not kids_storage (fn may still append). */
         if (create_cl) {
             if (n->ndbody >= SHADOW_DBODY_CAP) {
-                parser_fail(p, name, "too many @create closure attachments");
+                parser_fail(p, name, "too many create closure attachments");
                 return NULL;
             }
             spawn_infer_value_caps(create_cl);
@@ -1673,6 +1766,8 @@ static AstNode* parse_val_destroy(Parser* p) {
         }
         snprintf(n->e, sizeof(n->e), "_D");
         return n;
+            }
+        }
     }
 }
 
@@ -2151,6 +2246,9 @@ static AstNode* parse_typed_init(Parser* p) {
     } else {
         p_next(p);
         slice_to(tytxt, sizeof(tytxt), ty.spell);
+        /* `Family_rest` in a type position is an instance (not a method). */
+        if (shadow_ident_matches_factory_instance(tytxt))
+            shadow_seed_spelled_type_name(p, tytxt);
         /* Bare CamelCase IDENT types must be known — catch
          * `SomeUndefinedType` early (stdlib `int64_t` / snake_case pass). */
         if (!has_struct && ty.kind == TK_IDENT &&
@@ -2940,6 +3038,8 @@ static AstNode* parse_var_decl(Parser* p) {
         } else {
             p_next(p); /* type */
             slice_to(tytxt, sizeof(tytxt), ty.spell);
+            if (shadow_ident_matches_factory_instance(tytxt))
+                shadow_seed_spelled_type_name(p, tytxt);
         }
         if (!multi) {
             while (stars_left-- > 0) {
@@ -3950,6 +4050,8 @@ static AstNode* parse_stmt_inner(Parser* p) {
         n = parse_defer(p);
         if (n || p->err) return n;
         n = parse_with_deadline(p);
+        if (n || p->err) return n;
+        n = parse_parallel(p);
         if (n || p->err) return n;
         /* `@string(...).println() !>;` before bare `@string` AT_STMT. */
         n = parse_ufcs_stmt(p);

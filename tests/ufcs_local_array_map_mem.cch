@@ -1,12 +1,12 @@
 #ifndef UFCS_LOCAL_AM_MEM
 #define UFCS_LOCAL_AM_MEM
 static size_t am_live(DbMap map) {
-    return map ? map.live_bytes() : 0;
+    return map ? map->live_bytes() : 0;
 }
 static size_t am_caps(const Db* db) {
-    return (db && db->entries) ? db->entries.cap() : 0;
+    return (db && db->entries) ? db->entries->cap() : 0;
 }
 static size_t am_lens(const Db* db) {
-    return (db && db->entries) ? db->entries.len() : 0;
+    return (db && db->entries) ? db->entries->len() : 0;
 }
 #endif

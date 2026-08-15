@@ -89,8 +89,8 @@ Uses locks (mutex + condvar) via yarn.h for synchronization.
 Uses channels and explicit ownership scopes for clean structured concurrency:
 
 ```c
-CCNursery* writer = @create(NULL, writer_task) @destroy;
-CCNursery* pipeline = @create(writer) @destroy {
+CCNursery* writer@(NULL, writer_task) @destroy;
+CCNursery* pipeline@(writer) @destroy {
     results_tx.close();
 };
 
@@ -111,7 +111,7 @@ CCChan* ch = cc_channel_pair(&blocks_tx, &blocks_rx);
 ### 2. Nested Ownership with Explicit Close
 Close channels when producer-owned work finishes:
 ```c
-CCNursery* producer = @create(consumer) @destroy {
+CCNursery* producer@(consumer) @destroy {
     results_tx.close();
 };
 // Producer-owned work runs here.

@@ -57,8 +57,8 @@ predecls; they declare `a` / `io` / `in` / `args` explicitly when needed.
 
 | Name | Type | Declaration |
 | ---- | ---- | ----------- |
-| `a` | `CCArena` | `@create(megabytes(1)) @destroy` |
-| `io` | `CCStdio` | private `__cc_io_arena` + `@create(&__cc_io_arena) @destroy` |
+| `a` | `CCArena` | `a@(megabytes(1)) @destroy` |
+| `io` | `CCStdio` | private `__cc_io_arena` + `io@(&__cc_io_arena) @destroy` |
 | `in` | `char[:]` | `io.read_all() !>` |
 | `args` | `CCSlice` | `{ .ptr = (char *)(argv + 1), .len = (size_t)(argc > 1 ? argc - 1 : 0) }` |
 | `line` | `char[:]` | current input line (`-n` / `-p` only; loop-local) |

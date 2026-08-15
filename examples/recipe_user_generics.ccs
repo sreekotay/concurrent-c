@@ -12,6 +12,9 @@
  * declared `<Mangled>_<member>` function extends one instance the same
  * way declaring installs any method.
  *
+ * Stdlib `Vec::[T]`, `Map::[K,V]`, `ArrayMap::[K,V]`, and non-char `T[:]`
+ * are this factory — not a separate compiler container path.
+ *
  *    1. Define a family     CC_GENERIC_FACTORY + one @emit template
  *    2. Instantiate         Pair::[int, double] p
  *    3. Construct free-name pair_make::[int, double](3, 4.5)

@@ -1,7 +1,7 @@
 /*
  * Named exclusive sections (v1).
  *
- *   CCArena arena = @create(kilobytes(128)) @destroy;
+ *   CCArena arena@(kilobytes(128)) @destroy;
  *   CCExclusive* excl = cc_exclusive_create(&arena, 0);      // default map (64)
  *   // or: excl = cc_exclusive_create(&arena, 256);          // hint → pow2
  *   CCExclusiveMutex m = excl->mutex(name);  // resolve once
@@ -64,7 +64,7 @@
  * The lock word is the first field of the runtime entry, so a guard is a
  * single entry pointer and the inline paths cast it directly.
  *
- * Each CCExclusive is its own name space. Later: @create / guard @destroy.
+ * Each CCExclusive is its own name space. Later: name@(args) / guard @destroy.
  */
 #ifndef CCC_CC_EXCLUSIVE_CCH
 #define CCC_CC_EXCLUSIVE_CCH

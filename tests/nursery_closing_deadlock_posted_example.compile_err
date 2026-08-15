@@ -1,1 +1,1 @@
-error: async: `@closing(...)` is retired; use explicit ownership with `@create(...) @destroy { chan.close(); }`
+error: async: `@closing(...)` is retired; use explicit ownership with `T name@(args) @destroy { chan.close(); }`

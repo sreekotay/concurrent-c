@@ -412,7 +412,7 @@ and `Name_*` operations) is eligible to sit in the `@grammar(...)` slot.
 Ordinary, existing machinery — no new resolution, no dispatch table, no VM:
 
 ```c
-JSONReader* p = @create();
+JSONReader* p@() @destroy;
 p->read(f);     // static UFCS → JSONReader_read(p, f)
 ```
 

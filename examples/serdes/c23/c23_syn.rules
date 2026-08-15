@@ -1,0 +1,215 @@
+; C23 phase-7 PEG syntax over bytes (typedef-free / ident-as-typedef-name).
+; include the tokenizer factory, then declare translation_unit first so it
+; claims the entry. `top` remains the token-stream matcher.
+;
+; Honest limits: no preprocessor; every ident in specifier position is a
+; typedef-name; `(foo)(x)` parses as a cast, not a call; no GNU dialect.
+;
+; Keywords use `not idcont` so `ifdef` is an identifier, not `if` + `def`.
+
+include "c23_tok.rules"
+
+translation_unit: [pad any external_decl pad]
+
+pad: any [comment | ws]
+
+; --- keywords (no pad; each alt carries its own `not idcont`) ---
+kw_alignas:        ["alignas" not idcont]
+kw_alignof:        ["alignof" not idcont]
+kw_auto:           ["auto" not idcont]
+kw_bool:           ["bool" not idcont]
+kw_break:          ["break" not idcont]
+kw_case:           ["case" not idcont]
+kw_char:           ["char" not idcont]
+kw_const:          ["const" not idcont]
+kw_constexpr:      ["constexpr" not idcont]
+kw_continue:       ["continue" not idcont]
+kw_default:        ["default" not idcont]
+kw_do:             ["do" not idcont]
+kw_double:         ["double" not idcont]
+kw_else:           ["else" not idcont]
+kw_enum:           ["enum" not idcont]
+kw_extern:         ["extern" not idcont]
+kw_false:          ["false" not idcont]
+kw_float:          ["float" not idcont]
+kw_for:            ["for" not idcont]
+kw_goto:           ["goto" not idcont]
+kw_if:             ["if" not idcont]
+kw_inline:         ["inline" not idcont]
+kw_int:            ["int" not idcont]
+kw_long:           ["long" not idcont]
+kw_nullptr:        ["nullptr" not idcont]
+kw_register:       ["register" not idcont]
+kw_restrict:       ["restrict" not idcont]
+kw_return:         ["return" not idcont]
+kw_short:          ["short" not idcont]
+kw_signed:         ["signed" not idcont]
+kw_sizeof:         ["sizeof" not idcont]
+kw_static:         ["static" not idcont]
+kw_static_assert:  ["static_assert" not idcont]
+kw_struct:         ["struct" not idcont]
+kw_switch:         ["switch" not idcont]
+kw_thread_local:   ["thread_local" not idcont]
+kw_true:           ["true" not idcont]
+kw_typedef:        ["typedef" not idcont]
+kw_typeof:         ["typeof" not idcont]
+kw_typeof_unqual:  ["typeof_unqual" not idcont]
+kw_union:          ["union" not idcont]
+kw_unsigned:       ["unsigned" not idcont]
+kw_void:           ["void" not idcont]
+kw_volatile:       ["volatile" not idcont]
+kw_while:          ["while" not idcont]
+kw_Alignas:        ["_Alignas" not idcont]
+kw_Alignof:        ["_Alignof" not idcont]
+kw_Atomic:         ["_Atomic" not idcont]
+kw_BitInt:         ["_BitInt" not idcont]
+kw_Bool:           ["_Bool" not idcont]
+kw_Complex:        ["_Complex" not idcont]
+kw_Decimal128:     ["_Decimal128" not idcont]
+kw_Decimal32:      ["_Decimal32" not idcont]
+kw_Decimal64:      ["_Decimal64" not idcont]
+kw_Generic:        ["_Generic" not idcont]
+kw_Imaginary:      ["_Imaginary" not idcont]
+kw_Noreturn:       ["_Noreturn" not idcont]
+kw_Static_assert:  ["_Static_assert" not idcont]
+kw_Thread_local:   ["_Thread_local" not idcont]
+
+kws: [
+      kw_alignas | kw_alignof | kw_auto | kw_bool | kw_break | kw_case
+    | kw_char | kw_const | kw_constexpr | kw_continue | kw_default | kw_do
+    | kw_double | kw_else | kw_enum | kw_extern | kw_false | kw_float
+    | kw_for | kw_goto | kw_if | kw_inline | kw_int | kw_long | kw_nullptr
+    | kw_register | kw_restrict | kw_return | kw_short | kw_signed | kw_sizeof
+    | kw_static | kw_static_assert | kw_struct | kw_switch | kw_thread_local
+    | kw_true | kw_typedef | kw_typeof | kw_typeof_unqual | kw_union
+    | kw_unsigned | kw_void | kw_volatile | kw_while
+    | kw_Alignas | kw_Alignof | kw_Atomic | kw_BitInt | kw_Bool | kw_Complex
+    | kw_Decimal128 | kw_Decimal32 | kw_Decimal64 | kw_Generic | kw_Imaginary
+    | kw_Noreturn | kw_Static_assert | kw_Thread_local
+]
+
+nkw: [pad not kws ident]
+
+; --- declarations ---
+external_decl: function_def | declaration
+
+function_def: [spec_list declarator compound_stmt]
+
+declaration: static_assert_decl | [spec_list opt init_decl_list pad #';']
+
+static_assert_decl: [pad [kw_static_assert | kw_Static_assert]
+                     pad #'(' cond opt [pad #',' string_lit] pad #')' pad #';']
+
+spec_list: some spec
+spec: [pad [kw_typedef | kw_extern | kw_static | kw_constexpr | kw_thread_local
+          | kw_Thread_local | kw_auto | kw_register | kw_inline | kw_Noreturn
+          | kw_const | kw_restrict | kw_volatile | kw_Atomic
+          | kw_void | kw_char | kw_short | kw_int | kw_long | kw_float
+          | kw_double | kw_signed | kw_unsigned | kw_bool | kw_Bool
+          | kw_Complex | kw_Imaginary
+          | kw_Decimal32 | kw_Decimal64 | kw_Decimal128
+          | bitint | typeof_spec | alignas_spec | struct_spec | enum_spec
+          | typedef_spec]]
+; Ident in specifier position only when `*` or another ident follows
+; (`T x`, `const T *p`). `(` is left to the declarator (`void f(`,
+; `int (*p)`). `T (*p)` (typedef-name then parenthesized declarator)
+; is out of scope for this experiment.
+typedef_spec: [nkw and [pad [#'*' | not kws ident]]]
+
+bitint: [kw_BitInt pad #'(' cond pad #')']
+typeof_spec: [[kw_typeof | kw_typeof_unqual] pad #'(' [type_name | expr] pad #')']
+alignas_spec: [[kw_alignas | kw_Alignas] pad #'(' [type_name | cond] pad #')']
+
+struct_spec: [[kw_struct | kw_union] opt nkw opt [pad #'{' any struct_decl pad #'}']]
+struct_decl: [spec_list opt struct_decl_list pad #';']
+struct_decl_list: [declarator any [pad #',' declarator]]
+
+enum_spec: [kw_enum opt nkw opt [pad #'{' enum_list opt [pad #','] pad #'}']]
+enum_list: [enum_const any [pad #',' enum_const]]
+enum_const: [nkw opt [pad #'=' cond]]
+
+init_decl_list: [init_decl any [pad #',' init_decl]]
+init_decl: [declarator opt [pad #'=' initializer]]
+initializer: [pad #'{' opt init_list opt [pad #','] pad #'}'] | assign
+init_list: [initializer any [pad #',' initializer]]
+
+declarator: [any [pad #'*'] direct_decl]
+direct_decl: [nkw any postfix_decl | pad #'(' declarator pad #')' any postfix_decl]
+postfix_decl: [pad #'[' opt cond pad #']'] | [pad #'(' opt param_list pad #')']
+
+param_list: [param any [pad #',' param] opt [pad #',' pad "..."]] | [pad "..."]
+param: [spec_list opt declarator_or_abs]
+declarator_or_abs: declarator | abs_decl
+
+type_name: [spec_list opt abs_decl]
+abs_decl: [any [pad #'*'] opt direct_abs]
+direct_abs: [pad #'(' abs_decl pad #')' any postfix_decl
+           | some postfix_decl]
+
+; --- statements ---
+stmt: labeled_stmt | compound_stmt | if_stmt | switch_stmt | while_stmt
+    | do_stmt | for_stmt | jump_stmt | expr_stmt
+
+labeled_stmt: [pad kw_case cond pad #':' stmt]
+            | [pad kw_default pad #':' stmt]
+            | [nkw pad #':' stmt]
+
+compound_stmt: [pad #'{' any block_item pad #'}']
+block_item: declaration | stmt
+
+if_stmt: [pad kw_if pad #'(' expr pad #')' stmt opt [pad kw_else stmt]]
+switch_stmt: [pad kw_switch pad #'(' expr pad #')' stmt]
+while_stmt: [pad kw_while pad #'(' expr pad #')' stmt]
+do_stmt: [pad kw_do stmt pad kw_while pad #'(' expr pad #')' pad #';']
+for_stmt: [pad kw_for pad #'(' for_init opt expr pad #';' opt expr pad #')' stmt]
+for_init: declaration | [opt expr pad #';']
+
+jump_stmt: [pad kw_goto nkw pad #';']
+         | [pad kw_continue pad #';']
+         | [pad kw_break pad #';']
+         | [pad kw_return opt expr pad #';']
+
+expr_stmt: [opt expr pad #';']
+
+; --- expressions (non-left-recursive; assignment is right-assoc) ---
+expr: [assign any [pad #',' assign]]
+assign: [unary assign_op assign] | cond
+assign_op: [pad ["=" | "*=" | "/=" | "%=" | "+=" | "-=" | "<<=" | ">>="
+               | "&=" | "^=" | "|="]]
+cond: [lor opt [pad #'?' expr pad #':' cond]]
+lor:  [land any [pad "||" land]]
+land: [bor any [pad "&&" bor]]
+bor:  [bxor any [pad #'|' bxor]]
+bxor: [band any [pad #'^' band]]
+band: [eq any [pad #'&' eq]]
+eq:   [rel any [pad ["==" | "!="] rel]]
+rel:  [shift any [pad ["<=" | ">=" | #'<' | #'>'] shift]]
+shift:[add any [pad ["<<" | ">>"] add]]
+add:  [mul any [pad [#'+' | #'-'] mul]]
+mul:  [cast any [pad [#'*' | #'/' | #'%'] cast]]
+
+cast: [pad #'(' type_name pad #')' cast] | unary
+
+unary: [pad "++" unary] | [pad "--" unary]
+     | [pad [#'+' | #'-' | #'~' | #'!' | #'*' | #'&'] cast]
+     | [pad [kw_sizeof | kw_alignof | kw_Alignof] [pad #'(' type_name pad #')' | unary]]
+     | postfix
+
+postfix: [primary any postfix_op]
+postfix_op: [pad #'[' expr pad #']']
+          | [pad #'(' opt arg_list pad #')']
+          | [pad #'.' nkw]
+          | [pad "->" nkw]
+          | [pad "++"]
+          | [pad "--"]
+
+arg_list: [assign any [pad #',' assign]]
+
+primary: generic | [pad #'(' expr pad #')'] | string_lit | [pad charlit]
+       | [pad pp_number] | [pad [kw_true | kw_false | kw_nullptr]] | nkw
+
+string_lit: some [pad string]
+
+generic: [pad kw_Generic pad #'(' assign pad #',' generic_list pad #')']
+generic_list: [generic_assoc any [pad #',' generic_assoc]]
+generic_assoc: [pad kw_default pad #':' assign] | [type_name pad #':' assign]

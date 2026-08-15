@@ -1,0 +1,451 @@
+/*
+ * Hand-lowered C for:
+ *
+ *   static uint32_t sum(uint32_t d, uint32_t i) {
+ *       if (d >= DEPTH) return i;
+ *       uint32_t left, right;
+ *       @parallel {
+ *           left  = sum(d + 1, u24(i * 2));
+ *           right = sum(d + 1, u24(i * 2 + 1));
+ *       }
+ *       return u24(left + right);
+ *   }
+ *
+ * The @parallel block is a join point: both assignments complete before
+ * the closing brace. That is what makes parent-stack env and result
+ * slots legal — same contract as a nursery @destroy or Promise.all.
+ *
+ * What the lowerer has to emit, per block:
+ *   1. two result slots (already in source: left, right)
+ *   2. an env per spawned arm: captured args + out pointer
+ *   3. a thunk: unpack env, call sum, write *out
+ *   4. spawn (fiber start)
+ *   5. join at the brace (happens-before for the reads of left/right)
+ *
+ * Grain (SPAWN_UNTIL) is not in the source. Spawn-everywhere at
+ * DEPTH=28 is ~2^29 fibers. Set SPAWN_UNTIL < DEPTH to sequentialize
+ * below that depth — an execution-machine sentence the @parallel
+ * block does not contain.
+ *
+ * This file is the C a lowerer would emit, not surface CC.
+ * Surface @parallel: perf/parallel_hello.ccs
+ * Go counterpart: perf/go/parallel_hello.go
+ * Compare: ./perf/compare_parallel_hello.sh
+ *
+ *   CC_PAR_DEPTH    default 20
+ *   CC_PAR_SAMPLES  default 5
+ *
+ * Also: run the tree on a root fiber so main does one park_thread and
+ * every @parallel join is park_fiber (see run_on_fiber).
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <stdatomic.h>
+#include <time.h>
+
+#define WARMUP 2
+static int g_samples = 5;
+
+/* Runtime knobs so we can sweep grain. Spawn while d < g_spawn_until. */
+static uint32_t g_depth = 20;
+static uint32_t g_spawn_until = 0;
+
+#define U24_MASK 0xFFFFFFu
+
+static atomic_ullong g_spawns;
+static atomic_ullong g_joins;
+
+static inline uint32_t u24(uint32_t x) {
+    return x & U24_MASK;
+}
+
+static double now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+}
+
+/* --- sequential: the computation, no CC --- */
+
+static uint32_t sum_seq(uint32_t d, uint32_t i) {
+    if (d >= g_depth)
+        return i;
+    uint32_t left  = sum_seq(d + 1, u24(i * 2));
+    uint32_t right = sum_seq(d + 1, u24(i * 2 + 1));
+    return u24(left + right);
+}
+
+/* --- @parallel lowering ---
+ *
+ * Env lives on the parent stack. Legal only because we join before
+ * sum_par returns. Heap env would be required if a child could outlive
+ * this frame (a nursery-less fire-and-forget spawn).
+ */
+typedef struct {
+    uint32_t d;
+    uint32_t i;
+    uint32_t* out;
+} ParEnv;
+
+static uint32_t sum_par(uint32_t d, uint32_t i);
+
+static void* sum_par_thunk(void* arg) {
+    ParEnv* e = (ParEnv*)arg;
+    *e->out = sum_par(e->d, e->i);
+    return NULL;
+}
+
+static void spawn_into(uint32_t* out, uint32_t d, uint32_t i, ParEnv* env, CCTask* task) {
+    env->d = d;
+    env->i = i;
+    env->out = out;
+    *task = cc_fiber_spawn_task(sum_par_thunk, env);
+    if (task->kind == CC_TASK_KIND_INVALID)
+        abort();
+    atomic_fetch_add_explicit(&g_spawns, 1, memory_order_relaxed);
+}
+
+/* Literal reading of the block: spawn both arms, parent idle until join. */
+static uint32_t sum_par(uint32_t d, uint32_t i) {
+    if (d >= g_depth)
+        return i;
+    if (d >= g_spawn_until)
+        return u24(sum_par(d + 1, u24(i * 2)) + sum_par(d + 1, u24(i * 2 + 1)));
+
+    uint32_t left = 0;
+    uint32_t right = 0;
+    ParEnv el;
+    ParEnv er;
+    CCTask tl;
+    CCTask tr;
+
+    spawn_into(&left,  d + 1, u24(i * 2),     &el, &tl);
+    spawn_into(&right, d + 1, u24(i * 2 + 1), &er, &tr);
+
+    (void)cc_block_on_intptr(tl);
+    atomic_fetch_add_explicit(&g_joins, 1, memory_order_relaxed);
+    (void)cc_block_on_intptr(tr);
+    atomic_fetch_add_explicit(&g_joins, 1, memory_order_relaxed);
+
+    return u24(left + right);
+}
+
+/* Compiler-quality lowering of a 2-arm @parallel: spawn one, run one
+ * on the parent fiber, join. Halves the fiber count; parent is not idle. */
+static uint32_t sum_fork(uint32_t d, uint32_t i);
+
+static void* sum_fork_thunk(void* arg) {
+    ParEnv* e = (ParEnv*)arg;
+    *e->out = sum_fork(e->d, e->i);
+    return NULL;
+}
+
+static uint32_t sum_fork(uint32_t d, uint32_t i) {
+    if (d >= g_depth)
+        return i;
+    if (d >= g_spawn_until)
+        return u24(sum_fork(d + 1, u24(i * 2)) + sum_fork(d + 1, u24(i * 2 + 1)));
+
+    uint32_t left = 0;
+    uint32_t right = 0;
+    ParEnv er;
+    CCTask tr;
+
+    er.d = d + 1;
+    er.i = u24(i * 2 + 1);
+    er.out = &right;
+    tr = cc_fiber_spawn_task(sum_fork_thunk, &er);
+    if (tr.kind == CC_TASK_KIND_INVALID)
+        abort();
+    atomic_fetch_add_explicit(&g_spawns, 1, memory_order_relaxed);
+
+    left = sum_fork(d + 1, u24(i * 2));
+    (void)cc_block_on_intptr(tr);
+    atomic_fetch_add_explicit(&g_joins, 1, memory_order_relaxed);
+
+    return u24(left + right);
+}
+
+/* Nursery lowering of the same block: the join is @destroy instead of
+ * two explicit block_on calls. Adds a cancellation domain the source
+ * did not name. */
+static uint32_t sum_nur(uint32_t d, uint32_t i);
+
+static void* sum_nur_thunk(void* arg) {
+    ParEnv* e = (ParEnv*)arg;
+    *e->out = sum_nur(e->d, e->i);
+    return NULL;
+}
+
+static uint32_t sum_nur(uint32_t d, uint32_t i) {
+    if (d >= g_depth)
+        return i;
+    if (d >= g_spawn_until)
+        return u24(sum_nur(d + 1, u24(i * 2)) + sum_nur(d + 1, u24(i * 2 + 1)));
+
+    uint32_t left = 0;
+    uint32_t right = 0;
+    ParEnv el;
+    ParEnv er;
+    CCNursery* n = cc_nursery_create(NULL);
+    if (!n)
+        abort();
+
+    el.d = d + 1;
+    el.i = u24(i * 2);
+    el.out = &left;
+    er.d = d + 1;
+    er.i = u24(i * 2 + 1);
+    er.out = &right;
+
+    if (cc_nursery_spawn(n, sum_nur_thunk, &el) != 0)
+        abort();
+    atomic_fetch_add_explicit(&g_spawns, 1, memory_order_relaxed);
+    if (cc_nursery_spawn(n, sum_nur_thunk, &er) != 0)
+        abort();
+    atomic_fetch_add_explicit(&g_spawns, 1, memory_order_relaxed);
+
+    cc_nursery_destroy(n);
+    atomic_fetch_add_explicit(&g_joins, 1, memory_order_relaxed);
+    return u24(left + right);
+}
+
+/* --- spawn-cost calibration (noop fiber, no tree) --- */
+
+#define CALIB_N 8190
+
+static void sort_doubles(double* arr, int n) {
+    for (int i = 0; i < n - 1; i++) {
+        for (int j = i + 1; j < n; j++) {
+            if (arr[j] < arr[i]) {
+                double t = arr[i];
+                arr[i] = arr[j];
+                arr[j] = t;
+            }
+        }
+    }
+}
+
+static void* noop_thunk(void* arg) {
+    (void)arg;
+    return NULL;
+}
+
+/* Spawn one, join one, N times. Measures producer+join with no fan-out. */
+static double calib_serial_spawn_join(void) {
+    double t0 = now_ms();
+    for (int i = 0; i < CALIB_N; i++) {
+        CCTask t = cc_fiber_spawn_task(noop_thunk, NULL);
+        if (t.kind == CC_TASK_KIND_INVALID) abort();
+        (void)cc_block_on_intptr(t);
+    }
+    return now_ms() - t0;
+}
+
+/* Spawn all N, then join all N. Producer can race ahead of workers. */
+static double calib_batch_spawn_join(void) {
+    CCTask* tasks = (CCTask*)malloc((size_t)CALIB_N * sizeof(CCTask));
+    if (!tasks) abort();
+    double t0 = now_ms();
+    for (int i = 0; i < CALIB_N; i++) {
+        tasks[i] = cc_fiber_spawn_task(noop_thunk, NULL);
+        if (tasks[i].kind == CC_TASK_KIND_INVALID) abort();
+    }
+    for (int i = 0; i < CALIB_N; i++)
+        (void)cc_block_on_intptr(tasks[i]);
+    double ms = now_ms() - t0;
+    free(tasks);
+    return ms;
+}
+
+static void calib_report(const char* name, double (*fn)(void)) {
+    double xs[g_samples];
+    for (int i = 0; i < WARMUP; i++)
+        (void)fn();
+    for (int i = 0; i < g_samples; i++)
+        xs[i] = fn();
+    sort_doubles(xs, g_samples);
+    double med = xs[g_samples / 2];
+    printf("  %-18s  med %.2f ms  %.0f ns/op  (N=%d)\n",
+           name, med, med * 1e6 / (double)CALIB_N, CALIB_N);
+}
+
+typedef uint32_t (*sum_fn)(uint32_t, uint32_t);
+
+typedef struct {
+    sum_fn fn;
+    uint32_t result;
+} RootEnv;
+
+/* One park_thread at main. Every @parallel join inside runs in fiber context. */
+static void* root_thunk(void* arg) {
+    RootEnv* e = (RootEnv*)arg;
+    e->result = e->fn(0, 0);
+    return NULL;
+}
+
+static uint32_t run_on_fiber(sum_fn fn) {
+    RootEnv e;
+    e.fn = fn;
+    e.result = 0;
+    CCTask t = cc_fiber_spawn_task(root_thunk, &e);
+    if (t.kind == CC_TASK_KIND_INVALID)
+        abort();
+    (void)cc_block_on_intptr(t);
+    return e.result;
+}
+
+/* Serial spawn+join, but the producer is a fiber (park_fiber, not park_thread). */
+static void* calib_serial_fiber_thunk(void* arg) {
+    (void)arg;
+    for (int i = 0; i < CALIB_N; i++) {
+        CCTask t = cc_fiber_spawn_task(noop_thunk, NULL);
+        if (t.kind == CC_TASK_KIND_INVALID) abort();
+        (void)cc_block_on_intptr(t);
+    }
+    return NULL;
+}
+
+static double calib_serial_from_fiber(void) {
+    double t0 = now_ms();
+    CCTask t = cc_fiber_spawn_task(calib_serial_fiber_thunk, NULL);
+    if (t.kind == CC_TASK_KIND_INVALID) abort();
+    (void)cc_block_on_intptr(t);
+    return now_ms() - t0;
+}
+
+static double time_once(sum_fn fn, uint32_t expect) {
+    double t0 = now_ms();
+    uint32_t r = fn(0, 0);
+    double t1 = now_ms();
+    if (r != expect) {
+        fprintf(stderr, "mismatch: got=%u expect=%u\n", r, expect);
+        abort();
+    }
+    return t1 - t0;
+}
+
+static double time_once_fiber(sum_fn fn, uint32_t expect) {
+    double t0 = now_ms();
+    uint32_t r = run_on_fiber(fn);
+    double t1 = now_ms();
+    if (r != expect) {
+        fprintf(stderr, "mismatch: got=%u expect=%u\n", r, expect);
+        abort();
+    }
+    return t1 - t0;
+}
+
+static void bench(const char* name, sum_fn fn, uint32_t expect) {
+    double samples[g_samples];
+    double sum = 0.0;
+    unsigned long long spawns = 0;
+    unsigned long long joins = 0;
+    for (int i = 0; i < g_samples; i++) {
+        atomic_store_explicit(&g_spawns, 0, memory_order_relaxed);
+        atomic_store_explicit(&g_joins, 0, memory_order_relaxed);
+        samples[i] = time_once(fn, expect);
+        sum += samples[i];
+        if (i == 0) {
+            spawns = atomic_load_explicit(&g_spawns, memory_order_relaxed);
+            joins = atomic_load_explicit(&g_joins, memory_order_relaxed);
+        }
+    }
+    sort_doubles(samples, g_samples);
+    double med = samples[g_samples / 2];
+    printf("  %-4s  min %.2f  med %.2f  mean %.2f  max %.2f  ms",
+           name, samples[0], med, sum / (double)g_samples, samples[g_samples - 1]);
+    if (spawns)
+        printf("  spawns=%llu joins=%llu  %.0f ns/spawn",
+               spawns, joins, med * 1e6 / (double)spawns);
+    printf("   [");
+    for (int i = 0; i < g_samples; i++)
+        printf("%s%.2f", i ? " " : "", samples[i]);
+    printf("]\n");
+}
+
+static void bench_fiber(const char* name, sum_fn fn, uint32_t expect) {
+    double samples[g_samples];
+    double sum = 0.0;
+    unsigned long long spawns = 0;
+    unsigned long long joins = 0;
+    for (int i = 0; i < g_samples; i++) {
+        atomic_store_explicit(&g_spawns, 0, memory_order_relaxed);
+        atomic_store_explicit(&g_joins, 0, memory_order_relaxed);
+        samples[i] = time_once_fiber(fn, expect);
+        sum += samples[i];
+        if (i == 0) {
+            spawns = atomic_load_explicit(&g_spawns, memory_order_relaxed);
+            joins = atomic_load_explicit(&g_joins, memory_order_relaxed);
+        }
+    }
+    sort_doubles(samples, g_samples);
+    double med = samples[g_samples / 2];
+    printf("  %-6s  min %.2f  med %.2f  mean %.2f  max %.2f  ms",
+           name, samples[0], med, sum / (double)g_samples, samples[g_samples - 1]);
+    if (spawns)
+        printf("  spawns=%llu joins=%llu  %.0f ns/spawn",
+               spawns, joins, med * 1e6 / (double)spawns);
+    printf("   [");
+    for (int i = 0; i < g_samples; i++)
+        printf("%s%.2f", i ? " " : "", samples[i]);
+    printf("]\n");
+}
+
+static double median_of(sum_fn fn, uint32_t expect, int on_fiber,
+                        unsigned long long* spawns) {
+    double xs[g_samples];
+    for (int i = 0; i < WARMUP; i++) {
+        if (on_fiber)
+            (void)time_once_fiber(fn, expect);
+        else
+            (void)time_once(fn, expect);
+    }
+    for (int i = 0; i < g_samples; i++) {
+        atomic_store_explicit(&g_spawns, 0, memory_order_relaxed);
+        atomic_store_explicit(&g_joins, 0, memory_order_relaxed);
+        xs[i] = on_fiber ? time_once_fiber(fn, expect) : time_once(fn, expect);
+        if (i == 0 && spawns)
+            *spawns = atomic_load_explicit(&g_spawns, memory_order_relaxed);
+    }
+    sort_doubles(xs, g_samples);
+    return xs[g_samples / 2];
+}
+
+static uint32_t env_u32(const char* key, uint32_t fallback) {
+    const char* s = getenv(key);
+    if (!s || !s[0]) return fallback;
+    return (uint32_t)atoi(s);
+}
+
+int main(void) {
+    static const uint32_t grains[] = {0, 1, 2, 3, 4, 6, 8};
+    int ngrain = (int)(sizeof(grains) / sizeof(grains[0]));
+
+    g_depth = env_u32("CC_PAR_DEPTH", 20);
+    g_samples = (int)env_u32("CC_PAR_SAMPLES", 5);
+    if (g_samples < 1) g_samples = 1;
+
+    printf("parallel_hello_lowered grain sweep: depth=%u samples=%d (fork on fiber)\n",
+           g_depth, g_samples);
+    printf("  spawn while d < grain; below that, sequential\n");
+
+    g_spawn_until = 0;
+    uint32_t expect = sum_seq(0, 0);
+    unsigned long long dummy = 0;
+    double seq_ms = median_of(sum_seq, expect, 0, &dummy);
+    printf("  seq  %u  %.2f ms\n", expect, seq_ms);
+    printf("  grain  spawns     fork_ms   vs_seq\n");
+
+    for (int g = 0; g < ngrain; g++) {
+        g_spawn_until = grains[g];
+        unsigned long long spawns = 0;
+        double fork_ms = median_of(sum_fork, expect, 1, &spawns);
+        printf("  %5u  %7llu  %9.2f  %6.2fx\n",
+               grains[g], spawns, fork_ms,
+               seq_ms > 0.0 ? seq_ms / fork_ms : 0.0);
+    }
+    return 0;
+}

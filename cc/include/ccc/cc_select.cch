@@ -3,7 +3,7 @@
  *
  * Scope-attached usage (preferred):
  *
- *   CCSelect sel = @create() @destroy;
+ *   CCSelect sel@() @destroy;
  *   cc_select_add_recv(&sel, conn->reply_rx, &reply_slot,
  *                      () => [&env] { ... handler body ... });
  *   cc_select_add_close(&sel, conn->reply_rx, &close_err,
@@ -91,14 +91,14 @@ typedef struct CCSelect {
 } CCSelect;
 
 /* Initialize an empty select in place (rarely needed directly; prefer
- * `CCSelect sel = @create() @destroy;`). */
+ * `CCSelect sel@() @destroy;`). */
 void cc_select_init(CCSelect* sel);
 
 /* Release resources (shared signal, unwire channel signals, drop handler
  * closure envs). Matches @destroy. */
 void cc_select_dispose(CCSelect* sel);
 
-/* @create hook: returns a zeroed CCSelect by value. Paired with
+/* create hook: returns a zeroed CCSelect by value. Paired with
  * cc_select_dispose via cc_type_register below. */
 static inline CCSelect cc_select_create(void) {
     CCSelect s;

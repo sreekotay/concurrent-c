@@ -41,7 +41,7 @@ int main(void) {
     v.push(p);
 
     Map::[int, int] m = map_new::[int, int](&arena);
-    m.insert(7, 70);
+    m->insert(7, 70);
 
     /* Primitive — registered by runtime constructor. */
     const cc_type_info* ti_int = type_of(int);

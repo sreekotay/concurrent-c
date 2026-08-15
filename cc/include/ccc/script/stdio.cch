@@ -1,7 +1,7 @@
 /*
  * Script-facing stdio + flipped console print.
  *
- *   CCStdio io = @create(&a) @destroy;
+ *   CCStdio io@(&a) @destroy;
  *   char[:] in = io.read_all() !>;
  *   msg.println() !>;                 // CCSlice / CCString / cstr receivers
  *   "literal".println() !>;

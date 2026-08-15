@@ -8,7 +8,7 @@ Living plan. Inventory from the 2026-07-25 pass; policy updated for current tast
 |-------|---------|
 | **tutorial = idiomatic = performant = production** | One surface. No beginner dialect, no second "real" API, no slow path taught first. |
 | **Dissolve lifetime; express ownership** | Prefer nursery/`close_on`/`@destroy`, arena provenance, channel transfer/`send_into`, owner fibers. Lifetime should look like app protocol (Redis conn/reply), not refcount algebra. |
-| **Explicit arenas; no default magic** | Allocating edges name a `CCArena*` (or `@create`/`@destroy`). No hidden thread-local heap for user-visible payloads. |
+| **Explicit arenas; no default magic** | Allocating edges name a `CCArena*` (or `name@(args)` / `@destroy`). No hidden thread-local heap for user-visible payloads. |
 | **C is first-class** | Every blessed CC API has a clean, greppable `cc_*` twin suitable as the lowered / plain-C call. UFCS is sugar over that name—not a second ABI. Avoid unspeakable lowered symbols and "CC-only" Result wrappers with junk C names. |
 | **No API museum (yet)** | In-tree out-param net/HTTP surfaces are not sacred. Prefer flipping primary names to Result and updating callers in the same change over long dual-ship. Keep a thin internal helper only when it simplifies the `.c` implementation—not as a taught second API. |
 | **`@errhandler` stays** | Scope-level fatal policy is a forced decision for `!>;`, not wallpaper. Do not add ambient main defaults or `cc_fatal_main` helpers (more variants to learn). Inline `!>(e){…}` for one call; hoisted `@errhandler` for many. |
@@ -33,7 +33,7 @@ Drift is concentrated in **net / HTTP / TLS / DNS** (`CCNetError*` / `CCHttpErro
 | **No taught error out-params** | `E* out_err` is not the curriculum or redis path. Remove or demote to private `cc__*` when flipping. |
 | **C twin quality** | Public name is `cc_<subsystem>_<verb>` (e.g. `cc_tcp_listen`). Same function is what UFCS lowers to / what C calls. Result return is part of that signature, not a parallel `cc_tcp_listen_result`. |
 | **Nullability** | Map lookups stay NULL-not-found. Fallible create uses Result (or established pointer+`!>` NULL synthesis)—not empty handle + out_err. |
-| **Arena params** | Explicit `CCArena*` / `@create`. Stabilization via `materialize_in` / `clone_into`. |
+| **Arena params** | Explicit `CCArena*` / `name@(args)`. Stabilization via `materialize_in` / `clone_into`. |
 | **UFCS completeness** | `recv.method(...)` ↔ `cc_type_method(...)`. |
 | **`@destroy` / ownership** | Resources register create/destroy; happy path shows `@destroy` / `@defer`. |
 | **Fiber-awareness** | Document park vs `@noblock`. Shared business state → channels / owner fiber; atomics for counters. |
@@ -60,7 +60,7 @@ Drift is concentrated in **net / HTTP / TLS / DNS** (`CCNetError*` / `CCHttpErro
 
 | Module | Path | Drift |
 |--------|------|-------|
-| Arena | `cc_arena.cch` | Vocabulary: `@create` / `cc_arena_heap` / `cc_arena_create` / `cc_arena_create_buffer`. Bless `@create` + heap alias; don’t teach three names. |
+| Arena | `cc_arena.cch` | Vocabulary: `name@(args)` / `cc_arena_heap` / `cc_arena_create` / `cc_arena_create_buffer`. Bless the binder + heap alias; don’t teach three names. |
 | Slice std | `std/slice.cch` | Partial win (`materialize_in`, checked `at`)—template for net buffers. |
 | Slice packed | `std/slice_packed.cch` | Dense held twin of `CCSliceHdr` (SSO / SDS / probe view). Map-key sugar wired. |
 | String | `std/string.cch` | Growable owner. Some push helpers still NULL-fail vs Result. |

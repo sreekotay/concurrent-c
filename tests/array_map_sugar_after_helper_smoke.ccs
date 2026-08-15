@@ -27,12 +27,12 @@ int main(void) {
     if (!db.entries) return 2;
     k = key_view(@slice("k"));
     e.n = 99;
-    if (db.entries.insert(k, e) != 0) return 3;
-    p = db.entries.get_ptr(k);
+    if (db.entries->insert(k, e) != 0) return 3;
+    p = db.entries->get_ptr(k);
     if (!p || p->n != 99) return 4;
-    if (db.entries.len() != 1) return 5;
+    if (db.entries->len() != 1) return 5;
     printf("array_map_sugar_after_helper_smoke ok\n");
-    db.entries.destroy();
+    db.entries->destroy();
     cc_arena_free(&arena);
     return 0;
 }

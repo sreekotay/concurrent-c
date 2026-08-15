@@ -67,7 +67,8 @@ typedef enum {
     SHADOW_KW_DO,
     SHADOW_KW_EPRINTLN,
     SHADOW_KW_ENUM,
-    SHADOW_KW_SWITCH
+    SHADOW_KW_SWITCH,
+    SHADOW_KW_PARALLEL
 } ShadowKwKind;
 
 typedef struct {
@@ -116,6 +117,7 @@ typedef struct {
         { "eprintln", { SHADOW_KW_EPRINTLN } },
         { "enum", { SHADOW_KW_ENUM } },
         { "switch", { SHADOW_KW_SWITCH } },
+        { "parallel", { SHADOW_KW_PARALLEL } },
     };
     static_map("shadow_kw", shadow_kw_entries, CC_STATIC_MAP_CASE_SENSITIVE);
 }
@@ -231,6 +233,11 @@ typedef enum {
     AST_WHILE,
     /* @with_deadline(expr) [as name] { stmts } — a=expr b=bind|"" */
     AST_WITH_DEADLINE,
+    /* @parallel [(pred)] { name = expr; … } — body=assignment arms (≥2)
+     * e=predicate or "" (always try to spawn) */
+    AST_PARALLEL,
+    /* @parallel for (name in lo..hi) { stmts } — a=name b=lo c=hi; body=stmts */
+    AST_PARALLEL_FOR,
     /* name++; — a=name */
     AST_INC,
     /* typedef struct Tag { fields } Alias; — a=tag|"" b=alias; kids=fields
@@ -597,6 +604,144 @@ static void shadow_seed_spelled_type_name(Parser* p, const char* tytxt) {
     if (ok) shadow_seed_typedef_name(p, tytxt, nl);
 }
 
+/* Same-TU CC_GENERIC_FACTORY names (emit-plan csv covers headers). A mangled
+ * `Family_rest` in a type position is an instance; in expression text it is not. */
+enum { SHADOW_PARSE_GFAC_CAP = 64 };
+static char g_shadow_parse_gfac[SHADOW_PARSE_GFAC_CAP][64];
+static int g_shadow_nparse_gfac;
+
+static void shadow_parse_gfac_reset(void) { g_shadow_nparse_gfac = 0; }
+
+static void shadow_parse_gfac_note(const char* family) {
+    int i;
+    size_t n;
+    if (!family || !family[0]) return;
+    n = strlen(family);
+    if (n >= sizeof(g_shadow_parse_gfac[0])) return;
+    for (i = 0; i < g_shadow_nparse_gfac; i++) {
+        if (strcmp(g_shadow_parse_gfac[i], family) == 0) return;
+    }
+    if (g_shadow_nparse_gfac >= SHADOW_PARSE_GFAC_CAP) {
+        shadow_table_full("parse_gfac", SHADOW_PARSE_GFAC_CAP, family);
+        return;
+    }
+    memcpy(g_shadow_parse_gfac[g_shadow_nparse_gfac], family, n + 1);
+    g_shadow_nparse_gfac++;
+}
+
+static int shadow_ident_matches_factory_instance(const char* ident) {
+    size_t best_fl = 0;
+    int i;
+    char fams[512];
+    int nf;
+    if (!ident || !ident[0]) return 0;
+    /* Concrete Vec names are CCVec_T, not Vec_T. */
+    if (strncmp(ident, "CCVec_", 6) == 0 && ident[6]) return 1;
+    for (i = 0; i < g_shadow_nparse_gfac; i++) {
+        size_t fl = strlen(g_shadow_parse_gfac[i]);
+        if (fl > best_fl && strncmp(ident, g_shadow_parse_gfac[i], fl) == 0 &&
+            ident[fl] == '_' && ident[fl + 1])
+            best_fl = fl;
+    }
+    nf = cc_emit_plan_generic_factory_names_csv(fams, sizeof(fams));
+    if (nf > 0) {
+        const char* s = fams;
+        while (*s) {
+            const char* e = s;
+            size_t fl;
+            while (*e && *e != ',') e++;
+            fl = (size_t)(e - s);
+            while (fl && (s[fl - 1] == ' ' || s[fl - 1] == '\t')) fl--;
+            while (fl && (*s == ' ' || *s == '\t')) {
+                s++;
+                fl--;
+            }
+            if (fl > best_fl && strncmp(ident, s, fl) == 0 && ident[fl] == '_' &&
+                ident[fl + 1])
+                best_fl = fl;
+            if (*e == ',') {
+                s = e + 1;
+                while (*s == ' ') s++;
+            } else
+                break;
+        }
+    }
+    return best_fl ? 1 : 0;
+}
+
+static int shadow_parse_gfac_has(const char* family) {
+    int i;
+    if (!family || !family[0]) return 0;
+    for (i = 0; i < g_shadow_nparse_gfac; i++) {
+        if (strcmp(g_shadow_parse_gfac[i], family) == 0) return 1;
+    }
+    return 0;
+}
+
+/* `Name::[args]` is rewritten to a mangled ident before collect_binds, so
+ * queue the instance at the rewrite (the request is the `::[` spelling). */
+enum { SHADOW_PARSE_GINST_CAP = 128 };
+static char g_shadow_parse_ginst_fam[SHADOW_PARSE_GINST_CAP][64];
+static char g_shadow_parse_ginst_compact[SHADOW_PARSE_GINST_CAP][96];
+static int g_shadow_nparse_ginst;
+
+static void shadow_parse_ginst_reset(void) { g_shadow_nparse_ginst = 0; }
+
+static void shadow_parse_ginst_need(const char* family, const char* compact) {
+    int i;
+    if (!family || !family[0] || !compact || !compact[0]) return;
+    for (i = 0; i < g_shadow_nparse_ginst; i++) {
+        if (strcmp(g_shadow_parse_ginst_fam[i], family) == 0 &&
+            strcmp(g_shadow_parse_ginst_compact[i], compact) == 0)
+            return;
+    }
+    if (g_shadow_nparse_ginst >= SHADOW_PARSE_GINST_CAP) {
+        shadow_table_full("parse_ginst", SHADOW_PARSE_GINST_CAP, family);
+        return;
+    }
+    snprintf(g_shadow_parse_ginst_fam[g_shadow_nparse_ginst],
+             sizeof(g_shadow_parse_ginst_fam[0]), "%s", family);
+    snprintf(g_shadow_parse_ginst_compact[g_shadow_nparse_ginst],
+             sizeof(g_shadow_parse_ginst_compact[0]), "%s", compact);
+    g_shadow_nparse_ginst++;
+}
+
+static int shadow_parse_ginst_count(void) { return g_shadow_nparse_ginst; }
+
+static int shadow_parse_ginst_at(int i, char* fam, size_t fcap, char* compact,
+                                size_t ccap) {
+    if (i < 0 || i >= g_shadow_nparse_ginst || !fam || !fcap || !compact ||
+        !ccap)
+        return 0;
+    snprintf(fam, fcap, "%s", g_shadow_parse_ginst_fam[i]);
+    snprintf(compact, ccap, "%s", g_shadow_parse_ginst_compact[i]);
+    return 1;
+}
+
+/* `lru_cache_make` → `LruCache`. */
+static int shadow_snake_make_to_family(const char* fam, char* pascal,
+                                      size_t cap) {
+    size_t fl, bi, po = 0;
+    int up = 1;
+    if (!fam || !pascal || cap < 2) return 0;
+    fl = strlen(fam);
+    if (fl <= 5 || strcmp(fam + fl - 5, "_make") != 0) return 0;
+    fl -= 5;
+    for (bi = 0; bi < fl && po + 1 < cap; bi++) {
+        char c = fam[bi];
+        if (c == '_') {
+            up = 1;
+            continue;
+        }
+        if (up && c >= 'a' && c <= 'z')
+            c = (char)(c - 'a' + 'A');
+        pascal[po++] = c;
+        up = 0;
+    }
+    pascal[po] = 0;
+    return pascal[0] ? 1 : 0;
+}
+
 static void slice_to(char* dst, size_t cap, CCSlice s) {
     size_t n = s.len < cap - 1 ? s.len : cap - 1;
     memcpy(dst, s.ptr, n);
@@ -816,6 +961,7 @@ static AstNode* parse_stmt(Parser* p);
 static AstNode* parse_switch_stmt(Parser* p);
 static AstNode* parse_at_stmt(Parser* p);
 static AstNode* parse_with_deadline(Parser* p);
+static AstNode* parse_parallel(Parser* p);
 static AstNode* parse_inc(Parser* p);
 static AstNode* parse_async_fn(Parser* p);
 static AstNode* parse_static_var(Parser* p);
@@ -1184,56 +1330,52 @@ static int ast_spell_type_tokens(Parser* p, int start, int end, char* dst,
     slice_to(family, sizeof(family), p->toks[start].spell);
     ast_compact_type_args(p, start + 3, end - 1, compact, sizeof(compact));
     if (!compact[0]) return 0;
-    if (strcmp(family, "Map") == 0)
+    if (strcmp(family, "Map") == 0) {
         snprintf(dst, cap, "Map_%s*", compact);
-    else if (strcmp(family, "ArrayMap") == 0)
+        shadow_parse_ginst_need("Map", compact);
+    } else if (strcmp(family, "ArrayMap") == 0) {
         snprintf(dst, cap, "ArrayMap_%s*", compact);
-    else if (strcmp(family, "Vec") == 0)
+        shadow_parse_ginst_need("ArrayMap", compact);
+    } else if (strcmp(family, "Vec") == 0) {
         snprintf(dst, cap, "CCVec_%s", compact);
-    else if (strcmp(family, "map_new") == 0 ||
-             strcmp(family, "cc_map_new") == 0)
+        shadow_parse_ginst_need("Vec", compact);
+    } else if (strcmp(family, "map_new") == 0 ||
+             strcmp(family, "cc_map_new") == 0) {
         snprintf(dst, cap, "Map_%s_new", compact);
-    else if (strcmp(family, "array_map_new") == 0)
+        shadow_parse_ginst_need("Map", compact);
+    }
+    else if (strcmp(family, "array_map_new") == 0) {
         snprintf(dst, cap, "array_map_new_%s", compact);
-    else if (strcmp(family, "array_map_new_count") == 0)
+        shadow_parse_ginst_need("ArrayMap", compact);
+    } else if (strcmp(family, "array_map_new_count") == 0) {
         snprintf(dst, cap, "array_map_new_count_%s", compact);
+        shadow_parse_ginst_need("ArrayMap", compact);
+    }
     else if (strcmp(family, "vec_new") == 0 ||
-             strcmp(family, "cc_vec_new") == 0)
+             strcmp(family, "cc_vec_new") == 0) {
         snprintf(dst, cap, "CCVec_%s_new", compact);
-    else if (strcmp(family, "CCVec") == 0)
+        shadow_parse_ginst_need("Vec", compact);
+    } else if (strcmp(family, "CCVec") == 0) {
         snprintf(dst, cap, "CCVec_%s", compact);
-    else {
+        shadow_parse_ginst_need("Vec", compact);
+    } else {
         size_t fl = strlen(family);
         /* snake_make::[A,B] → Family_A_B_make (lru_cache_make → LruCache_…). */
         if (fl > 5 && strcmp(family + fl - 5, "_make") == 0) {
-            char base[64];
             char pascal[64];
-            size_t bl = fl - 5;
-            size_t bi, po = 0;
-            int up = 1;
-            if (bl >= sizeof(base)) bl = sizeof(base) - 1;
-            memcpy(base, family, bl);
-            base[bl] = 0;
-            for (bi = 0; base[bi] && po + 1 < sizeof(pascal); bi++) {
-                char c = base[bi];
-                if (c == '_') {
-                    up = 1;
-                    continue;
-                }
-                if (up && c >= 'a' && c <= 'z')
-                    c = (char)(c - 'a' + 'A');
-                pascal[po++] = c;
-                up = 0;
-            }
-            pascal[po] = 0;
-            if (!pascal[0]) snprintf(pascal, sizeof(pascal), "%s", base);
+            if (!shadow_snake_make_to_family(family, pascal, sizeof(pascal)))
+                snprintf(pascal, sizeof(pascal), "%s", family);
             snprintf(dst, cap, "%s_%s_make", pascal, compact);
+            shadow_parse_ginst_need(pascal, compact);
         } else if (family[0] >= 'A' && family[0] <= 'Z') {
             /* PascalCase type-style: Pair::[T] / Box::[T] / user factories. */
             snprintf(dst, cap, "%s_%s", family, compact);
-        } else if (cc_emit_plan_has_generic_factory(family)) {
-            /* Registered snake factory (py_expose::[T] → py_expose_T). */
+            shadow_parse_ginst_need(family, compact);
+        } else if (cc_emit_plan_has_generic_factory(family) ||
+                   shadow_parse_gfac_has(family)) {
+            /* Registered snake factory (py_expose::[T] / js_module::[T]). */
             snprintf(dst, cap, "%s_%s", family, compact);
+            shadow_parse_ginst_need(family, compact);
         } else {
             /* Free snake name that is not a known ctor / factory — refuse
              * host invent (unknown_fn::[int] → unknown_fn_int). */

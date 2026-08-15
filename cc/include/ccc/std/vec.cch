@@ -36,9 +36,9 @@
 #endif
 
 /*
- * The CC preprocessor rewrites CCVec::[T] to __CC_VEC(T_mangled).
- * The type registry emits matching CC_VEC_DECL_ARENA declarations before TCC
- * parses the lowered TU, so parser mode can use the concrete CCVec_T names.
+ * `Vec::[T]` / `vec_new::[T]` instantiate CC_GENERIC_FACTORY(Vec, 1) below.
+ * The concrete C name is CCVec_<T>. Parser-mode `__CC_VEC(T)` still spells
+ * that name for legacy stubs.
  */
 #ifdef __CC_VEC
 #undef __CC_VEC
@@ -209,6 +209,13 @@ static inline CCSlice __cc_vec_generic_as_slice(__CCVecGeneric *v) {
         cc_vec_clear((CCVec *)v);                                                 \
     }                                                                             \
                                                                                   \
+    /* Header teardown only — the arena owns the buffer. */                       \
+    static inline void Name##_destroy(Name *v) {                                  \
+        if (!v) return;                                                           \
+        v->data = NULL;                                                           \
+        v->len = 0;                                                               \
+    }                                                                             \
+                                                                                  \
     static inline uint64_t Name##_provenance(const Name *v) {                     \
         return cc_vec_provenance((const CCVec *)v);                               \
     }                                                                             \
@@ -242,11 +249,17 @@ static inline CCSlice __cc_vec_generic_as_slice(__CCVecGeneric *v) {
 #ifndef CC_VEC_CHAR_DEFINED
 #define CC_VEC_CHAR_DEFINED 1
 CC_VEC_DECL_ARENA(char, CCVec_char)
+static inline CCVec_char CCVec_char_new(CCArena* __a) {
+    return CCVec_char_init(__a, 0);
+}
 #endif
 
 #ifndef CC_VEC_SIZE_T_DEFINED
 #define CC_VEC_SIZE_T_DEFINED 1
 CC_VEC_DECL_ARENA(size_t, CCVec_size_t)
+static inline CCVec_size_t CCVec_size_t_new(CCArena* __a) {
+    return CCVec_size_t_init(__a, 0);
+}
 #endif
 
 /* Iteration helper */
@@ -335,5 +348,58 @@ CC_VEC_DECL_ARENA(size_t, CCVec_size_t)
 
 /* C-side alias mirroring the surface generic (`Vec::[T]`). */
 #define Vec(T, Name) CC_VEC_DECL_ARENA(T, Name)
+
+/* `Vec::[T]` / `vec_new::[T]` instantiate this family. The concrete type
+ * is `CCVec_<T>` (the struct, not a pointer). A header DECL that names
+ * the same instance (`CCVec_char`, `CCVec_size_t`) suppresses the splice.
+ * Header lowering blanks the factory from `.h`; harvest keeps it as a
+ * Concurrent-C fact. */
+CC_GENERIC_FACTORY(Vec, 1) {
+    CCSlice t = arg(0);
+    int typed_slice = cc_slice_eq_cstr(&t, "int") ||
+                      cc_slice_eq_cstr(&t, "double") ||
+                      cc_slice_eq_cstr(&t, "float") ||
+                      cc_slice_eq_cstr(&t, "bool") ||
+                      cc_slice_eq_cstr(&t, "long") ||
+                      cc_slice_eq_cstr(&t, "long_long");
+    CCString decl = typed_slice
+        ? @string(`CC_VEC_DECL_ARENA_TSLICE(${t}, ${mangled}, CCSlice_${t})`,
+                  @scratch)
+        : @string(`CC_VEC_DECL_ARENA(${t}, ${mangled})`, @scratch);
+    return @emit(`
+#ifdef CC_FRAGMENT_VALIDATE
+typedef struct ${mangled} { char _; } ${mangled};
+static inline ${mangled} ${mangled}_new(void *a) {
+    ${mangled} z;
+    (void)a;
+    memset(&z, 0, sizeof(z));
+    return z;
+}
+#else
+${decl}
+static inline ${mangled} ${mangled}_new(CCArena* __a) {
+    return ${mangled}_init(__a, 0);
+}
+
+/* cc_type_info for ${mangled} (serdes) */
+static const cc_type_info __cc_ti_${mangled} = {
+    .name = "${mangled}", .mangled = "${mangled}",
+    .id = 0, .size = (uint32_t)sizeof(${mangled}),
+    .align = (uint32_t)_Alignof(${mangled}),
+    .kind = (uint16_t)CC_TK_GENERIC_INST, .nfields = 0,
+    .flags = (uint16_t)CC_TF_ERASABLE, ._reserved = 0,
+    .fields = NULL, .copy_fn = NULL, .drop_fn = NULL,
+};
+__attribute__((constructor)) static void cc__ti_reg_${mangled}(void) {
+    cc_type_info_register(&__cc_ti_${mangled});
+}
+#endif
+`, arena);
+}
+
+@typehooks on CCVec_* {
+    .create = cc_type_create_call("_new"),
+    .destroy = cc_type_destroy_call("_destroy"),
+};
 
 #endif /* CC_STD_VEC_H */

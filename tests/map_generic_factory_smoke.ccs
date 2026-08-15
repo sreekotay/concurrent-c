@@ -1,0 +1,21 @@
+/* `Map::[K,V]` / `map_new::[K,V]` instantiate CC_GENERIC_FACTORY(Map, 2).
+ * `Map_len(...)` in expression text is not an instance request. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int Map_len(int x) { return x; }
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(4));
+    Map::[int, int] m;
+    int *vp;
+    if (!arena.base) return 1;
+    if (Map_len(0) != 0) return 2;
+    m = map_new::[int, int](&arena);
+    if (!m) return 3;
+    if (m->insert(1, 10) != 0) return 4;
+    vp = m->get_ptr(1);
+    if (!vp || *vp != 10) return 5;
+    printf("ok\n");
+    return 0;
+}

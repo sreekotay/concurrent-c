@@ -7,15 +7,15 @@
 #define IMPL_CCH_NESTED_UFCS_INNER_CCH
 
 static size_t nested_ufcs_len(NestedUfcsMap m) {
-    return m ? m.len() : 0;
+    return m ? m->len() : 0;
 }
 
 static size_t nested_ufcs_report(const NestedUfcsDb* db) {
     if (!db || !db->entries) return 0;
-    size_t cap = db->entries.cap();
-    size_t n = db->entries.len();
+    size_t cap = db->entries->cap();
+    size_t n = db->entries->len();
     size_t raw = db->entries->len;
-    size_t live = db->entries.live_bytes();
+    size_t live = db->entries->live_bytes();
     return cap + n + raw + (live ? 1 : 0);
 }
 

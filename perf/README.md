@@ -53,6 +53,8 @@ Run an individual benchmark directly:
 | `perf_gobench_async_pressure.ccs` | Go-bench-style pressure from many parked async recv tasks. |
 | `perf_gobench_blocking_pressure.ccs` | Parked waiters plus blocking-task scheduler pressure. |
 | `fiber_overhead_profile.ccs` | Fiber vs thread overhead for heavy and minimal tasks. |
+| `parallel_hello.ccs` | Surface `@parallel` binary-tree reduction vs sequential. Compare via `compare_parallel_hello.sh`. |
+| `parallel_hello_lowered.ccs` | Hand-lowered fork+grain sweep of the same tree (explicit spawn depth). |
 
 ### Runtime Stress And Application Patterns
 

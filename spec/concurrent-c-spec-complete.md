@@ -140,7 +140,7 @@ function with `@await f(...)` at the top level or `cc_block_on(f(...))`.
 
 **Sigil policy:** every CC-introduced keyword carries a leading `@`
 (`@async`, `@await`, `@defer`, `@cancel`, `@errhandler`,
-`@destroy`, `@with_deadline`, `@comptime`, `@blocking`,
+`@destroy`, `@with_deadline`, `@parallel`, `@comptime`, `@blocking`,
 `@nonblocking`, `@for`, `@typehooks`, `@typeview`). Bare forms are
 reserved for plain C identifiers — `match`, `await`, `async`, `defer`,
 etc. are legal variable / field / function names and never keywords
@@ -252,6 +252,9 @@ bugs.
 | `@errhandler`  | Block-scoped handler for `!>;` / `@err`, selected by Result error type  | `@errhandler(CCError e) cc_error_exit(e);` |
 | `@err`         | Forward current error to the matching `@errhandler` for that `E`        | `@err(e);`                             |
 | `@with_deadline` | Apply deadline to a block                                             | `@with_deadline(seconds(5)) { … }`     |
+| `@parallel`      | Join independent assignment arms, or walk an index range              | `@parallel { a = f(); b = g(); }`      |
+| `@parallel (pred)` | Same join; spawn if `pred`, otherwise run the arms in order         | `@parallel (d < k) { a = f(); b = g(); }` |
+| `@parallel for`  | Independent iterations over a half-open integer range                 | `@parallel for (i in 0..n) { … }`      |
 | `@destroy`     | Attach cleanup to a result-unwrap                                       | `FILE* f = open() !> @destroy;`         |
 | `@comptime`    | Compile-time evaluation / conditional                                   | `@comptime if (DEBUG) { }`             |
 | `@blocking`    | Mark a call edge as going through `run_blocking` (function or site)     | `@blocking f();` — see §8.2            |
@@ -331,6 +334,16 @@ Result-typed calls (`T!>(E)`) must be explicitly consumed. Two operators with cl
 | `@string(expr, arena)` / `@string(policy, \`..., arena)` | Direct or templated string construction (`${e}` and `$~tag{e}` slots) | `CCString msg = @string(user_id, arena);` |
 | `@string(\`...\`, @scratch)` / `@scratch(N)`             | Temp stack arena for `@string` only — shared per function/closure (§9.1.4) | `println(@string(\`r=${ratio}\`, @scratch))` |
 | `@string(\`...\`)` (no arena)                            | Bounded-template stack form: block-scoped buffer, yields `char[:]` borrow (§9.1.2) | `char[:] s = @string(\`v=${v}\`);`        |
+
+
+### Parallel Forms
+
+
+| Form | Purpose | Example |
+| ---- | ------- | ------- |
+| `@parallel { a = …; b = …; }` | Join independent assignments. Always tries to spawn. | `@parallel { left = f(); right = g(); }` |
+| `@parallel (pred) { a = …; b = …; }` | Same arms. Spawn if `pred`; otherwise serial. | `@parallel (d < k) { left = f(); right = g(); }` |
+| `@parallel for (i in lo..hi) { }` | Independent iterations over a half-open integer range. Bisects; may sequentialize. | `@parallel for (y in 0..h) { row(y); }` |
 
 
 ### Deadline Scope Forms
@@ -433,8 +446,8 @@ int!>(IoError) read_int(char[:] data) {
     return cc_ok(parse_int(trimmed));
 }
 
-Vec::[int] numbers = vec_new::[int](&arena);
-Map::[char[:], int] registry = map_new::[char[:], int](&arena);
+Vec::[int] numbers@(&arena) @destroy;
+Map::[char[:], int] registry@(&arena) @destroy;
 ```
 
 **Rule (type arguments, normative).** `::[...]` specializes the name it
@@ -760,7 +773,7 @@ Concurrent-C extends C syntax with new operators and keywords in specific contex
 carries a leading `@` sigil at the lexer level. The set includes
 (non-exhaustive): `@async`, `@await`, `@blocking`, `@noblock`,
 `@match` (reserved and rejected), `@defer`, `@defer(err)`, `@defer(ok)`, `@cancel`,
-`@errhandler`, `@err`, `@destroy`, `@with_deadline`, `@comptime`,
+`@errhandler`, `@err`, `@destroy`, `@with_deadline`, `@parallel`, `@comptime`,
 `@for`, `@latency_sensitive`, `@scoped`, `@unsafe`, `@slice`, `@string`,
 `@typehooks`, `@typeview`.
 The bare
@@ -1211,7 +1224,7 @@ int main(void) {
 (void)cleanup();
 ```
 
-**Composition with `@defer` and `@create(...) @destroy`.** `?>` and `!>` participate in deferred cleanup like any other C statement: `@defer` scheduled entries run on scope exit regardless of which branch of `?>` / `!>` fired. Divergent RHS (`return`, `break`, `continue`) respect the scope boundary they cross; the surrounding `@defer` runs as usual.
+**Composition with `name@(args) @destroy`.** `?>` and `!>` participate in deferred cleanup like any other C statement: `@defer` scheduled entries run on scope exit regardless of which branch of `?>` / `!>` fired. Divergent RHS (`return`, `break`, `continue`) respect the scope boundary they cross; the surrounding `@defer` runs as usual.
 
 **Declaration destructor suffix.** An unwrap in a declaration may be followed
 by `@destroy { D }` or bodyless `@destroy`:
@@ -3238,6 +3251,7 @@ This section specifies:
 - **§8.8 Blocking, Stalling, and Execution Contexts** — execution model for blocking operations, stalling classification, and cancellation guarantees
 - **§8.9 Error handling in async and nurseries** — composition of result unwrap operators (`?>`, `!>`, `@err`, `@errhandler`) defined in §3.1 with async functions and nursery teardown
 - **§8.10 Named exclusive sections (`CCExclusive`)** — arena-backed, name-keyed mutual exclusion for short critical sections
+- **§8.11 `@parallel`** — value join of independent assignments, optional spawn predicate, and `@parallel for` over a half-open index range
 
 ---
 
@@ -4798,7 +4812,7 @@ Each `CCExclusive` is its own name space: the same `uint64_t` name in one domain
 Construction allocates the section header and discovery map from a caller-supplied `CCArena*`. Mutex entries are allocated from an arena pool on that same arena on first resolve.
 
 ```c
-CCArena arena = @create(kilobytes(128)) @destroy;
+CCArena arena@(kilobytes(128)) @destroy;
 CCExclusive* excl = cc_exclusive_create(&arena, 0);     // default map (64)
 // or: excl = cc_exclusive_create(&arena, 256);         // initial map hint
 ```
@@ -4996,6 +5010,70 @@ void cc_exclusive_unlock_contended(void* entry);     /* wake one waiter */
 
 ---
 
+### 8.11 `@parallel`
+
+`@parallel` names a join of independent work. It is not a nursery and it does not create a task the program can hold. The implementation may run some arms or iterations on other workers, or run all of them on the caller. `n->spawn` does not sequentialize; `@parallel` may.
+
+The form is selected by the token after `@parallel`: `{` (always try to spawn), `(` (spawn if the predicate), or `for` (range).
+
+#### 8.11.1 Assignment join
+
+```c
+T a, b;
+@parallel {
+    a = f();
+    b = g();
+}
+```
+
+The block holds two or more arms. Each arm is `name = expr;` where `name` is a simple identifier already in scope. After the closing brace, every named write is visible. Compound assignment, indirection, field and subscript destinations, declarations, and other statements are ill-formed.
+
+Lowering is fork-join: the first arm runs on the caller; each remaining arm is spawned and joined before the brace. If spawn fails, that arm runs on the caller. The result is the same either way.
+
+Arms must not race. Sharing a location across arms, or reading another arm's destination, is undefined.
+
+#### 8.11.2 Gated assignment join
+
+```c
+T left, right;
+@parallel (d < k) {
+    left  = f();
+    right = g();
+}
+```
+
+`@parallel (pred) { … }` is the same assignment join. When `pred` is true, lowering matches §8.11.1. When `pred` is false, the arms run in order on the caller and spawn is not attempted. The body always executes; `pred` chooses scheduling, not presence. There is no `else`. An empty predicate is ill-formed. `@parallel (pred) for` is ill-formed.
+
+Independence is unchanged: reading another arm's destination is undefined on both paths.
+
+#### 8.11.3 `@parallel for`
+
+```c
+@parallel for (i in lo..hi) {
+    work(i);
+}
+```
+
+`lo..hi` is a half-open integer range. `i` is an `int` bound in the body for each iteration in `[lo, hi)`. The body is ordinary statements. A C `for (;;)` head is ill-formed; the `in` spelling matches `@comptime for`.
+
+A `for` statement inside `@parallel { }` is ill-formed. The loop is a form of the keyword, not a statement the brace happens to contain.
+
+Lowering bisects the range: one half is spawned, the other runs on the caller, then the spawn is joined. A span of length 0 or 1 runs as an ordinary sequential `for`. Nested `@parallel for` bisects the same way. If a spawn fails, that half runs on the caller.
+
+Iterations must not race. Disjoint writes (`img[y * w + x] = …` for distinct `(x, y)`) are the caller's fact.
+
+`n->spawn` remains the tool when the program names a task lifetime or an explicit tile size.
+
+#### 8.11.4 Grain and limits
+
+An assignment arm after the first is spawned as a fiber and joined before the brace. `@parallel for` spawns one half of a span at each bisection; a span of length 0 or 1 is a sequential `for`. In-flight `@parallel` fibers are capped at 256 times the number of online processors; further arms and leftover spans run on the caller. That ceiling is an allocation bound, not a grain. The construct does not estimate how much work an arm contains. A caller who knows a cutoff writes it on the join (`@parallel (d < k) { … }`) so the same arms run in parallel above the cut and in order below it.
+
+The range bounds of `@parallel for` are converted to `int`. A span whose length does not fit in `int` is outside this form.
+
+An implementation may reject a function that exceeds a finite number of `@parallel` statements, assignment arms, or captured names. The first arm of an assignment join always runs on the caller.
+
+---
+
 ## 9. Standard Library (UFCS-First Design)
 
 This section defines the core standard library using **UFCS-first design**: method syntax is primary and UFCS lowering is type-directed and library-owned.
@@ -5131,7 +5209,7 @@ int cc_type_register(const char* type_name, CCTypeHooks hooks);
   `(CCTypeHooks){ ... }` on the marker form.
 - Registrations are library-owned. The compiler selects a UFCS lowering rule from the resolved receiver type, not from the method name alone.
 - Handlers may be named functions or non-capturing lambdas.
-- `.create` is the type-owned construction hook. The compiler selects the overload from the declared type plus the `@create(...)` argument list.
+- `.create` is the type-owned construction hook. The compiler selects the overload from the declared type plus the `name@(args)` argument list.
 - `.destroy` may register a pre-destroy hook, a destroy hook, or both. `pre_callee` runs before `callee`.
 - The `.ufcs` hook is responsible only for choosing the lowered callee family. It does not execute the call.
 - Returning the empty slice means "no custom rewrite; fall back to ordinary receiver-type UFCS".
@@ -5153,19 +5231,19 @@ int cc_type_register(const char* type_name, CCTypeHooks hooks);
 
 **Create hook contract (normative):**
 
-- `.create` is selected from the declared type that appears on the left-hand side of `name = @create(...)`.
-- The compiler implicitly selects the registered creation overload from the `@create(...)` argument count.
-- The current implementation supports at most two explicit `@create(...)` arguments, including callable create hooks.
+- `.create` is selected from the declared type that appears on the left-hand side of `T name@(args)`.
+- The compiler implicitly selects the registered creation overload from the `@(args)` argument count.
+- The current implementation supports at most two explicit `@(args)` arguments, including callable create hooks.
 - `cc_type_create_call("callee")` registers the one-argument form.
 - `cc_type_create_overloads("callee1", "callee2")` registers one- and two-argument forms on the same `.create` hook.
 - `cc_type_create_hook(handler)` registers a callable create hook; it receives `type_name`, `argv`, `arg_types`, and `arena`, and must return the lowered callee name as a slice.
 - `cc_type_destroy_call("callee")` registers the destroy phase only.
 - `cc_type_pre_destroy_call("callee")` registers the pre-destroy phase only; it runs before any call-site `@destroy { ... }` body.
 - `cc_type_destroy_hooks("pre", "destroy")` registers both destroy phases.
-- If a type registers a destroy callee, then `name = @create(...)` must be followed by explicit ownership syntax: either `@destroy` or `@detach`. Omitting both is a compile-time error.
+- `T name@(args)` is well-formed only when `T` has a `.create` hook (or a `_new` factory on a generic instance). It must be followed by explicit ownership syntax: either `@destroy` or `@detach`. Omitting both is a compile-time error.
 - `@detach` does not take a cleanup body.
-- For `name = @create(...) @destroy { body };`, lowering order is: registered `pre_callee`, then call-site `body`, then registered `callee`, then the value-field chain (§3.1).
-- `arg_types` for `.create` is inferred from the `@create(...)` argument list. Implementations may leave complex local expressions unknown.
+- For `T name@(args) @destroy { body };`, lowering order is: registered `pre_callee`, then call-site `body`, then registered `callee`, then the value-field chain (§3.1).
+- `arg_types` for `.create` is inferred from the `@(args)` argument list. Implementations may leave complex local expressions unknown.
 
 **Preferred registration style:**
 
@@ -5560,7 +5638,7 @@ Concurrent-C pipeline:
      definitions and prototypes, and file-scope `static` / `extern`
      declarations.
    - **Synthetic `main`:** statements and non-static runtime-init declarations
-     (including `@create` / `@destroy` locals).
+     (including `name@(args) @destroy` locals).
 4. Inject a default `@errhandler(CCError)` **inside** synthetic `main` and
    each `@task` body that prints `cc_error_str(e)` to stderr and returns
    `1`, so statement-level `!>` works without a local handler. Dispatch is
@@ -5585,7 +5663,7 @@ Concurrent-C pipeline:
 7. Stamp provenance so diagnostics refer to the original `.shcc`: raw
    `#line` before TU-scope chunks; masked `CC_LN` markers before each
    statement chunk inside synthetic `main` (raw mid-function `#line` is
-   unsafe for `@create` / `@destroy` parsing). Markers are unmasked to
+   unsafe for `name@(args) @destroy` parsing). Markers are unmasked to
    `#line` before host compile.
 
 #### 9.5.2 Driver invocation
@@ -5677,8 +5755,8 @@ APIs. Fallible script helpers return `T !>(CCError)` (or the corresponding
 #### 9.5.4 `CCStdio` and console print
 
 ```c
-CCArena a = @create(megabytes(1)) @destroy;
-CCStdio io = @create(&a) @destroy;
+CCArena a@(megabytes(1)) @destroy;
+CCStdio io@(&a) @destroy;
 
 char[:] in = io.read_all() !>;
 io.write_all(out.as_slice()) !>;
@@ -5776,8 +5854,8 @@ Example (stdin transform):
 ```c
 #!/usr/bin/env -S ./cc/bin/ccc --as=shcc
 
-CCArena a = @create(megabytes(1)) @destroy;
-CCStdio io = @create(&a) @destroy;
+CCArena a@(megabytes(1)) @destroy;
+CCStdio io@(&a) @destroy;
 char[:] in = io.read_all() !>;
 /* … transform into out … */
 io.write_all(out.as_slice()) !>;
@@ -6177,6 +6255,26 @@ fragment.
 `CC_GENERIC_FACTORY(CCSlice, 1)` registered in `cc_slice.cch`. `char[:]`
 stays the erased `CCSlice` type and does not instantiate.
 
+`Vec::[T]` and `vec_new::[T]` use `CC_GENERIC_FACTORY(Vec, 1)` registered
+in `vec.cch`. The concrete type is the struct `CCVec_<T>`. A header
+`CC_VEC_DECL_ARENA` that names the same `CCVec_<T>` instance (the shipped
+`CCVec_char` / `CCVec_size_t`) suppresses the splice.
+
+`Map::[K,V]` and `map_new::[K,V]` use `CC_GENERIC_FACTORY(Map, 2)` registered
+in `map_forward.cch`. The concrete type is the pointer `Map_<K>_<V>*`. A
+hand-written `CC_MAP_DECL_ARENA` that names the same `Map_<K>_<V>` instance
+suppresses the splice.
+
+`ArrayMap::[K,V]`, `array_map_new::[K,V]`, and `array_map_new_count::[K,V]`
+use `CC_GENERIC_FACTORY(ArrayMap, 2)` registered in `array_map.cch`. The
+concrete type is the pointer `ArrayMap_<K>_<V>*`. A hand-written
+`CC_ARRAY_MAP_DECL` that names the same `ArrayMap_<K>_<V>` instance
+suppresses the splice.
+
+An instance is requested by `Name::[args]`, by `T[:]` for the slice family,
+or by the mangled type in a type position (a declaration, parameter, field,
+or typedef). An identifier `Family_rest` in expression text is not a request.
+
 **Rule (free-name member calls, normative).** For every registered family,
 `<snake(Family)>_<member>::[args](call-args)` lowers to
 `<Family>_<mangled args>_<member>(call-args)` — the same grid as
@@ -6222,9 +6320,17 @@ for one instantiation and erased wrappers for another without changing the
 ### 12.3 UFCS composition
 
 After instantiation and type resolution, UFCS dispatch uses the concrete
-receiver type. A generic factory may emit its own C operations and register a
-type or family UFCS hook. Generic instantiation does not create a second method
-system and does not bypass the C-member-first rule in §9.0.
+receiver type under §9.0. A generic factory may emit its own C operations and
+register a type or family UFCS hook. Generic instantiation does not create a
+second method system, does not invent a member from the instance being
+scheduled, and does not bypass the C-member-first rule in §9.0. A method
+exists when the instance fragment or a later declaration in the translation
+unit defines `Name_meth` (or the family header's `##_` set names it). An
+unknown method is ill-formed: the compiler diagnoses the miss with the
+receiver type and the instance's installed methods. The UFCS operator is the
+receiver shape: `.` on a value (first argument `&recv`), `->` on a pointer
+(first argument `recv`). Map and ArrayMap sugar is `Name*` — an arena-allocated
+header — so calls use `->`. Vec is the struct itself, so calls use `.`.
 
 Generated C is ordinary first-class C: it participates in parsing, type
 checking, linkage, diagnostics, emitted-C inspection, and subsequent UFCS/type
@@ -6247,34 +6353,35 @@ construction. See the stdlib spec for full API reference, rules, and examples.
 
 ```c
 // Vec::[T]
-Vec::[T] v = vec_new::[T](&arena);
+Vec::[T] v@(&arena) @destroy;
 v.push(value);
 T* x = v.get_ptr(index);
 T[:] slice = v.as_slice();
 
 // Map::[K,V] — tiny K/V, max probe locality
-Map::[K, V] m = map_new::[K, V](&arena);
-m.insert(key, value);
-V* x = m.get_ptr(key);
-m.remove(key);
+Map::[K, V] m@(&arena) @destroy;
+m->insert(key, value);
+V* x = m->get_ptr(key);
+m->remove(key);
 
 // ArrayMap::[K,V] — wide values; empty buckets stay cheap
-ArrayMap::[K, V] am = array_map_new::[K, V](&arena);
+ArrayMap::[K, V] am@(&arena) @destroy;
 ArrayMap::[K, V] sized = array_map_new_count::[K, V](&arena, 1024);
-am.insert(key, value);
-V* y = am.get_ptr(key);
-am.del(key);
+am->insert(key, value);
+V* y = am->get_ptr(key);
+am->del(key);
 ```
 
-**Implementation note:** The `Vec::[T]`, `Map::[K,V]`, and `ArrayMap::[K,V]`
-syntax is compile-time sugar that lowers to concrete C family types (e.g.,
-`Vec::[int]` → `CCVec_int`, `ArrayMap::[int,int]` → `ArrayMap_int_int`). The
-CC-prefixed spellings (`CCVec::[T]`, `cc_vec_new::[T]`) name the same instances
-and remain accepted as the instance layer. UFCS
-method calls on containers lower through that family contract; implementations
-may use direct concrete symbols such as `CCVec_int_push(&v, x)` or thin family
-wrappers over shared erased-core helpers. See the stdlib spec for full lowering
-rules.
+**Implementation note:** `Vec::[T]` instantiates `CC_GENERIC_FACTORY(Vec, 1)`
+in `vec.cch` (`Vec::[int]` → `CCVec_int`). `Map::[K,V]` instantiates
+`CC_GENERIC_FACTORY(Map, 2)` in `map_forward.cch` (`Map::[int,int]` →
+`Map_int_int*`). `ArrayMap::[K,V]` instantiates `CC_GENERIC_FACTORY(ArrayMap, 2)`
+in `array_map.cch` (`ArrayMap::[int,int]` → `ArrayMap_int_int*`). The
+CC-prefixed spellings (`CCVec::[T]`, `cc_vec_new::[T]`) name the same Vec
+instances and remain accepted as the instance layer. UFCS method calls on
+containers lower through that family contract; implementations may use direct
+concrete symbols such as `CCVec_int_push(&v, x)` or thin family wrappers over
+shared erased-core helpers. See the stdlib spec for full lowering rules.
 
 ---
 
@@ -7873,6 +7980,18 @@ An operation that supports ambient deadlines obtains it with
 Nursery-aware waits consult the current nursery separately. Each operation
 maps cancellation or expiry to its own documented result as required by
 §4.2.2 and §8.5.
+
+---
+
+### J.4 `@parallel` Lowering
+
+An assignment `@parallel` block lowers to `cc_parallel_spawn` of a file-scope thunk per arm after the first, the first arm on the caller, then `cc_parallel_join` in reverse spawn order. Each thunk writes `*out = <arm rhs>` through a stack environment that lives until join returns. If spawn returns `CC_TASK_KIND_INVALID` (live-fiber ceiling or spawn failure), the thunk runs on the caller.
+
+`@parallel (pred) { … }` lowers to `if (!(pred)) {` the same assignments in order `} else` a file-scope spawn helper. A false predicate does not call spawn. The helper holds `CCTask` and env so the sequential path stays a small function.
+
+`@parallel for (i in lo..hi)` lowers to a file-scope walk that bisects `[lo, hi)`: spawn one half, walk the other, join. A span of length ≤ 1, or a failed spawn, is a C `for` over that span. The walk environment is stack-allocated at the call site and copied for the spawned half.
+
+Neither form introduces a nursery.
 
 ---
 

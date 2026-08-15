@@ -9,6 +9,7 @@
 
 #include <errno.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -359,5 +360,39 @@ const struct timespec* cc_deadline_as_timespec(const CCDeadline* d, struct times
     if (!d || d->deadline.tv_sec == 0) return NULL;
     if (out) *out = d->deadline;
     return out;
+}
+
+static _Atomic int g_par_live;
+static _Atomic int g_par_cap;
+
+static int cc_parallel_cap(void) {
+    int cap = atomic_load_explicit(&g_par_cap, memory_order_relaxed);
+    if (cap > 0) return cap;
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    if (n < 1) n = 1;
+    if (n > 4096) n = 4096;
+    cap = (int)n * 256;
+    atomic_store_explicit(&g_par_cap, cap, memory_order_relaxed);
+    return cap;
+}
+
+CCTask cc_parallel_spawn(void* (*fn)(void*), void* arg) {
+    CCTask invalid;
+    memset(&invalid, 0, sizeof(invalid));
+    if (!fn) return invalid;
+    int prev = atomic_fetch_add_explicit(&g_par_live, 1, memory_order_acq_rel);
+    if (prev >= cc_parallel_cap()) {
+        atomic_fetch_sub_explicit(&g_par_live, 1, memory_order_acq_rel);
+        return invalid;
+    }
+    CCTask t = cc_fiber_spawn_task(fn, arg);
+    if (t.kind == CC_TASK_KIND_INVALID)
+        atomic_fetch_sub_explicit(&g_par_live, 1, memory_order_acq_rel);
+    return t;
+}
+
+void cc_parallel_join(CCTask t) {
+    (void)cc_block_on_intptr(t);
+    atomic_fetch_sub_explicit(&g_par_live, 1, memory_order_acq_rel);
 }
 

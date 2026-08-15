@@ -1464,158 +1464,27 @@ static void shadow_bind_param_list(const char* params) {
         shadow_normalize_result_param_ty(ps[i].ty, sizeof(ps[i].ty));
         if (strstr(ps[i].ty, "cc_atomic_int") || strstr(ps[i].ty, "atomic"))
             flags |= SHADOW_BIND_ATOMIC;
+        shadow_ginst_need_from_type(ps[i].ty);
         shadow_bind_name(ps[i].name, ps[i].ty, flags);
         shadow_cap_bind_name(ps[i].name, ps[i].ty, flags);
     }
 }
 
-/* Scan text for Map_/CCVec_/Family_* emit spellings and register. */
+/* Scan text for leftover mangled spellings (factory families queue via
+ * parse_ginst_need / from_type; method idents are not instances). */
 static void shadow_register_from_text(const char* s);
 
-/* Strip container/factory method suffixes so `CCVec_int_init` → elem `int`. */
-static size_t shadow_strip_method_suffix(char* compact, size_t n) {
-    static const char* suf[] = {
-        "_insert_entry", "_key_logical_live_bytes", "_as_slice", "_get_ptr",
-        "_nfields", "_make", "_init", "_push", "_pop", "_get", "_set", "_len",
-        "_new", "_free", "_insert", "_delete", "_remove", "_del", "_clear",
-        "_destroy", "_put", "_head", "_tail", "_marker", "_is_int", NULL};
-    int changed = 1;
-    while (changed && n > 0) {
-        int i;
-        changed = 0;
-        for (i = 0; suf[i]; i++) {
-            size_t sl = strlen(suf[i]);
-            if (n > sl && strcmp(compact + n - sl, suf[i]) == 0) {
-                n -= sl;
-                compact[n] = 0;
-                changed = 1;
-                break;
-            }
-        }
-    }
-    return n;
-}
-
-/* Register Map_/CCVec_/Family_* from parse-time emit spellings (no tape prescan). */
+/* Map:: / ArrayMap:: / Vec:: are factory families — queue via
+ * parse_ginst_need / from_type. `CCVec_*` method idents are not instances. */
 static void shadow_register_mangled_ty(const char* ty) {
-    const char* p = ty;
-    char compact[96];
-    size_t n;
-    int fi;
-    if (!p) return;
-    while (*p == ' ' || *p == '\t') p++;
-    if (strncmp(p, "const ", 6) == 0) p += 6;
-    while (*p == ' ' || *p == '\t') p++;
-    if (strncmp(p, "ArrayMap_", 9) == 0) {
-        p += 9;
-        n = 0;
-        while (*p && *p != '*' && *p != ' ' && *p != '(' && *p != ')' &&
-               *p != ',' && *p != ';' && n + 1 < sizeof(compact))
-            compact[n++] = *p++;
-        compact[n] = 0;
-        n = shadow_strip_method_suffix(compact, n);
-        if (compact[0]) shadow_amap_need(compact);
-        return;
-    }
-    if (strncmp(p, "array_map_new_count_", 20) == 0 ||
-        strncmp(p, "array_map_new_", 14) == 0) {
-        p += (strncmp(p, "array_map_new_count_", 20) == 0) ? 20 : 14;
-        n = 0;
-        while (*p && *p != '*' && *p != ' ' && *p != '(' && n + 1 < sizeof(compact))
-            compact[n++] = *p++;
-        compact[n] = 0;
-        if (compact[0]) shadow_amap_need(compact);
-        return;
-    }
-    if (strncmp(p, "Map_", 4) == 0) {
-        p += 4;
-        n = 0;
-        while (*p && *p != '*' && *p != ' ' && *p != '(' && *p != ')' &&
-               *p != ',' && *p != ';' && n + 1 < sizeof(compact))
-            compact[n++] = *p++;
-        compact[n] = 0;
-        n = shadow_strip_method_suffix(compact, n);
-        if (compact[0]) shadow_map_need(compact);
-        return;
-    }
-    if (strncmp(p, "CCVec_", 6) == 0) {
-        p += 6;
-        n = 0;
-        while (*p && *p != '*' && *p != ' ' && *p != '(' && *p != ')' &&
-               *p != ',' && *p != ';' && n + 1 < sizeof(compact))
-            compact[n++] = *p++;
-        compact[n] = 0;
-        n = shadow_strip_method_suffix(compact, n);
-        if (compact[0]) shadow_vec_need(compact);
-        return;
-    }
-    for (fi = 0; fi < g_shadow_ngfac; fi++) {
-        const char* fam = g_shadow_gfac[fi].family;
-        size_t fl = strlen(fam);
-        if (strncmp(p, fam, fl) == 0 && p[fl] == '_') {
-            const char* rest = p + fl + 1;
-            n = 0;
-            while (rest[n] && rest[n] != '*' && rest[n] != ' ' &&
-                   rest[n] != '(' && n + 1 < sizeof(compact)) {
-                compact[n] = rest[n];
-                n++;
-            }
-            compact[n] = 0;
-            n = shadow_strip_method_suffix(compact, n);
-            if (compact[0]) shadow_ginst_need_from_ident(fam, compact);
-            return;
-        }
-    }
-    /* Compiled factories registered via comptime cc_generic_register. */
-    {
-        char fams[512];
-        int nf = cc_emit_plan_generic_factory_names_csv(fams, sizeof(fams));
-        const char* s;
-        const char* best = NULL;
-        size_t best_fl = 0;
-        if (nf <= 0) return;
-        for (s = fams; *s;) {
-            const char* e = s;
-            size_t fl;
-            while (*e && *e != ',') e++;
-            fl = (size_t)(e - s);
-            while (fl && (s[fl - 1] == ' ' || s[fl - 1] == '\t')) fl--;
-            while (fl && (*s == ' ' || *s == '\t')) {
-                s++;
-                fl--;
-            }
-            if (fl && strncmp(p, s, fl) == 0 && p[fl] == '_' && fl > best_fl) {
-                best = s;
-                best_fl = fl;
-            }
-            if (*e == ',') {
-                s = e + 1;
-                while (*s == ' ') s++;
-            } else
-                break;
-        }
-        if (best && best_fl) {
-            char fam[64];
-            const char* rest;
-            if (best_fl >= sizeof(fam)) best_fl = sizeof(fam) - 1;
-            memcpy(fam, best, best_fl);
-            fam[best_fl] = 0;
-            rest = p + best_fl + 1;
-            n = 0;
-            while (rest[n] && rest[n] != '*' && rest[n] != ' ' &&
-                   rest[n] != '(' && n + 1 < sizeof(compact)) {
-                compact[n] = rest[n];
-                n++;
-            }
-            compact[n] = 0;
-            n = shadow_strip_method_suffix(compact, n);
-            if (compact[0]) shadow_ginst_need_from_ident(fam, compact);
-        }
-    }
+    (void)ty;
+    /* Factory families (CCSlice, Map, ArrayMap, Vec, user): do not
+     * instantiate from `Family_*` ident scans (`CCSlice_len`, `Map_len`,
+     * `ArrayMap_len`, `CCVec_int_push`). `::[` and type-position binds
+     * queue via shadow_ginst_need / shadow_ginst_need_from_type. */
 }
 
 static void shadow_register_from_text(const char* s) {
-    int fi;
     const char* h;
     char buf[2048];
     char* w;
@@ -1646,46 +1515,9 @@ static void shadow_register_from_text(const char* s) {
     s = buf;
     shadow_register_mangled_ty(s);
     h = s;
-    while ((h = strstr(h, "ArrayMap_")) != NULL) {
-        shadow_register_mangled_ty(h);
-        h += 9;
-    }
-    h = s;
-    while ((h = strstr(h, "array_map_new")) != NULL) {
-        shadow_register_mangled_ty(h);
-        h += 13;
-    }
-    h = s;
-    while ((h = strstr(h, "Map_")) != NULL) {
-        /* Do not treat the `Map_` inside `ArrayMap_` as a Map:: instance. */
-        if (h >= s + 5 && memcmp(h - 5, "Array", 5) == 0) {
-            h += 4;
-            continue;
-        }
-        if (h > s) {
-            char prev = h[-1];
-            if ((prev >= 'A' && prev <= 'Z') || (prev >= 'a' && prev <= 'z') ||
-                (prev >= '0' && prev <= '9') || prev == '_') {
-                h += 4;
-                continue;
-            }
-        }
-        shadow_register_mangled_ty(h);
-        h += 4;
-    }
-    h = s;
     while ((h = strstr(h, "CCVec_")) != NULL) {
         shadow_register_mangled_ty(h);
         h += 6;
-    }
-    for (fi = 0; fi < g_shadow_ngfac; fi++) {
-        char pat[80];
-        snprintf(pat, sizeof(pat), "%s_", g_shadow_gfac[fi].family);
-        h = s;
-        while ((h = strstr(h, pat)) != NULL) {
-            shadow_register_mangled_ty(h);
-            h += strlen(pat);
-        }
     }
     /* Surface `family::[Args]` — produce mangled `family_Args` instances. */
     h = s;
@@ -1742,10 +1574,14 @@ static void shadow_register_from_text(const char* s) {
         /* Member spelling `py.expose::[T]` scans as family `expose` — resolve
          * to registered factory `py_expose` (suffix `_expose`). */
         if (compact[0] && !cc_emit_plan_has_generic_factory(fam) &&
-            fam[0] >= 'a' && fam[0] <= 'z') {
+            !shadow_parse_gfac_has(fam) && fam[0] >= 'a' && fam[0] <= 'z') {
             char names[512];
-            if (cc_emit_plan_generic_factory_names_csv(names, sizeof(names)) >
-                0) {
+            char pascal[96];
+            if (shadow_snake_make_to_family(fam, pascal, sizeof(pascal))) {
+                snprintf(fam, sizeof(fam), "%s", pascal);
+            } else if (cc_emit_plan_generic_factory_names_csv(names,
+                                                             sizeof(names)) >
+                       0) {
                 char* tok = names;
                 size_t fl = strlen(fam);
                 while (tok && *tok) {
@@ -1765,16 +1601,16 @@ static void shadow_register_from_text(const char* s) {
         }
         if (compact[0] &&
             (cc_emit_plan_has_generic_factory(fam) ||
+             shadow_parse_gfac_has(fam) ||
              (fam[0] >= 'A' && fam[0] <= 'Z') ||
              strncmp(fam, "Map", 3) == 0 || strncmp(fam, "CCVec", 5) == 0 ||
-             strncmp(fam, "ArrayMap", 8) == 0 || strncmp(fam, "Vec", 3) == 0 ||
-             (strlen(fam) > 5 && strcmp(fam + strlen(fam) - 5, "_make") == 0))) {
+             strncmp(fam, "ArrayMap", 8) == 0 || strncmp(fam, "Vec", 3) == 0)) {
             char mangled[160];
             snprintf(mangled, sizeof(mangled), "%s_%s", fam, compact);
             shadow_register_mangled_ty(mangled);
             if (cc_emit_plan_has_generic_factory(fam) ||
-                (strlen(fam) > 5 &&
-                 strcmp(fam + strlen(fam) - 5, "_make") == 0))
+                shadow_parse_gfac_has(fam) ||
+                (fam[0] >= 'A' && fam[0] <= 'Z'))
                 shadow_ginst_need(fam, compact);
         }
         h = r + 1;
@@ -1790,6 +1626,7 @@ static int g_shadow_collect_fn_locals;
 static int g_shadow_collect_cap_deep;
 
 static void shadow_collect_bind_one(const char* name, const char* ty, int flags) {
+    shadow_ginst_need_from_type(ty);
     if (g_shadow_collect_cap_deep)
         shadow_cap_bind_name(name, ty, flags);
     else
@@ -1843,6 +1680,7 @@ static void shadow_collect_binds_node(AstNode* st) {
      * ConnEnc → Conn_Restrict_Encode* so @typeview checks stay transparent). */
     if (st->kind == AST_TYPEDEF_INT && st->a[0] && st->b[0]) {
         shadow_register_mangled_ty(st->b);
+        shadow_ginst_need_from_type(st->b);
         shadow_td_alias_register(st->a, st->b);
     }
     if (st->kind == AST_AT_STMT && strcmp(st->a, "typeview") == 0 &&
@@ -1880,6 +1718,8 @@ static void shadow_collect_binds_node(AstNode* st) {
             snprintf(bind_ty, sizeof(bind_ty), "%s", st->a);
         if (st->kind == AST_TYPED_INIT && st->e[0] == '[')
             flags |= SHADOW_BIND_ARRAY;
+        if (st->kind == AST_VAR_DECL && st->c[0] == '[')
+            flags |= SHADOW_BIND_ARRAY;
         if (strstr(bind_ty, "cc_atomic_int") || strstr(bind_ty, "atomic"))
             flags |= SHADOW_BIND_ATOMIC;
         if (strncmp(bind_ty, "CCSlice_", 8) == 0)
@@ -1887,6 +1727,8 @@ static void shadow_collect_binds_node(AstNode* st) {
         shadow_collect_bind_one(st->b, bind_ty, flags);
     } else if (st->kind == AST_RAW_LINE) {
         shadow_slice_note_raw(st->a);
+        shadow_map_note_raw(st->a);
+        shadow_amap_note_raw(st->a);
     } else if (st->kind == AST_TYPEDEF_STRUCT || st->kind == AST_STRUCT) {
         int i;
         const char* outer_alias = (st->kind == AST_TYPEDEF_STRUCT && st->b[0])
@@ -1913,6 +1755,7 @@ static void shadow_collect_binds_node(AstNode* st) {
                 continue;
             }
             if (f->kind != AST_FIELD_SIMPLE) continue;
+            if (f->a[0]) shadow_ginst_need_from_type(f->a);
             if (f->e[0] && strcmp(f->e, "raw") == 0) {
                 if (outer_alias && f->a[0])
                     shadow_field_register_raw(outer_alias, f->a);
@@ -1936,6 +1779,7 @@ static void shadow_collect_binds_node(AstNode* st) {
         }
     } else if (st->kind == AST_FIELD_SIMPLE) {
         shadow_register_from_text(st->a);
+        if (st->a[0]) shadow_ginst_need_from_type(st->a);
     } else if (st->kind == AST_ASSIGN) {
         shadow_register_from_text(st->b);
     } else if (st->kind == AST_RESULT_LOCAL) {
@@ -2017,6 +1861,7 @@ static void shadow_collect_binds_node(AstNode* st) {
             for (pi = 0; pi < np; pi++) {
                 char base[64];
                 int stars = 0;
+                shadow_ginst_need_from_type(ps[pi].ty);
                 shadow_ty_base_stars(ps[pi].ty, base, sizeof(base), &stars);
                 if (base[0])
                     shadow_fnparam_register(fname, pi, base, stars);
@@ -2293,6 +2138,721 @@ static void shadow_emit_call_args_text(AstNode* st, char* dst, size_t cap) {
     /* Always run expr/UFCS lowering — a format-string `"` in args must not
      * skip `p.head()` / similar receivers in later arguments. */
     shadow_emit_expr_text(st, st->b, dst, cap, NULL);
+}
+
+enum { SHADOW_PAR_CAP_MAX = 16 };
+
+static CEmit g_shadow_par_helpers;
+static int g_shadow_par_id = 1;
+
+static void shadow_par_helpers_reset(void) {
+    free(g_shadow_par_helpers.buf);
+    memset(&g_shadow_par_helpers, 0, sizeof(g_shadow_par_helpers));
+    g_shadow_par_id = 1;
+}
+
+static int shadow_flush_par_helpers(CEmit* out) {
+    int ok = 1;
+    if (!out) return 0;
+    if (g_shadow_par_helpers.len && g_shadow_par_helpers.buf) {
+        if (!cemit_str(out, "\n/* --- @parallel thunks --- */\n"))
+            ok = 0;
+        else if (!cemit_buf(out, g_shadow_par_helpers.buf,
+                            g_shadow_par_helpers.len))
+            ok = 0;
+    }
+    free(g_shadow_par_helpers.buf);
+    memset(&g_shadow_par_helpers, 0, sizeof(g_shadow_par_helpers));
+    return ok;
+}
+
+static void shadow_par_trim(const char* s, char* dst, size_t cap) {
+    const char* e;
+    size_t n;
+    if (!dst || !cap) return;
+    dst[0] = 0;
+    if (!s) return;
+    while (*s == ' ' || *s == '\t') s++;
+    e = s + strlen(s);
+    while (e > s && (e[-1] == ' ' || e[-1] == '\t')) e--;
+    n = (size_t)(e - s);
+    if (n + 1 > cap) n = cap - 1;
+    memcpy(dst, s, n);
+    dst[n] = 0;
+}
+
+static int shadow_par_name_eq(const char* a, const char* b) {
+    char ta[128], tb[128];
+    shadow_par_trim(a, ta, sizeof(ta));
+    shadow_par_trim(b, tb, sizeof(tb));
+    return ta[0] && strcmp(ta, tb) == 0;
+}
+
+static int shadow_collect_parallels(AstNode* st, AstNode** out, int* n, int cap) {
+    int k;
+    if (!st) return 1;
+    if (st->kind == AST_PARALLEL || st->kind == AST_PARALLEL_FOR) {
+        int need = 1;
+        if (st->kind == AST_PARALLEL && st->nbody > 1)
+            need = st->nbody - 1;
+        if (*n >= cap) return 0;
+        snprintf(st->d, sizeof(st->d), "%d", g_shadow_par_id);
+        g_shadow_par_id += need;
+        out[(*n)++] = st;
+    }
+    for (k = 0; k < st->nbody; k++) {
+        if (!shadow_collect_parallels(st->body[k], out, n, cap)) return 0;
+    }
+    for (k = 0; k < st->ndbody; k++) {
+        if (!shadow_collect_parallels(st->dbody[k], out, n, cap)) return 0;
+    }
+    if (st->kids) {
+        for (k = 0; k < st->nkids; k++) {
+            if (!shadow_collect_parallels(st->kids[k], out, n, cap)) return 0;
+        }
+    }
+    return 1;
+}
+
+static int shadow_par_go_collect(AstNode* st, char lhs[][128],
+                                 char lhs_ty[][96], int* nlhs,
+                                 char cap_names[][64], char cap_tys[][160],
+                                 int* ncaps);
+static int shadow_par_go_fmt_params(char* dst, size_t cap, char lhs[][128],
+                                    char lhs_ty[][96], int n,
+                                    char cap_names[][64], char cap_tys[][160],
+                                    int ncaps);
+
+static int shadow_emit_par_protos(CEmit* out, AstNode** pars, int n) {
+    int i;
+    if (!n) return 1;
+    if (!cemit_str(out, "\n/* --- @parallel declarations --- */\n")) return 0;
+    for (i = 0; i < n; i++) {
+        int id = atoi(pars[i]->d);
+        if (pars[i]->kind == AST_PARALLEL_FOR) {
+            if (!cemit_fmt(out,
+                    "static void __cc_parfor_walk_%d(int, int, void*);\n"
+                    "static void* __cc_parfor_thunk_%d(void*);\n",
+                    id, id))
+                return 0;
+        } else {
+            int a, nspawn = pars[i]->nbody > 1 ? pars[i]->nbody - 1 : 0;
+            for (a = 0; a < nspawn; a++) {
+                if (!cemit_fmt(out, "static void* __cc_par_thunk_%d(void*);\n",
+                               id + a))
+                    return 0;
+            }
+            if (pars[i]->e[0]) {
+                char glhs[32][128];
+                char glty[32][96];
+                char gnames[SHADOW_PAR_CAP_MAX][64];
+                char gtys[SHADOW_PAR_CAP_MAX][160];
+                char params[2048];
+                int nlhs = 0, ng = 0;
+                if (shadow_par_go_collect(pars[i], glhs, glty, &nlhs, gnames,
+                                          gtys, &ng) &&
+                    shadow_par_go_fmt_params(params, sizeof(params), glhs, glty,
+                                             nlhs, gnames, gtys, ng)) {
+                    if (!cemit_fmt(out, "static void __cc_par_go_%d(%s);\n",
+                                   id, params))
+                        return 0;
+                }
+            }
+        }
+    }
+    return cemit_str(out, "/* --- end @parallel declarations --- */\n\n");
+}
+
+static void shadow_par_cap_ty(const ShadowBind* b, char* dst, size_t cap) {
+    if (!dst || !cap) return;
+    dst[0] = 0;
+    if (!b || !b->ty[0]) return;
+    /* Array locals bind as the element type (`int par[N]` → ty `int`).
+     * The walk is file-scope, so capture the decayed pointer. */
+    if (b->flags & SHADOW_BIND_ARRAY)
+        snprintf(dst, cap, "%s*", b->ty);
+    else
+        snprintf(dst, cap, "%s", b->ty);
+}
+
+static int shadow_par_add_cap(const char* id, const char* skip,
+                              char names[][64], char tys[][160], int* n,
+                              int cap) {
+    const ShadowBind* b;
+    int i;
+    if (!id || !id[0]) return 1;
+    if (skip && shadow_par_name_eq(id, skip)) return 1;
+    b = shadow_bind_lookup(id);
+    if (!b || !b->ty[0]) return 1;
+    for (i = 0; i < *n; i++) {
+        if (strcmp(names[i], id) == 0) return 1;
+    }
+    if (*n >= cap) return 0;
+    snprintf(names[*n], 64, "%s", id);
+    shadow_par_cap_ty(b, tys[*n], 160);
+    if (!tys[*n][0]) return 1;
+    (*n)++;
+    return 1;
+}
+
+static int shadow_par_scan_text(const char* text, const char* skip,
+                                char names[][64], char tys[][160], int* n,
+                                int cap) {
+    const char* p = text ? text : "";
+    const char* start = p;
+    while (*p) {
+        if (*p == '"' || *p == '\'') {
+            char q = *p++;
+            while (*p && *p != q) {
+                if (*p == '\\' && p[1]) p++;
+                p++;
+            }
+            if (*p == q) p++;
+            continue;
+        }
+        if (*p >= '0' && *p <= '9') {
+            if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+                p += 2;
+                while ((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f') ||
+                       (*p >= 'A' && *p <= 'F'))
+                    p++;
+            } else {
+                while (*p >= '0' && *p <= '9') p++;
+            }
+            while (*p == 'u' || *p == 'U' || *p == 'l' || *p == 'L') p++;
+            continue;
+        }
+        if ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') || *p == '_') {
+            char id[64];
+            size_t nlen = 0;
+            const char* id0 = p;
+            int after_dot = 0;
+            if (id0 > start) {
+                const char* b = id0 - 1;
+                while (b > start && (*b == ' ' || *b == '\t')) b--;
+                if (*b == '.')
+                    after_dot = 1;
+                else if (*b == '>' && b > start && b[-1] == '-')
+                    after_dot = 1;
+            }
+            while ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+                   (*p >= '0' && *p <= '9') || *p == '_') {
+                if (nlen + 1 < sizeof(id)) id[nlen++] = *p;
+                p++;
+            }
+            id[nlen] = 0;
+            if (!after_dot &&
+                !shadow_par_add_cap(id, skip, names, tys, n, cap))
+                return 0;
+            continue;
+        }
+        p++;
+    }
+    return 1;
+}
+
+static int shadow_par_scan_node(AstNode* s, const char* skip,
+                                char names[][64], char tys[][160], int* n,
+                                int cap) {
+    int k;
+    if (!s) return 1;
+    if (!shadow_par_scan_text(s->a, skip, names, tys, n, cap)) return 0;
+    if (!shadow_par_scan_text(s->b, skip, names, tys, n, cap)) return 0;
+    if (!shadow_par_scan_text(s->c, skip, names, tys, n, cap)) return 0;
+    for (k = 0; k < s->nbody; k++) {
+        if (!shadow_par_scan_node(s->body[k], skip, names, tys, n, cap))
+            return 0;
+    }
+    for (k = 0; k < s->ndbody; k++) {
+        if (!shadow_par_scan_node(s->dbody[k], skip, names, tys, n, cap))
+            return 0;
+    }
+    if (s->kids) {
+        for (k = 0; k < s->nkids; k++) {
+            if (!shadow_par_scan_node(s->kids[k], skip, names, tys, n, cap))
+                return 0;
+        }
+    }
+    return 1;
+}
+
+static int shadow_par_rewrite_rhs(AstNode* asgn, char* dst, size_t cap) {
+    char raw[2048];
+    char pair[768];
+    const ShadowBind* lb;
+    const char* sink = NULL;
+    AstNode* cl;
+    if (!asgn || !dst || !cap) return 0;
+    dst[0] = 0;
+    cl = shadow_expr_closure_kid(asgn);
+    snprintf(raw, sizeof(raw), "%s", asgn->b);
+    lb = shadow_bind_lookup(asgn->a);
+    if (lb && lb->ty[0]) sink = lb->ty;
+    if (cl && (!asgn->b[0] || !strchr(asgn->b, '('))) {
+        shadow_fmt_closure_make(dst, cap, cl);
+    } else {
+        if (cl) shadow_splice_closure_arg(raw, sizeof(raw), cl);
+        shadow_emit_expr_text(asgn, raw, dst, cap, sink);
+        if (shadow_emit_channel_pair_expr(pair, sizeof(pair), dst))
+            snprintf(dst, cap, "%s", pair);
+        if (!shadow_rewrite_bang_exprs(dst, cap, NULL)) return 0;
+        shadow_rewrite_result_ctors_for_var(dst, cap, asgn->a);
+    }
+    return 1;
+}
+
+static int shadow_par_emit_assign_thunk(int id, const char* lhs_ty,
+                                        const char* rhs, char names[][64],
+                                        char tys[][160], int ncaps) {
+    CEmit* h = &g_shadow_par_helpers;
+    int i;
+    if (!cemit_fmt(h, "\nstatic void* __cc_par_thunk_%d(void* arg) {\n"
+                      "    struct {\n",
+                   id))
+        return 0;
+    for (i = 0; i < ncaps; i++) {
+        if (!cemit_fmt(h, "        %s %s;\n", tys[i], names[i])) return 0;
+    }
+    if (!cemit_fmt(h, "        %s* out;\n"
+                      "    } *e = arg;\n",
+                   lhs_ty))
+        return 0;
+    for (i = 0; i < ncaps; i++) {
+        if (!cemit_fmt(h, "    %s %s = e->%s;\n", tys[i], names[i], names[i]))
+            return 0;
+    }
+    return cemit_fmt(h, "    *e->out = %s;\n    return NULL;\n}\n", rhs);
+}
+
+static int shadow_par_go_collect(AstNode* st, char lhs[][128],
+                                 char lhs_ty[][96], int* nlhs,
+                                 char cap_names[][64], char cap_tys[][160],
+                                 int* ncaps) {
+    int a, n;
+    if (!st || !nlhs || !ncaps) return 0;
+    n = st->nbody;
+    if (n < 2 || n > 32) return 0;
+    *nlhs = n;
+    *ncaps = 0;
+    for (a = 0; a < n; a++) {
+        AstNode* arm = st->body[a];
+        const ShadowBind* b;
+        if (!arm) return 0;
+        shadow_par_trim(arm->a, lhs[a], 128);
+        b = shadow_bind_lookup(lhs[a]);
+        if (!b || !b->ty[0]) return 0;
+        snprintf(lhs_ty[a], 96, "%s", b->ty);
+    }
+    for (a = 0; a < n; a++) {
+        char names[SHADOW_PAR_CAP_MAX][64];
+        char tys[SHADOW_PAR_CAP_MAX][160];
+        int nc = 0, i, k;
+        if (!shadow_par_scan_text(st->body[a]->b, NULL, names, tys, &nc,
+                                  SHADOW_PAR_CAP_MAX))
+            return 0;
+        for (i = 0; i < nc; i++) {
+            int skip = 0, j;
+            for (k = 0; k < n; k++) {
+                if (strcmp(names[i], lhs[k]) == 0) {
+                    skip = 1;
+                    break;
+                }
+            }
+            if (skip) continue;
+            for (j = 0; j < *ncaps; j++) {
+                if (strcmp(cap_names[j], names[i]) == 0) {
+                    skip = 1;
+                    break;
+                }
+            }
+            if (skip) continue;
+            if (*ncaps >= SHADOW_PAR_CAP_MAX) return 0;
+            memcpy(cap_names[*ncaps], names[i], 64);
+            memcpy(cap_tys[*ncaps], tys[i], 160);
+            (*ncaps)++;
+        }
+    }
+    return 1;
+}
+
+static int shadow_par_go_fmt_params(char* dst, size_t cap, char lhs[][128],
+                                    char lhs_ty[][96], int n,
+                                    char cap_names[][64], char cap_tys[][160],
+                                    int ncaps) {
+    size_t o = 0;
+    int a;
+    (void)lhs;
+    if (!dst || !cap) return 0;
+    dst[0] = 0;
+    for (a = 0; a < n; a++) {
+        int r = snprintf(dst + o, cap - o, "%s%s* __cc_par_o_%d",
+                         a ? ", " : "", lhs_ty[a], a);
+        if (r < 0 || (size_t)r >= cap - o) return 0;
+        o += (size_t)r;
+    }
+    for (a = 0; a < ncaps; a++) {
+        int r = snprintf(dst + o, cap - o, ", %s %s", cap_tys[a],
+                         cap_names[a]);
+        if (r < 0 || (size_t)r >= cap - o) return 0;
+        o += (size_t)r;
+    }
+    return 1;
+}
+
+static int shadow_emit_par_spawn_body(
+    CEmit* dest, const char* bi, int n, int base, char lhs[][128],
+    char lhs_ty[][96], char rhs[][2048], int ncaps[],
+    char cap_names[][SHADOW_PAR_CAP_MAX][64],
+    char cap_tys[][SHADOW_PAR_CAP_MAX][160], int via_outs) {
+    int a;
+    for (a = 1; a < n; a++) {
+        int i;
+        int id = base + a - 1;
+        if (!cemit_fmt(dest, "%sstruct {\n", bi)) return 0;
+        for (i = 0; i < ncaps[a]; i++) {
+            if (!cemit_fmt(dest, "%s    %s %s;\n", bi, cap_tys[a][i],
+                           cap_names[a][i]))
+                return 0;
+        }
+        if (!cemit_fmt(dest, "%s    %s* out;\n%s} __cc_par_e_%d;\n", bi,
+                       lhs_ty[a], bi, id))
+            return 0;
+        if (!cemit_fmt(dest, "%sCCTask __cc_par_t_%d;\n", bi, id)) return 0;
+        for (i = 0; i < ncaps[a]; i++) {
+            if (!cemit_fmt(dest, "%s__cc_par_e_%d.%s = %s;\n", bi, id,
+                           cap_names[a][i], cap_names[a][i]))
+                return 0;
+        }
+        if (via_outs) {
+            if (!cemit_fmt(dest, "%s__cc_par_e_%d.out = __cc_par_o_%d;\n", bi,
+                           id, a))
+                return 0;
+        } else if (!cemit_fmt(dest, "%s__cc_par_e_%d.out = &(%s);\n", bi, id,
+                              lhs[a]))
+            return 0;
+        if (!cemit_fmt(dest,
+                "%s__cc_par_t_%d = cc_parallel_spawn(__cc_par_thunk_%d, "
+                "&__cc_par_e_%d);\n",
+                bi, id, id, id))
+            return 0;
+    }
+    if (via_outs) {
+        if (!cemit_fmt(dest, "%s*__cc_par_o_0 = %s;\n", bi, rhs[0])) return 0;
+    } else if (!cemit_fmt(dest, "%s%s = %s;\n", bi, lhs[0], rhs[0]))
+        return 0;
+    for (a = n - 1; a >= 1; a--) {
+        int id = base + a - 1;
+        if (!cemit_fmt(dest,
+                "%sif (__cc_par_t_%d.kind == CC_TASK_KIND_INVALID)\n"
+                "%s    (void)__cc_par_thunk_%d(&__cc_par_e_%d);\n"
+                "%selse\n"
+                "%s    cc_parallel_join(__cc_par_t_%d);\n",
+                bi, id, bi, id, id, bi, bi, id))
+            return 0;
+    }
+    return 1;
+}
+
+static int shadow_emit_parallel(AstNode* st, CEmit* out, ShadowCtx* ctx,
+                                const char* indent, int use_cleanup) {
+    (void)ctx;
+    (void)use_cleanup;
+    char i1[80];
+    char i2[80];
+    int n = st->nbody;
+    int base = st->d[0] ? atoi(st->d) : 0;
+    int a;
+    int ncaps[32];
+    char cap_names[32][SHADOW_PAR_CAP_MAX][64];
+    char cap_tys[32][SHADOW_PAR_CAP_MAX][160];
+    char lhs[32][128];
+    char lhs_ty[32][96];
+    char rhs[32][2048];
+
+    if (n < 2 || n > 32) {
+        fprintf(stderr, "error: @parallel arm count %d not supported\n", n);
+        out->err = 1;
+        return 0;
+    }
+    shadow_indent_nest(i1, sizeof(i1), indent, 1);
+    shadow_indent_nest(i2, sizeof(i2), i1, 1);
+    for (a = 0; a < n; a++) {
+        AstNode* arm = st->body[a];
+        const ShadowBind* b;
+        int k;
+        shadow_par_trim(arm->a, lhs[a], sizeof(lhs[a]));
+        b = shadow_bind_lookup(lhs[a]);
+        if (!b || !b->ty[0]) {
+            fprintf(stderr, "error: @parallel target '%s' has no known type\n",
+                    lhs[a]);
+            out->err = 1;
+            return 0;
+        }
+        snprintf(lhs_ty[a], sizeof(lhs_ty[a]), "%s", b->ty);
+        if (!shadow_par_rewrite_rhs(arm, rhs[a], sizeof(rhs[a]))) return 0;
+        ncaps[a] = 0;
+        if (a > 0) {
+            if (!shadow_par_scan_text(arm->b, NULL, cap_names[a], cap_tys[a],
+                                      &ncaps[a], SHADOW_PAR_CAP_MAX)) {
+                fprintf(stderr, "error: @parallel capture table full\n");
+                out->err = 1;
+                return 0;
+            }
+            for (k = 0; k < n; k++) {
+                int i, w = 0;
+                for (i = 0; i < ncaps[a]; i++) {
+                    if (strcmp(cap_names[a][i], lhs[k]) == 0) continue;
+                    if (w != i) {
+                        memcpy(cap_names[a][w], cap_names[a][i], 64);
+                        memcpy(cap_tys[a][w], cap_tys[a][i], 160);
+                    }
+                    w++;
+                }
+                ncaps[a] = w;
+            }
+            if (!shadow_par_emit_assign_thunk(base + a - 1, lhs_ty[a], rhs[a],
+                                              cap_names[a], cap_tys[a],
+                                              ncaps[a]))
+                return 0;
+        }
+    }
+    if (!cemit_fmt(out, "%s{\n", indent)) return 0;
+    if (st->e[0]) {
+        char gnames[SHADOW_PAR_CAP_MAX][64];
+        char gtys[SHADOW_PAR_CAP_MAX][160];
+        char glhs[32][128];
+        char glty[32][96];
+        char params[2048];
+        char args[2048];
+        int nlhs = 0, ng = 0, go = 0;
+        size_t ao = 0;
+        if (!cemit_fmt(out, "%sif (!(%s)) {\n", i1, st->e)) return 0;
+        for (a = 0; a < n; a++) {
+            if (!cemit_fmt(out, "%s%s = %s;\n", i2, lhs[a], rhs[a])) return 0;
+        }
+        if (shadow_par_go_collect(st, glhs, glty, &nlhs, gnames, gtys, &ng) &&
+            shadow_par_go_fmt_params(params, sizeof(params), glhs, glty, nlhs,
+                                     gnames, gtys, ng)) {
+            CEmit* h = &g_shadow_par_helpers;
+            if (!cemit_fmt(h, "\nstatic void __cc_par_go_%d(%s) {\n", base,
+                           params))
+                return 0;
+            if (!shadow_emit_par_spawn_body(h, "    ", n, base, lhs, lhs_ty,
+                                            rhs, ncaps, cap_names, cap_tys, 1))
+                return 0;
+            if (!cemit_str(h, "}\n")) return 0;
+            args[0] = 0;
+            for (a = 0; a < n; a++) {
+                int r = snprintf(args + ao, sizeof(args) - ao, "%s&(%s)",
+                                 a ? ", " : "", lhs[a]);
+                if (r < 0 || (size_t)r >= sizeof(args) - ao) return 0;
+                ao += (size_t)r;
+            }
+            for (a = 0; a < ng; a++) {
+                int r = snprintf(args + ao, sizeof(args) - ao, ", %s",
+                                 gnames[a]);
+                if (r < 0 || (size_t)r >= sizeof(args) - ao) return 0;
+                ao += (size_t)r;
+            }
+            if (!cemit_fmt(out, "%s} else {\n%s__cc_par_go_%d(%s);\n%s}\n",
+                           i1, i2, base, args, i1))
+                return 0;
+            go = 1;
+        }
+        if (!go) {
+            if (!cemit_fmt(out, "%s} else {\n", i1)) return 0;
+            if (!shadow_emit_par_spawn_body(out, i2, n, base, lhs, lhs_ty, rhs,
+                                            ncaps, cap_names, cap_tys, 0))
+                return 0;
+            if (!cemit_fmt(out, "%s}\n", i1)) return 0;
+        }
+        return cemit_fmt(out, "%s}\n", indent);
+    }
+    if (!shadow_emit_par_spawn_body(out, i1, n, base, lhs, lhs_ty, rhs, ncaps,
+                                    cap_names, cap_tys, 0))
+        return 0;
+    return cemit_fmt(out, "%s}\n", indent);
+}
+
+static int shadow_emit_parallel_for(AstNode* st, CEmit* out, ShadowCtx* ctx,
+                                    const char* indent, int use_cleanup) {
+    char i1[80];
+    char names[SHADOW_PAR_CAP_MAX][64];
+    char tys[SHADOW_PAR_CAP_MAX][160];
+    int ncaps = 0;
+    int id = st->d[0] ? atoi(st->d) : 0;
+    int k;
+    int mark;
+    CEmit body = {0};
+    CEmit* h = &g_shadow_par_helpers;
+    char lo[256], hi[256];
+
+    shadow_indent_nest(i1, sizeof(i1), indent, 1);
+    shadow_par_trim(st->b, lo, sizeof(lo));
+    shadow_par_trim(st->c, hi, sizeof(hi));
+    if (!lo[0] || !hi[0] || !st->a[0]) {
+        fprintf(stderr, "error: malformed @parallel for\n");
+        out->err = 1;
+        return 0;
+    }
+    for (k = 0; k < st->nbody; k++) {
+        if (!shadow_par_scan_node(st->body[k], st->a, names, tys, &ncaps,
+                                  SHADOW_PAR_CAP_MAX)) {
+            fprintf(stderr, "error: @parallel for capture table full\n");
+            out->err = 1;
+            return 0;
+        }
+    }
+    mark = g_shadow_nbinds;
+    shadow_bind_name(st->a, "int", 0);
+    for (k = 0; k < st->nbody; k++) {
+        char saved = st->body[k]->indent[0];
+        st->body[k]->indent[0] = 0;
+        if (!shadow_emit_stmt_ctx(st->body[k], &body, ctx, "            ",
+                                  use_cleanup)) {
+            st->body[k]->indent[0] = saved;
+            g_shadow_nbinds = mark;
+            free(body.buf);
+            return 0;
+        }
+        st->body[k]->indent[0] = saved;
+    }
+    g_shadow_nbinds = mark;
+
+    if (!cemit_fmt(h,
+            "\nstatic void __cc_parfor_walk_%d(int lo, int hi, void* env);\n"
+            "static void* __cc_parfor_thunk_%d(void* arg) {\n"
+            "    struct {\n",
+            id, id)) {
+        free(body.buf);
+        return 0;
+    }
+    for (k = 0; k < ncaps; k++) {
+        if (!cemit_fmt(h, "        %s %s;\n", tys[k], names[k])) {
+            free(body.buf);
+            return 0;
+        }
+    }
+    if (!cemit_fmt(h,
+            "        int lo;\n        int hi;\n"
+            "    } *e = arg;\n"
+            "    __cc_parfor_walk_%d(e->lo, e->hi, arg);\n"
+            "    return NULL;\n"
+            "}\n"
+            "static void __cc_parfor_walk_%d(int lo, int hi, void* env) {\n"
+            "    struct {\n",
+            id, id)) {
+        free(body.buf);
+        return 0;
+    }
+    for (k = 0; k < ncaps; k++) {
+        if (!cemit_fmt(h, "        %s %s;\n", tys[k], names[k])) {
+            free(body.buf);
+            return 0;
+        }
+    }
+    if (!cemit_fmt(h,
+            "        int lo;\n        int hi;\n"
+            "    } *e = env;\n")) {
+        free(body.buf);
+        return 0;
+    }
+    for (k = 0; k < ncaps; k++) {
+        if (!cemit_fmt(h, "    %s %s = e->%s;\n", tys[k], names[k], names[k])) {
+            free(body.buf);
+            return 0;
+        }
+    }
+    if (!cemit_fmt(h,
+            "    if (lo >= hi) return;\n"
+            "    if ((hi - lo) <= 1) {\n"
+            "        int %s;\n"
+            "        for (%s = lo; %s < hi; %s++) {\n",
+            st->a, st->a, st->a, st->a)) {
+        free(body.buf);
+        return 0;
+    }
+    if (body.buf && body.len) {
+        if (!cemit_buf(h, body.buf, body.len)) {
+            free(body.buf);
+            return 0;
+        }
+    }
+    if (!cemit_fmt(h,
+            "        }\n"
+            "        return;\n"
+            "    }\n"
+            "    {\n"
+            "        int mid = lo + (hi - lo) / 2;\n"
+            "        struct {\n")) {
+        free(body.buf);
+        return 0;
+    }
+    for (k = 0; k < ncaps; k++) {
+        if (!cemit_fmt(h, "            %s %s;\n", tys[k], names[k])) {
+            free(body.buf);
+            return 0;
+        }
+    }
+    if (!cemit_fmt(h,
+            "            int lo;\n            int hi;\n"
+            "        } child;\n"
+            "        CCTask t;\n")) {
+        free(body.buf);
+        return 0;
+    }
+    for (k = 0; k < ncaps; k++) {
+        if (!cemit_fmt(h, "        child.%s = e->%s;\n", names[k], names[k])) {
+            free(body.buf);
+            return 0;
+        }
+    }
+    if (!cemit_fmt(h,
+            "        child.lo = mid;\n"
+            "        child.hi = hi;\n"
+            "        t = cc_parallel_spawn(__cc_parfor_thunk_%d, &child);\n"
+            "        if (t.kind == CC_TASK_KIND_INVALID) {\n"
+            "            int %s;\n"
+            "            for (%s = lo; %s < hi; %s++) {\n",
+            id, st->a, st->a, st->a, st->a)) {
+        free(body.buf);
+        return 0;
+    }
+    if (body.buf && body.len) {
+        if (!cemit_buf(h, body.buf, body.len)) {
+            free(body.buf);
+            return 0;
+        }
+    }
+    free(body.buf);
+    if (!cemit_fmt(h,
+            "            }\n"
+            "            return;\n"
+            "        }\n"
+            "        __cc_parfor_walk_%d(lo, mid, env);\n"
+            "        cc_parallel_join(t);\n"
+            "    }\n"
+            "}\n",
+            id))
+        return 0;
+
+    if (!cemit_fmt(out, "%s{\n", indent)) return 0;
+    if (!cemit_fmt(out, "%sstruct {\n", i1)) return 0;
+    for (k = 0; k < ncaps; k++) {
+        if (!cemit_fmt(out, "%s    %s %s;\n", i1, tys[k], names[k])) return 0;
+    }
+    if (!cemit_fmt(out, "%s    int lo;\n%s    int hi;\n%s} __cc_parfor_e_%d;\n",
+                   i1, i1, i1, id))
+        return 0;
+    for (k = 0; k < ncaps; k++) {
+        if (!cemit_fmt(out, "%s__cc_parfor_e_%d.%s = %s;\n", i1, id, names[k],
+                       names[k]))
+            return 0;
+    }
+    return cemit_fmt(out,
+            "%s__cc_parfor_walk_%d((int)(%s), (int)(%s), &__cc_parfor_e_%d);\n"
+            "%s}\n",
+            i1, id, lo, hi, id, indent);
 }
 
 static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
@@ -3128,6 +3688,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
         }
         if (st->b[0]) {
             shadow_register_mangled_ty(st->b);
+            shadow_ginst_need_from_type(st->b);
             shadow_td_alias_register(st->a, st->b);
             return cemit_fmt(out, "%stypedef %s %s;\n", indent, st->b, st->a);
         }
@@ -3273,6 +3834,10 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                 "%s}\n",
                 i1, id, indent);
     }
+    case AST_PARALLEL:
+        return shadow_emit_parallel(st, out, ctx, indent, use_cleanup);
+    case AST_PARALLEL_FOR:
+        return shadow_emit_parallel_for(st, out, ctx, indent, use_cleanup);
     case AST_DO_WHILE: {
         if (!cemit_fmt(out, "%sdo {\n", indent)) return 0;
         char nested[80];
@@ -5086,7 +5651,8 @@ static int shadow_emit_one_destroy(AstNode* st, CEmit* out, ShadowCtx* ctx,
                                                  name, has_body);
             if (!emitted) {
                 snprintf(dhook, sizeof(dhook), "%s_destroy", ty);
-                if (shadow_ufn_exists(dhook)) {
+                if (shadow_ufn_exists(dhook) || shadow_hdr_fn_exists(dhook) ||
+                    strncmp(ty, "CCVec_", 6) == 0) {
                     snprintf(chain, sizeof(chain), "%s(&%s); ", dhook, name);
                     emitted = 1;
                 }

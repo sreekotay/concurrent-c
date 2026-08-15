@@ -351,6 +351,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
     g_file_header_lead_done = 0;
     g_shadow_async_id = 60000;
     g_shadow_closure_id = 1;
+    shadow_par_helpers_reset();
     g_shadow_n_emitted_grammar_fns = 0;
     /* Pre-scan send_task receivers so ordered channel_pair can select task
      * machinery before the send_task site is emitted. */
@@ -470,6 +471,25 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                                        ft->path, ofile, sizeof(ofile), &oline);
             shadow_gfac_add(items[i]->a, atoi(items[i]->b), items[i]->d,
                             items[i]->c[0] == 'e' /* extend */, ofile, oline);
+        }
+    }
+    /* `Name::[args]` rewritten at parse — drain those instance requests. */
+    {
+        int gi;
+        char fam[96];
+        char compact[96];
+        for (gi = 0; gi < shadow_parse_ginst_count(); gi++) {
+            if (!shadow_parse_ginst_at(gi, fam, sizeof(fam), compact,
+                                      sizeof(compact)))
+                continue;
+            if (strcmp(fam, "CCSlice") == 0)
+                shadow_slice_need(compact);
+            else if (strcmp(fam, "Map") == 0)
+                shadow_map_need(compact);
+            else if (strcmp(fam, "ArrayMap") == 0)
+                shadow_amap_need(compact);
+            else
+                shadow_ginst_need(fam, compact);
         }
     }
     /* AST+type: one normalize/bind walk before emit (not per-expr string soup). */
@@ -831,8 +851,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
      * types need to precede DECL macros, or a factory type-arg struct must
      * be complete before its factory body (py_expose::[Counter]). Factory
      * presence alone does not hoist every TU struct. */
-    hoist_typedefs = (nseen > 0 || g_shadow_nginst > 0 || g_shadow_nvecs > 0 || g_shadow_nmaps > 0 ||
-                      g_shadow_namaps > 0);
+    hoist_typedefs = (nseen > 0 || g_shadow_nginst > 0 || g_shadow_nvecs > 0 || g_shadow_nmaps > 0);
 
     if (hoist_typedefs) {
         /* Hoist typedefs referenced by @variant arm types so they are
@@ -1133,52 +1152,19 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 if (strcmp(g_shadow_slices[vi], alias) == 0) needed = 1;
             }
             for (vi = 0; vi < g_shadow_nmaps && !needed; vi++) {
-                const char* kv = g_shadow_maps[vi];
-                const char* us = strchr(kv, '_');
-                char part[64];
-                size_t plen, pl;
-                int side;
-                if (!us) continue;
-                for (side = 0; side < 2 && !needed; side++) {
-                    if (side == 0) {
-                        plen = (size_t)(us - kv);
-                        if (plen >= sizeof(part)) continue;
-                        memcpy(part, kv, plen);
-                        part[plen] = 0;
-                    } else {
-                        snprintf(part, sizeof(part), "%s", us + 1);
-                    }
-                    pl = strlen(part);
-                    while (pl >= 3 && strcmp(part + pl - 3, "ptr") == 0) {
-                        part[pl - 3] = 0;
-                        pl -= 3;
-                    }
-                    if (pl && strcmp(part, alias) == 0) needed = 1;
-                }
+                if (shadow_kv_compact_has_alias(g_shadow_maps[vi], alias))
+                    needed = 1;
+            }
+            for (vi = 0; vi < g_shadow_nginst && !needed; vi++) {
+                if (!shadow_ginst_after_vec(g_shadow_ginst[vi].family))
+                    continue;
+                if (shadow_kv_compact_has_alias(g_shadow_ginst[vi].compact,
+                                               alias))
+                    needed = 1;
             }
             for (vi = 0; vi < g_shadow_namaps && !needed; vi++) {
-                const char* kv = g_shadow_amaps[vi];
-                const char* us = strchr(kv, '_');
-                char part[64];
-                size_t plen, pl;
-                int side;
-                if (!us) continue;
-                for (side = 0; side < 2 && !needed; side++) {
-                    if (side == 0) {
-                        plen = (size_t)(us - kv);
-                        if (plen >= sizeof(part)) continue;
-                        memcpy(part, kv, plen);
-                        part[plen] = 0;
-                    } else {
-                        snprintf(part, sizeof(part), "%s", us + 1);
-                    }
-                    pl = strlen(part);
-                    while (pl >= 3 && strcmp(part + pl - 3, "ptr") == 0) {
-                        part[pl - 3] = 0;
-                        pl -= 3;
-                    }
-                    if (pl && strcmp(part, alias) == 0) needed = 1;
-                }
+                if (shadow_kv_compact_has_alias(g_shadow_amaps[vi], alias))
+                    needed = 1;
             }
             if (!needed) continue;
             if (!shadow_emit_preamble(it, out, cache)) return 0;
@@ -1236,11 +1222,39 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
         }
         if (!cemit_str(out, "\n")) return 0;
     }
-    /* Family factory bodies after typedef hoist so user types (Counter) are complete. */
+    /* Family factory bodies after typedef hoist so user types (Counter) are complete.
+     * Phase 0: CCSlice + user; 1: Vec; 2: Map / ArrayMap (nested
+     * Map::[K, Vec::[T]] sees CCVec_T). */
+    int ginst_phase = 0;
+ginst_emit_pass:
     if (kind == SHADOW_EMIT_C && cache) {
+        if (ginst_phase == 1 && g_shadow_nvecs > 0) {
+            if (!cemit_str(out, "#include <ccc/std/vec.h>\n"
+                                "#include <ccc/cc_type.h>\n"))
+                return 0;
+            for (int vi = 0; vi < g_shadow_nvecs; vi++) {
+                const char* t = g_shadow_vecs[vi];
+                int ai;
+                for (ai = 0; ai < n; ai++) {
+                    if (items[ai]->kind != AST_TYPEDEF_INT) continue;
+                    if (strcmp(items[ai]->e, "vech") == 0) continue;
+                    if (!items[ai]->a[0] || strcmp(items[ai]->a, t) != 0)
+                        continue;
+                    if (!items[ai]->b[0] ||
+                        strncmp(items[ai]->b, "CCVec_", 6) != 0)
+                        continue;
+                    if (!cemit_fmt(out, "typedef %s %s;\n",
+                                   items[ai]->b, items[ai]->a))
+                        return 0;
+                    snprintf(items[ai]->e, sizeof(items[ai]->e), "vech");
+                }
+            }
+        }
         /* Instantiate CC_GENERIC_FACTORY templates / compiled factories. */
         for (int ii = 0; ii < g_shadow_nginst; ii++) {
             ShadowGenericInst* inst = &g_shadow_ginst[ii];
+            if (shadow_ginst_phase(inst->family) != ginst_phase)
+                continue;
             const char* tpl = NULL;
             char args[8][64];
             char args128[8][128];
@@ -1264,24 +1278,75 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             }
             if (!tpl && strcmp(inst->family, "CCSlice") == 0)
                 tpl = shadow_ccslice_factory_tpl();
+            if (!tpl && strcmp(inst->family, "Vec") == 0)
+                tpl = shadow_vec_factory_tpl(
+                    shadow_vec_elem_typed_slice(inst->compact));
+            if (!tpl && strcmp(inst->family, "Map") == 0)
+                tpl = shadow_map_factory_tpl();
+            if (!tpl && strcmp(inst->family, "ArrayMap") == 0)
+                tpl = shadow_amap_factory_tpl();
             if (g_shadow_slice_stub && strcmp(inst->family, "CCSlice") == 0) {
+                cc_arena_free(&def_ar);
+                continue;
+            }
+            if (strcmp(inst->family, "Vec") == 0 &&
+                shadow_vec_already(inst->compact)) {
+                cc_arena_free(&def_ar);
+                continue;
+            }
+            if (strcmp(inst->family, "Map") == 0 &&
+                shadow_map_already(inst->compact)) {
+                cc_arena_free(&def_ar);
+                continue;
+            }
+            if (strcmp(inst->family, "ArrayMap") == 0 &&
+                shadow_amap_already(inst->compact)) {
                 cc_arena_free(&def_ar);
                 continue;
             }
             {
                 const char* p = inst->compact;
-                while (*p && nargs < 8) {
-                    size_t n = 0;
-                    while (p[n] && p[n] != '_') n++;
-                    if (n >= sizeof(args[0])) n = sizeof(args[0]) - 1;
-                    memcpy(args[nargs], p, n);
-                    args[nargs][n] = 0;
-                    snprintf(args128[nargs], sizeof(args128[0]), "%s",
-                             args[nargs]);
-                    nargs++;
-                    p += n;
-                    if (*p == '_') p++;
+                if (strcmp(inst->family, "Vec") == 0) {
+                    /* Compact is the whole element (size_t, long_long, Tptr). */
+                    snprintf(args[0], sizeof(args[0]), "%s", p);
+                    snprintf(args128[0], sizeof(args128[0]), "%s", p);
+                    nargs = 1;
+                    shadow_map_decode_ptr_arg(args[0], sizeof(args[0]));
+                    shadow_map_decode_ptr_arg(args128[0], sizeof(args128[0]));
+                } else if (shadow_ginst_after_vec(inst->family)) {
+                    /* Compact is K_V; value may itself be mangled (CCVec_int). */
+                    const char* us = strchr(p, '_');
+                    size_t kn;
+                    if (us) {
+                        kn = (size_t)(us - p);
+                        if (kn >= sizeof(args[0])) kn = sizeof(args[0]) - 1;
+                        memcpy(args[0], p, kn);
+                        args[0][kn] = 0;
+                        snprintf(args[1], sizeof(args[1]), "%s", us + 1);
+                        snprintf(args128[0], sizeof(args128[0]), "%s",
+                                 args[0]);
+                        snprintf(args128[1], sizeof(args128[1]), "%s",
+                                 args[1]);
+                        nargs = 2;
+                    }
+                } else {
+                    while (*p && nargs < 8) {
+                        size_t n = 0;
+                        while (p[n] && p[n] != '_') n++;
+                        if (n >= sizeof(args[0])) n = sizeof(args[0]) - 1;
+                        memcpy(args[nargs], p, n);
+                        args[nargs][n] = 0;
+                        snprintf(args128[nargs], sizeof(args128[0]), "%s",
+                                 args[nargs]);
+                        nargs++;
+                        p += n;
+                        if (*p == '_') p++;
+                    }
                 }
+            }
+            if (shadow_ginst_after_vec(inst->family) && nargs >= 2) {
+                shadow_map_decode_ptr_arg(args[1], sizeof(args[1]));
+                shadow_map_decode_ptr_arg(args128[1], sizeof(args128[1]));
             }
             {
                 FileTape* root = cache->n > 0 ? cache->items[0] : NULL;
@@ -1525,217 +1590,40 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                     cc_arena_free(&def_ar);
                     return 0;
                 }
+                shadow_ginst_ufcs_harvest_body(inst->mangled, body);
             }
             cc_arena_free(&def_ar);
         }
     }
 
-    /* Map/Vec/slice macros after typedef hoist (element types in scope). */
+    /* Leftover slice DECL after phase-0 factories, then Vec, then Map. */
     if (kind == SHADOW_EMIT_C && cache) {
-        if (g_shadow_nslices > 0 && !g_shadow_slice_stub) {
-            int si, any = 0;
-            for (si = 0; si < g_shadow_nslices; si++) {
-                if (!shadow_ginst_has("CCSlice", g_shadow_slices[si])) any = 1;
-            }
-            if (any) {
-                if (!cemit_str(out, "#include <ccc/cc_slice.h>\n")) return 0;
+        if (ginst_phase == 0) {
+            if (g_shadow_nslices > 0 && !g_shadow_slice_stub) {
+                int si, any = 0;
                 for (si = 0; si < g_shadow_nslices; si++) {
-                    if (shadow_ginst_has("CCSlice", g_shadow_slices[si]))
-                        continue;
-                    if (!cemit_fmt(out, "CC_DECL_SLICE(%s)\n",
-                                   g_shadow_slices[si]))
-                        return 0;
+                    if (!shadow_ginst_has("CCSlice", g_shadow_slices[si]))
+                        any = 1;
                 }
-                if (!cemit_str(out, "\n")) return 0;
-            }
-        }
-        if (g_shadow_nvecs > 0) {
-            if (!cemit_str(out, "#include <ccc/std/vec.h>\n"
-                                "#include <ccc/cc_type.h>\n"))
-                return 0;
-            for (int vi = 0; vi < g_shadow_nvecs; vi++) {
-                const char* t = g_shadow_vecs[vi];
-                int typed_slice =
-                    !strcmp(t, "int") || !strcmp(t, "double") ||
-                    !strcmp(t, "float") || !strcmp(t, "bool") ||
-                    !strcmp(t, "long") || !strcmp(t, "long_long");
-                /* vec.h already provides CCVec_char / CCVec_size_t DECL — still
-                 * emit the `_new` helper the beachhead lowers `cc_vec_new` to. */
-                if (!strcmp(t, "char") || !strcmp(t, "size_t")) {
-                    if (!cemit_fmt(out,
-                            "static inline CCVec_%s CCVec_%s_new(CCArena* __a) {\n"
-                            "    return CCVec_%s_init(__a, 0);\n"
-                            "}\n",
-                            t, t, t))
+                if (any) {
+                    if (!cemit_str(out, "#include <ccc/cc_slice.h>\n"))
                         return 0;
-                    continue;
-                }
-                /* Emit skipped CCVec_ typedef aliases before the DECL that
-                 * references them (CharVec = CCVec_char before
-                 * CC_VEC_DECL_ARENA(CharVec, …)). */
-                {
-                    int ai;
-                    for (ai = 0; ai < n; ai++) {
-                        if (items[ai]->kind != AST_TYPEDEF_INT) continue;
-                        if (strcmp(items[ai]->e, "vech") == 0) continue;
-                        if (!items[ai]->a[0] || strcmp(items[ai]->a, t) != 0)
+                    for (si = 0; si < g_shadow_nslices; si++) {
+                        if (shadow_ginst_has("CCSlice", g_shadow_slices[si]))
                             continue;
-                        if (!items[ai]->b[0] ||
-                            strncmp(items[ai]->b, "CCVec_", 6) != 0)
-                            continue;
-                        if (!cemit_fmt(out, "typedef %s %s;\n",
-                                       items[ai]->b, items[ai]->a))
+                        if (!cemit_fmt(out, "CC_DECL_SLICE(%s)\n",
+                                       g_shadow_slices[si]))
                             return 0;
-                        snprintf(items[ai]->e, sizeof(items[ai]->e), "vech");
                     }
+                    if (!cemit_str(out, "\n")) return 0;
                 }
-                if (typed_slice) {
-                    if (!cemit_fmt(out,
-                            "CC_VEC_DECL_ARENA_TSLICE(%s, CCVec_%s, CCSlice_%s)\n"
-                            "static inline CCVec_%s CCVec_%s_new(CCArena* __a) {\n"
-                            "    return CCVec_%s_init(__a, 0);\n"
-                            "}\n",
-                            t, t, t, t, t, t))
-                        return 0;
-                } else if (!cemit_fmt(out,
-                               "CC_VEC_DECL_ARENA(%s, CCVec_%s)\n"
-                               "static inline CCVec_%s CCVec_%s_new(CCArena* __a) {\n"
-                               "    return CCVec_%s_init(__a, 0);\n"
-                               "}\n",
-                               t, t, t, t, t)) {
-                    return 0;
-                }
-                /* Mirror oracle visit_codegen container cc_type_info. */
-                if (!cemit_fmt(out,
-                        "\n/* cc_type_info for CCVec_%s (serdes) */\n"
-                        "static const cc_type_info __cc_ti_CCVec_%s = {\n"
-                        "    .name = \"CCVec_%s\", .mangled = \"CCVec_%s\",\n"
-                        "    .id = 0, .size = (uint32_t)sizeof(CCVec_%s),\n"
-                        "    .align = (uint32_t)_Alignof(CCVec_%s),\n"
-                        "    .kind = (uint16_t)CC_TK_GENERIC_INST, .nfields = 0,\n"
-                        "    .flags = (uint16_t)CC_TF_ERASABLE, ._reserved = 0,\n"
-                        "    .fields = NULL, .copy_fn = NULL, .drop_fn = NULL,\n"
-                        "};\n"
-                        "__attribute__((constructor)) static void "
-                        "cc__ti_reg_CCVec_%s(void) {\n"
-                        "    cc_type_info_register(&__cc_ti_CCVec_%s);\n"
-                        "}\n",
-                        t, t, t, t, t, t, t, t))
-                    return 0;
             }
-            if (!cemit_str(out, "\n")) return 0;
+            ginst_phase = 1;
+            goto ginst_emit_pass;
         }
-        if (g_shadow_nmaps > 0) {
-            if (!cemit_str(out,
-                    "#include <ccc/std/map.h>\n"
-                    "#include <ccc/std/map_impl.h>\n"
-                    "#include <ccc/cc_type.h>\n"))
-                return 0;
-            for (int mi = 0; mi < g_shadow_nmaps; mi++) {
-                const char* kv = g_shadow_maps[mi];
-                const char* hash = NULL;
-                const char* eq = NULL;
-                char k[64], v[64], vty[80];
-                size_t vl, o;
-                int user_key = 0;
-                if (!shadow_map_hash_eq(kv, &hash, &eq, k, sizeof(k), v,
-                                        sizeof(v), &user_key))
-                    continue;
-                /* Mangled value `intptr` → C type `int*` for the DECL. */
-                {
-                    char base[64];
-                    int stars = 0;
-                    snprintf(base, sizeof(base), "%s", v);
-                    vl = strlen(base);
-                    while (vl >= 3 && strcmp(base + vl - 3, "ptr") == 0) {
-                        base[vl - 3] = 0;
-                        vl -= 3;
-                        stars++;
-                    }
-                    snprintf(vty, sizeof(vty), "%s", base);
-                    o = strlen(vty);
-                    while (stars-- > 0 && o + 1 < sizeof(vty))
-                        vty[o++] = '*';
-                    vty[o] = 0;
-                }
-                /* Fwd protos so DECL thunks see hash/eq before TU defs. */
-                if (user_key &&
-                    !cemit_fmt(out,
-                               "static size_t %s(%s);\n"
-                               "static int %s(%s, %s);\n",
-                               hash, k, eq, k, k))
-                    return 0;
-                if (!cemit_fmt(out,
-                        "CC_MAP_DECL_ARENA(%s, %s, Map_%s, %s, %s)\n"
-                        "static inline Map_%s* Map_%s_new(CCArena* __a) {\n"
-                        "    return Map_%s_init(__a);\n"
-                        "}\n"
-                        "\n/* cc_type_info for Map_%s (serdes) */\n"
-                        "static const cc_type_info __cc_ti_Map_%s = {\n"
-                        "    .name = \"Map_%s\", .mangled = \"Map_%s\",\n"
-                        "    .id = 0, .size = (uint32_t)sizeof(Map_%s),\n"
-                        "    .align = (uint32_t)_Alignof(Map_%s),\n"
-                        "    .kind = (uint16_t)CC_TK_GENERIC_INST, .nfields = 0,\n"
-                        "    .flags = (uint16_t)CC_TF_ERASABLE, ._reserved = 0,\n"
-                        "    .fields = NULL, .copy_fn = NULL, .drop_fn = NULL,\n"
-                        "};\n"
-                        "__attribute__((constructor)) static void "
-                        "cc__ti_reg_Map_%s(void) {\n"
-                        "    cc_type_info_register(&__cc_ti_Map_%s);\n"
-                        "}\n",
-                        k, vty, kv, hash, eq, kv, kv, kv, kv, kv, kv, kv, kv, kv,
-                        kv, kv))
-                    return 0;
-            }
-            if (!cemit_str(out, "\n")) return 0;
-        }
-        if (g_shadow_namaps > 0) {
-            if (!cemit_str(out, "#include <ccc/std/array_map.h>\n")) return 0;
-            for (int ai = 0; ai < g_shadow_namaps; ai++) {
-                const char* kv = g_shadow_amaps[ai];
-                const char* hash = NULL;
-                const char* eq = NULL;
-                char k[64], v[64], vty[80];
-                size_t vl, o;
-                int user_key = 0;
-                if (!shadow_map_hash_eq(kv, &hash, &eq, k, sizeof(k), v,
-                                        sizeof(v), &user_key))
-                    continue;
-                {
-                    char base[64];
-                    int stars = 0;
-                    snprintf(base, sizeof(base), "%s", v);
-                    vl = strlen(base);
-                    while (vl >= 3 && strcmp(base + vl - 3, "ptr") == 0) {
-                        base[vl - 3] = 0;
-                        vl -= 3;
-                        stars++;
-                    }
-                    snprintf(vty, sizeof(vty), "%s", base);
-                    o = strlen(vty);
-                    while (stars-- > 0 && o + 1 < sizeof(vty))
-                        vty[o++] = '*';
-                    vty[o] = 0;
-                }
-                if (user_key &&
-                    !cemit_fmt(out,
-                               "static size_t %s(%s);\n"
-                               "static int %s(%s, %s);\n",
-                               hash, k, eq, k, k))
-                    return 0;
-                if (!cemit_fmt(out,
-                        "CC_ARRAY_MAP_DECL(%s, %s, ArrayMap_%s, %s, %s)\n"
-                        "static inline ArrayMap_%s* array_map_new_%s(CCArena* __a) {\n"
-                        "    return ArrayMap_%s_init(__a);\n"
-                        "}\n"
-                        "static inline ArrayMap_%s* array_map_new_count_%s("
-                        "CCArena* __a, size_t __n) {\n"
-                        "    return ArrayMap_%s_init_count(__a, __n);\n"
-                        "}\n",
-                        k, vty, kv, hash, eq, kv, kv, kv, kv, kv, kv))
-                    return 0;
-            }
-            if (!cemit_str(out, "\n")) return 0;
+        if (ginst_phase == 1) {
+            ginst_phase = 2;
+            goto ginst_emit_pass;
         }
     }
     /* Detect __spawn_into_call in fn bodies (typed inits / assigns). */
@@ -1887,6 +1775,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                     return 0;
             } else if (it->b[0]) {
                 shadow_register_mangled_ty(it->b);
+                shadow_ginst_need_from_type(it->b);
                 shadow_td_alias_register(it->a, it->b);
                 if (!cemit_fmt(out, "typedef %s %s;\n", it->b, it->a))
                     return 0;
@@ -2182,7 +2071,8 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             AstNode* sdestroys[32];
             AstNode* sspawns[16];
             AstNode* sdefers[16];
-            int nsdestroys = 0, nsspawns = 0, nsdefers = 0;
+            AstNode* spars[16];
+            int nsdestroys = 0, nsspawns = 0, nsdefers = 0, nspars = 0;
             for (int k = 0; bind_ok && k < it->nkids; k++) {
                 if (it->kids[k]->kind == AST_DEFER) {
                     if (nsdefers >= 16) {
@@ -2204,6 +2094,12 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 }
                 if (!shadow_collect_spawns(it->kids[k], sspawns, &nsspawns, 16)) {
                     fprintf(stderr, "error: too many spawns for shadow beachhead\n");
+                    out->err = 1;
+                    bind_ok = 0;
+                    break;
+                }
+                if (!shadow_collect_parallels(it->kids[k], spars, &nspars, 16)) {
+                    fprintf(stderr, "error: too many @parallel for shadow beachhead\n");
                     out->err = 1;
                     bind_ok = 0;
                     break;
@@ -2255,6 +2151,8 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                         !cemit_str(out, "/* --- end closure declarations --- */\n\n"))
                         bind_ok = 0;
                 }
+                if (bind_ok && !shadow_emit_par_protos(out, spars, nspars))
+                    bind_ok = 0;
             }
             if (bind_ok &&
                 !cemit_fmt(out, "static %s%s%s%s %s(%s) {\n", unused_attr,
@@ -2305,6 +2203,8 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                             bind_ok = 0;
                     }
                 }
+                if (bind_ok && !shadow_flush_par_helpers(out))
+                    bind_ok = 0;
             }
             shadow_pop_fn_binds(bind_mark);
             if (!bind_ok) return 0;
@@ -2351,7 +2251,8 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             AstNode* spawns[16];
             AstNode* destroys[32];
             AstNode* defers[16];
-            int nspawns = 0, ndestroys = 0, ndefers = 0;
+            AstNode* pars[16];
+            int nspawns = 0, ndestroys = 0, ndefers = 0, npars = 0;
             for (int k = 0; bind_ok && k < it->nkids; k++) {
                 if (it->kids[k]->kind == AST_DEFER) {
                     if (ndefers >= 16) {
@@ -2374,6 +2275,12 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 }
                 if (!shadow_collect_spawns(it->kids[k], spawns, &nspawns, 16)) {
                     fprintf(stderr, "error: too many spawns for shadow beachhead\n");
+                    out->err = 1;
+                    bind_ok = 0;
+                    break;
+                }
+                if (!shadow_collect_parallels(it->kids[k], pars, &npars, 16)) {
+                    fprintf(stderr, "error: too many @parallel for shadow beachhead\n");
                     out->err = 1;
                     bind_ok = 0;
                     break;
@@ -2437,6 +2344,8 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                         !cemit_str(out, "/* --- end closure declarations --- */\n\n"))
                         bind_ok = 0;
                 }
+                if (bind_ok && !shadow_emit_par_protos(out, pars, npars))
+                    bind_ok = 0;
             }
             if (bind_ok) {
                 const char* rty = it->e[0] ? it->e : "int";
@@ -2502,6 +2411,8 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                             bind_ok = 0;
                     }
                 }
+                if (bind_ok && !shadow_flush_par_helpers(out))
+                    bind_ok = 0;
             }
             shadow_pop_fn_binds(bind_mark);
             if (!bind_ok) return 0;
@@ -2592,6 +2503,8 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             /* Install map UFCS before bodies use map->insert / … */
             shadow_map_ufcs_install_from_raw(it->a);
             shadow_slice_note_raw(it->a);
+            shadow_map_note_raw(it->a);
+            shadow_amap_note_raw(it->a);
             if (it->a[0] && strncmp(it->a, "static void", 11) == 0 &&
                 strstr(it->a, "[]")) {
                 const char* rest = it->a + 11;
@@ -2677,6 +2590,8 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
         case AST_VAR_DECL:
         case AST_WHILE:
         case AST_WITH_DEADLINE:
+        case AST_PARALLEL:
+        case AST_PARALLEL_FOR:
         case AST_INC:
         case AST_FIELD_SIMPLE:
         case AST_BREAK:

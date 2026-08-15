@@ -116,6 +116,24 @@ static inline int cc_map_eq_slice_hdr(CCSliceHdr a, CCSliceHdr b) {
 /* CCSlicePacked hash/eq live in slice_packed.cch (needs the type).  Map sugar
  * resolves keys named CCSlicePacked to cc_map_hash_slice_packed / eq. */
 
+/* Token-paste names used by the Map factory textual fallback
+ * (`cc_map_key_hash_${arg(0)}`). Compiled factory emission names the
+ * concrete `cc_map_hash_*` symbols directly. */
+#define cc_map_key_hash_int cc_map_hash_i32
+#define cc_map_key_eq_int cc_map_eq_i32
+#define cc_map_key_hash_CCSliceHdr cc_map_hash_slice_hdr
+#define cc_map_key_eq_CCSliceHdr cc_map_eq_slice_hdr
+#define cc_map_key_hash_CCSlicePacked cc_map_hash_slice_packed
+#define cc_map_key_eq_CCSlicePacked cc_map_eq_slice_packed
+#define cc_map_key_hash_CCSlice cc_map_hash_slice
+#define cc_map_key_eq_CCSlice cc_map_eq_slice
+#define cc_map_key_hash_charslice cc_map_hash_slice
+#define cc_map_key_eq_charslice cc_map_eq_slice
+#define cc_map_key_hash_uint64_t cc_map_hash_u64
+#define cc_map_key_eq_uint64_t cc_map_eq_u64
+#define cc_map_key_hash_int64_t cc_map_hash_u64
+#define cc_map_key_eq_int64_t cc_map_eq_u64
+
 #define CC_MAP_DECL_UFCS(Name) typedef char __cc_map_decl_ufcs__##Name
 
 /*
@@ -174,5 +192,79 @@ size_t ccj_map_bucket_index_from_itr();
  * heavy cc_containers include inside map_impl.cch is gated out; the parser-safe
  * ccj_* forward decls above stand in so the real bodies still parse. */
 #include "map_impl.cch"
+
+/* `Map::[K,V]` / `map_new::[K,V]` instantiate this family. The concrete
+ * type is `Map_<K>_<V>*`. A hand-written `CC_MAP_DECL_ARENA` that names
+ * the same `Map_<K>_<V>` suppresses the splice. Header lowering blanks
+ * the factory from `.h`; harvest keeps it as a Concurrent-C fact. */
+CC_GENERIC_FACTORY(Map, 2) {
+    char k[80], v[80], hash[96], eq[96], fwd[256];
+    size_t kn = arg(0).len < sizeof(k) - 1 ? arg(0).len : sizeof(k) - 1;
+    size_t vn = arg(1).len < sizeof(v) - 1 ? arg(1).len : sizeof(v) - 1;
+    int user_key = 0;
+    memcpy(k, arg(0).ptr, kn);
+    k[kn] = 0;
+    memcpy(v, arg(1).ptr, vn);
+    v[vn] = 0;
+    fwd[0] = 0;
+    if (strcmp(k, "int") == 0) {
+        snprintf(hash, sizeof(hash), "cc_map_hash_i32");
+        snprintf(eq, sizeof(eq), "cc_map_eq_i32");
+    } else if (strcmp(k, "CCSliceHdr") == 0) {
+        snprintf(hash, sizeof(hash), "cc_map_hash_slice_hdr");
+        snprintf(eq, sizeof(eq), "cc_map_eq_slice_hdr");
+    } else if (strcmp(k, "CCSlicePacked") == 0) {
+        snprintf(hash, sizeof(hash), "cc_map_hash_slice_packed");
+        snprintf(eq, sizeof(eq), "cc_map_eq_slice_packed");
+    } else if (strcmp(k, "CCSlice") == 0 || strcmp(k, "charslice") == 0) {
+        snprintf(hash, sizeof(hash), "cc_map_hash_slice");
+        snprintf(eq, sizeof(eq), "cc_map_eq_slice");
+    } else if (strstr(k, "slice") != NULL || strstr(k, "Slice") != NULL) {
+        snprintf(hash, sizeof(hash), "cc_map_hash_slice");
+        snprintf(eq, sizeof(eq), "cc_map_eq_slice");
+    } else if (strstr(k, "64") != NULL) {
+        snprintf(hash, sizeof(hash), "cc_map_hash_u64");
+        snprintf(eq, sizeof(eq), "cc_map_eq_u64");
+    } else {
+        snprintf(hash, sizeof(hash), "cc_map_key_hash_%s", k);
+        snprintf(eq, sizeof(eq), "cc_map_key_eq_%s", k);
+        user_key = 1;
+    }
+    if (user_key)
+        snprintf(fwd, sizeof(fwd),
+                 "static size_t %s(%s);\nstatic int %s(%s, %s);\n",
+                 hash, k, eq, k, k);
+    return @emit(`
+#ifdef CC_FRAGMENT_VALIDATE
+typedef struct ${mangled} { char _; } ${mangled};
+static inline ${mangled}* ${mangled}_init(void *a) { (void)a; return (${mangled}*)0; }
+static inline ${mangled}* ${mangled}_new(void *a) { (void)a; return (${mangled}*)0; }
+#else
+${fwd}
+CC_MAP_DECL_ARENA(${k}, ${v}, ${mangled}, ${hash}, ${eq})
+static inline ${mangled}* ${mangled}_new(CCArena* __a) {
+    return ${mangled}_init(__a);
+}
+
+/* cc_type_info for ${mangled} (serdes) */
+static const cc_type_info __cc_ti_${mangled} = {
+    .name = "${mangled}", .mangled = "${mangled}",
+    .id = 0, .size = (uint32_t)sizeof(${mangled}),
+    .align = (uint32_t)_Alignof(${mangled}),
+    .kind = (uint16_t)CC_TK_GENERIC_INST, .nfields = 0,
+    .flags = (uint16_t)CC_TF_ERASABLE, ._reserved = 0,
+    .fields = NULL, .copy_fn = NULL, .drop_fn = NULL,
+};
+__attribute__((constructor)) static void cc__ti_reg_${mangled}(void) {
+    cc_type_info_register(&__cc_ti_${mangled});
+}
+#endif
+`, arena);
+}
+
+@typehooks on Map_* {
+    .create = cc_type_create_call("_new"),
+    .destroy = cc_type_destroy_call("_destroy"),
+};
 
 #endif /* CC_STD_MAP_FORWARD_H */
