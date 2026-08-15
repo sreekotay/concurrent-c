@@ -1,0 +1,520 @@
+/*
+ * Sequential C reference for the Shirley weekend final scene.
+ *
+ * Same algorithm as rt.ccs and go/rt.go. World build and per-pixel
+ * sampling use a fixed LCG (not libc rand) so C / CC / Go checksums
+ * match. Rows write disjoint framebuffer slices.
+ *
+ *   RT_WIDTH / RT_SAMPLES / RT_DEPTH   image (default 400 / 10 / 20)
+ *   RT_SMOKE=1                         48 x 27, 2 spp, depth 8
+ *   RT_PPM=path                        write a binary P6 PPM
+ *
+ * Book: https://raytracing.github.io/books/RayTracingInOneWeekend.html
+ */
+#include <math.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#define RT_PI 3.14159265358979323846
+
+#define WORLD_CAP 512
+#define TMIN 0.001
+#define TMAX 1.0e30
+
+typedef struct Vec3 {
+    double x, y, z;
+} Vec3;
+
+typedef struct Ray {
+    Vec3 o, d;
+} Ray;
+
+typedef struct Rng {
+    uint64_t s;
+} Rng;
+
+typedef enum { MAT_LAMBERT = 0, MAT_METAL = 1, MAT_GLASS = 2 } MatKind;
+
+typedef struct Material {
+    MatKind kind;
+    Vec3 albedo;
+    double fuzz;
+    double ir;
+} Material;
+
+typedef struct Sphere {
+    Vec3 center;
+    double radius;
+    Material mat;
+} Sphere;
+
+typedef struct Hit {
+    Vec3 p, n;
+    double t;
+    int front;
+    Material mat;
+} Hit;
+
+typedef struct Camera {
+    Vec3 center, pixel00, du, dv;
+    Vec3 defocus_u, defocus_v;
+    double defocus_angle;
+} Camera;
+
+typedef struct RenderJob {
+    uint8_t* fb;
+    int w, h, spp, depth;
+    Camera cam;
+    Sphere* world;
+    int nworld;
+} RenderJob;
+
+static Vec3 v3(double x, double y, double z) {
+    Vec3 r;
+    r.x = x;
+    r.y = y;
+    r.z = z;
+    return r;
+}
+
+static Vec3 v3_add(Vec3 a, Vec3 b) { return v3(a.x + b.x, a.y + b.y, a.z + b.z); }
+static Vec3 v3_sub(Vec3 a, Vec3 b) { return v3(a.x - b.x, a.y - b.y, a.z - b.z); }
+static Vec3 v3_mul(Vec3 a, Vec3 b) { return v3(a.x * b.x, a.y * b.y, a.z * b.z); }
+static Vec3 v3_scale(Vec3 a, double t) { return v3(a.x * t, a.y * t, a.z * t); }
+static Vec3 v3_neg(Vec3 a) { return v3(-a.x, -a.y, -a.z); }
+
+static double v3_dot(Vec3 a, Vec3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+
+static Vec3 v3_cross(Vec3 a, Vec3 b) {
+    return v3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
+}
+
+static double v3_len2(Vec3 a) { return v3_dot(a, a); }
+static double v3_len(Vec3 a) { return sqrt(v3_len2(a)); }
+static Vec3 v3_unit(Vec3 a) { return v3_scale(a, 1.0 / v3_len(a)); }
+
+static int v3_near_zero(Vec3 a) {
+    const double s = 1.0e-8;
+    return fabs(a.x) < s && fabs(a.y) < s && fabs(a.z) < s;
+}
+
+static Vec3 v3_reflect(Vec3 v, Vec3 n) {
+    return v3_sub(v, v3_scale(n, 2.0 * v3_dot(v, n)));
+}
+
+static Vec3 v3_refract(Vec3 uv, Vec3 n, double etai_over_etat) {
+    double cos_theta = v3_dot(v3_neg(uv), n);
+    if (cos_theta > 1.0)
+        cos_theta = 1.0;
+    Vec3 r_out_perp = v3_scale(v3_add(uv, v3_scale(n, cos_theta)), etai_over_etat);
+    double par = 1.0 - v3_len2(r_out_perp);
+    if (par < 0.0)
+        par = 0.0;
+    Vec3 r_out_parallel = v3_scale(n, -sqrt(par));
+    return v3_add(r_out_perp, r_out_parallel);
+}
+
+static uint32_t rng_u32(Rng* r) {
+    r->s = r->s * 6364136223846793005ull + 1ull;
+    return (uint32_t)(r->s >> 32);
+}
+
+static double rng_f(Rng* r) { return (double)rng_u32(r) * (1.0 / 4294967296.0); }
+
+static double rng_range(Rng* r, double lo, double hi) {
+    return lo + (hi - lo) * rng_f(r);
+}
+
+static Vec3 rng_vec(Rng* r) { return v3(rng_f(r), rng_f(r), rng_f(r)); }
+
+static Vec3 rng_vec_range(Rng* r, double lo, double hi) {
+    return v3(rng_range(r, lo, hi), rng_range(r, lo, hi), rng_range(r, lo, hi));
+}
+
+static Vec3 rng_unit(Rng* r) {
+    for (;;) {
+        Vec3 p = rng_vec_range(r, -1.0, 1.0);
+        double lensq = v3_len2(p);
+        if (1.0e-160 < lensq && lensq <= 1.0)
+            return v3_scale(p, 1.0 / sqrt(lensq));
+    }
+}
+
+static Vec3 rng_in_unit_disk(Rng* r) {
+    for (;;) {
+        Vec3 p = v3(rng_range(r, -1.0, 1.0), rng_range(r, -1.0, 1.0), 0.0);
+        if (v3_len2(p) < 1.0)
+            return p;
+    }
+}
+
+static uint64_t pixel_seed(int x, int y) {
+    uint64_t s = 0x9E3779B97F4A7C15ull;
+    s ^= (uint64_t)(uint32_t)x * 0xBF58476D1CE4E5B9ull;
+    s ^= (uint64_t)(uint32_t)y * 0x94D049BB133111EBull;
+    return s | 1ull;
+}
+
+static Ray ray_at(Vec3 o, Vec3 d) {
+    Ray r;
+    r.o = o;
+    r.d = d;
+    return r;
+}
+
+static Vec3 ray_pos(Ray r, double t) { return v3_add(r.o, v3_scale(r.d, t)); }
+
+static int sphere_hit(const Sphere* s, Ray r, double tmin, double tmax, Hit* rec) {
+    Vec3 oc = v3_sub(s->center, r.o);
+    double a = v3_len2(r.d);
+    double h = v3_dot(r.d, oc);
+    double c = v3_len2(oc) - s->radius * s->radius;
+    double disc = h * h - a * c;
+    double sqrtd, root;
+    Vec3 outward;
+    if (disc < 0.0)
+        return 0;
+    sqrtd = sqrt(disc);
+    root = (h - sqrtd) / a;
+    if (root <= tmin || root >= tmax) {
+        root = (h + sqrtd) / a;
+        if (root <= tmin || root >= tmax)
+            return 0;
+    }
+    rec->t = root;
+    rec->p = ray_pos(r, rec->t);
+    outward = v3_scale(v3_sub(rec->p, s->center), 1.0 / s->radius);
+    rec->front = v3_dot(r.d, outward) < 0.0;
+    rec->n = rec->front ? outward : v3_neg(outward);
+    rec->mat = s->mat;
+    return 1;
+}
+
+static int world_hit(const Sphere* world, int n, Ray r, Hit* rec) {
+    Hit tmp;
+    int hit_any = 0;
+    double closest = TMAX;
+    int i;
+    for (i = 0; i < n; i++) {
+        if (sphere_hit(&world[i], r, TMIN, closest, &tmp)) {
+            hit_any = 1;
+            closest = tmp.t;
+            *rec = tmp;
+        }
+    }
+    return hit_any;
+}
+
+static double reflectance(double cosine, double ri) {
+    double r0 = (1.0 - ri) / (1.0 + ri);
+    double x, x2;
+    r0 = r0 * r0;
+    x = 1.0 - cosine;
+    x2 = x * x;
+    return r0 + (1.0 - r0) * x2 * x2 * x;
+}
+
+static int scatter(Ray r_in, const Hit* rec, Rng* rng, Vec3* attn, Ray* scattered) {
+    const Material* m = &rec->mat;
+    if (m->kind == MAT_LAMBERT) {
+        Vec3 dir = v3_add(rec->n, rng_unit(rng));
+        if (v3_near_zero(dir))
+            dir = rec->n;
+        *scattered = ray_at(rec->p, dir);
+        *attn = m->albedo;
+        return 1;
+    }
+    if (m->kind == MAT_METAL) {
+        Vec3 reflected = v3_unit(v3_reflect(r_in.d, rec->n));
+        reflected = v3_add(reflected, v3_scale(rng_unit(rng), m->fuzz));
+        *scattered = ray_at(rec->p, reflected);
+        *attn = m->albedo;
+        return v3_dot(scattered->d, rec->n) > 0.0;
+    }
+    {
+        double ri = rec->front ? (1.0 / m->ir) : m->ir;
+        Vec3 unit_d = v3_unit(r_in.d);
+        double cos_theta = v3_dot(v3_neg(unit_d), rec->n);
+        double sin_theta, cannot;
+        Vec3 direction;
+        if (cos_theta > 1.0)
+            cos_theta = 1.0;
+        sin_theta = sqrt(1.0 - cos_theta * cos_theta);
+        cannot = ri * sin_theta > 1.0;
+        if (cannot || reflectance(cos_theta, ri) > rng_f(rng))
+            direction = v3_reflect(unit_d, rec->n);
+        else
+            direction = v3_refract(unit_d, rec->n, ri);
+        *scattered = ray_at(rec->p, direction);
+        *attn = v3(1.0, 1.0, 1.0);
+        return 1;
+    }
+}
+
+static Vec3 ray_color(Ray r, int depth, const Sphere* world, int nworld, Rng* rng) {
+    Hit rec;
+    Ray scattered;
+    Vec3 attn, child;
+    if (depth <= 0)
+        return v3(0.0, 0.0, 0.0);
+    if (world_hit(world, nworld, r, &rec)) {
+        if (scatter(r, &rec, rng, &attn, &scattered)) {
+            child = ray_color(scattered, depth - 1, world, nworld, rng);
+            return v3_mul(attn, child);
+        }
+        return v3(0.0, 0.0, 0.0);
+    }
+    {
+        Vec3 unit = v3_unit(r.d);
+        double a = 0.5 * (unit.y + 1.0);
+        return v3_add(v3_scale(v3(1.0, 1.0, 1.0), 1.0 - a),
+                      v3_scale(v3(0.5, 0.7, 1.0), a));
+    }
+}
+
+static Camera camera_init(int w, int h) {
+    Camera cam;
+    Vec3 lookfrom = v3(13.0, 2.0, 3.0);
+    Vec3 lookat = v3(0.0, 0.0, 0.0);
+    Vec3 vup = v3(0.0, 1.0, 0.0);
+    double vfov = 20.0;
+    double focus = 10.0;
+    double defocus = 0.6;
+    double theta = vfov * RT_PI / 180.0;
+    double hh = tan(theta / 2.0);
+    double viewport_h = 2.0 * hh * focus;
+    double viewport_w = viewport_h * ((double)w / (double)h);
+    Vec3 ww = v3_unit(v3_sub(lookfrom, lookat));
+    Vec3 uu = v3_unit(v3_cross(vup, ww));
+    Vec3 vv = v3_cross(ww, uu);
+    Vec3 viewport_u = v3_scale(uu, viewport_w);
+    Vec3 viewport_v = v3_scale(v3_neg(vv), viewport_h);
+    double defocus_radius = focus * tan((defocus / 2.0) * RT_PI / 180.0);
+    Vec3 upper_left;
+    cam.center = lookfrom;
+    cam.du = v3_scale(viewport_u, 1.0 / (double)w);
+    cam.dv = v3_scale(viewport_v, 1.0 / (double)h);
+    upper_left = v3_sub(v3_sub(v3_sub(cam.center, v3_scale(ww, focus)),
+                               v3_scale(viewport_u, 0.5)),
+                        v3_scale(viewport_v, 0.5));
+    cam.pixel00 = v3_add(upper_left, v3_scale(v3_add(cam.du, cam.dv), 0.5));
+    cam.defocus_u = v3_scale(uu, defocus_radius);
+    cam.defocus_v = v3_scale(vv, defocus_radius);
+    cam.defocus_angle = defocus;
+    return cam;
+}
+
+static Ray camera_ray(const Camera* cam, int i, int j, Rng* rng) {
+    double ox = rng_f(rng) - 0.5;
+    double oy = rng_f(rng) - 0.5;
+    Vec3 pixel = v3_add(cam->pixel00,
+                        v3_add(v3_scale(cam->du, (double)i + ox),
+                               v3_scale(cam->dv, (double)j + oy)));
+    Vec3 origin = cam->center;
+    Vec3 p;
+    if (cam->defocus_angle > 0.0) {
+        p = rng_in_unit_disk(rng);
+        origin = v3_add(cam->center,
+                        v3_add(v3_scale(cam->defocus_u, p.x),
+                               v3_scale(cam->defocus_v, p.y)));
+    }
+    return ray_at(origin, v3_sub(pixel, origin));
+}
+
+static int to_byte(double linear) {
+    double g = linear > 0.0 ? sqrt(linear) : 0.0;
+    if (g < 0.0)
+        g = 0.0;
+    if (g > 0.999)
+        g = 0.999;
+    return (int)(256.0 * g);
+}
+
+static void render_row(RenderJob* job, int y) {
+    int x, s;
+    uint8_t* row = job->fb + (size_t)y * (size_t)job->w * 3u;
+    for (x = 0; x < job->w; x++) {
+        Rng rng;
+        Vec3 col = v3(0.0, 0.0, 0.0);
+        rng.s = pixel_seed(x, y);
+        for (s = 0; s < job->spp; s++) {
+            Ray r = camera_ray(&job->cam, x, y, &rng);
+            col = v3_add(col, ray_color(r, job->depth, job->world, job->nworld, &rng));
+        }
+        col = v3_scale(col, 1.0 / (double)job->spp);
+        row[x * 3 + 0] = (uint8_t)to_byte(col.x);
+        row[x * 3 + 1] = (uint8_t)to_byte(col.y);
+        row[x * 3 + 2] = (uint8_t)to_byte(col.z);
+    }
+}
+
+static Material mat_lambert(Vec3 albedo) {
+    Material m;
+    m.kind = MAT_LAMBERT;
+    m.albedo = albedo;
+    m.fuzz = 0.0;
+    m.ir = 1.0;
+    return m;
+}
+
+static Material mat_metal(Vec3 albedo, double fuzz) {
+    Material m;
+    m.kind = MAT_METAL;
+    m.albedo = albedo;
+    m.fuzz = fuzz < 1.0 ? fuzz : 1.0;
+    m.ir = 1.0;
+    return m;
+}
+
+static Material mat_glass(double ir) {
+    Material m;
+    m.kind = MAT_GLASS;
+    m.albedo = v3(1.0, 1.0, 1.0);
+    m.fuzz = 0.0;
+    m.ir = ir;
+    return m;
+}
+
+static void add_sphere(Sphere* world, int* n, Vec3 c, double r, Material m) {
+    if (*n >= WORLD_CAP)
+        return;
+    world[*n].center = c;
+    world[*n].radius = r;
+    world[*n].mat = m;
+    (*n)++;
+}
+
+static int build_world(Sphere* world) {
+    Rng rng;
+    int n = 0;
+    int a, b;
+    rng.s = 1;
+    add_sphere(world, &n, v3(0.0, -1000.0, 0.0), 1000.0, mat_lambert(v3(0.5, 0.5, 0.5)));
+    for (a = -11; a < 11; a++) {
+        for (b = -11; b < 11; b++) {
+            double choose = rng_f(&rng);
+            Vec3 center = v3((double)a + 0.9 * rng_f(&rng), 0.2,
+                             (double)b + 0.9 * rng_f(&rng));
+            if (v3_len(v3_sub(center, v3(4.0, 0.2, 0.0))) <= 0.9)
+                continue;
+            if (choose < 0.8) {
+                Vec3 albedo = v3_mul(rng_vec(&rng), rng_vec(&rng));
+                add_sphere(world, &n, center, 0.2, mat_lambert(albedo));
+            } else if (choose < 0.95) {
+                Vec3 albedo = rng_vec_range(&rng, 0.5, 1.0);
+                double fuzz = rng_range(&rng, 0.0, 0.5);
+                add_sphere(world, &n, center, 0.2, mat_metal(albedo, fuzz));
+            } else {
+                add_sphere(world, &n, center, 0.2, mat_glass(1.5));
+            }
+        }
+    }
+    add_sphere(world, &n, v3(0.0, 1.0, 0.0), 1.0, mat_glass(1.5));
+    add_sphere(world, &n, v3(-4.0, 1.0, 0.0), 1.0, mat_lambert(v3(0.4, 0.2, 0.1)));
+    add_sphere(world, &n, v3(4.0, 1.0, 0.0), 1.0, mat_metal(v3(0.7, 0.6, 0.5), 0.0));
+    return n;
+}
+
+static uint64_t checksum_rgb(const uint8_t* fb, size_t n) {
+    uint64_t h = 14695981039346656037ull;
+    size_t i;
+    for (i = 0; i < n; i++) {
+        h ^= (uint64_t)fb[i];
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
+static int env_truth(const char* k) {
+    const char* s = getenv(k);
+    if (!s || !s[0] || strcmp(s, "0") == 0)
+        return 0;
+    return 1;
+}
+
+static int env_int(const char* k, int def) {
+    const char* s = getenv(k);
+    if (!s || !s[0])
+        return def;
+    return atoi(s);
+}
+
+static double now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+}
+
+static int write_ppm(const char* path, const uint8_t* fb, int w, int h) {
+    FILE* f = fopen(path, "wb");
+    if (!f)
+        return 0;
+    fprintf(f, "P6\n%d %d\n255\n", w, h);
+    if (fwrite(fb, 1, (size_t)w * (size_t)h * 3u, f) != (size_t)w * (size_t)h * 3u) {
+        fclose(f);
+        return 0;
+    }
+    fclose(f);
+    return 1;
+}
+
+int main(void) {
+    int smoke = env_truth("RT_SMOKE");
+    int w = env_int("RT_WIDTH", smoke ? 48 : 400);
+    int spp = env_int("RT_SAMPLES", smoke ? 2 : 10);
+    int depth = env_int("RT_DEPTH", smoke ? 8 : 20);
+    int h;
+    int y, nworld;
+    Sphere world[WORLD_CAP];
+    uint8_t* fb;
+    RenderJob job;
+    const char* ppm;
+    double t0, t1;
+    uint64_t sum;
+
+    if (w < 1)
+        w = 1;
+    if (spp < 1)
+        spp = 1;
+    if (depth < 1)
+        depth = 1;
+    h = (int)((double)w / (16.0 / 9.0));
+    if (h < 1)
+        h = 1;
+
+    nworld = build_world(world);
+    fb = (uint8_t*)malloc((size_t)w * (size_t)h * 3u);
+    if (!fb) {
+        fprintf(stderr, "rt: out of memory\n");
+        return 1;
+    }
+    job.fb = fb;
+    job.w = w;
+    job.h = h;
+    job.spp = spp;
+    job.depth = depth;
+    job.cam = camera_init(w, h);
+    job.world = world;
+    job.nworld = nworld;
+
+    t0 = now_ms();
+    for (y = 0; y < h; y++)
+        render_row(&job, y);
+    t1 = now_ms();
+
+    sum = checksum_rgb(fb, (size_t)w * (size_t)h * 3u);
+    ppm = getenv("RT_PPM");
+    if (ppm && ppm[0] && !write_ppm(ppm, fb, w, h)) {
+        fprintf(stderr, "rt: failed to write %s\n", ppm);
+        free(fb);
+        return 1;
+    }
+    printf("rt impl=c seq=1 width=%d height=%d spp=%d depth=%d spheres=%d "
+           "checksum=0x%016llx time_ms=%.2f\n",
+           w, h, spp, depth, nworld, (unsigned long long)sum, t1 - t0);
+    free(fb);
+    return 0;
+}

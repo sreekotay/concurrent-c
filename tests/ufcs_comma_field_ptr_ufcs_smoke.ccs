@@ -1,0 +1,30 @@
+/* Value-field UFCS on a comma-declarator member (`Vec3 p, n`).
+ * `rec->n.add(one)` walks Hit.n → Vec3 (prefer-ufcs: db->maps.count). */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct Vec3 { double x, y, z; } Vec3;
+typedef struct Hit { Vec3 p, n; } Hit;
+
+static Vec3 add(Vec3 a, Vec3 b) {
+    Vec3 r;
+    r.x = a.x + b.x;
+    r.y = a.y + b.y;
+    r.z = a.z + b.z;
+    return r;
+}
+
+int main(void) {
+    Hit h = {0};
+    Hit* rec = &h;
+    Vec3 one = {1, 0, 0};
+    rec->p.x = 2;
+    rec->p.y = 3;
+    rec->p.z = 4;
+    Vec3 gotn = rec->n.add(one);
+    Vec3 gotp = rec->p.add(one);
+    if (gotn.x != 1 || gotn.y != 0 || gotn.z != 0) return 1;
+    if (gotp.x != 3 || gotp.y != 3 || gotp.z != 4) return 2;
+    printf("ufcs_comma_field_ptr_ufcs_smoke: OK\n");
+    return 0;
+}

@@ -54,6 +54,7 @@ Run an individual benchmark directly:
 | `perf_gobench_blocking_pressure.ccs` | Parked waiters plus blocking-task scheduler pressure. |
 | `fiber_overhead_profile.ccs` | Fiber vs thread overhead for heavy and minimal tasks. |
 | `parallel_hello.ccs` | Surface `@parallel` binary-tree reduction vs sequential. Compare via `compare_parallel_hello.sh`. |
+| `../real_projects/raytracer/` | Weekend raytracer: C seq vs CC `@parallel for` vs Go. `./real_projects/raytracer/compare.sh`. |
 | `parallel_hello_lowered.ccs` | Hand-lowered fork+grain sweep of the same tree (explicit spawn depth). |
 
 ### Runtime Stress And Application Patterns

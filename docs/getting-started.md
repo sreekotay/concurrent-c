@@ -413,8 +413,9 @@ timeouts / worker pool → arenas / defer. Then networking
 (`recipe_tcp_echo.ccs`, `recipe_http_get.ccs`) and build-system examples under
 `examples/`.
 
-Larger measured programs (pigz, Redis subset, CPython extension patterns) live
-under [`real_projects/`](../real_projects/); benches under [`perf/`](../perf/).
+Larger measured programs (pigz, Redis subset, CPython extension patterns,
+the Shirley weekend raytracer) live under
+[`real_projects/`](../real_projects/); benches under [`perf/`](../perf/).
 
 ## `.shcc` scripts
 

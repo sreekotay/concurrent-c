@@ -1,0 +1,18 @@
+RAYTRACER: Shirley weekend scene
+date: 2026-08-15
+host: Darwin arm64
+mode: bench (400x225, 10 spp, depth 20)
+spheres: 485
+checksum: 0xba39b7cb028e517f
+
+  row         time_ms     vs_c  checksum
+  c seq       1000.10      —  0xba39b7cb028e517f
+  cc seq      1006.77    0.99x  0xba39b7cb028e517f
+  cc par       159.57    6.27x  0xba39b7cb028e517f
+  go seq      2150.06    0.47x  0xba39b7cb028e517f
+  go par       420.50    2.38x  0xba39b7cb028e517f
+
+checksums match
+source: ./real_projects/raytracer/compare.sh
+notes: Go world slice tightened to live spheres (for i := range world).
+       Sequential Go remains ~2× C: clang inlines sphere_hit; gc does not.

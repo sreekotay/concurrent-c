@@ -74,6 +74,9 @@ tutorial, idiomatic, and production code — and race their upstreams
 - [**levenshtein**](real_projects/levenshtein/) — a CPython extension in
   CC vs upstream Levenshtein 0.27: ahead on short and long distance/ratio
   rows (e.g. 94ns vs 359ns on short words; see the specimen README).
+- [**raytracer**](real_projects/raytracer/) — Shirley weekend final scene
+  in C, CC `@parallel for` over scanlines, and Go; same LCG, matching
+  checksums (`./real_projects/raytracer/compare.sh`).
 - [**The Neckbeard Challenges**](perf/run_neckbeard_challenges.sh) — six
   cross-language robustness gauntlets (syscall kidnapping, wake storms,
   fairness, named locks) run head-to-head against pthreads, Go, and Zig,

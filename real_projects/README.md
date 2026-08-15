@@ -25,6 +25,13 @@ Normative definitions of the primitives and lowering live in `spec/concurrent-c-
 
 **Related:** `studies/cve_locality/` reconstructs historical CVEs under idiomatic CC to test locality, SERDES, and `@variant` — hits and misses both welcome.
 
+## Raytracer
+
+[`raytracer/`](raytracer/) is the Shirley *Ray Tracing in One Weekend*
+cover scene: sequential C, Concurrent-C `@parallel for` over scanlines,
+and Go with one goroutine per row. Same camera, same per-pixel LCG,
+checksum of the framebuffer. `./raytracer/compare.sh` (or `--smoke`).
+
 ## Sanitizers / fuzz
 
 ```bash

@@ -1,0 +1,13 @@
+The scene, camera, and material math follow Peter Shirley's
+"Ray Tracing in One Weekend" (https://raytracing.github.io/).
+
+That book's sample code is dedicated to the public domain under CC0:
+
+  Originally written in 2016 by Peter Shirley <ptrshrl@gmail.com>
+
+  To the extent possible under law, the author(s) have dedicated all
+  copyright and related and neighboring rights to this software to the
+  public domain worldwide. This software is distributed without any
+  warranty.
+
+  https://creativecommons.org/publicdomain/zero/1.0/
