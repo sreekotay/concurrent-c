@@ -4,7 +4,8 @@
  * Forms, selected by the token after @parallel:
  *
  *   @parallel { a = f(); b = g(); }
- *       Value join. Arms are independent assignments. The first
+ *       Value join. Arms are independent assignments, or
+ *       @serial { … } that writes one outer name. The first
  *       arm runs on the caller; each remaining arm is spawned
  *       and joined. In-flight @parallel fibers stop at
  *       256 * online processors; further arms run on the caller.
@@ -20,7 +21,8 @@
  *       is an ordinary for.
  *
  * Neither form is a nursery. n->spawn still names a task lifetime.
- * A for statement inside @parallel { } is a compile error.
+ * A for statement as a direct child of @parallel { } is a compile
+ * error; for inside @serial is ordinary C. Bare { } is not an arm.
  *
  * Tree bench vs Go: perf/compare_parallel_hello.sh
  */
@@ -76,5 +78,18 @@ int main(void) {
             return 1;
     }
     println("range: ok") !>;
+
+    int left = 0;
+    int right = 0;
+    @parallel {
+        @serial {
+            int t = 3;
+            left = t * t;
+        }
+        right = 16;
+    }
+    if (left + right != 25)
+        return 1;
+    println("serial: ok") !>;
     return 0;
 }

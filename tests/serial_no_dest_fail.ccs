@@ -1,0 +1,15 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    int a = 0;
+    int b = 0;
+    @parallel {
+        @serial {
+            int t = 1;
+            printf("%d\n", t);
+        }
+        b = 2;
+    }
+    return a + b;
+}

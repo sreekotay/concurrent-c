@@ -140,7 +140,7 @@ function with `@await f(...)` at the top level or `cc_block_on(f(...))`.
 
 **Sigil policy:** every CC-introduced keyword carries a leading `@`
 (`@async`, `@await`, `@defer`, `@cancel`, `@errhandler`,
-`@destroy`, `@with_deadline`, `@parallel`, `@comptime`, `@blocking`,
+`@destroy`, `@with_deadline`, `@parallel`, `@serial`, `@comptime`, `@blocking`,
 `@nonblocking`, `@for`, `@typehooks`, `@typeview`). Bare forms are
 reserved for plain C identifiers — `match`, `await`, `async`, `defer`,
 etc. are legal variable / field / function names and never keywords
@@ -255,6 +255,7 @@ bugs.
 | `@parallel`      | Join independent assignment arms, or walk an index range              | `@parallel { a = f(); b = g(); }`      |
 | `@parallel (pred)` | Same join; spawn if `pred`, otherwise run the arms in order         | `@parallel (d < k) { a = f(); b = g(); }` |
 | `@parallel for`  | Independent iterations over a half-open integer range                 | `@parallel for (i in 0..n) { … }`      |
+| `@serial`        | Multi-statement arm of `@parallel { }`; assigns one outer name        | `@serial { int t = f(); a = t; }`      |
 | `@destroy`     | Attach cleanup to a result-unwrap                                       | `FILE* f = open() !> @destroy;`         |
 | `@comptime`    | Compile-time evaluation / conditional                                   | `@comptime if (DEBUG) { }`             |
 | `@blocking`    | Mark a call edge as going through `run_blocking` (function or site)     | `@blocking f();` — see §8.2            |
@@ -342,6 +343,7 @@ Result-typed calls (`T!>(E)`) must be explicitly consumed. Two operators with cl
 | Form | Purpose | Example |
 | ---- | ------- | ------- |
 | `@parallel { a = …; b = …; }` | Join independent assignments. Always tries to spawn. | `@parallel { left = f(); right = g(); }` |
+| `@parallel { @serial { … } … }` | Same join; an arm may be ordinary C that writes one outer name. | `@parallel { @serial { int t = f(); a = t; } b = g(); }` |
 | `@parallel (pred) { a = …; b = …; }` | Same arms. Spawn if `pred`; otherwise serial. | `@parallel (d < k) { left = f(); right = g(); }` |
 | `@parallel for (i in lo..hi) { }` | Independent iterations over a half-open integer range. Bisects; may sequentialize. | `@parallel for (y in 0..h) { row(y); }` |
 
@@ -773,7 +775,7 @@ Concurrent-C extends C syntax with new operators and keywords in specific contex
 carries a leading `@` sigil at the lexer level. The set includes
 (non-exhaustive): `@async`, `@await`, `@blocking`, `@noblock`,
 `@match` (reserved and rejected), `@defer`, `@defer(err)`, `@defer(ok)`, `@cancel`,
-`@errhandler`, `@err`, `@destroy`, `@with_deadline`, `@parallel`, `@comptime`,
+`@errhandler`, `@err`, `@destroy`, `@with_deadline`, `@parallel`, `@serial`, `@comptime`,
 `@for`, `@latency_sensitive`, `@scoped`, `@unsafe`, `@slice`, `@string`,
 `@typehooks`, `@typeview`.
 The bare
@@ -3251,7 +3253,7 @@ This section specifies:
 - **§8.8 Blocking, Stalling, and Execution Contexts** — execution model for blocking operations, stalling classification, and cancellation guarantees
 - **§8.9 Error handling in async and nurseries** — composition of result unwrap operators (`?>`, `!>`, `@err`, `@errhandler`) defined in §3.1 with async functions and nursery teardown
 - **§8.10 Named exclusive sections (`CCExclusive`)** — arena-backed, name-keyed mutual exclusion for short critical sections
-- **§8.11 `@parallel`** — value join of independent assignments, optional spawn predicate, and `@parallel for` over a half-open index range
+- **§8.11 `@parallel`** — value join of independent assignments or `@serial` arms, optional spawn predicate, and `@parallel for` over a half-open index range
 
 ---
 
@@ -5024,9 +5026,21 @@ T a, b;
     a = f();
     b = g();
 }
+
+@parallel {
+    @serial {
+        int t = f();
+        a = t;
+    }
+    b = g();
+}
 ```
 
-The block holds two or more arms. Each arm is `name = expr;` where `name` is a simple identifier already in scope. After the closing brace, every named write is visible. Compound assignment, indirection, field and subscript destinations, declarations, and other statements are ill-formed.
+The block holds two or more arms. An arm is either `name = expr;` where `name` is a simple identifier already in scope, or `@serial { … }` whose body is ordinary C and which assigns exactly one simple outer name. After the closing brace, every named write is visible.
+
+`@serial` is legal only as a direct child of `@parallel { }`. A bare `{ }` as a direct child is ill-formed. Inner braces inside `@serial` are C scope. `@serial` is not a handle and is not legal in `@parallel for` or outside `@parallel`.
+
+Compound assignment, indirection, field and subscript destinations, declarations, and other statements are ill-formed as assignment arms. They are ordinary C inside `@serial`.
 
 Lowering is fork-join: the first arm runs on the caller; each remaining arm is spawned and joined before the brace. If spawn fails, that arm runs on the caller. The result is the same either way.
 
@@ -5042,7 +5056,7 @@ T left, right;
 }
 ```
 
-`@parallel (pred) { … }` is the same assignment join. When `pred` is true, lowering matches §8.11.1. When `pred` is false, the arms run in order on the caller and spawn is not attempted. The body always executes; `pred` chooses scheduling, not presence. There is no `else`. An empty predicate is ill-formed. `@parallel (pred) for` is ill-formed.
+`@parallel (pred) { … }` is the same join as §8.11.1, including `@serial` arms. When `pred` is true, lowering matches §8.11.1. When `pred` is false, the arms run in order on the caller and spawn is not attempted. The body always executes; `pred` chooses scheduling, not presence. There is no `else`. An empty predicate is ill-formed. `@parallel (pred) for` is ill-formed.
 
 Independence is unchanged: reading another arm's destination is undefined on both paths.
 
@@ -5056,7 +5070,7 @@ Independence is unchanged: reading another arm's destination is undefined on bot
 
 `lo..hi` is a half-open integer range. `i` is an `int` bound in the body for each iteration in `[lo, hi)`. The body is ordinary statements. A C `for (;;)` head is ill-formed; the `in` spelling matches `@comptime for`.
 
-A `for` statement inside `@parallel { }` is ill-formed. The loop is a form of the keyword, not a statement the brace happens to contain.
+A `for` statement as a direct child of `@parallel { }` is ill-formed. The loop is a form of the keyword, not a statement the brace happens to contain. A `for` inside `@serial` is ordinary C.
 
 Lowering bisects the range: one half is spawned, the other runs on the caller, then the spawn is joined. A span of length 0 or 1 runs as an ordinary sequential `for`. Nested `@parallel for` bisects the same way. If a spawn fails, that half runs on the caller.
 
@@ -5066,7 +5080,7 @@ Iterations must not race. Disjoint writes (`img[y * w + x] = …` for distinct `
 
 #### 8.11.4 Grain and limits
 
-An assignment arm after the first is spawned as a fiber and joined before the brace. `@parallel for` spawns one half of a span at each bisection; a span of length 0 or 1 is a sequential `for`. In-flight `@parallel` fibers are capped at 256 times the number of online processors; further arms and leftover spans run on the caller. That ceiling is an allocation bound, not a grain. The construct does not estimate how much work an arm contains. A caller who knows a cutoff writes it on the join (`@parallel (d < k) { … }`) so the same arms run in parallel above the cut and in order below it.
+An assignment or `@serial` arm after the first is spawned as a fiber and joined before the brace. `@parallel for` spawns one half of a span at each bisection; a span of length 0 or 1 is a sequential `for`. In-flight `@parallel` fibers are capped at 256 times the number of online processors; further arms and leftover spans run on the caller. That ceiling is an allocation bound, not a grain. The construct does not estimate how much work an arm contains. A caller who knows a cutoff writes it on the join (`@parallel (d < k) { … }`) so the same arms run in parallel above the cut and in order below it.
 
 The range bounds of `@parallel for` are converted to `int`. A span whose length does not fit in `int` is outside this form.
 
@@ -7985,9 +7999,9 @@ maps cancellation or expiry to its own documented result as required by
 
 ### J.4 `@parallel` Lowering
 
-An assignment `@parallel` block lowers to `cc_parallel_spawn` of a file-scope thunk per arm after the first, the first arm on the caller, then `cc_parallel_join` in reverse spawn order. Each thunk writes `*out = <arm rhs>` through a stack environment that lives until join returns. If spawn returns `CC_TASK_KIND_INVALID` (live-fiber ceiling or spawn failure), the thunk runs on the caller.
+An assignment `@parallel` block lowers to `cc_parallel_spawn` of a file-scope thunk per arm after the first, the first arm on the caller, then `cc_parallel_join` in reverse spawn order. An assignment thunk writes `*out = <arm rhs>` through a stack environment that lives until join returns. A `@serial` thunk copies the destination in, runs the body, and writes it back through `*out`. If spawn returns `CC_TASK_KIND_INVALID` (live-fiber ceiling or spawn failure), the thunk runs on the caller.
 
-`@parallel (pred) { … }` lowers to `if (!(pred)) {` the same assignments in order `} else` a file-scope spawn helper. A false predicate does not call spawn. The helper holds `CCTask` and env so the sequential path stays a small function.
+`@parallel (pred) { … }` lowers to `if (!(pred)) {` the same arms in order `} else` a file-scope spawn helper. A false predicate does not call spawn. The helper holds `CCTask` and env so the sequential path stays a small function.
 
 `@parallel for (i in lo..hi)` lowers to a file-scope walk that bisects `[lo, hi)`: spawn one half, walk the other, join. A span of length ≤ 1, or a failed spawn, is a C `for` over that span. The walk environment is stack-allocated at the call site and copied for the spawned half.
 

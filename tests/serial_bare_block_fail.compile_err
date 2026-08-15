@@ -1,0 +1,1 @@
+bare `{ }` is not an @parallel arm; use `@serial { }`
