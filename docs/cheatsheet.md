@@ -323,11 +323,21 @@ truncates.
 ```
 
 Nested: `cc_nursery_create(outer)` parents the inner nursery under `outer`.
+Independent value joins use `@parallel` (next), not a nursery.
 
-### `@parallel` / `@serial`
+---
+
+## `@parallel`
 
 Lexical fork-join — not a nursery, no task handle. Spec §8.11.
 Recipe: [recipe_parallel.ccs](../examples/recipe_parallel.ccs).
+
+| Form | Meaning |
+|------|---------|
+| `@parallel { a = f(); b = g(); }` | Independent assignment arms. First on the caller; the rest may spawn. |
+| `@serial { …; a = t; }` | Multi-statement arm. Ordinary C; writes exactly one outer name. |
+| `@parallel (pred) { … }` | Same arms. Spawn if `pred`; otherwise run in order. Body always runs. |
+| `@parallel for (i in lo..hi) { … }` | Independent iterations over `[lo, hi)`. Bisects; span 0 or 1 is a plain `for`. |
 
 ```c
 int a = 0, b = 0;
