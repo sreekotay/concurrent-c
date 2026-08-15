@@ -1,15 +1,14 @@
-; Oracle-matched JSON recognition factory (match layer) — not RFC 8259.
-; Specialize with `include` + rule overrides for keep / collect / encode.
-; Path is relative to the including source (or nested .rules file).
+; JSON recognition factory (RFC 8259 JSON-text). Specialize with `include`
+; + rule overrides for keep / collect / encode. Path is relative to the
+; including source (or nested .rules file).
 top:     value
 ws:      any charset [#' ' #'\t' #'\r' #'\n']
 digit:   charset [#'0' - #'9']
 onenine: charset [#'1' - #'9']
 hexd:    charset [#'0' - #'9' #'a' - #'f' #'A' - #'F']
-; Structural ends only — matches the hand json.h oracle (trusted corpora).
-; Raw controls in strings are not rejected by the fast scan; escapes still
-; go through `esc`. SWAR then packs as quote+backslash with T=0.
-strchar: complement charset [#'"' #'\\']
+; Unescaped U+0000–U+001F fail. Escapes go through `esc`. SWAR stop is
+; T=0x20 plus quote and backslash.
+strchar: complement charset [#'"' #'\\' #'\0' - #'\x1F']
 esc:     [#'\\' [[#'u' hexd hexd hexd hexd]
                 | charset [#'"' #'\\' #'/' #'b' #'f' #'n' #'r' #'t']]]
 string:  [#'"' any [some strchar | esc] #'"']

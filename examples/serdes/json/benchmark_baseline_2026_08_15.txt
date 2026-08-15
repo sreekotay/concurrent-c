@@ -1,0 +1,39 @@
+# serdes JSON benchmark baseline — 2026-08-15T23:13Z
+# commit: 5ff08c77  box: Darwin arm64 (macOS 26.5.2)
+# ./bench.sh -a  K=200  (full ladder: golden / yyjson / gen / write / shapes / cc_dom)
+# RFC 8259 recognition is json.rules; json.h golden still accepts raw controls
+== twitter.json  (K=200) ==
+ours   /Users/airm5/Documents/code/concurrent-c/examples/serdes/json/twitter.json   2339 MB/s    270.0 us/parse   98.3% zero-copy (borrow=17787 mat=312)  node=24B
+  yyjson default   4716 MB/s  (copy strings + eager num)
+  yyjson insitu    4852 MB/s  (in-place, no str alloc; incl input memcpy)
+  /Users/airm5/Documents/code/concurrent-c/examples/serdes/json/twitter.json gen match    3204.358634934824 MB/s  197.08000007085502 us/parse
+  /Users/airm5/Documents/code/concurrent-c/examples/serdes/json/twitter.json gen collect  2669.237922303084 MB/s  236.58999998588115 us/parse  (keeps=20208 bytes=377768)
+  /Users/airm5/Documents/code/concurrent-c/examples/serdes/json/twitter.json gen DOM      2748.645295637493 MB/s  229.75500003667548 us/parse
+  /Users/airm5/Documents/code/concurrent-c/examples/serdes/json/twitter.json gen schema   2986.380722472105 MB/s  211.46500017493963 us/parse  (statuses=100 textbytes=30610)
+  json write gen  3091.005034869581 MB/s  (38075 bytes/iter, statuses=100)
+  json write hand 3154.5153280316845 MB/s  (unchecked single-pass)
+  parse tape      2305 MB/s    273.9 us/parse  node=24B/member-pair=48B
+  parse shapes    2413 MB/s    261.7 us/parse  slot=16B  shapes=147 (25 finalized)  trans-hit=100.00%
+  access tape     125.4 Mlookups/s  (linear pair walk, sum=674640000)
+  access shapes   185.6 Mlookups/s  (per-shape hash, sum=674640000)
+  access shapes   441.4 Mlookups/s  (prepared keys, sum=674640000)
+  access shapes   591.1 Mlookups/s  (inline cache: shape check + slot)
+  dict fallback  deep: shapes=65 dicts=1   wide: shapes=62 dicts=469  (bounded, digests agree)
+  gen tape DOM   2610.8607562857173 MB/s  241.88000010326505 us/parse
+  gen shaped DOM 1822.9486908258634 MB/s  346.4249998796731 us/parse  shapes=147 dicts=0
+  access shaped  334.56005412233617 Mlookups/s (prepared keys, sum=674640000)
+== numbers.json  (K=200) ==
+ours   /Users/airm5/Documents/code/concurrent-c/examples/serdes/json/numbers.json   1613 MB/s    202.5 us/parse   100.0% zero-copy (borrow=0 mat=0)  node=24B
+  yyjson default   2062 MB/s  (copy strings + eager num)
+  yyjson insitu    2060 MB/s  (in-place, no str alloc; incl input memcpy)
+  /Users/airm5/Documents/code/concurrent-c/examples/serdes/json/numbers.json gen match    2066.367289339419 MB/s  158.10499986400828 us/parse
+  /Users/airm5/Documents/code/concurrent-c/examples/serdes/json/numbers.json gen collect  1735.1514986868526 MB/s  188.28500004019588 us/parse  (keeps=30000 bytes=296701)
+  /Users/airm5/Documents/code/concurrent-c/examples/serdes/json/numbers.json gen DOM      1822.204250688819 MB/s  179.2899999418296 us/parse
+  /Users/airm5/Documents/code/concurrent-c/examples/serdes/json/numbers.json gen schema     (skipped: corpus is not Feed-shaped)
+  write: corpus is not a Feed — skipped
+  parse tape      1650 MB/s    198.0 us/parse  node=24B/member-pair=48B
+  parse shapes    1603 MB/s    203.9 us/parse  slot=16B  shapes=0 (0 finalized)  trans-hit=100.00%
+  no statuses — access bench skipped
+no statuses
+  gen tape DOM   1758.8317636339505 MB/s  185.7499999459833 us/parse
+  gen shaped DOM 1199.878801598143 MB/s  272.27999991737306 us/parse  shapes=0 dicts=0

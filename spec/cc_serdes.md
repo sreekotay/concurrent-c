@@ -50,7 +50,11 @@ Grammar files are compile-time factories. In a rules block, `include "path"`
 copies rules from a file and `include Name` copies a rules grammar declared
 earlier in the translation unit. In a schema, `rules [ include "path" ]`
 creates a private copy, while `use Name` and `use "path" as Name` share a rules
-factory and require qualified references such as `Name.rule`.
+factory and require qualified references such as `Name.rule`. The JSON
+factory in `examples/serdes/json/json.rules` recognizes RFC 8259
+JSON-text (`ws value ws`, the seven value types, no leading zeros or
+trailing dots on numbers). Unescaped U+0000–U+001F in a string is a
+miss.
 
 A fenced body may contain `depth N`, where `N` is an integer from 1 through
 65535. The default nest limit is 128. The directive is valid only in the
@@ -75,9 +79,11 @@ override of an included rule does not claim the entry. If the block declares no
 new depth-zero rule, the first entry copied from its includes remains the
 default. Rules compose literals, character sets and complements, sequences,
 ordered choice, references, `some` / `any` / `opt` repetition, and
-`and` / `not` peeks (try the child and restore the cursor). Whitespace
-is consumed only where the grammar declares it. The engine grows its IR
-from a stack-rooted arena; grammar size is not a fixed cap.
+`and` / `not` peeks (try the child and restore the cursor). Character and
+string literals accept `\\n`, `\\t`, `\\r`, `\\0`, `\\\\`, `\\'`, `\\"`,
+and `\\xHH` (two hex digits). Whitespace is consumed only where the
+grammar declares it. The engine grows its IR from a stack-rooted arena;
+grammar size is not a fixed cap.
 
 `keep` records a matched span, `skip` consumes without output, and `collect`
 forms an interior collection. The generated operations are used as follows:
@@ -98,7 +104,9 @@ A plain kept span is a borrowed `CCSlice` into the source. A
 codec may preserve a legal borrow or materialize transformed bytes in the
 arena. `cc_slice_is_unique` distinguishes materialized slices from borrowed
 views. Borrowed slices remain valid only while their source storage remains
-valid.
+valid. A successful keep does not imply Unicode well-formedness of a
+borrowed span; that check belongs at the use site that treats the bytes as
+text.
 
 Rules do not generate domain structs. Tape DOM and shaped DOM are projections
 over the rule grammar, not separate grammar dialects.
@@ -151,6 +159,17 @@ matched numeric spans into floating values. Direct contiguous byte fields
 borrow from the source; decoded, normalized, or otherwise transformed fields
 materialize in the arena. Repeated and recursive structures allocate their
 containers in the arena while preserving each leaf's actual provenance.
+
+`field: Schema` binds one nested value as an arena-allocated `Schema*`. The
+named type may be declared later in the translation unit, including a cycle
+(`Member` holds `Val*`, `Val` holds `object of Member`). A typo is a C
+compile failure on the generated pointer type.
+
+`field: G.rule of Schema` narrows a list-shaped rule (open, optional
+delimited elements, close) and fills an arena array of `Schema`. The same
+form applies to member lists (`members: Json.object of JsonMember`) and
+value lists (`elems: Json.array of JsonVal`). The rule supplies delimiters
+and pads; the schema supplies the element type.
 
 `items Elem count cap N` emits an inline `Elem[N]` field and its generated
 count field; parsing does not allocate the item array. A negative count or a
@@ -276,6 +295,12 @@ arm (equality arms emit `N`; lower-bound arms derive the int from a later
 only) are allowed. Prefix `one of` remains the entire schema body; field mode
 may follow shared product terms. One `one of` per schema.
 
+Prefix dispatch is the first distinct byte of each arm: a leading
+literal, a narrowed list's open byte, or the singleton FIRST set of a
+bound rule (`Json.string` → `"`). An arm whose first term has several
+possible first bytes (JSON number) is the default arm. At most one
+default arm is allowed; first bytes must be distinct.
+
 ## Errors and source origin
 
 Malformed grammar declarations are compile-time errors attributed to the
@@ -286,8 +311,12 @@ without a complete requested write projection.
 Runtime recognition, collection, shaped DOM, and schema parse operations report
 failure with zero. Rules tape parsing reports failure with a null pointer. They
 do not expose partially successful output as success. Write reports failure
-with a zero byte count, and format returns an empty string. Grammar operations
-compose with the language's ordinary result handling at call sites.
+with a zero byte count, and format returns an empty string. After a failed
+`cc_match` or `cc_parse` in the same thread, `cc_fail_pos()` is the
+high-water byte offset of the miss (zero if the last call succeeded or
+never ran). Recognition stays boolean; the cursor is not a second result
+channel. Grammar operations compose with the language's ordinary result
+handling at call sites.
 
 `cc_dom(Name, src, len, registry, arena, out)` is the rules engine's shaped-DOM
 projection. It builds `CCShapeVal` objects and arrays using the caller's

@@ -8,8 +8,7 @@
 //   - first declared rule is the entry point
 //   - PEG ordered choice; `any` is greedy with an empty-match guard
 //   - faithful JSON numbers (no leading zeros, optional frac/exp)
-//   - strings: escapes incl \uXXXX; raw controls match the json.h oracle
-//     (not rejected by the fast scan)
+//   - strings: RFC 8259 — unescaped U+0000–U+001F fail; escapes incl \uXXXX
 #include <ccc/std/prelude.cch>
 
 @grammar(rules) Json {~~~~
@@ -20,6 +19,15 @@ static int expect(const char* src, int want) {
     int got = Json_match(src, strlen(src));
     if (got != want) {
         printf("FAIL: Json_match(%s) = %d, want %d\n", src, got, want);
+        return 0;
+    }
+    return 1;
+}
+
+static int expect_n(const char* src, size_t n, int want, const char* tag) {
+    int got = Json_match(src, n);
+    if (got != want) {
+        printf("FAIL: %s Json_match = %d, want %d\n", tag, got, want);
         return 0;
     }
     return 1;
@@ -47,6 +55,10 @@ int main(void) {
     pass &= expect(" [ ] ", 1);
     pass &= expect("null", 1);
     pass &= expect("\"str with \\\"quote\\\" and \\u00e9\"", 1);
+    pass &= expect("\"\"", 1);
+    pass &= expect("\"a b\"", 1);         /* U+0020 is legal unescaped */
+    pass &= expect("\"\\t\"", 1);
+    pass &= expect("\"\\u0001\"", 1);
     pass &= expect("-0.5e+10", 1);
     pass &= expect("0", 1);
     pass &= expect("[1,2.5,-3e2,\"x\",true,false,null,[],{}]", 1);
@@ -54,8 +66,23 @@ int main(void) {
     /* negatives */
     pass &= expect("", 0);
     pass &= expect("01", 0);              /* leading zero */
+    pass &= expect("1.", 0);
+    pass &= expect(".1", 0);
+    pass &= expect("+1", 0);
     pass &= expect("-", 0);
     pass &= expect("[1,]", 0);            /* trailing comma */
+    {
+        const char tab[] = { '"', 'a', '\t', 'b', '"' };
+        const char nl[] = { '"', 'a', '\n', 'b', '"' };
+        const char c01[] = { '"', 'a', 1, 'b', '"' };
+        const char nul[] = { '"', 'a', 0, 'b', '"' };
+        const char us[] = { '"', 'a', 0x1F, 'b', '"' };
+        pass &= expect_n(tab, sizeof(tab), 0, "unescaped tab");
+        pass &= expect_n(nl, sizeof(nl), 0, "unescaped newline");
+        pass &= expect_n(c01, sizeof(c01), 0, "unescaped 0x01");
+        pass &= expect_n(nul, sizeof(nul), 0, "unescaped NUL");
+        pass &= expect_n(us, sizeof(us), 0, "unescaped 0x1F");
+    }
     pass &= expect("{\"a\" 1}", 0);       /* missing colon */
     pass &= expect("[1 2]", 0);           /* missing comma */
     pass &= expect("\"unterminated", 0);

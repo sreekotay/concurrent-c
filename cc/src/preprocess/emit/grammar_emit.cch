@@ -416,6 +416,21 @@ static inline CCString cc_gr_witems_text(CCArena* a, int k, int md,
     return o;
 }
 
+static inline CCString cc_gr_wschema_text(CCArena* a, int md, const char* field,
+                                          const char* etype) {
+    if (md == CC_GR_WPUT)
+        return @string(`    if (!v->${field}) return 0;
+    o += ${etype}__wput(v->${field}, dst + o);
+`, a);
+    if (md == CC_GR_WCHK)
+        return @string(`    if (!v->${field}) return 0;
+    if (!${etype}__wchk(v->${field}, dst, cap, &o)) return 0;
+`, a);
+    return @string(`    if (!v->${field}) return 0;
+    o += ${etype}__wmeasure(v->${field});
+`, a);
+}
+
 /* narrowed delimited list: separator byte between elements comes from the
  * decomposed rule; open/close bytes ride the caller's constant-run WAcc */
 static inline CCString cc_gr_wnarrow_list_text(CCArena* a, int k, int md,
@@ -583,7 +598,7 @@ ${fail}: __attribute__((unused));
 static inline CCString cc_gr_pad_call_text(CCArena* a, const char* g, const char* cls,
                                            const char* r, const char* fail,
                                            const char* darg) {
-    return @string(`    if (!${g}__${cls}_${r}(s, n, &p${darg})) goto ${fail};
+    return @string(`    if (!${g}__${cls}_${r}(s, n, &p${darg})) { cc_grammar_note_fail(p); goto ${fail}; };
 `, a);
 }
 
@@ -593,15 +608,15 @@ static inline CCString cc_gr_bind_int_store_text(CCArena* a, int k, int neg,
                                                  const char* fail) {
     if (neg)
         return @string(`      if (ng${k}) {
-          if (v${k} > 9223372036854775808ULL) goto ${fail};
+          if (v${k} > 9223372036854775808ULL) { cc_grammar_note_fail(p); goto ${fail}; };
           out->${pfx}${field} = (v${k} == 9223372036854775808ULL)
               ? (-9223372036854775807LL - 1) : -(long long)v${k};
       } else {
-          if (v${k} > 9223372036854775807ULL) goto ${fail};
+          if (v${k} > 9223372036854775807ULL) { cc_grammar_note_fail(p); goto ${fail}; };
           out->${pfx}${field} = (long long)v${k};
       }
 `, a);
-    return @string(`      if (v${k} > 9223372036854775807ULL) goto ${fail};
+    return @string(`      if (v${k} > 9223372036854775807ULL) { cc_grammar_note_fail(p); goto ${fail}; };
       out->${pfx}${field} = (long long)v${k};
 `, a);
 }
@@ -623,10 +638,10 @@ static inline CCString cc_gr_bind_int_run_text(CCArena* a, int k, int neg,
       for (; p < n && s[p] >= '0' && s[p] <= '9'; p++) {
           unsigned dgt${k} = (unsigned)(s[p] - '0');
           if (v${k} > 1844674407370955161ULL ||
-              (v${k} == 1844674407370955161ULL && dgt${k} > 5u)) goto ${fail};
+              (v${k} == 1844674407370955161ULL && dgt${k} > 5u)) { cc_grammar_note_fail(p); goto ${fail}; };
           v${k} = v${k} * 10ull + dgt${k};
       }
-      if (p == d${k}) { if (p >= n) *cc_inc = 1; goto ${fail}; }
+      if (p == d${k}) { if (p >= n) *cc_inc = 1; { cc_grammar_note_fail(p); goto ${fail}; }; }
 `, a), a);
     cc_gr__cat(&o, cc_gr_bind_int_store_text(a, k, neg, pfx, field, fail), a);
     cc_gr__cat(&o, @string(`    }
@@ -639,7 +654,7 @@ static inline CCString cc_gr_bind_int_run_text(CCArena* a, int k, int neg,
 static inline CCString cc_gr_bind_span_call_text(CCArena* a, int k, const char* g,
                                                  const char* r, const char* fail) {
     return @string(`    { size_t xa${k}, xb${k}; int xd${k};
-      if (!${g}__x_${r}(s, n, &p, &xa${k}, &xb${k}, &xd${k})) goto ${fail};
+      if (!${g}__x_${r}(s, n, &p, &xa${k}, &xb${k}, &xd${k})) { cc_grammar_note_fail(p); goto ${fail}; };
 `, a);
 }
 
@@ -661,7 +676,7 @@ static inline CCString cc_gr_bind_int_span_text(CCArena* a, int k,
         for (; q${k} < xb${k} && s[q${k}] >= '0' && s[q${k}] <= '9'; q${k}++) {
             unsigned dgt${k} = (unsigned)(s[q${k}] - '0');
             if (v${k} > 1844674407370955161ULL ||
-                (v${k} == 1844674407370955161ULL && dgt${k} > 5u)) goto ${fail};
+                (v${k} == 1844674407370955161ULL && dgt${k} > 5u)) { cc_grammar_note_fail(p); goto ${fail}; };
             v${k} = v${k} * 10ull + dgt${k};
         }
 `, a), a);
@@ -679,7 +694,7 @@ static inline CCString cc_gr_bind_float_span_text(CCArena* a, int k, const char*
         double v${k} = 0.0;
         ffc_result r${k} = ffc_from_chars_double_options(
             (const char*)(s + xa${k}), (const char*)(s + xb${k}), &v${k}, o${k});
-        if (r${k}.outcome != FFC_OUTCOME_OK) goto ${fail};
+        if (r${k}.outcome != FFC_OUTCOME_OK) { cc_grammar_note_fail(p); goto ${fail}; };
         out->${pfx}${field} = v${k}; } }
 `, a);
 }
@@ -690,7 +705,7 @@ static inline CCString cc_gr_bind_slice_codec_text(CCArena* a, int k, const char
                                                    const char* field, const char* codec,
                                                    const char* fail) {
     return @string(`      if (!xd${k}) out->${pfx}${field} = cc_slice_from_buffer((void*)(s + xa${k}), xb${k} - xa${k});
-      else if (!${codec}((const char*)(s + xa${k}), xb${k} - xa${k}, &out->${pfx}${field}, arena)) goto ${fail};
+      else if (!${codec}((const char*)(s + xa${k}), xb${k} - xa${k}, &out->${pfx}${field}, arena)) { cc_grammar_note_fail(p); goto ${fail}; };
     }
 `, a);
 }
@@ -711,8 +726,8 @@ static inline CCString cc_gr_bytes_term_text(CCArena* a, int k, const char* cpfx
                                              const char* field, const char* fail) {
     /* CCSliceHdr: wire borrow is {ptr,len}; full CCSlice keeps provenance id. */
     return @string(`    { long long L${k} = out->${cpfx}${cfield};
-      if (L${k} < 0) goto ${fail};
-      if ((unsigned long long)L${k} > (unsigned long long)(n - p)) { *cc_inc = 1; goto ${fail}; }
+      if (L${k} < 0) { cc_grammar_note_fail(p); goto ${fail}; };
+      if ((unsigned long long)L${k} > (unsigned long long)(n - p)) { *cc_inc = 1; { cc_grammar_note_fail(p); goto ${fail}; }; }
       out->${fpfx}${field} = cc_slice_hdr_from_buffer((void*)(s + p), (size_t)L${k});
       p += (size_t)L${k}; }
 `, a);
@@ -727,20 +742,20 @@ static inline CCString cc_gr_items_counted_text(CCArena* a, int k, const char* T
                                                 int cap, const char* fail) {
     if (cap > 0)
         return @string(`    { long long C${k} = out->${cpfx}${cfield};
-      if (C${k} < 0 || C${k} > ${cap}) goto ${fail};
-      if ((unsigned long long)C${k} > n - p) { *cc_inc = 1; goto ${fail}; }
+      if (C${k} < 0 || C${k} > ${cap}) { cc_grammar_note_fail(p); goto ${fail}; };
+      if ((unsigned long long)C${k} > n - p) { *cc_inc = 1; { cc_grammar_note_fail(p); goto ${fail}; }; }
       for (long long i${k} = 0; i${k} < C${k}; i${k}++)
-          if (!${T}__fill(s, n, &p, arena, &out->${fpfx}${field}[i${k}], cc_inc, cc_depth + 1)) goto ${fail};
+          if (!${T}__fill(s, n, &p, arena, &out->${fpfx}${field}[i${k}], cc_inc, cc_depth + 1)) { cc_grammar_note_fail(p); goto ${fail}; };
       out->${fpfx}${field}_n = (size_t)C${k}; }
 `, a);
     return @string(`    { long long C${k} = out->${cpfx}${cfield};
-      if (C${k} < 0) goto ${fail};
-      if ((unsigned long long)C${k} > n - p) { *cc_inc = 1; goto ${fail}; }
+      if (C${k} < 0) { cc_grammar_note_fail(p); goto ${fail}; };
+      if ((unsigned long long)C${k} > n - p) { *cc_inc = 1; { cc_grammar_note_fail(p); goto ${fail}; }; }
       size_t cap${k} = C${k} > 0 ? (size_t)C${k} : 1;
       ${T}* v${k} = (${T}*)cc_arena_alloc_local(arena, cap${k} * sizeof(${T}), _Alignof(${T}));
-      if (!v${k}) goto ${fail};
+      if (!v${k}) { cc_grammar_note_fail(p); goto ${fail}; };
       for (long long i${k} = 0; i${k} < C${k}; i${k}++)
-          if (!${T}__fill(s, n, &p, arena, &v${k}[i${k}], cc_inc, cc_depth + 1)) goto ${fail};
+          if (!${T}__fill(s, n, &p, arena, &v${k}[i${k}], cc_inc, cc_depth + 1)) { cc_grammar_note_fail(p); goto ${fail}; };
       out->${fpfx}${field} = v${k}; out->${fpfx}${field}_n = (size_t)C${k}; }
 `, a);
 }
@@ -750,12 +765,12 @@ static inline CCString cc_gr_items_counted_text(CCArena* a, int k, const char* T
 static inline CCString cc_gr_lvec_head_text(CCArena* a, int k, const char* T, const char* fail) {
     return @string(`    { size_t cap${k} = 8, cnt${k} = 0;
     ${T}* v${k} = (${T}*)cc_arena_alloc_local(arena, cap${k} * sizeof(${T}), _Alignof(${T}));
-    if (!v${k}) goto ${fail};
+    if (!v${k}) { cc_grammar_note_fail(p); goto ${fail}; };
 `, a);
 }
 
 static inline CCString cc_gr_byte_check_text(CCArena* a, int b, const char* fail) {
-    return @string(`    if (!(p < n && s[p] == ${b})) goto ${fail};
+    return @string(`    if (!(p < n && s[p] == ${b})) { cc_grammar_note_fail(p); goto ${fail}; };
     p++;
 `, a);
 }
@@ -770,15 +785,42 @@ static inline CCString cc_gr_lvec_grow_text(CCArena* a, int k, const char* T, co
     return @string(`    if (cnt${k} == cap${k}) {
         ${T}* nv${k} = (${T}*)cc_arena_realloc(arena, arena, v${k},
             cap${k} * sizeof(${T}), cap${k} * 2 * sizeof(${T}), _Alignof(${T}));
-        if (!nv${k}) goto ${fail};
+        if (!nv${k}) { cc_grammar_note_fail(p); goto ${fail}; };
         v${k} = nv${k}; cap${k} *= 2;
     }
 `, a);
 }
 
 static inline CCString cc_gr_lvec_fill_text(CCArena* a, int k, const char* T, const char* fail) {
-    return @string(`    if (!${T}__fill(s, n, &p, arena, &v${k}[cnt${k}], cc_inc, cc_depth + 1)) goto ${fail};
+    return @string(`    if (!${T}__fill(s, n, &p, arena, &v${k}[cnt${k}], cc_inc, cc_depth + 1)) { cc_grammar_note_fail(p); goto ${fail}; };
     cnt${k}++;
+`, a);
+}
+
+static inline CCString cc_gr_new_fill_proto_text(CCArena* a, const char* T) {
+    return @string(`static ${T}* ${T}__new_fill(const unsigned char* s, size_t n, size_t* io,
+    CCArena* arena, int* cc_inc, int cc_depth);
+`, a);
+}
+
+static inline CCString cc_gr_new_fill_def_text(CCArena* a, const char* T) {
+    return @string(`static __attribute__((unused)) ${T}* ${T}__new_fill(const unsigned char* s, size_t n, size_t* io,
+    CCArena* arena, int* cc_inc, int cc_depth) {
+    ${T}* q = (${T}*)cc_arena_alloc_local(arena, sizeof(${T}), _Alignof(${T}));
+    if (!q) return 0;
+    memset(q, 0, sizeof(*q));
+    if (!${T}__fill(s, n, io, arena, q, cc_inc, cc_depth)) return 0;
+    return q;
+}
+`, a);
+}
+
+static inline CCString cc_gr_bind_schema_text(CCArena* a, int k, const char* T,
+                                              const char* pfx, const char* field,
+                                              const char* fail) {
+    return @string(`    { ${T}* q${k} = ${T}__new_fill(s, n, &p, arena, cc_inc, cc_depth + 1);
+      if (!q${k}) { cc_grammar_note_fail(p); goto ${fail}; };
+      out->${pfx}${field} = q${k}; }
 `, a);
 }
 
@@ -819,8 +861,8 @@ static inline CCString cc_gr_presence_text(CCArena* a, int bit) {
 /* literal terms: bounds-driven failure = INCOMPLETE, content = malformed */
 static inline CCString cc_gr_lit1_term_text(CCArena* a, int b, const char* fail) {
     CCString c = cc_gr_chr_text(a, b);
-    return @string(`    if (p >= n) { *cc_inc = 1; goto ${fail}; }
-    if (s[p] != ${b} /*${c}*/) goto ${fail};
+    return @string(`    if (p >= n) { *cc_inc = 1; { cc_grammar_note_fail(p); goto ${fail}; }; }
+    if (s[p] != ${b} /*${c}*/) { cc_grammar_note_fail(p); goto ${fail}; };
     p++;
 `, a);
 }
@@ -830,7 +872,7 @@ static inline CCString cc_gr_litn_term_text(CCArena* a, const unsigned char* lit
     /* Short lits (CRLF, "\r\n", small delimiters): per-byte compares beat
      * memcmp at redis / framing density — libc call + setup dominates. */
     CCString o = cc_string_new();
-    cc_gr__cat(&o, @string(`    if (p + ${len} > n) { *cc_inc = 1; goto ${fail}; }
+    cc_gr__cat(&o, @string(`    if (p + ${len} > n) { *cc_inc = 1; { cc_grammar_note_fail(p); goto ${fail}; }; }
 `, a), a);
     if (len > 0 && len <= 4) {
         cc_gr__cat(&o, @string(`    if (`, a), a);
@@ -840,11 +882,11 @@ static inline CCString cc_gr_litn_term_text(CCArena* a, const unsigned char* lit
             if (i) cc_gr__cat(&o, @string(` || `, a), a);
             cc_gr__cat(&o, @string(`s[p + ${i}] != ${b} /*${c}*/`, a), a);
         }
-        cc_gr__cat(&o, @string(`) goto ${fail};
+        cc_gr__cat(&o, @string(`) { cc_grammar_note_fail(p); goto ${fail}; };
 `, a), a);
     } else {
         CCString esc = cc_gr_esc_text(a, lit, len);
-        cc_gr__cat(&o, @string(`    if (memcmp(s + p, "${esc}", ${len}) != 0) goto ${fail};
+        cc_gr__cat(&o, @string(`    if (memcmp(s + p, "${esc}", ${len}) != 0) { cc_grammar_note_fail(p); goto ${fail}; };
 `, a), a);
     }
     cc_gr__cat(&o, @string(`    p += ${len};
@@ -858,14 +900,14 @@ static inline CCString cc_gr_litn_term_text(CCArena* a, const unsigned char* lit
 static inline CCString cc_gr_key_span_text(CCArena* a, int k, const char* g,
                                            const char* r, const char* fail) {
     return @string(`    { size_t xa${k}, xb${k}; int xd${k};
-      if (!${g}__x_${r}(s, n, &p, &xa${k}, &xb${k}, &xd${k})) goto ${fail};
+      if (!${g}__x_${r}(s, n, &p, &xa${k}, &xb${k}, &xd${k})) { cc_grammar_note_fail(p); goto ${fail}; };
       (void)xd${k};
 `, a);
 }
 
 /* member-scope byte check (6-space indent, inside the key block) */
 static inline CCString cc_gr_kv_check_text(CCArena* a, int b, const char* fail) {
-    return @string(`      if (!(p < n && s[p] == ${b})) goto ${fail};
+    return @string(`      if (!(p < n && s[p] == ${b})) { cc_grammar_note_fail(p); goto ${fail}; };
       p++;
 `, a);
 }
@@ -930,12 +972,12 @@ static inline CCString cc_gr_fk_fn_close_text(CCArena* a) {
 static inline CCString cc_gr_pad_call6_text(CCArena* a, const char* g, const char* cls,
                                             const char* r, const char* fail,
                                             const char* darg) {
-    return @string(`      if (!${g}__${cls}_${r}(s, n, &p${darg})) goto ${fail};
+    return @string(`      if (!${g}__${cls}_${r}(s, n, &p${darg})) { cc_grammar_note_fail(p); goto ${fail}; };
 `, a);
 }
 
 static inline CCString cc_gr_unknown_member_text(CCArena* a, const char* fail) {
-    return @string(`      goto ${fail};   /* unknown member and no else rule */
+    return @string(`      { cc_grammar_note_fail(p); goto ${fail}; };   /* unknown member and no else rule */
 `, a);
 }
 
@@ -1046,7 +1088,7 @@ static inline CCString cc_gr_get_hit_close_text(CCArena* a) {
 
 /* ---- tagged-union first-byte dispatch (`one of`) ---- */
 static inline CCString cc_gr_union_head_text(CCArena* a, const char* fail) {
-    return @string(`    if (p >= n) { *cc_inc = 1; goto ${fail}; }
+    return @string(`    if (p >= n) { *cc_inc = 1; { cc_grammar_note_fail(p); goto ${fail}; }; }
     switch (s[p]) {
 `, a);
 }
@@ -1079,7 +1121,7 @@ static inline CCString cc_gr_funion_arm_end_text(CCArena* a) {
 }
 
 static inline CCString cc_gr_funion_fail_text(CCArena* a, const char* fail) {
-    return @string(`      else goto ${fail};
+    return @string(`      else { cc_grammar_note_fail(p); goto ${fail}; };
     }
 `, a);
 }
@@ -1105,7 +1147,7 @@ static inline CCString cc_gr_union_default_text(CCArena* a,
 }
 
 static inline CCString cc_gr_union_no_default_text(CCArena* a, const char* fail) {
-    return @string(`    default: goto ${fail};
+    return @string(`    default: { cc_grammar_note_fail(p); goto ${fail}; };
 `, a);
 }
 
@@ -1189,7 +1231,7 @@ static inline CCString cc_gr_matcher_head_text(CCArena* a, const char* attr, con
 static inline CCString cc_gr_np_call_text(CCArena* a, const char* n, const char* cls,
                                           const char* r, const char* fail,
                                           const char* darg) {
-    return @string(`    if (!${n}__${cls}_${r}__np(s, n, &p${darg})) goto ${fail};
+    return @string(`    if (!${n}__${cls}_${r}__np(s, n, &p${darg})) { cc_grammar_note_fail(p); goto ${fail}; };
 `, a);
 }
 
@@ -1203,7 +1245,7 @@ static inline CCString cc_gr_bind_span_inline_close_text(CCArena* a) {
 static inline CCString cc_gr_pad_call_ctx_text(CCArena* a, const char* n, const char* cls,
                                                const char* r, const char* fail,
                                                const char* darg) {
-    return @string(`    if (!${n}__${cls}_${r}(c, s, n, &p${darg})) goto ${fail};
+    return @string(`    if (!${n}__${cls}_${r}(c, s, n, &p${darg})) { cc_grammar_note_fail(p); goto ${fail}; };
 `, a);
 }
 
@@ -1241,6 +1283,11 @@ static inline CCString cc_gr_ffc_include_text(CCArena* a) {
 `, a);
 }
 
+static inline CCString cc_gr_fwd_type_text(CCArena* a, const char* n) {
+    return @string(`typedef struct ${n} ${n};
+`, a);
+}
+
 static inline CCString cc_gr_struct_open_text(CCArena* a, const char* n) {
     return @string(`typedef struct ${n} {
 `, a);
@@ -1260,6 +1307,8 @@ static inline CCString cc_gr_member_text(CCArena* a, int vk, const char* T,
 `, a);
     if (vk == 5) return @string(`    CCSliceHdr ${field};
 `, a);
+    if (vk == 6) return @string(`    ${T}* ${field};
+`, a);
     return @string(`    ${T}* ${field}; size_t ${field}_n;
 `, a);
 }
@@ -1276,6 +1325,8 @@ static inline CCString cc_gr_umember_text(CCArena* a, int vk, const char* T,
     if (vk == 3) return @string(`            ${T} ${field}[${cap}]; size_t ${field}_n;
 `, a);
     if (vk == 5) return @string(`            CCSliceHdr ${field};
+`, a);
+    if (vk == 6) return @string(`            struct ${T}* ${field};
 `, a);
     return @string(`            struct ${T}* ${field}; size_t ${field}_n;
 `, a);
@@ -1358,6 +1409,7 @@ static inline CCString cc_gr_fill_tail_text(CCArena* a, const char* fail) {
     return @string(`    *io = p;
     return 1;
 ${fail}: __attribute__((unused));
+    cc_grammar_note_fail(p);
     return 0;
 }
 `, a);
@@ -1367,9 +1419,11 @@ static inline CCString cc_gr_parse_fn_text(CCArena* a, const char* n) {
     return @string(`static int ${n}_parse(const char* s0, size_t n, CCArena* arena, ${n}* out) {
     const unsigned char* s = (const unsigned char*)s0;
     size_t p = 0;
+    cc_grammar_fail_reset();
     { int cc_i0 = 0;
     if (!${n}__fill(s, n, &p, arena, out, &cc_i0, 0)) return 0; }
-    return p == n;
+    if (p != n) { cc_grammar_note_fail(p); return 0; }
+    return 1;
 }
 `, a);
 }
@@ -1431,7 +1485,7 @@ static inline CCString cc_gr_cse_bitset_text(CCArena* a, const char* n, int cs) 
 /* literal matches: single byte, 4/5-byte word compare, pool memcmp */
 static inline CCString cc_gr_m_lit1_text(CCArena* a, int b, const char* fail) {
     CCString c = cc_gr_chr_text(a, b);
-    return @string(`    if (!(p < n && s[p] == ${b} /*${c}*/)) goto ${fail};
+    return @string(`    if (!(p < n && s[p] == ${b} /*${c}*/)) { cc_grammar_note_fail(p); goto ${fail}; };
     p++;
 `, a);
 }
@@ -1440,14 +1494,14 @@ static inline CCString cc_gr_m_word_text(CCArena* a, unsigned int w, const unsig
                                          int len, const char* fail) {
     CCString lit = cc_gr_esc_text(a, bytes, len);
     if (len == 4)
-        return @string(`    if (!(p + 4 <= n)) goto ${fail};
-    { unsigned int w; memcpy(&w, s + p, 4); if (w != ${w}u) goto ${fail}; }  /* "${lit}" */
+        return @string(`    if (!(p + 4 <= n)) { cc_grammar_note_fail(p); goto ${fail}; };
+    { unsigned int w; memcpy(&w, s + p, 4); if (w != ${w}u) { cc_grammar_note_fail(p); goto ${fail}; }; }  /* "${lit}" */
     p += 4;
 `, a);
     {
         int b4 = (int)bytes[4];
-        return @string(`    if (!(p + 5 <= n)) goto ${fail};
-    { unsigned int w; memcpy(&w, s + p, 4); if (w != ${w}u || s[p + 4] != ${b4}) goto ${fail}; }  /* "${lit}" */
+        return @string(`    if (!(p + 5 <= n)) { cc_grammar_note_fail(p); goto ${fail}; };
+    { unsigned int w; memcpy(&w, s + p, 4); if (w != ${w}u || s[p + 4] != ${b4}) { cc_grammar_note_fail(p); goto ${fail}; }; }  /* "${lit}" */
     p += 5;
 `, a);
     }
@@ -1456,19 +1510,19 @@ static inline CCString cc_gr_m_word_text(CCArena* a, unsigned int w, const unsig
 static inline CCString cc_gr_m_litn_text(CCArena* a, const char* n, int off, int len,
                                          const unsigned char* bytes, const char* fail) {
     CCString lit = cc_gr_esc_text(a, bytes, len);
-    return @string(`    if (!(p + ${len} <= n && memcmp(s + p, ${n}__pool + ${off}, ${len}) == 0)) goto ${fail};   /* "${lit}" */
+    return @string(`    if (!(p + ${len} <= n && memcmp(s + p, ${n}__pool + ${off}, ${len}) == 0)) { cc_grammar_note_fail(p); goto ${fail}; };   /* "${lit}" */
     p += ${len};
 `, a);
 }
 
 static inline CCString cc_gr_m_cs1_text(CCArena* a, CCString cx, const char* fail) {
-    return @string(`    if (!(p < n && ${cx})) goto ${fail};
+    return @string(`    if (!(p < n && ${cx})) { cc_grammar_note_fail(p); goto ${fail}; };
     p++;
 `, a);
 }
 
 static inline CCString cc_gr_m_skip_text(CCArena* a, const char* fail) {
-    return @string(`    if (!(p < n)) goto ${fail};
+    return @string(`    if (!(p < n)) { cc_grammar_note_fail(p); goto ${fail}; };
     p++;
 `, a);
 }
@@ -1479,14 +1533,14 @@ static inline CCString cc_gr_m_ppkind_text(CCArena* a, const char* n, const char
                                            int klen, const char* fail) {
     (void)n;
     CCString kn = cc_gr_esc_text(a, (const unsigned char*)kind, klen);
-    return @string(`    if (!cc_grammar_ppkind_at(s, n, &p, "${kn}")) goto ${fail};
+    return @string(`    if (!cc_grammar_ppkind_at(s, n, &p, "${kn}")) { cc_grammar_note_fail(p); goto ${fail}; };
 `, a);
 }
 
 /* Fallible miss leaf: zero-width tape node at the restored cursor (collect). */
 static inline CCString cc_gr_fallible_leaf_text(CCArena* a, const char* n, int rid,
                                                  const char* fail) {
-    return @string(`    if (c->total == c->cap && !${n}__tgrow(c)) goto ${fail};
+    return @string(`    if (c->total == c->cap && !${n}__tgrow(c)) { cc_grammar_note_fail(p); goto ${fail}; };
     { ${n}Node* ndf = &c->tape[c->total++];
       ndf->meta = ${rid}u;
       ndf->u.bytes = (const char*)(s + p); }
@@ -1498,9 +1552,9 @@ static inline CCString cc_gr_ref_call_text(CCArena* a, const char* n, const char
                                            const char* r, const char* suf, int with_ctx,
                                            const char* fail, const char* darg) {
     if (with_ctx)
-        return @string(`    if (!${n}__${cls}_${r}${suf}(c, s, n, &p${darg})) goto ${fail};
+        return @string(`    if (!${n}__${cls}_${r}${suf}(c, s, n, &p${darg})) { cc_grammar_note_fail(p); goto ${fail}; };
 `, a);
-    return @string(`    if (!${n}__${cls}_${r}${suf}(s, n, &p${darg})) goto ${fail};
+    return @string(`    if (!${n}__${cls}_${r}${suf}(s, n, &p${darg})) { cc_grammar_note_fail(p); goto ${fail}; };
 `, a);
 }
 
@@ -1524,7 +1578,7 @@ static inline CCString cc_gr_keep_x_close_text(CCArena* a, int k, int has_codec)
 }
 
 static inline CCString cc_gr_tgrow_guard_text(CCArena* a, const char* n, const char* fail) {
-    return @string(`    if (c->total == c->cap && !${n}__tgrow(c)) goto ${fail};
+    return @string(`    if (c->total == c->cap && !${n}__tgrow(c)) { cc_grammar_note_fail(p); goto ${fail}; };
 `, a);
 }
 
@@ -1549,13 +1603,13 @@ static inline CCString cc_gr_keep_codec_tape_text(CCArena* a, const char* n, int
           c->mat_ptr = (const char**)cc_arena_alloc_local(c->arena, c->cap * sizeof(char*), 8);
           c->mat_len = (size_t*)cc_arena_alloc_local(c->arena, c->cap * sizeof(size_t), 8);
           c->mat_cow = (unsigned char*)cc_arena_alloc_local(c->arena, c->cap, 1);
-          if (!c->mat_ptr || !c->mat_len || !c->mat_cow) goto ${fail};
+          if (!c->mat_ptr || !c->mat_len || !c->mat_cow) { cc_grammar_note_fail(p); goto ${fail}; };
           memset(c->mat_ptr, 0, c->cap * sizeof(char*));
         }
         { CCSlice v${k};
           switch (${cb}) {
-          case ${cb}: if (!${codec}((const char*)(s + ka${k}), (size_t)(p - ka${k}), &v${k}, c->arena)) goto ${fail}; break;
-          default: goto ${fail};
+          case ${cb}: if (!${codec}((const char*)(s + ka${k}), (size_t)(p - ka${k}), &v${k}, c->arena)) { cc_grammar_note_fail(p); goto ${fail}; }; break;
+          default: { cc_grammar_note_fail(p); goto ${fail}; };
           }
           c->mat_ptr[ti${k}] = (const char*)v${k}.ptr;
           c->mat_len[ti${k}] = v${k}.len;
@@ -1571,8 +1625,8 @@ static inline CCString cc_gr_keep_codec_tape_text(CCArena* a, const char* n, int
 static inline CCString cc_gr_collect_begin_text(CCArena* a, const char* n, int rid,
                                                 const char* fail, int dom) {
     CCString o = cc_string_new();
-    cc_gr__cat(&o, @string(`    { if (c->bdepth >= 512) goto ${fail};
-        if (c->total == c->cap && !${n}__tgrow(c)) goto ${fail};
+    cc_gr__cat(&o, @string(`    { if (c->bdepth >= 512) { cc_grammar_note_fail(p); goto ${fail}; };
+        if (c->total == c->cap && !${n}__tgrow(c)) { cc_grammar_note_fail(p); goto ${fail}; };
         c->tape[c->total].meta = 0x100u | ${rid}u;
         c->tape[c->total].u.bytes = (const char*)(s + p);   /* source anchor */
 `, a), a);
@@ -1589,7 +1643,7 @@ static inline CCString cc_gr_collect_end_text(CCArena* a, const char* n,
     if (dom)
         return @string(`    { size_t bi = c->bstack[--c->bdepth];
         c->tape[bi].meta |= ((unsigned long long)(c->total - bi)) << 10;
-        if (c->sb && !${n}__shape_end(c, bi)) goto ${fail};
+        if (c->sb && !${n}__shape_end(c, bi)) { cc_grammar_note_fail(p); goto ${fail}; };
     }
 `, a);
     return @string(`    { size_t bi = c->bstack[--c->bdepth];
@@ -1633,7 +1687,7 @@ static inline CCString cc_gr_alt_default_fail_text(CCArena* a, int k) {
 static inline CCString cc_gr_alt_disp_tail_text(CCArena* a, int k, const char* fail) {
     return @string(`    }
     goto Lok${k};
-Lb${k}: goto ${fail};
+Lb${k}: { cc_grammar_note_fail(p); goto ${fail}; };
 Lok${k}: ; }
 `, a);
 }
@@ -1668,7 +1722,7 @@ static inline CCString cc_gr_restore_text(CCArena* a, const char* br, int k, int
 }
 
 static inline CCString cc_gr_goto_fail_text(CCArena* a, const char* fail) {
-    return @string(`    goto ${fail};
+    return @string(`    { cc_grammar_note_fail(p); goto ${fail}; };
 `, a);
 }
 
@@ -1680,7 +1734,7 @@ static inline CCString cc_gr_ok_close_text(CCArena* a, int k) {
 /* PEG `not` / `and` (peek): child already ran; restore cursor. `not` fails
  * if the child matched; `and` fails if the child missed. */
 static inline CCString cc_gr_not_hit_text(CCArena* a, int k, const char* fail) {
-    return @string(`    p = sv${k}; goto ${fail};
+    return @string(`    p = sv${k}; { cc_grammar_note_fail(p); goto ${fail}; };
 `, a);
 }
 
@@ -1863,6 +1917,7 @@ static inline CCString cc_gr_parse_entry_head_text(CCArena* a, const char* n) {
     return @string(`static ${n}Node* ${n}_parse(const char* s, size_t n, CCArena* arena) {
     ${n}__ctx c0;
     size_t p = 0;
+    cc_grammar_fail_reset();
     c0.cap = 2048 + (n / 24);  /* ~real density; tgrow covers denser input */
     c0.tape = (${n}Node*)cc_arena_alloc_local(arena, c0.cap * sizeof(${n}Node), _Alignof(${n}Node));
     if (!c0.tape) return 0;
@@ -1872,9 +1927,13 @@ static inline CCString cc_gr_parse_entry_head_text(CCArena* a, const char* n) {
     c0.tape[0].meta = 0x100u | 0xFFu;   /* root list */
     c0.tape[0].u.bytes = s;             /* source anchor */
 #if ${n}__ENTRY_PURE
-    if (!${n}__ENTRY_B((const unsigned char*)s, n, &p, 0) || p != n) return 0;
+    if (!${n}__ENTRY_B((const unsigned char*)s, n, &p, 0) || p != n) {
+        cc_grammar_note_fail(p); return 0;
+    }
 #else
-    if (!${n}__ENTRY_B(&c0, (const unsigned char*)s, n, &p, 0) || p != n) return 0;
+    if (!${n}__ENTRY_B(&c0, (const unsigned char*)s, n, &p, 0) || p != n) {
+        cc_grammar_note_fail(p); return 0;
+    }
 #endif
     c0.tape[0].meta |= ((unsigned long long)c0.total) << 10;
 `, a);
@@ -2091,9 +2150,13 @@ static inline CCString cc_gr_dom_entry_text(CCArena* a, const char* n) {
     c0.vsp = 0;
     c0.vbase[0] = 0;
 #if ${n}__ENTRY_PURE
-    if (!${n}__ENTRY_B((const unsigned char*)s, n, &p, 0) || p != n) return 0;
+    if (!${n}__ENTRY_B((const unsigned char*)s, n, &p, 0) || p != n) {
+        cc_grammar_note_fail(p); return 0;
+    }
 #else
-    if (!${n}__ENTRY_B(&c0, (const unsigned char*)s, n, &p, 0) || p != n) return 0;
+    if (!${n}__ENTRY_B(&c0, (const unsigned char*)s, n, &p, 0) || p != n) {
+        cc_grammar_note_fail(p); return 0;
+    }
 #endif
     c0.tape[0].meta |= ((unsigned long long)c0.total) << 10;
     c0.bdepth = 0;
@@ -2110,8 +2173,10 @@ static inline CCString cc_gr_dom_entry_text(CCArena* a, const char* n) {
 static inline CCString cc_gr_match_entry_text(CCArena* a, const char* n) {
     return @string(`static int ${n}_match(const char* s, size_t n) {
     size_t p = 0;
+    cc_grammar_fail_reset();
     if (!${n}__ENTRY_M((const unsigned char*)s, n, &p, 0)) return 0;
-    return p == n;
+    if (p != n) { cc_grammar_note_fail(p); return 0; }
+    return 1;
 }
 `, a);
 }

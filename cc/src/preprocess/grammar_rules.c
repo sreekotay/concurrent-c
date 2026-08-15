@@ -32,8 +32,8 @@
  *            | 'skip'                                     ; consume one byte
  *            | 'charset' '[' items ']'                    ; byte set (bitmap)
  *            | 'complement' charset-term                  ; inverted byte set
- *            | '"' bytes '"'                              ; literal
- *            | #'c'                                       ; char literal
+ *            | '"' bytes '"'                              ; literal (\n \t \r \0 \xHH \\ \' \")
+ *            | #'c'                                       ; char literal (same escapes)
  *            | '[' alt ']'                                ; group
  *            | ident                                      ; rule reference
  *     items:   { #'a' | #'a' - #'z' }                     ; chars and ranges
@@ -242,6 +242,13 @@ static size_t rg_ident(const RG* g, size_t p, size_t* end) {
 }
 
 /* One escaped-or-plain char inside a quoted form. Returns 1 and advances. */
+static int gr_hex_nibble(unsigned char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    c = (unsigned char)(c | 32);
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return -1;
+}
+
 static int rg_escchar(RG* g, size_t* io, unsigned char* out) {
     size_t p = *io;
     if (p >= g->n) return 0;
@@ -255,6 +262,16 @@ static int rg_escchar(RG* g, size_t* io, unsigned char* out) {
         case 'r': *out = '\r'; break;
         case '0': *out = '\0'; break;
         case '\\': case '\'': case '"': *out = e; break;
+        case 'x': {
+            int hi, lo;
+            if (p + 3 >= g->n) return 0;
+            hi = gr_hex_nibble((unsigned char)g->body[p + 2]);
+            lo = gr_hex_nibble((unsigned char)g->body[p + 3]);
+            if (hi < 0 || lo < 0) return 0;
+            *out = (unsigned char)((hi << 4) | lo);
+            *io = p + 4;
+            return 1;
+        }
         default: return 0;
         }
         *io = p + 2;
@@ -855,6 +872,12 @@ static int rf_popcount(const unsigned char* set) {
     int n = 0;
     for (int i = 0; i < 256; i++) if (set[i >> 3] & (1u << (i & 7))) n++;
     return n;
+}
+static int rf_singleton_byte(const unsigned char* set) {
+    if (rf_popcount(set) != 1) return -1;
+    for (int i = 0; i < 256; i++)
+        if (set[i >> 3] & (1u << (i & 7))) return i;
+    return -1;
 }
 static int rf_disjoint(const unsigned char* a, const unsigned char* b) {
     for (int i = 0; i < 32; i++) if (a[i] & b[i]) return 0;
@@ -2155,7 +2178,8 @@ static char* rg_emit(const RG* g, int origin_line, int want_match, int want_buil
 enum { SK_LIT, SK_RULE, SK_BIND_SLICE, SK_BIND_INT, SK_BIND_FLOAT, SK_BIND_ITEMS, SK_BIND_BYTES, SK_FIELDS,
        SK_UNION,            /* one of [ variant [ product-terms ] ... ] — tagged union */
        SK_NARROW_MEMBERS,   /* G.rule [ "k" term ... ] — narrow a member-list rule */
-       SK_NARROW_LIST };    /* f: G.rule of Schema    — narrow a list rule to an array */
+       SK_NARROW_LIST,      /* f: G.rule of Schema    — narrow a list rule to an array */
+       SK_BIND_SCHEMA };    /* f: Schema — one nested value (arena pointer) */
 
 /* Derived structural parameters of a narrowed rule. Narrowing is COMPOSITION:
  * the schema names a rules-grammar rule and the engine decomposes its shape —
@@ -2233,8 +2257,10 @@ typedef struct {
     int rfkey, rfpad, rfelse, ripad;              /* resolved rule idx, -1 unset */
 
     /* tagged union (`one of`): variants are product-term runs.
-     * Prefix mode (no `by`): dispatch is the first byte of each variant's
-     * leading literal (one optional non-literal DEFAULT arm).
+     * Prefix mode (no `by`): dispatch is the first distinct byte of each
+     * variant (leading lit, list/object open, or singleton FIRST of a bind
+     * rule). One optional DEFAULT arm has no single first byte (e.g. JSON
+     * number).
      * Field mode (`by <int-field>`): discriminant is that earlier int bind;
      * each arm carries an EQ/GE constraint (constr/constr_imm). */
     SVar* uv; int nuv, cap_uv;
@@ -2382,6 +2408,16 @@ static int ss_escbyte(SS* s, unsigned char* out) {
     case 'n': *out = '\n'; return 1;  case 't': *out = '\t'; return 1;
     case 'r': *out = '\r'; return 1;  case '0': *out = '\0'; return 1;
     case '\\': case '\'': case '"': *out = (unsigned char)e; return 1;
+    case 'x': {
+        int hi, lo;
+        if (s->p + 1 >= s->n) return 0;
+        hi = gr_hex_nibble((unsigned char)s->b[s->p]);
+        lo = gr_hex_nibble((unsigned char)s->b[s->p + 1]);
+        if (hi < 0 || lo < 0) return 0;
+        *out = (unsigned char)((hi << 4) | lo);
+        s->p += 2;
+        return 1;
+    }
     default: return 0;
     }
 }
@@ -2757,10 +2793,11 @@ static int ss_term(SS* s, int* out_term) {
             }
         }
     } else {
-        return ss_fail(s, s->p, s->usename[0]
-            ? "binding must be `int Use.rule`, `Use.rule`, or `items Schema` — this "
-              "schema composes with `use` (shared): qualify rule references with the use name"
-            : "binding must be `int rule`, `rule`, `bytes lenfield`, or `items Schema`");
+        /* `field: Schema` — single nested value. Pointer + arena alloc so
+         * the named type may be declared later in the file (JSON member
+         * → value → object of member). */
+        snprintf(t->etype, sizeof(t->etype), "%s", v);
+        t->kind = SK_BIND_SCHEMA;
     }
     *out_term = s->nterms++;
     return 0;
@@ -3006,13 +3043,16 @@ static void cc__grammar_note_bind_field(const char* type_name, const STerm* t) {
     else if (t->kind == SK_BIND_FLOAT) fty = "double";
     else if (t->kind == SK_BIND_SLICE) fty = "CCSlice";
     else if (t->kind == SK_BIND_BYTES) fty = "CCSliceHdr";
-    else if (t->kind == SK_BIND_ITEMS) {
-        if (t->cap > 0)
+    else if (t->kind == SK_BIND_ITEMS || t->kind == SK_NARROW_LIST) {
+        if (t->kind == SK_BIND_ITEMS && t->cap > 0)
             fty = t->etype;
         else {
             snprintf(ptr, sizeof(ptr), "%s*", t->etype);
             fty = ptr;
         }
+    } else if (t->kind == SK_BIND_SCHEMA) {
+        snprintf(ptr, sizeof(ptr), "%s*", t->etype);
+        fty = ptr;
     } else
         return;
     cc__grammar_note_ufcs_field(type_name, t->field, fty);
@@ -3112,6 +3152,26 @@ static int cc__schema_known(const char* name) {
 static int rs_rule_by_name(const RG* g, const char* name) {
     for (int r = 0; r < g->nrules; r++)
         if (strcmp(g->rules[r].name, name) == 0) return r;
+    return -1;
+}
+
+/* Prefix `one of` dispatch byte. A singleton FIRST set (Json.string → '"')
+ * or a narrowed list's open byte ('{' / '[') is as decisive as a leading
+ * literal. Several first bytes (Json.number) is the default arm. */
+static int rs_term_disp_byte(const RG* g, RFirst* F, const STerm* t) {
+    if (t->kind == SK_LIT && t->litlen >= 1) return (int)t->lit[0];
+    if ((t->kind == SK_NARROW_LIST || t->kind == SK_NARROW_MEMBERS) &&
+        t->nw.open_b >= 0)
+        return t->nw.open_b;
+    if ((t->kind == SK_BIND_SLICE || t->kind == SK_BIND_INT ||
+         t->kind == SK_BIND_FLOAT || t->kind == SK_RULE) &&
+        t->rule >= 0 && F && F->set) {
+        unsigned char tmp[32];
+        int nul = 0;
+        memset(tmp, 0, 32);
+        rf_rule(g, F, t->rule, tmp, &nul);
+        return rf_singleton_byte(F->set[t->rule]);
+    }
     return -1;
 }
 
@@ -3594,6 +3654,7 @@ static int rs_formatable_term(const SS* ss, const RG* g, int ti) {
     case SK_NARROW_MEMBERS:
         return rs_formatable_entries(ss, g, t);
     case SK_NARROW_LIST:
+    case SK_BIND_SCHEMA:
         return 1;
     case SK_UNION:
         /* formatable iff every variant's product terms are: the write side
@@ -3858,6 +3919,11 @@ static void rw_emit_wterm(SS* ss, const RG* g, EB* e, WAcc* w, int* lbl, int md,
         rw_wacc_bytes(e, w, md, &b, 1);
         break;
     }
+    case SK_BIND_SCHEMA:
+        if (md != RW_MEASURE) rw_wacc_flush_put(e, w, md);
+        snprintf(pe, sizeof pe, "%s%s", cc__fpfx, t->field);
+        eb_emit(e, cc_gr_wschema_text(e->scratch, md, pe, t->etype));
+        break;
     case SK_UNION: {
         /* switch on the stored kind; each arm is the product writer over
          * that variant's terms (fields under the u.<variant>. prefix).
@@ -3933,6 +3999,13 @@ static int rs_emit_get(SS* ss, EB* e, const char* name) {
     if (!order) return ss_fail(ss, 0, "out of memory (schema field table)");
     int cnt = 0;
     for (int i = 0; i < ss->nbody; i++) rs_collect_binds(ss, ss->body[i], order, &cnt);
+    {
+        int w = 0;
+        for (int i = 0; i < cnt; i++)
+            if (ss->terms[order[i]].kind != SK_BIND_SCHEMA)
+                order[w++] = order[i];
+        cnt = w;
+    }
     eb_emit(e, cc_gr_ftable_head_text(e->scratch, name, cnt > 0 ? cnt : 1));
     for (int i = 0; i < cnt; i++) {
         const STerm* t = &ss->terms[order[i]];
@@ -4191,6 +4264,13 @@ static void rs_emit_term(SS* ss, RG* g, EB* e, int* lbl, int ti, const char* fai
         rs_emit_narrow_list(g, e, lbl, t, fail);
         rs_emit_presence(ss, e, ti);
         break;
+    case SK_BIND_SCHEMA: {
+        int k = (*lbl)++;
+        eb_emit(e, cc_gr_bind_schema_text(e->scratch, k, t->etype, cc__fpfx,
+                                            t->field, fail));
+        rs_emit_presence(ss, e, ti);
+        break;
+    }
     case SK_UNION: {
         /* Prefix mode: first-byte dispatch. Field mode (`by <int>`): the
          * discriminant is already bound; dispatch on its value with EQ/GE. */
@@ -4261,7 +4341,7 @@ static void rs_collect_binds(const SS* ss, int ti, int* order, int* cnt) {
     const STerm* t = &ss->terms[ti];
     if (t->kind == SK_BIND_SLICE || t->kind == SK_BIND_INT || t->kind == SK_BIND_FLOAT ||
         t->kind == SK_BIND_ITEMS || t->kind == SK_BIND_BYTES ||
-        t->kind == SK_NARROW_LIST) {
+        t->kind == SK_NARROW_LIST || t->kind == SK_BIND_SCHEMA) {
         order[(*cnt)++] = ti;
     } else if (t->kind == SK_FIELDS || t->kind == SK_NARROW_MEMBERS) {
         for (int i = 0; i < t->k_cnt; i++)
@@ -4390,11 +4470,8 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                     goto done;
                 }
                 rw_match_value(g, F, K, t->nw.elem, &t->nw);
-                if (!cc__schema_known(t->etype)) {
-                    snprintf(err, err_sz, "@grammar(schema) %s: unknown schema '%s' "
-                             "(must be declared earlier in this file)", name, t->etype);
-                    goto done;
-                }
+                /* etype may be a later / self schema: emit a forward typedef
+                 * and let the C compile fail loudly on a real typo */
             }
             if (t->kind == SK_BIND_ITEMS && strcmp(t->etype, name) != 0 &&
                 !cc__schema_known(t->etype)) {
@@ -4445,8 +4522,8 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                              "product terms)", name);
                     goto done;
                 }
-                /* dispatch: each variant's leading literal's first byte; at most
-                 * one non-literal DEFAULT arm; bytes must be distinct */
+                /* dispatch: each variant's first distinct byte; at most one
+                 * DEFAULT arm (no singleton first byte); bytes must be distinct */
                 int ndef = 0;
                 for (int i = 0; i < ss->nuv; i++) {
                     if (ss->uv[i].nt == 0) {
@@ -4460,11 +4537,10 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                         goto done;
                     }
                     const STerm* ft = &ss->terms[ss->uv[i].t[0]];
-                    ss->uv[i].db = (ft->kind == SK_LIT && ft->litlen >= 1)
-                                       ? (int)ft->lit[0] : -1;
+                    ss->uv[i].db = rs_term_disp_byte(g, F, ft);
                     if (ss->uv[i].db < 0 && ++ndef > 1) {
                         snprintf(err, err_sz, "@grammar(schema) %s: at most one "
-                                 "variant may lack a leading literal (the default arm)",
+                                 "variant may lack a single first byte (the default arm)",
                                  name);
                         goto done;
                     }
@@ -4638,6 +4714,27 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                     if (ss->terms[order[i]].kind == SK_BIND_FLOAT) need_ffc = 1;
                 if (need_ffc) eb_emit(&e, cc_gr_ffc_include_text(e.scratch));
             }
+            {
+                char seen[16][S_NAME];
+                int nseen = 0;
+                for (int ti = 0; ti < ss->nterms; ti++) {
+                    const STerm* t = &ss->terms[ti];
+                    const char* et = NULL;
+                    if (t->kind == SK_BIND_SCHEMA) et = t->etype;
+                    else if (t->kind == SK_NARROW_LIST &&
+                             !cc__schema_known(t->etype)) et = t->etype;
+                    if (!et || !et[0]) continue;
+                    if (cc__schema_known(et) && strcmp(et, name) != 0) continue;
+                    int dup = 0;
+                    for (int i = 0; i < nseen; i++)
+                        if (strcmp(seen[i], et) == 0) { dup = 1; break; }
+                    if (dup) continue;
+                    if (nseen < 16) snprintf(seen[nseen++], S_NAME, "%s", et);
+                    eb_emit(&e, cc_gr_fwd_type_text(e.scratch, et));
+                    if (t->kind == SK_BIND_SCHEMA)
+                        eb_emit(&e, cc_gr_new_fill_proto_text(e.scratch, et));
+                }
+            }
             eb_emit(&e, cc_gr_struct_open_text(e.scratch, name));
             for (int i = 0; i < cnt; i++) {
                 const STerm* t = &ss->terms[order[i]];
@@ -4645,6 +4742,7 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                        : t->kind == SK_BIND_FLOAT ? 1
                        : t->kind == SK_BIND_SLICE ? 2
                        : t->kind == SK_BIND_BYTES ? 5
+                       : t->kind == SK_BIND_SCHEMA ? 6
                        : t->cap > 0 ? 3 : 4;
                 eb_emit(&e, cc_gr_member_text(e.scratch, vk, t->etype, t->field, t->cap));
                 cc__grammar_note_bind_field(name, t);
@@ -4678,8 +4776,12 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                             eb_emit(&e, cc_gr_umember_text(e.scratch, 3, t->etype, t->field, t->cap));
                             cc__grammar_note_bind_field(name, t);
                             nmembers++;
-                        } else if (t->kind == SK_BIND_ITEMS) {
+                        } else if (t->kind == SK_BIND_ITEMS || t->kind == SK_NARROW_LIST) {
                             eb_emit(&e, cc_gr_umember_text(e.scratch, 4, t->etype, t->field, 0));
+                            cc__grammar_note_bind_field(name, t);
+                            nmembers++;
+                        } else if (t->kind == SK_BIND_SCHEMA) {
+                            eb_emit(&e, cc_gr_umember_text(e.scratch, 6, t->etype, t->field, 0));
                             cc__grammar_note_bind_field(name, t);
                             nmembers++;
                         }
@@ -4717,7 +4819,8 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                         const STerm* t = &ss->terms[ss->uv[vi].t[j]];
                         if (t->kind == SK_BIND_INT || t->kind == SK_BIND_FLOAT ||
                             t->kind == SK_BIND_SLICE || t->kind == SK_BIND_BYTES ||
-                            t->kind == SK_BIND_ITEMS)
+                            t->kind == SK_BIND_ITEMS || t->kind == SK_NARROW_LIST ||
+                            t->kind == SK_BIND_SCHEMA)
                             nmembers++;
                     }
                     voids[vi] = (nmembers == 0);
@@ -4735,7 +4838,8 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
             int fill_leaf = 1;
             for (int ti = 0; ti < ss->nterms && fill_leaf; ti++)
                 if (ss->terms[ti].kind == SK_BIND_ITEMS ||
-                    ss->terms[ti].kind == SK_NARROW_LIST) fill_leaf = 0;
+                    ss->terms[ti].kind == SK_NARROW_LIST ||
+                    ss->terms[ti].kind == SK_BIND_SCHEMA) fill_leaf = 0;
             eb_emit(&e, cc_gr_fill_head_text(e.scratch, name, fill_leaf));
         }
         /* zero the struct only when some bind is conditional (inside a
@@ -4758,6 +4862,7 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
                 rs_emit_term(ss, g, &e, &lbl, ss->body[i], fail);
             eb_emit(&e, cc_gr_fill_tail_text(e.scratch, fail));
         }
+        eb_emit(&e, cc_gr_new_fill_def_text(e.scratch, name));
         eb_emit(&e, cc_gr_parse_fn_text(e.scratch, name));
         /* incremental entry: parse ONE value at *pos, advance it — pipelines
          * and framed streams call this in a loop instead of requiring p == n */

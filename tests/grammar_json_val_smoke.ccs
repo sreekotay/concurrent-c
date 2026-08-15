@@ -1,0 +1,183 @@
+// RFC product JSON: JsonVal is the seven-type sum, JsonText is
+// `ws value ws`. Closed products (Tweet) stay projections of this type.
+#include <ccc/std/prelude.cch>
+#include "../examples/serdes/json/json_codec.cch"
+
+@grammar(rules) Json {~~~~
+    include "../examples/serdes/json/json_dom.rules"
+~~~~}
+
+@grammar(schema) JsonMember {~~~~
+    use Json
+    Json.ws
+    k: Json.string
+    Json.ws
+    #':'
+    Json.ws
+    v: JsonVal
+    Json.ws
+~~~~}
+
+@grammar(schema) JsonVal {~~~~
+    use Json
+    one of [
+        object [ members: Json.object of JsonMember ]
+        array  [ elems: Json.array of JsonVal ]
+        string [ s: Json.string ]
+        jtrue  [ "true" ]
+        jfalse [ "false" ]
+        jnull  [ "null" ]
+        number [ n: Json.number ]
+    ]
+~~~~}
+
+@grammar(schema) JsonText {~~~~
+    use Json
+    Json.ws
+    v: JsonVal
+    Json.ws
+~~~~}
+
+static int slice_is(CCSlice s, const char* want) {
+    size_t l = strlen(want);
+    return s.len == l && s.ptr && memcmp(s.ptr, want, l) == 0;
+}
+
+static int parse_text(const char* src, JsonText* out, CCArena* arena) {
+    return JsonText_parse(src, strlen(src), arena, out);
+}
+
+int main(void) {
+    CCArena arena = cc_arena_create(8 << 20);
+    JsonText t;
+
+    if (!parse_text("{}", &t, &arena) || !t.v) {
+        printf("FAIL: empty object\n"); return 1;
+    }
+    {
+        JsonVal v = *t.v;
+        if (v.kind != JsonVal_object) { printf("FAIL: {} kind\n"); return 1; }
+        if (v.kind == .object) {
+            if (v.object.members_n != 0) { printf("FAIL: {} members\n"); return 1; }
+        }
+    }
+
+    if (!parse_text("[]", &t, &arena) || !t.v) {
+        printf("FAIL: empty array\n"); return 1;
+    }
+    {
+        JsonVal v = *t.v;
+        if (v.kind != JsonVal_array) { printf("FAIL: [] kind\n"); return 1; }
+        if (v.kind == .array) {
+            if (v.array.elems_n != 0) { printf("FAIL: [] elems\n"); return 1; }
+        }
+    }
+
+    if (!parse_text("\"x\"", &t, &arena) || !t.v) {
+        printf("FAIL: string\n"); return 1;
+    }
+    {
+        JsonVal v = *t.v;
+        if (v.kind != JsonVal_string) { printf("FAIL: string kind\n"); return 1; }
+        if (v.kind == .string) {
+            if (!slice_is(v.string.s, "x")) { printf("FAIL: string payload\n"); return 1; }
+        }
+    }
+
+    if (!parse_text("1", &t, &arena) || !t.v) {
+        printf("FAIL: number\n"); return 1;
+    }
+    {
+        JsonVal v = *t.v;
+        if (v.kind != JsonVal_number) { printf("FAIL: number kind\n"); return 1; }
+        if (v.kind == .number) {
+            if (!slice_is(v.number.n, "1")) { printf("FAIL: number payload\n"); return 1; }
+        }
+    }
+
+    if (!parse_text("true", &t, &arena) || !t.v || t.v->kind != JsonVal_jtrue) {
+        printf("FAIL: true\n"); return 1;
+    }
+    if (!parse_text("false", &t, &arena) || !t.v || t.v->kind != JsonVal_jfalse) {
+        printf("FAIL: false\n"); return 1;
+    }
+    if (!parse_text("null", &t, &arena) || !t.v || t.v->kind != JsonVal_jnull) {
+        printf("FAIL: null\n"); return 1;
+    }
+    if (!parse_text("  42  ", &t, &arena) || !t.v || t.v->kind != JsonVal_number) {
+        printf("FAIL: padded number\n"); return 1;
+    }
+
+    {
+        if (!parse_text("{\"a\":1}", &t, &arena) || !t.v) {
+            printf("FAIL: object parse\n"); return 1;
+        }
+        JsonVal v = *t.v;
+        if (v.kind != JsonVal_object) { printf("FAIL: object kind\n"); return 1; }
+        if (v.kind == .object) {
+            if (v.object.members_n != 1) { printf("FAIL: object n\n"); return 1; }
+            JsonMember* m = &v.object.members[0];
+            if (!slice_is(m->k, "a") || !m->v) { printf("FAIL: object member\n"); return 1; }
+            JsonVal mv = *m->v;
+            if (mv.kind != JsonVal_number) { printf("FAIL: member kind\n"); return 1; }
+            if (mv.kind == .number) {
+                if (!slice_is(mv.number.n, "1")) { printf("FAIL: member n\n"); return 1; }
+            }
+        }
+    }
+
+    {
+        if (!parse_text("[true,null,{}]", &t, &arena) || !t.v) {
+            printf("FAIL: array parse\n"); return 1;
+        }
+        JsonVal v = *t.v;
+        if (v.kind != JsonVal_array) { printf("FAIL: array kind\n"); return 1; }
+        if (v.kind == .array) {
+            if (v.array.elems_n != 3) { printf("FAIL: array n\n"); return 1; }
+            if (v.array.elems[0].kind != JsonVal_jtrue) { printf("FAIL: arr[0]\n"); return 1; }
+            if (v.array.elems[1].kind != JsonVal_jnull) { printf("FAIL: arr[1]\n"); return 1; }
+            if (v.array.elems[2].kind != JsonVal_object) { printf("FAIL: arr[2]\n"); return 1; }
+        }
+    }
+
+    {
+        const char tab[] = { '"', 'a', '\t', 'b', '"' };
+        JsonText bad;
+        if (JsonText_parse(tab, sizeof(tab), &arena, &bad)) {
+            printf("FAIL: unescaped tab accepted\n"); return 1;
+        }
+        size_t fp = cc_fail_pos();
+        if (fp < 2) { printf("FAIL: fail_pos %zu too early\n", fp); return 1; }
+        if (Json_match(tab, sizeof(tab))) {
+            printf("FAIL: Json_match accepted tab\n"); return 1;
+        }
+        if (cc_fail_pos() < 2) { printf("FAIL: match fail_pos\n"); return 1; }
+    }
+
+    if (parse_text("1.", &t, &arena)) { printf("FAIL: 1. accepted\n"); return 1; }
+    if (parse_text("", &t, &arena)) { printf("FAIL: empty accepted\n"); return 1; }
+
+    {
+        FILE* f = fopen("examples/serdes/json/twitter.json", "rb");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            long n = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            char* buf = (char*)malloc((size_t)n);
+            size_t rd = fread(buf, 1, (size_t)n, f);
+            fclose(f);
+            JsonText tw;
+            if (!JsonText_parse(buf, rd, &arena, &tw) || !tw.v ||
+                tw.v->kind != JsonVal_object) {
+                printf("FAIL: twitter JsonText\n");
+                free(buf);
+                return 1;
+            }
+            free(buf);
+        }
+    }
+
+    cc_arena_free(&arena);
+    printf("grammar json val OK\n");
+    return 0;
+}

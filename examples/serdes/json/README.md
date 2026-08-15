@@ -2,14 +2,30 @@
 
 **Example path:** `@grammar(rules)` / `@grammar(schema)` over the shared
 factory in this directory (`json.rules` recognition, `json_dom.rules` DOM
-specialization, `json_codec.cch` for `jstr` / `jstr_enc`). This is an
-oracle-matched bench, not stdlib JSON and not RFC 8259: the fast string scan
-accepts raw `U+0000`–`U+001F` the way `json.h` does. Benches: `./bench.sh -g`
-(engine tiers), `-d` (shaped DOM), `-w` (write).
+specialization, `json_codec.cch` for `jstr` / `jstr_enc`). Benches:
+`./bench.sh -a` (full ladder), or `-g` / `-y` / `-d` / `-w` / `-s`
+individually.
+
+## RFC 8259
+
+`json.rules` is an RFC 8259 JSON-text recognizer: `ws value ws`, the
+seven value types, numbers without a leading `+` / leading zero /
+trailing dot, and unescaped `U+0000`–`U+001F` rejected in strings.
+Escapes (`\"`, `\\`, `\/`, `\b`, `\f`, `\n`, `\r`, `\t`, `\uXXXX`) are
+accepted. Clean string spans stay borrowed; UTF-8 well-formedness of a
+borrow is a use-site check, not a parse-time copy. `jstr` runs only on
+dirty (escaped) spans.
+
+The product schema for that text is `JsonVal` (tagged sum of the seven
+types) plus `JsonText` (`ws` + `JsonVal` + `ws`). Closed products such
+as `Tweet` / `Feed` are projections of the same factory, not a second
+grammar. After a failed `cc_match` / `cc_parse`, `cc_fail_pos()` is the
+high-water byte of the miss.
 
 **Golden reference:** `json.h` is the hand-lowered C a rules engine would emit
 for a JSON DOM — kept legible so the lowering stays inspectable. It is the
-oracle for borrow/materialize splits, not a product parser.
+oracle for borrow/materialize splits. Its string scan still accepts raw
+controls; `json.rules` does not.
 
 ## What it demonstrates
 
@@ -63,24 +79,34 @@ without skewing the timing (expected: twitter.json `chk=406072`, numbers.json
 `yyjson.c` / `yyjson.h` (v0.12.0 from <https://github.com/ibireme/yyjson>, MIT)
 are checked in so `./bench.sh -y` works out of the box.
 
-Rough standing (best-of, parse-only vs yyjson-default, minified inputs so
-whitespace-skipping doesn't mask either side): within ~2× on string-heavy input,
-closer on number-heavy. yyjson's remaining edge is a denser 16-byte tape and
-years of micro-tuning — both of which trade away the provenance and simplicity this
-example keeps. `insitu` yyjson is faster still but destructively rewrites the input
-buffer and eager-parses numbers.
+Latest full ladder (`./bench.sh -a`, K=200) is
+[`benchmark_baseline_2026_08_15.txt`](benchmark_baseline_2026_08_15.txt)
+(Darwin arm64). A Linux x86-64 container receipt from July is
+[`benchmark_baseline_2026_07_20.txt`](benchmark_baseline_2026_07_20.txt).
+Treat ratios within a run; boxes are not interchangeable.
+
+On that Darwin snapshot, generated match is about **0.68×** yyjson-default
+on twitter.json (3204 vs 4716 MB/s) and **even** with it on numbers.json
+(2066 vs 2062 MB/s). Schema parse of twitter sits between match and
+collect; generated write matches the hand unchecked encoder. yyjson's
+remaining edge on string-heavy input is a denser 16-byte tape and years
+of micro-tuning — both of which trade away the provenance this example
+keeps. `insitu` yyjson is faster still on twitter but destructively
+rewrites the input and eager-parses numbers. Platform changes who wins:
+the July Linux receipt has generated match ahead of yyjson-default.
 
 ## Files
 
 | file | what |
 |------|------|
-| `json.rules` | shared recognition factory (`include` this) |
+| `json.rules` | RFC 8259 recognition factory (`include` this) |
 | `json_dom.rules` | DOM specialization (`keep` / `collect` overrides) |
 | `json_codec.cch` | `jstr` decode + `jstr_enc` encode |
 | `bench_grammar.ccs` | engine match / collect / DOM / schema bench |
-| `json.h` | hand golden DOM (lowering oracle) |
+| `json.h` | hand golden DOM (lowering oracle; not RFC-strict on controls) |
 | `bench.c` | golden throughput + zero-copy harness |
-| `bench.sh` | build + run driver (`-g`/`-y`/`-d`/`-w`) |
+| `bench.sh` | build + run driver (`-a` / `-g` / `-y` / `-d` / `-w` / `-s`) |
 | `yy.c` | yyjson comparison harness |
 | `yyjson.c`, `yyjson.h` | vendored yyjson 0.12.0 |
+| `benchmark_baseline_2026_08_15.txt` | latest full-ladder receipt |
 | `tools/gen_numbers.py`, `tools/minify.py` | corpus helpers |

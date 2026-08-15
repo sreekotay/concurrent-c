@@ -128,6 +128,22 @@ typedef struct {
 #define cc_field(T, ...)   T##_field(__VA_ARGS__)
 #define cc_dom(T, ...)     T##_dom(__VA_ARGS__)
 #define cc_try_read(T, ...) T##_try_read(__VA_ARGS__)
+#define cc_fail_pos()       cc_grammar_fail_pos()
+
+/* High-water byte offset of the last `cc_match` / `cc_parse` miss in this
+ * thread (0 if the last call succeeded or never ran). Recognition failure
+ * is still boolean; this is the cursor, not a second result channel.
+ * Generated matchers emit the same helpers when this header is not in
+ * scope (a rules-only TU). */
+#ifndef CC__GR_FAIL_CURSOR
+#define CC__GR_FAIL_CURSOR
+static _Thread_local size_t cc__gr_fail_pos;
+static inline void cc_grammar_fail_reset(void) { cc__gr_fail_pos = 0; }
+static inline void cc_grammar_note_fail(size_t p) {
+    if (p > cc__gr_fail_pos) cc__gr_fail_pos = p;
+}
+static inline size_t cc_grammar_fail_pos(void) { return cc__gr_fail_pos; }
+#endif
 /* @grammar(cli): fill typed options from argc/argv; print generated usage;
  * prepare = parse + usage with bool !>(CCError) (Ok true/false / Err). */
 #define cc_parse_args(T, ...)    T##_parse_args(__VA_ARGS__)

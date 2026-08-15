@@ -4,6 +4,7 @@
 // Run alongside the golden json.h and yyjson via ./bench.sh -g -y.
 // Requires a built compiler: make -C ../../../cc
 #include <ccc/cc_arena.cch>
+#include <ccc/cc_grammar.cch>
 #include <ccc/script/stdio.cch>
 #include <stdlib.h>
 #include <string.h>

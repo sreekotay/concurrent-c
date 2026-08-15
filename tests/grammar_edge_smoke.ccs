@@ -42,6 +42,17 @@ static int vc(const char* p, size_t n, CCSlice* out, CCArena* arena) {
     v: int num
 ~~~~}
 
+@grammar(rules) HexA {~~~~
+    top: #'\x41'
+~~~~}
+
+@grammar(schema) HexS {~~~~
+    rules [
+        dummy: skip
+    ]
+    #'\x42'
+~~~~}
+
 typedef struct { int calls; CCSlice last; } Env;
 static int cb(void* env, int id, CCSlice v) {
     (void)id;
@@ -82,6 +93,15 @@ int main(void) {
     /* multi-byte literal truncated at end of input: rejected, no overread */
     if (T_match("tru", 3)) { printf("FAIL: truncated literal accepted\n"); return 1; }
     if (!T_match("true", 4)) { printf("FAIL: literal rejected\n"); return 1; }
+
+    /* \\xHH in #'…' (rules + schema product lit) */
+    if (!HexA_match("A", 1)) { printf("FAIL: HexA A\n"); return 1; }
+    if (HexA_match("B", 1)) { printf("FAIL: HexA B\n"); return 1; }
+    {
+        HexS hs;
+        if (!HexS_parse("B", 1, &arena, &hs)) { printf("FAIL: HexS B\n"); return 1; }
+        if (HexS_parse("A", 1, &arena, &hs)) { printf("FAIL: HexS A\n"); return 1; }
+    }
 
     /* int bind: negative values */
     {

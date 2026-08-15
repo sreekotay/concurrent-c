@@ -101,6 +101,14 @@ Run any recipe:
 ./cc/bin/ccc build run examples/recipe_channel_pipeline.ccs
 ```
 
+### SERDES / JSON
+
+`serdes/json/` is the RFC 8259 JSON-text factory (`json.rules`) plus
+direct-to-struct schemas and a hand golden DOM (`json.h`). Recognition
+rejects unescaped `U+0000`–`U+001F`; the golden scanner still accepts
+raw controls. Full ladder: `./examples/serdes/json/bench.sh -a`. Latest
+receipt: [`serdes/json/benchmark_baseline_2026_08_15.txt`](serdes/json/benchmark_baseline_2026_08_15.txt).
+
 ### Networking Examples
 
 | File | Demonstrates |
