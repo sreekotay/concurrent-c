@@ -199,8 +199,45 @@ No `T?`. Pick the shape that matches the operation:
 
 ---
 
+## 7. `@parallel` joins independent work
+
+[recipe_parallel.ccs](../examples/recipe_parallel.ccs) · Spec §8.11
+
+`@parallel` is a lexical fork-join. It is not a nursery and it does not
+create a task the program can hold. `n->spawn` names a lifetime that may
+outlive the spawn point; `@parallel` joins at the closing brace.
+
+| Form | Meaning |
+|------|---------|
+| `@parallel { a = f(); b = g(); }` | Independent assignment arms. First on the caller; the rest may spawn. |
+| `@serial { …; a = t; }` | Multi-statement arm. Ordinary C; writes exactly one outer name. |
+| `@parallel (pred) { … }` | Same arms. Spawn if `pred`; otherwise run in order. The body always runs. |
+| `@parallel for (i in lo..hi) { … }` | Independent iterations over `[lo, hi)`. Bisects; a span of 0 or 1 is a plain `for`. |
+
+```c
+int a = 0, b = 0;
+@parallel {
+    @serial {
+        int t = f();
+        a = t;
+    }
+    b = g();
+}
+
+@parallel for (y in 0..h) {
+    row(y);
+}
+```
+
+`@serial` is legal only as a direct child of `@parallel { }`. A bare `{ }`
+is not an arm. A `for` as a direct child of `@parallel { }` is a compile
+error; `for` inside `@serial` is ordinary C.
+
+---
+
 ## Next
 
 [Getting Started](getting-started.md) · [Cheatsheet](cheatsheet.md) ·
 [recipe_channel_pipeline.ccs](../examples/recipe_channel_pipeline.ccs) ·
-[recipe_async_await.ccs](../examples/recipe_async_await.ccs)
+[recipe_async_await.ccs](../examples/recipe_async_await.ccs) ·
+[recipe_parallel.ccs](../examples/recipe_parallel.ccs)

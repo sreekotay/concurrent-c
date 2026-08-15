@@ -342,6 +342,29 @@ spawned into that nursery (and nested children) before the binding ends:
 /* both tasks have finished */
 ```
 
+### `@parallel`
+
+Independent work that joins at a brace — no nursery, no task handle.
+`@serial` is a multi-statement arm that writes one outer name.
+
+```c
+int a = 0, b = 0;
+@parallel {
+    @serial {
+        int t = f();
+        a = t;
+    }
+    b = g();
+}
+
+@parallel for (y in 0..h) {
+    row(y);
+}
+```
+
+`@parallel (pred) { … }` runs the same arms; spawn only if `pred` is true.
+Recipe: [recipe_parallel.ccs](../examples/recipe_parallel.ccs). Spec §8.11.
+
 ### Channels
 
 Typed ends `T[~N >]` (send) and `T[~N <]` (recv). Pair them, send/recv with
@@ -383,10 +406,11 @@ Close/deadlock details and env guards live there and in [Debugging](debugging.md
 
 ### Async / await
 
-Prefer `n->spawn` for sibling work under a nursery. Prefer `@async` / `@await`
-when one call stack should suspend (channel ops, nested async) without inventing
-a nursery just to join. Drive an async stack from sync `main` with `@await`
-(or `cc_block_on` where appropriate).
+Prefer `@parallel` for independent value joins that finish at a brace.
+Prefer `n->spawn` for sibling work under a nursery (named lifetime, channels,
+cancel). Prefer `@async` / `@await` when one call stack should suspend
+without inventing a nursery just to join. Drive an async stack from sync
+`main` with `@await` (or `cc_block_on` where appropriate).
 
 Full recipe: [examples/recipe_async_await.ccs](../examples/recipe_async_await.ccs).
 

@@ -285,6 +285,10 @@ bugs.
 | `@defer stmt;`                  | Schedule statement to run on scope exit                  | `@defer file.close();`                                   |
 | `@comptime if (cond) { }`       | Compile-time conditional                                 | `@comptime if (FEATURE_X) { }`                           |
 | `@errhandler(E e) stmt` / `{ }` | Block-scoped handler for Result error type `E` (§3.1)    | `@errhandler(CCError e) cc_error_exit(e);` |
+| `@parallel { arms }`            | Join independent `name = expr;` or `@serial` arms (§8.11) | `@parallel { a = f(); b = g(); }`          |
+| `@parallel (pred) { arms }`     | Same join; spawn if `pred`, else run in order (§8.11.3)   | `@parallel (d < k) { a = f(); b = g(); }`  |
+| `@parallel for (i in lo..hi)`   | Independent iterations over a half-open range (§8.11.4)   | `@parallel for (y in 0..h) { row(y); }`    |
+| `@serial { stmts }`             | Multi-statement arm of `@parallel { }` (§8.11.2)          | `@serial { int t = f(); a = t; }`          |
 
 **Call-site annotation forms** (see §8.2 for precedence):
 
@@ -3239,7 +3243,7 @@ return;
 
 ## 8. Concurrency
 
-Concurrent-C provides a single, unified concurrency primitive: the **nursery** (`CCNursery`, §8.1). A nursery is a scope-bound handle that manages task spawning, joining, and explicit cooperative cancellation. For the rare case where OS-level thread control is required, low-level APIs exist but should not be used in typical application code.
+Concurrent-C provides structured concurrency through nurseries (`CCNursery`, §8.1) and a lexical fork-join (`@parallel`, §8.11). A nursery is a scope-bound handle that manages task spawning, joining, and explicit cooperative cancellation. `@parallel` joins independent arms or iterations at a brace; it does not create a task the program can hold. For the rare case where OS-level thread control is required, low-level APIs exist but should not be used in typical application code.
 
 This section specifies:
 
@@ -3253,7 +3257,7 @@ This section specifies:
 - **§8.8 Blocking, Stalling, and Execution Contexts** — execution model for blocking operations, stalling classification, and cancellation guarantees
 - **§8.9 Error handling in async and nurseries** — composition of result unwrap operators (`?>`, `!>`, `@err`, `@errhandler`) defined in §3.1 with async functions and nursery teardown
 - **§8.10 Named exclusive sections (`CCExclusive`)** — arena-backed, name-keyed mutual exclusion for short critical sections
-- **§8.11 `@parallel`** — value join of independent assignments or `@serial` arms, optional spawn predicate, and `@parallel for` over a half-open index range
+- **§8.11 `@parallel`** — value join of independent assignments or `@serial` arms (§8.11.2), optional spawn predicate, and `@parallel for` over a half-open index range
 
 ---
 
@@ -5026,7 +5030,20 @@ T a, b;
     a = f();
     b = g();
 }
+```
 
+The block holds two or more arms. An arm is either `name = expr;` where `name` is a simple identifier already in scope, or `@serial { … }` (§8.11.2). After the closing brace, every named write is visible.
+
+Compound assignment, indirection, field and subscript destinations, declarations, and other statements are ill-formed as assignment arms. A bare `{ }` as a direct child of `@parallel { }` is ill-formed; braces are C scope, not an arm. A `for` statement as a direct child is ill-formed — the loop is a form of the keyword (§8.11.4).
+
+Lowering is fork-join: the first arm runs on the caller; each remaining arm is spawned and joined before the brace. If spawn fails, that arm runs on the caller. The result is the same either way.
+
+Arms must not race. Sharing a location across arms, or reading another arm's destination, is undefined.
+
+#### 8.11.2 `@serial`
+
+```c
+T a, b;
 @parallel {
     @serial {
         int t = f();
@@ -5036,17 +5053,13 @@ T a, b;
 }
 ```
 
-The block holds two or more arms. An arm is either `name = expr;` where `name` is a simple identifier already in scope, or `@serial { … }` whose body is ordinary C and which assigns exactly one simple outer name. After the closing brace, every named write is visible.
+`@serial { … }` is an arm of `@parallel { }`. Its body is ordinary C. It assigns exactly one simple outer name already in scope. Locals, `if`, `for`, and inner `{ }` are C scope inside the arm. After the join, that outer write is visible the same way an assignment arm's write is.
 
-`@serial` is legal only as a direct child of `@parallel { }`. A bare `{ }` as a direct child is ill-formed. Inner braces inside `@serial` are C scope. `@serial` is not a handle and is not legal in `@parallel for` or outside `@parallel`.
+`@serial` is legal only as a direct child of `@parallel { }`. It is not a handle, not an `else`, and not a file- or function-scope statement. It is ill-formed in `@parallel for`, nested inside another `@serial`, without a following `{ … }`, with an empty body, with no simple outer assignment, or with two or more distinct simple outer names. An assignment to a field, subscript, or indirection does not count as the outer name.
 
-Compound assignment, indirection, field and subscript destinations, declarations, and other statements are ill-formed as assignment arms. They are ordinary C inside `@serial`.
+A `for` inside `@serial` is ordinary C.
 
-Lowering is fork-join: the first arm runs on the caller; each remaining arm is spawned and joined before the brace. If spawn fails, that arm runs on the caller. The result is the same either way.
-
-Arms must not race. Sharing a location across arms, or reading another arm's destination, is undefined.
-
-#### 8.11.2 Gated assignment join
+#### 8.11.3 Gated assignment join
 
 ```c
 T left, right;
@@ -5060,7 +5073,7 @@ T left, right;
 
 Independence is unchanged: reading another arm's destination is undefined on both paths.
 
-#### 8.11.3 `@parallel for`
+#### 8.11.4 `@parallel for`
 
 ```c
 @parallel for (i in lo..hi) {
@@ -5070,7 +5083,7 @@ Independence is unchanged: reading another arm's destination is undefined on bot
 
 `lo..hi` is a half-open integer range. `i` is an `int` bound in the body for each iteration in `[lo, hi)`. The body is ordinary statements. A C `for (;;)` head is ill-formed; the `in` spelling matches `@comptime for`.
 
-A `for` statement as a direct child of `@parallel { }` is ill-formed. The loop is a form of the keyword, not a statement the brace happens to contain. A `for` inside `@serial` is ordinary C.
+A `for` statement as a direct child of `@parallel { }` is ill-formed. The loop is a form of the keyword, not a statement the brace happens to contain.
 
 Lowering bisects the range: one half is spawned, the other runs on the caller, then the spawn is joined. A span of length 0 or 1 runs as an ordinary sequential `for`. Nested `@parallel for` bisects the same way. If a spawn fails, that half runs on the caller.
 
@@ -5078,13 +5091,30 @@ Iterations must not race. Disjoint writes (`img[y * w + x] = …` for distinct `
 
 `n->spawn` remains the tool when the program names a task lifetime or an explicit tile size.
 
-#### 8.11.4 Grain and limits
+#### 8.11.5 Grain and limits
 
 An assignment or `@serial` arm after the first is spawned as a fiber and joined before the brace. `@parallel for` spawns one half of a span at each bisection; a span of length 0 or 1 is a sequential `for`. In-flight `@parallel` fibers are capped at 256 times the number of online processors; further arms and leftover spans run on the caller. That ceiling is an allocation bound, not a grain. The construct does not estimate how much work an arm contains. A caller who knows a cutoff writes it on the join (`@parallel (d < k) { … }`) so the same arms run in parallel above the cut and in order below it.
 
 The range bounds of `@parallel for` are converted to `int`. A span whose length does not fit in `int` is outside this form.
 
 An implementation may reject a function that exceeds a finite number of `@parallel` statements, assignment arms, or captured names. The first arm of an assignment join always runs on the caller.
+
+**Grammar (normative, minus whitespace).**
+
+```
+parallel_stmt ::= '@parallel' parallel_join
+               |  '@parallel' '(' pred ')' parallel_join
+               |  '@parallel' 'for' '(' ident 'in' expr '..' expr ')' block
+
+parallel_join ::= '{' parallel_arm parallel_arm+ '}'
+
+parallel_arm  ::= ident '=' expr ';'
+               |  serial_arm
+
+serial_arm    ::= '@serial' '{' stmt+ '}'
+```
+
+`pred` is a nonempty expression. `ident` on an assignment arm, and the unique simple outer name assigned by a `serial_arm`, are names already in scope. `serial_arm` is a `parallel_arm` only.
 
 ---
 

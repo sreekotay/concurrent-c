@@ -324,6 +324,35 @@ truncates.
 
 Nested: `cc_nursery_create(outer)` parents the inner nursery under `outer`.
 
+### `@parallel` / `@serial`
+
+Lexical fork-join — not a nursery, no task handle. Spec §8.11.
+Recipe: [recipe_parallel.ccs](../examples/recipe_parallel.ccs).
+
+```c
+int a = 0, b = 0;
+@parallel {                    // always try to spawn
+    a = f();
+    b = g();
+}
+
+@parallel (d < k) {            // spawn if pred; else run in order
+    @serial {
+        int t = f();
+        a = t;                 // exactly one outer name
+    }
+    b = g();
+}
+
+@parallel for (i in 0..n) {    // half-open; bisects
+    work(i);
+}
+```
+
+`@serial` is only a direct child of `@parallel { }`. Bare `{ }` is not an
+arm. `for` as a direct child of `@parallel { }` is an error; `for` inside
+`@serial` is ordinary C. `n->spawn` still names a task lifetime.
+
 ---
 
 ## Channels
@@ -474,6 +503,7 @@ ccc examples/js/jsdemo.shcc         # CC→JS (guest; Node owns env)
 | Worker pool | [recipe_worker_pool.ccs](../examples/recipe_worker_pool.ccs) |
 | Fan-out / captures | [recipe_fanout_capture.ccs](../examples/recipe_fanout_capture.ccs) |
 | Ordered parallel | [recipe_ordered_parallel.ccs](../examples/recipe_ordered_parallel.ccs) |
+| `@parallel` / `@serial` | [recipe_parallel.ccs](../examples/recipe_parallel.ccs) |
 | Channel pipeline | [recipe_channel_pipeline.ccs](../examples/recipe_channel_pipeline.ccs) |
 
 ---

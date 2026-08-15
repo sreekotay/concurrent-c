@@ -27,7 +27,7 @@ New to Concurrent-C? Work through these in order:
 | 9  | `recipe_timeout.ccs` | Cancellation | deadlines, cooperative exit |
 | 10 | `recipe_worker_pool.ccs` | Real pattern | Putting it together: workers + channels |
 | 11 | `recipe_ordered_parallel.ccs` | Ordered fan-out | `send_task` + ordered recv, FIFO without reorder buffer |
-| 11a | `recipe_parallel.ccs` | `@parallel` | assignment join, `@parallel (pred)`, `@parallel for` |
+| 11a | `recipe_parallel.ccs` | `@parallel` | assignment join, `@serial` arms, `@parallel (pred)`, `@parallel for` |
 | 12 | `recipe_exclusive_named.ccs` | Named exclusivity | `CCExclusive`, resolve-once mutex, short guard CS |
 | 13 | `recipe_arena_scope.ccs` | Memory | Arena names a lifetime; alloc strategy is policy; `@destroy` ends the epoch |
 | 14 | `recipe_long_lived_store.ccs` | Provenance | Anchoring request-lifetime views in a long-lived arena |
@@ -59,7 +59,7 @@ Minimal concurrent hello world — shows explicit nursery creation and task spaw
 | `recipe_ufcs_forms.ccs` | UFCS matrix | One rule × spellings, including bare-name and fallible chains |
 | `recipe_user_generics.ccs` | User generics | `CC_GENERIC_FACTORY` — same `Name::[args]` rule as Vec/Map |
 | `recipe_ordered_parallel.ccs` | Ordered fan-out | `send_task` + ordered recv, FIFO await |
-| `recipe_parallel.ccs` | `@parallel` | Value join; `@parallel (pred)` spawn gate; `@parallel for` over `lo..hi` |
+| `recipe_parallel.ccs` | `@parallel` | Value join; `@serial` arms; `@parallel (pred)` spawn gate; `@parallel for` over `lo..hi` |
 
 ### Python interop (one boundary, two doors)
 
