@@ -1,0 +1,5 @@
+.vscode/**
+**/*.vsix
+.gitignore
+install-local.sh
+.DS_Store

@@ -116,7 +116,14 @@ CC_REPO_DIR="$HOME/code/ccc" sh ./cc-install.sh   # override clone destination
 
 It writes a repo-local `./ccc` launcher and (unless `--no-editor-tools`) installs the Concurrent-C syntax package for VS Code / Cursor plus CodeLLDB when those CLIs are present. Use `--add-to-path` / `--no-add-to-path` for the shell-rc edit.
 
-> **VS Code / Cursor syntax** (not on the marketplace). `./cc-install.sh` installs it automatically. After Homebrew, or anytime from a clone:
+> **VS Code / Cursor syntax.** Search **Concurrent-C** in the Extensions view, or:
+>
+> ```bash
+> code --install-extension sreekotay.concurrent-c-syntax
+> cursor --install-extension sreekotay.concurrent-c-syntax
+> ```
+>
+> `./cc-install.sh` also copies the in-tree package. From a clone without the store:
 >
 > ```bash
 > ./vscode/ccs-syntax/install-local.sh --both   # then: Developer → Reload Window

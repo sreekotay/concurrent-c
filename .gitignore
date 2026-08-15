@@ -48,3 +48,6 @@ __pycache__/
 # Python virtual environments
 venv/
 .venv/
+
+# VS Code / Cursor extension packages
+*.vsix

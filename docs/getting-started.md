@@ -60,22 +60,19 @@ run from (`--out-dir` / `--bin-dir`); never into `$PREFIX`.
 
 ### VS Code / Cursor syntax (required for a good edit experience)
 
-> **Install the Concurrent-C syntax extension** — not on the marketplace.
-> Highlighting for `.ccs` / `.cch` / `.shcc` ships in-tree.
+> **Install the Concurrent-C syntax extension.** Search **Concurrent-C** in the
+> Extensions view, or:
+>
+> ```bash
+> code --install-extension sreekotay.concurrent-c-syntax
+> cursor --install-extension sreekotay.concurrent-c-syntax
+> ```
 >
 > | How you installed `ccc` | What to do |
 > |-------------------------|------------|
-> | **`./cc-install.sh`** | Already done (unless you passed `--no-editor-tools`). Also tries CodeLLDB when the `code` / `cursor` CLI exists. |
-> | **Homebrew** (or you skipped editor tools) | From a clone of this repo: |
->
-> ```bash
-> git clone --filter=blob:none https://github.com/sreekotay/concurrent-c.git
-> cd concurrent-c
-> ./vscode/ccs-syntax/install-local.sh --both   # VS Code + Cursor
-> ```
->
-> Then **Developer: Reload Window**. Open a `.ccs` file — language mode should
-> read **Concurrent-C**.
+> | **Marketplace / Extensions view** | Preferred. Language mode should read **Concurrent-C**. |
+> | **`./cc-install.sh`** | Also copies the in-tree package (unless `--no-editor-tools`). Tries CodeLLDB when the `code` / `cursor` CLI exists. |
+> | **From a clone** (no store) | `./vscode/ccs-syntax/install-local.sh --both` then **Developer: Reload Window**. |
 >
 > Details: [`vscode/ccs-syntax/README.md`](../vscode/ccs-syntax/README.md).
 > Debug configs: [Debugging](debugging.md).

@@ -1,53 +1,98 @@
-# Concurrent-C Syntax (VS Code)
+# Concurrent-C
 
-Syntax highlighting for Concurrent-C source, headers, and scripts:
+**[github.com/sreekotay/concurrent-c](https://github.com/sreekotay/concurrent-c)**
 
-- `*.ccs` (Concurrent-C source)
-- `*.cch` (Concurrent-C headers)
-- `*.shcc` (Concurrent-C scripts; same language as `.ccs`, outside the `.ccs`/`.cch` pair)
+Syntax highlighting for Concurrent-C in VS Code and Cursor.
 
-Concurrent-C is largely C + preprocessor, with a few extra active surface-syntax constructs like:
+Concurrent-C is a **strict C11-superset**: `.ccs` lowers to plain C and compiles with your host C compiler. This extension colors the extra surface — `@` keywords, result unwrap, UFCS, templates, `@emit`, and `@grammar` fences — on top of ordinary C.
 
-- `name@(args) @destroy` / `@detach` lifecycle declarations
-- `@defer` / `@defer(err|ok)` / `@cancel`
-- `@async` / `@await` / `@blocking` / `@nonblocking`
-- `@errhandler` / `@err` / result unwrap (`!>`, `?>`)
-- `@string` backtick templates (`${…}`, `$~tag{…}`, `${{…}}` verbatim) — string coloring
-- `@emit` backtick bodies — Concurrent-C/C highlighting with `${…}` interpolations
-- `@grammar(engine) Name {~~~~ … ~~~~}` fences (`rules` / `schema` / `cli`)
-- `@variant` / `@variant(packed)`
-- UFCS-style task operations like `n->spawn(...)` / `n->wait()`
-- UFCS-style `value.method(...)` / `ptr->method(...)` calls
-- Type sugar like `T!>(E)`, `T[:]`, `T[:!]`, `T[~N …]`, `Name::[args]`
-- Duration literals like `10ms`
+![Concurrent-C in the editor](images/screenshot-hello.png)
 
-## Install (local, no marketplace)
+## Install
 
-VS Code can load extensions from `~/.vscode/extensions/`. Cursor can load extensions from `~/.cursor/extensions/`.
-
-1. Copy this folder to your extensions directory:
+Search **Concurrent-C** in the Extensions view (`⇧⌘X`), or:
 
 ```bash
-mkdir -p ~/.vscode/extensions
-cp -R /path/to/concurrent-c/vscode/ccs-syntax ~/.vscode/extensions/concurrent-c-syntax
+code --install-extension sreekotay.concurrent-c-syntax
+# Cursor:
+cursor --install-extension sreekotay.concurrent-c-syntax
 ```
 
-Or run the helper script from this repo:
+Open a `.ccs`, `.cch`, or `.shcc` file. Language mode should read **Concurrent-C**.
+
+The [language toolchain](https://github.com/sreekotay/concurrent-c#install) (`ccc`) is separate — this extension is highlighting and editor basics only.
+
+## Languages
+
+| Suffix | Role |
+|--------|------|
+| `.ccs` | Concurrent-C source |
+| `.cch` | Concurrent-C headers |
+| `.shcc` | Concurrent-C scripts (same language; outside the `.ccs` / `.cch` pair) |
+
+Files associate automatically. Breakpoints are enabled for the language (pair with [CodeLLDB](https://marketplace.visualstudio.com/items?itemName=vadimcn.vscode-lldb) to debug a `ccc -g` binary).
+
+## What it highlights
+
+C11 and the preprocessor, plus Concurrent-C’s active syntax:
+
+```c
+#!ccc ccs
+#include <ccc/cc_runtime.cch>
+#include <ccc/script/stdio.cch>
+
+int main(void) {
+    @errhandler(CCError e) cc_error_exit(e);
+
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    CCStdio io = cc_stdio_create(&a);
+    CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+
+    n->spawn(() => [io] {
+        @errhandler(CCError e) cc_error_exit(e);
+        io.println("Hello from task A!") !>;
+    });
+    n->spawn(() => [io] {
+        @errhandler(CCError e) cc_error_exit(e);
+        io.println("Hello from task B!") !>;
+    });
+    return 0;
+}
+```
+
+| Surface | Examples |
+|---------|----------|
+| Lifecycle | `name@(args) @destroy` / `@detach`, `@defer` / `@defer(err\|ok)` / `@cancel` |
+| Concurrency | `@async` / `@await` / `@blocking` / `@nonblocking`, `n->spawn(...)` |
+| Results | `@errhandler` / `@err`, unwrap `!>` / `?>`, types `T!>(E)` |
+| Methods | UFCS `value.method(...)` / `ptr->method(...)` |
+| Types | `T[:]`, `T[:!]`, `T[~N 1:N >]`, `Name::[args]` |
+| Literals | `10ms`, `=>`, `..` |
+| `@string` | backtick templates: `${…}`, `$~tag{…}`, `${{…}}` verbatim |
+| `@emit` | backtick bodies highlighted as Concurrent-C/C, with `${…}` interpolations |
+| `@grammar` | `@grammar(engine) Name {~~~~ … ~~~~}` (`rules` / `schema` / `cli`) |
+| Variants | `@variant` / `@variant(packed)` |
+
+Comments, brackets, and auto-closing pairs follow C (`//`, `/* */`, including backticks).
+
+## Install the compiler
 
 ```bash
-cd /path/to/concurrent-c
-./vscode/ccs-syntax/install-local.sh --both   # VS Code + Cursor
+brew tap sreekotay/concurrent-c https://github.com/sreekotay/concurrent-c.git
+brew install --HEAD sreekotay/concurrent-c/ccc
+ccc run hello.ccs
 ```
 
-2. Reload VS Code (`Developer: Reload Window`).
+Docs: [Getting started](https://github.com/sreekotay/concurrent-c/blob/main/docs/getting-started.md) · [Language concepts](https://github.com/sreekotay/concurrent-c/blob/main/docs/language-concepts.md) · [Cheatsheet](https://github.com/sreekotay/concurrent-c/blob/main/docs/cheatsheet.md)
 
-3. Open a `.ccs`, `.cch`, or `.shcc` file; the language mode should be **Concurrent-C**.
+## From a clone
 
-A good smoke fixture for templates + `@grammar` is `tools/cc_perf_check.shcc`. For `@emit` C-body highlighting, open `real_projects/levenshtein/levenshtein_cc.ccs`.
+`./cc-install.sh` copies this package into `~/.vscode/extensions` and `~/.cursor/extensions` unless you pass `--no-editor-tools`. To install only the syntax package:
 
-## Develop / tweak the grammar
+```bash
+./vscode/ccs-syntax/install-local.sh --both   # then: Developer → Reload Window
+```
 
-- Grammar: `syntaxes/concurrent-c.tmLanguage.json`
-- Language config (comments/brackets): `language-configuration.json`
+## License
 
-After edits, reload the window to see changes.
+MIT. Source lives in the [Concurrent-C](https://github.com/sreekotay/concurrent-c) repository under `vscode/ccs-syntax`.

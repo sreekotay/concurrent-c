@@ -1,0 +1,54 @@
+# Publish vscode/ccs-syntax to the Visual Studio Marketplace via OIDC.
+#
+# One-time on https://marketplace.visualstudio.com/manage:
+#   1. Create publisher `sreekotay` if it does not exist
+#   2. Publisher → … → Personal Access Tokens is not required when using OIDC
+#   3. Trusted publishing → GitHub Actions
+#      Organization or user: sreekotay
+#      Repository:           concurrent-c
+#      Workflow filename:    publish-vscode-syntax.yml
+#      Environment name:     vscode-marketplace
+#
+# Also create a GitHub Environment named `vscode-marketplace`
+# (Settings → Environments).
+#
+# Usage:
+#   gh workflow run publish-vscode-syntax.yml
+#   # or tag: git tag vscode-syntax-v0.4.2 && git push origin vscode-syntax-v0.4.2
+name: publish-vscode-syntax
+
+on:
+  workflow_dispatch: {}
+  push:
+    tags:
+      - 'vscode-syntax-v*'
+
+concurrency:
+  group: publish-vscode-syntax
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: vscode-marketplace
+      url: https://marketplace.visualstudio.com/items?itemName=sreekotay.concurrent-c-syntax
+    permissions:
+      id-token: write
+      contents: read
+    defaults:
+      run:
+        working-directory: vscode/ccs-syntax
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Publish
+        run: npx --yes @vscode/vsce publish --oidc --no-update-package-json

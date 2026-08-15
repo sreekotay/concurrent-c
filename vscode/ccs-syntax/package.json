@@ -1,16 +1,43 @@
 {
   "name": "concurrent-c-syntax",
-  "displayName": "Concurrent-C Syntax",
-  "description": "Syntax highlighting for Concurrent-C (*.ccs, *.cch, *.shcc), a C-preprocessor-based language.",
+  "displayName": "Concurrent-C",
+  "description": "Syntax highlighting for Concurrent-C (.ccs, .cch, .shcc) — C11-superset with structured concurrency, results, and UFCS.",
   "version": "0.4.2",
-  "publisher": "local",
+  "publisher": "sreekotay",
+  "author": "Concurrent-C Contributors",
   "license": "MIT",
+  "icon": "icon.png",
+  "galleryBanner": {
+    "color": "#0B1220",
+    "theme": "dark"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sreekotay/concurrent-c.git"
+  },
+  "homepage": "https://github.com/sreekotay/concurrent-c/tree/main/vscode/ccs-syntax",
+  "bugs": {
+    "url": "https://github.com/sreekotay/concurrent-c/issues"
+  },
   "engines": {
     "vscode": "^1.60.0"
   },
   "categories": [
     "Programming Languages"
   ],
+  "keywords": [
+    "concurrent-c",
+    "ccs",
+    "cch",
+    "shcc",
+    "c",
+    "syntax",
+    "highlighting"
+  ],
+  "vsce": {
+    "baseContentUrl": "https://github.com/sreekotay/concurrent-c/raw/main/vscode/ccs-syntax",
+    "baseImagesUrl": "https://github.com/sreekotay/concurrent-c/raw/main/vscode/ccs-syntax"
+  },
   "contributes": {
     "languages": [
       {

@@ -12,7 +12,7 @@ This repo includes:
 - `.vscode/tasks.json` (build/run via `./cc/bin/ccc`)
 - `.vscode/launch.json` (LLDB launch config)
 
-If you install with `./cc-install.sh`, it also installs the local Concurrent-C syntax package for VS Code and Cursor, and it attempts to install the CodeLLDB extension automatically when the `code` / `cursor` CLI is available.
+Install the Concurrent-C syntax extension from the marketplace (`sreekotay.concurrent-c-syntax`) or via `./cc-install.sh`, which also copies the in-tree package and attempts to install CodeLLDB when the `code` / `cursor` CLI is available.
 
 In VS Code or Cursor:
 
