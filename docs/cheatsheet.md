@@ -229,7 +229,10 @@ v.median();                 // declare = install
 Last-resort unresolved methods: `.ufcs_sink = cc_type_dynamic_call("callee", "WRAP")`.
 Destination-aware: a typed dest composes `<callee>_<mangled dest>` when declared.
 
-Receiver first; arena last when needed. Recipe:
+Receiver first; **arena last** when the call needs one. That is the
+convention and what makes UFCS land on the data, not the arena:
+`s.clone_into(&a)` is `clone_into(s, &a)`. Arena first would be
+`a.clone_into(s)`. Recipe:
 [recipe_ufcs_forms.ccs](../examples/recipe_ufcs_forms.ccs).
 Tutorial: [typehooks-typeviews.md](typehooks-typeviews.md). Spec: `spec/draft_typehooks.md`.
 
@@ -310,14 +313,14 @@ Multiline backticks **dedent** to the closing backtick's margin.
 
 `@scratch` is only the arena operand of `@string`. Every site in a
 function or closure shares one stack arena (not per line). Bind the
-product (`CCString line =` `` @string(`…`, @scratch) ``) before
-`return` or `cc_script_sh_read` — `return f(@string(…))` breaks
-`@destroy` return-rewrite, and a call-local `@string` is reclaimed
-after the consuming call. A newline before `@scratch` is fine. Do not
-`scratch.destroy()`. Do not capture or send a `@scratch` product.
-Arena-less `` @string(`…`) `` is a compile error on slices, `CCString`,
-floats, or pointers (pass an arena). Growth failure poisons the
-`CCString`; it never truncates.
+product (`CCString line =` `` @string(`…`, @scratch) ``) before a
+consuming call. `return f(@string(…))` breaks `@destroy` return-rewrite;
+a call-local `@string` is reclaimed after that call. To keep a product,
+pass the arena it should live on (see [Keep](#keep-pass-the-arena-to-live-on)).
+A newline before `@scratch` is fine. Do not `scratch.destroy()`. Do not
+capture or send a `@scratch` product. Arena-less `` @string(`…`) `` is a
+compile error on slices, `CCString`, floats, or pointers (pass an arena).
+Growth failure poisons the `CCString`; it never truncates.
 
 ---
 
@@ -486,9 +489,6 @@ a.reset();                             // drain epoch; reuse L1
 CCArenaCheckpoint cp = a.try_checkpoint() !> @destroy; // consumed loan
 /* …scratch, including Main… */
 cp.try_restore() !>;                   // or leave the scope: @destroy restores
-
-/* @scratch — arena operand of @string only; bind before return / sh_read */
-io.println(@string(`len=${s.len}`, @scratch)) !>;   // call-local: reclaimed after println
 ```
 
 Slices (`T[:]`) carry provenance. Views must not outlive their arena.
@@ -496,6 +496,27 @@ A mid-slab hole disables a new capture until last-live rewind or `reset`.
 Restore of a handle whose overflow keep-set was released refuses.
 `detach()` moves heap-owned mallocs only — a stack or caller L1 is refused.
 Details: [getting-started § Arenas](getting-started.md#arenas-name-a-lifetime).
+
+---
+
+## Keep: pass the arena to live on
+
+`@scratch` is throwaway — gone after the consuming call. To **keep** a
+product, pass the arena it should live on. That arena is the **last**
+parameter (convention, and so UFCS binds the data: `s.clone_into(&a)`
+is `clone_into(s, &a)`).
+
+```c
+CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+
+io.println(@string(`tmp`, @scratch)) !>;     // gone after println
+
+CCString keep = @string(`keep me`, &a);      // lives on `a`
+CCString out  = cc_script_sh_read_at(keep, &a) !>;
+
+CCString load(CCSlice path, CCArena *a);     // arena last → keep on `a`
+s.clone_into(&a);
+```
 
 ---
 

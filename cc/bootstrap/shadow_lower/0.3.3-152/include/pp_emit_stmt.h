@@ -82,8 +82,8 @@ static int shadow_mode_destroy_bare(const char* mode) {
 }
 
 /* Extracted to pp_emit_unwrap.cch / pp_emit_spawn.cch */
-static int shadow_resolve_at_create(char* expr, size_t cap, const char* ty,
-                                    int is_ptr, int with_closure);
+static void shadow_resolve_at_create(char* expr, size_t cap, const char* ty,
+                                     int is_ptr, int with_closure);
 static int shadow_is_expr_closure(AstNode* kid);
 static AstNode* shadow_expr_closure_kid(AstNode* st);
 static int shadow_closure_arity(AstNode* cl);
@@ -2128,10 +2128,10 @@ static int shadow_emit_scratch_cps_restore(ShadowCtx* ctx, CEmit* out,
     return 1;
 }
 
-#include "pp_emit_unwrap.cch"
-#include "pp_emit_spawn.cch"
-#include "pp_emit_autoblock.cch"
-#include "pp_emit_strswitch.cch"
+#include "pp_emit_unwrap.h"
+#include "pp_emit_spawn.h"
+#include "pp_emit_autoblock.h"
+#include "pp_emit_strswitch.h"
 
 /* Call-arg text: skip UFCS peel when args are plain literals (preserve strings). */
 static void shadow_emit_call_args_text(AstNode* st, char* dst, size_t cap) {
@@ -4152,9 +4152,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
         /* Same as AST_PTR_INIT: channel_pair → create_named before UFCS peel. */
         if (!shadow_emit_channel_pair_expr(init, sizeof(init), raw))
             shadow_emit_expr_text(st, raw, init, sizeof(init), formal);
-        if (!shadow_resolve_at_create(init, sizeof(init), st->a, is_ptr,
-                                      cl != NULL))
-            return 0;
+        shadow_resolve_at_create(init, sizeof(init), st->a, is_ptr, cl != NULL);
         if (cl) shadow_splice_closure_arg(init, sizeof(init), cl);
         if (has_bang) {
             /* Result: field unwrap + @errhandler. Plain values (create hook,
@@ -4339,11 +4337,8 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
             if (!shadow_emit_channel_pair_expr(expr, sizeof(expr), raw))
                 shadow_emit_expr_text(st, raw, expr, sizeof(expr), formal);
             if (!shadow_rewrite_bang_exprs(expr, sizeof(expr), ctx)) return 0;
-            if (!shadow_resolve_at_create(expr, sizeof(expr), ty,
-                                          st->d[0] == '*',
-                                          cl != NULL &&
-                                              strcmp(cl->b, "create") == 0))
-                return 0;
+            shadow_resolve_at_create(expr, sizeof(expr), ty, st->d[0] == '*',
+                                     cl != NULL && strcmp(cl->b, "create") == 0);
         }
         if (ty && strncmp(ty, "CCResult_", 9) == 0)
             shadow_rewrite_result_ctors(expr, sizeof(expr), ty);
@@ -5794,8 +5789,7 @@ static int shadow_emit_one_destroy(AstNode* st, CEmit* out, ShadowCtx* ctx,
         init[0] = 0;
         if (st->c[0]) {
             shadow_emit_expr_text(st, st->c, init, sizeof(init), elem);
-            if (!shadow_resolve_at_create(init, sizeof(init), ty, is_ptr, 0))
-                ok = 0;
+            shadow_resolve_at_create(init, sizeof(init), ty, is_ptr, 0);
         }
         if (!bare) {
             for (int k = 0; k < ndbody && ok; k++) {
@@ -6112,5 +6106,5 @@ static int shadow_emit_destroy_cleanup(CEmit* out, ShadowCtx* ctx,
 }
 
 
-#include "pp_emit_async.cch"
-#include "pp_emit_tu.cch"
+#include "pp_emit_async.h"
+#include "pp_emit_tu.h"

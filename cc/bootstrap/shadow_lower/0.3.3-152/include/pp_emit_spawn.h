@@ -78,25 +78,16 @@ static void shadow_type_snake(const char* ty, char* snake, size_t cap) {
     snake[si] = 0;
 }
 
-/* Resolve `__cc_at_create(…)` from the declared dest type.
- * Returns 1 when expr is not a create binder, or when a real callee was
- * chosen. Returns 0 when `T name@(args)` has no .create hook / _new /
- * folklore callee — never invents arena or nursery. */
-static int shadow_resolve_at_create(char* expr, size_t cap, const char* ty,
-                                    int is_ptr, int with_closure) {
+static void shadow_resolve_at_create(char* expr, size_t cap, const char* ty,
+                                     int is_ptr, int with_closure) {
     char rest[256];
     char snake[96];
     char callee[128];
-    const char* resolved;
     int arity;
     const size_t prefix_len = sizeof("__cc_at_create(") - 1; /* 15 */
     callee[0] = 0;
-    if (!expr) return 0;
-    if (strncmp(expr, "__cc_at_create(", prefix_len) != 0) return 1;
-    if (!ty || !ty[0]) {
-        fprintf(stderr, "error: type: @(...) create needs a declared type\n");
-        return 0;
-    }
+    if (!expr || !ty) return;
+    if (strncmp(expr, "__cc_at_create(", prefix_len) != 0) return;
     snprintf(rest, sizeof(rest), "%s", expr + prefix_len);
     {
         size_t rl = strlen(rest);
@@ -110,26 +101,24 @@ static int shadow_resolve_at_create(char* expr, size_t cap, const char* ty,
         }
     }
     arity = shadow_create_arg_count(rest);
-    resolved = shadow_td_alias_resolve(ty);
-    if (!resolved || !resolved[0]) resolved = ty;
-    shadow_type_snake(resolved, snake, sizeof(snake));
-    if (strcmp(resolved, "CCNursery") == 0)
+    shadow_type_snake(ty, snake, sizeof(snake));
+    if (strcmp(ty, "CCNursery") == 0)
         /* Inline `() =>` or `create(parent, closure_var)` both need spawn. */
         snprintf(callee, sizeof(callee), "%s",
                  (with_closure || arity >= 2)
                      ? "cc_nursery_spawn_child_closure0"
                      : "cc_nursery_create");
-    else if (strcmp(resolved, "CCArena") == 0)
+    else if (strcmp(ty, "CCArena") == 0)
         snprintf(callee, sizeof(callee), "%s",
                  (arity >= 2) ? "cc_arena_fixed_buffer" : "cc_arena_create");
-    else if (strcmp(resolved, "CCChan") == 0)
+    else if (strcmp(ty, "CCChan") == 0)
         snprintf(callee, sizeof(callee), "cc_channel_pair");
     else {
         char base[128];
         const char* reg;
-        shadow_type_base_nostar(resolved, base, sizeof(base));
-        reg = shadow_create_hook_for(resolved);
-        if ((!reg || !reg[0]) && base[0] && strcmp(base, resolved) != 0)
+        shadow_type_base_nostar(ty, base, sizeof(base));
+        reg = shadow_create_hook_for(ty);
+        if ((!reg || !reg[0]) && base[0] && strcmp(base, ty) != 0)
             reg = shadow_create_hook_for(base);
         if (reg && reg[0])
             snprintf(callee, sizeof(callee), "%s", reg);
@@ -170,13 +159,10 @@ static int shadow_resolve_at_create(char* expr, size_t cap, const char* ty,
         }
         }
     }
-    if (!callee[0]) {
-        fprintf(stderr, "error: type: '%s%s' has no .create hook\n", ty,
-                is_ptr ? "*" : "");
-        return 0;
-    }
+    if (!callee[0])
+        snprintf(callee, sizeof(callee), "%s",
+                 is_ptr ? "cc_nursery_create" : "cc_arena_create");
     snprintf(expr, cap, "%s(%s", callee, rest);
-    return 1;
 }
 
 /* Expr-level () => / (T x) => closure on dbody (create / typed-init). */

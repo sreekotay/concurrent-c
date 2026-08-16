@@ -856,10 +856,10 @@ static void shadow_rewrite_at_slice(char* expr, size_t cap) {
     snprintf(expr, cap, "%s", tmp);
 }
 
-/* Rewrite #include <… .cch> → #include <… .h> for host/TCC consumption. */
+/* Rewrite #include <… .h> → #include <… .h> for host/TCC consumption. */
 static void shadow_rewrite_pass_inc(char* dst, size_t cap, const char* src) {
     size_t n = src ? strlen(src) : 0;
-    /* "...foo.cch>" → "...foo.h>" */
+    /* "...foo.h>" → "...foo.h>" */
     if (n >= 5 && src[n - 5] == '.' && src[n - 4] == 'c' && src[n - 3] == 'c' &&
         src[n - 2] == 'h' && src[n - 1] == '>') {
         snprintf(dst, cap, "%.*s.h>", (int)(n - 5), src);
@@ -4178,7 +4178,7 @@ static int shadow_cc_slice_erased_has(const char* method) {
         size_t i;
         csv[0] = 0;
         loaded = 1;
-        if (shadow_family_header_read("cc_slice.cch", &fsrc, &fn) && fsrc) {
+        if (shadow_family_header_read("cc_slice.h", &fsrc, &fn) && fsrc) {
             for (i = 0; i + 10 < fn; i++) {
                 const char* pref = NULL;
                 size_t plen = 0;
@@ -4391,12 +4391,9 @@ static const ShadowDestroyHook* shadow_destroy_hooks_for(const char* ty) {
     int best = -1;
     size_t best_score = 0;
     const ShadowDestroyHook* h = NULL;
-    const char* resolved;
     if (!ty || !ty[0]) return NULL;
-    resolved = shadow_td_alias_resolve(ty);
-    if (!resolved || !resolved[0]) resolved = ty;
     for (i = 0; i < g_shadow_ndhooks; i++) {
-        if (strcmp(g_shadow_dhooks[i].ty, resolved) == 0) {
+        if (strcmp(g_shadow_dhooks[i].ty, ty) == 0) {
             h = &g_shadow_dhooks[i];
             break;
         }
@@ -4405,7 +4402,7 @@ static const ShadowDestroyHook* shadow_destroy_hooks_for(const char* ty) {
         for (i = 0; i < g_shadow_ndhooks; i++) {
             size_t score;
             if (!shadow_ty_is_glob(g_shadow_dhooks[i].ty)) continue;
-            if (!shadow_restrict_pattern_matches(g_shadow_dhooks[i].ty, resolved))
+            if (!shadow_restrict_pattern_matches(g_shadow_dhooks[i].ty, ty))
                 continue;
             score = shadow_restrict_pattern_score(g_shadow_dhooks[i].ty);
             if (score > best_score) {
@@ -4420,10 +4417,10 @@ static const ShadowDestroyHook* shadow_destroy_hooks_for(const char* ty) {
         return h;
     g_shadow_dhook_exp = *h;
     if (shadow_hook_is_suffix(h->pre))
-        shadow_hook_expand(resolved, h->pre, g_shadow_dhook_exp.pre,
+        shadow_hook_expand(ty, h->pre, g_shadow_dhook_exp.pre,
                            sizeof(g_shadow_dhook_exp.pre));
     if (shadow_hook_is_suffix(h->hook))
-        shadow_hook_expand(resolved, h->hook, g_shadow_dhook_exp.hook,
+        shadow_hook_expand(ty, h->hook, g_shadow_dhook_exp.hook,
                            sizeof(g_shadow_dhook_exp.hook));
     return &g_shadow_dhook_exp;
 }
@@ -4479,16 +4476,10 @@ static void shadow_create_hook_register(const char* ty, const char* hook) {
 }
 
 static const char* shadow_create_hook_for(const char* ty) {
-    const char* resolved;
-    const char* hook;
-    if (!ty || !ty[0]) return NULL;
-    resolved = shadow_td_alias_resolve(ty);
-    if (!resolved || !resolved[0]) resolved = ty;
-    hook = shadow_create_hook_match(resolved);
+    const char* hook = shadow_create_hook_match(ty);
     if (!hook || !hook[0]) return NULL;
     if (!shadow_hook_is_suffix(hook)) return hook;
-    shadow_hook_expand(resolved, hook, g_shadow_chook_exp,
-                       sizeof(g_shadow_chook_exp));
+    shadow_hook_expand(ty, hook, g_shadow_chook_exp, sizeof(g_shadow_chook_exp));
     return g_shadow_chook_exp[0] ? g_shadow_chook_exp : NULL;
 }
 
@@ -4581,8 +4572,8 @@ static char* shadow_ufcs_slim_src(const char* src, size_t n, const char* expr,
     size_t on = 0, oc = 0;
     char* types;
     const char* prelude =
-        "#include <ccc/std/prelude.cch>\n"
-        "#include <ccc/cc_ufcs.cch>\n";
+        "#include <ccc/std/prelude.h>\n"
+        "#include <ccc/cc_ufcs.h>\n";
     if (!src || !n || !out_n) return NULL;
     *out_n = 0;
     shadow_ufcs_sb_append(&out, &on, &oc, prelude, strlen(prelude));
@@ -5406,7 +5397,7 @@ static void shadow_as_scan_nested_incs(const char* text, int depth) {
         memcpy(rel, lt, n);
         rel[n] = 0;
         /* Prefer .cch facts; strip generated .h suffix.
-         * Do not spell ".cch" in a string literal — header lowerer rewrites
+         * Do not spell ".h" in a string literal — header lowerer rewrites
          * those to ".h" (same constraint as pp_stage2 umbrella check). */
         if (n > 2 && strcmp(rel + n - 2, ".h") == 0) {
             size_t rl;
@@ -5460,7 +5451,7 @@ static void shadow_as_scan_pass_inc(char pass_inc[][256], int npass_inc) {
         if (n >= sizeof(rel)) n = sizeof(rel) - 1;
         memcpy(rel, lt, n);
         rel[n] = 0;
-        /* Same no-".cch"-literal rule as nested scan above. */
+        /* Same no-".h"-literal rule as nested scan above. */
         if (n > 2 && strcmp(rel + n - 2, ".h") == 0) {
             size_t rl;
             rel[n - 2] = 0;

@@ -1,0 +1,20 @@
+/* Destroy hook alone must not invent cc_nursery_create for T* name@(args). */
+#include <ccc/std/prelude.cch>
+
+typedef struct {
+    int n;
+} Widget;
+
+static void widget_destroy(Widget* w) {
+    (void)w;
+}
+
+@typehooks on Widget {
+    .destroy = cc_type_destroy_call("widget_destroy"),
+};
+
+int main(void) {
+    Widget* p@(NULL) @destroy;
+    (void)p;
+    return 0;
+}

@@ -1,0 +1,53 @@
+/* Typedef aliases see the base / family create+destroy hooks. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct {
+    int n;
+} Widget;
+
+static Widget widget_create(int n) {
+    Widget w;
+    w.n = n;
+    return w;
+}
+
+static void widget_destroy(Widget* w) {
+    (void)w;
+}
+
+@typehooks on Widget {
+    .create = cc_type_create_call("widget_create"),
+    .destroy = cc_type_destroy_call("widget_destroy"),
+};
+
+typedef struct {
+    int n;
+} Widget_foo;
+
+static Widget_foo Widget_foo_create(int n) {
+    Widget_foo w;
+    w.n = n;
+    return w;
+}
+
+static void Widget_foo_destroy(Widget_foo* w) {
+    (void)w;
+}
+
+@typehooks on Widget_* {
+    .create = cc_type_create_call("_create"),
+    .destroy = cc_type_destroy_call("_destroy"),
+};
+
+typedef Widget ExactAlias;
+typedef Widget_foo FamilyAlias;
+
+int main(void) {
+    ExactAlias a@(7) @destroy;
+    FamilyAlias b@(9) @destroy;
+    if (a.n != 7) return 1;
+    if (b.n != 9) return 2;
+    printf("ok\n");
+    return 0;
+}

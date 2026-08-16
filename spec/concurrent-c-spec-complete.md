@@ -216,7 +216,8 @@ disagrees with a `.ccs` / `.cch` / `.shcc` suffix is ill-formed.
 The implementation may copy a header-bearing unit into a cache file so a
 pin-era lowerer never sees the magic line. Quoted `#include` of project
 faces still resolves from the original unit's directory (the `#line` path),
-not the cache directory.
+not the cache directory. An included `.ccs` / `.cch` face with a unit
+header is stripped the same way — the bang is not a preprocessor directive.
 
 ---
 
@@ -5427,7 +5428,7 @@ int cc_type_register(const char* type_name, CCTypeHooks hooks);
 - `cc_type_destroy_call("callee")` registers the destroy phase only.
 - `cc_type_pre_destroy_call("callee")` registers the pre-destroy phase only; it runs before any call-site `@destroy { ... }` body.
 - `cc_type_destroy_hooks("pre", "destroy")` registers both destroy phases.
-- `T name@(args)` is well-formed only when `T` has a `.create` hook (or a `_new` factory on a generic instance). It must be followed by explicit ownership syntax: either `@destroy` or `@detach`. Omitting both is a compile-time error.
+- `T name@(args)` is well-formed only when `T` has a `.create` hook (or a `_new` factory on a generic instance). Typedef aliases use the base type's hooks. A dest type with neither a hook nor a `_new` / folklore callee is a compile-time error naming `T`. It must be followed by explicit ownership syntax: either `@destroy` or `@detach`. Omitting both is a compile-time error.
 - `@detach` does not take a cleanup body.
 - For `T name@(args) @destroy { body };`, lowering order is: registered `pre_callee`, then call-site `body`, then registered `callee`, then the value-field chain (§3.1).
 - `arg_types` for `.create` is inferred from the `@(args)` argument list. Implementations may leave complex local expressions unknown.

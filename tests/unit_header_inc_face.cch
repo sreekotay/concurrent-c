@@ -1,0 +1,5 @@
+#!ccc cch
+#ifndef UNIT_HEADER_INC_FACE_H
+#define UNIT_HEADER_INC_FACE_H
+static int unit_header_inc_face_ok(void) { return 0; }
+#endif
