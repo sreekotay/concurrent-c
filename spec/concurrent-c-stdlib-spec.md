@@ -133,8 +133,9 @@ int    cc_map_key_eq_<K-mangling>(K a, K b);
 ```
 
 are visible — declared in the translation unit or an included header — and a
-declared pair outranks the built-in table (`int`, 64-bit integers,
-`CCSliceHdr`, `CCSlicePacked`, the slice family). Forward prototypes are
+declared pair outranks the built-in table (`int`, `size_t`, `long` /
+`long long`, 64-bit integers, `CCSliceHdr`, `CCSlicePacked`, the slice
+family). Forward prototypes are
 emitted above the spliced container declaration with the definitions' own
 linkage, so the pair may be defined anywhere in the unit. A key type with no
 declared pair and no built-in entry is ill-formed; the diagnostic names the

@@ -247,9 +247,12 @@ v.push(10);                              // dot: Vec is the struct
 vec_new::[int](&arena);                  // same instance
 
 Map::[int, double] m = map_new::[int, double](&arena);
+Map::[size_t, int] n = map_new::[size_t, int](&arena);
 m->insert(1, 2.5);                       // arrow: Map sugar is Name*
 
 double[:] xs;                            // CCSlice_double (char[:] stays CCSlice)
+SmallVec::[int, 8] sv;                   // integer args are factory string slices
+SmallVec::[long long, 8] w;              // multi-word types stay one arg
 ```
 
 `.` = value, `->` = pointer. Recipe:

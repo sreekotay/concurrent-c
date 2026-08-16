@@ -6276,8 +6276,15 @@ case Color_Blue: ...
 `Name::[args]` is an instantiation use of a library-owned generic family.
 It is not declarative generic syntax. Declarations such as
 `struct Pair::[A, B] { ... }`, `void swap::[T](...)`, generic parameter
-lists, value-generic parameters, partial inference, and generic impl blocks are
-unsupported and produce compile-time errors.
+lists, partial inference, and generic impl blocks are unsupported and
+produce compile-time errors.
+
+Use-site arguments are type spellings or non-negative decimal integer
+literals (`SmallVec::[int, 8]`). Multi-word types join with `_` in the
+concrete name (`SmallVec::[long long, 8]` → `SmallVec_long_long_8`); the
+factory receives each argument as a C spelling string slice (`arg(0)` is
+`long long`). Other numeric spellings (floats, hex, a leading minus) are
+ill-formed.
 
 ### 12.1 Registered factories
 
@@ -6291,9 +6298,10 @@ compiler:
 4. splices the returned C definition before first use, and
 5. rewrites the source use to the concrete C name.
 
-The base factory must exist and return a non-empty C fragment. Each concrete
-name is emitted once per translation unit. Extensions may return an empty
-fragment.
+The base factory must exist and return a non-empty C fragment. A
+`Name::[args]` use with no registered factory for `Name` is ill-formed,
+diagnosed at the use site. Each concrete name is emitted once per
+translation unit. Extensions may return an empty fragment.
 
 `T[:]` with a non-char element is sugar for `CCSlice::[T]` and uses the
 `CC_GENERIC_FACTORY(CCSlice, 1)` registered in `cc_slice.cch`. `char[:]`
@@ -6534,7 +6542,10 @@ Functions may take compile-time parameters explicitly:
 
 **Rule:** A `@comptime` parameter may be used wherever a constant expression is required (array lengths, channel capacities, switch case values, etc.).
 
-**Important interaction with generics:** `@comptime` parameters are the standard way to express lightweight "value generics" (Zig-style) without introducing a separate template system.
+**Important interaction with generics:** `@comptime` parameters express
+compile-time values in ordinary functions (array lengths, channel
+capacities). Generic factories also receive decimal integer use-site
+arguments as string slices (`Name::[int, 8]`).
 
 ```c
 // @comptime parameter drives array size

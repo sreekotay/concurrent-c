@@ -260,7 +260,10 @@ Quick reference: [Cheatsheet](cheatsheet.md). Spec: [language spec](../spec/conc
 `Name::[args]` names a monomorph of a library factory. The factory’s emitted
 `${mangled}_<member>` functions are the methods — the same dispatch as
 `v.push`. Stdlib `Vec::[T]`, `Map::[K,V]`, `ArrayMap::[K,V]`, and non-char
-`T[:]` use `CC_GENERIC_FACTORY` like a user `Pair::[A,B]`.
+`T[:]` use `CC_GENERIC_FACTORY` like a user `Pair::[A,B]`. Arguments may be
+types or non-negative decimal integers (`SmallVec::[int, 8]`). Multi-word types stay one argument
+(`SmallVec::[long long, 8]`). A missing
+factory is a use-site error — include the header that registers it.
 
 ```c
 Vec::[int] v@(&arena) @destroy;     // CCVec_int; dot UFCS

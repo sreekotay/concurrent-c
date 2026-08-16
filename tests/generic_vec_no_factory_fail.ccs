@@ -1,0 +1,11 @@
+/* `Vec::[T]` without vec.cch must not splice a compiler-native DECL. */
+#include <ccc/cc_arena.cch>
+#include <stdio.h>
+
+int main(void) {
+    CCArena a = cc_arena_heap(kilobytes(4));
+    Vec::[int] v = vec_new::[int](&a);
+    (void)v;
+    cc_arena_free(&a);
+    return 0;
+}

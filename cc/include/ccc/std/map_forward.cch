@@ -133,6 +133,18 @@ static inline int cc_map_eq_slice_hdr(CCSliceHdr a, CCSliceHdr b) {
 #define cc_map_key_eq_uint64_t cc_map_eq_u64
 #define cc_map_key_hash_int64_t cc_map_hash_u64
 #define cc_map_key_eq_int64_t cc_map_eq_u64
+#define cc_map_key_hash_size_t cc_map_hash_u64
+#define cc_map_key_eq_size_t cc_map_eq_u64
+#define cc_map_key_hash_long cc_map_hash_u64
+#define cc_map_key_eq_long cc_map_eq_u64
+#define cc_map_key_hash_long_long cc_map_hash_u64
+#define cc_map_key_eq_long_long cc_map_eq_u64
+#define cc_map_key_hash_unsigned_long cc_map_hash_u64
+#define cc_map_key_eq_unsigned_long cc_map_eq_u64
+#define cc_map_key_hash_unsigned_long_long cc_map_hash_u64
+#define cc_map_key_eq_unsigned_long_long cc_map_eq_u64
+#define cc_map_key_hash_ptrdiff_t cc_map_hash_u64
+#define cc_map_key_eq_ptrdiff_t cc_map_eq_u64
 
 #define CC_MAP_DECL_UFCS(Name) typedef char __cc_map_decl_ufcs__##Name
 
@@ -223,6 +235,12 @@ CC_GENERIC_FACTORY(Map, 2) {
         snprintf(hash, sizeof(hash), "cc_map_hash_slice");
         snprintf(eq, sizeof(eq), "cc_map_eq_slice");
     } else if (strstr(k, "64") != NULL) {
+        snprintf(hash, sizeof(hash), "cc_map_hash_u64");
+        snprintf(eq, sizeof(eq), "cc_map_eq_u64");
+    } else if (strcmp(k, "size_t") == 0 || strcmp(k, "ptrdiff_t") == 0 ||
+               strcmp(k, "long") == 0 || strcmp(k, "long_long") == 0 ||
+               strcmp(k, "unsigned_long") == 0 ||
+               strcmp(k, "unsigned_long_long") == 0) {
         snprintf(hash, sizeof(hash), "cc_map_hash_u64");
         snprintf(eq, sizeof(eq), "cc_map_eq_u64");
     } else {

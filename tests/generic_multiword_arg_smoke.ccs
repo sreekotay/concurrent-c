@@ -1,0 +1,49 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+
+/* Multi-word types stay one factory arg: long long → arg(0) "long long".
+ * Map::[size_t, int] must not peel the key at the first `_`. */
+CC_GENERIC_FACTORY(SmallVec, 2) {
+    return @emit(`
+        typedef struct {
+            ${arg(0)} items[${arg(1)}];
+            int n;
+        } ${mangled};
+        static inline ${mangled} ${mangled}_make(void) {
+            ${mangled} z;
+            z.n = 0;
+            return z;
+        }
+        static inline void ${mangled}_push(${mangled}* self, ${arg(0)} x) {
+            if (self->n < ${arg(1)}) self->items[self->n++] = x;
+        }
+        static inline int ${mangled}_count(const ${mangled}* self) {
+            return self->n;
+        }`, arena);
+}
+
+int main(void) {
+    SmallVec::[long long, 8] v = small_vec_make::[long long, 8]();
+    v.push(1);
+    v.push(2);
+    {
+        CCArena a = cc_arena_heap(kilobytes(4));
+        Map::[size_t, int] m = map_new::[size_t, int](&a);
+        if (!m) {
+            printf("generic_multiword_arg_smoke FAIL map new\n");
+            cc_arena_free(&a);
+            return 1;
+        }
+        m->insert((size_t)1, 42);
+        int* got = m->get_ptr((size_t)1);
+        if (!got || *got != 42) {
+            printf("generic_multiword_arg_smoke FAIL map\n");
+            cc_arena_free(&a);
+            return 1;
+        }
+        cc_arena_free(&a);
+    }
+    printf("generic_multiword_arg_smoke ok count=%d\n", v.count());
+    return v.count() == 2 ? 0 : 1;
+}

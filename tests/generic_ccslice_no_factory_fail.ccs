@@ -1,0 +1,11 @@
+/* `CCSlice::[T]` without cc_slice.cch must not splice a compiler-native DECL.
+ * Prelude element types (double, int, …) skip factory queue; use a user type. */
+#include <stdio.h>
+
+typedef struct Pt { double x, y; } Pt;
+
+int main(void) {
+    CCSlice::[Pt] xs;
+    (void)xs;
+    return 0;
+}

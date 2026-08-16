@@ -11,7 +11,10 @@
 `T[:]` instantiate `CC_GENERIC_FACTORY` in the stdlib headers (concrete names
 `CCVec_<T>`, `Map_<K>_<V>*`, `ArrayMap_<K>_<V>*`, `CCSlice_<T>`). Use-site
 `Name::[args]` still rewrites through `cc_rewrite_generic_containers`;
-emission is the compiled factory (textual fallback for self-build).
+emission is the compiled factory. A missing factory is a use-site error
+(no compiler-native Vec/Map DECL fallback). `T[:]` keeps a textual CCSlice
+fallback when the harvested factory is not yet registered. Use-site args
+may be types or non-negative decimal integers (`SmallVec::[int, 8]`).
 `cc_instantiate_vec` / `_map` remain explicit `@comptime` force-ins.
 Dated sections below are the migration log.
 
@@ -562,8 +565,11 @@ instantiate → emit → rewrite machinery is identical regardless of whether th
   CCArena*)` returning the definition text. Arbitrary compile-time logic
   (branch on arity/N, choose monomorph vs type-erased) now possible.
 
-- **D6.2 (value params).** Allow `SmallVec::[int, 8]` — non-type args threaded as
-  string slices to the template/factory.
+- **D6.2 (value params) — landed.** `SmallVec::[int, 8]` — non-type args are
+  decimal integer literals, mangled into the concrete name (`SmallVec_int_8`)
+  and threaded as string slices to the factory (`arg(i)`). Multi-word types
+  stay one argument (`SmallVec::[long long, 8]` → `SmallVec_long_long_8`,
+  `arg(0)` is `long long`).
 
 - **D6.3 (reflection in factories) — landed 2026-05-29.** A reflection callback
   crosses the user-space bind point as **bytes only** — no `cc_type_info*` (or
@@ -616,9 +622,9 @@ instantiate → emit → rewrite machinery is identical regardless of whether th
   (full suite 489/489).  `Chan` has no decl factory yet (the chan branch in
   `cc_preprocess_emit_splice` emits nothing today).
   **Later:** Vec/Map (and ArrayMap / `T[:]`) moved off NATIVE_DECL emit onto
-  `CC_GENERIC_FACTORY` in the stdlib headers; see Current product above. The
-  `cc__builtin_vec_decl` / `_map_decl` NATIVE_DECL entries remain as host
-  fallbacks.
+  `CC_GENERIC_FACTORY` in the stdlib headers. Compiler-native Vec/Map
+  NATIVE_DECL entries are not default-seeded; a TU without the factory
+  fails at the use site.
 - **Option A (unified generic registry) — LANDED 2026-05-30.**  The three
   historic registries (container-decl factories, declarative generic templates,
   compiled generic factories) are now **one tagged registry** (`cc__generics[]`

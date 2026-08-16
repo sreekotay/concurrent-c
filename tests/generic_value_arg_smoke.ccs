@@ -1,0 +1,31 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_instantiate.cch>
+#include <stdio.h>
+
+/* Integer use-site args: SmallVec::[int, 8] → SmallVec_int_8; arg(1) is "8". */
+CC_GENERIC_FACTORY(SmallVec, 2) {
+    return @emit(`
+        typedef struct {
+            ${arg(0)} items[${arg(1)}];
+            int n;
+        } ${mangled};
+        static inline ${mangled} ${mangled}_make(void) {
+            ${mangled} z;
+            z.n = 0;
+            return z;
+        }
+        static inline void ${mangled}_push(${mangled}* self, ${arg(0)} x) {
+            if (self->n < ${arg(1)}) self->items[self->n++] = x;
+        }
+        static inline int ${mangled}_count(const ${mangled}* self) {
+            return self->n;
+        }`, arena);
+}
+
+int main(void) {
+    SmallVec::[int, 8] v = small_vec_make::[int, 8]();
+    v.push(1);
+    v.push(2);
+    printf("generic_value_arg_smoke ok count=%d\n", v.count());
+    return v.count() == 2 ? 0 : 1;
+}

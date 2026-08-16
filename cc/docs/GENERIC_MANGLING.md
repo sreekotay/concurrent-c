@@ -22,12 +22,17 @@ base + "_" + mangle(canon(arg0)) + "_" + mangle(canon(arg1)) + …
 1. **canon(arg)** — normalize the type spelling (trim, collapse, fold surface
    sugar such as the slice spelling). This is `cc__canonicalize_container_param_type`.
 2. **mangle(s)** — sanitize the canonical spelling into an identifier-safe token:
-   - drop interior whitespace,
+   - identifier tokens join with `_` (`long long` → `long_long`; `size_t` stays
+     `size_t`),
    - `*`  → `ptr`,
    - `[:]` (slice) → `slice`,
    - `[`, `]`, `,`, `<`, `>` → `_`,
-   - all other characters copied verbatim,
+   - all other characters copied verbatim (decimal integer args stay digits),
    - trim trailing `_`.
+
+The factory still receives each argument as a C spelling (`arg(0)` is
+`long long`, not `long_long`). Underscore-splitting the compact name is not
+how arity is recovered.
 
 ### Examples
 
@@ -39,6 +44,9 @@ base + "_" + mangle(canon(arg0)) + "_" + mangle(canon(arg1)) + …
 | `ArrayMap::[int, double]`| `ArrayMap_int_double` |
 | `Box::[char*]`           | `Box_charptr`         |
 | `Span::[char[:]]`        | `Span_slice`          |
+| `SmallVec::[int, 8]`     | `SmallVec_int_8`      |
+| `SmallVec::[long long, 8]` | `SmallVec_long_long_8` |
+| `Map::[size_t, int]`     | `Map_size_t_int`      |
 
 The Vec family name is `Vec`; the instance spelling is `CCVec_<T>` (not
 `Vec_<T>`). Map/ArrayMap instances are `Name*` sugar; Vec is the struct.

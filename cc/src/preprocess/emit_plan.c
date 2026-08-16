@@ -230,17 +230,14 @@ static int cc__emit_try_collect_cc_emit_format(const char* src, size_t len, size
  *
  * One registry holds every generic, built-in or user-defined, tagged by how it
  * produces C:
- *   - NATIVE_DECL : a compiler-native C fn that emits a container monomorph's
- *                   declaration from a CCTypeInstantiation (built-in Vec/Map;
- *                   consumed by the type-graph emission loop).
+ *   - NATIVE_DECL : optional compiler-native C fn that emits a container
+ *                   monomorph's declaration from a CCTypeInstantiation
+ *                   (type-graph emission loop; not seeded for Vec/Map).
  *   - TEMPLATE    : a declarative `$0..$N` template expanded at the use site.
  *   - COMPILED    : a `@comptime` factory compiled to a dylib and invoked at
  *                   the use site.
- * The three historic registries (container-decl factories, generic templates,
- * compiled factories) are now one array keyed by (name, kind); the built-in
- * containers are simply NATIVE_DECL entries, so "Vec/Map are special" stops
- * being true at the dispatch level — they share the registry and the use-site
- * resolver with user `Name::[args]` factories. */
+ * One array keyed by (name, kind). Vec/Map/ArrayMap splice through
+ * CC_GENERIC_FACTORY; NATIVE_DECL is only used when a library registers one. */
 typedef enum CCGenericKind {
     CC_GENERIC_NATIVE_DECL = 0,
     CC_GENERIC_COMPILED    = 1,
@@ -273,10 +270,6 @@ typedef struct CCGenericReg {
 #define CC_EMIT_PLAN_MAX_GENERICS 128
 static CCGenericReg cc__generics[CC_EMIT_PLAN_MAX_GENERICS];
 static size_t cc__generic_count = 0;
-/* Set once the built-in NATIVE_DECL defaults (Vec/Map) have been seeded — or
- * suppressed by an explicit early container registration (preserves the prior
- * container registry's "first external register opts out of defaults" quirk). */
-static int cc__generic_defaults_done = 0;
 
 static CCGenericReg* cc__generic_find(const char* name, CCGenericKind kind) {
     if (!name) return NULL;
@@ -3200,83 +3193,18 @@ void cc_emit_plan_fprint_container_epilogue(FILE* out) {
 
 /* --- D6.4 / Option A: container declaration factories ------------------- *
  *
- * Container monomorph declarations (Vec/Map/...) used to be emitted by two
- * hardcoded functions.  They are now NATIVE_DECL entries in the unified generic
- * registry (above): the built-in Vec/Map emitters below are simply the
- * default-seeded entries, so a library can register an additional container
- * kind (or override a built-in) through the same seam — and built-in containers
- * share one registry with user `Name::[args]` factories.
- * `cc_emit_plan_fprint_vec_decl` / `_map_decl` are thin dispatchers that look
- * the kind up and call the registered factory (the built-in unless overridden).
+ * NATIVE_DECL is an optional registry slot a library may fill with
+ * `cc_emit_plan_register_container_factory`. Vec/Map/ArrayMap splice through
+ * `CC_GENERIC_FACTORY` in the stdlib headers; the compiler does not seed
+ * native DECL emitters. A TU that spells `Vec::[T]` without that factory
+ * fails at the use site.
+ * `cc_emit_plan_fprint_vec_decl` / `_map_decl` dispatch to a registered
+ * NATIVE_DECL if one exists; otherwise they diagnose.
  */
-
-static void cc__builtin_vec_decl(FILE* out, const CCTypeInstantiation* inst) {
-    char slice_name[256];
-    if (!out || !inst || !inst->type1 || !inst->mangled_name) return;
-    const char* mangled_elem = inst->mangled_name + 6;
-    if (strcmp(mangled_elem, "char") == 0) return;
-    /* Elements with a declared slice instance get the typed `as_slice`
-     * (returns CCSlice_<elem>); others keep the erased view. */
-    if (cc_slice_spec_instance_for_elem(inst->type1, slice_name,
-                                        sizeof(slice_name)) == 0)
-        fprintf(out, "CC_VEC_DECL_ARENA_TSLICE(%s, %s, %s)\n",
-                inst->type1, inst->mangled_name, slice_name);
-    else
-        fprintf(out, "CC_VEC_DECL_ARENA(%s, %s)\n", inst->type1, inst->mangled_name);
-}
-
-/* Map key-type -> (hash, eq) selection, as data rather than control flow.
- * Priority order, first match wins; `substr` chooses substring vs exact match;
- * an unmatched key falls back to the i32 pair.  This is the built-in (closed)
- * set of primitive/slice key kinds — keeping it as a table makes the set
- * explicit and is the natural place a future registrable seam would prepend
- * library-supplied key hashers (see COMPTIME_INSTANTIATION_SEAM.md). */
-static void cc__map_select_hasheq_fwd(FILE* out, const char* key_type,
-                                      const char** out_hash,
-                                      const char** out_eq) {
-    static _Thread_local char hbuf[160];
-    static _Thread_local char ebuf[160];
-    int tu_static = -1;
-    (void)cc_map_key_hasheq_ex(key_type, hbuf, sizeof(hbuf),
-                               ebuf, sizeof(ebuf), &tu_static);
-    if (out && tu_static >= 0)
-        fprintf(out, "%ssize_t %s(%s);\n%sint %s(%s, %s);\n",
-                tu_static ? "static " : "", hbuf, key_type,
-                tu_static ? "static " : "", ebuf, key_type, key_type);
-    *out_hash = hbuf;
-    *out_eq = ebuf;
-}
-
-static void cc__builtin_map_decl(FILE* out, const CCTypeInstantiation* inst) {
-    const char* hash_fn;
-    const char* eq_fn;
-    if (!out || !inst || !inst->type1 || !inst->type2 || !inst->mangled_name) return;
-    cc__map_select_hasheq_fwd(out, inst->type1, &hash_fn, &eq_fn);
-    if (strncmp(inst->mangled_name, "ArrayMap_", 9) == 0) {
-        fprintf(out, "CC_ARRAY_MAP_DECL(%s, %s, %s, %s, %s)\n",
-                inst->type1, inst->type2, inst->mangled_name, hash_fn, eq_fn);
-        /* Seed Map-style UFCS method table (incl. live_bytes) for symbols. */
-        fprintf(out, "CC_ARRAY_MAP_DECL_UFCS(%s);\n", inst->mangled_name);
-        return;
-    }
-    fprintf(out, "CC_MAP_DECL_ARENA(%s, %s, %s, %s, %s)\n",
-            inst->type1, inst->type2, inst->mangled_name, hash_fn, eq_fn);
-}
-
-static void cc__container_factories_ensure_defaults(void) {
-    if (cc__generic_defaults_done) return;
-    cc__generic_defaults_done = 1;
-    cc_emit_plan_register_container_factory("Vec", cc__builtin_vec_decl);
-    cc_emit_plan_register_container_factory("Map", cc__builtin_map_decl);
-}
 
 void cc_emit_plan_register_container_factory(const char* kind, CCContainerDeclFactory fn) {
     CCGenericReg* r;
     if (!kind || !fn) return;
-    /* First external registration suppresses the default seeding (preserves the
-     * historic container registry's opt-out quirk) and avoids re-entering
-     * ensure_defaults() while it registers the built-ins. */
-    if (!cc__generic_defaults_done) cc__generic_defaults_done = 1;
     r = cc__generic_find(kind, CC_GENERIC_NATIVE_DECL);
     if (r) { r->decl_fn = fn; return; }  /* last registration wins */
     r = cc__generic_new(kind, CC_GENERIC_NATIVE_DECL);
@@ -3286,19 +3214,26 @@ void cc_emit_plan_register_container_factory(const char* kind, CCContainerDeclFa
 CCContainerDeclFactory cc_emit_plan_lookup_container_factory(const char* kind) {
     CCGenericReg* r;
     if (!kind) return NULL;
-    cc__container_factories_ensure_defaults();
     r = cc__generic_find(kind, CC_GENERIC_NATIVE_DECL);
     return r ? r->decl_fn : NULL;
 }
 
 void cc_emit_plan_fprint_vec_decl(FILE* out, const CCTypeInstantiation* inst) {
     CCContainerDeclFactory fn = cc_emit_plan_lookup_container_factory("Vec");
-    if (fn) fn(out, inst);
+    if (fn) { fn(out, inst); return; }
+    fprintf(stderr,
+            "error: Vec instantiation requires CC_GENERIC_FACTORY(Vec); "
+            "include <ccc/std/vec.cch> (no compiler-native Vec fallback)\n");
+    (void)out; (void)inst;
 }
 
 void cc_emit_plan_fprint_map_decl(FILE* out, const CCTypeInstantiation* inst) {
     CCContainerDeclFactory fn = cc_emit_plan_lookup_container_factory("Map");
-    if (fn) fn(out, inst);
+    if (fn) { fn(out, inst); return; }
+    fprintf(stderr,
+            "error: Map instantiation requires CC_GENERIC_FACTORY(Map); "
+            "include <ccc/std/map_forward.cch> (no compiler-native Map fallback)\n");
+    (void)out; (void)inst;
 }
 
 int cc_emit_plan_format_result_arm(char* out, size_t out_sz,

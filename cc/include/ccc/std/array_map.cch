@@ -573,6 +573,12 @@ CC_GENERIC_FACTORY(ArrayMap, 2) {
     } else if (strstr(k, "64") != NULL) {
         snprintf(hash, sizeof(hash), "cc_map_hash_u64");
         snprintf(eq, sizeof(eq), "cc_map_eq_u64");
+    } else if (strcmp(k, "size_t") == 0 || strcmp(k, "ptrdiff_t") == 0 ||
+               strcmp(k, "long") == 0 || strcmp(k, "long_long") == 0 ||
+               strcmp(k, "unsigned_long") == 0 ||
+               strcmp(k, "unsigned_long_long") == 0) {
+        snprintf(hash, sizeof(hash), "cc_map_hash_u64");
+        snprintf(eq, sizeof(eq), "cc_map_eq_u64");
     } else {
         snprintf(hash, sizeof(hash), "cc_map_key_hash_%s", k);
         snprintf(eq, sizeof(eq), "cc_map_key_eq_%s", k);

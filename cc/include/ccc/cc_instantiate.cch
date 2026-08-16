@@ -153,7 +153,8 @@ static inline int cc_emit_cstr(CCEmitAnchor anchor, const char* c_fragment) {
  * Ergonomics:
  *   - The implicit params are auto-voided, so a body that ignores one needn't
  *     write `(void)...`.
- *   - `arg(i)` is shorthand for `type_args.items[i]`.
+ *   - `arg(i)` is shorthand for `type_args.items[i]` (C type spelling such as
+ *     `long long`, or a decimal integer literal, as a string slice).
  *   - The optional arity `CC_GENERIC_FACTORY(Name, N)` injects the standard guard
  *     `if (type_args.len < N || !mangled.ptr) return cc_slice_empty();`; omit it
  *     (`CC_GENERIC_FACTORY(Name)`) to do your own argument checking.

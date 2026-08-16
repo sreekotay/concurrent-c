@@ -97,7 +97,8 @@ That is what makes `s.clone_into(&a)` and `clone_into(s, &a)` the same shape.
 Generics: `Name::[args]` instantiates a factory (`CC_GENERIC_FACTORY`).
 `Vec::[T]`, `Map::[K,V]`, `ArrayMap::[K,V]`, and non-char `T[:]` are that
 rule — Vec is the struct (`v.push`), Map/ArrayMap sugar is `Name*`
-(`m->insert`). Recipe:
+(`m->insert`). Arguments may be types or non-negative decimal integers
+(`SmallVec::[int, 8]`). Recipe:
 [recipe_user_generics.ccs](../examples/recipe_user_generics.ccs).
 
 Fallible chain: unwrap (`!>` / `?>`), then the next method sees the value.

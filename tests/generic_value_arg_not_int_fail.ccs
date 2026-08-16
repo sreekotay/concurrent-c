@@ -1,0 +1,7 @@
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    Ghost::[int, 8.5] x;
+    (void)x;
+    return 0;
+}
