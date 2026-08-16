@@ -62,4 +62,13 @@ printf '%s\n' '#include "curl_setup_standin.h"' \
     || fail "quote .h found only via --cc-flags -I failed to build"
 "$out_dir/foreign" || fail "foreign -I binary returned nonzero"
 
+# Bare CamelCase type: lowerer must not fail (host-cc typechecks).
+printf 'int main(void) { CURLcode x = 0; (void)x; return 0; }\n' \
+    > "$out_dir/camel.ccs"
+if ! "$CCC" build --no-cache --emit-c-only "$out_dir/camel.ccs" \
+        -o "$out_dir/camel.c" >/dev/null 2>"$out_dir/camel.err"; then
+    fail "bare CamelCase type failed at the lowerer: $(cat "$out_dir/camel.err")"
+fi
+grep -q CURLcode "$out_dir/camel.c" || fail "CURLcode was not passed through"
+
 echo "[test_quote_h_passthrough] ok"

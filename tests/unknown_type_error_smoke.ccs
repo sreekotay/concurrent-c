@@ -1,7 +1,6 @@
-/* Test that unknown type names produce a clear error message.
- * This should fail with "unknown type name 'SomeUndefinedType'"
- * rather than a confusing "';' expected" or "'{' expected".
- */
+/* Unknown CamelCase is left for host-cc (passthrough includes never
+ * register those typedefs). Host-cc must still say
+ * "unknown type name 'SomeUndefinedType'" — not a lowerer parse miss. */
 #include <ccc/std/prelude.cch>
 
 int main(void) {

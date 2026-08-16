@@ -1,0 +1,16 @@
+/* Foreign CamelCase typedefs come from a passthrough .h. The lowerer
+ * must seed the name and emit it; host-cc typechecks via the include. */
+#include <stdio.h>
+#include "foreign_camel_type_helper.h"
+
+static ForeignCamelCode wrap(ForeignCamelCode x) {
+    ForeignCamelCode result;
+    result = x;
+    return result;
+}
+
+int main(void) {
+    ForeignCamelCode v = wrap(foreign_camel_add(40, 2));
+    printf("sum=%d\n", v);
+    return 0;
+}
