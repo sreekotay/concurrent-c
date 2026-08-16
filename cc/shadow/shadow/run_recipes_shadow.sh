@@ -69,7 +69,8 @@ run_one examples/recipe_result_error_handling.ccs \
 run_one examples/recipe_arena_scope.ccs \
   "Processing request 1 bytes: 4096" \
   "Processing request 2 bytes: 4096" \
-  "Processing request 3 bytes: 4096"
+  "Processing request 3 bytes: 4096" \
+  "kept req-3"
 
 run_one examples/recipe_explicit_capture.ccs \
   "=== value capture ===" \

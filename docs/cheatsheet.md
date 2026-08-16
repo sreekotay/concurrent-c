@@ -518,6 +518,8 @@ CCString load(CCSlice path, CCArena *a);     // arena last → keep on `a`
 s.clone_into(&a);
 ```
 
+Recipe: [recipe_arena_scope.ccs](../examples/recipe_arena_scope.ccs).
+
 ---
 
 ## Absence (no `T?`)
