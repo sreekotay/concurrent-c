@@ -1,27 +1,52 @@
-# Project Proposal: Porting Curl's Asynchronous DNS Resolver
+# Project: Porting Curl's Asynchronous DNS Resolver
 
-This project aims to test the interop and build system practicality of Concurrent-C by porting a specific, high-value component of `libcurl`.
+Brownfield interop test: replace curl's threaded DNS resolver with a
+Concurrent-C translation unit and link it into a stock libcurl build.
+
+Working tree layout and phase status: [README.md](README.md).
 
 ## Target: `lib/asyn-thrdd.c`
 
-The `asyn-thrdd.c` file in `curl` implements an asynchronous DNS resolver using standard OS threads (pthreads or Windows threads). It spawns a thread for each `getaddrinfo` call to avoid blocking the main event loop.
+`asyn-thrdd.c` implements asynchronous DNS via OS threads so `getaddrinfo`
+does not block curl's event loop. It is one TU with a fixed API surface
+toward the rest of libcurl (start, await, shutdown, wakeup), which makes
+a surgical swap feasible.
 
-### Why this is a great target:
+### Why this target
 
-1.  **Surgical Interop:** It's a self-contained file (approx 500-800 lines). We can replace the thread-spawning logic with Concurrent-C fibers and a nursery (`CCNursery`) without rewriting the rest of `curl`.
-2.  **Build System Test:** `curl` uses a complex Autotools/CMake build system. Integrating `ccc` to compile this one file and link it into `libcurl.so` is the ultimate test of Concurrent-C's "brownfield" integration capabilities.
-3.  **Structural Safety:** DNS resolution is a common source of memory leaks and use-after-free bugs during cancellation. Using an owned `CCArena` for the lifetime of a DNS request and structured task ownership for the resolver fiber ensures deterministic cleanup.
-4.  **Fiber Efficiency:** Moving from OS threads to fibers reduces the overhead of concurrent DNS lookups, especially when many transfers are initiated simultaneously.
+1. **Surgical interop** — replace one file; leave the rest of curl as C.
+2. **Build-system proof** — Autotools/CMake must accept a `ccc --compile`
+   object in place of the stock `.o`.
+3. **Structured teardown** — DNS cancel/join is a known UAF and leak site.
+   Curl dropped `pthread_cancel` here because libc DNS is not cancel-safe.
+   Nursery ownership and arena-scoped results give deterministic cleanup
+   without force-killing the lookup.
+4. **Honest concurrency** — `getaddrinfo` remains blocking. The win is
+   ownership and join, not "fibers make DNS free." Hybrid/blocking offload
+   is the right spawn path for the lookup itself.
 
-## Implementation Strategy:
+## Implementation strategy
 
-1.  **Build Integration:** Modify the `curl` build process to use `ccc` for `asyn-thrdd.c`.
-2.  **Fiber Replacement:** Replace `Curl_thread_create` and thread-joining logic with `n->spawn` and a scoped `CCNursery`.
-3.  **Arena Management:** Use a `CCArena` to hold the `addrinfo` results and other per-request metadata, ensuring they are freed exactly when the resolver fiber completes or is cancelled.
-4.  **Event Loop Integration:** Ensure the fiber-based resolver correctly signals the main `curl` event loop upon completion (likely via the existing socket-pair or pipe signaling mechanism).
+1. **Pin + stock baseline** — fetch a release tarball; build with
+   `--enable-threaded-resolver --disable-ares`; smoke HTTPS.
+2. **Build integration** — compile the CC resolver with `ccc --compile`
+   and substitute that object into libcurl's archive / final link.
+3. **Fiber / hybrid replacement** — map `Curl_thread_create` / join onto
+   nursery spawn + wait; keep the existing socketpair/pipe wakeup so the
+   multi interface still learns completion.
+4. **Arena lifetime** — hold `addrinfo` results and per-request metadata
+   in a request-scoped arena freed when the resolver task completes or
+   the owning nursery is cancelled (after join).
 
-## Success Metrics:
+## Success metrics
 
-- **Correctness:** Pass the existing `curl` test suite (specifically the 500+ series tests for DNS).
-- **Build Practicality:** Successfully link the `ccc`-compiled object into a standard `libcurl` build.
-- **Performance:** Measure the overhead of spawning 100+ concurrent DNS lookups compared to the original thread-based implementation.
+Defined operationally in [BASELINE.md](BASELINE.md):
+
+- Stock identity: `AsynchDNS` / POSIX threaded resolver.
+- Happy path + NXDOMAIN via CLI and libcurl.
+- Concurrent multi lookups (N=32 default) all DNS-ok.
+- Abort/teardown mid-resolve returns within the soft budget (no hang).
+- Dated stock numbers under `benchmarks/baseline_stock_*.txt` for
+  order-of-magnitude comparison after the CC object swap.
+
+Later: curl `runtests.pl` DNS-related cases once the swap links cleanly.

@@ -1,0 +1,18 @@
+# Upstream curl source tree fetched by setup.sh
+curl_c/
+
+# Local build / install prefixes
+out/
+prefix/
+tmp/
+
+# Download artifacts
+*.tar.gz
+*.tar.xz
+
+# Configure / build residue if someone builds in-tree
+curl_c/lib/.libs/
+curl_c/src/.libs/
+
+# Dated baselines are committed; scratch copies stay local
+benchmarks/*_scratch*

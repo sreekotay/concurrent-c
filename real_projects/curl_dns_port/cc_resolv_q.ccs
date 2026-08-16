@@ -1,0 +1,352 @@
+/*
+ * Concurrent-C resolve queue - brownfield stand-in for curl's Curl_thrdq
+ * on the DNS path. getaddrinfo stays blocking; each item runs on a hybrid
+ * fiber so ownership/join is nursery-structured.
+ */
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_nursery.cch>
+
+#include <pthread.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#include "cc_resolv_q.h"
+
+typedef struct CcResolvNode {
+    void *item;
+    const char *description;
+    int64_t timeout_ms;
+    struct timespec start;
+    struct CcResolvNode *next;
+} CcResolvNode;
+
+struct CcResolvQ {
+    char *name;
+    pthread_mutex_t lock;
+    CcResolvNode *send_head;
+    CcResolvNode *send_tail;
+    CcResolvNode *recv_head;
+    CcResolvNode *recv_tail;
+    CCNursery *nursery;
+    CcResolvQItemFree fn_free;
+    CcResolvQItemProcess fn_process;
+    CcResolvQEvent fn_event;
+    void *fn_user_data;
+    uint32_t send_max_len;
+    uint32_t max_threads;
+    uint32_t inflight;
+    int aborted;
+};
+
+static CcResolvNode *node_new(void *item, const char *description,
+                              int64_t timeout_ms) {
+    CcResolvNode *n = (CcResolvNode *)calloc(1, sizeof(*n));
+    if (!n)
+        return NULL;
+    n->item = item;
+    n->description = description;
+    n->timeout_ms = timeout_ms;
+    if (timeout_ms > 0)
+        clock_gettime(CLOCK_MONOTONIC, &n->start);
+    return n;
+}
+
+static void node_free_keep_item(CcResolvNode *n) {
+    free(n);
+}
+
+static void node_free_with_item(CcResolvQ *q, CcResolvNode *n) {
+    if (n->item && q->fn_free)
+        q->fn_free(n->item);
+    free(n);
+}
+
+static void list_push(CcResolvNode **head, CcResolvNode **tail,
+                      CcResolvNode *n) {
+    n->next = NULL;
+    if (*tail)
+        (*tail)->next = n;
+    else
+        *head = n;
+    *tail = n;
+}
+
+static CcResolvNode *list_pop(CcResolvNode **head, CcResolvNode **tail) {
+    CcResolvNode *n = *head;
+    if (!n)
+        return NULL;
+    *head = n->next;
+    if (!*head)
+        *tail = NULL;
+    n->next = NULL;
+    return n;
+}
+
+static size_t list_count(CcResolvNode *head) {
+    size_t c = 0;
+    for (; head; head = head->next)
+        c++;
+    return c;
+}
+
+static void list_clear_match(CcResolvQ *q, CcResolvNode **head,
+                             CcResolvNode **tail, CcResolvQItemMatch fn,
+                             void *match_data) {
+    CcResolvNode *cur = *head;
+    CcResolvNode *prev = NULL;
+    while (cur) {
+        CcResolvNode *next = cur->next;
+        if (fn(cur->item, match_data)) {
+            if (prev)
+                prev->next = next;
+            else
+                *head = next;
+            if (*tail == cur)
+                *tail = prev;
+            node_free_with_item(q, cur);
+        } else {
+            prev = cur;
+        }
+        cur = next;
+    }
+}
+
+static void list_destroy(CcResolvQ *q, CcResolvNode **head,
+                         CcResolvNode **tail) {
+    while (*head) {
+        CcResolvNode *n = list_pop(head, tail);
+        node_free_with_item(q, n);
+    }
+}
+
+static int64_t elapsed_ms(const struct timespec *start) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (int64_t)(now.tv_sec - start->tv_sec) * 1000 +
+           (int64_t)(now.tv_nsec - start->tv_nsec) / 1000000;
+}
+
+static void fire_event(CcResolvQ *q) {
+    CcResolvQEvent ev = q->fn_event;
+    void *ud = q->fn_user_data;
+    if (ev)
+        ev(ud);
+}
+
+static void worker_finish(CcResolvQ *q, CcResolvNode *n, int timed_out) {
+    if (!timed_out && n->item && q->fn_process)
+        q->fn_process(n->item);
+
+    pthread_mutex_lock(&q->lock);
+    if (q->aborted) {
+        node_free_with_item(q, n);
+    } else {
+        list_push(&q->recv_head, &q->recv_tail, n);
+    }
+    if (q->inflight)
+        q->inflight--;
+    pthread_mutex_unlock(&q->lock);
+    fire_event(q);
+}
+
+int CcResolvQ_create(CcResolvQ **out, const char *name, uint32_t max_len,
+                     uint32_t min_threads, uint32_t max_threads,
+                     uint32_t idle_time_ms, CcResolvQItemFree fn_free,
+                     CcResolvQItemProcess fn_process, CcResolvQEvent fn_event,
+                     void *user_data) {
+    CcResolvQ *q;
+    (void)min_threads;
+    (void)idle_time_ms;
+
+    *out = NULL;
+    q = (CcResolvQ *)calloc(1, sizeof(*q));
+    if (!q)
+        return CC_CURLE_OUT_OF_MEMORY;
+    if (pthread_mutex_init(&q->lock, NULL) != 0) {
+        free(q);
+        return CC_CURLE_OUT_OF_MEMORY;
+    }
+    q->name = name ? strdup(name) : NULL;
+    q->fn_free = fn_free;
+    q->fn_process = fn_process;
+    q->fn_event = fn_event;
+    q->fn_user_data = user_data;
+    q->send_max_len = max_len;
+    q->max_threads = max_threads ? max_threads : 64;
+    q->nursery = cc_nursery_create(NULL);
+    if (!q->nursery) {
+        pthread_mutex_destroy(&q->lock);
+        free(q->name);
+        free(q);
+        return CC_CURLE_OUT_OF_MEMORY;
+    }
+    *out = q;
+    return CC_CURLE_OK;
+}
+
+void CcResolvQ_destroy(CcResolvQ *q, bool join) {
+    CCNursery *n;
+    if (!q)
+        return;
+    pthread_mutex_lock(&q->lock);
+    q->aborted = 1;
+    list_destroy(q, &q->send_head, &q->send_tail);
+    list_destroy(q, &q->recv_head, &q->recv_tail);
+    n = q->nursery;
+    q->nursery = NULL;
+    pthread_mutex_unlock(&q->lock);
+
+    if (n) {
+        if (join)
+            cc_nursery_cancel(n);
+        cc_nursery_free(n);
+    }
+    pthread_mutex_destroy(&q->lock);
+    free(q->name);
+    free(q);
+}
+
+typedef struct {
+    CcResolvQ *q;
+    CcResolvNode *node;
+} WorkerArg;
+
+static void *worker_entry(void *arg) {
+    WorkerArg *wa = (WorkerArg *)arg;
+    CcResolvQ *qq = wa->q;
+    CcResolvNode *nn = wa->node;
+    int timed_out = 0;
+    free(wa);
+
+    if (nn->timeout_ms > 0 && elapsed_ms(&nn->start) > nn->timeout_ms)
+        timed_out = 1;
+    worker_finish(qq, nn, timed_out);
+
+    for (;;) {
+        CcResolvNode *nextn = NULL;
+        pthread_mutex_lock(&qq->lock);
+        if (!qq->aborted)
+            nextn = list_pop(&qq->send_head, &qq->send_tail);
+        if (!nextn) {
+            pthread_mutex_unlock(&qq->lock);
+            break;
+        }
+        pthread_mutex_unlock(&qq->lock);
+        timed_out = 0;
+        if (nextn->timeout_ms > 0 &&
+            elapsed_ms(&nextn->start) > nextn->timeout_ms)
+            timed_out = 1;
+        worker_finish(qq, nextn, timed_out);
+    }
+    return NULL;
+}
+
+int CcResolvQ_send(CcResolvQ *q, void *item, const char *description,
+                   int64_t timeout_ms) {
+    CcResolvNode *node;
+    int spawn_now = 0;
+    int rc = CC_CURLE_OK;
+
+    if (!q || !item)
+        return CC_CURLE_SEND_ERROR;
+    if (timeout_ms < 0)
+        return CC_CURLE_OPERATION_TIMEDOUT;
+
+    node = node_new(item, description, timeout_ms);
+    if (!node)
+        return CC_CURLE_OUT_OF_MEMORY;
+
+    pthread_mutex_lock(&q->lock);
+    if (q->aborted) {
+        pthread_mutex_unlock(&q->lock);
+        node_free_keep_item(node);
+        return CC_CURLE_SEND_ERROR;
+    }
+    if (q->send_max_len && list_count(q->send_head) >= q->send_max_len) {
+        pthread_mutex_unlock(&q->lock);
+        node_free_keep_item(node);
+        return CC_CURLE_AGAIN;
+    }
+
+    if (q->inflight < q->max_threads && q->nursery) {
+        q->inflight++;
+        spawn_now = 1;
+    } else {
+        list_push(&q->send_head, &q->send_tail, node);
+        node = NULL;
+    }
+    pthread_mutex_unlock(&q->lock);
+
+    if (spawn_now && node) {
+        WorkerArg *wa = (WorkerArg *)malloc(sizeof(*wa));
+        if (!wa) {
+            pthread_mutex_lock(&q->lock);
+            if (q->inflight)
+                q->inflight--;
+            pthread_mutex_unlock(&q->lock);
+            node_free_with_item(q, node);
+            return CC_CURLE_OUT_OF_MEMORY;
+        }
+        wa->q = q;
+        wa->node = node;
+        if (cc_nursery_spawnhybrid(q->nursery, worker_entry, wa) != 0) {
+            pthread_mutex_lock(&q->lock);
+            if (q->inflight)
+                q->inflight--;
+            pthread_mutex_unlock(&q->lock);
+            free(wa);
+            node_free_with_item(q, node);
+            rc = CC_CURLE_OUT_OF_MEMORY;
+        }
+    }
+    return rc;
+}
+
+int CcResolvQ_recv(CcResolvQ *q, void **pitem) {
+    CcResolvNode *n;
+    *pitem = NULL;
+    if (!q)
+        return CC_CURLE_RECV_ERROR;
+    pthread_mutex_lock(&q->lock);
+    if (q->aborted) {
+        pthread_mutex_unlock(&q->lock);
+        return CC_CURLE_RECV_ERROR;
+    }
+    n = list_pop(&q->recv_head, &q->recv_tail);
+    pthread_mutex_unlock(&q->lock);
+    if (!n)
+        return CC_CURLE_AGAIN;
+    *pitem = n->item;
+    n->item = NULL;
+    node_free_keep_item(n);
+    return CC_CURLE_OK;
+}
+
+void CcResolvQ_clear(CcResolvQ *q, CcResolvQItemMatch fn_match,
+                     void *match_data) {
+    if (!q || !fn_match)
+        return;
+    pthread_mutex_lock(&q->lock);
+    if (!q->aborted) {
+        list_clear_match(q, &q->send_head, &q->send_tail, fn_match,
+                         match_data);
+        list_clear_match(q, &q->recv_head, &q->recv_tail, fn_match,
+                         match_data);
+    }
+    pthread_mutex_unlock(&q->lock);
+}
+
+int CcResolvQ_set_props(CcResolvQ *q, uint32_t max_len, uint32_t min_threads,
+                        uint32_t max_threads, uint32_t idle_time_ms) {
+    (void)min_threads;
+    (void)idle_time_ms;
+    if (!q)
+        return CC_CURLE_FAILED_INIT;
+    pthread_mutex_lock(&q->lock);
+    q->send_max_len = max_len;
+    if (max_threads)
+        q->max_threads = max_threads;
+    pthread_mutex_unlock(&q->lock);
+    return CC_CURLE_OK;
+}
