@@ -1,6 +1,6 @@
 #!ccc ccs
 /*
- * pigz_parallel.ccs — CCTurnstileRW(n, cap): depth + named read/write order.
+ * pigz_parallel.ccs — stdlib CCTurnstileRW(n, cap): depth + named read/write.
  *
  * PIGZ_CAP=N (default 16).  PIGZ_SEQ=1 for inline sequential.
  */
@@ -8,17 +8,6 @@
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_atomic.cch>
 #include <ccc/script/stdio.cch>
-#include "CCTurnstile.cch"
-
-@typehooks on CCTurnstileRW {
-    .create = cc_type_create_call("cc_turnstile_rw_create"),
-    .destroy = cc_type_destroy_call("cc_turnstile_rw_destroy"),
-};
-
-@typeview on CCTurnstileRW {
-    as: core;
-};
-
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>

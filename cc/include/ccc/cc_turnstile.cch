@@ -1,16 +1,16 @@
 /*
- * CCTurnstile — pigz-local pipeline gate: length n + depth cap + ordered stages.
+ * CCTurnstile — depth cap + ordered stages.
  *
  * One core (depth channel + stages[]). The named 2-stage bind is field
  * aliases over that array — not a second implementation:
  *
- *   CCTurnstile t = cc_turnstile_create(n, cap, n_stages, arena);
+ *   CCTurnstile t@(n, cap, n_stages, &arena) @destroy;
  *   t.enter(i) !>;
  *   t.stage(k)->wait(i);  …  t.stage(k)->pass(i);
  *   t.wait(k, i);         …  t.pass(k, i);
  *   t.leave() !>;
  *
- *   CCTurnstileRW ts@(n, cap, arena) @destroy;
+ *   CCTurnstileRW ts@(n, cap, &arena) @destroy;
  *   ts.enter(i) !>;
  *   ts.read.wait(i);  …  ts.read.pass(i);
  *   ts.write.wait(i); …  ts.write.pass(i);
@@ -19,9 +19,11 @@
  *
  * Declare the turnstile before the nursery so @destroy joins, then frees the
  * depth channel. enter(i) takes a depth token and arms every stage's i+1.
- * Promote to ccc/ once a second caller lands and the API settles.
+ *
+ * This header lowers to host C: internals use concrete callees, not UFCS.
  */
-#pragma once
+#ifndef CCC_CC_TURNSTILE_CCH
+#define CCC_CC_TURNSTILE_CCH
 
 #include <ccc/cc_exclusive.cch>
 #include <ccc/cc_channel.cch>
@@ -31,14 +33,18 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef CC_VEC_CCEXCLUSIVEGUARD_DEFINED
+#define CC_VEC_CCEXCLUSIVEGUARD_DEFINED 1
+CC_VEC_DECL_ARENA(CCExclusiveGuard, CCVec_CCExclusiveGuard)
+#endif
+
 typedef struct CCTurnstileStage {
     CCExclusive* excl;
     uint64_t name_base;
     int n;
     /* Ticket i+1 lives at armed[i+1]. Grown once at init; enter/pass only
-     * index. A growing Map/Vec under concurrent get is the same class of bug
-     * (the value moves). ArrayMap still reallocs the dense row on grow. */
-    Vec::[CCExclusiveGuard] armed;
+     * index. A growing Map/Vec under concurrent get moves the value. */
+    CCVec_CCExclusiveGuard armed;
 } CCTurnstileStage;
 
 typedef struct CCTurnstile {
@@ -77,11 +83,11 @@ static inline void cc_turnstile_stage_destroy(CCTurnstileStage* s) {
     if (!s)
         return;
     for (i = 1; i < s->n; i++) {
-        g = s->armed.get((size_t)i);
+        g = CCVec_CCExclusiveGuard_get(&s->armed, (size_t)i);
         if (g)
-            g->release();
+            cc_exclusive_guard_release(g);
     }
-    s->armed.destroy();
+    CCVec_CCExclusiveGuard_destroy(&s->armed);
     s->excl = NULL;
     s->n = 0;
 }
@@ -95,9 +101,10 @@ static inline int cc_turnstile_stage_init(CCTurnstileStage* s, CCExclusive* excl
     s->excl = excl;
     s->name_base = name_base;
     s->n = n;
-    s->armed = vec_new::[CCExclusiveGuard](arena);
+    s->armed = CCVec_CCExclusiveGuard_init(arena, n > 0 ? (size_t)n : 0);
     if (n > 0) {
-        if (s->armed.reserve((size_t)n) != 0 || !s->armed.at_grow((size_t)n - 1))
+        if (CCVec_CCExclusiveGuard_reserve(&s->armed, (size_t)n) != 0 ||
+            !CCVec_CCExclusiveGuard_at_grow(&s->armed, (size_t)n - 1))
             return -1;
         memset(s->armed.data, 0, (size_t)n * sizeof(CCExclusiveGuard));
     }
@@ -113,10 +120,10 @@ static inline void cc_turnstile_stage_arm(CCTurnstileStage* s, int i) {
     if (!s || i + 1 >= s->n)
         return;
     k = i + 1;
-    g = s->armed.get((size_t)k);
+    g = CCVec_CCExclusiveGuard_get(&s->armed, (size_t)k);
     if (!g)
         return;
-    *g = s->excl->acquire(cc_turnstile_stage_name(s, k));
+    *g = cc_exclusive_acquire(s->excl, cc_turnstile_stage_name(s, k));
 }
 
 static inline void cc_turnstile_stage_wait(CCTurnstileStage* s, int i) {
@@ -126,11 +133,11 @@ static inline void cc_turnstile_stage_wait(CCTurnstileStage* s, int i) {
     if (!s || i <= 0)
         return;
     name = cc_turnstile_stage_name(s, i);
-    g = s->excl->acquire(name);
-    g.release();
+    g = cc_exclusive_acquire(s->excl, name);
+    cc_exclusive_guard_release(&g);
     /* Name is idle after pass + this wait; drop it so Exclusive stays ~O(cap). */
-    m = s->excl->mutex(name);
-    m.free();
+    m = cc_exclusive_mutex(s->excl, name);
+    cc_exclusive_mutex_free(&m);
 }
 
 static inline void cc_turnstile_stage_pass(CCTurnstileStage* s, int i) {
@@ -139,9 +146,9 @@ static inline void cc_turnstile_stage_pass(CCTurnstileStage* s, int i) {
     if (!s || i + 1 >= s->n)
         return;
     k = i + 1;
-    g = s->armed.get((size_t)k);
+    g = CCVec_CCExclusiveGuard_get(&s->armed, (size_t)k);
     if (g)
-        g->release();
+        cc_exclusive_guard_release(g);
 }
 
 static inline void cc_turnstile_wait(CCTurnstile* t, int k, int i) {
@@ -166,7 +173,7 @@ static inline void cc_turnstile_destroy(CCTurnstile* t) {
         t->depth_ch = NULL;
     }
     if (t->excl) {
-        t->excl->destroy();
+        cc_exclusive_destroy(t->excl);
         t->excl = NULL;
     }
     t->n = 0;
@@ -252,6 +259,8 @@ static inline bool !>(CCIoError) cc_turnstile_leave(CCTurnstile* t) {
     if (!t || !t->depth_ch)
         return cc_err(cc_io_error(CC_IO_INVALID_ARGUMENT));
     rc = cc_channel_raw_send(t->depth_ch, &tok, sizeof(tok));
+    if (rc == EPIPE)
+        return cc_err(cc_io_error(CC_IO_CONNECTION_CLOSED));
     return cc_chan_result_with(t->depth_ch, rc, /*is_recv=*/false);
 }
 
@@ -261,6 +270,10 @@ typedef struct CCTurnstileRW {
     CCTurnstileStage read;
     CCTurnstileStage write;
 } CCTurnstileRW;
+
+_Static_assert(offsetof(CCTurnstileRW, write) ==
+                   offsetof(CCTurnstileRW, read) + sizeof(CCTurnstileStage),
+               "CCTurnstileRW read/write must be contiguous stages");
 
 static inline CCTurnstileRW cc_turnstile_rw_create(int n, int cap, CCArena* arena) {
     CCTurnstileRW w;
@@ -277,3 +290,17 @@ static inline void cc_turnstile_rw_destroy(CCTurnstileRW* w) {
         return;
     cc_turnstile_destroy(&w->core);
 }
+
+@typehooks on CCTurnstile {
+    .create = cc_type_create_call("cc_turnstile_create"),
+    .destroy = cc_type_destroy_call("cc_turnstile_destroy"),
+};
+@typehooks on CCTurnstileRW {
+    .create = cc_type_create_call("cc_turnstile_rw_create"),
+    .destroy = cc_type_destroy_call("cc_turnstile_rw_destroy"),
+};
+@typeview on CCTurnstileRW {
+    as: core;
+};
+
+#endif /* CCC_CC_TURNSTILE_CCH */

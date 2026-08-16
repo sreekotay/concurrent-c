@@ -1,0 +1,56 @@
+#!ccc ccs
+/*
+ * CCTurnstile index form: t.wait(k, i) / t.stage(k)->pass(i).
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+#define N   8
+#define CAP 2
+#define STAGES 3
+
+static int g_next[STAGES];
+static int g_fail;
+
+static void worker(CCTurnstile* t, int i) {
+    int k;
+    for (k = 0; k < STAGES; k++) {
+        t->wait(k, i);
+        if (g_next[k] != i)
+            g_fail = 1;
+        g_next[k] = i + 1;
+        t->pass(k, i);
+    }
+    t->leave() !>;
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+    CCTurnstile t@(N, CAP, STAGES, &arena) @destroy;
+    if (!t.excl)
+        return 1;
+
+    CCTurnstile* tp = &t;
+    CCNursery* nur = cc_nursery_create(NULL) !> @destroy;
+    int i;
+    for (i = 0; i < N; i++) {
+        t.enter(i) !>;
+        nur->spawn(() => [i, tp] {
+            @errhandler(CCError e) cc_error_exit(e);
+            worker(tp, i);
+        });
+    }
+
+    for (i = 0; i < STAGES; i++) {
+        if (g_next[i] != N)
+            g_fail = 1;
+    }
+    if (g_fail) {
+        fprintf(stderr, "FAIL\n");
+        return 1;
+    }
+    printf("turnstile_index_smoke: OK\n");
+    return 0;
+}

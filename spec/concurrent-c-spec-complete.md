@@ -3309,6 +3309,7 @@ This section specifies:
 - **§8.9 Error handling in async and nurseries** — composition of result unwrap operators (`?>`, `!>`, `@err`, `@errhandler`) defined in §3.1 with async functions and nursery teardown
 - **§8.10 Named exclusive sections (`CCExclusive`)** — arena-backed, name-keyed mutual exclusion for short critical sections; `acquire_when` gates entry on a predicate
 - **§8.11 `@parallel`** — value join of independent assignments or `@serial` arms (§8.11.2), optional spawn predicate, and `@parallel for` over a half-open index range
+- **§8.12 Ordered pipeline turnstile (`CCTurnstile`)** — depth cap plus sequenced stages; `enter(i)` arms every stage's next ticket
 
 ---
 
@@ -5262,6 +5263,62 @@ serial_arm    ::= '@serial' '{' stmt+ '}'
 
 ---
 
+### 8.12 Ordered pipeline turnstile (`CCTurnstile`)
+
+A **turnstile** bounds how many workers run at once (a depth channel of `cap` tokens) and sequences `n` tickets through one or more stages. Stage `k` ticket `i` cannot run until ticket `i-1` has passed that stage. `enter(i)` receives a depth token and arms ticket `i+1` on every stage. The worker waits and passes each stage, then `leave()` returns the token.
+
+Declare the turnstile before the nursery so `@destroy` joins children before the depth channel is freed. In-order `enter(i)` / `spawn(i)` is the happen-before that makes the arm visible to `worker(i).pass` and `worker(i+1).wait`.
+
+`Map` / `Vec` / `ArrayMap` are not concurrent. Stage preholds live in a `Vec` reserved to `n` at init; `enter` / `pass` only index those slots.
+
+```c
+CCTurnstile t@(n, cap, n_stages, &arena) @destroy;
+t.enter(i) !>;
+t.stage(k)->wait(i);
+t.stage(k)->pass(i);
+t.wait(k, i);
+t.pass(k, i);
+t.leave() !>;
+
+CCTurnstileRW ts@(n, cap, &arena) @destroy;
+ts.enter(i) !>;
+ts.read.wait(i);   ts.read.pass(i);
+ts.write.wait(i);  ts.write.pass(i);
+ts.leave() !>;
+```
+
+`CCTurnstileRW` is the two-stage face: `read` and `write` are `stages[0]` and `stages[1]` (`as: core` for `enter` / `leave` / `stage`). A closed depth channel is `CC_IO_CONNECTION_CLOSED`, not `Ok(false)` — `!>` on `Ok(false)` would spawn without a token.
+
+**Runtime API (normative):**
+
+```c
+int cc_turnstile_init(CCTurnstile* t, int n, int cap, int n_stages,
+                      CCArena* arena, CCTurnstileStage* slots);
+CCTurnstile cc_turnstile_create(int n, int cap, int n_stages, CCArena* arena);
+void cc_turnstile_destroy(CCTurnstile* t);
+bool !>(CCIoError) cc_turnstile_enter(CCTurnstile* t, int i);
+bool !>(CCIoError) cc_turnstile_leave(CCTurnstile* t);
+CCTurnstileStage* cc_turnstile_stage(CCTurnstile* t, int k);
+void cc_turnstile_wait(CCTurnstile* t, int k, int i);
+void cc_turnstile_pass(CCTurnstile* t, int k, int i);
+void cc_turnstile_stage_wait(CCTurnstileStage* s, int i);
+void cc_turnstile_stage_pass(CCTurnstileStage* s, int i);
+CCTurnstileRW cc_turnstile_rw_create(int n, int cap, CCArena* arena);
+void cc_turnstile_rw_destroy(CCTurnstileRW* w);
+```
+
+**UFCS surface (normative):**
+
+- `t.enter(i)` / `t.leave()` — depth token; `enter` arms every stage
+- `t.stage(k)` — `stages[k]`, or `NULL` if `k` is out of range
+- `t.wait(k, i)` / `t.pass(k, i)` — index form
+- `s.wait(i)` / `s.pass(i)` — one stage
+- `ts.read` / `ts.write` — `CCTurnstileRW` stage aliases
+
+Header: `<ccc/cc_turnstile.cch>` (also via prelude).
+
+---
+
 ## 9. Standard Library (UFCS-First Design)
 
 This section defines the core standard library using **UFCS-first design**: method syntax is primary and UFCS lowering is type-directed and library-owned.
@@ -6420,6 +6477,7 @@ case Color_Blue: ...
 **Built-in non-generic types:**
 
 - `CCNursery` — structured concurrency handle (§8.1)
+- `CCTurnstile` / `CCTurnstileRW` — depth + ordered stages (§8.12)
 - `Arena` — memory arena
 - `Ordering` — memory ordering enum (`relaxed`, `acquire`, `release`, `acq_rel`, `seq_cst`)
 - `Duration` — time span (secs + nanos)

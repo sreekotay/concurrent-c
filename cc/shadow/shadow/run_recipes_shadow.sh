@@ -109,6 +109,9 @@ run_one examples/recipe_exclusive_named.ccs \
   "shared  = 4000 (expect 4000)" \
   "OK"
 
+run_one examples/recipe_turnstile.ccs \
+  "turnstile: 8 tickets, cap 2, read then write in order"
+
 run_one examples/recipe_async_await.ccs \
   "pipeline result: 42 (expected 42)"
 

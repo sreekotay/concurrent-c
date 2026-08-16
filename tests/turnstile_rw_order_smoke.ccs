@@ -1,0 +1,59 @@
+#!ccc ccs
+/*
+ * CCTurnstileRW: cap-bounded spawn, read then write stay in ticket order.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+#define N   16
+#define CAP 3
+
+static int g_read_next;
+static int g_write_next;
+static int g_fail;
+
+static void worker(CCTurnstileRW* ts, int i) {
+    ts->read.wait(i);
+    if (g_read_next != i)
+        g_fail = 1;
+    g_read_next = i + 1;
+    ts->read.pass(i);
+
+    ts->write.wait(i);
+    if (g_write_next != i)
+        g_fail = 1;
+    g_write_next = i + 1;
+    ts->write.pass(i);
+
+    ts->leave() !>;
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+    CCTurnstileRW ts@(N, CAP, &arena) @destroy;
+    if (!ts.core.excl)
+        return 1;
+    if (ts.stage(0) != &ts.read || ts.stage(1) != &ts.write)
+        return 1;
+
+    CCTurnstileRW* tsp = &ts;
+    CCNursery* nur = cc_nursery_create(NULL) !> @destroy;
+    int i;
+    for (i = 0; i < N; i++) {
+        ts.enter(i) !>;
+        nur->spawn(() => [i, tsp] {
+            @errhandler(CCError e) cc_error_exit(e);
+            worker(tsp, i);
+        });
+    }
+
+    if (g_fail || g_read_next != N || g_write_next != N) {
+        fprintf(stderr, "FAIL read=%d write=%d fail=%d\n",
+                g_read_next, g_write_next, g_fail);
+        return 1;
+    }
+    printf("turnstile_rw_order_smoke: OK\n");
+    return 0;
+}

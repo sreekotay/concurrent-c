@@ -34,17 +34,20 @@ The standard library provides these headers under `<ccc/std/...>`:
 Portable atomics are provided separately by `<ccc/cc_atomic.cch>`, Python
 interop by `<ccc/script/py.cch>`, and JavaScript interop by
 `<ccc/script/js.cch>` (draft — guest surface implemented). I/O errors live in
-`<ccc/cc_io_error.cch>` (included by `io.cch` and the runtime).
+`<ccc/cc_io_error.cch>` (included by `io.cch` and the runtime). The pipeline
+turnstile lives in `<ccc/cc_turnstile.cch>` (also via prelude); see
+`spec/concurrent-c-spec-complete.md` §8.12.
 
 `<ccc/std/prelude.cch>` includes runtime headers (`cc_arena`, `cc_arc`,
 `cc_grammar`, `cc_shape`, `cc_type`, `cc_slice`, `cc_result`, `cc_channel`,
-`cc_nursery`, `cc_exec`) and these stdlib headers: `slice`, `string`,
+`cc_nursery`, `cc_exec`, `cc_turnstile`) and these stdlib headers: `slice`, `string`,
 `slice_packed`, `io` (which includes `bufio` and `async_io`), `vec`,
 `map_forward`, `array_map`, `shard_map`, `dir`, `process`, `exec`, and
 `future`. Include networking, DNS, TLS, HTTP, CLI, task, hash, `static_map`,
 and `map.cch` / `map_impl.cch` explicitly when needed. Channels, nursery,
-arenas, and results are defined in `spec/concurrent-c-spec-complete.md`; this
-document names them only where a stdlib header uses them.
+arenas, results, exclusive sections, and the turnstile are defined in
+`spec/concurrent-c-spec-complete.md`; this document names them only where a
+stdlib header uses them.
 
 Public C types use the `CC` prefix and public C functions use the `cc_` prefix.
 Unless a section states otherwise, a slice returned from an operation that

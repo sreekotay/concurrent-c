@@ -72,7 +72,7 @@ $(OUT_DIR)/pigz_idiomatic: pigz_idiomatic.ccs | $(OUT_DIR)
 	$(CCC) -O -o $@ pigz_idiomatic.ccs --ld-flags "-lz" --release
 
 # Batch @parallel for (no nursery / channel); seekable inputs only
-$(OUT_DIR)/pigz_parallel: pigz_parallel.ccs CCTurnstile.cch | $(OUT_DIR)
+$(OUT_DIR)/pigz_parallel: pigz_parallel.ccs | $(OUT_DIR)
 	$(CCC) -O -o $@ pigz_parallel.ccs --ld-flags "-lz" --release
 
 # Pthread CC version (OS threads)
