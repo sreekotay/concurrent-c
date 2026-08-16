@@ -1,59 +1,87 @@
 /*
- * CCTurnstile — pigz-local pipeline gate: length n + depth cap.
+ * CCTurnstile — pigz-local pipeline gate: length n + depth cap + ordered stages.
  *
- *   CCTurnstile* t = cc_turnstile_create(arena, n, cap);
- *   @defer t->destroy();   // before nursery joins finish; declare t before nur
+ * One core (depth channel + stages[]). The named 2-stage bind is field
+ * aliases over that array — not a second implementation:
  *
- *   t->enter() !>;                 // depth (token channel inside)
- *   t->arm(i);                     // prehold read/write i+1 (at spawn of i)
- *   t->read.wait(i);  …  t->read.pass(i);  // pass drops the map entry
- *   t->write.wait(i); …  t->write.pass(i);
- *   t->leave() !>;
+ *   CCTurnstile t = cc_turnstile_create(n, cap, n_stages, arena);
+ *   t.enter(i) !>;
+ *   t.stage(k)->wait(i);  …  t.stage(k)->pass(i);
+ *   t.wait(k, i);         …  t.pass(k, i);
+ *   t.leave() !>;
  *
+ *   CCTurnstileRW ts@(n, cap, arena) @destroy;
+ *   ts.enter(i) !>;
+ *   ts.read.wait(i);  …  ts.read.pass(i);
+ *   ts.write.wait(i); …  ts.write.pass(i);
+ *   ts.leave() !>;
+ *   ts.stage(0);   // == &ts.read
+ *
+ * Declare the turnstile before the nursery so @destroy joins, then frees the
+ * depth channel. enter(i) takes a depth token and arms every stage's i+1.
  * Promote to ccc/ once a second caller lands and the API settles.
  */
 #pragma once
 
 #include <ccc/cc_exclusive.cch>
 #include <ccc/cc_channel.cch>
-#include <ccc/std/map_forward.cch>
+#include <ccc/std/vec.cch>
+#include <errno.h>
+#include <stddef.h>
 #include <stdlib.h>
-
-#define CC_TURNSTILE_READ_BASE  ((uint64_t)1 << 20)
-#define CC_TURNSTILE_WRITE_BASE ((uint64_t)1 << 40)
+#include <string.h>
 
 typedef struct CCTurnstileStage {
     CCExclusive* excl;
     uint64_t name_base;
     int n;
-    Map::[int, CCExclusiveGuard] held; /* live preholds; dropped on pass */
+    /* Ticket i+1 lives at armed[i+1]. Grown once at init; enter/pass only
+     * index. A growing Map/Vec under concurrent get is the same class of bug
+     * (the value moves). ArrayMap still reallocs the dense row on grow. */
+    Vec::[CCExclusiveGuard] armed;
 } CCTurnstileStage;
 
 typedef struct CCTurnstile {
     CCExclusive* excl;
-    CCTurnstileStage read;
-    CCTurnstileStage write;
     CCChan* depth_ch;
+    CCTurnstileStage* stages;
     int n;
     int cap;
+    int n_stages;
 } CCTurnstile;
 
 static inline void cc_turnstile_destroy(CCTurnstile* t);
 static inline void cc_turnstile_stage_destroy(CCTurnstileStage* s);
 
+static inline uint64_t cc_turnstile_stage_base(int k) {
+    return (uint64_t)(k + 1) << 32;
+}
+
 static inline uint64_t cc_turnstile_stage_name(const CCTurnstileStage* s, int i) {
     return s->name_base + (uint64_t)i;
 }
 
+static inline int cc_turnstile_ready(const CCTurnstile* t) {
+    return t && t->excl && t->depth_ch && t->stages && t->n_stages > 0;
+}
+
+static inline CCTurnstileStage* cc_turnstile_stage(CCTurnstile* t, int k) {
+    if (!t || !t->stages || k < 0 || k >= t->n_stages)
+        return NULL;
+    return &t->stages[k];
+}
+
 static inline void cc_turnstile_stage_destroy(CCTurnstileStage* s) {
-    Map::[int, CCExclusiveGuard] held;
+    CCExclusiveGuard* g;
+    int i;
     if (!s)
         return;
-    held = s->held;
-    /* Remaining holds die with Exclusive destroy; map is arena-backed. */
-    if (held)
-        held->destroy();
-    s->held = NULL;
+    for (i = 1; i < s->n; i++) {
+        g = s->armed.get((size_t)i);
+        if (g)
+            g->release();
+    }
+    s->armed.destroy();
     s->excl = NULL;
     s->n = 0;
 }
@@ -61,33 +89,34 @@ static inline void cc_turnstile_stage_destroy(CCTurnstileStage* s) {
 static inline int cc_turnstile_stage_init(CCTurnstileStage* s, CCExclusive* excl,
                                          CCArena* arena, uint64_t name_base,
                                          int n) {
+    if (!s)
+        return -1;
+    memset(s, 0, sizeof(*s));
     s->excl = excl;
     s->name_base = name_base;
     s->n = n;
-    s->held = map_new::[int, CCExclusiveGuard](arena);
-    return s->held ? 0 : -1;
+    s->armed = vec_new::[CCExclusiveGuard](arena);
+    if (n > 0) {
+        if (s->armed.reserve((size_t)n) != 0 || !s->armed.at_grow((size_t)n - 1))
+            return -1;
+        memset(s->armed.data, 0, (size_t)n * sizeof(CCExclusiveGuard));
+    }
+    return 0;
 }
 
 /* Prehold ticket i+1 so wait(i+1) cannot run ahead of pass(i).
- * Call from the producer when spawn(i) fires — in-order spawn makes this
- * happen-before both worker(i).pass and worker(i+1).wait. */
+ * enter(i) calls this on every stage — in-order spawn makes it happen-before
+ * both worker(i).pass and worker(i+1).wait. */
 static inline void cc_turnstile_stage_arm(CCTurnstileStage* s, int i) {
-    CCExclusiveGuard g;
-    Map::[int, CCExclusiveGuard] held;
+    CCExclusiveGuard* g;
     int k;
-    if (!s || !s->held || i + 1 >= s->n)
+    if (!s || i + 1 >= s->n)
         return;
     k = i + 1;
-    g = s->excl->acquire(cc_turnstile_stage_name(s, k));
-    held = s->held;
-    held->insert(k, g);
-}
-
-static inline void cc_turnstile_arm(CCTurnstile* t, int i) {
-    if (!t)
+    g = s->armed.get((size_t)k);
+    if (!g)
         return;
-    cc_turnstile_stage_arm(&t->read, i);
-    cc_turnstile_stage_arm(&t->write, i);
+    *g = s->excl->acquire(cc_turnstile_stage_name(s, k));
 }
 
 static inline void cc_turnstile_stage_wait(CCTurnstileStage* s, int i) {
@@ -106,23 +135,32 @@ static inline void cc_turnstile_stage_wait(CCTurnstileStage* s, int i) {
 
 static inline void cc_turnstile_stage_pass(CCTurnstileStage* s, int i) {
     CCExclusiveGuard* g;
-    Map::[int, CCExclusiveGuard] held;
     int k;
-    if (!s || !s->held || i + 1 >= s->n)
+    if (!s || i + 1 >= s->n)
         return;
     k = i + 1;
-    held = s->held;
-    g = held->get(k);
+    g = s->armed.get((size_t)k);
     if (g)
         g->release();
-    held->remove(k);
+}
+
+static inline void cc_turnstile_wait(CCTurnstile* t, int k, int i) {
+    cc_turnstile_stage_wait(cc_turnstile_stage(t, k), i);
+}
+
+static inline void cc_turnstile_pass(CCTurnstile* t, int k, int i) {
+    cc_turnstile_stage_pass(cc_turnstile_stage(t, k), i);
 }
 
 static inline void cc_turnstile_destroy(CCTurnstile* t) {
+    int k;
     if (!t)
         return;
-    cc_turnstile_stage_destroy(&t->read);
-    cc_turnstile_stage_destroy(&t->write);
+    if (t->stages) {
+        for (k = 0; k < t->n_stages; k++)
+            cc_turnstile_stage_destroy(&t->stages[k]);
+        t->stages = NULL;
+    }
     if (t->depth_ch) {
         cc_channel_raw_free(t->depth_ch);
         t->depth_ch = NULL;
@@ -133,55 +171,79 @@ static inline void cc_turnstile_destroy(CCTurnstile* t) {
     }
     t->n = 0;
     t->cap = 0;
+    t->n_stages = 0;
 }
 
-static inline CCTurnstile* cc_turnstile_create(CCArena* arena, int n, int cap) {
-    CCTurnstile* t;
+/* slots[0..n_stages) must be contiguous CCTurnstileStage storage. */
+static inline int cc_turnstile_init(CCTurnstile* t, int n, int cap, int n_stages,
+                                   CCArena* arena, CCTurnstileStage* slots) {
     int k;
     int tok = 1;
 
-    if (!arena || n < 0 || cap < 1)
-        return NULL;
-    t = cc_arena_alloc_T(CCTurnstile, arena);
-    if (!t)
-        return NULL;
+    if (!t || !arena || !slots || n < 0 || cap < 1 || n_stages < 1)
+        return -1;
+    memset(t, 0, sizeof(*t));
     t->n = n;
     t->cap = cap;
-    t->depth_ch = NULL;
-    /* Live names stay ~2*cap (one prehold per in-flight stage); map grows if needed. */
+    t->n_stages = n_stages;
+    t->stages = slots;
+
+    /* Live names stay ~n_stages*cap (one prehold per in-flight stage). */
     t->excl = cc_exclusive_create(arena, (size_t)cap * 4 + 8);
     if (!t->excl)
-        return NULL;
+        return -1;
 
-    if (cc_turnstile_stage_init(&t->read, t->excl, arena, CC_TURNSTILE_READ_BASE,
-                                n) != 0 ||
-        cc_turnstile_stage_init(&t->write, t->excl, arena, CC_TURNSTILE_WRITE_BASE,
-                                n) != 0) {
-        cc_turnstile_destroy(t);
-        return NULL;
+    for (k = 0; k < n_stages; k++) {
+        if (cc_turnstile_stage_init(&slots[k], t->excl, arena,
+                                    cc_turnstile_stage_base(k), n) != 0)
+            return -1;
     }
 
     t->depth_ch = cc_chan_create((size_t)cap);
-    if (!t->depth_ch || cc_chan_init_elem(t->depth_ch, sizeof(int)) != 0) {
-        cc_turnstile_destroy(t);
-        return NULL;
-    }
+    if (!t->depth_ch || cc_chan_init_elem(t->depth_ch, sizeof(int)) != 0)
+        return -1;
     for (k = 0; k < cap; k++) {
-        if (cc_channel_raw_send(t->depth_ch, &tok, sizeof(tok)) != 0) {
-            cc_turnstile_destroy(t);
-            return NULL;
-        }
+        if (cc_channel_raw_send(t->depth_ch, &tok, sizeof(tok)) != 0)
+            return -1;
+    }
+    return 0;
+}
+
+static inline CCTurnstile cc_turnstile_create(int n, int cap, int n_stages,
+                                             CCArena* arena) {
+    CCTurnstile t;
+    CCTurnstileStage* slots;
+
+    memset(&t, 0, sizeof(t));
+    if (!arena || n < 0 || cap < 1 || n_stages < 1)
+        return t;
+    slots = cc_arena_alloc_T_count(CCTurnstileStage, arena, (size_t)n_stages);
+    if (!slots)
+        return t;
+    if (cc_turnstile_init(&t, n, cap, n_stages, arena, slots) != 0) {
+        cc_turnstile_destroy(&t);
+        memset(&t, 0, sizeof(t));
     }
     return t;
 }
 
-static inline bool !>(CCIoError) cc_turnstile_enter(CCTurnstile* t) {
+static inline bool !>(CCIoError) cc_turnstile_enter(CCTurnstile* t, int i) {
     int tok = 0;
     int rc;
-    if (!t || !t->depth_ch)
+    int k;
+    if (!cc_turnstile_ready(t))
         return cc_err(cc_io_error(CC_IO_INVALID_ARGUMENT));
     rc = cc_channel_raw_recv(t->depth_ch, &tok, sizeof(tok));
-    return cc_chan_result_with(t->depth_ch, rc, /*is_recv=*/true);
+    if (rc != 0) {
+        /* EPIPE is Ok(false) on a byte stream. Here it means the depth
+         * channel closed; `!>` would treat that as success and spawn unbounded. */
+        if (rc == EPIPE)
+            return cc_err(cc_io_error(CC_IO_CONNECTION_CLOSED));
+        return cc_chan_result_with(t->depth_ch, rc, /*is_recv=*/true);
+    }
+    for (k = 0; k < t->n_stages; k++)
+        cc_turnstile_stage_arm(&t->stages[k], i);
+    return cc_ok(true);
 }
 
 static inline bool !>(CCIoError) cc_turnstile_leave(CCTurnstile* t) {
@@ -191,4 +253,27 @@ static inline bool !>(CCIoError) cc_turnstile_leave(CCTurnstile* t) {
         return cc_err(cc_io_error(CC_IO_INVALID_ARGUMENT));
     rc = cc_channel_raw_send(t->depth_ch, &tok, sizeof(tok));
     return cc_chan_result_with(t->depth_ch, rc, /*is_recv=*/false);
+}
+
+/* Two-stage face: read/write are the core's stages[0]/stages[1]. */
+typedef struct CCTurnstileRW {
+    CCTurnstile core;
+    CCTurnstileStage read;
+    CCTurnstileStage write;
+} CCTurnstileRW;
+
+static inline CCTurnstileRW cc_turnstile_rw_create(int n, int cap, CCArena* arena) {
+    CCTurnstileRW w;
+    memset(&w, 0, sizeof(w));
+    if (cc_turnstile_init(&w.core, n, cap, 2, arena, &w.read) != 0) {
+        cc_turnstile_destroy(&w.core);
+        memset(&w, 0, sizeof(w));
+    }
+    return w;
+}
+
+static inline void cc_turnstile_rw_destroy(CCTurnstileRW* w) {
+    if (!w)
+        return;
+    cc_turnstile_destroy(&w->core);
 }

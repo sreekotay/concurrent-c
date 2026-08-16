@@ -1,6 +1,6 @@
 #!ccc ccs
 /*
- * pigz_parallel.ccs — CCTurnstile(n, cap): depth enter/leave + read/write order.
+ * pigz_parallel.ccs — CCTurnstileRW(n, cap): depth + named read/write order.
  *
  * PIGZ_CAP=N (default 16).  PIGZ_SEQ=1 for inline sequential.
  */
@@ -9,6 +9,16 @@
 #include <ccc/cc_atomic.cch>
 #include <ccc/script/stdio.cch>
 #include "CCTurnstile.cch"
+
+@typehooks on CCTurnstileRW {
+    .create = cc_type_create_call("cc_turnstile_rw_create"),
+    .destroy = cc_type_destroy_call("cc_turnstile_rw_destroy"),
+};
+
+@typeview on CCTurnstileRW {
+    as: core;
+};
+
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,10 +39,12 @@ typedef struct {
     CCArena arena;
 } CompressedResult;
 
+typedef CCTurnstileRW PigzTurnstile;
+
 typedef struct {
     CCFile* in;
     CCFile* out;
-    CCTurnstile* ts;
+    PigzTurnstile* ts;
     size_t file_len;
     int* failed;
     int n;
@@ -136,7 +148,7 @@ static void compress_and_write_i(CompressJob* job, int i) {
     size_t off = (size_t)i * (size_t)BLOCK_SIZE;
     CompressedResult* item = NULL;
     int handed_read = 0;
-    CCTurnstile* ts = job->ts;
+    PigzTurnstile* ts = job->ts;
 
     if (off < job->file_len) {
         size_t remain = job->file_len - off;
@@ -209,14 +221,13 @@ static void spawn_compress_all(CompressJob* job, int n) {
     @errhandler(CCError e) cc_error_exit(e);
 
     int i;
-    CCTurnstile* ts = job->ts;
+    PigzTurnstile* ts = job->ts;
 
     CCNursery* nur = cc_nursery_create(NULL) !> @destroy;
     for (i = 0; i < n; i++) {
         uint64_t tw0 = ns_now();
-        ts->enter() !>;
+        ts->enter(i) !>;
         g_start_wait_ns.fetch_add(ns_now() - tw0);
-        ts->arm(i);
 
         nur->spawn(() => [job, i, ts] {
             @errhandler(CCError e) cc_error_exit(e);
@@ -277,17 +288,16 @@ void !>(CCError) compress_file(const char* in_path, const char* out_path) {
 
     /* Turnstile before nursery (inside spawn) so join completes before channel free. */
     CCArena ts_arena = cc_arena_heap(megabytes(2)) @destroy;
-    CCTurnstile* ts = cc_turnstile_create(&ts_arena, n, cap);
-    if (!ts)
+    PigzTurnstile ts@(n, cap, &ts_arena) @destroy;
+    if (!ts.core.excl)
         return cc_err(CC_ERR_OUT_OF_MEMORY, "cc_turnstile_create failed");
-    @defer ts->destroy();
 
     int failed = 0;
 
     CompressJob job_store;
     job_store.in = &in_file;
     job_store.out = &out_file;
-    job_store.ts = ts;
+    job_store.ts = &ts;
     job_store.file_len = file_len;
     job_store.failed = &failed;
     job_store.n = n;
