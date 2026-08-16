@@ -138,7 +138,7 @@ denied (`@typeview` on the slice family). Tutorial:
 |-------|---------------------------|-------------|
 | `cc_arena_heap(n) @destroy` | Named lifetime; L1 heap `n`, L2 up to 4 slabs (~1.5×), then **Main** overflow | request / window |
 | `cc_arena_stack(name, n)` | Same lifetime; L1 on the stack; `@destroy` at scope exit | hot-path / frame scratch |
-| `@scratch` | Throwaway compiler stack scratch (not a long-lived named epoch) | `@string` / one-shot print |
+| `@scratch` | Arena operand of `@string` only — not a named `CCArena` | bind the `CCString`, or call-local print |
 
 ```c
 /* Heap — owns the root; @destroy frees slabs + overflow. */
@@ -151,7 +151,7 @@ char[:] s = a.alloc_slice_bytes(32);   /* arena provenance */
 cc_arena_stack(tmp, 1024);
 char* q = tmp.allocT(32);
 
-/* Scratch — only for throwaway templates / print. */
+/* Scratch — @string arena operand only; bind before return. */
 io.println(@string(`len=${a.remaining()}`, @scratch)) !>;
 
 char[:0] hi = "hi";

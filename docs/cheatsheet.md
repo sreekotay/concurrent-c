@@ -306,11 +306,18 @@ println(@string(`len=${msg.len()}`, @scratch)) !>;     // throwaway
 | `\${` / `\$~` | emit `${` / `$~` |
 | `${{…}}` | verbatim bytes — no escapes, no slots; inner backticks do not close the literal |
 
-Multiline backticks **dedent** to the closing backtick's margin. `@scratch`
-products stay in that function — do not `return`, capture, or send them.
-Arena-less `` @string(`…`) `` is a compile error on slices, `CCString`, floats,
-or pointers (pass an arena). Growth failure poisons the `CCString`; it never
-truncates.
+Multiline backticks **dedent** to the closing backtick's margin.
+
+`@scratch` is only the arena operand of `@string`. Every site in a
+function or closure shares one stack arena (not per line). Bind the
+product (`CCString line =` `` @string(`…`, @scratch) ``) before
+`return` or `cc_script_sh_read` — `return f(@string(…))` breaks
+`@destroy` return-rewrite, and a call-local `@string` is reclaimed
+after the consuming call. A newline before `@scratch` is fine. Do not
+`scratch.destroy()`. Do not capture or send a `@scratch` product.
+Arena-less `` @string(`…`) `` is a compile error on slices, `CCString`,
+floats, or pointers (pass an arena). Growth failure poisons the
+`CCString`; it never truncates.
 
 ---
 
@@ -479,8 +486,8 @@ CCArenaCheckpoint cp = a.try_checkpoint() !> @destroy; // consumed loan
 /* …scratch, including Main… */
 cp.try_restore() !>;                   // or leave the scope: @destroy restores
 
-/* @scratch — throwaway @string / print only; do not capture or send */
-io.println(@string(`len=${s.len}`, @scratch)) !>;
+/* @scratch — arena operand of @string only; bind before return / sh_read */
+io.println(@string(`len=${s.len}`, @scratch)) !>;   // call-local: reclaimed after println
 ```
 
 Slices (`T[:]`) carry provenance. Views must not outlive their arena.

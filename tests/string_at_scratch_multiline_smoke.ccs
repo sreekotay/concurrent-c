@@ -1,0 +1,25 @@
+/* Wrapped `@scratch` still names the shared function scratch — not a
+ * per-line arena, and not left unlowered. */
+#include <ccc/std/prelude.cch>
+#include <ccc/script/stdio.cch>
+#include <assert.h>
+#include <stdio.h>
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    int x = 1;
+    int y = 2;
+    CCString a = @string(`a=${x}`,
+        @scratch);
+    println(@string(`tmp=${y}`,
+        @scratch)) !>;
+    CCString b = @string(`b=${y}`,
+        @scratch);
+    assert(a.as_slice().eq_cstr("a=1"));
+    assert(b.as_slice().eq_cstr("b=2"));
+    println(a) !>;
+    println(b) !>;
+    printf("string_at_scratch_multiline_smoke: PASS\n");
+    return 0;
+}

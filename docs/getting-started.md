@@ -298,7 +298,7 @@ CCArena a = cc_arena_heap(kilobytes(4)) @destroy;  /* names this lifetime */
 CCStdio io = cc_stdio_create(&a);
 char* p = a.allocT(64);
 char[:] s = a.alloc_slice_bytes(32);               /* arena provenance */
-io.println(@string(`len=${s.len}`, @scratch)) !>;  /* @scratch: throwaway only */
+io.println(@string(`len=${s.len}`, @scratch)) !>;  /* @scratch: @string arena only */
 ```
 
 **Allocation policy** (`cc_arena_heap` / `cc_arena_stack` defaults) — three
@@ -325,7 +325,7 @@ overflow keep-set was released refuses (does not pretend to succeed).
 |-------------|------|
 | `cc_arena_heap(N) @destroy` | Named lifetime; heap L1 + L2 grow + Main overflow |
 | `cc_arena_stack(name, N)` | Same lifetime; L1 on the stack; `@destroy` at scope exit |
-| `@scratch` | Compiler stack scratch for one-shot `@string` / print — do not capture or send |
+| `@scratch` | Arena operand of `@string` only — bind the `CCString` before `return` / `cc_script_sh_read`; do not `scratch.destroy()` |
 
 Rules of thumb: a view must not outlive its arena; do not capture stack /
 `@scratch` slices into a task or channel. Capturing an arena slice into a

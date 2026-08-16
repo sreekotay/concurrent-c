@@ -1,0 +1,4 @@
+tmp=2
+a=1
+b=2
+string_at_scratch_multiline_smoke: PASS

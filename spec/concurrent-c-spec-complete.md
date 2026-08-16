@@ -5638,6 +5638,10 @@ int main(void) {
 
 **Call-local reclaim.** A call-local `@string(..., @scratch)` (e.g. `println(@string(\`…\`, @scratch))`) checkpoints the shared scratch before building the temp and restores after the consuming call. Earlier bound products in the same function remain valid; the temp's bump (and any extent growth for that temp) is reclaimed. Bound forms (`CCString s = @string(..., @scratch)`) keep their bytes for the function/closure lifetime and do not restore around the initializer.
 
+A product that must outlive the consuming call — including an argument of `return` (`cc_script_sh`, `cc_script_sh_read`, `@destroy` return-rewrite) — is bound to a local first (`CCString line = @string(\`…\`, @scratch); return f(line);`). `return f(@string(\`…\`, @scratch))` is call-local: the temp is reclaimed after `f` returns, and that nesting does not compose with `@destroy` return-rewrite.
+
+Newlines after the comma are whitespace — a wrapped `@scratch` is the same operand. `@scratch` is not a `CCArena` binding; there is no `scratch.destroy()`.
+
 **Escape (normative).** Products of `@string(..., @scratch)` have function/closure lifetime. It is a compile-time error to:
 
 - `return` that `String` (or a slice/view derived from it),
