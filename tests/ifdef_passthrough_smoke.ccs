@@ -1,0 +1,36 @@
+/* Root-tape `#ifdef` / `#ifndef` are a clean copy: both arms + the
+ * directive lines stay in the emit; host-cc selects. Integer literals
+ * so either arm compiles without extra system macros. */
+/***********************************************************************
+ * banner with an even-length star run before the closer (curl style)
+ **********************************************************************/
+#ifdef HAVE_GETADDRINFO
+#define RESOLVER_ENOMEM  1
+#else
+#define RESOLVER_ENOMEM  2
+#endif
+
+#ifdef HAVE_NETDB_H
+#include <stdbool.h>
+#endif
+
+#ifdef USE_ARES
+static int ares_probe(int s) { return s; }
+#endif
+
+#ifdef CURLVERBOSE
+static const char *desc(void) { return "verbose"; }
+#else
+static const char *desc(void) { return 0; }
+#endif
+
+#ifndef ENABLE_WAKEUP
+#define async_thrdd_event   NULL
+#endif
+
+int main(void) {
+    int x = RESOLVER_ENOMEM;
+    (void)x;
+    (void)desc;
+    return 0;
+}

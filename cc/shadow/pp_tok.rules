@@ -18,9 +18,10 @@ comment: line_comment | block_comment
 ws:      some charset [#' ' #'\t' #'\r' #'\n']
 
 line_comment:  ["//" any complement charset [#'\n']]
-block_comment: ["/*" any block_char "*/"]
-block_char:    [complement charset [#'*']
-               | [#'*' complement charset [#'/']]]
+; One char at a time, but stop before `*/`. Pairing `*`+next (the old
+; `block_char`) stole the closer's `*` after an even star run
+; (` ******/` + a later `/* WSA… */` swallowed every `#ifdef` between).
+block_comment: ["/*" any [not "*/" skip] "*/"]
 
 digit:    charset [#'0' - #'9']
 nondigit: charset [#'a' - #'z' #'A' - #'Z' #'_']

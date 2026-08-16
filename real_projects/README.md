@@ -25,6 +25,17 @@ Normative definitions of the primitives and lowering live in `spec/concurrent-c-
 
 **Related:** `studies/cve_locality/` reconstructs historical CVEs under idiomatic CC to test locality, SERDES, and `@variant` — hits and misses both welcome.
 
+## Raytext (out of tree)
+
+[github.com/sreekotay/raytext](https://github.com/sreekotay/raytext) is a standalone editor (piece tree, sections/runs, syntax highlight, measure-generic layout) with two frontends: **raytext** (Raylib) and **cctext** (console). It is not in this tree — install `ccc` and clone that repo. Language gaps from building it live in its `FRICTION.md`.
+
+## curl DNS (`curl_dns_port/`)
+
+[`curl_dns_port/`](curl_dns_port/) drops Concurrent-C into stock libcurl by
+replacing the threaded async DNS resolver. `make upstream` is vanilla curl;
+`make cc` lowers the overlay as a `.ccs` TU plus a nursery/hybrid queue
+and relinks the CLI. Same prefix, two flavors. See that directory's README.
+
 ## Raytracer
 
 [`raytracer/`](raytracer/) is the Shirley *Ray Tracing in One Weekend*

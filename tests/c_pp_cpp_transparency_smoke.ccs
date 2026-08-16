@@ -109,6 +109,92 @@ int main(void) {
                saw_if, saw_else, saw_endif, saw_dead, saw_live, nitems);
         return 1;
     }
-    printf("cpp-transparency: both arms + host #if structure OK\n");
+
+    /* `#ifdef` / `#ifndef` on the root tape match `#if`: emit the line,
+     * keep both arms, leave `#define` in place (do not apply / hoist). */
+    {
+        const char* src2 =
+            "#ifdef HAVE_GETADDRINFO\n"
+            "#define RESOLVER_ENOMEM  EAI_MEMORY\n"
+            "int eai_arm = 1;\n"
+            "#else\n"
+            "#define RESOLVER_ENOMEM  SOCKENOMEM\n"
+            "int sock_arm = 2;\n"
+            "#endif\n"
+            "int use = RESOLVER_ENOMEM;\n";
+        char* owned2 = (char*)malloc(strlen(src2) + 1);
+        FileTape* ft2;
+        Token out2[256];
+        Pp pp2 = {0};
+        int saw_ifdef = 0, saw_eai_def = 0, saw_sock_def = 0;
+        int saw_eai = 0, saw_sock = 0, saw_use_ident = 0, saw_expanded = 0;
+        int nifdef = 0, nelse = 0, nendif = 0;
+
+        if (!owned2) { printf("FAIL: oom ifdef\n"); return 1; }
+        memcpy(owned2, src2, strlen(src2) + 1);
+        ft2 = tape_cache_load_bytes(&cache, "<cpp-ifdef>", owned2, strlen(src2),
+                                    &arena);
+        if (!ft2) { printf("FAIL: tape ifdef\n"); return 1; }
+        pp2.cache = &cache;
+        pp2.arena = &arena;
+        pp2.out = out2;
+        pp2.out_cap = 256;
+        if (!pp_run(&pp2, ft2)) {
+            printf("FAIL: pp_run ifdef: %s\n", pp2.err_msg);
+            return 1;
+        }
+        for (i = 0; i < pp2.nout; i++) {
+            Token t = out2[i];
+            if (t.kind == TK_IDENT && t.spell.len > 0 && t.spell.ptr[0] == '#') {
+                if (t.spell.len >= 6 && memcmp(t.spell.ptr, "#ifdef", 6) == 0) {
+                    saw_ifdef = 1;
+                    nifdef++;
+                }
+                if (t.spell.len >= 5 && memcmp(t.spell.ptr, "#else", 5) == 0)
+                    nelse++;
+                if (t.spell.len >= 6 && memcmp(t.spell.ptr, "#endif", 6) == 0)
+                    nendif++;
+                if (t.spell.len >= 8 && memcmp(t.spell.ptr, "#define", 7) == 0) {
+                    if (strstr(t.spell.ptr, "EAI_MEMORY")) saw_eai_def = 1;
+                    if (strstr(t.spell.ptr, "SOCKENOMEM")) saw_sock_def = 1;
+                }
+            }
+            if (t.kind == TK_IDENT && spell_eq(t.spell, "eai_arm")) saw_eai = 1;
+            if (t.kind == TK_IDENT && spell_eq(t.spell, "sock_arm")) saw_sock = 1;
+            if (t.kind == TK_IDENT && spell_eq(t.spell, "RESOLVER_ENOMEM"))
+                saw_use_ident = 1;
+            if (t.kind == TK_IDENT && (spell_eq(t.spell, "EAI_MEMORY") ||
+                                       spell_eq(t.spell, "SOCKENOMEM")))
+                saw_expanded = 1;
+        }
+        if (!saw_ifdef || nifdef != 1 || nelse != 1 || nendif != 1) {
+            printf("FAIL: ifdef dirs ifdef=%d n#ifdef=%d n#else=%d n#endif=%d\n",
+                   saw_ifdef, nifdef, nelse, nendif);
+            return 1;
+        }
+        if (!saw_eai_def || !saw_sock_def) {
+            printf("FAIL: ifdef dropped a #define eai=%d sock=%d\n",
+                   saw_eai_def, saw_sock_def);
+            return 1;
+        }
+        if (!saw_eai || !saw_sock) {
+            printf("FAIL: ifdef dropped an arm eai=%d sock=%d\n", saw_eai,
+                   saw_sock);
+            return 1;
+        }
+        if (!saw_use_ident || saw_expanded) {
+            printf("FAIL: RESOLVER_ENOMEM not left for host cpp use=%d "
+                   "expanded=%d\n",
+                   saw_use_ident, saw_expanded);
+            return 1;
+        }
+        if (pp2.npass_def != 0) {
+            printf("FAIL: ifdef #define was hoisted npass_def=%d\n",
+                   pp2.npass_def);
+            return 1;
+        }
+    }
+
+    printf("cpp-transparency: both arms + host #if / #ifdef structure OK\n");
     return 0;
 }
