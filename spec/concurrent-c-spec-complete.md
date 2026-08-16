@@ -3287,14 +3287,14 @@ This section specifies:
 - **§8.7 Runtime API** — function signatures for tasks, timing, and sync bridging
 - **§8.8 Blocking, Stalling, and Execution Contexts** — execution model for blocking operations, stalling classification, and cancellation guarantees
 - **§8.9 Error handling in async and nurseries** — composition of result unwrap operators (`?>`, `!>`, `@err`, `@errhandler`) defined in §3.1 with async functions and nursery teardown
-- **§8.10 Named exclusive sections (`CCExclusive`)** — arena-backed, name-keyed mutual exclusion for short critical sections
+- **§8.10 Named exclusive sections (`CCExclusive`)** — arena-backed, name-keyed mutual exclusion for short critical sections; `acquire_when` gates entry on a predicate
 - **§8.11 `@parallel`** — value join of independent assignments or `@serial` arms (§8.11.2), optional spawn predicate, and `@parallel for` over a half-open index range
 
 ---
 
 ### 8.1 Structured Concurrency with `CCNursery`
 
-A **nursery** is a scope-bound handle that manages the lifetime, cancellation, and completion of spawned child tasks. Nurseries enforce a tree-shaped concurrency structure: every task is a child of some nursery, and no task outlives its nursery.
+A **nursery** is a join set with a handle. Every task is a child of some nursery. `wait` and `@destroy` keep the handle until the set is empty. `abandon` consumes the handle; children may still be running. The join set does not outlive the last child: when the last child is dead the runtime closes registered channels, runs `on_last` if one is registered, and frees the nursery.
 
 `CCNursery` is a library type constructed with `cc_nursery_create(NULL)` and released via `@destroy`. The construction-plus-destruction pattern is idiomatic:
 
@@ -3320,6 +3320,8 @@ UFCS on the explicit nursery handle.
 - Child task handles cannot outlive the nursery's scope (compile-time error if they escape).
 - `cc_nursery_wait(n)` joins every child and returns the first nonzero child
   error it records; it does not cancel siblings.
+- `n->abandon()` consumes the handle. The caller does not join. The runtime
+  releases the join set after the last child is dead.
 - Peer tasks cannot wait on each other (compile-time error).
 
 ---
@@ -3440,17 +3442,44 @@ optional and is independent of the scheduler's general detector (§8.7.1).
 
 ---
 
-#### 8.1.5 Guarantees
+#### 8.1.5 Abandon
+
+`n->on_last(ctx, finish)` registers one hook. `n->abandon()` consumes the
+handle. Extra after-work is `on_last`, registered before `abandon`.
+
+```c
+n->on_last(q, finish_q);   // optional
+n->abandon();              // always this
+```
+
+After `abandon` the pointer is invalid: no `wait`, `free`, `spawn`, or
+`close_on`. When `alive_count` is already zero, last-exit runs on the
+caller. When children remain, the last child's completion runs last-exit
+on a scheduler worker (the child fiber is already dead). Last-exit closes
+registered channels, runs `on_last` if set, and frees the nursery.
+
+`on_last` does not run on `wait` / `@destroy`. The hook must not `wait`,
+`free`, or `abandon` this nursery. `abandon` is not cancellation; in-flight
+work runs to completion. `abandon` requires worker-frees mode (the default).
+`on_signals` does not compose with `abandon`.
+
+`@destroy` and `abandon` do not compose: `@destroy` waits.
+
+---
+
+#### 8.1.6 Guarantees
 
 A nursery guarantees:
 
 - All spawned children are joined before the nursery's `@destroy` returns.
-- No child outlives its nursery's scope.
-- No forgotten-join deadlocks (impossible syntactically).
+- No child outlives the join set. After `abandon`, the handle is invalid;
+  the set is released after the last child is dead.
+- No forgotten-join deadlocks (impossible syntactically) on the `wait` /
+  `@destroy` path.
 - No cyclic peer waits (impossible syntactically).
 - First recorded child error returned by an explicit `cc_nursery_wait`.
 - Explicit cooperative cancellation through `cc_nursery_cancel`.
-- Deterministic channel close ordering (via `@destroy { ch.close(); }`, or `close_on` from C).
+- Deterministic channel close ordering (via `@destroy { ch.close(); }`, or `close_on` from C), including on the `abandon` last-exit path.
 
 A nursery does **not** guarantee:
 
@@ -3458,6 +3487,7 @@ A nursery does **not** guarantee:
 - Fairness or starvation freedom.
 - Immediate cancellation of blocking operations (cooperative; see §8.5).
 - Stack unwinding on cancellation.
+- That `abandon` composes with `on_signals`.
 
 ---
 
@@ -4316,6 +4346,8 @@ intptr_t cc_block_on_intptr(CCTaskIntptr task);
 void cc_nursery_cancel(CCNursery* n);
 bool cc_nursery_is_cancelled(const CCNursery* n);
 bool cc_cancelled(void);  // current nursery
+int cc_nursery_on_last(CCNursery* n, void* ctx, void (*finish)(void*));
+void cc_nursery_abandon(CCNursery* n);
 
 // Deadline cancellation and polling
 void cc_cancel(CCDeadline* d);
@@ -4940,6 +4972,38 @@ copies of the result; it may be `NULL` when the builder does not allocate.
 
 An acquire blocks until the caller owns the named entry. Uncontended acquire is an inlined compare-and-swap on the entry lock word; contended acquire uses a slow path that may park the current fiber.
 
+#### 8.10.3.1 Conditioned acquire (`acquire_when`)
+
+`acquire_when` is acquire gated on a predicate. The caller does not hold the name on entry. The implementation acquires, evaluates `pred` under the hold, and either returns holding or enqueues as a condition waiter, releases, and parks. On success the guard is held and `pred` was true under that hold.
+
+```c
+CCExclusiveGuard g = excl->acquire_when(name, pred, env) !> @destroy;
+m.acquire_when(pred, env) !>;
+excl->acquire_when_into(name, pred, env, &slot, &arena, builder) !>;
+```
+
+`pred` is `int (*)(void* env)` (nonzero = true). It runs only while the name is held and must not suspend. Wake means retry, not “still true.” Anyone who makes `pred` become true signals that name **while still holding**:
+
+```c
+CCExclusiveGuard h = excl->acquire(name);
+/* mutate so pred may be true */
+h.signal();     /* one waiter */
+h.broadcast();  /* every waiter */
+h.release();
+```
+
+`signal` / `broadcast` wake condition waiters only (not lock waiters). The waiter is enqueued before release so a signal cannot land on an empty list in the gap between “pred is false” and park.
+
+| Result | Holding? | Meaning |
+|--------|----------|---------|
+| `cc_ok(g)` / `cc_ok()` | yes, then released by `_into` | `pred` observed true under the hold |
+| `cc_err(CC_ERR_CANCELLED, …)` | no | parked wait cancelled; no guard escapes |
+| `cc_err(CC_ERR_INVALID_ARG, …)` | no | null domain or null `pred` |
+
+`acquire_when_into` runs the builder once under that success invariant and releases; the builder never runs on error (slot untouched). The builder contract is the same as `acquire_into` (synchronous, no suspend, own-before-release).
+
+Do not use this when the condition is “a message arrived” — that is a channel. `acquire_when` gates a short mutation of named shared state.
+
 #### 8.10.4 Hash-shard geometry (`CCShardMask`)
 
 Compose `CCExclusive` names `0 .. count-1` with a power-of-two shard mask:
@@ -5027,7 +5091,20 @@ CCShardMask cc_shard_mask_auto(size_t max);
 size_t cc_shard_mask_index(const CCShardMask* m, uint64_t hash);
 
 void cc_exclusive_lock_entry_slow(void* entry);      /* slow acquire path */
-void cc_exclusive_unlock_contended(void* entry);     /* wake one waiter */
+void cc_exclusive_unlock_contended(void* entry);     /* wake one lock waiter */
+int cc_exclusive_guard_wait_release(CCExclusiveGuard* g);
+void cc_exclusive_guard_signal(CCExclusiveGuard* g);
+void cc_exclusive_guard_broadcast(CCExclusiveGuard* g);
+CCExclusiveGuard !>(CCError) cc_exclusive_acquire_when(CCExclusive* excl,
+    uint64_t name, CCExclusivePred pred, void* env);
+CCExclusiveGuard !>(CCError) cc_exclusive_mutex_acquire_when(
+    CCExclusiveMutex* m, CCExclusivePred pred, void* env);
+void !>(CCError) cc_exclusive_acquire_when_into(CCExclusive* excl, uint64_t name,
+    CCExclusivePred pred, void* env, void* slot, CCArena* arena,
+    CCClosure2 builder);
+void !>(CCError) cc_exclusive_mutex_acquire_when_into(CCExclusiveMutex* m,
+    CCExclusivePred pred, void* env, void* slot, CCArena* arena,
+    CCClosure2 builder);
 ```
 
 **UFCS surface (normative):**
@@ -5039,10 +5116,14 @@ void cc_exclusive_unlock_contended(void* entry);     /* wake one waiter */
 - `excl->acquire_into(name, slot, arena, builder)` — admitted builder, one name
 - `excl->acquire_sorted_into(names, count, slot, arena, builder)` — admitted builder, name set
 - `excl->acquire_range_into(lo, hi, slot, arena, builder)` — admitted builder, name range
+- `excl->acquire_when(name, pred, env)` — acquire when `pred` is true under the name
+- `excl->acquire_when_into(name, pred, env, slot, arena, builder)` — same, admitted builder
 - `excl->destroy()` — tear down section
 - `m.acquire()` — acquire resolved mutex
+- `m.acquire_when(pred, env)` / `m.acquire_when_into(pred, env, slot, arena, builder)`
 - `m.free()` — explicit reclaim
 - `g.release()` / `g.destroy()` — release guard
+- `g.signal()` / `g.broadcast()` — wake condition waiters (while holding)
 - `shards.index(hash)` — `CCShardMask` routing
 
 ---

@@ -11,6 +11,14 @@
  *   CCExclusiveGuard g = m.acquire();
  *   ... short critical section (do not @await) ...
  *   g.release();                              // idempotent (local held bit)
+ *
+ * Conditioned acquire — park inside the primitive until pred is true
+ * under the name. Caller is not holding on the way in:
+ *
+ *   CCExclusiveGuard g = excl->acquire_when(name, pred, env) !> @destroy;
+ *   // held; pred was true under the name
+ *   // the fiber that made pred true: h.signal() while still holding
+ *
  *   cc_exclusive_destroy(excl);
  *
  * Same name in one domain ⇒ same lock. Different domains never collide.

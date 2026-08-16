@@ -68,7 +68,9 @@ typedef struct {
     uint64_t name;
     CCExclusiveWaiter* wait_head;
     CCExclusiveWaiter* wait_tail;
-    char _cc_line_pad[64 - (2 * sizeof(int) + sizeof(uint64_t) + 2 * sizeof(void*))];
+    CCExclusiveWaiter* cond_head;
+    CCExclusiveWaiter* cond_tail;
+    char _cc_line_pad[64 - (2 * sizeof(int) + sizeof(uint64_t) + 4 * sizeof(void*))];
 } CCExclusiveEntry;
 #else
 typedef struct {
@@ -77,6 +79,8 @@ typedef struct {
     uint64_t name;
     CCExclusiveWaiter* wait_head;
     CCExclusiveWaiter* wait_tail;
+    CCExclusiveWaiter* cond_head;
+    CCExclusiveWaiter* cond_tail;
 } __attribute__((aligned(64))) CCExclusiveEntry;
 #endif
 
@@ -502,6 +506,107 @@ void cc_exclusive_lock_entry_slow(void* entry) {
     cc__exclusive_lock_entry(e);
 }
 
+bool cc_cancelled(void);
+
+/* Unlink `node` from the condition queue.  Returns 1 if it was still queued. */
+static int cc__exclusive_cond_dequeue(CCExclusiveEntry* e, CCExclusiveWaiter* node) {
+    cc__spin_lock(&e->wait_spin);
+    CCExclusiveWaiter* prev = NULL;
+    CCExclusiveWaiter* cur = e->cond_head;
+    while (cur && cur != node) {
+        prev = cur;
+        cur = cur->next;
+    }
+    int found = (cur == node);
+    if (found) {
+        if (prev) prev->next = node->next;
+        else e->cond_head = node->next;
+        if (e->cond_tail == node) e->cond_tail = prev;
+        node->next = NULL;
+    }
+    cc__spin_unlock(&e->wait_spin);
+    return found;
+}
+
+static void cc__exclusive_cond_wake_n(CCExclusiveEntry* e, int all) {
+    for (;;) {
+        CCExclusiveWaiter* w;
+        void* fiber;
+        cc__spin_lock(&e->wait_spin);
+        w = e->cond_head;
+        if (w) {
+            e->cond_head = w->next;
+            if (!e->cond_head) e->cond_tail = NULL;
+            w->next = NULL;
+            fiber = w->fiber;
+        } else {
+            fiber = NULL;
+        }
+        cc__spin_unlock(&e->wait_spin);
+        if (!w) return;
+        atomic_store_explicit(&w->ready, 1, memory_order_release);
+        if (fiber) cc__fiber_unpark(fiber);
+        if (!all) return;
+    }
+}
+
+/* Caller holds `g`. Enqueue on the cond list, then release, then park.
+ * Returns CC_EXCL_WAIT_OK (not holding; retry acquire+pred),
+ * CC_EXCL_WAIT_CANCELLED (not holding), or CC_EXCL_WAIT_INVALID. */
+int cc_exclusive_guard_wait_release(CCExclusiveGuard* g) {
+    CCExclusiveEntry* e;
+    CCExclusiveWaiter node;
+    int found;
+
+    if (!g || !g->_entry) return CC_EXCL_WAIT_INVALID;
+    e = (CCExclusiveEntry*)g->_entry;
+
+    if (!cc__fiber_in_context()) {
+        /* OS threads cannot park; release and let the caller busy-recheck. */
+        cc_exclusive_guard_release(g);
+        return CC_EXCL_WAIT_OK;
+    }
+
+    node.fiber = cc__fiber_current();
+    node.next = NULL;
+    atomic_store_explicit(&node.ready, 0, memory_order_relaxed);
+
+    /* Enqueue before release so a signal under a later hold cannot miss us. */
+    cc__spin_lock(&e->wait_spin);
+    if (!e->cond_head) e->cond_head = &node;
+    else e->cond_tail->next = &node;
+    e->cond_tail = &node;
+    cc__spin_unlock(&e->wait_spin);
+
+    cc_exclusive_guard_release(g);
+
+    while (atomic_load_explicit(&node.ready, memory_order_acquire) == 0) {
+        if (cc_cancelled()) break;
+        CC_FIBER_PARK("exclusive_when");
+    }
+
+    if (atomic_load_explicit(&node.ready, memory_order_acquire) != 0)
+        return CC_EXCL_WAIT_OK;
+
+    found = cc__exclusive_cond_dequeue(e, &node);
+    if (!found) {
+        while (atomic_load_explicit(&node.ready, memory_order_acquire) == 0)
+            cc__cpu_pause();
+        return CC_EXCL_WAIT_OK;
+    }
+    return CC_EXCL_WAIT_CANCELLED;
+}
+
+void cc_exclusive_guard_signal(CCExclusiveGuard* g) {
+    if (!g || !g->_entry) return;
+    cc__exclusive_cond_wake_n((CCExclusiveEntry*)g->_entry, 0);
+}
+
+void cc_exclusive_guard_broadcast(CCExclusiveGuard* g) {
+    if (!g || !g->_entry) return;
+    cc__exclusive_cond_wake_n((CCExclusiveEntry*)g->_entry, 1);
+}
+
 void cc_exclusive_unlock_contended(void* entry) {
     CCExclusiveEntry* e = (CCExclusiveEntry*)entry;
     if (!e) abort();
@@ -751,7 +856,7 @@ void cc_exclusive_mutex_free(CCExclusiveMutex* m) {
     }
 
     if (atomic_load_explicit(&e->locked, memory_order_acquire) != CC_EXCL_FREE
-            || e->wait_head != NULL) {
+            || e->wait_head != NULL || e->cond_head != NULL) {
         pthread_mutex_unlock(&excl->create_mu);
         abort(); /* free while held or waiters queued */
     }
@@ -774,6 +879,8 @@ void cc_exclusive_mutex_free(CCExclusiveMutex* m) {
     e->name = 0;
     e->wait_head = NULL;
     e->wait_tail = NULL;
+    e->cond_head = NULL;
+    e->cond_tail = NULL;
     atomic_store_explicit(&e->locked, CC_EXCL_FREE, memory_order_relaxed);
     atomic_store_explicit(&e->wait_spin, 0, memory_order_relaxed);
     cc__excl_entry_free(excl, e);

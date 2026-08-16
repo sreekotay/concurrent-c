@@ -413,6 +413,20 @@ Runnable version with expected sum:
 Close/deadlock details and env guards live there and in [Debugging](debugging.md)
 — not required to start writing programs.
 
+### Named exclusive
+
+When several fibers must briefly mutate the same named resource,
+`CCExclusive` is per-name mutual exclusion. Keep the section short — do not
+`@await` under the hold. To wait until a condition is already true *under*
+that name, use `acquire_when` (Result; cancel is not a zeroed guard):
+
+```c
+CCExclusiveGuard g = excl->acquire_when(name, pred, env) !> @destroy;
+```
+
+The fiber that makes `pred` true calls `h.signal()` while still holding.
+Recipe: [recipe_exclusive_named.ccs](../examples/recipe_exclusive_named.ccs).
+
 ### Async / await
 
 Prefer `@parallel` for independent value joins that finish at a brace.

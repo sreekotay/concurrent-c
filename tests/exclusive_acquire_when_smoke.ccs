@@ -1,0 +1,141 @@
+/* acquire_when / acquire_when_into: Result, pred under hold, signal, cancel. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int g_ready;
+static int g_started;
+static int g_got;
+static int g_slot;
+static int g_runs;
+
+static int pred_ready(void* env) {
+    (void)env;
+    return g_ready;
+}
+
+static int pred_never(void* env) {
+    (void)env;
+    return 0;
+}
+
+static void* write_slot(void* envp, intptr_t slot_i, intptr_t arena_i) {
+    (void)envp;
+    (void)arena_i;
+    g_runs++;
+    *(int*)slot_i = 42;
+    return NULL;
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "FAIL unwrap kind=%d msg=%s\n", (int)e.kind,
+                e.message ? e.message : "");
+        return 20;
+    }
+    CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+    CCExclusive* excl = cc_exclusive_create(&arena, 0);
+    CCExclusiveMutex m;
+    CCExclusiveGuard g;
+    if (!excl) return 1;
+    @defer excl->destroy();
+    m = excl->mutex(1);
+
+    /* Already true: returns holding, no park. */
+    g_ready = 1;
+    g = excl->acquire_when(1u, pred_ready, NULL) !>;
+    if (!g._entry) return 2;
+    g.release();
+
+    g = m.acquire_when(pred_ready, NULL) !>;
+    if (!g._entry) return 3;
+    g.release();
+
+    /* Invalid args. */
+    {
+        CCExclusiveGuard !>(CCError) bad = cc_exclusive_acquire_when(NULL, 1u,
+                                                                    pred_ready, NULL);
+        if (!cc_is_err(bad) || bad.u.error.kind != CC_ERR_INVALID_ARG) return 4;
+        bad = excl->acquire_when(1u, NULL, NULL);
+        if (!cc_is_err(bad) || bad.u.error.kind != CC_ERR_INVALID_ARG) return 5;
+    }
+
+    /* Waiter parks; holder makes pred true and signals. */
+    g_ready = 0;
+    g_started = 0;
+    g_got = 0;
+    {
+        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+        n->spawn(() => [excl] {
+            @errhandler(CCError e) {
+                fprintf(stderr, "FAIL waiter unwrap kind=%d\n", (int)e.kind);
+                return NULL;
+            }
+            CCExclusiveGuard wg;
+            g_started = 1;
+            wg = excl->acquire_when(1u, pred_ready, NULL) !>;
+            g_got = 1;
+            wg.release();
+        });
+        while (!g_started) cc_yield();
+        cc_sleep_ms(5);
+        {
+            CCExclusiveGuard hg = excl->acquire(1u);
+            g_ready = 1;
+            hg.signal();
+            hg.release();
+        }
+    }
+    if (!g_got) return 6;
+
+    /* acquire_when_into: builder runs once under the hold. */
+    g_ready = 0;
+    g_started = 0;
+    g_slot = -1;
+    g_runs = 0;
+    {
+        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+        n->spawn(() => [excl] {
+            @errhandler(CCError e) {
+                fprintf(stderr, "FAIL into unwrap kind=%d\n", (int)e.kind);
+                return NULL;
+            }
+            CCClosure2 b = cc_closure2_make(write_slot, NULL, NULL);
+            g_started = 1;
+            excl->acquire_when_into(1u, pred_ready, NULL, &g_slot, NULL, b) !>;
+        });
+        while (!g_started) cc_yield();
+        cc_sleep_ms(5);
+        {
+            CCExclusiveGuard hg = excl->acquire(1u);
+            g_ready = 1;
+            hg.broadcast();
+            hg.release();
+        }
+    }
+    if (g_runs != 1 || g_slot != 42) return 7;
+
+    /* Cancel while parked: not holding, CANCELLED. */
+    g_started = 0;
+    g_got = 0;
+    {
+        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+        n->spawn(() => [excl] {
+            CCExclusiveGuard !>(CCError) wr;
+            g_started = 1;
+            wr = excl->acquire_when(1u, pred_never, NULL);
+            if (cc_is_err(wr) && wr.u.error.kind == CC_ERR_CANCELLED)
+                g_got = 1;
+            else if (cc_is_ok(wr)) {
+                CCExclusiveGuard hg = wr.u.value;
+                hg.release();
+            }
+        });
+        while (!g_started) cc_yield();
+        cc_sleep_ms(5);
+        n->cancel();
+    }
+    if (!g_got) return 8;
+
+    puts("exclusive_acquire_when_smoke: PASS");
+    return 0;
+}

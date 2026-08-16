@@ -420,6 +420,28 @@ past the frame; arena slices pin the arena until join.
 
 ---
 
+## Named exclusive (`CCExclusive`)
+
+Short critical sections on a `uint64_t` name. Do not `@await` under the hold.
+
+```c
+CCExclusive* excl = cc_exclusive_create(&arena, 0);
+CCExclusiveGuard g = excl->acquire(name);
+… mutate …
+g.release();
+
+/* Park until pred is true *under* the name. Not a condvar-on-held-guard. */
+CCExclusiveGuard w = excl->acquire_when(name, pred, env) !> @destroy;
+/* held; pred was observed true while held */
+```
+
+The fiber that makes `pred` true signals **while still holding**: `h.signal()`
+/ `h.broadcast()`. Cancel and bad args are `CCError` — never a zeroed guard.
+`acquire_when_into` runs a builder once under that invariant and releases.
+Recipe: [recipe_exclusive_named.ccs](../examples/recipe_exclusive_named.ccs).
+
+---
+
 ## Arenas name a lifetime
 
 **An arena is a named lifetime, not an allocator strategy.** Storage is

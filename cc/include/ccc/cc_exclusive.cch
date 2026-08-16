@@ -26,6 +26,15 @@
  *   bool ran = excl->acquire_sorted_into(names, count, &r, &arena, builder);
  *   bool ran = excl->acquire_range_into(0, shard_count, &r, &arena, builder);
  *
+ * Conditioned acquire (`cc_exclusive_result.cch`): park inside the primitive
+ * until pred is true under the name. Caller is not holding on entry.
+ * Pred is a non-suspending observation (int (*)(void*)). Signal under the
+ * hold after making pred true:
+ *
+ *   CCExclusiveGuard g = excl->acquire_when(name, pred, env) !> @destroy;
+ *   excl->acquire_when_into(name, pred, env, &r, &arena, builder) !>;
+ *   g.signal();   // or g.broadcast(); still holding
+ *
  * Hash-shard geometry partner (pow2 count; compose with exclusive names
  * 0..count-1):
  *
@@ -87,6 +96,15 @@ typedef struct CCExclusive CCExclusive;
 #define CC_EXCL_LOCKED    1
 #define CC_EXCL_CONTENDED 2
 
+/* cc_exclusive_guard_wait_release: 0 = woken (retry), else cancel / invalid. */
+enum {
+    CC_EXCL_WAIT_OK = 0,
+    CC_EXCL_WAIT_CANCELLED = 1,
+    CC_EXCL_WAIT_INVALID = 2
+};
+
+typedef int (*CCExclusivePred)(void* env);
+
 typedef struct CCExclusiveMutex {
     CCExclusive* excl;
     uint64_t name;
@@ -117,6 +135,15 @@ void cc_exclusive_mutex_free(CCExclusiveMutex* m);
 void cc_exclusive_lock_entry_slow(void* entry);
 /* Called after a release swap observed CONTENDED: wake one waiter. */
 void cc_exclusive_unlock_contended(void* entry);
+
+/* Caller holds `g`. Enqueue as a condition waiter, release, park until
+ * signal/broadcast or cancel. Never returns holding. 0 = woken (retry
+ * acquire+pred); CANCELLED / INVALID = not holding. */
+int cc_exclusive_guard_wait_release(CCExclusiveGuard* g);
+/* Wake one / all condition waiters. Call while still holding, after the
+ * mutation that may make pred true. No-op on a released guard. */
+void cc_exclusive_guard_signal(CCExclusiveGuard* g);
+void cc_exclusive_guard_broadcast(CCExclusiveGuard* g);
 
 static inline CCExclusiveGuard cc_exclusive_mutex_acquire(CCExclusiveMutex* m) {
     CCExclusiveGuard g;
