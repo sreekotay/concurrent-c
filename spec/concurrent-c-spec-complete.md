@@ -1267,9 +1267,11 @@ list is a compile error at `@destroy`. An explicit body remains valid
 without a registered hook and lowers to the declaration-bound deferred
 body plus any nested value-field chain.
 
-`recv.destroy()` on a value receiver expands to the same call list as
-bodyless `@destroy` on that type. No full-chain symbol is synthesized.
-Registered destroy hooks are idempotent.
+`recv.destroy()` on a value receiver is ordinary UFCS: `Type_destroy` when
+that function exists. Bodyless `@destroy` is the registered hook list
+(outer pre-destroy / destroy, then value-field hooks). No full-chain
+symbol is synthesized for `@destroy`. Registered destroy hooks are
+idempotent.
 
 The same declared-type hook lookup applies to a direct initializer such as
 `CCArena a = cc_arena_heap(n) @destroy;`; an unwrap operator is not required
@@ -1772,12 +1774,16 @@ bool cc_arena_set_heap_overflow(CCArena* a, bool enabled);
 void cc_arena_free(CCArena* a);          // drain ovf; free heap extents/root; clear handle
 void cc_arena_reset(CCArena* a);         // drain ovf; unwind extents; restore original root
 void cc_arena_destroy(CCArena* a);       // alias for cc_arena_free
-CCArena cc_arena_detach(CCArena* a);     // move ownership out; leave a empty
+CCArena cc_arena_detach(CCArena* a);     // heap-owned L1 only; empty on refuse
 
 // Checkpoints (cross-block; new capture disabled after a slab hole)
 typedef struct CCArenaCheckpoint CCArenaCheckpoint;
-CCArenaCheckpoint cc_arena_checkpoint(CCArena* a);
-bool cc_arena_restore(CCArenaCheckpoint checkpoint);  // false: refuse, no mutate
+CCArenaCheckpoint cc_arena_checkpoint(CCArena* a);           // C twin (@scratch)
+bool cc_arena_restore(CCArenaCheckpoint checkpoint);         // C twin; false: refuse
+CCArenaCheckpoint !>(CCError) cc_arena_try_checkpoint(CCArena* a);
+void !>(CCError) cc_arena_try_restore(CCArenaCheckpoint checkpoint);
+size_t cc_arena_live(const CCArena* a);  // L1 + L2 + Main
+CCArenaTier cc_arena_ptr_tier(const CCArena* a, const void* ptr);
 
 // Shared alloc (thread-safe tip CAS + meta_lock on grow/ovf/chain)
 void* cc_arena_alloc(CCArena* a, size_t nbytes, size_t align);
@@ -1832,16 +1838,18 @@ owns its arena (`cc_arena_pool`), `cc_arena_pool_destroy` frees that arena.
 
 ### Model
 
-**Root sizing.** Constructor `bytes` is the first slab capacity. Size it for the
-typical live set of that arena's lifetime so traffic stays in slabs.
-`cc_arena_heap` / `cc_arena_stack` share one engine: root exactly `N`,
-`block_max = CC_ARENA_DEFAULT_BLOCK_MAX` (4), heap overflow on after the slab
-budget. `cc_arena_malloc` is a durable fixed root (`block_max = 1`, overflow on,
-no extent growth) for stores that free entries individually — not for scratch
-alloc storms. `cc_arena_buffer` / `cc_arena_fixed_buffer` take a caller-owned
-root with overflow off by default; enable overflow or raise `block_max`
-explicitly. `cc_arena_create_buffer` sets an explicit `block_max`.
-`cc_arena_create` aliases `cc_arena_heap`.
+**Root sizing.** An arena is a named lifetime. Storage is three tiers: **L1**
+(the original root slab), **L2** (grown heap extents), **Main** (overflow).
+Constructor `bytes` is L1 capacity. Size it for the typical live set of that
+lifetime so traffic stays in slabs. `cc_arena_heap` / `cc_arena_stack` share
+one engine: L1 exactly `N`, `block_max = CC_ARENA_DEFAULT_BLOCK_MAX` (4), Main
+overflow on after the slab budget. `cc_arena_malloc` is a durable fixed L1
+(`block_max = 1`, overflow on, no L2) for stores that free entries
+individually — not for scratch alloc storms. `cc_arena_buffer` /
+`cc_arena_fixed_buffer` take a caller-owned L1 with overflow off by default;
+enable overflow or raise `block_max` explicitly. `cc_arena_create_buffer`
+sets an explicit `block_max`. `cc_arena_create` aliases `cc_arena_heap`.
+`cc_arena_live` counts live objects on L1 + L2 + Main.
 
 **`block_max`.** Affects future growth only.
 
@@ -1864,6 +1872,8 @@ holds the active slab.
 - User/stack root (`cc_arena_buffer`, `cc_arena_stack`): arena never frees the
   initial buffer. `cc_arena_free` frees heap extents and overflow only, then
   clears the handle (`base == NULL`). Re-init with `cc_arena_buffer` before reuse.
+  In Concurrent-C, `cc_arena_stack` attaches `@destroy` so L2 and Main are freed
+  at scope exit.
 - Freeing never calls `free` on stack or static storage.
 
 ```c
@@ -1949,19 +1959,24 @@ keep-set. Restore unwinds newer extents, writes back the saved offset and
 post-checkpoint allocations become stale; prior ones remain valid. Checkpoints
 do not change ownership rules.
 
-While the arena has a slab hole (`NON_REWINDABLE`), `cc_arena_checkpoint`
-returns a null handle (`checkpoint.arena == NULL`) and emits a diagnostic
-on every refused capture. `cc_arena_restore` returns false and does not mutate on a null
-handle, a slab hole, a punctured overflow keep-set, or a checkpoint that would
-advance the tip (stale nested restore); each refusal emits a diagnostic.
-Dropping a checkpoint handle does not block a later `checkpoint()`.
+A checkpoint is a consumed loan: bind with `@destroy` (restores) or call
+restore. `cc_arena_try_checkpoint` / `cc_arena_try_restore` are the Result
+surface; `cc_arena_checkpoint` / `cc_arena_restore` are C twins for `@scratch`
+and existing C. While the arena has a slab hole (`NON_REWINDABLE`),
+`cc_arena_checkpoint` returns a null handle (`checkpoint.arena == NULL`) and
+emits a diagnostic on every refused capture; `try_checkpoint` returns
+`CC_ERR_INVALID_ARG`. `cc_arena_restore` returns false and does not mutate on a
+null handle, a slab hole, a punctured overflow keep-set, or a checkpoint that
+would advance the tip (stale nested restore); each refusal emits a diagnostic.
+Dropping a handle without consume leaves an outstanding loan (diagnostic on
+free/reset/detach) and does not block a later capture.
 `cc_arena_reset` restores rewindability for the new epoch.
 
 ```c
 CCArena a = cc_arena_heap(megabytes(1)) @destroy;
-CCArenaCheckpoint cp = a.checkpoint();
+CCArenaCheckpoint cp = a.try_checkpoint() !> @destroy;
 char* tmp = cc_arena_alloc_T_count(char, &a, 1024);
-cc_arena_restore(cp);  // reclaim post-checkpoint bytes
+cp.try_restore() !>;  // reclaim post-checkpoint bytes
 ```
 
 ---
@@ -2072,13 +2087,17 @@ Result*!>(IoError) compress_block(Block* blk) {
 
 **Arena ownership transfer with `cc_arena_detach`:**
 
-`cc_arena_detach(CCArena* a)` (UFCS: `a.detach()`) transfers the arena's memory to a new owner, leaving the source arena empty. This enables clean ownership transfer out of scoped blocks:
+`cc_arena_detach(CCArena* a)` (UFCS: `a.detach()`) transfers arena-owned mallocs
+(heap L1, L2, Main) to a new owner, leaving the source empty. It refuses a
+stack or caller-owned L1 (the returned handle would dangle) and an outstanding
+checkpoint loan; both cases leave the source unchanged, return an empty
+handle, and emit a diagnostic.
 
 ```c
-CCArena cc_arena_detach(CCArena* a);  // returns arena contents, leaves a empty
+CCArena cc_arena_detach(CCArena* a);  // heap-owned L1 only; empty on refuse
 ```
 
-After detach:
+After a successful detach:
 
 - The source arena has `base = NULL` - any cleanup becomes a no-op
 - The returned arena owns all the memory and allocations
@@ -7476,7 +7495,7 @@ struct CCArena {
     uint16_t block_idx;  // current block generation (0 = initial)
     uint16_t block_max;  // budget: 0 = unbounded, 1 = fixed, N = max
     CCArena* prev;       // previous full block (NULL if none)
-    /* ovf_head / ovf_chunks / overflow_bytes / meta_lock — see cc_arena.cch */
+    /* ovf_head / ovf_chunks / overflow_bytes / meta_lock / cp_loans — see cc_arena.cch */
 };
 ```
 
@@ -7493,7 +7512,7 @@ On alloc failure in current block:
 
 **Reset:** Drain overflow, walk `prev` chain to the original root, free intermediate buffers and extent structs, restore root state, set offset = 0, advance provenance.
 
-**Checkpoint/Restore:** Checkpoint captures `{arena, offset, live_allocs, ovf_keep, block_idx, provenance}` and immediately starts a fresh arena provenance epoch for subsequent allocations, sealing the active overflow chunk. Restore refuses (no mutate) if the arena has a slab hole, if live overflow in the saved epoch no longer matches `ovf_keep`, or if the checkpoint would advance the tip. Otherwise, if `checkpoint.block_idx < arena->block_idx`, it unwinds the chain by freeing the current block and all extents newer than the checkpoint, restoring the root to the target block, then restores the checkpoint's offset, live count, and provenance epoch and drains overflow whose header epoch does not match. While a slab hole is live, `cc_arena_checkpoint` returns a null handle.
+**Checkpoint/Restore:** A checkpoint is a consumed loan. Capture records `{arena, offset, live_allocs, ovf_keep, block_idx, provenance}`, increments `cp_loans`, and starts a fresh provenance epoch, sealing the active overflow chunk. Restore consumes the loan and refuses (no mutate) if the arena has a slab hole, if live overflow in the saved epoch no longer matches `ovf_keep`, or if the checkpoint would advance the tip. Otherwise, if `checkpoint.block_idx < arena->block_idx`, it unwinds L2 newer than the checkpoint, restoring L1/L2 to the target block, then restores the checkpoint's offset, live count, and provenance epoch and drains Main whose header epoch does not match. While a slab hole is live, `cc_arena_checkpoint` returns a null handle; `try_checkpoint` returns `CC_ERR_INVALID_ARG`.
 
 **Per-request pattern:**
 

@@ -74,11 +74,11 @@ sites. Handler binding (§5) is the exception.
 
 ## 3. Destroy chain
 
-For `Outer x … @destroy;` (and `x.destroy()` on a value `Outer`), cleanup
-walks the declared type and every **value** field whose type has a
-registered destroy or pre-destroy hook, transitively. Pointer, array, and
-function-pointer fields are omitted. An `as:` face is a value embed, so it
-is in this walk.
+For `Outer x … @destroy;`, cleanup walks the declared type and every
+**value** field whose type has a registered destroy or pre-destroy hook,
+transitively. Pointer, array, and function-pointer fields are omitted. An
+`as:` face is a value embed, so it is in this walk. `x.destroy()` is
+ordinary UFCS (`Type_destroy` when that function exists), not this list.
 
 The lowering is a flat call list:
 
@@ -98,14 +98,14 @@ __cc_cleanup_1:
 
 Bodyless `@destroy` is well-formed when this list is non-empty: an outer
 hook, or a nested value field that reaches a hook. An empty list is
-ill-formed. Two value fields of the same type are both destroyed.
-`.destroy()` expands to the same list as bodyless `@destroy`. No
-full-chain symbol is synthesized.
+ill-formed. Two value fields of the same type are both destroyed. No
+full-chain symbol is synthesized for `@destroy`.
 
 A cycle in the value-embed graph is ill-formed.
 
-Calling `.destroy()` on a variable also marked `@destroy` runs the chain
-twice; hook idempotence covers it.
+Calling `.destroy()` on a variable also marked `@destroy` runs UFCS and
+then the registered chain; hook idempotence covers a `Type_destroy` that
+is also the registered hook.
 
 ### Hook naming
 

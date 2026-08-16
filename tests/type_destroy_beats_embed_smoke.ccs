@@ -1,0 +1,46 @@
+/* Type_destroy is the full chain. Embed flatten must not steal .destroy()
+ * just because a value field (CCArena) has its own hook. */
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+
+static int g_box = 0;
+
+typedef struct {
+    CCArena a;
+    int live;
+} Box;
+
+static void Box_destroy(Box *b) {
+    if (!b) return;
+    g_box++;
+    if (b->a.base) b->a.destroy();
+    memset(b, 0, sizeof(*b));
+}
+
+@typehooks on Box {
+    .destroy = Box_destroy,
+};
+
+int main(void) {
+    uint8_t buf[256];
+    {
+        Box b = {0};
+        b.a = cc_arena_create_buffer(buf, sizeof(buf), CC_ARENA_DEFAULT_BLOCK_MAX);
+        b.live = 1;
+        b.destroy();
+        assert(g_box == 1);
+        assert(b.live == 0);
+        assert(b.a.base == NULL);
+    }
+    g_box = 0;
+    {
+        Box b = {0} @destroy;
+        b.a = cc_arena_create_buffer(buf, sizeof(buf), CC_ARENA_DEFAULT_BLOCK_MAX);
+        b.live = 1;
+    }
+    assert(g_box == 1);
+    printf("ok\n");
+    return 0;
+}

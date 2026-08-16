@@ -1,0 +1,14 @@
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdio.h>
+#include "quote_cch_macro_destroy_smoke.cch"
+
+int main(void) {
+    {
+        quote_scratch(s, 32);
+        void* p = cc_arena_alloc(&s, 128, 8);
+        assert(p);
+    }
+    printf("ok\n");
+    return 0;
+}

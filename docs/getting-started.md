@@ -168,8 +168,9 @@ sugar on the binding. After `!>`, that means the unwrap succeeded (no binding �
 no destroy). The destroy chain is registered pre-destroy → `@destroy { body }`
 if present → registered destroy → each value field whose type has a hook,
 last-declared to first. Pointer, array, and function-pointer fields are
-omitted. Bodyless `@destroy` and `.destroy()` emit that list without a
-call-site body. An empty chain is a compile error.
+omitted. Bodyless `@destroy` emits that list without a call-site body. An
+empty chain is a compile error. `.destroy()` is UFCS (`Type_destroy` when
+that function exists), not this list.
 
 Stdlib owners ship registered (`CCNursery*` waits then frees, `CCArena` frees
 slabs + overflow, channels, `CCPy`, …). For your own types:
@@ -220,8 +221,9 @@ Tasks do not inherit `@errhandler` — re-bind inside each spawn. More:
 
 `recv.method(args)` calls the function the **receiver’s type** names. For the
 usual path, **declaring that function *is* installing the method** — no trait
-and no `@typehooks` step (unlike bodyless `@destroy`). Method and free
-forms are the same API; Concurrent-C examples prefer the method form:
+and no `@typehooks` step (unlike bodyless `@destroy`). `.destroy()` uses
+this path. Method and free forms are the same API; Concurrent-C examples
+prefer the method form:
 
 ```c
 n->spawn(() => { … });     // not cc_nursery_spawn(n, …)
@@ -299,28 +301,30 @@ char[:] s = a.alloc_slice_bytes(32);               /* arena provenance */
 io.println(@string(`len=${s.len}`, @scratch)) !>;  /* @scratch: throwaway only */
 ```
 
-**Allocation policy** (`cc_arena_heap` / `cc_arena_stack` defaults) — storage
-for the named lifetime, not a different lifetime model:
+**Allocation policy** (`cc_arena_heap` / `cc_arena_stack` defaults) — three
+storage tiers for the named lifetime, not a different lifetime model:
 
-1. Bump-allocate in the **root** slab of size `N` (size `N` for the typical live set).
-2. When the root is full, grow with more slabs (up to four, ~1.5× each).
-3. Past that budget, **heap overflow** kicks in: `malloc` for the request, still
-   owned by the arena — freed on `reset` / `@destroy`, same as slab bytes.
+1. **L1** — bump-allocate in the root slab of size `N` (size `N` for the typical live set).
+2. **L2** — when L1 is full, grow with more slabs (up to four, ~1.5× each).
+3. **Main** — past that budget, `malloc` for the request, still owned by the
+   arena — freed on `reset` / `@destroy`, same as slab bytes.
 
-So a tiny root still works; traffic just spends more time in overflow (costlier
-alloc and drain). Overflow is the escape hatch, not the steady-state path.
+So a tiny L1 still works; traffic just spends more time in Main (costlier
+alloc and drain). Main is the escape hatch, not the steady-state path.
 Prefer a second arena when lifetimes diverge rather than churning
-`cc_arena_release` on a long-lived one.
+`cc_arena_release` on a long-lived one. `a.live()` counts L1 + L2 + Main.
 
-`a.checkpoint()` / `cp.restore()` work after overflow alloc: restore rewinds
-slabs and frees overflow minted in the later epoch. A mid-slab hole disables
-a new `checkpoint()` until last-live rewind or `reset`. Restore of a handle
-whose overflow keep-set was released refuses (does not pretend to succeed).
+`a.try_checkpoint() !>` / `cp.try_restore() !>` work after overflow alloc:
+the handle is a consumed loan (`@destroy` restores). Restore rewinds slabs
+and frees Main minted in the later epoch. A mid-slab hole disables a new
+capture until last-live rewind or `reset`. Restore of a handle whose
+overflow keep-set was released refuses (does not pretend to succeed).
+`detach()` refuses a stack or caller-owned L1.
 
 | Constructor | Role |
 |-------------|------|
-| `cc_arena_heap(N) @destroy` | Names a lifetime; heap root + default grow/overflow policy |
-| `cc_arena_stack(name, N)` | Same lifetime idea; root on the stack — hot frame scratch |
+| `cc_arena_heap(N) @destroy` | Named lifetime; heap L1 + L2 grow + Main overflow |
+| `cc_arena_stack(name, N)` | Same lifetime; L1 on the stack; `@destroy` at scope exit |
 | `@scratch` | Compiler stack scratch for one-shot `@string` / print — do not capture or send |
 
 Rules of thumb: a view must not outlive its arena; do not capture stack /

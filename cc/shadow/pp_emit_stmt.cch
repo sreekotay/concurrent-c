@@ -1726,6 +1726,10 @@ static void shadow_collect_binds_node(AstNode* st) {
                                       ? st->b
                                       : NULL;
         const char* outer_tag = st->a[0] ? st->a : NULL;
+        /* Opaque `typedef struct tag Alias;` — field UFCS on Alias* walks tag. */
+        if (st->kind == AST_TYPEDEF_STRUCT && outer_alias && outer_tag &&
+            strcmp(outer_alias, outer_tag) != 0)
+            shadow_td_alias_register(outer_alias, outer_tag);
         for (i = 0; i < st->nkids; i++) {
             AstNode* f = st->kids[i];
             char target[64];
@@ -5843,16 +5847,22 @@ static int shadow_emit_one_destroy(AstNode* st, CEmit* out, ShadowCtx* ctx,
             char chain[768];
             size_t bo = 0;
             int emitted;
-            char dhook[96];
+            char dhook[160];
             chain[0] = 0;
-            emitted = shadow_embed_destroy_append(chain, &bo, sizeof(chain), ty,
-                                                 name, has_body);
-            if (!emitted) {
-                snprintf(dhook, sizeof(dhook), "%s_destroy", ty);
-                if (shadow_ufn_exists(dhook) || shadow_hdr_fn_exists(dhook) ||
-                    strncmp(ty, "CCVec_", 6) == 0) {
-                    snprintf(chain, sizeof(chain), "%s(&%s); ", dhook, name);
-                    emitted = 1;
+            /* Type_destroy is the full chain — do not also flatten embeds. */
+            if (shadow_type_destroy_fn(ty, dhook, sizeof(dhook))) {
+                snprintf(chain, sizeof(chain), "%s(&%s); ", dhook, name);
+                emitted = 1;
+            } else {
+                emitted = shadow_embed_destroy_append(chain, &bo, sizeof(chain),
+                                                     ty, name, has_body);
+                if (!emitted) {
+                    snprintf(dhook, sizeof(dhook), "%s_destroy", ty);
+                    if (shadow_ufn_exists(dhook) || shadow_hdr_fn_exists(dhook) ||
+                        strncmp(ty, "CCVec_", 6) == 0) {
+                        snprintf(chain, sizeof(chain), "%s(&%s); ", dhook, name);
+                        emitted = 1;
+                    }
                 }
             }
             if (emitted) {

@@ -1,0 +1,30 @@
+/* Quoted local `.cch` with `@typeview` / `@typehooks` — same lowering as
+ * `<ccc/…>` (stripped `.h` + facts from the original header). */
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+#include "quote_cch_typeview_smoke.cch"
+
+int main(void) {
+    QuoteTvWrap w = {0};
+    w.tag = 7;
+    assert(w.open(CC_SLICE_LIT("tmp/quote_cch_typeview_smoke.txt"), "w") == 0);
+
+    CCSlice msg = CC_SLICE_LIT("hello-tv\n");
+    CCRes(size_t, CCIoError) wr = w.write(msg);
+    assert(cc_is_ok(wr));
+    assert(cc_value(wr) == msg.len);
+
+    w.close();
+    remove("tmp/quote_cch_typeview_smoke.txt");
+
+    {
+        QuoteHooksDemo h@(7) @destroy;
+        assert(h.n == 7);
+        assert(h.alive == 1);
+    }
+    assert(g_quote_hooks_destroyed == 1);
+    printf("ok\n");
+    return 0;
+}

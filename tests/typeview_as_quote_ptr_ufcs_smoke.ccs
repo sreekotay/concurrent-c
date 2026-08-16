@@ -1,0 +1,35 @@
+/* Struct in a quoted .cch; as: face in the .ccs — cctext's RtxBuf shape. */
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdio.h>
+#include "typeview_as_quote_ptr_ufcs_smoke.cch"
+
+static int QvDoc_line_count(const QvDoc *d) {
+    return d ? d->n : 0;
+}
+
+static int QvDoc_line_of(const QvDoc *d, int off) {
+    (void)off;
+    return d ? d->n : -1;
+}
+
+@typeview on QvBuf {
+    as: doc;
+};
+
+int main(void) {
+    QvBuf w = {{5}, 1};
+    QvBuf *b = &w;
+    assert(w.doc.line_count() == 5);
+    assert(b->doc.line_count() == 5);
+    assert(b->line_count() == 5);
+    assert(b->line_of(0) == 5);
+    {
+        /* Leftover peel of `? act->meth` keeps a leading space on recv. */
+        QvBuf *act = b;
+        int cur = act ? act->line_of(0) + 1 : 0;
+        assert(cur == 6);
+    }
+    printf("ok\n");
+    return 0;
+}

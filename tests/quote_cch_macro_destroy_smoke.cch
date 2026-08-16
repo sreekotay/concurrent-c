@@ -1,0 +1,13 @@
+#ifndef TESTS_QUOTE_CCH_MACRO_DESTROY_SMOKE_CCH
+#define TESTS_QUOTE_CCH_MACRO_DESTROY_SMOKE_CCH
+
+#include <ccc/std/prelude.cch>
+
+/* Quoted header `#define` with `@destroy`. Interface-grade (attr is in the
+ * define body); the compiler harvests the original `.cch` and expands
+ * use sites. Host lower/seed strip the attr. */
+#define quote_scratch(name, n) \
+    uint8_t name##_buf[n]; \
+    CCArena name = cc_arena_create_buffer(name##_buf, sizeof(name##_buf), CC_ARENA_DEFAULT_BLOCK_MAX) @destroy
+
+#endif

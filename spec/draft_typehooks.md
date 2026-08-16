@@ -32,12 +32,13 @@ registration. The underlying marker API is `cc_type_register` (see
 
 ## 2. Destroy lowering
 
-Bodyless `@destroy` and `recv.destroy()` on a value receiver run the
-subject's registered pre-destroy / destroy hooks, then each **value** field
-whose type has such a hook, last-declared to first, transitively. Pointer,
-array, and function-pointer fields are omitted. The list is ill-formed when
-empty. See `spec/concurrent-c-spec-complete.md` (declaration destructor)
-and `draft_as.md` §3.
+Bodyless `@destroy` on a value binding runs the subject's registered
+pre-destroy / destroy hooks, then each **value** field whose type has such
+a hook, last-declared to first, transitively. Pointer, array, and
+function-pointer fields are omitted. The list is ill-formed when empty.
+`recv.destroy()` is UFCS (`Type_destroy` when that function exists). See
+`spec/concurrent-c-spec-complete.md` (declaration destructor) and
+`draft_as.md` §3.
 
 ## 3. Relation to `@typeview`
 

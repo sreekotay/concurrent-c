@@ -1,0 +1,28 @@
+#ifndef TESTS_QUOTE_CCH_TYPE_DESTROY_SMOKE_CCH
+#define TESTS_QUOTE_CCH_TYPE_DESTROY_SMOKE_CCH
+
+#include <ccc/std/prelude.cch>
+#include <string.h>
+
+/* Quoted header: Type_destroy + typehooks, CCArena embed. Same shape as
+ * RtxDoc / RtxPieceTree — .destroy() must be Type_destroy, not embed flatten. */
+
+static int g_quote_box = 0;
+
+typedef struct {
+    CCArena a;
+    int live;
+} QuoteBox;
+
+static void QuoteBox_destroy(QuoteBox *b) {
+    if (!b) return;
+    g_quote_box++;
+    if (b->a.base) b->a.destroy();
+    memset(b, 0, sizeof(*b));
+}
+
+@typehooks on QuoteBox {
+    .destroy = QuoteBox_destroy,
+};
+
+#endif

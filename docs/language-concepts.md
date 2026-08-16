@@ -16,9 +16,10 @@ succeeded only if the unwrap did (no binding → no destroy).
 The destroy chain is: registered pre-destroy → `@destroy { body }` if present
 → registered destroy → each **value** field whose type has a hook,
 last-declared to first, transitively. Pointer, array, and function-pointer
-fields are omitted. Bodyless `@destroy` and `x.destroy()` emit that list
-(without a call-site body). An empty chain is a compile error; a block body
-alone is enough to make it non-empty.
+fields are omitted. Bodyless `@destroy` emits that list (without a
+call-site body). An empty chain is a compile error; a block body alone is
+enough to make it non-empty. `x.destroy()` is UFCS (`Type_destroy` when
+that function exists).
 
 | Bind | Meaning |
 |------|---------|
@@ -135,8 +136,8 @@ denied (`@typeview` on the slice family). Tutorial:
 
 | Arena | Lifetime + storage policy | Typical use |
 |-------|---------------------------|-------------|
-| `cc_arena_heap(n) @destroy` | Named lifetime; heap root `n`, up to 4 slabs (~1.5×), then **heap overflow** (`malloc`, still arena-owned) | request / window |
-| `cc_arena_stack(name, n)` | Same lifetime idea; root on the stack | hot-path / frame scratch |
+| `cc_arena_heap(n) @destroy` | Named lifetime; L1 heap `n`, L2 up to 4 slabs (~1.5×), then **Main** overflow | request / window |
+| `cc_arena_stack(name, n)` | Same lifetime; L1 on the stack; `@destroy` at scope exit | hot-path / frame scratch |
 | `@scratch` | Throwaway compiler stack scratch (not a long-lived named epoch) | `@string` / one-shot print |
 
 ```c
@@ -146,7 +147,7 @@ CCStdio io = cc_stdio_create(&a);
 char* p = a.allocT(64);
 char[:] s = a.alloc_slice_bytes(32);   /* arena provenance */
 
-/* Stack — buffer lives in the frame; good for short work. */
+/* Stack — buffer lives in the frame; @destroy frees L2/Main at scope exit. */
 cc_arena_stack(tmp, 1024);
 char* q = tmp.allocT(32);
 
@@ -157,20 +158,24 @@ char[:0] hi = "hi";
 ```
 
 **Auto overflow (policy detail):** when the current slab cannot fit an alloc,
-heap/stack arenas grow within `block_max` (default 4), then spill to overflow
-`malloc`. Overflow bytes still belong to that same named lifetime — `reset` /
-`@destroy` frees them too. A tiny root still allocates; it just spends more
-time in overflow. Prefer another arena when lifetimes diverge; treat
-`cc_arena_release` / overflow as escape hatches, not the steady path. Fixed
+heap/stack arenas grow L2 within `block_max` (default 4), then spill to Main
+`malloc`. Main bytes still belong to that same named lifetime — `reset` /
+`@destroy` frees them too. A tiny L1 still allocates; it just spends more
+time in Main. Prefer another arena when lifetimes diverge; treat
+`cc_arena_release` / Main as escape hatches, not the steady path. Fixed
 arenas with overflow off return `NULL` on exhaustion (never silent success).
+`a.live()` counts every live object on L1 + L2 + Main.
 
-**Checkpoint / restore:** `a.checkpoint()` / `cp.restore()` rewind the slab
-prefix and drain overflow minted after the checkpoint (same contract on
-heap, stack, and `cc_arena_malloc`). Overflow alloc does not disable rewind.
-A mid-slab hole disables a new `checkpoint()` until last-live root rewind or
-`reset`. Restore returns false (no mutate) if that handle's overflow keep-set
-was released, or if the checkpoint would advance the tip. Dropping a
-checkpoint handle does not block a later capture.
+**Checkpoint / restore:** a checkpoint is a consumed loan —
+`a.try_checkpoint() !>` / `cp.try_restore() !>` (or `@destroy` on the handle).
+Restore rewinds the slab prefix and drains Main minted after the checkpoint
+(same contract on heap, stack, and `cc_arena_malloc`). Overflow alloc does
+not disable rewind. A mid-slab hole disables a new capture until last-live
+root rewind or `reset`. Restore refuses (no mutate) if that handle's overflow
+keep-set was released, or if the checkpoint would advance the tip. Dropping
+a handle without consume leaves an outstanding loan (diagnostic on
+free/reset/detach) and does not block a later capture. `detach()` refuses a
+stack or caller-owned L1.
 
 A view must not outlive its storage — no stack/arena borrow into an outliving
 task or channel send. Capturing a non-unique arena slice into a nursery **pins**

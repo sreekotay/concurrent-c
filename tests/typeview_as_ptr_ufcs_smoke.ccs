@@ -1,0 +1,42 @@
+/* @typeview as: UFCS retry on a pointer receiver — not only CCFile IO. */
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdio.h>
+
+typedef struct {
+    int n;
+} TvDoc;
+
+static int TvDoc_line_count(const TvDoc *d) {
+    return d ? d->n : 0;
+}
+
+static size_t TvDoc_len(const TvDoc *d) {
+    return d ? (size_t)d->n : 0;
+}
+
+static int TvDoc_line_of(const TvDoc *d, int off) {
+    (void)off;
+    return d ? d->n : -1;
+}
+
+typedef struct {
+    TvDoc doc;
+    int tag;
+} TvBuf;
+
+@typeview on TvBuf {
+    as: doc;
+};
+
+int main(void) {
+    TvBuf w = {{4}, 9};
+    TvBuf *b = &w;
+    assert(b->line_count() == 4);
+    assert(b->len() == 4);
+    assert(b->line_of(0) == 4);
+    assert(w.line_count() == 4);
+    assert(w.doc.line_count() == 4);
+    printf("ok\n");
+    return 0;
+}

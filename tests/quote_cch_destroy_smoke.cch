@@ -1,0 +1,21 @@
+#ifndef TESTS_QUOTE_CCH_DESTROY_SMOKE_CCH
+#define TESTS_QUOTE_CCH_DESTROY_SMOKE_CCH
+
+#include <ccc/std/prelude.cch>
+
+/* Statement `@destroy` on a create_buffer helper. Impl-grade: this header
+ * splices into the TU (same quoted-`.cch` border as `@typeview` /
+ * `@typehooks`). `cc_arena_stack` in a `.ccs` attaches `@destroy` itself. */
+
+enum { QUOTE_CCH_SCRATCH = 256 };
+
+static int quote_cch_scratch_sum(int a, int b) {
+    uint8_t buf[QUOTE_CCH_SCRATCH];
+    CCArena scratch = cc_arena_create_buffer(buf, sizeof(buf), CC_ARENA_GROWABLE) @destroy;
+    int* p = cc_arena_alloc_T(int, &scratch);
+    if (!p) return -1;
+    *p = a + b;
+    return *p;
+}
+
+#endif

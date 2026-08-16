@@ -878,6 +878,11 @@ static int cc__build_compile_and_load(const char* input_path,
     }
     if (!isolated_body) {
         char* lowered_local = cc_rewrite_local_cch_includes_to_lowered_headers(blanked_src, strlen(blanked_src), input_path);
+        if (cc_local_header_lower_failed()) {
+            free(lowered_local);
+            snprintf(err_buf, sizeof(err_buf), "failed to lower local .cch header");
+            goto done;
+        }
         if (lowered_local) { free(blanked_src); blanked_src = lowered_local; }
         {
             char* lowered_system = cc_rewrite_system_cch_includes_to_lowered_headers(blanked_src, strlen(blanked_src));

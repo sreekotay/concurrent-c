@@ -78,10 +78,10 @@ Rules that matter in practice:
   `Port p = port_open(3) @destroy;` run the destroy chain at scope
   exit the same way. After `!>`, construction succeeded only if the
   unwrap did.
-- `@destroy;` and `x.destroy()` run the type’s destroy chain: registered
-  pre-destroy → registered destroy → value fields with hooks,
-  last-declared to first. `@destroy { … }` inserts the block between
-  pre-destroy and destroy. See §3.
+- `@destroy;` runs the type’s destroy chain: registered pre-destroy →
+  registered destroy → value fields with hooks, last-declared to first.
+  `@destroy { … }` inserts the block between pre-destroy and destroy.
+  `x.destroy()` is UFCS (`Type_destroy` when that function exists). See §3.
 
 Pointer and family subjects use the same body (`MyRes*`, `CCChanTx_*`).
 A trailing-`*` subject is one registration for every match. `.ufcs`

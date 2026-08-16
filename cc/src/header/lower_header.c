@@ -554,6 +554,19 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
         }
     }
 
+    /* Pass 0b5: erase `@destroy` / `@detach` in `#define` bodies (and any
+     * other leftover) so the host `.h` stays plain C. Concurrent-C rewrites
+     * `cc_arena_stack` use sites to a real `@destroy` decl. */
+    {
+        char* buf_life = cc_strip_at_destroy_detach(cur, cur_len);
+        if (buf_life) {
+            if (buf_as && cur == buf_as) free(buf_as);
+            buf_as = buf_life;
+            cur = buf_life;
+            cur_len = strlen(buf_life);
+        }
+    }
+
     /* Pass 0c: Share header-safe type-syntax lowering with preprocess.c so
        constructs like `char[:]` and generic container types lower the same
        way they do in the main compiler pipeline. */

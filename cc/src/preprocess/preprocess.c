@@ -12564,6 +12564,7 @@ typedef struct {
 static CCLoweredLocalHeader* g_lowered_local_headers = NULL;
 static size_t g_lowered_local_header_count = 0;
 static size_t g_lowered_local_header_cap = 0;
+static int g_local_cch_lower_failed = 0;
 
 static char** g_included_cch_sources = NULL;
 static size_t g_included_cch_source_count = 0;
@@ -14251,10 +14252,44 @@ static int cc__match_local_include_line(const char* line,
 #define CC_IMPL_CCH_BEGIN_MARK "/*cc:impl_cch_begin:"
 #define CC_IMPL_CCH_END_MARK "/*cc:impl_cch_end:"
 
+/* Skip an interface-grade `@typeview` / `@typehooks` form (stdlib lowering
+ * strips these from the `.h` and recovers the facts from the original `.cch`).
+ * Returns the index after the form, or 0 if this `@` is not one of those. */
+static size_t cc__skip_type_policy_at(const char* src, size_t n, size_t i) {
+    int is_tv, is_th;
+    size_t p, body_r = 0;
+    if (!src || i >= n || src[i] != '@') return 0;
+    is_tv = cc_match_ident_kw(src, n, i + 1, "typeview");
+    is_th = cc_match_ident_kw(src, n, i + 1, "typehooks");
+    if (!is_tv && !is_th) return 0;
+    p = cc_skip_ws_and_comments(src, n, i + 1 + (is_tv ? 8 : 9));
+    if (p < n && src[p] == '(') {
+        size_t rp = 0;
+        if (!cc_find_matching_paren(src, n, p, &rp)) return i + 1;
+        p = cc_skip_ws_and_comments(src, n, rp + 1);
+    }
+    if (p < n && cc_is_ident_start(src[p]) && !cc_match_ident_kw(src, n, p, "on")) {
+        while (p < n && cc_is_ident_char(src[p])) p++;
+        p = cc_skip_ws_and_comments(src, n, p);
+    }
+    if (cc_match_ident_kw(src, n, p, "on")) {
+        p = cc_skip_ws_and_comments(src, n, p + 2);
+        while (p < n && (cc_is_ident_char(src[p]) || src[p] == '*')) p++;
+        p = cc_skip_ws_and_comments(src, n, p);
+    }
+    if (p < n && src[p] == '{' && cc_find_matching_brace(src, n, p, &body_r)) {
+        p = cc_skip_ws_and_comments(src, n, body_r + 1);
+        if (p < n && src[p] == ';') p++;
+        return p;
+    }
+    return p > i ? p : i + 1;
+}
+
 /* True when header text contains constructs only the full TU pipeline can
- * lower.  Comment/string aware.  `@comptime` blocks/functions and
- * CC_GENERIC_FACTORY bodies are skipped (the interface pipeline strips and
- * harvests those correctly); `T !>(E)` result-type syntax is allowed. */
+ * lower.  Comment/string aware.  `@comptime` blocks/functions,
+ * `@typeview` / `@typehooks`, and CC_GENERIC_FACTORY bodies are skipped
+ * (the interface pipeline strips and harvests those the way stdlib
+ * headers do); `T !>(E)` result-type syntax is allowed. */
 static int cc__cch_text_is_impl_grade(const char* src, size_t n) {
     static const char fac_kw[] = "CC_GENERIC_FACTORY";
     static const char fac_kw_ext[] = "CC_GENERIC_FACTORY_EXTEND";
@@ -14297,6 +14332,13 @@ static int cc__cch_text_is_impl_grade(const char* src, size_t n) {
             }
         }
         if (c == '@' && i + 1 < n && cc_is_ident_start(src[i + 1])) {
+            {
+                size_t after = cc__skip_type_policy_at(src, n, i);
+                if (after) {
+                    i = after;
+                    continue;
+                }
+            }
             if (cc_match_ident_kw(src, n, i + 1, "comptime")) {
                 size_t p = cc_skip_ws_and_comments(src, n, i + 1 + (sizeof("comptime") - 1));
                 size_t body_r = 0;
@@ -14520,15 +14562,14 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
             return g_lowered_local_headers[i].lowered_path;
         }
     }
-    /* Every give-up below leaves the include pointing at the `.cch`, so CPP
-     * inlines raw CC syntax and the failure surfaces as a parse error in
-     * unrelated code.  Name the header and the step instead. */
+    /* A give-up used to leave the include pointing at the `.cch`, so the
+     * later parse reported something unrelated.  Fail at this include. */
 #define CC__LOWER_GIVE_UP(step)                                                \
     do {                                                                       \
         fprintf(stderr,                                                        \
-                "cc: warning: cannot lower local header %s (%s: %s); it will " \
-                "be included as raw CC source\n",                              \
+                "cc: error: cannot lower local header %s (%s: %s)\n",          \
                 abs_src, (step), strerror(errno));                             \
+        g_local_cch_lower_failed = 1;                                          \
         return NULL;                                                           \
     } while (0)
     if (cc__build_stable_lowered_header_path(abs_src, lowered_path, sizeof(lowered_path)) != 0)
@@ -14661,8 +14702,18 @@ char* cc_rewrite_local_cch_includes_to_lowered_headers(const char* src,
     /* One top-level rewrite = one logical translation unit: repeat includes
      * of an already-spliced implementation header are inert within it, but a
      * later rewrite (reparse, comptime dylib TU) must splice afresh. */
+    g_local_cch_lower_failed = 0;
     cc__reset_spliced_impl_cch();
     return cc__rewrite_local_cch_includes_impl(src, input_len, input_path);
+}
+
+int cc_local_header_lower_failed(void) { return g_local_cch_lower_failed; }
+
+size_t cc_lowered_local_header_count(void) { return g_lowered_local_header_count; }
+
+const char* cc_lowered_local_header_source_path(size_t i) {
+    if (i >= g_lowered_local_header_count || !g_lowered_local_headers) return NULL;
+    return g_lowered_local_headers[i].source_path;
 }
 
 #define CC_LOCAL_CCH_BEGIN_MARK "/*cc:local_cch_begin:"
@@ -20059,6 +20110,9 @@ static int cc__apply_phase1_canonical_passes(CCPassChain* chain,
      * so existing hook collectors see the legacy form. */
     CC__CANON_STEP("cc_rewrite_typehooks_to_register");
     if (cc_pass_chain_apply(chain, cc_rewrite_typehooks_to_register(chain->src, chain->len)) < 0)
+        return -1;
+    CC__CANON_STEP("cc_rewrite_arena_stack_destroy");
+    if (cc_pass_chain_apply(chain, cc_rewrite_arena_stack_destroy(chain->src, chain->len)) < 0)
         return -1;
     /* @grammar declarations lower FIRST: the generated types (schemas,
      * Readers, tape Nodes) must be REAL in the canonical stream — the type

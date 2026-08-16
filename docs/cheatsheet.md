@@ -163,7 +163,7 @@ sugar on the binding. After `!>`, that means the unwrap succeeded.
 | `@defer(err) stmt;` | Only on error exit (`return cc_err(…)`) |
 | `T x = … @destroy { … };` | Explicit defer body on the binding, then the type’s destroy chain |
 | `T x = … @destroy;` | Bodyless → the type’s destroy chain |
-| `x.destroy()` | Same call list as bodyless `@destroy` on `x`’s type |
+| `x.destroy()` | UFCS: `Type_destroy` when that function exists |
 
 The chain: registered pre-destroy → `@destroy { body }` → registered destroy →
 each **value** field whose type has a hook, last-declared to first
@@ -200,8 +200,9 @@ Recipe: [recipe_defer_cleanup.ccs](../examples/recipe_defer_cleanup.ccs).
 
 One rule: `recv.method(args)` calls the function the **receiver’s type** names.
 **Usual path — no registration:** declaring the function installs the method
-(contrast bodyless `@destroy`, which needs a non-empty destroy chain). Prefer
-UFCS over the free-function spelling of the same API.
+(contrast bodyless `@destroy`, which needs a registered destroy chain). Prefer
+UFCS over the free-function spelling of the same API. `.destroy()` is that
+UFCS path (`Type_destroy`).
 
 ```c
 n->spawn(() => { … });      // cc_nursery_spawn(n, …)
@@ -421,34 +422,35 @@ past the frame; arena slices pin the arena until join.
 
 ## Arenas name a lifetime
 
-**An arena is a lifetime annotation, not an allocator strategy.** Heap vs
-stack root, slabs, and overflow are how storage for that lifetime is
-obtained — always named explicitly (`CCArena a = …`); there is no ambient
-or hidden arena.
+**An arena is a named lifetime, not an allocator strategy.** Storage is
+three tiers (cache-shaped): **L1** root slab, **L2** grown extents, **Main**
+overflow. Constructors pick how those tiers are obtained — always named
+explicitly (`CCArena a = …`); there is no ambient or hidden arena.
 
-Size the root for the typical live set of that lifetime. Default heap/stack
-policy: bump in root → up to 4 slabs (~1.5×) → **heap overflow** (`malloc`,
-still arena-owned; freed on reset / `@destroy`).
+Size L1 for the typical live set. Default heap/stack: bump in L1 → up to 4
+slabs (L2, ~1.5×) → **Main** (`malloc`, still arena-owned; freed on reset /
+`@destroy`). `a.live()` counts all three tiers.
 
 ```c
 CCArena a = cc_arena_heap(kilobytes(4)) @destroy;  // names the lifetime
 char* p = a.allocT(64);
 char[:] s = a.alloc_slice_bytes(32);   // arena provenance
 
-cc_arena_stack(tmp, 1024);             // same policy; stack root
-a.reset();                             // drain epoch; reuse root
+cc_arena_stack(tmp, 1024);             // same policy; L1 on the stack; @destroy at scope exit
+a.reset();                             // drain epoch; reuse L1
 
-CCArenaCheckpoint cp = a.checkpoint(); // works after overflow alloc
-/* …scratch, including overflow… */
-cp.restore();                          // rewind slabs; drain newer overflow
+CCArenaCheckpoint cp = a.try_checkpoint() !> @destroy; // consumed loan
+/* …scratch, including Main… */
+cp.try_restore() !>;                   // or leave the scope: @destroy restores
 
 /* @scratch — throwaway @string / print only; do not capture or send */
 io.println(@string(`len=${s.len}`, @scratch)) !>;
 ```
 
 Slices (`T[:]`) carry provenance. Views must not outlive their arena.
-A mid-slab hole disables a new `checkpoint()` until last-live rewind or
-`reset`. Restore of a handle whose overflow keep-set was released refuses.
+A mid-slab hole disables a new capture until last-live rewind or `reset`.
+Restore of a handle whose overflow keep-set was released refuses.
+`detach()` moves heap-owned mallocs only — a stack or caller L1 is refused.
 Details: [getting-started § Arenas](getting-started.md#arenas-name-a-lifetime).
 
 ---

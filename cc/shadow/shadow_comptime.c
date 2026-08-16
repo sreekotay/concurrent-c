@@ -81,6 +81,52 @@ static void shadow_ct_append_harvest(char** buf, size_t* n, char* harvested) {
     *n = *n + sep + hlen;
 }
 
+/* Original `.cch` text for lowered quoted headers — harvest `#define`
+ * bodies that carry `@destroy` (the lowered `.h` has those attrs stripped). */
+static char* shadow_ct_life_macro_extra(size_t* out_n) {
+    size_t i, n = 0, cap = 0;
+    char* buf = NULL;
+    if (out_n) *out_n = 0;
+    for (i = 0; i < cc_lowered_local_header_count(); i++) {
+        const char* path = cc_lowered_local_header_source_path(i);
+        size_t fn = 0;
+        char* f;
+        if (!path || !path[0]) continue;
+        f = shadow_ct_read_file(path, &fn);
+        if (!f) continue;
+        if (n + fn + 1 >= cap) {
+            size_t nc = cap ? cap * 2 + fn + 64 : fn + 256;
+            char* nb = (char*)realloc(buf, nc + 1);
+            if (!nb) { free(f); free(buf); return NULL; }
+            buf = nb;
+            cap = nc;
+        }
+        memcpy(buf + n, f, fn);
+        n += fn;
+        buf[n++] = '\n';
+        free(f);
+    }
+    if (!buf) return NULL;
+    buf[n] = 0;
+    if (out_n) *out_n = n;
+    return buf;
+}
+
+static int shadow_ct_apply_life_macros(char** buf, size_t* n) {
+    char* extra;
+    size_t extra_n = 0;
+    char* r;
+    if (!buf || !*buf || !n) return -1;
+    extra = shadow_ct_life_macro_extra(&extra_n);
+    r = cc_rewrite_life_macros(*buf, *n, extra, extra_n);
+    free(extra);
+    if (!r) return 0;
+    free(*buf);
+    *buf = r;
+    *n = strlen(r);
+    return 0;
+}
+
 /* Space-blank @comptime {…} / @comptime fn/const decls (layout-preserving).
  * File-scope `@comptime {…}` also leaves `enum{__ccs<body_l>=0};` on one
  * all-space line inside the blanked span (never crossing newlines — eating a
@@ -239,9 +285,31 @@ static char* shadow_ct_blank_comptime(const char* src, size_t n) {
 /* `@grammar(cli)` is a comptime engine (`cli` in cli.cch). The seam rewrites
  * it to `@comptime { cli(...) }`; do not mask the keyword before that pass. */
 
-/* Whitelist stage1 buffer: original spelling (keeps CC_GENERIC_FACTORY and
- * relative .cch includes) with @comptime if/value resolved and @comptime
- * blocks blanked. Exec/fragments still use the full prepare path below. */
+/* Apply quoted `.cch` → lowered `.h` (or impl-grade splice).  Interface
+ * headers — including `@typeview` / `@typehooks` — take the stdlib path.
+ * Returns -1 when a local header could not be lowered. */
+static int shadow_ct_apply_local_cch_rewrite(char** buf, size_t* n,
+                                            const char* input_path) {
+    char* lowered;
+    if (!buf || !*buf || !n) return -1;
+    lowered = cc_rewrite_local_cch_includes_to_lowered_headers(*buf, *n,
+                                                              input_path);
+    if (cc_local_header_lower_failed()) {
+        free(lowered);
+        return -1;
+    }
+    if (lowered) {
+        free(*buf);
+        *buf = lowered;
+        *n = strlen(lowered);
+    }
+    return 0;
+}
+
+/* Whitelist stage1 buffer: interface quoted `.cch` includes are rewritten
+ * to lowered `.h` (stdlib model); impl-grade headers still splice.
+ * `@comptime if`/value resolved and `@comptime` blocks blanked.
+ * Exec/fragments still use the full prepare path below. */
 static char* shadow_ct_stage1_src(const char* input_path, size_t* out_n) {
     char* buf;
     size_t n = 0;
@@ -249,6 +317,11 @@ static char* shadow_ct_stage1_src(const char* input_path, size_t* out_n) {
     if (out_n) *out_n = 0;
     buf = shadow_ct_read_file(input_path, &n);
     if (!buf) return NULL;
+
+    if (shadow_ct_apply_local_cch_rewrite(&buf, &n, input_path) != 0) {
+        free(buf);
+        return NULL;
+    }
 
     /* `@comptime <directive>(...);` module-export sugar expands to the
      * entry stanza BEFORE the blank pass below — a bare `@comptime` decl
@@ -307,6 +380,12 @@ static char* shadow_ct_stage1_src(const char* input_path, size_t* out_n) {
         n = strlen(buf);
     }
 
+    /* `#define` / header `@destroy` — expand before comptime blank. */
+    if (shadow_ct_apply_life_macros(&buf, &n) != 0) {
+        free(buf);
+        return NULL;
+    }
+
     {
         char* blanked = shadow_ct_blank_comptime(buf, n);
         free(buf);
@@ -324,14 +403,9 @@ static char* shadow_ct_load_with_harvest(const char* input_path, size_t* out_n) 
     buf = shadow_ct_read_file(input_path, &n);
     if (!buf) return NULL;
     cc_reset_included_cch_sources();
-    {
-        char* lowered =
-            cc_rewrite_local_cch_includes_to_lowered_headers(buf, n, input_path);
-        if (lowered) {
-            free(buf);
-            buf = lowered;
-            n = strlen(buf);
-        }
+    if (shadow_ct_apply_local_cch_rewrite(&buf, &n, input_path) != 0) {
+        free(buf);
+        return NULL;
     }
     {
         char* lowered = cc_rewrite_system_cch_includes_to_lowered_headers(buf, n);
@@ -350,6 +424,10 @@ static char* shadow_ct_load_with_harvest(const char* input_path, size_t* out_n) 
             free(buf);
             buf = th;
             n = strlen(buf);
+        }
+        if (shadow_ct_apply_life_macros(&buf, &n) != 0) {
+            free(buf);
+            return NULL;
         }
     }
     if (out_n) *out_n = n;

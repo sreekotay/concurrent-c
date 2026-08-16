@@ -1,0 +1,40 @@
+/* Channel handle fields on `typedef struct tag Alias` — UFCS through Alias*. */
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdio.h>
+
+typedef struct wrap_tag Wrap;
+
+struct wrap_tag {
+    int[~4 >] tx;
+    int[~4 <] rx;
+};
+
+int main(void) {
+    int[~4 >] tx;
+    int[~4 <] rx;
+    Wrap w;
+    Wrap *q = &w;
+    CCChan *ch = cc_channel_pair(&tx, &rx);
+    assert(ch != NULL);
+    q->tx = tx;
+    q->rx = rx;
+
+    {
+        bool !>(CCIoError) sent = q->tx.try_send(7);
+        assert(!sent.is_err());
+        assert(sent.value());
+    }
+    {
+        int got = 0;
+        bool !>(CCIoError) got_ok = q->rx.try_recv(&got);
+        assert(!got_ok.is_err());
+        assert(got_ok.value());
+        assert(got == 7);
+    }
+
+    q->tx.close();
+    q->tx.free();
+    printf("ok\n");
+    return 0;
+}

@@ -2517,4 +2517,627 @@ static inline void cc_parse_decl_name_and_type(const char* stmt,
                                    out_type, out_type_sz, NULL);
 }
 
+/* ---- `#define` bodies with `@destroy` / `@detach` ----
+ *
+ * Concurrent-C source (`.cch` macros and headers) may write `@destroy`.
+ * Stage-2 does not expand function-like macros, and the host `.h` / seed
+ * strip those attrs. Expand those macros here so parse sees a real
+ * `@destroy` decl. Stdlib `cc_arena_stack` is registered as a builtin
+ * (angle includes never splice the `#define` into the TU). Returns
+ * malloc'd text, or NULL if unchanged / OOM. */
+
+static inline int cc__text_put(char** out, size_t* w, size_t* cap,
+                               const char* s, size_t n) {
+    if (!out || !w || !cap || !s) return 0;
+    if (*w + n > *cap) {
+        size_t nc = *cap * 2 + n + 64;
+        char* nb = (char*)realloc(*out, nc + 1);
+        if (!nb) return 0;
+        *out = nb;
+        *cap = nc;
+    }
+    memcpy(*out + *w, s, n);
+    *w += n;
+    return 1;
+}
+
+static inline size_t cc__top_level_comma(const char* src, size_t lo, size_t hi) {
+    int par = 0, brk = 0, br = 0, ins = 0, lc = 0, bc = 0;
+    char q = 0;
+    size_t p;
+    for (p = lo; p < hi; p++) {
+        char ch = src[p];
+        char ch2 = (p + 1 < hi) ? src[p + 1] : 0;
+        if (lc) { if (ch == '\n') lc = 0; continue; }
+        if (bc) { if (ch == '*' && ch2 == '/') { bc = 0; p++; } continue; }
+        if (ins) {
+            if (ch == '\\' && p + 1 < hi) { p++; continue; }
+            if (ch == q) ins = 0;
+            continue;
+        }
+        if (ch == '/' && ch2 == '/') { lc = 1; p++; continue; }
+        if (ch == '/' && ch2 == '*') { bc = 1; p++; continue; }
+        if (ch == '"' || ch == '\'') { ins = 1; q = ch; continue; }
+        if (ch == '(') par++;
+        else if (ch == ')') { if (par) par--; }
+        else if (ch == '[') brk++;
+        else if (ch == ']') { if (brk) brk--; }
+        else if (ch == '{') br++;
+        else if (ch == '}') { if (br) br--; }
+        else if (ch == ',' && par == 0 && brk == 0 && br == 0) return p;
+    }
+    return hi;
+}
+
+static inline void cc__trim_code_span(const char* src, size_t lo, size_t hi,
+                                      size_t* out_s, size_t* out_e) {
+    size_t s, e;
+    s = cc_skip_ws_and_comments(src, hi, lo);
+    e = cc_rskip_ws_and_comments(src, hi);
+    if (e < s) e = s;
+    *out_s = s;
+    *out_e = e;
+}
+
+static inline int cc__at_directive_bol(const char* src, size_t n, size_t i);
+static inline size_t cc__directive_end(const char* src, size_t n, size_t i);
+
+#define CC__LIFE_MACRO_MAX 32
+#define CC__LIFE_PARAM_MAX 8
+#define CC__LIFE_NAME_MAX 64
+
+typedef struct {
+    char name[CC__LIFE_NAME_MAX];
+    int nparams;
+    char params[CC__LIFE_PARAM_MAX][CC__LIFE_NAME_MAX];
+    const char* body;
+    size_t body_n;
+    int owned;
+} CCLifeMacro;
+
+static inline int cc__life_has_attr(const char* s, size_t n) {
+    size_t i = 0;
+    while (i < n) {
+        if (s[i] == '"' || s[i] == '\'') {
+            char q = s[i++];
+            while (i < n) {
+                if (s[i] == '\\' && i + 1 < n) { i += 2; continue; }
+                if (s[i] == q) { i++; break; }
+                i++;
+            }
+            continue;
+        }
+        if (i + 1 < n && s[i] == '/' && s[i + 1] == '/') {
+            while (i < n && s[i] != '\n') i++;
+            continue;
+        }
+        if (i + 1 < n && s[i] == '/' && s[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < n && !(s[i] == '*' && s[i + 1] == '/')) i++;
+            if (i + 1 < n) i += 2;
+            continue;
+        }
+        if (s[i] == '@' &&
+            (cc_match_ident_kw(s, n, i + 1, "destroy") ||
+             cc_match_ident_kw(s, n, i + 1, "detach")))
+            return 1;
+        i++;
+    }
+    return 0;
+}
+
+static inline int cc__life_calls_name(const char* s, size_t n,
+                                      const char* name) {
+    size_t i = 0, nlen;
+    if (!s || !name || !name[0]) return 0;
+    nlen = strlen(name);
+    while (i < n) {
+        if (s[i] == '"' || s[i] == '\'') {
+            char q = s[i++];
+            while (i < n) {
+                if (s[i] == '\\' && i + 1 < n) { i += 2; continue; }
+                if (s[i] == q) { i++; break; }
+                i++;
+            }
+            continue;
+        }
+        if (i + 1 < n && s[i] == '/' && s[i + 1] == '/') {
+            while (i < n && s[i] != '\n') i++;
+            continue;
+        }
+        if (i + 1 < n && s[i] == '/' && s[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < n && !(s[i] == '*' && s[i + 1] == '/')) i++;
+            if (i + 1 < n) i += 2;
+            continue;
+        }
+        if (cc_match_ident_kw(s, n, i, name)) {
+            size_t p = cc_skip_ws_and_comments(s, n, i + nlen);
+            if (p < n && s[p] == '(') return 1;
+        }
+        i++;
+    }
+    return 0;
+}
+
+static inline CCLifeMacro* cc__life_find(CCLifeMacro* ms, int n, const char* name,
+                                         size_t nlen) {
+    int i;
+    if (!ms || !name || nlen == 0 || nlen >= CC__LIFE_NAME_MAX) return NULL;
+    for (i = 0; i < n; i++) {
+        if (strlen(ms[i].name) == nlen && memcmp(ms[i].name, name, nlen) == 0)
+            return &ms[i];
+    }
+    return NULL;
+}
+
+static inline int cc__life_add(CCLifeMacro* ms, int* n, const char* name,
+                               size_t nlen, const char* const* params, int np,
+                               const char* body, size_t bn, int owned) {
+    CCLifeMacro* m;
+    int i;
+    if (!ms || !n || !name || nlen == 0 || nlen >= CC__LIFE_NAME_MAX) return 0;
+    if (np < 0 || np > CC__LIFE_PARAM_MAX) return 0;
+    m = cc__life_find(ms, *n, name, nlen);
+    if (!m) {
+        if (*n >= CC__LIFE_MACRO_MAX) return 0;
+        m = &ms[(*n)++];
+        memset(m, 0, sizeof(*m));
+    } else if (m->owned && m->body) {
+        free((void*)m->body);
+        m->body = NULL;
+        m->owned = 0;
+    }
+    memcpy(m->name, name, nlen);
+    m->name[nlen] = 0;
+    m->nparams = np;
+    for (i = 0; i < np; i++) {
+        size_t pl = strlen(params[i]);
+        if (pl >= CC__LIFE_NAME_MAX) return 0;
+        memcpy(m->params[i], params[i], pl + 1);
+    }
+    if (owned) {
+        char* copy = (char*)malloc(bn + 1);
+        if (!copy) return 0;
+        memcpy(copy, body, bn);
+        copy[bn] = 0;
+        m->body = copy;
+        m->owned = 1;
+    } else {
+        m->body = body;
+        m->owned = 0;
+    }
+    m->body_n = bn;
+    return 1;
+}
+
+static inline int cc__life_body_qualifies(const CCLifeMacro* ms, int n,
+                                          const char* body, size_t bn) {
+    int i;
+    if (cc__life_has_attr(body, bn)) return 1;
+    for (i = 0; i < n; i++) {
+        if (cc__life_calls_name(body, bn, ms[i].name)) return 1;
+    }
+    return 0;
+}
+
+static inline int cc__life_harvest(CCLifeMacro* ms, int* n, const char* src,
+                                   size_t len) {
+    size_t i = 0;
+    int added = 0;
+    if (!src || len == 0) return 0;
+    while (i < len) {
+        size_t e, p, name_s, name_e, rp, body_s, body_e;
+        char pbuf[CC__LIFE_PARAM_MAX][CC__LIFE_NAME_MAX];
+        const char* parp[CC__LIFE_PARAM_MAX];
+        int np = 0;
+        if (!cc__at_directive_bol(src, len, i)) { i++; continue; }
+        e = cc__directive_end(src, len, i);
+        p = cc_skip_ws_and_comments(src, e, i + 1);
+        if (!cc_match_ident_kw(src, e, p, "define")) { i = e; continue; }
+        p = cc_skip_ws_and_comments(src, e, p + 6);
+        if (p >= e || !cc_is_ident_start(src[p])) { i = e; continue; }
+        name_s = p;
+        while (p < e && cc_is_ident_char(src[p])) p++;
+        name_e = p;
+        /* Function-like: '(' immediately after the name (C). */
+        if (p >= e || src[p] != '(') { i = e; continue; }
+        if (!cc_find_matching_paren(src, e, p, &rp)) { i = e; continue; }
+        {
+            size_t a = p + 1;
+            while (a < rp && np < CC__LIFE_PARAM_MAX) {
+                size_t c = cc__top_level_comma(src, a, rp);
+                size_t ts, te;
+                cc__trim_code_span(src, a, c, &ts, &te);
+                if (te > ts && cc_is_ident_start(src[ts])) {
+                    size_t k = 0;
+                    while (ts + k < te && cc_is_ident_char(src[ts + k]) &&
+                           k + 1 < CC__LIFE_NAME_MAX)
+                        k++;
+                    if (k == 0 || ts + k != te) break;
+                    memcpy(pbuf[np], src + ts, k);
+                    pbuf[np][k] = 0;
+                    parp[np] = pbuf[np];
+                    np++;
+                } else if (te > ts) {
+                    np = -1;
+                    break;
+                }
+                if (c >= rp) break;
+                a = c + 1;
+            }
+        }
+        if (np < 0) { i = e; continue; }
+        body_s = cc_skip_ws_and_comments(src, e, rp + 1);
+        body_e = cc_rskip_ws_and_comments(src, e);
+        if (body_e < body_s) body_e = body_s;
+        /* Drop a trailing `\` line-splice so the body is plain text. */
+        while (body_e > body_s && (src[body_e - 1] == '\\' ||
+                                   src[body_e - 1] == '\n' ||
+                                   src[body_e - 1] == '\r'))
+            body_e--;
+        if (body_e <= body_s) { i = e; continue; }
+        if (!cc__life_body_qualifies(ms, *n, src + body_s, body_e - body_s)) {
+            i = e;
+            continue;
+        }
+        if (cc__life_add(ms, n, src + name_s, name_e - name_s, parp, np,
+                         src + body_s, body_e - body_s, 1))
+            added = 1;
+        i = e;
+    }
+    return added;
+}
+
+static inline int cc__life_expand_body(char** out, size_t* w, size_t* cap,
+                                       const CCLifeMacro* m,
+                                       const char** args, const size_t* alen) {
+    const char* b;
+    size_t n, i = 0;
+    int pending_paste = 0;
+    if (!m || !m->body) return 0;
+    b = m->body;
+    n = m->body_n;
+    while (i < n) {
+        int pi;
+        size_t id_e;
+        if (b[i] == '"' || b[i] == '\'') {
+            char q = b[i++];
+            pending_paste = 0;
+            if (!cc__text_put(out, w, cap, &q, 1)) return 0;
+            while (i < n) {
+                if (!cc__text_put(out, w, cap, b + i, 1)) return 0;
+                if (b[i] == '\\' && i + 1 < n) {
+                    if (!cc__text_put(out, w, cap, b + i + 1, 1)) return 0;
+                    i += 2;
+                    continue;
+                }
+                if (b[i] == q) { i++; break; }
+                i++;
+            }
+            continue;
+        }
+        if (i + 1 < n && b[i] == '/' && b[i + 1] == '/') {
+            size_t s = i;
+            pending_paste = 0;
+            while (i < n && b[i] != '\n') i++;
+            if (!cc__text_put(out, w, cap, b + s, i - s)) return 0;
+            continue;
+        }
+        if (i + 1 < n && b[i] == '/' && b[i + 1] == '*') {
+            size_t s = i;
+            pending_paste = 0;
+            i += 2;
+            while (i + 1 < n && !(b[i] == '*' && b[i + 1] == '/')) i++;
+            if (i + 1 < n) i += 2;
+            if (!cc__text_put(out, w, cap, b + s, i - s)) return 0;
+            continue;
+        }
+        if (i + 1 < n && b[i] == '#' && b[i + 1] == '#') {
+            pending_paste = 1;
+            i += 2;
+            while (i < n && (b[i] == ' ' || b[i] == '\t' || b[i] == '\n' ||
+                             b[i] == '\r' || b[i] == '\\'))
+                i++;
+            continue;
+        }
+        if (cc_is_ident_start(b[i])) {
+            id_e = i + 1;
+            while (id_e < n && cc_is_ident_char(b[id_e])) id_e++;
+            for (pi = 0; pi < m->nparams; pi++) {
+                size_t pl = strlen(m->params[pi]);
+                if (pl == id_e - i && memcmp(b + i, m->params[pi], pl) == 0) {
+                    if (!cc__text_put(out, w, cap, args[pi], alen[pi])) return 0;
+                    pending_paste = 0;
+                    i = id_e;
+                    break;
+                }
+            }
+            if (pi < m->nparams) continue;
+            if (!cc__text_put(out, w, cap, b + i, id_e - i)) return 0;
+            pending_paste = 0;
+            i = id_e;
+            continue;
+        }
+        if (pending_paste && (b[i] == ' ' || b[i] == '\t' || b[i] == '\n' ||
+                              b[i] == '\r')) {
+            i++;
+            continue;
+        }
+        pending_paste = 0;
+        if (!cc__text_put(out, w, cap, b + i, 1)) return 0;
+        i++;
+    }
+    return 1;
+}
+
+static inline char* cc__life_expand_once(const char* src, size_t n,
+                                         CCLifeMacro* ms, int nm, int* changed) {
+    size_t i = 0, w = 0, cap;
+    char* out;
+    if (changed) *changed = 0;
+    if (!src || n == 0) return NULL;
+    cap = n + 128;
+    out = (char*)malloc(cap + 1);
+    if (!out) return NULL;
+    while (i < n) {
+        CCLifeMacro* m;
+        size_t id_e, lp, rp;
+        if (src[i] == '"' || src[i] == '\'') {
+            char q = src[i++];
+            if (!cc__text_put(&out, &w, &cap, &q, 1)) { free(out); return NULL; }
+            while (i < n) {
+                if (!cc__text_put(&out, &w, &cap, src + i, 1)) {
+                    free(out); return NULL;
+                }
+                if (src[i] == '\\' && i + 1 < n) {
+                    if (!cc__text_put(&out, &w, &cap, src + i + 1, 1)) {
+                        free(out); return NULL;
+                    }
+                    i += 2;
+                    continue;
+                }
+                if (src[i] == q) { i++; break; }
+                i++;
+            }
+            continue;
+        }
+        if (i + 1 < n && src[i] == '/' && src[i + 1] == '/') {
+            size_t s = i;
+            while (i < n && src[i] != '\n') i++;
+            if (!cc__text_put(&out, &w, &cap, src + s, i - s)) {
+                free(out); return NULL;
+            }
+            continue;
+        }
+        if (i + 1 < n && src[i] == '/' && src[i + 1] == '*') {
+            size_t s = i;
+            i += 2;
+            while (i + 1 < n && !(src[i] == '*' && src[i + 1] == '/')) i++;
+            if (i + 1 < n) i += 2;
+            if (!cc__text_put(&out, &w, &cap, src + s, i - s)) {
+                free(out); return NULL;
+            }
+            continue;
+        }
+        if (cc__at_directive_bol(src, n, i)) {
+            size_t e = cc__directive_end(src, n, i);
+            if (!cc__text_put(&out, &w, &cap, src + i, e - i)) {
+                free(out); return NULL;
+            }
+            i = e;
+            continue;
+        }
+        if (cc_is_ident_start(src[i])) {
+            id_e = i + 1;
+            while (id_e < n && cc_is_ident_char(src[id_e])) id_e++;
+            m = cc__life_find(ms, nm, src + i, id_e - i);
+            lp = cc_skip_ws_and_comments(src, n, id_e);
+            if (m && lp < n && src[lp] == '(' &&
+                cc_find_matching_paren(src, n, lp, &rp)) {
+                const char* args[CC__LIFE_PARAM_MAX];
+                size_t alen[CC__LIFE_PARAM_MAX];
+                int na = 0;
+                size_t a = lp + 1;
+                int ok = 1;
+                while (a <= rp && na < CC__LIFE_PARAM_MAX) {
+                    size_t c = (a < rp) ? cc__top_level_comma(src, a, rp) : rp;
+                    size_t ts, te;
+                    if (a == rp && na == 0 && m->nparams == 0) break;
+                    cc__trim_code_span(src, a, c, &ts, &te);
+                    if (te < ts) { ok = 0; break; }
+                    args[na] = src + ts;
+                    alen[na] = te - ts;
+                    na++;
+                    if (c >= rp) break;
+                    a = c + 1;
+                }
+                if (ok && na == m->nparams &&
+                    cc__life_expand_body(&out, &w, &cap, m, args, alen)) {
+                    i = rp + 1;
+                    if (changed) *changed = 1;
+                    continue;
+                }
+            }
+        }
+        if (!cc__text_put(&out, &w, &cap, src + i, 1)) { free(out); return NULL; }
+        i++;
+    }
+    out[w] = 0;
+    return out;
+}
+
+static inline void cc__life_free(CCLifeMacro* ms, int n) {
+    int i;
+    for (i = 0; i < n; i++) {
+        if (ms[i].owned && ms[i].body) free((void*)ms[i].body);
+    }
+}
+
+static inline char* cc_rewrite_life_macros(const char* src, size_t n,
+                                           const char* extra, size_t extra_n) {
+    static const char stack_body[] =
+        "uint8_t name##_cc_stack_buf[nbytes]; "
+        "CCArena name = cc_arena_create_buffer(name##_cc_stack_buf, "
+        "sizeof(name##_cc_stack_buf), CC_ARENA_DEFAULT_BLOCK_MAX) @destroy; "
+        "(name)._flags |= CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW";
+    static const char pool_body[] =
+        "cc_arena_stack(name##_arena, nbytes); "
+        "CCArenaPool name; "
+        "cc_arena_pool_init(&name, &name##_arena, elem_size)";
+    static const char stack_alias[] = "cc_arena_stack(name, nbytes)";
+    static const char pool_alias[] =
+        "cc_arena_pool_stack(name, elem_size, nbytes)";
+    CCLifeMacro ms[CC__LIFE_MACRO_MAX];
+    int nm = 0, round, changed = 0;
+    const char* p_stack[2] = { "name", "nbytes" };
+    const char* p_pool[3] = { "name", "elem_size", "nbytes" };
+    char* cur;
+    size_t cur_n;
+    int harvested;
+    if (!src || n == 0) return NULL;
+    memset(ms, 0, sizeof(ms));
+    (void)cc__life_add(ms, &nm, "cc_arena_stack", 14, p_stack, 2,
+                       stack_body, sizeof(stack_body) - 1, 0);
+    (void)cc__life_add(ms, &nm, "CC_ARENA_STACK", 14, p_stack, 2,
+                       stack_alias, sizeof(stack_alias) - 1, 0);
+    (void)cc__life_add(ms, &nm, "cc_arena_pool_stack", 19, p_pool, 3,
+                       pool_body, sizeof(pool_body) - 1, 0);
+    (void)cc__life_add(ms, &nm, "CC_ARENA_POOL_STACK", 19, p_pool, 3,
+                       pool_alias, sizeof(pool_alias) - 1, 0);
+    do {
+        harvested = nm;
+        (void)cc__life_harvest(ms, &nm, src, n);
+        if (extra && extra_n) (void)cc__life_harvest(ms, &nm, extra, extra_n);
+    } while (nm > harvested);
+    cur = cc__life_expand_once(src, n, ms, nm, &changed);
+    if (!cur) { cc__life_free(ms, nm); return NULL; }
+    cur_n = strlen(cur);
+    for (round = 0; changed && round < 7; round++) {
+        int again = 0;
+        char* nxt = cc__life_expand_once(cur, cur_n, ms, nm, &again);
+        if (!nxt) { free(cur); cc__life_free(ms, nm); return NULL; }
+        free(cur);
+        cur = nxt;
+        cur_n = strlen(cur);
+        changed = again;
+    }
+    cc__life_free(ms, nm);
+    if (cur_n == n && memcmp(cur, src, n) == 0) { free(cur); return NULL; }
+    return cur;
+}
+
+static inline char* cc_rewrite_arena_stack_destroy(const char* src, size_t n) {
+    return cc_rewrite_life_macros(src, n, NULL, 0);
+}
+
+static inline int cc__at_directive_bol(const char* src, size_t n, size_t i) {
+    size_t p;
+    if (!src || i >= n || src[i] != '#') return 0;
+    p = i;
+    while (p > 0 && src[p - 1] != '\n') {
+        char c = src[p - 1];
+        if (c != ' ' && c != '\t' && c != '\r') return 0;
+        p--;
+    }
+    return 1;
+}
+
+static inline size_t cc__directive_end(const char* src, size_t n, size_t i) {
+    int cont = 0;
+    while (i < n) {
+        if (src[i] == '\\') { cont = 1; i++; continue; }
+        if (src[i] == '\n') {
+            i++;
+            if (!cont) break;
+            cont = 0;
+            continue;
+        }
+        if (src[i] != '\r') cont = 0;
+        i++;
+    }
+    return i;
+}
+
+/* Erase `@destroy` / `@detach` (and an optional `{ … }` body) so a lowered
+ * `.h` stays host C. Concurrent-C source keeps the attrs; expand use sites
+ * with `cc_rewrite_life_macros`. */
+static inline char* cc_strip_at_destroy_detach(const char* src, size_t n) {
+    size_t i = 0;
+    size_t out_cap;
+    size_t w = 0;
+    char* out;
+    int changed = 0;
+    if (!src || n == 0) return NULL;
+    out_cap = n + 8;
+    out = (char*)malloc(out_cap + 1);
+    if (!out) return NULL;
+    while (i < n) {
+        if (src[i] == '"' || src[i] == '\'') {
+            char q = src[i++];
+            if (!cc__text_put(&out, &w, &out_cap, &q, 1)) { free(out); return NULL; }
+            while (i < n) {
+                if (!cc__text_put(&out, &w, &out_cap, src + i, 1)) {
+                    free(out); return NULL;
+                }
+                if (src[i] == '\\' && i + 1 < n) {
+                    if (!cc__text_put(&out, &w, &out_cap, src + i + 1, 1)) {
+                        free(out); return NULL;
+                    }
+                    i += 2;
+                    continue;
+                }
+                if (src[i] == q) { i++; break; }
+                i++;
+            }
+            continue;
+        }
+        if (i + 1 < n && src[i] == '/' && src[i + 1] == '/') {
+            size_t s = i;
+            while (i < n && src[i] != '\n') i++;
+            if (!cc__text_put(&out, &w, &out_cap, src + s, i - s)) {
+                free(out); return NULL;
+            }
+            continue;
+        }
+        if (i + 1 < n && src[i] == '/' && src[i + 1] == '*') {
+            size_t s = i;
+            i += 2;
+            while (i + 1 < n && !(src[i] == '*' && src[i + 1] == '/')) i++;
+            if (i + 1 < n) i += 2;
+            if (!cc__text_put(&out, &w, &out_cap, src + s, i - s)) {
+                free(out); return NULL;
+            }
+            continue;
+        }
+        if (src[i] == '@' &&
+            (cc_match_ident_kw(src, n, i + 1, "destroy") ||
+             cc_match_ident_kw(src, n, i + 1, "detach"))) {
+            int is_detach = cc_match_ident_kw(src, n, i + 1, "detach");
+            size_t tok_e = i + 1 + (is_detach ? 6 : 7);
+            size_t q = tok_e;
+            if (w > 0 && (out[w - 1] == ' ' || out[w - 1] == '\t')) w--;
+            while (q < n && (src[q] == ' ' || src[q] == '\t')) q++;
+            if (q < n && (src[q] == '\n' || src[q] == '\r')) {
+                size_t q2 = q + (src[q] == '\r' && q + 1 < n && src[q + 1] == '\n' ? 2 : 1);
+                while (q2 < n && (src[q2] == ' ' || src[q2] == '\t')) q2++;
+                if (q2 < n && src[q2] == '{') q = q2;
+            }
+            if (q < n && src[q] == '{') {
+                size_t rb = 0;
+                i = cc_find_matching_brace(src, n, q, &rb) ? rb + 1 : q;
+            } else {
+                i = tok_e;
+            }
+            changed = 1;
+            continue;
+        }
+        if (!cc__text_put(&out, &w, &out_cap, src + i, 1)) { free(out); return NULL; }
+        i++;
+    }
+    out[w] = '\0';
+    if (!changed) { free(out); return NULL; }
+    return out;
+}
+
 #endif /* CC_UTIL_TEXT_H */

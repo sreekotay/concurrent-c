@@ -1,0 +1,26 @@
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdio.h>
+#include "quote_cch_type_destroy_smoke.cch"
+
+int main(void) {
+    uint8_t buf[256];
+    {
+        QuoteBox b = {0};
+        b.a = cc_arena_create_buffer(buf, sizeof(buf), CC_ARENA_DEFAULT_BLOCK_MAX);
+        b.live = 1;
+        b.destroy();
+        assert(g_quote_box == 1);
+        assert(b.live == 0);
+        assert(b.a.base == NULL);
+    }
+    g_quote_box = 0;
+    {
+        QuoteBox b = {0} @destroy;
+        b.a = cc_arena_create_buffer(buf, sizeof(buf), CC_ARENA_DEFAULT_BLOCK_MAX);
+        b.live = 1;
+    }
+    assert(g_quote_box == 1);
+    printf("ok\n");
+    return 0;
+}

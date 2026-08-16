@@ -157,12 +157,18 @@ char* cc_preprocess_include_expanded(const char* input_path);
 char* cc_preprocess_comptime_source(const char* input_path);
 
 // Rewrite quoted local .cch includes to stable lowered .h files under
-// out/include/ so parser and final host C compilation do not see raw project
-// headers with CC-only syntax such as @comptime blocks. Returns malloc'd
-// string on success or NULL when no rewrite was needed. Caller must free().
+// out/include/ (or $TMPDIR/cc-lowered-<uid>/<hash>/ outside a repo) so
+// parser and host C compilation see the same interface-grade product
+// stdlib headers get. Returns malloc'd string on success or NULL when no
+// rewrite was needed. Caller must free(). After the call,
+// cc_local_header_lower_failed() is set if any include could not be
+// lowered — treat that as a hard error, even when the return is NULL.
 char* cc_rewrite_local_cch_includes_to_lowered_headers(const char* src,
                                                        size_t input_len,
                                                        const char* input_path);
+int cc_local_header_lower_failed(void);
+size_t cc_lowered_local_header_count(void);
+const char* cc_lowered_local_header_source_path(size_t i);
 char* cc_rewrite_system_cch_includes_to_lowered_headers(const char* src,
                                                         size_t input_len);
 /* Naked print/println/fprint/… call aliases → cc_* (script surface).

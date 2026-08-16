@@ -237,6 +237,8 @@ static const char* shadow_raw_field_cstr(TapeCache* cache, const AstNode* f,
 static int shadow_emit_typedef_struct(AstNode* it, CEmit* out, TapeCache* cache,
                                       ShadowCtx* line_ctx) {
     if (it->nkids == 0 && it->a[0]) {
+        if (it->b[0] && strcmp(it->a, it->b) != 0)
+            shadow_td_alias_register(it->b, it->a);
         if (!cemit_fmt(out, "typedef struct %s %s;\n", it->a, it->b))
             return 0;
         return 1;
@@ -456,6 +458,8 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
         shadow_as_scan_pass_inc(pass_inc, npass_inc);
     /* Warmed angle-includes (@as / hooks still present in .cch text). */
     shadow_as_scan_tapes(cache);
+    /* Quoted local `.cch` lowered to `.h` — scan the original source. */
+    shadow_as_scan_lowered_local_cch();
     /* Pre-blank TU source — stage1 blanks @comptime register bodies. */
     shadow_as_scan_src_path(src_path);
     shadow_as_resolve_transitive();

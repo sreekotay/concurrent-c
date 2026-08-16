@@ -1,0 +1,13 @@
+#ifndef TESTS_TYPEVIEW_AS_QUOTE_PTR_UFCS_SMOKE_CCH
+#define TESTS_TYPEVIEW_AS_QUOTE_PTR_UFCS_SMOKE_CCH
+
+typedef struct {
+    int n;
+} QvDoc;
+
+typedef struct {
+    QvDoc doc;
+    int tag;
+} QvBuf;
+
+#endif

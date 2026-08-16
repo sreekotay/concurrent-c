@@ -5,8 +5,8 @@
 #
 # Not a substitute for real lowering: stage-1 must re-run over this seed.
 # Only strips `@as` / legacy `/*@as*/`, `@typeview` / `@restricted` /
-# `@typehooks` blocks, `CC_GENERIC_FACTORY` / `_EXTEND` blocks, and
-# rewrites `.cch` includes to `.h`.
+# `@typehooks` blocks, `@destroy` / `@detach`, `CC_GENERIC_FACTORY` /
+# `_EXTEND` blocks, and rewrites `.cch` includes to `.h`.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -216,11 +216,87 @@ def strip_generic_factory_blocks(text: str) -> str:
         i += 1
     return "".join(out)
 
+def strip_at_life(text: str) -> str:
+    """Erase @destroy / @detach (and an optional { … } body) for host C."""
+    out = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] in "\"'":
+            q = text[i]
+            out.append(q)
+            i += 1
+            while i < n:
+                out.append(text[i])
+                if text[i] == "\\" and i + 1 < n:
+                    out.append(text[i + 1])
+                    i += 2
+                    continue
+                if text[i] == q:
+                    i += 1
+                    break
+                i += 1
+            continue
+        if text.startswith("//", i):
+            while i < n and text[i] != "\n":
+                out.append(text[i])
+                i += 1
+            continue
+        if text.startswith("/*", i):
+            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                out.append(text[i])
+                i += 1
+            if i + 1 < n:
+                out.append(text[i])
+                out.append(text[i + 1])
+                i += 2
+            continue
+        if text.startswith("@destroy", i) and (
+            i + 8 == n or not (text[i + 8].isalnum() or text[i + 8] == "_")
+        ):
+            if out and out[-1] in " \t":
+                out.pop()
+            i += 8
+            q = i
+            while q < n and text[q] in " \t":
+                q += 1
+            if q < n and text[q] in "\n\r":
+                q2 = q + (2 if text[q] == "\r" and q + 1 < n and text[q + 1] == "\n" else 1)
+                while q2 < n and text[q2] in " \t":
+                    q2 += 1
+                if q2 < n and text[q2] == "{":
+                    q = q2
+            if q < n and text[q] == "{":
+                depth = 0
+                i = q
+                while i < n:
+                    if text[i] == "{":
+                        depth += 1
+                    elif text[i] == "}":
+                        depth -= 1
+                        i += 1
+                        if depth == 0:
+                            break
+                        continue
+                    i += 1
+            continue
+        if text.startswith("@detach", i) and (
+            i + 7 == n or not (text[i + 7].isalnum() or text[i + 7] == "_")
+        ):
+            if out and out[-1] in " \t":
+                out.pop()
+            i += 7
+            continue
+        out.append(text[i])
+        i += 1
+    return "".join(out)
+
 def seed_text(text: str) -> str:
     text = text.replace("/*@as*/", "")
     text = re.sub(r"@as\b", "", text)
     text = strip_typeview_blocks(text)
     text = strip_generic_factory_blocks(text)
+    text = strip_at_life(text)
     text = text.replace(".cch>", ".h>").replace('.cch"', '.h"')
     return text
 

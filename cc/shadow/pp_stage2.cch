@@ -450,6 +450,49 @@ static int pp_quote_include_passthrough_line(CCSlice spell, char* dst, size_t ca
     return w > 0 && (size_t)w < cap;
 }
 
+/* Tool umbrellas must stay at the #include site (after @grammar KEEP_*).
+ * Quoted-header rewrite may have already turned `.cch` into an absolute `.h`. */
+static int pp_quote_include_is_umbrella(CCSlice spell) {
+    const char* p;
+    size_t n, i, bl;
+    const char* base;
+    pp_quote_include_path(spell, &p, &n);
+    if (!p || !n) return 0;
+    base = p;
+    for (i = 0; i < n; i++)
+        if (p[i] == '/') base = p + i + 1;
+    bl = n - (size_t)(base - p);
+    if (bl >= 11 && strncmp(base, "c_pp_spike.", 11) == 0) return 1;
+    if (bl >= 13 && strncmp(base, "shadow_build.", 13) == 0) return 1;
+    return 0;
+}
+
+static int pp_inject_include_at_hash(Pp* pp, Token hdr, const char* line) {
+    char* slot;
+    Token syn;
+    size_t dir_off;
+    FileTape* hft;
+    if (!pp || !line || !line[0]) return 0;
+    if (pp->ncpp_dir >= CPP_DIR_CAP)
+        return pp_fail_dir(pp, hdr, "too many injected #include lines");
+    slot = pp->cpp_dir[pp->ncpp_dir];
+    snprintf(slot, sizeof(pp->cpp_dir[0]), "%s", line);
+    memset(&syn, 0, sizeof(syn));
+    syn.kind = TK_IDENT;
+    syn.spell.ptr = slot;
+    syn.spell.len = strlen(slot);
+    syn.file_id = hdr.file_id;
+    dir_off = hdr.offset;
+    hft = (pp->nf > 0) ? pp->frames[pp->nf - 1].tape : NULL;
+    if (hft && hft->bytes) {
+        while (dir_off > 0 && hft->bytes[dir_off - 1] != '\n')
+            dir_off--;
+    }
+    syn.offset = dir_off;
+    pp->ncpp_dir++;
+    return pp_emit(pp, syn);
+}
+
 static int join_path(const char* dir, CCSlice rel, char* dst, size_t dst_cap) {
     /* String token spell may include surrounding quotes (KEEP_string) or not. */
     const char* p;
@@ -659,6 +702,10 @@ static int handle_include(Pp* pp) {
         }
         if (!pp_quote_include_passthrough_line(hdr.spell, line, sizeof(line)))
             return 0;
+        if (pp_quote_include_is_umbrella(hdr.spell)) {
+            pp_skip_line(pp);
+            return pp_inject_include_at_hash(pp, hdr, line);
+        }
         if (!pp_add_passthrough_include(pp, line)) return 0;
         pp_skip_line(pp);
         return 1;

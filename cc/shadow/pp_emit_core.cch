@@ -3747,6 +3747,7 @@ static void shadow_field_ident_norm(const char* field, char* out, size_t cap) {
 
 static ShadowStructField* shadow_field_find(const char* ty, const char* field) {
     size_t i, n;
+    const char* resolved;
     if (!ty || !ty[0] || !field || !field[0]) return NULL;
     if (!shadow_fields_ensure()) return NULL;
     n = ShadowFieldVec_len(&g_shadow_fields);
@@ -3755,6 +3756,14 @@ static ShadowStructField* shadow_field_find(const char* ty, const char* field) {
         if (!f || !f->ty || !f->field) continue;
         if (strcmp(f->ty, ty) == 0 && strcmp(f->field, field) == 0)
             return f;
+    }
+    /* `typedef struct tag Alias` — fields are on the tag. */
+    resolved = shadow_td_alias_resolve(ty);
+    if (resolved && resolved[0] && strcmp(resolved, ty) != 0) {
+        if (strncmp(resolved, "struct ", 7) == 0) resolved += 7;
+        while (*resolved == ' ' || *resolved == '\t') resolved++;
+        if (resolved[0] && strcmp(resolved, ty) != 0)
+            return shadow_field_find(resolved, field);
     }
     return NULL;
 }
@@ -4893,6 +4902,8 @@ static const ShadowDynSink* shadow_dyn_sink_for(const char* ty) {
 extern int cc_included_cch_contains_fn(const char* name);
 extern int cc_included_cch_fn_first_param(const char* name, char* out,
                                           size_t out_sz);
+extern size_t cc_lowered_local_header_count(void);
+extern const char* cc_lowered_local_header_source_path(size_t i);
 
 static int shadow_hdr_fn_exists(const char* name) {
     if (!name || !name[0]) return 0;
@@ -4972,12 +4983,17 @@ static void shadow_as_scan_header_text(const char* text) {
                 memcpy(alias, a, n);
                 alias[n] = 0;
                 if (alias[0]) {
-                    /* Retarget pending fields recorded under empty outer. */
+                    /* Retarget pending fields recorded under empty outer.
+                     * Also install them on the alias — `@typeview` in a
+                     * later file uses field_ty_of, not this scan's fld_*. */
                     int fi;
                     for (fi = 0; fi < nfld; fi++) {
-                        if (!fld_outer[fi][0])
+                        if (!fld_outer[fi][0]) {
                             snprintf(fld_outer[fi], sizeof(fld_outer[0]), "%s",
                                      alias);
+                            shadow_field_register_ex(alias, fld_name[fi],
+                                                     fld_ty[fi]);
+                        }
                     }
                     snprintf(outer, sizeof(outer), "%s", alias);
                 }
@@ -5414,6 +5430,22 @@ static void shadow_as_scan_tapes(TapeCache* cache) {
         FileTape* ft = cache->items[i];
         if (ft && ft->bytes && ft->len > 0)
             shadow_as_scan_header_text(ft->bytes);
+    }
+}
+
+/* Quoted project `.cch` lowers to `.h` (typeview/typehooks stripped), same
+ * as stdlib.  Recover those facts from the original `.cch` the lowerer
+ * registered — `shadow_family_header_read` only sees `cc/include/ccc/`. */
+static void shadow_as_scan_lowered_local_cch(void) {
+    size_t i, n = cc_lowered_local_header_count();
+    for (i = 0; i < n; i++) {
+        const char* path = cc_lowered_local_header_source_path(i);
+        char* text = NULL;
+        size_t tlen = 0;
+        if (!path || !path[0]) continue;
+        if (!read_file(path, &text, &tlen) || !text) continue;
+        shadow_as_scan_header_text(text);
+        free(text);
     }
 }
 
@@ -6100,6 +6132,91 @@ static const char* shadow_td_alias_resolve(const char* ty) {
             return g_shadow_td_base[i];
     }
     return ty;
+}
+
+/* True when `tag` is a `typedef struct tag Alias` base (after bind resolve). */
+static int shadow_td_alias_is_base(const char* tag) {
+    int i;
+    const char* t;
+    if (!tag || !tag[0]) return 0;
+    t = tag;
+    if (strncmp(t, "struct ", 7) == 0) t += 7;
+    while (*t == ' ' || *t == '\t') t++;
+    for (i = 0; i < g_shadow_ntd; i++) {
+        const char* b = g_shadow_td_base[i];
+        size_t n = 0;
+        if (strncmp(b, "struct ", 7) == 0) b += 7;
+        while (*b == ' ' || *b == '\t') b++;
+        while (b[n] && b[n] != '*' && b[n] != ' ' && b[n] != '\t') n++;
+        if (n && strncmp(b, t, n) == 0 && t[n] == 0) return 1;
+    }
+    return 0;
+}
+
+/* Binds of `typedef struct tag Alias` resolve to the tag so field UFCS
+ * walks tag rows. Type_meth is still spelled `Alias_meth` — try tag_meth,
+ * then every typedef that aliases this tag. */
+static int shadow_td_alias_ufn_meth(const char* tag, const char* meth,
+                                    char* out, size_t cap) {
+    int i;
+    char tryc[160];
+    char base[64];
+    const char* t;
+    size_t n;
+    if (!tag || !tag[0] || !meth || !meth[0] || !out || !cap) return 0;
+    t = tag;
+    if (strncmp(t, "struct ", 7) == 0) t += 7;
+    while (*t == ' ' || *t == '\t') t++;
+    snprintf(tryc, sizeof(tryc), "%s_%s", t, meth);
+    if (shadow_ufn_exists(tryc)) {
+        snprintf(out, cap, "%s", tryc);
+        return 1;
+    }
+    for (i = 0; i < g_shadow_ntd; i++) {
+        const char* b = g_shadow_td_base[i];
+        if (strncmp(b, "struct ", 7) == 0) b += 7;
+        while (*b == ' ' || *b == '\t') b++;
+        n = 0;
+        while (b[n] && b[n] != '*' && b[n] != ' ' && n + 1 < sizeof(base)) {
+            base[n] = b[n];
+            n++;
+        }
+        base[n] = 0;
+        if (!base[0] ||
+            (strcmp(base, t) != 0 && strcmp(g_shadow_td_base[i], tag) != 0))
+            continue;
+        snprintf(tryc, sizeof(tryc), "%s_%s", g_shadow_td_alias[i], meth);
+        if (shadow_ufn_exists(tryc)) {
+            snprintf(out, cap, "%s", tryc);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Full-chain destructor: `Type_destroy` (or a typehooks hook of that name).
+ * Delta hooks (`cc_temp_file_unlink`, `outer_dtor`) do not match — those
+ * still flatten value embeds. */
+static int shadow_type_destroy_fn(const char* ty, char* out, size_t cap) {
+    char base[160];
+    char tryc[160];
+    int stars = 0;
+    const ShadowDestroyHook* dh;
+    if (!ty || !ty[0] || !out || !cap) return 0;
+    shadow_ty_base_stars(ty, base, sizeof(base), &stars);
+    if (!base[0]) return 0;
+    snprintf(tryc, sizeof(tryc), "%s_destroy", base);
+    dh = shadow_destroy_hooks_for(base);
+    if (dh && dh->hook[0] && strcmp(dh->hook, tryc) == 0) {
+        snprintf(out, cap, "%s", dh->hook);
+        return 1;
+    }
+    if (shadow_ufn_exists(tryc) || shadow_hdr_fn_exists(tryc)) {
+        snprintf(out, cap, "%s", tryc);
+        return 1;
+    }
+    if (shadow_td_alias_ufn_meth(base, "destroy", out, cap)) return 1;
+    return 0;
 }
 
 static void shadow_bind_name(const char* name, const char* ty, int flags) {

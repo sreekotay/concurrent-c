@@ -1,0 +1,43 @@
+#ifndef TESTS_QUOTE_CCH_TYPEVIEW_SMOKE_CCH
+#define TESTS_QUOTE_CCH_TYPEVIEW_SMOKE_CCH
+
+#include <ccc/std/prelude.cch>
+
+/* Quoted project header: `@typeview` / `@typehooks` must take the same
+ * interface-grade `.cch` → `.h` path as stdlib, not raw splice. */
+
+typedef struct {
+    CCFile file;
+    int tag;
+} QuoteTvWrap;
+
+@typeview on QuoteTvWrap {
+    as: file;
+};
+
+typedef struct {
+    int n;
+    int alive;
+} QuoteHooksDemo;
+
+static int g_quote_hooks_destroyed = 0;
+
+static QuoteHooksDemo quote_hooks_demo_create(int n) {
+    QuoteHooksDemo h;
+    h.n = n;
+    h.alive = 1;
+    return h;
+}
+
+static void quote_hooks_demo_destroy(QuoteHooksDemo* h) {
+    if (!h || !h->alive) return;
+    h->alive = 0;
+    g_quote_hooks_destroyed += 1;
+}
+
+@typehooks on QuoteHooksDemo {
+    .create = cc_type_create_call("quote_hooks_demo_create"),
+    .destroy = cc_type_destroy_call("quote_hooks_demo_destroy"),
+};
+
+#endif

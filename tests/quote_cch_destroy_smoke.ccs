@@ -1,0 +1,12 @@
+/* Quoted local `.cch` with `create_buffer(...) @destroy` — pins statement
+ * `@destroy` on a helper inside a quoted header (impl-grade splice). */
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdio.h>
+#include "quote_cch_destroy_smoke.cch"
+
+int main(void) {
+    assert(quote_cch_scratch_sum(40, 2) == 42);
+    printf("ok\n");
+    return 0;
+}
