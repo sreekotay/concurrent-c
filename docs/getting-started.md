@@ -56,7 +56,8 @@ on `PATH` (the script can edit your shell rc via `--add-to-path`).
 `cc-install.sh` also works from an existing checkout with a custom `PREFIX`.
 
 Build outputs from `ccc` land in `./out` and `./bin` under the directory you
-run from (`--out-dir` / `--bin-dir`); never into `$PREFIX`.
+run from (`--out-dir` / `--bin-dir`); never into `$PREFIX` and never into a
+checkout of the compiler repo unless that directory is cwd.
 
 ### VS Code / Cursor syntax (required for a good edit experience)
 

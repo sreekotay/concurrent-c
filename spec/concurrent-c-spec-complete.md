@@ -213,6 +213,11 @@ with no matching seed is an error.
 line must agree with the file header when both are present. A header that
 disagrees with a `.ccs` / `.cch` / `.shcc` suffix is ill-formed.
 
+The implementation may copy a header-bearing unit into a cache file so a
+pin-era lowerer never sees the magic line. Quoted `#include` of project
+faces still resolves from the original unit's directory (the `#line` path),
+not the cache directory.
+
 ---
 
 Everything else in this specification is one of:

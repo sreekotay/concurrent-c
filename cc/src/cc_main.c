@@ -58,10 +58,10 @@ static const char* g_run_argv0 = NULL;
 
 // Resolved repo-relative paths so `./cc/bin/ccc build ...` works from the repo root.
 static int g_paths_inited = 0;
-/* Set when paths resolved to a prefix install rather than a checkout. The
- * prefix is read-only as far as the driver is concerned (it may be
- * /usr/local, owned by root), so build outputs are rooted at the working
- * directory instead of at g_repo_root. */
+/* Set when paths resolved to a prefix install rather than a checkout.
+ * The prefix is read-only as far as the driver is concerned (it may be
+ * /usr/local, owned by root). Build outputs are always cwd-relative;
+ * this flag still selects toolchain layout (includes, runtime, lowerer). */
 static int g_layout_installed = 0;
 static char g_repo_root[PATH_MAX];
 static char g_ccc_path[PATH_MAX];
@@ -421,16 +421,11 @@ static void cc_refresh_host_obj_root(const char* cc_bin_override) {
 }
 
 static void cc_set_out_dir(const char* out_dir_opt, const char* bin_dir_opt) {
-    /* Base for default and relative output dirs: the repo root in a checkout,
-     * the working directory under a prefix install (see g_layout_installed). */
+    /* Default and relative --out-dir / --bin-dir are always cwd. Toolchain
+     * files (includes, runtime, shadow_lower) still come from g_repo_root. */
     char base[PATH_MAX];
-    if (g_layout_installed) {
-        if (getcwd(base, sizeof(base)) == NULL) {
-            strncpy(base, ".", sizeof(base));
-            base[sizeof(base) - 1] = '\0';
-        }
-    } else {
-        strncpy(base, g_repo_root, sizeof(base));
+    if (getcwd(base, sizeof(base)) == NULL) {
+        strncpy(base, ".", sizeof(base));
         base[sizeof(base) - 1] = '\0';
     }
 
@@ -765,8 +760,8 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --sysroot PATH      Forward sysroot to C compiler\n");
     fprintf(stderr, "  --no-runtime        Do not link runtime (default links bundled runtime)\n");
     fprintf(stderr, "  --keep-c            Do not delete generated C file\n");
-    fprintf(stderr, "  --out-dir DIR       Output dir for generated C + objects (default: <repo>/out)\n");
-    fprintf(stderr, "  --bin-dir DIR       Output dir for linked executables (default: <repo>/bin)\n");
+    fprintf(stderr, "  --out-dir DIR       Output dir for generated C + objects (default: ./out)\n");
+    fprintf(stderr, "  --bin-dir DIR       Output dir for linked executables (default: ./bin)\n");
     fprintf(stderr, "  --out-stem NAME     Override the basename/stem used for generated files\n");
     fprintf(stderr, "  --no-cache          Disable incremental cache (also: CC_NO_CACHE=1)\n");
     fprintf(stderr, "  --frontend=native   Front end (native only; also: CC_FRONTEND=native)\n");
@@ -3265,6 +3260,9 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
     char ld_flags_arg[2048];
     char shcc_wrap[PATH_MAX];
     char unit_wrap[PATH_MAX];
+    char orig_in[PATH_MAX];
+    char quote_dir[PATH_MAX];
+    int set_quote = 0;
     CCBuildOptions opt_local;
     char* argv[28];
     int argc = 0;
@@ -3277,6 +3275,10 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
     char pin[64];
     char resolve_err[256];
     if (!opt || !opt->in_path || !out_path) return -1;
+
+    orig_in[0] = '\0';
+    quote_dir[0] = '\0';
+    snprintf(orig_in, sizeof(orig_in), "%s", opt->in_path);
 
     pin[0] = '\0';
     if (cc_unit_resolve(opt->in_path, opt->unit_kind, opt->ccc_version_pin,
@@ -3300,6 +3302,7 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
         opt_local = *opt;
         opt_local.in_path = shcc_wrap;
         opt = &opt_local;
+        set_quote = 1;
     } else if (kind == CC_UNIT_KIND_CCS || kind == CC_UNIT_KIND_CCH) {
         if (cc__materialize_strip_header(opt->in_path, kind, unit_wrap,
                                          sizeof(unit_wrap)) != 0)
@@ -3308,8 +3311,11 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
             opt_local = *opt;
             opt_local.in_path = unit_wrap;
             opt = &opt_local;
+            set_quote = 1;
         }
     }
+    if (set_quote && orig_in[0])
+        cc__dir_of_path(orig_in, quote_dir, sizeof(quote_dir));
 
     if (cc__load_const_bindings(opt, bindings, &binding_count) != 0) return -1;
     if (opt->dump_consts && !opt->dump_comptime) {
@@ -3429,6 +3435,15 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
         }
         cflen += (size_t)n;
     }
+    if (quote_dir[0]) {
+        int n = snprintf(cc_flags_buf + cflen, sizeof(cc_flags_buf) - cflen,
+                         "%s-I%s", cflen ? " " : "", quote_dir);
+        if (n < 0 || (size_t)n >= sizeof(cc_flags_buf) - cflen) {
+            fprintf(stderr, "cc: quote-dir include path too long\n");
+            return -1;
+        }
+        cflen += (size_t)n;
+    }
     (void)cflen;
     argv[argc++] = shadow;
     if (opt->no_cache) argv[argc++] = (char*)"--no-cache";
@@ -3461,6 +3476,8 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
         return -1;
     }
     if (pid == 0) {
+        if (quote_dir[0] && setenv("SHADOW_QUOTE_DIR", quote_dir, 1) != 0)
+            _exit(127);
         execv(shadow, argv);
         _exit(127);
     }

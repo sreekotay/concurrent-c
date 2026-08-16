@@ -56,7 +56,7 @@ Mach-O objects (or the reverse). Emitted `.c` and lowered headers stay shared.
 
 `-o PATH` selects the terminal output for the current mode. In link mode, `--obj-out PATH` independently selects the intermediate object. Generated C is retained; `--keep-c` is accepted and is therefore idempotent.
 
-`--out-dir DIR` or `CC_OUT_DIR` replaces `out`. `--bin-dir DIR` or `CC_BIN_DIR` replaces `bin`. Command-line values take precedence over environment values.
+`--out-dir DIR` or `CC_OUT_DIR` replaces `out`. `--bin-dir DIR` or `CC_BIN_DIR` replaces `bin`. Command-line values take precedence over environment values. Relative `--out-dir` / `--bin-dir` and the default `out` / `bin` resolve against the process cwd in every layout (checkout binary and prefix install). Absolute paths are unchanged. Toolchain files (includes, runtime, lowerer) still come from the checkout or prefix.
 
 ### Stem identity and collisions
 

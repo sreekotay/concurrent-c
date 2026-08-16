@@ -355,7 +355,7 @@ int main(int argc, char** argv) {
     shadow_diag_errors_reset();
 
     char search_dir[512];
-    dirname_of(in_path, search_dir, sizeof(search_dir));
+    shadow_fill_quote_dir(in_path, search_dir, sizeof(search_dir));
 
     /* Lower-then-TCC type pass (.ccs only, skipped when no @comptime): blank
      * @comptime, whitelist parse+emit → field registry + slim typedef unit;

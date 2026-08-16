@@ -56,7 +56,7 @@ typedef struct {
 } FileTape;
 
 /* Redis/pigz TUs warm many angle-includes into the stage-1 cache; 64
- * filled before nested `"redis_mem.cch"` and looked like a missing file. */
+ * filled before nested `"redis_mem.h"` and looked like a missing file. */
 enum { TAPE_CACHE_CAP = 512, TOK_BUILD_CAP = 1 << 16 };
 
 typedef struct {
