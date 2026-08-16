@@ -49,7 +49,7 @@ grep -q "$DIAG_SUBSTR" "$work/stderr.2" \
 # emitted C and replayed on every cache hit — a warm rebuild must print
 # the same warnings as the cold one.
 WARN_FIXTURE=tests/as_arg_coerce_smoke.ccs
-WARN_SUBSTR='skips @as path'
+WARN_SUBSTR='skips as: path'
 
 mkdir -p "$work2/out" "$work2/bin"
 
