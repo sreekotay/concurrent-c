@@ -9,7 +9,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PATH_FILE="${1:-$ROOT/cc/src/visitor/visit_codegen.c}"
+PATH_FILE="${1:-$ROOT/cc/src/visitor/pass_result_unwrap.c}"
 SAMPLES="${2:-5}"
 PASSES="${3:-8}"
 CCC="${CCC:-$ROOT/cc/bin/ccc}"

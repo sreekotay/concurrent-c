@@ -1,14 +1,14 @@
 /*
  * Capture-shaped line scan: slurp vs sync pull vs channel alloc-and-send.
  *
- * Same work as scripts/capture_baseline.sh static metrics on visit_codegen.c:
+ * Same work as scripts/capture_baseline.sh static metrics on a visitor TU:
  *   - count lines
  *   - count cc__reparse_source_to_ast_ctx( / _ex(
  *
  *   ./cc/bin/ccc run perf/bench_line_scan.ccs -- [path] [samples] [passes] [mode] [chan_cap]
  *   ./perf/bench_line_scan_vs_bash.sh   # wall + RSS vs bash (the real compare)
  *
- * path      default: cc/src/visitor/visit_codegen.c
+ * path      default: cc/src/visitor/pass_result_unwrap.c
  * samples   timed runs per mode (default 7; warm-up discarded)
  * passes    re-read the file this many times per sample (default 8)
  * mode      all | slurp | sync | chan  (default all)
@@ -26,7 +26,7 @@
 #include <string.h>
 #include <time.h>
 
-static const char* k_path_default = "cc/src/visitor/visit_codegen.c";
+static const char* k_path_default = "cc/src/visitor/pass_result_unwrap.c";
 static CCSlice k_ctx;
 static CCSlice k_ex;
 static size_t g_chan_cap = 64;
