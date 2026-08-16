@@ -1,0 +1,171 @@
+/* More than 64 Result functions in one TU — used to fill the safety
+ * result-fn roster. Table grows on a check-frame arena. */
+#include <stdio.h>
+
+int !> (CCError) r00(void) { return cc_ok(0); }
+
+int !> (CCError) r01(void) { return cc_ok(1); }
+
+int !> (CCError) r02(void) { return cc_ok(2); }
+
+int !> (CCError) r03(void) { return cc_ok(3); }
+
+int !> (CCError) r04(void) { return cc_ok(4); }
+
+int !> (CCError) r05(void) { return cc_ok(5); }
+
+int !> (CCError) r06(void) { return cc_ok(6); }
+
+int !> (CCError) r07(void) { return cc_ok(7); }
+
+int !> (CCError) r08(void) { return cc_ok(8); }
+
+int !> (CCError) r09(void) { return cc_ok(9); }
+
+int !> (CCError) r10(void) { return cc_ok(10); }
+
+int !> (CCError) r11(void) { return cc_ok(11); }
+
+int !> (CCError) r12(void) { return cc_ok(12); }
+
+int !> (CCError) r13(void) { return cc_ok(13); }
+
+int !> (CCError) r14(void) { return cc_ok(14); }
+
+int !> (CCError) r15(void) { return cc_ok(15); }
+
+int !> (CCError) r16(void) { return cc_ok(16); }
+
+int !> (CCError) r17(void) { return cc_ok(17); }
+
+int !> (CCError) r18(void) { return cc_ok(18); }
+
+int !> (CCError) r19(void) { return cc_ok(19); }
+
+int !> (CCError) r20(void) { return cc_ok(20); }
+
+int !> (CCError) r21(void) { return cc_ok(21); }
+
+int !> (CCError) r22(void) { return cc_ok(22); }
+
+int !> (CCError) r23(void) { return cc_ok(23); }
+
+int !> (CCError) r24(void) { return cc_ok(24); }
+
+int !> (CCError) r25(void) { return cc_ok(25); }
+
+int !> (CCError) r26(void) { return cc_ok(26); }
+
+int !> (CCError) r27(void) { return cc_ok(27); }
+
+int !> (CCError) r28(void) { return cc_ok(28); }
+
+int !> (CCError) r29(void) { return cc_ok(29); }
+
+int !> (CCError) r30(void) { return cc_ok(30); }
+
+int !> (CCError) r31(void) { return cc_ok(31); }
+
+int !> (CCError) r32(void) { return cc_ok(32); }
+
+int !> (CCError) r33(void) { return cc_ok(33); }
+
+int !> (CCError) r34(void) { return cc_ok(34); }
+
+int !> (CCError) r35(void) { return cc_ok(35); }
+
+int !> (CCError) r36(void) { return cc_ok(36); }
+
+int !> (CCError) r37(void) { return cc_ok(37); }
+
+int !> (CCError) r38(void) { return cc_ok(38); }
+
+int !> (CCError) r39(void) { return cc_ok(39); }
+
+int !> (CCError) r40(void) { return cc_ok(40); }
+
+int !> (CCError) r41(void) { return cc_ok(41); }
+
+int !> (CCError) r42(void) { return cc_ok(42); }
+
+int !> (CCError) r43(void) { return cc_ok(43); }
+
+int !> (CCError) r44(void) { return cc_ok(44); }
+
+int !> (CCError) r45(void) { return cc_ok(45); }
+
+int !> (CCError) r46(void) { return cc_ok(46); }
+
+int !> (CCError) r47(void) { return cc_ok(47); }
+
+int !> (CCError) r48(void) { return cc_ok(48); }
+
+int !> (CCError) r49(void) { return cc_ok(49); }
+
+int !> (CCError) r50(void) { return cc_ok(50); }
+
+int !> (CCError) r51(void) { return cc_ok(51); }
+
+int !> (CCError) r52(void) { return cc_ok(52); }
+
+int !> (CCError) r53(void) { return cc_ok(53); }
+
+int !> (CCError) r54(void) { return cc_ok(54); }
+
+int !> (CCError) r55(void) { return cc_ok(55); }
+
+int !> (CCError) r56(void) { return cc_ok(56); }
+
+int !> (CCError) r57(void) { return cc_ok(57); }
+
+int !> (CCError) r58(void) { return cc_ok(58); }
+
+int !> (CCError) r59(void) { return cc_ok(59); }
+
+int !> (CCError) r60(void) { return cc_ok(60); }
+
+int !> (CCError) r61(void) { return cc_ok(61); }
+
+int !> (CCError) r62(void) { return cc_ok(62); }
+
+int !> (CCError) r63(void) { return cc_ok(63); }
+
+int !> (CCError) r64(void) { return cc_ok(64); }
+
+int !> (CCError) r65(void) { return cc_ok(65); }
+
+int !> (CCError) r66(void) { return cc_ok(66); }
+
+int !> (CCError) r67(void) { return cc_ok(67); }
+
+int !> (CCError) r68(void) { return cc_ok(68); }
+
+int !> (CCError) r69(void) { return cc_ok(69); }
+
+int !> (CCError) r70(void) { return cc_ok(70); }
+
+int !> (CCError) r71(void) { return cc_ok(71); }
+
+int !> (CCError) r72(void) { return cc_ok(72); }
+
+int !> (CCError) r73(void) { return cc_ok(73); }
+
+int !> (CCError) r74(void) { return cc_ok(74); }
+
+int !> (CCError) r75(void) { return cc_ok(75); }
+
+int !> (CCError) r76(void) { return cc_ok(76); }
+
+int !> (CCError) r77(void) { return cc_ok(77); }
+
+int !> (CCError) r78(void) { return cc_ok(78); }
+
+int !> (CCError) r79(void) { return cc_ok(79); }
+
+int main(void) {
+    int s = 0;
+    s += r00() ?> 0;
+    s += r79() ?> 0;
+    printf("%d\n", s);
+    return s == 79 ? 0 : 1;
+}
