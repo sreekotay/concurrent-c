@@ -438,11 +438,17 @@ char[:] s = a.alloc_slice_bytes(32);   // arena provenance
 cc_arena_stack(tmp, 1024);             // same policy; stack root
 a.reset();                             // drain epoch; reuse root
 
+CCArenaCheckpoint cp = a.checkpoint(); // works after overflow alloc
+/* …scratch, including overflow… */
+cp.restore();                          // rewind slabs; drain newer overflow
+
 /* @scratch — throwaway @string / print only; do not capture or send */
 io.println(@string(`len=${s.len}`, @scratch)) !>;
 ```
 
 Slices (`T[:]`) carry provenance. Views must not outlive their arena.
+A mid-slab hole disables a new `checkpoint()` until last-live rewind or
+`reset`. Restore of a handle whose overflow keep-set was released refuses.
 Details: [getting-started § Arenas](getting-started.md#arenas-name-a-lifetime).
 
 ---

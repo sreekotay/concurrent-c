@@ -1774,10 +1774,10 @@ void cc_arena_reset(CCArena* a);         // drain ovf; unwind extents; restore o
 void cc_arena_destroy(CCArena* a);       // alias for cc_arena_free
 CCArena cc_arena_detach(CCArena* a);     // move ownership out; leave a empty
 
-// Checkpoints (cross-block; disabled after release/overflow — see below)
+// Checkpoints (cross-block; new capture disabled after a slab hole)
 typedef struct CCArenaCheckpoint CCArenaCheckpoint;
 CCArenaCheckpoint cc_arena_checkpoint(CCArena* a);
-void cc_arena_restore(CCArenaCheckpoint checkpoint);
+bool cc_arena_restore(CCArenaCheckpoint checkpoint);  // false: refuse, no mutate
 
 // Shared alloc (thread-safe tip CAS + meta_lock on grow/ovf/chain)
 void* cc_arena_alloc(CCArena* a, size_t nbytes, size_t align);
@@ -1919,9 +1919,16 @@ overflow pointer is undefined behavior, same as a pre-reset slab pointer.
   a separate malloc, linked on a doubly-linked `ovf_head` list.
   `cc_arena_release` unlinks and frees immediately.
 
-First non-last-live slab release, or any heap-overflow alloc, marks the arena
-non-rewindable (`CC_ARENA_FLAG_NON_REWINDABLE`). Releasing the last live alloc on
-the root slab rewinds the tip to zero and clears that flag.
+First non-last-live slab release marks the arena non-rewindable
+(`CC_ARENA_FLAG_NON_REWINDABLE`). Releasing the last live alloc on the root slab
+rewinds the tip to zero and clears that flag — a slab hole only; it does not
+absolve a punctured overflow keep-set. Overflow allocation does not itself
+disable rewind: each overflow object records the arena provenance epoch at mint,
+and restore drains overflow whose epoch does not match the checkpoint.
+Releasing overflow does not set `NON_REWINDABLE`. A checkpoint stores the live
+overflow count for its epoch (`ovf_keep`); restore refuses if that count no
+longer matches. Releasing a current-epoch overflow object is invisible to an
+older checkpoint's keep-set.
 
 **Rule:** `cc_arena_reset` frees outstanding overflow, unwinds extents, restores
 the original root (`block_idx = 0`), clears used-overflow / non-rewindable flags,
@@ -1934,16 +1941,21 @@ root buffers, then clears the handle.
 
 ### Checkpoints
 
-Checkpoints are cross-block: they capture `block_idx`, offset, and provenance,
-then advance provenance for subsequent allocations. Restore unwinds newer extents
-and restores offset/provenance; post-checkpoint allocations become stale; prior
-ones remain valid. Checkpoints do not change ownership rules.
+Checkpoints are cross-block: they capture `block_idx`, offset, `live_allocs`, and
+provenance, then advance provenance for subsequent allocations. The active
+overflow chunk is sealed so later overflow cannot share a chunk with the
+keep-set. Restore unwinds newer extents, writes back the saved offset and
+`live_allocs`, restores provenance, and frees overflow minted in a later epoch;
+post-checkpoint allocations become stale; prior ones remain valid. Checkpoints
+do not change ownership rules.
 
-While the arena is non-rewindable (mid-lifetime release or heap overflow),
-`cc_arena_checkpoint` returns a null handle (`checkpoint.arena == NULL`) and
-emits a one-time diagnostic; `cc_arena_restore` of a null handle or against a
-non-rewindable arena is a no-op. `cc_arena_reset` restores rewindability for the
-new epoch.
+While the arena has a slab hole (`NON_REWINDABLE`), `cc_arena_checkpoint`
+returns a null handle (`checkpoint.arena == NULL`) and emits a one-time
+diagnostic. `cc_arena_restore` returns false and does not mutate on a null
+handle, a slab hole, a punctured overflow keep-set, or a checkpoint that would
+advance the tip (stale nested restore); each refusal emits a diagnostic.
+Dropping a checkpoint handle does not block a later `checkpoint()`.
+`cc_arena_reset` restores rewindability for the new epoch.
 
 ```c
 CCArena a = cc_arena_heap(megabytes(1)) @destroy;
@@ -7481,7 +7493,7 @@ On alloc failure in current block:
 
 **Reset:** Drain overflow, walk `prev` chain to the original root, free intermediate buffers and extent structs, restore root state, set offset = 0, advance provenance.
 
-**Checkpoint/Restore:** Checkpoint captures `{arena, offset, block_idx, provenance}` and immediately starts a fresh arena provenance epoch for subsequent allocations. Restore checks if `checkpoint.block_idx < arena->block_idx`; if so, it unwinds the chain by freeing the current block and all extents newer than the checkpoint, restoring the root to the target block, then restores the checkpoint's provenance epoch. While non-rewindable, `cc_arena_checkpoint` returns a null handle.
+**Checkpoint/Restore:** Checkpoint captures `{arena, offset, live_allocs, ovf_keep, block_idx, provenance}` and immediately starts a fresh arena provenance epoch for subsequent allocations, sealing the active overflow chunk. Restore refuses (no mutate) if the arena has a slab hole, if live overflow in the saved epoch no longer matches `ovf_keep`, or if the checkpoint would advance the tip. Otherwise, if `checkpoint.block_idx < arena->block_idx`, it unwinds the chain by freeing the current block and all extents newer than the checkpoint, restoring the root to the target block, then restores the checkpoint's offset, live count, and provenance epoch and drains overflow whose header epoch does not match. While a slab hole is live, `cc_arena_checkpoint` returns a null handle.
 
 **Per-request pattern:**
 

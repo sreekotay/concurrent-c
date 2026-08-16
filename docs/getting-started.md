@@ -312,6 +312,11 @@ alloc and drain). Overflow is the escape hatch, not the steady-state path.
 Prefer a second arena when lifetimes diverge rather than churning
 `cc_arena_release` on a long-lived one.
 
+`a.checkpoint()` / `cp.restore()` work after overflow alloc: restore rewinds
+slabs and frees overflow minted in the later epoch. A mid-slab hole disables
+a new `checkpoint()` until last-live rewind or `reset`. Restore of a handle
+whose overflow keep-set was released refuses (does not pretend to succeed).
+
 | Constructor | Role |
 |-------------|------|
 | `cc_arena_heap(N) @destroy` | Names a lifetime; heap root + default grow/overflow policy |

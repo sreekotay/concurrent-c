@@ -23,7 +23,7 @@
 - **[Grammar and SERDES](../spec/cc_serdes.md)** — Grammar engines and serialization operations
 - **[Variants](../spec/draft_variants.md)** — Tagged-union semantics and packed layout
 - **[Type views](../spec/draft_facets.md)** — `@typeview` faces and allow-lists (draft). Tutorial: [typehooks-typeviews.md](typehooks-typeviews.md)
-- **[Allocator Strategy](../spec/draft_alloc_strategy.md)** — Arena release and heap-overflow behavior
+- **[Allocator Strategy](../spec/draft_alloc_strategy.md)** — Arena release, heap overflow, and checkpoint/restore
 - **[Fiber Scheduler](../spec/concurrent-c-scheduler.md)** — Scheduler state machine and park/wake contract
 - **[Scheduler ops runbook](scheduler-ops-runbook.md)** — Build/test/diagnose loops for the scheduler
 - **[Examples](../examples/)** — Working code examples with [learning path](../examples/README.md#learning-path-recommended-order)

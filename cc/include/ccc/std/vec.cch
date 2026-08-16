@@ -364,8 +364,8 @@ CC_GENERIC_FACTORY(Vec, 1) {
                       cc_slice_eq_cstr(&t, "long_long");
     CCString decl = typed_slice
         ? @string(`CC_VEC_DECL_ARENA_TSLICE(${t}, ${mangled}, CCSlice_${t})`,
-                  @scratch)
-        : @string(`CC_VEC_DECL_ARENA(${t}, ${mangled})`, @scratch);
+                  arena)
+        : @string(`CC_VEC_DECL_ARENA(${t}, ${mangled})`, arena);
     return @emit(`
 #ifdef CC_FRAGMENT_VALIDATE
 typedef struct ${mangled}_chk { char _; } ${mangled}_chk;

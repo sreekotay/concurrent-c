@@ -72,12 +72,20 @@ first follows the ordinary growth policy. If growth fails or reaches its block
 budget and overflow is enabled, the allocation uses `malloc` and is accounted
 in the arena's outstanding overflow bytes.
 
-Overflow allocation makes the current arena epoch non-rewindable. Overflow
-pointers remain individually releasable and reallocatable through the arena
-via `cc_arena_release` / `cc_arena_realloc`. `cc_arena_reset` and
-`cc_arena_free` / `cc_arena_destroy` also free every outstanding overflow
-allocation (tier 3). Using a pre-reset overflow pointer afterward is undefined
-behavior, same as using a pre-reset slab pointer.
+Overflow allocation stamps the current arena provenance epoch on the overflow
+header and does not itself make the epoch non-rewindable. Overflow pointers
+remain individually releasable and reallocatable through the arena via
+`cc_arena_release` / `cc_arena_realloc`. Realloc preserves the object's
+mint epoch. `cc_arena_reset` and `cc_arena_free` / `cc_arena_destroy` also
+free every outstanding overflow allocation (tier 3). Using a pre-reset
+overflow pointer afterward is undefined behavior, same as using a pre-reset
+slab pointer. Ownership is fail-closed: each overflow payload carries a
+header (`CC_ARENA_OVF_MAGIC` / `CC_ARENA_OVF_MAGIC_CHUNK`); a foreign,
+stale, or already-released pointer is refused (`false` / `NULL`) rather
+than passed to `free`/`realloc`. Per-object release unlinks and frees
+immediately; after `free` the header is gone, so a later double-release is
+undefined if the bytes have been reused. Chunk release punches a `DEAD`
+hole and leaves the chunk allocated until reset/restore.
 
 ## Individual release
 
@@ -92,21 +100,15 @@ A recognized double release or live-count mismatch returns `false` and reports
 a diagnostic.
 
 When heap overflow is enabled, a pointer outside the arena's slab chain takes
-the permissive overflow path: `free(ptr)` is performed and the available size
-information is removed from overflow accounting. By default this path has no
-per-allocation ownership table and cannot verify ownership. The caller must
-pass a live overflow allocation obtained through the same arena. Passing a
-foreign, stale, or already released pointer, including a double release, is
-undefined behavior even if `cc_arena_release` returns `true`.
+the overflow-header path. The caller must pass a live overflow allocation
+obtained through the same arena.
 
-Define `CC_DEBUG_ARENA_OVERFLOW_OWNERSHIP` to a non-zero value to record each
-overflow allocation against its arena and refuse overflow-path
-`cc_arena_release` / `cc_arena_realloc` for pointers not so recorded (returns
-`false` / `NULL` with a diagnostic instead of calling `free`/`realloc`).
-
-Any successful individual release makes the current arena epoch
-non-rewindable. Whole-arena `cc_arena_reset`, `cc_arena_free`, and
-`cc_arena_destroy` remain distinct lifecycle operations.
+A mid-slab release (any successful slab release that is not the last live
+allocation on the root slab) makes the current arena epoch non-rewindable.
+Overflow release does not. Restore of a checkpoint whose `ovf_keep` no
+longer matches the live overflow count for that epoch refuses. Whole-arena
+`cc_arena_reset`, `cc_arena_free`, and `cc_arena_destroy` remain distinct
+lifecycle operations.
 
 `cc_arena_realloc` preserves the shared prefix of the old and new sizes. When
 a slab allocation sits at the active bump tip (`ptr + old_size` equals the
@@ -118,23 +120,30 @@ through the source arena.
 
 ## Checkpoint and restore
 
-Checkpoint and restore operate only while allocation is monotonic:
+Checkpoint and restore operate while the slab prefix is intact (no mid-slab
+hole). Overflow keep-set puncture is detected at restore, not by disabling
+a later `checkpoint()`:
 
 ```c
 CCArenaCheckpoint checkpoint = cc_arena_checkpoint(&arena);
 cc_arena_restore(checkpoint);
 ```
 
-A rewindable checkpoint records the active block, offset, and current
+A rewindable checkpoint records the active block, offset, root-slab
+`live_allocs`, live overflow count for that epoch (`ovf_keep`), and current
 provenance epoch, then advances the arena to a fresh provenance epoch for
-subsequent allocations. Restore discards newer growth blocks and restores the
-saved offset and provenance. Slices minted from the later epoch become stale;
-pre-checkpoint slices retain the restored epoch.
+subsequent allocations and seals the active overflow chunk. Restore discards
+newer growth blocks, writes back the saved offset and live count, restores
+provenance, and frees overflow whose header epoch does not match the
+checkpoint. Slices minted from the later epoch become stale; pre-checkpoint
+slices retain the restored epoch.
 
-After heap overflow or individual release makes an epoch non-rewindable,
-`cc_arena_checkpoint` returns a null checkpoint with
-`checkpoint.arena == NULL`. Restoring a null checkpoint is a no-op. Restoring
-any checkpoint while its arena is non-rewindable is also a no-op.
+After a mid-slab hole, `cc_arena_checkpoint` returns a null checkpoint with
+`checkpoint.arena == NULL`. `cc_arena_restore` returns false and does not
+mutate on a null handle, a slab hole, an `ovf_keep` mismatch (keep-set
+object released), or a checkpoint that would advance the tip. Last-live
+root release may clear a slab hole; it does not make a punctured keep-set
+restorable. Dropping a checkpoint handle does not block a later capture.
 `cc_arena_reset` frees outstanding overflow (tier 3), clears the
 non-rewindable and used-overflow flags, returns to the original block, resets
 allocation counts and offset, advances provenance, and enables checkpointing

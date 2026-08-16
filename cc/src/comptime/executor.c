@@ -1041,6 +1041,13 @@ int cc_comptime_exec_compile_tu(const char* tu_src, void** out_state,
     memset(&sink, 0, sizeof(sink));
     TCCState* s = cc__exec_new_state(&sink, err_buf, err_sz);
     if (!s) return -1;
+    if (getenv("CC_DEBUG_COMPTIME_EXEC_DUMP")) {
+        FILE* df = fopen(getenv("CC_DEBUG_COMPTIME_EXEC_DUMP"), "wb");
+        if (df) {
+            fwrite(tu_src, 1, strlen(tu_src), df);
+            fclose(df);
+        }
+    }
     if (tcc_compile_string(s, tu_src) < 0) {
         if (err_buf && err_sz) {
             if (sink.buf[0]) snprintf(err_buf, err_sz, "%s", sink.buf);

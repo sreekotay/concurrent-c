@@ -73,6 +73,11 @@ int main(void) {
         // Restore checkpoint - should unwind all grown blocks
         cc_arena_restore(cp);
         if (a.block_idx != 0) { printf("FAIL: restore didn't unwind to block 0, got %d\n", a.block_idx); return 3; }
+        if (cc_atomic_load(&a.live_allocs) != 1) {
+            printf("FAIL: restore live_allocs want 1 got %zu\n",
+                   (size_t)cc_atomic_load(&a.live_allocs));
+            return 3;
+        }
 
         // Data before checkpoint should still be valid
         for (int i = 0; i < 4; i++) {
@@ -276,13 +281,14 @@ int main(void) {
             printf("FAIL: overflow byte accounting after release\n");
             return 7;
         }
-        /* Individual overflow release makes the epoch non-rewindable. */
+        /* Current-epoch overflow release does not disable checkpoint. */
         {
             CCArenaCheckpoint cp = cc_arena_checkpoint(&a);
-            if (cp.arena != NULL) {
-                printf("FAIL: checkpoint should be disabled after overflow release\n");
+            if (cp.arena == NULL) {
+                printf("FAIL: checkpoint should work after current-epoch overflow release\n");
                 return 7;
             }
+            cc_arena_restore(cp);
         }
 
         void *moved_src = cc_arena_alloc(&a, 64, 8);

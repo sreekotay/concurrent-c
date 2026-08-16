@@ -14,13 +14,16 @@ int main(void) {
         *a1 = 11;
 
         CCArenaCheckpoint cp = cc_arena_checkpoint(arena);
+        assert(cp.live_allocs == 1);
 
         int* a2 = cc_arena_alloc_T_count(int, arena, 4);
         assert(a2 != NULL);
         a2[0] = 22;
+        assert(cc_atomic_load(&arena->live_allocs) == 2);
 
         // Restore: allocations after checkpoint should be reclaimed
         cc_arena_restore(cp);
+        assert(cc_atomic_load(&arena->live_allocs) == 1);
 
         int* a3 = cc_arena_alloc_T_count(int, arena, 4);
         assert(a3 != NULL);

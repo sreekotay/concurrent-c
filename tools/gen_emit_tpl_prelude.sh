@@ -69,6 +69,19 @@ HDR
     "extern int cc_reflect_field_name(const char* type_name, int idx, char* buf, int buf_sz);\n" \
     "extern int cc_reflect_field_type(const char* type_name, int idx, char* buf, int buf_sz);\n" \
     "extern int cc_reflect_field_is_as(const char* type_name, int idx);\n" \
+    "extern int cc_result_box_name(const char* ok_type, const char* err_type, char* buf, int buf_sz);\n" \
+    "extern int cc_reflect_method_count(const char* type_name);\n" \
+    "extern int cc_reflect_method_name(const char* type_name, int idx, char* buf, int buf_sz);\n" \
+    "extern int cc_reflect_param_count(const char* params);\n" \
+    "extern int cc_reflect_param_name(const char* params, int idx, char* buf, int buf_sz);\n" \
+    "extern int cc_reflect_param_type(const char* params, int idx, char* buf, int buf_sz);\n" \
+    "extern int cc_reflect_param_default(const char* params, int idx, char* buf, int buf_sz);\n" \
+    "extern int cc_reflect_params_c_abi(const char* params, char* buf, int buf_sz);\n" \
+    "extern int cc_reflect_method_member(const char* type_name, int idx, char* buf, int buf_sz);\n" \
+    "extern int cc_reflect_method_params(const char* type_name, int idx, char* buf, int buf_sz);\n" \
+    "extern int cc_reflect_method_args(const char* type_name, int idx, char* buf, int buf_sz);\n" \
+    "extern int cc_reflect_method_ret(const char* type_name, int idx, char* buf, int buf_sz);\n" \
+    "extern int cc_reflect_method_err(const char* type_name, int idx, char* buf, int buf_sz);\n" \
     "extern int cc_reflect_enum_count(const char* enum_name);\n" \
     "extern int cc_reflect_enum_name(const char* enum_name, int idx, char* buf, int buf_sz);\n" \
     "extern int cc_reflect_enum_value(const char* enum_name, int idx, long long* out);\n" \
@@ -109,6 +122,9 @@ HDR
     "static void cc_emit_tpl_splice(int anchor, CCSlice fragment) {\n" \
     "  if (!fragment.ptr || !fragment.len) return;\n" \
     "  cc_emit_raw(anchor, (const char*)fragment.ptr, fragment.len); }\n" \
+    "static void cc_emit_tpl_splice_at(int anchor, const char* file, int line, CCSlice fragment) {\n" \
+    "  if (!fragment.ptr || !fragment.len) return;\n" \
+    "  cc_emit_raw_at(anchor, file, line, (const char*)fragment.ptr, fragment.len); }\n" \
     "static int cc_emit_cstr(int anchor, const char* cstr) {\n" \
     "  if (!cstr) return 0;\n" \
     "  cc_emit_raw(anchor, cstr, strlen(cstr));\n" \

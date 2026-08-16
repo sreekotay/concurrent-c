@@ -67,6 +67,8 @@ struct CCArena {
 struct CCArenaCheckpoint {
     CCArena* arena;
     size_t offset;
+    size_t live_allocs;       // root-slab live count at capture (restore writes this back)
+    size_t ovf_keep;          // live overflow objects in the saved epoch (restore checks this)
     uint16_t block_idx;       // which block this checkpoint was taken in
     uint64_t provenance;      // provenance for allocations that stay valid after restore
 };
@@ -175,19 +177,24 @@ static inline size_t cc__arena_malloc_usable_bytes(void* ptr) {
  *   - Chunk bump (growable heap/stack after slab budget): bump inside 64KiB
  *     (or larger) chunks on ovf_chunks; release punches a hole; reset/free
  *     frees a few chunks instead of one free per object.
- * malloc base for per-object is (uint8_t*)h - raw_delta. Double-release → DEAD. */
+ * malloc base for per-object is (uint8_t*)h - raw_delta. Double-release → DEAD.
+ * `provenance` is the arena epoch at alloc; restore frees overflow whose epoch
+ * does not match the checkpoint. Overflow alloc does not itself disable rewind. */
 struct CCArenaOvfHeader {
     uint32_t magic;
     uint32_t raw_delta; /* per-object: bytes back to malloc base; chunk: 0 */
     CCArena *arena;
     CCArenaOvfHeader *next; /* per-object DLL; chunk-obj: (CCArenaOvfHeader*)chunk */
     CCArenaOvfHeader *prev;
+    uint64_t provenance; /* arena epoch at mint; restore keeps matching epoch */
 };
 
 struct CCArenaOvfChunk {
     CCArenaOvfChunk *next;
     size_t capacity; /* bytes in data[] */
     size_t offset;   /* bump tip into data[] */
+    size_t live;     /* non-DEAD objects in this chunk */
+    uint64_t provenance; /* epoch of objects in this chunk (no mix across checkpoint) */
     /* uint8_t data[capacity] follows */
 };
 
@@ -302,6 +309,109 @@ static inline void cc__arena_ovf_free_stolen(CCArenaOvfHeader *heads,
     }
 }
 
+/* Checkpoint seals the active overflow chunk so later overflow cannot share
+ * a chunk with the keep-set. An empty head chunk is restamped to the new epoch
+ * instead of wasting a fresh malloc. */
+static inline void cc__arena_ovf_seal_for_new_epoch(CCArena *arena) {
+    CCArenaOvfChunk *c;
+    if (!arena) return;
+    c = arena->ovf_chunks;
+    if (!c) return;
+    if (c->offset == 0) c->provenance = arena->provenance;
+    else c->offset = c->capacity;
+}
+
+/* Split overflow into keep (matching epoch) vs kill. Caller holds meta_lock.
+ * Kill lists are singly linked via next for cc__arena_ovf_free_stolen. */
+static inline void cc__arena_ovf_split_by_epoch_locked(CCArena *arena,
+                                                       uint64_t keep_prov,
+                                                       CCArenaOvfHeader **kill_heads,
+                                                       CCArenaOvfChunk **kill_chunks) {
+    CCArenaOvfHeader *h;
+    CCArenaOvfHeader *keep_h = NULL;
+    CCArenaOvfChunk *c;
+    CCArenaOvfChunk *keep_c = NULL;
+    if (!arena) return;
+    if (kill_heads) *kill_heads = NULL;
+    if (kill_chunks) *kill_chunks = NULL;
+
+    h = arena->ovf_head;
+    arena->ovf_head = NULL;
+    while (h) {
+        CCArenaOvfHeader *next = h->next;
+        h->prev = NULL;
+        h->next = NULL;
+        if (h->provenance == keep_prov) {
+            h->next = keep_h;
+            if (keep_h) keep_h->prev = h;
+            keep_h = h;
+        } else if (kill_heads) {
+            h->next = *kill_heads;
+            *kill_heads = h;
+        }
+        h = next;
+    }
+    arena->ovf_head = keep_h;
+
+    c = arena->ovf_chunks;
+    arena->ovf_chunks = NULL;
+    while (c) {
+        CCArenaOvfChunk *next = c->next;
+        if (c->provenance == keep_prov) {
+            c->next = keep_c;
+            keep_c = c;
+        } else if (kill_chunks) {
+            c->next = *kill_chunks;
+            *kill_chunks = c;
+        }
+        c = next;
+    }
+    arena->ovf_chunks = keep_c;
+
+    if (!arena->ovf_head && !arena->ovf_chunks) {
+        CC_ATOMIC_STORE(&arena->overflow_bytes, 0);
+        arena->_flags &= ~CC_ARENA_FLAG_USED_HEAP_OVERFLOW;
+    } else {
+        size_t kill_bytes = 0;
+        CCArenaOvfHeader *kh = kill_heads ? *kill_heads : NULL;
+        CCArenaOvfChunk *kc = kill_chunks ? *kill_chunks : NULL;
+        while (kh) {
+            kill_bytes += cc__arena_malloc_usable_bytes(cc__arena_ovf_raw(kh));
+            kh = kh->next;
+        }
+        while (kc) {
+            kill_bytes += sizeof(CCArenaOvfChunk) + kc->capacity;
+            kc = kc->next;
+        }
+        if (kill_bytes > 0) {
+            size_t cur = CC_ATOMIC_LOAD(&arena->overflow_bytes);
+            if (cur <= kill_bytes) CC_ATOMIC_STORE(&arena->overflow_bytes, 0);
+            else CC_ATOMIC_FETCH_SUB(&arena->overflow_bytes, kill_bytes);
+        }
+    }
+}
+
+/* Live overflow objects minted in `prov`. Per-object nodes are the live set;
+ * chunk `live` skips DEAD holes. Restore compares this to the checkpoint. */
+static inline size_t cc__arena_ovf_count_epoch(const CCArena *arena, uint64_t prov) {
+    size_t n = 0;
+    const CCArenaOvfHeader *h;
+    const CCArenaOvfChunk *c;
+    if (!arena) return 0;
+    for (h = arena->ovf_head; h; h = h->next) {
+        if (h->provenance == prov) n++;
+    }
+    for (c = arena->ovf_chunks; c; c = c->next) {
+        if (c->provenance == prov) n += c->live;
+    }
+    return n;
+}
+
+static inline void cc__arena_report_restore_error(const char *msg) {
+    if (!msg) return;
+    fprintf(stderr, "cc_arena_restore: %s\n", msg);
+}
+
 /* Validate, unlink, and invalidate a *per-object* overflow alloc. */
 static inline bool cc__arena_ovf_take(CCArena *arena, void *payload, void **raw_out) {
     CCArenaOvfHeader *h;
@@ -353,10 +463,11 @@ static inline void *cc__arena_alloc_ovf_object(CCArena *arena, size_t size, size
     h->next = NULL;
     h->prev = NULL;
     cc__arena_meta_lock(arena);
+    h->provenance = arena->provenance;
     cc__arena_ovf_push_locked(arena, h);
     /* Account requested size (not malloc_usable_size) — our tax, not size-class noise. */
     CC_ATOMIC_FETCH_ADD(&arena->overflow_bytes, total);
-    arena->_flags |= CC_ARENA_FLAG_USED_HEAP_OVERFLOW | CC_ARENA_FLAG_NON_REWINDABLE;
+    arena->_flags |= CC_ARENA_FLAG_USED_HEAP_OVERFLOW;
     cc__arena_meta_unlock(arena);
     return payload;
 }
@@ -388,6 +499,8 @@ static inline void *cc__arena_alloc_ovf_chunked(CCArena *arena, size_t size, siz
         fresh->next = arena->ovf_chunks;
         fresh->capacity = cap;
         fresh->offset = 0;
+        fresh->live = 0;
+        fresh->provenance = arena->provenance;
         arena->ovf_chunks = fresh;
         CC_ATOMIC_FETCH_ADD(&arena->overflow_bytes, sizeof(CCArenaOvfChunk) + cap);
         chunk = fresh;
@@ -412,7 +525,9 @@ static inline void *cc__arena_alloc_ovf_chunked(CCArena *arena, size_t size, siz
     h->arena = arena;
     h->next = (CCArenaOvfHeader *)(void *)chunk;
     h->prev = NULL;
-    arena->_flags |= CC_ARENA_FLAG_USED_HEAP_OVERFLOW | CC_ARENA_FLAG_NON_REWINDABLE;
+    h->provenance = arena->provenance;
+    chunk->live++;
+    arena->_flags |= CC_ARENA_FLAG_USED_HEAP_OVERFLOW;
     cc__arena_meta_unlock(arena);
     return payload;
 }
@@ -803,6 +918,7 @@ static inline void *cc_arena_realloc(CCArena *old_arena,
             void *new_raw;
             void *new_payload;
             size_t new_off;
+            uint64_t saved_prov = h->provenance;
             cc__arena_ovf_unlink_locked(old_arena, h);
             cc__arena_meta_unlock(old_arena);
             new_raw = realloc(old_raw, total);
@@ -831,6 +947,7 @@ static inline void *cc_arena_realloc(CCArena *old_arena,
             h->arena = old_arena;
             h->next = NULL;
             h->prev = NULL;
+            h->provenance = saved_prov;
             cc__arena_meta_lock(old_arena);
             cc__arena_ovf_push_locked(old_arena, h);
             new_bytes = total;
@@ -839,7 +956,7 @@ static inline void *cc_arena_realloc(CCArena *old_arena,
                 CC_ATOMIC_FETCH_SUB(&old_arena->overflow_bytes, old_bytes);
             }
             CC_ATOMIC_FETCH_ADD(&old_arena->overflow_bytes, new_bytes);
-            old_arena->_flags |= CC_ARENA_FLAG_USED_HEAP_OVERFLOW | CC_ARENA_FLAG_NON_REWINDABLE;
+            old_arena->_flags |= CC_ARENA_FLAG_USED_HEAP_OVERFLOW;
             cc__arena_meta_unlock(old_arena);
             return new_payload;
         }
@@ -1182,7 +1299,9 @@ static inline size_t gigabytes(size_t n) { return n * 1024 * 1024 * 1024; }
  * growth), then tier-3 malloc overflow. Size N for typical request live set —
  * with N≈16MiB, four slabs cover ~100MiB-class live; a tiny N still works but
  * spills to overflow (slower alloc + drain). Overflow stays arena-owned and is
- * freed on reset/free.
+ * freed on reset/free. Checkpoint/restore stays rewindable after overflow
+ * alloc; restore drains overflow minted in a later epoch and refuses if that
+ * handle's keep-set was released.
  *
  * cc_arena_malloc: block_max=1, no extent growth — do not use for "tons of
  * scratch allocs" (that is malloc-with-tax). Prefer heap/stack for scratch;
@@ -1294,9 +1413,10 @@ static inline bool cc_arena_release(CCArena* arena, void* ptr) {
             cc__arena_report_release_error("double release or live_allocs mismatch", ptr);
             return false;
         }
-        /* Last live alloc on the root slab: full bump rewind — arena is empty
-         * again, so stay in epoch/checkpoint mode. Any other release punches a
-         * logical hole and flips to count/release (non-rewindable). */
+        /* Last live alloc on the root slab: full bump rewind. This clears a
+         * *slab* hole only — overflow keep-set puncture is a restore-time
+         * ovf_keep mismatch, not this flag. Any other slab release punches a
+         * logical hole (NON_REWINDABLE). */
         if (block == arena && prev_live == 1) {
             CC_ATOMIC_STORE(&arena->offset, 0);
             arena->_flags &= ~CC_ARENA_FLAG_NON_REWINDABLE;
@@ -1317,12 +1437,14 @@ static inline bool cc_arena_release(CCArena* arena, void* ptr) {
         }
         h = cc__arena_ovf_header(ptr);
         if (h->magic == CC_ARENA_OVF_MAGIC_CHUNK) {
-            /* Chunk bump: hole until reset/free (same as slab mid-life release). */
+            /* Chunk bump: hole until reset/free. Keep-set puncture is detected
+             * at restore by ovf_keep count, not by NON_REWINDABLE. */
+            CCArenaOvfChunk *chunk = (CCArenaOvfChunk *)(void *)h->next;
             h->magic = CC_ARENA_OVF_MAGIC_DEAD;
             h->arena = NULL;
             h->next = NULL;
             h->prev = NULL;
-            arena->_flags |= CC_ARENA_FLAG_NON_REWINDABLE;
+            if (chunk && chunk->live > 0) chunk->live--;
             cc__arena_meta_unlock(arena);
             return true;
         }
@@ -1345,7 +1467,6 @@ static inline bool cc_arena_release(CCArena* arena, void* ptr) {
                     CC_ATOMIC_FETCH_SUB(&arena->overflow_bytes, bytes);
                 }
             }
-            arena->_flags |= CC_ARENA_FLAG_NON_REWINDABLE;
             cc__arena_meta_unlock(arena);
             free(raw);
             return true;
@@ -1504,8 +1625,8 @@ static inline void cc__arena_warn_checkpoint_disabled_once(void) {
     unsigned expected = 0;
     if (!CC_ATOMIC_CAS(&once, &expected, 1u)) return;
     fprintf(stderr,
-            "cc_arena_checkpoint: arena is in release/overflow mode; "
-            "checkpoints disabled (restore would no-op)\n");
+            "cc_arena_checkpoint: arena has a slab hole; "
+            "checkpoints disabled (restore would refuse)\n");
 }
 
 // Capture current arena allocation state (including block index for cross-block restore).
@@ -1513,16 +1634,21 @@ static inline CCArenaCheckpoint cc_arena_checkpoint(CCArena* arena) {
     CCArenaCheckpoint cp;
     cp.arena = NULL;
     cp.offset = 0;
+    cp.live_allocs = 0;
+    cp.ovf_keep = 0;
     cp.block_idx = 0;
     cp.provenance = 0;
     if (!arena) return cp;
     cc__arena_meta_lock(arena);
     cp.offset = CC_ATOMIC_LOAD(&arena->offset);
+    cp.live_allocs = CC_ATOMIC_LOAD(&arena->live_allocs);
+    cp.ovf_keep = cc__arena_ovf_count_epoch(arena, arena->provenance);
     cp.block_idx = arena->block_idx;
     cp.provenance = arena->provenance;
     if (!(arena->_flags & CC_ARENA_FLAG_NON_REWINDABLE)) {
         cp.arena = arena;
         arena->provenance = CC_ATOMIC_FETCH_ADD(&cc_arena_prov_counter, 1);
+        cc__arena_ovf_seal_for_new_epoch(arena);
     }
     cc__arena_meta_unlock(arena);
     if (!cp.arena) cc__arena_warn_checkpoint_disabled_once();
@@ -1535,19 +1661,50 @@ static inline CCArenaCheckpoint cc_arena_checkpoint(CCArena* arena) {
 // root to the checkpointed block's state.
 // Restoring also restores the checkpoint's provenance epoch so allocations made
 // after the checkpoint become stale while earlier allocations remain valid.
-static inline void cc_arena_restore(CCArenaCheckpoint checkpoint) {
+// Overflow minted after the checkpoint (different epoch) is drained; keep-set
+// overflow is left in place. live_allocs is restored from the checkpoint, not
+// from a grown extent.
+// Returns false (and does not mutate) on a null handle, a slab hole, a
+// punctured overflow keep-set, or a checkpoint that would advance the tip.
+static inline bool cc_arena_restore(CCArenaCheckpoint checkpoint) {
     CCArena* arena = checkpoint.arena;
     uint8_t *free_root = NULL;
     CCArena *free_chain = NULL;
     CCArena *free_target = NULL;
+    CCArenaOvfHeader *kill_heads = NULL;
+    CCArenaOvfChunk *kill_chunks = NULL;
     size_t off;
-    if (!arena) return;
+    size_t cur_off;
+    if (!arena) {
+        cc__arena_report_restore_error("null checkpoint");
+        return false;
+    }
 
     cc__arena_meta_lock(arena);
     if (arena->_flags & CC_ARENA_FLAG_NON_REWINDABLE) {
         cc__arena_meta_unlock(arena);
-        return;
+        cc__arena_report_restore_error("slab hole; refuse");
+        return false;
     }
+    if (checkpoint.block_idx > arena->block_idx) {
+        cc__arena_meta_unlock(arena);
+        cc__arena_report_restore_error("checkpoint is ahead of arena (stale nested restore)");
+        return false;
+    }
+    cur_off = CC_ATOMIC_LOAD(&arena->offset);
+    if (checkpoint.block_idx == arena->block_idx && checkpoint.offset > cur_off) {
+        cc__arena_meta_unlock(arena);
+        cc__arena_report_restore_error("checkpoint is ahead of tip (stale nested restore)");
+        return false;
+    }
+    if (cc__arena_ovf_count_epoch(arena, checkpoint.provenance) != checkpoint.ovf_keep) {
+        cc__arena_meta_unlock(arena);
+        cc__arena_report_restore_error("overflow keep-set punctured; refuse");
+        return false;
+    }
+
+    cc__arena_ovf_split_by_epoch_locked(arena, checkpoint.provenance,
+                                       &kill_heads, &kill_chunks);
 
     if (checkpoint.block_idx < arena->block_idx) {
         CCArena *cur;
@@ -1584,8 +1741,11 @@ static inline void cc_arena_restore(CCArenaCheckpoint checkpoint) {
     off = checkpoint.offset;
     if (off > arena->capacity) off = arena->capacity;
     CC_ATOMIC_STORE(&arena->offset, off);
+    CC_ATOMIC_STORE(&arena->live_allocs, checkpoint.live_allocs);
     arena->provenance = checkpoint.provenance;
     cc__arena_meta_unlock(arena);
+
+    cc__arena_ovf_free_stolen(kill_heads, kill_chunks);
 
     if (free_root) free(free_root);
     while (free_chain) {
@@ -1597,6 +1757,7 @@ static inline void cc_arena_restore(CCArenaCheckpoint checkpoint) {
         free_chain = next;
     }
     if (free_target) free(free_target);
+    return true;
 }
 
 /* Pointer-taking UFCS wrapper: `cp.restore()` lowers to
@@ -1605,13 +1766,16 @@ static inline void cc_arena_restore(CCArenaCheckpoint checkpoint) {
    cc_arena_checkpoint), which forwards by value to cc_arena_restore.
    Keeping the value-taking `cc_arena_restore` as the canonical entry
    point preserves existing C callers. */
-static inline void cc_arena_checkpoint_restore(CCArenaCheckpoint* cp) {
-    if (!cp) return;
-    cc_arena_restore(*cp);
+static inline bool cc_arena_checkpoint_restore(CCArenaCheckpoint* cp) {
+    bool ok;
+    if (!cp || !cp->arena) return false; /* already consumed or never armed */
+    ok = cc_arena_restore(*cp);
+    cp->arena = NULL; /* one-shot: @destroy must not retry a refused restore */
+    return ok;
 }
 
 static inline void cc_arena_checkpoint_destroy(CCArenaCheckpoint* cp) {
-    cc_arena_checkpoint_restore(cp);
+    (void)cc_arena_checkpoint_restore(cp);
 }
 
 // True (non-zero) iff the current slab can satisfy this alloc without growing
@@ -1945,10 +2109,11 @@ static inline void* cc_arena_pool_iter_next(CCArenaPoolIter* it) {
  *    points into the caller's frame. Debug-check / document: detach requires
  *    a heap-rooted arena (CC_ARENA_FLAG_HEAP_OWNED root).
  *
- * 2. Document the modal lifecycle: epoch/rewind (checkpoint/restore/reset) vs
- *    count/release (cc_arena_release; last-live root release returns to epoch).
- *    Flip is first non-last release or heap-overflow alloc. checkpoint() now
- *    fprintf-once when disabled; restore() of a null handle still no-ops.
+ * 2. Modal lifecycle: epoch/rewind (checkpoint/restore/reset) vs count/release.
+ *    NON_REWINDABLE is a slab hole only; last-live root release may clear it.
+ *    Overflow keep-set puncture is a restore-time ovf_keep mismatch (does not
+ *    block a new checkpoint). Restore refuses (returns false, diagnostic)
+ *    on a slab hole, punctured keep-set, or a checkpoint that would advance.
  *
  * 3. Stdlib defaults stay on shared `cc_arena_alloc` (safe). Opt into
  *    `*_local_grow` only at exclusive-owner call sites (request/scratch fiber);

@@ -68,8 +68,14 @@ Typed pointers use `cc_arena_alloc_T` / `cc_arena_alloc_T_count` (UFCS:
 `arena.allocT()` / `arena.allocT(n)`). Tracked byte slices use
 `cc_arena_alloc_slice_bytes` (UFCS: `arena.alloc_slice_bytes(n)`); failure
 yields an empty slice. Exhausted allocation with overflow disabled returns
-`NULL` / empty — never a success-looking no-op. Normative growth, overflow,
-and release rules are in `spec/concurrent-c-spec-complete.md` §5 and
+`NULL` / empty — never a success-looking no-op. Checkpoint/restore is
+rewindable after overflow allocation: restore rewinds the slab prefix and
+drains overflow minted in a later provenance epoch. A mid-slab hole disables
+a new `checkpoint()` until last-live root rewind or `cc_arena_reset`.
+Release of an older-epoch overflow object does not block a new checkpoint;
+restore of that handle refuses (`false`, no mutate) if `ovf_keep` no longer
+matches. Normative growth, overflow, release, and checkpoint rules
+are in `spec/concurrent-c-spec-complete.md` §5 and
 `spec/draft_alloc_strategy.md`.
 
 ## Generic factories and UFCS
@@ -245,7 +251,9 @@ exhaustion. An optional `@destroy` on the declaration calls
 diagnostic when the pointer is not owned by the arena; a successful
 mid-slab release punches a hole and marks the arena non-rewindable
 unless it was the last live root allocation (which rewinds the tip).
-The declaration still states the allocation's scope.
+Overflow release never sets that flag; restore of a checkpoint whose
+`ovf_keep` no longer matches refuses. The declaration still states the
+allocation's scope.
 
 ### Arena-backed slice operations
 

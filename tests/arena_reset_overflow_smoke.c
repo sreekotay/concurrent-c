@@ -27,6 +27,14 @@ int main(void) {
         printf("FAIL: expected ovf_head link\n");
         return 1;
     }
+    if (a._flags & CC_ARENA_FLAG_NON_REWINDABLE) {
+        printf("FAIL: overflow alloc must stay rewindable\n");
+        return 1;
+    }
+    if (cc_arena_checkpoint(&a).arena == NULL) {
+        printf("FAIL: checkpoint should work after overflow alloc\n");
+        return 1;
+    }
 
     cc_arena_reset(&a);
 

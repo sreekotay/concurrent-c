@@ -2792,6 +2792,12 @@ static int ss_term(SS* s, int* out_term) {
                 }
             }
         }
+    } else if (v[0] >= 'a' && v[0] <= 'z') {
+        /* `v: num` with `use G` is a bare rule name, not a schema type.
+         * Nested schemas are CapCase (`v: OtherSchema`). */
+        return ss_fail(s, s->p, "this schema composes with `use` (shared factory): "
+                                "qualify rule references with the use name; bare names "
+                                "are for schemas with an inline rules [...] section (private copy)");
     } else {
         /* `field: Schema` — single nested value. Pointer + arena alloc so
          * the named type may be declared later in the file (JSON member

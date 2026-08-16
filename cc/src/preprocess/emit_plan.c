@@ -2943,6 +2943,30 @@ size_t cc_emit_plan_compute_container_anchor(const char* src, size_t len) {
             if (is_if) {
                 int depth = 1;
                 int region_refs_container = 0;
+                /* Factory product splices wrap the real decl in
+                 * `#ifdef CC_FRAGMENT_VALIDATE` / `#else`. Product TUs never
+                 * define that macro; AFTER_PRELUDE must not land in the stub
+                 * arm (TRIPLE_HAS / cc_emit_format would vanish). */
+                {
+                    size_t op = kw;
+                    if (kw + 5 <= line_end && memcmp(src + kw, "ifdef", 5) == 0)
+                        op = kw + 5;
+                    else if (kw + 6 <= line_end && memcmp(src + kw, "ifndef", 6) == 0)
+                        op = kw + 6;
+                    else
+                        op = 0;
+                    if (op) {
+                        while (op < line_end && (src[op] == ' ' || src[op] == '\t'))
+                            op++;
+                        if (op + 20 <= line_end &&
+                            memcmp(src + op, "CC_FRAGMENT_VALIDATE", 20) == 0 &&
+                            (op + 20 == line_end || !cc_is_ident_char(src[op + 20]))) {
+                            /* Insert before the stub/real-decl wrapper, not
+                             * inside the VALIDATE arm. */
+                            return line_start;
+                        }
+                    }
+                }
                 size_t q = (line_end < len) ? line_end + 1 : line_end;
                 while (q < len && depth > 0) {
                     size_t ls = q, le = q;

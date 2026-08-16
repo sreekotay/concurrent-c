@@ -1,4 +1,4 @@
-#include <ccc/cc_runtime.cch>
+#include <ccc/std/prelude.cch>
 #include <assert.h>
 #include <stdio.h>
 /* Extension by declaration: add methods to container/slice instances

@@ -164,6 +164,14 @@ time in overflow. Prefer another arena when lifetimes diverge; treat
 `cc_arena_release` / overflow as escape hatches, not the steady path. Fixed
 arenas with overflow off return `NULL` on exhaustion (never silent success).
 
+**Checkpoint / restore:** `a.checkpoint()` / `cp.restore()` rewind the slab
+prefix and drain overflow minted after the checkpoint (same contract on
+heap, stack, and `cc_arena_malloc`). Overflow alloc does not disable rewind.
+A mid-slab hole disables a new `checkpoint()` until last-live root rewind or
+`reset`. Restore returns false (no mutate) if that handle's overflow keep-set
+was released, or if the checkpoint would advance the tip. Dropping a
+checkpoint handle does not block a later capture.
+
 A view must not outlive its storage — no stack/arena borrow into an outliving
 task or channel send. Capturing a non-unique arena slice into a nursery **pins**
 that arena’s epoch until join (reset/destroy while pinned is a compile error).
