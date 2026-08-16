@@ -1,0 +1,9 @@
+/* Ordinary quote #include "….h" must passthrough to host-cc (not splice).
+ * The helper is valid C and poison for the CC parser if inlined. */
+#include <stdio.h>
+#include "quote_h_passthrough_helper.h"
+
+int main(void) {
+    printf("sum=%d\n", quote_h_passthrough_add(40, 2));
+    return 0;
+}

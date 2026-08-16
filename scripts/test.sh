@@ -176,6 +176,11 @@ if [ -x "./cc/bin/ccc" ]; then
     echo "[test] CLI selftest FAILED"
     exit 1
   fi
+  # Quote #include "….h" passthrough (ordinary C headers are host-cc's).
+  if ! sh scripts/test_quote_h_passthrough.sh; then
+    echo "[test] quote-.h passthrough selftest FAILED"
+    exit 1
+  fi
   # Tutorial fences: docs/typehooks-typeviews.md is the source of truth.
   if ! bash scripts/test_doc_fences.sh; then
     echo "[test] doc fence smoke FAILED"

@@ -1,0 +1,4 @@
+/* Missing CC-face quote include must still fail at the lowerer. */
+#include "no_such_quote_face.cch"
+
+int main(void) { return 0; }
