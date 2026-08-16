@@ -1,0 +1,18 @@
+/* `#define` body may write `@destroy`; the compiler expands it before parse. */
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdio.h>
+
+#define scratch_arena(name, n) \
+    uint8_t name##_buf[n]; \
+    CCArena name = cc_arena_create_buffer(name##_buf, sizeof(name##_buf), CC_ARENA_DEFAULT_BLOCK_MAX) @destroy
+
+int main(void) {
+    {
+        scratch_arena(s, 32);
+        void* p = cc_arena_alloc(&s, 128, 8);
+        assert(p);
+    }
+    printf("ok\n");
+    return 0;
+}

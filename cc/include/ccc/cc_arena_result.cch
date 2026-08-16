@@ -1,0 +1,45 @@
+/*
+ * Result surface for arena checkpoint/restore.
+ *
+ * Lives outside cc_arena.cch because that header is seeded as host C for the
+ * compiler. C twins (`cc_arena_checkpoint` / `cc_arena_restore`) stay in
+ * cc_arena.cch for `@scratch`. CCS: `a.try_checkpoint() !>` /
+ * `cp.try_restore() !>` (or `@destroy` on the handle, which restores).
+ */
+#ifndef CC_ARENA_RESULT_H
+#define CC_ARENA_RESULT_H
+
+#include <ccc/cc_arena.cch>
+#include <ccc/cc_result.cch>
+
+#ifndef CCResult_CCArenaCheckpoint_CCError_DEFINED
+#define CCResult_CCArenaCheckpoint_CCError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCArenaCheckpoint_CCError, CCArenaCheckpoint, CCError)
+#endif
+
+static inline CCArenaCheckpoint !>(CCError) cc_arena_try_checkpoint(CCArena *arena) {
+    CCArenaCheckpoint cp = cc_arena_checkpoint(arena);
+    if (!cp.arena) {
+        return cc_err(CC_ERR_INVALID_ARG, "cc_arena_checkpoint: refused");
+    }
+    return cc_ok(cp);
+}
+
+static inline void !>(CCError) cc_arena_try_restore(CCArenaCheckpoint checkpoint) {
+    if (!cc_arena_restore(checkpoint)) {
+        return cc_err(CC_ERR_INVALID_ARG, "cc_arena_restore: refused");
+    }
+    return cc_ok();
+}
+
+static inline void !>(CCError) cc_arena_checkpoint_try_restore(CCArenaCheckpoint *cp) {
+    if (!cp || !cp->arena) {
+        return cc_err(CC_ERR_INVALID_ARG, "cc_arena_restore: already consumed");
+    }
+    if (!cc_arena_checkpoint_restore(cp)) {
+        return cc_err(CC_ERR_INVALID_ARG, "cc_arena_restore: refused");
+    }
+    return cc_ok();
+}
+
+#endif /* CC_ARENA_RESULT_H */

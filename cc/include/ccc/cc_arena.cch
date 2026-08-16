@@ -1,8 +1,17 @@
 /*
- * Thread-safe bump allocator for per-request arenas.
+ * Named lifetime. `CCArena` is the epoch; constructors pick how bytes are
+ * obtained. Three storage tiers (cache-shaped):
+ *
+ *   L1   — root slab (stack frame or heap-owned first block)
+ *   L2   — grown heap extents (`prev` chain, 1.5×, min 4096)
+ *   Main — overflow: per-object (`ovf_head`, `block_max==1`) or 64KiB chunks
  *
  * Shared path (`cc_arena_alloc`): tip CAS + meta_lock on grow / ovf / chain.
  * Single-owner path (`*_local*`): plain loads/stores — do not share.
+ * `live()` counts L1 + L2 + Main. A checkpoint is a consumed loan: bind with
+ * `@destroy` (restores) or call restore. Result capture/restore lives in
+ * `cc_arena_result.cch` (`try_checkpoint` / `try_restore`). C twins here
+ * remain for `@scratch`.
  */
 #ifndef CC_ARENA_H
 #define CC_ARENA_H
@@ -62,16 +71,26 @@ struct CCArena {
      * when the owning slab may have been pushed to prev. Tip bump CAS stays
      * lock-free; shared arenas must use cc_arena_alloc (not *_local*). */
     cc_atomic_uint meta_lock;
+    size_t cp_loans;              // armed checkpoint handles not yet consumed
 };
 
 struct CCArenaCheckpoint {
     CCArena* arena;
     size_t offset;
-    size_t live_allocs;       // root-slab live count at capture (restore writes this back)
-    size_t ovf_keep;          // live overflow objects in the saved epoch (restore checks this)
+    size_t live_allocs;       // L1 (active-root) live count at capture (restore writes this back)
+    size_t ovf_keep;          // live Main-tier objects in the saved epoch (restore checks this)
     uint16_t block_idx;       // which block this checkpoint was taken in
     uint64_t provenance;      // provenance for allocations that stay valid after restore
 };
+
+/* Storage tier of a live allocation. L1 is the original root (block_idx 0);
+ * L2 is every grown extent; Main is overflow. */
+typedef enum CCArenaTier {
+    CC_ARENA_TIER_NONE = 0,
+    CC_ARENA_TIER_L1 = 1,
+    CC_ARENA_TIER_L2 = 2,
+    CC_ARENA_TIER_MAIN = 3
+} CCArenaTier;
 
 /* Thread-safe freelist head: lock-free Treiber stack with an ABA counter packed
  * into the upper bits of a 64-bit word. The pointer occupies the lower bits and
@@ -170,11 +189,11 @@ static inline size_t cc__arena_malloc_usable_bytes(void* ptr) {
 #endif
 }
 
-/* Heap-overflow ownership is stamped in a header immediately before the
- * payload. Two tier-3 modes:
+/* Main-tier ownership is stamped in a header immediately before the payload.
+ * Two Main modes:
  *   - Per-object (cc_arena_malloc / block_max==1): malloc each object, DLL on
  *     ovf_head, release frees immediately.
- *   - Chunk bump (growable heap/stack after slab budget): bump inside 64KiB
+ *   - Chunk bump (growable heap/stack after L1/L2 budget): bump inside 64KiB
  *     (or larger) chunks on ovf_chunks; release punches a hole; reset/free
  *     frees a few chunks instead of one free per object.
  * malloc base for per-object is (uint8_t*)h - raw_delta. Double-release → DEAD.
@@ -568,6 +587,7 @@ static inline int cc_arena_buffer(CCArena *arena, void *buffer, size_t capacity)
     arena->ovf_head = NULL;
     arena->ovf_chunks = NULL;
     CC_ATOMIC_STORE(&arena->overflow_bytes, 0);
+    arena->cp_loans = 0;
     CC_ATOMIC_STORE(&arena->meta_lock, 0u);
     return 0;
 }
@@ -689,6 +709,7 @@ static inline int cc__arena_grow_locked(CCArena *arena, size_t size, size_t alig
     extent->ovf_head = NULL;
     extent->ovf_chunks = NULL;
     CC_ATOMIC_STORE(&extent->overflow_bytes, 0);
+    extent->cp_loans = 0;
     CC_ATOMIC_STORE(&extent->meta_lock, 0u);
 
     /* Publish extent before swapping root base so note_live/find_block can
@@ -1289,27 +1310,27 @@ static inline size_t kilobytes(size_t n) { return n * 1024; }
 static inline size_t megabytes(size_t n) { return n * 1024 * 1024; }
 static inline size_t gigabytes(size_t n) { return n * 1024 * 1024 * 1024; }
 
-/* Three constructors:
+/* Three constructors — one named lifetime, three storage tiers:
  *
  *   CCArena h = cc_arena_heap(N) @destroy;   // request/window scratch (default)
- *   cc_arena_stack(s, N);                    // same policy; root on the stack
- *   CCArena m = cc_arena_malloc(N) @destroy; // durable: fixed root + per-object ovf
+ *   cc_arena_stack(s, N);                    // same policy; L1 on the stack
+ *   CCArena m = cc_arena_malloc(N) @destroy; // durable: fixed L1 + Main ovf
  *
- * heap/stack: root exactly N, up to CC_ARENA_DEFAULT_BLOCK_MAX (4) slabs (1.5×
- * growth), then tier-3 malloc overflow. Size N for typical request live set —
+ * heap/stack: L1 exactly N, up to CC_ARENA_DEFAULT_BLOCK_MAX (4) slabs (L2 at
+ * 1.5×), then Main malloc overflow. Size N for typical request live set —
  * with N≈16MiB, four slabs cover ~100MiB-class live; a tiny N still works but
- * spills to overflow (slower alloc + drain). Overflow stays arena-owned and is
+ * spills to Main (slower alloc + drain). Main stays arena-owned and is
  * freed on reset/free. Checkpoint/restore stays rewindable after overflow
- * alloc; restore drains overflow minted in a later epoch and refuses if that
+ * alloc; restore drains Main minted in a later epoch and refuses if that
  * handle's keep-set was released.
  *
- * cc_arena_malloc: block_max=1, no extent growth — do not use for "tons of
- * scratch allocs" (that is malloc-with-tax). Prefer heap/stack for scratch;
- * use malloc ctor when entries are freed individually from a fixed root.
+ * cc_arena_malloc: block_max=1, no L2 — do not use for "tons of scratch
+ * allocs" (that is malloc-with-tax). Prefer heap/stack for scratch; use
+ * malloc ctor when entries are freed individually from a fixed L1.
  *
- * Expert: create_buffer, block_max=0 (unbounded extents). */
+ * Expert: create_buffer, block_max=0 (unbounded L2). */
 
-/* Default slab budget for heap/stack: root + 3 grows, then tier-3 overflow. */
+/* Default slab budget for heap/stack: L1 + 3 L2 grows, then Main overflow. */
 #ifndef CC_ARENA_DEFAULT_BLOCK_MAX
 #define CC_ARENA_DEFAULT_BLOCK_MAX 4u
 #endif
@@ -1377,14 +1398,15 @@ static inline CCArena cc_arena_fixed_buffer(void *buffer, size_t capacity) {
 }
 
 /* Stack-rooted scratch — declaration macro (not a by-value constructor: the
- * backing bytes must live in the caller's frame). Spells:
+ * backing bytes must live in the caller's frame). `@destroy` is Concurrent-C:
+ * L2/Main free at scope exit; the stack L1 is frame memory. Host seed/lower
+ * strip the attr so the `.h` stays plain C; the compiler expands the macro
+ * before parse.
  *   cc_arena_stack(s, N);   // declares CCArena s + stack buf[N]
  * Same default as heap: up to CC_ARENA_DEFAULT_BLOCK_MAX slabs, then overflow. */
 #define cc_arena_stack(name, nbytes) \
     uint8_t name##_cc_stack_buf[nbytes]; \
-    CCArena name; \
-    (void)cc_arena_buffer(&name, name##_cc_stack_buf, sizeof(name##_cc_stack_buf)); \
-    (name).block_max = CC_ARENA_DEFAULT_BLOCK_MAX; \
+    CCArena name = cc_arena_create_buffer(name##_cc_stack_buf, sizeof(name##_cc_stack_buf), CC_ARENA_DEFAULT_BLOCK_MAX) @destroy; \
     (name)._flags |= CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW
 
 /* Compat aliases — prefer lowercase names. */
@@ -1478,18 +1500,21 @@ static inline bool cc_arena_release(CCArena* arena, void* ptr) {
     return false;
 }
 
-/* End-of-life for the arena handle. Drains tier-3 overflow, frees heap extents
- * and a heap-owned root, then clears the handle. Call cc_arena_buffer again
+/* End-of-life for the arena handle. Frees every malloc this arena made:
+ * Main overflow, L2 heap extents, and a heap-owned L1. Never frees a stack
+ * or caller L1, or the CCArena value itself. Call cc_arena_buffer again
  * before reuse. Individual cc_arena_release remains for mid-lifetime reclaim. */
 static inline void cc_arena_free(CCArena* a) {
     CCArena *cur;
     uint8_t* base;
     unsigned int flags;
+    size_t loans;
     CCArenaOvfHeader *ovf_heads = NULL;
     CCArenaOvfChunk *ovf_chunks = NULL;
     if (!a) return;
 
     cc__arena_meta_lock(a);
+    loans = a->cp_loans;
     cc__arena_ovf_steal_locked(a, &ovf_heads, &ovf_chunks);
 
     cur = a->prev;
@@ -1505,9 +1530,14 @@ static inline void cc_arena_free(CCArena* a) {
     a->block_max = 0;
     a->ovf_head = NULL;
     a->ovf_chunks = NULL;
+    a->cp_loans = 0;
     CC_ATOMIC_STORE(&a->overflow_bytes, 0);
     cc__arena_meta_unlock(a);
     CC_ATOMIC_STORE(&a->meta_lock, 0u);
+    if (loans) {
+        fprintf(stderr, "cc_arena_free: %zu outstanding checkpoint loan(s)\n",
+                loans);
+    }
 
     cc__arena_ovf_free_stolen(ovf_heads, ovf_chunks);
 
@@ -1537,44 +1567,74 @@ static inline void cc_heap_arena_free(CCArena* a) {
     cc_arena_free(a);
 }
 
-// Detach and return the arena's memory (including all growth extents),
-// leaving the source arena empty.
+/* True when the original L1 (oldest slab) is heap-owned. After grow, the
+ * active slab may be HEAP_OWNED even when L1 is a stack/caller buffer. */
+static inline int cc__arena_l1_heap_owned(const CCArena *a) {
+    const CCArena *cur = a;
+    if (!cur) return 0;
+    while (cur->prev) cur = cur->prev;
+    return (cur->_flags & CC_ARENA_FLAG_HEAP_OWNED) != 0;
+}
+
+static inline void cc__arena_report_detach_error(const char *msg) {
+    if (!msg) return;
+    fprintf(stderr, "cc_arena_detach: %s\n", msg);
+}
+
+/* Move arena-owned mallocs (L1 if heap-owned, L2, Main) to a new handle.
+ * Refuses a stack or caller-owned L1 (use-after-return) and an outstanding
+ * checkpoint loan. Source is left empty on success. */
 static inline CCArena cc_arena_detach(CCArena* a) {
     CCArena taken = {0};
-    if (a && a->base) {
-        cc__arena_meta_lock(a);
-        taken = *a;
-        a->base = NULL;
-        a->capacity = 0;
-        a->offset = 0;
-        a->live_allocs = 0;
-        a->_flags = 0;
-        a->block_idx = 0;
-        a->block_max = 0;
-        a->prev = NULL;
-        a->ovf_head = NULL;
-        a->ovf_chunks = NULL;
-        CC_ATOMIC_STORE(&a->overflow_bytes, 0);
-        cc__arena_meta_unlock(a);
-        CC_ATOMIC_STORE(&a->meta_lock, 0u);
-        CC_ATOMIC_STORE(&taken.meta_lock, 0u);
+    if (!a || !a->base) return taken;
+    if (!cc__arena_l1_heap_owned(a)) {
+        cc__arena_report_detach_error(
+            "refuses a stack or caller-owned L1 (would dangle)");
+        return taken;
     }
+    cc__arena_meta_lock(a);
+    if (a->cp_loans) {
+        size_t loans = a->cp_loans;
+        cc__arena_meta_unlock(a);
+        fprintf(stderr,
+                "cc_arena_detach: %zu outstanding checkpoint loan(s)\n",
+                loans);
+        return taken;
+    }
+    taken = *a;
+    a->base = NULL;
+    a->capacity = 0;
+    a->offset = 0;
+    a->live_allocs = 0;
+    a->_flags = 0;
+    a->block_idx = 0;
+    a->block_max = 0;
+    a->prev = NULL;
+    a->ovf_head = NULL;
+    a->ovf_chunks = NULL;
+    a->cp_loans = 0;
+    CC_ATOMIC_STORE(&a->overflow_bytes, 0);
+    cc__arena_meta_unlock(a);
+    CC_ATOMIC_STORE(&a->meta_lock, 0u);
+    CC_ATOMIC_STORE(&taken.meta_lock, 0u);
     return taken;
 }
 
-/* Clear allocations and restore the initial root buffer as the active slab
- * (stack-first arenas return to their stack storage). Frees tier-3 heap
- * overflow. Does not free the arena struct or a caller/stack root buffer.
+/* Clear allocations and restore the initial L1 as the active slab
+ * (stack-first arenas return to their stack storage). Frees Main overflow
+ * and L2 extents. Does not free the arena struct or a caller/stack L1.
  * Provenance bumps so pre-reset slices are stale. */
 static inline void cc_arena_reset(CCArena *arena) {
     CCArena *to_free = NULL;
     CCArena *tail = NULL;
     uint8_t *free_root = NULL;
+    size_t loans;
     CCArenaOvfHeader *ovf_heads = NULL;
     CCArenaOvfChunk *ovf_chunks = NULL;
     if (!arena) return;
 
     cc__arena_meta_lock(arena);
+    loans = arena->cp_loans;
     cc__arena_ovf_steal_locked(arena, &ovf_heads, &ovf_chunks);
 
     // If we have grown extents, unwind the chain back to the original block.
@@ -1601,10 +1661,15 @@ static inline void cc_arena_reset(CCArena *arena) {
     CC_ATOMIC_STORE(&arena->live_allocs, 0);
     arena->ovf_head = NULL;
     arena->ovf_chunks = NULL;
+    arena->cp_loans = 0;
     CC_ATOMIC_STORE(&arena->overflow_bytes, 0);
     arena->provenance = CC_ATOMIC_FETCH_ADD(&cc_arena_prov_counter, 1);
     arena->_flags &= ~(CC_ARENA_FLAG_USED_HEAP_OVERFLOW | CC_ARENA_FLAG_NON_REWINDABLE);
     cc__arena_meta_unlock(arena);
+    if (loans) {
+        fprintf(stderr, "cc_arena_reset: %zu outstanding checkpoint loan(s)\n",
+                loans);
+    }
 
     cc__arena_ovf_free_stolen(ovf_heads, ovf_chunks);
 
@@ -1646,6 +1711,7 @@ static inline CCArenaCheckpoint cc_arena_checkpoint(CCArena* arena) {
     cp.provenance = arena->provenance;
     if (!(arena->_flags & CC_ARENA_FLAG_NON_REWINDABLE)) {
         cp.arena = arena;
+        arena->cp_loans++;
         arena->provenance = CC_ATOMIC_FETCH_ADD(&cc_arena_prov_counter, 1);
         cc__arena_ovf_seal_for_new_epoch(arena);
     }
@@ -1683,6 +1749,7 @@ static inline bool cc_arena_restore(CCArenaCheckpoint checkpoint) {
     }
 
     cc__arena_meta_lock(arena);
+    if (arena->cp_loans > 0) arena->cp_loans--;
     if (arena->_flags & CC_ARENA_FLAG_NON_REWINDABLE) {
         cc__arena_meta_unlock(arena);
         cc__arena_report_restore_error("slab hole; refuse");
@@ -1778,6 +1845,61 @@ static inline bool cc_arena_checkpoint_restore(CCArenaCheckpoint* cp) {
 
 static inline void cc_arena_checkpoint_destroy(CCArenaCheckpoint* cp) {
     (void)cc_arena_checkpoint_restore(cp);
+}
+
+/* Live objects on L1 + L2 + Main. */
+static inline size_t cc__arena_ovf_live(const CCArena *arena) {
+    size_t n = 0;
+    const CCArenaOvfHeader *h;
+    const CCArenaOvfChunk *c;
+    if (!arena) return 0;
+    for (h = arena->ovf_head; h; h = h->next) n++;
+    for (c = arena->ovf_chunks; c; c = c->next) n += c->live;
+    return n;
+}
+
+static inline size_t cc_arena_live(const CCArena *arena) {
+    size_t n;
+    const CCArena *cur;
+    if (!arena) return 0;
+    n = CC_ATOMIC_LOAD(&((CCArena *)(uintptr_t)(const void *)arena)->live_allocs);
+    for (cur = arena->prev; cur; cur = cur->prev) {
+        n += CC_ATOMIC_LOAD(&((CCArena *)(uintptr_t)(const void *)cur)->live_allocs);
+    }
+    return n + cc__arena_ovf_live(arena);
+}
+
+static inline bool cc__arena_ovf_contains(const CCArena *arena, const void *ptr) {
+    const CCArenaOvfHeader *h;
+    const CCArenaOvfChunk *c;
+    const CCArenaOvfHeader *cand;
+    const uint8_t *p;
+    if (!arena || !ptr) return false;
+    cand = (const CCArenaOvfHeader *)((const uint8_t *)ptr - sizeof(CCArenaOvfHeader));
+    for (h = arena->ovf_head; h; h = h->next) {
+        if (h == cand) return true;
+    }
+    p = (const uint8_t *)ptr;
+    for (c = arena->ovf_chunks; c; c = c->next) {
+        const uint8_t *data = (const uint8_t *)(c + 1);
+        if (p >= data && p < data + c->capacity) return true;
+    }
+    return false;
+}
+
+static inline CCArenaTier cc_arena_ptr_tier(const CCArena *arena, const void *ptr) {
+    const CCArena *block;
+    if (!arena || !ptr) return CC_ARENA_TIER_NONE;
+    if (cc__arena_ptr_in_block(arena, ptr)) {
+        return arena->block_idx == 0 ? CC_ARENA_TIER_L1 : CC_ARENA_TIER_L2;
+    }
+    for (block = arena->prev; block; block = block->prev) {
+        if (cc__arena_ptr_in_block(block, ptr)) {
+            return block->block_idx == 0 ? CC_ARENA_TIER_L1 : CC_ARENA_TIER_L2;
+        }
+    }
+    if (cc__arena_ovf_contains(arena, ptr)) return CC_ARENA_TIER_MAIN;
+    return CC_ARENA_TIER_NONE;
 }
 
 // True (non-zero) iff the current slab can satisfy this alloc without growing
@@ -1931,7 +2053,7 @@ static inline void cc_arena_pool_init(CCArenaPool* p, CCArena* a, size_t sz) {
     cc_atomic_store(&p->freelist, 0);
     p->_flags = 0;
     /* Pool elements must live on the slab chain: the iterator walks it,
-     * and reset/free reclaim tier-3 overflow independently of the pool's
+     * and reset/free reclaim Main overflow independently of the pool's
      * freelist — an element spilled there would vanish from iteration
      * and dangle in the freelist after a reset.  The pool contract
      * already dedicates the arena to this pool alone, so lift the slab
@@ -2105,25 +2227,10 @@ static inline void* cc_arena_pool_iter_next(CCArenaPoolIter* it) {
     .ufcs = cc_ufcs_generic_cc_slice_family_c,
 };
 
-/* TODO (arena model hardening — none urgent):
- *
- * 1. detach() of a stack-rooted arena is a latent use-after-return: `taken.base`
- *    points into the caller's frame. Debug-check / document: detach requires
- *    a heap-rooted arena (CC_ARENA_FLAG_HEAP_OWNED root).
- *
- * 2. Modal lifecycle: epoch/rewind (checkpoint/restore/reset) vs count/release.
- *    NON_REWINDABLE is a slab hole only; last-live root release may clear it.
- *    Overflow keep-set puncture is a restore-time ovf_keep mismatch (does not
- *    block a new checkpoint). Restore refuses (returns false, diagnostic)
- *    on a slab hole, punctured keep-set, or a checkpoint that would advance.
- *
- * 3. Stdlib defaults stay on shared `cc_arena_alloc` (safe). Opt into
- *    `*_local_grow` only at exclusive-owner call sites (request/scratch fiber);
- *    do not blanket-flip macros or vec/string/containers.
- *
- * 4. Pool freelist packs pointers into 48 bits (CC__POOL_PTR_MASK); add an
- *    init-time check that pool addresses fit the mask (LA57 insurance).
- *    Pool bump allocs stay on shared `cc_arena_alloc` (lock-free freelist).
+/* Pool freelist packs pointers into 48 bits (CC__POOL_PTR_MASK); add an
+ * init-time check that pool addresses fit the mask (LA57 insurance).
+ * Pool bump allocs stay on shared `cc_arena_alloc` (lock-free freelist).
+ * Opt into `*_local_grow` only at exclusive-owner call sites.
  */
 
 #endif // CC_ARENA_H

@@ -1,0 +1,26 @@
+/* cc_arena_stack / cc_arena_pool_stack attach @destroy (L2/Main at scope exit). */
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdio.h>
+
+int main(void) {
+    {
+        cc_arena_stack(s, 32);
+        void* p;
+        assert(s.base);
+        assert(s.block_max == CC_ARENA_DEFAULT_BLOCK_MAX);
+        assert(s._flags & CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW);
+        p = cc_arena_alloc(&s, 128, 8);
+        assert(p);
+        /* no explicit free — @destroy drains overflow at block exit */
+    }
+    {
+        cc_arena_pool_stack(ps, sizeof(int), 64);
+        int* x = (int*)ps.alloc();
+        assert(x);
+        *x = 7;
+        assert(*x == 7);
+    }
+    printf("ok\n");
+    return 0;
+}

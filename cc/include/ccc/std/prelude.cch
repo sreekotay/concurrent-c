@@ -18,6 +18,7 @@
 #include <ccc/cc_type.cch>
 #include <ccc/cc_slice.cch>
 #include <ccc/cc_result.cch>
+#include <ccc/cc_arena_result.cch>
 #include "slice.cch"
 #include <ccc/cc_channel.cch>
 #include <ccc/cc_nursery.cch>

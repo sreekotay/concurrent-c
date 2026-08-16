@@ -12,11 +12,13 @@ runtime behavior required by the main specification.
 
 ## Ownership handle
 
-An arena names a lifetime. Its allocation strategy is an implementation
-policy for storage belonging to that lifetime. `CCArena` is the handle for
-that lifetime and for arena-backed containers. Existing constructors and
+An arena names a lifetime. Storage is three tiers: **L1** (root slab),
+**L2** (grown heap extents), **Main** (overflow). The constructor is an
+implementation policy for those tiers. `CCArena` is the handle for that
+lifetime and for arena-backed containers. Existing constructors and
 container APIs take `CCArena*`; allocation does not require a separate
-general allocator object.
+general allocator object. `cc_arena_live` counts live objects on all three
+tiers.
 
 ## Constructors and root sizing
 
@@ -24,16 +26,16 @@ Teach three constructors:
 
 ```c
 CCArena h = cc_arena_heap(N) @destroy;   /* request/window scratch */
-cc_arena_stack(s, N);                    /* same policy; root on the stack */
+cc_arena_stack(s, N);                    /* same policy; stack L1; @destroy at scope exit */
 CCArena m = cc_arena_malloc(N) @destroy; /* durable: fixed root + overflow */
 ```
 
-`cc_arena_heap` / `cc_arena_stack` use root capacity exactly `N`,
-`block_max = CC_ARENA_DEFAULT_BLOCK_MAX` (4), and heap overflow on: up to four
-slabs with 1.5× growth, then tier-3 malloc overflow. Size `N` for the typical
-request live set (about 16MiB root covers roughly 100MiB-class live under the
-default budget). A tiny root still allocates, but most traffic becomes overflow
-(higher alloc cost and reset drain). Overflow allocations remain arena-owned and
+`cc_arena_heap` / `cc_arena_stack` use L1 capacity exactly `N`,
+`block_max = CC_ARENA_DEFAULT_BLOCK_MAX` (4), and Main overflow on: up to four
+slabs with 1.5× L2 growth, then Main malloc overflow. Size `N` for the typical
+request live set (about 16MiB L1 covers roughly 100MiB-class live under the
+default budget). A tiny L1 still allocates, but most traffic becomes Main
+(higher alloc cost and reset drain). Main allocations remain arena-owned and
 are freed by `cc_arena_reset` / `cc_arena_free`.
 
 `cc_arena_malloc` is fixed-root (`block_max = 1`) with overflow on and no extent
@@ -77,7 +79,7 @@ header and does not itself make the epoch non-rewindable. Overflow pointers
 remain individually releasable and reallocatable through the arena via
 `cc_arena_release` / `cc_arena_realloc`. Realloc preserves the object's
 mint epoch. `cc_arena_reset` and `cc_arena_free` / `cc_arena_destroy` also
-free every outstanding overflow allocation (tier 3). Using a pre-reset
+free every outstanding overflow allocation (Main). Using a pre-reset
 overflow pointer afterward is undefined behavior, same as using a pre-reset
 slab pointer. Ownership is fail-closed: each overflow payload carries a
 header (`CC_ARENA_OVF_MAGIC` / `CC_ARENA_OVF_MAGIC_CHUNK`); a foreign,
@@ -125,8 +127,8 @@ hole). Overflow keep-set puncture is detected at restore, not by disabling
 a later `checkpoint()`:
 
 ```c
-CCArenaCheckpoint checkpoint = cc_arena_checkpoint(&arena);
-cc_arena_restore(checkpoint);
+CCArenaCheckpoint checkpoint = arena.try_checkpoint() !>;
+checkpoint.try_restore() !>; /* or @destroy on the handle */
 ```
 
 A rewindable checkpoint records the active block, offset, root-slab
@@ -139,15 +141,17 @@ checkpoint. Slices minted from the later epoch become stale; pre-checkpoint
 slices retain the restored epoch.
 
 After a mid-slab hole, `cc_arena_checkpoint` returns a null checkpoint with
-`checkpoint.arena == NULL`. `cc_arena_restore` returns false and does not
-mutate on a null handle, a slab hole, an `ovf_keep` mismatch (keep-set
-object released), or a checkpoint that would advance the tip. Last-live
-root release may clear a slab hole; it does not make a punctured keep-set
-restorable. Dropping a checkpoint handle does not block a later capture.
-`cc_arena_reset` frees outstanding overflow (tier 3), clears the
-non-rewindable and used-overflow flags, returns to the original block, resets
+`checkpoint.arena == NULL`; `try_checkpoint` returns `CC_ERR_INVALID_ARG`.
+`cc_arena_restore` returns false and does not mutate on a null handle, a slab
+hole, an `ovf_keep` mismatch (keep-set object released), or a checkpoint that
+would advance the tip. Last-live root release may clear a slab hole; it does
+not make a punctured keep-set restorable. A checkpoint is a consumed loan:
+`@destroy` restores. Dropping a handle without consume leaves an outstanding
+loan (diagnostic on free/reset/detach) and does not block a later capture.
+`cc_arena_reset` frees outstanding overflow (Main), clears the
+non-rewindable and used-overflow flags, returns to the original L1, resets
 allocation counts and offset, advances provenance, and enables checkpointing
-for the new epoch.
+for the new epoch. `cc_arena_detach` refuses a stack or caller-owned L1.
 
 ## Arena-backed containers
 

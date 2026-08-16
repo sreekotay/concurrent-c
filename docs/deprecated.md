@@ -54,9 +54,10 @@ in a Concurrent-C TU rewrites to `cc_type_register` before discovery.
   `tests/comptime_legacy_ufcs_compat_smoke.ccs`,
   `tests/sigils_in_comments_and_strings_smoke.ccs` (string/comment fixtures),
   `tests/header_comptime_backtick_smoke.cch` and
-  `tests/comptime_header_type_regs_shared.cch` (raw local `.cch` includes that
-  are not lower-header’d — file-scope `@typehooks` would reach shadow
-  unrewritten; stdlib headers are fine because they lower to stripped `.h`).
+  `tests/comptime_header_type_regs_shared.cch` (legacy `@comptime {
+  cc_type_register(...) }` kept on purpose). Quoted project `.cch` now
+  lower the same way stdlib headers do; file-scope `@typehooks` /
+  `@typeview` belong in the header (`tests/quote_cch_typeview_smoke.ccs`).
 
 ## UFCS-only helper: `cc_ufcs_register`
 

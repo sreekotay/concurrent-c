@@ -1,0 +1,5 @@
+  L1 live + Result loan OK
+  L2 + Main tiers OK
+  detach: stack refuse, heap move OK
+  try_checkpoint Result refuse OK
+arena_lifetime_tier_smoke OK

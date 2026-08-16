@@ -19,10 +19,10 @@ int main(void) {
 
         /* scratch allocation, reclaimed at cp.restore(); the element
          * type comes from the destination */
-        CCArenaCheckpoint cp = arena.checkpoint();
+        CCArenaCheckpoint cp = arena.try_checkpoint() !> @destroy;
         char* scratch = arena.allocT(1024);
         if (scratch) scratch[0] = '\0';
-        cp.restore();
+        cp.try_restore() !>;
     }
     return 0;
 }

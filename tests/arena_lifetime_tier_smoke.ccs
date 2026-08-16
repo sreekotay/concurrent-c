@@ -1,0 +1,113 @@
+/* Named lifetime: L1 / L2 / Main, live() across tiers, Result capture,
+ * detach refuses a stack L1. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int fail(int code, const char *msg) {
+    printf("FAIL: %s\n", msg);
+    return code;
+}
+
+static int test_l1_live_and_result_loan(void) {
+    @errhandler(CCError e) { (void)e; return fail(1, e.message ? e.message : "err"); }
+    CCArena a = cc_arena_heap(256) @destroy;
+    void *p;
+    CCArenaCheckpoint cp;
+    if (!a.base) return fail(1, "heap ctor");
+    p = cc_arena_alloc(&a, 32, 8);
+    if (!p) return fail(1, "L1 alloc");
+    if (cc_arena_live(&a) != 1) return fail(1, "live L1");
+    if (cc_arena_ptr_tier(&a, p) != CC_ARENA_TIER_L1) return fail(1, "tier L1");
+
+    cp = a.try_checkpoint() !>;
+    if (cc_arena_alloc(&a, 32, 8) == NULL) return fail(1, "post-checkpoint");
+    if (cc_arena_live(&a) != 2) return fail(1, "live after second");
+    cp.try_restore() !>;
+    if (cc_arena_live(&a) != 1) return fail(1, "live after restore");
+    if (!cc_arena_release(&a, p)) return fail(1, "release keep");
+    if (cc_arena_live(&a) != 0) return fail(1, "live empty");
+    printf("  L1 live + Result loan OK\n");
+    return 0;
+}
+
+static int test_l2_and_main(void) {
+    CCArena a = cc_arena_heap(64) @destroy;
+    CCArena m = cc_arena_malloc(64) @destroy;
+    void *grown;
+    void *ovf;
+    if (!a.base || !m.base) return fail(2, "ctors");
+    a.block_max = 2;
+    if (!cc_arena_alloc(&a, 32, 8)) return fail(2, "fill L1");
+    grown = cc_arena_alloc(&a, 128, 8);
+    if (!grown || cc_arena_ptr_tier(&a, grown) != CC_ARENA_TIER_L2) {
+        return fail(2, "tier L2");
+    }
+    if (cc_arena_live(&a) != 2) return fail(2, "live L1+L2");
+
+    ovf = cc_arena_alloc(&m, 128, 8);
+    if (!ovf || cc_arena_ptr_tier(&m, ovf) != CC_ARENA_TIER_MAIN) {
+        return fail(2, "tier Main");
+    }
+    if (cc_arena_live(&m) != 1) return fail(2, "live Main");
+    printf("  L2 + Main tiers OK\n");
+    return 0;
+}
+
+static int test_detach_refuses_stack(void) {
+    cc_arena_stack(s, 256);
+    CCArena heap = cc_arena_heap(256) @destroy;
+    CCArena taken;
+    void *p;
+    if (!s.base || !heap.base) return fail(3, "ctors");
+    p = cc_arena_alloc(&s, 16, 8);
+    if (!p) {
+        cc_arena_free(&s);
+        return fail(3, "stack alloc");
+    }
+    taken = s.detach();
+    if (taken.base) {
+        cc_arena_free(&s);
+        return fail(3, "stack detach must refuse");
+    }
+    if (!s.base) {
+        cc_arena_free(&s);
+        return fail(3, "stack source must stay");
+    }
+    cc_arena_free(&s);
+
+    p = cc_arena_alloc(&heap, 16, 8);
+    if (!p) return fail(3, "heap alloc");
+    taken = heap.detach();
+    if (!taken.base) return fail(3, "heap detach");
+    if (heap.base) return fail(3, "heap source emptied");
+    if (cc_arena_live(&taken) != 1) return fail(3, "detached live");
+    taken.free();
+    printf("  detach: stack refuse, heap move OK\n");
+    return 0;
+}
+
+static int test_try_checkpoint_refuses_slab_hole(void) {
+    CCArena a = cc_arena_heap(256) @destroy;
+    void *x;
+    void *y;
+    CCArenaCheckpoint !>(CCError) r;
+    if (!a.base) return fail(4, "heap ctor");
+    x = cc_arena_alloc(&a, 16, 8);
+    y = cc_arena_alloc(&a, 16, 8);
+    if (!x || !y) return fail(4, "pair");
+    if (!cc_arena_release(&a, x)) return fail(4, "hole");
+    r = a.try_checkpoint();
+    if (!cc_is_err(r)) return fail(4, "try_checkpoint must refuse slab hole");
+    printf("  try_checkpoint Result refuse OK\n");
+    return 0;
+}
+
+int main(void) {
+    int rc;
+    if ((rc = test_l1_live_and_result_loan()) != 0) return rc;
+    if ((rc = test_l2_and_main()) != 0) return rc;
+    if ((rc = test_detach_refuses_stack()) != 0) return rc;
+    if ((rc = test_try_checkpoint_refuses_slab_hole()) != 0) return rc;
+    printf("arena_lifetime_tier_smoke OK\n");
+    return 0;
+}

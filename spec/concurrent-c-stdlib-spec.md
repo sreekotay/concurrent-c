@@ -57,24 +57,28 @@ Arena allocation lives in `<ccc/cc_arena.cch>` (included via the runtime /
 prelude path). Prefer three constructors:
 
 - `cc_arena_heap(N)` — heap-rooted request/window scratch
-- `cc_arena_stack(name, N)` — same growth policy; root on the caller's stack
+- `cc_arena_stack(name, N)` — same growth policy; root on the caller's stack;
+  Concurrent-C attaches `@destroy` (L2/Main free at scope exit)
 - `cc_arena_malloc(N)` — fixed root plus per-object overflow for durable stores
 
-Heap and stack default to root capacity `N`, `block_max = 4`, then malloc
-overflow. Size `N` for typical request live traffic so allocations stay in
-slabs; a tiny root still works but spills. Do not use `cc_arena_malloc` for
-large scratch storms — that path is fixed-root overflow, not extent growth.
+Heap and stack default to L1 capacity `N`, `block_max = 4` (L2), then Main
+malloc overflow. Size `N` for typical request live traffic so allocations stay
+in slabs; a tiny L1 still works but spills. `cc_arena_live` counts L1 + L2 +
+Main. Do not use `cc_arena_malloc` for large scratch storms — that path is
+fixed-root overflow, not extent growth.
 Typed pointers use `cc_arena_alloc_T` / `cc_arena_alloc_T_count` (UFCS:
 `arena.allocT()` / `arena.allocT(n)`). Tracked byte slices use
 `cc_arena_alloc_slice_bytes` (UFCS: `arena.alloc_slice_bytes(n)`); failure
 yields an empty slice. Exhausted allocation with overflow disabled returns
 `NULL` / empty — never a success-looking no-op. Checkpoint/restore is
-rewindable after overflow allocation: restore rewinds the slab prefix and
-drains overflow minted in a later provenance epoch. A mid-slab hole disables
-a new `checkpoint()` until last-live root rewind or `cc_arena_reset`.
-Release of an older-epoch overflow object does not block a new checkpoint;
-restore of that handle refuses (`false`, no mutate) if `ovf_keep` no longer
-matches. Normative growth, overflow, release, and checkpoint rules
+rewindable after overflow allocation: `a.try_checkpoint() !>` /
+`cp.try_restore() !>` (or `@destroy` on the handle). Restore rewinds the
+slab prefix and drains overflow minted in a later provenance epoch. A
+mid-slab hole refuses a new capture (`CC_ERR_INVALID_ARG`) until last-live
+root rewind or `cc_arena_reset`. Release of an older-epoch overflow object
+does not block a new checkpoint; restore of that handle refuses if
+`ovf_keep` no longer matches. C twins (`cc_arena_checkpoint` /
+`cc_arena_restore`) stay for `@scratch`. Normative growth, overflow, release, and checkpoint rules
 are in `spec/concurrent-c-spec-complete.md` §5 and
 `spec/draft_alloc_strategy.md`.
 
