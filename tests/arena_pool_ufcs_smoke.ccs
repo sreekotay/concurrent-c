@@ -37,10 +37,17 @@ int main(void) {
         printf("FAIL: UFCS data integrity (y should be preserved if it's after the freelist pointer)\n");
         return 1;
     }
-    
-    // Test detach_arena
-    CCArena detached = p.detach_arena();
-    if (detached.base == NULL || p.arena != NULL) {
+
+    /* detach_arena moves a heap-owned L1. A stack L1 would dangle. */
+    CCArena heap = cc_arena_heap(1024);
+    CCArenaPool p_heap;
+    cc_arena_pool_init(&p_heap, &heap, sizeof(struct Point));
+    if (!p_heap.alloc()) {
+        printf("FAIL: heap pool alloc\n");
+        return 1;
+    }
+    CCArena detached = p_heap.detach_arena();
+    if (detached.base == NULL || p_heap.arena != NULL) {
         printf("FAIL: UFCS detach_arena\n");
         return 1;
     }
