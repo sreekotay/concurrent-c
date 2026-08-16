@@ -13,12 +13,13 @@
  *   recv     try-pop done (AGAIN if empty)
  *   clear    remove_if on both bags (retract; not a channel bounce)
  *   destroy  give_back queued jobs (do not run), close jobs,
- *            wait in-flight getaddrinfo, give_back leftover done, free q
+ *            join: wait in-flight getaddrinfo, give_back leftover done, free q
+ *            detach: on_last(finish_q) + workers->abandon() — do not wait
  *
  * getaddrinfo stays blocking. The bags are lists you can retract from.
  * The nursery is the join. await_left is only await_done (curl does not call it).
  */
-#include <ccc/std/prelude.cch>
+#include <ccc/cc_runtime.cch>
 #include <ccc/cc_atomic.cch>
 
 #include <errno.h>
@@ -272,15 +273,20 @@ static int spawn_worker(CCNursery *n, CcThrdq *q) {
     return rc;
 }
 
-static void *run_teardown(void *arg) {
-    CcThrdq_teardown((CcThrdq *)arg);
-    return NULL;
-}
-
-static int spawn_teardown(CCNursery *n, CcThrdq *q) {
-    if (!n)
-        return -1;
-    return cc_nursery_spawn(n, run_teardown, q);
+/* Abandon last-exit: workers are already dead. Do not wait/free the nursery. */
+static void finish_q(void *arg) {
+    CcThrdq *q = (CcThrdq *)arg;
+    JobBag *done;
+    JobBag *jobs;
+    if (!q)
+        return;
+    done = &q->done;
+    jobs = &q->jobs;
+    done->drain(q);
+    q->workers = NULL;
+    jobs->destroy();
+    done->destroy();
+    free(q);
 }
 
 /* Take a live slot below `cap` and spawn. 1 spawned, 0 already at cap, -1 failed.
@@ -436,15 +442,25 @@ void Curl_thrdq_clear(struct curl_thrdq *tqueue,
     done->remove_if(q, 0, fn_match, match_data);
 }
 
-/* curl multi quick_exit: process is dying — do not block on getaddrinfo.
- * The reaper nursery is not waited. It is not owned after this returns. */
+/* curl multi quick_exit: process is dying — do not block on getaddrinfo. */
 static void detach_teardown(CcThrdq *q) {
-    CCNursery *reaper = cc_nursery_create(NULL);
-    if (!reaper || spawn_teardown(reaper, q) != 0) {
-        if (reaper)
-            reaper->free();
-        q->teardown();
+    JobBag *jobs;
+    CCNursery *w;
+    if (!q)
+        return;
+    jobs = &q->jobs;
+    w = q->workers;
+    jobs->drain(q);
+    jobs->close();
+    if (!w) {
+        finish_q(q);
+        return;
     }
+    if (w->on_last(q, finish_q) != 0) {
+        q->teardown();
+        return;
+    }
+    w->abandon();
 }
 
 void Curl_thrdq_destroy(struct curl_thrdq *tqueue, bool join) {
