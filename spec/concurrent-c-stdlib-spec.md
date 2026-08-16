@@ -59,6 +59,8 @@ prelude path). Prefer three constructors:
 - `cc_arena_heap(N)` — heap-rooted request/window scratch
 - `cc_arena_stack(name, N)` — same growth policy; root on the caller's stack;
   Concurrent-C attaches `@destroy` (L2/Main free at scope exit)
+- `cc_arena_buf(name, ptr, N)` — same sugar as `cc_arena_stack`; caller
+  provides the L1 bytes (no VLA)
 - `cc_arena_malloc(N)` — fixed root plus per-object overflow for durable stores
 
 Heap and stack default to L1 capacity `N`, `block_max = 4` (L2), then Main
@@ -610,6 +612,30 @@ returns an empty slice / `0` at EOF; the `_into` form (out-parameter) returns
 `Ok(0)` for a non-seekable stream and does not change the current position.
 
 `CCFile` UFCS maps file methods to `cc_file_*` and passes `&file`.
+
+## POSIX file map
+
+`<ccc/std/mmap.cch>` is opt-in and POSIX-only. It is not part of the std
+prelude. Including it on Windows is a compile error.
+
+```c
+typedef struct CCMappedFile {
+    void *ptr;
+    size_t len;
+} CCMappedFile;
+
+CCMappedFile !>(CCIoError) cc_file_map(char[:0] path);
+void cc_file_unmap(CCMappedFile *m);
+CCSlice cc_mapped_file_as_slice(const CCMappedFile *m);  /* UFCS: m.as_slice() */
+```
+
+`cc_file_map` opens `path` read-only and maps the whole file (`PROT_READ`,
+`MAP_PRIVATE`). An empty file is `Ok` with `ptr == NULL` and `len == 0`.
+`cc_file_unmap` is idempotent (`munmap` then nulls the handle). `@destroy`
+on `CCMappedFile` runs `cc_file_unmap`.
+
+`as_slice()` is `cc_slice_from_buffer` — untracked, valid only while the
+map is live. Copy into an arena to outlive `unmap` / `@destroy`.
 
 Caller-buffer Duplex fill is `read_buf_into`: `bool !>(CCIoError)` with EOF
 model B (`Ok(true)` / `Ok(false)` / `Err`). `CCFile` exposes it as

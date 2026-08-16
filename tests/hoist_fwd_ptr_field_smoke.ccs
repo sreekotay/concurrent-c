@@ -1,0 +1,54 @@
+/* Hoisted Result / Vec types may mention a later `T*` — forwards first. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct RtxNode {
+    RtxNode* next;
+    int v;
+} RtxNode;
+
+typedef struct RtxHit {
+    RtxNode* node;
+    size_t at;
+} RtxHit;
+
+typedef struct RtxPeer {
+    RtxHit* hit;
+    int tag;
+} RtxPeer;
+
+static RtxHit !>(CCError) make_hit(RtxNode* n, size_t at) {
+    RtxHit h;
+    h.node = n;
+    h.at = at;
+    return cc_ok(h);
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
+    CCArena a = cc_arena_heap(kilobytes(4)) @destroy;
+    RtxNode node;
+    RtxPeer peer;
+    RtxHit hit;
+    Vec::[RtxNode] nodes;
+
+    node.next = NULL;
+    node.v = 7;
+    hit = make_hit(&node, 3) !>;
+    if (!hit.node || hit.node->v != 7 || hit.at != 3) return 2;
+
+    peer.hit = &hit;
+    peer.tag = 1;
+    if (!peer.hit || peer.hit->at != 3) return 3;
+
+    nodes = vec_new::[RtxNode](&a);
+    if (nodes.push(node) != 0) return 4;
+    if (nodes.len() != 1 || !nodes.get_ptr(0) || nodes.get_ptr(0)->v != 7)
+        return 5;
+
+    printf("ok\n");
+    return 0;
+}

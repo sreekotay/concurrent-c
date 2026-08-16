@@ -1402,15 +1402,23 @@ static inline CCArena cc_arena_fixed_buffer(void *buffer, size_t capacity) {
  * L2/Main free at scope exit; the stack L1 is frame memory. Host seed/lower
  * strip the attr so the `.h` stays plain C; the compiler expands the macro
  * before parse.
- *   cc_arena_stack(s, N);   // declares CCArena s + stack buf[N]
+ *   cc_arena_stack(s, N);          // declares CCArena s + stack buf[N]
+ *   cc_arena_buf(s, ptr, nbytes);  // same sugar; caller L1 (no VLA)
  * Same default as heap: up to CC_ARENA_DEFAULT_BLOCK_MAX slabs, then overflow. */
 #define cc_arena_stack(name, nbytes) \
     uint8_t name##_cc_stack_buf[nbytes]; \
     CCArena name = cc_arena_create_buffer(name##_cc_stack_buf, sizeof(name##_cc_stack_buf), CC_ARENA_DEFAULT_BLOCK_MAX) @destroy; \
     (name)._flags |= CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW
 
+/* Caller-provided root — same @destroy + overflow-flag sugar as
+ * cc_arena_stack, without a VLA. `ptr` + `nbytes` are the L1 bytes. */
+#define cc_arena_buf(name, ptr, nbytes) \
+    CCArena name = cc_arena_create_buffer((ptr), (nbytes), CC_ARENA_DEFAULT_BLOCK_MAX) @destroy; \
+    (name)._flags |= CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW
+
 /* Compat aliases — prefer lowercase names. */
 #define CC_ARENA_STACK(name, nbytes) cc_arena_stack(name, nbytes)
+#define CC_ARENA_BUF(name, ptr, nbytes) cc_arena_buf(name, ptr, nbytes)
 
 /* Stack-backed arena + pool initialized from it. */
 #define cc_arena_pool_stack(name, elem_size, nbytes) \

@@ -480,6 +480,7 @@ char* p = a.allocT(64);
 char[:] s = a.alloc_slice_bytes(32);   // arena provenance
 
 cc_arena_stack(tmp, 1024);             // same policy; L1 on the stack; @destroy at scope exit
+cc_arena_buf(win, frame, sizeof frame); // same sugar; caller L1 (no VLA)
 a.reset();                             // drain epoch; reuse L1
 
 CCArenaCheckpoint cp = a.try_checkpoint() !> @destroy; // consumed loan

@@ -138,6 +138,7 @@ denied (`@typeview` on the slice family). Tutorial:
 |-------|---------------------------|-------------|
 | `cc_arena_heap(n) @destroy` | Named lifetime; L1 heap `n`, L2 up to 4 slabs (~1.5×), then **Main** overflow | request / window |
 | `cc_arena_stack(name, n)` | Same lifetime; L1 on the stack; `@destroy` at scope exit | hot-path / frame scratch |
+| `cc_arena_buf(name, ptr, n)` | Same sugar as stack; caller L1 (no VLA) | existing buffer / `#define` scratch |
 | `@scratch` | Arena operand of `@string` only — not a named `CCArena` | bind the `CCString`, or call-local print |
 
 ```c

@@ -1,0 +1,69 @@
+/* `lvalue = call() !>;` stores Ok into a field, pointer, or index.
+ * RHS may be a free-name or UFCS call. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct Box {
+    int v;
+} Box;
+
+static int !>(CCError) get_int(int v) { return cc_ok(v); }
+
+static int !>(CCError) Box_plus(Box* b, int d) {
+    if (!b) return cc_err(CC_ERR_INVALID_ARG, "null box");
+    return cc_ok(b->v + d);
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal: %s\n", e.message);
+        return 1;
+    }
+    Box box;
+    Box* p;
+    int slot[1];
+    int star;
+    int* ip;
+    box.v = 0;
+    p = &box;
+    slot[0] = 0;
+    star = 0;
+    ip = &star;
+
+    p->v = get_int(7) !>;
+    if (p->v != 7) {
+        fprintf(stderr, "field unwrap: got=%d want=7\n", p->v);
+        return 2;
+    }
+
+    box.v = get_int(3) !>;
+    p->v = p->plus(4) !>;
+    if (p->v != 7) {
+        fprintf(stderr, "ufcs field unwrap: got=%d want=7\n", p->v);
+        return 3;
+    }
+
+    *ip = get_int(9) !>;
+    if (star != 9) {
+        fprintf(stderr, "star unwrap: got=%d want=9\n", star);
+        return 4;
+    }
+
+    slot[0] = get_int(11) !>;
+    if (slot[0] != 11) {
+        fprintf(stderr, "index unwrap: got=%d want=11\n", slot[0]);
+        return 5;
+    }
+
+    p->v = get_int(1) !>(e) {
+        fprintf(stderr, "binder: %s\n", e.message);
+        return 6;
+    };
+    if (p->v != 1) {
+        fprintf(stderr, "binder field unwrap: got=%d want=1\n", p->v);
+        return 7;
+    }
+
+    printf("ok\n");
+    return 0;
+}

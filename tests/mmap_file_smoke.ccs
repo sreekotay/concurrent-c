@@ -1,0 +1,42 @@
+/* POSIX CCMappedFile: map, untracked as_slice, @destroy unmaps. */
+#include <ccc/std/prelude.cch>
+#include <ccc/std/mmap.cch>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+int main(void) {
+    @errhandler(CCIoError e) {
+        fprintf(stderr, "fatal: %s\n", e.base.message);
+        return 1;
+    }
+    const char* path = "/tmp/cc_mmap_file_smoke.txt";
+    const char* msg = "mmap helper\n";
+    size_t n = strlen(msg);
+    CCFile w = {0};
+    CCSlice s;
+
+    if (w.open(cc_slice_cstr(path), "w") != 0) return 2;
+    if (cc_is_err(w.write(cc_slice_from_buffer((void*)msg, n)))) {
+        w.close();
+        return 3;
+    }
+    w.close();
+
+    CCMappedFile m = cc_file_map(cc_slice_cstr(path)) !> @destroy;
+    s = m.as_slice();
+    if (s.len != n || !s.ptr || memcmp(s.ptr, msg, n) != 0) {
+        fprintf(stderr, "mmap slice mismatch\n");
+        remove(path);
+        return 4;
+    }
+    if (!cc_slice_is_untracked(s)) {
+        fprintf(stderr, "mmap slice must be untracked\n");
+        remove(path);
+        return 5;
+    }
+
+    remove(path);
+    printf("ok\n");
+    return 0;
+}

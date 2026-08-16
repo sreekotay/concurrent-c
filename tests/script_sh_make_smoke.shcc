@@ -1,0 +1,34 @@
+#!/usr/bin/env -S ./cc/bin/ccc --as=shcc version=0.3.3
+/*
+ * Smoke: make.shcc runners take an @string line (quotes keep a word).
+ */
+
+int rc = cc_script_sh(@string(`true`, @scratch));
+if (rc != 0) {
+    "FAIL cc_script_sh true".eprintln() !>;
+    return 1;
+}
+
+rc = cc_script_sh(@string(`false`, @scratch));
+if (rc == 0) {
+    "FAIL cc_script_sh false exited 0".eprintln() !>;
+    return 1;
+}
+
+CCString q = @string(`printf "hello world"`, @scratch);
+CCString got = cc_script_sh_read(q) !>;
+CCSlice sl = got.as_slice();
+if (sl.len != 11 || !sl.ptr || memcmp(sl.ptr, "hello world", 11) != 0) {
+    "FAIL cc_script_sh_read".eprintln() !>;
+    return 1;
+}
+
+setenv("CCC", "true", 1);
+rc = cc_script_ccc(@string(`--ignored`, @scratch));
+unsetenv("CCC");
+if (rc != 0) {
+    "FAIL cc_script_ccc".eprintln() !>;
+    return 1;
+}
+
+"ok".println() !>;

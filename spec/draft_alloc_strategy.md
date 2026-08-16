@@ -27,6 +27,7 @@ Teach three constructors:
 ```c
 CCArena h = cc_arena_heap(N) @destroy;   /* request/window scratch */
 cc_arena_stack(s, N);                    /* same policy; stack L1; @destroy at scope exit */
+cc_arena_buf(s, ptr, N);                 /* same sugar; caller L1 (no VLA) */
 CCArena m = cc_arena_malloc(N) @destroy; /* durable: fixed root + overflow */
 ```
 

@@ -555,7 +555,7 @@ Concurrent-C distinguishes **copyable** and **move-only** values:
 
 This is a value-level property, not a type-level distinction. The compiler tracks provenance to enforce it.
 
-**Rule (foreign memory is untracked).** A slice over memory the program does not own — a buffer belonging to an embedded runtime, a `mmap`, a callback's argument — is minted with `cc_slice_from_buffer`, which records no provenance epoch. Claiming an arena's epoch for bytes that arena did not allocate makes the compiler's lifetime reasoning wrong in the one direction it cannot detect: the epoch would say the bytes outlive a reset that has nothing to do with them, or survive a scope that does not govern them. Untracked is the honest answer, and it means the borrow is valid only for as long as the foreign owner says. Copy into an arena to outlive that window.
+**Rule (foreign memory is untracked).** A slice over memory the program does not own — a buffer belonging to an embedded runtime, a `mmap`, a callback's argument — is minted with `cc_slice_from_buffer`, which records no provenance epoch. Claiming an arena's epoch for bytes that arena did not allocate makes the compiler's lifetime reasoning wrong in the one direction it cannot detect: the epoch would say the bytes outlive a reset that has nothing to do with them, or survive a scope that does not govern them. Untracked is the honest answer, and it means the borrow is valid only for as long as the foreign owner says. Copy into an arena to outlive that window. POSIX `CCMappedFile` (`<ccc/std/mmap.cch>`, opt-in) is the owner; `as_slice()` is untracked.
 
 **Move semantics:**
 
@@ -1111,6 +1111,13 @@ bang_stmt     ::= call '!>' ';'                            // statement: use reg
                |  call '!>' '{' stmt* '}' ';'?              // statement: block body (may fall through)
                |  call '!>' '(' ident ')' stmt              // statement: binder + single stmt
                |  call '!>' '(' ident ')' '{' stmt* '}' ';'?  // statement: binder + block
+               |  lvalue '=' call '!>' ';'                  // store Ok in lvalue
+               |  lvalue '=' call '!>' stmt
+               |  lvalue '=' call '!>' '{' stmt* '}' ';'?
+               |  lvalue '=' call '!>' '(' ident ')' stmt
+               |  lvalue '=' call '!>' '(' ident ')' '{' stmt* '}' ';'?
+
+lvalue        ::= ident | '*' lvalue | lvalue '.' ident | lvalue '->' ident | lvalue '[' expr ']'
 
 bang_expr     ::= call '!>' ';'                            // expression: matching @errhandler for E (inlined, must diverge)
                |  call '!>' divergent_stmt                  // expression: single divergent statement
@@ -1135,6 +1142,7 @@ err_handler   ::= '@errhandler' '(' type ident ')' '{' stmt* '}'
 
 - `EXPR ?> DEFAULT_EXPR` — Evaluate `EXPR` (a `T!>(E)` result) exactly once. If success, the expression's value is the unwrapped `T`. Otherwise the expression's value is `DEFAULT_EXPR`. `EXPR ?>(e) DEFAULT_EXPR` binds the error to `e`, scoped to `DEFAULT_EXPR`. `DEFAULT_EXPR` is always a pure C expression producing `T`.
 - `CALL !>;` *(statement)* — Evaluate `CALL` exactly once. On success, the success payload is discarded. On error, dispatch uses the two-pass rule of invariant 4 (exact `E`, else unique `@typeview` `as:` path to a handler face `F`; binder projected along that path); control then falls through to the following statement. If no such handler is in scope, the program is ill-formed. If the call occurs inside that matching handler's body (same-`E` re-entry), the program is ill-formed.
+- `lvalue = CALL !>;` *(statement)* — Same evaluation and error dispatch as statement `CALL !>;`. On success, store the Ok payload in `lvalue` (`p->f`, `p.f`, `*p`, `a[i]`, or a name). `CALL` may be a free-name or UFCS call. Binder and block variants store the same way. This is assignment, not a declaration.
 - `CALL !> BODY` *(statement)* — Same, with `BODY` in place of the default handler. `BODY` may fall through. `@err(e);` inside `BODY` is ill-formed without a binder.
 - `CALL !>(e) BODY` *(statement)* — Same, with the error bound to `e` for the scope of `BODY`. `@err(e);` inside `BODY` forwards to the matching `@errhandler` for `E` (see invariant 5).
 - `CALL !>;` *(expression)* — Evaluate `CALL` exactly once. On success, the surrounding expression's value is the unwrapped `T`. On error, a synthesized binder captures the error and the matching `@errhandler` body for `E` is inlined in place of `BODY`; the handler must diverge, so control never returns past the `!>;`. If no matching handler is in scope, the program is ill-formed. If the call occurs inside that matching handler's body (same-`E` re-entry), the program is ill-formed.
@@ -1768,6 +1776,8 @@ CCArena cc_arena_create_buffer(void* buf, size_t cap, unsigned block_max);
 CCArena cc_arena_fixed_buffer(void* buf, size_t cap);    // create_buffer(..., CC_ARENA_FIXED)
 #define cc_arena_stack(name, nbytes)     // stack root; block_max = 4; overflow on
 #define CC_ARENA_STACK(name, nbytes)     // alias of cc_arena_stack
+#define cc_arena_buf(name, ptr, nbytes)  // caller L1; same sugar as stack (no VLA)
+#define CC_ARENA_BUF(name, ptr, nbytes)  // alias of cc_arena_buf
 #define CC_ARENA_FIXED     1u            // root only
 #define CC_ARENA_GROWABLE  0u            // unbounded extents (expert)
 #ifndef CC_ARENA_DEFAULT_BLOCK_MAX
@@ -1846,9 +1856,9 @@ owns its arena (`cc_arena_pool`), `cc_arena_pool_destroy` frees that arena.
 **Root sizing.** An arena is a named lifetime. Storage is three tiers: **L1**
 (the original root slab), **L2** (grown heap extents), **Main** (overflow).
 Constructor `bytes` is L1 capacity. Size it for the typical live set of that
-lifetime so traffic stays in slabs. `cc_arena_heap` / `cc_arena_stack` share
-one engine: L1 exactly `N`, `block_max = CC_ARENA_DEFAULT_BLOCK_MAX` (4), Main
-overflow on after the slab budget. `cc_arena_malloc` is a durable fixed L1
+lifetime so traffic stays in slabs. `cc_arena_heap` / `cc_arena_stack` /
+`cc_arena_buf` share one engine: L1 exactly `N`, `block_max =
+CC_ARENA_DEFAULT_BLOCK_MAX` (4), Main overflow on after the slab budget. `cc_arena_malloc` is a durable fixed L1
 (`block_max = 1`, overflow on, no L2) for stores that free entries
 individually — not for scratch alloc storms. `cc_arena_buffer` /
 `cc_arena_fixed_buffer` take a caller-owned L1 with overflow off by default;
@@ -1874,11 +1884,11 @@ holds the active slab.
 
 - Heap-rooted (`cc_arena_heap` / `cc_arena_malloc`): arena owns the root buffer;
   `cc_arena_free` frees it with heap extents and overflow.
-- User/stack root (`cc_arena_buffer`, `cc_arena_stack`): arena never frees the
-  initial buffer. `cc_arena_free` frees heap extents and overflow only, then
-  clears the handle (`base == NULL`). Re-init with `cc_arena_buffer` before reuse.
-  In Concurrent-C, `cc_arena_stack` attaches `@destroy` so L2 and Main are freed
-  at scope exit.
+- User/stack root (`cc_arena_buffer`, `cc_arena_stack`, `cc_arena_buf`): arena
+  never frees the initial buffer. `cc_arena_free` frees heap extents and
+  overflow only, then clears the handle (`base == NULL`). Re-init with
+  `cc_arena_buffer` before reuse. In Concurrent-C, `cc_arena_stack` and
+  `cc_arena_buf` attach `@destroy` so L2 and Main are freed at scope exit.
 - Freeing never calls `free` on stack or static storage.
 
 ```c
@@ -1888,6 +1898,9 @@ int* xs = cc_arena_alloc_T_count(int, &a, 100);
 cc_arena_stack(scratch, 4096);
 void* p = scratch.alloc(n, align);
 scratch.reset();  // drain ovf, restore stack root
+
+uint8_t frame[4096];
+cc_arena_buf(win, frame, sizeof frame);  // caller L1; no VLA
 ```
 
 ---
@@ -2024,8 +2037,9 @@ a.free();  // BUG if the task may still use s
 
 - Size the root for the lifetime; treat overflow/release as escape, not policy.
 - Split divergent lifetimes across arenas instead of long-lived release churn.
-- Request/window scratch: `cc_arena_heap` / `cc_arena_stack` with an appropriately
-  sized root. Durable entry store with individual free: `cc_arena_malloc`.
+- Request/window scratch: `cc_arena_heap` / `cc_arena_stack` / `cc_arena_buf`
+  with an appropriately sized root. Durable entry store with individual free:
+  `cc_arena_malloc`.
 - Shared path by default (stdlib, any shared arena). Exclusive request/fiber
   arenas may use `*_local_grow` for tip + grow + overflow without tip CAS.
 - Fixed user buffer with a hard cap: `cc_arena_buffer` / `cc_arena_fixed_buffer`
@@ -5922,7 +5936,7 @@ headers below. Scripts do not `#include` the prelude; the driver injects it.
 | `<ccc/std/cli.cch>` | `@grammar(cli)` comptime engine and argv runtime (`cc_parse_args` / `cc_prepare_args` / `cc_print_usage`). `.shcc` gets this from the script prelude; `.ccs` includes it before `@grammar(cli)`. |
 | `<ccc/script/pathx.cch>` | Repo-root discovery and `char[:0]` path join |
 | `<ccc/script/file.cch>` | Read / write / copy / print by `char[:0]` path |
-| `<ccc/script/sh.cch>` | `cc_sh_run`, `cc_script_task_exe`, `cc_script_task_shcc` |
+| `<ccc/script/sh.cch>` | `cc_sh_run`, `cc_script_sh`, `cc_script_ccc`, `cc_script_sh_read`, `cc_script_task_exe`, `cc_script_task_shcc` |
 | `<ccc/script/temp.cch>` | `CCTempFile` with Result create and `@destroy` cleanup |
 
 Arena parameters follow the stdlib convention: **arena last** on allocating
@@ -6006,6 +6020,15 @@ NUL-terminated for C interop.
 `cc_sh_run` builds a `CCCommand`, runs it to completion, and fails with
 `CCError` when the process exits non-zero.
 
+`cc_script_sh` / `cc_script_ccc` / `cc_script_sh_read` take one `@string`
+line (whitespace words; `'…'` / `"…"` keep a word together), set cwd to
+the project root, and inherit stdio. `cc_script_sh` runs the first word as
+the program. `cc_script_ccc` runs `$CCC` or `<root>/cc/bin/ccc` or `PATH`
+`ccc`, and prepends absolute `--out-dir` / `--bin-dir`. `cc_script_sh_read`
+returns trimmed stdout as a `CCString` on the function `@scratch` arena
+(`cc_script_sh_read_at` takes an explicit arena). Bind the `@string` before
+`cc_script_sh_read` when the line must outlive the call.
+
 `cc_script_task_exe` / `cc_script_task_shcc` resolve a path under the repo
 root, set cwd to that root, inherit stdio, forward `argv[1..]`, and return the
 process exit status (printing a short stderr diagnostic on spawn failure).
@@ -6023,8 +6046,8 @@ orchestration:
   file or stdin bytes; `@grammar(cli)` / `cc_prepare_args` over argv.
 - **Format:** `@string(\`…${expr}…\`)` into a `CCString` / slice, then
   `CCStdio` or file write.
-- **Glue:** path join, temp files, `cc_sh_run` — thin wrappers over
-  `<ccc/std/>` process, dir, and I/O APIs.
+- **Glue:** path join, temp files, `cc_sh_run` / `cc_script_sh` — thin
+  wrappers over `<ccc/std/>` process, dir, and I/O APIs.
 
 Example (stdin transform):
 

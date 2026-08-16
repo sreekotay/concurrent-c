@@ -1,0 +1,20 @@
+/* cc_arena_buf: caller L1, same @destroy + overflow sugar as stack. */
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdio.h>
+
+int main(void) {
+    uint8_t frame[64];
+    {
+        cc_arena_buf(s, frame, sizeof frame);
+        void* p;
+        assert(s.base == frame);
+        assert(s.block_max == CC_ARENA_DEFAULT_BLOCK_MAX);
+        assert(s._flags & CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW);
+        p = cc_arena_alloc(&s, 16, 8);
+        assert(p);
+        /* no explicit free — @destroy drains overflow at block exit */
+    }
+    printf("ok\n");
+    return 0;
+}
