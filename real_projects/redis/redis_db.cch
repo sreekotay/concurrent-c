@@ -291,7 +291,7 @@ static RedisEntry* db_find_entry(RedisDb* db, char[:] key) {
 /* ---- lazy expiration ----
  * One wall-clock sample per command: the command boundary owns a DbCmdClock
  * (`DbCmdClock clock = {0}`) and every expiry-aware helper reads through
- * `clock.now()` (UFCS → db_cmd_clock_now), so a command sees a single
+ * `clock->now()` (UFCS → db_cmd_clock_now), so a command sees a single
  * consistent "now" (and the no-TTL hot path never touches the clock).
  * Deadlines are absolute wall milliseconds; 0 = none. */
 typedef struct DbCmdClock {
@@ -305,7 +305,7 @@ static int64_t redis_now_ms(void) {
     return (int64_t)ts.tv_sec * 1000 + (int64_t)(ts.tv_nsec / 1000000);
 }
 
-/* UFCS: clock.now() */
+/* UFCS: clock->now() */
 static int64_t db_cmd_clock_now(DbCmdClock* clock) {
     if (!clock->sampled) {
         clock->now_ms = redis_now_ms();
@@ -361,7 +361,7 @@ static int64_t db_expires_get_key(RedisDb* db, char[:] key) {
 static bool db_key_expired(RedisDb* db, char[:] key, DbCmdClock* clock) {
     int64_t exp = db_expires_get_key(db, key);
     if (exp == 0) return false;
-    return clock.now() >= exp;
+    return clock->now() >= exp;
 }
 
 /* Set absolute deadline; when==0 clears TTL.  New TTL keys clone into key_arena
@@ -466,7 +466,7 @@ static RedisEntry* db_lookup_live(RedisDb* db, char[:] key, DbCmdClock* clock) {
     if (!cell) return NULL;
     if (sh->expires && sh->expires->len() > 0) {
         int64_t* ep = sh->expires->get_ptr_h(kh, h);
-        if (ep && *ep != 0 && clock.now() >= *ep) {
+        if (ep && *ep != 0 && clock->now() >= *ep) {
             db_remove_entry(db, key, cell);
             return NULL;
         }
@@ -722,7 +722,7 @@ static RedisReply !>(CCError) db_expire_rel_ms(RedisDb* db, char[:] key, int64_t
         db_remove_entry(db, key, cell);
         return cc_ok(reply_integer(1));
     }
-    int64_t now = clock.now();
+    int64_t now = clock->now();
     int64_t when = (rel_ms > INT64_MAX - now) ? INT64_MAX : now + rel_ms;
     db_expires_set(db, key, when) !>;
     return cc_ok(reply_integer(1));
@@ -736,7 +736,7 @@ static RedisReply db_ttl(RedisDb* db, char[:] key, bool in_ms, DbCmdClock* clock
     {
         int64_t exp = db_expires_get_key(db, key);
         if (exp == 0) return reply_integer(-1);
-        int64_t rem = exp - clock.now();
+        int64_t rem = exp - clock->now();
         if (rem < 0) rem = 0;
         if (in_ms) return reply_integer(rem);
         /* Ceiling to seconds.  Clamped INT64_MAX deadlines (set_with_ttl /
@@ -836,7 +836,7 @@ static RedisReply db_dbsize(RedisDb* db, DbCmdClock* clock) {
         if (!sh->entries) continue;
         CC_ARRAY_MAP_FOREACH(sh->entries, k, v) {
             int64_t exp = db_expires_get(db, k);
-            if (exp != 0 && clock.now() >= exp) continue;
+            if (exp != 0 && clock->now() >= exp) continue;
             (void)v;
             n++;
         }
@@ -914,7 +914,7 @@ static RedisReply !>(CCError) db_keys(RedisDb* db,
                 CCSlicePacked* kp = sh->entries->key_ptr(i);
                 if (!kp) continue;
                 int64_t exp = db_expires_get(db, *kp);
-                if (exp != 0 && clock.now() >= exp) continue;
+                if (exp != 0 && clock->now() >= exp) continue;
                 char[:] ks = kp->as_slice();
                 if (!glob_match(pat, pattern.len, (const char*)ks.ptr, ks.len)) continue;
                 matched++;
@@ -953,7 +953,7 @@ static RedisReply !>(CCError) db_keys(RedisDb* db,
                 CCSlicePacked* kp = sh->entries->key_ptr(i);
                 if (!kp) continue;
                 int64_t exp = db_expires_get(db, *kp);
-                if (exp != 0 && clock.now() >= exp) continue;
+                if (exp != 0 && clock->now() >= exp) continue;
                 char[:] ks = kp->as_slice();
                 if (!glob_match(pat, pattern.len, (const char*)ks.ptr, ks.len)) continue;
                 RespGReply elem = wire_bulk(ks);
@@ -989,7 +989,7 @@ static void !>(CCError) db_set_with_ttl(RedisDb* db,
     if (rel_ms <= 0) {
         return cc_err(CC_ERROR(CC_ERR_INVALID_ARG, "ERR invalid expire time"));
     }
-    int64_t now = clock.now();
+    int64_t now = clock->now();
     int64_t deadline = (rel_ms > INT64_MAX - now) ? INT64_MAX : now + rel_ms;
     db_set(db, key, value, deadline) !>;
     return cc_ok();

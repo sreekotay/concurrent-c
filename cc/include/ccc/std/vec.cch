@@ -368,9 +368,9 @@ CC_GENERIC_FACTORY(Vec, 1) {
         : @string(`CC_VEC_DECL_ARENA(${t}, ${mangled})`, @scratch);
     return @emit(`
 #ifdef CC_FRAGMENT_VALIDATE
-typedef struct ${mangled} { char _; } ${mangled};
-static inline ${mangled} ${mangled}_new(void *a) {
-    ${mangled} z;
+typedef struct ${mangled}_chk { char _; } ${mangled}_chk;
+static inline ${mangled}_chk ${mangled}_chk_new(void *a) {
+    ${mangled}_chk z;
     (void)a;
     memset(&z, 0, sizeof(z));
     return z;

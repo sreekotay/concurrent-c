@@ -254,9 +254,10 @@ CC_GENERIC_FACTORY(Map, 2) {
                  hash, k, eq, k, k);
     return @emit(`
 #ifdef CC_FRAGMENT_VALIDATE
-typedef struct ${mangled} { char _; } ${mangled};
-static inline ${mangled}* ${mangled}_init(void *a) { (void)a; return (${mangled}*)0; }
-static inline ${mangled}* ${mangled}_new(void *a) { (void)a; return (${mangled}*)0; }
+typedef struct ${mangled}_chk { char _; } ${mangled}_chk;
+static inline ${mangled}_chk* ${mangled}_chk_p(void *a) {
+    (void)a; return (${mangled}_chk*)0;
+}
 #else
 ${fwd}
 CC_MAP_DECL_ARENA(${k}, ${v}, ${mangled}, ${hash}, ${eq})
