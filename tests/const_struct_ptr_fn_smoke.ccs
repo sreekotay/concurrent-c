@@ -1,0 +1,24 @@
+/* File-scope `const struct Tag *name(...)` and `struct Tag *name(...)`
+ * must parse as functions (not "unexpected token"). */
+#include <stdio.h>
+
+struct Box {
+    int x;
+};
+
+struct Box *box_mut(struct Box *b) {
+    return b;
+}
+
+const struct Box *box_get(const struct Box *b) {
+    return b;
+}
+
+int main(void) {
+    struct Box b;
+    const struct Box *p;
+    b.x = 7;
+    p = box_get(box_mut(&b));
+    printf("x=%d\n", p->x);
+    return p->x == 7 ? 0 : 1;
+}

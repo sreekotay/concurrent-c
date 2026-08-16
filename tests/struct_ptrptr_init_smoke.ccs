@@ -1,0 +1,35 @@
+/* `struct Tag **name = expr;` and prefix `++`/`--` statements are
+ * ordinary C. The lowerer must emit them; host-cc typechecks. */
+#include <stdio.h>
+
+struct Foo {
+    int n;
+};
+
+struct Wrap {
+    struct Foo *res_A;
+    int queries_ongoing;
+};
+
+int main(void) {
+    struct Foo a;
+    struct Foo *p;
+    struct Wrap w;
+    struct Wrap *async;
+    struct Foo **pdest;
+
+    a.n = 3;
+    p = &a;
+    w.res_A = &a;
+    w.queries_ongoing = 2;
+    async = &w;
+    pdest = &async->res_A;
+    {
+        struct Foo **q = &p;
+        (void)q;
+    }
+    --async->queries_ongoing;
+    ++pdest[0]->n;
+    printf("n=%d q=%d\n", a.n, async->queries_ongoing);
+    return (a.n == 4 && async->queries_ongoing == 1) ? 0 : 1;
+}
