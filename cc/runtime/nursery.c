@@ -171,7 +171,25 @@ struct CCNursery {
     _Atomic size_t alive_count;
     fiber_v2* _Atomic alive_waiter;
     wake_primitive alive_wake;
+
+    /* LIVE → JOINING (wait) or ABANDONED (abandon). After abandon the
+     * handle is consumed; last-exit frees the object. */
+    _Atomic int end_state;
+    _Atomic int finishing;
+    void (*on_last_fn)(void*);
+    void* on_last_ctx;
 };
+
+enum {
+    CC_NURSERY_LIVE = 0,
+    CC_NURSERY_JOINING = 1,
+    CC_NURSERY_ABANDONED = 2
+};
+
+static void cc_nursery_die(const char* msg) {
+    fprintf(stderr, "cc_nursery: %s\n", msg);
+    abort();
+}
 
 /* Process-wide gate, latched on first read.  On by default: nursery-
  * spawned fibers go back to the v2 free list the instant a worker
@@ -535,6 +553,8 @@ static void* cc__nursery_async_runner(void* arg) {
     return NULL;
 }
 
+void cc_nursery_notify_child_done(CCNursery* n);
+
 /* V2 is the default scheduler. spawn() routes through sched_v2; spawnhybrid()
  * is kept as an alias for source compatibility during the V1 retirement. */
 int cc_nursery_spawn(CCNursery* n, void* (*fn)(void*), void* arg) {
@@ -548,16 +568,27 @@ int cc_nursery_spawn(CCNursery* n, void* (*fn)(void*), void* arg) {
     /* Worker-frees mode: publish the pending child on alive_count BEFORE
      * enqueuing so a worker that races us to MCO_DEAD always observes a
      * matching increment when it calls cc_nursery_notify_child_done.  In
-     * the classic mode this counter is never consulted. */
+     * the classic mode this counter is never consulted. The abandoned
+     * check and the increment share mu so abandon cannot last-exit
+     * between them. */
     int worker_frees = cc_nursery_worker_frees_mode();
+    pthread_mutex_lock(&n->mu);
+    if (atomic_load_explicit(&n->end_state, memory_order_acquire) ==
+            CC_NURSERY_ABANDONED) {
+        pthread_mutex_unlock(&n->mu);
+        return EINVAL;
+    }
     if (worker_frees) {
         atomic_fetch_add_explicit(&n->alive_count, 1, memory_order_relaxed);
     }
+    pthread_mutex_unlock(&n->mu);
 
     fiber_v2* t = sched_v2_spawn_in_nursery(fn, arg, n);
     if (!t) {
         if (worker_frees) {
-            atomic_fetch_sub_explicit(&n->alive_count, 1, memory_order_relaxed);
+            /* May last-exit if this increment was the last live child
+             * after abandon. Do not touch n afterward. */
+            cc_nursery_notify_child_done(n);
         }
         return ENOMEM;
     }
@@ -655,6 +686,43 @@ int cc_nursery_spawnhybrid_async(CCNursery* n, CCTask task) {
  *   `if (prev == 1)` block would cost ~6000 extra syscalls per
  *   run of `stress/nested_nursery_deep.ccs` with zero correctness
  *   gain.  Don't. */
+
+static void cc_nursery_close_registered(CCNursery* n) {
+    for (size_t i = 0; i < n->closing_count; ++i) {
+        if (n->closing[i] && g_cc__nursery_chan_close)
+            g_cc__nursery_chan_close(n->closing[i]);
+    }
+}
+
+static void cc_nursery_release(CCNursery* n) {
+    free(n->tasks);
+    free(n->closing);
+    cc_arena_free(&n->closure_env_arena);
+    pthread_mutex_destroy(&n->mu);
+    wake_primitive_destroy(&n->alive_wake);
+    wake_primitive_destroy(&n->cancel_wake);
+    free(n);
+}
+
+/* Last child is already dead (fiber returned to the pool). Close
+ * registered channels, run on_last, free. Exactly once. */
+static void cc_nursery_last_exit(CCNursery* n) {
+    int expected = 0;
+    void (*fn)(void*);
+    void* ctx;
+    if (!atomic_compare_exchange_strong_explicit(&n->finishing, &expected, 1,
+            memory_order_acq_rel, memory_order_relaxed))
+        return;
+    cc_nursery_close_registered(n);
+    fn = n->on_last_fn;
+    ctx = n->on_last_ctx;
+    n->on_last_fn = NULL;
+    n->on_last_ctx = NULL;
+    if (fn)
+        fn(ctx);
+    cc_nursery_release(n);
+}
+
 void cc_nursery_notify_child_done(CCNursery* n) {
     if (!n) return;
     size_t prev = atomic_fetch_sub_explicit(&n->alive_count, 1, memory_order_acq_rel);
@@ -676,11 +744,24 @@ void cc_nursery_notify_child_done(CCNursery* n) {
         fiber_v2* waiter = atomic_exchange_explicit(&n->alive_waiter, NULL, memory_order_acq_rel);
         if (waiter) sched_v2_signal(waiter);
         wake_primitive_wake_all(&n->alive_wake);
+        /* Same fence: abandon stores end_state then loads alive_count;
+         * we stored alive_count (the fetch_sub) then load end_state. */
+        if (atomic_load_explicit(&n->end_state, memory_order_acquire) ==
+                CC_NURSERY_ABANDONED)
+            cc_nursery_last_exit(n);
     }
 }
 
 int cc_nursery_wait(CCNursery* n) {
     if (!n) return EINVAL;
+    {
+        int expected = CC_NURSERY_LIVE;
+        if (!atomic_compare_exchange_strong_explicit(&n->end_state, &expected,
+                CC_NURSERY_JOINING, memory_order_acq_rel, memory_order_acquire)) {
+            if (expected == CC_NURSERY_ABANDONED)
+                cc_nursery_die("wait after abandon");
+        }
+    }
     int first_err = 0;
     int timing = nursery_timing_enabled();
     uint64_t t0 = 0;
@@ -777,6 +858,9 @@ int cc_nursery_wait(CCNursery* n) {
 
 void cc_nursery_free(CCNursery* n) {
     if (!n) return;
+    if (atomic_load_explicit(&n->end_state, memory_order_acquire) ==
+            CC_NURSERY_ABANDONED)
+        cc_nursery_die("free after abandon");
     if (!cc_nursery_worker_frees_mode()) {
         /* Classic: tasks[] still owns fiber_v2 references until free. */
         for (size_t i = 0; i < n->count; ++i) {
@@ -787,21 +871,57 @@ void cc_nursery_free(CCNursery* n) {
     }
     /* Worker-frees mode: tasks[] entries are stale pointers; the worker
      * already returned each fiber to the v2 pool on MCO_DEAD. */
-    for (size_t i = 0; i < n->closing_count; ++i) {
-        if (n->closing[i] && g_cc__nursery_chan_close) g_cc__nursery_chan_close(n->closing[i]);
+    cc_nursery_close_registered(n);
+    cc_nursery_release(n);
+}
+
+int cc_nursery_on_last(CCNursery* n, void* ctx, void (*finish)(void*)) {
+    if (!n || !finish) return EINVAL;
+    pthread_mutex_lock(&n->mu);
+    if (atomic_load_explicit(&n->end_state, memory_order_acquire) !=
+            CC_NURSERY_LIVE) {
+        pthread_mutex_unlock(&n->mu);
+        return EINVAL;
     }
-    free(n->tasks);
-    free(n->closing);
-    cc_arena_free(&n->closure_env_arena);
-    pthread_mutex_destroy(&n->mu);
-    wake_primitive_destroy(&n->alive_wake);
-    wake_primitive_destroy(&n->cancel_wake);
-    free(n);
+    if (n->on_last_fn) {
+        pthread_mutex_unlock(&n->mu);
+        return EINVAL;
+    }
+    n->on_last_fn = finish;
+    n->on_last_ctx = ctx;
+    pthread_mutex_unlock(&n->mu);
+    return 0;
+}
+
+void cc_nursery_abandon(CCNursery* n) {
+    int expected;
+    if (!n) return;
+    if (!cc_nursery_worker_frees_mode())
+        cc_nursery_die("abandon requires worker-frees mode");
+    pthread_mutex_lock(&n->mu);
+    expected = CC_NURSERY_LIVE;
+    if (!atomic_compare_exchange_strong_explicit(&n->end_state, &expected,
+            CC_NURSERY_ABANDONED, memory_order_acq_rel, memory_order_acquire)) {
+        pthread_mutex_unlock(&n->mu);
+        if (expected == CC_NURSERY_JOINING)
+            cc_nursery_die("abandon while wait in progress");
+        cc_nursery_die("double abandon");
+    }
+    pthread_mutex_unlock(&n->mu);
+    /* Dekker pair with notify: we store end_state then load alive_count. */
+    atomic_thread_fence(memory_order_seq_cst);
+    if (atomic_load_explicit(&n->alive_count, memory_order_acquire) == 0)
+        cc_nursery_last_exit(n);
 }
 
 int cc_nursery_add_closing_chan(CCNursery* n, CCChan* ch) {
     if (!n || !ch) return EINVAL;
     pthread_mutex_lock(&n->mu);
+    if (atomic_load_explicit(&n->end_state, memory_order_acquire) ==
+            CC_NURSERY_ABANDONED) {
+        pthread_mutex_unlock(&n->mu);
+        return EINVAL;
+    }
     if (n->closing_count == n->closing_cap) {
         size_t new_cap = n->closing_cap ? n->closing_cap * 2 : 4;
         CCChan** nc = (CCChan**)realloc(n->closing, new_cap * sizeof(CCChan*));
