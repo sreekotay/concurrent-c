@@ -1,0 +1,341 @@
+#!ccc ccs
+/*
+ * pigz_parallel.ccs — CCTurnstile(n, cap): depth enter/leave + read/write order.
+ *
+ * PIGZ_CAP=N (default 16).  PIGZ_SEQ=1 for inline sequential.
+ */
+
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_atomic.cch>
+#include <ccc/script/stdio.cch>
+#include "CCTurnstile.cch"
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <zlib.h>
+
+#define BLOCK_SIZE (128 * 1024)
+#define DEFAULT_CAP 16
+#define MAX_CAP     256
+
+typedef struct {
+    long seq;
+    CCSlice data;
+    unsigned long crc;
+    size_t original_len;
+    bool is_last;
+    CCArena arena;
+} CompressedResult;
+
+typedef struct {
+    CCFile* in;
+    CCFile* out;
+    CCTurnstile* ts;
+    size_t file_len;
+    int* failed;
+    int n;
+    int level;
+} CompressJob;
+
+cc_atomic_i64 g_bytes_in = 0;
+cc_atomic_i64 g_bytes_out = 0;
+cc_atomic_int g_blocks_done = 0;
+
+cc_atomic_u64 g_start_wait_ns = 0;
+cc_atomic_u64 g_read_wait_ns = 0;
+cc_atomic_u64 g_read_io_ns = 0;
+cc_atomic_u64 g_compress_ns = 0;
+cc_atomic_u64 g_write_wait_ns = 0;
+cc_atomic_u64 g_write_ns = 0;
+
+static inline uint64_t ns_now(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static int stagger_cap(void) {
+    const char* s = getenv("PIGZ_CAP");
+    if (!s || !s[0])
+        return DEFAULT_CAP;
+    int v = atoi(s);
+    if (v < 1)
+        return DEFAULT_CAP;
+    if (v > MAX_CAP)
+        return MAX_CAP;
+    return v;
+}
+
+/* Arena owned until detach; @defer(err) frees on any error return. */
+static CompressedResult* !>(CCIoError) compress_slice(CCSlice data, long seq,
+                                                     bool is_last, int level) {
+    size_t arena_size = data.len + (data.len >> 3) + 8192;
+
+    CCArena res_arena = cc_arena_heap(arena_size);
+    @defer(err) res_arena.free();
+    if (!res_arena.base)
+        return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
+
+    CompressedResult* res = cc_arena_alloc_T(CompressedResult, &res_arena);
+    if (!res)
+        return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
+
+    res->seq = seq;
+    res->is_last = is_last;
+    res->original_len = data.len;
+    res->crc = crc32(0UL, (const Bytef*)data.ptr, (uInt)data.len);
+
+    size_t max_out = data.len + (data.len >> 3) + 256;
+    unsigned char* out_buf = cc_arena_alloc_T_count(unsigned char, &res_arena, max_out);
+    if (!out_buf)
+        return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
+
+    unsigned char header[10] = {0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0x00, 0x03};
+    memcpy(out_buf, header, 10);
+    size_t pos = 10;
+
+    z_stream strm = {0};
+    if (deflateInit2(&strm, level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK)
+        return cc_err(cc_io_error(CC_IO_OTHER));
+
+    strm.next_in = (Bytef*)data.ptr;
+    strm.avail_in = (uInt)data.len;
+    strm.next_out = out_buf + pos;
+    strm.avail_out = (uInt)(max_out - pos - 8);
+
+    int ret = deflate(&strm, Z_FINISH);
+    pos += strm.total_out;
+    deflateEnd(&strm);
+
+    if (ret != Z_STREAM_END)
+        return cc_err(cc_io_error(CC_IO_OTHER));
+
+    unsigned long crc = res->crc;
+    size_t in_len = data.len;
+    out_buf[pos++] = crc & 0xff;
+    out_buf[pos++] = (crc >> 8) & 0xff;
+    out_buf[pos++] = (crc >> 16) & 0xff;
+    out_buf[pos++] = (crc >> 24) & 0xff;
+    out_buf[pos++] = in_len & 0xff;
+    out_buf[pos++] = (in_len >> 8) & 0xff;
+    out_buf[pos++] = (in_len >> 16) & 0xff;
+    out_buf[pos++] = (in_len >> 24) & 0xff;
+
+    res->data = res_arena.slice(out_buf, pos);
+    g_bytes_in.fetch_add((int64_t)data.len);
+    g_bytes_out.fetch_add((int64_t)pos);
+    g_blocks_done.fetch_add(1);
+
+    res->arena = res_arena.detach();
+    return cc_ok(res);
+}
+
+static void compress_and_write_i(CompressJob* job, int i) {
+    size_t off = (size_t)i * (size_t)BLOCK_SIZE;
+    CompressedResult* item = NULL;
+    int handed_read = 0;
+    CCTurnstile* ts = job->ts;
+
+    if (off < job->file_len) {
+        size_t remain = job->file_len - off;
+        size_t want = remain < (size_t)BLOCK_SIZE ? remain : (size_t)BLOCK_SIZE;
+        bool is_last = (off + want >= job->file_len);
+
+        CCArena blk_arena = cc_arena_heap(want + 64);
+        @defer blk_arena.free();
+        if (!blk_arena.base) {
+            *job->failed = 1;
+        } else {
+            uint64_t tw0 = ns_now();
+            ts->read.wait(i);
+            g_read_wait_ns.fetch_add(ns_now() - tw0);
+
+            CCSlice data = cc_slice_empty();
+            uint64_t tr0 = ns_now();
+            size_t !>(CCIoError) seek_r = job->in->seek((long)off, SEEK_SET);
+            if (seek_r.is_err()) {
+                g_read_io_ns.fetch_add(ns_now() - tr0);
+                *job->failed = 1;
+            } else {
+                bool !>(CCIoError) read_r =
+                    job->in->read(&blk_arena, want, &data);
+                g_read_io_ns.fetch_add(ns_now() - tr0);
+                if (read_r.is_err() || !cc_io_avail(read_r) || data.len != want) {
+                    *job->failed = 1;
+                } else {
+                    ts->read.pass(i);
+                    handed_read = 1;
+
+                    uint64_t tc0 = ns_now();
+                    CompressedResult* !>(CCIoError) r =
+                        compress_slice(data, (long)i, is_last, job->level);
+                    g_compress_ns.fetch_add(ns_now() - tc0);
+                    if (r.is_err())
+                        *job->failed = 1;
+                    else
+                        item = r.value();
+                }
+            }
+        }
+    } else {
+        *job->failed = 1;
+    }
+
+    if (!handed_read)
+        ts->read.pass(i);
+
+    {
+        uint64_t tw0 = ns_now();
+        ts->write.wait(i);
+        g_write_wait_ns.fetch_add(ns_now() - tw0);
+    }
+
+    if (item && !*job->failed) {
+        uint64_t tw0 = ns_now();
+        size_t !>(CCIoError) wr = job->out->write(item->data);
+        g_write_ns.fetch_add(ns_now() - tw0);
+        if (wr.is_err() || cc_value(wr) != item->data.len)
+            *job->failed = 1;
+    }
+    if (item)
+        item->arena.free();
+
+    ts->write.pass(i);
+}
+
+static void spawn_compress_all(CompressJob* job, int n) {
+    @errhandler(CCError e) cc_error_exit(e);
+
+    int i;
+    CCTurnstile* ts = job->ts;
+
+    CCNursery* nur = cc_nursery_create(NULL) !> @destroy;
+    for (i = 0; i < n; i++) {
+        uint64_t tw0 = ns_now();
+        ts->enter() !>;
+        g_start_wait_ns.fetch_add(ns_now() - tw0);
+        ts->arm(i);
+
+        nur->spawn(() => [job, i, ts] {
+            @errhandler(CCError e) cc_error_exit(e);
+            compress_and_write_i(job, i);
+            ts->leave() !>;
+        });
+    }
+}
+
+static void compress_all_blocks(CompressJob* job, int n, int seq) {
+    int i;
+    if (seq) {
+        for (i = 0; i < n; i++)
+            compress_and_write_i(job, i);
+        return;
+    }
+    spawn_compress_all(job, n);
+}
+
+void !>(CCError) compress_file(const char* in_path, const char* out_path) {
+    @errhandler(CCError e) { return cc_err(e); }
+
+    g_bytes_in.store(0);
+    g_bytes_out.store(0);
+    g_blocks_done.store(0);
+    g_start_wait_ns.store(0);
+    g_read_wait_ns.store(0);
+    g_read_io_ns.store(0);
+    g_compress_ns.store(0);
+    g_write_wait_ns.store(0);
+    g_write_ns.store(0);
+
+    char[:0] in_s = cc_slice_cstr(in_path);
+    char[:0] out_s = cc_slice_cstr(out_path);
+
+    CCFile in_file;
+    if (in_file.open(in_s, "rb") != 0)
+        return cc_err(CC_ERR_IO, "Failed to open input");
+    @defer in_file.close();
+
+    size_t file_len = in_file.size() !>;
+
+    CCFile out_file;
+    if (out_file.open(out_s, "wb") != 0)
+        return cc_err(CC_ERR_IO, "Failed to open output");
+    @defer out_file.close();
+
+    if (file_len == 0) {
+        out_file.sync() !>;
+        return cc_ok();
+    }
+
+    size_t n_sz = (file_len + (size_t)BLOCK_SIZE - 1) / (size_t)BLOCK_SIZE;
+    if (n_sz > (size_t)INT_MAX)
+        return cc_err(CC_ERR_INVALID_ARG, "too many blocks");
+    int n = (int)n_sz;
+    int cap = stagger_cap();
+
+    /* Turnstile before nursery (inside spawn) so join completes before channel free. */
+    CCArena ts_arena = cc_arena_heap(megabytes(2)) @destroy;
+    CCTurnstile* ts = cc_turnstile_create(&ts_arena, n, cap);
+    if (!ts)
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "cc_turnstile_create failed");
+    @defer ts->destroy();
+
+    int failed = 0;
+
+    CompressJob job_store;
+    job_store.in = &in_file;
+    job_store.out = &out_file;
+    job_store.ts = ts;
+    job_store.file_len = file_len;
+    job_store.failed = &failed;
+    job_store.n = n;
+    job_store.level = 6;
+    CompressJob* job = &job_store;
+
+    int seq = 0;
+    const char* seq_env = getenv("PIGZ_SEQ");
+    if (seq_env && seq_env[0] == '1' && seq_env[1] == '\0')
+        seq = 1;
+
+    compress_all_blocks(job, n, seq);
+
+    if (failed)
+        return cc_err(CC_ERR_IO, "compress/write failed");
+
+    out_file.sync() !>;
+    return cc_ok();
+}
+
+int main(int argc, char* argv[]) {
+    @errhandler(CCError e) { return cc_err_log(e); }
+
+    if (argc < 2) {
+        eprintln(@string(`Usage: ${argv[0]} <file>`, @scratch)) !>;
+        return 1;
+    }
+
+    char out_name[4096];
+    snprintf(out_name, sizeof(out_name), "%s.gz", argv[1]);
+
+    compress_file(argv[1], out_name) !>;
+
+    long long bin = (long long)g_bytes_in.load();
+    long long bout = (long long)g_bytes_out.load();
+    int blocks = g_blocks_done.load();
+    unsigned long long sw = g_start_wait_ns.load();
+    unsigned long long rw = g_read_wait_ns.load();
+    unsigned long long rio = g_read_io_ns.load();
+    unsigned long long c_ns = g_compress_ns.load();
+    unsigned long long ww = g_write_wait_ns.load();
+    unsigned long long wr_ns = g_write_ns.load();
+    println(@string(`Compressed ${argv[1]} -> ${out_name}`, @scratch)) !>;
+    println(@string(`Stats: ${bin} bytes in, ${bout} bytes out, ${blocks} blocks`,
+                    @scratch)) !>;
+    printf("PhaseStats(sum): start_wait=%.1f ms  read_wait=%.1f ms  read_io=%.1f ms  "
+           "compress=%.1f ms  write_wait=%.1f ms  write=%.1f ms\n",
+           (double)sw / 1e6, (double)rw / 1e6, (double)rio / 1e6,
+           (double)c_ns / 1e6, (double)ww / 1e6, (double)wr_ns / 1e6);
+    return 0;
+}

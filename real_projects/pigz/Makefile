@@ -71,6 +71,10 @@ $(OUT_DIR)/pigz_cc: pigz_cc/pigz_cc.ccs | $(OUT_DIR)
 $(OUT_DIR)/pigz_idiomatic: pigz_idiomatic.ccs | $(OUT_DIR)
 	$(CCC) -O -o $@ pigz_idiomatic.ccs --ld-flags "-lz" --release
 
+# Batch @parallel for (no nursery / channel); seekable inputs only
+$(OUT_DIR)/pigz_parallel: pigz_parallel.ccs CCTurnstile.cch | $(OUT_DIR)
+	$(CCC) -O -o $@ pigz_parallel.ccs --ld-flags "-lz" --release
+
 # Pthread CC version (OS threads)
 $(OUT_DIR)/pigz_pthread: pigz_pthread.ccs | $(OUT_DIR)
 	$(CCC) -O -o $@ pigz_pthread.ccs --ld-flags "-lz" --release
@@ -95,13 +99,14 @@ $(OUT_DIR)/pigz_unordered: pigz_unordered.ccs | $(OUT_DIR)
 pigz: $(OUT_DIR)/pigz
 pigz_cc: $(OUT_DIR)/pigz_cc
 pigz_idiomatic: $(OUT_DIR)/pigz_idiomatic
+pigz_parallel: $(OUT_DIR)/pigz_parallel
 pigz_hybrid: $(OUT_DIR)/pigz_hybrid
 pigz_pthread: $(OUT_DIR)/pigz_pthread
 pigz_profile: $(OUT_DIR)/pigz_profile
 pigz_pthread_profile: $(OUT_DIR)/pigz_pthread_profile
 pigz_unordered: $(OUT_DIR)/pigz_unordered
 
-all: pigz pigz_cc pigz_idiomatic pigz_hybrid pigz_pthread
+all: pigz pigz_cc pigz_idiomatic pigz_parallel pigz_hybrid pigz_pthread
 
 # Download source files if not present
 setup:
@@ -143,4 +148,4 @@ clean:
 smoke: pigz_cc
 	@./smoke.sh
 
-.PHONY: setup test clean all pigz pigz_cc pigz_idiomatic pigz_hybrid smoke
+.PHONY: setup test clean all pigz pigz_cc pigz_idiomatic pigz_parallel pigz_hybrid smoke

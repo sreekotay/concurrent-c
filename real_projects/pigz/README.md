@@ -143,6 +143,8 @@ for (int w = 0; w < num_workers; w++) {
 | `bench_go_vs_cc.sh` | Cross-language comparison: CC vs Go vs Zig vs original |
 | `bench_compress_only.sh` | Compression-only timing |
 | `pigz_idiomatic.ccs` | **Idiomatic CC pipeline — read this first** (ordered channel + send_task) |
+| `pigz_parallel.ccs` | CCTurnstile(n, cap) + spawn |
+| `CCTurnstile.cch` | pigz-local pipeline gate: enter/leave + read/write wait/pass |
 | `pigz_cc/pigz_cc.ccs` | Feature-complete CC port (parity binary) |
 | `pigz_hybrid.ccs` | Idiomatic pipeline on the V2 hybrid scheduler |
 | `pigz_pthread.ccs` | Same pipeline on OS threads (`cc_thread_spawn`) |

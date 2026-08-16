@@ -1,3 +1,4 @@
+#!ccc ccs
 /*
  * pigz_idiomatic.ccs — Parallel gzip compression in idiomatic Concurrent-C.
  *
@@ -13,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include <zlib.h>
 
@@ -40,6 +42,17 @@ cc_atomic_i64 g_bytes_in = 0;
 cc_atomic_i64 g_bytes_out = 0;
 cc_atomic_int g_blocks_done = 0;
 cc_atomic_int g_pipeline_error = 0;
+
+cc_atomic_u64 g_read_ns = 0;
+cc_atomic_u64 g_compress_ns = 0;
+cc_atomic_u64 g_recv_ns = 0;   /* ordered recv = wait for next handle + join */
+cc_atomic_u64 g_write_ns = 0;
+
+static inline uint64_t ns_now(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
 
 /* NULL = allocation or zlib failure (fills the ordered slot; not a channel err). */
 static CompressedResult* compress_block(Block* blk, int level) {
@@ -124,6 +137,13 @@ int compress_file(const char* in_path, const char* out_path) {
     @errhandler(CCError e) { return cc_err_log(e); }
 
     g_pipeline_error.store(0);
+    g_bytes_in.store(0);
+    g_bytes_out.store(0);
+    g_blocks_done.store(0);
+    g_read_ns.store(0);
+    g_compress_ns.store(0);
+    g_recv_ns.store(0);
+    g_write_ns.store(0);
 
     char[:0] in_s = cc_slice_cstr(in_path);
     char[:0] out_s = cc_slice_cstr(out_path);
@@ -157,7 +177,13 @@ int compress_file(const char* in_path, const char* out_path) {
             @errhandler(CCError e) cc_error_exit(e);
             CompressedResult* item = NULL;
             long expect_seq = 0;
-            while (cc_io_avail(results_rx.recv(&item))) {
+            while (true) {
+                uint64_t tr0 = ns_now();
+                item = NULL;
+                bool !>(CCIoError) got = results_rx.recv(&item);
+                g_recv_ns.fetch_add(ns_now() - tr0);
+                if (!cc_io_avail(got))
+                    break;
                 if (!item) {
                     eprintln(@string(`compress task failed (OOM or zlib error)`,
                                      @scratch)) !>;
@@ -171,10 +197,12 @@ int compress_file(const char* in_path, const char* out_path) {
                     g_pipeline_error.store(1);
                 }
                 expect_seq++;
+                uint64_t tw0 = ns_now();
                 if (!write_all_or_fail(out_ptr, item->data, "compressed output")) {
                     item->arena.free();
                     break;
                 }
+                g_write_ns.fetch_add(ns_now() - tw0);
                 item->arena.free();
             }
         });
@@ -193,8 +221,10 @@ int compress_file(const char* in_path, const char* out_path) {
                     CCArena blk_arena =
                         cc_arena_heap(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD) @destroy;
                     CCSlice data;
+                    uint64_t tread0 = ns_now();
                     bool !>(CCIoError) read_res =
                         in_ptr->read(&blk_arena, BLOCK_SIZE, &data);
+                    g_read_ns.fetch_add(ns_now() - tread0);
 
                     if (read_res.is_err() || !cc_io_avail(read_res)) break;
 
@@ -208,7 +238,9 @@ int compress_file(const char* in_path, const char* out_path) {
 
                     bool is_last = cap->is_last;
                     results_tx.send_task(() => [cap] {
+                        uint64_t tc0 = ns_now();
                         CompressedResult* out = compress_block(cap, 6);
+                        g_compress_ns.fetch_add(ns_now() - tc0);
                         cap->arena.free();
                         return out;
                     });
@@ -241,6 +273,12 @@ int main(int argc, char* argv[]) {
         int blocks = g_blocks_done.load();
         println(@string(`Compressed ${argv[1]} -> ${out_name}`, @scratch)) !>;
         println(@string(`Stats: ${bin} bytes in, ${bout} bytes out, ${blocks} blocks`,
+                        @scratch)) !>;
+        unsigned long long read_ns = g_read_ns.load();
+        unsigned long long c_ns = g_compress_ns.load();
+        unsigned long long recv_ns = g_recv_ns.load();
+        unsigned long long w_ns = g_write_ns.load();
+        println(@string(`phases(sum): read=${read_ns / 1000000}ms compress=${c_ns / 1000000}ms recv+join=${recv_ns / 1000000}ms write=${w_ns / 1000000}ms`,
                         @scratch)) !>;
     }
 

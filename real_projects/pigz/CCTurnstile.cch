@@ -1,0 +1,194 @@
+/*
+ * CCTurnstile — pigz-local pipeline gate: length n + depth cap.
+ *
+ *   CCTurnstile* t = cc_turnstile_create(arena, n, cap);
+ *   @defer t->destroy();   // before nursery joins finish; declare t before nur
+ *
+ *   t->enter() !>;                 // depth (token channel inside)
+ *   t->arm(i);                     // prehold read/write i+1 (at spawn of i)
+ *   t->read.wait(i);  …  t->read.pass(i);  // pass drops the map entry
+ *   t->write.wait(i); …  t->write.pass(i);
+ *   t->leave() !>;
+ *
+ * Promote to ccc/ once a second caller lands and the API settles.
+ */
+#pragma once
+
+#include <ccc/cc_exclusive.cch>
+#include <ccc/cc_channel.cch>
+#include <ccc/std/map_forward.cch>
+#include <stdlib.h>
+
+#define CC_TURNSTILE_READ_BASE  ((uint64_t)1 << 20)
+#define CC_TURNSTILE_WRITE_BASE ((uint64_t)1 << 40)
+
+typedef struct CCTurnstileStage {
+    CCExclusive* excl;
+    uint64_t name_base;
+    int n;
+    Map::[int, CCExclusiveGuard] held; /* live preholds; dropped on pass */
+} CCTurnstileStage;
+
+typedef struct CCTurnstile {
+    CCExclusive* excl;
+    CCTurnstileStage read;
+    CCTurnstileStage write;
+    CCChan* depth_ch;
+    int n;
+    int cap;
+} CCTurnstile;
+
+static inline void cc_turnstile_destroy(CCTurnstile* t);
+static inline void cc_turnstile_stage_destroy(CCTurnstileStage* s);
+
+static inline uint64_t cc_turnstile_stage_name(const CCTurnstileStage* s, int i) {
+    return s->name_base + (uint64_t)i;
+}
+
+static inline void cc_turnstile_stage_destroy(CCTurnstileStage* s) {
+    Map::[int, CCExclusiveGuard] held;
+    if (!s)
+        return;
+    held = s->held;
+    /* Remaining holds die with Exclusive destroy; map is arena-backed. */
+    if (held)
+        held->destroy();
+    s->held = NULL;
+    s->excl = NULL;
+    s->n = 0;
+}
+
+static inline int cc_turnstile_stage_init(CCTurnstileStage* s, CCExclusive* excl,
+                                         CCArena* arena, uint64_t name_base,
+                                         int n) {
+    s->excl = excl;
+    s->name_base = name_base;
+    s->n = n;
+    s->held = map_new::[int, CCExclusiveGuard](arena);
+    return s->held ? 0 : -1;
+}
+
+/* Prehold ticket i+1 so wait(i+1) cannot run ahead of pass(i).
+ * Call from the producer when spawn(i) fires — in-order spawn makes this
+ * happen-before both worker(i).pass and worker(i+1).wait. */
+static inline void cc_turnstile_stage_arm(CCTurnstileStage* s, int i) {
+    CCExclusiveGuard g;
+    Map::[int, CCExclusiveGuard] held;
+    int k;
+    if (!s || !s->held || i + 1 >= s->n)
+        return;
+    k = i + 1;
+    g = s->excl->acquire(cc_turnstile_stage_name(s, k));
+    held = s->held;
+    held->insert(k, g);
+}
+
+static inline void cc_turnstile_arm(CCTurnstile* t, int i) {
+    if (!t)
+        return;
+    cc_turnstile_stage_arm(&t->read, i);
+    cc_turnstile_stage_arm(&t->write, i);
+}
+
+static inline void cc_turnstile_stage_wait(CCTurnstileStage* s, int i) {
+    CCExclusiveGuard g;
+    CCExclusiveMutex m;
+    uint64_t name;
+    if (!s || i <= 0)
+        return;
+    name = cc_turnstile_stage_name(s, i);
+    g = s->excl->acquire(name);
+    g.release();
+    /* Name is idle after pass + this wait; drop it so Exclusive stays ~O(cap). */
+    m = s->excl->mutex(name);
+    m.free();
+}
+
+static inline void cc_turnstile_stage_pass(CCTurnstileStage* s, int i) {
+    CCExclusiveGuard* g;
+    Map::[int, CCExclusiveGuard] held;
+    int k;
+    if (!s || !s->held || i + 1 >= s->n)
+        return;
+    k = i + 1;
+    held = s->held;
+    g = held->get(k);
+    if (g)
+        g->release();
+    held->remove(k);
+}
+
+static inline void cc_turnstile_destroy(CCTurnstile* t) {
+    if (!t)
+        return;
+    cc_turnstile_stage_destroy(&t->read);
+    cc_turnstile_stage_destroy(&t->write);
+    if (t->depth_ch) {
+        cc_channel_raw_free(t->depth_ch);
+        t->depth_ch = NULL;
+    }
+    if (t->excl) {
+        t->excl->destroy();
+        t->excl = NULL;
+    }
+    t->n = 0;
+    t->cap = 0;
+}
+
+static inline CCTurnstile* cc_turnstile_create(CCArena* arena, int n, int cap) {
+    CCTurnstile* t;
+    int k;
+    int tok = 1;
+
+    if (!arena || n < 0 || cap < 1)
+        return NULL;
+    t = cc_arena_alloc_T(CCTurnstile, arena);
+    if (!t)
+        return NULL;
+    t->n = n;
+    t->cap = cap;
+    t->depth_ch = NULL;
+    /* Live names stay ~2*cap (one prehold per in-flight stage); map grows if needed. */
+    t->excl = cc_exclusive_create(arena, (size_t)cap * 4 + 8);
+    if (!t->excl)
+        return NULL;
+
+    if (cc_turnstile_stage_init(&t->read, t->excl, arena, CC_TURNSTILE_READ_BASE,
+                                n) != 0 ||
+        cc_turnstile_stage_init(&t->write, t->excl, arena, CC_TURNSTILE_WRITE_BASE,
+                                n) != 0) {
+        cc_turnstile_destroy(t);
+        return NULL;
+    }
+
+    t->depth_ch = cc_chan_create((size_t)cap);
+    if (!t->depth_ch || cc_chan_init_elem(t->depth_ch, sizeof(int)) != 0) {
+        cc_turnstile_destroy(t);
+        return NULL;
+    }
+    for (k = 0; k < cap; k++) {
+        if (cc_channel_raw_send(t->depth_ch, &tok, sizeof(tok)) != 0) {
+            cc_turnstile_destroy(t);
+            return NULL;
+        }
+    }
+    return t;
+}
+
+static inline bool !>(CCIoError) cc_turnstile_enter(CCTurnstile* t) {
+    int tok = 0;
+    int rc;
+    if (!t || !t->depth_ch)
+        return cc_err(cc_io_error(CC_IO_INVALID_ARGUMENT));
+    rc = cc_channel_raw_recv(t->depth_ch, &tok, sizeof(tok));
+    return cc_chan_result_with(t->depth_ch, rc, /*is_recv=*/true);
+}
+
+static inline bool !>(CCIoError) cc_turnstile_leave(CCTurnstile* t) {
+    int tok = 1;
+    int rc;
+    if (!t || !t->depth_ch)
+        return cc_err(cc_io_error(CC_IO_INVALID_ARGUMENT));
+    rc = cc_channel_raw_send(t->depth_ch, &tok, sizeof(tok));
+    return cc_chan_result_with(t->depth_ch, rc, /*is_recv=*/false);
+}
