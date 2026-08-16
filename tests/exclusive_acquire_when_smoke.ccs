@@ -1,7 +1,10 @@
-/* acquire_when / acquire_when_into: Result, pred under hold, signal, cancel. */
+/* acquire_when / acquire_when_into: Result, pred under hold, signal, cancel,
+ * deadline, OS-thread park. */
 #include <ccc/std/prelude.cch>
+#include <pthread.h>
 #include <stdio.h>
 
+static CCExclusive* g_excl;
 static int g_ready;
 static int g_started;
 static int g_got;
@@ -24,6 +27,31 @@ static void* write_slot(void* envp, intptr_t slot_i, intptr_t arena_i) {
     g_runs++;
     *(int*)slot_i = 42;
     return NULL;
+}
+
+static void* thread_wait(void* arg) {
+    CCExclusiveGuard !>(CCError) r;
+    (void)arg;
+    r = cc_exclusive_acquire_when(g_excl, 1u, pred_ready, NULL);
+    if (cc_is_ok(r)) {
+        cc_exclusive_guard_release(&r.u.value);
+        return (void*)1;
+    }
+    return (void*)0;
+}
+
+static void* thread_timeout(void* arg) {
+    CCDeadline d = cc_deadline_after_ms(40);
+    CCDeadline* prev = cc_deadline_push(&d);
+    CCExclusiveGuard !>(CCError) r;
+    (void)arg;
+    r = cc_exclusive_acquire_when(g_excl, 1u, pred_never, NULL);
+    cc_deadline_pop(prev);
+    if (cc_is_err(r) && r.u.error.kind == CC_ERR_TIMEOUT)
+        return (void*)1;
+    if (cc_is_ok(r))
+        cc_exclusive_guard_release(&r.u.value);
+    return (void*)0;
 }
 
 int main(void) {
@@ -135,6 +163,51 @@ int main(void) {
         n->cancel();
     }
     if (!g_got) return 8;
+
+    /* Fiber deadline: pred never true → TIMEOUT, not holding. */
+    g_got = 0;
+    {
+        CCNursery* n = cc_nursery_create(NULL) !> @destroy;
+        n->spawn(() => [excl] {
+            CCExclusiveGuard !>(CCError) wr;
+            @with_deadline(millis(40)) {
+                wr = excl->acquire_when(1u, pred_never, NULL);
+            }
+            if (cc_is_err(wr) && wr.u.error.kind == CC_ERR_TIMEOUT)
+                g_got = 1;
+            else if (cc_is_ok(wr)) {
+                CCExclusiveGuard hg = wr.u.value;
+                hg.release();
+            }
+        });
+    }
+    if (!g_got) return 9;
+
+    /* OS thread parks (not a spin) until signal. */
+    g_ready = 0;
+    g_excl = excl;
+    {
+        pthread_t th;
+        void* ret = NULL;
+        if (pthread_create(&th, NULL, thread_wait, NULL) != 0) return 10;
+        cc_sleep_ms(20);
+        {
+            CCExclusiveGuard hg = excl->acquire(1u);
+            g_ready = 1;
+            hg.signal();
+            hg.release();
+        }
+        if (pthread_join(th, &ret) != 0 || ret != (void*)1) return 11;
+    }
+
+    /* OS thread + current deadline → TIMEOUT. */
+    g_excl = excl;
+    {
+        pthread_t th;
+        void* ret = NULL;
+        if (pthread_create(&th, NULL, thread_timeout, NULL) != 0) return 12;
+        if (pthread_join(th, &ret) != 0 || ret != (void*)1) return 13;
+    }
 
     puts("exclusive_acquire_when_smoke: PASS");
     return 0;

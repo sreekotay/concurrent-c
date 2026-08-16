@@ -329,6 +329,16 @@ truncates.
 Nested: `cc_nursery_create(outer)` parents the inner nursery under `outer`.
 Independent value joins use `@parallel` (next), not a nursery.
 
+To drop the handle without joining, register optional after-work then abandon
+(pointer is dead; last child frees the nursery):
+
+```c
+n->on_last(q, finish_q);   // optional; not run by wait / @destroy
+n->abandon();              // not cancel; in-flight work runs to completion
+```
+
+Use either `@destroy` / `wait` or `on_last` + `abandon`, not both. Spec §8.1.5.
+
 ---
 
 ## `@parallel`
@@ -435,9 +445,13 @@ CCExclusiveGuard w = excl->acquire_when(name, pred, env) !> @destroy;
 /* held; pred was observed true while held */
 ```
 
-The fiber that makes `pred` true signals **while still holding**: `h.signal()`
-/ `h.broadcast()`. Cancel and bad args are `CCError` — never a zeroed guard.
-`acquire_when_into` runs a builder once under that invariant and releases.
+The holder that makes `pred` true signals **while still holding**: `h.signal()`
+/ `h.broadcast()`. The wait parks a fiber or an OS thread. An expired
+`cc_current_deadline()` (`@with_deadline` / `cc_deadline_push`) is
+`CC_ERR_TIMEOUT`. A cancelled deadline, or a cancelled nursery when one
+exists, is `CC_ERR_CANCELLED`. No nursery is not cancel. Errors are
+`CCError` — never a zeroed guard. `acquire_when_into` runs a builder once
+under that invariant and releases.
 Recipe: [recipe_exclusive_named.ccs](../examples/recipe_exclusive_named.ccs).
 
 ---

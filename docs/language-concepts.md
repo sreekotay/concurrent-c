@@ -219,7 +219,8 @@ No `T?`. Pick the shape that matches the operation:
 
 `@parallel` is a lexical fork-join. It is not a nursery and it does not
 create a task the program can hold. `n->spawn` names a lifetime that may
-outlive the spawn point; `@parallel` joins at the closing brace.
+outlive the spawn point (`@destroy` waits that nursery; `n->abandon()`
+consumes the handle without joining). `@parallel` joins at the closing brace.
 
 | Form | Meaning |
 |------|---------|

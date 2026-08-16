@@ -3296,7 +3296,7 @@ This section specifies:
 
 A **nursery** is a join set with a handle. Every task is a child of some nursery. `wait` and `@destroy` keep the handle until the set is empty. `abandon` consumes the handle; children may still be running. The join set does not outlive the last child: when the last child is dead the runtime closes registered channels, runs `on_last` if one is registered, and frees the nursery.
 
-`CCNursery` is a library type constructed with `cc_nursery_create(NULL)` and released via `@destroy`. The construction-plus-destruction pattern is idiomatic:
+`CCNursery` is a library type constructed with `cc_nursery_create(NULL)`. The wait path releases it via `@destroy`. The abandon path consumes the handle without joining. The construction-plus-destruction pattern is idiomatic:
 
 ```c
 {
@@ -3361,7 +3361,7 @@ The compiler enforces the following normative rules:
 
 - **Rule (task handle escape):** A task handle returned by `spawn` may not be stored in a variable that outlives the nursery, returned from the enclosing function, or captured in closures escaping the nursery.
 - **Rule (no peer joins):** A child task may not @await or otherwise join another sibling's completion.
-- **Rule (no explicit join):** The nursery's `@destroy` is the only legitimate join point.
+- **Rule (join the set):** The caller joins the set with `@destroy` or `cc_nursery_wait`. `n->abandon()` consumes the handle and does not join.
 
 ---
 
@@ -3420,7 +3420,7 @@ for (int w = 0; w < N; w++) inner->spawn(() => worker(tx));
 
 **Registered close form.** `n->close_on(tx)` is UFCS for
 `cc_nursery_add_closing_tx(n, tx)`. It registers `tx` to close after nursery
-wait and before nursery storage is released:
+wait, or on the `abandon` last-exit path, and before nursery storage is released:
 
 ```c
 CCNursery* n = cc_nursery_create(NULL) !> @destroy;
@@ -3433,7 +3433,8 @@ observable close-after-join placement, but they are distinct lowerings.
 
 `@nursery`, bare `nursery { ... }`, `spawn { ... }`, and `@closing(...)` are
 unsupported spellings and are compile-time errors. Structured concurrency uses
-an explicit `CCNursery*` declaration and UFCS `spawn` / `close_on` calls.
+an explicit `CCNursery*` declaration and UFCS `spawn` / `close_on` /
+`on_last` / `abandon` calls.
 
 If `CC_NURSERY_CLOSING_RUNTIME_GUARD=1`, a receive that would park in the
 current nursery waiting for a channel registered in that same nursery's
@@ -3444,7 +3445,8 @@ optional and is independent of the scheduler's general detector (§8.7.1).
 
 #### 8.1.5 Abandon
 
-`n->on_last(ctx, finish)` registers one hook. `n->abandon()` consumes the
+`n->on_last(ctx, finish)` is UFCS for `cc_nursery_on_last` and registers one
+hook. `n->abandon()` is UFCS for `cc_nursery_abandon` and consumes the
 handle. Extra after-work is `on_last`, registered before `abandon`.
 
 ```c
@@ -3452,11 +3454,15 @@ n->on_last(q, finish_q);   // optional
 n->abandon();              // always this
 ```
 
-After `abandon` the pointer is invalid: no `wait`, `free`, `spawn`, or
-`close_on`. When `alive_count` is already zero, last-exit runs on the
-caller. When children remain, the last child's completion runs last-exit
-on a scheduler worker (the child fiber is already dead). Last-exit closes
-registered channels, runs `on_last` if set, and frees the nursery.
+A program uses either `wait` / `@destroy` or `on_last` + `abandon`. Mixing
+them is a programming error (the runtime aborts). After `abandon` the
+pointer is invalid: no `wait`, `free`, `spawn`, or `close_on`. Spawn after
+`abandon` fails with `EINVAL`.
+
+When `alive_count` is already zero, last-exit runs on the caller. When
+children remain, the last child's completion runs last-exit on a scheduler
+worker (the child fiber is already dead). Last-exit closes registered
+channels, runs `on_last` if set, and frees the nursery.
 
 `on_last` does not run on `wait` / `@destroy`. The hook must not `wait`,
 `free`, or `abandon` this nursery. `abandon` is not cancellation; in-flight
@@ -4101,7 +4107,10 @@ Cancellation and deadlines are cooperative and have distinct sources:
 - Absolute deadline expiry wakes deadline-aware parks; the operation re-checks
   time and returns its timeout result.
 - `cc_current_deadline()` exposes the innermost active deadline to operations
-  such as channel select.
+  such as channel select and exclusive `acquire_when`.
+- Exclusive `acquire_when` / `wait_release` observe that deadline and, when a
+  current nursery exists, that nursery's cancel. Absence of a nursery is not
+  cancel of that wait.
 
 An operation observes only the sources named by its API or lowering. Plain
 `@await`, plain channel operations, nursery-aware channel operations, and
@@ -4346,8 +4355,8 @@ intptr_t cc_block_on_intptr(CCTaskIntptr task);
 void cc_nursery_cancel(CCNursery* n);
 bool cc_nursery_is_cancelled(const CCNursery* n);
 bool cc_cancelled(void);  // current nursery
-int cc_nursery_on_last(CCNursery* n, void* ctx, void (*finish)(void*));
-void cc_nursery_abandon(CCNursery* n);
+int cc_nursery_on_last(CCNursery* n, void* ctx, void (*finish)(void*));  // UFCS: n->on_last
+void cc_nursery_abandon(CCNursery* n);  // UFCS: n->abandon — consume handle; last-exit frees
 
 // Deadline cancellation and polling
 void cc_cancel(CCDeadline* d);
@@ -4994,10 +5003,13 @@ h.release();
 
 `signal` / `broadcast` wake condition waiters only (not lock waiters). The waiter is enqueued before release so a signal cannot land on an empty list in the gap between “pred is false” and park.
 
+`wait_release` parks a fiber (`CC_FIBER_PARK`) or an OS thread (futex / ulock on the waiter). Plain `acquire` may spin on an OS thread; conditioned wait parks. The wait consults `cc_current_deadline()` (`@with_deadline` or `cc_deadline_push`): an expired deadline, including a remaining time of zero, is `CC_ERR_TIMEOUT` without parking. A cancelled deadline, or a cancelled current nursery when one exists, is `CC_ERR_CANCELLED`. `cc_cancelled()` is true when there is no current nursery; that is not cancel of this wait. Timeout and cancel return not holding.
+
 | Result | Holding? | Meaning |
 |--------|----------|---------|
 | `cc_ok(g)` / `cc_ok()` | yes, then released by `_into` | `pred` observed true under the hold |
 | `cc_err(CC_ERR_CANCELLED, …)` | no | parked wait cancelled; no guard escapes |
+| `cc_err(CC_ERR_TIMEOUT, …)` | no | current deadline expired; pred still false |
 | `cc_err(CC_ERR_INVALID_ARG, …)` | no | null domain or null `pred` |
 
 `acquire_when_into` runs the builder once under that success invariant and releases; the builder never runs on error (slot untouched). The builder contract is the same as `acquire_into` (synchronous, no suspend, own-before-release).

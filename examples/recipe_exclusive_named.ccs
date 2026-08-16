@@ -13,11 +13,13 @@
  *   g.release();                              // idempotent (local held bit)
  *
  * Conditioned acquire — park inside the primitive until pred is true
- * under the name. Caller is not holding on the way in:
+ * under the name. Caller is not holding on the way in. Parks a fiber
+ * or an OS thread. cc_current_deadline() → TIMEOUT; cancelled deadline
+ * or nursery (when one exists) → CANCELLED:
  *
  *   CCExclusiveGuard g = excl->acquire_when(name, pred, env) !> @destroy;
  *   // held; pred was true under the name
- *   // the fiber that made pred true: h.signal() while still holding
+ *   // the holder that made pred true: h.signal() while still holding
  *
  *   cc_exclusive_destroy(excl);
  *

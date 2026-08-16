@@ -124,7 +124,7 @@ What that program uses:
 | `T!>(E)` | Fallible value. `?>` : `E → T`. `!>` : `E →` control flow |
 | `@destroy` | Cleanup on **successful declaration construction** (`!> @destroy` = unwrap succeeded, then defer) |
 | `CCArena` / `CCStdio` | Arena **names** the window’s lifetime; growth/overflow is storage policy — prefer **`io.println(…)`** (see [Arenas](#arenas-name-a-lifetime)) |
-| `CCNursery*` | Structured-concurrency scope: teardown waits for spawned tasks |
+| `CCNursery*` | Structured-concurrency scope: `@destroy` waits; `abandon` drops the handle |
 | `n->spawn(() => [io] { … })` | UFCS spawn of a closure; capture `io` by value into the task |
 
 So `CCNursery* n = cc_nursery_create(NULL) !> @destroy;` is `!>` (unwrap or
@@ -351,6 +351,11 @@ spawned into that nursery (and nested children) before the binding ends:
 /* both tasks have finished */
 ```
 
+`@destroy` waits. To consume the handle without joining, register optional
+after-work and abandon (`n->on_last(ctx, finish); n->abandon();`). Last-exit
+closes registered channels, runs the hook, and frees the nursery. That is
+not cancel. Spec §8.1.5.
+
 ### `@parallel`
 
 Independent work that joins at a brace — no nursery, no task handle.
@@ -424,8 +429,10 @@ that name, use `acquire_when` (Result; cancel is not a zeroed guard):
 CCExclusiveGuard g = excl->acquire_when(name, pred, env) !> @destroy;
 ```
 
-The fiber that makes `pred` true calls `h.signal()` while still holding.
-Recipe: [recipe_exclusive_named.ccs](../examples/recipe_exclusive_named.ccs).
+The holder that makes `pred` true calls `h.signal()` while still holding.
+The wait parks a fiber or an OS thread. An expired deadline is
+`CC_ERR_TIMEOUT`; a cancelled deadline or nursery (when one exists) is
+`CC_ERR_CANCELLED`. Recipe: [recipe_exclusive_named.ccs](../examples/recipe_exclusive_named.ccs).
 
 ### Async / await
 

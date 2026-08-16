@@ -28,7 +28,7 @@ New to Concurrent-C? Work through these in order:
 | 10 | `recipe_worker_pool.ccs` | Real pattern | Putting it together: workers + channels |
 | 11 | `recipe_ordered_parallel.ccs` | Ordered fan-out | `send_task` + ordered recv, FIFO without reorder buffer |
 | 11a | `recipe_parallel.ccs` | `@parallel` | assignment join, `@serial` arms, `@parallel (pred)`, `@parallel for` |
-| 12 | `recipe_exclusive_named.ccs` | Named exclusivity | `CCExclusive`, resolve-once mutex, short guard CS |
+| 12 | `recipe_exclusive_named.ccs` | Named exclusivity | `CCExclusive`, resolve-once mutex, `acquire_when`, short guard CS |
 | 13 | `recipe_arena_scope.ccs` | Memory | Arena names a lifetime; alloc strategy is policy; `@destroy` ends the epoch |
 | 14 | `recipe_long_lived_store.ccs` | Provenance | Anchoring request-lifetime views in a long-lived arena |
 | 15 | `recipe_defer_cleanup.ccs` | Cleanup | `@defer` for resource management |
@@ -49,7 +49,7 @@ Minimal concurrent hello world — shows explicit nursery creation and task spaw
 | `recipe_channel_pipeline.ccs` | Producer/consumer | Nested ownership + channel close |
 | `recipe_async_await.ccs` | Async/Await | `@async`, `@await`, `cc_block_on` |
 | `recipe_worker_pool.ccs` | Worker pool | N workers, shared queue |
-| `recipe_exclusive_named.ccs` | Named exclusive | Domain + `mutex(name)` once + guard unlock |
+| `recipe_exclusive_named.ccs` | Named exclusive | Domain + `mutex(name)` once + `acquire_when` + guard unlock |
 | `recipe_arena_scope.ccs` | Scoped memory | Named lifetime per iteration; bump/reset is policy |
 | `recipe_long_lived_store.ccs` | Long-lived store | Explicit provenance movement into an arena-owned store |
 | `recipe_defer_cleanup.ccs` | Cleanup | `@defer` on scope exit |

@@ -29,8 +29,10 @@
  */
 
 #include <ccc/cc_exclusive.cch>
+#include <ccc/cc_sched.cch>
 
 #include "fiber_internal.h"
+#include "wake_primitive.h"
 
 #include <pthread.h>
 #include <signal.h>
@@ -44,8 +46,9 @@
 #include <unistd.h>
 
 typedef struct CCExclusiveWaiter {
-    void* fiber;
+    void* fiber;           /* tagged fiber, or NULL for an OS thread */
     _Atomic int ready;
+    wake_primitive wake;   /* off-fiber park; stack-scoped, not destroyed */
     struct CCExclusiveWaiter* next;
 } CCExclusiveWaiter;
 
@@ -507,6 +510,9 @@ void cc_exclusive_lock_entry_slow(void* entry) {
 }
 
 bool cc_cancelled(void);
+typedef struct CCNursery CCNursery;
+CCNursery* cc__runtime_current_nursery(void);
+bool cc_nursery_is_cancelled(const CCNursery* n);
 
 /* Unlink `node` from the condition queue.  Returns 1 if it was still queued. */
 static int cc__exclusive_cond_dequeue(CCExclusiveEntry* e, CCExclusiveWaiter* node) {
@@ -546,30 +552,81 @@ static void cc__exclusive_cond_wake_n(CCExclusiveEntry* e, int all) {
         if (!w) return;
         atomic_store_explicit(&w->ready, 1, memory_order_release);
         if (fiber) cc__fiber_unpark(fiber);
+        wake_primitive_wake_one(&w->wake);
         if (!all) return;
     }
 }
 
+/* Remaining ms until `d`, or -1 if none. 0 means already expired.
+ * ulock treats timeout=0 as wait-forever — never pass 0 through. */
+static int cc__excl_deadline_ms(const CCDeadline* d) {
+    struct timespec now;
+    int64_t sec, nsec, ms;
+    if (!d || d->deadline.tv_sec == 0) return -1;
+    if (cc_deadline_expired(d)) return 0;
+    clock_gettime(CLOCK_REALTIME, &now);
+    sec = (int64_t)d->deadline.tv_sec - (int64_t)now.tv_sec;
+    nsec = (int64_t)d->deadline.tv_nsec - (int64_t)now.tv_nsec;
+    if (nsec < 0) {
+        sec--;
+        nsec += 1000000000;
+    }
+    if (sec < 0) return 0;
+    ms = sec * 1000 + nsec / 1000000;
+    if (ms <= 0) return 0;
+    if (ms > 0x7fffffff) return 0x7fffffff;
+    return (int)ms;
+}
+
+/* Leave the cond queue on cancel/timeout. If a signaler already popped
+ * us, wait for ready and treat it as a wake. */
+static int cc__exclusive_cond_leave(CCExclusiveEntry* e, CCExclusiveWaiter* node,
+                                   int timedout) {
+    int found = cc__exclusive_cond_dequeue(e, node);
+    if (!found) {
+        while (atomic_load_explicit(&node->ready, memory_order_acquire) == 0) {
+            if (node->fiber)
+                cc__cpu_pause();
+            else {
+                uint32_t gen = atomic_load_explicit(&node->wake.value,
+                                                    memory_order_acquire);
+                if (atomic_load_explicit(&node->ready, memory_order_acquire) != 0)
+                    break;
+                wake_primitive_wait(&node->wake, gen);
+            }
+        }
+        return CC_EXCL_WAIT_OK;
+    }
+    return timedout ? CC_EXCL_WAIT_TIMEOUT : CC_EXCL_WAIT_CANCELLED;
+}
+
 /* Caller holds `g`. Enqueue on the cond list, then release, then park.
- * Returns CC_EXCL_WAIT_OK (not holding; retry acquire+pred),
- * CC_EXCL_WAIT_CANCELLED (not holding), or CC_EXCL_WAIT_INVALID. */
+ * Fiber: CC_FIBER_PARK. OS thread: wake_primitive on the node. Deadline
+ * from cc_current_deadline(). Never returns holding. */
 int cc_exclusive_guard_wait_release(CCExclusiveGuard* g) {
     CCExclusiveEntry* e;
     CCExclusiveWaiter node;
-    int found;
+    const CCDeadline* dl;
+    int in_fiber;
 
     if (!g || !g->_entry) return CC_EXCL_WAIT_INVALID;
     e = (CCExclusiveEntry*)g->_entry;
 
-    if (!cc__fiber_in_context()) {
-        /* OS threads cannot park; release and let the caller busy-recheck. */
+    dl = cc_current_deadline();
+    if (dl && dl->cancelled) {
         cc_exclusive_guard_release(g);
-        return CC_EXCL_WAIT_OK;
+        return CC_EXCL_WAIT_CANCELLED;
+    }
+    if (dl && dl->deadline.tv_sec != 0 && cc_deadline_expired(dl)) {
+        cc_exclusive_guard_release(g);
+        return CC_EXCL_WAIT_TIMEOUT;
     }
 
-    node.fiber = cc__fiber_current();
+    in_fiber = cc__fiber_in_context();
+    node.fiber = in_fiber ? cc__fiber_current() : NULL;
     node.next = NULL;
     atomic_store_explicit(&node.ready, 0, memory_order_relaxed);
+    wake_primitive_init(&node.wake);
 
     /* Enqueue before release so a signal under a later hold cannot miss us. */
     cc__spin_lock(&e->wait_spin);
@@ -580,21 +637,40 @@ int cc_exclusive_guard_wait_release(CCExclusiveGuard* g) {
 
     cc_exclusive_guard_release(g);
 
-    while (atomic_load_explicit(&node.ready, memory_order_acquire) == 0) {
-        if (cc_cancelled()) break;
-        CC_FIBER_PARK("exclusive_when");
-    }
+    for (;;) {
+        if (atomic_load_explicit(&node.ready, memory_order_acquire) != 0)
+            return CC_EXCL_WAIT_OK;
+        /* cc_cancelled() is true with no nursery — do not treat a bare
+         * OS thread as cancelled. */
+        {
+            CCNursery* nur = cc__runtime_current_nursery();
+            if ((nur && cc_nursery_is_cancelled(nur)) || (dl && dl->cancelled))
+                return cc__exclusive_cond_leave(e, &node, 0);
+        }
+        if (dl && dl->deadline.tv_sec != 0 && cc_deadline_expired(dl))
+            return cc__exclusive_cond_leave(e, &node, 1);
 
-    if (atomic_load_explicit(&node.ready, memory_order_acquire) != 0)
-        return CC_EXCL_WAIT_OK;
-
-    found = cc__exclusive_cond_dequeue(e, &node);
-    if (!found) {
-        while (atomic_load_explicit(&node.ready, memory_order_acquire) == 0)
-            cc__cpu_pause();
-        return CC_EXCL_WAIT_OK;
+        if (in_fiber) {
+            if (dl && dl->deadline.tv_sec != 0)
+                (void)CC_FIBER_PARK_IF_UNTIL(&node.ready, 0, &dl->deadline,
+                                             "exclusive_when");
+            else
+                CC_FIBER_PARK("exclusive_when");
+        } else {
+            uint32_t gen = atomic_load_explicit(&node.wake.value,
+                                                memory_order_acquire);
+            if (atomic_load_explicit(&node.ready, memory_order_acquire) != 0)
+                return CC_EXCL_WAIT_OK;
+            if (dl && dl->deadline.tv_sec != 0) {
+                int ms = cc__excl_deadline_ms(dl);
+                if (ms == 0)
+                    continue;
+                wake_primitive_wait_timeout(&node.wake, gen, (uint32_t)ms);
+            } else {
+                wake_primitive_wait(&node.wake, gen);
+            }
+        }
     }
-    return CC_EXCL_WAIT_CANCELLED;
 }
 
 void cc_exclusive_guard_signal(CCExclusiveGuard* g) {

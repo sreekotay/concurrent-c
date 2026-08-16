@@ -96,11 +96,12 @@ typedef struct CCExclusive CCExclusive;
 #define CC_EXCL_LOCKED    1
 #define CC_EXCL_CONTENDED 2
 
-/* cc_exclusive_guard_wait_release: 0 = woken (retry), else cancel / invalid. */
+/* cc_exclusive_guard_wait_release: 0 = woken (retry), else not holding. */
 enum {
     CC_EXCL_WAIT_OK = 0,
     CC_EXCL_WAIT_CANCELLED = 1,
-    CC_EXCL_WAIT_INVALID = 2
+    CC_EXCL_WAIT_INVALID = 2,
+    CC_EXCL_WAIT_TIMEOUT = 3
 };
 
 typedef int (*CCExclusivePred)(void* env);
@@ -137,8 +138,9 @@ void cc_exclusive_lock_entry_slow(void* entry);
 void cc_exclusive_unlock_contended(void* entry);
 
 /* Caller holds `g`. Enqueue as a condition waiter, release, park until
- * signal/broadcast or cancel. Never returns holding. 0 = woken (retry
- * acquire+pred); CANCELLED / INVALID = not holding. */
+ * signal/broadcast, cancel, or the current deadline. Parks a fiber or an
+ * OS thread (futex/ulock). Never returns holding. 0 = woken (retry
+ * acquire+pred); CANCELLED / INVALID / TIMEOUT = not holding. */
 int cc_exclusive_guard_wait_release(CCExclusiveGuard* g);
 /* Wake one / all condition waiters. Call while still holding, after the
  * mutation that may make pred true. No-op on a released guard. */

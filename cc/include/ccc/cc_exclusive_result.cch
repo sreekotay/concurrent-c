@@ -10,8 +10,10 @@
  *   m.acquire_when(pred, env) !>;
  *
  * Success: name is held and pred was true under that hold. Error: not
- * holding (INVALID_ARG or CANCELLED). Pred runs only while held and must
- * not suspend. Anyone who makes pred true signals that name under the hold.
+ * holding (INVALID_ARG, CANCELLED, or TIMEOUT). Pred runs only while held
+ * and must not suspend. Anyone who makes pred true signals that name under
+ * the hold. `wait_release` parks a fiber or an OS thread and consults
+ * `cc_current_deadline()`. No current nursery is not cancel.
  */
 #ifndef CC_EXCLUSIVE_RESULT_H
 #define CC_EXCLUSIVE_RESULT_H
@@ -41,6 +43,8 @@ cc_exclusive_acquire_when(CCExclusive* excl, uint64_t name,
                 return cc_err(CC_ERR_INVALID_ARG, "cc_exclusive_acquire_when");
             if (rc == CC_EXCL_WAIT_CANCELLED)
                 return cc_err(CC_ERR_CANCELLED, "cc_exclusive_acquire_when");
+            if (rc == CC_EXCL_WAIT_TIMEOUT)
+                return cc_err(CC_ERR_TIMEOUT, "cc_exclusive_acquire_when");
         }
     }
 }
