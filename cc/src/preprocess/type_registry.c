@@ -530,10 +530,17 @@ int cc_type_registry_add_field_ex(CCTypeRegistry* reg,
                 strcmp(reg->fields[i].field_type, field_type) != 0) {
                 return 0;
             }
-            free(reg->fields[i].field_type);
-            reg->fields[i].field_type = strdup(field_type);
+            /* Copy first: typeview as: re-add passes the interned
+             * field_type pointer back in (`lookup` then `add_field_ex`).
+             * Free-then-strdup of that pointer is a use-after-free. */
+            {
+                char* copy = strdup(field_type);
+                if (!copy) return -1;
+                free(reg->fields[i].field_type);
+                reg->fields[i].field_type = copy;
+            }
             if (is_as) reg->fields[i].is_as = 1;
-            return reg->fields[i].field_type ? 0 : -1;
+            return 0;
         }
     }
     if (ensure_field_capacity(reg, reg->field_count + 1) != 0) return -1;

@@ -494,6 +494,10 @@ static void env_sidecar_restore(EnvSidecar* e) {
 static int get_run_timeout_for_test(const char* stem, int default_timeout_sec) {
     if (!stem) return default_timeout_sec;
     if (strcmp(stem, "chan_park_wake_lostwake_stress_smoke") == 0) return 20;
+    /* Inner `cc` + `ccc build --release` + three weekend-image runs. The
+     * 10s default trips under --jobs contention (TIMEOUT, not a wrong
+     * checksum). */
+    if (strcmp(stem, "raytracer_weekend_smoke") == 0) return 60;
     /* Emits both Redis variants; ~7s each under -O0 toolchains. */
     if (strcmp(stem, "redis_phase2_lowering_shape_smoke") == 0) return 30;
     /* Many nested ccc -e/-E subprocesses; ~11s alone, can exceed 30s under

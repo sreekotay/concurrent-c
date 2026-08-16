@@ -1620,13 +1620,9 @@ static inline void cc_arena_reset(CCArena *arena) {
     }
 }
 
-static inline void cc__arena_warn_checkpoint_disabled_once(void) {
-    static cc_atomic_uint once = 0;
-    unsigned expected = 0;
-    if (!CC_ATOMIC_CAS(&once, &expected, 1u)) return;
-    fprintf(stderr,
-            "cc_arena_checkpoint: arena has a slab hole; "
-            "checkpoints disabled (restore would refuse)\n");
+static inline void cc__arena_report_checkpoint_error(const char *msg) {
+    if (!msg) return;
+    fprintf(stderr, "cc_arena_checkpoint: %s\n", msg);
 }
 
 // Capture current arena allocation state (including block index for cross-block restore).
@@ -1638,7 +1634,10 @@ static inline CCArenaCheckpoint cc_arena_checkpoint(CCArena* arena) {
     cp.ovf_keep = 0;
     cp.block_idx = 0;
     cp.provenance = 0;
-    if (!arena) return cp;
+    if (!arena) {
+        cc__arena_report_checkpoint_error("null arena");
+        return cp;
+    }
     cc__arena_meta_lock(arena);
     cp.offset = CC_ATOMIC_LOAD(&arena->offset);
     cp.live_allocs = CC_ATOMIC_LOAD(&arena->live_allocs);
@@ -1651,7 +1650,10 @@ static inline CCArenaCheckpoint cc_arena_checkpoint(CCArena* arena) {
         cc__arena_ovf_seal_for_new_epoch(arena);
     }
     cc__arena_meta_unlock(arena);
-    if (!cp.arena) cc__arena_warn_checkpoint_disabled_once();
+    if (!cp.arena) {
+        cc__arena_report_checkpoint_error(
+            "slab hole; refuse (a keep-set object may have been released)");
+    }
     return cp;
 }
 

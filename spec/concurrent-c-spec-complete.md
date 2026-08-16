@@ -1950,8 +1950,8 @@ post-checkpoint allocations become stale; prior ones remain valid. Checkpoints
 do not change ownership rules.
 
 While the arena has a slab hole (`NON_REWINDABLE`), `cc_arena_checkpoint`
-returns a null handle (`checkpoint.arena == NULL`) and emits a one-time
-diagnostic. `cc_arena_restore` returns false and does not mutate on a null
+returns a null handle (`checkpoint.arena == NULL`) and emits a diagnostic
+on every refused capture. `cc_arena_restore` returns false and does not mutate on a null
 handle, a slab hole, a punctured overflow keep-set, or a checkpoint that would
 advance the tip (stale nested restore); each refusal emits a diagnostic.
 Dropping a checkpoint handle does not block a later `checkpoint()`.
