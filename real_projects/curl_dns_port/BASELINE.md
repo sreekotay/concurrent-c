@@ -17,12 +17,13 @@ Binary under test: `out/prefix/bin/curl` and `out/prefix/lib/libcurl.a`
 | **Fail path** | NXDOMAIN / bad name surfaces cleanly | `CURLE_COULDNT_RESOLVE_HOST` (exit 6 on CLI) |
 | **Concurrent** | Queue handles many in-flight lookups | N easy handles × R rounds; all DNS-ok; report per-round + **median** wall / dns_mean |
 | **Abort / teardown** | Remove or destroy mid-resolve without hang/crash | Same N × R; each teardown &lt; 5s; median wall recorded. This is the fast path (lookups usually not yet in `getaddrinfo`). |
-| **Blocked join** | Destroy waits for an in-flight `process`, frees queued work, no UAF | `make queue-smoke` (`join_blocked` / `detach_blocked`); `make queue-asan` |
+| **Blocked join** | Join waits an in-flight `process` and frees queued work. Detach `abandon`s the nursery (returns without joining); last-exit frees. No UAF. | `make queue-smoke` (`join_blocked` / `detach_blocked`); `make queue-asan` |
+| **curl tests** | Stock harness agrees on the tests this build can run | `make runtests-dns` — 1515, 1516, 3301 (thrdqueue unit). 2103/2104 skip without `override-dns`; 1512 is DISABLED upstream. |
 | **Perf snapshot** | Comparable wall times later | Dated `benchmarks/baseline_<flavor>_*.txt` (medians, not a single shot) |
 
-Not in scope yet: full `runtests.pl` DNS series, DoH, `--resolve`
-(bypasses the resolver), c-ares builds. `CURLVERBOSE` thread-queue traces
-are stock-only; the CC queue does not call `curl_trc`.
+Not in scope: DoH, `--resolve` (bypasses the resolver), c-ares, a
+debug/`override-dns` curl. `CURLVERBOSE` thread-queue traces still do
+not call `curl_trc`.
 
 ## How to run
 

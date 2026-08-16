@@ -4,6 +4,7 @@
  */
 #include "cc_thrdqueue.h"
 
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -192,6 +193,160 @@ static int test_detach_blocked(void) {
     return 0;
 }
 
+static struct curl_thrdq *g_recv_q;
+static atomic_int g_saw_recv_error;
+
+static void *recv_while_join(void *arg) {
+    void *got;
+    int rc;
+    (void)arg;
+    while (atomic_load(&g_block_entered) < 1)
+        usleep(1000);
+    for (;;) {
+        rc = Curl_thrdq_recv(g_recv_q, &got);
+        if (rc == CC_CURLE_RECV_ERROR) {
+            atomic_store(&g_saw_recv_error, 1);
+            return NULL;
+        }
+        if (rc != CC_CURLE_AGAIN && rc != CC_CURLE_OK)
+            return NULL;
+        usleep(1000);
+    }
+}
+
+/* destroy(join) sets aborted first; recv must be RECV_ERROR, not AGAIN. */
+static int test_recv_aborted(void) {
+    struct curl_thrdq *q = NULL;
+    BlockItem *a;
+    pthread_t th;
+    int rc;
+
+    atomic_store(&g_block_entered, 0);
+    atomic_store(&g_block_processed, 0);
+    atomic_store(&g_block_freed, 0);
+    atomic_store(&g_saw_recv_error, 0);
+
+    a = block_item(4);
+    if (!a)
+        return fail("recv_aborted: malloc");
+    rc = Curl_thrdq_create(&q, "recv-abort", 0, 0, 1, 2000, free_block,
+                           process_block, NULL, NULL);
+    if (rc != CC_CURLE_OK || !q)
+        return fail("recv_aborted: create");
+    if (Curl_thrdq_send(q, a, "in-flight", 0) != CC_CURLE_OK)
+        return fail("recv_aborted: send");
+    if (!wait_atomic(&g_block_entered, 1, 1.0))
+        return fail("recv_aborted: process never entered");
+
+    g_recv_q = q;
+    if (pthread_create(&th, NULL, recv_while_join, NULL) != 0)
+        return fail("recv_aborted: pthread_create");
+    Curl_thrdq_destroy(q, true);
+    pthread_join(th, NULL);
+    g_recv_q = NULL;
+    if (!atomic_load(&g_saw_recv_error))
+        return fail("recv_aborted: expected CURLE_RECV_ERROR during join");
+    printf("thrdqueue_smoke: recv_aborted OK\n");
+    return 0;
+}
+
+/* Park until outstanding work is 0. timeout_ms=0 waits forever. */
+static int test_await_done(void) {
+    struct curl_thrdq *q = NULL;
+    void *got;
+    int item = 1;
+    double t0, dt;
+    int rc;
+
+    rc = Curl_thrdq_create(&q, "await", 0, 0, 1, 2000, free_nop,
+                           process_sleep, NULL, NULL);
+    if (rc != CC_CURLE_OK || !q)
+        return fail("await_done: create");
+
+    t0 = monotonic_s();
+    rc = Curl_thrdq_await_done(q, 100);
+    dt = monotonic_s() - t0;
+    if (rc != CC_CURLE_OK)
+        return fail("await_done: idle must be OK");
+    if (dt > 0.05)
+        return fail("await_done: idle wait parked");
+
+    if (Curl_thrdq_send(q, &item, "slow", 0) != CC_CURLE_OK)
+        return fail("await_done: send");
+
+    t0 = monotonic_s();
+    rc = Curl_thrdq_await_done(q, 30);
+    dt = monotonic_s() - t0;
+    if (rc != CC_CURLE_OPERATION_TIMEDOUT)
+        return fail("await_done: short wait must TIMEOUT");
+    if (dt < 0.02 || dt > 0.08)
+        return fail("await_done: TIMEOUT was not the deadline");
+
+    {
+        double timeout_s = dt;
+        t0 = monotonic_s();
+        rc = Curl_thrdq_await_done(q, 1000);
+        dt = monotonic_s() - t0;
+        if (rc != CC_CURLE_OK)
+            return fail("await_done: did not become idle");
+        if (dt > 0.20)
+            return fail("await_done: completion wait too long");
+        if (Curl_thrdq_recv(q, &got) != CC_CURLE_OK)
+            return fail("await_done: item never landed on done");
+
+        Curl_thrdq_destroy(q, true);
+        printf("thrdqueue_smoke: await_done OK (timeout=%.3fs rest=%.3fs)\n",
+               timeout_s, dt);
+    }
+    return 0;
+}
+
+static atomic_int g_ran_slow;
+static atomic_int g_ran_exp;
+
+static void process_timeout_take(void *item) {
+    int *p = (int *)item;
+    if (*p == 1) {
+        atomic_fetch_add(&g_ran_slow, 1);
+        usleep(80000);
+    } else {
+        atomic_fetch_add(&g_ran_exp, 1);
+    }
+}
+
+/* Stock take: remaining < 0 while queued → done, no process. */
+static int test_timeout_at_take(void) {
+    struct curl_thrdq *q = NULL;
+    void *got;
+    int slow = 1, exp = 2;
+    int n = 0;
+    int rc;
+
+    atomic_store(&g_ran_slow, 0);
+    atomic_store(&g_ran_exp, 0);
+    rc = Curl_thrdq_create(&q, "expire", 0, 0, 1, 2000, free_nop,
+                           process_timeout_take, NULL, NULL);
+    if (rc != CC_CURLE_OK || !q)
+        return fail("timeout_at_take: create");
+    if (Curl_thrdq_send(q, &slow, "slow", 0) != CC_CURLE_OK)
+        return fail("timeout_at_take: send slow");
+    if (Curl_thrdq_send(q, &exp, "exp", 10) != CC_CURLE_OK)
+        return fail("timeout_at_take: send exp");
+    if (Curl_thrdq_await_done(q, 1000) != CC_CURLE_OK)
+        return fail("timeout_at_take: await_done");
+    if (atomic_load(&g_ran_slow) != 1)
+        return fail("timeout_at_take: slow item must run");
+    if (atomic_load(&g_ran_exp) != 0)
+        return fail("timeout_at_take: expired item was processed");
+    while (Curl_thrdq_recv(q, &got) == CC_CURLE_OK)
+        n++;
+    if (n != 2)
+        return fail("timeout_at_take: both items must land on done");
+    Curl_thrdq_destroy(q, true);
+    printf("thrdqueue_smoke: timeout_at_take OK\n");
+    return 0;
+}
+
 int main(void) {
     struct curl_thrdq *q = NULL;
     void *got;
@@ -253,13 +408,20 @@ int main(void) {
         /* item may already have been processed; either way, no crash */
     }
 
+    Curl_thrdq_trace(q, NULL);
     Curl_thrdq_destroy(q, true);
     printf("thrdqueue_smoke: knobs OK (max_inflight=%d)\n",
            atomic_load(&g_max_inflight));
 
+    if (test_await_done())
+        return 1;
+    if (test_timeout_at_take())
+        return 1;
     if (test_join_blocked())
         return 1;
     if (test_detach_blocked())
+        return 1;
+    if (test_recv_aborted())
         return 1;
     return 0;
 }

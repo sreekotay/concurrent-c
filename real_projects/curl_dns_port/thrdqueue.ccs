@@ -8,22 +8,25 @@
  *
  *   create   jobs/done bags + min workers
  *   send     push jobs; live < max ⇒ spawn a hybrid worker
- *   worker   pop → fn_process → push done (or give_back)
+ *   worker   take (expired-while-queued → done, no process) →
+ *            fn_process → push done (or give_back)
  *            idle-exit only when live > min
  *   recv     try-pop done (AGAIN if empty)
- *   clear    remove_if on both bags (retract; not a channel bounce)
+ *   clear    retract both bags under one sorted hold (jobs then done)
  *   destroy  give_back queued jobs (do not run), close jobs,
  *            join: wait in-flight getaddrinfo, give_back leftover done, free q
  *            detach: on_last(finish_q) + workers->abandon() — do not wait
  *
  * getaddrinfo stays blocking. The bags are lists you can retract from.
- * The nursery is the join. await_left is only await_done (curl does not call it).
+ * Exclusive acquire_when is the bag wait and await_done (not a channel).
+ * The nursery is the join.
  */
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_atomic.cch>
+#include <ccc/cc_exclusive.cch>
+#include <ccc/cc_exclusive_result.cch>
 
 #include <errno.h>
-#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -33,6 +36,7 @@ __attribute__((used)) const char cc_curl_thrdq[] = "concurrent-c";
 
 typedef struct {
     void *item;
+    const char *description;
     CCDeadline expire;
 } Job;
 
@@ -42,16 +46,22 @@ typedef struct {
     int cap;
     int closed;
     int ready;
-    pthread_mutex_t mu;
-    pthread_cond_t cv;
+    CCExclusive *excl;
+    uint64_t name;
 } JobBag;
 
 typedef struct curl_thrdq CcThrdq;
 
+enum { BAG_JOBS = 0, BAG_DONE = 1, BAG_AWAIT = 2 };
+
 struct curl_thrdq {
     JobBag jobs;
     JobBag done;
+    CCArena lock_arena;
+    CCExclusive *locks;
     CCNursery *workers;
+    char *name;
+    int aborted;
     Curl_thrdq_item_free_cb fn_free;
     Curl_thrdq_item_process_cb fn_process;
     Curl_thrdq_ev_cb fn_event;
@@ -61,7 +71,7 @@ struct curl_thrdq {
     uint32_t max_threads;
     uint32_t idle_time_ms;
     cc_atomic_int live;
-    cc_atomic_int await_left;
+    int await_left; /* BAG_AWAIT: sent and not yet finished or retracted */
 };
 
 static void give_back(CcThrdq *q, void *item) {
@@ -69,14 +79,37 @@ static void give_back(CcThrdq *q, void *item) {
         q->fn_free(item);
 }
 
-static int JobBag_init(JobBag *b) {
+static int bag_has_item(void *env) {
+    JobBag *b = (JobBag *)env;
+    return b->n > 0 || b->closed;
+}
+
+static int await_is_idle(void *env) {
+    return ((CcThrdq *)env)->await_left == 0;
+}
+
+/* Hold BAG_AWAIT only. Do not call while holding BAG_JOBS / BAG_DONE. */
+static void await_note(CcThrdq *q, int delta) {
+    CCExclusive *locks;
+    CCExclusiveGuard g;
+    if (!q || !delta)
+        return;
+    locks = q->locks;
+    if (!locks)
+        return;
+    g = locks->acquire(BAG_AWAIT);
+    q->await_left += delta;
+    if (q->await_left == 0)
+        g.broadcast();
+    g.release();
+}
+
+static int JobBag_init(JobBag *b, CCExclusive *excl, uint64_t name) {
     memset(b, 0, sizeof(*b));
-    if (pthread_mutex_init(&b->mu, NULL) != 0)
+    if (!excl)
         return -1;
-    if (pthread_cond_init(&b->cv, NULL) != 0) {
-        pthread_mutex_destroy(&b->mu);
-        return -1;
-    }
+    b->excl = excl;
+    b->name = name;
     b->ready = 1;
     return 0;
 }
@@ -84,11 +117,10 @@ static int JobBag_init(JobBag *b) {
 static void JobBag_destroy(JobBag *b) {
     if (!b->ready)
         return;
-    pthread_cond_destroy(&b->cv);
-    pthread_mutex_destroy(&b->mu);
     free(b->a);
     b->a = NULL;
     b->n = b->cap = 0;
+    b->excl = NULL;
     b->ready = 0;
 }
 
@@ -109,11 +141,48 @@ static void JobBag_take0(JobBag *b, Job *out) {
         memmove(b->a, b->a + 1, (size_t)b->n * sizeof(Job));
 }
 
-/* 0 ok, AGAIN if at max_len, SEND_ERROR if closed, OOM if grow fails. */
-static int JobBag_push(JobBag *b, Job job, uint32_t max_len) {
-    int rc = CC_CURLE_OK;
-    pthread_mutex_lock(&b->mu);
+static int job_expired(const Job *j) {
+    return j->expire.deadline.tv_sec != 0 && cc_deadline_expired(&j->expire);
+}
+
+/* Caller holds this bag. */
+static int JobBag_append_held(JobBag *b, Job job) {
     if (b->closed)
+        return -1;
+    if (b->n == b->cap && JobBag_grow(b) != 0)
+        return -1;
+    b->a[b->n++] = job;
+    return 0;
+}
+
+/* Caller holds this bag. Returns how many jobs-bag matches were retracted. */
+static int JobBag_remove_if_held(JobBag *b, CcThrdq *q, int from_jobs,
+                                 Curl_thrdq_item_match_cb fn_match,
+                                 void *match_data) {
+    int i, w, dropped;
+    w = 0;
+    dropped = 0;
+    for (i = 0; i < b->n; i++) {
+        if (fn_match(b->a[i].item, match_data)) {
+            if (from_jobs)
+                dropped++;
+            give_back(q, b->a[i].item);
+        } else {
+            b->a[w++] = b->a[i];
+        }
+    }
+    b->n = w;
+    return dropped;
+}
+
+/* 0 ok, AGAIN if at max_len, SEND_ERROR if closed/aborted, OOM if grow fails. */
+static int JobBag_push(JobBag *b, CcThrdq *q, Job job, uint32_t max_len) {
+    CCExclusiveGuard g;
+    int rc = CC_CURLE_OK;
+    if (!b->excl)
+        return CC_CURLE_SEND_ERROR;
+    g = b->excl->acquire(b->name);
+    if (q->aborted || b->closed)
         rc = CC_CURLE_SEND_ERROR;
     else if (max_len && b->n >= (int)max_len)
         rc = CC_CURLE_AGAIN;
@@ -121,87 +190,136 @@ static int JobBag_push(JobBag *b, Job job, uint32_t max_len) {
         rc = CC_CURLE_OUT_OF_MEMORY;
     else {
         b->a[b->n++] = job;
-        pthread_cond_signal(&b->cv);
+        g.signal();
     }
-    pthread_mutex_unlock(&b->mu);
+    g.release();
     return rc;
 }
 
-/* 0 took one, ETIMEDOUT, EPIPE if closed and empty. */
-static int JobBag_pop(JobBag *b, Job *out, const CCDeadline *dl) {
-    int rc = 0;
-    pthread_mutex_lock(&b->mu);
-    while (b->n == 0 && !b->closed) {
-        if (dl && dl->deadline.tv_sec) {
-            int wr = pthread_cond_timedwait(&b->cv, &b->mu, &dl->deadline);
-            if (wr == ETIMEDOUT && b->n == 0) {
-                rc = ETIMEDOUT;
-                goto out;
-            }
-        } else {
-            pthread_cond_wait(&b->cv, &b->mu);
+/* 0 took a live job. ETIMEDOUT idle wait. EPIPE closed and empty.
+ * Expired heads move to done under jobs+done (no process), then ITEM_DONE. */
+static int take_job(CcThrdq *q, Job *out, const CCDeadline *dl) {
+    JobBag *jobs = &q->jobs;
+    JobBag *done = &q->done;
+    CCDeadline *prev = NULL;
+    CCDeadline idle;
+    if (!jobs->excl || !done->excl)
+        return EPIPE;
+    if (dl && dl->deadline.tv_sec) {
+        idle = *dl;
+        prev = cc_deadline_push(&idle);
+    }
+    for (;;) {
+        CCExclusiveGuard !>(CCError) r;
+        CCExclusiveGuard g_jobs;
+        CCExclusiveGuard g_done;
+        Job exp;
+        int skipped = 0;
+        int got = 0;
+        int closed;
+        r = jobs->excl->acquire_when(jobs->name, bag_has_item, jobs);
+        if (cc_is_err(r)) {
+            if (prev)
+                cc_deadline_pop(prev);
+            if (r.u.error.kind == CC_ERR_TIMEOUT)
+                return ETIMEDOUT;
+            return EPIPE;
+        }
+        g_jobs = r.u.value;
+        g_done = done->excl->acquire(done->name);
+        while (jobs->n > 0 && job_expired(&jobs->a[0])) {
+            JobBag_take0(jobs, &exp);
+            if (JobBag_append_held(done, exp) != 0)
+                give_back(q, exp.item);
+            skipped++;
+        }
+        if (jobs->n > 0) {
+            JobBag_take0(jobs, out);
+            got = 1;
+        }
+        closed = jobs->closed;
+        g_done.release();
+        g_jobs.release();
+        if (skipped) {
+            await_note(q, -skipped);
+            if (q->fn_event)
+                q->fn_event(q, CURL_THRDQ_EV_ITEM_DONE, q->fn_user_data);
+        }
+        if (got) {
+            if (prev)
+                cc_deadline_pop(prev);
+            return 0;
+        }
+        if (closed) {
+            if (prev)
+                cc_deadline_pop(prev);
+            return EPIPE;
         }
     }
-    if (b->n == 0) {
-        rc = EPIPE;
-        goto out;
-    }
-    JobBag_take0(b, out);
-out:
-    pthread_mutex_unlock(&b->mu);
-    return rc;
-}
-
-static int JobBag_try_pop(JobBag *b, Job *out) {
-    int rc = -1;
-    pthread_mutex_lock(&b->mu);
-    if (b->n > 0) {
-        JobBag_take0(b, out);
-        rc = 0;
-    }
-    pthread_mutex_unlock(&b->mu);
-    return rc;
 }
 
 static void JobBag_close(JobBag *b) {
-    if (!b->ready)
+    CCExclusiveGuard g;
+    if (!b->ready || !b->excl)
         return;
-    pthread_mutex_lock(&b->mu);
+    g = b->excl->acquire(b->name);
     b->closed = 1;
-    pthread_cond_broadcast(&b->cv);
-    pthread_mutex_unlock(&b->mu);
+    g.broadcast();
+    g.release();
 }
 
-static void JobBag_drain(JobBag *b, CcThrdq *q) {
-    int i;
-    if (!b->ready)
-        return;
-    pthread_mutex_lock(&b->mu);
-    for (i = 0; i < b->n; i++)
+static int JobBag_drain(JobBag *b, CcThrdq *q) {
+    CCExclusiveGuard g;
+    int i, n;
+    if (!b->ready || !b->excl)
+        return 0;
+    g = b->excl->acquire(b->name);
+    n = b->n;
+    for (i = 0; i < n; i++)
         give_back(q, b->a[i].item);
     b->n = 0;
-    pthread_mutex_unlock(&b->mu);
+    g.release();
+    return n;
 }
 
-static void JobBag_remove_if(JobBag *b, CcThrdq *q, int from_jobs,
-                             Curl_thrdq_item_match_cb fn_match,
-                             void *match_data) {
-    int i, w;
-    if (!b->ready)
+static void q_release_storage(CcThrdq *q) {
+    JobBag *jobs;
+    JobBag *done;
+    if (!q)
         return;
-    pthread_mutex_lock(&b->mu);
-    w = 0;
-    for (i = 0; i < b->n; i++) {
-        if (fn_match(b->a[i].item, match_data)) {
-            if (from_jobs)
-                q->await_left.fetch_add(-1);
-            give_back(q, b->a[i].item);
-        } else {
-            b->a[w++] = b->a[i];
-        }
+    jobs = &q->jobs;
+    done = &q->done;
+    jobs->destroy();
+    done->destroy();
+    if (q->locks) {
+        q->locks->destroy();
+        q->locks = NULL;
     }
-    b->n = w;
-    pthread_mutex_unlock(&b->mu);
+    q->lock_arena.destroy();
+    free(q->name);
+    q->name = NULL;
+    free(q);
+}
+
+static void mark_aborted(CcThrdq *q) {
+    CCExclusive *locks;
+    CCExclusiveGuard gs[2];
+    if (!q)
+        return;
+    locks = q->locks;
+    if (!locks) {
+        q->aborted = 1;
+        return;
+    }
+    if (locks->acquire_range(BAG_JOBS, BAG_DONE + 1, gs, 2) == 2) {
+        q->aborted = 1;
+        {
+            CCExclusiveGuard *held = gs;
+            held->release_n(2);
+        }
+    } else {
+        q->aborted = 1;
+    }
 }
 
 /* Give back queued jobs (do not run), close (wakes workers), wait
@@ -210,10 +328,13 @@ static void CcThrdq_teardown(CcThrdq *q) {
     CCNursery *w;
     if (!q)
         return;
+    mark_aborted(q);
     {
         JobBag *jobs = &q->jobs;
-        jobs->drain(q);
+        int dropped = jobs->drain(q);
         jobs->close();
+        if (dropped)
+            await_note(q, -dropped);
     }
     w = q->workers;
     if (w)
@@ -226,17 +347,10 @@ static void CcThrdq_teardown(CcThrdq *q) {
         w->free();
         q->workers = NULL;
     }
-    {
-        JobBag *jobs = &q->jobs;
-        JobBag *done = &q->done;
-        jobs->destroy();
-        done->destroy();
-    }
-    free(q);
+    q_release_storage(q);
 }
 
 static void worker(CcThrdq *q) {
-    JobBag *jobs = &q->jobs;
     JobBag *done = &q->done;
 
     for (;;) {
@@ -245,7 +359,7 @@ static void worker(CcThrdq *q) {
         CCDeadline idle = (q->idle_time_ms && n > (int)q->min_threads)
             ? cc_deadline_after_ms(q->idle_time_ms)
             : cc_deadline_none();
-        int rc = jobs->pop(&job, &idle);
+        int rc = take_job(q, &job, &idle);
         if (rc == ETIMEDOUT) {
             n = q->live.load();
             if (n > (int)q->min_threads && q->live.cas(&n, n - 1))
@@ -255,13 +369,13 @@ static void worker(CcThrdq *q) {
         if (rc != 0)
             break;
 
-        if (!cc_deadline_expired(&job.expire) && job.item)
+        if (job.item)
             q->fn_process(job.item);
-        if (done->push(job, 0) != CC_CURLE_OK)
+        if (done->push(q, job, 0) != CC_CURLE_OK)
             give_back(q, job.item);
         if (q->fn_event)
             q->fn_event(q, CURL_THRDQ_EV_ITEM_DONE, q->fn_user_data);
-        q->await_left.fetch_add(-1);
+        await_note(q, -1);
     }
 }
 
@@ -284,9 +398,7 @@ static void finish_q(void *arg) {
     jobs = &q->jobs;
     done->drain(q);
     q->workers = NULL;
-    jobs->destroy();
-    done->destroy();
-    free(q);
+    q_release_storage(q);
 }
 
 /* Take a live slot below `cap` and spawn. 1 spawned, 0 already at cap, -1 failed.
@@ -335,7 +447,6 @@ int Curl_thrdq_create(struct curl_thrdq **ptqueue, const char *name,
     CcThrdq *q;
     int rc;
 
-    (void)name;
     *ptqueue = NULL;
     if (!fn_free || !fn_process)
         return CC_CURLE_FAILED_INIT;
@@ -349,11 +460,27 @@ int Curl_thrdq_create(struct curl_thrdq **ptqueue, const char *name,
     q->fn_process = fn_process;
     q->fn_event = fn_event;
     q->fn_user_data = user_data;
+    q->name = strdup(name ? name : "");
+    if (!q->name) {
+        q->teardown();
+        return CC_CURLE_OUT_OF_MEMORY;
+    }
 
+    q->lock_arena = cc_arena_heap(kilobytes(16));
+    if (!q->lock_arena.base) {
+        q->teardown();
+        return CC_CURLE_OUT_OF_MEMORY;
+    }
+    q->locks = cc_exclusive_create(&q->lock_arena, 4);
+    if (!q->locks) {
+        q->teardown();
+        return CC_CURLE_OUT_OF_MEMORY;
+    }
     {
         JobBag *jobs = &q->jobs;
         JobBag *done = &q->done;
-        if (jobs->init() != 0 || done->init() != 0) {
+        if (jobs->init(q->locks, BAG_JOBS) != 0 ||
+            done->init(q->locks, BAG_DONE) != 0) {
             q->teardown();
             return CC_CURLE_OUT_OF_MEMORY;
         }
@@ -387,59 +514,101 @@ int Curl_thrdq_send(struct curl_thrdq *q, void *item, const char *description,
         return CC_CURLE_OPERATION_TIMEDOUT;
 
     job.item = item;
+    job.description = description;
     job.expire = timeout_ms > 0 ? cc_deadline_after_ms((uint32_t)timeout_ms)
                                 : cc_deadline_none();
 
-    if (spawn_up_to(q, (int)q->max_threads) < 0)
-        return CC_CURLE_OUT_OF_MEMORY;
-
     {
         JobBag *jobs = &q->jobs;
-        rc = jobs->push(job, q->send_max_len);
+        rc = jobs->push(q, job, q->send_max_len);
     }
     if (rc != CC_CURLE_OK)
         return rc;
-    q->await_left.fetch_add(1);
+    await_note(q, 1);
+    /* Item is already owned. Spawn failure is not reported (stock signals
+     * the pool unlocked and ignores the error). */
+    (void)spawn_up_to(q, (int)q->max_threads);
     return CC_CURLE_OK;
 }
 
 int Curl_thrdq_recv(struct curl_thrdq *q, void **pitem) {
     Job job = {0};
     JobBag *done;
+    CCExclusiveGuard g;
     *pitem = NULL;
     if (!q)
         return CC_CURLE_FAILED_INIT;
     done = &q->done;
-    if (done->try_pop(&job) != 0)
-        return CC_CURLE_AGAIN;
-    *pitem = job.item;
-    return CC_CURLE_OK;
+    if (!done->excl)
+        return CC_CURLE_FAILED_INIT;
+    g = done->excl->acquire(done->name);
+    if (q->aborted) {
+        g.release();
+        return CC_CURLE_RECV_ERROR;
+    }
+    if (done->n > 0) {
+        JobBag_take0(done, &job);
+        g.release();
+        *pitem = job.item;
+        return CC_CURLE_OK;
+    }
+    g.release();
+    return CC_CURLE_AGAIN;
 }
 
 int Curl_thrdq_await_done(struct curl_thrdq *q, uint32_t timeout_ms) {
-    CCDeadline dl = timeout_ms ? cc_deadline_after_ms(timeout_ms)
-                               : cc_deadline_none();
+    CCExclusive *locks;
+    CCExclusiveGuard !>(CCError) r;
+    CCExclusiveGuard g;
+    CCDeadline *prev = NULL;
+    CCDeadline idle;
     if (!q)
         return CC_CURLE_FAILED_INIT;
-    while (q->await_left.load() > 0) {
-        if (cc_deadline_expired(&dl))
-            return CC_CURLE_OPERATION_TIMEDOUT;
-        cc_sleep_ms(1);
+    locks = q->locks;
+    if (!locks)
+        return CC_CURLE_FAILED_INIT;
+    if (timeout_ms) {
+        idle = cc_deadline_after_ms(timeout_ms);
+        prev = cc_deadline_push(&idle);
     }
+    r = locks->acquire_when(BAG_AWAIT, await_is_idle, q);
+    if (prev)
+        cc_deadline_pop(prev);
+    if (cc_is_err(r)) {
+        if (r.u.error.kind == CC_ERR_TIMEOUT)
+            return CC_CURLE_OPERATION_TIMEDOUT;
+        return CC_CURLE_FAILED_INIT;
+    }
+    g = r.u.value;
+    g.release();
     return CC_CURLE_OK;
 }
 
 void Curl_thrdq_clear(struct curl_thrdq *tqueue,
                       Curl_thrdq_item_match_cb fn_match, void *match_data) {
     CcThrdq *q = tqueue;
+    CCExclusive *locks;
+    CCExclusiveGuard gs[2];
     JobBag *jobs;
     JobBag *done;
+    int dropped;
     if (!q || !fn_match)
         return;
+    locks = q->locks;
     jobs = &q->jobs;
     done = &q->done;
-    jobs->remove_if(q, 1, fn_match, match_data);
-    done->remove_if(q, 0, fn_match, match_data);
+    if (!locks || !jobs->ready || !done->ready)
+        return;
+    if (locks->acquire_range(BAG_JOBS, BAG_DONE + 1, gs, 2) != 2)
+        abort();
+    dropped = jobs->remove_if_held(q, 1, fn_match, match_data);
+    done->remove_if_held(q, 0, fn_match, match_data);
+    {
+        CCExclusiveGuard *held = gs;
+        held->release_n(2);
+    }
+    if (dropped)
+        await_note(q, -dropped);
 }
 
 /* curl multi quick_exit: process is dying — do not block on getaddrinfo. */
@@ -448,18 +617,20 @@ static void detach_teardown(CcThrdq *q) {
     CCNursery *w;
     if (!q)
         return;
+    mark_aborted(q);
     jobs = &q->jobs;
     w = q->workers;
-    jobs->drain(q);
-    jobs->close();
+    {
+        int dropped = jobs->drain(q);
+        jobs->close();
+        if (dropped)
+            await_note(q, -dropped);
+    }
     if (!w) {
         finish_q(q);
         return;
     }
-    if (w->on_last(q, finish_q) != 0) {
-        q->teardown();
-        return;
-    }
+    (void)w->on_last(q, finish_q);
     w->abandon();
 }
 
@@ -474,6 +645,30 @@ void Curl_thrdq_destroy(struct curl_thrdq *tqueue, bool join) {
 }
 
 void Curl_thrdq_trace(struct curl_thrdq *q, struct Curl_easy *data) {
-    (void)q;
+    CCExclusive *locks;
+    CCExclusiveGuard gs[2];
+    JobBag *jobs;
+    JobBag *done;
+    int i;
     (void)data;
+    if (!q)
+        return;
+    /* This TU does not include curl_trc. Walk under the same hold as
+     * clear so name / descriptions stay live and the ABI is not a no-op. */
+    locks = q->locks;
+    jobs = &q->jobs;
+    done = &q->done;
+    if (!locks || !jobs->ready || !done->ready)
+        return;
+    if (locks->acquire_range(BAG_JOBS, BAG_DONE + 1, gs, 2) != 2)
+        return;
+    (void)q->name;
+    for (i = 0; i < jobs->n; i++)
+        (void)jobs->a[i].description;
+    for (i = 0; i < done->n; i++)
+        (void)done->a[i].description;
+    {
+        CCExclusiveGuard *held = gs;
+        held->release_n(2);
+    }
 }

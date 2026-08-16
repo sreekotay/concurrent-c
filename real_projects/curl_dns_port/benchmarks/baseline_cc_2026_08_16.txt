@@ -1,0 +1,83 @@
+=== curl DNS baseline (cc) ===
+date: 2026-08-16T04:32:44Z
+host: Darwin arm64 25.5.0
+pin: 8.21.0
+flavor: cc
+curl_bin: /Users/airm5/Documents/code/concurrent-c/real_projects/curl_dns_port/out/prefix/bin/curl
+N: 64
+rounds: 20
+
+--- CLI --version ---
+curl 8.21.0 (aarch64-apple-darwin25.5.0) libcurl/8.21.0 OpenSSL/3.6.3 zlib/1.2.12
+Release-Date: 2026-06-24
+Protocols: dict file ftp ftps gopher gophers http https imap imaps ipfs ipns mqtt mqtts pop3 pop3s rtsp smtp smtps telnet tftp ws wss
+Features: alt-svc AsynchDNS HSTS HTTPS-proxy IPv6 Largefile libz SSL threadsafe TLS-SRP UnixSockets
+
+identity: AsynchDNS present
+
+--- CLI happy path ---
+url=https://example.com/ http=200 dns=0.001832s connect=0.030232s total=0.111727s
+
+--- CLI nxdomain (expect exit 6) ---
+cli_nxdomain_exit=6
+cli_nxdomain: OK
+
+--- libcurl harness ---
+=== baseline_dns features ===
+curl_version: 8.21.0
+host: aarch64-apple-darwin25.5.0
+AsynchDNS: yes
+ssl_version: OpenSSL/3.6.3
+libz_version: 1.2.12
+features: OK
+=== baseline_dns nxdomain ===
+nxdomain: curlcode=6 (Could not resolve hostname)
+nxdomain: OK
+=== baseline_dns sequential n=4 ===
+sequential: n=4 ok=4 fail=0 wall=0.445s dns_mean=0.0284s dns_max=0.0488s
+=== baseline_dns concurrent n=64 rounds=20 ===
+concurrent[1/20]: n=64 ok=64 fail=0 wall=0.293s dns_mean=0.0814s dns_max=0.1033s
+concurrent[2/20]: n=64 ok=64 fail=0 wall=0.243s dns_mean=0.0192s dns_max=0.0307s
+concurrent[3/20]: n=64 ok=64 fail=0 wall=0.238s dns_mean=0.0185s dns_max=0.0305s
+concurrent[4/20]: n=64 ok=64 fail=0 wall=0.245s dns_mean=0.0165s dns_max=0.0285s
+concurrent[5/20]: n=64 ok=64 fail=0 wall=0.247s dns_mean=0.0194s dns_max=0.0376s
+concurrent[6/20]: n=64 ok=64 fail=0 wall=0.232s dns_mean=0.0227s dns_max=0.0373s
+concurrent[7/20]: n=64 ok=64 fail=0 wall=0.238s dns_mean=0.0154s dns_max=0.0273s
+concurrent[8/20]: n=64 ok=64 fail=0 wall=0.244s dns_mean=0.0186s dns_max=0.0328s
+concurrent[9/20]: n=64 ok=64 fail=0 wall=0.273s dns_mean=0.0190s dns_max=0.0317s
+concurrent[10/20]: n=64 ok=64 fail=0 wall=0.267s dns_mean=0.0204s dns_max=0.0329s
+concurrent[11/20]: n=64 ok=64 fail=0 wall=0.249s dns_mean=0.0168s dns_max=0.0283s
+concurrent[12/20]: n=64 ok=64 fail=0 wall=0.263s dns_mean=0.0149s dns_max=0.0267s
+concurrent[13/20]: n=64 ok=64 fail=0 wall=0.278s dns_mean=0.0184s dns_max=0.0342s
+concurrent[14/20]: n=64 ok=64 fail=0 wall=0.222s dns_mean=0.0177s dns_max=0.0295s
+concurrent[15/20]: n=64 ok=64 fail=0 wall=0.240s dns_mean=0.0191s dns_max=0.0315s
+concurrent[16/20]: n=64 ok=64 fail=0 wall=0.261s dns_mean=0.0173s dns_max=0.0291s
+concurrent[17/20]: n=64 ok=64 fail=0 wall=0.263s dns_mean=0.0191s dns_max=0.0331s
+concurrent[18/20]: n=64 ok=64 fail=0 wall=0.236s dns_mean=0.0167s dns_max=0.0289s
+concurrent[19/20]: n=64 ok=64 fail=0 wall=0.237s dns_mean=0.0185s dns_max=0.0353s
+concurrent[20/20]: n=64 ok=64 fail=0 wall=0.244s dns_mean=0.0171s dns_max=0.0317s
+concurrent_summary: n=64 rounds=20 fail_rounds=0 wall_median=0.245s wall_min=0.222s wall_max=0.293s dns_mean_median=0.0185s
+=== baseline_dns abort n=64 rounds=20 ===
+abort[1/20]: n=64 wall=0.014s
+abort[2/20]: n=64 wall=0.007s
+abort[3/20]: n=64 wall=0.000s
+abort[4/20]: n=64 wall=0.001s
+abort[5/20]: n=64 wall=0.003s
+abort[6/20]: n=64 wall=0.014s
+abort[7/20]: n=64 wall=0.003s
+abort[8/20]: n=64 wall=0.005s
+abort[9/20]: n=64 wall=0.003s
+abort[10/20]: n=64 wall=0.000s
+abort[11/20]: n=64 wall=0.001s
+abort[12/20]: n=64 wall=0.002s
+abort[13/20]: n=64 wall=0.001s
+abort[14/20]: n=64 wall=0.002s
+abort[15/20]: n=64 wall=0.003s
+abort[16/20]: n=64 wall=0.000s
+abort[17/20]: n=64 wall=0.000s
+abort[18/20]: n=64 wall=0.002s
+abort[19/20]: n=64 wall=0.001s
+abort[20/20]: n=64 wall=0.001s
+abort_summary: n=64 rounds=20 fail_rounds=0 wall_median=0.002s wall_min=0.000s wall_max=0.014s
+abort: OK
+=== baseline_dns summary: OK ===

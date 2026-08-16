@@ -60,9 +60,12 @@ CC_LINK = $(CC_RT_OBJ) -lpthread -lm $(CURL_SYS_LIBS)
 SAN_CC ?= $(shell command -v clang >/dev/null 2>&1 && echo clang || echo $(CC))
 SAN_FLAGS = -fsanitize=address -fno-omit-frame-pointer -g -O1
 
+RUNTESTS_DNS = 1515 1516 3301
+RUNTESTS_SRC = $(CURDIR)/$(CURL_SRC)/tests
+
 .PHONY: setup upstream stock cc smoke baseline baseline-save \
 	cc-swap baseline-cc baseline-cc-save flavor queue-smoke queue-asan \
-	report clean help
+	runtests-dns report clean help
 
 help:
 	@echo "Targets:"
@@ -75,6 +78,7 @@ help:
 	@echo "  queue-asan         same smoke, AddressSanitizer"
 	@echo "  smoke / baseline   contract against the installed prefix"
 	@echo "  baseline-save      write benchmarks/baseline_<flavor>_YYYY_MM_DD.txt"
+	@echo "  runtests-dns       curl 1515 1516 3301 against the live prefix"
 	@echo "  report             stock vs cc table (REPORT_FLAGS=--md --queue)"
 	@echo "  clean              remove out/"
 
@@ -199,6 +203,18 @@ baseline: $(OUT_DIR)/baseline_dns
 
 baseline-save: $(OUT_DIR)/baseline_dns
 	./baseline.sh --save $(BASELINE_N) $(BASELINE_ROUNDS)
+
+# libtests / units link libcurl.a; the cc flavor needs the CC runtime.
+runtests-dns: $(LIVE_BIN)
+	@test -f "$(BUILD_DIR)/tests/Makefile" || { echo "missing $(BUILD_DIR)/tests — run make upstream"; exit 1; }
+	@extra=""; \
+	if nm "$(LIVE_LIB)" | grep $(CC_MARK) | grep -vq ' U '; then extra="$(CC_LINK)"; fi; \
+	$(MAKE) -C $(BUILD_DIR)/tests/libtest libtests LIBS="$$extra"; \
+	if [ -d "$(BUILD_DIR)/tests/unit" ]; then \
+		$(MAKE) -C $(BUILD_DIR)/tests/unit LIBS="$$extra"; \
+	fi
+	cd $(BUILD_DIR)/tests && srcdir="$(RUNTESTS_SRC)" perl "$(RUNTESTS_SRC)/runtests.pl" \
+		-a -p -c "$(LIVE_BIN)" $(RUNTESTS_DNS)
 
 $(OUT_DIR):
 	mkdir -p $(OUT_DIR)
