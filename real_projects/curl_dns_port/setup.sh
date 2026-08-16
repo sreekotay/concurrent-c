@@ -53,4 +53,5 @@ fi
 echo
 echo "Next steps:"
 echo "  make upstream    # stock libcurl + curl CLI (threaded resolver)"
-echo "  make smoke       # one HTTPS GET through the stock binary"
+echo "  make smoke       # one HTTPS GET through the installed binary"
+echo "  make cc          # swap Curl_thrdq for the CC queue, relink curl"

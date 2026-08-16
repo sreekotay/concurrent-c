@@ -1,4 +1,4 @@
-# curl_dns_port — stock libcurl in out/prefix, then a CC DNS overlay.
+# curl_dns_port — stock libcurl in out/prefix, then a CC Curl_thrdq.
 #
 # Upstream under curl_c/ is read-only (setup.sh). `make cc` / `make stock`
 # flip the live prefix; smoke and baseline always test what is installed.
@@ -20,7 +20,8 @@ STOCK_BIN = $(PREFIX)/bin/curl.stock
 LIVE_LIB = $(PREFIX)/lib/libcurl.a
 LIVE_BIN = $(PREFIX)/bin/curl
 CURL_CONFIG = $(PREFIX)/bin/curl-config
-ASYN_MEMBER = libcurl_la-asyn-thrdd.o
+THRDQ_MEMBER = libcurl_la-thrdqueue.o
+CC_MARK = cc_curl_thrdq
 
 ifeq ($(origin OPENSSL_PREFIX),undefined)
   ifneq ($(wildcard /opt/homebrew/opt/openssl@3),)
@@ -50,33 +51,31 @@ CONFIGURE_FLAGS = \
 	--disable-ldap \
 	--disable-ldaps
 
-ASYN_CFLAGS = -DHAVE_CONFIG_H \
-	-I$(CURDIR)/$(CURL_SRC)/include \
-	-I$(CURDIR)/$(BUILD_DIR)/lib \
-	-I$(CURDIR)/$(CURL_SRC)/lib \
-	-I$(CURDIR) \
-	-DBUILDING_LIBCURL -DCURL_STATICLIB -DCURL_HIDDEN_SYMBOLS \
-	$(if $(OPENSSL_PREFIX),-isystem $(OPENSSL_PREFIX)/include) \
-	-fvisibility=hidden -O2 -Werror=implicit-function-declaration
-
 BASELINE_CFLAGS = $(shell test -x $(CURL_CONFIG) && $(CURL_CONFIG) --cflags) -Wall -Wextra -O2
 BASELINE_LIBS = $(shell test -x $(CURL_CONFIG) && $(CURL_CONFIG) --static-libs)
 # curl-config --static-libs minus the archive path — used when relinking curl.
 CURL_SYS_LIBS = $(filter-out $(LIVE_LIB),$(BASELINE_LIBS))
 CC_LINK = $(CC_RT_OBJ) -lpthread -lm $(CURL_SYS_LIBS)
 
+SAN_CC ?= $(shell command -v clang >/dev/null 2>&1 && echo clang || echo $(CC))
+SAN_FLAGS = -fsanitize=address -fno-omit-frame-pointer -g -O1
+
 .PHONY: setup upstream stock cc smoke baseline baseline-save \
-	cc-swap baseline-cc baseline-cc-save flavor clean help
+	cc-swap baseline-cc baseline-cc-save flavor queue-smoke queue-asan \
+	report clean help
 
 help:
 	@echo "Targets:"
 	@echo "  setup              fetch curl $(CURL_VERSION) into $(CURL_SRC)/"
 	@echo "  upstream           stock curl → $(PREFIX)"
-	@echo "  cc                 overlay + queue into libcurl.a, relink curl"
+	@echo "  cc                 swap Curl_thrdq for the CC queue, relink curl"
 	@echo "  stock              restore the stock snapshot into prefix"
 	@echo "  flavor             print stock or cc"
+	@echo "  queue-smoke        knobs + blocked join/detach (no libcurl)"
+	@echo "  queue-asan         same smoke, AddressSanitizer"
 	@echo "  smoke / baseline   contract against the installed prefix"
 	@echo "  baseline-save      write benchmarks/baseline_<flavor>_YYYY_MM_DD.txt"
+	@echo "  report             stock vs cc table (REPORT_FLAGS=--md --queue)"
 	@echo "  clean              remove out/"
 
 setup:
@@ -106,28 +105,44 @@ upstream: $(LIVE_BIN)
 
 # --- prefix flavor -------------------------------------------------------
 
-$(OUT_DIR)/cc_resolv_q.o: cc_resolv_q.ccs cc_resolv_q.h | $(OUT_DIR)
+$(OUT_DIR)/thrdqueue.o: thrdqueue.ccs cc_thrdqueue.h | $(OUT_DIR)
 	$(CCC) --compile --keep-c $< -o $@
 
-$(OUT_DIR)/asyn_thrdd.ccs: asyn_thrdd.c | $(OUT_DIR)
-	cp $< $@
+$(OUT_DIR)/thrdqueue_smoke: thrdqueue_smoke.c $(OUT_DIR)/thrdqueue.o
+	@test -f "$(CC_RT_OBJ)" || { echo "missing $(CC_RT_OBJ) — build the CC toolchain first"; exit 1; }
+	$(CC) -Wall -Wextra -O2 -o $@ thrdqueue_smoke.c $(OUT_DIR)/thrdqueue.o \
+		$(CC_RT_OBJ) -lpthread -lm
 
-$(OUT_DIR)/asyn_thrdd.o: $(OUT_DIR)/asyn_thrdd.ccs cc_resolv_q.h $(STOCK_BIN) | $(OUT_DIR)
-	$(CCC) --compile --no-cache --keep-c --cc-flags "$(ASYN_CFLAGS)" $< -o $@
+queue-smoke: $(OUT_DIR)/thrdqueue_smoke
+	$(OUT_DIR)/thrdqueue_smoke
+
+$(OUT_DIR)/thrdqueue.asan.o: thrdqueue.ccs cc_thrdqueue.h | $(OUT_DIR)
+	$(CCC) --compile --no-cache --keep-c --cc-flags "$(SAN_FLAGS)" $< -o $@
+
+$(OUT_DIR)/thrdqueue_smoke.asan: thrdqueue_smoke.c $(OUT_DIR)/thrdqueue.asan.o
+	@test -f "$(CC_RT_OBJ)" || { echo "missing $(CC_RT_OBJ) — build the CC toolchain first"; exit 1; }
+	$(SAN_CC) $(SAN_FLAGS) -Wall -Wextra -o $@ thrdqueue_smoke.c \
+		$(OUT_DIR)/thrdqueue.asan.o $(CC_RT_OBJ) -lpthread -lm
+
+# Darwin ASan + CC fibers can hang (see scripts/real_projects_sanitize.sh).
+# The unsanitized join_blocked test is the timing proof; this is the UAF net.
+queue-asan: $(OUT_DIR)/thrdqueue_smoke.asan
+	ASAN_OPTIONS=detect_leaks=0:halt_on_error=1:detect_stack_use_after_return=0 \
+		$(OUT_DIR)/thrdqueue_smoke.asan
 
 # Snapshot the stock binary if upstream ran before this Makefile grew curl.stock.
 $(STOCK_BIN): $(LIVE_BIN)
 	@if [ ! -f "$(STOCK_BIN)" ]; then cp -f $(LIVE_BIN) $(STOCK_BIN); fi
 	@if [ ! -f "$(STOCK_LIB)" ]; then cp -f $(LIVE_LIB) $(STOCK_LIB); fi
 
-cc: $(OUT_DIR)/asyn_thrdd.o $(OUT_DIR)/cc_resolv_q.o $(STOCK_BIN)
+cc: queue-smoke $(STOCK_BIN)
 	@test -f "$(CC_RT_OBJ)" || { echo "missing $(CC_RT_OBJ) — build the CC toolchain first"; exit 1; }
 	@test -f "$(STOCK_LIB)" || { echo "missing $(STOCK_LIB) — run 'make upstream'"; exit 1; }
 	@set -e; \
 	swap() { \
 		cp "$(STOCK_LIB)" "$$1"; \
-		ar dS "$$1" $(ASYN_MEMBER); \
-		ar rS "$$1" "$(OUT_DIR)/asyn_thrdd.o" "$(OUT_DIR)/cc_resolv_q.o"; \
+		ar dS "$$1" $(THRDQ_MEMBER); \
+		ar rS "$$1" "$(OUT_DIR)/thrdqueue.o"; \
 		ranlib "$$1" >/dev/null 2>&1; \
 	}; \
 	swap "$(LIVE_LIB)"; \
@@ -142,8 +157,8 @@ cc: $(OUT_DIR)/asyn_thrdd.o $(OUT_DIR)/cc_resolv_q.o $(STOCK_BIN)
 	else \
 		echo "cc remake did not produce src/curl"; exit 1; \
 	fi
-	@nm "$(LIVE_BIN)" | grep CcResolvQ_create | grep -vq ' U ' || { \
-		echo "cc curl is missing CcResolvQ — relink failed"; exit 1; }
+	@nm "$(LIVE_BIN)" | grep $(CC_MARK) | grep -vq ' U ' || { \
+		echo "cc curl is missing $(CC_MARK) — relink failed"; exit 1; }
 	@echo "prefix is cc: $(LIVE_BIN)"
 
 stock: $(STOCK_BIN)
@@ -155,7 +170,7 @@ stock: $(STOCK_BIN)
 	@echo "prefix is stock: $(LIVE_BIN)"
 
 flavor:
-	@if nm "$(LIVE_LIB)" 2>/dev/null | grep CcResolvQ_create | grep -vq ' U '; then echo cc; \
+	@if nm "$(LIVE_LIB)" 2>/dev/null | grep $(CC_MARK) | grep -vq ' U '; then echo cc; \
 	else echo stock; fi
 
 # Old names.
@@ -166,17 +181,17 @@ baseline-cc-save: cc baseline-save
 # --- contract ------------------------------------------------------------
 
 smoke: $(LIVE_BIN)
-	@flav=stock; nm "$(LIVE_LIB)" 2>/dev/null | grep CcResolvQ_create | grep -vq ' U ' && flav=cc; \
+	@flav=stock; nm "$(LIVE_LIB)" 2>/dev/null | grep $(CC_MARK) | grep -vq ' U ' && flav=cc; \
 	echo "=== curl smoke ($$flav) ==="
 	$(LIVE_BIN) -fsS -o /dev/null -w "http=%{http_code} dns=%{time_namelookup}s total=%{time_total}s\n" \
 		https://example.com/
 	@echo "OK"
 
 # Link the harness against the live archive. CC runtime is added only when
-# the archive actually exports CcResolvQ (otherwise it is unused weight).
+# the archive actually exports the CC queue marker (otherwise unused weight).
 $(OUT_DIR)/baseline_dns: baseline_dns.c $(LIVE_BIN) | $(OUT_DIR)
 	@extra=""; \
-	if nm "$(LIVE_LIB)" | grep CcResolvQ_create | grep -vq ' U '; then extra="$(CC_LINK)"; fi; \
+	if nm "$(LIVE_LIB)" | grep $(CC_MARK) | grep -vq ' U '; then extra="$(CC_LINK)"; fi; \
 	$(CC) $(BASELINE_CFLAGS) -o $@ baseline_dns.c $(BASELINE_LIBS) $$extra
 
 baseline: $(OUT_DIR)/baseline_dns

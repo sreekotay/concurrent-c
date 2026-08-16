@@ -32,9 +32,10 @@ Normative definitions of the primitives and lowering live in `spec/concurrent-c-
 ## curl DNS (`curl_dns_port/`)
 
 [`curl_dns_port/`](curl_dns_port/) drops Concurrent-C into stock libcurl by
-replacing the threaded async DNS resolver. `make upstream` is vanilla curl;
-`make cc` lowers the overlay as a `.ccs` TU plus a nursery/hybrid queue
-and relinks the CLI. Same prefix, two flavors. See that directory's README.
+replacing `Curl_thrdq` (the queue behind the threaded DNS resolver).
+`make upstream` is vanilla curl; `make cc` swaps `thrdqueue.o` for a
+nursery/hybrid queue and relinks the CLI. Stock `asyn-thrdd.c` stays.
+Same prefix, two flavors. See that directory's README.
 
 ## Raytracer
 

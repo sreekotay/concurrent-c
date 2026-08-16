@@ -1,0 +1,463 @@
+#!ccc ccs
+/*
+ * Curl_thrdq — stock ABI, nursery-owned pool.
+ *
+ * Owned here: workers nursery, jobs/done bags, live (min always, max ever).
+ * Not owned: the void* item. send carries it; recv or give_back (their
+ * fn_free) returns it. No third state.
+ *
+ *   create   jobs/done bags + min workers
+ *   send     push jobs; live < max ⇒ spawn a hybrid worker
+ *   worker   pop → fn_process → push done (or give_back)
+ *            idle-exit only when live > min
+ *   recv     try-pop done (AGAIN if empty)
+ *   clear    remove_if on both bags (retract; not a channel bounce)
+ *   destroy  give_back queued jobs (do not run), close jobs,
+ *            wait in-flight getaddrinfo, give_back leftover done, free q
+ *
+ * getaddrinfo stays blocking. The bags are lists you can retract from.
+ * The nursery is the join. await_left is only await_done (curl does not call it).
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_atomic.cch>
+
+#include <errno.h>
+#include <pthread.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "cc_thrdqueue.h"
+
+__attribute__((used)) const char cc_curl_thrdq[] = "concurrent-c";
+
+typedef struct {
+    void *item;
+    CCDeadline expire;
+} Job;
+
+typedef struct {
+    Job *a;
+    int n;
+    int cap;
+    int closed;
+    int ready;
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+} JobBag;
+
+typedef struct curl_thrdq CcThrdq;
+
+struct curl_thrdq {
+    JobBag jobs;
+    JobBag done;
+    CCNursery *workers;
+    Curl_thrdq_item_free_cb fn_free;
+    Curl_thrdq_item_process_cb fn_process;
+    Curl_thrdq_ev_cb fn_event;
+    void *fn_user_data;
+    uint32_t send_max_len;
+    uint32_t min_threads;
+    uint32_t max_threads;
+    uint32_t idle_time_ms;
+    cc_atomic_int live;
+    cc_atomic_int await_left;
+};
+
+static void give_back(CcThrdq *q, void *item) {
+    if (item)
+        q->fn_free(item);
+}
+
+static int JobBag_init(JobBag *b) {
+    memset(b, 0, sizeof(*b));
+    if (pthread_mutex_init(&b->mu, NULL) != 0)
+        return -1;
+    if (pthread_cond_init(&b->cv, NULL) != 0) {
+        pthread_mutex_destroy(&b->mu);
+        return -1;
+    }
+    b->ready = 1;
+    return 0;
+}
+
+static void JobBag_destroy(JobBag *b) {
+    if (!b->ready)
+        return;
+    pthread_cond_destroy(&b->cv);
+    pthread_mutex_destroy(&b->mu);
+    free(b->a);
+    b->a = NULL;
+    b->n = b->cap = 0;
+    b->ready = 0;
+}
+
+static int JobBag_grow(JobBag *b) {
+    int cap = b->cap ? b->cap * 2 : 8;
+    Job *a = (Job *)realloc(b->a, (size_t)cap * sizeof(Job));
+    if (!a)
+        return -1;
+    b->a = a;
+    b->cap = cap;
+    return 0;
+}
+
+static void JobBag_take0(JobBag *b, Job *out) {
+    *out = b->a[0];
+    b->n--;
+    if (b->n)
+        memmove(b->a, b->a + 1, (size_t)b->n * sizeof(Job));
+}
+
+/* 0 ok, AGAIN if at max_len, SEND_ERROR if closed, OOM if grow fails. */
+static int JobBag_push(JobBag *b, Job job, uint32_t max_len) {
+    int rc = CC_CURLE_OK;
+    pthread_mutex_lock(&b->mu);
+    if (b->closed)
+        rc = CC_CURLE_SEND_ERROR;
+    else if (max_len && b->n >= (int)max_len)
+        rc = CC_CURLE_AGAIN;
+    else if (b->n == b->cap && JobBag_grow(b) != 0)
+        rc = CC_CURLE_OUT_OF_MEMORY;
+    else {
+        b->a[b->n++] = job;
+        pthread_cond_signal(&b->cv);
+    }
+    pthread_mutex_unlock(&b->mu);
+    return rc;
+}
+
+/* 0 took one, ETIMEDOUT, EPIPE if closed and empty. */
+static int JobBag_pop(JobBag *b, Job *out, const CCDeadline *dl) {
+    int rc = 0;
+    pthread_mutex_lock(&b->mu);
+    while (b->n == 0 && !b->closed) {
+        if (dl && dl->deadline.tv_sec) {
+            int wr = pthread_cond_timedwait(&b->cv, &b->mu, &dl->deadline);
+            if (wr == ETIMEDOUT && b->n == 0) {
+                rc = ETIMEDOUT;
+                goto out;
+            }
+        } else {
+            pthread_cond_wait(&b->cv, &b->mu);
+        }
+    }
+    if (b->n == 0) {
+        rc = EPIPE;
+        goto out;
+    }
+    JobBag_take0(b, out);
+out:
+    pthread_mutex_unlock(&b->mu);
+    return rc;
+}
+
+static int JobBag_try_pop(JobBag *b, Job *out) {
+    int rc = -1;
+    pthread_mutex_lock(&b->mu);
+    if (b->n > 0) {
+        JobBag_take0(b, out);
+        rc = 0;
+    }
+    pthread_mutex_unlock(&b->mu);
+    return rc;
+}
+
+static void JobBag_close(JobBag *b) {
+    if (!b->ready)
+        return;
+    pthread_mutex_lock(&b->mu);
+    b->closed = 1;
+    pthread_cond_broadcast(&b->cv);
+    pthread_mutex_unlock(&b->mu);
+}
+
+static void JobBag_drain(JobBag *b, CcThrdq *q) {
+    int i;
+    if (!b->ready)
+        return;
+    pthread_mutex_lock(&b->mu);
+    for (i = 0; i < b->n; i++)
+        give_back(q, b->a[i].item);
+    b->n = 0;
+    pthread_mutex_unlock(&b->mu);
+}
+
+static void JobBag_remove_if(JobBag *b, CcThrdq *q, int from_jobs,
+                             Curl_thrdq_item_match_cb fn_match,
+                             void *match_data) {
+    int i, w;
+    if (!b->ready)
+        return;
+    pthread_mutex_lock(&b->mu);
+    w = 0;
+    for (i = 0; i < b->n; i++) {
+        if (fn_match(b->a[i].item, match_data)) {
+            if (from_jobs)
+                q->await_left.fetch_add(-1);
+            give_back(q, b->a[i].item);
+        } else {
+            b->a[w++] = b->a[i];
+        }
+    }
+    b->n = w;
+    pthread_mutex_unlock(&b->mu);
+}
+
+/* Give back queued jobs (do not run), close (wakes workers), wait
+ * in-flight process, give back leftover done, free q. */
+static void CcThrdq_teardown(CcThrdq *q) {
+    CCNursery *w;
+    if (!q)
+        return;
+    {
+        JobBag *jobs = &q->jobs;
+        jobs->drain(q);
+        jobs->close();
+    }
+    w = q->workers;
+    if (w)
+        w->wait();
+    {
+        JobBag *done = &q->done;
+        done->drain(q);
+    }
+    if (w) {
+        w->free();
+        q->workers = NULL;
+    }
+    {
+        JobBag *jobs = &q->jobs;
+        JobBag *done = &q->done;
+        jobs->destroy();
+        done->destroy();
+    }
+    free(q);
+}
+
+static void worker(CcThrdq *q) {
+    JobBag *jobs = &q->jobs;
+    JobBag *done = &q->done;
+
+    for (;;) {
+        Job job = {0};
+        int n = q->live.load();
+        CCDeadline idle = (q->idle_time_ms && n > (int)q->min_threads)
+            ? cc_deadline_after_ms(q->idle_time_ms)
+            : cc_deadline_none();
+        int rc = jobs->pop(&job, &idle);
+        if (rc == ETIMEDOUT) {
+            n = q->live.load();
+            if (n > (int)q->min_threads && q->live.cas(&n, n - 1))
+                return;
+            continue;
+        }
+        if (rc != 0)
+            break;
+
+        if (!cc_deadline_expired(&job.expire) && job.item)
+            q->fn_process(job.item);
+        if (done->push(job, 0) != CC_CURLE_OK)
+            give_back(q, job.item);
+        if (q->fn_event)
+            q->fn_event(q, CURL_THRDQ_EV_ITEM_DONE, q->fn_user_data);
+        q->await_left.fetch_add(-1);
+    }
+}
+
+static int spawn_worker(CCNursery *n, CcThrdq *q) {
+    int rc = -1;
+    if (!n)
+        return -1;
+    rc = n->spawnhybrid(() => [q] { worker(q); });
+    return rc;
+}
+
+static void *run_teardown(void *arg) {
+    CcThrdq_teardown((CcThrdq *)arg);
+    return NULL;
+}
+
+static int spawn_teardown(CCNursery *n, CcThrdq *q) {
+    if (!n)
+        return -1;
+    return cc_nursery_spawn(n, run_teardown, q);
+}
+
+/* Take a live slot below `cap` and spawn. 1 spawned, 0 already at cap, -1 failed.
+ * cas writes the current live back into n on failure — the loop reloads. */
+static int spawn_up_to(CcThrdq *q, int cap) {
+    CCNursery *w = q->workers;
+    int n = q->live.load();
+    while (n < cap) {
+        if (!q->live.cas(&n, n + 1))
+            continue;
+        if (spawn_worker(w, q) != 0) {
+            q->live.fetch_add(-1);
+            return -1;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+int Curl_thrdq_set_props(struct curl_thrdq *q, uint32_t max_len,
+                         uint32_t min_threads, uint32_t max_threads,
+                         uint32_t idle_time_ms) {
+    if (!q)
+        return CC_CURLE_FAILED_INIT;
+    if (!max_threads || min_threads > max_threads)
+        return CC_CURLE_BAD_FUNCTION_ARGUMENT;
+
+    q->send_max_len = max_len;
+    q->min_threads = min_threads;
+    q->max_threads = max_threads;
+    q->idle_time_ms = idle_time_ms;
+
+    while (q->live.load() < (int)min_threads) {
+        if (spawn_up_to(q, (int)min_threads) < 0)
+            return CC_CURLE_OUT_OF_MEMORY;
+    }
+    return CC_CURLE_OK;
+}
+
+int Curl_thrdq_create(struct curl_thrdq **ptqueue, const char *name,
+                      uint32_t max_len, uint32_t min_threads,
+                      uint32_t max_threads, uint32_t idle_time_ms,
+                      Curl_thrdq_item_free_cb fn_free,
+                      Curl_thrdq_item_process_cb fn_process,
+                      Curl_thrdq_ev_cb fn_event, void *user_data) {
+    CcThrdq *q;
+    int rc;
+
+    (void)name;
+    *ptqueue = NULL;
+    if (!fn_free || !fn_process)
+        return CC_CURLE_FAILED_INIT;
+    if (!max_threads || min_threads > max_threads)
+        return CC_CURLE_BAD_FUNCTION_ARGUMENT;
+
+    q = (CcThrdq *)calloc(1, sizeof(*q));
+    if (!q)
+        return CC_CURLE_OUT_OF_MEMORY;
+    q->fn_free = fn_free;
+    q->fn_process = fn_process;
+    q->fn_event = fn_event;
+    q->fn_user_data = user_data;
+
+    {
+        JobBag *jobs = &q->jobs;
+        JobBag *done = &q->done;
+        if (jobs->init() != 0 || done->init() != 0) {
+            q->teardown();
+            return CC_CURLE_OUT_OF_MEMORY;
+        }
+    }
+
+    q->workers = cc_nursery_create(NULL);
+    if (!q->workers) {
+        q->teardown();
+        return CC_CURLE_OUT_OF_MEMORY;
+    }
+
+    rc = Curl_thrdq_set_props(q, max_len, min_threads, max_threads,
+                              idle_time_ms);
+    if (rc != CC_CURLE_OK) {
+        q->teardown();
+        return rc;
+    }
+    *ptqueue = q;
+    return CC_CURLE_OK;
+}
+
+int Curl_thrdq_send(struct curl_thrdq *q, void *item, const char *description,
+                    int64_t timeout_ms) {
+    Job job = {0};
+    int rc;
+
+    (void)description;
+    if (!q || !item)
+        return CC_CURLE_SEND_ERROR;
+    if (timeout_ms < 0)
+        return CC_CURLE_OPERATION_TIMEDOUT;
+
+    job.item = item;
+    job.expire = timeout_ms > 0 ? cc_deadline_after_ms((uint32_t)timeout_ms)
+                                : cc_deadline_none();
+
+    if (spawn_up_to(q, (int)q->max_threads) < 0)
+        return CC_CURLE_OUT_OF_MEMORY;
+
+    {
+        JobBag *jobs = &q->jobs;
+        rc = jobs->push(job, q->send_max_len);
+    }
+    if (rc != CC_CURLE_OK)
+        return rc;
+    q->await_left.fetch_add(1);
+    return CC_CURLE_OK;
+}
+
+int Curl_thrdq_recv(struct curl_thrdq *q, void **pitem) {
+    Job job = {0};
+    JobBag *done;
+    *pitem = NULL;
+    if (!q)
+        return CC_CURLE_FAILED_INIT;
+    done = &q->done;
+    if (done->try_pop(&job) != 0)
+        return CC_CURLE_AGAIN;
+    *pitem = job.item;
+    return CC_CURLE_OK;
+}
+
+int Curl_thrdq_await_done(struct curl_thrdq *q, uint32_t timeout_ms) {
+    CCDeadline dl = timeout_ms ? cc_deadline_after_ms(timeout_ms)
+                               : cc_deadline_none();
+    if (!q)
+        return CC_CURLE_FAILED_INIT;
+    while (q->await_left.load() > 0) {
+        if (cc_deadline_expired(&dl))
+            return CC_CURLE_OPERATION_TIMEDOUT;
+        cc_sleep_ms(1);
+    }
+    return CC_CURLE_OK;
+}
+
+void Curl_thrdq_clear(struct curl_thrdq *tqueue,
+                      Curl_thrdq_item_match_cb fn_match, void *match_data) {
+    CcThrdq *q = tqueue;
+    JobBag *jobs;
+    JobBag *done;
+    if (!q || !fn_match)
+        return;
+    jobs = &q->jobs;
+    done = &q->done;
+    jobs->remove_if(q, 1, fn_match, match_data);
+    done->remove_if(q, 0, fn_match, match_data);
+}
+
+/* curl multi quick_exit: process is dying — do not block on getaddrinfo.
+ * The reaper nursery is not waited. It is not owned after this returns. */
+static void detach_teardown(CcThrdq *q) {
+    CCNursery *reaper = cc_nursery_create(NULL);
+    if (!reaper || spawn_teardown(reaper, q) != 0) {
+        if (reaper)
+            reaper->free();
+        q->teardown();
+    }
+}
+
+void Curl_thrdq_destroy(struct curl_thrdq *tqueue, bool join) {
+    CcThrdq *q = tqueue;
+    if (!q)
+        return;
+    if (join)
+        q->teardown();
+    else
+        detach_teardown(q);
+}
+
+void Curl_thrdq_trace(struct curl_thrdq *q, struct Curl_easy *data) {
+    (void)q;
+    (void)data;
+}

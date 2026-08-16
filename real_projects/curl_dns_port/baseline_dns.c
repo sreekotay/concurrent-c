@@ -1,8 +1,8 @@
 /*
- * baseline_dns.c — stock (or CC-swapped) libcurl DNS resolver baseline.
+ * baseline_dns.c — libcurl DNS resolver baseline for the live prefix.
  *
- * Drives the multi interface so lookups go through asyn-thrdd's thread queue.
- * Link against the tree's out/prefix libcurl (see Makefile).
+ * Drives the multi interface so lookups go through the installed resolver
+ * queue (stock or Concurrent-C Curl_thrdq). Link against out/prefix (Makefile).
  *
  * Usage:
  *   baseline_dns all [N]
@@ -318,9 +318,10 @@ static int cmd_concurrent(int n, int rounds) {
 }
 
 /*
- * Start N concurrent resolves, then tear the multi down without waiting for
- * completion. Stock must not hang (this is the old pthread_cancel pain).
- * Repeated rounds catch flaky teardown.
+ * Start N concurrent resolves, then tear the multi down without waiting.
+ * Two perform calls rarely leave workers inside getaddrinfo, so this is
+ * "did not hang on the fast path," not a blocked join. The join that waits
+ * for an in-flight process lives in thrdqueue_smoke.c (make queue-smoke).
  */
 static int abort_once(int n, double *elapsed_out) {
     CURLM *m = curl_multi_init();

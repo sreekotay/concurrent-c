@@ -7,17 +7,27 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PREFIX="${PREFIX:-$SCRIPT_DIR/out/prefix}"
 CURL_BIN="${CURL_BIN:-$PREFIX/bin/curl}"
 HARNESS="${HARNESS:-$SCRIPT_DIR/out/baseline_dns}"
+LIBCURL_A="${LIBCURL_A:-$PREFIX/lib/libcurl.a}"
 BENCH_DIR="$SCRIPT_DIR/benchmarks"
 N="${BASELINE_N:-32}"
 ROUNDS="${BASELINE_ROUNDS:-10}"
 SAVE=0
 STAMP="$(date +%Y_%m_%d)"
 
+flavor() {
+    if [[ -f "$LIBCURL_A" ]] && nm "$LIBCURL_A" 2>/dev/null | grep cc_curl_thrdq | grep -vq ' U '; then
+        echo cc
+    else
+        echo stock
+    fi
+}
+
 usage() {
     echo "usage: $0 [--save] [N [ROUNDS]]"
-    echo "  --save    write benchmarks/baseline_stock_YYYY_MM_DD.txt"
+    echo "  --save    write benchmarks/baseline_<flavor>_YYYY_MM_DD.txt"
     echo "  N         concurrent/abort count (default: $N / \$BASELINE_N)"
     echo "  ROUNDS    repeat concurrent+abort for median (default: $ROUNDS / \$BASELINE_ROUNDS)"
+    echo "  flavor    read from libcurl.a (cc_curl_thrdq → cc, else stock)"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -44,10 +54,11 @@ if [[ ! -x "$HARNESS" ]]; then
     exit 1
 fi
 
+FLAVOR="$(flavor)"
 mkdir -p "$BENCH_DIR"
 REPORT=""
 if [[ "$SAVE" -eq 1 ]]; then
-    REPORT="$BENCH_DIR/baseline_stock_${STAMP}.txt"
+    REPORT="$BENCH_DIR/baseline_${FLAVOR}_${STAMP}.txt"
     : > "$REPORT"
 fi
 
@@ -60,10 +71,11 @@ run() {
 }
 
 {
-    echo "=== curl DNS baseline (stock) ==="
+    echo "=== curl DNS baseline ($FLAVOR) ==="
     echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "host: $(uname -s) $(uname -m) $(uname -r)"
     echo "pin: $(tr -d '[:space:]' < "$SCRIPT_DIR/CURL_VERSION")"
+    echo "flavor: $FLAVOR"
     echo "curl_bin: $CURL_BIN"
     echo "N: $N"
     echo "rounds: $ROUNDS"
