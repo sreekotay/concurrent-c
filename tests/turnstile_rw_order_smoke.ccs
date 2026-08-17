@@ -39,14 +39,16 @@ int main(void) {
         return 1;
 
     CCTurnstileRW* tsp = &ts;
-    CCNursery* nur = cc_nursery_create(NULL) !> @destroy;
     int i;
-    for (i = 0; i < N; i++) {
-        ts.enter(i) !>;
-        nur->spawn(() => [i, tsp] {
-            @errhandler(CCError e) cc_error_exit(e);
-            worker(tsp, i);
-        });
+    {
+        CCNursery* nur = cc_nursery_create(NULL) !> @destroy;
+        for (i = 0; i < N; i++) {
+            ts.enter(i) !>;
+            nur->spawn(() => [i, tsp] {
+                @errhandler(CCError e) cc_error_exit(e);
+                worker(tsp, i);
+            });
+        }
     }
 
     if (g_fail || g_read_next != N || g_write_next != N) {

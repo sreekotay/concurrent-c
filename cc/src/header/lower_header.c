@@ -19,6 +19,7 @@
 #include <string.h>
 
 #include "preprocess/preprocess.h"
+#include "preprocess/type_graph.h"
 #include "util/text.h"
 #include "visitor/pass_type_syntax.h"
 
@@ -177,6 +178,65 @@ static size_t cc__decl_insert_point(const char* s, size_t use_pos) {
     }
     (void)line_start;
     return anchor;
+}
+
+static int cc__header_vec_prebaked(const char* mangled) {
+    return mangled &&
+           (strcmp(mangled, "CCVec_char") == 0 ||
+            strcmp(mangled, "CCVec_size_t") == 0);
+}
+
+/* Splice CC_VEC_DECL_ARENA for Vec::[T] uses so the lowered .h is host C
+ * without waiting for a TU factory harvest. */
+static char* cc__splice_header_vec_decls(const char* src, size_t n) {
+    CCTypeGraph* g = cc_type_graph_get_global();
+    size_t nv, i, pos = (size_t)-1;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    if (!src || !g) return NULL;
+    nv = cc_type_graph_vec_count(g);
+    for (i = 0; i < nv; i++) {
+        const CCTypeInstantiation* inst = cc_type_graph_get_vec(g, i);
+        const char* hit;
+        size_t at;
+        if (!inst || !inst->mangled_name || cc__header_vec_prebaked(inst->mangled_name))
+            continue;
+        hit = cc__find_ident_top_level(src, n, inst->mangled_name);
+        if (!hit) hit = (const char*)memmem(src, n, "__CC_VEC(", 9);
+        if (!hit) continue;
+        at = cc__decl_insert_point(src, (size_t)(hit - src));
+        if (pos == (size_t)-1 || at < pos) pos = at;
+    }
+    if (pos == (size_t)-1) return NULL;
+    cc_sb_append(&out, &out_len, &out_cap, src, pos);
+    for (i = 0; i < nv; i++) {
+        const CCTypeInstantiation* inst = cc_type_graph_get_vec(g, i);
+        char guard[256];
+        if (!inst || !inst->mangled_name || !inst->type1 ||
+            cc__header_vec_prebaked(inst->mangled_name))
+            continue;
+        snprintf(guard, sizeof(guard), "CC_HEADER_VEC_%s", inst->mangled_name);
+        cc_sb_append_cstr(&out, &out_len, &out_cap,
+                          "/* --- CC auto-generated Vec instance --- */\n#ifndef ");
+        cc_sb_append_cstr(&out, &out_len, &out_cap, guard);
+        cc_sb_append_cstr(&out, &out_len, &out_cap, "\n#define ");
+        cc_sb_append_cstr(&out, &out_len, &out_cap, guard);
+        cc_sb_append_cstr(&out, &out_len, &out_cap, "\nCC_VEC_DECL_ARENA(");
+        cc_sb_append_cstr(&out, &out_len, &out_cap, inst->type1);
+        cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+        cc_sb_append_cstr(&out, &out_len, &out_cap, inst->mangled_name);
+        cc_sb_append_cstr(&out, &out_len, &out_cap, ")\nstatic inline ");
+        cc_sb_append_cstr(&out, &out_len, &out_cap, inst->mangled_name);
+        cc_sb_append_cstr(&out, &out_len, &out_cap, " ");
+        cc_sb_append_cstr(&out, &out_len, &out_cap, inst->mangled_name);
+        cc_sb_append_cstr(&out, &out_len, &out_cap,
+                          "_new(CCArena* __a) {\n    return ");
+        cc_sb_append_cstr(&out, &out_len, &out_cap, inst->mangled_name);
+        cc_sb_append_cstr(&out, &out_len, &out_cap,
+                          "_init(__a, 0);\n}\n#endif\n");
+    }
+    cc_sb_append(&out, &out_len, &out_cap, src + pos, n - pos);
+    return out;
 }
 
 static char* cc__lower_result_types(const char* src, size_t n, CCLowerState* state) {
@@ -482,6 +542,7 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
     char* buf_inc = NULL;
     char* buf_as = NULL;
     char* buf_types = NULL;
+    char* buf_vec = NULL;
     char* buf_result_ctors = NULL;
     char* buf2 = NULL;
     char* buf_result_fields = NULL;
@@ -576,6 +637,12 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
         cur_len = strlen(buf_types);
     }
 
+    buf_vec = cc__splice_header_vec_decls(cur, cur_len);
+    if (buf_vec) {
+        cur = buf_vec;
+        cur_len = strlen(buf_vec);
+    }
+
     /* Pass 1: Rewrite T!>(E) -> CCResult_T_E */
     buf2 = cc__lower_result_types(cur, cur_len, &state);
     if (buf2) {
@@ -666,6 +733,7 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
     free(buf_inc);
     free(buf_as);
     free(buf_types);
+    free(buf_vec);
     free(buf_result_ctors);
     free(buf2);
     free(buf_result_fields);

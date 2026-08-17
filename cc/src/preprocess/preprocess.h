@@ -271,7 +271,8 @@ char* cc_harvest_local_header_comptime_blocks(void);
 
 // Shared header-safe type-syntax lowering used by both preprocessing and
 // `.cch -> .h` lowering. Rewrites syntax that must not leak into plain C
-// headers, such as slice, typed channel handles, and generic container types.
+// headers: slice, typed channel handles, generic containers (`Vec::[T]`),
+// and method calls whose callees live in included headers.
 char* cc_rewrite_header_type_syntax_shared(const char* src,
                                            size_t input_len,
                                            const char* input_path);

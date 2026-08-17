@@ -34,7 +34,8 @@ registration. The underlying marker API is `cc_type_register` (see
 
 Bodyless `@destroy` on a value binding runs the subject's registered
 pre-destroy / destroy hooks, then each **value** field whose type has such
-a hook, last-declared to first, transitively. Pointer, array, and
+a hook, last-declared to first, transitively. Typedef aliases use the base
+type's hooks. Pointer, array, and
 function-pointer fields are omitted. The list is ill-formed when empty.
 `recv.destroy()` is UFCS (`Type_destroy` when that function exists). See
 `spec/concurrent-c-spec-complete.md` (declaration destructor) and

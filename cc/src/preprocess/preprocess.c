@@ -5246,7 +5246,22 @@ static int cc__resolve_generic_ufcs_receiver_type(const char* recv,
                                                     local_type, sizeof(local_type));
     }
     if (!type_name && reg) {
+        /* Full-expression resolve already walks `.` / `->`. Returning that
+         * type and then walking the postfix again looks up `armed` on the
+         * field type and fails — header lowering has no AST UFCS sweep. */
         type_name = cc_type_registry_resolve_receiver_expr_at(reg, recv, source_text, use_offset, &recv_is_ptr);
+        if (type_name) {
+            strncpy(out_type, type_name, out_type_sz - 1);
+            out_type[out_type_sz - 1] = '\0';
+            cc__resolve_registered_alias_type_name(reg, out_type, out_type, out_type_sz);
+            {
+                char normalized_recv_type[256];
+                cc__normalize_ufcs_type_name(normalized_recv_type, sizeof(normalized_recv_type), out_type);
+                if (normalized_recv_type[0]) snprintf(out_type, out_type_sz, "%s", normalized_recv_type);
+            }
+            if (out_recv_is_ptr) *out_recv_is_ptr = recv_is_ptr || strchr(out_type, '*') != NULL;
+            return 1;
+        }
     }
     if (!type_name) type_name = cc__lookup_ufcs_var_type(vars, var_count, root);
     if (!type_name) return 0;
@@ -5743,6 +5758,11 @@ static int cc__try_normalize_ufcs_chain(const char* src, size_t n,
 }
 
 static int g_ufcs_scope_idx_locked = 0;
+/* Header `.cch` → `.h` runs the text UFCS pass with no AST sweep. Same-file
+ * wrappers (`cc_closure1_drop` for `c.drop()`) must not count as callees. */
+static int g_ufcs_header_lowering = 0;
+static char g_ufcs_header_path[PATH_MAX];
+static int cc__included_cch_contains_fn_except(const char* name, const char* except_abs);
 /* Set when a type-formal member site errored (missing/invalid type
  * source); the parser-safe wrapper turns it into the error sentinel. */
 static _Thread_local int g_ufcs_typeformal_err = 0;
@@ -6257,8 +6277,11 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                                                    sizeof(wildcard_callee),
                                                    recv_type_base, method_name);
                 int real = composed &&
-                           (cc__ufcs_fn_name_in_text(src, n, wildcard_callee) ||
-                            cc_included_cch_contains_fn(wildcard_callee));
+                           (g_ufcs_header_lowering
+                                ? cc__included_cch_contains_fn_except(
+                                      wildcard_callee, g_ufcs_header_path)
+                                : (cc__ufcs_fn_name_in_text(src, n, wildcard_callee) ||
+                                   cc_included_cch_contains_fn(wildcard_callee)));
                 /* Sink-typed receiver, method with no real callee: lower to
                  * `sink(&recv, "method", N, wrap(a1), ...)` here so `!>`
                  * binders type against the sink's Result. Real methods keep
@@ -8611,6 +8634,9 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
         if (i == 0 || !cc_is_ident_char(src[i - 1])) {
             if (cc__builtin_generic_at(src, n, i, "CCVec", &blb)) {
                 is_vec_type = 1; kw_len = 5; use_bracket = 1;
+            } else if (cc__builtin_generic_at(src, n, i, "Vec", &blb)) {
+                /* Surface name; same monomorph as CCVec::[T] (CCVec_T). */
+                is_vec_type = 1; kw_len = 3; use_bracket = 1;
             } else if (i + 6 <= n && memcmp(src + i, "CCVec<", 6) == 0) {
                 retired_vec_syntax = "CCVec<T>";
             } else if (i + 4 <= n && memcmp(src + i, "Vec<", 4) == 0) {
@@ -8623,6 +8649,8 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                 retired_vec_syntax = "Map<K, V>";
             } else if (cc__builtin_generic_at(src, n, i, "cc_vec_new", &blb)) {
                 is_vec_new = 1; kw_len = 10; use_bracket = 1;
+            } else if (cc__builtin_generic_at(src, n, i, "vec_new", &blb)) {
+                is_vec_new = 1; kw_len = 7; use_bracket = 1;
             } else if (i + 11 <= n && memcmp(src + i, "cc_vec_new<", 11) == 0) {
                 retired_vec_syntax = "cc_vec_new<T>";
             } else if (i + 8 <= n && memcmp(src + i, "vec_new<", 8) == 0) {
@@ -12951,6 +12979,8 @@ static const char* cc__included_cch_text(size_t h, size_t* out_len) {
 }
 
 static void cc__register_included_cch_tree(const char* source_path);
+static void cc__register_included_cch_imports(const char* source_path);
+static int cc__included_cch_contains_fn_except(const char* name, const char* except_abs);
 
 /* Register stdlib `.cch` trees for `#include <….[ch]|cch>` so `@as` metadata
  * is available when the TU already uses lowered `.h` includes (no `.cch→.h`
@@ -13021,6 +13051,22 @@ int cc_included_cch_contains_fn(const char* name) {
     for (h = 0; h < g_included_cch_source_count; h++) {
         size_t fn = 0;
         CCPathTextCache* slot;
+        if (!cc__included_cch_text(h, &fn)) continue;
+        slot = cc__path_text_cache_find(g_included_cch_sources[h]);
+        if (slot && cc__cache_has_callable(slot, name)) return 1;
+    }
+    return 0;
+}
+
+static int cc__included_cch_contains_fn_except(const char* name, const char* except_abs) {
+    size_t h;
+    if (!name || !name[0]) return 0;
+    for (h = 0; h < g_included_cch_source_count; h++) {
+        size_t fn = 0;
+        CCPathTextCache* slot;
+        if (except_abs && except_abs[0] && g_included_cch_sources[h] &&
+            strcmp(g_included_cch_sources[h], except_abs) == 0)
+            continue;
         if (!cc__included_cch_text(h, &fn)) continue;
         slot = cc__path_text_cache_find(g_included_cch_sources[h]);
         if (slot && cc__cache_has_callable(slot, name)) return 1;
@@ -14098,6 +14144,60 @@ static void cc__register_included_cch_tree(const char* source_path) {
      * without include-expanding the TU buffer. */
     cc_result_fn_registry_scan_source(src, n);
 
+    while (i < n) {
+        size_t line_end = i, p, path_s, path_e;
+        char open = 0, close = 0;
+        while (line_end < n && src[line_end] != '\n') line_end++;
+        p = i;
+        while (p < line_end && (src[p] == ' ' || src[p] == '\t')) p++;
+        if (p < line_end && src[p++] == '#') {
+            while (p < line_end && (src[p] == ' ' || src[p] == '\t')) p++;
+            if (p + 7 <= line_end && memcmp(src + p, "include", 7) == 0 &&
+                (p + 7 == line_end || !cc_is_ident_char(src[p + 7]))) {
+                p += 7;
+                while (p < line_end && (src[p] == ' ' || src[p] == '\t')) p++;
+                if (p < line_end && (src[p] == '"' || src[p] == '<')) {
+                    open = src[p++];
+                    close = open == '"' ? '"' : '>';
+                    path_s = p;
+                    while (p < line_end && src[p] != close) p++;
+                    path_e = p;
+                    if (path_e > path_s + 4 &&
+                        memcmp(src + path_e - 4, ".cch", 4) == 0) {
+                        char rel[PATH_MAX], child[PATH_MAX];
+                        size_t rel_len = path_e - path_s;
+                        if (rel_len < sizeof(rel)) {
+                            memcpy(rel, src + path_s, rel_len);
+                            rel[rel_len] = '\0';
+                            if (open == '"') {
+                                snprintf(child, sizeof(child), "%s/%s", source_dir, rel);
+                            } else if (cc_path_resolve_system_cch(rel, child,
+                                                                  sizeof(child))) {
+                                /* child filled */
+                            } else {
+                                child[0] = '\0';
+                            }
+                            if (child[0]) cc__register_included_cch_tree(child);
+                        }
+                    }
+                }
+            }
+        }
+        i = line_end < n ? line_end + 1 : line_end;
+    }
+    free(src);
+}
+
+/* Register `#include`d `.cch` trees without adding `source_path` itself.
+ * Header lowering uses this so same-file wrappers are not "included callees". */
+static void cc__register_included_cch_imports(const char* source_path) {
+    char abs_src[PATH_MAX];
+    char source_dir[PATH_MAX];
+    char* src = NULL;
+    size_t n = 0, i = 0;
+    if (!source_path || !realpath(source_path, abs_src)) return;
+    if (cc__dirname_local(abs_src, source_dir, sizeof(source_dir)) != 0) return;
+    if (cc__read_file_text(abs_src, &src, &n) != 0) return;
     while (i < n) {
         size_t line_end = i, p, path_s, path_e;
         char open = 0, close = 0;
@@ -15407,6 +15507,75 @@ char* cc_rewrite_system_cch_includes_to_lowered_headers(const char* src, size_t 
     return out;
 }
 
+/* Host .h cannot keep parser-safe `__CC_VEC(T)` spellings: UFCS looks at
+ * the field type text and needs `CCVec_T`. */
+static char* cc__expand_header_vec_macros(const char* src, size_t n) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0, last = 0, i = 0;
+    int any = 0;
+    CCScannerState scan;
+    if (!src || n == 0) return NULL;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (i + 9 <= n && memcmp(src + i, "__CC_VEC(", 9) == 0 &&
+            (i == 0 || !cc_is_ident_char(src[i - 1]))) {
+            size_t rp = 0;
+            if (cc_find_matching_paren(src, n, i + 8, &rp)) {
+                const char* a = src + i + 9;
+                size_t alen = rp - (i + 9);
+                while (alen && (*a == ' ' || *a == '\t')) { a++; alen--; }
+                while (alen && (a[alen - 1] == ' ' || a[alen - 1] == '\t')) alen--;
+                cc_sb_append(&out, &out_len, &out_cap, src + last, i - last);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "CCVec_");
+                cc_sb_append(&out, &out_len, &out_cap, a, alen);
+                last = rp + 1;
+                i = rp + 1;
+                any = 1;
+                continue;
+            }
+        }
+        if (i + 14 <= n && memcmp(src + i, "__CC_VEC_INIT(", 14) == 0 &&
+            (i == 0 || !cc_is_ident_char(src[i - 1]))) {
+            size_t rp = 0;
+            if (cc_find_matching_paren(src, n, i + 13, &rp)) {
+                const char* inner = src + i + 14;
+                size_t ilen = rp - (i + 14);
+                const char* comma = NULL;
+                int depth = 0;
+                size_t k;
+                for (k = 0; k < ilen; k++) {
+                    if (inner[k] == '(') depth++;
+                    else if (inner[k] == ')') depth--;
+                    else if (inner[k] == ',' && depth == 0) { comma = inner + k; break; }
+                }
+                if (comma) {
+                    const char* t = inner;
+                    size_t tlen = (size_t)(comma - inner);
+                    const char* rest = comma + 1;
+                    size_t rlen = (size_t)((src + rp) - rest);
+                    while (tlen && (*t == ' ' || *t == '\t')) { t++; tlen--; }
+                    while (tlen && (t[tlen - 1] == ' ' || t[tlen - 1] == '\t')) tlen--;
+                    cc_sb_append(&out, &out_len, &out_cap, src + last, i - last);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "CCVec_");
+                    cc_sb_append(&out, &out_len, &out_cap, t, tlen);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "_init((");
+                    cc_sb_append(&out, &out_len, &out_cap, rest, rlen);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "), CC_VEC_INITIAL_CAP)");
+                    last = rp + 1;
+                    i = rp + 1;
+                    any = 1;
+                    continue;
+                }
+            }
+        }
+        i++;
+    }
+    if (!any) { free(out); return NULL; }
+    cc_sb_append(&out, &out_len, &out_cap, src + last, n - last);
+    return out;
+}
+
 char* cc_rewrite_header_type_syntax_shared(const char* src,
                                            size_t input_len,
                                            const char* input_path) {
@@ -15418,6 +15587,15 @@ char* cc_rewrite_header_type_syntax_shared(const char* src,
        main preprocess pipeline for syntax that must not survive into plain C
        headers. Keep this intentionally limited to header-safe rewrites. */
     if (!cc_type_graph_ensure_global_cleared()) return NULL;
+    /* Isolated `.cch` → `.h` has no TU include ingest. Register imports
+     * (not this file) so Exclusive/Vec callees resolve without treating
+     * same-file wrappers as UFCS targets. */
+    g_ufcs_header_path[0] = 0;
+    if (input_path && input_path[0]) {
+        if (!realpath(input_path, g_ufcs_header_path))
+            g_ufcs_header_path[0] = 0;
+        cc__register_included_cch_imports(input_path);
+    }
 
     cc_pass_chain_init(&chain, src, input_len);
     if (cc_pass_chain_apply(&chain, cc__normalize_template_recv_chains(chain.src, chain.len)) < 0) goto chain_cleanup;
@@ -15425,10 +15603,19 @@ char* cc_rewrite_header_type_syntax_shared(const char* src,
     if (cc_pass_chain_apply(&chain, cc__rewrite_chan_handle_types(chain.src, chain.len, input_path)) < 0) goto chain_cleanup;
     if (cc_pass_chain_apply(&chain, cc__rewrite_slice_types(chain.src, chain.len, input_path)) < 0) goto chain_cleanup;
     if (cc_pass_chain_apply(&chain, cc_rewrite_generic_containers(chain.src, chain.len, input_path)) < 0) goto chain_cleanup;
+    if (cc_pass_chain_apply(&chain, cc__expand_header_vec_macros(chain.src, chain.len)) < 0) goto chain_cleanup;
+    g_ufcs_header_lowering = 1;
+    if (cc_pass_chain_apply(&chain, cc_rewrite_generic_family_ufcs_parser_safe(chain.src, chain.len, input_path)) < 0) {
+        g_ufcs_header_lowering = 0;
+        goto chain_cleanup;
+    }
+    g_ufcs_header_lowering = 0;
 
     if (chain.src != src) out = strdup(chain.src);
 
 chain_cleanup:
+    g_ufcs_header_lowering = 0;
+    g_ufcs_header_path[0] = 0;
     cc_pass_chain_free(&chain);
     return out;
 }

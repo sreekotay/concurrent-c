@@ -33,14 +33,16 @@ int main(void) {
         return 1;
 
     CCTurnstile* tp = &t;
-    CCNursery* nur = cc_nursery_create(NULL) !> @destroy;
     int i;
-    for (i = 0; i < N; i++) {
-        t.enter(i) !>;
-        nur->spawn(() => [i, tp] {
-            @errhandler(CCError e) cc_error_exit(e);
-            worker(tp, i);
-        });
+    {
+        CCNursery* nur = cc_nursery_create(NULL) !> @destroy;
+        for (i = 0; i < N; i++) {
+            t.enter(i) !>;
+            nur->spawn(() => [i, tp] {
+                @errhandler(CCError e) cc_error_exit(e);
+                worker(tp, i);
+            });
+        }
     }
 
     for (i = 0; i < STAGES; i++) {

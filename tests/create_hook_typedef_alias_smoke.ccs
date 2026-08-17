@@ -41,10 +41,11 @@ static void Widget_foo_destroy(Widget_foo* w) {
 };
 
 typedef Widget ExactAlias;
+typedef ExactAlias ChainedAlias;
 typedef Widget_foo FamilyAlias;
 
 int main(void) {
-    ExactAlias a@(7) @destroy;
+    ChainedAlias a@(7) @destroy;
     FamilyAlias b@(9) @destroy;
     if (a.n != 7) return 1;
     if (b.n != 9) return 2;
