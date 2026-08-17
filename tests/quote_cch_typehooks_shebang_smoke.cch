@@ -1,0 +1,28 @@
+#ifndef TESTS_QUOTE_CCH_TYPEHOOKS_SHEBANG_SMOKE_CCH
+#define TESTS_QUOTE_CCH_TYPEHOOKS_SHEBANG_SMOKE_CCH
+
+#include <ccc/std/prelude.cch>
+
+typedef struct {
+    size_t n;
+} QuoteShebangBox;
+
+static void QuoteShebangBox_destroy(QuoteShebangBox *t) {
+    if (t) t->n = 0;
+}
+
+static inline size_t !>(CCError) QuoteShebangBox_read_at(const QuoteShebangBox *t,
+                                                          size_t offset,
+                                                          char *dest, size_t n) {
+    (void)offset;
+    (void)dest;
+    if (!t) return cc_err(CC_ERR_INVALID_ARG, "read_at");
+    if (n == 0) return cc_ok(0);
+    return cc_ok(0);
+}
+
+@typehooks on QuoteShebangBox {
+    .destroy = QuoteShebangBox_destroy,
+};
+
+#endif

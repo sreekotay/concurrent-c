@@ -1,0 +1,10 @@
+#!ccc ccs
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include "quote_cch_typehooks_shebang_smoke.cch"
+
+int main(void) {
+    QuoteShebangBox t = {0} @destroy;
+    printf("ok\n");
+    return 0;
+}

@@ -14598,6 +14598,74 @@ static int cc__impl_cch_mark_spliced(const char* abs_src) {
 static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, const char* current_path);
 static int cc__lowered_header_needs_ufcs_splice(const char* body, size_t body_len);
 
+/* #line  N "path" at the start of a unit-header wrap — dirname is the
+ * original source dir (the wrap itself lives under unit_native/). */
+static int cc__quote_dir_from_line_bytes(const char* bytes, size_t len,
+                                         char* dst, size_t cap) {
+    size_t i = 0;
+    size_t k;
+    size_t nlen;
+    char path[PATH_MAX];
+    char* slash;
+    if (!bytes || !dst || cap < 2) return 0;
+    dst[0] = 0;
+    if (len >= 3 && (unsigned char)bytes[0] == 0xef &&
+        (unsigned char)bytes[1] == 0xbb && (unsigned char)bytes[2] == 0xbf)
+        i = 3;
+    if (i + 5 >= len || strncmp(bytes + i, "#line", 5) != 0) return 0;
+    i += 5;
+    while (i < len && (bytes[i] == ' ' || bytes[i] == '\t')) i++;
+    while (i < len && bytes[i] >= '0' && bytes[i] <= '9') i++;
+    while (i < len && (bytes[i] == ' ' || bytes[i] == '\t')) i++;
+    if (i >= len || bytes[i] != '"') return 0;
+    i++;
+    k = i;
+    while (k < len && bytes[k] != '"' && bytes[k] != '\n') k++;
+    if (k >= len || bytes[k] != '"') return 0;
+    nlen = k - i;
+    if (nlen == 0 || nlen >= sizeof(path)) return 0;
+    memcpy(path, bytes + i, nlen);
+    path[nlen] = 0;
+    slash = strrchr(path, '/');
+    if (!slash) {
+        snprintf(dst, cap, ".");
+        return 1;
+    }
+    if (slash == path) {
+        snprintf(dst, cap, "/");
+        return 1;
+    }
+    *slash = 0;
+    snprintf(dst, cap, "%s", path);
+    return 1;
+}
+
+/* Extra quoted-include root when dirname(current_path) is a cache wrap.
+ * Same sources as shadow_fill_quote_dir: SHADOW_QUOTE_DIR, else #line. */
+static void cc__fill_quoted_cch_search_dir(const char* src, size_t n,
+                                           char* dst, size_t cap) {
+    const char* env;
+    if (!dst || cap < 2) return;
+    dst[0] = 0;
+    env = getenv("SHADOW_QUOTE_DIR");
+    if (env && env[0]) {
+        snprintf(dst, cap, "%s", env);
+        return;
+    }
+    if (src && n)
+        (void)cc__quote_dir_from_line_bytes(src, n, dst, cap);
+}
+
+static int cc__try_quoted_cch_path(const char* dir, const char* rel,
+                                   char* child_path, size_t child_cap,
+                                   char* child_abs) {
+    if (!dir || !dir[0] || !rel || !rel[0] || !child_path || child_cap < 2 ||
+        !child_abs)
+        return 0;
+    snprintf(child_path, child_cap, "%s/%s", dir, rel);
+    return realpath(child_path, child_abs) != NULL;
+}
+
 /* Splice an implementation-grade header's raw source into `out` in place of
  * its include line.  Nested local includes inside the header are processed
  * recursively (interface children lower to .h include lines, impl children
@@ -14626,6 +14694,20 @@ static int cc__splice_impl_cch_into(char** out, size_t* out_len, size_t* out_cap
     rew = cc__rewrite_local_cch_includes_impl(body, body_len, child_abs);
     use = rew ? rew : body;
     use_len = rew ? strlen(rew) : body_len;
+    /* Angle `<ccc/….cch>` inside the splice is not pass_inc (those lines
+     * sit under the header's `#ifndef` on the root tape).  Rewrite to `.h`
+     * here — same as a top-level system include — so host cc never opens
+     * raw stdlib `.cch` (`T !>(E)`, `@typehooks`). */
+    {
+        char* sys = cc_rewrite_system_cch_includes_to_lowered_headers(use,
+                                                                     use_len);
+        if (sys) {
+            if (rew) free(rew);
+            rew = sys;
+            use = rew;
+            use_len = strlen(rew);
+        }
+    }
     cc_sb_append_cstr(out, out_len, out_cap, CC_IMPL_CCH_BEGIN_MARK);
     cc_sb_append_cstr(out, out_len, out_cap, child_abs);
     cc_sb_append_cstr(out, out_len, out_cap, "*/\n");
@@ -14707,8 +14789,13 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
     size_t i = 0;
     int changed = 0;
     char current_dir[PATH_MAX];
+    char search_dir[PATH_MAX];
     if (!src || !current_path) return NULL;
     if (cc__dirname_local(current_path, current_dir, sizeof(current_dir)) != 0) return NULL;
+    /* Unit-header wraps live under unit_native/; quoted `.cch` sits next to
+     * the original source.  Try dirname(current) first (C include rules),
+     * then SHADOW_QUOTE_DIR / #line — same roots the tape uses later. */
+    cc__fill_quoted_cch_search_dir(src, n, search_dir, sizeof(search_dir));
     while (i < n) {
         size_t line_end = i;
         size_t path_s = 0, path_e = 0;
@@ -14720,10 +14807,21 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                 char child_path[PATH_MAX];
                 char child_abs[PATH_MAX];
                 const char* lowered_path;
+                int found;
                 if (rel_len >= sizeof(rel_path)) rel_len = sizeof(rel_path) - 1;
                 memcpy(rel_path, src + i + path_s, rel_len);
                 rel_path[rel_len] = '\0';
-                snprintf(child_path, sizeof(child_path), "%s/%s", current_dir, rel_path);
+                found = cc__try_quoted_cch_path(current_dir, rel_path, child_path,
+                                                sizeof(child_path), child_abs);
+                if (!found && search_dir[0] &&
+                    strcmp(search_dir, current_dir) != 0)
+                    found = cc__try_quoted_cch_path(search_dir, rel_path,
+                                                    child_path,
+                                                    sizeof(child_path),
+                                                    child_abs);
+                if (!found)
+                    snprintf(child_path, sizeof(child_path), "%s/%s",
+                             current_dir, rel_path);
                 /* Implementation-grade headers bypass .h lowering: splice
                  * their raw source into the stream so the full TU pipeline
                  * lowers it in context (see the block comment above
@@ -14735,7 +14833,7 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                  * out/include star-dot-h leaves nested-only methods (e.g.
                  * ArrayMap.live_bytes) dependent on a later UFCS splice /
                  * writeback that can miss or half-rewrite on some hosts. */
-                if (realpath(child_path, child_abs)) {
+                if (found) {
                     int splice_child = cc__local_cch_is_impl_grade(child_abs);
                     if (!splice_child) {
                         char* child_src = NULL;
@@ -14772,7 +14870,8 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                          * (which fails the same way it always has). */
                     }
                 }
-                lowered_path = cc__lower_local_cch_header(child_path);
+                lowered_path = cc__lower_local_cch_header(found ? child_abs
+                                                               : child_path);
                 if (lowered_path) {
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "#include \"");
                     cc_sb_append_cstr(&out, &out_len, &out_cap, lowered_path);

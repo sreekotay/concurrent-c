@@ -1,0 +1,20 @@
+#ifndef TESTS_QUOTE_CCH_IMPL_MMAP_SHEBANG_SMOKE_CCH
+#define TESTS_QUOTE_CCH_IMPL_MMAP_SHEBANG_SMOKE_CCH
+
+#include <ccc/std/prelude.cch>
+#include <ccc/std/mmap.cch>
+
+typedef struct {
+    CCMappedFile map;
+    int n;
+} QuoteMmapTree;
+
+static void QuoteMmapTree_destroy(QuoteMmapTree *t) {
+    if (t) t->map.destroy();
+}
+
+@typehooks on QuoteMmapTree {
+    .destroy = QuoteMmapTree_destroy,
+};
+
+#endif
