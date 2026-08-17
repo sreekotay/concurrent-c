@@ -1,0 +1,14 @@
+#!ccc ccs
+#include "nested_cch_mid.cch"
+#include <stdio.h>
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    NestedMid m = {0};
+    nested_mid_put(&m, 7) !>;
+    int n = nested_leaf_get(&m.leaf) !>;
+    if (n != 7) return 2;
+    m.leaf.destroy();
+    printf("nested_cch_smoke: PASS\n");
+    return 0;
+}

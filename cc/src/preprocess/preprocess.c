@@ -14385,6 +14385,22 @@ static size_t cc__skip_type_policy_at(const char* src, size_t n, size_t i) {
     return p > i ? p : i + 1;
 }
 
+/* `!>` statement unwrap (`!>;`, `!> {`, `!>(e) {`) vs result-type `T !>(E)`.
+ * Both spell `!>(` — the type form is followed by a declarator, the
+ * statement form by `{` or `;`. */
+static int cc__bang_unwrap_is_stmt(const char* src, size_t n, size_t i) {
+    size_t j, rp = 0;
+    if (!src || i + 1 >= n || src[i] != '!' || src[i + 1] != '>') return 0;
+    j = i + 2;
+    while (j < n && (src[j] == ' ' || src[j] == '\t' ||
+                     src[j] == '\n' || src[j] == '\r'))
+        j++;
+    if (j >= n || src[j] != '(') return 1;
+    if (!cc_find_matching_paren(src, n, j, &rp)) return 1;
+    j = cc_skip_ws_and_comments(src, n, rp + 1);
+    return (j < n && (src[j] == '{' || src[j] == ';'));
+}
+
 /* True when header text contains constructs only the full TU pipeline can
  * lower.  Comment/string aware.  `@comptime` blocks/functions,
  * `@typeview` / `@typehooks`, and CC_GENERIC_FACTORY bodies are skipped
@@ -14471,11 +14487,8 @@ static int cc__cch_text_is_impl_grade(const char* src, size_t n) {
         }
         if (c == '?' && c2 == '>') return 1;
         if (c == '!' && c2 == '>') {
-            size_t j = i + 2;
-            while (j < n && (src[j] == ' ' || src[j] == '\t' ||
-                             src[j] == '\n' || src[j] == '\r')) j++;
-            if (j >= n || src[j] != '(') return 1; /* statement unwrap */
-            i = j; /* `T !>(E)` result-type syntax: interface pipeline handles it */
+            if (cc__bang_unwrap_is_stmt(src, n, i)) return 1;
+            i += 2; /* `T !>(E)` result-type syntax: interface pipeline handles it */
             continue;
         }
         i++;

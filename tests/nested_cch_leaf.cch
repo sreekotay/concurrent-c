@@ -1,0 +1,30 @@
+#!ccc cch
+#ifndef NESTED_CCH_LEAF_H
+#define NESTED_CCH_LEAF_H
+
+#include <ccc/std/prelude.cch>
+
+typedef struct {
+    int n;
+} NestedLeaf;
+
+static void !>(CCError) nested_leaf_set(NestedLeaf *l, int n) {
+    if (!l) return cc_err(CC_ERR_INVALID_ARG, "null leaf");
+    l->n = n;
+    return cc_ok();
+}
+
+static int !>(CCError) nested_leaf_get(const NestedLeaf *l) {
+    if (!l) return cc_err(CC_ERR_INVALID_ARG, "null leaf");
+    return cc_ok(l->n);
+}
+
+static void NestedLeaf_destroy(NestedLeaf *l) {
+    if (l) l->n = 0;
+}
+
+@typehooks on NestedLeaf {
+    .destroy = NestedLeaf_destroy,
+};
+
+#endif

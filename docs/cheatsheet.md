@@ -686,4 +686,8 @@ Jupyter/Colab: `from cc_node import require`).
 #include <ccc/script/stdio.cch>    // CCStdio / io.println
 #include <ccc/script/prelude.cch>  // forced in for .shcc; usable from .ccs too
 #include <ccc/cc_atomic.cch>       // portable atomics
+#include "leaf.cch"                // local face; nested .cch is fine
 ```
+
+A local `.cch` with statement unwrap (`!>(e) {`) is spliced into the
+including unit. `T !>(E)` on a declaration does not force that.

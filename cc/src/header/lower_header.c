@@ -19,6 +19,7 @@
 #include <string.h>
 
 #include "preprocess/preprocess.h"
+#include "preprocess/unit_header.h"
 #include "preprocess/type_graph.h"
 #include "util/text.h"
 #include "visitor/pass_type_syntax.h"
@@ -536,6 +537,13 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
     /* Current processing buffer */
     const char* cur = input;
     size_t cur_len = input_len;
+    {
+        size_t skip = cc_unit_header_skip(input, input_len);
+        if (skip > 0 && skip <= input_len) {
+            cur = input + skip;
+            cur_len = input_len - skip;
+        }
+    }
     char* buf_ded = NULL;
     char* buf0 = NULL;
     char* buf_fac = NULL;

@@ -1,0 +1,17 @@
+#!ccc cch
+#ifndef NESTED_CCH_MID_H
+#define NESTED_CCH_MID_H
+
+#include "nested_cch_leaf.cch"
+
+typedef struct {
+    NestedLeaf leaf;
+} NestedMid;
+
+static int !>(CCError) nested_mid_put(NestedMid *m, int n) {
+    if (!m) return cc_err(CC_ERR_INVALID_ARG, "null mid");
+    nested_leaf_set(&m->leaf, n) !>(e) { return cc_err(e); };
+    return cc_ok(n);
+}
+
+#endif

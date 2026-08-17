@@ -218,6 +218,11 @@ pin-era lowerer never sees the magic line. Quoted `#include` of project
 faces still resolves from the original unit's directory (the `#line` path),
 not the cache directory. An included `.ccs` / `.cch` face with a unit
 header is stripped the same way — the bang is not a preprocessor directive.
+A local `.cch` that needs the including unit's pipeline — statement unwrap
+(`!>;`, `!> {`, `!>(e) {`), `@string`, `@errhandler`, and the like — is
+spliced into that unit. `T !>(E)` on a declaration is result-type syntax
+and does not by itself force a splice. Nested local `#include "….cch"`
+lines inside a spliced face are processed the same way.
 
 ---
 
