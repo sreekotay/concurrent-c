@@ -1,0 +1,27 @@
+/*
+ * @parallel seq (cond) { arms } — explicit spelling of the join gate.
+ * cond true tries to spawn; cond false is the named denial: run the
+ * same arms sequentially. Same answer either way (one body, two
+ * schedules).
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int gated(int spawn) {
+    int a = 0;
+    int b = 0;
+    @parallel seq (spawn) {
+        a = 10;
+        b = 20;
+    }
+    return a + b;
+}
+
+int main(void) {
+    if (gated(1) != 30 || gated(0) != 30) {
+        printf("seq gate mismatch\n");
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}

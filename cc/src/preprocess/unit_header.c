@@ -57,6 +57,28 @@ static int cc__is_ccc_interp(const char* tok) {
     return b && (strcmp(b, "ccc") == 0 || strcmp(b, ".ccc-bin") == 0);
 }
 
+static const char cc__ver_pin_form[] =
+    "MAJOR[.MINOR[.PATCH[-SEED]]], a bound (>=X, >X, <=X, <X), "
+    "or both (e.g. >=0.3.2,<0.4)";
+
+typedef struct {
+    int bare;
+    int has_lo;
+    int has_hi;
+    int lo_incl;
+    int hi_incl;
+    int lo[4];
+    int hi[4];
+} CCCccVersionSpec;
+
+static void cc__skip_ws(const char** pp) {
+    const char* p;
+    if (!pp || !*pp) return;
+    p = *pp;
+    while (*p == ' ' || *p == '\t') p++;
+    *pp = p;
+}
+
 static int cc__parse_ver_num(const char** pp, int* out) {
     const char* p;
     char* end;
@@ -71,8 +93,8 @@ static int cc__parse_ver_num(const char** pp, int* out) {
     return 0;
 }
 
-int cc_ccc_version_parse(const char* s, int* major, int* minor, int* patch,
-                         int* seed) {
+static int cc__parse_ver_fields(const char* s, const char** end, int* major,
+                               int* minor, int* patch, int* seed) {
     int ma = -1, mi = -1, pa = -1, se = -1;
     const char* p;
     if (!s || !s[0]) return -1;
@@ -90,12 +112,173 @@ int cc_ccc_version_parse(const char* s, int* major, int* minor, int* patch,
             }
         }
     }
-    if (*p != '\0') return -1;
+    if (end) *end = p;
     if (major) *major = ma;
     if (minor) *minor = mi;
     if (patch) *patch = pa;
     if (seed) *seed = se;
     return 0;
+}
+
+int cc_ccc_version_parse(const char* s, int* major, int* minor, int* patch,
+                         int* seed) {
+    const char* end;
+    if (cc__parse_ver_fields(s, &end, major, minor, patch, seed) != 0)
+        return -1;
+    if (*end != '\0') return -1;
+    return 0;
+}
+
+static int cc__parse_bound_op(const char** pp, int* is_lo, int* incl) {
+    const char* p;
+    if (!pp || !*pp || !is_lo || !incl) return -1;
+    p = *pp;
+    if (p[0] == '>' && p[1] == '=') {
+        *is_lo = 1;
+        *incl = 1;
+        *pp = p + 2;
+        return 0;
+    }
+    if (p[0] == '>') {
+        *is_lo = 1;
+        *incl = 0;
+        *pp = p + 1;
+        return 0;
+    }
+    if (p[0] == '<' && p[1] == '=') {
+        *is_lo = 0;
+        *incl = 1;
+        *pp = p + 2;
+        return 0;
+    }
+    if (p[0] == '<') {
+        *is_lo = 0;
+        *incl = 0;
+        *pp = p + 1;
+        return 0;
+    }
+    return -1;
+}
+
+static int cc_ccc_version_parse_spec(const char* s, CCCccVersionSpec* out) {
+    const char* p;
+    int n;
+    if (!out) return -1;
+    memset(out, 0, sizeof(*out));
+    out->lo[0] = out->lo[1] = out->lo[2] = out->lo[3] = -1;
+    out->hi[0] = out->hi[1] = out->hi[2] = out->hi[3] = -1;
+    if (!s || !s[0]) return -1;
+    p = s;
+    cc__skip_ws(&p);
+    if (!*p) return -1;
+
+    if (*p != '>' && *p != '<') {
+        const char* end;
+        if (cc__parse_ver_fields(p, &end, &out->lo[0], &out->lo[1], &out->lo[2],
+                                &out->lo[3]) != 0)
+            return -1;
+        cc__skip_ws(&end);
+        if (*end != '\0') return -1;
+        memcpy(out->hi, out->lo, sizeof(out->lo));
+        out->bare = 1;
+        out->has_lo = 1;
+        out->has_hi = 1;
+        out->lo_incl = 1;
+        out->hi_incl = 1;
+        return 0;
+    }
+
+    for (n = 0; n < 2; n++) {
+        int is_lo = 0, incl = 0;
+        int v[4];
+        const char* end;
+        cc__skip_ws(&p);
+        if (cc__parse_bound_op(&p, &is_lo, &incl) != 0) return -1;
+        cc__skip_ws(&p);
+        if (cc__parse_ver_fields(p, &end, &v[0], &v[1], &v[2], &v[3]) != 0)
+            return -1;
+        p = end;
+        if (is_lo) {
+            if (out->has_lo) return -1;
+            memcpy(out->lo, v, sizeof(v));
+            out->lo_incl = incl;
+            out->has_lo = 1;
+        } else {
+            if (out->has_hi) return -1;
+            memcpy(out->hi, v, sizeof(v));
+            out->hi_incl = incl;
+            out->has_hi = 1;
+        }
+        cc__skip_ws(&p);
+        if (*p == '\0') break;
+        if (*p != ',') return -1;
+        p++;
+        if (n == 1) return -1;
+    }
+    cc__skip_ws(&p);
+    if (*p != '\0') return -1;
+    if (!out->has_lo && !out->has_hi) return -1;
+    return 0;
+}
+
+static int cc__prefix_order(const int bound[4], const int cand[4]) {
+    int i;
+    for (i = 0; i < 4; i++) {
+        if (bound[i] < 0) return 0;
+        if (cand[i] < 0) return -1;
+        if (cand[i] < bound[i]) return -1;
+        if (cand[i] > bound[i]) return 1;
+    }
+    return 0;
+}
+
+static int cc__spec_matches(const CCCccVersionSpec* spec, const char* candidate) {
+    int c[4];
+    int o;
+    if (!spec || !candidate) return 0;
+    if (cc_ccc_version_parse(candidate, &c[0], &c[1], &c[2], &c[3]) != 0)
+        return 0;
+    if (spec->has_lo) {
+        o = cc__prefix_order(spec->lo, c);
+        if (spec->lo_incl) {
+            if (o < 0) return 0;
+        } else if (o <= 0) {
+            return 0;
+        }
+    }
+    if (spec->has_hi) {
+        o = cc__prefix_order(spec->hi, c);
+        if (spec->hi_incl) {
+            if (o > 0) return 0;
+        } else if (o >= 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int cc__each_pin_clause(const char* pin, int match, const char* candidate) {
+    char buf[CC_CCC_VERSION_PIN_CAP];
+    char* start;
+    int any = 0;
+    if (!pin || !pin[0] || strlen(pin) >= sizeof(buf)) return 0;
+    snprintf(buf, sizeof(buf), "%s", pin);
+    start = buf;
+    while (*start) {
+        CCCccVersionSpec spec;
+        char* semi = strchr(start, ';');
+        if (semi) *semi = '\0';
+        if (!start[0] || cc_ccc_version_parse_spec(start, &spec) != 0) return 0;
+        if (match && !cc__spec_matches(&spec, candidate)) return 0;
+        any = 1;
+        if (!semi) break;
+        start = semi + 1;
+    }
+    return any;
+}
+
+int cc_ccc_version_spec_ok(const char* pin) {
+    return cc__each_pin_clause(pin, 0, NULL);
 }
 
 int cc_ccc_version_current_seed(void) {
@@ -116,18 +299,8 @@ int cc_ccc_version_equal(const char* a, const char* b) {
 }
 
 int cc_ccc_version_matches(const char* pin, const char* candidate) {
-    int p[4], c[4];
-    int i;
     if (!pin || !candidate) return 0;
-    if (cc_ccc_version_parse(pin, &p[0], &p[1], &p[2], &p[3]) != 0) return 0;
-    if (cc_ccc_version_parse(candidate, &c[0], &c[1], &c[2], &c[3]) != 0)
-        return 0;
-    for (i = 0; i < 4; i++) {
-        if (p[i] < 0) return 1;
-        if (c[i] < 0) return 0;
-        if (p[i] != c[i]) return 0;
-    }
-    return 1;
+    return cc__each_pin_clause(pin, 1, candidate);
 }
 
 int cc_ccc_version_cmp(const char* a, const char* b) {
@@ -178,17 +351,14 @@ int cc_unit_cli_parse_version_value(const char* val, char* pin, size_t cap,
                                     char* err, size_t err_cap) {
     if (!val || !val[0]) {
         if (err && err_cap)
-            snprintf(err, err_cap,
-                     "cc: version pin requires MAJOR[.MINOR[.PATCH[-SEED]]] "
-                     "(e.g. 0.3.2 or 0.3.2-121)");
+            snprintf(err, err_cap, "cc: version pin requires %s",
+                     cc__ver_pin_form);
         return -1;
     }
-    if (cc_ccc_version_parse(val, NULL, NULL, NULL, NULL) != 0) {
+    if (!cc_ccc_version_spec_ok(val)) {
         if (err && err_cap)
-            snprintf(err, err_cap,
-                     "cc: version pin must be MAJOR[.MINOR[.PATCH[-SEED]]] "
-                     "(got %s)",
-                     val);
+            snprintf(err, err_cap, "cc: version pin must be %s (got %s)",
+                     cc__ver_pin_form, val);
         return -1;
     }
     if (pin && cap) {
@@ -230,9 +400,10 @@ static int cc__apply_ver_tok(const char* tok, CCUnitHeader* out) {
     if (strncmp(tok, "version=", 8) == 0) val = tok + 8;
     else if (strncmp(tok, "--ccc-version=", 14) == 0) val = tok + 14;
     else return 1;
-    if (cc_ccc_version_parse(val, NULL, NULL, NULL, NULL) != 0) {
+    if (!cc_ccc_version_spec_ok(val)) {
         cc__hdr_fail(out,
-                     "unit header version= must be MAJOR[.MINOR[.PATCH[-SEED]]]");
+                     "unit header version= must be a version or bound "
+                     "(>=X, >X, <=X, <X, or both)");
         return -1;
     }
     if (out->version[0] && strcmp(out->version, val) != 0) {
@@ -372,10 +543,10 @@ int cc_unit_header_parse_line(const char* line, size_t n, CCUnitHeader* out) {
                 return 0;
             }
             t++;
-            if (cc_ccc_version_parse(toks[t], NULL, NULL, NULL, NULL) != 0) {
+            if (!cc_ccc_version_spec_ok(toks[t])) {
                 cc__hdr_fail(out,
-                             "shebang version pin must be "
-                             "MAJOR[.MINOR[.PATCH[-SEED]]]");
+                             "shebang version pin must be a version or bound "
+                             "(>=X, >X, <=X, <X, or both)");
                 return 0;
             }
             snprintf(out->version, sizeof(out->version), "%s", toks[t]);
@@ -427,11 +598,12 @@ size_t cc_unit_header_skip(const char* src, size_t n) {
 
 int cc_unit_resolve(const char* path, CCUnitKind cli_kind,
                     const char* cli_version, CCUnitKind* kind_out,
-                    char version_out[64], char* err, size_t err_cap) {
+                    char version_out[CC_CCC_VERSION_PIN_CAP], char* err,
+                    size_t err_cap) {
     CCUnitHeader h;
     CCUnitKind ext;
     CCUnitKind kind;
-    char pin[64];
+    char pin[CC_CCC_VERSION_PIN_CAP];
 
     pin[0] = '\0';
     if (kind_out) *kind_out = CC_UNIT_KIND_UNKNOWN;
@@ -465,7 +637,8 @@ int cc_unit_resolve(const char* path, CCUnitKind cli_kind,
 
     if (kind == CC_UNIT_KIND_UNKNOWN) {
         if (kind_out) *kind_out = CC_UNIT_KIND_UNKNOWN;
-        if (version_out && pin[0]) snprintf(version_out, 64, "%s", pin);
+        if (version_out && pin[0])
+            snprintf(version_out, CC_CCC_VERSION_PIN_CAP, "%s", pin);
         return 0;
     }
 
@@ -489,33 +662,48 @@ int cc_unit_resolve(const char* path, CCUnitKind cli_kind,
     }
 
     if (cli_version && cli_version[0]) {
-        if (cc_ccc_version_parse(cli_version, NULL, NULL, NULL, NULL) != 0) {
+        if (!cc_ccc_version_spec_ok(cli_version)) {
             if (err && err_cap)
-                snprintf(err, err_cap,
-                         "cc: version pin must be MAJOR[.MINOR[.PATCH[-SEED]]] "
-                         "(got %s)",
-                         cli_version);
+                snprintf(err, err_cap, "cc: version pin must be %s (got %s)",
+                         cc__ver_pin_form, cli_version);
             return -1;
         }
         snprintf(pin, sizeof(pin), "%s", cli_version);
     }
     if (h.version[0]) {
         if (pin[0] && strcmp(pin, h.version) != 0) {
-            if (cc_ccc_version_matches(pin, h.version)) {
+            int cli_ver =
+                cc_ccc_version_parse(pin, NULL, NULL, NULL, NULL) == 0;
+            int hdr_ver =
+                cc_ccc_version_parse(h.version, NULL, NULL, NULL, NULL) == 0;
+            if (cc_ccc_version_matches(pin, h.version) && hdr_ver) {
                 snprintf(pin, sizeof(pin), "%s", h.version);
-            } else if (!cc_ccc_version_matches(h.version, pin)) {
+            } else if (cc_ccc_version_matches(h.version, pin) && cli_ver) {
+                /* CLI is a concrete version inside the header bound. */
+            } else if (cli_ver && hdr_ver) {
                 if (err && err_cap)
                     snprintf(err, err_cap,
                              "cc: version=%s disagrees with unit header pin %s "
                              "(%s)",
                              pin, h.version, path ? path : "");
                 return -1;
+            } else if (strlen(pin) + 1 + strlen(h.version) + 1 > sizeof(pin)) {
+                if (err && err_cap)
+                    snprintf(err, err_cap,
+                             "cc: version pin too long when combining CLI and "
+                             "header (%s)",
+                             path ? path : "");
+                return -1;
+            } else {
+                char combined[CC_CCC_VERSION_PIN_CAP];
+                snprintf(combined, sizeof(combined), "%s;%s", pin, h.version);
+                snprintf(pin, sizeof(pin), "%s", combined);
             }
         }
         if (!pin[0]) snprintf(pin, sizeof(pin), "%s", h.version);
     }
 
     if (kind_out) *kind_out = kind;
-    if (version_out) snprintf(version_out, 64, "%s", pin);
+    if (version_out) snprintf(version_out, CC_CCC_VERSION_PIN_CAP, "%s", pin);
     return 0;
 }

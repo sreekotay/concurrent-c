@@ -1,0 +1,10 @@
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    int i;
+    int xs[4];
+    @parallel seq (1) for (i in 0..4) {
+        xs[i] = i;
+    }
+    return xs[0];
+}

@@ -1,0 +1,29 @@
+/*
+ * Same unique-E refuse on UFCS: Face.always is int !>(CCError), handler is OtherErr.
+ */
+#include <stdio.h>
+#include <ccc/std/prelude.cch>
+
+typedef struct {
+    int unused;
+} Face;
+
+typedef struct {
+    int tag;
+} OtherErr;
+
+static int !> (CCError) Face_always(Face *self) {
+    (void)self;
+    return cc_err(CC_ERR_NOT_FOUND, "cc");
+}
+
+int main(void) {
+    @errhandler(OtherErr e) {
+        (void)e;
+        return 1;
+    }
+    Face f = {0};
+    f.always() !>;
+    printf("unreachable\n");
+    return 0;
+}

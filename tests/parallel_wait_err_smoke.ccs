@@ -1,0 +1,63 @@
+/*
+ * @parallel wait for — stop-starting error posture. The first failing
+ * ticket cancels further entries, in-flight iterations finish (leave()
+ * still runs, so the turnstile stays balanced), and the error re-raises
+ * after the brace into the enclosing @errhandler. Lowest failing ticket
+ * wins, so the caught error is deterministic.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+#define N   8
+#define BAD 3
+
+static void !>(CCError) work(int i, int* done) {
+    if (i == BAD)
+        return cc_err(CC_ERR_INVALID_ARG, "bad ticket");
+    done[i] = 1;
+    return cc_ok();
+}
+
+static int run(CCTurnstile* ts, int* done) {
+    @errhandler(CCError e) {
+        (void)e;
+        return -1;
+    }
+    int i;
+    @parallel wait (ts) for (i in 0..N) {
+        work(i, done) !>;
+    }
+    return 0;
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+    CCTurnstile ts@(N, 2, 1, &arena) @destroy;
+    if (!ts.excl)
+        return 1;
+
+    int done[N];
+    int i;
+    for (i = 0; i < N; i++)
+        done[i] = 0;
+
+    if (run(&ts, done) != -1) {
+        fprintf(stderr, "FAIL error did not re-raise\n");
+        return 1;
+    }
+    /* Tickets below the failing one always ran; the failing one never
+     * completed. Later tickets may or may not have started. */
+    for (i = 0; i < BAD; i++) {
+        if (!done[i]) {
+            fprintf(stderr, "FAIL ticket %d skipped\n", i);
+            return 1;
+        }
+    }
+    if (done[BAD]) {
+        fprintf(stderr, "FAIL failing ticket completed\n");
+        return 1;
+    }
+    printf("parallel_wait_err_smoke: OK\n");
+    return 0;
+}

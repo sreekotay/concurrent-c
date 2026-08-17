@@ -19605,6 +19605,27 @@ static int cc__try_expand_comptime_for(const char* src, size_t n, const char* in
     if (!(p + 3 <= n && memcmp(src + p, "for", 3) == 0 &&
           (p + 3 >= n || !cc_is_ident_char(src[p + 3])))) return 0;
 
+    /* Native shadow's whitelist cannot lower `@comptime for` that lives in a
+     * harvested/spliced `.cch`. Expanding it here looks like success while the
+     * subset still cannot represent the form — refuse loudly. */
+    {
+        const char* bm = CC_IMPL_CCH_BEGIN_MARK;
+        const char* em = CC_IMPL_CCH_END_MARK;
+        size_t bl = strlen(bm), el = strlen(em);
+        size_t last_begin = (size_t)-1, k;
+        for (k = 0; k + bl <= n && k <= i; k++) {
+            if (memcmp(src + k, bm, bl) == 0) last_begin = k;
+            else if (last_begin != (size_t)-1 && k + el <= n && k < i &&
+                     memcmp(src + k, em, el) == 0)
+                last_begin = (size_t)-1;
+        }
+        if (last_begin != (size_t)-1) {
+            fprintf(stderr, "%s: error: unexpected token\n",
+                    input_path ? input_path : "<input>");
+            return -1;
+        }
+    }
+
     size_t lp = cc_skip_ws_and_comments(src, n, p + 3);
     if (lp >= n || src[lp] != '(') return 0;       /* not our shape; leave alone */
     size_t hp_close;

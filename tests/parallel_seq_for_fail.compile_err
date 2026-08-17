@@ -1,0 +1,1 @@
+@parallel seq (...) with 'for' requires 'wait (gate)'

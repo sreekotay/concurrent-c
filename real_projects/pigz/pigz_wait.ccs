@@ -1,0 +1,292 @@
+#!ccc ccs
+/*
+ * pigz_wait.ccs — pigz over `@parallel seq (use_par) wait (ts) for`.
+ *
+ * The loop body is one ordinary call; the construct owns enter / spawn /
+ * join / error capture (no nursery plumbing, no shared failed flag). The
+ * CCTurnstileRW stages order the two pieces of loop-carried state:
+ *
+ *   read stage  — input file position and the chained dictionary: each
+ *                 block's deflate is seeded with the previous block's
+ *                 last 32 KiB, like real pigz, so the output is one
+ *                 continuous gzip stream at full compression ratio;
+ *   write stage — output file position and the running CRC.
+ *
+ * Because the ticket order is the loop order, the parallel run writes
+ * byte-for-byte what the sequential run writes. PIGZ_SEQ=1 denies
+ * parallelism at runtime (`seq (use_par)`): same body, two schedules.
+ * Worker errors re-raise after the loop into the enclosing @errhandler;
+ * every entered ticket discharges both stage passes on every path (see
+ * the @defer(err) in compress_block_i) so in-flight tickets can finish.
+ *
+ * PIGZ_CAP=N bounds in-flight blocks (default 16).
+ */
+
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_atomic.cch>
+#include <ccc/script/stdio.cch>
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <zlib.h>
+
+#define BLOCK_SIZE (128 * 1024)
+#define DICT_SIZE  32768
+#define DEFAULT_CAP 16
+#define MAX_CAP     256
+
+typedef struct {
+    CCSlice data;         /* compressed bytes, owned by .arena */
+    unsigned long crc;    /* crc32 of the uncompressed block */
+    size_t original_len;
+    CCArena arena;
+} CompressedResult;
+
+typedef struct {
+    CCFile* in;
+    CCFile* out;
+    CCTurnstileRW* ts;
+    size_t file_len;
+    int n;
+    int level;
+    /* Loop-carried, guarded by the read stage (ticket order). */
+    unsigned char dict[DICT_SIZE];
+    size_t dict_len;
+    /* Loop-carried, guarded by the write stage. */
+    unsigned long crc;
+} CompressJob;
+
+cc_atomic_i64 g_bytes_in = 0;
+cc_atomic_i64 g_bytes_out = 0;
+cc_atomic_int g_blocks_done = 0;
+
+static int stagger_cap(void) {
+    const char* s = getenv("PIGZ_CAP");
+    if (!s || !s[0])
+        return DEFAULT_CAP;
+    int v = atoi(s);
+    if (v < 1)
+        return DEFAULT_CAP;
+    if (v > MAX_CAP)
+        return MAX_CAP;
+    return v;
+}
+
+/* Deflate one block as a section of a single continuous stream: raw
+ * deflate seeded with the previous block's tail, ended with a sync
+ * flush (byte boundary) — or Z_FINISH on the last block. Arena owned
+ * until detach; @defer(err) frees on any error return. */
+static CompressedResult* !>(CCIoError) compress_block(CCSlice data,
+                                                     const unsigned char* dict,
+                                                     size_t dict_len,
+                                                     bool is_last, int level) {
+    size_t max_out = data.len + (data.len >> 3) + 1024;
+    CCArena res_arena = cc_arena_heap(sizeof(CompressedResult) + max_out + 64);
+    @defer(err) res_arena.free();
+    if (!res_arena.base)
+        return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
+
+    CompressedResult* res = cc_arena_alloc_T(CompressedResult, &res_arena);
+    unsigned char* out_buf =
+        cc_arena_alloc_T_count(unsigned char, &res_arena, max_out);
+    if (!res || !out_buf)
+        return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
+
+    res->original_len = data.len;
+    res->crc = crc32(0UL, (const Bytef*)data.ptr, (uInt)data.len);
+
+    z_stream strm = {0};
+    if (deflateInit2(&strm, level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK)
+        return cc_err(cc_io_error(CC_IO_OTHER));
+    if (dict_len)
+        deflateSetDictionary(&strm, dict, (uInt)dict_len);
+
+    strm.next_in = (Bytef*)data.ptr;
+    strm.avail_in = (uInt)data.len;
+    strm.next_out = out_buf;
+    strm.avail_out = (uInt)max_out;
+
+    int ret = deflate(&strm, is_last ? Z_FINISH : Z_SYNC_FLUSH);
+    size_t pos = strm.total_out;
+    deflateEnd(&strm);
+    if (is_last ? (ret != Z_STREAM_END) : (ret != Z_OK || strm.avail_in != 0))
+        return cc_err(cc_io_error(CC_IO_OTHER));
+
+    res->data = res_arena.slice(out_buf, pos);
+    g_bytes_in.fetch_add((int64_t)data.len);
+    g_bytes_out.fetch_add((int64_t)pos);
+    g_blocks_done.fetch_add(1);
+
+    res->arena = res_arena.detach();
+    return cc_ok(res);
+}
+
+/* One iteration. Every entered ticket must pass every stage on every
+ * path — an entered successor is parked in wait(i+1) until pass(i) — so
+ * the passes are armed up front and disarmed by the early success
+ * passes in the normal flow. */
+static void !>(CCIoError) compress_block_i(CompressJob* job, int i) {
+    /* Forwarding handler: a return here runs the @defer ledger below,
+     * so error exits still discharge the stage passes. */
+    @errhandler(CCIoError e) { return cc_err(e); }
+    CCTurnstileRW* ts = job->ts;
+    int read_passed = 0;
+    int write_waited = 0;
+    int write_passed = 0;
+    @defer(err) {
+        if (!read_passed) ts->read.pass(i);
+        if (!write_waited) ts->write.wait(i);
+        if (!write_passed) ts->write.pass(i);
+    }
+
+    size_t off = (size_t)i * (size_t)BLOCK_SIZE;
+    size_t remain = job->file_len - off;
+    size_t want = remain < (size_t)BLOCK_SIZE ? remain : (size_t)BLOCK_SIZE;
+    bool is_last = (off + want >= job->file_len);
+
+    /* read stage — sequential file IO; hand the chained dictionary on. */
+    ts->read.wait(i);
+    CCArena blk_arena = cc_arena_heap(want + DICT_SIZE + 512);
+    @defer blk_arena.free();
+    if (!blk_arena.base)
+        return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
+    unsigned char* dict =
+        cc_arena_alloc_T_count(unsigned char, &blk_arena, DICT_SIZE);
+    if (!dict)
+        return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
+
+    CCSlice data = cc_slice_empty();
+    job->in->seek((long)off, SEEK_SET) !>;
+    bool avail = job->in->read(&blk_arena, want, &data) !>;
+    if (!avail || data.len != want)
+        return cc_err(cc_io_error(CC_IO_OTHER));
+
+    size_t dict_len = job->dict_len;
+    if (dict_len)
+        memcpy(dict, job->dict, dict_len);
+    size_t tail = data.len < (size_t)DICT_SIZE ? data.len : (size_t)DICT_SIZE;
+    memcpy(job->dict, (const unsigned char*)data.ptr + (data.len - tail), tail);
+    job->dict_len = tail;
+    ts->read.pass(i);
+    read_passed = 1;
+
+    /* off-stage — the parallel part. */
+    CompressedResult* item =
+        compress_block(data, dict, dict_len, is_last, job->level) !>;
+    @defer(err) item->arena.free();
+
+    /* write stage — in-order append and running CRC. */
+    ts->write.wait(i);
+    write_waited = 1;
+    job->crc = crc32_combine(job->crc, item->crc, (long)item->original_len);
+    size_t wrote = job->out->write(item->data) !>;
+    if (wrote != item->data.len)
+        return cc_err(cc_io_error(CC_IO_OTHER));
+    ts->write.pass(i);
+    write_passed = 1;
+
+    item->arena.free();
+    return cc_ok();
+}
+
+void !>(CCError) compress_file(const char* in_path, const char* out_path) {
+    @errhandler(CCError e) { return cc_err(e); }
+
+    g_bytes_in.store(0);
+    g_bytes_out.store(0);
+    g_blocks_done.store(0);
+
+    char[:0] in_s = cc_slice_cstr(in_path);
+    char[:0] out_s = cc_slice_cstr(out_path);
+
+    CCFile in_file;
+    if (in_file.open(in_s, "rb") != 0)
+        return cc_err(CC_ERR_IO, "Failed to open input");
+    @defer in_file.close();
+
+    size_t file_len = in_file.size() !>;
+
+    CCFile out_file;
+    if (out_file.open(out_s, "wb") != 0)
+        return cc_err(CC_ERR_IO, "Failed to open output");
+    @defer out_file.close();
+
+    if (file_len == 0) {
+        out_file.sync() !>;
+        return cc_ok();
+    }
+
+    size_t n_sz = (file_len + (size_t)BLOCK_SIZE - 1) / (size_t)BLOCK_SIZE;
+    if (n_sz > (size_t)INT_MAX)
+        return cc_err(CC_ERR_INVALID_ARG, "too many blocks");
+    int n = (int)n_sz;
+    int cap = stagger_cap();
+
+    unsigned char header[10] = {0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0x00, 0x03};
+    out_file.write(cc_slice_from_buffer(header, sizeof(header))) !>;
+
+    CCArena ts_arena = cc_arena_heap(megabytes(2)) @destroy;
+    CCTurnstileRW ts@(n, cap, &ts_arena) @destroy;
+    if (!ts.core.excl)
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "cc_turnstile_create failed");
+
+    CompressJob job_store;
+    memset(&job_store, 0, sizeof(job_store));
+    job_store.in = &in_file;
+    job_store.out = &out_file;
+    job_store.ts = &ts;
+    job_store.file_len = file_len;
+    job_store.n = n;
+    job_store.level = 6;
+    job_store.crc = crc32(0UL, NULL, 0);
+    CompressJob* job = &job_store;
+
+    int use_par = 1;
+    const char* seq_env = getenv("PIGZ_SEQ");
+    if (seq_env && seq_env[0] == '1' && seq_env[1] == '\0')
+        use_par = 0;
+
+    int i;
+    @parallel seq (use_par) wait (ts) for (i in 0..n) {
+        compress_block_i(job, i) !>;
+    }
+
+    unsigned char trailer[8];
+    unsigned long crc = job->crc;
+    unsigned long isize = (unsigned long)(file_len & 0xffffffffUL);
+    trailer[0] = crc & 0xff;
+    trailer[1] = (crc >> 8) & 0xff;
+    trailer[2] = (crc >> 16) & 0xff;
+    trailer[3] = (crc >> 24) & 0xff;
+    trailer[4] = isize & 0xff;
+    trailer[5] = (isize >> 8) & 0xff;
+    trailer[6] = (isize >> 16) & 0xff;
+    trailer[7] = (isize >> 24) & 0xff;
+    out_file.write(cc_slice_from_buffer(trailer, sizeof(trailer))) !>;
+
+    out_file.sync() !>;
+    return cc_ok();
+}
+
+int main(int argc, char* argv[]) {
+    @errhandler(CCError e) { return cc_err_log(e); }
+
+    if (argc < 2) {
+        eprintln(@string(`Usage: ${argv[0]} <file>`, @scratch)) !>;
+        return 1;
+    }
+
+    char out_name[4096];
+    snprintf(out_name, sizeof(out_name), "%s.gz", argv[1]);
+
+    compress_file(argv[1], out_name) !>;
+
+    long long bin = (long long)g_bytes_in.load();
+    long long bout = (long long)g_bytes_out.load();
+    int blocks = g_blocks_done.load();
+    println(@string(`Compressed ${argv[1]} -> ${out_name}`, @scratch)) !>;
+    println(@string(`Stats: ${bin} bytes in, ${bout} bytes out, ${blocks} blocks`,
+                    @scratch)) !>;
+    return 0;
+}

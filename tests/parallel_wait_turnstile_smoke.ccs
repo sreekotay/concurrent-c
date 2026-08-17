@@ -1,0 +1,51 @@
+/*
+ * @parallel [seq (cond)] wait (ts) for — ordered spawn loop.
+ * The turnstile caps in-flight iterations and its stage sequences the
+ * loop-carried counter in ticket order, so the parallel run and the
+ * seq-denied run produce identical output.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+#define N   16
+#define CAP 3
+
+static int g_next;
+
+static int run(CCTurnstile* ts, int use_par, int* order) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    int i;
+    g_next = 0;
+    @parallel seq (use_par) wait (ts) for (i in 0..N) {
+        ts->wait(0, i);
+        order[i] = g_next;
+        g_next = g_next + 1;
+        ts->pass(0, i);
+    }
+    return 0;
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+    CCTurnstile ts_par@(N, CAP, 1, &arena) @destroy;
+    CCTurnstile ts_seq@(N, CAP, 1, &arena) @destroy;
+    if (!ts_par.excl || !ts_seq.excl)
+        return 1;
+
+    int par_order[N];
+    int seq_order[N];
+    if (run(&ts_par, 1, par_order) != 0 || run(&ts_seq, 0, seq_order) != 0)
+        return 1;
+
+    int i;
+    for (i = 0; i < N; i++) {
+        if (par_order[i] != i || seq_order[i] != i) {
+            fprintf(stderr, "FAIL i=%d par=%d seq=%d\n", i, par_order[i],
+                    seq_order[i]);
+            return 1;
+        }
+    }
+    printf("parallel_wait_turnstile_smoke: OK\n");
+    return 0;
+}

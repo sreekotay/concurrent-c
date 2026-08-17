@@ -266,6 +266,8 @@ bugs.
 | `@parallel`      | Join independent assignment arms, or walk an index range              | `@parallel { a = f(); b = g(); }`      |
 | `@parallel (pred)` | Same join; spawn if `pred`, otherwise run the arms in order         | `@parallel (d < k) { a = f(); b = g(); }` |
 | `@parallel for`  | Independent iterations over a half-open integer range                 | `@parallel for (i in 0..n) { … }`      |
+| `@parallel seq (cond)` | Same join; `seq` names the denial: run the arms in order         | `@parallel seq (use_par) { a = f(); b = g(); }` |
+| `@parallel wait (ts) for` | Ordered spawn loop over a turnstile; tickets are loop indices | `@parallel wait (ts) for (i in 0..n) { step(i) !>; }` |
 | `@serial`        | Multi-statement arm of `@parallel { }`; assigns one outer name        | `@serial { int t = f(); a = t; }`      |
 | `@destroy`     | Attach cleanup to a result-unwrap                                       | `FILE* f = open() !> @destroy;`         |
 | `@comptime`    | Compile-time evaluation / conditional                                   | `@comptime if (DEBUG) { }`             |
@@ -299,6 +301,8 @@ bugs.
 | `@parallel { arms }`            | Join independent `name = expr;` or `@serial` arms (§8.11) | `@parallel { a = f(); b = g(); }`          |
 | `@parallel (pred) { arms }`     | Same join; spawn if `pred`, else run in order (§8.11.3)   | `@parallel (d < k) { a = f(); b = g(); }`  |
 | `@parallel for (i in lo..hi)`   | Independent iterations over a half-open range (§8.11.4)   | `@parallel for (y in 0..h) { row(y); }`    |
+| `@parallel seq (cond) { arms }` | Same join; named sequential denial (§8.11.5)              | `@parallel seq (use_par) { a = f(); b = g(); }` |
+| `@parallel [seq (cond)] wait (ts) for` | Ordered spawn loop over a turnstile (§8.11.6)      | `@parallel wait (ts) for (i in 0..n) { step(i) !>; }` |
 | `@serial { stmts }`             | Multi-statement arm of `@parallel { }` (§8.11.2)          | `@serial { int t = f(); a = t; }`          |
 
 **Call-site annotation forms** (see §8.2 for precedence):
@@ -361,6 +365,8 @@ Result-typed calls (`T!>(E)`) must be explicitly consumed. Two operators with cl
 | `@parallel { @serial { … } … }` | Same join; an arm may be ordinary C that writes one outer name. | `@parallel { @serial { int t = f(); a = t; } b = g(); }` |
 | `@parallel (pred) { a = …; b = …; }` | Same arms. Spawn if `pred`; otherwise serial. | `@parallel (d < k) { left = f(); right = g(); }` |
 | `@parallel for (i in lo..hi) { }` | Independent iterations over a half-open integer range. Bisects; may sequentialize. | `@parallel for (y in 0..h) { row(y); }` |
+| `@parallel seq (cond) { a = …; b = …; }` | Same arms; `seq` names the denial: run in order when `cond` is false. | `@parallel seq (use_par) { left = f(); right = g(); }` |
+| `@parallel [seq (cond)] wait (ts) for (i in lo..hi) { }` | Ordered spawn loop: `enter(i)` in loop order on the caller, depth-capped, `leave()` after each body. | `@parallel wait (ts) for (i in 0..n) { step(i) !>; }` |
 
 
 ### Deadline Scope Forms
@@ -1094,7 +1100,7 @@ CCRes(MyData, MyError) my_function(int arg);
   - At **statement position** the body may fall through. Forms: `CALL !>;`, `CALL !> STMT;`, `CALL !> { BODY };`, `CALL !>(e) STMT;`, `CALL !>(e) { BODY };`.
   - At **expression position** the body must *visibly diverge*. Forms: `CALL !>(e) DIVERGENT_STMT;`, `CALL !>(e) { …; DIVERGENT_STMT };`, `CALL !> DIVERGENT_STMT;`, `CALL !> { …; DIVERGENT_STMT };`, and the bare `CALL !>;` which synthesizes a binder and inlines the matching `@errhandler` body for Result `E` (which must itself diverge). A non-divergent body at expression position is diagnosed with `expression-position '!>' body must diverge (return/break/continue/goto/@err/exit/abort/etc.)`. A bare `CALL !>;` at expression position with no matching `@errhandler` for `E` is ill-formed.
 3. Error values are accessible only via an explicit `(ident)` binder on `?>` or `!>`. Neither operator creates an implicit `e` / `err` binding. The bare expression-position `!>;` form synthesizes a fresh internal binder that threads the error value through the inlined handler body.
-4. `CALL !>;` at statement position runs a matching in-scope `@errhandler`, or the success path if the call succeeded. Candidates are `@errhandler` declarations in the current function whose declaration point is textually before the unwrap (block-nested, not hoisted); there is no cross-function search — that locality is why same-`E` re-entry is a compile error. From the unwrap outward, the first handler whose parameter type is exactly the call's Result error type `E` wins; if none, the first whose parameter `F` is reachable from `E` by a unique `@typeview` `as:` path wins (hop count is not a rank; two such face-matching handlers in the same block are ill-formed). No match is ill-formed. If that matching handler's body textually contains the call (same-`E` re-entry), the program is ill-formed — report via a helper such as `cc_error_log` / `cc_error_exit`, or an inline `!> { abort(); }`, not bare `!>;` inside the same-`E` handler.
+4. `CALL !>;` at statement position runs a matching in-scope `@errhandler`, or the success path if the call succeeded. Candidates are `@errhandler` declarations in the current function whose declaration point is textually before the unwrap (block-nested, not hoisted); there is no cross-function search — that locality is why same-`E` re-entry is a compile error. From the unwrap outward, the first handler whose parameter type is exactly the call's Result error type `E` wins; if none, the first whose parameter `F` is reachable from `E` by a unique `@typeview` `as:` path wins (hop count is not a rank; two such face-matching handlers in the same block are ill-formed). No match is ill-formed: the diagnostic names the call's `T !>(E)` and the in-scope `@errhandler` parameter type(s) at the `!>` site. If that matching handler's body textually contains the call (same-`E` re-entry), the program is ill-formed — report via a helper such as `cc_error_log` / `cc_error_exit`, or an inline `!> { abort(); }`, not bare `!>;` inside the same-`E` handler.
 5. `@err(IDENT);` inside a `!>` body forwards the bound error to the matching `@errhandler` for that unwrap's `E`. It is a **structured control-flow transfer** (not a returning call): any statement textually following it in the same block is unreachable and is a compile error.
 6. `@errhandler(E e) STMT;` or `@errhandler(E e) { ... }` registers a block-local handler for Result error type `E`. A handler is in scope for a use only after its declaration point (same candidate set as invariant 4). The statement form is a thin forward (typically `cc_error_exit(e);`); the block form holds multiple statements. `CALL !>;` is the hoist of `CALL !>(e) STMT` when `STMT` is that handler body. When reached via `CALL !>;` at statement position, the handler body runs and control returns to the statement after the call — the handler may end in any statement. When reached via an `@err(e);` forward, via a bare expression-position `!>;`, or via an expression-position `!>` whose body inlines the handler, control never returns, so the handler body **must visibly diverge**. A `return` (or other soft-return) from the handler body discharges the enclosing function’s `@defer` / `@destroy` ledger via the same epilogue as any other return in that function (§5.1). Concretely: if any `@err(e);` targets a handler, or any expression-position `!>;` inlines a handler, that handler's body must end in one of:
   - `return EXPR;` / `return;`
@@ -5170,7 +5176,7 @@ void !>(CCError) cc_exclusive_mutex_acquire_when_into(CCExclusiveMutex* m,
 
 `@parallel` names a join of independent work. It is not a nursery and it does not create a task the program can hold. The implementation may run some arms or iterations on other workers, or run all of them on the caller. `n->spawn` does not sequentialize; `@parallel` may.
 
-The form is selected by the token after `@parallel`: `{` (always try to spawn), `(` (spawn if the predicate), or `for` (range).
+The form is selected by the tokens after `@parallel`: `{` (always try to spawn), `(` or `seq (` (spawn if the predicate, §8.11.3, §8.11.5), `wait (` (ordered spawn loop over a turnstile, §8.11.6), or `for` (bisected range, §8.11.4).
 
 #### 8.11.1 Assignment join
 
@@ -5241,7 +5247,34 @@ Iterations must not race. Disjoint writes (`img[y * w + x] = …` for distinct `
 
 `n->spawn` remains the tool when the program names a task lifetime or an explicit tile size.
 
-#### 8.11.5 Grain and limits
+#### 8.11.5 `seq` — the named denial
+
+```c
+@parallel seq (use_par) {
+    left  = f();
+    right = g();
+}
+```
+
+`@parallel seq (cond) { … }` is the gated assignment join of §8.11.3 with the denial written out: when `cond` is true the join tries to spawn; when false the arms run in order on the caller. `seq` names what happens when parallelism is not granted — the same body runs sequentially. Because `cond` is an ordinary runtime expression, one body carries two schedules: differential testing and adaptive dispatch flip a flag, not the code. `@parallel seq (cond) for` without `wait` is ill-formed; the `for` denial spelling is §8.11.6.
+
+#### 8.11.6 `wait` — ordered spawn loop
+
+```c
+@parallel seq (use_par) wait (ts) for (i in 0..n) {
+    step(job, i) !>;
+}
+```
+
+`@parallel wait (gate) for (i in lo..hi) { … }` runs the loop as an ordered spawn loop. `gate` is the name of a `CCTurnstile` or `CCTurnstileRW` (§8.12) in scope; any other type is ill-formed. Iterations are tickets: the construct calls `enter(i)` on the caller in loop order — the depth cap bounds in-flight iterations and the in-order enter is the happens-before that arms every stage's next ticket — then spawns the body. `leave()` runs after the body on every path. If a spawn is denied, that iteration's body runs on the caller before the next `enter`; the token is never leaked. `wait` without `for`, or with an assignment-join body, is ill-formed.
+
+The optional `seq (cond)` prefix composes: when `cond` is false the same body runs as a plain sequential `for` on the caller, with no `enter`/`leave` and no spawn. The construct also takes this path when it cannot allocate its join scope. Stage `wait`/`pass` calls in the body degrade to no-ops against a never-entered turnstile, so one body serves both schedules.
+
+Body statements may raise with `!>`. Errors are stop-starting: the first failure stops new tickets from entering, in-flight iterations finish, and after the brace the error of the lowest failing ticket re-raises into the innermost `@errhandler` for `CCError` — which must be in scope, on both schedules. A failed `enter` takes no token and joins the same way. Because an entered successor is parked in `wait(i+1)` until `pass(i)`, an entered ticket must discharge every stage pass on every path, including error exits; a fallible body does this in a helper whose `@defer(err)` passes the stages not yet passed. `@defer` and `@errhandler` at the top level of the body are ill-formed; they belong in a helper or outside the loop.
+
+The loop-carried case is the point: state that hops from ticket `i` to `i+1` (a chained compression dictionary, a running checksum, an output file position) sits between `wait(k, i)` and `pass(k, i)` in the body and reads exactly as it does in the sequential loop. The parallel run and the denied run produce the same output.
+
+#### 8.11.7 Grain and limits
 
 An assignment or `@serial` arm after the first is spawned as a fiber and joined before the brace. `@parallel for` spawns one half of a span at each bisection; a span of length 0 or 1 is a sequential `for`. In-flight `@parallel` fibers are capped at 256 times the number of online processors; further arms and leftover spans run on the caller. That ceiling is an allocation bound, not a grain. The construct does not estimate how much work an arm contains. A caller who knows a cutoff writes it on the join (`@parallel (d < k) { … }`) so the same arms run in parallel above the cut and in order below it.
 
@@ -5254,6 +5287,9 @@ An implementation may reject a function that exceeds a finite number of `@parall
 ```
 parallel_stmt ::= '@parallel' parallel_join
                |  '@parallel' '(' pred ')' parallel_join
+               |  '@parallel' 'seq' '(' pred ')' parallel_join
+               |  '@parallel' [ 'seq' '(' pred ')' ] 'wait' '(' ident ')'
+                  'for' '(' ident 'in' expr '..' expr ')' block
                |  '@parallel' 'for' '(' ident 'in' expr '..' expr ')' block
 
 parallel_join ::= '{' parallel_arm parallel_arm+ '}'
@@ -5264,7 +5300,7 @@ parallel_arm  ::= ident '=' expr ';'
 serial_arm    ::= '@serial' '{' stmt+ '}'
 ```
 
-`pred` is a nonempty expression. `ident` on an assignment arm, and the unique simple outer name assigned by a `serial_arm`, are names already in scope. `serial_arm` is a `parallel_arm` only.
+`pred` is a nonempty expression. `seq` and `wait` are contextual words after `@parallel`, not keywords elsewhere. The `wait` ident names a `CCTurnstile` or `CCTurnstileRW` in scope. `ident` on an assignment arm, and the unique simple outer name assigned by a `serial_arm`, are names already in scope. `serial_arm` is a `parallel_arm` only.
 
 ---
 

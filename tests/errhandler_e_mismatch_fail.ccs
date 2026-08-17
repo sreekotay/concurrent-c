@@ -1,0 +1,24 @@
+/*
+ * Unique-E: a CCError unwrap must not run through an OtherErr handler.
+ * Diagnostic names the call's T !>(E) and the in-scope @errhandler.
+ */
+#include <stdio.h>
+#include <ccc/std/prelude.cch>
+
+typedef struct {
+    int tag;
+} OtherErr;
+
+static int !> (CCError) always_err(void) {
+    return cc_err(CC_ERR_NOT_FOUND, "cc");
+}
+
+int main(void) {
+    @errhandler(OtherErr e) {
+        (void)e;
+        return 1;
+    }
+    always_err() !>;
+    printf("unreachable\n");
+    return 0;
+}

@@ -767,8 +767,8 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --frontend=native   Front end (native only; also: CC_FRONTEND=native)\n");
     fprintf(stderr, "  --version, --v, -V  Print version (MAJOR.MINOR.PATCH-SEED)\n");
     fprintf(stderr, "  --as=ccs|cch|shcc   Unit kind (else first-line header, else suffix)\n");
-    fprintf(stderr, "  version=X           Pin lowerer to X (prefix of MAJOR.MINOR.PATCH-SEED)\n");
-    fprintf(stderr, "  --ccc-version=X     Same as version=X\n");
+    fprintf(stderr, "  version=X           Pin lowerer: prefix, or >=X / >X / <=X / <X, or both (>=A,<B)\n");
+    fprintf(stderr, "  --ccc-version=X     Same as version=X (quote bounds: 'version=>=0.3.3')\n");
     fprintf(stderr, "  --timeout SECONDS   Kill run/test step after timeout\n");
     fprintf(stderr, "  --verbose           Print invoked commands\n");
     fprintf(stderr, "One-liners:\n");
@@ -1741,7 +1741,7 @@ static int cc__compile_with_env(const CCBuildOptions* opt, const char* in_path, 
         int rc = -1;
         {
             CCUnitKind uk = CC_UNIT_KIND_UNKNOWN;
-            char pin[64];
+            char pin[CC_CCC_VERSION_PIN_CAP];
             char uerr[256];
             pin[0] = '\0';
             if (cc_unit_resolve(in_path,
@@ -3188,7 +3188,7 @@ static int cc__ensure_pinned_shadow_lower(const char* pin, char* dst, size_t cap
     int have_src, have_bin;
 
     if (!pin || !pin[0]) return cc__find_shadow_lower(dst, cap);
-    if (cc_ccc_version_parse(pin, NULL, NULL, NULL, NULL) != 0) {
+    if (!cc_ccc_version_spec_ok(pin)) {
         fprintf(stderr, "cc: invalid version pin %s\n", pin);
         return -1;
     }
@@ -3272,7 +3272,7 @@ static int cc__run_shadow_lower(const CCBuildOptions* opt, const char* out_path)
     CCConstBinding bindings[128];
     size_t binding_count = 0;
     CCUnitKind kind = CC_UNIT_KIND_UNKNOWN;
-    char pin[64];
+    char pin[CC_CCC_VERSION_PIN_CAP];
     char resolve_err[256];
     if (!opt || !opt->in_path || !out_path) return -1;
 
@@ -3502,7 +3502,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
      * Py modules keep the caller's -fPIC/-shared flags; shadow_lower forwards. */
     if (cc__want_native_front()) {
         CCUnitKind uk = CC_UNIT_KIND_UNKNOWN;
-        char pin[64];
+        char pin[CC_CCC_VERSION_PIN_CAP];
         char uerr[256];
         pin[0] = '\0';
         if (cc_unit_resolve(opt->in_path, opt->unit_kind, opt->ccc_version_pin,
@@ -4575,7 +4575,7 @@ static int run_build_mode(int argc, char** argv) {
     CCMode mode = CC_MODE_LINK;
     int no_cache = 0;
     CCUnitKind unit_kind = CC_UNIT_KIND_UNKNOWN;
-    char version_pin[64];
+    char version_pin[CC_CCC_VERSION_PIN_CAP];
     version_pin[0] = '\0';
 
     enum {
@@ -6277,7 +6277,9 @@ static int cc__take_unit_flag(int argc, char** argv, int* i,
         else if (strncmp(a, "--ccc-version=", 14) == 0) val = a + 14;
         else {
             if (*i + 1 >= argc) {
-                fprintf(stderr, "cc: --ccc-version requires MAJOR[.MINOR[.PATCH[-SEED]]]\n");
+                fprintf(stderr,
+                        "cc: --ccc-version requires a version or bound "
+                        "(>=X, >X, <=X, <X, or both)\n");
                 return -1;
             }
             val = argv[++(*i)];
@@ -6639,6 +6641,14 @@ int main(int argc, char **argv) {
                h.version[0] ? h.version : "-");
         return 0;
     }
+    if (argc >= 2 && strcmp(argv[1], "__ccc-version-match") == 0) {
+        if (argc < 4) {
+            fprintf(stderr, "cc: __ccc-version-match requires PIN CANDIDATE\n");
+            return 2;
+        }
+        printf("%d\n", cc_ccc_version_matches(argv[2], argv[3]));
+        return 0;
+    }
     if (argc >= 2 && strcmp(argv[1], "clean") == 0) {
         int all = 0;
         const char* out_dir = NULL;
@@ -6696,7 +6706,7 @@ int main(int argc, char **argv) {
         const char* save_doc = NULL;
         CCScriptOnelinerOpts ol_opts;
         CCUnitKind pre_as = CC_UNIT_KIND_UNKNOWN;
-        char pre_pin[64];
+        char pre_pin[CC_CCC_VERSION_PIN_CAP];
         pre_pin[0] = '\0';
 
         /* Collect one-liner mode flags anywhere (before or after PROGRAM). */
@@ -6758,7 +6768,7 @@ int main(int argc, char **argv) {
                 else if (a[0] == '@') toolbox_idx = i;
                 else {
                     CCUnitKind k = CC_UNIT_KIND_UNKNOWN;
-                    char pin[64];
+                    char pin[CC_CCC_VERSION_PIN_CAP];
                     char uerr[256];
                     pin[0] = '\0';
                     if (pre_as == CC_UNIT_KIND_SHCC) script_idx = i;
@@ -6940,7 +6950,7 @@ int main(int argc, char **argv) {
     int dump_comptime = 0;
     CCMode mode = CC_MODE_LINK;
     CCUnitKind unit_kind = CC_UNIT_KIND_UNKNOWN;
-    char version_pin[64];
+    char version_pin[CC_CCC_VERSION_PIN_CAP];
     char out_stem_buf[128];
     enum { max_cli_main = 64 };
     char* cli_names_main[max_cli_main];
