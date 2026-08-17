@@ -160,6 +160,7 @@ UFCS show up in almost every example — treat them as day-one, not advanced.
 | Methods (UFCS) | `recv.method(args)` — ordinary functions; prefer this form |
 | Generics | `Name::[args]` — Vec / Map / ArrayMap / `T[:]` are factory families |
 | Arenas / slices | arena **names a lifetime**; alloc strategy is policy for that lifetime’s storage; `T[:]` views carry provenance (below) |
+| Locality | owned or view; constructors assume dead; failure is unchanged — [below](#locality-owned-or-view) |
 | Closures | `() => …`, `() => [x] { … }`, `() => [&x] { … }` — tasks re-bind `@errhandler` |
 
 ### Destroy registration — what bodyless `@destroy` calls
@@ -336,6 +337,43 @@ More: [Language Concepts §4](language-concepts.md#4-slices-remember-where-bytes
 [recipe_arena_scope.ccs](../examples/recipe_arena_scope.ccs),
 [allocator strategy](../spec/draft_alloc_strategy.md).
 
+## Locality: owned or view
+
+Memory is owned or it is a view. Lifetime is a **field**, not a protocol.
+Ownership is handled at the call site.
+
+**Construct, use, `@destroy`.** A constructor assumes the object is dead — it
+does not tear down a live one. Reopen is two lines, or a second local.
+`memset` is neither:
+
+```c
+d.destroy();
+d.from_view(src) !>;
+/* or: Doc d2 = {0} @destroy; */
+```
+
+**Epochs are fields.** Prefer a second arena when lifetimes diverge — as a
+named epoch on the object (`d.store`, `d.analysis`), not a second allocator
+identity. Frame / `@scratch` copies stay inside the callee and are not
+returned. A product takes the destination arena last (`d.copy_into(&d.analysis)`).
+
+**A path that gives up is not success.** Fallible APIs are Results. Value
+returns are only queries of already-valid state (`len`, `dirty`). Failure is
+**unchanged** or **`broken`** — never a short slice or a zero that looks like
+a commit. Empty can be a payload (“not one piece”) as well as “no bytes”; do
+not collapse those. A `char[:]` is `{ptr, len, id}` — storing it does not take
+the bytes; `id == 0` is untracked.
+
+**Faces at the use site.** UFCS keeps a type open. A `@typeview` is the
+reverse: the caller declares what a composition may reach. Measure may `len`
+/ `span` and cannot `replace`. Hooks and faces live next to the type they
+name.
+
+Recipe: [recipe_owned_view.ccs](../examples/recipe_owned_view.ccs). Face
+syntax: [typehooks-typeviews.md](typehooks-typeviews.md). Editor-scale
+worked example (out of tree):
+[raytext](https://github.com/sreekotay/raytext).
+
 ## Concurrency
 
 ### Nurseries
@@ -465,13 +503,15 @@ Work the recipes in order — they are the intended tutorial:
 [examples/README.md — Learning Path](../examples/README.md#learning-path-recommended-order)
 
 In short: `hello` → results / unwrap / UFCS → generics (`recipe_user_generics`) → captures → channels → async →
-timeouts / worker pool → arenas / defer. Then networking
+timeouts / worker pool → arenas → [owned or view](../examples/recipe_owned_view.ccs) / defer. Then networking
 (`recipe_tcp_echo.ccs`, `recipe_http_get.ccs`) and build-system examples under
 `examples/`.
 
 Larger measured programs (pigz, Redis subset, CPython extension patterns,
 the Shirley weekend raytracer) live under
 [`real_projects/`](../real_projects/); benches under [`perf/`](../perf/).
+An editor that is this locality shape at full size:
+[raytext](https://github.com/sreekotay/raytext).
 
 ## `.shcc` scripts
 
@@ -530,6 +570,7 @@ Script form of the same door: [examples/py/pydemo.shcc](../examples/py/pydemo.sh
 ## Next
 
 - [Language Concepts](language-concepts.md)
+- [Locality: owned or view](#locality-owned-or-view) · [recipe_owned_view.ccs](../examples/recipe_owned_view.ccs)
 - [@typehooks / @typeview](typehooks-typeviews.md) — register destroy/create, faces, allow-lists
 - [Cheatsheet](cheatsheet.md)
 - [Backwards compatibility](backwards_compatibility.md) — unit headers and version pins

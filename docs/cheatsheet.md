@@ -543,12 +543,27 @@ Recipe: [recipe_arena_scope.ccs](../examples/recipe_arena_scope.ccs).
 
 ---
 
+## Locality (program shape)
+
+Memory is owned or it is a view. Lifetime is a field. A constructor assumes
+dead — reopen is `d.destroy(); d.from_view(src) !>;`, not `memset`. Fallible
+work is `T!>(E)`; a giving-up path is **unchanged** or **`broken`**, not a
+zero that looks like success. `char[:]` is `{ptr, len, id}` (storing it does
+not take the bytes; `id == 0` is untracked). Faces (`@typeview`) are decided
+at the use site.
+
+[Getting started](getting-started.md#locality-owned-or-view) ·
+[recipe_owned_view.ccs](../examples/recipe_owned_view.ccs) ·
+[typehooks-typeviews.md](typehooks-typeviews.md).
+
+---
+
 ## Absence (no `T?`)
 
 | Shape | Use when |
 |-------|----------|
 | `T*` / bool+out | missing lookup / pop |
-| empty slice | EOF / no bytes |
+| empty slice | no bytes, or “not one piece” — not automatically EOF |
 | `T!>(E)` | operation failed |
 
 ---
@@ -609,6 +624,7 @@ ccc examples/js/jsdemo.shcc         # CC→JS (guest; Node owns env)
 
 | Pattern | Recipe |
 |---------|--------|
+| Owned or view / reopen | [recipe_owned_view.ccs](../examples/recipe_owned_view.ccs) |
 | Worker pool | [recipe_worker_pool.ccs](../examples/recipe_worker_pool.ccs) |
 | Fan-out / captures | [recipe_fanout_capture.ccs](../examples/recipe_fanout_capture.ccs) |
 | Ordered parallel | [recipe_ordered_parallel.ccs](../examples/recipe_ordered_parallel.ccs) |

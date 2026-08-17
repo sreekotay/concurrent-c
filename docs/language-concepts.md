@@ -118,7 +118,7 @@ io.println(@string(`n=${n}`, @scratch)) !>;
 
 ## 4. Slices remember where bytes live
 
-[recipe_arena_scope.ccs](../examples/recipe_arena_scope.ccs) · [recipe_long_lived_store.ccs](../examples/recipe_long_lived_store.ccs) · [Allocator strategy](../spec/draft_alloc_strategy.md) · [Restricted access](../spec/draft_facets.md)
+[recipe_arena_scope.ccs](../examples/recipe_arena_scope.ccs) · [recipe_owned_view.ccs](../examples/recipe_owned_view.ccs) · [recipe_long_lived_store.ccs](../examples/recipe_long_lived_store.ccs) · [Allocator strategy](../spec/draft_alloc_strategy.md) · [Restricted access](../spec/draft_facets.md)
 
 **An arena names a lifetime. Its allocation strategy is an implementation
 policy for storage belonging to that lifetime.**
@@ -126,9 +126,14 @@ policy for storage belonging to that lifetime.**
 The `CCArena` binding *is* that lifetime (the epoch). Size the root for the
 typical live set of that lifetime; choose heap/stack/fixed/overflow as
 **policy** for how its storage is obtained — not a separate allocator identity.
-Slices are views — `T[:]` carries provenance (stack, arena, static, unique, …)
-so the compiler can reject views that outlive their storage. `char[:0]` is the
-NUL-terminated refinement — prefer `char[:0] s = "hi";` for string literals.
+Slices are views — `T[:]` is `{ptr, len, id}`; storing it does not take the
+bytes. Provenance (stack, arena, static, unique, …) is what the compiler uses
+to reject views that outlive their storage. `id == 0` is untracked.
+`char[:0]` is the NUL-terminated refinement — prefer `char[:0] s = "hi";` for
+string literals. How those facts compose into an object (constructors assume
+dead, epochs as fields, failure is unchanged):
+[getting started — locality](getting-started.md#locality-owned-or-view) ·
+[recipe_owned_view.ccs](../examples/recipe_owned_view.ccs).
 
 Ordinary slice sites allow loads and UFCS; field stores (`s.len = …`) are
 denied (`@typeview` on the slice family). Tutorial:
@@ -209,7 +214,7 @@ Tasks do not inherit `@errhandler` — re-bind inside if you use `!>;`.
 
 No `T?`. Pick the shape that matches the operation:
 
-- **Missing** → `T*`, bool+out, or a sentinel (empty slice)
+- **Missing** → `T*`, bool+out, or a sentinel (empty slice — also “not one piece”)
 - **Failed** → `T!>(E)` (§2)
 
 ---
@@ -254,6 +259,7 @@ error; `for` inside `@serial` is ordinary C.
 ## Next
 
 [Getting Started](getting-started.md) · [Cheatsheet](cheatsheet.md) ·
+[recipe_owned_view.ccs](../examples/recipe_owned_view.ccs) ·
 [recipe_channel_pipeline.ccs](../examples/recipe_channel_pipeline.ccs) ·
 [recipe_async_await.ccs](../examples/recipe_async_await.ccs) ·
 [recipe_parallel.ccs](../examples/recipe_parallel.ccs)

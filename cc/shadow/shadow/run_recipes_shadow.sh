@@ -138,6 +138,16 @@ run_one examples/recipe_ordered_parallel.ccs \
   "[consumer] item 8: 8^2 = 64" \
   "Done! Results printed in order despite out-of-order completion."
 
+run_one examples/recipe_owned_view.ccs \
+  "len=5" \
+  "reopen=2" \
+  "live refused (len=2)" \
+  "untracked refused" \
+  "measure=2" \
+  "analysis=2" \
+  "unchanged=2" \
+  "cleared=0"
+
 run_one examples/recipe_long_lived_store.ccs \
   "entries=2 logical_key_bytes=12 inserted=18 deleted=6"
 

@@ -114,6 +114,7 @@ splice, `as:` faces, `const char*` helpers, errno `switch`; no `_Generic` /
 ./cc/shadow/shadow_lower.sh examples/recipe_defer_cleanup.ccs -o /tmp/defer_shadow.c
 ./cc/shadow/shadow_lower.sh examples/recipe_unwrap_destroy_forms.ccs -o /tmp/unwrap_shadow.c
 ./cc/shadow/shadow_lower.sh examples/recipe_arena_scope.ccs -o /tmp/arena_shadow.c
+./cc/shadow/shadow_lower.sh examples/recipe_owned_view.ccs -o /tmp/owned_view_shadow.c
 ./cc/shadow/shadow_lower.sh examples/recipe_explicit_capture.ccs -o /tmp/capture_shadow.c
 ./cc/shadow/shadow_lower.sh examples/recipe_channel_pipeline.ccs -o /tmp/pipeline_shadow.c
 ./cc/shadow/shadow_lower.sh examples/recipe_timeout.ccs -o /tmp/timeout_shadow.c

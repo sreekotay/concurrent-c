@@ -1,0 +1,125 @@
+#!ccc ccs
+/*
+ * Recipe: owned or view
+ *
+ * Memory is owned or it is a view. Lifetime is a field. A constructor
+ * assumes the object is dead — reopen is destroy then construct, not
+ * memset. Fallible work is T!>(E); a pre-mutation fault leaves the
+ * object unchanged. A @typeview is the use-site face: measure may
+ * len / span, not replace.
+ *
+ * In a real program these hooks and faces live next to the type
+ * (document.cch). Frame copies take a scratch arena the callee owns
+ * and do not return; analysis copies take d.analysis (arena last).
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/script/stdio.cch>
+
+#define DOC_MAX 8
+
+typedef struct Doc {
+    CCArena store;      /* document epoch — lives until destroy() */
+    CCArena analysis;   /* derived epoch — reset without killing the doc */
+    char[:] body;       /* view; storing it does not take the bytes */
+} Doc;
+
+static void Doc_destroy(Doc* d) {
+    if (!d) return;
+    d->store.destroy();
+    d->analysis.destroy();
+    d->body = cc_slice_empty();
+}
+
+/* Keeps src. Refuses a live object and a non-empty untracked slice. */
+static void !>(CCError) doc_from_view(Doc* d, char[:] src) {
+    if (!d) return cc_err(CC_ERR_INVALID_ARG, "from_view without doc");
+    if (d->store.valid()) return cc_err(CC_ERR_INVALID_ARG, "from_view on live doc");
+    if (src.len && src.id == 0)
+        return cc_err(CC_ERR_INVALID_ARG, "untracked view");
+    d->store = cc_arena_heap(kilobytes(1));
+    if (!d->store.valid()) return cc_err(CC_ERR_OUT_OF_MEMORY, "store");
+    d->analysis = cc_arena_heap(kilobytes(1));
+    if (!d->analysis.valid()) {
+        d->store.destroy();
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "analysis");
+    }
+    d->body = src;
+    return cc_ok();
+}
+
+static size_t doc_len(const Doc* d) {
+    return d ? d->body.len : 0;
+}
+
+static char[:] doc_span(const Doc* d) {
+    return d ? d->body : cc_slice_empty();
+}
+
+/* Pre-mutation refuse → unchanged. Empty next is a real clear. */
+static void !>(CCError) doc_replace(Doc* d, char[:] next) {
+    if (!d || !d->store.valid())
+        return cc_err(CC_ERR_INVALID_ARG, "replace on dead doc");
+    if (next.len > DOC_MAX) return cc_err(CC_ERR_INVALID_ARG, "too long");
+    if (next.len == 0) {
+        d->body = cc_slice_empty();
+        return cc_ok();
+    }
+    char[:] owned = next.clone_into(&d->store) !>(e) { return cc_err(e); };
+    d->body = owned;
+    return cc_ok();
+}
+
+/* Arena last: the copy lives on `a` (analysis, or a frame the callee owns). */
+static char[:] !>(CCError) doc_copy_into(Doc* d, CCArena* a) {
+    if (!d || !a) return cc_err(CC_ERR_INVALID_ARG, "copy_into");
+    return d->body.clone_into(a);
+}
+
+@typehooks on Doc {
+    .destroy = Doc_destroy,
+};
+
+@typeview Measure on Doc {
+    r: len, span;
+};
+
+static size_t measure_len(@typeview(Measure) Doc* m) {
+    /* m->replace(...) is ill-formed — not in Measure */
+    return m->len();
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    Doc d = {0} @destroy;
+    d.from_view(@slice("hello")) !>;
+    println(@string(`len=${d.len()}`, @scratch)) !>;
+
+    d.destroy();
+    d.from_view(@slice("ab")) !>;
+    println(@string(`reopen=${d.len()}`, @scratch)) !>;
+
+    d.from_view(@slice("x")) !>(e) {
+        println(@string(`live refused (len=${d.len()})`, @scratch)) !>;
+    };
+
+    char buf[4] = {'n', 'o', 'p', 'e'};
+    char[:] raw = cc_slice_from_buffer(buf, 4);
+    Doc d2 = {0} @destroy;
+    d2.from_view(raw) !>(e) {
+        println(@string(`untracked refused`, @scratch)) !>;
+    };
+
+    println(@string(`measure=${measure_len(&d)}`, @scratch)) !>;
+
+    char[:] note = d.copy_into(&d.analysis) !>;
+    println(@string(`analysis=${note.len}`, @scratch)) !>;
+
+    d.replace(@slice("too-long!")) !>(e) {
+        println(@string(`unchanged=${d.len()}`, @scratch)) !>;
+    };
+
+    d.replace(@slice("")) !>;
+    println(@string(`cleared=${d.len()}`, @scratch)) !>;
+    return 0;
+}

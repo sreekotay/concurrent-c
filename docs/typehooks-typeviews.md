@@ -513,7 +513,8 @@ form independently.
 
 - [Cheatsheet](cheatsheet.md) — destroy / UFCS one-liners
 - [Language concepts](language-concepts.md) — `@destroy` and ordinary UFCS
-- [Getting started](getting-started.md) — first program
+- [Getting started](getting-started.md) — first program; [faces at the use site](getting-started.md#locality-owned-or-view)
+- [recipe_owned_view.ccs](../examples/recipe_owned_view.ccs) — Measure may `len` / `span`, not `replace`
 - Spec: [type hooks](../spec/draft_typehooks.md),
   [type views](../spec/draft_facets.md),
   [type-owned registration](../spec/concurrent-c-spec-complete.md)
