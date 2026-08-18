@@ -110,21 +110,24 @@ static inline void cc_closure0_drop(CCClosure0 c) {
 #if defined(CC_PARSER_MODE)
     (void)c;
 #else
-    if (c.drop) c.drop(c.env);
+    if (c.drop) (c.drop)(c.env);
 #endif
 }
 static inline void cc_closure1_drop(CCClosure1 c) {
 #if defined(CC_PARSER_MODE)
     (void)c;
 #else
-    if (c.drop) c.drop(c.env);
+    if (c.drop) (c.drop)(c.env);
 #endif
 }
 static inline void cc_closure2_drop(CCClosure2 c) {
 #if defined(CC_PARSER_MODE)
     (void)c;
 #else
-    if (c.drop) c.drop(c.env);
+    /* Parenthesize the field: `c.drop(c.env)` is a UFCS site and rewrites
+     * to `cc_closureN_drop(&c, c.env)` when another header's call site
+     * makes the wrapper look like a real callee. */
+    if (c.drop) (c.drop)(c.env);
 #endif
 }
 

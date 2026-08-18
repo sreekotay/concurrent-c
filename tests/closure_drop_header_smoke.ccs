@@ -1,0 +1,12 @@
+#!ccc ccs
+/* Header lowering must not UFCS-rewrite `c.drop(c.env)` inside
+ * cc_closureN_drop to `cc_closureN_drop(&c, c.env)`. */
+#include <ccc/cc_runtime.cch>
+#include <string.h>
+
+int main(void) {
+    CCClosure2 c;
+    memset(&c, 0, sizeof(c));
+    cc_closure2_drop(c);
+    return 0;
+}

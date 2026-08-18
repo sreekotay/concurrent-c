@@ -6496,8 +6496,11 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                            cc__compose_scalar_ufcs_callee(wildcard_callee,
                                                           sizeof(wildcard_callee),
                                                           recv_type_base, method_name) &&
-                           (cc__ufcs_fn_name_in_text(src, n, wildcard_callee) ||
-                            cc_included_cch_contains_fn(wildcard_callee))) {
+                           (g_ufcs_header_lowering
+                                ? cc__included_cch_contains_fn_except(
+                                      wildcard_callee, g_ufcs_header_path)
+                                : (cc__ufcs_fn_name_in_text(src, n, wildcard_callee) ||
+                                   cc_included_cch_contains_fn(wildcard_callee)))) {
                     /* Scalar value receiver (`d.halve()`, `(1.5).halve()`):
                      * `cc_<mangled type>_<method>`, receiver by value. */
                     wildcard_like = 1;
@@ -13073,7 +13076,7 @@ static int cc__included_cch_contains_fn_except(const char* name, const char* exc
             continue;
         if (!cc__included_cch_text(h, &fn)) continue;
         slot = cc__path_text_cache_find(g_included_cch_sources[h]);
-        if (slot && cc__cache_has_callable(slot, name)) return 1;
+        if (slot && cc__cache_has_declare(slot, name)) return 1;
     }
     return 0;
 }
@@ -15717,9 +15720,12 @@ char* cc_rewrite_header_type_syntax_shared(const char* src,
        main preprocess pipeline for syntax that must not survive into plain C
        headers. Keep this intentionally limited to header-safe rewrites. */
     if (!cc_type_graph_ensure_global_cleared()) return NULL;
-    /* Isolated `.cch` → `.h` has no TU include ingest. Register imports
-     * (not this file) so Exclusive/Vec callees resolve without treating
-     * same-file wrappers as UFCS targets. */
+    /* Isolated `.cch` → `.h` has no TU include ingest. Drop leftovers
+     * from the previous header in this `lower_headers` process (readdir
+     * order is not stable across hosts), then register imports — not this
+     * file — so Exclusive/Vec callees resolve without treating same-file
+     * wrappers as UFCS targets. */
+    cc_reset_included_cch_sources();
     g_ufcs_header_path[0] = 0;
     if (input_path && input_path[0]) {
         if (!realpath(input_path, g_ufcs_header_path))
