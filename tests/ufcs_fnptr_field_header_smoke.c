@@ -215,7 +215,10 @@ int main(void) {
     rc |= check_stdlib_artifact();
 
     snprintf(cmd, sizeof(cmd), "rm -rf '%s'", dir);
-    (void)system(cmd);
+    {
+        int cleaned = system(cmd);
+        (void)cleaned;
+    }
 
     if (rc) return 1;
     printf("ufcs_fnptr_field_header_smoke ok\n");

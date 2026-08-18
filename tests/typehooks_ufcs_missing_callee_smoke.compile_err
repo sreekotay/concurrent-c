@@ -1,5 +1,4 @@
-# Host error at the call site. Snippet is the original p.gone(), not the
-# lowered port_gone(&p). Message still names the composed symbol.
-typehooks_ufcs_missing_callee_smoke.ccs:43
-undeclared function 'port_gone'
-    p.gone();
+# CC owns the miss: hook composed port_gone, which is not declared.
+typehooks_ufcs_missing_callee_smoke.ccs:43:
+error: type: no UFCS method 'gone' for receiver type 'Port'
+candidate port_gone (hook compose): not declared
