@@ -1,0 +1,25 @@
+#!ccc ccs
+#include "cch_typehooks_extract_face.cch"
+
+void ExtractFace_destroy(ExtractFace *t) {
+    (void)t;
+}
+
+void !>(CCError) ExtractFace_from_buffer(ExtractFace *t, char[:] bytes) {
+    if (!t) return cc_err(CC_ERR_INVALID_ARG, "null");
+    t->n = (int)bytes.len;
+    t->bytes = bytes;
+    return cc_ok();
+}
+
+size_t !>(ExtractFaceErr) ExtractFace_line_of(const ExtractFace *t, size_t offset) {
+    if (!t) return cc_err(extract_face_err("null"));
+    (void)offset;
+    return cc_ok(0);
+}
+
+char[:] ExtractFace_span(const ExtractFace *t, size_t from, size_t n) {
+    (void)from;
+    (void)n;
+    return t ? t->bytes : cc_slice_empty();
+}

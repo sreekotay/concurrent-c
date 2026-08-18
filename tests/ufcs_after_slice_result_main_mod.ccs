@@ -1,0 +1,30 @@
+#!ccc ccs
+#include "ufcs_after_slice_result.cch"
+#include <stdio.h>
+
+/* Non-static slice Result in this TU must not hide the extracted header's
+ * `T !>(E) Type_read_at` proto from family UFCS. */
+char[:] !>(CCError) UfcsAfterSliceBox_scratch_span(const UfcsAfterSliceBox *b,
+                                                  size_t n) {
+    (void)n;
+    if (!b) return cc_err(CC_ERR_INVALID_ARG, "null");
+    return cc_ok(cc_slice_empty());
+}
+
+static size_t !>(CCError) ufcs_after_slice_use(UfcsAfterSliceBox *b) {
+    char buf[1];
+    size_t got = b->read_at(buf, 1) !>(e) { return cc_err(e); };
+    return cc_ok(got);
+}
+
+int main(void) {
+    UfcsAfterSliceBox box = { .x = 7 };
+    @errhandler(CCError e) {
+        (void)e;
+        return 1;
+    }
+    size_t n = ufcs_after_slice_use(&box) !>;
+    if (n != 1) return 2;
+    printf("ok\n");
+    return 0;
+}

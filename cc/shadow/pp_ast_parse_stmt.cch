@@ -3980,6 +3980,41 @@ static AstNode* parse_enum_raw_stmt(Parser* p) {
     return n;
 }
 
+/* `@cache Type name = init [@destroy {…}];` — storage-class mark on a
+ * declaration. Sequential paths keep the one instance; a wait-for may
+ * instantiate extras. The mark is not a statement of its own. */
+static AstNode* parse_cache_decl(Parser* p) {
+    AstNode* n;
+    Token at;
+    if (!tok_eq(p_peek(p), TK_PUNCT, "@")) return NULL;
+    if (p->i + 1 >= p->n || shadow_kw(p->toks[p->i + 1]) != SHADOW_KW_CACHE)
+        return NULL;
+    p_next(p); /* @ */
+    at = p_next(p); /* cache */
+    n = parse_val_destroy(p);
+    if (n || p->err) {
+        if (n) n->is_cache = 1;
+        return n;
+    }
+    n = parse_typed_init(p);
+    if (n || p->err) {
+        if (n) n->is_cache = 1;
+        return n;
+    }
+    n = parse_ptr_init(p);
+    if (n || p->err) {
+        if (n) n->is_cache = 1;
+        return n;
+    }
+    n = parse_var_decl(p);
+    if (n || p->err) {
+        if (n) n->is_cache = 1;
+        return n;
+    }
+    parser_fail(p, at, "@cache must precede a declaration");
+    return NULL;
+}
+
 static AstNode* parse_stmt_inner(Parser* p) {
     Token t = p_peek(p);
     if (t.kind == TK_EOF) return NULL;
@@ -4053,6 +4088,10 @@ static AstNode* parse_stmt_inner(Parser* p) {
         n = parse_with_deadline(p);
         if (n || p->err) return n;
         n = parse_parallel(p);
+        if (n || p->err) return n;
+        n = parse_stage(p);
+        if (n || p->err) return n;
+        n = parse_cache_decl(p);
         if (n || p->err) return n;
         /* `@string(...).println() !>;` before bare `@string` AT_STMT. */
         n = parse_ufcs_stmt(p);
@@ -4173,9 +4212,27 @@ static AstNode* parse_stmt_inner(Parser* p) {
     return NULL;
 }
 
+/* Stage2 marker for `#pragma(@parallel) off|on` — positional, so it is
+ * consumed exactly where the pragma sat in the source. */
+static int parse_parallel_pragma_marker(Parser* p) {
+    Token t = p_peek(p);
+    if (t.kind != TK_IDENT) return 0;
+    if (tok_eq(t, TK_IDENT, "__cc_pragma_parallel_off"))
+        p->parallel_off = 1;
+    else if (tok_eq(t, TK_IDENT, "__cc_pragma_parallel_on"))
+        p->parallel_off = 0;
+    else
+        return 0;
+    p_next(p);
+    return 1;
+}
+
 static AstNode* parse_stmt(Parser* p) {
-    int start = p->i;
-    AstNode* n = parse_stmt_inner(p);
+    int start;
+    AstNode* n;
+    if (parse_parallel_pragma_marker(p)) return ast_new(p, AST_RAW_LINE);
+    start = p->i;
+    n = parse_stmt_inner(p);
     if (n) shadow_attach_lead(p, n, start);
     return n;
 }

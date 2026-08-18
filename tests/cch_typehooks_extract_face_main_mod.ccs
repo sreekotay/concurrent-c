@@ -1,0 +1,36 @@
+#!ccc ccs
+#include "cch_typehooks_extract_face.cch"
+#include <stdio.h>
+
+/* Extracted typehooks face: string-lit arg must wrap as char[:], and
+ * `!>` must bind ExtractFaceErr (not ambient CCError). `unique_tag` is
+ * only on that E — a CCError binder fails host-cc. */
+static size_t !>(ExtractFaceErr) extract_face_probe(ExtractFace *t) {
+    size_t ln = t->line_of(0) !>(e) {
+        (void)e.unique_tag;
+        return cc_err(e);
+    };
+    return cc_ok(ln);
+}
+
+int main(void) {
+    ExtractFace t = {0};
+    @errhandler(CCError e) {
+        (void)e;
+        return 1;
+    }
+    t.from_buffer("ab") !>;
+    if (t.n != 2) return 2;
+    @errhandler(ExtractFaceErr e) {
+        (void)e.unique_tag;
+        return 3;
+    }
+    size_t ln = t.line_of(0) !>;
+    if (ln != 0) return 4;
+    ln = extract_face_probe(&t) !>;
+    if (ln != 0) return 6;
+    char[:] s = t.span(0, 2);
+    if (s.len != 2) return 5;
+    printf("ok\n");
+    return 0;
+}

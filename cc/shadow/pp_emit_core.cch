@@ -937,6 +937,10 @@ typedef struct {
      * (`__cc_scratch_cpN`). Soft-return / break / continue restore these
      * before leaving — fallthrough still pops via shadow_scratch_cp_pop. */
     int scratch_cp_depth;
+    /* Inside a '@parallel wait for' body: 1 = sequential denial path,
+     * 2 = per-ticket run. @stage is only legal when nonzero and only
+     * tracks its passed-flag in mode 2. */
+    int pw_body;
 } ShadowCtx;
 
 enum { SHADOW_SCRATCH_CP_MAX = 16 };
@@ -1031,10 +1035,55 @@ static int shadow_rfn_index(const char* name) {
     return n == 1 ? hit : -1;
 }
 
+extern int cc_result_fn_registry_get_err_type(const char* name, size_t name_len,
+                                              char* out_buf, size_t out_sz);
+extern const char* cc_result_fn_registry_name_at(size_t i);
+extern const char* cc_result_fn_registry_err_type_at(size_t i);
+extern const char* cc_result_fn_registry_result_type_at(size_t i);
+extern size_t cc_result_fn_registry_count(void);
+
+static char g_shadow_rfn_hdr_err[64];
+
+/* Extracted `.cch` Result protos are not AST_RESULT_FN. The driver scan
+ * of included / lowered-local headers still recorded their E. */
+static const char* shadow_rfn_err_from_hdr(const char* name) {
+    size_t k, n, nlen, hits;
+    const char* hit;
+    if (!name || !name[0]) return NULL;
+    if (cc_result_fn_registry_get_err_type(name, strlen(name),
+                                           g_shadow_rfn_hdr_err,
+                                           sizeof(g_shadow_rfn_hdr_err)) &&
+        g_shadow_rfn_hdr_err[0])
+        return g_shadow_rfn_hdr_err;
+    nlen = strlen(name);
+    n = cc_result_fn_registry_count();
+    hits = 0;
+    hit = NULL;
+    for (k = 0; k < n; k++) {
+        const char* rn = cc_result_fn_registry_name_at(k);
+        size_t rlen;
+        const char* e;
+        if (!rn || !rn[0]) continue;
+        rlen = strlen(rn);
+        if (rlen <= nlen + 1 || rn[rlen - nlen - 1] != '_' ||
+            strcmp(rn + rlen - nlen, name) != 0)
+            continue;
+        e = cc_result_fn_registry_err_type_at(k);
+        if (!e || !e[0]) continue;
+        hits++;
+        hit = e;
+    }
+    if (hits == 1 && hit) {
+        snprintf(g_shadow_rfn_hdr_err, sizeof(g_shadow_rfn_hdr_err), "%s", hit);
+        return g_shadow_rfn_hdr_err;
+    }
+    return NULL;
+}
+
 static const char* shadow_rfn_err(const char* name) {
     int i = shadow_rfn_index(name);
     if (i >= 0 && g_shadow_rfns[i].err[0]) return g_shadow_rfns[i].err;
-    return NULL;
+    return shadow_rfn_err_from_hdr(name);
 }
 
 static int shadow_rfn_ok(const char* name, char* ok, size_t cap) {
@@ -2930,7 +2979,8 @@ static int g_shadow_nginst;
  * stack arena). No fixed CAP. Lexical unwind is g_shadow_nbinds = mark. */
 enum {
     SHADOW_BIND_ARRAY = 1,
-    SHADOW_BIND_ATOMIC = 2
+    SHADOW_BIND_ATOMIC = 2,
+    SHADOW_BIND_CACHE = 4
 };
 typedef struct ShadowBind {
     char name[64];
@@ -2940,6 +2990,9 @@ typedef struct ShadowBind {
 static ShadowBind** g_shadow_binds;
 static int g_shadow_nbinds;
 static int g_shadow_binds_cap;
+enum { SHADOW_CACHE_DECL_CAP = 16 };
+static AstNode* g_shadow_cache_decl[SHADOW_CACHE_DECL_CAP];
+static int g_shadow_ncache_decl;
 /* When set, shadow_bind_name is a no-op (TU prepass still walks fn bodies for
  * type/generic registration without polluting the name→type map). */
 static int g_shadow_binds_frozen;
@@ -4171,6 +4224,7 @@ static void shadow_field_register_raw(const char* ty, const char* span) {
 }
 
 static int shadow_ufn_exists(const char* name);
+static int shadow_ufcs_callee_declared(const char* name);
 static const char* shadow_ufn_unique_for_meth(const char* meth);
 static void shadow_as_register(const char* outer, const char* field,
                                const char* target);
@@ -4334,11 +4388,11 @@ static int shadow_family_accepts(const char* base, const char* method) {
     if (shadow_family_has_member(base, method)) return 1;
     if (!base || !method || !method[0]) return 0;
     snprintf(composed, sizeof(composed), "%s_%s", base, method);
-    if (shadow_ufn_exists(composed)) return 1;
+    if (shadow_ufcs_callee_declared(composed)) return 1;
     /* Slice extensions often spell cc_slice_<elem>_<meth>. */
     if (strncmp(base, "CCSlice_", 8) == 0) {
         snprintf(ext, sizeof(ext), "cc_slice_%s_%s", base + 8, method);
-        if (shadow_ufn_exists(ext)) return 1;
+        if (shadow_ufcs_callee_declared(ext)) return 1;
     }
     return 0;
 }
@@ -4474,6 +4528,7 @@ static void shadow_chan_reset(void) {
     g_shadow_ngfac = 0;
     g_shadow_nginst = 0;
     g_shadow_nbinds = 0;
+    g_shadow_ncache_decl = 0;
     g_shadow_nrfns = 0;
     g_shadow_binds_frozen = 0;
     g_shadow_ncap_binds = 0;
@@ -5173,6 +5228,17 @@ extern int cc_included_cch_declares_fn(const char* name);
 extern int cc_lowered_local_declares_fn(const char* name);
 extern int cc_included_cch_fn_first_param(const char* name, char* out,
                                           size_t out_sz);
+extern int cc_included_cch_fn_param(const char* name, int argi, char* out,
+                                    size_t out_sz);
+extern int cc_result_fn_registry_get_err_type(const char* name, size_t name_len,
+                                              char* out_buf, size_t out_sz);
+extern int cc_result_fn_registry_get_result_type(const char* name,
+                                                 size_t name_len, char* out_buf,
+                                                 size_t out_sz);
+extern const char* cc_result_fn_registry_name_at(size_t i);
+extern const char* cc_result_fn_registry_err_type_at(size_t i);
+extern const char* cc_result_fn_registry_result_type_at(size_t i);
+extern size_t cc_result_fn_registry_count(void);
 extern size_t cc_included_cch_source_count(void);
 extern const char* cc_included_cch_source_path(size_t i);
 extern size_t cc_lowered_local_header_count(void);
@@ -6387,6 +6453,17 @@ static int shadow_ufn_exists(const char* name) {
            NULL;
 }
 
+/* TU harvest or a header prototype/definition. Family compose for a
+ * linked-TU method is `Type_meth` in the .cch — that is a declare, not a
+ * static inline wrapper. */
+static int shadow_ufcs_callee_declared(const char* name) {
+    if (!name || !name[0]) return 0;
+    if (shadow_ufn_exists(name)) return 1;
+    if (cc_included_cch_declares_fn(name)) return 1;
+    if (cc_lowered_local_declares_fn(name)) return 1;
+    return 0;
+}
+
 static const char* shadow_ufn_first_ty(const char* name) {
     ShadowUfcsFn* fn;
     if (!name || !name[0]) return NULL;
@@ -6517,7 +6594,7 @@ static int shadow_td_alias_ufn_meth(const char* tag, const char* meth,
     if (strncmp(t, "struct ", 7) == 0) t += 7;
     while (*t == ' ' || *t == '\t') t++;
     snprintf(tryc, sizeof(tryc), "%s_%s", t, meth);
-    if (shadow_ufn_exists(tryc)) {
+    if (shadow_ufcs_callee_declared(tryc)) {
         snprintf(out, cap, "%s", tryc);
         return 1;
     }
@@ -6535,7 +6612,7 @@ static int shadow_td_alias_ufn_meth(const char* tag, const char* meth,
             (strcmp(base, t) != 0 && strcmp(g_shadow_td_base[i], tag) != 0))
             continue;
         snprintf(tryc, sizeof(tryc), "%s_%s", g_shadow_td_alias[i], meth);
-        if (shadow_ufn_exists(tryc)) {
+        if (shadow_ufcs_callee_declared(tryc)) {
             snprintf(out, cap, "%s", tryc);
             return 1;
         }

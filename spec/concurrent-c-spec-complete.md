@@ -306,6 +306,10 @@ bugs.
 | `@parallel seq (cond) { arms }` | Same join; named sequential denial (§8.11.5)              | `@parallel seq (use_par) { a = f(); b = g(); }` |
 | `@parallel [seq (cond)] wait (ts) for` | Ordered spawn loop over a turnstile (§8.11.6)      | `@parallel wait (ts) for (i in 0..n) { step(i) !>; }` |
 | `@serial { stmts }`             | Multi-statement arm of `@parallel { }` (§8.11.2)          | `@serial { int t = f(); a = t; }`          |
+| `worker (w)`                    | Wait-for binder: the runner slot index (§8.11.6)          | `wait (ts) for (i in 0..n) worker (w) { z[w]… }` |
+| `@cache Type name = init;`      | Warm scratch: exclusive per ticket, instance unobservable (§8.11.6) | `@cache ZState zs = {0} @destroy { … };` |
+| `@stage (gate, args…) { stmts }` | Ordered section in a wait-for body; pass on all exits (§8.11.6) | `@stage (ts.write, i) { out.write(d) !>; }` |
+| `#pragma(@parallel) off` / `on` | Static denial: `@parallel` lowers sequentially (§8.11.8)  | `#pragma(@parallel) off`                   |
 
 **Call-site annotation forms** (see §8.2 for precedence):
 
@@ -5274,9 +5278,15 @@ Iterations must not race. Disjoint writes (`img[y * w + x] = …` for distinct `
 
 The optional `seq (cond)` prefix composes: when `cond` is false the same body runs as a plain sequential `for` on the caller, with no `enter`/`leave` and no spawn. The construct also takes this path when it cannot allocate its join scope. Stage `wait`/`pass` calls in the body degrade to no-ops against a never-entered turnstile, so one body serves both schedules.
 
-Body statements may raise with `!>`. Errors are stop-starting: the first failure stops new tickets from entering, in-flight iterations finish, and after the brace the error of the lowest failing ticket re-raises into the innermost `@errhandler` for `CCError` — which must be in scope, on both schedules. A failed `enter` takes no token and joins the same way. Because an entered successor is parked in `wait(i+1)` until `pass(i)`, an entered ticket must discharge every stage pass on every path, including error exits; a fallible body does this in a helper whose `@defer(err)` passes the stages not yet passed. `@defer` and `@errhandler` at the top level of the body are ill-formed; they belong in a helper or outside the loop.
+An optional `worker (name)` after the range binds `name` as an `int`: the index of the runner slot executing the ticket, in `[0, cap)`. Two live tickets never share a slot. Like the loop variable, the binder is a per-ticket value, not a capture. On every sequential path it binds `0`. `worker` without `wait` is ill-formed. The surface idiom for reusable per-ticket scratch is `@cache`, not an index.
 
-The loop-carried case is the point: state that hops from ticket `i` to `i+1` (a chained compression dictionary, a running checksum, an output file position) sits between `wait(k, i)` and `pass(k, i)` in the body and reads exactly as it does in the sequential loop. The parallel run and the denied run produce the same output.
+`@cache Type name = init;` is a storage-class mark on a declaration in the enclosing scope. Each ticket gets exclusive use of an instance of `Type` whose contents are the initializer (cold) or the state some earlier ticket left (warm). Which instance a ticket gets is unobservable. Sequential paths, including `seq` denial and `#pragma(@parallel) off`, keep the one declared instance — deleting the mark leaves the serial program. A wait-for may instantiate additional copies, up to the turnstile cap; it runs the initializer on each extra and the declaration's `@destroy` on each extra at join. After the construct the declared name holds some instance's state — unspecified which. `@cache` on a non-declaration is ill-formed.
+
+Body statements may raise with `!>`. Errors are stop-starting: the first failure stops new tickets from entering, in-flight iterations finish, and after the brace the error of the lowest failing ticket re-raises into the innermost `@errhandler` for `CCError` — which must be in scope, on both schedules. A failed `enter` takes no token and joins the same way. Because an entered successor is parked in `wait(i+1)` until `pass(i)`, an entered ticket must discharge every stage pass on every path, including error exits. `@defer` and `@errhandler` at the top level of the body are ill-formed; the structural form of the discharge is `@stage`.
+
+`@stage (gate, args…) { … }` is a statement inside a wait-for body: `gate.wait(args…)`, the block, `gate.pass(args…)`. `gate` is spelled as the receiver the calls apply to — `ts.read`, `ts.write`, a `CCTurnstile` with the stage index in `args` (`@stage (t, k, i)`), or a pointer to either. Each `@stage` is a ticket-scoped handshake: `enter(i)` has already armed `i+1` on every stage of the gate, so a successor may `wait` that stage before this ticket reaches the block. The construct guarantees the pass on every exit of the ticket — a ticket that leaves through the error path first passes every `@stage` it has not passed, in source order — so parked successors always run. Work inside the block may be empty or guarded (`if (chain) { … }`); the handshake still happens. The `@stage` itself is a top-level statement of the wait-for body — nested in `if`, a loop, or another `@stage` is ill-formed. Inside the block the ticket is ordered and exclusive for that stage — loop-carried state reads as it does in the sequential loop. `@stage` outside a wait-for body is ill-formed. A raise inside the block exits the ticket; the pass still happens.
+
+The loop-carried case is the point: state that hops from ticket `i` to `i+1` (a chained compression dictionary, a running checksum, an output file position) sits in an `@stage` block in the body and reads exactly as it does in the sequential loop. The parallel run and the denied run produce the same output.
 
 #### 8.11.7 Grain and limits
 
@@ -5286,6 +5296,18 @@ The range bounds of `@parallel for` are converted to `int`. A span whose length 
 
 An implementation may reject a function that exceeds a finite number of `@parallel` statements, assignment arms, or captured names. The first arm of an assignment join always runs on the caller.
 
+#### 8.11.8 `#pragma(@parallel)` — static denial
+
+```c
+#pragma(@parallel) off
+…                        /* @parallel here lowers sequentially */
+#pragma(@parallel) on
+```
+
+`#pragma(@parallel) off` makes every `@parallel` construct that follows it lower to its sequential form: join arms run in source order on the caller frame, `for` and `wait for` are plain loops, and no task, environment, or scheduler call is emitted — the compiled function is the linear program. `on` restores the parallel lowering. The toggle is positional: it applies from the directive to the next toggle or the end of the translation unit, at file scope or statement position.
+
+Where `seq (cond)` is the runtime denial — one body, two schedules, chosen by a flag — the pragma is the compile-time denial. Under `off` a `seq`/gated predicate is not evaluated: the annotation is inert, and the program is the loop as written. `worker` binders bind `0`; `@stage` blocks emit their `wait`/`pass` calls, which degrade to no-ops against the never-entered turnstile. A wait-for under `off` has no re-raise edge, so it does not require a `CCError` handler in scope. Any operand other than `off` or `on` is ill-formed. The directive is consumed by the lowering and never reaches the host compiler.
+
 **Grammar (normative, minus whitespace).**
 
 ```
@@ -5293,7 +5315,8 @@ parallel_stmt ::= '@parallel' parallel_join
                |  '@parallel' '(' pred ')' parallel_join
                |  '@parallel' 'seq' '(' pred ')' parallel_join
                |  '@parallel' [ 'seq' '(' pred ')' ] 'wait' '(' ident ')'
-                  'for' '(' ident 'in' expr '..' expr ')' block
+                  'for' '(' ident 'in' expr '..' expr ')'
+                  [ 'worker' '(' ident ')' ] block
                |  '@parallel' 'for' '(' ident 'in' expr '..' expr ')' block
 
 parallel_join ::= '{' parallel_arm parallel_arm+ '}'
@@ -5302,9 +5325,13 @@ parallel_arm  ::= ident '=' expr ';'
                |  serial_arm
 
 serial_arm    ::= '@serial' '{' stmt+ '}'
+
+stage_stmt    ::= '@stage' '(' expr { ',' expr } ')' block
+
+cache_decl    ::= '@cache' declaration
 ```
 
-`pred` is a nonempty expression. `seq` and `wait` are contextual words after `@parallel`, not keywords elsewhere. The `wait` ident names a `CCTurnstile` or `CCTurnstileRW` in scope. `ident` on an assignment arm, and the unique simple outer name assigned by a `serial_arm`, are names already in scope. `serial_arm` is a `parallel_arm` only.
+`pred` is a nonempty expression. `seq`, `wait`, and `worker` are contextual words after `@parallel`, not keywords elsewhere. The `wait` ident names a `CCTurnstile` or `CCTurnstileRW` in scope. `ident` on an assignment arm, and the unique simple outer name assigned by a `serial_arm`, are names already in scope. `serial_arm` is a `parallel_arm` only. In `stage_stmt` the first expression is the gate receiver; the rest are the `wait`/`pass` arguments. `stage_stmt` is a top-level statement of a wait-for body only — not nested in `if`, a loop, or another `@stage`. Work inside the block may be guarded. `cache_decl` is a declaration of the enclosing scope; the mark is a storage class, not a statement of the wait-for body.
 
 ---
 

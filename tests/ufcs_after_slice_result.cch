@@ -1,0 +1,20 @@
+#ifndef TESTS_UFCS_AFTER_SLICE_RESULT_CCH
+#define TESTS_UFCS_AFTER_SLICE_RESULT_CCH
+
+#include <ccc/std/prelude.cch>
+
+typedef struct UfcsAfterSliceBox {
+    int x;
+} UfcsAfterSliceBox;
+
+size_t !>(CCError) UfcsAfterSliceBox_read_at(const UfcsAfterSliceBox *b,
+                                            char *dest, size_t n);
+char[:] !>(CCError) UfcsAfterSliceBox_scratch_span(const UfcsAfterSliceBox *b,
+                                                  size_t n);
+void UfcsAfterSliceBox_destroy(UfcsAfterSliceBox *b);
+
+@typehooks on UfcsAfterSliceBox {
+    .destroy = UfcsAfterSliceBox_destroy,
+};
+
+#endif

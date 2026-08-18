@@ -81,7 +81,9 @@ typedef enum {
     SHADOW_KW_ENUM,
     SHADOW_KW_SWITCH,
     SHADOW_KW_PARALLEL,
-    SHADOW_KW_SERIAL
+    SHADOW_KW_SERIAL,
+    SHADOW_KW_STAGE,
+    SHADOW_KW_CACHE
 } ShadowKwKind;
 
 typedef struct {
@@ -132,6 +134,8 @@ typedef struct {
         { "switch", { SHADOW_KW_SWITCH } },
         { "parallel", { SHADOW_KW_PARALLEL } },
         { "serial", { SHADOW_KW_SERIAL } },
+        { "stage", { SHADOW_KW_STAGE } },
+        { "cache", { SHADOW_KW_CACHE } },
     };
     static_map("shadow_kw", shadow_kw_entries, CC_STATIC_MAP_CASE_SENSITIVE);
 }
@@ -259,6 +263,10 @@ typedef enum {
     AST_PARALLEL_FOR,
     /* @serial { stmts } — arm of @parallel { }; a=simple outer dest name */
     AST_SERIAL,
+    /* @stage (gate, args…) { stmts } — gate.wait(args); stmts; gate.pass(args);
+     * with pass guaranteed on the wait-for error path. a=gate receiver text,
+     * b=trailing args text; body=stmts. Top-level of a wait-for body only. */
+    AST_STAGE,
     /* name++; — a=name */
     AST_INC,
     /* typedef struct Tag { fields } Alias; — a=tag|"" b=alias; kids=fields
@@ -313,6 +321,15 @@ struct AstNode {
     char e[2048];
     /* Sixth slot for composite forms (@parallel seq+wait: e=gate, f=seq). */
     char f[512];
+    /* Wait-for `worker (name)` binder — per-ticket pool slot index. */
+    char g[64];
+    /* Parsed under `#pragma(@parallel) off`: lower to the sequential
+     * denial path only — no thunks, no envs, no scheduler. */
+    int forced_seq;
+    /* `@cache` on a declaration: contents are cold (the initializer) or
+     * warm (an earlier iteration's leavings); which instance a ticket
+     * sees is unobservable. Sequential paths keep the one instance. */
+    int is_cache;
     /* Attachment roles (never mix):
      *   kids  — open parent lists (fn/struct members still being filled)
      *   body  — nested stmt lists (block / if / loop / bang bodies)
@@ -360,6 +377,9 @@ typedef struct {
     unsigned pending_fn_attrs; /* @noblock/@blocking before fn decl */
     /* 1 = parse_stmt returns NULL on miss without parser_fail (static-fn soft). */
     int soft_stmt;
+    /* `#pragma(@parallel) off` seen (stage2 marker token): @parallel
+     * constructs parsed while set lower serially (forced_seq). */
+    int parallel_off;
     int own_storage; /* 1 if nodes/kids/tu were calloc'd by ensure_storage */
 } Parser;
 
@@ -1154,6 +1174,7 @@ static AstNode* parse_switch_stmt(Parser* p);
 static AstNode* parse_at_stmt(Parser* p);
 static AstNode* parse_with_deadline(Parser* p);
 static AstNode* parse_parallel(Parser* p);
+static AstNode* parse_stage(Parser* p);
 static AstNode* parse_inc(Parser* p);
 static AstNode* parse_async_fn(Parser* p);
 static AstNode* parse_static_var(Parser* p);

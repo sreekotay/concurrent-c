@@ -1,0 +1,13 @@
+/* Chapter: types come from the including .ccs only. No priv include. */
+static int cch_chapter_node_x(const CchChapterNode *n) {
+    return n ? n->x : -1;
+}
+
+static size_t !>(CchChapterErr) cch_chapter_line(const CchChapterNode *n) {
+    if (!n) {
+        CchChapterErr e;
+        e.message = "null";
+        return cc_err(e);
+    }
+    return cc_ok((size_t)n->x);
+}

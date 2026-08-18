@@ -1,0 +1,16 @@
+/* Quoted chapter .cch after a TU typedef must see that type (include stays
+ * in source order; a pass_inc hoist puts the lowered .h above the typedef). */
+#include <stdio.h>
+
+typedef struct {
+    int x;
+} CchAfterTuNode;
+
+#include "cch_after_tu_type.cch"
+
+int main(void) {
+    CchAfterTuNode n = { .x = 9 };
+    if (cch_after_tu_node_x(&n) != 9) return 1;
+    printf("ok\n");
+    return 0;
+}

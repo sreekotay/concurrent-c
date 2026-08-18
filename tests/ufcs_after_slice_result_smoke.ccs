@@ -1,0 +1,42 @@
+/* A non-static char[:] !>(E) in the TU must not drop family UFCS later
+ * (t->read_at / Type_read_at "not declared"). */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include "ufcs_after_slice_result.cch"
+
+size_t !>(CCError) UfcsAfterSliceBox_read_at(const UfcsAfterSliceBox *b,
+                                            char *dest, size_t n) {
+    if (!b) return cc_err(CC_ERR_INVALID_ARG, "null");
+    if (!dest || n == 0) return cc_ok(0);
+    dest[0] = (char)('0' + (b->x % 10));
+    return cc_ok(1);
+}
+
+char[:] !>(CCError) UfcsAfterSliceBox_scratch_span(const UfcsAfterSliceBox *b,
+                                                  size_t n) {
+    (void)n;
+    if (!b) return cc_err(CC_ERR_INVALID_ARG, "null");
+    return cc_ok(cc_slice_empty());
+}
+
+void UfcsAfterSliceBox_destroy(UfcsAfterSliceBox *b) {
+    (void)b;
+}
+
+static size_t !>(CCError) ufcs_after_slice_use(UfcsAfterSliceBox *b) {
+    char buf[1];
+    size_t got = b->read_at(buf, 1) !>(e) { return cc_err(e); };
+    return cc_ok(got);
+}
+
+int main(void) {
+    UfcsAfterSliceBox box = { .x = 7 };
+    @errhandler(CCError e) {
+        (void)e;
+        return 1;
+    }
+    size_t n = ufcs_after_slice_use(&box) !>;
+    if (n != 1) return 2;
+    printf("ok\n");
+    return 0;
+}

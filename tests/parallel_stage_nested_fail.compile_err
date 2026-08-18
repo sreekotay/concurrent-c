@@ -1,0 +1,1 @@
+@stage must be a top-level statement of a '@parallel wait for' body

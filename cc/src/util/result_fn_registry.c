@@ -268,6 +268,16 @@ static size_t cc__scan_back_type_start(const char* s, size_t end) {
     return i;
 }
 
+const char* cc_result_fn_registry_name_at(size_t i) {
+    if (i >= g_result_fn_meta.len) return NULL;
+    return g_result_fn_meta.names[i];
+}
+
+const char* cc_result_fn_registry_err_type_at(size_t i) {
+    if (i >= g_result_fn_meta.len) return NULL;
+    return g_result_fn_meta.err_types[i];
+}
+
 /* Enumerate the concrete `CCResult_T_E` names seen in scanned declarations.
  * These come from headers this TU actually includes, so naming one in a
  * `_Generic` arm is safe by construction. */

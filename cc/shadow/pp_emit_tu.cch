@@ -483,6 +483,96 @@ static int shadow_seen_result_add(char seen_ok[][128], char seen_err[][128],
     return 1;
 }
 
+/* CC_DECL_RESULT_SPEC needs a complete Err type. Do not emit this at the
+ * top of the TU — a quoted header that defines E may still be an item. */
+/* Ok/E that stdlib headers already make complete. Seeded `__cc_uw_*`
+ * arms (int64_t+CCError, int+CCIoError, …) must exist before any `!>`
+ * use; TU unique-E still waits for the first AST_RESULT_FN. */
+static int shadow_result_pair_is_prelude(const char* ok, const char* err) {
+    static const char* oks[] = {"int",     "bool",     "char",    "size_t",
+                                "int64_t", "uint64_t", "void",    "voidptr",
+                                "charptr", NULL};
+    int i;
+    if (!ok || !ok[0] || !err || !err[0]) return 0;
+    if (strcmp(err, "CCError") != 0 && strcmp(err, "CCIoError") != 0)
+        return 0;
+    for (i = 0; oks[i]; i++) {
+        if (strcmp(ok, oks[i]) == 0) return 1;
+    }
+    return 0;
+}
+
+static int shadow_emit_collected_result_specs(CEmit* out,
+                                              char seen_ok[][128],
+                                              char seen_err[][128],
+                                              int nseen, int prelude_only) {
+    int i;
+    if (!out || nseen < 0) return 0;
+    if (nseen && !cemit_str(out, "\n")) return 0;
+    for (i = 0; i < nseen; i++) {
+        char rname[256];
+        if (prelude_only &&
+            !shadow_result_pair_is_prelude(seen_ok[i], seen_err[i]))
+            continue;
+        shadow_result_name(seen_ok[i], seen_err[i], rname, sizeof(rname));
+        /* Stdlib already defines these (cc_io_error.h) without *_DEFINED. */
+        if (strcmp(seen_ok[i], "bool") == 0 &&
+            strcmp(seen_err[i], "CCIoError") == 0)
+            continue;
+        /* Real layout + typed ctors when cc_result.h provided CC_DECL_RESULT_SPEC.
+         * Void ok uses SPEC_VOID (no `void value` field). Split across cemit_fmt
+         * calls (512-byte temp). */
+        if (strcmp(seen_ok[i], "void") == 0) {
+            if (!cemit_fmt(out,
+                    "#ifndef %s_DEFINED\n#define %s_DEFINED 1\n"
+                    "#ifdef CC_DECL_RESULT_SPEC_VOID\n"
+                    "CC_DECL_RESULT_SPEC_VOID(%s, %s)\n#else\n",
+                    rname, rname, rname, seen_err[i]))
+                return 0;
+            {
+                ShadowTplBind renv[3];
+                renv[0] = (ShadowTplBind){ "rname", SHADOW_TPL_IDENT, rname };
+                renv[1] = (ShadowTplBind){ "ok_ty", SHADOW_TPL_IDENT, "void" };
+                renv[2] =
+                    (ShadowTplBind){ "err_ty", SHADOW_TPL_IDENT, seen_err[i] };
+                if (!shadow_tpl_emit(out, k_tpl_result_spec_void, renv, 3))
+                    return 0;
+            }
+            if (!cemit_fmt(out,
+                    "static inline %s cc_ok_%s(void) {"
+                    " %s r; r.ok = 1; return r; }\n"
+                    "static inline %s cc_err_%s(%s e) {"
+                    " %s r; r.ok = 0; r.u.error = e; return r; }\n"
+                    "#endif\n#endif\n",
+                    rname, rname, rname, rname, rname, seen_err[i], rname))
+                return 0;
+            continue;
+        }
+        if (!cemit_fmt(out,
+                "#ifndef %s_DEFINED\n#define %s_DEFINED 1\n"
+                "#ifdef CC_DECL_RESULT_SPEC\n"
+                "CC_DECL_RESULT_SPEC(%s, %s, %s)\n#else\n",
+                rname, rname, rname, seen_ok[i], seen_err[i]))
+            return 0;
+        {
+            ShadowTplBind renv[3];
+            renv[0] = (ShadowTplBind){ "rname", SHADOW_TPL_IDENT, rname };
+            renv[1] = (ShadowTplBind){ "ok_ty", SHADOW_TPL_IDENT, seen_ok[i] };
+            renv[2] = (ShadowTplBind){ "err_ty", SHADOW_TPL_IDENT, seen_err[i] };
+            if (!shadow_tpl_emit(out, k_tpl_result_spec_value, renv, 3))
+                return 0;
+        }
+        if (!cemit_fmt(out,
+                "static inline %s cc_err_%s(%s e) {"
+                " %s r; r.ok = 0; r.u.error = e; return r; }\n"
+                "#endif\n#endif\n",
+                rname, rname, seen_err[i], rname))
+            return 0;
+    }
+    if (nseen && !cemit_str(out, "\n")) return 0;
+    return 1;
+}
+
 static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                        ShadowEmitKind kind, char pass_inc[][256], int npass_inc,
                        char pass_def[][512], int npass_def,
@@ -658,6 +748,7 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
     int hoist_typedefs = 0;
     int has_result_hdr = 0;
     int need_uw = 0;
+    int specs_emitted = 0;
 
     for (int i = 0; i < n; i++) {
         if (items[i]->kind == AST_RESULT_FN || items[i]->kind == AST_RESULT_LOCAL) {
@@ -794,6 +885,12 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
                 }
                 if (need_io &&
                     !cemit_str(out, "#include <ccc/cc_io_error.h>\n"))
+                    return 0;
+                /* as: Io→CCError arms `CCResult_*_CCIoError` in `__cc_uw_*`.
+                 * Declare those specs (and int64_t+CCError) before the
+                 * macros; unique-E stays delayed. */
+                if (!shadow_emit_collected_result_specs(out, seen_ok, seen_err,
+                                                        nseen, 1))
                     return 0;
             }
             if (!cemit_str(out,
@@ -1812,65 +1909,8 @@ ginst_emit_pass:
             has_result_hdr = 1;
         }
     }
-    if (nseen && !cemit_str(out, "\n")) return 0;
-    for (int i = 0; i < nseen; i++) {
-        char rname[256];
-        shadow_result_name(seen_ok[i], seen_err[i], rname, sizeof(rname));
-        /* Stdlib already defines these (cc_io_error.h) without *_DEFINED. */
-        if (strcmp(seen_ok[i], "bool") == 0 &&
-            strcmp(seen_err[i], "CCIoError") == 0)
-            continue;
-        /* Real layout + typed ctors when cc_result.h provided CC_DECL_RESULT_SPEC.
-         * Void ok uses SPEC_VOID (no `void value` field). Split across cemit_fmt
-         * calls (512-byte temp). */
-        if (strcmp(seen_ok[i], "void") == 0) {
-            if (!cemit_fmt(out,
-                    "#ifndef %s_DEFINED\n#define %s_DEFINED 1\n"
-                    "#ifdef CC_DECL_RESULT_SPEC_VOID\n"
-                    "CC_DECL_RESULT_SPEC_VOID(%s, %s)\n#else\n",
-                    rname, rname, rname, seen_err[i]))
-                return 0;
-            {
-                ShadowTplBind renv[3];
-                renv[0] = (ShadowTplBind){ "rname", SHADOW_TPL_IDENT, rname };
-                renv[1] = (ShadowTplBind){ "ok_ty", SHADOW_TPL_IDENT, "void" };
-                renv[2] =
-                    (ShadowTplBind){ "err_ty", SHADOW_TPL_IDENT, seen_err[i] };
-                if (!shadow_tpl_emit(out, k_tpl_result_spec_void, renv, 3))
-                    return 0;
-            }
-            if (!cemit_fmt(out,
-                    "static inline %s cc_ok_%s(void) {"
-                    " %s r; r.ok = 1; return r; }\n"
-                    "static inline %s cc_err_%s(%s e) {"
-                    " %s r; r.ok = 0; r.u.error = e; return r; }\n"
-                    "#endif\n#endif\n",
-                    rname, rname, rname, rname, rname, seen_err[i], rname))
-                return 0;
-            continue;
-        }
-        if (!cemit_fmt(out,
-                "#ifndef %s_DEFINED\n#define %s_DEFINED 1\n"
-                "#ifdef CC_DECL_RESULT_SPEC\n"
-                "CC_DECL_RESULT_SPEC(%s, %s, %s)\n#else\n",
-                rname, rname, rname, seen_ok[i], seen_err[i]))
-            return 0;
-        {
-            ShadowTplBind renv[3];
-            renv[0] = (ShadowTplBind){ "rname", SHADOW_TPL_IDENT, rname };
-            renv[1] = (ShadowTplBind){ "ok_ty", SHADOW_TPL_IDENT, seen_ok[i] };
-            renv[2] = (ShadowTplBind){ "err_ty", SHADOW_TPL_IDENT, seen_err[i] };
-            if (!shadow_tpl_emit(out, k_tpl_result_spec_value, renv, 3))
-                return 0;
-        }
-        if (!cemit_fmt(out,
-                "static inline %s cc_err_%s(%s e) {"
-                " %s r; r.ok = 0; r.u.error = e; return r; }\n"
-                "#endif\n#endif\n",
-                rname, rname, seen_err[i], rname))
-            return 0;
-    }
-    if (nseen && !cemit_str(out, "\n")) return 0;
+    /* Result specs wait until the first AST_RESULT_FN so a quoted include
+     * that defines E (or a TU typedef just above the fn) is already out. */
     {
         int has_slice_rt = 0, has_chan_rt = 0;
         for (int i = 0; i < npass_inc; i++) {
@@ -1899,6 +1939,12 @@ ginst_emit_pass:
 
     for (int i = 0; i < n; i++) {
         AstNode* it = items[i];
+        if (!specs_emitted && nseen && it->kind == AST_RESULT_FN) {
+            if (!shadow_emit_collected_result_specs(out, seen_ok, seen_err,
+                                                    nseen, 0))
+                return 0;
+            specs_emitted = 1;
+        }
         if (!shadow_emit_preamble(it, out, cache)) return 0;
         it->lead_len = 0;
         if (!shadow_emit_line(out, &line_ctx, it, "")) return 0;
@@ -1963,20 +2009,28 @@ ginst_emit_pass:
         case AST_FN_PROTO: {
             char* heap = NULL;
             char small[2048];
-            const char* params = it->c[0] ? it->c : NULL;
+            char ret[192];
+            const char* raw = it->c[0] ? it->c : NULL;
+            const char* params;
             const char* pref =
                 (strcmp(it->e, "extern") == 0) ? "extern " : "";
-            if (!params) {
-                params = shadow_raw_field_cstr(cache, it, small, sizeof(small),
-                                              &heap);
-                if (!params || !params[0]) params = "void";
-            } else {
-                snprintf(small, sizeof(small), "%s", params);
-                shadow_normalize_chan_params(small, sizeof(small));
-                params = small;
+            snprintf(ret, sizeof(ret), "%s", it->a[0] ? it->a : "int");
+            shadow_rewrite_slice_types(ret, sizeof(ret));
+            if (!raw) {
+                raw = shadow_raw_field_cstr(cache, it, small, sizeof(small),
+                                            &heap);
             }
-            if (heap) shadow_normalize_chan_params(heap, strlen(heap) + 1);
-            if (!cemit_str(out, pref) || !cemit_str(out, it->a) ||
+            if (!raw || !raw[0]) {
+                snprintf(small, sizeof(small), "void");
+            } else if (raw == small) {
+                /* already in small from the raw-field helper */
+            } else {
+                snprintf(small, sizeof(small), "%s", raw);
+            }
+            shadow_normalize_chan_params(small, sizeof(small));
+            shadow_rewrite_slice_types(small, sizeof(small));
+            params = small;
+            if (!cemit_str(out, pref) || !cemit_str(out, ret) ||
                 !cemit_str(out, " ") || !cemit_str(out, it->b) ||
                 !cemit_str(out, "(") || !cemit_str(out, params) ||
                 !cemit_str(out, ");\n")) {
@@ -2520,14 +2574,20 @@ ginst_emit_pass:
                     bind_ok = 0;
             }
             if (bind_ok) {
-                const char* rty = it->e[0] ? it->e : "int";
+                char rty_buf[192];
+                const char* rty;
                 char params[512];
+                snprintf(rty_buf, sizeof(rty_buf), "%s",
+                         it->e[0] ? it->e : "int");
+                shadow_rewrite_slice_types(rty_buf, sizeof(rty_buf));
+                rty = rty_buf;
                 /* Host linkers require `int main`; coerce void main. */
                 if (strcmp(it->a, "main") == 0 && strcmp(rty, "void") == 0)
                     rty = "int";
                 params[0] = 0;
                 if (it->b[0]) {
                     snprintf(params, sizeof(params), "%s", it->b);
+                    shadow_rewrite_slice_types(params, sizeof(params));
                     shadow_rewrite_generic_types_text(params, sizeof(params));
                     shadow_normalize_chan_params(params, sizeof(params));
                 }
@@ -2788,6 +2848,7 @@ ginst_emit_pass:
         case AST_PARALLEL:
         case AST_PARALLEL_FOR:
         case AST_SERIAL:
+        case AST_STAGE:
         case AST_INC:
         case AST_FIELD_SIMPLE:
         case AST_BREAK:
@@ -2802,6 +2863,11 @@ ginst_emit_pass:
             return 0;
         }
         if (out->err) return 0;
+    }
+    if (nseen && !specs_emitted) {
+        if (!shadow_emit_collected_result_specs(out, seen_ok, seen_err, nseen,
+                                                0))
+            return 0;
     }
     if (g_shadow_ufcs_miss) return 0;
     if (g_shadow_eh_diag) return 0;

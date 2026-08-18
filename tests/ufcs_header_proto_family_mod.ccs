@@ -1,0 +1,11 @@
+#!ccc ccs
+#include "ufcs_header_proto_family.cch"
+
+size_t UfcsHdrBox_len(const UfcsHdrBox *b) {
+    return b ? (size_t)b->n : 0;
+}
+
+char[:] UfcsHdrBox_span(const UfcsHdrBox *b) {
+    (void)b;
+    return cc_slice_from_buffer("hi", 2);
+}

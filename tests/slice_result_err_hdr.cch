@@ -1,0 +1,8 @@
+#ifndef TESTS_SLICE_RESULT_ERR_HDR_CCH
+#define TESTS_SLICE_RESULT_ERR_HDR_CCH
+
+typedef struct {
+    const char *message;
+} SliceHdrErr;
+
+#endif

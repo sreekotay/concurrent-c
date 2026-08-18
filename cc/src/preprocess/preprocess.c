@@ -7054,6 +7054,40 @@ static size_t cc__tu_decl_prev_code(const char* src, size_t pos) {
     return cc_rskip_ws_and_comments(src, pos);
 }
 
+/* `T !>(E) name(` — the name sits after the `)` of `!>(E)`, not a type. */
+static int cc__prev_is_result_bang_err(const char* src, size_t b) {
+    size_t rp, lp, k, depth;
+    if (!src || b == 0 || src[b - 1] != ')') return 0;
+    rp = b - 1;
+    depth = 1;
+    lp = rp;
+    while (lp > 0) {
+        lp--;
+        if (src[lp] == ')') depth++;
+        else if (src[lp] == '(') {
+            depth--;
+            if (depth == 0) break;
+        }
+    }
+    if (depth != 0) return 0;
+    k = cc_rskip_ws_and_comments(src, lp);
+    if (k < 2 || src[k - 1] != '>' || src[k - 2] != '!') return 0;
+    return 1;
+}
+
+static int cc__decl_prev_ok(const char* src, size_t b) {
+    if (b == 0) return 0;
+    if (src[b - 1] == '*') return 1;
+    /* `char[:] name(` / `T[:] name(` — slice sugar ends on `]`. */
+    if (src[b - 1] == ']') return 1;
+    /* `T !>(E) name(` — Result err-type paren. */
+    if (src[b - 1] == ')' && cc__prev_is_result_bang_err(src, b)) return 1;
+    if (cc_is_ident_char(src[b - 1]) &&
+        !cc__free_call_prev_word_is_stmt_kw(src, b))
+        return 1;
+    return 0;
+}
+
 static int cc__tu_ident_paren_is_decl(const char* src, size_t n, size_t name_pos,
                                       size_t nlen) {
     size_t q = name_pos + nlen;
@@ -7061,11 +7095,7 @@ static int cc__tu_ident_paren_is_decl(const char* src, size_t n, size_t name_pos
     while (q < n && (src[q] == ' ' || src[q] == '\t')) q++;
     if (q >= n || src[q] != '(') return 0;
     b = cc__tu_decl_prev_code(src, name_pos);
-    if (b > 0 && src[b - 1] == '*') return 1;
-    if (b > 0 && cc_is_ident_char(src[b - 1]) &&
-        !cc__free_call_prev_word_is_stmt_kw(src, b))
-        return 1;
-    return 0;
+    return cc__decl_prev_ok(src, b);
 }
 
 
@@ -12593,6 +12623,9 @@ static CCLoweredLocalHeader* g_lowered_local_headers = NULL;
 static size_t g_lowered_local_header_count = 0;
 static size_t g_lowered_local_header_cap = 0;
 static int g_local_cch_lower_failed = 0;
+/* TU extract of a quoted .cch must not wipe include/declare/result indexes
+ * the caller already ingested. `lower_headers` batch still resets. */
+static int g_header_lower_preserve_tu_state = 0;
 
 static char** g_included_cch_sources = NULL;
 static size_t g_included_cch_source_count = 0;
@@ -12839,10 +12872,8 @@ static void cc__index_declares(CCPathTextCache* slot) {
         while (q < slot->len && (slot->text[q] == ' ' || slot->text[q] == '\t'))
             q++;
         if (q >= slot->len || slot->text[q] != '(') continue;
-        b = s;
-        while (b > 0 && isspace((unsigned char)slot->text[b - 1])) b--;
-        if (b > 0 && (cc_is_ident_char(slot->text[b - 1]) ||
-                      slot->text[b - 1] == '*'))
+        b = cc_rskip_ws_and_comments(slot->text, s);
+        if (b > 0 && cc__decl_prev_ok(slot->text, b))
             (void)cc__name_set_push(&set, slot->text + s, e - s);
     }
     cc__name_set_finalize(&set);
@@ -14063,9 +14094,10 @@ static void cc__ensure_incl_declares_union(void) {
 
 /* Decl-shaped twin of cc_included_cch_contains_fn: comment/string-aware,
  * and a hit requires the occurrence's previous code char to be an
- * identifier char or `*` (a type or declarator precedes). Doc-comment
- * examples and `.method(` call spellings never match. Also matches
- * `#define name(` (a visible macro is a real binding). */
+ * identifier char, `*`, `]` (`T[:]` / `char[:]` return sugar), or the
+ * `)` of `!>(E)` (`T !>(E) name(`).
+ * Doc-comment examples and `.method(` call spellings never match. Also
+ * matches `#define name(` (a visible macro is a real binding). */
 int cc_included_cch_declares_fn(const char* name) {
     if (!name || !name[0]) return 0;
     cc__ensure_incl_declares_union();
@@ -14086,66 +14118,125 @@ int cc_lowered_local_declares_fn(const char* name) {
     return 0;
 }
 
-/* First parameter's type span for a decl-shaped `name(` occurrence in
- * an included cch header, whitespace-normalized (`const char* s` shape:
- * idents space-separated, `*` attached). Returns 0/1. */
-int cc_included_cch_fn_first_param(const char* name, char* out, size_t out_sz) {
-    size_t h;
-    size_t nlen;
-    if (!name || !name[0] || !out || out_sz == 0) return 0;
+/* Drop a trailing parameter name (`char[:] bytes` → `char[:]`). A lone
+ * type ident (`CCSlice`) is left intact. */
+static void cc__param_drop_name(const char* src, size_t ps, size_t* pe) {
+    size_t e, name_s;
+    if (!src || !pe || *pe <= ps) return;
+    e = *pe;
+    while (e > ps && isspace((unsigned char)src[e - 1])) e--;
+    if (e == ps || !cc_is_ident_char(src[e - 1])) return;
+    while (e > ps && cc_is_ident_char(src[e - 1])) e--;
+    name_s = e;
+    while (e > ps && isspace((unsigned char)src[e - 1])) e--;
+    if (e == ps) return;
+    if (cc_is_ident_char(src[e - 1]) || src[e - 1] == '*' || src[e - 1] == ']' ||
+        src[e - 1] == '>')
+        *pe = name_s;
+}
+
+static int cc__norm_type_span(const char* src, size_t ps, size_t pe, char* out,
+                              size_t out_sz) {
+    size_t dn = 0;
+    if (!src || !out || out_sz == 0) return 0;
+    out[0] = 0;
+    while (ps < pe && isspace((unsigned char)src[ps])) ps++;
+    while (pe > ps && isspace((unsigned char)src[pe - 1])) pe--;
+    while (ps < pe && dn + 1 < out_sz) {
+        if (isspace((unsigned char)src[ps])) {
+            if (dn > 0 && out[dn - 1] != ' ' && out[dn - 1] != '*')
+                out[dn++] = ' ';
+            ps++;
+            continue;
+        }
+        if (src[ps] == '*' && dn > 0 && out[dn - 1] == ' ') dn--;
+        if (cc_is_ident_char(src[ps]) && dn > 0 && out[dn - 1] == '*')
+            out[dn++] = ' ';
+        out[dn++] = src[ps++];
+    }
+    out[dn] = 0;
+    return dn > 0;
+}
+
+static int cc__scan_fn_param_in_src(const char* fsrc, size_t fn, const char* name,
+                                    size_t nlen, int argi, char* out,
+                                    size_t out_sz) {
+    size_t i = 0;
+    CCScannerState scan;
+    if (!fsrc || !name || !name[0] || argi < 0 || !out || out_sz == 0) return 0;
+    cc_scanner_init(&scan);
+    while (i + nlen < fn) {
+        size_t q;
+        if (cc_scanner_skip_non_code(&scan, fsrc, fn, &i)) continue;
+        if (fsrc[i] != name[0]) { i++; continue; }
+        if (i > 0 && cc_is_ident_char(fsrc[i - 1])) { i++; continue; }
+        if (memcmp(fsrc + i, name, nlen) != 0) { i++; continue; }
+        if (cc_is_ident_char(fsrc[i + nlen])) { i += nlen; continue; }
+        q = i + nlen;
+        while (q < fn && (fsrc[q] == ' ' || fsrc[q] == '\t')) q++;
+        if (q < fn && fsrc[q] == '(') {
+            size_t b = cc_rskip_ws_and_comments(fsrc, i);
+            if (b > 0 && cc__decl_prev_ok(fsrc, b)) {
+                size_t ps = q + 1;
+                int depth = 0;
+                int seen = 0;
+                size_t pe = ps;
+                while (pe < fn) {
+                    char c = fsrc[pe];
+                    if (c == '(') depth++;
+                    else if (c == ')' && depth-- == 0) break;
+                    else if (c == ',' && depth == 0) {
+                        if (seen == argi) {
+                            cc__param_drop_name(fsrc, ps, &pe);
+                            return cc__norm_type_span(fsrc, ps, pe, out, out_sz);
+                        }
+                        seen++;
+                        ps = pe + 1;
+                    }
+                    pe++;
+                }
+                if (seen == argi && pe > ps) {
+                    cc__param_drop_name(fsrc, ps, &pe);
+                    return cc__norm_type_span(fsrc, ps, pe, out, out_sz);
+                }
+                return 0;
+            }
+        }
+        i += nlen;
+    }
+    return 0;
+}
+
+/* Parameter `argi` type for a decl-shaped `name(` in an included or
+ * lowered-local `.cch`, whitespace-normalized. */
+int cc_included_cch_fn_param(const char* name, int argi, char* out,
+                             size_t out_sz) {
+    size_t h, nlen;
+    if (!name || !name[0] || argi < 0 || !out || out_sz == 0) return 0;
     out[0] = 0;
     nlen = strlen(name);
     for (h = 0; h < g_included_cch_source_count; h++) {
         size_t fn = 0;
-        size_t i = 0;
-        CCScannerState scan;
         const char* fsrc = cc__included_cch_text(h, &fn);
-        if (!fsrc) continue;
-        cc_scanner_init(&scan);
-        while (i + nlen < fn) {
-            size_t q;
-            if (cc_scanner_skip_non_code(&scan, fsrc, fn, &i)) continue;
-            if (fsrc[i] != name[0]) { i++; continue; }
-            if (i > 0 && cc_is_ident_char(fsrc[i - 1])) { i++; continue; }
-            if (memcmp(fsrc + i, name, nlen) != 0) { i++; continue; }
-            if (cc_is_ident_char(fsrc[i + nlen])) { i += nlen; continue; }
-            q = i + nlen;
-            while (q < fn && (fsrc[q] == ' ' || fsrc[q] == '\t')) q++;
-            if (q < fn && fsrc[q] == '(') {
-                size_t b = cc_rskip_ws_and_comments(fsrc, i);
-                if (b > 0 && (cc_is_ident_char(fsrc[b - 1]) || fsrc[b - 1] == '*')) {
-                    size_t ps = q + 1, pe = ps;
-                    int depth = 0;
-                    size_t dn = 0;
-                    while (pe < fn) {
-                        char c = fsrc[pe];
-                        if (c == '(') depth++;
-                        else if (c == ')' && depth-- == 0) break;
-                        else if (c == ',' && depth == 0) break;
-                        pe++;
-                    }
-                    while (ps < pe && isspace((unsigned char)fsrc[ps])) ps++;
-                    while (pe > ps && isspace((unsigned char)fsrc[pe - 1])) pe--;
-                    while (ps < pe && dn + 1 < out_sz) {
-                        if (isspace((unsigned char)fsrc[ps])) {
-                            if (dn > 0 && out[dn - 1] != ' ' && out[dn - 1] != '*')
-                                out[dn++] = ' ';
-                            ps++;
-                            continue;
-                        }
-                        if (fsrc[ps] == '*' && dn > 0 && out[dn - 1] == ' ') dn--;
-                        if (cc_is_ident_char(fsrc[ps]) && dn > 0 && out[dn - 1] == '*')
-                            out[dn++] = ' ';
-                        out[dn++] = fsrc[ps++];
-                    }
-                    out[dn] = 0;
-                    return dn > 0;
-                }
-            }
-            i += nlen;
-        }
+        if (fsrc && cc__scan_fn_param_in_src(fsrc, fn, name, nlen, argi, out,
+                                            out_sz))
+            return 1;
+    }
+    for (h = 0; h < g_lowered_local_header_count; h++) {
+        const char* path = g_lowered_local_headers[h].source_path;
+        size_t fn = 0;
+        const char* fsrc;
+        if (!path || !path[0]) continue;
+        fsrc = cc__path_text_cached(path, &fn);
+        if (fsrc && cc__scan_fn_param_in_src(fsrc, fn, name, nlen, argi, out,
+                                            out_sz))
+            return 1;
     }
     return 0;
+}
+
+int cc_included_cch_fn_first_param(const char* name, char* out, size_t out_sz) {
+    return cc_included_cch_fn_param(name, 0, out, out_sz);
 }
 
 static void cc__register_included_cch_tree(const char* source_path) {
@@ -14517,6 +14608,27 @@ static int cc__cch_text_is_impl_grade(const char* src, size_t n) {
     return 0;
 }
 
+static int cc__path_is_ccs(const char* path) {
+    size_t n;
+    if (!path) return 0;
+    n = strlen(path);
+    return n >= 4 && memcmp(path + n - 4, ".ccs", 4) == 0;
+}
+
+/* @typeview / @typehooks must stay on the extract path (stdlib model). */
+static int cc__cch_text_has_type_policy(const char* src, size_t n) {
+    size_t i = 0;
+    CCScannerState scan;
+    if (!src || n == 0) return 0;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (src[i] == '@' && cc__skip_type_policy_at(src, n, i)) return 1;
+        i++;
+    }
+    return 0;
+}
+
 /* Per-process memo of .cch grade, keyed by realpath.  grade: 1 impl-grade,
  * 0 interface, -1 classification in progress (include cycle break). */
 typedef struct {
@@ -14797,9 +14909,11 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
     if (cc__read_file_text(abs_src, &input, &input_len) != 0)
         CC__LOWER_GIVE_UP("read");
     rewritten = cc__rewrite_local_cch_includes_impl(input, input_len, abs_src);
+    g_header_lower_preserve_tu_state++;
     lowered = cc_lower_header_string(rewritten ? rewritten : input,
                                      rewritten ? strlen(rewritten) : input_len,
                                      abs_src);
+    g_header_lower_preserve_tu_state--;
     if (!lowered) lowered = strdup(rewritten ? rewritten : input);
     if (!lowered) return NULL;
     if (cc__write_file_text(lowered_path, lowered, strlen(lowered)) != 0)
@@ -14873,9 +14987,18 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                         char* child_src = NULL;
                         size_t child_len = 0;
                         if (cc__read_file_text(child_abs, &child_src, &child_len) == 0 &&
-                            child_src &&
-                            cc__lowered_header_needs_ufcs_splice(child_src, child_len))
-                            splice_child = 1;
+                            child_src) {
+                            if (cc__lowered_header_needs_ufcs_splice(child_src,
+                                                                    child_len))
+                                splice_child = 1;
+                            else if (cc__path_is_ccs(current_path) &&
+                                     !cc__cch_text_has_type_policy(child_src,
+                                                                   child_len))
+                                /* Chapter included from a .ccs: splice so
+                                 * types defined in that TU are in scope.
+                                 * @typeview / @typehooks still extract. */
+                                splice_child = 1;
+                        }
                         free(child_src);
                     }
                     if (splice_child) {
@@ -15719,18 +15842,25 @@ char* cc_rewrite_header_type_syntax_shared(const char* src,
     /* Header lowering should share the same type-syntax understanding as the
        main preprocess pipeline for syntax that must not survive into plain C
        headers. Keep this intentionally limited to header-safe rewrites. */
-    if (!cc_type_graph_ensure_global_cleared()) return NULL;
-    /* Isolated `.cch` → `.h` has no TU include ingest. Drop leftovers
-     * from the previous header in this `lower_headers` process (readdir
-     * order is not stable across hosts), then register imports — not this
-     * file — so Exclusive/Vec callees resolve without treating same-file
-     * wrappers as UFCS targets. */
-    cc_reset_included_cch_sources();
-    g_ufcs_header_path[0] = 0;
-    if (input_path && input_path[0]) {
+    if (!g_header_lower_preserve_tu_state) {
+        if (!cc_type_graph_ensure_global_cleared()) return NULL;
+        /* Isolated `.cch` → `.h` has no TU include ingest. Drop leftovers
+         * from the previous header in this `lower_headers` process (readdir
+         * order is not stable across hosts), then register imports — not this
+         * file — so Exclusive/Vec callees resolve without treating same-file
+         * wrappers as UFCS targets. */
+        cc_reset_included_cch_sources();
+        g_ufcs_header_path[0] = 0;
+        if (input_path && input_path[0]) {
+            if (!realpath(input_path, g_ufcs_header_path))
+                g_ufcs_header_path[0] = 0;
+            cc__register_included_cch_imports(input_path);
+        }
+    } else if (input_path && input_path[0]) {
+        /* TU extract: keep include/declare/result indexes. Still name this
+         * header for UFCS path notes. */
         if (!realpath(input_path, g_ufcs_header_path))
             g_ufcs_header_path[0] = 0;
-        cc__register_included_cch_imports(input_path);
     }
 
     cc_pass_chain_init(&chain, src, input_len);

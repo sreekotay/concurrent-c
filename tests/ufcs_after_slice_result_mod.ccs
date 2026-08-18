@@ -1,0 +1,14 @@
+#!ccc ccs
+#include "ufcs_after_slice_result.cch"
+
+size_t !>(CCError) UfcsAfterSliceBox_read_at(const UfcsAfterSliceBox *b,
+                                            char *dest, size_t n) {
+    if (!b) return cc_err(CC_ERR_INVALID_ARG, "null");
+    if (!dest || n == 0) return cc_ok(0);
+    dest[0] = (char)('0' + (b->x % 10));
+    return cc_ok(1);
+}
+
+void UfcsAfterSliceBox_destroy(UfcsAfterSliceBox *b) {
+    (void)b;
+}

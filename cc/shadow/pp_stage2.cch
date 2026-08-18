@@ -450,23 +450,6 @@ static int pp_quote_include_passthrough_line(CCSlice spell, char* dst, size_t ca
     return w > 0 && (size_t)w < cap;
 }
 
-/* Tool umbrellas must stay at the #include site (after @grammar KEEP_*).
- * Quoted-header rewrite may have already turned `.cch` into an absolute `.h`. */
-static int pp_quote_include_is_umbrella(CCSlice spell) {
-    const char* p;
-    size_t n, i, bl;
-    const char* base;
-    pp_quote_include_path(spell, &p, &n);
-    if (!p || !n) return 0;
-    base = p;
-    for (i = 0; i < n; i++)
-        if (p[i] == '/') base = p + i + 1;
-    bl = n - (size_t)(base - p);
-    if (bl >= 11 && strncmp(base, "c_pp_spike.", 11) == 0) return 1;
-    if (bl >= 13 && strncmp(base, "shadow_build.", 13) == 0) return 1;
-    return 0;
-}
-
 static int pp_inject_include_at_hash(Pp* pp, Token hdr, const char* line) {
     char* slot;
     Token syn;
@@ -702,13 +685,13 @@ static int handle_include(Pp* pp) {
         }
         if (!pp_quote_include_passthrough_line(hdr.spell, line, sizeof(line)))
             return 0;
-        if (pp_quote_include_is_umbrella(hdr.spell)) {
-            pp_skip_line(pp);
-            return pp_inject_include_at_hash(pp, hdr, line);
-        }
-        if (!pp_add_passthrough_include(pp, line)) return 0;
+        /* Stay at the #include site. Hoisting quoted locals into pass_inc
+         * puts a lowered chapter .h above types the .ccs just defined
+         * (`RtxNode` before `#include "piece_tree_rb.cch"`). Umbrellas
+         * already inject here; ordinary `"….h"` (including driver-rewritten
+         * local `.cch`) must too. */
         pp_skip_line(pp);
-        return 1;
+        return pp_inject_include_at_hash(pp, hdr, line);
     }
     /* #include "..." CC faces (.c c h / .c c s / .inc) — splice
      * (mid-struct / local fixtures). Prefer the directory of the including
@@ -1055,7 +1038,55 @@ static int handle_directive(Pp* pp) {
         pp_skip_line(pp);
         return 1;
     }
-    case PP_DIR_PRAGMA:
+    case PP_DIR_PRAGMA: {
+        /* `#pragma(@parallel) off|on` — positional scheduling toggle.
+         * Stage2 consumes directives before the parser runs, so the
+         * toggle is injected as a marker token the parser flips on in
+         * stream order. Never reaches host cc (`@` is not a pp-token). */
+        char line[512];
+        if (pp_capture_dir_line(pp, name, line, sizeof(line))) {
+            const char* q = line;
+            while (*q && *q != '#') q++;
+            if (*q == '#') q++;
+            while (*q == ' ' || *q == '\t') q++;
+            if (strncmp(q, "pragma", 6) == 0) {
+                int state = -1;
+                q += 6;
+                while (*q == ' ' || *q == '\t') q++;
+                if (strncmp(q, "(@parallel)", 11) == 0) {
+                    const char* r;
+                    q += 11;
+                    while (*q == ' ' || *q == '\t') q++;
+                    if (strncmp(q, "off", 3) == 0) { state = 1; r = q + 3; }
+                    else if (strncmp(q, "on", 2) == 0) { state = 0; r = q + 2; }
+                    else r = q;
+                    if (state >= 0) {
+                        while (*r == ' ' || *r == '\t') r++;
+                        if (*r) state = -1;
+                    }
+                    if (state < 0) {
+                        pp_fail_dir(pp, name,
+                                    "#pragma(@parallel) takes 'off' or 'on'");
+                        return 0;
+                    }
+                }
+                if (state >= 0) {
+                    Token syn;
+                    memset(&syn, 0, sizeof(syn));
+                    syn.kind = TK_IDENT;
+                    syn.spell.ptr = state ? "__cc_pragma_parallel_off"
+                                          : "__cc_pragma_parallel_on";
+                    syn.spell.len = strlen(syn.spell.ptr);
+                    syn.file_id = name.file_id;
+                    syn.offset = name.offset;
+                    pp_skip_line(pp);
+                    return pp_emit(pp, syn);
+                }
+            }
+        }
+        pp_skip_line(pp);
+        return 1;
+    }
     case PP_DIR_LINE:
     case PP_DIR_WARNING:
         /* Passthrough-by-design: not spliced into the AST stream. */

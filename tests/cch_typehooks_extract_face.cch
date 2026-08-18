@@ -1,0 +1,33 @@
+#!ccc cch
+#ifndef TESTS_CCH_TYPEHOOKS_EXTRACT_FACE_CCH
+#define TESTS_CCH_TYPEHOOKS_EXTRACT_FACE_CCH
+
+#include <ccc/std/prelude.cch>
+
+typedef struct {
+    const char *message;
+    int unique_tag;
+} ExtractFaceErr;
+
+static inline ExtractFaceErr extract_face_err(const char *msg) {
+    ExtractFaceErr e;
+    e.message = msg ? msg : "err";
+    e.unique_tag = 7;
+    return e;
+}
+
+typedef struct ExtractFace {
+    int n;
+    char[:] bytes;
+} ExtractFace;
+
+void ExtractFace_destroy(ExtractFace *t);
+void !>(CCError) ExtractFace_from_buffer(ExtractFace *t, char[:] bytes);
+size_t !>(ExtractFaceErr) ExtractFace_line_of(const ExtractFace *t, size_t offset);
+char[:] ExtractFace_span(const ExtractFace *t, size_t from, size_t n);
+
+@typehooks on ExtractFace {
+    .destroy = ExtractFace_destroy,
+};
+
+#endif

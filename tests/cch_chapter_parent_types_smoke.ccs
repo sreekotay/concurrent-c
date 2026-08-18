@@ -1,0 +1,29 @@
+/* A chapter .cch included from a .ccs must see types defined in that TU
+ * (not only types the chapter includes itself). */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct {
+    const char *message;
+} CchChapterErr;
+
+typedef struct {
+    int x;
+} CchChapterNode;
+
+#include "cch_chapter_parent_types.cch"
+
+int main(void) {
+    CchChapterNode n = { .x = 4 };
+    if (cch_chapter_node_x(&n) != 4) return 1;
+    {
+        @errhandler(CchChapterErr e) {
+            (void)e;
+            return 2;
+        }
+        size_t got = cch_chapter_line(&n) !>;
+        if (got != 4) return 3;
+    }
+    printf("ok\n");
+    return 0;
+}

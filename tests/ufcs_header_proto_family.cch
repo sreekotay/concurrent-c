@@ -1,0 +1,10 @@
+#!ccc cch
+#ifndef UFCS_HEADER_PROTO_FAMILY_H
+#define UFCS_HEADER_PROTO_FAMILY_H
+#include <ccc/std/prelude.cch>
+typedef struct {
+    int n;
+} UfcsHdrBox;
+size_t UfcsHdrBox_len(const UfcsHdrBox *b);
+char[:] UfcsHdrBox_span(const UfcsHdrBox *b);
+#endif

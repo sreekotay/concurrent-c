@@ -1,0 +1,28 @@
+/* E lives in an extracted quoted header; a later non-static char[:] !>(E)
+ * must not hoist CC_DECL_RESULT_SPEC above that include. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include "slice_result_err_hdr.cch"
+
+static SliceHdrErr slice_hdr_err(const char *msg) {
+    SliceHdrErr e;
+    e.message = msg ? msg : "err";
+    return e;
+}
+
+char[:] !>(SliceHdrErr) slice_hdr_span(const char *p, size_t n) {
+    if (!p) return cc_err(slice_hdr_err("null"));
+    return cc_ok(cc_slice_from_buffer((char *)p, n));
+}
+
+int main(void) {
+    @errhandler(SliceHdrErr e) {
+        (void)e;
+        return 1;
+    }
+    char buf[3] = "hi";
+    char[:] s = slice_hdr_span(buf, 2) !>;
+    if (s.len != 2) return 2;
+    printf("ok\n");
+    return 0;
+}

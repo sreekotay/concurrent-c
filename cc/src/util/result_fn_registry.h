@@ -50,7 +50,9 @@ int  cc_result_fn_registry_get_result_type(const char* name, size_t name_len,
  * Safe to call on header bodies that are not spliced into the TU buffer. */
 void cc_result_fn_registry_scan_source(const char* src, size_t n);
 
-/* Enumerate concrete `CCResult_T_E` names seen in scanned declarations. */
+/* Enumerate scanned result-fn rows (name / textual E / CCResult_T_E). */
+const char* cc_result_fn_registry_name_at(size_t i);
+const char* cc_result_fn_registry_err_type_at(size_t i);
 const char* cc_result_fn_registry_result_type_at(size_t i);
 size_t cc_result_fn_registry_count(void);
 

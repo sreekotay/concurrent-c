@@ -1,0 +1,95 @@
+/*
+ * @cache on a wait-for: exclusive checkout (no two live tickets share
+ * an instance), extras destroyed at join, sequential denial keeps one
+ * instance (w-less: the body names `s`, not a slot).
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+
+#define N   16
+#define CAP 4
+
+typedef struct {
+    int live;
+    int hits;
+} Slot;
+
+static cc_atomic_int g_overlap;
+static cc_atomic_int g_destroyed;
+static cc_atomic_int g_hits;
+
+static int run_par(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+    CCTurnstile ts@(N, CAP, 1, &arena) @destroy;
+    if (!ts.excl)
+        return 1;
+    @cache Slot s = {0} @destroy {
+        cc_atomic_fetch_add(&g_destroyed, 1);
+    };
+    int i;
+    @parallel wait (ts) for (i in 0..N) {
+        if (s.live)
+            cc_atomic_fetch_add(&g_overlap, 1);
+        s.live = 1;
+        cc_sleep_ms(1);
+        s.hits++;
+        cc_atomic_fetch_add(&g_hits, 1);
+        s.live = 0;
+    }
+    (void)s.hits;
+    return 0;
+}
+
+static int run_seq(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+    CCTurnstile ts@(N, CAP, 1, &arena) @destroy;
+    if (!ts.excl)
+        return 1;
+    int before = cc_atomic_load(&g_destroyed);
+    @cache Slot s = {0} @destroy {
+        cc_atomic_fetch_add(&g_destroyed, 1);
+    };
+    int i;
+    @parallel seq (0) wait (ts) for (i in 0..N) {
+        s.hits++;
+    }
+    if (s.hits != N) {
+        fprintf(stderr, "FAIL seq hits=%d want=%d\n", s.hits, N);
+        return 1;
+    }
+    (void)before;
+    return 0;
+}
+
+int main(void) {
+    cc_atomic_store(&g_overlap, 0);
+    cc_atomic_store(&g_destroyed, 0);
+    cc_atomic_store(&g_hits, 0);
+    if (run_par() != 0)
+        return 1;
+    if (cc_atomic_load(&g_overlap) != 0) {
+        fprintf(stderr, "FAIL overlap=%d\n", cc_atomic_load(&g_overlap));
+        return 1;
+    }
+    if (cc_atomic_load(&g_hits) != N) {
+        fprintf(stderr, "FAIL hits=%d want=%d\n", cc_atomic_load(&g_hits), N);
+        return 1;
+    }
+    if (cc_atomic_load(&g_destroyed) != CAP) {
+        fprintf(stderr, "FAIL destroyed=%d want=%d\n",
+                cc_atomic_load(&g_destroyed), CAP);
+        return 1;
+    }
+    if (run_seq() != 0)
+        return 1;
+    if (cc_atomic_load(&g_destroyed) != CAP + 1) {
+        fprintf(stderr, "FAIL seq destroyed=%d want=%d\n",
+                cc_atomic_load(&g_destroyed), CAP + 1);
+        return 1;
+    }
+    printf("parallel_cache_smoke: OK\n");
+    return 0;
+}

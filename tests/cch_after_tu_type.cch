@@ -1,0 +1,4 @@
+/* Chapter: uses a type defined in the including .ccs (not this header). */
+static int cch_after_tu_node_x(const CchAfterTuNode *n) {
+    return n ? n->x : -1;
+}

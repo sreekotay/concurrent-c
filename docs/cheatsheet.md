@@ -214,6 +214,10 @@ get(21)!>.twice();          // unwrap, then method on the value
 
 static double CCVec_double_median(CCVec_double* v) { … }
 v.median();                 // declare = install
+
+size_t Box_len(const Box *b);   /* header prototype — other TUs get b.len() */
+size_t !>(CCError) Box_read_at(const Box *b, char *d, size_t n);
+size_t Box_len(const Box *b) { … }  /* linked definition; not a static wrapper */
 ```
 
 **Optional registration** (stdlib / your families):
@@ -706,4 +710,7 @@ Jupyter/Colab: `from cc_node import require`).
 ```
 
 A local `.cch` with statement unwrap (`!>(e) {`) is spliced into the
-including unit. `T !>(E)` on a declaration does not force that.
+including unit. `T !>(E)` on a declaration does not force that. A
+`@typehooks` / `@typeview` face still extracts to a lowered `.h`; callers
+keep `char[:]` argument wrap and the proto's Result error type from the
+original `.cch`.

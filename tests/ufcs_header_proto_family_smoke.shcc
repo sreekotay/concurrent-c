@@ -1,0 +1,24 @@
+/* Linked-TU family UFCS: header has Type_meth prototypes only (no static
+ * inline wrappers). Caller TU includes the header and uses b.len(). */
+CCArena a = cc_arena_heap(megabytes(1)) @destroy;
+CCCommand build = cc_command(&a, @slice("./cc/bin/ccc"));
+build.arg("build");
+build.arg("--no-cache");
+build.arg("tests/ufcs_header_proto_family_main_mod.ccs");
+build.arg("tests/ufcs_header_proto_family_mod.ccs");
+build.arg("-o");
+build.arg("out/ufcs_header_proto_family_smoke");
+build.inherit_stdio();
+int rc = build.status() !>;
+if (rc != 0) {
+    "build failed".println() !>;
+    return 1;
+}
+CCCommand run = cc_command(&a, @slice("out/ufcs_header_proto_family_smoke"));
+run.inherit_stdio();
+rc = run.status() !>;
+if (rc != 0) {
+    "run failed".println() !>;
+    return 1;
+}
+return 0;

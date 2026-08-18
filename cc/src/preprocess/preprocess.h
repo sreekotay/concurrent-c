@@ -193,6 +193,10 @@ int cc_included_cch_contains_fn(const char* name);
 int cc_included_cch_declares_fn(const char* name);
 /* Same oracle, restricted to lowered local (quoted project) `.cch`. */
 int cc_lowered_local_declares_fn(const char* name);
+/* Parameter `argi` (0-based) type of a decl-shaped `name(` in an included
+ * or lowered-local `.cch`, whitespace-normalized. Returns 0/1. */
+int cc_included_cch_fn_param(const char* name, int argi, char* out,
+                             size_t out_sz);
 /* First parameter type of a decl-shaped `name(` occurrence in an
  * included cch header, whitespace-normalized. Returns 0/1. */
 int cc_included_cch_fn_first_param(const char* name, char* out, size_t out_sz);
