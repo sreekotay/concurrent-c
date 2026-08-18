@@ -4,6 +4,7 @@
  * Usage:
  *   lower_headers <input_dir> <output_dir>
  *   lower_headers <input_dir> <output_dir> --rewrite-includes <src_dir> <dst_dir>
+ *   lower_headers --ordered <output_dir> <file.cch> [file.cch ...]
  *
  * Mode 1 (headers): Recursively finds all .cch files in input_dir, transforms
  * CC syntax (T!>(E) -> CCResult_T_E), and writes .h files to output_dir
@@ -58,6 +59,26 @@ static int is_c_or_h_file(const char* name) {
     if (len > 2 && strcmp(name + len - 2, ".c") == 0) return 1;
     if (len > 2 && strcmp(name + len - 2, ".h") == 0) return 1;
     return 0;
+}
+
+static const char* path_basename(const char* path) {
+    const char* slash = strrchr(path, '/');
+    return slash ? slash + 1 : path;
+}
+
+/* Flat .h next to output_dir for an explicit --ordered input list. */
+static char* ordered_h_path(const char* output_dir, const char* cch_path) {
+    const char* base = path_basename(cch_path);
+    size_t dlen = strlen(output_dir);
+    size_t blen = strlen(base);
+    char* out = malloc(dlen + 1 + blen + 1);
+    size_t n;
+    if (!out) return NULL;
+    sprintf(out, "%s/%s", output_dir, base);
+    n = strlen(out);
+    if (n > 4 && strcmp(out + n - 4, ".cch") == 0)
+        strcpy(out + n - 4, ".h");
+    return out;
 }
 
 /* Convert .cch path to .h path */
@@ -278,12 +299,45 @@ static int rewrite_source_dir(const char* src_dir, const char* dst_dir) {
  * -------------------------------------------------------------------------*/
 
 int main(int argc, char* argv[]) {
+    if (argc >= 4 && strcmp(argv[1], "--ordered") == 0) {
+        const char* output_dir = argv[2];
+        int i;
+        if (mkpath(output_dir, 0755) != 0) {
+            fprintf(stderr, "Cannot create output directory: %s\n", output_dir);
+            return 1;
+        }
+        printf("Lowering headers (ordered): -> %s\n", output_dir);
+        for (i = 3; i < argc; i++) {
+            char* h_path = ordered_h_path(output_dir, argv[i]);
+            int err;
+            if (!h_path) {
+                fprintf(stderr, "OOM\n");
+                return 1;
+            }
+            if (!is_cch_file(argv[i])) {
+                fprintf(stderr, "Not a .cch file: %s\n", argv[i]);
+                free(h_path);
+                return 1;
+            }
+            err = process_file(argv[i], h_path);
+            free(h_path);
+            if (err) {
+                fprintf(stderr, "Error lowering %s: %d\n", argv[i], err);
+                return 1;
+            }
+        }
+        printf("Done.\n");
+        return 0;
+    }
+
     if (argc != 3 && argc != 6) {
         fprintf(stderr, "Usage: %s <input_dir> <output_dir>\n", argv[0]);
         fprintf(stderr, "       %s <input_dir> <output_dir> --rewrite-includes <src_dir> <dst_dir>\n", argv[0]);
+        fprintf(stderr, "       %s --ordered <output_dir> <file.cch> [file.cch ...]\n", argv[0]);
         fprintf(stderr, "\nLowers .cch headers to .h files:\n");
         fprintf(stderr, "  - Rewrites T!>(E) -> CCResult_T_E + guarded CC_DECL_RESULT_SPEC\n");
         fprintf(stderr, "\n--rewrite-includes: copy .c/.h files, rewriting .cch includes to .h\n");
+        fprintf(stderr, "--ordered: lower the listed files in this process, in argv order\n");
         return 1;
     }
     

@@ -5,8 +5,14 @@
 #include <string.h>
 
 int main(void) {
-    CCClosure2 c;
-    memset(&c, 0, sizeof(c));
-    cc_closure2_drop(c);
+    CCClosure0 c0;
+    CCClosure1 c1;
+    CCClosure2 c2;
+    memset(&c0, 0, sizeof(c0));
+    memset(&c1, 0, sizeof(c1));
+    memset(&c2, 0, sizeof(c2));
+    cc_closure0_drop(c0);
+    cc_closure1_drop(c1);
+    cc_closure2_drop(c2);
     return 0;
 }
