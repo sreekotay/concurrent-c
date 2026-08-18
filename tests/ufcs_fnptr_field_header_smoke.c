@@ -2,15 +2,18 @@
  * Header UFCS must not rewrite a function-pointer field call
  * (`c.drop(c.env)`) into the same-named wrapper (`cc_widget_drop(&c, c.env)`).
  *
- * That class is in-process and order-dependent: `lower_headers` is one
- * process, and leftover include-probe state from an earlier file (or a
- * call-site spelling counted as a callee) makes the wrapper look "real".
- * A `.ccs` that includes already-lowered stdlib cannot reproduce it —
- * two sequential `lower_headers` processes will not either.
+ * The class is in-process and order-dependent: leftover include-probe
+ * state from an earlier file in the same `lower_headers` process (or a
+ * call-site spelling counted as a callee) makes the wrapper look real.
+ * A `.ccs` that includes already-lowered stdlib cannot see it — that is
+ * why a compile of `cc_closureN_drop` after headers are already `.h`
+ * stays green while isolated header lowering breaks. Two sequential
+ * `lower_headers` processes cannot see it either.
  *
- * This smoke forces polluter-then-victim in one process via
- * `lower_headers --ordered`, and keeps the victim field call unparenthesized
- * so a probe regression stays visible.
+ * This smoke reproduces the configuration, not the symptom: it forces
+ * polluter-then-victim in one process via `lower_headers --ordered`,
+ * and keeps the victim field call unparenthesized so a defensive
+ * `(c.drop)(c.env)` cannot mask a probe regression.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,7 +23,7 @@
 #include <unistd.h>
 
 static int run_capture(const char* cmd, char* out, size_t out_cap, int* exit_code) {
-    char wrapped[2048];
+    char wrapped[4096];
     FILE* f;
     size_t n;
     int st;
@@ -154,12 +157,12 @@ int main(void) {
     char tmpl[] = "/tmp/cc_ufcs_fnptr_XXXXXX";
     char ext[8];
     char* dir;
-    char polluter_decl[256];
-    char polluter_call[256];
-    char victim[256];
-    char outdir[256];
-    char victim_h[256];
-    char cmd[1024];
+    char polluter_decl[512];
+    char polluter_call[512];
+    char victim[512];
+    char outdir[512];
+    char victim_h[512];
+    char cmd[2048];
     char captured[4096];
     char* lowered = NULL;
     int ec = 0;
