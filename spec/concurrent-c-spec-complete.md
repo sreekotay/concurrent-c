@@ -5180,6 +5180,8 @@ void !>(CCError) cc_exclusive_mutex_acquire_when_into(CCExclusiveMutex* m,
 
 The form is selected by the tokens after `@parallel`: `{` (always try to spawn), `(` or `seq (` (spawn if the predicate, §8.11.3, §8.11.5), `wait (` (ordered spawn loop over a turnstile, §8.11.6), or `for` (bisected range, §8.11.4).
 
+**Captures.** A body or arm may use locals of the enclosing frame. Such names are captured by reference: the lowering takes each captured local's address, and every use inside the body denotes the frame's object itself. There is one object — a write through a capture is visible to the frame after the brace and to concurrently running arms or iterations, subject to the construct's independence and ordering rules. No copy is made, and no capture outlives its frame: the join completes before the statement does. The loop index of a `for` form is a per-iteration value, not a capture. These rules are distinct from closure-literal capture lists (§2.2), which copy by value because a closure may escape its frame.
+
 #### 8.11.1 Assignment join
 
 ```c

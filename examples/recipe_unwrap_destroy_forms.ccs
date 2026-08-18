@@ -29,7 +29,8 @@
 #include <stdlib.h>
 #include <ccc/script/stdio.cch>
 
-/* Return a pointer or NULL based on the argument. */
+/* Test fixture: maybe_null(0) succeeds (pointer to "hello"), 
+   maybe_null(1) returns NULL to trip the error path. */
 static char* maybe_null(int want_null) {
     static char buf[] = "hello";
     return want_null ? NULL : buf;

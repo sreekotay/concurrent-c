@@ -1,0 +1,3 @@
+store ready beta=1234 counter_one=23 label=primary-label-for-the-big-store
+destroy big store alpha=7
+ok

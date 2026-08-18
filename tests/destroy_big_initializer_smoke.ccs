@@ -1,0 +1,53 @@
+/* Large braced designated initializer with @destroy { body }.
+ * The init text (>255 bytes) used to overflow a 256-byte parse buffer:
+ * "token spelling exceeds 255-byte AST text field". */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct {
+    int alpha;
+    int beta;
+    int gamma;
+    int delta;
+    int epsilon;
+    long counter_one;
+    long counter_two;
+    long counter_three;
+    const char* label_primary;
+    const char* label_secondary;
+    const char* label_tertiary;
+    void* handle_main;
+    void* handle_backup;
+} BigStore;
+
+static int compute_alpha(void) { return 7; }
+static long compute_counter(long base) { return base * 2 + 1; }
+
+static int g_backing;
+
+int main(void) {
+    {
+        BigStore store = {
+            .alpha = compute_alpha(),
+            .beta = 1000 + 200 + 30 + 4,
+            .gamma = 42,
+            .delta = -12345,
+            .epsilon = 99999,
+            .counter_one = compute_counter(11),
+            .counter_two = compute_counter(222),
+            .counter_three = compute_counter(3333),
+            .label_primary = "primary-label-for-the-big-store",
+            .label_secondary = "secondary-label-for-the-big-store",
+            .label_tertiary = "tertiary-label-for-the-big-store",
+            .handle_main = &g_backing,
+            .handle_backup = NULL
+        } @destroy {
+            if (store.alpha == 7)
+                printf("destroy big store alpha=%d\n", store.alpha);
+        };
+        printf("store ready beta=%d counter_one=%ld label=%s\n",
+               store.beta, store.counter_one, store.label_primary);
+    }
+    printf("ok\n");
+    return 0;
+}

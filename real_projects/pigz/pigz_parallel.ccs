@@ -12,7 +12,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include <zlib.h>
 
 #define BLOCK_SIZE (128 * 1024)
@@ -43,19 +42,6 @@ typedef struct {
 cc_atomic_i64 g_bytes_in = 0;
 cc_atomic_i64 g_bytes_out = 0;
 cc_atomic_int g_blocks_done = 0;
-
-cc_atomic_u64 g_start_wait_ns = 0;
-cc_atomic_u64 g_read_wait_ns = 0;
-cc_atomic_u64 g_read_io_ns = 0;
-cc_atomic_u64 g_compress_ns = 0;
-cc_atomic_u64 g_write_wait_ns = 0;
-cc_atomic_u64 g_write_ns = 0;
-
-static inline uint64_t ns_now(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-}
 
 static int stagger_cap(void) {
     const char* s = getenv("PIGZ_CAP");
@@ -149,30 +135,21 @@ static void compress_and_write_i(CompressJob* job, int i) {
         if (!blk_arena.base) {
             *job->failed = 1;
         } else {
-            uint64_t tw0 = ns_now();
             ts->read.wait(i);
-            g_read_wait_ns.fetch_add(ns_now() - tw0);
-
             CCSlice data = cc_slice_empty();
-            uint64_t tr0 = ns_now();
             size_t !>(CCIoError) seek_r = job->in->seek((long)off, SEEK_SET);
             if (seek_r.is_err()) {
-                g_read_io_ns.fetch_add(ns_now() - tr0);
                 *job->failed = 1;
             } else {
                 bool !>(CCIoError) read_r =
                     job->in->read(&blk_arena, want, &data);
-                g_read_io_ns.fetch_add(ns_now() - tr0);
                 if (read_r.is_err() || !cc_io_avail(read_r) || data.len != want) {
                     *job->failed = 1;
                 } else {
                     ts->read.pass(i);
                     handed_read = 1;
-
-                    uint64_t tc0 = ns_now();
                     CompressedResult* !>(CCIoError) r =
                         compress_slice(data, (long)i, is_last, job->level);
-                    g_compress_ns.fetch_add(ns_now() - tc0);
                     if (r.is_err())
                         *job->failed = 1;
                     else
@@ -187,16 +164,9 @@ static void compress_and_write_i(CompressJob* job, int i) {
     if (!handed_read)
         ts->read.pass(i);
 
-    {
-        uint64_t tw0 = ns_now();
-        ts->write.wait(i);
-        g_write_wait_ns.fetch_add(ns_now() - tw0);
-    }
-
+    ts->write.wait(i);
     if (item && !*job->failed) {
-        uint64_t tw0 = ns_now();
         size_t !>(CCIoError) wr = job->out->write(item->data);
-        g_write_ns.fetch_add(ns_now() - tw0);
         if (wr.is_err() || cc_value(wr) != item->data.len)
             *job->failed = 1;
     }
@@ -214,10 +184,7 @@ static void spawn_compress_all(CompressJob* job, int n) {
 
     CCNursery* nur = cc_nursery_create(NULL) !> @destroy;
     for (i = 0; i < n; i++) {
-        uint64_t tw0 = ns_now();
         ts->enter(i) !>;
-        g_start_wait_ns.fetch_add(ns_now() - tw0);
-
         nur->spawn(() => [job, i, ts] {
             @errhandler(CCError e) cc_error_exit(e);
             compress_and_write_i(job, i);
@@ -242,12 +209,6 @@ void !>(CCError) compress_file(const char* in_path, const char* out_path) {
     g_bytes_in.store(0);
     g_bytes_out.store(0);
     g_blocks_done.store(0);
-    g_start_wait_ns.store(0);
-    g_read_wait_ns.store(0);
-    g_read_io_ns.store(0);
-    g_compress_ns.store(0);
-    g_write_wait_ns.store(0);
-    g_write_ns.store(0);
 
     char[:0] in_s = cc_slice_cstr(in_path);
     char[:0] out_s = cc_slice_cstr(out_path);
@@ -323,18 +284,8 @@ int main(int argc, char* argv[]) {
     long long bin = (long long)g_bytes_in.load();
     long long bout = (long long)g_bytes_out.load();
     int blocks = g_blocks_done.load();
-    unsigned long long sw = g_start_wait_ns.load();
-    unsigned long long rw = g_read_wait_ns.load();
-    unsigned long long rio = g_read_io_ns.load();
-    unsigned long long c_ns = g_compress_ns.load();
-    unsigned long long ww = g_write_wait_ns.load();
-    unsigned long long wr_ns = g_write_ns.load();
     println(@string(`Compressed ${argv[1]} -> ${out_name}`, @scratch)) !>;
     println(@string(`Stats: ${bin} bytes in, ${bout} bytes out, ${blocks} blocks`,
                     @scratch)) !>;
-    printf("PhaseStats(sum): start_wait=%.1f ms  read_wait=%.1f ms  read_io=%.1f ms  "
-           "compress=%.1f ms  write_wait=%.1f ms  write=%.1f ms\n",
-           (double)sw / 1e6, (double)rw / 1e6, (double)rio / 1e6,
-           (double)c_ns / 1e6, (double)ww / 1e6, (double)wr_ns / 1e6);
     return 0;
 }

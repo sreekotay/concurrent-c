@@ -2,27 +2,17 @@
 /*
  * pigz_wait.ccs — pigz over `@parallel seq (use_par) wait (ts) for`.
  *
- * The loop body is one ordinary call; the construct owns enter / spawn /
- * join / error capture (no nursery plumbing, no shared failed flag). The
- * CCTurnstileRW stages order the two pieces of loop-carried state:
+ * The construct owns enter / spawn / join / error capture. The body owns
+ * stages and loop-carried state:
  *
- *   read stage  — (PIGZ_DICT=1) the chained dictionary pointer only.
- *                 Block bytes are pread at i*BLOCK_SIZE (no shared
- *                 cursor). The previous block's last 32 KiB stays live
- *                 until the next write ticket (pigz's `dict = curr`);
- *   write stage — output file position, and (PIGZ_DICT=1) the running CRC.
+ *   read  — (PIGZ_DICT=1) dictionary pointer into the previous block.
+ *           Bytes are pread at i*BLOCK_SIZE. That input stays live until
+ *           the next write ticket (pigz `dict = curr`).
+ *   write — output position, and (PIGZ_DICT=1) the running CRC.
  *
- * Because the ticket order is the loop order, the parallel run writes
- * byte-for-byte what the sequential run writes. PIGZ_SEQ=1 denies
- * parallelism at runtime (`seq (use_par)`): same body, two schedules.
- * The helper returns `void !>(CCError)`; the wait-for line unwraps it.
- * The construct records the first error, cancels new entries, still
- * `leave()`s, and re-raises the lowest ticket. Stage passes always run
- * (read is handed back before deflate). PIGZ_DICT=1 is a flag on that
- * one helper — dict on the read stage, crc32_combine on the write,
- * raw deflate + Z_SYNC_FLUSH — not a second code path.
- *
- * PIGZ_CAP=N bounds in-flight blocks (default 16).
+ * PIGZ_SEQ=1 is the same body, sequential. PIGZ_DICT=1 is a flag on one
+ * helper, not a second path. PIGZ_CAP=N (default 16).
+ * PIGZ_SPAWN=1 replaces wait-for with enter + nur->spawn + leave.
  */
 
 #include <ccc/std/prelude.cch>
@@ -37,34 +27,49 @@
 
 #define BLOCK_SIZE (128 * 1024)
 #define DICT_SIZE  32768
-#define DEFAULT_CAP 16
+/* ~2x the scheduler workers: spare in-flight tickets absorb out-of-order
+ * deflate completion so the ordered write stage never starves a runner
+ * (pigz keeps the same lookahead in its job queue). */
+#define DEFAULT_CAP 32
 #define MAX_CAP     256
+#define LEVEL       6
 
+static const unsigned char GZIP_HDR[10] = {
+    0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0x00, 0x03
+};
+
+/* Pooled: the element is this header followed by the output buffer
+ * (deflate_cap(BLOCK_SIZE) bytes). Returned to out_pool after write. */
 typedef struct {
-    CCSlice data;         /* compressed bytes, owned by .arena */
-    unsigned long crc;    /* crc32 of the uncompressed block */
+    CCSlice data;
+    unsigned long crc;
     size_t original_len;
-    CCArena arena;
 } CompressedResult;
 
+/* Reusable deflate state — pigz's deflateReset instead of Init/End per
+ * block. In-flight tickets ≤ cap, so a cap-sized slot array always has
+ * a free entry. */
 typedef struct {
-    CCFile* in;
-    int in_fd;            /* positional reads; FILE cursor is not shared */
+    z_stream strm;
+    cc_atomic_int busy;
+    int inited;
+} ZSlot;
+
+typedef struct {
+    int in_fd;
     CCFile* out;
     CCTurnstileRW* ts;
     size_t file_len;
-    int n;
-    int level;
-    int chain;            /* PIGZ_DICT=1: loop-carried dict + one member */
-    /* Tail of the previous uncompressed block (into held_in). */
+    int chain;
     const unsigned char* dict;
     size_t dict_len;
-    CCArena held_in;      /* previous input; next write ticket frees it */
-    /* Loop-carried, guarded by the write stage. */
+    unsigned char* held_in;  /* pooled input buffer kept alive as next dict */
     unsigned long crc;
-    /* crc32_combine_gen(BLOCK_SIZE): pigz's g.shift = x2nmodp(block, 3).
-     * Full-size blocks skip the per-combine modular exponentiation. */
     unsigned long crc_shift;
+    ZSlot* zslots;
+    int nzslots;
+    CCArenaPool* in_pool;    /* BLOCK_SIZE input buffers, recycled */
+    CCArenaPool* out_pool;   /* CompressedResult + output buffer, recycled */
 } CompressJob;
 
 cc_atomic_i64 g_bytes_in = 0;
@@ -88,185 +93,202 @@ static int env_is_one(const char* name) {
     return s && s[0] == '1' && s[1] == '\0';
 }
 
-/* !chain: one gzip member (header + Z_FINISH + crc/isize), like pigz_parallel.
- * chain: raw deflate, optional dictionary, Z_SYNC_FLUSH (Z_FINISH on last). */
-static CompressedResult* !>(CCIoError) compress_slice(CCSlice data,
-        const unsigned char* dict, size_t dict_len, bool is_last, int chain,
-        int level) {
-    size_t wrap = chain ? 0 : 18;
-    size_t max_out = data.len + (data.len >> 3) + (chain ? 1024 : 256) + wrap;
-    CCArena res_arena = cc_arena_heap(data.len + (data.len >> 3) + 8192);
-    @defer(err) res_arena.free();
-    if (!res_arena.base)
-        return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
+static void put_u32le(unsigned char* p, unsigned long v) {
+    p[0] = (unsigned char)v;
+    p[1] = (unsigned char)(v >> 8);
+    p[2] = (unsigned char)(v >> 16);
+    p[3] = (unsigned char)(v >> 24);
+}
 
-    CompressedResult* res = cc_arena_alloc_T(CompressedResult, &res_arena);
-    unsigned char* out_buf =
-        cc_arena_alloc_T_count(unsigned char, &res_arena, max_out);
-    if (!res || !out_buf)
-        return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
+static void gzip_trailer(unsigned char t[8], unsigned long crc, unsigned long isize) {
+    put_u32le(t, crc);
+    put_u32le(t + 4, isize);
+}
+
+static CCSlice gzip_hdr_slice(void) {
+    return cc_slice_from_buffer((void*)GZIP_HDR, sizeof(GZIP_HDR));
+}
+
+/* One bound: input + 12.5% + slack + gzip wrap (header+trailer). */
+static size_t deflate_cap(size_t n) {
+    return n + (n >> 3) + 1024 + 18;
+}
+
+static ZSlot* zslot_acquire(CompressJob* job) {
+    for (;;) {
+        int k;
+        for (k = 0; k < job->nzslots; k++) {
+            int expect = 0;
+            if (cc_atomic_cas(&job->zslots[k].busy, &expect, 1))
+                return &job->zslots[k];
+        }
+    }
+}
+
+static void zslot_release(ZSlot* zs) {
+    cc_atomic_store(&zs->busy, 0);
+}
+
+/* !chain: header + Z_FINISH + crc/isize. chain: raw deflate, optional
+ * dictionary, Z_SYNC_FLUSH (Z_FINISH on last). */
+static CompressedResult* !>(CCError) compress_slice(CCSlice data,
+        const unsigned char* dict, size_t dict_len, bool is_last, int chain,
+        ZSlot* zs, CCArenaPool* out_pool) {
+    size_t max_out = deflate_cap((size_t)BLOCK_SIZE);
+    CompressedResult* res = (CompressedResult*)out_pool->alloc();
+    @defer(err) out_pool->free(res);
+    if (!res)
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "deflate buf");
+    unsigned char* out_buf = (unsigned char*)(res + 1);
 
     res->original_len = data.len;
     res->crc = crc32(0UL, (const Bytef*)data.ptr, (uInt)data.len);
 
     size_t pos = 0;
     if (!chain) {
-        unsigned char header[10] = {0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0x00, 0x03};
-        memcpy(out_buf, header, 10);
-        pos = 10;
+        memcpy(out_buf, GZIP_HDR, sizeof(GZIP_HDR));
+        pos = sizeof(GZIP_HDR);
     }
 
-    z_stream strm = {0};
-    if (deflateInit2(&strm, level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK)
-        return cc_err(cc_io_error(CC_IO_OTHER));
+    z_stream* strm = &zs->strm;
+    if (zs->inited && deflateReset(strm) != Z_OK) {
+        deflateEnd(strm);
+        zs->inited = 0;
+    }
+    if (!zs->inited) {
+        memset(strm, 0, sizeof(*strm));
+        if (deflateInit2(strm, LEVEL, Z_DEFLATED, -15, 8,
+                         Z_DEFAULT_STRATEGY) != Z_OK)
+            return cc_err(CC_ERR_IO, "deflateInit2");
+        zs->inited = 1;
+    }
     if (chain && dict_len)
-        deflateSetDictionary(&strm, dict, (uInt)dict_len);
+        deflateSetDictionary(strm, dict, (uInt)dict_len);
 
-    strm.next_in = (Bytef*)data.ptr;
-    strm.avail_in = (uInt)data.len;
-    strm.next_out = out_buf + pos;
-    strm.avail_out = (uInt)(max_out - pos - (chain ? 0 : 8));
+    strm->next_in = (Bytef*)data.ptr;
+    strm->avail_in = (uInt)data.len;
+    strm->next_out = out_buf + pos;
+    strm->avail_out = (uInt)(max_out - pos - (chain ? 0 : 8));
 
     int flush = (!chain || is_last) ? Z_FINISH : Z_SYNC_FLUSH;
-    int ret = deflate(&strm, flush);
-    uInt left = strm.avail_in;
-    uInt space = strm.avail_out;
-    pos += strm.total_out;
-    deflateEnd(&strm);
-    /* Z_SYNC_FLUSH: avail_out == 0 can still mean pending sync bytes. */
+    int ret = deflate(strm, flush);
+    uInt left = strm->avail_in;
+    uInt space = strm->avail_out;
+    pos += strm->total_out;
     if (flush == Z_FINISH ? (ret != Z_STREAM_END)
                           : (ret != Z_OK || left != 0 || space == 0))
-        return cc_err(cc_io_error(CC_IO_OTHER));
+        return cc_err(CC_ERR_IO, "deflate");
 
     if (!chain) {
-        unsigned long crc = res->crc;
-        size_t in_len = data.len;
-        out_buf[pos++] = crc & 0xff;
-        out_buf[pos++] = (crc >> 8) & 0xff;
-        out_buf[pos++] = (crc >> 16) & 0xff;
-        out_buf[pos++] = (crc >> 24) & 0xff;
-        out_buf[pos++] = in_len & 0xff;
-        out_buf[pos++] = (in_len >> 8) & 0xff;
-        out_buf[pos++] = (in_len >> 16) & 0xff;
-        out_buf[pos++] = (in_len >> 24) & 0xff;
+        gzip_trailer(out_buf + pos, res->crc, (unsigned long)data.len);
+        pos += 8;
     }
 
-    res->data = res_arena.slice(out_buf, pos);
+    res->data = cc_slice_from_parts(out_buf, pos, CC_SLICE_ID_UNTRACKED);
     g_bytes_in.fetch_add((int64_t)data.len);
     g_bytes_out.fetch_add((int64_t)pos);
     g_blocks_done.fetch_add(1);
-
-    res->arena = res_arena.detach();
     return cc_ok(res);
 }
 
-/* One iteration. job->chain is the only switch: dict pointer on read,
- * combine on write. First local error is kept; stages still pass; the
- * wait-for line unwraps so the construct can cancel / re-raise. */
-static void !>(CCError) compress_and_write_i(CompressJob* job, int i) {
+/* Read stage + deflate. @defer(err) passes the read ticket on any exit
+ * before the handoff. Dict publish is the only wait. */
+static CompressedResult* !>(CCError) deflate_ticket(CompressJob* job, int i,
+                                                   unsigned char** prev_in) {
+    @defer(err) job->ts->read.pass(i);
+
     size_t off = (size_t)i * (size_t)BLOCK_SIZE;
-    CompressedResult* item = NULL;
-    int handed_read = 0;
-    int published = 0;
-    CCTurnstileRW* ts = job->ts;
-    int chain = job->chain;
-    CCErrorKind ek = CC_ERR_NONE;
-    const char* em = NULL;
+    if (off > job->file_len)
+        return cc_err(CC_ERR_IO, "block past end");
+
+    size_t remain = job->file_len - off;
+    size_t want = remain < (size_t)BLOCK_SIZE ? remain : (size_t)BLOCK_SIZE;
+    bool is_last = (off + want >= job->file_len);
+
+    unsigned char* buf = NULL;
+    @defer if (buf) job->in_pool->free(buf);
+
+    CCSlice data = cc_slice_empty();
+    if (want) {
+        buf = (unsigned char*)job->in_pool->alloc();
+        if (!buf)
+            return cc_err(CC_ERR_OUT_OF_MEMORY, "block buf");
+        ssize_t got = pread(job->in_fd, buf, want, (off_t)off);
+        if (got < 0 || (size_t)got != want)
+            return cc_err(CC_ERR_IO, "pread");
+        data = cc_slice_from_parts(buf, (size_t)got, CC_SLICE_ID_UNTRACKED);
+    }
+
     const unsigned char* dict = NULL;
     size_t dict_len = 0;
-    CCArena prev_in = {0};
-
-    if (off >= job->file_len) {
-        ek = CC_ERR_IO;
-        em = "block past end";
-    } else {
-        size_t remain = job->file_len - off;
-        size_t want = remain < (size_t)BLOCK_SIZE ? remain : (size_t)BLOCK_SIZE;
-        bool is_last = (off + want >= job->file_len);
-
-        CCArena blk_arena = cc_arena_heap(want + 64);
-        @defer blk_arena.free();
-        if (!blk_arena.base) {
-            ek = CC_ERR_OUT_OF_MEMORY;
-            em = "block arena";
-        } else {
-            unsigned char* buf =
-                cc_arena_alloc_T_count(unsigned char, &blk_arena, want);
-            CCSlice data = cc_slice_empty();
-            if (!buf) {
-                ek = CC_ERR_OUT_OF_MEMORY;
-                em = "block buf";
-            } else {
-                ssize_t got = pread(job->in_fd, buf, want, (off_t)off);
-                if (got < 0 || (size_t)got != want) {
-                    ek = CC_ERR_IO;
-                    em = "pread";
-                } else {
-                    data = cc_slice_from_parts(buf, (size_t)got,
-                                               CC_SLICE_ID_UNTRACKED);
-                    /* Dict pointer is the only loop-carried read state. */
-                    if (chain)
-                        ts->read.wait(i);
-                    if (chain) {
-                        dict = job->dict;
-                        dict_len = job->dict_len;
-                        prev_in = job->held_in;
-                        memset(&job->held_in, 0, sizeof(job->held_in));
-                        size_t tail = data.len < (size_t)DICT_SIZE
-                            ? data.len : (size_t)DICT_SIZE;
-                        job->dict = (const unsigned char*)data.ptr
-                            + (data.len - tail);
-                        job->dict_len = tail;
-                        job->held_in = blk_arena.detach();
-                        published = 1;
-                    }
-                    ts->read.pass(i);
-                    handed_read = 1;
-                    CompressedResult* !>(CCIoError) r = compress_slice(
-                        data, dict, dict_len, is_last, chain, job->level);
-                    if (r.is_err()) {
-                        ek = CC_ERR_IO;
-                        em = "deflate";
-                    } else {
-                        item = r.value();
-                    }
-                }
-            }
-            if (chain && !published) {
-                job->dict = dict;
-                job->dict_len = dict_len;
-                job->held_in = prev_in;
-                memset(&prev_in, 0, sizeof(prev_in));
-            }
-        }
+    if (job->chain) {
+        job->ts->read.wait(i);
+        dict = job->dict;
+        dict_len = job->dict_len;
+        *prev_in = job->held_in;
+        size_t tail = data.len < (size_t)DICT_SIZE ? data.len : (size_t)DICT_SIZE;
+        job->dict = tail ? (const unsigned char*)data.ptr + (data.len - tail) : NULL;
+        job->dict_len = tail;
+        /* Ownership moves to the chain: the successor frees it once its
+         * deflate no longer needs it as a dictionary. Defer becomes no-op. */
+        job->held_in = buf;
+        buf = NULL;
     }
 
-    if (!handed_read)
-        ts->read.pass(i);
+    job->ts->read.pass(i);
+    /* `return compress_slice(...)` is a Result-fn tail return and skips
+     * this function's @defer (input leak on the default path). cc_ok /
+     * cc_err go through the epilogue. */
+    ZSlot* zs = zslot_acquire(job);
+    CompressedResult* !>(CCError) r = compress_slice(
+        data, dict, dict_len, is_last, job->chain, zs, job->out_pool);
+    zslot_release(zs);
+    if (r.is_err())
+        return cc_err(r.error());
+    return cc_ok(r.value());
+}
 
-    ts->write.wait(i);
-    @defer ts->write.pass(i);
-    if (prev_in.base)
-        prev_in.free();
-    if (item && ek == CC_ERR_NONE) {
-        if (chain) {
-            size_t len2 = item->original_len;
-            job->crc = (len2 == (size_t)BLOCK_SIZE)
-                ? crc32_combine_op(job->crc, item->crc, job->crc_shift)
-                : crc32_combine(job->crc, item->crc, (long)len2);
-        }
-        size_t !>(CCIoError) wr = job->out->write(item->data);
-        if (wr.is_err() || wr.value() != item->data.len) {
-            ek = CC_ERR_IO;
-            em = "write";
-        }
+/* Write stage. Read has already been handed back. */
+static void !>(CCError) compress_and_write_i(CompressJob* job, int i) {
+    @errhandler(CCError e) { return cc_err(e); }
+
+    unsigned char* prev_in = NULL;
+    CompressedResult* !>(CCError) r = deflate_ticket(job, i, &prev_in);
+
+    job->ts->write.wait(i);
+    @defer job->ts->write.pass(i);
+    if (prev_in)
+        job->in_pool->free(prev_in);
+    if (r.is_err())
+        return cc_err(r.error());
+
+    CompressedResult* item = r.value();
+    @defer job->out_pool->free(item);
+    if (job->chain) {
+        size_t len = item->original_len;
+        job->crc = (len == (size_t)BLOCK_SIZE)
+            ? crc32_combine_op(job->crc, item->crc, job->crc_shift)
+            : crc32_combine(job->crc, item->crc, (long)len);
     }
-    if (item)
-        item->arena.free();
-
-    if (ek != CC_ERR_NONE)
-        return cc_err(ek, em);
+    size_t n = job->out->write(item->data) !>;
+    if (n != item->data.len)
+        return cc_err(CC_ERR_IO, "write");
     return cc_ok();
+}
+
+static void spawn_all(CompressJob* job, CCTurnstileRW* ts, int n) {
+    @errhandler(CCError e) cc_error_exit(e);
+
+    CCNursery* nur = cc_nursery_create(NULL) !> @destroy;
+    int i;
+    for (i = 0; i < n; i++) {
+        ts->enter(i) !>;
+        nur->spawn(() => [job, i, ts] {
+            @errhandler(CCError e) cc_error_exit(e);
+            compress_and_write_i(job, i) !>;
+            ts->leave() !>;
+        });
+    }
 }
 
 void !>(CCError) compress_file(char[:] in_path, char[:] out_path) {
@@ -288,72 +310,79 @@ void !>(CCError) compress_file(char[:] in_path, char[:] out_path) {
         return cc_err(CC_ERR_IO, "Failed to open output");
     @defer out_file.close();
 
-    /* gzip empty file is a valid member, not a zero-byte success. */
-    if (file_len == 0) {
-        CompressedResult* item =
-            compress_slice(cc_slice_empty(), NULL, 0, true, 0, 6) !>;
-        @defer item->arena.free();
-        size_t n = out_file.write(item->data) !>;
-        if (n != item->data.len)
-            return cc_err(CC_ERR_IO, "write");
-        out_file.sync() !>;
-        return cc_ok();
-    }
-
-    size_t n_sz = (file_len + (size_t)BLOCK_SIZE - 1) / (size_t)BLOCK_SIZE;
+    /* Empty file is one zero-length ticket, not a zero-byte .gz. */
+    size_t n_sz = file_len ? (file_len + (size_t)BLOCK_SIZE - 1) / (size_t)BLOCK_SIZE : 1;
     if (n_sz > (size_t)INT_MAX)
         return cc_err(CC_ERR_INVALID_ARG, "too many blocks");
     int n = (int)n_sz;
     int cap = stagger_cap();
     int chain = env_is_one("PIGZ_DICT");
 
-    if (chain) {
-        unsigned char header[10] = {0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0x00, 0x03};
-        out_file.write(cc_slice_from_buffer(header, sizeof(header))) !>;
-    }
+    if (chain)
+        out_file.write(gzip_hdr_slice()) !>;
 
     CCArena ts_arena = cc_arena_heap(megabytes(2)) @destroy;
     CCTurnstileRW ts@(n, cap, &ts_arena) @destroy;
     if (!ts.core.excl)
         return cc_err(CC_ERR_OUT_OF_MEMORY, "cc_turnstile_create failed");
 
-    CompressJob job_store;
-    memset(&job_store, 0, sizeof(job_store));
-    job_store.in = &in_file;
-    job_store.in_fd = fileno(in_file.handle);
-    job_store.out = &out_file;
-    job_store.ts = &ts;
-    job_store.file_len = file_len;
-    job_store.n = n;
-    job_store.level = 6;
-    job_store.chain = chain;
-    job_store.crc = crc32(0UL, NULL, 0);
-    if (chain)
-        job_store.crc_shift = crc32_combine_gen((z_off_t)BLOCK_SIZE);
-    CompressJob* job = &job_store;
+    CCArenaPool in_pool;
+    if (cc_arena_pool(&in_pool, (size_t)BLOCK_SIZE) != 0)
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "input pool");
+    @defer in_pool.destroy();
+
+    CCArenaPool out_pool;
+    if (cc_arena_pool(&out_pool,
+            sizeof(CompressedResult) + deflate_cap((size_t)BLOCK_SIZE)) != 0)
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "output pool");
+    @defer out_pool.destroy();
+
+    ZSlot* zslots = cc_arena_alloc_T_count(ZSlot, &ts_arena, (size_t)cap);
+    if (!zslots)
+        return cc_err(CC_ERR_OUT_OF_MEMORY, "zslot pool");
+    memset(zslots, 0, (size_t)cap * sizeof(ZSlot));
+    @defer {
+        int k;
+        for (k = 0; k < cap; k++)
+            if (zslots[k].inited)
+                deflateEnd(&zslots[k].strm);
+    }
+
+    CompressJob store = {
+        .in_fd = fileno(in_file.handle),
+        .out = &out_file,
+        .ts = &ts,
+        .file_len = file_len,
+        .chain = chain,
+        .crc = crc32(0UL, NULL, 0),
+        .crc_shift = chain ? crc32_combine_gen((z_off_t)BLOCK_SIZE) : 0,
+        .zslots = zslots,
+        .nzslots = cap,
+        .in_pool = &in_pool,
+        .out_pool = &out_pool,
+    } @destroy {
+        /* Last block's buffer: published as the next dict, no successor
+         * ever takes it out of held_in. */
+        if (store.held_in) store.in_pool->free(store.held_in);
+    };
 
     int use_par = !env_is_one("PIGZ_SEQ");
-
+    int use_spawn = env_is_one("PIGZ_SPAWN");
     int i;
-    @parallel seq (use_par) wait (ts) for (i in 0..n) {
-        compress_and_write_i(job, i) !>;
+    if (!use_par) {
+        for (i = 0; i < n; i++)
+            compress_and_write_i(&store, i) !>;
+    } else if (use_spawn) {
+        spawn_all(&store, &ts, n);
+    } else {
+        @parallel seq (use_par) wait (ts) for (i in 0..n) {
+            compress_and_write_i(&store, i) !>;
+        }
     }
-    if (job->held_in.base)
-        job->held_in.free();
-
     if (chain) {
-        unsigned char trailer[8];
-        unsigned long crc = job->crc;
-        unsigned long isize = (unsigned long)(file_len & 0xffffffffUL);
-        trailer[0] = crc & 0xff;
-        trailer[1] = (crc >> 8) & 0xff;
-        trailer[2] = (crc >> 16) & 0xff;
-        trailer[3] = (crc >> 24) & 0xff;
-        trailer[4] = isize & 0xff;
-        trailer[5] = (isize >> 8) & 0xff;
-        trailer[6] = (isize >> 16) & 0xff;
-        trailer[7] = (isize >> 24) & 0xff;
-        out_file.write(cc_slice_from_buffer(trailer, sizeof(trailer))) !>;
+        unsigned char t[8];
+        gzip_trailer(t, store.crc, (unsigned long)(file_len & 0xffffffffUL));
+        out_file.write(cc_slice_from_buffer(t, sizeof(t))) !>;
     }
 
     out_file.sync() !>;

@@ -1,0 +1,173 @@
+/*
+ * @parallel captures are by reference (§8.11 Captures): a body or arm
+ * reads and writes the frame's object itself, and writes are visible
+ * after the join. Under a by-value env copy every check below sees
+ * stale zeros: the join's @serial field write, the go-helper RHS, the
+ * for-body element writes, and the wait loop-carried locals all land
+ * in copies and never reach the frame.
+ *
+ * collide() pins the rewrite rule: a captured local named like a struct
+ * member (`x` vs `p->x`) in the same body. The reference rewrite must
+ * redirect exactly the bare uses and leave member names alone, on every
+ * lowering path (thunk, go helper, for walk, wait run, closure entry).
+ */
+#include <ccc/std/prelude.cch>
+#include <string.h>
+#include <stdio.h>
+
+#define N   16
+#define CAP 3
+
+typedef struct {
+    int vals[N];
+    int scale;
+} Acc;
+
+static int add_one(int v) { return v + 1; }
+
+typedef struct { int x; int y; } Pt;
+
+static int collide(CCTurnstile* ts) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    Pt pt = { 9, 0 };
+    Pt* p = &pt;
+    int x = 1; /* same name as the member */
+    int a = 0;
+    int b = 0;
+    int on = 1;
+    int buf[N];
+    int i;
+
+    @parallel {
+        a = p->x + x;
+        b = x + 1;
+    }
+    if (a != 10 || b != 2) {
+        fprintf(stderr, "FAIL collide join a=%d b=%d\n", a, b);
+        return 1;
+    }
+
+    @parallel seq (on) {
+        a = p->x - x;
+        b = x + 2;
+    }
+    if (a != 8 || b != 3) {
+        fprintf(stderr, "FAIL collide gated a=%d b=%d\n", a, b);
+        return 1;
+    }
+
+    @parallel for (i in 0..N) {
+        buf[i] = p->x + x + i;
+    }
+    for (i = 0; i < N; i++) {
+        if (buf[i] != 10 + i) {
+            fprintf(stderr, "FAIL collide for i=%d got=%d\n", i, buf[i]);
+            return 1;
+        }
+    }
+
+    int next = 0;
+    @parallel wait (ts) for (i in 0..N) {
+        ts->wait(0, i);
+        next = next + p->x + x;
+        ts->pass(0, i);
+    }
+    if (next != N * 10) {
+        fprintf(stderr, "FAIL collide wait next=%d\n", next);
+        return 1;
+    }
+
+    CCClosure0 c = @unsafe () => [&x, p] {
+        return (void*)(intptr_t)(p->x + x);
+    };
+    if ((int)(intptr_t)cc_closure0_call(c) != 10) {
+        fprintf(stderr, "FAIL collide closure\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int run_wait(CCTurnstile* ts) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    int i;
+    int next = 0; /* loop-carried through the stage: a local, not a global */
+    long total = 0;
+    @parallel wait (ts) for (i in 0..N) {
+        ts->wait(0, i);
+        total += next;
+        next = next + 1;
+        ts->pass(0, i);
+    }
+    if (next != N || total != (long)N * (N - 1) / 2) {
+        fprintf(stderr, "FAIL wait next=%d total=%ld\n", next, total);
+        return 1;
+    }
+    return 0;
+}
+
+int main(void) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+
+    /* Assignment join: the @serial arm mutates a captured struct field. */
+    Acc acc;
+    int base = 41;
+    int a = 0;
+    int b = 0;
+    memset(&acc, 0, sizeof(acc));
+    @parallel {
+        a = add_one(base);
+        @serial {
+            int t;
+            acc.scale = 3;
+            t = base + acc.scale;
+            b = t;
+        }
+    }
+    if (a != 42 || b != 44 || acc.scale != 3) {
+        fprintf(stderr, "FAIL join a=%d b=%d scale=%d\n", a, b, acc.scale);
+        return 1;
+    }
+
+    /* Gated join (go-helper path): RHS reads the mutated frame state. */
+    int flag = 1;
+    int x = 0;
+    int y = 0;
+    @parallel seq (flag) {
+        x = acc.scale + base;
+        y = add_one(acc.scale);
+    }
+    if (x != 44 || y != 4) {
+        fprintf(stderr, "FAIL gated x=%d y=%d\n", x, y);
+        return 1;
+    }
+
+    /* @parallel for: disjoint element writes into a captured struct. */
+    Acc pacc;
+    int i;
+    memset(&pacc, 0, sizeof(pacc));
+    pacc.scale = 2;
+    @parallel for (i in 0..N) {
+        pacc.vals[i] = pacc.scale * i;
+    }
+    for (i = 0; i < N; i++) {
+        if (pacc.vals[i] != 2 * i) {
+            fprintf(stderr, "FAIL for i=%d got=%d\n", i, pacc.vals[i]);
+            return 1;
+        }
+    }
+
+    /* wait for: loop-carried counter and sum in captured locals. */
+    CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+    CCTurnstile ts@(N, CAP, 1, &arena) @destroy;
+    CCTurnstile ts2@(N, CAP, 1, &arena) @destroy;
+    if (!ts.excl || !ts2.excl)
+        return 1;
+    if (run_wait(&ts) != 0)
+        return 1;
+
+    if (collide(&ts2) != 0)
+        return 1;
+
+    printf("parallel_capture_ref_smoke: OK\n");
+    return 0;
+}
