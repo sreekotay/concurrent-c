@@ -1731,6 +1731,13 @@ static inline CCString cc_gr_ok_close_text(CCArena* a, int k) {
 `, a);
 }
 
+/* PEG `not` succeeds by falling through after the child miss restore; no
+ * `goto Lok`. Close the save-block without a join label. */
+static inline CCString cc_gr_block_close_text(CCArena* a) {
+    return @string(`}
+`, a);
+}
+
 /* PEG `not` / `and` (peek): child already ran; restore cursor. `not` fails
  * if the child matched; `and` fails if the child missed. */
 static inline CCString cc_gr_not_hit_text(CCArena* a, int k, const char* fail) {

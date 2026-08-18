@@ -2730,7 +2730,6 @@ int cc__ufcs_method_return_type(const char* recv_type_base, const char* method,
 static int cc__call_return_type(const char* fname, const char* src, size_t n,
                                 char* out, size_t out_sz);
 static int cc__free_call_name_is_keyword(const char* s, size_t n);
-static int cc_included_cch_declares_fn(const char* name);
 static int cc__fn_return_type(const char* src, size_t n, const char* name,
                               char* out, size_t out_sz);
 static void cc__enumerate_family_variants(const char* src, size_t n,
@@ -6926,8 +6925,6 @@ static char* cc__rewrite_channel_send_recv_ufcs_parser_safe(const char* src, siz
  * left untouched, as is any site whose composition or verification
  * fails (those remain the implicit-declaration errors they are today).
  */
-
-static int cc_included_cch_declares_fn(const char* name);
 
 static int cc__free_call_name_is_keyword(const char* s, size_t len) {
     static const char* const kws[] = {
@@ -12860,6 +12857,13 @@ static int cc__cache_has_callable(const CCPathTextCache* slot, const char* name)
                    cc__callable_name_cmp) != NULL;
 }
 
+static int cc__cache_has_declare(const CCPathTextCache* slot, const char* name) {
+    char* key = (char*)name;
+    if (!slot || !slot->declares || !name || !name[0]) return 0;
+    return bsearch(&key, slot->declares, slot->n_declares, sizeof(char*),
+                   cc__callable_name_cmp) != NULL;
+}
+
 static CCPathTextCache* cc__path_text_cache_find(const char* path) {
     size_t i;
     if (!path) return NULL;
@@ -14059,10 +14063,24 @@ static void cc__ensure_incl_declares_union(void) {
  * identifier char or `*` (a type or declarator precedes). Doc-comment
  * examples and `.method(` call spellings never match. Also matches
  * `#define name(` (a visible macro is a real binding). */
-static int cc_included_cch_declares_fn(const char* name) {
+int cc_included_cch_declares_fn(const char* name) {
     if (!name || !name[0]) return 0;
     cc__ensure_incl_declares_union();
     return cc__name_set_has(&g_incl_declares_union, name);
+}
+
+int cc_lowered_local_declares_fn(const char* name) {
+    size_t i;
+    if (!name || !name[0]) return 0;
+    for (i = 0; i < g_lowered_local_header_count; i++) {
+        const char* path = g_lowered_local_headers[i].source_path;
+        CCPathTextCache* slot;
+        if (!path || !path[0]) continue;
+        (void)cc__path_text_cached(path, NULL);
+        slot = cc__path_text_cache_find(path);
+        if (slot && cc__cache_has_declare(slot, name)) return 1;
+    }
+    return 0;
 }
 
 /* First parameter's type span for a decl-shaped `name(` occurrence in

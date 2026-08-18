@@ -188,6 +188,11 @@ void cc_ingest_included_cch_struct_fields(CCTypeRegistry* reg);
 
 /* Nonzero if any registered included .cch contains callable `name(`. */
 int cc_included_cch_contains_fn(const char* name);
+/* Decl-shaped twin: comment/string-aware, and a type or `*` precedes
+ * `name(`. Doc-comment examples and `.method(` calls never match. */
+int cc_included_cch_declares_fn(const char* name);
+/* Same oracle, restricted to lowered local (quoted project) `.cch`. */
+int cc_lowered_local_declares_fn(const char* name);
 /* First parameter type of a decl-shaped `name(` occurrence in an
  * included cch header, whitespace-normalized. Returns 0/1. */
 int cc_included_cch_fn_first_param(const char* name, char* out, size_t out_sz);

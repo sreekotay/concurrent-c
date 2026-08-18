@@ -1742,9 +1742,12 @@ static void rg_emit_node(const RG* g, EB* e, int nd, const char* fail, int* lbl,
         else
             eb_emit(e, cc_gr_and_hit_text(e->scratch, k));
         eb_emit(e, cc_gr_restore_text(e->scratch, br, k, 0, g->name));
-        if (x->kind == RN_AND)
+        if (x->kind == RN_AND) {
             eb_emit(e, cc_gr_goto_fail_text(e->scratch, fail));
-        eb_emit(e, cc_gr_ok_close_text(e->scratch, k));
+            eb_emit(e, cc_gr_ok_close_text(e->scratch, k));
+        } else {
+            eb_emit(e, cc_gr_block_close_text(e->scratch));
+        }
         break;
     }
     case RN_TOKKIND: {

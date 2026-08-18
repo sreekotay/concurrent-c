@@ -1,0 +1,14 @@
+/* A string literal to a local-header callee has no pack type — refuse
+ * instead of emitting printf((intptr_t)__e->__a0). */
+#include <ccc/cc_runtime.cch>
+#include <ccc/std/task.cch>
+#include "autoblock_string_arg_helper.cch"
+
+@async int f(void) {
+    ab_log("hi");
+    return 0;
+}
+
+int main(void) {
+    return cc_block_on(int, f());
+}

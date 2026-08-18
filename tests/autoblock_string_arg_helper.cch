@@ -1,0 +1,8 @@
+#ifndef AUTOBLOCK_STRING_ARG_HELPER_CCH
+#define AUTOBLOCK_STRING_ARG_HELPER_CCH
+
+static void ab_log(const char* s) {
+    (void)s;
+}
+
+#endif

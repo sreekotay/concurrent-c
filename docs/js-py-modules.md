@@ -7,6 +7,9 @@ Same headers and marshalling; two ownership models:
 | **Hosting** | Concurrent-C | `cc_py_new` / JS host; call foreign packages with UFCS + `!>` |
 | **Module export** | Node or CPython | one `.ccs` → `.node` and/or `.abi3.so`; they `require` / `import` your type |
 
+A [more advanced example](#more-advanced-example) keeps the module
+stateless: N instances are N host buffers.
+
 **Process bridges** (any foreign package, heavier):
 
 - **Python from Node** — npm [`concurrent-c-python`](https://www.npmjs.com/package/concurrent-c-python) · in-tree [`npm/cc-python`](../npm/cc-python)
@@ -262,7 +265,10 @@ the exported pointer. The rest follows from C:
 
 - `long long by = 1` — default argument. JS may pass a trailing plain
   object by name (`c.bump({by: 2})`); Python gets keywords
-  (`counter.bump(by=2)`).
+  (`counter.bump(by=2)`). A trailing plain object binds by name only
+  when every key names a remaining parameter; any unmatched key
+  refuses. Place an options-bag-shaped parameter before defaulted
+  ones so a legitimate object argument is not read as a keyword bag.
 - `Counter__clamp` (double underscore after the type) reflects as
   `_clamp` and is **not exported** — leading `_` is privacy at the
   boundary. Wrap-and-export if you want a public name
@@ -278,7 +284,9 @@ trampolines hold the GIL for the call). You still own: C globals across
 realms, and threads you start inside a call that touch `T` (or a
 `double[:]` borrow — lease is exactly the call) after return.
 Free-threaded CPython is out of scope. Multiple instances in one realm:
-hold them in your `T` (handle-passing), as a C library would.
+hold them in your `T` (handle-passing), as a C library would — or leave
+`T` empty and keep each instance in a host buffer ([more advanced
+example](#more-advanced-example)).
 
 ## Buffers
 
@@ -340,7 +348,8 @@ Engines that are not Node can win a scalar call and still fail `require('fs')`.
 **Module export:** [`examples/recipe_js_module.ccs`](../examples/recipe_js_module.ccs),
 [`examples/recipe_py_module.ccs`](../examples/recipe_py_module.ccs),
 [`tests/dual_module_export_mod.ccs`](../tests/dual_module_export_mod.ccs),
-[`tests/js_module_double_result_mod.ccs`](../tests/js_module_double_result_mod.ccs).
+[`tests/js_module_double_result_mod.ccs`](../tests/js_module_double_result_mod.ccs),
+[more advanced example](#more-advanced-example) (stateless module, host buffer).
 
 ## Measured
 
@@ -430,3 +439,81 @@ with in-process because the kernel dominates.
 
 Costs by tier: **ns** for your own module, **µs** in-process for a Python
 package, **~100µs + shm** when you want processes between you.
+
+## More advanced example
+
+The module is a service; the state is the caller's.
+
+Running mean/variance (Welford). The module owns no state:
+`st = [n, mean, m2]` lives in the caller's buffer — numpy float64,
+`array.array('d')`, or `Float64Array` — borrowed zero-copy for exactly
+the call, mutated in place. N instances = N host buffers; the host's GC
+owns liveness; pickle / `structuredClone` work because the state is
+host-real. The seed is empty: `Wf` is scratch, not data. The state
+must be a typed buffer — a converted list discards the in-place
+update.
+
+```c
+#include <ccc/script/py.cch>
+#include <ccc/script/js.cch>
+
+typedef struct Wf { char _; } Wf;
+
+static void !>(CCError) Wf_step(Wf *self, double[:] st, double x) {
+    if (st.base.len < 3) return cc_err(CC_ERR_INVALID_ARG, "state needs 3 doubles");
+    double *s = (double *)st.base.ptr;
+    double n = s[0] + 1.0, d = x - s[1];
+    double mean = s[1] + d / n;
+    s[0] = n;  s[1] = mean;  s[2] += d * (x - mean);
+    return cc_ok();
+}
+static double Wf_mean(Wf *self, double[:] st) {
+    return ((double *)st.base.ptr)[1];
+}
+static double !>(CCError) Wf_variance(Wf *self, double[:] st) {
+    double *s = (double *)st.base.ptr;
+    if (s[0] < 2.0) return cc_err(CC_ERR_INVALID_ARG, "need two samples");
+    return cc_ok(s[2] / (s[0] - 1.0));
+}
+
+static const Wf seed = {0};
+@comptime cc_py_export("welford", "Wf", &seed);
+@comptime cc_js_export("welford", "Wf", &seed);
+```
+
+```sh
+ccc build welford.ccs   # → bin/welford.node + bin/welford.abi3.so
+```
+
+Python — the class the first-minute user was looking for, ten lines:
+
+```python
+import array, welford
+
+class Welford:
+    def __init__(self):
+        self.st = array.array('d', [0.0, 0.0, 0.0])   # real Python state:
+    def step(self, x):                                 # picklable, copyable,
+        welford.wf.step(self.st, x)                    # debugger-visible
+    @property
+    def mean(self):     return welford.wf.mean(self.st)
+    @property
+    def variance(self): return welford.wf.variance(self.st)  # ValueError if n < 2
+```
+
+JS — same shape, same count:
+
+```js
+const m = require('./bin/welford.node');
+
+class Welford {
+  st = new Float64Array(3);                    // real JS state: structuredClone,
+  step(x)        { m.wf.step(this.st, x); }    // devtools, GC all just work
+  get mean()     { return m.wf.mean(this.st); }
+  get variance() { return m.wf.variance(this.st); }  // TypeError before 2 samples
+}
+```
+
+[`real_projects/levenshtein`](../real_projects/levenshtein) is this
+pattern at package scale — stateless service, host-owned data, judged
+at parity by the package it reimplements.

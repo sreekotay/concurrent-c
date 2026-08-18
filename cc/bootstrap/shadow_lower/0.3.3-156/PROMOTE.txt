@@ -1,0 +1,9 @@
+promoted_utc: 2026-08-18T00:16:19Z
+git_head: b941fddd
+--- from SNAPSHOT.txt ---
+source: cc/shadow/shadow_lower.ccs
+emitter: native:/Users/airm5/Documents/code/concurrent-c/out/cc/bin/shadow_lower
+created_utc: 2026-08-18T00:16:14Z
+git_head: b941fddd
+emit_bytes: 117293
+header_count: 26
