@@ -13,8 +13,9 @@ The driver accepts:
 
 Unit kind is the first-line header (`#!ccc ccs|cch`, or a `ccc` OS shebang for
 scripts; see the complete spec §1.7). A `.ccs` / `.cch` / `.shcc` suffix is the
-fallback when the header is absent. `version=MAJOR[.MINOR[.PATCH[-SEED]]]` (or
-`--ccc-version=`) pins the lowerer to a bootstrap folder the pin prefixes.
+fallback when the header is absent. `version=MAJOR.MINOR` (usual) or a
+tighter `MAJOR.MINOR.PATCH[-SEED]` (or `--ccc-version=`) pins the lowerer
+to a bootstrap folder the pin prefixes.
 
 The default pipeline emits C, compiles an object, and links an executable. `run` performs that pipeline and executes the result.
 

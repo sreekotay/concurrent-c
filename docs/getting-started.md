@@ -15,15 +15,16 @@ strips it; it is not program text:
 ```text
 #!ccc ccs                         # source (.ccs)
 #!ccc cch                         # header (.cch)
-#!ccc ccs version=0.3.3           # pin lowerer (prefix of ccc --version)
-#!/usr/bin/env -S ./cc/bin/ccc version=0.3.3   # script (.shcc); OS shebang
+#!ccc ccs version=0.3             # pin lowerer (usual: MAJOR.MINOR)
+#!/usr/bin/env -S ./cc/bin/ccc version=0.3     # script (.shcc); OS shebang
 ```
 
-`version=MAJOR[.MINOR[.PATCH[-SEED]]]` keeps that file on a matching bootstrap
-seed when the toolchain moves. Omit the pin only when you intentionally want
-whatever `ccc` is running. A `.ccs` / `.cch` / `.shcc` suffix is the fallback
-when the header is absent — prefer the header so kind and pin travel with the
-file. Details: [backwards compatibility](backwards_compatibility.md).
+`version=MAJOR.MINOR` keeps that file on the 0.3 line when the toolchain
+moves. PATCH and SEED (`0.3.3`, `0.3.3-156`) tighten the match. Omit the pin
+only when you intentionally want whatever `ccc` is running. A `.ccs` / `.cch`
+/ `.shcc` suffix is the fallback when the header is absent — prefer the header
+so kind and pin travel with the file. Details:
+[backwards compatibility](backwards_compatibility.md).
 
 ## Install
 
@@ -541,7 +542,7 @@ ccc run tools/cc_perf_check.shcc -- --help
 Shebang from a repo checkout (cwd = repo root):
 
 ```text
-#!/usr/bin/env -S ./cc/bin/ccc [--as=shcc] [version=0.3.3]
+#!/usr/bin/env -S ./cc/bin/ccc [--as=shcc] [version=0.3]
 ```
 
 `--as=shcc` is optional on a `ccc` interpreter shebang. `#!ccc shcc` is

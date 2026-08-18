@@ -16,10 +16,11 @@ The lowerer (`shadow_lower`) is a frozen C snapshot, not “whatever is in
 (`MAJOR.MINOR.PATCH-SEED`, for example `0.3.3-128`). `last-good` points at the
 running pin. `ccc --version` prints that pin (`ccc 0.3.3-128`).
 
-A source file that pins `version=0.3.2` keeps lowering with a 0.3.2 seed after
-the toolchain moves to 0.4.x. A file with no pin always uses the running
-lowerer. A pin whose seed is not in the tree is an error — the driver does not
-quietly substitute a different lowerer.
+A source file that pins `version=0.3` stays on the 0.3 line after the
+toolchain moves to 0.4.x. That is the usual pin: MAJOR.MINOR. PATCH and SEED
+freeze a tighter match. A file with no pin always uses the running lowerer. A
+pin whose seed is not in the tree is an error — the driver does not quietly
+substitute a different lowerer.
 
 ## Unit header
 
@@ -42,14 +43,15 @@ a `.ccs` / `.cch` / `.shcc` suffix is ill-formed.
 
 ## Version pins
 
-Form: `MAJOR[.MINOR[.PATCH[-SEED]]]`. The pin is a **component prefix** of a
-bootstrap folder name, not a digit prefix of the seed.
+Form: `MAJOR.MINOR[.PATCH[-SEED]]` (usual: `MAJOR.MINOR`). The pin is a
+**component prefix** of a bootstrap folder name, not a digit prefix of the
+seed. `MAJOR` alone still matches.
 
 | Pin | Matches `0.3.2-122`? |
 |-----|----------------------|
 | `0.3.2-122` | yes (exact) |
 | `0.3.2` | yes |
-| `0.3` | yes |
+| `0.3` | yes (usual) |
 | `0` | yes |
 | `0.3.2-12` | no (`12` is not seed `122`) |
 | `0.4` | no |
@@ -59,12 +61,12 @@ When the running toolchain matches the pin, that lowerer is used. Otherwise
 `cc/bootstrap/shadow_lower/`. No matching folder is a hard error.
 
 ```text
-#!ccc ccs version=0.3.2
+#!ccc ccs version=0.3
 ```
 
 ```bash
-ccc version=0.3.2-110 --emit-c-only path.ccs
-ccc --ccc-version=0.3.2 run path.ccs
+ccc version=0.3 --emit-c-only path.ccs
+ccc --ccc-version=0.3 run path.ccs
 ```
 
 Unpinned units, and pins that prefix the running version, use the current
@@ -80,9 +82,10 @@ kind to travel with the file (extensionless paths, or a pin).
 ## What a pin is for
 
 Pin a file (or a CLI invocation) when its syntax or lowering must stay on a
-known seed: a recipe written against 0.3.2, a CI job that must not pick up a
-newer lowerer, a historical repro. Do not pin day-to-day hacking on this repo
-unless you mean to freeze that unit.
+known line: a recipe written against 0.3, a CI job that must not pick up 0.4,
+a historical repro. Use PATCH or SEED only to freeze tighter than the line.
+Do not pin day-to-day hacking on this repo unless you mean to freeze that
+unit.
 
 Keep `last-good` plus one or two prior pins for rollback. Older seeds are safe
 to delete once cold smoke is green — they are not required to build the

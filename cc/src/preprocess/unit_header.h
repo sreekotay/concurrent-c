@@ -14,8 +14,8 @@
  *   #!ccc cch [version=PIN]
  *   #!/usr/bin/env -S ./cc/bin/ccc [--as=shcc] [version=PIN]
  *
- * PIN is MAJOR[.MINOR[.PATCH[-SEED]]] (component prefix), a bound
- * (>=X / >X / <=X / <X), or both (e.g. >=0.3.2,<0.4).
+ * PIN is MAJOR.MINOR[.PATCH[-SEED]] (usual: MAJOR.MINOR), a bound
+ * (>=X / >X / <=X / <X), or both (e.g. >=0.3,<0.4).
  */
 
 typedef enum {
@@ -55,8 +55,8 @@ int cc_unit_resolve(const char* path, CCUnitKind cli_kind,
                     char version_out[CC_CCC_VERSION_PIN_CAP], char* err,
                     size_t err_cap);
 
-/* Bare pin form: MAJOR[.MINOR[.PATCH[-SEED]]]  (e.g. 0.3.2 or 0.3.2-121).
- * Omitted trailing components are -1. */
+/* Bare pin form: MAJOR.MINOR[.PATCH[-SEED]] (usual: 0.3; tighter: 0.3.3-156).
+ * Omitted trailing components are -1. MAJOR alone is still a prefix. */
 int cc_ccc_version_parse(const char* s, int* major, int* minor, int* patch,
                          int* seed);
 /* 1 if pin is a bare version, a bound (>=X / >X / <=X / <X), both, or
@@ -66,9 +66,9 @@ void cc_ccc_version_current(char* dst, size_t cap);
 int cc_ccc_version_current_seed(void);
 int cc_ccc_version_equal(const char* a, const char* b);
 /* 1 if every pin clause matches candidate. A bare pin is a component
- * prefix (`0.3.2` matches `0.3.2-121`; `0.3.2-12` does not). A bound
- * compares as a prefix: a candidate on the bound's line is equal
- * (`>=0.3.3` matches `0.3.3-151`; `>0.3.3` does not). Candidate must
+ * prefix (`0.3` matches `0.3.3-156`; `0.3.2-12` does not match
+ * `0.3.2-121`). A bound compares as a prefix: a candidate on the bound's
+ * line is equal (`>=0.3` matches `0.3.3-156`; `>0.3` does not). Candidate must
  * be a concrete version (folder / current), not a spec. */
 int cc_ccc_version_matches(const char* pin, const char* candidate);
 /* <0 / 0 / >0 like strcmp. Unspecified components sort below specified. */

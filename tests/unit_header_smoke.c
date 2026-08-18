@@ -1,6 +1,6 @@
 /*
  * Driver smoke: first-line unit headers (#!ccc ccs|cch, OS shebang) and
- * version pins (prefix, >= / > / <= / <, or both).
+ * version pins (usual MAJOR.MINOR, or tighter / >= / > / <= / <, or both).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -94,21 +94,21 @@ int main(void) {
                            "magic cch pin");
     failed |= expect_parse("#!ccc ccs version=0.3.2",
                            "kind=ccs os_shebang=0 version=0.3.2",
-                           "magic ccs prefix pin");
+                           "magic ccs patch pin");
     failed |= expect_parse("#!ccc ccs version=0.3",
                            "kind=ccs os_shebang=0 version=0.3",
-                           "magic ccs major.minor pin");
-    failed |= expect_parse("#!ccc ccs version=>=0.3.3",
-                           "kind=ccs os_shebang=0 version=>=0.3.3",
+                           "magic ccs usual minor pin");
+    failed |= expect_parse("#!ccc ccs version=>=0.3",
+                           "kind=ccs os_shebang=0 version=>=0.3",
                            "magic ccs >= pin");
     failed |= expect_parse("#!ccc ccs version=<0.4",
                            "kind=ccs os_shebang=0 version=<0.4",
                            "magic ccs < pin");
-    failed |= expect_parse("#!ccc ccs version=>=0.3.2,<0.4",
-                           "kind=ccs os_shebang=0 version=>=0.3.2,<0.4",
+    failed |= expect_parse("#!ccc ccs version=>=0.3,<0.4",
+                           "kind=ccs os_shebang=0 version=>=0.3,<0.4",
                            "magic ccs range pin");
-    failed |= expect_parse("#!ccc ccs version=<0.4,>=0.3.2",
-                           "kind=ccs os_shebang=0 version=<0.4,>=0.3.2",
+    failed |= expect_parse("#!ccc ccs version=<0.4,>=0.3",
+                           "kind=ccs os_shebang=0 version=<0.4,>=0.3",
                            "magic ccs range pin reversed");
     failed |= expect_ill_formed("#!ccc ccs version=>=", "empty >=");
     failed |= expect_ill_formed("#!ccc ccs version=>", "empty >");
@@ -148,12 +148,19 @@ int main(void) {
     }
 
     if (ver[0]) {
-        char prefix[64];
+        char patch[64];
+        char minor[64];
         char bad[80];
         char* dash;
-        snprintf(prefix, sizeof(prefix), "%s", ver);
-        dash = strrchr(prefix, '-');
+        char* d1;
+        char* d2;
+        snprintf(patch, sizeof(patch), "%s", ver);
+        dash = strrchr(patch, '-');
         if (dash) *dash = '\0';
+        snprintf(minor, sizeof(minor), "%s", patch);
+        d1 = strchr(minor, '.');
+        d2 = d1 ? strchr(d1 + 1, '.') : NULL;
+        if (d2) *d2 = '\0';
 
         snprintf(cmd, sizeof(cmd),
                  "./cc/bin/ccc version=%s --emit-c-only "
@@ -168,14 +175,24 @@ int main(void) {
         snprintf(cmd, sizeof(cmd),
                  "./cc/bin/ccc version=%s --emit-c-only "
                  "tests/unit_header_ccs_smoke.ccs",
-                 prefix);
+                 minor);
         if (run_capture(cmd, out, sizeof(out), &ec) != 0 || ec != 0) {
-            fprintf(stderr, "FAIL prefix pin %s (exit %d):\n%s\n", prefix, ec,
+            fprintf(stderr, "FAIL usual minor pin %s (exit %d):\n%s\n", minor,
+                    ec, out);
+            failed = 1;
+        }
+
+        snprintf(cmd, sizeof(cmd),
+                 "./cc/bin/ccc version=%s --emit-c-only "
+                 "tests/unit_header_ccs_smoke.ccs",
+                 patch);
+        if (run_capture(cmd, out, sizeof(out), &ec) != 0 || ec != 0) {
+            fprintf(stderr, "FAIL patch pin %s (exit %d):\n%s\n", patch, ec,
                     out);
             failed = 1;
         }
 
-        snprintf(bad, sizeof(bad), "%s-12", prefix);
+        snprintf(bad, sizeof(bad), "%s-12", patch);
         snprintf(cmd, sizeof(cmd),
                  "./cc/bin/ccc version=%s --emit-c-only "
                  "tests/unit_header_ccs_smoke.ccs",
@@ -190,25 +207,28 @@ int main(void) {
             failed |= expect_substr(out, cmd, "seed prefix not a match");
         }
 
-        failed |= expect_match(">=0.3.3", ver, 1, ">= current");
-        failed |= expect_match(">0.3.3", ver, 0, "> current line");
+        failed |= expect_match("0.3", ver, 1, "usual minor prefix");
+        failed |= expect_match(">=0.3", ver, 1, ">= minor line");
+        failed |= expect_match(">0.3", ver, 0, "> minor line");
+        failed |= expect_match(">=0.3.3", ver, 1, ">= current patch");
+        failed |= expect_match(">0.3.3", ver, 0, "> current patch line");
         failed |= expect_match("<0.4", ver, 1, "< next major.minor");
-        failed |= expect_match("<=0.3.3", ver, 1, "<= current line");
-        failed |= expect_match(">=0.3.2,<0.4", ver, 1, "range includes current");
-        failed |= expect_match("<0.4,>=0.3.2", ver, 1, "range reversed");
-        failed |= expect_match("0.3.2", "0.3.2-121", 1, "bare prefix");
+        failed |= expect_match("<=0.3.3", ver, 1, "<= current patch line");
+        failed |= expect_match(">=0.3,<0.4", ver, 1, "usual range includes current");
+        failed |= expect_match("<0.4,>=0.3", ver, 1, "range reversed");
+        failed |= expect_match("0.3.2", "0.3.2-121", 1, "patch prefix");
         failed |= expect_match("0.3.2-12", "0.3.2-121", 0, "seed not a prefix");
-        failed |= expect_match(">0.3.3", "0.4.0-1", 1, "> line then later");
+        failed |= expect_match(">0.3", "0.4.0-1", 1, "> minor then later");
         failed |= expect_match("<0.0", ver, 0, "<0.0 misses current");
         failed |= expect_match(">99", ver, 0, ">99 misses current");
-        failed |= expect_match(">=0.3.3;>=0.3.2,<0.4", ver, 1, "AND clauses");
+        failed |= expect_match(">=0.3;>=0.3,<0.4", ver, 1, "AND clauses");
 
         snprintf(cmd, sizeof(cmd),
                  "./cc/bin/ccc 'version=>=%s' --emit-c-only "
                  "tests/unit_header_ccs_smoke.ccs",
-                 prefix);
+                 minor);
         if (run_capture(cmd, out, sizeof(out), &ec) != 0 || ec != 0) {
-            fprintf(stderr, "FAIL CLI >=%s pin (exit %d):\n%s\n", prefix, ec,
+            fprintf(stderr, "FAIL CLI >=%s pin (exit %d):\n%s\n", minor, ec,
                     out);
             failed = 1;
         }
@@ -225,7 +245,7 @@ int main(void) {
                  "./cc/bin/ccc version=0.4 --emit-c-only "
                  "tests/unit_header_version_prefix_smoke.ccs");
         if (run_capture(cmd, out, sizeof(out), &ec) != 0 || ec == 0) {
-            fprintf(stderr, "FAIL CLI 0.4 vs header 0.3.2 should disagree:\n%s\n",
+            fprintf(stderr, "FAIL CLI 0.4 vs header 0.3 should disagree:\n%s\n",
                     out);
             failed = 1;
         } else {

@@ -58,8 +58,8 @@ static int cc__is_ccc_interp(const char* tok) {
 }
 
 static const char cc__ver_pin_form[] =
-    "MAJOR[.MINOR[.PATCH[-SEED]]], a bound (>=X, >X, <=X, <X), "
-    "or both (e.g. >=0.3.2,<0.4)";
+    "MAJOR.MINOR[.PATCH[-SEED]] (usual: MAJOR.MINOR), a bound "
+    "(>=X, >X, <=X, <X), or both (e.g. >=0.3,<0.4)";
 
 typedef struct {
     int bare;

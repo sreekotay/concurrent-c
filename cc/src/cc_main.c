@@ -767,8 +767,8 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --frontend=native   Front end (native only; also: CC_FRONTEND=native)\n");
     fprintf(stderr, "  --version, --v, -V  Print version (MAJOR.MINOR.PATCH-SEED)\n");
     fprintf(stderr, "  --as=ccs|cch|shcc   Unit kind (else first-line header, else suffix)\n");
-    fprintf(stderr, "  version=X           Pin lowerer: prefix, or >=X / >X / <=X / <X, or both (>=A,<B)\n");
-    fprintf(stderr, "  --ccc-version=X     Same as version=X (quote bounds: 'version=>=0.3.3')\n");
+    fprintf(stderr, "  version=X           Pin lowerer: MAJOR.MINOR (usual), or tighter / >=X / >X / <=X / <X, or both (>=A,<B)\n");
+    fprintf(stderr, "  --ccc-version=X     Same as version=X (quote bounds: 'version=>=0.3')\n");
     fprintf(stderr, "  --timeout SECONDS   Kill run/test step after timeout\n");
     fprintf(stderr, "  --verbose           Print invoked commands\n");
     fprintf(stderr, "One-liners:\n");

@@ -194,7 +194,7 @@ fallback when the header is absent.
 
 | Kind | Line 1 |
 | ---- | ------ |
-| source (`ccs`) | `#!ccc ccs [version=MAJOR[.MINOR[.PATCH[-SEED]]]]` |
+| source (`ccs`) | `#!ccc ccs [version=MAJOR.MINOR[.PATCH[-SEED]]]` |
 | header (`cch`) | `#!ccc cch [version=…]` |
 | script (`shcc`) | `#!/usr/bin/env -S ./cc/bin/ccc [--as=shcc] [version=…]` |
 
@@ -202,12 +202,14 @@ The script form is an OS shebang so the kernel can exec the file. `--as=shcc`
 is optional: a `ccc` interpreter shebang without `--as` is script kind.
 `#!ccc shcc` is ill-formed — scripts must be OS-executable.
 
-`version=MAJOR[.MINOR[.PATCH[-SEED]]]` pins the lowerer to a bootstrap
-folder whose name the pin prefixes (for example `0.3.2` matches
-`0.3.2-121`; `0.3.2-12` does not). The running toolchain lowers an unpinned
-unit, and also a pin that prefixes the running version. Otherwise the
-newest matching seed's prelowered `shadow_lower.c` is host-cc'd. A pin
-with no matching seed is an error.
+`version=MAJOR.MINOR[.PATCH[-SEED]]` pins the lowerer to a bootstrap
+folder whose name the pin prefixes. The usual pin is MAJOR.MINOR (`0.3`
+matches `0.3.3-156`). PATCH and SEED tighten the match (`0.3.2` matches
+`0.3.2-121`; `0.3.2-12` does not). A shorter prefix (`0`) also matches.
+The running toolchain lowers an unpinned unit, and also a pin that
+prefixes the running version. Otherwise the newest matching seed's
+prelowered `shadow_lower.c` is host-cc'd. A pin with no matching seed is
+an error.
 
 `--as=ccs|cch|shcc` and `version=` / `--ccc-version=` on the `ccc` command
 line must agree with the file header when both are present. A header that
