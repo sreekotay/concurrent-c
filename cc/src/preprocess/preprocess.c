@@ -14608,27 +14608,6 @@ static int cc__cch_text_is_impl_grade(const char* src, size_t n) {
     return 0;
 }
 
-static int cc__path_is_ccs(const char* path) {
-    size_t n;
-    if (!path) return 0;
-    n = strlen(path);
-    return n >= 4 && memcmp(path + n - 4, ".ccs", 4) == 0;
-}
-
-/* @typeview / @typehooks must stay on the extract path (stdlib model). */
-static int cc__cch_text_has_type_policy(const char* src, size_t n) {
-    size_t i = 0;
-    CCScannerState scan;
-    if (!src || n == 0) return 0;
-    cc_scanner_init(&scan);
-    while (i < n) {
-        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
-        if (src[i] == '@' && cc__skip_type_policy_at(src, n, i)) return 1;
-        i++;
-    }
-    return 0;
-}
-
 /* Per-process memo of .cch grade, keyed by realpath.  grade: 1 impl-grade,
  * 0 interface, -1 classification in progress (include cycle break). */
 typedef struct {
@@ -14980,7 +14959,14 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                  * redis_db → redis_mem shape).  Interface-lowering those to
                  * out/include star-dot-h leaves nested-only methods (e.g.
                  * ArrayMap.live_bytes) dependent on a later UFCS splice /
-                 * writeback that can miss or half-rewrite on some hosts. */
+                 * writeback that can miss or half-rewrite on some hosts.
+                 *
+                 * Do not splice every quoted `.cch` included from a `.ccs`.
+                 * That inlines ordinary helpers: autoblock can no longer
+                 * refuse an untyped string pack, and a syntax error in the
+                 * header is blamed on the include site.  Chapter parent
+                 * types stay in scope because the extracted `#include`
+                 * is not hoisted above the TU declarations. */
                 if (found) {
                     int splice_child = cc__local_cch_is_impl_grade(child_abs);
                     if (!splice_child) {
@@ -14990,13 +14976,6 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                             child_src) {
                             if (cc__lowered_header_needs_ufcs_splice(child_src,
                                                                     child_len))
-                                splice_child = 1;
-                            else if (cc__path_is_ccs(current_path) &&
-                                     !cc__cch_text_has_type_policy(child_src,
-                                                                   child_len))
-                                /* Chapter included from a .ccs: splice so
-                                 * types defined in that TU are in scope.
-                                 * @typeview / @typehooks still extract. */
                                 splice_child = 1;
                         }
                         free(child_src);

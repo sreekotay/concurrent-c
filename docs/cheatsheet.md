@@ -713,4 +713,6 @@ A local `.cch` with statement unwrap (`!>(e) {`) is spliced into the
 including unit. `T !>(E)` on a declaration does not force that. A
 `@typehooks` / `@typeview` face still extracts to a lowered `.h`; callers
 keep `char[:]` argument wrap and the proto's Result error type from the
-original `.cch`.
+original `.cch`. A quoted interface `.cch` from a `.ccs` still extracts;
+the `#include` stays in source order so types declared above it are in
+scope.
