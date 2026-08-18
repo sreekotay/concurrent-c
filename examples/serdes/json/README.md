@@ -1,20 +1,21 @@
 # JSON serdes (engine + golden)
 
-**Example path:** `@grammar(rules)` / `@grammar(schema)` over the shared
-factory in this directory (`json.rules` recognition, `json_dom.rules` DOM
-specialization, `json_codec.cch` for `jstr` / `jstr_enc`). Benches:
-`./bench.sh -a` (full ladder), or `-g` / `-y` / `-d` / `-w` / `-s`
-individually.
+**Example path:** `@grammar(rules)` / `@grammar(schema)` over the stdlib
+factory (`<ccc/std/json.cch>`, `include JsonRfc` / `JsonKeep` / `JsonDom`).
+This directory keeps the hand golden DOM (`json.h`) and benches.
+`json.rules` / `json_dom.rules` / `json_codec.cch` here are shims onto
+stdlib. Benches: `./bench.sh -a` (full ladder), or `-g` / `-y` / `-d` /
+`-w` / `-s` individually.
 
 ## RFC 8259
 
-`json.rules` is an RFC 8259 JSON-text recognizer: `ws value ws`, the
-seven value types, numbers without a leading `+` / leading zero /
-trailing dot, and unescaped `U+0000`–`U+001F` rejected in strings.
-Escapes (`\"`, `\\`, `\/`, `\b`, `\f`, `\n`, `\r`, `\t`, `\uXXXX`) are
-accepted. Clean string spans stay borrowed; UTF-8 well-formedness of a
-borrow is a use-site check, not a parse-time copy. `jstr` runs only on
-dirty (escaped) spans.
+`<ccc/std/json.rules>` (`include JsonRfc`) is an RFC 8259 JSON-text
+recognizer: `ws value ws`, the seven value types, numbers without a
+leading `+` / leading zero / trailing dot, and unescaped `U+0000`–`U+001F`
+rejected in strings. Escapes (`\"`, `\\`, `\/`, `\b`, `\f`, `\n`, `\r`,
+`\t`, `\uXXXX`) are accepted. Clean string spans stay borrowed; UTF-8
+well-formedness of a borrow is a use-site check, not a parse-time copy.
+`jstr` (in `<ccc/std/json.cch>`) runs only on dirty (escaped) spans.
 
 The product schema for that text is `JsonVal` (tagged sum of the seven
 types) plus `JsonText` (`ws` + `JsonVal` + `ws`). Closed products such
@@ -25,7 +26,7 @@ high-water byte of the miss.
 **Golden reference:** `json.h` is the hand-lowered C a rules engine would emit
 for a JSON DOM — kept legible so the lowering stays inspectable. It is the
 oracle for borrow/materialize splits. Its string scan still accepts raw
-controls; `json.rules` does not.
+controls; `JsonRfc` does not.
 
 ## What it demonstrates
 
@@ -99,9 +100,11 @@ the July Linux receipt has generated match ahead of yyjson-default.
 
 | file | what |
 |------|------|
-| `json.rules` | RFC 8259 recognition factory (`include` this) |
-| `json_dom.rules` | DOM specialization (`keep` / `collect` overrides) |
-| `json_codec.cch` | `jstr` decode + `jstr_enc` encode |
+| `<ccc/std/json.rules>` | RFC 8259 recognition (`include JsonRfc`) |
+| `<ccc/std/json_keep.rules>` | schema-ready keep (`include JsonKeep`) |
+| `<ccc/std/json_dom.rules>` | tape collect (`include JsonDom`) |
+| `<ccc/std/json.cch>` | `jstr` decode + `jstr_enc` encode |
+| `json.rules` / `json_dom.rules` / `json_codec.cch` | shims onto stdlib |
 | `bench_grammar.ccs` | engine match / collect / DOM / schema bench |
 | `json.h` | hand golden DOM (lowering oracle; not RFC-strict on controls) |
 | `bench.c` | golden throughput + zero-copy harness |

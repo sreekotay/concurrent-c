@@ -25,6 +25,7 @@ The standard library provides these headers under `<ccc/std/...>`:
 - `future.cch`
 - `task.cch`
 - `cli.cch`
+- `json.cch` (opt-in; factories `json.rules`, `json_keep.rules`, `json_dom.rules`)
 - `net.cch`
 - `dns.cch`
 - `tls.cch`
@@ -43,7 +44,7 @@ turnstile lives in `<ccc/cc_turnstile.cch>` (also via prelude); see
 `cc_nursery`, `cc_exec`, `cc_turnstile`) and these stdlib headers: `slice`, `string`,
 `slice_packed`, `io` (which includes `bufio` and `async_io`), `vec`,
 `map_forward`, `array_map`, `shard_map`, `dir`, `process`, `exec`, and
-`future`. Include networking, DNS, TLS, HTTP, CLI, task, hash, `static_map`,
+`future`. Include networking, DNS, TLS, HTTP, CLI, JSON, task, hash, `static_map`,
 and `map.cch` / `map_impl.cch` explicitly when needed. Channels, nursery,
 arenas, results, exclusive sections, and the turnstile are defined in
 `spec/concurrent-c-spec-complete.md`; this document names them only where a
@@ -1352,6 +1353,38 @@ argv or of a `default "..."` literal). Defaults apply before the argv overlay;
 `bool !>(CCError)` face: `Ok(true)` proceed, `Ok(false)` help (usage printed
 for a `flag` named `help`), `Err` bad argv (usage printed). `cc_parse_args`
 fills only (defaults, then argv). `cc_print_usage` prints the generated usage.
+
+## JSON
+
+`<ccc/std/json.cch>` is opt-in (not in the prelude). It provides the RFC 8259
+string codecs `jstr` and `jstr_enc` for `@grammar` `keep/decode` / `/encode`.
+The rules factories live beside it and are not lowered headers:
+
+| Name | File | Role |
+| ---- | ---- | ---- |
+| `JsonRfc` | `<ccc/std/json.rules>` | Recognition only |
+| `JsonKeep` | `<ccc/std/json_keep.rules>` | Keep/decode string, keep number |
+| `JsonDom` | `<ccc/std/json_dom.rules>` | Keep plus `collect` on object/array |
+
+A translation unit writes `@grammar(rules) Json { include JsonKeep }` (or
+`JsonRfc` / `JsonDom`) and keeps product schemas local. `JsonKeep` and
+`JsonDom` require this header so `jstr` is in scope. Depth, `/encode`,
+literal `keep`, number materialization, unknown-member policy, and
+any-JSON (`JsonVal` / `JsonText`) stay in the TU.
+
+```c
+#include <ccc/std/json.cch>
+@grammar(rules) Json {~~~~
+    include JsonKeep
+    string: [#'"' keep/decode(jstr)/encode(jstr_enc) any [some strchar | esc] #'"']
+~~~~}
+@grammar(schema) Feed {~~~~
+    use Json
+    Json.ws
+    Json.object [ "statuses" statuses: Json.array of Tweet ]
+    Json.ws
+~~~~}
+```
 
 ## Networking
 

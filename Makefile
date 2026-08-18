@@ -39,6 +39,7 @@ distclean: clean
 #   $PREFIX/bin/ccc                   - compiler driver (default front: serdes)
 #   $PREFIX/bin/shadow_lower          - serdes lowerer (required beside ccc)
 #   $PREFIX/include/ccc/**/*.cch      - standard library headers
+#   $PREFIX/include/ccc/**/*.rules    - grammar factories (not lowered)
 #   $PREFIX/include/ccc/**/*.h        - the same headers, pre-lowered
 #   $PREFIX/lib/ccc/runtime/*.c,.h    - pre-lowered runtime source and internal headers
 #   $PREFIX/lib/ccc/runtime/vendor/   - vendored third-party runtime sources
@@ -86,6 +87,7 @@ install: cc
 	fi
 	install -m 644 cc/include/ccc/*.cch $(DESTDIR)$(PREFIX)/include/ccc/
 	install -m 644 cc/include/ccc/std/*.cch $(DESTDIR)$(PREFIX)/include/ccc/std/
+	install -m 644 cc/include/ccc/std/*.rules $(DESTDIR)$(PREFIX)/include/ccc/std/
 	install -m 644 cc/include/ccc/script/*.cch $(DESTDIR)$(PREFIX)/include/ccc/script/
 	install -m 644 out/include/ccc/*.h $(DESTDIR)$(PREFIX)/include/ccc/
 	@if [ -n "$$(ls cc/include/ccc/*.h 2>/dev/null)" ]; then \

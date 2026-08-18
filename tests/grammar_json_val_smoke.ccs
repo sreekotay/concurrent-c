@@ -1,10 +1,10 @@
 // RFC product JSON: JsonVal is the seven-type sum, JsonText is
 // `ws value ws`. Closed products (Tweet) stay projections of this type.
 #include <ccc/std/prelude.cch>
-#include "../examples/serdes/json/json_codec.cch"
+#include <ccc/std/json.cch>
 
 @grammar(rules) Json {~~~~
-    include "../examples/serdes/json/json_dom.rules"
+    include JsonDom
 ~~~~}
 
 @grammar(schema) JsonMember {~~~~

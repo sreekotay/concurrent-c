@@ -1,10 +1,2 @@
-; JSON DOM factory: recognition + keep/decode string, keep number, collect
-; containers. Requires `jstr` in the including C translation unit
-; (see json_codec.cch). Override `string` for /encode, or `value` to keep
-; literals when a tape oracle needs one node per member value.
-include "json.rules"
-string:  [#'"' keep/decode(jstr) any [some strchar | esc] #'"']
-number:  keep [int opt [#'.' some digit]
-                   opt [charset [#'e' #'E'] opt charset [#'+' #'-'] some digit]]
-array:   collect [#'[' ws opt [value any [#',' value]] #']']
-object:  collect [#'{' ws opt [member any [#',' member]] #'}']
+; Compatibility shim — factory is `<ccc/std/json_dom.rules>`.
+include <ccc/std/json_dom.rules>

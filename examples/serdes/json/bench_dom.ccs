@@ -6,10 +6,10 @@
 #include <stdlib.h>
 #include <ccc/script/stdio.cch>
 #include <time.h>
-#include "json_codec.cch"
+#include <ccc/std/json.cch>
 
 @grammar(rules) Json {~~~~
-    include "json_dom.rules"
+    include JsonDom
     value:   [ws [string | number | object | array
                  | keep ["true" | "false" | "null"]] ws]
 ~~~~}

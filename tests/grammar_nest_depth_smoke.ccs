@@ -27,12 +27,12 @@
 ~~~~}
 
 @grammar(rules) Json {~~~~
-    include "../examples/serdes/json/json.rules"
+    include JsonRfc
 ~~~~}
 
 @grammar(rules) JsonShallow {~~~~
     depth 4
-    include "../examples/serdes/json/json.rules"
+    include JsonRfc
 ~~~~}
 
 static size_t resp_bomb(char* dst, int frames) {

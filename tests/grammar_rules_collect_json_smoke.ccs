@@ -10,13 +10,10 @@
 // 17787 borrowed + 312 materialized strings on twitter.json. The generated
 // parser + this codec must reproduce that exact split.
 #include <ccc/std/prelude.cch>
-#include "../examples/serdes/json/json_codec.cch"
+#include <ccc/std/json.cch>
 
 @grammar(rules) Json {~~~~
-    include "../examples/serdes/json/json.rules"
-    string:  [#'"' keep/decode(jstr) any [some strchar | esc] #'"']
-    number:  keep [int opt [#'.' some digit]
-                       opt [charset [#'e' #'E'] opt charset [#'+' #'-'] some digit]]
+    include JsonKeep
 ~~~~}
 
 typedef struct { long borrowed, materialized, numbers; CCSlice last_str; } Counts;

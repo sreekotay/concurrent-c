@@ -107,11 +107,12 @@ Run any recipe:
 
 ### SERDES / JSON
 
-`serdes/json/` is the RFC 8259 JSON-text factory (`json.rules`) plus
-direct-to-struct schemas and a hand golden DOM (`json.h`). Recognition
-rejects unescaped `U+0000`–`U+001F`; the golden scanner still accepts
-raw controls. Full ladder: `./examples/serdes/json/bench.sh -a`. Latest
-receipt: [`serdes/json/benchmark_baseline_2026_08_15.txt`](serdes/json/benchmark_baseline_2026_08_15.txt).
+`serdes/json/` benches the stdlib RFC 8259 factory (`<ccc/std/json.cch>`,
+`include JsonDom`) plus direct-to-struct schemas and a hand golden DOM
+(`json.h`). Recognition rejects unescaped `U+0000`–`U+001F`; the golden
+scanner still accepts raw controls. Full ladder:
+`./examples/serdes/json/bench.sh -a`. Latest receipt:
+[`serdes/json/benchmark_baseline_2026_08_15.txt`](serdes/json/benchmark_baseline_2026_08_15.txt).
 
 ### Networking Examples
 

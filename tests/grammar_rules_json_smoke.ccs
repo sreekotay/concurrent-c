@@ -12,7 +12,7 @@
 #include <ccc/std/prelude.cch>
 
 @grammar(rules) Json {~~~~
-    include "../examples/serdes/json/json.rules"
+    include JsonRfc
 ~~~~}
 
 static int expect(const char* src, int want) {

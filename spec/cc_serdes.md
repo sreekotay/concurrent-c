@@ -25,8 +25,9 @@ the declaration so `cli` is harvested. `.shcc` units receive that header from
 `<ccc/script/prelude.cch>`.
 
 ```c
+#include <ccc/std/json.cch>
 @grammar(rules) Json {~~~~
-    include "json.rules"
+    include JsonRfc
 ~~~~}
 
 @grammar(schema) RespArg {~~~~
@@ -47,14 +48,20 @@ the declaration so `cli` is harvested. `.shcc` units receive that header from
 ```
 
 Grammar files are compile-time factories. In a rules block, `include "path"`
-copies rules from a file and `include Name` copies a rules grammar declared
-earlier in the translation unit. In a schema, `rules [ include "path" ]`
-creates a private copy, while `use Name` and `use "path" as Name` share a rules
-factory and require qualified references such as `Name.rule`. The JSON
-factory in `examples/serdes/json/json.rules` recognizes RFC 8259
-JSON-text (`ws value ws`, the seven value types, no leading zeros or
-trailing dots on numbers). Unescaped U+0000–U+001F in a string is a
-miss.
+copies rules from a file (relative to the including source, then the compiler
+include path), `include <ccc/…>` searches the include path only, and
+`include Name` copies a rules grammar declared earlier in the translation
+unit or a stdlib factory (`JsonRfc`, `JsonKeep`, `JsonDom`). In a schema,
+`rules [ include "path" ]` creates a private copy, while `use Name`,
+`use "path" as Name`, and `use <ccc/…> as Name` share a rules factory and
+require qualified references such as `Name.rule`. The JSON factory in
+`<ccc/std/json.rules>` (`include JsonRfc`) recognizes RFC 8259 JSON-text
+(`ws value ws`, the seven value types, no leading zeros or trailing dots
+on numbers). Unescaped U+0000–U+001F in a string is a miss. `JsonKeep`
+adds `keep/decode(jstr)` on strings and `keep` on numbers (needs
+`<ccc/std/json.cch>`). `JsonDom` adds `collect` on containers. Closed
+products (`JsonVal`, Tweet, TmGrammar) stay in the TU. JSON is not in
+the std prelude.
 
 A fenced body may contain `depth N`, where `N` is an integer from 1 through
 65535. The default nest limit is 128. The directive is valid only in the

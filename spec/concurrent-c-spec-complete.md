@@ -6035,6 +6035,7 @@ headers below. Scripts do not `#include` the prelude; the driver injects it.
 | ------ | ---- |
 | `<ccc/script/stdio.cch>` | `CCStdio` reads; console print (`io.println` / data UFCS / naked aliases) |
 | `<ccc/std/cli.cch>` | `@grammar(cli)` comptime engine and argv runtime (`cc_parse_args` / `cc_prepare_args` / `cc_print_usage`). `.shcc` gets this from the script prelude; `.ccs` includes it before `@grammar(cli)`. |
+| `<ccc/std/json.cch>` | RFC 8259 JSON codecs (`jstr` / `jstr_enc`). Opt-in; factories are `JsonRfc` / `JsonKeep` / `JsonDom` (`<ccc/std/json*.rules>`). Product schemas stay in the TU. |
 | `<ccc/script/pathx.cch>` | Repo-root discovery and `char[:0]` path join |
 | `<ccc/script/file.cch>` | Read / write / copy / print by `char[:0]` path |
 | `<ccc/script/sh.cch>` | `cc_sh_run`, `cc_script_sh`, `cc_script_ccc`, `cc_script_sh_read`, `cc_script_task_exe`, `cc_script_task_shcc` |

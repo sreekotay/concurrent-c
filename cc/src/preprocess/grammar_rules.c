@@ -76,6 +76,7 @@
  */
 #include "preprocess/grammar_engine.h"
 #include "preprocess/variant_lower.h"
+#include "util/path.h"
 #include "util/text.h"
 
 #include <ccc/cc_arena.h>
@@ -647,8 +648,37 @@ static int rg_parse_alt(RG* g, size_t* io, int depth) {
 /* include support: bodies of earlier @grammar(rules) blocks in this file,
  * resolved through the per-file registry (defined with the schema engine). */
 static const char* cc__rules_body_lookup(const char* name, size_t* len);
+static char* cc__load_rel(const char* base_file, const char* relpath,
+                          char* pathbuf, size_t pathbuf_sz, size_t* out_len);
+static char* cc__load_system_rel(const char* rel, char* pathbuf,
+                                 size_t pathbuf_sz, size_t* out_len);
+
+/* Stdlib rules factories. Headers must not declare @grammar (stage-1
+ * lower-headers stubs the engines), so `include JsonRfc` loads these. */
+static const char* cc__stdlib_rules_rel(const char* name) {
+    if (!name) return NULL;
+    if (strcmp(name, "JsonRfc") == 0) return "ccc/std/json.rules";
+    if (strcmp(name, "JsonKeep") == 0) return "ccc/std/json_keep.rules";
+    if (strcmp(name, "JsonDom") == 0) return "ccc/std/json_dom.rules";
+    return NULL;
+}
 
 static int rg_parse_text(RG* g, int depth, int base);
+
+static int rg_include_file_text(RG* g, int depth, const char* path,
+                                char* ftxt, size_t frd) {
+    const char* sb = g->body;
+    size_t sn = g->n;
+    const char* sf = g->file;
+    g->body = ftxt;
+    g->n = frd;
+    g->file = path;
+    int rc = rg_parse_text(g, depth + 1, g->nrules);
+    g->body = sb;
+    g->n = sn;
+    g->file = sf;
+    return rc;
+}
 
 static int rg_parse(RG* g) {
     if (rg_parse_text(g, 0, 0) != 0) return -1;
@@ -699,71 +729,91 @@ static int rg_parse_text(RG* g, int depth, int base) {
         if (e - p == 7 && memcmp(g->body + p, "include", 7) == 0 &&
             (q >= g->n || g->body[q] != ':')) {
             if (depth >= 4) return rg_fail(g, p, "include nesting too deep");
-            /* `include "path"` — a grammar FILE is a factory artifact: shared
-             * dialect text loaded at compile time, path relative to the
-             * including source. `include Name` splices a grammar declared
-             * earlier in this file (registry). Both are pure text splices. */
+            /* `include "path"` — factory file, relative to the including
+             * source, then the compiler include path. `include <ccc/…>`
+             * searches the include path only. `include Name` splices a
+             * grammar declared earlier in this file, or a stdlib factory
+             * (JsonRfc / JsonKeep / JsonDom). All are text splices. */
             if (q < g->n && g->body[q] == '"') {
                 size_t ps = ++q;
                 while (q < g->n && g->body[q] != '"') q++;
                 if (q >= g->n) return rg_fail(g, ps, "unterminated include path");
-                char path[512];
-                {
-                    size_t pl = q - ps;
-                    const char* base = g->file ? g->file : "";
-                    const char* slash = strrchr(base, '/');
-                    size_t bl = (slash && g->body[ps] != '/') ? (size_t)(slash - base) + 1 : 0;
-                    if (bl + pl >= sizeof(path)) return rg_fail(g, ps, "include path too long");
-                    memcpy(path, base, bl);
-                    memcpy(path + bl, g->body + ps, pl);
-                    path[bl + pl] = '\0';
-                }
+                char rel[512], path[512];
+                size_t pl = q - ps;
+                if (pl >= sizeof(rel)) return rg_fail(g, ps, "include path too long");
+                memcpy(rel, g->body + ps, pl); rel[pl] = '\0';
                 q++;
                 {
-                    FILE* f = fopen(path, "rb");
-                    if (!f) {
+                    size_t frd = 0;
+                    char* ftxt = cc__load_rel(g->file, rel, path, sizeof(path), &frd);
+                    if (!ftxt) {
                         char msg[600];
-                        snprintf(msg, sizeof(msg), "cannot open included grammar '%s'", path);
+                        snprintf(msg, sizeof(msg), "cannot open included grammar '%s'", rel);
                         return rg_fail(g, p, msg);
                     }
-                    fseek(f, 0, SEEK_END);
-                    long fl = ftell(f);
-                    fseek(f, 0, SEEK_SET);
-                    char* ftxt = (char*)malloc(fl > 0 ? (size_t)fl : 1);
-                    size_t frd = ftxt ? fread(ftxt, 1, (size_t)fl, f) : 0;
-                    fclose(f);
-                    if (!ftxt) return rg_fail(g, p, "out of memory reading include");
-                    const char* sb = g->body; size_t sn = g->n;
-                    const char* sf = g->file;
-                    g->body = ftxt; g->n = frd;
-                    g->file = path;   /* nested file includes resolve relative to this file */
-                    int rc = rg_parse_text(g, depth + 1, g->nrules);
-                    g->body = sb; g->n = sn; g->file = sf;
-                    free(ftxt);   /* names/literals were copied into the pool */
+                    int rc = rg_include_file_text(g, depth, path, ftxt, frd);
+                    free(ftxt);
+                    if (rc != 0) return rc;
+                }
+                p = q;
+                continue;
+            }
+            if (q < g->n && g->body[q] == '<') {
+                size_t ps = ++q;
+                while (q < g->n && g->body[q] != '>') q++;
+                if (q >= g->n) return rg_fail(g, ps, "unterminated include path");
+                char rel[512], path[512];
+                size_t pl = q - ps;
+                if (pl >= sizeof(rel)) return rg_fail(g, ps, "include path too long");
+                memcpy(rel, g->body + ps, pl); rel[pl] = '\0';
+                q++;
+                {
+                    size_t frd = 0;
+                    char* ftxt = cc__load_system_rel(rel, path, sizeof(path), &frd);
+                    if (!ftxt) {
+                        char msg[600];
+                        snprintf(msg, sizeof(msg), "cannot open included grammar <%s>", rel);
+                        return rg_fail(g, p, msg);
+                    }
+                    int rc = rg_include_file_text(g, depth, path, ftxt, frd);
+                    free(ftxt);
                     if (rc != 0) return rc;
                 }
                 p = q;
                 continue;
             }
             size_t ie;
-            if (!rg_ident(g, q, &ie)) return rg_fail(g, q, "expected grammar name or \"path\" after include");
+            if (!rg_ident(g, q, &ie)) return rg_fail(g, q, "expected grammar name or path after include");
             {
                 char nm[64];
                 size_t nl = ie - q < sizeof(nm) - 1 ? ie - q : sizeof(nm) - 1;
                 memcpy(nm, g->body + q, nl); nm[nl] = '\0';
                 size_t blen = 0;
                 const char* btxt = cc__rules_body_lookup(nm, &blen);
-                if (!btxt) {
-                    char msg[160];
-                    snprintf(msg, sizeof(msg), "include of unknown grammar '%s' "
-                             "(must be a @grammar(rules) block earlier in this file)", nm);
-                    return rg_fail(g, p, msg);
+                if (btxt) {
+                    const char* sb = g->body; size_t sn = g->n;
+                    g->body = btxt; g->n = blen;
+                    int rc = rg_parse_text(g, depth + 1, g->nrules);
+                    g->body = sb; g->n = sn;
+                    if (rc != 0) return rc;
+                } else {
+                    const char* stdrel = cc__stdlib_rules_rel(nm);
+                    char path[512];
+                    size_t frd = 0;
+                    char* ftxt = stdrel
+                        ? cc__load_system_rel(stdrel, path, sizeof(path), &frd)
+                        : NULL;
+                    if (!ftxt) {
+                        char msg[200];
+                        snprintf(msg, sizeof(msg), "include of unknown grammar '%s' "
+                                 "(a @grammar(rules) block earlier in this file, "
+                                 "or stdlib JsonRfc / JsonKeep / JsonDom)", nm);
+                        return rg_fail(g, p, msg);
+                    }
+                    int rc = rg_include_file_text(g, depth, path, ftxt, frd);
+                    free(ftxt);
+                    if (rc != 0) return rc;
                 }
-                const char* sb = g->body; size_t sn = g->n;
-                g->body = btxt; g->n = blen;
-                int rc = rg_parse_text(g, depth + 1, g->nrules);
-                g->body = sb; g->n = sn;
-                if (rc != 0) return rc;
             }
             p = ie;
             continue;
@@ -2248,6 +2298,7 @@ typedef struct {
 
     char usename[S_NAME];
     char usepath[256];                   /* use "path" as Name: file-backed factory */
+    int use_angle;                       /* 1 = use <ccc/...> as Name (include path) */
     const char* rtext; size_t rlen;      /* inline rules [ ... ] section (verbatim) */
     STerm* terms; int nterms, cap_terms;
     SKey* keys; int nkeys, cap_keys;
@@ -2856,22 +2907,26 @@ static int ss_parse(SS* s) {
         size_t save = s->p;
         char id[S_NAME];
         if (ss_ident(s, id, sizeof id) && strcmp(id, "use") == 0) {
-            if (ss_peek(s) == '"') {
-                /* use "path.rules" as Name — file-backed shared factory */
+            if (ss_peek(s) == '"' || ss_peek(s) == '<') {
+                /* use "path.rules" as Name — file-backed shared factory.
+                 * Angle `use <ccc/std/json.rules> as Name` searches include path. */
+                int angle = ss_peek(s) == '<';
+                char close = angle ? '>' : '"';
                 s->p++;
                 size_t ps = s->p;
-                while (s->p < s->n && s->b[s->p] != '"') s->p++;
+                while (s->p < s->n && s->b[s->p] != close) s->p++;
                 if (s->p >= s->n) return ss_fail(s, ps, "unterminated use path");
                 size_t pl = s->p - ps;
                 if (pl >= sizeof(s->usepath)) return ss_fail(s, ps, "use path too long");
                 memcpy(s->usepath, s->b + ps, pl); s->usepath[pl] = '\0';
                 s->p++;
+                if (angle) s->use_angle = 1;
                 if (!ss_ident(s, id, sizeof id) || strcmp(id, "as") != 0)
-                    return ss_fail(s, s->p, "expected `as <Name>` after use \"path\"");
+                    return ss_fail(s, s->p, "expected `as <Name>` after use path");
                 if (!ss_ident(s, s->usename, sizeof s->usename))
                     return ss_fail(s, s->p, "expected namespace name after as");
             } else if (!ss_ident(s, s->usename, sizeof s->usename)) {
-                return ss_fail(s, s->p, "expected rules grammar name or \"path\" after use");
+                return ss_fail(s, s->p, "expected rules grammar name or path after use");
             }
         } else {
             s->p = save;
@@ -2949,29 +3004,55 @@ static int sr_xdone_fit(SRulesReg* r, int n) {
     return 0;
 }
 
-/* load `relpath` relative to `base_file`'s directory (absolute passes through) */
+/* Read `path` into a malloc'd buffer. Caller frees. */
+static char* cc__read_file(const char* path, size_t* out_len) {
+    FILE* f;
+    long fl;
+    char* txt;
+    size_t rd;
+    if (!path || !path[0] || !out_len) return NULL;
+    f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    fl = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    txt = (char*)malloc(fl > 0 ? (size_t)fl + 1 : 1);
+    if (!txt) { fclose(f); return NULL; }
+    rd = fread(txt, 1, fl > 0 ? (size_t)fl : 0, f);
+    fclose(f);
+    txt[rd] = '\0';
+    *out_len = rd;
+    return txt;
+}
+
+/* load `relpath` relative to `base_file`'s directory (absolute passes through).
+ * If that file is missing, search the compiler include path for the same
+ * relative string (so `include "ccc/std/json.rules"` works from any TU). */
 static char* cc__load_rel(const char* base_file, const char* relpath,
                           char* pathbuf, size_t pathbuf_sz, size_t* out_len) {
     const char* base = base_file ? base_file : "";
     const char* slash = strrchr(base, '/');
     size_t bl = (slash && relpath[0] != '/') ? (size_t)(slash - base) + 1 : 0;
     size_t pl = strlen(relpath);
+    char* txt;
+    if (!relpath || !relpath[0] || !pathbuf || pathbuf_sz == 0 || !out_len)
+        return NULL;
     if (bl + pl >= pathbuf_sz) return NULL;
     memcpy(pathbuf, base, bl);
     memcpy(pathbuf + bl, relpath, pl);
     pathbuf[bl + pl] = '\0';
-    FILE* f = fopen(pathbuf, "rb");
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END);
-    long fl = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    char* txt = (char*)malloc(fl > 0 ? (size_t)fl + 1 : 1);
-    if (!txt) { fclose(f); return NULL; }
-    size_t rd = fread(txt, 1, (size_t)fl, f);
-    fclose(f);
-    txt[rd] = '\0';
-    *out_len = rd;
-    return txt;
+    txt = cc__read_file(pathbuf, out_len);
+    if (txt) return txt;
+    if (!cc_path_resolve_system_cch(relpath, pathbuf, pathbuf_sz)) return NULL;
+    return cc__read_file(pathbuf, out_len);
+}
+
+/* Angle-include / named stdlib factory: include-path search only. */
+static char* cc__load_system_rel(const char* rel, char* pathbuf,
+                                 size_t pathbuf_sz, size_t* out_len) {
+    if (!rel || !rel[0] || !pathbuf || pathbuf_sz == 0 || !out_len) return NULL;
+    if (!cc_path_resolve_system_cch(rel, pathbuf, pathbuf_sz)) return NULL;
+    return cc__read_file(pathbuf, out_len);
 }
 
 static SRulesReg cc__rules_reg[8]; static int cc__rules_nreg;
@@ -3124,10 +3205,12 @@ static const char* cc__rules_body_lookup(const char* name, size_t* len) {
  * schema using the same file shares one emitted matcher set (the prefix comes
  * from the first use's alias; later uses may alias differently). */
 static SRulesReg* cc__use_rules_file(const char* base_file, const char* relpath,
-                                     const char* alias) {
+                                     const char* alias, int system_only) {
     char full[512];
     size_t blen = 0;
-    char* body = cc__load_rel(base_file, relpath, full, sizeof(full), &blen);
+    char* body = system_only
+        ? cc__load_system_rel(relpath, full, sizeof(full), &blen)
+        : cc__load_rel(base_file, relpath, full, sizeof(full), &blen);
     if (!body) return NULL;
     for (int i = 0; i < cc__rules_nreg; i++) {
         if (strcmp(cc__rules_reg[i].path, full) == 0) {
@@ -4395,17 +4478,27 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
     }
     SRulesReg* reg = NULL;
     if (ss->usepath[0]) {
-        reg = cc__use_rules_file(file, ss->usepath, ss->usename);
+        reg = cc__use_rules_file(file, ss->usepath, ss->usename, ss->use_angle);
         if (!reg) {
-            snprintf(err, err_sz, "@grammar(schema) %s: cannot load factory \"%s\" "
-                     "(path is relative to this source file)", name, ss->usepath);
+            snprintf(err, err_sz, "@grammar(schema) %s: cannot load factory %s%s%s "
+                     "(%s)", name,
+                     ss->use_angle ? "<" : "\"", ss->usepath, ss->use_angle ? ">" : "\"",
+                     ss->use_angle
+                         ? "searched the compiler include path"
+                         : "path is relative to this source file, then the include path");
             goto done;
         }
     } else if (ss->usename[0]) {
         reg = cc__find_rules(ss->usename);
         if (!reg) {
+            const char* stdrel = cc__stdlib_rules_rel(ss->usename);
+            if (stdrel)
+                reg = cc__use_rules_file(file, stdrel, ss->usename, 1);
+        }
+        if (!reg) {
             snprintf(err, err_sz, "@grammar(schema) %s: unknown rules grammar '%s' "
                      "(a @grammar(rules) %s block must appear earlier in this file, "
+                     "a stdlib factory JsonRfc / JsonKeep / JsonDom, "
                      "or use \"path.rules\" as %s for a file-backed factory)",
                      name, ss->usename, ss->usename, ss->usename);
             goto done;
@@ -4416,7 +4509,7 @@ static char* cc__schema_emit(const char* name, const char* body, size_t body_len
     } else {     /* self-contained: inline rules, private matchers */
         g->body = ss->rtext; g->n = ss->rlen; g->name = name;
     }
-    g->file = file; g->line0 = line;
+    g->file = (reg && reg->path[0]) ? reg->path : file; g->line0 = line;
     g->nest_max = 128;
     if (rg_parse(g) != 0) {
         snprintf(err, err_sz, "@grammar(schema) %s: %s grammar failed to parse: %s",

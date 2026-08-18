@@ -10,10 +10,10 @@
 // of the SAME grammar's tape (Json_parse) — two independent lowerings of one
 // grammar must agree byte-for-byte on ids, text, and screen names.
 #include <ccc/std/prelude.cch>
-#include "../examples/serdes/json/json_codec.cch"
+#include <ccc/std/json.cch>
 
 @grammar(rules) Json {~~~~
-    include "../examples/serdes/json/json_dom.rules"
+    include JsonDom
     string:  [#'"' keep/decode(jstr)/encode(jstr_enc) any [some strchar | esc] #'"']
     value:   [ws [string | number | object | array
                  | keep ["true" | "false" | "null"]] ws]
