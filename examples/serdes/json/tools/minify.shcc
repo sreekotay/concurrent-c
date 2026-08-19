@@ -7,9 +7,6 @@
  * Side-by-side with: examples/serdes/json/tools/minify.py
  * Suite: tests/script_minify_smoke.shcc (symlink) + .stdin/.stdout
  */
-
-/* prelude + synthetic-main predecls (a/io/in); default @errhandler */
-
 Vec::[char] out@(&a) @destroy;
 bool instr = false;
 bool esc = false;
@@ -30,3 +27,5 @@ for (size_t i = 0; i < in.len; i++) {
 }
 
 io.write_all(out.as_slice()) !>;
+
+/* prelude + synthetic-main predecls (a/io/in); default @errhandler */

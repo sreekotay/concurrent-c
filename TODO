@@ -1,0 +1,5 @@
+- typeview: negative^, views, validate, hooks
+- ccfile and io cleanup
+- slices, strings, ptrs ,arenas, etc 
+- @create pointer vs val confusions
+- @defer can't sit at the wait-for body top level. I'll put the collect buffer on the stack as hits[MAX] so the cap is the array size.

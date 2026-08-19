@@ -298,8 +298,12 @@ Single thread, interval `V2_SYSMON_INTERVAL_MS` (20 ms). Per tick:
 3. **Deadlock check.** See below.
 4. **Safety-net wake.** If `ready_queue.count > 0 && idle_workers > 0`,
    `sched_v2_wake(-1)`.
-5. **Stall diagnostics.** If progress counters stall for ~2 s, print a
-   diagnostic snapshot.
+5. **Stall diagnostics.** If at least one fiber is queued, running, or
+   parked and progress counters stall for ~2 s, print a diagnostic
+   snapshot. Idle leftover pool slots after a join are not waiters.
+   Fibers parked only in `external_wait` / deadlock-suppress, or a host
+   thread in `cc_external_wait_enter`, are not waiters for this
+   diagnostic.
 
 ## Deadlock detection
 

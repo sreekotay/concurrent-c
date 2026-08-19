@@ -2341,10 +2341,20 @@ static void* sched_v2_sysmon_main(void* arg) {
                                           &reason_bucket_count);
                 size_t external_threads = atomic_load_explicit(&g_external_wait_threads,
                                                                memory_order_relaxed);
-                /* Idle server waiting on kernel I/O (accept/read/etc.) is not a
-                 * stall: no runnable work, workers asleep, and every parked
-                 * fiber is an external_wait / suppress scope. Printing STALL
-                 * here previously made healthy listen loops look hung. */
+                uint64_t scan_live = state_counts[FIBER_V2_QUEUED] +
+                                    state_counts[FIBER_V2_RUNNING] +
+                                    state_counts[FIBER_V2_PARKED];
+                /* Stall is "a waiter exists and no resume." IDLE leftover
+                 * slots after a join are not waiters. Skip only resets the
+                 * clock: leaving stall_ticks at the print threshold makes
+                 * the next wave inherit a hot clock and fire on first tick. */
+                if (gq == 0 && scan_live == 0) {
+                    stall_ticks = 0;
+                    continue;
+                }
+                /* Listen / accept: no runnable work, and every parked fiber
+                 * is an external_wait / suppress scope (or the host thread
+                 * is in cc_external_wait_enter). Same clock reset. */
                 if (gq == 0 &&
                     state_counts[FIBER_V2_QUEUED] == 0 &&
                     state_counts[FIBER_V2_RUNNING] == 0 &&
@@ -2352,14 +2362,12 @@ static void* sched_v2_sysmon_main(void* arg) {
                     (parked_external_wait > 0 ||
                      parked_deadlock_suppressed > 0 ||
                      external_threads > 0)) {
+                    stall_ticks = 0;
                     continue;
                 }
                 /* fibers_alive is only maintained under CC_V2_STATS=1; when
                  * stats are off it reads 0 even with live parked fibers.
                  * Prefer the scan total so the banner is not actively wrong. */
-                uint64_t scan_live = state_counts[FIBER_V2_QUEUED] +
-                                    state_counts[FIBER_V2_RUNNING] +
-                                    state_counts[FIBER_V2_PARKED];
                 uint64_t alive_report = cc_v2_stats_enabled() ? alive : scan_live;
                 fprintf(stderr, "[sched_v2 sysmon] STALL #%d: threads=%d idle=%d global_q=%zu fibers_alive=%llu%s\n",
                         stall_ticks / STALL_DIAG_TICKS, n, idle_n, gq,
