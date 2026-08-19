@@ -17,7 +17,7 @@ chaseing use-after-free and race reports.
 ./scripts/stress_sanitize.sh tsan
 ./scripts/stress_sanitize.sh sanitizers   # both
 
-# real_projects mains (pigz_idiomatic, pigz_cc, redis_idiomatic, levenshtein)
+# real_projects mains (pigz_idiomatic, pigz_wait dict, pigz_cc, redis_idiomatic, levenshtein)
 ./scripts/real_projects_sanitize.sh asan
 ./scripts/real_projects_sanitize.sh tsan
 ./scripts/real_projects_sanitize.sh fuzz   # ASan binaries + random inputs

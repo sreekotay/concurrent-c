@@ -18,8 +18,11 @@
  *         the block is the work (empty when !chain on read). Pass runs
  *         on every exit, including raises.
  *
- * PIGZ_DICT=1 chains blocks through a 32 KiB dictionary (one gzip
- * stream); default is one gzip member per block. PIGZ_CAP=N (default 32).
+ * PIGZ_DICT=1 chains blocks through a 32 KiB tail copy (one gzip
+ * stream). The published thing is that value, not a view into the
+ * input block — so the serial loop and the wait-for free each block
+ * after deflate. Default is one gzip member per block. PIGZ_CAP=N
+ * (default 32).
  */
 
 #include <ccc/std/prelude.cch>
@@ -234,20 +237,17 @@ void !>(CCError) compress_file(char[:] in_path, char[:] out_path) {
     @defer out_pool.destroy();
 
     /* Loop-carried state — plain locals, exactly as the serial loop
-     * would write them. dict/held_in hop ticket-to-ticket through the
-     * read stage; crc through the write stage. zs is warm scratch. */
+     * would write them. dictbuf hops ticket-to-ticket through the read
+     * stage (a copied tail, not a view); crc through the write stage.
+     * zs is warm scratch. */
     unsigned long crc = crc32(0UL, NULL, 0);
     unsigned long crc_shift = chain ? crc32_combine_gen((z_off_t)BLOCK_SIZE) : 0;
-    const unsigned char* dict = NULL;
+    unsigned char dictbuf[DICT_SIZE];
     size_t dict_len = 0;
-    unsigned char* held_in = NULL;
     ZState zs = {0} @destroy {
         if (zs.inited)
             deflateEnd(&zs.strm);
     };
-    /* Last block's buffer: published as the next dict, no successor ever
-     * takes it out of held_in. */
-    @defer if (held_in) in_pool.free(held_in);
 
     int use_par = !env_is_one("PIGZ_SEQ");
     int i;
@@ -264,21 +264,20 @@ void !>(CCError) compress_file(char[:] in_path, char[:] out_path) {
             ? cc_slice_from_parts(buf, want, CC_SLICE_ID_UNTRACKED)
             : cc_slice_empty();
 
+        unsigned char take[DICT_SIZE];
         const unsigned char* d = NULL;
         size_t dlen = 0;
-        unsigned char* prev = NULL;
         @stage (ts.read, i) {
             if (chain) {
-                d = dict;                    /* take predecessor's tail */
-                dlen = dict_len;
-                prev = held_in;              /* its input is now mine to free */
+                dlen = dict_len;             /* consume predecessor's tail */
+                if (dlen)
+                    memcpy(take, dictbuf, dlen);
+                d = dlen ? take : NULL;
                 size_t tail = data.len < (size_t)DICT_SIZE ? data.len
                                                            : (size_t)DICT_SIZE;
-                dict = tail ? (const unsigned char*)data.ptr + (data.len - tail)
-                            : NULL;
+                if (tail)
+                    memcpy(dictbuf, data.ptr + (data.len - tail), tail);
                 dict_len = tail;             /* publish mine for i+1 */
-                held_in = buf;               /* ownership moves to the chain */
-                buf = NULL;
             }
         }
 
@@ -295,8 +294,7 @@ void !>(CCError) compress_file(char[:] in_path, char[:] out_path) {
             write_all(&out_file, r->data) !>;
         }
 
-        if (prev) in_pool.free(prev);        /* dict consumer is done */
-        if (buf) in_pool.free(buf);          /* !chain: input recycles here */
+        if (buf) in_pool.free(buf);
         out_pool.free(r);
     }
 

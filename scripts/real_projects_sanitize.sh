@@ -11,8 +11,8 @@
 # DYLD_INSERT / interceptor issues). Default on Darwin is build-with-flags
 # + skip run, or --docker for a full Linux pass. Ubuntu CI runs full.
 #
-# Mains: pigz_idiomatic, pigz_cc (build), redis_idiomatic (+ smoke),
-# levenshtein. See docs/sanitizers.md.
+# Mains: pigz_idiomatic, pigz_wait (PIGZ_DICT=1 SEQ+PAR), pigz_cc (build),
+# redis_idiomatic (+ smoke), levenshtein. See docs/sanitizers.md.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -212,6 +212,52 @@ build_run_pigz_idiomatic() {
   ok "pigz_idiomatic"
 }
 
+# Wait-for + cache(zs) + dict chain: take[] snapshot of a loop-carried slot.
+# SEQ is the serial body (no nursery). PAR is the race surface.
+build_run_pigz_wait() {
+  local san="$1"
+  local flags
+  flags="$(san_flags "$san")"
+  local bin="$OUT/pigz_wait_${san}"
+  echo -e "${CYA}[$san]${NC} pigz_wait (PIGZ_DICT=1)"
+  if ! "$CCC" build --no-cache -g \
+      real_projects/pigz/pigz_wait.ccs -o "$bin" \
+      --cc-flags "$flags" --ld-flags "$flags -lz"; then
+    fail "pigz_wait build"
+    return
+  fi
+  if ! can_run_sanitized; then
+    skip "pigz_wait run (Darwin ASan/TSan runtime — use --docker / Linux CI)"
+    ok "pigz_wait build"
+    return
+  fi
+  python3 -c "open(r'$OUT/pw_in.bin','wb').write((b'The quick brown fox\n')*50000)"
+  unset CC_WORKERS || true
+  export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0:halt_on_error=1:detect_stack_use_after_return=0}"
+  export TSAN_OPTIONS="${TSAN_OPTIONS:-halt_on_error=1}"
+  rm -f "$OUT/pw_in.bin.gz"
+  if ! env PIGZ_DICT=1 PIGZ_SEQ=1 run_timeout "$bin" "$OUT/pw_in.bin"; then
+    fail "pigz_wait SEQ dict"
+    return
+  fi
+  if command -v gzip >/dev/null 2>&1; then
+    gzip -t "$OUT/pw_in.bin.gz" || { fail "pigz_wait SEQ gzip"; return; }
+  fi
+  mv "$OUT/pw_in.bin.gz" "$OUT/pw_seq.gz"
+  if ! env PIGZ_DICT=1 run_timeout "$bin" "$OUT/pw_in.bin"; then
+    fail "pigz_wait PAR dict"
+    return
+  fi
+  if command -v gzip >/dev/null 2>&1; then
+    gzip -t "$OUT/pw_in.bin.gz" || { fail "pigz_wait PAR gzip"; return; }
+  fi
+  if ! cmp -s "$OUT/pw_seq.gz" "$OUT/pw_in.bin.gz"; then
+    fail "pigz_wait SEQ/PAR differ"
+    return
+  fi
+  ok "pigz_wait dict"
+}
+
 build_pigz_cc() {
   local san="$1"
   local flags
@@ -334,6 +380,7 @@ run_san() {
   local san="$1"
   echo -e "${YEL}=== real_projects $san (host=$HOST_OS) ===${NC}"
   build_run_pigz_idiomatic "$san"
+  build_run_pigz_wait "$san"
   build_pigz_cc "$san"
   build_run_redis "$san"
   build_run_levenshtein "$san"

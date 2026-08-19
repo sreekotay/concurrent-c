@@ -234,6 +234,7 @@ consumes the handle without joining). `@parallel` joins at the closing brace.
 | `@serial { …; a = t; }` | Multi-statement arm. Ordinary C; writes exactly one outer name. |
 | `@parallel (pred) { … }` | Same arms. Spawn if `pred`; otherwise run in order. The body always runs. |
 | `@parallel for (i in lo..hi) { … }` | Independent iterations over `[lo, hi)`. Bisects; a span of 0 or 1 is a plain `for`. |
+| `@parallel wait (ts) for (i in lo..hi)` | Ordered spawn loop on a turnstile. Type: `bool !>(CCError)` — `true` if the range finished. A targeting `break` is `ok(false)` and must be bound. `@stage` is a handshake, not a Result. |
 
 ```c
 int a = 0, b = 0;

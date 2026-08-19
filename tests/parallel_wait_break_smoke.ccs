@@ -18,14 +18,16 @@ static int run(int use_par, int* xs) {
     if (!ts.excl)
         return 1;
     int i;
-    @parallel seq (use_par) wait (ts) for (i in 0..N) {
+    bool fin = @parallel seq (use_par) wait (ts) for (i in 0..N) {
         cc_atomic_fetch_add(&g_hits, 1);
         @stage (ts, 0, i) {
             xs[i] = i + 1;
         }
         if (i == CUT)
             break;
-    }
+    } !>;
+    if (fin)
+        return 1;
     return 0;
 }
 

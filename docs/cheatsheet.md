@@ -366,10 +366,10 @@ Recipe: [recipe_parallel.ccs](../examples/recipe_parallel.ccs).
 | `@serial { …; a = t; }` | Multi-statement arm. Ordinary C; writes exactly one outer name. |
 | `@parallel (pred) { … }` | Same arms. Spawn if `pred`; otherwise run in order. Body always runs. |
 | `@parallel for (i in lo..hi) { … }` | Independent iterations over `[lo, hi)`. Bisects; span 0 or 1 is a plain `for`. |
-| `@parallel wait (ts) for (i in lo..hi)` | Ordered spawn loop on a turnstile (§8.11.6). |
+| `@parallel wait (ts) for (i in lo..hi)` | Ordered spawn loop on a turnstile. Type: `bool !>(CCError)` — `true` if the range finished (§8.11.6). |
 | `cache (zs)` | After `wait`: adopt enclosing scratch; instance identity unobservable. |
-| `@stage (ts.read, i) { … }` | Ticket handshake in a wait-for body; pass on every exit. |
-| `break` / `continue` / `return` | Same as `for`; parallel path drains first. Stage work is the contract; counters are best-effort under early exit. `goto` cannot leave the body. |
+| `@stage (ts.read, i) { … }` | Ticket handshake in a wait-for body; pass on every exit. Not a Result. |
+| `break` / `continue` / `return` | Same as `for`; parallel path drains first. `break` is `ok(false)` and must be bound. `goto` cannot leave the body. |
 
 ```c
 int a = 0, b = 0;
@@ -389,6 +389,11 @@ int a = 0, b = 0;
 @parallel for (i in 0..n) {    // half-open; bisects
     work(i);
 }
+
+bool fin = @parallel wait (ts) for (i in 0..n) {
+    @stage (ts, 0, i) { work(i); }
+    if (done) break;           // ok(false); bind the bool
+} !>;
 ```
 
 `@serial` is only a direct child of `@parallel { }`. Bare `{ }` is not an
