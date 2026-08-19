@@ -116,9 +116,13 @@ CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh   # self-build ccc + suite backend=tcc
 - Platform: `linux/arm/v7`
 - ABI: **gnueabihf** / armhf (hard-float), matching TCC’s default arm target
 
-Optional pigz compare (named volume `ccc-arm32-work`):
+Optional pigz compare (named volumes `ccc-i386-work` / `ccc-arm32-work`):
+original `pigz.c`, `pigz_wait` (chained dict by default), and `pigz_cc`
+when the backend can build it.
 
 ```bash
+./scripts/pigz_i386.sh
+CCC_HOST_CC=tcc ./scripts/pigz_i386.sh   # ccc backend = TinyCC; pigz.c still gcc
 ./scripts/pigz_arm32.sh
 ```
 

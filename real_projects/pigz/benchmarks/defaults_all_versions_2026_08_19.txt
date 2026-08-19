@@ -1,0 +1,42 @@
+# All pigz versions — defaults only
+# Date: 2026-08-19
+# Commit: 01146f26 + pigz_wait default dict chaining
+# Machine: Apple M5, 10 cores, 24 GB
+# Input: testdata/text_50mb.bin (52,428,800 bytes), Silesia concat
+# Method: 5 interleaved rounds, page-cached input, invoke `<bin> <file>`
+#         no -p / -k / -i; CC_WORKERS, CC_THREADS, PIGZ_* unset
+#         each program picks its own width. gunzip -t after a size pass.
+
+Each binary was invoked as `<bin> <file>` only. No -p, no CC_WORKERS /
+CC_THREADS / PIGZ_CAP / PIGZ_DICT / PIGZ_SEQ. pigz_wait now defaults to
+chained 32 KiB dictionaries (one gzip stream); PIGZ_DICT=0 opts out.
+
+=== Interleaved wall seconds ===
+round    pigz   pigz_cc  pigz_wait  idiomatic  parallel  hybrid  pthread  pigz_go  pigz_zig
+    1     0.337     0.202     0.497     0.190     0.191     0.189     0.184     0.231     0.194
+    2     0.212     0.188     0.188     0.178     0.177     0.176     0.199     0.207     0.188
+    3     0.212     0.188     0.186     0.174     0.176     0.180     0.175     0.228     0.190
+    4     0.215     0.190     0.190     0.177     0.178     0.176     0.176     0.210     0.190
+    5     0.217     0.191     0.194     0.178     0.178     0.177     0.179     0.236     0.193
+
+=== Summary (best / median / mean wall, output bytes, gunzip) ===
+binary             dict    best   median     mean          out   gunzip
+pigz               chain   0.212    0.215    0.239     19826377       ok
+pigz_cc            chain   0.188    0.190    0.192     19826381       ok
+pigz_wait          chain   0.186    0.190    0.251     19826922       ok
+pigz_idiomatic     indep   0.174    0.178    0.179     20092354       ok
+pigz_parallel      indep   0.176    0.178    0.180     20092354       ok
+pigz_hybrid        indep   0.176    0.177    0.179     20092354       ok
+pigz_pthread       indep   0.175    0.179    0.183     20092354       ok
+pigz_go            indep   0.207    0.228    0.222     19826922       ok
+pigz_zig           indep   0.188    0.190    0.191     19826922       ok
+
+Round 1 is cold for every binary. Median is the fair column.
+
+=== Notes ===
+- chain = 32 KiB predecessor dictionary, one gzip stream (pigz default;
+  pigz_cc default; pigz_wait default, PIGZ_DICT=0 opts out).
+- indep = one gzip member per 128 KiB block, no SetDictionary
+  (idiomatic / parallel / hybrid / pthread / Go / Zig).
+- 50 MB is short; treat medians, not means. For a 200 MB dict-vs-pigz
+  -p 16 compare see wait_dict_parity_2026_08_18.txt.

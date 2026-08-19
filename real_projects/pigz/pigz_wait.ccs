@@ -18,11 +18,11 @@
  *         the block is the work (empty when !chain on read). Pass runs
  *         on every exit, including raises.
  *
- * PIGZ_DICT=1 chains blocks through a 32 KiB tail copy (one gzip
- * stream). The published thing is that value, not a view into the
- * input block — so the serial loop and the wait-for free each block
- * after deflate. Default is one gzip member per block. PIGZ_CAP=N
- * (default 32).
+ * Default chains blocks through a 32 KiB tail copy (one gzip stream),
+ * matching pigz. The published thing is that value, not a view into
+ * the input block — so the serial loop and the wait-for free each
+ * block after deflate. PIGZ_DICT=0 is one gzip member per block.
+ * PIGZ_CAP=N (default 32).
  */
 
 #include <ccc/std/prelude.cch>
@@ -82,6 +82,12 @@ static int stagger_cap(void) {
 static int env_is_one(const char* name) {
     const char* s = getenv(name);
     return s && s[0] == '1' && s[1] == '\0';
+}
+
+/* Unset or anything but "0" is on — chaining is the pigz-shaped default. */
+static int env_not_zero(const char* name) {
+    const char* s = getenv(name);
+    return !(s && s[0] == '0' && s[1] == '\0');
 }
 
 static void put_u32le(unsigned char* p, unsigned long v) {
@@ -215,7 +221,7 @@ void !>(CCError) compress_file(char[:] in_path, char[:] out_path) {
         return cc_err(CC_ERR_INVALID_ARG, "too many blocks");
     int n = (int)n_sz;
     int cap = stagger_cap();
-    int chain = env_is_one("PIGZ_DICT");
+    int chain = env_not_zero("PIGZ_DICT");
 
     if (chain)
         out_file.write(gzip_hdr_slice()) !>;

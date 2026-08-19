@@ -25,16 +25,19 @@ WORKERS=${2:-8}
 RUNS=${3:-4}
 MEM_LIMIT_MB=${4:-0}  # 0 = no limit
 
-# For fiber-based pigz_cc, use 2x CPU workers for CPU-bound compression
-export CC_WORKERS=${CC_WORKERS:-16}
-
+# Do not default CC_WORKERS. 1x cores is correct for CPU-bound pigz_wait;
+# forcing 16 oversubscribes and is the wrong equivalent of pigz -p N.
 echo "=============================================="
 echo "pigz Benchmark: Real Compressible Data"
 echo "=============================================="
 echo ""
 echo "Input size:   ${SIZE_MB} MB"
-echo "pigz workers: ${WORKERS}"
-echo "CC_WORKERS:   ${CC_WORKERS} (fiber scheduler)"
+echo "pigz workers: ${WORKERS} (original pigz -p / pigz_cc)"
+if [ -n "${CC_WORKERS:-}" ]; then
+    echo "CC_WORKERS:   ${CC_WORKERS}"
+else
+    echo "CC_WORKERS:   (runtime default, 1x cores)"
+fi
 echo "Runs:         ${RUNS}"
 if [ "$MEM_LIMIT_MB" -gt 0 ]; then
     echo "Memory Limit: ${MEM_LIMIT_MB} MB"
@@ -43,16 +46,12 @@ echo ""
 
 # Ensure benchmark binaries (always under this script's out/, not cwd).
 ensure_pigz_bins() {
-    if [ ! -x "$OUT_DIR/pigz" ] || [ ! -x "$OUT_DIR/pigz_cc" ]; then
-        echo "Building $OUT_DIR/pigz and pigz_cc ..."
-        make -C "$SCRIPT_DIR" pigz pigz_cc
+    if [ ! -x "$OUT_DIR/pigz" ]; then
+        echo "Building $OUT_DIR/pigz ..."
+        make -C "$SCRIPT_DIR" pigz
     fi
     if [ ! -x "$OUT_DIR/pigz" ]; then
         echo "Error: $OUT_DIR/pigz is missing or not executable after make."
-        exit 1
-    fi
-    if [ ! -x "$OUT_DIR/pigz_cc" ]; then
-        echo "Error: $OUT_DIR/pigz_cc is missing or not executable after make."
         exit 1
     fi
 }
@@ -61,6 +60,11 @@ ensure_pigz_bins
 
 PIGZ_ORIG="$OUT_DIR/pigz"
 PIGZ_CC="$OUT_DIR/pigz_cc"
+PIGZ_WAIT="$OUT_DIR/pigz_wait"
+HAVE_PIGZ_CC=0
+HAVE_PIGZ_WAIT=0
+[ -x "$PIGZ_CC" ] && HAVE_PIGZ_CC=1
+[ -x "$PIGZ_WAIT" ] && HAVE_PIGZ_WAIT=1
 
 # Create data directory
 mkdir -p "$DATA_DIR"
@@ -128,12 +132,17 @@ run_compress() {
         # Time compression
         start=$(python3 -c 'import time; print(time.time())')
         
+        compress_one() {
+            if [ "$key" = "wait" ]; then
+                PIGZ_DICT=1 "$binary" bench_test.bin
+            else
+                "$binary" -k -p "$WORKERS" bench_test.bin
+            fi
+        }
         if [ "$MEM_LIMIT_MB" -gt 0 ]; then
-            # Use ulimit to restrict virtual memory (approximate memory limit)
-            # 1024 * MEM_LIMIT_MB
-            (ulimit -v $((MEM_LIMIT_MB * 1024)); "$binary" -k -p "$WORKERS" bench_test.bin)
+            (ulimit -v $((MEM_LIMIT_MB * 1024)); compress_one)
         else
-            "$binary" -k -p "$WORKERS" bench_test.bin
+            compress_one
         fi
         
         end=$(python3 -c 'import time; print(time.time())')
@@ -230,15 +239,23 @@ echo "COMPRESSION BENCHMARKS"
 echo "=============================================="
 echo ""
 
-run_compress cc   "CC pigz (Concurrent-C)"  "$PIGZ_CC" "$INPUT_FILE"
+if [ "$HAVE_PIGZ_WAIT" -eq 1 ]; then
+    run_compress wait "pigz_wait PIGZ_DICT=1 (Concurrent-C)" "$PIGZ_WAIT" "$INPUT_FILE"
+fi
+if [ "$HAVE_PIGZ_CC" -eq 1 ]; then
+    run_compress cc   "pigz_cc (Concurrent-C)"  "$PIGZ_CC" "$INPUT_FILE"
+fi
 run_compress orig "Original pigz (pthread)" "$PIGZ_ORIG" "$INPUT_FILE"
 
-# Create compressed files for decompression benchmarks
+# Create compressed files for decompression benchmarks (pigz / pigz_cc only;
+# pigz_wait has no -d).
 echo "=== Preparing Compressed Files ==="
-cp "$INPUT_FILE" bench_cc.bin
-$PIGZ_CC -k -p $WORKERS bench_cc.bin
-mv bench_cc.bin.gz bench_cc.gz
-echo "CC pigz compressed: $(du -h bench_cc.gz | cut -f1)"
+if [ "$HAVE_PIGZ_CC" -eq 1 ]; then
+    cp "$INPUT_FILE" bench_cc.bin
+    $PIGZ_CC -k -p $WORKERS bench_cc.bin
+    mv bench_cc.bin.gz bench_cc.gz
+    echo "pigz_cc compressed: $(du -h bench_cc.gz | cut -f1)"
+fi
 
 cp "$INPUT_FILE" bench_orig.bin
 $PIGZ_ORIG -k -p $WORKERS bench_orig.bin
@@ -252,7 +269,9 @@ echo "DECOMPRESSION BENCHMARKS"
 echo "=============================================="
 echo ""
 
-run_decompress cc   "CC pigz (Concurrent-C)"  "$PIGZ_CC" "bench_cc.gz"
+if [ "$HAVE_PIGZ_CC" -eq 1 ]; then
+    run_decompress cc   "pigz_cc (Concurrent-C)"  "$PIGZ_CC" "bench_cc.gz"
+fi
 run_decompress orig "Original pigz (pthread)" "$PIGZ_ORIG" "bench_orig.gz"
 
 # Verify correctness
@@ -260,11 +279,7 @@ echo "=== Correctness Check ==="
 cp "$INPUT_FILE" verify_input.bin
 
 $PIGZ_ORIG -k -c verify_input.bin > orig.gz
-$PIGZ_CC -k -c verify_input.bin > cc.gz
-
 gunzip -c orig.gz > orig_decomp.bin
-gunzip -c cc.gz > cc_decomp.bin
-
 echo -n "Original pigz: "
 if cmp -s verify_input.bin orig_decomp.bin; then
     echo "PASS"
@@ -272,11 +287,28 @@ else
     echo "FAIL"
 fi
 
-echo -n "CC pigz:       "
-if cmp -s verify_input.bin cc_decomp.bin; then
-    echo "PASS"
-else
-    echo "FAIL"
+if [ "$HAVE_PIGZ_CC" -eq 1 ]; then
+    $PIGZ_CC -k -c verify_input.bin > cc.gz
+    gunzip -c cc.gz > cc_decomp.bin
+    echo -n "pigz_cc:       "
+    if cmp -s verify_input.bin cc_decomp.bin; then
+        echo "PASS"
+    else
+        echo "FAIL"
+    fi
+fi
+
+if [ "$HAVE_PIGZ_WAIT" -eq 1 ]; then
+    cp verify_input.bin verify_wait.bin
+    PIGZ_DICT=1 $PIGZ_WAIT verify_wait.bin
+    gunzip -c verify_wait.bin.gz > wait_decomp.bin
+    echo -n "pigz_wait:     "
+    if cmp -s verify_input.bin wait_decomp.bin; then
+        echo "PASS"
+    else
+        echo "FAIL"
+    fi
+    rm -f verify_wait.bin verify_wait.bin.gz wait_decomp.bin
 fi
 
 # Show compression ratios
@@ -284,26 +316,40 @@ echo ""
 echo "=== Compression Summary ==="
 orig_size=$(wc -c < "$INPUT_FILE")
 orig_compressed=$(wc -c < orig.gz)
-cc_compressed=$(wc -c < cc.gz)
 orig_ratio=$(python3 -c "print(f'{$orig_compressed / $orig_size * 100:.2f}%')")
-cc_ratio=$(python3 -c "print(f'{$cc_compressed / $orig_size * 100:.2f}%')")
 
 echo "Input:          $(du -h $INPUT_FILE | cut -f1) ($orig_size bytes)"
 echo "Original pigz:  $(du -h orig.gz | cut -f1) ($orig_compressed bytes) - ${orig_ratio}"
-echo "CC pigz:        $(du -h cc.gz | cut -f1) ($cc_compressed bytes) - ${cc_ratio}"
+if [ "$HAVE_PIGZ_CC" -eq 1 ]; then
+    cc_compressed=$(wc -c < cc.gz)
+    cc_ratio=$(python3 -c "print(f'{$cc_compressed / $orig_size * 100:.2f}%')")
+    echo "pigz_cc:        $(du -h cc.gz | cut -f1) ($cc_compressed bytes) - ${cc_ratio}"
+fi
+if [ "$HAVE_PIGZ_WAIT" -eq 1 ]; then
+    wait_ratio="${COMP_wait_AVG_RATIO:-?}"
+    echo "pigz_wait dict: (see timed runs) avg ratio ${wait_ratio}"
+fi
 
 # Consolidated summary (easy to paste into issues/PRs)
 echo ""
 echo "=== Benchmark Summary (avg over ${RUNS} runs) ==="
-printf "%-24s  %10s  %12s  %10s  %10s  %12s\n" "Implementation" "Comp(s)" "Comp(MB/s)" "Ratio" "Decomp(s)" "Decomp(MB/s)"
-printf "%-24s  %10s  %12s  %10s  %10s  %12s\n" \
+printf "%-32s  %10s  %12s  %10s  %10s  %12s\n" "Implementation" "Comp(s)" "Comp(MB/s)" "Ratio" "Decomp(s)" "Decomp(MB/s)"
+printf "%-32s  %10s  %12s  %10s  %10s  %12s\n" \
   "pigz (pthread)" \
   "${COMP_orig_AVG_S:-?}" "${COMP_orig_AVG_MBPS:-?}" "${COMP_orig_AVG_RATIO:-?}" \
   "${DECOMP_orig_AVG_S:-?}" "${DECOMP_orig_AVG_MBPS:-?}"
-printf "%-24s  %10s  %12s  %10s  %10s  %12s\n" \
-  "pigz_cc (Concurrent-C)" \
-  "${COMP_cc_AVG_S:-?}" "${COMP_cc_AVG_MBPS:-?}" "${COMP_cc_AVG_RATIO:-?}" \
-  "${DECOMP_cc_AVG_S:-?}" "${DECOMP_cc_AVG_MBPS:-?}"
+if [ "$HAVE_PIGZ_WAIT" -eq 1 ]; then
+    printf "%-32s  %10s  %12s  %10s  %10s  %12s\n" \
+      "pigz_wait PIGZ_DICT=1" \
+      "${COMP_wait_AVG_S:-?}" "${COMP_wait_AVG_MBPS:-?}" "${COMP_wait_AVG_RATIO:-?}" \
+      "—" "—"
+fi
+if [ "$HAVE_PIGZ_CC" -eq 1 ]; then
+    printf "%-32s  %10s  %12s  %10s  %10s  %12s\n" \
+      "pigz_cc (Concurrent-C)" \
+      "${COMP_cc_AVG_S:-?}" "${COMP_cc_AVG_MBPS:-?}" "${COMP_cc_AVG_RATIO:-?}" \
+      "${DECOMP_cc_AVG_S:-?}" "${DECOMP_cc_AVG_MBPS:-?}"
+fi
 
 # Cleanup temp files
 rm -f verify_input.bin orig.gz cc.gz orig_decomp.bin cc_decomp.bin

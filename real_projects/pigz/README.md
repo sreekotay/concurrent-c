@@ -23,9 +23,11 @@ make pigz_cc   # CC version (requires CC compiler + zlib)
 # 4. Run benchmark
 ./benchmark.sh 200 8 3   # <size_mb> <workers> <runs>
 
-# 5. Linux i386 (Docker) — build + correctness + compare vs original pigz
+# 5. Linux i386 (Docker) — pigz.c vs pigz_wait (PIGZ_DICT=1) vs pigz_cc
 ../../scripts/pigz_i386.sh
 # Optional: PIGZ_BENCH_MB=50 PIGZ_BENCH_WORKERS=8 PIGZ_BENCH_RUNS=3 ../../scripts/pigz_i386.sh
+# TinyCC as the ccc backend (original pigz.c still gcc):
+#   CCC_HOST_CC=tcc ../../scripts/pigz_i386.sh
 ```
 
 ## Benchmark Data (auto-downloaded, not checked in)
@@ -37,6 +39,11 @@ make pigz_cc   # CC version (requires CC compiler + zlib)
 - **Downloaded/extracted to**: `testdata/silesia/` (and `testdata/silesia.zip`)
 - **Generated input**: `testdata/text_<size_mb>mb.bin`
 - **Not checked in**: benchmark inputs are ignored via `.gitignore`
+
+Receipts (checked in):
+
+- [All versions, defaults only, 50 MB, 2026-08-19](benchmarks/defaults_all_versions_2026_08_19.txt) — `<bin> <file>`, no `-p` / `CC_WORKERS` / `PIGZ_*`; table marks `chain` vs `indep` dict per binary (`pigz_wait` chains by default, `PIGZ_DICT=0` opts out)
+- [pigz_wait vs pigz `-p 16`, 200 MB, 2026-08-18](benchmarks/wait_dict_parity_2026_08_18.txt) — chained-dict parity (do not set `CC_WORKERS`)
 
 ## Architecture Comparison
 

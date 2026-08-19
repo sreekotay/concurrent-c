@@ -34,8 +34,13 @@ download_silesia() {
         curl -L --fail -o silesia.zip "$SILESIA_URL"
     elif command -v wget >/dev/null 2>&1; then
         wget -O silesia.zip "$SILESIA_URL"
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 - "$SILESIA_URL" <<'PY'
+import sys, urllib.request
+urllib.request.urlretrieve(sys.argv[1], "silesia.zip")
+PY
     else
-        echo "Error: need curl or wget to download silesia.zip" >&2
+        echo "Error: need curl, wget, or python3 to download silesia.zip" >&2
         exit 1
     fi
 

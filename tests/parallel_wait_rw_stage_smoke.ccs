@@ -1,0 +1,51 @@
+/*
+ * CCTurnstileRW + @stage (ts.read/write) — the pigz_wait gate shape.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+#define N 4
+#define CAP 2
+
+static int run_rw(int use_par) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+    CCTurnstileRW ts@(N, CAP, &arena) @destroy;
+    if (!ts.core.excl)
+        return 1;
+    int i;
+    int xs[N];
+    memset(xs, 0, sizeof(xs));
+    unsigned char big[32768];
+    @parallel seq (use_par) wait (ts) for (i in 0..N) {
+        unsigned char take[32768];
+        @stage (ts.read, i) {
+            take[0] = (unsigned char)i;
+            big[i] = take[0];
+        }
+        @stage (ts.write, i) {
+            xs[i] = (int)big[i] + 1;
+        }
+    }
+    for (i = 0; i < N; i++) {
+        if (xs[i] != i + 1) {
+            fprintf(stderr, "FAIL use_par=%d i=%d xs=%d\n", use_par, i, xs[i]);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int main(void) {
+    if (run_rw(0) != 0) {
+        fprintf(stderr, "FAIL seq\n");
+        return 1;
+    }
+    if (run_rw(1) != 0) {
+        fprintf(stderr, "FAIL par\n");
+        return 1;
+    }
+    printf("parallel_wait_rw_stage_smoke: OK\n");
+    return 0;
+}

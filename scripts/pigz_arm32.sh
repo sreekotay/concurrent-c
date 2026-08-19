@@ -31,6 +31,8 @@ exec docker run --rm --platform "$PLATFORM" \
   -e BUILD="${BUILD:-debug}" \
   -e SKIP_TOOLCHAIN="${SKIP_TOOLCHAIN:-0}" \
   -e FORCE_TOOLCHAIN="${FORCE_TOOLCHAIN:-0}" \
+  -e CCC_HOST_CC="${CCC_HOST_CC:-cc}" \
+  -e CCC_BACKEND_CC="${CCC_BACKEND_CC:-}" \
   -e PIGZ_BENCH_MB="${PIGZ_BENCH_MB:-20}" \
   -e PIGZ_BENCH_WORKERS="${PIGZ_BENCH_WORKERS:-4}" \
   -e PIGZ_BENCH_RUNS="${PIGZ_BENCH_RUNS:-2}" \
