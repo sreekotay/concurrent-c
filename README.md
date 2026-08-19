@@ -192,8 +192,10 @@ Test conventions: `tests/README.md`. Build driver / cache / outputs: [build spec
 `linux/arm/v7` (gnueabihf / armhf, QEMU on Apple Silicon), `shadow_lower`
 last-good **0.3.3-173**: curated suite green for host+backend **gcc** and
 **TinyCC** (`./scripts/smoke_i386.sh`, `./scripts/smoke_arm32.sh`, and the
-same with `CCC_HOST_CC=tcc`). Earlier full `cc_test` on ARM32: **787 / 787**
-(`0.3.2-108`). Config and receipt: [docs/ilp32-docker.md](docs/ilp32-docker.md).
+same with `CCC_HOST_CC=tcc`). pigz compare on i386 and ARM32 (**0.3.3-174**):
+`pigz_wait` / `pigz_cc` / original all ELF 32-bit and gunzip-clean;
+numbers in [docs/ilp32-docker.md](docs/ilp32-docker.md). Earlier full
+`cc_test` on ARM32: **787 / 787** (`0.3.2-108`).
 
 ### Updating TCC
 

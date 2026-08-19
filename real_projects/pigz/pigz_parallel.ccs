@@ -1,6 +1,6 @@
 #!ccc ccs
 /*
- * pigz_parallel.ccs — stdlib CCTurnstileRW(n, cap): depth + named read/write.
+ * pigz_parallel.ccs — stdlib CCTurnstileRW(cap): depth + named read/write.
  *
  * PIGZ_CAP=N (default 16).  PIGZ_SEQ=1 for inline sequential.
  */
@@ -238,7 +238,7 @@ void !>(CCError) compress_file(const char* in_path, const char* out_path) {
 
     /* Turnstile before nursery (inside spawn) so join completes before channel free. */
     CCArena ts_arena = cc_arena_heap(megabytes(2)) @destroy;
-    PigzTurnstile ts@(n, cap, &ts_arena) @destroy;
+    PigzTurnstile ts@(cap, &ts_arena) @destroy;
     if (!ts.core.excl)
         return cc_err(CC_ERR_OUT_OF_MEMORY, "cc_turnstile_create failed");
 

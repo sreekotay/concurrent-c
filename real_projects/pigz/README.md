@@ -42,8 +42,12 @@ make pigz_cc   # CC version (requires CC compiler + zlib)
 
 Receipts (checked in):
 
-- [All versions, defaults only, 50 MB, 2026-08-19](benchmarks/defaults_all_versions_2026_08_19.txt) — `<bin> <file>`, no `-p` / `CC_WORKERS` / `PIGZ_*`; table marks `chain` vs `indep` dict per binary (`pigz_wait` chains by default, `PIGZ_DICT=0` opts out)
+- [Latest (defaults, 50 MB)](benchmarks/latest.txt) — same method as the dated receipts below
+- [All versions, defaults only, 50 MB, 2026-08-19 (gate turnstile)](benchmarks/defaults_all_versions_2026_08_19_gate.txt) — `<bin> <file>`, no `-p` / `CC_WORKERS` / `PIGZ_*`; table marks `chain` vs `indep` dict per binary (`pigz_wait` chains by default, `PIGZ_DICT=0` opts out)
+- [All versions, defaults only, 50 MB, 2026-08-19 (pre-gate)](benchmarks/defaults_all_versions_2026_08_19.txt) — same method, before create-on-first-touch gates
 - [pigz_wait vs pigz `-p 16`, 200 MB, 2026-08-18](benchmarks/wait_dict_parity_2026_08_18.txt) — chained-dict parity (do not set `CC_WORKERS`)
+- [Linux i386 Docker, 20 MB, 2026-08-19](benchmarks/ilp32_i386_2026_08_19.txt) — `pigz.c` vs `pigz_wait` vs `pigz_cc` on QEMU (`./scripts/pigz_i386.sh`); summary in [docs/ilp32-docker.md](../../docs/ilp32-docker.md)
+- [Linux ARM32 Docker, 20 MB, 2026-08-19](benchmarks/ilp32_arm32_2026_08_19.txt) — same compare on `linux/arm/v7` (`./scripts/pigz_arm32.sh`)
 
 ## Architecture Comparison
 

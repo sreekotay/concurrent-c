@@ -39,6 +39,32 @@ CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh
 | `./scripts/smoke_arm32.sh` | gcc (`cc`) | gcc | **0 failures** |
 | `CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh` | TinyCC | TinyCC | **0 failures** |
 
+## Latest pigz receipt — 2026-08-19
+
+**Host:** macOS (Darwin 25), arm64, Docker Desktop, QEMU user-mode  
+**Seed:** `shadow_lower` last-good **0.3.3-174**  
+**Scripts:** `./scripts/pigz_i386.sh`, `./scripts/pigz_arm32.sh` — `pigz.c` vs `pigz_wait` (chained dict) vs `pigz_cc`  
+**Input:** 20 MB Silesia concat, 2 runs; pigz / pigz_cc `-p 4`; `pigz_wait` uses runtime cores (`CC_WORKERS` unset)  
+**Binaries:** ELF 32-bit. Round-trip + gunzip **PASS**. Dumps: [i386](../real_projects/pigz/benchmarks/ilp32_i386_2026_08_19.txt), [ARM32](../real_projects/pigz/benchmarks/ilp32_arm32_2026_08_19.txt).
+
+QEMU user-mode — relative ILP32 only; not comparable to host Darwin or across arches.
+
+### i386 (linux/386, gcc)
+
+| Implementation | Comp (s) | Comp (MB/s) | Ratio | Decomp (s) | Decomp (MB/s) |
+|----------------|----------|-------------|-------|------------|---------------|
+| pigz (pthread) | 1.540 | 12.4 | 46.0% | 0.505 | 37.8 |
+| pigz_wait (chain) | 0.834 | 22.9 | 46.0% | — | — |
+| pigz_cc | 0.734 | 26.0 | 46.0% | 0.552 | 34.6 |
+
+### ARM32 (linux/arm/v7, gnueabihf, gcc)
+
+| Implementation | Comp (s) | Comp (MB/s) | Ratio | Decomp (s) | Decomp (MB/s) |
+|----------------|----------|-------------|-------|------------|---------------|
+| pigz (pthread) | 0.646 | 29.5 | 46.0% | 0.287 | 66.5 |
+| pigz_wait (chain) | 0.483 | 39.5 | 46.0% | — | — |
+| pigz_cc | 0.500 | 38.1 | 46.0% | 0.302 | 63.1 |
+
 ## i386 (supported)
 
 Requires Docker with `linux/386` (QEMU on Apple Silicon is fine; slower).
@@ -116,9 +142,10 @@ CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh   # self-build ccc + suite backend=tcc
 - Platform: `linux/arm/v7`
 - ABI: **gnueabihf** / armhf (hard-float), matching TCC’s default arm target
 
-Optional pigz compare (named volumes `ccc-i386-work` / `ccc-arm32-work`):
+Optional pigz compare (named volumes `ccc-ilp32-work` / `ccc-arm32-work`):
 original `pigz.c`, `pigz_wait` (chained dict by default), and `pigz_cc`
-when the backend can build it.
+when the backend can build it. Latest i386 numbers are in
+[Latest pigz receipt](#latest-pigz-receipt--2026-08-19).
 
 ```bash
 ./scripts/pigz_i386.sh
