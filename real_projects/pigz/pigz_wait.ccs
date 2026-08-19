@@ -6,14 +6,13 @@
  * block, take the predecessor's dictionary, deflate, combine the CRC,
  * write. The annotations carry all the scheduling:
  *
- *   @parallel seq (use_par) wait (ts) for …
+ *   @parallel seq (use_par) wait (ts) cache (zs) for …
  *       — ordered spawn loop; `seq` is the runtime denial (PIGZ_SEQ=1
- *         runs the same body sequentially).
- *   @cache ZState zs
- *       — warm deflate scratch. Sequential: the one hoisted local.
+ *         runs the same body sequentially). `cache (zs)` adopts the
+ *         hoisted deflate scratch. Sequential: the one local.
  *         Parallel: exclusive instance per in-flight ticket; which
- *         one is unobservable. Strip the mark and the serial program
- *         remains.
+ *         one is unobservable. Strip the clause and the serial
+ *         program remains.
  *   @stage (ts.read, i) / @stage (ts.write, i)
  *       — ticket-scoped handshakes. enter() already armed i+1 on both;
  *         the block is the work (empty when !chain on read). Pass runs
@@ -242,7 +241,7 @@ void !>(CCError) compress_file(char[:] in_path, char[:] out_path) {
     const unsigned char* dict = NULL;
     size_t dict_len = 0;
     unsigned char* held_in = NULL;
-    @cache ZState zs = {0} @destroy {
+    ZState zs = {0} @destroy {
         if (zs.inited)
             deflateEnd(&zs.strm);
     };
@@ -252,7 +251,7 @@ void !>(CCError) compress_file(char[:] in_path, char[:] out_path) {
 
     int use_par = !env_is_one("PIGZ_SEQ");
     int i;
-    @parallel seq (use_par) wait (ts) for (i in 0..n) {
+    @parallel seq (use_par) wait (ts) cache (zs) for (i in 0..n) {
         size_t off = (size_t)i * (size_t)BLOCK_SIZE;
         size_t remain = file_len - off;
         size_t want = remain < (size_t)BLOCK_SIZE ? remain : (size_t)BLOCK_SIZE;

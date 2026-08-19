@@ -1,0 +1,6 @@
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    @cache int s = 0;
+    return s;
+}

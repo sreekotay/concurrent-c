@@ -856,10 +856,10 @@ static void shadow_rewrite_at_slice(char* expr, size_t cap) {
     snprintf(expr, cap, "%s", tmp);
 }
 
-/* Rewrite #include <… .cch> / "… .cch" → .h for host/TCC consumption. */
+/* Rewrite #include <… .h> / "… .h" → .h for host/TCC consumption. */
 static void shadow_rewrite_pass_inc(char* dst, size_t cap, const char* src) {
     size_t n = src ? strlen(src) : 0;
-    /* "...foo.cch>" / "...foo.cch\"" → "...foo.h>" / "...foo.h\"" */
+    /* "...foo.h>" / "...foo.cch\"" → "...foo.h>" / "...foo.h\"" */
     if (n >= 5 && src[n - 5] == '.' && src[n - 4] == 'c' && src[n - 3] == 'c' &&
         src[n - 2] == 'h' && (src[n - 1] == '>' || src[n - 1] == '"')) {
         snprintf(dst, cap, "%.*s.h%c", (int)(n - 5), src, src[n - 1]);
@@ -4415,7 +4415,7 @@ static int shadow_cc_slice_erased_has(const char* method) {
         size_t i;
         csv[0] = 0;
         loaded = 1;
-        if (shadow_family_header_read("cc_slice.cch", &fsrc, &fn) && fsrc) {
+        if (shadow_family_header_read("cc_slice.h", &fsrc, &fn) && fsrc) {
             for (i = 0; i + 10 < fn; i++) {
                 const char* pref = NULL;
                 size_t plen = 0;
@@ -4843,8 +4843,8 @@ static char* shadow_ufcs_slim_src(const char* src, size_t n, const char* expr,
     size_t on = 0, oc = 0;
     char* types;
     const char* prelude =
-        "#include <ccc/std/prelude.cch>\n"
-        "#include <ccc/cc_ufcs.cch>\n";
+        "#include <ccc/std/prelude.h>\n"
+        "#include <ccc/cc_ufcs.h>\n";
     if (!src || !n || !out_n) return NULL;
     *out_n = 0;
     shadow_ufcs_sb_append(&out, &on, &oc, prelude, strlen(prelude));
@@ -5725,7 +5725,7 @@ static void shadow_as_scan_nested_incs(const char* text, int depth) {
         memcpy(rel, lt, n);
         rel[n] = 0;
         /* Prefer .cch facts; strip generated .h suffix.
-         * Do not spell ".cch" in a string literal — header lowerer rewrites
+         * Do not spell ".h" in a string literal — header lowerer rewrites
          * those to ".h" (same constraint as pp_stage2 umbrella check). */
         if (n > 2 && strcmp(rel + n - 2, ".h") == 0) {
             size_t rl;
@@ -5779,7 +5779,7 @@ static void shadow_as_scan_pass_inc(char pass_inc[][256], int npass_inc) {
         if (n >= sizeof(rel)) n = sizeof(rel) - 1;
         memcpy(rel, lt, n);
         rel[n] = 0;
-        /* Same no-".cch"-literal rule as nested scan above. */
+        /* Same no-".h"-literal rule as nested scan above. */
         if (n > 2 && strcmp(rel + n - 2, ".h") == 0) {
             size_t rl;
             rel[n - 2] = 0;
@@ -5818,7 +5818,7 @@ static void shadow_as_scan_tapes(TapeCache* cache) {
     }
 }
 
-/* System `.cch` registered when a splice rewrites `<ccc/….cch>` → `.h`
+/* System `.cch` registered when a splice rewrites `<ccc/….h>` → `.h`
  * (those lines sit under `#ifndef` and never become pass_inc). */
 static void shadow_as_scan_included_cch(void) {
     size_t i, n = cc_included_cch_source_count();

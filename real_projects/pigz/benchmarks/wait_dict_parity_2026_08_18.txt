@@ -1,0 +1,40 @@
+# pigz_wait PIGZ_DICT=1 vs original pigz -p 16 — parity confirmed
+# Date: 2026-08-18
+# Commit: f0d01016 (working tree: cache (zs) clause + wait-for control-flow drain)
+# Machine: Apple M5, 10 cores, 24 GB
+# Input: testdata/text_200mb.bin (200,000,000 bytes), output ratio 29.3% both
+# Method: interleaved A/B (alternate binaries each round), /usr/bin/time,
+#         page-cached input, gunzip -t after each config
+
+=== Headline (interleaved, 5 rounds, sorted wall seconds) ===
+pigz_wait dict, CC_WORKERS unset:  0.56 0.57 0.58 0.59 0.59
+pigz_wait dict, CC_WORKERS=10:     0.56 0.57 0.57 0.57 0.57
+original pigz -k -p 16:            0.56 0.56 0.57 0.58 0.62
+
+Parity. Same best (0.56), same median (0.57), same ratio, gunzip OK.
+
+=== CPU time (interleaved, 6 rounds, /usr/bin/time -l) ===
+pigz_wait dict (CC_WORKERS=16): user 5.26-5.28s  sys 0.09-0.10s  RSS ~20 MB
+pigz -p 16:                     user 5.28-5.32s  sys 0.07-0.08s  RSS ~15 MB
+
+User CPU identical => cache (zs) warm z_stream (deflateReset +
+deflateSetDictionary + Z_SYNC_FLUSH) does the same work per byte as
+pigz's workers. Any wall gap is scheduling, not compression.
+
+=== Root cause of the earlier "gap" ===
+Earlier benches passed CC_WORKERS=16 to "match" pigz -p 16. Wrong knob
+equivalence: pigz's 16 threads mostly block in handoffs, so the kernel
+packs them onto 10 cores cleanly; CC_WORKERS=16 makes 16 CPU-hungry
+scheduler workers on 10 cores and the oversubscription cost ~4-8% wall.
+sched_v2.c already documents this (~5% on pigz 100MB silesia).
+
+Worker sweep (dict, best of 3, 200MB):
+  workers=10  cap=32/48/64: 0.57 0.57 0.57
+  workers=12  cap=32/48/64: 0.58 0.57 0.57
+  workers=16  cap=32/48/64: 0.60 0.59 0.58
+  workers=20  cap=32/48/64: 0.60 0.59 0.59
+PIGZ_CAP is flat; CC_WORKERS above core count is the whole effect.
+
+=== Rule for future benches ===
+Do not set CC_WORKERS. The runtime default (1x core count) is correct
+for CPU-bound work; "match pigz -p N" is the wrong mental model.

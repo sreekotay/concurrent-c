@@ -1,0 +1,59 @@
+/*
+ * return from a wait-for drains in-flight predecessors, then returns.
+ * Stage-guarded writes through the returning ticket match sequential.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+#define N 8
+#define CUT 2
+
+static int go(int use_par, int* xs) {
+    @errhandler(CCError e) { cc_error_log(e); return -1; }
+    CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+    CCTurnstile ts@(N, 4, 1, &arena) @destroy;
+    if (!ts.excl)
+        return -1;
+    int i;
+    @parallel seq (use_par) wait (ts) for (i in 0..N) {
+        @stage (ts, 0, i) {
+            xs[i] = i + 1;
+        }
+        if (i == CUT)
+            return 7;
+    }
+    return 0;
+}
+
+static int check(const char* tag, int use_par) {
+    int xs[N];
+    int i, rc;
+    for (i = 0; i < N; i++) xs[i] = 0;
+    rc = go(use_par, xs);
+    if (rc != 7) {
+        fprintf(stderr, "FAIL %s rc=%d want=7\n", tag, rc);
+        return 1;
+    }
+    for (i = 0; i <= CUT; i++) {
+        if (xs[i] != i + 1) {
+            fprintf(stderr, "FAIL %s xs[%d]=%d\n", tag, i, xs[i]);
+            return 1;
+        }
+    }
+    for (i = CUT + 1; i < N; i++) {
+        if (xs[i] != 0) {
+            fprintf(stderr, "FAIL %s leaked xs[%d]=%d\n", tag, i, xs[i]);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int main(void) {
+    if (check("seq", 0) != 0)
+        return 1;
+    if (check("par", 1) != 0)
+        return 1;
+    printf("parallel_wait_return_smoke: OK\n");
+    return 0;
+}

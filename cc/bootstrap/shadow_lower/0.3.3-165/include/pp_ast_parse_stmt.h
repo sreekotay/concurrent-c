@@ -3921,11 +3921,11 @@ static AstNode* parse_call_args(Parser* p) {
     return n;
 }
 
-#include "pp_ast_parse_unwrap.cch"
-#include "pp_ast_parse_spawn.cch"
+#include "pp_ast_parse_unwrap.h"
+#include "pp_ast_parse_spawn.h"
 
 static AstNode* parse_stmt(Parser* p);
-#include "pp_ast_parse_err.cch"
+#include "pp_ast_parse_err.h"
 
 /* Defined in pp_ast_parse_ext.cch (included after this file). */
 static AstNode* parse_typedef_int(Parser* p);

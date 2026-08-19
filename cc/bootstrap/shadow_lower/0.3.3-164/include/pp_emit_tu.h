@@ -40,45 +40,6 @@ static int shadow_typedef_struct_embeds_generic_container(const AstNode* it) {
     return 0;
 }
 
-/* Extracted local `.cch` stays an `AST_RAW_LINE` `#include "…h"`. */
-static int shadow_raw_is_quoted_include(const AstNode* it) {
-    const char* s;
-    if (!it || it->kind != AST_RAW_LINE || !it->a[0]) return 0;
-    if (it->e[0] && strcmp(it->e, "tape") == 0) return 0;
-    s = it->a;
-    while (*s == ' ' || *s == '\t') s++;
-    return strncmp(s, "#include \"", 10) == 0;
-}
-
-static int shadow_item_is_type_decl(const AstNode* it) {
-    if (!it) return 0;
-    return it->kind == AST_STRUCT || it->kind == AST_TYPEDEF_STRUCT ||
-           it->kind == AST_TYPEDEF_INT || it->kind == AST_TYPEDEF_ENUM;
-}
-
-/* Host text for a quoted include line (same rewrite as AST_RAW_LINE). */
-static int shadow_emit_quoted_include_text(CEmit* out, const char* line) {
-    char buf[768];
-    const char* s;
-    if (!line) return 0;
-    snprintf(buf, sizeof(buf), "%s", line);
-    s = buf;
-    while (*s == ' ' || *s == '\t') s++;
-    if (strncmp(s, "#include \"", 10) == 0) {
-        size_t n = strlen(s);
-        if (n >= 5 && strcmp(s + n - 5, ".cch\"") == 0) {
-            char path[256];
-            size_t plen = n - 10 - 5;
-            if (plen > 0 && plen < sizeof(path)) {
-                memcpy(path, s + 10, plen);
-                path[plen] = 0;
-                return cemit_fmt(out, "#include <%s.h>\n", path);
-            }
-        }
-    }
-    return cemit_fmt(out, "%s\n", s);
-}
-
 /* True when `alias` is a monomorph type argument of some factory instance
  * (e.g. Counter in py_expose::[Counter]). BufReader::[CCSocket] does not
  * require hoisting every user struct in the TU. */
@@ -1441,25 +1402,6 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
         }
         if (!cemit_str(out, "\n")) return 0;
     }
-    /* Extracted chapter includes stay in source order (below a TU typedef).
-     * Includes that precede every type decl must go out before factory
-     * bodies — `BufReader::[MemReader]` names a type that lives only in
-     * that `.h`. Do not splice every quoted `.cch` from a `.ccs` to get
-     * this; that inlines helpers and breaks header-line provenance. */
-    if (kind == SHADOW_EMIT_C && g_shadow_nginst > 0) {
-        int hi;
-        for (hi = 0; hi < n; hi++) {
-            if (shadow_item_is_type_decl(items[hi])) break;
-            if (!shadow_raw_is_quoted_include(items[hi])) continue;
-            if (items[hi]->e[0] && strcmp(items[hi]->e, "ginc") == 0)
-                continue;
-            if (!shadow_emit_line(out, &line_ctx, items[hi], ""))
-                return 0;
-            if (!shadow_emit_quoted_include_text(out, items[hi]->a))
-                return 0;
-            snprintf(items[hi]->e, sizeof(items[hi]->e), "ginc");
-        }
-    }
     /* Family factory bodies after typedef hoist so user types (Counter) are complete.
      * Phase 0: CCSlice + user; 1: Vec; 2: Map / ArrayMap (nested
      * Map::[K, Vec::[T]] sees CCVec_T). */
@@ -1836,23 +1778,23 @@ ginst_emit_pass:
                             inst->family);
                     if (strcmp(inst->family, "Vec") == 0)
                         fprintf(stderr,
-                                "  note: include <ccc/std/vec.cch> or "
-                                "<ccc/std/prelude.cch> "
+                                "  note: include <ccc/std/vec.h> or "
+                                "<ccc/std/prelude.h> "
                                 "(CC_GENERIC_FACTORY(Vec))\n");
                     else if (strcmp(inst->family, "Map") == 0)
                         fprintf(stderr,
-                                "  note: include <ccc/std/map_forward.cch> or "
-                                "<ccc/std/prelude.cch> "
+                                "  note: include <ccc/std/map_forward.h> or "
+                                "<ccc/std/prelude.h> "
                                 "(CC_GENERIC_FACTORY(Map))\n");
                     else if (strcmp(inst->family, "ArrayMap") == 0)
                         fprintf(stderr,
-                                "  note: include <ccc/std/array_map.cch> or "
-                                "<ccc/std/prelude.cch> "
+                                "  note: include <ccc/std/array_map.h> or "
+                                "<ccc/std/prelude.h> "
                                 "(CC_GENERIC_FACTORY(ArrayMap))\n");
                     else if (strcmp(inst->family, "CCSlice") == 0)
                         fprintf(stderr,
-                                "  note: include <ccc/cc_slice.cch> or "
-                                "<ccc/std/prelude.cch> "
+                                "  note: include <ccc/cc_slice.h> or "
+                                "<ccc/std/prelude.h> "
                                 "(CC_GENERIC_FACTORY(CCSlice))\n");
                     else
                         fprintf(stderr,
@@ -2005,8 +1947,6 @@ ginst_emit_pass:
         }
         if (!shadow_emit_preamble(it, out, cache)) return 0;
         it->lead_len = 0;
-        if (it->e[0] && strcmp(it->e, "ginc") == 0)
-            continue;
         if (!shadow_emit_line(out, &line_ctx, it, "")) return 0;
         switch (it->kind) {
         case AST_TYPEDEF_INT:
@@ -2835,7 +2775,7 @@ ginst_emit_pass:
                     size_t n = strlen(s);
                     if (n >= 5 && strcmp(s + n - 5, ".cch\"") == 0) {
                         char path[256];
-                        size_t plen = n - 10 - 5; /* after '#include "' before '.cch"' */
+                        size_t plen = n - 10 - 5; /* after '#include "' before '.h"' */
                         if (plen > 0 && plen < sizeof(path)) {
                             memcpy(path, s + 10, plen);
                             path[plen] = 0;
@@ -2845,7 +2785,7 @@ ginst_emit_pass:
                         }
                     }
                 }
-                /* Angle `<….cch>` left on the root tape (spliced header
+                /* Angle `<….h>` left on the root tape (spliced header
                  * `#ifndef` — not pass_inc).  Same rewrite as pass_inc. */
                 if (strncmp(s, "#include <", 10) == 0) {
                     char rew[768];

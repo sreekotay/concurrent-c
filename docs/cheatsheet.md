@@ -366,6 +366,10 @@ Recipe: [recipe_parallel.ccs](../examples/recipe_parallel.ccs).
 | `@serial { …; a = t; }` | Multi-statement arm. Ordinary C; writes exactly one outer name. |
 | `@parallel (pred) { … }` | Same arms. Spawn if `pred`; otherwise run in order. Body always runs. |
 | `@parallel for (i in lo..hi) { … }` | Independent iterations over `[lo, hi)`. Bisects; span 0 or 1 is a plain `for`. |
+| `@parallel wait (ts) for (i in lo..hi)` | Ordered spawn loop on a turnstile (§8.11.6). |
+| `cache (zs)` | After `wait`: adopt enclosing scratch; instance identity unobservable. |
+| `@stage (ts.read, i) { … }` | Ticket handshake in a wait-for body; pass on every exit. |
+| `break` / `continue` / `return` | Same as `for`; parallel path drains first. Stage work is the contract; counters are best-effort under early exit. `goto` cannot leave the body. |
 
 ```c
 int a = 0, b = 0;

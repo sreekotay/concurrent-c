@@ -1,5 +1,5 @@
 /*
- * @cache on a wait-for: exclusive checkout (no two live tickets share
+ * cache (s) on a wait-for: exclusive checkout (no two live tickets share
  * an instance), extras destroyed at join, sequential denial keeps one
  * instance (w-less: the body names `s`, not a slot).
  */
@@ -25,11 +25,11 @@ static int run_par(void) {
     CCTurnstile ts@(N, CAP, 1, &arena) @destroy;
     if (!ts.excl)
         return 1;
-    @cache Slot s = {0} @destroy {
+    Slot s = {0} @destroy {
         cc_atomic_fetch_add(&g_destroyed, 1);
     };
     int i;
-    @parallel wait (ts) for (i in 0..N) {
+    @parallel wait (ts) cache (s) for (i in 0..N) {
         if (s.live)
             cc_atomic_fetch_add(&g_overlap, 1);
         s.live = 1;
@@ -49,11 +49,11 @@ static int run_seq(void) {
     if (!ts.excl)
         return 1;
     int before = cc_atomic_load(&g_destroyed);
-    @cache Slot s = {0} @destroy {
+    Slot s = {0} @destroy {
         cc_atomic_fetch_add(&g_destroyed, 1);
     };
     int i;
-    @parallel seq (0) wait (ts) for (i in 0..N) {
+    @parallel seq (0) wait (ts) cache (s) for (i in 0..N) {
         s.hits++;
     }
     if (s.hits != N) {

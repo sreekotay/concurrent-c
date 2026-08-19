@@ -1,0 +1,81 @@
+/*
+ * break on a wait-for: stage-guarded writes match the sequential loop;
+ * ambient counters of drained successors may have run (best-effort).
+ */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+
+#define N 8
+#define CUT 2
+
+static cc_atomic_int g_hits;
+
+static int run(int use_par, int* xs) {
+    @errhandler(CCError e) { cc_error_log(e); return 1; }
+    CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
+    CCTurnstile ts@(N, 4, 1, &arena) @destroy;
+    if (!ts.excl)
+        return 1;
+    int i;
+    @parallel seq (use_par) wait (ts) for (i in 0..N) {
+        cc_atomic_fetch_add(&g_hits, 1);
+        @stage (ts, 0, i) {
+            xs[i] = i + 1;
+        }
+        if (i == CUT)
+            break;
+    }
+    return 0;
+}
+
+int main(void) {
+    int xs[N];
+    int i, hits;
+
+    for (i = 0; i < N; i++) xs[i] = 0;
+    cc_atomic_store(&g_hits, 0);
+    if (run(0, xs) != 0)
+        return 1;
+    hits = cc_atomic_load(&g_hits);
+    for (i = 0; i <= CUT; i++) {
+        if (xs[i] != i + 1) {
+            fprintf(stderr, "FAIL seq xs[%d]=%d\n", i, xs[i]);
+            return 1;
+        }
+    }
+    for (i = CUT + 1; i < N; i++) {
+        if (xs[i] != 0) {
+            fprintf(stderr, "FAIL seq leaked xs[%d]=%d\n", i, xs[i]);
+            return 1;
+        }
+    }
+    if (hits != CUT + 1) {
+        fprintf(stderr, "FAIL seq hits=%d want=%d\n", hits, CUT + 1);
+        return 1;
+    }
+
+    for (i = 0; i < N; i++) xs[i] = 0;
+    cc_atomic_store(&g_hits, 0);
+    if (run(1, xs) != 0)
+        return 1;
+    hits = cc_atomic_load(&g_hits);
+    for (i = 0; i <= CUT; i++) {
+        if (xs[i] != i + 1) {
+            fprintf(stderr, "FAIL par xs[%d]=%d\n", i, xs[i]);
+            return 1;
+        }
+    }
+    for (i = CUT + 1; i < N; i++) {
+        if (xs[i] != 0) {
+            fprintf(stderr, "FAIL par leaked xs[%d]=%d\n", i, xs[i]);
+            return 1;
+        }
+    }
+    if (hits < CUT + 1) {
+        fprintf(stderr, "FAIL par hits=%d < %d\n", hits, CUT + 1);
+        return 1;
+    }
+    printf("parallel_wait_break_smoke: OK hits_par=%d\n", hits);
+    return 0;
+}

@@ -1,1 +1,1 @@
-@parallel wait (...) requires 'for (name in lo..hi)'
+@parallel wait (...) [cache (...)] requires 'for (name in lo..hi)'
