@@ -6,11 +6,11 @@ PR CI runs the CC runtime lanes on Linux (`.github/workflows/ci.yml` job
 `sanitizers`). Darwin ASan+fibers hangs — use Linux/Docker for ASan.
 
 Linux TSan follows OS threads, not CC fibers, and will flag nursery
-`free` at wait/teardown against a worker that is already ordered by
-`alive_count`. Those reports are false positives; extra waits/fences on
-that path are a real throughput hit. The test scripts load
-`scripts/tsan_fiber.supp` instead. New races outside those frames still
-fail the job.
+`free` / last-child `end_state` load at wait/teardown against a worker
+that is already ordered by `alive_count`. Those reports are false
+positives; extra waits/fences on that path are a real throughput hit.
+The test scripts load `scripts/tsan_fiber.supp` instead. New races
+outside those frames still fail the job.
 
 Native `ccc` links `--ld-flags` only; pass `-fsanitize=…` on both
 `--cc-flags` and `--ld-flags` (Linux clang will not pull libtsan/asan

@@ -70,9 +70,9 @@ Notes:
 
 ### Validating TSan suppressions
 
-Linux TSan fiber-teardown false positives (nursery `free` vs worker) are
-listed in `scripts/tsan_fiber.supp` — do not add production barriers for
-those. `no_sanitize("thread")` on a function is only safe when:
+Linux TSan fiber-teardown false positives (nursery `free` /
+`notify_child_done` vs worker) are listed in `scripts/tsan_fiber.supp` —
+do not add production barriers for those. `no_sanitize("thread")` on a function is only safe when:
 1. The function only accesses thread-local memory (e.g. local stack variables)
 2. There are no real data races (the attribute only hides false positives)
 

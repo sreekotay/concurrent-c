@@ -1,10 +1,16 @@
 # TSan tracks OS threads, not CC fibers. Linux reports nursery teardown
-# (free in cc_nursery_release) against a worker already ordered by
-# alive_count. Do not add production barriers for this.
+# (free / last-child notify / end_state load) against a worker already
+# ordered by alive_count. Do not add production barriers for this.
 #
 # fun: / src: both listed — compiler-rt and GCC libtsan parsers differ.
 race:cc_nursery_release
 race:cc_nursery_free
+race:cc_nursery_last_exit
+race:cc_nursery_notify_child_done
+race:cc_nursery_abandon
 race:fun:cc_nursery_release
 race:fun:cc_nursery_free
+race:fun:cc_nursery_last_exit
+race:fun:cc_nursery_notify_child_done
+race:fun:cc_nursery_abandon
 race:src:nursery.c

@@ -37,10 +37,23 @@ if need node && need python3; then
 
   echo "--- js_python_chaos ---"
   CHAOS_WALL="${CHAOS_TIMEOUT:-120}"
-  OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}" \
-    CHAOS_SCALE="$SCALE" \
-    "$ROOT/scripts/run_monitored.sh" "$CHAOS_WALL" "${FUZZ_HEARTBEAT_SECS:-5}" -- \
-      node --expose-gc "$ROOT/stress/bridge/js_python_chaos.js" || rc=1
+  chaos_once() {
+    OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}" \
+      CHAOS_SCALE="$SCALE" \
+      "$ROOT/scripts/run_monitored.sh" "$CHAOS_WALL" "${FUZZ_HEARTBEAT_SECS:-5}" -- \
+        node --expose-gc "$ROOT/stress/bridge/js_python_chaos.js"
+  }
+  if ! chaos_once; then
+    st=$?
+    # In-process asyncio_lane_storm has aborted Node (SIGABRT) on GHA after
+    # a prior in-process domain; one retry is the same as a fresh worker.
+    if [ "$st" -eq 134 ]; then
+      echo "[stress/bridge] chaos aborted (exit 134); retrying once"
+      chaos_once || rc=1
+    else
+      rc=1
+    fi
+  fi
 
   echo "--- cc_node_stress_wire ---"
   CHAOS_SCALE="$SCALE" \

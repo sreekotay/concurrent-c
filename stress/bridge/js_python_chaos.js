@@ -1502,8 +1502,8 @@ async function abortInject() {
   await isolatedDestroyFromCb();
   await callbackBufferPath();
   await parkingShm();
-  await keepPastReturn();
   await asyncioLaneStorm();
+  await keepPastReturn();
   await releaseDuringSuspend();
   await destroyDuringThenable();
   await mixedHammer(numpyOk);
