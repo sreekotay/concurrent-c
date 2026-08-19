@@ -373,7 +373,7 @@ name.
 Recipe: [recipe_owned_view.ccs](../examples/recipe_owned_view.ccs). Face
 syntax: [typehooks-typeviews.md](typehooks-typeviews.md). Editor-scale
 worked example (out of tree):
-[raytext](https://github.com/sreekotay/raytext).
+[cctext](https://github.com/sreekotay/cctext).
 
 ## Concurrency
 
@@ -514,7 +514,7 @@ Larger measured programs (pigz, Redis subset, CPython extension patterns,
 the Shirley weekend raytracer) live under
 [`real_projects/`](../real_projects/); benches under [`perf/`](../perf/).
 An editor that is this locality shape at full size:
-[raytext](https://github.com/sreekotay/raytext).
+[cctext](https://github.com/sreekotay/cctext).
 
 ## `.shcc` scripts
 

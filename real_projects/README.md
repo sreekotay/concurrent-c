@@ -25,9 +25,9 @@ Normative definitions of the primitives and lowering live in `spec/concurrent-c-
 
 **Related:** `studies/cve_locality/` reconstructs historical CVEs under idiomatic CC to test locality, SERDES, and `@variant` — hits and misses both welcome.
 
-## Raytext (out of tree)
+## cctext (out of tree)
 
-[github.com/sreekotay/raytext](https://github.com/sreekotay/raytext) is a standalone editor (piece tree, sections/runs, syntax highlight, measure-generic layout) with two frontends: **raytext** (Raylib) and **cctext** (console). It is not in this tree — install `ccc` and clone that repo. Language gaps from building it live in its `FRICTION.md`.
+[github.com/sreekotay/cctext](https://github.com/sreekotay/cctext) is a standalone editor (piece tree, sections/runs, syntax highlight, measure-generic layout) with two frontends: **cctext** (console) and **cctext-ray** (Raylib). It is not in this tree — install `ccc` and clone that repo. Language gaps from building it live in its `FRICTION.md`.
 
 ## curl DNS (`curl_dns_port/`)
 
