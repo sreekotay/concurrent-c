@@ -297,6 +297,10 @@ void cc_ct_field_reg_clear(void);
 int cc_ct_field_reg_put(const char* type_name, const char* const* names,
                         const char* const* types, const int* is_as, int n);
 int cc_ct_field_reg_has(const char* type_name);
+/* Type-pass was skipped despite `@comptime` (no field-reflection markers).
+ * `cc_reflect_field_*` must fail loud — empty registry is not "unknown type". */
+void cc_ct_field_reg_set_type_pass_skipped(int skipped);
+int cc_ct_field_reg_type_pass_skipped(void);
 /* Optional owned lowered-C typedef unit (from type-pass emit; slimmed). */
 void cc_ct_field_reg_set_lowered_c(char* owned_c);
 const char* cc_ct_field_reg_lowered_c(void);

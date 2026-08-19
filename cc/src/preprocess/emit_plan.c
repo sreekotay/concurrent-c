@@ -1416,6 +1416,7 @@ static CCCtFieldRegEntry* cc__field_reg = NULL;
 static size_t cc__field_reg_n = 0;
 static size_t cc__field_reg_cap = 0;
 static char* cc__field_reg_lowered_c = NULL;
+static int cc__field_reg_type_pass_skipped = 0;
 
 void cc_ct_field_reg_clear(void) {
     size_t i, j;
@@ -1436,6 +1437,26 @@ void cc_ct_field_reg_clear(void) {
     cc__field_reg_cap = 0;
     free(cc__field_reg_lowered_c);
     cc__field_reg_lowered_c = NULL;
+    cc__field_reg_type_pass_skipped = 0;
+}
+
+void cc_ct_field_reg_set_type_pass_skipped(int skipped) {
+    cc__field_reg_type_pass_skipped = skipped ? 1 : 0;
+}
+
+int cc_ct_field_reg_type_pass_skipped(void) {
+    return cc__field_reg_type_pass_skipped;
+}
+
+/* Empty registry after a deliberate type-pass skip is not "unknown type". */
+static int cc__field_reg_refuse_if_skipped(const char* api) {
+    if (!cc__field_reg_type_pass_skipped) return 0;
+    fprintf(stderr,
+            "error: %s: type-pass was skipped (no type_of/cc_reflect_field_ "
+            "in the harvested TU) but comptime asked the field registry — "
+            "refusing silent empty lookup\n",
+            api ? api : "cc_reflect_field_*");
+    return 1;
 }
 
 void cc_ct_field_reg_set_lowered_c(char* owned_c) {
@@ -1638,6 +1659,7 @@ int cc_reflect_field_count(const char* type_name) {
         cc_ct_free_fields(fields, nf);
         return (int)nf;
     }
+    if (cc__field_reg_refuse_if_skipped("cc_reflect_field_count")) return -1;
     if (e) return e->n;
     return -1;
 }
@@ -1659,6 +1681,9 @@ static int cc__reflect_field_member(const char* type_name, int idx, int want_typ
         cc_ct_free_fields(fields, nf);
         return rc;
     }
+    if (cc__field_reg_refuse_if_skipped(want_type ? "cc_reflect_field_type"
+                                                  : "cc_reflect_field_name"))
+        return -1;
     e = cc__field_reg_find(type_name);
     if (!e || idx < 0 || idx >= e->n) return -1;
     return cc__rfl_emit(want_type ? e->types[idx] : e->names[idx], buf, buf_sz);
@@ -1681,12 +1706,16 @@ int cc_reflect_field_is_as(const char* type_name, int idx) {
         if (idx < 0 || idx >= e->n) return -1;
         return e->is_as[idx] ? 1 : 0;
     }
-    if (!cc_ct_reflect_struct_fields(cc__reflect_src, cc__reflect_src_len,
-                                     type_name, &fields, &nf))
-        return -1;
-    if (idx >= 0 && (size_t)idx < nf) rc = fields[idx].is_as ? 1 : 0;
-    cc_ct_free_fields(fields, nf);
-    return rc;
+    if (cc__reflect_src && cc__reflect_src_len > 0) {
+        if (!cc_ct_reflect_struct_fields(cc__reflect_src, cc__reflect_src_len,
+                                         type_name, &fields, &nf))
+            return -1;
+        if (idx >= 0 && (size_t)idx < nf) rc = fields[idx].is_as ? 1 : 0;
+        cc_ct_free_fields(fields, nf);
+        return rc;
+    }
+    if (cc__field_reg_refuse_if_skipped("cc_reflect_field_is_as")) return -1;
+    return -1;
 }
 
 /* --- method reflection host verbs ---

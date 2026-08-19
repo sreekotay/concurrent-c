@@ -357,8 +357,9 @@ int main(int argc, char** argv) {
     char search_dir[512];
     shadow_fill_quote_dir(in_path, search_dir, sizeof(search_dir));
 
-    /* Lower-then-TCC type pass (.ccs only, skipped when no @comptime): blank
-     * @comptime, whitelist parse+emit → field registry + slim typedef unit;
+    /* Lower-then-TCC type pass (.ccs only): blank @comptime, whitelist
+     * parse+emit → field registry + slim typedef unit when the harvested TU
+     * mentions field reflection; skipped (fail-loud on later ask) otherwise.
      * TCC gets typedefs+__cc_rf_* via cc_ct_field_reg_slim_prelude. */
     if (kind == SHADOW_EMIT_C) {
         char* type_src = NULL;

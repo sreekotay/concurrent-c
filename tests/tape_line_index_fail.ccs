@@ -1,0 +1,11 @@
+#include <ccc/std/prelude.cch>
+
+/* Emit-site locus: `#line` remaps the next line. shadow_site_loc reads
+ * the FileTape line index (not a linear scan) so the diagnostic names
+ * virt_tape.cch:100, not this file's physical line. */
+
+int main(void) {
+#line 100 "virt_tape.cch"
+    tape_line_index_missing();
+    return 0;
+}

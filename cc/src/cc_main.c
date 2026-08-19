@@ -764,6 +764,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --bin-dir DIR       Output dir for linked executables (default: ./bin)\n");
     fprintf(stderr, "  --out-stem NAME     Override the basename/stem used for generated files\n");
     fprintf(stderr, "  --no-cache          Disable incremental cache (also: CC_NO_CACHE=1)\n");
+    fprintf(stderr, "  -j[N], --jobs[=N]   Parallel CC_TARGET build (default 4; 0/omit N → ncpu)\n");
     fprintf(stderr, "  --frontend=native   Front end (native only; also: CC_FRONTEND=native)\n");
     fprintf(stderr, "  --version, --v, -V  Print version (MAJOR.MINOR.PATCH-SEED)\n");
     fprintf(stderr, "  --as=ccs|cch|shcc   Unit kind (else first-line header, else suffix)\n");
@@ -834,6 +835,7 @@ static void usage_build(const char* prog) {
     fprintf(stderr, "  -O, --release   Add -O2 -DNDEBUG (dead-strip stays on)\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Options: same as main help (use `%s --help` for full list)\n", prog);
+    fprintf(stderr, "  -j[N], --jobs[=N]   Parallel independent CC_TARGETs (default 4; 0 → ncpu)\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Project options:\n");
     fprintf(stderr, "  build.cc may declare options using: CC_OPTION <NAME> <HELP...>\n");
@@ -2589,6 +2591,21 @@ static int cc__find_target_idx(const CCBuildTargetDecl* targets, size_t target_c
     return -1;
 }
 
+static int g_build_jobs = 4; /* ccc build -jN; 0 → ncpu; default 4 */
+
+static int cc__ncpu(void) {
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    if (n < 1) n = 1;
+    if (n > 64) n = 64;
+    return (int)n;
+}
+
+static int cc__resolve_build_jobs(int jobs) {
+    if (jobs <= 0) return cc__ncpu();
+    if (jobs > 64) return 64;
+    return jobs;
+}
+
 static void cc__make_cross_parts(const CCBuildTargetDecl* t,
                                  const char* cli_target,
                                  const char* cli_sysroot,
@@ -2604,7 +2621,9 @@ static void cc__make_cross_parts(const CCBuildTargetDecl* t,
     if (sys && sys[0]) snprintf(sysroot_part, sysroot_part_cap, "--sysroot %s", sys);
 }
 
-static int cc__build_target_objs_rec(int idx,
+/* Emit+compile one target's sources. Caller ensures deps are done and owns
+ * caches[idx].state. Returns 0 on success. */
+static int cc__build_one_target_objs(int idx,
                                      const CCBuildTargetDecl* targets,
                                      size_t target_count,
                                      const char* build_dir,
@@ -2615,43 +2634,21 @@ static int cc__build_target_objs_rec(int idx,
                                      const CCFileSig* build_sig_for_key,
                                      const CCFileSig* cc_sig_for_key,
                                      int cache_ok,
-                                     CCTargetObjCache* caches,
-                                     char chain[][128],
-                                     size_t chain_len) {
+                                     CCTargetObjCache* caches) {
     if (idx < 0 || (size_t)idx >= target_count) return -1;
-    if (caches[idx].state == 1) return -2; // cycle
-    if (caches[idx].state == 2) return 0;
-    caches[idx].state = 1;
-
     const CCBuildTargetDecl* t = &targets[(size_t)idx];
 
     char t_target_part[256];
     char t_sysroot_part[256];
     cc__make_cross_parts(t, cli_target, cli_sysroot, t_target_part, sizeof(t_target_part), t_sysroot_part, sizeof(t_sysroot_part));
 
-    // Recurse deps first (compile them once).
-    for (size_t di = 0; di < t->dep_count; ++di) {
-        int d = cc__find_target_idx(targets, target_count, t->deps[di]);
-        if (d < 0) return -3;
-        if (chain_len < 64) strncpy(chain[chain_len], t->deps[di], sizeof(chain[chain_len]) - 1);
-        int r = cc__build_target_objs_rec(d, targets, target_count, build_dir, cfg, base_cli_opt, cli_target, cli_sysroot,
-                                          build_sig_for_key, cc_sig_for_key, cache_ok, caches, chain, chain_len + 1);
-        if (r != 0) return r;
-    }
-
-    // Build compile flags for this target (compile props + CLI cc_flags).
     char t_cc_flags[2048];
     t_cc_flags[0] = '\0';
     cc__merge_target_compile_flags(t, build_dir, t_cc_flags, sizeof(t_cc_flags));
     if (base_cli_opt && base_cli_opt->cc_flags && base_cli_opt->cc_flags[0]) cc__append_spaced(t_cc_flags, sizeof(t_cc_flags), base_cli_opt->cc_flags);
 
-    // Ensure target subdirs exist.
     char c_dir[PATH_MAX];
     char o_dir[PATH_MAX];
-    // Include a per-build-dir prefix so multiple unrelated projects can safely share the same --out-dir.
-    // Layout:
-    //   <out>/c/<build_id>/<target>/<unit>.c          (host-agnostic emit)
-    //   <cache>/host/<fp>/obj/<build_id>/<target>/...  (host-native objects)
     uint64_t build_id_u64 = cc__hash_build_dir_u64(build_dir);
     char build_id_hex[32];
     cc__format_u64_hex(build_id_hex, sizeof(build_id_hex), build_id_u64);
@@ -2660,9 +2657,7 @@ static int cc__build_target_objs_rec(int idx,
              g_host_obj_root[0] ? g_host_obj_root : g_out_root, build_id_hex, t->name);
     if (cc__mkdir_p(c_dir) != 0 || cc__mkdir_p(o_dir) != 0) return -1;
 
-    // Emit + compile each source.
     caches[idx].obj_count = 0;
-    // Allocate space for object paths/keys (max 128 per target).
     if (!caches[idx].obj_paths) {
         caches[idx].obj_paths = (char**)calloc(128, sizeof(char*));
         caches[idx].obj_keys = (uint64_t*)calloc(128, sizeof(uint64_t));
@@ -2674,8 +2669,6 @@ static int cc__build_target_objs_rec(int idx,
         char src_abs[PATH_MAX];
         cc__join_path(build_dir, t->srcs[si], src_abs, sizeof(src_abs));
 
-        // Collision-proof, stable unit name:
-        //   <basename_without_ext>__<hash(rel_or_abs_path)>
         char stem0[128];
         cc__stem_from_path(src_abs, stem0, sizeof(stem0));
         uint64_t src_id_u64 = cc__hash_src_path_u64(build_dir, src_abs);
@@ -2696,7 +2689,6 @@ static int cc__build_target_objs_rec(int idx,
 
         const int is_raw_c = cc__is_raw_c(src_abs);
         if (is_raw_c) {
-            /* Host-safe copy: .cch includes → .h (lowered under out/include). */
             if (cc__materialize_host_c(src_abs, c_out) != 0) {
                 fprintf(stderr, "cc: failed to materialize host C %s -> %s\n",
                         src_abs, c_out);
@@ -2705,9 +2697,7 @@ static int cc__build_target_objs_rec(int idx,
         }
         const char* c_for_compile = c_out;
 
-        // Use a cache stem that is unique per target.
         char cache_stem[256];
-        // Also include build_id so caches are safe when sharing --out-dir across multiple projects.
         snprintf(cache_stem, sizeof(cache_stem), "%s__%s__%s", build_id_hex, t->name, unit);
         char meta_path[PATH_MAX];
         char obj_meta_path[PATH_MAX];
@@ -2736,10 +2726,7 @@ static int cc__build_target_objs_rec(int idx,
                 h = cc__fnv1a64_str(h, t_cc_flags);
                 h = cc__fnv1a64_str(h, getenv("CFLAGS"));
                 h = cc__fnv1a64_str(h, getenv("CPPFLAGS"));
-                // Semantic env: changing it changes the diagnostics the emit
-                // stage produces, so a cached artifact must not be reused.
                 h = cc__fnv1a64_str(h, getenv("CC_STRICT_RESULT_UNWRAP"));
-                // bake in const bindings
                 if (cfg) {
                     h = cc__fnv1a64_i64(h, (long long)cfg->const_count);
                     for (size_t bi = 0; bi < cfg->const_count; ++bi) {
@@ -2763,7 +2750,6 @@ static int cc__build_target_objs_rec(int idx,
             }
         }
 
-        // Compile object (with depfile-based invalidation).
         if (base_cli_opt && base_cli_opt->mode != CC_MODE_EMIT_C) {
             uint64_t obj_key = 0;
             if (cache_ok) {
@@ -2788,7 +2774,7 @@ static int cc__build_target_objs_rec(int idx,
                 obj_key = h;
                 uint64_t prev = 0;
                 if (file_exists(o_out) && cc__read_u64_file(obj_meta_path, &prev) == 0 && prev == obj_key && !cc__deps_require_rebuild(d_out, o_out)) {
-                    // reuse
+                    /* reuse */
                 } else {
                     CCBuildOptions opt = *base_cli_opt;
                     opt.in_path = src_abs;
@@ -2807,6 +2793,273 @@ static int cc__build_target_objs_rec(int idx,
             caches[idx].obj_keys[caches[idx].obj_count] = obj_key;
             caches[idx].obj_count++;
         }
+    }
+    return 0;
+}
+
+static int cc__write_target_job_manifest(const char* o_dir, const CCTargetObjCache* cache) {
+    char path[PATH_MAX];
+    FILE* f;
+    size_t i;
+    if (!o_dir || !cache) return -1;
+    snprintf(path, sizeof(path), "%s/.cc_job_objs", o_dir);
+    f = fopen(path, "w");
+    if (!f) return -1;
+    for (i = 0; i < cache->obj_count; ++i) {
+        if (!cache->obj_paths[i]) continue;
+        fprintf(f, "%llu\t%s\n", (unsigned long long)cache->obj_keys[i], cache->obj_paths[i]);
+    }
+    fclose(f);
+    return 0;
+}
+
+static int cc__read_target_job_manifest(const char* o_dir, CCTargetObjCache* cache) {
+    char path[PATH_MAX];
+    char line[PATH_MAX + 64];
+    FILE* f;
+    if (!o_dir || !cache) return -1;
+    snprintf(path, sizeof(path), "%s/.cc_job_objs", o_dir);
+    f = fopen(path, "r");
+    if (!f) {
+        /* Emit-C-only builds write an empty/absent manifest. */
+        cache->obj_count = 0;
+        return 0;
+    }
+    if (!cache->obj_paths) {
+        cache->obj_paths = (char**)calloc(128, sizeof(char*));
+        cache->obj_keys = (uint64_t*)calloc(128, sizeof(uint64_t));
+        if (!cache->obj_paths || !cache->obj_keys) {
+            fclose(f);
+            return -1;
+        }
+    }
+    cache->obj_count = 0;
+    while (fgets(line, sizeof(line), f) && cache->obj_count < 128) {
+        unsigned long long key = 0;
+        char obj[PATH_MAX];
+        if (sscanf(line, "%llu\t%1023s", &key, obj) != 2) continue;
+        cache->obj_paths[cache->obj_count] = strdup(obj);
+        cache->obj_keys[cache->obj_count] = (uint64_t)key;
+        cache->obj_count++;
+    }
+    fclose(f);
+    return 0;
+}
+
+static void cc__target_obj_dir(const CCBuildTargetDecl* t, const char* build_dir,
+                               char* o_dir, size_t o_cap) {
+    uint64_t build_id_u64 = cc__hash_build_dir_u64(build_dir);
+    char build_id_hex[32];
+    cc__format_u64_hex(build_id_hex, sizeof(build_id_hex), build_id_u64);
+    snprintf(o_dir, o_cap, "%s/obj/%s/%s",
+             g_host_obj_root[0] ? g_host_obj_root : g_out_root, build_id_hex, t->name);
+}
+
+static int cc__target_deps_done(int idx, const CCBuildTargetDecl* targets,
+                                size_t target_count, const CCTargetObjCache* caches) {
+    size_t di;
+    if (idx < 0 || (size_t)idx >= target_count) return 0;
+    for (di = 0; di < targets[idx].dep_count; ++di) {
+        int d = cc__find_target_idx(targets, target_count, targets[idx].deps[di]);
+        if (d < 0) return 0;
+        if (caches[d].state != 2) return 0;
+    }
+    return 1;
+}
+
+static int cc__mark_needed_targets(int idx, const CCBuildTargetDecl* targets,
+                                   size_t target_count, unsigned char* needed,
+                                   unsigned char* walk) {
+    size_t di;
+    if (idx < 0 || (size_t)idx >= target_count) return -3;
+    if (walk[idx] == 1) return -2; /* cycle */
+    if (needed[idx]) return 0;
+    walk[idx] = 1;
+    for (di = 0; di < targets[idx].dep_count; ++di) {
+        int d = cc__find_target_idx(targets, target_count, targets[idx].deps[di]);
+        if (d < 0) return -3;
+        int r = cc__mark_needed_targets(d, targets, target_count, needed, walk);
+        if (r != 0) return r;
+    }
+    walk[idx] = 2;
+    needed[idx] = 1;
+    return 0;
+}
+
+/* Parallel ready-set scheduler for CC_TARGET_DEPS. Fail-loud: first child
+ * failure SIGTERMs the rest and returns that error. */
+static int cc__build_target_objs_parallel(int chosen_idx,
+                                          const CCBuildTargetDecl* targets,
+                                          size_t target_count,
+                                          const char* build_dir,
+                                          const CCCompileConfig* cfg,
+                                          const CCBuildOptions* base_cli_opt,
+                                          const char* cli_target,
+                                          const char* cli_sysroot,
+                                          const CCFileSig* build_sig_for_key,
+                                          const CCFileSig* cc_sig_for_key,
+                                          int cache_ok,
+                                          CCTargetObjCache* caches,
+                                          int jobs) {
+    unsigned char needed[64];
+    unsigned char walk[64];
+    typedef struct {
+        pid_t pid;
+        int idx;
+    } CCBuildJob;
+    CCBuildJob running[64];
+    int nrun = 0;
+    int remaining = 0;
+    int fail_rc = 0;
+    size_t i;
+
+    if (jobs < 1) jobs = 1;
+    if (chosen_idx < 0 || (size_t)chosen_idx >= target_count) return -1;
+    memset(needed, 0, sizeof(needed));
+    memset(walk, 0, sizeof(walk));
+    {
+        int mr = cc__mark_needed_targets(chosen_idx, targets, target_count, needed, walk);
+        if (mr != 0) return mr;
+    }
+    for (i = 0; i < target_count; ++i)
+        if (needed[i]) remaining++;
+
+    while (remaining > 0 || nrun > 0) {
+        while (nrun < jobs && fail_rc == 0) {
+            int pick = -1;
+            for (i = 0; i < target_count; ++i) {
+                if (!needed[i] || caches[i].state != 0) continue;
+                if (!cc__target_deps_done((int)i, targets, target_count, caches)) continue;
+                pick = (int)i;
+                break;
+            }
+            if (pick < 0) break;
+
+            caches[pick].state = 1;
+            {
+                pid_t pid = fork();
+                if (pid < 0) {
+                    perror("cc: fork");
+                    fail_rc = -1;
+                    caches[pick].state = 0;
+                    break;
+                }
+                if (pid == 0) {
+                    int r = cc__build_one_target_objs(
+                        pick, targets, target_count, build_dir, cfg, base_cli_opt,
+                        cli_target, cli_sysroot, build_sig_for_key, cc_sig_for_key,
+                        cache_ok, caches);
+                    if (r == 0) {
+                        char o_dir[PATH_MAX];
+                        cc__target_obj_dir(&targets[pick], build_dir, o_dir, sizeof(o_dir));
+                        if (cc__write_target_job_manifest(o_dir, &caches[pick]) != 0) r = -1;
+                    }
+                    _exit(r == 0 ? 0 : 1);
+                }
+                running[nrun].pid = pid;
+                running[nrun].idx = pick;
+                nrun++;
+            }
+        }
+
+        if (nrun == 0) {
+            if (remaining > 0 && fail_rc == 0) return -2; /* cycle / stuck */
+            break;
+        }
+
+        {
+            int status = 0;
+            pid_t done = waitpid(-1, &status, 0);
+            int slot = -1;
+            int idx = -1;
+            if (done < 0) {
+                perror("cc: waitpid");
+                fail_rc = -1;
+                break;
+            }
+            for (i = 0; i < (size_t)nrun; ++i) {
+                if (running[i].pid == done) {
+                    slot = (int)i;
+                    idx = running[i].idx;
+                    break;
+                }
+            }
+            if (slot < 0) continue;
+            running[slot] = running[nrun - 1];
+            nrun--;
+
+            if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+                fail_rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+                if (fail_rc == 0) fail_rc = -1;
+                caches[idx].state = 0;
+                /* Cancel siblings. */
+                for (i = 0; i < (size_t)nrun; ++i) kill(running[i].pid, SIGTERM);
+                while (nrun > 0) {
+                    int st = 0;
+                    pid_t p = waitpid(-1, &st, 0);
+                    if (p < 0) break;
+                    for (i = 0; i < (size_t)nrun; ++i) {
+                        if (running[i].pid == p) {
+                            running[i] = running[nrun - 1];
+                            nrun--;
+                            break;
+                        }
+                    }
+                }
+                return fail_rc;
+            }
+
+            {
+                char o_dir[PATH_MAX];
+                cc__target_obj_dir(&targets[idx], build_dir, o_dir, sizeof(o_dir));
+                if (cc__read_target_job_manifest(o_dir, &caches[idx]) != 0) {
+                    fail_rc = -1;
+                    return fail_rc;
+                }
+            }
+            caches[idx].state = 2;
+            remaining--;
+        }
+    }
+    return fail_rc;
+}
+
+static int cc__build_target_objs_rec(int idx,
+                                     const CCBuildTargetDecl* targets,
+                                     size_t target_count,
+                                     const char* build_dir,
+                                     const CCCompileConfig* cfg,
+                                     const CCBuildOptions* base_cli_opt,
+                                     const char* cli_target,
+                                     const char* cli_sysroot,
+                                     const CCFileSig* build_sig_for_key,
+                                     const CCFileSig* cc_sig_for_key,
+                                     int cache_ok,
+                                     CCTargetObjCache* caches,
+                                     char chain[][128],
+                                     size_t chain_len) {
+    if (idx < 0 || (size_t)idx >= target_count) return -1;
+    if (caches[idx].state == 1) return -2; // cycle
+    if (caches[idx].state == 2) return 0;
+    caches[idx].state = 1;
+
+    const CCBuildTargetDecl* t = &targets[(size_t)idx];
+
+    /* Recurse deps first (serial path; -j uses the parallel scheduler). */
+    for (size_t di = 0; di < t->dep_count; ++di) {
+        int d = cc__find_target_idx(targets, target_count, t->deps[di]);
+        if (d < 0) return -3;
+        if (chain_len < 64) strncpy(chain[chain_len], t->deps[di], sizeof(chain[chain_len]) - 1);
+        int r = cc__build_target_objs_rec(d, targets, target_count, build_dir, cfg, base_cli_opt, cli_target, cli_sysroot,
+                                          build_sig_for_key, cc_sig_for_key, cache_ok, caches, chain, chain_len + 1);
+        if (r != 0) return r;
+    }
+
+    {
+        int r = cc__build_one_target_objs(idx, targets, target_count, build_dir, cfg, base_cli_opt,
+                                          cli_target, cli_sysroot, build_sig_for_key, cc_sig_for_key,
+                                          cache_ok, caches);
+        if (r != 0) return r;
     }
 
     caches[idx].state = 2;
@@ -4708,6 +4961,25 @@ static int run_build_mode(int argc, char** argv) {
         if (strcmp(argv[i], "--no-runtime") == 0) { no_runtime = 1; continue; }
         if (strcmp(argv[i], "--keep-c") == 0) { keep_c = 1; continue; }
         if (strcmp(argv[i], "--verbose") == 0) { verbose = 1; continue; }
+        if (strcmp(argv[i], "-j") == 0 || strcmp(argv[i], "--jobs") == 0) {
+            if (i + 1 < argc && argv[i + 1] && argv[i + 1][0] &&
+                (argv[i + 1][0] == '-' ? 0 : 1) &&
+                (isdigit((unsigned char)argv[i + 1][0]) ||
+                 (argv[i + 1][0] == '+' && isdigit((unsigned char)argv[i + 1][1])))) {
+                g_build_jobs = atoi(argv[++i]);
+            } else {
+                g_build_jobs = 0; /* ncpu */
+            }
+            continue;
+        }
+        if (strncmp(argv[i], "-j", 2) == 0 && argv[i][2]) {
+            g_build_jobs = atoi(argv[i] + 2);
+            continue;
+        }
+        if (strncmp(argv[i], "--jobs=", 7) == 0) {
+            g_build_jobs = atoi(argv[i] + 7);
+            continue;
+        }
         if (strcmp(argv[i], "--cc-bin") == 0) {
             if (i + 1 >= argc) { fprintf(stderr, "cc: --cc-bin requires a path\n"); goto parse_fail; }
             cc_bin = argv[++i];
@@ -5345,9 +5617,17 @@ static int run_build_mode(int argc, char** argv) {
             memset(caches, 0, sizeof(caches));
             char chain[64][128];
             memset(chain, 0, sizeof(chain));
-            int r = cc__build_target_objs_rec(chosen_idx, targets, target_count, build_dir, &cfg, &base_opt,
+            int jobs = cc__resolve_build_jobs(g_build_jobs);
+            int r;
+            if (jobs <= 1) {
+                r = cc__build_target_objs_rec(chosen_idx, targets, target_count, build_dir, &cfg, &base_opt,
                                               target_flag ? target_flag : "", sysroot_flag ? sysroot_flag : "",
                                               &build_sig, &cc_sig, cache_ok, caches, chain, 0);
+            } else {
+                r = cc__build_target_objs_parallel(chosen_idx, targets, target_count, build_dir, &cfg, &base_opt,
+                                                   target_flag ? target_flag : "", sysroot_flag ? sysroot_flag : "",
+                                                   &build_sig, &cc_sig, cache_ok, caches, jobs);
+            }
             if (r == -2) {
                 fprintf(stderr, "cc: cycle in CC_TARGET_DEPS\n");
                 cc_build_free_targets(targets, target_count, def_name);

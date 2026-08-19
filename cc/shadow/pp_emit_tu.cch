@@ -744,8 +744,8 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
             FileTape* ft = cache ? tape_by_id(cache, items[i]->file_id) : NULL;
             ofile[0] = 0;
             if (ft && ft->bytes)
-                shadow_tape_logical_at(ft->bytes, ft->len, items[i]->tok_off,
-                                       ft->path, ofile, sizeof(ofile), &oline);
+                shadow_tape_logical_at(ft, items[i]->tok_off, ofile,
+                                       sizeof(ofile), &oline);
             shadow_gfac_add(items[i]->a, atoi(items[i]->b), items[i]->d,
                             items[i]->c[0] == 'e' /* extend */, ofile, oline);
         }
@@ -769,6 +769,8 @@ static int shadow_emit(AstNode** items, int n, TapeCache* cache, CEmit* out,
     }
     /* AST+type: one normalize/bind walk before emit (not per-expr string soup). */
     shadow_collect_binds(items, n);
+    /* Header protos → same ShadowFnParamMap (TU rows already present). */
+    shadow_fnparam_ingest_headers();
     /* @typeview modes before UFCS/field checks (erased typedefs emit later).
      * Builtins first (slice family); TU decls may redeclare if compatible. */
     shadow_restrict_register_builtins();

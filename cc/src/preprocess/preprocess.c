@@ -14239,6 +14239,97 @@ int cc_included_cch_fn_first_param(const char* name, char* out, size_t out_sz) {
     return cc_included_cch_fn_param(name, 0, out, out_sz);
 }
 
+/* Same decl-shaped `name(` rule as cc__scan_fn_param_in_src, but every
+ * parameter of every first-seen decl — one pass per buffer. */
+static int cc__each_fn_param_in_src(const char* fsrc, size_t fn,
+                                    CCIncludedCchFnParamCb cb, void* ctx) {
+    size_t i = 0;
+    CCScannerState scan;
+    if (!fsrc || !cb) return 0;
+    cc_scanner_init(&scan);
+    while (i < fn) {
+        size_t s, e, q, b;
+        if (cc_scanner_skip_non_code(&scan, fsrc, fn, &i)) continue;
+        if (i >= fn) break;
+        if (!cc_is_ident_start(fsrc[i])) {
+            i++;
+            continue;
+        }
+        if (i > 0 && cc_is_ident_char(fsrc[i - 1])) {
+            while (i < fn && cc_is_ident_char(fsrc[i])) i++;
+            continue;
+        }
+        s = i;
+        while (i < fn && cc_is_ident_char(fsrc[i])) i++;
+        e = i;
+        q = e;
+        while (q < fn && (fsrc[q] == ' ' || fsrc[q] == '\t')) q++;
+        if (q >= fn || fsrc[q] != '(') continue;
+        b = cc_rskip_ws_and_comments(fsrc, s);
+        if (!(b > 0 && cc__decl_prev_ok(fsrc, b))) continue;
+        {
+            char name[192];
+            char ty[160];
+            size_t nlen = e - s;
+            size_t ps = q + 1;
+            int depth = 0;
+            int argi = 0;
+            size_t pe = ps;
+            if (nlen == 0 || nlen >= sizeof(name)) continue;
+            memcpy(name, fsrc + s, nlen);
+            name[nlen] = 0;
+            while (pe < fn) {
+                char c = fsrc[pe];
+                if (c == '(') {
+                    depth++;
+                } else if (c == ')' && depth-- == 0) {
+                    if (pe > ps) {
+                        size_t end = pe;
+                        cc__param_drop_name(fsrc, ps, &end);
+                        if (cc__norm_type_span(fsrc, ps, end, ty, sizeof(ty)) &&
+                            ty[0] && strcmp(ty, "void") != 0) {
+                            if (cb(name, argi, ty, ctx) != 0) return -1;
+                        }
+                    }
+                    break;
+                } else if (c == ',' && depth == 0) {
+                    size_t end = pe;
+                    cc__param_drop_name(fsrc, ps, &end);
+                    if (cc__norm_type_span(fsrc, ps, end, ty, sizeof(ty)) &&
+                        ty[0]) {
+                        if (cb(name, argi, ty, ctx) != 0) return -1;
+                    }
+                    argi++;
+                    ps = pe + 1;
+                }
+                pe++;
+            }
+        }
+    }
+    return 0;
+}
+
+int cc_included_cch_each_fn_param(CCIncludedCchFnParamCb cb, void* ctx) {
+    size_t h;
+    if (!cb) return 0;
+    for (h = 0; h < g_included_cch_source_count; h++) {
+        size_t fn = 0;
+        const char* fsrc = cc__included_cch_text(h, &fn);
+        if (fsrc && cc__each_fn_param_in_src(fsrc, fn, cb, ctx) != 0)
+            return -1;
+    }
+    for (h = 0; h < g_lowered_local_header_count; h++) {
+        const char* path = g_lowered_local_headers[h].source_path;
+        size_t fn = 0;
+        const char* fsrc;
+        if (!path || !path[0]) continue;
+        fsrc = cc__path_text_cached(path, &fn);
+        if (fsrc && cc__each_fn_param_in_src(fsrc, fn, cb, ctx) != 0)
+            return -1;
+    }
+    return 0;
+}
+
 static void cc__register_included_cch_tree(const char* source_path) {
     char abs_src[PATH_MAX];
     char source_dir[PATH_MAX];

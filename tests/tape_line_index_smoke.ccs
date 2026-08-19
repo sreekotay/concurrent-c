@@ -1,0 +1,19 @@
+#include <ccc/std/prelude.cch>
+#include "tape_line_index_ok.cch"
+#include "tape_line_index_ok.cch"
+#include <stdio.h>
+
+/* Line-index smoke: `#line` in the TU plus a quoted header loaded twice
+ * (include guard + stage-1 tape cache hit). Must compile and run; the
+ * directives must not shift later code. */
+
+#line 1000 "virt_ok.cch"
+    static int tape_line_index_virt(void) { return 7; }
+#line 20 "tape_line_index_smoke.ccs"
+
+int main(void) {
+    if (tape_line_index_ok(2) != 3) return 1;
+    if (tape_line_index_virt() != 7) return 2;
+    printf("tape_line_index_smoke ok\n");
+    return 0;
+}

@@ -1,0 +1,5 @@
+# Included tape's line index: `#line 77` is stamped into the product so
+# host-cc reports virt_include.h:77 (path suffix .cch→.h), not the .cch
+# physical line.
+virt_include.h:77
+expected expression

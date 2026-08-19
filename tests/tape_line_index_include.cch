@@ -1,0 +1,12 @@
+#ifndef TAPE_LINE_INDEX_INCLUDE_CCH
+#define TAPE_LINE_INDEX_INCLUDE_CCH
+
+/* Parse-time locus on this tape: `#line` makes the next line logical 77.
+ * diag_at uses the FileTape index for the line and ft->path for the file. */
+static inline int tape_line_index_hdr_bad(void) {
+#line 77 "virt_include.cch"
+    int x = ;
+    return x;
+}
+
+#endif /* TAPE_LINE_INDEX_INCLUDE_CCH */

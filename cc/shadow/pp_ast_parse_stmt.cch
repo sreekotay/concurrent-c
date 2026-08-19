@@ -765,7 +765,7 @@ static void shadow_result_note_ok_qual(Parser* p, Token at, const char* okty,
             const char* path = (ft && ft->path) ? ft->path : "<input>";
             const char* tests = strstr(path, "tests/");
             if (ft && ft->bytes)
-                offset_to_linecol(ft->bytes, ft->len, at.offset, &line, &col);
+                offset_to_linecol(ft, at.offset, &line, &col);
             fprintf(stderr,
                     "%s:%d:%d: warning: type: '%s' is declared with a %s "
                     "ok type here and a %s one at line %d; qualifiers are "
@@ -782,7 +782,7 @@ static void shadow_result_note_ok_qual(Parser* p, Token at, const char* okty,
         FileTape* ft =
             (p && p->cache) ? tape_by_id(p->cache, at.file_id) : NULL;
         if (ft && ft->bytes)
-            offset_to_linecol(ft->bytes, ft->len, at.offset, &line, &col);
+            offset_to_linecol(ft, at.offset, &line, &col);
         snprintf(g_shadow_rq_name[g_shadow_nrq],
                  sizeof(g_shadow_rq_name[0]), "%s", concrete);
         g_shadow_rq_qual[g_shadow_nrq] = quals;
@@ -2320,8 +2320,7 @@ static AstNode* parse_typed_init(Parser* p) {
                 const char* tests = strstr(path, "tests/");
                 int oline = 1, ocol = 1;
                 if (ft && ft->bytes)
-                    offset_to_linecol(ft->bytes, ft->len, name.offset, &oline,
-                                      &ocol);
+                    offset_to_linecol(ft, name.offset, &oline, &ocol);
                 fprintf(stderr,
                         "%s:%d: error: expression expected before ';'\n",
                         tests ? tests : path, oline);

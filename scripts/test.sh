@@ -201,6 +201,11 @@ if [ -x "./cc/bin/ccc" ]; then
     echo "[test] doc fence smoke FAILED"
     exit 1
   fi
+  # FileTape `#line` / CC_LN index + emit-cache replay of remapped loci.
+  if ! sh scripts/test_tape_line_index.sh; then
+    echo "[test] tape line index cache selftest FAILED"
+    exit 1
+  fi
   # Full SERDES goldens/recipes: scripts/test_shadow.sh (not this gate).
 
   if [ "$quick" = 0 ]; then

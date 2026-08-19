@@ -1,0 +1,4 @@
+# FileTape line index: `#line 100` remaps the emit-site locus so host-cc
+# names virt_tape.cch:100:5, not this .ccs physical line.
+virt_tape.cch:100:5
+tape_line_index_missing

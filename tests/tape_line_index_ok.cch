@@ -1,0 +1,10 @@
+#ifndef TAPE_LINE_INDEX_OK_CCH
+#define TAPE_LINE_INDEX_OK_CCH
+
+/* Quoted include: a second FileTape in the stage-1 cache. Included twice
+ * from the smoke so the second load is a tape-cache hit. */
+static inline int tape_line_index_ok(int n) {
+    return n + 1;
+}
+
+#endif /* TAPE_LINE_INDEX_OK_CCH */

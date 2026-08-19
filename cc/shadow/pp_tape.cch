@@ -6,6 +6,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdarg.h>
+#include <ccc/std/vec.cch>
 
 extern size_t cc_unit_header_skip(const char* src, size_t n);
 
@@ -59,6 +60,20 @@ static int __attribute__((unused)) tok_is_ident(Token t, const char* lit) {
 
 /* ---- stage-1 file tape cache -------------------------------------------- */
 
+/* One record per physical line start. Query is predecessor (`off <= tok_off`)
+ * — a hash Map cannot do that; a sorted Vec + bsearch can. */
+typedef struct {
+    size_t off;
+    int logic;
+    int phys;
+    const char* file; /* interned; tape path or a `#line` / CC_LN spelling */
+} TapeLineRec;
+
+typedef char* TapeInternPath;
+
+CC_VEC_DECL_HEAP(TapeLineRec, TapeLineVec);
+CC_VEC_DECL_HEAP(TapeInternPath, TapePathVec);
+
 typedef struct {
     char* path;          /* owned */
     char* bytes;         /* owned, line-spliced; Token spells borrow here */
@@ -66,6 +81,8 @@ typedef struct {
     Token* toks;         /* owned array; spells borrow bytes */
     int ntoks;
     int file_id;
+    TapeLineVec lines;   /* owned; built once at load */
+    TapePathVec paths;   /* owned interned `#line` / CC_LN paths */
 } FileTape;
 
 /* Redis/pigz TUs warm many angle-includes into the stage-1 cache; 64
@@ -80,96 +97,133 @@ typedef struct {
 
 /* ---- origins / loud diagnostics ----------------------------------------- */
 
-static void offset_to_linecol(const char* bytes, size_t len, size_t off,
-                              int* out_line, int* out_col) {
-    int line = 1, col = 1;
-    size_t n = off < len ? off : len;
-    for (size_t i = 0; i < n; i++) {
-        if (bytes[i] == '\n') { line++; col = 1; }
-        else col++;
+static const char* tape_intern_path(FileTape* ft, const char* p, size_t n) {
+    char* copy;
+    size_t i, np;
+    if (!ft) return "";
+    if (!p || n == 0) return ft->path ? ft->path : "";
+    if (ft->path && strlen(ft->path) == n && memcmp(ft->path, p, n) == 0)
+        return ft->path;
+    np = TapePathVec_len(&ft->paths);
+    for (i = 0; i < np; i++) {
+        char* e = ft->paths.data[i];
+        if (e && strlen(e) == n && memcmp(e, p, n) == 0) return e;
     }
-    *out_line = line;
-    *out_col = col;
+    copy = (char*)malloc(n + 1);
+    if (!copy) {
+        fprintf(stderr, "error: tape line path intern failed for '%s'\n",
+                ft->path ? ft->path : "<input>");
+        return NULL;
+    }
+    memcpy(copy, p, n);
+    copy[n] = 0;
+    if (TapePathVec_push(&ft->paths, copy) != 0) {
+        free(copy);
+        fprintf(stderr, "error: tape line path table grow failed for '%s'\n",
+                ft->path ? ft->path : "<input>");
+        return NULL;
+    }
+    return copy;
 }
 
-/* Logical file:line at byte offset, honoring `#line` / CC_LN in tape bytes. */
-static void tape_logical_at(const char* bytes, size_t len, size_t off,
-                            const char* fallback_path, char* file, size_t fcap,
-                            int* line_out) {
-    int phys = 1;
-    int logic = 1;
-    char sticky[256];
-    const char* cur_file = fallback_path ? fallback_path : "";
-    size_t i = 0;
-    size_t lim = off < len ? off : len;
-    sticky[0] = 0;
-    if (!file || !fcap || !line_out) return;
-    file[0] = 0;
-    *line_out = 1;
-    if (!bytes) {
-        snprintf(file, fcap, "%s", cur_file);
-        return;
+static int tape_line_push(FileTape* ft, size_t off, int logic, int phys,
+                          const char* file) {
+    TapeLineRec r;
+    r.off = off;
+    r.logic = logic;
+    r.phys = phys;
+    r.file = file ? file : (ft && ft->path ? ft->path : "");
+    if (!ft || TapeLineVec_push(&ft->lines, r) != 0) {
+        fprintf(stderr, "error: tape line index grow failed for '%s'\n",
+                ft && ft->path ? ft->path : "<input>");
+        return 0;
     }
-    while (i < lim) {
+    return 1;
+}
+
+/* One walk: record logical line + sticky path at each physical line start. */
+static int tape_lines_build(FileTape* ft) {
+    const char* bytes;
+    size_t len, i;
+    int phys = 1, logic = 1;
+    const char* cur_file;
+    if (!ft || !ft->bytes) {
+        fprintf(stderr, "error: tape line index build with no bytes\n");
+        return 0;
+    }
+    bytes = ft->bytes;
+    len = ft->len;
+    ft->lines = TapeLineVec_init();
+    ft->paths = TapePathVec_init();
+    cur_file = ft->path ? ft->path : "";
+    if (TapeLineVec_reserve(&ft->lines, len / 32 + 8) != 0) {
+        fprintf(stderr, "error: tape line index reserve failed for '%s'\n",
+                ft->path ? ft->path : "<input>");
+        return 0;
+    }
+    if (!tape_line_push(ft, 0, logic, phys, cur_file)) return 0;
+    i = 0;
+    while (i < len) {
         int at_bol = (i == 0 || bytes[i - 1] == '\n');
-        if (at_bol && i + 5 < lim && bytes[i] == '#' &&
+        if (at_bol && i + 5 < len && bytes[i] == '#' &&
             strncmp(bytes + i, "#line", 5) == 0 &&
             (bytes[i + 5] == ' ' || bytes[i + 5] == '\t')) {
             size_t j = i + 5;
             int n = 0;
-            while (j < lim && (bytes[j] == ' ' || bytes[j] == '\t')) j++;
-            while (j < lim && bytes[j] >= '0' && bytes[j] <= '9') {
+            while (j < len && (bytes[j] == ' ' || bytes[j] == '\t')) j++;
+            while (j < len && bytes[j] >= '0' && bytes[j] <= '9') {
                 n = n * 10 + (bytes[j] - '0');
                 j++;
             }
-            while (j < lim && (bytes[j] == ' ' || bytes[j] == '\t')) j++;
-            if (j < lim && bytes[j] == '"') {
+            while (j < len && (bytes[j] == ' ' || bytes[j] == '\t')) j++;
+            if (j < len && bytes[j] == '"') {
                 size_t k = ++j;
-                while (k < lim && bytes[k] != '"' && bytes[k] != '\n') k++;
-                if (k < lim && bytes[k] == '"' && k > j) {
-                    size_t nlen = k - j;
-                    if (nlen >= sizeof(sticky)) nlen = sizeof(sticky) - 1;
-                    memcpy(sticky, bytes + j, nlen);
-                    sticky[nlen] = 0;
-                    cur_file = sticky;
+                while (k < len && bytes[k] != '"' && bytes[k] != '\n') k++;
+                if (k < len && bytes[k] == '"' && k > j) {
+                    const char* interned = tape_intern_path(ft, bytes + j, k - j);
+                    if (!interned) return 0;
+                    cur_file = interned;
                 }
             }
             logic = n;
-            while (i < lim && bytes[i] != '\n') i++;
-            if (i < lim && bytes[i] == '\n') {
+            while (i < len && bytes[i] != '\n') i++;
+            if (i < len && bytes[i] == '\n') {
                 i++;
                 phys++;
+                if (!tape_line_push(ft, i, logic, phys, cur_file)) return 0;
             }
             continue;
         }
         if (at_bol) {
             size_t ss = i;
-            while (ss < lim && (bytes[ss] == ' ' || bytes[ss] == '\t')) ss++;
-            if (ss + 8 < lim && memcmp(bytes + ss, "/*CC_LN ", 8) == 0) {
+            while (ss < len && (bytes[ss] == ' ' || bytes[ss] == '\t')) ss++;
+            if (ss + 8 < len && memcmp(bytes + ss, "/*CC_LN ", 8) == 0) {
                 size_t j = ss + 8;
                 int n = 0;
-                while (j < lim && bytes[j] >= '0' && bytes[j] <= '9') {
+                while (j < len && bytes[j] >= '0' && bytes[j] <= '9') {
                     n = n * 10 + (bytes[j] - '0');
                     j++;
                 }
-                if (j < lim && bytes[j] == ' ') {
+                if (j < len && bytes[j] == ' ') {
                     size_t k = j + 1;
                     size_t pe = k;
-                    while (pe + 1 < lim &&
+                    while (pe + 1 < len &&
                            !(bytes[pe] == '*' && bytes[pe + 1] == '/'))
                         pe++;
-                    if (pe + 1 < lim && bytes[pe] == '*') {
+                    if (pe + 1 < len && bytes[pe] == '*') {
                         size_t nlen = pe - k;
+                        const char* interned;
                         while (nlen && bytes[k + nlen - 1] == ' ') nlen--;
-                        if (nlen >= sizeof(sticky)) nlen = sizeof(sticky) - 1;
-                        memcpy(sticky, bytes + k, nlen);
-                        sticky[nlen] = 0;
-                        cur_file = sticky;
+                        interned = tape_intern_path(ft, bytes + k, nlen);
+                        if (!interned) return 0;
+                        cur_file = interned;
                         logic = n;
-                        while (i < lim && bytes[i] != '\n') i++;
-                        if (i < lim && bytes[i] == '\n') {
+                        while (i < len && bytes[i] != '\n') i++;
+                        if (i < len && bytes[i] == '\n') {
                             i++;
                             phys++;
+                            if (!tape_line_push(ft, i, logic, phys, cur_file))
+                                return 0;
                         }
                         continue;
                     }
@@ -179,11 +233,75 @@ static void tape_logical_at(const char* bytes, size_t len, size_t off,
         if (bytes[i] == '\n') {
             phys++;
             logic++;
+            i++;
+            if (!tape_line_push(ft, i, logic, phys, cur_file)) return 0;
+            continue;
         }
         i++;
     }
-    snprintf(file, fcap, "%s", cur_file);
-    *line_out = logic > 0 ? logic : phys;
+    return 1;
+}
+
+static const TapeLineRec* tape_line_at(const FileTape* ft, size_t off) {
+    const TapeLineRec* recs;
+    size_t n, lo, hi, q;
+    if (!ft) {
+        fprintf(stderr, "error: tape line index query with no tape\n");
+        return NULL;
+    }
+    recs = ft->lines.data;
+    n = ft->lines.len;
+    if (!recs || n == 0) {
+        fprintf(stderr, "error: tape line index empty for '%s'\n",
+                ft->path ? ft->path : "<input>");
+        return NULL;
+    }
+    q = (ft->len && off > ft->len) ? ft->len : off;
+    if (q < recs[0].off) return &recs[0];
+    lo = 0;
+    hi = n;
+    while (lo + 1 < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (recs[mid].off <= q) lo = mid;
+        else hi = mid;
+    }
+    return &recs[lo];
+}
+
+static void offset_to_linecol(const FileTape* ft, size_t off, int* out_line,
+                              int* out_col) {
+    const TapeLineRec* rec;
+    size_t q;
+    if (!out_line || !out_col) return;
+    rec = tape_line_at(ft, off);
+    if (!rec) {
+        *out_line = 1;
+        *out_col = 1;
+        return;
+    }
+    q = (ft && ft->len && off > ft->len) ? ft->len : off;
+    *out_line = rec->phys;
+    *out_col = (int)(q - rec->off) + 1;
+    if (*out_col < 1) *out_col = 1;
+}
+
+/* Logical file:line at byte offset, honoring `#line` / CC_LN (from the index). */
+static void tape_logical_at(const FileTape* ft, size_t off, char* file,
+                            size_t fcap, int* line_out) {
+    const TapeLineRec* rec;
+    const char* cur;
+    if (!line_out) return;
+    rec = tape_line_at(ft, off);
+    if (!rec) {
+        *line_out = 1;
+        if (file && fcap)
+            snprintf(file, fcap, "%s", ft && ft->path ? ft->path : "");
+        return;
+    }
+    *line_out = rec->logic > 0 ? rec->logic : rec->phys;
+    if (!file || !fcap) return;
+    cur = rec->file ? rec->file : (ft && ft->path ? ft->path : "");
+    snprintf(file, fcap, "%s", cur);
 }
 
 static FileTape* tape_by_id(TapeCache* c, int file_id) {
@@ -210,8 +328,8 @@ static void diag_at(TapeCache* cache, Token t, const char* msg) {
         return;
     }
     int line = 1, col = 1;
-    offset_to_linecol(ft->bytes, ft->len, t.offset, &line, &col);
-    tape_logical_at(ft->bytes, ft->len, t.offset, ft->path, NULL, 0, &line);
+    offset_to_linecol(ft, t.offset, &line, &col);
+    tape_logical_at(ft, t.offset, NULL, 0, &line);
     fprintf(stderr, "%s:%d:%d: error: %s\n", ft->path, line, col, msg);
 }
 
@@ -253,8 +371,7 @@ static int tok_build_push(void* env, int id, CCSlice v) {
         Token* nt = (Token*)realloc(b->toks, sizeof(Token) * (size_t)ncap);
         if (!nt) {
             int line = 1, col = 1;
-            offset_to_linecol(b->building->bytes, b->building->len, off, &line,
-                              &col);
+            offset_to_linecol(b->building, off, &line, &col);
             fprintf(stderr,
                     "%s:%d:%d: error: stage1 token buffer realloc failed "
                     "(%d → %d tokens)\n",
@@ -280,6 +397,19 @@ static char* xstrdup(const char* s) {
     if (!p) return NULL;
     memcpy(p, s, n + 1);
     return p;
+}
+
+static void file_tape_free(FileTape* ft) {
+    size_t i, n;
+    if (!ft) return;
+    n = TapePathVec_len(&ft->paths);
+    for (i = 0; i < n; i++) free(ft->paths.data[i]);
+    TapePathVec_free(&ft->paths);
+    TapeLineVec_free(&ft->lines);
+    free(ft->path);
+    free(ft->bytes);
+    free(ft->toks);
+    free(ft);
 }
 
 static int read_file(const char* path, char** out_buf, size_t* out_len) {
@@ -356,10 +486,11 @@ static FileTape* tape_cache_load_bytes(TapeCache* c, const char* path,
     ft->file_id = ++c->next_file_id;
     ft->toks = (Token*)malloc(sizeof(Token) * TOK_BUILD_CAP);
     if (!ft->path || !ft->toks) {
-        free(ft->path);
-        free(ft->bytes);
-        free(ft->toks);
-        free(ft);
+        file_tape_free(ft);
+        return NULL;
+    }
+    if (!tape_lines_build(ft)) {
+        file_tape_free(ft);
         return NULL;
     }
 
@@ -368,10 +499,7 @@ static FileTape* tape_cache_load_bytes(TapeCache* c, const char* path,
         fprintf(stderr,
                 "error: tokenize failed for '%s' (often arena exhaustion)\n",
                 path ? path : "<null>");
-        free(ft->path);
-        free(ft->bytes);
-        free(ft->toks);
-        free(ft);
+        file_tape_free(ft);
         return NULL;
     }
     ft->ntoks = b.n;
@@ -388,13 +516,7 @@ static FileTape* tape_cache_load(TapeCache* c, const char* path, CCArena* arena)
 }
 
 static void tape_cache_free(TapeCache* c) {
-    for (int i = 0; i < c->n; i++) {
-        FileTape* ft = c->items[i];
-        free(ft->path);
-        free(ft->bytes);
-        free(ft->toks);
-        free(ft);
-    }
+    for (int i = 0; i < c->n; i++) file_tape_free(c->items[i]);
     c->n = 0;
 }
 

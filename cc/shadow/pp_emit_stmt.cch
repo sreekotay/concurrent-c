@@ -6911,9 +6911,8 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                                             src[i + al] == ':') {
                                             if (seen == 0) {
                                                 int fl = 1, fc = 1;
-                                                offset_to_linecol(ft->bytes,
-                                                                  ft->len, i,
-                                                                  &fl, &fc);
+                                                offset_to_linecol(ft, i, &fl,
+                                                                  &fc);
                                                 first_line = fl;
                                             }
                                             if (seen == 1) {
@@ -6923,8 +6922,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                                             seen++;
                                         }
                                     }
-                                    offset_to_linecol(ft->bytes, ft->len, off,
-                                                      &line, &col);
+                                    offset_to_linecol(ft, off, &line, &col);
                                     path = ft->path;
                                 }
                             }
@@ -6961,8 +6959,7 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                                 }
                             }
                             (void)hit;
-                            offset_to_linecol(ft->bytes, ft->len, off, &line,
-                                              &col);
+                            offset_to_linecol(ft, off, &line, &col);
                             path = ft->path;
                         }
                     }
@@ -7022,10 +7019,8 @@ static int shadow_emit_stmt_ctx(AstNode* st, CEmit* out, ShadowCtx* ctx,
                                     }
                                 }
                             }
-                            offset_to_linecol(ft->bytes, ft->len, off, &line,
-                                              &col);
-                            tape_logical_at(ft->bytes, ft->len, off, ft->path,
-                                            NULL, 0, &line);
+                            offset_to_linecol(ft, off, &line, &col);
+                            tape_logical_at(ft, off, NULL, 0, &line);
                             if (ft->path && ft->path[0]) path = ft->path;
                         }
                     }

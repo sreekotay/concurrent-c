@@ -200,6 +200,13 @@ int cc_included_cch_fn_param(const char* name, int argi, char* out,
 /* First parameter type of a decl-shaped `name(` occurrence in an
  * included cch header, whitespace-normalized. Returns 0/1. */
 int cc_included_cch_fn_first_param(const char* name, char* out, size_t out_sz);
+/* One comment-aware walk of included + lowered-local `.cch`. First
+ * decl-shaped `name(` wins (same order as cc_included_cch_fn_param).
+ * `cb` returns 0 to continue, nonzero to stop. Returns 0, or -1 if
+ * `cb` stops. */
+typedef int (*CCIncludedCchFnParamCb)(const char* name, int argi,
+                                      const char* ty, void* ctx);
+int cc_included_cch_each_fn_param(CCIncludedCchFnParamCb cb, void* ctx);
 /* Family member sets derived from a declaration-form macro's body: the
  * `##_<member>` tokens in the included cch header whose path ends with
  * `header_suffix`. Membership test and comma-separated enumeration. */

@@ -1,0 +1,10 @@
+#include <ccc/std/prelude.cch>
+#include "tape_line_index_include.cch"
+
+/* Parse error lives in the included tape after `#line`. The diagnostic
+ * line must be the logical 77 from that tape's index — not the physical
+ * .cch line and not a line in this .ccs. */
+
+int main(void) {
+    return tape_line_index_hdr_bad();
+}

@@ -3570,6 +3570,7 @@ static int shadow_restrict_register(const char* base, const char* mode,
 }
 
 static const ShadowFnParam* shadow_fnparam_lookup(const char* fn, int argi);
+static void shadow_fnparam_ingest_headers(void);
 static const ShadowBind* shadow_bind_lookup(const char* name);
 static void shadow_restrict_check_call_widen(const char* fn, const char* args);
 
@@ -5235,6 +5236,9 @@ extern int cc_included_cch_fn_first_param(const char* name, char* out,
                                           size_t out_sz);
 extern int cc_included_cch_fn_param(const char* name, int argi, char* out,
                                     size_t out_sz);
+extern int cc_included_cch_each_fn_param(int (*cb)(const char* name, int argi,
+                                                   const char* ty, void* ctx),
+                                         void* ctx);
 extern int cc_result_fn_registry_get_err_type(const char* name, size_t name_len,
                                               char* out_buf, size_t out_sz);
 extern int cc_result_fn_registry_get_result_type(const char* name,
@@ -5252,48 +5256,10 @@ extern const char* cc_lowered_local_header_source_path(size_t i);
 /* True when `name(` appears as a decl-shaped callable in a lowered local
  * `.cch` (quoted project header). Those bodies are not in the TU AST, so
  * autoblock / UFCS must consult the original source the lowerer registered. */
-static int shadow_lowered_local_fn_exists(const char* name) {
-    size_t i, n, nlen;
-    if (!name || !name[0]) return 0;
-    nlen = strlen(name);
-    n = cc_lowered_local_header_count();
-    for (i = 0; i < n; i++) {
-        const char* path = cc_lowered_local_header_source_path(i);
-        char* text = NULL;
-        size_t tlen = 0;
-        const char* p;
-        if (!path || !path[0]) continue;
-        if (!read_file(path, &text, &tlen) || !text) continue;
-        for (p = text; (size_t)(p - text) + nlen < tlen; p++) {
-            const char* q;
-            const char* b;
-            if (*p != name[0]) continue;
-            if (p > text && shadow_is_ident_char(p[-1])) continue;
-            if (memcmp(p, name, nlen) != 0) continue;
-            if (shadow_is_ident_char(p[nlen])) continue;
-            q = p + nlen;
-            while (*q == ' ' || *q == '\t') q++;
-            if (*q != '(') continue;
-            b = p;
-            while (b > text &&
-                   (b[-1] == ' ' || b[-1] == '\t' || b[-1] == '\n' ||
-                    b[-1] == '\r'))
-                b--;
-            if (b > text &&
-                (shadow_is_ident_char(b[-1]) || b[-1] == '*')) {
-                free(text);
-                return 1;
-            }
-        }
-        free(text);
-    }
-    return 0;
-}
-
 static int shadow_hdr_fn_exists(const char* name) {
     if (!name || !name[0]) return 0;
     if (cc_included_cch_contains_fn(name)) return 1;
-    return shadow_lowered_local_fn_exists(name);
+    return cc_lowered_local_declares_fn(name);
 }
 
 /* Scan header text for `Type field @as;` / `@typeview on T { as:… }`,
@@ -6961,6 +6927,30 @@ static void shadow_fnparam_register(const char* fn, int argi, const char* base,
     }
 }
 
+/* Header protos are not in the TU AST. One walk into the existing
+ * ShadowFnParamMap (TU collect_binds already ran — insert-if-absent). */
+static int shadow_fnparam_header_cb(const char* name, int argi, const char* ty,
+                                    void* ctx) {
+    char base[64];
+    int stars = 0;
+    (void)ctx;
+    if (!name || !name[0] || !ty || !ty[0] || argi < 0) return 0;
+    shadow_ty_base_stars(ty, base, sizeof(base), &stars);
+    if (!base[0]) return 0;
+    shadow_fnparam_register(name, argi, base, stars);
+    return g_shadow_fnparam_oom ? -1 : 0;
+}
+
+static void shadow_fnparam_ingest_headers(void) {
+    shadow_meta_ar_ensure();
+    if (!g_shadow_fnparams) return;
+    if (cc_included_cch_each_fn_param(shadow_fnparam_header_cb, NULL) != 0) {
+        fprintf(stderr, "error: header fn param ingest failed\n");
+        g_shadow_fnparam_oom = 1;
+        g_shadow_ufcs_miss = 1;
+    }
+}
+
 
 static const ShadowBind* shadow_bind_lookup(const char* name) {
     int i;
@@ -7158,8 +7148,8 @@ static void shadow_variant_err_loc(ShadowCtx* ctx, AstNode* st, CEmit* out,
                     }
                 }
             }
-            offset_to_linecol(ft->bytes, ft->len, off, &line, &col);
-            tape_logical_at(ft->bytes, ft->len, off, ft->path, NULL, 0, &line);
+            offset_to_linecol(ft, off, &line, &col);
+            tape_logical_at(ft, off, NULL, 0, &line);
             if (ft->path && ft->path[0]) path = ft->path;
         }
     }
@@ -7189,8 +7179,8 @@ static void shadow_variant_note_loc(ShadowCtx* ctx, AstNode* st,
                     }
                 }
             }
-            offset_to_linecol(ft->bytes, ft->len, off, &line, &col);
-            tape_logical_at(ft->bytes, ft->len, off, ft->path, NULL, 0, &line);
+            offset_to_linecol(ft, off, &line, &col);
+            tape_logical_at(ft, off, NULL, 0, &line);
             if (ft->path && ft->path[0]) path = ft->path;
         }
     }
@@ -7860,111 +7850,28 @@ static void __attribute__((unused)) shadow_family_snake(const char* family, char
     out[i] = 0;
 }
 
-/* Resolve `#line` / masked CC_LN markers at byte offset (physical scan). */
-static void shadow_tape_logical_at(const char* bytes, size_t len, size_t off,
-                                   const char* fallback_path, char* file,
+/* Prefer `tests/...` (MATCH goldens); else basename. */
+static void shadow_fmt_site_path(const char* cur_file, char* file, size_t fcap) {
+    const char* base = cur_file ? cur_file : "";
+    const char* tests = strstr(base, "tests/");
+    if (tests)
+        base = tests;
+    else {
+        const char* slash = strrchr(base, '/');
+        if (slash && slash[1]) base = slash + 1;
+    }
+    snprintf(file, fcap, "%s", base);
+}
+
+/* Resolve `#line` / masked CC_LN at byte offset via FileTape line index. */
+static void shadow_tape_logical_at(const FileTape* ft, size_t off, char* file,
                                    size_t fcap, int* line_out) {
-    int phys = 1;
-    int logic = 1;
-    char sticky[256];
-    const char* cur_file = fallback_path ? fallback_path : "";
-    size_t i = 0;
-    size_t lim = off < len ? off : len;
-    sticky[0] = 0;
-    if (!file || !fcap || !line_out) return;
-    file[0] = 0;
-    *line_out = 1;
-    if (!bytes) {
-        snprintf(file, fcap, "%s", cur_file);
-        return;
-    }
-    while (i < lim) {
-        int at_bol = (i == 0 || bytes[i - 1] == '\n');
-        if (at_bol && i + 5 < lim && bytes[i] == '#' &&
-            strncmp(bytes + i, "#line", 5) == 0 &&
-            (bytes[i + 5] == ' ' || bytes[i + 5] == '\t')) {
-            size_t j = i + 5;
-            int n = 0;
-            while (j < lim && (bytes[j] == ' ' || bytes[j] == '\t')) j++;
-            while (j < lim && bytes[j] >= '0' && bytes[j] <= '9') {
-                n = n * 10 + (bytes[j] - '0');
-                j++;
-            }
-            while (j < lim && (bytes[j] == ' ' || bytes[j] == '\t')) j++;
-            if (j < lim && bytes[j] == '"') {
-                size_t k = ++j;
-                while (k < lim && bytes[k] != '"' && bytes[k] != '\n') k++;
-                if (k < lim && bytes[k] == '"' && k > j) {
-                    size_t nlen = k - j;
-                    if (nlen >= sizeof(sticky)) nlen = sizeof(sticky) - 1;
-                    memcpy(sticky, bytes + j, nlen);
-                    sticky[nlen] = 0;
-                    cur_file = sticky;
-                }
-            }
-            logic = n;
-            /* `#line` itself occupies a physical line; next line is `n`. */
-            while (i < lim && bytes[i] != '\n') i++;
-            if (i < lim && bytes[i] == '\n') {
-                i++;
-                phys++;
-            }
-            continue;
-        }
-        /* script_entry masked ledger: CC_LN N PATH alone on a line. */
-        if (at_bol) {
-            size_t ss = i;
-            while (ss < lim && (bytes[ss] == ' ' || bytes[ss] == '\t')) ss++;
-            if (ss + 8 < lim && memcmp(bytes + ss, "/*CC_LN ", 8) == 0) {
-                size_t j = ss + 8;
-                int n = 0;
-                while (j < lim && bytes[j] >= '0' && bytes[j] <= '9') {
-                    n = n * 10 + (bytes[j] - '0');
-                    j++;
-                }
-                if (j < lim && bytes[j] == ' ') {
-                    size_t k = j + 1;
-                    size_t pe = k;
-                    while (pe + 1 < lim &&
-                           !(bytes[pe] == '*' && bytes[pe + 1] == '/'))
-                        pe++;
-                    if (pe + 1 < lim && bytes[pe] == '*') {
-                        size_t nlen = pe - k;
-                        while (nlen && bytes[k + nlen - 1] == ' ') nlen--;
-                        if (nlen >= sizeof(sticky)) nlen = sizeof(sticky) - 1;
-                        memcpy(sticky, bytes + k, nlen);
-                        sticky[nlen] = 0;
-                        cur_file = sticky;
-                        logic = n;
-                        while (i < lim && bytes[i] != '\n') i++;
-                        if (i < lim && bytes[i] == '\n') {
-                            i++;
-                            phys++;
-                        }
-                        continue;
-                    }
-                }
-            }
-        }
-        if (bytes[i] == '\n') {
-            phys++;
-            logic++;
-        }
-        i++;
-    }
-    {
-        /* Prefer `tests/...` (MATCH goldens); else basename. */
-        const char* base = cur_file;
-        const char* tests = strstr(cur_file, "tests/");
-        if (tests)
-            base = tests;
-        else {
-            const char* slash = strrchr(cur_file, '/');
-            if (slash && slash[1]) base = slash + 1;
-        }
-        snprintf(file, fcap, "%s", base);
-    }
-    *line_out = logic > 0 ? logic : phys;
+    char raw[256];
+    raw[0] = 0;
+    tape_logical_at(ft, off, raw, sizeof(raw), line_out);
+    if (!file || !fcap) return;
+    shadow_fmt_site_path(raw[0] ? raw : (ft && ft->path ? ft->path : ""), file,
+                         fcap);
 }
 
 static void shadow_gfac_add(const char* family, int arity, const char* tpl,
@@ -8499,8 +8406,7 @@ static int shadow_site_loc(TapeCache* cache, AstNode* st, const char** path_out,
     int line = 1;
     char lfile[256];
     lfile[0] = 0;
-    shadow_tape_logical_at(ft->bytes, ft->len, st->tok_off, ft->path, lfile,
-                           sizeof(lfile), &line);
+    shadow_tape_logical_at(ft, st->tok_off, lfile, sizeof(lfile), &line);
     if (lfile[0]) {
         snprintf(g_shadow_site_lpath, sizeof(g_shadow_site_lpath), "%s", lfile);
         *path_out = g_shadow_site_lpath;

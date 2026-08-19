@@ -12,8 +12,10 @@ extern "C" {
 /* Lower-then-TCC type pass: read input, rewrite includes, harvest, space-blank
  * all `@comptime` constructs (blocks / for / if) so whitelist parse+emit can
  * populate `cc_ct_field_reg_*` from `__cc_rf_*` tables before comptime exec.
- * Returns NULL (skip type pass) when the harvested TU has no `@comptime`.
- * Caller frees. */
+ * Returns NULL (skip type pass) when the harvested TU has no `@comptime`, or
+ * has `@comptime` but no field-reflection markers (`type_of` /
+ * `cc_reflect_field_` / `__cc_rf_`) — in the latter case the skip is marked so
+ * a later registry ask fails loud. Caller frees. */
 char* shadow_comptime_type_pass_src(const char* input_path, size_t* out_n);
 
 /* Field registry (libshadow_comptime) — filled during type-pass emit. */
