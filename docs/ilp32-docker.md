@@ -45,6 +45,7 @@ CCC_HOST_CC=tcc ./scripts/smoke_arm32.sh
 **Seed:** `shadow_lower` last-good **0.3.3-174**  
 **Scripts:** `./scripts/pigz_i386.sh`, `./scripts/pigz_arm32.sh` — `pigz.c` vs `pigz_wait` (chained dict) vs `pigz_cc`  
 **Input:** 20 MB Silesia concat, 2 runs; pigz / pigz_cc `-p 4`; `pigz_wait` uses runtime cores (`CC_WORKERS` unset)  
+**Compile:** original pigz `cc -O3`; `pigz_wait` / `pigz_cc` `ccc -O --release` (host `-O2 -DNDEBUG`). The ILP32 `ccc` driver itself was `BUILD=debug` (`-O0 -g`); that does not change product flags.  
 **Binaries:** ELF 32-bit. Round-trip + gunzip **PASS**. Dumps: [i386](../real_projects/pigz/benchmarks/ilp32_i386_2026_08_19.txt), [ARM32](../real_projects/pigz/benchmarks/ilp32_arm32_2026_08_19.txt).
 
 QEMU user-mode — relative ILP32 only; not comparable to host Darwin or across arches.

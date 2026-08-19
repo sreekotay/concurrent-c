@@ -7,6 +7,8 @@
 # Method: compare_ilp32.sh — ELF 32-bit, 4 MiB random gunzip round-trip, then
 #         benchmark.sh on Silesia concat. pigz / pigz_cc: -p 4. pigz_wait:
 #         CC_WORKERS unset (runtime cores), chained dict (PIGZ_DICT=1).
+# Compile: pigz cc -O3; pigz_wait / pigz_cc  ccc -O --release (-O2 -DNDEBUG).
+#          ILP32 ccc driver was BUILD=debug (-O0 -g); product flags unchanged.
 # Note: QEMU user-mode — relative ILP32 only; not comparable to host Darwin.
 
 Binaries: ELF 32-bit LSB pie, Intel 80386, dynamically linked.
