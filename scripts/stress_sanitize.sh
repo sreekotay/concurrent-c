@@ -11,6 +11,12 @@
 set -e
 cd "$(dirname "$0")/.."
 
+# Same fiber-teardown FPs as test_tsan.sh (no extra runtime HB).
+TSAN_SUPP="$(pwd)/scripts/tsan_fiber.supp"
+export TSAN_OPTIONS="${TSAN_OPTIONS:+${TSAN_OPTIONS}:}suppressions=${TSAN_SUPP}:halt_on_error=0"
+# shellcheck source=tsan_fiber_fp.sh
+. "$(pwd)/scripts/tsan_fiber_fp.sh"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -52,16 +58,27 @@ run_with_sanitizer() {
         # Note: --no-cache ensures fresh build with sanitizer flags
         local t0
         t0=$(date +%s)
-        output=$(./cc/bin/ccc build run "$test" --timeout "$STRESS_TIMEOUT" --cc-flags "$san_flags" --no-cache 2>&1) || true
-        exit_code=$?
+        local exit_code=0
+        output=$(./cc/bin/ccc build run "$test" --timeout "$STRESS_TIMEOUT" \
+            --cc-flags "$san_flags" --ld-flags "$san_flags" --no-cache 2>&1) || exit_code=$?
         local elapsed=$(( $(date +%s) - t0 ))
 
         # Check for sanitizer errors in output
-        if echo "$output" | grep -qiE "ThreadSanitizer|AddressSanitizer|LeakSanitizer|data race|heap-use-after-free|buffer-overflow"; then
+        if echo "$output" | grep -qiE "AddressSanitizer|LeakSanitizer|heap-use-after-free|buffer-overflow"; then
             echo -e "${RED}FAIL${NC} (sanitizer error, ${elapsed}s)"
             echo "$output" | grep -iE "SUMMARY|WARNING.*Sanitizer|ERROR" | head -5
             echo ""
             ((failed++))
+        elif echo "$output" | grep -qE "ThreadSanitizer.*data race"; then
+            if tsan_output_only_fiber_teardown_fp "$output"; then
+                echo -e "${GREEN}OK${NC} (${elapsed}s)"
+                ((passed++))
+            else
+                echo -e "${RED}FAIL${NC} (sanitizer error, ${elapsed}s)"
+                echo "$output" | grep -iE "SUMMARY|WARNING.*Sanitizer|ERROR" | head -5
+                echo ""
+                ((failed++))
+            fi
         elif [ $exit_code -ne 0 ]; then
             echo -e "${RED}FAIL${NC} (exit $exit_code, ${elapsed}s)"
             echo "$output" | tail -3

@@ -6,6 +6,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: smoke-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   smoke:
     strategy:
@@ -69,3 +73,42 @@ jobs:
 
       - name: Bridge stress (quick tier)
         run: ./stress/bridge/run.sh
+
+  # Concurrent-C runtime under ASan / TSan (fibers, nurseries, channels).
+  # Linux-only: Darwin ASan+fibers hangs (see docs/sanitizers.md).
+  sanitizers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y clang zlib1g-dev libcurl4-openssl-dev
+
+      - name: Fetch TinyCC submodule
+        run: |
+          git submodule update --init third_party/tcc
+          if [ ! -f third_party/tcc/configure ]; then
+            git submodule update --checkout --force third_party/tcc
+          fi
+
+      - name: Build toolchain
+        run: make cc -j"$(nproc)"
+
+      - name: TSan tests
+        env:
+          CC: clang
+        run: ./scripts/test_tsan.sh --timeout 60s
+
+      - name: Stress ASan
+        env:
+          CC: clang
+          ASAN_OPTIONS: detect_leaks=0:halt_on_error=1:detect_stack_use_after_return=0
+          STRESS_TIMEOUT: '90'
+        run: ./scripts/stress_sanitize.sh asan
+
+      - name: Stress TSan
+        env:
+          CC: clang
+          STRESS_TIMEOUT: '90'
+        run: ./scripts/stress_sanitize.sh tsan

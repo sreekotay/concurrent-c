@@ -36,9 +36,11 @@ if need node && need python3; then
   echo "[stress/bridge] fuzz end $(date -u +%H:%M:%SZ) rc_so_far=$rc"
 
   echo "--- js_python_chaos ---"
+  CHAOS_WALL="${CHAOS_TIMEOUT:-120}"
   OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}" \
     CHAOS_SCALE="$SCALE" \
-    node --expose-gc "$ROOT/stress/bridge/js_python_chaos.js" || rc=1
+    "$ROOT/scripts/run_monitored.sh" "$CHAOS_WALL" "${FUZZ_HEARTBEAT_SECS:-5}" -- \
+      node --expose-gc "$ROOT/stress/bridge/js_python_chaos.js" || rc=1
 
   echo "--- cc_node_stress_wire ---"
   CHAOS_SCALE="$SCALE" \
@@ -54,7 +56,10 @@ if [[ -x "$ROOT/out/cc/bin/ccc" || -x "$ROOT/cc/bin/ccc" ]]; then
   CCC="$ROOT/out/cc/bin/ccc"
   [[ -x "$CCC" ]] || CCC="$ROOT/cc/bin/ccc"
   echo "--- cc_embed_stress ---"
-  CHAOS_SCALE="$SCALE" "$CCC" run "$ROOT/stress/bridge/cc_embed_stress.ccs" || rc=1
+  EMBED_WALL="${EMBED_TIMEOUT:-180}"
+  CHAOS_SCALE="$SCALE" \
+    "$ROOT/scripts/run_monitored.sh" "$EMBED_WALL" "${FUZZ_HEARTBEAT_SECS:-5}" -- \
+      "$CCC" run "$ROOT/stress/bridge/cc_embed_stress.ccs" || rc=1
 else
   echo "SKIP cc_embed_stress (need out/cc/bin/ccc or cc/bin/ccc)"
 fi

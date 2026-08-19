@@ -70,9 +70,11 @@ Notes:
 
 ### Validating TSan suppressions
 
-Some functions use `__attribute__((no_sanitize("thread")))` to suppress TSan checking. This is safe only when:
-1. The function only accesses thread-local memory (e.g., local stack variables)
-2. There are no real data races (suppression only hides false positives)
+Linux TSan fiber-teardown false positives (nursery `free` vs worker) are
+listed in `scripts/tsan_fiber.supp` — do not add production barriers for
+those. `no_sanitize("thread")` on a function is only safe when:
+1. The function only accesses thread-local memory (e.g. local stack variables)
+2. There are no real data races (the attribute only hides false positives)
 
 To validate a suppression is safe:
 1. Create a stress test that calls the suppressed function concurrently from multiple threads/fibers

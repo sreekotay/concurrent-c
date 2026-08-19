@@ -2,8 +2,20 @@
 
 Periodic AddressSanitizer / ThreadSanitizer passes for the Concurrent-C
 runtime, plus a recipe for ASan on the `concurrent-c-python` N-API addon.
-Not part of every PR; run after large runtime / bridge changes or when
-chaseing use-after-free and race reports.
+PR CI runs the CC runtime lanes on Linux (`.github/workflows/ci.yml` job
+`sanitizers`). Darwin ASan+fibers hangs — use Linux/Docker for ASan.
+
+Linux TSan follows OS threads, not CC fibers, and will flag nursery
+`free` at wait/teardown against a worker that is already ordered by
+`alive_count`. Those reports are false positives; extra waits/fences on
+that path are a real throughput hit. The test scripts load
+`scripts/tsan_fiber.supp` instead. New races outside those frames still
+fail the job.
+
+Native `ccc` links `--ld-flags` only; pass `-fsanitize=…` on both
+`--cc-flags` and `--ld-flags` (Linux clang will not pull libtsan/asan
+from instrumented `.o` files). Docker TSan needs `seccomp=unconfined`
+so `personality(ADDR_NO_RANDOMIZE)` works.
 
 ## How to run (CC runtime)
 
@@ -120,21 +132,24 @@ companion once a TSan Node is available.
 
 ---
 
-## Latest receipt — 2026-08-10
+## Latest receipt — 2026-08-19
 
-**Host:** macOS 26.6, arm64, Apple clang 17.0.0  
+**Host:** macOS 26, arm64, Apple clang; Linux via Docker (`linux/arm64`, `seccomp=unconfined`)  
+**Seed:** `shadow_lower` last-good **0.3.3-173**
 
 ### CC runtime — green
 
 | Command | Result |
 |---------|--------|
-| `./scripts/test_tsan.sh` | **13/13 OK** (no data races) |
-| `./scripts/stress_sanitize.sh asan` | **8/8 OK** |
-| `./scripts/stress_sanitize.sh tsan` | **8/8 OK** |
+| `./scripts/test_tsan.sh` | **13/13 OK** (Darwin; Linux with `tsan_fiber.supp`) |
+| `./scripts/stress_sanitize.sh asan` | **8/8 OK** (Linux; Darwin ASan+fibers hangs) |
+| `./scripts/stress_sanitize.sh tsan` | **8/8 OK** (Linux, same suppressions) |
 
 Tests covered: `tsan_closure_*`, fiber/nursery join races, work-stealing /
 park / inbox storms; stress set `spawn_storm` … `deadline_race` (see
-`scripts/stress_sanitize.sh` / `scripts/test_tsan.sh`).
+`scripts/stress_sanitize.sh` / `scripts/test_tsan.sh`). PR CI: job
+`sanitizers` on `ubuntu-latest`. Native link needs `--ld-flags -fsanitize=…`
+as well as `--cc-flags`.
 
 ### real_projects — green (Linux / Docker)
 

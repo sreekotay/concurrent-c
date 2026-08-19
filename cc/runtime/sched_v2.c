@@ -2631,13 +2631,14 @@ static void sched_v2_init_impl(void) {
     g_v2.allow_expand = 1;
     pthread_mutex_init(&g_v2.start_mu, NULL);
     sched_v2_init_worker_slot(0);
+    /* pthread_create is the happens-before to the new threads; store first. */
+    g_v2.initialized = 1;
     if (pthread_create(&g_v2.threads[0].handle, NULL,
                        thread_v2_main, (void*)(intptr_t)0) == 0) {
         atomic_store_explicit(&g_v2.num_threads, 1, memory_order_release);
     }
 
     pthread_create(&g_v2.sysmon_handle, NULL, sched_v2_sysmon_main, NULL);
-    g_v2.initialized = 1;
 }
 
 void sched_v2_ensure_init(void) {

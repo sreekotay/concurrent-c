@@ -1,6 +1,6 @@
 ### Concurrent-C (CC) — a strict C11-superset language + toolchain
 
-**Version:** 0.3.3-128 (`ccc --version`)
+**Version:** 0.3.3-173 (`ccc --version`)
 
 Concurrent‑C is a **strict C11-superset preprocessor**: `.ccs` lowers to
 plain C and compiles with your **host C compiler**. Structured concurrency,
@@ -188,9 +188,9 @@ Or: `make test TCC_EXT=1 TCC_INC=third_party/tcc TCC_LIB=../third_party/tcc/libt
 
 Test conventions: `tests/README.md`. Build driver / cache / outputs: [build spec](spec/concurrent-c-build.md). Channel close + deadlock patterns: `examples/recipe_channel_pipeline.ccs`, [getting started](docs/getting-started.md).
 
-**Linux ILP32 (last verified 2026-08-12).** Docker cold smokes on i386 and
+**Linux ILP32 (last verified 2026-08-19).** Docker cold smokes on i386 and
 `linux/arm/v7` (gnueabihf / armhf, QEMU on Apple Silicon), `shadow_lower`
-last-good **0.3.2-121**: curated suite green for host+backend **gcc** and
+last-good **0.3.3-173**: curated suite green for host+backend **gcc** and
 **TinyCC** (`./scripts/smoke_i386.sh`, `./scripts/smoke_arm32.sh`, and the
 same with `CCC_HOST_CC=tcc`). Earlier full `cc_test` on ARM32: **787 / 787**
 (`0.3.2-108`). Config and receipt: [docs/ilp32-docker.md](docs/ilp32-docker.md).

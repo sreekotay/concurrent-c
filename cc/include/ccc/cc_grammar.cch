@@ -137,7 +137,32 @@ typedef struct {
  * scope (a rules-only TU). */
 #ifndef CC__GR_FAIL_CURSOR
 #define CC__GR_FAIL_CURSOR
+/* Host TCC has no _Thread_local; keep a pthread cell so concurrent
+ * parsers on that backend still do not share a cursor. */
+#if defined(__TINYC__)
+#include <pthread.h>
+#include <stdlib.h>
+static pthread_key_t cc__gr_fail_pos_key;
+static pthread_once_t cc__gr_fail_pos_once = PTHREAD_ONCE_INIT;
+static size_t cc__gr_fail_pos_oom;
+static void cc__gr_fail_pos_key_init(void) {
+    (void)pthread_key_create(&cc__gr_fail_pos_key, free);
+}
+static size_t *cc__gr_fail_pos_slot(void) {
+    size_t *p;
+    (void)pthread_once(&cc__gr_fail_pos_once, cc__gr_fail_pos_key_init);
+    p = (size_t *)pthread_getspecific(cc__gr_fail_pos_key);
+    if (!p) {
+        p = (size_t *)calloc(1, sizeof(*p));
+        if (p) (void)pthread_setspecific(cc__gr_fail_pos_key, p);
+        else p = &cc__gr_fail_pos_oom;
+    }
+    return p;
+}
+#define cc__gr_fail_pos (*cc__gr_fail_pos_slot())
+#else
 static _Thread_local size_t cc__gr_fail_pos;
+#endif
 static inline void cc_grammar_fail_reset(void) { cc__gr_fail_pos = 0; }
 static inline void cc_grammar_note_fail(size_t p) {
     if (p > cc__gr_fail_pos) cc__gr_fail_pos = p;

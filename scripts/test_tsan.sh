@@ -12,6 +12,12 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
+TSAN_SUPP="$ROOT_DIR/scripts/tsan_fiber.supp"
+# halt_on_error=0 so a fiber-teardown FP cannot hide a later real race.
+export TSAN_OPTIONS="${TSAN_OPTIONS:+${TSAN_OPTIONS}:}suppressions=${TSAN_SUPP}:halt_on_error=0"
+# shellcheck source=tsan_fiber_fp.sh
+. "$ROOT_DIR/scripts/tsan_fiber_fp.sh"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -61,7 +67,7 @@ run_test() {
     local test_file="$1"
     local name
     local output
-    local exit_code
+    local exit_code=0
     if [[ "$test_file" == *.ccs ]]; then
         name=$(basename "$test_file" .ccs)
     else
@@ -82,34 +88,40 @@ run_test() {
         
         # Run with timeout if specified
         if [ -n "$TIMEOUT" ]; then
-            output=$(run_with_timeout "$TIMEOUT" "$bin" 2>&1) || true
-            exit_code=$?
+            output=$(run_with_timeout "$TIMEOUT" "$bin" 2>&1) || exit_code=$?
         else
-            output=$("$bin" 2>&1) || true
-            exit_code=$?
+            output=$("$bin" 2>&1) || exit_code=$?
         fi
         rm -f "$bin"
     else
-        # Run with timeout if specified
+        # Native front compiles from --cc-flags but only links --ld-flags
+        # (Linux clang will not pull libtsan from instrumented .o).
+        local tsan_cc="-fsanitize=thread -g"
+        local tsan_ld="-fsanitize=thread"
         if [ -n "$TIMEOUT" ]; then
-            output=$(run_with_timeout "$TIMEOUT" bash -c "CC=clang CFLAGS=\"-fsanitize=thread -g\" ./cc/bin/ccc run \"$test_file\" --no-cache 2>&1") || true
-            exit_code=$?
+            output=$(run_with_timeout "$TIMEOUT" env TSAN_OPTIONS="$TSAN_OPTIONS" CC=clang \
+                ./cc/bin/ccc run "$test_file" --no-cache \
+                --cc-flags "$tsan_cc" --ld-flags "$tsan_ld") || exit_code=$?
         else
-            output=$(CC=clang CFLAGS="-fsanitize=thread -g" \
-                ./cc/bin/ccc run "$test_file" --no-cache 2>&1) || true
-            exit_code=$?
+            output=$(env TSAN_OPTIONS="$TSAN_OPTIONS" CC=clang \
+                ./cc/bin/ccc run "$test_file" --no-cache \
+                --cc-flags "$tsan_cc" --ld-flags "$tsan_ld" 2>&1) || exit_code=$?
         fi
     fi
     
-    # Check for timeout
-    if echo "$output" | grep -qE "(timeout|Terminated|killed)"; then
+    # Check for timeout (GNU timeout exit 124; avoid matching "Timeout: Ns")
+    if [ "$exit_code" -eq 124 ] || echo "$output" | grep -qE "(timeout: |Terminated|Killed)"; then
         echo -e "${RED}TIMEOUT${NC}"
         echo "$output" | tail -5
         return 1
     fi
     
-    # Check for TSan errors
+    # Check for TSan errors. Linux fiber-teardown FPs: see tsan_fiber.supp.
     if echo "$output" | grep -qE "ThreadSanitizer.*data race"; then
+        if tsan_output_only_fiber_teardown_fp "$output"; then
+            echo -e "${GREEN}OK${NC}"
+            return 0
+        fi
         echo -e "${RED}RACE${NC}"
         echo "$output" | grep -A5 "WARNING: ThreadSanitizer" | head -20
         echo ""
@@ -198,7 +210,7 @@ fi
 
 echo ""
 if [ $failed -eq 0 ]; then
-    echo -e "${GREEN}TSan: All $passed tests passed (no data races detected)${NC}"
+    echo -e "${GREEN}TSan: All $passed tests passed${NC}"
     exit 0
 else
     echo -e "${RED}TSan: $failed tests with data races, $passed passed${NC}"
