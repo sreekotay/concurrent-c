@@ -484,18 +484,20 @@ Recipe: [recipe_exclusive_named.ccs](../examples/recipe_exclusive_named.ccs).
 Depth cap plus ordered stages. Declare the turnstile **before** the nursery.
 
 ```c
-CCTurnstileRW ts@(n, cap, &arena) @destroy;
+CCTurnstileRW ts@(cap, &arena) @destroy;
 ts.enter(i) !>;
 ts.read.wait(i);   …  ts.read.pass(i);
 ts.write.wait(i);  …  ts.write.pass(i);
 ts.leave() !>;
 
-CCTurnstile t@(n, cap, n_stages, &arena) @destroy;
+CCTurnstile t@(cap, n_stages, &arena) @destroy;
 t.enter(i) !>;
 t.stage(k)->wait(i);  t.wait(k, i);
 ```
 
-`enter(i)` takes a token and arms every stage's `i+1`. A closed depth channel is an error, not `Ok(false)`.
+`enter(i)` takes a depth token. Stage `wait`/`pass` create a gate cell on
+first touch (map upsert is the happen-before). A closed depth channel is an
+error, not `Ok(false)`.
 Recipe: [recipe_turnstile.ccs](../examples/recipe_turnstile.ccs).
 
 ---

@@ -227,7 +227,7 @@ void !>(CCError) compress_file(char[:] in_path, char[:] out_path) {
         out_file.write(gzip_hdr_slice()) !>;
 
     CCArena ts_arena = cc_arena_heap(megabytes(2)) @destroy;
-    CCTurnstileRW ts@(n, cap, &ts_arena) @destroy;
+    CCTurnstileRW ts@(cap, &ts_arena) @destroy;
     if (!ts.core.excl)
         return cc_err(CC_ERR_OUT_OF_MEMORY, "cc_turnstile_create failed");
 

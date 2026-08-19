@@ -58,7 +58,7 @@ int main(void) {
 
     /* wait-for: plain loop; worker binds 0; stages degrade to no-ops. */
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
-    CCTurnstile ts@(N, 4, 1, &arena) @destroy;
+    CCTurnstile ts@(4, 1, &arena) @destroy;
     if (!ts.excl)
         return 1;
     int hits = 0;

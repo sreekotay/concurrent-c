@@ -62,8 +62,10 @@
  * the create mutex and releases discovery-map tables; pooled entry storage
  * remains until the arena is freed.  The map starts at 64 slots (or the
  * capacity hint, rounded up to a power of two) and grows under the create lock.
- * The live map pointer is `_Atomic`; grow release-stores the new table and
- * lock-free lookups acquire-load it.  Prior tables stay allocated until destroy.
+ * Live+tombstone load triggers a same-capacity rehash (drops tombstones) or a
+ * double-capacity grow.  The live map pointer is `_Atomic`; grow release-stores
+ * the new table and lock-free lookups acquire-load it.  Prior tables stay
+ * allocated until destroy.
  *
  * Lock word: 0 free, 1 locked, 2 contended (locked, waiters may be queued).
  * Uncontended acquire is an inlined CAS; release is an inlined swap to FREE.
@@ -131,6 +133,17 @@ CCExclusiveMutex cc_exclusive_mutex(CCExclusive* excl, uint64_t name);
  * mutex entry to the section's arena pool.  Requires the mutex not held and
  * no waiters; other handles to the same name become invalid. */
 void cc_exclusive_mutex_free(CCExclusiveMutex* m);
+
+/* Gate cell on a named exclusive entry (turnstile wait/pass).
+ * First touch creates the cell; state records who arrived:
+ *   wait: EMPTY→ARMED (park); COMPLETED/UNARMED → return
+ *   pass: EMPTY→UNARMED; ARMED→COMPLETED + broadcast
+ * Exactly two touchers per name; the second frees the entry. */
+int cc_exclusive_gate_wait(CCExclusive* excl, uint64_t name);
+void cc_exclusive_gate_pass(CCExclusive* excl, uint64_t name);
+
+/* Live names in the discovery map (under create_mu). */
+size_t cc_exclusive_live_count(CCExclusive* excl);
 
 /* Blocks until the entry's lock is owned by the caller. */
 void cc_exclusive_lock_entry_slow(void* entry);

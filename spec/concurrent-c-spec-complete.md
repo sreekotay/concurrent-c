@@ -3326,7 +3326,7 @@ This section specifies:
 - **§8.9 Error handling in async and nurseries** — composition of result unwrap operators (`?>`, `!>`, `@err`, `@errhandler`) defined in §3.1 with async functions and nursery teardown
 - **§8.10 Named exclusive sections (`CCExclusive`)** — arena-backed, name-keyed mutual exclusion for short critical sections; `acquire_when` gates entry on a predicate
 - **§8.11 `@parallel`** — value join of independent assignments or `@serial` arms (§8.11.2), optional spawn predicate, `@parallel for` over a half-open index range, and `@parallel wait for` as `bool !>(CCError)` (§8.11.6)
-- **§8.12 Ordered pipeline turnstile (`CCTurnstile`)** — depth cap plus sequenced stages; `enter(i)` arms every stage's next ticket
+- **§8.12 Ordered pipeline turnstile (`CCTurnstile`)** — depth cap plus sequenced stages; stage wait/pass use create-on-first-touch gate cells
 
 ---
 
@@ -5276,9 +5276,9 @@ bool fin = @parallel seq (use_par) wait (ts) for (i in 0..n) {
 
 The wait-for form is an expression of type `bool !>(CCError)`. `ok(true)` means the range ran out. `ok(false)` means a `break` that targets this wait-for cancelled the nursery. A ticket error is `err`. `continue` does not produce `false`. `return` leaves the function after drain and does not yield the construct's Result. Assignment join and bisect `@parallel for` remain statements.
 
-`@parallel wait (gate) for (i in lo..hi) { … }` runs the loop as an ordered spawn loop. `gate` is the name of a `CCTurnstile` or `CCTurnstileRW` (§8.12) in scope; any other type is ill-formed. Iterations are tickets: the construct calls `enter(i)` on the caller in loop order — the depth cap bounds in-flight iterations and the in-order enter is the happens-before that arms every stage's next ticket — then spawns the body. `leave()` runs after the body on every path. If a spawn is denied, that iteration's body runs on the caller before the next `enter`; the token is never leaked. `wait` without `for`, or with an assignment-join body, is ill-formed.
+`@parallel wait (gate) for (i in lo..hi) { … }` runs the loop as an ordered spawn loop. `gate` is the name of a `CCTurnstile` or `CCTurnstileRW` (§8.12) in scope; any other type is ill-formed. Iterations are tickets: the construct calls `enter(i)` on the caller in loop order — the depth cap bounds in-flight iterations — then spawns the body. `leave()` runs after the body on every path. If a spawn is denied, that iteration's body runs on the caller before the next `enter`; the token is never leaked. `wait` without `for`, or with an assignment-join body, is ill-formed.
 
-The optional `seq (cond)` prefix composes: when `cond` is false the same body runs as a plain sequential `for` on the caller, with no `enter`/`leave` and no spawn. The construct also takes this path when it cannot allocate its join scope. Stage `wait`/`pass` calls in the body degrade to no-ops against a never-entered turnstile, so one body serves both schedules.
+The optional `seq (cond)` prefix composes: when `cond` is false the same body runs as a plain sequential `for` on the caller, with no `enter`/`leave` and no spawn. The construct also takes this path when it cannot allocate its join scope. Stage `wait`/`pass` still run: on the sequential path `pass` precedes the successor's `wait` in program order, so the gate cell is UNARMED and the wait returns immediately.
 
 An optional `worker (name)` after the range binds `name` as an `int`: the index of the runner slot executing the ticket, in `[0, cap)`. Two live tickets never share a slot. Like the loop variable, the binder is a per-ticket value, not a capture. On every sequential path it binds `0`. `worker` without `wait` is ill-formed. The surface idiom for reusable per-ticket scratch is `cache (name)`, not an index.
 
@@ -5286,7 +5286,7 @@ An optional `worker (name)` after the range binds `name` as an `int`: the index 
 
 Body statements may raise with `!>`. Errors are stop-starting: the first failure stops new tickets from entering, in-flight iterations finish, and after the brace the error of the lowest failing ticket re-raises into the innermost `@errhandler` for `CCError`, or into an attached `!>(e) { … }` on the construct. A handler must be in scope on both schedules unless that attached tail is present. A failed `enter` takes no token and joins the same way. Because an entered successor is parked in `wait(i+1)` until `pass(i)`, an entered ticket must discharge every stage pass on every path, including error exits. `@defer` and `@errhandler` at the top level of the body are ill-formed; the structural form of the discharge is `@stage`.
 
-`@stage (gate, args…) { … }` is a statement inside a wait-for body, not a Result: `gate.wait(args…)`, the block, `gate.pass(args…)`. `gate` is spelled as the receiver the calls apply to — `ts.read`, `ts.write`, a `CCTurnstile` with the stage index in `args` (`@stage (t, k, i)`), or a pointer to either. Each `@stage` is a ticket-scoped handshake: `enter(i)` has already armed `i+1` on every stage of the gate, so a successor may `wait` that stage before this ticket reaches the block. The construct guarantees the pass on every exit of the ticket — a ticket that leaves through the error path first passes every `@stage` it has not passed, in source order — so parked successors always run. Work inside the block may be empty or guarded (`if (chain) { … }`); the handshake still happens. The `@stage` itself is a top-level statement of the wait-for body — nested in `if`, a loop, or another `@stage` is ill-formed. Inside the block the ticket is ordered and exclusive for that stage — loop-carried state reads as it does in the sequential loop. `@stage` outside a wait-for body is ill-formed. A raise inside the block exits the ticket; the pass still happens.
+`@stage (gate, args…) { … }` is a statement inside a wait-for body, not a Result: `gate.wait(args…)`, the block, `gate.pass(args…)`. `gate` is spelled as the receiver the calls apply to — `ts.read`, `ts.write`, a `CCTurnstile` with the stage index in `args` (`@stage (t, k, i)`), or a pointer to either. Each `@stage` is a ticket-scoped handshake on a named gate cell: whichever of `wait` or `pass` touches the cell first creates it (ARMED or UNARMED); the other completes the handshake. A successor may therefore `wait` before this ticket reaches the block. The construct guarantees the pass on every exit of the ticket — a ticket that leaves through the error path first passes every `@stage` it has not passed, in source order — so parked successors always run. Work inside the block may be empty or guarded (`if (chain) { … }`); the handshake still happens. The `@stage` itself is a top-level statement of the wait-for body — nested in `if`, a loop, or another `@stage` is ill-formed. Inside the block the ticket is ordered and exclusive for that stage — loop-carried state reads as it does in the sequential loop. `@stage` outside a wait-for body is ill-formed. A raise inside the block exits the ticket; the pass still happens.
 
 The loop-carried case is the point: state that hops from ticket `i` to `i+1` (a chained compression dictionary, a running checksum, an output file position) sits in an `@stage` block in the body and reads exactly as it does in the sequential loop. The parallel run and the denied run produce the same output.
 
@@ -5312,7 +5312,7 @@ An implementation may reject a function that exceeds a finite number of `@parall
 
 `#pragma(@parallel) off` makes every `@parallel` construct that follows it lower to its sequential form: join arms run in source order on the caller frame, `for` and `wait for` are plain loops, and no task, environment, or scheduler call is emitted — the compiled function is the linear program. A wait-for under `off` is still `bool !>(CCError)`: a targeting `break` is `ok(false)`, and the range running out is `ok(true)`. `on` restores the parallel lowering. The toggle is positional: it applies from the directive to the next toggle or the end of the translation unit, at file scope or statement position.
 
-Where `seq (cond)` is the runtime denial — one body, two schedules, chosen by a flag — the pragma is the compile-time denial. Under `off` a `seq`/gated predicate is not evaluated: the annotation is inert, and the program is the loop as written. `worker` binders bind `0`; `cache` names keep the one declared instance; `@stage` blocks emit their `wait`/`pass` calls, which degrade to no-ops against the never-entered turnstile. A wait-for under `off` has no re-raise edge, so it does not require a `CCError` handler in scope. Any operand other than `off` or `on` is ill-formed. The directive is consumed by the lowering and never reaches the host compiler.
+Where `seq (cond)` is the runtime denial — one body, two schedules, chosen by a flag — the pragma is the compile-time denial. Under `off` a `seq`/gated predicate is not evaluated: the annotation is inert, and the program is the loop as written. `worker` binders bind `0`; `cache` names keep the one declared instance; `@stage` blocks emit their `wait`/`pass` calls, which complete immediately when `pass` precedes `wait` in program order. A wait-for under `off` has no re-raise edge, so it does not require a `CCError` handler in scope. Any operand other than `off` or `on` is ill-formed. The directive is consumed by the lowering and never reaches the host compiler.
 
 **Grammar (normative, minus whitespace).**
 
@@ -5356,14 +5356,12 @@ stage_stmt    ::= '@stage' '(' expr { ',' expr } ')' block
 
 ### 8.12 Ordered pipeline turnstile (`CCTurnstile`)
 
-A **turnstile** bounds how many workers run at once (a depth channel of `cap` tokens) and sequences `n` tickets through one or more stages. Stage `k` ticket `i` cannot run until ticket `i-1` has passed that stage. `enter(i)` receives a depth token and arms ticket `i+1` on every stage. The worker waits and passes each stage, then `leave()` returns the token.
+A **turnstile** bounds how many workers run at once (a depth channel of `cap` tokens) and sequences tickets through one or more stages. Stage `k` ticket `i` cannot run until ticket `i-1` has passed that stage. `enter(i)` receives a depth token. Stage `wait`/`pass` use named exclusive gate cells created on first touch: `wait` creates ARMED and parks if the cell is absent; `pass` creates UNARMED if absent, or completes an ARMED cell and wakes the waiter. The map upsert is the happen-before. Each name has exactly two touchers; the second frees the cell so live names stay O(in-flight). The worker waits and passes each stage, then `leave()` returns the token.
 
-Declare the turnstile before the nursery so `@destroy` joins children before the depth channel is freed. In-order `enter(i)` / `spawn(i)` is the happen-before that makes the arm visible to `worker(i).pass` and `worker(i+1).wait`.
-
-`Map` / `Vec` / `ArrayMap` are not concurrent. Stage preholds live in a `Vec` reserved to `n` at init; `enter` / `pass` only index those slots.
+Declare the turnstile before the nursery so `@destroy` joins children before the depth channel is freed.
 
 ```c
-CCTurnstile t@(n, cap, n_stages, &arena) @destroy;
+CCTurnstile t@(cap, n_stages, &arena) @destroy;
 t.enter(i) !>;
 t.stage(k)->wait(i);
 t.stage(k)->pass(i);
@@ -5371,7 +5369,7 @@ t.wait(k, i);
 t.pass(k, i);
 t.leave() !>;
 
-CCTurnstileRW ts@(n, cap, &arena) @destroy;
+CCTurnstileRW ts@(cap, &arena) @destroy;
 ts.enter(i) !>;
 ts.read.wait(i);   ts.read.pass(i);
 ts.write.wait(i);  ts.write.pass(i);
@@ -5383,9 +5381,9 @@ ts.leave() !>;
 **Runtime API (normative):**
 
 ```c
-int cc_turnstile_init(CCTurnstile* t, int n, int cap, int n_stages,
+int cc_turnstile_init(CCTurnstile* t, int cap, int n_stages,
                       CCArena* arena, CCTurnstileStage* slots);
-CCTurnstile cc_turnstile_create(int n, int cap, int n_stages, CCArena* arena);
+CCTurnstile cc_turnstile_create(int cap, int n_stages, CCArena* arena);
 void cc_turnstile_destroy(CCTurnstile* t);
 bool !>(CCIoError) cc_turnstile_enter(CCTurnstile* t, int i);
 bool !>(CCIoError) cc_turnstile_leave(CCTurnstile* t);
@@ -5394,13 +5392,13 @@ void cc_turnstile_wait(CCTurnstile* t, int k, int i);
 void cc_turnstile_pass(CCTurnstile* t, int k, int i);
 void cc_turnstile_stage_wait(CCTurnstileStage* s, int i);
 void cc_turnstile_stage_pass(CCTurnstileStage* s, int i);
-CCTurnstileRW cc_turnstile_rw_create(int n, int cap, CCArena* arena);
+CCTurnstileRW cc_turnstile_rw_create(int cap, CCArena* arena);
 void cc_turnstile_rw_destroy(CCTurnstileRW* w);
 ```
 
 **UFCS surface (normative):**
 
-- `t.enter(i)` / `t.leave()` — depth token; `enter` arms every stage
+- `t.enter(i)` / `t.leave()` — depth token
 - `t.stage(k)` — `stages[k]`, or `NULL` if `k` is out of range
 - `t.wait(k, i)` / `t.pass(k, i)` — index form
 - `s.wait(i)` / `s.pass(i)` — one stage

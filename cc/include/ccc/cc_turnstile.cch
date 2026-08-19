@@ -4,13 +4,13 @@
  * One core (depth channel + stages[]). The named 2-stage bind is field
  * aliases over that array — not a second implementation:
  *
- *   CCTurnstile t@(n, cap, n_stages, &arena) @destroy;
+ *   CCTurnstile t@(cap, n_stages, &arena) @destroy;
  *   t.enter(i) !>;
  *   t.stage(k)->wait(i);  …  t.stage(k)->pass(i);
  *   t.wait(k, i);         …  t.pass(k, i);
  *   t.leave() !>;
  *
- *   CCTurnstileRW ts@(n, cap, &arena) @destroy;
+ *   CCTurnstileRW ts@(cap, &arena) @destroy;
  *   ts.enter(i) !>;
  *   ts.read.wait(i);  …  ts.read.pass(i);
  *   ts.write.wait(i); …  ts.write.pass(i);
@@ -18,14 +18,14 @@
  *   ts.stage(0);   // == &ts.read
  *
  * Declare the turnstile before the nursery so @destroy joins, then frees the
- * depth channel. enter(i) takes a depth token and arms every stage's i+1.
+ * depth channel. enter(i) takes a depth token; stage wait/pass use exclusive
+ * gate cells created on first touch (map upsert is the happen-before).
  */
 #ifndef CCC_CC_TURNSTILE_CCH
 #define CCC_CC_TURNSTILE_CCH
 
 #include <ccc/cc_exclusive.cch>
 #include <ccc/cc_channel.cch>
-#include <ccc/std/vec.cch>
 #include <errno.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -34,23 +34,17 @@
 typedef struct CCTurnstileStage {
     CCExclusive* excl;
     uint64_t name_base;
-    int n;
-    /* Ticket i+1 lives at armed[i+1]. Grown once at init; enter/pass only
-     * index. A growing Map/Vec under concurrent get moves the value. */
-    Vec::[CCExclusiveGuard] armed;
 } CCTurnstileStage;
 
 typedef struct CCTurnstile {
     CCExclusive* excl;
     CCChan* depth_ch;
     CCTurnstileStage* stages;
-    int n;
     int cap;
     int n_stages;
 } CCTurnstile;
 
 static inline void cc_turnstile_destroy(CCTurnstile* t);
-static inline void cc_turnstile_stage_destroy(CCTurnstileStage* s);
 
 static inline uint64_t cc_turnstile_stage_base(int k) {
     return (uint64_t)(k + 1) << 32;
@@ -71,76 +65,35 @@ static inline CCTurnstileStage* cc_turnstile_stage(CCTurnstile* t, int k) {
 }
 
 static inline void cc_turnstile_stage_destroy(CCTurnstileStage* s) {
-    CCExclusiveGuard* g;
-    int i;
     if (!s)
         return;
-    for (i = 1; i < s->n; i++) {
-        g = s->armed.get((size_t)i);
-        if (g)
-            g->release();
-    }
-    s->armed.destroy();
     s->excl = NULL;
-    s->n = 0;
+    s->name_base = 0;
 }
 
 static inline int cc_turnstile_stage_init(CCTurnstileStage* s, CCExclusive* excl,
-                                         CCArena* arena, uint64_t name_base,
-                                         int n) {
+                                         uint64_t name_base) {
     if (!s)
         return -1;
     memset(s, 0, sizeof(*s));
     s->excl = excl;
     s->name_base = name_base;
-    s->n = n;
-    s->armed = vec_new::[CCExclusiveGuard](arena);
-    if (n > 0) {
-        if (s->armed.reserve((size_t)n) != 0 || !s->armed.at_grow((size_t)n - 1))
-            return -1;
-        memset(s->armed.data, 0, (size_t)n * sizeof(CCExclusiveGuard));
-    }
     return 0;
 }
 
-/* Prehold ticket i+1 so wait(i+1) cannot run ahead of pass(i).
- * enter(i) calls this on every stage — in-order spawn makes it happen-before
- * both worker(i).pass and worker(i+1).wait. */
-static inline void cc_turnstile_stage_arm(CCTurnstileStage* s, int i) {
-    CCExclusiveGuard* g;
-    int k;
-    if (!s || i + 1 >= s->n)
-        return;
-    k = i + 1;
-    g = s->armed.get((size_t)k);
-    if (!g)
-        return;
-    *g = s->excl->acquire(cc_turnstile_stage_name(s, k));
-}
-
+/* Wait for predecessor i-1 to pass this stage. Ticket 0 never waits.
+ * Absent cell → create ARMED and park; UNARMED/COMPLETED → return. */
 static inline void cc_turnstile_stage_wait(CCTurnstileStage* s, int i) {
-    CCExclusiveGuard g;
-    CCExclusiveMutex m;
-    uint64_t name;
     if (!s || i <= 0)
         return;
-    name = cc_turnstile_stage_name(s, i);
-    g = s->excl->acquire(name);
-    g.release();
-    /* Name is idle after pass + this wait; drop it so Exclusive stays ~O(cap). */
-    m = s->excl->mutex(name);
-    m.free();
+    (void)cc_exclusive_gate_wait(s->excl, cc_turnstile_stage_name(s, i));
 }
 
+/* Publish ticket i done on this stage (opens wait for i+1). Absent → UNARMED. */
 static inline void cc_turnstile_stage_pass(CCTurnstileStage* s, int i) {
-    CCExclusiveGuard* g;
-    int k;
-    if (!s || i + 1 >= s->n)
+    if (!s || i < 0)
         return;
-    k = i + 1;
-    g = s->armed.get((size_t)k);
-    if (g)
-        g->release();
+    cc_exclusive_gate_pass(s->excl, cc_turnstile_stage_name(s, i + 1));
 }
 
 static inline void cc_turnstile_wait(CCTurnstile* t, int k, int i) {
@@ -168,33 +121,31 @@ static inline void cc_turnstile_destroy(CCTurnstile* t) {
         t->excl->destroy();
         t->excl = NULL;
     }
-    t->n = 0;
     t->cap = 0;
     t->n_stages = 0;
 }
 
 /* slots[0..n_stages) must be contiguous CCTurnstileStage storage. */
-static inline int cc_turnstile_init(CCTurnstile* t, int n, int cap, int n_stages,
+static inline int cc_turnstile_init(CCTurnstile* t, int cap, int n_stages,
                                    CCArena* arena, CCTurnstileStage* slots) {
     int k;
     int tok = 1;
 
-    if (!t || !arena || !slots || n < 0 || cap < 1 || n_stages < 1)
+    if (!t || !arena || !slots || cap < 1 || n_stages < 1)
         return -1;
     memset(t, 0, sizeof(*t));
-    t->n = n;
     t->cap = cap;
     t->n_stages = n_stages;
     t->stages = slots;
 
-    /* Live names stay ~n_stages*cap (one prehold per in-flight stage). */
+    /* Live names stay ~n_stages*cap (one gate cell per in-flight stage). */
     t->excl = cc_exclusive_create(arena, (size_t)cap * 4 + 8);
     if (!t->excl)
         return -1;
 
     for (k = 0; k < n_stages; k++) {
-        if (cc_turnstile_stage_init(&slots[k], t->excl, arena,
-                                    cc_turnstile_stage_base(k), n) != 0)
+        if (cc_turnstile_stage_init(&slots[k], t->excl,
+                                    cc_turnstile_stage_base(k)) != 0)
             return -1;
     }
 
@@ -208,18 +159,18 @@ static inline int cc_turnstile_init(CCTurnstile* t, int n, int cap, int n_stages
     return 0;
 }
 
-static inline CCTurnstile cc_turnstile_create(int n, int cap, int n_stages,
+static inline CCTurnstile cc_turnstile_create(int cap, int n_stages,
                                              CCArena* arena) {
     CCTurnstile t;
     CCTurnstileStage* slots;
 
     memset(&t, 0, sizeof(t));
-    if (!arena || n < 0 || cap < 1 || n_stages < 1)
+    if (!arena || cap < 1 || n_stages < 1)
         return t;
     slots = cc_arena_alloc_T_count(CCTurnstileStage, arena, (size_t)n_stages);
     if (!slots)
         return t;
-    if (cc_turnstile_init(&t, n, cap, n_stages, arena, slots) != 0) {
+    if (cc_turnstile_init(&t, cap, n_stages, arena, slots) != 0) {
         cc_turnstile_destroy(&t);
         memset(&t, 0, sizeof(t));
     }
@@ -229,7 +180,7 @@ static inline CCTurnstile cc_turnstile_create(int n, int cap, int n_stages,
 static inline bool !>(CCIoError) cc_turnstile_enter(CCTurnstile* t, int i) {
     int tok = 0;
     int rc;
-    int k;
+    (void)i;
     if (!cc_turnstile_ready(t))
         return cc_err(cc_io_error(CC_IO_INVALID_ARGUMENT));
     rc = cc_channel_raw_recv(t->depth_ch, &tok, sizeof(tok));
@@ -240,8 +191,6 @@ static inline bool !>(CCIoError) cc_turnstile_enter(CCTurnstile* t, int i) {
             return cc_err(cc_io_error(CC_IO_CONNECTION_CLOSED));
         return cc_chan_result_with(t->depth_ch, rc, /*is_recv=*/true);
     }
-    for (k = 0; k < t->n_stages; k++)
-        cc_turnstile_stage_arm(&t->stages[k], i);
     return cc_ok(true);
 }
 
@@ -267,10 +216,10 @@ _Static_assert(offsetof(CCTurnstileRW, write) ==
                    offsetof(CCTurnstileRW, read) + sizeof(CCTurnstileStage),
                "CCTurnstileRW read/write must be contiguous stages");
 
-static inline CCTurnstileRW cc_turnstile_rw_create(int n, int cap, CCArena* arena) {
+static inline CCTurnstileRW cc_turnstile_rw_create(int cap, CCArena* arena) {
     CCTurnstileRW w;
     memset(&w, 0, sizeof(w));
-    if (cc_turnstile_init(&w.core, n, cap, 2, arena, &w.read) != 0) {
+    if (cc_turnstile_init(&w.core, cap, 2, arena, &w.read) != 0) {
         cc_turnstile_destroy(&w.core);
         memset(&w, 0, sizeof(w));
     }

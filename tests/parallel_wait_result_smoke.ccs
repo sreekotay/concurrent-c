@@ -7,7 +7,7 @@
 static int run(int use_par, int cut, int* out_fin) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
-    CCTurnstile ts@(N, 2, 1, &arena) @destroy;
+    CCTurnstile ts@(2, 1, &arena) @destroy;
     if (!ts.excl)
         return 1;
     int i;
@@ -36,7 +36,7 @@ static int run(int use_par, int cut, int* out_fin) {
 static int run_assign(void) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
-    CCTurnstile ts@(N, 2, 1, &arena) @destroy;
+    CCTurnstile ts@(2, 1, &arena) @destroy;
     if (!ts.excl)
         return 1;
     int i;

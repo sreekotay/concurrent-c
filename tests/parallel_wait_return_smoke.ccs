@@ -11,7 +11,7 @@
 static int go(int use_par, int* xs) {
     @errhandler(CCError e) { cc_error_log(e); return -1; }
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
-    CCTurnstile ts@(N, 4, 1, &arena) @destroy;
+    CCTurnstile ts@(4, 1, &arena) @destroy;
     if (!ts.excl)
         return -1;
     int i;

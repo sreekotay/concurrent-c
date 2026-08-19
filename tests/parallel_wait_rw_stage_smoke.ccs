@@ -11,7 +11,7 @@
 static int run_rw(int use_par) {
     @errhandler(CCError e) { cc_error_log(e); return 1; }
     CCArena arena = cc_arena_heap(kilobytes(64)) @destroy;
-    CCTurnstileRW ts@(N, CAP, &arena) @destroy;
+    CCTurnstileRW ts@(CAP, &arena) @destroy;
     if (!ts.core.excl)
         return 1;
     int i;
