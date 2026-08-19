@@ -3908,25 +3908,13 @@ static AstNode* parse_call_args(Parser* p) {
                     break;
                 }
             }
-            {
-                if (!need_spell &&
-                    span_text(p, a0, a1, n->b, sizeof(n->b))) {
-                    /* Plain args — preserve source bytes (string gaps, etc.). */
-                } else if (!ast_spell_token_range(p, a0, a1, n->b,
-                                                  sizeof(n->b)) &&
-                           !span_text(p, a0, a1, n->b, sizeof(n->b))) {
-                    parser_fail(p, callee, "call args too long");
-                    return NULL;
-                }
-                /* Both span and spell end on the last arg token; keep trivia
-                 * before `)` so a trailing `#endif` cannot glue into `#endif)`.
-                 * Do not put this in span_text globally — switch case labels
-                 * and unwrap site strings must not grow a trailing newline. */
-                if (!ast_append_trail_before(p, a1 - 1, a1, n->b,
-                                             sizeof(n->b))) {
-                    parser_fail(p, callee, "call args too long");
-                    return NULL;
-                }
+            if (!need_spell &&
+                span_text(p, a0, a1, n->b, sizeof(n->b))) {
+                /* Plain args — preserve source bytes (string gaps, etc.). */
+            } else if (!ast_spell_token_range(p, a0, a1, n->b, sizeof(n->b)) &&
+                       !span_text(p, a0, a1, n->b, sizeof(n->b))) {
+                parser_fail(p, callee, "call args too long");
+                return NULL;
             }
             AstNode* ue = parse_ufcs_expr_range(p, a0, a1);
             if (ue) (void)ast_attach_ufcs_kid(p, n, ue);
@@ -3936,11 +3924,11 @@ static AstNode* parse_call_args(Parser* p) {
     return n;
 }
 
-#include "pp_ast_parse_unwrap.cch"
-#include "pp_ast_parse_spawn.cch"
+#include "pp_ast_parse_unwrap.h"
+#include "pp_ast_parse_spawn.h"
 
 static AstNode* parse_stmt(Parser* p);
-#include "pp_ast_parse_err.cch"
+#include "pp_ast_parse_err.h"
 
 /* Defined in pp_ast_parse_ext.cch (included after this file). */
 static AstNode* parse_typedef_int(Parser* p);

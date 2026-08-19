@@ -1,0 +1,16 @@
+/* Mid-arg `#endif` with a dotted receiver in earlier args (forces spell). */
+#include <stdio.h>
+struct Ru { long ru_maxrss; };
+int main(void) {
+    struct Ru ru = { .ru_maxrss = 1 };
+    fprintf(stderr,
+            "x=%ld (%s)\n",
+            (long)ru.ru_maxrss,
+#if 1
+            "a"
+#else
+            "b"
+#endif
+            );
+    return 0;
+}

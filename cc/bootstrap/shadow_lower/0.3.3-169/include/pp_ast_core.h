@@ -95,50 +95,50 @@ typedef struct {
     ShadowKwSpec value;
 } ShadowKwEntry;
 
-@comptime {
-    ShadowKwEntry shadow_kw_entries[] = {
-        { "int", { SHADOW_KW_INT } },
-        { "void", { SHADOW_KW_VOID } },
-        { "return", { SHADOW_KW_RETURN } },
-        { "typedef", { SHADOW_KW_TYPEDEF } },
-        { "struct", { SHADOW_KW_STRUCT } },
-        { "println", { SHADOW_KW_PRINTLN } },
-        { "errhandler", { SHADOW_KW_ERRHANDLER } },
-        { "destroy", { SHADOW_KW_DESTROY } },
-        { "spawn", { SHADOW_KW_SPAWN } },
-        { "err", { SHADOW_KW_ERR } },
-        { "if", { SHADOW_KW_IF } },
-        { "string", { SHADOW_KW_STRING } },
-        { "defer", { SHADOW_KW_DEFER } },
-        { "static", { SHADOW_KW_STATIC } },
-        { "char", { SHADOW_KW_CHAR } },
-        { "for", { SHADOW_KW_FOR } },
-        { "while", { SHADOW_KW_WHILE } },
-        { "with_deadline", { SHADOW_KW_WITH_DEADLINE } },
-        { "as", { SHADOW_KW_AS } },
-        { "async", { SHADOW_KW_ASYNC } },
-        { "await", { SHADOW_KW_AWAIT } },
-        { "create", { SHADOW_KW_CREATE } },
-        { "detach", { SHADOW_KW_DETACH } },
-        { "bool", { SHADOW_KW_BOOL } },
-        { "size_t", { SHADOW_KW_SIZE_T } },
-        { "inline", { SHADOW_KW_INLINE } },
-        { "const", { SHADOW_KW_CONST } },
-        { "ordered", { SHADOW_KW_ORDERED } },
-        { "break", { SHADOW_KW_BREAK } },
-        { "continue", { SHADOW_KW_CONTINUE } },
-        { "else", { SHADOW_KW_ELSE } },
-        { "do", { SHADOW_KW_DO } },
-        { "eprintln", { SHADOW_KW_EPRINTLN } },
-        { "enum", { SHADOW_KW_ENUM } },
-        { "switch", { SHADOW_KW_SWITCH } },
-        { "parallel", { SHADOW_KW_PARALLEL } },
-        { "serial", { SHADOW_KW_SERIAL } },
-        { "stage", { SHADOW_KW_STAGE } },
-        { "cache", { SHADOW_KW_CACHE } },
-    };
-    static_map("shadow_kw", shadow_kw_entries, CC_STATIC_MAP_CASE_SENSITIVE);
-}
+           
+                                         
+                                     
+                                       
+                                           
+                                             
+                                           
+                                             
+                                                   
+                                             
+                                         
+                                     
+                                   
+                                           
+                                         
+                                           
+                                       
+                                     
+                                         
+                                                         
+                                   
+                                         
+                                         
+                                           
+                                           
+                                       
+                                           
+                                           
+                                         
+                                             
+                                         
+                                               
+                                       
+                                   
+                                               
+                                       
+                                           
+                                               
+                                           
+                                         
+                                         
+      
+                                                                             
+ 
 
 /* Forward decl for in-header callers; body is TU-spliced from the map above. */
 static const ShadowKwSpec* shadow_kw_get(CCSlice key);
@@ -1137,7 +1137,7 @@ static void shadow_attach_lead(Parser* p, AstNode* n, int start_i) {
             size_t end = prev.offset + prev.spell.len;
             FileTape* pft = tape_by_id(p->cache, prev.file_id);
             /* Injected tokens (stage2 umbrella #include → <.h>) keep a tape
-             * offset at the original `"….cch"` string but point spell at a
+             * offset at the original `"….h"` string but point spell at a
              * side buffer. Treating spell.len as a tape advance walks into
              * the next line and leaves a lead like `de` (from `include`),
              * which emit glues into `de#line`. End at EOL on the tape. */
@@ -1721,39 +1721,6 @@ static int ast_copy_ws_gap(Parser* p, Token t, size_t lo, size_t hi, char* dst,
     return 1;
 }
 
-/* Append whitespace in [last_incl.spell_end, excl.offset) onto dst.
- * Call-arg spans that end on `#endif` must keep the newline before `)` or
- * emit glues `#endif)` — but only here, not in every spell range (switch
- * `case "…":` labels must not grow a trailing newline that desyncs strsw). */
-static int ast_append_trail_before(Parser* p, int last_incl, int excl, char* dst,
-                                   size_t cap) {
-    Token a, b;
-    size_t lo, hi, n, o, k;
-    FileTape* ft;
-    if (!p || !dst || !cap || last_incl < 0 || excl <= last_incl || excl > p->n)
-        return 1;
-    a = p->toks[last_incl];
-    b = p->toks[excl];
-    if (b.file_id != a.file_id) return 1;
-    if (!ast_tok_verbatim(p, a) || !ast_tok_verbatim(p, b)) return 1;
-    lo = a.offset + a.spell.len;
-    hi = b.offset;
-    if (hi <= lo) return 1;
-    if (hi - lo > 512) return 1;
-    ft = tape_by_id(p->cache, a.file_id);
-    if (!ft || !ft->bytes || hi > ft->len) return 1;
-    for (k = lo; k < hi; k++) {
-        char c = ft->bytes[k];
-        if (c != ' ' && c != '\t' && c != '\n' && c != '\r') return 1;
-    }
-    o = strlen(dst);
-    n = hi - lo;
-    if (o + n + 1 > cap) return 0;
-    memcpy(dst + o, ft->bytes + lo, n);
-    dst[o + n] = 0;
-    return 1;
-}
-
 static int ast_append_spell(char* dst, size_t* o, size_t cap, CCSlice spell,
                             int need_sp) {
     size_t need = spell.len + (need_sp && *o ? 1 : 0);
@@ -2081,4 +2048,4 @@ static int ast_spell_token_range(Parser* p, int start, int end, char* dst,
     return 1;
 }
 
-#include "pp_ast_autoblock.cch"
+#include "pp_ast_autoblock.h"
