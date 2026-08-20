@@ -1,0 +1,10 @@
+#ifndef TESTS_QUOTE_CCH_SIBLING_CCS_UMBRELLA_CCH
+#define TESTS_QUOTE_CCH_SIBLING_CCS_UMBRELLA_CCH
+
+/* Interface umbrella. The leaf has a sibling `.ccs`, so consumers extract
+ * decls and do not splice the leaf body. */
+static int sibling_umbrella_decl_only(void) { return 40; }
+
+#include "quote_cch_sibling_ccs_leaf_mod.cch"
+
+#endif

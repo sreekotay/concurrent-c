@@ -1,0 +1,10 @@
+#ifndef TESTS_QUOTE_CCH_NESTED_IMPL_VIA_UMBRELLA_CCH
+#define TESTS_QUOTE_CCH_NESTED_IMPL_VIA_UMBRELLA_CCH
+
+/* Interface umbrella that nests an impl-grade leaf with no sibling `.ccs`.
+ * Extracting this must fail loud — not splice the leaf into the includer. */
+static int nested_impl_via_umbrella_decl(void) { return 1; }
+
+#include "quote_cch_umbrella_impl_leaf_impl.cch"
+
+#endif

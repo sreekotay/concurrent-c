@@ -722,10 +722,14 @@ Jupyter/Colab: `from cc_node import require`).
 ```
 
 A local `.cch` with statement unwrap (`!>(e) {`) is spliced into the
-including unit. `T !>(E)` on a declaration does not force that. A
+including unit only when that unit is a `.ccs` (or an already-spliced
+impl face). `T !>(E)` on a declaration does not force that, and neither
+does a `.foo(` in an interface header included from a `.ccs`. A
 `@typehooks` / `@typeview` face still extracts to a lowered `.h`; callers
 keep `char[:]` argument wrap and the proto's Result error type from the
-original `.cch`. A quoted interface `.cch` from a `.ccs` still extracts
-(even if it includes an impl-grade child — only the child splices);
-the `#include` stays in source order so types declared above it are in
-scope. `#define FLAG` before that include reaches host cpp.
+original `.cch`. A quoted interface `.cch` extracts; nested includes
+become their own `.h` (impl-grade nested faces need a sibling `.ccs`,
+or a direct include from a `.ccs`). `foo.cch` next to `foo.ccs` extracts
+as decls in every other TU. The `#include` stays in source order so
+types declared above it are in scope. `#define FLAG` before that
+include reaches host cpp.

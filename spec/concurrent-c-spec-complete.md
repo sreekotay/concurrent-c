@@ -222,13 +222,19 @@ not the cache directory. An included `.ccs` / `.cch` face with a unit
 header is stripped the same way — the bang is not a preprocessor directive.
 A local `.cch` that needs the including unit's pipeline — statement unwrap
 (`!>;`, `!> {`, `!>(e) {`), `@string`, `@errhandler`, and the like — is
-spliced into that unit. `T !>(E)` on a declaration is result-type syntax
-and does not by itself force a splice. A quoted interface `.cch` extracts
-to a lowered `.h` even when a nested local `#include "….cch"` is
-impl-grade; that nested face splices into the including unit, not the
-parent header. Nested local includes inside a spliced face are processed
-the same way. An object-like `#define` immediately before a quoted include
-is present for host cpp when the include extracts.
+spliced into that unit when the include is written in a `.ccs` or inside
+an already-spliced face. `T !>(E)` on a declaration is result-type syntax
+and does not by itself force a splice. Method-call UFCS in an interface
+header does not force a splice from a `.ccs`. A quoted interface `.cch`
+extracts to a lowered `.h`. Nested local includes inside that header
+extract to their own `.h`; they do not splice into the including unit.
+An impl-grade nested face without a sibling `.ccs` is an error — move
+the bodies to a sibling `.ccs`, or include the face from a `.ccs`. If a
+sibling `.ccs` of the same stem exists, other units extract decls and
+the sibling unit splices the bodies. Nested local includes inside a
+spliced face are processed the same way. An object-like `#define`
+immediately before a quoted include is present for host cpp when the
+include extracts.
 
 ---
 

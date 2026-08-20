@@ -1,0 +1,29 @@
+#ifndef TESTS_QUOTE_CCH_SIBLING_CCS_LEAF_MOD_CCH
+#define TESTS_QUOTE_CCH_SIBLING_CCS_LEAF_MOD_CCH
+
+#include <ccc/std/prelude.cch>
+
+/* Impl-grade + UFCS on purpose: without a sibling `.ccs` this would splice
+ * into every umbrella consumer. Bodies belong in the defining TU. */
+int !>(CCError) sibling_leaf_step(int x) {
+    /* SIBLING_LEAF_BODY_MUST_NOT_SPLICE */
+    @errhandler(CCError e) { return cc_err(e); }
+    return cc_ok(x);
+}
+
+int sibling_leaf_add(int a, int b) {
+    int x = sibling_leaf_step(a) !> { return -1; };
+    int y = sibling_leaf_step(b) !> { return -1; };
+    return x + y;
+}
+
+typedef struct SiblingLeafBox {
+    int n;
+} SiblingLeafBox;
+
+int SiblingLeafBox_plus(const SiblingLeafBox *b, int x) {
+    /* SIBLING_LEAF_BODY_MUST_NOT_SPLICE */
+    return b ? b->n + x : x;
+}
+
+#endif

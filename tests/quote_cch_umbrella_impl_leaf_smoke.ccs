@@ -1,7 +1,8 @@
-/* Quoted interface `.cch` that includes an impl-grade child: extract the
- * umbrella, splice only the leaf. */
+/* Quoted interface `.cch` extracts. Impl-grade leaf splices only when
+ * this `.ccs` includes it directly — not through the umbrella. */
 #include <stdio.h>
 #include "quote_cch_umbrella_impl_leaf.cch"
+#include "quote_cch_umbrella_impl_leaf_impl.cch"
 
 int main(void) {
     int u = umbrella_decl_only();

@@ -1,0 +1,16 @@
+#!ccc ccs
+#include "quote_cch_sibling_ccs_umbrella.cch"
+#include <stdio.h>
+
+int main(void) {
+    int u = sibling_umbrella_decl_only();
+    int v = sibling_leaf_add(1, 1);
+    SiblingLeafBox b = { .n = 3 };
+    int p = SiblingLeafBox_plus(&b, 4);
+    if (u != 40 || v != 2 || p != 7) {
+        printf("umbrella=%d leaf=%d plus=%d\n", u, v, p);
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}
