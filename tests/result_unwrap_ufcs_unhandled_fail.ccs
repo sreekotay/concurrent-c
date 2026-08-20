@@ -1,0 +1,13 @@
+/* UFCS of a TU Result fn at statement position is unhandled-result. */
+#include <stdio.h>
+typedef struct { int x; } Box;
+int !>(CCError) bump(Box* b) {
+    (void)b;
+    return cc_err(CC_ERR_NOT_FOUND, "x");
+}
+int main(void) {
+    Box b = {0};
+    b.bump();
+    printf("done\n");
+    return 0;
+}

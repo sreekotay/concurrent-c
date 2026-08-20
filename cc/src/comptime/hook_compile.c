@@ -151,9 +151,18 @@ static void cc__emit_chunk_stripped(char** out, size_t* out_len, size_t* out_cap
 }
 
 static int cc__chunk_contains_at(const char* src, size_t start, size_t end) {
+    CCInertScan scan;
     if (!src || end <= start) return 0;
-    for (size_t i = start; i < end; ++i) {
+    cc_inert_scan_init(&scan, NULL);
+    scan.at_line_start = 0; /* mid-buffer chunk */
+    for (size_t i = start; i < end; ) {
+        if (cc_inert_scan_step(&scan, src, end, &i)) continue;
+        if (src[i] == '`') {
+            size_t te = 0;
+            if (cc_tpl_scan_literal(src, end, i, &te) == 0) { i = te + 1; continue; }
+        }
         if (src[i] == '@') return 1;
+        i++;
     }
     return 0;
 }

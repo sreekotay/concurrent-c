@@ -7,7 +7,7 @@ int g = 0;
 
 @async int f(void) {
     g = 0;
-    @defer cleanup: { g = 7; };
+    @defer { g = 7; };
     int x = @await noop(1);
     (void)x;
     return g;

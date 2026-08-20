@@ -29,7 +29,7 @@ static char[:] port_ufcs(char[:] recv_type, char[:] method, char[:] mode,
                          CCSliceArray argv, CCSliceArray arg_types,
                          CCArena* arena) {
     (void)recv_type;
-    (void)mode;
+    (void)mode; /* named `@typeview Mode on T` — otherwise empty */
     (void)argv;
     (void)arg_types;
     switch (method) {

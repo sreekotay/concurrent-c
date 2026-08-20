@@ -1,0 +1,5 @@
+/* @defer(ok|err) is only valid in a Result-returning function. */
+int main(void) {
+    @defer(ok) { int x = 0; (void)x; };
+    return 0;
+}

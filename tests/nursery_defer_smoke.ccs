@@ -6,7 +6,7 @@ void worker(int n) {
 }
 
 int main(void) {
-    @defer cleanup: { int x = 0; (void)x; };
+    @defer { int x = 0; (void)x; };
     {
         CCNursery* __cc_nursery71 = @create(NULL) @destroy;
         if (!__cc_nursery71) abort();
