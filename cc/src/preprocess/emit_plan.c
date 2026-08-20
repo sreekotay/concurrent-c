@@ -1112,7 +1112,7 @@ void cc_emit_plan_collect_comptime_instantiations(const char* src, size_t len) {
 void cc_emit_plan_apply_comptime_instantiations(CCTypeGraph* graph) {
     /* graph may be NULL: cc_type_graph_request_* falls back to the global
      * registry (see cc_type_graph_active_registry), which is what the
-     * final-compile path in visit_codegen.c reads. */
+     * product / factory path reads. */
     for (size_t i = 0; i < cc__comptime_inst_count; i++) {
         const CCEmitComptimeInst* inst = &cc__comptime_insts[i];
         char mangled[256];
@@ -1462,7 +1462,7 @@ int cc_ct_field_reg_type_pass_failed(void) {
 static int cc__field_reg_refuse_if_skipped(const char* api) {
     if (cc__field_reg_type_pass_failed) {
         fprintf(stderr,
-                "error: %s: type-pass failed (parse/emit after blanking "
+                "error: %s: type-pass failed (parse/harvest after blanking "
                 "@comptime) — refusing silent empty field registry\n",
                 api ? api : "cc_reflect_field_*");
         return 1;

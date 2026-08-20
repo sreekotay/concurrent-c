@@ -2,7 +2,7 @@
  * CCEmitPlan — unified instantiation anchors and splice scheduling (track A2).
  *
  * Replaces ad-hoc insert_pos / container_pos / delayed Vec-Map-Result logic
- * duplicated in preprocess.c and visit_codegen.c.  Feeds the comptime seam:
+ * duplicated in preprocess.c.  Feeds the comptime seam:
  * every monomorph emission names an explicit CCEmitAnchor.
  *
  * See cc/docs/COMPTIME_INSTANTIATION_SEAM.md.
@@ -34,7 +34,7 @@ typedef struct CCEmitPlanComptimeSchedule {
     size_t frag_index[CC_EMIT_PLAN_MAX_COMPTIME_FRAGMENTS];
 } CCEmitPlanComptimeSchedule;
 
-/* --- source scan (shared preprocess + visit_codegen) --- */
+/* --- source scan (shared preprocess + visitor passes) --- */
 size_t cc_emit_plan_line_start_before(const char* src, size_t pos);
 size_t cc_emit_plan_find_ident_top_level(const char* src, size_t start, size_t len,
                                          const char* ident);
@@ -111,9 +111,9 @@ void cc_emit_plan_fprint_line_directive(FILE* out, const char* src, size_t offse
  *
  * The unwrap primitives `__cc_uw_is_err` / `__cc_uw_value` / `__cc_uw_err_at`
  * expand to `_Generic((__x__), ...)` with one arm per concrete Result type.
- * Both the parser-mode emission (preprocess.c) and the final-compile emission
- * (visit_codegen.c) must use the *identical* cast-and-probe arm body or the
- * two parses disagree on field layout.  This single formatter owns that body
+ * Parser-mode emission (preprocess.c) and factory/TCC fragments must use
+ * the *identical* cast-and-probe arm body or the two parses disagree on
+ * field layout.  This single formatter owns that body
  * so the two call sites can keep their own control flow (which arms, defaults,
  * sink: FILE vs string buffer) without the arm format drifting. */
 typedef enum CCResultArmKind {
@@ -290,9 +290,9 @@ const void* cc_emit_plan_host_type_of(const char* name);
  * number of bytes written (excluding NUL) or -1 if idx is out of range. */
 void cc_emit_plan_set_reflect_source(const char* src, size_t len);
 
-/* Lower-then-TCC field registry: populated from shadow emit `__cc_rf_*`
- * tables (plain C). `cc_reflect_field_is_as` prefers this; count/name/type
- * prefer Concurrent-C reflect source when set (registry is incomplete). */
+/* Lower-then-TCC field registry: populated from type-pass harvest (and
+ * product `__cc_rf_*` emit). `cc_reflect_field_is_as` prefers this;
+ * count/name/type prefer Concurrent-C reflect source when set. */
 void cc_ct_field_reg_clear(void);
 int cc_ct_field_reg_put(const char* type_name, const char* const* names,
                         const char* const* types, const int* is_as, int n);
@@ -301,7 +301,7 @@ int cc_ct_field_reg_has(const char* type_name);
  * `cc_reflect_field_*` must fail loud — empty registry is not "unknown type". */
 void cc_ct_field_reg_set_type_pass_skipped(int skipped);
 int cc_ct_field_reg_type_pass_skipped(void);
-/* Type-pass ran (src produced) but parse/emit failed. Distinct from skipped
+/* Type-pass ran (src produced) but parse/harvest failed. Distinct from skipped
  * and from "unknown type" / unsupported field forms. */
 void cc_ct_field_reg_set_type_pass_failed(int failed);
 int cc_ct_field_reg_type_pass_failed(void);

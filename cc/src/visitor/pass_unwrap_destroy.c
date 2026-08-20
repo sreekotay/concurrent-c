@@ -743,7 +743,7 @@ int cc__rewrite_unwrap_destroy_suffix(const char* src,
     *out_len = 0;
 
     /* Ensure struct fields are visible for destroy chaining (canonicalize-time
-     * rewrite runs before visit_codegen's usual field scan). Include bodies
+     * rewrite runs before the type-registry field ingest). Include bodies
      * stay as `#include`, so also ingest registered .cch headers. */
     {
         CCTypeRegistry* reg = cc_type_registry_get_global();

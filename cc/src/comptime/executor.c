@@ -1403,6 +1403,8 @@ int cc_comptime_validate_c_fragment(const char* fragment,
     sink.got = 0;
     sink.line = 0;
     tcc_set_error_func(s, &sink, cc__frag_err_capture);
+    /* Same C version as host / comptime exec — do not parse fragments as C99. */
+    tcc_set_options(s, CC_TCC_HOST_OPTIONS);
     {
         char dirbuf[1024];
         const char* libdir = cc__exec_lib_dir(dirbuf, sizeof(dirbuf));

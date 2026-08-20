@@ -10,7 +10,8 @@ pigz / levenshtein. The tape → whitelist-AST → tape-fallback spine stays;
 active hardening (not changing that spine):
 
 1. **UFCS peel kill** — typed/instance receivers diagnose on structured miss;
-   no `Map_CCSliceHdr_int_*` invent; leftover peel only for unbound/opaque.
+   no `Map_CCSliceHdr_int_*` invent; leftover peel only for unbound/opaque
+   (switch bodies / one-liner C). Holes, Result hops, `@await` are exact-only.
 2. **Stage-2 exhaustive directives** — implement / passthrough-by-design /
    hard error; `#if` never guesses the true arm; indented `#` recognized.
 3. **ccc↔shadow_lower options contract** — forward release/debug/flags/target/
@@ -73,8 +74,9 @@ Same front for both products; H adds `#pragma once` and rejects function bodies.
 | `pp_ast_parse_unwrap.cch` | Unwrap / bang / result-local / ptr unwrap |
 | `pp_ast_parse_spawn.cch` | Spawn / send_task / closure / capture infer |
 | `pp_ast_parse_ext.cch` | External / TU parsers + `parse_tu` |
-| `pp_emit.cch` | Emit umbrella → core + ufcs + stmt |
+| `pp_emit.cch` | Emit umbrella → core + typehooks + ufcs + stmt |
 | `pp_emit_core.cch` | CEmit, bind/chan tables, `#line` / lead; leftover `?>` API |
+| `pp_emit_typehooks.cch` | `@typehooks` harvest, `.ufcs` compile, hook resolve |
 | `pp_emit_ufcs.cch` | `lower_parts` + leftover peel (not a pipeline) |
 | `pp_emit_unwrap.cch` | Result / bang / qmark / try_assign emit |
 | `pp_emit_spawn.cch` | Closure make, spawn collect, defer epilogue |
@@ -313,7 +315,8 @@ Prioritized by fail mass × language value on native-quick:
      `out/include` face patch (local build aid) or umbrella until fixed;
      then snapshot/promote a **new** pin so it sticks in `last-good`.
      Never hand-patch an existing bootstrap seed instead of promoting.
-   - `as:` forwarding; remaining UFCS leftover peel kill.
+   - `as:` forwarding. Leftover peel remains for opaque switch / one-liner
+     C; holes, Result hops, and `@await` use exact `lower_parts` only.
 
 ## Explicit tool
 

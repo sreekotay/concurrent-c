@@ -1,6 +1,6 @@
 /* pass_channel_syntax.c - Channel syntax lowering passes.
  *
- * Extracted from visit_codegen.c for maintainability.
+ * Legacy visitor pass (linked into libshadow_comptime; not product emit).
  */
 
 #include "pass_channel_syntax.h"

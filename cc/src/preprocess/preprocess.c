@@ -11833,7 +11833,7 @@ char* cc_preprocess_canonicalize(const char* input, size_t input_len, const char
  * lands at a known user-coordinate anchor and user text is copied verbatim
  * between anchors, so for user text AFTER the last anchor:
  *     out_off = user_off + delta.
- * The reparse wrapper (visit_codegen.c) reads this to advertise an EXACT
+ * The reparse wrapper reads this to advertise an EXACT
  * offset mapping on the AST root instead of falling back to line walking.
  * `user_text_rewritten` flags the one case where user bytes themselves
  * changed (system-include lowering) and the anchors are meaningless.
@@ -11866,7 +11866,7 @@ static char* cc_preprocess_pipeline_ex(const char* input, size_t input_len, cons
     if (!input || input_len == 0) return NULL;
 
     /* Per-TU type graph (wraps registry — see type_graph.h).  Reparses reuse
-     * the active registry populated during initial parse / visit_codegen. */
+     * the active registry populated during initial parse / visitor passes. */
     /* Emit splice reuses the registry populated by a prior canonicalize pass. */
     CCTypeGraph* graph = (mode == CC_PP_MODE_EMIT_SPLICE_ONLY || skip_checks)
         ? cc_type_graph_get_global()
@@ -12167,7 +12167,7 @@ static char* cc_preprocess_pipeline_ex(const char* input, size_t input_len, cons
                      * into the owning `.cch` header (e.g. `dir.cch`), with no
                      * include-guard around it.  Re-emitting the spec here
                      * triggers "struct/union/enum already defined" at the
-                     * duplicate typedef.  visit_codegen.c's post-prelude
+                     * duplicate typedef.  The post-prelude
                      * emission uses the same `is_stdlib_predeclared_name`
                      * check to skip them — mirror it here. */
                     {
@@ -12243,7 +12243,7 @@ static char* cc_preprocess_pipeline_ex(const char* input, size_t input_len, cons
                  * "'{' expected (got ';')" with nothing pointing here.
                  * Forward tags suffice: parser-mode TCC never evaluates an
                  * unselected arm's body, and the real compile emits its own
-                 * roster from complete types (visit_codegen). */
+                 * roster from complete types (shadow_lower / host cc). */
                 for (size_t ri = 0; ri < cc_result_fn_registry_count(); ri++) {
                     const char* t = cc_result_fn_registry_result_type_at(ri);
                     if (!t || strncmp(t, "CCResult_", 9) != 0) continue;
@@ -12290,8 +12290,8 @@ static char* cc_preprocess_pipeline_ex(const char* input, size_t input_len, cons
                  * a `?>(e) handle(e)` ternary whose handler returns `T`
                  * fails TCC's conditional type-check with
                  *   "have 'struct CCResult_T_E' and 'struct T'".
-                 * visit_codegen.c emits the same enumeration for the
-                 * real compile path; we mirror it here so the initial
+                 * The product emit path enumerates the same arms for the
+                 * real compile; we mirror it here so the initial
                  * parser-mode parse type-checks too.  Every CCResult_T_E
                  * struct shares layout `{ bool ok; union { T value; E
                  * error; } u; }`, so the casts pick out the right field
@@ -15993,7 +15993,7 @@ chain_cleanup:
  *
  * `cc_preprocess_include_expanded` shells out to `cc -E` (~40ms + ~600KB on a
  * typical prelude TU). Within one process the same path is expanded at most
- * once (parse stashes the buffer; visit_codegen reuses it). Across processes —
+ * once (parse stashes the buffer; later passes reuse it). Across processes —
  * every cold `--no-cache` emit — a disk cache keyed by input/toolchain mtimes
  * plus `#line` dependency freshness skips the subprocess entirely.
  *
@@ -16445,7 +16445,7 @@ char* cc_preprocess_include_expanded(const char* input_path) {
  * Structural members (`.kind`, `.nfields`, `.name`, `.fields[...]`) are a later
  * D1 increment that reads the type graph; only numeric layout lands here.
  * Runs in `cc__apply_phase1_canonical_passes` (parse path) AND on the
- * visit_codegen emit path, since the emitted `.c` is produced by the latter.
+ * shadow_lower emit path (the product `.c` is produced there).
  *
  * D1.1 adds the *structural* members the compiler can decide by name:
  *   - `.name`    -> `"T"` (constexpr string literal; the display spelling)
@@ -20802,9 +20802,8 @@ static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
              * form.  `@create(...) @destroy { ... };` is untouched
              * because its statement has no `!>` / `?>` operator.
              *
-             * The same rewrite is also invoked in visit_codegen.c right
-             * before the final `!>`/`?>` lowering, because visit_codegen
-             * re-reads the raw source for its own text-pass pipeline. */
+             * Visitor unwrap-destroy also runs this rewrite on header /
+             * factory text that never goes through shadow_lower parse. */
             if (cc_contains_token_top_level(chain->src, chain->len, "@destroy")) {
                 char* ud_out = NULL;
                 size_t ud_out_len = 0;
@@ -20817,9 +20816,10 @@ static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
             /* `!>` / `?>` lowering no longer needs a pointer-fn registry:
              * the Result-vs-pointer dispatch is handled at emission time
              * by the `__cc_uw_*` `_Generic` macros in `cc_result.cch`
-             * (baseline arms) and `visit_codegen.c` (per-spec enumerated
-             * arms).  The pre-lowering scan that used to populate a
-             * pointer-fn registry has been removed — the lowering now
+             * (baseline arms) and emit-plan Result-arm formatting
+             * (per-spec enumerated arms).  The pre-lowering scan that used
+             * to populate a pointer-fn registry has been removed — the
+             * lowering now
              * emits the same unified shape for every LHS and lets the C
              * type system pick the right arm at preprocessor expansion
              * time. */

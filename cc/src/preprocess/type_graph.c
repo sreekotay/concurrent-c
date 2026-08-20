@@ -61,7 +61,7 @@ CCTypeGraph* cc_type_graph_ensure_global_cleared(void) {
         if (!graph) return NULL;
         cc_type_graph_set_global(graph);
     }
-    /* When visit_codegen reparse pushes a scoped temp registry, only clear that
+    /* When a reparse pushes a scoped temp registry, only clear that
      * temp view — do not wipe graph->reg (TU Vec/Map instantiations). */
     CCTypeRegistry* active = cc_type_registry_get_global();
     if (active) {

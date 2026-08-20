@@ -466,7 +466,7 @@ char* shadow_comptime_type_pass_src(const char* input_path, size_t* out_n) {
     shadow_ct_ensure_repo_root(input_path);
     buf = shadow_ct_load_with_harvest(input_path, &n);
     if (!buf) return NULL;
-    /* Skip the second whitelist lower when the TU (incl. harvest) has no
+    /* Skip the type-pass parse+harvest when the TU (incl. harvest) has no
      * `@comptime` — field registry is only consumed by comptime exec. */
     if (!cc_contains_token_top_level(buf, n, "@comptime")) {
         cc_ct_field_reg_set_type_pass_skipped(0);
@@ -474,8 +474,8 @@ char* shadow_comptime_type_pass_src(const char* input_path, size_t* out_n) {
         return NULL;
     }
     /* `@typehooks` → `@comptime { cc_type_register(...) }` and similar do not
-     * need `__cc_rf_*` / field registry. Only run the double emit when the
-     * harvested TU actually mentions field reflection. */
+     * need `__cc_rf_*` / field registry. Only run the type-pass harvest when
+     * the harvested TU actually mentions field reflection. */
     if (!cc_contains_token_top_level(buf, n, "type_of") &&
         !cc_contains_token_top_level(buf, n, "cc_reflect_field_") &&
         !cc_contains_token_top_level(buf, n, "__cc_rf_")) {

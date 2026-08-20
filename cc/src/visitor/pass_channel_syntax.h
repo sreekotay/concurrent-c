@@ -13,7 +13,7 @@
  *   - T[~ ... <] -> CCChanRx  (T[~ ... ordered <] also becomes CCChanRx;
  *     ordered is a runtime flag on the channel, not a distinct type)
  *
- * Extracted from visit_codegen.c for maintainability.
+ * Legacy visitor pass (linked into libshadow_comptime; not product emit).
  */
 
 #ifndef CC_PASS_CHANNEL_SYNTAX_H

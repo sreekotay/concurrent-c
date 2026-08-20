@@ -29,7 +29,7 @@ static inline int cc_is_ident_char(char c) {
  * directives surviving from earlier phases (e.g. the @grammar expansion
  * brackets) plus masked `CC_LN` same-line comment markers added by phase-3
  * passes (see cc__mask_line_directives / cc__unmask_line_directives in
- * visit_codegen.c).  Both forms occupy a whole line, and the line FOLLOWING
+ * visitor text passes).  Both forms occupy a whole line, and the line FOLLOWING
  * a ledger line is user line N of the named file.
  *
  * A raw physical newline count is therefore NOT a user line once any

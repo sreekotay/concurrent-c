@@ -294,7 +294,7 @@ static void cc__ru_emit_uw_err_binder(char** out, size_t* ol, size_t* oc,
      *   - `CCError` for raw-pointer LHS (via the default _Generic arm).
      *
      * R3 record() fires inside the `__cc_uw_err_at` macro arms (see
-     * cc_result.cch + the per-TU enumerated arms in visit_codegen.c),
+     * cc_result.cch + emit-plan Result-arm formatting),
      * so no explicit record() call is needed here — the macro
      * expansion below already side-effects on each evaluation. */
     cc__append_str(out, ol, oc, "__typeof__(");

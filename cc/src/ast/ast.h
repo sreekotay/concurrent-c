@@ -90,11 +90,11 @@ typedef struct CCASTRoot {
     size_t parse_buffer_len;
     char*  parse_buffer_pre_relower;
     size_t parse_buffer_pre_relower_len;
-    /* Canonical CC buffer for visit_codegen (pre-cpp-expand). */
+    /* Canonical CC buffer for visitor text passes (pre-cpp-expand). */
     char*  codegen_buffer;
     size_t codegen_buffer_len;
     /* Authoritative include-expanded comptime discovery buffer (regs/UFCS).
-     * Built once in parse.c; visit_codegen borrows it instead of re-expanding.
+     * Built once in parse.c; visitor passes borrow it instead of re-expanding.
      * Owned by the root; freed in cc_tcc_bridge_free_ast. */
     char*  comptime_buffer;
     size_t comptime_buffer_len;

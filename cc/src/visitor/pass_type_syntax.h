@@ -8,7 +8,7 @@
  * The retired optional surface (T?, CCOptional_T, *opt unwrap) used to live
  * here; see cc/include/ccc/DEPRECATIONS.md for the migration matrix.
  *
- * Extracted from visit_codegen.c for maintainability.
+ * Legacy visitor pass (linked into libshadow_comptime; not product emit).
  */
 
 #ifndef CC_PASS_TYPE_SYNTAX_H
@@ -46,8 +46,8 @@ char* cc_emit_rewrite_result_sugar(const char* src, size_t n);
 extern CCResultSpecTable cc__cg_result_specs;
 
 /* Reset type registries to empty (retain allocated buffer capacity).
- * Call once at the start of each compilation unit in visit_codegen.c rather
- * than relying on the implicit reset inside each scan function. */
+ * Call once at the start of each compilation unit rather than relying on
+ * the implicit reset inside each scan function. */
 void cc__cg_reset_type_registries(void);
 
 #endif /* CC_PASS_TYPE_SYNTAX_H */

@@ -373,9 +373,10 @@ int main(int argc, char** argv) {
     shadow_fill_quote_dir(in_path, search_dir, sizeof(search_dir));
 
     /* Lower-then-TCC type pass (.ccs only): blank @comptime, whitelist
-     * parse+emit → field registry + slim typedef unit when the harvested TU
-     * mentions field reflection; skipped (fail-loud on later ask) otherwise.
-     * TCC gets typedefs+__cc_rf_* via cc_ct_field_reg_slim_prelude. */
+     * parse + field harvest when the harvested TU mentions field reflection;
+     * skipped (fail-loud on later ask) otherwise. Product pass still does
+     * safety + full emit on the comptime-spliced TU. TCC gets __cc_rf_*
+     * via cc_ct_field_reg_slim_prelude (registry, not a second emit). */
     if (kind == SHADOW_EMIT_C) {
         char* type_src = NULL;
         size_t type_len = 0;
@@ -439,22 +440,8 @@ int main(int argc, char** argv) {
                         type_p.n = type_pp.nout;
                         type_p.cache = &type_cache;
                         if (parse_tu(&type_p, &type_items, &type_n) &&
-                            shadow_safety_check(type_items, type_n,
-                                               &type_cache)) {
-                            CEmit type_emit = {0};
-                            if (shadow_emit(type_items, type_n, &type_cache,
-                                            &type_emit, SHADOW_EMIT_C,
-                                            type_pp.pass_inc, type_pp.npass_inc,
-                                            type_pp.pass_def, type_pp.npass_def,
-                                            in_path)) {
-                                /* Registry filled during __cc_rf_* emit; keep
-                                 * lowered C for TCC reflect prelude. */
-                                cc_ct_field_reg_set_lowered_c(type_emit.buf);
-                                type_emit.buf = NULL;
-                                type_ok = 1;
-                            }
-                            free(type_emit.buf);
-                        }
+                            shadow_harvest_field_reg(type_items, type_n))
+                            type_ok = 1;
                     }
                     pp_free_macros(&type_pp);
                     free(type_pp.out);

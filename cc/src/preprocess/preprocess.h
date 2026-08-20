@@ -434,8 +434,8 @@ char* cc__rewrite_async_void_ret(const char* src, size_t n);
 // as integer constant expressions (static_assert / array dims / @comptime if).
 // The bare value form `type_of(T)` and the pointer form `type_of(T)->m` are
 // left untouched (runtime `cc_type_of` semantics).  Must run on BOTH the
-// preprocess-for-parse path and the visit_codegen emit path (the emitted .c is
-// produced by the latter).  Returns malloc'd string on change, NULL otherwise.
+// preprocess-for-parse path and the shadow_lower / factory emit path.
+// Returns malloc'd string on change, NULL otherwise.
 char* cc__lower_type_of_constexpr(const char* src, size_t n);
 
 // D2.0: resolve `@comptime if (PRED) { ... } [else { ... }]` by evaluating the

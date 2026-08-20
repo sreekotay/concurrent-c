@@ -1,6 +1,6 @@
 /* pass_type_syntax.c - Type syntax lowering passes.
  *
- * Extracted from visit_codegen.c for maintainability.
+ * Legacy visitor pass (linked into libshadow_comptime; not product emit).
  */
 
 #include "pass_type_syntax.h"
@@ -219,7 +219,7 @@ static size_t cc__scan_back_to_type_start(const char* s, size_t from) {
 }
 
 /* Reset the result-spec registry to empty (retain allocated buffer capacity).
- * Call once per compilation unit in visit_codegen.c before type rewriting begins.
+ * Call once per compilation unit before type rewriting begins.
  * The old implicit per-call reset made the registry non-accumulative across calls.
  * (The retired optional registry used to be reset here too.) */
 void cc__cg_reset_type_registries(void) {

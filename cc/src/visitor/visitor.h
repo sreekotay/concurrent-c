@@ -14,11 +14,10 @@ typedef struct CCVisitorCtx {
      * is off.  Borrowed; owned by the AST root. */
     const char* pre_expanded_buf;
     size_t      pre_expanded_len;
-    // TODO: add type tables, provenance tracking, arena/async context, codegen state.
 } CCVisitorCtx;
 
-// Run the main visitor and emit C to output_path.
-int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path);
+/* Product emit is `shadow_lower`. These visitor passes stay linked into
+ * libshadow_comptime (header/factory text). There is no `cc_visit` front. */
 
 #endif // CC_VISITOR_VISITOR_H
 
