@@ -223,8 +223,12 @@ header is stripped the same way — the bang is not a preprocessor directive.
 A local `.cch` that needs the including unit's pipeline — statement unwrap
 (`!>;`, `!> {`, `!>(e) {`), `@string`, `@errhandler`, and the like — is
 spliced into that unit. `T !>(E)` on a declaration is result-type syntax
-and does not by itself force a splice. Nested local `#include "….cch"`
-lines inside a spliced face are processed the same way.
+and does not by itself force a splice. A quoted interface `.cch` extracts
+to a lowered `.h` even when a nested local `#include "….cch"` is
+impl-grade; that nested face splices into the including unit, not the
+parent header. Nested local includes inside a spliced face are processed
+the same way. An object-like `#define` immediately before a quoted include
+is present for host cpp when the include extracts.
 
 ---
 

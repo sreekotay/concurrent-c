@@ -1,0 +1,10 @@
+#ifndef TESTS_QUOTE_CCH_UMBRELLA_IMPL_LEAF_CCH
+#define TESTS_QUOTE_CCH_UMBRELLA_IMPL_LEAF_CCH
+
+/* Interface umbrella: no statement-level CC. The impl leaf must splice
+ * into the including unit without pulling this file into the AST. */
+static int umbrella_decl_only(void) { return 40; }
+
+#include "quote_cch_umbrella_impl_leaf_impl.cch"
+
+#endif

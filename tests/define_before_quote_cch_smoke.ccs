@@ -1,0 +1,14 @@
+/* `#define FLAG` before a quoted interface `.cch` must reach host cpp
+ * when the include extracts to a `.h`. */
+#include <stdio.h>
+#define LISTING_ONLY
+#include "define_before_quote_cch_smoke.cch"
+
+int main(void) {
+    if (define_before_quote_mode() != 1) {
+        printf("define did not survive into the extracted include\n");
+        return 1;
+    }
+    printf("ok\n");
+    return 0;
+}

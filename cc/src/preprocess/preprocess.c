@@ -14733,45 +14733,18 @@ static void cc__cch_grade_memo_set(const char* abs_src, int grade) {
     g_cch_grade_memo_count++;
 }
 
-/* Implementation-grade check, transitive over nested LOCAL quoted .cch
- * includes: a header including an impl-grade header cannot lower to a clean
- * .h either (the child is spliced, so the parent must be too).  System
- * `<...>` includes are pre-lowered interface headers and are not walked. */
+/* Own-text only. A nested impl-grade `#include "leaf.cch"` does not make
+ * this file impl-grade — the leaf splices into the including unit; this
+ * file still extracts to a `.h`. */
 static int cc__local_cch_is_impl_grade(const char* abs_src) {
-    char source_dir[PATH_MAX];
     char* src = NULL;
     size_t n = 0;
     int grade = 0;
     CCCchGradeMemo* memo = cc__cch_grade_memo_find(abs_src);
     if (memo) return memo->grade > 0;
     cc__cch_grade_memo_set(abs_src, -1);
-    if (cc__read_file_text(abs_src, &src, &n) == 0 && src) {
-        if (cc__cch_text_is_impl_grade(src, n)) {
-            grade = 1;
-        } else if (cc__dirname_local(abs_src, source_dir, sizeof(source_dir)) == 0) {
-            size_t i = 0;
-            while (i < n && !grade) {
-                size_t line_end = i;
-                size_t path_s = 0, path_e = 0;
-                while (line_end < n && src[line_end] != '\n') line_end++;
-                if (cc__match_local_include_line(src + i, line_end - i, &path_s, &path_e) &&
-                    path_e >= path_s + 4 &&
-                    memcmp(src + i + path_e - 4, ".cch", 4) == 0) {
-                    char rel[PATH_MAX], child[PATH_MAX], child_abs[PATH_MAX];
-                    size_t rel_len = path_e - path_s;
-                    if (rel_len < sizeof(rel)) {
-                        memcpy(rel, src + i + path_s, rel_len);
-                        rel[rel_len] = '\0';
-                        snprintf(child, sizeof(child), "%s/%s", source_dir, rel);
-                        if (realpath(child, child_abs) &&
-                            cc__local_cch_is_impl_grade(child_abs))
-                            grade = 1;
-                    }
-                }
-                i = (line_end < n) ? line_end + 1 : line_end;
-            }
-        }
-    }
+    if (cc__read_file_text(abs_src, &src, &n) == 0 && src)
+        grade = cc__cch_text_is_impl_grade(src, n) ? 1 : 0;
     free(src);
     cc__cch_grade_memo_set(abs_src, grade);
     return grade;
@@ -14784,6 +14757,10 @@ static int cc__local_cch_is_impl_grade(const char* abs_src) {
 static char** g_spliced_impl_cch = NULL;
 static size_t g_spliced_impl_cch_count = 0;
 static size_t g_spliced_impl_cch_cap = 0;
+/* 1 when rewriting a .ccs / spliced impl body: impl children splice.
+ * 0 when lowering an interface `.cch` → `.h`: omit impl includes (the
+ * including unit already spliced those leaves). */
+static int g_rewrite_allow_impl_splice = 1;
 
 static void cc__reset_spliced_impl_cch(void) {
     for (size_t i = 0; i < g_spliced_impl_cch_count; i++) free(g_spliced_impl_cch[i]);
@@ -14882,6 +14859,70 @@ static int cc__try_quoted_cch_path(const char* dir, const char* rel,
     return realpath(child_path, child_abs) != NULL;
 }
 
+static int cc__path_in_list(char** paths, size_t n, const char* p) {
+    size_t i;
+    if (!paths || !p) return 0;
+    for (i = 0; i < n; i++) {
+        if (paths[i] && strcmp(paths[i], p) == 0) return 1;
+    }
+    return 0;
+}
+
+/* Impl-grade (or UFCS-forced) descendants of an interface umbrella. */
+static int cc__collect_impl_descendants(const char* abs_src, char** paths,
+                                        size_t* n, size_t cap, int depth) {
+    char source_dir[PATH_MAX];
+    char* src = NULL;
+    size_t len = 0;
+    size_t i = 0;
+    if (!abs_src || !paths || !n || depth > 32) return 0;
+    if (cc__dirname_local(abs_src, source_dir, sizeof(source_dir)) != 0)
+        return 0;
+    if (cc__read_file_text(abs_src, &src, &len) != 0 || !src) return 0;
+    while (i < len) {
+        size_t line_end = i;
+        size_t path_s = 0, path_e = 0;
+        while (line_end < len && src[line_end] != '\n') line_end++;
+        if (cc__match_local_include_line(src + i, line_end - i, &path_s,
+                                        &path_e) &&
+            path_e >= path_s + 4 &&
+            memcmp(src + i + path_e - 4, ".cch", 4) == 0) {
+            char rel[PATH_MAX], child[PATH_MAX], child_abs[PATH_MAX];
+            size_t rel_len = path_e - path_s;
+            if (rel_len < sizeof(rel)) {
+                memcpy(rel, src + i + path_s, rel_len);
+                rel[rel_len] = '\0';
+                snprintf(child, sizeof(child), "%s/%s", source_dir, rel);
+                if (realpath(child, child_abs) &&
+                    !cc__path_in_list(paths, *n, child_abs)) {
+                    int leaf = cc__local_cch_is_impl_grade(child_abs);
+                    if (!leaf) {
+                        char* cs = NULL;
+                        size_t cl = 0;
+                        if (cc__read_file_text(child_abs, &cs, &cl) == 0 &&
+                            cs &&
+                            cc__lowered_header_needs_ufcs_splice(cs, cl))
+                            leaf = 1;
+                        free(cs);
+                    }
+                    if (leaf) {
+                        if (*n < cap) {
+                            paths[*n] = strdup(child_abs);
+                            if (paths[*n]) (*n)++;
+                        }
+                    } else {
+                        cc__collect_impl_descendants(child_abs, paths, n, cap,
+                                                     depth + 1);
+                    }
+                }
+            }
+        }
+        i = (line_end < len) ? line_end + 1 : line_end;
+    }
+    free(src);
+    return 0;
+}
+
 /* Splice an implementation-grade header's raw source into `out` in place of
  * its include line.  Nested local includes inside the header are processed
  * recursively (interface children lower to .h include lines, impl children
@@ -14978,7 +15019,12 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
         CC__LOWER_GIVE_UP("mkdir -p");
     if (cc__read_file_text(abs_src, &input, &input_len) != 0)
         CC__LOWER_GIVE_UP("read");
-    rewritten = cc__rewrite_local_cch_includes_impl(input, input_len, abs_src);
+    {
+        int saved_splice = g_rewrite_allow_impl_splice;
+        g_rewrite_allow_impl_splice = 0;
+        rewritten = cc__rewrite_local_cch_includes_impl(input, input_len, abs_src);
+        g_rewrite_allow_impl_splice = saved_splice;
+    }
     g_header_lower_preserve_tu_state++;
     lowered = cc_lower_header_string(rewritten ? rewritten : input,
                                      rewritten ? strlen(rewritten) : input_len,
@@ -15072,6 +15118,15 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                         free(child_src);
                     }
                     if (splice_child) {
+                        if (!g_rewrite_allow_impl_splice) {
+                            /* Lowering an interface `.h`: impl leaves are
+                             * spliced into the including unit, not this
+                             * header. Keep a blank line for physical lines. */
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+                            changed = 1;
+                            i = (line_end < n) ? line_end + 1 : line_end;
+                            continue;
+                        }
                         if (cc__impl_cch_was_spliced(child_abs)) {
                             /* Repeat include: the header's guard would make this
                              * inert; keep a blank line so following lines in this
@@ -15095,6 +15150,25 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                         }
                         /* Unreadable header: fall through to the interface path
                          * (which fails the same way it always has). */
+                    } else if (g_rewrite_allow_impl_splice && found) {
+                        /* Interface umbrella: splice impl-grade descendants
+                         * into this unit, then extract the umbrella `.h`. */
+                        char* desc[32];
+                        size_t nd = 0;
+                        size_t di;
+                        size_t line_no = 1;
+                        for (size_t k = 0; k < i; k++)
+                            if (src[k] == '\n') line_no++;
+                        memset(desc, 0, sizeof(desc));
+                        cc__collect_impl_descendants(child_abs, desc, &nd, 32,
+                                                     0);
+                        for (di = 0; di < nd; di++) {
+                            if (desc[di] && !cc__impl_cch_was_spliced(desc[di]))
+                                (void)cc__splice_impl_cch_into(
+                                    &out, &out_len, &out_cap, desc[di],
+                                    current_path, line_no);
+                            free(desc[di]);
+                        }
                     }
                 }
                 lowered_path = cc__lower_local_cch_header(found ? child_abs

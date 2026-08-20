@@ -1,0 +1,10 @@
+#ifndef TESTS_DEFINE_BEFORE_QUOTE_CCH_SMOKE_CCH
+#define TESTS_DEFINE_BEFORE_QUOTE_CCH_SMOKE_CCH
+
+#ifdef LISTING_ONLY
+static int define_before_quote_mode(void) { return 1; }
+#else
+static int define_before_quote_mode(void) { return 0; }
+#endif
+
+#endif
