@@ -1,0 +1,17 @@
+/* String / char literal args pack through autoblock: a string literal is a
+ * pointer to static storage (unpacked as the callee param type, else
+ * `(const char*)`), a char literal is an int value. Commas and parens
+ * inside a literal are not argument separators. */
+#include <ccc/cc_runtime.cch>
+#include <ccc/std/task.cch>
+#include "autoblock_string_arg_helper.cch"
+
+@async int f(void) {
+    ab_log("hi, (world)");
+    ab_tag('x');
+    return 0;
+}
+
+int main(void) {
+    return cc_block_on(int, f());
+}

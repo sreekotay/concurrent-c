@@ -4568,6 +4568,10 @@ static void shadow_chan_reset(void) {
     shadow_ufn_register("strlen", "const char*");
     g_shadow_nas = 0;
     g_shadow_nas_globs = 0;
+    /* Stdlib as: faces — header lowering strips `@typeview { as: base; }`,
+     * so cc_err(e) / @errhandler still need the unique path without a
+     * live typeview in the TU. */
+    shadow_as_register("CCIoError", "base", "CCError");
     g_shadow_ndhooks = 0;
     g_shadow_nchooks = 0;
     if (g_shadow_ufcs_syms) {
@@ -7616,8 +7620,7 @@ static int shadow_cc_err_as_project(const char* err_face, const char* arg,
         const ShadowBind* b = shadow_bind_lookup(trimmed);
         char path[128];
         int pr;
-        if (b && b->ty[0]) {
-            if (strcmp(b->ty, err_face) == 0) return 0;
+        if (b && b->ty[0] && strcmp(b->ty, err_face) != 0) {
             pr = shadow_as_path_to(b->ty, err_face, path, sizeof(path));
             if (pr < 0) {
                 fprintf(stderr,
@@ -7629,7 +7632,7 @@ static int shadow_cc_err_as_project(const char* err_face, const char* arg,
                 snprintf(out, cap, "%s.%s", trimmed, path);
                 return 1;
             }
-            return 0;
+            /* Unknown source type — fall through to _Generic. */
         }
     }
     /* Expression / unbound: stmt-expr + _Generic (offset-0 cast, same as

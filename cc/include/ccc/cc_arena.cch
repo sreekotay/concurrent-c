@@ -48,11 +48,22 @@ typedef struct CCArenaCheckpoint CCArenaCheckpoint;
 #define CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW 0x8
 #define CC_ARENA_FLAG_USED_HEAP_OVERFLOW  0x10
 #define CC_ARENA_FLAG_NON_REWINDABLE      0x20
+#define CC_ARENA_FLAG_WALKING             0x40  // teardown walk in progress (attach/adopt refuse)
 
 #define CC_ARENA_POOL_FLAG_OWNED  0x1  // Pool owns its arena (should free it)
 
 typedef struct CCArenaOvfHeader CCArenaOvfHeader;
 typedef struct CCArenaOvfChunk CCArenaOvfChunk;
+
+/* Lifetime-parent record: one attached child (object + destroy thunk).
+ * Nodes are allocated from the parent arena itself; the teardown walk
+ * (cc_arena_free / cc_arena_reset) never frees them individually.
+ * See spec/draft_lifetime_parents.md. */
+typedef struct CCAttachNode {
+    void* obj;                    /* NULL = tombstone (skipped) */
+    void (*destroy)(void*);
+    struct CCAttachNode* next;
+} CCAttachNode;
 
 struct CCArena {
     uint8_t *base;
@@ -72,6 +83,7 @@ struct CCArena {
      * lock-free; shared arenas must use cc_arena_alloc (not *_local*). */
     cc_atomic_uint meta_lock;
     size_t cp_loans;              // armed checkpoint handles not yet consumed
+    CCAttachNode* children;       // lifetime-parent records, newest first
 };
 
 struct CCArenaCheckpoint {
@@ -588,6 +600,7 @@ static inline int cc_arena_buffer(CCArena *arena, void *buffer, size_t capacity)
     arena->ovf_chunks = NULL;
     CC_ATOMIC_STORE(&arena->overflow_bytes, 0);
     arena->cp_loans = 0;
+    arena->children = NULL;
     CC_ATOMIC_STORE(&arena->meta_lock, 0u);
     return 0;
 }
@@ -710,6 +723,7 @@ static inline int cc__arena_grow_locked(CCArena *arena, size_t size, size_t alig
     extent->ovf_chunks = NULL;
     CC_ATOMIC_STORE(&extent->overflow_bytes, 0);
     extent->cp_loans = 0;
+    extent->children = NULL;  /* records live on the root handle only */
     CC_ATOMIC_STORE(&extent->meta_lock, 0u);
 
     /* Publish extent before swapping root base so note_live/find_block can
@@ -1508,10 +1522,35 @@ static inline bool cc_arena_release(CCArena* arena, void* ptr) {
     return false;
 }
 
-/* End-of-life for the arena handle. Frees every malloc this arena made:
- * Main overflow, L2 heap extents, and a heap-owned L1. Never frees a stack
- * or caller L1, or the CCArena value itself. Call cc_arena_buffer again
- * before reuse. Individual cc_arena_release remains for mid-lifetime reclaim. */
+/* Detach the record list and mark the walk (attach/adopt refuse mid-walk).
+ * Callbacks must run without the meta lock held. */
+static inline CCAttachNode* cc__arena_children_steal(CCArena* a) {
+    CCAttachNode* kids;
+    cc__arena_meta_lock(a);
+    kids = a->children;
+    a->children = NULL;
+    if (kids) a->_flags |= CC_ARENA_FLAG_WALKING;
+    cc__arena_meta_unlock(a);
+    return kids;
+}
+
+/* Run a stolen record list, newest first. Destroy fns must tolerate an
+ * already-dead object (dead-state protocol). Nodes live in the dying or
+ * resetting arena's own storage — never freed here. */
+static inline void cc__arena_children_run(CCAttachNode* n) {
+    while (n) {
+        CCAttachNode* next = n->next;
+        if (n->obj && n->destroy) n->destroy(n->obj);
+        n = next;
+    }
+}
+
+/* End-of-life for the arena handle. First destroys attached children
+ * (newest first — their handles live in this arena's storage), then frees
+ * every malloc this arena made: Main overflow, L2 heap extents, and a
+ * heap-owned L1. Never frees a stack or caller L1, or the CCArena value
+ * itself. Call cc_arena_buffer again before reuse. Individual
+ * cc_arena_release remains for mid-lifetime reclaim. */
 static inline void cc_arena_free(CCArena* a) {
     CCArena *cur;
     uint8_t* base;
@@ -1519,7 +1558,11 @@ static inline void cc_arena_free(CCArena* a) {
     size_t loans;
     CCArenaOvfHeader *ovf_heads = NULL;
     CCArenaOvfChunk *ovf_chunks = NULL;
+    CCAttachNode *kids;
     if (!a) return;
+
+    kids = cc__arena_children_steal(a);
+    if (kids) cc__arena_children_run(kids);
 
     cc__arena_meta_lock(a);
     loans = a->cp_loans;
@@ -1539,6 +1582,7 @@ static inline void cc_arena_free(CCArena* a) {
     a->ovf_head = NULL;
     a->ovf_chunks = NULL;
     a->cp_loans = 0;
+    a->children = NULL;
     CC_ATOMIC_STORE(&a->overflow_bytes, 0);
     cc__arena_meta_unlock(a);
     CC_ATOMIC_STORE(&a->meta_lock, 0u);
@@ -1621,6 +1665,7 @@ static inline CCArena cc_arena_detach(CCArena* a) {
     a->ovf_head = NULL;
     a->ovf_chunks = NULL;
     a->cp_loans = 0;
+    a->children = NULL;  /* records (and their nodes) move with `taken` */
     CC_ATOMIC_STORE(&a->overflow_bytes, 0);
     cc__arena_meta_unlock(a);
     CC_ATOMIC_STORE(&a->meta_lock, 0u);
@@ -1628,10 +1673,163 @@ static inline CCArena cc_arena_detach(CCArena* a) {
     return taken;
 }
 
+/* ---- Lifetime parents (spec/draft_lifetime_parents.md) --------------------
+ * An arena owns objects in space (allocation) and in time (destroy records).
+ * Records fire newest-first at cc_arena_free / cc_arena_reset, before any
+ * storage is released. Ownership is exclusive by construction: adopt and
+ * detach move the value and zero the source (dead-state protocol). */
+
+static inline void cc__arena_report_parent_error(const char* who, const char* msg) {
+    fprintf(stderr, "%s: %s\n", who, msg);
+}
+
+/* Primitive: append a destroy record to `parent`. The record node is
+ * allocated from `parent` itself, so it dies with the parent's storage.
+ * `destroy_fn(obj)` must tolerate an already-dead object. Returns 0, or -1
+ * with a report (dead parent, mid-teardown parent, no room for the node). */
+static inline int cc_arena_attach(CCArena* parent, void* obj, void (*destroy_fn)(void*)) {
+    CCAttachNode* nd;
+    if (!parent || !parent->base) {
+        cc__arena_report_parent_error("cc_arena_attach", "parent arena is dead");
+        return -1;
+    }
+    if (!obj || !destroy_fn) {
+        cc__arena_report_parent_error("cc_arena_attach", "null object or destroy fn");
+        return -1;
+    }
+    nd = cc_arena_alloc_T(CCAttachNode, parent);
+    if (!nd) {
+        cc__arena_report_parent_error("cc_arena_attach", "parent cannot back the record");
+        return -1;
+    }
+    nd->obj = obj;
+    nd->destroy = destroy_fn;
+    cc__arena_meta_lock(parent);
+    if ((parent->_flags & CC_ARENA_FLAG_WALKING) || !parent->base) {
+        cc__arena_meta_unlock(parent);
+        cc__arena_report_parent_error("cc_arena_attach", "parent is mid-teardown");
+        return -1;
+    }
+    nd->next = parent->children;
+    parent->children = nd;
+    cc__arena_meta_unlock(parent);
+    return 0;
+}
+
+/* Destroy thunk for arena children (record fn must be void(void*)). */
+static inline void cc__arena_child_free(void* p) {
+    cc_arena_free((CCArena*)p);
+}
+
+/* Default L1 for heap-backed children (create_arena(owner, 0)). */
+#ifndef CC_ARENA_CHILD_DEFAULT_BYTES
+#define CC_ARENA_CHILD_DEFAULT_BYTES 4096
+#endif
+
+/* Child-arena constructor: the handle (and, for n > 0, the L1 slab) come
+ * from `owner`, and a destroy record is attached so the child dies when the
+ * owner does. The size selects the child's storage class:
+ *   n > 0  — L1 carved from owner: storage-bound (adopt/detach refuse it).
+ *   n == 0 — heap-backed child: movable (adopt/detach work).
+ * Both grow to heap L2 after the L1. Returns NULL with a report when the
+ * owner cannot back it. No scope sigil: the owner holds the obligation. */
+static inline CCArena* create_arena(CCArena* owner, size_t n) {
+    CCArena* h;
+    if (!owner || !owner->base) {
+        cc__arena_report_parent_error("create_arena", "owner arena is dead");
+        return NULL;
+    }
+    h = cc_arena_alloc_T(CCArena, owner);
+    if (!h) {
+        cc__arena_report_parent_error("create_arena", "owner cannot back the handle");
+        return NULL;
+    }
+    if (n > 0) {
+        void* buf = cc_arena_alloc(owner, n, 16);
+        if (!buf) {
+            cc__arena_report_parent_error("create_arena", "owner cannot back the slab");
+            return NULL;
+        }
+        *h = cc_arena_create_buffer(buf, n, CC_ARENA_DEFAULT_BLOCK_MAX);
+        if (h->base) h->_flags |= CC_ARENA_FLAG_ALLOW_HEAP_OVERFLOW;
+    } else {
+        *h = cc_arena_heap(CC_ARENA_CHILD_DEFAULT_BYTES);
+    }
+    if (!h->base) {
+        cc__arena_report_parent_error("create_arena", "child arena init failed");
+        return NULL;
+    }
+    if (cc_arena_attach(owner, h, cc__arena_child_free) != 0) {
+        cc_arena_free(h);
+        return NULL;
+    }
+    return h;
+}
+
+/* UFCS alias: `owner.create_arena(n)` / `owner->create_arena(n)` compose
+ * `cc_arena_create_arena` via the generic prefix hook. The bare name stays
+ * the canonical constructor spelling for free calls. */
+static inline CCArena* cc_arena_create_arena(CCArena* owner, size_t n) {
+    return create_arena(owner, n);
+}
+
+/* Move `*src` into `parent` — the real move: the value relocates, the source
+ * dies. On success returns the child at its new location (a handle in
+ * `parent`, destroy record attached) and `*src` is zeroed; stale aliases see
+ * the dead state, and a second adopt of the same handle refuses loudly.
+ * Refusals (reported, NULL, source untouched): dead parent, parent
+ * mid-teardown, dead source, self/cycle (parent handle lives inside source),
+ * storage-bound source L1, outstanding checkpoint loans.
+ * Composes with `!>` as a nullable pointer; Result face: cc_arena_try_adopt
+ * (cc_arena_result.cch). */
+static inline CCArena* cc_arena_adopt(CCArena* parent, CCArena* src) {
+    CCArena taken;
+    CCArena* h;
+    if (!parent || !parent->base) {
+        cc__arena_report_parent_error("cc_arena_adopt", "parent arena is dead");
+        return NULL;
+    }
+    if (parent->_flags & CC_ARENA_FLAG_WALKING) {
+        cc__arena_report_parent_error("cc_arena_adopt", "parent is mid-teardown");
+        return NULL;
+    }
+    if (!src || !src->base) {
+        cc__arena_report_parent_error("cc_arena_adopt",
+                                      "source arena is dead (already moved?)");
+        return NULL;
+    }
+    if (src == parent) {
+        cc__arena_report_parent_error("cc_arena_adopt", "arena cannot adopt itself");
+        return NULL;
+    }
+    if (cc__arena_find_block(src, parent)) {
+        cc__arena_report_parent_error("cc_arena_adopt",
+                                      "cycle: parent handle lives inside source");
+        return NULL;
+    }
+    taken = cc_arena_detach(src);  /* refuses storage-bound L1 / cp loans, with reports */
+    if (!taken.base) return NULL;
+    h = cc_arena_alloc_T(CCArena, parent);
+    if (!h) {
+        *src = taken;  /* restore: the move did not happen */
+        cc__arena_report_parent_error("cc_arena_adopt", "parent cannot back the handle");
+        return NULL;
+    }
+    *h = taken;
+    if (cc_arena_attach(parent, h, cc__arena_child_free) != 0) {
+        *src = *h;     /* restore; the husk stays in parent storage */
+        memset(h, 0, sizeof *h);
+        return NULL;
+    }
+    return h;
+}
+
 /* Clear allocations and restore the initial L1 as the active slab
  * (stack-first arenas return to their stack storage). Frees Main overflow
  * and L2 extents. Does not free the arena struct or a caller/stack L1.
- * Provenance bumps so pre-reset slices are stale. */
+ * Provenance bumps so pre-reset slices are stale.
+ * Attached children are contents: they die at reset like every other
+ * allocation (their handles live in the slabs being rewound). */
 static inline void cc_arena_reset(CCArena *arena) {
     CCArena *to_free = NULL;
     CCArena *tail = NULL;
@@ -1639,7 +1837,16 @@ static inline void cc_arena_reset(CCArena *arena) {
     size_t loans;
     CCArenaOvfHeader *ovf_heads = NULL;
     CCArenaOvfChunk *ovf_chunks = NULL;
+    CCAttachNode *kids;
     if (!arena) return;
+
+    kids = cc__arena_children_steal(arena);
+    if (kids) {
+        cc__arena_children_run(kids);
+        cc__arena_meta_lock(arena);
+        arena->_flags &= ~(uint32_t)CC_ARENA_FLAG_WALKING;
+        cc__arena_meta_unlock(arena);
+    }
 
     cc__arena_meta_lock(arena);
     loans = arena->cp_loans;
@@ -2084,6 +2291,35 @@ static inline int cc_arena_pool(CCArenaPool* p, size_t sz) {
     return 0;
 }
 
+/* Pool constructor on a lifetime parent: the pool handle comes from `owner`
+ * and the element arena is a heap-backed child (create_arena(owner, 0)), so
+ * the pool dies when the owner does — no OWNED flag, no explicit destroy.
+ * cc_arena_pool_destroy on such a pool is a harmless no-op; detach_arena
+ * still works (the owner's record then fires on a dead handle and no-ops).
+ * Returns NULL with a report when the owner cannot back it. */
+static inline CCArenaPool* create_pool(CCArena* owner, size_t elem_size) {
+    CCArenaPool* p;
+    CCArena* a;
+    if (!owner || !owner->base) {
+        cc__arena_report_parent_error("create_pool", "owner arena is dead");
+        return NULL;
+    }
+    p = cc_arena_alloc_T(CCArenaPool, owner);
+    if (!p) {
+        cc__arena_report_parent_error("create_pool", "owner cannot back the handle");
+        return NULL;
+    }
+    a = create_arena(owner, 0);
+    if (!a) return NULL;
+    cc_arena_pool_init(p, a, elem_size);
+    return p;
+}
+
+/* UFCS alias: `owner.create_pool(elem_size)`. */
+static inline CCArenaPool* cc_arena_create_pool(CCArena* owner, size_t elem_size) {
+    return create_pool(owner, elem_size);
+}
+
 // End-of-life for the pool handle. If the pool owns its arena, the arena is freed.
 static inline void cc_arena_pool_destroy(CCArenaPool* p) {
     if (!p) return;
@@ -2234,6 +2470,19 @@ static inline void* cc_arena_pool_iter_next(CCArenaPoolIter* it) {
     .destroy = cc_type_destroy_call("cc_slice_destroy"),
     .ufcs = cc_ufcs_generic_cc_slice_family_c,
 };
+
+/* Lifetime-parent modes (spec/draft_lifetime_parents.md, spec/draft_facets.md).
+ * `Alloc` / `Parent` restrict what a signature can do with an arena;
+ * `Region` is both, for container faces (`as: (Region)field;`). */
+@typeview Alloc on CCArena {
+    r: alloc, remaining;
+}
+@typeview Parent on CCArena {
+    r: adopt, attach, create_*;
+}
+@typeview Region on CCArena {
+    r: alloc, remaining, adopt, attach, create_*;
+}
 
 /* Pool freelist packs pointers into 48 bits (CC__POOL_PTR_MASK); add an
  * init-time check that pool addresses fit the mask (LA57 insurance).

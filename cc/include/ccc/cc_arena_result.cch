@@ -32,6 +32,23 @@ static inline void !>(CCError) cc_arena_try_restore(CCArenaCheckpoint checkpoint
     return cc_ok();
 }
 
+#ifndef CCResult_CCArenaPtr_CCError_DEFINED
+#define CCResult_CCArenaPtr_CCError_DEFINED 1
+typedef CCArena* CCArenaPtr;
+CC_DECL_RESULT_SPEC(CCResult_CCArenaPtr_CCError, CCArenaPtr, CCError)
+#endif
+
+/* Result face over cc_arena_adopt (which reports the specific refusal and
+ * returns NULL; the plain form already composes with `!>` as a nullable
+ * pointer). CCS: `parent->try_adopt(&a) !>`. */
+static inline CCArenaPtr !>(CCError) cc_arena_try_adopt(CCArena* parent, CCArena* src) {
+    CCArena* h = cc_arena_adopt(parent, src);
+    if (!h) {
+        return cc_err(CC_ERR_INVALID_ARG, "cc_arena_adopt: refused");
+    }
+    return cc_ok(h);
+}
+
 static inline void !>(CCError) cc_arena_checkpoint_try_restore(CCArenaCheckpoint *cp) {
     if (!cp || !cp->arena) {
         return cc_err(CC_ERR_INVALID_ARG, "cc_arena_restore: already consumed");

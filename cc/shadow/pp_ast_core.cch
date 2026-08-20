@@ -433,6 +433,20 @@ static void parser_fail(Parser* p, Token at, const char* msg) {
     diag_at(p->cache, at, msg);
 }
 
+static void parser_note(Parser* p, Token at, const char* msg) {
+    FileTape* ft;
+    int line = 1, col = 1;
+    if (!p || !msg) return;
+    ft = tape_by_id(p->cache, at.file_id);
+    if (!ft || !ft->bytes) {
+        fprintf(stderr, "  note: %s\n", msg);
+        return;
+    }
+    offset_to_linecol(ft, at.offset, &line, &col);
+    tape_logical_at(ft, at.offset, NULL, 0, &line);
+    fprintf(stderr, "%s:%d:%d: note: %s\n", ft->path, line, col, msg);
+}
+
 /* Named capacity overflow — always includes the numeric limit. */
 static void parser_fail_cap(Parser* p, Token at, const char* what, int limit) {
     char msg[192];

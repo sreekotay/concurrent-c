@@ -1,0 +1,19 @@
+  walk:
+  down 2
+  down 1
+  attach LIFO walk OK
+  nested walk:
+  down 3
+  carved child: bound + nested walk OK
+  heap child move OK
+  scope arena adopt OK
+  reset walk:
+  down 4
+  free walk:
+  down 5
+  reset walk OK
+  pool on parent OK
+  cycle refusal OK
+  try_adopt Result OK
+  alloc face OK
+arena_lifetime_parent_smoke OK

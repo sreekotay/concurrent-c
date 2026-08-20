@@ -1,0 +1,186 @@
+/* Lifetime parents: attach records + LIFO walk, create_arena storage classes,
+ * adopt as a move (source dies, allocs survive), reset kills contents,
+ * create_pool on an owner, refusals (storage-bound / dead source / cycle),
+ * and an Alloc face. spec/draft_lifetime_parents.md */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+static int fail(int code, const char *msg) {
+    printf("FAIL: %s\n", msg);
+    return code;
+}
+
+typedef struct Obj { int id; } Obj;
+static void obj_down(void* p) {
+    printf("  down %d\n", ((Obj*)p)->id);
+}
+
+static int test_attach_lifo_walk(void) {
+    CCArena root = cc_arena_heap(1024) @destroy;
+    Obj* a;
+    Obj* b;
+    if (!root.base) return fail(1, "ctor");
+    a = cc_arena_alloc_T(Obj, &root);
+    b = cc_arena_alloc_T(Obj, &root);
+    if (!a || !b) return fail(1, "alloc");
+    a->id = 1;
+    b->id = 2;
+    if (root.attach(a, obj_down) != 0) return fail(1, "attach a");
+    if (root.attach(b, obj_down) != 0) return fail(1, "attach b");
+    printf("  walk:\n");
+    root.free();               /* prints down 2, down 1 (newest first) */
+    root.free();               /* dead: full no-op, nothing prints */
+    printf("  attach LIFO walk OK\n");
+    return 0;
+}
+
+static int test_carved_child_nested_walk(void) {
+    CCArena owner = cc_arena_heap(2048) @destroy;
+    CCArena* child;
+    CCArena sink = cc_arena_heap(256) @destroy;
+    Obj* o;
+    if (!owner.base || !sink.base) return fail(2, "ctor");
+    child = owner.create_arena(512);            /* carved: storage-bound */
+    if (!child || !child->base) return fail(2, "create carved");
+    o = cc_arena_alloc_T(Obj, child);
+    if (!o) return fail(2, "child alloc");
+    o->id = 3;
+    if (child->attach(o, obj_down) != 0) return fail(2, "child attach");
+    if (sink.adopt(child) != NULL) return fail(2, "adopt must refuse carved L1");
+    if (!child->base) return fail(2, "refused source must stay live");
+    printf("  nested walk:\n");
+    owner.free();              /* child record fires -> child walk prints down 3 */
+    printf("  carved child: bound + nested walk OK\n");
+    return 0;
+}
+
+static int test_heap_child_move(void) {
+    CCArena owner = cc_arena_heap(1024) @destroy;
+    CCArena dst = cc_arena_heap(1024) @destroy;
+    CCArena* kid;
+    CCArena* moved;
+    char* s;
+    if (!owner.base || !dst.base) return fail(3, "ctor");
+    kid = owner.create_arena(0);                /* heap-backed: movable */
+    if (!kid || !kid->base) return fail(3, "create heap child");
+    s = (char*)cc_arena_alloc(kid, 16, 8);
+    if (!s) return fail(3, "kid alloc");
+    strcpy(s, "survives");
+    moved = dst.adopt(kid);
+    if (!moved || !moved->base) return fail(3, "adopt heap child");
+    if (kid->base) return fail(3, "source must be dead after move");
+    if (strcmp(s, "survives") != 0) return fail(3, "alloc must survive move");
+    if (dst.adopt(kid) != NULL) return fail(3, "second adopt must refuse");
+    owner.free();              /* record on kid fires on a dead handle: no-op */
+    printf("  heap child move OK\n");
+    return 0;
+}
+
+static int test_scope_arena_adopt(void) {
+    CCArena parent = cc_arena_heap(1024) @destroy;
+    CCArena tmp = cc_arena_heap(256) @destroy;
+    CCArena* moved;
+    if (!parent.base || !tmp.base) return fail(4, "ctor");
+    moved = parent.adopt(&tmp);
+    if (!moved || !moved->base) return fail(4, "adopt scope arena");
+    if (tmp.base) return fail(4, "scope source must be dead");
+    /* tmp's @destroy discharges vacuously at scope exit (dead no-op) */
+    printf("  scope arena adopt OK\n");
+    return 0;
+}
+
+static int test_reset_walks_contents(void) {
+    CCArena a = cc_arena_heap(1024) @destroy;
+    Obj* o;
+    if (!a.base) return fail(5, "ctor");
+    o = cc_arena_alloc_T(Obj, &a);
+    if (!o) return fail(5, "alloc");
+    o->id = 4;
+    if (a.attach(o, obj_down) != 0) return fail(5, "attach");
+    printf("  reset walk:\n");
+    a.reset();                 /* prints down 4; arena stays live */
+    if (!a.base) return fail(5, "reset must keep arena live");
+    o = cc_arena_alloc_T(Obj, &a);
+    if (!o) return fail(5, "alloc after reset");
+    o->id = 5;
+    if (a.attach(o, obj_down) != 0) return fail(5, "attach after reset");
+    printf("  free walk:\n");
+    a.free();                  /* prints down 5 */
+    printf("  reset walk OK\n");
+    return 0;
+}
+
+static int test_pool_on_parent(void) {
+    CCArena owner = cc_arena_heap(1024) @destroy;
+    CCArenaPool* p;
+    void* e;
+    if (!owner.base) return fail(6, "ctor");
+    p = owner.create_pool(32);
+    if (!p) return fail(6, "create_pool");
+    e = cc_arena_pool_alloc(p);
+    if (!e) return fail(6, "pool alloc");
+    cc_arena_pool_free(p, e);
+    /* no explicit pool destroy: owner teardown reclaims everything */
+    printf("  pool on parent OK\n");
+    return 0;
+}
+
+static int test_cycle_refusal(void) {
+    CCArena src = cc_arena_heap(1024) @destroy;
+    CCArena* p2;
+    if (!src.base) return fail(7, "ctor");
+    p2 = cc_arena_alloc_T(CCArena, &src);
+    if (!p2) return fail(7, "alloc handle");
+    *p2 = cc_arena_heap(128);
+    if (!p2->base) return fail(7, "inner ctor");
+    if (p2->adopt(&src) != NULL) return fail(7, "cycle adopt must refuse");
+    if (!src.base) return fail(7, "refused source must stay live");
+    p2->free();
+    printf("  cycle refusal OK\n");
+    return 0;
+}
+
+static int test_try_adopt_result(void) {
+    @errhandler(CCError e) { (void)e; return fail(8, "unexpected err"); }
+    CCArena parent = cc_arena_heap(512) @destroy;
+    CCArena tmp = cc_arena_heap(128) @destroy;
+    CCArena* moved;
+    CCArenaPtr !>(CCError) r;
+    if (!parent.base || !tmp.base) return fail(8, "ctor");
+    moved = parent.try_adopt(&tmp) !>;
+    if (!moved || !moved->base) return fail(8, "try_adopt");
+    r = parent.try_adopt(&tmp);      /* dead source */
+    if (!cc_is_err(r)) return fail(8, "try_adopt must refuse dead source");
+    printf("  try_adopt Result OK\n");
+    return 0;
+}
+
+/* In-TU mode on the stdlib type (header-declared modes await viewed-face
+ * support in shadow_lower; see spec/draft_facets.md). */
+@typeview AllocFace on CCArena {
+    r: alloc, remaining;
+}
+
+static void bump(@typeview(AllocFace) CCArena* a) {
+    void* p = a->alloc(16, 8);
+    if (p) printf("  alloc face OK\n");
+}
+
+int main(void) {
+    int rc;
+    if ((rc = test_attach_lifo_walk()) != 0) return rc;
+    if ((rc = test_carved_child_nested_walk()) != 0) return rc;
+    if ((rc = test_heap_child_move()) != 0) return rc;
+    if ((rc = test_scope_arena_adopt()) != 0) return rc;
+    if ((rc = test_reset_walks_contents()) != 0) return rc;
+    if ((rc = test_pool_on_parent()) != 0) return rc;
+    if ((rc = test_cycle_refusal()) != 0) return rc;
+    if ((rc = test_try_adopt_result()) != 0) return rc;
+    {
+        CCArena a = cc_arena_heap(256) @destroy;
+        bump(&a);
+    }
+    printf("arena_lifetime_parent_smoke OK\n");
+    return 0;
+}

@@ -1,8 +1,14 @@
 #ifndef AUTOBLOCK_STRING_ARG_HELPER_CCH
 #define AUTOBLOCK_STRING_ARG_HELPER_CCH
 
+#include <stdio.h>
+
 static void ab_log(const char* s) {
-    (void)s;
+    printf("ab_log: %s\n", s);
+}
+
+static void ab_tag(int c) {
+    printf("ab_tag: %c\n", (char)c);
 }
 
 #endif

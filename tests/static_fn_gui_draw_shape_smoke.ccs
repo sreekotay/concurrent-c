@@ -1,0 +1,195 @@
+/* Shape of raytext gui_draw_buf: static fn, stacked @errhandler, cc_arena_stack,
+ * char[:], assign-unwrap, nested handler, and `!>` in if conditions. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct { unsigned char r, g, b, a; } GuiColor;
+typedef struct { float x, y; } GuiVec;
+typedef struct {
+    size_t line;
+    float height;
+    size_t byte_start;
+    size_t byte_len;
+    int sec;
+} GuiRow;
+typedef struct {
+    GuiRow *rows;
+    size_t len;
+} GuiLayout;
+typedef struct {
+    int sel_box;
+    size_t caret;
+    int box_ccol;
+    GuiLayout layout;
+    size_t top_wrap;
+} GuiDoc;
+typedef struct {
+    GuiDoc doc;
+    GuiLayout layout;
+    size_t top_wrap;
+} GuiBuf;
+
+static int GuiDoc_has_sel(GuiDoc *d) {
+    (void)d;
+    return 1;
+}
+
+static int !>(CCError) GuiDoc_sel_covers(GuiDoc *d, size_t off) {
+    (void)d;
+    (void)off;
+    return cc_ok(1);
+}
+
+static char[:] !>(CCError) GuiBuf_scratch_span(GuiBuf *b, CCArena *a, size_t start,
+                                              size_t n) {
+    (void)b;
+    (void)a;
+    (void)start;
+    (void)n;
+    return cc_ok(cc_slice_empty());
+}
+
+static void gui_rect(int x, int y, int w, int h, GuiColor c) {
+    (void)x;
+    (void)y;
+    (void)w;
+    (void)h;
+    (void)c;
+}
+
+static int !>(CCError) gui_sel_covers(size_t off) {
+    (void)off;
+    return cc_ok(1);
+}
+
+static size_t !>(CCError) gui_box_col_at(size_t line_off, int ccol) {
+    (void)line_off;
+    (void)ccol;
+    return cc_ok(0);
+}
+
+static char[:] !>(CCError) gui_scratch_span(CCArena *a, size_t start, size_t n) {
+    (void)a;
+    (void)start;
+    (void)n;
+    return cc_ok(cc_slice_empty());
+}
+
+static void gui_draw_buf_shape(GuiBuf *b, int ph, int focused) {
+    size_t i;
+    double acc = 0;
+    int has = b->doc.has_sel();
+    size_t plo = 0, phi = 0;
+    int phave;
+    int vis_rows = ph > 0 ? (int)((float)ph / 18.0f) : 32;
+    float gpx = 8.0f;
+    @errhandler(CCError e) {
+        (void)e;
+        return;
+    }
+    (void)vis_rows;
+    (void)gpx;
+    (void)plo;
+    (void)phi;
+    (void)focused;
+    if (ph > 0) {
+        gui_rect(0, 0, 1, ph,
+                 focused ? (GuiColor){28, 30, 36, 255} : (GuiColor){16, 16, 20, 255});
+        if (focused) gui_rect(0, 0, 3, ph, (GuiColor){80, 200, 220, 255});
+    }
+    phave = 1;
+    for (i = 0; i < 1; i++) {
+        GuiRow row;
+        double y;
+        row.line = 0;
+        row.height = 18;
+        row.byte_start = 0;
+        row.byte_len = 1;
+        y = acc;
+        acc += row.height;
+        {
+            size_t k;
+            size_t line = row.line;
+            size_t box_lo = 0, box_hi = 0;
+            size_t line_off = row.byte_start;
+            int box_row = 0;
+            int show_ln = 1;
+            {
+                size_t j = i;
+                while (j > 0) j--;
+                line_off = 0;
+                (void)j;
+            }
+            if (1) {
+                box_lo = 0;
+                box_hi = 1;
+                box_row = 1;
+                (void)box_lo;
+                (void)box_hi;
+            }
+            cc_arena_stack(scratch, 256);
+            if (show_ln) {
+                char ln[16];
+                snprintf(ln, sizeof(ln), "%zu", line);
+                (void)ln;
+            }
+            {
+                int span_ok = 1;
+                char[:] bytes = cc_slice_empty();
+                {
+                    @errhandler(CCError e) {
+                        (void)e;
+                        span_ok = 0;
+                    }
+                    bytes = b->scratch_span(&scratch, row.byte_start,
+                                            row.byte_len) !>;
+                }
+                if (!span_ok) continue;
+                k = 0;
+                while (k < bytes.len || k == 0) {
+                    size_t off = row.byte_start + k;
+                    char[:] one = bytes.sub(k, k + 1);
+                    if (has && (b->doc.sel_covers(off) !>)) {
+                        (void)off;
+                    } else if (phave && (off == plo || off == phi)) {
+                        (void)y;
+                    }
+                    if (box_row && (gui_box_col_at(line_off, 0) !>) ==
+                        off - line_off) {
+                        (void)one;
+                    }
+                    if (focused &&
+                        (box_row &&
+                         line_off + (gui_box_col_at(line_off, 0) !>) ==
+                         row.byte_start + row.byte_len)) {
+                        (void)acc;
+                    }
+                    k++;
+                    if (k > 0) break;
+                }
+            }
+        }
+    }
+}
+
+int main(void) {
+    GuiBuf box;
+    GuiRow rows[1];
+    rows[0].line = 0;
+    rows[0].height = 18;
+    rows[0].byte_start = 0;
+    rows[0].byte_len = 1;
+    rows[0].sec = 0;
+    box.doc.sel_box = 0;
+    box.doc.caret = 0;
+    box.doc.box_ccol = 0;
+    box.doc.layout.rows = rows;
+    box.doc.layout.len = 1;
+    box.doc.top_wrap = 0;
+    box.layout = box.doc.layout;
+    box.top_wrap = 0;
+    gui_draw_buf_shape(&box, 100, 1);
+    printf("ok\n");
+    return 0;
+}

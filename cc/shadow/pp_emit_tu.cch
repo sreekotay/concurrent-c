@@ -602,6 +602,7 @@ static int shadow_emit_collected_result_specs(CEmit* out,
                                               char seen_err[][128],
                                               int nseen, int prelude_only) {
     int i;
+    int announced = 0;
     if (!out || nseen < 0) return 0;
     if (nseen && !cemit_str(out, "\n")) return 0;
     for (i = 0; i < nseen; i++) {
@@ -614,6 +615,13 @@ static int shadow_emit_collected_result_specs(CEmit* out,
         if (strcmp(seen_ok[i], "bool") == 0 &&
             strcmp(seen_err[i], "CCIoError") == 0)
             continue;
+        /* Synthesized block: without a directive these physical lines keep
+         * counting up from the last user #line and map past the source EOF
+         * (test_async_line_map). Later user items re-anchor themselves. */
+        if (!announced) {
+            if (!cemit_str(out, "#line 1 \"<cc:result-specs>\"\n")) return 0;
+            announced = 1;
+        }
         /* Real layout + typed ctors when cc_result.h provided CC_DECL_RESULT_SPEC.
          * Void ok uses SPEC_VOID (no `void value` field). Split across cemit_fmt
          * calls (512-byte temp). */

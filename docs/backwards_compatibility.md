@@ -13,8 +13,8 @@ new seed: [build-when.md](build-when.md). Seed layout:
 
 The lowerer (`shadow_lower`) is a frozen C snapshot, not “whatever is in
 `cc/shadow` today.” Each promote writes a folder named the full pin
-(`MAJOR.MINOR.PATCH-SEED`, for example `0.3.3-128`). `last-good` points at the
-running pin. `ccc --version` prints that pin (`ccc 0.3.3-128`).
+(`MAJOR.MINOR.PATCH-SEED`, for example `0.3.4-185`). `last-good` points at the
+running pin. `ccc --version` prints that pin (`ccc 0.3.4-185`).
 
 A source file that pins `version=0.3` stays on the 0.3 line after the
 toolchain moves to 0.4.x. That is the usual pin: MAJOR.MINOR. PATCH and SEED

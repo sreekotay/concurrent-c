@@ -186,6 +186,22 @@ enum {
     CC_NURSERY_ABANDONED = 2
 };
 
+/* Abandon-mode last-exit arbitration lives in ONE atomic word: the high bit
+ * of alive_count is the abandoned flag, the low bits are the live-child
+ * count. Both exit-qualifying operations (abandon's fetch_or, notify's
+ * fetch_sub) are RMWs on this word, so they are totally ordered and exactly
+ * one of them observes "abandoned and count zero" at its own linearization
+ * point. The non-closer must not touch the nursery after its RMW — the
+ * closer frees it. (The previous two-variable protocol — end_state stores
+ * paired with alive_count loads under seq-cst fences — guaranteed no LOST
+ * exit but let both sides qualify; the loser then consulted `finishing`
+ * inside an object the winner had already freed. Freed-memory scribble could
+ * fake finishing==0 and run a second teardown: the nursery_abandon_smoke
+ * malloc abort.) end_state remains the user-facing lifecycle state (spawn /
+ * on_last / wait refusals, loud-die diagnostics); it no longer arbitrates. */
+#define CC_NURSERY_ALIVE_ABANDONED_BIT ((size_t)1 << (sizeof(size_t) * 8 - 1))
+#define CC_NURSERY_ALIVE_COUNT_MASK    (~CC_NURSERY_ALIVE_ABANDONED_BIT)
+
 static void cc_nursery_die(const char* msg) {
     fprintf(stderr, "cc_nursery: %s\n", msg);
     abort();
@@ -227,9 +243,20 @@ static CCNursery* cc__nursery_alloc(void) {
     CCNursery* n = (CCNursery*)malloc(sizeof(CCNursery));
     if (!n) return NULL;
     memset(n, 0, sizeof(*n));
+    n->closure_env_arena = cc_arena_heap(1024);
+    if (!n->closure_env_arena.base) {
+        free(n);
+        return NULL;
+    }
+    /* tasks[] and closing[] live in the nursery's own arena: release is one
+     * arena free, nothing to track piecemeal. Slots >= count are never read
+     * (every reader is count-guarded), so no zeroing of arena memory. */
     n->cap = 1024;
-    n->tasks = (cc_nursery_child*)calloc(n->cap, sizeof(cc_nursery_child));
+    n->tasks = (cc_nursery_child*)cc_arena_alloc(
+        &n->closure_env_arena, n->cap * sizeof(cc_nursery_child),
+        _Alignof(cc_nursery_child));
     if (!n->tasks) {
+        cc_arena_free(&n->closure_env_arena);
         free(n);
         return NULL;
     }
@@ -243,15 +270,6 @@ static CCNursery* cc__nursery_alloc(void) {
     n->closing = NULL;
     n->closing_cap = 0;
     n->closing_count = 0;
-    n->closure_env_arena = cc_arena_heap(1024);
-    if (!n->closure_env_arena.base) {
-        pthread_mutex_destroy(&n->mu);
-        wake_primitive_destroy(&n->cancel_wake);
-        wake_primitive_destroy(&n->alive_wake);
-        free(n->tasks);
-        free(n);
-        return NULL;
-    }
     return n;
 }
 
@@ -456,10 +474,14 @@ void cc_nursery_cancel_wait(CCNursery* n, uint32_t expected_gen, uint32_t timeou
 }
 
 static int cc_nursery_grow(CCNursery* n) {
+    /* Arena-backed: allocate the doubled array and copy; the old array is
+     * arena garbage until release. Slots >= count are never read. */
     size_t new_cap = n->cap ? n->cap * 2 : 8;
-    cc_nursery_child* nt = (cc_nursery_child*)realloc(n->tasks, new_cap * sizeof(cc_nursery_child));
+    cc_nursery_child* nt = (cc_nursery_child*)cc_arena_alloc(
+        &n->closure_env_arena, new_cap * sizeof(cc_nursery_child),
+        _Alignof(cc_nursery_child));
     if (!nt) return ENOMEM;
-    memset(nt + n->cap, 0, (new_cap - n->cap) * sizeof(cc_nursery_child));
+    if (n->count) memcpy(nt, n->tasks, n->count * sizeof(cc_nursery_child));
     n->tasks = nt;
     n->cap = new_cap;
     return 0;
@@ -695,8 +717,8 @@ static void cc_nursery_close_registered(CCNursery* n) {
 }
 
 static void cc_nursery_release(CCNursery* n) {
-    free(n->tasks);
-    free(n->closing);
+    /* tasks[] and closing[] are arena contents — the arena free is their
+     * free. */
     cc_arena_free(&n->closure_env_arena);
     pthread_mutex_destroy(&n->mu);
     wake_primitive_destroy(&n->alive_wake);
@@ -705,14 +727,19 @@ static void cc_nursery_release(CCNursery* n) {
 }
 
 /* Last child is already dead (fiber returned to the pool). Close
- * registered channels, run on_last, free. Exactly once. */
+ * registered channels, run on_last, free. The single-word protocol
+ * guarantees a unique caller; `finishing` is a tripwire, not an arbiter —
+ * a second entry means the protocol was broken upstream, and deduping it
+ * quietly would hide a use-after-free (no silent degradation).
+ * The on_last callback must not touch the nursery: it runs before release,
+ * and whoever it wakes races the teardown. */
 static void cc_nursery_last_exit(CCNursery* n) {
     int expected = 0;
     void (*fn)(void*);
     void* ctx;
     if (!atomic_compare_exchange_strong_explicit(&n->finishing, &expected, 1,
             memory_order_acq_rel, memory_order_relaxed))
-        return;
+        cc_nursery_die("last-exit entered twice (abandon protocol violation)");
     cc_nursery_close_registered(n);
     fn = n->on_last_fn;
     ctx = n->on_last_ctx;
@@ -726,8 +753,20 @@ static void cc_nursery_last_exit(CCNursery* n) {
 void cc_nursery_notify_child_done(CCNursery* n) {
     if (!n) return;
     size_t prev = atomic_fetch_sub_explicit(&n->alive_count, 1, memory_order_acq_rel);
+    if (prev == (CC_NURSERY_ALIVE_ABANDONED_BIT | 1)) {
+        /* Abandoned, and this decrement took the count to zero: unique
+         * closer (see the protocol comment on the bit). No waiter can
+         * exist — wait-after-abandon dies — so go straight to teardown. */
+        cc_nursery_last_exit(n);
+        return;
+    }
     if (prev == 1) {
-        /* Dekker pair with cc_nursery_wait waiter: notifier stores
+        /* Wait-mode boundary. The nursery is pinned here: the abandoned
+         * bit was clear in `prev`, so teardown can only come from
+         * cc_nursery_wait / cc_nursery_free on the owner's side, and the
+         * owner is either parked below or hasn't reached them.
+         *
+         * Dekker pair with cc_nursery_wait waiter: notifier stores
          * alive_count then loads alive_waiter; waiter stores
          * alive_waiter then loads alive_count.  A release/acq_rel RMW
          * on the two different objects is insufficient on ARM64 — the
@@ -744,12 +783,9 @@ void cc_nursery_notify_child_done(CCNursery* n) {
         fiber_v2* waiter = atomic_exchange_explicit(&n->alive_waiter, NULL, memory_order_acq_rel);
         if (waiter) sched_v2_signal(waiter);
         wake_primitive_wake_all(&n->alive_wake);
-        /* Same fence: abandon stores end_state then loads alive_count;
-         * we stored alive_count (the fetch_sub) then load end_state. */
-        if (atomic_load_explicit(&n->end_state, memory_order_acquire) ==
-                CC_NURSERY_ABANDONED)
-            cc_nursery_last_exit(n);
     }
+    /* Every other `prev`: not the closer. `n` must not be touched again —
+     * another child may take the count to zero and free it any time. */
 }
 
 int cc_nursery_wait(CCNursery* n) {
@@ -786,7 +822,10 @@ int cc_nursery_wait(CCNursery* n) {
              * notifier, leaving us parked with no signal coming.
              * Stress: `tests/stress/nursery_worker_frees_race_stress_smoke.ccs`. */
             atomic_thread_fence(memory_order_seq_cst);
-            while (atomic_load_explicit(&n->alive_count, memory_order_acquire) != 0) {
+            /* Mask is hygiene: JOINING excludes ABANDONED, the bit cannot
+             * be set here. */
+            while ((atomic_load_explicit(&n->alive_count, memory_order_acquire) &
+                    CC_NURSERY_ALIVE_COUNT_MASK) != 0) {
                 sched_v2_set_park_reason("nursery_wait");
                 sched_v2_park();
                 sched_v2_set_park_reason(NULL);
@@ -797,7 +836,8 @@ int cc_nursery_wait(CCNursery* n) {
         } else {
             for (;;) {
                 uint32_t gen = atomic_load_explicit(&n->alive_wake.value, memory_order_acquire);
-                if (atomic_load_explicit(&n->alive_count, memory_order_acquire) == 0) break;
+                if ((atomic_load_explicit(&n->alive_count, memory_order_acquire) &
+                     CC_NURSERY_ALIVE_COUNT_MASK) == 0) break;
                 wake_primitive_wait(&n->alive_wake, gen);
             }
         }
@@ -893,8 +933,18 @@ int cc_nursery_on_last(CCNursery* n, void* ctx, void (*finish)(void*)) {
     return 0;
 }
 
+/* Hand the nursery to its children and walk away. From the caller's side
+ * the handle is CONSUMED: the last child to exit (or this call, if none are
+ * live) frees the object at an unpredictable time on a worker thread.
+ * Calling anything on `n` after abandon is a use-after-free unless the
+ * caller owns independent proof that a child is still live (e.g. it holds
+ * the channel a spawned child is provably blocked on); such calls get
+ * EINVAL, they are not part of the supported lifecycle. This is also why an
+ * abandon-capable nursery must never have a lifetime parent: an owner's
+ * destroy record would eventually fire on freed storage. */
 void cc_nursery_abandon(CCNursery* n) {
     int expected;
+    size_t prev;
     if (!n) return;
     if (!cc_nursery_worker_frees_mode())
         cc_nursery_die("abandon requires worker-frees mode");
@@ -907,10 +957,15 @@ void cc_nursery_abandon(CCNursery* n) {
             cc_nursery_die("abandon while wait in progress");
         cc_nursery_die("double abandon");
     }
+    /* Single-word arbitration (see the protocol comment on the bit).
+     * Under mu so no spawn increment can interleave: spawn's not-abandoned
+     * check and its increment share this mutex, so a zero count observed by
+     * this RMW is final — no child exists and none can appear. */
+    prev = atomic_fetch_or_explicit(&n->alive_count,
+                                    CC_NURSERY_ALIVE_ABANDONED_BIT,
+                                    memory_order_acq_rel);
     pthread_mutex_unlock(&n->mu);
-    /* Dekker pair with notify: we store end_state then load alive_count. */
-    atomic_thread_fence(memory_order_seq_cst);
-    if (atomic_load_explicit(&n->alive_count, memory_order_acquire) == 0)
+    if ((prev & CC_NURSERY_ALIVE_COUNT_MASK) == 0)
         cc_nursery_last_exit(n);
 }
 
@@ -923,10 +978,14 @@ int cc_nursery_add_closing_chan(CCNursery* n, CCChan* ch) {
         return EINVAL;
     }
     if (n->closing_count == n->closing_cap) {
+        /* Arena-backed like tasks[]: alloc-and-copy, old array is arena
+         * garbage until release. Slots >= closing_count are never read. */
         size_t new_cap = n->closing_cap ? n->closing_cap * 2 : 4;
-        CCChan** nc = (CCChan**)realloc(n->closing, new_cap * sizeof(CCChan*));
+        CCChan** nc = (CCChan**)cc_arena_alloc(
+            &n->closure_env_arena, new_cap * sizeof(CCChan*), _Alignof(CCChan*));
         if (!nc) { pthread_mutex_unlock(&n->mu); return ENOMEM; }
-        memset(nc + n->closing_cap, 0, (new_cap - n->closing_cap) * sizeof(CCChan*));
+        if (n->closing_count)
+            memcpy(nc, n->closing, n->closing_count * sizeof(CCChan*));
         n->closing = nc;
         n->closing_cap = new_cap;
     }

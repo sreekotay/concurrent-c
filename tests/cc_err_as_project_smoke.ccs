@@ -30,6 +30,26 @@ static int !>(CCError) via_inline(void) {
     return cc_ok(0);
 }
 
+typedef struct { int _pad; } CcErrAsBox;
+
+static int !>(CCIoError) CcErrAsBox_as_project_io(CcErrAsBox *b) {
+    CCIoError e;
+    (void)b;
+    e = cc_io_error(CC_IO_OTHER);
+    e.os_code = 42;
+    return cc_err(e);
+}
+
+/* UFCS callee often misses the rfn table — projection must still fire. */
+static int !>(CCError) via_ufcs(void) {
+    CcErrAsBox box;
+    box._pad = 0;
+    box.as_project_io() !>(e) {
+        return cc_err(e);
+    };
+    return cc_ok(0);
+}
+
 int main(void) {
     @errhandler(CCError e) {
         if (g_inline_kind == 0)
@@ -39,6 +59,7 @@ int main(void) {
     }
     via_inline() !>;
     via_hoist() !>;
+    via_ufcs() !>;
     if (g_os != 42) return 1;
     if (g_inline_kind != (int)CC_ERR_IO) return 2;
     if (g_hoist_kind != (int)CC_ERR_IO) return 3;

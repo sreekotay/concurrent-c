@@ -1986,12 +1986,15 @@ overflow count for its epoch (`ovf_keep`); restore refuses if that count no
 longer matches. Releasing a current-epoch overflow object is invisible to an
 older checkpoint's keep-set.
 
-**Rule:** `cc_arena_reset` frees outstanding overflow, unwinds extents, restores
-the original root (`block_idx = 0`), clears used-overflow / non-rewindable flags,
-and advances provenance.
+**Rule:** `cc_arena_reset` runs attached destroy records, newest first (see
+`draft_lifetime_parents.md`), then frees outstanding overflow, unwinds extents,
+restores the original root (`block_idx = 0`), clears used-overflow /
+non-rewindable flags, and advances provenance. The arena stays live and may
+attach again.
 
-**Rule:** `cc_arena_free` steals and frees overflow, frees heap-owned extent and
-root buffers, then clears the handle.
+**Rule:** `cc_arena_free` runs attached destroy records, newest first (see
+`draft_lifetime_parents.md`), then steals and frees overflow, frees heap-owned
+extent and root buffers, then clears the handle.
 
 ---
 

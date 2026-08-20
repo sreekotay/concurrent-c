@@ -15209,6 +15209,25 @@ static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, cons
                             (cc__path_ends_with(current_path, ".cch") ||
                              cc__cch_root_is_defining_ccs(child_abs)))
                             splice_child = 1;
+                        else if (ufcs && !cc__cch_has_sibling_ccs(child_abs)) {
+                            /* Sibling-less leaf: its UFCS may bind
+                             * registrations that live only in the parent TU
+                             * (CC_MAP_DECL_UFCS in the .ccs, a TU-local
+                             * generic instance). Lower it standalone and
+                             * splice when method-call UFCS survives — an
+                             * extracted `.h` with raw calls fails host
+                             * compile blaming the header. Resolvable
+                             * headers keep extracting. */
+                            const char* lp = cc__lower_local_cch_header(child_abs);
+                            if (lp) {
+                                char* hb = NULL;
+                                size_t hn = 0;
+                                if (cc__read_file_text(lp, &hb, &hn) == 0 && hb &&
+                                    cc__lowered_header_needs_ufcs_splice(hb, hn))
+                                    splice_child = 1;
+                                free(hb);
+                            }
+                        }
                     }
                     if (splice_child && cc__cch_extract_for_other_tus(child_abs))
                         splice_child = 0;

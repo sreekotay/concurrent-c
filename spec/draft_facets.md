@@ -1,7 +1,8 @@
 # Type views (`@typeview`)
 
 Status: draft — implemented in shadow_lower (`tests/restricted_*`,
-`tests/typeview_as_ufcs_smoke.ccs`).
+`tests/typeview_as_ufcs_smoke.ccs`). Viewed faces (`(Mode)field` in `as:`)
+— not implemented.
 
 ## 1. Notion
 
@@ -59,6 +60,19 @@ typedef struct CCTempFile {
 };
 ```
 
+A viewed face exposes a field through one of its type's named modes:
+
+```c
+@typeview Region on CCArena {
+    r: alloc, remaining, adopt, attach, create_*;
+};
+
+@typeview on CCNursery* {
+    as: (Region)arena;    /* n->alloc(...) retries on the arena face;
+                             n->reset() is ill-formed — not in Region */
+};
+```
+
 A named mode on a completed struct type lists names under use-kind groups:
 
 ```c
@@ -92,8 +106,19 @@ typedef struct Conn {
   UFCS call (`s->len`, `c->write(...)`).
 - **`w:`** — may store through a field (`c->out = …`, `+=`, `++`, …).
 - **`rw:`** — both use and store.
-- **`as:`** — field names of `Base` that are is-a faces (value embeds only;
-  at most one path per target type). Not an allow-list group.
+- **`as:`** — is-a faces (value embeds only; at most one path per target
+  type). Not an allow-list group. Each pattern is `field` or
+  `(Mode)field`. The plain form exposes the field's full surface. The
+  parenthesized form exposes the field through a named mode of the
+  field's type: UFCS retry through that face consults the mode's
+  allow-list instead of the field type's full surface. Exactly one mode
+  may appear. The name resolves first as a mode declared on the field's
+  type; otherwise it must be a type name denoting a **value** view of the
+  field's type (`Base_Restrict_Mode` or a value alias). A pointer alias
+  is ill-formed in face position — a face names an embedded object. The
+  cast spelling exists only in `as:` patterns; expression-site narrowing
+  stays implicit (§4). Explicit member access through the field
+  (`t.field.name`) is unaffected by the mode.
 - The subject `Base` may be a trailing-`*` type-family glob (`CCSlice_*`),
   same match/score rule as allow-list patterns and `@typehooks`.
   Narrowest matching view wins; equal-score conflicts are ill-formed. Named
@@ -337,6 +362,10 @@ default open-observe, no-field-write contract.
 - Requiring a cast to narrow `Base*` → restricted (narrowing is always
   implicit).
 - `@typeview(Mode)` naming a mode not declared on that base.
+- `(Mode)field` in an `as:` group where the name is not a mode of the
+  field's type and not a value view type of the field's type; where it
+  denotes a view of a different base; where it is a pointer alias; or
+  where more than one mode is listed.
 
 ## 9. Non-goals
 

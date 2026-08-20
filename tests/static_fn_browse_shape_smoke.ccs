@@ -1,0 +1,142 @@
+/* Shape of raytext gui_draw_browse: compound-literal call args, array
+ * dims with `IDENT + N`, multi-decl, unbraced if + Draw*. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+enum { BROWSE_NAME = 256, BROWSE_SIZE_W = 8, BROWSE_MTIME_W = 8 };
+
+typedef struct { unsigned char r, g, b, a; } BColor;
+typedef struct { float x, y; } BVec;
+typedef struct {
+    char name[BROWSE_NAME];
+    int is_dir;
+} BEnt;
+typedef struct {
+    char *dir;
+    int flat;
+    size_t top, len, cur;
+    BEnt *ents;
+} BBrowse;
+
+static BColor b_face(int k) {
+    (void)k;
+    return (BColor){200, 206, 220, 255};
+}
+
+static float b_mono_w(float sz, const char *s) {
+    (void)sz;
+    return s ? (float)strlen(s) : 0;
+}
+
+static void b_rect(int x, int y, int w, int h, BColor c) {
+    (void)x;
+    (void)y;
+    (void)w;
+    (void)h;
+    (void)c;
+}
+
+static void b_text(const char *s, BVec pos, float sz, BColor c) {
+    (void)s;
+    (void)pos;
+    (void)sz;
+    (void)c;
+}
+
+static void b_field(BVec gp) { (void)gp; }
+
+static int b_head(BBrowse *br) {
+    (void)br;
+    return 2;
+}
+
+static void gui_draw_browse_shape(BBrowse *br, int focused, int x0, int y0,
+                                  int pw, int ph, int vis_rows) {
+    char line[512];
+    char name[BROWSE_NAME + 2];
+    char meta[40];
+    size_t i, list;
+    float row_h = 20.0f;
+    float cw;
+    int cols, meta_w;
+    BVec m0;
+    @errhandler(CCError e) {
+        (void)e;
+        return;
+    }
+    if (!br) return;
+    m0.x = 8;
+    m0.y = 0;
+    cw = m0.x > 1 ? m0.x : 8.0f;
+    cols = (int)(((float)pw - 16.0f) / cw);
+    if (cols < 2) cols = 2;
+    meta_w = BROWSE_SIZE_W + 2 + BROWSE_MTIME_W;
+    b_rect(x0, y0, pw, ph, (BColor){22, 24, 30, 255});
+    snprintf(line, sizeof(line), "%s", br->dir ? br->dir : ".");
+    b_text(line, (BVec){(float)x0 + 8, (float)y0 + 2}, 14,
+           b_face(1));
+    {
+        BVec gp;
+        float lab;
+        gp.x = (float)x0 + 8;
+        gp.y = (float)y0 + row_h + 2;
+        b_text("glob: ", gp, 14, b_face(2));
+        lab = b_mono_w(14, "glob: ");
+        gp.x += lab;
+        b_field(gp);
+    }
+    {
+        int head = b_head(br);
+        if (br->flat)
+            b_text("> Flattened search",
+                   (BVec){(float)x0 + 8, (float)y0 + 2.0f * row_h + 2},
+                   14, b_face(2));
+        list = (vis_rows > head) ? (size_t)(vis_rows - head) : 0;
+        for (i = 0; i < list; i++) {
+            size_t idx = br->top + i;
+            float y = (float)y0 + (float)(head + i) * row_h;
+            BColor name_c;
+            if (y > (float)(y0 + ph)) break;
+            if (idx >= br->len) continue;
+            if (focused && idx == br->cur) {
+                b_rect(x0, (int)y, pw, (int)row_h, (BColor){40, 70, 120, 255});
+            }
+            snprintf(name, sizeof(name), "%s%s", br->ents[idx].name,
+                     br->ents[idx].is_dir ? "/" : "");
+            if (cols >= 10 + meta_w) {
+                int name_max = cols - meta_w - 2;
+                if (name_max < 1) name_max = 1;
+                if ((int)strlen(name) > name_max) name[name_max] = 0;
+            }
+            name_c = b_face(br->ents[idx].is_dir ? 3 : 4);
+            b_text(name, (BVec){(float)x0 + 8, y + 2}, 14, name_c);
+            if (cols >= 10 + meta_w) {
+                BVec mw;
+                snprintf(meta, sizeof(meta), "meta");
+                mw.x = 8;
+                mw.y = 0;
+                b_text(meta,
+                       (BVec){(float)x0 + (float)pw - 8.0f - mw.x, y + 2},
+                       14, b_face(5));
+            }
+        }
+    }
+}
+
+int main(void) {
+    BEnt ents[1];
+    BBrowse br;
+    ents[0].name[0] = 'a';
+    ents[0].name[1] = 0;
+    ents[0].is_dir = 0;
+    br.dir = ".";
+    br.flat = 0;
+    br.top = 0;
+    br.len = 1;
+    br.cur = 0;
+    br.ents = ents;
+    gui_draw_browse_shape(&br, 1, 0, 0, 80, 40, 4);
+    printf("ok\n");
+    return 0;
+}

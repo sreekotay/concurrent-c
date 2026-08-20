@@ -432,6 +432,16 @@ int main(void) {
 ok
 -->
 
+The arena header declares three named modes on `CCArena` — `Alloc`
+(`r: alloc, remaining;`), `Parent` (`r: adopt, attach, create_*;`), and
+`Region` (the union of both) — meant for signatures like
+`@typeview(Parent) CCArena*` (a function that constructs and owns but never
+resets or destroys). **Limitation:** header-declared modes are stripped at
+header lowering and are not visible from a consuming TU — to restrict an
+arena parameter today, declare the mode in your own TU (see
+`tests/arena_lifetime_parent_smoke.ccs`). Viewed faces (`as: (Mode)field`)
+are drafted, not implemented ([draft_facets.md](../spec/draft_facets.md)).
+
 ---
 
 ## 3. Put them side by side, not in one block

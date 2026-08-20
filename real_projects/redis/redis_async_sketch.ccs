@@ -10,7 +10,8 @@
  *                   — scratch is stack-local; one append into the coalesce buf.
  *   ConnEnc (= @typeview Encode) → execute/exec_* encode-only (no sock/flush);
  *                   handle_client keeps Conn* for flush (draft_facets.md)
- *   encode/flush  → bool !>(CCError): Ok = buffered/shipped; Redis -ERR is Ok
+ *   encode/flush / read  → bool !>(CCIoError): client-fatal I/O
+ *   execute              → bool !>(CCError): command/db; becomes -ERR
  *   CCShardHold   → acquire + @defer hold.release(); then if (!held()) …
  *                   release is a defined no-op when n==0 (cc_exclusive /
  *                   CCShardHold); defer-before-held-check is intentional,
@@ -79,22 +80,23 @@ typedef @typeview Encode on Conn {
     r: write, lit, simple, err, ok, pong, null, integer, bulk, array_*;
 } *ConnEnc;
 
-static bool !>(CCError) write_all(CCSocket* sock, char[:] data) {
+static bool !>(CCIoError) write_all(CCSocket* sock, char[:] data) {
     size_t off = 0;
     while (off < data.len) {
         size_t n = sock->write(data.ptr + off, data.len - off) !>(e) {
             return cc_err(e);
         };
-        if (n == 0) return cc_err(CC_ERR_CLOSED, "short write");
+        if (n == 0)
+            return cc_err(cc_io_error(CC_ERROR(CC_ERR_CLOSED, "short write")));
         off += n;
     }
     return cc_ok(true);
 }
 
-static bool !>(CCError) conn_flush(Conn* c) {
+static bool !>(CCIoError) conn_flush(Conn* c) {
     char[:] data;
     if (!c || !c->arena)
-        return cc_err(CC_ERR_INVALID_ARG, "conn flush: null");
+        return cc_err(cc_io_error(CC_ERROR(CC_ERR_INVALID_ARG, "conn flush: null")));
     data = c->out.as_slice();
     if (data.len == 0) return cc_ok(true);
     /* LIFO: release handle, then reclaim the encode arena. */
@@ -358,7 +360,7 @@ static bool !>(CCError) execute(DB* db, Cmd* c,
     }
 }
 
-static bool !>(CCError) read_cmd(BufReader::[CCSocket]* br, CCArena* arena, Cmd* out) {
+static bool !>(CCIoError) read_cmd(BufReader::[CCSocket]* br, CCArena* arena, Cmd* out) {
     for (;;) {
         size_t i, start, end;
         memset(out, 0, sizeof(*out));
@@ -378,7 +380,7 @@ static bool !>(CCError) read_cmd(BufReader::[CCSocket]* br, CCArena* arena, Cmd*
                 while (end < line.len && line.ptr[end] != ' ') end++;
                 char[:] part = line.sub(start, end);
                 char[:] owned = part.clone_into(arena) !>(e) {
-                    return cc_err(e);
+                    return cc_err(cc_io_error(e));
                 };
                 out->args[out->argc++] = owned;
                 start = end;
@@ -390,29 +392,29 @@ static bool !>(CCError) read_cmd(BufReader::[CCSocket]* br, CCArena* arena, Cmd*
         char[:] argc_s = line.sub(1, line.len);
         int64_t n = argc_s.to_i64() !>(e) {
             (void)e;
-            return cc_err(CC_ERR_INVALID_ARG, "bad argc");
+            return cc_err(cc_io_error(CC_ERROR(CC_ERR_INVALID_ARG, "bad argc")));
         };
         if (n < 0 || n > K_MAX_ARGS)
-            return cc_err(CC_ERR_INVALID_ARG, "bad argc");
+            return cc_err(cc_io_error(CC_ERROR(CC_ERR_INVALID_ARG, "bad argc")));
         if (n == 0) continue;
         for (i = 0; i < (size_t)n; i++) {
             char[:] hdr = br->read_line() !>(e) { return cc_err(e); };
             if (hdr.len == 0 || hdr.ptr[0] != '$')
-                return cc_err(CC_ERR_INVALID_ARG, "bad bulk");
+                return cc_err(cc_io_error(CC_ERROR(CC_ERR_INVALID_ARG, "bad bulk")));
             char[:] blen_s = hdr.sub(1, hdr.len);
             int64_t blen = blen_s.to_i64() !>(e) {
                 (void)e;
-                return cc_err(CC_ERR_INVALID_ARG, "bad bulk");
+                return cc_err(cc_io_error(CC_ERROR(CC_ERR_INVALID_ARG, "bad bulk")));
             };
             if (blen < 0 || blen > (int64_t)K_CMD_ARENA)
-                return cc_err(CC_ERR_INVALID_ARG, "bad bulk");
+                return cc_err(cc_io_error(CC_ERROR(CC_ERR_INVALID_ARG, "bad bulk")));
 
             char[:] payload = br->read_exact((size_t)blen + 2) !>(e) {
                 return cc_err(e);
             };
             char[:] part = payload.sub(0, (size_t)blen);
             char[:] owned = part.clone_into(arena) !>(e) {
-                return cc_err(e);
+                return cc_err(cc_io_error(e));
             };
             out->args[out->argc++] = owned;
         }
@@ -441,8 +443,8 @@ static void handle_client(CCSocket client, DB* db) {
             CCArena cmd_a = @create(cmd_buf, sizeof(cmd_buf)) @destroy;
 
             bool ok = read_cmd(&br, &cmd_a, &c) !>(e) {
-                if (i == 0 && e.kind != CC_ERR_CLOSED)
-                    conn.err(cc_error_str(e)) !>(e2) { (void)e2; };
+                if (i == 0 && e.base.kind != CC_ERR_CLOSED)
+                    conn.err(cc_io_error_str(e)) !>(e2) { (void)e2; };
                 return;
             };
             if (!ok) return;

@@ -334,9 +334,15 @@ overflow keep-set was released refuses (does not pretend to succeed).
 Rules of thumb: a view must not outlive its arena; do not capture stack /
 `@scratch` slices into a task or channel. Capturing an arena slice into a
 nursery **pins** that arena until join (no reset/destroy while the pin is live).
+An arena is also a **lifetime parent**: `owner.attach(obj, fn)`,
+`owner.adopt(&a)`, and the `owner.create_arena(n)` / `owner.create_pool(sz)`
+constructors attach destroy records that run newest-first at `free` — and at
+`reset`, where attached children die with the other contents. Recipes:
+[Cheatsheet § Lifetime parents](cheatsheet.md#lifetime-parents-attach--adopt--create_).
 More: [Language Concepts §4](language-concepts.md#4-slices-remember-where-bytes-live),
 [recipe_arena_scope.ccs](../examples/recipe_arena_scope.ccs),
-[allocator strategy](../spec/draft_alloc_strategy.md).
+[allocator strategy](../spec/draft_alloc_strategy.md),
+[lifetime parents](../spec/draft_lifetime_parents.md).
 
 ## Locality: owned or view
 

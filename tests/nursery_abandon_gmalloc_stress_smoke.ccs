@@ -1,0 +1,72 @@
+#!ccc ccs
+/* Abandon last-exit protocol hammer. The abandon race (worker's
+ * notify_child_done and the abandoning caller both qualifying as closer)
+ * only aborted when freed-memory scribble faked `finishing == 0`. Under
+ * Guard Malloc every freed page unmaps, so ANY touch of the nursery after
+ * the closer frees it crashes deterministically instead of once per few
+ * thousand runs. The test re-execs itself with libgmalloc inserted; where
+ * the library does not exist (non-macOS) it runs unguarded and still
+ * exercises the protocol. */
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/stat.h>
+
+static void finish_flag(void* p) {
+    cc_atomic_store((cc_atomic_int*)p, 1);
+}
+
+/* Per-iteration child spin: sweeps the worker's notify_child_done across
+ * the caller's on_last/abandon window so the "both sides qualify as closer"
+ * interleaving actually occurs, instead of the worker always finishing
+ * first (Guard Malloc slows the allocating main thread far more than the
+ * empty child). */
+static cc_atomic_int g_spin;
+
+static void child_spin(void) {
+    int lim = cc_atomic_load(&g_spin);
+    for (int k = 0; k < lim; k++)
+        (void)cc_atomic_load(&g_spin);
+}
+
+static int wait_flag(cc_atomic_int* f, int ms) {
+    int i;
+    for (i = 0; i < ms; i++) {
+        if (cc_atomic_load(f) == 1)
+            return 1;
+        cc_sleep_ms(1);
+    }
+    return 0;
+}
+
+int main(int argc, char** argv) {
+    (void)argc;
+#ifdef __APPLE__
+    if (!getenv("CC__GMALLOC_CHILD")) {
+        struct stat st;
+        if (stat("/usr/lib/libgmalloc.dylib", &st) == 0) {
+            setenv("CC__GMALLOC_CHILD", "1", 1);
+            setenv("DYLD_INSERT_LIBRARIES", "/usr/lib/libgmalloc.dylib", 1);
+            execv(argv[0], argv);
+            /* exec failed: run unguarded rather than not at all */
+        }
+    }
+#else
+    (void)argv;
+#endif
+    for (int i = 0; i < 500; i++) {
+        cc_atomic_int done = 0;
+        CCNursery* n = cc_nursery_create(NULL);
+        if (!n) return 40;
+        cc_atomic_store(&g_spin, (i % 97) * 29);
+        if (n->spawn(() => { child_spin(); }) != 0) return 41;
+        if (n->on_last(&done, finish_flag) != 0) return 42;
+        n->abandon();
+        if (!wait_flag(&done, 2000)) return 43;
+    }
+    printf("nursery_abandon_gmalloc_stress_smoke: OK\n");
+    return 0;
+}

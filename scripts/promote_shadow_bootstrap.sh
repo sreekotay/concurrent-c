@@ -22,7 +22,7 @@ fi
 
 VERSION_BASE="$(sed -n 's/^CCC_VERSION_BASE ?= //p' "$ROOT/cc/Makefile" | head -1 | tr -d '[:space:]')"
 if [[ -z "$VERSION_BASE" ]]; then
-  VERSION_BASE="0.3.3"
+  VERSION_BASE="0.3.4"
 fi
 
 if [[ $# -gt 1 ]]; then

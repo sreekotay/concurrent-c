@@ -1,0 +1,18 @@
+/* Missing '}' before the next static fn. Name the unclosed function;
+ * do not blame `@errhandler` in the following body. */
+#include <ccc/std/prelude.cch>
+
+static void first_draw(void) {
+    int x;
+    x = 1;
+
+static void second_draw(void) {
+    @errhandler(CCError e) {
+        (void)e;
+        return;
+    }
+}
+
+int main(void) {
+    return 0;
+}

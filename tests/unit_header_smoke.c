@@ -210,10 +210,10 @@ int main(void) {
         failed |= expect_match("0.3", ver, 1, "usual minor prefix");
         failed |= expect_match(">=0.3", ver, 1, ">= minor line");
         failed |= expect_match(">0.3", ver, 0, "> minor line");
-        failed |= expect_match(">=0.3.3", ver, 1, ">= current patch");
-        failed |= expect_match(">0.3.3", ver, 0, "> current patch line");
+        failed |= expect_match(">=0.3.4", ver, 1, ">= current patch");
+        failed |= expect_match(">0.3.4", ver, 0, "> current patch line");
         failed |= expect_match("<0.4", ver, 1, "< next major.minor");
-        failed |= expect_match("<=0.3.3", ver, 1, "<= current patch line");
+        failed |= expect_match("<=0.3.4", ver, 1, "<= current patch line");
         failed |= expect_match(">=0.3,<0.4", ver, 1, "usual range includes current");
         failed |= expect_match("<0.4,>=0.3", ver, 1, "range reversed");
         failed |= expect_match("0.3.2", "0.3.2-121", 1, "patch prefix");
