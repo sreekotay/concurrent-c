@@ -1,0 +1,7 @@
+#if 1
+int arm_a;
+#elif defined(X)
+int arm_b;
+#else
+int arm_c;
+#endif

@@ -301,6 +301,10 @@ int cc_ct_field_reg_has(const char* type_name);
  * `cc_reflect_field_*` must fail loud — empty registry is not "unknown type". */
 void cc_ct_field_reg_set_type_pass_skipped(int skipped);
 int cc_ct_field_reg_type_pass_skipped(void);
+/* Type-pass ran (src produced) but parse/emit failed. Distinct from skipped
+ * and from "unknown type" / unsupported field forms. */
+void cc_ct_field_reg_set_type_pass_failed(int failed);
+int cc_ct_field_reg_type_pass_failed(void);
 /* Optional owned lowered-C typedef unit (from type-pass emit; slimmed). */
 void cc_ct_field_reg_set_lowered_c(char* owned_c);
 const char* cc_ct_field_reg_lowered_c(void);

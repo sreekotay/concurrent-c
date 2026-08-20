@@ -1,0 +1,50 @@
+/* .ufcs call with more than SHADOW_UFCS_HOOK_ARG_MAX (8) args → hard error. */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_ufcs.cch>
+
+typedef struct {
+    int n;
+} Box;
+
+static Box box_open(int n) {
+    Box b;
+    b.n = n;
+    return b;
+}
+
+static void box_close(Box* b) {
+    if (b) b->n = 0;
+}
+
+static int box_sum9(Box* b, int a0, int a1, int a2, int a3, int a4, int a5,
+                    int a6, int a7, int a8) {
+    (void)b;
+    return a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8;
+}
+
+static char[:] box_ufcs(char[:] recv_type, char[:] method, char[:] mode,
+                        CCSliceArray argv, CCSliceArray arg_types,
+                        CCArena* arena) {
+    (void)recv_type;
+    (void)mode;
+    (void)argv;
+    (void)arg_types;
+    (void)arena;
+    switch (method) {
+    case "sum9": return @slice("box_sum9");
+    default:     return @slice("__cc_ufcs_pass__");
+    }
+}
+
+@typehooks on Box {
+    .create = box_open,
+    .destroy = box_close,
+    .ufcs = box_ufcs,
+};
+
+int main(void) {
+    Box b = @create(1) @destroy;
+    /* 9 explicit args after the receiver → exceeds hook argv cap of 8. */
+    (void)b.sum9(0, 1, 2, 3, 4, 5, 6, 7, 8);
+    return 0;
+}

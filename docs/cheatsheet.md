@@ -322,7 +322,8 @@ consuming call. `return f(@string(…))` breaks `@destroy` return-rewrite;
 a call-local `@string` is reclaimed after that call. To keep a product,
 pass the arena it should live on (see [Keep](#keep-pass-the-arena-to-live-on)).
 A newline before `@scratch` is fine. Do not `scratch.destroy()`. Do not
-capture or send a `@scratch` product. Arena-less `` @string(`…`) `` is a
+capture, send, or `return` a `@scratch` product (`@scratch string escapes
+scope`). Arena-less `` @string(`…`) `` is a
 compile error on slices, `CCString`, floats, or pointers (pass an arena).
 Growth failure poisons the `CCString`; it never truncates.
 

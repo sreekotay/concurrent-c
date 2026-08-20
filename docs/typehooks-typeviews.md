@@ -129,7 +129,7 @@ static char[:] port_ufcs(char[:] recv_type, char[:] method, char[:] mode,
                          CCSliceArray argv, CCSliceArray arg_types,
                          CCArena* arena) {
     (void)recv_type;
-    (void)mode;
+    (void)mode; /* named `@typeview Mode on T` — otherwise empty */
     (void)argv;
     (void)arg_types;
     switch (method) {
@@ -475,7 +475,8 @@ int main(void) {
 ok
 -->
 
-`as:` forwards `open` / `write` / `close` through `.file`. Cleanup is
+`as:` retries any UFCS miss on the named embed (`t.open` → `t.file.open`),
+not a CCFile-only method list. Cleanup is
 **pre-destroy → `@destroy { }` body → outer destroy hook → value embeds**
 last-declared to first. `file` is a `CCFile` value field with a destroy
 hook, so `cc_file_close(&t.file)` runs in that last step. Bodyless

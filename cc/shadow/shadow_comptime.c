@@ -132,7 +132,19 @@ static int shadow_ct_apply_life_macros(char** buf, size_t* n) {
  * all-space line inside the blanked span (never crossing newlines — eating a
  * newline shifts every later diagnostic line by -1). Nested / in-function
  * blocks stay space-blank only (whitelist rejects enum as a statement).
- * Leaves CC_GENERIC_FACTORY sugar intact for shadow instantiate. */
+ * Leaves CC_GENERIC_FACTORY sugar intact for shadow instantiate.
+ * Unmatched braces → NULL (same fail-loud contract as header lower_header). */
+static void shadow_ct_blank_unterminated(const char* src, size_t at,
+                                         const char* what) {
+    size_t line = 1, k;
+    for (k = 0; k < at; k++)
+        if (src[k] == '\n') line++;
+    fprintf(stderr,
+            "error: unterminated '%s' at line %zu; refusing silent skip of "
+            "the @comptime blanker\n",
+            what ? what : "@comptime", line);
+}
+
 static char* shadow_ct_blank_comptime(const char* src, size_t n) {
     char* out;
     CCInertScan sc;
@@ -172,8 +184,9 @@ static char* shadow_ct_blank_comptime(const char* src, size_t n) {
                 char marker[64];
                 int mlen;
                 if (!cc_find_matching_brace(src, n, body_l, &body_r)) {
-                    i++;
-                    continue;
+                    shadow_ct_blank_unterminated(src, i, "@comptime {…}");
+                    free(out);
+                    return NULL;
                 }
                 for (size_t k = i; k <= body_r; ++k) {
                     if (out[k] != '\n') out[k] = ' ';
@@ -217,8 +230,10 @@ static char* shadow_ct_blank_comptime(const char* src, size_t n) {
                 after = cc_skip_ws_and_comments(src, n, rp + 1);
                 if (after >= n || src[after] != '{' ||
                     !cc_find_matching_brace(src, n, after, &body_r)) {
-                    i++;
-                    continue;
+                    shadow_ct_blank_unterminated(
+                        src, i, kw_len == 3 ? "@comptime for" : "@comptime if");
+                    free(out);
+                    return NULL;
                 }
                 end = body_r;
                 /* `@comptime if (…) {…} else {…}` */
@@ -228,9 +243,15 @@ static char* shadow_ct_blank_comptime(const char* src, size_t n) {
                         (e + 4 >= n || !cc_is_ident_char(src[e + 4]))) {
                         size_t eb = cc_skip_ws_and_comments(src, n, e + 4);
                         size_t er;
-                        if (eb < n && src[eb] == '{' &&
-                            cc_find_matching_brace(src, n, eb, &er))
+                        if (eb < n && src[eb] == '{') {
+                            if (!cc_find_matching_brace(src, n, eb, &er)) {
+                                shadow_ct_blank_unterminated(
+                                    src, i, "@comptime if … else");
+                                free(out);
+                                return NULL;
+                            }
                             end = er;
+                        }
                     }
                 }
                 for (size_t k = i; k <= end; ++k) {
@@ -254,8 +275,10 @@ static char* shadow_ct_blank_comptime(const char* src, size_t n) {
                     p = cc_skip_ws_and_comments(src, n, rpar + 1);
                     if (p < n && src[p] == '{') {
                         if (!cc_find_matching_brace(src, n, p, &body_r)) {
-                            i++;
-                            continue;
+                            shadow_ct_blank_unterminated(src, i,
+                                                         "@comptime fn/const");
+                            free(out);
+                            return NULL;
                         }
                         end = body_r;
                     } else {

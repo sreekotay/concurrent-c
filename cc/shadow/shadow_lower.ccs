@@ -93,22 +93,37 @@ static int shadow_dep_scan_cc_depends(const char* in_path, const char** paths,
     char* src = NULL;
     size_t rd = 0, i = 0;
     char dir[512];
-    if (!in_path || !paths || !n || !owned || !nowned) return 0;
+    if (!in_path || !paths || !n || !owned || !nowned) return -1;
     dirname_of(in_path, dir, sizeof(dir));
     f = fopen(in_path, "rb");
-    if (!f) return 0;
+    if (!f) {
+        fprintf(stderr, "error: cc_depends: cannot open '%s'\n", in_path);
+        return -1;
+    }
     fseek(f, 0, SEEK_END);
     {
         long sz = ftell(f);
         fseek(f, 0, SEEK_SET);
-        if (sz <= 0 || sz > 16 * 1024 * 1024) {
+        if (sz < 0) {
+            fprintf(stderr, "error: cc_depends: cannot size '%s'\n", in_path);
+            fclose(f);
+            return -1;
+        }
+        if (sz == 0) {
             fclose(f);
             return 0;
         }
+        if (sz > 16 * 1024 * 1024) {
+            fprintf(stderr, "error: cc_depends: '%s' too large\n", in_path);
+            fclose(f);
+            return -1;
+        }
         src = (char*)malloc((size_t)sz + 1);
         if (!src) {
+            fprintf(stderr, "error: cc_depends: out of memory reading '%s'\n",
+                    in_path);
             fclose(f);
-            return 0;
+            return -1;
         }
         rd = fread(src, 1, (size_t)sz, f);
         src[rd] = 0;
@@ -367,6 +382,7 @@ int main(int argc, char** argv) {
         cc_ct_field_reg_clear();
         type_src = shadow_comptime_type_pass_src(in_path, &type_len);
         if (type_src) {
+            int type_ok = 0;
             CCArena type_arena = cc_arena_create(8 << 20);
             TapeCache type_cache = {0};
             FileTape* type_ft = tape_cache_load_bytes(
@@ -378,11 +394,38 @@ int main(int argc, char** argv) {
                                                   (size_t)SHADOW_TYPE_TOK_INIT);
                 if (type_toks) {
                     Pp type_pp = {0};
+                    char sys_cc[256], sys_out[256];
+                    const char* prefs[4];
+                    int pi;
                     type_pp.cache = &type_cache;
                     type_pp.arena = &type_arena;
                     type_pp.search_dir = search_dir;
-                    pp_add_sys_inc(&type_pp, "cc/include");
-                    pp_add_sys_inc(&type_pp, "out/include");
+                    /* Same sys-include probe as the product pass. */
+                    prefs[0] = ".";
+                    prefs[1] = "..";
+                    prefs[2] = "../..";
+                    prefs[3] = "../../..";
+                    sys_cc[0] = sys_out[0] = 0;
+                    for (pi = 0; pi < 4; pi++) {
+                        char probe[256];
+                        if (sys_cc[0] == 0) {
+                            snprintf(probe, sizeof(probe), "%s/cc/include",
+                                     prefs[pi]);
+                            if (access(probe, R_OK) == 0)
+                                snprintf(sys_cc, sizeof(sys_cc), "%s", probe);
+                        }
+                        if (sys_out[0] == 0) {
+                            snprintf(probe, sizeof(probe), "%s/out/include",
+                                     prefs[pi]);
+                            if (access(probe, R_OK) == 0)
+                                snprintf(sys_out, sizeof(sys_out), "%s",
+                                         probe);
+                        }
+                    }
+                    pp_add_sys_inc(&type_pp,
+                                   sys_cc[0] != 0 ? sys_cc : "cc/include");
+                    pp_add_sys_inc(&type_pp,
+                                   sys_out[0] != 0 ? sys_out : "out/include");
                     type_pp.out = type_toks;
                     type_pp.out_cap = SHADOW_TYPE_TOK_INIT;
                     type_pp.out_grow = 1;
@@ -408,6 +451,7 @@ int main(int argc, char** argv) {
                                  * lowered C for TCC reflect prelude. */
                                 cc_ct_field_reg_set_lowered_c(type_emit.buf);
                                 type_emit.buf = NULL;
+                                type_ok = 1;
                             }
                             free(type_emit.buf);
                         }
@@ -419,6 +463,8 @@ int main(int argc, char** argv) {
             tape_cache_free(&type_cache);
             cc_arena_free(&type_arena);
             free(type_src);
+            /* Attempted-but-failed is not "unknown type" / unsupported forms. */
+            if (!type_ok) cc_ct_field_reg_set_type_pass_failed(1);
         }
     }
     /* Type pass blanks @comptime, so it may diag on types that only exist

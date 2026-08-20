@@ -14984,8 +14984,8 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
                                      rewritten ? strlen(rewritten) : input_len,
                                      abs_src);
     g_header_lower_preserve_tu_state--;
-    if (!lowered) lowered = strdup(rewritten ? rewritten : input);
-    if (!lowered) return NULL;
+    /* Never write raw `.cch` into the `.h` — that looks like a successful lower. */
+    if (!lowered) CC__LOWER_GIVE_UP("lower");
     if (cc__write_file_text(lowered_path, lowered, strlen(lowered)) != 0)
         CC__LOWER_GIVE_UP("write");
 #undef CC__LOWER_GIVE_UP

@@ -23,7 +23,17 @@ if ! rg -q '#define SHADOW_RAW_BODY_REWRITE 0' "$EMIT_DIR/pp_emit.cch"; then
 fi
 
 # Smokes live under tests/ but are skipped by default cc_test (c_pp_* / serdes).
-if ! ./ccc tests/c_pp_stage_spike_smoke.ccs -o bin/c_pp_stage_spike_smoke; then
+# Stage smoke includes pp_emit (lead-trivia oracle) — same comptime link as emit smoke.
+# CPATH: face headers pull util/text.h from cc/src.
+SHADOW_COMPTIME_LIB="$ROOT/out/cc/obj/libshadow_comptime.a"
+TCC_LIB="$ROOT/third_party/tcc"
+if [[ ! -f "$SHADOW_COMPTIME_LIB" || ! -f "$TCC_LIB/libtcc.a" ]]; then
+  echo "[test_shadow] building libshadow_comptime.a (+ libtcc if needed)"
+  make -C cc ../out/cc/obj/libshadow_comptime.a
+fi
+if ! CPATH="$ROOT/cc/src${CPATH:+:$CPATH}" ./ccc tests/c_pp_stage_spike_smoke.ccs \
+    -o bin/c_pp_stage_spike_smoke --no-cache \
+    --ld-flags "$SHADOW_COMPTIME_LIB -L$TCC_LIB -ltcc"; then
   echo "[test_shadow] FAIL: build c_pp_stage_spike_smoke"
   exit 1
 fi
@@ -34,14 +44,9 @@ fi
 
 # Emit smoke includes pp_emit (generic-factory / comptime notes). Link the same
 # comptime + libtcc stack as native shadow_lower (API boundary must stay aligned).
-SHADOW_COMPTIME_LIB="$ROOT/out/cc/obj/libshadow_comptime.a"
-TCC_LIB="$ROOT/third_party/tcc"
-if [[ ! -f "$SHADOW_COMPTIME_LIB" || ! -f "$TCC_LIB/libtcc.a" ]]; then
-  echo "[test_shadow] building libshadow_comptime.a (+ libtcc if needed)"
-  make -C cc ../out/cc/obj/libshadow_comptime.a
-fi
 # --no-cache: smoke includes pp_*.cch; stale objects would miss capacity-diag edits.
-if ! ./ccc tests/c_pp_shadow_emit_smoke.ccs -o bin/c_pp_shadow_emit_smoke --no-cache \
+if ! CPATH="$ROOT/cc/src${CPATH:+:$CPATH}" ./ccc tests/c_pp_shadow_emit_smoke.ccs \
+    -o bin/c_pp_shadow_emit_smoke --no-cache \
     --ld-flags "$SHADOW_COMPTIME_LIB -L$TCC_LIB -ltcc"; then
   echo "[test_shadow] FAIL: build c_pp_shadow_emit_smoke"
   exit 1

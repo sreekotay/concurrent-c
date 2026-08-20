@@ -1,3 +1,3 @@
-#include "guarded.h"
-#include "guarded.h"
+#include "guarded.inc"
+#include "guarded.inc"
 Guarded * p;

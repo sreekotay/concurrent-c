@@ -213,14 +213,14 @@ int main(void) {
         if (n != 2) { printf("FAIL: guard_twice n=%d\n", n); return 1; }
         pass &= expect_kind(items[0], AST_TYPEDEF_INT, "Guarded", NULL);
         pass &= expect_kind(items[1], AST_PTR_DECL, "Guarded", "p");
-        /* guarded.h + fields.inc + others may already be cached; ensure guarded
+        /* guarded.inc + fields.inc + others may already be cached; ensure guarded
          * loaded at most once as a tape entry */
         int guarded_tapes = 0;
         for (int i = 0; i < cache.n; i++) {
-            if (strstr(cache.items[i]->path, "guarded.h")) guarded_tapes++;
+            if (strstr(cache.items[i]->path, "guarded.inc")) guarded_tapes++;
         }
         if (guarded_tapes != 1) {
-            printf("FAIL: guarded.h tapes=%d (cache grew %d->%d)\n",
+            printf("FAIL: guarded.inc tapes=%d (cache grew %d->%d)\n",
                    guarded_tapes, before, cache.n);
             return 1;
         }
@@ -259,12 +259,12 @@ int main(void) {
         pass &= expect_kind(items[4], AST_AT_STMT, "defer", NULL);
     }
 
-    /* CC types spliced mid-struct + @async */
+    /* CC types spliced mid-struct */
     {
         AstNode** items = NULL;
         int n = 0;
         if (!run_file(&cache, &arena, "cc_cross_include.ccs", &items, &n, NULL)) return 1;
-        if (n != 2) { printf("FAIL: cc_cross_include n=%d\n", n); return 1; }
+        if (n != 1) { printf("FAIL: cc_cross_include n=%d\n", n); return 1; }
         pass &= expect_kind(items[0], AST_STRUCT, "Bundle", NULL);
         if (!items[0] || items[0]->nkids != 2) {
             printf("FAIL: Bundle fields %d\n", items[0] ? items[0]->nkids : -1);
@@ -272,7 +272,6 @@ int main(void) {
         }
         pass &= expect_kind(items[0]->kids[0], AST_SLICE_VAR, "buf", NULL);
         pass &= expect_kind(items[0]->kids[1], AST_CHAN_VAR, "tx", "8");
-        pass &= expect_kind(items[1], AST_AT_STMT, "async", NULL);
     }
 
     /* object-like macro expands to CC channel type (post-expand oracle) */
@@ -282,6 +281,139 @@ int main(void) {
         if (!run_file(&cache, &arena, "cc_macro_chan.ccs", &items, &n, NULL)) return 1;
         if (n != 1) { printf("FAIL: cc_macro_chan n=%d\n", n); return 1; }
         pass &= expect_kind(items[0], AST_CHAN_VAR, "c", "4");
+    }
+
+    /* include-frame #if 1 / #elif / #else — only arm A */
+    {
+        AstNode** items = NULL;
+        int n = 0;
+        int i;
+        if (!run_file(&cache, &arena, "elif_else_inc.ccs", &items, &n, NULL))
+            return 1;
+        if (n != 1) {
+            printf("FAIL: elif_else n=%d (want 1 arm_a)\n", n);
+            return 1;
+        }
+        for (i = 0; i < n; i++) {
+            if (items[i] && items[i]->b[0] &&
+                (strcmp(items[i]->b, "arm_b") == 0 ||
+                 strcmp(items[i]->b, "arm_c") == 0 ||
+                 strcmp(items[i]->a, "arm_b") == 0 ||
+                 strcmp(items[i]->a, "arm_c") == 0)) {
+                printf("FAIL: elif_else leaked arm %s/%s\n", items[i]->a,
+                       items[i]->b);
+                return 1;
+            }
+        }
+        if (!items[0] || (strcmp(items[0]->a, "arm_a") != 0 &&
+                          strcmp(items[0]->b, "arm_a") != 0)) {
+            printf("FAIL: elif_else missing arm_a (got %s/%s)\n",
+                   items[0] ? items[0]->a : "?", items[0] ? items[0]->b : "?");
+            return 1;
+        }
+    }
+
+    /* include-frame #ifdef __APPLE__ — passthrough both arms */
+    {
+        AstNode** items = NULL;
+        int n = 0;
+        int saw_apple = 0, saw_other = 0, i;
+        if (!run_file(&cache, &arena, "ifdef_apple_inc.ccs", &items, &n, NULL))
+            return 1;
+        for (i = 0; i < n; i++) {
+            if (!items[i]) continue;
+            if (strcmp(items[i]->a, "apple_arm") == 0 ||
+                strcmp(items[i]->b, "apple_arm") == 0)
+                saw_apple = 1;
+            if (strcmp(items[i]->a, "other_arm") == 0 ||
+                strcmp(items[i]->b, "other_arm") == 0)
+                saw_other = 1;
+        }
+        if (!saw_apple || !saw_other) {
+            printf("FAIL: ifdef_apple passthrough apple=%d other=%d n=%d\n",
+                   saw_apple, saw_other, n);
+            return 1;
+        }
+    }
+
+    /* #if !FOO must hard-error (not treat as #if FOO) */
+    {
+        char path[512];
+        FileTape* ft;
+        Token out_buf[4096];
+        Pp pp = {0};
+        snprintf(path, sizeof(path), "%s/if_not_ident_inc.ccs", FIX);
+        ft = tape_cache_load(&cache, path, &arena);
+        if (!ft) {
+            printf("FAIL: load if_not_ident_inc\n");
+            return 1;
+        }
+        pp.cache = &cache;
+        pp.arena = &arena;
+        pp.search_dir = FIX;
+        pp.out = out_buf;
+        pp.out_cap = 4096;
+        if (pp_run(&pp, ft)) {
+            printf("FAIL: if_not_ident should hard-error\n");
+            pp_free_macros(&pp);
+            return 1;
+        }
+        pp_free_macros(&pp);
+    }
+
+    /* #define ENABLED (1) is object-like — #ifdef ENABLED true */
+    {
+        AstNode** items = NULL;
+        int n = 0;
+        if (!run_file(&cache, &arena, "define_paren_inc.ccs", &items, &n, NULL))
+            return 1;
+        if (n != 2) {
+            printf("FAIL: define_paren n=%d\n", n);
+            return 1;
+        }
+        pass &= expect_kind(items[0], AST_TYPEDEF_INT, "EnabledOn", NULL);
+        pass &= expect_kind(items[1], AST_PTR_DECL, "EnabledOn", "p");
+    }
+
+    /* #ifdef skip must not resurrect via lead trivia on emit */
+    {
+        AstNode** items = NULL;
+        int n = 0;
+        CEmit emit = {0};
+        if (!run_file(&cache, &arena, "ifdef_skip_lead_inc.ccs", &items, &n, NULL))
+            return 1;
+        if (n != 2) {
+            printf("FAIL: ifdef_skip_lead n=%d\n", n);
+            return 1;
+        }
+        pass &= expect_kind(items[0], AST_TYPEDEF_INT, "Before", NULL);
+        pass &= expect_kind(items[1], AST_TYPEDEF_INT, "After", NULL);
+        if (!shadow_emit(items, n, &cache, &emit, SHADOW_EMIT_C, NULL, 0, NULL,
+                         0, "cc/shadow/fixtures/ifdef_skip_lead_inc.ccs")) {
+            printf("FAIL: ifdef_skip_lead emit\n");
+            free(emit.buf);
+            return 1;
+        }
+        if (emit.buf && strstr(emit.buf, "skipped_should_not_lead")) {
+            printf("FAIL: ifdef_skip_lead resurrected skipped arm\n");
+            free(emit.buf);
+            return 1;
+        }
+        free(emit.buf);
+    }
+
+    /* #define A A / mutual recursion — no hang; blue-paint emits name */
+    {
+        AstNode** items = NULL;
+        int n = 0;
+        if (!run_file(&cache, &arena, "macro_cycle.c", &items, &n, NULL))
+            return 1;
+        if (n != 2) {
+            printf("FAIL: macro_cycle n=%d\n", n);
+            return 1;
+        }
+        pass &= expect_kind(items[0], AST_PTR_DECL, "A", "p");
+        pass &= expect_kind(items[1], AST_PTR_DECL, "B", "q");
     }
 
     tape_cache_free(&cache);

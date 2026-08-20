@@ -681,6 +681,22 @@ static int shadow_product_host_c_ok(const char* buf, size_t len, const char** hi
                 }
             }
         }
+        /* Bare `await` left in product (strip path must not resurrect it). */
+        if (c == 'a' && i + 5 <= len && memcmp(buf + i, "await", 5) == 0) {
+            char before = (i > 0) ? buf[i - 1] : 0;
+            char after = (i + 5 < len) ? buf[i + 5] : 0;
+            int before_ok = !((before >= 'a' && before <= 'z') ||
+                              (before >= 'A' && before <= 'Z') ||
+                              (before >= '0' && before <= '9') ||
+                              before == '_');
+            int after_ok = !((after >= 'a' && after <= 'z') ||
+                             (after >= 'A' && after <= 'Z') ||
+                             (after >= '0' && after <= '9') || after == '_');
+            if (before_ok && after_ok) {
+                if (hit) *hit = buf + i;
+                return 0;
+            }
+        }
         if (c == '\n') at_line_start = 1;
         else if (c != ' ' && c != '\t') at_line_start = 0;
         i++;
@@ -938,14 +954,16 @@ typedef struct {
      * before leaving — fallthrough still pops via shadow_scratch_cp_pop. */
     int scratch_cp_depth;
     /* Inside a '@parallel wait for' body: 1 = sequential denial path,
-     * 2 = per-ticket run. @stage is only legal when nonzero and only
-     * tracks its passed-flag in mode 2. */
+     * 2 = per-ticket run. @stage is only legal when nonzero. Both
+     * modes track per-stage passed flags so `continue` can still pass. */
     int pw_body;
     int pw_id;            /* wait-for helper id (`__cc_pw_done_<id>`) */
     int pw_loop;          /* inner for/while/do depth (continue targets) */
     int pw_brk;           /* inner loop+switch depth (break targets) */
     char pw_ivar[64];     /* wait-for loop variable */
     int pw_fin;           /* sequential path tracks wait-for break */
+    AstNode* pw_stages[16]; /* top-level @stage nodes (seq continue) */
+    int pw_nstages;
 } ShadowCtx;
 
 enum { SHADOW_SCRATCH_CP_MAX = 16 };
@@ -1397,9 +1415,9 @@ static int shadow_eh_select(ShadowCtx* ctx, const char* call, AstNode** saved) {
 static void shadow_eh_push_node(ShadowCtx* ctx, AstNode* eh) {
     if (!ctx || !eh) return;
     if (ctx->nehs >= SHADOW_EH_STACK_CAP) {
+        /* Fail loud — do not overwrite ctx->eh (that looked like a push). */
         shadow_table_full("errhandlers", SHADOW_EH_STACK_CAP,
                           eh->a[0] ? eh->a : NULL);
-        ctx->eh = eh;
         return;
     }
     ctx->ehs_scope[ctx->nehs] = ctx->eh_scope;
@@ -3050,6 +3068,9 @@ static CCSymbolTable* g_shadow_ufcs_syms;
 static const char* g_shadow_ufcs_compile_src;
 static size_t g_shadow_ufcs_compile_len;
 static char g_shadow_ufcs_path[1024];
+enum { SHADOW_UFCS_SEEN_CAP = 128 };
+static char g_shadow_ufcs_seen[SHADOW_UFCS_SEEN_CAP][256];
+static int g_shadow_ufcs_nseen;
 /* Current structured UFCS site — hook-compose miss uses these for file:line. */
 static TapeCache* g_shadow_ufcs_cache;
 static AstNode* g_shadow_ufcs_site;
@@ -4553,6 +4574,7 @@ static void shadow_chan_reset(void) {
         cc_symbols_free(g_shadow_ufcs_syms);
         g_shadow_ufcs_syms = NULL;
     }
+    g_shadow_ufcs_nseen = 0;
     g_shadow_ufcs_compile_src = NULL;
     g_shadow_ufcs_compile_len = 0;
     g_shadow_ufcs_path[0] = 0;
@@ -4880,6 +4902,10 @@ static int shadow_ufcs_on_register(CCSymbolTable* t,
     int rc;
     (void)user_ctx;
     if (!t || !type_name || !expr_src || !expr_len) return -1;
+    /* Catch-all folklore hook stays invent-side. Compiling `@typehooks on *`
+     * would run before dyn-sink / @as and hard-fail compose-misses that those
+     * paths still own. Specific header subjects (CCChanTx_*, user .cch) load. */
+    if (strcmp(type_name, "*") == 0) return 0;
     if (!g_shadow_ufcs_compile_src || !g_shadow_ufcs_compile_len) return -1;
     slim = shadow_ufcs_slim_src(g_shadow_ufcs_compile_src,
                                 g_shadow_ufcs_compile_len, expr_src, expr_len,
@@ -4909,28 +4935,176 @@ static int shadow_ufcs_on_register(CCSymbolTable* t,
     return 0;
 }
 
+/* Drive create/destroy/sink/niche tables off CCSymbolTable (one harvest). */
+static void shadow_dyn_sink_register(const char* ty, const char* callee,
+                                     const char* wrap, int dest_aware,
+                                     int returns_result);
+static int shadow_text_fn_returns_result(const char* text, const char* name);
+static void shadow_niche_register(const char* ty, unsigned size, unsigned align,
+                                  unsigned off, unsigned width,
+                                  unsigned long long sentinel);
+
+static void shadow_ufcs_sync_hooks_from_syms(const char* probe_text) {
+    size_t i, n;
+    if (!g_shadow_ufcs_syms) return;
+    n = cc_symbols_type_count(g_shadow_ufcs_syms);
+    for (i = 0; i < n; i++) {
+        const char* ty = cc_symbols_type_name(g_shadow_ufcs_syms, i);
+        const char* create = NULL;
+        const char* destroy = NULL;
+        const char* pre = NULL;
+        const char* dyn_cal = NULL;
+        const char* dyn_wrap = NULL;
+        unsigned ns = 0, na = 0, no = 0, nw = 0;
+        unsigned long long nsen = 0;
+        char needle[160];
+        if (!ty || !ty[0]) continue;
+        /* Only materialize facts whose register site is in this collect text
+         * — re-syncing the whole table against another file's probe_text
+         * corrupts dyn-sink returns_result. */
+        if (probe_text) {
+            snprintf(needle, sizeof(needle), "cc_type_register(\"%s\"", ty);
+            if (!strstr(probe_text, needle)) continue;
+        }
+        if (cc_symbols_lookup_type_create_call(g_shadow_ufcs_syms, ty, 1,
+                                               &create) == 0 &&
+            create && create[0])
+            shadow_create_hook_register(ty, create);
+        else if (cc_symbols_lookup_type_create_call(g_shadow_ufcs_syms, ty, 2,
+                                                    &create) == 0 &&
+                 create && create[0])
+            shadow_create_hook_register(ty, create);
+        else if (cc_symbols_lookup_type_create_call(g_shadow_ufcs_syms, ty, 0,
+                                                    &create) == 0 &&
+                 create && create[0])
+            shadow_create_hook_register(ty, create);
+        (void)cc_symbols_lookup_type_pre_destroy_call(g_shadow_ufcs_syms, ty,
+                                                      &pre);
+        (void)cc_symbols_lookup_type_destroy_call(g_shadow_ufcs_syms, ty,
+                                                  &destroy);
+        if ((pre && pre[0]) || (destroy && destroy[0]))
+            shadow_destroy_hook_register(ty, pre, destroy);
+        if (cc_symbols_lookup_type_ufcs_dynamic(g_shadow_ufcs_syms, ty, &dyn_cal,
+                                                &dyn_wrap) == 0 &&
+            dyn_cal && dyn_cal[0] && dyn_wrap && dyn_wrap[0]) {
+            shadow_dyn_sink_register(
+                ty, dyn_cal, dyn_wrap, 1,
+                probe_text ? shadow_text_fn_returns_result(probe_text, dyn_cal)
+                           : 0);
+        }
+        if (cc_symbols_lookup_type_niche(g_shadow_ufcs_syms, ty, &ns, &na, &no,
+                                         &nw, &nsen) == 0 &&
+            nw)
+            shadow_niche_register(ty, ns, na, no, nw, nsen);
+    }
+}
+
+/* Compile `.ufcs` only for project TU / local .cch. Stdlib headers redefine
+ * types inside the hook TCC session if we compile their full text. */
+static int shadow_ufcs_compile_for_path(const char* path) {
+    if (!path || !path[0]) return 0;
+    if (strstr(path, "/cc/include/ccc/")) return 0;
+    if (strstr(path, "/out/include/ccc/")) return 0;
+    if (strstr(path, "/include/ccc/")) return 0;
+    return 1;
+}
+
+static int shadow_ufcs_mark_seen(const char* path) {
+    int i;
+    if (!path || !path[0]) return 0;
+    for (i = 0; i < g_shadow_ufcs_nseen; i++) {
+        if (strcmp(g_shadow_ufcs_seen[i], path) == 0) return 1;
+    }
+    if (g_shadow_ufcs_nseen >= SHADOW_UFCS_SEEN_CAP) return 0;
+    snprintf(g_shadow_ufcs_seen[g_shadow_ufcs_nseen],
+             sizeof(g_shadow_ufcs_seen[0]), "%s", path);
+    g_shadow_ufcs_nseen++;
+    return 0;
+}
+
+/* Accumulate typehooks from one source into g_shadow_ufcs_syms (do not free).
+ * `compile_ufcs`: compile `.ufcs` callables (project TU / local .cch only).
+ * Stdlib headers still feed create/destroy/sink/niche via collect; compiling
+ * their handlers against the full `.cch` redefines types inside TCC. */
 static void shadow_ufcs_hooks_load(const char* path, const char* collect_src,
                                   size_t collect_n, const char* compile_src,
-                                  size_t compile_n) {
+                                  size_t compile_n, int compile_ufcs) {
     if (!path || !collect_src || !compile_src) return;
-    if (g_shadow_ufcs_syms) {
-        cc_symbols_free(g_shadow_ufcs_syms);
-        g_shadow_ufcs_syms = NULL;
+    if (shadow_ufcs_mark_seen(path)) return;
+    if (!g_shadow_ufcs_syms) {
+        g_shadow_ufcs_syms = cc_symbols_new();
+        if (!g_shadow_ufcs_syms) {
+            fprintf(stderr,
+                    "%s: error: typehooks symbol table alloc failed; refusing "
+                    "silent UFCS invent\n",
+                    path);
+            g_shadow_ufcs_miss = 1;
+            return;
+        }
     }
-    g_shadow_ufcs_syms = cc_symbols_new();
-    if (!g_shadow_ufcs_syms) return;
     snprintf(g_shadow_ufcs_path, sizeof(g_shadow_ufcs_path), "%s", path);
     g_shadow_ufcs_compile_src = compile_src;
     g_shadow_ufcs_compile_len = compile_n;
     if (cc_symbols_collect_type_registrations_ex(
             g_shadow_ufcs_syms, path, collect_src, collect_n, NULL, NULL,
-            shadow_ufcs_on_register, NULL) != 0) {
+            compile_ufcs ? shadow_ufcs_on_register : NULL, NULL) != 0) {
         fprintf(stderr, "%s: error: failed to compile @typehooks .ufcs hook\n",
                 path);
         g_shadow_ufcs_miss = 1;
     }
+    shadow_ufcs_sync_hooks_from_syms(collect_src);
     g_shadow_ufcs_compile_src = NULL;
     g_shadow_ufcs_compile_len = 0;
+}
+
+static void shadow_ufcs_hooks_collect_text(const char* path, const char* text,
+                                          size_t n, int compile_ufcs);
+
+/* Paths spliced into stage1 (impl_cch_begin / local_cch_begin marks).
+ * Impl-grade headers never enter lowered_local; collect follows the marks. */
+static void shadow_ufcs_hooks_collect_spliced_marks(const char* text) {
+    static const char* marks[2] = {
+        "/*cc:impl_cch_begin:",
+        "/*cc:local_cch_begin:",
+    };
+    int mi;
+    if (!text) return;
+    for (mi = 0; mi < 2; mi++) {
+        const char* p = text;
+        size_t ml = strlen(marks[mi]);
+        while ((p = strstr(p, marks[mi])) != NULL) {
+            const char* s = p + ml;
+            const char* e = strstr(s, "*/");
+            char path[512];
+            char* src = NULL;
+            size_t n = 0;
+            size_t pl;
+            p = e ? e + 2 : p + ml;
+            if (!e || e <= s) continue;
+            pl = (size_t)(e - s);
+            if (pl == 0 || pl >= sizeof(path)) continue;
+            memcpy(path, s, pl);
+            path[pl] = 0;
+            if (!read_file(path, &src, &n) || !src) continue;
+            shadow_ufcs_hooks_collect_text(path, src, n,
+                                           shadow_ufcs_compile_for_path(path));
+            free(src);
+        }
+    }
+}
+
+/* Rewrite @typehooks → cc_type_register, then collect (+ optional .ufcs). */
+static void shadow_ufcs_hooks_collect_text(const char* path, const char* text,
+                                          size_t n, int compile_ufcs) {
+    char* rw = NULL;
+    if (!path || !text) return;
+    rw = cc_rewrite_typehooks_to_register(text, n);
+    {
+        const char* src = rw ? rw : text;
+        size_t sn = rw ? strlen(rw) : n;
+        shadow_ufcs_hooks_load(path, src, sn, src, sn, compile_ufcs);
+    }
+    free(rw);
 }
 
 enum { SHADOW_UFCS_HOOK_ARG_MAX = 8 };
@@ -4968,7 +5142,8 @@ static int shadow_ufcs_split_args(const char* a, const char** starts, size_t* le
             while (e > starts[n] && (e[-1] == ' ' || e[-1] == '\t')) e--;
             lens[n] = (size_t)(e - starts[n]);
             n++;
-            if (n >= max) return n;
+            /* Another arg follows this comma — refuse silent truncate. */
+            if (n >= max) return -1;
             p++;
             while (*p == ' ' || *p == '\t') p++;
             starts[n] = p;
@@ -5033,8 +5208,8 @@ static void shadow_ufcs_infer_one_type(const char* arg, size_t n, char* out,
  * 0 = no hook / pass-through. Empty return is a hard reject.
  * `cc_ufcs_emit_value[_cstr]` tags a by-value receiver (never `&recv`). */
 static int shadow_ufcs_hook_resolve(const char* ty, const char* method,
-                                   const char* args, char* out, size_t cap,
-                                   int* out_by_value) {
+                                   const char* args, const char* view_mode,
+                                   char* out, size_t cap, int* out_by_value) {
     const void* fn = NULL;
     ShadowUfcsRewriteFn rewrite;
     CCSlice recv, meth, mode, result;
@@ -5060,7 +5235,12 @@ static int shadow_ufcs_hook_resolve(const char* ty, const char* method,
     rewrite = (ShadowUfcsRewriteFn)fn;
     recv = cc_slice_from_static((void*)base, strlen(base));
     meth = cc_slice_from_static((void*)method, strlen(method));
-    mode = cc_slice_from_static((void*)"", 0);
+    /* Named `@typeview Mode on T` — `view_mode` is that Mode. Unnamed
+     * views pass empty (the `.ufcs` parameter is not a call-site invent). */
+    if (view_mode && view_mode[0])
+        mode = cc_slice_from_static((void*)view_mode, strlen(view_mode));
+    else
+        mode = cc_slice_from_static((void*)"", 0);
     {
         const char* starts[SHADOW_UFCS_HOOK_ARG_MAX];
         size_t lens[SHADOW_UFCS_HOOK_ARG_MAX];
@@ -5069,6 +5249,14 @@ static int shadow_ufcs_hook_resolve(const char* ty, const char* method,
         char type_bufs[SHADOW_UFCS_HOOK_ARG_MAX][80];
         int na = shadow_ufcs_split_args(args, starts, lens, SHADOW_UFCS_HOOK_ARG_MAX);
         int ai;
+        if (na < 0) {
+            fprintf(stderr,
+                    "error: type: .ufcs hook for '%s.%s' exceeds %d args; "
+                    "refusing silent truncate\n",
+                    base, method, SHADOW_UFCS_HOOK_ARG_MAX);
+            g_shadow_ufcs_miss = 1;
+            return 0;
+        }
         for (ai = 0; ai < na; ai++) {
             argv_store[ai] = cc_slice_from_static((void*)starts[ai], lens[ai]);
             shadow_ufcs_infer_one_type(starts[ai], lens[ai], type_bufs[ai],
@@ -5098,7 +5286,21 @@ static int shadow_ufcs_hook_resolve(const char* ty, const char* method,
         result.len -= vtag_n;
         if (out_by_value) *out_by_value = 1;
     }
-    if (!result.ptr || result.len == 0 || result.len + 1 > cap) return 0;
+    if (!result.ptr || result.len == 0) {
+        fprintf(stderr,
+                "error: type: .ufcs hook rejected method '%s' for '%s'\n",
+                method, base);
+        g_shadow_ufcs_miss = 1;
+        return 0;
+    }
+    if (result.len + 1 > cap) {
+        fprintf(stderr,
+                "error: type: .ufcs hook rewrite for '%s.%s' overflowed "
+                "callee buffer (%zu); refusing silent invent\n",
+                base, method, cap);
+        g_shadow_ufcs_miss = 1;
+        return 0;
+    }
     memcpy(out, result.ptr, result.len);
     out[result.len] = 0;
     return 1;
@@ -5262,11 +5464,11 @@ static int shadow_hdr_fn_exists(const char* name) {
     return cc_lowered_local_declares_fn(name);
 }
 
-/* Scan header text for `Type field @as;` / `@typeview on T { as:… }`,
- * and cc_type_register destroy hooks. */
+/* Scan header text for `Type field @as;` / `@typeview on T { as:… }`.
+ * create/destroy/sink/niche/.ufcs come from CCSymbolTable via
+ * shadow_ufcs_hooks_collect_* (one harvest — no parallel strstr). */
 static void shadow_as_scan_header_text(const char* text) {
     const char* p;
-    char* rewritten = NULL;
     char outer[96];
     int in_typedef_struct = 0;
     /* Pending @as inside anonymous `typedef struct { … } Alias;` */
@@ -5282,9 +5484,6 @@ static void shadow_as_scan_header_text(const char* text) {
     char tv_base[96];
     int tv_depth = 0;
     if (!text) return;
-    /* Prefer register form so create/destroy/ufcs_sink harvest is shared. */
-    rewritten = cc_rewrite_typehooks_to_register(text, strlen(text));
-    if (rewritten) text = rewritten;
     outer[0] = 0;
     tv_base[0] = 0;
     p = text;
@@ -5532,137 +5731,9 @@ static void shadow_as_scan_header_text(const char* text) {
                 }
             }
         }
-        /* cc_type_register("Ty" …) + nearby create/destroy hook callees */
-        {
-            const char* reg_in_line = strstr(line, "cc_type_register(\"");
-            if (reg_in_line) {
-                const char* reg = strstr(p, "cc_type_register(\"");
-                const char* te;
-                char ty[64];
-                size_t n = 0;
-                const char* call;
-                const char* hooks;
-                const char* create;
-                if (!reg) reg = p + (size_t)(reg_in_line - line);
-                te = reg + 18;
-                while (te[n] && te[n] != '"' && n + 1 < sizeof(ty)) n++;
-                memcpy(ty, te, n);
-                ty[n] = 0;
-                call = strstr(reg, "cc_type_destroy_call(\"");
-                hooks = strstr(reg, "cc_type_destroy_hooks(\"");
-                create = strstr(reg, "cc_type_create_call(\"");
-                if (ty[0] && hooks && hooks < reg + 800) {
-                    const char* he = hooks + 23;
-                    char pre[96], post[96];
-                    size_t hn = 0;
-                    const char* q2;
-                    while (he[hn] && he[hn] != '"' && hn + 1 < sizeof(pre))
-                        hn++;
-                    memcpy(pre, he, hn);
-                    pre[hn] = 0;
-                    q2 = he + hn;
-                    while (*q2 && *q2 != '"') q2++;
-                    if (*q2 == '"') q2++;
-                    while (*q2 == ' ' || *q2 == '\t' || *q2 == ',') q2++;
-                    if (*q2 == '"') {
-                        size_t pn = 0;
-                        q2++;
-                        while (q2[pn] && q2[pn] != '"' && pn + 1 < sizeof(post))
-                            pn++;
-                        memcpy(post, q2, pn);
-                        post[pn] = 0;
-                        shadow_destroy_hook_register(ty, pre, post);
-                    }
-                } else if (ty[0] && call && call < reg + 800) {
-                    const char* he = call + 22;
-                    char hook[96];
-                    size_t hn = 0;
-                    while (he[hn] && he[hn] != '"' && hn + 1 < sizeof(hook))
-                        hn++;
-                    memcpy(hook, he, hn);
-                    hook[hn] = 0;
-                    if (hook[0]) shadow_destroy_hook_register(ty, NULL, hook);
-                }
-                if (ty[0] && create && create < reg + 800) {
-                    const char* he = create + 21;
-                    char hook[96];
-                    size_t hn = 0;
-                    while (he[hn] && he[hn] != '"' && hn + 1 < sizeof(hook))
-                        hn++;
-                    memcpy(hook, he, hn);
-                    hook[hn] = 0;
-                    if (hook[0]) shadow_create_hook_register(ty, hook);
-                }
-                /* .ufcs_sink (aliases .ufcs_dynamic / .ufcs_dynamic2) =
-                 * cc_type_dynamic_call("c","W"). Bound the search to THIS
-                 * register site — do not pick up the next type's sink
-                 * (CCPy must not inherit CCPyObj's cc_py_obj_callm). */
-                {
-                    const char* reg_end = strstr(reg + 18, "cc_type_register(\"");
-                    size_t reg_span = reg_end ? (size_t)(reg_end - reg) : 800;
-                    const char* dyn = strstr(reg, ".ufcs_sink");
-                    const char* call = strstr(reg, "cc_type_dynamic_call(\"");
-                    int dest_aware = 1;
-                    if (reg_span > 800) reg_span = 800;
-                    if (!dyn || (size_t)(dyn - reg) >= reg_span)
-                        dyn = strstr(reg, ".ufcs_dynamic");
-                    if (ty[0] && dyn && call &&
-                        (size_t)(dyn - reg) < reg_span &&
-                        (size_t)(call - reg) < reg_span + 100 && call > dyn) {
-                        const char* he = call + 22; /* after open quote */
-                        char callee[96], wrap[64];
-                        size_t hn = 0;
-                        const char* q2;
-                        while (he[hn] && he[hn] != '"' &&
-                               hn + 1 < sizeof(callee))
-                            hn++;
-                        memcpy(callee, he, hn);
-                        callee[hn] = 0;
-                        q2 = he + hn;
-                        while (*q2 && *q2 != '"') q2++;
-                        if (*q2 == '"') q2++;
-                        while (*q2 == ' ' || *q2 == '\t' || *q2 == ',') q2++;
-                        if (*q2 == '"') {
-                            size_t wn = 0;
-                            q2++;
-                            while (q2[wn] && q2[wn] != '"' &&
-                                   wn + 1 < sizeof(wrap))
-                                wn++;
-                            memcpy(wrap, q2, wn);
-                            wrap[wn] = 0;
-                            if (callee[0] && wrap[0])
-                                shadow_dyn_sink_register(
-                                    ty, callee, wrap, dest_aware,
-                                    shadow_text_fn_returns_result(text,
-                                                                  callee));
-                        }
-                    }
-                }
-                /* .niche = cc_type_niche(size, align, off, width, sentinel) */
-                {
-                    const char* nic = strstr(reg, "cc_type_niche(");
-                    if (ty[0] && nic && nic < reg + 800) {
-                        unsigned ns = 0, na = 0, no = 0, nw = 0;
-                        unsigned long long nsen = 0;
-                        const char* np = nic + 14;
-                        ns = (unsigned)strtoul(np, (char**)&np, 0);
-                        while (*np == ',' || *np == ' ' || *np == '\t') np++;
-                        na = (unsigned)strtoul(np, (char**)&np, 0);
-                        while (*np == ',' || *np == ' ' || *np == '\t') np++;
-                        no = (unsigned)strtoul(np, (char**)&np, 0);
-                        while (*np == ',' || *np == ' ' || *np == '\t') np++;
-                        nw = (unsigned)strtoul(np, (char**)&np, 0);
-                        while (*np == ',' || *np == ' ' || *np == '\t') np++;
-                        nsen = strtoull(np, NULL, 0);
-                        if (nw) shadow_niche_register(ty, ns, na, no, nw, nsen);
-                    }
-                }
-            }
-        }
         if (!nl) break;
         p = nl + 1;
     }
-    free(rewritten);
 }
 
 /* Follow one level of #include <ccc/…> / "…" inside scanned text. */
@@ -5709,11 +5780,13 @@ static void shadow_as_scan_nested_incs(const char* text, int depth) {
         if (strncmp(rel, "ccc/", 4) == 0) {
             if (shadow_family_header_read(rel + 4, &nested, &tlen) && nested) {
                 shadow_as_scan_header_text(nested);
+                shadow_ufcs_hooks_collect_text(rel, nested, tlen, 0);
                 shadow_as_scan_nested_incs(nested, depth - 1);
                 free(nested);
             }
         } else if (shadow_family_header_read(rel, &nested, &tlen) && nested) {
             shadow_as_scan_header_text(nested);
+            shadow_ufcs_hooks_collect_text(rel, nested, tlen, 0);
             shadow_as_scan_nested_incs(nested, depth - 1);
             free(nested);
         }
@@ -5763,25 +5836,38 @@ static void shadow_as_scan_pass_inc(char pass_inc[][256], int npass_inc) {
         if (strncmp(rel, "ccc/", 4) == 0) {
             if (shadow_family_header_read(rel + 4, &text, &tlen) && text) {
                 shadow_as_scan_header_text(text);
+                shadow_ufcs_hooks_collect_text(rel, text, tlen, 0);
                 shadow_as_scan_nested_incs(text, 2);
                 free(text);
             }
         } else if (shadow_family_header_read(rel, &text, &tlen) && text) {
             shadow_as_scan_header_text(text);
+            shadow_ufcs_hooks_collect_text(rel, text, tlen, 0);
             shadow_as_scan_nested_incs(text, 2);
             free(text);
         }
     }
 }
 
-/* Scan warmed tapes (TU + angle-includes) for @as / destroy hooks. */
+/* Scan warmed tapes (TU + includes) for @as / typeview.
+ * Collect typehooks from the original path — stage1 blanks @comptime. */
 static void shadow_as_scan_tapes(TapeCache* cache) {
     int i;
     if (!cache) return;
     for (i = 0; i < cache->n; i++) {
         FileTape* ft = cache->items[i];
-        if (ft && ft->bytes && ft->len > 0)
+        char* text = NULL;
+        size_t tlen = 0;
+        if (!ft) continue;
+        if (ft->bytes && ft->len > 0) {
             shadow_as_scan_header_text(ft->bytes);
+            shadow_ufcs_hooks_collect_spliced_marks(ft->bytes);
+        }
+        if (!ft->path || !ft->path[0]) continue;
+        if (!read_file(ft->path, &text, &tlen) || !text) continue;
+        shadow_ufcs_hooks_collect_text(ft->path, text, tlen,
+                                       shadow_ufcs_compile_for_path(ft->path));
+        free(text);
     }
 }
 
@@ -5796,6 +5882,7 @@ static void shadow_as_scan_included_cch(void) {
         if (!path || !path[0]) continue;
         if (!read_file(path, &text, &tlen) || !text) continue;
         shadow_as_scan_header_text(text);
+        shadow_ufcs_hooks_collect_text(path, text, tlen, 0);
         free(text);
     }
 }
@@ -5812,30 +5899,19 @@ static void shadow_as_scan_lowered_local_cch(void) {
         if (!path || !path[0]) continue;
         if (!read_file(path, &text, &tlen) || !text) continue;
         shadow_as_scan_header_text(text);
+        shadow_ufcs_hooks_collect_text(path, text, tlen, 1);
         free(text);
     }
 }
 
-/* Original TU source (pre-blank): @comptime cc_type_register is space-blanked
- * in stage1 tapes, so re-read the input path for destroy hooks. */
+/* Original TU source (pre-blank): stage1 blanks @comptime on tapes. */
 static void shadow_as_scan_src_path(const char* path) {
     char* text = NULL;
-    char* rw = NULL;
     size_t n = 0;
     if (!path || !path[0]) return;
     if (!read_file(path, &text, &n) || !text) return;
     shadow_as_scan_header_text(text);
-    rw = cc_rewrite_typehooks_to_register(text, n);
-    /* Compile from the rewritten text: hook_compile blanks @comptime, so
-     * the cc_type_register(...) call is gone before preprocess (that call
-     * is otherwise mistaken for a prototype with designated-init "defaults").
-     * The named handler / lambda still lives in the file or lambda_defs. */
-    {
-        const char* src = rw ? rw : text;
-        size_t sn = rw ? strlen(rw) : n;
-        shadow_ufcs_hooks_load(path, src, sn, src, sn);
-    }
-    free(rw);
+    shadow_ufcs_hooks_collect_text(path, text, n, 1);
     free(text);
 }
 
@@ -8837,6 +8913,8 @@ static int shadow_emit_lead_span(CEmit* out, TapeCache* cache, int file_id,
             seen_hash = 1;
             continue;
         }
+        /* Omit stage-2 skipped arms (shared tapes are not blanked). */
+        if (pp_skip_span_overlaps(file_id, off + ls, le - ls)) continue;
         if (file_header && seen_hash) {
             g_sticky_lead_off = off + ls;
             g_sticky_lead_len = len - ls;

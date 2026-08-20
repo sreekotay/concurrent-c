@@ -1,0 +1,4 @@
+#define FOO 1
+#if !FOO
+int should_not_parse;
+#endif

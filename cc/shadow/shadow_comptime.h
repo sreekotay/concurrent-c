@@ -23,6 +23,8 @@ void cc_ct_field_reg_clear(void);
 int cc_ct_field_reg_put(const char* type_name, const char* const* names,
                         const char* const* types, const int* is_as, int n);
 void cc_ct_field_reg_set_lowered_c(char* owned_c);
+/* Type-pass src was produced but parse/emit failed — distinct from skipped. */
+void cc_ct_field_reg_set_type_pass_failed(int failed);
 
 /* Prepare + execute @comptime blocks for `input_path` (reads the file).
  * Populates the process-global emit-plan fragment table.

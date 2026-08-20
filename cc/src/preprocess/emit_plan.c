@@ -1417,6 +1417,7 @@ static size_t cc__field_reg_n = 0;
 static size_t cc__field_reg_cap = 0;
 static char* cc__field_reg_lowered_c = NULL;
 static int cc__field_reg_type_pass_skipped = 0;
+static int cc__field_reg_type_pass_failed = 0;
 
 void cc_ct_field_reg_clear(void) {
     size_t i, j;
@@ -1438,6 +1439,7 @@ void cc_ct_field_reg_clear(void) {
     free(cc__field_reg_lowered_c);
     cc__field_reg_lowered_c = NULL;
     cc__field_reg_type_pass_skipped = 0;
+    cc__field_reg_type_pass_failed = 0;
 }
 
 void cc_ct_field_reg_set_type_pass_skipped(int skipped) {
@@ -1448,8 +1450,23 @@ int cc_ct_field_reg_type_pass_skipped(void) {
     return cc__field_reg_type_pass_skipped;
 }
 
-/* Empty registry after a deliberate type-pass skip is not "unknown type". */
+void cc_ct_field_reg_set_type_pass_failed(int failed) {
+    cc__field_reg_type_pass_failed = failed ? 1 : 0;
+}
+
+int cc_ct_field_reg_type_pass_failed(void) {
+    return cc__field_reg_type_pass_failed;
+}
+
+/* Empty registry after skip/fail is not "unknown type" / unsupported forms. */
 static int cc__field_reg_refuse_if_skipped(const char* api) {
+    if (cc__field_reg_type_pass_failed) {
+        fprintf(stderr,
+                "error: %s: type-pass failed (parse/emit after blanking "
+                "@comptime) — refusing silent empty field registry\n",
+                api ? api : "cc_reflect_field_*");
+        return 1;
+    }
     if (!cc__field_reg_type_pass_skipped) return 0;
     fprintf(stderr,
             "error: %s: type-pass was skipped (no type_of/cc_reflect_field_ "

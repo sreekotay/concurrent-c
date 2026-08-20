@@ -7334,6 +7334,16 @@ int main(int argc, char **argv) {
             ld_flags = argv[++i];
             continue;
         }
+        /* Host-cc style flags: never treat as positional inputs. */
+        if (strcmp(argv[i], "-I") == 0 ||
+            (strncmp(argv[i], "-I", 2) == 0 && argv[i][2] != 0) ||
+            strcmp(argv[i], "-fPIC") == 0 || strcmp(argv[i], "-fpic") == 0) {
+            fprintf(stderr,
+                    "cc: '%s' is not a positional input; pass host flags via "
+                    "--cc-flags (e.g. --cc-flags=\"-Ipath -fPIC\")\n",
+                    argv[i]);
+            return 1;
+        }
         if (strcmp(argv[i], "--target") == 0) {
             if (i + 1 >= argc) { fprintf(stderr, "cc: --target requires a value\n"); usage(argv[0]); return 1; }
             target_flag = argv[++i];

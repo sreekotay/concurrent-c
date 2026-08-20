@@ -1,0 +1,13 @@
+/* .ufcs in an included .cch must compile — invent would miss this callee. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include "cch_typehooks_ufcs_hdr.cch"
+
+int main(void) {
+    HdrHookBox b = @create(10) @destroy;
+    int n = b.bump(7);
+    if (n != 17) return 1;
+    if (b.n != 17) return 2;
+    printf("ok\n");
+    return 0;
+}

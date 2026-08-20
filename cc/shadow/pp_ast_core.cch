@@ -1867,8 +1867,8 @@ static int ast_spell_token_range(Parser* p, int start, int end, char* dst,
         int spelled = 0;
         piece[0] = 0;
         /* @await / bare await fname(...) → cc_block_on(Ret, fname(...)) when
-         * fname is @async; otherwise strip (channel UFCS etc. already block in
-         * sync context). @create → __cc_at_create (resolved at emit). */
+         * fname is @async; otherwise refuse (never strip the keyword).
+         * @create → __cc_at_create (resolved at emit). */
         {
             int await_at = 0;
             int await_i = -1;
@@ -2008,10 +2008,12 @@ static int ast_spell_token_range(Parser* p, int start, int end, char* dst,
                         continue;
                     }
                 }
-                /* Strip unresolved await keyword (and optional leading @). */
-                i = await_i + 1;
+                /* Unknown in-async await form — refuse, do not strip. */
                 (void)await_at;
-                continue;
+                parser_fail(p, t,
+                            "unresolved 'await' (need await fname(...), "
+                            "await recv.send/recv(...), or await call(...))");
+                return 0;
             }
             if (tok_eq(t, TK_PUNCT, "@") && i + 1 < end &&
                 shadow_kw(p->toks[i + 1]) == SHADOW_KW_CREATE) {

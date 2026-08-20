@@ -1,0 +1,46 @@
+/* Named @typeview Mode on T: .ufcs sees mode, not "". */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_ufcs.cch>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct {
+    int n;
+} Box;
+
+static int box_bump(Box* b) {
+    return b ? ++b->n : 0;
+}
+
+static char[:] box_ufcs(char[:] recv_type, char[:] method, char[:] mode,
+                        CCSliceArray argv, CCSliceArray arg_types,
+                        CCArena* arena) {
+    (void)recv_type;
+    (void)argv;
+    (void)arg_types;
+    (void)arena;
+    if (CCSlice_eq_cstr(&method, "bump") && CCSlice_eq_cstr(&mode, "Edit"))
+        return @slice("box_bump");
+    return @slice("");
+}
+
+@typehooks on Box {
+    .ufcs = box_ufcs,
+};
+
+@typeview Edit on Box {
+    r: n, bump;
+};
+
+static int use_edit(@typeview(Edit) Box* b) {
+    return b->bump();
+}
+
+int main(void) {
+    Box box;
+    memset(&box, 0, sizeof(box));
+    box.n = 3;
+    if (use_edit(&box) != 4) return 1;
+    printf("ok\n");
+    return 0;
+}

@@ -69,8 +69,8 @@ static PpDirKind pp_dir_of(CCSlice spell) {
 
 /* ---- stage-2: splice + object-like macros + guards ---------------------- */
 
-enum { MACRO_CAP = 64, FRAME_CAP = 32, EXPAND_CAP = 1 << 14,
-       REFUSE_CLO_CAP = 32 };
+enum { MACRO_CAP = 64, FRAME_CAP = 32, EXPAND_CAP = 64,
+       REFUSE_CLO_CAP = 32, PP_NEST_CAP = 32, PP_SKIP_SPAN_CAP = 4096 };
 
 typedef struct {
     char name[128];
@@ -81,7 +81,21 @@ typedef struct {
 typedef struct {
     FileTape* tape;
     int i;         /* next index in tape->toks */
+    int blue_paint; /* 1 = this synth frame disables its macro name */
 } Frame;
+
+/* Include-frame (#if nest) state. Root tape stays cpp-transparent. */
+typedef struct {
+    int taken;       /* already emitted a true arm */
+    int else_seen;
+    int passthrough; /* host predefined — emit both arms for host cpp */
+} PpIfNest;
+
+typedef struct {
+    int file_id;
+    size_t off;
+    size_t len;
+} PpSkipSpan;
 
 enum { PASS_INC_CAP = 64, SYS_INC_CAP = 16, CPP_DIR_CAP = 256 };
 
@@ -112,9 +126,12 @@ typedef struct {
     /* Root-tape `#if`/`#ifdef`/`#ifndef` nest (cpp-transparent; host cpp
      * selects). `#define`/`#include` inside stay in place. */
     int root_if_depth;
-    /* Blank skipped token bytes only for `#if`/`#else` arms (not `#ifdef`
-     * include-guard skips — those share TapeCache bytes across includes). */
-    int skip_blank;
+    /* Include-frame nest with taken/else/passthrough (nf > 1 only). */
+    PpIfNest if_nest[PP_NEST_CAP];
+    int nif_nest;
+    /* Object-like expand blue-paint stack (C: disable name while expanding). */
+    char expand_disable[EXPAND_CAP][128];
+    int nexpand_disable;
     int err;
     char err_msg[192]; /* set on capacity / hard failures (also printed) */
     /* Top-level #include <...> and ordinary quote-.h lines (not spliced). */
@@ -128,6 +145,33 @@ typedef struct {
     char cpp_dir[CPP_DIR_CAP][512];
     int ncpp_dir;
 } Pp;
+
+/* Skip spans for lead-trivia emit (do not blank shared FileTape bytes). */
+static PpSkipSpan g_pp_skip_spans[PP_SKIP_SPAN_CAP];
+static int g_pp_nskip_spans;
+
+static void pp_skip_spans_reset(void) { g_pp_nskip_spans = 0; }
+
+static int pp_skip_span_overlaps(int file_id, size_t off, size_t len) {
+    int i;
+    size_t end = off + len;
+    for (i = 0; i < g_pp_nskip_spans; i++) {
+        PpSkipSpan* s = &g_pp_skip_spans[i];
+        size_t send;
+        if (s->file_id != file_id) continue;
+        send = s->off + s->len;
+        if (off < send && end > s->off) return 1;
+    }
+    return 0;
+}
+
+static void pp_record_skip_token(FileTape* ft, Token t) {
+    if (!ft || !t.spell.len || g_pp_nskip_spans >= PP_SKIP_SPAN_CAP) return;
+    g_pp_skip_spans[g_pp_nskip_spans].file_id = ft->file_id;
+    g_pp_skip_spans[g_pp_nskip_spans].off = t.offset;
+    g_pp_skip_spans[g_pp_nskip_spans].len = t.spell.len;
+    g_pp_nskip_spans++;
+}
 
 static void pp_add_sys_inc(Pp* pp, const char* path) {
     if (!pp || !path || pp->nsys_inc >= SYS_INC_CAP) return;
@@ -166,7 +210,16 @@ static int pp_define_has_cc_token(const char* line) {
 }
 
 static int pp_add_passthrough_define(Pp* pp, const char* line) {
-    if (!pp || !line || !line[0] || pp->npass_def >= PASS_INC_CAP) return 0;
+    if (!pp || !line || !line[0]) return 0;
+    if (pp->npass_def >= PASS_INC_CAP) {
+        snprintf(pp->err_msg, sizeof(pp->err_msg),
+                 "stage-2 #define passthrough table full (%d); refusing silent "
+                 "drop",
+                 PASS_INC_CAP);
+        fprintf(stderr, "error: %s\n", pp->err_msg);
+        pp->err = 1;
+        return 0;
+    }
     /* Keep macro table registration; skip host emit for CC-token bodies. */
     if (pp_define_has_cc_token(line)) return 1;
     snprintf(pp->pass_def[pp->npass_def], sizeof(pp->pass_def[0]), "%s", line);
@@ -227,7 +280,8 @@ static int pp_fail_dir(Pp* pp, Token at, const char* msg) {
 
 /* Evaluate a stage-2 `#if` / `#elif` operand. Returns 1 and sets *truth on
  * success; returns 0 when the form is outside the closed set (caller must
- * hard-error — never guess the true arm). */
+ * hard-error — never guess the true arm). Closed set: 0/1, IDENT→0|1,
+ * defined(IDENT), !defined(IDENT). `#if !IDENT` is not accepted. */
 static int pp_eval_if_operand(Pp* pp, int* truth) {
     Token t0;
     if (!truth) return 0;
@@ -267,6 +321,8 @@ static int pp_eval_if_operand(Pp* pp, int* truth) {
             if (neg) *truth = !*truth;
             return 1;
         }
+        /* After `!`, only `defined(IDENT)` is in the closed set. */
+        if (neg) return 0;
     }
     /* #if IDENT  — object-like body must be a single 0/1 token. */
     if (t0.kind == TK_IDENT) {
@@ -286,6 +342,76 @@ static int pp_eval_if_operand(Pp* pp, int* truth) {
         return 0;
     }
     return 0;
+}
+
+/* Host/compiler predefineds stage-2 does not own — do not eval; passthrough. */
+static int pp_is_host_predefined(CCSlice name) {
+    if (!name.ptr || name.len < 2) return 0;
+    if (name.ptr[0] == '_' && name.ptr[1] == '_') return 1;
+    if (spell_eq(name, "_WIN32") || spell_eq(name, "_WIN64") ||
+        spell_eq(name, "_MSC_VER"))
+        return 1;
+    return 0;
+}
+
+/* True when IDENT is a host predefined not registered in the macro table. */
+static int pp_is_unowned_predefined(Pp* pp, CCSlice name) {
+    if (macro_find(pp, name)) return 0;
+    return pp_is_host_predefined(name);
+}
+
+static int pp_if_nest_push(Pp* pp, int taken, int passthrough) {
+    PpIfNest* n;
+    if (!pp || pp->nif_nest >= PP_NEST_CAP) {
+        if (pp) {
+            snprintf(pp->err_msg, sizeof(pp->err_msg),
+                     "stage-2 #if nest too deep (%d)", PP_NEST_CAP);
+            pp->err = 1;
+        }
+        return 0;
+    }
+    n = &pp->if_nest[pp->nif_nest++];
+    n->taken = taken ? 1 : 0;
+    n->else_seen = 0;
+    n->passthrough = passthrough ? 1 : 0;
+    return 1;
+}
+
+static void pp_if_nest_pop(Pp* pp) {
+    if (pp && pp->nif_nest > 0) pp->nif_nest--;
+}
+
+static PpIfNest* pp_if_nest_top(Pp* pp) {
+    if (!pp || pp->nif_nest <= 0) return NULL;
+    return &pp->if_nest[pp->nif_nest - 1];
+}
+
+static int pp_expand_disabled(Pp* pp, CCSlice name) {
+    int i;
+    if (!pp || !name.ptr) return 0;
+    for (i = 0; i < pp->nexpand_disable; i++) {
+        if (spell_eq(name, pp->expand_disable[i])) return 1;
+    }
+    return 0;
+}
+
+static int pp_expand_disable_push(Pp* pp, CCSlice name) {
+    if (!pp || !name.ptr || name.len == 0 || name.len >= 128) return 0;
+    if (pp->nexpand_disable >= EXPAND_CAP) {
+        snprintf(pp->err_msg, sizeof(pp->err_msg),
+                 "stage-2 macro expand depth exceeded (%d)", EXPAND_CAP);
+        fprintf(stderr, "error: %s\n", pp->err_msg);
+        pp->err = 1;
+        return 0;
+    }
+    memcpy(pp->expand_disable[pp->nexpand_disable], name.ptr, name.len);
+    pp->expand_disable[pp->nexpand_disable][name.len] = 0;
+    pp->nexpand_disable++;
+    return 1;
+}
+
+static void pp_expand_disable_pop(Pp* pp) {
+    if (pp && pp->nexpand_disable > 0) pp->nexpand_disable--;
 }
 
 static int macro_undef(Pp* pp, CCSlice name) {
@@ -347,7 +473,15 @@ static int pp_add_refuse_closure_macro(Pp* pp, CCSlice name) {
     for (i = 0; i < pp->nrefuse_clo; i++) {
         if (spell_eq(name, pp->refuse_clo[i])) return 1;
     }
-    if (pp->nrefuse_clo >= REFUSE_CLO_CAP) return 0;
+    if (pp->nrefuse_clo >= REFUSE_CLO_CAP) {
+        snprintf(pp->err_msg, sizeof(pp->err_msg),
+                 "stage-2 refuse-closure macro table full (%d); refusing silent "
+                 "drop",
+                 REFUSE_CLO_CAP);
+        fprintf(stderr, "error: %s\n", pp->err_msg);
+        pp->err = 1;
+        return 0;
+    }
     memcpy(pp->refuse_clo[pp->nrefuse_clo], name.ptr, name.len);
     pp->refuse_clo[pp->nrefuse_clo][name.len] = 0;
     pp->nrefuse_clo++;
@@ -511,21 +645,21 @@ static int join_path(const char* dir, CCSlice rel, char* dst, size_t dst_cap) {
 
 static int pp_push_tape(Pp* pp, FileTape* ft) {
     if (pp->nf >= FRAME_CAP) return 0;
-    pp->frames[pp->nf++] = (Frame){ .tape = ft, .i = 0 };
+    pp->frames[pp->nf++] = (Frame){ .tape = ft, .i = 0, .blue_paint = 0 };
     return 1;
 }
 
-/* Peek/pop raw from top frame (no expand). */
+/* Peek/pop raw from top frame only (no expand, no auto-pop).
+ * Exhausted frames are popped by pp_run. Auto-popping here would drop an
+ * includer whose `#include` was the last line, so the spliced body would
+ * land at nf==1 and be treated as the cpp-transparent root tape. */
 static int pp_raw_peek(Pp* pp, Token* out) {
-    while (pp->nf > 0) {
-        Frame* fr = &pp->frames[pp->nf - 1];
-        if (fr->i < fr->tape->ntoks) {
-            *out = fr->tape->toks[fr->i];
-            return 1;
-        }
-        pp->nf--;
-    }
-    return 0;
+    Frame* fr;
+    if (!pp || pp->nf <= 0 || !out) return 0;
+    fr = &pp->frames[pp->nf - 1];
+    if (!fr->tape || fr->i >= fr->tape->ntoks) return 0;
+    *out = fr->tape->toks[fr->i];
+    return 1;
 }
 
 static int pp_raw_next(Pp* pp, Token* out) {
@@ -590,9 +724,9 @@ static int pp_emit_cpp_dir_line(Pp* pp, Token at) {
     return pp_emit(pp, syn);
 }
 
-/* Space-blank a token's source bytes (keep newlines) so emit lead trivia
- * cannot resurrect `#ifdef`-skipped arms from the original tape. */
-static void pp_blank_token_src(FileTape* ft, Token t) {
+/* Kept for experiments; product skip path records spans instead of blanking
+ * shared FileTape bytes (path-keyed cache). */
+static void __attribute__((unused)) pp_blank_token_src(FileTape* ft, Token t) {
     size_t off, end, k;
     if (!ft || !ft->bytes || !t.spell.len) return;
     off = t.offset;
@@ -655,7 +789,9 @@ static int handle_include(Pp* pp) {
             al += t.spell.len;
         }
         angle[al] = 0;
-        if (pp->nf == 1 && pp->root_if_depth > 0 && pp->skip_depth == 0) {
+        if (pp->skip_depth == 0 &&
+            ((pp->nf == 1 && pp->root_if_depth > 0) ||
+             (pp_if_nest_top(pp) && pp_if_nest_top(pp)->passthrough))) {
             if (!pp_emit_cpp_dir_line(pp, hash)) return 0;
             pp_skip_line(pp);
             return 1;
@@ -678,7 +814,9 @@ static int handle_include(Pp* pp) {
      * .h is a host -I problem, not a lowerer error (curl_setup.h). */
     if (!pp_quote_include_is_cc_face(hdr.spell)) {
         char line[256];
-        if (pp->nf == 1 && pp->root_if_depth > 0 && pp->skip_depth == 0) {
+        if (pp->skip_depth == 0 &&
+            ((pp->nf == 1 && pp->root_if_depth > 0) ||
+             (pp_if_nest_top(pp) && pp_if_nest_top(pp)->passthrough))) {
             if (!pp_emit_cpp_dir_line(pp, hash)) return 0;
             pp_skip_line(pp);
             return 1;
@@ -813,16 +951,20 @@ static int handle_define(Pp* pp) {
     int nb = 0;
     Token peek;
     int captured = 0;
+    PpIfNest* nest;
 
     if (pp->nf <= 0) return 0;
     fr = &pp->frames[pp->nf - 1];
     /* handle_directive already consumed `#` + `define`; recover `#` for capture. */
     if (fr->i < 2) return 0;
     hash = fr->tape->toks[fr->i - 2];
-    /* Inside a root-tape `#if`/`#ifdef` tree: emit the `#define` in place
+    nest = pp_if_nest_top(pp);
+    /* Inside a root-tape or passthrough `#if` tree: emit the `#define` in place
      * and do not apply it. Host cpp picks the arm; applying both sides
      * (or hoisting to pass_def) chooses a value the source did not. */
-    if (pp->nf == 1 && pp->root_if_depth > 0 && pp->skip_depth == 0) {
+    if (pp->skip_depth == 0 &&
+        ((pp->nf == 1 && pp->root_if_depth > 0) ||
+         (nest && nest->passthrough))) {
         if (!pp_emit_cpp_dir_line(pp, hash)) return 0;
         pp_skip_line(pp);
         return 1;
@@ -831,13 +973,14 @@ static int handle_define(Pp* pp) {
         captured = pp_capture_dir_line(pp, hash, line, sizeof(line));
 
     if (!pp_raw_next(pp, &id) || id.kind != TK_IDENT) return 0;
-    /* function-like: passthrough only (host keeps the API macro).
-     * Inert `#define` bodies may contain `=>` (never expanded) — allow
-     * those. Refuse when a use site invokes such a macro (pp_run). */
-    if (pp_raw_peek(pp, &peek) && tok_eq(peek, TK_PUNCT, "(")) {
-        if (captured) (void)pp_add_passthrough_define(pp, line);
-        if (captured && strstr(line, "=>"))
-            (void)pp_add_refuse_closure_macro(pp, id.spell);
+    /* Function-like only when `(` is adjacent to the name (ISO).
+     * `#define ENABLED (1)` is object-like — `(` is replacement-list punct. */
+    if (pp_raw_peek(pp, &peek) && tok_eq(peek, TK_PUNCT, "(") &&
+        peek.offset == id.offset + id.spell.len) {
+        if (captured && !pp_add_passthrough_define(pp, line)) return 0;
+        if (captured && strstr(line, "=>") &&
+            !pp_add_refuse_closure_macro(pp, id.spell))
+            return 0;
         pp_skip_line(pp);
         return 1;
     }
@@ -849,7 +992,7 @@ static int handle_define(Pp* pp) {
     }
     /* Empty object-like `#define FOO` is an include/stub guard — expand only.
      * Non-empty object-like (`#define A B`) is API surface — pass through too. */
-    if (captured && nb > 0) (void)pp_add_passthrough_define(pp, line);
+    if (captured && nb > 0 && !pp_add_passthrough_define(pp, line)) return 0;
     return macro_define(pp, id.spell, body_buf, nb);
 }
 
@@ -885,25 +1028,39 @@ static int handle_directive(Pp* pp) {
     }
 
     switch (dir) {
-    case PP_DIR_ENDIF:
+    case PP_DIR_ENDIF: {
+        PpIfNest* nest = pp_if_nest_top(pp);
+        if (nest && nest->passthrough) {
+            if (!pp_emit_cpp_dir_line(pp, hash)) return 0;
+            pp_if_nest_pop(pp);
+            pp_skip_line(pp);
+            return 1;
+        }
         if (pp->skip_depth > 0) {
             pp->skip_depth--;
-            if (pp->skip_depth == 0) pp->skip_blank = 0;
+            if (pp->skip_depth == 0) pp_if_nest_pop(pp);
             pp_skip_line(pp);
             return 1;
         }
         if (pp->nf == 1) {
             if (!pp_emit_cpp_dir_line(pp, hash)) return 0;
             if (pp->root_if_depth > 0) pp->root_if_depth--;
+            pp_skip_line(pp);
+            return 1;
         }
+        /* Closing a taken include-frame arm. */
+        if (nest) pp_if_nest_pop(pp);
         pp_skip_line(pp);
         return 1;
-    case PP_DIR_ELSE:
-        if (pp->skip_depth > 0) {
-            if (pp->skip_depth == 1) {
-                pp->skip_depth = 0;
-                pp->skip_blank = 0;
-            }
+    }
+    case PP_DIR_ELSE: {
+        PpIfNest* nest = pp_if_nest_top(pp);
+        if (nest && nest->passthrough) {
+            if (!pp_emit_cpp_dir_line(pp, hash)) return 0;
+            pp_skip_line(pp);
+            return 1;
+        }
+        if (pp->skip_depth > 1) {
             pp_skip_line(pp);
             return 1;
         }
@@ -912,24 +1069,46 @@ static int handle_directive(Pp* pp) {
             pp_skip_line(pp);
             return 1;
         }
-        pp->skip_depth = 1;
-        pp->skip_blank = 1;
+        if (!nest)
+            return pp_fail_dir(pp, name, "#else without matching #if");
+        if (nest->else_seen)
+            return pp_fail_dir(pp, name, "duplicate #else");
+        nest->else_seen = 1;
+        if (nest->taken) {
+            /* Already took a true arm — else stays skipped. */
+            pp->skip_depth = 1;
+        } else {
+            /* False if so far — else becomes active. */
+            pp->skip_depth = 0;
+            nest->taken = 1;
+        }
         pp_skip_line(pp);
         return 1;
+    }
     case PP_DIR_ELIF: {
         int truth = 0;
-        if (pp->skip_depth > 1) {
-            pp_skip_line(pp);
-            return 1;
-        }
-        if (pp->nf == 1 && pp->skip_depth == 0) {
+        PpIfNest* nest = pp_if_nest_top(pp);
+        if (nest && nest->passthrough) {
             if (!pp_emit_cpp_dir_line(pp, hash)) return 0;
             pp_skip_line(pp);
             return 1;
         }
-        if (pp->skip_depth == 0) {
+        if (pp->skip_depth > 1) {
+            pp_skip_line(pp);
+            return 1;
+        }
+        if (pp->nf == 1) {
+            if (!pp_emit_cpp_dir_line(pp, hash)) return 0;
+            pp_skip_line(pp);
+            return 1;
+        }
+        if (!nest)
+            return pp_fail_dir(pp, name, "#elif without matching #if");
+        if (nest->else_seen)
+            return pp_fail_dir(pp, name, "#elif after #else");
+        if (nest->taken) {
+            /* Already took a true arm — stay skipped; do not evaluate. */
             pp->skip_depth = 1;
-            pp->skip_blank = 1;
             pp_skip_line(pp);
             return 1;
         }
@@ -942,7 +1121,9 @@ static int handle_directive(Pp* pp) {
         }
         if (truth) {
             pp->skip_depth = 0;
-            pp->skip_blank = 0;
+            nest->taken = 1;
+        } else {
+            pp->skip_depth = 1;
         }
         pp_skip_line(pp);
         return 1;
@@ -963,9 +1144,18 @@ static int handle_directive(Pp* pp) {
             pp_skip_line(pp);
             return 1;
         }
+        /* Host predefined we do not own → passthrough both arms. */
+        if (pp_is_unowned_predefined(pp, id.spell)) {
+            if (!pp_emit_cpp_dir_line(pp, hash)) return 0;
+            if (!pp_if_nest_push(pp, 0, 1)) return 0;
+            pp_skip_line(pp);
+            return 1;
+        }
         if (macro_find(pp, id.spell)) {
+            if (!pp_if_nest_push(pp, 0, 0)) return 0;
             pp->skip_depth = 1;
-            pp->skip_blank = 0; /* include guards: keep shared tape bytes */
+        } else {
+            if (!pp_if_nest_push(pp, 1, 0)) return 0;
         }
         pp_skip_line(pp);
         return 1;
@@ -986,15 +1176,55 @@ static int handle_directive(Pp* pp) {
             pp_skip_line(pp);
             return 1;
         }
+        if (pp_is_unowned_predefined(pp, id.spell)) {
+            if (!pp_emit_cpp_dir_line(pp, hash)) return 0;
+            if (!pp_if_nest_push(pp, 0, 1)) return 0;
+            pp_skip_line(pp);
+            return 1;
+        }
         if (!macro_find(pp, id.spell)) {
+            if (!pp_if_nest_push(pp, 0, 0)) return 0;
             pp->skip_depth = 1;
-            pp->skip_blank = 0;
+        } else {
+            if (!pp_if_nest_push(pp, 1, 0)) return 0;
         }
         pp_skip_line(pp);
         return 1;
     }
     case PP_DIR_IF: {
         int truth = 0;
+        Token peek0, peek1, peek2;
+        /* Peek `defined ( PREDEF )` / `! defined ( PREDEF )` for passthrough. */
+        if (pp->skip_depth == 0 && pp->nf > 1 &&
+            pp_raw_peek(pp, &peek0)) {
+            int neg = 0;
+            int at = 0;
+            Token id;
+            if (tok_eq(peek0, TK_PUNCT, "!")) {
+                neg = 1;
+                at = 1;
+            }
+            if (pp->frames[pp->nf - 1].i + at < pp->frames[pp->nf - 1].tape->ntoks)
+                peek1 = pp->frames[pp->nf - 1].tape->toks[pp->frames[pp->nf - 1].i + at];
+            else
+                peek1 = (Token){0};
+            if (peek1.kind == TK_IDENT && spell_eq(peek1.spell, "defined") &&
+                pp->frames[pp->nf - 1].i + at + 3 <
+                    pp->frames[pp->nf - 1].tape->ntoks) {
+                peek2 = pp->frames[pp->nf - 1].tape
+                            ->toks[pp->frames[pp->nf - 1].i + at + 1];
+                id = pp->frames[pp->nf - 1].tape
+                         ->toks[pp->frames[pp->nf - 1].i + at + 2];
+                if (tok_eq(peek2, TK_PUNCT, "(") && id.kind == TK_IDENT &&
+                    pp_is_unowned_predefined(pp, id.spell)) {
+                    if (!pp_emit_cpp_dir_line(pp, hash)) return 0;
+                    if (!pp_if_nest_push(pp, 0, 1)) return 0;
+                    pp_skip_line(pp);
+                    return 1;
+                }
+            }
+            (void)neg;
+        }
         if (pp->skip_depth > 0) {
             pp->skip_depth++;
             pp_skip_line(pp);
@@ -1014,20 +1244,24 @@ static int handle_directive(Pp* pp) {
                 "unsupported #if operand (need 0/1, IDENT→0|1, or "
                 "defined(IDENT) / !defined(IDENT); never guess the true arm)");
         }
-        if (!truth) {
+        if (truth) {
+            if (!pp_if_nest_push(pp, 1, 0)) return 0;
+        } else {
+            if (!pp_if_nest_push(pp, 0, 0)) return 0;
             pp->skip_depth = 1;
-            pp->skip_blank = 1;
         }
         pp_skip_line(pp);
         return 1;
     }
     case PP_DIR_UNDEF: {
         Token id;
+        PpIfNest* nest = pp_if_nest_top(pp);
         if (pp->skip_depth > 0) {
             pp_skip_line(pp);
             return 1;
         }
-        if (pp->nf == 1 && pp->root_if_depth > 0) {
+        if ((pp->nf == 1 && pp->root_if_depth > 0) ||
+            (nest && nest->passthrough)) {
             if (!pp_emit_cpp_dir_line(pp, hash)) return 0;
             pp_skip_line(pp);
             return 1;
@@ -1146,19 +1380,22 @@ static int pp_run(Pp* pp, FileTape* root) {
     pp->nout = 0;
     pp->skip_depth = 0;
     pp->root_if_depth = 0;
-    pp->skip_blank = 0;
+    pp->nif_nest = 0;
+    pp->nexpand_disable = 0;
     pp->err = 0;
     pp->err_msg[0] = 0;
     pp->npass_inc = 0;
     pp->npass_def = 0;
     pp->ncpp_dir = 0;
     pp->nrefuse_clo = 0;
+    pp_skip_spans_reset();
     if (!pp_push_tape(pp, root)) return 0;
 
     while (pp->nf > 0) {
         Frame* fr = &pp->frames[pp->nf - 1];
         if (fr->i >= fr->tape->ntoks) {
             FileTape* done = fr->tape;
+            if (fr->blue_paint) pp_expand_disable_pop(pp);
             pp->nf--;
             free_synth_if(done);
             continue;
@@ -1169,9 +1406,9 @@ static int pp_run(Pp* pp, FileTape* root) {
             continue;
         }
         if (pp->skip_depth > 0) {
-            /* Drop from the token stream; for `#if`/`#else` also blank source
-             * so lead replay (skips only `#…` lines) cannot re-inject the arm. */
-            if (pp->skip_blank) pp_blank_token_src(fr->tape, t);
+            /* Drop from the token stream; record span so lead replay cannot
+             * re-inject the arm (shared tapes are not blanked). */
+            pp_record_skip_token(fr->tape, t);
             fr->i++;
             continue;
         }
@@ -1188,7 +1425,7 @@ static int pp_run(Pp* pp, FileTape* root) {
                     return pp_refuse_closure_macro_at(pp, t);
             }
             Macro* m = macro_find(pp, t.spell);
-            if (m) {
+            if (m && !pp_expand_disabled(pp, t.spell)) {
                 if (m->nbody == 0) continue;
                 /* Object-like body with `=>` — refuse on expansion. */
                 {
@@ -1198,8 +1435,18 @@ static int pp_run(Pp* pp, FileTape* root) {
                             return pp_refuse_closure_macro_at(pp, t);
                     }
                 }
-                FileTape* syn = synth_tape_from_tokens(m->body, m->nbody, t.file_id);
-                if (!syn || !pp_push_tape(pp, syn)) return 0;
+                FileTape* syn =
+                    synth_tape_from_tokens(m->body, m->nbody, t.file_id);
+                if (!syn || !pp_expand_disable_push(pp, t.spell)) {
+                    free_synth_if(syn);
+                    return 0;
+                }
+                if (!pp_push_tape(pp, syn)) {
+                    pp_expand_disable_pop(pp);
+                    free_synth_if(syn);
+                    return 0;
+                }
+                pp->frames[pp->nf - 1].blue_paint = 1;
                 continue;
             }
         }

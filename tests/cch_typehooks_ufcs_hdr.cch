@@ -1,0 +1,49 @@
+#!ccc cch
+#ifndef TESTS_CCH_TYPEHOOKS_UFCS_HDR_CCH
+#define TESTS_CCH_TYPEHOOKS_UFCS_HDR_CCH
+
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_ufcs.cch>
+
+typedef struct {
+    int n;
+} HdrHookBox;
+
+static HdrHookBox hdr_hook_box_open(int n) {
+    HdrHookBox b;
+    b.n = n;
+    return b;
+}
+
+static void hdr_hook_box_close(HdrHookBox* b) {
+    if (b) b->n = 0;
+}
+
+/* Non-folklore name: invent would emit HdrHookBox_bump, not this. */
+static int hdr_hook_box_bump_impl(HdrHookBox* b, int d) {
+    if (!b) return -1;
+    b->n += d;
+    return b->n;
+}
+
+static char[:] hdr_hook_box_ufcs(char[:] recv_type, char[:] method, char[:] mode,
+                                 CCSliceArray argv, CCSliceArray arg_types,
+                                 CCArena* arena) {
+    (void)recv_type;
+    (void)mode;
+    (void)argv;
+    (void)arg_types;
+    (void)arena;
+    switch (method) {
+    case "bump": return @slice("hdr_hook_box_bump_impl");
+    default:     return @slice("__cc_ufcs_pass__");
+    }
+}
+
+@typehooks on HdrHookBox {
+    .create = hdr_hook_box_open,
+    .destroy = hdr_hook_box_close,
+    .ufcs = hdr_hook_box_ufcs,
+};
+
+#endif

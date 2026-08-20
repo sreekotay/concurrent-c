@@ -1,0 +1,34 @@
+/* Ninth stacked @errhandler must fail loud (SHADOW_EH_STACK_CAP = 8). */
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    @errhandler(CCError e0) { (void)e0; return 1; }
+    {
+        @errhandler(CCError e1) { (void)e1; return 1; }
+        {
+            @errhandler(CCError e2) { (void)e2; return 1; }
+            {
+                @errhandler(CCError e3) { (void)e3; return 1; }
+                {
+                    @errhandler(CCError e4) { (void)e4; return 1; }
+                    {
+                        @errhandler(CCError e5) { (void)e5; return 1; }
+                        {
+                            @errhandler(CCError e6) { (void)e6; return 1; }
+                            {
+                                @errhandler(CCError e7) { (void)e7; return 1; }
+                                {
+                                    @errhandler(CCError e8) {
+                                        (void)e8;
+                                        return 1;
+                                    }
+                                    return 0;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
