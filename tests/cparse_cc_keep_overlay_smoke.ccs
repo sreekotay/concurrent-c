@@ -1,0 +1,30 @@
+/* Overlay meaning must not be span-reprinted as C. Default args and
+ * typeview params stay on the beachhead even when the rest looks like
+ * a C function. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct CparseTv {
+    int out_len;
+} CparseTv;
+
+@typeview Mut on CparseTv {
+    rw: out_len;
+}
+
+static int cparse_default_arg(int x = 3) {
+    return x;
+}
+
+static void cparse_tv_store(@typeview(Mut) CparseTv* enc) {
+    enc->out_len = enc->out_len + 1;
+}
+
+int main(void) {
+    CparseTv c;
+    memset(&c, 0, sizeof(c));
+    cparse_tv_store(&c);
+    /* CC call sites pass every argument; lowering strips `= 3`. */
+    return (cparse_default_arg(3) + c.out_len == 4) ? 0 : 1;
+}

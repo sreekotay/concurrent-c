@@ -141,9 +141,10 @@ declarators (`size_t a, b, c`) flatten to one field node per name.
 Nested `struct` / `union` fields are cparse's: flatten keeps
 `start`/`end` when the declarator outgrows `CpFlat.text` (512); emit
 reprints the FileTape span instead of chopping. C-only file-scope
-functions go through cparse (stmt list on `CP_FUNC`); the overlay tapes
-the span for emit and copies the body for safety. Concurrent-C fields,
-result fns, and UFCS bodies stay on the beachhead. Link
+functions stay on the beachhead: emit reprints FileTape, which drops
+defaults, `@typeview`, string switch, safety, and comptime harvest.
+Concurrent-C fields, result fns, and UFCS bodies stay on the beachhead.
+Link
 `out/cc/obj/cparse/libcparse.a` into `shadow_lower`
 (`make -C cc SHADOW_LOWER_SOURCE=ccs`). Gate:
 `cparse-dump --fields` and, once the lowerer exports

@@ -76,6 +76,8 @@ printf '%s\n' "$emit8" | grep -q 'size_t b' || fail "overlay dropped comma field
 printf '%s\n' "$emit8" | grep -q 'size_t c' || fail "overlay dropped comma field c"
 printf '%s\n' "$emit8" | grep -q 'int \* p' || fail "overlay dropped int *p"
 printf '%s\n' "$emit8" | grep -q 'int q' || fail "overlay dropped int q"
+printf '%s\n' "$emit8" | grep -q 'int \* r' || fail "overlay dropped int *r"
+printf '%s\n' "$emit8" | grep -q 'int \* s' || fail "overlay dropped int *s (star on later comma name)"
 
 emit9="$("$SL" tests/cparse_nested_fields_smoke.ccs --no-cache)" \
     || fail "lower cparse_nested_fields_smoke"
@@ -88,5 +90,18 @@ body9="$(printf '%s\n' "$emit9" | sed -n '/typedef struct CparseNest/,/^} Cparse
 printf '%s\n' "$body9" | grep -q 'a00' || fail "overlay chopped fat union (a00)"
 printf '%s\n' "$body9" | grep -q 'a79' || fail "overlay chopped fat union (a79)"
 printf '%s\n' "$body9" | grep -q 'extra' || fail "overlay dropped extra after nested"
+
+emit10="$("$SL" tests/cparse_cc_keep_overlay_smoke.ccs --no-cache)" \
+    || fail "lower cparse_cc_keep_overlay_smoke"
+if printf '%s\n' "$emit10" | grep -q 'int x = 3'; then
+    fail "overlay reprinted default arg as C"
+fi
+if printf '%s\n' "$emit10" | grep -q '@typeview(Mut)'; then
+    fail "overlay reprinted @typeview param as C"
+fi
+printf '%s\n' "$emit10" | grep -q 'cparse_default_arg' \
+    || fail "overlay dropped cparse_default_arg"
+printf '%s\n' "$emit10" | grep -q 'cparse_tv_store' \
+    || fail "overlay dropped cparse_tv_store"
 
 echo "[test_cparse_overlay] ok"

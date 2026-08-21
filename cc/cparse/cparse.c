@@ -619,10 +619,15 @@ static int field_attach_comma_kids(Parser *ps, int lo, int semi, CpNode *parent)
             }
             last_nm = (int)ps->toks[i].offset;
             last_nml = (int)ps->toks[i].len;
-        } else if (depth == 0 && punct_eq_i(ps, i, "*") && type_ready &&
-                   spec_hi < 0) {
-            spec_hi = (int)ps->toks[i].offset;
-            cur_lo = spec_hi;
+        } else if (depth == 0 && punct_eq_i(ps, i, "*") && type_ready) {
+            /* First `*` ends the spec (`int *fa`). After a comma, a new
+             * `*` starts that declarator (`*fb` in `int *fa, *fb`). */
+            if (spec_hi < 0) {
+                spec_hi = (int)ps->toks[i].offset;
+                cur_lo = spec_hi;
+            } else if (cur_lo < 0) {
+                cur_lo = (int)ps->toks[i].offset;
+            }
         }
         (void)tmp;
     }

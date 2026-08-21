@@ -3,15 +3,22 @@
 typedef struct CparseComma {
     size_t a, b, c;
     int *p, q;
+    int *r, *s;
 } CparseComma;
 
 int main(void) {
     CparseComma x;
     int n = 0;
+    int m = 0;
     x.a = 1;
     x.b = 2;
     x.c = 3;
     x.p = &n;
     x.q = 4;
-    return (x.a + x.b + x.c + (size_t)x.q == 10 && x.p == &n) ? 0 : 1;
+    x.r = &n;
+    x.s = &m;
+    return (x.a + x.b + x.c + (size_t)x.q == 10 && x.p == &n &&
+            x.r == &n && x.s == &m)
+               ? 0
+               : 1;
 }
